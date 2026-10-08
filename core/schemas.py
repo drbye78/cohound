@@ -12,7 +12,7 @@ from __future__ import annotations
 import datetime as _dt
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
