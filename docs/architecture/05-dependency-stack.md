@@ -132,16 +132,32 @@ CLI-ядро (`pydantic`+`pyyaml`+stdlib) ставится везде; инде�
 | Пакет | Версия | Лицензия | Вердикт | Обоснование |
 |---|---|---|---|---|
 | `Scrapy` | 2.19.x | BSD-3 ✅ | **a** | `DOWNLOAD_SLOTS` per-domain, AutoThrottle, HttpCache |
-| `scrapy-playwright` | 0.0.48 | BSD-3 ✅ | **a** | per-request `playwright=True` для JS-доменов (зрелость 0.0.x 🟡) |
-| `playwright` | 1.63.x | Apache-2.0 ✅ | **a** | headless-рендер; браузеры качаются с CDN — в закрытом контуре нужен зеркальный кэш |
+| `scrapy-playwright` | 0.0.48 | BSD-3 ✅ | **a** (с пином + smoke) | per-request `playwright=True` для JS-доменов. **V5: зрелый де-факто стандарт** (org `scrapy-plugins`, активные PR Zyte 2026, py3.14 поддержан PR #375); ярлык `0.0.x` = конвенция автора (classifier Beta), не заброшенность |
+| `playwright` | 1.63.x | Apache-2.0 ✅ | **a** (пин) | headless-рендер; браузеры качаются с CDN — в закрытом контуре зеркало (`PLAYWRIGHT_DOWNLOAD_HOST`/`PLAYWRIGHT_BROWSERS_PATH`) |
 | `httpx` | 0.28.x | BSD ✅ | **a** | общий HTTP-клиент (search API, тесты) |
+| `curl_cffi` | 0.16.x | MIT ✅ | **b** | «дешёвый первый ярус» для антибот-доменов без JS (имитация TLS/JA3); не замена браузеру |
 | `trafilatura`/`courlan` (fetch) | 2.3.x | Apache-2.0 ✅ | **b** | простой политкорректный fetch |
 | `crawl4ai` | 0.9.x | Apache-2.0 ✅ | **c** | LLM-first, тянет litellm/patchright/stealth — избыточно (A1) |
+| `crawlee-python` | 1.10.x | Apache-2.0 ✅ | **c** | активен, но **нет интеграции со Scrapy** — это замена фреймворка целиком (ломает A2) |
+| `scrapy-selenium` / `scrapy-splash` | 0.0.7 / 0.11.1 | BSD/Apache | **d** | selenium мёртв (релиз 2019); splash требует внешнего сервера (Docker/Lua) |
 | `selenium` | 4.50.x | Apache-2.0 ✅ | **c** | legacy-рендер |
 | `firecrawl` | — | **AGPL-3.0** | **d** | AGPL + облачный дефолт |
 
 ⚠️ **Безопасность (важно, ✅):** при встраивании Scrapy **как библиотеки** его дефолт —
 `ROBOTSTXT_OBEY = False`. Нужно **явно выставить `True`** (этическая норма §10, курс на robots-дефолт).
+robots.txt-запрос оставлять на дефолтном HTTP-handler (не ставить ему `playwright`-meta).
+
+**V5 — зрелость `scrapy-playwright` и оговорки (2026-10-08):**
+- **Незакрытые прогоны требуют настройки:** утечка JS-heap Node (upstream) → `NODE_OPTIONS=--max-old-space-size=…`;
+  `playwright_include_page=True` без закрытия Page вешает краул → всегда errback-close; concurrency>1 требует
+  `--reactor=asyncio`. Плюс согласовать `PLAYWRIGHT_MAX_CONTEXTS`/`PLAYWRIGHT_MAX_PAGES_PER_CONTEXT` с `CONCURRENT_REQUESTS_PER_DOMAIN`.
+- **`DOWNLOAD_SLOTS` не затрагивается** (0 issue) — политика на домен остаётся за Scrapy core.
+- **Антибот плагин не решает** — профили контекстов (UA/прокси) + `curl_cffi` как первый ярус.
+- **Bus-factor ≈1** (elacuesta, 344 из ~355 коммитов), но проект в официальной org; изоляция за портом
+  `crawler` делает замену сменой адаптера, не переписыванием (A2).
+- **Совместимость 1.63/2.19 не подтверждена мейнтейнером** (оба вышли позже релиза 0.0.48; upstream CI пинит
+  playwright 1.57) → **обязательный smoke-тест** (plain render + download + firefox-контекст) перед пином;
+  фолбэк при провале — `playwright==1.57`.
 
 ### 2.6. Безопасность контента / санитайзинг (§10)
 
@@ -264,7 +280,7 @@ bump `methodology_version`, обязателен `golden-full` (§13). Поэт�
 | V2 | Колёса `torch`/`sentence-transformers` под Python 3.14 | ✅ **закрыт (2026-10-08):** `torch 2.14.1` и `sentence-transformers 6.1.0` имеют колёса `cp314`; резолв `uv` на 3.14 прошёл. См. `pyproject.toml` |
 | V3 | Выбор RU/EN-эмбеддинга | 🟡 **решение:** RU — абсолютный приоритет, EN — очень хорошо; **основной — `BAAI/bge-m3`** (MIT, 8192 контекста). Подтверждение и сравнение с RU-файнтюнами (`deepvk/USER-bge-m3`, `ai-forever/ru-en-RoSBERTa`) — R9/R10 |
 | V4 | docling offline-веса в контуре + лицензии весов | ⚠️ **механика подтверждена** (см. §7): `huggingface_hub.snapshot_download` при первом PDF-прогоне; PDF-контур требует предзакачанный кэш (`HF_HUB_OFFLINE=1`) + аудит лицензий весов |
-| V5 | `scrapy-playwright` 0.0.x на сложных антибот-доменах | проверка зрелости (lib-3) |
+| V5 | `scrapy-playwright` 0.0.x на сложных антибот-доменах | 🟡 **решение (b):** зрелый де-факто стандарт (org `scrapy-plugins`, BSD-3, py3.14, оперативные фиксы). **Оставляем с жёстким пином** (`scrapy==2.19.0`, `scrapy-playwright==0.0.48`, `playwright==<проверенный>`) и **обязательным smoke-тестом** на 1.63/2.19 (мейнтейнер валидировал 1.57). Изолируется за портом `crawler`. Альтернативы не берём (см. §2.5) |
 
 ---
 
