@@ -1,0 +1,5 @@
+[
+  {"query": "механизм альфа", "expected_ids": ["c1"], "lang": "ru"},
+  {"query": "beta mechanism", "expected_ids": ["c2"], "lang": "en"},
+  {"query": "gamma component", "expected_ids": ["c3"], "lang": "en"}
+]
