@@ -63,6 +63,13 @@ from core.pipeline.prompt import (
     render_queries,
     save_prompt,
 )
+from core.pipeline.compute import (
+    ScoreBundle,
+    assert_publishable,
+    compute,
+    per_product_bundle,
+    publish_warnings,
+)
 from core.pipeline.plan import RunPlan, derive_run_id, load_plan, plan
 from core.pipeline.registry import (
     registry_covered_params,
@@ -146,4 +153,10 @@ __all__ = [
     "compile_prompt",
     "render_queries",
     "save_prompt",
+    # compute (T10.1, Ш8)
+    "ScoreBundle",
+    "compute",
+    "per_product_bundle",
+    "publish_warnings",
+    "assert_publishable",
 ]
