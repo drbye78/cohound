@@ -9,4 +9,5 @@ __all__ = [
     "hashing",
     "cache",
     "sanitize",
+    "logging",
 ]

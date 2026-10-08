@@ -82,6 +82,31 @@ from core.pipeline.validate import (
     ValidationResult,
     validate_output,
 )
+from core.pipeline.report import (
+    Artifacts,
+    CrossCycleDiffError,
+    PublishBlockedError,
+    render_battle_card,
+    render_diff,
+    render_nda_questions,
+    render_preliminary_findings,
+    write_reports,
+    write_run_manifest,
+)
+from core.pipeline.extraction_eval import (
+    ExtractionCaseResult,
+    ExtractionGoldenCase,
+    ExtractionReport,
+    compare_extractors,
+    extractor_version_changed,
+    load_extraction_golden,
+    run_extraction_golden,
+)
+from core.pipeline.metrics import (
+    RunMetrics,
+    collect_phase_durations,
+    compute_metrics,
+)
 from core.pipeline.plan import RunPlan, derive_run_id, load_plan, plan
 from core.pipeline.registry import (
     registry_covered_params,
@@ -180,4 +205,26 @@ __all__ = [
     "ValidationResult",
     "ValidationFailureKind",
     "validate_output",
+    # report (T10.2), §9 — G4/I11
+    "Artifacts",
+    "PublishBlockedError",
+    "CrossCycleDiffError",
+    "write_run_manifest",
+    "render_battle_card",
+    "render_nda_questions",
+    "render_preliminary_findings",
+    "render_diff",
+    "write_reports",
+    # extraction-eval (T8.7), §13
+    "ExtractionGoldenCase",
+    "ExtractionCaseResult",
+    "ExtractionReport",
+    "load_extraction_golden",
+    "run_extraction_golden",
+    "compare_extractors",
+    "extractor_version_changed",
+    # metrics (T12.1), §B.2
+    "RunMetrics",
+    "compute_metrics",
+    "collect_phase_durations",
 ]

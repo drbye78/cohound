@@ -12,5 +12,6 @@ __all__ = [
     "lexical_tantivy",
     "llm_local",
     "registry_generic",
+    "search_yandex",
     "vector_npy",
 ]

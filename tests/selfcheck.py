@@ -352,6 +352,17 @@ def main() -> int:
     check("validate: цитата-подстрока + CellEvidence hash (I10/I19)", lambda: _validate_echelon())
     check("evaluate: strict failed≠status (I4), preliminary (I13)", lambda: _evaluate_failed())
 
+    section("Отчётность (Ш8-9) — W10")
+    check("report: I11 Coverage отсутствует → G4-блок; §13 diff-граница", lambda: _report_gates())
+
+    section("Наблюдаемость и эксплуатация — W12")
+    check("logging: поля §B.1 + invariant отдельным полем", lambda: _logging_fields())
+    check("metrics: cells_by_state/failure_rate/search_calls", lambda: _run_metrics())
+    check("backup: консистентный БД-снапшот + GC dry-run (§13)", lambda: _backup_gc())
+
+    section("Экстракция (Ш5) — W8")
+    check("extraction-golden: expected/forbidden + §13 триггер", lambda: _extraction_golden())
+
     print(f"\n{CHECKS - len(FAILURES)}/{CHECKS} проверок пройдено")
     if FAILURES:
         print("\nПровалы:")
@@ -1350,6 +1361,164 @@ def _evaluate_failed() -> None:
                              evaluator=ev, chunks=[chunk], strict=False, max_retries=0)
     if outcome2.cell.state is not CellState.PRELIMINARY or outcome2.cell.status is not None:
         raise AssertionError("I13: preliminary -> preliminary/status None")
+
+
+def _report_gates() -> None:
+    """Отчётность: G4/I11 (Coverage отсутствует → блок) + §13 diff-граница."""
+    from core.domain import CatalogRow, RunManifest, RunMode, SensitivityReport
+    from core.domain.scoring import Comparability, Coverage, Score
+    from core.pipeline.compute import ScoreBundle
+    from core.pipeline.report import (
+        CrossCycleDiffError,
+        PublishBlockedError,
+        render_battle_card,
+        render_diff,
+    )
+
+    bundle = ScoreBundle(
+        capability=Score(value=1.0, numerator=1.0, denominator=1.0, n_used=1),
+        coverage=Coverage(value=0.0, numerator=0.0, denominator=0.0, n_used=0),
+        failure_rate=0.0,
+        modules=[],
+        comparability=Comparability(level="insufficient", min_coverage=0.0, cross_cycle=False),
+        sensitivity=SensitivityReport(
+            stable=True, per_axis={}, unstable_pairs=[],
+            requested_ranking="capability_ranked", computed_ranking="capability_ranked",
+        ),
+        requested_ranking="capability_ranked",
+        computed_ranking="capability_ranked",
+    )
+    row = CatalogRow.model_construct(
+        param_id="x", title="t", module="m", group="g", importance="Кр", param_type="fact", rule="r",
+    )
+    import tempfile as _tf
+
+    with _tf.TemporaryDirectory() as td:
+        try:
+            render_battle_card(bundle, [], {"x": row}, f"{td}/battle.csv")
+            raise AssertionError("I11: battle_card без Coverage обязан быть заблокирован")
+        except PublishBlockedError:
+            pass
+
+        def _manifest(index_build_id: str):
+            return RunManifest(
+                run_id="r1", case_id="c", created_at="2026-01-01", mode=RunMode.STRICT,
+                methodology_version="2.0.0", package_version="1", catalog_version="1",
+                status_dict_version="1", scoring_policy_version="1", anchor_product_id="p1",
+                index_build_id=index_build_id, retrieval_profile="R1", retrieval_cutoff_K=20,
+                retrieval_params_json="{}",
+            )
+
+        try:
+            render_diff(_manifest("ib_a"), _manifest("ib_b"), [], [], f"{td}/diff.md")
+            raise AssertionError("§13: diff при смене index_build_id обязан отказать")
+        except CrossCycleDiffError:
+            pass
+
+
+def _logging_fields() -> None:
+    """Логи §B.1: поля записи; ``invariant`` — отдельное поле, не ``ctx``."""
+    import json as _json
+    import pathlib as _pl
+    import tempfile as _tf
+
+    from core.util.logging import PhaseLogger
+
+    with _tf.TemporaryDirectory() as td:
+        lg = PhaseLogger("r1", "corpus", logs_root=td,
+                         now=lambda: "2026-01-01T00:00:00Z", component="crawler")
+        lg.info("шаг", product="p1")
+        lg.warn("аномалия", invariant="I2b")
+        lines = (_pl.Path(td) / "r1" / "logs" / "corpus.jsonl").read_text(
+            encoding="utf-8"
+        ).strip().splitlines()
+        recs = [_json.loads(line) for line in lines]
+        if len(recs) != 2:
+            raise AssertionError(f"ожидалось 2 записи, получено {len(recs)}")
+        for field in ("ts", "run_id", "phase", "component", "level", "message", "ctx", "invariant"):
+            if field not in recs[0]:
+                raise AssertionError(f"поле §B.1 отсутствует: {field}")
+        if recs[0]["ctx"] != {"product": "p1"} or recs[1]["invariant"] != "I2b":
+            raise AssertionError("invariant обязан быть отдельным полем, не внутри ctx")
+
+
+def _run_metrics() -> None:
+    """Метрики §B.2: cells_by_state/failure_rate/search_calls_by_phase."""
+    from core.domain import Cell, CellState
+    from core.pipeline.metrics import compute_metrics
+
+    def _cell(pid, state):
+        return Cell.model_construct(run_id="r1", product_id=pid, param_id="x", state=state,
+                                    status=None, evidence=[], absence_evidence=[], reviewed_by=None)
+
+    class _Entry:
+        def __init__(self, phase):
+            self.phase = phase
+
+    cells = [_cell("p1", CellState.EVALUATED), _cell("p1", CellState.FAILED)]
+    m = compute_metrics(cells=cells, search_log=[_Entry("corpus"), _Entry("corpus")], llm_calls=3)
+    if m.cells_by_state.get("evaluated") != 1 or m.cells_by_state.get("failed") != 1:
+        raise AssertionError(f"cells_by_state сломан: {m.cells_by_state}")
+    if m.failure_rate != 0.5:
+        raise AssertionError(f"failure_rate сломан: {m.failure_rate}")
+    if m.search_calls_by_phase != {"corpus": 2} or m.llm_calls != 3:
+        raise AssertionError("search/llm-метрики сломаны")
+
+
+def _backup_gc() -> None:
+    """Бэкап/GC: безопасный dry-run по умолчанию + refuse при keep<1 (§13)."""
+    import pathlib as _pl
+    import tempfile as _tf
+
+    from core.store.backup import gc_index_builds, list_builds
+
+    with _tf.TemporaryDirectory() as td:
+        for build in ("ib_1", "ib_2", "ib_3"):
+            for prod in ("p1",):
+                (_pl.Path(td) / "pkg" / build / prod).mkdir(parents=True)
+        if len(list_builds(td, "pkg")) != 3:
+            raise AssertionError("list_builds сломан")
+        dry = gc_index_builds(td, "pkg", keep=1)
+        if not dry:
+            raise AssertionError("dry-run обязан вернуть кандидатов на удаление")
+        if not all((_pl.Path(td) / "pkg" / b).is_dir() for b in ("ib_1", "ib_2", "ib_3")):
+            raise AssertionError("dry-run не имеет права удалять сборки")
+        try:
+            gc_index_builds(td, "pkg", keep=0)
+            raise AssertionError("keep<1 обязан быть отклонён")
+        except ValueError:
+            pass
+
+
+def _extraction_golden() -> None:
+    """Extraction-golden: expected/forbidden + триггер смены extractor_version (§13)."""
+    from core.pipeline.extraction_eval import (
+        ExtractionGoldenCase,
+        extractor_version_changed,
+        run_extraction_golden,
+    )
+    from core.ports.types import ExtractedDoc
+
+    class _Fake:
+        version = "ext-1"
+
+        def extract(self, page):
+            text = page.content.decode("utf-8")
+            return ExtractedDoc(text=text, content_hash="h", extractor_version=self.version, page_count=1)
+
+    cases = [
+        ExtractionGoldenCase(case_id="a", format="html", raw_b64="aGVsbG8gd29ybGQ=",
+                             expected_substrings=["hello"], min_chars=5),
+        ExtractionGoldenCase(case_id="b", format="html", raw_b64="aGVsbG8gd29ybGQ=",
+                             forbidden_substrings=["hello"]),
+    ]
+    report = run_extraction_golden(cases, _Fake())
+    if report.passed != 1 or report.total != 2:
+        raise AssertionError(f"extraction-golden: ожидалось 1/2, получено {report.passed}/{report.total}")
+    if not extractor_version_changed("ext-1", "ext-2"):
+        raise AssertionError("§13: смена extractor_version обязана триггерить прогон")
+    if extractor_version_changed("", None):
+        raise AssertionError("None и '' — одна «незаданная» версия, не изменение")
 
 
 if __name__ == "__main__":
