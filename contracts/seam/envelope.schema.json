@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cohound.local/contracts/seam/envelope.schema.json",
+  "title": "coHound seam response envelope",
+  "description": "Общий конверт ответа edge (07 §3): {schema_version, request_id, status, payload, error}. schema_version — часть контракта (версионная граница §13).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "request_id", "status"],
+  "properties": {
+    "schema_version": {
+      "const": "1"
+    },
+    "request_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "status": {
+      "enum": ["ok", "error"]
+    },
+    "payload": {},
+    "error": {
+      "type": ["string", "null"]
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {"status": {"const": "ok"}},
+        "required": ["status"]
+      },
+      "then": {
+        "required": ["payload"],
+        "properties": {"error": {"type": "null"}}
+      }
+    },
+    {
+      "if": {
+        "properties": {"status": {"const": "error"}},
+        "required": ["status"]
+      },
+      "then": {
+        "required": ["error"],
+        "properties": {"error": {"type": "string", "minLength": 1}}
+      }
+    }
+  ],
+  "$defs": {
+    "request": {
+      "title": "coHound seam request envelope",
+      "description": "Конверт запроса core→edge (форма клиента HttpContentGateway): payload несёт аргументы операции, status=\"request\".",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "request_id", "status", "payload"],
+      "properties": {
+        "schema_version": {"const": "1"},
+        "request_id": {"type": "string", "minLength": 1},
+        "status": {"const": "request"},
+        "payload": {},
+        "error": {"type": ["string", "null"]}
+      }
+    }
+  }
+}

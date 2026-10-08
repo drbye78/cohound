@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cohound.local/contracts/seam/capabilities.schema.json",
+  "title": "GET /v1/capabilities response payload",
+  "description": "Версии edge-компонентов для манифеста прогона (07 §3/§7, R7).",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "extractor_version": {"type": "string"},
+    "crawler_version": {"type": "string"},
+    "search_engine": {"type": "string"},
+    "supported_formats": {
+      "type": "array",
+      "items": {"type": "string"}
+    }
+  }
+}

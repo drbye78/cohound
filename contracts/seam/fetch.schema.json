@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cohound.local/contracts/seam/fetch.schema.json",
+  "title": "POST /v1/fetch payload",
+  "description": "Запрос фетча страницы/документа и ответ edge (07 §3). Сырые байты (raw) — retention; очищенный markdown (text) — при extract=true. Возвращается контент, не evidence (I19).",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "request_id": {"type": "string"},
+    "final_url": {"type": "string"},
+    "status_code": {"type": ["integer", "null"]},
+    "content_type": {"type": ["string", "null"]},
+    "fetched_at": {"type": "string"},
+    "lang": {"type": ["string", "null"]},
+    "raw": {
+      "oneOf": [
+        {"$ref": "#/$defs/raw"},
+        {"type": "null"}
+      ]
+    },
+    "text": {
+      "oneOf": [
+        {"$ref": "#/$defs/text"},
+        {"type": "null"}
+      ]
+    },
+    "error": {"type": ["string", "null"]}
+  },
+  "anyOf": [
+    {"required": ["raw"]},
+    {"required": ["text"]},
+    {"required": ["error"]},
+    {"required": ["final_url"]}
+  ],
+  "$defs": {
+    "request": {
+      "title": "POST /v1/fetch request payload",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["url"],
+      "properties": {
+        "url": {"type": "string", "minLength": 1},
+        "render": {"enum": ["http", "browser"]},
+        "lang": {"type": ["string", "null"]},
+        "extract": {"type": "boolean"}
+      }
+    },
+    "raw": {
+      "title": "Сырые байты страницы",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "hash": {"type": "string"},
+        "size": {"type": "integer"},
+        "bytes_b64": {"type": ["string", "null"]},
+        "ref": {"type": ["string", "null"]},
+        "content": {"type": ["string", "null"]}
+      }
+    },
+    "text": {
+      "title": "Очищенный markdown",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "content": {"type": ["string", "null"]},
+        "hash": {"type": ["string", "null"]},
+        "extractor_version": {"type": ["string", "null"]},
+        "page_count": {"type": ["integer", "null"]}
+      }
+    }
+  }
+}

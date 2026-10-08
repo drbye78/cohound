@@ -1,0 +1,211 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "coHound DMZ seam API",
+    "version": "1",
+    "description": "Единственный канал core↔edge (application-layer firewall, L7). Ядро (Z0) инициирует, edge (Z1/DMZ) отвечает; обратного инициирования нет (07 §3/§5). Конверт: {schema_version, request_id, status, payload, error}. schema_version=\"1\"; несовместимое изменение контракта — версионная граница §13 (07 §8.3). Схемы публикуются для написания DLP/IDS/IDP-политик по контракту (07 §8); аттестация против конкретных средств — вне рамок проекта.",
+    "x-schema-version": "1"
+  },
+  "servers": [
+    {
+      "url": "https://edge.internal:8443",
+      "description": "DMZ app-port (mTLS; без certificate pinning — L7/TLS-инспекция допускается, 07 §8.1)"
+    }
+  ],
+  "components": {
+    "parameters": {
+      "RequestId": {
+        "name": "X-Request-Id",
+        "in": "header",
+        "required": true,
+        "description": "Корреляция вызова (совпадает с request_id конверта; SIEM/IDS, 07 §8.1/§8.4).",
+        "schema": {"type": "string", "minLength": 1}
+      },
+      "SchemaVersion": {
+        "name": "X-Schema-Version",
+        "in": "header",
+        "required": true,
+        "description": "Версия контракта шва; несовпадение — версионная граница §13.",
+        "schema": {"const": "1"}
+      }
+    },
+    "schemas": {
+      "Envelope": {"$ref": "envelope.schema.json"},
+      "RequestEnvelope": {"$ref": "envelope.schema.json#/$defs/request"},
+      "FetchRequest": {"$ref": "fetch.schema.json#/$defs/request"},
+      "FetchResponse": {"$ref": "fetch.schema.json"},
+      "SearchRequest": {"$ref": "search.schema.json#/$defs/request"},
+      "SearchResponse": {"$ref": "search.schema.json"},
+      "RegistryRequest": {"$ref": "registry.schema.json#/$defs/request"},
+      "RegistryResponse": {"$ref": "registry.schema.json"},
+      "CapabilitiesResponse": {"$ref": "capabilities.schema.json"},
+      "HealthResponse": {"$ref": "health.schema.json"}
+    }
+  },
+  "paths": {
+    "/v1/fetch": {
+      "post": {
+        "operationId": "fetch",
+        "summary": "Фетч страницы/документа (сырые байты + опц. очищенный markdown)",
+        "parameters": [
+          {"$ref": "#/components/parameters/RequestId"},
+          {"$ref": "#/components/parameters/SchemaVersion"}
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "allOf": [
+                  {"$ref": "#/components/schemas/RequestEnvelope"},
+                  {"properties": {"payload": {"$ref": "#/components/schemas/FetchRequest"}}}
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Сырые байты/очищенный текст; контент, не evidence (I19).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {"$ref": "#/components/schemas/Envelope"},
+                    {"properties": {"payload": {"$ref": "#/components/schemas/FetchResponse"}}}
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/search": {
+      "post": {
+        "operationId": "search",
+        "summary": "Внешний поиск (кандидаты, не evidence)",
+        "parameters": [
+          {"$ref": "#/components/parameters/RequestId"},
+          {"$ref": "#/components/parameters/SchemaVersion"}
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "allOf": [
+                  {"$ref": "#/components/schemas/RequestEnvelope"},
+                  {"properties": {"payload": {"$ref": "#/components/schemas/SearchRequest"}}}
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Список кандидатов {url, title, snippet, rank}; не evidence (I19).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {"$ref": "#/components/schemas/Envelope"},
+                    {"properties": {"payload": {"$ref": "#/components/schemas/SearchResponse"}}}
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/registry": {
+      "post": {
+        "operationId": "registry",
+        "summary": "Реестровый фетчер (факты с обязательным source_url, R1)",
+        "parameters": [
+          {"$ref": "#/components/parameters/RequestId"},
+          {"$ref": "#/components/parameters/SchemaVersion"}
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "allOf": [
+                  {"$ref": "#/components/schemas/RequestEnvelope"},
+                  {"properties": {"payload": {"$ref": "#/components/schemas/RegistryRequest"}}}
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Список фактов {fact_json, source_url, fetched_at}; source_url обязателен (R1).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {"$ref": "#/components/schemas/Envelope"},
+                    {"properties": {"payload": {"$ref": "#/components/schemas/RegistryResponse"}}}
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/capabilities": {
+      "get": {
+        "operationId": "capabilities",
+        "summary": "Версии edge-компонентов (для манифеста; R7)",
+        "parameters": [
+          {"$ref": "#/components/parameters/RequestId"},
+          {"$ref": "#/components/parameters/SchemaVersion"}
+        ],
+        "responses": {
+          "200": {
+            "description": "Версии edge-компонентов.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {"$ref": "#/components/schemas/Envelope"},
+                    {"properties": {"payload": {"$ref": "#/components/schemas/CapabilitiesResponse"}}}
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/health": {
+      "get": {
+        "operationId": "health",
+        "summary": "Диагностика достижимости шва",
+        "parameters": [
+          {"$ref": "#/components/parameters/RequestId"},
+          {"$ref": "#/components/parameters/SchemaVersion"}
+        ],
+        "responses": {
+          "200": {
+            "description": "Состояние edge.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {"$ref": "#/components/schemas/Envelope"},
+                    {"properties": {"payload": {"$ref": "#/components/schemas/HealthResponse"}}}
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

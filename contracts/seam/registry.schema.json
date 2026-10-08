@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cohound.local/contracts/seam/registry.schema.json",
+  "title": "POST /v1/registry payload",
+  "description": "Запрос реестрового фетчера и ответ edge (07 §3). R1: каждый факт обязан нести source_url.",
+  "type": "array",
+  "items": {"$ref": "#/$defs/item"},
+  "$defs": {
+    "request": {
+      "title": "POST /v1/registry request payload",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["registry_id"],
+      "properties": {
+        "registry_id": {"type": "string", "minLength": 1},
+        "product_ref": {"type": "object"},
+        "scope": {"type": "object"}
+      }
+    },
+    "item": {
+      "title": "Реестровый факт",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source_url"],
+      "properties": {
+        "fact_json": {
+          "type": ["string", "object", "array", "null"]
+        },
+        "source_url": {"type": "string", "minLength": 1},
+        "fetched_at": {"type": ["string", "null"]}
+      }
+    }
+  }
+}
