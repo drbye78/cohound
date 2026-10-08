@@ -1,0 +1,12 @@
+[
+  {"param_id": "param.ok", "title": "ok", "module": "mod.one", "group": "grp", "importance": "Кр", "param_type": "fact", "rule": "правило"},
+  {"param_id": "param.partial", "title": "partial", "module": "mod.one", "group": "grp", "importance": "Вж", "param_type": "fact", "rule": "правило"},
+  {"param_id": "param.absent", "title": "absent", "module": "mod.one", "group": "grp", "importance": "Баз", "param_type": "fact", "rule": "правило"},
+  {"param_id": "param.unknown", "title": "unknown", "module": "mod.two", "group": "grp", "importance": "Вж", "param_type": "fact", "rule": "правило"},
+  {"param_id": "param.na", "title": "na", "module": "mod.two", "group": "grp", "importance": "Баз", "param_type": "fact", "rule": "правило"},
+  {"param_id": "param.fail", "title": "fail", "module": "mod.two", "group": "grp", "importance": "Вж", "param_type": "fact", "rule": "правило"},
+  {"param_id": "param.preliminary", "title": "preliminary", "module": "mod.three", "group": "grp", "importance": "Баз", "param_type": "fact", "rule": "правило"},
+  {"param_id": "param.b_ok", "title": "b ok", "module": "mod.one", "group": "grp", "importance": "Кр", "param_type": "fact", "rule": "правило"},
+  {"param_id": "param.p1", "title": "p1", "module": "mod.one", "group": "grp", "importance": "Кр", "param_type": "fact", "rule": "правило"},
+  {"param_id": "param.p2", "title": "p2", "module": "mod.one", "group": "grp", "importance": "Вж", "param_type": "fact", "rule": "правило"}
+]
