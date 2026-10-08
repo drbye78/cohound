@@ -5,7 +5,8 @@
 ``runner.py`` (оркестрация фаз + ``PhaseResult``), ``gates.py`` (человеческие решения
 G1–G4, S9), ``idempotency.py`` (детерминированные ключи upsert, S8/R15),
 ``normalize.py``/``lint.py``/``plan.py`` (нормализация входов, блокирующий линтер
-и воспроизводимый план прогона — W5/T5.2/T5.4).
+и воспроизводимый план прогона — W5/T5.2/T5.4), ``registry.py``/``inheritance.py``
+(детерминированные волны Ш3/Ш4 без LLM — W6/T6.3/T6.4).
 
 Нейтрален к предметной категории (§1.3): никаких названий продуктов/вендоров.
 """
@@ -40,7 +41,13 @@ from core.pipeline.normalize import (
     load_inputs,
     load_scope_attestation,
 )
+from core.pipeline.inheritance import apply_precedence, inheritance_wave
 from core.pipeline.plan import RunPlan, derive_run_id, load_plan, plan
+from core.pipeline.registry import (
+    registry_covered_params,
+    registry_wave,
+    resolve_registry_ids,
+)
 from core.pipeline.runner import (
     GATE_PHASES,
     PHASES,
@@ -91,4 +98,11 @@ __all__ = [
     "plan",
     "load_plan",
     "derive_run_id",
+    # registry wave (T6.3)
+    "registry_wave",
+    "registry_covered_params",
+    "resolve_registry_ids",
+    # inheritance wave (T6.4)
+    "inheritance_wave",
+    "apply_precedence",
 ]

@@ -1,0 +1,76 @@
+{
+  "catalog": [
+    {
+      "param_id": "param_a",
+      "title": "Param A",
+      "module": "mod_a",
+      "group": "grp_1",
+      "importance": "Кр",
+      "param_type": "fact",
+      "rule": "presence of mechanism a",
+      "absence_rule": "registry_absence",
+      "role_binding": "role_a",
+      "concept_terms": {"ru": ["механизм а"], "en": ["mechanism a"]},
+      "search_langs": ["ru", "en"]
+    },
+    {
+      "param_id": "param_b",
+      "title": "Param B",
+      "module": "mod_a",
+      "group": "grp_1",
+      "importance": "Баз",
+      "param_type": "fact",
+      "rule": "presence of mechanism b",
+      "absence_rule": "explicit",
+      "role_binding": "role_b",
+      "concept_terms": {"ru": ["механизм б"], "en": ["mechanism b"]},
+      "search_langs": ["ru"]
+    },
+    {
+      "param_id": "param_c",
+      "title": "Param C",
+      "module": "mod_a",
+      "group": "grp_2",
+      "importance": "Опц",
+      "param_type": "fact",
+      "rule": "presence of mechanism c",
+      "absence_rule": "explicit",
+      "role_binding": null,
+      "concept_terms": {},
+      "search_langs": []
+    }
+  ],
+  "baselines": [
+    {
+      "baseline_id": "base_1",
+      "param_id": "param_a",
+      "min_version": null,
+      "inheritance_mode": "direct",
+      "note": null
+    },
+    {
+      "baseline_id": "base_1",
+      "param_id": "param_b",
+      "min_version": null,
+      "inheritance_mode": "conditional",
+      "note": null
+    },
+    {
+      "baseline_id": "base_1",
+      "param_id": "param_c",
+      "min_version": null,
+      "inheritance_mode": "blocked",
+      "note": null
+    }
+  ],
+  "registry_facts": [
+    {
+      "run_id": "run-fixture",
+      "product_id": "p1",
+      "registry_id": "reg_x",
+      "fact_json": "{\"present\": true, \"note\": \"neutral record\"}",
+      "source_url": "https://reg.test/entry/p1",
+      "fetched_at": "2026-01-01T00:00:00+00:00"
+    }
+  ]
+}
