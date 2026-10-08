@@ -13,23 +13,31 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from core.domain.enums import (
     AbsenceRuleType,
+    AdapterKind,
     AnchorRelation,
     Archetype,
     CellState,
+    EndpointKind,
     EvidenceState,
     EvidenceType,
+    Gate,
+    GoldenTier,
     Importance,
     InheritanceMode,
+    LLMScenario,
     Origin,
     ParamType,
     RankingPolicy,
     Relationship,
     RunMode,
     SatelliteState,
+    SearchKind,
+    SearchPhase,
     SourceKind,
     SourceScope,
     StaleReason,
     Status,
+    TerminationReason,
 )
 
 _BASE = ConfigDict(extra="forbid", str_strip_whitespace=True)
@@ -66,6 +74,7 @@ class PackageManifest(BaseModel):
     model_config = _BASE
 
     case_id: str
+    package_version: str = "0.0.0"
     archetype: Archetype
     modules: list[ModuleDef]
     roles: list[RoleDef]
@@ -174,6 +183,7 @@ class GoldenRow(BaseModel):
     expected_status: Status
     expected_evidence_kind: list[SourceKind]
     case_class: str
+    tier: GoldenTier = GoldenTier.FULL
     note: str | None = None
 
 
@@ -435,3 +445,219 @@ class Cell(BaseModel):
                             "I2b: registry_absence — exhaustive по построению"
                         )
         return self
+
+
+# ---------------------------------------------------------------------------
+# §4.4 Операционные объекты (персистентные строки store; T2.1)
+# ---------------------------------------------------------------------------
+
+
+class ScenarioBinding(BaseModel):
+    """Привязка сценарий → модель (§7.4/I21). Строка ``llm_scenarios``.
+
+    Маршрут детерминирован фазой, а не решением LLM. Для ``EVALUATOR``
+    ``web_tool`` обязан быть False (I18) — это подтверждает и SQL-триггер.
+    """
+
+    model_config = _BASE
+
+    run_id: str
+    scenario: LLMScenario
+    model_id: str
+    model_version: str | None = None
+    endpoint_kind: EndpointKind
+    web_tool: bool = False
+    decoder: str | None = None
+    seed: int | None = None
+    temperature: float | None = None
+    constrained_decoding: str | None = None
+
+    @model_validator(mode="after")
+    def _check(self) -> ScenarioBinding:
+        if self.scenario is LLMScenario.EVALUATOR and self.web_tool:
+            raise ValueError("I18: evaluator не может иметь web_tool")
+        return self
+
+
+class SearchLogEntry(BaseModel):
+    """Строка ``search_log`` (§4.4, S12). Внутренний ретривал vs внешний поиск."""
+
+    model_config = _BASE
+
+    run_id: str
+    phase: SearchPhase
+    kind: SearchKind
+    provider: str | None = None
+    adapter_kind: AdapterKind | None = None
+    language: str | None = None
+    query: str | None = None
+    results_count: int | None = None
+    selected: int | None = None
+    lexical_score: float | None = None
+    dense_score: float | None = None
+    fused_rank: int | None = None
+    rerank_score: float | None = None
+    retrieval_score: float | None = None
+    termination_reason: TerminationReason | None = None
+    ts: str | None = None
+    log_id: int | None = None  # AUTOINCREMENT в БД
+
+
+class ProtocolExhaustion(BaseModel):
+    """Машиночитаемый протокол исчерпания (§5, S13). Строка ``search_exhaustion``.
+
+    ``❓`` = «протокол исчерпан, evidence недостаточно». Объект фиксирует, что
+    именно было исчерпано: контуры, бюджеты, число раундов, терминацию.
+    """
+
+    model_config = _BASE
+
+    run_id: str
+    product_id: str
+    param_id: str
+    contours: list[str] = Field(default_factory=list)   # исчерпанные контуры (registry/corpus/serp)
+    queries: list[str] = Field(default_factory=list)    # запросы протокола
+    rounds: int = 0                                     # число SERP-раундов
+    budget: dict[str, Any] = Field(default_factory=dict)
+    termination_reason: TerminationReason
+    exhausted_at: str | None = None
+    notes: str | None = None
+
+
+class RegistryFact(BaseModel):
+    """Реестровый факт (R1). Строка ``registry_facts``.
+
+    **R1: 100% фактов обязаны нести ``source_url``.** ``fact_json`` — сырое
+    значение, приведённое из конфиг-driven маппинга (нейтрально к реестру).
+    """
+
+    model_config = _BASE
+
+    run_id: str
+    product_id: str
+    registry_id: str
+    fact_json: str
+    source_url: str
+    fetched_at: str | None = None
+
+    @model_validator(mode="after")
+    def _check(self) -> RegistryFact:
+        if not self.source_url:
+            raise ValueError("R1: реестровый факт обязан иметь source_url")
+        return self
+
+
+class GateDecision(BaseModel):
+    """Человеческое решение гейта G1–G4 (S9). Строка ``gate_decisions``.
+
+    Носитель ``reviewed_by`` и аудит-след. Гейт не считается пройденным без строки.
+    """
+
+    model_config = _BASE
+
+    decision_id: str
+    run_id: str
+    gate: Gate
+    target: str | None = None
+    actor: str
+    decided_at: str | None = None
+    notes: str | None = None
+
+    @model_validator(mode="after")
+    def _check(self) -> GateDecision:
+        if not self.actor:
+            raise ValueError("решение гейта обязано иметь actor (человека)")
+        return self
+
+
+class UpstreamRef(BaseModel):
+    """Ссылка на upstream-факт при наследовании (I8, K5).
+
+    Используется ``check_derived_evidence``: унаследованный ✅/⚠️ обязан нести
+    derived-evidence с резолвом и hash.
+    """
+
+    model_config = _BASE
+
+    product_id: str
+    param_id: str
+    source_id: str
+    source_url: str | None = None
+    content_hash: str | None = None
+
+
+class AlignmentReport(BaseModel):
+    """Alignment-условия Comparability (§6). Строка-сводка манифеста."""
+
+    model_config = _BASE
+
+    snapshot_date: str
+    retrieval_profile: str
+    retrieval_cutoff_K: int
+    embed_model_id: str | None = None
+    index_build_id: str
+    package_version: str
+    catalog_version: str
+    editions_consistent: bool = True
+    jurisdictions_consistent: bool = True
+    violations: list[str] = Field(default_factory=list)
+
+
+class RunManifest(BaseModel):
+    """``run_manifest.yaml`` (§9, §13): агрегат всех версий и параметров прогона (R7).
+
+    Пишется ``runner.py`` в конце; иммутабелен. Несёт всё, что влияет на результат:
+    версии, ``llm_scenarios``, индексную сборку, ретривал-профиль+K, бюджет, политику расчёта.
+    """
+
+    model_config = _BASE
+
+    run_id: str
+    case_id: str
+    created_at: str
+    mode: RunMode
+    methodology_version: str
+    package_version: str
+    catalog_version: str
+    status_dict_version: str
+    scoring_policy_version: str
+    anchor_product_id: str
+    cohort_ref: str | None = None
+    focus_modules: list[str] = Field(default_factory=list)
+    # Индексный/ретривал-контур (§13, I16/I20/S1)
+    index_build_id: str | None = None
+    embed_model_id: str | None = None
+    chunker_version: str | None = None
+    extractor_version: str | None = None
+    lexical_engine_version: str | None = None
+    vector_store: str | None = None
+    retrieval_profile: str | None = None
+    retrieval_cutoff_K: int | None = None
+    retrieval_params_json: str | None = None
+    # Бюджеты и ранжирование (I23, K6)
+    search_effort_budget_json: str | None = None
+    requested_ranking: RankingPolicy | None = None
+    computed_ranking: RankingPolicy | None = None
+    # Маршрутизация моделей (I21)
+    llm_scenarios: list[ScenarioBinding] = Field(default_factory=list)
+    # Расчёт (§6)
+    capability_policy: str = "resolved-only-v1"
+    unknown_policy: str = "excluded"
+    partial_score: float = 0.5
+    snapshot_date: str | None = None
+    edge_capabilities: dict[str, Any] = Field(default_factory=dict)  # версии edge-компонентов (gateway)
+
+
+class Violation(BaseModel):
+    """Типизированное нарушение инварианта (T2.2).
+
+    ``code`` — машинная ссылка на инвариант (``"I2b"``, ``"I19"``, …), чтобы CI/ревью
+    ссылались на него программно.
+    """
+
+    model_config = _BASE
+
+    code: str
+    message: str
+    field: str | None = None
+

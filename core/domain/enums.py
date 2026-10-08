@@ -180,3 +180,39 @@ class Cap(StrEnum):
     PARTIAL = "partial"
     OK = "ok"
     PARAMETER_RULE = "parameter_rule"
+
+
+class SearchPhase(StrEnum):
+    """Фазы конвейера, в которых пишется ``search_log`` (§4.4)."""
+
+    DISCOVERY = "discovery"
+    CORPUS = "corpus"
+    SERP = "serp"
+    SCOUT = "scout"
+
+
+class TerminationReason(StrEnum):
+    """Причина терминации поискового протокола — исчерпание (§4.4/§5)."""
+
+    BUDGET_EXHAUSTED = "budget_exhausted"
+    RESULTS_EXHAUSTED = "results_exhausted"
+    SUFFICIENT_EVIDENCE = "sufficient_evidence"
+    NOT_FOUND = "not_found"
+    ERROR = "error"
+
+
+class ComparabilityLevel(StrEnum):
+    """Аннотация Comparability (§6): кросс-продуктовая сопоставимость."""
+
+    HIGH = "HIGH"
+    MEDIUM = "MEDIUM"
+    LOW = "LOW"
+    INSUFFICIENT = "INSUFFICIENT"
+    CROSS_CYCLE = "cross-cycle"
+
+
+class GoldenTier(StrEnum):
+    """Тир golden-набора (§11.6): быстрый PR-гейт vs полный прогон."""
+
+    FAST = "fast"
+    FULL = "full"
