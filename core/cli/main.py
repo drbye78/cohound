@@ -2,7 +2,9 @@
 
 Точка входа :func:`main` реализует команды W5/T5.3: ``resolve``, ``plan`` и ``run``,
 который связывает реальный реестр фаз (:func:`core.pipeline.build_phases`) с портами
-профиля (composition root, L3). Только stdlib (``argparse``/``json``/``sys``) — без
+профиля (composition root, L3). Команды ``diff`` (§9/§13) и ``sensitivity`` (§6/K6)
+экспонируют уже построенные возможности ``pipeline/report.py`` и ``pipeline/compute.py``
+без дублирования логики. Только stdlib (``argparse``/``json``/``sys``) — без
 фреймворков (A1).
 
 **Принципы UX (``03`` §E.2).**
@@ -46,9 +48,11 @@ from core.cli.wiring import (
 )
 from core.config.deploy import DeployConfig, is_split, load_deploy_config
 from core.pipeline import PHASES, Ports, RunReport, build_phases
+from core.pipeline.compute import compute
 from core.pipeline.lint import lint_run_inputs
 from core.pipeline.normalize import RunInputs, load_inputs
 from core.pipeline.plan import RunPlan, derive_run_id, plan as build_plan
+from core.pipeline.report import CrossCycleDiffError, render_diff
 from core.pipeline.runner import Clock, PhaseFn
 from core.ports.gateway import ContentGateway
 
@@ -392,9 +396,207 @@ def cmd_deploy_check(args: argparse.Namespace) -> int:
     return EXIT_OK if report["ok"] else EXIT_ERROR
 
 
+def cmd_diff(args: argparse.Namespace) -> int:
+    """``diff``: межцикловый diff ``run_a`` → ``run_b`` (§9/§13).
+
+    Резолв хранилищ (контракт выбора):
+
+    * ``--runs-dir`` (дефолт ``runs``) + два позиционных ``run_id`` →
+      ``runs/{run_id}/cohound.db`` через :func:`core.cli.wiring.run_db_path`;
+    * единый явный ``--db`` — когда оба цикла лежат в **одной** БД; он переопределяет
+      ``--runs-dir``.
+
+    Оба цикла читаются как реальные prev/curr (без заглушки): ``read_manifest`` +
+    ``iter_cells``. :func:`core.pipeline.report.render_diff` пишет ``diff.md``; при
+    нарушении версионной границы §13 (major ``methodology_version`` либо расхождение
+    cohort/profile+K/index_build/retrieval_params) :class:`CrossCycleDiffError` →
+    :data:`EXIT_ERROR` с причиной ``§13: ...``.
+
+    Дефолт ``--out`` — ``runs/{run_b}/outputs/diff.md`` (родительские каталоги создаются).
+    """
+    out_path = (
+        Path(args.out)
+        if args.out is not None
+        else Path(args.runs_dir) / args.run_b / "outputs" / "diff.md"
+    )
+    prev_manifest, prev_cells = _read_cycle(args, args.run_a)
+    curr_manifest, curr_cells = _read_cycle(args, args.run_b)
+    try:
+        written = render_diff(
+            prev_manifest, curr_manifest, prev_cells, curr_cells, out_path
+        )
+    except CrossCycleDiffError as exc:
+        message = _concise(exc)
+        code = extract_code(message)
+        prefix = f"{code}:"
+        if message.startswith(prefix):
+            message = message[len(prefix) :].strip()
+        _emit_error(args, code, message)
+        return EXIT_ERROR
+
+    payload = {
+        "ok": True,
+        "out": str(written),
+        "run_a": args.run_a,
+        "run_b": args.run_b,
+    }
+    if args.json:
+        _print_json(payload)
+    else:
+        sys.stdout.write(f"{written}\n")
+    return EXIT_OK
+
+
+def cmd_sensitivity(args: argparse.Namespace) -> int:
+    """``sensitivity``: пост-хок анализ устойчивости по осям (§6, K6).
+
+    Хранилище резолвится одним из двух способов: явный ``--db`` (``run_id`` берётся из
+    ``--run-id`` либо выводится, если в БД ровно один прогон) **или**
+    ``--runs-dir`` + ``--run-id`` → ``runs/{run_id}/cohound.db``.
+
+    Бандл пересобирается :func:`core.pipeline.compute.compute` из ячеек прогона. **ГЭП:**
+    каталог/веса/когорта в операционной БД не персистятся (в ``runs`` их нет), поэтому
+    для точного воспроизведения передаются ``--run-yaml`` + ``--package`` — через
+    ``load_inputs``/``plan`` берутся focused-каталог, перенормированные веса и когорта.
+    Без них расчёт идёт с **пустым** каталогом (вес ячейки = 1.0) и без когорты, а
+    ограничение явно печатается в поле ``notes`` (значения не выдумываются).
+
+    Печатает оси ``per_axis``, флаг ``stable``, ``unstable_pairs`` и
+    ``requested_ranking``/``computed_ranking`` (человеку или JSON).
+    """
+    if args.db is not None:
+        db_path: str | Path = args.db
+    else:
+        if not args.run_id:
+            raise CliError(
+                "--runs-dir требует --run-id", code="usage", exit_code=EXIT_USAGE
+            )
+        db_path = run_db_path(args.runs_dir, args.run_id)
+
+    run_id = args.run_id
+    bundle = None
+    notes: list[str] = []
+    with build_store(db_path, profile=args.profile) as store:
+        if run_id is None:
+            run_id = _infer_run_id(store)
+        store.read_manifest(run_id)  # валидация: прогон существует
+        catalog, module_weights, cohort, notes = _sensitivity_inputs(args, run_id)
+        bundle = compute(
+            store=store,
+            run_id=run_id,
+            catalog=catalog,
+            module_weights=module_weights,
+            cohort=cohort,
+        )
+
+    assert bundle is not None  # compute выполняется безусловно (см. выше)
+    report = bundle.sensitivity
+    payload = {
+        "ok": True,
+        "run_id": run_id,
+        "stable": report.stable,
+        "per_axis": report.per_axis,
+        "unstable_pairs": [list(pair) for pair in report.unstable_pairs],
+        "requested_ranking": report.requested_ranking,
+        "computed_ranking": report.computed_ranking,
+        "notes": notes,
+    }
+    if args.json:
+        _print_json(payload)
+    else:
+        _print_sensitivity(payload)
+    return EXIT_OK
+
+
 # ---------------------------------------------------------------------------
 # Помощники команд
 # ---------------------------------------------------------------------------
+
+
+def _read_cycle(args: argparse.Namespace, run_id: str) -> tuple[Any, list[Any]]:
+    """Читает цикл прогона: ``(манифест, ячейки)`` для ``diff``.
+
+    ``--db`` (общая БД) приоритетнее ``--runs-dir``; иначе БД резолвится
+    :func:`core.cli.wiring.run_db_path`.
+    """
+    db_path = args.db if args.db is not None else run_db_path(args.runs_dir, run_id)
+    manifest: Any = None
+    cells: list[Any] = []
+    with build_store(db_path, profile=args.profile) as store:
+        manifest = store.read_manifest(run_id)
+        cells = list(store.iter_cells(run_id))
+    return manifest, cells
+
+
+def _infer_run_id(store: Any) -> str:
+    """Выводит единственный ``run_id`` из БД прогона (для ``sensitivity --db``).
+
+    :raises CliError: БД пуста либо содержит несколько прогонов (нужен ``--run-id``).
+    """
+    rows = store.conn.execute("SELECT run_id FROM runs ORDER BY run_id").fetchall()
+    if len(rows) == 1:
+        return str(rows[0]["run_id"])
+    if not rows:
+        raise CliError("в БД нет ни одного прогона", code="usage", exit_code=EXIT_USAGE)
+    raise CliError(
+        f"--db содержит {len(rows)} прогонов; укажите --run-id",
+        code="usage",
+        exit_code=EXIT_USAGE,
+    )
+
+
+def _sensitivity_inputs(
+    args: argparse.Namespace, run_id: str
+) -> tuple[dict[str, Any], dict[str, float], Any, list[str]]:
+    """Восстанавливает ``(catalog, module_weights, cohort, notes)`` для ``sensitivity``.
+
+    При наличии ``--run-yaml`` и ``--package`` каталог/веса/когорта берутся из плана
+    (как в фазе Ш8: ``plan.params`` + ``renormalized_weights``/``module_weights`` +
+    ``plan.cohort``). Иначе возвращаются пустые значения и явная заметка о ГЭП —
+    каталог/веса **не выдумываются**.
+    """
+    notes: list[str] = []
+    if args.run_yaml and args.package:
+        inputs = load_inputs(args.run_yaml, args.package)
+        run_plan = build_plan(inputs, run_id=run_id)
+        catalog = {row.param_id: row for row in run_plan.params}
+        module_weights = dict(
+            getattr(run_plan, "renormalized_weights", None)
+            or getattr(run_plan, "module_weights", None)
+            or {}
+        )
+        return catalog, module_weights, getattr(run_plan, "cohort", None), notes
+
+    if args.run_yaml or args.package:
+        notes.append(
+            "для восстановления каталога нужны ОБА --run-yaml и --package; "
+            "указан только один — использован пустой каталог"
+        )
+    notes.append(
+        "ГЭП: каталог/веса/когорта не персистятся в БД прогона — sensitivity "
+        "рассчитан с пустым каталогом (вес ячейки = 1.0) и без когорты; передайте "
+        "--run-yaml и --package для точного воспроизведения"
+    )
+    return {}, {}, None, notes
+
+
+def _print_sensitivity(payload: dict[str, Any]) -> None:
+    """Человекочитаемый вывод ``sensitivity`` (оси + устойчивость)."""
+    pairs = ", ".join(f"{a}|{b}" for a, b in payload["unstable_pairs"]) or "—"
+    lines = [
+        f"run_id: {payload['run_id']}",
+        f"stable: {'yes' if payload['stable'] else 'no'}",
+        f"requested_ranking: {payload['requested_ranking']}",
+        f"computed_ranking: {payload['computed_ranking']}",
+        f"unstable_pairs: {pairs}",
+    ]
+    for axis, data in sorted(payload["per_axis"].items()):
+        values = ", ".join(str(value) for value in data.get("values", []))
+        stable = "yes" if data.get("stable") else "no"
+        lines.append(f"axis {axis}: values=[{values}] stable={stable}")
+    for note in payload.get("notes", ()):
+        lines.append(f"note: {note}")
+    sys.stdout.write("\n".join(lines) + "\n")
 
 
 def _diagnostic_gateway(
@@ -797,6 +999,60 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_common(p_run)
     p_run.set_defaults(handler=cmd_run)
+
+    # diff ---------------------------------------------------------------- #
+    p_diff = sub.add_parser(
+        "diff",
+        help="межцикловый diff run_a → run_b (запрещён через major/границу, §13)",
+    )
+    p_diff.add_argument("run_a", help="предыдущий прогон (run_id)")
+    p_diff.add_argument("run_b", help="текущий прогон (run_id)")
+    p_diff.add_argument(
+        "--runs-dir",
+        default="runs",
+        help="каталог прогонов: runs/{run_id}/cohound.db (дефолт runs); --db переопределяет",
+    )
+    p_diff.add_argument(
+        "--db",
+        default=None,
+        help="один общий cohound.db для обоих прогонов (оба run_id в одной БД)",
+    )
+    p_diff.add_argument(
+        "--out",
+        default=None,
+        help="путь diff.md (дефолт runs/{run_b}/outputs/diff.md)",
+    )
+    _add_common(p_diff)
+    p_diff.set_defaults(handler=cmd_diff)
+
+    # sensitivity --------------------------------------------------------- #
+    p_sens = sub.add_parser(
+        "sensitivity", help="пост-хок sensitivity по осям (§6, K6)"
+    )
+    sens_source = p_sens.add_mutually_exclusive_group(required=True)
+    sens_source.add_argument("--db", default=None, help="путь к cohound.db прогона")
+    sens_source.add_argument(
+        "--runs-dir",
+        default=None,
+        help="каталог прогонов (runs/{run_id}/cohound.db; требует --run-id)",
+    )
+    p_sens.add_argument(
+        "--run-id",
+        default=None,
+        help="run_id (обязателен с --runs-dir; с --db выводится, если прогон один)",
+    )
+    p_sens.add_argument(
+        "--run-yaml",
+        default=None,
+        help="run.yaml для восстановления каталога/весов/когорты (вместе с --package)",
+    )
+    p_sens.add_argument(
+        "--package",
+        default=None,
+        help="каталог пакета для восстановления каталога/весов/когорты (вместе с --run-yaml)",
+    )
+    _add_common(p_sens)
+    p_sens.set_defaults(handler=cmd_sensitivity)
 
     # deploy-check -------------------------------------------------------- #
     p_deploy = sub.add_parser(
