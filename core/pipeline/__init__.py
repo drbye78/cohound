@@ -107,6 +107,19 @@ from core.pipeline.metrics import (
     collect_phase_durations,
     compute_metrics,
 )
+from core.pipeline.search_log import (
+    SearchBudget,
+    SearchEffort,
+    external_search,
+    record_search,
+    termination_for,
+)
+from core.pipeline.discovery import (
+    DiscoveryCandidate,
+    DiscoveryReport,
+    discover,
+    review_candidates,
+)
 from core.pipeline.plan import RunPlan, derive_run_id, load_plan, plan
 from core.pipeline.registry import (
     registry_covered_params,
@@ -227,4 +240,15 @@ __all__ = [
     "RunMetrics",
     "compute_metrics",
     "collect_phase_durations",
+    # search_log (T11.2), I16/I23
+    "SearchBudget",
+    "SearchEffort",
+    "record_search",
+    "termination_for",
+    "external_search",
+    # discovery (T11.4), G2/I19
+    "DiscoveryCandidate",
+    "DiscoveryReport",
+    "discover",
+    "review_candidates",
 ]
