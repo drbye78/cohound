@@ -120,6 +120,13 @@ from core.pipeline.discovery import (
     discover,
     review_candidates,
 )
+from core.pipeline.adversarial import (
+    AdversarialBreachError,
+    AdversarialCase,
+    AdversarialReport,
+    load_adversarial,
+    run_adversarial,
+)
 from core.pipeline.plan import RunPlan, derive_run_id, load_plan, plan
 from core.pipeline.registry import (
     registry_covered_params,
@@ -251,4 +258,10 @@ __all__ = [
     "DiscoveryReport",
     "discover",
     "review_candidates",
+    # adversarial (T12.3), R8
+    "AdversarialCase",
+    "AdversarialReport",
+    "AdversarialBreachError",
+    "run_adversarial",
+    "load_adversarial",
 ]
