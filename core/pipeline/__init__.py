@@ -140,6 +140,17 @@ from core.pipeline.serp_loop import (
     run_serp_round,
 )
 from core.pipeline.phases import IMPLEMENTED_PHASES, build_phases
+from core.pipeline.golden import (
+    ERROR_CLASSES,
+    GoldenCaseResult,
+    GoldenReport,
+    GoldenThresholdError,
+    GoldenThresholds,
+    assert_golden,
+    check_thresholds,
+    evaluate_golden,
+    run_golden,
+)
 from core.pipeline.plan import RunPlan, derive_run_id, load_plan, plan
 from core.pipeline.registry import (
     registry_covered_params,
@@ -291,4 +302,13 @@ __all__ = [
     "IMPLEMENTED_PHASES",
     "evaluate_phase",
     "build_manifest",
+    # golden (T12.4), R6/R12
+    "GoldenThresholds",
+    "GoldenCaseResult",
+    "GoldenReport",
+    "GoldenThresholdError",
+    "run_golden",
+    "evaluate_golden",
+    "check_thresholds",
+    "assert_golden",
 ]
