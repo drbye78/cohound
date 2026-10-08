@@ -1,0 +1,20 @@
+case_id: e2e
+package_version: "1.0.0"
+archetype: B
+modules:
+  - module_id: m1
+    weight: 100
+roles:
+  - role_id: role_r1
+    definition: "Тестовая инженерная роль (категорийно-нейтрально)."
+    markers: [marker_1]
+    query_patterns:
+      ru: [запрос]
+      en: [query]
+    core_coverage_allowed: true
+    multi_instance: false
+baselines: []
+baseline_participant: null
+jurisdictions: [RU]
+registries: []
+languages: [ru, en]

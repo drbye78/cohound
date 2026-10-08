@@ -1,0 +1,2 @@
+product_id,param_id,expected_status,expected_evidence_kind,case_class,tier,note
+p1,feature.alpha,✅,documentation,class_ok,fast,

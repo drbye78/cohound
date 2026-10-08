@@ -11,11 +11,15 @@
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Sequence
+from dataclasses import replace
 from typing import Any, Callable
 
 from core.domain import LLMCellOutput, RegistryFact
+from core.ports.index_builder import IndexMeta
 from core.ports.llm import LLMRequest, LLMResponse, TokenUsage
 from core.ports.types import Chunk, ExtractedDoc, ProductRef, RawPage, RenderMode
+from core.ports.vector_index import RetrievedChunk, VectorQuery
 
 #: Фиксированная метка времени (детерминизм фейков).
 FIXED_TS = "2026-01-01T00:00:00+00:00"
@@ -28,6 +32,10 @@ __all__ = [
     "FakeExtractor",
     "FakeChunker",
     "FakeRegistryFetcher",
+    "FakeEmbedder",
+    "FakeIndexBuilder",
+    "FakeLexicalIndex",
+    "FakeVectorIndex",
 ]
 
 
@@ -36,6 +44,31 @@ def _digest(data: bytes | str) -> str:
     if isinstance(data, str):
         data = data.encode("utf-8")
     return hashlib.sha256(data).hexdigest()
+
+
+def _hash_vector(text: str, dim: int) -> list[float]:
+    """Детерминированный вектор ``dim`` в ``[0, 1]``: по 4 байта SHA-256 на ось.
+
+    Одинаковый текст → одинаковый вектор (воспроизводимость A3). Размерность любая
+    (байты SHA-256 нарезаются по индексу оси, а не по смещению), модель/сеть не нужны.
+    """
+    values: list[float] = []
+    for index in range(dim):
+        digest = hashlib.sha256(f"{text}\x1f{index}".encode("utf-8")).digest()
+        values.append(int.from_bytes(digest[:4], "big") / 0xFFFFFFFF)
+    return values
+
+
+def _cosine(a: Sequence[float], b: Sequence[float]) -> float:
+    """Косинусная близость; при несовпадении размеров/нулевой норме — ``0.0``."""
+    if not a or not b or len(a) != len(b):
+        return 0.0
+    dot = sum(x * y for x, y in zip(a, b))
+    norm_a = sum(x * x for x in a) ** 0.5
+    norm_b = sum(y * y for y in b) ** 0.5
+    if norm_a == 0.0 or norm_b == 0.0:
+        return 0.0
+    return dot / (norm_a * norm_b)
 
 
 class FakeEvaluator:
@@ -179,3 +212,171 @@ class FakeRegistryFetcher:
                 fetched_at=FIXED_TS,
             )
         ]
+
+
+class FakeEmbedder:
+    """Детерминированный in-memory эмбеддер (``EmbedderPort``), без сети/GPU.
+
+    Вектор фиксированной размерности выводится из SHA-256 текста (:func:`_hash_vector`):
+    одинаковый текст → одинаковый вектор, что делает ретривал воспроизводимым (A3).
+    Это заглушка порта, а не локальная модель: ``model_id``/``dim`` объявлены, чтобы
+    ``build_corpus`` записал их в ``index_manifest``.
+    """
+
+    available = True
+
+    def __init__(self, dim: int = 4, model_id: str = "fake-embedder-1") -> None:
+        if dim < 1:
+            raise ValueError("dim обязан быть ≥ 1")
+        self.dim = dim
+        self.model_id = model_id
+        self.calls: list[list[str]] = []
+
+    def embed(self, texts: Sequence[str]) -> list[list[float]]:
+        """Возвращает ``N × dim`` детерминированных векторов в порядке входа."""
+        batch = [str(text) for text in texts]
+        self.calls.append(batch)
+        return [_hash_vector(text, self.dim) for text in batch]
+
+
+class FakeIndexBuilder:
+    """In-memory сборщик индекса (``IndexBuilderPort``): ``build`` стадирует, ``commit`` фиксирует.
+
+    Контракт ``build_corpus``: ``build(...)`` вызывается **по каждой** продукт-партиции,
+    а ``commit()`` — **один раз** в конце (см. ``core/pipeline/corpus.py``). Поэтому
+    ``build`` копит записи в ``staged``, а ``commit`` переводит их в ``committed``.
+    ``build`` возвращает ``build_id`` из ``meta.extra["index_build_id"]`` (его задаёт
+    корпус) либо детерминированно выводит из ``IndexMeta``.
+    """
+
+    vector_store = "fake"
+    lexical_engine_version = "fake-bm25-1"
+
+    def __init__(self) -> None:
+        self.meta_by_product: dict[str, IndexMeta] = {}
+        self.chunks_by_product: dict[str, list[Chunk]] = {}
+        self.vectors_by_product: dict[str, list[list[float]]] = {}
+        self.build_ids: dict[str, str] = {}
+        self.staged: list[str] = []
+        self.committed: list[str] = []
+        self.commit_calls = 0
+
+    def build(
+        self,
+        chunks: Sequence[Chunk],
+        vectors: Sequence[Sequence[float]],
+        meta: IndexMeta,
+    ) -> str:
+        """Стадирует продукт-партицию и возвращает её ``build_id``."""
+        build_id = str(meta.extra.get("index_build_id") or self._derive_build_id(meta))
+        self.build_ids[meta.product_id] = build_id
+        self.meta_by_product[meta.product_id] = meta
+        self.chunks_by_product[meta.product_id] = list(chunks)
+        self.vectors_by_product[meta.product_id] = [list(v) for v in vectors]
+        self.staged.append(build_id)
+        return build_id
+
+    def commit(self) -> None:
+        """Фиксирует все стадированные сборки (порядок сохранён)."""
+        self.commit_calls += 1
+        self.committed.extend(self.staged)
+        self.staged.clear()
+
+    @staticmethod
+    def _derive_build_id(meta: IndexMeta) -> str:
+        """Детерминированный ``build_id`` из метаданных (fallback без ``extra``)."""
+        material = "\x1f".join(
+            (
+                meta.package,
+                meta.chunker_version,
+                meta.embed_model_id,
+                meta.snapshot_date,
+                meta.product_id,
+            )
+        )
+        return "ib_" + hashlib.sha256(material.encode("utf-8")).hexdigest()[:24]
+
+
+class FakeLexicalIndex:
+    """In-memory лексический индекс (``LexicalIndexPort``), продукт-скоупед (I17).
+
+    Документы задаются готовыми ``RetrievedChunk``. Скор — число токенов запроса,
+    встреченных в тексте чанка; при отсутствии совпадений берётся исходный ``score``
+    чанка (чтобы «немой» запрос всё же вернул детерминированный топ). Порядок — по
+    убыванию скора и ``chunk_id`` (R7), срез — ``top_k``.
+    """
+
+    def __init__(
+        self,
+        docs: Sequence[RetrievedChunk] | None = None,
+        engine_version: str = "fake-bm25-1",
+    ) -> None:
+        self.docs = list(docs or [])
+        self.engine_version = engine_version
+        self.calls: list[tuple[str, list[str], int]] = []
+
+    def add(self, *chunks: RetrievedChunk) -> None:
+        """Дописывает чанки в индекс (удобно для скриптового наполнения)."""
+        self.docs.extend(chunks)
+
+    def search(
+        self,
+        query: str,
+        product_ids: list[str],
+        top_k: int,
+        lang: str | None = None,
+    ) -> list[RetrievedChunk]:
+        """Продукт-скоупед поиск (I17): фильтр по ``product_ids`` + срез ``top_k``."""
+        self.calls.append((query, list(product_ids), top_k))
+        allowed = set(product_ids)
+        tokens = [tok for tok in str(query).casefold().split() if tok]
+        hits: list[RetrievedChunk] = []
+        for doc in self.docs:
+            if doc.product_id not in allowed:
+                continue
+            overlap = float(sum(1 for tok in tokens if tok in doc.text.casefold()))
+            score = overlap if overlap > 0.0 else float(doc.score)
+            hits.append(replace(doc, score=score))
+        hits.sort(key=lambda c: (-c.score, c.chunk_id))
+        return hits[:top_k]
+
+
+class FakeVectorIndex:
+    """In-memory векторный индекс (``VectorIndexPort``), продукт-скоупед (I17).
+
+    Вектор каждого чанка детерминированно выводится из ``chunk_id`` (как у
+    :class:`FakeEmbedder`), поэтому близость воспроизводима. Скор — косинус вектора
+    запроса и вектора чанка; без вектора запроса — ``0.0``.
+    """
+
+    def __init__(
+        self,
+        docs: Sequence[RetrievedChunk] | None = None,
+        build_id: str = "ib_fake",
+        dim: int = 4,
+    ) -> None:
+        self.docs = list(docs or [])
+        self.build_id = build_id
+        self.dim = dim
+        self._vectors: dict[str, list[float]] = {
+            doc.chunk_id: _hash_vector(doc.chunk_id, dim) for doc in self.docs
+        }
+
+    def search(self, q: VectorQuery) -> list[RetrievedChunk]:
+        """Продукт-скоупед поиск (I17) по косинусу; срез — ``q.top_k`` (R7 tie-break)."""
+        allowed = set(q.product_ids)
+        query = [float(x) for x in (q.vector or [])]
+        hits: list[RetrievedChunk] = []
+        for doc in self.docs:
+            if doc.product_id not in allowed:
+                continue
+            score = _cosine(query, self._vectors[doc.chunk_id])
+            hits.append(replace(doc, score=score))
+        hits.sort(key=lambda c: (-c.score, c.chunk_id))
+        return hits[: q.top_k]
+
+    def shard_ids(self, product_id: str) -> list[str]:
+        """Идентификаторы чанков партиции (детерминированная заглушка шардов)."""
+        return sorted(
+            {doc.chunk_id for doc in self.docs if doc.product_id == product_id}
+        )

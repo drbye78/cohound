@@ -1,0 +1,7 @@
+case_id: e2e
+frozen_at: 2026-06-01
+entries:
+  - product_id: p1
+    role_overlap: 1.0
+    selection_reason: "якорь"
+    anchor_relation: anchor

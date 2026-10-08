@@ -1,0 +1,2 @@
+param_id,title,module,group,importance,param_type,rule,absence_rule,role_binding,concept_terms,search_langs
+feature.alpha,Функция alpha,m1,grp1,Кр,fact,"граница зачёта alpha",explicit,role_r1,"{""ru"": [""альфа""], ""en"": [""alpha""]}",ru|en

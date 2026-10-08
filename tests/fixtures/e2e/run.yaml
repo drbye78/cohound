@@ -1,0 +1,12 @@
+case_id: e2e
+anchor: p1
+cohort: cohort_e2e
+products: [p1]
+package: e2e
+focus:
+  modules: [m1]
+  params: [feature.alpha]
+languages: [ru, en]
+snapshot_date: 2026-06-01
+mode: strict
+ranking_policy: capability_ranked
