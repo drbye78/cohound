@@ -74,6 +74,7 @@ from core.pipeline.evaluate import (
     EvaluationOutcome,
     evaluate_batch,
     evaluate_cell,
+    evaluate_phase,
     retrieve_for_cell,
     run_queries_for_cell,
 )
@@ -86,6 +87,7 @@ from core.pipeline.report import (
     Artifacts,
     CrossCycleDiffError,
     PublishBlockedError,
+    build_manifest,
     render_battle_card,
     render_diff,
     render_nda_questions,
@@ -137,6 +139,7 @@ from core.pipeline.serp_loop import (
     run_serp_loop,
     run_serp_round,
 )
+from core.pipeline.phases import IMPLEMENTED_PHASES, build_phases
 from core.pipeline.plan import RunPlan, derive_run_id, load_plan, plan
 from core.pipeline.registry import (
     registry_covered_params,
@@ -283,4 +286,9 @@ __all__ = [
     "run_serp_round",
     "invalidate_affected",
     "run_serp_loop",
+    # phases (интеграция Ш1–Ш9, composition root)
+    "build_phases",
+    "IMPLEMENTED_PHASES",
+    "evaluate_phase",
+    "build_manifest",
 ]
