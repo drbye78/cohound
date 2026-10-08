@@ -1,9 +1,11 @@
 # coHound — архитектура: Итерация 0 — мастер-обзор
 
 **Документ:** `docs/architecture/00-overview.md`
-**Статус:** черновик проектирования (итерация 0 из 4 + ревью-гейт)
+**Статус:** принято (ревью-гейт @oracle пройден 2026-10-08; правки K1–K7/S1–S13 интегрированы)
 **Источник истины:** `cohound-spec-v2.md` (регламент v2.0). При расхождении — регламент главнее;
 этот документ не вводит новой методологии, только её архитектурную развёртку.
+**Смежное:** `05-dependency-stack.md` (реестр пакетов/лицензий/пинов), `06-implementation-strategy.md`
+(стратегия и план реализации).
 
 ---
 
@@ -15,7 +17,8 @@
 
 **В рамках этого документа:** слои, компоненты, зависимости, сквозные механизмы, план итераций.
 **Вне рамок:** конкретные алгоритмы ретривала/чанкинга (итерация 2), схема CLI-флагов (итерация 3),
-выбор библиотек (итерация 3), содержание ADR (итерация 4).
+содержание ADR (итерация 4). **Выбор библиотек вынесен в `05-dependency-stack.md`** (снимок
+версий/лицензий, проверки совместимости V1–V5).
 
 ---
 
@@ -131,7 +134,7 @@ flowchart LR
 | `ports/lexical_index.py` | BM25 поиск | Симметрия профиля (I16) |
 | `ports/search.py` | Внешний поиск как источник контента | Логирование в `search_log` (I23) |
 | `ports/crawler.py` | Краул страниц | Возвращает сырые байты (retention) |
-| `ports/extractor.py` | HTML/PDF → нормализованный текст | `extractor_version` |
+| `ports/extractor.py` | HTML / PDF / Office (docx/pptx/xlsx) → markdown-текст | `extractor_version` |
 | `ports/chunker.py` | Текст → чанки с `heading_path` | `chunker_version` |
 | `ports/embedder.py` | Текст → вектор (батч; локальная модель) | Модель не покидает контур; `embed_model_id` |
 | `ports/index_builder.py` | Запись `.npy`-шардов и tantivy-индекса | `build()`/`commit()`; иммутабельная сборка (I17) |
@@ -143,8 +146,9 @@ flowchart LR
 
 `adapters/vector_npy.py` (NpyVectorIndex, продукт-шарды) · `adapters/lexical_tantivy.py` ·
 `adapters/llm_local.py` (vLLM/SGLang) · `adapters/search_yandex.py` · `adapters/search_glm.py` ·
-`adapters/crawl_scrapy.py` · `adapters/extract_html.py`/`extract_document.py` · `adapters/chunker_*.py` ·
-`store/sqlite.py` · `store/paths.py`.
+`adapters/crawl_scrapy.py` · `adapters/extract_html.py` (trafilatura) / `adapters/extract_document.py`
+(docling: PDF + Office docx/pptx/xlsx, лёгкий путь без torch для Office) · `adapters/chunker_*.py` ·
+`store/sqlite.py` · `store/paths.py`. Стек/пины/лицензии — `05-dependency-stack.md`.
 
 **Адаптеры-писатели индекса:** `adapters/index_npy.py` и `adapters/index_tantivy.py` реализуют
 `IndexBuilderPort` (запись `.npy`-шардов и tantivy, `build()`/`commit()`), `adapters/embed_local.py` —
@@ -226,7 +230,9 @@ packages/{case_id}/, registries/, passports/, runs/, index_store/, corpus_raw/, 
 | **2** | Детальный дизайн подсистем: конвейер, ретривал/индекс, LLM-контуры, реестры, отчёты | `02-subsystems.md` | — |
 | **3** | Данные/хранилища, версионирование, конфигурация, CLI/UX | `03-data-config-cli.md` | — |
 | **4** | Надёжность, наблюдаемость, CI, ADR-реестр, сверка с регламентом | `04-reliability-adr.md` | — |
-| **R** | Независимое ревью архитектуры @oracle + интеграция | правки | ревью-гейт |
+| **R** | Независимое ревью архитектуры @oracle + интеграция | правки | ✅ пройден (2026-10-08) |
+| **5** | Реестр зависимостей: пакеты, лицензии, пины, проверки V1–V5 | `05-dependency-stack.md` | — |
+| **6** | Стратегия production-grade реализации + детальный план | `06-implementation-strategy.md` | — |
 
 ### 8.1. Вертикальный срез M0 (что реально в каркасе)
 
@@ -250,10 +256,10 @@ M0 (по §14 регламента) должен давать **сквозной
 - 0001–0011 — accepted: порты/адаптеры (hexagonal) vs монолит; продукт-партиция + NpyVectorIndex;
   LLM без `tools`; контент только через Ш5; единый cut-off K; реестры как данные; SQLite+WAL;
   иммутабельные сборки; кэш внешних вызовов; `failed` как состояние ячейки; человеческие гейты.
-- 0012 — proposed: расщепление `core/schemas.py`/`core/db.py` на слои.
-- 0013–0017 — proposed: гранулярность индексной сборки и provenance ячеек; SERP-петля vs
-  иммутабельность (append-only раунды); политика ранжирования/демотирования (requested vs computed);
-  глобальный content-addressed кэш для R7; контракт derived-evidence наследования/сателлитов.
+- 0012 — accepted (план): расщепление `core/schemas.py`/`core/db.py` на слои (реализация — M0).
+- 0013–0017 — accepted (ревью-гейт): гранулярность индексной сборки и provenance ячеек; SERP-петля
+  vs иммутабельность (append-only раунды); политика ранжирования/демотирования (requested vs
+  computed); глобальный content-addressed кэш для R7; контракт derived-evidence наследования/сателлитов.
 
 **Открытые вопросы (для итераций):**
 - Гранулярность транзакций SQLite при массовой записи ячеек (итерация 3).
@@ -269,6 +275,7 @@ M0 (по §14 регламента) должен давать **сквозной
 |---|---|
 | §1.3 нейтральность | §3 слои, §7 структура |
 | §3.1 компоненты | §4 карта компонентов |
+| §3.2 стек | `05-dependency-stack.md` |
 | §4.4 БД | §4.4 адаптеры (store), итерация 3 |
 | §5 конвейер | §5 поток данных |
 | §7 LLM-контуры | §4.3 порт LLM, §5 петля SERP |

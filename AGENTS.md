@@ -78,6 +78,8 @@ python3 -c "import sys; sys.path.insert(0,'.'); from core.db import connect; c=c
 `pytest` пока не установлен — для CI по §11.6 его нужно добавить.
 Выбор внешних пакетов, лицензии и запреты — `docs/architecture/05-dependency-stack.md`
 (реестр решений; LangChain/LlamaIndex и все hosted-парсеры отклонены).
+Стратегия и детальный план реализации (потоки W1–W12, майлстоуны, DoD) —
+`docs/architecture/06-implementation-strategy.md`.
 
 ## Конвенции кода
 

@@ -1,9 +1,10 @@
 # coHound — архитектура: Итерация 3 — данные, конфигурация, CLI
 
 **Документ:** `docs/architecture/03-data-config-cli.md`
-**Статус:** черновик проектирования (итерация 3 из 4 + ревью-гейт)
+**Статус:** принято (ревью-гейт @oracle пройден 2026-10-08)
 **Опирается на:** `00-overview.md`, `01-modules-and-contracts.md`, `02-subsystems.md`
 **Источник истины:** `cohound-spec-v2.md`
+**Смежное:** `05-dependency-stack.md` (стек/пины), `06-implementation-strategy.md` (план).
 
 Детальный дизайн: (A) раскладка на диске, (B) операционное хранилище и транзакции,
 (C) версионирование, (D) конфигурация и входы, (E) CLI и UX, (F) миграция текущего кода.
@@ -17,6 +18,8 @@
 ```
 repo/
   cohound-spec-v2.md
+  pyproject.toml             # ядро + extras (стек/пины — 05-dependency-stack.md)
+  uv.lock                    # (планируется) зафиксированный резолв для воспроизводимости
   core/                      # пакет (см. итерацию 1)
   packages/{case_id}/
     package.yaml             # §4.2

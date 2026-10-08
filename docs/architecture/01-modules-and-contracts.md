@@ -1,9 +1,10 @@
 # coHound — архитектура: Итерация 1 — модули и контракты
 
 **Документ:** `docs/architecture/01-modules-and-contracts.md`
-**Статус:** черновик проектирования (итерация 1 из 4 + ревью-гейт)
+**Статус:** принято (ревью-гейт @oracle пройден 2026-10-08)
 **Опирается на:** `00-overview.md` (слои, драйверы D1–D11)
 **Источник истины:** `cohound-spec-v2.md` (регламент v2.0)
+**Смежное:** `05-dependency-stack.md` (пины/лицензии), `06-implementation-strategy.md` (план).
 
 Задача итерации — зафиксировать **границы модулей**, **контракты портов** (типы данных на стыках)
 и **правила зависимостей**. Алгоритмы — итерация 2; конфиг/CLI — итерация 3.
@@ -242,8 +243,18 @@ class StorePort(Protocol):       # §4.4
 ```
 
 `RawPage(url, bytes, fetched_at, render_mode, lang)` — retention-единица.
-`ExtractedDoc(url, text, structure, extractor_version)`.
+`ExtractedDoc(text, extractor_version, content_hash, page_count, error)` — нормализованный документ;
+`error` — грациозная деградация адаптера (пустой `text` вместо исключения).
 `Chunk(chunk_no, text, heading_path, context_prefix, content_hash)`.
+
+**Дрейф контракта экстрактора (актуализация).** Реализованный адаптер
+(`adapters/extract_document.py`, docling) предоставляет `extract_bytes(content: bytes, filename: str)`
+и возвращает `ExtractedDoc(text, content_hash, extractor_version, page_count, error)`: формат
+определяется расширением `filename`, а не полем `structure`. Порт-контракт `extract(page: RawPage)`
+остаётся целевым (Page несёт `url`+`bytes`; формат выводится из `url`/content-type). Адаптер
+приводится к порту тонкой обёрткой при реализации Ш5; `content_hash` считает адаптер (§10/I19).
+`SUPPORTED_FORMATS` (pdf/docx/pptx/xlsx) — единственный реестр форматов; HTML — отдельный
+`extract_html.py` (trafilatura). Поддержка Office опирается на `docling-slim[format-office]` без torch.
 
 **Единая операционная БД (S6).** Контракт `StorePort` описывает **одну** SQLite-БД прогона
 (`runs/{run_id}/cohound.db`); вариант «отдельная корпусная БД» отвергнут — при разнесении
@@ -374,6 +385,7 @@ JSONPath-маппинг полей) и реализует `RegistryFetcherPort`.
 | SERP-провайдера | новый `adapters/search_*.py` + YAML | pipeline |
 | Экстрактор (docling→другой) | новый `adapters/extract_*.py` | corpus |
 | Добавить формат (docx/pptx/xlsx/…) | реестр `SUPPORTED_FORMATS` в `adapters/extract_document.py` | corpus |
+| Экстрактор HTML (trafilatura→другой) | новый `adapters/extract_html.py` | corpus |
 | Хранилище (SQLite→PG) | новый `store/*.py` | domain |
 
 ---
@@ -384,10 +396,11 @@ JSONPath-маппинг полей) и реализует `RegistryFetcherPort`.
 |---|---|---|
 | `core/schemas.py` (монолит) | `domain/enums.py` + `domain/models.py` + `domain/invariants.py` + `domain/r2.py` | расщепить |
 | `core/db.py` DDL/триггеры | `store/sqlite.py` (DDL) + `ports/store.py` (контракт) | разделить данные/интерфейс |
-| `tests/selfcheck.py` | `tests/domain/*`, `tests/store/*` | разбить по слоям |
+| `tests/selfcheck.py` | `tests/domain/*`, `tests/store/*` | разбить по слоям (обёртка selfcheck остаётся) |
 
-Миграция — в итерации 3 (когда конфиг/CLI определены), чтобы не ломать текущий selfcheck.
-До этого `core/schemas.py` и `core/db.py` остаются рабочими.
+Последовательность миграции и её привязка к майлстоунам — `06-implementation-strategy.md` (§работа W1).
+Принцип: не ломать текущий selfcheck — расщепление идёт с transitional re-export-шимами, selfcheck
+остаётся зелёным на каждом шаге. До завершения расщепления `core/schemas.py` и `core/db.py` рабочие.
 
 ---
 
@@ -396,6 +409,7 @@ JSONPath-маппинг полей) и реализует `RegistryFetcherPort`.
 | Регламент | Покрытие |
 |---|---|
 | §3.1 компоненты | §2–§4 |
+| §3.2 стек | `05-dependency-stack.md` |
 | §4.1 словари | §2.1 |
 | §7 LLM-контуры | §3.1, §3.4 |
 | §11.6 CI | §1 (проверка импортов), §6 |
