@@ -394,6 +394,9 @@ def main() -> int:
     section("Ревью preliminary (I6/I7) — W9")
     check("review: очередь + human-only promote без фабрикации статуса", lambda: _review_human_only())
 
+    section("CLI-поверхность (03 §D.6) — T10.4")
+    check("commands: полный набор resolve/plan/run/discover/review/promote/…", lambda: _cli_surface())
+
     print(f"\n{CHECKS - len(FAILURES)}/{CHECKS} проверок пройдено")
     if FAILURES:
         print("\nПровалы:")
@@ -2129,6 +2132,33 @@ def _review_human_only() -> None:
                        actor="human-1", status=Status.UNKNOWN)
         if cell.reviewed_by != "human-1" or cell.state is not CellState.EVALUATED:
             raise AssertionError("promote обязан выставить reviewed_by и state=evaluated")
+
+
+def _cli_surface() -> None:
+    """CLI-поверхность (03 §D.6): присутствуют все команды; search-адаптеры зарегистрированы."""
+    import importlib as _il
+
+    from core.ports.search import SearchAdapterPort
+
+    main = _il.import_module("core.cli.main")
+    wiring = _il.import_module("core.cli.wiring")
+    parser = main.build_parser()
+    subparsers = next(
+        action for action in parser._actions if hasattr(action, "choices") and isinstance(action.choices, dict)
+    )
+    commands = set(subparsers.choices)
+    required = {
+        "resolve", "plan", "run", "discover", "review", "promote",
+        "report", "golden", "sensitivity", "diff", "deploy-check",
+    }
+    missing = required - commands
+    if missing:
+        raise AssertionError(f"CLI-команды отсутствуют: {sorted(missing)}")
+    if not getattr(wiring, "SUPPORTED_SEARCH_ADAPTERS", ()):
+        raise AssertionError("SUPPORTED_SEARCH_ADAPTERS пуст")
+    adapter = wiring.build_search_adapter(wiring.SUPPORTED_SEARCH_ADAPTERS[0])
+    if not isinstance(adapter, SearchAdapterPort):
+        raise AssertionError("build_search_adapter обязан вернуть SearchAdapterPort")
 
 
 if __name__ == "__main__":
