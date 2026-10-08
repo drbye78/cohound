@@ -109,4 +109,4 @@ python_files = ["selfcheck.py", "test_*.py"]
 
 [tool.setuptools]
 # Плоская раскладка: пакет core/ в корне репозитория (§3.3 регламента).
-packages = ["core", "core.util", "core.adapters", "core.ports"]
+packages = ["core", "core.util", "core.adapters", "core.ports", "core.domain"]

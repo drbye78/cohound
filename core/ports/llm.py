@@ -13,7 +13,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
-from core.schemas import LLMCellOutput
+from core.domain import LLMCellOutput
 
 
 @dataclass(frozen=True)

@@ -12,8 +12,8 @@ from __future__ import annotations
 
 from typing import Iterator, Protocol, runtime_checkable
 
+from core.domain import Cell, CellEvidence, RunConfig
 from core.ports.types import Chunk
-from core.schemas import Cell, CellEvidence, RunConfig
 
 
 @runtime_checkable
