@@ -28,21 +28,22 @@ v2.0). Это источник истины по семантике, инвар�
 
 ```
 cohound-spec-v2.md            # регламент v2.0 (источник истины)
+THIRD_PARTY_NOTICES.md        # лицензии/происхождение скопированного кода
 docs/status-dictionary.yaml   # словарь статусов/перечислений + Р-2 (§4.1)
 core/                         # ядро: категорийно-НЕЙТРАЛЬНЫЙ код (грепп-тест §1.3)
   schemas.py                  # (текущий монолит) Pydantic-схемы §4.2/4.3/4.5/7 + инварианты
   db.py                       # (текущий) SQLite DDL §4.4 + триггеры инвариантов
+  util/                       # text_utils (RU/EN), security (SSRF/slug), fusion (RRF) — см. NOTICES
+  adapters/                   # chunker_markdown (heading_path), extract_pdf (docling) — см. NOTICES
   # целевое расщепление (docs/architecture/01-modules-and-contracts.md):
   domain/                     # модели, enums, invariants, scoring, r2, anchors (чистый Python, без I/O)
   ports/                      # Protocol-интерфейсы: LLM, индексы, embedder, index_builder, search,
                               #   crawler, extractor, chunker, registry, store, gate_store
   pipeline/                   # сценарии Ш1–Ш9, гейты G1–G4, эксперименты (use-cases)
-  adapters/                   # реализации портов: npy/tantivy, LLM, SERP, краул, экстракция, реестры
   store/                      # SQLite-хранилище + paths
   config/                     # загрузка run.yaml/пакетов
   cli/                        # единственная точка сборки зависимостей (wiring)
-  util/                       # ids, hashing, logging, clock
-tests/selfcheck.py            # self-contained проверка фундамента
+tests/selfcheck.py            # self-contained проверка фундамента (33 проверки)
 packages/{case_id}/           # (планируется) пакеты категорий: package/catalog/baselines/cohort/golden
 registries/ · docs/           # словари, регламент, absence-правила
 passports/{product_id}/       # (планируется) паспорта продуктов
@@ -84,6 +85,9 @@ python3 -c "import sys; sys.path.insert(0,'.'); from core.db import connect; c=c
 - **`StrEnum`** для всех перечислений; источник истины — `docs/status-dictionary.yaml`,
   схемы — его зеркало. Это относится и к новым перечислениям: `ranking_policy`, `gate`,
   `capability_policy`, `unknown_policy` (`docs/status-dictionary.yaml` — единственный источник).
+- **Скопированный сторонний код** — только с записью в `THIRD_PARTY_NOTICES.md` и сохранением
+  лицензии/copyright. Переносим **копированием**, а не зависимостью на внешний проект.
+  Не копировать код без явной лицензии (напр. из `../gtm` — права не определены).
 - Комментарии и докстринги — на русском (как в регламенте), идентификаторы — на английском.
 
 ## Инварианты, которые легко сломать (кратко)

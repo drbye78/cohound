@@ -294,6 +294,13 @@ def main() -> int:
         ),
     )
 
+    section("Скопированные утилиты/адаптеры (gag5, MIT) — §3.2/§5")
+    check("text_utils: детект RU, ё→е, разбиение предложений", lambda: _util_text())
+    check("security: SSRF-блок и санитизация", lambda: _util_security())
+    check("fusion: RRF дедуп по chunk_id + детерминизм", lambda: _util_fusion())
+    check("MarkdownChunker: heading_path иерархичен (I17/§3.2)", lambda: _chunker())
+    check("DoclingPdfExtractor: грациозная деградация", lambda: _pdf_extractor())
+
     print(f"\n{CHECKS - len(FAILURES)}/{CHECKS} проверок пройдено")
     if FAILURES:
         print("\nПровалы:")
@@ -307,6 +314,73 @@ def main() -> int:
 def _assert(cond: bool) -> None:
     if not cond:
         raise AssertionError
+
+
+def _util_text() -> None:
+    from core.util import text_utils as t
+
+    _assert(t.detect_language("Это предложение на русском языке") is t.TextLanguage.RUSSIAN)
+    _assert(t.detect_language("This is an english sentence") is t.TextLanguage.ENGLISH)
+    _assert(t.normalize_cyrillic("ёж") == "еж")
+    _assert(t.split_sentences("Привет. Как дела? Хорошо!") == ["Привет.", "Как дела?", "Хорошо!"])
+
+
+def _util_security() -> None:
+    from core.util import security as s
+
+    _assert(s.validate_url("https://example.com/docs") == "https://example.com/docs")
+    for bad in ("http://127.0.0.1/x", "http://169.254.169.254/latest", "ftp://x"):
+        try:
+            s.validate_url(bad)
+            raise AssertionError(f"не отклонён опасный URL: {bad}")
+        except ValueError:
+            pass
+    try:
+        s.validate_url("https://evil.com", allowed_domain="example.com")
+        raise AssertionError("домен вне allowlist не отклонён")
+    except ValueError:
+        pass
+    _assert(s.sanitize_filename("../../etc/passwd") == "etcpasswd")
+    _assert(s.sanitize_slug("Platform V Pangolin!") == "Platform_V_Pangolin")
+
+
+def _util_fusion() -> None:
+    from core.util import fusion as f
+
+    bm25 = [{"chunk_id": "c1", "content": "a", "score": 0.9},
+            {"chunk_id": "c2", "content": "b", "score": 0.5}]
+    dense = [{"chunk_id": "c2", "content": "b", "score": 0.8},
+             {"chunk_id": "c3", "content": "c", "score": 0.7}]
+    res = f.rrf_fuse([bm25, dense], rrf_k=60)
+    # c2 присутствует в обоих списках → первый; дедуп по chunk_id даёт 3 записи.
+    _assert(res[0]["content"] == "b")
+    _assert(len(res) == 3)
+    res2 = f.rrf_fuse([bm25, dense], rrf_k=60)
+    _assert([r["content"] for r in res] == [r["content"] for r in res2])  # детерминизм
+
+
+def _chunker() -> None:
+    from core.adapters.chunker_markdown import MarkdownChunker
+
+    md = "# H1\nтело\n\n## H2\nтело2\n\n### H3\nтело3\n"
+    chunks = MarkdownChunker(chunk_size=100, chunk_overlap=20).chunk("doc1", md)
+    _assert(chunks[0].heading_path == "H1")
+    _assert(chunks[1].heading_path == "H1 > H2")
+    _assert(chunks[2].heading_path == "H1 > H2 > H3")
+    _assert([c.chunk_id for c in chunks] == ["doc1#0", "doc1#1", "doc1#2"])
+    _assert(all(c.context_prefix == c.heading_path for c in chunks))
+    _assert(all(len(c.content_hash) == 16 for c in chunks))
+
+
+def _pdf_extractor() -> None:
+    from core.adapters.extract_pdf import DoclingPdfExtractor
+
+    ex = DoclingPdfExtractor()
+    # При недоступном docling адаптер деградирует, а не падает.
+    res = ex.extract_bytes(b"%PDF-1.4 not really a pdf")
+    _assert(res.text == "")
+    _assert(res.error is not None)
+    _assert(res.extractor_version == DoclingPdfExtractor.version)
 
 
 def _db_smoke() -> None:
