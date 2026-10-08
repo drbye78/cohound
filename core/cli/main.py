@@ -75,6 +75,7 @@ from core.config import (
 from core.config.deploy import DeployConfig, is_split, load_deploy_config
 from core.domain.enums import Status
 from core.pipeline import (
+    GATE_PHASES,
     PHASES,
     Ports,
     RunReport,
@@ -88,10 +89,11 @@ from core.pipeline import (
 from core.pipeline.compute import compute
 from core.pipeline.lint import lint_run_inputs
 from core.pipeline.normalize import RunInputs, load_inputs
+from core.pipeline.observability import instrument_phases, write_run_metrics
 from core.pipeline.plan import RunPlan, derive_run_id, plan as build_plan
 from core.pipeline.report import CrossCycleDiffError, render_diff, write_reports
 from core.pipeline.review import PromotionResult, ReviewError, ReviewItem
-from core.pipeline.runner import Clock, PhaseFn
+from core.pipeline.runner import Clock, PhaseFn, _gate_phase
 from core.ports.gateway import ContentGateway
 from core.ports.search import SearchAdapterPort
 
@@ -375,7 +377,21 @@ def cmd_run(args: argparse.Namespace) -> int:
     run_plan = _resolve_plan(args, inputs, run_id)
     ports = _resolve_ports(args, deploy_config)
     phases = _resolve_phases(args, inputs=inputs, plan=run_plan, ports=ports)
+    # Наблюдаемость (W12/T12.1, 04 §B.1/§B.2): оборачиваем фазы логом+таймингом.
+    # Гейты — дефолтные замыкания Runner; оборачиваем и их, чтобы §B.1-лог покрывал
+    # точку остановки (g1 без человеческого решения тоже оставляет logs/g1.jsonl).
+    clock = getattr(args, "clock", None)
+    instrumentable: dict[str, PhaseFn] = dict(phases)
+    for gate_name, gate in GATE_PHASES.items():
+        instrumentable.setdefault(gate_name, _gate_phase(gate_name, gate))
+    instrumentation = instrument_phases(
+        instrumentable,
+        run_id=run_id,
+        logs_root=args.runs_dir,
+        clock=clock,
+    )
 
+    instrumentation_errors: list[str] = []
     store = build_store(db_path, profile=args.profile)
     try:
         _ensure_run(store, run_id, inputs)
@@ -383,16 +399,32 @@ def cmd_run(args: argparse.Namespace) -> int:
             store,
             profile=args.profile,
             ports=ports,
-            phases=phases,
-            clock=getattr(args, "clock", None),
+            phases=instrumentation.phases,
+            clock=clock,
         )
         if args.reset:
             runner.reset(run_id)
         run_report = runner.run(run_id, until=args.until)
+        # Метрики (04 §B.2) пишутся ДО закрытия store (источник ячеек) и независимо от
+        # остановки на гейте — отражают реально отработавшие фазы. Сбой наблюдаемости
+        # фиксируется, но не подменяет код возврата прогона.
+        try:
+            write_run_metrics(
+                run_id=run_id,
+                out_dir=args.runs_dir,
+                durations=instrumentation.durations,
+                store=store,
+            )
+        except Exception as exc:  # noqa: BLE001 — наблюдаемость не роняет прогон
+            instrumentation_errors.append(
+                f"metrics: {type(exc).__name__}: {_concise(exc)}"
+            )
     finally:
         store.close()
 
     payload = _run_report_payload(run_id, run_report, db_path)
+    if instrumentation_errors:
+        payload["instrumentation_errors"] = instrumentation_errors
     if deploy_fields:
         payload["deploy"] = deploy_fields
     if args.json:
