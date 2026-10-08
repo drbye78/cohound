@@ -2,7 +2,8 @@
 
 Проверяются: реальный BM25-поиск на tantivy, RU-стемминг (запрос «экспорта» находит
 «Экспорт»), EN-поле, продукт-скоупед (I17), детерминизм/tie-break (R7), identifier-профиль
-(точное совпадение с учётом регистра), провенанс ``RetrievedChunk``, контракт порта,
+(точное совпадение с учётом регистра), ngram-профиль (подстрочный матч фрагмента
+идентификатора/слова, двойной профиль T8.3), провенанс ``RetrievedChunk``, контракт порта,
 ленивый импорт/guard отсутствия зависимости и валидация входа. Фикстуры категорийно
 нейтральны (§1.3). Тесты, требующие tantivy, помечены ``requires_tantivy`` и
 пропускаются при отсутствии зависимости.
@@ -10,7 +11,9 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
+from pathlib import Path
 
 import pytest
 
@@ -314,3 +317,177 @@ def test_missing_dependency_guard(monkeypatch: pytest.MonkeyPatch) -> None:
 @requires_tantivy
 def test_engine_version_reports_native_version() -> None:
     assert TantivyLexicalIndex().engine_version != "tantivy-unknown"
+
+
+# ---------------------------------------------------------------------------
+# Ngram-профиль (T8.3, двойной профиль)
+# ---------------------------------------------------------------------------
+
+#: Записи с идентификатором (пунктуация/регистр) и обычным словом для ngram-проверок.
+_NGRAM_DOCS = [
+    LexicalChunk(
+        chunk_id="n1",
+        product_id=PRODUCT_A,
+        text="see API-2024_X endpoint",
+        heading_path="Section > API",
+        content_hash="hash-n1",
+        build_id="build-ng",
+    ),
+    LexicalChunk(
+        chunk_id="n2",
+        product_id=PRODUCT_A,
+        text="перехват сетевого трафика",
+        content_hash="hash-n2",
+        build_id="build-ng",
+    ),
+    LexicalChunk(
+        chunk_id="n3",
+        product_id=PRODUCT_B,
+        text="export of data to external file",
+        content_hash="hash-n3",
+        build_id="build-ng",
+    ),
+]
+
+
+def test_profiles_include_ngram() -> None:
+    assert "ngram" in lexical_tantivy._PROFILES
+
+
+def test_ngram_bounds_are_sane() -> None:
+    assert 1 <= lexical_tantivy._NGRAM_MIN <= lexical_tantivy._NGRAM_MAX
+
+
+def test_ngram_profile_accepted_by_constructor() -> None:
+    index = TantivyLexicalIndex(profile="ngram")
+    try:
+        assert index.profile == "ngram"
+    finally:
+        index.close()
+
+
+def test_ngram_profile_normalizes_case_and_whitespace() -> None:
+    index = TantivyLexicalIndex(profile="  NGRAM ")
+    try:
+        assert index.profile == "ngram"
+    finally:
+        index.close()
+
+
+@pytest.mark.parametrize("bad", ["ngramm", "grams", "fuzzy", ""])
+def test_unknown_profile_is_still_rejected(bad: str) -> None:
+    with pytest.raises(ValueError):
+        TantivyLexicalIndex(profile=bad)
+
+
+def test_stemmed_remains_default_profile() -> None:
+    index = TantivyLexicalIndex()
+    try:
+        assert index.profile == "stemmed"
+    finally:
+        index.close()
+
+
+@requires_tantivy
+def test_ngram_matches_partial_identifier() -> None:
+    with _index(_NGRAM_DOCS, profile="ngram") as index:
+        partial = index.search("i-202", [PRODUCT_A], top_k=5)
+        exact = index.search("API-2024_X", [PRODUCT_A], top_k=5)
+    assert [c.chunk_id for c in partial] == ["n1"]
+    assert [c.chunk_id for c in exact] == ["n1"]
+
+
+@requires_tantivy
+def test_ngram_finds_substring_inside_token() -> None:
+    with _index(_NGRAM_DOCS, profile="ngram") as index:
+        hits = index.search("endpo", [PRODUCT_A], top_k=5)
+    assert [c.chunk_id for c in hits] == ["n1"]
+
+
+@requires_tantivy
+def test_ngram_query_shorter_than_min_gram_is_empty() -> None:
+    """Честная граница профиля: нет n-грамм короче ``_NGRAM_MIN`` → пустой результат."""
+    with _index(_NGRAM_DOCS, profile="ngram") as index:
+        assert index.search("xy", [PRODUCT_A], top_k=5) == []
+
+
+@requires_tantivy
+def test_search_ngram_overrides_stemmed_profile() -> None:
+    with _index(_NGRAM_DOCS, profile="stemmed") as index:
+        stemmed = index.search("i-202", [PRODUCT_A, PRODUCT_B], top_k=5)
+        via_ngram = index.search_ngram("i-202", [PRODUCT_A, PRODUCT_B], top_k=5)
+    assert stemmed == []  # стеммированный парсер не сближает подстроку
+    assert [c.chunk_id for c in via_ngram] == ["n1"]
+
+
+@requires_tantivy
+def test_ngram_provenance_fields_preserved() -> None:
+    with _index(_NGRAM_DOCS, profile="ngram") as index:
+        hits = index.search("endpo", [PRODUCT_A], top_k=5)
+    assert hits
+    top = hits[0]
+    assert top.chunk_id == "n1"
+    assert top.product_id == PRODUCT_A
+    assert top.text == "see API-2024_X endpoint"
+    assert top.heading_path == "Section > API"
+    assert top.content_hash == "hash-n1"
+    assert top.build_id == "build-ng"
+    assert isinstance(top.score, float) and top.score > 0.0
+
+
+@requires_tantivy
+def test_ngram_product_scope_excludes_other_products() -> None:
+    with _index(_NGRAM_DOCS, profile="ngram") as index:
+        other = index.search("endpo", [PRODUCT_B], top_k=10)
+        own = index.search("endpo", [PRODUCT_A], top_k=10)
+    assert other == []
+    assert [c.chunk_id for c in own] == ["n1"]
+
+
+@requires_tantivy
+def test_ngram_empty_product_ids_return_nothing() -> None:
+    with _index(_NGRAM_DOCS, profile="ngram") as index:
+        assert index.search("endpo", [], top_k=10) == []
+
+
+@requires_tantivy
+def test_ngram_is_deterministic() -> None:
+    with _index(_NGRAM_DOCS, profile="ngram") as index:
+        first = [c.chunk_id for c in index.search("2024", [PRODUCT_A, PRODUCT_B], top_k=5)]
+        second = [c.chunk_id for c in index.search("2024", [PRODUCT_A, PRODUCT_B], top_k=5)]
+    assert first == second == ["n1"]
+
+
+@requires_tantivy
+def test_ngram_port_conformance() -> None:
+    index = TantivyLexicalIndex(profile="ngram")
+    try:
+        assert isinstance(index, LexicalIndexPort)
+        assert index.engine_version.startswith("tantivy-")
+    finally:
+        index.close()
+
+
+def test_ngram_missing_dependency_guard(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(lexical_tantivy, "tantivy_available", lambda: False)
+    index = TantivyLexicalIndex(profile="ngram")
+    try:
+        assert index.available is False
+        with pytest.raises(LexicalIndexUnavailable):
+            index.index(
+                [{"chunk_id": "n1", "product_id": PRODUCT_A, "text": "endpoint"}]
+            )
+    finally:
+        index.close()
+
+
+# ---------------------------------------------------------------------------
+# Нейтральность (§1.3)
+# ---------------------------------------------------------------------------
+
+
+def test_module_is_category_neutral() -> None:
+    """Исходник адаптера не содержит предметных/вендорских терминов (§1.3)."""
+    source = Path(lexical_tantivy.__file__).read_text(encoding="utf-8")
+    forbidden = re.compile(r"postgres|pangolin|sber|сбер|copywala|платформа", re.IGNORECASE)
+    assert forbidden.search(source) is None

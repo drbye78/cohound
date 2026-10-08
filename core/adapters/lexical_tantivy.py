@@ -12,16 +12,23 @@ tantivy 0.26).
 * ``body_stem_en`` — EN-анализатор: lowercase → english stemmer → english stopword;
 * ``body_identifier`` — identifier-профиль: whitespace-токенизация **без** lowercase
   и стемминга, поэтому точные идентификаторы (``API-2024_X``) различают регистр и
-  сохраняют пунктуацию/подчёркивания.
+  сохраняют пунктуацию/подчёркивания;
+* ``body_ngram`` — ngram-профиль: символьные n-граммы (``Tokenizer.ngram``,
+  ``min_gram=3``, ``max_gram=3``) по lowercase-тексту, для fuzzy/подстрочного
+  совпадения по фрагменту идентификатора (``"2024"`` находит ``API-2024_X``).
 
 Профиль выбирается параметром ``profile`` конструктора: ``"stemmed"`` (по умолчанию,
-RU/EN) либо ``"identifier"`` (псевдоним ``"raw"``). Метод :meth:`search_identifier`
-позволяет выполнить identifier-поиск независимо от выбранного профиля.
+RU/EN), ``"identifier"`` (псевдоним ``"raw"``) либо ``"ngram"``. Методы
+:meth:`search_identifier`/:meth:`search_ngram` позволяют выполнить поиск по
+соответствующему профилю независимо от выбранного при конструировании.
 
-**TODO (ngram).** Полный ngram-профиль (``Tokenizer.ngram``) для fuzzy-совпадений по
-идентификаторам здесь намеренно не реализован: он требует отдельной настройки
-min/max gram и абляции R9/R10. Текущий identifier-профиль уже даёт точное совпадение
-токена без стемминга — расширение до ngram оформляется отдельной задачей.
+**Границы ngram-профиля (честно).** Это **не** лексический fuzzy по расстоянию
+редактирования (опечатки/Левенштейн) и не ngram-per-token: ``Tokenizer.ngram`` в
+tantivy 0.26 нарезает n-граммы по всему тексту поля, включая пробелы и пунктуацию.
+Профиль даёт подстрочный матч по общим n-граммам, поэтому, как и любой ngram-поиск,
+может давать паразитные совпадения по общим граммам; короткие запросы короче
+``min_gram`` не находят ничего. Параметры min/max gram зафиксированы детерминированно;
+их абляция — отдельная задача R9/R10.
 
 **Продукт-скоупед (I17).** Поиск ограничен переданными ``product_ids``: и на уровне
 запроса (term-set по ``product_id``), и защитной пост-фильтрацией. Пустой список
@@ -63,12 +70,19 @@ FIELD_PRODUCT = "product_id"
 FIELD_STEM_RU = "body_stem_ru"
 FIELD_STEM_EN = "body_stem_en"
 FIELD_IDENTIFIER = "body_identifier"
+FIELD_NGRAM = "body_ngram"
 
 _RU_TOKENIZER = "cohound_ru"
 _EN_TOKENIZER = "cohound_en"
+_NGRAM_TOKENIZER = "cohound_ngram"
+
+#: Границы n-грамм ngram-профиля (символы). Фиксированы детерминированно; триграмма —
+#: компромисс между подстрочной чувствительностью и объёмом инвертированного индекса.
+_NGRAM_MIN = 3
+_NGRAM_MAX = 3
 
 #: Допустимые профили поиска (``"raw"`` — псевдоним identifier-профиля).
-_PROFILES = {"stemmed", "identifier", "raw"}
+_PROFILES = {"stemmed", "identifier", "raw", "ngram"}
 
 #: Поля, обязательные в индексируемой записи.
 _REQUIRED_FIELDS = ("chunk_id", "product_id", "text")
@@ -132,10 +146,11 @@ def _coerce_record(record: Any) -> LexicalChunk:
 
 
 class TantivyLexicalIndex:
-    """BM25-поиск на tantivy с RU/EN-стеммингом и identifier-профилем (§3.2, I16/I17).
+    """BM25-поиск на tantivy с RU/EN-стеммингом, identifier- и ngram-профилями (§3.2, I16/I17).
 
     :param index_path: каталог индекса; ``None`` → временный каталог (авто-удаление).
-    :param profile: ``"stemmed"`` (RU/EN, по умолчанию), ``"identifier"``/``"raw"``.
+    :param profile: ``"stemmed"`` (RU/EN, по умолчанию), ``"identifier"``/``"raw"``,
+        ``"ngram"`` (символьные триграммы для подстрочного/fuzzy-совпадения).
 
     Атрибуты ``engine_version``/``build_id`` доступны до построения индекса;
     ``build_id`` заполняется при :meth:`index` (из параметра либо из записей).
@@ -150,7 +165,7 @@ class TantivyLexicalIndex:
         normalized = profile.strip().lower()
         if normalized not in _PROFILES:
             raise ValueError(
-                f"неизвестный профиль {profile!r} (ожидается stemmed|identifier|raw)"
+                f"неизвестный профиль {profile!r} (ожидается stemmed|identifier|raw|ngram)"
             )
         self.profile = normalized
         self.build_id: str = ""
@@ -222,6 +237,7 @@ class TantivyLexicalIndex:
                         FIELD_STEM_RU: record.text,
                         FIELD_STEM_EN: record.text,
                         FIELD_IDENTIFIER: record.text,
+                        FIELD_NGRAM: record.text,
                     }
                 )
             )
@@ -250,6 +266,8 @@ class TantivyLexicalIndex:
         """
         if self.profile == "stemmed":
             return self._search(query, product_ids, top_k, profile="stemmed", lang=lang)
+        if self.profile == "ngram":
+            return self._search(query, product_ids, top_k, profile="ngram", lang=None)
         return self._search(query, product_ids, top_k, profile="identifier", lang=None)
 
     def search_identifier(
@@ -260,6 +278,15 @@ class TantivyLexicalIndex:
     ) -> list[RetrievedChunk]:
         """Поиск по identifier-профилю независимо от ``profile`` конструктора."""
         return self._search(query, product_ids, top_k, profile="identifier", lang=None)
+
+    def search_ngram(
+        self,
+        query: str,
+        product_ids: list[str],
+        top_k: int,
+    ) -> list[RetrievedChunk]:
+        """Поиск по ngram-профилю независимо от ``profile`` конструктора."""
+        return self._search(query, product_ids, top_k, profile="ngram", lang=None)
 
     # ------------------------------------------------------------------ #
     # Внутреннее
@@ -280,12 +307,14 @@ class TantivyLexicalIndex:
         builder.add_text_field(FIELD_STEM_RU, tokenizer_name=_RU_TOKENIZER)
         builder.add_text_field(FIELD_STEM_EN, tokenizer_name=_EN_TOKENIZER)
         builder.add_text_field(FIELD_IDENTIFIER, tokenizer_name="whitespace")
+        builder.add_text_field(FIELD_NGRAM, tokenizer_name=_NGRAM_TOKENIZER)
         return builder.build()
 
     def _open_index(self, tantivy: Any, schema: Any) -> Any:
         index = tantivy.Index(schema, path=str(self._path))
         index.register_tokenizer(_RU_TOKENIZER, _analyzer(tantivy, "russian"))
         index.register_tokenizer(_EN_TOKENIZER, _analyzer(tantivy, "english"))
+        index.register_tokenizer(_NGRAM_TOKENIZER, _ngram_analyzer(tantivy))
         return index
 
     def _search(
@@ -306,11 +335,7 @@ class TantivyLexicalIndex:
         allowed = list(dict.fromkeys(str(pid) for pid in product_ids))
         if not allowed:
             return []
-        base = (
-            self._identifier_query(query)
-            if profile == "identifier"
-            else self._stemmed_query(query, lang)
-        )
+        base = self._query_for_profile(query, profile=profile, lang=lang)
         if base is None:
             return []
 
@@ -343,6 +368,14 @@ class TantivyLexicalIndex:
         out.sort(key=lambda chunk: (-chunk.score, chunk.chunk_id))
         return out[:top_k]
 
+    def _query_for_profile(self, query: str, *, profile: str, lang: str | None) -> Any:
+        """Строит разобранный запрос под профиль (``None`` — пустой запрос)."""
+        if profile == "identifier":
+            return self._identifier_query(query)
+        if profile == "ngram":
+            return self._ngram_query(query)
+        return self._stemmed_query(query, lang)
+
     def _stemmed_query(self, query: str, lang: str | None) -> Any:
         if not query or not query.strip():
             return None
@@ -370,6 +403,20 @@ class TantivyLexicalIndex:
             for token in tokens
         ]
         return tantivy.Query.boolean_query(clauses, 1)
+
+    def _ngram_query(self, query: str) -> Any:
+        """Запрос по ngram-полю: тот же анализатор, что при индексации.
+
+        Парсер сам нарезает строку запроса на n-граммы анализатором поля (триграммы)
+        и объединяет их дизъюнкцией (tantivy query parser, дефолт OR), поэтому
+        совпадение по фрагменту токена/идентификатора даёт ненулевой BM25-скор.
+        """
+        if not query or not query.strip():
+            return None
+        parsed, _errors = self._index.parse_query_lenient(
+            query, default_field_names=[FIELD_NGRAM]
+        )
+        return parsed
 
     def close(self) -> None:
         """Освобождает временный каталог индекса (если он принадлежит адаптеру)."""
@@ -402,6 +449,22 @@ def _analyzer(tantivy: Any, language: str) -> Any:
         .filter(tantivy.Filter.lowercase())
         .filter(tantivy.Filter.stemmer(language))
         .filter(tantivy.Filter.stopword(language))
+        .build()
+    )
+
+
+def _ngram_analyzer(tantivy: Any) -> Any:
+    """Анализатор ngram-профиля: ``Tokenizer.ngram(min,max)`` → lowercase.
+
+    Тот же анализатор применяется и при индексации, и при разборе запроса — иначе
+    n-граммы документа и запроса не совпадут. Стемминг/стоп-слова намеренно не
+    используются: профиль отвечает за подстрочный, а не морфологический матч.
+    """
+    return (
+        tantivy.TextAnalyzerBuilder(
+            tantivy.Tokenizer.ngram(min_gram=_NGRAM_MIN, max_gram=_NGRAM_MAX)
+        )
+        .filter(tantivy.Filter.lowercase())
         .build()
     )
 
