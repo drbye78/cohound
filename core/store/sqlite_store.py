@@ -1,7 +1,9 @@
-"""coHound — конкретное операционное хранилище ``SqliteStore`` (L3, W3/T3.1).
+"""coHound — конкретное операционное хранилище ``SqliteStore`` (L3, W3/T3.1, W3/T3.4).
 
 Реализует ``StorePort`` и ``GateStore`` (``core/ports/store.py``) поверх схемы §4.4
 (``core/store/sqlite.py``: 11 таблиц + ``schema_meta``, индексы, триггеры I4/I6/I7/I13/I18).
+Также реализует ``domain.anchors.SourceResolver`` (T3.4): детерминированный
+резолв ``source_id`` → URL + ``content_hash`` без сети (I10/I15/I19).
 
 Инварианты остаются кодом: запись ячеек и evidence идёт через DDL-триггеры, поэтому
 нарушения (I4/I6/I7/I13/I18) отклоняются на уровне БД. Батчевые записи — одна транзакция
@@ -31,6 +33,7 @@ from core.domain import (
     ProtocolExhaustion,
     RankingPolicy,
     RegistryFact,
+    ResolvedSource,
     RunConfig,
     RunManifest,
     RunMode,
@@ -42,6 +45,7 @@ from core.domain import (
 )
 from core.ports.types import Chunk
 from core.store.sqlite import connect
+from core.util.ids import parse_source_id
 
 #: Размер пачки по умолчанию для батчевых записей (§B.2, T3.1).
 DEFAULT_BATCH_SIZE = 200
@@ -616,15 +620,66 @@ class SqliteStore:
             content_hash=row["content_hash"] or "",
         )
 
-    def resolve_source_url(self, source_id: str) -> str | None:
-        """Базовый резолв URL источника (I10/I15): искомое — ``corpus_chunks.chunk_id``.
+    def resolve(self, source_id: str) -> ResolvedSource | None:
+        """Детерминированно резолвит ``source_id`` в источник (I10/I15/I19), без сети.
 
-        Hash-верификация резолва — T3.4. Здесь: возвращает ``url`` чанка или ``None``.
+        Принимает как «сырой» ``corpus_chunks.chunk_id``, так и форматированный
+        ``source_id`` (``core.util.ids.source_id`` → ``product:doc:chunk_no[:build_id]``):
+
+        1. прямой lookup по ``corpus_chunks.chunk_id``;
+        2. иначе — разбор через ``parse_source_id`` и матч по
+           ``(product_id, chunk_no[, build_id])`` (колонки ``corpus_chunks`` —
+           ``chunk_no``/``product_id``/``build_id``).
+
+        Малформед/неизвестный ``source_id`` → ``None`` (не исключение). Возвращает
+        :class:`ResolvedSource` с ``chunk_id``/``url``/``content_hash``/``build_id``
+        строки ``corpus_chunks``.
         """
         row = self.conn.execute(
-            "SELECT url FROM corpus_chunks WHERE chunk_id = ?",
+            "SELECT chunk_id, url, content_hash, build_id FROM corpus_chunks"
+            " WHERE chunk_id = ?",
             (source_id,),
         ).fetchone()
+        if row is not None:
+            return self._row_to_resolved(row)
+
+        try:
+            ref = parse_source_id(source_id)
+        except ValueError:
+            return None
+
+        sql = (
+            "SELECT chunk_id, url, content_hash, build_id FROM corpus_chunks"
+            " WHERE product_id = ? AND doc_id = ? AND chunk_no = ?"
+        )
+        params: list[Any] = [ref.product_id, ref.doc_id, ref.chunk_no]
+        if ref.build_id is not None:
+            sql += " AND build_id = ?"
+            params.append(ref.build_id)
+        # Детерминизм: при нескольких кандидатах — стабильный порядок по PK.
+        sql += " ORDER BY chunk_id LIMIT 1"
+        row = self.conn.execute(sql, params).fetchone()
         if row is None:
             return None
-        return row["url"]
+        return self._row_to_resolved(row)
+
+    @staticmethod
+    def _row_to_resolved(row: sqlite3.Row) -> ResolvedSource:
+        """Собирает :class:`ResolvedSource` из строки ``corpus_chunks``."""
+        return ResolvedSource(
+            chunk_id=row["chunk_id"],
+            source_url=row["url"],
+            content_hash=row["content_hash"],
+            build_id=row["build_id"],
+        )
+
+    def resolve_source_url(self, source_id: str) -> str | None:
+        """Резолв URL источника (I10/I15) через :meth:`resolve`.
+
+        Сохранён как тонкая совместимая обёртка (T3.1): возвращает URL или ``None``.
+        Hash-верификация вызывающим кодом — ``domain.anchors.verify_evidence_hash`` (I19).
+        """
+        resolved = self.resolve(source_id)
+        if resolved is None:
+            return None
+        return resolved.source_url

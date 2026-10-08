@@ -323,6 +323,9 @@ def main() -> int:
     check("content_hash/prompt_hash детерминированы (§5/I19)", lambda: _util_hashing())
     check("scoring: failed в знаменателе Coverage, вне Capability (I5)", lambda: _domain_scoring())
 
+    section("Store (L3) — W3")
+    check("SqliteStore I19: резолв + сверка content_hash", lambda: _store_resolver_i19())
+
     print(f"\n{CHECKS - len(FAILURES)}/{CHECKS} проверок пройдено")
     if FAILURES:
         print("\nПровалы:")
@@ -807,6 +810,47 @@ def _domain_scoring() -> None:
     cap_unknown = resolved_capability([_cell("p", Status.UNKNOWN)], params, weights)
     if cap_unknown.denominator != 0:
         raise AssertionError("I5: ❓ обязан быть вне знаменателя Capability")
+
+
+def _store_resolver_i19() -> None:
+    """SqliteStore резолвит source_id и сверяет content_hash (I10/I15/I19, T3.4)."""
+    from core.domain.anchors import verify_evidence_hash
+    from core.domain.enums import EvidenceType, SourceKind
+    from core.domain.models import CellEvidence
+    from core.store.sqlite_store import SqliteStore
+    from core.util.hashing import content_hash
+
+    with SqliteStore(":memory:") as store:
+        h = content_hash("payload")
+        store.conn.execute(
+            "INSERT INTO corpus_docs (doc_id, product_id, url) VALUES (?, ?, ?)",
+            ("d1", "p1", "https://e.test/doc"),
+        )
+        store.conn.execute(
+            "INSERT INTO corpus_chunks"
+            " (chunk_id, doc_id, product_id, url, chunk_no, text, content_hash, build_id)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            ("c1", "d1", "p1", "https://e.test/doc#a", 0, "текст", h, "b1"),
+        )
+        store.conn.commit()
+
+        ev = CellEvidence.model_construct(
+            evidence_id="e",
+            run_id="r",
+            product_id="p1",
+            param_id="x",
+            source_kind=SourceKind.DOCUMENTATION,
+            evidence_type=EvidenceType.DIRECT,
+            source_id="c1",
+            content_hash=h,
+            source_url="https://e.test/doc#a",
+            citation_quote="фрагмент",
+        )
+        if not verify_evidence_hash(ev, store):
+            raise AssertionError("I19: совпадающий hash должен пройти резолв")
+        bad = ev.model_copy(update={"content_hash": content_hash("other")})
+        if verify_evidence_hash(bad, store):
+            raise AssertionError("I19: расхождение hash обязано инвалидировать evidence")
 
 
 if __name__ == "__main__":
