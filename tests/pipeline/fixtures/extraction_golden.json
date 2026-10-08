@@ -1,0 +1,26 @@
+[
+  {
+    "case_id": "case_html",
+    "format": "html",
+    "raw_b64": "PGh0bWw+PGJvZHk+PGgxPkFscGhhIGhlYWRpbmc8L2gxPjxwPmJldGEgYm9keTwvcD48L2JvZHk+PC9odG1sPg==",
+    "expected_substrings": ["Alpha heading", "beta body"],
+    "forbidden_substrings": ["Gamma"],
+    "min_chars": 10
+  },
+  {
+    "case_id": "case_pdf",
+    "format": "pdf",
+    "raw_b64": "JVBERi0xLjQKMSAwIG9iago8PCAvVHlwZSAvQ2F0YWxvZyA+PgplbmRvYmoKdHJhaWxlcgo8PCAvUm9vdCAxIDAgUiA+PgolJUVPRgo=",
+    "expected_substrings": ["Catalog"],
+    "forbidden_substrings": [],
+    "min_chars": 1
+  },
+  {
+    "case_id": "case_docx",
+    "format": "docx",
+    "raw_b64": "UEsDBBQAAABmYWtlLW9mZmljZS1wYXlsb2FkLWZvci1nb2xkZW4=",
+    "expected_substrings": [],
+    "forbidden_substrings": [],
+    "min_chars": 0
+  }
+]
