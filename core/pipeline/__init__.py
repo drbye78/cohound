@@ -127,6 +127,16 @@ from core.pipeline.adversarial import (
     load_adversarial,
     run_adversarial,
 )
+from core.pipeline.serp_loop import (
+    SerpLoopError,
+    SerpLoopResult,
+    SerpQuery,
+    SerpRound,
+    derive_round_build_id,
+    invalidate_affected,
+    run_serp_loop,
+    run_serp_round,
+)
 from core.pipeline.plan import RunPlan, derive_run_id, load_plan, plan
 from core.pipeline.registry import (
     registry_covered_params,
@@ -264,4 +274,13 @@ __all__ = [
     "AdversarialBreachError",
     "run_adversarial",
     "load_adversarial",
+    # serp_loop (T11.3), K2/§13
+    "SerpQuery",
+    "SerpRound",
+    "SerpLoopResult",
+    "SerpLoopError",
+    "derive_round_build_id",
+    "run_serp_round",
+    "invalidate_affected",
+    "run_serp_loop",
 ]
