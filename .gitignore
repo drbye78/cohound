@@ -24,3 +24,9 @@ corpus_raw/
 # Прочее
 *.log
 .DS_Store
+
+# Покрытие и property-тесты (артефакты, не версионируются)
+.coverage
+.coverage.*
+htmlcov/
+.hypothesis/

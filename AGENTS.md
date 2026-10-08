@@ -31,20 +31,23 @@ cohound-spec-v2.md            # регламент v2.0 (источник ист
 THIRD_PARTY_NOTICES.md        # лицензии/происхождение скопированного кода
 docs/status-dictionary.yaml   # словарь статусов/перечислений + Р-2 (§4.1)
 core/                         # ядро: категорийно-НЕЙТРАЛЬНЫЙ код (грепп-тест §1.3)
-  schemas.py                  # (текущий монолит) Pydantic-схемы §4.2/4.3/4.5/7 + инварианты
-  db.py                       # (текущий) SQLite DDL §4.4 + триггеры инвариантов
+  schemas.py                  # (transitional re-export-шим → core/domain, T1.2)
+  db.py                       # (transitional re-export-шим → core/store/sqlite, T1.3)
   util/                       # text_utils (RU/EN), security (SSRF/slug), fusion (RRF) — см. NOTICES
   adapters/                   # chunker_markdown (heading_path), extract_document (docling: pdf+office), lexical_bm25 — см. NOTICES
-  # целевое расщепление (docs/architecture/01-modules-and-contracts.md):
-  domain/                     # модели, enums, invariants, scoring, r2, anchors (чистый Python, без I/O)
+  # расщепление (docs/architecture/01-modules-and-contracts.md):
+  domain/                     # (ЕСТЬ) enums, models, r2, dictionary — чистый Python, без I/O
   ports/                      # (ЕСТЬ) Protocol-контракты: LLM, индексы, embedder, index_builder, search,
                               #   crawler, extractor, chunker, registry, store, gate_store, gateway, types
+  store/                      # (ЕСТЬ) SQLite DDL §4.4 + триггеры (sqlite.py); StorePort-реализация — W3
   pipeline/                   # (планируется) сценарии Ш1–Ш9, гейты G1–G4, эксперименты (use-cases)
-  store/                      # (планируется) SQLite-хранилище + paths
   config/                     # (планируется) загрузка run.yaml/пакетов + deploy.yaml (профиль зон)
   cli/                        # (планируется) composition root Z0 (ядро) — сборка зависимостей
   edge/                       # (планируется) composition root Z1/DMZ — веб-адаптеры за швом (07)
-tests/selfcheck.py            # self-contained проверка фундамента (39 проверок)
+scripts/ci.sh                 # единая точка входа CI (§11.6): selfcheck + pytest + порог покрытия
+tests/selfcheck.py            # self-contained проверка фундамента (42 проверки)
+tests/test_selfcheck.py       # pytest-обёртка над selfcheck (W1/T1.5)
+tests/domain/                 # property-тесты домена (hypothesis)
 tests/smoke_scrapy_playwright.py  # браузерный smoke scrapy-playwright (V5; 0/1/2)
 packages/{case_id}/           # (планируется) пакеты категорий: package/catalog/baselines/cohort/golden
 registries/ · docs/           # словари, регламент, absence-правила
@@ -69,6 +72,13 @@ cache/serp/{query_hash}.json · cache/http/{url_hash}.bin  # глобальны�
 # Проверка фундамента (без pytest)
 python3 tests/selfcheck.py
 
+# CI-гейты (selfcheck + pytest + порог покрытия ядра) — провайдер-нейтрально
+bash scripts/ci.sh
+
+# pytest (dev-окружение): обёртка над selfcheck + property-тесты домена
+uv pip install -e '.[dev]'
+python3 -m pytest -q
+
 # Грепп-нейтральность ядра (§1.3) — предметных терминов в core/ быть не должно
 grep -rniE "postgres|pangolin|sber|сбер|copywala|платформа" core/
 
@@ -86,7 +96,7 @@ python3 -c "import sys; sys.path.insert(0,'.'); from core.db import connect; c=c
 
 Требуется Python **3.14** (базлайн; greenfield, контролируемое развёртывание, все зависимости
 стека имеют cp314/abi3-колёса — `docs/architecture/05-dependency-stack.md` §1), `pydantic>=2`, `pyyaml`.
-`pytest` пока не установлен — для CI по §11.6 его нужно добавить.
+Dev/CI по §11.6: `pytest`+`hypothesis`+`pytest-cov` в extra `dev`; единая точка входа — `scripts/ci.sh`.
 Выбор внешних пакетов, лицензии и запреты — `docs/architecture/05-dependency-stack.md`
 (реестр решений; LangChain/LlamaIndex и все hosted-парсеры отклонены).
 Стратегия и детальный план реализации (потоки W1–W13, майлстоуны, DoD) —

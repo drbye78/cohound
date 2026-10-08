@@ -106,6 +106,20 @@ dev = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["selfcheck.py", "test_*.py"]
+addopts = "--cov=core --cov-report=term-missing"
+
+[tool.coverage.run]
+source = ["core"]
+branch = true
+
+[tool.coverage.report]
+# Порог покрытия ядра (W1/T1.5). Текущий запас — см. CI; повышается по мере W2/W3.
+fail_under = 80
+exclude_also = [
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "\\.\\.\\.",
+]
 
 [tool.setuptools]
 # Плоская раскладка: пакет core/ в корне репозитория (§3.3 регламента).
