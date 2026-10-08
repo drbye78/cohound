@@ -70,6 +70,18 @@ from core.pipeline.compute import (
     per_product_bundle,
     publish_warnings,
 )
+from core.pipeline.evaluate import (
+    EvaluationOutcome,
+    evaluate_batch,
+    evaluate_cell,
+    retrieve_for_cell,
+    run_queries_for_cell,
+)
+from core.pipeline.validate import (
+    ValidationFailureKind,
+    ValidationResult,
+    validate_output,
+)
 from core.pipeline.plan import RunPlan, derive_run_id, load_plan, plan
 from core.pipeline.registry import (
     registry_covered_params,
@@ -159,4 +171,13 @@ __all__ = [
     "per_product_bundle",
     "publish_warnings",
     "assert_publishable",
+    # evaluate (T9.3)/validate (T9.4), Ш6
+    "EvaluationOutcome",
+    "evaluate_cell",
+    "evaluate_batch",
+    "run_queries_for_cell",
+    "retrieve_for_cell",
+    "ValidationResult",
+    "ValidationFailureKind",
+    "validate_output",
 ]
