@@ -343,6 +343,7 @@ def main() -> int:
     check("R0/R1/R2: профиль явный, продукт-скоуп (I16/I17)", lambda: _retrieve_profiles())
     check("RRF-фьюжн: дедуп + провенанс + tie-break (R7)", lambda: _rrf_fusion())
     check("LocalEmbedder: батч + torque-free шов (T8.1)", lambda: _embed_local())
+    check("NpyIndexBuilder/VectorIndex: партиции + cosine (T8.2/T8.4)", lambda: _index_roundtrip())
 
     print(f"\n{CHECKS - len(FAILURES)}/{CHECKS} проверок пройдено")
     if FAILURES:
@@ -1180,6 +1181,55 @@ def _embed_local() -> None:
         raise AssertionError("embed обязан вернуть N×dim")
     if batches != [2, 2, 1]:
         raise AssertionError(f"батчинг сломан: {batches}")
+
+
+def _index_roundtrip() -> None:
+    """Индексная сборка .npy: round-trip партиции + cosine-поиск (T8.2/T8.4, I17).
+
+    Пропускается, если numpy не установлен (selfcheck автономен, без обязательных extras).
+    """
+    try:
+        import numpy  # noqa: F401
+    except ImportError:
+        return
+    import tempfile
+
+    from core.adapters import index_format
+    from core.adapters.index_npy import NpyIndexBuilder
+    from core.adapters.vector_npy import NpyVectorIndex
+    from core.ports.index_builder import IndexBuilderPort, IndexMeta
+    from core.ports.types import Chunk
+    from core.ports.vector_index import VectorIndexPort, VectorQuery
+
+    with tempfile.TemporaryDirectory() as tmp:
+        builder = NpyIndexBuilder(index_root=tmp, package="pk")
+        if not isinstance(builder, IndexBuilderPort):
+            raise AssertionError("NpyIndexBuilder обязан реализовывать IndexBuilderPort")
+        chunks = [
+            Chunk(chunk_id="c0", chunk_no=0, text="a", heading_path="H",
+                  context_prefix="", content_hash="h0"),
+            Chunk(chunk_id="c1", chunk_no=1, text="b", heading_path="H",
+                  context_prefix="", content_hash="h1"),
+        ]
+        meta = IndexMeta(
+            package="pk", chunker_version="v1", embed_model_id="m",
+            snapshot_date="2026-01-01", product_id="p1",
+            extra={"index_build_id": "ib_sc"},
+        )
+        bid = builder.build(chunks, [[1.0, 0.0], [0.0, 1.0]], meta)
+        builder.commit()
+        if bid != "ib_sc" or not index_format.is_committed(tmp, "pk", "ib_sc", "p1"):
+            raise AssertionError("сборка .npy-партиции не зафиксирована")
+
+        lookup = {c.chunk_id: c for c in chunks}
+        vindex = NpyVectorIndex(
+            index_root=tmp, package="pk", build_id="ib_sc", dim=2, chunk_lookup=lookup
+        )
+        if not isinstance(vindex, VectorIndexPort):
+            raise AssertionError("NpyVectorIndex обязан реализовывать VectorIndexPort")
+        hits = vindex.search(VectorQuery(product_ids=["p1"], top_k=2, vector=[0.9, 0.1]))
+        if not hits or hits[0].chunk_id != "c0" or hits[0].content_hash != "h0":
+            raise AssertionError(f"cosine/provenance сломан: {[h.chunk_id for h in hits]}")
 
 
 if __name__ == "__main__":
