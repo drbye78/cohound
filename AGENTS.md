@@ -67,6 +67,11 @@ grep -rniE "postgres|pangolin|sber|сбер|copywala|платформа" core/do
 
 # Проверка схемы БД
 python3 -c "import sys; sys.path.insert(0,'.'); from core.db import connect; c=connect(':memory:')"
+
+# Smoke-тест scrapy-playwright (V5) — отдельное окружение с браузерными бинарями:
+# pip install 'scrapy>=2.19' 'scrapy-playwright>=0.0.48' 'playwright>=1.63'
+# playwright install chromium firefox
+# python3 tests/smoke_scrapy_playwright.py   # 0 — ok, 1 — fail, 2 — skip (нет deps)
 ```
 
 Требуется Python 3.11+ (в окружении — 3.14), `pydantic>=2`, `pyyaml`.
