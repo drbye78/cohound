@@ -71,6 +71,8 @@ python3 -c "import sys; sys.path.insert(0,'.'); from core.db import connect; c=c
 
 Требуется Python 3.11+ (в окружении — 3.14), `pydantic>=2`, `pyyaml`.
 `pytest` пока не установлен — для CI по §11.6 его нужно добавить.
+Выбор внешних пакетов, лицензии и запреты — `docs/architecture/05-dependency-stack.md`
+(реестр решений; LangChain/LlamaIndex и все hosted-парсеры отклонены).
 
 ## Конвенции кода
 
