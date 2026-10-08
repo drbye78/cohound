@@ -9,6 +9,7 @@ venv/
 .ruff_cache/
 
 # Операционные артефакты прогонов (не версионируется)
+runs/
 runs/*/sqlite.db
 runs/*/*.db-wal
 runs/*/*.db-shm
