@@ -1,0 +1,32 @@
+# coHound — конфиг развёртывания (07 §7, 03 D.5).
+#
+# Отдельно от run.yaml: развёртывание ≠ методологический прогон.
+# Профиль `local` (дефолт, A1) выполняет всё in-process и ИГНОРИРУЕТ секцию `edge.*`.
+# Для профилей `split`/`split-hardened` обязателен `edge.base_url` и шов поднимается
+# через application-layer firewall по протоколу /v1/* (07 §5).
+#
+# TLS: доверие через корпоративный CA; certificate pinning НЕ поддерживается
+# намеренно — это не блокирует корпоративную TLS-инспекцию DLP/IDS (07 §8.1).
+# Не коммитить секреты: `client_key` — путь к файлу ключа, сам ключ вне репозитория.
+
+profile: local                 # local | split | split-hardened
+
+# --- Профиль split (раскомментировать при переходе на DMZ) -------------------
+# edge:
+#   base_url: "https://edge.internal:8443"
+#   tls:
+#     ca: certs/ca.pem                 # корпоративный CA (в т.ч. TLS break-and-inspect)
+#     client_cert: certs/core.pem      # workload-identity ядра
+#     client_key: secrets/core.key     # путь к ключу; сам ключ не коммитится
+#   auth: mtls                         # mtls | oidc
+#   # oidc: { issuer: "https://idp.corp/realms/x", audience: "cohound-edge" }  # если auth: oidc
+#   timeout_s: 30
+#   max_retries: 2
+#   max_response_bytes: 52428800       # защита ядра от edge
+#   audit: { sink: file, target: /var/log/cohound/audit.jsonl }  # SIEM-экспорт, §8.4
+
+extractor_zone: core           # edge | core | separate
+
+search:
+  budget: { ru: 5, en: 5 }     # симметрия I16
+  adapter: example_adapter     # имя адаптера — данные, ядро провайдеро-нейтрально

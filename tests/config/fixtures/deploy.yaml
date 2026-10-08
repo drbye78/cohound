@@ -1,0 +1,18 @@
+# Тестовая фикстура: профиль split (03 D.5 / 07 §7).
+# Нейтральна: вымышленный edge-хост, example-адаптер; без названий вендоров.
+profile: split
+edge:
+  base_url: "https://edge.internal:8443"
+  tls:
+    ca: certs/ca.pem
+    client_cert: certs/core.pem
+    client_key: secrets/core.key
+  auth: mtls
+  timeout_s: 30
+  max_retries: 2
+  max_response_bytes: 52428800
+  audit: { sink: file, target: /var/log/cohound/audit.jsonl }
+extractor_zone: edge
+search:
+  budget: { ru: 5, en: 5 }
+  adapter: example_adapter
