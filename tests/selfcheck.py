@@ -339,6 +339,11 @@ def main() -> int:
     check("ScrapyCrawler: кэш + SSRF + домен-профиль", lambda: _crawl_scrapy())
     check("MarkdownChunkerPort удовлетворяет ChunkerPort (T7.3)", lambda: _chunker_port())
 
+    section("Ретривал/индекс — W8")
+    check("R0/R1/R2: профиль явный, продукт-скоуп (I16/I17)", lambda: _retrieve_profiles())
+    check("RRF-фьюжн: дедуп + провенанс + tie-break (R7)", lambda: _rrf_fusion())
+    check("LocalEmbedder: батч + torque-free шов (T8.1)", lambda: _embed_local())
+
     print(f"\n{CHECKS - len(FAILURES)}/{CHECKS} проверок пройдено")
     if FAILURES:
         print("\nПровалы:")
@@ -1094,6 +1099,87 @@ def _chunker_port() -> None:
     )
     if [c.chunk_id for c in chunks] != ["doc1#0"] or chunks[0].heading_path != "H1":
         raise AssertionError("порт-чанкинг сломан")
+
+
+def _retrieve_profiles() -> None:
+    """Профили R0/R1/R2 явны; ретривал продукт-скоупед (I16/I17)."""
+    from core.pipeline.retrieve import RetrievalProfile, retrieve
+    from core.ports.vector_index import RetrievedChunk
+
+    def _c(cid, product="p1"):
+        return RetrievedChunk(
+            chunk_id=cid, product_id=product, text="t",
+            content_hash="h", heading_path="H", build_id="b", score=1.0,
+        )
+
+    class _Lex:
+        engine_version = "fake"
+
+        def search(self, query, product_ids, top_k, lang=None):
+            return [c for c in [_c("c1"), _c("c9", "p2")] if c.product_id in set(product_ids)][:top_k]
+
+    class _Vec:
+        build_id = "bx"
+        dim = 2
+
+        def search(self, q):
+            return [c for c in [_c("c1")] if c.product_id in set(q.product_ids)][: q.top_k]
+
+        def shard_ids(self, product_id):
+            return [product_id]
+
+    r0 = retrieve(query_text="q", query_vector=None, product_ids=["p1"],
+                  profile="R0", cutoff_k=5, lexical_index=_Lex())
+    if r0.profile != "R0" or [c.chunk_id for c in r0.chunks] != ["c1"]:
+        raise AssertionError(f"R0/продукт-скоуп сломан: {[c.chunk_id for c in r0.chunks]}")
+    r1 = retrieve(query_text="q", query_vector=[1.0, 0.0], product_ids=["p1"],
+                  profile=RetrievalProfile.R1, cutoff_k=5, vector_index=_Vec())
+    if r1.profile != "R1" or r1.build_id != "bx":
+        raise AssertionError("R1 сломан")
+
+
+def _rrf_fusion() -> None:
+    """RRF: дедуп по chunk_id, сумма вкладов, провенанс, tie-break (R7)."""
+    from core.pipeline.retrieve import rrf_fuse_chunks
+    from core.ports.vector_index import RetrievedChunk
+
+    def _c(cid, build="b-lex"):
+        return RetrievedChunk(
+            chunk_id=cid, product_id="p1", text=f"t-{cid}",
+            content_hash=f"h-{cid}", heading_path="H", build_id=build, score=1.0,
+        )
+
+    fused = rrf_fuse_chunks([_c("c1"), _c("c2")], [_c("c2", build="b-dense"), _c("c3")])
+    ids = [c.chunk_id for c in fused]
+    if ids[0] != "c2" or set(ids) != {"c1", "c2", "c3"}:
+        raise AssertionError(f"RRF-дедуп/сумма сломан: {ids}")
+    if fused[0].build_id != "b-dense":
+        raise AssertionError("dense-провенанс обязан быть приоритетным")
+    # tie-break детерминирован
+    a = [c.chunk_id for c in rrf_fuse_chunks([_c("b"), _c("a")], [_c("a"), _c("b")])]
+    if a != ["a", "b"]:
+        raise AssertionError(f"tie-break не по chunk_id: {a}")
+
+
+def _embed_local() -> None:
+    """LocalEmbedder: батч-нарезка и torque-free контракт (T8.1)."""
+    from core.adapters.embed_local import LocalEmbedder
+    from core.ports.embedder import EmbedderPort
+
+    batches: list[int] = []
+
+    def _fake(texts):
+        batches.append(len(texts))
+        return [[0.0] * 3 for _ in texts]
+
+    emb = LocalEmbedder(embed_fn=_fake, model_id="m", dim=3, batch_size=2)
+    if not isinstance(emb, EmbedderPort) or emb.model_id != "m" or emb.dim != 3:
+        raise AssertionError("LocalEmbedder не соответствует EmbedderPort")
+    out = emb.embed(["a", "b", "c", "d", "e"])
+    if len(out) != 5 or any(len(v) != 3 for v in out):
+        raise AssertionError("embed обязан вернуть N×dim")
+    if batches != [2, 2, 1]:
+        raise AssertionError(f"батчинг сломан: {batches}")
 
 
 if __name__ == "__main__":
