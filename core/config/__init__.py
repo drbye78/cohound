@@ -27,6 +27,12 @@ from core.config.deploy import (
     is_split,
     load_deploy_config,
 )
+from core.config.passports import (
+    PassportLoadError,
+    load_passport,
+    load_passports,
+    passport_urls,
+)
 
 __all__ = [
     # run.yaml (§4.5)
@@ -49,4 +55,9 @@ __all__ = [
     "load_deploy_config",
     "DeployConfig",
     "is_split",
+    # passports/{product_id}/{date}.yaml (§4.3)
+    "load_passport",
+    "load_passports",
+    "passport_urls",
+    "PassportLoadError",
 ]
