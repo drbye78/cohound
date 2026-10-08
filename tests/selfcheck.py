@@ -385,6 +385,9 @@ def main() -> int:
     check("build_phases: 11 не-гейтовых фаз, гейты не переопределены", lambda: _build_phases_gate())
     check("walking-skeleton: реальные фазы + гейт g1 блокирует без решения", lambda: _walking_skeleton())
 
+    section("Паспорта продукта (§4.3)")
+    check("passports: latest-by-date + кандидаты URL (не evidence, I19)", lambda: _passports())
+
     print(f"\n{CHECKS - len(FAILURES)}/{CHECKS} проверок пройдено")
     if FAILURES:
         print("\nПровалы:")
@@ -1992,6 +1995,55 @@ def _here(*, tests_root: bool = False):
 
     root = _pl.Path(__file__).resolve().parent
     return root if tests_root else root.parent
+
+
+def _passports() -> None:
+    """Паспорта: выборка latest-by-ISO-date; URL-кандидаты из ``doc_domains`` (I19)."""
+    from core.config.passports import (
+        PassportLoadError,
+        load_passport,
+        load_passports,
+        passport_urls,
+    )
+
+    if load_passports("/tmp/__cohound_no_passports__") != {}:
+        raise AssertionError("отсутствие каталога паспортов → пустой словарь (безопасный дефолт)")
+    if load_passport("p1", "/tmp/__cohound_no_passports__") is not None:
+        raise AssertionError("отсутствующий паспорт → None")
+
+    fixture_dir = _here(tests_root=True) / "config" / "fixtures" / "passports"
+    passport = load_passport("p1", fixture_dir)
+    if passport is None or passport.product_id != "p1":
+        raise AssertionError("паспорт фикстуры не загрузился")
+    urls = passport_urls(passport)
+    if not urls or not all(u.startswith("https://") for u in urls):
+        raise AssertionError(f"doc_domains → https-кандидаты, получено {urls!r}")
+
+    import pathlib as _pl
+    import tempfile as _tf
+
+    with _tf.TemporaryDirectory() as td:
+        product_dir = _pl.Path(td) / "p9"
+        product_dir.mkdir()
+        for date, domain in (("2025-01-01", "old.example"), ("2026-01-01", "new.example")):
+            (product_dir / f"{date}.yaml").write_text(
+                "product_id: p9\ncanonical_name: Nine\nvendor: V\njurisdiction: RU\n"
+                f"doc_domains: [{domain}]\nsnapshot_date: {date}\n",
+                encoding="utf-8",
+            )
+        (product_dir / "notes.yaml").write_text("junk", encoding="utf-8")
+        loaded = load_passports(td)
+        if loaded.get("p9") is None or loaded["p9"].doc_domains != ["new.example"]:
+            raise AssertionError("latest-by-ISO-date не выбрал новейший паспорт")
+        # битый YAML → PassportLoadError
+        bad_dir = _pl.Path(td) / "p8"
+        bad_dir.mkdir()
+        (bad_dir / "2026-01-01.yaml").write_text("product_id: [", encoding="utf-8")
+        try:
+            load_passport("p8", td)
+            raise AssertionError("битый YAML обязан поднять PassportLoadError")
+        except PassportLoadError:
+            pass
 
 
 if __name__ == "__main__":
