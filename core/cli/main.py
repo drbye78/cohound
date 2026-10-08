@@ -10,6 +10,19 @@
 фетчатся (I19). Только stdlib (``argparse``/``json``/``sys``) + ``yaml`` (зависимость
 ядра) — без фреймворков (A1).
 
+Команды разведки/ревью экспонируют уже готовые модули ``pipeline/discovery.py`` и
+``pipeline/review.py`` (T10.4, ``03`` §D.6/E.1):
+
+* ``discover`` — внешний поиск (SERP) как источник **кандидатов-гипотез** (Ш2/Ш5).
+  Выход — только ``DiscoveryCandidate`` (URL+сниппет); evidence **не** пишется и ни одна
+  гипотеза не одобряется автоматически (I19/G2, A3). ``doc_domains`` паспортов
+  (``--passports-dir``) используются **лишь** как seed-подсказки запросов и не фетчатся.
+* ``review`` — детерминированная очередь ревью (preliminary-контур + ``❓``-кандидаты,
+  Ш7/G3).
+* ``promote`` — человеческое повышение ``preliminary`` → ``evaluated`` (переаттестация,
+  I14). Актор обязателен и непуст (I6/I7); без валидированного вердикта при
+  ``--validated-only`` (дефолт) повышение отклоняется — вердикт не выдумывается.
+
 **Принципы UX (``03`` §E.2).**
 
 - гейты — явные человеческие решения: ``run`` останавливается и печатает, что требуется;
@@ -43,31 +56,44 @@ from core.cli.wiring import (
     LOCAL_PROFILE,
     SPLIT_PROFILE,
     SUPPORTED_PROFILES,
+    SUPPORTED_SEARCH_ADAPTERS,
     WiringError,
     build_adapters,
     build_gateway,
     build_runner,
+    build_search_adapter,
     build_store,
     manifest_deploy_fields,
     run_db_path,
 )
-from core.config import PassportLoadError, load_golden, load_passports
+from core.config import (
+    PassportLoadError,
+    load_golden,
+    load_passports,
+    passport_urls,
+)
 from core.config.deploy import DeployConfig, is_split, load_deploy_config
+from core.domain.enums import Status
 from core.pipeline import (
     PHASES,
     Ports,
     RunReport,
     build_phases,
     check_thresholds,
+    discover,
     evaluate_golden,
+    promote_batch,
+    review_queue,
 )
 from core.pipeline.compute import compute
 from core.pipeline.lint import lint_run_inputs
 from core.pipeline.normalize import RunInputs, load_inputs
 from core.pipeline.plan import RunPlan, derive_run_id, plan as build_plan
 from core.pipeline.report import CrossCycleDiffError, render_diff, write_reports
+from core.pipeline.review import PromotionResult, ReviewError, ReviewItem
 from core.pipeline.runner import Clock, PhaseFn
 from core.ports.gateway import ContentGateway
+from core.ports.search import SearchAdapterPort
 
 __all__ = [
     "EXIT_OK",
@@ -103,6 +129,16 @@ EXIT_NOT_FOUND = 4
 
 #: Код по умолчанию для ошибок без распознанного инварианта/правила.
 _FALLBACK_CODE = "E"
+
+#: Допустимые явные вердикты переаттестации для ``hound promote --status`` (I14).
+#: N/A сюда не входит: назначение N/A — отдельное человеческое решение (§5), не
+#: повышение ``preliminary``-кандидата.
+_PROMOTE_STATUSES: tuple[str, ...] = (
+    Status.OK.value,
+    Status.PARTIAL.value,
+    Status.ABSENT.value,
+    Status.UNKNOWN.value,
+)
 
 #: ``CODE: message`` — сообщения линтера/инвариантов начинаются с кода правила.
 _CODE_RE = re.compile(r"^\s*([^\s:]+):")
@@ -653,6 +689,200 @@ def cmd_report(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def cmd_discover(args: argparse.Namespace) -> int:
+    """``discover``: внешний поиск как источник **кандидатов-гипотез** (Ш2/Ш5, I19/G2).
+
+    Собирает поисковый адаптер (по умолчанию ``yandex``; тестовый шов —
+    ``search_adapter`` аргумент :func:`main`) и гоняет :func:`core.pipeline.discover`
+    по запросам ``--query`` (можно повторять). Выход — только
+    :class:`~core.pipeline.discovery.DiscoveryCandidate` (URL+сниппет): **evidence не
+    пишется**, ни одна гипотеза не одобряется автоматически (I19/G2, A3). Продвижение
+    гипотезы — отдельное человеческое решение G2.
+
+    **Недоступный адаптер** (нет ``httpx`` или учётных данных при сборке реального
+    адаптера) → :data:`EXIT_ERROR` с ясным сообщением; кандидаты **не выдумываются**.
+    Неизвестный ``--search-adapter`` отвергается ``argparse`` (:data:`EXIT_USAGE`).
+
+    ``--passports-dir`` **засеивает** дополнительные запросы из ``doc_domains`` паспортов
+    (через :func:`core.config.passport_urls`) — это **лишь подсказки-кандидаты**, домены
+    не фетчатся (I19). Хотя бы один запрос обязателен (``--query`` либо seed).
+
+    :returns: :data:`EXIT_OK` (список кандидатов может быть пуст); :data:`EXIT_ERROR`
+        при недоступном адаптере; :data:`EXIT_USAGE` при пустом наборе запросов.
+    """
+    injected = getattr(args, "search_adapter", None)
+
+    queries: list[str] = list(args.query or [])
+    seeds = _discover_seed_queries(args.passports_dir)
+    for seed in seeds:
+        if seed not in queries:
+            queries.append(seed)
+    if not queries:
+        raise CliError(
+            "нужен хотя бы один --query либо --passports-dir с doc_domains",
+            code="usage",
+            exit_code=EXIT_USAGE,
+        )
+
+    adapter: SearchAdapterPort
+    if injected is not None:
+        adapter = injected
+    else:
+        adapter = build_search_adapter(args.search_adapter_kind)
+        if not _search_adapter_configured(adapter):
+            _emit_error(
+                args,
+                "I19",
+                "поисковый адаптер недоступен: нет httpx либо учётных данных "
+                "(YANDEX_SEARCH_API_KEY/YANDEX_FOLDER_ID); кандидаты не выдумываются",
+            )
+            return EXIT_ERROR
+    if not getattr(adapter, "available", True):
+        _emit_error(
+            args,
+            "I19",
+            "поисковый адаптер недоступен (available=false): "
+            "кандидаты не выдумываются",
+        )
+        return EXIT_ERROR
+
+    report = discover(
+        queries=queries, adapter=adapter, limit=args.limit, lang=args.lang
+    )
+    payload: dict[str, Any] = json.loads(report.to_manifest_json())
+    payload["ok"] = True
+    payload["search_adapter"] = getattr(adapter, "adapter_kind", "serp")
+    payload["seeded_queries"] = seeds
+    payload["note"] = (
+        "кандидаты — гипотезы, не evidence (I19); продвижение возможно только "
+        "человеческим решением G2"
+    )
+    if args.json:
+        _print_json(payload)
+    else:
+        _print_discover(payload)
+    return EXIT_OK
+
+
+def cmd_review(args: argparse.Namespace) -> int:
+    """``review``: очередь ревью — preliminary-контур + ``❓``-кандидаты (Ш7/G3, ``03`` §D.6).
+
+    Резолвит хранилище как ``sensitivity`` (``--db`` приоритетнее ``--runs-dir`` +
+    ``--run-id``; ``run_id`` выводится, если в БД ровно один прогон) и печатает
+    :func:`core.pipeline.review_queue` — детерминированный (по ``product_id``/``param_id``)
+    список ячеек, требующих человеческого внимания. Пустая очередь — валидный результат
+    :data:`EXIT_OK` с явной пометкой «queue empty».
+    """
+    db_path = _resolve_db_path(args)
+    run_id = args.run_id
+    items: list[ReviewItem] = []
+    with build_store(db_path, profile=args.profile) as store:
+        if run_id is None:
+            run_id = _infer_run_id(store)
+        store.read_manifest(run_id)  # валидация: прогон существует
+        items = review_queue(store, run_id)
+
+    payload = {
+        "ok": True,
+        "run_id": run_id,
+        "count": len(items),
+        "items": [_review_item_payload(item) for item in items],
+    }
+    if args.json:
+        _print_json(payload)
+    else:
+        _print_review(payload)
+    return EXIT_OK
+
+
+def cmd_promote(args: argparse.Namespace) -> int:
+    """``promote``: человеческое повышение ``preliminary`` → ``evaluated`` (I6/I7/I14).
+
+    Резолвит хранилище как ``review``, берёт :func:`core.pipeline.review_queue` и
+    повышает :func:`core.pipeline.promote_batch`:
+
+    * ``--param`` задан — повышаются только пары ``(product_id, param_id)`` очереди с
+      указанными ``param_id``;
+    * иначе — **все** элементы очереди.
+
+    ``--actor`` обязателен и непуст (I6/I7). Вердикт переаттестации — явный ``--status``;
+    **без** ``--status`` он берётся из ``cell.status``. При ``--validated-only`` (дефолт)
+    отсутствие вердикта у ``preliminary``-ячейки → отказ ``I14`` (вердикт **не
+    выдумывается**); ``--no-validated-only`` допускает ``evaluated`` без вердикта (первый
+    шаг цикла §1.4). Отказы попадают в ``skipped`` с причиной; если не повышено **ни
+    одной** ячейки — :data:`EXIT_ERROR`.
+
+    :returns: :data:`EXIT_OK`, если повышена хотя бы одна ячейка; иначе :data:`EXIT_ERROR`.
+    """
+    db_path = _resolve_db_path(args)
+    run_id = args.run_id
+    target_status = Status(args.status) if args.status else None
+    wanted_params = set(args.param or [])
+    result: PromotionResult | None = None
+    target_count = 0
+    with build_store(db_path, profile=args.profile) as store:
+        if run_id is None:
+            run_id = _infer_run_id(store)
+        store.read_manifest(run_id)  # валидация: прогон существует
+        queue = review_queue(store, run_id)
+        if wanted_params:
+            targets = [
+                (item.product_id, item.param_id)
+                for item in queue
+                if item.param_id in wanted_params
+            ]
+        else:
+            targets = [(item.product_id, item.param_id) for item in queue]
+        target_count = len(targets)
+        statuses = (
+            {pair: target_status for pair in targets}
+            if target_status is not None
+            else {}
+        )
+        try:
+            result = promote_batch(
+                store=store,
+                run_id=run_id,
+                items=targets,
+                actor=args.actor,
+                notes=args.notes,
+                validated_only=args.validated_only,
+                statuses=statuses,
+            )
+        except ReviewError as exc:
+            _emit_error(args, exc.code or "I14", _concise(exc))
+            return EXIT_ERROR
+
+    assert result is not None  # promote_batch выполняется безусловно (см. выше)
+    payload: dict[str, Any] = {
+        "ok": bool(result.promoted),
+        "run_id": run_id,
+        "actor": args.actor,
+        "status": target_status.value if target_status is not None else None,
+        "validated_only": args.validated_only,
+        "requested": target_count,
+        "promoted": len(result.promoted),
+        "promoted_cells": [
+            {
+                "product_id": cell.product_id,
+                "param_id": cell.param_id,
+                "status": cell.status.value if cell.status is not None else None,
+            }
+            for cell in result.promoted
+        ],
+        "skipped": [
+            {"product_id": product_id, "param_id": param_id, "reason": reason}
+            for product_id, param_id, reason in result.skipped
+        ],
+        "errors": list(result.errors),
+    }
+    if args.json:
+        _print_json(payload)
+    else:
+        _print_promote(payload)
+    return EXIT_OK if result.promoted else EXIT_ERROR
+
+
 # ---------------------------------------------------------------------------
 # Помощники команд
 # ---------------------------------------------------------------------------
@@ -741,6 +971,112 @@ def _artifacts_payload(artifacts: Any) -> dict[str, str | None]:
         "diff": _path(artifacts.diff),
         "manifest": _path(artifacts.manifest),
     }
+
+
+def _search_adapter_configured(adapter: Any) -> bool:
+    """Готов ли реальный поисковый адаптер к вызовам (есть зависимость и учётные данные).
+
+    Проверяет ``available`` и наличие ``api_key`` (``YANDEX_SEARCH_API_KEY``): без ключа
+    реальный SERP-вызов невозможен, и кандидаты не выдумываются (I19). Для инъектированного
+    тестового шва эта проверка не применяется (см. :func:`cmd_discover`).
+    """
+    return bool(getattr(adapter, "available", True)) and bool(
+        getattr(adapter, "api_key", None)
+    )
+
+
+def _discover_seed_queries(passports_dir: str | Path | None) -> list[str]:
+    """Собирает seed-запросы из ``doc_domains`` паспортов (только подсказки, I19).
+
+    Возвращает URL-кандидаты (:func:`core.config.passport_urls`) в детерминированном
+    порядке: продукты по имени, домены — как в ``doc_domains``. Домены **не фетчатся**:
+    это лишь подсказки для ручного/автоматического поиска, не evidence.
+    """
+    if passports_dir is None:
+        return []
+    passports = _load_passports_dir(passports_dir)
+    seeds: list[str] = []
+    for product_id in sorted(passports):
+        for url in passport_urls(passports[product_id]):
+            if url not in seeds:
+                seeds.append(url)
+    return seeds
+
+
+def _review_item_payload(item: ReviewItem) -> dict[str, Any]:
+    """JSON-совместимое представление :class:`~core.pipeline.review.ReviewItem`."""
+    return {
+        "product_id": item.product_id,
+        "param_id": item.param_id,
+        "state": item.state.value,
+        "status": item.status.value if item.status is not None else None,
+        "reason": item.reason,
+        "evidence_count": item.evidence_count,
+        "index_build_id": item.index_build_id,
+    }
+
+
+def _print_discover(payload: dict[str, Any]) -> None:
+    """Человекочитаемый вывод ``discover``: кандидаты-гипотезы (не evidence, I19)."""
+    lines = [
+        f"queries: {len(payload.get('query', []))}",
+        f"search_calls: {payload.get('search_calls', 0)}",
+        f"termination_reason: {payload.get('termination_reason')}",
+        f"candidates: {len(payload.get('candidates', []))}",
+    ]
+    for candidate in payload.get("candidates", []):
+        urls = candidate.get("source_urls") or []
+        url = urls[0] if urls else "—"
+        lines.append(
+            f"- {candidate['param_id']}\t{candidate['title']}\t{url}"
+            f"\tconfidence={candidate['confidence']}"
+        )
+    if not payload.get("candidates"):
+        lines.append("candidates: none — гипотез не найдено (evidence не создаётся, I19)")
+    lines.append(f"note: {payload.get('note', '')}")
+    sys.stdout.write("\n".join(lines) + "\n")
+
+
+def _print_review(payload: dict[str, Any]) -> None:
+    """Человекочитаемый вывод ``review``: очередь ревью (Ш7/G3)."""
+    lines = [
+        f"run_id: {payload['run_id']}",
+        f"queue: {payload['count']} item(s)",
+    ]
+    if not payload["items"]:
+        lines.append("queue empty: нет ячеек, требующих ревью (preliminary/❓, Ш7/G3)")
+    for item in payload["items"]:
+        status = item["status"] if item["status"] is not None else "—"
+        lines.append(
+            f"- {item['product_id']}/{item['param_id']}\t{item['state']}\t"
+            f"{status}\t{item['reason']}"
+        )
+    sys.stdout.write("\n".join(lines) + "\n")
+
+
+def _print_promote(payload: dict[str, Any]) -> None:
+    """Человекочитаемый вывод ``promote``: повышение + отказы с причинами (I6/I7/I14)."""
+    lines = [
+        f"run_id: {payload['run_id']}",
+        f"actor: {payload['actor']}",
+        f"requested: {payload['requested']}",
+        f"promoted: {payload['promoted']}",
+    ]
+    if not payload["promoted"] and not payload["skipped"] and not payload["errors"]:
+        lines.append(
+            "нечего повышать: очередь ревью пуста либо не найдено preliminary-ячеек"
+        )
+    for cell in payload["promoted_cells"]:
+        lines.append(
+            f"promoted {cell['product_id']}/{cell['param_id']} -> {cell['status']}"
+        )
+    for item in payload["skipped"]:
+        lines.append(
+            f"skip {item['product_id']}/{item['param_id']}: {item['reason']}"
+        )
+    for error in payload["errors"]:
+        lines.append(f"error: {error}")
+    sys.stdout.write("\n".join(lines) + "\n")
 
 
 def _restore_plan_inputs(
@@ -1416,6 +1752,120 @@ def build_parser() -> argparse.ArgumentParser:
     _add_common(p_report)
     p_report.set_defaults(handler=cmd_report)
 
+    # discover ------------------------------------------------------------ #
+    p_discover = sub.add_parser(
+        "discover",
+        help="разведка кандидатов внешним поиском (I19/G2: только гипотезы, без evidence)",
+    )
+    p_discover.add_argument(
+        "--query",
+        action="append",
+        default=None,
+        metavar="Q",
+        help="поисковый запрос (можно повторять); выход — гипотезы-кандидаты, не evidence (I19)",
+    )
+    p_discover.add_argument(
+        "--lang",
+        choices=["ru", "en"],
+        default="ru",
+        help="язык строковых запросов (дефолт ru)",
+    )
+    p_discover.add_argument(
+        "--limit",
+        type=int,
+        default=10,
+        help="лимит результатов на запрос (дефолт 10)",
+    )
+    p_discover.add_argument(
+        "--search-adapter",
+        dest="search_adapter_kind",
+        choices=list(SUPPORTED_SEARCH_ADAPTERS),
+        default="yandex",
+        help="внешний поисковый адаптер (дефолт yandex)",
+    )
+    p_discover.add_argument(
+        "--passports-dir",
+        default=None,
+        help="каталог паспортов: doc_domains используется ТОЛЬКО как seed-подсказки "
+        "запросов и не фетчится (I19)",
+    )
+    _add_common(p_discover)
+    p_discover.set_defaults(handler=cmd_discover)
+
+    # review -------------------------------------------------------------- #
+    p_review = sub.add_parser(
+        "review", help="очередь ревью: preliminary-контур + ❓-кандидаты (Ш7/G3)"
+    )
+    review_source = p_review.add_mutually_exclusive_group(required=True)
+    review_source.add_argument("--db", default=None, help="путь к cohound.db прогона")
+    review_source.add_argument(
+        "--runs-dir",
+        default=None,
+        help="каталог прогонов (runs/{run_id}/cohound.db; требует --run-id)",
+    )
+    p_review.add_argument(
+        "--run-id",
+        default=None,
+        help="run_id (обязателен с --runs-dir; с --db выводится, если прогон один)",
+    )
+    _add_common(p_review)
+    p_review.set_defaults(handler=cmd_review)
+
+    # promote ------------------------------------------------------------- #
+    p_promote = sub.add_parser(
+        "promote",
+        help="человеческое повышение preliminary → evaluated (I6/I7/I14)",
+    )
+    promote_source = p_promote.add_mutually_exclusive_group(required=True)
+    promote_source.add_argument("--db", default=None, help="путь к cohound.db прогона")
+    promote_source.add_argument(
+        "--runs-dir",
+        default=None,
+        help="каталог прогонов (runs/{run_id}/cohound.db; требует --run-id)",
+    )
+    p_promote.add_argument(
+        "--run-id",
+        default=None,
+        help="run_id (обязателен с --runs-dir; с --db выводится, если прогон один)",
+    )
+    p_promote.add_argument(
+        "--actor",
+        required=True,
+        help="человек, выполняющий промоушен (I6/I7; обязателен и непуст)",
+    )
+    p_promote.add_argument(
+        "--param",
+        action="append",
+        default=None,
+        metavar="PARAM_ID",
+        help="ограничить повышение этими param_id (можно повторять; иначе — вся очередь)",
+    )
+    p_promote.add_argument(
+        "--status",
+        choices=list(_PROMOTE_STATUSES),
+        default=None,
+        help="явный вердикт переаттестации; без него берётся из ячейки (а при "
+        "--validated-only отсутствие вердикта → отказ I14)",
+    )
+    p_promote.add_argument(
+        "--validated-only",
+        dest="validated_only",
+        action="store_true",
+        default=True,
+        help="дефолт: без валидированного вердикта повышение запрещено (I14)",
+    )
+    p_promote.add_argument(
+        "--no-validated-only",
+        dest="validated_only",
+        action="store_false",
+        help="разрешить evaluated без вердикта (первый шаг цикла §1.4, set-status позднее)",
+    )
+    p_promote.add_argument(
+        "--notes", default=None, help="заметка к решению (аудит-след)"
+    )
+    _add_common(p_promote)
+    p_promote.set_defaults(handler=cmd_promote)
+
     # deploy-check -------------------------------------------------------- #
     p_deploy = sub.add_parser(
         "deploy-check",
@@ -1445,6 +1895,7 @@ def main(
     retrieval_profile: Any = None,
     cutoff_k: int | None = None,
     clock: Clock | None = None,
+    search_adapter: SearchAdapterPort | None = None,
 ) -> int:
     """Точка входа CLI. Возвращает код выхода (``0`` — успех).
 
@@ -1465,6 +1916,8 @@ def main(
     :param retrieval_profile: зафиксированный профиль R0/R1/R2 (I16) для фаз ``run``.
     :param cutoff_k: зафиксированный ``retrieval_cutoff_K`` (I20) для фаз ``run``.
     :param clock: часы прогона (детерминизм ``created_at`` манифеста, тесты).
+    :param search_adapter: инъекция готового ``SearchAdapterPort`` для ``discover``
+        (тесты без сети/учётных данных; провайдерская специфика — в адаптере).
     """
     parser = build_parser()
     try:
@@ -1473,7 +1926,8 @@ def main(
         return _system_exit_code(exc)
 
     # Инъекция швов команд (тесты без сети/внешних систем).
-    # `deploy-check` использует диагностические швы; `run` — ports/phases/plan-фабрики.
+    # `deploy-check` использует диагностические швы; `run` — ports/phases/plan-фабрики;
+    # `discover` — готовый поисковый адаптер (иначе собирается реальный `yandex`).
     args.deploy_transport = deploy_transport
     args.gateway_factory = gateway_factory
     args.ports = ports
@@ -1482,6 +1936,7 @@ def main(
     args.retrieval_profile = retrieval_profile
     args.cutoff_k = cutoff_k
     args.clock = clock
+    args.search_adapter = search_adapter
 
     if getattr(args, "command", None) is None:
         parser.print_help()

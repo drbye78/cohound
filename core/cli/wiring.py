@@ -46,6 +46,7 @@ from core.adapters.remote_gateway import (
 )
 from core.adapters.remote_registry import RemoteRegistry
 from core.adapters.remote_search import RemoteSearch
+from core.adapters.search_yandex import YandexSearchAdapter
 from core.config.deploy import DeployConfig, is_split, load_deploy_config
 from core.pipeline import Ports, Runner
 from core.pipeline.runner import PHASES, Clock, PhaseFn
@@ -53,6 +54,7 @@ from core.ports.extractor import ExtractorPort
 from core.ports.gateway import ContentGateway
 from core.ports.llm import EvaluatorPort
 from core.ports.registry import RegistryFetcherPort
+from core.ports.search import SearchAdapterPort
 from core.ports.types import ExtractedDoc, RawPage
 from core.store.sqlite_store import SqliteStore
 
@@ -60,12 +62,14 @@ __all__ = [
     "LOCAL_PROFILE",
     "SPLIT_PROFILE",
     "SUPPORTED_PROFILES",
+    "SUPPORTED_SEARCH_ADAPTERS",
     "DEFAULT_REGISTRY_ID",
     "PHASES",
     "WiringError",
     "run_db_path",
     "build_store",
     "build_gateway",
+    "build_search_adapter",
     "build_adapters",
     "build_runner",
     "manifest_deploy_fields",
@@ -77,6 +81,10 @@ LOCAL_PROFILE = "local"
 SPLIT_PROFILE = "split"
 #: Известные профили развёртывания, выбираемые CLI (``03`` §D.5/D.6).
 SUPPORTED_PROFILES: tuple[str, ...] = (LOCAL_PROFILE, SPLIT_PROFILE)
+
+#: Известные внешние поисковые адаптеры для ``hound discover`` (``03`` §D.6).
+#: Провайдер — данные-конфигурация, а не предметная категория (§1.3).
+SUPPORTED_SEARCH_ADAPTERS: tuple[str, ...] = ("yandex",)
 
 #: Идентификатор реестра по умолчанию для remote-прокси (данные; ``deploy.yaml``
 #: в модели ``DeployConfig`` не несёт ``registry_fetchers`` — см. ГЭП в
@@ -158,6 +166,25 @@ def build_gateway(
 def _module_installed(name: str) -> bool:
     """Установлен ли модуль (без импорта тяжёлого пакета)."""
     return importlib.util.find_spec(name) is not None
+
+
+def build_search_adapter(adapter: str) -> SearchAdapterPort:
+    """Собирает внешний поисковый адаптер по имени для ``hound discover`` (``03`` §D.6).
+
+    Провайдер — данные-конфигурация (не предметная категория, §1.3). Реальный адаптер
+    подтягивает ``httpx`` **лениво**; готовность проверяется свойством ``available`` у
+    вызывающего (CLI). Отсутствие ``httpx``/учётных данных не подменяется выдуманными
+    кандидатами (I19) — это решает :func:`core.cli.main.cmd_discover`.
+
+    :param adapter: имя адаптера из :data:`SUPPORTED_SEARCH_ADAPTERS`.
+    :raises WiringError: неизвестный адаптер.
+    """
+    if adapter == "yandex":
+        return YandexSearchAdapter()
+    raise WiringError(
+        f"неизвестный поисковый адаптер: {adapter!r}; "
+        f"поддерживаются: {', '.join(SUPPORTED_SEARCH_ADAPTERS)}"
+    )
 
 
 #: Формат документа → расширение (роутинг композитного экстрактора на docling).
