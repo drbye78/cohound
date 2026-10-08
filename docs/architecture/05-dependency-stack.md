@@ -77,7 +77,10 @@ CLI-ядро (`pydantic`+`pyyaml`+stdlib) ставится везде; инде�
 | Пакет | Версия | Лицензия | Вердикт | Обоснование |
 |---|---|---|---|---|
 | `sentence-transformers` | 6.1.x | Apache-2.0 ✅ | **a** | инференс bge-m3 / multilingual-e5, локально |
-| модели: `BAAI/bge-m3`, `intfloat/multilingual-e5-large` | — | MIT ✅ | **a** | RU/EN, длинный контекст; финал — R9/R10 (A3) |
+| `BAAI/bge-m3` | — | MIT ✅ | **a** | **основной кандидат** (приоритет RU, EN хорошо): 8192 контекста, dense(+sparse/colbert), 33.7M загрузок HF |
+| `intfloat/multilingual-e5-large` | — | MIT ✅ | **b** | альтернатива (512 контекста, нужны префиксы query:/passage:) |
+| `deepvk/USER-bge-m3` | — | Apache-2.0 ✅ | **b** | RU-специализированный файнтюн bge-m3 (**только ru**, 86★) — кандидат R9/R10, если RU-recall надо усилить; EN просядет → нужен билингвальный напарник |
+| `ai-forever/ru-en-RoSBERTa` | — | MIT ✅ | **b** | ru+en, MIT — альтернативный билингвальный кандидат R9/R10 |
 | `model2vec` | 0.9.x | MIT ✅ | **b** | лёгкий fallback без torch (статичные эмбеддинги, CPU); качество RU 🟡 — как абляция |
 | `FlagEmbedding` | 1.4.x | MIT ✅ | **d** | training-тулкит (deepspeed, flash-attn); для инференса избыточен |
 | `vllm` | 0.31.x | Apache-2.0 ✅ | **a** | self-host сервер, встроенный xgrammar, reproducibility-режимы |
@@ -257,8 +260,39 @@ bump `methodology_version`, обязателен `golden-full` (§13). Поэт�
 
 | # | Вопрос | Метод проверки |
 |---|---|---|
-| V1 | RU/EN-стемминг `tantivy` из Python-биндингов | retrieval-golden (§11.2) |
-| V2 | Колёса `torch`/`sentence-transformers` под Python 3.14 | ✅ **закрыт (2026-10-08):** `torch 2.14.1` и `sentence-transformers 6.1.0` имеют колёса `cp314`; резолв `uv` на 3.14 прошёл. См. `pyproject.toml` + `/tmp/opencode/*.lock` |
-| V3 | RU-качество bge-m3 vs multilingual-e5 | R9/R10 (§16) |
-| V4 | docling offline-веса в контуре + лицензии весов | предзакачка в кэш HF + аудит лицензий |
-| V5 | `scrapy-playwright` 0.0.x на сложных антибот-доменах | пилотный краул 3–5 доменов |
+| V1 | RU/EN-стемминг `tantivy` из Python-биндингов | ✅ **закрыт (2026-10-08):** русский стеммер и стоп-слова доступны нативно — `Filter.stemmer("russian")`, `Filter.stopword("russian")` (tantivy 0.26.2); end-to-end индекс+поиск на смешанном RU/EN корпусе прошёл («экспорт» находит «Экспорт»/«экспорта»). Внешний `snowballstemmer` не нужен |
+| V2 | Колёса `torch`/`sentence-transformers` под Python 3.14 | ✅ **закрыт (2026-10-08):** `torch 2.14.1` и `sentence-transformers 6.1.0` имеют колёса `cp314`; резолв `uv` на 3.14 прошёл. См. `pyproject.toml` |
+| V3 | Выбор RU/EN-эмбеддинга | 🟡 **решение:** RU — абсолютный приоритет, EN — очень хорошо; **основной — `BAAI/bge-m3`** (MIT, 8192 контекста). Подтверждение и сравнение с RU-файнтюнами (`deepvk/USER-bge-m3`, `ai-forever/ru-en-RoSBERTa`) — R9/R10 |
+| V4 | docling offline-веса в контуре + лицензии весов | ⚠️ **механика подтверждена** (см. §7): `huggingface_hub.snapshot_download` при первом PDF-прогоне; PDF-контур требует предзакачанный кэш (`HF_HUB_OFFLINE=1`) + аудит лицензий весов |
+| V5 | `scrapy-playwright` 0.0.x на сложных антибот-доменах | проверка зрелости (lib-3) |
+
+---
+
+## 7. V4 — офлайн-веса docling и лицензии моделей
+
+**Суть.** docling — это не только код (MIT). Для PDF-конвейера он использует ML-модели
+(layout-анализ, распознавание таблиц TableFormer, OCR), которые **скачиваются с Hugging Face
+Hub при первом прогоне**. В РФ-контуре (данные/инфраструктура не выходят за периметр, возм.
+air-gap) сетевого доступа к HF нет — либо загрузка упадёт, либо произойдёт нежелательное
+обращение наружу.
+
+**Механика (подтверждена в коде `docling 2.135.0`):**
+- `docling/models/utils/hf_model_download.py` → `huggingface_hub.snapshot_download(repo_id=…, revision=…)`;
+- дефолтные репозитории моделей — `docling-project/docling-models`, `docling-project/TableFormerV2`,
+  `docling-project/CodeFormulaV2`; OCR/VLM-варианты — `ibm-granite/*`, `nvidia/nemotron-ocr-v2` и др.;
+- часть моделей пинится по `revision` (напр. TableFormer `v2.3.0`) — плюс к воспроизводимости;
+- кэш — стандартный HF (`HF_HOME`), полем `local_dir` можно задать свой путь.
+
+**Что делать (план, закрывает V4):**
+1. **Предзакачать** нужные веса на машине с доступом к сети → положить в артефакт-бандл контура.
+2. В контуре выставить `HF_HUB_OFFLINE=1` (и `TRANSFORMERS_OFFLINE=1`) — тогда HF-hub читает
+   **только** локальный кэш и не пытается выйти в сеть. Это и тест «офлайн реально работает».
+3. Указать кэш/пути через `HF_HOME`/`local_dir`; зафиксировать `revision` каждой модели в
+   `run_manifest.yaml` (§13, воспроизводимость R7).
+4. **Аудит лицензий весов** — лицензия кода (MIT) ≠ лицензия весов. Для каждой модели в бандле
+   зафиксировать repo_id + revision + лицензию в `THIRD_PARTY_NOTICES.md` до редистрибуции.
+
+**Область действия:** V4 касается **только PDF-контура** (`docling-slim[standard]`, extra
+`extract-pdf`). Office-форматы (DOCX/PPTX/XLSX, extra `extract`, `docling-slim[format-office]`)
+парсятся **без ML-моделей** — офлайн из коробки, веса не нужны. Поэтому блокер M0 по PDF
+(тест на 3–5 мануалах, §3.2/§16) включает и проверку офлайн-бандла весов.
