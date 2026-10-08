@@ -397,6 +397,9 @@ def main() -> int:
     section("CLI-поверхность (03 §D.6) — T10.4")
     check("commands: полный набор resolve/plan/run/discover/review/promote/…", lambda: _cli_surface())
 
+    section("Лексический индекс (W8) — двойной профиль")
+    check("lexical: профили stemmed/identifier/raw/ngram + порт", lambda: _lexical_profiles())
+
     print(f"\n{CHECKS - len(FAILURES)}/{CHECKS} проверок пройдено")
     if FAILURES:
         print("\nПровалы:")
@@ -2159,6 +2162,30 @@ def _cli_surface() -> None:
     adapter = wiring.build_search_adapter(wiring.SUPPORTED_SEARCH_ADAPTERS[0])
     if not isinstance(adapter, SearchAdapterPort):
         raise AssertionError("build_search_adapter обязан вернуть SearchAdapterPort")
+
+
+def _lexical_profiles() -> None:
+    """Лексический индекс: двойной профиль (stemmed + raw/ngram) и конформность порту."""
+    from core.adapters.lexical_tantivy import _PROFILES, TantivyLexicalIndex
+    from core.ports.lexical_index import LexicalIndexPort
+
+    for profile in ("stemmed", "identifier", "raw", "ngram"):
+        if profile not in _PROFILES:
+            raise AssertionError(f"профиль лексического индекса отсутствует: {profile}")
+
+    default = TantivyLexicalIndex(index_path=None)
+    if default.profile != "stemmed":
+        raise AssertionError("профиль по умолчанию обязан остаться stemmed")
+    if not isinstance(default, LexicalIndexPort):
+        raise AssertionError("TantivyLexicalIndex обязан реализовывать LexicalIndexPort")
+    ngram = TantivyLexicalIndex(index_path=None, profile="ngram")
+    if ngram.profile != "ngram":
+        raise AssertionError("ngram-профиль не принят конструктором")
+    try:
+        TantivyLexicalIndex(index_path=None, profile="nonsense")
+        raise AssertionError("неизвестный профиль обязан быть отвергнут")
+    except ValueError:
+        pass
 
 
 if __name__ == "__main__":
