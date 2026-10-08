@@ -396,6 +396,7 @@ def main() -> int:
 
     section("CLI-поверхность (03 §D.6) — T10.4")
     check("commands: полный набор resolve/plan/run/discover/review/promote/…", lambda: _cli_surface())
+    check("run-dir: снимок входов (run.yaml/plan_inputs.json) читается (03 §A.2)", lambda: _cli_run_self_contained())
 
     section("Лексический индекс (W8) — двойной профиль")
     check("lexical: профили stemmed/identifier/raw/ngram + порт", lambda: _lexical_profiles())
@@ -2167,6 +2168,95 @@ def _cli_surface() -> None:
         adapter = wiring.build_search_adapter(name)
         if not isinstance(adapter, SearchAdapterPort):
             raise AssertionError(f"build_search_adapter({name!r}) не SearchAdapterPort")
+
+
+def _cli_run_self_contained() -> None:
+    """Самодостаточность прогона (03 §A.2): ``plan_inputs.json`` читается и валидируется.
+
+    Проверяется контракт границы читатель/формат без полной сборки ``RunInputs``:
+    корректный снимок даёт каталог/веса/когорту; чужая версия, чужой ``run_id`` и
+    отсутствующий файл — ``None`` (значения не подставляются, не выдумываются).
+    """
+    import json as _json
+    import tempfile as _tempfile
+    from pathlib import Path as _Path
+
+    import importlib as _il
+
+    main = _il.import_module("core.cli.main")
+    for const in (
+        "RUN_YAML_FILENAME",
+        "PLAN_INPUTS_FILENAME",
+        "PLAN_INPUTS_SNAPSHOT_VERSION",
+    ):
+        if not hasattr(main, const):
+            raise AssertionError(f"core.cli.main.{const} отсутствует (03 §A.2)")
+
+    from core.domain.models import CatalogRow, Cohort
+
+    row = CatalogRow.model_validate(
+        {
+            "param_id": "p_selfcheck",
+            "title": "T",
+            "module": "m",
+            "group": "g",
+            "importance": "Баз",
+            "param_type": "fact",
+            "rule": "r",
+        }
+    )
+    cohort = Cohort.model_validate(
+        {
+            "case_id": "case_selfcheck",
+            "frozen_at": "2026-01-01",
+            "entries": [
+                {
+                    "product_id": "p1",
+                    "role_overlap": 0.5,
+                    "selection_reason": "r",
+                    "anchor_relation": "anchor",
+                }
+            ],
+        }
+    )
+    payload = {
+        "snapshot_version": main.PLAN_INPUTS_SNAPSHOT_VERSION,
+        "run_id": "run_selfcheck",
+        "params": [row.model_dump(mode="json")],
+        "module_weights": {"m": 1.0},
+        "renormalized_weights": {"m": 0.5},
+        "cohort": cohort.model_dump(mode="json"),
+    }
+
+    def _write(dir_path, data):
+        target = _Path(dir_path) / main.PLAN_INPUTS_FILENAME
+        target.write_text(_json.dumps(data, ensure_ascii=False), encoding="utf-8")
+
+    with _tempfile.TemporaryDirectory() as td:
+        _write(td, payload)
+        loaded = main._load_plan_inputs_snapshot(td, "run_selfcheck")
+        if loaded is None:
+            raise AssertionError("валидный снимок не прочитан")
+        catalog, weights, restored = loaded
+        if set(catalog) != {row.param_id}:
+            raise AssertionError("каталог из снимка восстановлен неверно")
+        if weights != {"m": 0.5}:
+            raise AssertionError(f"веса из снимка неверны: {weights!r}")
+        if restored.case_id != cohort.case_id:
+            raise AssertionError("когорта из снимка восстановлена неверно")
+
+        # Чужой run_id и чужая версия — не подставляем.
+        if main._load_plan_inputs_snapshot(td, "other_run") is not None:
+            raise AssertionError("чужой run_id должен давать None")
+
+    with _tempfile.TemporaryDirectory() as td:
+        _write(td, {**payload, "snapshot_version": 999})
+        if main._load_plan_inputs_snapshot(td, "run_selfcheck") is not None:
+            raise AssertionError("несовместимая версия снимка должна давать None")
+
+    with _tempfile.TemporaryDirectory() as td:
+        if main._load_plan_inputs_snapshot(td, "run_selfcheck") is not None:
+            raise AssertionError("отсутствующий снимок должен давать None")
 
 
 def _lexical_profiles() -> None:
