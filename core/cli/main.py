@@ -766,7 +766,8 @@ def cmd_discover(args: argparse.Namespace) -> int:
                 args,
                 "I19",
                 "поисковый адаптер недоступен: нет httpx либо учётных данных "
-                "(YANDEX_SEARCH_API_KEY/YANDEX_FOLDER_ID); кандидаты не выдумываются",
+                "(yandex: YANDEX_SEARCH_API_KEY/YANDEX_FOLDER_ID; "
+                "glm: GLM_SEARCH_API_KEY); кандидаты не выдумываются",
             )
             return EXIT_ERROR
     if not getattr(adapter, "available", True):

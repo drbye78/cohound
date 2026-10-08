@@ -202,6 +202,20 @@ def test_discover_unknown_adapter_is_usage_error() -> None:
     )
 
 
+def test_supported_search_adapters_include_glm_and_yandex() -> None:
+    """Registry: оба адаптера (yandex=serp, glm=llm_grounding) собираемы и конформны порту (I19)."""
+    from core.cli.wiring import SUPPORTED_SEARCH_ADAPTERS, build_search_adapter
+    from core.ports.search import SearchAdapterPort
+
+    assert set(SUPPORTED_SEARCH_ADAPTERS) >= {"yandex", "glm"}
+    for name in SUPPORTED_SEARCH_ADAPTERS:
+        adapter = build_search_adapter(name)
+        assert isinstance(adapter, SearchAdapterPort), name
+        # Кандидаты, не evidence: у адаптера нет поверхности записи/evidence (I19).
+        assert not hasattr(adapter, "save_cell")
+        assert not hasattr(adapter, "add_evidence")
+
+
 def test_discover_rejects_store_flags(capsys: pytest.CaptureFixture[str]) -> None:
     """У ``discover`` нет поверхности записи в store: ``--db`` — usage-ошибка (I19)."""
     asserted = main(["discover", "--query", "q1", "--db", "x.db"])
