@@ -2159,9 +2159,14 @@ def _cli_surface() -> None:
         raise AssertionError(f"CLI-команды отсутствуют: {sorted(missing)}")
     if not getattr(wiring, "SUPPORTED_SEARCH_ADAPTERS", ()):
         raise AssertionError("SUPPORTED_SEARCH_ADAPTERS пуст")
-    adapter = wiring.build_search_adapter(wiring.SUPPORTED_SEARCH_ADAPTERS[0])
-    if not isinstance(adapter, SearchAdapterPort):
-        raise AssertionError("build_search_adapter обязан вернуть SearchAdapterPort")
+    if "yandex" not in wiring.SUPPORTED_SEARCH_ADAPTERS:
+        raise AssertionError("адаптер yandex не зарегистрирован")
+    if "glm" not in wiring.SUPPORTED_SEARCH_ADAPTERS:
+        raise AssertionError("адаптер glm не зарегистрирован")
+    for name in wiring.SUPPORTED_SEARCH_ADAPTERS:
+        adapter = wiring.build_search_adapter(name)
+        if not isinstance(adapter, SearchAdapterPort):
+            raise AssertionError(f"build_search_adapter({name!r}) не SearchAdapterPort")
 
 
 def _lexical_profiles() -> None:
