@@ -49,6 +49,13 @@ from core.pipeline.retrieve import (
     retrieve,
     rrf_fuse_chunks,
 )
+from core.pipeline.experiments import (
+    DEFAULT_PROFILES,
+    ExperimentReport,
+    ProfileExperiment,
+    load_retrieval_golden,
+    run_retrieval_experiment,
+)
 from core.pipeline.plan import RunPlan, derive_run_id, load_plan, plan
 from core.pipeline.registry import (
     registry_covered_params,
@@ -120,4 +127,10 @@ __all__ = [
     "PROFILE_DESCRIPTIONS",
     "retrieve",
     "rrf_fuse_chunks",
+    # experiments (T8.6, R9/R10)
+    "DEFAULT_PROFILES",
+    "ExperimentReport",
+    "ProfileExperiment",
+    "load_retrieval_golden",
+    "run_retrieval_experiment",
 ]
