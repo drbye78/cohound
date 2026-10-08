@@ -26,9 +26,21 @@
 | `torch` / `sentence-transformers` | совместимость с 3.14 🟡 | проверить колёса перед пином; при отсутствии — venv на 3.12/3.13 для индекс-контура |
 | `vllm` | `<3.15` ✅ | совместим (но живёт в отдельном GPU-Docker, не в основном venv) |
 
-**Следствие:** тяжёлые ML-зависимости (torch/vLLM/docling) не обязаны разделять venv с CLI.
+**Следствие:** тяжёлые ML-зависимости (torch/vLLM) не обязаны разделять venv с CLI.
 CLI-ядро (`pydantic`+`pyyaml`+stdlib) ставится везде; индекс- и GPU-контуры —
 изолированные окружения/образы. Это согласуется с D1 (commodity за портами) и A1.
+
+**Проверено резолвом `uv` на Python 3.14 (2026-10-08):** все лёгкие extras (ядро + `retrieval`,
+`crawl`, `extract`, `safety`, `ops`, `dev`, `ann`, `fallback`, `embed-lite`) разрешаются;
+`torch`/`sentence-transformers` (`embed`) — тоже (колёса `cp314` есть). Полный совместный
+набор — 137 пакетов, без torch по умолчанию. `extract-pdf` намеренно тяжёлый (torch+CUDA).
+
+**Находка (docling):** пакет `docling` = ровно `docling-slim[standard]` и тянет
+**torch+torchvision+CUDA** (~гигабайты). Для Office (DOCX/PPTX/XLSX) это не нужно:
+`docling-slim[format-office]` ставит только python-docx/python-pptx/openpyxl/pylatexenc.
+`docling-slim` предоставляет namespace-импорт `docling` (`docling/document_converter.py`) —
+адаптер `extract_document.py` менять не нужно. Разделены extras `extract` (лёгкий) и
+`extract-pdf` (тяжёлый, отдельное окружение).
 
 ---
 
@@ -94,7 +106,8 @@ CLI-ядро (`pydantic`+`pyyaml`+stdlib) ставится везде; инде�
 | Пакет | Версия | Лицензия | Вердикт | Обоснование |
 |---|---|---|---|---|
 | `trafilatura` | 2.3.x | Apache-2.0 ✅ | **a** | main-content → markdown, заголовки/списки/таблицы |
-| `docling` (+`docling-slim[format-office]`) | 2.135.x | MIT ✅ | **a** | PDF layout+tables; DOCX/PPTX/XLSX нативно (бэкенды python-docx/-pptx/openpyxl) |
+| `docling-slim[format-office]` + `rtree` | 2.135.x | MIT ✅ | **a** | DOCX/PPTX/XLSX нативно (python-docx/-pptx/openpyxl), **без torch**; namespace-импорт `docling`. **`rtree` обязателен** — `[format-office]` не покрывает импорт `DocumentConverter` |
+| `docling-slim[standard]` | 2.135.x | MIT ✅ | **a** (отдельное окружение) | PDF layout+tables; **тянет torch+torchvision+CUDA**; обязателен для PDF-контура (блокер M0) |
 | `lxml` | 6.1.x | BSD-3 ✅ | **a** (транзитивно) | уже в дереве trafilatura/Scrapy |
 | `openpyxl` | 3.1.x | MIT ✅ | **a** | XLSX-отчёты; Office-бэкенд docling |
 | `python-docx` / `python-pptx` | 1.2.x / 1.0.x | MIT ✅ | **b** (через docling) | отдельно не нужны |
@@ -209,12 +222,14 @@ CLI-ядро (`pydantic`+`pyyaml`+stdlib) ставится везде; инде�
 
 ## 4. Предлагаемый набор MVP
 
-**Runtime (`a`):** `pydantic` · `pyyaml` · `numpy` · `tantivy` · `trafilatura` · `docling`
-(+`docling-slim[format-office]`) · `Scrapy`+`scrapy-playwright`+`playwright` · `httpx` · `nh3` ·
+**Runtime (`a`):** `pydantic` · `pyyaml` · `numpy` · `tantivy` · `trafilatura` ·
+`docling-slim[format-office]` · `Scrapy`+`scrapy-playwright`+`playwright` · `httpx` · `nh3` ·
 `defusedxml` · `openpyxl` · `tenacity` · `structlog` · stdlib (`sqlite3`, `csv`, `argparse`, `json`).
+Собирается как extras в `pyproject.toml`: `retrieval`, `crawl`, `extract`, `safety`, `ops`.
 
 **Отдельные окружения (не в CLI-venv):**
-- **Индекс-контур:** `sentence-transformers` (+torch) — изолированный venv/образ.
+- **PDF layout:** `docling-slim[standard]` (torch+CUDA) — extra `extract-pdf`, блокер M0.
+- **Индекс-контур:** `sentence-transformers` (+torch) — extra `embed`, изолированный venv/образ.
 - **GPU-инференс:** `vLLM`/`SGLang` — отдельный Docker-образ на GPU.
 - **Опц. CPU-инференс:** `llama-cpp-python` (GGUF) для тестов порта.
 
@@ -243,7 +258,7 @@ bump `methodology_version`, обязателен `golden-full` (§13). Поэт�
 | # | Вопрос | Метод проверки |
 |---|---|---|
 | V1 | RU/EN-стемминг `tantivy` из Python-биндингов | retrieval-golden (§11.2) |
-| V2 | Колёса `torch`/`sentence-transformers` под Python 3.14 | пробная установка; иначе venv 3.12/3.13 |
+| V2 | Колёса `torch`/`sentence-transformers` под Python 3.14 | ✅ **закрыт (2026-10-08):** `torch 2.14.1` и `sentence-transformers 6.1.0` имеют колёса `cp314`; резолв `uv` на 3.14 прошёл. См. `pyproject.toml` + `/tmp/opencode/*.lock` |
 | V3 | RU-качество bge-m3 vs multilingual-e5 | R9/R10 (§16) |
 | V4 | docling offline-веса в контуре + лицензии весов | предзакачка в кэш HF + аудит лицензий |
 | V5 | `scrapy-playwright` 0.0.x на сложных антибот-доменах | пилотный краул 3–5 доменов |
