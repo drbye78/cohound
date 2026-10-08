@@ -158,3 +158,46 @@ def is_cyrillic(text: str) -> bool:
 
 def is_latin(text: str) -> bool:
     return any(char.isalpha() and "a" <= char.lower() <= "z" for char in text)
+
+
+# --------------------------------------------------------------------------- #
+# Лёгкая лексическая токенизация (для BM25-контура и сопоставления concept_terms)
+# Происхождение: адаптировано из проекта gtm (`scripts/kb_poc.py`, собственная
+# разработка) — см. THIRD_PARTY_NOTICES.md.
+# --------------------------------------------------------------------------- #
+
+_TOKEN_RE = re.compile(r"[а-яёa-z0-9]+", re.IGNORECASE)
+
+# Частые русские флективные окончания — обрезаются для грубого «стемминга».
+_RU_SUFFIXES = (
+    "иями", "ями", "ами", "ого", "ему", "ому", "ыми", "ими", "ая", "яя", "ою", "ею",
+    "ий", "ый", "ой", "ем", "ам", "ах", "ям", "ев", "ов", "ие", "ье", "её",
+    "и", "ы", "а", "я", "о", "е", "у", "ю", "ь", "й",
+)
+
+_ALL_STOP_WORDS = RUSSIAN_STOP_WORDS | ENGLISH_STOP_WORDS
+
+
+def normalize_ru_token(token: str) -> str:
+    """Грубая нормализация RU-токена: обрезка частого флективного хвоста.
+
+    Не заменяет настоящий стеммер (tantivy RU/EN, §3.2), но даёт дешёвое
+    сближение форм («перехвата» ≈ «перехват») на лексическом baseline.
+    """
+    t = token.lower()
+    if len(t) > 6:
+        for suffix in _RU_SUFFIXES:
+            if t.endswith(suffix) and len(t) - len(suffix) >= 4:
+                return t[: -len(suffix)]
+    return t
+
+
+def tokenize_lexical(text: str) -> list[str]:
+    """Токенизация для лексического поиска: нижний регистр, нормализация, стоп-слова."""
+    out: list[str] = []
+    for match in _TOKEN_RE.findall(text or ""):
+        token = match.lower()
+        if token in _ALL_STOP_WORDS or len(token) < 2:
+            continue
+        out.append(normalize_ru_token(token))
+    return out

@@ -301,6 +301,11 @@ def main() -> int:
     check("MarkdownChunker: heading_path иерархичен (I17/§3.2)", lambda: _chunker())
     check("DoclingPdfExtractor: грациозная деградация", lambda: _pdf_extractor())
 
+    section("Скопированные утилиты/адаптеры (gtm, авторские) — §11.2/§11.3")
+    check("text_utils: RU-нормализация токенов", lambda: _util_ru_tokenize())
+    check("BM25: продукт-скоупед и детерминизм (I17/R7)", lambda: _bm25())
+    check("retrieval_eval: hit@K/recall@K/MRR (I20)", lambda: _retrieval_eval())
+
     print(f"\n{CHECKS - len(FAILURES)}/{CHECKS} проверок пройдено")
     if FAILURES:
         print("\nПровалы:")
@@ -381,6 +386,56 @@ def _pdf_extractor() -> None:
     _assert(res.text == "")
     _assert(res.error is not None)
     _assert(res.extractor_version == DoclingPdfExtractor.version)
+
+
+def _util_ru_tokenize() -> None:
+    from core.util import text_utils as t
+
+    # Грубый стеммер сближает флективные формы.
+    _assert(t.normalize_ru_token("перехвата") == t.normalize_ru_token("перехват"))
+    tokens = t.tokenize_lexical("Инспекция трафика к LLM через CONNECT-прокси")
+    _assert("LLM".lower() in tokens or "connect" in tokens)
+    _assert(all(tok == tok.lower() for tok in tokens))
+    _assert(not any(tok in {"и", "в", "на", "the", "of"} for tok in tokens))
+
+
+def _bm25() -> None:
+    from core.adapters.lexical_bm25 import Bm25Index, LexicalDoc
+
+    docs = [
+        LexicalDoc("p1#0", "p1", "резервное копирование и восстановление базы"),
+        LexicalDoc("p1#1", "p1", "разграничение прав доступа пользователей"),
+        LexicalDoc("p2#0", "p2", "резервное копирование по расписанию"),
+    ]
+    idx = Bm25Index()
+    idx.index(docs)
+    # Продукт-скоупед: запрос по p1 не возвращает p2 (I17).
+    hits_p1 = idx.search("резервное копирование", product_ids=["p1"], top_k=5)
+    _assert(all(h.product_id == "p1" for h in hits_p1))
+    _assert(bool(hits_p1) and hits_p1[0].chunk_id == "p1#0")
+    # Детерминизм порядка (R7).
+    again = idx.search("резервное копирование", product_ids=["p1"], top_k=5)
+    _assert([h.chunk_id for h in hits_p1] == [h.chunk_id for h in again])
+
+
+def _retrieval_eval() -> None:
+    from core.util.retrieval_eval import GoldenQuery, evaluate_retrieval
+
+    queries = [
+        GoldenQuery("резервное копирование", frozenset({"c1"})),
+        GoldenQuery("права доступа", frozenset({"c2"})),
+        GoldenQuery("absent concept", frozenset({"c9"})),
+    ]
+    ranking = {"резервное копирование": ["c0", "c1"], "права доступа": ["c2"],
+               "absent concept": ["c3"]}
+    report = evaluate_retrieval(queries, lambda q, k: ranking.get(q, []), k=5)
+    _assert(report.k == 5)
+    _assert(abs(report.hit_at_k - 2 / 3) < 1e-9)     # c1 ранк2, c2 ранк1, c9 нет
+    _assert(abs(report.recall_at_k - 2 / 3) < 1e-9)
+    _assert(report.mrr > 0.0)
+    # I20: cut-off K усекает ранжирование.
+    short = evaluate_retrieval(queries, lambda q, k: ranking.get(q, []), k=1)
+    _assert(abs(short.hit_at_k - 1 / 3) < 1e-9)      # только c2 на ранке 1
 
 
 def _db_smoke() -> None:
