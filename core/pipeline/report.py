@@ -37,10 +37,11 @@ stdlib.
 from __future__ import annotations
 
 import csv
+import json
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import yaml
 
@@ -53,6 +54,10 @@ from core.pipeline.compute import (
     publish_warnings,
 )
 
+if TYPE_CHECKING:  # только для аннотаций: без рантайм-связности слоёв
+    from core.pipeline.normalize import RunInputs
+    from core.pipeline.plan import RunPlan
+
 __all__ = [
     "Artifacts",
     "PublishBlockedError",
@@ -62,6 +67,7 @@ __all__ = [
     "INSUFFICIENT_COVERAGE_NOTE",
     "NOT_FOR_PUBLICATION",
     "DIFF_BOUNDARY_FIELDS",
+    "build_manifest",
     "write_run_manifest",
     "render_battle_card",
     "render_nda_questions",
@@ -328,6 +334,256 @@ def _ordered_products(
 # ---------------------------------------------------------------------------
 # run_manifest.yaml
 # ---------------------------------------------------------------------------
+
+
+def _first_present(*values: Any) -> Any:
+    """Первое непустое (не ``None`` и не пустая строка) значение цепочки (провенанс)."""
+    for value in values:
+        if value is None:
+            continue
+        if isinstance(value, str) and not value.strip():
+            continue
+        return value
+    return None
+
+
+def _embed_json(value: Any) -> str | None:
+    """Детерминированный JSON-фрагмент манифеста (R7/§13).
+
+    Готовая строка возвращается как есть; словарь/список сериализуется с
+    ``ensure_ascii=False`` и ``sort_keys=True`` — одинаковый вход даёт байт-в-байт
+    одинаковую строку. ``None`` остаётся ``None``.
+    """
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return value
+    return json.dumps(value, ensure_ascii=False, sort_keys=True)
+
+
+def _as_ranking_policy(value: Any) -> RankingPolicy | None:
+    """Приводит ранжирование к :class:`RankingPolicy` (``None`` — если не задано)."""
+    if value is None:
+        return None
+    if isinstance(value, RankingPolicy):
+        return value
+    return RankingPolicy(str(value))
+
+
+def _coerce_int(value: Any) -> int | None:
+    """Приводит ``cutoff_K`` к ``int`` (устойчиво к строковой сериализации)."""
+    if value is None:
+        return None
+    return int(value)
+
+
+def build_manifest(
+    *,
+    inputs: RunInputs,
+    plan: RunPlan,
+    bundle: ScoreBundle | None = None,
+    index_build_id: str | None = None,
+    deploy_profile: str | None = None,
+    edge_schema_version: str | None = None,
+    edge_capabilities: Mapping[str, Any] | None = None,
+    created_at: str | None = None,
+) -> RunManifest:
+    """Собирает полностью заполненный :class:`RunManifest` (R7/§13) фазы Ш9.
+
+    Источники по приоритету (провенанс, а не пересчёт):
+
+    * версии — ``inputs.run`` (обогащённый конфиг прогона), затем ``inputs.package`` и
+      ``plan``; пустые значения не затирают уже известные (в т.ч. ``methodology_version``
+      не откатывается к ``"0.0.0"``, если он есть у входа);
+    * идентификация — ``plan`` (``run_id``, ``anchor``, scope-модули) и ``inputs.run``
+      (``case_id``, ``mode``, ``cohort``, ``snapshot_date``);
+    * ранжирование — из ``bundle`` (``requested_ranking``/``computed_ranking``), иначе
+      запрошенное берётся из ``run.ranking_policy``;
+    * индексный/ретривал-контур — ``index_build_id`` и (если заданы) атрибуты run:
+      ``retrieval_profile``/``retrieval_cutoff_K``/``retrieval_params_json`` и версии
+      сборки (``embed_model_id``/``chunker_version``/``extractor_version``/
+      ``lexical_engine_version``/``vector_store``).
+
+    Деплой-провенанс (``deploy_profile``/``edge_schema_version``) заполняется только если
+    соответствующие поля есть в текущей схеме :class:`RunManifest` (defensive: иначе
+    значения уходят в ``edge_capabilities``), что сохраняет совместимость при разносе
+    правок между лейнами.
+
+    Функция детерминирована: все встраиваемые JSON-фрагменты сериализуются
+    ``sort_keys=True`` (R7/§13), списки нормализуются сортировкой; единственный
+    недетерминированный вход — ``created_at`` — передаётся вызывающим (композиция
+    использует ``ctx.clock``).
+    """
+    run: Any = getattr(inputs, "run", inputs)
+    package: Any = getattr(inputs, "package", None)
+
+    methodology_version = _first_present(
+        getattr(run, "methodology_version", None),
+        getattr(inputs, "methodology_version", None),
+        getattr(plan, "methodology_version", None),
+    ) or "0.0.0"
+    package_version = _first_present(
+        getattr(run, "package_version", None),
+        getattr(package, "package_version", None),
+        getattr(inputs, "package_version", None),
+    ) or "0.0.0"
+    catalog_version = _first_present(
+        getattr(run, "catalog_version", None),
+        getattr(plan, "catalog_version", None),
+        getattr(inputs, "catalog_version", None),
+    ) or "0.0.0"
+    status_dict_version = _first_present(
+        getattr(run, "status_dict_version", None),
+        getattr(inputs, "status_dict_version", None),
+    ) or "0.0.0"
+    scoring_policy_version = _first_present(
+        getattr(run, "scoring_policy_version", None),
+        getattr(inputs, "scoring_policy_version", None),
+    ) or "0.0.0"
+
+    created = _first_present(
+        created_at,
+        getattr(run, "created_at", None),
+        getattr(inputs, "created_at", None),
+    ) or ""
+
+    snapshot_raw = getattr(run, "snapshot_date", None)
+    snapshot_date = str(snapshot_raw) if snapshot_raw is not None else None
+
+    anchor_product_id = _first_present(
+        getattr(plan, "anchor", None),
+        getattr(run, "anchor", None),
+    ) or ""
+
+    focus_modules = sorted(str(module) for module in (getattr(plan, "modules", None) or []))
+
+    requested = bundle.requested_ranking if bundle is not None else None
+    if requested is None:
+        requested = getattr(run, "ranking_policy", None)
+    computed = bundle.computed_ranking if bundle is not None else None
+
+    resolved_index_build_id = _first_present(
+        index_build_id,
+        getattr(run, "index_build_id", None),
+        getattr(plan, "index_build_id", None),
+    )
+    retrieval_profile = _first_present(
+        getattr(run, "retrieval_profile", None),
+        getattr(inputs, "retrieval_profile", None),
+        getattr(plan, "retrieval_profile", None),
+    )
+    retrieval_cutoff_K = _coerce_int(
+        _first_present(
+            getattr(run, "retrieval_cutoff_K", None),
+            getattr(inputs, "retrieval_cutoff_K", None),
+            getattr(plan, "retrieval_cutoff_K", None),
+        )
+    )
+    retrieval_params_json = _embed_json(
+        _first_present(
+            getattr(run, "retrieval_params_json", None),
+            getattr(inputs, "retrieval_params_json", None),
+            getattr(plan, "retrieval_params_json", None),
+        )
+    )
+    search_effort_budget_json = _embed_json(
+        _first_present(
+            getattr(run, "search_effort_budget_json", None),
+            getattr(inputs, "search_effort_budget_json", None),
+        )
+    )
+
+    llm_scenarios = list(
+        _first_present(
+            getattr(inputs, "llm_scenarios", None),
+            getattr(plan, "llm_scenarios", None),
+            getattr(run, "llm_scenarios", None),
+        )
+        or []
+    )
+
+    partial_score_raw = _first_present(
+        getattr(run, "partial_score", None),
+        getattr(inputs, "partial_score", None),
+    )
+
+    extra: dict[str, Any] = {}
+    manifest_fields = getattr(RunManifest, "model_fields", {})
+    if "deploy_profile" in manifest_fields:
+        extra["deploy_profile"] = _first_present(
+            deploy_profile,
+            getattr(inputs, "deploy_profile", None),
+            getattr(run, "deploy_profile", None),
+        )
+    if "edge_schema_version" in manifest_fields:
+        extra["edge_schema_version"] = _first_present(
+            edge_schema_version,
+            getattr(inputs, "edge_schema_version", None),
+            getattr(run, "edge_schema_version", None),
+        )
+    edge_caps = edge_capabilities if edge_capabilities is not None else getattr(
+        inputs, "edge_capabilities", None
+    )
+    extra["edge_capabilities"] = dict(edge_caps or {})
+
+    return RunManifest(
+        run_id=str(getattr(plan, "run_id", "")),
+        case_id=str(getattr(run, "case_id", "")),
+        created_at=str(created),
+        mode=getattr(run, "mode", None),  # type: ignore[arg-type] — обязателен в RunConfig/плане
+        methodology_version=str(methodology_version),
+        package_version=str(package_version),
+        catalog_version=str(catalog_version),
+        status_dict_version=str(status_dict_version),
+        scoring_policy_version=str(scoring_policy_version),
+        anchor_product_id=str(anchor_product_id),
+        cohort_ref=_first_present(
+            getattr(run, "cohort", None),
+            getattr(plan, "cohort_ref", None),
+        ),
+        focus_modules=focus_modules,
+        index_build_id=resolved_index_build_id,
+        embed_model_id=_first_present(
+            getattr(run, "embed_model_id", None),
+            getattr(inputs, "embed_model_id", None),
+        ),
+        chunker_version=_first_present(
+            getattr(run, "chunker_version", None),
+            getattr(inputs, "chunker_version", None),
+        ),
+        extractor_version=_first_present(
+            getattr(run, "extractor_version", None),
+            getattr(inputs, "extractor_version", None),
+        ),
+        lexical_engine_version=_first_present(
+            getattr(run, "lexical_engine_version", None),
+            getattr(inputs, "lexical_engine_version", None),
+        ),
+        vector_store=_first_present(
+            getattr(run, "vector_store", None),
+            getattr(inputs, "vector_store", None),
+        ),
+        retrieval_profile=retrieval_profile,
+        retrieval_cutoff_K=retrieval_cutoff_K,
+        retrieval_params_json=retrieval_params_json,
+        search_effort_budget_json=search_effort_budget_json,
+        requested_ranking=_as_ranking_policy(requested),
+        computed_ranking=_as_ranking_policy(computed),
+        llm_scenarios=llm_scenarios,
+        capability_policy=_first_present(
+            getattr(run, "capability_policy", None),
+            getattr(inputs, "capability_policy", None),
+        )
+        or "resolved-only-v1",
+        unknown_policy=_first_present(
+            getattr(run, "unknown_policy", None),
+            getattr(inputs, "unknown_policy", None),
+        )
+        or "excluded",
+        partial_score=0.5 if partial_score_raw is None else float(partial_score_raw),
+        snapshot_date=snapshot_date,
+        **extra,
+    )
 
 
 def write_run_manifest(manifest: RunManifest, out_dir: str | Path) -> Path:

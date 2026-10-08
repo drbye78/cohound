@@ -40,6 +40,7 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from typing import Any
 
 from core.domain import (
     AbsenceRuleType,
@@ -61,7 +62,7 @@ from core.pipeline.retrieve import (
     RetrievalResult,
     retrieve,
 )
-from core.pipeline.runner import run_isolated
+from core.pipeline.runner import PhaseResult, Ports, run_isolated
 from core.pipeline.validate import ChunkLike, ValidationResult, validate_output
 from core.ports.embedder import EmbedderPort
 from core.ports.lexical_index import LexicalIndexPort
@@ -70,15 +71,26 @@ from core.ports.store import StorePort
 from core.ports.vector_index import RetrievedChunk, VectorIndexPort
 
 __all__ = [
+    "DEFAULT_RETRIEVAL_CUTOFF_K",
+    "DEFAULT_RETRIEVAL_PROFILE",
     "EvaluationOutcome",
     "evaluate_batch",
     "evaluate_cell",
+    "evaluate_phase",
     "retrieve_for_cell",
     "run_queries_for_cell",
 ]
 
 #: Максимум запросов на ячейку (S13/I16): title + концепт-термины ru → en.
 MAX_QUERIES = 3
+
+#: Дефолтный профиль ретривала фазы оценки, если оркестратор его не задал (I16).
+#: В проде профиль фиксируется в ``RunConfig``/манифесте; здесь — безопасный baseline.
+DEFAULT_RETRIEVAL_PROFILE: RetrievalProfile = RetrievalProfile.R0
+
+#: Дефолтный ``retrieval_cutoff_K`` фазы оценки, если оркестратор его не задал (I20).
+#: В проде K фиксируется в ``RunConfig``/манифесте; здесь — нейтральный baseline.
+DEFAULT_RETRIEVAL_CUTOFF_K: int = 10
 
 #: Дефолтный ``model_id``, если оценщик не объявил свой (данные, не решение LLM, I21).
 _UNSPECIFIED_MODEL_ID = "unspecified"
@@ -615,3 +627,103 @@ def evaluate_batch(
         )
 
     return run_isolated(params, _one)
+
+
+def evaluate_phase(
+    *,
+    plan: Any,
+    ports: Ports,
+    store: StorePort,
+    run_id: str,
+    satellites: Sequence[Satellite] = (),
+    resolver: SourceResolver | None = None,
+    profile: RetrievalProfile | str | None = None,
+    cutoff_k: int | None = None,
+    strict: bool = True,
+) -> PhaseResult:
+    """Фаза оценки Ш6 на уровне конвейера: продукты × параметры → ретривал → оценщик.
+
+    Композиция ровно того порядка, который фиксируют инварианты:
+
+    1. для каждой пары ``(product, param)`` вызывается :func:`retrieve_for_cell` с
+       **единым** профилем и ``cutoff_k`` (I16: симметрия; I20: один K на цикл);
+    2. полученный продукт-скоупед срез передаётся в :func:`evaluate_batch`
+       (I17: evidence — только чанки продукта/его сателлитов);
+    3. оценщик работает только по переданным чанкам (I18): здесь нет ни ``search``,
+       ни ``fetch``, ни ``core.adapters``/``core.edge``.
+
+    Ретривал каждого параметра изолирован: сбой ретривала не роняет фазу, а попадает в
+    ``PhaseResult.errors``; сбои отдельных ячеек внутри :func:`evaluate_batch` изолируются
+    тем же контрактом. Возвращаемый ``PhaseResult`` несёт агрегат ``cells`` по всем
+    продуктам.
+
+    :param plan: ``RunPlan`` (``products``, ``params``, ``run_id``).
+    :param ports: ``Ports`` с ``evaluator``/``lexical_index``/``vector_index``/``embedder``.
+    :param store: ``StorePort`` — персистенция ячеек/evidence.
+    :param run_id: идентификатор прогона.
+    :param satellites: сателлиты как контекст промпта (не доказательство).
+    :param resolver: резолвер ``source_id`` → URL (I10/I15); опционален.
+    :param profile: зафиксированный профиль R0/R1/R2; ``None`` → :data:`DEFAULT_RETRIEVAL_PROFILE`.
+    :param cutoff_k: зафиксированный ``retrieval_cutoff_K``; ``None`` → :data:`DEFAULT_RETRIEVAL_CUTOFF_K`.
+    :param strict: strict (failed при исчерпании) vs preliminary (кандидат).
+
+    При ``ports.evaluator is None`` фаза сразу ``failed``: без оценщика Ш6 не имеет смысла,
+    а молчаливый ``ok`` скрыл бы неполноту карты.
+    """
+    evaluator = getattr(ports, "evaluator", None)
+    if evaluator is None:
+        return PhaseResult(
+            status="failed",
+            phase="evaluate",
+            errors=["evaluator не сконфигурирован"],
+        )
+
+    resolved_profile: RetrievalProfile | str = (
+        profile if profile is not None else DEFAULT_RETRIEVAL_PROFILE
+    )
+    resolved_cutoff: int = (
+        int(cutoff_k) if cutoff_k is not None else DEFAULT_RETRIEVAL_CUTOFF_K
+    )
+
+    cells: list[Cell] = []
+    errors: list[str] = []
+
+    for product_id in plan.products:
+        chunks_by_param: dict[str, Sequence[ChunkLike]] = {}
+        retrievals_by_param: dict[str, RetrievalResult] = {}
+        for param in plan.params:
+            try:
+                result = retrieve_for_cell(
+                    param,
+                    product_id=product_id,
+                    profile=resolved_profile,
+                    cutoff_k=resolved_cutoff,
+                    lexical_index=getattr(ports, "lexical_index", None),
+                    vector_index=getattr(ports, "vector_index", None),
+                    embedder=getattr(ports, "embedder", None),
+                )
+            except Exception as exc:  # noqa: BLE001 — изоляция по контракту фазы
+                errors.append(
+                    f"{product_id}/{param.param_id}: retrieval: "
+                    f"{type(exc).__name__}: {exc}"
+                )
+                continue
+            chunks_by_param[param.param_id] = result.chunks
+            retrievals_by_param[param.param_id] = result
+
+        outcomes, batch_errors = evaluate_batch(
+            params=list(plan.params),
+            product_id=product_id,
+            run_id=run_id,
+            evaluator=evaluator,
+            chunks_by_param=chunks_by_param,
+            satellites=satellites,
+            resolver=resolver,
+            strict=strict,
+            store=store,
+            retrievals_by_param=retrievals_by_param,
+        )
+        cells.extend(outcome.cell for outcome in outcomes)
+        errors.extend(batch_errors)
+
+    return PhaseResult(status="ok", phase="evaluate", cells=cells, errors=errors)
