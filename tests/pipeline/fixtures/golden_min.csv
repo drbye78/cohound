@@ -1,0 +1,6 @@
+product_id,param_id,expected_status,expected_evidence_kind,case_class,tier,note
+p1,feature.alpha,✅,documentation,presence,full,прямое подтверждение
+p1,feature.beta,⚠️,documentation,partial,full,частичное подтверждение
+p1,feature.absent,❌,registry,absence,full,страта ожидаемого отсутствия
+p1,feature.critical,✅,documentation,critical_presence,full,Кр-параметр
+p2,feature.gamma,❓,documentation,unknown,fast,протокол исчерпан
