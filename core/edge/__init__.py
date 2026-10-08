@@ -5,4 +5,4 @@
 ``/v1/*``; edge отвечает. Нейтрален (§1.3).
 """
 
-__all__ = ["server"]
+__all__ = ["server", "seam_schema"]
