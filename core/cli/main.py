@@ -21,22 +21,33 @@ import argparse
 import json
 import re
 import sys
-from collections.abc import Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+from core.adapters.gateway_validate import validate_envelope_shape
+from core.adapters.remote_gateway import (
+    DEFAULT_SCHEMA_VERSION,
+    GatewayError,
+    TransportFn,
+)
 from core.cli.wiring import (
     LOCAL_PROFILE,
+    SPLIT_PROFILE,
     SUPPORTED_PROFILES,
     WiringError,
+    build_gateway,
     build_runner,
     build_store,
+    manifest_deploy_fields,
     run_db_path,
 )
+from core.config.deploy import DeployConfig, is_split, load_deploy_config
 from core.pipeline import PHASES, RunReport
 from core.pipeline.lint import lint_run_inputs
 from core.pipeline.normalize import RunInputs, load_inputs
 from core.pipeline.plan import RunPlan, derive_run_id, plan as build_plan
+from core.ports.gateway import ContentGateway
 
 __all__ = [
     "EXIT_OK",
@@ -49,6 +60,9 @@ __all__ = [
     "main",
     "build_parser",
 ]
+
+#: Фабрика диагностического gateway по deploy-конфигу (тестовый шов ``deploy-check``).
+GatewayFactory = Callable[[DeployConfig], ContentGateway]
 
 # -- Коды возврата ---------------------------------------------------------- #
 #: Успех.
@@ -279,6 +293,19 @@ def cmd_run(args: argparse.Namespace) -> int:
     if not report.ok:
         raise LintFailure(report.blocking, report.warnings)
 
+    # R7 (07 §7): сведения о профиле зон для манифеста прогона. ГЭП: CLI W5 ещё не
+    # собирает run_manifest.yaml (это W10/T10.4), поэтому поля добавляются в отчёт
+    # прогона (`deploy`) и готовы для edge_capabilities через manifest_deploy_fields.
+    deploy_fields: dict[str, Any] = {}
+    if args.profile == SPLIT_PROFILE:
+        deploy_config = load_deploy_config(None)
+        if not is_split(deploy_config):
+            raise WiringError(
+                "профиль split требует deploy-конфиг с profile split/split-hardened "
+                "(07 §6/§7)"
+            )
+        deploy_fields = manifest_deploy_fields(deploy_config)
+
     store = build_store(db_path, profile=args.profile)
     try:
         _ensure_run(store, run_id, inputs)
@@ -290,6 +317,8 @@ def cmd_run(args: argparse.Namespace) -> int:
         store.close()
 
     payload = _run_report_payload(run_id, run_report, db_path)
+    if deploy_fields:
+        payload["deploy"] = deploy_fields
     if args.json:
         _print_json(payload)
     else:
@@ -301,9 +330,187 @@ def cmd_run(args: argparse.Namespace) -> int:
     return EXIT_ERROR
 
 
+def cmd_deploy_check(args: argparse.Namespace) -> int:
+    """``deploy-check``: диагностика DMZ-шва (T13.6; ``07`` §3/§7/§8).
+
+    Загружает deploy-конфиг и для профилей ``split``/``split-hardened`` строит gateway
+    по секции ``edge.*``, вызывает ``/v1/health`` и ``/v1/capabilities`` и проверяет
+    конверт/полезную нагрузку против опубликованного контракта шва. Профиль ``local``
+    шва не использует — команда сообщает об этом и успешна.
+
+    Диагностика **инъектируема**: аргументы ``deploy_transport`` (шов
+    ``(op, envelope) -> envelope``) или ``gateway_factory`` позволяют тестировать без
+    сокета. Контракт валидируется через :mod:`core.adapters.gateway_validate` —
+    слой-безопасное зеркало ``core/edge/seam_schema`` (``cli`` не импортирует ``edge``,
+    матрица ``01`` §1); форма payload ``health``/``capabilities`` проверяется локально.
+
+    :returns: :data:`EXIT_OK` при достижимом и валидном шве; :data:`EXIT_ERROR` иначе.
+    """
+    config = load_deploy_config(args.deploy)
+    if not is_split(config):
+        _emit_deploy_check(
+            args,
+            {
+                "ok": True,
+                "split": False,
+                "profile": config.profile,
+                "note": "профиль local: DMZ-шов не используется (07 §6); диагностика не требуется",
+            },
+        )
+        return EXIT_OK
+
+    transport = getattr(args, "deploy_transport", None)
+    factory = getattr(args, "gateway_factory", None)
+    gateway, raw_envelopes = _diagnostic_gateway(
+        config, transport=transport, factory=factory
+    )
+    report = _seam_diagnostics(config, gateway, raw_envelopes)
+    _emit_deploy_check(args, report)
+    return EXIT_OK if report["ok"] else EXIT_ERROR
+
+
 # ---------------------------------------------------------------------------
 # Помощники команд
 # ---------------------------------------------------------------------------
+
+
+def _diagnostic_gateway(
+    config: DeployConfig,
+    *,
+    transport: TransportFn | None,
+    factory: GatewayFactory | None,
+) -> tuple[ContentGateway, dict[str, Mapping[str, Any]]]:
+    """Собирает gateway для ``deploy-check`` и, при возможности, записывает конверты.
+
+    ``raw_envelopes`` пополняется только для внедрённого ``transport`` (обёртка
+    фиксирует ответ до клиентской валидации) — это позволяет проверить конверт
+    против контракта. Для реального HTTP подтверждённый конверт недоступен (gateway
+    валидирует его сам); для ``factory`` — ответственность фабрики.
+    """
+    raw: dict[str, Mapping[str, Any]] = {}
+    if factory is not None:
+        return factory(config), raw
+    if transport is not None:
+
+        def _recording(op: str, envelope: Mapping[str, Any]) -> Mapping[str, Any]:
+            response = transport(op, envelope)
+            raw[op] = response
+            return response
+
+        return build_gateway(config, transport=_recording), raw
+    return build_gateway(config), raw
+
+
+def _seam_diagnostics(
+    config: DeployConfig,
+    gateway: ContentGateway,
+    raw_envelopes: Mapping[str, Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Прогоняет health/capabilities и собирает отчёт диагностики шва.
+
+    Сбои транспорта/схемы ловятся в ``GatewayError`` и попадают в ``issues`` (не
+    роняют команду): команда возвращает ненулевой код, но отчёт остаётся машинночитаемым.
+    """
+    issues: list[str] = []
+    health: Any = None
+    capabilities: Any = None
+    try:
+        health = gateway.call("health", {})
+    except GatewayError as exc:
+        issues.append(f"health: {type(exc).__name__}: {_concise(exc)}")
+    try:
+        capabilities = gateway.call("capabilities", {})
+    except GatewayError as exc:
+        issues.append(f"capabilities: {type(exc).__name__}: {_concise(exc)}")
+
+    if health is not None:
+        issues.extend(_validate_health_payload(health))
+    if capabilities is not None:
+        issues.extend(_validate_capabilities_payload(capabilities))
+
+    for op in ("health", "capabilities"):
+        envelope = raw_envelopes.get(op)
+        if envelope is None:
+            continue
+        for violation in validate_envelope_shape(envelope, DEFAULT_SCHEMA_VERSION):
+            issues.append(f"{op}: конверт {violation.code}: {violation.message}")
+
+    fields = manifest_deploy_fields(
+        config, capabilities if isinstance(capabilities, Mapping) else None
+    )
+    return {
+        "ok": not issues,
+        "split": True,
+        "profile": config.profile,
+        "base_url": config.edge.base_url,
+        "deploy_profile": fields["deploy_profile"],
+        "edge_schema_version": fields["edge_schema_version"],
+        "health": health,
+        "capabilities": capabilities,
+        "edge_versions": {
+            key: capabilities.get(key)
+            for key in ("extractor_version", "crawler_version", "search_engine")
+        }
+        if isinstance(capabilities, Mapping)
+        else {},
+        "issues": issues,
+    }
+
+
+def _validate_health_payload(payload: Any) -> list[str]:
+    """Форма payload ``GET /v1/health`` (``07`` §3): ``{status: <непустая строка>}``."""
+    if not isinstance(payload, Mapping):
+        return ["health: payload должен быть объектом"]
+    status = payload.get("status")
+    if not isinstance(status, str) or not status:
+        return ["health: обязательное поле status — непустая строка (07 §3)"]
+    return []
+
+
+def _validate_capabilities_payload(payload: Any) -> list[str]:
+    """Форма payload ``GET /v1/capabilities`` (``07`` §3): версии + форматы edge."""
+    if not isinstance(payload, Mapping):
+        return ["capabilities: payload должен быть объектом"]
+    issues: list[str] = []
+    for field in ("extractor_version", "crawler_version", "search_engine"):
+        value = payload.get(field)
+        if value is not None and not isinstance(value, str):
+            issues.append(f"capabilities: поле {field} должно быть строкой или null")
+    formats = payload.get("supported_formats")
+    if formats is not None and (
+        not isinstance(formats, list) or not all(isinstance(item, str) for item in formats)
+    ):
+        issues.append("capabilities: supported_formats должен быть списком строк (07 §3)")
+    return issues
+
+
+def _emit_deploy_check(args: argparse.Namespace, payload: dict[str, Any]) -> None:
+    """Печатает отчёт ``deploy-check`` как JSON (``--json``) или человеку."""
+    if getattr(args, "json", False):
+        _print_json(payload)
+        return
+    lines = [
+        f"profile: {payload['profile']}",
+        f"split: {'yes' if payload['split'] else 'no'}",
+    ]
+    if payload["split"]:
+        lines.append(f"base_url: {payload['base_url']}")
+        lines.append(f"edge_schema_version: {payload['edge_schema_version']}")
+        lines.append(f"health: {_short_json(payload.get('health'))}")
+        lines.append(f"capabilities: {_short_json(payload.get('capabilities'))}")
+    else:
+        lines.append(f"note: {payload['note']}")
+    for issue in payload.get("issues", ()):
+        lines.append(f"issue: {issue}")
+    lines.append(f"ok: {'yes' if payload['ok'] else 'no'}")
+    sys.stdout.write("\n".join(lines) + "\n")
+
+
+def _short_json(value: Any) -> str:
+    """Однострочное JSON-представление значения для человекочитаемого отчёта."""
+    if value is None:
+        return "—"
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
 
 
 def _phases_until(until: str | None) -> list[str]:
@@ -437,7 +644,7 @@ def _add_common(parser: argparse.ArgumentParser) -> None:
         "--profile",
         choices=SUPPORTED_PROFILES,
         default=LOCAL_PROFILE,
-        help="профиль развёртывания (07): local (дефолт) | split (W13, пока недоступен)",
+        help="профиль развёртывания (07): local (дефолт) | split (DMZ, требует config/deploy.yaml)",
     )
 
 
@@ -501,10 +708,30 @@ def build_parser() -> argparse.ArgumentParser:
     _add_common(p_run)
     p_run.set_defaults(handler=cmd_run)
 
+    # deploy-check -------------------------------------------------------- #
+    p_deploy = sub.add_parser(
+        "deploy-check",
+        help="диагностика DMZ-шва: /v1/health + /v1/capabilities + схема (07 §3/§7/§8)",
+    )
+    p_deploy.add_argument(
+        "--deploy",
+        default=None,
+        help="путь к deploy.yaml (по умолчанию config/deploy.yaml, 03 D.5)",
+    )
+    p_deploy.add_argument(
+        "--json", action="store_true", help="машинночитаемый вывод (JSON) в stdout"
+    )
+    p_deploy.set_defaults(handler=cmd_deploy_check)
+
     return parser
 
 
-def main(argv: Sequence[str] | None = None) -> int:
+def main(
+    argv: Sequence[str] | None = None,
+    *,
+    deploy_transport: TransportFn | None = None,
+    gateway_factory: GatewayFactory | None = None,
+) -> int:
     """Точка входа CLI. Возвращает код выхода (``0`` — успех).
 
     ``argparse`` сам печатает ``--help`` и usage-ошибки; здесь его ``SystemExit``
@@ -513,12 +740,19 @@ def main(argv: Sequence[str] | None = None) -> int:
     Ошибки домена/линта печатаются как ``CODE: message`` (код инварианта/правила).
     Непредвиденные исключения не проглатываются traceback'ом: печатается сжатое
     сообщение и возвращается ненулевой код.
+
+    :param deploy_transport: тестовый шов транспорта для ``deploy-check`` (без сокета).
+    :param gateway_factory: фабрика ``ContentGateway`` для ``deploy-check`` (тесты).
     """
     parser = build_parser()
     try:
         args = parser.parse_args(argv)
     except SystemExit as exc:
         return _system_exit_code(exc)
+
+    # Инъекция диагностических швов `deploy-check` (тесты без сети, T13.6).
+    args.deploy_transport = deploy_transport
+    args.gateway_factory = gateway_factory
 
     if getattr(args, "command", None) is None:
         parser.print_help()
