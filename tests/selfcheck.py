@@ -316,6 +316,13 @@ def main() -> int:
     check("§1.3 нейтральность domain/ports/pipeline (грепп)", lambda: _neutrality())
     check("transitional-шимы schemas.py/db.py сохраняют идентичность", lambda: _domain_store_shims())
 
+    section("Домен (L0) — W2")
+    check("инварианты домена возвращают Violation (I1/I4/I13/I7)", lambda: _domain_invariants())
+    check("derived-evidence требует hash/резолв (I1/I10/I15/I19, K5)", lambda: _domain_derived())
+    check("source_id round-trip + резолв с hash (I10/I15/I19)", lambda: _domain_anchors())
+    check("content_hash/prompt_hash детерминированы (§5/I19)", lambda: _util_hashing())
+    check("scoring: failed в знаменателе Coverage, вне Capability (I5)", lambda: _domain_scoring())
+
     print(f"\n{CHECKS - len(FAILURES)}/{CHECKS} проверок пройдено")
     if FAILURES:
         print("\nПровалы:")
@@ -613,6 +620,193 @@ def _domain_store_shims() -> None:
         raise AssertionError("core.schemas.Status должен ссылаться на core.domain.Status")
     if connect is not sqlite.connect or SCHEMA_VERSION != sqlite.SCHEMA_VERSION or DDL != sqlite.DDL:
         raise AssertionError("core.db должен реэкспортировать core.store.sqlite")
+
+
+def _domain_invariants() -> None:
+    """Чистые инварианты домена возвращают Violation, не исключения (T2.2)."""
+    from core.domain.enums import (
+        AbsenceRuleType,
+        CellState,
+        Status,
+    )
+    from core.domain.invariants import check_cell
+    from core.domain.models import Cell
+
+    def _cell(**kw):
+        base = dict(
+            run_id="r",
+            product_id="p",
+            param_id="x",
+            state=CellState.EVALUATED,
+            status=None,
+            evidence=[],
+            absence_evidence=[],
+            reviewed_by=None,
+            absence_rule=AbsenceRuleType.EXPLICIT,
+        )
+        base.update(kw)
+        return Cell.model_construct(**base)  # type: ignore[call-arg]
+
+    def _codes(c) -> set[str]:
+        return {v.code for v in check_cell(c)}
+
+    if "I1" not in _codes(_cell(status=Status.OK)):
+        raise AssertionError("I1 не пойман")
+    if "I4" not in _codes(_cell(state=CellState.FAILED, status=Status.OK)):
+        raise AssertionError("I4 не пойман")
+    if "I13" not in _codes(_cell(state=CellState.PRELIMINARY, status=Status.OK)):
+        raise AssertionError("I13 не пойман")
+    if "I7" not in _codes(_cell(status=Status.NOT_APPLICABLE)):
+        raise AssertionError("I7 не пойман")
+    if "I2" not in _codes(_cell(status=Status.ABSENT)):
+        raise AssertionError("I2 не пойман")
+    if "I2b" not in _codes(
+        _cell(
+            status=Status.ABSENT,
+            absence_rule=AbsenceRuleType.PARAMETER_REFERENCE,
+            absence_evidence=[{"source_scope": "exhaustive"}],
+        )
+    ):
+        raise AssertionError("I2b не пойман (нет scope_attested_by)")
+    clean = _cell(
+        status=Status.ABSENT,
+        absence_rule=AbsenceRuleType.REGISTRY_ABSENCE,
+        absence_evidence=[{"source_scope": "exhaustive"}],
+    )
+    if check_cell(clean):
+        raise AssertionError("registry_absence exhaustive должен быть чистым")
+
+
+def _domain_derived() -> None:
+    """Derived-evidence требует derived-тип, резолв и hash (I1/I8/I10/I15/I19, K5)."""
+    from core.domain.enums import EvidenceType, SourceKind
+    from core.domain.invariants import check_derived_evidence
+    from core.domain.models import CellEvidence, UpstreamRef
+
+    up = UpstreamRef(
+        product_id="p", param_id="x", source_id="c", source_url="http://u", content_hash="h"
+    )
+    good = CellEvidence.model_construct(
+        evidence_id="e",
+        run_id="r",
+        product_id="p",
+        param_id="x",
+        source_kind=SourceKind.INHERITANCE,
+        evidence_type=EvidenceType.DERIVED,
+        source_id="c",
+        source_url="http://u",
+        content_hash="h",
+        citation_quote=None,
+    )
+    if check_derived_evidence(good, up):
+        raise AssertionError(f"валидный derived-evidence отвергнут: {check_derived_evidence(good, up)}")
+    bad = CellEvidence.model_construct(
+        evidence_id="e",
+        run_id="r",
+        product_id="p",
+        param_id="x",
+        source_kind=SourceKind.INHERITANCE,
+        evidence_type=EvidenceType.DERIVED,
+        source_id="c",
+        source_url="http://u",
+        content_hash=None,
+        citation_quote=None,
+    )
+    if "I19" not in {v.code for v in check_derived_evidence(bad, up)}:
+        raise AssertionError("I19 (нет hash) не пойман")
+
+
+def _domain_anchors() -> None:
+    """Резолв source_id в URL со сверкой hash (I10/I15/I19)."""
+    from core.domain.anchors import (
+        ResolvedSource,
+        resolve_source_url,
+        verify_evidence_hash,
+    )
+    from core.domain.enums import EvidenceType, SourceKind
+    from core.domain.models import CellEvidence
+    from core.util.ids import SourceRef, parse_source_id, source_id
+
+    sid = source_id("p", "doc1", 7, "bld")
+    if parse_source_id(sid) != SourceRef("p", "doc1", 7, "bld"):
+        raise AssertionError("source_id round-trip сломан")
+
+    class _R:
+        def resolve(self, source_id: str) -> ResolvedSource:
+            return ResolvedSource("c1", "http://u", "HASH", "bld")
+
+    if resolve_source_url("c1", _R(), expected_hash="OTHER") is not None:
+        raise AssertionError("I19: расхождение hash обязано инвалидировать source_id")
+    ev = CellEvidence.model_construct(
+        evidence_id="e",
+        run_id="r",
+        product_id="p",
+        param_id="x",
+        source_kind=SourceKind.DOCUMENTATION,
+        evidence_type=EvidenceType.DIRECT,
+        source_id="c1",
+        content_hash="HASH",
+        source_url="http://u",
+        citation_quote="q",
+    )
+    if not verify_evidence_hash(ev, _R()):
+        raise AssertionError("I19: совпадающий hash обязан пройти")
+
+
+def _util_hashing() -> None:
+    """Детерминизм content_hash/prompt_hash (I19, §5)."""
+    from core.util.hashing import content_hash, prompt_hash
+
+    if content_hash("x") != content_hash(b"x"):
+        raise AssertionError("content_hash: str/bytes должны совпадать")
+    if prompt_hash("v", "r", "e", ["b", "a"]) != prompt_hash("v", "r", "e", ["a", "b"]):
+        raise AssertionError("prompt_hash обязан быть порядко-независимым")
+    if prompt_hash("v", "r", "e", ["a"]) == prompt_hash("v", "r", "e", ["b"]):
+        raise AssertionError("prompt_hash обязан зависеть от состава чанков")
+
+
+def _domain_scoring() -> None:
+    """I5: failed вне Capability, но в знаменателе Coverage (T2.3, §6)."""
+    from core.domain.enums import CellState, Importance, ParamType, Status
+    from core.domain.models import CatalogRow, Cell
+    from core.domain.scoring import evidence_coverage, resolved_capability
+
+    def _cell(pid, status, state=CellState.EVALUATED):
+        return Cell.model_construct(
+            run_id="r",
+            product_id=pid,
+            param_id="x",
+            state=state,
+            status=status,
+            evidence=[],
+            absence_evidence=[],
+            reviewed_by=None,
+        )
+
+    params = {
+        "x": CatalogRow.model_construct(
+            param_id="x",
+            title="t",
+            module="m",
+            group="g",
+            importance=Importance.CRITICAL,
+            param_type=ParamType.FACT,
+            rule="r",
+        )
+    }
+    weights = {"m": 1.0}
+
+    cells = [_cell("p", Status.OK), _cell("p", None, CellState.FAILED)]
+    cap = resolved_capability(cells, params, weights)
+    cov = evidence_coverage(cells, params, weights)
+    if cap.denominator <= 0:
+        raise AssertionError("I5: Capability обязан считать по разрешённым ячейкам")
+    if cov.denominator < cap.denominator:
+        raise AssertionError("I5: failed обязан входить в знаменатель Coverage")
+
+    cap_unknown = resolved_capability([_cell("p", Status.UNKNOWN)], params, weights)
+    if cap_unknown.denominator != 0:
+        raise AssertionError("I5: ❓ обязан быть вне знаменателя Capability")
 
 
 if __name__ == "__main__":

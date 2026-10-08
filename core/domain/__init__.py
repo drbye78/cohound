@@ -71,6 +71,32 @@ from core.domain.models import (
     derived_evidence_id,
 )
 from core.domain.r2 import apply_r2
+from core.domain.invariants import (
+    check_cell,
+    check_derived_evidence,
+    check_evidence,
+    check_inheritance,
+    check_satellite,
+)
+from core.domain.anchors import (
+    ResolvedSource,
+    SourceResolver,
+    resolve_source_url,
+    verify_evidence_hash,
+)
+from core.domain.scoring import (
+    Comparability,
+    Coverage,
+    ModuleScore,
+    Score,
+    SensitivityReport,
+    comparability,
+    evidence_coverage,
+    failure_rate,
+    module_scores,
+    resolved_capability,
+    sensitivity,
+)
 
 __all__ = [
     # enums
@@ -136,6 +162,29 @@ __all__ = [
     "derived_evidence_id",
     # r2
     "apply_r2",
+    # invariants (T2.2)
+    "check_cell",
+    "check_evidence",
+    "check_inheritance",
+    "check_derived_evidence",
+    "check_satellite",
+    # anchors (T2.4)
+    "ResolvedSource",
+    "SourceResolver",
+    "resolve_source_url",
+    "verify_evidence_hash",
+    # scoring (T2.3)
+    "Score",
+    "Coverage",
+    "ModuleScore",
+    "Comparability",
+    "SensitivityReport",
+    "resolved_capability",
+    "evidence_coverage",
+    "failure_rate",
+    "comparability",
+    "sensitivity",
+    "module_scores",
     # dictionary
     "assert_dictionary_integrity",
     "load_dictionary",
