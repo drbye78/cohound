@@ -136,6 +136,9 @@ def build_phases(
     satellites: Sequence[Satellite] = (),
     resolver: SourceResolver | None = None,
     strict: bool = True,
+    deploy_profile: str | None = None,
+    edge_schema_version: str | None = None,
+    edge_capabilities: Mapping[str, Any] | None = None,
 ) -> dict[str, PhaseFn]:
     """Возвращает реестр ``{phase_name: PhaseFn}`` для не-гейтовых фаз конвейера.
 
@@ -156,6 +159,12 @@ def build_phases(
     :param satellites: сателлиты как контекст промпта (I17, не доказательство).
     :param resolver: резолвер ``source_id`` → URL (I10/I15).
     :param strict: strict vs preliminary для Ш6 (I13).
+    :param deploy_profile: профиль доверенных зон (``local``/``split``/…) для деплой-провенанса
+        манифеста Ш9 (07 §7); ``None`` → не заполняется.
+    :param edge_schema_version: версия контракта шва (``/v1/*``) для манифеста Ш9; ``None`` →
+        не заполняется.
+    :param edge_capabilities: версии edge-компонентов (gateway) для манифеста Ш9; ``None`` →
+        пустой mapping (backward-compatible).
 
     Каждое замыкание детерминировано и не импортирует адаптеры; единственный
     межфазовый канал — замыкание ``holder`` (см. docstring модуля).
@@ -284,6 +293,9 @@ def build_phases(
             bundle=bundle,
             index_build_id=holder.get("index_build_id"),
             created_at=_created_at(ctx),
+            deploy_profile=deploy_profile,
+            edge_schema_version=edge_schema_version,
+            edge_capabilities=edge_capabilities,
         )
         artifacts = write_reports(
             bundle=bundle,

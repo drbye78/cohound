@@ -477,6 +477,82 @@ def test_report_phase_without_compute_fails() -> None:
     assert "compute" in result.errors[0]
 
 
+# ---------------------------------------------------------------------------
+# Деплой-провенанс: build_phases прокидывает его в манифест Ш9 (07 §7, R7/§13)
+# ---------------------------------------------------------------------------
+
+
+def _run_chain_to_report(tmp_path: Path, **phase_kwargs: Any) -> dict[str, Any]:
+    """Прогоняет registry→…→report на фейках и возвращает ``run_manifest.yaml`` как dict."""
+    inputs = _inputs()
+    plan = _plan()
+    pages = {
+        "https://docs.test/p1": RawPage(
+            url="https://docs.test/p1",
+            content="Свойство А доступно.".encode(),
+            fetched_at=FIXED_TS,
+        ),
+        "https://docs.test/p2": RawPage(
+            url="https://docs.test/p2",
+            content="Документ продукта два.".encode(),
+            fetched_at=FIXED_TS,
+        ),
+    }
+    ports = Ports(
+        evaluator=FakeEvaluator(default=_ok_output()),
+        lexical_index=_chunks_index(),
+        registry=FakeRegistryFetcher(registry_id="reg_x", run_id=RUN_ID),
+        crawler=FakeCrawler(pages=pages),
+        extractor=FakeExtractor(),
+        chunker=FakeChunker(),
+        embedder=FakeEmbedder(),
+        index_builder=FakeIndexBuilder(),
+    )
+    phases = build_phases(
+        inputs=inputs,
+        plan=plan,
+        ports=ports,
+        urls={"p1": ["https://docs.test/p1"], "p2": ["https://docs.test/p2"]},
+        passports=_passports(),
+        out_dir=str(tmp_path),
+        raw_root=str(tmp_path / "raw"),
+        **phase_kwargs,
+    )
+    store = _store()
+    ctx = _context(store, ports)
+    for name in ("registry", "inheritance", "corpus", "evaluate", "compute"):
+        result = phases[name](ctx)
+        assert result.status == "ok", (name, result.errors)
+    report = phases["report"](ctx)
+    assert report.status == "ok", report.errors
+    artifacts = report.log_entries[0]
+    return yaml.safe_load(artifacts.manifest.read_text(encoding="utf-8"))
+
+
+def test_build_phases_forwards_deploy_provenance_to_manifest(tmp_path: Path) -> None:
+    """Переданные в ``build_phases`` деплой-поля доходят до ``run_manifest.yaml`` (Ш9)."""
+    caps = {"gateway": "0.4.2", "edge": "1"}
+    manifest = _run_chain_to_report(
+        tmp_path,
+        deploy_profile="split",
+        edge_schema_version="1.0.0",
+        edge_capabilities=caps,
+    )
+    assert manifest["deploy_profile"] == "split"
+    assert manifest["edge_schema_version"] == "1.0.0"
+    assert manifest["edge_capabilities"] == caps
+
+
+def test_build_phases_without_deploy_provenance_is_backward_compatible(
+    tmp_path: Path,
+) -> None:
+    """Без новых kwargs манифест строится: деплой-поля пусты (backward-compatible)."""
+    manifest = _run_chain_to_report(tmp_path)
+    assert manifest["deploy_profile"] is None
+    assert manifest["edge_schema_version"] is None
+    assert manifest["edge_capabilities"] == {}
+
+
 def test_discovery_noop_without_adapter() -> None:
     inputs = _inputs()
     plan = _plan()
