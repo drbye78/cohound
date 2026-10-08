@@ -22,6 +22,11 @@ from core.config.run_config import (
     load_package_manifest,
     load_run_config,
 )
+from core.config.deploy import (
+    DeployConfig,
+    is_split,
+    load_deploy_config,
+)
 
 __all__ = [
     # run.yaml (§4.5)
@@ -40,4 +45,8 @@ __all__ = [
     "load_domain_profiles",
     # кросс-артефактная проверка S11 (§4.5)
     "cross_check_products",
+    # deploy.yaml (D.5, 07)
+    "load_deploy_config",
+    "DeployConfig",
+    "is_split",
 ]

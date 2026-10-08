@@ -11,6 +11,7 @@ __all__ = [
     "lexical_bm25",
     "lexical_tantivy",
     "llm_local",
+    "llm_llamacpp",
     "registry_generic",
     "search_yandex",
     "vector_npy",
