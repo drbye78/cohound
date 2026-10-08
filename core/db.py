@@ -44,15 +44,18 @@ CREATE TABLE IF NOT EXISTS runs (
     status_dict_version   TEXT,
     scoring_policy_version TEXT,
     methodology_version   TEXT,
-    llm_scenario_map_json TEXT,                        -- scenario -> {model_id, version, ...}
     embed_model_id        TEXT,
     index_build_id        TEXT,
     retrieval_profile     TEXT,                        -- R0|R1|R2
+    retrieval_params_json TEXT,                        -- fusion-параметры (rrf_k и пр.) — S1
     retrieval_cutoff_K    INTEGER,                     -- I20
     search_effort_budget_json TEXT,                    -- I23
+    requested_ranking     TEXT,                        -- запрошенный режим (run.yaml) — K6
+    computed_ranking      TEXT,                        -- вычисленный допустимый ранг — K6
     snapshot_date         TEXT,
     state                 TEXT
 );
+-- llm_scenario_map_json удалён: канонический носитель — таблица llm_scenarios (S2).
 
 -- §7.4: детерминированная маршрутизация модель->сценарий (I21)
 CREATE TABLE IF NOT EXISTS llm_scenarios (
@@ -95,15 +98,18 @@ CREATE TABLE IF NOT EXISTS corpus_chunks (
     text            TEXT NOT NULL,
     context_prefix  TEXT,                              -- НЕ входит в валидацию цитат (§4.4)
     content_hash    TEXT,
+    build_id        TEXT,                              -- привязка чанка к сборке (S5)
     embed_model_id  TEXT,
     embedded_at     TEXT
 );
 
+-- K1: пакетная сборка (index_build_id, иммутабельна) × продукт-партиция (I17).
+-- Один index_build_id даёт N партиций → составной PK.
 CREATE TABLE IF NOT EXISTS index_manifest (
-    index_build_id  TEXT PRIMARY KEY,
+    index_build_id  TEXT NOT NULL,                       -- пакетная сборка (иммутабельная)
+    product_id      TEXT NOT NULL,                       -- продукт-партиция (I17)
     package_id      TEXT,
-    product_id      TEXT,                               -- продукт-партиция (I17)
-    partition_key   TEXT,
+    partition_key   TEXT,                                -- (index_build_id, product_id)
     snapshot_date   TEXT,
     chunker_version TEXT,
     embed_model_id  TEXT,
@@ -112,7 +118,8 @@ CREATE TABLE IF NOT EXISTS index_manifest (
     vector_store    TEXT,
     store_path      TEXT,
     created_at      TEXT,
-    stats_json      TEXT
+    stats_json      TEXT,
+    PRIMARY KEY (index_build_id, product_id)
 );
 
 CREATE TABLE IF NOT EXISTS cells (
@@ -130,6 +137,10 @@ CREATE TABLE IF NOT EXISTS cells (
     model_id          TEXT,
     llm_scenario      TEXT,                             -- §7.4/I21
     prompt_hash       TEXT,
+    index_build_id    TEXT,                             -- provenance ячейки (R7/§13)
+    retrieval_profile TEXT,
+    retrieval_params_json TEXT,
+    stale_reason      TEXT,                             -- инвалидация при смене сборки/prompt
     primary_evidence_id TEXT,
     reviewed_by       TEXT,
     updated_at        TEXT,
@@ -138,25 +149,39 @@ CREATE TABLE IF NOT EXISTS cells (
 );
 
 CREATE TABLE IF NOT EXISTS cell_evidence (
-    evidence_id       TEXT PRIMARY KEY,
+    evidence_id       TEXT PRIMARY KEY,                 -- детерминированный: H(run_id,product,param,source_id,kind,seq) — S8
     run_id            TEXT NOT NULL,
     product_id        TEXT NOT NULL,
     param_id          TEXT NOT NULL,
     source_kind       TEXT,
-    evidence_type     TEXT,
+    evidence_type     TEXT,                             -- direct|derived (K5)
     source_id         TEXT,                             -- I10/I15: резолв в URL
     source_url        TEXT,
     citation_quote    TEXT,
     content_hash      TEXT,
     source_scope      TEXT,                             -- absence-evidence (§4.2)
     scope_attested_by TEXT,                             -- человек для param_ref/distribution
+    index_build_id    TEXT,                             -- привязка evidence к сборке (R7)
     retrieved_at      TEXT
+);
+
+-- S9: персистентные человеческие решения гейтов G1–G4 (носитель reviewed_by, аудит-след).
+CREATE TABLE IF NOT EXISTS gate_decisions (
+    decision_id       TEXT PRIMARY KEY,
+    run_id            TEXT NOT NULL,
+    gate              TEXT NOT NULL,                    -- G1|G2|G3|G4
+    target            TEXT,                             -- что подтверждено (cohort/cell/...)
+    actor             TEXT NOT NULL,                    -- человек
+    decided_at        TEXT,
+    notes             TEXT,
+    FOREIGN KEY (run_id) REFERENCES runs(run_id)
 );
 
 CREATE TABLE IF NOT EXISTS search_log (
     log_id            INTEGER PRIMARY KEY AUTOINCREMENT,
     run_id            TEXT NOT NULL,
     phase             TEXT NOT NULL,                    -- discovery|corpus|serp|scout
+    kind              TEXT,                             -- retrieval|external (S12)
     provider          TEXT,
     adapter_kind      TEXT,                             -- serp|llm_grounding
     language          TEXT,
@@ -191,8 +216,10 @@ CREATE TABLE IF NOT EXISTS registry_facts (
 
 CREATE INDEX IF NOT EXISTS idx_cells_run_state  ON cells(run_id, state);
 CREATE INDEX IF NOT EXISTS idx_chunks_product   ON corpus_chunks(product_id);
+CREATE INDEX IF NOT EXISTS idx_chunks_build     ON corpus_chunks(build_id);
 CREATE INDEX IF NOT EXISTS idx_log_run_phase    ON search_log(run_id, phase);
 CREATE INDEX IF NOT EXISTS idx_evidence_run_cell ON cell_evidence(run_id, product_id, param_id);
+CREATE INDEX IF NOT EXISTS idx_gate_run         ON gate_decisions(run_id, gate);
 
 -- I18: оценщик (evaluator) не может быть зарегистрирован с веб-тулом.
 CREATE TRIGGER IF NOT EXISTS trg_evaluator_no_web_tool

@@ -205,7 +205,7 @@ repo/
 
 ### 4.1. Словари и перечисления
 
-`docs/status-dictionary.yaml`: статусы (§2.1) · `source_kind` (registry|inheritance|distribution|documentation|web|manual) · `evidence_type` (direct|derived) · `absence_rule_type` (explicit|parameter_reference|distribution_absence|registry_absence) · `source_scope` (**exhaustive|partial|unknown** — свойство экземпляра источника, поле evidence) · `failure_kind` (search_failed|source_unavailable|evaluation_failed|validation_failed|parser_failed) · `cell_state` (pending|preliminary|evaluated|failed|reviewed) · `run_mode`.
+`docs/status-dictionary.yaml`: статусы (§2.1) · `source_kind` (registry|inheritance|distribution|documentation|web|manual) · `evidence_type` (direct|derived) · `absence_rule_type` (explicit|parameter_reference|distribution_absence|registry_absence) · `source_scope` (**exhaustive|partial|unknown** — свойство экземпляра источника, поле evidence) · `failure_kind` (search_failed|source_unavailable|evaluation_failed|validation_failed|parser_failed) · `cell_state` (pending|preliminary|evaluated|failed|reviewed) · `run_mode` · `ranking_policy` (capability_ranked|coverage_fallback|unranked) · `gate` (G1|G2|G3|G4) · `capability_policy` (resolved-only-v1) · `unknown_policy` (excluded|unknown_as_zero). `unexpected` — **run-level ошибка без ячейки** (системное исключение), в `failure_kind` не входит (S7): `failure_kind` описывает только сбой ячейки.
 
 **Оси сателлита:**
 
@@ -245,6 +245,14 @@ evidence_state:  verified | claimed
 Следствие фиксируется честно: исчерпанные справочники редки → ❌ остаётся редким статусом в публичном цикле → компенсаторы: NDA-петля, дистрибутивный контур, coverage рядом с баллом. Приёмка требует **демонстрации** работоспособного ❌-пути (R12, §11.3), а не только декларации.
 
 **baselines.csv:** `(baseline_id, param_id, min_version, inheritance_mode, note)`; режимы `direct` (дефолт для ядровых: upstream ≥ min_version + отсутствие явного исключения) · `conditional` (расширения/дистрибутивные: ревью/кандидат) · `blocked` (upstream-факт не используется). Отсутствие строки = кросс-линейный параметр (архетип B): только корпус. **Наследование переносит возможность проверить применимость upstream-факта, но не является автоматическим доказательством наличия функции в downstream-продукте.**
+
+**Derived-evidence наследования и сателлитов (K5, контракт).** Унаследованный статус обязан нести evidence (I1/R2), но это evidence **производного** типа:
+
+- `evidence_type: derived`; `source_kind: inheritance`;
+- носитель — запись `cell_evidence` с ссылкой на upstream-паспорт/строку baselines и, где возможно, на корпусный чанк upstream-продукта (`source_id`); если чанк недоступен — на паспортный `Citation` upstream (`source_id = upstream://{baseline_id}#{param_id}`);
+- derived-evidence **обязан резолвиться** через `source_url` (I10/I15) и `content_hash` (I19): паспортный `Citation` при внесении в прогон проходит нормализацию Ш5 (в `corpus_raw` продукта-сателлита/upstream) либо фиксируется как `source_kind: manual` с явной пометкой и `scope_attested_by`.
+
+**Сателлиты как партиции (K5/I17).** Сателлит — это `component` с ролью, а не самостоятельный `product_id`. Чтобы I17 сохранялся, документы сателлита индексируются **в партицию продукта-владельца** (тот, у которого он в паспорте), с привязкой `role` в метаданных чанка; `VectorQuery.product_ids` для продукта включает партиции продукта и (при наличии) его сателлитовых доменов. `relationship_evidence` услуги сателлита — паспортный объект, не cell-evidence, но подчиняется тем же правилам provenance (резолв + hash). I9 остаётся: сателлитная ячейка требует relationship evidence.
 
 **golden.csv:** `product_id, param_id, expected_status, expected_evidence_kind, case_class, note`; проверка kind — вхождение в допустимый набор. **Тиры:** `golden-fast` (~30, каждый PR) · `golden-full` (100–200: смена модели/правил/каталога, релиз). **Состав golden-full обязан включать страту ожидаемых ❌** (через `registry_absence` и `distribution_absence`) — иначе критический класс false-❌ нечем тренировать. **adversarial/** — страницы-ловушки; R8 — регрессионный gate, не заявление о безопасности.
 
@@ -287,44 +295,55 @@ products(product_id PK, canonical_name, vendor, jurisdiction, first_seen, last_s
 runs(run_id PK, created_at, mode, case_id, anchor_product_id, cohort_ref, focus_text,
      focus_modules, package_id, package_version, catalog_version, status_dict_version,
      scoring_policy_version, methodology_version,
-     llm_scenario_map_json, embed_model_id, index_build_id, retrieval_profile,
+     index_build_id, retrieval_profile, retrieval_params_json,   -- профиль + fusion-параметры (rrf_k) — S1
      retrieval_cutoff_K, search_effort_budget_json, snapshot_date, state);
 
+-- llm_scenarios — канонический носитель маршрутизации (S2; llm_scenario_map_json удалён).
 llm_scenarios(run_id, scenario, model_id, model_version, endpoint_kind,  -- self_host|api
-              web_tool, decoder, seed, temperature, constrained_decoding);
+              web_tool, decoder, seed, temperature, constrained_decoding,
+              PRIMARY KEY (run_id, scenario));
 
 corpus_docs(doc_id PK, product_id, url, fetched_at, content_hash,
             raw_path, extractor_version, render_mode, lang);
 corpus_chunks(chunk_id PK, doc_id, product_id, url, heading_path, lang,
-              chunk_no, text, context_prefix, content_hash,
+              chunk_no, text, context_prefix, content_hash, build_id,   -- build_id: привязка чанка к сборке (S5)
               embed_model_id, embedded_at);
-index_manifest(index_build_id PK, package_id, product_id, partition_key,
+-- index_manifest: пакетная сборка (build_id, иммутабельна) × продукт-партиция.
+-- PK — составной (index_build_id, product_id): один build_id даёт N партиций (K1).
+index_manifest(index_build_id, product_id, package_id, partition_key,
                snapshot_date, chunker_version, embed_model_id, embed_dim,
-               lexical_engine_version, vector_store, store_path, created_at, stats_json);
+               lexical_engine_version, vector_store, store_path, created_at, stats_json,
+               PRIMARY KEY (index_build_id, product_id));
 
 cells(run_id, product_id, param_id, state,
       status, preliminary_status, source_kind, justification, rule_note,
       validation_notes, failure_kind, model_id, llm_scenario, prompt_hash,
-      primary_evidence_id, reviewed_by, updated_at);
+      index_build_id, retrieval_profile, retrieval_params_json,      -- provenance ячейки (R7/§13)
+      stale_reason,                                                   -- инвалидация (смена сборки/prompt)
+      primary_evidence_id, reviewed_by, updated_at,
+      PRIMARY KEY (run_id, product_id, param_id));
 
 cell_evidence(evidence_id PK, run_id, product_id, param_id,
       source_kind, evidence_type, source_id, source_url,
       citation_quote, content_hash, source_scope, scope_attested_by,   -- absence-evidence
-      retrieved_at);
+      index_build_id, retrieved_at);
+-- evidence_id детерминирован: H(run_id, product_id, param_id, source_id, source_kind, seq) — идемпотентность при resume (S8).
 
-search_log(log_id PK, run_id, phase, provider, adapter_kind, language, query,
+gate_decisions(decision_id PK, run_id, gate, target, actor, decided_at, notes);  -- S9: человеческие решения G1–G4 (I6/I7)
+
+search_log(log_id PK, run_id, phase, kind, provider, adapter_kind, language, query,
            results_count, selected, lexical_score, dense_score, fused_rank,
-           rerank_score, retrieval_score, termination_reason, ts);
+           rerank_score, retrieval_score, termination_reason, ts);   -- kind: retrieval|external (S12)
 
 search_exhaustion(run_id, product_id, param_id, protocol_json);
 registry_facts(run_id, product_id, registry_id, fact_json, source_url, fetched_at);
 ```
 
-Валидация цитат — по чистому `text` чанка (`context_prefix` не входит). `content_hash` заполняется с первого дня. `search_log` — **единственное место** логирования любых поисковых вызовов, включая tool-based (§7, I23).
+Валидация цитат — по чистому `text` чанка (`context_prefix` не входит). `content_hash` заполняется с первого дня. `search_log` — **единственное место** логирования любых поисковых вызовов, включая tool-based (§7, I23); поле `kind` разделяет внутренний ретривал (`retrieval`) и внешние поисковые запросы (`external`).
 
 ### 4.5. Конфигурация прогона (run.yaml)
 
-`case_id · anchor · cohort · products · package · focus{modules, params} · languages · snapshot_date · mode · ranking_policy`. Фокус меняет scope и перенормировку весов, не методологию. Роли scope = объединение `role_binding` выбранных модулей.
+`case_id · anchor · cohort · products · package · focus{modules, params} · languages · snapshot_date · mode · ranking_policy`. Фокус меняет scope и перенормировку весов, не методологию. Роли scope = объединение `role_binding` выбранных модулей. **Согласованность (S11):** `products` обязан совпадать с множеством `product_id` из `cohort.yaml` (один канонический источник состава — когорта; `products` — её проекция, проверяется линтером); `anchor ∈ products`; ровно один `anchor_relation: anchor` в когорте.
 
 ---
 
@@ -351,6 +370,16 @@ registry_facts(run_id, product_id, registry_id, fact_json, source_url, fetched_a
 Ш8  Расчёт: Resolved Capability + Coverage (+модульные)            ── ГЕЙТ G4
 Ш9  Отчёты: battle_card · preliminary_findings · nda_questions · diff · manifest
 ```
+
+**SERP-раунды и иммутабельность корпуса (K2).** Иммутабельность индексной сборки относится к
+*содержимому* продукт-партиции, а не к числу раундов. Корпус append-only и версионируется по
+раундам: базовый раунд (краул/документация) — `index_build_id R0-base`; каждый SERP-раунд, доливающий
+внешний контент, порождает **новую** сборку (`R1-serp`, `R2-serp`, …) с полным сохранением предыдущих.
+После долива раунда инвалидируются только **затронутые** ячейки (те, чей срез ретривала изменился);
+они помечаются `stale_reason='new_build'` и переоцениваются на новой сборке. Полная переоценка когорты
+не требуется и не запрещена — определяется политикой прогона. Сборка никогда не мутируется на месте:
+либо новый `index_build_id`, либо ячейка остаётся привязанной к своей (непереоценённой) сборке с явной
+пометкой устаревания. «Повторный Ш6» идёт **по уже проиндексированному** контенту новой сборки.
 
 Протокол исчерпания — машиночитаемый объект; ❓ = «протокол исчерпан, evidence недостаточно». Правило П>В действует на Ш6 поверх унаследованных статусов. Реконсиляция когорты: роль найдена у большинства и не найдена у одного → прицельный повтор тем же протоколом; итог — `not_found` (❓), не ❌. **SERP не встроен в оценщик:** поиск выполняется search-адаптером, его результат нормализуется в корпус (Ш5) и только затем попадает в оценку — повторный Ш6 идёт по уже проиндексированному контенту.
 
@@ -386,6 +415,8 @@ registry_facts(run_id, product_id, registry_id, fact_json, source_url, fetched_a
 - веса важности: объявленные vs uniform.
 
 **Правило решения (уточнено).** Если ранжирование устойчиво по всем трём осям → 0.5 и `unknown_policy: excluded` остаются. Если неустойчиво → Resolved Capability **демотируется до неранжирующего индикатора**, и battle_card публикует **fallback-порядок**: сортировку по Coverage (полнота прохождения) с по-модульной детализацией resolved-статусов и явной пометкой «упорядочено по полноте исследования, не по функциональности», а для каждой пары — интервал разброса. Официально допустимый исход — «без ранга» как честный результат (это не провал, а корректное отражение данных).
+
+**Разграничение запрошенного и вычисленного ранга (K6).** `ranking_policy` во входе (`run.yaml`) — это **запрошенный режим отображения** (`capability_ranked` | `coverage_fallback` | `unranked`), а не разрешение ранжировать вопреки измерению. Вычисленный **допустимый ранг** определяется sensitivity: если ранжирование неустойчиво, оно демотируется **независимо от** запрошенного режима (A3 — не предрешение). Аудит фиксирует оба: `requested_ranking` и `computed_ranking` в манифесте; расхождение (запрошено ранжирование, вычислено демотирование) — ожидаемый и явно отображаемый случай.
 
 ---
 
@@ -433,6 +464,8 @@ Discovery (Ш2) может использовать search-enabled модель;
 ## 8. Человеко-машинные интерфейсы
 
 **G1** — план прогона (продукты, когорта, фокус→модули→роли, перенормировка, объём). **G2** — матрица ролей × продуктов, подтверждение relationship; паспорта фиксируются на цикл. **G3** — strict-ревью (⚠️/❌/❓/failed/Кр/аномалии) и preliminary-рабочий стол (`promote · set-status · fix-evidence · reject`), пакетные операции обязательны. **G4** — публикация: только strict, только с Coverage. Бюджеты времени G2/G3 фиксируются после первого полного кейса (норматив v1.1 «≤1 ч» относился к пилоту 3×50 и более не утверждается).
+
+**Решения гейтов персистентны (S9).** Каждое человеческое решение G1–G4 пишется в `gate_decisions(decision_id, run_id, gate, target, actor, decided_at, notes)` — это носитель `reviewed_by` и аудит-след (кто подтвердил N/A, кто одобрил relationship на G2). Гейт не считается пройденным без строки в `gate_decisions`.
 
 ---
 
@@ -491,6 +524,13 @@ R12 кейс 1 демонстрирует ≥1 валидный ❌ через r
     и 0 false-❌ на Кр-параметрах на golden
 R13 Coverage учитывает failed в знаменателе; failure_rate публикуется
 R14 когорта и операциональная роль якоря зафиксированы в манифесте (проверяется)
+R15 provenance ячеек: 100% evaluated-ячеек несут index_build_id и retrieval_profile;
+    evidence-объекты имеют детерминированный evidence_id (идемпотентность resume)
+R16 CI-гейты подтверждают: I16 (единый профиль+K для когорты), I20 (golden cut-off =
+    pipeline-K), I23 (поисковый бюджет залогирован); diff запрещён при несовпадении
+    methodology/catalog/retrieval/provenance (§13)
+R17 оценщик не имеет веб-тула ни при каком сценарии-эвалуаторе (I18); все evidence
+    корпусного типа имеют content_hash (I19)
 ```
 
 ### 11.4. Portability gate
@@ -507,7 +547,7 @@ Yield · расхождение кандидат/strict на golden · врем�
 
 ### 11.7. Определение воспроизводимости (R7)
 
-«Двойной прогон» = два запуска с идентичными входами, `snapshot_date`, `index_build_id`, `retrieval_profile`+K, набором моделей и фиксированными `temperature`/`seed`/decoder, **без живого ре-фетча** (корпус и SERP — из кэша). Метрика — доля совпавших `status` по всем ячейкам. Детерминизм обеспечивается: greedy или seed (SGLang per-request seed; vLLM `VLLM_ENABLE_V1_MULTIPROCESSING=0`/batch invariance), зафиксированные версии весов и движка, одинаковое железо. Остаточный GPU non-determinism распределённых MoE конфигов документируется как известное ограничение.
+«Двойной прогон» = два запуска с идентичными входами, `snapshot_date`, `index_build_id`, `retrieval_profile`+K, набором моделей и фиксированными `temperature`/`seed`/decoder, **без живого ре-фетча** (корпус и SERP — из кэша). **Кэш внешних вызовов content-addressed и глобальный** (вне `runs/{run_id}/`): сырые байты страниц — `corpus_raw/{product_id}/{content_hash}` (уже глобальны), ответы SERP — `cache/serp/{query_hash}.json`, HTTP — `cache/http/{url_hash}.bin` в корне репозитория. Это делает R7 достижимым **между разными `run_id`**: второй запуск читает тот же кэш по хэшу ключа, а не по идентификатору прогона. Метрика — доля совпавших `status` по всем ячейкам. Детерминизм обеспечивается: greedy или seed (SGLang per-request seed; vLLM `VLLM_ENABLE_V1_MULTIPROCESSING=0`/batch invariance), зафиксированные версии весов и движка, одинаковое железо. Остаточный GPU non-determinism распределённых MoE конфигов документируется как известное ограничение.
 
 ---
 
@@ -543,7 +583,7 @@ Yield · расхождение кандидат/strict на golden · врем�
 
 ## 13. Версионирование
 
-`package_version · catalog_version · status_dictionary_version · scoring_policy_version` + `methodology_version`. Индексный контур: `index_build_id`, `embed_model_id`, `chunker_version`, `extractor_version`, `lexical_engine_version`, `retrieval_profile`, `retrieval_cutoff_K` — сборки иммутабельны; смена = новая сборка + retrieval-golden. **Смена модели под сценарий** (I21) и смена когорты = версионная граница, инвалидирующая межцикловый diff. Slug иммутабельны; deprecated + replaced_by. Major запрещает межцикловые diff.
+`package_version · catalog_version · status_dictionary_version · scoring_policy_version` + `methodology_version`. Индексный контур: `index_build_id`, `embed_model_id`, `chunker_version`, `extractor_version`, `lexical_engine_version`, `retrieval_profile`, `retrieval_cutoff_K`, **`retrieval_params_json` (fusion-параметры, включая `rrf_k`)** — сборки иммутабельны; смена любого из них = новая сборка + retrieval-golden (S1: `rrf_k` влияет на результаты и тоже версионируется). **Смена модели под сценарий** (I21) и смена когорты = версионная граница, инвалидирующая межцикловый diff. Slug иммутабельны; deprecated + replaced_by. Major запрещает межцикловые diff. **Diff-совместимость:** `hound diff` сравнивает манифесты прогонов и запрещает межцикловый diff при несовпадении `methodology_version` (major), когорты, `retrieval_profile`+K, `retrieval_params_json` или `index_build_id` — иначе сравнение несопоставимо.
 
 ---
 

@@ -174,6 +174,39 @@ adapter_kind:
   - serp
   - llm_grounding
 
+# §4.4/§7.4. Вид поискового лога (S12): внутренний ретривал vs внешний поиск.
+search_kind:
+  - retrieval
+  - external
+
+# §4.1. Политика ранжирования (S3, K6). Вход = запрошенный режим;
+# вычисленный допустимый ранг определяется sensitivity и не переопределяется входом.
+ranking_policy:
+  - capability_ranked
+  - coverage_fallback
+  - unranked
+
+# §6. Политики расчёта.
+capability_policy:
+  - resolved-only-v1
+unknown_policy:
+  - excluded
+  - unknown_as_zero
+
+# §8. Гейты (S3). Решения персистентны в gate_decisions (S9).
+gate:
+  - G1
+  - G2
+  - G3
+  - G4
+
+# §11.7 / §5. Инвалидация ячеек (K2, gaps).
+stale_reason:
+  - new_build
+  - prompt_changed
+  - catalog_changed
+  - model_changed
+
 # §4.4. Фазы конвейера, в которых пишется search_log.
 search_phase:
   - discovery

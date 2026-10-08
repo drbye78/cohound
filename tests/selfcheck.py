@@ -24,10 +24,12 @@ from core.schemas import (  # noqa: E402
     AnchorRelation,
     Archetype,
     Cell,
+    CellEvidence,
     CellState,
     Cohort,
     CohortEntry,
     EvidenceState,
+    EvidenceType,
     LLMCellOutput,
     LLMEvidence,
     ModuleDef,
@@ -36,10 +38,12 @@ from core.schemas import (  # noqa: E402
     Relationship,
     RunConfig,
     RunMode,
+    SourceKind,
     SourceScope,
     Status,
     apply_r2,
     assert_dictionary_integrity,
+    derived_evidence_id,
 )
 
 FAILURES: list[str] = []
@@ -236,6 +240,59 @@ def main() -> int:
 
     section("DDL SQLite §4.4 + триггеры инвариантов")
     check("создание схемы в памяти", lambda: _db_smoke())
+
+    section("CellEvidence / derived-evidence (K5, S5, S8, I19)")
+    check(
+        "корпусный evidence с hash валиден",
+        lambda: CellEvidence(
+            evidence_id="ev1", run_id="r", product_id="p", param_id="x",
+            source_kind=SourceKind.DOCUMENTATION, evidence_type=EvidenceType.DIRECT,
+            source_id="chunk_1", content_hash="abc",
+        ),
+    )
+    expect_raises(
+        "I19: корпусный evidence без content_hash отклоняется",
+        ValueError,
+        lambda: CellEvidence(
+            evidence_id="ev2", run_id="r", product_id="p", param_id="x",
+            source_kind=SourceKind.DOCUMENTATION, evidence_type=EvidenceType.DIRECT,
+            source_id="chunk_1",
+        ),
+    )
+    check(
+        "derived-evidence (наследование) валиден с source_id",
+        lambda: CellEvidence(
+            evidence_id="ev3", run_id="r", product_id="p", param_id="x",
+            source_kind=SourceKind.INHERITANCE, evidence_type=EvidenceType.DERIVED,
+            source_id="upstream://baseline#param",
+        ),
+    )
+    expect_raises(
+        "R1: registry evidence без source_url отклоняется",
+        ValueError,
+        lambda: CellEvidence(
+            evidence_id="ev4", run_id="r", product_id="p", param_id="x",
+            source_kind=SourceKind.REGISTRY, evidence_type=EvidenceType.DIRECT,
+            source_id="rrp:1",
+        ),
+    )
+    check(
+        "S8: derived_evidence_id детерминирован",
+        lambda: _assert(
+            derived_evidence_id("r", "p", "x", "s", "registry", 0)
+            == derived_evidence_id("r", "p", "x", "s", "registry", 0)
+        ),
+    )
+
+    section("New enums (S3) + провенанс ячейки (R7/§13)")
+    check(
+        "ячейка с провенансом сборки валидна",
+        lambda: Cell(
+            run_id="r", product_id="p", param_id="x",
+            state=CellState.PENDING,
+            index_build_id="b1", retrieval_profile="R2",
+        ),
+    )
 
     print(f"\n{CHECKS - len(FAILURES)}/{CHECKS} проверок пройдено")
     if FAILURES:

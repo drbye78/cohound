@@ -135,6 +135,40 @@ class AnchorRelation(StrEnum):
     ANALOG = "analog"
 
 
+class Gate(StrEnum):
+    G1 = "G1"
+    G2 = "G2"
+    G3 = "G3"
+    G4 = "G4"
+
+
+class RankingPolicy(StrEnum):
+    CAPABILITY_RANKED = "capability_ranked"
+    COVERAGE_FALLBACK = "coverage_fallback"
+    UNRANKED = "unranked"
+
+
+class CapabilityPolicy(StrEnum):
+    RESOLVED_ONLY_V1 = "resolved-only-v1"
+
+
+class UnknownPolicy(StrEnum):
+    EXCLUDED = "excluded"
+    UNKNOWN_AS_ZERO = "unknown_as_zero"
+
+
+class SearchKind(StrEnum):
+    RETRIEVAL = "retrieval"
+    EXTERNAL = "external"
+
+
+class StaleReason(StrEnum):
+    NEW_BUILD = "new_build"
+    PROMPT_CHANGED = "prompt_changed"
+    CATALOG_CHANGED = "catalog_changed"
+    MODEL_CHANGED = "model_changed"
+
+
 class LLMScenario(StrEnum):
     EVALUATOR = "evaluator"
     SEARCH_ADAPTER = "search_adapter"
@@ -402,15 +436,17 @@ class RunConfig(BaseModel):
     languages: list[str] = Field(default_factory=list)
     snapshot_date: _dt.date
     mode: RunMode
-    ranking_policy: Literal[
-        "capability_ranked", "coverage_fallback", "unranked"
-    ] = "capability_ranked"
+    ranking_policy: RankingPolicy = RankingPolicy.CAPABILITY_RANKED
 
     @model_validator(mode="after")
     def _check(self) -> RunConfig:
         if self.anchor not in self.products:
             raise ValueError("anchor обязан входить в products")
-        if self.mode is RunMode.PRELIMINARY and self.ranking_policy == "capability_ranked":
+        # S11: products — проекция когорты. Согласованность с cohort.yaml
+        # проверяется линтером/планером (там доступен Cohort); здесь — уникальность.
+        if len(self.products) != len(set(self.products)):
+            raise ValueError("products не должен содержать дубликаты")
+        if self.mode is RunMode.PRELIMINARY and self.ranking_policy is RankingPolicy.CAPABILITY_RANKED:
             # preliminary исключён из расчётов (I13) — ранжировать нечего.
             raise ValueError("preliminary не участвует в Capability-ранжировании (I13)")
         return self
@@ -446,6 +482,54 @@ class LLMCellOutput(BaseModel):
         return self
 
 
+class CellEvidence(BaseModel):
+    """Типизированный evidence-объект (§4.4). Единственная единица доказательства (§2.4).
+
+    K5: derived-evidence (наследование/сателлиты) обязано иметь резолв (I10/I15) и hash (I19).
+    S8: evidence_id детерминирован — идемпотентность при resume/повторном Ш6.
+    """
+
+    model_config = _BASE
+
+    evidence_id: str
+    run_id: str
+    product_id: str
+    param_id: str
+    source_kind: SourceKind
+    evidence_type: EvidenceType
+    source_id: str                       # I10/I15
+    source_url: str | None = None        # заполняется системным резолвом
+    citation_quote: str | None = None
+    content_hash: str | None = None
+    source_scope: SourceScope | None = None
+    scope_attested_by: str | None = None
+    index_build_id: str | None = None
+    retrieved_at: str | None = None
+
+    @model_validator(mode="after")
+    def _check(self) -> CellEvidence:
+        if not self.source_id:
+            raise ValueError("I10/I15: evidence обязан иметь source_id")
+        # Корпусный evidence обязан нести hash (I19).
+        if self.source_kind in {SourceKind.DOCUMENTATION, SourceKind.WEB, SourceKind.DISTRIBUTION}:
+            if not self.content_hash:
+                raise ValueError("I19: корпусный evidence обязан иметь content_hash")
+        # absence-evidence: scope по типу правила проверяется на уровне Cell.
+        if self.source_kind is SourceKind.REGISTRY and not self.source_url:
+            raise ValueError("R1: registry evidence обязан иметь source_url")
+        return self
+
+
+def derived_evidence_id(
+    run_id: str, product_id: str, param_id: str, source_id: str, source_kind: str, seq: int
+) -> str:
+    """Детерминированный evidence_id (S8)."""
+    import hashlib
+
+    raw = f"{run_id}|{product_id}|{param_id}|{source_id}|{source_kind}|{seq}".encode()
+    return "ev_" + hashlib.sha256(raw).hexdigest()[:24]
+
+
 # ---------------------------------------------------------------------------
 # Инварианты ячейки (§2.3) и Р-2 (§4.1)
 # ---------------------------------------------------------------------------
@@ -466,6 +550,11 @@ class Cell(BaseModel):
     evidence: list[LLMEvidence] = Field(default_factory=list)
     absence_evidence: list[dict[str, Any]] = Field(default_factory=list)
     reviewed_by: str | None = None
+    # Провенанс ячейки (R7/§13): смена сборки/профиля/промпта детектируется сравнением.
+    index_build_id: str | None = None
+    retrieval_profile: str | None = None
+    retrieval_params_json: str | None = None
+    stale_reason: StaleReason | None = None
 
     @model_validator(mode="after")
     def _enforce_invariants(self) -> Cell:
@@ -564,6 +653,13 @@ def assert_dictionary_integrity(path: str | Path) -> None:
         "run_mode",
         "satellite",
         "rule_r2",
+        # S3: новые перечисления должны быть в словаре — источнике истины.
+        "ranking_policy",
+        "capability_policy",
+        "unknown_policy",
+        "gate",
+        "search_kind",
+        "stale_reason",
     ]
     missing = [k for k in required if k not in data]
     if missing:
@@ -573,3 +669,19 @@ def assert_dictionary_integrity(path: str | Path) -> None:
             raise ValueError(f"статус {status}: символ {meta['symbol']} вне Status")
     if data["absence_rule_type"]["default"] not in data["absence_rule_type"]["values"]:
         raise ValueError("absence_rule_type.default отсутствует в values")
+    # Синхронизация новых enum со словарём (S3).
+    checks = {
+        "ranking_policy": {v.value for v in RankingPolicy},
+        "capability_policy": {v.value for v in CapabilityPolicy},
+        "unknown_policy": {v.value for v in UnknownPolicy},
+        "gate": {v.value for v in Gate},
+        "search_kind": {v.value for v in SearchKind},
+        "stale_reason": {v.value for v in StaleReason},
+    }
+    for section, expected in checks.items():
+        actual = set(data[section])
+        if actual != expected:
+            raise ValueError(
+                f"словарь.{section} рассинхронизирован со схемой: "
+                f"словарь={sorted(actual)}, схема={sorted(expected)}"
+            )
