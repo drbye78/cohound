@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Операционные артефакты прогонов (не версионируется)
+runs/*/sqlite.db
+runs/*/*.db-wal
+runs/*/*.db-shm
+reports/*.xlsx
+reports/*.csv
+
+# Индексные сборки (.npy-шарды) — иммутабельны, но велики
+index_store/
+
+# Сырой корпус (байты страниц) — retention локально
+corpus_raw/
+
+# Прочее
+*.log
+.DS_Store

@@ -1,0 +1,231 @@
+# coHound — словарь статусов и перечислений
+# Источник истины по §4.1 регламента cohound-spec-v2.md (v2.0).
+# Версия словаря: 2.0.0
+# Каталоги (package/catalog) версионируются отдельно; этот файл — их зависимость.
+
+status_dictionary_version: "2.0.0"
+
+# §2.1. Статусы ячейки. Порядок ординален: OK > PARTIAL > ABSENT.
+# unknown (❓) — не отрицательное свидетельство; N/A — только человеком.
+statuses:
+  ok:
+    symbol: "✅"
+    ordinal: 3
+    label_ru: "подтверждено"
+    description: "Наличие подтверждено валидной цитатой или детерминированным выводом."
+  partial:
+    symbol: "⚠️"
+    ordinal: 2
+    label_ru: "частично/неполно подтверждено"
+    description: "Наличие частично/неполно подтверждено либо реализовано ограниченно."
+  absent:
+    symbol: "❌"
+    ordinal: 1
+    label_ru: "подтверждённое отсутствие"
+    description: "Отсутствие непосредственно подтверждено absence-evidence по absence-правилу параметра."
+  unknown:
+    symbol: "❓"
+    ordinal: 0
+    label_ru: "не установлено"
+    description: "После исчерпания предписанного протокола недостаточно доказательств."
+  not_applicable:
+    symbol: "N/A"
+    ordinal: -1
+    label_ru: "неприменимо"
+    description: "Архитектурно неприменим; устанавливается только человеком (I6, I7)."
+
+# Разрешающий набор для числителя Resolved Capability (§6): ❓ вне числителя и знаменателя.
+# N/A исключается человеком. failed — не статус вовсе (I4).
+capability_scoring:
+  ok: 1.0
+  partial: 0.5
+  absent: 0.0
+  # unknown и not_applicable в числитель не входят.
+partial_score: 0.5
+
+# §4.1. source_kind — вид источника evidence.
+source_kind:
+  - registry
+  - inheritance
+  - distribution
+  - documentation
+  - web
+  - manual
+
+# §4.1. evidence_type — прямое или производное доказательство.
+evidence_type:
+  - direct
+  - derived
+
+# §4.2. absence_rule_type — тип правила отсутствия параметра.
+# Дефолт catalog.csv — explicit.
+absence_rule_type:
+  default: explicit
+  values:
+    explicit: "Явное отрицание вендора; source_scope не требуется (само отрицание есть evidence)."
+    parameter_reference: "Требует source_scope=exhaustive И scope_attested_by != null, иначе ❓."
+    distribution_absence: "Требует source_scope=exhaustive И scope_attested_by != null, иначе ❓."
+    registry_absence: "Exhaustive по построению (авторитетная энумерация); scope_attested_by не требуется."
+  # I2b: какие типы требуют человеческой аттестации исчерпанности.
+  requires_attestation:
+    - parameter_reference
+    - distribution_absence
+  # Типы, для которых source_scope обязан быть exhaustive в силу конструкции.
+  exhaustive_by_construction:
+    - registry_absence
+
+# §4.1. source_scope — свойство экземпляра источника (поле evidence).
+source_scope:
+  - exhaustive
+  - partial
+  - unknown
+
+# §4.1. failure_kind — класс сбоя; failed никогда не статус (I4).
+failure_kind:
+  - search_failed
+  - source_unavailable
+  - evaluation_failed
+  - validation_failed
+  - parser_failed
+
+# §4.1. cell_state — жизненный цикл ячейки.
+# evaluated+status → разрешённая; failed → status=null (I4), в знаменателе Coverage (I5).
+cell_state:
+  - pending
+  - preliminary
+  - evaluated
+  - failed
+  - reviewed
+
+# §1.4. run_mode — режим прогона.
+run_mode:
+  - strict
+  - preliminary
+
+# §4.1. Оси сателлита.
+satellite:
+  origin:
+    - in_house
+    - third_party
+    - upstream
+    - community
+    - unknown
+  relationship:
+    - bundled
+    - integrated
+    - certified
+    - recommended
+    - external
+  evidence_state:
+    - verified
+    - claimed
+
+# §4.3. Состояние сателлита в паспорте.
+satellite_state:
+  - draft
+  - approved
+  - edited_by_human
+  - not_found
+
+# §4.2. Режим наследования (baselines.csv).
+inheritance_mode:
+  - direct
+  - conditional
+  - blocked
+
+# §4.2. Тип параметра.
+param_type:
+  - fact
+  - showcase
+
+# §4.2. Важность параметра (лат. аббревиатуры по регламенту).
+importance:
+  - "Кр"
+  - "Вж"
+  - "Баз"
+  - "Опц"
+importance_labels:
+  "Кр": "критический"
+  "Вж": "важный"
+  "Баз": "базовый"
+  "Опц": "опциональный"
+
+# §4.2. Архетип категории.
+archetype:
+  - A
+  - B
+  - C
+
+# §1.6. Связь продукта с якорем когорты.
+anchor_relation:
+  - anchor
+  - analog
+
+# §7.4 / §4.4. Роль LLM-сценария и вид эндпоинта.
+llm_scenario:
+  - evaluator
+  - search_adapter
+  - discovery
+  - concept_scout
+endpoint_kind:
+  - self_host
+  - api
+adapter_kind:
+  - serp
+  - llm_grounding
+
+# §4.4. Фазы конвейера, в которых пишется search_log.
+search_phase:
+  - discovery
+  - corpus
+  - serp
+  - scout
+
+# §4.4. Причина терминации поискового протокола (исчерпание).
+termination_reason:
+  - budget_exhausted
+  - results_exhausted
+  - sufficient_evidence
+  - not_found
+  - error
+
+# §6. Аннотация Comparability (кросс-продуктовая).
+comparability:
+  - HIGH
+  - MEDIUM
+  - LOW
+  - INSUFFICIENT
+  - cross-cycle   # при невыполнении alignment-условий когорты
+
+# §4.1 / Р-2. Маппинг сателлита на зачёт. Правила применяются сверху вниз,
+# первое совпавшее решает. cap — потолок статуса зачёта.
+# Дополняет §4.1 «Маппинг на зачёт (Р-2)».
+rule_r2:
+  order:
+    - id: r2_claimed
+      when:
+        evidence_state: claimed
+      cap: partial
+    - id: r2_community_external
+      when:
+        origin: community
+        relationship: external
+      cap: none        # зачёт по интеграционным параметрам не даётся
+    - id: r2_verified_integrated
+      when:
+        relationship: [bundled, integrated, certified]
+        evidence_state: verified
+      cap: ok          # без потолка
+    - id: r2_recommended
+      when:
+        relationship: recommended
+        evidence_state: verified
+      cap: partial
+    - id: r2_external
+      when:
+        relationship: external
+        evidence_state: verified
+      cap: parameter_rule   # по rule параметра
+    - id: r2_default
+      when: {}
+      cap: parameter_rule
