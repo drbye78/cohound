@@ -2,8 +2,15 @@
 
 __all__ = [
     "chunker_markdown",
+    "crawl_scrapy",
+    "embed_local",
     "extract_document",
     "extract_html",
+    "index_format",
+    "index_npy",
     "lexical_bm25",
+    "lexical_tantivy",
+    "llm_local",
     "registry_generic",
+    "vector_npy",
 ]
