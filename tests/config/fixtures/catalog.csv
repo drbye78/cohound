@@ -1,0 +1,3 @@
+param_id,title,module,group,importance,param_type,rule,absence_rule,role_binding,concept_terms,search_langs
+param_a,Параметр A,mod_a,grp_a,Кр,fact,граница зачёта A,explicit,role_a,"{""ru"": [""a""], ""en"": [""a""]}",ru|en
+param_b,Параметр B,mod_b,grp_b,Баз,showcase,"публичная величина: доля 10%",distribution_absence,role_a,ru=b;en=b,ru

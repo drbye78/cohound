@@ -122,4 +122,4 @@ exclude_also = [
 
 [tool.setuptools]
 # Плоская раскладка: пакет core/ в корне репозитория (§3.3 регламента).
-packages = ["core", "core.util", "core.adapters", "core.ports", "core.domain", "core.store", "core.pipeline"]
+packages = ["core", "core.util", "core.adapters", "core.ports", "core.domain", "core.store", "core.pipeline", "core.config"]

@@ -1,0 +1,11 @@
+case_id: case_x
+frozen_at: 2026-06-01
+entries:
+  - product_id: p1
+    role_overlap: 1.0
+    selection_reason: "якорь"
+    anchor_relation: anchor
+  - product_id: p2
+    role_overlap: 0.5
+    selection_reason: "аналог"
+    anchor_relation: analog

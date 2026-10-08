@@ -1,0 +1,12 @@
+case_id: case_x
+anchor: p1
+cohort: cohort_case_x
+products: [p1, p2]
+package: case_x
+focus:
+  modules: [mod_a]
+  params: [param_a]
+languages: [ru, en]
+snapshot_date: 2026-06-01
+mode: strict
+ranking_policy: capability_ranked

@@ -1,0 +1,22 @@
+case_id: case_x
+package_version: "1.0.0"
+archetype: B
+modules:
+  - module_id: mod_a
+    weight: 60
+  - module_id: mod_b
+    weight: 40
+roles:
+  - role_id: role_a
+    definition: "Тестовая инженерная роль (категорийно-нейтрально)."
+    markers: [marker_a]
+    query_patterns:
+      ru: [запрос_а]
+      en: [query_a]
+    core_coverage_allowed: true
+    multi_instance: false
+baselines: [baseline_a]
+baseline_participant: baseline_a
+jurisdictions: [RU]
+registries: [reg_a]
+languages: [ru, en]

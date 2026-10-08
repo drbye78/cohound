@@ -1,0 +1,6 @@
+case_x:
+  render:
+    mode: text
+    max_chars: 4000
+  index:
+    partition_key: p1

@@ -1,0 +1,3 @@
+baseline_id,param_id,min_version,inheritance_mode,note
+baseline_a,param_a,1.0,direct,примечание
+baseline_b,param_b,,conditional,
