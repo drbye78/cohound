@@ -363,6 +363,23 @@ def main() -> int:
     section("Экстракция (Ш5) — W8")
     check("extraction-golden: expected/forbidden + §13 триггер", lambda: _extraction_golden())
 
+    section("SERP/бюджет/поиск — W11")
+    check("search_log: бюджет симметричен на продукт (I16/I23)", lambda: _search_budget())
+    check("discovery: кандидаты без evidence (I19), промоушен только G2", lambda: _discovery())
+
+    section("Adversarial (R8) — W12")
+    check("adversarial: 0 известных инъекций + регрессионный gate", lambda: _adversarial_gate())
+
+    section("DMZ-шов (07) — W13")
+    check("seam: schema_version=1 + конверт/payload + R1", lambda: _seam_schema())
+    check("edge server: зеркало клиента + изоляция от store/domain", lambda: _edge_isolation())
+    check("gateway_validate: повторный content_hash → отказ (I19)", lambda: _gateway_validate())
+    check("auth/audit: подделка отвергнута + поля SIEM (07 §8)", lambda: _edge_auth_audit())
+    check("deploy.yaml: отсутствие → local; split требует base_url", lambda: _deploy_config())
+
+    section("Оценщик fallback (CPU) — W9")
+    check("llama-cpp: порт EvaluatorPort + I18 структурно", lambda: _llamacpp_fallback())
+
     print(f"\n{CHECKS - len(FAILURES)}/{CHECKS} проверок пройдено")
     if FAILURES:
         print("\nПровалы:")
@@ -1519,6 +1536,300 @@ def _extraction_golden() -> None:
         raise AssertionError("§13: смена extractor_version обязана триггерить прогон")
     if extractor_version_changed("", None):
         raise AssertionError("None и '' — одна «незаданная» версия, не изменение")
+
+
+def _search_budget() -> None:
+    """Бюджет внешнего поиска: симметрия на продукт (I16), терминация §5 (I23)."""
+    from core.domain import TerminationReason
+    from core.pipeline.search_log import SearchBudget, SearchEffort, external_search
+    from core.ports.search import SearchQuery, SearchResult
+
+    budget = SearchBudget.from_mapping({"corpus": 1})
+    effort = SearchEffort(budget)
+    if not effort.charge("corpus", "p1") or effort.charge("corpus", "p1"):
+        raise AssertionError("p1 обязан исчерпать бюджет за 1 вызов")
+    if not effort.charge("corpus", "p2"):
+        raise AssertionError("I16: исчерпание бюджета p1 не должно влиять на p2")
+
+    class _Ad:
+        adapter_kind = "serp"
+        provider = "fake"
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def search(self, q):
+            self.calls += 1
+            return [SearchResult(url="https://example.com/a", title="t", snippet="s")]
+
+        def fetch(self, url):
+            raise NotImplementedError
+
+    logged: list = []
+    store = type("S", (), {"log_search": lambda self, e: logged.append(e)})()
+    ad = _Ad()
+    eff = SearchEffort(SearchBudget.from_mapping({"corpus": 1}))
+    first = external_search(ad, SearchQuery(text="q"), store=store, run_id="r1",
+                            effort=eff, budget=budget, product_id="p1")
+    second = external_search(ad, SearchQuery(text="q"), store=store, run_id="r1",
+                             effort=eff, budget=budget, product_id="p1")
+    if not first or second or ad.calls != 1:
+        raise AssertionError("исчерпание бюджета обязано вернуть [] без вызова адаптера (I23)")
+    if logged[-1].termination_reason is not TerminationReason.BUDGET_EXHAUSTED:
+        raise AssertionError("терминация при исчерпании бюджета обязана быть budget_exhausted")
+
+
+def _discovery() -> None:
+    """Discovery: выход — кандидаты/гипотезы, не evidence (I19); промоушен только G2."""
+    import ast as _ast
+    import inspect as _inspect
+
+    import core.pipeline.discovery as _d
+    from core.pipeline.discovery import discover, review_candidates
+    from core.ports.search import SearchResult
+
+    tree = _ast.parse(_inspect.getsource(_d))
+    imports: set[str] = set()
+    for node in _ast.walk(tree):
+        if isinstance(node, _ast.ImportFrom) and node.module:
+            imports.add(node.module)
+        if isinstance(node, _ast.Import):
+            imports.update(a.name for a in node.names)
+    if {m for m in imports if m.startswith("core.store") or m == "core.domain.models"}:
+        raise AssertionError("discovery обязан не импортировать store/Cell (I19)")
+
+    class _Fake:
+        adapter_kind = "serp"
+        provider = "fake"
+
+        def search(self, q):
+            return [SearchResult(url="https://example.com/a", title="t", snippet="s")]
+
+        def fetch(self, url):
+            raise NotImplementedError
+
+    report = discover(queries=["q"], adapter=_Fake(), limit=5, lang="ru")
+    if len(report.candidates) != 1 or report.candidates[0].source_urls != ["https://example.com/a"]:
+        raise AssertionError("кандидат должен нести source_urls, но не evidence")
+    if report.candidates[0].status.value != "hypothesis":
+        raise AssertionError("discover обязан выдавать гипотезы (кандидат — только через G2)")
+    if any(c.status.value != "hypothesis" for c in review_candidates(report, decisions=None)):
+        raise AssertionError("без решения G2 промоушена быть не должно")
+
+
+def _adversarial_gate() -> None:
+    """R8: 0 известных инъекций; gate() бросает при breach."""
+    from pathlib import Path
+
+    from core.pipeline.adversarial import (
+        AdversarialBreachError,
+        DefenseResult,
+        load_adversarial,
+        run_adversarial,
+    )
+
+    path = Path(__file__).parent / "pipeline" / "fixtures" / "adversarial_prompts.json"
+    cases = load_adversarial(path)
+    report = run_adversarial(cases)
+    if report.breached != 0 or report.total == 0:
+        raise AssertionError(f"R8: ожидалось 0 инъекций, получено {report.breached}/{report.total}")
+    report.gate()
+
+    class _Breach:
+        def __call__(self, case, chunks, output):
+            return DefenseResult(defended=False, stage="none", detail="synthetic")
+
+    if run_adversarial(cases, validator=_Breach()).breached == 0:
+        raise AssertionError("gate обязан обнаруживать синтетический breach")
+    try:
+        run_adversarial(cases, validator=_Breach()).gate()
+        raise AssertionError("gate обязан бросить AdversarialBreachError")
+    except AdversarialBreachError:
+        pass
+
+
+def _seam_schema() -> None:
+    """Контракты шва: schema_version=1, конверт/payload, R1 source_url."""
+    from core.adapters.remote_gateway import DEFAULT_SCHEMA_VERSION
+    from core.edge.seam_schema import (
+        ENDPOINT_OPS,
+        SEAM_SCHEMA_VERSION,
+        contract_digest,
+        validate_envelope,
+        validate_payload,
+    )
+
+    if not (SEAM_SCHEMA_VERSION == DEFAULT_SCHEMA_VERSION == "1"):
+        raise AssertionError("schema_version шва обязан совпадать с клиентом (=1)")
+    if validate_envelope({"schema_version": "1", "request_id": "x", "status": "ok",
+                          "payload": {}, "error": None}):
+        raise AssertionError("корректный конверт отвергнут")
+    if not validate_envelope({"request_id": "x", "status": "ok", "payload": {}}):
+        raise AssertionError("отсутствие schema_version обязано быть нарушением")
+    if not validate_payload("registry", [{"fact_json": {}, "fetched_at": "t"}]):
+        raise AssertionError("R1: registry без source_url обязан быть отвергнут")
+    if {"fetch", "search", "registry", "health", "capabilities"} - set(ENDPOINT_OPS):
+        raise AssertionError("не все /v1/* эндпоинты описаны контрактом")
+    if contract_digest() != contract_digest():
+        raise AssertionError("contract_digest обязан быть детерминирован")
+
+
+def _edge_isolation() -> None:
+    """Edge-сервер: зеркало клиента (envelope round-trip), изоляция от store/domain (I18/I19)."""
+    import ast as _ast
+    import inspect as _inspect
+
+    import core.edge.server as _srv
+    from core.adapters.remote_crawler import RemoteCrawler
+    from core.adapters.remote_gateway import HttpContentGateway
+    from core.edge.server import EdgeGateway
+    from core.ports.types import ExtractedDoc, RawPage
+
+    tree = _ast.parse(_inspect.getsource(_srv))
+    imports: set[str] = set()
+    for node in _ast.walk(tree):
+        if isinstance(node, _ast.ImportFrom) and node.module:
+            imports.add(node.module)
+        if isinstance(node, _ast.Import):
+            imports.update(a.name for a in node.names)
+    if {m for m in imports if m.startswith("core.store") or m.startswith("core.domain")}:
+        raise AssertionError("edge не имеет права импортировать store/domain (I18/I19)")
+
+    class _Crawler:
+        version = "c1"
+
+        def fetch(self, url, render=None, lang=None):
+            return RawPage(url=url, content=b"<html>hi</html>", fetched_at="t")
+
+    class _Extractor:
+        version = "e1"
+
+        def extract(self, page):
+            return ExtractedDoc(text="hi", content_hash="h", extractor_version="e1")
+
+    edge = EdgeGateway(crawler=_Crawler(), extractor=_Extractor(), registries={})
+    client = HttpContentGateway(
+        base_url="https://edge.invalid",
+        transport=lambda op, env: edge.envelope(op, env.get("payload") or {},
+                                                request_id=env.get("request_id")),
+    )
+    if RemoteCrawler(client).fetch("https://example.com").content != b"<html>hi</html>":
+        raise AssertionError("client↔server round-trip шва сломан")
+
+
+def _gateway_validate() -> None:
+    """Валидация входящего: повторный content_hash отвергает подмену (I19, T13.5)."""
+    import ast as _ast
+    import base64 as _b64
+    import inspect as _inspect
+
+    import core.adapters.gateway_validate as _gv
+    from core.adapters.gateway_validate import validate_raw_page
+    from core.util.hashing import content_hash
+
+    tree = _ast.parse(_inspect.getsource(_gv))
+    imports: set[str] = set()
+    for node in _ast.walk(tree):
+        if isinstance(node, _ast.ImportFrom) and node.module:
+            imports.add(node.module)
+        if isinstance(node, _ast.Import):
+            imports.update(a.name for a in node.names)
+    if {m for m in imports if m.startswith("core.edge")}:
+        raise AssertionError("01 §1: adapters не могут импортировать edge")
+
+    raw = b"<html>hello</html>"
+    declared = content_hash(raw)
+    good = {"raw": {"bytes_b64": _b64.b64encode(raw).decode(), "hash": declared, "size": len(raw)}}
+    if not validate_raw_page(good, url="https://example.com/a").ok:
+        raise AssertionError("валидный raw-page обязан проходить")
+    bad = {"raw": {"bytes_b64": _b64.b64encode(b"tampered").decode(), "hash": declared,
+                   "size": len(raw)}}
+    result = validate_raw_page(bad, url="https://example.com/a")
+    if result.ok or not any(i.code == "hash" for i in result.issues):
+        raise AssertionError("подмена байтов при заявленном хеше обязана быть отвергнута (I19)")
+
+
+def _edge_auth_audit() -> None:
+    """Шов: mTLS-скоупы, OIDC fail-closed (подделка), аудит-строка SIEM (07 §8)."""
+    import json as _json
+    import pathlib as _pl
+    import tempfile as _tf
+
+    from core.edge.audit import FileAuditSink, audit_call
+    from core.edge.auth import MTLSAuthenticator, OIDCAuthenticator, authorize
+
+    mtls = MTLSAuthenticator(subject_scopes={"core@svc": frozenset({"fetch", "search"})})
+    decision = mtls.authenticate({"X-Client-Cert-Subject": "core@svc"})
+    if not decision.allowed or decision.principal is None \
+            or decision.principal.subject != "core@svc":
+        raise AssertionError("mTLS-принципал не разрешён")
+    if not authorize(decision.principal, "fetch") or authorize(decision.principal, "registry"):
+        raise AssertionError("authorize: op→scope allowlist сломан")
+    if mtls.authenticate({}).allowed:
+        raise AssertionError("запрос без идентичности обязан быть отвергнут")
+
+    oidc = OIDCAuthenticator(issuer="https://idp.invalid", audience="cohound")
+    forged = ("eyJhbGciOiJub25lIn0."
+              "eyJzdWIiOiJhZG1pbiIsImlzcyI6Imh0dHBzOi8vaWRwLmludmFsaWQiLCJhdWQiOiJjb2hvdW5kIn0.")
+    if oidc.authenticate({"Authorization": f"Bearer {forged}"}).allowed:
+        raise AssertionError("подделанный OIDC-токен не должен считаться проверенным")
+
+    with _tf.TemporaryDirectory() as td:
+        sink = FileAuditSink(_pl.Path(td) / "audit.jsonl", clock=lambda: "2026-01-01T00:00:00Z")
+        audit_call(sink, request_id="req-1", principal=decision.principal, op="fetch",
+                   status="allow")
+        event = _json.loads((_pl.Path(td) / "audit.jsonl").read_text(encoding="utf-8").strip())
+        for field in ("ts", "request_id", "principal", "op", "status", "classification"):
+            if field not in event:
+                raise AssertionError(f"поле SIEM-события отсутствует: {field}")
+        if event["request_id"] != "req-1":
+            raise AssertionError("событие обязано коррелироваться по request_id")
+
+
+def _deploy_config() -> None:
+    """deploy.yaml: отсутствие → безопасный local; split* требует edge.base_url."""
+    import pathlib as _pl
+    import tempfile as _tf
+
+    from core.config.deploy import is_split, load_deploy_config
+
+    default = load_deploy_config("/tmp/__cohound_missing_deploy__.yaml")
+    if default.profile != "local" or is_split(default):
+        raise AssertionError("отсутствие deploy.yaml → профиль local (07)")
+    with _tf.TemporaryDirectory() as td:
+        bad = _pl.Path(td) / "d.yaml"
+        bad.write_text("profile: split\nedge: {}\n", encoding="utf-8")
+        try:
+            load_deploy_config(bad)
+            raise AssertionError("split без edge.base_url обязан отказать")
+        except ValueError:
+            pass
+
+
+def _llamacpp_fallback() -> None:
+    """CPU-fallback оценщика: конформность EvaluatorPort, I18 структурно."""
+    import inspect as _inspect
+
+    import core.adapters.llm_llamacpp as _m
+    from core.domain import LLMCellOutput, Status
+    from core.ports.llm import EvaluatorPort, LLMRequest
+
+    evaluator = _m.LlamaCppEvaluator(
+        model_path="/nonexistent.gguf",
+        generate=lambda req: '{"status":"✅","justification":"j",'
+                             '"evidence":[{"source_id":"c1","quote":"q"}]}',
+    )
+    if not isinstance(evaluator, EvaluatorPort):
+        raise AssertionError("LlamaCppEvaluator обязан реализовывать EvaluatorPort")
+    response = evaluator.complete(LLMRequest(prompt="p", response_schema=LLMCellOutput, model_id="m"))
+    if response.output.status is not Status.OK:
+        raise AssertionError("валидный JSON оценщика не разобран")
+    source = _inspect.getsource(_m)
+    for banned in ("web_search", "tool_choice", "search_tool"):
+        if banned in source:
+            raise AssertionError(f"I18: веб-тул в оценщике запрещён ({banned})")
+    if _m.LlamaCppEvaluator(model_path="/nonexistent.gguf").available:
+        raise AssertionError("available обязан быть False без пакета/модели")
 
 
 if __name__ == "__main__":
