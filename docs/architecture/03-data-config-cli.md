@@ -21,6 +21,10 @@ repo/
   pyproject.toml             # ядро + extras (стек/пины — 05-dependency-stack.md)
   uv.lock                    # (планируется) зафиксированный резолв для воспроизводимости
   core/                      # пакет (см. итерацию 1)
+    cli/                     # composition root Z0 (ядро)
+    edge/                    # composition root Z1/DMZ (веб-адаптеры за gateway) — 07
+  config/
+    deploy.yaml              # профиль развёртывания (local|split), endpoints, allowlist (07)
   packages/{case_id}/
     package.yaml             # §4.2
     catalog.csv              # 11 колонок
@@ -211,6 +215,29 @@ mapping: { name: "$.items[*].name", version: "$.items[*].version" }
 
 `adapters/registry_generic.py` интерпретирует; код ядра не знает названий реестров (§1.3).
 
+### D.5. Конфиг развёртывания (`config/deploy.yaml`, 07)
+
+Отдельно от `run.yaml` (развёртывание ≠ методологический прогон). Выбирает профиль зон и адреса
+DMZ-шва:
+
+```yaml
+profile: split                 # local | split | split-hardened
+edge:
+  base_url: "https://edge.internal:8443"
+  tls: { ca: certs/ca.pem, client_cert: certs/core.pem, client_key: secrets/core.key }
+  timeout_s: 30
+  max_retries: 2
+  max_response_bytes: 52428800
+extractor_zone: edge           # edge | core | separate
+search:
+  budget: { ru: 5, en: 5 }      # симметрия I16
+  adapter: yandex
+```
+
+Профиль `local` игнорирует `edge.*`. Загрузчик `config/deploy.py` → `DeployConfig` (домен-нейтрален).
+`deploy_profile` и версии edge-компонентов (`/v1/capabilities`) пишутся в `run_manifest.yaml` (R7).
+`edge/` (composition root Z1) читает тот же файл для bind-адреса/аутентификации входящих.
+
 ---
 
 ## E. CLI и UX
@@ -229,6 +256,7 @@ mapping: { name: "$.items[*].name", version: "$.items[*].version" }
 | `hound sensitivity` | пост-хок по осям | отчёт |
 | `hound diff <run_a> <run_b>` | межцикловый diff (запрещён через major) | diff.md |
 | `hound promote --validated-only` | preliminary → strict (переаттестация) | cells |
+| `hound deploy-check` | диагностика профиля: достижимость DMZ-шва, версии/форматы edge (`/v1/health`, `/v1/capabilities`) | — (отчёт) |
 
 ### E.2. UX-принципы
 
@@ -243,8 +271,11 @@ mapping: { name: "$.items[*].name", version: "$.items[*].version" }
 
 ### E.3. Композиция (wiring)
 
-`cli/main.py` — единственное место сборки: выбирает адаптеры по `run_manifest`/CLI-флагам,
-создаёт порты, инстанцирует `Runner`. Ручной DI без фреймворка (A1).
+`cli/main.py` — единственное место сборки **ядра** (Z0): выбирает адаптеры по `run_manifest`/CLI-флагам
+и `deploy.yaml`, создаёт порты, инстанцирует `Runner`. При профиле `split` веб-порты подставляются
+**remote-прокси** (`RemoteCrawler`/`RemoteSearch`/…), вызывающими DMZ-сервис через `ContentGateway`.
+Ручной DI без фреймворка (A1). Второй composition root — `edge/` (Z1): собирает реальные веб-адаптеры
+и публикует их через gateway-сервер (07). `pipeline` не знает о профиле: получает порты как аргументы.
 
 ---
 
@@ -272,6 +303,7 @@ mapping: { name: "$.items[*].name", version: "$.items[*].version" }
 | §9 артефакты | A.2 |
 | §13 версионирование | C |
 | I10/I15 | B.1 (resolve_source_url) |
+| Развёртывание/DMZ (07) | A.1 (`edge/`, `config/deploy.yaml`), D.5, E.3 |
 
 **Открытые вопросы к итерации 4:** формат импорт-графа CI; структура логирования; бэкап/
 восстановление прогона; как считать `prompt`-шаблоны версиями. Отдельная корпусная БД —

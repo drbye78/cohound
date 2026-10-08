@@ -104,6 +104,13 @@ products × doc_domains
 `pipeline` **не работает с файлами индекса напрямую**: за запись `.npy`-шардов и tantivy отвечает
 `IndexBuilderPort`, за эмбеддинги — `EmbedderPort` (K3).
 
+**Граница доверенных зон (07).** В профиле `split` шаги `CrawlerPort.fetch` и `ExtractorPort.extract`
+исполняются **в DMZ** (`edge/`), а ядро вызывает их через `ContentGateway` (remote-прокси). Сырые
+байты и очищенный текст возвращаются в ядро **как ответ edge** (не как evidence); ядро **повторно
+хеширует и валидирует** входящее, пишет `corpus_raw` (retention) и только затем `chunk → embed →
+index`. Это делает DMZ-шов физической границей **I19**. В профиле `local` те же шаги идут in-process
+(порт тот же — код ядра не меняется).
+
 **Retention.** `corpus_docs.raw_path` → байты хранятся; `extractor_version` позволяет
 ре-извлечение без ре-фетча (A/B экстракторов). `content_hash` — с первого дня (I19).
 
@@ -222,9 +229,11 @@ retry ≤2 → `failed` (status=null, I4). В preliminary невалидная �
 ### C.3. Search-адаптер (Ш5, §7.2)
 
 - **Провайдеры:** `search_yandex.py` (Yandex Search API / Web Search Tool), `search_glm.py`
-  (Z.ai Web Search API) — оба за `ports/search.py`.
+  (Z.ai Web Search API) — оба за `ports/search.py`. В профиле `split` исполняются в DMZ (`edge/`),
+  ядро вызывает через `gateway` (07).
 - **Бюджет:** фиксирован (≤5 RU + ≤5 EN на параметр-продукт по умолчанию), симметричен (I16).
-- **Логирование:** каждый вызов → `search_log` (`adapter_kind`, provider, query, results, termination).
+- **Логирование:** каждый вызов → `search_log` (`adapter_kind`, provider, query, results, termination);
+  инициатор — ядро (I23), edge ведёт свой аудит.
 - **Цитаты заземления — кандидаты, не доказательства:** URL результата проходит corpus_raw →
   hash → index (I19); только после этого цитата может стать evidence.
 - **Discovery/concept scout:** могут использовать search-enabled модель; выход — кандидаты,
@@ -257,6 +266,10 @@ llm_scenarios:
 
 **Нейтральность.** Нет кода под конкретный реестр: `adapters/registry_generic.py` +
 `registries/*.yaml` (endpoint, формат `json|html`, JSONPath-маппинг). См. итерацию 1 §7.
+
+**Зона (07).** Реестровые фетчеры — веб-функция: в профиле `split` `registry_generic.py` исполняется
+в DMZ (`edge/`), ядро вызывает через `gateway` (`/v1/registry`). Результат (`RegistryFact` с
+`source_url`) возвращается в ядро и резолвится/валидируется там (R1/I10/I15).
 
 ### D.2. Волна наследования (Ш4, без LLM)
 
@@ -358,6 +371,10 @@ flowchart LR
     INV --> Ev2[повторный Ш6 · сборка R_n+1]
 ```
 
+**Профиль `split` (07):** шаг `SA` (search adapter) и `CR` (краул) исполняются в DMZ; ядро↔edge —
+через `/v1/search` и `/v1/fetch`. Сборка индекса (`CH`/`IX`) остаётся в ядре. Граница не меняет
+семантику петли (append-only раунды, K2), а лишь размещает веб-часть в изолированной зоне.
+
 ---
 
 ## G. Traceability и открытые вопросы
@@ -367,7 +384,7 @@ flowchart LR
 | §5 конвейер Ш1–Ш9 | A |
 | §6 расчёт | E.1 |
 | §7 LLM-контуры | C |
-| §10 эшелон | C.2 |
+| §10 эшелон | C.2; `07` (изоляция веб-контура) |
 | §11 golden/эксперименты | B.3 |
 | I16–I23 | A–E |
 

@@ -25,11 +25,14 @@
 | **store** | ✅ | ✅ | ❌ | ❌ | ✅ | ✅ | ❌ | ✅ |
 | **config** | ✅ | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ✅ |
 | **cli** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| **edge** | ✅ | ✅ | ❌ | ✅ | ❌ | ✅ | ❌ | ✅ |
 | **util** | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
 
-**Композиция (wiring):** `cli` — единственное место, где `pipeline` соединяется с `adapters`
-(внедрение зависимостей вручную, без DI-фреймворка — A1). `pipeline` принимает порты как
-аргументы, никогда не инстанцирует адаптеры.
+**Композиция (wiring):** `cli` и `edge` — два **composition root**. `cli` (Z0) соединяет `pipeline`
+с адаптерами (ручной DI, без фреймворка — A1); `edge` (Z1/DMZ, `07`) собирает **только веб-адаптеры**
+и публикует их через gateway. `pipeline` принимает порты как аргументы, никогда не инстанцирует
+адаптеры. `edge` **не зависит** от `pipeline`/`store`/`domain` (только `ports`+`adapters`+`config`+`util`),
+поэтому не может писать в операционную БД или исполнять доменную логику.
 
 **Следствие для §1.3:** `domain/`, `ports/`, `pipeline/` не содержат предметных терминов.
 Адаптеры, работающие с реестрами/доменами, остаются нейтральными: специфика — в данных
@@ -125,6 +128,23 @@ def module_scores(...) -> list[ModuleScore]
 
 Все порты — `typing.Protocol` (структурная типизация, без наследования — упрощает адаптеры).
 Каждый порт в отдельном файле. Ниже — сигнатуры (псевдо-Python, полные доказы — docstring).
+
+### 3.0. Классификация портов по доверенной зоне (07)
+
+Каждый порт имеет декларативный атрибут **зоны** (где исполняется его реальный адаптер):
+
+| Порт | Зона | Порт | Зона |
+|---|---|---|---|
+| `llm` (evaluator) | **core** | `crawler` | **edge** |
+| `vector_index`, `lexical_index` | **core** | `search` | **edge** |
+| `index_builder`, `embedder` | **core** | `registry` | **edge** |
+| `store`, `gate_store` | **core** | `extractor` | **edge** (по умолч.) |
+| `chunker` | **core** | `gateway` | **core**→edge (транспорт) |
+
+**Измерение локальности.** Порт с зоной `edge` реализуется дважды: реальный адаптер (живёт в
+`edge/`) и **remote-proxy** (живёт в ядре, вызывает `gateway`). Профиль `local` инстанцирует
+реальные адаптеры in-process; профиль `split` — remote-proxy + сервис `edge/`. Контракт порта при
+этом **не меняется** (см. `07` §4). Порт `llm` — всегда `core` (I18: без маршрута в интернет).
 
 ### 3.1. `ports/llm.py` — оценщик (I18)
 
@@ -284,6 +304,21 @@ class GateStore(Protocol):                               # персистенц�
 файлами индекса напрямую. `build()` возвращает иммутабельный `build_id`, `commit()` фиксирует запись
 атомарно (существующая сборка не мутируется, §13). `GateStore` — носитель `gate_decisions`.
 
+### 3.7. `ports/gateway.py` — транспорт core↔edge (07)
+
+```python
+class ContentGateway(Protocol):
+    schema_version: str
+    def call(self, op: str, payload: Mapping[str, Any]) -> Mapping[str, Any]: ...
+    # op ∈ {"fetch", "search", "registry", "capabilities", "health"}
+    def capabilities(self) -> Mapping[str, Any]: ...   # версии edge-компонентов (в манифест)
+```
+
+Общий транспорт remote-прокси (`RemoteCrawler`/`RemoteSearch`/`RemoteRegistry`/`RemoteExtractor`).
+**Гарантия (I19):** gateway возвращает контент/кандидатов, **не evidence**; ядро повторно
+хеширует/валидирует входящее (`07` §5). Реализация — `adapters/remote_gateway.py` (httpx, mTLS,
+таймауты, retry, лимит размера ответа). В профиле `local` не используется.
+
 ---
 
 ## 4. Сценарии (L1) — модули конвейера
@@ -387,6 +422,8 @@ JSONPath-маппинг полей) и реализует `RegistryFetcherPort`.
 | Добавить формат (docx/pptx/xlsx/…) | реестр `SUPPORTED_FORMATS` в `adapters/extract_document.py` | corpus |
 | Экстрактор HTML (trafilatura→другой) | новый `adapters/extract_html.py` | corpus |
 | Хранилище (SQLite→PG) | новый `store/*.py` | domain |
+| Профиль развёртывания (`local`↔`split`) | `config/deploy.yaml` + wiring в `cli/`/`edge/` | domain, pipeline (порты те же) |
+| Веб-адаптер в другую зону | новый remote-proxy в `adapters/remote_*.py` | domain, pipeline |
 
 ---
 

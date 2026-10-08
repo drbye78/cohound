@@ -41,9 +41,11 @@ core/                         # ядро: категорийно-НЕЙТРАЛ�
                               #   crawler, extractor, chunker, registry, store, gate_store
   pipeline/                   # сценарии Ш1–Ш9, гейты G1–G4, эксперименты (use-cases)
   store/                      # SQLite-хранилище + paths
-  config/                     # загрузка run.yaml/пакетов
-  cli/                        # единственная точка сборки зависимостей (wiring)
-tests/selfcheck.py            # self-contained проверка фундамента (33 проверки)
+  config/                     # загрузка run.yaml/пакетов + deploy.yaml (профиль зон)
+  cli/                        # composition root Z0 (ядро) — сборка зависимостей
+  edge/                       # composition root Z1/DMZ — веб-адаптеры за application-layer швом (07)
+tests/selfcheck.py            # self-contained проверка фундамента (36 проверок)
+tests/smoke_scrapy_playwright.py  # браузерный smoke scrapy-playwright (V5; 0/1/2)
 packages/{case_id}/           # (планируется) пакеты категорий: package/catalog/baselines/cohort/golden
 registries/ · docs/           # словари, регламент, absence-правила
 passports/{product_id}/       # (планируется) паспорта продуктов
@@ -52,6 +54,12 @@ index_store/{package}/{build}/{product_id}/  # иммутабельные инд
 corpus_raw/{product_id}/      # retention сырых байтов
 cache/serp/{query_hash}.json · cache/http/{url_hash}.bin  # глобальный content-addressed кэш (R7)
 ```
+
+**Доверенные зоны (docs/architecture/07-deployment-topology.md).** Веб-функции (краул, поиск,
+реестры, экстракция недоверенного контента) выносятся в **DMZ** (`edge/`), не-веб — в ядро без
+веб-эгрессии; связь — только через application-layer firewall по протоколу `/v1/*`. Профиль `local`
+(один процесс) — дефолт; `split` (DMZ) — прод-опция. Это усиливает I18 (у оценщика нет маршрута в
+интернет) и делает явной границу I19.
 
 ## Команды
 
@@ -74,12 +82,15 @@ python3 -c "import sys; sys.path.insert(0,'.'); from core.db import connect; c=c
 # python3 tests/smoke_scrapy_playwright.py   # 0 — ok, 1 — fail, 2 — skip (нет deps)
 ```
 
-Требуется Python 3.11+ (в окружении — 3.14), `pydantic>=2`, `pyyaml`.
+Требуется Python **3.14** (базлайн; greenfield, контролируемое развёртывание, все зависимости
+стека имеют cp314/abi3-колёса — `docs/architecture/05-dependency-stack.md` §1), `pydantic>=2`, `pyyaml`.
 `pytest` пока не установлен — для CI по §11.6 его нужно добавить.
 Выбор внешних пакетов, лицензии и запреты — `docs/architecture/05-dependency-stack.md`
 (реестр решений; LangChain/LlamaIndex и все hosted-парсеры отклонены).
-Стратегия и детальный план реализации (потоки W1–W12, майлстоуны, DoD) —
+Стратегия и детальный план реализации (потоки W1–W13, майлстоуны, DoD) —
 `docs/architecture/06-implementation-strategy.md`.
+Развёртывание: доверенные зоны и DMZ-шов (application-layer firewall) —
+`docs/architecture/07-deployment-topology.md`.
 
 ## Конвенции кода
 

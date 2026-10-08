@@ -7,12 +7,13 @@ name = "cohound"
 version = "0.0.0"
 description = "coHound — сравнительная техническая карта продуктов по публично доказуемой функциональности"
 readme = "AGENTS.md"
-requires-python = ">=3.11"
+requires-python = ">=3.14"
 license = { text = "Proprietary" }
 authors = [{ name = "Marusin Dmitry", email = "drbye@mail.ru" }]
 
 # Ядро (MVP, §3.2 + docs/architecture/05-dependency-stack.md).
-# Ставится везде, включая окружение Python 3.14; тяжёлые контуры — в extras.
+# Базлайн — Python 3.14 (greenfield, контролируемое развёртывание; все зависимости стека
+# имеют cp314/abi3/py3-колёса — см. 05 §1). Тяжёлые контуры — в extras.
 dependencies = [
     "pydantic>=2.13,<3",
     "pyyaml>=6.0,<7",

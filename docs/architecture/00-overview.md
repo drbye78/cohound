@@ -5,7 +5,7 @@
 **Источник истины:** `cohound-spec-v2.md` (регламент v2.0). При расхождении — регламент главнее;
 этот документ не вводит новой методологии, только её архитектурную развёртку.
 **Смежное:** `05-dependency-stack.md` (реестр пакетов/лицензий/пинов), `06-implementation-strategy.md`
-(стратегия и план реализации).
+(стратегия и план реализации), `07-deployment-topology.md` (доверенные зоны/DMZ).
 
 ---
 
@@ -58,6 +58,14 @@ flowchart LR
 **Границы данных:** корпус не покидает контур (оценщик self-host); search-адаптер — единственный
 внешний канал поисковых запросов, логируемый (`search_log`).
 
+**Доверенные зоны (см. `07-deployment-topology.md`).** Система разворачивается в двух сетевых
+зонах: **Z0 CORE** (доверенная, без веб-эгрессии: оркестрация, домен, store, ретривал, оценщик,
+расчёт, отчёты) и **Z1 EDGE/DMZ** (веб-эгрессия: краул, поиск, реестры, экстракция недоверенного
+контента). Взаимодействие — только через **application-layer firewall (L7)** по протоколу
+`/v1/fetch|search|registry`. Это усиливает **I18** (оценщик физически без маршрута в интернет) и
+даёт явную границу для **I19**. Профиль `local` (один процесс) — дефолт для разработки (A1);
+`split` (DMZ) — опциональный прод-профиль.
+
 ---
 
 ## 3. Слои и правило зависимостей (C4 уровень 2)
@@ -85,6 +93,11 @@ flowchart LR
 > `reports/` — не архитектурный слой, а каталог **выходных артефактов**; его писатель —
 > L1-сценарий `pipeline/report.py` (openpyxl). В слое L4 живёт только `cli/`. Это снимает
 > кажущееся противоречие «`reports/` в L4» vs «`pipeline/report.py` в L1».
+>
+> **Два composition root (07):** `cli/` собирает ядро (Z0), `edge/` собирает веб-адаптеры (Z1/DMZ).
+> Оба — «корни сборки» и могут зависеть от `ports`+`adapters`; ни один не содержит домена. В
+> профиле `local` `cli/` собирает всё in-process; в `split` ядро использует remote-прокси, а
+> `edge/` публикует реальные адаптеры через gateway.
 
 **Правило:** `domain` ← `pipeline` ← `ports`/`adapters` ← `cli`. `ports` может зависеть от `domain`.
 Обратных зависимостей нет. `packages/` (данные) не импортируются кодом как Python — читаются через
@@ -141,6 +154,7 @@ flowchart LR
 | `ports/registry.py` | Реестровый факт | `source_url` обязателен (R1) |
 | `ports/store.py` | Операционное хранилище | Транзакционность |
 | `ports/gate_store.py` | Персистенция человеческих решений G1–G4 | `gate_decisions` — аудит-след (I6/I7) |
+| `ports/gateway.py` | Транспорт core↔edge (L7) | Только контент/кандидаты, не evidence (I19); см. 07 |
 
 ### 4.4. Адаптeры (L3)
 
@@ -191,6 +205,7 @@ flowchart TD
 | **Нейтральность** | Грепп-тест `core/`; данные только в `packages/` | §1.3, §11.4 |
 | **Детерминизм маршрутизации** | `scenario → {model_id,...}` таблицей, не решением LLM | I21 |
 | **Валидация-эшелон** | Отдельный `pipeline/validate.py`, независимый от LLM | §10 |
+| **Изоляция веб-контура** | Профиль `split`: веб-адаптеры в DMZ за L7-швом; ядро без эгрессии | I18, I19, §10 (07) |
 
 ---
 
@@ -202,22 +217,26 @@ core/
   domain/      enums.py models.py invariants.py scoring.py r2.py anchors.py
   ports/       llm.py vector_index.py lexical_index.py search.py crawler.py
                extractor.py chunker.py embedder.py index_builder.py
-               registry.py store.py gate_store.py
+               registry.py store.py gate_store.py gateway.py
   pipeline/    normalize.py lint.py plan.py discovery.py registry.py
                inheritance.py corpus.py evaluate.py validate.py review.py
                compute.py report.py experiments.py gates.py
   adapters/    vector_npy.py lexical_tantivy.py index_npy.py index_tantivy.py
                embed_local.py llm_local.py search_yandex.py
                search_glm.py crawl_scrapy.py extract_html.py extract_document.py
+               remote_gateway.py remote_crawler.py remote_search.py
+               registry_generic.py
   store/       sqlite.py paths.py
-  config/      run_config.py paths.py
-  cli/         main.py commands.py
+  config/      run_config.py deploy.py paths.py
+  cli/         main.py commands.py          # composition root Z0
+  edge/        server.py registry.py         # composition root Z1 (DMZ): публикует адаптеры
   util/        ids.py hashing.py logging.py
 packages/{case_id}/, registries/, passports/, runs/, index_store/, corpus_raw/, cache/
 ```
 
 `domain/schemas.py` (текущий `core/schemas.py`) будет расщеплён на `domain/models.py` +
 `domain/enums.py` + `domain/invariants.py` в итерации 1; текущий файл — временный монолит.
+`edge/` появляется только при профиле `split` (07); в `local` не запускается.
 
 ---
 
@@ -233,6 +252,7 @@ packages/{case_id}/, registries/, passports/, runs/, index_store/, corpus_raw/, 
 | **R** | Независимое ревью архитектуры @oracle + интеграция | правки | ✅ пройден (2026-10-08) |
 | **5** | Реестр зависимостей: пакеты, лицензии, пины, проверки V1–V5 | `05-dependency-stack.md` | — |
 | **6** | Стратегия production-grade реализации + детальный план | `06-implementation-strategy.md` | — |
+| **7** | Развёртывание: доверенные зоны, DMZ-шов (L7), профили | `07-deployment-topology.md` | — |
 
 ### 8.1. Вертикальный срез M0 (что реально в каркасе)
 
@@ -242,7 +262,7 @@ M0 (по §14 регламента) должен давать **сквозной
 | Статус | Модули |
 |---|---|
 | **Реально в M0** | `domain/*` (enums, models, invariants, scoring, r2, anchors); `store/sqlite.py`; `pipeline/normalize.py` + `lint.py` + `plan.py`; `pipeline/gates.py`; CLI `resolve`/`plan`; реестровый generic-адаптер + `registries/*.yaml`; golden-каркас |
-| **Заглушки (stub)** | LLM-оценщик (`evaluate`); SERP/`search`-адаптер; crawler; vector/lexical-индексы (и `embedder`/`index_builder`) |
+| **Заглушки (stub)** | LLM-оценщик (`evaluate`); SERP/`search`-адаптер; crawler; vector/lexical-индексы (и `embedder`/`index_builder`); `edge/`-сервис (не запускается в `local`) |
 
 Заглушки реализуют свои порты и дают детерминированный пустой ответ: конвейер собирается сквозь
 них, но контуры Ш5/Ш6 в M0 рабочими не считаются. Сквозной результат M0 — мини-карта из
@@ -260,6 +280,8 @@ M0 (по §14 регламента) должен давать **сквозной
 - 0013–0017 — accepted (ревью-гейт): гранулярность индексной сборки и provenance ячеек; SERP-петля
   vs иммутабельность (append-only раунды); политика ранжирования/демотирования (requested vs
   computed); глобальный content-addressed кэш для R7; контракт derived-evidence наследования/сателлитов.
+- **0018 — accepted:** доверенные зоны и DMZ-шов (веб-контур за application-layer firewall; remote-
+  адаптеры + `ContentGateway`) — `07-deployment-topology.md`.
 
 **Открытые вопросы (для итераций):**
 - Гранулярность транзакций SQLite при массовой записи ячеек (итерация 3).
@@ -279,6 +301,6 @@ M0 (по §14 регламента) должен давать **сквозной
 | §4.4 БД | §4.4 адаптеры (store), итерация 3 |
 | §5 конвейер | §5 поток данных |
 | §7 LLM-контуры | §4.3 порт LLM, §5 петля SERP |
-| §10 защита | §6 валидация-эшелон |
+| §10 защита | §6 валидация-эшелон; `07` (изоляция веб-контура) |
 | §13 версионирование | §6 |
 | I1–I23 | §4.1 владение, §6 |

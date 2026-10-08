@@ -15,25 +15,38 @@
 
 ---
 
-## 1. Ограничение окружения: Python 3.14
+## 1. Базлайн окружения: Python 3.14
 
-В проекте **Python 3.14.6**. Это уже отсеивает часть популярных пакетов:
+**Решение (2026-10-08): базлайн проекта — Python 3.14** (не 3.11). Обоснование: greenfield,
+контролируемое развёртывание (self-host), один разработчик; базлайн 3.14 убирает матрицу версий и
+legacy-шимы и совпадает с целевым окружением. Условие допустимости — **все зависимости стека имеют
+готовые колёса под `cp314`** (или `abi3`/`py3`, forward-совместимые) — проверено (ниже).
 
-| Пакет | `requires_python` | Следствие |
+**Матрица колёс под 3.14 (PyPI JSON API, 2026-10-08):**
+
+| Тип колеса | Пакеты | Следствие |
 |---|---|---|
-| `unstructured` | `>=3.11,<3.14` ✅ | **не устанавливается на 3.14** → d |
-| `outlines` | `<3.14` ✅ | **не устанавливается** → c (и не нужен, см. §5) |
-| `torch` / `sentence-transformers` | совместимость с 3.14 🟡 | проверить колёса перед пином; при отсутствии — venv на 3.12/3.13 для индекс-контура |
-| `vllm` | `<3.15` ✅ | совместим (но живёт в отдельном GPU-Docker, не в основном venv) |
+| `cp314`-колёса | `numpy`, `torch`, `scipy`, `scikit-learn`, `pydantic-core`, `lxml`, `pillow`, `cryptography`, `regex`, `cffi`, `markupsafe`, `pyyaml`, `aiohttp`(+`multidict`/`yarl`/`frozenlist`/`propcache`), `greenlet`, `psutil`, `msgpack`, `zstandard`, `brotli`, `lz4`, `tantivy`, `nh3`, `curl-cffi`, `faiss-cpu`, `docling-parse` | ✅ ставятся из wheel без сборки |
+| `abi3` (forward-compat) | `tokenizers`, `safetensors` (оба `cp310-abi3`), `charset-normalizer` | ✅ abi3-колёса работают на 3.14 |
+| `py3-none-*` (Python-независимые) | `rtree`, `twisted` (чистый Python), `scrapy`, `trafilatura`, `docling-slim`, `html5lib`, `model2vec` | ✅ |
+
+**Отсеяно базлайном 3.14:** `unstructured` (`<3.14`) → d; `outlines` (`<3.14`) → c.
+`vllm` (`<3.15`) — совместим, но живёт в отдельном GPU-Docker (не в CLI-venv).
 
 **Следствие:** тяжёлые ML-зависимости (torch/vLLM) не обязаны разделять venv с CLI.
 CLI-ядро (`pydantic`+`pyyaml`+stdlib) ставится везде; индекс- и GPU-контуры —
 изолированные окружения/образы. Это согласуется с D1 (commodity за портами) и A1.
 
-**Проверено резолвом `uv` на Python 3.14 (2026-10-08):** все лёгкие extras (ядро + `retrieval`,
-`crawl`, `extract`, `safety`, `ops`, `dev`, `ann`, `fallback`, `embed-lite`) разрешаются;
-`torch`/`sentence-transformers` (`embed`) — тоже (колёса `cp314` есть). Полный совместный
-набор — 137 пакетов, без torch по умолчанию. `extract-pdf` намеренно тяжёлый (torch+CUDA).
+**Проверено резолвом и установкой на Python 3.14 (2026-10-08):** все лёгкие extras (ядро + `retrieval`,
+`crawl`, `extract`, `safety`, `ops`, `dev`, `ann`, `fallback`, `embed-lite`) разрешаются и
+устанавливаются; `torch`/`sentence-transformers` (`embed`) — тоже (колёса `cp314` есть). Полный
+совместный набор — 137 пакетов, без torch по умолчанию. `extract-pdf` намеренно тяжёлый (torch+CUDA).
+`requires-python = ">=3.14"` в `pyproject.toml`; CI резолвит на 3.14.
+
+**Escape hatch.** Если появится вынужденно старый целевой хост (без возможности поставить 3.14 через
+`uv`/контейнер), понижение базлайна до 3.13/3.12 — точечная правка `requires-python` после проверки
+колёс под понижённую версию; код не должен использовать 3.14-only синтаксис инкрементально
+(фиксируется по мере появления).
 
 **Находка (docling):** пакет `docling` = ровно `docling-slim[standard]` и тянет
 **torch+torchvision+CUDA** (~гигабайты). Для Office (DOCX/PPTX/XLSX) это не нужно:
@@ -204,6 +217,21 @@ robots.txt-запрос оставлять на дефолтном HTTP-handler 
 ### 2.8. Отчёты
 
 `openpyxl` (MIT, **a**) + stdlib `csv` (**a**); `xlsxwriter` (**b**) — если нужно форматирование.
+
+### 2.9. Транспорт DMZ-шва (07)
+
+Профиль `split` связывает ядро (Z0) и DMZ (Z1) через application-layer boundary. Дополнительных
+тяжёлых зависимостей не требуется:
+
+| Пакет | Вердикт | Роль |
+|---|---|---|
+| `httpx` | **a** | клиент remote-прокси (core→edge); уже в стеке |
+| stdlib `http.server` / ASGI-микрофреймворк | **a** | сервер gateway в `edge/`; для MVP достаточно stdlib/`uvicorn`+`Starlette`(опц.) |
+| TLS/mTLS | stdlib `ssl` | взаимная аутентификация ядра↔edge (сертификаты вне git) |
+
+`edge/` — отдельное окружение (тот же `crawl`+`extract` extras), сетевая изоляция — на уровне L7-фаервола
+(политики — `07` §5), не пакета. Сервер gateway — тонкий; допускается `Starlette`/`uvicorn` (Apache-2.0/MIT)
+как **b**, но не обязателен (A1).
 
 ---
 
