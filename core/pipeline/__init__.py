@@ -3,7 +3,9 @@
 Пакет принимает порты как аргументы (ручной DI, A1) и никогда не инстанцирует адаптеры:
 сборка зависимостей — задача composition root (``cli/``, Z0). Здесь живут:
 ``runner.py`` (оркестрация фаз + ``PhaseResult``), ``gates.py`` (человеческие решения
-G1–G4, S9) и ``idempotency.py`` (детерминированные ключи upsert, S8/R15).
+G1–G4, S9), ``idempotency.py`` (детерминированные ключи upsert, S8/R15),
+``normalize.py``/``lint.py``/``plan.py`` (нормализация входов, блокирующий линтер
+и воспроизводимый план прогона — W5/T5.2/T5.4).
 
 Нейтрален к предметной категории (§1.3): никаких названий продуктов/вендоров.
 """
@@ -25,6 +27,20 @@ from core.pipeline.idempotency import (
     upsert_cells,
     upsert_evidence,
 )
+from core.pipeline.lint import (
+    RULES,
+    LintReport,
+    LintRule,
+    assert_lint,
+    lint_run_inputs,
+)
+from core.pipeline.normalize import (
+    RunInputs,
+    cross_check,
+    load_inputs,
+    load_scope_attestation,
+)
+from core.pipeline.plan import RunPlan, derive_run_id, load_plan, plan
 from core.pipeline.runner import (
     GATE_PHASES,
     PHASES,
@@ -59,4 +75,20 @@ __all__ = [
     "mark_stale",
     "upsert_cells",
     "upsert_evidence",
+    # normalize (T5.4)
+    "RunInputs",
+    "load_inputs",
+    "load_scope_attestation",
+    "cross_check",
+    # lint (T5.2)
+    "LintReport",
+    "LintRule",
+    "RULES",
+    "lint_run_inputs",
+    "assert_lint",
+    # plan (T5.4)
+    "RunPlan",
+    "plan",
+    "load_plan",
+    "derive_run_id",
 ]
