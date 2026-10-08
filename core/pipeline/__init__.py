@@ -43,6 +43,12 @@ from core.pipeline.normalize import (
 )
 from core.pipeline.inheritance import apply_precedence, inheritance_wave
 from core.pipeline.corpus import IndexBuild, build_corpus
+from core.pipeline.retrieve import (
+    PROFILE_DESCRIPTIONS,
+    RetrievalProfile,
+    retrieve,
+    rrf_fuse_chunks,
+)
 from core.pipeline.plan import RunPlan, derive_run_id, load_plan, plan
 from core.pipeline.registry import (
     registry_covered_params,
@@ -109,4 +115,9 @@ __all__ = [
     # corpus (T7.4, Ш5)
     "build_corpus",
     "IndexBuild",
+    # retrieve (T8.5, Ш6)
+    "RetrievalProfile",
+    "PROFILE_DESCRIPTIONS",
+    "retrieve",
+    "rrf_fuse_chunks",
 ]
