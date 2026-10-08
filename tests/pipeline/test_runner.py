@@ -81,11 +81,8 @@ def test_phases_run_in_order(store: SqliteStore) -> None:
 def test_phase_state_persisted_to_store(store: SqliteStore) -> None:
     runner = Runner(store, phases={name: _recorder([]) for name in PHASES})
     runner.run(RUN_ID, until="plan")
-    # Последняя выполненная фаза зеркалится в runs.state конвенцией "{phase}:{state}".
-    state = store.conn.execute(
-        "SELECT state FROM runs WHERE run_id = ?", (RUN_ID,)
-    ).fetchone()["state"]
-    assert state == "plan:ok"
+    # Durable-карта фаз хранится JSON-объектом в runs.state (несколько фаз аккумулируются).
+    assert store.get_phase_state(RUN_ID) == {"normalize": "ok", "lint": "ok", "plan": "ok"}
     assert runner.state_of(RUN_ID, "plan") == "ok"
 
 
@@ -232,3 +229,103 @@ def test_ports_container_is_optional() -> None:
             ports.registry,
         )
     )
+
+
+# --------------------------------------------------------------------------- #
+# durable (cross-process) resume через runs.state (02 §A.1)
+# --------------------------------------------------------------------------- #
+
+
+def _recording_phases(calls: list[str]) -> dict:
+    """Реестр фаз-регистраторов, пишущих имя фазы в ``calls`` и возвращающих ``ok``."""
+
+    def make(phase: str):
+        def _fn(ctx) -> PhaseResult:
+            calls.append(phase)
+            return PhaseResult(status="ok", phase=phase)
+
+        return _fn
+
+    return {name: make(name) for name in PHASES}
+
+
+def test_durable_resume_across_runner_instances(store: SqliteStore) -> None:
+    calls_a: list[str] = []
+    runner_a = Runner(store, phases=_recording_phases(calls_a))
+    first = runner_a.run(RUN_ID, until="plan")
+    assert first.ok
+    assert calls_a == ["normalize", "lint", "plan"]
+    # durable-карта фаз записана в runs.state
+    assert store.get_phase_state(RUN_ID) == {
+        "normalize": "ok",
+        "lint": "ok",
+        "plan": "ok",
+    }
+
+    # Новый инстанс (эмуляция нового процесса) над той же БД: завершённые фазы пропущены.
+    calls_b: list[str] = []
+    runner_b = Runner(store, phases=_recording_phases(calls_b))
+    second = runner_b.run(RUN_ID, until="plan")
+    assert second.ok
+    assert calls_b == []
+    assert second.results == []
+    assert second.skipped == ["normalize", "lint", "plan"]
+
+
+def test_durable_gate_blocked_state_resumes_across_instances(store: SqliteStore) -> None:
+    runner_a = Runner(store)
+    first = runner_a.run(RUN_ID, until="g1")
+    assert first.status == "blocked"
+    assert store.get_phase_state(RUN_ID) == {
+        "normalize": "ok",
+        "lint": "ok",
+        "plan": "ok",
+        "g1": "blocked",
+    }
+
+    # Новый инстанс видит blocked: ранние ok-фазы пропускаются, гейт перезапускается.
+    runner_b = Runner(store)
+    second = runner_b.run(RUN_ID, until="g1")
+    assert second.status == "blocked"
+    assert second.skipped == ["normalize", "lint", "plan"]
+    assert [r.phase for r in second.results] == ["g1"]
+
+    # Человеческое решение в gate_decisions → новый инстанс продолжает с гейта.
+    gate_g1(store, RUN_ID, actor="human-1", notes="accepted")
+    runner_c = Runner(store)
+    third = runner_c.run(RUN_ID, until="g1")
+    assert third.ok
+    assert runner_c.state_of(RUN_ID, "g1") == "ok"
+    assert store.get_phase_state(RUN_ID)["g1"] == "ok"
+
+
+def test_reset_forces_full_restart_ignoring_durable_state(store: SqliteStore) -> None:
+    calls: list[str] = []
+    runner = Runner(store, phases=_recording_phases(calls))
+    runner.run(RUN_ID, until="plan")
+    assert calls == ["normalize", "lint", "plan"]
+
+    runner.reset(RUN_ID)
+    calls.clear()
+    report = runner.run(RUN_ID, until="plan")
+    assert report.ok
+    # после reset durable-карта не разогревается — фазы выполняются заново
+    assert calls == ["normalize", "lint", "plan"]
+
+
+class _StoreWithoutGetter:
+    """Минимальная заглушка store без ``get_phase_state`` (обратная совместимость)."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str, str]] = []
+
+    def set_phase_state(self, run_id: str, phase: str, state: str) -> None:
+        self.calls.append((run_id, phase, state))
+
+
+def test_runner_tolerates_store_without_get_phase_state() -> None:
+    stub = _StoreWithoutGetter()
+    runner = Runner(stub)  # type: ignore[arg-type]
+    report = runner.run(RUN_ID, until="plan")
+    assert report.ok
+    assert [phase for _, phase, _ in stub.calls] == ["normalize", "lint", "plan"]

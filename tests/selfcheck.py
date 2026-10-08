@@ -326,6 +326,9 @@ def main() -> int:
     section("Store (L3) — W3")
     check("SqliteStore I19: резолв + сверка content_hash", lambda: _store_resolver_i19())
 
+    section("Конвейер (L1) — W4")
+    check("гейт не пройден без gate_decisions; durable resume (S9/P4)", lambda: _pipeline_gates_resume())
+
     print(f"\n{CHECKS - len(FAILURES)}/{CHECKS} проверок пройдено")
     if FAILURES:
         print("\nПровалы:")
@@ -851,6 +854,44 @@ def _store_resolver_i19() -> None:
         bad = ev.model_copy(update={"content_hash": content_hash("other")})
         if verify_evidence_hash(bad, store):
             raise AssertionError("I19: расхождение hash обязано инвалидировать evidence")
+
+
+def _pipeline_gates_resume() -> None:
+    """Гейт не пройден без gate_decisions (S9); durable resume через runs.state (P4)."""
+    import datetime as _dt
+
+    from core.domain import Gate, RunConfig, RunMode
+    from core.pipeline.gates import is_gate_passed, record_decision
+    from core.pipeline.runner import Runner
+    from core.store.sqlite_store import SqliteStore
+
+    cfg = RunConfig(
+        case_id="c",
+        anchor="p1",
+        cohort="co1",
+        products=["p1", "p2"],
+        package="pk",
+        snapshot_date=_dt.date(2026, 1, 1),
+        mode=RunMode.STRICT,
+    )
+    with SqliteStore(":memory:") as store:
+        store.create_run("r1", cfg)
+        # Гейт не пройден без строки; прогон останавливается на g1.
+        r1 = Runner(store)
+        rep = r1.run("r1", until="g1")
+        if rep.stopped_at != "g1" or rep.status != "blocked":
+            raise AssertionError("гейт обязан остановить прогон без решения (S9)")
+        if is_gate_passed(store, "r1", Gate.G1):
+            raise AssertionError("гейт не пройден без строки gate_decisions")
+        # Durable resume: новый Runner видит завершённые фазы через store.
+        r2 = Runner(store)
+        rep2 = r2.run("r1", until="plan")
+        if rep2.results:
+            raise AssertionError(f"durable resume: ok-фазы должны пропускаться, выполнено {[x.phase for x in rep2.results]}")
+        # Человеческое решение проходит гейт.
+        record_decision(store, "r1", Gate.G1, actor="human", target="plan")
+        if not is_gate_passed(store, "r1", Gate.G1):
+            raise AssertionError("гейт обязан пройтись после строки gate_decisions")
 
 
 if __name__ == "__main__":

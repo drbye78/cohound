@@ -36,7 +36,21 @@ class StorePort(Protocol):
 
     def create_run(self, run_id: str, cfg: RunConfig) -> None: ...
 
-    def set_phase_state(self, run_id: str, phase: str, state: str) -> None: ...
+    def set_phase_state(self, run_id: str, phase: str, state: str) -> None:
+        """Фиксирует состояние фазы прогона (durable-носитель resume, 02 §A.1).
+
+        Состояния фаз аккумулируются, а не перетирают друг друга: реализация обязана
+        сохранять карту ``{phase: state}`` целиком.
+        """
+        ...
+
+    def get_phase_state(self, run_id: str) -> dict[str, str]:
+        """Возвращает карту ``{phase: "ok"|"blocked"|"failed"}`` прогона для resume.
+
+        Пустой словарь — если прогон неизвестен, состояние не записано или повреждено
+        (legacy-формат/невалидный JSON). Метод не бросает исключений на неизвестный ``run_id``.
+        """
+        ...
 
     def save_cell(self, cell: Cell) -> None: ...
 

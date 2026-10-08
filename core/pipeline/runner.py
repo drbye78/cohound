@@ -13,9 +13,10 @@
 
 **Resume.** Фаза со сохранённым состоянием ``ok`` пропускается; фаза ``failed``/``blocked``
 перезапускается при следующем ``run``/``resume``. Состояния фаз кэшируются в памяти
-``Runner`` под ``run_id`` и зеркалятся в ``StorePort.set_phase_state`` (последняя фаза).
-Долговременный (межпроцессный) resume требует читателя пер-фазного состояния на стороне
-store; текущий ``StorePort`` такого геттера не объявляет — см. отчёт W4.
+``Runner`` под ``run_id`` и durable-персистятся в ``StorePort.set_phase_state`` (карта
+``{phase: state}`` в ``runs.state``). При пустом in-memory-журнале он разогревается из
+``StorePort.get_phase_state``, поэтому **новый процесс/``Runner`` продолжает прерванный
+прогон** (cross-process resume, 02 §A.1).
 
 Нейтрален (§1.3).
 """
@@ -257,6 +258,8 @@ class Runner:
             self._fns.update(phases)
         # Пер-фазное состояние прогонов: run_id -> {phase: ok|blocked|failed}.
         self._states: dict[str, dict[str, str]] = {}
+        # Прогоны, сброшенные через reset(): для них seeding из store пропускается один раз.
+        self._force_restart: set[str] = set()
 
     # -- регистрация фаз ------------------------------------------------- #
     def register(self, phase: str, fn: PhaseFn) -> PhaseFn:
@@ -279,12 +282,36 @@ class Runner:
         return self._states.get(run_id, {}).get(phase)
 
     def reset(self, run_id: str) -> None:
-        """Сбрасывает пер-фазное состояние прогона (принудительный полный перезапуск)."""
+        """Сбрасывает пер-фазное состояние прогона (принудительный полный перезапуск).
+
+        Помимо очистки in-memory-журнала помечает прогон как принудительно
+        перезапускаемый, чтобы при ближайшем ``run``/``resume`` не подтянуть durable-карту
+        фаз из store (иначе resume вернул бы пропуск завершённых фаз).
+        """
         self._states.pop(run_id, None)
+        self._force_restart.add(run_id)
+
+    def _seed_from_store(self, run_id: str, ledger: dict[str, str]) -> None:
+        """Разогревает журнал фаз из durable-карты store (cross-process resume, §A.1).
+
+        Вызывается, когда in-memory-журнал прогона пуст (новый ``Runner``/новый процесс).
+        Обратная совместимость: хранилище без ``get_phase_state`` или сбой чтения не роняют
+        прогон — журнал просто остаётся пустым.
+        """
+        getter = getattr(self.store, "get_phase_state", None)
+        if getter is None:
+            return
+        try:
+            ledger.update(dict(getter(run_id)))
+        except Exception:  # noqa: BLE001 — resume не должен падать на чтении состояния
+            return
 
     # -- прогон ---------------------------------------------------------- #
     def run(self, run_id: str, until: str | None = None) -> RunReport:
         """Выполняет фазы по порядку, пропуская уже ``ok`` и останавливаясь на гейте.
+
+        Журнал фаз разогревается из ``store.get_phase_state`` при пустом in-memory-журнале,
+        поэтому новый ``Runner`` (новый процесс) продолжает ранее прерванный прогон.
 
         :param until: последняя выполняемая фаза (включительно); ``None`` — все фазы.
         :raises ValueError: ``until`` не входит в :data:`PHASES`.
@@ -293,6 +320,9 @@ class Runner:
             raise ValueError(f"неизвестная фаза until={until!r}")
         end = PHASES.index(until) if until is not None else len(PHASES) - 1
         ledger = self._states.setdefault(run_id, {})
+        if not ledger and run_id not in self._force_restart:
+            self._seed_from_store(run_id, ledger)
+        self._force_restart.discard(run_id)
         ctx = RunContext(run_id=run_id, store=self.store, ports=self.ports, clock=self.clock)
         report = RunReport(run_id=run_id)
 

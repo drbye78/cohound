@@ -150,6 +150,27 @@ def _parse_json_text(value: str | None) -> Any:
         return None
 
 
+def _parse_phase_state(raw: str | None) -> dict[str, str]:
+    """Извлекает карту ``{phase: state}`` из ``runs.state`` (durable resume, 02 §A.1).
+
+    Ожидается JSON-объект вида ``{"phase_state": {"<phase>": "<state>"}}``. Всё
+    остальное (``NULL``, legacy-строка ``"{phase}:{state}"``, невалидный JSON, иная
+    структура) трактуется как отсутствие данных → ``{}``. Функция не бросает исключений:
+    resume обязан быть устойчив к повреждённому/старому состоянию.
+    """
+    payload = _parse_json_text(raw)
+    if not isinstance(payload, Mapping):
+        return {}
+    inner = payload.get("phase_state")
+    if not isinstance(inner, Mapping):
+        return {}
+    return {
+        str(phase): str(state)
+        for phase, state in inner.items()
+        if phase is not None and state is not None
+    }
+
+
 def _get(obj: Any, name: str, default: Any = None) -> Any:
     """Чтение поля из dict/Mapping или объекта (``upsert_products`` — flexible input)."""
     if isinstance(obj, Mapping):
@@ -246,12 +267,34 @@ class SqliteStore:
             )
 
     def set_phase_state(self, run_id: str, phase: str, state: str) -> None:
-        """Фиксирует состояние фазы в ``runs.state`` как ``"{phase}:{state}"`` (конвенция)."""
+        """Фиксирует состояние фазы в ``runs.state`` как JSON-карту ``{phase: state}``.
+
+        Колонка ``runs.state`` — единственный durable-носитель resume в схеме §4.4 (§A.1).
+        Соседние фазы **не затираются**: новое состояние вливается в уже сохранённую карту
+        (``{"phase_state": {...}}``). Legacy-значение ``"{phase}:{state}"`` или иной
+        невалидный JSON молча заменяется свежей картой (устойчивость к старому состоянию).
+        """
+        current = self.get_phase_state(run_id)
+        current[str(phase)] = str(state)
+        payload = json.dumps({"phase_state": current}, ensure_ascii=False, sort_keys=True)
         with self.conn:
             self.conn.execute(
                 "UPDATE runs SET state = ? WHERE run_id = ?",
-                (f"{phase}:{state}", run_id),
+                (payload, run_id),
             )
+
+    def get_phase_state(self, run_id: str) -> dict[str, str]:
+        """Возвращает сохранённую карту ``{phase: "ok"|"blocked"|"failed"}`` прогона.
+
+        Пустой словарь — если прогон неизвестен, ``runs.state`` пуст (``NULL``) либо хранит
+        legacy/повреждённое значение. Метод не бросает исключений на неизвестный ``run_id``.
+        """
+        row = self.conn.execute(
+            "SELECT state FROM runs WHERE run_id = ?", (run_id,)
+        ).fetchone()
+        if row is None:
+            return {}
+        return _parse_phase_state(row["state"])
 
     # -- cells ----------------------------------------------------------- #
     def _cell_row(self, cell: Cell) -> tuple[Any, ...]:

@@ -5,4 +5,4 @@
 domain · ports · pipeline · adapters · store · config · cli · util.
 """
 
-__all__ = ["schemas", "db", "util", "adapters", "ports", "domain", "store", "pipeline"]
+__all__ = ["schemas", "db", "util", "adapters", "ports", "domain", "store", "pipeline", "config"]

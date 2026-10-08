@@ -158,7 +158,8 @@ def test_set_phase_state_convention(store: SqliteStore) -> None:
     state = store.conn.execute(
         "SELECT state FROM runs WHERE run_id = ?", (RUN_ID,)
     ).fetchone()["state"]
-    assert state == "W6:evaluated"
+    # Durable-носитель resume (02 §A.1): JSON-карта фаз в единственной колонке runs.state.
+    assert json.loads(state) == {"phase_state": {"W6": "evaluated"}}
 
 
 def test_read_manifest_missing_run_raises(store: SqliteStore) -> None:
