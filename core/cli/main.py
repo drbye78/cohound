@@ -2,10 +2,13 @@
 
 Точка входа :func:`main` реализует команды W5/T5.3: ``resolve``, ``plan`` и ``run``,
 который связывает реальный реестр фаз (:func:`core.pipeline.build_phases`) с портами
-профиля (composition root, L3). Команды ``diff`` (§9/§13) и ``sensitivity`` (§6/K6)
-экспонируют уже построенные возможности ``pipeline/report.py`` и ``pipeline/compute.py``
-без дублирования логики. Только stdlib (``argparse``/``json``/``sys``) — без
-фреймворков (A1).
+профиля (composition root, L3). Команды ``diff`` (§9/§13), ``sensitivity`` (§6/K6),
+``golden`` (R6/R12, §11.3) и ``report`` (§9/Ш9) экспонируют уже построенные возможности
+``pipeline/report.py``, ``pipeline/compute.py`` и ``pipeline/golden.py`` без дублирования
+логики. ``run`` загружает паспорта (``--passports-dir``) и операторский корпус URL
+(``--urls``) — специфицированного артефакта URL нет, поэтому ``doc_domains`` молча не
+фетчатся (I19). Только stdlib (``argparse``/``json``/``sys``) + ``yaml`` (зависимость
+ядра) — без фреймворков (A1).
 
 **Принципы UX (``03`` §E.2).**
 
@@ -28,6 +31,8 @@ from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+import yaml
+
 from core.adapters.gateway_validate import validate_envelope_shape
 from core.adapters.remote_gateway import (
     DEFAULT_SCHEMA_VERSION,
@@ -46,13 +51,21 @@ from core.cli.wiring import (
     manifest_deploy_fields,
     run_db_path,
 )
+from core.config import PassportLoadError, load_golden, load_passports
 from core.config.deploy import DeployConfig, is_split, load_deploy_config
-from core.pipeline import PHASES, Ports, RunReport, build_phases
+from core.pipeline import (
+    PHASES,
+    Ports,
+    RunReport,
+    build_phases,
+    check_thresholds,
+    evaluate_golden,
+)
 from core.pipeline.compute import compute
 from core.pipeline.lint import lint_run_inputs
 from core.pipeline.normalize import RunInputs, load_inputs
 from core.pipeline.plan import RunPlan, derive_run_id, plan as build_plan
-from core.pipeline.report import CrossCycleDiffError, render_diff
+from core.pipeline.report import CrossCycleDiffError, render_diff, write_reports
 from core.pipeline.runner import Clock, PhaseFn
 from core.ports.gateway import ContentGateway
 
@@ -464,15 +477,7 @@ def cmd_sensitivity(args: argparse.Namespace) -> int:
     Печатает оси ``per_axis``, флаг ``stable``, ``unstable_pairs`` и
     ``requested_ranking``/``computed_ranking`` (человеку или JSON).
     """
-    if args.db is not None:
-        db_path: str | Path = args.db
-    else:
-        if not args.run_id:
-            raise CliError(
-                "--runs-dir требует --run-id", code="usage", exit_code=EXIT_USAGE
-            )
-        db_path = run_db_path(args.runs_dir, args.run_id)
-
+    db_path = _resolve_db_path(args)
     run_id = args.run_id
     bundle = None
     notes: list[str] = []
@@ -480,7 +485,9 @@ def cmd_sensitivity(args: argparse.Namespace) -> int:
         if run_id is None:
             run_id = _infer_run_id(store)
         store.read_manifest(run_id)  # валидация: прогон существует
-        catalog, module_weights, cohort, notes = _sensitivity_inputs(args, run_id)
+        catalog, module_weights, cohort, notes = _restore_plan_inputs(
+            args, run_id, purpose="sensitivity"
+        )
         bundle = compute(
             store=store,
             run_id=run_id,
@@ -505,6 +512,144 @@ def cmd_sensitivity(args: argparse.Namespace) -> int:
         _print_json(payload)
     else:
         _print_sensitivity(payload)
+    return EXIT_OK
+
+
+def cmd_golden(args: argparse.Namespace) -> int:
+    """``golden``: сверка вердиктов прогона с эталонным ``golden.csv`` (R6/R12, §11.3).
+
+    Хранилище резолвится как в ``sensitivity``: явный ``--db`` (``run_id`` из
+    ``--run-id`` либо выводится, если в БД ровно один прогон) **или** ``--runs-dir`` +
+    ``--run-id`` → ``runs/{run_id}/cohound.db``.
+
+    Каталог (для классификации критических параметров, R12) строится из
+    ``--run-yaml`` + ``--package`` при их наличии; иначе ``evaluate_golden`` получает
+    **пустой** каталог и важность параметров неизвестна (ГЭП: каталог не персистится в
+    БД) — правило «false ❌ на Кр» тогда не срабатывает, что честно печатается в ``notes``.
+
+    ``--tier fast|full`` фильтрует строки :class:`~core.domain.models.GoldenRow` по
+    ``tier`` **до** оценки (PR-гейт vs полный набор, §11.6).
+
+    **Контракт кода возврата.** :data:`EXIT_OK` — только если одновременно
+    ``report.passes()`` (R6: agreement + критические классы) **и**
+    ``report.has_absent_stratum`` (R12/§4.2: в наборе есть страта ожидаемых ❌); иначе
+    :data:`EXIT_ERROR`. Нарушения порогов (``check_thresholds``) печатаются явно.
+
+    :param args: ``--golden`` (путь), источник хранилища, ``--tier``, ``--run-yaml``/
+        ``--package`` (опц.).
+    """
+    db_path = _resolve_db_path(args)
+    run_id = args.run_id
+    notes: list[str] = []
+    report = None
+    with build_store(db_path, profile=args.profile) as store:
+        if run_id is None:
+            run_id = _infer_run_id(store)
+        store.read_manifest(run_id)  # валидация: прогон существует
+        golden = _load_golden_arg(args.golden)
+        if args.tier is not None:
+            golden = [row for row in golden if row.tier.value == args.tier]
+        catalog, _weights, _cohort, notes = _restore_plan_inputs(
+            args, run_id, purpose="golden"
+        )
+        report = evaluate_golden(
+            golden=golden, store=store, run_id=run_id, catalog=catalog
+        )
+
+    assert report is not None  # evaluate_golden выполняется безусловно (см. выше)
+    violations = check_thresholds(report)
+    ok = report.passes() and report.has_absent_stratum
+    payload = {
+        "ok": ok,
+        "run_id": run_id,
+        "tier": args.tier,
+        "violations": violations,
+        "notes": notes,
+        **json.loads(report.to_manifest_json()),
+    }
+    if args.json:
+        _print_json(payload)
+    else:
+        sys.stdout.write(report.summary() + "\n")
+        for note in notes:
+            sys.stdout.write(f"note: {note}\n")
+        for violation in violations:
+            sys.stdout.write(f"violation: {violation}\n")
+        sys.stdout.write(f"ok: {'yes' if ok else 'no'}\n")
+    return EXIT_OK if ok else EXIT_ERROR
+
+
+def cmd_report(args: argparse.Namespace) -> int:
+    """``report``: пересборка артефактов прогона из БД (Ш9, §9, ``03`` §D.6).
+
+    Хранилище резолвится как в ``sensitivity`` (``--db`` либо ``--runs-dir`` +
+    ``--run-id``). Бандл пересобирается :func:`core.pipeline.compute.compute`, ячейки
+    читаются :meth:`~core.pipeline.runner.StorePort.iter_cells`, манифест —
+    ``read_manifest``. Артефакты пишутся :func:`core.pipeline.report.write_reports` в
+    ``{out}/{run_id}/outputs/`` (``--out``; дефолт — ``--runs-dir`` либо ``runs``).
+
+    Каталог/веса/когорта восстанавливаются из ``--run-yaml`` + ``--package`` (как в
+    ``sensitivity``); без них расчёт идёт с пустым каталогом и явной заметкой о ГЭП.
+    Если ``read_manifest`` вернул незаполненный манифест (финальная фаза ``report`` не
+    завершалась), это также сообщается в ``notes`` — артефакты строятся из текущего
+    состояния ячеек, а не выдумываются версии.
+
+    :returns: :data:`EXIT_OK` при записанных артефактах.
+    """
+    db_path = _resolve_db_path(args)
+    run_id = args.run_id
+    notes: list[str] = []
+    manifest = None
+    bundle = None
+    catalog: dict[str, Any] = {}
+    cells: list[Any] = []
+    with build_store(db_path, profile=args.profile) as store:
+        if run_id is None:
+            run_id = _infer_run_id(store)
+        manifest = store.read_manifest(run_id)
+        catalog, module_weights, cohort, notes = _restore_plan_inputs(
+            args, run_id, purpose="report"
+        )
+        bundle = compute(
+            store=store,
+            run_id=run_id,
+            catalog=catalog,
+            module_weights=module_weights,
+            cohort=cohort,
+        )
+        cells = list(store.iter_cells(run_id))
+
+    assert run_id is not None and bundle is not None and manifest is not None
+    out_dir = args.out if args.out is not None else (args.runs_dir or "runs")
+    artifacts = write_reports(
+        bundle=bundle,
+        cells=cells,
+        catalog=catalog,
+        manifest=manifest,
+        out_dir=out_dir,
+        run_id=run_id,
+    )
+    partial = _manifest_partial(manifest)
+    if partial:
+        notes.append(
+            "манифест не заполнен (фаза report не завершалась): версии — заглушки; "
+            "артефакты построены из текущего состояния ячеек"
+        )
+    payload = {
+        "ok": True,
+        "run_id": run_id,
+        "out": str(Path(out_dir) / run_id / "outputs"),
+        "manifest_partial": partial,
+        "artifacts": _artifacts_payload(artifacts),
+        "notes": notes,
+    }
+    if args.json:
+        _print_json(payload)
+    else:
+        for name, path in payload["artifacts"].items():
+            sys.stdout.write(f"{name}: {path}\n")
+        for note in notes:
+            sys.stdout.write(f"note: {note}\n")
     return EXIT_OK
 
 
@@ -545,15 +690,69 @@ def _infer_run_id(store: Any) -> str:
     )
 
 
-def _sensitivity_inputs(
-    args: argparse.Namespace, run_id: str
-) -> tuple[dict[str, Any], dict[str, float], Any, list[str]]:
-    """Восстанавливает ``(catalog, module_weights, cohort, notes)`` для ``sensitivity``.
+def _resolve_db_path(args: argparse.Namespace) -> str | Path:
+    """Резолвит БД прогона: явный ``--db`` приоритетнее ``--runs-dir`` + ``--run-id``.
 
-    При наличии ``--run-yaml`` и ``--package`` каталог/веса/когорта берутся из плана
-    (как в фазе Ш8: ``plan.params`` + ``renormalized_weights``/``module_weights`` +
-    ``plan.cohort``). Иначе возвращаются пустые значения и явная заметка о ГЭП —
-    каталог/веса **не выдумываются**.
+    Общий контракт выбора хранилища для ``sensitivity``/``golden``/``report``.
+
+    :raises CliError: ``--runs-dir`` задан без ``--run-id`` (:data:`EXIT_USAGE`).
+    """
+    if args.db is not None:
+        return args.db
+    if not args.run_id:
+        raise CliError(
+            "--runs-dir требует --run-id", code="usage", exit_code=EXIT_USAGE
+        )
+    return run_db_path(args.runs_dir, args.run_id)
+
+
+def _load_golden_arg(path: str | Path) -> list[Any]:
+    """Загружает golden-набор (:func:`core.config.load_golden`) с понятной ошибкой CLI.
+
+    :raises CliError: файл не читается или не соответствует схеме ``golden.csv``
+        (§4.2/§11.6) — :data:`EXIT_USAGE` с кодом ``golden``.
+    """
+    try:
+        return load_golden(path)
+    except (OSError, ValueError) as exc:
+        raise CliError(_concise(exc), code="golden", exit_code=EXIT_USAGE) from exc
+
+
+def _manifest_partial(manifest: Any) -> bool:
+    """Незаполнен ли манифест прогона (финальная фаза ``report`` не завершалась).
+
+    ``SqliteStore.read_manifest`` подставляет заглушки ``"0.0.0"`` для версий, пока
+    фаза ``report`` их не записала. Такое состояние честно помечается, а не выдаётся за
+    реальный провенанс.
+    """
+    return getattr(manifest, "methodology_version", None) in (None, "", "0.0.0")
+
+
+def _artifacts_payload(artifacts: Any) -> dict[str, str | None]:
+    """JSON-совместимое представление :class:`~core.pipeline.report.Artifacts`."""
+
+    def _path(value: Any) -> str | None:
+        return str(value) if value is not None else None
+
+    return {
+        "battle_card": _path(artifacts.battle_card),
+        "preliminary_findings": _path(artifacts.preliminary_findings),
+        "nda_questions": _path(artifacts.nda_questions),
+        "diff": _path(artifacts.diff),
+        "manifest": _path(artifacts.manifest),
+    }
+
+
+def _restore_plan_inputs(
+    args: argparse.Namespace, run_id: str, *, purpose: str
+) -> tuple[dict[str, Any], dict[str, float], Any, list[str]]:
+    """Восстанавливает ``(catalog, module_weights, cohort, notes)`` из ``--run-yaml``/``--package``.
+
+    При наличии обоих аргументов каталог/веса/когорта берутся из плана (как в фазе Ш8:
+    ``plan.params`` + ``renormalized_weights``/``module_weights`` + ``plan.cohort``).
+    Иначе возвращаются пустые значения и явная заметка о ГЭП — каталог/веса **не
+    выдумываются**. ``purpose`` называет команду в тексте заметки (``sensitivity``/
+    ``golden``/``report``).
     """
     notes: list[str] = []
     if args.run_yaml and args.package:
@@ -573,9 +772,9 @@ def _sensitivity_inputs(
             "указан только один — использован пустой каталог"
         )
     notes.append(
-        "ГЭП: каталог/веса/когорта не персистятся в БД прогона — sensitivity "
-        "рассчитан с пустым каталогом (вес ячейки = 1.0) и без когорты; передайте "
-        "--run-yaml и --package для точного воспроизведения"
+        "ГЭП: каталог/веса/когорта не персистятся в БД прогона — "
+        f"{purpose} рассчитан с пустым каталогом (вес ячейки = 1.0) и без когорты; "
+        "передайте --run-yaml и --package для точного воспроизведения"
     )
     return {}, {}, None, notes
 
@@ -796,26 +995,105 @@ def _resolve_ports(args: argparse.Namespace, deploy_config: DeployConfig | None)
     )
 
 
+def _load_passports_dir(passports_dir: str | Path) -> dict[str, Any]:
+    """Загружает паспорта продуктов для фаз Ш4/Ш5 (:func:`core.config.load_passports`).
+
+    Отсутствующий каталог даёт ``{}`` (безопасный дефолт — прогон, которому паспорта не
+    нужны, не падает; :func:`core.config.passports.load_passports` уже так устроен).
+    Каталог **есть**, но паспорт не разбирается/не соответствует схеме §4.3 — это
+    конфигурационная ошибка, и она поднимается как понятная ошибка CLI (:data:`EXIT_USAGE`),
+    а не глушится.
+
+    :raises CliError: только при существующем, но некорректном паспортном каталоге.
+    """
+    root = Path(passports_dir)
+    if not root.is_dir():
+        return {}
+    try:
+        return load_passports(root)
+    except PassportLoadError as exc:
+        raise CliError(_concise(exc), code="passports", exit_code=EXIT_USAGE) from exc
+
+
+def _load_corpus_urls(path: str | Path | None) -> dict[str, list[str]]:
+    """Читает опциональный JSON/YAML-файл ``{product_id: [url, ...]}`` (Ш5).
+
+    Источник URL — **оператор** (Discovery/человек): специфицированного артефакта URL нет.
+    Файл задаётся ``--urls`` и валидируется как отображение ``product_id → список строк``.
+    При ``None`` возвращается ``{}``: нулевые URL — легитимный вход (см. заметку в
+    :func:`_resolve_phases`), а не приглашение фетчить домены из паспортов.
+
+    :raises CliError: файл не читается/не разбирается/не является отображением списков строк.
+    """
+    if path is None:
+        return {}
+    p = Path(path)
+    try:
+        text = p.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise CliError(
+            f"не удалось прочитать {p}: {_concise(exc)}",
+            code="urls",
+            exit_code=EXIT_USAGE,
+        ) from exc
+    try:
+        if p.suffix.lower() == ".json":
+            data = json.loads(text)
+        else:
+            data = yaml.safe_load(text)
+    except (json.JSONDecodeError, yaml.YAMLError) as exc:
+        raise CliError(
+            f"некорректный {p}: {_concise(exc)}", code="urls", exit_code=EXIT_USAGE
+        ) from exc
+
+    if not isinstance(data, Mapping):
+        raise CliError(
+            f"{p}: ожидался объект {{product_id: [url, ...]}}",
+            code="urls",
+            exit_code=EXIT_USAGE,
+        )
+    result: dict[str, list[str]] = {}
+    for product_id, value in data.items():
+        if not isinstance(value, list) or not all(
+            isinstance(item, str) for item in value
+        ):
+            raise CliError(
+                f"{p}: {product_id!r} должен быть списком строк (URL)",
+                code="urls",
+                exit_code=EXIT_USAGE,
+            )
+        result[str(product_id)] = list(value)
+    return result
+
+
 def _resolve_phases(
     args: argparse.Namespace, *, inputs: RunInputs, plan: RunPlan, ports: Ports
 ) -> dict[str, PhaseFn]:
     """Собирает реестр не-гейтовых фаз (``phases_factory`` — тестовый шов).
 
-    **ГЭП (urls/passports).** Загрузчика паспортов/URL в ядре пока нет, поэтому фазы Ш3
-    (реестр), Ш4 (наследование) и Ш5 (корпус) получают пустые ``urls``/``passports`` и
-    легитимно работают как no-op. URL **не выдумываются**: их должен передать composition
-    root из паспортов/``domain_profiles`` (будущая задача). Гейты ``g1``–``g4`` сюда не
-    входят — их (де)фолтные замыкания остаются в :class:`Runner` (I6/I7, S9), поэтому
-    ``run`` честно останавливается ``blocked`` без человеческого решения.
+    **Паспорта** загружаются из ``--passports-dir`` (дефолт ``passports``) и передаются
+    фазе Ш4 (наследование по ``upstream``). **URL корпуса** — только явный операторский
+    вход ``--urls`` (JSON/YAML ``{product_id: [url, ...]}``); специфицированного артефакта
+    URL в регламенте **нет**, поэтому ``doc_domains`` паспортов молча **не** фетчатся:
+    homepage — не корпус документации (I19: контент становится evidence лишь после
+    ``corpus_raw`` → hash → index). Без ``--urls`` фазы Ш5 получает ``{}`` и легитимно
+    работает как no-op. ``passport_urls`` — лишь возможный seed-источник для будущего
+    Discovery/оператора, но здесь он не подставляется неявно.
+
+    Гейты ``g1``–``g4`` сюда не входят — их (де)фолтные замыкания остаются в
+    :class:`Runner` (I6/I7, S9), поэтому ``run`` честно останавливается ``blocked`` без
+    человеческого решения.
     """
     kwargs: dict[str, Any] = {
         "inputs": inputs,
         "plan": plan,
         "ports": ports,
-        # GAP: загрузчика passport/url в ядре нет — корпус/наследование легитимно no-op.
-        # Гейты g1–g4 не входят в реестр фаз (остаются дефолтными в Runner, S9/I6/I7).
-        "urls": {},
-        "passports": {},
+        # URLs: только явный операторский вход; doc_domains не фетчатся молча (I19).
+        "urls": _load_corpus_urls(getattr(args, "urls", None)),
+        # Паспорта: --passports-dir (дефолт passports); отсутствие каталога → {}.
+        "passports": _load_passports_dir(
+            getattr(args, "passports_dir", "passports")
+        ),
         "out_dir": args.runs_dir,
         "retrieval_profile": getattr(args, "retrieval_profile", None),
         "cutoff_k": getattr(args, "cutoff_k", None),
@@ -997,6 +1275,18 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument(
         "--reset", action="store_true", help="форсировать полный перезапуск (обход resume)"
     )
+    p_run.add_argument(
+        "--passports-dir",
+        default="passports",
+        help="каталог паспортов passports/{product_id}/{YYYY-MM-DD}.yaml (дефолт passports; "
+        "отсутствие каталога → без паспортов)",
+    )
+    p_run.add_argument(
+        "--urls",
+        default=None,
+        help="опциональный JSON/YAML {product_id: [url, ...]} — операторский корпусный вход "
+        "Ш5; без него корпус URL пуст (doc_domains паспортов не фетчатся молча)",
+    )
     _add_common(p_run)
     p_run.set_defaults(handler=cmd_run)
 
@@ -1053,6 +1343,78 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_common(p_sens)
     p_sens.set_defaults(handler=cmd_sensitivity)
+
+    # golden -------------------------------------------------------------- #
+    p_golden = sub.add_parser(
+        "golden", help="сверка прогона с golden.csv (R6/R12, §11.3; --tier fast|full)"
+    )
+    p_golden.add_argument(
+        "--golden", required=True, help="путь к golden.csv (§4.2/§11.6)"
+    )
+    golden_source = p_golden.add_mutually_exclusive_group(required=True)
+    golden_source.add_argument("--db", default=None, help="путь к cohound.db прогона")
+    golden_source.add_argument(
+        "--runs-dir",
+        default=None,
+        help="каталог прогонов (runs/{run_id}/cohound.db; требует --run-id)",
+    )
+    p_golden.add_argument(
+        "--run-id",
+        default=None,
+        help="run_id (обязателен с --runs-dir; с --db выводится, если прогон один)",
+    )
+    p_golden.add_argument(
+        "--run-yaml",
+        default=None,
+        help="run.yaml для каталога (важность Кр, R12; вместе с --package)",
+    )
+    p_golden.add_argument(
+        "--package",
+        default=None,
+        help="каталог пакета для каталога (вместе с --run-yaml)",
+    )
+    p_golden.add_argument(
+        "--tier",
+        choices=["fast", "full"],
+        default=None,
+        help="фильтр golden-строк по тиру до оценки (PR-гейт fast vs полный full)",
+    )
+    _add_common(p_golden)
+    p_golden.set_defaults(handler=cmd_golden)
+
+    # report -------------------------------------------------------------- #
+    p_report = sub.add_parser(
+        "report", help="пересборка артефактов прогона из БД (Ш9, §9)"
+    )
+    report_source = p_report.add_mutually_exclusive_group(required=True)
+    report_source.add_argument("--db", default=None, help="путь к cohound.db прогона")
+    report_source.add_argument(
+        "--runs-dir",
+        default=None,
+        help="каталог прогонов (runs/{run_id}/cohound.db; требует --run-id)",
+    )
+    p_report.add_argument(
+        "--run-id",
+        default=None,
+        help="run_id (обязателен с --runs-dir; с --db выводится, если прогон один)",
+    )
+    p_report.add_argument(
+        "--run-yaml",
+        default=None,
+        help="run.yaml для восстановления каталога/весов/когорты (вместе с --package)",
+    )
+    p_report.add_argument(
+        "--package",
+        default=None,
+        help="каталог пакета для восстановления каталога/весов/когорты (вместе с --run-yaml)",
+    )
+    p_report.add_argument(
+        "--out",
+        default=None,
+        help="базовый каталог артефактов (дефолт --runs-dir либо runs); пишет {out}/{run_id}/outputs/",
+    )
+    _add_common(p_report)
+    p_report.set_defaults(handler=cmd_report)
 
     # deploy-check -------------------------------------------------------- #
     p_deploy = sub.add_parser(

@@ -182,7 +182,8 @@ def test_cmd_run_registers_real_phases_and_blocks_at_g1(
     assert phases["report"].__name__ == "report_phase"
     # План переиспользован: тот же run_id, что выведен CLI (без второго derive).
     assert captured["plan"].run_id == "g1-blocked"
-    # ГЭП: загрузчика URL/паспортов нет — фазы получают пустые отображения.
+    # Паспорта подключены (--passports-dir, дефолт passports), но каталога в cwd нет →
+    # {}; URL не заданы (--urls) → {}: фазы Ш4/Ш5 легитимно no-op. doc_domains не фетчатся.
     assert captured["urls"] == {}
     assert captured["passports"] == {}
     # Не дошли до compute/report — гейт остановил раньше.
