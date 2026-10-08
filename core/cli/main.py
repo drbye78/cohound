@@ -1,8 +1,9 @@
 """coHound — CLI-ядро (composition root Z0, ручной DI, A1; ``03`` §E).
 
-Точка входа :func:`main` реализует команды W5/T5.3: ``resolve``, ``plan`` и минимальный
-``run`` (реальный конвейер Ш1–Ш9 подключается в W7–W11, T10.4). Только stdlib
-(``argparse``/``json``/``sys``) — без фреймворков (A1).
+Точка входа :func:`main` реализует команды W5/T5.3: ``resolve``, ``plan`` и ``run``,
+который связывает реальный реестр фаз (:func:`core.pipeline.build_phases`) с портами
+профиля (composition root, L3). Только stdlib (``argparse``/``json``/``sys``) — без
+фреймворков (A1).
 
 **Принципы UX (``03`` §E.2).**
 
@@ -36,6 +37,7 @@ from core.cli.wiring import (
     SPLIT_PROFILE,
     SUPPORTED_PROFILES,
     WiringError,
+    build_adapters,
     build_gateway,
     build_runner,
     build_store,
@@ -43,10 +45,11 @@ from core.cli.wiring import (
     run_db_path,
 )
 from core.config.deploy import DeployConfig, is_split, load_deploy_config
-from core.pipeline import PHASES, RunReport
+from core.pipeline import PHASES, Ports, RunReport, build_phases
 from core.pipeline.lint import lint_run_inputs
 from core.pipeline.normalize import RunInputs, load_inputs
 from core.pipeline.plan import RunPlan, derive_run_id, plan as build_plan
+from core.pipeline.runner import Clock, PhaseFn
 from core.ports.gateway import ContentGateway
 
 __all__ = [
@@ -63,6 +66,11 @@ __all__ = [
 
 #: Фабрика диагностического gateway по deploy-конфигу (тестовый шов ``deploy-check``).
 GatewayFactory = Callable[[DeployConfig], ContentGateway]
+
+#: Фабрика реестра фаз прогона (тестовый шов ``run``: подмена реального ``build_phases``).
+PhasesFactory = Callable[..., dict[str, PhaseFn]]
+#: Фабрика плана прогона (тестовый шов ``run``: подмена детерминированного ``plan``).
+PlanFactory = Callable[..., RunPlan]
 
 # -- Коды возврата ---------------------------------------------------------- #
 #: Успех.
@@ -257,12 +265,13 @@ def cmd_plan(args: argparse.Namespace) -> int:
 
 
 def cmd_run(args: argparse.Namespace) -> int:
-    """``run`` (минимальный): создать прогон и провести ``Runner`` по доступным фазам.
+    """``run``: собрать прогон и провести ``Runner`` по реальным фазам Ш1–Ш9.
 
-    Реальный конвейер Ш1–Ш9 появится в W7–W11 (T10.4); сейчас фазы — заглушки, а гейты
-    G1–G4 останавливают прогон без человеческого решения. Resume honour'ится: строка
-    прогона **не пересоздаётся**, если она уже есть, поэтому durable-карта фаз в
-    ``runs.state`` сохраняется между процессами (``02`` §A.1).
+    Composition root строит план и реестр фаз (:func:`build_phases`) и связывает их с
+    портами профиля (:func:`_resolve_ports`). Гейты G1–G4 намеренно **не** автоматизируются
+    (I6/I7): без строки в ``gate_decisions`` прогон останавливается ``blocked`` на ``g1``.
+    Resume honour'ится: строка прогона **не пересоздаётся**, если она уже есть, поэтому
+    durable-карта фаз в ``runs.state`` сохраняется между процессами (``02`` §A.1).
 
     ``--dry-run`` показывает план фаз/линт без записи; ``--reset`` форсирует полный
     перезапуск в обход durable-состояния.
@@ -297,6 +306,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     # собирает run_manifest.yaml (это W10/T10.4), поэтому поля добавляются в отчёт
     # прогона (`deploy`) и готовы для edge_capabilities через manifest_deploy_fields.
     deploy_fields: dict[str, Any] = {}
+    deploy_config: DeployConfig | None = None
     if args.profile == SPLIT_PROFILE:
         deploy_config = load_deploy_config(None)
         if not is_split(deploy_config):
@@ -306,10 +316,23 @@ def cmd_run(args: argparse.Namespace) -> int:
             )
         deploy_fields = manifest_deploy_fields(deploy_config)
 
+    # План строится ОДИН раз здесь и переиспользуется фазами: повторный ``plan()`` внутри
+    # фазы дал бы иной ``run_id``/двойной линт (см. core/pipeline/phases.py). ``run_id``
+    # переиспользуется тот же, что выведен выше, — второго derive нет.
+    run_plan = _resolve_plan(args, inputs, run_id)
+    ports = _resolve_ports(args, deploy_config)
+    phases = _resolve_phases(args, inputs=inputs, plan=run_plan, ports=ports)
+
     store = build_store(db_path, profile=args.profile)
     try:
         _ensure_run(store, run_id, inputs)
-        runner = build_runner(store, profile=args.profile)
+        runner = build_runner(
+            store,
+            profile=args.profile,
+            ports=ports,
+            phases=phases,
+            clock=getattr(args, "clock", None),
+        )
         if args.reset:
             runner.reset(run_id)
         run_report = runner.run(run_id, until=args.until)
@@ -534,6 +557,73 @@ def _ensure_run(store: Any, run_id: str, inputs: RunInputs) -> None:
         store.create_run(run_id, inputs.run)
 
 
+def _resolve_plan(
+    args: argparse.Namespace, inputs: RunInputs, run_id: str
+) -> RunPlan:
+    """Строит план прогона (``plan_factory`` — тестовый шов; иначе ``plan``).
+
+    ``run_id`` переиспользуется выведенный вызывающим: ``plan()`` не пересчитывает его
+    (детерминизм resume, §13).
+    """
+    factory = getattr(args, "plan_factory", None)
+    if factory is not None:
+        return factory(inputs, run_id=run_id)
+    return build_plan(inputs, run_id=run_id)
+
+
+def _resolve_ports(args: argparse.Namespace, deploy_config: DeployConfig | None) -> Ports:
+    """Собирает порты профиля (``ports`` — тестовый шов; иначе :func:`build_adapters`).
+
+    Для ``split`` используются инъектируемые швы (``deploy_transport``/``gateway_factory``),
+    поэтому прогон в тестах не требует сокета.
+    """
+    injected = getattr(args, "ports", None)
+    if injected is not None:
+        return injected
+    gateway_factory = getattr(args, "gateway_factory", None)
+    gateway = (
+        gateway_factory(deploy_config)
+        if gateway_factory is not None and deploy_config is not None
+        else None
+    )
+    return build_adapters(
+        profile=args.profile,
+        deploy=deploy_config,
+        transport=getattr(args, "deploy_transport", None),
+        gateway=gateway,
+    )
+
+
+def _resolve_phases(
+    args: argparse.Namespace, *, inputs: RunInputs, plan: RunPlan, ports: Ports
+) -> dict[str, PhaseFn]:
+    """Собирает реестр не-гейтовых фаз (``phases_factory`` — тестовый шов).
+
+    **ГЭП (urls/passports).** Загрузчика паспортов/URL в ядре пока нет, поэтому фазы Ш3
+    (реестр), Ш4 (наследование) и Ш5 (корпус) получают пустые ``urls``/``passports`` и
+    легитимно работают как no-op. URL **не выдумываются**: их должен передать composition
+    root из паспортов/``domain_profiles`` (будущая задача). Гейты ``g1``–``g4`` сюда не
+    входят — их (де)фолтные замыкания остаются в :class:`Runner` (I6/I7, S9), поэтому
+    ``run`` честно останавливается ``blocked`` без человеческого решения.
+    """
+    kwargs: dict[str, Any] = {
+        "inputs": inputs,
+        "plan": plan,
+        "ports": ports,
+        # GAP: загрузчика passport/url в ядре нет — корпус/наследование легитимно no-op.
+        # Гейты g1–g4 не входят в реестр фаз (остаются дефолтными в Runner, S9/I6/I7).
+        "urls": {},
+        "passports": {},
+        "out_dir": args.runs_dir,
+        "retrieval_profile": getattr(args, "retrieval_profile", None),
+        "cutoff_k": getattr(args, "cutoff_k", None),
+    }
+    factory = getattr(args, "phases_factory", None)
+    if factory is not None:
+        return factory(**kwargs)
+    return build_phases(**kwargs)
+
+
 def _plan_payload(result: RunPlan) -> dict[str, Any]:
     """Сериализует :class:`RunPlan` в JSON-совместимый словарь."""
     return {
@@ -731,6 +821,12 @@ def main(
     *,
     deploy_transport: TransportFn | None = None,
     gateway_factory: GatewayFactory | None = None,
+    ports: Ports | None = None,
+    phases_factory: PhasesFactory | None = None,
+    plan_factory: PlanFactory | None = None,
+    retrieval_profile: Any = None,
+    cutoff_k: int | None = None,
+    clock: Clock | None = None,
 ) -> int:
     """Точка входа CLI. Возвращает код выхода (``0`` — успех).
 
@@ -741,8 +837,16 @@ def main(
     Непредвиденные исключения не проглатываются traceback'ом: печатается сжатое
     сообщение и возвращается ненулевой код.
 
-    :param deploy_transport: тестовый шов транспорта для ``deploy-check`` (без сокета).
-    :param gateway_factory: фабрика ``ContentGateway`` для ``deploy-check`` (тесты).
+    :param deploy_transport: тестовый шов транспорта для ``deploy-check``/``split``
+        (без сокета).
+    :param gateway_factory: фабрика ``ContentGateway`` для ``deploy-check``/``split``.
+    :param ports: инъекция готового :class:`Ports` для ``run`` (тесты без внешних систем).
+    :param phases_factory: фабрика реестра фаз ``run`` (тестовый шов; по умолчанию —
+        реальный :func:`core.pipeline.build_phases`).
+    :param plan_factory: фабрика плана ``run`` (тестовый шов; по умолчанию — ``plan``).
+    :param retrieval_profile: зафиксированный профиль R0/R1/R2 (I16) для фаз ``run``.
+    :param cutoff_k: зафиксированный ``retrieval_cutoff_K`` (I20) для фаз ``run``.
+    :param clock: часы прогона (детерминизм ``created_at`` манифеста, тесты).
     """
     parser = build_parser()
     try:
@@ -750,9 +854,16 @@ def main(
     except SystemExit as exc:
         return _system_exit_code(exc)
 
-    # Инъекция диагностических швов `deploy-check` (тесты без сети, T13.6).
+    # Инъекция швов команд (тесты без сети/внешних систем).
+    # `deploy-check` использует диагностические швы; `run` — ports/phases/plan-фабрики.
     args.deploy_transport = deploy_transport
     args.gateway_factory = gateway_factory
+    args.ports = ports
+    args.phases_factory = phases_factory
+    args.plan_factory = plan_factory
+    args.retrieval_profile = retrieval_profile
+    args.cutoff_k = cutoff_k
+    args.clock = clock
 
     if getattr(args, "command", None) is None:
         parser.print_help()

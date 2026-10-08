@@ -142,9 +142,12 @@ def _json_out(capsys: pytest.CaptureFixture[str]) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def test_local_profile_still_returns_empty_ports() -> None:
+def test_local_profile_sets_safe_ports_and_no_network() -> None:
+    """``local``: чанкер/экстрактор есть, сетевые/оценщик — ``None`` (L3, без регрессии split)."""
     ports = build_adapters(profile=LOCAL_PROFILE)
     assert isinstance(ports, Ports)
+    assert ports.chunker is not None
+    assert ports.extractor is not None
     assert ports.crawler is None
     assert ports.evaluator is None
 

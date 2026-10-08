@@ -11,20 +11,32 @@ in-process. ``split`` (T13.4) собирает remote-прокси (``RemoteCraw
 (матрица слоёв ``01`` §1: ``cli`` не зависит от ``edge``). Certificate pinning
 отсутствует намеренно (``07`` §8.1): доверие — через корпоративный CA.
 
-**Состояние W5/W13.** Большинство in-process адаптеров (краул/экстрактор/чанкер/
-индекс/LLM/SERP) появятся в W7–W11; для ``local`` отсутствующие порты остаются
-``None`` с явным TODO. Для ``split`` заполняются только remote-прокси веб-контура;
-не-веб порты — по мере появления.
+**Состояние W5/W13.** Для ``local`` собираются in-process адаптеры, безопасные без
+сети/тяжёлых зависимостей: чанкер и экстрактор (HTML + документы при наличии docling)
+доступны всегда, тяжёлые опциональные (эмбеддер/индекс/лексический индекс) — только
+при выполненной availability-предикате, иначе ``None`` (без исключений). Сетевые
+адаптеры (краул/SERP) для ``local`` не инстанцируются: нет URL/учётных данных/запросов
+в конфиге CLI — включаются явной инъекцией портов. Оценщик/реестр остаются ``None``,
+пока вызывающий не передаст их (генератор/конфиг). Для ``split`` заполняются
+remote-прокси веб-контура (``07`` §4); не-веб порты — по мере появления.
 
 Нейтрален к предметной категории (§1.3): никаких названий продуктов/вендоров.
 """
 
 from __future__ import annotations
 
+import importlib.util
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
+from core.adapters.chunker_markdown import MarkdownChunkerPort
+from core.adapters.embed_local import LocalEmbedder
+from core.adapters.extract_document import DoclingDocumentExtractor
+from core.adapters.extract_html import HtmlExtractor
+from core.adapters.index_npy import NpyIndexBuilder, numpy_available
+from core.adapters.lexical_tantivy import TantivyLexicalIndex, tantivy_available
 from core.adapters.remote_crawler import RemoteCrawler
 from core.adapters.remote_extractor import RemoteExtractor
 from core.adapters.remote_gateway import (
@@ -37,7 +49,11 @@ from core.adapters.remote_search import RemoteSearch
 from core.config.deploy import DeployConfig, is_split, load_deploy_config
 from core.pipeline import Ports, Runner
 from core.pipeline.runner import PHASES, Clock, PhaseFn
+from core.ports.extractor import ExtractorPort
 from core.ports.gateway import ContentGateway
+from core.ports.llm import EvaluatorPort
+from core.ports.registry import RegistryFetcherPort
+from core.ports.types import ExtractedDoc, RawPage
 from core.store.sqlite_store import SqliteStore
 
 __all__ = [
@@ -139,6 +155,116 @@ def build_gateway(
     )
 
 
+def _module_installed(name: str) -> bool:
+    """Установлен ли модуль (без импорта тяжёлого пакета)."""
+    return importlib.util.find_spec(name) is not None
+
+
+#: Формат документа → расширение (роутинг композитного экстрактора на docling).
+_DOC_SUFFIX_BY_CONTENT_TYPE: dict[str, str] = {
+    "application/pdf": ".pdf",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation": ".pptx",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ".xlsx",
+}
+
+
+def _document_filename(page: RawPage) -> str | None:
+    """Имя файла с документным расширением, если формат страницы обрабатывает docling.
+
+    Формат выводится из URL (суффикс пути), затем из ``content_type``. Возврат ``None``
+    означает, что страницу обрабатывает HTML-путь (trafilatura).
+    """
+    suffix = Path(urlsplit(page.url).path).suffix.lower()
+    if suffix and DoclingDocumentExtractor.supports(f"document{suffix}"):
+        return f"document{suffix}"
+    content_type = (page.content_type or "").split(";")[0].strip().lower()
+    doc_suffix = _DOC_SUFFIX_BY_CONTENT_TYPE.get(content_type)
+    return f"document{doc_suffix}" if doc_suffix is not None else None
+
+
+class _LocalExtractor:
+    """Композит локальной экстракции: документы (docling) поверх HTML (trafilatura).
+
+    Реализует ``ExtractorPort`` структурно. Документные форматы (pdf/docx/pptx/xlsx)
+    уходят в :class:`DoclingDocumentExtractor`, если тот доступен; всё прочее — в
+    :class:`HtmlExtractor`. Оба адаптера деградируют грациозно (``ExtractedDoc.error``),
+    поэтому композит не бросает исключений на уровне извлечения.
+    """
+
+    def __init__(
+        self, html: ExtractorPort, documents: DoclingDocumentExtractor | None
+    ) -> None:
+        self._html = html
+        self._documents = documents
+        html_version = str(getattr(self._html, "version", "") or "")
+        # Версия экстрактора: HTML-версия, дополненная документной при наличии docling.
+        self.version = (
+            html_version
+            if documents is None
+            else f"{html_version}+{documents.version}"
+        )
+
+    def extract(self, page: RawPage) -> ExtractedDoc:
+        """``RawPage`` → ``ExtractedDoc``; документный формат → docling, иначе HTML."""
+        if self._documents is not None:
+            filename = _document_filename(page)
+            if filename is not None:
+                return self._documents.extract_bytes(page.content, filename)
+        return self._html.extract(page)
+
+
+def _build_local_ports(
+    *,
+    evaluator: EvaluatorPort | None,
+    registry: RegistryFetcherPort | None,
+    index_root: str | Path,
+    package: str | None,
+) -> Ports:
+    """Собирает in-process порты профиля ``local`` (без сети/тяжёлых зависимостей).
+
+    Гарантия: никогда не бросает из-за отсутствия опциональной зависимости — недоступный
+    тяжёлый адаптер остаётся ``None``. ``evaluator``/``registry`` не создаются сами:
+    передаются вызывающим (генератор/конфиг; I6/I7/I18 не автоматизируются).
+    """
+    html = HtmlExtractor()
+    documents = DoclingDocumentExtractor()
+    # Без docling ``extractor`` — ровно ``HtmlExtractor``; при наличии docling
+    # документные форматы (pdf/docx/pptx/xlsx) уходят в него через композит.
+    extractor: ExtractorPort = (
+        _LocalExtractor(html, documents) if documents.available else html
+    )
+
+    # Тяжёлые опциональные адаптеры: только при выполненной availability-предикате.
+    embedder = (
+        LocalEmbedder() if _module_installed("sentence_transformers") else None
+    )
+    index_builder = (
+        NpyIndexBuilder(index_root=index_root, package=package)
+        if numpy_available()
+        else None
+    )
+    lexical_index = TantivyLexicalIndex() if tantivy_available() else None
+
+    return Ports(
+        evaluator=evaluator,
+        registry=registry,
+        chunker=MarkdownChunkerPort(),
+        extractor=extractor,
+        embedder=embedder,
+        index_builder=index_builder,
+        # Adapter/port mismatch (engine_version: property vs mutable attr) — статическая
+        # несовместимость протокола; runtime_checkable проверяет методы, поведение корректно.
+        lexical_index=lexical_index,  # type: ignore[arg-type]
+        # Сетевые адаптеры (crawl/SERP) для local не инстанцируются: в CLI-конфиге нет
+        # ни URL-набора, ни учётных данных, ни discovery-запросов. Включаются явной
+        # инъекцией портов вызывающим (composition root, W13/T13).
+        crawler=None,
+        search=None,
+        vector_index=None,
+    )
+
+
 def build_adapters(
     *,
     profile: str = LOCAL_PROFILE,
@@ -147,10 +273,17 @@ def build_adapters(
     gateway: ContentGateway | None = None,
     registry_id: str = DEFAULT_REGISTRY_ID,
     extra_headers: Mapping[str, str] | None = None,
+    evaluator: EvaluatorPort | None = None,
+    registry: RegistryFetcherPort | None = None,
+    index_root: str | Path = "index_store",
+    package: str | None = None,
 ) -> Ports:
     """Собирает порты внешних систем по профилю развёртывания (``03`` §E.3).
 
-    * ``local`` — реальные адаптеры in-process (W7–W11); сейчас пустой :class:`Ports`.
+    * ``local`` — реальные адаптеры in-process: чанкер и экстрактор всегда, тяжёлые
+      опциональные (эмбеддер/индекс/лексический индекс) — только при доступной
+      зависимости, иначе ``None``. Сетевые адаптеры не собираются (см. комментарий в
+      :func:`_build_local_ports`).
     * ``split`` — remote-прокси поверх :class:`HttpContentGateway` (``07`` §4): краулер,
       поиск, экстрактор и реестровый фетчер маршрутизируются в DMZ. Конфиг берётся из
       ``deploy`` или загружается из ``config/deploy.yaml``; профиль конфига обязан быть
@@ -161,12 +294,21 @@ def build_adapters(
     :param gateway: готовый ``ContentGateway`` (переопределяет сборку по конфигу).
     :param registry_id: идентификатор реестра для ``RemoteRegistry`` (данные).
     :param extra_headers: доп. заголовки шва (напр. OIDC bearer).
+    :param evaluator: готовый оценщик (``local``); ``None`` → остаётся ``None`` (не
+        конструируется автоматически: сценарий evaluator требует self-host backend).
+    :param registry: готовый реестровый фетчер (``local``); ``None`` → остаётся ``None``
+        (конфиг реестра — данные вызывающего).
+    :param index_root: корень индексного хранилища для ``NpyIndexBuilder`` (``local``).
+    :param package: пакет по умолчанию для ``NpyIndexBuilder`` (``local``).
     :raises WiringError: неизвестный профиль или split без валидного deploy-конфига.
     """
     if profile == LOCAL_PROFILE:
-        # TODO(W7–W11): crawler/extractor/chunker (W7), индексы/embedder (W8),
-        # evaluator (W9), search (W11), registry (W6) — заполнять здесь по мере появления.
-        return Ports()
+        return _build_local_ports(
+            evaluator=evaluator,
+            registry=registry,
+            index_root=index_root,
+            package=package,
+        )
     if profile == SPLIT_PROFILE:
         config = deploy if deploy is not None else load_deploy_config(None)
         if not is_split(config):

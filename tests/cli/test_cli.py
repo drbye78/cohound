@@ -365,11 +365,15 @@ def test_run_split_profile_unavailable(
 # ---------------------------------------------------------------------------
 
 
-def test_build_adapters_local_returns_empty_ports() -> None:
+def test_build_adapters_local_sets_safe_ports() -> None:
+    """``local`` собирает безопасные in-process порты; сетевые/оценщик — ``None`` (L3)."""
     ports = build_adapters(profile=LOCAL_PROFILE)
     assert isinstance(ports, Ports)
+    assert ports.chunker is not None
+    assert ports.extractor is not None
     assert ports.evaluator is None
     assert ports.crawler is None
+    assert ports.search is None
 
 
 def test_build_adapters_split_raises_clean_seam() -> None:
