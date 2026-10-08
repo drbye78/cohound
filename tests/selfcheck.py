@@ -311,6 +311,11 @@ def main() -> int:
     check("I18 структурно: у оценщика нет tools/web_search", lambda: _ports_i18())
     check("адаптеры используют порт-типы (Chunk/ExtractedDoc)", lambda: _ports_type_reuse())
 
+    section("Инженерные гейты (W1/T1.4)")
+    check("матрица зависимостей core.* (01 §1, ast)", lambda: _import_graph())
+    check("§1.3 нейтральность domain/ports/pipeline (грепп)", lambda: _neutrality())
+    check("transitional-шимы schemas.py/db.py сохраняют идентичность", lambda: _domain_store_shims())
+
     print(f"\n{CHECKS - len(FAILURES)}/{CHECKS} проверок пройдено")
     if FAILURES:
         print("\nПровалы:")
@@ -527,6 +532,87 @@ def _db_smoke() -> None:
         if "I4" not in str(exc):
             raise
     conn.close()
+
+
+def _import_graph() -> None:
+    """Матрица зависимостей слоёв core.* (01 §1) — статически через ast, без исполнения."""
+    import ast
+
+    matrix = {
+        "domain": {"domain", "util"},
+        "ports": {"domain", "ports", "util"},
+        "pipeline": {"domain", "ports", "pipeline", "config", "util"},
+        "adapters": {"domain", "ports", "adapters", "store", "config", "util"},
+        "store": {"domain", "ports", "store", "config", "util"},
+        "config": {"domain", "config", "util"},
+        "cli": {"domain", "ports", "pipeline", "adapters", "store", "config", "cli", "util"},
+        "edge": {"domain", "ports", "adapters", "config", "edge", "util"},
+        "util": {"domain", "util"},
+    }
+    root = Path(__file__).resolve().parent.parent / "core"
+    violations: list[str] = []
+    for layer in matrix:
+        layer_dir = root / layer
+        if not layer_dir.is_dir():
+            continue
+        for py in layer_dir.rglob("*.py"):
+            tree = ast.parse(py.read_text(encoding="utf-8"), filename=str(py))
+            for node in ast.walk(tree):
+                mod = None
+                if isinstance(node, ast.ImportFrom) and node.module and node.module.startswith("core."):
+                    mod = node.module
+                elif isinstance(node, ast.Import):
+                    for alias in node.names:
+                        if alias.name.startswith("core."):
+                            _check_edge(layer, alias.name.split(".")[1], matrix, py, root, violations)
+                if mod is None:
+                    continue
+                _check_edge(layer, mod.split(".")[1], matrix, py, root, violations)
+    if violations:
+        raise AssertionError("нарушена матрица зависимостей (01 §1): " + "; ".join(violations))
+
+
+def _check_edge(layer: str, target: str, matrix: dict, py: Path, root: Path, violations: list) -> None:
+    if target not in matrix:
+        return
+    if target not in matrix[layer]:
+        violations.append(f"{py.relative_to(root)}: {layer} -> {target}")
+
+
+def _neutrality() -> None:
+    """§1.3 грепп-тест: domain/ports/pipeline без предметных терминов."""
+    import re
+
+    bad = re.compile(r"postgres|pangolin|sber|сбер|copywala|платформа", re.IGNORECASE)
+    root = Path(__file__).resolve().parent.parent / "core"
+    hits: list[str] = []
+    for layer in ("domain", "ports", "pipeline"):
+        layer_dir = root / layer
+        if not layer_dir.is_dir():
+            continue
+        for py in layer_dir.rglob("*.py"):
+            for i, line in enumerate(py.read_text(encoding="utf-8").splitlines(), 1):
+                if bad.search(line):
+                    hits.append(f"{py.relative_to(root)}:{i}")
+    if hits:
+        raise AssertionError("§1.3: предметные термины в нейтральных слоях: " + ", ".join(hits))
+
+
+def _domain_store_shims() -> None:
+    """Transitional-шимы core/schemas.py и core/db.py сохраняют идентичность типов (T1.2/T1.3)."""
+    from core.db import DDL, SCHEMA_VERSION, connect
+    from core.domain import Cell as DomainCell
+    from core.domain import Status as DomainStatus
+    from core.schemas import Cell as ShimCell
+    from core.schemas import Status as ShimStatus
+    from core.store import sqlite
+
+    if ShimCell is not DomainCell:
+        raise AssertionError("core.schemas.Cell должен ссылаться на core.domain.Cell")
+    if ShimStatus is not DomainStatus:
+        raise AssertionError("core.schemas.Status должен ссылаться на core.domain.Status")
+    if connect is not sqlite.connect or SCHEMA_VERSION != sqlite.SCHEMA_VERSION or DDL != sqlite.DDL:
+        raise AssertionError("core.db должен реэкспортировать core.store.sqlite")
 
 
 if __name__ == "__main__":
