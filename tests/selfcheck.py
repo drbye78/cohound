@@ -391,6 +391,9 @@ def main() -> int:
     section("Golden-harness (R6/R12) — W12")
     check("golden: R6-согласие, false-✅ гейт, страта ❌ (R12)", lambda: _golden_harness())
 
+    section("Ревью preliminary (I6/I7) — W9")
+    check("review: очередь + human-only promote без фабрикации статуса", lambda: _review_human_only())
+
     print(f"\n{CHECKS - len(FAILURES)}/{CHECKS} проверок пройдено")
     if FAILURES:
         print("\nПровалы:")
@@ -2078,6 +2081,54 @@ def _golden_harness() -> None:
         raise AssertionError("false ✅ обязан фейлить golden-гейт (critical=0)")
     if not check_thresholds(report):
         raise AssertionError("check_thresholds обязан вернуть нарушение при false ✅")
+
+
+def _review_human_only() -> None:
+    """Ревью: очередь preliminary/❓; promote только человеком и без фабрикации статуса (I6/I7)."""
+    import datetime as _dt
+
+    from core.domain import (
+        Cell,
+        CellState,
+        RankingPolicy,
+        RunConfig,
+        RunMode,
+        Status,
+    )
+    from core.pipeline.review import ReviewError, promote, review_queue
+    from core.store.sqlite_store import SqliteStore
+
+    with SqliteStore(":memory:") as store:
+        store.create_run("r1", RunConfig(
+            case_id="c", anchor="p1", cohort="co.yaml", products=["p1"], package="pkg",
+            snapshot_date=_dt.date(2026, 1, 1), mode=RunMode.STRICT,
+            ranking_policy=RankingPolicy.CAPABILITY_RANKED,
+        ))
+        store.save_cells_batch([
+            Cell(run_id="r1", product_id="p1", param_id="x", state=CellState.PRELIMINARY,
+                 status=None, evidence=[], absence_evidence=[], reviewed_by=None),
+            Cell(run_id="r1", product_id="p1", param_id="y", state=CellState.EVALUATED,
+                 status=Status.UNKNOWN, evidence=[], absence_evidence=[], reviewed_by=None),
+        ])
+        if {i.param_id for i in review_queue(store, "r1")} != {"x", "y"}:
+            raise AssertionError("очередь ревью обязана включать preliminary и ❓")
+
+        try:
+            promote(store=store, run_id="r1", product_id="p1", param_id="x", actor="",
+                    status=Status.UNKNOWN)
+            raise AssertionError("I6/I7: promote без actor обязан быть отвергнут")
+        except ReviewError:
+            pass
+        try:
+            promote(store=store, run_id="r1", product_id="p1", param_id="x", actor="human-1")
+            raise AssertionError("A3: promote без verdict обязан быть отвергнут (не фабрикуем статус)")
+        except ReviewError:
+            pass
+
+        cell = promote(store=store, run_id="r1", product_id="p1", param_id="x",
+                       actor="human-1", status=Status.UNKNOWN)
+        if cell.reviewed_by != "human-1" or cell.state is not CellState.EVALUATED:
+            raise AssertionError("promote обязан выставить reviewed_by и state=evaluated")
 
 
 if __name__ == "__main__":
