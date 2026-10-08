@@ -42,6 +42,7 @@ from core.pipeline.normalize import (
     load_scope_attestation,
 )
 from core.pipeline.inheritance import apply_precedence, inheritance_wave
+from core.pipeline.corpus import IndexBuild, build_corpus
 from core.pipeline.plan import RunPlan, derive_run_id, load_plan, plan
 from core.pipeline.registry import (
     registry_covered_params,
@@ -105,4 +106,7 @@ __all__ = [
     # inheritance wave (T6.4)
     "inheritance_wave",
     "apply_precedence",
+    # corpus (T7.4, Ш5)
+    "build_corpus",
+    "IndexBuild",
 ]

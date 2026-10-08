@@ -333,6 +333,12 @@ def main() -> int:
     check("load_inputs→lint→plan; битый пакет блокируется (I2b)", lambda: _cli_plan_lint())
     check("профили local/split: split честно недоступен (07/W13)", lambda: _cli_wiring_profiles())
 
+    section("Корпус (Ш5) — W7")
+    check("content-addressed кэш: get_or_fetch + ключи (R7)", lambda: _util_cache())
+    check("HtmlExtractor: hash/деградация (I19)", lambda: _extract_html())
+    check("ScrapyCrawler: кэш + SSRF + домен-профиль", lambda: _crawl_scrapy())
+    check("MarkdownChunkerPort удовлетворяет ChunkerPort (T7.3)", lambda: _chunker_port())
+
     print(f"\n{CHECKS - len(FAILURES)}/{CHECKS} проверок пройдено")
     if FAILURES:
         print("\nПровалы:")
@@ -982,6 +988,112 @@ def _cli_wiring_profiles() -> None:
             code = main(["resolve", "missing", "--db", str(db)])
         if code != EXIT_NOT_FOUND:
             raise AssertionError(f"промах resolve обязан давать EXIT_NOT_FOUND, код={code}")
+
+
+def _util_cache() -> None:
+    """Content-addressed кэш: round-trip, get_or_fetch (один фетч), детерминизм (R7)."""
+    import tempfile
+
+    from core.util.cache import ContentAddressedCache, http_key, serp_key
+
+    with tempfile.TemporaryDirectory() as tmp:
+        cache = ContentAddressedCache(root=tmp)
+        key = http_key("https://example.test/a")
+        if cache.get_bytes("http", key) is not None:
+            raise AssertionError("промах кэша обязан возвращать None")
+        cache.put_bytes("http", key, b"payload")
+        if cache.get_bytes("http", key) != b"payload":
+            raise AssertionError("round-trip bytes кэша сломан")
+
+        calls: list[int] = []
+
+        def _fetch() -> bytes:
+            calls.append(1)
+            return b"X"
+
+        k2 = http_key("https://example.test/b")
+        cache.get_or_fetch("http", k2, _fetch)
+        cache.get_or_fetch("http", k2, _fetch)
+        if len(calls) != 1:
+            raise AssertionError(f"get_or_fetch обязан фетчить один раз, было {len(calls)}")
+        if serp_key("  Alpha  Beta ") != serp_key("alpha beta"):
+            raise AssertionError("serp_key обязан нормализовать регистр/пробелы")
+        if http_key("u1") == http_key("u2"):
+            raise AssertionError("разные URL обязаны давать разные ключи")
+
+
+def _extract_html() -> None:
+    """HtmlExtractor: hash = hash текста (I19), деградация без исключения."""
+    from core.adapters.extract_html import HtmlExtractor
+    from core.ports.types import RawPage
+    from core.util.hashing import content_hash
+
+    good = HtmlExtractor(extract_fn=lambda _h: "извлечённый текст")
+    doc = good.extract(RawPage(url="https://e.test/a", content=b"<p>x</p>", fetched_at="t"))
+    if doc.error is not None or not doc.text:
+        raise AssertionError(f"успешная экстракция: {doc.error!r}")
+    if doc.content_hash != content_hash(doc.text):
+        raise AssertionError("I19: content_hash обязан считаться от извлечённого текста")
+    if not doc.extractor_version:
+        raise AssertionError("extractor_version обязателен")
+
+    bad = HtmlExtractor(extract_fn=lambda _h: None)
+    degraded = bad.extract(RawPage(url="https://e.test/a", content=b"<p>x</p>", fetched_at="t"))
+    if not degraded.error or degraded.text != "":
+        raise AssertionError("сбой извлечения обязан деградировать в error без исключения")
+
+
+def _crawl_scrapy() -> None:
+    """ScrapyCrawler: кэш (1 фетч), SSRF-блок, доменный рендер-профиль."""
+    import tempfile
+
+    from core.adapters.crawl_scrapy import ScrapyCrawler
+    from core.ports.crawler import CrawlerPort
+    from core.ports.types import RawPage, RenderMode
+    from core.util.cache import ContentAddressedCache
+
+    calls: list[int] = []
+
+    def _fake(url: str, render: RenderMode) -> RawPage:
+        calls.append(1)
+        return RawPage(url=url, content=b"<html>ok</html>", fetched_at="t", render_mode=render)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        crawler = ScrapyCrawler(
+            fetcher=_fake,
+            cache=ContentAddressedCache(root=tmp),
+            domain_profiles={"example.com": {"render": "browser"}},
+        )
+        if not isinstance(crawler, CrawlerPort):
+            raise AssertionError("ScrapyCrawler обязан удовлетворять CrawlerPort")
+        first = crawler.fetch("https://example.com/x")
+        crawler.fetch("https://example.com/x")
+        if len(calls) != 1:
+            raise AssertionError(f"кэш обязан дать 1 фетч, было {len(calls)}")
+        if first.render_mode is not RenderMode.BROWSER:
+            raise AssertionError("доменный профиль обязан выбрать browser-рендер")
+        try:
+            crawler.fetch("http://127.0.0.1/secret")
+            raise AssertionError("SSRF-цель обязана блокироваться до фетча")
+        except Exception as exc:  # noqa: BLE001 — ожидаемый отказ
+            if "SSRF" not in str(exc) and "приватн" not in str(exc) and "127.0.0.1" not in str(exc):
+                raise
+
+
+def _chunker_port() -> None:
+    """MarkdownChunkerPort структурно реализует ChunkerPort (T7.3)."""
+    from core.adapters.chunker_markdown import MarkdownChunkerPort
+    from core.ports.chunker import ChunkerPort
+    from core.ports.types import ExtractedDoc
+
+    chunker = MarkdownChunkerPort()
+    if not isinstance(chunker, ChunkerPort):
+        raise AssertionError("MarkdownChunkerPort обязан удовлетворять ChunkerPort")
+    chunks = chunker.chunk(
+        ExtractedDoc(text="# H1\nтело", content_hash="h", extractor_version="v"), "doc1"
+    )
+    if [c.chunk_id for c in chunks] != ["doc1#0"] or chunks[0].heading_path != "H1":
+        raise AssertionError("порт-чанкинг сломан")
 
 
 if __name__ == "__main__":
