@@ -345,6 +345,9 @@ def main() -> int:
     check("LocalEmbedder: батч + torque-free шов (T8.1)", lambda: _embed_local())
     check("NpyIndexBuilder/VectorIndex: партиции + cosine (T8.2/T8.4)", lambda: _index_roundtrip())
 
+    section("Расчёт (Ш8) — W10")
+    check("compute: I5 (failed в Coverage, вне Capability) + K6", lambda: _compute_i5())
+
     print(f"\n{CHECKS - len(FAILURES)}/{CHECKS} проверок пройдено")
     if FAILURES:
         print("\nПровалы:")
@@ -1230,6 +1233,50 @@ def _index_roundtrip() -> None:
         hits = vindex.search(VectorQuery(product_ids=["p1"], top_k=2, vector=[0.9, 0.1]))
         if not hits or hits[0].chunk_id != "c0" or hits[0].content_hash != "h0":
             raise AssertionError(f"cosine/provenance сломан: {[h.chunk_id for h in hits]}")
+
+
+def _compute_i5() -> None:
+    """compute: failed в знаменателе Coverage, вне Capability (I5); K6-демотирование."""
+    import datetime as _dt
+
+    from core.domain import CatalogRow, Cell, CellState, Importance, ParamType, RunConfig, RunMode, Status
+    from core.pipeline.compute import compute
+    from core.store.sqlite_store import SqliteStore
+
+    def _cell(pid, param_id, status, state=CellState.EVALUATED):
+        return Cell.model_construct(
+            run_id="r1", product_id=pid, param_id=param_id, state=state, status=status,
+            evidence=[{"source_id": "c", "quote": "q"}], absence_evidence=[], reviewed_by=None,
+        )
+
+    with SqliteStore(":memory:") as store:
+        cfg = RunConfig(case_id="c", anchor="p1", cohort="co", products=["p1"],
+                        package="pk", snapshot_date=_dt.date(2026, 1, 1), mode=RunMode.STRICT)
+        store.create_run("r1", cfg)
+        store.save_cells_batch([
+            _cell("p1", "x", Status.OK),
+            _cell("p1", "y", None, CellState.FAILED),
+        ])
+        row_x = CatalogRow.model_construct(
+            param_id="x", title="t", module="m", group="g",
+            importance=Importance.CRITICAL, param_type=ParamType.FACT, rule="r",
+        )
+        row_y = CatalogRow.model_construct(
+            param_id="y", title="t", module="m", group="g",
+            importance=Importance.CRITICAL, param_type=ParamType.FACT, rule="r",
+        )
+        bundle = compute(
+            store=store, run_id="r1",
+            catalog={"x": row_x, "y": row_y}, module_weights={"m": 1.0},
+        )
+        if bundle.capability.value != 1.0:
+            raise AssertionError(f"I5: failed вне Capability, получено {bundle.capability.value}")
+        if not 0.0 < bundle.coverage.value < 1.0:
+            raise AssertionError(f"I5: failed обязан снижать Coverage, получено {bundle.coverage.value}")
+        if bundle.failure_rate != 0.5:
+            raise AssertionError(f"failure_rate сломан: {bundle.failure_rate}")
+        if bundle.computed_ranking not in {"capability_ranked", "coverage_fallback"}:
+            raise AssertionError(f"K6 computed_ranking невалиден: {bundle.computed_ranking}")
 
 
 if __name__ == "__main__":
