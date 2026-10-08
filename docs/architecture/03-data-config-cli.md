@@ -224,10 +224,12 @@ DMZ-шва:
 profile: split                 # local | split | split-hardened
 edge:
   base_url: "https://edge.internal:8443"
-  tls: { ca: certs/ca.pem, client_cert: certs/core.pem, client_key: secrets/core.key }
+  tls: { ca: certs/ca.pem, client_cert: certs/core.pem, client_key: secrets/core.key }  # без pinning (07 §8)
+  auth: mtls                   # mtls | oidc (issuer/audience — IDP заказчика)
   timeout_s: 30
   max_retries: 2
   max_response_bytes: 52428800
+  audit: { sink: "file|syslog", target: "…" }   # SIEM-экспорт
 extractor_zone: edge           # edge | core | separate
 search:
   budget: { ru: 5, en: 5 }      # симметрия I16
@@ -235,8 +237,10 @@ search:
 ```
 
 Профиль `local` игнорирует `edge.*`. Загрузчик `config/deploy.py` → `DeployConfig` (домен-нейтрален).
-`deploy_profile` и версии edge-компонентов (`/v1/capabilities`) пишутся в `run_manifest.yaml` (R7).
-`edge/` (composition root Z1) читает тот же файл для bind-адреса/аутентификации входящих.
+`deploy_profile`, версии edge-компонентов (`/v1/capabilities`) и `edge_schema_version` пишутся в
+`run_manifest.yaml` (R7). `edge/` (composition root Z1) читает тот же файл для bind-адреса,
+аутентификации входящих (IDP) и экспорта аудита (SIEM). Полные требования к прозрачности шва для
+IDP/DLP/IDS — `07` §8.
 
 ---
 

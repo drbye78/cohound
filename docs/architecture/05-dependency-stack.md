@@ -227,11 +227,14 @@ robots.txt-запрос оставлять на дефолтном HTTP-handler 
 |---|---|---|
 | `httpx` | **a** | клиент remote-прокси (core→edge); уже в стеке |
 | stdlib `http.server` / ASGI-микрофреймворк | **a** | сервер gateway в `edge/`; для MVP достаточно stdlib/`uvicorn`+`Starlette`(опц.) |
-| TLS/mTLS | stdlib `ssl` | взаимная аутентификация ядра↔edge (сертификаты вне git) |
+| TLS/mTLS | stdlib `ssl` | взаимная аутентификация ядра↔edge (сертификаты вне git); **без certificate pinning** — чтобы не блокировать корп. TLS-инспекцию (07 §8.1) |
+| `jsonschema` | **b** | валидация запроса/ответа шва по опубликованной JSON-Schema (07 §8.3); можно stdlib-руками |
+| `pyjwt` / `authlib` | **b** | OIDC/JWT-идентичность шва, если корп. IDP требует bearer-токены вместо mTLS (07 §8.2) |
 
 `edge/` — отдельное окружение (тот же `crawl`+`extract` extras), сетевая изоляция — на уровне L7-фаервола
 (политики — `07` §5), не пакета. Сервер gateway — тонкий; допускается `Starlette`/`uvicorn` (Apache-2.0/MIT)
-как **b**, но не обязателен (A1).
+как **b**, но не обязателен (A1). Контракты шва публикуются как **OpenAPI + JSON-Schema** (`schema_version`)
+для IDP/DLP/IDS-политик — `07` §8.
 
 ---
 
