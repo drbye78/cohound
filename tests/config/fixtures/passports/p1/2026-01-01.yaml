@@ -1,0 +1,12 @@
+# Минимальный валидный паспорт продукта (§4.3). Идентификаторы нейтральны (§1.3).
+product_id: p1
+canonical_name: "Product One"
+vendor: "Vendor One"
+upstream: null
+edition_assessed: "Standard"
+version: "1.0"
+jurisdiction: XX
+doc_domains:
+  - "example.com"
+satellites: []
+snapshot_date: 2026-01-01
