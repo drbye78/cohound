@@ -386,6 +386,9 @@ def build_manifest(
     deploy_profile: str | None = None,
     edge_schema_version: str | None = None,
     edge_capabilities: Mapping[str, Any] | None = None,
+    retrieval_profile: str | None = None,
+    retrieval_cutoff_K: int | None = None,
+    retrieval_params_json: str | None = None,
     created_at: str | None = None,
 ) -> RunManifest:
     """Собирает полностью заполненный :class:`RunManifest` (R7/§13) фазы Ш9.
@@ -468,12 +471,14 @@ def build_manifest(
         getattr(plan, "index_build_id", None),
     )
     retrieval_profile = _first_present(
+        retrieval_profile,
         getattr(run, "retrieval_profile", None),
         getattr(inputs, "retrieval_profile", None),
         getattr(plan, "retrieval_profile", None),
     )
     retrieval_cutoff_K = _coerce_int(
         _first_present(
+            retrieval_cutoff_K,
             getattr(run, "retrieval_cutoff_K", None),
             getattr(inputs, "retrieval_cutoff_K", None),
             getattr(plan, "retrieval_cutoff_K", None),
@@ -481,6 +486,7 @@ def build_manifest(
     )
     retrieval_params_json = _embed_json(
         _first_present(
+            retrieval_params_json,
             getattr(run, "retrieval_params_json", None),
             getattr(inputs, "retrieval_params_json", None),
             getattr(plan, "retrieval_params_json", None),

@@ -37,7 +37,11 @@ from core.domain.models import Satellite
 from core.pipeline.compute import compute
 from core.pipeline.corpus import build_corpus
 from core.pipeline.discovery import discover
-from core.pipeline.evaluate import evaluate_phase
+from core.pipeline.evaluate import (
+    DEFAULT_RETRIEVAL_CUTOFF_K,
+    DEFAULT_RETRIEVAL_PROFILE,
+    evaluate_phase,
+)
 from core.pipeline.inheritance import inheritance_wave
 from core.pipeline.registry import registry_wave
 from core.pipeline.report import build_manifest, write_reports
@@ -69,6 +73,23 @@ IMPLEMENTED_PHASES: tuple[str, ...] = (
 # ---------------------------------------------------------------------------
 # Внутренние помощники
 # ---------------------------------------------------------------------------
+
+
+def _retrieval_params_json(holder: Mapping[str, Any]) -> str | None:
+    """``retrieval_params_json`` манифеста в формате ячейки: ``{profile, cutoff_K}`` (R7/§13).
+
+    Тот же ``sort_keys=True``-формат, что пишет :func:`core.pipeline.evaluate._provenance`,
+    поэтому манифест и ячейки несут одно и то же провенанс-значение.
+    """
+    import json as _json
+
+    profile = holder.get("retrieval_profile")
+    cutoff = holder.get("retrieval_cutoff_K")
+    if profile is None and cutoff is None:
+        return None
+    return _json.dumps(
+        {"profile": profile, "cutoff_K": cutoff}, ensure_ascii=False, sort_keys=True
+    )
 
 
 def _as_phase(result: Any, phase: str) -> PhaseResult:
@@ -239,6 +260,17 @@ def build_phases(
     # -- Ш6: оценка (ретривал → оценщик) ------------------------------------ #
     def evaluate_phase_fn(ctx: RunContext) -> PhaseResult:
         """Ш6: делегирует :func:`~core.pipeline.evaluate.evaluate_phase` (I16–I20)."""
+        # Разрешённые профиль/K фиксируются в holder для провенанса манифеста Ш9 (R7/§13):
+        # ячейка несёт те же значения, что и манифест (иначе манифест — не самостоятельная
+        # запись воспроизведения). Дефолты — те же, что применяет evaluate_phase.
+        holder["retrieval_profile"] = (
+            retrieval_profile.value
+            if isinstance(retrieval_profile, RetrievalProfile)
+            else retrieval_profile
+        ) or DEFAULT_RETRIEVAL_PROFILE.value
+        holder["retrieval_cutoff_K"] = (
+            int(cutoff_k) if cutoff_k is not None else DEFAULT_RETRIEVAL_CUTOFF_K
+        )
         return evaluate_phase(
             plan=plan,
             ports=ctx.ports,
@@ -296,6 +328,9 @@ def build_phases(
             deploy_profile=deploy_profile,
             edge_schema_version=edge_schema_version,
             edge_capabilities=edge_capabilities,
+            retrieval_profile=holder.get("retrieval_profile"),
+            retrieval_cutoff_K=holder.get("retrieval_cutoff_K"),
+            retrieval_params_json=_retrieval_params_json(holder),
         )
         artifacts = write_reports(
             bundle=bundle,

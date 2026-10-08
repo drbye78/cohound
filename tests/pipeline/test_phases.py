@@ -553,6 +553,38 @@ def test_build_phases_without_deploy_provenance_is_backward_compatible(
     assert manifest["edge_capabilities"] == {}
 
 
+def test_build_phases_records_default_retrieval_provenance(tmp_path: Path) -> None:
+    """R7/§13: манифест несёт эффективный профиль/K даже без явных kwargs (не null).
+
+    Ранее манифест писал ``retrieval_profile=null`` при том, что ячейка несла ``R0`` —
+    манифест не был самостоятельной записью воспроизведения. Теперь значения совпадают
+    с форматом ячейки (``_provenance``).
+    """
+    from core.pipeline.evaluate import (
+        DEFAULT_RETRIEVAL_CUTOFF_K,
+        DEFAULT_RETRIEVAL_PROFILE,
+    )
+
+    manifest = _run_chain_to_report(tmp_path)
+    assert manifest["retrieval_profile"] == DEFAULT_RETRIEVAL_PROFILE.value
+    assert manifest["retrieval_cutoff_K"] == DEFAULT_RETRIEVAL_CUTOFF_K
+    assert json.loads(manifest["retrieval_params_json"]) == {
+        "profile": DEFAULT_RETRIEVAL_PROFILE.value,
+        "cutoff_K": DEFAULT_RETRIEVAL_CUTOFF_K,
+    }
+
+
+def test_build_phases_forwards_explicit_retrieval_provenance(tmp_path: Path) -> None:
+    """Явные ``retrieval_profile``/``cutoff_k`` доходят до манифеста в формате ячейки."""
+    manifest = _run_chain_to_report(tmp_path, retrieval_profile="R1", cutoff_k=25)
+    assert manifest["retrieval_profile"] == "R1"
+    assert manifest["retrieval_cutoff_K"] == 25
+    assert json.loads(manifest["retrieval_params_json"]) == {
+        "profile": "R1",
+        "cutoff_K": 25,
+    }
+
+
 def test_discovery_noop_without_adapter() -> None:
     inputs = _inputs()
     plan = _plan()
