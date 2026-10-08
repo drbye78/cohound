@@ -329,6 +329,10 @@ def main() -> int:
     section("Конвейер (L1) — W4")
     check("гейт не пройден без gate_decisions; durable resume (S9/P4)", lambda: _pipeline_gates_resume())
 
+    section("CLI / composition root (Z0) — W5")
+    check("load_inputs→lint→plan; битый пакет блокируется (I2b)", lambda: _cli_plan_lint())
+    check("профили local/split: split честно недоступен (07/W13)", lambda: _cli_wiring_profiles())
+
     print(f"\n{CHECKS - len(FAILURES)}/{CHECKS} проверок пройдено")
     if FAILURES:
         print("\nПровалы:")
@@ -892,6 +896,92 @@ def _pipeline_gates_resume() -> None:
         record_decision(store, "r1", Gate.G1, actor="human", target="plan")
         if not is_gate_passed(store, "r1", Gate.G1):
             raise AssertionError("гейт обязан пройтись после строки gate_decisions")
+
+
+def _cli_plan_lint() -> None:
+    """CLI-фасад plan/dry-run: валидный пакет → 0; битый (I2b) → блок с кодом."""
+    import contextlib
+    import io
+    import shutil
+    import tempfile
+
+    from core.cli.main import EXIT_OK, EXIT_USAGE, main
+    from core.cli.wiring import LOCAL_PROFILE, SPLIT_PROFILE, WiringError, build_adapters
+
+    def _silent(argv: list[str]) -> int:
+        """Запускает CLI, подавляя его stdout/stderr (проверяется только код возврата)."""
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            return main(argv)
+
+    fixtures = ROOT / "tests" / "config" / "fixtures"
+    raw_code = _silent(
+        [
+            "plan",
+            "--run-yaml",
+            str(fixtures / "run.yaml"),
+            "--package",
+            str(fixtures),
+            "--dry-run",
+            "--json",
+        ]
+    )
+    if raw_code != EXIT_USAGE:
+        raise AssertionError(f"битый пакет (I2b) обязан блокироваться, код={raw_code}")
+    with tempfile.TemporaryDirectory() as tmp:
+        pkg = Path(tmp) / "package"
+        pkg.mkdir()
+        for item in fixtures.iterdir():
+            if item.is_file():
+                shutil.copy(item, pkg / item.name)
+        (pkg / "scope_attestation.yaml").write_text(
+            'procedure: "аттестация (selfcheck)"\n', encoding="utf-8"
+        )
+        good_code = _silent(
+            [
+                "plan",
+                "--run-yaml",
+                str(pkg / "run.yaml"),
+                "--package",
+                str(pkg),
+                "--dry-run",
+                "--json",
+            ]
+        )
+        if good_code != EXIT_OK:
+            raise AssertionError(f"валидный пакет обязан планироваться, код={good_code}")
+    # Профиль split честно недоступен до W13 (шов 07), local — ок.
+    if build_adapters(profile=LOCAL_PROFILE) is None:
+        raise AssertionError("local-профиль обязан собирать Ports")
+    try:
+        build_adapters(profile=SPLIT_PROFILE)
+        raise AssertionError("split-профиль обязан быть честно недоступен до W13")
+    except WiringError:
+        pass
+
+
+def _cli_wiring_profiles() -> None:
+    """Профили развёртывания: local ок, split — явный отказ (07/W13)."""
+    import contextlib
+    import io
+    import tempfile
+
+    from core.cli.main import EXIT_NOT_FOUND, main
+    from core.cli.wiring import LOCAL_PROFILE, SPLIT_PROFILE, SUPPORTED_PROFILES, WiringError, build_adapters
+
+    if set(SUPPORTED_PROFILES) != {LOCAL_PROFILE, SPLIT_PROFILE}:
+        raise AssertionError(f"неожиданный набор профилей: {SUPPORTED_PROFILES}")
+    try:
+        build_adapters(profile="nope")
+        raise AssertionError("неизвестный профиль обязан отвергаться")
+    except WiringError:
+        pass
+    # resolve по пустой БД — промах I10/I15 (не исключение).
+    with tempfile.TemporaryDirectory() as tmp:
+        db = Path(tmp) / "cohound.db"
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            code = main(["resolve", "missing", "--db", str(db)])
+        if code != EXIT_NOT_FOUND:
+            raise AssertionError(f"промах resolve обязан давать EXIT_NOT_FOUND, код={code}")
 
 
 if __name__ == "__main__":
