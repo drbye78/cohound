@@ -19,10 +19,15 @@ echo "== selfcheck (автономный, без pytest) =="
 echo
 echo "== pytest + coverage ядра (порог в pyproject.toml) =="
 if "$py" -c "import pytest" >/dev/null 2>&1; then
-  "$py" -m pytest -q
+  if "$py" -c "import pytest_cov" >/dev/null 2>&1; then
+    "$py" -m pytest -q --cov=core --cov-report=term-missing
+  else
+    echo "pytest-cov не установлен — запускаю pytest без порога покрытия."
+    "$py" -m pytest -q
+  fi
 else
   echo "pytest не установлен — пропускаю (selfcheck уже прошёл)."
-  echo "Установка: uv pip install -e '.[dev]'"
+  echo "Установка: uv sync --frozen --extra dev"
 fi
 
 echo

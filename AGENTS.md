@@ -76,7 +76,7 @@ python3 tests/selfcheck.py
 bash scripts/ci.sh
 
 # pytest (dev-окружение): обёртка над selfcheck + property-тесты домена
-uv pip install -e '.[dev]'
+uv pip install -e '.[dev]'           # или воспроизводимо из лока: uv sync --frozen --extra dev
 python3 -m pytest -q
 
 # Грепп-нейтральность ядра (§1.3) — предметных терминов в core/ быть не должно

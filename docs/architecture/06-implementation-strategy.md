@@ -436,6 +436,34 @@ preliminary-yield), калибровка порогов.
 `run_manifest.yaml` (§13, R7). Офлайн-бандл docling-весов (V4). Браузерные бинари — зеркало
 (`PLAYWRIGHT_DOWNLOAD_HOST`). `HF_HUB_OFFLINE=1` в контуре.
 
+**Установка (T1.6, extras из `pyproject.toml`).** Базлайн — Python 3.14; воспроизводимость — `uv.lock`
+(`uv sync --frozen --extra <name>`). Тяжёлые контуры (`pdf`/`index`/`gpu`) — в изолированных venv/образах,
+ядро их не тянет (P7/A1).
+
+```bash
+# cli-light — рабочее окружение: ядро + retrieval + crawl + extract(office/html) + safety + ops
+uv sync --frozen --extra retrieval --extra crawl --extra extract --extra safety --extra ops
+
+# edge (DMZ/Z1) — только веб-экстракторы (профиль split, 07)
+uv sync --frozen --extra crawl --extra extract
+
+# pdf — отдельное окружение с layout-моделями (torch/CUDA); блокер M0, §3.2/§16
+uv sync --frozen --extra extract-pdf
+
+# index — локальные эмбеддинги bge-m3 (torch, CPU/GPU); изолированно от ядра
+uv sync --frozen --extra embed        # bge-m3 (sentence-transformers); или --extra embed-lite (model2vec, без torch)
+
+# ann — подмена NpyVectorIndex при росте (триггер §15)
+uv sync --frozen --extra ann
+
+# test/dev — pytest + hypothesis + respx + coverage
+uv sync --frozen --extra dev
+
+# gpu — вне uv.lock: vLLM/SGLang в отдельном GPU-Docker-образе (05 §1)
+```
+
+Браузерные бинари (crawl): `playwright install chromium firefox` (зеркало — `PLAYWRIGHT_DOWNLOAD_HOST`).
+
 ---
 
 ## 8. Риски и меры
