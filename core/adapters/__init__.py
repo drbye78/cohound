@@ -13,6 +13,7 @@ __all__ = [
     "llm_local",
     "llm_llamacpp",
     "registry_generic",
+    "search_glm",
     "search_yandex",
     "vector_npy",
 ]
