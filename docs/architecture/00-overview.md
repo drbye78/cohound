@@ -64,12 +64,12 @@ flowchart LR
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│ L4. Интерфейс        cli/ · reports/                          │  CLI-команды, писатели артефактов
+│ L4. Интерфейс        cli/                                     │  CLI-команды, сборка зависимостей (wiring)
 ├──────────────────────────────────────────────────────────────┤
 │ L3. Адаптеры         adapters/ · store/                       │  .npy, tantivy, vLLM/SGLang, Yandex/GLM, Scrapy, docling, SQLite
 │      (реализуют порты)                                        │
 ├──────────────────────────────────────────────────────────────┤
-│ L2. Порты            ports/                                   │  Protocol-интерфейсы (LLM, VectorIndex, Lexical, Search, Fetcher, Crawler, Extractor, Chunker, Store)
+│ L2. Порты            ports/                                   │  Protocol-интерфейсы (LLM, VectorIndex, Lexical, Search, Fetcher, Crawler, Extractor, Chunker, Embedder, IndexBuilder, Store, GateStore)
 ├──────────────────────────────────────────────────────────────┤
 │ L1. Сценарии         pipeline/                                │  Ш1–Ш9, гейты G1–G4, эксперименты
 │      (use-cases)                                              │
@@ -78,6 +78,10 @@ flowchart LR
 └──────────────────────────────────────────────────────────────┘
             зависит от ──▲ (внутрь), никогда ▼
 ```
+
+> `reports/` — не архитектурный слой, а каталог **выходных артефактов**; его писатель —
+> L1-сценарий `pipeline/report.py` (openpyxl). В слое L4 живёт только `cli/`. Это снимает
+> кажущееся противоречие «`reports/` в L4» vs «`pipeline/report.py` в L1».
 
 **Правило:** `domain` ← `pipeline` ← `ports`/`adapters` ← `cli`. `ports` может зависеть от `domain`.
 Обратных зависимостей нет. `packages/` (данные) не импортируются кодом как Python — читаются через
@@ -96,7 +100,11 @@ flowchart LR
 | `domain/invariants.py` | Проверки I1–I23 для ячеек/evidence/сателлитов | I1–I14, I17–I19, I22 |
 | `domain/scoring.py` | Resolved Capability, Coverage, failure_rate, Comparability, sensitivity | I5, I11, I13 |
 | `domain/r2.py` | Маппинг сателлита на зачёт (§4.1) | Р-2 |
-| `domain/anchors.py` | Stable slug, версионирование, source_id→URL резолв | I10, I15 |
+| `domain/anchors.py` | Stable slug, версионирование, `source_id`→URL резолв | I10, I15 |
+
+`domain/anchors.resolve_source_url` не импортирует `ports/`: reader-протокол **`SourceResolver`**
+объявляется внутри `domain/` (структурная типизация), конкретная реализация приходит из `store/`.
+Так соблюдается матрица зависимостей (L0 не зависит от L2).
 
 ### 4.2. Сценарии (L1) — конвейер
 
@@ -125,8 +133,11 @@ flowchart LR
 | `ports/crawler.py` | Краул страниц | Возвращает сырые байты (retention) |
 | `ports/extractor.py` | HTML/PDF → нормализованный текст | `extractor_version` |
 | `ports/chunker.py` | Текст → чанки с `heading_path` | `chunker_version` |
+| `ports/embedder.py` | Текст → вектор (батч; локальная модель) | Модель не покидает контур; `embed_model_id` |
+| `ports/index_builder.py` | Запись `.npy`-шардов и tantivy-индекса | `build()`/`commit()`; иммутабельная сборка (I17) |
 | `ports/registry.py` | Реестровый факт | `source_url` обязателен (R1) |
 | `ports/store.py` | Операционное хранилище | Транзакционность |
+| `ports/gate_store.py` | Персистенция человеческих решений G1–G4 | `gate_decisions` — аудит-след (I6/I7) |
 
 ### 4.4. Адаптeры (L3)
 
@@ -134,6 +145,11 @@ flowchart LR
 `adapters/llm_local.py` (vLLM/SGLang) · `adapters/search_yandex.py` · `adapters/search_glm.py` ·
 `adapters/crawl_scrapy.py` · `adapters/extract_html.py`/`extract_pdf.py` · `adapters/chunker_*.py` ·
 `store/sqlite.py` · `store/paths.py`.
+
+**Адаптеры-писатели индекса:** `adapters/index_npy.py` и `adapters/index_tantivy.py` реализуют
+`IndexBuilderPort` (запись `.npy`-шардов и tantivy, `build()`/`commit()`), `adapters/embed_local.py` —
+`EmbedderPort`. `pipeline` не пишет `.npy`/tantivy напрямую. `store/sqlite.py` реализует и
+`StorePort`, и `GateStore`.
 
 **Реестровые фетчеры:** `ports/registry.py` — нейтральный порт; конкретные реестры (РРПО, ФСТЭК)
 описываются данными в `registries/*.yaml` и обслуживаются **generic config-driven HTTP/JSON/HTML
@@ -155,7 +171,9 @@ flowchart TD
 ```
 
 Ключевое: пунктирная петля — единственный легальный путь внешнего поиска. SERP не внутри оценщика,
-а как **вход Ш5** (I18/I19).
+а как **вход Ш5** (I18/I19). Каждый SERP-раунд порождает **новую иммутабельную сборку**
+(`R0-base` → `R1-serp` → `R2-serp` → …), а не мутирует существующую; повторный Ш6 идёт **по новой
+сборке**, инвалидируются только затронутые ячейки (`stale_reason='new_build'`), а не вся когорта.
 
 ---
 
@@ -165,7 +183,7 @@ flowchart TD
 |---|---|---|
 | **Evidence integrity** | `source_id` → `source_url` резолв; цитата-подстрока `text`; `content_hash` | I1, I2, I10, I15, I19 |
 | **Версионирование** | Все версии в `run_manifest.yaml`; иммутабельные сборки | §13 |
-| **Воспроизводимость** | Пинить веса/движок/профиль/seed/железо; кэш корпуса и SERP | R7, I16, I20 |
+| **Воспроизводимость** | Пинить веса/движок/профиль/seed/железо; глобальный content-addressed кэш корпуса и SERP (ADR 0016) | R7, I16, I20 |
 | **Нейтральность** | Грепп-тест `core/`; данные только в `packages/` | §1.3, §11.4 |
 | **Детерминизм маршрутизации** | `scenario → {model_id,...}` таблицей, не решением LLM | I21 |
 | **Валидация-эшелон** | Отдельный `pipeline/validate.py`, независимый от LLM | §10 |
@@ -179,17 +197,19 @@ core/
   __init__.py
   domain/      enums.py models.py invariants.py scoring.py r2.py anchors.py
   ports/       llm.py vector_index.py lexical_index.py search.py crawler.py
-               extractor.py chunker.py registry.py store.py
+               extractor.py chunker.py embedder.py index_builder.py
+               registry.py store.py gate_store.py
   pipeline/    normalize.py lint.py plan.py discovery.py registry.py
                inheritance.py corpus.py evaluate.py validate.py review.py
                compute.py report.py experiments.py gates.py
-  adapters/    vector_npy.py lexical_tantivy.py llm_local.py search_yandex.py
+  adapters/    vector_npy.py lexical_tantivy.py index_npy.py index_tantivy.py
+               embed_local.py llm_local.py search_yandex.py
                search_glm.py crawl_scrapy.py extract_html.py extract_pdf.py
   store/       sqlite.py paths.py
   config/      run_config.py paths.py
   cli/         main.py commands.py
   util/        ids.py hashing.py logging.py
-packages/{case_id}/, registries/, passports/, runs/, index_store/, corpus_raw/
+packages/{case_id}/, registries/, passports/, runs/, index_store/, corpus_raw/, cache/
 ```
 
 `domain/schemas.py` (текущий `core/schemas.py`) будет расщеплён на `domain/models.py` +
@@ -208,21 +228,37 @@ packages/{case_id}/, registries/, passports/, runs/, index_store/, corpus_raw/
 | **4** | Надёжность, наблюдаемость, CI, ADR-реестр, сверка с регламентом | `04-reliability-adr.md` | — |
 | **R** | Независимое ревью архитектуры @oracle + интеграция | правки | ревью-гейт |
 
+### 8.1. Вертикальный срез M0 (что реально в каркасе)
+
+M0 (по §14 регламента) должен давать **сквозной вертикальный срез** на детерминированных волнах;
+всё остальное — заглушки за портами.
+
+| Статус | Модули |
+|---|---|
+| **Реально в M0** | `domain/*` (enums, models, invariants, scoring, r2, anchors); `store/sqlite.py`; `pipeline/normalize.py` + `lint.py` + `plan.py`; `pipeline/gates.py`; CLI `resolve`/`plan`; реестровый generic-адаптер + `registries/*.yaml`; golden-каркас |
+| **Заглушки (stub)** | LLM-оценщик (`evaluate`); SERP/`search`-адаптер; crawler; vector/lexical-индексы (и `embedder`/`index_builder`) |
+
+Заглушки реализуют свои порты и дают детерминированный пустой ответ: конвейер собирается сквозь
+них, но контуры Ш5/Ш6 в M0 рабочими не считаются. Сквозной результат M0 — мини-карта из
+детерминированных волн (реестры + наследование) на 3 продуктах.
+
 ---
 
 ## 9. Заготовки решений (ADR seeds) и открытые вопросы
 
-**ADR-кандидаты (решаются в итерациях 1–4):**
-1. Порты/адаптеры vs монолит — принято (D1, D3).
-2. Граница `core/` для реестровых фетчеров — generic-адаптер + данные (D2).
-3. Формат порта LLM: constrained decoding как часть контракта, веб-тул физически отсутствует.
-4. Единица ретривала: продукт-партиция; формат шардов `.npy` + манифест.
-5. Демонизировать ли вычисления — нет (A1, §15).
+**ADR-реестр (детально — `04-reliability-adr.md` §E):**
+- 0001–0011 — accepted: порты/адаптеры (hexagonal) vs монолит; продукт-партиция + NpyVectorIndex;
+  LLM без `tools`; контент только через Ш5; единый cut-off K; реестры как данные; SQLite+WAL;
+  иммутабельные сборки; кэш внешних вызовов; `failed` как состояние ячейки; человеческие гейты.
+- 0012 — proposed: расщепление `core/schemas.py`/`core/db.py` на слои.
+- 0013–0017 — proposed: гранулярность индексной сборки и provenance ячеек; SERP-петля vs
+  иммутабельность (append-only раунды); политика ранжирования/демотирования (requested vs computed);
+  глобальный content-addressed кэш для R7; контракт derived-evidence наследования/сателлитов.
 
 **Открытые вопросы (для итераций):**
 - Гранулярность транзакций SQLite при массовой записи ячеек (итерация 3).
 - Формат и версионирование `prompt_hash` при смене шаблона (итерация 2).
-- Механизм кэша SERP/корпуса для R7 без живого ре-фетча (итерация 2).
+- Механизм кэша SERP/корпуса для R7 — решён как глобальный content-addressed (ADR 0016, итерация 3 A.2).
 - Где живёт реестр экспериментов R0/R1/R2 и как связывается с `index_build_id` (итерация 2).
 
 ---
@@ -239,4 +275,3 @@ packages/{case_id}/, registries/, passports/, runs/, index_store/, corpus_raw/
 | §10 защита | §6 валидация-эшелон |
 | §13 версионирование | §6 |
 | I1–I23 | §4.1 владение, §6 |
-```

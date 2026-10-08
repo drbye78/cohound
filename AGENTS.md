@@ -30,8 +30,18 @@ v2.0). Это источник истины по семантике, инвар�
 cohound-spec-v2.md            # регламент v2.0 (источник истины)
 docs/status-dictionary.yaml   # словарь статусов/перечислений + Р-2 (§4.1)
 core/                         # ядро: категорийно-НЕЙТРАЛЬНЫЙ код (грепп-тест §1.3)
-  schemas.py                  # Pydantic-схемы §4.2/4.3/4.5/7 + инварианты
-  db.py                       # SQLite DDL §4.4 + триггеры инвариантов
+  schemas.py                  # (текущий монолит) Pydantic-схемы §4.2/4.3/4.5/7 + инварианты
+  db.py                       # (текущий) SQLite DDL §4.4 + триггеры инвариантов
+  # целевое расщепление (docs/architecture/01-modules-and-contracts.md):
+  domain/                     # модели, enums, invariants, scoring, r2, anchors (чистый Python, без I/O)
+  ports/                      # Protocol-интерфейсы: LLM, индексы, embedder, index_builder, search,
+                              #   crawler, extractor, chunker, registry, store, gate_store
+  pipeline/                   # сценарии Ш1–Ш9, гейты G1–G4, эксперименты (use-cases)
+  adapters/                   # реализации портов: npy/tantivy, LLM, SERP, краул, экстракция, реестры
+  store/                      # SQLite-хранилище + paths
+  config/                     # загрузка run.yaml/пакетов
+  cli/                        # единственная точка сборки зависимостей (wiring)
+  util/                       # ids, hashing, logging, clock
 tests/selfcheck.py            # self-contained проверка фундамента
 packages/{case_id}/           # (планируется) пакеты категорий: package/catalog/baselines/cohort/golden
 registries/ · docs/           # словари, регламент, absence-правила
@@ -39,6 +49,7 @@ passports/{product_id}/       # (планируется) паспорта про
 runs/{run_id}/                # (планируется) прогоны: SQLite, логи, промпты, манифесты
 index_store/{package}/{build}/{product_id}/  # иммутабельные индексные сборки (продукт-партиции)
 corpus_raw/{product_id}/      # retention сырых байтов
+cache/serp/{query_hash}.json · cache/http/{url_hash}.bin  # глобальный content-addressed кэш (R7)
 ```
 
 ## Команды
@@ -49,6 +60,9 @@ python3 tests/selfcheck.py
 
 # Грепп-нейтральность ядра (§1.3) — предметных терминов в core/ быть не должно
 grep -rniE "postgres|pangolin|sber|сбер|copywala|платформа" core/
+
+# после расщепления core/ — нейтральны именно domain/ports/pipeline:
+grep -rniE "postgres|pangolin|sber|сбер|copywala|платформа" core/domain core/ports core/pipeline
 
 # Проверка схемы БД
 python3 -c "import sys; sys.path.insert(0,'.'); from core.db import connect; c=connect(':memory:')"
@@ -68,7 +82,8 @@ python3 -c "import sys; sys.path.insert(0,'.'); from core.db import connect; c=c
 - **Строгая типизация.** Pydantic-модели с `extra="forbid"`. Используй enum-классы
   (`Status`, `Origin`, …), а не строковые литералы.
 - **`StrEnum`** для всех перечислений; источник истины — `docs/status-dictionary.yaml`,
-  схемы — его зеркало.
+  схемы — его зеркало. Это относится и к новым перечислениям: `ranking_policy`, `gate`,
+  `capability_policy`, `unknown_policy` (`docs/status-dictionary.yaml` — единственный источник).
 - Комментарии и докстринги — на русском (как в регламенте), идентификаторы — на английском.
 
 ## Инварианты, которые легко сломать (кратко)
@@ -112,3 +127,6 @@ python3 -c "import sys; sys.path.insert(0,'.'); from core.db import connect; c=c
 - Не делать failed статусом; не выводить N/A автоматически.
 - Не придавать якорю вес/влияние на статусы (только порядок/фокус, anchor-blind).
 - Не реализовывать «LLM с веб-поиском» внутри оценщика.
+- Не придавать запрошенному `ranking_policy` силу переопределять sensitivity-демотирование
+  (запрошено ранжирование, вычислено демотирование — допустимое расхождение, `requested` vs `computed`).
+- Не мутировать иммутабельные индексные сборки: новый раунд/SERP → **новая** сборка; правка на месте запрещена.

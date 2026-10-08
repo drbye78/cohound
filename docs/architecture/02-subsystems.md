@@ -31,6 +31,14 @@ class Runner:
 
 **Идемпотентность.** Фазы Ш3/Ш4/Ш6 перезаписывают ячейки по ключу `(run_id, product_id, param_id)`
 через upsert; Ш5 — иммутабельная сборка (новая `index_build_id` при любом изменении входов).
+Evidence пишется по **детерминированному** `evidence_id = H(run_id, product_id, param_id,
+source_id, source_kind, seq)` (S8) — resume не порождает дублей.
+
+**SERP-раунды и append-only (K2).** Корпус append-only и версионируется по раундам: базовый раунд
+(`R0-base`) и каждый SERP-раунд (`R1-serp`, …) порождают **новую** иммутабельную сборку; существующая
+сборка не мутируется. После долива раунда инвалидируются только **затронутые** ячейки
+(`stale_reason='new_build'`) и переоцениваются на новой сборке; повторный Ш6 идёт по уже
+проиндексированному контенту.
 
 ### A.2. Гейты (`pipeline/gates.py`)
 
@@ -43,7 +51,9 @@ class Runner:
 
 **GateDecision** — доменный объект: `target` (что подтверждается), `actor` (человек),
 `ts`, `notes`. Гейты **никогда автоматические** (I6/I7, N/A человеком). Оркестратор не «проходит»
-гейт сам — только регистрирует решение, поданное через CLI.
+гейт сам — только регистрирует решение, поданное через CLI. Каждое решение записывается в
+**`gate_decisions`** (S9) через `GateStore`; гейт не считается пройденным без строки в
+`gate_decisions` (носитель `reviewed_by`).
 
 ### A.3. Псевдокод прогона
 
@@ -66,7 +76,9 @@ report(run_id)                            # Ш9
 ```
 
 Петля SERP: если по ячейке `корпус недостаточен` → `search_adapter` собирает контент → **в Ш5**
-(chunk+hash+index) → повторный Ш6. Никогда «на лету» внутри оценщика (I18/I19).
+(chunk+hash+index) как **новая сборка раунда** (`R1-serp`, …) → повторный Ш6 **по новой сборке**;
+инвалидируются только затронутые ячейки (`stale_reason='new_build'`). Никогда «на лету» внутри
+оценщика (I18/I19), никогда с мутацией существующей сборки (K2).
 
 ---
 
@@ -75,15 +87,21 @@ report(run_id)                            # Ш9
 ### B.1. Ш5 — сборка корпуса (`pipeline/corpus.py`)
 
 ```
+build_corpus(plan, crawler, extractor, chunker, embedder: EmbedderPort,
+             index_builder: IndexBuilderPort, store)         # K3
 products × doc_domains
   → CrawlerPort.fetch(url, render_mode)      # сырые байты → corpus_raw/{product}/{hash}.bin
   → ExtractorPort.extract(page)              # HTML(trafilatura) | PDF(docling)
   → dedup(content_hash)                      # повтор перепечаток не индексируется
   → ChunkerPort.chunk(doc)                   # heading_path, context_prefix
-  → embed(chunks)                            # батч, локальная модель
-  → .npy-шарды в index_store/{package}/{build}/{product_id}/
+  → EmbedderPort.embed(chunks)               # батч, локальная модель
+  → IndexBuilderPort.build(chunks, vectors, meta) -> build_id
+  → IndexBuilderPort.commit()                # .npy-шарды + tantivy (атомарно)
   → index_manifest (одна запись на продукт-партицию)
 ```
+
+`pipeline` **не работает с файлами индекса напрямую**: за запись `.npy`-шардов и tantivy отвечает
+`IndexBuilderPort`, за эмбеддинги — `EmbedderPort` (K3).
 
 **Retention.** `corpus_docs.raw_path` → байты хранятся; `extractor_version` позволяет
 ре-извлечение без ре-фетча (A/B экстракторов). `content_hash` — с первого дня (I19).
@@ -108,6 +126,13 @@ index_store/{package}/{build}/
 Поиск — brute-force cosine по шардам переданных `product_ids` (продукт + его сателлиты).
 Оценка продукта **не видит** чужие партиции (I17). При росте — триггеры §15 (квантизация, Qdrant).
 
+**Сателлиты как партиции продукта-владельца (K5/I17).** Сателлит — `component` с ролью, а не
+самостоятельный `product_id`. Документы сателлита индексируются **в партицию продукта-владельца**
+(того, у которого он в паспорте), с привязкой `role` в метаданных чанка; `VectorQuery.product_ids`
+для продукта = его партиция + партиции сателлитовых доменов. `relationship_evidence` сателлита —
+паспортный объект, но подчиняется тем же правилам provenance (резолв + hash). Derived-evidence
+наследования и сателлитов — по контракту §4.2 регламента (`check_derived_evidence`, K5).
+
 ### B.3. Ретривал-профиль и фьюжн (I16, I20)
 
 Профиль — часть `RunConfig`, зафиксированная **до** прогона (симметрия I16):
@@ -128,6 +153,15 @@ def retrieve(q_text: str, q_vec, product_ids, profile, k, lindex, vindex) -> lis
 
 `retrieval_cutoff_K` — единый для golden и pipeline (I20). Каждый запрос → строка `search_log`
 (`phase='corpus'`, lexical/dense/fused ranks). Оценщику отдаётся ровно `top_k=K` чанков.
+
+Fusion-параметры (включая `rrf_k`) входят в `retrieval_params_json` и **версионируются** (§13, S1):
+смена `rrf_k` меняет результаты → новая сборка + retrieval-golden. Поле `search_log.kind` различает
+внутренний ретривал (`retrieval`) и внешние SERP-вызовы (`external`) (S12).
+
+**Provenance и инвалидация ячеек (gaps).** Ячейка хранит `index_build_id` и `retrieval_profile` —
+сборку и профиль, на которых получен вердикт. Смена сборки или prompt-шаблона помечает ячейку
+`stale` (`stale_reason ∈ {new_build, prompt_template}`); `stale`-ячейки исключаются из расчёта до
+переоценки/ревью (R15).
 
 **Эксперимент R0/R1/R2 (`pipeline/experiments.py`).** Прогон на retrieval-golden, метрика
 `recall@K`, выбор профиля — по R9/R10 (A3: дефолт фиксируется измерением).
@@ -255,9 +289,15 @@ bundle = {
   modules: module_scores(...),
   comparability: comparability(cohort, per_product, alignment),
   sensitivity: sensitivity(cells, params, weights, axes={warn, unknown_policy, weights}),
-  ranking: choose_ranking(capability, sensitivity),           # R11 ветка поведения
+  requested_ranking: run_cfg.ranking_policy,                  # K6: запрошенный режим отображения
+  computed_ranking: choose_ranking(capability, sensitivity),  # K6: демотирование по sensitivity
 }
 ```
+
+**Запрошенный vs вычисленный ранг (K6).** `ranking_policy` во входе — запрошенный режим; он **не
+переопределяет** демотирование по sensitivity. Если ранжирование неустойчиво, `computed_ranking`
+демотируется до fallback-порядка по Coverage независимо от запрошенного. В манифест пишутся **оба**
+поля (`requested_ranking`, `computed_ranking`); расхождение — ожидаемый и явно отображаемый случай (A3).
 
 `alignment` (Comparability, §6): единый snapshot_date, retrieval_profile+K, embed/index build,
 package/catalog version, edition/jurisdiction. Нарушено → `cross-cycle`, понижение на уровень.
@@ -306,14 +346,15 @@ sequenceDiagram
     end
 ```
 
-### F.2. Петля SERP (I18/I19)
+### F.2. Петля SERP (I18/I19) — append-only раунды (K2)
 
 ```mermaid
 flowchart LR
-    Ev[Ш6 evaluate] -->|корпус недостаточен| SA[search adapter]
+    Ev[Ш6 evaluate · сборка R_n] -->|корпус недостаточен| SA[search adapter]
     SA -->|url+bytes| CR[corpus_raw]
-    CR --> EX[extract] --> CH[chunk+hash] --> IX[index]
-    IX --> Ev2[повторный Ш6]
+    CR --> EX[extract] --> CH[chunk+hash] --> IX[IndexBuilder.build/commit]
+    IX -->|новая сборка R_n+1| INV[инвалидация затронутых ячеек: stale_reason=new_build]
+    INV --> Ev2[повторный Ш6 · сборка R_n+1]
 ```
 
 ---
@@ -330,5 +371,5 @@ flowchart LR
 | I16–I23 | A–E |
 
 **Открытые вопросы к итерации 3:** формат `runs/{run_id}/` (раскладка файлов); версионирование
-`prompt`-шаблонов; кэш SERP/корпуса для R7; политика ретраев и backoff; гранулярность транзакций
-SQLite при массовой записи.
+`prompt`-шаблонов; глобальный content-addressed кэш для R7 (ADR 0016); политика ретраев и backoff;
+гранулярность транзакций SQLite при массовой записи.

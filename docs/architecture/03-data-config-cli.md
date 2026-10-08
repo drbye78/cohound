@@ -33,6 +33,8 @@ repo/
   runs/{run_id}/             # пакет прогона (см. A.2)
   index_store/{package}/{build}/{product_id}/    # иммутабельные сборки (I17)
   corpus_raw/{product_id}/{doc_hash}.bin         # retention сырых байтов
+  cache/serp/{query_hash}.json                   # глобальный content-addressed кэш SERP (R7, ADR 0016)
+  cache/http/{url_hash}.bin                      # глобальный content-addressed кэш HTTP
   reports/{run_id}/          # (опц.) публикуемые артефакты вне runs/
   tests/
 ```
@@ -51,14 +53,13 @@ runs/{run_id}/
     preliminary_findings.xlsx
     nda_questions.csv
     diff.md
-  cache/
-    serp/{query_hash}.json   # кэш SERP (R7 без живого ре-фетча)
-    http/{url_hash}.bin      # кэш страниц
 ```
 
 **Правила:** `run.yaml`/`run_manifest.yaml` иммутабельны после завершения; `cohound.db` несёт всё
-операционное состояние; артефакты `outputs/` перезаписываемы (регенерация из БД). `cache/`
-обеспечивает R7: двойной прогон идёт из кэша, без живого ре-фетча.
+операционное состояние; артефакты `outputs/` перезаписываемы (регенерация из БД). Кэш внешних
+вызовов — **глобальный content-addressed** (`cache/serp/{query_hash}.json`, `cache/http/{url_hash}.bin`
+в корне репозитория), а **не** внутри `runs/{run_id}/cache/`: иначе R7 между разными `run_id`
+недостижим. Второй прогон читает тот же кэш по хэшу ключа, без живого ре-фетча (K4, ADR 0016).
 
 ---
 
@@ -80,6 +81,7 @@ class SqliteStore:
     def add_evidence(ev: CellEvidence); def add_evidence_batch(evs)
     def log_search(entry: SearchLogEntry)
     def save_exhaustion(pe: ProtocolExhaustion)
+    def save_gate_decision(d: GateDecision)        # S9: gate_decisions
     def save_registry_fact(rf: RegistryFact)
     def save_llm_scenarios(bindings: list[ScenarioBinding])
     # чтение
@@ -87,6 +89,7 @@ class SqliteStore:
     def get_chunk(chunk_id) -> Chunk            # для валидации цитат
     def resolve_source_url(source_id) -> str    # I10/I15
     def read_manifest(run_id) -> RunManifest
+    def iter_gate_decisions(run_id) -> Iterator[GateDecision]   # S9
 ```
 
 ### B.2. Транзакции и производительность
@@ -94,9 +97,11 @@ class SqliteStore:
 - **WAL** включён (уже в DDL); читатели не блокируют писателя.
 - **Батчевые записи:** ячейки Ш6 пишутся пачками (`save_cells_batch`), одна транзакция на N
   (по умолчанию 200) ячеек → снижает fsync-нагрузку.
-- **Раздельные БД:** операционные данные — `runs/{run_id}/cohound.db`. Корпус (документы/чанки)
-  может жить в «корпусной» БД продукта, если объём велик; тогда `corpus_chunks` ссылается по
-  `chunk_id`, а `content_hash` — мост. Решение по объёму — триггер (A1).
+- **Единая БД (S6):** корпус и операционные данные живут в **одной** SQLite-БД прогона
+  (`runs/{run_id}/cohound.db`). Вариант «отдельная корпусная БД» **отвергнут**: при разнесении
+  таблиц SQLite не может обеспечить FK между `cell_evidence.source_id` и `corpus_chunks.chunk_id`,
+  что ломает provenance (I10/I15/I19). Объём корпуса — не основание менять модель данных;
+  триггеры масштабирования — §15, а не разделение БД.
 - **Индексы:** `idx_cells_run_state`, `idx_chunks_product`, `idx_log_run_phase`,
   `idx_evidence_run_cell` (уже в DDL).
 
@@ -125,7 +130,10 @@ class SqliteStore:
 | `index_build_id` | index_manifest | ретривал |
 | `embed_model_id`, `chunker_version`, `extractor_version`, `lexical_engine_version` | index_manifest | сборка индекса |
 | `retrieval_profile`, `retrieval_cutoff_K` | run_manifest | ретривал (I16, I20) |
+| `retrieval_params_json` (fusion, вкл. `rrf_k`) | run_manifest | ретривал (S1) |
+| `index_build_id`, `retrieval_profile` (per cell) | cells | provenance ячейки (R15) |
 | `prompt_hash` (per cell) | cells | воспроизводимость ячейки |
+| `stale_reason` (per cell) | cells | инвалидация при смене сборки/prompt-шаблона |
 
 ### C.2. Версионные границы (bump + golden-full)
 
@@ -133,7 +141,10 @@ class SqliteStore:
 - Смена когорты после G1 → новый цикл (межцикловый diff запрещён).
 - Смена `rule`/`absence_rule` параметра → bump `catalog_version` + golden.
 - Смена `retrieval_profile`/K → новая `index_build_id` + retrieval-golden.
-- Смена prompt-шаблона → новый `prompt_hash`; ячейки с прошлым hash помечаются устаревшими.
+- Смена fusion-параметров (`rrf_k`) → `retrieval_params_json` + новая `index_build_id` + retrieval-golden (S1).
+- Смена prompt-шаблона → новый `prompt_hash`; ячейки с прошлым hash помечаются `stale_reason='prompt_template'`.
+- Смена `index_build_id` → затронутые ячейки помечаются `stale_reason='new_build'`; `stale`-ячейки
+  не участвуют в расчёте до переоценки/ревью.
 
 ### C.3. Slug-иммутабельность
 
@@ -160,7 +171,10 @@ ranking_policy: capability_ranked
 ```
 
 Загрузчик `config/run_config.py` → `RunConfig` (домен) с валидацией (anchor ∈ products;
-preliminary не совместим с capability_ranked — I13).
+preliminary не совместим с capability_ranked — I13). `ranking_policy` — **запрошенный** режим
+отображения (K6); вычисленный ранг определяется sensitivity и может демотироваться независимо от
+запрошенного (02 E.1). `products` — **проекция** `cohort.yaml` (один канонический источник состава);
+линтер проверяет совпадение множеств `products` и `cohort.product_id` (S11).
 
 ### D.2. Загрузчики пакета (`pipeline/normalize.py`)
 
@@ -176,6 +190,10 @@ preliminary не совместим с capability_ranked — I13).
 Всё из §4.2 + новые: `absence_rule` с аттестацией без процедуры `scope_attested_by` → ошибка;
 непустой baselines для архетипа C → **ошибка**; пустые `concept_terms` → warning; golden-full без
 страты ❌ → ошибка. `LintReport(blocking, warnings)`.
+
+**Усечение запросов (S13).** На ячейку допускается ≤3 запроса, приоритет детерминирован:
+(1) `title`; (2) `concept_terms` (сначала ru, затем en, затем порядок в пакете). Линтер не
+блокирует при большем числе концептов, но предупреждает, что лишние в запрос не войдут.
 
 ### D.4. Реестровый конфиг (`registries/{id}.yaml`)
 
@@ -253,4 +271,5 @@ mapping: { name: "$.items[*].name", version: "$.items[*].version" }
 | I10/I15 | B.1 (resolve_source_url) |
 
 **Открытые вопросы к итерации 4:** формат импорт-графа CI; структура логирования; бэкап/
-восстановление прогона; как считать `prompt`-шаблоны версиями; нужна ли отдельная корпусная БД.
+восстановление прогона; как считать `prompt`-шаблоны версиями. Отдельная корпусная БД —
+**отвергнута** (S6, B.2; единая БД сохраняет FK).

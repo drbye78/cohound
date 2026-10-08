@@ -82,9 +82,16 @@ pipeline, БД-слое и selfcheck независимо от Pydantic:
 ```python
 def check_cell(cell: Cell) -> list[Violation]           # I1, I2, I2b, I4, I6, I7, I13
 def check_evidence(ev: CellEvidence, cell: Cell) -> list[Violation]   # I10, I15, I19, I22
-def check_inheritance(cell: Cell, baseline: BaselineRow) -> list[Violation]  # I8
+def check_inheritance(cell: Cell, baseline: BaselineRow) -> list[Violation]  # I8 + derived-evidence
+def check_derived_evidence(ev: CellEvidence, upstream: UpstreamRef) -> list[Violation]  # I1, I10, I15, I19
 def check_satellite(sat: Satellite) -> list[Violation]   # I9
 ```
+
+`check_inheritance` проверяет не только mode (I8): **унаследованный ✅/⚠️ обязан нести
+derived-evidence** (§4.2 регламента) — `evidence_type: derived`, `source_kind: inheritance`, с
+резолвом `source_url` (I10/I15) и `content_hash` (I19). Отсутствие или нерезолвимость
+derived-evidence → violation (иначе I1 нарушается на унаследованной ячейке). `check_derived_evidence`
+инкапсулирует этот контракт (наследование и сателлиты).
 
 `Violation(code, message, field)` — типизированная ошибка; `code` — `"I2b"` и т.п. Это позволяет
 CI и ревью-эшелону ссылаться на инвариант машинно.
@@ -105,9 +112,11 @@ def module_scores(...) -> list[ModuleScore]
 ### 2.5. `domain/r2.py`, `domain/anchors.py`
 
 Перенос текущих `apply_r2` и `load_dictionary/assert_dictionary_integrity`.
-`anchors.py` добавляет `resolve_source_url(source_id, store_reader)` — **детерминированный**
-резолв (I10/I15): `source_id` кодирует `product_id`+`doc_id`+`chunk_no`, резолв — по индексу,
-без сети.
+`anchors.py` добавляет `resolve_source_url(source_id, resolver: SourceResolver)` — **детерминированный**
+резолв (I10/I15): `source_id` кодирует `product_id`+`doc_id`+`chunk_no` (+ привязку к `build_id`),
+резолв — по индексу, без сети. `SourceResolver` — reader-протокол, **объявленный внутри `domain/`**
+(не в `ports/`), поэтому матрица зависимостей L0 ↛ L2 соблюдается; реализация приходит из `store/`.
+При резолве обязательна сверка `content_hash` evidence с чанком (I19), иначе source_id невалиден.
 
 ---
 
@@ -157,7 +166,14 @@ class VectorQuery:
 
 @dataclass(frozen=True)
 class RetrievedChunk:
-    chunk_id: str; product_id: str; text: str; heading_path: str; score: float
+    chunk_id: str; product_id: str; text: str
+    content_hash: str; heading_path: str
+    build_id: str; score: float          # provenance единицы ретривала (S4/S5)
+
+@dataclass(frozen=True)
+class RetrievalResult:
+    chunks: list[RetrievedChunk]         # fused top-K
+    profile: str; cutoff_K: int; build_id: str
 
 class VectorIndexPort(Protocol):
     build_id: str
@@ -165,6 +181,13 @@ class VectorIndexPort(Protocol):
     def search(self, q: VectorQuery) -> list[RetrievedChunk]: ...
     def shard_ids(self, product_id: str) -> list[str]: ...
 ```
+
+`RetrievedChunk` несёт `content_hash` и `build_id`, поэтому evidence и `prompt_hash` привязаны к
+конкретной сборке; резолв `source_id` сверяет их (I19).
+
+**Усечение запросов (S13).** Число запросов на ячейку ≤3, приоритет детерминирован:
+(1) `param.title`; (2) `concept_terms` в фиксированном порядке (ru, затем en, затем порядок в
+пакете). Это исключает зависимость состава запросов от реализации/LLM и сохраняет симметрию (I16).
 
 ### 3.3. `ports/lexical_index.py` (I16)
 
@@ -222,6 +245,34 @@ class StorePort(Protocol):       # §4.4
 `ExtractedDoc(url, text, structure, extractor_version)`.
 `Chunk(chunk_no, text, heading_path, context_prefix, content_hash)`.
 
+**Единая операционная БД (S6).** Контракт `StorePort` описывает **одну** SQLite-БД прогона
+(`runs/{run_id}/cohound.db`); вариант «отдельная корпусная БД» отвергнут — при разнесении
+`corpus_chunks`/`cells`/`cell_evidence` по разным файлам SQLite не может обеспечить FK между
+`cell_evidence.source_id` и `corpus_chunks.chunk_id` (и `build_id`). Единая БД сохраняет FK и
+целостность provenance; объём корпуса — не основание для разнесения (триггеры масштабирования —
+§15/§12, а не смена модели данных).
+
+### 3.6. `ports/embedder.py`, `ports/index_builder.py`, `ports/gate_store.py`
+
+```python
+class EmbedderPort(Protocol):
+    model_id: str
+    dim: int
+    def embed(self, texts: list[str]) -> "Matrix": ...   # батч; локальная модель
+
+class IndexBuilderPort(Protocol):
+    def build(self, chunks: list[Chunk], vectors: Matrix, meta: IndexMeta) -> str: ...  # → build_id
+    def commit(self) -> None: ...                        # атомарная фиксация шардов (.npy/tantivy)
+
+class GateStore(Protocol):                               # персистенция решений G1–G4 (S9)
+    def save_gate_decision(self, d: GateDecision) -> None: ...
+    def iter_gate_decisions(self, run_id: str) -> Iterator[GateDecision]: ...
+```
+
+`IndexBuilderPort` — **единственный** писатель `.npy`-шардов и tantivy; `pipeline` не работает с
+файлами индекса напрямую. `build()` возвращает иммутабельный `build_id`, `commit()` фиксирует запись
+атомарно (существующая сборка не мутируется, §13). `GateStore` — носитель `gate_decisions`.
+
 ---
 
 ## 4. Сценарии (L1) — модули конвейера
@@ -237,14 +288,18 @@ class StorePort(Protocol):       # §4.4
 | `discovery.py` | `discover(plan, search: SearchAdapterPort) -> list[SatelliteCandidate]` | passports | §4.3, G2 |
 | `registry.py` | `registry_wave(plan, fetchers) -> list[Cell]` | cells, registry_facts | I1, R1 |
 | `inheritance.py` | `inheritance_wave(plan, baselines) -> list[Cell]` | cells | I8 |
-| `corpus.py` | `build_corpus(plan, crawler, extractor, chunker, embedder, store) -> IndexBuild` | corpus_*, index_manifest | I17, I19 |
+| `corpus.py` | `build_corpus(plan, crawler, extractor, chunker, embedder: EmbedderPort, index_builder: IndexBuilderPort, store) -> IndexBuild` | corpus_*, index_manifest | I17, I19 |
 | `evaluate.py` | `evaluate(plan, llm: EvaluatorPort, vindex, lindex, store) -> list[Cell]` | cells, evidence | I1, I16, I17, I20 |
 | `validate.py` | `validate(cell, chunks_by_id) -> ValidationResult` | cell_evidence | §10 |
 | `review.py` | `review_queue(run_id, store) -> ReviewSet` | cells (reviewed) | I6, I7, I14 |
 | `compute.py` | `compute(run_id, store) -> ScoreBundle` | runs (сводка) | I5, I11, I13 |
 | `report.py` | `report(run_id, store, out_dir) -> Artifacts` | reports | I11 |
 | `experiments.py` | `run_retrieval_experiment(profiles) -> ExperimentReport` | runs | R9, R10 |
-| `gates.py` | `gate_g1/r2/r3/g4(...) -> GateDecision` | runs | G1–G4 |
+| `gates.py` | `gate_g1/r2/r3/g4(...) -> GateDecision` | gate_decisions | G1–G4 |
+
+**Запросы Ш6 (S13).** `evaluate.py` формирует на ячейку ≤3 запроса, приоритет детерминирован:
+(1) `title`; (2) `concept_terms` (сначала ru, затем en, затем порядок в пакете). Состав запросов не
+зависит от реализации/LLM (сохраняет симметрию I16).
 
 **Общий контракт фазы:** `PhaseResult(status: ok|blocked|failed, cells, log_entries, errors)`.
 Конвейер (`pipeline/runner.py`) оркестрирует последовательность и останавливается на гейтах.
@@ -255,7 +310,7 @@ class StorePort(Protocol):       # §4.4
 
 | Модуль | Содержимое |
 |---|---|
-| `ids.py` | `source_id(product, doc, chunk_no)`, парсинг; slug-валидация |
+| `ids.py` | `source_id(product, doc, chunk_no, build_id)`, парсинг; slug-валидация; привязка к `build_id` ИЛИ сверка `content_hash` при резолве (S5) |
 | `hashing.py` | `content_hash(bytes)`, `prompt_hash(template, inputs)` |
 | `logging.py` | структурированный лог (JSON lines) в `runs/{run_id}/logs/` |
 | `clock.py` | `snapshot_date`, UTC-таймстемпы (тестируемость) |
@@ -267,18 +322,30 @@ class StorePort(Protocol):       # §4.4
 
 ## 6. Матрица «инвариант → где обеспечивается»
 
-| Инвариант | domain/invariants | SQL-триггер | pipeline | CI |
-|---|---|---|---|---|
-| I1, I2, I2b | ✅ | — | evaluate | selfcheck |
-| I4, I6, I7, I13 | ✅ | ✅ | review | selfcheck |
-| I5, I11 | ✅ (scoring) | — | compute | selfcheck |
-| I8 | ✅ | — | inheritance | selfcheck |
-| I9 | ✅ | — | discovery | selfcheck |
-| I10, I15 | ✅ | ✅ (source_id) | anchors/validate | selfcheck |
-| I16, I17, I20 | — | — | corpus/evaluate | experiments |
-| I18, I19, I23 | — | ✅ (I18) | corpus/search | selfcheck + грепп |
-| I21 | — | — | plan/runner | selfcheck (манифест) |
-| I22 | ✅ | — | evaluate | selfcheck |
+| Инвариант | Обеспечено структурно | pipeline | Проверено тестом |
+|---|---|---|---|
+| I1, I2, I2b | domain/invariants (`check_cell`) | evaluate | selfcheck |
+| I3, I12 | domain/invariants (`check_cell`), review-политика | review | unit (review) |
+| I3b | domain/enums (`protocol: partial`) | review | unit (preliminary) |
+| I4, I6, I7, I13 | domain/invariants + SQL-триггеры | review | selfcheck |
+| I5, I11 | domain/scoring | compute | selfcheck |
+| I8 | domain/invariants (`check_inheritance`, derived-evidence) | inheritance | selfcheck |
+| I9 | domain/invariants (`check_satellite`) | discovery | selfcheck |
+| I10, I15 | domain `SourceResolver`-резолв (код) + `source_id NOT NULL` | anchors/validate | selfcheck |
+| I14 | review/promote-политика | review | unit (promote) |
+| I16, I17, I20 | profile/K в `RunConfig`/манифесте | corpus/evaluate | experiments |
+| I18 | порт без `tools` (структурно) + грепп | corpus/search | selfcheck + грепп |
+| I19 | domain (`content_hash`), `IndexBuilderPort` | corpus/search | selfcheck |
+| I21 | `ScenarioBinding`/манифест (таблица фаз) | plan/runner | selfcheck (манифест) |
+| I22 | domain/invariants (`check_evidence`) | evaluate | selfcheck |
+| I23 | SQL (`search_log.kind`) | corpus/search | selfcheck |
+
+**CI-формулировка (K7):** `tests/selfcheck.py` покрывает I1/I2/I2b/I4/I6/I7/I13 и Р-2 — не
+«I1–I23» целиком. Остальные инварианты обеспечиваются структурно и проверяются юнит-тестами по
+слоям (I3/I3b/I12/I14, I16–I21, I23) и грепп-тестом нейтральности.
+
+**I10/I15 (K7):** SQL обеспечивает только `source_id NOT NULL`; детерминированный резолв
+`source_id → source_url` — **код** (`domain/anchors.py` + `SourceResolver`), не триггер.
 
 ---
 
