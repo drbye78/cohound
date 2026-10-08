@@ -381,6 +381,10 @@ def main() -> int:
     section("Оценщик fallback (CPU) — W9")
     check("llama-cpp: порт EvaluatorPort + I18 структурно", lambda: _llamacpp_fallback())
 
+    section("Интеграция Ш1–Ш9 (composition root)")
+    check("build_phases: 11 не-гейтовых фаз, гейты не переопределены", lambda: _build_phases_gate())
+    check("walking-skeleton: реальные фазы + гейт g1 блокирует без решения", lambda: _walking_skeleton())
+
     print(f"\n{CHECKS - len(FAILURES)}/{CHECKS} проверок пройдено")
     if FAILURES:
         print("\nПровалы:")
@@ -1924,6 +1928,70 @@ def _serp_loop() -> None:
         raise AssertionError("переиспользование сборки обязано быть запрещено")
     except ImmutableBuildError:
         pass
+
+
+def _build_phases_gate() -> None:
+    """Интеграция: ``build_phases`` отдаёт 11 не-гейтовых фаз и НЕ переопределяет гейты."""
+    from core.pipeline.phases import IMPLEMENTED_PHASES, build_phases
+    from core.pipeline.runner import GATE_PHASES, PHASES, Ports
+
+    expected = set(PHASES) - set(GATE_PHASES)
+    if set(IMPLEMENTED_PHASES) != expected:
+        raise AssertionError(
+            f"IMPLEMENTED_PHASES != не-гейтовые фазы: {set(IMPLEMENTED_PHASES) ^ expected}"
+        )
+    from core.pipeline.normalize import load_inputs
+    from core.pipeline.plan import plan
+
+    inputs = load_inputs(
+        str(_here(tests_root=True) / "fixtures" / "e2e" / "run.yaml"),
+        str(_here(tests_root=True) / "fixtures" / "e2e"),
+    )
+    run_plan = plan(inputs)
+    phases = build_phases(inputs=inputs, plan=run_plan, ports=Ports())
+    if set(phases) != expected:
+        raise AssertionError(f"build_phases вернул не тот набор фаз: {set(phases) ^ expected}")
+    if set(phases) & set(GATE_PHASES):
+        raise AssertionError("build_phases обязан НЕ переопределять гейты (S9)")
+
+
+def _walking_skeleton() -> None:
+    """Интеграция: реальные фазы зарегистрированы; без решения G1 прогон стоит blocked."""
+    from core.cli.wiring import build_store
+    from core.domain import RunMode
+    from core.pipeline.normalize import load_inputs
+    from core.pipeline.phases import build_phases
+    from core.pipeline.plan import plan
+    from core.pipeline.runner import Ports, Runner
+
+    fixture_dir = _here(tests_root=True) / "fixtures" / "e2e"
+    inputs = load_inputs(str(fixture_dir / "run.yaml"), str(fixture_dir))
+    run_plan = plan(inputs)
+
+    store = build_store(":memory:")
+    try:
+        if hasattr(store, "create_run"):
+            store.create_run(run_plan.run_id, inputs.run)
+        phases = build_phases(inputs=inputs, plan=run_plan, ports=Ports())
+        runner = Runner(store, ports=Ports(), phases=phases)
+        report = runner.run(run_plan.run_id, until="g2")
+        # Без строки решения G1 прогон обязан остановиться на гейте (I6/I7, S9).
+        if report.stopped_at != "g1":
+            raise AssertionError(f"без решения G1 ожидалась остановка на g1, получено {report.stopped_at!r}")
+        if runner.state_of(run_plan.run_id, "g2") is not None:
+            raise AssertionError("g2 не должен выполняться, пока g1 не пройден")
+        if inputs.run.mode is not RunMode.STRICT:
+            raise AssertionError("неожиданный режим e2e-фикстуры")
+    finally:
+        store.close()
+
+
+def _here(*, tests_root: bool = False):
+    """Каталог selfcheck (``tests/``) либо репозитория (родитель ``tests/``)."""
+    import pathlib as _pl
+
+    root = _pl.Path(__file__).resolve().parent
+    return root if tests_root else root.parent
 
 
 if __name__ == "__main__":
