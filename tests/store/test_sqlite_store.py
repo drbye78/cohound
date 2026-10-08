@@ -1,0 +1,501 @@
+"""Тесты ``SqliteStore`` (W3/T3.1): schema, round-trip домена, триггеры I18.
+
+Все тесты работают на ``:memory:``-БД. Нейтральны (§1.3).
+"""
+
+from __future__ import annotations
+
+import datetime as _dt
+import json
+import sqlite3
+from collections.abc import Iterator
+
+import pytest
+
+from core.domain import (
+    AbsenceRuleType,
+    AdapterKind,
+    Cell,
+    CellEvidence,
+    CellState,
+    EndpointKind,
+    EvidenceType,
+    Focus,
+    Gate,
+    GateDecision,
+    LLMScenario,
+    ProtocolExhaustion,
+    RankingPolicy,
+    RegistryFact,
+    RunConfig,
+    RunMode,
+    ScenarioBinding,
+    SearchKind,
+    SearchLogEntry,
+    SearchPhase,
+    SourceKind,
+    SourceScope,
+    StaleReason,
+    Status,
+    TerminationReason,
+)
+from core.ports.store import GateStore, StorePort
+from core.store.sqlite_store import SqliteStore
+
+RUN_ID = "run-1"
+
+
+@pytest.fixture()
+def store() -> Iterator[SqliteStore]:
+    with SqliteStore(":memory:") as s:
+        yield s
+
+
+def _cfg() -> RunConfig:
+    return RunConfig(
+        case_id="case-1",
+        anchor="p1",
+        cohort="cohort.yaml",
+        products=["p1", "p2"],
+        package="pkg-1",
+        focus=Focus(modules=["m1", "m2"], params=["param.a"]),
+        languages=["ru", "en"],
+        snapshot_date=_dt.date(2026, 1, 1),
+        mode=RunMode.STRICT,
+        ranking_policy=RankingPolicy.CAPABILITY_RANKED,
+    )
+
+
+def _cell(param_id: str, **overrides: object) -> Cell:
+    base: dict[str, object] = {
+        "run_id": RUN_ID,
+        "product_id": "p1",
+        "param_id": param_id,
+        "state": CellState.PENDING,
+    }
+    base.update(overrides)
+    return Cell(**base)  # type: ignore[arg-type]
+
+
+# --------------------------------------------------------------------------- #
+# schema / protocols
+# --------------------------------------------------------------------------- #
+
+
+def test_schema_opens(store: SqliteStore) -> None:
+    ver = store.conn.execute(
+        "SELECT value FROM schema_meta WHERE key = 'schema_version'"
+    ).fetchone()
+    assert ver["value"] == "2.0.0"
+    tables = {
+        r["name"] for r in store.conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+    }
+    for t in (
+        "products",
+        "runs",
+        "llm_scenarios",
+        "corpus_docs",
+        "corpus_chunks",
+        "index_manifest",
+        "cells",
+        "cell_evidence",
+        "gate_decisions",
+        "search_log",
+        "search_exhaustion",
+        "registry_facts",
+    ):
+        assert t in tables
+
+
+def test_store_implements_protocols(store: SqliteStore) -> None:
+    assert isinstance(store, StorePort)
+    assert isinstance(store, GateStore)
+
+
+# --------------------------------------------------------------------------- #
+# products / run / manifest
+# --------------------------------------------------------------------------- #
+
+
+def test_upsert_products_accepts_objects_and_dicts(store: SqliteStore) -> None:
+    from core.ports.types import ProductRef
+
+    store.upsert_products(
+        [
+            ProductRef(product_id="p1", canonical_name="One", vendor="V1", jurisdiction="RU"),
+            {"product_id": "p2", "canonical_name": "Two", "vendor": "V2"},
+        ]
+    )
+    rows = {
+        r["product_id"]: r
+        for r in store.conn.execute("SELECT * FROM products ORDER BY product_id")
+    }
+    assert rows["p1"]["canonical_name"] == "One"
+    assert rows["p1"]["vendor"] == "V1"
+    assert rows["p1"]["jurisdiction"] == "RU"
+    assert rows["p2"]["canonical_name"] == "Two"
+    assert rows["p1"]["first_seen"] is not None
+    assert rows["p1"]["last_seen"] is not None
+
+
+def test_create_run_then_read_manifest_round_trip(store: SqliteStore) -> None:
+    store.create_run(RUN_ID, _cfg())
+    manifest = store.read_manifest(RUN_ID)
+    assert manifest.run_id == RUN_ID
+    assert manifest.case_id == "case-1"
+    assert manifest.mode is RunMode.STRICT
+    assert manifest.anchor_product_id == "p1"
+    assert manifest.cohort_ref == "cohort.yaml"
+    assert manifest.focus_modules == ["m1", "m2"]
+    assert manifest.snapshot_date == "2026-01-01"
+    assert manifest.requested_ranking is RankingPolicy.CAPABILITY_RANKED
+    assert manifest.created_at  # ISO now
+
+
+def test_set_phase_state_convention(store: SqliteStore) -> None:
+    store.create_run(RUN_ID, _cfg())
+    store.set_phase_state(RUN_ID, "W6", "evaluated")
+    state = store.conn.execute(
+        "SELECT state FROM runs WHERE run_id = ?", (RUN_ID,)
+    ).fetchone()["state"]
+    assert state == "W6:evaluated"
+
+
+def test_read_manifest_missing_run_raises(store: SqliteStore) -> None:
+    with pytest.raises(ValueError):
+        store.read_manifest("does-not-exist")
+
+
+# --------------------------------------------------------------------------- #
+# cells
+# --------------------------------------------------------------------------- #
+
+
+def test_save_cell_and_iter_cells_round_trip(store: SqliteStore) -> None:
+    store.create_run(RUN_ID, _cfg())
+    from core.domain import LLMEvidence
+
+    cell = _cell(
+        "param.a",
+        state=CellState.EVALUATED,
+        status=Status.OK,
+        source_kind=SourceKind.DOCUMENTATION,
+        evidence=[LLMEvidence(source_id="src-1", quote="q")],
+        reviewed_by="human-1",
+        index_build_id="build-1",
+        retrieval_profile="R1",
+        retrieval_params_json='{"rrf_k": 60}',
+        stale_reason=StaleReason.NEW_BUILD,
+    )
+    store.save_cell(cell)
+
+    got = list(store.iter_cells(RUN_ID))
+    assert len(got) == 1
+    c = got[0]
+    # enum-поля, персистируемые моделью Cell
+    assert c.state is CellState.EVALUATED
+    assert c.status is Status.OK
+    assert c.source_kind is SourceKind.DOCUMENTATION
+    assert c.stale_reason is StaleReason.NEW_BUILD
+    # прочие поля
+    assert c.reviewed_by == "human-1"
+    assert c.index_build_id == "build-1"
+    assert c.retrieval_profile == "R1"
+    assert c.retrieval_params_json == '{"rrf_k": 60}'
+    # evidence не хранится в cells — восстанавливается пустым
+    assert c.evidence == []
+    assert c.absence_evidence == []
+    # absence_rule не имеет колонки в cells — дефолт модели
+    assert c.absence_rule is AbsenceRuleType.EXPLICIT
+
+
+def test_save_cell_failed_and_preliminary_null_status(store: SqliteStore) -> None:
+    store.create_run(RUN_ID, _cfg())
+    store.save_cell(_cell("p.failed", state=CellState.FAILED, status=None))
+    store.save_cell(_cell("p.prelim", state=CellState.PRELIMINARY, status=None))
+    statuses = {
+        r["param_id"]: r["status"]
+        for r in store.conn.execute("SELECT param_id, status FROM cells")
+    }
+    assert statuses == {"p.failed": None, "p.prelim": None}
+
+
+def test_save_cell_na_requires_reviewer(store: SqliteStore) -> None:
+    store.create_run(RUN_ID, _cfg())
+    # Валидатор Cell не даёт собрать N/A без ревьюера, поэтому обходим его, чтобы
+    # проверить именно SQL-триггер I6/I7.
+    bad = Cell.model_construct(
+        run_id=RUN_ID,
+        product_id="p1",
+        param_id="p.na",
+        state=CellState.REVIEWED,
+        status=Status.NOT_APPLICABLE,
+        source_kind=None,
+        absence_rule=AbsenceRuleType.EXPLICIT,
+        evidence=[],
+        absence_evidence=[],
+        reviewed_by=None,
+    )
+    with pytest.raises(sqlite3.IntegrityError):
+        store.save_cell(bad)
+
+    ok = _cell(
+        "p.na", state=CellState.REVIEWED, status=Status.NOT_APPLICABLE, reviewed_by="human-1"
+    )
+    store.save_cell(ok)
+    got = list(store.iter_cells(RUN_ID))
+    assert got[0].status is Status.NOT_APPLICABLE
+    assert got[0].reviewed_by == "human-1"
+
+
+def test_save_cells_batch_two_chunks(store: SqliteStore) -> None:
+    store.create_run(RUN_ID, _cfg())
+    cells = [_cell(f"param.{i}") for i in range(10)]
+    store.save_cells_batch(cells, chunk_size=5)  # 10 ячеек -> 2 транзакции
+    assert len(list(store.iter_cells(RUN_ID))) == 10
+
+
+def test_iter_cells_state_filter(store: SqliteStore) -> None:
+    store.create_run(RUN_ID, _cfg())
+    store.save_cells_batch(
+        [
+            _cell("p.pending"),
+            _cell("p.evaluated", state=CellState.EVALUATED, status=Status.ABSENT,
+                  absence_evidence=[{"source_scope": "partial"}]),
+        ]
+    )
+    only_eval = list(store.iter_cells(RUN_ID, state="evaluated"))
+    assert [c.param_id for c in only_eval] == ["p.evaluated"]
+
+
+# --------------------------------------------------------------------------- #
+# evidence
+# --------------------------------------------------------------------------- #
+
+
+def test_add_evidence_round_trip(store: SqliteStore) -> None:
+    ev = CellEvidence(
+        evidence_id="ev-1",
+        run_id=RUN_ID,
+        product_id="p1",
+        param_id="param.a",
+        source_kind=SourceKind.MANUAL,
+        evidence_type=EvidenceType.DIRECT,
+        source_id="src-1",
+        source_url="https://example.test/doc",
+        citation_quote="quote",
+        source_scope=SourceScope.PARTIAL,
+        scope_attested_by="human-1",
+        index_build_id="build-1",
+        retrieved_at="2026-01-01T00:00:00Z",
+    )
+    store.add_evidence(ev)
+    row = store.conn.execute(
+        "SELECT * FROM cell_evidence WHERE evidence_id = ?", ("ev-1",)
+    ).fetchone()
+    assert row["source_kind"] == "manual"
+    assert row["evidence_type"] == "direct"
+    assert row["source_scope"] == "partial"
+    assert row["source_url"] == "https://example.test/doc"
+    assert row["scope_attested_by"] == "human-1"
+
+
+def test_add_evidence_batch(store: SqliteStore) -> None:
+    evs = [
+        CellEvidence(
+            evidence_id=f"ev-{i}",
+            run_id=RUN_ID,
+            product_id="p1",
+            param_id="param.a",
+            source_kind=SourceKind.MANUAL,
+            evidence_type=EvidenceType.DERIVED,
+            source_id=f"src-{i}",
+        )
+        for i in range(3)
+    ]
+    store.add_evidence_batch(evs)
+    count = store.conn.execute("SELECT COUNT(*) AS n FROM cell_evidence").fetchone()["n"]
+    assert count == 3
+
+
+# --------------------------------------------------------------------------- #
+# search log / exhaustion / registry
+# --------------------------------------------------------------------------- #
+
+
+def test_log_search(store: SqliteStore) -> None:
+    entry = SearchLogEntry(
+        run_id=RUN_ID,
+        phase=SearchPhase.SERP,
+        kind=SearchKind.EXTERNAL,
+        provider="provider-1",
+        adapter_kind=AdapterKind.SERP,
+        language="en",
+        query="some query",
+        results_count=10,
+        selected=3,
+        termination_reason=TerminationReason.RESULTS_EXHAUSTED,
+        ts="2026-01-01T00:00:00Z",
+    )
+    store.log_search(entry)
+    row = store.conn.execute("SELECT * FROM search_log").fetchone()
+    assert row["phase"] == "serp"
+    assert row["kind"] == "external"
+    assert row["adapter_kind"] == "serp"
+    assert row["termination_reason"] == "results_exhausted"
+    assert row["selected"] == 3
+    assert row["log_id"] is not None
+
+
+def test_save_exhaustion(store: SqliteStore) -> None:
+    pe = ProtocolExhaustion(
+        run_id=RUN_ID,
+        product_id="p1",
+        param_id="param.a",
+        contours=["registry", "corpus", "serp"],
+        queries=["q1", "q2"],
+        rounds=2,
+        budget={"serp": 5},
+        termination_reason=TerminationReason.BUDGET_EXHAUSTED,
+        exhausted_at="2026-01-01T00:00:00Z",
+        notes="note",
+    )
+    store.save_exhaustion(pe)
+    row = store.conn.execute(
+        "SELECT protocol_json FROM search_exhaustion WHERE run_id = ?", (RUN_ID,)
+    ).fetchone()
+    payload = json.loads(row["protocol_json"])
+    assert payload["contours"] == ["registry", "corpus", "serp"]
+    assert payload["rounds"] == 2
+    assert payload["budget"] == {"serp": 5}
+    assert payload["termination_reason"] == "budget_exhausted"
+
+
+def test_save_registry_fact(store: SqliteStore) -> None:
+    rf = RegistryFact(
+        run_id=RUN_ID,
+        product_id="p1",
+        registry_id="reg-1",
+        fact_json='{"status": "active"}',
+        source_url="https://registry.test/p1",
+        fetched_at="2026-01-01T00:00:00Z",
+    )
+    store.save_registry_fact(rf)
+    row = store.conn.execute(
+        "SELECT * FROM registry_facts WHERE registry_id = ?", ("reg-1",)
+    ).fetchone()
+    assert row["source_url"] == "https://registry.test/p1"
+    assert json.loads(row["fact_json"]) == {"status": "active"}
+
+
+# --------------------------------------------------------------------------- #
+# gates
+# --------------------------------------------------------------------------- #
+
+
+def test_save_gate_decision_and_iter(store: SqliteStore) -> None:
+    store.create_run(RUN_ID, _cfg())
+    store.save_gate_decision(
+        GateDecision(
+            decision_id="gd-1",
+            run_id=RUN_ID,
+            gate=Gate.G2,
+            target="role:management_console",
+            actor="human-1",
+            decided_at="2026-01-01T00:00:00Z",
+            notes="accepted",
+        )
+    )
+    decisions = list(store.iter_gate_decisions(RUN_ID))
+    assert len(decisions) == 1
+    d = decisions[0]
+    assert d.decision_id == "gd-1"
+    assert d.gate is Gate.G2
+    assert d.actor == "human-1"
+    assert d.notes == "accepted"
+
+
+# --------------------------------------------------------------------------- #
+# llm scenarios / manifest / trigger I18
+# --------------------------------------------------------------------------- #
+
+
+def test_save_llm_scenarios_and_manifest_includes_them(store: SqliteStore) -> None:
+    store.create_run(RUN_ID, _cfg())
+    store.save_llm_scenarios(
+        [
+            ScenarioBinding(
+                run_id=RUN_ID,
+                scenario=LLMScenario.EVALUATOR,
+                model_id="model-eval",
+                endpoint_kind=EndpointKind.SELF_HOST,
+                web_tool=False,
+                temperature=0.0,
+            ),
+            ScenarioBinding(
+                run_id=RUN_ID,
+                scenario=LLMScenario.SEARCH_ADAPTER,
+                model_id="model-search",
+                endpoint_kind=EndpointKind.API,
+                web_tool=True,
+            ),
+        ]
+    )
+    manifest = store.read_manifest(RUN_ID)
+    assert len(manifest.llm_scenarios) == 2
+    by_scenario = {s.scenario: s for s in manifest.llm_scenarios}
+    assert by_scenario[LLMScenario.EVALUATOR].web_tool is False
+    assert by_scenario[LLMScenario.SEARCH_ADAPTER].web_tool is True
+    assert by_scenario[LLMScenario.EVALUATOR].endpoint_kind is EndpointKind.SELF_HOST
+
+
+def test_trigger_i18_rejects_evaluator_with_web_tool(store: SqliteStore) -> None:
+    store.create_run(RUN_ID, _cfg())
+    # Валидатор ScenarioBinding не даёт собрать такое значение, поэтому обходим его,
+    # чтобы проверить именно SQL-триггер I18.
+    bad = ScenarioBinding.model_construct(
+        run_id=RUN_ID,
+        scenario=LLMScenario.EVALUATOR,
+        model_id="model-eval",
+        model_version=None,
+        endpoint_kind=EndpointKind.SELF_HOST,
+        web_tool=True,
+        decoder=None,
+        seed=None,
+        temperature=None,
+        constrained_decoding=None,
+    )
+    with pytest.raises(sqlite3.IntegrityError):
+        store.save_llm_scenarios([bad])
+    assert store.conn.execute("SELECT COUNT(*) AS n FROM llm_scenarios").fetchone()["n"] == 0
+
+
+# --------------------------------------------------------------------------- #
+# corpus chunk helpers
+# --------------------------------------------------------------------------- #
+
+
+def test_get_chunk_and_resolve_source_url(store: SqliteStore) -> None:
+    with store.conn:
+        store.conn.execute(
+            "INSERT INTO corpus_docs (doc_id, product_id, url) VALUES ('doc-1', 'p1',"
+            " 'https://example.test/page')"
+        )
+        store.conn.execute(
+            "INSERT INTO corpus_chunks"
+            " (chunk_id, doc_id, product_id, url, heading_path, chunk_no, text,"
+            "  context_prefix, content_hash)"
+            " VALUES ('chunk-1', 'doc-1', 'p1', 'https://example.test/page#a',"
+            " 'H1 > H2', 0, 'body text', 'prefix', 'hash-1')"
+        )
+    chunk = store.get_chunk("chunk-1")
+    assert chunk is not None
+    assert chunk.chunk_id == "chunk-1"
+    assert chunk.chunk_no == 0
+    assert chunk.text == "body text"
+    assert chunk.heading_path == "H1 > H2"
+    assert chunk.context_prefix == "prefix"
+    assert chunk.content_hash == "hash-1"
+    assert store.get_chunk("missing") is None
+    assert store.resolve_source_url("chunk-1") == "https://example.test/page#a"
+    assert store.resolve_source_url("missing") is None
