@@ -1,0 +1,70 @@
+{
+  "product_id": "p1",
+  "run_id": "run_eval_1",
+  "param": {
+    "param_id": "param_alpha",
+    "title": "Параметр Альфа",
+    "module": "mod_a",
+    "group": "grp_1",
+    "importance": "Баз",
+    "param_type": "fact",
+    "rule": "Подтвердить наличие свойства Альфа.",
+    "absence_rule": "explicit",
+    "role_binding": "role_a",
+    "concept_terms": {"ru": ["свойство альфа"], "en": ["alpha feature"]},
+    "search_langs": ["ru", "en"]
+  },
+  "chunks": [
+    {
+      "chunk_id": "chunk_a1",
+      "chunk_no": 0,
+      "text": "Документ описывает экспорт данных в формате CSV.",
+      "heading_path": "Раздел 1",
+      "context_prefix": "контекст",
+      "content_hash": "hash_a1"
+    },
+    {
+      "chunk_id": "chunk_a2",
+      "chunk_no": 1,
+      "text": "Свойство Альфа доступно без дополнительной настройки.",
+      "heading_path": "Раздел 2",
+      "context_prefix": "контекст",
+      "content_hash": "hash_a2"
+    }
+  ],
+  "ok_output": {
+    "status": "✅",
+    "justification": "Свойство Альфа подтверждено документацией.",
+    "evidence": [
+      {
+        "source_id": "chunk_a2",
+        "quote": "Свойство Альфа доступно без дополнительной настройки."
+      }
+    ]
+  },
+  "bad_quote_output": {
+    "status": "✅",
+    "justification": "Претензия без точной цитаты.",
+    "evidence": [
+      {
+        "source_id": "chunk_a2",
+        "quote": "Свойство Бета доступно без дополнительной настройки."
+      }
+    ]
+  },
+  "missing_source_output": {
+    "status": "✅",
+    "justification": "Ссылка на неизвестный источник.",
+    "evidence": [{"source_id": "chunk_x", "quote": "любая цитата"}]
+  },
+  "whitespace_output": {
+    "status": "⚠️",
+    "justification": "Цитата с иной расстановкой пробелов.",
+    "evidence": [
+      {
+        "source_id": "chunk_a1",
+        "quote": "экспорт   данных\nв формате CSV"
+      }
+    ]
+  }
+}
