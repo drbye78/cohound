@@ -56,6 +56,13 @@ from core.pipeline.experiments import (
     load_retrieval_golden,
     run_retrieval_experiment,
 )
+from core.pipeline.prompt import (
+    TEMPLATE_VERSION,
+    CompiledPrompt,
+    compile_prompt,
+    render_queries,
+    save_prompt,
+)
 from core.pipeline.plan import RunPlan, derive_run_id, load_plan, plan
 from core.pipeline.registry import (
     registry_covered_params,
@@ -133,4 +140,10 @@ __all__ = [
     "ProfileExperiment",
     "load_retrieval_golden",
     "run_retrieval_experiment",
+    # prompt (T9.1, Ш6)
+    "TEMPLATE_VERSION",
+    "CompiledPrompt",
+    "compile_prompt",
+    "render_queries",
+    "save_prompt",
 ]
