@@ -388,6 +388,9 @@ def main() -> int:
     section("Паспорта продукта (§4.3)")
     check("passports: latest-by-date + кандидаты URL (не evidence, I19)", lambda: _passports())
 
+    section("Golden-harness (R6/R12) — W12")
+    check("golden: R6-согласие, false-✅ гейт, страта ❌ (R12)", lambda: _golden_harness())
+
     print(f"\n{CHECKS - len(FAILURES)}/{CHECKS} проверок пройдено")
     if FAILURES:
         print("\nПровалы:")
@@ -2044,6 +2047,37 @@ def _passports() -> None:
             raise AssertionError("битый YAML обязан поднять PassportLoadError")
         except PassportLoadError:
             pass
+
+
+def _golden_harness() -> None:
+    """Golden-harness: R6-согласие, false-✅ фейлит гейт, страта ❌ присутствует (R12)."""
+    from core.config.run_config import load_golden
+    from core.domain import Status
+    from core.pipeline.golden import check_thresholds, run_golden
+
+    fixture = _here(tests_root=True) / "pipeline" / "fixtures" / "golden_min.csv"
+    golden = load_golden(fixture)
+    if not golden:
+        raise AssertionError("golden-фикстура пуста")
+
+    actual = {(g.product_id, g.param_id): g.expected_status for g in golden}
+    perfect = run_golden(golden, actual)
+    if perfect.agreement != 1.0 or not perfect.passes():
+        raise AssertionError(f"полное согласие обязано проходить: agreement={perfect.agreement}")
+    if not perfect.has_absent_stratum:
+        raise AssertionError("R12: golden обязан содержать страту ожидаемых ❌")
+
+    # false ✅ (там, где ожидался не-✅ статус) обязан завалить гейт
+    target = next((g for g in golden if g.expected_status is not Status.OK), None)
+    if target is None:
+        raise AssertionError("в фикстуре нужен кейс с ожиданием ≠ ✅")
+    forced = dict(actual)
+    forced[(target.product_id, target.param_id)] = Status.OK
+    report = run_golden(golden, forced)
+    if report.false_ok != 1 or report.passes():
+        raise AssertionError("false ✅ обязан фейлить golden-гейт (critical=0)")
+    if not check_thresholds(report):
+        raise AssertionError("check_thresholds обязан вернуть нарушение при false ✅")
 
 
 if __name__ == "__main__":
