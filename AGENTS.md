@@ -37,14 +37,14 @@ core/                         # ядро: категорийно-НЕЙТРАЛ�
   adapters/                   # chunker_markdown (heading_path), extract_document (docling: pdf+office), lexical_bm25 — см. NOTICES
   # целевое расщепление (docs/architecture/01-modules-and-contracts.md):
   domain/                     # модели, enums, invariants, scoring, r2, anchors (чистый Python, без I/O)
-  ports/                      # Protocol-интерфейсы: LLM, индексы, embedder, index_builder, search,
-                              #   crawler, extractor, chunker, registry, store, gate_store
-  pipeline/                   # сценарии Ш1–Ш9, гейты G1–G4, эксперименты (use-cases)
-  store/                      # SQLite-хранилище + paths
-  config/                     # загрузка run.yaml/пакетов + deploy.yaml (профиль зон)
-  cli/                        # composition root Z0 (ядро) — сборка зависимостей
-  edge/                       # composition root Z1/DMZ — веб-адаптеры за application-layer швом (07)
-tests/selfcheck.py            # self-contained проверка фундамента (36 проверок)
+  ports/                      # (ЕСТЬ) Protocol-контракты: LLM, индексы, embedder, index_builder, search,
+                              #   crawler, extractor, chunker, registry, store, gate_store, gateway, types
+  pipeline/                   # (планируется) сценарии Ш1–Ш9, гейты G1–G4, эксперименты (use-cases)
+  store/                      # (планируется) SQLite-хранилище + paths
+  config/                     # (планируется) загрузка run.yaml/пакетов + deploy.yaml (профиль зон)
+  cli/                        # (планируется) composition root Z0 (ядро) — сборка зависимостей
+  edge/                       # (планируется) composition root Z1/DMZ — веб-адаптеры за швом (07)
+tests/selfcheck.py            # self-contained проверка фундамента (39 проверок)
 tests/smoke_scrapy_playwright.py  # браузерный smoke scrapy-playwright (V5; 0/1/2)
 packages/{case_id}/           # (планируется) пакеты категорий: package/catalog/baselines/cohort/golden
 registries/ · docs/           # словари, регламент, absence-правила

@@ -1,0 +1,56 @@
+"""coHound — порты (L2): Protocol-контракты между доменом и адаптерами.
+
+Структурная типизация (``typing.Protocol``), без наследования. Каждый порт — отдельный модуль
+(архитектура 01 §3). Внешние системы (LLM, SERP, краул, индексы, реестры, store, DMZ-шов) —
+за портами; ``pipeline`` зависит только от них.
+
+Нейтральность (§1.3): в этом пакете нет предметных терминов.
+"""
+
+from __future__ import annotations
+
+from core.ports.chunker import ChunkerPort
+from core.ports.crawler import CrawlerPort
+from core.ports.embedder import EmbedderPort
+from core.ports.extractor import ExtractorPort
+from core.ports.gate_store import GateStore
+from core.ports.gateway import ContentGateway
+from core.ports.index_builder import IndexBuilderPort, IndexMeta
+from core.ports.lexical_index import LexicalIndexPort
+from core.ports.llm import EvaluatorPort, LLMRequest, LLMResponse, TokenUsage
+from core.ports.registry import RegistryFetcherPort, RegistryFact
+from core.ports.search import SearchAdapterPort, SearchQuery, SearchResult
+from core.ports.store import StorePort
+from core.ports.types import Chunk, ExtractedDoc, ProductRef, RawPage, RenderMode
+from core.ports.vector_index import RetrievedChunk, RetrievalResult, VectorIndexPort, VectorQuery
+
+__all__ = [
+    "ChunkerPort",
+    "CrawlerPort",
+    "EmbedderPort",
+    "EvaluatorPort",
+    "ExtractorPort",
+    "GateStore",
+    "ContentGateway",
+    "IndexBuilderPort",
+    "IndexMeta",
+    "LexicalIndexPort",
+    "LLMRequest",
+    "LLMResponse",
+    "TokenUsage",
+    "RegistryFetcherPort",
+    "RegistryFact",
+    "SearchAdapterPort",
+    "SearchQuery",
+    "SearchResult",
+    "StorePort",
+    "Chunk",
+    "ExtractedDoc",
+    "ProductRef",
+    "RawPage",
+    "RenderMode",
+    "RetrievedChunk",
+    "RetrievalResult",
+    "VectorIndexPort",
+    "VectorQuery",
+]

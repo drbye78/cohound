@@ -16,19 +16,9 @@ import hashlib
 import re
 from dataclasses import dataclass, field
 
+from core.ports.types import Chunk
+
 _HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
-
-
-@dataclass(frozen=True)
-class Chunk:
-    """Единица индексации (§4.4). ``text`` — чистый текст для валидации цитат."""
-
-    chunk_id: str
-    chunk_no: int
-    text: str
-    heading_path: str
-    context_prefix: str
-    content_hash: str
 
 
 @dataclass

@@ -306,6 +306,11 @@ def main() -> int:
     check("BM25: продукт-скоупед и детерминизм (I17/R7)", lambda: _bm25())
     check("retrieval_eval: hit@K/recall@K/MRR (I20)", lambda: _retrieval_eval())
 
+    section("Порты (L2) — контракты (01 §3, W1/T1.1)")
+    check("порты импортируются, все — Protocol", lambda: _ports_contracts())
+    check("I18 структурно: у оценщика нет tools/web_search", lambda: _ports_i18())
+    check("адаптеры используют порт-типы (Chunk/ExtractedDoc)", lambda: _ports_type_reuse())
+
     print(f"\n{CHECKS - len(FAILURES)}/{CHECKS} проверок пройдено")
     if FAILURES:
         print("\nПровалы:")
@@ -445,6 +450,45 @@ def _retrieval_eval() -> None:
     # I20: cut-off K усекает ранжирование.
     short = evaluate_retrieval(queries, lambda q, k: ranking.get(q, []), k=1)
     _assert(abs(short.hit_at_k - 1 / 3) < 1e-9)      # только c2 на ранке 1
+
+
+def _ports_contracts() -> None:
+    """Все порты — импортируемые Protocol-контракты (01 §3, W1/T1.1)."""
+    import core.ports as P
+
+    names = [
+        "EvaluatorPort", "VectorIndexPort", "LexicalIndexPort", "SearchAdapterPort",
+        "CrawlerPort", "ExtractorPort", "ChunkerPort", "RegistryFetcherPort",
+        "StorePort", "GateStore", "EmbedderPort", "IndexBuilderPort", "ContentGateway",
+    ]
+    for n in names:
+        obj = getattr(P, n)
+        if not getattr(obj, "_is_protocol", False):
+            raise AssertionError(f"{n} не является Protocol")
+
+
+def _ports_i18() -> None:
+    """I18 структурно: у порта оценщика физически нет параметров tools/web_search."""
+    import inspect
+
+    from core.ports.llm import EvaluatorPort
+
+    params = set(inspect.signature(EvaluatorPort.complete).parameters)
+    banned = {"tools", "web_search", "websearch", "search"}
+    if params & banned:
+        raise AssertionError(f"I18: EvaluatorPort.complete не должен принимать {params & banned}")
+
+
+def _ports_type_reuse() -> None:
+    """Адаптеры переиспользуют порт-типы (единый тип Chunk/ExtractedDoc, не дубль)."""
+    from core.adapters.chunker_markdown import Chunk as AdapterChunk
+    from core.adapters.extract_document import ExtractedDoc as AdapterDoc
+    from core.ports.types import Chunk as PortChunk, ExtractedDoc as PortDoc
+
+    if AdapterChunk is not PortChunk:
+        raise AssertionError("chunker Chunk должен быть ports.types.Chunk")
+    if AdapterDoc is not PortDoc:
+        raise AssertionError("extractor ExtractedDoc должен быть ports.types.ExtractedDoc")
 
 
 def _db_smoke() -> None:

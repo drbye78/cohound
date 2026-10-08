@@ -18,8 +18,9 @@ from __future__ import annotations
 
 import hashlib
 import tempfile
-from dataclasses import dataclass
 from pathlib import Path
+
+from core.ports.types import ExtractedDoc
 
 try:  # тяжёлая необязательная зависимость
     import docling  # noqa: F401  # type: ignore[import-not-found]
@@ -41,17 +42,6 @@ SUPPORTED_FORMATS: dict[str, str] = {
     ".pptx": "office",
     ".xlsx": "office",
 }
-
-
-@dataclass(frozen=True)
-class ExtractedDoc:
-    """Нормализованный документ после экстракции (§3.5, ``ExtractedDoc``)."""
-
-    text: str
-    content_hash: str
-    extractor_version: str
-    page_count: int | None = None
-    error: str | None = None
 
 
 def _sha256(text: str) -> str:
