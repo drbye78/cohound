@@ -181,6 +181,21 @@ def _get(obj: Any, name: str, default: Any = None) -> Any:
     return getattr(obj, name, default)
 
 
+def _optional_row_value(row: sqlite3.Row, name: str) -> str | None:
+    """Значение колонки, если она присутствует в строке; иначе ``None``.
+
+    Схема §4.4 (``runs``) **не содержит** ``deploy_profile``/``edge_schema_version``:
+    деплой-провенанс манифеста на текущий момент не персистится в операционной БД
+    (см. docstring :meth:`SqliteStore.read_manifest`). Хелпер делает чтение
+    forward-compatible: если колонка появится в будущей схеме, значение подхватится,
+    а на текущих БД (``runs`` без этих колонок) вернётся ``None`` без исключения.
+    """
+    if name not in row.keys():
+        return None
+    value = row[name]
+    return str(value) if value is not None else None
+
+
 class SqliteStore:
     """Реализация ``StorePort``/``GateStore`` поверх SQLite-схемы прогона (§4.4).
 
@@ -670,6 +685,14 @@ class SqliteStore:
     def read_manifest(self, run_id: str) -> RunManifest:
         """Собирает ``RunManifest`` из строки ``runs`` (+ ``llm_scenarios``).
 
+        **Ограничение деплой-провенанса.** Поля ``deploy_profile`` и
+        ``edge_schema_version`` (R7/§13, 07 §7) на текущий момент **не персистятся**
+        в операционной БД: колонок в ``runs`` нет, а ``run_manifest.yaml`` пишется
+        отдельно (``core.pipeline.report.write_run_manifest``). Поэтому при обычном
+        прогоне здесь возвращается ``None``. Чтение сделано forward-compatible —
+        :func:`_optional_row_value` подхватит значения, если соответствующие колонки
+        появятся в ``runs`` (без миграции и без падения на старой схеме).
+
         :raises ValueError: если строка прогона отсутствует.
         """
         row = self.conn.execute(
@@ -724,22 +747,29 @@ class SqliteStore:
             computed_ranking=RankingPolicy(computed) if computed is not None else None,
             llm_scenarios=scenarios,
             snapshot_date=row["snapshot_date"],
+            deploy_profile=_optional_row_value(row, "deploy_profile"),
+            edge_schema_version=_optional_row_value(row, "edge_schema_version"),
         )
 
     # -- corpus ---------------------------------------------------------- #
-    def get_chunk(self, chunk_id: str) -> Chunk | None:
-        """Возвращает чанк как порт-тип ``Chunk`` или ``None`` (валидация цитат).
+    #: Колонки ``corpus_chunks``, которые несёт порт-тип ``Chunk``. ``url`` намеренно
+    #: исключён: у ``Chunk`` нет поля ``url`` (URL резолвится через ``resolve_source_url``).
+    _CHUNK_COLUMNS = (
+        "chunk_id",
+        "chunk_no",
+        "text",
+        "heading_path",
+        "context_prefix",
+        "content_hash",
+    )
 
-        ``corpus_chunks.url`` намеренно не переносится: у ``Chunk`` нет поля ``url``
-        (URL резолвится отдельно через ``resolve_source_url``).
+    @staticmethod
+    def _row_to_chunk(row: sqlite3.Row) -> Chunk:
+        """Восстанавливает порт-тип ``Chunk`` из строки ``corpus_chunks``.
+
+        Единая точка конверсии для ``get_chunk``/``iter_chunks``: ``chunk_no=None``
+        читается как ``0``, ``NULL`` в текстовых полях — как пустая строка.
         """
-        row = self.conn.execute(
-            "SELECT chunk_id, chunk_no, text, heading_path, context_prefix, content_hash"
-            " FROM corpus_chunks WHERE chunk_id = ?",
-            (chunk_id,),
-        ).fetchone()
-        if row is None:
-            return None
         return Chunk(
             chunk_id=row["chunk_id"],
             chunk_no=row["chunk_no"] if row["chunk_no"] is not None else 0,
@@ -748,6 +778,43 @@ class SqliteStore:
             context_prefix=row["context_prefix"] or "",
             content_hash=row["content_hash"] or "",
         )
+
+    def get_chunk(self, chunk_id: str) -> Chunk | None:
+        """Возвращает чанк как порт-тип ``Chunk`` или ``None`` (валидация цитат).
+
+        ``corpus_chunks.url`` намеренно не переносится: у ``Chunk`` нет поля ``url``
+        (URL резолвится отдельно через ``resolve_source_url``).
+        """
+        row = self.conn.execute(
+            f"SELECT {', '.join(self._CHUNK_COLUMNS)} FROM corpus_chunks"
+            " WHERE chunk_id = ?",
+            (chunk_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return self._row_to_chunk(row)
+
+    def iter_chunks(
+        self, build_id: str, *, product_id: str | None = None
+    ) -> Iterator[Chunk]:
+        """Итерирует чанки сборки ``build_id`` как порт-типы ``Chunk`` (resume/rebuild).
+
+        Выборка идёт по ``corpus_chunks.build_id`` (у таблицы **нет** ``run_id``),
+        порядок детерминирован: ``product_id, chunk_no, chunk_id``. ``product_id=None``
+        — все продукты сборки; иначе — только указанная продукт-партиция. ``url`` не
+        переносится (см. :meth:`get_chunk`).
+        """
+        sql = (
+            f"SELECT {', '.join(self._CHUNK_COLUMNS)} FROM corpus_chunks"
+            " WHERE build_id = ?"
+        )
+        params: list[Any] = [build_id]
+        if product_id is not None:
+            sql += " AND product_id = ?"
+            params.append(product_id)
+        sql += " ORDER BY product_id, chunk_no, chunk_id"
+        for row in self.conn.execute(sql, params):
+            yield self._row_to_chunk(row)
 
     def resolve(self, source_id: str) -> ResolvedSource | None:
         """Детерминированно резолвит ``source_id`` в источник (I10/I15/I19), без сети.

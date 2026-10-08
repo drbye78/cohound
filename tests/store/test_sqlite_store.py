@@ -18,6 +18,8 @@ from core.domain import (
     Cell,
     CellEvidence,
     CellState,
+    CorpusChunk,
+    CorpusDoc,
     EndpointKind,
     EvidenceType,
     Focus,
@@ -40,6 +42,7 @@ from core.domain import (
     TerminationReason,
 )
 from core.ports.store import GateStore, StorePort
+from core.ports.types import Chunk
 from core.store.sqlite_store import SqliteStore
 
 RUN_ID = "run-1"
@@ -500,3 +503,121 @@ def test_get_chunk_and_resolve_source_url(store: SqliteStore) -> None:
     assert store.get_chunk("missing") is None
     assert store.resolve_source_url("chunk-1") == "https://example.test/page#a"
     assert store.resolve_source_url("missing") is None
+
+
+# --------------------------------------------------------------------------- #
+# iter_chunks (resume/rebuild индексной сборки)
+# --------------------------------------------------------------------------- #
+
+
+def _doc(doc_id: str, product_id: str) -> CorpusDoc:
+    """Нейтральный ``corpus_docs``-документ для FK чанков."""
+    return CorpusDoc(
+        doc_id=doc_id,
+        product_id=product_id,
+        url=f"https://example.test/{doc_id}",
+        fetched_at="2026-01-01T00:00:00Z",
+        content_hash=f"doc-hash-{doc_id}",
+    )
+
+
+def _chunk(
+    chunk_id: str,
+    *,
+    doc_id: str = "doc-1",
+    product_id: str = "p1",
+    chunk_no: int = 0,
+    build_id: str = "build-1",
+    text: str = "body text",
+) -> CorpusChunk:
+    """Нейтральный ``corpus_chunks``-чанк для тестов итерации."""
+    return CorpusChunk(
+        chunk_id=chunk_id,
+        doc_id=doc_id,
+        product_id=product_id,
+        url=f"https://example.test/{doc_id}#{chunk_id}",
+        heading_path="H1 > H2",
+        lang="en",
+        chunk_no=chunk_no,
+        text=text,
+        context_prefix="prefix",
+        content_hash=f"hash-{chunk_id}",
+        build_id=build_id,
+    )
+
+
+def test_iter_chunks_deterministic_order_and_port_type(store: SqliteStore) -> None:
+    store.upsert_corpus_doc(_doc("doc-1", "p1"))
+    store.upsert_corpus_doc(_doc("doc-2", "p2"))
+    # Вставка в «перемешанном» порядке: итерация обязана вернуть детерминированный
+    # порядок (product_id, chunk_no, chunk_id), а не порядок вставки.
+    store.add_chunks_batch(
+        [
+            _chunk("p1-b", chunk_no=1),
+            _chunk("p2-a", doc_id="doc-2", product_id="p2", chunk_no=0),
+            _chunk("p1-c", chunk_no=0),
+            _chunk("p1-a", chunk_no=0),
+        ]
+    )
+    got = list(store.iter_chunks("build-1"))
+    assert [c.chunk_id for c in got] == ["p1-a", "p1-c", "p1-b", "p2-a"]
+    assert all(isinstance(c, Chunk) for c in got)
+    first = got[0]
+    assert first.chunk_no == 0
+    assert first.text == "body text"
+    assert first.heading_path == "H1 > H2"
+    assert first.context_prefix == "prefix"
+    assert first.content_hash == "hash-p1-a"
+    # ``url`` намеренно не переносится: у порт-типа ``Chunk`` нет поля ``url``.
+    assert not hasattr(first, "url")
+
+
+def test_iter_chunks_product_filter(store: SqliteStore) -> None:
+    store.upsert_corpus_doc(_doc("doc-1", "p1"))
+    store.upsert_corpus_doc(_doc("doc-2", "p2"))
+    store.add_chunks_batch(
+        [
+            _chunk("p1-a", chunk_no=0),
+            _chunk("p1-b", chunk_no=1),
+            _chunk("p2-a", doc_id="doc-2", product_id="p2", chunk_no=0),
+        ]
+    )
+    only_p2 = list(store.iter_chunks("build-1", product_id="p2"))
+    assert [c.chunk_id for c in only_p2] == ["p2-a"]
+    all_chunks = list(store.iter_chunks("build-1", product_id=None))
+    assert [c.chunk_id for c in all_chunks] == ["p1-a", "p1-b", "p2-a"]
+
+
+def test_iter_chunks_unknown_build_is_empty(store: SqliteStore) -> None:
+    store.upsert_corpus_doc(_doc("doc-1", "p1"))
+    store.add_chunks_batch([_chunk("p1-a", build_id="build-1")])
+    assert list(store.iter_chunks("build-unknown")) == []
+    assert list(store.iter_chunks("build-1", product_id="p9")) == []
+
+
+# --------------------------------------------------------------------------- #
+# deploy provenance on the manifest (R7/§13, 07 §7)
+# --------------------------------------------------------------------------- #
+
+
+def test_read_manifest_deploy_fields_default_none(store: SqliteStore) -> None:
+    """Схема ``runs`` не персистит деплой-поля — без них ``read_manifest`` даёт ``None``."""
+    store.create_run(RUN_ID, _cfg())
+    manifest = store.read_manifest(RUN_ID)
+    assert manifest.deploy_profile is None
+    assert manifest.edge_schema_version is None
+
+
+def test_read_manifest_reads_deploy_fields_when_present(store: SqliteStore) -> None:
+    """Forward-compatible: если колонки появятся в ``runs``, значения подхватятся."""
+    store.create_run(RUN_ID, _cfg())
+    with store.conn:
+        store.conn.execute("ALTER TABLE runs ADD COLUMN deploy_profile TEXT")
+        store.conn.execute("ALTER TABLE runs ADD COLUMN edge_schema_version TEXT")
+        store.conn.execute(
+            "UPDATE runs SET deploy_profile = ?, edge_schema_version = ? WHERE run_id = ?",
+            ("split", "1.0.0", RUN_ID),
+        )
+    manifest = store.read_manifest(RUN_ID)
+    assert manifest.deploy_profile == "split"
+    assert manifest.edge_schema_version == "1.0.0"

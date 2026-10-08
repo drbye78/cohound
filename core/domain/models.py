@@ -645,6 +645,10 @@ class RunManifest(BaseModel):
     unknown_policy: str = "excluded"
     partial_score: float = 0.5
     snapshot_date: str | None = None
+    # Деплой-провенанс (07 §7, R7/§13): профиль зон и версия контракта шва.
+    # Опциональны и backward-compatible; заполняются внешним манифест-писателем.
+    deploy_profile: str | None = None
+    edge_schema_version: str | None = None
     edge_capabilities: dict[str, Any] = Field(default_factory=dict)  # версии edge-компонентов (gateway)
 
 

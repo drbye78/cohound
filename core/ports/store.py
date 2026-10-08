@@ -87,6 +87,20 @@ class StorePort(Protocol):
 
     def get_chunk(self, chunk_id: str) -> Chunk | None: ...
 
+    def iter_chunks(
+        self, build_id: str, *, product_id: str | None = None
+    ) -> Iterator[Chunk]:
+        """Итерирует чанки индексной сборки ``build_id`` как порт-типы ``Chunk``.
+
+        Нужен для seed/rebuild индекса в возобновлённом процессе (resume): чанки
+        восстанавливаются из ``corpus_chunks`` по ``build_id``. Порядок
+        детерминирован: ``product_id, chunk_no, chunk_id``. ``product_id=None`` —
+        все продукты сборки; иначе — только указанная продукт-партиция. Поля ``url``
+        нет (как и в ``get_chunk``): URL резолвится отдельно
+        (``resolve_source_url``/``resolve``).
+        """
+        ...
+
     def resolve_source_url(self, source_id: str) -> str | None: ...
 
     def read_manifest(self, run_id: str) -> RunManifest: ...
