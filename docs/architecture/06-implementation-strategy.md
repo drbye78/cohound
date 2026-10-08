@@ -11,6 +11,42 @@
 
 ---
 
+## 0. Текущее состояние (baseline на 2026-10-08)
+
+Проект **не greenfield с нуля**: фундамент и часть переиспользуемого кода уже есть. План ниже
+опирается на это — часть задач W1/W7/W8 сводится к **оборачиванию и выравниванию** существующего,
+а не к написанию заново.
+
+| Артефакт | Состояние | Роль в плане |
+|---|---|---|
+| `core/schemas.py` | монолит: Pydantic-схемы §4.2/4.3/4.5/7 + инварианты | расщепляется в W1/T1.2 → `domain/` |
+| `core/db.py` | SQLite DDL §4.4 + триггеры I4/I6/I7/I13/I18 | переезжает в W1/T1.3 → `store/` |
+| `core/util/text_utils.py` | RU/EN-нормализация (из gag5, MIT) | готово (W1/W2/W8) |
+| `core/util/security.py` | SSRF-защита URL, `sanitize_slug` (gag5) | готово (W2/W7) |
+| `core/util/fusion.py` | RRF-слияние (gag5) | оборачивается в W8/T8.5 |
+| `core/util/retrieval_eval.py` | retrieval-метрики (gtm, авторская разработка) | основа W8/T8.6 |
+| `core/adapters/chunker_markdown.py` | чанкер с `heading_path` (gag5) | оборачивается в порт в W7/T7.3 |
+| `core/adapters/extract_document.py` | docling PDF+Office (написано заново) | оборачивается в порт в W7/T7.2 |
+| `core/adapters/lexical_bm25.py` | BM25-базлайн (gtm) | прототип W8/T8.3 |
+| `tests/selfcheck.py` | 36 проверок, без pytest; словарь/схемы/DDL | остаётся автономным; обёртка в W1/T1.5 |
+| `tests/smoke_scrapy_playwright.py` | браузерный smoke (V5) — **пройден** | вход W7/T7.1 |
+| `docs/status-dictionary.yaml` | источник истины перечислений (§4.1) | уже есть |
+| `THIRD_PARTY_NOTICES.md` | происхождение/лицензии reused-кода | уже есть (gag5 MIT / gtm авторская) |
+| `pyproject.toml` | пины/extras (Python 3.14 базлайн) | уже есть; `uv.lock` — W1/T1.6 |
+
+**Следствия для оценок:**
+- **W7:** HTML-экстрактор и чанкер **уже реализованы** — задачи сводятся к оборачиванию в порты
+  (≈ −3 дд против «с нуля»).
+- **W8:** lexical-BM25 прототип и retrieval-метрики есть — T8.3 (tantivy) и T8.6 частично опираются
+  на них (≈ −2 дд).
+- **W1/W2/W3:** рефакторинг (не написание) монолита; инварианты и DDL уже обеспечены и покрыты
+  selfcheck — переносятся с сохранением зелёности.
+
+*Источник истины о переиспользовании — `THIRD_PARTY_NOTICES.md`; категорийная нейтральность `core/`
+проверяется грепп-тестом на каждом шаге.*
+
+---
+
 ## 1. Что значит «production-grade» для coHound
 
 «Production-grade» здесь определяется **аксиомами A1–A3**, а не индустриальными шаблонами.
@@ -61,8 +97,8 @@
    экспериментом R0/R1/R2/R9/R10, не решением заранее.
 7. **Контур данных — с первого коммита.** SSRF/санитайзинг/robots и запрет исходящего контента
    закладываются в адаптеры Ш5/Ш6, а не добавляются «потом».
-8. **Два окружения.** Лёгкое CLI-ядро (везде, включая py3.14) и тяжёлые контуры (PDF-torch, GPU-LLM,
-   индекс-torch) — изолированы (05 §1). Ядро не тянет torch.
+8. **Два окружения.** Лёгкое CLI-ядро (Python 3.14 базлайн, 05 §1) и тяжёлые контуры (PDF-torch,
+   GPU-LLM, индекс-torch) — изолированы. Ядро не тянет torch.
 9. **Непрерывная зелёность.** `tests/selfcheck.py` + грепп-нейтральность + импорт-граф проходят на
    каждом коммите; рефакторинги идут с transitional re-export-шимами.
 10. **Непрерывная интеграция документов.** Изменение контракта/инварианта — правка `00`–`06` в том
@@ -184,8 +220,8 @@ preliminary-yield), калибровка порогов.
 
 | ID | Задача | дд | Зависит | DoD |
 |---|---|---|---|---|
-| T1.1 | Пакет `core/ports/`: `Protocol`-контракты (llm, vector_index, lexical_index, search, crawler, extractor, chunker, embedder, index_builder, registry, store, gate_store) с docstring-гарантиями | 2 | — | импортируются без циклов; mypy/pyright-чисто (опц.); контракт-тесты-заготовки |
-| T1.2 | Расщепить `core/schemas.py` → `core/domain/{enums,models,invariants,r2,anchors}.py` + re-export-шим | 3 | T1.1 | `tests/selfcheck.py` зелёный; старые импорты работают |
+| T1.1 | Пакет `core/ports/`: `Protocol`-контракты (llm, vector_index, lexical_index, search, crawler, extractor, chunker, embedder, index_builder, registry, store, gate_store, **gateway**) с docstring-гарантиями. Пока домен не расщеплён — типы импортируются из текущего `core/schemas.py` (transitional) | 2 | — | импортируются без циклов; контракт-тесты-заготовки |
+| T1.2 | Расщепить `core/schemas.py` → `core/domain/{enums,models,invariants,r2,anchors}.py` + re-export-шим; перевести `ports/*` на новые типы | 3 | T1.1 | `tests/selfcheck.py` зелёный; старые импорты работают |
 | T1.3 | Расщепить `core/db.py` → `core/store/sqlite.py` (DDL+триггеры) + контракт `ports/store.py` | 2 | T1.1 | DDL-тест + триггеры I4/I6/I7/I13/I18 зелёные |
 | T1.4 | CI: импорт-граф (`ast`-матрица 01 §1), грепп-нейтральность `core/domain|ports|pipeline`, `uv pip compile` на 3.14 | 2 | T1.2,T1.3 | гейты краснеют на учебном нарушении |
 | T1.5 | pytest+hypothesis в dev; обёртка над selfcheck; фикстуры; порог покрытия ядра | 1.5 | T1.2 | `pytest -q` зелёный; selfcheck остаётся автономным |
@@ -255,13 +291,13 @@ preliminary-yield), калибровка порогов.
 | ID | Задача | дд | Зависит | DoD |
 |---|---|---|---|---|
 | T7.1 | `ports/crawler.py` + `adapters/crawl_scrapy.py` (per-domain профили, robots=obey, playwright per-request, retries/backoff, content-addressed кэш) | 4 | T1.1 | smoke V5 зелёный; robots соблюдён; кэш работает |
-| T7.2 | `ports/extractor.py` + `extract_html.py` (trafilatura) + обёртка над `extract_document.py` | 2.5 | T1.1 | формат из url/content-type; `content_hash` |
-| T7.3 | `ports/chunker.py` + обёртка чанкера (`heading_path`, `context_prefix`) | 1.5 | T1.1 | детерминированный чанкинг; тест |
+| T7.2 | `ports/extractor.py` + `extract_html.py` (trafilatura) + обёртка над **существующим** `extract_document.py` (docling PDF+Office) | 2 | T1.1 | формат из url/content-type; `content_hash` |
+| T7.3 | `ports/chunker.py` + обёртка **существующего** `chunker_markdown.py` (`heading_path`, `context_prefix`) | 1 | T1.1 | детерминированный чанкинг; тест |
 | T7.4 | `pipeline/corpus.py`: raw retention → extract → dedup(hash) → chunk; `index_manifest` | 3 | T7.1–T7.3, T3.1 | retention+extractor_version; I19 |
 | T7.5 | Санитайзинг (nh3/defusedxml) на границе экстракции; SSRF-защита краула | 1.5 | T7.2 | инъекции вырезаны, текст не мутирован (§10/C.2) |
 | T7.6 | Глобальный content-addressed кэш (`cache/http`, `cache/serp`) | 1.5 | T7.1 | R7 между run_id; тест ADR 0016 |
 
-**Итого W7 ≈ 14 дд.**
+**Итого W7 ≈ 12.5 дд.** (скорректировано с учётом уже перенесённых `extract_document.py`/`chunker_markdown.py` — §0)
 
 ### W8 — Ретривал и индекс
 
@@ -269,13 +305,13 @@ preliminary-yield), калибровка порогов.
 |---|---|---|---|---|
 | T8.1 | `ports/embedder.py` + `adapters/embed_local.py` (bge-m3) + изолированное окружение | 2.5 | T1.6, T7.4 | батч; `embed_model_id` в манифест |
 | T8.2 | `ports/index_builder.py` + `index_npy.py` (продукт-партиции, .npy+jsonl+manifest, атомарный commit) | 3.5 | T8.1 | иммутабельность; `build_id`=hash входов |
-| T8.3 | `ports/lexical_index.py` + `index_tantivy.py`/`lexical_tantivy.py` (RU/EN-стеммер + raw/ngram-профиль) | 4 | T1.6 | V1 подтверждён на golden; двойной профиль |
+| T8.3 | `ports/lexical_index.py` + `index_tantivy.py`/`lexical_tantivy.py` (RU/EN-стеммер + raw/ngram-профиль); опирается на **существующий** `lexical_bm25.py` | 3.5 | T1.6 | V1 подтверждён на golden; двойной профиль |
 | T8.4 | `ports/vector_index.py` + `vector_npy.py` (brute-force cosine по шардам) | 2 | T8.2 | продукт-скоупед (I17); тест |
-| T8.5 | RRF-фьюжн (обёртка `util/fusion`) + формирование `RetrievedChunk` с provenance | 1.5 | T8.3, T8.4 | фьюжн явный в pipeline; tie-break по `chunk_id` |
-| T8.6 | `retrieval-golden` (30–40 пар) + `pipeline/experiments.py` R0/R1/R2 (recall@K, cut-off=pipeline-K) | 3.5 | T8.5 | профиль и K зафиксированы измерением (R9/R10) |
+| T8.5 | RRF-фьюжн (обёртка **существующего** `util/fusion`) + формирование `RetrievedChunk` с provenance | 1.5 | T8.3, T8.4 | фьюжн явный в pipeline; tie-break по `chunk_id` |
+| T8.6 | `retrieval-golden` (30–40 пар) + `pipeline/experiments.py` R0/R1/R2 (recall@K, cut-off=pipeline-K); метрики — из **существующего** `util/retrieval_eval.py` | 3 | T8.5 | профиль и K зафиксированы измерением (R9/R10) |
 | T8.7 | `extraction-golden` (PDF+Office) + A/B экстракторов | 2 | T7.2 | смена `extractor_version` триггерит прогон |
 
-**Итого W8 ≈ 19 дд.**
+**Итого W8 ≈ 17.5 дд.** (скорректировано с учётом существующих BM25-прототипа, RRF и retrieval-метрик — §0)
 
 ### W9 — Оценщик
 
@@ -351,14 +387,14 @@ preliminary-yield), калибровка порогов.
 | W4 | 9 |
 | W5 | 10 |
 | W6 | 9 |
-| W7 | 14 |
-| W8 | 19 |
+| W7 | 12.5 |
+| W8 | 17.5 |
 | W9 | 14 |
 | W10 | 10.5 |
 | W11 | 9 |
 | W12 | 11 |
 | W13 | 18.5 |
-| **Итого** | **≈ 153.5 дд** кода + доменная работа (авторство категорий, golden-аннотация, калибровка) |
+| **Итого** | **≈ 150.5 дд** кода + доменная работа (авторство категорий, golden-аннотация, калибровка) |
 
 Это согласуется с §14 регламента (M0–M2 ≈ 13–15 нед чистого кода при 5 дд/нед) и подтверждает:
 **код — не самое дорогое; основная стоимость — калибровка методологии и авторство категорий.**
