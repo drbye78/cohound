@@ -91,7 +91,7 @@ build_corpus(plan, crawler, extractor, chunker, embedder: EmbedderPort,
              index_builder: IndexBuilderPort, store)         # K3
 products × doc_domains
   → CrawlerPort.fetch(url, render_mode)      # сырые байты → corpus_raw/{product}/{hash}.bin
-  → ExtractorPort.extract(page)              # HTML(trafilatura) | PDF(docling)
+  → ExtractorPort.extract(page)              # HTML(trafilatura) | PDF/Office(docling)
   → dedup(content_hash)                      # повтор перепечаток не индексируется
   → ChunkerPort.chunk(doc)                   # heading_path, context_prefix
   → EmbedderPort.embed(chunks)               # батч, локальная модель

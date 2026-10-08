@@ -373,6 +373,7 @@ JSONPath-маппинг полей) и реализует `RegistryFetcherPort`.
 | Векторный индекс (Npy→Qdrant) | новый `adapters/vector_*.py` | pipeline/evaluate (тот же порт) |
 | SERP-провайдера | новый `adapters/search_*.py` + YAML | pipeline |
 | Экстрактор (docling→другой) | новый `adapters/extract_*.py` | corpus |
+| Добавить формат (docx/pptx/xlsx/…) | реестр `SUPPORTED_FORMATS` в `adapters/extract_document.py` | corpus |
 | Хранилище (SQLite→PG) | новый `store/*.py` | domain |
 
 ---

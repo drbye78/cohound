@@ -176,7 +176,7 @@ CLI-ядро (`resolve · plan · discover · run · review · report · golden 
 | **Ретривал-профиль** | эксперимент в M1: R0=BM25 / R1=dense / R2=RRF-гибрид на retrieval-golden; дефолт фиксируется измерением и записывается в манифест. Параметр `retrieval_cutoff_K` (K единиц, отдаваемых оценщику) входит в профиль | ретривал принимается по evidence, не по предвидению (A3); гипотеза: R2 выигрывает на смешанном RU/EN корпусе — проверяемая, не предрешённая |
 | Эмбеддинги | локально, sentence-transformers: multilingual-e5-large (кандидат), BGE-M3 (альтернатива); финал по R9/R10 | данные не покидают контур; NC-лицензии исключены |
 | Краулинг | Scrapy + scrapy-playwright (per-domain рендер-профили) | production-фреймворки; качество извлечения кормит цитатную валидацию |
-| Экстракция | trafilatura (HTML) · docling (PDF, фич-матрицы → markdown); PyMuPDF исключён (AGPL); лицензии и транзитивные зависимости (pypdfium2, OCR-модели) верифицируются в M0 | docling выбран осознанно, но табличные фич-матрицы — риск потери структуры; тест на 3–5 реальных мануалах РФ-вендоров — **блокер M0**, не M1 (§16) |
+| Экстракция | trafilatura (HTML) · docling (PDF + Office: DOCX/PPTX/XLSX, фич-матрицы → markdown); PyMuPDF исключён (AGPL); лицензии и транзитивные зависимости (pypdfium2, OCR-модели) верифицируются в M0 | docling выбран осознанно: нативно парсит Office Open XML (его бэкенды — python-docx/python-pptx/openpyxl; для офисных форматов torch не нужен, `docling-slim[format-office]`). Риск потери табличной структуры фич-матриц; тест на 3–5 реальных мануалах РФ-вендоров (PDF + Office) — **блокер M0**, не M1 (§16) |
 | **LLM-оценщик** | self-host, контур РФ: vLLM/SGLang c **constrained decoding** (xgrammar/XGrammar) + greedy/seed; кандидаты — DeepSeek-V4.1-Flash (MIT), GLM-5.3-Flash (MIT), GigaChat3.5-432B (MIT, ru); лёгкие — GLM-4.5-Air (MIT), Qwen3.8-27B (Apache-2.0). **Без веб-тула.** Финал — измерением на golden (A3) | корпус не покидает контур безусловно; запрет поиска структурный (у сырых весов тула нет); self-host пинит веса/движок → лучше для R7 |
 | **Search-адаптер** | Yandex Search API + Yandex GPT Web Search Tool (РФ) — дефолт; альтернатива — GLM Web Search API. Commodity-слой, вне evidence-модели | даёт цитаты-кандидаты (`url_citation`/`link`), которые обязаны пройти corpus_raw → hash → index (I19) |
 | Отчёты / Оркестрация | openpyxl · однопроцессный Python + thread-pool (**дефолт MVP**, пересматривается по триггеру) | без изменений |
@@ -621,6 +621,9 @@ Yield · расхождение кандидат/strict на golden · врем�
 | Профили (КИИ, ВН) | первый профильный заказчик |
 | Веб-UI, многопользовательность | команда >2–3 на цикл |
 | Категории 6+ | стабильность 5 кейсов; онбординг — §11.4 |
+| Парсинг исходного кода (code-chunker) | кейс, где upstream-факт (архетипы A/B) доказуем только по исходникам; отдельный `ChunkerPort`-адаптер, без графа |
+| Граф знаний / GraphRAG (vector+graph) | потребность в кросс-продуктовых связях, не выражаемых `baselines.csv`/сателлитами; в текущем дизайне не требуется (A1/A2) |
+| Лёгкие Office-extras docling (`docling-slim[format-office]`) | если вес полного docling (torch) мешает установке/CI, а PDF-контур уже вынесен отдельно |
 
 ---
 

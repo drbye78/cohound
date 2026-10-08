@@ -299,7 +299,7 @@ def main() -> int:
     check("security: SSRF-блок и санитизация", lambda: _util_security())
     check("fusion: RRF дедуп по chunk_id + детерминизм", lambda: _util_fusion())
     check("MarkdownChunker: heading_path иерархичен (I17/§3.2)", lambda: _chunker())
-    check("DoclingPdfExtractor: грациозная деградация", lambda: _pdf_extractor())
+    check("DoclingDocumentExtractor: pdf/office + грациозная деградация", lambda: _pdf_extractor())
 
     section("Скопированные утилиты/адаптеры (gtm, авторские) — §11.2/§11.3")
     check("text_utils: RU-нормализация токенов", lambda: _util_ru_tokenize())
@@ -378,14 +378,23 @@ def _chunker() -> None:
 
 
 def _pdf_extractor() -> None:
-    from core.adapters.extract_pdf import DoclingPdfExtractor
+    from core.adapters.extract_document import DoclingDocumentExtractor
 
-    ex = DoclingPdfExtractor()
+    ex = DoclingDocumentExtractor()
     # При недоступном docling адаптер деградирует, а не падает.
-    res = ex.extract_bytes(b"%PDF-1.4 not really a pdf")
+    res = ex.extract_bytes(b"%PDF-1.4 not really a pdf", "manual.pdf")
     _assert(res.text == "")
     _assert(res.error is not None)
-    _assert(res.extractor_version == DoclingPdfExtractor.version)
+    _assert(res.extractor_version == DoclingDocumentExtractor.version)
+    # Реестр форматов: pdf + office (§3.2).
+    _assert(DoclingDocumentExtractor.supports("a.pdf"))
+    _assert(DoclingDocumentExtractor.supports("a.docx"))
+    _assert(DoclingDocumentExtractor.supports("a.pptx"))
+    _assert(DoclingDocumentExtractor.supports("a.xlsx"))
+    _assert(not DoclingDocumentExtractor.supports("a.txt"))
+    # Неподдерживаемый формат → ошибка без исключения.
+    bad = ex.extract_bytes(b"data", "file.bin")
+    _assert(bad.text == "" and bad.error is not None)
 
 
 def _util_ru_tokenize() -> None:

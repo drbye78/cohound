@@ -18,6 +18,13 @@ coHound использует оригинальный код, а также фр
     имён; функция под графовую БД удалена, добавлен `sanitize_slug`).
   - `core/util/fusion.py` ← `gag5/retrieval/fusion.py` (RRF и др. методы слияния;
     доменные веса убраны, ключ дедупа параметризован под `chunk_id`).
+  - `core/adapters/extract_document.py` — идея graceful-degradation и способ вызова
+    `DocumentConverter.export_to_markdown()` ← `gag5/documents/parse.py`; реализация
+    написана заново и расширена на Office-форматы (DOCX/PPTX/XLSX), доменные хвосты и
+    мёртвые ветки gag5 (`parse_with_elements`) не переносились. Код gag5 для ручного
+    OOXML-парсинга (`documents/layout.py`: `DOCXStructureAnalyzer` и др.) **не копировался** —
+    он сырой (таблицы DOCX пропускались, XLSX-заглушка на 10 строк), а docling закрывает
+    офисные форматы нативно.
 - **MIT License (текст):**
 
   ```

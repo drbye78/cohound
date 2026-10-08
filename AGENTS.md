@@ -34,7 +34,7 @@ core/                         # ядро: категорийно-НЕЙТРАЛ�
   schemas.py                  # (текущий монолит) Pydantic-схемы §4.2/4.3/4.5/7 + инварианты
   db.py                       # (текущий) SQLite DDL §4.4 + триггеры инвариантов
   util/                       # text_utils (RU/EN), security (SSRF/slug), fusion (RRF) — см. NOTICES
-  adapters/                   # chunker_markdown (heading_path), extract_pdf (docling) — см. NOTICES
+  adapters/                   # chunker_markdown (heading_path), extract_document (docling: pdf+office), lexical_bm25 — см. NOTICES
   # целевое расщепление (docs/architecture/01-modules-and-contracts.md):
   domain/                     # модели, enums, invariants, scoring, r2, anchors (чистый Python, без I/O)
   ports/                      # Protocol-интерфейсы: LLM, индексы, embedder, index_builder, search,

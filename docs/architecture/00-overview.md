@@ -143,7 +143,7 @@ flowchart LR
 
 `adapters/vector_npy.py` (NpyVectorIndex, продукт-шарды) · `adapters/lexical_tantivy.py` ·
 `adapters/llm_local.py` (vLLM/SGLang) · `adapters/search_yandex.py` · `adapters/search_glm.py` ·
-`adapters/crawl_scrapy.py` · `adapters/extract_html.py`/`extract_pdf.py` · `adapters/chunker_*.py` ·
+`adapters/crawl_scrapy.py` · `adapters/extract_html.py`/`extract_document.py` · `adapters/chunker_*.py` ·
 `store/sqlite.py` · `store/paths.py`.
 
 **Адаптеры-писатели индекса:** `adapters/index_npy.py` и `adapters/index_tantivy.py` реализуют
@@ -204,7 +204,7 @@ core/
                compute.py report.py experiments.py gates.py
   adapters/    vector_npy.py lexical_tantivy.py index_npy.py index_tantivy.py
                embed_local.py llm_local.py search_yandex.py
-               search_glm.py crawl_scrapy.py extract_html.py extract_pdf.py
+               search_glm.py crawl_scrapy.py extract_html.py extract_document.py
   store/       sqlite.py paths.py
   config/      run_config.py paths.py
   cli/         main.py commands.py
