@@ -151,6 +151,14 @@ from core.pipeline.golden import (
     evaluate_golden,
     run_golden,
 )
+from core.pipeline.review import (
+    PromotionResult,
+    ReviewError,
+    ReviewItem,
+    promote,
+    promote_batch,
+    review_queue,
+)
 from core.pipeline.plan import RunPlan, derive_run_id, load_plan, plan
 from core.pipeline.registry import (
     registry_covered_params,
@@ -311,4 +319,11 @@ __all__ = [
     "evaluate_golden",
     "check_thresholds",
     "assert_golden",
+    # review (§7/§D.6), I6/I7
+    "ReviewItem",
+    "PromotionResult",
+    "ReviewError",
+    "review_queue",
+    "promote",
+    "promote_batch",
 ]
