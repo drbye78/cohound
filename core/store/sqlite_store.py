@@ -25,10 +25,13 @@ from core.domain import (
     Cell,
     CellEvidence,
     CellState,
+    CorpusChunk,
+    CorpusDoc,
     EndpointKind,
     EvidenceType,
     Gate,
     GateDecision,
+    IndexManifestEntry,
     LLMScenario,
     ProtocolExhaustion,
     RankingPolicy,
@@ -580,6 +583,89 @@ class SqliteStore:
         ]
         with self.conn:
             self.conn.executemany(sql, rows)
+
+    # -- корпус (Ш5, W7) ------------------------------------------------- #
+    def upsert_corpus_doc(self, doc: CorpusDoc) -> None:
+        """Upsert строки ``corpus_docs`` (raw retention + provenance экстракции, §3.2)."""
+        with self.conn:
+            self.conn.execute(
+                "INSERT OR REPLACE INTO corpus_docs"
+                " (doc_id, product_id, url, fetched_at, content_hash, raw_path,"
+                "  extractor_version, render_mode, lang)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    doc.doc_id,
+                    doc.product_id,
+                    doc.url,
+                    doc.fetched_at,
+                    doc.content_hash,
+                    doc.raw_path,
+                    doc.extractor_version,
+                    _as_text(doc.render_mode),
+                    doc.lang,
+                ),
+            )
+
+    def add_chunk(self, chunk: CorpusChunk) -> None:
+        """Upsert строки ``corpus_chunks`` (PK ``chunk_id``), идемпотентно (S8/I19)."""
+        self.add_chunks_batch([chunk])
+
+    def add_chunks_batch(self, chunks: list[CorpusChunk]) -> None:
+        """Батчевый upsert чанков (одна транзакция на пачку, §B.2)."""
+        if not chunks:
+            return
+        sql = (
+            "INSERT OR REPLACE INTO corpus_chunks"
+            " (chunk_id, doc_id, product_id, url, heading_path, lang, chunk_no, text,"
+            "  context_prefix, content_hash, build_id, embed_model_id, embedded_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        )
+        rows = [
+            (
+                c.chunk_id,
+                c.doc_id,
+                c.product_id,
+                c.url,
+                c.heading_path,
+                c.lang,
+                c.chunk_no,
+                c.text,
+                c.context_prefix,
+                c.content_hash,
+                c.build_id,
+                c.embed_model_id,
+                c.embedded_at,
+            )
+            for c in chunks
+        ]
+        with self.conn:
+            self.conn.executemany(sql, rows)
+
+    def save_index_manifest(self, entry: IndexManifestEntry) -> None:
+        """Upsert строки ``index_manifest`` (PK ``(index_build_id, product_id)`` — K1/I17)."""
+        with self.conn:
+            self.conn.execute(
+                "INSERT OR REPLACE INTO index_manifest"
+                " (index_build_id, product_id, package_id, partition_key, snapshot_date,"
+                "  chunker_version, embed_model_id, embed_dim, lexical_engine_version,"
+                "  vector_store, store_path, created_at, stats_json)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    entry.index_build_id,
+                    entry.product_id,
+                    entry.package_id,
+                    entry.partition_key,
+                    entry.snapshot_date,
+                    entry.chunker_version,
+                    entry.embed_model_id,
+                    entry.embed_dim,
+                    entry.lexical_engine_version,
+                    entry.vector_store,
+                    entry.store_path,
+                    entry.created_at,
+                    _as_json_text(entry.stats_json),
+                ),
+            )
 
     def read_manifest(self, run_id: str) -> RunManifest:
         """Собирает ``RunManifest`` из строки ``runs`` (+ ``llm_scenarios``).

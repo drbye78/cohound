@@ -661,3 +661,78 @@ class Violation(BaseModel):
     message: str
     field: str | None = None
 
+
+# ---------------------------------------------------------------------------
+# §4.4 Корпус и индекс (T7.3/T7.4, W8) — персистентные строки store
+# ---------------------------------------------------------------------------
+
+
+class CorpusDoc(BaseModel):
+    """Строка ``corpus_docs`` (§4.4, Ш5): сырой документ с retention-путём и версией.
+
+    ``raw_path`` — retention байтов (§3.2); ``extractor_version`` позволяет re-extract
+    без ре-фетча. ``render_mode`` — строка (не ``ports.RenderMode``): домен L0 не
+    импортирует порты L2 (матрица 01 §1).
+    """
+
+    model_config = _BASE
+
+    doc_id: str
+    product_id: str
+    url: str
+    fetched_at: str | None = None
+    content_hash: str | None = None
+    raw_path: str | None = None
+    extractor_version: str | None = None
+    render_mode: str | None = None
+    lang: str | None = None
+
+
+class CorpusChunk(BaseModel):
+    """Строка ``corpus_chunks`` (§4.4, Ш5): единица индексации с привязкой к сборке.
+
+    ``context_prefix`` не входит в валидацию цитат (§4.4) — цитата обязана быть
+    подстрокой ``text``. ``build_id`` привязывает чанк к индексной сборке (S5/I19).
+    """
+
+    model_config = _BASE
+
+    chunk_id: str
+    doc_id: str
+    product_id: str
+    url: str | None = None
+    heading_path: str | None = None
+    lang: str | None = None
+    chunk_no: int | None = None
+    text: str
+    context_prefix: str | None = None
+    content_hash: str | None = None
+    build_id: str | None = None
+    embed_model_id: str | None = None
+    embedded_at: str | None = None
+
+
+class IndexManifestEntry(BaseModel):
+    """Строка ``index_manifest`` (§4.4, K1): иммутабельная сборка × продукт-партиция (I17).
+
+    Один ``index_build_id`` даёт N партиций (по продукту). ``store_path`` указывает на
+    ``index_store/{package}/{build}/{product_id}/``.
+    """
+
+    model_config = _BASE
+
+    index_build_id: str
+    product_id: str
+    package_id: str | None = None
+    partition_key: str | None = None
+    snapshot_date: str | None = None
+    chunker_version: str | None = None
+    embed_model_id: str | None = None
+    embed_dim: int | None = None
+    lexical_engine_version: str | None = None
+    vector_store: str | None = None
+    store_path: str | None = None
+    created_at: str | None = None
+    stats_json: str | None = None
+
+

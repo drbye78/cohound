@@ -16,7 +16,10 @@ from typing import Any, Iterable, Iterator, Protocol, runtime_checkable
 from core.domain import (
     Cell,
     CellEvidence,
+    CorpusChunk,
+    CorpusDoc,
     GateDecision,
+    IndexManifestEntry,
     ProtocolExhaustion,
     RegistryFact,
     RunConfig,
@@ -69,6 +72,15 @@ class StorePort(Protocol):
     def save_registry_fact(self, rf: RegistryFact) -> None: ...
 
     def save_llm_scenarios(self, bindings: list[ScenarioBinding]) -> None: ...
+
+    # -- корпус (Ш5, W7) -------------------------------------------------- #
+    def upsert_corpus_doc(self, doc: CorpusDoc) -> None: ...
+
+    def add_chunk(self, chunk: CorpusChunk) -> None: ...
+
+    def add_chunks_batch(self, chunks: list[CorpusChunk]) -> None: ...
+
+    def save_index_manifest(self, entry: IndexManifestEntry) -> None: ...
 
     # -- чтение ---------------------------------------------------------- #
     def iter_cells(self, run_id: str, state: str | None = None) -> Iterator[Cell]: ...

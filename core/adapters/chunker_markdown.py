@@ -17,6 +17,7 @@ import re
 from dataclasses import dataclass, field
 
 from core.ports.types import Chunk
+from core.ports.types import ExtractedDoc
 
 _HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
 
@@ -151,3 +152,28 @@ class MarkdownChunker:
             next_pos = end - self.chunk_overlap
             pos = next_pos if next_pos > pos else end
         return pieces
+
+
+class MarkdownChunkerPort(MarkdownChunker):
+    """Обёртка ``MarkdownChunker`` под контракт ``ChunkerPort`` (T7.3).
+
+    Порт (``core/ports/chunker.py``) объявляет ``chunk(doc: ExtractedDoc, document_id)``,
+    тогда как базовый :class:`MarkdownChunker` принимает ``chunk(document_id, text)``
+    и используется в selfcheck. Обёртка переопределяет ``chunk`` под порт-сигнатуру и
+    оставляет базовый метод доступным как :meth:`chunk_text` — так адаптер реализует
+    ``ChunkerPort`` структурно, не ломая существующие вызовы.
+
+    ``document_id`` — стабильный id документа (например, ``source_id``/``doc_id``);
+    ``chunk_id`` детерминирован (``f"{document_id}#{no}"``), что сохраняет привязку
+    чанка к сборке и идемпотентность (I19/S5).
+    """
+
+    def chunk(self, doc: ExtractedDoc, document_id: str) -> list[Chunk]:  # type: ignore[override]
+        """Порт-путь: ``ExtractedDoc`` + ``document_id`` → секционные чанки с heading_path."""
+        return self.chunk_text(document_id, doc.text)
+
+    def chunk_text(self, document_id: str, text: str) -> list[Chunk]:
+        """Чанкинг по markdown-тексту (сохранённый базовый вход)."""
+        return super().chunk(document_id, text)
+
+
