@@ -1,0 +1,10 @@
+registry_id: registry-x
+jurisdiction: XX
+endpoint: "https://data.example.test/registry/{product_id}"
+method: GET
+format: json
+records_path: items
+query_param: q
+mapping:
+  name: name
+  version: ver

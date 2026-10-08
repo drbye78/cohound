@@ -1,0 +1,9 @@
+registry_id: registry-h
+jurisdiction: XX
+endpoint: "https://data.example.test/list/{product_id}"
+format: html
+records_path: tr
+mapping:
+  name: "#text"
+  version: "@data-ver"
+  row_id: "@id"
