@@ -74,6 +74,7 @@ from core.config import (
 )
 from core.config.deploy import DeployConfig, is_split, load_deploy_config
 from core.domain.enums import Status
+from core.domain.models import CatalogRow, Cohort
 from core.pipeline import (
     GATE_PHASES,
     PHASES,
@@ -141,6 +142,13 @@ _PROMOTE_STATUSES: tuple[str, ...] = (
     Status.ABSENT.value,
     Status.UNKNOWN.value,
 )
+
+#: Имя иммутабельной копии входа в каталоге прогона (``03`` §A.2).
+RUN_YAML_FILENAME = "run.yaml"
+#: Имя снимка входов плана в каталоге прогона (самодостаточность прогона, ``03`` §A.2).
+PLAN_INPUTS_FILENAME = "plan_inputs.json"
+#: Версия формата :data:`PLAN_INPUTS_FILENAME` (для будущей эволюции без поломки чтения).
+PLAN_INPUTS_SNAPSHOT_VERSION = 1
 
 #: ``CODE: message`` — сообщения линтера/инвариантов начинаются с кода правила.
 _CODE_RE = re.compile(r"^\s*([^\s:]+):")
@@ -395,6 +403,18 @@ def cmd_run(args: argparse.Namespace) -> int:
     store = build_store(db_path, profile=args.profile)
     try:
         _ensure_run(store, run_id, inputs)
+        # 03 §A.2: снимок входов прогона (иммутабельная копия run.yaml + plan_inputs.json)
+        # записывается ДО исполнения фаз, чтобы последующие команды были самодостаточны.
+        # Сбой снимка не роняет прогон: фиксируется в instrumentation_errors и не
+        # подменяет код возврата.
+        try:
+            instrumentation_errors.extend(
+                _snapshot_run_inputs(args, run_id, inputs=inputs, run_plan=run_plan)
+            )
+        except Exception as exc:  # noqa: BLE001 — самодостаточность не роняет прогон
+            instrumentation_errors.append(
+                f"snapshot: {type(exc).__name__}: {_concise(exc)}"
+            )
         runner = build_runner(
             store,
             profile=args.profile,
@@ -535,12 +555,12 @@ def cmd_sensitivity(args: argparse.Namespace) -> int:
     ``--run-id`` либо выводится, если в БД ровно один прогон) **или**
     ``--runs-dir`` + ``--run-id`` → ``runs/{run_id}/cohound.db``.
 
-    Бандл пересобирается :func:`core.pipeline.compute.compute` из ячеек прогона. **ГЭП:**
-    каталог/веса/когорта в операционной БД не персистятся (в ``runs`` их нет), поэтому
-    для точного воспроизведения передаются ``--run-yaml`` + ``--package`` — через
-    ``load_inputs``/``plan`` берутся focused-каталог, перенормированные веса и когорта.
-    Без них расчёт идёт с **пустым** каталогом (вес ячейки = 1.0) и без когорты, а
-    ограничение явно печатается в поле ``notes`` (значения не выдумываются).
+    Бандл пересобирается :func:`core.pipeline.compute.compute` из ячеек прогона. Источник
+    каталога/весов/когорты (приоритет): явные ``--run-yaml`` + ``--package``, иначе снимок
+    прогона ``runs/{run_id}/plan_inputs.json`` (``cmd_run`` пишет его — прогон
+    самодостаточен, ``03`` §A.2). Лишь при отсутствии обоих источников расчёт идёт с
+    **пустым** каталогом (вес ячейки = 1.0) и без когорты, а ограничение явно печатается
+    в поле ``notes`` (значения не выдумываются).
 
     Печатает оси ``per_axis``, флаг ``stable``, ``unstable_pairs`` и
     ``requested_ranking``/``computed_ranking`` (человеку или JSON).
@@ -554,7 +574,7 @@ def cmd_sensitivity(args: argparse.Namespace) -> int:
             run_id = _infer_run_id(store)
         store.read_manifest(run_id)  # валидация: прогон существует
         catalog, module_weights, cohort, notes = _restore_plan_inputs(
-            args, run_id, purpose="sensitivity"
+            args, run_id, purpose="sensitivity", run_dir=Path(db_path).parent
         )
         bundle = compute(
             store=store,
@@ -590,10 +610,11 @@ def cmd_golden(args: argparse.Namespace) -> int:
     ``--run-id`` либо выводится, если в БД ровно один прогон) **или** ``--runs-dir`` +
     ``--run-id`` → ``runs/{run_id}/cohound.db``.
 
-    Каталог (для классификации критических параметров, R12) строится из
-    ``--run-yaml`` + ``--package`` при их наличии; иначе ``evaluate_golden`` получает
-    **пустой** каталог и важность параметров неизвестна (ГЭП: каталог не персистится в
-    БД) — правило «false ❌ на Кр» тогда не срабатывает, что честно печатается в ``notes``.
+    Каталог (для классификации критических параметров, R12) берётся из явных
+    ``--run-yaml`` + ``--package`` при их наличии, иначе из снимка прогона
+    ``runs/{run_id}/plan_inputs.json``. Лишь если оба источника недоступны, ``evaluate_golden``
+    получает **пустой** каталог и важность параметров неизвестна — правило «false ❌ на Кр»
+    тогда не срабатывает, что честно печатается в ``notes``.
 
     ``--tier fast|full`` фильтрует строки :class:`~core.domain.models.GoldenRow` по
     ``tier`` **до** оценки (PR-гейт vs полный набор, §11.6).
@@ -618,7 +639,7 @@ def cmd_golden(args: argparse.Namespace) -> int:
         if args.tier is not None:
             golden = [row for row in golden if row.tier.value == args.tier]
         catalog, _weights, _cohort, notes = _restore_plan_inputs(
-            args, run_id, purpose="golden"
+            args, run_id, purpose="golden", run_dir=Path(db_path).parent
         )
         report = evaluate_golden(
             golden=golden, store=store, run_id=run_id, catalog=catalog
@@ -656,8 +677,9 @@ def cmd_report(args: argparse.Namespace) -> int:
     ``read_manifest``. Артефакты пишутся :func:`core.pipeline.report.write_reports` в
     ``{out}/{run_id}/outputs/`` (``--out``; дефолт — ``--runs-dir`` либо ``runs``).
 
-    Каталог/веса/когорта восстанавливаются из ``--run-yaml`` + ``--package`` (как в
-    ``sensitivity``); без них расчёт идёт с пустым каталогом и явной заметкой о ГЭП.
+    Каталог/веса/когорта восстанавливаются из явных ``--run-yaml`` + ``--package`` либо из
+    снимка прогона ``runs/{run_id}/plan_inputs.json``; лишь без обоих источников расчёт идёт
+    с пустым каталогом и явной заметкой о ГЭП.
     Если ``read_manifest`` вернул незаполненный манифест (финальная фаза ``report`` не
     завершалась), это также сообщается в ``notes`` — артефакты строятся из текущего
     состояния ячеек, а не выдумываются версии.
@@ -676,7 +698,7 @@ def cmd_report(args: argparse.Namespace) -> int:
             run_id = _infer_run_id(store)
         manifest = store.read_manifest(run_id)
         catalog, module_weights, cohort, notes = _restore_plan_inputs(
-            args, run_id, purpose="report"
+            args, run_id, purpose="report", run_dir=Path(db_path).parent
         )
         bundle = compute(
             store=store,
@@ -1113,15 +1135,27 @@ def _print_promote(payload: dict[str, Any]) -> None:
 
 
 def _restore_plan_inputs(
-    args: argparse.Namespace, run_id: str, *, purpose: str
+    args: argparse.Namespace,
+    run_id: str,
+    *,
+    purpose: str,
+    run_dir: str | Path | None = None,
 ) -> tuple[dict[str, Any], dict[str, float], Any, list[str]]:
-    """Восстанавливает ``(catalog, module_weights, cohort, notes)`` из ``--run-yaml``/``--package``.
+    """Восстанавливает ``(catalog, module_weights, cohort, notes)`` для пост-хок команд.
 
-    При наличии обоих аргументов каталог/веса/когорта берутся из плана (как в фазе Ш8:
-    ``plan.params`` + ``renormalized_weights``/``module_weights`` + ``plan.cohort``).
-    Иначе возвращаются пустые значения и явная заметка о ГЭП — каталог/веса **не
-    выдумываются**. ``purpose`` называет команду в тексте заметки (``sensitivity``/
-    ``golden``/``report``).
+    Приоритет источников:
+
+    (a) **явные** ``--run-yaml`` + ``--package`` — высший приоритет (поведение сохранено);
+    (b) **снимок прогона** ``runs/{run_id}/plan_inputs.json`` (``03`` §A.2), если каталог
+        пакета больше не нужен — прогон самодостаточен. Заметка сообщает, что значения
+        восстановлены из снимка (ГЭП отсутствует);
+    (c) иначе — **пустые** значения и явная ГЭП-заметка: каталог/веса/когорта **не
+        выдумываются** (вес ячейки = 1.0, когорта ``None``).
+
+    :param run_dir: каталог прогона (``runs/{run_id}``); ``None`` → выводится из
+        ``--runs-dir``/``--db`` (:func:`_resolve_run_dir`). Команды передают родителя
+        резолвнутой БД, что покрывает оба контракта выбора хранилища.
+    :param purpose: имя команды в тексте ГЭП-заметки (``sensitivity``/``golden``/``report``).
     """
     notes: list[str] = []
     if args.run_yaml and args.package:
@@ -1137,15 +1171,188 @@ def _restore_plan_inputs(
 
     if args.run_yaml or args.package:
         notes.append(
-            "для восстановления каталога нужны ОБА --run-yaml и --package; "
-            "указан только один — использован пустой каталог"
+            "для восстановления каталога нужны ОБА --run-yaml и --package; указан только "
+            "один — предпринята попытка восстановления из plan_inputs.json прогона"
         )
+
+    resolved_dir = run_dir if run_dir is not None else _resolve_run_dir(args, run_id)
+    restored = _load_plan_inputs_snapshot(resolved_dir, run_id)
+    if restored is not None:
+        catalog, module_weights, cohort = restored
+        notes.append("каталог/веса/когорта восстановлены из plan_inputs.json прогона")
+        return catalog, module_weights, cohort, notes
+
     notes.append(
         "ГЭП: каталог/веса/когорта не персистятся в БД прогона — "
         f"{purpose} рассчитан с пустым каталогом (вес ячейки = 1.0) и без когорты; "
         "передайте --run-yaml и --package для точного воспроизведения"
     )
     return {}, {}, None, notes
+
+
+def _resolve_run_dir(args: argparse.Namespace, run_id: str) -> Path | None:
+    """Выводит каталог прогона ``runs/{run_id}`` из аргументов команды.
+
+    Приоритет: явный ``--runs-dir`` (``{runs_dir}/{run_id}``), иначе родитель явного
+    ``--db`` (для канонической раскладки ``--db runs/{run_id}/cohound.db`` это тот же
+    каталог). ``--db :memory:`` и отсутствие обоих дают ``None`` — снимок не ищется,
+    команда честно уходит в ГЭП-ветку.
+    """
+    runs_dir = getattr(args, "runs_dir", None)
+    if runs_dir:
+        return Path(runs_dir) / run_id
+    db = getattr(args, "db", None)
+    if db is not None and str(db) != ":memory:":
+        return Path(db).parent
+    return None
+
+
+def _load_plan_inputs_snapshot(
+    run_dir: str | Path | None, run_id: str
+) -> tuple[dict[str, Any], dict[str, float], Any] | None:
+    """Читает и валидирует ``runs/{run_id}/plan_inputs.json`` (снимок входов плана).
+
+    Возвращает ``(catalog, module_weights, cohort)`` либо ``None`` при отсутствии/
+    частичности/несовместимой версии снимка или ``run_id``-несоответствии. Несовпадение
+    ``run_id`` трактуется как чужой снимок: значения не подставляются (не выдумываем).
+    """
+    if run_dir is None:
+        return None
+    path = Path(run_dir) / PLAN_INPUTS_FILENAME
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(data, Mapping):
+        return None
+    if data.get("snapshot_version") != PLAN_INPUTS_SNAPSHOT_VERSION:
+        return None
+    if data.get("run_id") != run_id:
+        return None
+    raw_params = data.get("params")
+    raw_cohort = data.get("cohort")
+    if not isinstance(raw_params, list) or not isinstance(raw_cohort, Mapping):
+        return None
+    try:
+        catalog = {
+            row.param_id: row
+            for row in (CatalogRow.model_validate(item) for item in raw_params)
+        }
+        cohort = Cohort.model_validate(raw_cohort)
+    except (ValueError, TypeError):
+        return None
+    weights = data.get("renormalized_weights")
+    if weights is None:
+        weights = data.get("module_weights")
+    if not isinstance(weights, Mapping):
+        return None
+    try:
+        module_weights = {str(key): float(value) for key, value in weights.items()}
+    except (TypeError, ValueError):
+        return None
+    return catalog, module_weights, cohort
+
+
+def _snapshot_run_inputs(
+    args: argparse.Namespace,
+    run_id: str,
+    *,
+    inputs: RunInputs,
+    run_plan: RunPlan,
+) -> list[str]:
+    """Пишет снимок входов прогона в ``runs/{run_id}/`` (``03`` §A.2).
+
+    Состав:
+
+    * ``run.yaml`` — **иммутабельная копия** входа (байт-в-байт); существующий
+      отличающийся файл **не** перезаписывается (иначе мутировал бы завершённый
+      прогон), идентичный — оставляется как есть;
+    * ``plan_inputs.json`` — детерминированный JSON (``sort_keys=True``,
+      ``ensure_ascii=False``) с тем, что нужно для пересборки каталога/весов/когорты
+      без исходного пакета (см. :func:`_plan_inputs_payload`).
+
+    Никогда не бросает исключений: любая ошибка записи возвращается строкой для
+    ``instrumentation_errors`` прогона (сбой снимка не подменяет код возврата).
+    """
+    run_dir = Path(args.runs_dir) / run_id
+    try:
+        run_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        return [f"snapshot: не удалось создать каталог прогона {run_dir}: {_concise(exc)}"]
+
+    issues = _snapshot_run_yaml(args.run_yaml, run_dir)
+    issues.extend(_snapshot_plan_inputs(run_dir, run_id, inputs=inputs, run_plan=run_plan))
+    return issues
+
+
+def _snapshot_run_yaml(source: str | Path, run_dir: Path) -> list[str]:
+    """Копирует ``run.yaml`` в каталог прогона как иммутабельный вход (``03`` §A.2)."""
+    target = run_dir / RUN_YAML_FILENAME
+    try:
+        data = Path(source).read_bytes()
+    except OSError as exc:
+        return [f"snapshot: не удалось прочитать run.yaml {source}: {_concise(exc)}"]
+
+    if target.exists():
+        try:
+            existing = target.read_bytes()
+        except OSError as exc:
+            return [f"snapshot: не удалось прочитать существующий {target}: {_concise(exc)}"]
+        if existing != data:
+            return [
+                f"snapshot: {target} уже существует и отличается от входа — "
+                "не перезаписан (иммутабельность, 03 §A.2)"
+            ]
+        return []  # идентичный вход: идемпотентный resume, перезапись не требуется
+
+    try:
+        target.write_bytes(data)
+    except OSError as exc:
+        return [f"snapshot: не удалось записать {target}: {_concise(exc)}"]
+    return []
+
+
+def _snapshot_plan_inputs(
+    run_dir: Path, run_id: str, *, inputs: RunInputs, run_plan: RunPlan
+) -> list[str]:
+    """Пишет ``plan_inputs.json`` — снимок плановых входов для пост-хок команд."""
+    target = run_dir / PLAN_INPUTS_FILENAME
+    payload = _plan_inputs_payload(run_id, inputs=inputs, run_plan=run_plan)
+    try:
+        text = json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2) + "\n"
+        target.write_text(text, encoding="utf-8")
+    except (OSError, TypeError, ValueError) as exc:
+        return [f"snapshot: не удалось записать {target}: {_concise(exc)}"]
+    return []
+
+
+def _plan_inputs_payload(
+    run_id: str, *, inputs: RunInputs, run_plan: RunPlan
+) -> dict[str, Any]:
+    """Сериализует минимальный снимок входов плана (без всего :class:`RunInputs`).
+
+    Ключи: ``snapshot_version`` (версия формата), идентичность прогона
+    (``run_id``/``case_id``/``package_id``/``package_version``), и то, что нужно для
+    пересборки без пакета — ``params`` (``CatalogRow.model_dump(mode="json")``),
+    ``module_weights``/``renormalized_weights`` и ``cohort`` (``Cohort``). Ключей
+    ``params``/``cohort`` достаточно для :func:`_load_plan_inputs_snapshot`; прочие —
+    провенанс, а не «истина о продукте».
+    """
+    return {
+        "snapshot_version": PLAN_INPUTS_SNAPSHOT_VERSION,
+        "run_id": run_id,
+        "case_id": run_plan.cohort.case_id,
+        "package_id": inputs.run.package,
+        "package_version": inputs.package.package_version,
+        "anchor": run_plan.anchor,
+        "products": list(run_plan.products),
+        "params": [row.model_dump(mode="json") for row in run_plan.params],
+        "module_weights": dict(run_plan.module_weights),
+        "renormalized_weights": dict(run_plan.renormalized_weights),
+        "cohort": run_plan.cohort.model_dump(mode="json"),
+    }
 
 
 def _print_sensitivity(payload: dict[str, Any]) -> None:
