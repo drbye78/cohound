@@ -348,6 +348,10 @@ def main() -> int:
     section("Расчёт (Ш8) — W10")
     check("compute: I5 (failed в Coverage, вне Capability) + K6", lambda: _compute_i5())
 
+    section("Оценка (Ш6) — W9")
+    check("validate: цитата-подстрока + CellEvidence hash (I10/I19)", lambda: _validate_echelon())
+    check("evaluate: strict failed≠status (I4), preliminary (I13)", lambda: _evaluate_failed())
+
     print(f"\n{CHECKS - len(FAILURES)}/{CHECKS} проверок пройдено")
     if FAILURES:
         print("\nПровалы:")
@@ -1277,6 +1281,75 @@ def _compute_i5() -> None:
             raise AssertionError(f"failure_rate сломан: {bundle.failure_rate}")
         if bundle.computed_ranking not in {"capability_ranked", "coverage_fallback"}:
             raise AssertionError(f"K6 computed_ranking невалиден: {bundle.computed_ranking}")
+
+
+def _validate_echelon() -> None:
+    """Валидация цитат: source_id∈chunks, цитата-подстрока, CellEvidence с content_hash (I10/I19)."""
+    from core.domain import LLMCellOutput, Status
+    from core.pipeline.validate import validate_output
+    from core.ports.types import Chunk
+
+    chunk = Chunk(chunk_id="c1", chunk_no=0, text="Резервное копирование поддерживает PITR.",
+                  heading_path="H", context_prefix="", content_hash="hc1")
+    chunks = {"c1": chunk}
+
+    good = LLMCellOutput(status=Status.OK, justification="есть",
+                         evidence=[LLMEvidence(source_id="c1", quote="поддерживает PITR")])
+    vr = validate_output(output=good, chunks=chunks, product_id="p1", param_id="x", run_id="r1")
+    if not vr.ok or len(vr.resolved_evidence) != 1:
+        raise AssertionError(f"валидная цитата отклонена: {vr.notes}")
+    if vr.resolved_evidence[0].content_hash != "hc1":
+        raise AssertionError("I19: content_hash чанка обязан попасть в evidence")
+
+    bad_quote = LLMCellOutput(status=Status.OK, justification="j",
+                              evidence=[LLMEvidence(source_id="c1", quote="нет такой подстроки")])
+    vr2 = validate_output(output=bad_quote, chunks=chunks, product_id="p1", param_id="x", run_id="r1")
+    if vr2.ok or vr2.failure_kind != "validation_failed":
+        raise AssertionError("цитата не-подстрока обязана провалиться")
+
+    bad_src = LLMCellOutput(status=Status.OK, justification="j",
+                            evidence=[LLMEvidence(source_id="missing", quote="x")])
+    vr3 = validate_output(output=bad_src, chunks=chunks, product_id="p1", param_id="x", run_id="r1")
+    if vr3.ok:
+        raise AssertionError("I10/I15: несуществующий source_id обязан провалиться")
+
+
+def _evaluate_failed() -> None:
+    """Оценка Ш6: strict исчерпание -> failed/status None (I4); preliminary -> I13."""
+    from core.domain import CatalogRow, CellState, LLMCellOutput, Status
+    from core.pipeline.evaluate import evaluate_cell
+    from core.ports.llm import LLMResponse, TokenUsage
+    from core.ports.types import Chunk
+
+    chunk = Chunk(chunk_id="c1", chunk_no=0, text="текст", heading_path="H",
+                  context_prefix="", content_hash="hc1")
+    param = CatalogRow.model_construct(
+        param_id="x", title="t", module="m", group="g", importance="Кр",
+        param_type="fact", rule="r", absence_rule="explicit", role_binding=None, concept_terms={},
+    )
+
+    class _BadEvaluator:
+        def __init__(self):
+            self.calls = 0
+
+        def complete(self, req):
+            self.calls += 1
+            out = LLMCellOutput(status=Status.OK, justification="j",
+                                evidence=[LLMEvidence(source_id="c1", quote="НЕТ ПОДСТРОКИ")])
+            return LLMResponse(output=out, raw="{}", prompt_hash="ph", decoder="none", usage=TokenUsage())
+
+    ev = _BadEvaluator()
+    outcome = evaluate_cell(param=param, product_id="p1", run_id="r1",
+                            evaluator=ev, chunks=[chunk], max_retries=2)
+    if outcome.cell.state is not CellState.FAILED or outcome.cell.status is not None:
+        raise AssertionError(f"I4: исчерпание strict -> failed/status None, получено {outcome.cell.state}/{outcome.cell.status}")
+    if ev.calls != 3:
+        raise AssertionError(f"retry ≤2 => 3 вызова, было {ev.calls}")
+
+    outcome2 = evaluate_cell(param=param, product_id="p1", run_id="r1",
+                             evaluator=ev, chunks=[chunk], strict=False, max_retries=0)
+    if outcome2.cell.state is not CellState.PRELIMINARY or outcome2.cell.status is not None:
+        raise AssertionError("I13: preliminary -> preliminary/status None")
 
 
 if __name__ == "__main__":
