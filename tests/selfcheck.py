@@ -366,6 +366,7 @@ def main() -> int:
     section("SERP/бюджет/поиск — W11")
     check("search_log: бюджет симметричен на продукт (I16/I23)", lambda: _search_budget())
     check("discovery: кандидаты без evidence (I19), промоушен только G2", lambda: _discovery())
+    check("serp_loop: append-only сборки + K2-инвалидация (§13)", lambda: _serp_loop())
 
     section("Adversarial (R8) — W12")
     check("adversarial: 0 известных инъекций + регрессионный gate", lambda: _adversarial_gate())
@@ -1830,6 +1831,99 @@ def _llamacpp_fallback() -> None:
             raise AssertionError(f"I18: веб-тул в оценщике запрещён ({banned})")
     if _m.LlamaCppEvaluator(model_path="/nonexistent.gguf").available:
         raise AssertionError("available обязан быть False без пакета/модели")
+
+
+def _serp_loop() -> None:
+    """SERP-петля: append-only сборки (новый id на раунд), K2-инвалидация, §13."""
+    import ast as _ast
+    import datetime as _dt
+    import inspect as _inspect
+
+    import core.pipeline.serp_loop as _sl
+    from core.domain import (
+        Cell,
+        CellState,
+        LLMEvidence,
+        RankingPolicy,
+        RunConfig,
+        RunMode,
+        StaleReason,
+        Status,
+    )
+    from core.pipeline.search_log import SearchBudget, SearchEffort
+
+    tree = _ast.parse(_inspect.getsource(_sl))
+    imports: set[str] = set()
+    for node in _ast.walk(tree):
+        if isinstance(node, _ast.ImportFrom) and node.module:
+            imports.add(node.module)
+        if isinstance(node, _ast.Import):
+            imports.update(a.name for a in node.names)
+    if {m for m in imports if m.startswith("core.adapters")}:
+        raise AssertionError("01 §1: pipeline не может импортировать adapters")
+
+    from core.pipeline.serp_loop import (
+        ImmutableBuildError,
+        derive_round_build_id,
+        invalidate_affected,
+        run_serp_round,
+    )
+    from core.ports.search import SearchQuery, SearchResult
+    from core.ports.types import RawPage
+    from core.store.sqlite_store import SqliteStore
+
+    class _Fake:
+        adapter_kind = "serp"
+        provider = "fake"
+
+        def search(self, q):
+            return [SearchResult(url="https://example.com/a", title="t", rank=1)]
+
+        def fetch(self, url):
+            raise NotImplementedError
+
+    run_id = "run-selfcheck-serp"
+    base = "ib_base"
+    with SqliteStore(":memory:") as store:
+        store.create_run(run_id, RunConfig(
+            case_id="c", anchor="p1", cohort="cohort.yaml", products=["p1", "p2"],
+            package="pkg", snapshot_date=_dt.date(2026, 1, 1), mode=RunMode.STRICT,
+            ranking_policy=RankingPolicy.CAPABILITY_RANKED,
+        ))
+        store.save_cells_batch([Cell(
+            run_id=run_id, product_id="p1", param_id="x", state=CellState.EVALUATED,
+            status=Status.OK, evidence=[LLMEvidence(source_id="p1:0", quote="q")],
+            index_build_id=base,
+        )])
+        budget = SearchBudget.from_mapping({"serp": 5})
+        queries = {"p1": [SearchQuery(text="q", lang="ru", phase="serp")]}
+        rnd = run_serp_round(
+            adapter=_Fake(), queries_by_product=queries, store=store, run_id=run_id,
+            effort=SearchEffort(budget), budget=budget, round_no=1, parent_build_id=base,
+            package="pkg", clock=lambda: "2026-01-01T00:00:00Z",
+        )
+        if rnd.build.index_build_id == base or not rnd.build.index_build_id.startswith("ib_"):
+            raise AssertionError("раунд обязан породить новую сборку (K2)")
+        invalidated = invalidate_affected(store, run_id, base, rnd.build.index_build_id)
+        if not invalidated or any(c.stale_reason is not StaleReason.NEW_BUILD for c in invalidated):
+            raise AssertionError("K2: затронутые ячейки обязаны помечаться stale_reason=new_build")
+        row = store.conn.execute(
+            "SELECT stale_reason FROM cells WHERE run_id=? AND product_id=? AND param_id=?",
+            (run_id, "p1", "x"),
+        ).fetchone()
+        if row[0] != StaleReason.NEW_BUILD.value:
+            raise AssertionError(f"K2: ячейка старой сборки обязана стать stale, получено {row[0]!r}")
+
+    r1 = derive_round_build_id(None, 1, "pkg", "tok")
+    r2 = derive_round_build_id(r1, 2, "pkg", "tok")
+    if r1 == r2:
+        raise AssertionError("append-only: id раундов обязаны различаться")
+    try:
+        from core.pipeline.serp_loop import assert_build_id_new
+        assert_build_id_new(None, r1, existing_build_ids={r1})
+        raise AssertionError("переиспользование сборки обязано быть запрещено")
+    except ImmutableBuildError:
+        pass
 
 
 if __name__ == "__main__":
