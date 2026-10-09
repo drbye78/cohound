@@ -1,0 +1,4 @@
+product_id,param_id,expected_status,expected_evidence_kind,case_class,tier,note
+product_anchor,param.alpha_capability,✅,documentation,class_ok,fast,"TODO: эталонный ✅"
+product_analog_a,param.beta_capability,⚠️,documentation|web,class_partial,fast,"TODO: эталонный ⚠️"
+product_analog_b,param.gamma_capability,❌,registry,absence_registry,full,"TODO: страта отсутствия (обязательна для golden-full)"

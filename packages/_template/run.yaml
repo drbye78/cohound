@@ -1,0 +1,24 @@
+# ШАБЛОН run.yaml (§4.5). products — РОВНО множество product_id из cohort.yaml (S11).
+case_id: template
+anchor: product_anchor
+cohort: cohort_template
+products:
+  - product_anchor
+  - product_analog_a
+  - product_analog_b
+package: template
+focus:
+  # TODO: сузить до нужных модулей/параметров реального прогона.
+  modules:
+    - module_core
+    - module_ecosystem
+  params:
+    - param.alpha_capability
+    - param.beta_capability
+    - param.gamma_capability
+    - param.public_metric
+    - param.delta_integration
+languages: [ru, en]
+snapshot_date: 2026-01-01
+mode: strict
+ranking_policy: capability_ranked

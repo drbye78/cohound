@@ -1,0 +1,31 @@
+# ШАБЛОН паспорта продукта (§4.3). НЕ ПРОДАКШН; реальные данные — владелец домена.
+# Идентификаторы нейтральны (§1.3). TLD `.invalid` (RFC 2606) — заведомо несуществующие адреса.
+product_id: example_product
+canonical_name: "TODO: каноническое имя продукта"
+vendor: "TODO: вендор продукта"
+# Архетип B: эталона нет.
+upstream: null
+edition_assessed: "TODO: оцениваемая редакция продукта"
+version: "TODO: версия продукта на дату снимка"
+jurisdiction: XX
+doc_domains:
+  - "docs.example.invalid"
+  - "https://manuals.example.invalid/base"
+satellites:
+  # Пример установленного сателлита: все обязательные поля + relationship_evidence.
+  - role: role_primary
+    state: approved
+    component: "TODO: имя установленного компонента"
+    origin: third_party
+    relationship: bundled
+    evidence_state: verified
+    relationship_evidence:
+      url: "https://vendor.example.invalid/relationship"
+      quote: "TODO: цитата, подтверждающая поставку/интеграцию компонента"
+    rejected_candidates:
+      - name: "TODO: отклонённый кандидат"
+        reason: "TODO: причина отклонения (например, связь не подтверждена)"
+  # Сателлит, который искали, но не нашли (существование не подтверждено).
+  - role: role_secondary
+    state: not_found
+snapshot_date: 2026-01-01

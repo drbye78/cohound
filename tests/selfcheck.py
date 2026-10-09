@@ -401,6 +401,12 @@ def main() -> int:
     section("Лексический индекс (W8) — двойной профиль")
     check("lexical: профили stemmed/identifier/raw/ngram + порт", lambda: _lexical_profiles())
 
+    section("Шаблоны данных (T6.5) — пакет/паспорт/реестр")
+    check(
+        "templates: пакет линтуется без блоков и warnings; паспорт/реестр валидны",
+        lambda: _data_templates(),
+    )
+
     print(f"\n{CHECKS - len(FAILURES)}/{CHECKS} проверок пройдено")
     if FAILURES:
         print("\nПровалы:")
@@ -2057,6 +2063,50 @@ def _passports() -> None:
             raise AssertionError("битый YAML обязан поднять PassportLoadError")
         except PassportLoadError:
             pass
+
+
+def _data_templates() -> None:
+    """Шаблоны данных (T6.5): пакет/паспорт/реестр валидны, линт без блоков и warnings.
+
+    Шаблоны в ``packages/_template``, ``passports/_template`` и
+    ``registries/example_template.yaml`` — нейтральные скелеты: они обязаны проходить
+    тот же контур валидации, что и реальные данные (``load_inputs`` → ``lint`` →
+    ``cross_check``, ``load_passport``, ``load_registry_config``), но без выдуманных
+    значений. Нарушение любого условия — понятный ``AssertionError``.
+    """
+    from core.adapters.registry_generic import load_registry_config
+    from core.config.passports import load_passport
+    from core.pipeline.lint import lint_run_inputs
+    from core.pipeline.normalize import cross_check, load_inputs
+
+    root = _here()
+    package_dir = root / "packages" / "_template"
+
+    inputs = load_inputs(package_dir / "run.yaml", package_dir)
+    report = lint_run_inputs(inputs)
+    if report.blocking:
+        raise AssertionError(
+            "шаблон пакета: блокирующие нарушения линтера: " + "; ".join(report.blocking)
+        )
+    if report.warnings:
+        raise AssertionError(
+            "шаблон пакета: неожиданные warnings линтера: " + "; ".join(report.warnings)
+        )
+    violations = cross_check(inputs)
+    if violations:
+        raise AssertionError(
+            "шаблон пакета: кросс-артефактные нарушения: " + "; ".join(violations)
+        )
+
+    passport = load_passport("example_product", root / "passports" / "_template")
+    if passport is None or passport.product_id != "example_product":
+        raise AssertionError("шаблон паспорта example_product не загрузился (None или чужой id)")
+    if not passport.doc_domains or not all(".invalid" in d for d in passport.doc_domains):
+        raise AssertionError("шаблон паспорта: doc_domains обязаны быть на TLD .invalid")
+
+    registry = load_registry_config(root / "registries" / "example_template.yaml")
+    if registry.registry_id != "example_template":
+        raise AssertionError("шаблон реестра example_template не загрузился")
 
 
 def _golden_harness() -> None:

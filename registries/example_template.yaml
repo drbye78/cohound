@@ -1,0 +1,18 @@
+# ШАБЛОН реестрового конфига (не продакшн). TLD `.invalid` зарезервирован под примеры
+# (RFC 2606) — это НЕ рабочий endpoint. Замените значения данными от владельца домена.
+# Схема: core/adapters/registry_generic.py::RegistryConfig (extra="forbid").
+registry_id: example_template
+jurisdiction: XX
+endpoint: "https://registry.example.invalid/api/v1/search/{query}"
+method: GET
+format: json
+records_path: items
+headers:
+  Accept: application/json
+timeout: 30.0
+mapping:
+  # TODO: привести пути к реальной структуре ответа.
+  name: "name"
+  version: "version"
+  registration_id: "id"
+  detail_url: "detail_url"

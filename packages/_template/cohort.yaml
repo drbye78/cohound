@@ -1,0 +1,16 @@
+# ШАБЛОН когорты (§1.6). Ровно один якорь (anchor), остальные — аналоги. real data — TODO.
+case_id: template
+frozen_at: 2026-01-01
+entries:
+  - product_id: product_anchor
+    role_overlap: 1.0
+    selection_reason: "TODO: обоснование выбора якоря (почему именно этот продукт — эталон сравнения)."
+    anchor_relation: anchor
+  - product_id: product_analog_a
+    role_overlap: 0.8
+    selection_reason: "TODO: обоснование выбора аналога (перекрытие ролей, сопоставимость)."
+    anchor_relation: analog
+  - product_id: product_analog_b
+    role_overlap: 0.6
+    selection_reason: "TODO: обоснование выбора аналога (перекрытие ролей, сопоставимость)."
+    anchor_relation: analog
