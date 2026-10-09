@@ -76,6 +76,7 @@ __all__ = [
     "validate_case_id",
     "load_artifacts",
     "save_artifact",
+    "delete_artifact",
     "build_run_inputs",
     "prospective_lint",
     "assert_no_new_blocking",
@@ -367,6 +368,21 @@ def save_artifact(package_dir: str | Path, name: str, data: Any) -> Path:
     if name == "golden":
         return atomic_write_csv(path, GOLDEN_WRITE_COLUMNS, [_golden_cells(row) for row in _sorted_golden(rows)])
     raise ValueError(f"артефакт без сериализатора: {name}")  # pragma: no cover — исчерпано выше
+
+
+def delete_artifact(package_dir: str | Path, name: str) -> bool:
+    """Удаляет файл артефакта ``name`` (path-конфайнмент). ``True``, если он был.
+
+    Нужен для операций «отмены» (например, ``clear_scope_attestation``): отсутствие
+    файла — не ошибка (возвращается ``False``).
+    """
+    if name not in ARTIFACT_FILES:
+        raise ValueError(f"неизвестный артефакт: {name}")
+    path = _safe_join(package_dir, ARTIFACT_FILES[name])
+    if path.is_file():
+        path.unlink()
+        return True
+    return False
 
 
 # ---------------------------------------------------------------------------

@@ -33,26 +33,48 @@ from core.cli.main import (
 from core.pipeline.package_admin import (
     OpResult,
     PackageAdminError,
+    add_baseline,
     add_module,
     add_param,
     add_role,
     bump_version,
+    clear_scope_attestation,
     create_package,
     get_param,
+    list_baselines,
     list_params,
     list_roles,
+    remove_baseline,
     remove_module,
     remove_param,
     remove_role,
     renormalize_modules,
     set_archetype,
+    set_cohort,
+    set_scope_attestation,
     show_package,
+    update_baseline,
+    update_cohort,
     update_module,
     update_param,
     update_role,
     validate_package,
 )
-from core.pipeline.package_discovery import compose_baselines, infer_archetype
+from core.pipeline.package_candidates import (
+    Candidate,
+    apply_candidates,
+    dumps_candidates,
+    loads_candidates,
+    plan_candidates,
+)
+from core.pipeline.package_discovery import (
+    compose_baselines,
+    infer_archetype,
+    suggest_cohort_members,
+    suggest_modules,
+    suggest_roles,
+)
+from core.pipeline.package_io import atomic_write_text
 
 __all__ = ["add_package_parser", "cmd_package"]
 
@@ -146,6 +168,38 @@ def _coerce_terms(entries: list[str] | None) -> dict[str, list[str]]:
         lang, term = entry.split("=", 1)
         result.setdefault(lang.strip(), []).append(term.strip())
     return result
+
+
+def _read_mapping(path: str | Path) -> dict[str, Any]:
+    """Читает JSON/YAML-файл и требует словарь верхнего уровня."""
+    try:
+        data = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
+    except OSError as exc:
+        raise CliError(f"не удалось прочитать {path}: {exc}", code="usage", exit_code=EXIT_USAGE) from exc
+    if data is None:
+        return {}
+    if not isinstance(data, dict):
+        raise CliError(
+            f"{path}: ожидался словарь верхнего уровня, получено {type(data).__name__}",
+            code="usage",
+            exit_code=EXIT_USAGE,
+        )
+    return data
+
+
+def _read_list(path: str | Path) -> list[Any]:
+    """Читает JSON/YAML-файл и требует список верхнего уровня."""
+    try:
+        data = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
+    except OSError as exc:
+        raise CliError(f"не удалось прочитать {path}: {exc}", code="usage", exit_code=EXIT_USAGE) from exc
+    if not isinstance(data, list):
+        raise CliError(
+            f"{path}: ожидался список верхнего уровня, получено {type(data).__name__}",
+            code="usage",
+            exit_code=EXIT_USAGE,
+        )
+    return data
 
 
 # ---------------------------------------------------------------------------
@@ -491,6 +545,219 @@ def cmd_package_compose_baselines(args: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------------------
+# Хендлеры: baselines
+# ---------------------------------------------------------------------------
+
+
+def cmd_package_baseline_add(args: argparse.Namespace) -> int:
+    """``baseline add`` — строка наследования (ключ baseline_id+param_id)."""
+    result = _invoke(
+        lambda: add_baseline(
+            args.package,
+            args.baseline_id,
+            args.param_id,
+            inheritance_mode=args.inheritance_mode,
+            min_version=args.min_version,
+            note=args.note,
+            actor=args.actor,
+            dry_run=args.dry_run,
+        )
+    )
+    _emit(args, _op_payload(result), _op_lines(result))
+    return EXIT_OK
+
+
+def cmd_package_baseline_update(args: argparse.Namespace) -> int:
+    """``baseline update``."""
+    result = _invoke(
+        lambda: update_baseline(
+            args.package,
+            args.baseline_id,
+            args.param_id,
+            inheritance_mode=args.inheritance_mode,
+            min_version=args.min_version,
+            note=args.note,
+            actor=args.actor,
+            dry_run=args.dry_run,
+        )
+    )
+    _emit(args, _op_payload(result), _op_lines(result))
+    return EXIT_OK
+
+
+def cmd_package_baseline_remove(args: argparse.Namespace) -> int:
+    """``baseline remove``."""
+    result = _invoke(
+        lambda: remove_baseline(
+            args.package,
+            args.baseline_id,
+            args.param_id,
+            actor=args.actor,
+            dry_run=args.dry_run,
+        )
+    )
+    _emit(args, _op_payload(result), _op_lines(result))
+    return EXIT_OK
+
+
+def cmd_package_baseline_list(args: argparse.Namespace) -> int:
+    """``baseline list`` (read-only)."""
+    rows = _invoke(lambda: list_baselines(args.package))
+    payload = {"ok": True, "baselines": [row.model_dump(mode="json") for row in rows]}
+    lines = [f"baselines: {len(rows)}"]
+    for row in rows:
+        lines.append(f"  {row.baseline_id}\t{row.param_id}\t{row.inheritance_mode.value}")
+    _emit(args, payload, lines)
+    return EXIT_OK
+
+
+# ---------------------------------------------------------------------------
+# Хендлеры: cohort / scope
+# ---------------------------------------------------------------------------
+
+
+def cmd_package_cohort_update(args: argparse.Namespace) -> int:
+    """``cohort update`` — слить поля в ``cohort.yaml`` (смена состава → warning §13)."""
+    fields = _invoke(lambda: _read_mapping(args.fields))
+    result = _invoke(
+        lambda: update_cohort(args.package, fields, actor=args.actor, dry_run=args.dry_run)
+    )
+    _emit(args, _op_payload(result), _op_lines(result))
+    return EXIT_OK
+
+
+def cmd_package_cohort_set(args: argparse.Namespace) -> int:
+    """``cohort set`` — заменить состав когорты (``--entries FILE``)."""
+    entries = _invoke(lambda: _read_list(args.entries))
+    result = _invoke(
+        lambda: set_cohort(
+            args.package,
+            entries,
+            frozen_at=args.frozen_at,
+            actor=args.actor,
+            dry_run=args.dry_run,
+        )
+    )
+    _emit(args, _op_payload(result), _op_lines(result))
+    return EXIT_OK
+
+
+def cmd_package_scope_set(args: argparse.Namespace) -> int:
+    """``scope set`` — настроить процедуру аттестации полноты источника (I2b)."""
+    result = _invoke(
+        lambda: set_scope_attestation(
+            args.package, args.procedure, actor=args.actor, dry_run=args.dry_run
+        )
+    )
+    _emit(args, _op_payload(result), _op_lines(result))
+    return EXIT_OK
+
+
+def cmd_package_scope_clear(args: argparse.Namespace) -> int:
+    """``scope clear`` — удалить ``scope_attestation.yaml`` (I2b)."""
+    result = _invoke(
+        lambda: clear_scope_attestation(args.package, actor=args.actor, dry_run=args.dry_run)
+    )
+    _emit(args, _op_payload(result), _op_lines(result))
+    return EXIT_OK
+
+
+# ---------------------------------------------------------------------------
+# Хендлеры: suggest-* (read-only эвристики)
+# ---------------------------------------------------------------------------
+
+
+def _emit_candidates(args: argparse.Namespace, candidates: list[Candidate]) -> None:
+    """Печатает кандидатов (JSON или человекочитаемо)."""
+    payload = {"ok": True, "count": len(candidates), "candidates": [c.as_dict() for c in candidates]}
+    lines = [f"candidates: {len(candidates)}"]
+    for candidate in candidates:
+        lines.append(f"  [{candidate.kind}] {candidate.rationale} ({candidate.source})")
+    _emit(args, payload, lines)
+
+
+def cmd_package_suggest_modules(args: argparse.Namespace) -> int:
+    """``suggest modules`` — кандидаты модулей из профиля (без записи)."""
+    profile = _invoke(lambda: _load_profile(args))
+    _emit_candidates(args, _invoke(lambda: suggest_modules(profile)))
+    return EXIT_OK
+
+
+def cmd_package_suggest_roles(args: argparse.Namespace) -> int:
+    """``suggest roles`` — кандидаты ролей из профиля (без записи)."""
+    profile = _invoke(lambda: _load_profile(args))
+    _emit_candidates(args, _invoke(lambda: suggest_roles(profile)))
+    return EXIT_OK
+
+
+def cmd_package_suggest_cohort(args: argparse.Namespace) -> int:
+    """``suggest cohort`` — кандидаты участников когорты (без записи)."""
+    profile = _invoke(lambda: _load_profile(args))
+    _emit_candidates(args, _invoke(lambda: suggest_cohort_members(profile)))
+    return EXIT_OK
+
+
+# ---------------------------------------------------------------------------
+# Хендлеры: candidates / apply
+# ---------------------------------------------------------------------------
+
+
+def cmd_package_candidates(args: argparse.Namespace) -> int:
+    """``candidates`` — план кандидатов (не пишет в пакет; ``--write`` — во внешний файл)."""
+    profile = _invoke(lambda: _load_profile(args))
+    candidates = _invoke(
+        lambda: plan_candidates(args.package, profile=profile, scope=args.scope)
+    )
+    if args.write:
+        _invoke(lambda: atomic_write_text(args.write, dumps_candidates(candidates)))
+    payload = {
+        "ok": True,
+        "count": len(candidates),
+        "candidates": [c.as_dict() for c in candidates],
+    }
+    if args.write:
+        payload["written"] = str(args.write)
+    lines = [f"candidates: {len(candidates)}"]
+    for candidate in candidates:
+        lines.append(f"  [{candidate.kind}] {candidate.rationale} ({candidate.source})")
+    if args.write:
+        lines.append(f"written: {args.write}")
+    _emit(args, payload, lines)
+    return EXIT_OK
+
+
+def cmd_package_apply(args: argparse.Namespace) -> int:
+    """``apply`` — применить кандидатов (обязателен ``--actor``; человеческий шлюз)."""
+    if getattr(args, "from_file", None):
+        text = _invoke(lambda: Path(args.from_file).read_text(encoding="utf-8"))
+    elif getattr(args, "stdin", False):
+        text = sys.stdin.read()
+    else:
+        raise CliError(
+            "укажите источник кандидатов: --from FILE или --stdin",
+            code="usage",
+            exit_code=EXIT_USAGE,
+        )
+    candidates = _invoke(lambda: loads_candidates(text))
+    results = _invoke(
+        lambda: apply_candidates(
+            args.package, candidates, actor=args.actor, dry_run=args.dry_run
+        )
+    )
+    payload = {
+        "ok": True,
+        "applied": len(results),
+        "dry_run": bool(args.dry_run),
+        "results": [_op_payload(result) for result in results],
+    }
+    lines = [f"applied: {len(results)}"]
+    for result in results:
+        lines.extend(_op_lines(result))
+    _emit(args, payload, lines)
+    return EXIT_OK
+
+
+# ---------------------------------------------------------------------------
 # Сборка парсера
 # ---------------------------------------------------------------------------
 
@@ -714,6 +981,116 @@ def add_package_parser(subparsers: Any) -> None:
     )
     p_compose.add_argument("--json", action="store_true")
     p_compose.set_defaults(handler=cmd_package_compose_baselines)
+
+    # baseline ------------------------------------------------------------- #
+    p_baseline = pkg.add_parser("baseline", help="строки наследования baselines.csv")
+    baseline = p_baseline.add_subparsers(dest="baseline_command", metavar="ДЕЙСТВИЕ")
+
+    p_bl_add = baseline.add_parser("add", help="добавить строку наследования")
+    _add_op_common(p_bl_add)
+    p_bl_add.add_argument("--baseline-id", required=True)
+    p_bl_add.add_argument("--param-id", required=True)
+    p_bl_add.add_argument(
+        "--inheritance-mode", default="direct", choices=["direct", "conditional", "blocked"]
+    )
+    p_bl_add.add_argument("--min-version", default=None)
+    p_bl_add.add_argument("--note", default=None)
+    p_bl_add.set_defaults(handler=cmd_package_baseline_add)
+
+    p_bl_upd = baseline.add_parser("update", help="обновить строку наследования")
+    _add_op_common(p_bl_upd)
+    p_bl_upd.add_argument("--baseline-id", required=True)
+    p_bl_upd.add_argument("--param-id", required=True)
+    p_bl_upd.add_argument(
+        "--inheritance-mode", default=None, choices=["direct", "conditional", "blocked"]
+    )
+    p_bl_upd.add_argument("--min-version", default=None)
+    p_bl_upd.add_argument("--note", default=None)
+    p_bl_upd.set_defaults(handler=cmd_package_baseline_update)
+
+    p_bl_rm = baseline.add_parser("remove", help="удалить строку наследования")
+    _add_op_common(p_bl_rm)
+    p_bl_rm.add_argument("--baseline-id", required=True)
+    p_bl_rm.add_argument("--param-id", required=True)
+    p_bl_rm.set_defaults(handler=cmd_package_baseline_remove)
+
+    p_bl_ls = baseline.add_parser("list", help="список строк наследования (read-only)")
+    _add_read_common(p_bl_ls)
+    p_bl_ls.set_defaults(handler=cmd_package_baseline_list)
+
+    # cohort --------------------------------------------------------------- #
+    p_cohort = pkg.add_parser("cohort", help="состав когорты cohort.yaml (§1.6)")
+    cohort = p_cohort.add_subparsers(dest="cohort_command", metavar="ДЕЙСТВИЕ")
+
+    p_coh_upd = cohort.add_parser("update", help="слить поля cohort.yaml (смена состава → §13)")
+    _add_op_common(p_coh_upd)
+    p_coh_upd.add_argument(
+        "--fields", required=True, metavar="FILE", help="JSON/YAML-словарь полей (entries/frozen_at)"
+    )
+    p_coh_upd.set_defaults(handler=cmd_package_cohort_update)
+
+    p_coh_set = cohort.add_parser("set", help="заменить состав когорты (--entries FILE)")
+    _add_op_common(p_coh_set)
+    p_coh_set.add_argument("--entries", required=True, metavar="FILE", help="JSON/YAML-список записей")
+    p_coh_set.add_argument("--frozen-at", default=None, help="дата фиксации когорты (YYYY-MM-DD)")
+    p_coh_set.set_defaults(handler=cmd_package_cohort_set)
+
+    # scope ---------------------------------------------------------------- #
+    p_scope = pkg.add_parser("scope", help="процедура аттестации полноты источника (I2b)")
+    scope = p_scope.add_subparsers(dest="scope_command", metavar="ДЕЙСТВИЕ")
+
+    p_scope_set = scope.add_parser("set", help="настроить процедуру (scope_attestation.yaml)")
+    _add_op_common(p_scope_set)
+    p_scope_set.add_argument("--procedure", required=True, help="описание процедуры аттестации")
+    p_scope_set.set_defaults(handler=cmd_package_scope_set)
+
+    p_scope_clr = scope.add_parser("clear", help="удалить scope_attestation.yaml")
+    _add_op_common(p_scope_clr)
+    p_scope_clr.set_defaults(handler=cmd_package_scope_clear)
+
+    # suggest -------------------------------------------------------------- #
+    p_suggest = pkg.add_parser("suggest", help="эвристики-кандидаты из профиля (без записи)")
+    suggest = p_suggest.add_subparsers(dest="suggest_command", metavar="ЧТО")
+
+    p_sug_mod = suggest.add_parser("modules", help="кандидаты модулей")
+    _add_profile_flags(p_sug_mod)
+    p_sug_mod.add_argument("--json", action="store_true")
+    p_sug_mod.set_defaults(handler=cmd_package_suggest_modules)
+
+    p_sug_role = suggest.add_parser("roles", help="кандидаты ролей")
+    _add_profile_flags(p_sug_role)
+    p_sug_role.add_argument("--json", action="store_true")
+    p_sug_role.set_defaults(handler=cmd_package_suggest_roles)
+
+    p_sug_coh = suggest.add_parser("cohort", help="кандидаты участников когорты")
+    _add_profile_flags(p_sug_coh)
+    p_sug_coh.add_argument("--json", action="store_true")
+    p_sug_coh.set_defaults(handler=cmd_package_suggest_cohort)
+
+    # candidates / apply --------------------------------------------------- #
+    p_cand = pkg.add_parser("candidates", help="план кандидатов (в пакет не пишет)")
+    p_cand.add_argument("--package", required=True, help="каталог пакета категории")
+    _add_profile_flags(p_cand)
+    p_cand.add_argument("--scope", default="all", help="'all', модуль или param_id (для baselines)")
+    p_cand.add_argument("--write", default=None, metavar="FILE", help="записать JSON-план в файл")
+    p_cand.add_argument("--json", action="store_true")
+    p_cand.set_defaults(handler=cmd_package_candidates)
+
+    p_apply = pkg.add_parser("apply", help="применить кандидатов (обязателен --actor)")
+    p_apply.add_argument("--package", required=True, help="каталог пакета категории")
+    apply_source = p_apply.add_mutually_exclusive_group()
+    apply_source.add_argument(
+        "--from", dest="from_file", default=None, metavar="FILE", help="JSON-файл кандидатов"
+    )
+    apply_source.add_argument("--stdin", action="store_true", help="читать кандидатов из stdin")
+    p_apply.add_argument(
+        "--actor", required=True, help="человек, выполняющий применение (шлюз I6/I7; обязателен)"
+    )
+    p_apply.add_argument(
+        "--dry-run", action="store_true", help="показать применение без записи"
+    )
+    p_apply.add_argument("--json", action="store_true", help="машинночитаемый вывод (JSON)")
+    p_apply.set_defaults(handler=cmd_package_apply)
 
     p_package.set_defaults(handler=cmd_package, _package_parser=p_package)
 

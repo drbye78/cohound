@@ -38,10 +38,16 @@ __all__ = [
     "BaselineProposal",
     "infer_archetype",
     "compose_baselines",
+    "suggest_modules",
+    "suggest_roles",
+    "suggest_cohort_members",
 ]
 
 #: Уровень уверенности, ниже которого предложение требует человеческого решения.
 _NEEDS_HUMAN_THRESHOLD = 0.75
+
+#: Дефолтный вес модуля-кандидата (assumption; уточняется человеком, A3).
+_DEFAULT_MODULE_WEIGHT = 10.0
 
 
 @dataclass
@@ -323,3 +329,155 @@ def compose_baselines(
         notes=notes,
         needs_human=True,
     )
+
+
+# ---------------------------------------------------------------------------
+# Suggest-* (лёгкие эвристики профиля → Candidate; ничего не пишут)
+# ---------------------------------------------------------------------------
+
+
+def _spec_list(raw: Any) -> list[dict[str, Any]]:
+    """Нормализует вход профиля (список/dict/строка) в список словарей-спецификаций.
+
+    Поддерживаются формы: ``["a", {"id": "b", ...}]``, ``{"id": {...}}`` и скаляр.
+    Каждый элемент несёт ключ ``id`` (или собственные поля).
+    """
+    if raw is None:
+        return []
+    if isinstance(raw, Mapping):
+        out: list[dict[str, Any]] = []
+        for key, value in raw.items():
+            if isinstance(value, Mapping):
+                out.append({"id": str(key), **{str(k): v for k, v in value.items()}})
+            else:
+                out.append({"id": str(key), "value": value})
+        return out
+    if isinstance(raw, str):
+        return [{"id": raw}]
+    try:
+        items = list(raw)
+    except TypeError:
+        return [{"id": str(raw)}]
+    out = []
+    for item in items:
+        if isinstance(item, Mapping):
+            out.append({str(k): v for k, v in item.items()})
+        else:
+            out.append({"id": str(item)})
+    return out
+
+
+def _candidate(**kwargs: Any) -> Any:
+    """Ленивая фабрика :class:`~core.pipeline.package_candidates.Candidate`.
+
+    Локальный импорт разрывает цикл модулей (``package_candidates`` импортирует этот
+    модуль на уровне модуля; обратный импорт — только по вызову).
+    """
+    from core.pipeline.package_candidates import Candidate
+
+    return Candidate(**kwargs)
+
+
+def _spec_id(spec: Mapping[str, Any], *keys: str) -> str:
+    """Первый непустой идентификатор спецификации по списку ключей-синонимов."""
+    for key in (*keys, "id", "name"):
+        value = spec.get(key)
+        if value not in (None, ""):
+            return str(value).strip()
+    return ""
+
+
+def suggest_modules(profile: dict[str, Any]) -> list[Any]:
+    """Предлагает модули из ``profile`` (ключи ``modules``/``module_hints``). Ничего не пишет.
+
+    Формы значения: ``["m1", ...]``, ``{"m1": 30}``, ``[{"module_id": "m1", "weight": 30}]``.
+    Вес по умолчанию — :data:`_DEFAULT_MODULE_WEIGHT` (assumption; ``needs_human=True``).
+    """
+    profile = profile if isinstance(profile, Mapping) else {}
+    result: list[Any] = []
+    seen: set[str] = set()
+    for spec in _spec_list(_first(profile, "modules", "module_hints", "module_candidates")):
+        module_id = _spec_id(spec, "module_id")
+        if not module_id or module_id in seen:
+            continue
+        seen.add(module_id)
+        raw_weight = spec.get("weight", spec.get("value", _DEFAULT_MODULE_WEIGHT))
+        try:
+            weight = float(raw_weight)
+        except (TypeError, ValueError):
+            weight = _DEFAULT_MODULE_WEIGHT
+        result.append(
+            _candidate(
+                kind="module",
+                payload={"module_id": module_id, "weight": weight},
+                confidence=0.5,
+                rationale=f"модуль из профиля: {module_id}",
+                source="heuristic",
+                needs_human=True,
+            )
+        )
+    return result
+
+
+def suggest_roles(profile: dict[str, Any]) -> list[Any]:
+    """Предлагает роли из ``profile`` (ключи ``roles``/``role_hints``). Ничего не пишет."""
+    profile = profile if isinstance(profile, Mapping) else {}
+    result: list[Any] = []
+    seen: set[str] = set()
+    for spec in _spec_list(_first(profile, "roles", "role_hints", "role_candidates")):
+        role_id = _spec_id(spec, "role_id")
+        if not role_id or role_id in seen:
+            continue
+        seen.add(role_id)
+        payload: dict[str, Any] = {
+            "role_id": role_id,
+            "definition": str(spec.get("definition", "TODO: описание роли (кандидат)")),
+        }
+        for key in ("markers", "query_patterns", "core_coverage_allowed", "multi_instance"):
+            if key in spec:
+                payload[key] = spec[key]
+        result.append(
+            _candidate(
+                kind="role",
+                payload=payload,
+                confidence=0.5,
+                rationale=f"роль из профиля: {role_id}",
+                source="heuristic",
+                needs_human=True,
+            )
+        )
+    return result
+
+
+def suggest_cohort_members(profile: dict[str, Any]) -> list[Any]:
+    """Предлагает участников когорты из ``profile`` (``cohort_members``/``cohort``/``products``).
+
+    Новые участники по умолчанию — ``anchor_relation="analog"`` (якорь уже задан когортой,
+    §1.6). Ничего не пишет; ``needs_human=True``.
+    """
+    profile = profile if isinstance(profile, Mapping) else {}
+    result: list[Any] = []
+    seen: set[str] = set()
+    raw = _first(profile, "cohort_members", "cohort", "products")
+    for spec in _spec_list(raw):
+        product_id = _spec_id(spec, "product_id")
+        if not product_id or product_id in seen:
+            continue
+        seen.add(product_id)
+        payload: dict[str, Any] = {
+            "product_id": product_id,
+            "role_overlap": spec.get("role_overlap", 0.5),
+            "selection_reason": str(spec.get("selection_reason", "TODO: обоснование (кандидат)")),
+            "anchor_relation": str(spec.get("anchor_relation", "analog")),
+        }
+        result.append(
+            _candidate(
+                kind="cohort_member",
+                payload=payload,
+                confidence=0.5,
+                rationale=f"участник когорты из профиля: {product_id}",
+                source="heuristic",
+                needs_human=True,
+            )
+        )
+    return result

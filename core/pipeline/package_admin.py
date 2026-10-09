@@ -33,10 +33,12 @@ from core.domain.enums import (
     AnchorRelation,
     Archetype,
     Importance,
+    InheritanceMode,
     ParamType,
     RunMode,
 )
 from core.domain.models import (
+    BaselineRow,
     CatalogRow,
     Cohort,
     CohortEntry,
@@ -50,6 +52,7 @@ from core.pipeline.package_io import (
     append_apply_log,
     assert_no_new_blocking,
     build_run_inputs,
+    delete_artifact,
     load_artifacts,
     prospective_lint,
     save_artifact,
@@ -79,6 +82,14 @@ __all__ = [
     "remove_param",
     "get_param",
     "list_params",
+    "list_baselines",
+    "add_baseline",
+    "update_baseline",
+    "remove_baseline",
+    "set_cohort",
+    "update_cohort",
+    "set_scope_attestation",
+    "clear_scope_attestation",
 ]
 
 #: Идентификаторы пакетных сущностей — ``[a-z0-9_]+``.
@@ -195,8 +206,14 @@ def _finalize(
     actor: str | None,
     dry_run: bool,
     extra_warnings: list[str] | None = None,
+    deleted: list[str] | None = None,
 ) -> OpResult:
-    """Общий хвост мутации: проспективный линт → отказ/запись → журнал."""
+    """Общий хвост мутации: проспективный линт → отказ/запись → журнал.
+
+    ``deleted`` — имена артефактов, файлы которых требуется удалить (например,
+    ``clear_scope_attestation``); удаление выполняется только после успешного линта и
+    только при ``not dry_run``.
+    """
     after = prospective_lint(artifacts)
     new_blocking = assert_no_new_blocking(before, after)
     if new_blocking:
@@ -208,18 +225,21 @@ def _finalize(
         )
     warnings = list(extra_warnings or []) + list(after.warnings)
     written: list[Path] = []
+    removed = list(deleted or [])
     if not dry_run:
         for name in changed:
             data = _artifact_data(artifacts, name)
             if data is None:
                 continue
             written.append(save_artifact(package_dir, name, data))
+        for name in removed:
+            delete_artifact(package_dir, name)
         append_apply_log(
             package_dir,
-            {"op": op, "actor": actor, "changed": list(changed), "ts": _now()},
+            {"op": op, "actor": actor, "changed": list(changed), "deleted": removed, "ts": _now()},
         )
     return OpResult(
-        changed=list(changed),
+        changed=[*changed, *removed],
         written=written,
         lint={"blocking": [], "warnings": warnings},
         dry_run=dry_run,
@@ -1006,3 +1026,289 @@ def list_params(
     if not include_deprecated:
         rows = [row for row in rows if not row.deprecated]
     return rows
+
+
+# ---------------------------------------------------------------------------
+# Baselines (baselines.csv, §4.2)
+# ---------------------------------------------------------------------------
+
+
+def _baseline_index(
+    rows: list[BaselineRow], baseline_id: str, param_id: str
+) -> int | None:
+    """Индекс строки наследования по ключу ``(baseline_id, param_id)`` (или ``None``)."""
+    return next(
+        (
+            i
+            for i, row in enumerate(rows)
+            if row.baseline_id == baseline_id and row.param_id == param_id
+        ),
+        None,
+    )
+
+
+def list_baselines(package_dir: str | Path) -> list[BaselineRow]:
+    """Список строк наследования ``baselines.csv`` (read-only)."""
+    artifacts = load_artifacts(package_dir)
+    return list(artifacts.baselines)
+
+
+def add_baseline(
+    package_dir: str | Path,
+    baseline_id: str,
+    param_id: str,
+    *,
+    inheritance_mode: str = "direct",
+    min_version: str | None = None,
+    note: str | None = None,
+    actor: str | None = None,
+    dry_run: bool = False,
+) -> OpResult:
+    """Добавляет строку наследования (§4.2). Ключ строки ``(baseline_id, param_id)``.
+
+    ``param_id`` обязан существовать в каталоге; ``inheritance_mode`` ∈ enum. На
+    архетипе C непустой ``baselines`` блокируется линтером (§1.5) — операция откажет.
+    """
+    if not (baseline_id or "").strip():
+        raise PackageAdminError("baseline_id не может быть пустым", kind="usage")
+    artifacts = _load(package_dir)
+    before = prospective_lint(artifacts)
+    if not any(row.param_id == param_id for row in artifacts.catalog):
+        raise PackageAdminError(
+            f"param_id '{param_id}' отсутствует в каталоге — нечего наследовать", kind="usage"
+        )
+    if _baseline_index(artifacts.baselines, baseline_id, param_id) is not None:
+        raise PackageAdminError(
+            f"строка baseline уже существует: ({baseline_id}, {param_id})", kind="usage"
+        )
+    try:
+        row = BaselineRow(
+            baseline_id=baseline_id,
+            param_id=param_id,
+            min_version=min_version,
+            inheritance_mode=InheritanceMode(inheritance_mode),
+            note=note,
+        )
+    except ValueError as exc:
+        raise PackageAdminError(f"baseline: {exc}", kind="usage") from exc
+    artifacts.baselines = [*artifacts.baselines, row]
+    result = _finalize(
+        package_dir, artifacts, before, ["baselines"], op="baseline-add", actor=actor, dry_run=dry_run
+    )
+    result.created_id = f"{baseline_id}:{param_id}"
+    return result
+
+
+def update_baseline(
+    package_dir: str | Path,
+    baseline_id: str,
+    param_id: str,
+    *,
+    inheritance_mode: str | None = None,
+    min_version: str | None = None,
+    note: str | None = None,
+    actor: str | None = None,
+    dry_run: bool = False,
+) -> OpResult:
+    """Обновляет строку наследования по ключу ``(baseline_id, param_id)``.
+
+    Ключ иммутабелен (для смены ключа — ``remove`` + ``add``). ``None`` = не менять.
+    """
+    artifacts = _load(package_dir)
+    before = prospective_lint(artifacts)
+    index = _baseline_index(artifacts.baselines, baseline_id, param_id)
+    if index is None:
+        raise PackageAdminError(
+            f"строка baseline не найдена: ({baseline_id}, {param_id})", kind="usage"
+        )
+    updates: dict[str, Any] = {}
+    if inheritance_mode is not None:
+        try:
+            updates["inheritance_mode"] = InheritanceMode(inheritance_mode)
+        except ValueError as exc:
+            raise PackageAdminError(f"baseline: {exc}", kind="usage") from exc
+    if min_version is not None:
+        updates["min_version"] = min_version
+    if note is not None:
+        updates["note"] = note
+    try:
+        updated = BaselineRow.model_validate(
+            {**artifacts.baselines[index].model_dump(mode="python"), **updates}
+        )
+    except ValueError as exc:
+        raise PackageAdminError(f"baseline: {exc}", kind="usage") from exc
+    artifacts.baselines[index] = updated
+    return _finalize(
+        package_dir, artifacts, before, ["baselines"], op="baseline-update", actor=actor, dry_run=dry_run
+    )
+
+
+def remove_baseline(
+    package_dir: str | Path,
+    baseline_id: str,
+    param_id: str,
+    *,
+    actor: str | None = None,
+    dry_run: bool = False,
+) -> OpResult:
+    """Удаляет строку наследования по ключу ``(baseline_id, param_id)``."""
+    artifacts = _load(package_dir)
+    before = prospective_lint(artifacts)
+    index = _baseline_index(artifacts.baselines, baseline_id, param_id)
+    if index is None:
+        raise PackageAdminError(
+            f"строка baseline не найдена: ({baseline_id}, {param_id})", kind="usage"
+        )
+    artifacts.baselines = [
+        row for i, row in enumerate(artifacts.baselines) if i != index
+    ]
+    return _finalize(
+        package_dir, artifacts, before, ["baselines"], op="baseline-remove", actor=actor, dry_run=dry_run
+    )
+
+
+# ---------------------------------------------------------------------------
+# Cohort (cohort.yaml, §1.6)
+# ---------------------------------------------------------------------------
+
+
+#: Поля cohort.yaml, которые можно менять операцией (``case_id`` иммутабелен).
+_COHORT_MUTABLE_FIELDS = frozenset({"entries", "frozen_at"})
+
+
+def update_cohort(
+    package_dir: str | Path,
+    fields: dict[str, Any],
+    *,
+    actor: str | None = None,
+    dry_run: bool = False,
+) -> OpResult:
+    """Меняет поля ``cohort.yaml`` (§1.6). ``case_id`` иммутабелен.
+
+    Изменение состава (``entries``) — **версионная граница §13**: операция также
+    синхронизирует проекцию ``run.yaml`` (``products``/``anchor``), чтобы S11 и «anchor ∈
+    products» оставались выполнимыми, и добавляет warning о bump/``golden-full``.
+    Валидация — повторный :class:`Cohort.model_validate` (ровно один якорь, уникальные id).
+    """
+    artifacts = _load(package_dir)
+    before = prospective_lint(artifacts)
+    if artifacts.cohort is None:
+        raise PackageAdminError("cohort.yaml отсутствует в пакете", kind="usage")
+    unknown = set(fields) - _COHORT_MUTABLE_FIELDS
+    if unknown:
+        raise PackageAdminError(
+            f"неизменяемые/неизвестные поля cohort: {sorted(unknown)}", kind="usage"
+        )
+    data = artifacts.cohort.model_dump(mode="python")
+    data.update(fields)
+    try:
+        cohort = Cohort.model_validate(data)
+    except ValueError as exc:
+        raise PackageAdminError(f"cohort: {exc}", kind="usage") from exc
+    artifacts.cohort = cohort
+
+    changed = ["cohort"]
+    extra: list[str] = []
+    if "entries" in fields:
+        products = [entry.product_id for entry in cohort.entries]
+        anchor = next(
+            entry.product_id
+            for entry in cohort.entries
+            if entry.anchor_relation is AnchorRelation.ANCHOR
+        )
+        if artifacts.run is not None:
+            artifacts.run = artifacts.run.model_copy(
+                update={"products": products, "anchor": anchor}
+            )
+            changed.append("run")
+        extra.append(
+            "§13: смена состава когорты — версионная граница; выполните bump-version "
+            "и пересоберите golden-full"
+        )
+    return _finalize(
+        package_dir,
+        artifacts,
+        before,
+        changed,
+        op="cohort-update",
+        actor=actor,
+        dry_run=dry_run,
+        extra_warnings=extra,
+    )
+
+
+def set_cohort(
+    package_dir: str | Path,
+    entries: list[Any],
+    *,
+    frozen_at: Any = None,
+    actor: str | None = None,
+    dry_run: bool = False,
+) -> OpResult:
+    """Заменяет состав когорты (``entries``) и, опционально, ``frozen_at`` (§1.6)."""
+    fields: dict[str, Any] = {"entries": list(entries)}
+    if frozen_at is not None:
+        fields["frozen_at"] = frozen_at
+    return update_cohort(package_dir, fields, actor=actor, dry_run=dry_run)
+
+
+# ---------------------------------------------------------------------------
+# Scope attestation (scope_attestation.yaml, I2b)
+# ---------------------------------------------------------------------------
+
+
+def set_scope_attestation(
+    package_dir: str | Path,
+    procedure: str,
+    *,
+    actor: str | None = None,
+    dry_run: bool = False,
+) -> OpResult:
+    """Настраивает процедуру аттестации полноты источника (I2b).
+
+    Артефакт ``scope_attestation.yaml`` — строка процедуры (а не объект). Если
+    ``parameter_reference``/``distribution_absence`` требуют ``exhaustive`` +
+    ``scope_attested_by``, линтер отразит остаточные требования; установка процедуры
+    снимает блок ``absence-attestation``.
+    """
+    if not (procedure or "").strip():
+        raise PackageAdminError(
+            "procedure не может быть пустой (для очистки — scope clear)", kind="usage"
+        )
+    artifacts = _load(package_dir)
+    before = prospective_lint(artifacts)
+    artifacts.scope_attestation = procedure.strip()
+    return _finalize(
+        package_dir,
+        artifacts,
+        before,
+        ["scope_attestation"],
+        op="scope-set",
+        actor=actor,
+        dry_run=dry_run,
+    )
+
+
+def clear_scope_attestation(
+    package_dir: str | Path,
+    *,
+    actor: str | None = None,
+    dry_run: bool = False,
+) -> OpResult:
+    """Удаляет ``scope_attestation.yaml`` (I2b). Прогон, опирающийся на эту процедуру,
+    будет заблокирован линтером — операция откажет, если появятся новые blocking."""
+    artifacts = _load(package_dir)
+    before = prospective_lint(artifacts)
+    artifacts.scope_attestation = None
+    result = _finalize(
+        package_dir,
+        artifacts,
+        before,
+        [],
+        op="scope-clear",
+        actor=actor,
+        dry_run=dry_run,
+        deleted=["scope_attestation"],
+    )
+    return result
+

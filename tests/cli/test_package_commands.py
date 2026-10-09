@@ -202,3 +202,221 @@ def test_cli_compose_bad_profile_file(capsys, tmp_path: Path) -> None:
     )
     assert code == EXIT_USAGE
     assert "словар" in err
+
+
+# ---------------------------------------------------------------------------
+# I2: baselines / cohort / scope
+# ---------------------------------------------------------------------------
+
+
+def _write(path: Path, text: str) -> Path:
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
+def test_cli_baseline_crud(capsys, tmp_path: Path) -> None:
+    package = _new(capsys, tmp_path)
+    code, _, _ = _run(
+        capsys,
+        ["package", "baseline", "add", "--package", str(package), "--baseline-id", "up",
+         "--param-id", "param.alpha_capability", "--min-version", "1.0", "--actor", "t", "--json"],
+    )
+    assert code == EXIT_OK
+    code, out, _ = _run(capsys, ["package", "baseline", "list", "--package", str(package), "--json"])
+    assert json.loads(out)["baselines"][0]["baseline_id"] == "up"
+    code, _, _ = _run(
+        capsys,
+        ["package", "baseline", "update", "--package", str(package), "--baseline-id", "up",
+         "--param-id", "param.alpha_capability", "--inheritance-mode", "conditional", "--json"],
+    )
+    assert code == EXIT_OK
+    code, _, _ = _run(
+        capsys,
+        ["package", "baseline", "remove", "--package", str(package), "--baseline-id", "up",
+         "--param-id", "param.alpha_capability", "--json"],
+    )
+    assert code == EXIT_OK
+    code, out, _ = _run(capsys, ["package", "baseline", "list", "--package", str(package), "--json"])
+    assert json.loads(out)["baselines"] == []
+
+
+def test_cli_baseline_add_unknown_param_usage(capsys, tmp_path: Path) -> None:
+    package = _new(capsys, tmp_path)
+    code, _, err = _run(
+        capsys,
+        ["package", "baseline", "add", "--package", str(package), "--baseline-id", "up",
+         "--param-id", "param.none"],
+    )
+    assert code == EXIT_USAGE
+    assert "param.none" in err
+
+
+def test_cli_cohort_update_warns(capsys, tmp_path: Path) -> None:
+    package = _new(capsys, tmp_path)
+    fields = _write(
+        tmp_path / "cohort.yaml",
+        "entries:\n"
+        "  - product_id: product_anchor\n    role_overlap: 1.0\n    selection_reason: a\n    anchor_relation: anchor\n"
+        "  - product_id: product_new\n    role_overlap: 0.5\n    selection_reason: b\n    anchor_relation: analog\n",
+    )
+    code, out, _ = _run(
+        capsys,
+        ["package", "cohort", "update", "--package", str(package), "--fields", str(fields),
+         "--actor", "t", "--json"],
+    )
+    assert code == EXIT_OK
+    payload = json.loads(out)
+    assert "run" in payload["changed"]
+    assert any("§13" in warning for warning in payload["warnings"])
+
+
+def test_cli_cohort_set(capsys, tmp_path: Path) -> None:
+    package = _new(capsys, tmp_path)
+    entries = _write(
+        tmp_path / "entries.yaml",
+        "- product_id: product_anchor\n  role_overlap: 1.0\n  selection_reason: a\n  anchor_relation: anchor\n",
+    )
+    code, _, _ = _run(
+        capsys,
+        ["package", "cohort", "set", "--package", str(package), "--entries", str(entries),
+         "--frozen-at", "2030-01-01", "--actor", "t", "--json"],
+    )
+    assert code == EXIT_OK
+    assert len(load_artifacts(package).cohort.entries) == 1
+
+
+def test_cli_scope_set_clear(capsys, tmp_path: Path) -> None:
+    package = _new(capsys, tmp_path)
+    code, _, _ = _run(
+        capsys,
+        ["package", "scope", "set", "--package", str(package), "--procedure", "полная проверка",
+         "--actor", "t", "--json"],
+    )
+    assert code == EXIT_OK
+    assert load_artifacts(package).scope_attestation == "полная проверка"
+    code, _, _ = _run(capsys, ["package", "scope", "clear", "--package", str(package), "--actor", "t", "--json"])
+    assert code == EXIT_OK
+    assert not (package / "scope_attestation.yaml").exists()
+
+
+def test_cli_scope_clear_blocked(capsys, tmp_path: Path) -> None:
+    package = _new(capsys, tmp_path)
+    artifacts = load_artifacts(package)
+    rows = [
+        row.model_copy(update={"absence_rule": AbsenceRuleType.PARAMETER_REFERENCE})
+        if row.param_id == "param.alpha_capability"
+        else row
+        for row in artifacts.catalog
+    ]
+    save_artifact(package, "catalog", rows)
+    code, _, _ = _run(capsys, ["package", "scope", "clear", "--package", str(package), "--json"])
+    assert code == EXIT_BLOCKED
+    assert (package / "scope_attestation.yaml").is_file()
+
+
+# ---------------------------------------------------------------------------
+# I2: suggest / candidates / apply
+# ---------------------------------------------------------------------------
+
+
+def test_cli_suggest_modules(capsys, tmp_path: Path) -> None:
+    profile = _write(tmp_path / "profile.yaml", "modules:\n  module_new: 12\n")
+    code, out, _ = _run(capsys, ["package", "suggest", "modules", "--profile", str(profile), "--json"])
+    assert code == EXIT_OK
+    assert json.loads(out)["candidates"][0]["payload"]["module_id"] == "module_new"
+
+
+def test_cli_candidates_and_write(capsys, tmp_path: Path) -> None:
+    package = _new(capsys, tmp_path)
+    profile = _write(
+        tmp_path / "profile.yaml",
+        "modules:\n  module_new: 12\ncohort_members:\n  - product_id: product_new\n",
+    )
+    out_file = tmp_path / "candidates.json"
+    code, out, _ = _run(
+        capsys,
+        ["package", "candidates", "--package", str(package), "--profile", str(profile),
+         "--write", str(out_file), "--json"],
+    )
+    assert code == EXIT_OK
+    assert json.loads(out)["count"] == 2
+    assert out_file.is_file()
+
+
+def test_cli_apply_from_file(capsys, tmp_path: Path) -> None:
+    package = _new(capsys, tmp_path)
+    candidates = _write(
+        tmp_path / "candidates.json",
+        json.dumps(
+            [
+                {"kind": "module", "payload": {"module_id": "module_new", "weight": 10}},
+                {"kind": "role", "payload": {"role_id": "role_new", "definition": "d"}},
+            ]
+        ),
+    )
+    code, out, _ = _run(
+        capsys,
+        ["package", "apply", "--package", str(package), "--from", str(candidates),
+         "--actor", "tester", "--json"],
+    )
+    assert code == EXIT_OK
+    assert json.loads(out)["applied"] == 2
+    assert "module_new" in {m.module_id for m in load_artifacts(package).manifest.modules}
+    assert (package / ".authoring" / "apply_log.jsonl").is_file()
+
+
+def test_cli_apply_requires_actor(capsys, tmp_path: Path) -> None:
+    package = _new(capsys, tmp_path)
+    candidates = _write(tmp_path / "c.json", "[]")
+    code, _, err = _run(
+        capsys,
+        ["package", "apply", "--package", str(package), "--from", str(candidates)],
+    )
+    assert code == EXIT_USAGE
+    assert "--actor" in err
+
+
+def test_cli_apply_blocked_candidate(capsys, tmp_path: Path) -> None:
+    package = _new(capsys, tmp_path)
+    (package / "scope_attestation.yaml").unlink()
+    before = (package / "catalog.csv").read_bytes()
+    candidates = _write(
+        tmp_path / "blocked.json",
+        json.dumps(
+            [
+                {
+                    "kind": "param",
+                    "payload": {
+                        "title": "Blocked",
+                        "rule": "r",
+                        "module": "module_core",
+                        "group": "g",
+                        "importance": "Баз",
+                        "absence_rule": "parameter_reference",
+                    },
+                }
+            ]
+        ),
+    )
+    code, out, _ = _run(
+        capsys,
+        ["package", "apply", "--package", str(package), "--from", str(candidates),
+         "--actor", "tester", "--json"],
+    )
+    assert code == EXIT_BLOCKED
+    assert json.loads(out)["ok"] is False
+    assert (package / "catalog.csv").read_bytes() == before
+
+
+def test_cli_apply_stdin(capsys, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    package = _new(capsys, tmp_path)
+    import io
+    import sys
+
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps([{"kind": "module", "payload": {"module_id": "module_s", "weight": 5}}])))
+    code, out, _ = _run(
+        capsys,
+        ["package", "apply", "--package", str(package), "--stdin", "--actor", "tester", "--json"],
+    )
+    assert code == EXIT_OK
+    assert json.loads(out)["applied"] == 1
