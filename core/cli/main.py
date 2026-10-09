@@ -796,7 +796,8 @@ def cmd_discover(args: argparse.Namespace) -> int:
                 "I19",
                 "поисковый адаптер недоступен: нет httpx либо учётных данных "
                 "(yandex: YANDEX_SEARCH_API_KEY/YANDEX_FOLDER_ID; "
-                "glm: GLM_SEARCH_API_KEY); кандидаты не выдумываются",
+                "glm: GLM_SEARCH_API_KEY; google: GOOGLE_API_KEY+GOOGLE_CSE_ID); "
+                "кандидаты не выдумываются",
             )
             return EXIT_ERROR
     if not getattr(adapter, "available", True):
@@ -1173,15 +1174,19 @@ def _print_passport_scout(payload: dict[str, Any]) -> None:
 
 
 def _search_adapter_configured(adapter: Any) -> bool:
-    """Готов ли реальный поисковый адаптер к вызовам (есть зависимость и учётные данные).
+    """Готов ли реальный поисковый адаптер к вызовам (зависимость и учётные данные).
 
-    Проверяет ``available`` и наличие ``api_key`` (``YANDEX_SEARCH_API_KEY``): без ключа
-    реальный SERP-вызов невозможен, и кандидаты не выдумываются (I19). Для инъектированного
-    тестового шва эта проверка не применяется (см. :func:`cmd_discover`).
+    Ключевые адаптеры (``yandex``/``glm``/``google``) выставляют атрибут ``api_key``;
+    без ключа такой адаптер не готов, и кандидаты не выдумываются (I19). Бесключевые
+    адаптеры (``duckduckgo``/``open-websearch``) атрибута ``api_key`` не имеют вовсе —
+    для них достаточна доступность (``available``), иначе они ошибочно блокировались
+    бы. Для инъектированного тестового шва проверка не применяется (см. ``cmd_discover``).
     """
-    return bool(getattr(adapter, "available", True)) and bool(
-        getattr(adapter, "api_key", None)
-    )
+    if not bool(getattr(adapter, "available", True)):
+        return False
+    if hasattr(adapter, "api_key") and not getattr(adapter, "api_key", None):
+        return False
+    return True
 
 
 def _discover_seed_queries(passports_dir: str | Path | None) -> list[str]:

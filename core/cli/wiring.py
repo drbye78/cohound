@@ -56,7 +56,10 @@ from core.adapters.remote_gateway import (
 )
 from core.adapters.remote_registry import RemoteRegistry
 from core.adapters.remote_search import RemoteSearch
+from core.adapters.search_duckduckgo import DuckDuckGoSearchAdapter
 from core.adapters.search_glm import GlmSearchAdapter
+from core.adapters.search_google import GoogleSearchAdapter
+from core.adapters.search_openwebsearch import OpenWebSearchAdapter
 from core.adapters.search_yandex import YandexSearchAdapter
 from core.config.deploy import DeployConfig, is_split, load_deploy_config
 from core.pipeline import Ports, Runner
@@ -102,7 +105,13 @@ SUPPORTED_PROFILES: tuple[str, ...] = (LOCAL_PROFILE, SPLIT_PROFILE)
 
 #: Известные внешние поисковые адаптеры для ``hound discover`` (``03`` §D.6).
 #: Провайдер — данные-конфигурация, а не предметная категория (§1.3).
-SUPPORTED_SEARCH_ADAPTERS: tuple[str, ...] = ("yandex", "glm")
+SUPPORTED_SEARCH_ADAPTERS: tuple[str, ...] = (
+    "yandex",
+    "glm",
+    "google",
+    "duckduckgo",
+    "open-websearch",
+)
 
 #: Идентификатор реестра по умолчанию для remote-прокси (данные; ``deploy.yaml``
 #: в модели ``DeployConfig`` не несёт ``registry_fetchers`` — см. ГЭП в
@@ -217,6 +226,12 @@ def build_search_adapter(adapter: str) -> SearchAdapterPort:
         return YandexSearchAdapter()
     if adapter == "glm":
         return GlmSearchAdapter()
+    if adapter == "google":
+        return GoogleSearchAdapter()
+    if adapter == "duckduckgo":
+        return DuckDuckGoSearchAdapter()
+    if adapter == "open-websearch":
+        return OpenWebSearchAdapter()
     raise WiringError(
         f"неизвестный поисковый адаптер: {adapter!r}; "
         f"поддерживаются: {', '.join(SUPPORTED_SEARCH_ADAPTERS)}"

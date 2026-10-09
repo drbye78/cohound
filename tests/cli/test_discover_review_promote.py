@@ -21,6 +21,7 @@
 from __future__ import annotations
 
 import datetime as _dt
+import importlib
 import json
 from pathlib import Path
 
@@ -203,17 +204,84 @@ def test_discover_unknown_adapter_is_usage_error() -> None:
 
 
 def test_supported_search_adapters_include_glm_and_yandex() -> None:
-    """Registry: оба адаптера (yandex=serp, glm=llm_grounding) собираемы и конформны порту (I19)."""
+    """Registry: адаптеры (serp/llm_grounding) собираемы и конформны порту (I19)."""
     from core.cli.wiring import SUPPORTED_SEARCH_ADAPTERS, build_search_adapter
     from core.ports.search import SearchAdapterPort
 
-    assert set(SUPPORTED_SEARCH_ADAPTERS) >= {"yandex", "glm"}
+    assert set(SUPPORTED_SEARCH_ADAPTERS) >= {
+        "yandex",
+        "glm",
+        "google",
+        "duckduckgo",
+        "open-websearch",
+    }
     for name in SUPPORTED_SEARCH_ADAPTERS:
         adapter = build_search_adapter(name)
         assert isinstance(adapter, SearchAdapterPort), name
         # Кандидаты, не evidence: у адаптера нет поверхности записи/evidence (I19).
         assert not hasattr(adapter, "save_cell")
         assert not hasattr(adapter, "add_evidence")
+
+
+def test_search_adapter_configured_keyless_adapters_allowed() -> None:
+    """Бесключевые адаптеры (duckduckgo/open-websearch) не блокируются в discover.
+
+    ``_search_adapter_configured`` требует ``api_key`` только у ключевых адаптеров
+    (yandex/glm/google). Бесключевые атрибута ``api_key`` не имеют — для них достаточна
+    ``available``; иначе ``hound discover --search-adapter duckduckgo`` ложно падал бы.
+    """
+    from core.cli.main import _search_adapter_configured
+
+    class _Keyless:
+        available = True
+        api_key = None  # type: ignore[assignment]
+
+    class _KeyedNoKey:
+        available = True
+        api_key = None
+
+    class _KeyedWithKey:
+        available = True
+        api_key = "secret"
+
+    class _NoApiKeyAttr:
+        available = True
+
+    class _Unavailable:
+        available = False
+
+    assert _search_adapter_configured(_NoApiKeyAttr()) is True  # duckduckgo/open-websearch
+    assert _search_adapter_configured(_KeyedWithKey()) is True
+    assert _search_adapter_configured(_KeyedNoKey()) is False  # yandex/glm/google без ключа
+    assert _search_adapter_configured(_Unavailable()) is False
+    # Явное присутствие атрибута api_key=None (даже у «keyless»-класса) → не готов.
+    assert _search_adapter_configured(_Keyless()) is False
+
+
+def test_discover_keyless_adapter_not_rejected_for_api_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``discover`` с бесключевым реальным адаптером не отбивается из-за отсутствия ключа.
+
+    Проверяем, что после фикса бесключевой адаптер проходит проверку конфигурации:
+    подменяем ``build_search_adapter`` на бесключевой фейк и убеждаемся, что доходит до
+    вызова ``search`` (а не до ``EXIT_ERROR`` про «нет учётных данных»).
+    """
+    from core.cli import main as main_mod
+
+    class _KeylessAdapter(FakeSearchAdapter):
+        """Бесключевой адаптер: ``available=True`` и нет атрибута ``api_key``."""
+
+        provider = "keyless"
+
+    # ``core.cli`` экспортирует функцию ``main`` (не модуль) — берём модуль по имени.
+    cli_main = importlib.import_module("core.cli.main")
+    monkeypatch.setattr(
+        cli_main, "build_search_adapter", lambda _name: _KeylessAdapter()
+    )
+    code = cli_main.main(["discover", "--query", "q1", "--json"])
+    assert code == EXIT_OK
+
 
 
 def test_discover_rejects_store_flags(capsys: pytest.CaptureFixture[str]) -> None:
