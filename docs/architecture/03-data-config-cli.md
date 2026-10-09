@@ -351,6 +351,16 @@ hound run \
 | `hound diff <run_a> <run_b>` | межцикловый diff (запрещён через major) | diff.md |
 | `hound promote --validated-only` | preliminary → strict (переаттестация) | cells |
 | `hound deploy-check` | диагностика профиля: достижимость DMZ-шва, версии/форматы edge (`/v1/health`, `/v1/capabilities`) | — (отчёт) |
+| `hound doctor [--strict] [--with-selfcheck]` | самодиагностика инсталляции: runtime, зависимости по extras, env/ключи, конфиг, каталоги, CLI-поверхность | — (отчёт) |
+
+`hound doctor` — read-only и по умолчанию **без сети**: проверяет Python/venv, наличие
+зависимостей по группам extras (`find_spec`, без импорта тяжёлых), заданность env/ключей
+(значения **не** печатаются), файлы `config/deploy.yaml`/`registries`/`.env.example`/`packages`,
+запись в операционные каталоги (`runs/`/`index_store/`/`corpus_raw/`/`cache/`) и полноту
+CLI-поверхности. Каждая проверка обёрнута в try/except и даёт запись `ok|warn|fail`;
+секреты эгрессии в профиле `split` живут только в edge (07). `--json` — машинный отчёт
+(детерминированный: `sort_keys=True`); код возврата ненулевой при `fail`, а с `--strict` —
+и при любом `warn`. `--with-selfcheck` дополнительно прогоняет `tests/selfcheck.py`.
 
 ### E.2. UX-принципы
 

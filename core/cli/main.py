@@ -2417,6 +2417,29 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_deploy.set_defaults(handler=cmd_deploy_check)
 
+    # doctor -------------------------------------------------------------- #
+    p_doctor = sub.add_parser(
+        "doctor",
+        help="самодиагностика инсталляции: runtime, зависимости, env, конфиг, каталоги, CLI",
+    )
+    p_doctor.add_argument(
+        "--with-selfcheck",
+        dest="with_selfcheck",
+        action="store_true",
+        help="запустить tests/selfcheck.py (subprocess) и включить результат в отчёт",
+    )
+    p_doctor.add_argument(
+        "--strict",
+        action="store_true",
+        help="считать warn ошибкой (ненулевой код возврата при предупреждениях)",
+    )
+    _add_common(p_doctor)
+    # Ленивый импорт: логика проверок не подтягивается, пока команда не запрошена
+    # (образец подключения — ``package``); doctor не создаёт циклических импортов.
+    from core.cli.doctor import cmd_doctor
+
+    p_doctor.set_defaults(handler=cmd_doctor)
+
     # package ------------------------------------------------------------- #
     # Ленивый импорт: подключает ``hound package`` (CRUD + discovery, I1) без
     # циклического импорта (package_commands импортирует символы этого модуля).

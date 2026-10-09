@@ -2203,7 +2203,7 @@ def _cli_surface() -> None:
     commands = set(subparsers.choices)
     required = {
         "resolve", "plan", "run", "discover", "review", "promote",
-        "report", "golden", "sensitivity", "diff", "deploy-check",
+        "report", "golden", "sensitivity", "diff", "deploy-check", "doctor",
     }
     missing = required - commands
     if missing:
