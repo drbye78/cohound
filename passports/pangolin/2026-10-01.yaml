@@ -1,0 +1,53 @@
+# Паспорт продукта (§4.3). Источник: comp_0.xlsx «Лист1» (снимок 2026-10-01).
+# Precision-first: upstream null — в источнике нет достоверного мажора PostgreSQL
+# (стр.15 «Технологический стек» перечисляет PostgreSQL без версии; «ядро 11.1.0»
+# в стр.16 — версия ядра Pangolin, не PostgreSQL).
+product_id: pangolin
+canonical_name: "Platform V Pangolin DB"
+vendor: "СберТех"
+upstream: null
+edition_assessed: null
+version: "Pangolin 8.1 (31.05.2026, ядро 11.1.0, Patroni 4.1.0)"
+jurisdiction: RU
+doc_domains:
+  - "pangolin.sbertech.ru"
+  - "platformv.sbertech.ru/products/rabota-s-dannymi/pangolin"
+  - "sbertech.ru"
+  - "sbertech.ru/documents/platform-v-pangolin-se"
+satellites:
+  # Установлен: подтверждены существование и связь в роли (URL сайта из «Комм.» + фраза).
+  - role: management_console
+    state: approved
+    component: "Kintsugi"
+    origin: in_house
+    relationship: bundled
+    evidence_state: verified
+    relationship_evidence:
+      url: "https://pangolin.sbertech.ru"
+      quote: "Kintsugi (управление)"
+  # Установлен: бэкапы с FUSE — роль backup.
+  - role: backup
+    state: approved
+    component: "CopyWala"
+    origin: in_house
+    relationship: bundled
+    evidence_state: verified
+    relationship_evidence:
+      url: "https://pangolin.sbertech.ru"
+      quote: "CopyWala (бэкапы с FUSE)"
+  # Только имя и версия в стеке; роль ha_orchestrator источником не подтверждена → draft.
+  - role: ha_orchestrator
+    state: draft
+    component: "Patroni"
+    origin: third_party
+    relationship: bundled
+    evidence_state: claimed
+  # Упомянут в группе Platform V; роль in_memory_cache выведена из «In-memory кэширование»
+  # (не из прямой фразы про Ignite) → claimed/draft.
+  - role: in_memory_cache
+    state: draft
+    component: "Ignite"
+    origin: unknown
+    relationship: bundled
+    evidence_state: claimed
+snapshot_date: 2026-10-01

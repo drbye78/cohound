@@ -1,0 +1,19 @@
+case_id: ru-pg-dbms
+entries:
+- anchor_relation: anchor
+  product_id: pangolin
+  role_overlap: 1.0
+  selection_reason: 'Якорь/объект сравнения: Platform V Pangolin DB.'
+- anchor_relation: analog
+  product_id: postgrespro
+  role_overlap: 1.0
+  selection_reason: Российский лидер PG-СУБД; максимальное перекрытие ролей с якорем.
+- anchor_relation: analog
+  product_id: tantor
+  role_overlap: 0.9
+  selection_reason: Российская СУБД на PostgreSQL; высокое перекрытие ролей.
+- anchor_relation: analog
+  product_id: jatoba
+  role_overlap: 0.7
+  selection_reason: Российская СУБД на PostgreSQL; частичное перекрытие ролей.
+frozen_at: '2026-10-01'

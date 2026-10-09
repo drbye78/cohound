@@ -1,0 +1,26 @@
+docs.tantorlabs.ru:
+  index:
+    partition_key: product_id
+  render:
+    mode: text
+jatoba.ru:
+  index:
+    partition_key: product_id
+  render:
+    mode: text
+pangolin.sbertech.ru:
+  index:
+    partition_key: product_id
+  render:
+    mode: browser
+    spa: true
+postgrespro.ru:
+  index:
+    partition_key: product_id
+  render:
+    mode: text
+sbertech.ru/documents:
+  index:
+    partition_key: product_id
+  render:
+    mode: pdf

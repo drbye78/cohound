@@ -1,0 +1,245 @@
+archetype: A
+baseline_participant: postgresql
+baselines:
+- upstream-pg
+case_id: ru-pg-dbms
+jurisdictions:
+- RU
+languages:
+- ru
+- en
+modules:
+- module_id: core
+  weight: 58.0
+- module_id: backup
+  weight: 19.0
+- module_id: management
+  weight: 23.0
+package_version: 1.0.0
+registries: []
+roles:
+- core_coverage_allowed: true
+  definition: 'Ядро СУБД: архитектурные механизмы (транзакции/снимки/блокировки/хранение)
+    и мультимодельные типы данных.'
+  markers:
+  - ядро СУБД
+  - MVCC
+  - XID/MXID
+  - снимки CSN
+  - LWLock
+  - субтранзакции
+  - партиционирование
+  - мультимодельность
+  - векторный поиск
+  - JSONB
+  - JSONB/time-series
+  - columnar
+  multi_instance: false
+  query_patterns:
+    en:
+    - database kernel architecture
+    - 64-bit transaction id
+    - multimodel database
+    ru:
+    - архитектура ядра СУБД
+    - расширение счётчика транзакций
+    - мультимодельные типы данных
+  role_id: core_engine
+- core_coverage_allowed: true
+  definition: 'Планировщик запросов: оптимизация планов, JIT, параллелизм, подсказки,
+    статистика.'
+  markers:
+  - планировщик
+  - оптимизатор запросов
+  - JIT
+  - parallel SELECT
+  - pg_hint_plan
+  - HypoPG
+  - оценка кардинальности
+  multi_instance: false
+  query_patterns:
+    en:
+    - query planner
+    - query hints
+    - parallel query
+    ru:
+    - планировщик запросов
+    - подсказки плана
+    - параллельные запросы
+  role_id: query_planner
+- core_coverage_allowed: false
+  definition: 'Интеграция прикладных платформ (1С и смежные) с СУБД: профили нагрузки
+    и совместимость.'
+  markers:
+  - интеграция 1С
+  - 1С:Предприятие
+  - регламентные операции
+  - временные таблицы
+  - OLTP 1С
+  multi_instance: false
+  query_patterns:
+    en:
+    - 1C application integration
+    - 1C database performance
+    - ERP database profile
+    ru:
+    - интеграция с 1С
+    - производительность 1С на СУБД
+    - базы 1С большого объёма
+  role_id: app_integration
+- core_coverage_allowed: false
+  definition: 'Миграция с иных СУБД (Oracle/MS SQL) на PostgreSQL: совместимость синтаксиса
+    и перенос кода.'
+  markers:
+  - миграция Oracle
+  - PL/SQL
+  - T-SQL
+  - orafce
+  - конвертер кода
+  - синонимы объектов
+  multi_instance: false
+  query_patterns:
+    en:
+    - Oracle migration
+    - PL/SQL conversion
+    - MS SQL compatibility
+    ru:
+    - миграция с Oracle
+    - конвертация PL/SQL
+    - совместимость с MS SQL
+  role_id: migration
+- core_coverage_allowed: false
+  definition: 'Резервное копирование и восстановление: базовые копии, PITR, дедупликация,
+    защита копий.'
+  markers:
+  - резервное копирование
+  - PITR
+  - инкрементальный бэкап
+  - дедупликация
+  - WORM
+  - шифрование копий
+  - air-gap
+  - восстановление
+  multi_instance: true
+  query_patterns:
+    en:
+    - database backup
+    - point in time recovery
+    - ransomware protection backup
+    ru:
+    - резервное копирование СУБД
+    - восстановление на момент времени
+    - защита бэкапов от ransomware
+  role_id: backup_recovery
+- core_coverage_allowed: false
+  definition: 'Платформа управления и эксплуатации: консоль, RBAC, интеграция с IdP,
+    аудит, API.'
+  markers:
+  - платформа управления
+  - консоль
+  - RBAC
+  - LDAP/AD
+  - OAuth/OIDC
+  - 2FA
+  - аудит платформы
+  - REST API платформы
+  multi_instance: true
+  query_patterns:
+    en:
+    - database management platform
+    - console RBAC
+    - LDAP integration
+    ru:
+    - платформа управления СУБД
+    - ролевой доступ консоли
+    - интеграция с LDAP
+  role_id: management_platform
+- core_coverage_allowed: false
+  definition: 'Внешнее решение резервного копирования (сателлит СУБД): сервер/шлюз
+    копий, каталог, политики.'
+  markers:
+  - бэкап-сервер
+  - каталог бэкапов
+  - политики хранения
+  multi_instance: true
+  query_patterns:
+    en:
+    - backup server
+    - backup catalog
+    ru:
+    - сервер резервного копирования
+    - каталог резервных копий
+  role_id: backup
+- core_coverage_allowed: false
+  definition: 'Консоль/панель управления (сателлит): веб-интерфейс, автоматизация,
+    агенты.'
+  markers:
+  - веб-консоль
+  - панель управления
+  - агент управления
+  multi_instance: true
+  query_patterns:
+    en:
+    - web management console
+    ru:
+    - веб-консоль управления СУБД
+  role_id: management_console
+- core_coverage_allowed: false
+  definition: 'Кэш в оперативной памяти (сателлит): Redis-совместимый кэш для ускорения
+    приложений.'
+  markers:
+  - Redis
+  - in-memory cache
+  - кэш сессий
+  multi_instance: true
+  query_patterns:
+    en:
+    - in-memory cache
+    ru:
+    - кэш в оперативной памяти
+  role_id: in_memory_cache
+- core_coverage_allowed: false
+  definition: 'Оркестратор высокой доступности и отказоустойчивости (сателлит): failover,
+    репликация.'
+  markers:
+  - Patroni
+  - failover
+  - менеджер репликации
+  multi_instance: true
+  query_patterns:
+    en:
+    - high availability orchestrator
+    - failover manager
+    ru:
+    - оркестратор высокой доступности
+  role_id: ha_orchestrator
+- core_coverage_allowed: false
+  definition: 'Внешний провайдер идентичности (сателлит): LDAP/AD/OIDC/SSO.'
+  markers:
+  - LDAP
+  - Active Directory
+  - OIDC
+  - SSO
+  multi_instance: false
+  query_patterns:
+    en:
+    - identity provider
+    - single sign-on
+    ru:
+    - провайдер идентичности
+    - единый вход
+  role_id: identity_provider
+- core_coverage_allowed: false
+  definition: 'Система мониторинга (сателлит): метрики, экспортёры, алертинг.'
+  markers:
+  - Prometheus
+  - экспортёр метрик
+  - алертинг
+  multi_instance: true
+  query_patterns:
+    en:
+    - database monitoring
+    - metrics exporter
+    ru:
+    - мониторинг СУБД
+  role_id: monitoring

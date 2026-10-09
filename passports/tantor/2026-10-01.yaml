@@ -1,0 +1,57 @@
+# Паспорт продукта (§4.3). Источник: comp_0.xlsx «Лист1» (снимок 2026-10-01).
+product_id: tantor
+canonical_name: "Tantor Postgres"
+vendor: "Tantor Labs (ГК Астра)"
+upstream:
+  baseline_id: upstream-pg
+  version: "18"
+  evidence:
+    url: "https://tantorlabs.ru"
+    quote: "Российская СУБД общего назначения на базе PostgreSQL с сертификатами ФСТЭК"
+edition_assessed: null
+version: "Tantor Postgres 18.3.0 (06.2026); Platform 7.0 (08.2026)"
+jurisdiction: RU
+doc_domains:
+  - "tantorlabs.ru"
+  - "tantorlabs.ru/products/dbms"
+  - "docs.tantorlabs.ru"
+  - "wiki.astralinux.ru"
+satellites:
+  # Установлен: платформа управления (management_console).
+  - role: management_console
+    state: approved
+    component: "Tantor Platform"
+    origin: in_house
+    relationship: bundled
+    evidence_state: verified
+    relationship_evidence:
+      url: "https://tantorlabs.ru"
+      quote: "Tantor Platform для управления"
+  # Установлен: PipelineDB определён как стриминговая подсистема.
+  - role: streaming
+    state: approved
+    component: "PipelineDB"
+    origin: third_party
+    relationship: integrated
+    evidence_state: verified
+    relationship_evidence:
+      url: "https://tantorlabs.ru/products/dbms"
+      quote: "PipelineDB (стриминг)"
+  # Установлен: XData определён как «машина БД».
+  - role: database_appliance
+    state: approved
+    component: "XData"
+    origin: in_house
+    relationship: bundled
+    evidence_state: verified
+    relationship_evidence:
+      url: "https://tantorlabs.ru"
+      quote: "XData (машина БД)"
+  # Только имя в группах/стеке; роль источником не определена → draft.
+  - role: unknown
+    state: draft
+    component: "Polar"
+    origin: in_house
+    relationship: bundled
+    evidence_state: claimed
+snapshot_date: 2026-10-01

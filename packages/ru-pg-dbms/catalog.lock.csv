@@ -1,0 +1,120 @@
+param_id,source_file,source_row,title,generated_at
+a1_architecture__64_bitnyj_schetchik_tranzakcij_xid_mxid,psq_params_091_demo.xlsx#final,2,64-битный счётчик транзакций (XID/MXID),2026-10-01T00:00:00Z
+a1_architecture__masshtabirovanie_pri_1000_pryamyh_soedinenij,psq_params_091_demo.xlsx#final,3,Масштабирование при >1000 прямых соединений,2026-10-01T00:00:00Z
+a1_architecture__optimizaciya_autovacuum_pod_64_bit_xid,psq_params_091_demo.xlsx#final,4,Оптимизация autovacuum под 64-bit XID,2026-10-01T00:00:00Z
+a1_architecture__snimki_na_osnove_schetchika_tranzakcij_csn,psq_params_091_demo.xlsx#final,5,Снимки на основе счётчика транзакций (CSN),2026-10-01T00:00:00Z
+a1_architecture__masshtabirovanie_lightweight_blokirovok_lwlock,psq_params_091_demo.xlsx#final,6,Масштабирование lightweight-блокировок (LWLock),2026-10-01T00:00:00Z
+a1_architecture__effektivnye_subtranzakcii_sverh_vanilla,psq_params_091_demo.xlsx#final,7,Эффективные субтранзакции сверх vanilla,2026-10-01T00:00:00Z
+a1_architecture__avtonomnye_tranzakcii,psq_params_091_demo.xlsx#final,8,Автономные транзакции,2026-10-01T00:00:00Z
+a1_architecture__prozrachnoe_szhatie_dannyh_pri_zapisi,psq_params_091_demo.xlsx#final,9,Прозрачное сжатие данных при записи,2026-10-01T00:00:00Z
+a1_architecture__avtosozdanie_particij_pri_vstavke,psq_params_091_demo.xlsx#final,10,Автосоздание партиций при вставке,2026-10-01T00:00:00Z
+a1_architecture__upravlenie_keshem_prepared_operatorov,psq_params_091_demo.xlsx#final,11,Управление кэшем prepared операторов,2026-10-01T00:00:00Z
+a1_architecture__jit_kompilyaciya_celyh_operatorov,psq_params_091_demo.xlsx#final,12,JIT-компиляция целых операторов,2026-10-01T00:00:00Z
+a1_architecture__izmeneniya_sistemnogo_kataloga_v_minornyh_reliz,psq_params_091_demo.xlsx#final,13,Изменения системного каталога в минорных релизах,2026-10-01T00:00:00Z
+a1_architecture__shtatnoe_vosstanovlenie_pri_povrezhdenii_wal,psq_params_091_demo.xlsx#final,14,Штатное восстановление при повреждении WAL,2026-10-01T00:00:00Z
+a1_architecture__otlozhennoe_sozdanie_vremennyh_tablic,psq_params_091_demo.xlsx#final,15,Отложенное создание временных таблиц,2026-10-01T00:00:00Z
+a1_architecture__optimizaciya_slru_i_bufernyh_kart,psq_params_091_demo.xlsx#final,16,Оптимизация SLRU и буферных карт,2026-10-01T00:00:00Z
+a1_architecture__snizhenie_konkurencii_za_lwlock_v_shared_buffer,psq_params_091_demo.xlsx#final,17,Снижение конкуренции за LWLock в shared_buffers,2026-10-01T00:00:00Z
+a1_architecture__numa_aware_allokaciya_pamyati,psq_params_091_demo.xlsx#final,18,NUMA-aware аллокация памяти,2026-10-01T00:00:00Z
+a1_architecture__simd_instrukcii_avx2_avx_512,psq_params_091_demo.xlsx#final,19,SIMD-инструкции (AVX2/AVX-512),2026-10-01T00:00:00Z
+a1_architecture__avtooptimizaciya_fizicheskogo_razmeshcheniya_bl,psq_params_091_demo.xlsx#final,20,Автооптимизация физического размещения блоков,2026-10-01T00:00:00Z
+a1_architecture__optimizaciya_pod_energonezavisimuyu_pamyat,psq_params_091_demo.xlsx#final,21,Оптимизация под энергонезависимую память,2026-10-01T00:00:00Z
+a2_planner__parallelnoe_vypolnenie_dml,psq_params_091_demo.xlsx#final,22,Параллельное выполнение DML,2026-10-01T00:00:00Z
+a2_planner__adaptivnaya_optimizaciya_zaprosov_aqo,psq_params_091_demo.xlsx#final,23,Адаптивная оптимизация запросов (AQO),2026-10-01T00:00:00Z
+a2_planner__sessionnaya_podmena_planov,psq_params_091_demo.xlsx#final,24,Сессионная подмена планов,2026-10-01T00:00:00Z
+a2_planner__kvoty_resursov_na_urovne_zaprosov_wlm,psq_params_091_demo.xlsx#final,25,Квоты ресурсов на уровне запросов (WLM),2026-10-01T00:00:00Z
+a2_planner__logicheskaya_izolyaciya_nagruzok,psq_params_091_demo.xlsx#final,26,Логическая изоляция нагрузок,2026-10-01T00:00:00Z
+a2_planner__prioritizaciya_resursov_po_rolyam,psq_params_091_demo.xlsx#final,27,Приоритизация ресурсов по ролям,2026-10-01T00:00:00Z
+a2_planner__gipoteticheskie_indeksy,psq_params_091_demo.xlsx#final,28,Гипотетические индексы,2026-10-01T00:00:00Z
+a2_planner__podskazki_optimizatoru_query_hints,psq_params_091_demo.xlsx#final,29,Подсказки оптимизатору (query hints),2026-10-01T00:00:00Z
+a2_planner__prodvizhenie_predikatov_soedineniya_pushdown,psq_params_091_demo.xlsx#final,30,Продвижение предикатов соединения (pushdown),2026-10-01T00:00:00Z
+a2_planner__otsechenie_particij_partition_pruning,psq_params_091_demo.xlsx#final,31,Отсечение партиций (partition pruning),2026-10-01T00:00:00Z
+a2_planner__preobrazovanie_exists_in_v_semi_join,psq_params_091_demo.xlsx#final,32,Преобразование EXISTS/IN в semi-join,2026-10-01T00:00:00Z
+a2_planner__parallelnyj_analyze,psq_params_091_demo.xlsx#final,33,Параллельный ANALYZE,2026-10-01T00:00:00Z
+a2_planner__parallelnyj_explain_analyze,psq_params_091_demo.xlsx#final,34,Параллельный EXPLAIN ANALYZE,2026-10-01T00:00:00Z
+a3_1c_integration__sertifikat_1s_sovmestimo_prof_korp,psq_params_091_demo.xlsx#final,35,Сертификат «1С:Совместимо» (ПРОФ/КОРП),2026-10-01T00:00:00Z
+a3_1c_integration__optimizaciya_specifichnyh_tipov_1s,psq_params_091_demo.xlsx#final,36,Оптимизация специфичных типов 1С,2026-10-01T00:00:00Z
+a3_1c_integration__podtverzhdennaya_proizvoditelnost_na_zakrytii,psq_params_091_demo.xlsx#final,37,Подтверждённая производительность на «Закрытии месяца»,2026-10-01T00:00:00Z
+a3_1c_integration__nagruzochnye_testy_1s_100_500_polzovatelej,psq_params_091_demo.xlsx#final,38,Нагрузочные тесты 1С (>100/500 пользователей),2026-10-01T00:00:00Z
+a3_1c_integration__podtverzhdennaya_rabota_s_bazami_1s_1_tb,psq_params_091_demo.xlsx#final,39,Подтверждённая работа с базами 1С >1 ТБ,2026-10-01T00:00:00Z
+a3_1c_integration__evristiki_planirovshchika_pod_patterny_1s,psq_params_091_demo.xlsx#final,40,Эвристики планировщика под паттерны 1С,2026-10-01T00:00:00Z
+a3_1c_integration__anti_bloat_mehanizm_dlya_profilej_1s_registry,psq_params_091_demo.xlsx#final,41,Анти-bloat механизм для профилей 1С (регистры),2026-10-01T00:00:00Z
+a3_1c_integration__korrelyaciya_zaprosov_s_tehnologicheskim_zhur,psq_params_091_demo.xlsx#final,42,Корреляция запросов с Технологическим журналом 1С,2026-10-01T00:00:00Z
+a3_1c_integration__in_memory_katalog_vremennyh_tablic_1s,psq_params_091_demo.xlsx#final,43,In-memory каталог временных таблиц 1С,2026-10-01T00:00:00Z
+a3_1c_integration__podderzhka_istoricheskih_kodirovok_1s,psq_params_091_demo.xlsx#final,44,Поддержка исторических кодировок 1С,2026-10-01T00:00:00Z
+a3_1c_integration__sovmestimost_s_rossijskimi_erp_galaktika_paru,psq_params_091_demo.xlsx#final,45,Совместимость с российскими ERP (Галактика/Парус/Turbo),2026-10-01T00:00:00Z
+a3_1c_integration__optimizaciya_ierarhicheskih_zaprosov_dlya_sed,psq_params_091_demo.xlsx#final,46,Оптимизация иерархических запросов для СЭД,2026-10-01T00:00:00Z
+a3_1c_integration__sovmestimost_s_hr_sistemami_s_pdn_sbis_potok,psq_params_091_demo.xlsx#final,47,Совместимость с HR-системами с ПДн (СБИС/Поток/WebTutor),2026-10-01T00:00:00Z
+a3_1c_integration__sovmestimost_s_crm_bpm_platformami_bitriks24,psq_params_091_demo.xlsx#final,48,Совместимость с CRM/BPM-платформами (Битрикс24/Creatio),2026-10-01T00:00:00Z
+a4_migration__sovmestimost_s_oracle_pl_sql,psq_params_091_demo.xlsx#final,49,Совместимость с Oracle PL/SQL,2026-10-01T00:00:00Z
+a4_migration__pakety_oracle_dbms_sql_lob_crypto_scheduler,psq_params_091_demo.xlsx#final,50,Пакеты Oracle DBMS_* (SQL/LOB/Crypto/Scheduler),2026-10-01T00:00:00Z
+a4_migration__oracle_sovmestimye_tipy_dannyh_number_varchar2_clo,psq_params_091_demo.xlsx#final,51,Oracle-совместимые типы данных (NUMBER/VARCHAR2/CLOB),2026-10-01T00:00:00Z
+a4_migration__emulyaciya_t_sql_top_nolock_identity,psq_params_091_demo.xlsx#final,52,Эмуляция T-SQL (TOP/NOLOCK/IDENTITY),2026-10-01T00:00:00Z
+a4_migration__funkcii_ms_sql_isnull_getdate_dateadd_i_dr,psq_params_091_demo.xlsx#final,53,Функции MS SQL (ISNULL/GETDATE/DATEADD и др.),2026-10-01T00:00:00Z
+a4_migration__instrument_ocenki_slozhnosti_migracii_assessment,psq_params_091_demo.xlsx#final,54,Инструмент оценки сложности миграции (assessment),2026-10-01T00:00:00Z
+a4_migration__konverter_koda_pl_sql_t_sql_pl_pgsql,psq_params_091_demo.xlsx#final,55,Конвертер кода PL/SQL/T-SQL → PL/pgSQL,2026-10-01T00:00:00Z
+a4_migration__pakety_oracle_utl_file_http_mail_smtp,psq_params_091_demo.xlsx#final,56,Пакеты Oracle UTL_* (FILE/HTTP/MAIL/SMTP),2026-10-01T00:00:00Z
+a4_migration__ierarhicheskie_zaprosy_connect_by,psq_params_091_demo.xlsx#final,57,Иерархические запросы (CONNECT BY),2026-10-01T00:00:00Z
+a4_migration__oracle_data_dictionary_views_all_user_dba,psq_params_091_demo.xlsx#final,58,Oracle Data Dictionary Views (ALL_/USER_/DBA_*),2026-10-01T00:00:00Z
+a4_migration__polzovatelskie_tipy_i_isklyucheniya_oracle_style,psq_params_091_demo.xlsx#final,59,Пользовательские типы и исключения (Oracle-style),2026-10-01T00:00:00Z
+a4_migration__pakety_i_kollekcii_oracle_packages_kollekcii,psq_params_091_demo.xlsx#final,60,Пакеты и коллекции Oracle (Packages/коллекции),2026-10-01T00:00:00Z
+a4_migration__bulk_operacii_oracle_bulk_collect_forall,psq_params_091_demo.xlsx#final,61,Bulk-операции Oracle (BULK COLLECT/FORALL),2026-10-01T00:00:00Z
+a4_migration__cdc_dlya_migracii_s_minimizaciej_prostoya,psq_params_091_demo.xlsx#final,62,CDC для миграции с минимизацией простоя,2026-10-01T00:00:00Z
+a4_migration__operator_merge_upsert,psq_params_091_demo.xlsx#final,63,Оператор MERGE (Upsert),2026-10-01T00:00:00Z
+a4_migration__sinonimy_obektov_public_private,psq_params_091_demo.xlsx#final,64,Синонимы объектов (public/private),2026-10-01T00:00:00Z
+a4_migration__tipy_bfile_rowid,psq_params_091_demo.xlsx#final,65,Типы BFILE/ROWID,2026-10-01T00:00:00Z
+a4_migration__format_bcp_dlya_dampov_ms_sql,psq_params_091_demo.xlsx#final,66,Формат bcp для дампов MS SQL,2026-10-01T00:00:00Z
+a4_migration__linked_servers_raspredelennye_zaprosy_ms_sql_style,psq_params_091_demo.xlsx#final,67,Linked Servers (распределённые запросы MS SQL-style),2026-10-01T00:00:00Z
+a5_multimodel__kolonochnoe_hranilishche_columnar,psq_params_091_demo.xlsx#final,68,Колоночное хранилище (columnar),2026-10-01T00:00:00Z
+a5_multimodel__rasshirennyj_json_jsonb_sql_json,psq_params_091_demo.xlsx#final,69,Расширенный JSON/JSONB (SQL/JSON),2026-10-01T00:00:00Z
+a5_multimodel__rasshirennaya_obrabotka_lob,psq_params_091_demo.xlsx#final,70,Расширенная обработка LOB,2026-10-01T00:00:00Z
+a5_multimodel__indeksy_vektornogo_poiska_ann,psq_params_091_demo.xlsx#final,71,Индексы векторного поиска (ANN),2026-10-01T00:00:00Z
+a5_multimodel__nativnyj_tip_vektora_vector,psq_params_091_demo.xlsx#final,72,Нативный тип вектора (VECTOR),2026-10-01T00:00:00Z
+a5_multimodel__rag_scenarii_i_in_database_ml,psq_params_091_demo.xlsx#final,73,RAG-сценарии и in-database ML,2026-10-01T00:00:00Z
+a5_multimodel__grafovyj_sloj_apache_age_opencypher,psq_params_091_demo.xlsx#final,74,Графовый слой (Apache AGE / openCypher),2026-10-01T00:00:00Z
+a5_multimodel__time_series_mehaniki,psq_params_091_demo.xlsx#final,75,Time-series механики,2026-10-01T00:00:00Z
+a5_multimodel__versioniruemye_tablicy_system_versioned_sql_2011,psq_params_091_demo.xlsx#final,76,"Версионируемые таблицы (System-Versioned, SQL:2011)",2026-10-01T00:00:00Z
+a5_multimodel__pryamoj_dostup_k_vneshnim_s3_hranilishcham,psq_params_091_demo.xlsx#final,77,Прямой доступ к внешним S3-хранилищам,2026-10-01T00:00:00Z
+b1_backup_basic__inkrementalnoe_kopirovanie_page_level,psq_params_091_demo.xlsx#final,78,Инкрементальное копирование (page-level),2026-10-01T00:00:00Z
+b1_backup_basic__vosstanovlenie_na_moment_vremeni_pitr,psq_params_091_demo.xlsx#final,79,Восстановление на момент времени (PITR),2026-10-01T00:00:00Z
+b1_backup_basic__katalog_bekapov_v_reshenii,psq_params_091_demo.xlsx#final,80,Каталог бэкапов (в решении),2026-10-01T00:00:00Z
+b1_backup_basic__goryachee_kopirovanie_hot_backup,psq_params_091_demo.xlsx#final,81,Горячее копирование (hot backup),2026-10-01T00:00:00Z
+b1_backup_basic__vizualnyj_konstruktor_politik,psq_params_091_demo.xlsx#final,82,Визуальный конструктор политик,2026-10-01T00:00:00Z
+b1_backup_basic__bekap_drugih_subd_iz_edinoj_konsoli,psq_params_091_demo.xlsx#final,83,Бэкап других СУБД из единой консоли,2026-10-01T00:00:00Z
+b1_backup_basic__application_aware_kopirovanie,psq_params_091_demo.xlsx#final,84,Application-aware копирование,2026-10-01T00:00:00Z
+b1_backup_basic__bekap_fajlovyh_sistem_i_vm,psq_params_091_demo.xlsx#final,85,Бэкап файловых систем и ВМ,2026-10-01T00:00:00Z
+b2_storage_eff__globalnaya_deduplikaciya,psq_params_091_demo.xlsx#final,86,Глобальная дедупликация,2026-10-01T00:00:00Z
+b2_storage_eff__vygruzka_v_s3_hranilishcha_rossijskie_oblaka,psq_params_091_demo.xlsx#final,87,Выгрузка в S3-хранилища (российские облака),2026-10-01T00:00:00Z
+b2_storage_eff__politiki_hraneniya_gfs_legal_hold,psq_params_091_demo.xlsx#final,88,Политики хранения (GFS/Legal Hold),2026-10-01T00:00:00Z
+b2_storage_eff__deduplikaciya_s_peremennym_blokom,psq_params_091_demo.xlsx#final,89,Дедупликация с переменным блоком,2026-10-01T00:00:00Z
+b2_storage_eff__tirazhirovanie_po_urovnyam_hraneniya_tiering,psq_params_091_demo.xlsx#final,90,Тиражирование по уровням хранения (tiering),2026-10-01T00:00:00Z
+b2_storage_eff__kompressiya_kopij_lz4_zstd,psq_params_091_demo.xlsx#final,91,Компрессия копий (LZ4/ZSTD),2026-10-01T00:00:00Z
+b3_backup_threats__skvoznoe_shifrovanie_kopij,psq_params_091_demo.xlsx#final,92,Сквозное шифрование копий,2026-10-01T00:00:00Z
+b3_backup_threats__neizmenyaemye_kopii_worm,psq_params_091_demo.xlsx#final,93,Неизменяемые копии (WORM),2026-10-01T00:00:00Z
+b3_backup_threats__izolyaciya_kontura_bekapa_air_gap,psq_params_091_demo.xlsx#final,94,Изоляция контура бэкапа (Air-Gap),2026-10-01T00:00:00Z
+b3_backup_threats__razdelenie_polnomochij_bekap_administratora_s,psq_params_091_demo.xlsx#final,95,Разделение полномочий бэкап-администратора (SoD),2026-10-01T00:00:00Z
+b3_backup_threats__kriptograficheskoe_udalenie_kopij,psq_params_091_demo.xlsx#final,96,Криптографическое удаление копий,2026-10-01T00:00:00Z
+b4_recovery__verifikaciya_celostnosti_bd_i_kopij,psq_params_091_demo.xlsx#final,97,Верификация целостности БД и копий,2026-10-01T00:00:00Z
+b4_recovery__mgnovennyj_zapusk_iz_kopii_instant_recovery,psq_params_091_demo.xlsx#final,98,Мгновенный запуск из копии (Instant Recovery),2026-10-01T00:00:00Z
+b4_recovery__granulyarnoe_vosstanovlenie_obektov,psq_params_091_demo.xlsx#final,99,Гранулярное восстановление объектов,2026-10-01T00:00:00Z
+b4_recovery__krossplatformennoe_vosstanovlenie_x86_arm_elbrus,psq_params_091_demo.xlsx#final,100,Кроссплатформенное восстановление (x86↔ARM/Эльбрус),2026-10-01T00:00:00Z
+b4_recovery__avtomaticheskaya_proverka_vosstanovimosti,psq_params_091_demo.xlsx#final,101,Автоматическая проверка восстановимости,2026-10-01T00:00:00Z
+b4_recovery__prosmotr_soderzhimogo_kopii_browse,psq_params_091_demo.xlsx#final,102,Просмотр содержимого копии (browse),2026-10-01T00:00:00Z
+v1_platform_core__nativnaya_podderzhka_rodnoj_subd,psq_params_091_demo.xlsx#final,103,Нативная поддержка «родной» СУБД,2026-10-01T00:00:00Z
+v1_platform_core__razdelenie_polnomochij_platformy_sod,psq_params_091_demo.xlsx#final,104,Разделение полномочий платформы (SoD),2026-10-01T00:00:00Z
+v1_platform_core__rabota_platformy_v_zakrytom_konture,psq_params_091_demo.xlsx#final,105,Работа платформы в закрытом контуре,2026-10-01T00:00:00Z
+v1_platform_core__audit_dejstvij_polzovatelej_platformy,psq_params_091_demo.xlsx#final,106,Аудит действий пользователей платформы,2026-10-01T00:00:00Z
+v1_platform_core__upravlenie_bez_superpolzovatelya_subd,psq_params_091_demo.xlsx#final,107,Управление без суперпользователя СУБД,2026-10-01T00:00:00Z
+v1_platform_core__dvuhfaktornaya_autentifikaciya_2fa,psq_params_091_demo.xlsx#final,108,Двухфакторная аутентификация (2FA),2026-10-01T00:00:00Z
+v1_platform_core__autentifikaciya_cherez_ldap_ad,psq_params_091_demo.xlsx#final,109,Аутентификация через LDAP/AD,2026-10-01T00:00:00Z
+v1_platform_core__rolevoj_dostup_k_funkciyam_platformy_rbac,psq_params_091_demo.xlsx#final,110,Ролевой доступ к функциям платформы (RBAC),2026-10-01T00:00:00Z
+v1_platform_core__vneshnij_api_platformy_rest_graphql,psq_params_091_demo.xlsx#final,111,Внешний API платформы (REST/GraphQL),2026-10-01T00:00:00Z
+v1_platform_core__integraciya_s_menedzherami_sekretov_vault,psq_params_091_demo.xlsx#final,112,Интеграция с менеджерами секретов (Vault),2026-10-01T00:00:00Z
+v1_platform_core__upravlenie_chuzhimi_postgresql_like_subd,psq_params_091_demo.xlsx#final,113,Управление чужими PostgreSQL-like СУБД,2026-10-01T00:00:00Z
+v1_platform_core__geterogennyj_landshaft_iz_edinoj_konsoli,psq_params_091_demo.xlsx#final,114,Гетерогенный ландшафт из единой консоли,2026-10-01T00:00:00Z
+v1_platform_core__podtverzhdenie_opasnyh_operacij_two_man_rule,psq_params_091_demo.xlsx#final,115,Подтверждение опасных операций (two-man rule),2026-10-01T00:00:00Z
+v1_platform_core__autentifikaciya_oauth_oidc,psq_params_091_demo.xlsx#final,116,Аутентификация OAuth/OIDC,2026-10-01T00:00:00Z
+v1_platform_core__tls_dlya_trafika_platformy,psq_params_091_demo.xlsx#final,117,TLS для трафика платформы,2026-10-01T00:00:00Z
+v1_platform_core__kanaly_opoveshchenij_platformy,psq_params_091_demo.xlsx#final,118,Каналы оповещений платформы,2026-10-01T00:00:00Z
+v1_platform_core__dostup_po_atributam_abac,psq_params_091_demo.xlsx#final,119,Доступ по атрибутам (ABAC),2026-10-01T00:00:00Z
+v1_platform_core__rasshirenie_platformy_plaginami,psq_params_091_demo.xlsx#final,120,Расширение платформы плагинами,2026-10-01T00:00:00Z

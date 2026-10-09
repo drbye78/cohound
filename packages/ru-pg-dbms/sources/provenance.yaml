@@ -1,0 +1,13 @@
+case_id: ru-pg-dbms
+generated_at: '2026-10-01T00:00:00Z'
+generator: packages/ru-pg-dbms/sources/build_package.py
+snapshot_date: '2026-10-01'
+sources:
+- path: /mnt/c/Work/gtm/psq_params_091_demo.xlsx
+  role: технический каталог 119 параметров
+  sha256: 0523781728bb8477158674b02844ce1b1467f135f3c4b05e27afcff6363cae1e
+  sheet: final
+- path: /mnt/c/Work/gtm/golden_091.xlsx
+  role: эталонные статусы (golden)
+  sha256: 8a676f0340146bf3fbcac0f8e8ed59ccfa1631619ee0df66397f584728902130
+  sheet: data

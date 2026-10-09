@@ -1,0 +1,21 @@
+anchor: pangolin
+case_id: ru-pg-dbms
+cohort: cohort-ru-pg-dbms-2026-10-01
+focus:
+  modules:
+  - core
+  - backup
+  - management
+  params: []
+languages:
+- ru
+- en
+mode: strict
+package: ru-pg-dbms
+products:
+- pangolin
+- postgrespro
+- tantor
+- jatoba
+ranking_policy: capability_ranked
+snapshot_date: '2026-10-01'

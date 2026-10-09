@@ -1,0 +1,37 @@
+# Паспорт продукта (§4.3). Источник: comp_0.xlsx «Лист1» (снимок 2026-10-01).
+product_id: jatoba
+canonical_name: "Jatoba (Ятоба)"
+vendor: "Газинформсервис"
+upstream:
+  baseline_id: upstream-pg
+  version: "18"
+  evidence:
+    url: "https://jatoba.ru"
+    quote: "Jatoba 18 Standard/Enterprise (18.02.2026, PostgreSQL 18)"
+edition_assessed: null
+version: "Jatoba 18 Standard/Enterprise (18.02.2026, PostgreSQL 18)"
+jurisdiction: RU
+doc_domains:
+  - "jatoba.ru"
+  - "www.gaz-is.ru"
+  - "www.gaz-is.ru/products/jatoba"
+satellites:
+  # Установлен: прямая фраза «Интеграция с КриптоПро».
+  - role: security_crypto
+    state: approved
+    component: "КриптоПро"
+    origin: third_party
+    relationship: integrated
+    evidence_state: verified
+    relationship_evidence:
+      url: "https://jatoba.ru"
+      quote: "Интеграция с КриптоПро"
+  # VipNet упомянут в стеке и совместимых продуктах, но роль источником не
+  # зафиксирована (только имя) → claimed/draft.
+  - role: security_crypto
+    state: draft
+    component: "VipNet"
+    origin: third_party
+    relationship: integrated
+    evidence_state: claimed
+snapshot_date: 2026-10-01

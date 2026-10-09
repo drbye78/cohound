@@ -1,0 +1,46 @@
+# Паспорт продукта (§4.3). Источник: comp_0.xlsx «Лист1» (снимок 2026-10-01).
+product_id: postgrespro
+canonical_name: "Postgres Pro Enterprise / Certified"
+vendor: "Postgres Professional"
+upstream:
+  baseline_id: upstream-pg
+  version: "18"
+  evidence:
+    url: "https://postgrespro.ru/products/postgrespro"
+    quote: "Российская СУБД корпоративного уровня на базе PostgreSQL с расширенной функциональностью"
+edition_assessed: "Enterprise / Certified"
+version: "Postgres Pro Enterprise 18.4.1 (2026); Standard 18.4.1 (18.06.2026)"
+jurisdiction: RU
+doc_domains:
+  - "postgrespro.ru"
+  - "postgrespro.ru/products/postgrespro/enterprise"
+  - "postgrespro.ru/docs"
+satellites:
+  # Установлен: pg_probackup перечислен в функциях/стеке; роль backup (имя инструмента).
+  - role: backup
+    state: approved
+    component: "pg_probackup"
+    origin: in_house
+    relationship: bundled
+    evidence_state: verified
+    relationship_evidence:
+      url: "https://postgrespro.ru/docs"
+      quote: "pg_probackup"
+  # Установлен: AQO прямо определён как адаптивная оптимизация.
+  - role: query_optimizer
+    state: approved
+    component: "AQO"
+    origin: in_house
+    relationship: bundled
+    evidence_state: verified
+    relationship_evidence:
+      url: "https://postgrespro.ru/products/postgrespro"
+      quote: "AQO (адаптивная оптимизация)"
+  # Только имя в технологическом стеке; роль источником не определена → draft.
+  - role: unknown
+    state: draft
+    component: "Proxima"
+    origin: in_house
+    relationship: bundled
+    evidence_state: claimed
+snapshot_date: 2026-10-01

@@ -137,9 +137,17 @@ def test_malformed_passports_dir_is_clear_usage_error(
 
 
 def test_default_passports_dir_absent_is_noop(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Без ``--passports-dir`` дефолт ``passports`` (нет каталога в cwd) → ``{}``."""
+    """Без ``--passports-dir`` дефолт ``passports`` (нет каталога в cwd) → ``{}``.
+
+    Дефолт относителен cwd, поэтому тест обязан быть cwd-независимым: переходим в
+    ``tmp_path``, где каталога ``passports`` заведомо нет. Иначе наличие реального
+    ``passports/`` в корне репозитория (пакеты кейсов) даёт ложный провал.
+    """
+    monkeypatch.chdir(tmp_path)
     package = _valid_package(tmp_path)
     db = tmp_path / "cohound.db"
 

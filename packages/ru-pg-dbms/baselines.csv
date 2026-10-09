@@ -1,0 +1,34 @@
+baseline_id,param_id,min_version,inheritance_mode,note
+upstream-pg,a1_architecture__effektivnye_subtranzakcii_sverh_vanilla,13,direct,
+upstream-pg,a1_architecture__prozrachnoe_szhatie_dannyh_pri_zapisi,,direct,TOAST
+upstream-pg,a1_architecture__avtosozdanie_particij_pri_vstavke,,direct,DEFAULT partition
+upstream-pg,a1_architecture__jit_kompilyaciya_celyh_operatorov,,direct,vanilla JIT (выражения)
+upstream-pg,a1_architecture__izmeneniya_sistemnogo_kataloga_v_minornyh_reliz,,direct,стабильный catversion в минорах
+upstream-pg,a1_architecture__optimizaciya_slru_i_bufernyh_kart,17,direct,
+upstream-pg,a1_architecture__snizhenie_konkurencii_za_lwlock_v_shared_buffer,17,direct,
+upstream-pg,a1_architecture__numa_aware_allokaciya_pamyati,,conditional,PG 18+
+upstream-pg,a1_architecture__simd_instrukcii_avx2_avx_512,,conditional,PG 17/18 (частично)
+upstream-pg,a2_planner__parallelnoe_vypolnenie_dml,,direct,parallel SELECT
+upstream-pg,a2_planner__prioritizaciya_resursov_po_rolyam,,direct,лимиты соединений на роль
+upstream-pg,a2_planner__gipoteticheskie_indeksy,,conditional,расш.: HypoPG
+upstream-pg,a2_planner__podskazki_optimizatoru_query_hints,,conditional,расш.: pg_hint_plan
+upstream-pg,a2_planner__prodvizhenie_predikatov_soedineniya_pushdown,12,direct,
+upstream-pg,a2_planner__otsechenie_particij_partition_pruning,,conditional,PG 11+
+upstream-pg,a2_planner__preobrazovanie_exists_in_v_semi_join,,conditional,upstream (актуальные)
+upstream-pg,a2_planner__parallelnyj_analyze,13,direct,
+upstream-pg,a2_planner__parallelnyj_explain_analyze,13,direct,
+upstream-pg,a3_1c_integration__podderzhka_istoricheskih_kodirovok_1s,,conditional,upstream (локали)
+upstream-pg,a3_1c_integration__optimizaciya_ierarhicheskih_zaprosov_dlya_sed,,direct,upstream WITH RECURSIVE
+upstream-pg,a4_migration__pakety_oracle_utl_file_http_mail_smtp,,conditional,базлайн: orafce (частично)
+upstream-pg,a4_migration__ierarhicheskie_zaprosy_connect_by,,conditional,базлайн: orafce (частично) / upstream WITH RECURSIVE
+upstream-pg,a4_migration__oracle_data_dictionary_views_all_user_dba,,conditional,базлайн: orafce (частично)
+upstream-pg,a4_migration__cdc_dlya_migracii_s_minimizaciej_prostoya,,direct,upstream logical decoding
+upstream-pg,a4_migration__operator_merge_upsert,,conditional,PG 15+
+upstream-pg,a4_migration__tipy_bfile_rowid,,conditional,базлайн: orafce (ROWID псевдо-колонка)
+upstream-pg,a4_migration__linked_servers_raspredelennye_zaprosy_ms_sql_style,,direct,upstream FDW
+upstream-pg,a5_multimodel__rasshirennyj_json_jsonb_sql_json,17,direct,
+upstream-pg,a5_multimodel__rasshirennaya_obrabotka_lob,,direct,vanilla TOAST
+upstream-pg,a5_multimodel__indeksy_vektornogo_poiska_ann,,conditional,расш.: pgvector (PG 18 частично)
+upstream-pg,a5_multimodel__grafovyj_sloj_apache_age_opencypher,,conditional,расш.: Apache AGE
+upstream-pg,a5_multimodel__pryamoj_dostup_k_vneshnim_s3_hranilishcham,,direct,upstream FDW
+upstream-pg,b1_backup_basic__inkrementalnoe_kopirovanie_page_level,,direct,PG 17 incremental basebackup

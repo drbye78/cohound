@@ -152,9 +152,14 @@ def test_split_without_valid_config_still_rejected() -> None:
 
 
 def test_cmd_run_registers_real_phases_and_blocks_at_g1(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """CLI строит реальные фазы (не заглушки); g1 без решения → ``blocked``."""
+    # Дефолт --passports-dir относителен cwd: переходим в tmp_path, чтобы «нет каталога
+    # passports» было детерминировано и не зависело от реальных паспортов в корне репо.
+    monkeypatch.chdir(tmp_path)
     package = _valid_package(tmp_path)
     db = tmp_path / "cohound.db"
     runs_dir = tmp_path / "runs"
