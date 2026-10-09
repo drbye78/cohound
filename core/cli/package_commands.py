@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import argparse
+import datetime as _dt
 import sys
 from pathlib import Path
 from typing import Any
@@ -25,11 +26,16 @@ import yaml
 
 from core.cli.main import (
     EXIT_BLOCKED,
+    EXIT_ERROR,
     EXIT_NOT_FOUND,
     EXIT_OK,
     EXIT_USAGE,
     CliError,
+    _concise,
+    _emit_error,
+    _llm_configured,
     _print_json,
+    _search_adapter_configured,
 )
 from core.pipeline.package_admin import (
     OpResult,
@@ -77,7 +83,12 @@ from core.pipeline.package_discovery import (
     suggest_modules,
     suggest_roles,
 )
-from core.pipeline.package_io import atomic_write_text, scan_packages
+from core.pipeline.package_io import atomic_write_text, load_artifacts, scan_packages
+from core.pipeline.package_scout import (
+    PackageScoutReport,
+    scout_package,
+    write_scout_artifacts,
+)
 
 __all__ = ["add_package_parser", "cmd_package"]
 
@@ -853,6 +864,209 @@ def cmd_package_apply(args: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------------------
+# Хендлеры: веб-заземлённая разведка пакета (scout)
+# ---------------------------------------------------------------------------
+
+
+def _parse_only(raw: str | None) -> list[str] | None:
+    """Разбирает ``--only`` (через запятую) в список из {landscape,catalog,baselines}."""
+    if raw is None or not str(raw).strip():
+        return None
+    parts = [part.strip() for part in str(raw).split(",") if part.strip()]
+    valid = {"landscape", "catalog", "baselines"}
+    unknown = set(parts) - valid
+    if unknown:
+        raise CliError(
+            f"--only: неизвестные значения {sorted(unknown)}; допустимы {sorted(valid)}",
+            code="usage",
+            exit_code=EXIT_USAGE,
+        )
+    return parts
+
+
+def cmd_package_scout(args: argparse.Namespace) -> int:
+    """``package scout`` — веб-заземлённая разведка категории: SERP+краул+tool-less LLM.
+
+    Pipeline сам делает внешний поиск (:class:`SearchAdapterPort`), реальный краул
+    (:class:`CrawlerPort`) и извлечение (:class:`ExtractorPort`), затем **tool-less** LLM
+    (:class:`DiscoveryLLMPort`, I18) синтезирует гипотезы → консервативный маппинг →
+    кандидаты. Все кандидаты ``needs_human=True`` — auto-approve нет (A3/G2). Scout
+    **не пишет в пакет** (I19): только ``sources/scout/{date}.candidates.json`` +
+    ``.provenance.json``; применение — человеческим ``hound package apply --actor``.
+
+    Ошибки разведки (``report.ok=False``) не отменяют запись: частичные кандидаты
+    сохраняются с пометкой в sidecar/``needs_human`` (OQ-3). Без LLM-конфигурации или
+    учётных данных поиска — понятная ошибка, кандидаты не выдумываются.
+
+    :returns: :data:`EXIT_OK` — разведка без ошибок; :data:`EXIT_ERROR` — ошибки
+        сбора/инференса; :data:`EXIT_USAGE` — битый ``--package``/LLM не сконфигурирован.
+    """
+    from core.cli.wiring import (
+        LOCAL_PROFILE,
+        WiringError,
+        build_adapters,
+        build_discovery_llm,
+        build_scout_crawler,
+        build_search_adapter,
+    )
+
+    pkg_dir = Path(args.package)
+    if not (pkg_dir / "package.yaml").is_file():
+        raise CliError(
+            f"{args.package}: package.yaml отсутствует — это не пакет категории",
+            code="package",
+            exit_code=EXIT_USAGE,
+        )
+    artifacts = _invoke(lambda: load_artifacts(pkg_dir))
+    manifest = artifacts.manifest
+    case_id = manifest.case_id if manifest is not None else pkg_dir.name
+
+    # 1. LLM-разведка (tool-less, I18): инъекция теста ИЛИ сборка из env/флагов.
+    injected_llm = getattr(args, "discovery_llm", None)
+    if injected_llm is not None:
+        discovery_llm = injected_llm
+    else:
+        try:
+            discovery_llm = build_discovery_llm(
+                base_url=args.llm_base_url,
+                model_id=args.llm_model,
+                decoder=args.llm_decoder,
+                max_tokens=args.llm_max_tokens,
+            )
+        except WiringError as exc:
+            _emit_error(args, "llm", _concise(exc))
+            return EXIT_USAGE
+    if not _llm_configured(discovery_llm):
+        _emit_error(
+            args,
+            "llm",
+            "LLM-разведка не сконфигурирована: задайте --llm-base-url/--llm-model "
+            "или COHOUND_LLM_BASE_URL/COHOUND_LLM_MODEL; кандидаты не выдумываются",
+        )
+        return EXIT_USAGE
+
+    # 2. Поиск: инъекция теста, --no-search либо реальный адаптер (без ключей — ошибка).
+    injected_search = getattr(args, "search_adapter", None)
+    search: Any
+    if injected_search is not None:
+        search = injected_search
+    elif args.no_search:
+        search = None
+    else:
+        try:
+            search = build_search_adapter(args.search_adapter_kind)
+        except WiringError as exc:
+            _emit_error(args, "I19", _concise(exc))
+            return EXIT_USAGE
+        if not _search_adapter_configured(search):
+            _emit_error(
+                args,
+                "I19",
+                "поисковый адаптер недоступен: нет httpx либо учётных данных "
+                "(yandex: YANDEX_SEARCH_API_KEY/YANDEX_FOLDER_ID; glm: GLM_SEARCH_API_KEY); "
+                "кандидаты не выдумываются (используйте --no-search с --url)",
+            )
+            return EXIT_ERROR
+
+    # 3. Краул/экстракция: как в ``cmd_passport_scout`` (инъекции/локальный профиль).
+    crawler = getattr(args, "crawler", None) or build_scout_crawler()
+    extractor: Any = getattr(args, "extractor", None)
+    if extractor is None:
+        ports = build_adapters(profile=LOCAL_PROFILE, package=str(pkg_dir))
+        extractor = ports.extractor
+
+    # 4. Подсказки: пользовательские + резервный контекст целевого пакета.
+    user_hints = _invoke(lambda: _read_mapping(args.hints)) if args.hints else {}
+    reserved = {
+        "existing_modules": [m.module_id for m in (manifest.modules if manifest else [])],
+        "existing_roles": [r.role_id for r in (manifest.roles if manifest else [])],
+        "existing_params": [row.param_id for row in artifacts.catalog],
+        "existing_titles": [row.title for row in artifacts.catalog],
+    }
+    hints = {**user_hints, **reserved}
+
+    # 5. Разведка (кандидаты; в пакет не пишет — I19).
+    report: PackageScoutReport = _invoke(
+        lambda: scout_package(
+            subject_name=args.subject_name,
+            category=args.category,
+            seed_urls=list(args.seed_urls or []),
+            hints=hints,
+            search=search,
+            crawler=crawler,
+            extractor=extractor,
+            discovery_llm=discovery_llm,
+            only=_parse_only(args.only),
+            scope=args.scope,
+            lang=args.lang,
+            limit=args.limit,
+            max_pages=args.max_pages,
+            budget=args.max_calls,
+        )
+    )
+
+    # 6. Запись артефактов (OQ-3: частичные кандидаты тоже пишутся; --dry-run не пишет).
+    out_dir = Path(args.out) if args.out else pkg_dir / "sources" / "scout"
+    written: dict[str, str] = {}
+    if not args.dry_run:
+        candidates_path, provenance_path = _invoke(
+            lambda: write_scout_artifacts(
+                report, out_dir, report.sidecar.get("snapshot_date") or _today()
+            )
+        )
+        written = {
+            "candidates_path": str(candidates_path),
+            "provenance_path": str(provenance_path),
+        }
+
+    payload: dict[str, Any] = {
+        "ok": report.ok,
+        "subject_name": report.subject_name,
+        "case_id": case_id,
+        "archetype": report.archetype.as_dict(),
+        "candidates": len(report.candidates),
+        "candidate_kinds": dict(report.sidecar.get("candidate_kinds", {})),
+        "needs_human": report.needs_human,
+        "errors": report.errors,
+        "fetched": len(report.fetched),
+        "search_calls": report.search_calls,
+        "dry_run": bool(args.dry_run),
+        **written,
+    }
+    _emit(args, payload, _print_package_scout_lines(payload))
+    return EXIT_OK if report.ok else EXIT_ERROR
+
+
+def _today() -> str:
+    """Сегодняшняя дата ISO (fallback даты снимка артефактов scout)."""
+    return _dt.date.today().isoformat()
+
+
+def _print_package_scout_lines(payload: dict[str, Any]) -> list[str]:
+    """Строит строки человекочитаемого вывода ``package scout`` (для :func:`_emit`)."""
+    lines = [
+        f"subject_name: {payload['subject_name']}",
+        f"case_id: {payload['case_id']}",
+        f"archetype: {payload['archetype']['archetype']}",
+        f"candidates: {payload['candidates']}",
+        f"search_calls: {payload['search_calls']}",
+        f"fetched: {payload['fetched']}",
+        f"dry-run: {'yes' if payload.get('dry_run') else 'no'}",
+    ]
+    for label in ("candidates_path", "provenance_path"):
+        if label in payload:
+            lines.append(f"{label}: {payload[label]}")
+    for kind, count in sorted(payload.get("candidate_kinds", {}).items()):
+        lines.append(f"  [{kind}] {count}")
+    for item in payload["needs_human"]:
+        lines.append(f"needs_human: {item}")
+    for error in payload["errors"]:
+        lines.append(f"error: {error}")
+    lines.append(f"ok: {'yes' if payload['ok'] else 'no'}")
+    return lines
+
+
+# ---------------------------------------------------------------------------
 # Сборка парсера
 # ---------------------------------------------------------------------------
 
@@ -1221,6 +1435,63 @@ def add_package_parser(subparsers: Any) -> None:
     )
     p_apply.add_argument("--json", action="store_true", help="машинночитаемый вывод (JSON)")
     p_apply.set_defaults(handler=cmd_package_apply)
+
+    # scout (веб-заземлённая разведка) ------------------------------------- #
+    from core.cli.wiring import SUPPORTED_SEARCH_ADAPTERS
+
+    p_scout = pkg.add_parser(
+        "scout",
+        help="веб-заземлённая разведка пакета: SERP+краул+tool-less LLM → кандидаты",
+    )
+    _add_op_common(p_scout)
+    p_scout.add_argument("--subject-name", required=True, help="тема разведки (категория/продукт)")
+    p_scout.add_argument("--category", default=None, help="уточнение категории (для запросов/промпта)")
+    p_scout.add_argument("--hints", default=None, metavar="FILE", help="JSON/YAML-файл подсказок")
+    p_scout.add_argument(
+        "--url",
+        action="append",
+        dest="seed_urls",
+        default=None,
+        metavar="URL",
+        help="доверенная точка входа (повторяемо; фетчится всегда)",
+    )
+    p_scout.add_argument(
+        "--search-adapter",
+        dest="search_adapter_kind",
+        default="yandex",
+        choices=list(SUPPORTED_SEARCH_ADAPTERS),
+        help="внешний поисковый адаптер (дефолт yandex)",
+    )
+    p_scout.add_argument("--no-search", action="store_true", help="не делать SERP (только --url)")
+    p_scout.add_argument("--limit", type=int, default=10, help="лимит результатов SERP на запрос")
+    p_scout.add_argument("--max-pages", type=int, default=8, help="потолок числа фетчей")
+    p_scout.add_argument(
+        "--max-calls", type=int, default=None, help="потолок числа SERP-вызовов (бюджет)"
+    )
+    p_scout.add_argument(
+        "--only",
+        default="landscape,catalog",
+        help="какие LLM-вызовы делать: landscape,catalog,baselines (через запятую)",
+    )
+    p_scout.add_argument("--scope", default="all", help="область baselines: 'all', модуль или param_id")
+    p_scout.add_argument("--lang", choices=["ru", "en"], default="ru", help="язык запросов")
+    p_scout.add_argument("--llm-base-url", default=None, help="override COHOUND_LLM_BASE_URL")
+    p_scout.add_argument("--llm-model", default=None, help="override COHOUND_LLM_MODEL")
+    p_scout.add_argument(
+        "--llm-decoder",
+        choices=["none", "json_object", "json_schema"],
+        default=None,
+        help="механизм декодирования (override COHOUND_LLM_DECODER)",
+    )
+    p_scout.add_argument(
+        "--llm-max-tokens", type=int, default=None, help="потолок генерации LLM"
+    )
+    p_scout.add_argument(
+        "--out",
+        default=None,
+        help="каталог артефактов scout (дефолт packages/{case_id}/sources/scout)",
+    )
+    p_scout.set_defaults(handler=cmd_package_scout)
 
     p_package.set_defaults(handler=cmd_package, _package_parser=p_package)
 

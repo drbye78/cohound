@@ -1,0 +1,51 @@
+{
+  "subject_name": "Alpha Product",
+  "category": "database",
+  "vendor": "ACME",
+  "upstream": {
+    "name": "Open Core",
+    "is_oss": true,
+    "url": "https://docs.test/alpha",
+    "quote": "Open Core engine, an open-source upstream",
+    "confidence": 0.9,
+    "rationale": "root of the lineage"
+  },
+  "alternatives": [
+    {
+      "name": "Alt One",
+      "role_hint": "alternative",
+      "is_anchor_candidate": false,
+      "url": "https://docs.test/alpha",
+      "quote": "Backup and Restore with verified snapshots",
+      "confidence": 0.6
+    }
+  ],
+  "commercial_derivatives": [],
+  "cross_line": false,
+  "products": [
+    {
+      "name": "Alpha Product",
+      "role_hint": "anchor product",
+      "is_anchor_candidate": true,
+      "url": "https://docs.test/alpha",
+      "quote": "Alpha Product documentation",
+      "confidence": 0.9
+    }
+  ],
+  "modules": [
+    {"name": "Backup", "weight": 30.0, "rationale": "backup features", "confidence": 0.7},
+    {"name": "Core", "weight": 40.0, "rationale": "core engine", "confidence": 0.7}
+  ],
+  "roles": [
+    {
+      "name": "Backup Role",
+      "definition": "Backup and restore operations",
+      "markers": ["backup", "restore"],
+      "query_patterns": {"ru": ["резервное копирование"], "en": ["backup"]},
+      "confidence": 0.7
+    }
+  ],
+  "archetype_signal": {"value": "A", "signals": ["common open upstream"], "confidence": 0.8},
+  "field_confidence": {"upstream": 0.9},
+  "needs_human": ["проверить лицензию upstream"]
+}

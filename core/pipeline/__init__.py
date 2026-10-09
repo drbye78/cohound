@@ -251,6 +251,23 @@ from core.pipeline.package_candidates import (
     loads_candidates,
     plan_candidates,
 )
+from core.pipeline.package_scout import (
+    BASELINE_TEMPLATE_VERSION,
+    CATALOG_TEMPLATE_VERSION,
+    LANDSCAPE_TEMPLATE_VERSION,
+    PackageScoutReport,
+    ScoutArchetypeSignal,
+    ScoutCatalogHypothesis,
+    ScoutLandscapeHypothesis,
+    ScoutModule,
+    ScoutParam,
+    ScoutProduct,
+    ScoutRole,
+    ScoutUpstream,
+    build_seed_from_hypotheses,
+    scout_package,
+    write_scout_artifacts,
+)
 
 __all__ = [
     # runner (T4.1)
@@ -470,4 +487,20 @@ __all__ = [
     "apply_candidates",
     "dumps_candidates",
     "loads_candidates",
+    # package-scout (веб-заземлённая разведка пакета категории)
+    "LANDSCAPE_TEMPLATE_VERSION",
+    "CATALOG_TEMPLATE_VERSION",
+    "BASELINE_TEMPLATE_VERSION",
+    "ScoutUpstream",
+    "ScoutProduct",
+    "ScoutModule",
+    "ScoutRole",
+    "ScoutArchetypeSignal",
+    "ScoutLandscapeHypothesis",
+    "ScoutParam",
+    "ScoutCatalogHypothesis",
+    "PackageScoutReport",
+    "scout_package",
+    "build_seed_from_hypotheses",
+    "write_scout_artifacts",
 ]

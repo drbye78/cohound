@@ -1,0 +1,72 @@
+{
+  "subject_name": "Alpha Product",
+  "params": [
+    {
+      "title": "Backup and Restore",
+      "module": "backup",
+      "group": "data protection",
+      "importance": "Вж",
+      "param_type": "fact",
+      "rule": "Supports Backup and Restore with verified snapshots",
+      "absence_rule": "explicit",
+      "role_binding": "backup_role",
+      "concept_terms": {"ru": ["резервное копирование"], "en": ["backup"]},
+      "reference_upstream": "Open Core",
+      "min_version": "1.0",
+      "inheritance_mode": "direct",
+      "url": "https://docs.test/alpha",
+      "quote": "Backup and Restore with verified snapshots",
+      "confidence": 0.8,
+      "rationale": "documented"
+    },
+    {
+      "title": "Query Planner",
+      "module": "core",
+      "group": "query",
+      "importance": "Баз",
+      "param_type": "showcase",
+      "rule": "Optimizes queries",
+      "absence_rule": "explicit",
+      "role_binding": null,
+      "concept_terms": {"ru": ["планировщик"], "en": ["query planner"]},
+      "url": "https://docs.test/alpha",
+      "quote": "Query Planner hints",
+      "confidence": 0.5
+    },
+    {
+      "title": "Ghost Param",
+      "module": "backup",
+      "group": "x",
+      "importance": "Баз",
+      "param_type": "fact",
+      "rule": "fake",
+      "url": "https://fab.test/x",
+      "quote": "nope",
+      "confidence": 0.9
+    },
+    {
+      "title": "Bad Quote Param",
+      "module": "backup",
+      "group": "x",
+      "importance": "Баз",
+      "param_type": "fact",
+      "rule": "fake",
+      "url": "https://docs.test/alpha",
+      "quote": "NOT IN TEXT AT ALL",
+      "confidence": 0.9
+    },
+    {
+      "title": "Unknown Module Param",
+      "module": "ghost_module",
+      "group": "x",
+      "importance": "Баз",
+      "param_type": "fact",
+      "rule": "fake",
+      "url": "https://docs.test/alpha",
+      "quote": "Alpha Product documentation",
+      "confidence": 0.9
+    }
+  ],
+  "field_confidence": {},
+  "needs_human": []
+}
