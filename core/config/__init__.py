@@ -33,6 +33,24 @@ from core.config.passports import (
     load_passports,
     passport_urls,
 )
+from core.config.paths import (
+    DEFAULT_PATHS_FILE,
+    ENV_CACHE_DIR,
+    ENV_CORPUS_RAW_DIR,
+    ENV_HOME,
+    ENV_INDEX_STORE_DIR,
+    ENV_PACKAGES_DIR,
+    ENV_PASSPORTS_DIR,
+    ENV_PATHS_FILE,
+    ENV_REGISTRIES_DIR,
+    ENV_REPORTS_DIR,
+    ENV_RUNS_DIR,
+    HARNESS_FIELDS,
+    PathsConfig,
+    load_paths_file,
+    resolve_paths,
+    with_home,
+)
 
 __all__ = [
     # run.yaml (§4.5)
@@ -60,4 +78,21 @@ __all__ = [
     "load_passports",
     "passport_urls",
     "PassportLoadError",
+    # paths.yaml — раскладка операционных каталогов (03 §A.1)
+    "PathsConfig",
+    "resolve_paths",
+    "load_paths_file",
+    "with_home",
+    "HARNESS_FIELDS",
+    "DEFAULT_PATHS_FILE",
+    "ENV_HOME",
+    "ENV_PATHS_FILE",
+    "ENV_PACKAGES_DIR",
+    "ENV_PASSPORTS_DIR",
+    "ENV_RUNS_DIR",
+    "ENV_INDEX_STORE_DIR",
+    "ENV_CORPUS_RAW_DIR",
+    "ENV_CACHE_DIR",
+    "ENV_REGISTRIES_DIR",
+    "ENV_REPORTS_DIR",
 ]
