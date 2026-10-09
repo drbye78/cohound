@@ -59,8 +59,10 @@ from core.cli.wiring import (
     SUPPORTED_SEARCH_ADAPTERS,
     WiringError,
     build_adapters,
+    build_discovery_llm,
     build_gateway,
     build_runner,
+    build_scout_crawler,
     build_search_adapter,
     build_store,
     manifest_deploy_fields,
@@ -69,6 +71,7 @@ from core.cli.wiring import (
 from core.config import (
     PassportLoadError,
     load_golden,
+    load_package_manifest,
     load_passports,
     passport_urls,
 )
@@ -86,6 +89,8 @@ from core.pipeline import (
     evaluate_golden,
     promote_batch,
     review_queue,
+    scout_passport,
+    write_passport_draft,
 )
 from core.pipeline.compute import compute
 from core.pipeline.lint import lint_run_inputs
@@ -95,6 +100,8 @@ from core.pipeline.plan import RunPlan, derive_run_id, plan as build_plan
 from core.pipeline.report import CrossCycleDiffError, render_diff, write_reports
 from core.pipeline.review import PromotionResult, ReviewError, ReviewItem
 from core.pipeline.runner import Clock, PhaseFn, _gate_phase
+from core.ports.crawler import CrawlerPort
+from core.ports.discovery_llm import DiscoveryLLMPort
 from core.ports.gateway import ContentGateway
 from core.ports.search import SearchAdapterPort
 
@@ -819,6 +826,99 @@ def cmd_discover(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def cmd_passport_scout(args: argparse.Namespace) -> int:
+    """``passport-scout``: авто-генерация **черновика** паспорта продукта (M1).
+
+    Собирает страницы заданного ``--url`` (и, при переданном поиске, URL выдачи),
+    зовёт LLM-разведку в схему гипотезы и строит консервативный черновик
+    (:func:`core.pipeline.scout_passport`). Сателлиты — только ``draft``/``not_found``;
+    ``relationship_evidence``/``upstream`` — лишь при подтверждённом URL и дословной
+    цитате (I10/I15, precision-first). ``--dry-run`` не пишет. При ошибках сбора/LLM
+    (``report.ok=False``) черновик **не публикуется**, код возврата :data:`EXIT_ERROR`.
+
+    Без LLM-конфигурации (пустые ``base_url``/``model_id``) — понятная ошибка ``llm``
+    (:data:`EXIT_USAGE`); кандидаты не выдумываются. Тестовые швы ``discovery_llm``/
+    ``crawler``/``extractor`` инъектируются в :func:`main` (без сети).
+
+    :returns: :data:`EXIT_OK` — черновик построен; :data:`EXIT_ERROR` — ошибки;
+        :data:`EXIT_USAGE` — LLM не сконфигурирован/битый ``--package``.
+    """
+    injected_llm = getattr(args, "discovery_llm", None)
+    if injected_llm is not None:
+        discovery_llm: DiscoveryLLMPort = injected_llm
+    else:
+        try:
+            discovery_llm = build_discovery_llm(
+                base_url=args.llm_base_url,
+                model_id=args.llm_model,
+                decoder=args.llm_decoder,
+            )
+        except WiringError as exc:
+            _emit_error(args, "llm", _concise(exc))
+            return EXIT_USAGE
+    if not _llm_configured(discovery_llm):
+        _emit_error(
+            args,
+            "llm",
+            "LLM-разведка не сконфигурирована: задайте --llm-base-url/--llm-model "
+            "или COHOUND_LLM_BASE_URL/COHOUND_LLM_MODEL; кандидаты не выдумываются",
+        )
+        return EXIT_USAGE
+
+    # Порты профиля: для ``local`` crawler не инстанцируется (нет URL-конфига) —
+    # берём локальный ScrapyCrawler; для ``split`` используется remote-прокси из Ports.
+    profile_ports = build_adapters(
+        profile=args.profile, package=getattr(args, "package", None)
+    )
+    crawler: CrawlerPort = (
+        getattr(args, "crawler", None)
+        or getattr(profile_ports, "crawler", None)
+        or build_scout_crawler()
+    )
+    extractor: Any = getattr(args, "extractor", None) or profile_ports.extractor
+
+    roles = _load_package_roles(getattr(args, "package", None))
+    report = scout_passport(
+        product_name=args.product_name,
+        url=args.url,
+        crawler=crawler,
+        extractor=extractor,
+        discovery_llm=discovery_llm,
+        search=getattr(args, "search_adapter", None),
+        roles=roles,
+    )
+
+    written: dict[str, str] = {}
+    if not args.dry_run and report.ok:
+        yaml_path, sidecar_path = write_passport_draft(
+            report, args.passports_dir, report.passport.snapshot_date
+        )
+        written = {
+            "passport_path": str(yaml_path),
+            "candidates_path": str(sidecar_path),
+        }
+
+    payload: dict[str, Any] = {
+        "ok": report.ok,
+        "product_id": report.passport.product_id,
+        "canonical_name": report.passport.canonical_name,
+        "vendor": report.passport.vendor,
+        "jurisdiction": report.passport.jurisdiction,
+        "satellites": len(report.passport.satellites),
+        "doc_domains": report.passport.doc_domains,
+        "needs_human": report.needs_human,
+        "errors": report.errors,
+        "fetched": report.fetched,
+        "dry_run": bool(args.dry_run),
+        **written,
+    }
+    if args.json:
+        _print_json(payload)
+    else:
+        _print_passport_scout(payload)
+    return EXIT_OK if report.ok else EXIT_ERROR
+
+
 def cmd_review(args: argparse.Namespace) -> int:
     """``review``: очередь ревью — preliminary-контур + ``❓``-кандидаты (Ш7/G3, ``03`` §D.6).
 
@@ -1026,6 +1126,50 @@ def _artifacts_payload(artifacts: Any) -> dict[str, str | None]:
         "diff": _path(artifacts.diff),
         "manifest": _path(artifacts.manifest),
     }
+
+
+def _llm_configured(adapter: Any) -> bool:
+    """Сконфигурирован ли LLM-адаптер (готовность и непустые ``base_url``/``model_id``)."""
+    return bool(getattr(adapter, "available", False)) and bool(
+        getattr(adapter, "model_id", "") or getattr(adapter, "base_url", "")
+    )
+
+
+def _load_package_roles(package: str | Path | None) -> list[str] | None:
+    """Читает ``role_id`` из ``{package}/package.yaml`` (подсказка LLM; опционально).
+
+    :raises CliError: пакет задан, но не читается/невалиден (:data:`EXIT_USAGE`).
+    """
+    if package is None:
+        return None
+    try:
+        manifest = load_package_manifest(Path(package) / "package.yaml")
+    except (OSError, ValueError) as exc:
+        raise CliError(_concise(exc), code="package", exit_code=EXIT_USAGE) from exc
+    return [role.role_id for role in manifest.roles]
+
+
+def _print_passport_scout(payload: dict[str, Any]) -> None:
+    """Человекочитаемый вывод ``passport-scout``: черновик и диагностика."""
+    lines = [
+        f"product_id: {payload['product_id']}",
+        f"canonical_name: {payload['canonical_name']}",
+        f"vendor: {payload['vendor']}",
+        f"jurisdiction: {payload['jurisdiction']}",
+        f"satellites: {payload['satellites']}",
+        f"doc_domains: {', '.join(payload['doc_domains']) or '—'}",
+        f"fetched: {len(payload['fetched'])}",
+        f"dry-run: {'yes' if payload.get('dry_run') else 'no'}",
+    ]
+    for label in ("passport_path", "candidates_path"):
+        if label in payload:
+            lines.append(f"{label}: {payload[label]}")
+    for item in payload["needs_human"]:
+        lines.append(f"needs_human: {item}")
+    for error in payload["errors"]:
+        lines.append(f"error: {error}")
+    lines.append(f"ok: {'yes' if payload['ok'] else 'no'}")
+    sys.stdout.write("\n".join(lines) + "\n")
 
 
 def _search_adapter_configured(adapter: Any) -> bool:
@@ -2032,6 +2176,47 @@ def build_parser() -> argparse.ArgumentParser:
     _add_common(p_discover)
     p_discover.set_defaults(handler=cmd_discover)
 
+    # passport-scout ------------------------------------------------------ #
+    p_scout = sub.add_parser(
+        "passport-scout",
+        help="авто-генерация черновика паспорта продукта (сателлиты draft, без auto-approve)",
+    )
+    p_scout.add_argument(
+        "--product-name", required=True, help="человеческое имя продукта (→ product_id slug)"
+    )
+    p_scout.add_argument("--url", required=True, help="главный URL продукта (фетчится HTTP)")
+    p_scout.add_argument(
+        "--passports-dir",
+        default="passports",
+        help="каталог паспортов: пишет passports/{product_id}/{date}.yaml (дефолт passports)",
+    )
+    p_scout.add_argument(
+        "--package",
+        default=None,
+        help="опциональный пакет категории: роли сателлитов из package.yaml::roles",
+    )
+    p_scout.add_argument(
+        "--llm-base-url",
+        default=None,
+        help="base_url LLM-разведки (override COHOUND_LLM_BASE_URL)",
+    )
+    p_scout.add_argument(
+        "--llm-model",
+        default=None,
+        help="model_id LLM-разведки (override COHOUND_LLM_MODEL)",
+    )
+    p_scout.add_argument(
+        "--llm-decoder",
+        choices=["none", "json_object", "json_schema"],
+        default=None,
+        help="механизм декодирования (override COHOUND_LLM_DECODER; дефолт none)",
+    )
+    p_scout.add_argument(
+        "--dry-run", action="store_true", help="показать черновик без записи файлов"
+    )
+    _add_common(p_scout)
+    p_scout.set_defaults(handler=cmd_passport_scout)
+
     # review -------------------------------------------------------------- #
     p_review = sub.add_parser(
         "review", help="очередь ревью: preliminary-контур + ❓-кандидаты (Ш7/G3)"
@@ -2136,6 +2321,9 @@ def main(
     cutoff_k: int | None = None,
     clock: Clock | None = None,
     search_adapter: SearchAdapterPort | None = None,
+    discovery_llm: DiscoveryLLMPort | None = None,
+    crawler: CrawlerPort | None = None,
+    extractor: Any = None,
 ) -> int:
     """Точка входа CLI. Возвращает код выхода (``0`` — успех).
 
@@ -2158,6 +2346,9 @@ def main(
     :param clock: часы прогона (детерминизм ``created_at`` манифеста, тесты).
     :param search_adapter: инъекция готового ``SearchAdapterPort`` для ``discover``
         (тесты без сети/учётных данных; провайдерская специфика — в адаптере).
+    :param discovery_llm: инъекция ``DiscoveryLLMPort`` для ``passport-scout`` (тесты без сети).
+    :param crawler: инъекция ``CrawlerPort`` для ``passport-scout`` (тесты без сети).
+    :param extractor: инъекция ``ExtractorPort`` для ``passport-scout`` (тесты без сети).
     """
     parser = build_parser()
     try:
@@ -2177,6 +2368,9 @@ def main(
     args.cutoff_k = cutoff_k
     args.clock = clock
     args.search_adapter = search_adapter
+    args.discovery_llm = discovery_llm
+    args.crawler = crawler
+    args.extractor = extractor
 
     if getattr(args, "command", None) is None:
         parser.print_help()

@@ -1,0 +1,65 @@
+{
+  "canonical_name": "Alpha Product",
+  "vendor": null,
+  "jurisdiction": null,
+  "edition_assessed": null,
+  "version": "1.0",
+  "upstream_baseline_id": "base-1",
+  "upstream_version": "1.0",
+  "upstream": {
+    "url": "https://docs.test/alpha",
+    "quote": "supports Feature X natively",
+    "confidence": 0.8,
+    "rationale": "upstream manifest mentions base-1"
+  },
+  "doc_domains": ["evil.test"],
+  "satellites": [
+    {
+      "role": "role_a",
+      "component": "Feature X",
+      "origin": "in_house",
+      "relationship": "integrated",
+      "exists_confidence": 0.9,
+      "relationship_confidence": 0.8,
+      "evidence_hint": {
+        "url": "https://docs.test/alpha",
+        "quote": "supports Feature X natively",
+        "confidence": 0.8,
+        "rationale": "explicit statement"
+      },
+      "rationale": "mentioned in the page"
+    },
+    {
+      "role": "role_b",
+      "component": "Ghost Component",
+      "exists_confidence": 0.4,
+      "evidence_hint": {
+        "url": "https://fab.test/ghost",
+        "quote": "fabricated quote",
+        "confidence": 0.2
+      }
+    },
+    {
+      "role": "role_c",
+      "component": "Bad Quote",
+      "exists_confidence": 0.4,
+      "evidence_hint": {
+        "url": "https://docs.test/alpha",
+        "quote": "THIS QUOTE IS NOT IN THE TEXT",
+        "confidence": 0.2
+      }
+    },
+    {
+      "role": "role_d",
+      "component": "Mentioned Component",
+      "exists_confidence": 0.7,
+      "evidence_hint": {
+        "url": "https://docs.test/alpha",
+        "quote": "Alpha Product",
+        "confidence": 0.5
+      }
+    }
+  ],
+  "field_confidence": {"canonical_name": 0.9, "vendor": 0.0},
+  "needs_human": ["проверить версию"]
+}

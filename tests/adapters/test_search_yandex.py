@@ -1,11 +1,17 @@
 """Тесты ``YandexSearchAdapter`` (W11/T11.1) — реализация ``SearchAdapterPort``.
 
-Сеть не задействуется: HTTP-вызовы внедряются через швы ``http_post``/``http_get``.
-Покрываются: разбор кандидатов (url/title/snippet/rank), уважение ``limit`` (симметрия
-бюджета — за вызывающим, I16), ``fetch`` с SSRF-валидацией и кэшем (попадание без сети,
-промах→попадание, ровно один живой вызов, R7), ``available`` без ``httpx``, структурное
-соответствие порту, I19-инвариант (модуль не ссылается на доказательства/ячейки/хранилище),
-категорийная нейтральность (§1.3).
+Сеть не задействуется: HTTP-вызовы внедряются через швы ``http_post``/``http_get``/
+``http_poll``, а ожидание — через ``sleep``. Покрываются: разбор кандидатов
+(url/title/snippet/rank), уважение ``limit`` (симметрия бюджета — за вызывающим, I16),
+``fetch`` с SSRF-валидацией и кэшем (попадание без сети, промах→попадание, ровно один
+живой вызов, R7), ``available`` без ``httpx``, структурное соответствие порту,
+I19-инвариант (модуль не ссылается на доказательства/ячейки/хранилище), категорийная
+нейтральность (§1.3).
+
+Отдельно покрыт **асинхронный режим** (дефолт): запуск ``searchAsync`` → опрос
+``/operations/{id}`` → ``response.rawData`` (base64-XML), обработка ``error``
+(**до** ``done``), таймаут ``max_wait``, чтение режима из ``YANDEX_SEARCH_MODE`` и
+валидация режима/таймингов.
 
 Фикстуры **категорийно-нейтральны**: example.com / «Example», без продуктов и вендоров.
 """
@@ -23,8 +29,14 @@ import pytest
 
 import core.adapters.search_yandex as module
 from core.adapters.search_yandex import (
+    DEFAULT_ASYNC_SEARCH_PATH,
     DEFAULT_BASE_URL,
+    DEFAULT_MAX_WAIT,
+    DEFAULT_OPERATION_BASE_URL,
+    DEFAULT_POLL_INTERVAL,
+    DEFAULT_SEARCH_MODE,
     DEFAULT_SEARCH_PATH,
+    ENV_SEARCH_MODE,
     SearchAdapterUnavailable,
     SearchError,
     YandexSearchAdapter,
@@ -60,6 +72,29 @@ def _post_returning(payload: Any) -> Any:
     return _post
 
 
+def _sync(**kwargs: Any) -> YandexSearchAdapter:
+    """Адаптер в режиме ``sync`` — обратная совместимость прежних (не-async) тестов."""
+    kwargs.setdefault("search_mode", "sync")
+    return YandexSearchAdapter(**kwargs)
+
+
+def _noop_sleep(_seconds: float) -> None:
+    """No-op ожидание: тесты не спят реально."""
+
+
+def _xml_two_docs() -> str:
+    """base64-XML веб-поиска v2 с двумя ``doc`` (для async-ответа ``response.rawData``)."""
+    xml = (
+        "<yandexsearch><response><results><grouping><group>"
+        "<doc><url>{a}</url><title>Example A</title>"
+        "<passages><passage>alpha</passage><passage>beta</passage></passages></doc>"
+        "<doc><url>{b}</url><title>Example B</title></doc>"
+        "</group></grouping></results></response></yandexsearch>"
+    ).format(a=URL_A, b=URL_B)
+    return base64.b64encode(xml.encode("utf-8")).decode("ascii")
+
+
+
 # ---------------------------------------------------------------------------
 # Контракт порта / атрибуты
 # ---------------------------------------------------------------------------
@@ -83,6 +118,20 @@ def test_defaults_and_endpoint() -> None:
     assert adapter.base_url == DEFAULT_BASE_URL
     assert adapter.search_path == DEFAULT_SEARCH_PATH
     assert adapter.endpoint == f"{DEFAULT_BASE_URL}{DEFAULT_SEARCH_PATH}"
+    assert adapter.async_search_path == DEFAULT_ASYNC_SEARCH_PATH
+    assert adapter.async_endpoint == f"{DEFAULT_BASE_URL}{DEFAULT_ASYNC_SEARCH_PATH}"
+    assert adapter.operation_base_url == DEFAULT_OPERATION_BASE_URL
+    assert adapter.search_mode == DEFAULT_SEARCH_MODE == "async"
+    assert adapter.poll_interval == DEFAULT_POLL_INTERVAL
+    assert adapter.max_wait == DEFAULT_MAX_WAIT
+
+
+def test_operation_endpoint() -> None:
+    adapter = YandexSearchAdapter()
+    assert (
+        adapter.operation_endpoint("op-7")
+        == f"{DEFAULT_OPERATION_BASE_URL}/operations/op-7"
+    )
 
 
 def test_invalid_constructor_args_rejected() -> None:
@@ -91,7 +140,17 @@ def test_invalid_constructor_args_rejected() -> None:
     with pytest.raises(ValueError):
         YandexSearchAdapter(search_path="v2/web/search")
     with pytest.raises(ValueError):
+        YandexSearchAdapter(async_search_path="v2/web/searchAsync")
+    with pytest.raises(ValueError):
+        YandexSearchAdapter(operation_base_url="")
+    with pytest.raises(ValueError):
         YandexSearchAdapter(timeout=0)
+    with pytest.raises(ValueError):
+        YandexSearchAdapter(search_mode="bogus")
+    with pytest.raises(ValueError):
+        YandexSearchAdapter(poll_interval=0)
+    with pytest.raises(ValueError):
+        YandexSearchAdapter(max_wait=0)
 
 
 # ---------------------------------------------------------------------------
@@ -100,7 +159,7 @@ def test_invalid_constructor_args_rejected() -> None:
 
 
 def test_search_parses_candidates() -> None:
-    adapter = YandexSearchAdapter(http_post=_post_returning({"results": _RECORDS}))
+    adapter = _sync(http_post=_post_returning({"results": _RECORDS}))
     results = adapter.search(SearchQuery(text="neutral query", limit=10))
 
     assert [r.url for r in results] == [URL_A, URL_B, URL_C]
@@ -112,13 +171,13 @@ def test_search_parses_candidates() -> None:
 
 def test_search_returns_candidates_without_page_bytes() -> None:
     # I19: SERP отдаёт кандидатов; байты страницы берёт fetch, не search.
-    adapter = YandexSearchAdapter(http_post=_post_returning({"results": _RECORDS}))
+    adapter = _sync(http_post=_post_returning({"results": _RECORDS}))
     results = adapter.search(SearchQuery(text="neutral query"))
     assert all(r.raw_bytes is None for r in results)
 
 
 def test_search_result_has_no_evidence_members() -> None:
-    adapter = YandexSearchAdapter(http_post=_post_returning({"results": _RECORDS}))
+    adapter = _sync(http_post=_post_returning({"results": _RECORDS}))
     result = adapter.search(SearchQuery(text="neutral query"))[0]
     for banned in ("source_id", "citation_quote", "content_hash", "evidence"):
         assert not hasattr(result, banned)
@@ -126,7 +185,7 @@ def test_search_result_has_no_evidence_members() -> None:
 
 def test_search_accepts_alt_field_names() -> None:
     records = [{"link": URL_A, "title": "Example A", "content": "body text"}]
-    adapter = YandexSearchAdapter(http_post=_post_returning({"items": records}))
+    adapter = _sync(http_post=_post_returning({"items": records}))
     results = adapter.search(SearchQuery(text="neutral query"))
     assert results[0].url == URL_A
     assert results[0].snippet == "body text"
@@ -142,20 +201,20 @@ def test_search_parses_rawdata_xml() -> None:
         "</group></grouping></results></response></yandexsearch>"
     ).format(a=URL_A, b=URL_B)
     raw_data = base64.b64encode(xml.encode("utf-8")).decode("ascii")
-    adapter = YandexSearchAdapter(http_post=_post_returning({"rawData": raw_data}))
+    adapter = _sync(http_post=_post_returning({"rawData": raw_data}))
     results = adapter.search(SearchQuery(text="neutral query"))
     assert [r.url for r in results] == [URL_A, URL_B]
     assert results[0].snippet == "alpha beta"
 
 
 def test_search_unknown_shape_is_empty_not_error() -> None:
-    adapter = YandexSearchAdapter(http_post=_post_returning({"unexpected": True}))
+    adapter = _sync(http_post=_post_returning({"unexpected": True}))
     assert adapter.search(SearchQuery(text="neutral query")) == []
 
 
 def test_search_records_without_url_skipped() -> None:
     payload = {"results": [{"title": "no url"}, _RECORDS[0]]}
-    adapter = YandexSearchAdapter(http_post=_post_returning(payload))
+    adapter = _sync(http_post=_post_returning(payload))
     results = adapter.search(SearchQuery(text="neutral query"))
     assert [r.url for r in results] == [URL_A]
 
@@ -166,7 +225,7 @@ def test_search_records_without_url_skipped() -> None:
 
 
 def test_search_respects_limit() -> None:
-    adapter = YandexSearchAdapter(http_post=_post_returning({"results": _RECORDS * 4}))
+    adapter = _sync(http_post=_post_returning({"results": _RECORDS * 4}))
     results = adapter.search(SearchQuery(text="neutral query", limit=5))
     assert len(results) == 5
 
@@ -178,7 +237,7 @@ def test_search_limit_sent_to_provider() -> None:
         captured.update(body)
         return json.dumps({"results": _RECORDS}).encode("utf-8")
 
-    adapter = YandexSearchAdapter(http_post=_post)
+    adapter = _sync(http_post=_post)
     adapter.search(SearchQuery(text="neutral query", limit=7))
     assert captured["groupSpec"]["groupsOnPage"] == "7"
     assert captured["query"]["queryText"] == "neutral query"
@@ -193,9 +252,147 @@ def test_search_limit_zero_returns_empty_without_http() -> None:
 
 
 def test_search_empty_query_rejected() -> None:
-    adapter = YandexSearchAdapter(http_post=_post_returning({"results": []}))
+    adapter = _sync(http_post=_post_returning({"results": []}))
     with pytest.raises(ValueError):
         adapter.search(SearchQuery(text="   "))
+
+
+def test_sync_mode_still_works_explicitly() -> None:
+    """Явный ``search_mode="sync"`` сохраняет прежний путь POST→decode→parse."""
+    adapter = YandexSearchAdapter(
+        http_post=_post_returning({"results": _RECORDS}), search_mode="sync"
+    )
+    assert adapter.search_mode == "sync"
+    results = adapter.search(SearchQuery(text="neutral query", limit=2))
+    assert [r.url for r in results] == [URL_A, URL_B]
+
+
+# ---------------------------------------------------------------------------
+# Асинхронный режим (дефолт): запуск → опрос → response.rawData
+# ---------------------------------------------------------------------------
+
+
+def test_async_search_happy_path() -> None:
+    raw_data = _xml_two_docs()
+    posts: list[str] = []
+    polls: list[str] = []
+    sleeps: list[float] = []
+
+    def _post(url: str, body: dict[str, Any]) -> bytes:
+        posts.append(url)
+        return json.dumps({"done": False, "id": "op1", "description": "pending"}).encode()
+
+    def _poll(url: str) -> bytes:
+        polls.append(url)
+        if len(polls) == 1:
+            return json.dumps({"done": False}).encode()
+        return json.dumps({"done": True, "response": {"rawData": raw_data}}).encode()
+
+    adapter = YandexSearchAdapter(
+        http_post=_post, http_poll=_poll, sleep=sleeps.append
+    )
+    assert adapter.search_mode == "async"
+    results = adapter.search(SearchQuery(text="neutral query", limit=10))
+
+    assert [r.url for r in results] == [URL_A, URL_B]
+    assert [r.title for r in results] == ["Example A", "Example B"]
+    assert [r.rank for r in results] == [1, 2]
+    assert results[0].snippet == "alpha beta"
+    assert all(r.raw_bytes is None for r in results)  # I19
+    assert posts == [f"{DEFAULT_BASE_URL}{DEFAULT_ASYNC_SEARCH_PATH}"]
+    assert polls == [f"{DEFAULT_OPERATION_BASE_URL}/operations/op1"] * 2
+    assert sleeps == [DEFAULT_POLL_INTERVAL]
+
+
+def test_async_search_error_checked_before_done() -> None:
+    polls: list[str] = []
+
+    def _post(url: str, body: dict[str, Any]) -> bytes:
+        return json.dumps({"done": False, "id": "op2"}).encode()
+
+    def _poll(url: str) -> bytes:
+        polls.append(url)
+        # ``error`` приходит при ``done:false`` — должен сработать раньше проверки done.
+        return json.dumps({"error": {"code": 7, "message": "denied"}}).encode()
+
+    adapter = YandexSearchAdapter(
+        http_post=_post, http_poll=_poll, sleep=_noop_sleep
+    )
+    with pytest.raises(SearchError):
+        adapter.search(SearchQuery(text="neutral query"))
+    assert len(polls) == 1  # не ушли в бесконечный цикл
+
+
+def test_async_search_timeout() -> None:
+    def _post(url: str, body: dict[str, Any]) -> bytes:
+        return json.dumps({"done": False, "id": "op3"}).encode()
+
+    def _poll(url: str) -> bytes:
+        return json.dumps({"done": False}).encode()
+
+    adapter = YandexSearchAdapter(
+        http_post=_post,
+        http_poll=_poll,
+        sleep=_noop_sleep,
+        poll_interval=0.01,
+        max_wait=0.05,
+    )
+    with pytest.raises(SearchError, match="превышено время ожидания"):
+        adapter.search(SearchQuery(text="neutral query"))
+
+
+def test_async_search_missing_operation_id_raises() -> None:
+    def _post(url: str, body: dict[str, Any]) -> bytes:
+        return json.dumps({"done": False, "description": "no id"}).encode()
+
+    adapter = YandexSearchAdapter(
+        http_post=_post, http_poll=_noop_poll, sleep=_noop_sleep
+    )
+    with pytest.raises(SearchError):
+        adapter.search(SearchQuery(text="neutral query"))
+
+
+def _noop_poll(url: str) -> bytes:  # pragma: no cover - не должен вызываться
+    """Заглушка опроса: при отсутствии operationId поллинг не стартует."""
+    raise AssertionError("опрос не должен вызываться без operationId")
+
+
+# ---------------------------------------------------------------------------
+# Режим: env-переопределение и валидация
+# ---------------------------------------------------------------------------
+
+
+def test_env_search_mode_sync(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(ENV_SEARCH_MODE, "sync")
+    assert YandexSearchAdapter().search_mode == "sync"
+
+
+def test_env_search_mode_async(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(ENV_SEARCH_MODE, "async")
+    assert YandexSearchAdapter().search_mode == "async"
+
+
+def test_env_search_mode_garbage_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(ENV_SEARCH_MODE, "bogus")
+    with pytest.raises(ValueError):
+        YandexSearchAdapter()
+
+
+def test_explicit_search_mode_overrides_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(ENV_SEARCH_MODE, "async")
+    assert YandexSearchAdapter(search_mode="sync").search_mode == "sync"
+
+
+def test_search_mode_validation_rejects_non_async_sync() -> None:
+    with pytest.raises(ValueError):
+        YandexSearchAdapter(search_mode="parallel")
+
+
+def test_timing_args_validation() -> None:
+    with pytest.raises(ValueError):
+        YandexSearchAdapter(poll_interval=-1)
+    with pytest.raises(ValueError):
+        YandexSearchAdapter(max_wait=-1)
 
 
 # ---------------------------------------------------------------------------

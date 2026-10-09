@@ -26,17 +26,27 @@ remote-прокси веб-контура (``07`` §4); не-веб порты �
 from __future__ import annotations
 
 import importlib.util
+import os
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
 from core.adapters.chunker_markdown import MarkdownChunkerPort
+from core.adapters.crawl_http import HttpCrawler
+from core.adapters.crawl_scrapy import ScrapyCrawler
 from core.adapters.embed_local import LocalEmbedder
 from core.adapters.extract_document import DoclingDocumentExtractor
 from core.adapters.extract_html import HtmlExtractor
 from core.adapters.index_npy import NpyIndexBuilder, numpy_available
 from core.adapters.lexical_tantivy import TantivyLexicalIndex, tantivy_available
+from core.adapters.llm_discovery import (
+    DEFAULT_DECODER as DISCOVERY_DEFAULT_DECODER,
+    DEFAULT_MAX_TOKENS as DISCOVERY_DEFAULT_MAX_TOKENS,
+    DEFAULT_TIMEOUT as DISCOVERY_DEFAULT_TIMEOUT,
+    DiscoveryLLM,
+    GenerateFn as DiscoveryGenerateFn,
+)
 from core.adapters.remote_crawler import RemoteCrawler
 from core.adapters.remote_extractor import RemoteExtractor
 from core.adapters.remote_gateway import (
@@ -51,6 +61,8 @@ from core.adapters.search_yandex import YandexSearchAdapter
 from core.config.deploy import DeployConfig, is_split, load_deploy_config
 from core.pipeline import Ports, Runner
 from core.pipeline.runner import PHASES, Clock, PhaseFn
+from core.ports.crawler import CrawlerPort
+from core.ports.discovery_llm import DiscoveryLLMPort
 from core.ports.extractor import ExtractorPort
 from core.ports.gateway import ContentGateway
 from core.ports.llm import EvaluatorPort
@@ -65,12 +77,17 @@ __all__ = [
     "SUPPORTED_PROFILES",
     "SUPPORTED_SEARCH_ADAPTERS",
     "DEFAULT_REGISTRY_ID",
+    "ENV_SCOUT_CRAWLER",
+    "DEFAULT_SCOUT_CRAWLER",
+    "SUPPORTED_SCOUT_CRAWLERS",
     "PHASES",
     "WiringError",
     "run_db_path",
     "build_store",
     "build_gateway",
     "build_search_adapter",
+    "build_discovery_llm",
+    "build_scout_crawler",
     "build_adapters",
     "build_runner",
     "manifest_deploy_fields",
@@ -91,6 +108,22 @@ SUPPORTED_SEARCH_ADAPTERS: tuple[str, ...] = ("yandex", "glm")
 #: в модели ``DeployConfig`` не несёт ``registry_fetchers`` — см. ГЭП в
 #: :func:`manifest_deploy_fields`).
 DEFAULT_REGISTRY_ID = "edge"
+
+#: Префикс env-переменных LLM-разведки (``passport-scout``). Провайдер/модель — данные.
+ENV_LLM_BASE_URL = "COHOUND_LLM_BASE_URL"
+ENV_LLM_API_KEY = "COHOUND_LLM_API_KEY"
+ENV_LLM_MODEL = "COHOUND_LLM_MODEL"
+ENV_LLM_DECODER = "COHOUND_LLM_DECODER"
+ENV_LLM_TIMEOUT = "COHOUND_LLM_TIMEOUT"
+ENV_LLM_MAX_TOKENS = "COHOUND_LLM_MAX_TOKENS"
+
+#: Env-фолбэк ключа контура (уже присутствует в среде развёртывания).
+ENV_PLUSVIBE_API_KEY = "PLUSVIBEAPI_API_KEY"
+
+#: Дефолтный base_url openai-совместимого сервера LLM-разведки (env-фолбэк; данные).
+DEFAULT_LLM_BASE_URL = "https://plusvibeapi.ru/v1"
+#: Дефолтная модель LLM-разведки (env-фолбэк; данные, не предметная категория).
+DEFAULT_LLM_MODEL = "deepseek-v4.1-flash:cxbc"
 
 
 class WiringError(ValueError):
@@ -187,6 +220,135 @@ def build_search_adapter(adapter: str) -> SearchAdapterPort:
     raise WiringError(
         f"неизвестный поисковый адаптер: {adapter!r}; "
         f"поддерживаются: {', '.join(SUPPORTED_SEARCH_ADAPTERS)}"
+    )
+
+
+def _env_float(name: str, default: float) -> float:
+    """Читает положительный float из env; нечисловое значение → :class:`WiringError`."""
+    raw = os.environ.get(name)
+    if raw is None or not str(raw).strip():
+        return default
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise WiringError(f"{name}: ожидалось число, получено {raw!r}") from exc
+    if value <= 0:
+        raise WiringError(f"{name}: значение обязано быть положительным, получено {raw!r}")
+    return value
+
+
+def _env_int(name: str, default: int) -> int:
+    """Читает положительный int из env; нечисловое значение → :class:`WiringError`."""
+    raw = os.environ.get(name)
+    if raw is None or not str(raw).strip():
+        return default
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise WiringError(f"{name}: ожидалось целое, получено {raw!r}") from exc
+    if value <= 0:
+        raise WiringError(f"{name}: значение обязано быть положительным, получено {raw!r}")
+    return value
+
+
+def build_discovery_llm(
+    *,
+    base_url: str | None = None,
+    api_key: str | None = None,
+    model_id: str | None = None,
+    decoder: str | None = None,
+    timeout: float | None = None,
+    max_tokens: int | None = None,
+    generate: DiscoveryGenerateFn | None = None,
+) -> DiscoveryLLMPort:
+    """Собирает LLM-адаптер разведки паспорта из env с override CLI-флагами (``03`` §E.3).
+
+    Источник конфигурации — env ``COHOUND_LLM_*`` (префикс задан здесь); явные
+    аргументы (CLI-флаги) имеют приоритет. Фолбэки: ``COHOUND_LLM_API_KEY`` →
+    ``PLUSVIBEAPI_API_KEY``; ``COHOUND_LLM_BASE_URL`` → :data:`DEFAULT_LLM_BASE_URL`;
+    ``COHOUND_LLM_MODEL`` → :data:`DEFAULT_LLM_MODEL`; ``COHOUND_LLM_DECODER`` →
+    ``json_object`` (подтверждён рабочим). Пустые ``base_url``/``model_id`` допустимы:
+    готовность проверяет вызывающий (``cmd_passport_scout``) и выдаёт понятную ошибку
+    ``llm`` (:data:`EXIT_USAGE`), а не падает.
+
+    :param generate: тестовый/оффлайн-шов ``(prompt, schema) -> str`` (без сети).
+    :raises WiringError: нечисловой/неположительный ``timeout``/``max_tokens`` из env.
+    """
+    resolved_base = (
+        base_url
+        if base_url is not None
+        else os.environ.get(ENV_LLM_BASE_URL) or DEFAULT_LLM_BASE_URL
+    )
+    resolved_key = (
+        api_key
+        if api_key is not None
+        else os.environ.get(ENV_LLM_API_KEY) or os.environ.get(ENV_PLUSVIBE_API_KEY)
+    )
+    resolved_model = (
+        model_id
+        if model_id is not None
+        else os.environ.get(ENV_LLM_MODEL) or DEFAULT_LLM_MODEL
+    )
+    resolved_decoder = (
+        decoder
+        if decoder is not None
+        else os.environ.get(ENV_LLM_DECODER, DISCOVERY_DEFAULT_DECODER)
+    )
+    resolved_timeout = (
+        timeout
+        if timeout is not None
+        else _env_float(ENV_LLM_TIMEOUT, DISCOVERY_DEFAULT_TIMEOUT)
+    )
+    resolved_max_tokens = (
+        max_tokens
+        if max_tokens is not None
+        else _env_int(ENV_LLM_MAX_TOKENS, DISCOVERY_DEFAULT_MAX_TOKENS)
+    )
+    return DiscoveryLLM(
+        base_url=resolved_base or "",
+        api_key=(resolved_key or None),
+        model_id=resolved_model or "",
+        decoder=resolved_decoder or DISCOVERY_DEFAULT_DECODER,
+        timeout=resolved_timeout,
+        max_tokens=resolved_max_tokens,
+        generate=generate,
+    )
+
+
+#: Env-переменная выбора краулера ``passport-scout``: ``http`` (дефолт) | ``scrapy``.
+ENV_SCOUT_CRAWLER = "COHOUND_SCOUT_CRAWLER"
+#: Дефолтный (лёгкий) краулер scout — обычный HTTP без браузера (A1, MVP).
+DEFAULT_SCOUT_CRAWLER = "http"
+#: Поддерживаемые краулеры scout: лёгкий ``http`` и браузерный ``scrapy``.
+SUPPORTED_SCOUT_CRAWLERS: tuple[str, ...] = ("http", "scrapy")
+
+
+def build_scout_crawler() -> CrawlerPort:
+    """Собирает краулер для ``passport-scout`` (дефолт — лёгкий, A1/MVP).
+
+    Обычный сайт = ``httpx`` (:class:`HttpCrawler`, ленивый импорт); браузерный
+    Scrapy/playwright — опция для SPA. Выбор — через env
+    :data:`ENV_SCOUT_CRAWLER` ∈ :data:`SUPPORTED_SCOUT_CRAWLERS`:
+
+    * ``http`` (дефолт) — :class:`HttpCrawler`;
+    * ``scrapy`` — :class:`ScrapyCrawler` (прежнее поведение).
+
+    Недоступность зависимости даёт понятный ``CrawlError`` на фетче (адаптер не
+    падает на конструкторе). Тесты инъектируют ``crawler`` в :func:`main`.
+
+    :raises WiringError: неизвестное значение ``COHOUND_SCOUT_CRAWLER``.
+    """
+    raw = os.environ.get(ENV_SCOUT_CRAWLER)
+    name = (raw if raw is not None else DEFAULT_SCOUT_CRAWLER).strip().lower()
+    if not name:
+        name = DEFAULT_SCOUT_CRAWLER
+    if name == "http":
+        return HttpCrawler()
+    if name == "scrapy":
+        return ScrapyCrawler()
+    raise WiringError(
+        f"{ENV_SCOUT_CRAWLER}: неизвестный краулер {name!r}; "
+        f"поддерживаются: {', '.join(SUPPORTED_SCOUT_CRAWLERS)}"
     )
 
 

@@ -11,6 +11,11 @@ from __future__ import annotations
 
 from core.ports.chunker import ChunkerPort
 from core.ports.crawler import CrawlerPort
+from core.ports.discovery_llm import (
+    DiscoveryLLMPort,
+    DiscoveryLLMRequest,
+    DiscoveryLLMResponse,
+)
 from core.ports.embedder import EmbedderPort
 from core.ports.extractor import ExtractorPort
 from core.ports.gate_store import GateStore
@@ -27,6 +32,9 @@ from core.ports.vector_index import RetrievedChunk, RetrievalResult, VectorIndex
 __all__ = [
     "ChunkerPort",
     "CrawlerPort",
+    "DiscoveryLLMPort",
+    "DiscoveryLLMRequest",
+    "DiscoveryLLMResponse",
     "EmbedderPort",
     "EvaluatorPort",
     "ExtractorPort",

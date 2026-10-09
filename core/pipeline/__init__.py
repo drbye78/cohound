@@ -122,6 +122,15 @@ from core.pipeline.discovery import (
     discover,
     review_candidates,
 )
+from core.pipeline.passport_scout import (
+    DISCOVERY_TEMPLATE_VERSION,
+    DiscoveryPassportHypothesis,
+    PassportScoutError,
+    PassportScoutReport,
+    build_passport_draft,
+    scout_passport,
+    write_passport_draft,
+)
 from core.pipeline.adversarial import (
     AdversarialBreachError,
     AdversarialCase,
@@ -290,6 +299,14 @@ __all__ = [
     "DiscoveryReport",
     "discover",
     "review_candidates",
+    # passport-scout (M1), черновик паспорта
+    "DISCOVERY_TEMPLATE_VERSION",
+    "DiscoveryPassportHypothesis",
+    "PassportScoutReport",
+    "PassportScoutError",
+    "build_passport_draft",
+    "scout_passport",
+    "write_passport_draft",
     # adversarial (T12.3), R8
     "AdversarialCase",
     "AdversarialReport",
