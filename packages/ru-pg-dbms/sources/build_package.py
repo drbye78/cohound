@@ -121,6 +121,272 @@ _RU_STOP = {
 #: Максимальная длина ``param_id`` (slug, §4.2).
 _MAX_SLUG = 64
 
+# ---------------------------------------------------------------------------
+# concept_terms: курируемый глоссарий RU→EN и латинские технические токены
+# ---------------------------------------------------------------------------
+#
+# EN-часть ``concept_terms`` НЕ строится транслитерацией русских слов (это давало
+# бесполезный для англоязычного поиска мусор вида ``masshtabirovanie``). Вместо этого
+# собираются:
+#   1) латинские технические токены, реально присутствующие в ``title``/``Семантика``
+#      (XID, MXID, CSN, LWLock, TOAST, WAL, PITR, JSONB, …);
+#   2) курируемый глоссарий RU→EN для типовых технических слов заголовков
+#      («счётчик транзакций» → transaction id counter, «резервное копирование» → backup, …).
+# Транслитерация (:func:`translit`) остаётся ТОЛЬКО источником ``param_id`` (slug §13).
+
+#: Латинские технические токены «в каноне» — с подчёркиванием/длиной, которые эвристика
+#: валидатора (``^[a-z0-9_]+$`` и ``_``/длина>12) иначе сочла бы подозрительными.
+#: Все — реальные идентификаторы из источников, а не транслит-артефакты.
+_TECH_LATIN: frozenset[str] = frozenset(
+    {
+        # подчёркивания из psq (title/F)
+        "shared_buffers", "autonomous_transaction", "pg_catalog", "dbms_sql",
+        "dbms_lob", "dbms_crypto", "dbms_scheduler", "utl_file", "utl_http",
+        "utl_mail", "utl_smtp", "dba_tables", "exception_init",
+        "raise_application_error", "json_table", "system_time", "pg_checksums",
+        "pg_verifybackup",
+        # часто встречающиеся идентификаторы ядра/расширений
+        "pg_hint_plan", "pg_stat_statements", "pgvector", "hypopg", "autovacuum",
+        "jsonb", "lwlock", "slru", "walmethods", "wal_level", "pg_upgrade",
+        "shared_buffers", "work_mem", "on_premise", "postgresql", "postgres",
+    }
+)
+
+#: Префиксы латинских идентификаторов, которые считаются техническими (pg_*, dbms_*, …).
+_TECH_LATIN_PREFIXES: tuple[str, ...] = (
+    "pg_", "dbms_", "utl_", "dba_", "all_", "user_", "shared_", "system_",
+    "json_", "exception_", "raise_", "autonomous_",
+)
+
+#: Английские служебные слова — не термины, в EN-список не попадают.
+_LATIN_STOP: frozenset[str] = frozenset(
+    {
+        "for", "the", "and", "with", "from", "into", "of", "in", "on", "at",
+        "to", "a", "an", "per", "via", "vs", "etc", "id", "dr", "ii", "iii",
+    }
+)
+
+#: Глоссарий RU→EN: фрагмент заголовка/семантики (без учёта регистра) → EN-термины.
+#: Сопоставление — по подстроке; проверяется в порядке объявления. ~100 частотных
+#: технических слов, покрывающих заголовки каталога.
+_RU_EN_GLOSSARY: tuple[tuple[str, tuple[str, ...]], ...] = (
+    # --- общие/CУБД ---
+    ("субд", ("dbms", "database")),
+    ("база данных", ("database",)),
+    ("базами", ("database",)),
+    ("подключени", ("connections",)),
+    ("соединени", ("connections",)),
+    ("эксплуатац", ("operations",)),
+    ("платформ", ("platform",)),
+    ("управлени", ("management",)),
+    ("ландшафт", ("landscape",)),
+    ("гетерогенн", ("heterogeneous",)),
+    ("консол", ("console",)),
+    ("транзакц", ("transaction",)),
+    ("счётчик", ("counter",)),
+    ("счетчик", ("counter",)),
+    ("масштабир", ("scaling",)),
+    ("оптимизац", ("optimization",)),
+    ("оптимизатор", ("optimizer",)),
+    ("автооптимизац", ("auto-tuning",)),
+    # --- a1 архитектура ядра ---
+    ("снимок", ("snapshot",)),
+    ("снимки", ("snapshots",)),
+    ("блокиров", ("locking", "locks")),
+    ("субтранзакц", ("subtransactions",)),
+    ("автономн", ("autonomous",)),
+    ("сжат", ("compression",)),
+    ("прозрачн", ("transparent",)),
+    ("партиц", ("partitioning", "partitions")),
+    ("секциониров", ("partitioning",)),
+    ("вставк", ("insert",)),
+    ("кэш", ("cache",)),
+    ("системн", ("system",)),
+    ("каталог", ("catalog",)),
+    ("релиз", ("release",)),
+    ("повреждени", ("corruption",)),
+    ("временн", ("temporary",)),
+    ("таблиц", ("tables",)),
+    ("буферн", ("buffer",)),
+    ("карт", ("maps",)),
+    ("конкуренц", ("contention",)),
+    ("аллокац", ("allocation",)),
+    ("памят", ("memory",)),
+    ("инструкц", ("instructions",)),
+    ("размещени", ("placement",)),
+    ("блоков", ("blocks",)),
+    ("энергонезависим", ("persistent", "non-volatile")),
+    ("восстановлени", ("recovery",)),
+    # --- a2 планировщик ---
+    ("параллельн", ("parallel",)),
+    ("выполнени", ("execution",)),
+    ("запрос", ("query",)),
+    ("планов", ("plans",)),
+    ("подмена", ("substitution",)),
+    ("квот", ("quotas",)),
+    ("ресурс", ("resources",)),
+    ("изоляц", ("isolation",)),
+    ("нагрузок", ("workloads",)),
+    ("приоритизац", ("prioritization",)),
+    ("гипотетическ", ("hypothetical",)),
+    ("индекс", ("indexes",)),
+    ("подсказк", ("hints",)),
+    ("предикат", ("predicates",)),
+    ("продвижени", ("pushdown",)),
+    ("отсечени", ("pruning",)),
+    ("преобразовани", ("transformation",)),
+    # --- a3 интеграция 1С ---
+    ("сертификат", ("certificate",)),
+    ("совместимост", ("compatibility",)),
+    ("совместимо", ("compatible",)),
+    ("производительност", ("performance",)),
+    ("тест", ("testing", "tests")),
+    ("пользовател", ("users",)),
+    ("планировщик", ("planner",)),
+    ("эвристик", ("heuristics",)),
+    ("паттерн", ("patterns",)),
+    ("профил", ("profiles",)),
+    ("регистр", ("registers",)),
+    ("корреляц", ("correlation",)),
+    ("журнал", ("log",)),
+    ("технологическ", ("technology",)),
+    ("поддержк", ("support",)),
+    ("кодировк", ("encoding",)),
+    ("иерархическ", ("hierarchical",)),
+    ("закрыт", ("closed",)),
+    ("производственн", ("production",)),
+    # --- a4 миграция ---
+    ("оценк", ("assessment",)),
+    ("сложност", ("complexity",)),
+    ("миграц", ("migration",)),
+    ("пакет", ("packages",)),
+    ("тип", ("types",)),
+    ("эмуляц", ("emulation",)),
+    ("функц", ("functions",)),
+    ("инструмент", ("tool",)),
+    ("конвертер", ("converter",)),
+    ("исключени", ("exceptions",)),
+    ("коллекц", ("collections",)),
+    ("оператор", ("operator",)),
+    ("синоним", ("synonyms",)),
+    ("объект", ("objects",)),
+    ("формат", ("format",)),
+    ("дамп", ("dumps",)),
+    ("распределённ", ("distributed",)),
+    ("простой", ("downtime",)),
+    ("простоя", ("downtime",)),
+    ("пользовательск", ("user-defined",)),
+    # --- a5 мультимодельность ---
+    ("колоночн", ("columnar",)),
+    ("хранилищ", ("storage",)),
+    ("расширен", ("extended",)),
+    ("обработк", ("processing",)),
+    ("вектор", ("vector",)),
+    ("поиск", ("search",)),
+    ("нативн", ("native",)),
+    ("сценар", ("scenarios",)),
+    ("механизм", ("mechanisms", "mechanism")),
+    ("механик", ("mechanisms",)),
+    ("версионируем", ("versioned",)),
+    ("внешн", ("external",)),
+    ("доступ", ("access",)),
+    ("графов", ("graph",)),
+    # --- backup ---
+    ("резервн", ("backup",)),
+    ("копировани", ("backup", "copying")),
+    ("копий", ("copies",)),
+    ("копии", ("copies",)),
+    ("копия", ("copy",)),
+    ("копи", ("copies",)),
+    ("бэкап", ("backup",)),
+    ("инкрементальн", ("incremental",)),
+    ("момент времени", ("point-in-time",)),
+    ("дедупликац", ("deduplication",)),
+    ("выгрузк", ("export",)),
+    ("облак", ("cloud",)),
+    ("политик", ("policies",)),
+    ("хранени", ("retention", "storage")),
+    ("тиражировани", ("tiering",)),
+    ("компресси", ("compression",)),
+    ("шифровани", ("encryption",)),
+    ("неизменяем", ("immutable",)),
+    ("контур", ("perimeter",)),
+    ("полномочий", ("privileges", "duties")),
+    ("администратор", ("administrator",)),
+    ("криптографическ", ("cryptographic",)),
+    ("удалени", ("erasure", "deletion")),
+    ("верификац", ("verification",)),
+    ("целостност", ("integrity",)),
+    ("запуск", ("startup",)),
+    ("гранулярн", ("granular",)),
+    ("кроссплатформенн", ("cross-platform",)),
+    ("автоматическ", ("automated",)),
+    ("проверк", ("verification", "checking")),
+    ("просмотр", ("browse", "viewing")),
+    ("содержимого", ("contents",)),
+    # --- management ---
+    ("действий", ("actions",)),
+    ("аудит", ("audit",)),
+    ("аутентификац", ("authentication",)),
+    ("двухфакторн", ("two-factor", "2fa")),
+    ("ролевой", ("role-based",)),
+    ("функциям", ("functions",)),
+    ("секрет", ("secrets",)),
+    ("менеджер", ("manager",)),
+    ("чуж", ("third-party",)),
+    ("опасн", ("dangerous",)),
+    ("атрибут", ("attribute",)),
+    ("плагин", ("plugins",)),
+    ("канал", ("channels",)),
+    ("оповещен", ("notifications",)),
+    ("трафик", ("traffic",)),
+    ("родной", ("native",)),
+    ("интеграц", ("integration",)),
+    ("внешний api", ("api",)),
+    ("работа платформы", ("platform operations",)),
+    # --- уточняющие частотные термины заголовков ---
+    ("подтвержд", ("verified", "confirmed")),
+    ("российск", ("russian",)),
+    ("глобальн", ("global",)),
+    ("компиляц", ("compilation",)),
+    ("сквозн", ("end-to-end",)),
+    ("сессионн", ("session",)),
+    ("ролям", ("roles",)),
+    ("создани", ("creation",)),
+    ("отложенн", ("deferred",)),
+    ("изменени", ("changes",)),
+    ("мгновенн", ("instant",)),
+    ("мгновенный запуск", ("instant recovery",)),
+    ("файлов", ("file",)),
+    ("вм", ("vm",)),
+    ("тб", ("terabyte",)),
+    ("1с", ("1c",)),
+    ("работа", ("operations",)),
+    ("нагрузочн", ("load-testing",)),
+    ("суперпользовател", ("superuser",)),
+    ("пдн", ("personal-data",)),
+    ("одновременн", ("concurrent",)),
+    ("последовательн", ("sequential",)),
+    ("64-бит", ("64-bit",)),
+    ("битн", ("64-bit",)),
+    ("событий", ("events",)),
+    ("порог", ("thresholds",)),
+    ("сервер", ("server",)),
+)
+
+#: Фолбэк EN-термина, гарантирующий непустой ``en`` (warning ``empty-concept-terms``).
+_MODULE_EN_FALLBACK: dict[str, tuple[str, ...]] = {
+    "core": ("database",),
+    "backup": ("backup",),
+    "management": ("management",),
+}
+
+#: Курированное множество допустимых EN-токенов (глоссарий + технические идентификаторы).
+#: Используется в валидации: «подозрительный транслит» = токен, которого здесь нет.
+CURATED_EN_TOKENS: frozenset[str] = frozenset(
+    {term for _phrase, terms in _RU_EN_GLOSSARY for term in terms}
+) | _TECH_LATIN
+
 
 # ---------------------------------------------------------------------------
 # Утилиты
@@ -173,40 +439,90 @@ def ru_tokens(text: str, *, min_len: int = 3, limit: int = 8) -> list[str]:
     return out
 
 
-def latin_tokens(text: str, *, limit: int = 12) -> list[str]:
-    """Латинские токены строки (для ``concept_terms.en``)."""
+_LATIN_TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z0-9]*(?:[-_.][A-Za-z0-9]+)*")
+
+
+def is_technical_latin(token: str) -> bool:
+    """Технический ли латинский токен (``pg_*``/``dbms_*``/… или из канона)."""
+    return token in _TECH_LATIN or token.startswith(_TECH_LATIN_PREFIXES)
+
+
+def latin_tokens(text: str, *, limit: int = 12, keep_underscore: bool = True) -> list[str]:
+    """Латинские токены строки (для ``concept_terms.en``), без служебных слов.
+
+    Нормализует хвостовую пунктуацию; сохраняет дефисы/слэши/точки в компаундах
+    (``avx-512``, ``pl/sql``), идентификаторы с ``_`` — только технические.
+    """
+    if not text:
+        return []
     out: list[str] = []
-    for token in re.findall(r"[A-Za-z][A-Za-z0-9_+#./-]*", text):
-        low = token.lower().rstrip(".")
-        if len(low) < 2:
+    for raw in _LATIN_TOKEN_RE.findall(str(text)):
+        token = raw.lower().strip(".-_")
+        if len(token) < 2 or token in _LATIN_STOP or token.isdigit():
             continue
-        if low not in out:
-            out.append(low)
+        # «_» допускаем только у технических идентификаторов (pg_catalog, dbms_sql, …).
+        if "_" in token and not (keep_underscore and is_technical_latin(token)):
+            continue
+        if token not in out:
+            out.append(token)
         if len(out) >= limit:
             break
     return out
 
 
-def build_concept_terms(title: str, semantics: str) -> dict[str, list[str]]:
-    """Собирает ``concept_terms``: RU — заголовок и ключевые слова; EN — латиница/транслит.
+def glossary_terms(text: str, *, limit: int = 6) -> list[str]:
+    """EN-термины из курируемого глоссария по фрагменту RU-текста (``title``/семантика)."""
+    if not text:
+        return []
+    low = str(text).lower()
+    out: list[str] = []
+    for phrase, terms in _RU_EN_GLOSSARY:
+        if phrase in low:
+            for term in terms:
+                if term not in out:
+                    out.append(term)
+        if len(out) >= limit:
+            break
+    return out[:limit]
+
+
+def build_concept_terms(
+    title: str, semantics: str, *, module: str | None = None
+) -> dict[str, list[str]]:
+    """Собирает ``concept_terms``: RU — заголовок и ключевые слова; EN — латиница+глоссарий.
 
     RU-часть всегда непуста (заголовок входит первым) — линтер ``empty-concept-terms``
-    не срабатывает.
+    не срабатывает. EN-часть непуста у всех параметров: латинские технические токены
+    заголовка/семантики + курируемый глоссарий, а при их отсутствии — фолбэк по модулю.
+    Транслитерация в EN **не** используется (только для ``param_id``).
     """
-    ru: list[str] = [title.strip()]
+    meaningful = title.strip()
+    ru: list[str] = [meaningful]
     for token in ru_tokens(title):
         if token not in ru:
             ru.append(token)
+
     en: list[str] = []
-    for token in latin_tokens(title) + latin_tokens(semantics):
-        if token not in en:
-            en.append(token)
-    # Транслит заголовка — фонетическая подсказка для EN-поиска (выведено, не факт).
-    for token in ru_tokens(title, limit=6):
-        trans = translit(token)
-        if trans and trans not in en:
-            en.append(trans)
-    return {"ru": ru, "en": en}
+
+    def _add(term: str) -> None:
+        if term and term not in en:
+            en.append(term)
+
+    # 1) латинские технические токены заголовка (высшая ценность).
+    for token in latin_tokens(title, limit=6):
+        _add(token)
+    # 2) глоссарий по заголовку.
+    for term in glossary_terms(title, limit=8):
+        _add(term)
+    # 3) добираем латиницей из семантики, если EN-список ещё беден.
+    if len(en) < 5:
+        for token in latin_tokens(clean_head(semantics), limit=4):
+            _add(token)
+    # 4) гарантия непустого en (§4.2/empty-concept-terms).
+    if not en:
+        for term in _MODULE_EN_FALLBACK.get(module or "", ("database",)):
+            _add(term)
+    return {"ru": ru, "en": en[:10]}
 
 
 def slug_for(title: str, group_slug: str) -> str:
@@ -586,7 +902,9 @@ def main() -> int:
         if (not g_damaged) and f_damaged:
             shift_fragments += 1
 
-        concept_terms = build_concept_terms(title, clean_head(row["semantics"]))
+        concept_terms = build_concept_terms(
+            title, clean_head(row["semantics"]), module=module
+        )
         catalog_rows.append(
             [
                 param_id,
@@ -616,7 +934,7 @@ def main() -> int:
         derived_rows.append([param_id, "param_type", "fact", "derived", "нет гарантированной публичной величины → fact", ""])
         derived_rows.append([param_id, "absence_rule", "distribution_absence", "mapped", "политика пакета для технических fact-параметров", ""])
         derived_rows.append([param_id, "role_binding", role_binding, "mapped", "group → роль", group])
-        derived_rows.append([param_id, "concept_terms", _json_compact(concept_terms), "derived", "title + семантика (RU/EN)", ""])
+        derived_rows.append([param_id, "concept_terms", _json_compact(concept_terms), "derived", "title (RU) + латинские токены и глоссарий RU→EN (EN)", ""])
         derived_rows.append([param_id, "rule", rule, rule_origin, "чистая G → source; иначе fallback F", note])
         derived_rows.append(
             [
