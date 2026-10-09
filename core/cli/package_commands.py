@@ -25,6 +25,7 @@ import yaml
 
 from core.cli.main import (
     EXIT_BLOCKED,
+    EXIT_NOT_FOUND,
     EXIT_OK,
     EXIT_USAGE,
     CliError,
@@ -40,8 +41,10 @@ from core.pipeline.package_admin import (
     bump_version,
     clear_scope_attestation,
     create_package,
+    get_cohort,
     get_param,
     list_baselines,
+    list_modules,
     list_params,
     list_roles,
     remove_baseline,
@@ -74,7 +77,7 @@ from core.pipeline.package_discovery import (
     suggest_modules,
     suggest_roles,
 )
-from core.pipeline.package_io import atomic_write_text
+from core.pipeline.package_io import atomic_write_text, scan_packages
 
 __all__ = ["add_package_parser", "cmd_package"]
 
@@ -259,6 +262,37 @@ def cmd_package_validate(args: argparse.Namespace) -> int:
     return EXIT_OK if payload["ok"] else EXIT_BLOCKED
 
 
+def cmd_package_list(args: argparse.Namespace) -> int:
+    """``hound package list`` — обзор всех пакетов каталога (read-only).
+
+    ``--search`` фильтрует по ``case_id``/``archetype``/``path``/``package_version``;
+    ``--include-template`` добавляет ``packages/_template``. Пустой результат — валидный
+    :data:`EXIT_OK` с ``count: 0``. Ничего не пишет.
+    """
+    summaries = _invoke(
+        lambda: scan_packages(
+            args.dir, include_template=args.include_template, query=args.search
+        )
+    )
+    payload = {
+        "ok": True,
+        "count": len(summaries),
+        "packages": [summary.as_dict() for summary in summaries],
+    }
+    lines = [f"packages: {len(summaries)}"]
+    for summary in summaries:
+        status = "ok" if summary.ok else "FAIL"
+        extra = f" error: {summary.error}" if summary.error else ""
+        lines.append(
+            f"  {summary.case_id}\t{summary.archetype}\t{summary.package_version}\t"
+            f"mod={summary.modules} roles={summary.roles} cat={summary.catalog} "
+            f"base={summary.baselines} gold={summary.golden} coh={summary.cohort} "
+            f"{status}{extra}"
+        )
+    _emit(args, payload, lines)
+    return EXIT_OK
+
+
 # ---------------------------------------------------------------------------
 # Хендлеры: архетип/версия
 # ---------------------------------------------------------------------------
@@ -337,6 +371,23 @@ def cmd_package_module_renormalize(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def cmd_package_module_list(args: argparse.Namespace) -> int:
+    """``module list`` — модули пакета (id: weight) и Σ весов (read-only)."""
+    modules = _invoke(lambda: list_modules(args.package))
+    total = round(sum(module.weight for module in modules), 6)
+    payload = {
+        "ok": True,
+        "count": len(modules),
+        "weight_total": total,
+        "modules": [module.model_dump(mode="json") for module in modules],
+    }
+    lines = [f"modules: {len(modules)} (Σ={total})"]
+    for module in modules:
+        lines.append(f"  {module.module_id}: {module.weight}")
+    _emit(args, payload, lines)
+    return EXIT_OK
+
+
 # ---------------------------------------------------------------------------
 # Хендлеры: роли
 # ---------------------------------------------------------------------------
@@ -394,9 +445,9 @@ def cmd_package_role_remove(args: argparse.Namespace) -> int:
 
 
 def cmd_package_role_list(args: argparse.Namespace) -> int:
-    """``role list`` — список ролей (read-only)."""
-    roles = _invoke(lambda: list_roles(args.package))
-    payload = {"ok": True, "roles": [role.model_dump(mode="json") for role in roles]}
+    """``role list`` — список ролей (read-only); ``--search`` по ``role_id``/``definition``."""
+    roles = _invoke(lambda: list_roles(args.package, query=args.search))
+    payload = {"ok": True, "count": len(roles), "roles": [role.model_dump(mode="json") for role in roles]}
     lines = [f"roles: {len(roles)}"]
     for role in roles:
         lines.append(f"  {role.role_id}: {role.definition}")
@@ -487,11 +538,24 @@ def cmd_package_param_get(args: argparse.Namespace) -> int:
 
 
 def cmd_package_param_list(args: argparse.Namespace) -> int:
-    """``param list`` (read-only)."""
+    """``param list`` — список параметров (read-only) с поиском/фильтрами."""
     rows = _invoke(
-        lambda: list_params(args.package, include_deprecated=not args.exclude_deprecated)
+        lambda: list_params(
+            args.package,
+            include_deprecated=not args.exclude_deprecated,
+            query=args.search,
+            module=args.module,
+            group=args.group,
+            importance=args.importance,
+            param_type=args.param_type,
+            role_binding=args.role,
+        )
     )
-    payload = {"ok": True, "params": [row.model_dump(mode="json") for row in rows]}
+    payload = {
+        "ok": True,
+        "count": len(rows),
+        "params": [row.model_dump(mode="json") for row in rows],
+    }
     lines = [f"params: {len(rows)}"]
     for row in rows:
         marker = " [deprecated]" if row.deprecated else ""
@@ -601,9 +665,15 @@ def cmd_package_baseline_remove(args: argparse.Namespace) -> int:
 
 
 def cmd_package_baseline_list(args: argparse.Namespace) -> int:
-    """``baseline list`` (read-only)."""
-    rows = _invoke(lambda: list_baselines(args.package))
-    payload = {"ok": True, "baselines": [row.model_dump(mode="json") for row in rows]}
+    """``baseline list`` — строки наследования (read-only); ``--search``/``--baseline``."""
+    rows = _invoke(
+        lambda: list_baselines(args.package, query=args.search, baseline_id=args.baseline)
+    )
+    payload = {
+        "ok": True,
+        "count": len(rows),
+        "baselines": [row.model_dump(mode="json") for row in rows],
+    }
     lines = [f"baselines: {len(rows)}"]
     for row in rows:
         lines.append(f"  {row.baseline_id}\t{row.param_id}\t{row.inheritance_mode.value}")
@@ -639,6 +709,31 @@ def cmd_package_cohort_set(args: argparse.Namespace) -> int:
         )
     )
     _emit(args, _op_payload(result), _op_lines(result))
+    return EXIT_OK
+
+
+def cmd_package_cohort_show(args: argparse.Namespace) -> int:
+    """``cohort show`` — состав когорты (read-only): ``cohort_id``/``frozen_at``/``entries``.
+
+    Отсутствие пакета/``cohort.yaml`` — аккуратное ``not found`` с :data:`EXIT_NOT_FOUND`
+    (значения не выдумываются; невалидный файл → :data:`EXIT_USAGE` как битый ввод).
+    """
+    cohort = _invoke(lambda: get_cohort(args.package))
+    if cohort is None:
+        payload = {"ok": False, "found": False, "package": args.package}
+        _emit(args, payload, [f"not found: cohort.yaml отсутствует в {args.package}"])
+        return EXIT_NOT_FOUND
+    payload = {"ok": True, "found": True, "cohort": cohort.model_dump(mode="json")}
+    lines = [
+        f"case_id: {cohort.case_id}",
+        f"frozen_at: {cohort.frozen_at.isoformat()}",
+        f"entries: {len(cohort.entries)}",
+    ]
+    for entry in cohort.entries:
+        lines.append(
+            f"  {entry.product_id}\t{entry.anchor_relation.value}\toverlap={entry.role_overlap}"
+        )
+    _emit(args, payload, lines)
     return EXIT_OK
 
 
@@ -830,6 +925,16 @@ def add_package_parser(subparsers: Any) -> None:
     _add_read_common(p_validate)
     p_validate.set_defaults(handler=cmd_package_validate)
 
+    # list (обзор пакетов) ------------------------------------------------- #
+    p_list = pkg.add_parser("list", help="обзор пакетов каталога (read-only)")
+    p_list.add_argument("--dir", default="packages", help="каталог пакетов (дефолт packages)")
+    p_list.add_argument("--search", default=None, help="фильтр по case_id/archetype/path/version")
+    p_list.add_argument(
+        "--include-template", action="store_true", help="включить packages/_template"
+    )
+    p_list.add_argument("--json", action="store_true", help="машинночитаемый вывод (JSON)")
+    p_list.set_defaults(handler=cmd_package_list)
+
     # set-archetype / bump-version ---------------------------------------- #
     p_arch = pkg.add_parser("set-archetype", help="установить архетип (C запрещён при baselines)")
     _add_op_common(p_arch)
@@ -867,6 +972,10 @@ def add_package_parser(subparsers: Any) -> None:
     _add_op_common(p_mod_ren)
     p_mod_ren.set_defaults(handler=cmd_package_module_renormalize)
 
+    p_mod_ls = mod.add_parser("list", help="список модулей и Σ весов (read-only)")
+    _add_read_common(p_mod_ls)
+    p_mod_ls.set_defaults(handler=cmd_package_module_list)
+
     # role ----------------------------------------------------------------- #
     p_role = pkg.add_parser("role", help="роли package.yaml")
     role = p_role.add_subparsers(dest="role_command", metavar="ДЕЙСТВИЕ")
@@ -899,6 +1008,7 @@ def add_package_parser(subparsers: Any) -> None:
 
     p_role_ls = role.add_parser("list", help="список ролей (read-only)")
     _add_read_common(p_role_ls)
+    p_role_ls.add_argument("--search", default=None, help="поиск по role_id/definition")
     p_role_ls.set_defaults(handler=cmd_package_role_list)
 
     # param ---------------------------------------------------------------- #
@@ -959,6 +1069,20 @@ def add_package_parser(subparsers: Any) -> None:
     p_param_ls = param.add_parser("list", help="список параметров (read-only)")
     _add_read_common(p_param_ls)
     p_param_ls.add_argument(
+        "--search",
+        default=None,
+        help="поиск по param_id/title/rule/concept_terms",
+    )
+    p_param_ls.add_argument("--module", default=None, help="точный фильтр по модулю")
+    p_param_ls.add_argument("--group", default=None, help="точный фильтр по группе")
+    p_param_ls.add_argument(
+        "--importance", default=None, choices=["Кр", "Вж", "Баз", "Опц"], help="точный фильтр важности"
+    )
+    p_param_ls.add_argument(
+        "--param-type", default=None, choices=["fact", "showcase"], help="точный фильтр типа"
+    )
+    p_param_ls.add_argument("--role", default=None, help="точный фильтр по role_binding")
+    p_param_ls.add_argument(
         "--exclude-deprecated", action="store_true", help="скрыть §13-отменённые параметры"
     )
     p_param_ls.set_defaults(handler=cmd_package_param_list)
@@ -1016,6 +1140,8 @@ def add_package_parser(subparsers: Any) -> None:
 
     p_bl_ls = baseline.add_parser("list", help="список строк наследования (read-only)")
     _add_read_common(p_bl_ls)
+    p_bl_ls.add_argument("--search", default=None, help="поиск по param_id/baseline_id/note")
+    p_bl_ls.add_argument("--baseline", default=None, help="точный фильтр по baseline_id")
     p_bl_ls.set_defaults(handler=cmd_package_baseline_list)
 
     # cohort --------------------------------------------------------------- #
@@ -1034,6 +1160,10 @@ def add_package_parser(subparsers: Any) -> None:
     p_coh_set.add_argument("--entries", required=True, metavar="FILE", help="JSON/YAML-список записей")
     p_coh_set.add_argument("--frozen-at", default=None, help="дата фиксации когорты (YYYY-MM-DD)")
     p_coh_set.set_defaults(handler=cmd_package_cohort_set)
+
+    p_coh_show = cohort.add_parser("show", help="состав когорты (read-only)")
+    _add_read_common(p_coh_show)
+    p_coh_show.set_defaults(handler=cmd_package_cohort_show)
 
     # scope ---------------------------------------------------------------- #
     p_scope = pkg.add_parser("scope", help="процедура аттестации полноты источника (I2b)")

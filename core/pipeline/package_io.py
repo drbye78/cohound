@@ -64,6 +64,7 @@ from core.domain.models import (
 )
 from core.pipeline.lint import LintReport, lint_run_inputs
 from core.pipeline.normalize import RunInputs, cross_check, load_scope_attestation
+from core.util.text_utils import normalize_cyrillic
 
 __all__ = [
     "ARTIFACT_FILES",
@@ -71,6 +72,7 @@ __all__ = [
     "BASELINE_WRITE_COLUMNS",
     "GOLDEN_WRITE_COLUMNS",
     "PackageArtifacts",
+    "PackageSummary",
     "atomic_write_text",
     "atomic_write_csv",
     "validate_case_id",
@@ -82,6 +84,8 @@ __all__ = [
     "assert_no_new_blocking",
     "append_apply_log",
     "APPLY_LOG_RELPATH",
+    "matches",
+    "scan_packages",
 ]
 
 #: Канонический порядок CSV-колонок каталога при записи (обязательные + опц. §13).
@@ -131,6 +135,148 @@ class PackageArtifacts:
     domain_profiles: dict[str, Any] = field(default_factory=dict)
     scope_attestation: str | None = None
     run: RunConfig | None = None
+
+
+# ---------------------------------------------------------------------------
+# Скан каталога пакетов и поиск/фильтрация (read-only)
+# ---------------------------------------------------------------------------
+
+
+def _fold(text: str) -> str:
+    """Unicode-устойчивая свёртка для поиска: ``casefold`` + ё→е (RU)."""
+    return normalize_cyrillic(text.casefold())
+
+
+def matches(text: str | None, query: str | None) -> bool:
+    """Регистронезависимый unicode-устойчивый поиск подстроки ``query`` в ``text``.
+
+    Свёртка через :meth:`str.casefold` и :func:`~core.util.text_utils.normalize_cyrillic`
+    (ё→е) делает сравнение устойчивым к регистру/диакритике русских вхождений. Пустой/
+    отсутствующий ``query`` → ``True`` (фильтр не активен). ``text is None`` при непустом
+    ``query`` → ``False``.
+    """
+    if not query:
+        return True
+    if text is None:
+        return False
+    return _fold(query) in _fold(text)
+
+
+@dataclass
+class PackageSummary:
+    """Сводка по одному пакету категории для обзора ``hound package list`` (read-only).
+
+    JSON-совместима (:meth:`as_dict`): счётчики составных элементов, версия/архетип и
+    итог проспективного линта (``ok``). ``error`` непуст, если пакет не читается/не
+    разбирается — такой подкаталог не валит общий скан, а помечается.
+    """
+
+    path: str
+    case_id: str | None
+    archetype: str | None
+    package_version: str | None
+    modules: int
+    roles: int
+    catalog: int
+    baselines: int
+    golden: int
+    cohort: int
+    ok: bool
+    error: str | None = None
+
+    def as_dict(self) -> dict[str, Any]:
+        """JSON-совместимое представление сводки."""
+        return {
+            "path": self.path,
+            "case_id": self.case_id,
+            "archetype": self.archetype,
+            "package_version": self.package_version,
+            "modules": self.modules,
+            "roles": self.roles,
+            "catalog": self.catalog,
+            "baselines": self.baselines,
+            "golden": self.golden,
+            "cohort": self.cohort,
+            "ok": self.ok,
+            "error": self.error,
+        }
+
+
+def _one_line(exc: BaseException) -> str:
+    """Сжимает сообщение исключения в одну строку (для ``PackageSummary.error``)."""
+    return " ".join(str(exc).split()) or type(exc).__name__
+
+
+def _summarize_package(entry: Path) -> PackageSummary:
+    """Строит :class:`PackageSummary` по каталогу пакета; ошибки разбора не поднимает."""
+    try:
+        artifacts = load_artifacts(entry)
+        report = prospective_lint(artifacts)
+    except (ValueError, OSError) as exc:
+        return PackageSummary(
+            path=str(entry),
+            case_id=entry.name,
+            archetype=None,
+            package_version=None,
+            modules=0,
+            roles=0,
+            catalog=0,
+            baselines=0,
+            golden=0,
+            cohort=0,
+            ok=False,
+            error=_one_line(exc),
+        )
+    manifest = artifacts.manifest
+    return PackageSummary(
+        path=str(entry),
+        case_id=manifest.case_id if manifest is not None else entry.name,
+        archetype=manifest.archetype.value if manifest is not None else None,
+        package_version=manifest.package_version if manifest is not None else None,
+        modules=len(manifest.modules) if manifest is not None else 0,
+        roles=len(manifest.roles) if manifest is not None else 0,
+        catalog=len(artifacts.catalog),
+        baselines=len(artifacts.baselines),
+        golden=len(artifacts.golden),
+        cohort=len(artifacts.cohort.entries) if artifacts.cohort is not None else 0,
+        ok=report.ok,
+    )
+
+
+def scan_packages(
+    dir: str | Path = "packages",
+    *,
+    include_template: bool = False,
+    query: str | None = None,
+) -> list[PackageSummary]:
+    """Обходит непосредственные подкаталоги ``dir`` с ``package.yaml`` и даёт сводку.
+
+    Порядок детерминирован по ``case_id`` (fallback — путь). Каталог ``_template``
+    исключается по умолчанию (``include_template=True`` включает его). Подкаталоги без
+    ``package.yaml`` пропускаются; нечитаемые/нечётные пакеты не валят скан — попадают в
+    результат с ``ok=False`` и непустым ``error``. ``query`` фильтрует по
+    ``case_id``/``archetype``/``path``/``package_version`` (:func:`matches`). Ничего не пишет.
+    """
+    base = Path(dir)
+    if not base.is_dir():
+        return []
+    summaries: list[PackageSummary] = []
+    for entry in sorted(base.iterdir(), key=lambda path: path.name):
+        if not entry.is_dir():
+            continue
+        if entry.name == "_template" and not include_template:
+            continue
+        if not (entry / "package.yaml").is_file():
+            continue
+        summaries.append(_summarize_package(entry))
+    if query:
+        fields = ("case_id", "archetype", "path", "package_version")
+        summaries = [
+            summary
+            for summary in summaries
+            if any(matches(getattr(summary, field), query) for field in fields)
+        ]
+    return sorted(summaries, key=lambda summary: (summary.case_id or "", summary.path))
 
 
 # ---------------------------------------------------------------------------

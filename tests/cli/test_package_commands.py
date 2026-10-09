@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from core.cli.main import EXIT_BLOCKED, EXIT_OK, EXIT_USAGE, main
+from core.cli.main import EXIT_BLOCKED, EXIT_NOT_FOUND, EXIT_OK, EXIT_USAGE, main
 from core.domain.enums import AbsenceRuleType
 from core.pipeline.package_io import load_artifacts, save_artifact
 
@@ -420,3 +420,140 @@ def test_cli_apply_stdin(capsys, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     )
     assert code == EXIT_OK
     assert json.loads(out)["applied"] == 1
+
+
+# ---------------------------------------------------------------------------
+# I3: обзор пакетов / модулей / когорты + поиск в list-командах
+# ---------------------------------------------------------------------------
+
+
+def test_cli_package_list_json_and_search(capsys, tmp_path: Path) -> None:
+    package = _new(capsys, tmp_path)  # demo_pkg в tmp_path
+    code, out, _ = _run(capsys, ["package", "list", "--dir", str(tmp_path), "--json"])
+    assert code == EXIT_OK
+    payload = json.loads(out)
+    assert payload["count"] == 1
+    assert payload["packages"][0]["case_id"] == "demo_pkg"
+    assert payload["packages"][0]["ok"] is True
+
+    code, out, _ = _run(capsys, ["package", "list", "--dir", str(tmp_path), "--search", "DEMO", "--json"])
+    assert code == EXIT_OK
+    assert json.loads(out)["count"] == 1
+
+    code, out, _ = _run(capsys, ["package", "list", "--dir", str(tmp_path), "--search", "nomatch", "--json"])
+    assert code == EXIT_OK
+    assert json.loads(out)["count"] == 0
+
+    # Пустой каталог — валидный EXIT_OK с count 0.
+    code, out, _ = _run(capsys, ["package", "list", "--dir", str(tmp_path / "empty"), "--json"])
+    assert code == EXIT_OK
+    assert json.loads(out)["count"] == 0
+
+
+def test_cli_package_list_includes_template(capsys, tmp_path: Path) -> None:
+    (tmp_path / "_template").mkdir()
+    (tmp_path / "_template" / "package.yaml").write_text(
+        "case_id: template\npackage_version: '0.0.0'\narchetype: B\n"
+        "modules:\n  - module_id: core\n    weight: 100\n"
+        "roles: []\nbaselines: []\nbaseline_participant: null\n",
+        encoding="utf-8",
+    )
+    code, out, _ = _run(capsys, ["package", "list", "--dir", str(tmp_path), "--json"])
+    assert json.loads(out)["count"] == 0
+    code, out, _ = _run(
+        capsys, ["package", "list", "--dir", str(tmp_path), "--include-template", "--json"]
+    )
+    assert json.loads(out)["count"] == 1
+
+
+def test_cli_module_list(capsys, tmp_path: Path) -> None:
+    package = _new(capsys, tmp_path)
+    code, out, _ = _run(capsys, ["package", "module", "list", "--package", str(package), "--json"])
+    assert code == EXIT_OK
+    payload = json.loads(out)
+    assert payload["count"] == 2
+    assert payload["weight_total"] == 100.0
+    assert {m["module_id"] for m in payload["modules"]} == {"module_core", "module_ecosystem"}
+
+
+def test_cli_cohort_show_and_not_found(capsys, tmp_path: Path) -> None:
+    package = _new(capsys, tmp_path)
+    code, out, _ = _run(capsys, ["package", "cohort", "show", "--package", str(package), "--json"])
+    assert code == EXIT_OK
+    payload = json.loads(out)
+    assert payload["found"] is True
+    assert payload["cohort"]["case_id"] == "demo_pkg"
+    assert len(payload["cohort"]["entries"]) == 3
+
+    code, out, _ = _run(
+        capsys, ["package", "cohort", "show", "--package", str(tmp_path / "nope"), "--json"]
+    )
+    assert code == EXIT_NOT_FOUND
+    assert json.loads(out)["found"] is False
+
+
+def test_cli_role_list_search(capsys, tmp_path: Path) -> None:
+    package = _new(capsys, tmp_path)
+    code, out, _ = _run(
+        capsys, ["package", "role", "list", "--package", str(package), "--search", "PRIMARY", "--json"]
+    )
+    assert code == EXIT_OK
+    assert [r["role_id"] for r in json.loads(out)["roles"]] == ["role_primary"]
+    code, out, _ = _run(
+        capsys, ["package", "role", "list", "--package", str(package), "--search", "nomatch", "--json"]
+    )
+    assert json.loads(out)["count"] == 0
+
+
+def test_cli_baseline_list_search_and_filter(capsys, tmp_path: Path) -> None:
+    package = _new(capsys, tmp_path)
+    _run(
+        capsys,
+        ["package", "baseline", "add", "--package", str(package), "--baseline-id", "up",
+         "--param-id", "param.alpha_capability", "--note", "upstream", "--actor", "t", "--json"],
+    )
+    _run(
+        capsys,
+        ["package", "baseline", "add", "--package", str(package), "--baseline-id", "down",
+         "--param-id", "param.alpha_capability", "--actor", "t", "--json"],
+    )
+    code, out, _ = _run(
+        capsys, ["package", "baseline", "list", "--package", str(package), "--search", "UPSTREAM", "--json"]
+    )
+    assert code == EXIT_OK
+    assert [r["baseline_id"] for r in json.loads(out)["baselines"]] == ["up"]
+    code, out, _ = _run(
+        capsys, ["package", "baseline", "list", "--package", str(package), "--baseline", "down", "--json"]
+    )
+    assert [r["baseline_id"] for r in json.loads(out)["baselines"]] == ["down"]
+
+
+def test_cli_param_list_filters_and_search(capsys, tmp_path: Path) -> None:
+    package = _new(capsys, tmp_path)
+    _run(
+        capsys,
+        ["package", "param", "add", "--package", str(package), "--title", "Latency",
+         "--rule", "публичная величина latency p95 (metric)", "--module", "module_ecosystem",
+         "--group", "ecosystem", "--importance", "Баз", "--param-type", "showcase",
+         "--concept-term", "en=latency", "--param-id", "param.latency", "--json"],
+    )
+    code, out, _ = _run(
+        capsys, ["package", "param", "list", "--package", str(package), "--search", "LATENCY", "--json"]
+    )
+    assert code == EXIT_OK
+    assert [p["param_id"] for p in json.loads(out)["params"]] == ["param.latency"]
+
+    code, out, _ = _run(
+        capsys, ["package", "param", "list", "--package", str(package), "--module", "module_ecosystem", "--json"]
+    )
+    assert all(p["module"] == "module_ecosystem" for p in json.loads(out)["params"])
+
+    code, out, _ = _run(
+        capsys, ["package", "param", "list", "--package", str(package), "--importance", "Кр", "--json"]
+    )
+    assert all(p["importance"] == "Кр" for p in json.loads(out)["params"])
+
+    code, out, _ = _run(
+        capsys, ["package", "param", "list", "--package", str(package), "--search", "nomatch", "--json"]
+    )
+    assert json.loads(out)["count"] == 0

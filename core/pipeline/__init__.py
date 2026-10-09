@@ -187,6 +187,7 @@ from core.pipeline.runner import (
 from core.pipeline.package_io import (
     ARTIFACT_FILES,
     PackageArtifacts,
+    PackageSummary,
     append_apply_log,
     assert_no_new_blocking,
     atomic_write_csv,
@@ -194,8 +195,10 @@ from core.pipeline.package_io import (
     build_run_inputs,
     delete_artifact,
     load_artifacts,
+    matches,
     prospective_lint,
     save_artifact,
+    scan_packages,
     validate_case_id,
 )
 from core.pipeline.package_discovery import (
@@ -236,6 +239,8 @@ from core.pipeline.package_admin import (
     update_param,
     update_role,
     validate_package,
+    get_cohort,
+    list_modules,
 )
 from core.pipeline.package_candidates import (
     CANDIDATE_KINDS,
@@ -418,6 +423,9 @@ __all__ = [
     "prospective_lint",
     "assert_no_new_blocking",
     "append_apply_log",
+    "PackageSummary",
+    "scan_packages",
+    "matches",
     "OpResult",
     "PackageAdminError",
     "create_package",
@@ -446,6 +454,8 @@ __all__ = [
     "update_cohort",
     "set_scope_attestation",
     "clear_scope_attestation",
+    "get_cohort",
+    "list_modules",
     "ArchetypeHypothesis",
     "BaselineProposal",
     "infer_archetype",

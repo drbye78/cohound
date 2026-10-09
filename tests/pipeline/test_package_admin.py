@@ -319,3 +319,87 @@ def test_repeated_save_is_byte_identical(tmp_path: Path) -> None:
     pa.renormalize_modules(package)
     second = (package / "package.yaml").read_bytes()
     assert first == second
+
+
+# ---------------------------------------------------------------------------
+# Read-only обзор: list_modules / get_cohort / фильтры
+# ---------------------------------------------------------------------------
+
+
+def test_list_modules_reads_manifest(tmp_path: Path) -> None:
+    package = _make(tmp_path)
+    modules = pa.list_modules(package)
+    assert {m.module_id for m in modules} == {"module_core", "module_ecosystem"}
+    assert abs(sum(m.weight for m in modules) - 100.0) < 1e-6
+
+
+def test_list_modules_requires_manifest(tmp_path: Path) -> None:
+    with pytest.raises(pa.PackageAdminError) as exc:
+        pa.list_modules(tmp_path / "nope")
+    assert exc.value.kind == "usage"
+
+
+def test_get_cohort_present_and_absent(tmp_path: Path) -> None:
+    package = _make(tmp_path)
+    cohort = pa.get_cohort(package)
+    assert cohort is not None
+    assert cohort.case_id == "case_x"
+    assert len(cohort.entries) == 3
+    # Пакет без cohort.yaml — None (не исключение).
+    pa.create_package("case_min", "C", dir=tmp_path, from_template=False)
+    minimal = tmp_path / "case_min"
+    (minimal / "cohort.yaml").unlink()
+    assert pa.get_cohort(minimal) is None
+
+
+def test_list_params_filters(tmp_path: Path) -> None:
+    package = _make(tmp_path)
+    pa.add_param(
+        package,
+        "Фича",
+        "граница",
+        module="module_core",
+        group="grp_x",
+        importance="Кр",
+        param_type="fact",
+        role_binding="role_primary",
+        concept_terms={"ru": ["термин"]},
+        param_id="param.feat",
+    )
+    assert [r.param_id for r in pa.list_params(package, module="module_core") if r.param_id == "param.feat"] == ["param.feat"]
+    assert pa.list_params(package, module="nope") == []
+    assert [r.param_id for r in pa.list_params(package, group="grp_x")] == ["param.feat"]
+    assert "param.feat" in {r.param_id for r in pa.list_params(package, importance="Кр")}
+    assert all(r.importance.value == "Кр" for r in pa.list_params(package, importance="Кр"))
+    assert "param.feat" in {r.param_id for r in pa.list_params(package, param_type="fact")}
+    assert "param.feat" in {r.param_id for r in pa.list_params(package, role_binding="role_primary")}
+    assert all(r.role_binding == "role_primary" for r in pa.list_params(package, role_binding="role_primary"))
+    assert [r.param_id for r in pa.list_params(package, query="ТЕРМИН")] == ["param.feat"]
+    assert [r.param_id for r in pa.list_params(package, query="граница")] == ["param.feat"]
+    assert pa.list_params(package, query="нет_такого") == []
+
+
+def test_list_params_exclude_deprecated_with_query(tmp_path: Path) -> None:
+    package = _make(tmp_path)
+    pa.add_param(package, "T", "r", module="module_core", group="g", importance="Баз", param_id="param.t")
+    pa.remove_param(package, "param.t")
+    assert any(r.param_id == "param.t" for r in pa.list_params(package, query="param.t"))
+    assert pa.list_params(package, query="param.t", include_deprecated=False) == []
+
+
+def test_list_roles_filter(tmp_path: Path) -> None:
+    package = _make(tmp_path)
+    pa.add_role(package, "role_extra", "функция обзора")
+    assert [r.role_id for r in pa.list_roles(package, query="ОБЗОР")] == ["role_extra"]
+    assert [r.role_id for r in pa.list_roles(package, query="role_extra")] == ["role_extra"]
+    assert pa.list_roles(package, query="нет") == []
+
+
+def test_list_baselines_filter(tmp_path: Path) -> None:
+    package = _make(tmp_path)
+    pa.add_baseline(package, "up", "param.alpha_capability", note="основной upstream")
+    pa.add_baseline(package, "down", "param.alpha_capability", inheritance_mode="conditional")
+    assert {r.baseline_id for r in pa.list_baselines(package, baseline_id="up")} == {"up"}
+    assert {r.baseline_id for r in pa.list_baselines(package, query="DOWN")} == {"down"}
+    assert {r.baseline_id for r in pa.list_baselines(package, query="upstream")} == {"up"}
+    assert pa.list_baselines(package, query="нет") == []

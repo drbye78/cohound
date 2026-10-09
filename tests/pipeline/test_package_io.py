@@ -13,8 +13,8 @@ from pathlib import Path
 import pytest
 
 from core.config.run_config import load_catalog
-from core.domain.models import CatalogRow
-from core.domain.enums import Importance, ParamType
+from core.domain.models import CatalogRow, ModuleDef, PackageManifest
+from core.domain.enums import Archetype, Importance, ParamType
 from core.pipeline.lint import LintReport
 from core.pipeline.package_io import (
     ARTIFACT_FILES,
@@ -25,8 +25,10 @@ from core.pipeline.package_io import (
     atomic_write_text,
     build_run_inputs,
     load_artifacts,
+    matches,
     prospective_lint,
     save_artifact,
+    scan_packages,
     validate_case_id,
 )
 
@@ -228,3 +230,74 @@ def test_append_apply_log_is_append_only_and_sorted(tmp_path: Path) -> None:
     assert json.loads(lines[1])["actor"] == "a2"
     # Ключи отсортированы (детерминированный JSON).
     assert lines[0].startswith('{"actor"')
+
+
+# ---------------------------------------------------------------------------
+# Поиск/фильтрация и скан каталога пакетов
+# ---------------------------------------------------------------------------
+
+
+def test_matches_is_case_insensitive_unicode_and_empty_query() -> None:
+    assert matches("Backup", "backup") is True
+    assert matches("Ключ", "ключ") is True
+    assert matches("ёлка", "елка") is True  # ё→е
+    assert matches(None, "x") is False
+    assert matches("abc", None) is True
+    assert matches("abc", "") is True
+    assert matches("abc", "zzz") is False
+
+
+def _write_min_package(entry: Path, case_id: str, *, version: str = "1.0.0") -> Path:
+    """Пишет минимальный валидный ``package.yaml`` (без остальных артефактов)."""
+    entry.mkdir(parents=True, exist_ok=True)
+    manifest = PackageManifest(
+        case_id=case_id,
+        package_version=version,
+        archetype=Archetype.B,
+        modules=[ModuleDef(module_id="core", weight=100.0)],
+        roles=[],
+        baselines=[],
+        baseline_participant=None,
+    )
+    save_artifact(entry, "package", manifest)
+    return entry
+
+
+def test_scan_packages_summarizes_and_orders(tmp_path: Path) -> None:
+    _write_min_package(tmp_path / "case_b", "case_b")
+    _write_min_package(tmp_path / "case_a", "case_a")
+    summaries = scan_packages(tmp_path)
+    assert [s.case_id for s in summaries] == ["case_a", "case_b"]
+    first = summaries[0].as_dict()
+    assert first["modules"] == 1 and first["catalog"] == 0
+    assert first["ok"] is True and first["error"] is None
+
+
+def test_scan_packages_excludes_template_by_default(tmp_path: Path) -> None:
+    _write_min_package(tmp_path / "_template", "template")
+    _write_min_package(tmp_path / "case_a", "case_a")
+    assert [s.case_id for s in scan_packages(tmp_path)] == ["case_a"]
+    included = scan_packages(tmp_path, include_template=True)
+    assert {s.case_id for s in included} == {"case_a", "template"}
+
+
+def test_scan_packages_skips_dirs_without_manifest_and_reports_errors(tmp_path: Path) -> None:
+    _write_min_package(tmp_path / "case_ok", "case_ok")
+    (tmp_path / "not_a_package").mkdir()
+    broken = tmp_path / "case_broken"
+    broken.mkdir()
+    (broken / "package.yaml").write_text("modules: []\n", encoding="utf-8")  # невалиден
+    summaries = scan_packages(tmp_path)
+    by_id = {s.case_id: s for s in summaries}
+    assert "not_a_package" not in by_id
+    assert by_id["case_ok"].ok is True
+    assert by_id["case_broken"].ok is False
+    assert by_id["case_broken"].error
+
+
+def test_scan_packages_filters_by_query_and_missing_dir(tmp_path: Path) -> None:
+    _write_min_package(tmp_path / "case_alpha", "case_alpha")
+    _write_min_package(tmp_path / "case_beta", "case_beta")
+    assert [s.case_id for s in scan_packages(tmp_path, query="ALPHA")] == ["case_alpha"]
+    assert [s.case_id for s in scan_packages(tmp_path, query="beta")] == ["case_beta"]
+    assert scan_packages(tmp_path / "nope") == []

@@ -54,6 +54,7 @@ from core.pipeline.package_io import (
     build_run_inputs,
     delete_artifact,
     load_artifacts,
+    matches,
     prospective_lint,
     save_artifact,
     validate_case_id,
@@ -88,6 +89,8 @@ __all__ = [
     "remove_baseline",
     "set_cohort",
     "update_cohort",
+    "get_cohort",
+    "list_modules",
     "set_scope_attestation",
     "clear_scope_attestation",
 ]
@@ -669,6 +672,17 @@ def renormalize_modules(
     )
 
 
+def list_modules(package_dir: str | Path) -> list[ModuleDef]:
+    """Список модулей пакета (read-only) из ``package.yaml``.
+
+    ``package.yaml`` обязателен — иначе :class:`PackageAdminError` (kind ``usage``):
+    без манифеста состав модулей неизвестен и не выдумывается.
+    """
+    artifacts = _load(package_dir)
+    assert artifacts.manifest is not None  # гарантировано _load
+    return list(artifacts.manifest.modules)
+
+
 # ---------------------------------------------------------------------------
 # Роли
 # ---------------------------------------------------------------------------
@@ -819,10 +833,21 @@ def remove_role(
     )
 
 
-def list_roles(package_dir: str | Path) -> list[RoleDef]:
-    """Список ролей пакета (read-only)."""
+def list_roles(package_dir: str | Path, *, query: str | None = None) -> list[RoleDef]:
+    """Список ролей пакета (read-only).
+
+    ``query`` фильтрует по подстроке в ``role_id``/``definition`` (:func:`matches`,
+    регистронезависимо, ё→е).
+    """
     artifacts = load_artifacts(package_dir)
-    return list(artifacts.manifest.roles) if artifacts.manifest is not None else []
+    roles = list(artifacts.manifest.roles) if artifacts.manifest is not None else []
+    if query:
+        roles = [
+            role
+            for role in roles
+            if matches(role.role_id, query) or matches(role.definition, query)
+        ]
+    return roles
 
 
 # ---------------------------------------------------------------------------
@@ -1017,14 +1042,54 @@ def get_param(package_dir: str | Path, param_id: str) -> CatalogRow | None:
     return next((row for row in artifacts.catalog if row.param_id == param_id), None)
 
 
+def _param_matches(row: CatalogRow, query: str) -> bool:
+    """True, если ``query`` входит в ``param_id``/``title``/``rule``/``concept_terms``."""
+    if matches(row.param_id, query) or matches(row.title, query) or matches(row.rule, query):
+        return True
+    return any(
+        matches(term, query) for terms in row.concept_terms.values() for term in terms
+    )
+
+
 def list_params(
-    package_dir: str | Path, *, include_deprecated: bool = True
+    package_dir: str | Path,
+    *,
+    include_deprecated: bool = True,
+    query: str | None = None,
+    module: str | None = None,
+    group: str | None = None,
+    importance: str | None = None,
+    param_type: str | None = None,
+    role_binding: str | None = None,
 ) -> list[CatalogRow]:
-    """Список параметров (read-only); ``include_deprecated=False`` скрывает §13-отменённые."""
+    """Список параметров (read-only) с необязательными поиском/фильтрами.
+
+    Порядок сохраняется как в ``catalog.csv`` (детерминирован при записи).
+
+    :param include_deprecated: ``False`` скрывает §13-отменённые параметры.
+    :param query: подстрока в ``param_id``/``title``/``rule``/``concept_terms``.
+    :param module: точное равенство ``module``.
+    :param group: точное равенство ``group``.
+    :param importance: значение :class:`~core.domain.enums.Importance` (например ``"Баз"``).
+    :param param_type: значение :class:`~core.domain.enums.ParamType` (``fact``/``showcase``).
+    :param role_binding: точное равенство ``role_binding``.
+    """
     artifacts = load_artifacts(package_dir)
     rows = list(artifacts.catalog)
     if not include_deprecated:
         rows = [row for row in rows if not row.deprecated]
+    if module is not None:
+        rows = [row for row in rows if row.module == module]
+    if group is not None:
+        rows = [row for row in rows if row.group == group]
+    if importance is not None:
+        rows = [row for row in rows if row.importance.value == importance]
+    if param_type is not None:
+        rows = [row for row in rows if row.param_type.value == param_type]
+    if role_binding is not None:
+        rows = [row for row in rows if row.role_binding == role_binding]
+    if query:
+        rows = [row for row in rows if _param_matches(row, query)]
     return rows
 
 
@@ -1047,10 +1112,30 @@ def _baseline_index(
     )
 
 
-def list_baselines(package_dir: str | Path) -> list[BaselineRow]:
-    """Список строк наследования ``baselines.csv`` (read-only)."""
+def list_baselines(
+    package_dir: str | Path,
+    *,
+    query: str | None = None,
+    baseline_id: str | None = None,
+) -> list[BaselineRow]:
+    """Список строк наследования ``baselines.csv`` (read-only).
+
+    :param query: подстрока в ``param_id``/``baseline_id``/``note`` (:func:`matches`).
+    :param baseline_id: точное равенство ``baseline_id``.
+    """
     artifacts = load_artifacts(package_dir)
-    return list(artifacts.baselines)
+    rows = list(artifacts.baselines)
+    if baseline_id is not None:
+        rows = [row for row in rows if row.baseline_id == baseline_id]
+    if query:
+        rows = [
+            row
+            for row in rows
+            if matches(row.param_id, query)
+            or matches(row.baseline_id, query)
+            or matches(row.note, query)
+        ]
+    return rows
 
 
 def add_baseline(
@@ -1250,6 +1335,17 @@ def set_cohort(
     if frozen_at is not None:
         fields["frozen_at"] = frozen_at
     return update_cohort(package_dir, fields, actor=actor, dry_run=dry_run)
+
+
+def get_cohort(package_dir: str | Path) -> Cohort | None:
+    """Состав когорты (read-only) или ``None``, если ``cohort.yaml`` нет в пакете.
+
+    Отсутствие пакета/когорты — не исключение (CLI печатает аккуратное ``not found``).
+    Невалидный присутствующий ``cohort.yaml`` поднимает :class:`ValueError` (не маскируется
+    под отсутствие — значения не выдумываются).
+    """
+    artifacts = load_artifacts(package_dir)
+    return artifacts.cohort
 
 
 # ---------------------------------------------------------------------------
