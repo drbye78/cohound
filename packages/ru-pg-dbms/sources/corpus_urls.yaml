@@ -1,0 +1,23 @@
+# Корпусный вход прогона (--urls) для кейса ru-pg-dbms (§11.6).
+# Выведен детерминированно из passports/{product}/2026-10-01.yaml :: doc_domains
+# (core.config.passport_urls). Это лишь КАНДИДАТЫ-источники контента: они не являются
+# evidence до corpus_raw → hash → index (I19). Homepage-домены → базовые URL '/'.
+# Регенерация: python -c "...passport_urls..." (см. docs/architecture/03 §D.6 runbook).
+jatoba:
+- https://jatoba.ru/
+- https://www.gaz-is.ru/
+- https://www.gaz-is.ru/products/jatoba/
+pangolin:
+- https://pangolin.sbertech.ru/
+- https://platformv.sbertech.ru/products/rabota-s-dannymi/pangolin/
+- https://sbertech.ru/
+- https://sbertech.ru/documents/platform-v-pangolin-se/
+postgrespro:
+- https://postgrespro.ru/
+- https://postgrespro.ru/products/postgrespro/enterprise/
+- https://postgrespro.ru/docs/
+tantor:
+- https://tantorlabs.ru/
+- https://tantorlabs.ru/products/dbms/
+- https://docs.tantorlabs.ru/
+- https://wiki.astralinux.ru/
