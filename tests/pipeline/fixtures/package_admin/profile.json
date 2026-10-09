@@ -1,0 +1,11 @@
+{
+  "upstream_name": "shared_upstream",
+  "upstream_shared": true,
+  "alternatives": ["alt_one", "alt_two"],
+  "commercial_derivatives": ["vendor_edition"],
+  "cross_line": true,
+  "upstream_id": "product_anchor",
+  "params": {
+    "param.alpha_capability": {"inheritance_mode": "conditional", "min_version": "1.2.0", "note": "с версии 1.2"}
+  }
+}

@@ -2311,6 +2311,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_deploy.set_defaults(handler=cmd_deploy_check)
 
+    # package ------------------------------------------------------------- #
+    # Ленивый импорт: подключает ``hound package`` (CRUD + discovery, I1) без
+    # циклического импорта (package_commands импортирует символы этого модуля).
+    from core.cli.package_commands import add_package_parser
+
+    add_package_parser(sub)
+
     return parser
 
 

@@ -154,6 +154,16 @@ def _opt(row: dict[str, str | None], key: str) -> str | None:
     return str(value).strip()
 
 
+#: Истинные значения опциональной булевой CSV-колонки (регистр не важен).
+_TRUE_VALUES = frozenset({"1", "true", "yes", "y", "да", "истина"})
+
+
+def _opt_bool(row: dict[str, str | None], key: str) -> bool:
+    """Разбирает опциональную булеву колонку; пустое/отсутствующее значение → ``False``."""
+    value = _opt(row, key)
+    return value is not None and value.lower() in _TRUE_VALUES
+
+
 def _split_items(raw: Any) -> list[str]:
     """Разбирает списочное значение: готовый список, JSON-массив или строка с разделителями."""
     if raw is None:
@@ -241,6 +251,8 @@ def load_catalog(path: str | Path) -> list[CatalogRow]:
     """Загружает ``catalog.csv`` (11 колонок, §4.2) в ``list[CatalogRow]``.
 
     Все 11 колонок обязаны присутствовать в заголовке; дополнительные игнорируются.
+    Опциональные колонки ``deprecated``/``replaced_by`` (§13) читаются, если присутствуют;
+    пакет без них грузится с дефолтами (``False``/``None``) — обратная совместимость.
     Валидаторы домена: ``param_id`` — slug в нижнем регистре; ``showcase`` → ``rule``
     упоминает публичную величину/метрику.
     """
@@ -267,6 +279,9 @@ def _catalog_row(row: dict[str, str | None]) -> CatalogRow:
         role_binding=_opt(row, "role_binding"),
         concept_terms=_parse_concept_terms(row.get("concept_terms")),
         search_langs=_split_items(row.get("search_langs")),
+        # §13: опциональные колонки; при отсутствии — дефолтные значения модели.
+        deprecated=_opt_bool(row, "deprecated"),
+        replaced_by=_opt(row, "replaced_by"),
     )
 
 

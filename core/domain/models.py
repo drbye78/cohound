@@ -146,6 +146,11 @@ class CatalogRow(BaseModel):
     role_binding: str | None = None
     concept_terms: dict[str, list[str]] = Field(default_factory=dict)  # {"ru": [...], "en": [...]}
     search_langs: list[str] = Field(default_factory=list)
+    # §13: slug (param_id) иммутабелен; отмена — флаг ``deprecated`` + ``replaced_by``,
+    # физического удаления строки нет. Поля опциональны и обратно совместимы: пакет без
+    # одноимённых CSV-колонок грузится с дефолтами (False/None).
+    deprecated: bool = False
+    replaced_by: str | None = None
 
     @model_validator(mode="after")
     def _check(self) -> CatalogRow:
