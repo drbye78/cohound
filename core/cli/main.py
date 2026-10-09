@@ -104,6 +104,7 @@ from core.ports.crawler import CrawlerPort
 from core.ports.discovery_llm import DiscoveryLLMPort
 from core.ports.gateway import ContentGateway
 from core.ports.search import SearchAdapterPort
+from core.ports.types import RenderMode
 
 __all__ = [
     "EXIT_OK",
@@ -350,6 +351,9 @@ def cmd_run(args: argparse.Namespace) -> int:
     report = lint_run_inputs(inputs)
     run_id = args.run_id or derive_run_id(inputs)
     db_path = Path(args.db) if args.db is not None else run_db_path(args.runs_dir, run_id)
+    # Валидация per-URL режимов рендера (Ш5) — до dry-run, чтобы ошибка входа была
+    # видна и в сухом прогоне (I19: никакого молчаливого фетча/подмены).
+    render_modes = _load_render_modes(getattr(args, "render_modes", None))
 
     if args.dry_run:
         if not report.ok:
@@ -361,6 +365,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             "db": str(db_path),
             "until": args.until,
             "phases": _phases_until(args.until),
+            "render_modes": {url: mode.value for url, mode in render_modes.items()},
             "warnings": list(report.warnings),
         }
         if args.json:
@@ -375,10 +380,12 @@ def cmd_run(args: argparse.Namespace) -> int:
     # R7 (07 §7): сведения о профиле зон для манифеста прогона. ГЭП: CLI W5 ещё не
     # собирает run_manifest.yaml (это W10/T10.4), поэтому поля добавляются в отчёт
     # прогона (`deploy`) и готовы для edge_capabilities через manifest_deploy_fields.
+    # Конфиг загружается всегда: секция ``crawl`` (03 §D.5/D.6) — операционная политика
+    # HTTP-краулинга корпуса и в профиле ``local``; для ``split`` дополнительно
+    # валидируется шов и собираются deploy-поля манифеста.
     deploy_fields: dict[str, Any] = {}
-    deploy_config: DeployConfig | None = None
+    deploy_config = load_deploy_config(None)
     if args.profile == SPLIT_PROFILE:
-        deploy_config = load_deploy_config(None)
         if not is_split(deploy_config):
             raise WiringError(
                 "профиль split требует deploy-конфиг с profile split/split-hardened "
@@ -391,7 +398,9 @@ def cmd_run(args: argparse.Namespace) -> int:
     # переиспользуется тот же, что выведен выше, — второго derive нет.
     run_plan = _resolve_plan(args, inputs, run_id)
     ports = _resolve_ports(args, deploy_config)
-    phases = _resolve_phases(args, inputs=inputs, plan=run_plan, ports=ports)
+    phases = _resolve_phases(
+        args, inputs=inputs, plan=run_plan, ports=ports, render_modes=render_modes
+    )
     # Наблюдаемость (W12/T12.1, 04 §B.1/§B.2): оборачиваем фазы логом+таймингом.
     # Гейты — дефолтные замыкания Runner; оборачиваем и их, чтобы §B.1-лог покрывал
     # точку остановки (g1 без человеческого решения тоже оставляет logs/g1.jsonl).
@@ -1791,8 +1800,71 @@ def _load_corpus_urls(path: str | Path | None) -> dict[str, list[str]]:
     return result
 
 
+def _load_render_modes(path: str | Path | None) -> dict[str, RenderMode]:
+    """Читает опциональный JSON/YAML-файл ``{url: "http"|"browser"}`` (Ш5).
+
+    Режим рендера — операционный вход: браузерный рендер нужен для SPA/JS-страниц.
+    Файл задаётся ``--render-modes``; значения валидируются через :class:`RenderMode`
+    (``http``/``browser``). При ``None`` возвращается ``{}``: пустое отображение даёт
+    дефолт HTTP в :func:`core.pipeline.corpus.build_corpus`.
+
+    :raises CliError: файл не читается/не разбирается; документ не словарь либо значение
+        не является допустимым ``RenderMode`` (:data:`EXIT_USAGE`, код ``render-modes``).
+    """
+    if path is None:
+        return {}
+    p = Path(path)
+    try:
+        text = p.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise CliError(
+            f"не удалось прочитать {p}: {_concise(exc)}",
+            code="render-modes",
+            exit_code=EXIT_USAGE,
+        ) from exc
+    try:
+        if p.suffix.lower() == ".json":
+            data = json.loads(text)
+        else:
+            data = yaml.safe_load(text)
+    except (json.JSONDecodeError, yaml.YAMLError) as exc:
+        raise CliError(
+            f"некорректный {p}: {_concise(exc)}",
+            code="render-modes",
+            exit_code=EXIT_USAGE,
+        ) from exc
+
+    if data is None:
+        return {}
+    if not isinstance(data, Mapping):
+        raise CliError(
+            f"{p}: ожидался объект {{url: \"http\"|\"browser\"}}",
+            code="render-modes",
+            exit_code=EXIT_USAGE,
+        )
+    modes: dict[str, RenderMode] = {}
+    for url, mode in data.items():
+        if not isinstance(mode, str):
+            raise CliError(
+                f"{p}: {url!r} должен указывать режим строкой (http|browser)",
+                code="render-modes",
+                exit_code=EXIT_USAGE,
+            )
+        try:
+            modes[str(url)] = RenderMode(mode.strip())
+        except ValueError as exc:
+            raise CliError(
+                f"{p}: недопустимый render_mode {mode!r} для {url!r}; "
+                "ожидается один из http|browser",
+                code="render-modes",
+                exit_code=EXIT_USAGE,
+            ) from exc
+    return modes
+
+
 def _resolve_phases(
-    args: argparse.Namespace, *, inputs: RunInputs, plan: RunPlan, ports: Ports
+    args: argparse.Namespace, *, inputs: RunInputs, plan: RunPlan, ports: Ports,
+    render_modes: Mapping[str, RenderMode] | None = None,
 ) -> dict[str, PhaseFn]:
     """Собирает реестр не-гейтовых фаз (``phases_factory`` — тестовый шов).
 
@@ -1822,6 +1894,8 @@ def _resolve_phases(
         "out_dir": args.runs_dir,
         "retrieval_profile": getattr(args, "retrieval_profile", None),
         "cutoff_k": getattr(args, "cutoff_k", None),
+        # Per-URL render-mode (--render-modes): {url: RenderMode}; пусто → HTTP (Ш5).
+        "render_modes": render_modes or {},
     }
     factory = getattr(args, "phases_factory", None)
     if factory is not None:
@@ -1943,6 +2017,21 @@ def _add_common(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _positive_int(raw: str) -> int:
+    """``argparse``-тип: положительное целое (иначе ``--cutoff-k`` отвергается, I20).
+
+    :raises argparse.ArgumentTypeError: нечисловое либо ``<= 0`` значение; ``argparse``
+        печатает usage и завершает процесс кодом :data:`EXIT_USAGE`.
+    """
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"ожидалось целое, получено {raw!r}") from exc
+    if value <= 0:
+        raise argparse.ArgumentTypeError(f"значение обязано быть положительным, получено {raw!r}")
+    return value
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Собирает argparse-парсер CLI (stdlib, без фреймворков, A1)."""
     parser = argparse.ArgumentParser(
@@ -2011,6 +2100,23 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="опциональный JSON/YAML {product_id: [url, ...]} — операторский корпусный вход "
         "Ш5; без него корпус URL пуст (doc_domains паспортов не фетчатся молча)",
+    )
+    p_run.add_argument(
+        "--render-modes",
+        dest="render_modes",
+        default=None,
+        metavar="FILE",
+        help="опциональный JSON/YAML {url: \"http\"|\"browser\"} — per-URL режим рендера Ш5 "
+        "(дефолт: HTTP/по домен-профилю)",
+    )
+    p_run.add_argument(
+        "--cutoff-k",
+        dest="cutoff_k",
+        type=_positive_int,
+        default=None,
+        metavar="K",
+        help="retrieval_cutoff_K (I20) выреза ретривала для фазы оценки; дефолт — "
+        "DEFAULT_RETRIEVAL_CUTOFF_K (10)",
     )
     _add_common(p_run)
     p_run.set_defaults(handler=cmd_run)
@@ -2377,7 +2483,12 @@ def main(
     args.phases_factory = phases_factory
     args.plan_factory = plan_factory
     args.retrieval_profile = retrieval_profile
-    args.cutoff_k = cutoff_k
+    # ``--cutoff-k`` (CLI) выставляется парсером; инъекция ``cutoff_k`` — тестовый шов и
+    # переопределяет CLI только при явном значении (иначе сохраняем ввод оператора).
+    if cutoff_k is not None:
+        args.cutoff_k = cutoff_k
+    elif not hasattr(args, "cutoff_k"):
+        args.cutoff_k = None
     args.clock = clock
     args.search_adapter = search_adapter
     args.discovery_llm = discovery_llm

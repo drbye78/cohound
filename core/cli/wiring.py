@@ -338,7 +338,7 @@ DEFAULT_SCOUT_CRAWLER = "http"
 SUPPORTED_SCOUT_CRAWLERS: tuple[str, ...] = ("http", "scrapy")
 
 
-def build_scout_crawler() -> CrawlerPort:
+def build_scout_crawler(*, deploy: DeployConfig | None = None) -> CrawlerPort:
     """Собирает краулер для ``passport-scout`` (дефолт — лёгкий, A1/MVP).
 
     Обычный сайт = ``httpx`` (:class:`HttpCrawler`, ленивый импорт); браузерный
@@ -348,8 +348,12 @@ def build_scout_crawler() -> CrawlerPort:
     * ``http`` (дефолт) — :class:`HttpCrawler`;
     * ``scrapy`` — :class:`ScrapyCrawler` (прежнее поведение).
 
-    Недоступность зависимости даёт понятный ``CrawlError`` на фетче (адаптер не
-    падает на конструкторе). Тесты инъектируют ``crawler`` в :func:`main`.
+    Для ``http`` применяется операционная политика :class:`~core.config.deploy.CrawlConfig`
+    из ``deploy.yaml`` (``user_agent``/``timeout_s``/``follow_redirects``). ``deploy=None``
+    → конфиг загружается канонически (:func:`load_deploy_config`); при профиле ``local``
+    без файла значения совпадают с дефолтами :class:`HttpCrawler` — поведение не меняется
+    (обратная совместимость). Недоступность зависимости даёт понятный ``CrawlError`` на
+    фетче (адаптер не падает на конструкторе). Тесты инъектируют ``crawler`` в :func:`main`.
 
     :raises WiringError: неизвестное значение ``COHOUND_SCOUT_CRAWLER``.
     """
@@ -358,13 +362,30 @@ def build_scout_crawler() -> CrawlerPort:
     if not name:
         name = DEFAULT_SCOUT_CRAWLER
     if name == "http":
-        return HttpCrawler()
+        config = deploy if deploy is not None else load_deploy_config(None)
+        return HttpCrawler(**_http_crawler_kwargs(config))
     if name == "scrapy":
         return ScrapyCrawler()
     raise WiringError(
         f"{ENV_SCOUT_CRAWLER}: неизвестный краулер {name!r}; "
         f"поддерживаются: {', '.join(SUPPORTED_SCOUT_CRAWLERS)}"
     )
+
+
+def _http_crawler_kwargs(deploy: DeployConfig) -> dict[str, Any]:
+    """Параметры :class:`HttpCrawler` из ``deploy.crawl`` (дефолты адаптера при ``None``).
+
+    Поля ``user_agent``/``timeout_s`` со значением ``None`` **не** передаются: адаптер
+    подставит собственные дефолты (:data:`~core.adapters.crawl_http.DEFAULT_USER_AGENT`/
+    ``DEFAULT_TIMEOUT``). ``follow_redirects`` передаётся всегда (дефолт ``True``).
+    """
+    crawl = deploy.crawl
+    kwargs: dict[str, Any] = {"follow_redirects": crawl.follow_redirects}
+    if crawl.user_agent is not None:
+        kwargs["user_agent"] = crawl.user_agent
+    if crawl.timeout_s is not None:
+        kwargs["timeout"] = crawl.timeout_s
+    return kwargs
 
 
 #: Формат документа → расширение (роутинг композитного экстрактора на docling).
@@ -427,12 +448,16 @@ def _build_local_ports(
     registry: RegistryFetcherPort | None,
     index_root: str | Path,
     package: str | None,
+    crawler: CrawlerPort | None = None,
 ) -> Ports:
     """Собирает in-process порты профиля ``local`` (без сети/тяжёлых зависимостей).
 
     Гарантия: никогда не бросает из-за отсутствия опциональной зависимости — недоступный
     тяжёлый адаптер остаётся ``None``. ``evaluator``/``registry`` не создаются сами:
     передаются вызывающим (генератор/конфиг; I6/I7/I18 не автоматизируются).
+    ``crawler`` — опциональный HTTP-краулер корпуса, собранный composition root из
+    ``deploy.crawl`` (:func:`build_scout_crawler`); ``None`` → не инстанцируется (прежнее
+    поведение, сетевые адаптеры включаются явной инъекцией).
     """
     html = HtmlExtractor()
     documents = DoclingDocumentExtractor()
@@ -463,10 +488,10 @@ def _build_local_ports(
         # Adapter/port mismatch (engine_version: property vs mutable attr) — статическая
         # несовместимость протокола; runtime_checkable проверяет методы, поведение корректно.
         lexical_index=lexical_index,  # type: ignore[arg-type]
-        # Сетевые адаптеры (crawl/SERP) для local не инстанцируются: в CLI-конфиге нет
-        # ни URL-набора, ни учётных данных, ни discovery-запросов. Включаются явной
-        # инъекцией портов вызывающим (composition root, W13/T13).
-        crawler=None,
+        # Краулер корпуса: инстанцируется composition root'ом из ``deploy.crawl`` (R7/03
+        # §D.5); без конфига остаётся ``None`` — прежнее поведение. SERP/discovery для
+        # local включаются явной инъекцией портов (в CLI-конфиге нет запросов).
+        crawler=crawler,
         search=None,
         vector_index=None,
     )
@@ -510,11 +535,18 @@ def build_adapters(
     :raises WiringError: неизвестный профиль или split без валидного deploy-конфига.
     """
     if profile == LOCAL_PROFILE:
+        # Краулер корпуса строится только при явном deploy-конфиге: политика crawl
+        # (user_agent/timeout/follow_redirects) — данные оператора (03 D.5/D.6). Без
+        # конфига — прежнее поведение (crawler=None; сетевые порты инъектируются).
+        local_crawler = (
+            build_scout_crawler(deploy=deploy) if deploy is not None else None
+        )
         return _build_local_ports(
             evaluator=evaluator,
             registry=registry,
             index_root=index_root,
             package=package,
+            crawler=local_crawler,
         )
     if profile == SPLIT_PROFILE:
         config = deploy if deploy is not None else load_deploy_config(None)

@@ -120,6 +120,51 @@ def test_search_budget_parsed() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Секция crawl (операционная политика HTTP-краулинга, 03 D.5/D.6)
+# ---------------------------------------------------------------------------
+
+
+def test_crawl_defaults_preserve_http_crawler_behaviour(tmp_path: Path) -> None:
+    """Без секции ``crawl`` поля дефолтны: ``None``/``None``/``True`` (обратная совместимость)."""
+    cfg = load_deploy_config(_write(tmp_path, "profile: local\n"))
+    assert cfg.crawl.user_agent is None
+    assert cfg.crawl.timeout_s is None
+    assert cfg.crawl.follow_redirects is True
+
+
+def test_crawl_section_parsed(tmp_path: Path) -> None:
+    path = _write(
+        tmp_path,
+        _dump(
+            {
+                "profile": "local",
+                "crawl": {
+                    "user_agent": "cohound-bot/1.0",
+                    "timeout_s": 12.5,
+                    "follow_redirects": False,
+                },
+            }
+        ),
+    )
+    cfg = load_deploy_config(path)
+    assert cfg.crawl.user_agent == "cohound-bot/1.0"
+    assert cfg.crawl.timeout_s == 12.5
+    assert cfg.crawl.follow_redirects is False
+
+
+def test_crawl_non_positive_timeout_rejected(tmp_path: Path) -> None:
+    path = _write(tmp_path, "profile: local\ncrawl:\n  timeout_s: 0\n")
+    with pytest.raises(ValidationError, match="timeout_s"):
+        load_deploy_config(path)
+
+
+def test_extra_crawl_field_rejected(tmp_path: Path) -> None:
+    path = _write(tmp_path, "profile: local\ncrawl:\n  user_agent: ua\n  robots: true\n")
+    with pytest.raises(ValidationError):
+        load_deploy_config(path)
+
+
+# ---------------------------------------------------------------------------
 # Негативные случаи
 # ---------------------------------------------------------------------------
 

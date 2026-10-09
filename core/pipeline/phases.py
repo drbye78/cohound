@@ -47,6 +47,7 @@ from core.pipeline.registry import registry_wave
 from core.pipeline.report import build_manifest, write_reports
 from core.pipeline.retrieve import RetrievalProfile
 from core.pipeline.runner import PhaseFn, PhaseResult, Ports, RunContext
+from core.ports.types import RenderMode
 
 if TYPE_CHECKING:  # только аннотации: без рантайм-импорта входа/плана
     from core.pipeline.normalize import RunInputs
@@ -154,6 +155,7 @@ def build_phases(
     snapshot_date: Any = None,
     retrieval_profile: RetrievalProfile | str | None = None,
     cutoff_k: int | None = None,
+    render_modes: Mapping[str, RenderMode] | None = None,
     satellites: Sequence[Satellite] = (),
     resolver: SourceResolver | None = None,
     strict: bool = True,
@@ -177,6 +179,8 @@ def build_phases(
     :param snapshot_date: окно снимка (Ш5); ``None`` → ``plan``/когорта.
     :param retrieval_profile: зафиксированный профиль R0/R1/R2 (I16); ``None`` → дефолт Ш6.
     :param cutoff_k: зафиксированный ``retrieval_cutoff_K`` (I20); ``None`` → дефолт Ш6.
+    :param render_modes: per-URL режим рендера (``{url: RenderMode}``, Ш5); ``None``/пусто →
+        HTTP по умолчанию. Прокидывается в :func:`~core.pipeline.corpus.build_corpus`.
     :param satellites: сателлиты как контекст промпта (I17, не доказательство).
     :param resolver: резолвер ``source_id`` → URL (I10/I15).
     :param strict: strict vs preliminary для Ш6 (I13).
@@ -253,6 +257,7 @@ def build_phases(
             index_builder=getattr(ctx.ports, "index_builder", None),
             raw_root=raw_root,
             package_id=_package_id(inputs, plan),
+            render_modes=render_modes,
         )
         _capture_index_build(holder, result)
         return _as_phase(result, "corpus")

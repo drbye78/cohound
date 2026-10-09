@@ -103,6 +103,8 @@ Dev/CI по §11.6: `pytest`+`hypothesis`+`pytest-cov` в extra `dev`; един�
 `docs/architecture/06-implementation-strategy.md`.
 Развёртывание: доверенные зоны и DMZ-шов (application-layer firewall) —
 `docs/architecture/07-deployment-topology.md`.
+Переменные окружения и внешние ключи (LLM, scout, поисковые адаптеры) + runbook живого
+прогона корпуса — шаблон без секретов `.env.example` и `docs/architecture/03-data-config-cli.md` §D.6.
 
 ## Конвенции кода
 

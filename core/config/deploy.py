@@ -34,6 +34,7 @@ __all__ = [
     "AuditConfig",
     "EdgeConfig",
     "SearchDeployConfig",
+    "CrawlConfig",
     "DeployConfig",
     "load_deploy_config",
     "is_split",
@@ -196,12 +197,30 @@ class SearchDeployConfig(BaseModel):
         return value
 
 
+class CrawlConfig(BaseModel):
+    """Операционная политика HTTP-краулинга корпуса (03 D.5/D.6).
+
+    Секция применима к лёгкому :class:`~core.adapters.crawl_http.HttpCrawler`
+    (композиция — ``cli.wiring``): ``user_agent``, ``timeout_s`` (таймаут запроса, с) и
+    ``follow_redirects``. Значения **не** дублируют возможности адаптера, а лишь
+    выносят их в конфиг оператора (A1). Поля со значением ``None`` означают «взять
+    дефолт адаптера» — так сохраняется обратная совместимость профиля ``local`` без файла.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    user_agent: str | None = None
+    timeout_s: float | None = Field(default=None, gt=0)
+    follow_redirects: bool = True
+
+
 class DeployConfig(BaseModel):
     """Профиль развёртывания и настройки зон (03 D.5).
 
     Для ``split``/``split-hardened`` обязателен ``edge.base_url``; для ``local``
-    секция ``edge.*`` игнорируется. Отсутствие файла даёт безопасный дефолт
-    ``profile: local`` (см. :func:`load_deploy_config`).
+    секция ``edge.*`` игнорируется. Секция ``crawl`` действует в обоих профилях
+    (операционная политика HTTP-краулинга; 03 D.5/D.6). Отсутствие файла даёт
+    безопасный дефолт ``profile: local`` (см. :func:`load_deploy_config`).
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -210,6 +229,7 @@ class DeployConfig(BaseModel):
     edge: EdgeConfig = Field(default_factory=EdgeConfig)
     extractor_zone: str = "core"
     search: SearchDeployConfig = Field(default_factory=SearchDeployConfig)
+    crawl: CrawlConfig = Field(default_factory=CrawlConfig)
 
     @field_validator("profile")
     @classmethod

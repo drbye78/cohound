@@ -234,13 +234,103 @@ extractor_zone: edge           # edge | core | separate
 search:
   budget: { ru: 5, en: 5 }      # симметрия I16
   adapter: yandex
+crawl:                         # операционная политика HTTP-краулинга корпуса (local|split)
+  user_agent: "coHound-crawler/0.1"   # None → дефолт HttpCrawler
+  timeout_s: 30                # None → дефолт HttpCrawler (30 с)
+  follow_redirects: true
 ```
 
-Профиль `local` игнорирует `edge.*`. Загрузчик `config/deploy.py` → `DeployConfig` (домен-нейтрален).
-`deploy_profile`, версии edge-компонентов (`/v1/capabilities`) и `edge_schema_version` пишутся в
-`run_manifest.yaml` (R7). `edge/` (composition root Z1) читает тот же файл для bind-адреса,
-аутентификации входящих (IDP) и экспорта аудита (SIEM). Полные требования к прозрачности шва для
-IDP/DLP/IDS — `07` §8.
+Профиль `local` игнорирует `edge.*`. Секция `crawl` действует в обоих профилях: она
+переопределяет операционные параметры лёгкого `HttpCrawler` (`user_agent`/`timeout_s`/
+`follow_redirects`); при `None`/отсутствии поля берётся дефолт адаптера — обратная
+совместимость профиля `local` без файла. Загрузчик `config/deploy.py` → `DeployConfig`
+(домен-нейтрален). `deploy_profile`, версии edge-компонентов (`/v1/capabilities`) и
+`edge_schema_version` пишутся в `run_manifest.yaml` (R7). `edge/` (composition root Z1)
+читает тот же файл для bind-адреса, аутентификации входящих (IDP) и экспорта аудита
+(SIEM). Полные требования к прозрачности шва для IDP/DLP/IDS — `07` §8.
+
+### D.6. Переменные окружения и внешние ключи
+
+Единая точка правды по env-переменным конвейера. Секреты **не коммитятся**; шаблон без
+значений — `.env.example` в корне. Ключи передаются через среду процесса (в `split` —
+только в контейнере edge, см. ниже).
+
+**Контуры (I18/07).** Эгрессионные ключи внешнего поиска (`YANDEX_*`, `GLM_SEARCH_API_KEY`,
+`GOOGLE_*`, `OPEN_WEBSEARCH_*`, `DUCKDUCKGO_BACKEND`) в профиле `split` живут **только в
+edge** (composition root Z1, `07` §4/§7); ядро ходит за кандидатами через `/v1/*`-шов и
+этих переменных не читает. **Оценщик (Ш6, I18) веб-тула не имеет** и никакие поисковые
+ключи не читает — он работает только по переданным чанкам корпуса. В профиле `local`
+поиск/краул исполняются in-process, поэтому те же переменные доступны процессу ядра.
+
+| Переменная | Назначение | Обязательность | Fallback | Потребитель |
+|---|---|---|---|---|
+| `COHOUND_LLM_BASE_URL` | базовый URL openai-совместимого LLM-сервера | опц. | `https://plusvibeapi.ru/v1` | `wiring.build_discovery_llm` (LLM-разведка `passport-scout`, Ш2) |
+| `COHOUND_LLM_API_KEY` | ключ LLM-разведки | **обязателен для вызова** | `PLUSVIBEAPI_API_KEY` | `wiring.build_discovery_llm` |
+| `PLUSVIBEAPI_API_KEY` | фолбэк ключа контура | опц. | — | `wiring.build_discovery_llm` |
+| `COHOUND_LLM_MODEL` | `model_id` LLM-разведки | опц. | `deepseek-v4.1-flash:cxbc` | `wiring.build_discovery_llm` |
+| `COHOUND_LLM_DECODER` | механизм декодирования (`none`/`json_object`/`json_schema`) | опц. | `json_object` | `wiring.build_discovery_llm` |
+| `COHOUND_LLM_TIMEOUT` | таймаут LLM-запроса, с (>0) | опц. | `120.0` | `wiring.build_discovery_llm` |
+| `COHOUND_LLM_MAX_TOKENS` | максимум токенов ответа (>0) | опц. | `4096` | `wiring.build_discovery_llm` |
+| `COHOUND_SCOUT_CRAWLER` | краулер `passport-scout`: `http`\|`scrapy` | опц. | `http` | `wiring.build_scout_crawler` |
+| `COHOUND_NO_REEXEC` | отключить автоперезапуск `hound.py` в проектной `.venv` | опц. | — | `hound.py` |
+| `COHOUND_REEXEC` | предохранитель от зацикливания перезапуска (ставит `hound.py`) | служебная | — | `hound.py` |
+| `YANDEX_SEARCH_API_KEY` | ключ Yandex Search API | **обязателен для адаптера** | — | `adapters.search_yandex` |
+| `YANDEX_FOLDER_ID` | folder-id Yandex Cloud | **обязателен для адаптера** | — | `adapters.search_yandex` |
+| `YANDEX_SEARCH_MODE` | режим поиска Yandex: `async`/`sync` | опц. | `async` | `adapters.search_yandex` |
+| `GLM_SEARCH_API_KEY` | ключ GLM web-search | **обязателен для адаптера** | — | `adapters.search_glm` |
+| `GOOGLE_API_KEY` | ключ Google CSE | **обязателен для адаптера** | `GOOGLE_SEARCH_API_KEY` | `adapters.search_google` |
+| `GOOGLE_SEARCH_API_KEY` | альтернативное имя ключа Google CSE | опц. | — | `adapters.search_google` |
+| `GOOGLE_CSE_ID` | идентификатор поискового движка (cx) | **обязателен для адаптера** | `GOOGLE_SEARCH_ENGINE_ID` | `adapters.search_google` |
+| `GOOGLE_SEARCH_ENGINE_ID` | альтернативное имя cx | опц. | — | `adapters.search_google` |
+| `DUCKDUCKGO_BACKEND` | движок библиотеки `ddgs` | опц. | `duckduckgo` | `adapters.search_duckduckgo` |
+| `OPEN_WEBSEARCH_BIN` | путь/имя утилиты `open-websearch` | опц. | `open-websearch` | `adapters.search_openwebsearch` |
+| `OPEN_WEBSEARCH_ENGINE` | движок утилиты | опц. | `duckduckgo` | `adapters.search_openwebsearch` |
+
+Примечания:
+
+- **Обязательность** ключей поиска проявляется в `hound discover`: без пары
+  (`api_key`, `folder_id`/`cx`) адаптер считается недоступным, и кандидаты **не
+  выдумываются** (I19) — команда возвращает `EXIT_ERROR` с явным сообщением.
+- Флаги CLI переопределяют env: `passport-scout --llm-base-url/--llm-model/--llm-decoder`,
+  `discover --search-adapter`.
+
+**Runbook живого прогона корпуса.** Минимальный операторский запуск (профиль `local`,
+in-process, без Правки кода):
+
+```bash
+hound run \
+  --run-yaml packages/{case_id}/run.yaml \
+  --package packages/{case_id} \
+  --passports-dir passports \
+  --urls <urls>.json \
+  --until corpus \
+  [--render-modes <render>.json]
+```
+
+- `<urls>.json` — `{product_id: [url, ...]}` (явный корпусный вход, Ш5; `doc_domains`
+  паспортов молча не фетчатся, I19).
+- `[--render-modes <render>.json]` — `{url: "http"|"browser"}` для SPA/JS-страниц
+  (значение не из `http`/`browser` → `EXIT_USAGE`).
+- `--cutoff-k K` (I20) и `--render-modes` влияют на фазы Ш5/Ш6; `--cutoff-k` имеет смысл
+  при прогоне до `evaluate`.
+
+Что появится на диске (раскладка A.1/A.2):
+
+- `corpus_raw/{product_id}/{hash}.bin` — retention сырых байтов (пишется до экстракции, I19);
+- `index_store/{package}/{build_id}/{product_id}/` — иммутабельная индексная сборка
+  (chunks + `index_manifest`; при подключённых эмбеддере/билдере — `.npy`-шарды);
+- `runs/{run_id}/cohound.db` — чанки/документы/манифест индекса прогона;
+- `cache/http/{url_hash}.bin` — глобальный content-addressed кэш (R7; повторный прогон
+  читает кэш без живого ре-фетча).
+
+Тяжёлые опциональные зависимости (extras `pyproject.toml`, `05-dependency-stack.md`):
+
+- `docling` (extra `extract`/`extract-pdf`) — извлечение PDF/DOCX/PPTX/XLSX; без него
+  документные форматы деградируют, HTML обрабатывается `trafilatura`;
+- `sentence_transformers` (extra `embed`) — плотные эмбеддинги bge-m3 (dense-ретривал);
+  без него — лексический индекс (`tantivy`/BM25, extra `retrieval`) и/или sparse;
+- `scrapy` + `playwright` (extra `crawl`) — браузерный рендер SPA/JS; `COHOUND_SCOUT_CRAWLER=scrapy`
+  для `passport-scout`.
 
 ---
 

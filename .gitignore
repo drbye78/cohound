@@ -22,6 +22,12 @@ index_store/
 # Сырой корпус (байты страниц) — retention локально
 corpus_raw/
 
+# Глобальный content-addressed кэш (R7, ADR 0016): SERP + HTTP — операционный
+cache/
+
+# Секреты окружения (шаблон без значений — .env.example, коммитится)
+.env
+
 # Прочее
 *.log
 .DS_Store
