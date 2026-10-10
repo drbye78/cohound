@@ -4,8 +4,7 @@
 ``tools``/``web_search``; метод ``complete`` принимает только промпт и схему ответа.
 Search-enabled модели обслуживаются другим портом (``ports/search.py``).
 
-Типы выходного контракта — из домена (``LLMCellOutput``). Transitional-импорт: до расщепления
-``core/schemas.py`` (T1.2) типы берутся оттуда. Нейтрален (§1.3).
+Типы выходного контракта — из домена (``LLMCellOutput``). Нейтрален (§1.3).
 """
 
 from __future__ import annotations
