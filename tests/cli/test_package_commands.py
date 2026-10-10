@@ -836,12 +836,15 @@ def test_cli_show_missing_manifest_is_not_found(capsys, tmp_path: Path) -> None:
     assert payload["reason"] == "package.yaml отсутствует"
 
 
-def test_cli_validate_existing_dir_without_manifest_is_not_not_found(capsys, tmp_path: Path) -> None:
-    """Существующий каталог без ``package.yaml`` проходит гейт (не not-found): вердикт — за
-    ``validate_package`` (терпимость к частичным пакетам — вне CLI)."""
+def test_cli_validate_existing_dir_without_manifest_is_blocked(capsys, tmp_path: Path) -> None:
+    """Существующий каталог без ``package.yaml`` — не not-found, но fail-closed:
+    ``EXIT_BLOCKED`` с блокирующим сообщением (не ложный ``ok: yes``)."""
     empty = tmp_path / "bare_dir"
     empty.mkdir()
-    code, _, _ = _run(capsys, ["package", "validate", "--package", str(empty), "--json"])
-    assert code != EXIT_NOT_FOUND
+    code, out, _ = _run(capsys, ["package", "validate", "--package", str(empty), "--json"])
+    assert code == EXIT_BLOCKED
+    payload = json.loads(out)
+    assert payload["ok"] is False
+    assert payload["lint"]["blocking"] == ["package.yaml отсутствует"]
 
 

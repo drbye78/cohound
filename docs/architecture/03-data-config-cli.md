@@ -407,6 +407,9 @@ hound run \
 Подкоманды `hound package …` принимают `--package` как **путь к каталогу пакета**, так и
 **`case_id`** (резолвится в каталоге пакетов: `--dir`, иначе resolved `paths.packages`);
 несуществующий пакет — честный `EXIT_NOT_FOUND` (команды чтения fail-closed, а не ложный успех).
+`hound package validate` дополнительно fail-closed, когда каталог есть, но `package.yaml`
+отсутствует: `EXIT_BLOCKED` с `blocking: package.yaml отсутствует` (не `EXIT_NOT_FOUND`
+и не ложный `ok: yes`; терпимость к частичным пакетам с манифестом сохраняется).
 
 `hound doctor` — read-only и по умолчанию **без сети**: проверяет Python/venv, наличие
 зависимостей по группам extras (`find_spec`, без импорта тяжёлых), заданность env/ключей

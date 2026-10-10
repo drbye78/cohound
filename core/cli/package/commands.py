@@ -428,11 +428,25 @@ def cmd_package_show(args: argparse.Namespace) -> int:
 def cmd_package_validate(args: argparse.Namespace) -> int:
     """``hound package validate`` — линт пакета без записи."""
     # Несуществующий каталог — not-found, а не ложный ``ok: yes``. Существующий каталог
-    # без ``package.yaml`` проходит гейт: вердикт — за ``validate_package`` (терпимость к
-    # частичным пакетам — вне CLI, гейт только отличает «нет каталога» от «частичный пакет»).
+    # без ``package.yaml`` — не «пустой пакет», а невалидный: fail-closed (EXIT_BLOCKED),
+    # чтобы не выдавать ``ok: yes``. Это вердикт валидации, а не отсутствие объекта,
+    # поэтому не EXIT_NOT_FOUND (в отличие от ``show``; терпимость к частичным пакетам —
+    # когда ``package.yaml`` есть, но не хватает артефактов — остаётся за ``validate_package``).
     gate = _require_package(args, need_manifest=False)
     if gate is not None:
         return gate
+    if not (Path(args.package) / "package.yaml").is_file():
+        payload: dict[str, Any] = {
+            "ok": False,
+            "dry_run": False,
+            "changed": [],
+            "written": [],
+            "created_id": None,
+            "lint": {"blocking": ["package.yaml отсутствует"], "warnings": []},
+            "warnings": [],
+        }
+        _emit(args, payload, ["ok: no", "blocking: package.yaml отсутствует"])
+        return EXIT_BLOCKED
     result = _invoke(lambda: validate_package(args.package))
     payload = _op_payload(result)
     lines = [f"ok: {'yes' if payload['ok'] else 'no'}"]
