@@ -69,11 +69,19 @@ from core.pipeline.package_discovery import (
 )
 from core.pipeline.package_io import atomic_write_text
 from core.pipeline.prompt import _fill_template, _load_template
+from core.pipeline.scout_common import (
+    as_date as _as_date,
+    clean as _clean,
+    dedupe as _dedupe,
+    fetch_one as _fetch_one,
+    join_pages as _join_pages,
+    url_allowed as _url_allowed,
+    usage_dict as _usage_dict,
+)
 from core.ports.crawler import CrawlerPort
 from core.ports.discovery_llm import DiscoveryLLMRequest, DiscoveryLLMPort
 from core.ports.extractor import ExtractorPort
 from core.ports.search import SearchAdapterPort, SearchQuery
-from core.ports.types import RenderMode
 from core.util.hashing import content_hash
 from core.util.security import sanitize_slug
 
@@ -293,23 +301,6 @@ class PackageScoutReport:
 # ---------------------------------------------------------------------------
 
 
-def _as_date(value: _dt.date | str | None) -> _dt.date:
-    """Нормализует дату снимка (``date``/ISO-строка/``None`` → сегодня)."""
-    if value is None:
-        return _dt.date.today()
-    if isinstance(value, _dt.date):
-        return value
-    return _dt.date.fromisoformat(str(value))
-
-
-def _clean(value: Any) -> str | None:
-    """Строка без внешних пробелов или ``None`` (пустая → ``None``)."""
-    if value is None:
-        return None
-    text = str(value).strip()
-    return text or None
-
-
 def _clamp(value: Any, default: float = 0.0) -> float:
     """Приводит ``confidence`` к ``float`` и зажимает в ``[0, 1]``."""
     try:
@@ -317,28 +308,6 @@ def _clamp(value: Any, default: float = 0.0) -> float:
     except (TypeError, ValueError):
         return default
     return min(1.0, max(0.0, number))
-
-
-def _url_allowed(url: str, allowed: set[str]) -> bool:
-    """Входит ли URL в собранные источники (точное совпадение либо без ``/`` на конце)."""
-    if url in allowed:
-        return True
-    stripped = url.rstrip("/")
-    return stripped in allowed or f"{stripped}/" in allowed
-
-
-def _render_pages(page_texts: dict[str, str]) -> str:
-    """Рендер страниц: ``[source: url]`` + чистый текст (детерминированный порядок)."""
-    if not page_texts:
-        return "(нет фрагментов)"
-    return "\n\n".join(f"[source: {url}]\n{page_texts[url]}" for url in sorted(page_texts))
-
-
-def _join_pages(page_texts: dict[str, str], max_chars: int) -> str:
-    """Объединяет страницы в текст ≤ ``max_chars`` (маркеры ``[source: url]``)."""
-    if max_chars <= 0:
-        return ""
-    return _render_pages(page_texts)[:max_chars]
 
 
 def _render_hints(hints: dict[str, Any] | None) -> str:
@@ -374,29 +343,6 @@ def _render_urls(urls: list[str]) -> str:
     if not urls:
         return "(не заданы)"
     return "\n".join(f"- {url}" for url in urls)
-
-
-def _usage_dict(usage: Any, reasoning_tokens: int = 0) -> dict[str, int]:
-    """JSON-совместимый ``usage`` (нули при отсутствии) + токены reasoning."""
-    if usage is None:
-        prompt_tokens = completion_tokens = 0
-    else:
-        prompt_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
-        completion_tokens = int(getattr(usage, "completion_tokens", 0) or 0)
-    return {
-        "prompt_tokens": prompt_tokens,
-        "completion_tokens": completion_tokens,
-        "reasoning_tokens": int(reasoning_tokens or 0),
-    }
-
-
-def _dedupe(items: list[str]) -> list[str]:
-    """Убирает повторы, сохраняя порядок (детерминизм sidecar)."""
-    seen: list[str] = []
-    for item in items:
-        if item and item not in seen:
-            seen.append(item)
-    return seen
 
 
 def _normalize_only(only: Any) -> set[str]:
@@ -441,49 +387,6 @@ def _plan_queries(
             if str(term).strip():
                 queries.append(f"{subject_name} {term}".strip())
     return _dedupe([query.strip() for query in queries if query and query.strip()])
-
-
-def _fetch_one(
-    url: str,
-    *,
-    crawler: CrawlerPort,
-    extractor: ExtractorPort,
-    fetched: list[dict[str, Any]],
-    page_texts: dict[str, str],
-    errors: list[str],
-) -> None:
-    """Фетчит и извлекает одну страницу; ошибки изолируются (без исключений наружу)."""
-    try:
-        page = crawler.fetch(url, RenderMode.HTTP)
-    except Exception as exc:  # noqa: BLE001 — сбой фетча изолируется по документу
-        errors.append(f"fetch {url}: {type(exc).__name__}: {exc}")
-        fetched.append({"url": url, "error": f"{type(exc).__name__}: {exc}"})
-        return
-    try:
-        doc = extractor.extract(page)
-    except Exception as exc:  # noqa: BLE001 — сбой экстракции изолируется по документу
-        errors.append(f"extract {url}: {type(exc).__name__}: {exc}")
-        fetched.append(
-            {
-                "url": url,
-                "content_hash": content_hash(page.content),
-                "error": f"{type(exc).__name__}: {exc}",
-            }
-        )
-        return
-    text = doc.text or ""
-    page_texts[url] = text
-    resolved_url = getattr(page, "url", None) or url
-    if resolved_url != url:
-        page_texts[resolved_url] = text
-    fetched.append(
-        {
-            "url": url,
-            "content_hash": doc.content_hash or content_hash(page.content),
-            "extractor_version": doc.extractor_version,
-            "error": doc.error,
-        }
-    )
 
 
 def _call_llm(
