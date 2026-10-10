@@ -28,7 +28,7 @@
 | `core/adapters/chunker_markdown.py` | чанкер с `heading_path` (gag5) | оборачивается в порт в W7/T7.3 |
 | `core/adapters/extract_document.py` | docling PDF+Office (написано заново) | оборачивается в порт в W7/T7.2 |
 | `core/adapters/lexical_bm25.py` | BM25-базлайн (gtm) | прототип W8/T8.3 |
-| `tests/selfcheck.py` | 86 проверок, без pytest; словарь/схемы/DDL | остаётся автономным; обёртка в W1/T1.5 |
+| `tests/selfcheck.py` | 87 проверок, без pytest; словарь/схемы/DDL | остаётся автономным; обёртка в W1/T1.5 |
 | `tests/smoke_scrapy_playwright.py` | браузерный smoke (V5) — **пройден** | вход W7/T7.1 |
 | `docs/status-dictionary.yaml` | источник истины перечислений (§4.1) | уже есть |
 | `THIRD_PARTY_NOTICES.md` | происхождение/лицензии reused-кода | уже есть (gag5 MIT / gtm авторская) |

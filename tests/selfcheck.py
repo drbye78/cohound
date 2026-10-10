@@ -315,6 +315,7 @@ def main() -> int:
     check("матрица зависимостей core.* (01 §1, ast)", lambda: _import_graph())
     check("§1.3 нейтральность domain/ports/pipeline (грепп)", lambda: _neutrality())
     check("transitional-шимы schemas.py/db.py удалены", lambda: _shims_removed())
+    check("core.domain.__all__ полон (публичные символы домена)", lambda: _domain_all_complete())
 
     section("Домен (L0) — W2")
     check("инварианты домена возвращают Violation (I1/I4/I13/I7)", lambda: _domain_invariants())
@@ -720,6 +721,33 @@ def _shims_removed() -> None:
         raise AssertionError("core.schemas не должен существовать (T1.2 завершён)")
     if importlib.util.find_spec("core.db") is not None:
         raise AssertionError("core.db не должен существовать (T1.3 завершён)")
+
+
+def _domain_all_complete() -> None:
+    """``core.domain.__all__`` полон: каждый публичный def/class модулей домена в нём (§1.3).
+
+    Защита от будущего дрейфа: новый публичный доменный символ, не добавленный в ``__all__``,
+    валит гейт (иначе он молча выпадает из единого пространства доменных типов).
+    """
+    import ast
+
+    import core.domain as domain_pkg
+
+    root = Path(__file__).resolve().parent.parent / "core" / "domain"
+    declared = set(domain_pkg.__all__)
+    defined: set[str] = set()
+    for py in root.glob("*.py"):
+        if py.name == "__init__.py":
+            continue
+        tree = ast.parse(py.read_text(encoding="utf-8"), filename=str(py))
+        for node in tree.body:
+            if isinstance(node, (ast.FunctionDef, ast.ClassDef)) and not node.name.startswith("_"):
+                defined.add(node.name)
+    missing = sorted(defined - declared)
+    if missing:
+        raise AssertionError(
+            "публичные символы домена отсутствуют в core.domain.__all__: " + ", ".join(missing)
+        )
 
 
 def _domain_invariants() -> None:

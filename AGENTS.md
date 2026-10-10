@@ -54,7 +54,7 @@ core/                         # ядро: категорийно-НЕЙТРАЛ�
                               #   lexical_bm25, index_npy/index_format/lexical_tantivy, search_* — см. NOTICES
   util/                       # text_utils (RU/EN), security (SSRF/slug), fusion (RRF), retrieval_eval — см. NOTICES
 scripts/ci.sh                 # единая точка входа CI (§11.6): selfcheck + pytest + порог покрытия
-tests/selfcheck.py            # self-contained проверка фундамента (86 проверок)
+tests/selfcheck.py            # self-contained проверка фундамента (87 проверок)
 tests/test_selfcheck.py       # pytest-обёртка над selfcheck (W1/T1.5)
 tests/domain/                 # property-тесты домена (hypothesis)
 tests/smoke_scrapy_playwright.py  # браузерный smoke scrapy-playwright (V5; 0/1/2)
