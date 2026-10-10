@@ -157,6 +157,8 @@ __all__ = [
     "_today",
     "_print_package_scout_lines",
     "_resolve_packages_dir",
+    "_resolve_package_dir",
+    "_require_package",
 ]
 
 
@@ -337,6 +339,44 @@ def _resolve_packages_dir(args: argparse.Namespace) -> str:
     return "packages"
 
 
+def _resolve_package_dir(args: argparse.Namespace) -> str:
+    """``--package``: существующий путь как есть; иначе ``case_id`` под каталогом пакетов."""
+    raw = str(getattr(args, "package", "") or "")
+    p = Path(raw)
+    if raw and p.is_dir():
+        return str(p)
+    if raw:
+        candidate = Path(_resolve_packages_dir(args)) / raw
+        if candidate.is_dir():
+            return str(candidate)
+    return raw
+
+
+def _require_package(args: argparse.Namespace, *, need_manifest: bool = True) -> int | None:
+    """EXIT_NOT_FOUND, если пакет недоступен; иначе None (продолжать).
+
+    Fail-closed гейт для read-хендлеров: несуществующий каталог пакета — не «пустой
+    пакет», а отсутствующий объект (иначе команды как ``show``/``validate``/``list``
+    дают ложный успех). ``need_manifest=False`` ослабляет гейт до наличия каталога —
+    для ``validate``, чей вердикт о недостающем ``package.yaml`` остаётся за
+    :func:`validate_package`. Терпимость :func:`core.pipeline.package_io.load_artifacts`
+    к частичным пакетам не затрагивается (гейт только в CLI).
+    """
+    package = str(getattr(args, "package", "") or "")
+    if not package or not Path(package).is_dir():
+        return _not_found(args, "package", package)
+    if need_manifest and not (Path(package) / "package.yaml").is_file():
+        payload = {
+            "ok": False,
+            "found": False,
+            "package": package,
+            "reason": "package.yaml отсутствует",
+        }
+        _emit(args, payload, [f"not found: {package} (package.yaml отсутствует)"])
+        return EXIT_NOT_FOUND
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Хендлеры: создание/чтение/валидация
 # ---------------------------------------------------------------------------
@@ -364,6 +404,9 @@ def cmd_package_new(args: argparse.Namespace) -> int:
 
 def cmd_package_show(args: argparse.Namespace) -> int:
     """``hound package show`` — сводка по пакету (read-only)."""
+    gate = _require_package(args)
+    if gate is not None:
+        return gate
     payload = _invoke(lambda: show_package(args.package))
     lines = [
         f"case_id: {payload['case_id']}",
@@ -384,6 +427,12 @@ def cmd_package_show(args: argparse.Namespace) -> int:
 
 def cmd_package_validate(args: argparse.Namespace) -> int:
     """``hound package validate`` — линт пакета без записи."""
+    # Несуществующий каталог — not-found, а не ложный ``ok: yes``. Существующий каталог
+    # без ``package.yaml`` проходит гейт: вердикт — за ``validate_package`` (терпимость к
+    # частичным пакетам — вне CLI, гейт только отличает «нет каталога» от «частичный пакет»).
+    gate = _require_package(args, need_manifest=False)
+    if gate is not None:
+        return gate
     result = _invoke(lambda: validate_package(args.package))
     payload = _op_payload(result)
     lines = [f"ok: {'yes' if payload['ok'] else 'no'}"]
@@ -594,6 +643,9 @@ def cmd_package_role_remove(args: argparse.Namespace) -> int:
 
 def cmd_package_role_list(args: argparse.Namespace) -> int:
     """``role list`` — список ролей (read-only); ``--search`` по ``role_id``/``definition``."""
+    gate = _require_package(args)
+    if gate is not None:
+        return gate
     roles = _invoke(lambda: list_roles(args.package, query=args.search))
     payload = {"ok": True, "count": len(roles), "roles": [role.model_dump(mode="json") for role in roles]}
     lines = [f"roles: {len(roles)}"]
@@ -712,6 +764,9 @@ def cmd_package_param_get(args: argparse.Namespace) -> int:
 
 def cmd_package_param_list(args: argparse.Namespace) -> int:
     """``param list`` — список параметров (read-only) с поиском/фильтрами."""
+    gate = _require_package(args)
+    if gate is not None:
+        return gate
     rows = _invoke(
         lambda: list_params(
             args.package,
@@ -839,6 +894,9 @@ def cmd_package_baseline_remove(args: argparse.Namespace) -> int:
 
 def cmd_package_baseline_list(args: argparse.Namespace) -> int:
     """``baseline list`` — строки наследования (read-only); ``--search``/``--baseline``."""
+    gate = _require_package(args)
+    if gate is not None:
+        return gate
     rows = _invoke(
         lambda: list_baselines(args.package, query=args.search, baseline_id=args.baseline)
     )
@@ -995,6 +1053,9 @@ def cmd_package_scope_show(args: argparse.Namespace) -> int:
 
 def cmd_package_golden_list(args: argparse.Namespace) -> int:
     """``golden list`` — golden-кейсы (read-only); ``--search``/``--product``/``--param``."""
+    gate = _require_package(args)
+    if gate is not None:
+        return gate
     rows = _invoke(
         lambda: list_golden(
             args.package, query=args.search, product_id=args.product, param_id=args.param
@@ -1038,6 +1099,9 @@ def cmd_package_run_show(args: argparse.Namespace) -> int:
 
 def cmd_package_artifact_list(args: argparse.Namespace) -> int:
     """``artifact list`` — обзор всех 8 артефактов пакета (read-only)."""
+    gate = _require_package(args)
+    if gate is not None:
+        return gate
     items = _invoke(lambda: list_artifacts(args.package))
     payload = {"ok": True, "count": len(items), "artifacts": items}
     lines = [f"artifacts: {len(items)}"]

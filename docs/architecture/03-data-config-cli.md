@@ -404,6 +404,10 @@ hound run \
 | `hound deploy-check` | диагностика профиля: достижимость DMZ-шва, версии/форматы edge (`/v1/health`, `/v1/capabilities`) | — (отчёт) |
 | `hound doctor [--strict] [--with-selfcheck]` | самодиагностика инсталляции: runtime, зависимости по extras, env/ключи, конфиг, каталоги, CLI-поверхность | — (отчёт) |
 
+Подкоманды `hound package …` принимают `--package` как **путь к каталогу пакета**, так и
+**`case_id`** (резолвится в каталоге пакетов: `--dir`, иначе resolved `paths.packages`);
+несуществующий пакет — честный `EXIT_NOT_FOUND` (команды чтения fail-closed, а не ложный успех).
+
 `hound doctor` — read-only и по умолчанию **без сети**: проверяет Python/venv, наличие
 зависимостей по группам extras (`find_spec`, без импорта тяжёлых), заданность env/ключей
 (значения **не** печатаются), файлы `config/deploy.yaml`/`registries`/`.env.example`/`packages`,

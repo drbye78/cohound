@@ -776,3 +776,72 @@ def test_cli_json_output_is_deterministic(capsys, tmp_path: Path) -> None:
     _, g1, _ = _run(capsys, ["package", "golden", "list", "--package", str(package), "--json"])
     _, g2, _ = _run(capsys, ["package", "golden", "list", "--package", str(package), "--json"])
     assert g1 == g2
+
+
+# ---------------------------------------------------------------------------
+# ``--package``: резолв case_id (путь ИЛИ case_id) + fail-closed на несуществующем пакете
+# ---------------------------------------------------------------------------
+
+
+def test_cli_package_bare_case_id_resolves_via_dir(capsys, tmp_path: Path) -> None:
+    """``--package <case_id> --dir <packages>`` резолвится в каталог пакета."""
+    _new(capsys, tmp_path)  # demo_pkg лежит в tmp_path
+    code, out, _ = _run(
+        capsys, ["package", "show", "--package", "demo_pkg", "--dir", str(tmp_path), "--json"]
+    )
+    assert code == EXIT_OK
+    assert json.loads(out)["case_id"] == "demo_pkg"
+
+    code, out, _ = _run(
+        capsys, ["package", "run", "show", "--package", "demo_pkg", "--dir", str(tmp_path), "--json"]
+    )
+    assert code == EXIT_OK
+    payload = json.loads(out)
+    assert payload["found"] is True
+    assert payload["run"]["case_id"] == "demo_pkg"
+
+
+def test_cli_package_missing_case_id_fail_closed(capsys, tmp_path: Path) -> None:
+    """Несуществующий ``case_id`` — ``EXIT_NOT_FOUND`` во всех read-командах (не ложный успех)."""
+    for argv in (
+        ["package", "show", "--package", "no_such_pkg", "--dir", str(tmp_path)],
+        ["package", "validate", "--package", "no_such_pkg", "--dir", str(tmp_path)],
+        ["package", "role", "list", "--package", "no_such_pkg", "--dir", str(tmp_path)],
+        ["package", "golden", "list", "--package", "no_such_pkg", "--dir", str(tmp_path)],
+        ["package", "artifact", "list", "--package", "no_such_pkg", "--dir", str(tmp_path)],
+    ):
+        code, _, _ = _run(capsys, argv)
+        assert code == EXIT_NOT_FOUND, argv
+
+
+def test_cli_validate_missing_path_is_not_found(capsys, tmp_path: Path) -> None:
+    """``validate`` на несуществующем пути — ``EXIT_NOT_FOUND`` (не ``ok: yes``)."""
+    code, out, _ = _run(
+        capsys, ["package", "validate", "--package", str(tmp_path / "nope"), "--json"]
+    )
+    assert code == EXIT_NOT_FOUND
+    payload = json.loads(out)
+    assert payload["found"] is False
+    assert payload["ok"] is False
+
+
+def test_cli_show_missing_manifest_is_not_found(capsys, tmp_path: Path) -> None:
+    """Существующий каталог без ``package.yaml`` — ``EXIT_NOT_FOUND`` для ``show``."""
+    empty = tmp_path / "empty_pkg"
+    empty.mkdir()
+    code, out, _ = _run(capsys, ["package", "show", "--package", str(empty), "--json"])
+    assert code == EXIT_NOT_FOUND
+    payload = json.loads(out)
+    assert payload["found"] is False
+    assert payload["reason"] == "package.yaml отсутствует"
+
+
+def test_cli_validate_existing_dir_without_manifest_is_not_not_found(capsys, tmp_path: Path) -> None:
+    """Существующий каталог без ``package.yaml`` проходит гейт (не not-found): вердикт — за
+    ``validate_package`` (терпимость к частичным пакетам — вне CLI)."""
+    empty = tmp_path / "bare_dir"
+    empty.mkdir()
+    code, _, _ = _run(capsys, ["package", "validate", "--package", str(empty), "--json"])
+    assert code != EXIT_NOT_FOUND
+
+

@@ -69,7 +69,11 @@ from core.cli.package.commands import (
 
 def _add_op_common(parser: argparse.ArgumentParser, *, dry_run: bool = True) -> None:
     """Общие флаги мутирующих подкоманд: ``--package``, ``--dry-run``, ``--json``, ``--actor``."""
-    parser.add_argument("--package", required=True, help="каталог пакета категории")
+    parser.add_argument(
+        "--package",
+        required=True,
+        help="пакет: путь или case_id (резолвится в каталоге пакетов)",
+    )
     if dry_run:
         parser.add_argument(
             "--dry-run", action="store_true", help="показать проспективный результат без записи"
@@ -81,7 +85,16 @@ def _add_op_common(parser: argparse.ArgumentParser, *, dry_run: bool = True) -> 
 def _add_read_common(parser: argparse.ArgumentParser, *, package: bool = True) -> None:
     """Общие флаги read-only подкоманд."""
     if package:
-        parser.add_argument("--package", required=True, help="каталог пакета категории")
+        parser.add_argument(
+            "--package",
+            required=True,
+            help="пакет: путь или case_id (резолвится в каталоге пакетов)",
+        )
+    parser.add_argument(
+        "--dir",
+        default=None,
+        help="каталог пакетов для резолва case_id (дефолт — resolved paths.packages, иначе packages)",
+    )
     parser.add_argument("--json", action="store_true", help="машинночитаемый вывод (JSON)")
 
 
@@ -325,7 +338,11 @@ def add_package_parser(subparsers: Any) -> None:
     p_infer.set_defaults(handler=cmd_package_infer_archetype)
 
     p_compose = pkg.add_parser("compose-baselines", help="черновик наследования (без записи)")
-    p_compose.add_argument("--package", required=True, help="каталог пакета (источник каталога)")
+    p_compose.add_argument(
+        "--package",
+        required=True,
+        help="пакет: путь или case_id (резолвится в каталоге пакетов; источник каталога)",
+    )
     _add_profile_flags(p_compose)
     p_compose.add_argument("--scope", default="all", help="'all', модуль или param_id")
     p_compose.add_argument(
@@ -480,7 +497,11 @@ def add_package_parser(subparsers: Any) -> None:
 
     # candidates / apply --------------------------------------------------- #
     p_cand = pkg.add_parser("candidates", help="план кандидатов (в пакет не пишет)")
-    p_cand.add_argument("--package", required=True, help="каталог пакета категории")
+    p_cand.add_argument(
+        "--package",
+        required=True,
+        help="пакет: путь или case_id (резолвится в каталоге пакетов)",
+    )
     _add_profile_flags(p_cand)
     p_cand.add_argument("--scope", default="all", help="'all', модуль или param_id (для baselines)")
     p_cand.add_argument("--write", default=None, metavar="FILE", help="записать JSON-план в файл")
@@ -488,7 +509,11 @@ def add_package_parser(subparsers: Any) -> None:
     p_cand.set_defaults(handler=cmd_package_candidates)
 
     p_apply = pkg.add_parser("apply", help="применить кандидатов (обязателен --actor)")
-    p_apply.add_argument("--package", required=True, help="каталог пакета категории")
+    p_apply.add_argument(
+        "--package",
+        required=True,
+        help="пакет: путь или case_id (резолвится в каталоге пакетов)",
+    )
     apply_source = p_apply.add_mutually_exclusive_group()
     apply_source.add_argument(
         "--from", dest="from_file", default=None, metavar="FILE", help="JSON-файл кандидатов"

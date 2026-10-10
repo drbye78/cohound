@@ -167,6 +167,13 @@ def main(
     # совместимость байт-в-байт.
     paths = _resolve_paths(args)
     args.paths = paths
+    # ``hound package … --package`` принимает путь ИЛИ case_id: нормализуем один раз в
+    # composition root, чтобы все подкоманды видели разрешённый путь (ленивый импорт —
+    # как принято для package).
+    if args.command == "package" and hasattr(args, "package"):
+        from core.cli.package.commands import _resolve_package_dir
+
+        args.package = _resolve_package_dir(args)
     if args.command in _RUNS_DIR_COMMANDS and getattr(args, "runs_dir", None) is None:
         args.runs_dir = str(paths.runs)
     if (
