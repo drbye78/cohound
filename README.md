@@ -7,7 +7,7 @@
 absence-evidence по формальным правилам.
 
 **Источник истины по семантике, инвариантам и архитектуре** — регламент
-[`cohound-spec-v2.md`](cohound-spec-v2.md) (v2.0). Архитектурный проект — в
+[`cohound-spec-v2.md`](cohound-spec-v2.md) (v2.1). Архитектурный проект — в
 [`docs/architecture/`](docs/architecture/). `thesis_2.md` — предыдущая редакция (v1.3),
 оставлена для истории, не редактируется.
 
@@ -66,7 +66,7 @@ bash scripts/ci.sh         # CI-гейты: selfcheck + pytest + порог по
 ## Структура репозитория (сжато)
 
 ```
-cohound-spec-v2.md   # регламент v2.0 — источник истины
+cohound-spec-v2.md   # регламент v2.1 — источник истины
 AGENTS.md            # инструкции для агентов/разработчиков
 core/                # ядро, категорийно-нейтральный код (§1.3)
   domain/            # Pydantic-модели, enums, инварианты, r2, scoring, anchors (без I/O)
