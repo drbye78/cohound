@@ -134,7 +134,7 @@ def test_cli_role_list(capsys, tmp_path: Path) -> None:
 def test_cli_param_get_missing(capsys, tmp_path: Path) -> None:
     package = _new(capsys, tmp_path)
     code, out, _ = _run(capsys, ["package", "param", "get", "--package", str(package), "--param-id", "param.none", "--json"])
-    assert code == EXIT_USAGE
+    assert code == EXIT_NOT_FOUND
     assert json.loads(out)["found"] is False
 
 
@@ -557,3 +557,222 @@ def test_cli_param_list_filters_and_search(capsys, tmp_path: Path) -> None:
         capsys, ["package", "param", "list", "--package", str(package), "--search", "nomatch", "--json"]
     )
     assert json.loads(out)["count"] == 0
+
+
+# ---------------------------------------------------------------------------
+# I4: read-плоскость — get/list по модулям/ролям/параметрам/baselines/scope/golden/run/artifact
+# ---------------------------------------------------------------------------
+
+
+def test_cli_module_get_and_list_search(capsys, tmp_path: Path) -> None:
+    package = _new(capsys, tmp_path)
+    code, out, _ = _run(capsys, ["package", "module", "get", "--package", str(package), "--module-id", "module_core", "--json"])
+    assert code == EXIT_OK
+    assert json.loads(out)["module"]["module_id"] == "module_core"
+
+    code, out, _ = _run(capsys, ["package", "module", "get", "--package", str(package), "--module-id", "nope", "--json"])
+    assert code == EXIT_NOT_FOUND
+    assert json.loads(out)["found"] is False
+
+    code, out, _ = _run(capsys, ["package", "module", "list", "--package", str(package), "--search", "CORE", "--json"])
+    assert code == EXIT_OK
+    payload = json.loads(out)
+    assert payload["count"] == 1
+    assert [m["module_id"] for m in payload["modules"]] == ["module_core"]
+
+    code, out, _ = _run(capsys, ["package", "module", "list", "--package", str(package), "--search", "nomatch", "--json"])
+    assert code == EXIT_OK
+    assert json.loads(out)["count"] == 0
+
+
+def test_cli_role_get_found_and_missing(capsys, tmp_path: Path) -> None:
+    package = _new(capsys, tmp_path)
+    code, out, _ = _run(capsys, ["package", "role", "get", "--package", str(package), "--role-id", "role_primary", "--json"])
+    assert code == EXIT_OK
+    assert json.loads(out)["role"]["role_id"] == "role_primary"
+
+    code, out, _ = _run(capsys, ["package", "role", "get", "--package", str(package), "--role-id", "nope", "--json"])
+    assert code == EXIT_NOT_FOUND
+    assert json.loads(out)["found"] is False
+
+
+def test_cli_param_get_exact_missing_is_not_found(capsys, tmp_path: Path) -> None:
+    package = _new(capsys, tmp_path)
+    code, out, _ = _run(capsys, ["package", "param", "get", "--package", str(package), "--param-id", "param.none", "--json"])
+    assert code == EXIT_NOT_FOUND
+    assert json.loads(out)["found"] is False
+
+
+def test_cli_param_get_search_single_and_ambiguous(capsys, tmp_path: Path) -> None:
+    package = _new(capsys, tmp_path)
+    # Уникальная подстрока → ровно одно совпадение.
+    code, out, _ = _run(capsys, ["package", "param", "get", "--package", str(package), "--search", "delta", "--json"])
+    assert code == EXIT_OK
+    assert json.loads(out)["param"]["param_id"] == "param.delta_integration"
+
+    # «capability» входит в три параметра → неоднозначность → EXIT_USAGE со списком.
+    code, out, _ = _run(capsys, ["package", "param", "get", "--package", str(package), "--search", "capability", "--json"])
+    assert code == EXIT_USAGE
+    payload = json.loads(out)
+    assert payload["ambiguous"] is True
+    assert payload["count"] == 3
+    assert {c["param_id"] for c in payload["candidates"]} == {
+        "param.alpha_capability",
+        "param.beta_capability",
+        "param.gamma_capability",
+    }
+
+
+def test_cli_param_get_requires_a_source(capsys, tmp_path: Path) -> None:
+    package = _new(capsys, tmp_path)
+    code, _, err = _run(capsys, ["package", "param", "get", "--package", str(package)])
+    assert code == EXIT_USAGE
+    assert "--param-id" in err or "--search" in err
+
+
+def test_cli_baseline_get_exact_and_ambiguous(capsys, tmp_path: Path) -> None:
+    package = _new(capsys, tmp_path)
+    _run(
+        capsys,
+        ["package", "baseline", "add", "--package", str(package), "--baseline-id", "up",
+         "--param-id", "param.alpha_capability", "--note", "x", "--actor", "t", "--json"],
+    )
+    _run(
+        capsys,
+        ["package", "baseline", "add", "--package", str(package), "--baseline-id", "up",
+         "--param-id", "param.beta_capability", "--actor", "t", "--json"],
+    )
+    # Точный ключ → вывод.
+    code, out, _ = _run(
+        capsys,
+        ["package", "baseline", "get", "--package", str(package), "--baseline-id", "up",
+         "--param-id", "param.alpha_capability", "--json"],
+    )
+    assert code == EXIT_OK
+    assert json.loads(out)["baseline"]["param_id"] == "param.alpha_capability"
+
+    # Точный ключ, которого нет → EXIT_NOT_FOUND.
+    code, out, _ = _run(
+        capsys,
+        ["package", "baseline", "get", "--package", str(package), "--baseline-id", "up",
+         "--param-id", "param.none", "--json"],
+    )
+    assert code == EXIT_NOT_FOUND
+    assert json.loads(out)["found"] is False
+
+    # Только baseline_id, несколько совпадений → неоднозначность → EXIT_USAGE.
+    code, out, _ = _run(
+        capsys, ["package", "baseline", "get", "--package", str(package), "--baseline-id", "up", "--json"]
+    )
+    assert code == EXIT_USAGE
+    payload = json.loads(out)
+    assert payload["ambiguous"] is True
+    assert payload["count"] == 2
+
+
+def test_cli_scope_show_present_and_missing(capsys, tmp_path: Path) -> None:
+    package = _new(capsys, tmp_path)
+    code, out, _ = _run(capsys, ["package", "scope", "show", "--package", str(package), "--json"])
+    assert code == EXIT_OK
+    assert json.loads(out)["procedure"]
+    (package / "scope_attestation.yaml").unlink()
+    code, out, _ = _run(capsys, ["package", "scope", "show", "--package", str(package), "--json"])
+    assert code == EXIT_NOT_FOUND
+    assert json.loads(out)["found"] is False
+
+
+def test_cli_golden_list_search_and_filters(capsys, tmp_path: Path) -> None:
+    package = _new(capsys, tmp_path)
+    code, out, _ = _run(capsys, ["package", "golden", "list", "--package", str(package), "--json"])
+    assert code == EXIT_OK
+    payload = json.loads(out)
+    assert payload["count"] == 3
+
+    code, out, _ = _run(capsys, ["package", "golden", "list", "--package", str(package), "--search", "class_ok", "--json"])
+    assert [g["param_id"] for g in json.loads(out)["golden"]] == ["param.alpha_capability"]
+
+    code, out, _ = _run(
+        capsys, ["package", "golden", "list", "--package", str(package), "--product", "product_analog_b", "--json"]
+    )
+    assert {g["product_id"] for g in json.loads(out)["golden"]} == {"product_analog_b"}
+
+    code, out, _ = _run(capsys, ["package", "golden", "list", "--package", str(package), "--search", "nomatch", "--json"])
+    assert code == EXIT_OK and json.loads(out)["count"] == 0
+
+
+def test_cli_run_show_present_and_missing(capsys, tmp_path: Path) -> None:
+    package = _new(capsys, tmp_path)
+    code, out, _ = _run(capsys, ["package", "run", "show", "--package", str(package), "--json"])
+    assert code == EXIT_OK
+    payload = json.loads(out)
+    assert payload["found"] is True
+    assert payload["run"]["case_id"] == "demo_pkg"
+
+    (package / "run.yaml").unlink()
+    code, out, _ = _run(capsys, ["package", "run", "show", "--package", str(package), "--json"])
+    assert code == EXIT_NOT_FOUND
+    assert json.loads(out)["found"] is False
+
+
+def test_cli_artifact_list(capsys, tmp_path: Path) -> None:
+    package = _new(capsys, tmp_path)
+    code, out, _ = _run(capsys, ["package", "artifact", "list", "--package", str(package), "--json"])
+    assert code == EXIT_OK
+    payload = json.loads(out)
+    assert payload["count"] == 8
+    names = {item["name"] for item in payload["artifacts"]}
+    assert names == {
+        "package", "catalog", "baselines", "cohort",
+        "golden", "domain_profiles", "scope_attestation", "run",
+    }
+
+
+def test_cli_artifact_get_structured_and_raw(capsys, tmp_path: Path) -> None:
+    package = _new(capsys, tmp_path)
+    # golden — структурный список строк.
+    code, out, _ = _run(capsys, ["package", "artifact", "get", "--package", str(package), "--name", "golden", "--json"])
+    assert code == EXIT_OK
+    payload = json.loads(out)
+    assert isinstance(payload["data"], list) and len(payload["data"]) == 3
+
+    # run — структура (не сырой текст).
+    code, out, _ = _run(capsys, ["package", "artifact", "get", "--package", str(package), "--name", "run", "--json"])
+    assert code == EXIT_OK
+    assert json.loads(out)["data"]["case_id"] == "demo_pkg"
+
+    # domain_profiles — dict.
+    code, out, _ = _run(capsys, ["package", "artifact", "get", "--package", str(package), "--name", "domain_profiles", "--json"])
+    assert code == EXIT_OK and isinstance(json.loads(out)["data"], dict)
+
+    # scope_attestation --raw — сырой текст YAML.
+    code, out, _ = _run(capsys, ["package", "artifact", "get", "--package", str(package), "--name", "scope_attestation", "--raw"])
+    assert code == EXIT_OK
+    assert "procedure:" in out
+
+
+def test_cli_artifact_get_absent_and_raw_json_conflict(capsys, tmp_path: Path) -> None:
+    package = _new(capsys, tmp_path)
+    # Отсутствующий артефакт → not found.
+    (package / "run.yaml").unlink()
+    code, out, _ = _run(capsys, ["package", "artifact", "get", "--package", str(package), "--name", "run", "--json"])
+    assert code == EXIT_NOT_FOUND
+    assert json.loads(out)["found"] is False
+
+    # --raw и --json несовместимы → usage (при --json ошибка печатается в stdout).
+    code, out, _ = _run(capsys, ["package", "artifact", "get", "--package", str(package), "--name", "cohort", "--raw", "--json"])
+    assert code == EXIT_USAGE
+    assert "raw" in out.lower() or "json" in out.lower()
+
+    # Неизвестное имя отсекается argparse (choices) → usage.
+    code, _, _ = _run(capsys, ["package", "artifact", "get", "--package", str(package), "--name", "nope"])
+    assert code == EXIT_USAGE
+
+
+def test_cli_json_output_is_deterministic(capsys, tmp_path: Path) -> None:
+    package = _new(capsys, tmp_path)
+    _, first, _ = _run(capsys, ["package", "artifact", "list", "--package", str(package), "--json"])
+    _, second, _ = _run(capsys, ["package", "artifact", "list", "--package", str(package), "--json"])
+    assert first == second
+    _, g1, _ = _run(capsys, ["package", "golden", "list", "--package", str(package), "--json"])
+    _, g2, _ = _run(capsys, ["package", "golden", "list", "--package", str(package), "--json"])
+    assert g1 == g2

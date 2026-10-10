@@ -403,3 +403,92 @@ def test_list_baselines_filter(tmp_path: Path) -> None:
     assert {r.baseline_id for r in pa.list_baselines(package, query="DOWN")} == {"down"}
     assert {r.baseline_id for r in pa.list_baselines(package, query="upstream")} == {"up"}
     assert pa.list_baselines(package, query="нет") == []
+
+
+# ---------------------------------------------------------------------------
+# Read-only get-функции (единичные элементы и наборы)
+# ---------------------------------------------------------------------------
+
+
+def test_get_module_found_and_missing(tmp_path: Path) -> None:
+    package = _make(tmp_path)
+    module = pa.get_module(package, "module_core")
+    assert module is not None and module.module_id == "module_core"
+    assert pa.get_module(package, "module_nope") is None
+    # Пакет без package.yaml — None (не исключение; значения не выдумываются).
+    assert pa.get_module(tmp_path / "nope", "module_core") is None
+
+
+def test_list_modules_search(tmp_path: Path) -> None:
+    package = _make(tmp_path)
+    assert {m.module_id for m in pa.list_modules(package, query="CORE")} == {"module_core"}
+    assert {m.module_id for m in pa.list_modules(package, query="module")} == {
+        "module_core",
+        "module_ecosystem",
+    }
+    assert pa.list_modules(package, query="nomatch") == []
+
+
+def test_get_role_found_and_missing(tmp_path: Path) -> None:
+    package = _make(tmp_path)
+    role = pa.get_role(package, "role_primary")
+    assert role is not None and role.role_id == "role_primary"
+    assert pa.get_role(package, "role_nope") is None
+    assert pa.get_role(tmp_path / "nope", "role_primary") is None
+
+
+def test_get_baseline_exact_key(tmp_path: Path) -> None:
+    package = _make(tmp_path)
+    pa.add_baseline(package, "up", "param.alpha_capability", note="x")
+    row = pa.get_baseline(package, baseline_id="up", param_id="param.alpha_capability")
+    assert row is not None and row.baseline_id == "up"
+    assert pa.get_baseline(package, baseline_id="up", param_id="param.nope") is None
+
+
+def test_get_baseline_single_key_ambiguity(tmp_path: Path) -> None:
+    package = _make(tmp_path)
+    pa.add_baseline(package, "up", "param.alpha_capability")
+    # Один ключ, одно совпадение → найдено.
+    assert pa.get_baseline(package, baseline_id="up") is not None
+    # Один ключ, несколько совпадений → None (неоднозначность разрешает CLI).
+    pa.add_baseline(package, "up", "param.beta_capability")
+    assert pa.get_baseline(package, baseline_id="up") is None
+    assert len(pa.find_baselines(package, baseline_id="up")) == 2
+
+
+def test_find_baselines_by_param_and_query(tmp_path: Path) -> None:
+    package = _make(tmp_path)
+    pa.add_baseline(package, "up", "param.alpha_capability", note="основной")
+    pa.add_baseline(package, "down", "param.beta_capability", note="запасной")
+    assert {r.baseline_id for r in pa.find_baselines(package, param_id="param.alpha_capability")} == {"up"}
+    assert {r.baseline_id for r in pa.find_baselines(package, query="запасной")} == {"down"}
+    assert pa.find_baselines(package, query="нет") == []
+
+
+def test_get_scope_attestation_present_and_absent(tmp_path: Path) -> None:
+    package = _make(tmp_path)
+    procedure = pa.get_scope_attestation(package)
+    assert isinstance(procedure, str) and procedure
+    (package / "scope_attestation.yaml").unlink()
+    assert pa.get_scope_attestation(package) is None
+
+
+def test_get_run_config_present_and_absent(tmp_path: Path) -> None:
+    package = _make(tmp_path)
+    run = pa.get_run_config(package)
+    assert run is not None and run.case_id == "case_x"
+    (package / "run.yaml").unlink()
+    assert pa.get_run_config(package) is None
+
+
+def test_list_golden_filters(tmp_path: Path) -> None:
+    package = _make(tmp_path)
+    rows = pa.list_golden(package)
+    assert rows
+    # Точный фильтр по product_id/param_id.
+    golden = rows[0]
+    assert all(r.product_id == golden.product_id for r in pa.list_golden(package, product_id=golden.product_id))
+    assert [r.param_id for r in pa.list_golden(package, param_id=golden.param_id)] == [golden.param_id]
+    # Поиск по expected_status (✅/❌) и case_class.
+    assert pa.list_golden(package, query="class_ok")
+    assert pa.list_golden(package, query="nomatch") == []

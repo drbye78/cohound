@@ -344,6 +344,7 @@ hound run \
 | `hound plan` | план прогона, когорта | run.yaml (черновик), cohort.yaml |
 | `hound discover` | Discovery-агент | passports, run |
 | `hound package scout` | веб-заземлённая разведка пакета категории: pipeline сам делает SERP+краул+extract, tool-less LLM синтезирует гипотезы → консервативный маппинг → кандидаты (`needs_human=True`; auto-approve нет, I18/I19/A3) | `packages/{case_id}/sources/scout/{date}.candidates.json` (+ `.provenance.json`) |
+| `hound package {module\|role\|param\|baseline\|scope\|golden\|run\|artifact} {get\|list\|show}` | read-плоскость управления пакетом: единичные элементы и наборы по критерию поиска (`--search`/`--product`/`--param`), обзор/чтение всех 8 артефактов (`artifact list`/`artifact get [--raw]`), `--json` | — (read-only) |
 | `hound run [--until PHASE]` | конвейер Ш1–Ш9 | БД, артефакты |
 | `hound review` | очередь ревью / preliminary-стол | cells (reviewed) |
 | `hound report` | сборка артефактов | outputs |

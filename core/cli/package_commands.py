@@ -47,9 +47,16 @@ from core.pipeline.package_admin import (
     bump_version,
     clear_scope_attestation,
     create_package,
+    find_baselines,
+    get_baseline,
     get_cohort,
+    get_module,
     get_param,
+    get_role,
+    get_run_config,
+    get_scope_attestation,
     list_baselines,
+    list_golden,
     list_modules,
     list_params,
     list_roles,
@@ -83,7 +90,14 @@ from core.pipeline.package_discovery import (
     suggest_modules,
     suggest_roles,
 )
-from core.pipeline.package_io import atomic_write_text, load_artifacts, scan_packages
+from core.pipeline.package_io import (
+    ARTIFACT_FILES,
+    atomic_write_text,
+    get_artifact,
+    list_artifacts,
+    load_artifacts,
+    scan_packages,
+)
 from core.pipeline.package_scout import (
     PackageScoutReport,
     scout_package,
@@ -141,6 +155,43 @@ def _op_lines(result: OpResult) -> list[str]:
         lines.append(f"warning: {message}")
     lines.append("ok: yes")
     return lines
+
+
+def _not_found(args: argparse.Namespace, key: str, value: Any) -> int:
+    """Печатает ``not found`` (JSON/человекочитаемо) и возвращает :data:`EXIT_NOT_FOUND`."""
+    payload = {"ok": False, "found": False, key: value}
+    _emit(args, payload, [f"not found: {value}"])
+    return EXIT_NOT_FOUND
+
+
+def _ambiguous(
+    args: argparse.Namespace, label: str, candidates: list[dict[str, Any]]
+) -> int:
+    """Печатает список кандидатов неоднозначного ``get`` → :data:`EXIT_USAGE`."""
+    message = (
+        f"{label}: неоднозначный запрос — {len(candidates)} совпадений; "
+        "уточните --param-id/--baseline-id"
+    )
+    payload: dict[str, Any] = {
+        "ok": False,
+        "found": False,
+        "ambiguous": True,
+        "count": len(candidates),
+        "message": message,
+        "candidates": candidates,
+    }
+    lines = [message]
+    for candidate in candidates:
+        ident = (
+            candidate.get("param_id")
+            or candidate.get("baseline_id")
+            or candidate.get("module_id")
+            or candidate.get("role_id")
+            or "?"
+        )
+        lines.append(f"  {ident}")
+    _emit(args, payload, lines)
+    return EXIT_USAGE
 
 
 def _load_profile(args: argparse.Namespace) -> dict[str, Any]:
@@ -382,9 +433,23 @@ def cmd_package_module_renormalize(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def cmd_package_module_get(args: argparse.Namespace) -> int:
+    """``module get`` — один модуль по ``--module-id`` (read-only)."""
+    module = _invoke(lambda: get_module(args.package, args.module_id))
+    if module is None:
+        return _not_found(args, "module_id", args.module_id)
+    payload = {"ok": True, "found": True, "module": module.model_dump(mode="json")}
+    lines = [f"module_id: {module.module_id}", f"weight: {module.weight}"]
+    _emit(args, payload, lines)
+    return EXIT_OK
+
+
 def cmd_package_module_list(args: argparse.Namespace) -> int:
-    """``module list`` — модули пакета (id: weight) и Σ весов (read-only)."""
-    modules = _invoke(lambda: list_modules(args.package))
+    """``module list`` — модули пакета (id: weight) и Σ весов (read-only).
+
+    ``--search`` фильтрует по подстроке в ``module_id``.
+    """
+    modules = _invoke(lambda: list_modules(args.package, query=args.search))
     total = round(sum(module.weight for module in modules), 6)
     payload = {
         "ok": True,
@@ -466,6 +531,17 @@ def cmd_package_role_list(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def cmd_package_role_get(args: argparse.Namespace) -> int:
+    """``role get`` — одна роль по ``--role-id`` (read-only)."""
+    role = _invoke(lambda: get_role(args.package, args.role_id))
+    if role is None:
+        return _not_found(args, "role_id", args.role_id)
+    payload = {"ok": True, "found": True, "role": role.model_dump(mode="json")}
+    lines = [f"role_id: {role.role_id}", f"definition: {role.definition}"]
+    _emit(args, payload, lines)
+    return EXIT_OK
+
+
 # ---------------------------------------------------------------------------
 # Хендлеры: каталог
 # ---------------------------------------------------------------------------
@@ -536,12 +612,26 @@ def cmd_package_param_remove(args: argparse.Namespace) -> int:
 
 
 def cmd_package_param_get(args: argparse.Namespace) -> int:
-    """``param get`` — один параметр (read-only)."""
-    row = _invoke(lambda: get_param(args.package, args.param_id))
-    if row is None:
-        payload = {"ok": False, "found": False, "param_id": args.param_id}
-        _emit(args, payload, [f"not found: {args.param_id}"])
-        return EXIT_USAGE
+    """``param get`` — один параметр (read-only) по точному ``--param-id`` или ``--search``.
+
+    Точный ``--param-id``: найден → :data:`EXIT_OK`; нет → :data:`EXIT_NOT_FOUND`.
+    ``--search`` (подстрока): 0 совпадений → :data:`EXIT_NOT_FOUND`; >1 → :data:`EXIT_USAGE`
+    со списком кандидатов (первый не «угадывается»); ровно 1 → вывод.
+    """
+    param_id = getattr(args, "param_id", None)
+    if param_id:
+        row = _invoke(lambda: get_param(args.package, param_id))
+        if row is None:
+            return _not_found(args, "param_id", param_id)
+    else:
+        rows = _invoke(lambda: list_params(args.package, query=args.search))
+        if not rows:
+            return _not_found(args, "search", args.search)
+        if len(rows) > 1:
+            return _ambiguous(
+                args, f"param get --search {args.search!r}", [r.model_dump(mode="json") for r in rows]
+            )
+        row = rows[0]
     payload = {"ok": True, "found": True, "param": row.model_dump(mode="json")}
     lines = [f"param_id: {row.param_id}", f"title: {row.title}", f"module: {row.module}"]
     _emit(args, payload, lines)
@@ -692,6 +782,48 @@ def cmd_package_baseline_list(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def cmd_package_baseline_get(args: argparse.Namespace) -> int:
+    """``baseline get`` — строка наследования (read-only).
+
+    Точный ключ ``(baseline_id, param_id)`` → вывод/``not found``; если задан лишь один
+    из ключей либо ``--search`` — поиск по критерию; неоднозначность (>1) → :data:`EXIT_USAGE`
+    со списком кандидатов; 0 → :data:`EXIT_NOT_FOUND`.
+    """
+    baseline_id = getattr(args, "baseline_id", None)
+    param_id = getattr(args, "param_id", None)
+    query = getattr(args, "search", None)
+    exact = baseline_id is not None and param_id is not None and not query
+    if exact:
+        row = _invoke(
+            lambda: get_baseline(args.package, baseline_id=baseline_id, param_id=param_id)
+        )
+        if row is None:
+            return _not_found(args, "baseline", f"({baseline_id}, {param_id})")
+    else:
+        rows = _invoke(
+            lambda: find_baselines(
+                args.package, baseline_id=baseline_id, param_id=param_id, query=query
+            )
+        )
+        if not rows:
+            criterion = query or f"({baseline_id}, {param_id})"
+            return _not_found(args, "baseline", criterion)
+        if len(rows) > 1:
+            criterion = query or f"({baseline_id}, {param_id})"
+            return _ambiguous(
+                args, f"baseline get {criterion!r}", [r.model_dump(mode="json") for r in rows]
+            )
+        row = rows[0]
+    payload = {"ok": True, "found": True, "baseline": row.model_dump(mode="json")}
+    lines = [
+        f"baseline_id: {row.baseline_id}",
+        f"param_id: {row.param_id}",
+        f"inheritance_mode: {row.inheritance_mode.value}",
+    ]
+    _emit(args, payload, lines)
+    return EXIT_OK
+
+
 # ---------------------------------------------------------------------------
 # Хендлеры: cohort / scope
 # ---------------------------------------------------------------------------
@@ -765,6 +897,113 @@ def cmd_package_scope_clear(args: argparse.Namespace) -> int:
         lambda: clear_scope_attestation(args.package, actor=args.actor, dry_run=args.dry_run)
     )
     _emit(args, _op_payload(result), _op_lines(result))
+    return EXIT_OK
+
+
+def cmd_package_scope_show(args: argparse.Namespace) -> int:
+    """``scope show`` — процедура аттестации полноты источника (read-only, I2b).
+
+    Отсутствие процедуры → ``not found`` с :data:`EXIT_NOT_FOUND` (значение не выдумывается).
+    """
+    procedure = _invoke(lambda: get_scope_attestation(args.package))
+    if procedure is None:
+        payload = {"ok": False, "found": False, "package": args.package}
+        _emit(args, payload, [f"not found: scope_attestation.yaml отсутствует в {args.package}"])
+        return EXIT_NOT_FOUND
+    payload = {"ok": True, "found": True, "procedure": procedure}
+    lines = [f"procedure: {procedure}"]
+    _emit(args, payload, lines)
+    return EXIT_OK
+
+
+# ---------------------------------------------------------------------------
+# Хендлеры: golden / run / artifact (read-only обзор артефактов)
+# ---------------------------------------------------------------------------
+
+
+def cmd_package_golden_list(args: argparse.Namespace) -> int:
+    """``golden list`` — golden-кейсы (read-only); ``--search``/``--product``/``--param``."""
+    rows = _invoke(
+        lambda: list_golden(
+            args.package, query=args.search, product_id=args.product, param_id=args.param
+        )
+    )
+    payload = {
+        "ok": True,
+        "count": len(rows),
+        "golden": [row.model_dump(mode="json") for row in rows],
+    }
+    lines = [f"golden: {len(rows)}"]
+    for row in rows:
+        lines.append(
+            f"  {row.product_id}\t{row.param_id}\t{row.expected_status.value}\t{row.tier.value}"
+        )
+    _emit(args, payload, lines)
+    return EXIT_OK
+
+
+def cmd_package_run_show(args: argparse.Namespace) -> int:
+    """``run show`` — ``run.yaml`` как структура (read-only).
+
+    Отсутствие ``run.yaml`` → ``not found`` с :data:`EXIT_NOT_FOUND`.
+    """
+    run = _invoke(lambda: get_run_config(args.package))
+    if run is None:
+        return _not_found(args, "run", args.package)
+    payload = {"ok": True, "found": True, "run": run.model_dump(mode="json")}
+    lines = [
+        f"case_id: {run.case_id}",
+        f"anchor: {run.anchor}",
+        f"cohort: {run.cohort}",
+        f"products: {', '.join(run.products)}",
+        f"mode: {run.mode.value}",
+        f"snapshot_date: {run.snapshot_date.isoformat()}",
+        f"ranking_policy: {run.ranking_policy.value}",
+    ]
+    _emit(args, payload, lines)
+    return EXIT_OK
+
+
+def cmd_package_artifact_list(args: argparse.Namespace) -> int:
+    """``artifact list`` — обзор всех 8 артефактов пакета (read-only)."""
+    items = _invoke(lambda: list_artifacts(args.package))
+    payload = {"ok": True, "count": len(items), "artifacts": items}
+    lines = [f"artifacts: {len(items)}"]
+    for item in items:
+        marker = "present" if item["present"] else "absent"
+        count = item["count"] if item["count"] is not None else "—"
+        lines.append(
+            f"  {item['name']}\t{marker}\tsize={item['size']}\tcount={count}\t{item['file']}"
+        )
+    _emit(args, payload, lines)
+    return EXIT_OK
+
+
+def cmd_package_artifact_get(args: argparse.Namespace) -> int:
+    """``artifact get`` — один артефакт по ``--name`` (read-only); ``--raw`` — сырой текст.
+
+    Отсутствие файла → ``not found`` с :data:`EXIT_NOT_FOUND`; неизвестное ``--name``
+    отсекается ``argparse`` (choices→:data:`EXIT_USAGE`).
+    """
+    name = args.name
+    raw = bool(getattr(args, "raw", False))
+    if raw and getattr(args, "json", False):
+        raise CliError(
+            "--raw и --json несовместимы: сырой текст не является JSON-документом",
+            code="usage",
+            exit_code=EXIT_USAGE,
+        )
+    data, path = _invoke(lambda: get_artifact(args.package, name, raw=raw))
+    if data is None:
+        return _not_found(args, "artifact", name)
+    if raw:
+        sys.stdout.write(data)
+        if not data.endswith("\n"):
+            sys.stdout.write("\n")
+        return EXIT_OK
+    payload = {"ok": True, "found": True, "name": name, "path": str(path), "data": data}
+    lines = [f"artifact: {name}", f"path: {path}"]
+    _emit(args, payload, lines)
     return EXIT_OK
 
 
@@ -1188,7 +1427,13 @@ def add_package_parser(subparsers: Any) -> None:
 
     p_mod_ls = mod.add_parser("list", help="список модулей и Σ весов (read-only)")
     _add_read_common(p_mod_ls)
+    p_mod_ls.add_argument("--search", default=None, help="поиск по module_id")
     p_mod_ls.set_defaults(handler=cmd_package_module_list)
+
+    p_mod_get = mod.add_parser("get", help="получить модуль по id (read-only)")
+    _add_read_common(p_mod_get)
+    p_mod_get.add_argument("--module-id", required=True)
+    p_mod_get.set_defaults(handler=cmd_package_module_get)
 
     # role ----------------------------------------------------------------- #
     p_role = pkg.add_parser("role", help="роли package.yaml")
@@ -1224,6 +1469,11 @@ def add_package_parser(subparsers: Any) -> None:
     _add_read_common(p_role_ls)
     p_role_ls.add_argument("--search", default=None, help="поиск по role_id/definition")
     p_role_ls.set_defaults(handler=cmd_package_role_list)
+
+    p_role_get = role.add_parser("get", help="получить роль по id (read-only)")
+    _add_read_common(p_role_get)
+    p_role_get.add_argument("--role-id", required=True)
+    p_role_get.set_defaults(handler=cmd_package_role_get)
 
     # param ---------------------------------------------------------------- #
     p_param = pkg.add_parser("param", help="каталог catalog.csv")
@@ -1277,7 +1527,9 @@ def add_package_parser(subparsers: Any) -> None:
 
     p_param_get = param.add_parser("get", help="получить параметр (read-only)")
     _add_read_common(p_param_get)
-    p_param_get.add_argument("--param-id", required=True)
+    get_source = p_param_get.add_mutually_exclusive_group(required=True)
+    get_source.add_argument("--param-id", default=None, help="точный slug параметра")
+    get_source.add_argument("--search", default=None, help="подстрока (неоднозначность → EXIT_USAGE)")
     p_param_get.set_defaults(handler=cmd_package_param_get)
 
     p_param_ls = param.add_parser("list", help="список параметров (read-only)")
@@ -1358,6 +1610,13 @@ def add_package_parser(subparsers: Any) -> None:
     p_bl_ls.add_argument("--baseline", default=None, help="точный фильтр по baseline_id")
     p_bl_ls.set_defaults(handler=cmd_package_baseline_list)
 
+    p_bl_get = baseline.add_parser("get", help="получить строку наследования (read-only)")
+    _add_read_common(p_bl_get)
+    p_bl_get.add_argument("--baseline-id", default=None, help="точный baseline_id (ключ)")
+    p_bl_get.add_argument("--param-id", default=None, help="точный param_id (ключ)")
+    p_bl_get.add_argument("--search", default=None, help="подстрока (неоднозначность → EXIT_USAGE)")
+    p_bl_get.set_defaults(handler=cmd_package_baseline_get)
+
     # cohort --------------------------------------------------------------- #
     p_cohort = pkg.add_parser("cohort", help="состав когорты cohort.yaml (§1.6)")
     cohort = p_cohort.add_subparsers(dest="cohort_command", metavar="ДЕЙСТВИЕ")
@@ -1391,6 +1650,49 @@ def add_package_parser(subparsers: Any) -> None:
     p_scope_clr = scope.add_parser("clear", help="удалить scope_attestation.yaml")
     _add_op_common(p_scope_clr)
     p_scope_clr.set_defaults(handler=cmd_package_scope_clear)
+
+    p_scope_show = scope.add_parser("show", help="показать процедуру аттестации (read-only)")
+    _add_read_common(p_scope_show)
+    p_scope_show.set_defaults(handler=cmd_package_scope_show)
+
+    # golden --------------------------------------------------------------- #
+    p_golden = pkg.add_parser("golden", help="golden-кейсы golden.csv (§4.2/§11.6)")
+    golden = p_golden.add_subparsers(dest="golden_command", metavar="ДЕЙСТВИЕ")
+
+    p_golden_ls = golden.add_parser("list", help="список golden-кейсов (read-only)")
+    _add_read_common(p_golden_ls)
+    p_golden_ls.add_argument(
+        "--search", default=None, help="поиск по product_id/param_id/expected_status/case_class"
+    )
+    p_golden_ls.add_argument("--product", default=None, help="точный фильтр по product_id")
+    p_golden_ls.add_argument("--param", default=None, help="точный фильтр по param_id")
+    p_golden_ls.set_defaults(handler=cmd_package_golden_list)
+
+    # run ------------------------------------------------------------------ #
+    p_run = pkg.add_parser("run", help="run.yaml как структура (read-only)")
+    run_cmd = p_run.add_subparsers(dest="run_command", metavar="ДЕЙСТВИЕ")
+
+    p_run_show = run_cmd.add_parser("show", help="показать run.yaml (read-only)")
+    _add_read_common(p_run_show)
+    p_run_show.set_defaults(handler=cmd_package_run_show)
+
+    # artifact ------------------------------------------------------------- #
+    p_artifact = pkg.add_parser("artifact", help="обобщённый доступ к артефактам пакета (read-only)")
+    artifact = p_artifact.add_subparsers(dest="artifact_command", metavar="ДЕЙСТВИЕ")
+
+    p_artifact_ls = artifact.add_parser("list", help="обзор всех артефактов пакета (read-only)")
+    _add_read_common(p_artifact_ls)
+    p_artifact_ls.set_defaults(handler=cmd_package_artifact_list)
+
+    p_artifact_get = artifact.add_parser("get", help="прочитать один артефакт (read-only)")
+    _add_read_common(p_artifact_get)
+    p_artifact_get.add_argument(
+        "--name", required=True, choices=sorted(ARTIFACT_FILES), help="имя артефакта"
+    )
+    p_artifact_get.add_argument(
+        "--raw", action="store_true", help="сырой текст файла (несовместимо с --json)"
+    )
+    p_artifact_get.set_defaults(handler=cmd_package_artifact_get)
 
     # suggest -------------------------------------------------------------- #
     p_suggest = pkg.add_parser("suggest", help="эвристики-кандидаты из профиля (без записи)")

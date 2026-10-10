@@ -24,6 +24,8 @@ from core.pipeline.package_io import (
     atomic_write_csv,
     atomic_write_text,
     build_run_inputs,
+    get_artifact,
+    list_artifacts,
     load_artifacts,
     matches,
     prospective_lint,
@@ -213,6 +215,77 @@ def test_artifact_files_cover_all_names() -> None:
         "scope_attestation",
         "run",
     }
+
+
+# ---------------------------------------------------------------------------
+# Read-only обзор/чтение артефактов: list_artifacts / get_artifact
+# ---------------------------------------------------------------------------
+
+
+def test_list_artifacts_reports_presence_size_and_count() -> None:
+    template = load_artifacts(TEMPLATE)
+    assert template.run is not None
+    items = list_artifacts(TEMPLATE)
+    assert [item["name"] for item in items] == list(ARTIFACT_FILES)
+    by_name = {item["name"]: item for item in items}
+    assert all(item["present"] for item in items)
+    assert by_name["package"]["count"] == 2  # два модуля шаблона
+    assert by_name["catalog"]["count"] == len(template.catalog)
+    assert by_name["catalog"]["size"] > 0
+    assert by_name["scope_attestation"]["count"] == 1
+    assert by_name["run"]["count"] == len(template.run.products)
+
+
+def test_list_artifacts_absent_and_broken_package(tmp_path: Path) -> None:
+    # Отсутствующий пакет: все артефакты absent, count None.
+    items = list_artifacts(tmp_path / "nope")
+    assert all(item["present"] is False for item in items)
+    assert all(item["count"] is None for item in items)
+    assert all(item["size"] == 0 for item in items)
+
+    # Битый catalog.csv не валит обзор: состав читается по файловой системе.
+    broken = tmp_path / "broken"
+    save_artifact(broken, "package", load_artifacts(TEMPLATE).manifest)
+    (broken / "catalog.csv").write_text("bad,header\n1,2\n", encoding="utf-8")
+    items = list_artifacts(broken)
+    by_name = {item["name"]: item for item in items}
+    assert by_name["package"]["present"] is True
+    assert by_name["catalog"]["present"] is True
+    assert by_name["catalog"]["count"] is None  # разбор не удался — счётчик не выдуман
+    assert by_name["catalog"]["size"] > 0
+
+
+def test_get_artifact_structured_views() -> None:
+    manifest, path = get_artifact(TEMPLATE, "package")
+    assert path == TEMPLATE / "package.yaml"
+    assert manifest["case_id"] == "template"
+    assert len(manifest["modules"]) == 2
+
+    catalog, _ = get_artifact(TEMPLATE, "catalog")
+    assert isinstance(catalog, list) and catalog[0]["param_id"]
+
+    profiles, _ = get_artifact(TEMPLATE, "domain_profiles")
+    assert isinstance(profiles, dict)
+
+    procedure, _ = get_artifact(TEMPLATE, "scope_attestation")
+    assert isinstance(procedure, str) and procedure
+
+
+def test_get_artifact_raw_returns_text() -> None:
+    data, path = get_artifact(TEMPLATE, "run", raw=True)
+    assert isinstance(data, str)
+    assert data == (TEMPLATE / "run.yaml").read_text(encoding="utf-8")
+    assert path == TEMPLATE / "run.yaml"
+
+
+def test_get_artifact_absent_and_unknown(tmp_path: Path) -> None:
+    data, path = get_artifact(tmp_path / "nope", "scope_attestation")
+    assert data is None
+    assert path == tmp_path / "nope" / "scope_attestation.yaml"
+    raw, _ = get_artifact(tmp_path / "nope", "scope_attestation", raw=True)
+    assert raw is None
+    with pytest.raises(ValueError):
+        get_artifact(TEMPLATE, "nope")
 
 
 # ---------------------------------------------------------------------------

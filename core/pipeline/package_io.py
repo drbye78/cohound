@@ -38,6 +38,7 @@ from pathlib import Path
 from typing import Any, Union
 
 import yaml
+from pydantic import BaseModel
 
 from core.config.run_config import (
     _BASELINE_COLUMNS,
@@ -77,6 +78,8 @@ __all__ = [
     "atomic_write_csv",
     "validate_case_id",
     "load_artifacts",
+    "list_artifacts",
+    "get_artifact",
     "save_artifact",
     "delete_artifact",
     "build_run_inputs",
@@ -464,6 +467,121 @@ def load_artifacts(package_dir: str | Path) -> PackageArtifacts:
         artifacts.run = load_run_config(run_file)
 
     return artifacts
+
+
+def _artifact_value(artifacts: PackageArtifacts, name: str) -> Any:
+    """Доменное/сырое значение артефакта по имени (для :func:`get_artifact`)."""
+    return {
+        "package": artifacts.manifest,
+        "catalog": artifacts.catalog,
+        "baselines": artifacts.baselines,
+        "cohort": artifacts.cohort,
+        "golden": artifacts.golden,
+        "domain_profiles": artifacts.domain_profiles,
+        "scope_attestation": artifacts.scope_attestation,
+        "run": artifacts.run,
+    }[name]
+
+
+def _jsonable(value: Any) -> Any:
+    """Приводит доменное значение к JSON-совместимому виду (``model_dump(mode="json")``).
+
+    Pydantic-модели (в т.ч. внутри списков) сериализуются рекурсивно; ``dict``/``str``/
+    скаляры возвращаются как есть. ``None`` сохраняется (артефакт отсутствует).
+    """
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, BaseModel):
+        return value.model_dump(mode="json")
+    if isinstance(value, list):
+        return [_jsonable(item) for item in value]
+    if isinstance(value, dict):
+        return {str(key): _jsonable(item) for key, item in value.items()}
+    return value
+
+
+def _artifact_count(artifacts: PackageArtifacts, name: str) -> int | None:
+    """Число элементов артефакта (строк/записей) или ``None``, если он отсутствует."""
+    if name == "package":
+        return len(artifacts.manifest.modules) if artifacts.manifest is not None else None
+    if name == "catalog":
+        return len(artifacts.catalog)
+    if name == "baselines":
+        return len(artifacts.baselines)
+    if name == "golden":
+        return len(artifacts.golden)
+    if name == "cohort":
+        return len(artifacts.cohort.entries) if artifacts.cohort is not None else None
+    if name == "domain_profiles":
+        return len(artifacts.domain_profiles)
+    if name == "scope_attestation":
+        return 1 if artifacts.scope_attestation is not None else 0
+    if name == "run":
+        return len(artifacts.run.products) if artifacts.run is not None else None
+    return None  # pragma: no cover — исчерпано ARTIFACT_FILES
+
+
+def list_artifacts(package_dir: str | Path) -> list[dict[str, Any]]:
+    """Обзор всех 8 артефактов пакета (read-only): присутствие, размер, счётчик, путь.
+
+    Порядок совпадает с :data:`ARTIFACT_FILES` (детерминирован). ``count`` — число
+    строк/записей артефакта (для ``package`` — число модулей; ``cohort`` — число записей;
+    ``run`` — число продуктов; ``scope_attestation`` — ``1``/``0``), либо ``None``, если
+    файл отсутствует или пакет не разбирается. Ничего не пишет; ошибки разбора не
+    поднимаются — обзор остаётся доступным по файловой системе.
+    """
+    base = Path(package_dir)
+    artifacts: PackageArtifacts | None
+    try:
+        artifacts = load_artifacts(base)
+    except (ValueError, OSError):
+        artifacts = None
+    items: list[dict[str, Any]] = []
+    for name, filename in ARTIFACT_FILES.items():
+        path = base / filename
+        present = path.is_file()
+        try:
+            size = path.stat().st_size if present else 0
+        except OSError:  # pragma: no cover — гонка ФС; не валим обзор
+            size = 0
+        count = _artifact_count(artifacts, name) if (present and artifacts is not None) else None
+        items.append(
+            {
+                "name": name,
+                "file": filename,
+                "path": str(path),
+                "present": present,
+                "size": size,
+                "count": count,
+            }
+        )
+    return items
+
+
+def get_artifact(
+    package_dir: str | Path, name: str, *, raw: bool = False
+) -> tuple[Any, Path]:
+    """Читает один артефакт пакета (read-only) → ``(data, path)``.
+
+    :param name: одно из :data:`ARTIFACT_FILES`.
+    :param raw: ``True`` — сырой текст файла (``str``); ``False`` — структурированный
+        JSON-совместимый вид (``model_dump(mode="json")`` для доменных моделей, ``dict``
+        для ``domain_profiles``, ``str`` для ``scope_attestation``).
+    :returns: ``(None, path)``, если файл отсутствует (значение не выдумывается).
+    :raises ValueError: неизвестное имя артефакта или ошибка чтения файла.
+    """
+    if name not in ARTIFACT_FILES:
+        raise ValueError(f"неизвестный артефакт: {name}")
+    path = Path(package_dir) / ARTIFACT_FILES[name]
+    if raw:
+        if not path.is_file():
+            return None, path
+        try:
+            return path.read_text(encoding="utf-8"), path
+        except OSError as exc:
+            raise ValueError(f"не удалось прочитать {path}: {exc}") from exc
+    artifacts = load_artifacts(package_dir)
+    return _jsonable(_artifact_value(artifacts, name)), path
 
 
 def save_artifact(package_dir: str | Path, name: str, data: Any) -> Path:

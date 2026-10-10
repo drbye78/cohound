@@ -42,6 +42,7 @@ from core.domain.models import (
     CatalogRow,
     Cohort,
     CohortEntry,
+    GoldenRow,
     ModuleDef,
     PackageManifest,
     RoleDef,
@@ -53,13 +54,15 @@ from core.pipeline.package_io import (
     assert_no_new_blocking,
     build_run_inputs,
     delete_artifact,
+    get_artifact,
+    list_artifacts,
     load_artifacts,
     matches,
     prospective_lint,
     save_artifact,
     validate_case_id,
 )
-from core.pipeline.normalize import cross_check
+from core.pipeline.normalize import cross_check, load_scope_attestation
 from core.util.security import sanitize_slug
 
 __all__ = [
@@ -74,15 +77,20 @@ __all__ = [
     "update_module",
     "remove_module",
     "renormalize_modules",
+    "get_module",
+    "list_modules",
     "add_role",
     "update_role",
     "remove_role",
+    "get_role",
     "list_roles",
     "add_param",
     "update_param",
     "remove_param",
     "get_param",
     "list_params",
+    "get_baseline",
+    "find_baselines",
     "list_baselines",
     "add_baseline",
     "update_baseline",
@@ -90,9 +98,13 @@ __all__ = [
     "set_cohort",
     "update_cohort",
     "get_cohort",
-    "list_modules",
+    "get_scope_attestation",
     "set_scope_attestation",
     "clear_scope_attestation",
+    "list_golden",
+    "get_run_config",
+    "list_artifacts",
+    "get_artifact",
 ]
 
 #: Идентификаторы пакетных сущностей — ``[a-z0-9_]+``.
@@ -672,15 +684,35 @@ def renormalize_modules(
     )
 
 
-def list_modules(package_dir: str | Path) -> list[ModuleDef]:
+def get_module(package_dir: str | Path, module_id: str) -> ModuleDef | None:
+    """Возвращает модуль по ``module_id`` или ``None`` (read-only).
+
+    Отсутствие пакета/``package.yaml`` или модуля — ``None`` (CLI печатает ``not found``);
+    значения не выдумываются. Невалидный присутствующий ``package.yaml`` поднимает
+    :class:`ValueError` (не маскируется под отсутствие).
+    """
+    artifacts = load_artifacts(package_dir)
+    if artifacts.manifest is None:
+        return None
+    return next(
+        (module for module in artifacts.manifest.modules if module.module_id == module_id), None
+    )
+
+
+def list_modules(package_dir: str | Path, *, query: str | None = None) -> list[ModuleDef]:
     """Список модулей пакета (read-only) из ``package.yaml``.
 
     ``package.yaml`` обязателен — иначе :class:`PackageAdminError` (kind ``usage``):
-    без манифеста состав модулей неизвестен и не выдумывается.
+    без манифеста состав модулей неизвестен и не выдумывается. ``query`` (keyword-only,
+    обратно совместимо) фильтрует по подстроке в ``module_id`` (:func:`matches`,
+    регистронезависимо, ё→е).
     """
     artifacts = _load(package_dir)
     assert artifacts.manifest is not None  # гарантировано _load
-    return list(artifacts.manifest.modules)
+    modules = list(artifacts.manifest.modules)
+    if query:
+        modules = [module for module in modules if matches(module.module_id, query)]
+    return modules
 
 
 # ---------------------------------------------------------------------------
@@ -831,6 +863,17 @@ def remove_role(
     return _finalize(
         package_dir, artifacts, before, changed, op="role-remove", actor=actor, dry_run=dry_run
     )
+
+
+def get_role(package_dir: str | Path, role_id: str) -> RoleDef | None:
+    """Возвращает роль по ``role_id`` или ``None`` (read-only).
+
+    Отсутствие пакета/``package.yaml`` или роли — ``None``; значения не выдумываются.
+    """
+    artifacts = load_artifacts(package_dir)
+    if artifacts.manifest is None:
+        return None
+    return next((role for role in artifacts.manifest.roles if role.role_id == role_id), None)
 
 
 def list_roles(package_dir: str | Path, *, query: str | None = None) -> list[RoleDef]:
@@ -1138,6 +1181,53 @@ def list_baselines(
     return rows
 
 
+def find_baselines(
+    package_dir: str | Path,
+    *,
+    baseline_id: str | None = None,
+    param_id: str | None = None,
+    query: str | None = None,
+) -> list[BaselineRow]:
+    """Ищет строки наследования по критериям (read-only) → список совпадений.
+
+    Комбинация фильтров: ``baseline_id``/``param_id`` — точное равенство; ``query`` —
+    подстрока в ``param_id``/``baseline_id``/``note`` (:func:`matches`). Пустой список —
+    валидный результат (CLI решает ``not found``); для неоднозначного доступа CLI
+    показывает список кандидатов, не «угадывая» первый.
+    """
+    rows = list_baselines(package_dir, query=query, baseline_id=baseline_id)
+    if param_id is not None:
+        rows = [row for row in rows if row.param_id == param_id]
+    return rows
+
+
+def get_baseline(
+    package_dir: str | Path,
+    *,
+    baseline_id: str | None = None,
+    param_id: str | None = None,
+) -> BaselineRow | None:
+    """Возвращает строку наследования по точному ключу ``(baseline_id, param_id)``.
+
+    Если заданы **оба** ключа — точный доступ (``None``, если строки нет). Если задан
+    только один из них — возвращается единственное совпадение; при **неоднозначности**
+    (совпадений >1) или отсутствии возвращается ``None`` (никаких «догадок» — CLI для
+    разрешения неоднозначности использует :func:`find_baselines`).
+    """
+    if baseline_id is not None and param_id is not None:
+        artifacts = load_artifacts(package_dir)
+        return next(
+            (
+                row
+                for row in artifacts.baselines
+                if row.baseline_id == baseline_id and row.param_id == param_id
+            ),
+            None,
+        )
+    candidates = find_baselines(package_dir, baseline_id=baseline_id, param_id=param_id)
+    return candidates[0] if len(candidates) == 1 else None
+
+
 def add_baseline(
     package_dir: str | Path,
     baseline_id: str,
@@ -1253,6 +1343,43 @@ def remove_baseline(
 
 
 # ---------------------------------------------------------------------------
+# Golden (golden.csv, §4.2/§11.6)
+# ---------------------------------------------------------------------------
+
+
+def list_golden(
+    package_dir: str | Path,
+    *,
+    query: str | None = None,
+    product_id: str | None = None,
+    param_id: str | None = None,
+) -> list[GoldenRow]:
+    """Список golden-кейсов ``golden.csv`` (read-only) с поиском/фильтрами.
+
+    :param query: подстрока в ``product_id``/``param_id``/``expected_status``/``case_class``
+        (:func:`matches`, регистронезависимо, ё→е).
+    :param product_id: точное равенство ``product_id``.
+    :param param_id: точное равенство ``param_id``.
+    """
+    artifacts = load_artifacts(package_dir)
+    rows = list(artifacts.golden)
+    if product_id is not None:
+        rows = [row for row in rows if row.product_id == product_id]
+    if param_id is not None:
+        rows = [row for row in rows if row.param_id == param_id]
+    if query:
+        rows = [
+            row
+            for row in rows
+            if matches(row.product_id, query)
+            or matches(row.param_id, query)
+            or matches(row.expected_status.value, query)
+            or matches(row.case_class, query)
+        ]
+    return rows
+
+
+# ---------------------------------------------------------------------------
 # Cohort (cohort.yaml, §1.6)
 # ---------------------------------------------------------------------------
 
@@ -1348,9 +1475,27 @@ def get_cohort(package_dir: str | Path) -> Cohort | None:
     return artifacts.cohort
 
 
+def get_run_config(package_dir: str | Path) -> RunConfig | None:
+    """Возвращает ``run.yaml`` как :class:`RunConfig` или ``None`` (read-only).
+
+    Отсутствие пакета/``run.yaml`` — ``None`` (значения не выдумываются); невалидный
+    присутствующий ``run.yaml`` поднимает :class:`ValueError`.
+    """
+    return load_artifacts(package_dir).run
+
+
 # ---------------------------------------------------------------------------
 # Scope attestation (scope_attestation.yaml, I2b)
 # ---------------------------------------------------------------------------
+
+
+def get_scope_attestation(package_dir: str | Path) -> str | None:
+    """Читает процедуру аттестации полноты источника (read-only) или ``None`` (I2b).
+
+    Отсутствие файла/пустое значение → ``None`` (CLI печатает ``not found``). Невалидный
+    присутствующий ``scope_attestation.yaml`` поднимает :class:`ValueError`.
+    """
+    return load_scope_attestation(package_dir)
 
 
 def set_scope_attestation(
