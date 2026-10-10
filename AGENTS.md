@@ -31,31 +31,36 @@ cohound-spec-v2.md            # регламент v2.0 (источник ист
 THIRD_PARTY_NOTICES.md        # лицензии/происхождение скопированного кода
 docs/status-dictionary.yaml   # словарь статусов/перечислений + Р-2 (§4.1)
 core/                         # ядро: категорийно-НЕЙТРАЛЬНЫЙ код (грепп-тест §1.3)
-  schemas.py                  # (transitional re-export-шим → core/domain, T1.2)
-  db.py                       # (transitional re-export-шим → core/store/sqlite, T1.3)
-  util/                       # text_utils (RU/EN), security (SSRF/slug), fusion (RRF) — см. NOTICES
-  adapters/                   # chunker_markdown (heading_path), extract_document (docling: pdf+office), lexical_bm25 — см. NOTICES
-  # расщепление (docs/architecture/01-modules-and-contracts.md):
-  domain/                     # (ЕСТЬ) enums, models, r2, dictionary — чистый Python, без I/O
-  ports/                      # (ЕСТЬ) Protocol-контракты: LLM, индексы, embedder, index_builder, search,
+  domain/                     # enums, models, invariants, scoring, r2, anchors, dictionary — чистый Python, без I/O
+  ports/                      # Protocol-контракты: LLM, индексы, embedder, index_builder, search,
                               #   crawler, extractor, chunker, registry, store, gate_store, gateway, types
-  store/                      # (ЕСТЬ) SQLite DDL §4.4 + триггеры (sqlite.py); StorePort-реализация — W3
-  pipeline/                   # (планируется) сценарии Ш1–Ш9, гейты G1–G4, эксперименты (use-cases)
-  config/                     # (планируется) загрузка run.yaml/пакетов + deploy.yaml (профиль зон)
-  cli/                        # (планируется) composition root Z0 (ядро) — сборка зависимостей
-  edge/                       # (планируется) composition root Z1/DMZ — веб-адаптеры за швом (07)
+  store/                      # SQLite DDL §4.4 + триггеры (sqlite.py); StorePort/GateStore-реализация
+                              #   (sqlite_store.py); backup.py — бэкап/восстановление прогона
+  pipeline/                   # сценарии Ш1–Ш9, гейты G1–G4, эксперименты; авторство пакета:
+                              #   package_{io,admin,discovery,candidates,scout}.py, passport_scout.py,
+                              #   scout_common.py
+  config/                     # загрузка run.yaml/пакетов, deploy.yaml (профиль зон), раскладка путей
+                              #   (paths.py), passports.py
+  cli/                        # composition root Z0 (ядро) — сборка зависимостей: main.py, wiring.py,
+                              #   package_commands.py, doctor.py, __main__.py
+  edge/                       # composition root Z1/DMZ — веб-адаптеры за швом (07): server.py, auth.py,
+                              #   audit.py, seam_schema.py
+  adapters/                   # chunker_markdown (heading_path), extract_document (docling: pdf+office),
+                              #   lexical_bm25, index_npy/index_format/lexical_tantivy, search_* — см. NOTICES
+  util/                       # text_utils (RU/EN), security (SSRF/slug), fusion (RRF), retrieval_eval — см. NOTICES
 scripts/ci.sh                 # единая точка входа CI (§11.6): selfcheck + pytest + порог покрытия
-tests/selfcheck.py            # self-contained проверка фундамента (42 проверки)
+tests/selfcheck.py            # self-contained проверка фундамента (86 проверок)
 tests/test_selfcheck.py       # pytest-обёртка над selfcheck (W1/T1.5)
 tests/domain/                 # property-тесты домена (hypothesis)
 tests/smoke_scrapy_playwright.py  # браузерный smoke scrapy-playwright (V5; 0/1/2)
-packages/{case_id}/           # (планируется) пакеты категорий: package/catalog/baselines/cohort/golden
+packages/{case_id}/           # пакеты категорий: package/catalog/baselines/cohort/golden
 registries/ · docs/           # словари, регламент, absence-правила
-passports/{product_id}/       # (планируется) паспорта продуктов
-runs/{run_id}/                # (планируется) прогоны: SQLite, логи, промпты, манифесты
+passports/{product_id}/       # паспорта продуктов
+runs/{run_id}/                # прогоны: SQLite, логи, промпты, манифесты
 index_store/{package}/{build}/{product_id}/  # иммутабельные индексные сборки (продукт-партиции)
 corpus_raw/{product_id}/      # retention сырых байтов
 cache/serp/{query_hash}.json · cache/http/{url_hash}.bin  # глобальный content-addressed кэш (R7)
+config/paths.example.yaml     # пример раскладки операционных каталогов (COHOUND_HOME/COHOUND_*_DIR)
 ```
 
 **Доверенные зоны (docs/architecture/07-deployment-topology.md).** Веб-функции (краул, поиск,
@@ -86,7 +91,7 @@ grep -rniE "postgres|pangolin|sber|сбер|copywala|платформа" core/
 grep -rniE "postgres|pangolin|sber|сбер|copywala|платформа" core/domain core/ports core/pipeline
 
 # Проверка схемы БД
-python3 -c "import sys; sys.path.insert(0,'.'); from core.db import connect; c=connect(':memory:')"
+python3 -c "import sys; sys.path.insert(0,'.'); from core.store.sqlite import connect; c=connect(':memory:')"
 
 # Smoke-тест scrapy-playwright (V5) — отдельное окружение с браузерными бинарями:
 # pip install 'scrapy>=2.19' 'scrapy-playwright>=0.0.48' 'playwright>=1.63'
@@ -112,8 +117,9 @@ Dev/CI по §11.6: `pytest`+`hypothesis`+`pytest-cov` в extra `dev`; един�
   вендоров и предметных терминов. Вся специфика — данные в `packages/`. Нарушение
   блокирует кейс (§11.4).
 - **Инварианты — это код, а не комментарии.** Инварианты §2.3 (I1–I23) должны
-  обеспечиваться валидаторами Pydantic (`core/schemas.py`) и SQL-триггерами (`core/db.py`).
-  Каждая новая предметная сущность — с проверкой своих инвариантов и записью в selfcheck.
+  обеспечиваться валидаторами Pydantic (`core/domain/`) и SQL-триггерами
+  (`core/store/sqlite.py`). Каждая новая предметная сущность — с проверкой своих инвариантов
+  и записью в selfcheck.
 - **Строгая типизация.** Pydantic-модели с `extra="forbid"`. Используй enum-классы
   (`Status`, `Origin`, …), а не строковые литералы.
 - **`StrEnum`** для всех перечислений; источник истины — `docs/status-dictionary.yaml`,

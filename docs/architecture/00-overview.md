@@ -163,12 +163,15 @@ IDP/DLP/IDS (`07` §8).
 `adapters/llm_local.py` (vLLM/SGLang) · `adapters/search_yandex.py` · `adapters/search_glm.py` ·
 `adapters/crawl_scrapy.py` · `adapters/extract_html.py` (trafilatura) / `adapters/extract_document.py`
 (docling: PDF + Office docx/pptx/xlsx, лёгкий путь без torch для Office) · `adapters/chunker_*.py` ·
-`store/sqlite.py` · `store/paths.py`. Стек/пины/лицензии — `05-dependency-stack.md`.
+`store/sqlite.py` (DDL) · **`config/paths.py`** (раскладка путей). Стек/пины/лицензии —
+`05-dependency-stack.md`.
 
-**Адаптеры-писатели индекса:** `adapters/index_npy.py` и `adapters/index_tantivy.py` реализуют
-`IndexBuilderPort` (запись `.npy`-шардов и tantivy, `build()`/`commit()`), `adapters/embed_local.py` —
-`EmbedderPort`. `pipeline` не пишет `.npy`/tantivy напрямую. `store/sqlite.py` реализует и
-`StorePort`, и `GateStore`.
+**Адаптеры-писатели индекса:** `adapters/index_npy.py` (`IndexBuilderPort`: запись `.npy`-шардов
+и манифеста, `build()`/`commit()`; формат — `adapters/index_format.py`) и
+`adapters/lexical_tantivy.py` (`LexicalIndexPort`). Векторный поиск — `adapters/vector_npy.py`
+(`VectorIndexPort`); `adapters/embed_local.py` — `EmbedderPort`. `pipeline` не пишет `.npy`/tantivy
+напрямую. Реализация `StorePort`/`GateStore` — `store/sqlite_store.py` поверх DDL `store/sqlite.py`;
+бэкап/восстановление прогона — `store/backup.py`.
 
 **Реестровые фетчеры:** `ports/registry.py` — нейтральный порт; конкретные реестры (РРПО, ФСТЭК)
 описываются данными в `registries/*.yaml` и обслуживаются **generic config-driven HTTP/JSON/HTML
@@ -210,34 +213,39 @@ flowchart TD
 
 ---
 
-## 7. Предлагаемая модульная структура (целевая)
+## 7. Модульная структура (фактическая)
 
 ```
 core/
   __init__.py
-  domain/      enums.py models.py invariants.py scoring.py r2.py anchors.py
+  domain/      enums.py models.py invariants.py scoring.py r2.py anchors.py dictionary.py
   ports/       llm.py vector_index.py lexical_index.py search.py crawler.py
                extractor.py chunker.py embedder.py index_builder.py
-               registry.py store.py gate_store.py gateway.py
+               registry.py store.py gate_store.py gateway.py discovery_llm.py types.py
   pipeline/    normalize.py lint.py plan.py discovery.py registry.py
                inheritance.py corpus.py evaluate.py validate.py review.py
-               compute.py report.py experiments.py gates.py
-  adapters/    vector_npy.py lexical_tantivy.py index_npy.py index_tantivy.py
-               embed_local.py llm_local.py search_yandex.py
-               search_glm.py crawl_scrapy.py extract_html.py extract_document.py
-               remote_gateway.py remote_crawler.py remote_search.py
-               registry_generic.py
-  store/       sqlite.py paths.py
-  config/      run_config.py deploy.py paths.py
-  cli/         main.py commands.py          # composition root Z0
-  edge/        server.py registry.py         # composition root Z1 (DMZ): публикует адаптеры
-  util/        ids.py hashing.py logging.py
+               compute.py report.py experiments.py gates.py runner.py
+               package_{io,admin,discovery,candidates,scout}.py
+               passport_scout.py scout_common.py adversarial.py serp_loop.py golden.py
+  adapters/    vector_npy.py index_npy.py index_format.py lexical_tantivy.py
+               embed_local.py llm_local.py llm_discovery.py llm_llamacpp.py
+               search_yandex.py search_glm.py search_google.py search_duckduckgo.py
+               search_openwebsearch.py crawl_scrapy.py crawl_http.py
+               extract_html.py extract_document.py chunker_markdown.py
+               remote_gateway.py remote_crawler.py remote_search.py remote_registry.py
+               remote_extractor.py registry_generic.py gateway_validate.py
+  store/       sqlite.py sqlite_store.py backup.py
+  config/      run_config.py deploy.py paths.py passports.py
+  cli/         main.py wiring.py package_commands.py doctor.py __main__.py  # composition root Z0
+  edge/        server.py auth.py audit.py seam_schema.py                    # composition root Z1 (DMZ)
+  util/        ids.py hashing.py logging.py cache.py sanitize.py fusion.py
+               security.py text_utils.py retrieval_eval.py
 packages/{case_id}/, registries/, passports/, runs/, index_store/, corpus_raw/, cache/
 ```
 
-`domain/schemas.py` (текущий `core/schemas.py`) будет расщеплён на `domain/models.py` +
-`domain/enums.py` + `domain/invariants.py` в итерации 1; текущий файл — временный монолит.
-`edge/` появляется только при профиле `split` (07); в `local` не запускается.
+Монолит `core/schemas.py` расщеплён на `domain/{models,enums,invariants}.py` (T1.2, файл
+**удалён**); DDL/триггеры `core/db.py` перенесены в `store/sqlite.py` + `ports/store.py` (T1.3,
+файл **удалён**). `edge/` используется только при профиле `split` (07); в `local` не запускается.
 
 ---
 
@@ -269,11 +277,11 @@ M0 (по §14 регламента) должен давать **сквозной
 них, но контуры Ш5/Ш6 в M0 рабочими не считаются. Сквозной результат M0 — мини-карта из
 детерминированных волн (реестры + наследование) на 3 продуктах.
 
-> **Стартовый актив (не greenfield).** К началу M0 уже существуют: монолиты `core/schemas.py` /
-> `core/db.py` (схемы + инварианты + DDL/триггеры), утилиты (`text_utils`, `security`, `fusion`,
-> `retrieval_eval`) и адаптеры (`chunker_markdown`, `extract_document`, `lexical_bm25`), а также
-> `tests/selfcheck.py` (36) и пройденный браузерный smoke (V5). M0 — это **рефакторинг за порты**,
-> а не написание с нуля. Полная инвентаризация и влияние на оценки — `06` §0.
+> **Стартовый актив (не greenfield).** К началу M0 уже существовали монолиты `core/schemas.py` / `core/db.py` (схемы + инварианты + DDL/триггеры), позже **расщеплены и удалены** (T1.2/T1.3);
+> утилиты (`text_utils`, `security`, `fusion`, `retrieval_eval`) и адаптеры (`chunker_markdown`,
+> `extract_document`, `lexical_bm25`), а также `tests/selfcheck.py` (ныне **86** проверок) и
+> пройденный браузерный smoke (V5). M0 — это **рефакторинг за порты**, а не написание с нуля.
+> Полная инвентаризация и влияние на оценки — `06` §0.
 
 ---
 
@@ -283,7 +291,8 @@ M0 (по §14 регламента) должен давать **сквозной
 - 0001–0011 — accepted: порты/адаптеры (hexagonal) vs монолит; продукт-партиция + NpyVectorIndex;
   LLM без `tools`; контент только через Ш5; единый cut-off K; реестры как данные; SQLite+WAL;
   иммутабельные сборки; кэш внешних вызовов; `failed` как состояние ячейки; человеческие гейты.
-- 0012 — accepted (план): расщепление `core/schemas.py`/`core/db.py` на слои (реализация — M0).
+- 0012 — accepted и **реализовано** (T1.2/T1.3): расщепление бывших `core/schemas.py`/`core/db.py`
+  на слои (`domain/`, `store/`); transitional-шимы удалены.
 - 0013–0017 — accepted (ревью-гейт): гранулярность индексной сборки и provenance ячеек; SERP-петля
   vs иммутабельность (append-only раунды); политика ранжирования/демотирования (requested vs
   computed); глобальный content-addressed кэш для R7; контракт derived-evidence наследования/сателлитов.

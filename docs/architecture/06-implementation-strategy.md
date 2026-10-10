@@ -19,8 +19,8 @@
 
 | Артефакт | Состояние | Роль в плане |
 |---|---|---|
-| `core/schemas.py` | монолит: Pydantic-схемы §4.2/4.3/4.5/7 + инварианты | расщепляется в W1/T1.2 → `domain/` |
-| `core/db.py` | SQLite DDL §4.4 + триггеры I4/I6/I7/I13/I18 | переезжает в W1/T1.3 → `store/` |
+| `core/schemas.py` (был) | монолит: Pydantic-схемы §4.2/4.3/4.5/7 + инварианты | ✅ расщеплён в W1/T1.2 → `core/domain/`; монолит **удалён** |
+| `core/db.py` (был) | SQLite DDL §4.4 + триггеры I4/I6/I7/I13/I18 | ✅ переехал в W1/T1.3 → `core/store/sqlite.py`; монолит **удалён** |
 | `core/util/text_utils.py` | RU/EN-нормализация (из gag5, MIT) | готово (W1/W2/W8) |
 | `core/util/security.py` | SSRF-защита URL, `sanitize_slug` (gag5) | готово (W2/W7) |
 | `core/util/fusion.py` | RRF-слияние (gag5) | оборачивается в W8/T8.5 |
@@ -28,7 +28,7 @@
 | `core/adapters/chunker_markdown.py` | чанкер с `heading_path` (gag5) | оборачивается в порт в W7/T7.3 |
 | `core/adapters/extract_document.py` | docling PDF+Office (написано заново) | оборачивается в порт в W7/T7.2 |
 | `core/adapters/lexical_bm25.py` | BM25-базлайн (gtm) | прототип W8/T8.3 |
-| `tests/selfcheck.py` | 36 проверок, без pytest; словарь/схемы/DDL | остаётся автономным; обёртка в W1/T1.5 |
+| `tests/selfcheck.py` | 86 проверок, без pytest; словарь/схемы/DDL | остаётся автономным; обёртка в W1/T1.5 |
 | `tests/smoke_scrapy_playwright.py` | браузерный smoke (V5) — **пройден** | вход W7/T7.1 |
 | `docs/status-dictionary.yaml` | источник истины перечислений (§4.1) | уже есть |
 | `THIRD_PARTY_NOTICES.md` | происхождение/лицензии reused-кода | уже есть (gag5 MIT / gtm авторская) |
@@ -144,7 +144,7 @@ L7-инспектируемый JSON, публикуемые схемы, атр�
 
 | W | Поток | Ключевые артефакты | Зависит от |
 |---|---|---|---|
-| **W1** | Фундамент и рефактор | `ports/*.py` (Protocol), расщепление `core/schemas.py`→`domain/`, `core/db.py`→`store/`+`ports/`, CI импорт-граф/нейтральность, pytest+hypothesis, `uv.lock` | — |
+| **W1** | Фундамент и рефактор | `ports/*.py` (Protocol), расщепление прежних монолитов схем/DDL → `domain/`, `store/`+`ports/` (✅ выполнено), CI импорт-граф/нейтральность, pytest+hypothesis, `uv.lock` | — |
 | **W2** | Домен | `domain/{models,invariants,scoring,r2,anchors}.py`, property-тесты | W1 |
 | **W3** | Store | `ports/store.py`, `store/sqlite.py`, `GateStore`, тесты DDL/триггеров/транзакций | W1 |
 | **W4** | Конвейер и гейты | `pipeline/runner.py`, `phase_state`, `gates.py`, `PhaseResult`, resume | W2, W3 |
@@ -220,9 +220,9 @@ preliminary-yield), калибровка порогов.
 
 | ID | Задача | дд | Зависит | DoD |
 |---|---|---|---|---|
-| T1.1 | Пакет `core/ports/`: `Protocol`-контракты (llm, vector_index, lexical_index, search, crawler, extractor, chunker, embedder, index_builder, registry, store, gate_store, **gateway**) с docstring-гарантиями. Пока домен не расщеплён — типы импортируются из текущего `core/schemas.py` (transitional) | 2 | — | импортируются без циклов; контракт-тесты-заготовки |
-| T1.2 | Расщепить `core/schemas.py` → `core/domain/{enums,models,invariants,r2,anchors}.py` + re-export-шим; перевести `ports/*` на новые типы | 3 | T1.1 | `tests/selfcheck.py` зелёный; старые импорты работают |
-| T1.3 | Расщепить `core/db.py` → `core/store/sqlite.py` (DDL+триггеры) + контракт `ports/store.py` | 2 | T1.1 | DDL-тест + триггеры I4/I6/I7/I13/I18 зелёные |
+| T1.1 | ✅ Пакет `core/ports/`: `Protocol`-контракты (llm, vector_index, lexical_index, search, crawler, extractor, chunker, embedder, index_builder, registry, store, gate_store, **gateway**) с docstring-гарантиями. Типы импортируются из `core/domain/` | 2 | — | импортируются без циклов; контракт-тесты-заготовки |
+| T1.2 | ✅ Расщепить прежний монолит `core/schemas.py` → `core/domain/{enums,models,invariants,r2,anchors}.py`; transitional re-export-шим **удалён**, `ports/*` переведены на новые типы | 3 | T1.1 | `tests/selfcheck.py` зелёный |
+| T1.3 | ✅ Расщепить прежний монолит `core/db.py` → `core/store/sqlite.py` (DDL+триггеры) + контракт `ports/store.py`; монолит **удалён** | 2 | T1.1 | DDL-тест + триггеры I4/I6/I7/I13/I18 зелёные |
 | T1.4 | CI: импорт-граф (`ast`-матрица 01 §1), грепп-нейтральность `core/domain|ports|pipeline`, `uv pip compile` на 3.14 | 2 | T1.2,T1.3 | гейты краснеют на учебном нарушении |
 | T1.5 | pytest+hypothesis в dev; обёртка над selfcheck; фикстуры; порог покрытия ядра | 1.5 | T1.2 | `pytest -q` зелёный; selfcheck остаётся автономным |
 | T1.6 | `uv.lock` + документация окружений (CLI-light / pdf / gpu / index) | 1 | T1.5 | lock воспроизводим; extras резолвятся |
@@ -305,7 +305,7 @@ preliminary-yield), калибровка порогов.
 |---|---|---|---|---|
 | T8.1 | `ports/embedder.py` + `adapters/embed_local.py` (bge-m3) + изолированное окружение | 2.5 | T1.6, T7.4 | батч; `embed_model_id` в манифест |
 | T8.2 | `ports/index_builder.py` + `index_npy.py` (продукт-партиции, .npy+jsonl+manifest, атомарный commit) | 3.5 | T8.1 | иммутабельность; `build_id`=hash входов |
-| T8.3 | `ports/lexical_index.py` + `index_tantivy.py`/`lexical_tantivy.py` (RU/EN-стеммер + raw/ngram-профиль); опирается на **существующий** `lexical_bm25.py` | 3.5 | T1.6 | V1 подтверждён на golden; двойной профиль |
+| T8.3 | `ports/lexical_index.py` + `adapters/lexical_tantivy.py` (RU/EN-стеммер + raw/ngram-профиль); опирается на **существующий** `lexical_bm25.py` | 3.5 | T1.6 | V1 подтверждён на golden; двойной профиль |
 | T8.4 | `ports/vector_index.py` + `vector_npy.py` (brute-force cosine по шардам) | 2 | T8.2 | продукт-скоупед (I17); тест |
 | T8.5 | RRF-фьюжн (обёртка **существующего** `util/fusion`) + формирование `RetrievedChunk` с provenance | 1.5 | T8.3, T8.4 | фьюжн явный в pipeline; tie-break по `chunk_id` |
 | T8.6 | `retrieval-golden` (30–40 пар) + `pipeline/experiments.py` R0/R1/R2 (recall@K, cut-off=pipeline-K); метрики — из **существующего** `util/retrieval_eval.py` | 3 | T8.5 | профиль и K зафиксированы измерением (R9/R10) |
@@ -492,7 +492,7 @@ uv sync --frozen --extra dev
 - **Store:** DDL+триггеры; батчи; идемпотентность; FK сохранены (единая БД).
 - **Pipeline:** фаза возвращает `PhaseResult`; resume; гейты только через `gate_decisions`.
 - **Adapters:** за портом; контракт-тест + фейк + smoke; секреты не логируются; SSRF/sanitize.
-- **CLI:** команды из §3.1; `--dry-run`/`--json`; ошибки с кодом инварианта.
+- **CLI:** команды из §3.1 (актуальный список — `docs/03 §E.1`/код `core/cli/`); `--dry-run`/`--json`; ошибки с кодом инварианта.
 - **Docs:** правка контракта/инварианта — правка `00`–`06` в том же коммите.
 
 ---

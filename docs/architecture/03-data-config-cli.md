@@ -19,12 +19,13 @@
 repo/
   cohound-spec-v2.md
   pyproject.toml             # ядро + extras (стек/пины — 05-dependency-stack.md)
-  uv.lock                    # (планируется) зафиксированный резолв для воспроизводимости
+  uv.lock                    # зафиксированный резолв для воспроизводимости
   core/                      # пакет (см. итерацию 1)
     cli/                     # composition root Z0 (ядро)
     edge/                    # composition root Z1/DMZ (веб-адаптеры за gateway) — 07
   config/
     deploy.yaml              # профиль развёртывания (local|split), endpoints, allowlist (07)
+    paths.example.yaml       # пример раскладки операционных каталогов (COHOUND_HOME/COHOUND_*_DIR)
   packages/{case_id}/
     package.yaml             # §4.2
     catalog.csv              # 11 колонок
@@ -74,9 +75,9 @@ runs/{run_id}/
 
 ### B.1. Контракт `ports/store.py` → `store/sqlite.py`
 
-Текущая схема §4.4 (`core/db.py`) переносится в `store/sqlite.py` без семантических изменений
-(11 таблиц + `schema_meta`, индексы, триггеры I4/I6/I7/I13/I18). Добавляются методы доступа
-(реализация `StorePort`):
+Схема §4.4 перенесена из бывшего `core/db.py` (удалён в T1.3) в `store/sqlite.py` без
+семантических изменений (11 таблиц + `schema_meta`, индексы, триггеры I4/I6/I7/I13/I18).
+Методы доступа (реализация `StorePort`):
 
 ```python
 class SqliteStore:
@@ -357,11 +358,15 @@ hound run \
 
 ### E.1. Команды (из §3.1)
 
+> **Источник истины по CLI — код `core/cli/`** (`main.py`, `package_commands.py`). Таблица ниже —
+> его зеркало; при расхождении верен код. Актуальный список команд см. также `./hound.py --help`.
+
 | Команда | Назначение | Пишет |
 |---|---|---|
 | `hound resolve` | нормализация входов + линт | — (отчёт) |
 | `hound plan` | план прогона, когорта | run.yaml (черновик), cohort.yaml |
 | `hound discover` | Discovery-агент | passports, run |
+| `hound passport-scout` | авто-генерация **черновика** паспорта продукта: краул `--url` (и, при поиске, URL выдачи) → tool-less LLM-разведка (`discovery_llm`) → консервативный черновик. Сателлиты — только `draft`/`not_found`; `relationship_evidence`/`upstream` — лишь при подтверждённом URL и дословной цитате (I10/I15, precision-first). Публикация только при `report.ok`; `--dry-run` не пишет. Кандидаты не выдумываются без LLM-конфигурации | `passports/{product_id}/…yaml` (+ sidecar кандидатов) |
 | `hound package scout` | веб-заземлённая разведка пакета категории: pipeline сам делает SERP+краул+extract, tool-less LLM синтезирует гипотезы → консервативный маппинг → кандидаты (`needs_human=True`; auto-approve нет, I18/I19/A3). Провайдер поиска резолвится из `config/deploy.yaml` (`search.adapter`/`search.by_language` по `--lang`) детерминированно; `--search-adapter` переопределяет (I16/I21/I23) | `packages/{case_id}/sources/scout/{date}.candidates.json` (+ `.provenance.json`, в т.ч. `search_provider`) |
 | `hound package {module\|role\|param\|baseline\|scope\|golden\|run\|artifact} {get\|list\|show}` | read-плоскость управления пакетом: единичные элементы и наборы по критерию поиска (`--search`/`--product`/`--param`), обзор/чтение всех 8 артефактов (`artifact list`/`artifact get [--raw]`), `--json` | — (read-only) |
 | `hound run [--until PHASE]` | конвейер Ш1–Ш9 | БД, артефакты |
@@ -406,15 +411,16 @@ CLI-поверхности. Каждая проверка обёрнута в tr
 
 ## F. Миграция текущего кода
 
-| Шаг | Действие | Проверка |
-|---|---|---|
-| 1 | Расщепить `core/schemas.py` → `domain/{enums,models,invariants,r2,anchors}.py` | `tests/selfcheck.py` остаётся зелёным (импорты обновляются) |
-| 2 | Расщепить `core/db.py` → `store/sqlite.py` (DDL) + `ports/store.py` (контракт) | DDL-тест + триггеры |
-| 3 | Ввести `ports/*` (Protocol) и адаптеры-заглушки | импорт-граф CI (итерация 4) |
-| 4 | Перенести проверки `Cell._enforce_invariants` в `domain/invariants.py` (оставить вызов из Pydantic) | selfcheck |
+| Шаг | Действие | Проверка | Статус |
+|---|---|---|---|
+| 1 | Расщепить `core/schemas.py` → `domain/{enums,models,invariants,r2,anchors}.py` | `tests/selfcheck.py` зелёный | ✅ T1.2, монолит **удалён** |
+| 2 | Расщепить `core/db.py` → `store/sqlite.py` (DDL) + `ports/store.py` (контракт) | DDL-тест + триггеры | ✅ T1.3, монолит **удалён** |
+| 3 | Ввести `ports/*` (Protocol) и адаптеры-заглушки | импорт-граф CI (итерация 4) | ✅ |
+| 4 | Перенести проверки `Cell._enforce_invariants` в `domain/invariants.py` (вызов из Pydantic) | selfcheck | ✅ |
 
-Миграция не ломает существующий публичный контракт `core.schemas`/`core.db` до полного перехода
-(переходные re-export-шимы).
+Ранее использовавшиеся transitional re-export-шимы `core.schemas`/`core.db` **удалены**;
+публичный контракт — `core.domain` и `core.store.sqlite` (проверяется
+`tests/selfcheck.py::_shims_removed`).
 
 ---
 

@@ -331,9 +331,28 @@ package/catalog version, edition/jurisdiction. Нарушено → `cross-cycle
 
 ---
 
-## F. Диаграммы
+## F. Подсистемы авторства пакета и экспериментов (обзор)
 
-### F.1. Последовательность Ш6
+Помимо конвейера Ш1–Ш9, в `core/pipeline/` выделены две вспомогательные подсистемы; их CLI-фасад —
+`03-data-config-cli.md` §E.1 (источник истины по CLI — код `core/cli/`).
+
+**Авторство пакета.** `package_io.py` (чтение/запись артефактов пакета), `package_admin.py`
+(CRUD модулей/ролей/параметров/baselines, перенормировка весов), `package_discovery.py` и
+`package_candidates.py` (план и применение кандидатов), `package_scout.py` (веб-заземлённая
+разведка пакета: pipeline сам делает SERP→краул→extract, tool-less LLM синтезирует гипотезы).
+Авто-генерация черновика паспорта продукта — `passport_scout.py`; общие scout-хелперы (краул/
+экстракция, разбор ответа) — `scout_common.py`. Выход подсистемы — **кандидаты** и черновики
+(`needs_human=True`), не evidence: auto-approve нет (I18/I19, A3).
+
+**Эксперименты.** `adversarial.py` (R8: проверка устойчивости), `serp_loop.py` (append-only
+раунды сборок `R0-base`/`R1-serp`/…, K2) и golden (`golden.py` + `packages/{case_id}/golden.csv`,
+тир fast/full) — см. `03 §E.1`, а также §B.3 и `06` (W8/W12).
+
+---
+
+## G. Диаграммы
+
+### G.1. Последовательность Ш6
 
 ```mermaid
 sequenceDiagram
@@ -360,7 +379,7 @@ sequenceDiagram
     end
 ```
 
-### F.2. Петля SERP (I18/I19) — append-only раунды (K2)
+### G.2. Петля SERP (I18/I19) — append-only раунды (K2)
 
 ```mermaid
 flowchart LR
@@ -377,7 +396,7 @@ flowchart LR
 
 ---
 
-## G. Traceability и открытые вопросы
+## H. Traceability и открытые вопросы
 
 | Регламент | Покрытие |
 |---|---|

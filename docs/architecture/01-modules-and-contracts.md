@@ -16,17 +16,17 @@
 Пакет `core.*` разбит на слои; разрешённые импорты задаются матрицей. CI проверяет импорты
 (статически — через `ast`, без исполнения).
 
-| Из \ В | domain | ports | pipeline | adapters | store | config | cli | util |
-|---|---|---|---|---|---|---|---|---|
-| **domain** | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
-| **ports** | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
-| **pipeline** | ✅ | ✅ | ✅ | ❌ | ❌ | ✅ | ❌ | ✅ |
-| **adapters** | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ |
-| **store** | ✅ | ✅ | ❌ | ❌ | ✅ | ✅ | ❌ | ✅ |
-| **config** | ✅ | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ✅ |
-| **cli** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| **edge** | ✅ | ✅ | ❌ | ✅ | ❌ | ✅ | ❌ | ✅ |
-| **util** | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
+| Из \ В | domain | ports | pipeline | adapters | store | config | cli | edge | util |
+|---|---|---|---|---|---|---|---|---|---|
+| **domain** | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
+| **ports** | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
+| **pipeline** | ✅ | ✅ | ✅ | ❌ | ❌ | ✅ | ❌ | ❌ | ✅ |
+| **adapters** | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ❌ | ✅ |
+| **store** | ✅ | ✅ | ❌ | ❌ | ✅ | ✅ | ❌ | ❌ | ✅ |
+| **config** | ✅ | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ✅ |
+| **cli** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ |
+| **edge** | ✅ | ✅ | ❌ | ✅ | ❌ | ✅ | ❌ | ✅ | ✅ |
+| **util** | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
 
 **Композиция (wiring):** `cli` и `edge` — два **composition root**. `cli` (Z0) соединяет `pipeline`
 с адаптерами (ручной DI, без фреймворка — A1); `edge` (Z1/DMZ, `07`) собирает **только веб-адаптеры**
@@ -44,8 +44,8 @@
 
 ### 2.1. `domain/enums.py`
 
-Зеркало `docs/status-dictionary.yaml`. Существующие `StrEnum` (Status, SourceKind, …) переносятся
-из текущего `core/schemas.py` без изменения семантики. Добавляется:
+Зеркало `docs/status-dictionary.yaml`. Существующие `StrEnum` (Status, SourceKind, …) перенесены
+из бывшего монолита `core/schemas.py` (удалён в T1.2) без изменения семантики. Добавляется:
 
 ```python
 class Gate(StrEnum):        G1 = "G1"; G2 = "G2"; G3 = "G3"; G4 = "G4"
@@ -59,7 +59,8 @@ class Scenario(StrEnum):    EVALUATOR="evaluator"; SEARCH_ADAPTER="search_adapte
 
 ### 2.2. `domain/models.py`
 
-Чистые Pydantic-модели (без I/O). Переносятся из `core/schemas.py` + уточняются:
+Чистые Pydantic-модели (без I/O). Перенесены из бывшего `core/schemas.py` (удалён в T1.2) и
+уточнены:
 
 | Модель | Изменение против текущей |
 |---|---|
@@ -427,17 +428,18 @@ JSONPath-маппинг полей) и реализует `RegistryFetcherPort`.
 
 ---
 
-## 9. Что переносится из текущего кода (миграция)
+## 9. Что перенесено из прежнего кода (миграция)
 
-| Сейчас | Станет | Действие |
+| Было | Стало | Статус |
 |---|---|---|
-| `core/schemas.py` (монолит) | `domain/enums.py` + `domain/models.py` + `domain/invariants.py` + `domain/r2.py` | расщепить |
-| `core/db.py` DDL/триггеры | `store/sqlite.py` (DDL) + `ports/store.py` (контракт) | разделить данные/интерфейс |
-| `tests/selfcheck.py` | `tests/domain/*`, `tests/store/*` | разбить по слоям (обёртка selfcheck остаётся) |
+| `core/schemas.py` (монолит) | `domain/enums.py` + `domain/models.py` + `domain/invariants.py` + `domain/r2.py` | ✅ выполнено (T1.2); монолит **удалён** |
+| `core/db.py` DDL/триггеры | `store/sqlite.py` (DDL) + `ports/store.py` (контракт) | ✅ выполнено (T1.3); монолит **удалён** |
+| `tests/selfcheck.py` | `tests/domain/*`, `tests/store/*` | частично (обёртка selfcheck остаётся) |
 
-Последовательность миграции и её привязка к майлстоунам — `06-implementation-strategy.md` (§работа W1).
-Принцип: не ломать текущий selfcheck — расщепление идёт с transitional re-export-шимами, selfcheck
-остаётся зелёным на каждом шаге. До завершения расщепления `core/schemas.py` и `core/db.py` рабочие.
+Ранее использовавшиеся transitional re-export-шимы `core/schemas.py` и `core/db.py` **удалены**:
+импорты идут напрямую из `core.domain` и `core.store.sqlite`. Последовательность миграции и её
+привязка к майлстоунам — `06-implementation-strategy.md` (§работа W1). Новые правки не должны
+возвращать эти модули (проверяется в `tests/selfcheck.py::_shims_removed`).
 
 ---
 
