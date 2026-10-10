@@ -24,19 +24,16 @@ from typing import Any
 
 import yaml
 
-from core.cli.main import (
+from core.cli.errors import (
     EXIT_BLOCKED,
     EXIT_ERROR,
     EXIT_NOT_FOUND,
     EXIT_OK,
     EXIT_USAGE,
     CliError,
-    _concise,
-    _emit_error,
-    _llm_configured,
-    _print_json,
-    _search_adapter_configured,
 )
+from core.cli.output import concise, emit_error, print_json
+from core.cli.wiring import _llm_configured
 from core.pipeline.package_admin import (
     OpResult,
     PackageAdminError,
@@ -124,7 +121,7 @@ def _invoke(fn: Any) -> Any:
 def _emit(args: argparse.Namespace, payload: dict[str, Any], lines: list[str]) -> None:
     """Печатает ``payload`` как JSON при ``--json``, иначе построчно ``lines``."""
     if getattr(args, "json", False):
-        _print_json(payload)
+        print_json(payload)
     else:
         sys.stdout.write("\n".join(lines) + "\n")
 
@@ -1154,12 +1151,12 @@ def cmd_package_scout(args: argparse.Namespace) -> int:
     """
     from core.cli.wiring import (
         LOCAL_PROFILE,
-        SUPPORTED_SEARCH_ADAPTERS,
+        SearchResolutionError,
         WiringError,
         build_adapters,
         build_discovery_llm,
         build_scout_crawler,
-        build_search_adapter,
+        resolve_and_build_search_adapter,
     )
 
     pkg_dir = Path(args.package)
@@ -1186,10 +1183,10 @@ def cmd_package_scout(args: argparse.Namespace) -> int:
                 max_tokens=args.llm_max_tokens,
             )
         except WiringError as exc:
-            _emit_error(args, "llm", _concise(exc))
+            emit_error(args, "llm", concise(exc))
             return EXIT_USAGE
     if not _llm_configured(discovery_llm):
-        _emit_error(
+        emit_error(
             args,
             "llm",
             "LLM-разведка не сконфигурирована: задайте --llm-base-url/--llm-model "
@@ -1201,39 +1198,18 @@ def cmd_package_scout(args: argparse.Namespace) -> int:
     #    Провайдер выбирается детерминированно (I16: функция от lang, не от продукта;
     #    дух I21: по правилу, а не LLM). Выбранный провайдер фиксируется в провенансе (I23).
     injected_search = getattr(args, "search_adapter", None)
-    resolved_provider: str | None = None
     search: Any
-    if injected_search is not None:
-        # Тестовый шов: резолв/валидация провайдера пропускаются (провайдер зафиксирован
-        # вне конфига — ответственность теста).
-        search = injected_search
-    elif args.no_search:
-        search = None
-    else:
-        from core.config.deploy import load_deploy_config, resolve_search_provider
-
-        config = load_deploy_config(None)
-        resolved_provider = resolve_search_provider(
-            config.search, lang=args.lang, explicit=args.search_adapter_kind
+    try:
+        search, resolved_provider = resolve_and_build_search_adapter(
+            lang=args.lang,
+            explicit=args.search_adapter_kind,
+            injected=injected_search,
+            no_search=args.no_search,
         )
-        # Валидация против реестра адаптеров — в composition root (config-слой
-        # провайдеро-нейтрален). Неизвестный провайдер → понятная ошибка (I19: не выдумываем).
-        if resolved_provider not in SUPPORTED_SEARCH_ADAPTERS:
-            _emit_error(
-                args,
-                "search",
-                f"неизвестный провайдер поиска {resolved_provider!r} "
-                "(config/deploy.yaml search.adapter/by_language либо --search-adapter); "
-                f"поддерживаются: {', '.join(SUPPORTED_SEARCH_ADAPTERS)}",
-            )
-            return EXIT_USAGE
-        try:
-            search = build_search_adapter(resolved_provider)
-        except WiringError as exc:
-            _emit_error(args, "I19", _concise(exc))
-            return EXIT_USAGE
-        if not _search_adapter_configured(search):
-            _emit_error(
+    except SearchResolutionError as exc:
+        if exc.code == "I19":
+            # Текст scout отличается от discover (--no-search с --url); сохраняем его.
+            emit_error(
                 args,
                 "I19",
                 "поисковый адаптер недоступен: нет httpx либо учётных данных "
@@ -1241,6 +1217,12 @@ def cmd_package_scout(args: argparse.Namespace) -> int:
                 "кандидаты не выдумываются (используйте --no-search с --url)",
             )
             return EXIT_ERROR
+        emit_error(args, exc.code, concise(exc))
+        return EXIT_USAGE
+    except WiringError as exc:
+        # build_search_adapter: неизвестный адаптер — как раньше, I19/EXIT_USAGE.
+        emit_error(args, "I19", concise(exc))
+        return EXIT_USAGE
 
     # Имя выбранного провайдера для провенанса (I23): резолв из конфига либо атрибут шва.
     provider_label: str | None = resolved_provider

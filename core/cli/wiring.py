@@ -61,7 +61,12 @@ from core.adapters.search_glm import GlmSearchAdapter
 from core.adapters.search_google import GoogleSearchAdapter
 from core.adapters.search_openwebsearch import OpenWebSearchAdapter
 from core.adapters.search_yandex import YandexSearchAdapter
-from core.config.deploy import DeployConfig, is_split, load_deploy_config
+from core.config.deploy import (
+    DeployConfig,
+    is_split,
+    load_deploy_config,
+    resolve_search_provider,
+)
 from core.pipeline import Ports, Runner
 from core.pipeline.runner import PHASES, Clock, PhaseFn
 from core.ports.crawler import CrawlerPort
@@ -94,6 +99,8 @@ __all__ = [
     "build_adapters",
     "build_runner",
     "manifest_deploy_fields",
+    "SearchResolutionError",
+    "resolve_and_build_search_adapter",
 ]
 
 #: Профиль ``local`` — один процесс, реальные адаптеры in-process (дефолт, ``07``).
@@ -236,6 +243,97 @@ def build_search_adapter(adapter: str) -> SearchAdapterPort:
         f"неизвестный поисковый адаптер: {adapter!r}; "
         f"поддерживаются: {', '.join(SUPPORTED_SEARCH_ADAPTERS)}"
     )
+
+
+def _llm_configured(adapter: Any) -> bool:
+    """Сконфигурирован ли LLM-адаптер (готовность и непустые ``base_url``/``model_id``)."""
+    return bool(getattr(adapter, "available", False)) and bool(
+        getattr(adapter, "model_id", "") or getattr(adapter, "base_url", "")
+    )
+
+
+def _search_adapter_configured(adapter: Any) -> bool:
+    """Готов ли реальный поисковый адаптер к вызовам (зависимость и учётные данные).
+
+    Ключевые адаптеры (``yandex``/``glm``/``google``) выставляют атрибут ``api_key``;
+    без ключа такой адаптер не готов, и кандидаты не выдумываются (I19). Бесключевые
+    адаптеры (``duckduckgo``/``open-websearch``) атрибута ``api_key`` не имеют вовсе —
+    для них достаточна доступность (``available``), иначе они ошибочно блокировались
+    бы. Для инъектированного тестового шва проверка не применяется (см. ``cmd_discover``).
+    """
+    if not bool(getattr(adapter, "available", True)):
+        return False
+    if hasattr(adapter, "api_key") and not getattr(adapter, "api_key", None):
+        return False
+    return True
+
+
+class SearchResolutionError(WiringError):
+    """Ошибка разрешения/готовности поискового адаптера (composition root, ``03`` §D.6).
+
+    Несёт код правила CLI в ``code``:
+
+    * ``"search"`` — выбран неизвестный провайдер поиска (``EXIT_USAGE``);
+    * ``"I19"`` — реальный адаптер недоступен (нет зависимости/учётных данных);
+      вызывающий маппит его в ``EXIT_ERROR`` (``discover``) либо ``EXIT_USAGE`` (scout).
+
+    Наследует :class:`WiringError`, поэтому старые обработчики (``except WiringError``)
+    не ломаются.
+    """
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+def resolve_and_build_search_adapter(
+    *,
+    lang: str,
+    explicit: str | None,
+    injected: Any | None = None,
+    no_search: bool = False,
+) -> tuple[Any | None, str | None]:
+    """Разрешает провайдера поиска и собирает адаптер (общий хелпер ``discover``/scout).
+
+    Семантика (детерминированная, без LLM — I16/I21):
+
+    * ``injected is not None`` — тестовый шов: резолв/валидация провайдера пропускаются,
+      возвращается ``(injected, getattr(injected, "provider", "") or None)``;
+    * ``no_search`` — поиск выключен: ``(None, None)``;
+    * иначе — ``load_deploy_config(None)`` → :func:`resolve_search_provider` → проверка
+      против :data:`SUPPORTED_SEARCH_ADAPTERS` → :func:`build_search_adapter` → проверка
+      готовности (:func:`_search_adapter_configured`).
+
+    :returns: ``(adapter, provider)`` — провайдер для провенанса (I23).
+    :raises SearchResolutionError: неизвестный провайдер (``code="search"``) либо
+        недоступный реальный адаптер (``code="I19"``).
+    :raises WiringError: ошибка сборки адаптера (пробрасывается как есть).
+    """
+    if injected is not None:
+        return injected, (getattr(injected, "provider", "") or None)
+    if no_search:
+        return None, None
+    config = load_deploy_config(None)
+    provider = resolve_search_provider(config.search, lang=lang, explicit=explicit)
+    # Валидация против реестра адаптеров — в composition root (config-слой
+    # провайдеро-нейтрален). Неизвестный провайдер → понятная ошибка (I19: не выдумываем).
+    if provider not in SUPPORTED_SEARCH_ADAPTERS:
+        raise SearchResolutionError(
+            "search",
+            f"неизвестный провайдер поиска {provider!r} "
+            "(config/deploy.yaml search.adapter/by_language либо --search-adapter); "
+            f"поддерживаются: {', '.join(SUPPORTED_SEARCH_ADAPTERS)}",
+        )
+    adapter = build_search_adapter(provider)
+    if not _search_adapter_configured(adapter):
+        raise SearchResolutionError(
+            "I19",
+            "поисковый адаптер недоступен: нет httpx либо учётных данных "
+            "(yandex: YANDEX_SEARCH_API_KEY/YANDEX_FOLDER_ID; "
+            "glm: GLM_SEARCH_API_KEY; google: GOOGLE_API_KEY+GOOGLE_CSE_ID); "
+            "кандидаты не выдумываются",
+        )
+    return adapter, provider
 
 
 def _env_float(name: str, default: float) -> float:

@@ -38,7 +38,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import re
 import sys
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
@@ -52,20 +51,40 @@ from core.adapters.remote_gateway import (
     GatewayError,
     TransportFn,
 )
+from core.cli.errors import (
+    EXIT_BLOCKED,
+    EXIT_ERROR,
+    EXIT_NOT_FOUND,
+    EXIT_OK,
+    EXIT_USAGE,
+    FALLBACK_CODE,
+    CliError,
+    LintFailure,
+    extract_code,
+)
+from core.cli.output import (
+    concise,
+    emit_error,
+    emit_lint_failure,
+    print_json,
+)
 from core.cli.wiring import (
     LOCAL_PROFILE,
     SPLIT_PROFILE,
     SUPPORTED_PROFILES,
     SUPPORTED_SEARCH_ADAPTERS,
+    SearchResolutionError,
     WiringError,
+    _llm_configured,
+    _search_adapter_configured,
     build_adapters,
     build_discovery_llm,
     build_gateway,
     build_runner,
     build_scout_crawler,
-    build_search_adapter,
     build_store,
     manifest_deploy_fields,
+    resolve_and_build_search_adapter,
     run_db_path,
 )
 from core.config import (
@@ -79,7 +98,6 @@ from core.config.deploy import (
     DeployConfig,
     is_split,
     load_deploy_config,
-    resolve_search_provider,
 )
 from core.domain.enums import Status
 from core.domain.models import CatalogRow, Cohort
@@ -131,20 +149,16 @@ PhasesFactory = Callable[..., dict[str, PhaseFn]]
 #: Фабрика плана прогона (тестовый шов ``run``: подмена детерминированного ``plan``).
 PlanFactory = Callable[..., RunPlan]
 
-# -- Коды возврата ---------------------------------------------------------- #
-#: Успех.
-EXIT_OK = 0
-#: Непредвиденная ошибка исполнения.
-EXIT_ERROR = 1
-#: Ошибка входа/конфигурации: блокирующий линт, валидация, неразобранные аргументы.
-EXIT_USAGE = 2
-#: Прогон остановлен на гейте (нужно человеческое решение, ``03`` §E.2).
-EXIT_BLOCKED = 3
-#: Запрошенный объект не найден (например, ``source_id`` не резолвится).
-EXIT_NOT_FOUND = 4
-
-#: Код по умолчанию для ошибок без распознанного инварианта/правила.
-_FALLBACK_CODE = "E"
+# -- Коды возврата/ошибки --------------------------------------------------- #
+# Коды возврата, :class:`CliError`/:class:`LintFailure`, :func:`extract_code` и вывод
+# (JSON/ошибки) вынесены в :mod:`core.cli.errors`/:mod:`core.cli.output`; здесь —
+# реэкспорт для обратной совместимости публичной и приватной поверхности ``main``.
+_FALLBACK_CODE = FALLBACK_CODE
+# Приватные алиасы вывода (историческая поверхность ``main``; тесты/вызовы сохраняются).
+_concise = concise
+_print_json = print_json
+_emit_error = emit_error
+_emit_lint_failure = emit_lint_failure
 
 #: Допустимые явные вердикты переаттестации для ``hound promote --status`` (I14).
 #: N/A сюда не входит: назначение N/A — отдельное человеческое решение (§5), не
@@ -170,110 +184,6 @@ _RUNS_DIR_COMMANDS: frozenset[str] = frozenset({"run", "diff"})
 #: resolved ``paths.passports``. ``discover`` сюда не входит: его ``--passports-dir`` —
 #: opt-in seed-источник запросов (I19), а не каталог-дефолт.
 _PASSPORTS_DIR_COMMANDS: frozenset[str] = frozenset({"run", "passport-scout"})
-
-#: ``CODE: message`` — сообщения линтера/инвариантов начинаются с кода правила.
-_CODE_RE = re.compile(r"^\s*([^\s:]+):")
-#: Код инварианта внутри текста (например, ``I2b``).
-_INVARIANT_RE = re.compile(r"\bI\d+[a-z]?\b")
-#: Ссылка на раздел регламента (например, ``§4.2``/``§4.2/I2b``).
-_SECTION_RE = re.compile(r"§[\d.]+(?:/[^\s:,;]+)?")
-
-
-class CliError(Exception):
-    """Ошибка CLI с кодом инварианта/правила и кодом возврата.
-
-    Сообщение печатается как ``CODE: message`` в stderr (или в JSON при ``--json``).
-    """
-
-    def __init__(
-        self,
-        message: str,
-        *,
-        code: str | None = None,
-        exit_code: int = EXIT_ERROR,
-    ) -> None:
-        super().__init__(message)
-        self.code = code or extract_code(message)
-        self.exit_code = exit_code
-
-
-class LintFailure(CliError):
-    """Блокирующие нарушения линтера входов (``03`` §D.3/§E.2).
-
-    ``blocking``/``warnings`` сохраняются раздельно: CLI печатает блокирующие в stderr
-    (каждое сообщение уже несёт код правила), предупреждения — отдельной строкой.
-    """
-
-    def __init__(self, blocking: Sequence[str], warnings: Sequence[str] = ()) -> None:
-        super().__init__(
-            "блокирующие нарушения линтера", code="lint", exit_code=EXIT_USAGE
-        )
-        self.blocking = list(blocking)
-        self.warnings = list(warnings)
-
-
-# ---------------------------------------------------------------------------
-# Разбор кодов и вывод
-# ---------------------------------------------------------------------------
-
-
-def extract_code(message: str) -> str:
-    """Извлекает код инварианта/правила из сообщения (для ``CODE: message``).
-
-    Порядок попыток: ведущий ``CODE:`` (сообщения линтера), затем инвариант вида
-    ``I2b`` в тексте (сообщения домена), затем ссылка ``§4.2``. Если ничего не найдено —
-    :data:`_FALLBACK_CODE`.
-    """
-    text = (message or "").strip()
-    if not text:
-        return _FALLBACK_CODE
-    match = _CODE_RE.match(text)
-    if match and len(match.group(1)) <= 32:
-        return match.group(1)
-    for pattern in (_INVARIANT_RE, _SECTION_RE):
-        found = pattern.search(text)
-        if found:
-            return found.group(0)
-    return _FALLBACK_CODE
-
-
-def _concise(exc: BaseException) -> str:
-    """Однострочное представление исключения (без простыней traceback)."""
-    return " ".join(str(exc).split()) or type(exc).__name__
-
-
-def _print_json(payload: dict[str, Any]) -> None:
-    """Печатает JSON-объект в stdout (машинночитаемый вывод, ``--json``)."""
-    sys.stdout.write(
-        json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str) + "\n"
-    )
-
-
-def _emit_lint_failure(args: argparse.Namespace, exc: LintFailure) -> None:
-    """Печатает блокирующий линт: каждое сообщение уже несёт код правила."""
-    if getattr(args, "json", False):
-        _print_json(
-            {
-                "ok": False,
-                "error": "lint",
-                "blocking": exc.blocking,
-                "warnings": exc.warnings,
-            }
-        )
-        return
-    for message in exc.blocking:
-        sys.stderr.write(f"{message}\n")
-    for message in exc.warnings:
-        sys.stderr.write(f"{_FALLBACK_CODE}: предупреждение: {message}\n")
-
-
-def _emit_error(args: argparse.Namespace, code: str, message: str) -> None:
-    """Печатает ошибку как ``CODE: message`` (stderr) или JSON (stdout)."""
-    if getattr(args, "json", False):
-        _print_json({"ok": False, "error": code, "message": message})
-        return
-    sys.stderr.write(f"{code}: {message}\n")
-
 
 # ---------------------------------------------------------------------------
 # Команды
@@ -827,38 +737,16 @@ def cmd_discover(args: argparse.Namespace) -> int:
             exit_code=EXIT_USAGE,
         )
 
-    adapter: SearchAdapterPort
-    if injected is not None:
-        # Тестовый шов: резолв/валидация провайдера пропускаются (провайдер зафиксирован
-        # вне конфига — ответственность теста).
-        adapter = injected
-    else:
-        config = load_deploy_config(None)
-        provider = resolve_search_provider(
-            config.search, lang=args.lang, explicit=args.search_adapter_kind
+    adapter: Any
+    try:
+        adapter, _provider = resolve_and_build_search_adapter(
+            lang=args.lang,
+            explicit=args.search_adapter_kind,
+            injected=injected,
         )
-        # Валидация против реестра адаптеров — в composition root (config-слой
-        # провайдеро-нейтрален). Неизвестный провайдер → понятная ошибка (I19: не выдумываем).
-        if provider not in SUPPORTED_SEARCH_ADAPTERS:
-            _emit_error(
-                args,
-                "search",
-                f"неизвестный провайдер поиска {provider!r} "
-                "(config/deploy.yaml search.adapter/by_language либо --search-adapter); "
-                f"поддерживаются: {', '.join(SUPPORTED_SEARCH_ADAPTERS)}",
-            )
-            return EXIT_USAGE
-        adapter = build_search_adapter(provider)
-        if not _search_adapter_configured(adapter):
-            _emit_error(
-                args,
-                "I19",
-                "поисковый адаптер недоступен: нет httpx либо учётных данных "
-                "(yandex: YANDEX_SEARCH_API_KEY/YANDEX_FOLDER_ID; "
-                "glm: GLM_SEARCH_API_KEY; google: GOOGLE_API_KEY+GOOGLE_CSE_ID); "
-                "кандидаты не выдумываются",
-            )
-            return EXIT_ERROR
+    except SearchResolutionError as exc:
+        _emit_error(args, exc.code, _concise(exc))
+        return EXIT_USAGE if exc.code == "search" else EXIT_ERROR
     if not getattr(adapter, "available", True):
         _emit_error(
             args,
@@ -1211,13 +1099,6 @@ def _artifacts_payload(artifacts: Any) -> dict[str, str | None]:
     }
 
 
-def _llm_configured(adapter: Any) -> bool:
-    """Сконфигурирован ли LLM-адаптер (готовность и непустые ``base_url``/``model_id``)."""
-    return bool(getattr(adapter, "available", False)) and bool(
-        getattr(adapter, "model_id", "") or getattr(adapter, "base_url", "")
-    )
-
-
 def _load_package_roles(package: str | Path | None) -> list[str] | None:
     """Читает ``role_id`` из ``{package}/package.yaml`` (подсказка LLM; опционально).
 
@@ -1253,22 +1134,6 @@ def _print_passport_scout(payload: dict[str, Any]) -> None:
         lines.append(f"error: {error}")
     lines.append(f"ok: {'yes' if payload['ok'] else 'no'}")
     sys.stdout.write("\n".join(lines) + "\n")
-
-
-def _search_adapter_configured(adapter: Any) -> bool:
-    """Готов ли реальный поисковый адаптер к вызовам (зависимость и учётные данные).
-
-    Ключевые адаптеры (``yandex``/``glm``/``google``) выставляют атрибут ``api_key``;
-    без ключа такой адаптер не готов, и кандидаты не выдумываются (I19). Бесключевые
-    адаптеры (``duckduckgo``/``open-websearch``) атрибута ``api_key`` не имеют вовсе —
-    для них достаточна доступность (``available``), иначе они ошибочно блокировались
-    бы. Для инъектированного тестового шва проверка не применяется (см. ``cmd_discover``).
-    """
-    if not bool(getattr(adapter, "available", True)):
-        return False
-    if hasattr(adapter, "api_key") and not getattr(adapter, "api_key", None):
-        return False
-    return True
 
 
 def _discover_seed_queries(passports_dir: str | Path | None) -> list[str]:

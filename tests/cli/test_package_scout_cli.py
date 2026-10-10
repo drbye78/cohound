@@ -218,7 +218,7 @@ def test_search_provider_defaults_to_yandex_key_gate(
     _clear_env(monkeypatch)
     # «Нет конфига»: канонический путь даёт безопасный дефолт ``local`` без search.*.
     monkeypatch.setattr(
-        "core.config.deploy.load_deploy_config",
+        "core.cli.wiring.load_deploy_config",
         lambda _path=None: DeployConfig(profile="local"),
     )
     package = _package(tmp_path)
@@ -247,7 +247,7 @@ def test_search_provider_resolved_from_config_by_language(
 
     monkeypatch.setattr("core.cli.wiring.build_search_adapter", _fake_build)
     monkeypatch.setattr(
-        "core.config.deploy.load_deploy_config",
+        "core.cli.wiring.load_deploy_config",
         lambda _path=None: DeployConfig(
             profile="local",
             search=SearchDeployConfig(by_language={"ru": "yandex", "en": "duckduckgo"}),
@@ -281,7 +281,7 @@ def test_search_provider_explicit_flag_overrides_config(
 
     monkeypatch.setattr("core.cli.wiring.build_search_adapter", _fake_build)
     monkeypatch.setattr(
-        "core.config.deploy.load_deploy_config",
+        "core.cli.wiring.load_deploy_config",
         lambda _path=None: DeployConfig(
             profile="local",
             search=SearchDeployConfig(adapter="yandex", by_language={"ru": "duckduckgo"}),
@@ -306,7 +306,7 @@ def test_search_provider_unknown_from_config_is_usage_error(
     """Неизвестный провайдер из конфига → ``EXIT_USAGE`` (``search``), без выдумывания."""
     _clear_env(monkeypatch)
     monkeypatch.setattr(
-        "core.config.deploy.load_deploy_config",
+        "core.cli.wiring.load_deploy_config",
         lambda _path=None: DeployConfig(
             profile="local", search=SearchDeployConfig(adapter="not-a-provider")
         ),

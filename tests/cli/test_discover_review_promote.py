@@ -277,13 +277,14 @@ def test_discover_keyless_adapter_not_rejected_for_api_key(
 
     # ``core.cli`` экспортирует функцию ``main`` (не модуль) — берём модуль по имени.
     cli_main = importlib.import_module("core.cli.main")
+    cli_wiring = importlib.import_module("core.cli.wiring")
     monkeypatch.setattr(
-        cli_main, "build_search_adapter", lambda _name: _KeylessAdapter()
+        cli_wiring, "build_search_adapter", lambda _name: _KeylessAdapter()
     )
     # Конфиг без явного адаптера → провайдер по умолчанию (yandex); иначе резолвер
     # читал бы config/deploy.yaml репозитория (там пример-адаптер).
     monkeypatch.setattr(
-        cli_main, "load_deploy_config", lambda _path=None: DeployConfig(profile="local")
+        cli_wiring, "load_deploy_config", lambda _path=None: DeployConfig(profile="local")
     )
     code = cli_main.main(["discover", "--query", "q1", "--json"])
     assert code == EXIT_OK
@@ -294,15 +295,16 @@ def test_discover_provider_from_config_by_language(
 ) -> None:
     """Провайдер выбирается из ``config/deploy.yaml`` по языку (by_language, I16/I23)."""
     cli_main = importlib.import_module("core.cli.main")
+    cli_wiring = importlib.import_module("core.cli.wiring")
     requested: list[str] = []
 
     def _fake_build(name: str) -> FakeSearchAdapter:
         requested.append(name)
         return FakeSearchAdapter()
 
-    monkeypatch.setattr(cli_main, "build_search_adapter", _fake_build)
+    monkeypatch.setattr(cli_wiring, "build_search_adapter", _fake_build)
     monkeypatch.setattr(
-        cli_main,
+        cli_wiring,
         "load_deploy_config",
         lambda _path=None: DeployConfig(
             profile="local",
@@ -322,15 +324,16 @@ def test_discover_explicit_flag_overrides_config(
 ) -> None:
     """Явный ``--search-adapter`` побеждает конфиг (explicit > by_language > adapter)."""
     cli_main = importlib.import_module("core.cli.main")
+    cli_wiring = importlib.import_module("core.cli.wiring")
     requested: list[str] = []
 
     def _fake_build(name: str) -> FakeSearchAdapter:
         requested.append(name)
         return FakeSearchAdapter()
 
-    monkeypatch.setattr(cli_main, "build_search_adapter", _fake_build)
+    monkeypatch.setattr(cli_wiring, "build_search_adapter", _fake_build)
     monkeypatch.setattr(
-        cli_main,
+        cli_wiring,
         "load_deploy_config",
         lambda _path=None: DeployConfig(
             profile="local",
@@ -349,8 +352,9 @@ def test_discover_unknown_provider_from_config_is_usage_error(
 ) -> None:
     """Неизвестный провайдер из конфига → понятная ошибка (не выдумываем, I19)."""
     cli_main = importlib.import_module("core.cli.main")
+    cli_wiring = importlib.import_module("core.cli.wiring")
     monkeypatch.setattr(
-        cli_main,
+        cli_wiring,
         "load_deploy_config",
         lambda _path=None: DeployConfig(
             profile="local", search=SearchDeployConfig(adapter="not-a-provider")

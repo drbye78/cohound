@@ -55,7 +55,7 @@ from core.adapters.search_yandex import (
     ENV_FOLDER_ID as ENV_YANDEX_FOLDER_ID,
     ENV_SEARCH_MODE as ENV_YANDEX_MODE,
 )
-from core.cli.main import EXIT_ERROR, EXIT_OK
+from core.cli.errors import EXIT_ERROR, EXIT_OK
 from core.cli.wiring import (
     ENV_LLM_API_KEY,
     ENV_LLM_BASE_URL,
