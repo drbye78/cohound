@@ -71,6 +71,15 @@ from core.cli.wiring import (
     build_search_adapter,
 )
 from core.config.deploy import DEFAULT_DEPLOY_PATH, load_deploy_config
+from core.config.paths import (
+    DEFAULT_PATHS_FILE,
+    ENV_BY_FIELD,
+    ENV_HOME,
+    ENV_PATHS_FILE,
+    HARNESS_FIELDS,
+    load_paths_file,
+    resolve_paths,
+)
 from core.ports.search import SearchAdapterPort
 
 __all__ = [
@@ -530,27 +539,97 @@ def _config_group(root: Path) -> CheckGroup:
 # ---------------------------------------------------------------------------
 
 
-def _dir_writable(root: Path, rel: str) -> tuple[str, str]:
-    """Проверяет существование/создаваемость и запись в каталог ``rel`` (без мусора)."""
-    path = root / rel
+def _dir_writable(path: Path, label: str) -> tuple[str, str]:
+    """Проверяет существование/создаваемость и запись в каталог ``path`` (без мусора)."""
     if path.exists():
         if not path.is_dir():
-            return FAIL, f"{rel}: существует, но не каталог"
+            return FAIL, f"{label}: существует, но не каталог"
         with tempfile.NamedTemporaryFile(dir=path, prefix=".doctor-", delete=True):
             pass
         if os.access(path, os.W_OK):
-            return OK, f"{rel}: запись доступна"
-        return FAIL, f"{rel}: нет доступа на запись"
+            return OK, f"{label}: запись доступна"
+        return FAIL, f"{label}: нет доступа на запись"
     parent = path.parent
     if parent.exists() and os.access(parent, os.W_OK):
-        return OK, f"{rel}: отсутствует, будет создан при прогоне"
-    return FAIL, f"{rel}: отсутствует и родитель недоступен на запись"
+        return OK, f"{label}: отсутствует, будет создан при прогоне"
+    return FAIL, f"{label}: отсутствует и родитель недоступен на запись"
 
 
-def _dirs_group(root: Path) -> CheckGroup:
+def _effective_dir(base: Path, value: Path) -> Path:
+    """Эффективный каталог раскладки: абсолютный ``value`` как есть, относительный — от ``base``.
+
+    Резолвер раскладки возвращает абсолютные пути при заданном ``COHOUND_HOME``/абсолютных
+    env; относительные дефолты означают «от CWD». Для диагностики в границах ``base``
+    (корень репозитория) относительные приклеиваются к нему — так ``run_doctor(root=tmp)``
+    тестируем, а env/``home``-значения остаются абсолютными.
+    """
+    return value if value.is_absolute() else base / value
+
+
+def _dirs_group(base: Path) -> CheckGroup:
+    """Операционные каталоги (раскладка A.1) с учётом resolved-путей (03 §A.1).
+
+    Каталоги берутся из :func:`core.config.paths.resolve_paths` (env/``paths.yaml``/дефолт),
+    поэтому диагностика показывает доступность записи именно в **эффективные** каталоги.
+    Ошибка резолва (битый ``paths.yaml``) не роняет doctor: используется безопасный
+    относительный дефолт.
+    """
     builder = _GroupBuilder("dirs")
+    try:
+        config = resolve_paths()
+    except Exception:  # noqa: BLE001 — диагностика не должна падать (см. load_paths_file)
+        config = None
     for rel in OPERATIONAL_DIRS:
-        builder.add(rel, lambda _rel=rel: _dir_writable(root, _rel))
+        value = getattr(config, rel) if config is not None else Path(rel)
+        target = _effective_dir(base, value)
+        builder.add(rel, lambda _t=target, _rel=rel: _dir_writable(_t, _rel))
+    return builder.group
+
+
+# ---------------------------------------------------------------------------
+# Группа 5b: эффективная раскладка каталогов (resolved layout, 03 §A.1)
+# ---------------------------------------------------------------------------
+
+
+def _layout_source(field: str, file_doc: dict[str, Any]) -> str:
+    """Источник эффективного пути: ``env`` > ``file`` > ``home`` > ``default``.
+
+    Per-field env (``COHOUND_<FIELD>_DIR``) — ``env``; значение из ``paths.yaml`` — ``file``;
+    заданный ``COHOUND_HOME`` (сдвигает относительные) — ``home``; иначе ``default``.
+    """
+    if os.environ.get(ENV_BY_FIELD.get(field, "")):
+        return "env"
+    if field in file_doc:
+        return "file"
+    if os.environ.get(ENV_HOME):
+        return "home"
+    return "default"
+
+
+def _layout_group() -> CheckGroup:
+    """Показывает эффективную раскладку (resolved) и её источник для каждой оси (03 §A.1).
+
+    Значения — абсолютные при ``COHOUND_HOME``/абсолютных env; относительные — от CWD
+    (эффективное поведение). Секреты не печатаются (только пути).
+    """
+    builder = _GroupBuilder("layout")
+    file_target = Path(os.environ.get(ENV_PATHS_FILE) or DEFAULT_PATHS_FILE)
+    try:
+        file_doc = load_paths_file(file_target) if file_target.is_file() else {}
+    except ValueError:
+        file_doc = {}
+
+    def _check(field: str) -> tuple[str, str, str | None]:
+        config = resolve_paths()
+        value = getattr(config, field)
+        source = _layout_source(field, file_doc)
+        hint = None
+        if field in ("runs", "packages", "passports"):
+            hint = "CLI-флаг (--runs-dir/--passports-dir/--dir) переопределяет resolved-значение"
+        return OK, f"{value} (источник: {source})", hint
+
+    for field in HARNESS_FIELDS:
+        builder.add(f"layout.{field}", lambda _f=field: _check(_f))
     return builder.group
 
 
@@ -671,6 +750,7 @@ def run_doctor(
         report.groups.append(_dependency_group(group_name, required, modules))
     report.groups.append(_env_group())
     report.groups.append(_config_group(base))
+    report.groups.append(_layout_group())
     report.groups.append(_dirs_group(base))
     report.groups.append(_cli_group())
     report.groups.append(_foundation_group(base, with_selfcheck=with_selfcheck))

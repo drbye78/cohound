@@ -174,8 +174,10 @@ def build_phases(
     :param ports: внедрённые порты (оценщик, индексы, краулер/экстрактор/чанкер, реестр).
     :param urls: ``product_id → [url]`` для Ш5 (план URL не несёт — тонкий вход).
     :param passports: ``product_id → Passport`` для Ш4 (наследование).
-    :param out_dir: базовый каталог отчётов (Ш9).
-    :param raw_root: корень retention сырых байтов (Ш5).
+    :param out_dir: базовый каталог отчётов (Ш9); composition root передаёт resolved
+        ``paths.runs`` (``03`` §A.1). Дефолт ``"runs"`` совпадает с :class:`PathsConfig`.
+    :param raw_root: корень retention сырых байтов (Ш5); composition root передаёт resolved
+        ``paths.corpus_raw``. Дефолт ``"corpus_raw"`` совпадает с :class:`PathsConfig`.
     :param snapshot_date: окно снимка (Ш5); ``None`` → ``plan``/когорта.
     :param retrieval_profile: зафиксированный профиль R0/R1/R2 (I16); ``None`` → дефолт Ш6.
     :param cutoff_k: зафиксированный ``retrieval_cutoff_K`` (I20); ``None`` → дефолт Ш6.

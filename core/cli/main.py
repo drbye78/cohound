@@ -163,6 +163,14 @@ PLAN_INPUTS_FILENAME = "plan_inputs.json"
 #: Версия формата :data:`PLAN_INPUTS_FILENAME` (для будущей эволюции без поломки чтения).
 PLAN_INPUTS_SNAPSHOT_VERSION = 1
 
+#: Команды, чей ``--runs-dir`` — операционный дефолт раскладки (03 §A.1): при отсутствии
+#: флага подставляется resolved ``paths.runs`` (composition root — единственная точка).
+_RUNS_DIR_COMMANDS: frozenset[str] = frozenset({"run", "diff"})
+#: Команды, чей ``--passports-dir`` — операционный дефолт раскладки: без флага —
+#: resolved ``paths.passports``. ``discover`` сюда не входит: его ``--passports-dir`` —
+#: opt-in seed-источник запросов (I19), а не каталог-дефолт.
+_PASSPORTS_DIR_COMMANDS: frozenset[str] = frozenset({"run", "passport-scout"})
+
 #: ``CODE: message`` — сообщения линтера/инвариантов начинаются с кода правила.
 _CODE_RE = re.compile(r"^\s*([^\s:]+):")
 #: Код инварианта внутри текста (например, ``I2b``).
@@ -404,7 +412,12 @@ def cmd_run(args: argparse.Namespace) -> int:
     run_plan = _resolve_plan(args, inputs, run_id)
     ports = _resolve_ports(args, deploy_config)
     phases = _resolve_phases(
-        args, inputs=inputs, plan=run_plan, ports=ports, render_modes=render_modes
+        args,
+        inputs=inputs,
+        plan=run_plan,
+        ports=ports,
+        paths=getattr(args, "paths", None),
+        render_modes=render_modes,
     )
     # Наблюдаемость (W12/T12.1, 04 §B.1/§B.2): оборачиваем фазы логом+таймингом.
     # Гейты — дефолтные замыкания Runner; оборачиваем и их, чтобы §B.1-лог покрывал
@@ -731,7 +744,13 @@ def cmd_report(args: argparse.Namespace) -> int:
         cells = list(store.iter_cells(run_id))
 
     assert run_id is not None and bundle is not None and manifest is not None
-    out_dir = args.out if args.out is not None else (args.runs_dir or "runs")
+    # Базовый каталог артефактов: явный --out > --runs-dir > resolved paths.runs > runs.
+    out_dir = args.out
+    if out_dir is None:
+        out_dir = getattr(args, "runs_dir", None)
+    if out_dir is None:
+        _paths = getattr(args, "paths", None)
+        out_dir = str(_paths.runs) if _paths is not None else "runs"
     artifacts = write_reports(
         bundle=bundle,
         cells=cells,
@@ -910,8 +929,15 @@ def cmd_passport_scout(args: argparse.Namespace) -> int:
 
     # Порты профиля: для ``local`` crawler не инстанцируется (нет URL-конфига) —
     # берём локальный ScrapyCrawler; для ``split`` используется remote-прокси из Ports.
+    # Корень индекса — из resolved-раскладки (03 §A.1); passport-scout индекс не пишет,
+    # но каталог должен быть согласован с остальными командами.
+    _scout_paths = getattr(args, "paths", None)
     profile_ports = build_adapters(
-        profile=args.profile, package=getattr(args, "package", None)
+        profile=args.profile,
+        package=getattr(args, "package", None),
+        index_root=(
+            str(_scout_paths.index_store) if _scout_paths is not None else "index_store"
+        ),
     )
     crawler: CrawlerPort = (
         getattr(args, "crawler", None)
@@ -1084,6 +1110,20 @@ def cmd_promote(args: argparse.Namespace) -> int:
 # ---------------------------------------------------------------------------
 # Помощники команд
 # ---------------------------------------------------------------------------
+
+
+def _resolve_paths(args: argparse.Namespace) -> Any:
+    """Резолвит эффективную раскладку операционных каталогов (``03`` §A.1).
+
+    Источник — :func:`core.config.paths.resolve_paths`: env (``COHOUND_*_DIR`` /
+    ``COHOUND_HOME``) > ``config/paths.yaml`` (или ``COHOUND_PATHS_FILE``) > дефолты модели
+    (относительные — от CWD). CLI-флаги сюда не читаются: их приоритет обеспечивает
+    :func:`main` (флаг побеждает resolved-дефолт естественным образом). Ленивый импорт
+    держит ``core.config.paths`` вне горячего пути команд, раскладку не запрашивающих.
+    """
+    from core.config.paths import resolve_paths
+
+    return resolve_paths()
 
 
 def _read_cycle(args: argparse.Namespace, run_id: str) -> tuple[Any, list[Any]]:
@@ -1743,7 +1783,9 @@ def _resolve_ports(args: argparse.Namespace, deploy_config: DeployConfig | None)
     """Собирает порты профиля (``ports`` — тестовый шов; иначе :func:`build_adapters`).
 
     Для ``split`` используются инъектируемые швы (``deploy_transport``/``gateway_factory``),
-    поэтому прогон в тестах не требует сокета.
+    поэтому прогон в тестах не требует сокета. Корень индексного хранилища берётся из
+    resolved-раскладки (``paths.index_store``, ``03`` §A.1), чтобы индекс-контур писался
+    в настроенный каталог.
     """
     injected = getattr(args, "ports", None)
     if injected is not None:
@@ -1754,11 +1796,14 @@ def _resolve_ports(args: argparse.Namespace, deploy_config: DeployConfig | None)
         if gateway_factory is not None and deploy_config is not None
         else None
     )
+    paths = getattr(args, "paths", None)
+    index_root = str(paths.index_store) if paths is not None else "index_store"
     return build_adapters(
         profile=args.profile,
         deploy=deploy_config,
         transport=getattr(args, "deploy_transport", None),
         gateway=gateway,
+        index_root=index_root,
     )
 
 
@@ -1897,34 +1942,43 @@ def _load_render_modes(path: str | Path | None) -> dict[str, RenderMode]:
 
 def _resolve_phases(
     args: argparse.Namespace, *, inputs: RunInputs, plan: RunPlan, ports: Ports,
+    paths: Any = None,
     render_modes: Mapping[str, RenderMode] | None = None,
 ) -> dict[str, PhaseFn]:
     """Собирает реестр не-гейтовых фаз (``phases_factory`` — тестовый шов).
 
-    **Паспорта** загружаются из ``--passports-dir`` (дефолт ``passports``) и передаются
-    фазе Ш4 (наследование по ``upstream``). **URL корпуса** — только явный операторский
-    вход ``--urls`` (JSON/YAML ``{product_id: [url, ...]}``); специфицированного артефакта
-    URL в регламенте **нет**, поэтому ``doc_domains`` паспортов молча **не** фетчатся:
-    homepage — не корпус документации (I19: контент становится evidence лишь после
-    ``corpus_raw`` → hash → index). Без ``--urls`` фазы Ш5 получает ``{}`` и легитимно
-    работает как no-op. ``passport_urls`` — лишь возможный seed-источник для будущего
-    Discovery/оператора, но здесь он не подставляется неявно.
+    **Паспорта** загружаются из ``--passports-dir`` (дефолт — resolved ``paths.passports``,
+    ``03`` §A.1) и передаются фазе Ш4 (наследование по ``upstream``). **URL корпуса** —
+    только явный операторский вход ``--urls`` (JSON/YAML ``{product_id: [url, ...]}``);
+    специфицированного артефакта URL в регламенте **нет**, поэтому ``doc_domains``
+    паспортов молча **не** фетчатся: homepage — не корпус документации (I19: контент
+    становится evidence лишь после ``corpus_raw`` → hash → index). Без ``--urls`` фазы Ш5
+    получает ``{}`` и легитимно работает как no-op. ``passport_urls`` — лишь возможный
+    seed-источник для будущего Discovery/оператора, но здесь он не подставляется неявно.
+
+    Операционные каталоги (``out_dir``, ``raw_root``) берутся из resolved-раскладки
+    (``paths``): ``runs`` для отчётов Ш9, ``corpus_raw`` для retention сырых байтов Ш5.
 
     Гейты ``g1``–``g4`` сюда не входят — их (де)фолтные замыкания остаются в
     :class:`Runner` (I6/I7, S9), поэтому ``run`` честно останавливается ``blocked`` без
     человеческого решения.
     """
+    passports_dir = getattr(args, "passports_dir", None)
+    if passports_dir is None and paths is not None:
+        passports_dir = str(paths.passports)
+    if passports_dir is None:
+        passports_dir = "passports"
+    raw_root = str(paths.corpus_raw) if paths is not None else "corpus_raw"
     kwargs: dict[str, Any] = {
         "inputs": inputs,
         "plan": plan,
         "ports": ports,
         # URLs: только явный операторский вход; doc_domains не фетчатся молча (I19).
         "urls": _load_corpus_urls(getattr(args, "urls", None)),
-        # Паспорта: --passports-dir (дефолт passports); отсутствие каталога → {}.
-        "passports": _load_passports_dir(
-            getattr(args, "passports_dir", "passports")
-        ),
-        "out_dir": args.runs_dir,
+        # Паспорта: --passports-dir либо resolved paths.passports; отсутствие → {}.
+        "passports": _load_passports_dir(passports_dir),
+        "out_dir": getattr(args, "runs_dir", None) or "runs",
+        "raw_root": raw_root,
         "retrieval_profile": getattr(args, "retrieval_profile", None),
         "cutoff_k": getattr(args, "cutoff_k", None),
         # Per-URL render-mode (--render-modes): {url: RenderMode}; пусто → HTTP (Ш5).
@@ -2110,7 +2164,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--package", required=True, help="каталог пакета категории")
     p_run.add_argument("--run-id", default=None, help="переопределить детерминированный run_id")
     p_run.add_argument(
-        "--runs-dir", default="runs", help="каталог прогонов (runs/{run_id}/cohound.db)"
+        "--runs-dir",
+        default=None,
+        help="каталог прогонов (runs/{run_id}/cohound.db); дефолт — раскладка "
+        "(config/paths.yaml/COHOUND_RUNS_DIR/COHOUND_HOME), иначе runs",
     )
     p_run.add_argument("--db", default=None, help="путь к БД прогона (иначе runs/{run_id}/...)")
     p_run.add_argument(
@@ -2124,8 +2181,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_run.add_argument(
         "--passports-dir",
-        default="passports",
-        help="каталог паспортов passports/{product_id}/{YYYY-MM-DD}.yaml (дефолт passports; "
+        default=None,
+        help="каталог паспортов passports/{product_id}/{YYYY-MM-DD}.yaml (дефолт — "
+        "раскладка: config/paths.yaml/COHOUND_PASSPORTS_DIR/COHOUND_HOME, иначе passports; "
         "отсутствие каталога → без паспортов)",
     )
     p_run.add_argument(
@@ -2163,8 +2221,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_diff.add_argument("run_b", help="текущий прогон (run_id)")
     p_diff.add_argument(
         "--runs-dir",
-        default="runs",
-        help="каталог прогонов: runs/{run_id}/cohound.db (дефолт runs); --db переопределяет",
+        default=None,
+        help="каталог прогонов: runs/{run_id}/cohound.db (дефолт — раскладка: "
+        "config/paths.yaml/COHOUND_RUNS_DIR/COHOUND_HOME, иначе runs); --db переопределяет",
     )
     p_diff.add_argument(
         "--db",
@@ -2332,8 +2391,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_scout.add_argument("--url", required=True, help="главный URL продукта (фетчится HTTP)")
     p_scout.add_argument(
         "--passports-dir",
-        default="passports",
-        help="каталог паспортов: пишет passports/{product_id}/{date}.yaml (дефолт passports)",
+        default=None,
+        help="каталог паспортов: пишет passports/{product_id}/{date}.yaml (дефолт — "
+        "раскладка: config/paths.yaml/COHOUND_PASSPORTS_DIR/COHOUND_HOME, иначе passports)",
     )
     p_scout.add_argument(
         "--package",
@@ -2555,6 +2615,21 @@ def main(
     if getattr(args, "command", None) is None:
         parser.print_help()
         return EXIT_USAGE
+
+    # Composition root — единственная точка разрешения раскладки (03 §A.1): резолвим
+    # эффективные каталоги (env/paths.yaml/дефолты) и подставляем их как дефолты
+    # argparse-флагов, если оператор флаг не задал. Приоритет: CLI-флаг > env > файл >
+    # дефолт. Без env/файла/флага значения совпадают с прежними литералами — обратная
+    # совместимость байт-в-байт.
+    paths = _resolve_paths(args)
+    args.paths = paths
+    if args.command in _RUNS_DIR_COMMANDS and getattr(args, "runs_dir", None) is None:
+        args.runs_dir = str(paths.runs)
+    if (
+        args.command in _PASSPORTS_DIR_COMMANDS
+        and getattr(args, "passports_dir", None) is None
+    ):
+        args.passports_dir = str(paths.passports)
 
     try:
         return int(args.handler(args))

@@ -135,7 +135,9 @@ class NpyIndexBuilder:
         """``index_root`` — корень ``index_store``; ``package`` — пакет по умолчанию.
 
         Пакет разрешается как ``meta.package`` (авторитетно для конкретного вызова) и лишь
-        при его пустоте — конструкторный ``package``.
+        при его пустоте — конструкторный ``package``. Дефолт ``"index_store"`` совпадает с
+        :class:`~core.config.paths.PathsConfig`; composition root передаёт resolved
+        ``paths.index_store`` (``03`` §A.1).
         """
         self._index_root = Path(index_root)
         self._package = package

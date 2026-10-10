@@ -530,7 +530,9 @@ def build_adapters(
         конструируется автоматически: сценарий evaluator требует self-host backend).
     :param registry: готовый реестровый фетчер (``local``); ``None`` → остаётся ``None``
         (конфиг реестра — данные вызывающего).
-    :param index_root: корень индексного хранилища для ``NpyIndexBuilder`` (``local``).
+    :param index_root: корень индексного хранилища для ``NpyIndexBuilder`` (``local``);
+        composition root передаёт resolved ``paths.index_store`` (``03`` §A.1); дефолт
+        ``"index_store"`` совпадает с дефолтом :class:`~core.config.paths.PathsConfig`.
     :param package: пакет по умолчанию для ``NpyIndexBuilder`` (``local``).
     :raises WiringError: неизвестный профиль или split без валидного deploy-конфига.
     """

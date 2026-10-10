@@ -285,7 +285,9 @@ def build_corpus(
         ``urls`` в детерминированном порядке).
     :param snapshot_date: окно снимка; ``None`` → ``plan.snapshot_date``/``cohort.frozen_at``.
     :param chunker_version: версия чанкера; ``None`` → ``chunker.version``.
-    :param raw_root: корень retention (``corpus_raw/{product_id}/{raw_hash}.bin``).
+    :param raw_root: корень retention (``corpus_raw/{product_id}/{raw_hash}.bin``); дефолт
+        ``"corpus_raw"`` совпадает с :class:`~core.config.paths.PathsConfig`; composition
+        root передаёт resolved ``paths.corpus_raw`` (``03`` §A.1).
     :param embedder: опциональный ``EmbedderPort`` (W8); при наличии — батч-эмбеддинг.
     :param index_builder: опциональный ``IndexBuilderPort`` (W8); при наличии — build/commit.
     :param render_modes: необязательный ``{url: RenderMode}``; по умолчанию HTTP.

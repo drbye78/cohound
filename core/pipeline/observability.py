@@ -142,7 +142,8 @@ def instrument_phases(
 
     :param phases: реестр ``{phase: PhaseFn}`` (например, из ``build_phases`` + гейты).
     :param run_id: идентификатор прогона (подкаталог ``runs/``).
-    :param logs_root: корень логов (по умолчанию ``runs``).
+    :param logs_root: корень логов (по умолчанию ``runs``; composition root передаёт
+        resolved ``paths.runs``, ``03`` §A.1). Дефолт совпадает с :class:`PathsConfig`.
     :param clock: часы прогона (``now_iso()``) — инжектируются в ``ts`` логов
         (детерминизм тестов); ``None`` → системное UTC.
     :param component: компонент-источник записей; ``None`` → совпадает с фазой.
@@ -184,7 +185,8 @@ def write_run_metrics(
     ``ensure_ascii=False``) через :meth:`RunMetrics.to_manifest_json`.
 
     :param run_id: идентификатор прогона.
-    :param out_dir: корень прогонов (по умолчанию ``runs``); файл — ``{out_dir}/{run_id}/metrics.json``.
+    :param out_dir: корень прогонов (по умолчанию ``runs``; composition root передаёт
+        resolved ``paths.runs``, ``03`` §A.1); файл — ``{out_dir}/{run_id}/metrics.json``.
     :param durations: карта ``{phase: seconds}`` (тайминг инжектирует
         :class:`InstrumentedPhases`); служит источником ``duration_by_phase``.
     :param store: ``StorePort``; источник ячеек (``iter_cells``), если ``cells`` не передан.

@@ -359,6 +359,11 @@ def create_package(
     По умолчанию копирует ``packages/_template/`` и заменяет ``case_id`` в
     ``package.yaml``/``run.yaml``/``cohort.yaml``, а также архетип. Новый пакет обязан
     пройти линт без блокирующих нарушений (иначе отказ без записи).
+
+    ``dir`` — каталог пакетов; дефолт ``"packages"`` совпадает с дефолтом раскладки
+    (:class:`~core.config.paths.PathsConfig`). Composition root может передать эффективный
+    каталог из :func:`core.config.paths.resolve_paths` (``paths.packages``, 03 §A.1):
+    приоритет CLI-флаг > env > ``paths.yaml`` > дефолт.
     """
     validate_case_id(case_id)
     try:

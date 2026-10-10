@@ -109,6 +109,10 @@ class ContentAddressedCache:
         root: str | Path = "cache",
         subdirs: tuple[str, ...] = _DEFAULT_SUBDIRS,
     ) -> None:
+        """``root`` — корень кэша (R7): дефолт ``"cache"`` совпадает с
+        :class:`~core.config.paths.PathsConfig`; composition root передаёт resolved
+        ``paths.cache`` (``03`` §A.1). ``subdirs`` — подпространства (``serp``/``http``).
+        """
         if not subdirs:
             raise ValueError("subdirs не может быть пустым")
         for sub in subdirs:

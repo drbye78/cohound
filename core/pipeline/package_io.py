@@ -259,6 +259,10 @@ def scan_packages(
     ``package.yaml`` пропускаются; нечитаемые/нечётные пакеты не валят скан — попадают в
     результат с ``ok=False`` и непустым ``error``. ``query`` фильтрует по
     ``case_id``/``archetype``/``path``/``package_version`` (:func:`matches`). Ничего не пишет.
+
+    ``dir`` — каталог пакетов; дефолт ``"packages"`` совпадает с дефолтом раскладки
+    (:class:`~core.config.paths.PathsConfig`). Composition root может передать эффективный
+    каталог из :func:`core.config.paths.resolve_paths` (``paths.packages``, 03 §A.1).
     """
     base = Path(dir)
     if not base.is_dir():
