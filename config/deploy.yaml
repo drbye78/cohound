@@ -29,4 +29,7 @@ extractor_zone: core           # edge | core | separate
 
 search:
   budget: { ru: 5, en: 5 }     # симметрия I16
-  adapter: example_adapter     # имя адаптера — данные, ядро провайдеро-нейтрально
+  adapter: yandex              # провайдер по умолчанию (--search-adapter переопределяет)
+  # Дифференциация по языку/географии (опционально; I16: маршрут — функция от lang,
+  # одинаков для всех продуктов). Пример:
+  # by_language: { ru: yandex, en: duckduckgo }

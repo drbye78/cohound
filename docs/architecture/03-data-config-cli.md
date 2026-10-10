@@ -233,7 +233,10 @@ edge:
 extractor_zone: edge           # edge | core | separate
 search:
   budget: { ru: 5, en: 5 }      # симметрия I16
-  adapter: yandex
+  adapter: yandex               # провайдер поиска по умолчанию
+  by_language:                  # переопределение по языку (география-прокси, I16)
+    ru: yandex
+    en: duckduckgo
 crawl:                         # операционная политика HTTP-краулинга корпуса (local|split)
   user_agent: "coHound-crawler/0.1"   # None → дефолт HttpCrawler
   timeout_s: 30                # None → дефолт HttpCrawler (30 с)
@@ -243,7 +246,23 @@ crawl:                         # операционная политика HTTP-
 Профиль `local` игнорирует `edge.*`. Секция `crawl` действует в обоих профилях: она
 переопределяет операционные параметры лёгкого `HttpCrawler` (`user_agent`/`timeout_s`/
 `follow_redirects`); при `None`/отсутствии поля берётся дефолт адаптера — обратная
-совместимость профиля `local` без файла. Загрузчик `config/deploy.py` → `DeployConfig`
+совместимость профиля `local` без файла.
+
+**Провайдер поиска (`search.adapter` / `search.by_language`).** Провайдер выбирается
+детерминированно (`core.config.deploy.resolve_search_provider`) по приоритету:
+явный CLI-флаг (`--search-adapter`) > `search.by_language[lang]` > `search.adapter` >
+дефолт `yandex`. Маршрут — **функция от языка**, а не от продукта: один и тот же язык
+даёт один и тот же провайдер для всех продуктов цикла, поэтому симметричный протокол
+**I16** сохраняется, а дифференциация по географии реализуется через каноничную ось
+`lang` (`SearchQuery.lang`, `search_log.language`, бюджет по языкам §7.2). Решение
+вычисляется по правилу, а не LLM (**дух I21**). Имена провайдеров — свободные строки-данные:
+config-слой не импортирует `cli.wiring`; валидация против `SUPPORTED_SEARCH_ADAPTERS` —
+в composition root, неизвестный провайдер отвергается с понятной ошибкой (I19: кандидаты
+не выдумываются). Выбранный провайдер фиксируется в провенансе/`search_log` (**I23**).
+Смена таблицы провайдеров меняет протокол поиска и потому влияет на сопоставимость
+циклов — это **версионная граница**: фиксируется в манифесте/провенансе (§13).
+
+Загрузчик `config/deploy.py` → `DeployConfig`
 (домен-нейтрален). `deploy_profile`, версии edge-компонентов (`/v1/capabilities`) и
 `edge_schema_version` пишутся в `run_manifest.yaml` (R7). `edge/` (composition root Z1)
 читает тот же файл для bind-адреса, аутентификации входящих (IDP) и экспорта аудита

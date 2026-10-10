@@ -16,8 +16,10 @@ from pydantic import ValidationError
 
 from core.config.deploy import (
     DeployConfig,
+    SearchDeployConfig,
     is_split,
     load_deploy_config,
+    resolve_search_provider,
 )
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -117,6 +119,92 @@ def test_search_budget_parsed() -> None:
     cfg = load_deploy_config(FIXTURES / "deploy.yaml")
     assert cfg.search.budget == {"ru": 5, "en": 5}
     assert cfg.search.adapter == "example_adapter"
+
+
+# ---------------------------------------------------------------------------
+# Провайдер поиска: by_language + resolve_search_provider (I16/I21/I23, 03 D.5)
+# ---------------------------------------------------------------------------
+
+
+def test_search_by_language_parsed(tmp_path: Path) -> None:
+    path = _write(
+        tmp_path,
+        _dump(
+            {
+                "profile": "local",
+                "search": {
+                    "adapter": "yandex",
+                    "by_language": {"ru": "yandex", "en": "duckduckgo"},
+                },
+            }
+        ),
+    )
+    cfg = load_deploy_config(path)
+    assert cfg.search.adapter == "yandex"
+    assert cfg.search.by_language == {"ru": "yandex", "en": "duckduckgo"}
+
+
+def test_search_by_language_defaults_empty() -> None:
+    cfg = load_deploy_config(FIXTURES / "deploy.yaml")
+    assert cfg.search.by_language == {}
+
+
+def test_search_by_language_empty_key_rejected(tmp_path: Path) -> None:
+    path = _write(
+        tmp_path,
+        _dump({"profile": "local", "search": {"by_language": {"": "yandex"}}}),
+    )
+    with pytest.raises(ValidationError, match="by_language"):
+        load_deploy_config(path)
+
+
+def test_search_by_language_empty_value_rejected(tmp_path: Path) -> None:
+    path = _write(
+        tmp_path,
+        _dump({"profile": "local", "search": {"by_language": {"ru": "  "}}}),
+    )
+    with pytest.raises(ValidationError, match="by_language"):
+        load_deploy_config(path)
+
+
+def test_resolve_search_provider_priority() -> None:
+    """explicit > by_language > adapter > default."""
+    search = SearchDeployConfig(
+        adapter="glm", by_language={"ru": "yandex", "en": "duckduckgo"}
+    )
+    # explicit побеждает всё
+    assert resolve_search_provider(search, lang="ru", explicit="google") == "google"
+    # by_language побеждает adapter
+    assert resolve_search_provider(search, lang="ru") == "yandex"
+    assert resolve_search_provider(search, lang="en") == "duckduckgo"
+    # язык без совпадения → adapter
+    assert resolve_search_provider(search, lang="de") == "glm"
+    # explicit пустой/пробельный → не считается
+    assert resolve_search_provider(search, lang="ru", explicit="  ") == "yandex"
+
+
+def test_resolve_search_provider_casefold_language() -> None:
+    search = SearchDeployConfig(by_language={"RU": "yandex", "En": "duckduckgo"})
+    assert resolve_search_provider(search, lang="ru") == "yandex"
+    assert resolve_search_provider(search, lang="EN") == "duckduckgo"
+
+
+def test_resolve_search_provider_adapter_and_default() -> None:
+    assert resolve_search_provider(SearchDeployConfig(adapter="glm"), lang="ru") == "glm"
+    # нет конфига → default
+    assert resolve_search_provider(None, lang="ru") == "yandex"
+    assert resolve_search_provider(None, lang="ru", default="duckduckgo") == "duckduckgo"
+    # конфиг без adapter/by_language → default
+    assert resolve_search_provider(SearchDeployConfig(), lang="ru") == "yandex"
+
+
+def test_resolve_search_provider_local_scope_independent_of_product() -> None:
+    """I16: маршрут — функция от lang, не от продукта (одинаков для всех продуктов)."""
+    search = SearchDeployConfig(by_language={"ru": "yandex", "en": "duckduckgo"})
+    # Один и тот же (search, lang) → один провайдер независимо от вызова.
+    assert resolve_search_provider(search, lang="ru") == resolve_search_provider(
+        search, lang="ru"
+    )
 
 
 # ---------------------------------------------------------------------------

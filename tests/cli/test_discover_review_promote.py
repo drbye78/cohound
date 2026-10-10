@@ -28,6 +28,7 @@ from pathlib import Path
 import pytest
 
 from core.cli.main import EXIT_ERROR, EXIT_OK, EXIT_USAGE, main
+from core.config.deploy import DeployConfig, SearchDeployConfig
 from core.domain.enums import CellState, RankingPolicy, RunMode, Status
 from core.domain.models import Cell, Focus, LLMEvidence, RunConfig
 from core.ports.search import SearchResult
@@ -279,8 +280,103 @@ def test_discover_keyless_adapter_not_rejected_for_api_key(
     monkeypatch.setattr(
         cli_main, "build_search_adapter", lambda _name: _KeylessAdapter()
     )
+    # Конфиг без явного адаптера → провайдер по умолчанию (yandex); иначе резолвер
+    # читал бы config/deploy.yaml репозитория (там пример-адаптер).
+    monkeypatch.setattr(
+        cli_main, "load_deploy_config", lambda _path=None: DeployConfig(profile="local")
+    )
     code = cli_main.main(["discover", "--query", "q1", "--json"])
     assert code == EXIT_OK
+
+
+def test_discover_provider_from_config_by_language(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Провайдер выбирается из ``config/deploy.yaml`` по языку (by_language, I16/I23)."""
+    cli_main = importlib.import_module("core.cli.main")
+    requested: list[str] = []
+
+    def _fake_build(name: str) -> FakeSearchAdapter:
+        requested.append(name)
+        return FakeSearchAdapter()
+
+    monkeypatch.setattr(cli_main, "build_search_adapter", _fake_build)
+    monkeypatch.setattr(
+        cli_main,
+        "load_deploy_config",
+        lambda _path=None: DeployConfig(
+            profile="local",
+            search=SearchDeployConfig(by_language={"ru": "yandex", "en": "duckduckgo"}),
+        ),
+    )
+    code = cli_main.main(["discover", "--query", "q1", "--lang", "en", "--json"])
+    assert code == EXIT_OK
+    assert requested == ["duckduckgo"]
+    payload = _json_out(capsys)
+    assert payload["provider"] == "fake"  # провенанс из адаптера (I23)
+    assert payload["adapter_kind"] == "serp"
+
+
+def test_discover_explicit_flag_overrides_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Явный ``--search-adapter`` побеждает конфиг (explicit > by_language > adapter)."""
+    cli_main = importlib.import_module("core.cli.main")
+    requested: list[str] = []
+
+    def _fake_build(name: str) -> FakeSearchAdapter:
+        requested.append(name)
+        return FakeSearchAdapter()
+
+    monkeypatch.setattr(cli_main, "build_search_adapter", _fake_build)
+    monkeypatch.setattr(
+        cli_main,
+        "load_deploy_config",
+        lambda _path=None: DeployConfig(
+            profile="local",
+            search=SearchDeployConfig(adapter="yandex", by_language={"ru": "duckduckgo"}),
+        ),
+    )
+    code = cli_main.main(
+        ["discover", "--query", "q1", "--search-adapter", "google", "--json"]
+    )
+    assert code == EXIT_OK
+    assert requested == ["google"]
+
+
+def test_discover_unknown_provider_from_config_is_usage_error(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Неизвестный провайдер из конфига → понятная ошибка (не выдумываем, I19)."""
+    cli_main = importlib.import_module("core.cli.main")
+    monkeypatch.setattr(
+        cli_main,
+        "load_deploy_config",
+        lambda _path=None: DeployConfig(
+            profile="local", search=SearchDeployConfig(adapter="not-a-provider")
+        ),
+    )
+    code = cli_main.main(["discover", "--query", "q1", "--json"])
+    assert code == EXIT_USAGE
+    payload = _json_out(capsys)
+    assert payload["ok"] is False
+    assert "not-a-provider" in payload["message"]
+
+
+def test_discover_config_uses_repo_deploy_yaml() -> None:
+    """Канонический ``config/deploy.yaml`` репозитория резолвит валидного провайдера.
+
+    Защита от регрессии: ``hound discover`` из коробки не должен ломаться на
+    placeholder-адаптере — резолв канонического конфига обязан давать провайдера из
+    ``SUPPORTED_SEARCH_ADAPTERS`` (иначе discover падает без явного ``--search-adapter``).
+    Детерминированно: не зависит от env/ключей (резолв, а не живой вызов адаптера).
+    """
+    from core.cli.wiring import SUPPORTED_SEARCH_ADAPTERS
+    from core.config.deploy import load_deploy_config, resolve_search_provider
+
+    config = load_deploy_config(None)
+    provider = resolve_search_provider(config.search, lang="ru")
+    assert provider in SUPPORTED_SEARCH_ADAPTERS
 
 
 

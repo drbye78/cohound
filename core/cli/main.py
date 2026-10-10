@@ -75,7 +75,12 @@ from core.config import (
     load_passports,
     passport_urls,
 )
-from core.config.deploy import DeployConfig, is_split, load_deploy_config
+from core.config.deploy import (
+    DeployConfig,
+    is_split,
+    load_deploy_config,
+    resolve_search_provider,
+)
 from core.domain.enums import Status
 from core.domain.models import CatalogRow, Cohort
 from core.pipeline import (
@@ -762,23 +767,32 @@ def cmd_report(args: argparse.Namespace) -> int:
 def cmd_discover(args: argparse.Namespace) -> int:
     """``discover``: внешний поиск как источник **кандидатов-гипотез** (Ш2/Ш5, I19/G2).
 
-    Собирает поисковый адаптер (по умолчанию ``yandex``; тестовый шов —
-    ``search_adapter`` аргумент :func:`main`) и гоняет :func:`core.pipeline.discover`
-    по запросам ``--query`` (можно повторять). Выход — только
+    Собирает поисковый адаптер и гоняет :func:`core.pipeline.discover` по запросам
+    ``--query`` (можно повторять). Выход — только
     :class:`~core.pipeline.discovery.DiscoveryCandidate` (URL+сниппет): **evidence не
     пишется**, ни одна гипотеза не одобряется автоматически (I19/G2, A3). Продвижение
     гипотезы — отдельное человеческое решение G2.
 
+    **Выбор провайдера (I16/I21/I23).** Провайдер резолвится детерминированно
+    :func:`core.config.deploy.resolve_search_provider`: явный ``--search-adapter`` >
+    ``search.by_language[lang]`` из ``config/deploy.yaml`` > ``search.adapter`` >
+    ``yandex``. Маршрут зависит только от языка (не от продукта) — симметричный протокол
+    I16 сохраняется; выбранный провайдер фиксируется в payload (``provider``/``adapter_kind``)
+    как провенанс (I23). Неизвестный провайдер из конфига честно отвергается
+    (:data:`EXIT_USAGE`), а не подменяется — кандидаты не выдумываются (I19).
+
     **Недоступный адаптер** (нет ``httpx`` или учётных данных при сборке реального
     адаптера) → :data:`EXIT_ERROR` с ясным сообщением; кандидаты **не выдумываются**.
-    Неизвестный ``--search-adapter`` отвергается ``argparse`` (:data:`EXIT_USAGE`).
+    Тестовый шов ``search_adapter`` (аргумент :func:`main`) имеет высший приоритет и
+    пропускает резолв/валидацию провайдера.
 
     ``--passports-dir`` **засеивает** дополнительные запросы из ``doc_domains`` паспортов
     (через :func:`core.config.passport_urls`) — это **лишь подсказки-кандидаты**, домены
     не фетчатся (I19). Хотя бы один запрос обязателен (``--query`` либо seed).
 
     :returns: :data:`EXIT_OK` (список кандидатов может быть пуст); :data:`EXIT_ERROR`
-        при недоступном адаптере; :data:`EXIT_USAGE` при пустом наборе запросов.
+        при недоступном адаптере; :data:`EXIT_USAGE` при пустом наборе запросов либо
+        неизвестном провайдере из конфига.
     """
     injected = getattr(args, "search_adapter", None)
 
@@ -796,9 +810,26 @@ def cmd_discover(args: argparse.Namespace) -> int:
 
     adapter: SearchAdapterPort
     if injected is not None:
+        # Тестовый шов: резолв/валидация провайдера пропускаются (провайдер зафиксирован
+        # вне конфига — ответственность теста).
         adapter = injected
     else:
-        adapter = build_search_adapter(args.search_adapter_kind)
+        config = load_deploy_config(None)
+        provider = resolve_search_provider(
+            config.search, lang=args.lang, explicit=args.search_adapter_kind
+        )
+        # Валидация против реестра адаптеров — в composition root (config-слой
+        # провайдеро-нейтрален). Неизвестный провайдер → понятная ошибка (I19: не выдумываем).
+        if provider not in SUPPORTED_SEARCH_ADAPTERS:
+            _emit_error(
+                args,
+                "search",
+                f"неизвестный провайдер поиска {provider!r} "
+                "(config/deploy.yaml search.adapter/by_language либо --search-adapter); "
+                f"поддерживаются: {', '.join(SUPPORTED_SEARCH_ADAPTERS)}",
+            )
+            return EXIT_USAGE
+        adapter = build_search_adapter(provider)
         if not _search_adapter_configured(adapter):
             _emit_error(
                 args,
@@ -823,7 +854,9 @@ def cmd_discover(args: argparse.Namespace) -> int:
     )
     payload: dict[str, Any] = json.loads(report.to_manifest_json())
     payload["ok"] = True
-    payload["search_adapter"] = getattr(adapter, "adapter_kind", "serp")
+    # Провенанс выбранного провайдера (I23): и вид адаптера, и имя провайдера.
+    payload["adapter_kind"] = getattr(adapter, "adapter_kind", "serp")
+    payload["provider"] = getattr(adapter, "provider", "")
     payload["seeded_queries"] = seeds
     payload["note"] = (
         "кандидаты — гипотезы, не evidence (I19); продвижение возможно только "
@@ -2275,8 +2308,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--search-adapter",
         dest="search_adapter_kind",
         choices=list(SUPPORTED_SEARCH_ADAPTERS),
-        default="yandex",
-        help="внешний поисковый адаптер (дефолт yandex)",
+        default=None,
+        help="провайдер поиска (I23); по умолчанию — из config/deploy.yaml "
+        "(search.adapter/by_language по --lang) или yandex",
     )
     p_discover.add_argument(
         "--passports-dir",

@@ -38,6 +38,7 @@ __all__ = [
     "DeployConfig",
     "load_deploy_config",
     "is_split",
+    "resolve_search_provider",
 ]
 
 # Канонические допустимые значения (ЗЕРКАЛО 07 §7 / 03 D.5). Не выносим в доменные
@@ -179,12 +180,20 @@ class SearchDeployConfig(BaseModel):
 
     Бюджет — целочисленные лимиты по языкам (``{ru: 5, en: 5}``); симметрия I16 —
     методологическое правило конвейера, здесь значение лишь парсится.
+
+    **Провайдер поиска.** ``adapter`` — провайдер **по умолчанию**; ``by_language`` —
+    детерминированное переопределение по языку (география-прокси), например
+    ``{ru: yandex, en: duckduckgo}``. Выбор из ``by_language`` — функция **от языка**,
+    не от продукта, поэтому симметричный протокол I16 сохраняется. Имена провайдеров —
+    свободные строки-данные: валидация против реестра (``SUPPORTED_SEARCH_ADAPTERS``)
+    живёт в composition root (CLI), а не в config-слое (§1.3, 01 §1).
     """
 
     model_config = ConfigDict(extra="forbid")
 
     budget: dict[str, int] = Field(default_factory=dict)
     adapter: str | None = None
+    by_language: dict[str, str] = Field(default_factory=dict)
 
     @field_validator("budget")
     @classmethod
@@ -194,6 +203,19 @@ class SearchDeployConfig(BaseModel):
                 raise ValueError("search.budget: пустой код языка")
             if limit < 0:
                 raise ValueError(f"search.budget[{lang}]: лимит не может быть отрицательным")
+        return value
+
+    @field_validator("by_language")
+    @classmethod
+    def _check_by_language(cls, value: dict[str, str]) -> dict[str, str]:
+        """Ключи-языки и значения-провайдеры обязаны быть непустыми (данные-конфиг)."""
+        for lang, provider in value.items():
+            if not str(lang).strip():
+                raise ValueError("search.by_language: пустой код языка")
+            if not str(provider).strip():
+                raise ValueError(
+                    f"search.by_language[{lang}]: пустое имя провайдера поиска"
+                )
         return value
 
 
@@ -285,3 +307,65 @@ def load_deploy_config(path: str | Path | None = None) -> DeployConfig:
 def is_split(config: DeployConfig) -> bool:
     """``True`` для профилей ``split`` и ``split-hardened`` (зоны данных разделены)."""
     return config.profile in SPLIT_PROFILES
+
+
+# ---------------------------------------------------------------------------
+# Резолвер провайдера поиска (I16/I21/I23)
+# ---------------------------------------------------------------------------
+
+
+def resolve_search_provider(
+    search: SearchDeployConfig | None,
+    *,
+    lang: str = "ru",
+    explicit: str | None = None,
+    default: str = "yandex",
+) -> str:
+    """Детерминированный выбор провайдера веб-поиска (03 D.5).
+
+    Приоритет (первый непустой побеждает):
+
+    1. ``explicit`` — явный ``--search-adapter`` (CLI-флаг оператора);
+    2. ``search.by_language[lang]`` — переопределение по языку (география-прокси);
+    3. ``search.adapter`` — провайдер по умолчанию из конфига;
+    4. ``default`` — безопасный дефолт (``yandex``).
+
+    **I16 (симметрия протокола).** Функция зависит только от ``(lang, config)`` и
+    **не** зависит от продукта: один и тот же язык даёт один и тот же провайдер для всех
+    продуктов цикла — дифференциация по ``lang`` канонична (``SearchQuery.lang``,
+    ``search_log.language``, бюджет по языкам), а не по продукту.
+
+    **I21-дух (детерминизм).** Маршрут вычисляется по правилу, а не решается LLM.
+
+    **§13 (версионная граница).** Смена таблицы провайдеров меняет протокол поиска и
+    потому влияет на сопоставимость циклов; выбранный провайдер обязан быть зафиксирован
+    в провенансе/``search_log`` (I23) и меняется как версионная граница.
+
+    ``lang`` нормализуется к нижнему регистру; ключи ``by_language`` сравниваются
+    ``casefold``-совпадением (детерминированно, регистронезависимо). Возврат — имя
+    провайдера (строка-данные); валидация против реестра адаптеров — в composition root
+    (CLI, ``wiring``), не здесь.
+
+    :param search: секция ``search`` deploy-конфига либо ``None`` (нет конфига).
+    :param lang: язык запроса (``ru``/``en``/…); по умолчанию ``ru``.
+    :param explicit: явное переопределение (CLI-флаг); непустое побеждает всегда.
+    :param default: безопасный дефолт при отсутствии конфига/совпадений.
+    """
+    if explicit is not None and str(explicit).strip():
+        return str(explicit).strip()
+
+    normalized = str(lang or "").strip().casefold()
+    if search is not None and search.by_language:
+        casefolded = {
+            str(key).strip().casefold(): str(value).strip()
+            for key, value in search.by_language.items()
+        }
+        matched = casefolded.get(normalized)
+        if matched:
+            return matched
+
+    if search is not None and search.adapter is not None and str(search.adapter).strip():
+        return str(search.adapter).strip()
+
+    return default
+
