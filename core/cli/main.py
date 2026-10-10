@@ -20,6 +20,7 @@ from core.adapters.remote_gateway import TransportFn
 from core.cli.commands.deploy import run as cmd_deploy_check
 from core.cli.commands.diff import run as cmd_diff
 from core.cli.commands.discover import run as cmd_discover
+from core.cli.commands.gate import run as cmd_gate
 from core.cli.commands.golden import run as cmd_golden
 from core.cli.commands.passport_scout import run as cmd_passport_scout
 from core.cli.commands.plan import run as cmd_plan

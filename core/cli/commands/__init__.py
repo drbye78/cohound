@@ -13,6 +13,7 @@ from core.cli.commands import (
     deploy,
     diff,
     discover,
+    gate,
     golden,
     passport_scout,
     plan,
@@ -37,6 +38,7 @@ COMMANDS = (
     passport_scout,
     review,
     promote,
+    gate,
     deploy,
 )
 

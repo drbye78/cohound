@@ -140,6 +140,7 @@ __all__ = [
     "_print_discover",
     "_print_review",
     "_print_promote",
+    "_print_gate",
     "_print_passport_scout",
     "_add_common",
     "_positive_int",
@@ -357,6 +358,25 @@ def _print_review(payload: dict[str, Any]) -> None:
             f"- {item['product_id']}/{item['param_id']}\t{item['state']}\t"
             f"{status}\t{item['reason']}"
         )
+    sys.stdout.write("\n".join(lines) + "\n")
+
+
+def _print_gate(payload: dict[str, Any]) -> None:
+    """Человекочитаемый вывод ``gate``: записанное человеческое решение (S9/I6/I7)."""
+    lines = [
+        f"run_id: {payload['run_id']}",
+        f"gate: {payload['gate']}",
+        f"actor: {payload['actor']}",
+        f"decided_at: {payload['decided_at']}",
+        f"decision_id: {payload['decision_id']}",
+    ]
+    if payload.get("target") is not None:
+        lines.append(f"target: {payload['target']}")
+    if payload.get("notes") is not None:
+        lines.append(f"notes: {payload['notes']}")
+    lines.append(
+        f"решение записано: гейт {payload['gate']} пройден (продолжите hound run)"
+    )
     sys.stdout.write("\n".join(lines) + "\n")
 
 
@@ -1101,7 +1121,7 @@ def _print_run_report(payload: dict[str, Any]) -> None:
     if payload["stopped_at"] is not None:
         lines.append(
             "примечание: гейт требует явного человеческого решения (03 §E.2); "
-            "продолжите после записи решения в gate_decisions"
+            "продолжите после записи решения: hound gate --db <db> --gate <G1..G4> --actor <вы>"
         )
     sys.stdout.write("\n".join(lines) + "\n")
 
