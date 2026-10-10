@@ -18,8 +18,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from core.db import connect  # noqa: E402
-from core.schemas import (  # noqa: E402
+from core.store.sqlite import DDL, SCHEMA_VERSION, connect  # noqa: E402
+from core.domain import (  # noqa: E402
     AbsenceRuleType,
     AnchorRelation,
     Archetype,
@@ -314,7 +314,7 @@ def main() -> int:
     section("Инженерные гейты (W1/T1.4)")
     check("матрица зависимостей core.* (01 §1, ast)", lambda: _import_graph())
     check("§1.3 нейтральность domain/ports/pipeline (грепп)", lambda: _neutrality())
-    check("transitional-шимы schemas.py/db.py сохраняют идентичность", lambda: _domain_store_shims())
+    check("transitional-шимы schemas.py/db.py удалены", lambda: _shims_removed())
 
     section("Домен (L0) — W2")
     check("инварианты домена возвращают Violation (I1/I4/I13/I7)", lambda: _domain_invariants())
@@ -689,21 +689,14 @@ def _neutrality() -> None:
         raise AssertionError("§1.3: предметные термины в нейтральных слоях: " + ", ".join(hits))
 
 
-def _domain_store_shims() -> None:
-    """Transitional-шимы core/schemas.py и core/db.py сохраняют идентичность типов (T1.2/T1.3)."""
-    from core.db import DDL, SCHEMA_VERSION, connect
-    from core.domain import Cell as DomainCell
-    from core.domain import Status as DomainStatus
-    from core.schemas import Cell as ShimCell
-    from core.schemas import Status as ShimStatus
-    from core.store import sqlite
+def _shims_removed() -> None:
+    """Transitional-шимы core/schemas.py и core/db.py удалены (T1.2/T1.3 завершены)."""
+    import importlib.util
 
-    if ShimCell is not DomainCell:
-        raise AssertionError("core.schemas.Cell должен ссылаться на core.domain.Cell")
-    if ShimStatus is not DomainStatus:
-        raise AssertionError("core.schemas.Status должен ссылаться на core.domain.Status")
-    if connect is not sqlite.connect or SCHEMA_VERSION != sqlite.SCHEMA_VERSION or DDL != sqlite.DDL:
-        raise AssertionError("core.db должен реэкспортировать core.store.sqlite")
+    if importlib.util.find_spec("core.schemas") is not None:
+        raise AssertionError("core.schemas не должен существовать (T1.2 завершён)")
+    if importlib.util.find_spec("core.db") is not None:
+        raise AssertionError("core.db не должен существовать (T1.3 завершён)")
 
 
 def _domain_invariants() -> None:
