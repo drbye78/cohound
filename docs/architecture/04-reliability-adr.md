@@ -89,7 +89,7 @@
 |---|---|
 | `cells_by_state` | pending/preliminary/evaluated/failed/reviewed |
 | `failure_rate` | failed/(evaluated∪failed) — R13 |
-| `coverage_aggregate` | Evidence Coverage |
+| `coverage_aggregate` | Evidence Coverage по вселенной scope (§6/B-3a; `universe`/`completed`/`defined`) |
 | `retrieval_topk_hit` | внутренняя диагностика (не приёмка) |
 | `search_calls_by_phase` | расход поискового бюджета (I23) |
 | `llm_calls`, `tokens` | стоимость (важно для M1/§16) |
@@ -194,12 +194,21 @@ Consequences). Реестр:
 | 0017 | Контракт derived-evidence наследования/сателлитов | I1/I10/I15/I19, §4.2 | accepted |
 | 0018 | Доверенные зоны + DMZ-шов (веб-контур за L7; remote-адаптеры + `ContentGateway`) | I18/I19, §10 | accepted |
 | 0019 | Инспектируемый контракт шва для корп. IDP/DLP/IDS (L7-JSON, публикуемые схемы, без pinning, OIDC/mTLS) | ИБ-прозрачность, §10 | accepted |
+| 0020 | Coverage по **вселенной scope** (§6/B-3a: `scope_universe`, `universe`/`completed`/`defined`, UNDEFINED) + разделение `methodology_version`/`EXECUTION_FIELDS` (§13/B-7) | A2/A3, I5/I11/I13 | accepted · **v2.1** |
 
 **Статус ADR после ревью-гейта (2026-10-08):** 0001–0019 — **accepted**. Правки K1–K7/S1–S13
 интегрированы в регламент, схемы, DDL и словарь; 0013–0017 — следствия ревью-гейта; 0018 —
 развёртывание/DMZ (07); 0019 — прозрачность контрактов для IDP/DLP/IDS (07 §8). Отдельный каталог
 `docs/architecture/adr/NNNN-title.md` заводится по мере реализации (сейчас решения зафиксированы
 сводно в этом реестре, в регламенте и `07`).
+
+**v2.1 (0020).** Методологическая ревизия v2.0 → v2.1 (коммиты `5401991`/`06b0bab`/`ee4e295`)
+зафиксировала **Coverage по вселенной scope** (знаменатель — `Σ w(scope)`, а не существующие ячейки:
+`pending`/missing в знаменателе, `N/A`/`preliminary` — вне, I7/I13; `universe=0` → UNDEFINED, I11/G4)
+и **разделение классов версий** diff-причин: `methodology_change` (`METHODOLOGY_FIELDS` + major
+`methodology_version`) vs `execution_change` (`EXECUTION_FIELDS`) — §13/B-7. `ranking_epsilon`
+(порог неразличимости) и `settings_provenance` (`default|measured`, A3) добавлены в `RunConfig`/
+`RunManifest`; `SCHEMA_VERSION` SQLite-схемы — `2.1.0`.
 
 ---
 

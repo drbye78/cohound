@@ -70,9 +70,9 @@ class Scenario(StrEnum):    EVALUATOR="evaluator"; SEARCH_ADAPTER="search_adapte
 | `GoldenRow` | + `tier` (fast/full) |
 | `Cohort`, `CohortEntry` | без изменений |
 | `Passport`, `Satellite`, `Upstream`, `Citation` | без изменений |
-| `RunConfig`, `Focus` | + `ranking_policy`, `languages` |
+| `RunConfig`, `Focus` | + `ranking_policy`, `languages`, `ranking_epsilon`, `settings_provenance` (v2.1, §6/B-1, A3) |
 | `Cell`, `LLMCellOutput`, `LLMEvidence` | без изменений |
-| **`RunManifest`** | **новое**: агрегирует все версии (§9, §13) |
+| **`RunManifest`** | **новое**: агрегирует все версии (§9, §13); + `ranking_epsilon`, `settings_provenance` (v2.1, §13/B-7, A3) |
 | **`CellEvidence`** | **новое**: типизированный evidence (сейчас dict) |
 | **`SearchLogEntry`** | **новое**: строка `search_log` |
 | **`ScenarioBinding`** | **новое**: `scenario → {model_id, version, ...}` (I21) |
@@ -90,7 +90,14 @@ def check_evidence(ev: CellEvidence, cell: Cell) -> list[Violation]   # I10, I15
 def check_inheritance(cell: Cell, baseline: BaselineRow) -> list[Violation]  # I8 + derived-evidence
 def check_derived_evidence(ev: CellEvidence, upstream: UpstreamRef) -> list[Violation]  # I1, I10, I15, I19
 def check_satellite(sat: Satellite) -> list[Violation]   # I9
+def check_unknown_exhaustion(cell: Cell, exhaustion: ProtocolExhaustion | None,
+                             *, required=REQUIRED_EXHAUSTION_CONTOURS) -> list[Violation]  # I3 (§5, v2.1)
 ```
+
+`REQUIRED_EXHAUSTION_CONTOURS = ("corpus", "serp", "registry", "inheritance")` — обязательные контуры
+**полного** протокола исчерпания strict-`❓` (v2.1, §5). `check_unknown_exhaustion` фиксирует
+отсутствие протокола/`termination_reason`/неполный перечень контуров как нарушение `I3`, но это
+**аномалия**, а не смена статуса ячейки: `❓` остаётся `❓` (I12).
 
 `check_inheritance` проверяет не только mode (I8): **унаследованный ✅/⚠️ обязан нести
 derived-evidence** (§4.2 регламента) — `evidence_type: derived`, `source_kind: inheritance`, с
@@ -105,14 +112,27 @@ CI и ревью-эшелону ссылаться на инвариант ма�
 
 ```python
 def resolved_capability(cells, params, weights, policy) -> Score        # I5 (failed вне числителя)
-def evidence_coverage(cells, params, weights) -> Coverage               # failed в знаменателе (I5)
+def evidence_coverage(cells, params, weights, *, universe=None) -> Coverage  # §6/B-3a; I5/I7/I13
 def failure_rate(cells) -> float
 def comparability(cohort, per_product_coverage, alignment: AlignmentReport) -> Comparability
-def sensitivity(cells, params, weights, axes) -> SensitivityReport      # §6
-def module_scores(...) -> list[ModuleScore]
+def sensitivity(cells, params, weights, axes, *,
+                requested_ranking=RankingPolicy.CAPABILITY_RANKED,
+                ranking_epsilon=0.0) -> SensitivityReport            # §6, K6/B-1
+def module_scores(cells, params, weights, *, universe=None) -> list[ModuleScore]
 ```
 
-Чистые функции над доменными объектами; никакого доступа к БД (загрузка — в pipeline).
+**Coverage по вселенной scope (v2.1, §6/B-3a).** При `universe` (множество пар `(product_id,
+param_id)` — декартово произведение scope-параметров на продукты когорты; строится
+`compute.scope_universe(catalog, products)`) знаменатель — `Σ w(universe)`: `pending`/отсутствующая
+ячейка учтены как неразрешённые, `N/A`/`preliminary` — вне (I7/I13), `failed` — внутри (I5).
+`Coverage` несёт `universe`/`completed`/`defined`; `universe=0` → `value=None`, `defined=False`
+(UNDEFINED). Legacy-режим (`universe=None`) сохранён. Итоговый ранг — join `requested × computed =
+min` по порядку `capability_ranked ⊐ coverage_fallback ⊐ unranked` (K6/C-1): запрос `unranked` не
+повышается, `ranking_epsilon` задаёт порог неразличимости пар.
+
+`scope_universe` — публичная точка `pipeline/compute.py` (фазы Ш8/отчёты/`sensitivity` строят
+вселенную из неё). Чистые функции `domain/scoring.py` остаются без I/O: загрузка ячеек/каталога — в
+`pipeline`.
 
 ### 2.5. `domain/r2.py`, `domain/anchors.py`
 
@@ -260,6 +280,7 @@ class RegistryFetcherPort(Protocol):
 class StorePort(Protocol):       # §4.4
     def upsert_products(...); def create_run(...); def save_cell(...)
     def add_evidence(...); def log_search(...); def save_exhaustion(...)
+    def persist_manifest(...); def iter_exhaustions(run_id) -> Iterator[ProtocolExhaustion]
     def read_manifest(...); def iter_cells(run_id) -> Iterator[Cell]
 ```
 
@@ -372,7 +393,7 @@ class ContentGateway(Protocol):
 | Инвариант | Обеспечено структурно | pipeline | Проверено тестом |
 |---|---|---|---|
 | I1, I2, I2b | domain/invariants (`check_cell`) | evaluate | selfcheck |
-| I3, I12 | domain/invariants (`check_cell`), review-политика | review | unit (review) |
+| I3, I12 | domain/invariants (`check_unknown_exhaustion`, `check_cell`) + report-контур | review/report | unit (review/report) |
 | I3b | domain/enums (`protocol: partial`) | review | unit (preliminary) |
 | I4, I6, I7, I13 | domain/invariants + SQL-триггеры | review | selfcheck |
 | I5, I11 | domain/scoring | compute | selfcheck |

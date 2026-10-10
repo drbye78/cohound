@@ -75,9 +75,11 @@ runs/{run_id}/
 
 ### B.1. Контракт `ports/store.py` → `store/sqlite.py`
 
-Схема §4.4 перенесена из бывшего `core/db.py` (удалён в T1.3) в `store/sqlite.py` без
-семантических изменений (11 таблиц + `schema_meta`, индексы, триггеры I4/I6/I7/I13/I18).
-Методы доступа (реализация `StorePort`):
+Схема §4.4 перенесена из бывшего `core/db.py` (удалён в T1.3) в `store/sqlite.py`
+(11 таблиц + `schema_meta`, индексы, триггеры I4/I6/I7/I13/I18). Константа `SCHEMA_VERSION`
+= **`2.1.0`** (v2.1/A3) — версия **SQLite-схемы**, не регламента; колонка
+`runs.settings_provenance_json` хранит провенанс настроек, а миграция additive/idempotent
+(`ALTER TABLE ... ADD COLUMN` при отсутствии). Методы доступа (реализация `StorePort`):
 
 ```python
 class SqliteStore:
@@ -92,11 +94,13 @@ class SqliteStore:
     def save_gate_decision(d: GateDecision)        # S9: gate_decisions
     def save_registry_fact(rf: RegistryFact)
     def save_llm_scenarios(bindings: list[ScenarioBinding])
+    def persist_manifest(run_id, manifest: RunManifest)   # версии/индекс/retrieval + settings_provenance_json
     # чтение
     def iter_cells(run_id, state=None) -> Iterator[Cell]
+    def iter_exhaustions(run_id) -> Iterator[ProtocolExhaustion]    # I3/§5: протоколы исчерпания
     def get_chunk(chunk_id) -> Chunk            # для валидации цитат
     def resolve_source_url(source_id) -> str    # I10/I15
-    def read_manifest(run_id) -> RunManifest
+    def read_manifest(run_id) -> RunManifest    # forward-compatible: settings_provenance/ranking_epsilon
     def iter_gate_decisions(run_id) -> Iterator[GateDecision]   # S9
 ```
 
@@ -139,9 +143,21 @@ class SqliteStore:
 | `embed_model_id`, `chunker_version`, `extractor_version`, `lexical_engine_version` | index_manifest | сборка индекса |
 | `retrieval_profile`, `retrieval_cutoff_K` | run_manifest | ретривал (I16, I20) |
 | `retrieval_params_json` (fusion, вкл. `rrf_k`) | run_manifest | ретривал (S1) |
+| `requested_ranking` / `computed_ranking` | run_manifest | ранжирование (K6) |
+| `ranking_epsilon` | run_manifest | порог неразличимости ранжирования (§6/B-1, K6) |
+| `settings_provenance` | run_manifest | провенанс настроек: `default`\|`measured` (+ `experiment_id`) (A3) |
 | `index_build_id`, `retrieval_profile` (per cell) | cells | provenance ячейки (R15) |
 | `prompt_hash` (per cell) | cells | воспроизводимость ячейки |
 | `stale_reason` (per cell) | cells | инвалидация при смене сборки/prompt-шаблона |
+
+**Разделение версий (§13/B-7, v2.1).** Межцикловый diff классифицирует причины изменения
+манифеста по **классам полей**: `methodology_change` — смена major `methodology_version` либо поля
+`METHODOLOGY_FIELDS` (`scoring_policy_version`, `status_dict_version`, `capability_policy`,
+`unknown_policy`, `partial_score`); `execution_change` — расхождение поля `EXECUTION_FIELDS`
+(`case_id`, `cohort_ref`, `index_build_id`, `embed_model_id`, `chunker_version`, `extractor_version`,
+`lexical_engine_version`, `vector_store`, `retrieval_profile`, `retrieval_cutoff_K`,
+`retrieval_params_json`, `llm_scenarios`). `DIFF_BOUNDARY_FIELDS` сохранён алиасом
+`EXECUTION_FIELDS` (обратная совместимость). Дифф отказывает при обеих классах причин (§13).
 
 ### C.2. Версионные границы (bump + golden-full)
 
@@ -176,12 +192,18 @@ languages: [ru, en]
 snapshot_date: 2026-06-01
 mode: strict
 ranking_policy: capability_ranked
+ranking_epsilon: 0.0            # §6/B-1: порог неразличимости ранжирования (доля диапазона)
+settings_provenance:            # A3: default|measured (+ experiment_id при measured)
+  partial_score: {source: default}
 ```
 
 Загрузчик `config/run_config.py` → `RunConfig` (домен) с валидацией (anchor ∈ products;
 preliminary не совместим с capability_ranked — I13). `ranking_policy` — **запрошенный** режим
-отображения (K6); вычисленный ранг определяется sensitivity и может демотироваться независимо от
-запрошенного (02 E.1). `products` — **проекция** `cohort.yaml` (один канонический источник состава);
+отображения (K6); вычисленный ранг определяется sensitivity (join `requested × computed = min`,
+02 E.1). `ranking_epsilon` — калибруемый порог неразличимости пар (§6/B-1; `None` → 0.0).
+`settings_provenance` фиксирует, какие настройки — дефолт, а какие получены **измерением**
+(`source: default|measured`), — это делает «дефолт по предвидению» явным исключением, а не нормой
+(A3). `products` — **проекция** `cohort.yaml` (один канонический источник состава);
 линтер проверяет совпадение множеств `products` и `cohort.product_id` (S11).
 
 ### D.2. Загрузчики пакета (`pipeline/normalize.py`)

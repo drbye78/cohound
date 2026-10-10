@@ -171,7 +171,9 @@ IDP/DLP/IDS (`07` §8).
 `adapters/lexical_tantivy.py` (`LexicalIndexPort`). Векторный поиск — `adapters/vector_npy.py`
 (`VectorIndexPort`); `adapters/embed_local.py` — `EmbedderPort`. `pipeline` не пишет `.npy`/tantivy
 напрямую. Реализация `StorePort`/`GateStore` — `store/sqlite_store.py` поверх DDL `store/sqlite.py`;
-бэкап/восстановление прогона — `store/backup.py`.
+бэкап/восстановление прогона — `store/backup.py`. Схема БД версионируется константой
+`SCHEMA_VERSION` = **`2.1.0`** (версия SQLite-схемы, **не** регламента); `runs.settings_provenance_json`
+хранит провенанс настроек (A3), миграция additive/idempotent (`ALTER TABLE` при отсутствии колонки).
 
 **Реестровые фетчеры:** `ports/registry.py` — нейтральный порт; конкретные реестры (РРПО, ФСТЭК)
 описываются данными в `registries/*.yaml` и обслуживаются **generic config-driven HTTP/JSON/HTML
@@ -204,8 +206,8 @@ flowchart TD
 | Механизм | Реализация | Инварианты |
 |---|---|---|
 | **Evidence integrity** | `source_id` → `source_url` резолв; цитата-подстрока `text`; `content_hash` | I1, I2, I10, I15, I19 |
-| **Версионирование** | Все версии в `run_manifest.yaml`; иммутабельные сборки | §13 |
-| **Воспроизводимость** | Пинить веса/движок/профиль/seed/железо; глобальный content-addressed кэш корпуса и SERP (ADR 0016) | R7, I16, I20 |
+| **Версионирование** | Все версии в `run_manifest.yaml` (вкл. `settings_provenance`, `ranking_epsilon`); иммутабельные сборки | §13 |
+| **Воспроизводимость** | Пинить веса/движок/профиль/seed/железо + провенанс настроек (default\|measured); глобальный content-addressed кэш корпуса и SERP (ADR 0016) | R7, I16, I20 |
 | **Нейтральность** | Грепп-тест `core/`; данные только в `packages/` | §1.3, §11.4 |
 | **Детерминизм маршрутизации** | `scenario → {model_id,...}` таблицей, не решением LLM | I21 |
 | **Валидация-эшелон** | Отдельный `pipeline/validate.py`, независимый от LLM | §10 |

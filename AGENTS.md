@@ -141,8 +141,14 @@ Dev/CI по §11.6: `pytest`+`hypothesis`+`pytest-cov` в extra `dev`; един�
 - **I2/I2b** evaluated ❌ → absence-evidence; для `parameter_reference`/`distribution_absence`
   нужен `source_scope: exhaustive` **и** `scope_attested_by`. Для `registry_absence` —
   exhaustive по построению. Для `explicit` — `source_scope` не требуется.
+- **I3** strict-`❓` → **полный** протокол исчерпания (`corpus`+`serp`+`registry`+`inheritance`,
+  `check_unknown_exhaustion`) **или** `reviewed_by ≠ null`. Неполный протокол — **аномалия** отчёта,
+  не смена статуса (`❓` остаётся `❓`, I12).
 - **I4** failed → `status = null`, **не статус никогда**.
-- **I5** failed **входит** в знаменатель Coverage.
+- **I5** failed **входит** в знаменатель Coverage. Universe-режим (§6): знаменатель — `Σ w(scope)`
+  (`scope_universe` = scope-параметры × продукты когорты), `pending`/отсутствующая ячейка — как
+  неразрешённая. `preliminary` (I13) и `N/A` (I7) — **вне** знаменателя; `universe=0` → Coverage
+  `defined=False`/UNDEFINED, Capability не публикуется (I11/G4).
 - **I6/I7** N/A — только человеком (`reviewed_by`).
 - **I13** preliminary исключён из всех расчётов; `status` у него null.
 - **I17** ретривал продукт-скоупед; evidence — только чанки паспорта и его сателлитов.

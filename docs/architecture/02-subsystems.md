@@ -296,22 +296,39 @@ llm_scenarios:
 ### E.1. Расчёт (`pipeline/compute.py` → `domain/scoring.py`)
 
 ```
+scope = scope_universe(catalog, cohort_product_ids)         # (product × param) — вселенная §6/B-3a
 bundle = {
-  capability: resolved_capability(cells, params, weights),   # ✅=1 ⚠️=0.5 ❌=0; ❓ вне
-  coverage: evidence_coverage(cells, params, weights),       # (✅⚠️❌)/(✅⚠️❌❓ ∪ failed)
+  capability: resolved_capability(cells, params, weights),   # ✅=1 ⚠️=0.5 ❌=0; ❓/failed вне числителя
+  coverage: evidence_coverage(cells, params, weights, universe=scope),  # Σresolved / Σ w(scope)
   failure_rate: ...,                                          # R13
-  modules: module_scores(...),
+  modules: module_scores(cells, params, weights, universe=scope),
   comparability: comparability(cohort, per_product, alignment),
-  sensitivity: sensitivity(cells, params, weights, axes={warn, unknown_policy, weights}),
+  sensitivity: sensitivity(cells, params, weights, axes={warn, unknown_policy, weights},
+                           requested_ranking=run_cfg.ranking_policy,
+                           ranking_epsilon=run_cfg.ranking_epsilon),  # §6/B-1 предикат устойчивости
   requested_ranking: run_cfg.ranking_policy,                  # K6: запрошенный режим отображения
-  computed_ranking: choose_ranking(capability, sensitivity),  # K6: демотирование по sensitivity
+  computed_ranking: join(requested, computed),                # K6: min; unranked не повышается
 }
 ```
 
-**Запрошенный vs вычисленный ранг (K6).** `ranking_policy` во входе — запрошенный режим; он **не
-переопределяет** демотирование по sensitivity. Если ранжирование неустойчиво, `computed_ranking`
-демотируется до fallback-порядка по Coverage независимо от запрошенного. В манифест пишутся **оба**
-поля (`requested_ranking`, `computed_ranking`); расхождение — ожидаемый и явно отображаемый случай (A3).
+**Coverage по вселенной scope (v2.1, §6/B-3a).** Знаменатель universe-режима — `Σ w(universe)`, где
+`universe = scope_universe(catalog, products)` (`core/pipeline/compute.py`) — декартово произведение
+scope-параметров на продукты когорты, а не только существующие ячейки. `pending`/отсутствующая ячейка
+входит в знаменатель как **неразрешённая**; `N/A` и `preliminary` — **вне** знаменателя (I7/I13);
+`failed` — в знаменателе (I5). Возвращаемый `Co` (`Coverage`) несёт `universe` (вес вселенной),
+`completed` (взвешенный числитель **завершённых** измерений: `evaluated/reviewed` без N/A + `failed`) и
+`defined`; опубликованная доля завершённости — `completed / universe`. При `universe = 0` →
+`value = None`, `defined = False` (UNDEFINED): Capability не публикуется (I11/G4). Legacy-режим
+(`universe=None`) сохранён — знаменатель по существующим ячейкам.
+
+**Запрошенный vs вычисленный ранг (K6/C-1).** `ranking_policy` во входе — запрошенный режим; он **не
+переопределяет** демотирование по sensitivity. Итог — **join** `requested × computed = min` по порядку
+`capability_ranked ⊐ coverage_fallback ⊐ unranked`: неустойчивое ранжирование демотируется до
+`coverage_fallback` независимо от запрошенного, а запрос `unranked` не повышается. Предикат
+устойчивости (`sensitivity`, §6/B-1) учитывает `ranking_epsilon` — порог неразличимости пар (доля
+диапазона агрегата; разность в пределах порога в подсчёт не входит, дефолт 0 — точное равенство). В
+манифест пишутся **оба** поля (`requested_ranking`, `computed_ranking`) и `ranking_epsilon`; расхождение
+— ожидаемый и явно отображаемый случай (A3).
 
 `alignment` (Comparability, §6): единый snapshot_date, retrieval_profile+K, embed/index build,
 package/catalog version, edition/jurisdiction. Нарушено → `cross-cycle`, понижение на уровень.
@@ -320,14 +337,20 @@ package/catalog version, edition/jurisdiction. Нарушено → `cross-cycle
 
 | Артефакт | Писатель | Содержание |
 |---|---|---|
-| `battle_card.xlsx` | `report.py` (openpyxl) | шапка (capability/coverage/comparability), матрица, сателлиты, модульное покрытие, sensitivity |
+| `battle_card.xlsx` | `report.py` (openpyxl) | шапка (capability/coverage + `coverage_defined`/`coverage_universe`/`coverage_n_used`, comparability), матрица, сателлиты, модульное покрытие, sensitivity |
 | `preliminary_findings.xlsx` | `report.py` | кандидаты + validation_notes (маркер «не публикация») |
-| `nda_questions.csv` | `report.py` | все ❓ |
+| `nda_questions.csv` | `report.py` | все ❓ + `protocol_status` (`complete`/`incomplete`/`unknown`) и `i3_anomaly` (§5/I3) |
 | `diff.md` | `report.py` | изменённые статусы + evidence_id (запрещён через major) |
-| `run_manifest.yaml` | `runner.py` | все версии, модели, index_build, профиль+K, бюджет, scoring-политика |
+| `run_manifest.yaml` | `runner.py` | все версии, модели, index_build, профиль+K, бюджет, scoring-политика, `ranking_epsilon`, `settings_provenance` |
+
+**Отчётный контур I3 (v2.1, §5).** `report.py` собирает `i3_anomalies` (`collect_i3_anomalies`):
+strict-`❓` без **полного** протокола исчерпания (`corpus`+`serp`+`registry`+`inheritance`). Это
+**наблюдение**, а не изменение статуса: `❓` остаётся `❓` (I12), `status` не трогается. Те же
+аномалии отражаются колонками `protocol_status`/`i3_anomaly` в `nda_questions.csv`.
 
 **G4-инвариант:** `battle_card` не пишется без Coverage (I11); при `INSUFFICIENT` — приглушение;
-при демотировании — fallback-порядок по Coverage с пометкой.
+при `UNDEFINED` (вселенная scope пуста) — публикация **блокируется**; при демотировании —
+fallback-порядок по Coverage с пометкой.
 
 ---
 
