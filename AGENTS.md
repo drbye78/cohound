@@ -41,8 +41,13 @@ core/                         # ядро: категорийно-НЕЙТРАЛ�
                               #   scout_common.py
   config/                     # загрузка run.yaml/пакетов, deploy.yaml (профиль зон), раскладка путей
                               #   (paths.py), passports.py
-  cli/                        # composition root Z0 (ядро) — сборка зависимостей: main.py, wiring.py,
-                              #   package_commands.py, doctor.py, __main__.py
+  cli/                        # composition root Z0 (ядро): main.py (тонкий вход + реэкспорт),
+                              #   parser.py (build_parser), context.py (общие DI/ГЭП-хелперы),
+                              #   errors.py (EXIT_*/CliError), output.py (--json/emit_*),
+                              #   wiring.py (сборка build_* адаптеров), doctor.py, __main__.py;
+                              #   команды — commands/* (реестр COMMANDS), подкоманды hound package —
+                              #   package/* (add_package_parser, cmd_package_*); package_commands.py —
+                              #   re-export-шим (обратная совместимость)
   edge/                       # composition root Z1/DMZ — веб-адаптеры за швом (07): server.py, auth.py,
                               #   audit.py, seam_schema.py
   adapters/                   # chunker_markdown (heading_path), extract_document (docling: pdf+office),

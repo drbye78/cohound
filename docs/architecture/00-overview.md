@@ -236,7 +236,8 @@ core/
                remote_extractor.py registry_generic.py gateway_validate.py
   store/       sqlite.py sqlite_store.py backup.py
   config/      run_config.py deploy.py paths.py passports.py
-  cli/         main.py wiring.py package_commands.py doctor.py __main__.py  # composition root Z0
+  cli/         main.py parser.py context.py errors.py output.py wiring.py doctor.py __main__.py
+               commands/* (реестр COMMANDS) package/* (hound package)            # composition root Z0
   edge/        server.py auth.py audit.py seam_schema.py                    # composition root Z1 (DMZ)
   util/        ids.py hashing.py logging.py cache.py sanitize.py fusion.py
                security.py text_utils.py retrieval_eval.py
