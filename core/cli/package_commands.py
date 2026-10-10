@@ -1137,11 +1137,24 @@ def cmd_package_scout(args: argparse.Namespace) -> int:
     сохраняются с пометкой в sidecar/``needs_human`` (OQ-3). Без LLM-конфигурации или
     учётных данных поиска — понятная ошибка, кандидаты не выдумываются.
 
+    **Выбор провайдера (I16/I21/I23).** Провайдер резолвится детерминированно
+    :func:`core.config.deploy.resolve_search_provider`: явный ``--search-adapter`` >
+    ``search.by_language[lang]`` из ``config/deploy.yaml`` > ``search.adapter`` >
+    ``yandex``. Маршрут зависит только от языка (не от продукта) — симметричный протокол
+    I16 сохраняется; решение вычисляется по правилу, а не LLM (дух I21). Выбранный
+    провайдер попадает в payload и sidecar-провенанс (``search_provider``/
+    ``search_adapter_kind``, I23). Неизвестный провайдер из конфига честно отвергается
+    (:data:`EXIT_USAGE`, ``search``), а не подменяется — кандидаты не выдумываются (I19).
+    Тестовый шов ``search_adapter`` (аргумент :func:`core.cli.main.main`) имеет высший
+    приоритет и пропускает резолв/валидацию провайдера.
+
     :returns: :data:`EXIT_OK` — разведка без ошибок; :data:`EXIT_ERROR` — ошибки
-        сбора/инференса; :data:`EXIT_USAGE` — битый ``--package``/LLM не сконфигурирован.
+        сбора/инференса; :data:`EXIT_USAGE` — битый ``--package``/LLM не сконфигурирован/
+        неизвестный провайдер поиска.
     """
     from core.cli.wiring import (
         LOCAL_PROFILE,
+        SUPPORTED_SEARCH_ADAPTERS,
         WiringError,
         build_adapters,
         build_discovery_llm,
@@ -1184,16 +1197,38 @@ def cmd_package_scout(args: argparse.Namespace) -> int:
         )
         return EXIT_USAGE
 
-    # 2. Поиск: инъекция теста, --no-search либо реальный адаптер (без ключей — ошибка).
+    # 2. Поиск: инъекция теста, --no-search либо резолв провайдера из deploy-конфига.
+    #    Провайдер выбирается детерминированно (I16: функция от lang, не от продукта;
+    #    дух I21: по правилу, а не LLM). Выбранный провайдер фиксируется в провенансе (I23).
     injected_search = getattr(args, "search_adapter", None)
+    resolved_provider: str | None = None
     search: Any
     if injected_search is not None:
+        # Тестовый шов: резолв/валидация провайдера пропускаются (провайдер зафиксирован
+        # вне конфига — ответственность теста).
         search = injected_search
     elif args.no_search:
         search = None
     else:
+        from core.config.deploy import load_deploy_config, resolve_search_provider
+
+        config = load_deploy_config(None)
+        resolved_provider = resolve_search_provider(
+            config.search, lang=args.lang, explicit=args.search_adapter_kind
+        )
+        # Валидация против реестра адаптеров — в composition root (config-слой
+        # провайдеро-нейтрален). Неизвестный провайдер → понятная ошибка (I19: не выдумываем).
+        if resolved_provider not in SUPPORTED_SEARCH_ADAPTERS:
+            _emit_error(
+                args,
+                "search",
+                f"неизвестный провайдер поиска {resolved_provider!r} "
+                "(config/deploy.yaml search.adapter/by_language либо --search-adapter); "
+                f"поддерживаются: {', '.join(SUPPORTED_SEARCH_ADAPTERS)}",
+            )
+            return EXIT_USAGE
         try:
-            search = build_search_adapter(args.search_adapter_kind)
+            search = build_search_adapter(resolved_provider)
         except WiringError as exc:
             _emit_error(args, "I19", _concise(exc))
             return EXIT_USAGE
@@ -1206,6 +1241,11 @@ def cmd_package_scout(args: argparse.Namespace) -> int:
                 "кандидаты не выдумываются (используйте --no-search с --url)",
             )
             return EXIT_ERROR
+
+    # Имя выбранного провайдера для провенанса (I23): резолв из конфига либо атрибут шва.
+    provider_label: str | None = resolved_provider
+    if provider_label is None and search is not None:
+        provider_label = getattr(search, "provider", "") or getattr(search, "adapter_kind", "")
 
     # 3. Краул/экстракция: как в ``cmd_passport_scout`` (инъекции/локальный профиль).
     crawler = getattr(args, "crawler", None) or build_scout_crawler()
@@ -1244,6 +1284,14 @@ def cmd_package_scout(args: argparse.Namespace) -> int:
         )
     )
 
+    # Провайдер поиска в sidecar-провенанс (I23): имя провайдера и вид адаптера.
+    # Мутируем только копию-словарь отчёта; глубоко pipeline не трогаем.
+    if provider_label:
+        report.sidecar.setdefault("search_provider", provider_label)
+    adapter_kind = getattr(search, "adapter_kind", "") if search is not None else ""
+    if adapter_kind:
+        report.sidecar.setdefault("search_adapter_kind", adapter_kind)
+
     # 6. Запись артефактов (OQ-3: частичные кандидаты тоже пишутся; --dry-run не пишет).
     out_dir = Path(args.out) if args.out else pkg_dir / "sources" / "scout"
     written: dict[str, str] = {}
@@ -1269,6 +1317,8 @@ def cmd_package_scout(args: argparse.Namespace) -> int:
         "errors": report.errors,
         "fetched": len(report.fetched),
         "search_calls": report.search_calls,
+        "search_provider": provider_label,
+        "search_adapter_kind": adapter_kind or None,
         "dry_run": bool(args.dry_run),
         **written,
     }
@@ -1292,6 +1342,10 @@ def _print_package_scout_lines(payload: dict[str, Any]) -> list[str]:
         f"fetched: {payload['fetched']}",
         f"dry-run: {'yes' if payload.get('dry_run') else 'no'}",
     ]
+    if payload.get("search_provider"):
+        detail = payload.get("search_adapter_kind")
+        suffix = f" ({detail})" if detail else ""
+        lines.append(f"search_provider: {payload['search_provider']}{suffix}")
     for label in ("candidates_path", "provenance_path"):
         if label in payload:
             lines.append(f"{label}: {payload[label]}")
@@ -1760,9 +1814,10 @@ def add_package_parser(subparsers: Any) -> None:
     p_scout.add_argument(
         "--search-adapter",
         dest="search_adapter_kind",
-        default="yandex",
+        default=None,
         choices=list(SUPPORTED_SEARCH_ADAPTERS),
-        help="внешний поисковый адаптер (дефолт yandex)",
+        help="провайдер поиска; по умолчанию — из config/deploy.yaml "
+        "(search.adapter/by_language по --lang) или yandex",
     )
     p_scout.add_argument("--no-search", action="store_true", help="не делать SERP (только --url)")
     p_scout.add_argument("--limit", type=int, default=10, help="лимит результатов SERP на запрос")

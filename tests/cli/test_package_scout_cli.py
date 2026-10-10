@@ -4,7 +4,9 @@
 Покрываются: отсутствие LLM-конфигурации → ``EXIT_USAGE`` (``llm``), недоступный поиск →
 ``EXIT_ERROR`` (``I19``), ``--dry-run`` ничего не пишет, happy-path пишет кандидатов +
 provenance (apply-совместимо), частичный ``ok=False`` всё равно пишет (OQ-3), битый
-``--package``/``--only`` → ``EXIT_USAGE``.
+``--package``/``--only`` → ``EXIT_USAGE``, а также резолв провайдера поиска из
+``config/deploy.yaml`` (I16/I21/I23: ``by_language`` по языку, ``--search-adapter`` поверх
+конфига, неизвестный провайдер → ``EXIT_USAGE``).
 """
 
 from __future__ import annotations
@@ -18,9 +20,10 @@ import pytest
 
 from core.adapters.llm_discovery import DiscoveryLLM
 from core.cli.main import EXIT_ERROR, EXIT_OK, EXIT_USAGE, main
+from core.config.deploy import DeployConfig, SearchDeployConfig
 from core.pipeline.package_candidates import loads_candidates
 from core.ports.types import RawPage, RenderMode
-from tests.fakes.ports import FakeCrawler, FakeExtractor
+from tests.fakes.ports import FakeCrawler, FakeExtractor, FakeSearchAdapter
 
 ROOT = Path(__file__).resolve().parents[2]
 TEMPLATE_PACKAGE = ROOT / "packages" / "_template"
@@ -114,6 +117,25 @@ def _base_argv(package: Path, out: Path, *extra: str, dry_run: bool = False) -> 
     return argv
 
 
+def _search_argv(package: Path, out: Path, *extra: str) -> list[str]:
+    """Аргументы ``package scout`` с реальным (не ``--no-search``) путём поиска."""
+    return [
+        "package",
+        "scout",
+        "--package",
+        str(package),
+        "--subject-name",
+        "Alpha Product",
+        "--out",
+        str(out),
+        "--url",
+        URL,
+        "--dry-run",
+        "--json",
+        *extra,
+    ]
+
+
 # ---------------------------------------------------------------------------
 # Конфигурация / ошибки входа
 # ---------------------------------------------------------------------------
@@ -182,6 +204,124 @@ def test_search_without_keys_is_error_not_fabrication(
     assert code == EXIT_ERROR
     payload = _json_out(capsys)
     assert payload["error"] == "I19"
+
+
+# ---------------------------------------------------------------------------
+# Провайдер поиска (config/deploy.yaml, I16/I21/I23) — тестовый шов конфига
+# ---------------------------------------------------------------------------
+
+
+def test_search_provider_defaults_to_yandex_key_gate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Нет конфига/``--search-adapter`` → резолв в ``yandex`` → key-gate (не выдумываем)."""
+    _clear_env(monkeypatch)
+    # «Нет конфига»: канонический путь даёт безопасный дефолт ``local`` без search.*.
+    monkeypatch.setattr(
+        "core.config.deploy.load_deploy_config",
+        lambda _path=None: DeployConfig(profile="local"),
+    )
+    package = _package(tmp_path)
+    code = main(
+        _search_argv(package, tmp_path / "out"),
+        discovery_llm=_llm(),
+        crawler=_crawler(),
+        extractor=FakeExtractor(),
+    )
+    assert code == EXIT_ERROR
+    payload = _json_out(capsys)
+    assert payload["error"] == "I19"
+    assert "yandex" in payload["message"]
+
+
+def test_search_provider_resolved_from_config_by_language(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """``--lang en`` + ``by_language={en: duckduckgo}`` → выбран ``duckduckgo`` (I16)."""
+    _clear_env(monkeypatch)
+    requested: list[str] = []
+
+    def _fake_build(name: str) -> FakeSearchAdapter:
+        requested.append(name)
+        return FakeSearchAdapter()
+
+    monkeypatch.setattr("core.cli.wiring.build_search_adapter", _fake_build)
+    monkeypatch.setattr(
+        "core.config.deploy.load_deploy_config",
+        lambda _path=None: DeployConfig(
+            profile="local",
+            search=SearchDeployConfig(by_language={"ru": "yandex", "en": "duckduckgo"}),
+        ),
+    )
+    package = _package(tmp_path)
+    code = main(
+        _search_argv(package, tmp_path / "out", "--lang", "en"),
+        discovery_llm=_llm(),
+        crawler=_crawler(),
+        extractor=FakeExtractor(),
+    )
+    assert code == EXIT_OK
+    assert requested == ["duckduckgo"]
+    payload = _json_out(capsys)
+    # Провенанс провайдера (I23): имя из резолвера + вид адаптера.
+    assert payload["search_provider"] == "duckduckgo"
+    assert payload["search_adapter_kind"] == "serp"
+
+
+def test_search_provider_explicit_flag_overrides_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Явный ``--search-adapter google`` побеждает ``by_language`` из конфига."""
+    _clear_env(monkeypatch)
+    requested: list[str] = []
+
+    def _fake_build(name: str) -> FakeSearchAdapter:
+        requested.append(name)
+        return FakeSearchAdapter()
+
+    monkeypatch.setattr("core.cli.wiring.build_search_adapter", _fake_build)
+    monkeypatch.setattr(
+        "core.config.deploy.load_deploy_config",
+        lambda _path=None: DeployConfig(
+            profile="local",
+            search=SearchDeployConfig(adapter="yandex", by_language={"ru": "duckduckgo"}),
+        ),
+    )
+    package = _package(tmp_path)
+    code = main(
+        _search_argv(package, tmp_path / "out", "--lang", "ru", "--search-adapter", "google"),
+        discovery_llm=_llm(),
+        crawler=_crawler(),
+        extractor=FakeExtractor(),
+    )
+    assert code == EXIT_OK
+    assert requested == ["google"]
+    payload = _json_out(capsys)
+    assert payload["search_provider"] == "google"
+
+
+def test_search_provider_unknown_from_config_is_usage_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Неизвестный провайдер из конфига → ``EXIT_USAGE`` (``search``), без выдумывания."""
+    _clear_env(monkeypatch)
+    monkeypatch.setattr(
+        "core.config.deploy.load_deploy_config",
+        lambda _path=None: DeployConfig(
+            profile="local", search=SearchDeployConfig(adapter="not-a-provider")
+        ),
+    )
+    package = _package(tmp_path)
+    code = main(
+        _search_argv(package, tmp_path / "out"),
+        discovery_llm=_llm(),
+        crawler=_crawler(),
+        extractor=FakeExtractor(),
+    )
+    assert code == EXIT_USAGE
+    payload = _json_out(capsys)
+    assert payload["error"] == "search"
+    assert "not-a-provider" in payload["message"]
 
 
 # ---------------------------------------------------------------------------
