@@ -652,15 +652,38 @@ def _import_graph() -> None:
                 mod = None
                 if isinstance(node, ast.ImportFrom) and node.module and node.module.startswith("core."):
                     mod = node.module
+                elif isinstance(node, ast.ImportFrom) and node.level and node.level > 0:
+                    # Relative-импорт (``from ..domain import X``): резолвим в ``core.*``;
+                    # без этого гейт молча пропускал бы межслойные нарушения (§1.3/01 §1).
+                    mod = _resolve_relative_import(py, root, node.level, node.module)
                 elif isinstance(node, ast.Import):
                     for alias in node.names:
                         if alias.name.startswith("core."):
                             _check_edge(layer, alias.name.split(".")[1], matrix, py, root, violations)
                 if mod is None:
                     continue
-                _check_edge(layer, mod.split(".")[1], matrix, py, root, violations)
+                parts = mod.split(".")
+                if len(parts) < 2 or parts[0] != "core":
+                    continue
+                _check_edge(layer, parts[1], matrix, py, root, violations)
     if violations:
         raise AssertionError("нарушена матрица зависимостей (01 §1): " + "; ".join(violations))
+
+def _resolve_relative_import(py: Path, root: Path, level: int, module: str | None) -> str | None:
+    """Резолвит relative-импорт (``level>0``) в абсолютное имя ``core.*`` или ``None``.
+
+    ``level=1`` — текущий пакет файла, ``level=2`` — родительский и т.д. Возвращает
+    ``None``, если импорт выходит за пределы пакета ``core``.
+    """
+    pkg_parts = list(py.relative_to(root).parts[:-1])
+    up = level - 1
+    if up > len(pkg_parts):
+        return None
+    base = pkg_parts[: len(pkg_parts) - up]
+    parts = ["core", *base]
+    if module:
+        parts.append(module)
+    return ".".join(parts)
 
 
 def _check_edge(layer: str, target: str, matrix: dict, py: Path, root: Path, violations: list) -> None:
