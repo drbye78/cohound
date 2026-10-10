@@ -74,11 +74,13 @@ from core.domain.models import (
 )
 from core.domain.r2 import apply_r2
 from core.domain.invariants import (
+    REQUIRED_EXHAUSTION_CONTOURS,
     check_cell,
     check_derived_evidence,
     check_evidence,
     check_inheritance,
     check_satellite,
+    check_unknown_exhaustion,
 )
 from core.domain.anchors import (
     ResolvedSource,
@@ -173,6 +175,8 @@ __all__ = [
     "check_inheritance",
     "check_derived_evidence",
     "check_satellite",
+    "check_unknown_exhaustion",
+    "REQUIRED_EXHAUSTION_CONTOURS",
     # anchors (T2.4)
     "ResolvedSource",
     "SourceResolver",

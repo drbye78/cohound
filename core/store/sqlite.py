@@ -12,7 +12,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = "2.0.0"
+SCHEMA_VERSION = "2.1.0"
 
 DDL = """
 PRAGMA journal_mode = WAL;
@@ -55,6 +55,7 @@ CREATE TABLE IF NOT EXISTS runs (
     search_effort_budget_json TEXT,                    -- I23
     requested_ranking     TEXT,                        -- запрошенный режим (run.yaml) — K6
     computed_ranking      TEXT,                        -- вычисленный допустимый ранг — K6
+    settings_provenance_json TEXT,                     -- A3 (v2.1): {setting: {source, experiment_id?}}
     snapshot_date         TEXT,
     state                 TEXT
 );
@@ -273,10 +274,15 @@ END;
 
 
 def connect(db_path: str | Path = ":memory:") -> sqlite3.Connection:
-    """Открывает БД и применяет схему."""
+    """Открывает БД и применяет схему (+ идемпотентная миграция DDL-дельты v2.1)."""
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
     conn.executescript(DDL)
+    # DDL-миграция v2.1 (A3): старая БД без settings_provenance_json получает колонку.
+    # CREATE TABLE IF NOT EXISTS не меняет существующую таблицу — добавляем явно.
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(runs)")}
+    if "settings_provenance_json" not in columns:
+        conn.execute("ALTER TABLE runs ADD COLUMN settings_provenance_json TEXT")
     conn.execute(
         "INSERT OR REPLACE INTO schema_meta(key, value) VALUES ('schema_version', ?)",
         (SCHEMA_VERSION,),

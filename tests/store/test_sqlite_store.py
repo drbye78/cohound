@@ -30,6 +30,7 @@ from core.domain import (
     RankingPolicy,
     RegistryFact,
     RunConfig,
+    RunManifest,
     RunMode,
     ScenarioBinding,
     SearchKind,
@@ -89,7 +90,7 @@ def test_schema_opens(store: SqliteStore) -> None:
     ver = store.conn.execute(
         "SELECT value FROM schema_meta WHERE key = 'schema_version'"
     ).fetchone()
-    assert ver["value"] == "2.0.0"
+    assert ver["value"] == "2.1.0"
     tables = {
         r["name"] for r in store.conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
     }
@@ -621,3 +622,93 @@ def test_read_manifest_reads_deploy_fields_when_present(store: SqliteStore) -> N
     manifest = store.read_manifest(RUN_ID)
     assert manifest.deploy_profile == "split"
     assert manifest.edge_schema_version == "1.0.0"
+
+
+# --------------------------------------------------------------------------- #
+# v2.1: settings_provenance (A3), persist_manifest (R7/§13), iter_exhaustions (§5)
+# --------------------------------------------------------------------------- #
+
+
+def test_settings_provenance_roundtrip(store: SqliteStore) -> None:
+    store.create_run(RUN_ID, _cfg())
+    # Новый прогон: пустой провенанс по умолчанию.
+    assert store.read_manifest(RUN_ID).settings_provenance == {}
+
+    provenance = {
+        "ranking_epsilon": {"source": "measured", "experiment_id": "exp-1"},
+        "partial_score": {"source": "default"},
+    }
+    with store.conn:
+        store.conn.execute(
+            "UPDATE runs SET settings_provenance_json = ? WHERE run_id = ?",
+            (json.dumps(provenance, ensure_ascii=False), RUN_ID),
+        )
+    manifest = store.read_manifest(RUN_ID)
+    assert manifest.settings_provenance == provenance
+
+
+def test_persist_manifest_roundtrip(store: SqliteStore) -> None:
+    store.create_run(RUN_ID, _cfg())
+    manifest = RunManifest(
+        run_id=RUN_ID,
+        case_id="case-1",
+        created_at="2026-01-01T00:00:00Z",
+        mode=RunMode.STRICT,
+        methodology_version="2.1.0",
+        package_version="pkg-1.2.3",
+        catalog_version="cat-1",
+        status_dict_version="sd-1",
+        scoring_policy_version="sp-1",
+        anchor_product_id="p1",
+        index_build_id="ib_x",
+        retrieval_profile="R1",
+        retrieval_cutoff_K=20,
+        requested_ranking=RankingPolicy.CAPABILITY_RANKED,
+        computed_ranking=RankingPolicy.COVERAGE_FALLBACK,
+        settings_provenance={"ranking_epsilon": {"source": "measured", "experiment_id": "e1"}},
+    )
+    store.persist_manifest(RUN_ID, manifest)
+    read = store.read_manifest(RUN_ID)
+    assert read.package_version == "pkg-1.2.3"
+    assert read.catalog_version == "cat-1"
+    assert read.methodology_version == "2.1.0"
+    assert read.index_build_id == "ib_x"
+    assert read.retrieval_profile == "R1"
+    assert read.retrieval_cutoff_K == 20
+    assert read.requested_ranking is RankingPolicy.CAPABILITY_RANKED
+    assert read.computed_ranking is RankingPolicy.COVERAGE_FALLBACK
+    assert read.settings_provenance == {
+        "ranking_epsilon": {"source": "measured", "experiment_id": "e1"}
+    }
+
+
+def test_iter_exhaustions(store: SqliteStore) -> None:
+    store.create_run(RUN_ID, _cfg())
+    pe = ProtocolExhaustion(
+        run_id=RUN_ID,
+        product_id="p1",
+        param_id="param.a",
+        contours=["corpus", "serp", "registry", "inheritance"],
+        queries=["q1"],
+        rounds=2,
+        budget={"serp": 5},
+        termination_reason=TerminationReason.BUDGET_EXHAUSTED,
+        exhausted_at="2026-01-01T00:00:00Z",
+        notes="note",
+    )
+    store.save_exhaustion(pe)
+    # Повреждённая строка (невалидный protocol_json) не должна ронять итерацию.
+    with store.conn:
+        store.conn.execute(
+            "INSERT INTO search_exhaustion(run_id, product_id, param_id, protocol_json)"
+            " VALUES (?, 'p1', 'zz', 'not-json')",
+            (RUN_ID,),
+        )
+    items = list(store.iter_exhaustions(RUN_ID))
+    assert [e.param_id for e in items] == ["param.a"]
+    assert items[0].contours == ["corpus", "serp", "registry", "inheritance"]
+    assert items[0].termination_reason is TerminationReason.BUDGET_EXHAUSTED
+    assert items[0].budget == {"serp": 5}
+    assert items[0].rounds == 2
+    # Неизвестный прогон → пустая итерация.
+    assert list(store.iter_exhaustions("does-not-exist")) == []

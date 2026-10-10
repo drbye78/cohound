@@ -591,7 +591,7 @@ def _ports_type_reuse() -> None:
 def _db_smoke() -> None:
     conn = connect(":memory:")
     ver = conn.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()
-    _assert(ver is not None and ver["value"] == "2.0.0")
+    _assert(ver is not None and ver["value"] == "2.1.0")
 
     tables = {r["name"] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     for t in ("products", "runs", "llm_scenarios", "corpus_docs", "corpus_chunks",
@@ -624,6 +624,30 @@ def _db_smoke() -> None:
         if "I4" not in str(exc):
             raise
     conn.close()
+
+    # DDL-дельта v2.1 (A3): старая БД без settings_provenance_json мигрирует идемпотентно.
+    import os as _os
+    import sqlite3 as _sqlite3
+    import tempfile as _tf
+
+    fd, legacy_path = _tf.mkstemp(suffix=".db")
+    _os.close(fd)
+    legacy = _sqlite3.connect(legacy_path)
+    legacy.execute(
+        "CREATE TABLE runs (run_id TEXT PRIMARY KEY, created_at TEXT NOT NULL,"
+        " mode TEXT, case_id TEXT, anchor_product_id TEXT)"
+    )
+    legacy.execute(
+        "INSERT INTO runs(run_id, created_at, mode, case_id, anchor_product_id)"
+        " VALUES ('r1','now','strict','c','p')"
+    )
+    legacy.commit()
+    legacy.close()
+    migrated = connect(legacy_path)
+    cols = {r["name"] for r in migrated.execute("PRAGMA table_info(runs)")}
+    _assert("settings_provenance_json" in cols)
+    migrated.close()
+    _os.unlink(legacy_path)
 
 
 def _import_graph() -> None:

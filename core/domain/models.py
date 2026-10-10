@@ -289,6 +289,12 @@ class RunConfig(BaseModel):
     snapshot_date: _dt.date
     mode: RunMode
     ranking_policy: RankingPolicy = RankingPolicy.CAPABILITY_RANKED
+    # §6/B-1 (v2.1): калибруемый порог неразличимости ранжирования (доля диапазона
+    # агрегата); ``None`` → 0.0. Идёт в манифест с provenance (A3).
+    ranking_epsilon: float | None = None
+    #: A3 (v2.1): провенанс настроек ``{setting: {"source": "default"|"measured",
+    #: "experiment_id"?: str}}``. Строки настроек (не enum ядра) — словарь не трогаем.
+    settings_provenance: dict[str, dict[str, Any]] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def _check(self) -> RunConfig:
@@ -643,6 +649,11 @@ class RunManifest(BaseModel):
     search_effort_budget_json: str | None = None
     requested_ranking: RankingPolicy | None = None
     computed_ranking: RankingPolicy | None = None
+    #: §6/B-1 (v2.1): порог неразличимости ранжирования (доля диапазона агрегата, дефолт 0).
+    ranking_epsilon: float = 0.0
+    #: A3 (v2.1): провенанс настроек ``{setting: {"source": "default"|"measured",
+    #: "experiment_id"?: str}}``; фиксирует, что тюнится измерением, а не предвидением.
+    settings_provenance: dict[str, dict[str, Any]] = Field(default_factory=dict)
     # Маршрутизация моделей (I21)
     llm_scenarios: list[ScenarioBinding] = Field(default_factory=list)
     # Расчёт (§6)

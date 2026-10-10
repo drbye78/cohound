@@ -17,7 +17,9 @@
   Coverage из бандла никогда не «теряется» молча.
 * **I13** — ``preliminary``-ячейки исключаются из **всех** расчётов. Доменные функции их и
   так игнорируют; здесь они фильтруются явно, чтобы модульные баллы не содержали фантомных
-  модулей, и выполняется проверка эквивалентности.
+  модулей, и выполняется проверка эквивалентности Capability.
+* **§6/B-3a** — при заданной ``universe`` Coverage считается по вселенной scope (pending и
+  отсутствующие ячейки в знаменателе; ``universe = 0`` → ``UNDEFINED``); ``None`` — legacy.
 * **K6/A3** — ``requested_ranking`` не переопределяет демотирование: ``computed_ranking``
   берётся из sensitivity и при неустойчивости становится ``coverage_fallback`` даже при
   запрошенном ``capability_ranked``.
@@ -30,7 +32,7 @@ from __future__ import annotations
 
 import json
 import warnings
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, fields, is_dataclass
 from enum import Enum
 from typing import Any
@@ -69,6 +71,8 @@ __all__ = [
     "per_product_bundle",
     "assert_publishable",
     "publish_warnings",
+    "scope_universe",
+    "score_universe",
 ]
 
 #: Запрошенный режим ранжирования по умолчанию (§6/K6), если ни аргумент, ни манифест
@@ -103,6 +107,8 @@ class ScoreBundle:
     sensitivity: SensitivityReport
     requested_ranking: str
     computed_ranking: str
+    #: Порог неразличимости ранжирования (§6/B-1); идёт в манифест с provenance (A3).
+    ranking_epsilon: float = 0.0
 
     def to_dict(self) -> dict[str, Any]:
         """Словарь бандла для отчёта/манифеста (JSON-совместимый, вложенный)."""
@@ -156,17 +162,51 @@ def _resolve_requested_ranking(
     return DEFAULT_REQUESTED_RANKING
 
 
+def scope_universe(
+    catalog: Mapping[str, CatalogRow], products: Iterable[str]
+) -> set[tuple[str, str]]:
+    """Вселенная scope §6/B-3a: декартово произведение продуктов и параметров каталога.
+
+    Возвращает множество пар ``(product_id, param_id)``, задающее знаменатель Coverage
+    (включая ``pending``/отсутствующие ячейки). Публичная точка для фаз и пост-хок команд.
+    """
+    return {(product, param) for product in products for param in catalog}
+
+
+#: Обратно-совместимый алиас (в части дизайна фигурировало имя ``score_universe``).
+score_universe = scope_universe
+
+
 def _per_product_coverage(
-    cells: list[Cell], catalog: Mapping[str, CatalogRow], module_weights: Mapping[str, float]
+    cells: list[Cell],
+    catalog: Mapping[str, CatalogRow],
+    module_weights: Mapping[str, float],
+    *,
+    universe: Iterable[tuple[str, str]] | None = None,
 ) -> dict[str, float]:
-    """Coverage по каждому продукту (для Comparability) через доменную функцию."""
+    """Coverage по каждому продукту (для Comparability) через доменную функцию.
+
+    В universe-режиме знаменатель продукта — только его пары scope; ``UNDEFINED``
+    (пустая вселенная продукта) для Comparability публикуется как ``0.0``.
+    """
     grouped: dict[str, list[Cell]] = {}
     for cell in cells:
         grouped.setdefault(cell.product_id, []).append(cell)
-    return {
-        product_id: evidence_coverage(group, catalog, module_weights).value
-        for product_id, group in grouped.items()
-    }
+    if universe is None:
+        return {
+            product_id: evidence_coverage(group, catalog, module_weights).value or 0.0
+            for product_id, group in grouped.items()
+        }
+    pairs = list(universe)
+    product_ids = {product_id for product_id, _ in pairs} | set(grouped)
+    result: dict[str, float] = {}
+    for product_id in product_ids:
+        product_pairs = [(p, param) for (p, param) in pairs if p == product_id]
+        coverage = evidence_coverage(
+            grouped.get(product_id, []), catalog, module_weights, universe=product_pairs
+        )
+        result[product_id] = coverage.value if coverage.value is not None else 0.0
+    return result
 
 
 def _comparability(
@@ -198,30 +238,44 @@ def _compute_from_cells(
     cohort: Cohort | None,
     alignment: AlignmentReport | None,
     requested_ranking: str,
+    universe: Iterable[tuple[str, str]] | None = None,
+    ranking_epsilon: float = 0.0,
 ) -> ScoreBundle:
     """Считает :class:`ScoreBundle` по уже загруженным ячейкам (без I/O)."""
     # I13: preliminary вне всех расчётов. Фильтруем явно (модульные баллы иначе содержали бы
-    # фантомные модули с нулевым покрытием) и проверяем эквивалентность метрик.
+    # фантомные модули с нулевым покрытием). Coverage в universe-режиме исключает
+    # preliminary по тому же правилу, поэтому отдельный assert эквивалентности не нужен.
     measured = [cell for cell in cells if cell.state is not CellState.PRELIMINARY]
     assert resolved_capability(cells, catalog, module_weights) == resolved_capability(
         measured, catalog, module_weights
     ), "I13: preliminary не должны влиять на Capability"
-    assert evidence_coverage(cells, catalog, module_weights) == evidence_coverage(
-        measured, catalog, module_weights
-    ), "I13: preliminary не должны влиять на Coverage"
 
-    report = sensitivity(measured, catalog, module_weights)
-    per_product = _per_product_coverage(measured, catalog, module_weights)
+    universe_set = set(universe) if universe is not None else None
+    report = sensitivity(
+        measured,
+        catalog,
+        module_weights,
+        requested_ranking=requested_ranking,
+        ranking_epsilon=ranking_epsilon,
+    )
+    # Coverage получает **полный** набор ячеек: preliminary должна быть видна и
+    # исключена (§6/B-3a, I13), иначе в universe-режиме она читалась бы как отсутствующая.
+    per_product = _per_product_coverage(
+        cells, catalog, module_weights, universe=universe_set
+    )
     return ScoreBundle(
         capability=resolved_capability(measured, catalog, module_weights),
-        coverage=evidence_coverage(measured, catalog, module_weights),
+        coverage=evidence_coverage(
+            cells, catalog, module_weights, universe=universe_set
+        ),
         failure_rate=failure_rate(measured),
-        modules=module_scores(measured, catalog, module_weights),
+        modules=module_scores(measured, catalog, module_weights, universe=universe_set),
         comparability=_comparability(cohort, per_product, alignment),
         sensitivity=report,
         requested_ranking=requested_ranking,
-        # K6/A3: демотирование по sensitivity не переопределяется запрошенным режимом.
+        # K6/A3: демотирование по sensitivity объединено с запрошенным режимом (min).
         computed_ranking=report.computed_ranking,
+        ranking_epsilon=ranking_epsilon,
     )
 
 
@@ -239,6 +293,8 @@ def compute(
     cohort: Cohort | None = None,
     alignment: AlignmentReport | None = None,
     requested_ranking: RankingPolicy | str | None = None,
+    universe: Iterable[tuple[str, str]] | None = None,
+    ranking_epsilon: float = 0.0,
 ) -> ScoreBundle:
     """Собирает :class:`ScoreBundle` прогона из store (Ш8, §6, 02 §E.1).
 
@@ -249,9 +305,13 @@ def compute(
     :param cohort: когорта для Comparability; ``None`` → аннотация ``INSUFFICIENT``.
     :param alignment: alignment-условия Comparability (§6); ``None`` → ``cross_cycle``.
     :param requested_ranking: запрошенный режим (K6); ``None`` → манифест → дефолт.
+    :param universe: вселенная scope ``{(product_id, param_id)}`` (§6/B-3a); ``None`` —
+        legacy-режим Coverage по существующим ячейкам.
+    :param ranking_epsilon: порог неразличимости ранжирования (§6/B-1, дефолт 0).
 
     Формулы не дублируются: вызовы делегированы :mod:`core.domain.scoring`. ``computed_ranking``
-    всегда берётся из sensitivity (K6). Пустой прогон обрабатывается детерминированно.
+    всегда берётся из sensitivity как ``min(requested, computed)`` (K6). Пустой прогон
+    обрабатывается детерминированно.
     """
     cells = list(store.iter_cells(run_id))
     requested = _resolve_requested_ranking(store, run_id, requested_ranking)
@@ -262,6 +322,8 @@ def compute(
         cohort=cohort,
         alignment=alignment,
         requested_ranking=requested,
+        universe=universe,
+        ranking_epsilon=ranking_epsilon,
     )
 
 
@@ -274,16 +336,20 @@ def per_product_bundle(
     cohort: Cohort | None = None,
     alignment: AlignmentReport | None = None,
     requested_ranking: RankingPolicy | str | None = None,
+    universe: Iterable[tuple[str, str]] | None = None,
+    ranking_epsilon: float = 0.0,
 ) -> dict[str, ScoreBundle]:
     """Бандл на каждый продукт (для battle card): ``{product_id: ScoreBundle}``.
 
     Набор продуктов — когорта, если задана, иначе продукты, найденные в ячейках (сортировка
     для детерминизма). Comparability считается на **однопродуктовой** когорте продукта, чтобы
     уровень отражал его собственное покрытие (кросс-продуктовый уровень — у агрегатного
-    :func:`compute`). Продукты когорты без ячеек дают пустой бандл.
+    :func:`compute`). Продукты когорты без ячеек дают пустой бандл. ``universe``/``ranking_epsilon``
+    прокидываются; вселенная фильтруется по продукту.
     """
     cells = list(store.iter_cells(run_id))
     requested = _resolve_requested_ranking(store, run_id, requested_ranking)
+    universe_set = set(universe) if universe is not None else None
 
     by_product: dict[str, list[Cell]] = {}
     for cell in cells:
@@ -296,6 +362,11 @@ def per_product_bundle(
 
     result: dict[str, ScoreBundle] = {}
     for product_id in sorted(set(product_ids)):
+        product_universe = (
+            {pair for pair in universe_set if pair[0] == product_id}
+            if universe_set is not None
+            else None
+        )
         result[product_id] = _compute_from_cells(
             by_product.get(product_id, []),
             catalog=catalog,
@@ -303,6 +374,8 @@ def per_product_bundle(
             cohort=_single_product_cohort(cohort, product_id),
             alignment=alignment,
             requested_ranking=requested,
+            universe=product_universe,
+            ranking_epsilon=ranking_epsilon,
         )
     return result
 
@@ -329,12 +402,16 @@ def publish_warnings(bundle: ScoreBundle) -> list[str]:
     """Причины, по которым бандл непубликуем (I11: Capability без Coverage).
 
     Возвращает список предупреждений; пустой — публикация допустима (при ``INSUFFICIENT``
-    покрытие приглушается, но не блокирует).
+    покрытие приглушается, но не блокирует). Блок — при ``UNDEFINED``-покрытии
+    (``universe = 0``, §6/B-3a) либо при пустом знаменателе legacy-режима.
     """
-    if bundle.coverage.n_used <= 0 or bundle.coverage.denominator <= 0:
+    coverage = bundle.coverage
+    if not coverage.defined or (
+        coverage.universe <= 0 and coverage.denominator <= 0
+    ):
         return [
             "I11: Resolved Capability без Coverage не публикуется "
-            "(нет применимых/failed ячеек в знаменателе Coverage)"
+            "(вселенная scope пуста: Coverage = UNDEFINED; нет применимых/failed ячеек)"
         ]
     return []
 

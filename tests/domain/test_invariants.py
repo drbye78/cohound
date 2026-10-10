@@ -25,13 +25,16 @@ from core.domain.enums import (
     SourceKind,
     SourceScope,
     Status,
+    TerminationReason,
 )
 from core.domain.invariants import (
+    REQUIRED_EXHAUSTION_CONTOURS,
     check_cell,
     check_derived_evidence,
     check_evidence,
     check_inheritance,
     check_satellite,
+    check_unknown_exhaustion,
 )
 from core.domain.models import (
     BaselineRow,
@@ -39,6 +42,7 @@ from core.domain.models import (
     CellEvidence,
     Citation,
     LLMEvidence,
+    ProtocolExhaustion,
     Satellite,
     UpstreamRef,
     Violation,
@@ -531,3 +535,68 @@ def test_check_evidence_total(
     # I22 инвариантен к непустой непробельной цитате для direct-претензии.
     if evidence_type is EvidenceType.DIRECT and quote.strip():
         assert "I22" not in _codes(result)
+
+
+# ---------------------------------------------------------------------------
+# I3 (§5, v2.1): полный протокол исчерпания strict-❓
+# ---------------------------------------------------------------------------
+
+
+def _exhaustion(**kw: Any) -> ProtocolExhaustion:
+    base: dict[str, Any] = {
+        "run_id": _RUN,
+        "product_id": _PRODUCT,
+        "param_id": _PARAM,
+        "contours": list(REQUIRED_EXHAUSTION_CONTOURS),
+        "queries": ["q1"],
+        "rounds": 1,
+        "budget": {},
+        "termination_reason": TerminationReason.RESULTS_EXHAUSTED,
+    }
+    base.update(kw)
+    return ProtocolExhaustion.model_construct(**base)
+
+
+def _unknown_cell() -> Cell:
+    return Cell.model_construct(
+        run_id=_RUN,
+        product_id=_PRODUCT,
+        param_id=_PARAM,
+        state=CellState.EVALUATED,
+        status=Status.UNKNOWN,
+    )
+
+
+def test_required_exhaustion_contours_constant() -> None:
+    assert REQUIRED_EXHAUSTION_CONTOURS == ("corpus", "serp", "registry", "inheritance")
+
+
+def test_check_unknown_exhaustion_missing_protocol() -> None:
+    violations = check_unknown_exhaustion(_unknown_cell(), None)
+    assert "I3" in _codes(violations)
+
+
+def test_check_unknown_exhaustion_missing_termination() -> None:
+    violations = check_unknown_exhaustion(
+        _unknown_cell(), _exhaustion(termination_reason=None)
+    )
+    assert "I3" in _codes(violations)
+
+
+def test_check_unknown_exhaustion_incomplete_contours() -> None:
+    violations = check_unknown_exhaustion(
+        _unknown_cell(), _exhaustion(contours=["corpus", "serp"])
+    )
+    assert "I3" in _codes(violations)
+    assert "registry" in violations[0].message
+
+
+def test_check_unknown_exhaustion_pass() -> None:
+    assert check_unknown_exhaustion(_unknown_cell(), _exhaustion()) == []
+
+
+def test_check_unknown_exhaustion_custom_required() -> None:
+    violations = check_unknown_exhaustion(
+        _unknown_cell(), _exhaustion(contours=["corpus"]), required=("corpus",)
+    )
+    assert violations == []

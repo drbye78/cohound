@@ -23,7 +23,7 @@ from core.cli.context import (
 )
 from core.cli.errors import EXIT_OK
 from core.cli.wiring import build_store
-from core.pipeline.compute import compute
+from core.pipeline.compute import compute, scope_universe
 
 
 def run(args: argparse.Namespace) -> int:
@@ -54,12 +54,19 @@ def run(args: argparse.Namespace) -> int:
         catalog, module_weights, cohort, notes = _restore_plan_inputs(
             args, run_id, purpose="sensitivity", run_dir=Path(db_path).parent
         )
+        # §6/B-3a: при наличии когорты Coverage считается по вселенной scope; иначе legacy.
+        universe = (
+            scope_universe(catalog, [entry.product_id for entry in cohort.entries])
+            if cohort is not None
+            else None
+        )
         bundle = compute(
             store=store,
             run_id=run_id,
             catalog=catalog,
             module_weights=module_weights,
             cohort=cohort,
+            universe=universe,
         )
 
     assert bundle is not None  # compute выполняется безусловно (см. выше)
@@ -72,6 +79,7 @@ def run(args: argparse.Namespace) -> int:
         "unstable_pairs": [list(pair) for pair in report.unstable_pairs],
         "requested_ranking": report.requested_ranking,
         "computed_ranking": report.computed_ranking,
+        "ranking_epsilon": report.ranking_epsilon,
         "notes": notes,
     }
     if args.json:

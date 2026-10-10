@@ -73,6 +73,14 @@ class StorePort(Protocol):
 
     def save_llm_scenarios(self, bindings: list[ScenarioBinding]) -> None: ...
 
+    def persist_manifest(self, run_id: str, manifest: RunManifest) -> None:
+        """Персистит финальный манифест прогона в операционную БД (R7/§13, A3).
+
+        Обновляет версии/индексные/ретривал-поля строки ``runs`` и ``settings_provenance_json``
+        из манифеста (в т.ч. ``ranking_epsilon`` в составе провенанса настроек).
+        """
+        ...
+
     # -- корпус (Ш5, W7) -------------------------------------------------- #
     def upsert_corpus_doc(self, doc: CorpusDoc) -> None: ...
 
@@ -106,6 +114,14 @@ class StorePort(Protocol):
     def read_manifest(self, run_id: str) -> RunManifest: ...
 
     def iter_gate_decisions(self, run_id: str) -> Iterator[GateDecision]: ...
+
+    def iter_exhaustions(self, run_id: str) -> Iterator[ProtocolExhaustion]:
+        """Итерирует машиночитаемые протоколы исчерпания прогона (§5/S13).
+
+        Вход для :func:`core.domain.invariants.check_unknown_exhaustion` (I3): каждая
+        запись несёт перечень пройденных контуров и ``termination_reason``.
+        """
+        ...
 
 
 @runtime_checkable

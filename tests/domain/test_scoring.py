@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import datetime as dt
 
+import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
@@ -35,6 +36,8 @@ from core.domain.scoring import (
     Coverage,
     ModuleScore,
     Score,
+    _is_order_stable,
+    _join_ranking,
     comparability,
     evidence_coverage,
     failure_rate,
@@ -506,3 +509,212 @@ def test_property_coverage_monotone_on_removing_failed(
         [c for c in cells if c.state is not CellState.FAILED], params, {}
     )
     assert with_failed.value <= without_failed.value + 1e-9
+
+
+# ---------------------------------------------------------------------------
+# §6/B-3a: Coverage по вселенной scope + UNDEFINED + completed
+# ---------------------------------------------------------------------------
+
+
+def test_coverage_universe_missing_params_in_denominator() -> None:
+    """§6/B-3a: отсутствующие в прогоне параметры scope входят в знаменатель."""
+    params = {
+        "p_ok": _param("p_ok", importance=Importance.CRITICAL),  # 4
+        "p_missing": _param("p_missing", importance=Importance.IMPORTANT),  # 3
+        "p_unk": _param("p_unk", importance=Importance.BASIC),  # 2
+    }
+    cells = [_cell("a", "p_ok", Status.OK)]
+    universe = {("a", "p_ok"), ("a", "p_missing"), ("a", "p_unk")}
+    coverage = evidence_coverage(cells, params, {}, universe=universe)
+    assert coverage.numerator == 4.0
+    assert coverage.denominator == 9.0
+    assert coverage.universe == 9.0
+    assert coverage.value == 4.0 / 9.0
+    assert coverage.defined is True
+    # completed: только p_ok измерена.
+    assert coverage.completed == 4.0
+    assert coverage.n_used == 1
+
+
+def test_coverage_universe_empty_is_undefined() -> None:
+    """§6/B-3a: `universe = 0` → value None (UNDEFINED), defined False."""
+    params = {"p_ok": _param("p_ok", importance=Importance.CRITICAL)}
+    coverage = evidence_coverage([], params, {}, universe=set())
+    assert coverage.value is None
+    assert coverage.defined is False
+    assert coverage.universe == 0.0
+    assert coverage.denominator == 0.0
+    assert coverage.completed == 0.0
+    assert coverage.numerator == 0.0
+
+
+def test_coverage_universe_completed_counts_failed_but_not_missing() -> None:
+    """completed = (evaluated/reviewed без N/A) ∪ failed; missing не завершён."""
+    params = {
+        "p_ok": _param("p_ok", importance=Importance.CRITICAL),  # 4
+        "p_fail": _param("p_fail", importance=Importance.BASIC),  # 2
+        "p_missing": _param("p_missing", importance=Importance.IMPORTANT),  # 3
+        "p_na": _param("p_na", importance=Importance.IMPORTANT),  # 3
+    }
+    cells = [
+        _cell("a", "p_ok", Status.OK),
+        _cell("a", "p_fail", None, CellState.FAILED),
+        _cell("a", "p_na", Status.NOT_APPLICABLE),
+    ]
+    universe = {
+        ("a", "p_ok"),
+        ("a", "p_fail"),
+        ("a", "p_missing"),
+        ("a", "p_na"),
+    }
+    coverage = evidence_coverage(cells, params, {}, universe=universe)
+    # N/A вне знаменателя; missing — неразрешённая в знаменателе.
+    assert coverage.universe == 4.0 + 2.0 + 3.0
+    assert coverage.numerator == 4.0
+    assert coverage.value == 4.0 / 9.0
+    assert coverage.completed == 4.0 + 2.0
+    assert coverage.n_used == 2
+
+
+def test_coverage_universe_na_excluded_from_denominator() -> None:
+    params = {
+        "p_ok": _param("p_ok", importance=Importance.CRITICAL),
+        "p_na": _param("p_na", importance=Importance.IMPORTANT),
+    }
+    cells = [_cell("a", "p_ok", Status.OK), _cell("a", "p_na", Status.NOT_APPLICABLE)]
+    coverage = evidence_coverage(
+        cells, params, {}, universe={("a", "p_ok"), ("a", "p_na")}
+    )
+    assert coverage.universe == 4.0
+    assert coverage.value == 1.0
+    assert coverage.completed == 4.0
+
+
+def test_coverage_universe_preliminary_excluded() -> None:
+    """I13 (v2.1 §6): preliminary исключена из знаменателя Coverage."""
+    params = {
+        "p_ok": _param("p_ok", importance=Importance.CRITICAL),
+        "p_prelim": _param("p_prelim", importance=Importance.IMPORTANT),
+    }
+    cells = [
+        _cell("a", "p_ok", Status.OK),
+        _cell("a", "p_prelim", None, CellState.PRELIMINARY),
+    ]
+    coverage = evidence_coverage(
+        cells, params, {}, universe={("a", "p_ok"), ("a", "p_prelim")}
+    )
+    assert coverage.universe == 4.0
+    assert coverage.value == 1.0
+    assert coverage.completed == 4.0
+
+
+def test_coverage_legacy_unchanged_when_universe_none() -> None:
+    """Legacy-режим (``universe=None``) сохраняет прежний алгоритм и поля."""
+    params = {"p_ok": _param("p_ok", importance=Importance.CRITICAL)}
+    cells = [_cell("a", "p_ok", Status.OK)]
+    legacy = evidence_coverage(cells, params, {})
+    assert legacy.value == 1.0
+    assert legacy.universe == 0.0
+    assert legacy.completed == 0.0
+    assert legacy.defined is True
+
+
+def test_module_scores_universe_includes_scope_modules() -> None:
+    """§6/B-3a: модуль, все ячейки которого отсутствуют, всё равно в scope и применим."""
+    params = {
+        "p1": _param("p1", module="m1", importance=Importance.CRITICAL),
+        "p2": _param("p2", module="m2", importance=Importance.BASIC),
+    }
+    cells = [_cell("a", "p1", Status.OK)]
+    scores = {
+        m.module: m
+        for m in module_scores(cells, params, {}, universe={("a", "p1"), ("a", "p2")})
+    }
+    assert set(scores) == {"m1", "m2"}
+    assert scores["m1"].score == 1.0
+    assert scores["m1"].coverage == 1.0
+    # m2 в scope (universe>0), но не измерен → coverage 0, всё же применим.
+    assert scores["m2"].coverage == 0.0
+    assert scores["m2"].applicable_weight == pytest.approx(0.5)
+    assert scores["m1"].applicable_weight == pytest.approx(0.5)
+
+
+def test_module_scores_legacy_unchanged() -> None:
+    params = {
+        "p1": _param("p1", module="m1", importance=Importance.CRITICAL),
+        "p2": _param("p2", module="m2", importance=Importance.BASIC),
+    }
+    cells = [_cell("a", "p1", Status.OK)]
+    scores = {m.module: m for m in module_scores(cells, params, {})}
+    # Legacy: m2 вообще не наблюдается → отсутствует в списке.
+    assert set(scores) == {"m1"}
+
+
+# ---------------------------------------------------------------------------
+# §6/B-1: предикат устойчивости + ranking_epsilon; K6 join
+# ---------------------------------------------------------------------------
+
+
+def test_is_order_stable_exact_tie_is_skipped() -> None:
+    """v2.1: пара с точным равенством (sign 0) неразличима и не участвует."""
+    rankings = [{"a": 1.0, "b": 1.0}, {"a": 1.0, "b": 0.5}]
+    stable, unstable = _is_order_stable(rankings, 0.0)
+    assert stable is True
+    assert unstable == []
+
+
+def test_is_order_stable_epsilon_makes_pair_indistinguishable() -> None:
+    rankings = [{"a": 1.0, "b": 0.95}, {"a": 0.95, "b": 1.0}]
+    stable0, unstable0 = _is_order_stable(rankings, 0.0)
+    assert stable0 is False
+    assert ("a", "b") in unstable0
+    # tol = epsilon * (max - min) = 2.0 * 0.05 = 0.1 ≥ |a-b| → пара неразличима.
+    stable1, unstable1 = _is_order_stable(rankings, 2.0)
+    assert stable1 is True
+    assert unstable1 == []
+
+
+def test_join_ranking_matrix_nine_cells() -> None:
+    """K6: join(requested, computed) = min по порядку — 3×3 матрица."""
+    order = {"unranked": 0, "coverage_fallback": 1, "capability_ranked": 2}
+    rankings = list(order)
+    for requested in rankings:
+        for stability_value in rankings:
+            expected = min(order[requested], order[stability_value])
+            expected_name = next(n for n, o in order.items() if o == expected)
+            assert (
+                _join_ranking(requested, RankingPolicy(stability_value)) == expected_name
+            )
+
+
+def test_sensitivity_epsilon_zero_matches_default() -> None:
+    params = {"p1": _param("p1"), "p2": _param("p2")}
+    cells = [
+        _cell("a", "p1", Status.OK),
+        _cell("a", "p2", Status.UNKNOWN),
+        _cell("b", "p1", Status.OK),
+        _cell("b", "p2", Status.PARTIAL),
+    ]
+    default = sensitivity(cells, params, {})
+    explicit = sensitivity(cells, params, {}, ranking_epsilon=0.0)
+    assert default.stable is explicit.stable is False
+    assert default.unstable_pairs == explicit.unstable_pairs
+    assert default.computed_ranking == explicit.computed_ranking
+
+
+def test_sensitivity_requested_unranked_stable_joins_to_unranked() -> None:
+    """K6: устойчивое ранжирование + requested=unranked → computed=unranked."""
+    params = {"p1": _param("p1")}
+    cells = [_cell("a", "p1", Status.OK), _cell("b", "p1", Status.ABSENT)]
+    report = sensitivity(cells, params, {}, requested_ranking=RankingPolicy.UNRANKED)
+    assert report.stable is True
+    assert report.requested_ranking == RankingPolicy.UNRANKED.value
+    assert report.computed_ranking == RankingPolicy.UNRANKED.value
+    assert report.ranking_epsilon == 0.0
+
+
+def test_sensitivity_passes_ranking_epsilon_through() -> None:
+    params = {"p1": _param("p1")}
+    cells = [_cell("a", "p1", Status.OK), _cell("b", "p1", Status.ABSENT)]
+    report = sensitivity(cells, params, {}, ranking_epsilon=0.25)
+    assert report.ranking_epsilon == 0.25

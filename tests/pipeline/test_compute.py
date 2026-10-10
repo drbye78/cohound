@@ -44,6 +44,8 @@ from core.pipeline.compute import (
     compute,
     per_product_bundle,
     publish_warnings,
+    scope_universe,
+    score_universe,
 )
 from core.store.sqlite_store import SqliteStore
 
@@ -350,7 +352,8 @@ def test_sensitivity_demotion_k6_requested_never_overrides(store: SqliteStore) -
     assert bundle.requested_ranking == RankingPolicy.CAPABILITY_RANKED.value
     assert bundle.computed_ranking == RankingPolicy.COVERAGE_FALLBACK.value
 
-    # Явно запрошенное иное ранжирование также не переопределяет демотирование.
+    # Запрошенный режим не повышает демотированный ранг (K6 join = min): при
+    # requested=unranked итог остаётся unranked.
     forced = compute(
         store=store,
         run_id=RUN_ID,
@@ -359,7 +362,17 @@ def test_sensitivity_demotion_k6_requested_never_overrides(store: SqliteStore) -
         requested_ranking=RankingPolicy.UNRANKED,
     )
     assert forced.requested_ranking == RankingPolicy.UNRANKED.value
-    assert forced.computed_ranking == RankingPolicy.COVERAGE_FALLBACK.value
+    assert forced.computed_ranking == RankingPolicy.UNRANKED.value
+
+    # requested=coverage_fallback при неустойчивости остаётся coverage_fallback.
+    fallback = compute(
+        store=store,
+        run_id=RUN_ID,
+        catalog=catalog,
+        module_weights={},
+        requested_ranking=RankingPolicy.COVERAGE_FALLBACK,
+    )
+    assert fallback.computed_ranking == RankingPolicy.COVERAGE_FALLBACK.value
 
 
 def test_requested_ranking_sourced_from_manifest() -> None:
@@ -457,3 +470,122 @@ def test_per_product_bundle_groups_by_product(store: SqliteStore) -> None:
     assert isinstance(bundles[PRODUCT_A], ScoreBundle)
     assert bundles[PRODUCT_A].coverage.value == pytest.approx(0.6)
     assert bundles[PRODUCT_B].coverage.value == pytest.approx(1.0)
+
+
+# ---------------------------------------------------------------------------
+# §6/B-3a: universe-scope в pipeline/compute
+# ---------------------------------------------------------------------------
+
+
+def test_scope_universe_cartesian_product_and_alias() -> None:
+    catalog = _catalog()
+    universe = scope_universe(catalog, [PRODUCT_A, PRODUCT_B])
+    assert universe == {
+        (product, param) for product in (PRODUCT_A, PRODUCT_B) for param in catalog
+    }
+    assert score_universe is scope_universe
+
+
+def test_compute_universe_counts_missing_params(store: SqliteStore) -> None:
+    """Отсутствующие параметры scope входят в знаменатель Coverage (§6/B-3a)."""
+    catalog = _catalog()
+    _save(store, [_cell(PRODUCT_A, "param.ok", Status.OK)])  # Кр → вес 4
+    universe = {
+        (PRODUCT_A, "param.ok"),  # 4
+        (PRODUCT_A, "param.partial"),  # Вж → 3
+        (PRODUCT_A, "param.absent"),  # Баз → 2
+    }
+    bundle = compute(
+        store=store,
+        run_id=RUN_ID,
+        catalog=catalog,
+        module_weights={},
+        universe=universe,
+    )
+    assert bundle.coverage.numerator == 4.0
+    assert bundle.coverage.universe == 9.0
+    assert bundle.coverage.value == pytest.approx(4.0 / 9.0)
+    assert bundle.coverage.completed == 4.0
+    assert bundle.coverage.defined is True
+
+
+def test_compute_universe_empty_is_undefined_and_unpublishable(
+    store: SqliteStore,
+) -> None:
+    catalog = _catalog()
+    _save(store, [_cell(PRODUCT_A, "param.ok", Status.OK)])
+    bundle = compute(
+        store=store,
+        run_id=RUN_ID,
+        catalog=catalog,
+        module_weights={},
+        universe=set(),
+    )
+    assert bundle.coverage.value is None
+    assert bundle.coverage.defined is False
+    assert publish_warnings(bundle)  # UNDEFINED → непубликуем (I11)
+
+
+def test_compute_universe_preliminary_and_na_excluded(store: SqliteStore) -> None:
+    """I13 + I7: preliminary и N/A исключены из знаменателя universe-покрытия."""
+    catalog = _catalog()
+    _save(
+        store,
+        [
+            _cell(PRODUCT_A, "param.ok", Status.OK),
+            _cell(PRODUCT_A, "param.preliminary", None, CellState.PRELIMINARY),
+            _cell(PRODUCT_A, "param.na", Status.NOT_APPLICABLE),
+        ],
+    )
+    universe = {
+        (PRODUCT_A, "param.ok"),
+        (PRODUCT_A, "param.preliminary"),
+        (PRODUCT_A, "param.na"),
+    }
+    bundle = compute(
+        store=store,
+        run_id=RUN_ID,
+        catalog=catalog,
+        module_weights={},
+        universe=universe,
+    )
+    # Только param.ok (Кр=4) в знаменателе; preliminary/N-A вне.
+    assert bundle.coverage.universe == 4.0
+    assert bundle.coverage.value == 1.0
+    assert bundle.coverage.completed == 4.0
+    assert bundle.coverage.n_used == 1
+
+
+def test_compute_ranking_epsilon_propagates(store: SqliteStore) -> None:
+    _save(store, _mixed_cells())
+    bundle = compute(
+        store=store,
+        run_id=RUN_ID,
+        catalog=_catalog(),
+        module_weights={},
+        ranking_epsilon=0.5,
+    )
+    assert bundle.ranking_epsilon == 0.5
+    assert bundle.sensitivity.ranking_epsilon == 0.5
+
+
+def test_compute_requested_unranked_stable_joins_to_unranked(
+    store: SqliteStore,
+) -> None:
+    _save(
+        store,
+        [
+            _cell(PRODUCT_A, "param.ok", Status.OK),
+            _cell(PRODUCT_B, "param.ok", Status.ABSENT),
+        ],
+    )
+    bundle = compute(
+        store=store,
+        run_id=RUN_ID,
+        catalog=_catalog(),
+        module_weights={},
+        requested_ranking=RankingPolicy.UNRANKED,
+    )
+    assert bundle.sensitivity.stable is True
+    assert bundle.requested_ranking == RankingPolicy.UNRANKED.value
+    assert bundle.computed_ranking == RankingPolicy.UNRANKED.value

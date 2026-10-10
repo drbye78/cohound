@@ -34,7 +34,7 @@ from typing import TYPE_CHECKING, Any
 
 from core.domain.anchors import SourceResolver
 from core.domain.models import Satellite
-from core.pipeline.compute import compute
+from core.pipeline.compute import compute, scope_universe
 from core.pipeline.corpus import build_corpus
 from core.pipeline.discovery import discover
 from core.pipeline.evaluate import (
@@ -305,6 +305,8 @@ def build_phases(
             or {}
         )
         run = getattr(inputs, "run", None)
+        universe = scope_universe(catalog, plan.products)
+        ranking_epsilon = getattr(run, "ranking_epsilon", None) or 0.0
         bundle = compute(
             store=ctx.store,
             run_id=plan.run_id,
@@ -312,6 +314,8 @@ def build_phases(
             module_weights=module_weights,
             cohort=getattr(plan, "cohort", None),
             requested_ranking=getattr(run, "ranking_policy", None),
+            universe=universe,
+            ranking_epsilon=ranking_epsilon,
         )
         holder["bundle"] = bundle
         return PhaseResult(status="ok", phase="compute")
@@ -339,6 +343,9 @@ def build_phases(
             retrieval_cutoff_K=holder.get("retrieval_cutoff_K"),
             retrieval_params_json=_retrieval_params_json(holder),
         )
+        # R7/§13: финальный манифест — самостоятельная запись воспроизведения,
+        # поэтому персистится в операционную БД прогона (версии/индекс/провенанс).
+        ctx.store.persist_manifest(plan.run_id, manifest)
         artifacts = write_reports(
             bundle=bundle,
             cells=list(ctx.store.iter_cells(plan.run_id)),

@@ -45,6 +45,7 @@ from core.domain import (
     SourceKind,
     StaleReason,
     Status,
+    TerminationReason,
 )
 from core.ports.types import Chunk
 from core.store.sqlite import connect
@@ -571,6 +572,38 @@ class SqliteStore:
                 notes=row["notes"],
             )
 
+    def iter_exhaustions(self, run_id: str) -> Iterator[ProtocolExhaustion]:
+        """Итерирует протоколы исчерпания прогона из ``search_exhaustion`` (§5, S13).
+
+        Порядок детерминирован: ``product_id, param_id``. Строки с невалидным
+        ``protocol_json`` или без ``termination_reason`` пропускаются (устойчивость к
+        повреждённым данным; модель требует терминацию).
+        """
+        cursor = self.conn.execute(
+            "SELECT run_id, product_id, param_id, protocol_json FROM search_exhaustion"
+            " WHERE run_id = ? ORDER BY product_id, param_id",
+            (run_id,),
+        )
+        for row in cursor:
+            protocol = _parse_json_text(row["protocol_json"])
+            if not isinstance(protocol, Mapping):
+                continue
+            reason = protocol.get("termination_reason")
+            if reason is None:
+                continue
+            yield ProtocolExhaustion(
+                run_id=row["run_id"],
+                product_id=row["product_id"],
+                param_id=row["param_id"],
+                contours=list(protocol.get("contours") or []),
+                queries=list(protocol.get("queries") or []),
+                rounds=int(protocol.get("rounds") or 0),
+                budget=dict(protocol.get("budget") or {}),
+                termination_reason=TerminationReason(reason),
+                exhausted_at=protocol.get("exhausted_at"),
+                notes=protocol.get("notes"),
+            )
+
     # -- llm scenarios / manifest ---------------------------------------- #
     def save_llm_scenarios(self, bindings: list[ScenarioBinding]) -> None:
         """Upsert маршрутизации модель→сценарий (I21). ``evaluator`` без веб-тула (I18)."""
@@ -599,7 +632,44 @@ class SqliteStore:
         with self.conn:
             self.conn.executemany(sql, rows)
 
-    # -- корпус (Ш5, W7) ------------------------------------------------- #
+    def persist_manifest(self, run_id: str, manifest: RunManifest) -> None:
+        """Персистит финальный манифест в строку ``runs`` (R7/§13, A3).
+
+        Обновляет версии, индексные/ретривал-поля и ``settings_provenance_json``
+        (провенанс настроек, включая ``ranking_epsilon``). ``UPDATE`` по существующей
+        строке прогона: манифест — самостоятельная запись воспроизведения, а не
+        источник создания прогона (его создаёт :meth:`create_run`).
+        """
+        provenance = manifest.settings_provenance or {}
+        with self.conn:
+            self.conn.execute(
+                "UPDATE runs SET"
+                " package_version = ?, catalog_version = ?, status_dict_version = ?,"
+                " scoring_policy_version = ?, methodology_version = ?, embed_model_id = ?,"
+                " index_build_id = ?, retrieval_profile = ?, retrieval_params_json = ?,"
+                " retrieval_cutoff_K = ?, search_effort_budget_json = ?,"
+                " requested_ranking = ?, computed_ranking = ?, snapshot_date = ?,"
+                " settings_provenance_json = ?"
+                " WHERE run_id = ?",
+                (
+                    manifest.package_version,
+                    manifest.catalog_version,
+                    manifest.status_dict_version,
+                    manifest.scoring_policy_version,
+                    manifest.methodology_version,
+                    manifest.embed_model_id,
+                    manifest.index_build_id,
+                    manifest.retrieval_profile,
+                    manifest.retrieval_params_json,
+                    manifest.retrieval_cutoff_K,
+                    manifest.search_effort_budget_json,
+                    _as_text(manifest.requested_ranking),
+                    _as_text(manifest.computed_ranking),
+                    manifest.snapshot_date,
+                    json.dumps(provenance, ensure_ascii=False, sort_keys=True),
+                    run_id,
+                ),
+            )
     def upsert_corpus_doc(self, doc: CorpusDoc) -> None:
         """Upsert строки ``corpus_docs`` (raw retention + provenance экстракции, §3.2)."""
         with self.conn:
@@ -722,6 +792,13 @@ class SqliteStore:
         focus_modules = _parse_json_text(row["focus_modules"]) or []
         requested = row["requested_ranking"]
         computed = row["computed_ranking"]
+        # A3 (v2.1): провенанс настроек и ranking_epsilon — forward-compatible чтение
+        # (на старой схеме колонок нет → дефолты, без падения).
+        settings_provenance = _parse_json_text(
+            _optional_row_value(row, "settings_provenance_json")
+        ) or {}
+        eps_raw = _optional_row_value(row, "ranking_epsilon")
+        ranking_epsilon = float(eps_raw) if eps_raw else 0.0
         return RunManifest(
             run_id=row["run_id"],
             case_id=row["case_id"],
@@ -745,6 +822,8 @@ class SqliteStore:
             search_effort_budget_json=row["search_effort_budget_json"],
             requested_ranking=RankingPolicy(requested) if requested is not None else None,
             computed_ranking=RankingPolicy(computed) if computed is not None else None,
+            ranking_epsilon=ranking_epsilon,
+            settings_provenance=settings_provenance,
             llm_scenarios=scenarios,
             snapshot_date=row["snapshot_date"],
             deploy_profile=_optional_row_value(row, "deploy_profile"),

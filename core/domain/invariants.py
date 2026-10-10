@@ -12,6 +12,8 @@ Pydantic (см. docs/architecture/01-modules-and-contracts.md §2.3).
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 from core.domain.enums import (
     AbsenceRuleType,
     CellState,
@@ -26,9 +28,18 @@ from core.domain.models import (
     BaselineRow,
     Cell,
     CellEvidence,
+    ProtocolExhaustion,
     Satellite,
     UpstreamRef,
     Violation,
+)
+
+#: I3 (v2.1 §5): обязательные контуры полного протокола исчерпания для strict-❓.
+REQUIRED_EXHAUSTION_CONTOURS: tuple[str, ...] = (
+    "corpus",
+    "serp",
+    "registry",
+    "inheritance",
 )
 
 # Контракт derived-evidence (K5) допускает два пути:
@@ -54,6 +65,49 @@ def _violation(code: str, message: str, field: str | None = None) -> Violation:
 def _has_exhaustive_scope(absences: list[dict[str, object]]) -> bool:
     """Есть ли среди absence-evidence запись со ``source_scope: exhaustive``."""
     return any(e.get("source_scope") == SourceScope.EXHAUSTIVE for e in absences)
+
+
+def check_unknown_exhaustion(
+    cell: Cell,
+    exhaustion: ProtocolExhaustion | None,
+    *,
+    required: Sequence[str] = REQUIRED_EXHAUSTION_CONTOURS,
+) -> list[Violation]:
+    """I3 (§5, v2.1): strict-❓ обязан опираться на полный протокол исчерпания.
+
+    Возвращает нарушение при: отсутствии ``exhaustion``, отсутствии ``termination_reason``
+    либо неполном перечне пройденных контуров (``required ⊄ contours``). «Full» — не пустое
+    слово, а перечисление контуров; ❓ без обязательных контуров — аномалия прогона, а не
+    статус (риск преждевременного ❓ = FN, §12).
+    """
+    if exhaustion is None:
+        return [
+            _violation(
+                "I3",
+                "I3: strict-❓ без протокола исчерпания (search_exhaustion)",
+                "exhaustion",
+            )
+        ]
+    if exhaustion.termination_reason is None:
+        return [
+            _violation(
+                "I3",
+                "I3: протокол исчерпания без termination_reason",
+                "termination_reason",
+            )
+        ]
+    contours = set(exhaustion.contours)
+    missing = [name for name in required if name not in contours]
+    if missing:
+        return [
+            _violation(
+                "I3",
+                "I3: неполный протокол исчерпания strict-❓; не пройдены контуры: "
+                f"{', '.join(missing)}",
+                "contours",
+            )
+        ]
+    return []
 
 
 def check_cell(cell: Cell) -> list[Violation]:
