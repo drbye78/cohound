@@ -17,19 +17,17 @@
 from __future__ import annotations
 
 import datetime as _dt
-import json
-import shutil
 from pathlib import Path
-from typing import Any
 
 import pytest
 
 from core.cli.main import EXIT_ERROR, EXIT_OK, EXIT_USAGE, main
-from core.domain.enums import CellState, RankingPolicy, RunMode, Status
-from core.domain.models import Cell, Focus, LLMEvidence, RunConfig
+from core.domain.enums import RankingPolicy, RunMode, Status
+from core.domain.models import Focus, RunConfig
 from core.store.sqlite_store import SqliteStore
-
-CONFIG_FIXTURES = Path(__file__).resolve().parent.parent / "config" / "fixtures"
+from tests.helpers.domain import cell
+from tests.helpers.output import json_out
+from tests.helpers.packages import valid_package
 
 PRODUCT_A = "p1"
 PRODUCT_B = "p2"
@@ -57,35 +55,6 @@ def _cfg() -> RunConfig:
     )
 
 
-def _cell(run_id: str, product_id: str, param_id: str, status: Status) -> Cell:
-    """Собирает валидную ячейку под инварианты I1/I2."""
-    if status in {Status.OK, Status.PARTIAL}:
-        return Cell(
-            run_id=run_id,
-            product_id=product_id,
-            param_id=param_id,
-            state=CellState.EVALUATED,
-            status=status,
-            evidence=[LLMEvidence(source_id="src.1", quote="q")],
-        )
-    if status is Status.ABSENT:
-        return Cell(
-            run_id=run_id,
-            product_id=product_id,
-            param_id=param_id,
-            state=CellState.EVALUATED,
-            status=status,
-            absence_evidence=[{"source_scope": "partial"}],
-        )
-    return Cell(
-        run_id=run_id,
-        product_id=product_id,
-        param_id=param_id,
-        state=CellState.EVALUATED,
-        status=status,
-    )
-
-
 def _seed_run(
     db_path: Path,
     run_id: str,
@@ -101,7 +70,7 @@ def _seed_run(
             (methodology_version, run_id),
         )
         for product_id, param_id, status in cells:
-            store.save_cell(_cell(run_id, product_id, param_id, status))
+            store.save_cell(cell(run_id, product_id, param_id, status))
         store.conn.commit()
 
 
@@ -109,21 +78,6 @@ def _write_golden(path: Path, rows: list[str]) -> Path:
     header = "product_id,param_id,expected_status,expected_evidence_kind,case_class,tier"
     path.write_text("\n".join([header, *rows]) + "\n", encoding="utf-8")
     return path
-
-
-def _json_out(capsys: pytest.CaptureFixture[str]) -> dict[str, Any]:
-    captured = capsys.readouterr()
-    return json.loads(captured.out.strip().splitlines()[-1])
-
-
-def _package(tmp_path: Path) -> Path:
-    """Копия ``tests/config/fixtures/`` (валидный пакет для ``--run-yaml``/``--package``)."""
-    package = tmp_path / "package"
-    package.mkdir()
-    for item in CONFIG_FIXTURES.iterdir():
-        if item.is_file():
-            shutil.copy(item, package / item.name)
-    return package
 
 
 # ---------------------------------------------------------------------------
@@ -152,7 +106,7 @@ def test_golden_pass_returns_ok(
 
     code = main([*_golden_argv(db, golden), "--json"])
     assert code == EXIT_OK
-    payload = _json_out(capsys)
+    payload = json_out(capsys)
     assert payload["ok"] is True
     assert payload["run_id"] == "run.g"
     assert payload["agreement"] == pytest.approx(1.0)
@@ -185,7 +139,7 @@ def test_golden_false_ok_fails(
 
     code = main([*_golden_argv(db, golden), "--json"])
     assert code == EXIT_ERROR
-    payload = _json_out(capsys)
+    payload = json_out(capsys)
     assert payload["ok"] is False
     assert payload["false_ok"] == 1
     assert any("false ✅" in v for v in payload["violations"])
@@ -204,7 +158,7 @@ def test_golden_missing_absent_stratum_fails(
 
     code = main([*_golden_argv(db, golden), "--json"])
     assert code == EXIT_ERROR
-    payload = _json_out(capsys)
+    payload = json_out(capsys)
     assert payload["has_absent_stratum"] is False
     assert any("страты" in v for v in payload["violations"])
 
@@ -235,7 +189,7 @@ def test_golden_tier_filter_applied_before_evaluation(
 
     code = main([*_golden_argv(db, golden), "--tier", "fast", "--json"])
     assert code == EXIT_OK
-    payload = _json_out(capsys)
+    payload = json_out(capsys)
     assert payload["tier"] == "fast"
     assert payload["total"] == 2
     assert payload["ok"] is True
@@ -255,7 +209,7 @@ def test_golden_with_package_catalog_has_no_gap_note(
         [f"{PRODUCT_A},{PARAM_A},✅,documentation,class_a,full",
          f"{PRODUCT_B},{PARAM_B},❌,registry,class_b,full"],
     )
-    package = _package(tmp_path)
+    package = valid_package(tmp_path, scope_attestation=False)
 
     code = main(
         [
@@ -268,7 +222,7 @@ def test_golden_with_package_catalog_has_no_gap_note(
         ]
     )
     assert code == EXIT_OK
-    payload = _json_out(capsys)
+    payload = json_out(capsys)
     assert payload["notes"] == []
 
 
@@ -311,7 +265,7 @@ def test_report_writes_artifacts(
         "run.r",
         cells=[(PRODUCT_A, PARAM_A, Status.OK), (PRODUCT_B, PARAM_B, Status.ABSENT)],
     )
-    package = _package(tmp_path)
+    package = valid_package(tmp_path, scope_attestation=False)
     out = tmp_path / "runs"
 
     code = main(
@@ -324,7 +278,7 @@ def test_report_writes_artifacts(
         ]
     )
     assert code == EXIT_OK
-    payload = _json_out(capsys)
+    payload = json_out(capsys)
     assert payload["ok"] is True
     assert Path(payload["out"]) == out / "run.r" / "outputs"
     assert payload["manifest_partial"] is False
@@ -346,7 +300,7 @@ def test_report_without_package_notes_gap_and_still_writes(
 
     code = main(_report_argv(db, out))
     assert code == EXIT_OK
-    payload = _json_out(capsys)
+    payload = json_out(capsys)
     assert payload["notes"]
     assert any("ГЭП" in note for note in payload["notes"])
     assert Path(payload["artifacts"]["manifest"]).exists()
@@ -363,7 +317,7 @@ def test_report_infers_single_run_id(
         ["report", "--db", str(db), "--out", str(out), "--json"]
     )
     assert code == EXIT_OK
-    assert _json_out(capsys)["run_id"] == "run.r"
+    assert json_out(capsys)["run_id"] == "run.r"
 
 
 def test_report_runs_dir_resolution(
@@ -383,7 +337,7 @@ def test_report_runs_dir_resolution(
         ]
     )
     assert code == EXIT_OK
-    payload = _json_out(capsys)
+    payload = json_out(capsys)
     # --out не задан → артефакты рядом с БД прогона.
     assert Path(payload["out"]) == runs_dir / "run.r" / "outputs"
 
@@ -401,7 +355,7 @@ def test_report_partial_manifest_is_flagged(
         ["report", "--db", str(db), "--run-id", "run.p", "--out", str(out), "--json"]
     )
     assert code == EXIT_OK
-    payload = _json_out(capsys)
+    payload = json_out(capsys)
     assert payload["manifest_partial"] is True
     assert any("манифест не заполнен" in note for note in payload["notes"])
 

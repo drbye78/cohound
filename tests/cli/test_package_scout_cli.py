@@ -22,8 +22,9 @@ from core.adapters.llm_discovery import DiscoveryLLM
 from core.cli.main import EXIT_ERROR, EXIT_OK, EXIT_USAGE, main
 from core.config.deploy import DeployConfig, SearchDeployConfig
 from core.pipeline.package_candidates import loads_candidates
-from core.ports.types import RawPage, RenderMode
-from tests.fakes.ports import FakeCrawler, FakeExtractor, FakeSearchAdapter
+from tests.fakes.ports import FakeExtractor, FakeSearchAdapter
+from tests.helpers.output import json_out
+from tests.helpers.scout import clear_env, fake_crawler
 
 ROOT = Path(__file__).resolve().parents[2]
 TEMPLATE_PACKAGE = ROOT / "packages" / "_template"
@@ -36,8 +37,6 @@ PAGE_TEXT = (
     "The Alpha Product provides Backup and Restore with verified snapshots.\n"
     "It supports Query Planner hints for parallel queries.\n"
 )
-FIXED_TS = "2026-01-01T00:00:00+00:00"
-
 _ENV_NAMES = (
     "COHOUND_LLM_BASE_URL",
     "COHOUND_LLM_API_KEY",
@@ -51,11 +50,6 @@ _ENV_NAMES = (
     "GOOGLE_API_KEY",
     "GOOGLE_CSE_ID",
 )
-
-
-def _clear_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    for name in _ENV_NAMES:
-        monkeypatch.delenv(name, raising=False)
 
 
 def _fixture(name: str) -> dict[str, Any]:
@@ -76,25 +70,10 @@ def _llm(*, fail_catalog: bool = False) -> DiscoveryLLM:
     return DiscoveryLLM(generate=generate, model_id="m1", decoder="none")
 
 
-def _crawler() -> FakeCrawler:
-    page = RawPage(
-        url=URL,
-        content=PAGE_TEXT.encode("utf-8"),
-        fetched_at=FIXED_TS,
-        render_mode=RenderMode.HTTP,
-    )
-    return FakeCrawler({URL: page})
-
-
 def _package(tmp_path: Path) -> Path:
     dest = tmp_path / "package"
     shutil.copytree(TEMPLATE_PACKAGE, dest)
     return dest
-
-
-def _json_out(capsys: pytest.CaptureFixture[str]) -> dict[str, Any]:
-    captured = capsys.readouterr()
-    return json.loads(captured.out.strip().splitlines()[-1])
 
 
 def _base_argv(package: Path, out: Path, *extra: str, dry_run: bool = False) -> list[str]:
@@ -144,12 +123,12 @@ def _search_argv(package: Path, out: Path, *extra: str) -> list[str]:
 def test_missing_llm_config_is_usage_error(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    _clear_env(monkeypatch)
+    clear_env(monkeypatch, _ENV_NAMES)
     package = _package(tmp_path)
     code = main(
         _base_argv(package, tmp_path / "out", "--dry-run"),
         discovery_llm=DiscoveryLLM(base_url="", model_id=""),
-        crawler=_crawler(),
+        crawler=fake_crawler(URL, PAGE_TEXT),
         extractor=FakeExtractor(),
     )
     assert code == EXIT_USAGE
@@ -162,7 +141,7 @@ def test_missing_package_is_usage_error(
     code = main(
         _base_argv(tmp_path / "nope", tmp_path / "out", "--dry-run"),
         discovery_llm=_llm(),
-        crawler=_crawler(),
+        crawler=fake_crawler(URL, PAGE_TEXT),
         extractor=FakeExtractor(),
     )
     assert code == EXIT_USAGE
@@ -172,12 +151,12 @@ def test_missing_package_is_usage_error(
 def test_invalid_only_is_usage_error(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    _clear_env(monkeypatch)
+    clear_env(monkeypatch, _ENV_NAMES)
     package = _package(tmp_path)
     code = main(
         _base_argv(package, tmp_path / "out", "--only", "bogus"),
         discovery_llm=_llm(),
-        crawler=_crawler(),
+        crawler=fake_crawler(URL, PAGE_TEXT),
         extractor=FakeExtractor(),
     )
     assert code == EXIT_USAGE
@@ -187,7 +166,7 @@ def test_invalid_only_is_usage_error(
 def test_search_without_keys_is_error_not_fabrication(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    _clear_env(monkeypatch)
+    clear_env(monkeypatch, _ENV_NAMES)
     package = _package(tmp_path)
     argv = [
         "package",
@@ -200,9 +179,9 @@ def test_search_without_keys_is_error_not_fabrication(
         str(tmp_path / "out"),
         "--json",
     ]
-    code = main(argv, discovery_llm=_llm(), crawler=_crawler(), extractor=FakeExtractor())
+    code = main(argv, discovery_llm=_llm(), crawler=fake_crawler(URL, PAGE_TEXT), extractor=FakeExtractor())
     assert code == EXIT_ERROR
-    payload = _json_out(capsys)
+    payload = json_out(capsys)
     assert payload["error"] == "I19"
 
 
@@ -215,7 +194,7 @@ def test_search_provider_defaults_to_yandex_key_gate(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """Нет конфига/``--search-adapter`` → резолв в ``yandex`` → key-gate (не выдумываем)."""
-    _clear_env(monkeypatch)
+    clear_env(monkeypatch, _ENV_NAMES)
     # «Нет конфига»: канонический путь даёт безопасный дефолт ``local`` без search.*.
     monkeypatch.setattr(
         "core.cli.wiring.load_deploy_config",
@@ -225,11 +204,11 @@ def test_search_provider_defaults_to_yandex_key_gate(
     code = main(
         _search_argv(package, tmp_path / "out"),
         discovery_llm=_llm(),
-        crawler=_crawler(),
+        crawler=fake_crawler(URL, PAGE_TEXT),
         extractor=FakeExtractor(),
     )
     assert code == EXIT_ERROR
-    payload = _json_out(capsys)
+    payload = json_out(capsys)
     assert payload["error"] == "I19"
     assert "yandex" in payload["message"]
 
@@ -238,7 +217,7 @@ def test_search_provider_resolved_from_config_by_language(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """``--lang en`` + ``by_language={en: duckduckgo}`` → выбран ``duckduckgo`` (I16)."""
-    _clear_env(monkeypatch)
+    clear_env(monkeypatch, _ENV_NAMES)
     requested: list[str] = []
 
     def _fake_build(name: str) -> FakeSearchAdapter:
@@ -257,12 +236,12 @@ def test_search_provider_resolved_from_config_by_language(
     code = main(
         _search_argv(package, tmp_path / "out", "--lang", "en"),
         discovery_llm=_llm(),
-        crawler=_crawler(),
+        crawler=fake_crawler(URL, PAGE_TEXT),
         extractor=FakeExtractor(),
     )
     assert code == EXIT_OK
     assert requested == ["duckduckgo"]
-    payload = _json_out(capsys)
+    payload = json_out(capsys)
     # Провенанс провайдера (I23): имя из резолвера + вид адаптера.
     assert payload["search_provider"] == "duckduckgo"
     assert payload["search_adapter_kind"] == "serp"
@@ -272,7 +251,7 @@ def test_search_provider_explicit_flag_overrides_config(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """Явный ``--search-adapter google`` побеждает ``by_language`` из конфига."""
-    _clear_env(monkeypatch)
+    clear_env(monkeypatch, _ENV_NAMES)
     requested: list[str] = []
 
     def _fake_build(name: str) -> FakeSearchAdapter:
@@ -291,12 +270,12 @@ def test_search_provider_explicit_flag_overrides_config(
     code = main(
         _search_argv(package, tmp_path / "out", "--lang", "ru", "--search-adapter", "google"),
         discovery_llm=_llm(),
-        crawler=_crawler(),
+        crawler=fake_crawler(URL, PAGE_TEXT),
         extractor=FakeExtractor(),
     )
     assert code == EXIT_OK
     assert requested == ["google"]
-    payload = _json_out(capsys)
+    payload = json_out(capsys)
     assert payload["search_provider"] == "google"
 
 
@@ -304,7 +283,7 @@ def test_search_provider_unknown_from_config_is_usage_error(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """Неизвестный провайдер из конфига → ``EXIT_USAGE`` (``search``), без выдумывания."""
-    _clear_env(monkeypatch)
+    clear_env(monkeypatch, _ENV_NAMES)
     monkeypatch.setattr(
         "core.cli.wiring.load_deploy_config",
         lambda _path=None: DeployConfig(
@@ -315,11 +294,11 @@ def test_search_provider_unknown_from_config_is_usage_error(
     code = main(
         _search_argv(package, tmp_path / "out"),
         discovery_llm=_llm(),
-        crawler=_crawler(),
+        crawler=fake_crawler(URL, PAGE_TEXT),
         extractor=FakeExtractor(),
     )
     assert code == EXIT_USAGE
-    payload = _json_out(capsys)
+    payload = json_out(capsys)
     assert payload["error"] == "search"
     assert "not-a-provider" in payload["message"]
 
@@ -332,17 +311,17 @@ def test_search_provider_unknown_from_config_is_usage_error(
 def test_dry_run_writes_nothing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    _clear_env(monkeypatch)
+    clear_env(monkeypatch, _ENV_NAMES)
     package = _package(tmp_path)
     out = tmp_path / "out"
     code = main(
         _base_argv(package, out, "--json", dry_run=True),
         discovery_llm=_llm(),
-        crawler=_crawler(),
+        crawler=fake_crawler(URL, PAGE_TEXT),
         extractor=FakeExtractor(),
     )
     assert code == EXIT_OK
-    payload = _json_out(capsys)
+    payload = json_out(capsys)
     assert payload["dry_run"] is True
     assert "candidates_path" not in payload
     assert not out.exists()
@@ -351,17 +330,17 @@ def test_dry_run_writes_nothing(
 def test_happy_path_writes_candidates_and_provenance(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    _clear_env(monkeypatch)
+    clear_env(monkeypatch, _ENV_NAMES)
     package = _package(tmp_path)
     out = tmp_path / "out"
     code = main(
         _base_argv(package, out, "--json"),
         discovery_llm=_llm(),
-        crawler=_crawler(),
+        crawler=fake_crawler(URL, PAGE_TEXT),
         extractor=FakeExtractor(),
     )
     assert code == EXIT_OK
-    payload = _json_out(capsys)
+    payload = json_out(capsys)
     assert payload["ok"] is True
     assert payload["candidates"] > 0
     candidates_path = Path(payload["candidates_path"])
@@ -379,17 +358,17 @@ def test_happy_path_writes_candidates_and_provenance(
 def test_partial_failure_still_writes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    _clear_env(monkeypatch)
+    clear_env(monkeypatch, _ENV_NAMES)
     package = _package(tmp_path)
     out = tmp_path / "out"
     code = main(
         _base_argv(package, out, "--json"),
         discovery_llm=_llm(fail_catalog=True),
-        crawler=_crawler(),
+        crawler=fake_crawler(URL, PAGE_TEXT),
         extractor=FakeExtractor(),
     )
     assert code == EXIT_ERROR
-    payload = _json_out(capsys)
+    payload = json_out(capsys)
     assert payload["ok"] is False
     # OQ-3: частичные кандидаты записаны несмотря на ok=False.
     assert Path(payload["candidates_path"]).is_file()
@@ -399,29 +378,29 @@ def test_partial_failure_still_writes(
 def test_only_catalog_runs_without_landscape(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    _clear_env(monkeypatch)
+    clear_env(monkeypatch, _ENV_NAMES)
     package = _package(tmp_path)
     out = tmp_path / "out"
     code = main(
         _base_argv(package, out, "--json", "--only", "catalog", dry_run=True),
         discovery_llm=_llm(),
-        crawler=_crawler(),
+        crawler=fake_crawler(URL, PAGE_TEXT),
         extractor=FakeExtractor(),
     )
     assert code == EXIT_OK
-    payload = _json_out(capsys)
+    payload = json_out(capsys)
     assert payload["ok"] is True
 
 
 def test_human_output_does_not_crash(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    _clear_env(monkeypatch)
+    clear_env(monkeypatch, _ENV_NAMES)
     package = _package(tmp_path)
     code = main(
         _base_argv(package, tmp_path / "out", dry_run=True),
         discovery_llm=_llm(),
-        crawler=_crawler(),
+        crawler=fake_crawler(URL, PAGE_TEXT),
         extractor=FakeExtractor(),
     )
     assert code == EXIT_OK

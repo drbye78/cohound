@@ -27,7 +27,8 @@ from core.pipeline.passport_scout import (
     write_passport_draft,
 )
 from core.ports.types import RawPage, RenderMode
-from tests.fakes.ports import FakeCrawler, FakeExtractor
+from tests.fakes.ports import FakeExtractor
+from tests.helpers.scout import fake_crawler
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "passport_scout"
 URL = "https://docs.test/alpha"
@@ -36,23 +37,12 @@ PAGE_TEXT = (
     "Vendor: ACME.\n"
     "The Alpha Product supports Feature X natively.\n"
 )
-FIXED_TS = "2026-01-01T00:00:00+00:00"
 SNAPSHOT = _dt.date(2026, 6, 1)
 PRODUCT = "Alpha Product"
 
 
 def _hypothesis() -> dict[str, Any]:
     return json.loads((FIXTURES / "hypothesis.json").read_text(encoding="utf-8"))
-
-
-def _crawler() -> FakeCrawler:
-    page = RawPage(
-        url=URL,
-        content=PAGE_TEXT.encode("utf-8"),
-        fetched_at=FIXED_TS,
-        render_mode=RenderMode.HTTP,
-    )
-    return FakeCrawler({URL: page})
 
 
 def _llm(hyp: dict[str, Any] | None = None) -> DiscoveryLLM:
@@ -66,7 +56,7 @@ def _report(**overrides: Any) -> PassportScoutReport:
     params: dict[str, Any] = {
         "product_name": PRODUCT,
         "url": URL,
-        "crawler": _crawler(),
+        "crawler": fake_crawler(URL, PAGE_TEXT),
         "extractor": FakeExtractor(),
         "discovery_llm": _llm(),
         "today": SNAPSHOT,

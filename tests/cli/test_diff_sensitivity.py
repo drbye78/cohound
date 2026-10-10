@@ -16,8 +16,6 @@
 from __future__ import annotations
 
 import datetime as _dt
-import json
-import shutil
 from pathlib import Path
 
 import pytest
@@ -29,15 +27,15 @@ from core.cli.main import (
     main,
 )
 from core.domain.enums import (
-    CellState,
     RankingPolicy,
     RunMode,
     Status,
 )
-from core.domain.models import Cell, Focus, LLMEvidence, RunConfig
+from core.domain.models import Focus, RunConfig
 from core.store.sqlite_store import SqliteStore
-
-CONFIG_FIXTURES = Path(__file__).resolve().parent.parent / "config" / "fixtures"
+from tests.helpers.domain import cell
+from tests.helpers.output import json_out
+from tests.helpers.packages import valid_package
 
 PRODUCT_A = "p1"
 PRODUCT_B = "p2"
@@ -62,35 +60,6 @@ def _cfg() -> RunConfig:
         snapshot_date=_dt.date(2026, 6, 1),
         mode=RunMode.STRICT,
         ranking_policy=RankingPolicy.CAPABILITY_RANKED,
-    )
-
-
-def _cell(run_id: str, product_id: str, param_id: str, status: Status) -> Cell:
-    """Собирает валидную ячейку под инварианты I1/I2."""
-    if status in {Status.OK, Status.PARTIAL}:
-        return Cell(
-            run_id=run_id,
-            product_id=product_id,
-            param_id=param_id,
-            state=CellState.EVALUATED,
-            status=status,
-            evidence=[LLMEvidence(source_id="src.1", quote="q")],
-        )
-    if status is Status.ABSENT:
-        return Cell(
-            run_id=run_id,
-            product_id=product_id,
-            param_id=param_id,
-            state=CellState.EVALUATED,
-            status=status,
-            absence_evidence=[{"source_scope": "partial"}],
-        )
-    return Cell(
-        run_id=run_id,
-        product_id=product_id,
-        param_id=param_id,
-        state=CellState.EVALUATED,
-        status=status,
     )
 
 
@@ -121,24 +90,8 @@ def _seed_cycle(
             ),
         )
         for product_id, param_id, status in cells:
-            store.save_cell(_cell(run_id, product_id, param_id, status))
+            store.save_cell(cell(run_id, product_id, param_id, status))
         store.conn.commit()
-
-
-def _json_out(capsys: pytest.CaptureFixture[str]) -> dict:
-    """Читает единственный JSON-объект из stdout."""
-    captured = capsys.readouterr()
-    return json.loads(captured.out.strip().splitlines()[-1])
-
-
-def _valid_package(tmp_path: Path) -> Path:
-    """Копия ``tests/config/fixtures/`` (для восстановления каталога/весов/когорты)."""
-    package = tmp_path / "package"
-    package.mkdir()
-    for item in CONFIG_FIXTURES.iterdir():
-        if item.is_file():
-            shutil.copy(item, package / item.name)
-    return package
 
 
 # ---------------------------------------------------------------------------
@@ -167,7 +120,7 @@ def test_diff_happy_path_writes_diff_md(
         ]
     )
     assert code == EXIT_OK
-    payload = _json_out(capsys)
+    payload = json_out(capsys)
     assert payload == {
         "ok": True,
         "out": str(runs_dir / "run.b" / "outputs" / "diff.md"),
@@ -224,7 +177,7 @@ def test_diff_across_boundary_json(
 
     code = main(["diff", "run.a", "run.b", "--db", str(db), "--json"])
     assert code == EXIT_ERROR
-    payload = _json_out(capsys)
+    payload = json_out(capsys)
     assert payload["ok"] is False
     assert payload["error"] == "§13"
     assert "methodology_version major" in payload["message"]
@@ -240,7 +193,7 @@ def test_diff_runs_dir_resolution(
 
     code = main(["diff", "run.a", "run.b", "--runs-dir", str(runs_dir), "--json"])
     assert code == EXIT_OK
-    payload = _json_out(capsys)
+    payload = json_out(capsys)
     assert Path(payload["out"]).exists()
 
 
@@ -270,7 +223,7 @@ def test_sensitivity_json_shape(
         ["sensitivity", "--db", str(db), "--run-id", "run.s", "--json"]
     )
     assert code == EXIT_OK
-    payload = _json_out(capsys)
+    payload = json_out(capsys)
     assert payload["ok"] is True
     assert payload["run_id"] == "run.s"
     assert payload["stable"] in (True, False)
@@ -307,7 +260,7 @@ def test_sensitivity_runs_dir_resolution(
         ["sensitivity", "--runs-dir", str(runs_dir), "--run-id", "run.s", "--json"]
     )
     assert code == EXIT_OK
-    assert _json_out(capsys)["run_id"] == "run.s"
+    assert json_out(capsys)["run_id"] == "run.s"
 
 
 def test_sensitivity_infers_single_run_from_db(
@@ -318,7 +271,7 @@ def test_sensitivity_infers_single_run_from_db(
 
     code = main(["sensitivity", "--db", str(db), "--json"])
     assert code == EXIT_OK
-    assert _json_out(capsys)["run_id"] == "run.s"
+    assert json_out(capsys)["run_id"] == "run.s"
 
 
 def test_sensitivity_with_package_has_no_gap_note(
@@ -326,7 +279,7 @@ def test_sensitivity_with_package_has_no_gap_note(
 ) -> None:
     db = tmp_path / "cohound.db"
     _seed_sensitivity_run(db)
-    package = _valid_package(tmp_path)
+    package = valid_package(tmp_path, scope_attestation=False)
 
     code = main(
         [
@@ -343,7 +296,7 @@ def test_sensitivity_with_package_has_no_gap_note(
         ]
     )
     assert code == EXIT_OK
-    payload = _json_out(capsys)
+    payload = json_out(capsys)
     assert payload["notes"] == []
     # Каталог из пакета применён: ось весов присутствует в форме плана.
     assert set(payload["per_axis"]["weights"]["rankings"]) == {"declared", "uniform"}

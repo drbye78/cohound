@@ -24,13 +24,13 @@ from core.pipeline.package_scout import (
     write_scout_artifacts,
 )
 from core.ports.search import SearchQuery, SearchResult
-from core.ports.types import RawPage, RenderMode
-from tests.fakes.ports import FakeCrawler, FakeExtractor
+from core.ports.types import RawPage
+from tests.fakes.ports import FakeExtractor
+from tests.helpers.scout import fake_crawler
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "package_scout"
 URL = "https://docs.test/alpha"
 URL2 = "https://docs.test/beta"
-FIXED_TS = "2026-01-01T00:00:00+00:00"
 SUBJECT = "Alpha Product"
 PAGE_TEXT = (
     "Alpha Product documentation.\n"
@@ -72,21 +72,11 @@ def _llm(
     return DiscoveryLLM(generate=generate, model_id="m1", decoder="none")
 
 
-def _crawler() -> FakeCrawler:
-    page = RawPage(
-        url=URL,
-        content=PAGE_TEXT.encode("utf-8"),
-        fetched_at=FIXED_TS,
-        render_mode=RenderMode.HTTP,
-    )
-    return FakeCrawler({URL: page})
-
-
 def _report(**overrides: Any) -> PackageScoutReport:
     params: dict[str, Any] = {
         "subject_name": SUBJECT,
         "seed_urls": [URL],
-        "crawler": _crawler(),
+        "crawler": fake_crawler(URL, PAGE_TEXT),
         "extractor": FakeExtractor(),
         "discovery_llm": _llm(),
     }

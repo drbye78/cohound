@@ -19,62 +19,13 @@ from __future__ import annotations
 import json
 import shutil
 from pathlib import Path
-from typing import Any
 
 import pytest
 
 from core.cli.main import EXIT_OK, EXIT_USAGE, main
-from core.pipeline import build_phases
+from tests.helpers.packages import capturing_factory, run_argv, valid_package
 
 CONFIG_FIXTURES = Path(__file__).resolve().parent.parent / "config" / "fixtures"
-RUN_YAML_NAME = "run.yaml"
-
-
-# ---------------------------------------------------------------------------
-# Помощники
-# ---------------------------------------------------------------------------
-
-
-def _valid_package(tmp_path: Path) -> Path:
-    """Копия ``tests/config/fixtures/`` + ``scope_attestation.yaml`` → линт-чистый пакет."""
-    package = tmp_path / "package"
-    package.mkdir()
-    for item in CONFIG_FIXTURES.iterdir():
-        if item.is_file():
-            shutil.copy(item, package / item.name)
-    (package / "scope_attestation.yaml").write_text(
-        'procedure: "ручная аттестация полноты источника (тест)"\n', encoding="utf-8"
-    )
-    return package
-
-
-def _capturing_factory() -> tuple[dict[str, Any], Any]:
-    """Возвращает ``(captured, factory)``: фабрика сохраняет kwargs и строит фазы."""
-    captured: dict[str, Any] = {}
-
-    def factory(**kwargs: Any) -> dict:
-        captured.update(kwargs)
-        return build_phases(**kwargs)
-
-    return captured, factory
-
-
-def _run_argv(package: Path, db: Path) -> list[str]:
-    """Базовый ``run --until plan`` с фиксированным ``run_id`` (без гейта)."""
-    return [
-        "run",
-        "--run-yaml",
-        str(package / RUN_YAML_NAME),
-        "--package",
-        str(package),
-        "--db",
-        str(db),
-        "--run-id",
-        "inputs-1",
-        "--until",
-        "plan",
-        "--json",
-    ]
 
 
 # ---------------------------------------------------------------------------
@@ -85,14 +36,14 @@ def _run_argv(package: Path, db: Path) -> list[str]:
 def test_passports_dir_loads_valid_passports(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    package = _valid_package(tmp_path)
+    package = valid_package(tmp_path)
     db = tmp_path / "cohound.db"
     passports = tmp_path / "passports"
     shutil.copytree(CONFIG_FIXTURES / "passports", passports)
 
-    captured, factory = _capturing_factory()
+    captured, factory = capturing_factory()
     code = main(
-        [*_run_argv(package, db), "--passports-dir", str(passports)],
+        [*run_argv(package, run_id="inputs-1", db=db, until="plan"), "--passports-dir", str(passports)],
         phases_factory=factory,
     )
     assert code == EXIT_OK
@@ -103,12 +54,12 @@ def test_passports_dir_loads_valid_passports(
 def test_passports_dir_missing_is_empty(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    package = _valid_package(tmp_path)
+    package = valid_package(tmp_path)
     db = tmp_path / "cohound.db"
 
-    captured, factory = _capturing_factory()
+    captured, factory = capturing_factory()
     code = main(
-        [*_run_argv(package, db), "--passports-dir", str(tmp_path / "nope")],
+        [*run_argv(package, run_id="inputs-1", db=db, until="plan"), "--passports-dir", str(tmp_path / "nope")],
         phases_factory=factory,
     )
     assert code == EXIT_OK
@@ -118,16 +69,16 @@ def test_passports_dir_missing_is_empty(
 def test_malformed_passports_dir_is_clear_usage_error(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    package = _valid_package(tmp_path)
+    package = valid_package(tmp_path)
     db = tmp_path / "cohound.db"
     passports = tmp_path / "passports"
     (passports / "p1").mkdir(parents=True)
     # YAML-список вместо словаря паспорта → PassportLoadError (§4.3).
     (passports / "p1" / "2026-01-01.yaml").write_text("- not\n- a\n- map\n", encoding="utf-8")
 
-    captured, factory = _capturing_factory()
+    captured, factory = capturing_factory()
     code = main(
-        [*_run_argv(package, db), "--passports-dir", str(passports)],
+        [*run_argv(package, run_id="inputs-1", db=db, until="plan"), "--passports-dir", str(passports)],
         phases_factory=factory,
     )
     assert code == EXIT_USAGE
@@ -148,11 +99,11 @@ def test_default_passports_dir_absent_is_noop(
     ``passports/`` в корне репозитория (пакеты кейсов) даёт ложный провал.
     """
     monkeypatch.chdir(tmp_path)
-    package = _valid_package(tmp_path)
+    package = valid_package(tmp_path)
     db = tmp_path / "cohound.db"
 
-    captured, factory = _capturing_factory()
-    code = main(_run_argv(package, db), phases_factory=factory)
+    captured, factory = capturing_factory()
+    code = main(run_argv(package, run_id="inputs-1", db=db, until="plan"), phases_factory=factory)
     assert code == EXIT_OK
     assert captured["passports"] == {}
 
@@ -165,16 +116,16 @@ def test_default_passports_dir_absent_is_noop(
 def test_urls_json_mapping_accepted(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    package = _valid_package(tmp_path)
+    package = valid_package(tmp_path)
     db = tmp_path / "cohound.db"
     urls_path = tmp_path / "urls.json"
     urls_path.write_text(
         json.dumps({"p1": ["https://docs.example/p1"], "p2": []}), encoding="utf-8"
     )
 
-    captured, factory = _capturing_factory()
+    captured, factory = capturing_factory()
     code = main(
-        [*_run_argv(package, db), "--urls", str(urls_path)], phases_factory=factory
+        [*run_argv(package, run_id="inputs-1", db=db, until="plan"), "--urls", str(urls_path)], phases_factory=factory
     )
     assert code == EXIT_OK
     assert captured["urls"] == {
@@ -186,16 +137,16 @@ def test_urls_json_mapping_accepted(
 def test_urls_yaml_mapping_accepted(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    package = _valid_package(tmp_path)
+    package = valid_package(tmp_path)
     db = tmp_path / "cohound.db"
     urls_path = tmp_path / "urls.yaml"
     urls_path.write_text(
         "p1:\n  - https://docs.example/p1\n", encoding="utf-8"
     )
 
-    captured, factory = _capturing_factory()
+    captured, factory = capturing_factory()
     code = main(
-        [*_run_argv(package, db), "--urls", str(urls_path)], phases_factory=factory
+        [*run_argv(package, run_id="inputs-1", db=db, until="plan"), "--urls", str(urls_path)], phases_factory=factory
     )
     assert code == EXIT_OK
     assert captured["urls"] == {"p1": ["https://docs.example/p1"]}
@@ -204,11 +155,11 @@ def test_urls_yaml_mapping_accepted(
 def test_urls_without_flag_is_empty(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    package = _valid_package(tmp_path)
+    package = valid_package(tmp_path)
     db = tmp_path / "cohound.db"
 
-    captured, factory = _capturing_factory()
-    code = main(_run_argv(package, db), phases_factory=factory)
+    captured, factory = capturing_factory()
+    code = main(run_argv(package, run_id="inputs-1", db=db, until="plan"), phases_factory=factory)
     assert code == EXIT_OK
     assert captured["urls"] == {}
 
@@ -224,14 +175,14 @@ def test_urls_without_flag_is_empty(
 def test_urls_invalid_shape_is_usage_error(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], payload: str
 ) -> None:
-    package = _valid_package(tmp_path)
+    package = valid_package(tmp_path)
     db = tmp_path / "cohound.db"
     urls_path = tmp_path / "urls.json"
     urls_path.write_text(payload, encoding="utf-8")
 
-    captured, factory = _capturing_factory()
+    captured, factory = capturing_factory()
     code = main(
-        [*_run_argv(package, db), "--urls", str(urls_path)], phases_factory=factory
+        [*run_argv(package, run_id="inputs-1", db=db, until="plan"), "--urls", str(urls_path)], phases_factory=factory
     )
     assert code == EXIT_USAGE
     captured_out = capsys.readouterr()
@@ -242,12 +193,12 @@ def test_urls_invalid_shape_is_usage_error(
 def test_urls_missing_file_is_usage_error(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    package = _valid_package(tmp_path)
+    package = valid_package(tmp_path)
     db = tmp_path / "cohound.db"
 
-    captured, factory = _capturing_factory()
+    captured, factory = capturing_factory()
     code = main(
-        [*_run_argv(package, db), "--urls", str(tmp_path / "absent.json")],
+        [*run_argv(package, run_id="inputs-1", db=db, until="plan"), "--urls", str(tmp_path / "absent.json")],
         phases_factory=factory,
     )
     assert code == EXIT_USAGE
@@ -258,14 +209,14 @@ def test_urls_missing_file_is_usage_error(
 def test_urls_bad_json_is_usage_error(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    package = _valid_package(tmp_path)
+    package = valid_package(tmp_path)
     db = tmp_path / "cohound.db"
     urls_path = tmp_path / "urls.json"
     urls_path.write_text("{not json", encoding="utf-8")
 
-    _, factory = _capturing_factory()
+    _, factory = capturing_factory()
     code = main(
-        [*_run_argv(package, db), "--urls", str(urls_path)], phases_factory=factory
+        [*run_argv(package, run_id="inputs-1", db=db, until="plan"), "--urls", str(urls_path)], phases_factory=factory
     )
     assert code == EXIT_USAGE
     captured_out = capsys.readouterr()

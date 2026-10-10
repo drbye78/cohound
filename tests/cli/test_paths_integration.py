@@ -16,8 +16,6 @@
 
 from __future__ import annotations
 
-import json
-import shutil
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -28,54 +26,7 @@ import yaml
 from core.cli.main import main
 from core.cli.wiring import build_adapters
 from core.config.paths import PathsConfig
-from core.pipeline import build_phases
-
-CONFIG_FIXTURES = Path(__file__).resolve().parent.parent / "config" / "fixtures"
-RUN_YAML_NAME = "run.yaml"
-
-
-# ---------------------------------------------------------------------------
-# Помощники
-# ---------------------------------------------------------------------------
-
-
-def _valid_package(tmp_path: Path) -> Path:
-    """Копия ``tests/config/fixtures/`` + ``scope_attestation.yaml`` → линт-чистый пакет."""
-    package = tmp_path / "package"
-    package.mkdir()
-    for item in CONFIG_FIXTURES.iterdir():
-        if item.is_file():
-            shutil.copy(item, package / item.name)
-    (package / "scope_attestation.yaml").write_text(
-        'procedure: "ручная аттестация полноты источника (тест)"\n', encoding="utf-8"
-    )
-    return package
-
-
-def _run_argv(package: Path, run_id: str) -> list[str]:
-    """Базовый ``run --until plan`` с фиксированным ``run_id`` (без --db/--runs-dir)."""
-    return [
-        "run",
-        "--run-yaml",
-        str(package / RUN_YAML_NAME),
-        "--package",
-        str(package),
-        "--run-id",
-        run_id,
-        "--until",
-        "plan",
-        "--json",
-    ]
-
-
-def _capturing_factory() -> tuple[dict[str, Any], Any]:
-    captured: dict[str, Any] = {}
-
-    def factory(**kwargs: Any) -> dict:
-        captured.update(kwargs)
-        return build_phases(**kwargs)
-
-    return captured, factory
+from tests.helpers.packages import capturing_factory, run_argv, valid_package
 
 
 # ---------------------------------------------------------------------------
@@ -88,9 +39,9 @@ def test_default_runs_dir_is_relative_runs(
 ) -> None:
     """Без env/файла эффективный ``out_dir`` — прежний относительный ``runs``."""
     monkeypatch.chdir(tmp_path)
-    package = _valid_package(tmp_path)
-    captured, factory = _capturing_factory()
-    code = main(_run_argv(package, "bt-1"), phases_factory=factory)
+    package = valid_package(tmp_path)
+    captured, factory = capturing_factory()
+    code = main(run_argv(package, run_id="bt-1", until="plan"), phases_factory=factory)
     assert code == 0
     assert captured["out_dir"] == "runs"
     assert captured["raw_root"] == "corpus_raw"
@@ -101,8 +52,8 @@ def test_default_run_writes_db_under_relative_runs(
 ) -> None:
     """Прогон без флагов пишет БД в ``./runs/{run_id}/cohound.db`` (как раньше)."""
     monkeypatch.chdir(tmp_path)
-    package = _valid_package(tmp_path)
-    assert main(_run_argv(package, "bt-2")) == 0
+    package = valid_package(tmp_path)
+    assert main(run_argv(package, run_id="bt-2", until="plan")) == 0
     assert (tmp_path / "runs" / "bt-2" / "cohound.db").is_file()
 
 
@@ -116,8 +67,8 @@ def test_env_runs_dir_changes_effective_dir(
 ) -> None:
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("COHOUND_RUNS_DIR", str(tmp_path / "envruns"))
-    package = _valid_package(tmp_path)
-    assert main(_run_argv(package, "env-1")) == 0
+    package = valid_package(tmp_path)
+    assert main(run_argv(package, run_id="env-1", until="plan")) == 0
     assert (tmp_path / "envruns" / "env-1" / "cohound.db").is_file()
     assert not (tmp_path / "runs").exists()
 
@@ -127,8 +78,8 @@ def test_cli_flag_wins_over_env(
 ) -> None:
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("COHOUND_RUNS_DIR", str(tmp_path / "envruns"))
-    package = _valid_package(tmp_path)
-    argv = [*_run_argv(package, "flag-1"), "--runs-dir", str(tmp_path / "flagruns")]
+    package = valid_package(tmp_path)
+    argv = [*run_argv(package, run_id="flag-1", until="plan"), "--runs-dir", str(tmp_path / "flagruns")]
     assert main(argv) == 0
     assert (tmp_path / "flagruns" / "flag-1" / "cohound.db").is_file()
     assert not (tmp_path / "envruns").exists()
@@ -144,8 +95,8 @@ def test_home_shifts_relative_dirs(
 ) -> None:
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("COHOUND_HOME", str(tmp_path / "home"))
-    package = _valid_package(tmp_path)
-    assert main(_run_argv(package, "home-1")) == 0
+    package = valid_package(tmp_path)
+    assert main(run_argv(package, run_id="home-1", until="plan")) == 0
     assert (tmp_path / "home" / "runs" / "home-1" / "cohound.db").is_file()
 
 
@@ -154,9 +105,9 @@ def test_home_shifts_raw_root_and_out_dir(
 ) -> None:
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("COHOUND_HOME", str(tmp_path / "home"))
-    package = _valid_package(tmp_path)
-    captured, factory = _capturing_factory()
-    assert main(_run_argv(package, "home-2"), phases_factory=factory) == 0
+    package = valid_package(tmp_path)
+    captured, factory = capturing_factory()
+    assert main(run_argv(package, run_id="home-2", until="plan"), phases_factory=factory) == 0
     assert captured["out_dir"] == str(tmp_path / "home" / "runs")
     assert captured["raw_root"] == str(tmp_path / "home" / "corpus_raw")
 
@@ -176,8 +127,8 @@ def test_paths_file_feeds_layout(
         encoding="utf-8",
     )
     monkeypatch.setenv("COHOUND_PATHS_FILE", str(paths_file))
-    package = _valid_package(tmp_path)
-    assert main(_run_argv(package, "file-1")) == 0
+    package = valid_package(tmp_path)
+    assert main(run_argv(package, run_id="file-1", until="plan")) == 0
     assert (tmp_path / "customruns" / "file-1" / "cohound.db").is_file()
 
 

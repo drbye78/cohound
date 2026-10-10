@@ -17,7 +17,6 @@ edge-сервер, как в ``tests/edge/``.
 
 from __future__ import annotations
 
-import json
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -47,6 +46,8 @@ from core.config.deploy import DeployConfig, load_deploy_config
 from core.edge.seam_schema import SEAM_SCHEMA_VERSION, validate_envelope, validate_payload
 from core.pipeline import Ports
 from core.ports.search import SearchQuery
+from tests.helpers.output import json_out
+from tests.helpers.packages import write_text
 
 # ---------------------------------------------------------------------------
 # Фикстуры и швы (категорийно-нейтральные)
@@ -115,12 +116,6 @@ def _edge_transport(op: str, envelope: Mapping[str, Any]) -> Mapping[str, Any]:
     return _envelope(op, rid, payloads[op])
 
 
-def _write(tmp_path: Path, name: str, text: str) -> Path:
-    path = tmp_path / name
-    path.write_text(text, encoding="utf-8")
-    return path
-
-
 def _split_config() -> DeployConfig:
     return DeployConfig.model_validate(
         {
@@ -130,11 +125,6 @@ def _split_config() -> DeployConfig:
             "search": {"budget": {"ru": 1}, "adapter": "example_adapter"},
         }
     )
-
-
-def _json_out(capsys: pytest.CaptureFixture[str]) -> dict[str, Any]:
-    captured = capsys.readouterr()
-    return json.loads(captured.out.strip().splitlines()[-1])
 
 
 # ---------------------------------------------------------------------------
@@ -215,11 +205,11 @@ def test_build_gateway_uses_edge_config_without_pinning() -> None:
 def test_deploy_check_success_json(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    cfg = _write(tmp_path, "deploy.yaml", _SPLIT_YAML)
+    cfg = write_text(tmp_path, "deploy.yaml", _SPLIT_YAML)
 
     code = main(["deploy-check", "--deploy", str(cfg), "--json"], deploy_transport=_edge_transport)
     assert code == EXIT_OK
-    payload = _json_out(capsys)
+    payload = json_out(capsys)
     assert payload["ok"] is True
     assert payload["split"] is True
     assert payload["profile"] == "split"
@@ -235,7 +225,7 @@ def test_deploy_check_success_json(
 def test_deploy_check_human_output(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    cfg = _write(tmp_path, "deploy.yaml", _SPLIT_YAML)
+    cfg = write_text(tmp_path, "deploy.yaml", _SPLIT_YAML)
 
     code = main(["deploy-check", "--deploy", str(cfg)], deploy_transport=_edge_transport)
     assert code == EXIT_OK
@@ -248,11 +238,11 @@ def test_deploy_check_human_output(
 def test_deploy_check_local_profile_is_ok(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    cfg = _write(tmp_path, "deploy.yaml", _LOCAL_YAML)
+    cfg = write_text(tmp_path, "deploy.yaml", _LOCAL_YAML)
 
     code = main(["deploy-check", "--deploy", str(cfg), "--json"])
     assert code == EXIT_OK
-    payload = _json_out(capsys)
+    payload = json_out(capsys)
     assert payload["ok"] is True
     assert payload["split"] is False
     assert payload["profile"] == "local"
@@ -261,14 +251,14 @@ def test_deploy_check_local_profile_is_ok(
 def test_deploy_check_unreachable_is_nonzero(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    cfg = _write(tmp_path, "deploy.yaml", _SPLIT_YAML)
+    cfg = write_text(tmp_path, "deploy.yaml", _SPLIT_YAML)
 
     def _down(op: str, envelope: Mapping[str, Any]) -> Mapping[str, Any]:
         raise GatewayTransportError("edge недостижим")
 
     code = main(["deploy-check", "--deploy", str(cfg), "--json"], deploy_transport=_down)
     assert code == EXIT_ERROR
-    payload = _json_out(capsys)
+    payload = json_out(capsys)
     assert payload["ok"] is False
     assert payload["health"] is None
     assert any("health:" in issue for issue in payload["issues"])
@@ -277,7 +267,7 @@ def test_deploy_check_unreachable_is_nonzero(
 def test_deploy_check_schema_mismatch_is_rejected(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    cfg = _write(tmp_path, "deploy.yaml", _SPLIT_YAML)
+    cfg = write_text(tmp_path, "deploy.yaml", _SPLIT_YAML)
 
     def _bumped(op: str, envelope: Mapping[str, Any]) -> Mapping[str, Any]:
         rid = str(envelope["request_id"])
@@ -285,7 +275,7 @@ def test_deploy_check_schema_mismatch_is_rejected(
 
     code = main(["deploy-check", "--deploy", str(cfg), "--json"], deploy_transport=_bumped)
     assert code == EXIT_ERROR
-    payload = _json_out(capsys)
+    payload = json_out(capsys)
     assert payload["ok"] is False
     assert any(
         ("version" in issue) or ("schema" in issue) or ("schema_version" in issue)
@@ -297,7 +287,7 @@ def test_deploy_check_invalid_envelope_shape_is_rejected(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """Форма конверта (request_id) ловится сверкой с опубликованным контрактом."""
-    cfg = _write(tmp_path, "deploy.yaml", _SPLIT_YAML)
+    cfg = write_text(tmp_path, "deploy.yaml", _SPLIT_YAML)
 
     def _no_request_id(op: str, envelope: Mapping[str, Any]) -> Mapping[str, Any]:
         payloads = {"health": _HEALTH, "capabilities": _CAPABILITIES}
@@ -313,7 +303,7 @@ def test_deploy_check_invalid_envelope_shape_is_rejected(
         deploy_transport=_no_request_id,
     )
     assert code == EXIT_ERROR
-    payload = _json_out(capsys)
+    payload = json_out(capsys)
     assert payload["ok"] is False
     assert any("request_id" in issue for issue in payload["issues"])
 
@@ -321,7 +311,7 @@ def test_deploy_check_invalid_envelope_shape_is_rejected(
 def test_deploy_check_missing_base_url_is_usage_error(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    cfg = _write(tmp_path, "deploy.yaml", "profile: split\n")
+    cfg = write_text(tmp_path, "deploy.yaml", "profile: split\n")
 
     code = main(["deploy-check", "--deploy", str(cfg)])
     assert code == EXIT_USAGE
@@ -331,7 +321,7 @@ def test_deploy_check_missing_base_url_is_usage_error(
 def test_deploy_check_gateway_factory_injection(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    cfg = _write(tmp_path, "deploy.yaml", _SPLIT_YAML)
+    cfg = write_text(tmp_path, "deploy.yaml", _SPLIT_YAML)
     seen: dict[str, str] = {}
 
     def factory(config: DeployConfig) -> HttpContentGateway:
@@ -341,7 +331,7 @@ def test_deploy_check_gateway_factory_injection(
     code = main(["deploy-check", "--deploy", str(cfg), "--json"], gateway_factory=factory)
     assert code == EXIT_OK
     assert seen["profile"] == "split"
-    assert _json_out(capsys)["ok"] is True
+    assert json_out(capsys)["ok"] is True
 
 
 # ---------------------------------------------------------------------------

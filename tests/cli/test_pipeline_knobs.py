@@ -17,9 +17,7 @@ root (прогон без внешних систем).
 from __future__ import annotations
 
 import json
-import shutil
 from pathlib import Path
-from typing import Any
 
 import pytest
 
@@ -32,58 +30,8 @@ from core.cli.wiring import (
     build_scout_crawler,
 )
 from core.config.deploy import CrawlConfig, DeployConfig
-from core.pipeline import build_phases
 from core.ports.types import RenderMode
-
-CONFIG_FIXTURES = Path(__file__).resolve().parent.parent / "config" / "fixtures"
-RUN_YAML_NAME = "run.yaml"
-
-
-# ---------------------------------------------------------------------------
-# Помощники
-# ---------------------------------------------------------------------------
-
-
-def _valid_package(tmp_path: Path) -> Path:
-    """Копия ``tests/config/fixtures/`` + ``scope_attestation.yaml`` → линт-чистый пакет."""
-    package = tmp_path / "package"
-    package.mkdir()
-    for item in CONFIG_FIXTURES.iterdir():
-        if item.is_file():
-            shutil.copy(item, package / item.name)
-    (package / "scope_attestation.yaml").write_text(
-        'procedure: "ручная аттестация полноты источника (тест)"\n', encoding="utf-8"
-    )
-    return package
-
-
-def _capturing_factory() -> tuple[dict[str, Any], Any]:
-    """Возвращает ``(captured, factory)``: фабрика сохраняет kwargs и строит фазы."""
-    captured: dict[str, Any] = {}
-
-    def factory(**kwargs: Any) -> dict:
-        captured.update(kwargs)
-        return build_phases(**kwargs)
-
-    return captured, factory
-
-
-def _run_argv(package: Path, db: Path) -> list[str]:
-    """Базовый ``run --until plan`` с фиксированным ``run_id`` (без гейта)."""
-    return [
-        "run",
-        "--run-yaml",
-        str(package / RUN_YAML_NAME),
-        "--package",
-        str(package),
-        "--db",
-        str(db),
-        "--run-id",
-        "knobs-1",
-        "--until",
-        "plan",
-        "--json",
-    ]
+from tests.helpers.packages import capturing_factory, run_argv, valid_package
 
 
 # ---------------------------------------------------------------------------
@@ -95,7 +43,7 @@ def test_render_modes_json_propagates(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.chdir(tmp_path)
-    package = _valid_package(tmp_path)
+    package = valid_package(tmp_path)
     db = tmp_path / "cohound.db"
     modes = tmp_path / "render.json"
     modes.write_text(
@@ -105,9 +53,9 @@ def test_render_modes_json_propagates(
         encoding="utf-8",
     )
 
-    captured, factory = _capturing_factory()
+    captured, factory = capturing_factory()
     code = main(
-        [*_run_argv(package, db), "--render-modes", str(modes)], phases_factory=factory
+        [*run_argv(package, run_id="knobs-1", db=db, until="plan"), "--render-modes", str(modes)], phases_factory=factory
     )
     assert code == EXIT_OK
     assert captured["render_modes"] == {
@@ -120,14 +68,14 @@ def test_render_modes_yaml_propagates(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.chdir(tmp_path)
-    package = _valid_package(tmp_path)
+    package = valid_package(tmp_path)
     db = tmp_path / "cohound.db"
     modes = tmp_path / "render.yaml"
     modes.write_text("https://docs.example/p1: browser\n", encoding="utf-8")
 
-    captured, factory = _capturing_factory()
+    captured, factory = capturing_factory()
     code = main(
-        [*_run_argv(package, db), "--render-modes", str(modes)], phases_factory=factory
+        [*run_argv(package, run_id="knobs-1", db=db, until="plan"), "--render-modes", str(modes)], phases_factory=factory
     )
     assert code == EXIT_OK
     assert captured["render_modes"] == {"https://docs.example/p1": RenderMode.BROWSER}
@@ -137,11 +85,11 @@ def test_render_modes_default_empty(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.chdir(tmp_path)
-    package = _valid_package(tmp_path)
+    package = valid_package(tmp_path)
     db = tmp_path / "cohound.db"
 
-    captured, factory = _capturing_factory()
-    code = main(_run_argv(package, db), phases_factory=factory)
+    captured, factory = capturing_factory()
+    code = main(run_argv(package, run_id="knobs-1", db=db, until="plan"), phases_factory=factory)
     assert code == EXIT_OK
     assert captured["render_modes"] == {}
 
@@ -150,14 +98,14 @@ def test_render_modes_invalid_value_usage_error(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.chdir(tmp_path)
-    package = _valid_package(tmp_path)
+    package = valid_package(tmp_path)
     db = tmp_path / "cohound.db"
     modes = tmp_path / "render.json"
     modes.write_text('{"https://docs.example/p1": "webkit"}', encoding="utf-8")
 
-    captured, factory = _capturing_factory()
+    captured, factory = capturing_factory()
     code = main(
-        [*_run_argv(package, db), "--render-modes", str(modes)], phases_factory=factory
+        [*run_argv(package, run_id="knobs-1", db=db, until="plan"), "--render-modes", str(modes)], phases_factory=factory
     )
     assert code == EXIT_USAGE
     out = capsys.readouterr()
@@ -169,12 +117,12 @@ def test_render_modes_missing_file_usage_error(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.chdir(tmp_path)
-    package = _valid_package(tmp_path)
+    package = valid_package(tmp_path)
     db = tmp_path / "cohound.db"
 
-    _, factory = _capturing_factory()
+    _, factory = capturing_factory()
     code = main(
-        [*_run_argv(package, db), "--render-modes", str(tmp_path / "absent.json")],
+        [*run_argv(package, run_id="knobs-1", db=db, until="plan"), "--render-modes", str(tmp_path / "absent.json")],
         phases_factory=factory,
     )
     assert code == EXIT_USAGE
@@ -190,14 +138,14 @@ def test_render_modes_bad_shape_usage_error(
     payload: str,
 ) -> None:
     monkeypatch.chdir(tmp_path)
-    package = _valid_package(tmp_path)
+    package = valid_package(tmp_path)
     db = tmp_path / "cohound.db"
     modes = tmp_path / "render.json"
     modes.write_text(payload, encoding="utf-8")
 
-    _, factory = _capturing_factory()
+    _, factory = capturing_factory()
     code = main(
-        [*_run_argv(package, db), "--render-modes", str(modes)], phases_factory=factory
+        [*run_argv(package, run_id="knobs-1", db=db, until="plan"), "--render-modes", str(modes)], phases_factory=factory
     )
     assert code == EXIT_USAGE
     out = capsys.readouterr()
@@ -209,14 +157,14 @@ def test_render_modes_dry_run_validates_and_succeeds(
 ) -> None:
     """Живая проверка: ``--dry-run`` с флагами не падает и печатает режимы."""
     monkeypatch.chdir(tmp_path)
-    package = _valid_package(tmp_path)
+    package = valid_package(tmp_path)
     db = tmp_path / "cohound.db"
     modes = tmp_path / "render.json"
     modes.write_text('{"https://docs.example/p1": "browser"}', encoding="utf-8")
 
     code = main(
         [
-            *_run_argv(package, db),
+            *run_argv(package, run_id="knobs-1", db=db, until="plan"),
             "--dry-run",
             "--render-modes",
             str(modes),
@@ -234,13 +182,13 @@ def test_render_modes_dry_run_invalid_value_usage_error(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.chdir(tmp_path)
-    package = _valid_package(tmp_path)
+    package = valid_package(tmp_path)
     db = tmp_path / "cohound.db"
     modes = tmp_path / "render.json"
     modes.write_text('{"https://docs.example/p1": "webkit"}', encoding="utf-8")
 
     code = main(
-        [*_run_argv(package, db), "--dry-run", "--render-modes", str(modes)]
+        [*run_argv(package, run_id="knobs-1", db=db, until="plan"), "--dry-run", "--render-modes", str(modes)]
     )
     assert code == EXIT_USAGE
 
@@ -254,12 +202,12 @@ def test_cutoff_k_propagates(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.chdir(tmp_path)
-    package = _valid_package(tmp_path)
+    package = valid_package(tmp_path)
     db = tmp_path / "cohound.db"
 
-    captured, factory = _capturing_factory()
+    captured, factory = capturing_factory()
     code = main(
-        [*_run_argv(package, db), "--cutoff-k", "5"], phases_factory=factory
+        [*run_argv(package, run_id="knobs-1", db=db, until="plan"), "--cutoff-k", "5"], phases_factory=factory
     )
     assert code == EXIT_OK
     assert captured["cutoff_k"] == 5
@@ -270,11 +218,11 @@ def test_cutoff_k_default_pipeline_value(
 ) -> None:
     """Без флага значение ``None`` → фаза оценки применяет ``DEFAULT_RETRIEVAL_CUTOFF_K``."""
     monkeypatch.chdir(tmp_path)
-    package = _valid_package(tmp_path)
+    package = valid_package(tmp_path)
     db = tmp_path / "cohound.db"
 
-    captured, factory = _capturing_factory()
-    code = main(_run_argv(package, db), phases_factory=factory)
+    captured, factory = capturing_factory()
+    code = main(run_argv(package, run_id="knobs-1", db=db, until="plan"), phases_factory=factory)
     assert code == EXIT_OK
     assert captured["cutoff_k"] is None
 
@@ -287,10 +235,10 @@ def test_cutoff_k_non_positive_rejected(
     bad: str,
 ) -> None:
     monkeypatch.chdir(tmp_path)
-    package = _valid_package(tmp_path)
+    package = valid_package(tmp_path)
     db = tmp_path / "cohound.db"
 
-    code = main([*_run_argv(package, db), "--cutoff-k", bad])
+    code = main([*run_argv(package, run_id="knobs-1", db=db, until="plan"), "--cutoff-k", bad])
     assert code == EXIT_USAGE
 
 

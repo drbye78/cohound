@@ -11,8 +11,6 @@
 
 from __future__ import annotations
 
-import json
-import shutil
 from pathlib import Path
 
 import pytest
@@ -34,6 +32,8 @@ from core.cli.wiring import (
 )
 from core.pipeline import Ports
 from core.store.sqlite_store import SqliteStore
+from tests.helpers.output import json_out
+from tests.helpers.packages import valid_package
 
 CONFIG_FIXTURES = Path(__file__).resolve().parent.parent / "config" / "fixtures"
 RUN_YAML_NAME = "run.yaml"
@@ -42,19 +42,6 @@ RUN_YAML_NAME = "run.yaml"
 # ---------------------------------------------------------------------------
 # Помощники
 # ---------------------------------------------------------------------------
-
-
-def _valid_package(tmp_path: Path) -> Path:
-    """Копия ``tests/config/fixtures/`` + ``scope_attestation.yaml`` → линт-чистый пакет."""
-    package = tmp_path / "package"
-    package.mkdir()
-    for item in CONFIG_FIXTURES.iterdir():
-        if item.is_file():
-            shutil.copy(item, package / item.name)
-    (package / "scope_attestation.yaml").write_text(
-        'procedure: "ручная аттестация полноты источника (тест)"\n', encoding="utf-8"
-    )
-    return package
 
 
 def _seed_run_db(
@@ -76,12 +63,6 @@ def _seed_run_db(
             (chunk_id, "d1", "p1", url, 0, "text", "h1", "b1"),
         )
         store.conn.commit()
-
-
-def _json_out(capsys: pytest.CaptureFixture[str]) -> dict:
-    """Читает единственный JSON-объект из stdout."""
-    captured = capsys.readouterr()
-    return json.loads(captured.out.strip().splitlines()[-1])
 
 
 # ---------------------------------------------------------------------------
@@ -125,7 +106,7 @@ def test_resolve_hit_json(tmp_path: Path, capsys: pytest.CaptureFixture[str]) ->
     _seed_run_db(db)
 
     assert main(["resolve", "c1", "--db", str(db), "--json"]) == EXIT_OK
-    payload = _json_out(capsys)
+    payload = json_out(capsys)
     assert payload["ok"] is True
     assert payload["found"] is True
     assert payload["source_url"] == "https://example.test/doc#1"
@@ -148,7 +129,7 @@ def test_resolve_miss_json(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -
     _seed_run_db(db)
 
     assert main(["resolve", "nope", "--db", str(db), "--json"]) == EXIT_NOT_FOUND
-    payload = _json_out(capsys)
+    payload = json_out(capsys)
     assert payload["ok"] is False
     assert payload["found"] is False
     assert payload["error"] == "I10/I15"
@@ -162,7 +143,7 @@ def test_resolve_miss_json(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -
 def test_plan_dry_run_valid_fixtures_returns_zero(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    package = _valid_package(tmp_path)
+    package = valid_package(tmp_path)
 
     code = main(
         [
@@ -176,7 +157,7 @@ def test_plan_dry_run_valid_fixtures_returns_zero(
         ]
     )
     assert code == EXIT_OK
-    payload = _json_out(capsys)
+    payload = json_out(capsys)
     assert payload["ok"] is True
     assert payload["dry_run"] is True
     assert payload["anchor"] == "p1"
@@ -190,7 +171,7 @@ def test_plan_dry_run_valid_fixtures_returns_zero(
 def test_plan_human_output(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    package = _valid_package(tmp_path)
+    package = valid_package(tmp_path)
 
     code = main(
         [
@@ -240,7 +221,7 @@ def test_plan_blocking_lint_json(capsys: pytest.CaptureFixture[str]) -> None:
         ]
     )
     assert code == EXIT_USAGE
-    payload = _json_out(capsys)
+    payload = json_out(capsys)
     assert payload["ok"] is False
     assert payload["error"] == "lint"
     assert any("I2b" in message for message in payload["blocking"])
@@ -254,7 +235,7 @@ def test_plan_blocking_lint_json(capsys: pytest.CaptureFixture[str]) -> None:
 def test_run_dry_run_does_not_write(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    package = _valid_package(tmp_path)
+    package = valid_package(tmp_path)
     db = tmp_path / "unused.db"
 
     code = main(
@@ -271,7 +252,7 @@ def test_run_dry_run_does_not_write(
         ]
     )
     assert code == EXIT_OK
-    payload = _json_out(capsys)
+    payload = json_out(capsys)
     assert payload["ok"] is True
     assert payload["dry_run"] is True
     assert "normalize" in payload["phases"]
@@ -281,7 +262,7 @@ def test_run_dry_run_does_not_write(
 def test_run_resume_skips_completed_phases(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    package = _valid_package(tmp_path)
+    package = valid_package(tmp_path)
     db = tmp_path / "cohound.db"
     common = [
         "run",
@@ -299,12 +280,12 @@ def test_run_resume_skips_completed_phases(
     ]
 
     assert main(common) == EXIT_OK
-    first = _json_out(capsys)
+    first = json_out(capsys)
     assert [item["phase"] for item in first["results"]] == ["normalize", "lint", "plan"]
     assert first["skipped"] == []
 
     assert main(common) == EXIT_OK
-    second = _json_out(capsys)
+    second = json_out(capsys)
     assert second["skipped"] == ["normalize", "lint", "plan"]
     assert second["results"] == []
 
@@ -312,7 +293,7 @@ def test_run_resume_skips_completed_phases(
 def test_run_stops_at_gate_blocked(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    package = _valid_package(tmp_path)
+    package = valid_package(tmp_path)
     db = tmp_path / "cohound.db"
 
     code = main(
@@ -330,7 +311,7 @@ def test_run_stops_at_gate_blocked(
         ]
     )
     assert code == EXIT_BLOCKED
-    payload = _json_out(capsys)
+    payload = json_out(capsys)
     assert payload["status"] == "blocked"
     assert payload["stopped_at"] == "g1"
 
@@ -338,7 +319,7 @@ def test_run_stops_at_gate_blocked(
 def test_run_split_profile_unavailable(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    package = _valid_package(tmp_path)
+    package = valid_package(tmp_path)
     db = tmp_path / "cohound.db"
 
     code = main(

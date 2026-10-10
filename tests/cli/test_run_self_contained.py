@@ -25,6 +25,8 @@ from core.cli.main import (
     PLAN_INPUTS_SNAPSHOT_VERSION,
     main,
 )
+from tests.helpers.output import json_out
+from tests.helpers.packages import run_argv
 
 #: Корень e2e-фикстур (``tests/fixtures/e2e``) — валидный пакет для ``run``.
 E2E_FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "e2e"
@@ -35,32 +37,6 @@ CONFIG_FIXTURES = Path(__file__).resolve().parents[1] / "config" / "fixtures"
 # ---------------------------------------------------------------------------
 # Помощники
 # ---------------------------------------------------------------------------
-
-
-def _run_argv(
-    runs_dir: Path, run_id: str, *, dry_run: bool = False, package: Path = E2E_FIXTURES
-) -> list[str]:
-    """Базовый ``run``-argv на e2e-пакете с канонической БД ``runs/{run_id}/cohound.db``."""
-    argv = [
-        "run",
-        "--run-yaml",
-        str(package / "run.yaml"),
-        "--package",
-        str(package),
-        "--runs-dir",
-        str(runs_dir),
-        "--run-id",
-        run_id,
-        "--json",
-    ]
-    if dry_run:
-        argv.append("--dry-run")
-    return argv
-
-
-def _json_out(capsys: pytest.CaptureFixture[str]) -> dict[str, Any]:
-    captured = capsys.readouterr()
-    return json.loads(captured.out.strip().splitlines()[-1])
 
 
 def _config_package(tmp_path: Path) -> Path:
@@ -88,7 +64,7 @@ def test_run_writes_immutable_run_yaml_and_plan_inputs(
     runs_dir = tmp_path / "runs"
     run_id = "sc-run"
 
-    code = main(_run_argv(runs_dir, run_id))
+    code = main(run_argv(E2E_FIXTURES, run_id=run_id, runs_dir=runs_dir))
     assert code == EXIT_BLOCKED  # g1 — человеческое решение (I6/I7)
     capsys.readouterr()
 
@@ -120,8 +96,8 @@ def test_run_dry_run_writes_nothing(
     runs_dir = tmp_path / "runs"
     run_id = "sc-dry"
 
-    assert main(_run_argv(runs_dir, run_id, dry_run=True)) == EXIT_OK
-    assert _json_out(capsys)["dry_run"] is True
+    assert main(run_argv(E2E_FIXTURES, run_id=run_id, runs_dir=runs_dir, dry_run=True)) == EXIT_OK
+    assert json_out(capsys)["dry_run"] is True
     assert not (runs_dir / run_id).exists()
     assert not (runs_dir / run_id / "run.yaml").exists()
     assert not (runs_dir / run_id / "plan_inputs.json").exists()
@@ -133,7 +109,7 @@ def test_second_run_does_not_overwrite_differing_run_yaml(
     runs_dir = tmp_path / "runs"
     run_id = "sc-immutable"
 
-    assert main(_run_argv(runs_dir, run_id)) == EXIT_BLOCKED
+    assert main(run_argv(E2E_FIXTURES, run_id=run_id, runs_dir=runs_dir)) == EXIT_BLOCKED
     capsys.readouterr()
 
     target = runs_dir / run_id / "run.yaml"
@@ -141,7 +117,7 @@ def test_second_run_does_not_overwrite_differing_run_yaml(
     target.write_bytes(tampered)
 
     # Повторный прогон (resume) не должен мутировать завершённый вход.
-    code = main(_run_argv(runs_dir, run_id))
+    code = main(run_argv(E2E_FIXTURES, run_id=run_id, runs_dir=runs_dir))
     assert code == EXIT_BLOCKED
     assert target.read_bytes() == tampered
 
@@ -156,7 +132,7 @@ def test_sensitivity_restores_from_snapshot(
 ) -> None:
     runs_dir = tmp_path / "runs"
     run_id = "sc-sens"
-    assert main(_run_argv(runs_dir, run_id)) == EXIT_BLOCKED
+    assert main(run_argv(E2E_FIXTURES, run_id=run_id, runs_dir=runs_dir)) == EXIT_BLOCKED
     capsys.readouterr()
 
     # Ни --run-yaml, ни --package: единственный источник — снимок прогона.
@@ -164,7 +140,7 @@ def test_sensitivity_restores_from_snapshot(
         ["sensitivity", "--runs-dir", str(runs_dir), "--run-id", run_id, "--json"]
     )
     assert code == EXIT_OK
-    payload = _json_out(capsys)
+    payload = json_out(capsys)
     assert payload["run_id"] == run_id
     notes = _notes(payload)
     assert "plan_inputs.json" in notes
@@ -177,7 +153,7 @@ def test_sensitivity_restores_from_snapshot_via_db_parent(
     """``--db runs/{run_id}/cohound.db`` выводит каталог прогона из родителя БД."""
     runs_dir = tmp_path / "runs"
     run_id = "sc-db-parent"
-    assert main(_run_argv(runs_dir, run_id)) == EXIT_BLOCKED
+    assert main(run_argv(E2E_FIXTURES, run_id=run_id, runs_dir=runs_dir)) == EXIT_BLOCKED
     capsys.readouterr()
 
     code = main(
@@ -191,7 +167,7 @@ def test_sensitivity_restores_from_snapshot_via_db_parent(
         ]
     )
     assert code == EXIT_OK
-    assert "plan_inputs.json" in _notes(_json_out(capsys))
+    assert "plan_inputs.json" in _notes(json_out(capsys))
 
 
 def test_report_restores_from_snapshot(
@@ -200,7 +176,7 @@ def test_report_restores_from_snapshot(
     runs_dir = tmp_path / "runs"
     run_id = "sc-report"
     out = tmp_path / "out"
-    assert main(_run_argv(runs_dir, run_id)) == EXIT_BLOCKED
+    assert main(run_argv(E2E_FIXTURES, run_id=run_id, runs_dir=runs_dir)) == EXIT_BLOCKED
     capsys.readouterr()
 
     code = main(
@@ -216,7 +192,7 @@ def test_report_restores_from_snapshot(
         ]
     )
     assert code == EXIT_OK
-    payload = _json_out(capsys)
+    payload = json_out(capsys)
     notes = _notes(payload)
     assert "plan_inputs.json" in notes
     assert "ГЭП" not in notes
@@ -228,7 +204,7 @@ def test_golden_restores_from_snapshot(
 ) -> None:
     runs_dir = tmp_path / "runs"
     run_id = "sc-golden"
-    assert main(_run_argv(runs_dir, run_id)) == EXIT_BLOCKED
+    assert main(run_argv(E2E_FIXTURES, run_id=run_id, runs_dir=runs_dir)) == EXIT_BLOCKED
     capsys.readouterr()
 
     # Код возврата зависит от вердиктов (ячеек нет → приёмка не пройдена); проверяем
@@ -245,7 +221,7 @@ def test_golden_restores_from_snapshot(
             "--json",
         ]
     )
-    payload = _json_out(capsys)
+    payload = json_out(capsys)
     notes = _notes(payload)
     assert "plan_inputs.json" in notes
     assert "ГЭП" not in notes
@@ -256,7 +232,7 @@ def test_explicit_inputs_take_priority_over_snapshot(
 ) -> None:
     runs_dir = tmp_path / "runs"
     run_id = "sc-explicit"
-    assert main(_run_argv(runs_dir, run_id)) == EXIT_BLOCKED
+    assert main(run_argv(E2E_FIXTURES, run_id=run_id, runs_dir=runs_dir)) == EXIT_BLOCKED
     capsys.readouterr()
 
     package = _config_package(tmp_path)  # отличный каталог (param_a), не снимок e2e
@@ -275,7 +251,7 @@ def test_explicit_inputs_take_priority_over_snapshot(
         ]
     )
     assert code == EXIT_OK
-    payload = _json_out(capsys)
+    payload = json_out(capsys)
     # Явный источник: ни restore-заметки, ни ГЭП (снимок не читался).
     assert payload["notes"] == []
 
@@ -288,7 +264,7 @@ def test_missing_snapshot_keeps_gap_note(
 
     runs_dir = tmp_path / "runs"
     run_id = "sc-gap"
-    assert main(_run_argv(runs_dir, run_id)) == EXIT_BLOCKED
+    assert main(run_argv(E2E_FIXTURES, run_id=run_id, runs_dir=runs_dir)) == EXIT_BLOCKED
     capsys.readouterr()
 
     (runs_dir / run_id / "plan_inputs.json").unlink()
@@ -298,4 +274,4 @@ def test_missing_snapshot_keeps_gap_note(
         ["sensitivity", "--runs-dir", str(runs_dir), "--run-id", run_id, "--json"]
     )
     assert code == EXIT_OK
-    assert "ГЭП" in _notes(_json_out(capsys))
+    assert "ГЭП" in _notes(json_out(capsys))

@@ -18,8 +18,6 @@
 from __future__ import annotations
 
 import importlib.util
-import json
-import shutil
 from pathlib import Path
 from typing import Any
 
@@ -44,9 +42,8 @@ from core.pipeline import (
 )
 from core.pipeline.gates import gate_g1, gate_g2, gate_g3, gate_g4
 from tests.fakes.ports import FakeEvaluator, FakeLexicalIndex
-
-CONFIG_FIXTURES = Path(__file__).resolve().parent.parent / "config" / "fixtures"
-RUN_YAML_NAME = "run.yaml"
+from tests.helpers.output import json_out
+from tests.helpers.packages import run_argv, valid_package
 
 
 # ---------------------------------------------------------------------------
@@ -54,46 +51,9 @@ RUN_YAML_NAME = "run.yaml"
 # ---------------------------------------------------------------------------
 
 
-def _valid_package(tmp_path: Path) -> Path:
-    """Копия ``tests/config/fixtures/`` + ``scope_attestation.yaml`` → линт-чистый пакет."""
-    package = tmp_path / "package"
-    package.mkdir()
-    for item in CONFIG_FIXTURES.iterdir():
-        if item.is_file():
-            shutil.copy(item, package / item.name)
-    (package / "scope_attestation.yaml").write_text(
-        'procedure: "ручная аттестация полноты источника (тест)"\n', encoding="utf-8"
-    )
-    return package
-
-
-def _json_out(capsys: pytest.CaptureFixture[str]) -> dict[str, Any]:
-    """Читает единственный JSON-объект из stdout."""
-    captured = capsys.readouterr()
-    return json.loads(captured.out.strip().splitlines()[-1])
-
-
 def _has_module(name: str) -> bool:
     """Установлен ли модуль (без импорта тяжёлого пакета)."""
     return importlib.util.find_spec(name) is not None
-
-
-def _run_argv(package: Path, db: Path, runs_dir: Path, run_id: str) -> list[str]:
-    """Базовый ``run``-argv с фиксированным ``run_id`` и временным ``--runs-dir``."""
-    return [
-        "run",
-        "--run-yaml",
-        str(package / RUN_YAML_NAME),
-        "--package",
-        str(package),
-        "--db",
-        str(db),
-        "--runs-dir",
-        str(runs_dir),
-        "--run-id",
-        run_id,
-        "--json",
-    ]
 
 
 # ---------------------------------------------------------------------------
@@ -160,7 +120,7 @@ def test_cmd_run_registers_real_phases_and_blocks_at_g1(
     # Дефолт --passports-dir относителен cwd: переходим в tmp_path, чтобы «нет каталога
     # passports» было детерминировано и не зависело от реальных паспортов в корне репо.
     monkeypatch.chdir(tmp_path)
-    package = _valid_package(tmp_path)
+    package = valid_package(tmp_path)
     db = tmp_path / "cohound.db"
     runs_dir = tmp_path / "runs"
     captured: dict[str, Any] = {}
@@ -172,11 +132,11 @@ def test_cmd_run_registers_real_phases_and_blocks_at_g1(
         return phases
 
     code = main(
-        _run_argv(package, db, runs_dir, "g1-blocked"),
+        run_argv(package, run_id="g1-blocked", db=db, runs_dir=runs_dir),
         phases_factory=spy_factory,
     )
     assert code == EXIT_BLOCKED
-    payload = _json_out(capsys)
+    payload = json_out(capsys)
     assert payload["status"] == "blocked"
     assert payload["stopped_at"] == "g1"
 
@@ -209,11 +169,11 @@ def test_cmd_run_full_local_writes_manifest_with_real_compute_report(
     пишет ``run_manifest.yaml``, значит реальные ``compute``/``report`` действительно
     выполнялись, а не echo-заглушки.
     """
-    package = _valid_package(tmp_path)
+    package = valid_package(tmp_path)
     db = tmp_path / "cohound.db"
     runs_dir = tmp_path / "runs"
     run_id = "full-local"
-    argv = _run_argv(package, db, runs_dir, run_id)
+    argv = run_argv(package, run_id=run_id, db=db, runs_dir=runs_dir)
 
     # Предполёт: создаём строку прогона и завершаем normalize/lint/plan.
     assert main([*argv, "--until", "plan"]) == EXIT_OK

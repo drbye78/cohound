@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import datetime as _dt
 import importlib
-import json
 from pathlib import Path
 
 import pytest
@@ -34,6 +33,7 @@ from core.domain.models import Cell, Focus, LLMEvidence, RunConfig
 from core.ports.search import SearchResult
 from core.store.sqlite_store import SqliteStore
 from tests.fakes.ports import FakeSearchAdapter
+from tests.helpers.output import json_out
 
 CONFIG_FIXTURES = Path(__file__).resolve().parent.parent / "config" / "fixtures"
 PASSPORTS_FIXTURES = CONFIG_FIXTURES / "passports"
@@ -111,12 +111,6 @@ def _read_cell(db_path: Path, product_id: str, param_id: str, *, run_id: str = R
     raise AssertionError(f"ячейка не найдена: {product_id}/{param_id}")
 
 
-def _json_out(capsys: pytest.CaptureFixture[str]) -> dict:
-    """Читает единственный JSON-объект из stdout."""
-    captured = capsys.readouterr()
-    return json.loads(captured.out.strip().splitlines()[-1])
-
-
 def _fake_adapter(results: dict[str, list[SearchResult]] | None = None) -> FakeSearchAdapter:
     """Фейковый поисковый адаптер без сети (I19: только кандидаты)."""
     return FakeSearchAdapter(results=results)
@@ -156,7 +150,7 @@ def test_discover_injected_adapter_lists_candidates_json(
 
     code = main(["discover", "--query", "q1", "--json"], search_adapter=adapter)
     assert code == EXIT_OK
-    payload = _json_out(capsys)
+    payload = json_out(capsys)
     assert payload["ok"] is True
     assert payload["phase"] == "discovery"
     assert payload["query"] == ["q1"]
@@ -314,7 +308,7 @@ def test_discover_provider_from_config_by_language(
     code = cli_main.main(["discover", "--query", "q1", "--lang", "en", "--json"])
     assert code == EXIT_OK
     assert requested == ["duckduckgo"]
-    payload = _json_out(capsys)
+    payload = json_out(capsys)
     assert payload["provider"] == "fake"  # провенанс из адаптера (I23)
     assert payload["adapter_kind"] == "serp"
 
@@ -362,7 +356,7 @@ def test_discover_unknown_provider_from_config_is_usage_error(
     )
     code = cli_main.main(["discover", "--query", "q1", "--json"])
     assert code == EXIT_USAGE
-    payload = _json_out(capsys)
+    payload = json_out(capsys)
     assert payload["ok"] is False
     assert "not-a-provider" in payload["message"]
 
@@ -401,7 +395,7 @@ def test_discover_seeds_queries_from_passports(
         search_adapter=adapter,
     )
     assert code == EXIT_OK
-    payload = _json_out(capsys)
+    payload = json_out(capsys)
     # doc_domains паспорта p1: example.com → https-кандидат (только подсказка, I19).
     assert payload["seeded_queries"] == ["https://example.com/"]
     assert "https://example.com/" in payload["query"]
@@ -443,7 +437,7 @@ def test_review_lists_preliminary_and_unknown(
 
     code = main(["review", "--db", str(db), "--run-id", RUN_ID, "--json"])
     assert code == EXIT_OK
-    payload = _json_out(capsys)
+    payload = json_out(capsys)
     assert payload["ok"] is True
     assert payload["count"] == 2
     # Детерминированная сортировка по (product_id, param_id).
@@ -478,7 +472,7 @@ def test_review_empty_queue_json(
 
     code = main(["review", "--db", str(db), "--run-id", RUN_ID, "--json"])
     assert code == EXIT_OK
-    payload = _json_out(capsys)
+    payload = json_out(capsys)
     assert payload == {"ok": True, "run_id": RUN_ID, "count": 0, "items": []}
 
 
@@ -495,7 +489,7 @@ def test_review_runs_dir_resolution(
         ["review", "--runs-dir", str(runs_dir), "--run-id", RUN_ID, "--json"]
     )
     assert code == EXIT_OK
-    assert _json_out(capsys)["count"] == 1
+    assert json_out(capsys)["count"] == 1
 
 
 # ---------------------------------------------------------------------------
@@ -551,7 +545,7 @@ def test_promote_with_unknown_status_sets_reviewed_by(
         ]
     )
     assert code == EXIT_OK
-    payload = _json_out(capsys)
+    payload = json_out(capsys)
     assert payload["promoted"] == 1
     assert payload["requested"] == 1
     assert payload["promoted_cells"] == [
@@ -584,7 +578,7 @@ def test_promote_without_verdict_is_refused(
         ]
     )
     assert code == EXIT_ERROR
-    payload = _json_out(capsys)
+    payload = json_out(capsys)
     assert payload["ok"] is False
     assert payload["promoted"] == 0
     assert payload["skipped"]
@@ -615,7 +609,7 @@ def test_promote_no_validated_only_allows_pending(
         ]
     )
     assert code == EXIT_OK
-    payload = _json_out(capsys)
+    payload = json_out(capsys)
     assert payload["promoted"] == 1
     assert payload["validated_only"] is False
     pending = _read_cell(db, PRODUCT_A, PARAM_A)
@@ -645,7 +639,7 @@ def test_promote_non_preliminary_is_refused(
         ]
     )
     assert code == EXIT_ERROR
-    payload = _json_out(capsys)
+    payload = json_out(capsys)
     assert payload["promoted"] == 0
     assert payload["skipped"]
     assert "preliminary" in payload["skipped"][0]["reason"]
@@ -680,7 +674,7 @@ def test_promote_filter_by_param(
         ]
     )
     assert code == EXIT_OK
-    payload = _json_out(capsys)
+    payload = json_out(capsys)
     assert payload["requested"] == 1
     assert payload["promoted"] == 1
     assert payload["promoted_cells"][0]["param_id"] == PARAM_A
