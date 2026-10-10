@@ -1476,13 +1476,27 @@ def _evaluate_failed() -> None:
 
 
 def _report_gates() -> None:
-    """Отчётность: G4/I11 (Coverage отсутствует → блок) + §13 diff-граница."""
-    from core.domain import CatalogRow, RunManifest, RunMode, SensitivityReport
+    """Отчётность: G4/I11 (Coverage отсутствует/UNDEFINED → блок), §13/B-7 diff, §5/I3."""
+    from core.domain import (
+        Cell,
+        CellState,
+        CatalogRow,
+        ProtocolExhaustion,
+        REQUIRED_EXHAUSTION_CONTOURS,
+        RunManifest,
+        RunMode,
+        SensitivityReport,
+        Status,
+        TerminationReason,
+        check_unknown_exhaustion,
+    )
     from core.domain.scoring import Comparability, Coverage, Score
     from core.pipeline.compute import ScoreBundle
     from core.pipeline.report import (
         CrossCycleDiffError,
         PublishBlockedError,
+        collect_i3_anomalies,
+        diff_boundary_violations,
         render_battle_card,
         render_diff,
     )
@@ -1512,6 +1526,29 @@ def _report_gates() -> None:
         except PublishBlockedError:
             pass
 
+        # §6/B-3a + I11: UNDEFINED-покрытие (universe = 0) — тоже непубликуемо.
+        undefined = ScoreBundle(
+            capability=Score(value=0.0, numerator=0.0, denominator=0.0, n_used=0),
+            coverage=Coverage(
+                value=None, numerator=0.0, denominator=0.0, n_used=0,
+                universe=0.0, completed=0.0, defined=False,
+            ),
+            failure_rate=0.0,
+            modules=[],
+            comparability=Comparability(level="insufficient", min_coverage=0.0, cross_cycle=True),
+            sensitivity=SensitivityReport(
+                stable=True, per_axis={}, unstable_pairs=[],
+                requested_ranking="capability_ranked", computed_ranking="capability_ranked",
+            ),
+            requested_ranking="capability_ranked",
+            computed_ranking="capability_ranked",
+        )
+        try:
+            render_battle_card(undefined, [], {"x": row}, f"{td}/battle_undef.csv")
+            raise AssertionError("I11: battle_card при UNDEFINED Coverage обязан быть заблокирован")
+        except PublishBlockedError:
+            pass
+
         def _manifest(index_build_id: str):
             return RunManifest(
                 run_id="r1", case_id="c", created_at="2026-01-01", mode=RunMode.STRICT,
@@ -1526,6 +1563,28 @@ def _report_gates() -> None:
             raise AssertionError("§13: diff при смене index_build_id обязан отказать")
         except CrossCycleDiffError:
             pass
+
+        # §13/B-7 (v2.1): причина версионной границы помечена классом execution_change.
+        reasons = diff_boundary_violations(_manifest("ib_a"), _manifest("ib_b"))
+        if not reasons or not all(r.startswith("execution_change:") for r in reasons):
+            raise AssertionError(f"§13/B-7: ожидалась метка execution_change, получено {reasons}")
+
+        # §5/I3 (v2.1): strict-❓ без полного протокола → аномалия (статус не меняется).
+        unknown = Cell(
+            run_id="r1", product_id="p1", param_id="x",
+            state=CellState.EVALUATED, status=Status.UNKNOWN,
+        )
+        if not check_unknown_exhaustion(unknown, None):
+            raise AssertionError("I3: strict-❓ без протокола обязан дать нарушение")
+        full = ProtocolExhaustion(
+            run_id="r1", product_id="p1", param_id="x",
+            contours=list(REQUIRED_EXHAUSTION_CONTOURS),
+            termination_reason=TerminationReason.BUDGET_EXHAUSTED,
+        )
+        if check_unknown_exhaustion(unknown, full):
+            raise AssertionError("I3: полный протокол исчерпания не должен давать нарушение")
+        if not collect_i3_anomalies([unknown], None):
+            raise AssertionError("I3: collect_i3_anomalies обязан зафиксировать аномалию")
 
 
 def _logging_fields() -> None:
@@ -2219,6 +2278,7 @@ def _review_human_only() -> None:
         RunConfig,
         RunMode,
         Status,
+        check_unknown_exhaustion,
     )
     from core.pipeline.review import ReviewError, promote, review_queue
     from core.store.sqlite_store import SqliteStore
@@ -2250,10 +2310,18 @@ def _review_human_only() -> None:
         except ReviewError:
             pass
 
+        # I3-OR (§2.3): reviewed_by ≠ null удовлетворяет I3 — promote ❓ без протокола проходит.
         cell = promote(store=store, run_id="r1", product_id="p1", param_id="x",
                        actor="human-1", status=Status.UNKNOWN)
         if cell.reviewed_by != "human-1" or cell.state is not CellState.EVALUATED:
             raise AssertionError("promote обязан выставить reviewed_by и state=evaluated")
+
+        # Машинный ❓ (без reviewed_by) без протокола исчерпания — нарушение I3
+        # (фиксируется как аномалия в report, promote не блокирует).
+        machine = Cell(run_id="r1", product_id="p1", param_id="z", state=CellState.EVALUATED,
+                       status=Status.UNKNOWN, evidence=[], absence_evidence=[], reviewed_by=None)
+        if not check_unknown_exhaustion(machine, None):
+            raise AssertionError("I3: машинный ❓ без протокола обязан нарушать I3")
 
 
 def _cli_surface() -> None:

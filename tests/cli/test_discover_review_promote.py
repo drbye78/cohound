@@ -92,7 +92,12 @@ def _cell(
     )
 
 
-def _seed_run(db_path: Path, cells: list[Cell], *, run_id: str = RUN_ID) -> None:
+def _seed_run(
+    db_path: Path,
+    cells: list[Cell],
+    *,
+    run_id: str = RUN_ID,
+) -> None:
     """Создаёт прогон и сохраняет ячейки (детерминированно)."""
     db_path.parent.mkdir(parents=True, exist_ok=True)
     with SqliteStore(db_path) as store:

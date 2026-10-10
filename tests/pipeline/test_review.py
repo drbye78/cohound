@@ -20,9 +20,13 @@ from core.domain import (
     CellState,
     Focus,
     LLMEvidence,
+    ProtocolExhaustion,
+    REQUIRED_EXHAUSTION_CONTOURS,
     RunConfig,
     RunMode,
     Status,
+    TerminationReason,
+    check_unknown_exhaustion,
 )
 from core.pipeline import review as review_mod
 from core.pipeline.review import (
@@ -92,6 +96,17 @@ def _get(store: SqliteStore, product_id: str, param_id: str) -> Cell:
         if c.product_id == product_id and c.param_id == param_id
     ]
     return cell
+
+
+def _full_exhaustion(product_id: str, param_id: str) -> ProtocolExhaustion:
+    """Полный протокол исчерпания I3 (все обязательные контуры)."""
+    return ProtocolExhaustion(
+        run_id=RUN_ID,
+        product_id=product_id,
+        param_id=param_id,
+        contours=list(REQUIRED_EXHAUSTION_CONTOURS),
+        termination_reason=TerminationReason.BUDGET_EXHAUSTED,
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -264,6 +279,79 @@ def test_promote_with_explicit_status_sets_reviewed_by(store: SqliteStore) -> No
     assert stored.state is CellState.EVALUATED
     assert stored.status is Status.UNKNOWN
     assert stored.reviewed_by == "human-1"
+
+
+def test_promote_unknown_without_protocol_succeeds_via_reviewed_by(
+    store: SqliteStore,
+) -> None:
+    """I3-OR (§2.3): reviewed_by ≠ null удовлетворяет I3 — протокол не требуется.
+
+    promote выставляет ``reviewed_by = actor``, поэтому ``❓`` повышается без протокола.
+    Отдельно проверяем, что машинный ``❓`` без human-ветки нарушает I3 (наблюдение).
+    """
+    store.save_cell(_preliminary("p1", "param.a"))
+
+    promoted = promote(
+        store=store,
+        run_id=RUN_ID,
+        product_id="p1",
+        param_id="param.a",
+        actor="human-1",
+        status=Status.UNKNOWN,
+    )
+    assert promoted.state is CellState.EVALUATED
+    assert promoted.status is Status.UNKNOWN
+    assert promoted.reviewed_by == "human-1"
+
+    # Машинный `❓` (без reviewed_by) без протокола — нарушение I3 (report-аномалия).
+    machine = promoted.model_copy(update={"reviewed_by": None})
+    assert check_unknown_exhaustion(machine, None)
+
+
+def test_promote_unknown_with_incomplete_protocol_succeeds_but_anomaly(
+    store: SqliteStore,
+) -> None:
+    """I3-OR (§2.3): неполный протокол не блокирует promote (human-ветка), но это аномалия."""
+    store.save_cell(_preliminary("p1", "param.a"))
+    incomplete = ProtocolExhaustion(
+        run_id=RUN_ID,
+        product_id="p1",
+        param_id="param.a",
+        contours=["corpus", "serp"],  # без registry/inheritance
+        termination_reason=TerminationReason.BUDGET_EXHAUSTED,
+    )
+    store.save_exhaustion(incomplete)
+
+    promoted = promote(
+        store=store,
+        run_id=RUN_ID,
+        product_id="p1",
+        param_id="param.a",
+        actor="human-1",
+        status=Status.UNKNOWN,
+    )
+    assert promoted.state is CellState.EVALUATED
+    assert promoted.reviewed_by == "human-1"
+
+    # Протокол остаётся неполным — check_unknown_exhaustion это фиксирует.
+    assert check_unknown_exhaustion(promoted, incomplete)
+
+
+def test_promote_unknown_with_full_protocol_succeeds(store: SqliteStore) -> None:
+    """I3 (§2.3): полный протокол исчерпания — повышение проходит."""
+    store.save_cell(_preliminary("p1", "param.a"))
+    store.save_exhaustion(_full_exhaustion("p1", "param.a"))
+
+    promoted = promote(
+        store=store,
+        run_id=RUN_ID,
+        product_id="p1",
+        param_id="param.a",
+        actor="human-1",
+        status=Status.UNKNOWN,
+    )
+    assert promoted.state is CellState.EVALUATED
+    assert promoted.status is Status.UNKNOWN
 
 
 def test_promote_na_is_human_only_and_sets_reviewed_by(store: SqliteStore) -> None:

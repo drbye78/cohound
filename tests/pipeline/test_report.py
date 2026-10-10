@@ -27,11 +27,13 @@ import json
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 import yaml
 
+from core.domain import REQUIRED_EXHAUSTION_CONTOURS
 from core.domain.enums import (
     CellState,
     EndpointKind,
@@ -50,14 +52,21 @@ from core.domain.models import (
     RunManifest,
     ScenarioBinding,
 )
-from core.pipeline.compute import compute, publish_warnings
+from core.domain.scoring import Comparability, Coverage, Score, SensitivityReport
+from core.pipeline.compute import ScoreBundle, compute, publish_warnings
 from core.pipeline.report import (
+    DIFF_BOUNDARY_FIELDS,
+    EXECUTION_FIELDS,
     FALLBACK_ORDER_LABEL,
     INSUFFICIENT_COVERAGE_NOTE,
+    METHODOLOGY_FIELDS,
     NOT_FOR_PUBLICATION,
     Artifacts,
     CrossCycleDiffError,
     PublishBlockedError,
+    build_manifest,
+    collect_i3_anomalies,
+    diff_boundary_violations,
     render_battle_card,
     render_diff,
     render_nda_questions,
@@ -258,6 +267,57 @@ def test_write_run_manifest_round_trip(tmp_path: Path) -> None:
     assert loaded["llm_scenarios"][0]["scenario"] == "evaluator"
 
 
+def test_build_manifest_carries_provenance_and_epsilon(tmp_path: Path) -> None:
+    """§9/A3 (v2.1): ``settings_provenance``/``ranking_epsilon`` идут из ``run`` в манифест."""
+    provenance = {
+        "ranking_epsilon": {"source": "measured", "experiment_id": "exp-1"},
+        "partial_score": {"source": "default"},
+    }
+    run = SimpleNamespace(
+        case_id="case-1",
+        mode=RunMode.STRICT,
+        methodology_version="2.1.0",
+        cohort="cohort.yaml",
+        ranking_policy=RankingPolicy.CAPABILITY_RANKED,
+        settings_provenance=provenance,
+        ranking_epsilon=0.05,
+    )
+    inputs = SimpleNamespace(run=run, package=None)
+    plan = SimpleNamespace(
+        run_id="run-build",
+        anchor=PRODUCT_A,
+        modules=[],
+        methodology_version="2.1.0",
+        catalog_version="1.0.0",
+        cohort_ref="cohort.yaml",
+    )
+
+    manifest = build_manifest(
+        inputs=inputs, plan=plan, created_at="2026-01-01T00:00:00Z"
+    )
+
+    assert manifest.ranking_epsilon == pytest.approx(0.05)
+    assert manifest.settings_provenance == provenance
+
+    # Round-trip через run_manifest.yaml.
+    path = write_run_manifest(manifest, tmp_path)
+    loaded = yaml.safe_load(path.read_text(encoding="utf-8"))
+    assert loaded["ranking_epsilon"] == pytest.approx(0.05)
+    assert loaded["settings_provenance"] == provenance
+    assert RunManifest(**loaded) == manifest
+
+    # Аргумент имеет приоритет над ``run`` (явный провенанс).
+    override = build_manifest(
+        inputs=inputs,
+        plan=plan,
+        created_at="2026-01-01T00:00:00Z",
+        settings_provenance={"ranking_epsilon": {"source": "default"}},
+        ranking_epsilon=0.0,
+    )
+    assert override.ranking_epsilon == 0.0
+    assert override.settings_provenance == {"ranking_epsilon": {"source": "default"}}
+
+
 # ---------------------------------------------------------------------------
 # battle_card
 # ---------------------------------------------------------------------------
@@ -338,6 +398,65 @@ def test_battle_card_refused_without_coverage(store: SqliteStore, tmp_path: Path
     assert not (tmp_path / "battle_card.csv").exists()
 
 
+def _undefined_bundle() -> ScoreBundle:
+    """Бандл с ``coverage.defined is False`` (``UNDEFINED``: universe = 0, §6/B-3a)."""
+    return ScoreBundle(
+        capability=Score(value=0.0, numerator=0.0, denominator=0.0, n_used=0),
+        coverage=Coverage(
+            value=None,
+            numerator=0.0,
+            denominator=0.0,
+            n_used=0,
+            universe=0.0,
+            completed=0.0,
+            defined=False,
+        ),
+        failure_rate=0.0,
+        modules=[],
+        comparability=Comparability(
+            level="insufficient", min_coverage=0.0, cross_cycle=True
+        ),
+        sensitivity=SensitivityReport(
+            stable=True,
+            per_axis={},
+            unstable_pairs=[],
+            requested_ranking="capability_ranked",
+            computed_ranking="capability_ranked",
+        ),
+        requested_ranking="capability_ranked",
+        computed_ranking="capability_ranked",
+    )
+
+
+def test_battle_card_blocked_when_coverage_undefined(tmp_path: Path) -> None:
+    """§6/B-3a + I11/G4: ``coverage.defined is False`` → Capability не публикуется."""
+    bundle = _undefined_bundle()
+    assert publish_warnings(bundle)  # UNDEFINED покрытие непубликуемо
+
+    with pytest.raises(PublishBlockedError):
+        render_battle_card(bundle, [], _catalog(), tmp_path / "battle_card.xlsx")
+    assert not (tmp_path / "battle_card.xlsx").exists()
+    assert not (tmp_path / "battle_card.csv").exists()
+
+
+def test_write_reports_omits_battle_card_when_coverage_undefined(
+    tmp_path: Path,
+) -> None:
+    """I11/G4: артефакт не эмитится при UNDEFINED-покрытии (мягкое предупреждение + отказ)."""
+    bundle = _undefined_bundle()
+    with pytest.warns(RuntimeWarning):  # compute.assert_publishable (I11)
+        artifacts = write_reports(
+            bundle=bundle,
+            cells=[],
+            catalog=_catalog(),
+            manifest=_manifest(),
+            out_dir=tmp_path,
+            run_id=RUN_ID,
+        )
+    assert artifacts.battle_card is None
+    assert artifacts.manifest.exists()
+
+
 def test_battle_card_demotion_uses_coverage_fallback_order(store: SqliteStore, tmp_path: Path) -> None:
     """K6/A3: неустойчивый порядок → fallback-порядок по Coverage + явная метка."""
     _save(
@@ -394,6 +513,55 @@ def test_nda_questions_contains_only_unknown(tmp_path: Path) -> None:
     assert by_key[(PRODUCT_B, "param.u2")]["exhausted_contours"] == ""
 
 
+def test_nda_questions_records_i3_anomaly(tmp_path: Path) -> None:
+    """§5/I3 (v2.1): неполный протокол → аномалия, статус ``❓`` не меняется."""
+    cells = [
+        _cell(PRODUCT_A, "param.full", Status.UNKNOWN),
+        _cell(PRODUCT_A, "param.partial", Status.UNKNOWN),
+        _cell(PRODUCT_A, "param.missing", Status.UNKNOWN),
+    ]
+    exhaustions = {
+        (PRODUCT_A, "param.full"): ProtocolExhaustion(
+            run_id=RUN_ID,
+            product_id=PRODUCT_A,
+            param_id="param.full",
+            contours=list(REQUIRED_EXHAUSTION_CONTOURS),
+            termination_reason=TerminationReason.BUDGET_EXHAUSTED,
+        ),
+        (PRODUCT_A, "param.partial"): ProtocolExhaustion(
+            run_id=RUN_ID,
+            product_id=PRODUCT_A,
+            param_id="param.partial",
+            contours=["corpus", "serp"],
+            termination_reason=TerminationReason.BUDGET_EXHAUSTED,
+        ),
+    }
+    path = render_nda_questions(
+        cells, tmp_path / "nda_questions.csv", exhaustions=exhaustions
+    )
+    rows = _read_csv(path)
+    by_key = {(r["product_id"], r["param_id"]): r for r in rows}
+
+    assert by_key[(PRODUCT_A, "param.full")]["protocol_status"] == "complete"
+    assert by_key[(PRODUCT_A, "param.full")]["i3_anomaly"] == ""
+
+    assert by_key[(PRODUCT_A, "param.partial")]["protocol_status"] == "incomplete"
+    assert by_key[(PRODUCT_A, "param.partial")]["i3_anomaly"]
+
+    assert by_key[(PRODUCT_A, "param.missing")]["protocol_status"] == "incomplete"
+    assert by_key[(PRODUCT_A, "param.missing")]["i3_anomaly"]
+
+    # I12: статус неизменен — аномалия не превращает ❓ в ❌.
+    assert all(r["status"] == Status.UNKNOWN.value for r in rows)
+
+    anomalies = collect_i3_anomalies(cells, exhaustions)
+    assert {(a["product_id"], a["param_id"]) for a in anomalies} == {
+        (PRODUCT_A, "param.partial"),
+        (PRODUCT_A, "param.missing"),
+    }
+    assert all(a["reason"].startswith("I3:") for a in anomalies)
+
+
 # ---------------------------------------------------------------------------
 # preliminary_findings
 # ---------------------------------------------------------------------------
@@ -448,6 +616,51 @@ def test_diff_writes_changed_statuses_and_evidence(tmp_path: Path) -> None:
     assert Status.PARTIAL.value in text
     assert "src.1" in text  # evidence_id
     assert "param.absent" in text
+
+
+def test_diff_boundary_alias_points_to_execution_fields() -> None:
+    """Обратная совместимость: ``DIFF_BOUNDARY_FIELDS`` — алиас :data:`EXECUTION_FIELDS`."""
+    assert DIFF_BOUNDARY_FIELDS == EXECUTION_FIELDS
+    assert set(METHODOLOGY_FIELDS).isdisjoint(EXECUTION_FIELDS)
+
+
+def test_diff_boundary_violations_are_class_labeled() -> None:
+    """§13/B-7 (v2.1): причины помечаются классом ``methodology_change``/``execution_change``."""
+    prev = _manifest()
+    assert diff_boundary_violations(prev, prev) == []
+
+    method = _manifest(scoring_policy_version="2.0.0")
+    method_reasons = diff_boundary_violations(prev, method)
+    assert method_reasons
+    assert all(r.startswith("methodology_change:") for r in method_reasons)
+    assert any("scoring_policy_version" in r for r in method_reasons)
+
+    execution = _manifest(index_build_id="build.2")
+    exec_reasons = diff_boundary_violations(prev, execution)
+    assert exec_reasons
+    assert all(r.startswith("execution_change:") for r in exec_reasons)
+    assert any("index_build_id" in r for r in exec_reasons)
+
+
+def test_diff_guard_marks_execution_change_on_index_build(tmp_path: Path) -> None:
+    """Живой diff-guard: разный ``index_build_id`` → отказ с меткой ``execution_change``."""
+    prev = _manifest(index_build_id="build.1")
+    curr = _manifest(index_build_id="build.2")
+    with pytest.raises(CrossCycleDiffError) as excinfo:
+        render_diff(prev, curr, [], [], tmp_path / "diff.md")
+    message = str(excinfo.value)
+    assert "execution_change" in message
+    assert "index_build_id" in message
+    assert not (tmp_path / "diff.md").exists()
+
+
+def test_diff_guard_marks_methodology_change_on_major(tmp_path: Path) -> None:
+    """Major ``methodology_version`` → отказ с меткой ``methodology_change``."""
+    prev = _manifest(methodology_version="2.0.0")
+    curr = _manifest(methodology_version="3.0.0")
+    with pytest.raises(CrossCycleDiffError) as excinfo:
+        render_diff(prev, curr, [], [], tmp_path / "diff.md")
+    assert "methodology_change" in str(excinfo.value)
 
 
 # ---------------------------------------------------------------------------

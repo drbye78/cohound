@@ -346,6 +346,11 @@ def build_phases(
         # R7/§13: финальный манифест — самостоятельная запись воспроизведения,
         # поэтому персистится в операционную БД прогона (версии/индекс/провенанс).
         ctx.store.persist_manifest(plan.run_id, manifest)
+        # I3/§5: протоколы исчерпания идут в nda_questions и в сбор аномалий.
+        exhaustions = {
+            (exhaustion.product_id, exhaustion.param_id): exhaustion
+            for exhaustion in ctx.store.iter_exhaustions(plan.run_id)
+        }
         artifacts = write_reports(
             bundle=bundle,
             cells=list(ctx.store.iter_cells(plan.run_id)),
@@ -353,6 +358,7 @@ def build_phases(
             manifest=manifest,
             out_dir=out_dir,
             run_id=plan.run_id,
+            exhaustions=exhaustions,
         )
         holder["artifacts"] = artifacts
         return PhaseResult(status="ok", phase="report", log_entries=[artifacts])

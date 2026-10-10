@@ -24,9 +24,10 @@
   :data:`FALLBACK_ORDER_LABEL`; запрошенный режим демотирование не переопределяет.
 * **I13** — ``preliminary`` не попадает в battle card/NDA; идёт только в
   ``preliminary_findings`` с маркером «не публикация».
-* **§13** — межцикловый ``diff`` запрещён при смене major ``methodology_version``
-  либо при расхождении cohort/profile+K/retrieval_params/index_build: контракт —
-  **отказ** (:class:`CrossCycleDiffError`).
+* **§13** — межцикловый ``diff`` запрещён при смене major ``methodology_version``,
+  методологического класса (:data:`METHODOLOGY_FIELDS`) либо исполнительного класса
+  (:data:`EXECUTION_FIELDS`); контракт — **отказ** (:class:`CrossCycleDiffError`).
+  Причины маркируются классом: ``methodology_change`` / ``execution_change``.
 
 Модуль категорийно нейтрален (§1.3), детерминирован (сортировка продуктов/параметров).
 ``openpyxl`` — опциональная зависимость: при её отсутствии XLSX-артефакты
@@ -39,14 +40,15 @@ from __future__ import annotations
 import csv
 import json
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import yaml
 
 from core.domain.enums import CellState, RankingPolicy, Status
-from core.domain.models import CatalogRow, Cell, RunManifest
+from core.domain.invariants import check_unknown_exhaustion
+from core.domain.models import CatalogRow, Cell, ProtocolExhaustion, RunManifest
 from core.domain.scoring import evidence_coverage
 from core.pipeline.compute import (
     ScoreBundle,
@@ -66,6 +68,8 @@ __all__ = [
     "FALLBACK_ORDER_LABEL",
     "INSUFFICIENT_COVERAGE_NOTE",
     "NOT_FOR_PUBLICATION",
+    "METHODOLOGY_FIELDS",
+    "EXECUTION_FIELDS",
     "DIFF_BOUNDARY_FIELDS",
     "build_manifest",
     "write_run_manifest",
@@ -74,6 +78,7 @@ __all__ = [
     "render_preliminary_findings",
     "render_diff",
     "write_reports",
+    "collect_i3_anomalies",
 ]
 
 #: Порог «недостаточного» Coverage для приглушения battle card (§9/02 §E.2).
@@ -94,17 +99,38 @@ INSUFFICIENT_COVERAGE_NOTE: str = (
 #: Маркер непубликуемости preliminary-кандидатов (§9, I13).
 NOT_FOR_PUBLICATION: str = "не публикация"
 
-#: Поля манифеста, смена которых запрещает межцикловый diff (§13 C.2):
-#: смена когорты/индексной сборки/ретривал-профиля+K/fusion-параметров. Major
-#: ``methodology_version`` проверяется отдельно.
-DIFF_BOUNDARY_FIELDS: tuple[str, ...] = (
+#: §13/B-7 (v2.1): поля **методологического** класса версий. Их смена означает
+#: несовместимость расчёта (major ``methodology_version`` проверяется отдельно) и
+#: маркируется причиной ``methodology_change``.
+METHODOLOGY_FIELDS: tuple[str, ...] = (
+    "scoring_policy_version",
+    "status_dict_version",
+    "capability_policy",
+    "unknown_policy",
+    "partial_score",
+)
+
+#: §13/B-7 (v2.1): поля **исполнительного** класса (что именно исполнялось). Их смена —
+#: версионная граница, но не методологическая несовместимость; маркируется причиной
+#: ``execution_change``.
+EXECUTION_FIELDS: tuple[str, ...] = (
     "case_id",
     "cohort_ref",
     "index_build_id",
+    "embed_model_id",
+    "chunker_version",
+    "extractor_version",
+    "lexical_engine_version",
+    "vector_store",
     "retrieval_profile",
     "retrieval_cutoff_K",
     "retrieval_params_json",
+    "llm_scenarios",
 )
+
+#: Обратно-совместимый алиас (v2.0): прежде границей считался только исполнительный
+#: набор. Сохранён для внешних импортов; новые правки — через :data:`EXECUTION_FIELDS`.
+DIFF_BOUNDARY_FIELDS: tuple[str, ...] = EXECUTION_FIELDS
 
 
 # ---------------------------------------------------------------------------
@@ -126,6 +152,9 @@ class Artifacts:
 
     ``battle_card`` — ``None`` при срабатывании G4/I11 (нет Coverage вообще).
     Остальные поля — пути записанных файлов; ``manifest`` — ``run_manifest.yaml``.
+
+    ``i3_anomalies`` — собранные аномалии I3 (§5): strict-``❓`` без полного протокола
+    исчерпания. Это **наблюдения**, а не изменение статуса ячейки.
     """
 
     battle_card: Path | None
@@ -133,6 +162,7 @@ class Artifacts:
     nda_questions: Path | None
     diff: Path | None
     manifest: Path
+    i3_anomalies: list[dict[str, Any]] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -300,13 +330,18 @@ def _per_product_coverage(cells: list[Any], catalog: Mapping[str, CatalogRow]) -
     for cell in cells:
         grouped.setdefault(str(cell.product_id), []).append(cell)
     return {
-        product_id: evidence_coverage(group, catalog, {}).value
+        product_id: (evidence_coverage(group, catalog, {}).value or 0.0)
         for product_id, group in grouped.items()
     }
 
 
 def _coverage_absent(bundle: ScoreBundle) -> bool:
-    """I11: Coverage отсутствует полностью (нечего сопровождать Capability)."""
+    """I11: Coverage отсутствует полностью (нечего сопровождать Capability).
+
+    Блокировка завязана на :func:`core.pipeline.compute.publish_warnings` (Лента 1),
+    который возвращает причину при ``coverage.defined is False`` (``UNDEFINED``,
+    ``universe = 0``) либо при пустом знаменателе legacy-режима. Логика не дублируется.
+    """
     return bool(publish_warnings(bundle))
 
 
@@ -315,8 +350,9 @@ def _coverage_insufficient(bundle: ScoreBundle) -> bool:
 
     Гейт завязан на **Coverage** (I11): Comparability — лишь аннотация в шапке, и её
     ``INSUFFICIENT`` из-за отсутствия когорты не должен «глушить» полноценное покрытие.
+    ``UNDEFINED`` (``value is None``) сюда не доходит — блокируется :func:`_coverage_absent`.
     """
-    return bundle.coverage.value < COVERAGE_INSUFFICIENT_THRESHOLD
+    return (bundle.coverage.value or 0.0) < COVERAGE_INSUFFICIENT_THRESHOLD
 
 
 def _ordered_products(
@@ -390,6 +426,8 @@ def build_manifest(
     retrieval_cutoff_K: int | None = None,
     retrieval_params_json: str | None = None,
     created_at: str | None = None,
+    settings_provenance: Mapping[str, Any] | None = None,
+    ranking_epsilon: float | None = None,
 ) -> RunManifest:
     """Собирает полностью заполненный :class:`RunManifest` (R7/§13) фазы Ш9.
 
@@ -405,7 +443,10 @@ def build_manifest(
     * индексный/ретривал-контур — ``index_build_id`` и (если заданы) атрибуты run:
       ``retrieval_profile``/``retrieval_cutoff_K``/``retrieval_params_json`` и версии
       сборки (``embed_model_id``/``chunker_version``/``extractor_version``/
-      ``lexical_engine_version``/``vector_store``).
+      ``lexical_engine_version``/``vector_store``);
+    * §9/A3 (v2.1) — ``settings_provenance`` (провенанс настроек) и ``ranking_epsilon``
+      берутся по цепочке ``аргумент → run → inputs → plan`` (``_first_present``); идут в
+      манифест **как есть**, без пересчёта дефолтов «по предвидению».
 
     Деплой-провенанс (``deploy_profile``/``edge_schema_version``) заполняется только если
     соответствующие поля есть в текущей схеме :class:`RunManifest` (defensive: иначе
@@ -513,6 +554,21 @@ def build_manifest(
         getattr(inputs, "partial_score", None),
     )
 
+    # §9/A3 (v2.1): провенанс настроек и порог неразличимости — по цепочке
+    # аргумент → run → inputs → plan; без пересчёта «по предвидению» (A3).
+    resolved_provenance = _first_present(
+        settings_provenance,
+        getattr(run, "settings_provenance", None),
+        getattr(inputs, "settings_provenance", None),
+        getattr(plan, "settings_provenance", None),
+    )
+    resolved_ranking_epsilon = _first_present(
+        ranking_epsilon,
+        getattr(run, "ranking_epsilon", None),
+        getattr(inputs, "ranking_epsilon", None),
+        getattr(plan, "ranking_epsilon", None),
+    )
+
     extra: dict[str, Any] = {}
     manifest_fields = getattr(RunManifest, "model_fields", {})
     if "deploy_profile" in manifest_fields:
@@ -587,6 +643,10 @@ def build_manifest(
         )
         or "excluded",
         partial_score=0.5 if partial_score_raw is None else float(partial_score_raw),
+        ranking_epsilon=(
+            0.0 if resolved_ranking_epsilon is None else float(resolved_ranking_epsilon)
+        ),
+        settings_provenance=dict(resolved_provenance or {}),
         snapshot_date=snapshot_date,
         **extra,
     )
@@ -623,9 +683,11 @@ def _battle_card_header(
     rows: list[tuple[str, Any]] = [
         ("capability", round(bundle.capability.value, 6)),
         ("capability_n_used", bundle.capability.n_used),
-        ("coverage", round(bundle.coverage.value, 6)),
+        ("coverage", round(bundle.coverage.value or 0.0, 6)),
+        ("coverage_defined", bundle.coverage.defined),
         ("coverage_n_used", bundle.coverage.n_used),
         ("coverage_denominator", bundle.coverage.denominator),
+        ("coverage_universe", bundle.coverage.universe),
         ("failure_rate", round(bundle.failure_rate, 6)),
         ("comparability_level", bundle.comparability.level),
         ("comparability_min_coverage", round(bundle.comparability.min_coverage, 6)),
@@ -809,28 +871,60 @@ def render_nda_questions(
 
     ``exhaustions`` — опциональная карта ``(product_id, param_id) → ProtocolExhaustion``
     (``contours`` заполняются, если доступны; §5/S13). Фильтр строго ``status == ❓``.
+
+    §5/I3 (v2.1): для каждого ``❓`` дополнительно фиксируется **аномалия** протокола:
+    ``protocol_status`` ∈ {``complete``, ``incomplete``, ``unknown``} и ``i3_anomaly``
+    (сообщение :func:`core.domain.invariants.check_unknown_exhaustion`). Это наблюдение
+    о полноте протокола — **статус ячейки при этом не меняется**.
     """
     rows: list[dict[str, Any]] = []
     for cell in _cell_list(cells):
         if getattr(cell, "status", None) is not Status.UNKNOWN:
             continue
         key = (str(cell.product_id), str(cell.param_id))
-        contours = ""
-        if exhaustions and key in exhaustions:
-            contours = ",".join(_contours(exhaustions[key]))
+        exhaustion = exhaustions.get(key) if exhaustions else None
+        contours = ",".join(_contours(exhaustion)) if exhaustion is not None else ""
         rows.append(
             {
                 "product_id": cell.product_id,
                 "param_id": cell.param_id,
                 "status": Status.UNKNOWN.value,
                 "exhausted_contours": contours,
+                "protocol_status": _i3_protocol_status(cell, exhaustion),
+                "i3_anomaly": _i3_violations(cell, exhaustion),
             }
         )
     return _write_csv(
         Path(out_path),
-        ["product_id", "param_id", "status", "exhausted_contours"],
+        [
+            "product_id",
+            "param_id",
+            "status",
+            "exhausted_contours",
+            "protocol_status",
+            "i3_anomaly",
+        ],
         rows,
     )
+
+
+def _i3_violations(cell: Any, exhaustion: Any) -> str:
+    """Первое нарушение :func:`check_unknown_exhaustion` (или пустая строка).
+
+    Проверка применима к ``None`` (нет протокола) и к ``ProtocolExhaustion``. Иные
+    носители (например, «сырой» dict) не классифицируются — во избежание ложной аномалии.
+    """
+    if exhaustion is not None and not isinstance(exhaustion, ProtocolExhaustion):
+        return ""
+    violations = check_unknown_exhaustion(cell, exhaustion)
+    return violations[0].message if violations else ""
+
+
+def _i3_protocol_status(cell: Any, exhaustion: Any) -> str:
+    """Статус протокола исчерпания ``❓``: ``complete`` / ``incomplete`` / ``unknown``."""
+    if exhaustion is not None and not isinstance(exhaustion, ProtocolExhaustion):
+        return "unknown"
+    return "incomplete" if _i3_violations(cell, exhaustion) else "complete"
 
 
 def _contours(exhaustion: Any) -> list[str]:
@@ -840,6 +934,34 @@ def _contours(exhaustion: Any) -> list[str]:
     else:
         values = getattr(exhaustion, "contours", None) or []
     return [str(v) for v in values]
+
+
+def collect_i3_anomalies(
+    cells: Iterable[Any],
+    exhaustions: Mapping[tuple[str, str], Any] | None = None,
+) -> list[dict[str, Any]]:
+    """Собирает аномалии I3 (§5): strict-``❓`` без полного протокола исчерпания.
+
+    Возвращает детерминированный (по ``product_id, param_id``) список записей
+    ``{"product_id", "param_id", "reason"}``. Это **наблюдения**, не изменение статуса
+    ячейки: ``❓`` остаётся ``❓`` (I12 — ❓ никогда не трактуется как ❌).
+    """
+    exhaustions = exhaustions or {}
+    anomalies: list[dict[str, Any]] = []
+    for cell in _cell_list(cells):
+        if getattr(cell, "status", None) is not Status.UNKNOWN:
+            continue
+        key = (str(cell.product_id), str(cell.param_id))
+        reason = _i3_violations(cell, exhaustions.get(key))
+        if reason:
+            anomalies.append(
+                {
+                    "product_id": str(cell.product_id),
+                    "param_id": str(cell.param_id),
+                    "reason": reason,
+                }
+            )
+    return anomalies
 
 
 # ---------------------------------------------------------------------------
@@ -888,17 +1010,64 @@ def _major(version: str) -> str:
     return str(version).split(".", 1)[0]
 
 
+def _scenario_fingerprint(manifest: RunManifest) -> list[tuple[Any, ...]]:
+    """Маршрутизационная подпись ``llm_scenarios`` (§7.4/I21) без ``run_id``.
+
+    ``run_id`` привязан к конкретному циклу и меняется при каждом прогоне, поэтому в
+    границу §13 он не входит: значимо **какой** сценарий привязан к **какой** модели
+    (и как декодируется), а не идентификатор прогона.
+    """
+    return [
+        (
+            getattr(binding, "scenario", None),
+            getattr(binding, "model_id", None),
+            getattr(binding, "model_version", None),
+            getattr(binding, "endpoint_kind", None),
+            getattr(binding, "web_tool", None),
+            getattr(binding, "decoder", None),
+            getattr(binding, "seed", None),
+            getattr(binding, "temperature", None),
+            getattr(binding, "constrained_decoding", None),
+        )
+        for binding in (getattr(manifest, "llm_scenarios", None) or [])
+    ]
+
+
+def _boundary_value(manifest: RunManifest, name: str) -> Any:
+    """Сравнимое значение поля границы §13 (``llm_scenarios`` — без ``run_id``)."""
+    if name == "llm_scenarios":
+        return _scenario_fingerprint(manifest)
+    return getattr(manifest, name)
+
+
 def diff_boundary_violations(prev: RunManifest, curr: RunManifest) -> list[str]:
-    """Версионные границы §13, запрещающие межцикловый diff (список причин)."""
+    """Версионные границы §13, запрещающие межцикловый diff (список причин).
+
+    §13/B-7 (v2.1): причина помечается классом изменения:
+
+    * ``methodology_change`` — смена major ``methodology_version`` либо поля
+      :data:`METHODOLOGY_FIELDS` (методологическая несовместимость расчёта);
+    * ``execution_change`` — расхождение поля :data:`EXECUTION_FIELDS` (что именно
+      исполнялось: когорта/индексная сборка/версии моделей/ретривал-профиль и т.п.).
+    """
     violations: list[str] = []
     if _major(prev.methodology_version) != _major(curr.methodology_version):
         violations.append(
-            "methodology_version major: "
+            "methodology_change: methodology_version major: "
             f"{prev.methodology_version} → {curr.methodology_version}"
         )
-    for name in DIFF_BOUNDARY_FIELDS:
+    for name in METHODOLOGY_FIELDS:
         if getattr(prev, name) != getattr(curr, name):
-            violations.append(f"{name}: {getattr(prev, name)!r} → {getattr(curr, name)!r}")
+            violations.append(
+                f"methodology_change: {name}: "
+                f"{getattr(prev, name)!r} → {getattr(curr, name)!r}"
+            )
+    for name in EXECUTION_FIELDS:
+        if _boundary_value(prev, name) != _boundary_value(curr, name):
+            violations.append(
+                f"execution_change: {name}: "
+                f"{getattr(prev, name)!r} → {getattr(curr, name)!r}"
+            )
     return violations
 
 
@@ -937,9 +1106,10 @@ def render_diff(
 ) -> Path:
     """Пишет ``diff.md`` — изменённые статусы + evidence_id (§9).
 
-    Контракт §13: при смене major ``methodology_version`` либо версионной границы
-    (cohort/profile+K/retrieval_params/index_build) diff **отказывается** —
-    :raises CrossCycleDiffError. Иначе пишется markdown-таблица изменений.
+    Контракт §13: при смене major ``methodology_version``/поля :data:`METHODOLOGY_FIELDS`
+    (класс ``methodology_change``) либо поля :data:`EXECUTION_FIELDS` (класс
+    ``execution_change``) diff **отказывается** — :raises CrossCycleDiffError. Иначе
+    пишется markdown-таблица изменений.
     """
     violations = diff_boundary_violations(prev_manifest, curr_manifest)
     if violations:
@@ -996,6 +1166,7 @@ def write_reports(
     run_id: str,
     prev_manifest: RunManifest | None = None,
     prev_cells: Iterable[Any] | None = None,
+    exhaustions: Mapping[tuple[str, str], Any] | None = None,
 ) -> Artifacts:
     """Пишет все артефакты прогона в ``{out_dir}/{run_id}/outputs/`` (Ш9, 03 §A.2).
 
@@ -1003,10 +1174,15 @@ def write_reports(
     :param run_id: идентификатор прогона; ``run_manifest.yaml`` — в ``{out_dir}/{run_id}/``.
     :param prev_manifest/prev_cells: предыдущий цикл для ``diff.md`` (опционально; без
         них пишется заглушка).
+    :param exhaustions: карта ``(product_id, param_id) → ProtocolExhaustion`` (§5/S13);
+        прокидывается в ``nda_questions`` и используется для сбора аномалий I3.
 
     G4/I11: вызывается :func:`core.pipeline.compute.assert_publishable` (предупреждение);
-    при полностью отсутствующем Coverage battle card **не эмитится**
-    (``Artifacts.battle_card is None``).
+    при полностью отсутствующем Coverage (``coverage.defined is False`` либо пустой
+    знаменатель) battle card **не эмитится** (``Artifacts.battle_card is None``).
+
+    I3 (§5): strict-``❓`` без полного протокола исчерпания фиксируются как аномалии
+    (:attr:`Artifacts.i3_anomalies`) — статус ячейки при этом не меняется.
     """
     cell_list = _cell_list(cells)
     run_dir = Path(out_dir) / run_id
@@ -1024,7 +1200,9 @@ def write_reports(
     except PublishBlockedError:
         battle_card = None
 
-    nda_questions = render_nda_questions(cell_list, outputs_dir / "nda_questions.csv")
+    nda_questions = render_nda_questions(
+        cell_list, outputs_dir / "nda_questions.csv", exhaustions=exhaustions
+    )
     preliminary = render_preliminary_findings(
         cell_list, outputs_dir / "preliminary_findings.xlsx"
     )
@@ -1045,4 +1223,5 @@ def write_reports(
         nda_questions=nda_questions,
         diff=diff,
         manifest=manifest_path,
+        i3_anomalies=collect_i3_anomalies(cell_list, exhaustions),
     )

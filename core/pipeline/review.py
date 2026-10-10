@@ -28,6 +28,12 @@
 (например, ``✅`` без evidence — I1, или ``❌`` без absence-evidence — I2) → :class:`ReviewError`;
 в strict-слой нечестная ячейка не попадает.
 
+**I3/§5 (v2.1).** ``❓ (strict) → протокол исчерпан (full) **ИЛИ** reviewed_by ≠ null`` (§2.3).
+Повышение выставляет ``reviewed_by = actor``, чем удовлетворяет человеческую ветку I3, поэтому
+promote ``❓`` протокол **не требует**. Полнота протокола для машинных ``❓`` (без ``reviewed_by``)
+контролируется как аномалия отчёта (``core.pipeline.report.collect_i3_anomalies``), а не блокирует
+promote. :func:`check_unknown_exhaustion` применяется в promote лишь в ветке без ``reviewed_by``.
+
 **Ограничение поверхности чтения.** ``StorePort.iter_cells`` (§B.1) не возвращает
 ``evidence``/``absence_evidence`` (они живут в ``cell_evidence``). Поэтому при загрузке из
 store :attr:`ReviewItem.evidence_count` всегда ``0``, а статусы, требующие evidence
@@ -44,7 +50,14 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 
-from core.domain import Cell, CellState, Status, check_cell
+from core.domain import (
+    Cell,
+    CellState,
+    ProtocolExhaustion,
+    Status,
+    check_cell,
+    check_unknown_exhaustion,
+)
 from core.pipeline.runner import Clock, run_isolated
 from core.ports.store import StorePort
 
@@ -191,6 +204,16 @@ def _find_cell(
     )
 
 
+def _find_exhaustion(
+    store: StorePort, run_id: str, product_id: str, param_id: str
+) -> ProtocolExhaustion | None:
+    """Протокол исчерпания ячейки из ``store.iter_exhaustions`` (§5/S13) либо ``None``."""
+    for exhaustion in store.iter_exhaustions(run_id):
+        if exhaustion.product_id == product_id and exhaustion.param_id == param_id:
+            return exhaustion
+    return None
+
+
 def promote(
     *,
     store: StorePort,
@@ -222,6 +245,15 @@ def promote(
     ``cell.status``; иначе при ``validated_only=True`` возбуждается :class:`ReviewError`.
     Готовая ячейка проверяется :func:`check_cell` (I1/I2/I4/I6/I7/I13): нарушение → отказ,
     нечестная strict-ячейка не персистится.
+
+    **I3/§5 (v2.1).** ``❓ (strict) → протокол исчерпан (full) **ИЛИ** reviewed_by ≠ null``
+    (дизъюнкция, §2.3). Человеческое решение (``reviewed_by``) само по себе удовлетворяет
+    I3, поэтому promote ``❓`` **не требует** протокола: он всегда выставляет
+    ``reviewed_by = actor``. Полнота протокола для **машинно-порождённого** strict-``❓``
+    (без ``reviewed_by``) контролируется как аномалия в отчёте
+    (:func:`core.pipeline.report.collect_i3_anomalies`) и публикацию не блокирует.
+    Блок ниже срабатывает лишь в ветке без человеческой аттестации
+    (``not promoted.reviewed_by``) — I3-верная дизъюнкция.
     """
     _require_actor(actor)
     cell = _find_cell(store, run_id, product_id, param_id)
@@ -257,6 +289,20 @@ def promote(
             f"[{codes}]: {violations[0].message}",
             code=violations[0].code,
         )
+
+    # I3/§5 (v2.1), дизъюнкция: `❓ (strict) → протокол исчерпан (full) ИЛИ reviewed_by ≠ null`.
+    # Человеческая аттестация (reviewed_by) уже удовлетворяет I3, поэтому протокол требуем
+    # только для машинного `❓` без reviewed_by. promote всегда проставляет reviewed_by,
+    # поэтому на практике блок не срабатывает; полнота протокола машинных `❓` фиксируется
+    # как аномалия в report (`collect_i3_anomalies`), не блокирует promote.
+    if promoted.status is Status.UNKNOWN and not promoted.reviewed_by:
+        exhaustion = _find_exhaustion(store, run_id, product_id, param_id)
+        i3 = check_unknown_exhaustion(promoted, exhaustion)
+        if i3:
+            raise ReviewError(
+                f"I3: {i3[0].message}",
+                code="I3",
+            )
 
     store.save_cell(promoted)
     return promoted
