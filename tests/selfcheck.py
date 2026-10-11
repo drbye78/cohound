@@ -1180,13 +1180,13 @@ def _extract_html() -> None:
 
 
 def _crawl_scrapy() -> None:
-    """ScrapyCrawler: кэш (1 фетч), SSRF-блок, доменный рендер-профиль."""
+    """ScrapyCrawler: HTTP-кэш, browser-байпас кэша, SSRF-блок, доменный профиль."""
     import tempfile
 
     from core.adapters.crawl_scrapy import ScrapyCrawler
     from core.ports.crawler import CrawlerPort
     from core.ports.types import RawPage, RenderMode
-    from core.util.cache import ContentAddressedCache
+    from core.util.cache import ContentAddressedCache, http_key
 
     calls: list[int] = []
 
@@ -1195,19 +1195,29 @@ def _crawl_scrapy() -> None:
         return RawPage(url=url, content=b"<html>ok</html>", fetched_at="t", render_mode=render)
 
     with tempfile.TemporaryDirectory() as tmp:
+        cache = ContentAddressedCache(root=tmp)
         crawler = ScrapyCrawler(
             fetcher=_fake,
-            cache=ContentAddressedCache(root=tmp),
+            cache=cache,
             domain_profiles={"example.com": {"render": "browser"}},
         )
         if not isinstance(crawler, CrawlerPort):
             raise AssertionError("ScrapyCrawler обязан удовлетворять CrawlerPort")
+        # browser-рендер: профиль выбирает режим, но кэш НЕ консультируется и не пишется.
         first = crawler.fetch("https://example.com/x")
         crawler.fetch("https://example.com/x")
-        if len(calls) != 1:
-            raise AssertionError(f"кэш обязан дать 1 фетч, было {len(calls)}")
         if first.render_mode is not RenderMode.BROWSER:
             raise AssertionError("доменный профиль обязан выбрать browser-рендер")
+        if len(calls) != 2:
+            raise AssertionError(f"browser-рендер обязан идти вживую (2 фетча), было {len(calls)}")
+        if cache.get_bytes("http", http_key("https://example.com/x")) is not None:
+            raise AssertionError("browser-рендер не должен писать в кэш")
+        # HTTP-путь кэшируется (R7): повторный вызов не дёргает фетчер.
+        calls.clear()
+        crawler.fetch("https://other.test/y")
+        crawler.fetch("https://other.test/y")
+        if len(calls) != 1:
+            raise AssertionError(f"HTTP-кэш обязан дать 1 фетч, было {len(calls)}")
         try:
             crawler.fetch("http://127.0.0.1/secret")
             raise AssertionError("SSRF-цель обязана блокироваться до фетча")

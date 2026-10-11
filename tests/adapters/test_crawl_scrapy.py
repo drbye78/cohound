@@ -102,6 +102,65 @@ def test_cache_write_uses_global_http_layout(tmp_path: Path) -> None:
     assert (tmp_path / "http" / f"{http_key(URL)}.bin").is_file()
 
 
+class _SpyCache(ContentAddressedCache):
+    """Кэш-шпион: записывает обращения ``get_bytes``/``put_bytes``."""
+
+    def __init__(self, root: Path) -> None:
+        super().__init__(root)
+        self.gets: list[tuple[str, str]] = []
+        self.puts: list[tuple[str, str]] = []
+
+    def get_bytes(self, kind: str, key: str) -> bytes | None:
+        self.gets.append((kind, key))
+        return super().get_bytes(kind, key)
+
+    def put_bytes(self, kind: str, key: str, data: bytes) -> Path:
+        self.puts.append((kind, key))
+        return super().put_bytes(kind, key, data)
+
+
+def test_browser_render_bypasses_cache(tmp_path: Path) -> None:
+    cache = _SpyCache(tmp_path)
+    fetcher = _RecordingFetcher(b"live-body")
+    crawler = ScrapyCrawler(fetcher, cache=cache)
+
+    page = crawler.fetch(URL, render=RenderMode.BROWSER)
+
+    assert page.content == b"live-body"
+    assert fetcher.calls == [(URL, RenderMode.BROWSER)]
+    # Браузерный рендер не читает и не пишет кэш (нет кросс-контаминации HTTP/browser).
+    assert cache.gets == []
+    assert cache.puts == []
+
+
+def test_browser_render_always_live_even_with_cache(tmp_path: Path) -> None:
+    cache = _SpyCache(tmp_path)
+    # Предзаполняем кэш под тем же ключом — браузер обязан его игнорировать.
+    cache.put_bytes("http", http_key(URL), b"cached-body")
+    cache.gets.clear()
+    cache.puts.clear()
+    fetcher = _RecordingFetcher(b"live-body")
+    crawler = ScrapyCrawler(fetcher, cache=cache)
+
+    first = crawler.fetch(URL, render=RenderMode.BROWSER)
+    second = crawler.fetch(URL, render=RenderMode.BROWSER)
+
+    assert first.content == b"live-body" and second.content == b"live-body"
+    assert len(fetcher.calls) == 2
+    assert cache.gets == [] and cache.puts == []
+
+
+def test_http_render_uses_cache(tmp_path: Path) -> None:
+    cache = _SpyCache(tmp_path)
+    crawler = ScrapyCrawler(_RecordingFetcher(b"live-body"), cache=cache)
+
+    crawler.fetch(URL, render=RenderMode.HTTP)
+
+    assert cache.gets and cache.puts
+    assert cache.gets[0] == ("http", http_key(URL))
+    assert cache.puts[0] == ("http", http_key(URL))
+
+
 # ---------------------------------------------------------------------------
 # Рендер-профили по домену
 # ---------------------------------------------------------------------------

@@ -6,16 +6,21 @@
 
   1. JS-контент НЕ виден обычным HTTP-запросом (доказывает необходимость рендера);
   2. JS-контент ВИДЕН через scrapy-playwright (chromium) — рендер работает;
-  3. (best-effort) рендер в контексте Firefox, если бинарь установлен.
+  3. (best-effort) рендер в контексте Firefox, если бинарь установлен;
+  4. (``--multi``) несколько URL в ОДНОМ процессе через ``ScrapyCrawler``: два HTTP
+     и один browser-рендер — авторитетная проверка «N URL в одном процессе без
+     ``ReactorNotRestartable``», а также семантики кэша (HTTP кэшируется, browser — нет).
 
-Каждый браузер запускается в отдельном процессе (Twisted-реактор не перезапускаем).
-Требуется Scrapy ≥2.16 на Python 3.14 (в 2.19 у `Spider` удалён `start_requests`,
-поэтому используется `async def start()`).
+Режимы 1–3 запускают каждый браузер в отдельном процессе (Twisted-реактор не
+перезапускаем). Режим ``--multi`` использует общий реактор процесса
+(``core/adapters/crawl_scrapy.py``). Требуется Scrapy ≥2.16 на Python 3.14 (в 2.19 у
+`Spider` удалён `start_requests`, поэтому используется `async def start()`).
 
 Запуск (отдельное окружение, требует браузерных бинарей):
     pip install 'scrapy>=2.19' 'scrapy-playwright>=0.0.48' 'playwright>=1.63'
     playwright install chromium firefox
-    python3 tests/smoke_scrapy_playwright.py
+    python3 tests/smoke_scrapy_playwright.py            # режимы 1–3
+    python3 tests/smoke_scrapy_playwright.py --multi    # режим 4
 
 Коды выхода: 0 — пройдено; 1 — провал; 2 — окружение не готово (skip).
 Это ручной/full-CI тест: не часть tests/selfcheck.py (тот — stdlib+pydantic, без сети).
@@ -155,6 +160,83 @@ def _run_browser_subprocess(browser_type: str) -> dict[str, str]:
     return data
 
 
+def _run_multi() -> int:
+    """``--multi``: N URL (HTTP + browser) в ОДНОМ процессе через ``ScrapyCrawler``.
+
+    Авторитетная проверка дефекта ``ReactorNotRestartable``: два HTTP-фетча и один
+    браузерный рендер идут подряд в одном процессе/реакторе. Дополнительно
+    проверяется семантика кэша R7: HTTP-страница кэшируется, browser — нет.
+
+    Использует SSRF-допустимое DNS-имя ``localhost`` (литеральный ``127.0.0.1``
+    был бы отклонён ``validate_url``). Возвращает 0/1.
+    """
+    from pathlib import Path
+
+    from core.adapters.crawl_scrapy import CrawlError, ScrapyCrawler
+    from core.ports.types import RenderMode
+    from core.util.cache import ContentAddressedCache, http_key
+
+    base = f"http://localhost:{PORT}"
+    plain_url = f"{base}/plain"
+    plain_url2 = f"{base}/plain?second=1"
+    js_url = f"{base}/js"
+    wait_for = (
+        "() => document.getElementById('app').textContent.includes('" + JS_TEXT + "')"
+    )
+
+    print("== smoke scrapy-playwright (multi-URL, один процесс) ==")
+    failures: list[str] = []
+
+    with tempfile.TemporaryDirectory() as tmp:
+        cache = ContentAddressedCache(tmp)
+        # Профиль без `render`: режим берётся из аргумента fetch, а `wait_for`
+        # подхватывается для browser-рендера (см. _profile_wait_for).
+        crawler = ScrapyCrawler(
+            cache=cache,
+            domain_profiles={"localhost": {"wait_for": wait_for}},
+        )
+        try:
+            plain = crawler.fetch(plain_url, RenderMode.HTTP)
+            js = crawler.fetch(js_url, RenderMode.BROWSER)
+            plain2 = crawler.fetch(plain_url2, RenderMode.HTTP)
+        except CrawlError as exc:
+            print(f"FAIL  краул упал (ReactorNotRestartable?): {exc}")
+            return 1
+        finally:
+            crawler.close()  # останавливает общий реактор (idempotent)
+
+        def check(label: str, content: bytes, needle: str) -> None:
+            text = content.decode("utf-8", "replace")
+            ok = needle in text
+            mark = "  ok  " if ok else "FAIL  "
+            print(f"{mark}{label}: {'содержит' if ok else 'не содержит'} {needle!r}")
+            if not ok:
+                failures.append(label)
+
+        check("plain_http", plain.content, STATIC_TEXT)
+        check("js_browser", js.content, JS_TEXT)
+        check("plain_http_second", plain2.content, STATIC_TEXT)
+
+        http_file = Path(cache.path_for("http", http_key(plain_url), ".bin"))
+        js_file = Path(cache.path_for("http", http_key(js_url), ".bin"))
+        if http_file.is_file():
+            print("  ok  cache: HTTP-страница закэширована")
+        else:
+            print("FAIL  cache: нет файла кэша для HTTP-страницы")
+            failures.append("cache_http")
+        if not js_file.is_file():
+            print("  ok  cache: browser-рендер НЕ закэширован")
+        else:
+            print("FAIL  cache: browser-рендер попал в кэш")
+            failures.append("cache_browser")
+
+    if failures:
+        print("\nMULTI SMOKE FAILED: " + ", ".join(failures))
+        return 1
+    print("\nMULTI SMOKE PASSED")
+    return 0
+
+
 def main(argv: list[str]) -> int:
     if "--browser" in argv:  # дочерний процесс: один браузер
         browser_type = argv[argv.index("--browser") + 1]
@@ -172,6 +254,13 @@ def main(argv: list[str]) -> int:
     except ImportError as exc:
         print(f"SKIP: окружение не готово ({exc}). См. docstring.")
         return 2
+
+    if "--multi" in argv:  # режим 4: несколько URL в одном процессе
+        srv = _start_server()
+        try:
+            return _run_multi()
+        finally:
+            srv.shutdown()
 
     srv = _start_server()
     try:
