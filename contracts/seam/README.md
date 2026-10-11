@@ -14,7 +14,7 @@
 | Файл | Что описывает |
 |---|---|
 | `envelope.schema.json` | Конверт ответа `{schema_version, request_id, status, payload, error}`; форма запроса (`$defs.request`, `status="request"`) |
-| `fetch.schema.json` | `POST /v1/fetch` — запрос `{url, render, lang, extract}` и ответ (сырые байты `raw` / markdown `text`) |
+| `fetch.schema.json` | `POST /v1/fetch` — запрос `{url, fetch, extract, wait_for, lang}` и ответ (сырые байты `raw` / markdown `text`; извлечение best-effort, D2) |
 | `search.schema.json` | `POST /v1/search` — запрос `{query, lang, limit, phase}` и ответ-список `{url, title, snippet, rank}` |
 | `registry.schema.json` | `POST /v1/registry` — запрос `{registry_id, product_ref, scope}` и ответ-список `{fact_json, source_url, fetched_at}` (R1: `source_url` обязателен) |
 | `capabilities.schema.json` | `GET /v1/capabilities` → `{extractor_version, crawler_version, search_engine, supported_formats}` |

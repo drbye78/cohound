@@ -18,7 +18,7 @@ from __future__ import annotations
 import re
 from collections.abc import Callable
 
-from core.ports.types import ExtractedDoc, RawPage
+from core.ports.types import ExtractedDoc, ExtractionRoute, RawPage
 from core.util.hashing import content_hash
 from core.util.sanitize import (
     neutralize_prompt_injection_marks,
@@ -93,8 +93,14 @@ class HtmlExtractor:
         """Доступен ли экстрактор (внедрённая функция или установленная trafilatura)."""
         return self._extract_fn is not _default_extract or _TRAFILATURA_AVAILABLE
 
-    def extract(self, page: RawPage) -> ExtractedDoc:
-        """``RawPage`` → ``ExtractedDoc``. Никогда не бросает: сбой → ``error``."""
+    def extract(
+        self, page: RawPage, route: ExtractionRoute = ExtractionRoute.AUTO
+    ) -> ExtractedDoc:
+        """``RawPage`` → ``ExtractedDoc``. Никогда не бросает: сбой → ``error``.
+
+        ``route`` здесь не влияет на путь: HTML-экстрактор всегда трактует страницу как
+        HTML (маршрут ``document``/``auto`` разрешается композитом в composition root).
+        """
         try:
             html = _decode_page(page)
         except Exception as exc:  # noqa: BLE001 - грациозная деградация адаптера

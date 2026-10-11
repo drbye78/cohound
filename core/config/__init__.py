@@ -17,10 +17,13 @@ from core.config.run_config import (
     load_baselines,
     load_catalog,
     load_cohort,
-    load_domain_profiles,
     load_golden,
     load_package_manifest,
     load_run_config,
+)
+from core.config.domain_profiles import (
+    DomainProfile,
+    load_domain_profiles,
 )
 from core.config.deploy import (
     DeployConfig,
@@ -66,6 +69,7 @@ __all__ = [
     # golden.csv (§4.2/§11.6)
     "load_golden",
     # domain_profiles.yaml (D.2)
+    "DomainProfile",
     "load_domain_profiles",
     # кросс-артефактная проверка S11 (§4.5)
     "cross_check_products",

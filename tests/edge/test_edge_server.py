@@ -42,7 +42,14 @@ from core.edge.server import (
     serve,
 )
 from core.ports.search import SearchQuery, SearchResult
-from core.ports.types import ExtractedDoc, ProductRef, RawPage, RenderMode
+from core.ports.types import (
+    ExtractedDoc,
+    ExtractionRoute,
+    FetchMode,
+    FetchPlan,
+    ProductRef,
+    RawPage,
+)
 from core.util.hashing import content_hash
 
 _FIXED_ID = "0" * 32
@@ -67,17 +74,17 @@ class FakeCrawler:
     ) -> None:
         self._content = content
         self._raises = raises
-        self.calls: list[tuple[str, RenderMode]] = []
+        self.calls: list[tuple[str, FetchMode]] = []
 
-    def fetch(self, url: str, render: RenderMode = RenderMode.HTTP) -> RawPage:
-        self.calls.append((url, RenderMode(render)))
+    def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:
+        self.calls.append((url, FetchMode(plan.fetch)))
         if self._raises is not None:
             raise self._raises
         return RawPage(
             url=url,
             content=self._content,
             fetched_at=_FIXED_TIME,
-            render_mode=RenderMode(render),
+            fetch_mode=FetchMode(plan.fetch),
             status_code=200,
             content_type="text/html; charset=utf-8",
         )
@@ -100,7 +107,9 @@ class FakeExtractor:
         self._raises = raises
         self.calls = 0
 
-    def extract(self, page: RawPage) -> ExtractedDoc:
+    def extract(
+        self, page: RawPage, route: ExtractionRoute = ExtractionRoute.AUTO
+    ) -> ExtractedDoc:
         self.calls += 1
         if self._raises is not None:
             raise self._raises
@@ -260,12 +269,12 @@ def test_capabilities_derives_engine_and_formats() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_fetch_without_extract_returns_raw_bytes_shape() -> None:
+def test_fetch_returns_raw_and_extracted_text() -> None:
     content = b"<html>neutral bytes</html>"
     crawler = FakeCrawler(content)
     extractor = FakeExtractor()
     env = _edge(crawler=crawler, extractor=extractor).envelope(
-        "fetch", {"url": "https://site.test/x", "render": "http", "extract": False}
+        "fetch", {"url": "https://site.test/x", "fetch": "http", "extract": "auto"}
     )
 
     assert env["status"] == "ok"
@@ -288,14 +297,15 @@ def test_fetch_without_extract_returns_raw_bytes_shape() -> None:
     assert payload["raw"]["hash"] == content_hash(content)
     assert payload["raw"]["size"] == len(content)
     assert base64.b64decode(payload["raw"]["bytes_b64"]) == content
-    assert payload["text"] is None
+    # Извлечение выполняется по оси extract; сырые байты возвращаются всегда (retention).
+    assert payload["text"]["content"] == "# clean markdown"
     assert payload["error"] is None
-    assert crawler.calls == [("https://site.test/x", RenderMode.HTTP)]
-    assert extractor.calls == 0
+    assert crawler.calls == [("https://site.test/x", FetchMode.HTTP)]
+    assert extractor.calls == 1
 
 
 def test_fetch_with_extract_returns_text() -> None:
-    env = _edge().envelope("fetch", {"url": "https://site.test/x", "extract": True})
+    env = _edge().envelope("fetch", {"url": "https://site.test/x", "extract": "html"})
     assert env["status"] == "ok"
     assert env["payload"]["text"] == {
         "content": "# clean markdown",
@@ -305,14 +315,14 @@ def test_fetch_with_extract_returns_text() -> None:
     assert env["payload"]["error"] is None
 
 
-def test_fetch_passes_render_mode_and_request_id_echo() -> None:
+def test_fetch_passes_fetch_mode_and_request_id_echo() -> None:
     crawler = FakeCrawler()
     env = _edge(crawler=crawler).envelope(
-        "fetch", {"url": "https://site.test/x", "render": "browser"}, request_id="abc123"
+        "fetch", {"url": "https://site.test/x", "fetch": "browser"}, request_id="abc123"
     )
     assert env["request_id"] == "abc123"
     assert env["payload"]["request_id"] == "abc123"
-    assert crawler.calls == [("https://site.test/x", RenderMode.BROWSER)]
+    assert crawler.calls == [("https://site.test/x", FetchMode.BROWSER)]
 
 
 def test_fetch_rejects_missing_url() -> None:
@@ -321,10 +331,10 @@ def test_fetch_rejects_missing_url() -> None:
     assert "url" in env["error"]
 
 
-def test_fetch_rejects_unknown_render() -> None:
-    env = _edge().envelope("fetch", {"url": "https://site.test/x", "render": "flash"})
+def test_fetch_rejects_unknown_fetch() -> None:
+    env = _edge().envelope("fetch", {"url": "https://site.test/x", "fetch": "flash"})
     assert env["status"] == "error"
-    assert "рендер" in env["error"]
+    assert "fetch" in env["error"]
 
 
 # ---------------------------------------------------------------------------
@@ -422,12 +432,14 @@ def test_crawler_exception_becomes_status_error_without_traceback() -> None:
     assert "Traceback" not in env["error"]
 
 
-def test_extractor_result_error_becomes_status_error() -> None:
+def test_extractor_result_error_is_captured_best_effort() -> None:
     edge = _edge(extractor=FakeExtractor(result_error="parse failed"))
-    env = edge.envelope("fetch", {"url": "https://site.test/x", "extract": True})
-    assert env["status"] == "error"
-    assert "parse failed" in env["error"]
-    assert env["payload"] is None
+    env = edge.envelope("fetch", {"url": "https://site.test/x", "extract": "document"})
+    # Сбой извлечения не лишает ядро сырых байтов: raw возвращается, ошибка — в error.
+    assert env["status"] == "ok"
+    assert env["payload"]["raw"] is not None
+    assert env["payload"]["text"] is None
+    assert "parse failed" in env["payload"]["error"]
 
 
 def test_search_exception_becomes_status_error() -> None:
@@ -451,14 +463,16 @@ def test_unknown_op_is_error() -> None:
 def test_round_trip_fetch_via_client() -> None:
     content = b"<html>round trip</html>"
     edge = _edge(crawler=FakeCrawler(content))
-    page = RemoteCrawler(_client(edge)).fetch("https://site.test/x", RenderMode.BROWSER)
+    page = RemoteCrawler(_client(edge)).fetch(
+        "https://site.test/x", FetchPlan(fetch=FetchMode.BROWSER)
+    )
 
     assert isinstance(page, RawPage)
     assert page.url == "https://site.test/x"
     assert page.content == content
     assert page.status_code == 200
     assert page.content_type == "text/html; charset=utf-8"
-    assert page.render_mode is RenderMode.BROWSER
+    assert page.fetch_mode is FetchMode.BROWSER
 
 
 def test_round_trip_extract_via_client() -> None:

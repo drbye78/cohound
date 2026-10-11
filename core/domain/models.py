@@ -691,8 +691,8 @@ class CorpusDoc(BaseModel):
     """Строка ``corpus_docs`` (§4.4, Ш5): сырой документ с retention-путём и версией.
 
     ``raw_path`` — retention байтов (§3.2); ``extractor_version`` позволяет re-extract
-    без ре-фетча. ``render_mode`` — строка (не ``ports.RenderMode``): домен L0 не
-    импортирует порты L2 (матрица 01 §1).
+    без ре-фетча. ``render_mode`` — строка (не ``ports.FetchMode``): домен L0 не
+    импортирует порты L2 (матрица 01 §1). Имя поля/колонки сохранено (D2 не меняет DDL).
     """
 
     model_config = _BASE

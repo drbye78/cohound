@@ -43,6 +43,7 @@ from core.pipeline.normalize import (
 )
 from core.pipeline.inheritance import apply_precedence, inheritance_wave
 from core.pipeline.corpus import IndexBuild, build_corpus
+from core.pipeline.fetch_plan import resolve_fetch_plan
 from core.pipeline.retrieve import (
     PROFILE_DESCRIPTIONS,
     RetrievalProfile,
@@ -327,6 +328,7 @@ __all__ = [
     # corpus (T7.4, Ш5)
     "build_corpus",
     "IndexBuild",
+    "resolve_fetch_plan",
     # retrieve (T8.5, Ш6)
     "RetrievalProfile",
     "PROFILE_DESCRIPTIONS",

@@ -29,7 +29,7 @@ from core.adapters.search_glm import (
     SearchError,
 )
 from core.ports.search import SearchAdapterPort, SearchQuery, SearchResult
-from core.ports.types import RawPage, RenderMode
+from core.ports.types import RawPage, FetchMode
 from core.util.cache import ContentAddressedCache, http_key
 
 URL_A = "https://example.com/a"
@@ -205,7 +205,7 @@ def test_fetch_returns_rawpage_from_seam() -> None:
     assert isinstance(page, RawPage)
     assert page.url == URL_A
     assert page.content == b"<html>page</html>"
-    assert page.render_mode is RenderMode.HTTP
+    assert page.fetch_mode is FetchMode.HTTP
     assert page.fetched_at
 
 

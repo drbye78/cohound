@@ -15,6 +15,7 @@ import pytest
 
 from core.adapters import index_format
 from core.adapters.index_npy import NpyIndexBuilder
+from core.config.domain_profiles import DomainProfile
 from core.domain import (
     AnchorRelation,
     CatalogRow,
@@ -23,7 +24,14 @@ from core.domain import (
 )
 from core.pipeline import RunPlan
 from core.pipeline.corpus import IndexBuild, build_corpus
-from core.ports.types import Chunk, ExtractedDoc, RawPage, RenderMode
+from core.ports.types import (
+    Chunk,
+    ExtractedDoc,
+    ExtractionRoute,
+    FetchMode,
+    FetchPlan,
+    RawPage,
+)
 from core.store.sqlite_store import SqliteStore
 from core.util.hashing import content_hash
 
@@ -102,17 +110,17 @@ class _Crawler:
     ) -> None:
         self.pages = dict(pages)
         self.raising = set(raising or ())
-        self.calls: list[tuple[str, RenderMode]] = []
+        self.calls: list[tuple[str, FetchPlan]] = []
 
-    def fetch(self, url: str, render: RenderMode = RenderMode.HTTP) -> RawPage:
-        self.calls.append((url, render))
+    def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:
+        self.calls.append((url, plan))
         if url in self.raising:
             raise RuntimeError(f"crawl failed: {url}")
         return RawPage(
             url=url,
             content=self.pages[url],
             fetched_at=TS,
-            render_mode=render,
+            fetch_mode=plan.fetch,
             lang="en",
         )
 
@@ -125,7 +133,7 @@ class _Extractor:
     def __init__(self, *, error_urls: set[str] | None = None) -> None:
         self.error_urls = set(error_urls or ())
 
-    def extract(self, page: RawPage) -> ExtractedDoc:
+    def extract(self, page: RawPage, route: ExtractionRoute = ExtractionRoute.AUTO) -> ExtractedDoc:
         if page.url in self.error_urls:
             return ExtractedDoc(
                 text="",
@@ -429,6 +437,63 @@ def test_error_isolation_crawler_and_extractor(tmp_path: Path) -> None:
     assert {e.product_id for e in build.entries} == {"p1"}
     assert any("crawl" in err or "RuntimeError" in err for err in result.errors)
     assert any("extract" in err for err in result.errors)
+
+
+# --------------------------------------------------------------------------- #
+# D2: URL-скоупедированная проверка исполнимости browser-рендера
+# --------------------------------------------------------------------------- #
+
+
+def test_browser_plan_on_http_only_crawler_skips_url_scoped(tmp_path: Path) -> None:
+    """HTTP-краулер + browser-URL: пофURL-ошибка, фаза ``ok``, http-URL обработан (D2)."""
+    browser_url = "https://browser.test/landing"
+    pages = {URL_P1_A: b"http ok", browser_url: b"browser bytes"}
+    crawler = _Crawler(pages)
+    crawler.supports_browser = False  # type: ignore[attr-defined]
+
+    result = _build(
+        tmp_path,
+        pages=pages,
+        urls={"p1": [URL_P1_A, browser_url]},
+        crawler=crawler,
+        domain_profiles={"browser.test": DomainProfile(fetch=FetchMode.BROWSER)},
+    )
+    build = _build_of(result)
+
+    assert result.status == "ok"
+    assert build.chunk_count == 1
+    # Browser-URL пропущен ДО фетча, с понятной пофURL-ошибкой.
+    assert all(url != browser_url for url, _ in crawler.calls)
+    assert any(
+        browser_url in err and "browser" in err and "scrapy" in err
+        for err in result.errors
+    )
+    # HTTP-URL обработан, без ошибки для него.
+    assert [d.url for d in build.docs] == [URL_P1_A]
+    assert not any(URL_P1_A in err for err in result.errors)
+
+
+def test_explicit_http_override_avoids_browser_support_error(tmp_path: Path) -> None:
+    """Явный override на ``http`` снимает browser-ошибку: проверяется резолв-план (D2)."""
+    browser_url = "https://browser.test/landing"
+    pages = {browser_url: b"served as http"}
+    crawler = _Crawler(pages)
+    crawler.supports_browser = False  # type: ignore[attr-defined]
+
+    result = _build(
+        tmp_path,
+        pages=pages,
+        urls={"p1": [browser_url]},
+        crawler=crawler,
+        domain_profiles={"browser.test": DomainProfile(fetch=FetchMode.BROWSER)},
+        explicit_fetch={browser_url: FetchMode.HTTP},
+    )
+    build = _build_of(result)
+
+    assert result.status == "ok"
+    assert result.errors == []
+    assert build.chunk_count == 1
+    assert [url for url, _ in crawler.calls] == [browser_url]
 
 
 # --------------------------------------------------------------------------- #

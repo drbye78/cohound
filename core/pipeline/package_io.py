@@ -40,6 +40,7 @@ from typing import Any, Union
 import yaml
 from pydantic import BaseModel
 
+from core.config.domain_profiles import DomainProfile, load_domain_profiles
 from core.config.run_config import (
     _BASELINE_COLUMNS,
     _CATALOG_COLUMNS,
@@ -47,7 +48,6 @@ from core.config.run_config import (
     load_baselines,
     load_catalog,
     load_cohort,
-    load_domain_profiles,
     load_golden,
     load_package_manifest,
     load_run_config,
@@ -135,7 +135,7 @@ class PackageArtifacts:
     baselines: list[BaselineRow] = field(default_factory=list)
     cohort: Cohort | None = None
     golden: list[GoldenRow] = field(default_factory=list)
-    domain_profiles: dict[str, Any] = field(default_factory=dict)
+    domain_profiles: dict[str, DomainProfile] = field(default_factory=dict)
     scope_attestation: str | None = None
     run: RunConfig | None = None
 
@@ -618,7 +618,15 @@ def save_artifact(package_dir: str | Path, name: str, data: Any) -> Path:
     if name == "domain_profiles":
         if not isinstance(data, dict):
             raise ValueError("domain_profiles: ожидался dict")
-        return atomic_write_text(path, _dump_yaml(data))
+        serializable = {
+            str(key): (
+                value.model_dump(exclude_none=True)
+                if isinstance(value, DomainProfile)
+                else value
+            )
+            for key, value in data.items()
+        }
+        return atomic_write_text(path, _dump_yaml(serializable))
     if name == "scope_attestation":
         if not isinstance(data, str):
             raise ValueError("scope_attestation: ожидалась строка процедуры")

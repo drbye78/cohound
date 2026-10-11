@@ -9,7 +9,8 @@
 - ``baselines.csv``       → ``list[BaselineRow]`` (§4.2);
 - ``cohort.yaml``         → :class:`~core.domain.models.Cohort` (§1.6);
 - ``golden.csv``          → ``list[GoldenRow]`` (§4.2/§11.6);
-- ``domain_profiles.yaml``→ ``dict`` (профили рендера per domain, D.2).
+- ``domain_profiles.yaml``→ ``dict[str, DomainProfile]`` (оси fetch/extract домена, D.2 —
+  загрузчик живёт в :mod:`core.config.domain_profiles`).
 
 Загрузчики только парсят и приводят к моделям; семантические правила, требующие
 сопоставления нескольких артефактов (S11, golden-full без страты ❌, showcase и т.п.),
@@ -57,7 +58,6 @@ __all__ = [
     "load_baselines",
     "load_cohort",
     "load_golden",
-    "load_domain_profiles",
     "cross_check_products",
 ]
 
@@ -345,28 +345,6 @@ def load_golden(path: str | Path) -> list[GoldenRow]:
         except (ValidationError, ValueError) as exc:
             raise ValueError(f"golden.csv строка {lineno}: {exc}") from exc
     return rows
-
-
-def load_domain_profiles(path: str | Path) -> dict[str, Any]:
-    """Загружает ``domain_profiles.yaml`` (D.2) как обычный ``dict``.
-
-    Формат профилей рендера per domain не фиксирован доменной моделью, поэтому
-    валидация «слабая»: корень — словарь, каждое значение — тоже словарь. Остальное
-    интерпретирует соответствующий адаптер/корпусный сценарий.
-    """
-    data = _read_yaml(path)
-    if not isinstance(data, dict):
-        raise ValueError(
-            f"domain_profiles.yaml: ожидался YAML-словарь верхнего уровня, "
-            f"получено {type(data).__name__}"
-        )
-    for key, profile in data.items():
-        if not isinstance(profile, dict):
-            raise ValueError(
-                f"domain_profiles.yaml[{key}]: ожидался словарь профиля, "
-                f"получено {type(profile).__name__}"
-            )
-    return data
 
 
 # ---------------------------------------------------------------------------

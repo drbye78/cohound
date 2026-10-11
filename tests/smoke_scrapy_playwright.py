@@ -173,7 +173,7 @@ def _run_multi() -> int:
     from pathlib import Path
 
     from core.adapters.crawl_scrapy import CrawlError, ScrapyCrawler
-    from core.ports.types import RenderMode
+    from core.ports.types import FetchMode, FetchPlan
     from core.util.cache import ContentAddressedCache, http_key
 
     base = f"http://localhost:{PORT}"
@@ -189,16 +189,13 @@ def _run_multi() -> int:
 
     with tempfile.TemporaryDirectory() as tmp:
         cache = ContentAddressedCache(tmp)
-        # Профиль без `render`: режим берётся из аргумента fetch, а `wait_for`
-        # подхватывается для browser-рендера (см. _profile_wait_for).
-        crawler = ScrapyCrawler(
-            cache=cache,
-            domain_profiles={"localhost": {"wait_for": wait_for}},
-        )
+        # План получения (D2): HTTP-страницы — FetchPlan по умолчанию, JS-страница —
+        # browser-ось с wait_for. Профили доменов резолвит pipeline, не адаптер.
+        crawler = ScrapyCrawler(cache=cache)
         try:
-            plain = crawler.fetch(plain_url, RenderMode.HTTP)
-            js = crawler.fetch(js_url, RenderMode.BROWSER)
-            plain2 = crawler.fetch(plain_url2, RenderMode.HTTP)
+            plain = crawler.fetch(plain_url, FetchPlan(fetch=FetchMode.HTTP))
+            js = crawler.fetch(js_url, FetchPlan(fetch=FetchMode.BROWSER, wait_for=wait_for))
+            plain2 = crawler.fetch(plain_url2, FetchPlan(fetch=FetchMode.HTTP))
         except CrawlError as exc:
             print(f"FAIL  краул упал (ReactorNotRestartable?): {exc}")
             return 1

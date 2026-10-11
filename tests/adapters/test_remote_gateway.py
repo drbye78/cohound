@@ -41,7 +41,7 @@ from core.ports.extractor import ExtractorPort
 from core.ports.gateway import ContentGateway
 from core.ports.registry import RegistryFetcherPort
 from core.ports.search import SearchAdapterPort, SearchQuery, SearchResult
-from core.ports.types import ExtractedDoc, ProductRef, RawPage, RenderMode
+from core.ports.types import ExtractedDoc, FetchMode, FetchPlan, ProductRef, RawPage
 from core.util.hashing import content_hash
 
 _REQUEST_ID = "0" * 32
@@ -253,19 +253,21 @@ def test_remote_crawler_decodes_base64_and_rehashes() -> None:
         }
 
     crawler = RemoteCrawler(_gw(respond))
-    page = crawler.fetch("https://site.test/start", RenderMode.BROWSER)
+    page = crawler.fetch(
+        "https://site.test/start", FetchPlan(fetch=FetchMode.BROWSER)
+    )
 
     assert isinstance(page, RawPage)
     assert page.url == "https://site.test/final"
     assert page.content == content
     assert page.status_code == 200
     assert page.content_type == "text/html; charset=utf-8"
-    assert page.render_mode is RenderMode.BROWSER
-    # Запрос: /v1/fetch, extract=False (сырые байты).
+    assert page.fetch_mode is FetchMode.BROWSER
+    # Запрос: /v1/fetch с осями fetch=browser/extract=auto (сырые байты — retention).
     assert seen["op"] == "fetch"
     assert seen["payload"]["url"] == "https://site.test/start"
-    assert seen["payload"]["render"] == "browser"
-    assert seen["payload"]["extract"] is False
+    assert seen["payload"]["fetch"] == "browser"
+    assert seen["payload"]["extract"] == "auto"
 
 
 def test_remote_crawler_rejects_hash_mismatch() -> None:
@@ -357,7 +359,7 @@ def test_remote_search_fetch_returns_raw_page() -> None:
 
     def respond(op: str, payload: Mapping[str, Any]) -> Any:
         assert op == "fetch"
-        assert payload["extract"] is False
+        assert payload["extract"] == "auto"
         return {"raw": {"content": content.decode()}, "fetched_at": "T"}
 
     page = RemoteSearch(_gw(respond)).fetch("https://a.test")
@@ -471,10 +473,10 @@ def test_remote_extractor_returns_doc_and_rehashes() -> None:
     assert doc.content_hash == content_hash(text)  # пересчитан ядром (I19)
     assert doc.extractor_version == "trafilatura-html-1"
     assert doc.error is None
-    # 07 §3: /v1/fetch с extract=True.
+    # 07 §3: /v1/fetch с осью extract (auto по умолчанию).
     assert seen["op"] == "fetch"
     assert seen["payload"]["url"] == "https://doc.test/x"
-    assert seen["payload"]["extract"] is True
+    assert seen["payload"]["extract"] == "auto"
     assert isinstance(extractor, ExtractorPort)
     assert extractor.version
 

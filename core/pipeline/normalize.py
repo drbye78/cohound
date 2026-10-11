@@ -22,12 +22,12 @@ from typing import Any
 
 import yaml
 
+from core.config.domain_profiles import DomainProfile, load_domain_profiles
 from core.config.run_config import (
     cross_check_products,
     load_baselines,
     load_catalog,
     load_cohort,
-    load_domain_profiles,
     load_golden,
     load_package_manifest,
     load_run_config,
@@ -71,7 +71,7 @@ class RunInputs:
     baselines: list[BaselineRow]
     cohort: Cohort
     golden: list[GoldenRow]
-    domain_profiles: dict[str, Any] = field(default_factory=dict)
+    domain_profiles: dict[str, DomainProfile] = field(default_factory=dict)
     scope_attestation_procedure: str | None = None
 
 

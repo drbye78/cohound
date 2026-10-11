@@ -10,14 +10,35 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from enum import StrEnum
+
+from core.domain.enums import ExtractionRoute, FetchMode
+
+# Переиспользуем доменные оси (D2): краулер видит ``fetch``/``extract`` как value-объекты,
+# не как строки. Реэкспорт — чтобы адаптеры/edge импортировали их из порт-слоя.
+__all__ = [
+    "ExtractionRoute",
+    "FetchMode",
+    "FetchPlan",
+    "RawPage",
+    "ExtractedDoc",
+    "Chunk",
+    "ProductRef",
+]
 
 
-class RenderMode(StrEnum):
-    """Режим получения страницы: обычный HTTP или браузерный рендер (JS)."""
+@dataclass(frozen=True)
+class FetchPlan:
+    """План получения и извлечения страницы (D2).
 
-    HTTP = "http"
-    BROWSER = "browser"
+    Две независимые оси: ``fetch`` (HTTP/браузер) и ``extract`` (авто/HTML/документ),
+    плюс опциональное JS-условие ожидания для браузерного рендера. Единый value-объект
+    резолвится в pipeline (:func:`core.pipeline.fetch_plan.resolve_fetch_plan`) и
+    передаётся и краулеру, и экстрактору — адаптеры сами план не строят.
+    """
+
+    fetch: FetchMode = FetchMode.HTTP
+    extract: ExtractionRoute = ExtractionRoute.AUTO
+    wait_for: str | None = None
 
 
 @dataclass(frozen=True)
@@ -27,7 +48,7 @@ class RawPage:
     url: str
     content: bytes
     fetched_at: str
-    render_mode: RenderMode = RenderMode.HTTP
+    fetch_mode: FetchMode = FetchMode.HTTP
     lang: str | None = None
     status_code: int | None = None
     content_type: str | None = None

@@ -213,7 +213,21 @@ preliminary не совместим с capability_ranked — I13). `ranking_poli
 - `baselines.csv` → `list[BaselineRow]`.
 - `cohort.yaml` → `Cohort` (ровно один якорь — §1.6).
 - `golden.csv` → `list[GoldenRow]` (тир fast/full; страта ❌ обязательна для full).
-- `domain_profiles.yaml` → профили рендера per domain.
+- `domain_profiles.yaml` → `dict[str, DomainProfile]` — две независимые оси получения
+  контента: `fetch: http|browser` и `extract: auto|html|document` (+ опц. `wait_for` для
+  браузерного рендера). Ключ — `host` с опциональным `/path`; схема строгая
+  (`extra="forbid"`: старые `render`/`index`/`spa` отвергаются). Резолв `FetchPlan` для
+  каждого URL — **в pipeline** (`pipeline/fetch_plan.py`), не в адаптерах:
+
+  ```yaml
+  docs.example:          {fetch: http,    extract: html}
+  app.example:           {fetch: browser, extract: html, wait_for: "() => document.readyState === 'complete'"}
+  example.org/documents: {fetch: http,    extract: document}
+  ```
+
+  Матчинг: host (или родительский суффикс) + опциональный префикс пути; приоритет —
+  длиннейший `path_key`, затем длиннейший `host_key`. Явный `--render-modes` по точному URL
+  переопределяет **только** ось `fetch`, оставляя `extract`/`wait_for` из профиля.
 
 ### D.3. Линтер (`pipeline/lint.py`, блокирует прогон)
 
@@ -351,8 +365,10 @@ hound run \
 
 - `<urls>.json` — `{product_id: [url, ...]}` (явный корпусный вход, Ш5; `doc_domains`
   паспортов молча не фетчатся, I19).
-- `[--render-modes <render>.json]` — `{url: "http"|"browser"}` для SPA/JS-страниц
-  (значение не из `http`/`browser` → `EXIT_USAGE`).
+- `[--render-modes <render>.json]` — `{url: "http"|"browser"}`: явное переопределение оси
+  `fetch` для SPA/JS-страниц (значение не из `http`/`browser` → `EXIT_USAGE`). **Явное
+  переопределение побеждает доменный профиль** по оси `fetch`; `extract`/`wait_for` при этом
+  берутся из `domain_profiles.yaml` (D.2).
 - `--cutoff-k K` (I20) и `--render-modes` влияют на фазы Ш5/Ш6; `--cutoff-k` имеет смысл
   при прогоне до `evaluate`.
 

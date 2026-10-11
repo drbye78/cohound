@@ -67,6 +67,7 @@ from core.config.deploy import (
     load_deploy_config,
     resolve_search_provider,
 )
+from core.config.domain_profiles import DomainProfile
 from core.pipeline import Ports, Runner
 from core.pipeline.runner import PHASES, Clock, PhaseFn
 from core.ports.crawler import CrawlerPort
@@ -76,7 +77,7 @@ from core.ports.gateway import ContentGateway
 from core.ports.llm import EvaluatorPort
 from core.ports.registry import RegistryFetcherPort
 from core.ports.search import SearchAdapterPort
-from core.ports.types import ExtractedDoc, RawPage
+from core.ports.types import ExtractedDoc, ExtractionRoute, RawPage
 from core.store.sqlite_store import SqliteStore
 from core.util.cache import ContentAddressedCache
 
@@ -441,7 +442,7 @@ def build_scout_crawler(
     *,
     deploy: DeployConfig | None = None,
     cache: ContentAddressedCache | None = None,
-    domain_profiles: Mapping[str, Any] | None = None,
+    domain_profiles: Mapping[str, DomainProfile] | None = None,
 ) -> CrawlerPort:
     """Собирает краулер для ``passport-scout`` (дефолт — лёгкий, A1/MVP).
 
@@ -450,7 +451,7 @@ def build_scout_crawler(
     :data:`ENV_SCOUT_CRAWLER` ∈ :data:`SUPPORTED_SCOUT_CRAWLERS`:
 
     * ``http`` (дефолт) — :class:`HttpCrawler`;
-    * ``scrapy`` — :class:`ScrapyCrawler` (прежнее поведение).
+    * ``scrapy`` — :class:`ScrapyCrawler` (браузерный рендер).
 
     Для ``http`` применяется операционная политика :class:`~core.config.deploy.CrawlConfig`
     из ``deploy.yaml`` (``user_agent``/``timeout_s``/``follow_redirects``). ``deploy=None``
@@ -459,14 +460,21 @@ def build_scout_crawler(
     (обратная совместимость). Недоступность зависимости даёт понятный ``CrawlError`` на
     фетче (адаптер не падает на конструкторе). Тесты инъектируют ``crawler`` в :func:`main`.
 
-    **R7-кэш и домен-профили.** ``cache`` — глобальный content-addressed кэш
-    (``core.util.cache``, ADR 0016); протягивается в оба краулера. ``domain_profiles``
-    (per-domain режимы рендера) применимы только к браузерному :class:`ScrapyCrawler`;
-    :class:`HttpCrawler` их **не принимает** (HTTP-only, R7/03 §D.5).
+    **Исполнимость (D2).** Лёгкий ``HttpCrawler`` не умеет ``fetch: browser``. Проверка
+    исполнимости **не** делается здесь: иначе ``hound run`` падал бы на сборке композиции
+    даже для ``--until plan`` и для наборов URL, не задевающих browser-домены. Она
+    URL-скоупедится в pipeline (:func:`core.pipeline.corpus.build_corpus`): browser-URL при
+    HTTP-краулере пропускается с пофURL-ошибкой, не роняя фазу. Выбор ``http``/``scrapy`` —
+    только env :data:`ENV_SCOUT_CRAWLER`.
+
+    **R7-кэш.** ``cache`` — глобальный content-addressed кэш (``core.util.cache``,
+    ADR 0016), протягивается в краулер. План (``FetchPlan``) резолвится в pipeline
+    (:func:`core.pipeline.fetch_plan.resolve_fetch_plan`), поэтому профили сюда не передаются.
 
     :param deploy: типизированный deploy-конфиг (политика ``crawl``); ``None`` → канон.
     :param cache: глобальный кэш внешних вызовов; ``None`` → без кэша.
-    :param domain_profiles: per-domain рендер-профили (только для ``scrapy``).
+    :param domain_profiles: зарезервирован для совместимости сигнатуры; исполнимость
+        профилей проверяется URL-скоупедированно в pipeline (D2).
     :raises WiringError: неизвестное значение ``COHOUND_SCOUT_CRAWLER``.
     """
     raw = os.environ.get(ENV_SCOUT_CRAWLER)
@@ -477,7 +485,7 @@ def build_scout_crawler(
         config = deploy if deploy is not None else load_deploy_config(None)
         return HttpCrawler(**_http_crawler_kwargs(config), cache=cache)
     if name == "scrapy":
-        return ScrapyCrawler(cache=cache, domain_profiles=domain_profiles)
+        return ScrapyCrawler(cache=cache)
     raise WiringError(
         f"{ENV_SCOUT_CRAWLER}: неизвестный краулер {name!r}; "
         f"поддерживаются: {', '.join(SUPPORTED_SCOUT_CRAWLERS)}"
@@ -509,11 +517,12 @@ _DOC_SUFFIX_BY_CONTENT_TYPE: dict[str, str] = {
 }
 
 
-def _document_filename(page: RawPage) -> str | None:
+def _detect_document_filename(page: RawPage) -> str | None:
     """Имя файла с документным расширением, если формат страницы обрабатывает docling.
 
     Формат выводится из URL (суффикс пути), затем из ``content_type``. Возврат ``None``
-    означает, что страницу обрабатывает HTML-путь (trafilatura).
+    означает, что страницу обрабатывает HTML-путь (trafilatura). Используется только при
+    маршруте ``AUTO``; ``HTML``/``DOCUMENT`` задают путь явно (D2).
     """
     suffix = Path(urlsplit(page.url).path).suffix.lower()
     if suffix and DoclingDocumentExtractor.supports(f"document{suffix}"):
@@ -526,10 +535,14 @@ def _document_filename(page: RawPage) -> str | None:
 class _LocalExtractor:
     """Композит локальной экстракции: документы (docling) поверх HTML (trafilatura).
 
-    Реализует ``ExtractorPort`` структурно. Документные форматы (pdf/docx/pptx/xlsx)
-    уходят в :class:`DoclingDocumentExtractor`, если тот доступен; всё прочее — в
-    :class:`HtmlExtractor`. Оба адаптера деградируют грациозно (``ExtractedDoc.error``),
-    поэтому композит не бросает исключений на уровне извлечения.
+    Реализует ``ExtractorPort`` структурно. Маршрут ``ExtractionRoute`` (D2):
+
+    * ``HTML`` — принудительно :class:`HtmlExtractor` (trafilatura);
+    * ``DOCUMENT`` — принудительно :class:`DoclingDocumentExtractor` (docling);
+    * ``AUTO`` — авто-детект формата (URL/content-type): документ → docling, иначе HTML.
+
+    Оба адаптера деградируют грациозно (``ExtractedDoc.error``), поэтому композит не
+    бросает исключений на уровне извлечения.
     """
 
     def __init__(
@@ -545,13 +558,21 @@ class _LocalExtractor:
             else f"{html_version}+{documents.version}"
         )
 
-    def extract(self, page: RawPage) -> ExtractedDoc:
-        """``RawPage`` → ``ExtractedDoc``; документный формат → docling, иначе HTML."""
-        if self._documents is not None:
-            filename = _document_filename(page)
-            if filename is not None:
-                return self._documents.extract_bytes(page.content, filename)
-        return self._html.extract(page)
+    def extract(
+        self, page: RawPage, route: ExtractionRoute = ExtractionRoute.AUTO
+    ) -> ExtractedDoc:
+        """``RawPage`` → ``ExtractedDoc`` по маршруту ``route`` (D2)."""
+        if route is ExtractionRoute.HTML:
+            return self._html.extract(page, route)
+        if self._documents is None:
+            return self._html.extract(page, route)
+        if route is ExtractionRoute.DOCUMENT:
+            filename = _detect_document_filename(page)
+            return self._documents.extract_bytes(page.content, filename or "document.pdf")
+        filename = _detect_document_filename(page)
+        if filename is not None:
+            return self._documents.extract_bytes(page.content, filename)
+        return self._html.extract(page, route)
 
 
 def _build_local_ports(
@@ -622,7 +643,7 @@ def build_adapters(
     index_root: str | Path = "index_store",
     package: str | None = None,
     cache: ContentAddressedCache | None = None,
-    domain_profiles: Mapping[str, Any] | None = None,
+    domain_profiles: Mapping[str, DomainProfile] | None = None,
 ) -> Ports:
     """Собирает порты внешних систем по профилю развёртывания (``03`` §E.3).
 
@@ -650,8 +671,9 @@ def build_adapters(
     :param package: пакет по умолчанию для ``NpyIndexBuilder`` (``local``).
     :param cache: глобальный content-addressed кэш (R7, ADR 0016); протягивается в
         локальный краулер корпуса (``local``).
-    :param domain_profiles: per-domain рендер-профили (``domain_profiles.yaml``,
-        ``03`` §D.2); применяются локальным браузерным краулером (``local``).
+    :param domain_profiles: типизированные доменные профили (``domain_profiles.yaml``,
+        ``03`` §D.2); используются локальным краулером для fail-fast проверки ``fetch: browser``
+        (план резолвится в pipeline).
     :raises WiringError: неизвестный профиль или split без валидного deploy-конфига.
     """
     if profile == LOCAL_PROFILE:

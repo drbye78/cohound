@@ -2,9 +2,11 @@
 
 Сеть и браузеры не используются: внедряется ``fetcher`` (шов), кэш — ``tmp_path``.
 Проверяются: интеграция с content-addressed кэшем (промах → фетч → запись →
-попадание без повторного фетча), per-domain рендер-профили, проброс
-``RenderMode.BROWSER``, SSRF-отказ до фетча, устойчивый импорт без Scrapy,
-``version`` и структурное соответствие ``CrawlerPort``. Данные нейтральны (§1.3).
+попадание без повторного фетча), проброс ``FetchPlan`` (``fetch: browser`` игнорирует
+кэш), SSRF-отказ до фетча, устойчивый импорт без Scrapy, ``version`` и структурное
+соответствие ``CrawlerPort``. Резолв доменных профилей — задача pipeline
+(``core.pipeline.fetch_plan``), см. ``tests/pipeline/test_fetch_plan.py``.
+Данные нейтральны (§1.3).
 """
 
 from __future__ import annotations
@@ -14,40 +16,43 @@ from pathlib import Path
 import pytest
 
 from core.adapters.crawl_scrapy import CrawlError, CrawlUrlError, ScrapyCrawler
-from core.config.run_config import load_domain_profiles
 from core.ports.crawler import CrawlerPort
-from core.ports.types import RawPage, RenderMode
+from core.ports.types import FetchMode, FetchPlan, RawPage
 from core.util.cache import ContentAddressedCache, http_key
 
 FIXTURES = Path(__file__).parent / "fixtures"
 FIXED_TS = "2026-01-01T00:00:00+00:00"
 URL = "https://example.com/page"
 
+_BROWSER = FetchPlan(fetch=FetchMode.BROWSER)
 
-def _page(url: str, content: bytes = b"payload", render: RenderMode = RenderMode.HTTP) -> RawPage:
-    return RawPage(url=url, content=content, fetched_at=FIXED_TS, render_mode=render)
+
+def _page(
+    url: str, content: bytes = b"payload", fetch: FetchMode = FetchMode.HTTP
+) -> RawPage:
+    return RawPage(url=url, content=content, fetched_at=FIXED_TS, fetch_mode=fetch)
 
 
 class _RecordingFetcher:
-    """Фетчер-объект с методом ``fetch``; записывает ``(url, render)`` вызовы."""
+    """Фетчер-объект с методом ``fetch``; записывает ``(url, plan.fetch)`` вызовы."""
 
     def __init__(self, content: bytes = b"payload") -> None:
-        self.calls: list[tuple[str, RenderMode]] = []
+        self.calls: list[tuple[str, FetchMode]] = []
         self.content = content
 
-    def fetch(self, url: str, render: RenderMode = RenderMode.HTTP) -> RawPage:
-        self.calls.append((url, render))
-        return _page(url, self.content, render)
+    def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:
+        self.calls.append((url, plan.fetch))
+        return _page(url, self.content, plan.fetch)
 
 
 def _counting_fetcher(
-    calls: list[tuple[str, RenderMode]], content: bytes = b"payload"
+    calls: list[tuple[str, FetchMode]], content: bytes = b"payload"
 ):
-    """Callable-фетчер ``(url, render) -> RawPage``, пишущий вызовы в ``calls``."""
+    """Callable-фетчер ``(url, plan) -> RawPage``, пишущий вызовы в ``calls``."""
 
-    def fetch(url: str, render: RenderMode = RenderMode.HTTP) -> RawPage:
-        calls.append((url, render))
-        return _page(url, content, render)
+    def fetch(url: str, plan: FetchPlan = FetchPlan()) -> RawPage:
+        calls.append((url, plan.fetch))
+        return _page(url, content, plan.fetch)
 
     return fetch
 
@@ -58,7 +63,7 @@ def _counting_fetcher(
 
 
 def test_cache_miss_fetches_and_second_call_served_from_cache(tmp_path: Path) -> None:
-    calls: list[tuple[str, RenderMode]] = []
+    calls: list[tuple[str, FetchMode]] = []
     crawler = ScrapyCrawler(
         _counting_fetcher(calls, b"fresh-body"),
         cache=ContentAddressedCache(tmp_path),
@@ -88,7 +93,7 @@ def test_cache_hit_skips_fetcher(tmp_path: Path) -> None:
 
 
 def test_without_cache_each_call_fetches(tmp_path: Path) -> None:
-    calls: list[tuple[str, RenderMode]] = []
+    calls: list[tuple[str, FetchMode]] = []
     crawler = ScrapyCrawler(_counting_fetcher(calls))
     crawler.fetch(URL)
     crawler.fetch(URL)
@@ -119,21 +124,21 @@ class _SpyCache(ContentAddressedCache):
         return super().put_bytes(kind, key, data)
 
 
-def test_browser_render_bypasses_cache(tmp_path: Path) -> None:
+def test_browser_fetch_bypasses_cache(tmp_path: Path) -> None:
     cache = _SpyCache(tmp_path)
     fetcher = _RecordingFetcher(b"live-body")
     crawler = ScrapyCrawler(fetcher, cache=cache)
 
-    page = crawler.fetch(URL, render=RenderMode.BROWSER)
+    page = crawler.fetch(URL, _BROWSER)
 
     assert page.content == b"live-body"
-    assert fetcher.calls == [(URL, RenderMode.BROWSER)]
+    assert fetcher.calls == [(URL, FetchMode.BROWSER)]
     # Браузерный рендер не читает и не пишет кэш (нет кросс-контаминации HTTP/browser).
     assert cache.gets == []
     assert cache.puts == []
 
 
-def test_browser_render_always_live_even_with_cache(tmp_path: Path) -> None:
+def test_browser_fetch_always_live_even_with_cache(tmp_path: Path) -> None:
     cache = _SpyCache(tmp_path)
     # Предзаполняем кэш под тем же ключом — браузер обязан его игнорировать.
     cache.put_bytes("http", http_key(URL), b"cached-body")
@@ -142,19 +147,19 @@ def test_browser_render_always_live_even_with_cache(tmp_path: Path) -> None:
     fetcher = _RecordingFetcher(b"live-body")
     crawler = ScrapyCrawler(fetcher, cache=cache)
 
-    first = crawler.fetch(URL, render=RenderMode.BROWSER)
-    second = crawler.fetch(URL, render=RenderMode.BROWSER)
+    first = crawler.fetch(URL, _BROWSER)
+    second = crawler.fetch(URL, _BROWSER)
 
     assert first.content == b"live-body" and second.content == b"live-body"
     assert len(fetcher.calls) == 2
     assert cache.gets == [] and cache.puts == []
 
 
-def test_http_render_uses_cache(tmp_path: Path) -> None:
+def test_http_fetch_uses_cache(tmp_path: Path) -> None:
     cache = _SpyCache(tmp_path)
     crawler = ScrapyCrawler(_RecordingFetcher(b"live-body"), cache=cache)
 
-    crawler.fetch(URL, render=RenderMode.HTTP)
+    crawler.fetch(URL, FetchPlan(fetch=FetchMode.HTTP))
 
     assert cache.gets and cache.puts
     assert cache.gets[0] == ("http", http_key(URL))
@@ -162,62 +167,24 @@ def test_http_render_uses_cache(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Рендер-профили по домену
+# План получения (FetchPlan)
 # ---------------------------------------------------------------------------
 
 
-def test_render_profile_overrides_default_argument() -> None:
-    fetcher = _RecordingFetcher()
-    crawler = ScrapyCrawler(
-        fetcher, domain_profiles={"example.com": {"render": "browser"}}
-    )
-    crawler.fetch(URL, render=RenderMode.HTTP)
-    assert fetcher.calls == [(URL, RenderMode.BROWSER)]
-
-
-def test_unknown_domain_falls_back_to_argument() -> None:
-    fetcher = _RecordingFetcher()
-    crawler = ScrapyCrawler(
-        fetcher, domain_profiles={"example.com": {"render": "browser"}}
-    )
-    crawler.fetch("https://other.test/page", render=RenderMode.BROWSER)
-    assert fetcher.calls == [("https://other.test/page", RenderMode.BROWSER)]
-
-
-def test_browser_mode_passthrough_without_profile() -> None:
+def test_plan_browser_passthrough() -> None:
     fetcher = _RecordingFetcher()
     crawler = ScrapyCrawler(fetcher)
-    page = crawler.fetch(URL, render=RenderMode.BROWSER)
-    assert fetcher.calls == [(URL, RenderMode.BROWSER)]
-    assert page.render_mode is RenderMode.BROWSER
+    page = crawler.fetch(URL, _BROWSER)
+    assert fetcher.calls == [(URL, FetchMode.BROWSER)]
+    assert page.fetch_mode is FetchMode.BROWSER
 
 
-def test_render_for_exact_suffix_nested_and_bare() -> None:
-    crawler = ScrapyCrawler(
-        _RecordingFetcher(),
-        domain_profiles={
-            "example.com": {"render": "browser"},
-            "nested.example": {"render": {"mode": "http"}},
-            "bare.example": "browser",
-        },
-    )
-    assert crawler.render_for("https://example.com/a") is RenderMode.BROWSER
-    # суффиксное совпадение: профиль родительского домена применяется к поддомену
-    assert crawler.render_for("https://www.example.com/a") is RenderMode.BROWSER
-    # вложенная форма render.mode
-    assert crawler.render_for("https://nested.example/a") is RenderMode.HTTP
-    # bare-строка
-    assert crawler.render_for("https://bare.example/a") is RenderMode.BROWSER
-    # неизвестный домен → дефолт
-    assert crawler.render_for("https://other.test/a") is RenderMode.HTTP
-
-
-def test_domain_profiles_loaded_from_yaml_fixture() -> None:
-    profiles = load_domain_profiles(FIXTURES / "domain_profiles.yaml")
-    crawler = ScrapyCrawler(_RecordingFetcher(), domain_profiles=profiles)
-    assert crawler.render_for("https://example.com/a") is RenderMode.BROWSER
-    assert crawler.render_for("https://static.example/a") is RenderMode.HTTP
-    assert crawler.render_for("https://nested.example/a") is RenderMode.BROWSER
+def test_plan_default_is_http() -> None:
+    fetcher = _RecordingFetcher()
+    crawler = ScrapyCrawler(fetcher)
+    page = crawler.fetch(URL)
+    assert fetcher.calls == [(URL, FetchMode.HTTP)]
+    assert page.fetch_mode is FetchMode.HTTP
 
 
 # ---------------------------------------------------------------------------
@@ -246,7 +213,7 @@ def test_ssrf_error_is_crawl_error_too() -> None:
 
 
 def test_fetcher_exception_wrapped_in_crawl_error(tmp_path: Path) -> None:
-    def boom(url: str, render: RenderMode = RenderMode.HTTP) -> RawPage:
+    def boom(url: str, plan: FetchPlan = FetchPlan()) -> RawPage:
         raise RuntimeError("network down")
 
     cache = ContentAddressedCache(tmp_path)

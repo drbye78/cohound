@@ -81,10 +81,10 @@ application-layer firewall (L7). Функционал, которому нуже
 **инициирует**; edge **отвечает**. Обратного инициирования из edge в core нет.
 
 ```
-POST /v1/fetch    {url, render: "http"|"browser", lang, extract: bool}
+POST /v1/fetch    {url, fetch: "http"|"browser", lang, extract: "auto"|"html"|"document", wait_for: str|null}
    → {request_id, final_url, status_code, content_type, fetched_at,
       raw:  {hash, size, bytes_b64? | ref},                 # сырые байты (retention)
-      text: {content, hash, extractor_version} | null,      # очищенный markdown (если extract)
+      text: {content, hash, extractor_version} | null,      # очищенный markdown (результат extract-оси)
       error: str | null}
 
 POST /v1/search   {query, lang, limit, phase}

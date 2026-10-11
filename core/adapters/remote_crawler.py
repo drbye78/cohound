@@ -18,13 +18,16 @@ from core.adapters.remote_gateway import (
     raw_page_from_response,
 )
 from core.ports.gateway import ContentGateway
-from core.ports.types import RawPage, RenderMode
+from core.ports.types import FetchPlan, RawPage
 
 __all__ = ["RemoteCrawler"]
 
 
 class RemoteCrawler:
     """``CrawlerPort`` через DMZ-шов. Drop-in для реального краулера (07 §4)."""
+
+    #: Браузерный рендер исполняется на edge (DMZ) — прокси поддерживает ``fetch: browser``.
+    supports_browser = True
 
     def __init__(self, gateway: ContentGateway, *, version: str = "remote-crawler-1") -> None:
         self._gateway = gateway
@@ -35,16 +38,20 @@ class RemoteCrawler:
         """Доступен ли транспорт шва (``httpx`` или внедрённый ``transport``)."""
         return bool(getattr(self._gateway, "available", True))
 
-    def fetch(self, url: str, render: RenderMode = RenderMode.HTTP) -> RawPage:
-        """``/v1/fetch`` с ``extract=False`` → ``RawPage`` (сырые байты, retention)."""
-        mode = RenderMode(render)
+    def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:
+        """``/v1/fetch`` → ``RawPage`` (сырые байты, retention).
+
+        План сериализуется целиком (``fetch``/``extract``/``wait_for``): edge исполняет
+        обе оси, а прокси потребляет сырые байты. Нейтрален (§1.3).
+        """
         payload = {
             "url": url,
-            "render": mode.value,
+            "fetch": plan.fetch.value,
             "lang": None,
-            "extract": False,
+            "extract": plan.extract.value,
+            "wait_for": plan.wait_for,
         }
         response = self._gateway.call("fetch", payload)
         if not isinstance(response, Mapping):
             raise RemoteContentError("fetch: payload ответа edge не является отображением")
-        return raw_page_from_response(response, url=url, render=mode)
+        return raw_page_from_response(response, url=url, fetch=plan.fetch)

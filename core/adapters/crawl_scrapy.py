@@ -5,15 +5,13 @@ I19; 02 §B.1). Ответственность адаптера (01 §3.2, ``por
 
 * **robots=obey** — реальный путь явно выставляет ``ROBOTSTXT_OBEY = True``
   (дефолт Scrapy при встраивании как библиотеки — ``False``, 05 §2.5);
-* **per-domain рендер-профили** — домен берётся из host URL, профиль задаёт
-  режим (HTTP или браузерный рендер JS) и опциональное ожидание JS;
-* **playwright per-request** — при браузерном режиме запрос идёт с ``playwright``-
-  meta (снимок после готовности JS, V5-оговорки 05 §2.5);
+* **playwright per-request** — при ``plan.fetch is FetchMode.BROWSER`` запрос идёт с
+  ``playwright``-meta (снимок после готовности JS, ``plan.wait_for``; V5-оговорки 05 §2.5);
 * **retries/backoff** — через настройки Scrapy (``RETRY_TIMES``/``DOWNLOAD_DELAY``);
 * **content-addressed кэш** — перед живым фетчем консультируется глобальный кэш
   (``core.util.cache``, ADR 0016): попадание → ``RawPage`` из байтов, промах →
   фетч + ``put_bytes("http", http_key(url), content)`` (R7 между ``run_id``).
-  Кэш применяется **только** к ``RenderMode.HTTP``: браузерный рендер всегда
+  Кэш применяется **только** к ``FetchMode.HTTP``: браузерный рендер всегда
   идёт вживую и не пишется в кэш (детерминизм R7; см. ``fetch``).
 
 **Один реактор на процесс.** Twisted-реактор одноразовый (``ReactorNotRestartable``),
@@ -37,7 +35,7 @@ I19; 02 §B.1). Ответственность адаптера (01 §3.2, ``por
 пути. ``available`` показывает готовность.
 
 **Шов для тестов.** Конструктор принимает ``fetcher`` — callable
-``(url, render) -> RawPage`` или объект с методом ``fetch(url, render)``. Если он
+``(url, plan) -> RawPage`` или объект с методом ``fetch(url, plan)``. Если он
 задан, реальный Scrapy-путь не задействуется, и юнит-тесты не запускают
 Twisted-реактор и не требуют браузеров. Если ``fetcher is None`` — используется
 настоящий Scrapy. Дополнительно ``worker`` позволяет подменить общий реактор-воркер
@@ -61,9 +59,8 @@ from concurrent.futures import TimeoutError as FuturesTimeoutError
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Protocol, cast, runtime_checkable
-from urllib.parse import urlsplit
 
-from core.ports.types import RawPage, RenderMode
+from core.ports.types import FetchMode, FetchPlan, RawPage
 from core.util.cache import ContentAddressedCache, http_key
 from core.util.security import validate_url
 
@@ -74,9 +71,9 @@ __all__ = [
     "ScrapyCrawler",
 ]
 
-# Внедряемый фетчер: callable ``(url, render) -> RawPage``. Объект с методом
-# ``fetch(url, render)`` также принимается (см. ``PageFetcher``).
-FetchFn = Callable[[str, RenderMode], RawPage]
+# Внедряемый фетчер: callable ``(url, plan) -> RawPage``. Объект с методом
+# ``fetch(url, plan)`` также принимается (см. ``PageFetcher``).
+FetchFn = Callable[[str, FetchPlan], RawPage]
 
 # Callable-шов воркера: ``(settings, spec) -> deferred`` (реальный CrawlerRunner
 # либо тестовый фейк). Возвращённый объект обязан поддерживать ``addCallbacks``.
@@ -116,8 +113,6 @@ _PLAYWRIGHT_SETTINGS: dict[str, Any] = {
     "PLAYWRIGHT_DEFAULT_NAVIGATION_TIMEOUT": 15000,
 }
 
-_RENDER_VALUES = {mode.value: mode for mode in RenderMode}
-
 # Таймаут ожидания старта общего реактора (поток обязан успеть установить его).
 _STARTUP_TIMEOUT = 30.0
 # Таймаут best-effort останова общего реактора при ``close``.
@@ -142,7 +137,7 @@ class CrawlUrlError(CrawlError, ValueError):
 class PageFetcher(Protocol):
     """Минимальный контракт внедряемого фетчера (альтернатива callable)."""
 
-    def fetch(self, url: str, render: RenderMode = RenderMode.HTTP) -> RawPage: ...
+    def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage: ...
 
 
 def _now_iso() -> str:
@@ -153,51 +148,6 @@ def _now_iso() -> str:
 def _scrapy_available() -> bool:
     """Установлен ли Scrapy (без импорта тяжёлого пакета)."""
     return importlib.util.find_spec("scrapy") is not None
-
-
-def _normalize_render(value: Any) -> RenderMode | None:
-    """Приводит значение профиля к ``RenderMode`` или ``None`` (неизвестно)."""
-    if isinstance(value, RenderMode):
-        return value
-    if isinstance(value, str):
-        return _RENDER_VALUES.get(value.strip().lower())
-    return None
-
-
-def _profile_render(profile: Any) -> RenderMode | None:
-    """Извлекает режим рендера из профиля домена.
-
-    Поддерживаемые формы профиля (слабая схема ``load_domain_profiles``, D.2):
-
-    * строка: ``"http"`` | ``"browser"``;
-    * словарь с ``render: "http"|"browser"``;
-    * словарь с ``render: {mode: "http"|"browser", ...}`` (вложенная форма).
-
-    Неизвестное/пустое значение → ``None`` (режим остаётся за аргументом ``fetch``).
-    """
-    if isinstance(profile, str):
-        return _normalize_render(profile)
-    if isinstance(profile, Mapping):
-        raw = profile.get("render")
-        direct = _normalize_render(raw)
-        if direct is not None:
-            return direct
-        if isinstance(raw, Mapping):
-            return _normalize_render(raw.get("mode"))
-    return None
-
-
-def _profile_wait_for(profile: Any) -> str | None:
-    """JS-условие ожидания из профиля (``wait_for``) либо ``None``.
-
-    Это выражение передаётся в ``PageMethod("wait_for_function", ...)``, чтобы
-    снимок брался после готовности отложенного JS (оговорка V5).
-    """
-    if isinstance(profile, Mapping):
-        value = profile.get("wait_for")
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-    return None
 
 
 # ---------------------------------------------------------------------------
@@ -214,7 +164,7 @@ class _CrawlSpec:
     """
 
     url: str
-    render: RenderMode
+    fetch: FetchMode
     wait_for: str | None
     collected: list[RawPage] = field(default_factory=list)
 
@@ -261,7 +211,7 @@ def _default_crawl(settings: Mapping[str, Any], spec: _CrawlSpec) -> Any:
 
         async def start(self):  # noqa: ANN201 - сигнатура Scrapy 2.19
             meta: dict[str, Any] = {}
-            if spec.render is RenderMode.BROWSER:
+            if spec.fetch is FetchMode.BROWSER:
                 from scrapy_playwright.page import (  # type: ignore[import-not-found]
                     PageMethod,
                 )
@@ -292,7 +242,7 @@ def _default_crawl(settings: Mapping[str, Any], spec: _CrawlSpec) -> Any:
                     url=response.url,
                     content=response.body,
                     fetched_at=_now_iso(),
-                    render_mode=spec.render,
+                    fetch_mode=spec.fetch,
                     status_code=response.status,
                     content_type=content_type or None,
                 )
@@ -477,28 +427,27 @@ class ScrapyCrawler:
     """
 
     version = "scrapy-crawler-2"
+    #: Scrapy-краулер умеет per-request playwright-рендер (``fetch: browser``, D2).
+    supports_browser = True
 
     def __init__(
         self,
         fetcher: FetchFn | PageFetcher | None = None,
         *,
         cache: ContentAddressedCache | None = None,
-        domain_profiles: Mapping[str, Any] | None = None,
         scrapy_settings: Mapping[str, Any] | None = None,
         worker: _ReactorWorker | None = None,
     ) -> None:
-        """``fetcher`` — тестовый шов; ``cache`` — глобальный кэш; ``domain_profiles`` —
-        per-domain рендер-профили (из ``load_domain_profiles``); ``scrapy_settings`` —
+        """``fetcher`` — тестовый шов; ``cache`` — глобальный кэш; ``scrapy_settings`` —
         переопределения настроек реального пути; ``worker`` — тестовый шов общего
         реактор-воркера (по умолчанию — process-глобальный singleton).
+
+        Профили домена здесь **не** хранятся: план получения (``FetchPlan``) резолвится
+        в pipeline (:func:`core.pipeline.fetch_plan.resolve_fetch_plan`) и передаётся
+        готовым в :meth:`fetch`.
         """
         self._fetcher = fetcher
         self._cache = cache
-        self._profiles = {
-            str(domain).strip().lower(): profile
-            for domain, profile in (domain_profiles or {}).items()
-            if str(domain).strip()
-        }
         self._scrapy_settings = dict(scrapy_settings or {})
         self._worker = worker
 
@@ -507,74 +456,35 @@ class ScrapyCrawler:
         """Готов ли краулер: внедрённый фетчер или установленный Scrapy."""
         return self._fetcher is not None or _scrapy_available()
 
-    # -- выбор режима ---------------------------------------------------------
-
-    def render_for(self, url: str, default: RenderMode = RenderMode.HTTP) -> RenderMode:
-        """Режим рендера для URL: профиль домена (в т.ч. родительского) или ``default``.
-
-        Домен читается из host URL (регистронезависимо). Сначала ищется точное
-        совпадение, затем — совпадение по суффиксу домена (профиль ``example.com``
-        применяется к ``www.example.com``; ключи ``*.example.com``/``.example.com``
-        нормализуются к ``example.com``).
-        """
-        host = (urlsplit(url).hostname or "").strip().lower()
-        if not host:
-            return default
-        for candidate in self._profile_candidates(host):
-            profile = self._profiles.get(candidate)
-            if profile is None:
-                continue
-            mode = _profile_render(profile)
-            if mode is not None:
-                return mode
-        return default
-
-    def _profile_candidates(self, host: str) -> list[str]:
-        """Кандидаты-домены для поиска профиля: сам host + его родительские суффиксы."""
-        labels = host.split(".")
-        return [".".join(labels[i:]) for i in range(len(labels))]
-
-    def _profile_for(self, url: str) -> Any:
-        """Профиль домена URL (точное/суффиксное совпадение) либо ``None``."""
-        host = (urlsplit(url).hostname or "").strip().lower()
-        if not host:
-            return None
-        for candidate in self._profile_candidates(host):
-            if candidate in self._profiles:
-                return self._profiles[candidate]
-        return None
-
     # -- публичный контракт ---------------------------------------------------
 
-    def fetch(self, url: str, render: RenderMode = RenderMode.HTTP) -> RawPage:
-        """Загружает ``url``; ``render`` — дефолт, переопределяемый профилем домена.
+    def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:
+        """Загружает ``url`` по готовому ``plan`` (fetch/extract/wait_for).
 
-        Порядок: SSRF-валидация → выбор режима → (для HTTP) кэш → живой фетч →
-        (для HTTP) запись в кэш. Браузерный рендер **не** консультирует и не
-        пишет кэш: он недетерминирован, а общий ключ ``http_key(url)`` дал бы
-        кросс-контаминацию HTTP/browser по одному URL.
+        Порядок: SSRF-валидация → (для HTTP) кэш → живой фетч → (для HTTP) запись в
+        кэш. Браузерный рендер **не** консультирует и не пишет кэш: он недетерминирован,
+        а общий ключ ``http_key(url)`` дал бы кросс-контаминацию HTTP/browser по одному URL.
         """
         try:
             validate_url(url)
         except ValueError as exc:
             raise CrawlUrlError(f"URL отклонён SSRF-валидацией: {exc}") from exc
 
-        effective = self.render_for(url, render)
-        use_cache = effective is RenderMode.HTTP
+        use_cache = plan.fetch is FetchMode.HTTP
 
         if use_cache and self._cache is not None:
             cached = self._cache.get_bytes("http", http_key(url))
             if cached is not None:
-                return self._page_from_cache(url, cached, effective)
+                return self._page_from_cache(url, cached, plan.fetch)
 
-        page = self._fetch_live(url, effective)
+        page = self._fetch_live(url, plan)
         if use_cache:
             self._store(url, http_key(url), page.content)
         return page
 
     # -- кэш ------------------------------------------------------------------
 
-    def _page_from_cache(self, url: str, content: bytes, render: RenderMode) -> RawPage:
+    def _page_from_cache(self, url: str, content: bytes, fetch: FetchMode) -> RawPage:
         """Собирает ``RawPage`` из кэшированных байтов.
 
         Кэшируются только байты, поэтому ``status_code``/``content_type`` в
@@ -585,7 +495,7 @@ class ScrapyCrawler:
             url=url,
             content=content,
             fetched_at=self._cache_mtime_iso(url),
-            render_mode=render,
+            fetch_mode=fetch,
         )
 
     def _cache_mtime_iso(self, url: str) -> str:
@@ -606,28 +516,28 @@ class ScrapyCrawler:
 
     # -- фетч -----------------------------------------------------------------
 
-    def _fetch_live(self, url: str, effective: RenderMode) -> RawPage:
+    def _fetch_live(self, url: str, plan: FetchPlan) -> RawPage:
         """Живой фетч: внедрённый ``fetcher`` или реальный Scrapy-путь."""
         if self._fetcher is not None:
             try:
-                return self._call_fetcher(self._fetcher, url, effective)
+                return self._call_fetcher(self._fetcher, url, plan)
             except CrawlError:
                 raise
             except Exception as exc:  # noqa: BLE001 - унификация ошибок адаптера
                 raise CrawlError(f"фетч {url!r} не удался: {exc}") from exc
-        return self._fetch_with_scrapy(url, effective)
+        return self._fetch_with_scrapy(url, plan)
 
     @staticmethod
-    def _call_fetcher(fetcher: FetchFn | PageFetcher, url: str, render: RenderMode) -> RawPage:
+    def _call_fetcher(fetcher: FetchFn | PageFetcher, url: str, plan: FetchPlan) -> RawPage:
         """Вызывает внедрённый фетчер: объект с ``fetch`` или callable."""
         fetch_attr = getattr(fetcher, "fetch", None)
         if callable(fetch_attr):
-            return cast(RawPage, fetch_attr(url, render))
+            return cast(RawPage, fetch_attr(url, plan))
         if callable(fetcher):
-            return cast(RawPage, fetcher(url, render))  # type: ignore[operator]
+            return cast(RawPage, fetcher(url, plan))  # type: ignore[operator]
         raise CrawlError("внедрённый fetcher не callable и не имеет метода fetch")
 
-    def _fetch_with_scrapy(self, url: str, render: RenderMode) -> RawPage:
+    def _fetch_with_scrapy(self, url: str, plan: FetchPlan) -> RawPage:
         """Реальный путь: мультиплексирует краул на общий реактор процесса.
 
         Свежий ``CrawlerRunner`` на submit (см. воркер), один реактор на процесс.
@@ -641,9 +551,8 @@ class ScrapyCrawler:
                 "(scrapy/scrapy-playwright/playwright) или внедрите fetcher"
             )
 
-        wait_for = _profile_wait_for(self._profile_for(url))
-        settings = self._build_settings(render)
-        spec = _CrawlSpec(url=url, render=render, wait_for=wait_for)
+        settings = self._build_settings(plan.fetch)
+        spec = _CrawlSpec(url=url, fetch=plan.fetch, wait_for=plan.wait_for)
         fut: Future[bool] = Future()
         timeout_s = self._submit_timeout(settings)
         self._worker_instance().submit(settings, spec, fut, timeout_s)
@@ -679,10 +588,10 @@ class ScrapyCrawler:
         if worker is not None:
             worker.close()
 
-    def _build_settings(self, render: RenderMode) -> dict[str, Any]:
+    def _build_settings(self, fetch: FetchMode) -> dict[str, Any]:
         """Итоговые настройки Scrapy: дефолты → playwright (для browser) → overrides."""
         settings = dict(DEFAULT_SCRAPY_SETTINGS)
-        if render is RenderMode.BROWSER:
+        if fetch is FetchMode.BROWSER:
             settings.update(_PLAYWRIGHT_SETTINGS)
         settings.update(self._scrapy_settings)
         return settings

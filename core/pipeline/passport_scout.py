@@ -386,7 +386,7 @@ def scout_passport(
 ) -> PassportScoutReport:
     """Собирает страницы, зовёт LLM-разведку и строит черновик паспорта (M1).
 
-    Поток: fetch заданного ``url`` (``RenderMode.HTTP``) → extract → собрать промпт
+    Поток: fetch заданного ``url`` (дефолтный ``FetchPlan``: HTTP) → extract → собрать промпт
     (текст ≤ ``max_chars``) → ``discovery_llm.complete`` в схему
     :class:`DiscoveryPassportHypothesis` → :func:`build_passport_draft` → отчёт.
 

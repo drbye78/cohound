@@ -13,6 +13,8 @@ import yaml
 
 from core.domain.enums import (
     CapabilityPolicy,
+    ExtractionRoute,
+    FetchMode,
     Gate,
     RankingPolicy,
     SearchKind,
@@ -53,6 +55,9 @@ def assert_dictionary_integrity(path: str | Path) -> None:
         "gate",
         "search_kind",
         "stale_reason",
+        # D2: оси получения/извлечения (domain_profiles.yaml / FetchPlan).
+        "fetch_mode",
+        "extraction_route",
     ]
     missing = [k for k in required if k not in data]
     if missing:
@@ -70,6 +75,8 @@ def assert_dictionary_integrity(path: str | Path) -> None:
         "gate": {v.value for v in Gate},
         "search_kind": {v.value for v in SearchKind},
         "stale_reason": {v.value for v in StaleReason},
+        "fetch_mode": {v.value for v in FetchMode},
+        "extraction_route": {v.value for v in ExtractionRoute},
     }
     for section, expected in checks.items():
         actual = set(data[section])

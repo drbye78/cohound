@@ -28,6 +28,8 @@ from core.domain import (
     AbsenceRuleType,
     AnchorRelation,
     Archetype,
+    ExtractionRoute,
+    FetchMode,
     GoldenTier,
     InheritanceMode,
     ParamType,
@@ -136,8 +138,8 @@ def test_load_golden_tier_defaults_to_full(tmp_path: Path) -> None:
 
 def test_load_domain_profiles_happy() -> None:
     profiles = load_domain_profiles(FIXTURES / "domain_profiles.yaml")
-    assert profiles["case_x"]["render"]["mode"] == "text"
-    assert profiles["case_x"]["index"]["partition_key"] == "p1"
+    assert profiles["case_x"].fetch is FetchMode.HTTP
+    assert profiles["case_x"].extract is ExtractionRoute.HTML
 
 
 # ---------------------------------------------------------------------------

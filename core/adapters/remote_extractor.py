@@ -4,8 +4,8 @@
 байтов (docling/trafilatura) исполняется в DMZ, ядро вызывает его через
 ``ContentGateway``. Контракт порта **не меняется** (07 §4).
 
-07 §3 определяет ``POST /v1/fetch`` с флагом ``extract: bool``: при
-``extract=True`` edge выполняет fetch+extract+sanitize и возвращает
+07 §3 определяет ``POST /v1/fetch`` с осями ``fetch`` (http|browser) и
+``extract`` (auto|html|document): edge выполняет fetch+extract+sanitize и возвращает
 ``text: {content, hash, extractor_version}``. Ядро **пересчитывает**
 ``content_hash`` очищенного текста (I19), не доверяя edge (07 §5).
 Нейтрален (§1.3).
@@ -20,7 +20,7 @@ from core.adapters.remote_gateway import (
     extracted_doc_from_response,
 )
 from core.ports.gateway import ContentGateway
-from core.ports.types import ExtractedDoc, RawPage, RenderMode
+from core.ports.types import ExtractedDoc, ExtractionRoute, FetchMode, RawPage
 
 __all__ = ["RemoteExtractor"]
 
@@ -37,18 +37,23 @@ class RemoteExtractor:
         """Доступен ли транспорт шва (``httpx`` или внедрённый ``transport``)."""
         return bool(getattr(self._gateway, "available", True))
 
-    def extract(self, page: RawPage) -> ExtractedDoc:
-        """``/v1/fetch`` с ``extract=True`` → ``ExtractedDoc`` (повторный хэш, I19).
+    def extract(
+        self, page: RawPage, route: ExtractionRoute = ExtractionRoute.AUTO
+    ) -> ExtractedDoc:
+        """``/v1/fetch`` → ``ExtractedDoc`` (повторный хэш, I19).
 
         Байты повторно не передаются: edge сам выполняет fetch по ``url``
-        (форма протокола 07 §3). ``url``/``render``/``lang`` берутся из ``page``.
+        (форма протокола 07 §3). ``url``/``fetch``/``lang`` берутся из ``page``; маршрут
+        извлечения — из аргумента ``route`` (резолвится в pipeline). ``wait_for`` не
+        переносится: ``RawPage`` его не несёт.
         """
-        render = RenderMode(page.render_mode)
+        fetch = FetchMode(page.fetch_mode)
         payload = {
             "url": page.url,
-            "render": render.value,
+            "fetch": fetch.value,
             "lang": page.lang,
-            "extract": True,
+            "extract": route.value,
+            "wait_for": None,
         }
         response = self._gateway.call("fetch", payload)
         if not isinstance(response, Mapping):

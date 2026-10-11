@@ -3,8 +3,8 @@
 Проверяется, что операционные входы доходят от CLI до адаптера краулера:
 
 * :func:`build_scout_crawler` — ``cache`` протягивается в оба краулера
-  (``HttpCrawler``/``ScrapyCrawler``), ``domain_profiles`` — **только** в браузерный
-  ``ScrapyCrawler`` (HTTP-краулер их не принимает, R7/03 §D.5);
+  (``HttpCrawler``/``ScrapyCrawler``); ``domain_profiles`` на проводке не блокируют
+  ``http`` (исполнимость browser-URL проверяется URL-скоупедированно в pipeline, D2);
 * :func:`build_adapters` — оба параметра доходят до ``ports.crawler`` (профиль ``local``),
   а без ``deploy`` краулер остаётся ``None`` (обратная совместимость);
 * :func:`_resolve_ports` — строит ``ContentAddressedCache(paths.cache)`` из resolved
@@ -34,11 +34,14 @@ from core.cli.main import EXIT_BLOCKED, main
 from core.cli.wiring import (
     ENV_SCOUT_CRAWLER,
     LOCAL_PROFILE,
+    WiringError,
     build_adapters,
     build_scout_crawler,
 )
 from core.config.deploy import DeployConfig
+from core.config.domain_profiles import DomainProfile
 from core.config.paths import PathsConfig
+from core.domain.enums import ExtractionRoute, FetchMode
 from core.pipeline import Ports
 from core.pipeline.normalize import RunInputs
 from core.util.cache import ContentAddressedCache
@@ -56,11 +59,19 @@ def _cache(tmp_path: Path) -> ContentAddressedCache:
     return ContentAddressedCache(tmp_path / "cache")
 
 
-def _profiles() -> dict[str, Any]:
-    """Категорийно-нейтральные per-domain рендер-профили (данные, §D.2)."""
+def _profiles() -> dict[str, DomainProfile]:
+    """Категорийно-нейтральные доменные профили (данные, §D.2) без browser-оси."""
     return {
-        "example.com": {"render": "browser"},
-        "static.example.org": {"render": "http"},
+        "example.com": DomainProfile(fetch=FetchMode.HTTP, extract=ExtractionRoute.HTML),
+        "static.example.org": DomainProfile(fetch=FetchMode.HTTP),
+    }
+
+
+def _browser_profiles() -> dict[str, DomainProfile]:
+    """Профили с browser-осью (проводка ``http`` их больше не блокирует, D2)."""
+    return {
+        "spa.example.com": DomainProfile(fetch=FetchMode.BROWSER),
+        "example.com": DomainProfile(fetch=FetchMode.HTTP),
     }
 
 
@@ -79,25 +90,50 @@ class _ClosableCrawler:
 # ---------------------------------------------------------------------------
 
 
-def test_build_scout_crawler_scrapy_threads_cache_and_profiles(
+def test_build_scout_crawler_scrapy_threads_cache(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """``scrapy``: кэш и домен-профили доходят до ``ScrapyCrawler``."""
+    """``scrapy``: кэш доходит до ``ScrapyCrawler``; профили ему не нужны (резолв в pipeline)."""
     monkeypatch.setenv(ENV_SCOUT_CRAWLER, "scrapy")
     cache = _cache(tmp_path)
-    profiles = _profiles()
 
-    crawler = build_scout_crawler(cache=cache, domain_profiles=profiles)
+    crawler = build_scout_crawler(cache=cache, domain_profiles=_profiles())
 
     assert isinstance(crawler, ScrapyCrawler)
     assert crawler._cache is cache
-    assert crawler._profiles == profiles
 
 
-def test_build_scout_crawler_http_threads_cache_only(
+def test_build_scout_crawler_http_allows_browser_profile_at_wiring(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """``http``: кэш доходит, ``domain_profiles`` не передаются (HTTP-only)."""
+    """``http`` + профиль ``fetch: browser`` не падает на проводке: браузер проверяется по URL в pipeline (D2)."""
+    monkeypatch.setenv(ENV_SCOUT_CRAWLER, "http")
+    cache = _cache(tmp_path)
+
+    crawler = build_scout_crawler(
+        deploy=DeployConfig(profile="local"),
+        cache=cache,
+        domain_profiles=_browser_profiles(),
+    )
+
+    assert isinstance(crawler, HttpCrawler)
+    assert crawler._cache is cache
+
+
+def test_build_scout_crawler_unknown_value_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Неизвестное значение ``COHOUND_SCOUT_CRAWLER`` по-прежнему → ``WiringError``."""
+    monkeypatch.setenv(ENV_SCOUT_CRAWLER, "nope")
+
+    with pytest.raises(WiringError, match="неизвестный краулер"):
+        build_scout_crawler()
+
+
+def test_build_scout_crawler_http_threads_cache(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``http``: кэш доходит; профили не влияют на выбор краулера (D2)."""
     monkeypatch.setenv(ENV_SCOUT_CRAWLER, "http")
     cache = _cache(tmp_path)
 
@@ -145,21 +181,19 @@ def test_build_scout_crawler_no_args_backward_compatible(
 def test_build_adapters_threads_cache_and_profiles(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """``local`` + ``scrapy``: оба параметра доходят до ``ports.crawler``."""
+    """``local`` + ``scrapy``: кэш доходит до ``ports.crawler`` (профили — fail-fast/резолв)."""
     monkeypatch.setenv(ENV_SCOUT_CRAWLER, "scrapy")
     cache = _cache(tmp_path)
-    profiles = _profiles()
 
     ports = build_adapters(
         profile=LOCAL_PROFILE,
         deploy=DeployConfig(profile="local"),
         cache=cache,
-        domain_profiles=profiles,
+        domain_profiles=_profiles(),
     )
 
     assert isinstance(ports.crawler, ScrapyCrawler)
     assert ports.crawler._cache is cache
-    assert ports.crawler._profiles == profiles
 
 
 def test_build_adapters_http_threads_cache(

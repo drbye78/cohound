@@ -1180,34 +1180,32 @@ def _extract_html() -> None:
 
 
 def _crawl_scrapy() -> None:
-    """ScrapyCrawler: HTTP-кэш, browser-байпас кэша, SSRF-блок, доменный профиль."""
+    """ScrapyCrawler: HTTP-кэш, browser-байпас кэша, SSRF-блок, FetchPlan (D2)."""
     import tempfile
 
     from core.adapters.crawl_scrapy import ScrapyCrawler
     from core.ports.crawler import CrawlerPort
-    from core.ports.types import RawPage, RenderMode
+    from core.ports.types import FetchMode, FetchPlan, RawPage
     from core.util.cache import ContentAddressedCache, http_key
 
     calls: list[int] = []
 
-    def _fake(url: str, render: RenderMode) -> RawPage:
+    def _fake(url: str, plan: FetchPlan = FetchPlan()) -> RawPage:
         calls.append(1)
-        return RawPage(url=url, content=b"<html>ok</html>", fetched_at="t", render_mode=render)
+        return RawPage(url=url, content=b"<html>ok</html>", fetched_at="t", fetch_mode=plan.fetch)
 
     with tempfile.TemporaryDirectory() as tmp:
         cache = ContentAddressedCache(root=tmp)
-        crawler = ScrapyCrawler(
-            fetcher=_fake,
-            cache=cache,
-            domain_profiles={"example.com": {"render": "browser"}},
-        )
+        crawler = ScrapyCrawler(fetcher=_fake, cache=cache)
         if not isinstance(crawler, CrawlerPort):
             raise AssertionError("ScrapyCrawler обязан удовлетворять CrawlerPort")
-        # browser-рендер: профиль выбирает режим, но кэш НЕ консультируется и не пишется.
-        first = crawler.fetch("https://example.com/x")
-        crawler.fetch("https://example.com/x")
-        if first.render_mode is not RenderMode.BROWSER:
-            raise AssertionError("доменный профиль обязан выбрать browser-рендер")
+        # browser-ось плана: кэш НЕ консультируется и не пишется.
+        first = crawler.fetch(
+            "https://example.com/x", FetchPlan(FetchMode.BROWSER)
+        )
+        crawler.fetch("https://example.com/x", FetchPlan(FetchMode.BROWSER))
+        if first.fetch_mode is not FetchMode.BROWSER:
+            raise AssertionError("browser-ось плана обязана выбрать browser-режим")
         if len(calls) != 2:
             raise AssertionError(f"browser-рендер обязан идти вживую (2 фетча), было {len(calls)}")
         if cache.get_bytes("http", http_key("https://example.com/x")) is not None:
@@ -1683,7 +1681,7 @@ def _extraction_golden() -> None:
     class _Fake:
         version = "ext-1"
 
-        def extract(self, page):
+        def extract(self, page, route=None):
             text = page.content.decode("utf-8")
             return ExtractedDoc(text=text, content_hash="h", extractor_version=self.version, page_count=1)
 
@@ -1862,13 +1860,13 @@ def _edge_isolation() -> None:
     class _Crawler:
         version = "c1"
 
-        def fetch(self, url, render=None, lang=None):
+        def fetch(self, url, plan=None, lang=None):
             return RawPage(url=url, content=b"<html>hi</html>", fetched_at="t")
 
     class _Extractor:
         version = "e1"
 
-        def extract(self, page):
+        def extract(self, page, route=None):
             return ExtractedDoc(text="hi", content_hash="h", extractor_version="e1")
 
     edge = EdgeGateway(crawler=_Crawler(), extractor=_Extractor(), registries={})

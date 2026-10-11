@@ -50,7 +50,7 @@ from typing import Any
 from urllib.parse import urlencode
 
 from core.ports.search import SearchQuery, SearchResult
-from core.ports.types import RawPage, RenderMode
+from core.ports.types import RawPage, FetchMode
 from core.util.cache import ContentAddressedCache, http_key
 from core.util.security import validate_url
 
@@ -336,7 +336,7 @@ class GoogleSearchAdapter:
                 url=url,
                 content=content,
                 fetched_at=_now_iso(),
-                render_mode=RenderMode.HTTP,
+                fetch_mode=FetchMode.HTTP,
             )
         return self._get_real(url)
 
@@ -353,7 +353,7 @@ class GoogleSearchAdapter:
             url=str(response.url),
             content=response.content,
             fetched_at=_now_iso(),
-            render_mode=RenderMode.HTTP,
+            fetch_mode=FetchMode.HTTP,
             status_code=response.status_code,
             content_type=content_type or None,
         )
@@ -368,7 +368,7 @@ class GoogleSearchAdapter:
             url=url,
             content=content,
             fetched_at=self._cache_mtime_iso(url),
-            render_mode=RenderMode.HTTP,
+            fetch_mode=FetchMode.HTTP,
         )
 
     def _cache_mtime_iso(self, url: str) -> str:

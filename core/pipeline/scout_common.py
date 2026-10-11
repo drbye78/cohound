@@ -17,7 +17,6 @@ from typing import Any
 
 from core.ports.crawler import CrawlerPort
 from core.ports.extractor import ExtractorPort
-from core.ports.types import RenderMode
 from core.util.hashing import content_hash
 
 
@@ -71,7 +70,7 @@ def fetch_one(
 ) -> None:
     """Фетчит и извлекает одну страницу; ошибки изолируются (без исключений наружу)."""
     try:
-        page = crawler.fetch(url, RenderMode.HTTP)
+        page = crawler.fetch(url)
     except Exception as exc:  # noqa: BLE001 — сбой фетча изолируется по документу
         errors.append(f"fetch {url}: {type(exc).__name__}: {exc}")
         fetched.append({"url": url, "error": f"{type(exc).__name__}: {exc}"})

@@ -22,7 +22,7 @@ from core.adapters.remote_gateway import (
 )
 from core.ports.gateway import ContentGateway
 from core.ports.search import SearchQuery, SearchResult
-from core.ports.types import RawPage, RenderMode
+from core.ports.types import ExtractionRoute, FetchMode, RawPage
 
 __all__ = ["RemoteSearch"]
 
@@ -61,14 +61,15 @@ class RemoteSearch:
         """Дозагрузка выбранного кандидата через ``/v1/fetch`` → ``RawPage``."""
         payload = {
             "url": url,
-            "render": RenderMode.HTTP.value,
+            "fetch": FetchMode.HTTP.value,
             "lang": None,
-            "extract": False,
+            "extract": ExtractionRoute.AUTO.value,
+            "wait_for": None,
         }
         response = self._gateway.call("fetch", payload)
         if not isinstance(response, Mapping):
             raise RemoteContentError("fetch: payload ответа edge не является отображением")
-        return raw_page_from_response(response, url=url, render=RenderMode.HTTP)
+        return raw_page_from_response(response, url=url, fetch=FetchMode.HTTP)
 
 
 def _search_results_from_payload(payload: Any) -> list[SearchResult]:

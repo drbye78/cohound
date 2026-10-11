@@ -53,7 +53,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from core.config.domain_profiles import DomainProfile
 from core.domain import CorpusChunk, CorpusDoc, IndexManifestEntry
+from core.pipeline.fetch_plan import resolve_fetch_plan
 from core.pipeline.runner import PhaseResult
 from core.ports.chunker import ChunkerPort
 from core.ports.crawler import CrawlerPort
@@ -61,7 +63,7 @@ from core.ports.embedder import EmbedderPort
 from core.ports.extractor import ExtractorPort
 from core.ports.index_builder import IndexBuilderPort, IndexMeta
 from core.ports.types import Chunk as PortChunk
-from core.ports.types import RenderMode
+from core.ports.types import FetchMode
 from core.util.hashing import content_hash, short_hash
 
 __all__ = ["IndexBuild", "build_corpus"]
@@ -166,15 +168,6 @@ def _chunk_id(product_id: str, doc_hash: str, chunk_no: int) -> str:
     от адаптера и воспроизводимость ``source_id``-резолва.
     """
     return f"{product_id}:{doc_hash}:{chunk_no}"
-
-
-def _render_for(render_modes: Mapping[str, RenderMode] | None, url: str) -> RenderMode:
-    """Режим рендера для URL (по умолчанию HTTP; profile — ответственность адаптера)."""
-    if render_modes:
-        value = render_modes.get(url)
-        if value is not None:
-            return value
-    return RenderMode.HTTP
 
 
 # --------------------------------------------------------------------------- #
@@ -300,7 +293,8 @@ def build_corpus(
     raw_root: str | Path = "corpus_raw",
     embedder: EmbedderPort | None = None,
     index_builder: IndexBuilderPort | None = None,
-    render_modes: Mapping[str, RenderMode] | None = None,
+    domain_profiles: Mapping[str, DomainProfile] | None = None,
+    explicit_fetch: Mapping[str, FetchMode] | None = None,
     package_id: str | None = None,
 ) -> PhaseResult:
     """Ш5: собирает корпус из ``plan × urls`` и возвращает ``PhaseResult``.
@@ -324,7 +318,9 @@ def build_corpus(
         root передаёт resolved ``paths.corpus_raw`` (``03`` §A.1).
     :param embedder: опциональный ``EmbedderPort`` (W8); при наличии — батч-эмбеддинг.
     :param index_builder: опциональный ``IndexBuilderPort`` (W8); при наличии — build/commit.
-    :param render_modes: необязательный ``{url: RenderMode}``; по умолчанию HTTP.
+    :param domain_profiles: типизированные доменные профили (D.2) для резолва ``FetchPlan``.
+    :param explicit_fetch: явные переопределения оси ``fetch`` по URL (``--render-modes``);
+        побеждают профиль, но только по оси ``fetch`` (``extract``/``wait_for`` — из профиля).
     :param package_id: явный пакет корпуса; ``None`` → производный от ``plan``.
 
     Возвращает ``PhaseResult`` со ``status='ok'`` (даже при изолированных ошибках),
@@ -374,11 +370,28 @@ def build_corpus(
         seen_chunk_ids: set[str] = set()
 
         for url in url_map.get(product_id, []):
-            render = _render_for(render_modes, url)
+            # D2: единый план резолвится в pipeline и передаётся и краулеру, и экстрактору.
+            fetch_plan = resolve_fetch_plan(
+                url, domain_profiles or {}, explicit_fetch
+            )
+
+            # D2: браузерный рендер требует поддерживающего краулера. Проверка
+            # URL-скоупедирована (а не на сборке композиции): фаза не падает, пропускается
+            # только этот URL. Резолв проверяется — явный override на ``http`` снимает ошибку.
+            if (
+                getattr(crawler, "supports_browser", True) is False
+                and fetch_plan.fetch is FetchMode.BROWSER
+            ):
+                errors.append(
+                    f"{product_id}/{url}: требует браузерный рендер, но краулер "
+                    f"{type(crawler).__name__} не поддерживает browser; "
+                    f"задайте COHOUND_SCOUT_CRAWLER=scrapy"
+                )
+                continue
 
             # 1. Краул.
             try:
-                page = crawler.fetch(url, render)
+                page = crawler.fetch(url, fetch_plan)
             except Exception as exc:  # noqa: BLE001 — изоляция по контракту фазы
                 errors.append(f"{product_id}/{url}: crawl: {type(exc).__name__}: {exc}")
                 continue
@@ -398,7 +411,7 @@ def build_corpus(
 
             # 3. Экстракция (грациозная деградация адаптера через .error).
             try:
-                extracted = extractor.extract(page)
+                extracted = extractor.extract(page, fetch_plan.extract)
             except Exception as exc:  # noqa: BLE001
                 errors.append(f"{product_id}/{url}: extract: {type(exc).__name__}: {exc}")
                 continue
@@ -427,7 +440,7 @@ def build_corpus(
                 content_hash=doc_hash,
                 raw_path=str(raw_path),
                 extractor_version=getattr(extracted, "extractor_version", None),
-                render_mode=_as_text(page.render_mode),
+                render_mode=_as_text(page.fetch_mode),
                 lang=page.lang,
             )
             product_docs.append(doc)

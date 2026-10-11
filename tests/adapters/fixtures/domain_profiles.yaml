@@ -1,13 +1,10 @@
-# Профили рендера per domain (нейтральные тестовые данные, D.2).
-# Формы значений, поддерживаемые ScrapyCrawler:
-#   * render: "http" | "browser"            — прямой режим;
-#   * render: {mode: "http" | "browser"}     — вложенная форма;
-#   * wait_for: "<JS-выражение>"             — опциональное ожидание готовности JS.
+# Профили получения/извлечения per domain (нейтральные тестовые данные, D.2).
+# Оси: fetch: http|browser; extract: auto|html|document; wait_for — опц. JS-ожидание.
 example.com:
-  render: browser
+  fetch: browser
   wait_for: "() => document.readyState === 'complete'"
 static.example:
-  render: http
+  fetch: http
 nested.example:
-  render:
-    mode: browser
+  fetch: browser
+  extract: document

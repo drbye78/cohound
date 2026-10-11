@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from core.domain import Focus
+from core.domain import FetchMode, Focus
 from core.pipeline.normalize import RunInputs, cross_check, load_inputs
 from core.pipeline.plan import load_plan, plan
 
@@ -63,7 +63,7 @@ def test_load_inputs_happy() -> None:
     assert len(inputs.baselines) == 2
     assert {entry.product_id for entry in inputs.cohort.entries} == {"p1", "p2"}
     assert len(inputs.golden) == 2
-    assert inputs.domain_profiles["case_x"]["render"]["mode"] == "text"
+    assert inputs.domain_profiles["case_x"].fetch is FetchMode.HTTP
     assert inputs.scope_attestation_procedure is None
 
 

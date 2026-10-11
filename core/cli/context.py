@@ -57,7 +57,7 @@ from core.pipeline.plan import RunPlan, plan as build_plan
 from core.pipeline.review import ReviewItem
 from core.pipeline.runner import PhaseFn
 from core.ports.gateway import ContentGateway
-from core.ports.types import RenderMode
+from core.ports.types import FetchMode
 from core.util.cache import ContentAddressedCache
 
 # -- Типовые швы (тестовые инъекции) --------------------------------------- #
@@ -933,16 +933,16 @@ def _load_corpus_urls(path: str | Path | None) -> dict[str, list[str]]:
     return result
 
 
-def _load_render_modes(path: str | Path | None) -> dict[str, RenderMode]:
+def _load_render_modes(path: str | Path | None) -> dict[str, FetchMode]:
     """Читает опциональный JSON/YAML-файл ``{url: "http"|"browser"}`` (Ш5).
 
-    Режим рендера — операционный вход: браузерный рендер нужен для SPA/JS-страниц.
-    Файл задаётся ``--render-modes``; значения валидируются через :class:`RenderMode`
+    Явное переопределение оси ``fetch`` (D2): браузерный рендер нужен для SPA/JS-страниц.
+    Файл задаётся ``--render-modes``; значения валидируются через :class:`FetchMode`
     (``http``/``browser``). При ``None`` возвращается ``{}``: пустое отображение даёт
-    дефолт HTTP в :func:`core.pipeline.corpus.build_corpus`.
+    профиль домена/дефолт HTTP в :func:`core.pipeline.fetch_plan.resolve_fetch_plan`.
 
     :raises CliError: файл не читается/не разбирается; документ не словарь либо значение
-        не является допустимым ``RenderMode`` (:data:`EXIT_USAGE`, код ``render-modes``).
+        не является допустимым ``FetchMode`` (:data:`EXIT_USAGE`, код ``render-modes``).
     """
     if path is None:
         return {}
@@ -975,7 +975,7 @@ def _load_render_modes(path: str | Path | None) -> dict[str, RenderMode]:
             code="render-modes",
             exit_code=EXIT_USAGE,
         )
-    modes: dict[str, RenderMode] = {}
+    modes: dict[str, FetchMode] = {}
     for url, mode in data.items():
         if not isinstance(mode, str):
             raise CliError(
@@ -984,10 +984,10 @@ def _load_render_modes(path: str | Path | None) -> dict[str, RenderMode]:
                 exit_code=EXIT_USAGE,
             )
         try:
-            modes[str(url)] = RenderMode(mode.strip())
+            modes[str(url)] = FetchMode(mode.strip())
         except ValueError as exc:
             raise CliError(
-                f"{p}: недопустимый render_mode {mode!r} для {url!r}; "
+                f"{p}: недопустимый fetch-режим {mode!r} для {url!r}; "
                 "ожидается один из http|browser",
                 code="render-modes",
                 exit_code=EXIT_USAGE,
@@ -998,7 +998,7 @@ def _load_render_modes(path: str | Path | None) -> dict[str, RenderMode]:
 def _resolve_phases(
     args: argparse.Namespace, *, inputs: RunInputs, plan: RunPlan, ports: Ports,
     paths: Any = None,
-    render_modes: Mapping[str, RenderMode] | None = None,
+    render_modes: Mapping[str, FetchMode] | None = None,
 ) -> dict[str, PhaseFn]:
     """Собирает реестр не-гейтовых фаз (``phases_factory`` — тестовый шов).
 
@@ -1036,8 +1036,10 @@ def _resolve_phases(
         "raw_root": raw_root,
         "retrieval_profile": getattr(args, "retrieval_profile", None),
         "cutoff_k": getattr(args, "cutoff_k", None),
-        # Per-URL render-mode (--render-modes): {url: RenderMode}; пусто → HTTP (Ш5).
-        "render_modes": render_modes or {},
+        # D2: доменные профили (из domain_profiles.yaml) + явное переопределение
+        # оси fetch (--render-modes); резолв FetchPlan — в pipeline Ш5.
+        "domain_profiles": inputs.domain_profiles,
+        "explicit_fetch": render_modes or {},
     }
     factory = getattr(args, "phases_factory", None)
     if factory is not None:

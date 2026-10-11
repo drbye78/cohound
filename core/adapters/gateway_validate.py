@@ -31,7 +31,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
-from core.ports.types import ExtractedDoc, RawPage, RenderMode
+from core.ports.types import ExtractedDoc, FetchMode, RawPage
 from core.util.hashing import content_hash
 from core.util.sanitize import sanitize_html
 from core.util.security import validate_url
@@ -356,7 +356,7 @@ def _iter_items(payload: Any, op: str) -> tuple[list[Any], list[ValidationIssue]
 
 
 # ---------------------------------------------------------------------------
-# Сырая страница (/v1/fetch, extract=False)
+# Сырая страница (/v1/fetch; ось extract: auto|html|document, извлечение best-effort)
 # ---------------------------------------------------------------------------
 
 
@@ -366,11 +366,13 @@ def validate_raw_page(
     url: str,
     expected_hash: str | None = None,
     max_bytes: int = MAX_RESPONSE_BYTES,
-    render: RenderMode = RenderMode.HTTP,
+    fetch: FetchMode = FetchMode.HTTP,
     sanitize: bool = True,
 ) -> ValidatedResponse:
-    """Проверяет payload ``/v1/fetch`` (``extract=False``) и собирает ``RawPage``.
+    """Проверяет payload ``/v1/fetch`` с сырыми байтами и собирает ``RawPage``.
 
+    Запрос несёт ось ``extract`` (``auto`` | ``html`` | ``document``), но сырые байты edge
+    возвращает всегда — извлечение best-effort, поэтому отсутствие ``text`` допустимо.
     Байты берутся из ``raw.bytes_b64`` → ``raw.content`` → (деградация)
     ``text.content``. Ядро **пересчитывает** ``content_hash`` и сверяет с
     ``expected_hash``/``raw.hash`` (I19). При наличии активного HTML добавляется
@@ -438,7 +440,7 @@ def validate_raw_page(
             url=str(final_url or url),
             content=content if content is not None else b"",
             fetched_at=str(response.get("fetched_at") or ""),
-            render_mode=RenderMode(render),
+            fetch_mode=FetchMode(fetch),
             lang=str(lang) if lang else None,
             status_code=int(status_code) if status_code is not None else None,
             content_type=str(content_type) if content_type else None,
@@ -447,7 +449,7 @@ def validate_raw_page(
 
 
 # ---------------------------------------------------------------------------
-# Извлечённый документ (/v1/fetch, extract=True)
+# Извлечённый документ (/v1/fetch; ось extract: auto|html|document)
 # ---------------------------------------------------------------------------
 
 
@@ -457,10 +459,11 @@ def validate_extracted_doc(
     expected_hash: str | None = None,
     max_bytes: int = MAX_RESPONSE_BYTES,
 ) -> ValidatedResponse:
-    """Проверяет payload ``/v1/fetch`` (``extract=True``) и собирает ``ExtractedDoc``.
+    """Проверяет payload ``/v1/fetch`` с извлечённым текстом и собирает ``ExtractedDoc``.
 
-    ``content_hash`` очищенного текста **пересчитывается** ядром и сверяется с
-    ``expected_hash``/``text.hash`` (I19); ``text.extractor_version`` обязателен.
+    Ось ``extract`` запроса (``auto`` | ``html`` | ``document``) выбирает маршрут извлечения
+    на edge (best-effort). ``content_hash`` очищенного текста **пересчитывается** ядром и
+    сверяется с ``expected_hash``/``text.hash`` (I19); ``text.extractor_version`` обязателен.
     """
     issues: list[ValidationIssue] = []
     if not isinstance(response, Mapping):

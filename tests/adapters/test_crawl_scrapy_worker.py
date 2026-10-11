@@ -24,7 +24,7 @@ from core.adapters.crawl_scrapy import (
     _CrawlSpec,
     _ReactorWorker,
 )
-from core.ports.types import RawPage, RenderMode
+from core.ports.types import FetchMode, FetchPlan, RawPage
 
 _SETTINGS: dict[str, int] = {"RETRY_TIMES": 0, "DOWNLOAD_TIMEOUT": 1}
 
@@ -101,7 +101,7 @@ class _FakeCrawl:
                         url=spec.url,
                         content=b"body",
                         fetched_at="t",
-                        render_mode=spec.render,
+                        fetch_mode=spec.fetch,
                     )
                 )
             deferred.callback(None)
@@ -152,9 +152,9 @@ def _submit(
     worker: _ReactorWorker,
     url: str,
     timeout: float = 1.0,
-    render: RenderMode = RenderMode.HTTP,
+    fetch: FetchMode = FetchMode.HTTP,
 ) -> _CrawlSpec:
-    spec = _CrawlSpec(url=url, render=render, wait_for=None)
+    spec = _CrawlSpec(url=url, fetch=fetch, wait_for=None)
     fut: Future = Future()
     worker.submit(_SETTINGS, spec, fut, timeout)
     return spec
@@ -223,7 +223,7 @@ def test_fetch_uses_worker_and_returns_first_page(make_worker) -> None:
     _reactor, worker = make_worker(fake)
     crawler = ScrapyCrawler(worker=worker)
 
-    page = crawler.fetch("https://example.com/a", RenderMode.HTTP)
+    page = crawler.fetch("https://example.com/a")
 
     assert page.url == "https://example.com/a"
     assert fake.calls == ["https://example.com/a"]

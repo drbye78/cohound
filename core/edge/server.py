@@ -29,10 +29,11 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
+from core.edge.seam_schema import validate_fetch_request
 from core.ports.crawler import CrawlerPort
 from core.ports.extractor import ExtractorPort
 from core.ports.search import SearchAdapterPort, SearchQuery
-from core.ports.types import ProductRef, RenderMode
+from core.ports.types import ExtractionRoute, FetchMode, FetchPlan, ProductRef
 from core.util.hashing import content_hash
 
 __all__ = [
@@ -61,8 +62,9 @@ _KNOWN_OPS = _POST_OPS | _GET_OPS
 #: Заголовок корреляции запрос→ответ (07 §8.2/§8.4).
 REQUEST_ID_HEADER = "X-Request-Id"
 
-#: Допустимые режимы рендера (07 §3).
-_RENDER_VALUES = {mode.value: mode for mode in RenderMode}
+#: Допустимые оси фетча/экстракции (07 §3).
+_FETCH_VALUES = {mode.value: mode for mode in FetchMode}
+_EXTRACT_VALUES = {route.value: route for route in ExtractionRoute}
 
 
 # ---------------------------------------------------------------------------
@@ -97,14 +99,32 @@ def _default_id_factory() -> str:
     return uuid.uuid4().hex
 
 
-def _coerce_render(value: Any) -> RenderMode:
-    """Приводит ``render`` из payload к ``RenderMode`` (дефолт — http, 07 §3)."""
+def _coerce_fetch(value: Any) -> FetchMode:
+    """Приводит ``fetch`` из payload к ``FetchMode`` (дефолт — http, 07 §3)."""
     if value is None or value == "":
-        return RenderMode.HTTP
-    mode = _RENDER_VALUES.get(str(value).strip().lower())
+        return FetchMode.HTTP
+    mode = _FETCH_VALUES.get(str(value).strip().lower())
     if mode is None:
-        raise EdgeRequestError(f"fetch: неизвестный режим рендера: {value!r}")
+        raise EdgeRequestError(f"fetch: неизвестный режим получения: {value!r}")
     return mode
+
+
+def _coerce_extract(value: Any) -> ExtractionRoute:
+    """Приводит ``extract`` из payload к ``ExtractionRoute`` (дефолт — auto, 07 §3)."""
+    if value is None or value == "":
+        return ExtractionRoute.AUTO
+    route = _EXTRACT_VALUES.get(str(value).strip().lower())
+    if route is None:
+        raise EdgeRequestError(f"fetch: неизвестный маршрут извлечения: {value!r}")
+    return route
+
+
+def _coerce_wait_for(value: Any) -> str | None:
+    """Приводит ``wait_for`` из payload к строке JS-ожидания либо ``None``."""
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
 
 
 def _coerce_int(value: Any, *, default: int) -> int:
@@ -352,15 +372,26 @@ class EdgeGateway:
     # -- fetch -----------------------------------------------------------------
 
     def _handle_fetch(self, payload: Mapping[str, Any]) -> dict[str, Any]:
-        """``/v1/fetch`` → сырые байты (+ опционально очищенный текст) (07 §3)."""
+        """``/v1/fetch`` → сырые байты (+ очищенный текст по маршруту) (07 §3).
+
+        Оси ``fetch``/``extract`` берутся из запроса и складываются в ``FetchPlan``.
+        Сырые байты возвращаются всегда; извлечение best-effort: сбой экстрактора не
+        лишает ядро retеншн-байтов, а переносится в ``error`` (ядро решает, что делать).
+        """
         url = payload.get("url")
         if not url:
             raise EdgeRequestError("fetch: поле url обязательно")
-        render = _coerce_render(payload.get("render"))
-        extract = bool(payload.get("extract", False))
+        violations = validate_fetch_request(payload)
+        if violations:
+            raise EdgeRequestError("; ".join(violations))
+        plan = FetchPlan(
+            fetch=_coerce_fetch(payload.get("fetch")),
+            extract=_coerce_extract(payload.get("extract")),
+            wait_for=_coerce_wait_for(payload.get("wait_for")),
+        )
 
         try:
-            page = self._crawler.fetch(str(url), render)
+            page = self._crawler.fetch(str(url), plan)
         except EdgeError:
             raise
         except Exception as exc:  # noqa: BLE001 - грациозная граница адаптера
@@ -373,7 +404,13 @@ class EdgeGateway:
             # Явные байты для retention/инспекции (07 §8.1); ядро делает re-hash (I19).
             "bytes_b64": base64.b64encode(content).decode("ascii"),
         }
-        text_obj = self._extract_text(page) if extract else None
+        text_obj: dict[str, Any] | None = None
+        extract_error: str | None = None
+        if self._extractors:
+            try:
+                text_obj = self._extract_text(page, plan.extract)
+            except EdgeError as exc:
+                extract_error = str(exc)
         return {
             "final_url": str(getattr(page, "url", None) or url),
             "status_code": getattr(page, "status_code", None),
@@ -381,14 +418,14 @@ class EdgeGateway:
             "fetched_at": str(getattr(page, "fetched_at", None) or self._clock()),
             "raw": raw,
             "text": text_obj,
-            "error": None,
+            "error": extract_error,
         }
 
-    def _extract_text(self, page: Any) -> dict[str, Any]:
-        """Запускает инъецированный экстрактор; ``.error`` результата → ``EdgeAdapterError``."""
+    def _extract_text(self, page: Any, route: ExtractionRoute) -> dict[str, Any]:
+        """Запускает инъецированный экстрактор по маршруту; ``.error`` → ``EdgeAdapterError``."""
         extractor = self._select_extractor(page)
         try:
-            doc = extractor.extract(page)
+            doc = extractor.extract(page, route)
         except EdgeError:
             raise
         except Exception as exc:  # noqa: BLE001 - грациозная граница адаптера

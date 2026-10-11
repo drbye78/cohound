@@ -2,7 +2,7 @@
 
 Сеть не используется: внедряется шов ``fetcher``/``http_get``, кэш — ``tmp_path``.
 Проверяются: ``RawPage`` из шва, отображение ответа ``httpx`` (финальный URL/статус/
-тип), SSRF-отказ до фетча, честная ошибка на ``RenderMode.BROWSER``, интеграция с
+тип), SSRF-отказ до фетча, честная ошибка на ``FetchMode.BROWSER``, интеграция с
 content-addressed кэшем (промах → фетч → запись → попадание без повторного фетча),
 ``available``/ленивый ``httpx``, ``version`` и структурное соответствие ``CrawlerPort``.
 Данные нейтральны (§1.3).
@@ -17,7 +17,7 @@ import pytest
 from core.adapters.crawl_http import CrawlUnavailable, HttpCrawler
 from core.adapters.crawl_scrapy import CrawlError, CrawlUrlError
 from core.ports.crawler import CrawlerPort
-from core.ports.types import RawPage, RenderMode
+from core.ports.types import FetchPlan, FetchMode, RawPage
 from core.util.cache import ContentAddressedCache, http_key
 
 URL = "https://example.com/page"
@@ -65,7 +65,7 @@ def test_fetch_via_fetcher_returns_raw_page() -> None:
     assert isinstance(page, RawPage)
     assert page.url == URL
     assert page.content == BODY
-    assert page.render_mode is RenderMode.HTTP
+    assert page.fetch_mode is FetchMode.HTTP
     assert page.fetched_at  # UTC ISO-таймстемп
     assert calls == [URL]
 
@@ -104,7 +104,7 @@ def test_page_from_response_maps_final_url_status_and_type() -> None:
     assert page.content == b"redirected-body"
     assert page.status_code == 203
     assert page.content_type == "text/html; charset=utf-8"
-    assert page.render_mode is RenderMode.HTTP
+    assert page.fetch_mode is FetchMode.HTTP
 
 
 def test_page_from_response_without_content_type() -> None:
@@ -137,12 +137,12 @@ def test_ssrf_error_is_crawl_error_too() -> None:
     assert issubclass(CrawlUrlError, ValueError)
 
 
-@pytest.mark.parametrize("render", [RenderMode.BROWSER, "browser"])
-def test_browser_render_raises_honest_error(render: object) -> None:
+@pytest.mark.parametrize("render", [FetchMode.BROWSER, "browser"])
+def test_browser_fetch_raises_honest_error(render: object) -> None:
     calls: list[str] = []
     crawler = HttpCrawler(_counting_fetcher(calls))
     with pytest.raises(CrawlError, match="browser"):
-        crawler.fetch(URL, render=render)  # type: ignore[arg-type]
+        crawler.fetch(URL, FetchPlan(fetch=FetchMode(render)))  # type: ignore[arg-type]
     assert calls == []  # ни fetcher, ни httpx не задействованы
 
 

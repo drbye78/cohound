@@ -25,8 +25,8 @@
 callable ``(url) -> bytes``. Если он задан, реальный ``httpx`` не задействуется, и
 тесты работают без сети.
 
-**BROWSER не поддерживается.** ``fetch(..., render=RenderMode.BROWSER)`` поднимает
-понятную ``CrawlError`` (не молчаливую подмену на HTTP): браузерный рендер — задача
+**BROWSER не поддерживается.** ``fetch(..., plan=FetchPlan(fetch=FetchMode.BROWSER))``
+поднимает понятную ``CrawlError`` (не молчаливую подмену на HTTP): браузерный рендер — задача
 ``ScrapyCrawler``/playwright.
 
 **Ошибки.** Единый тип ``CrawlError`` (переиспользован из ``crawl_scrapy``), чтобы
@@ -44,7 +44,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from core.adapters.crawl_scrapy import CrawlError, CrawlUrlError
-from core.ports.types import RawPage, RenderMode
+from core.ports.types import FetchMode, FetchPlan, RawPage
 from core.util.cache import ContentAddressedCache, http_key
 from core.util.security import validate_url
 
@@ -100,6 +100,9 @@ class HttpCrawler:
     """
 
     version = "http-crawler-1"
+    #: Лёгкий HTTP-краулер не умеет браузерный рендер (D2): pipeline пропускает
+    #: ``fetch: browser``-URL для такого краулера с пофURL-ошибкой.
+    supports_browser = False
 
     def __init__(
         self,
@@ -128,12 +131,12 @@ class HttpCrawler:
 
     # -- публичный контракт ---------------------------------------------------
 
-    def fetch(self, url: str, render: RenderMode = RenderMode.HTTP) -> RawPage:
-        """Загружает ``url``: проверка рендера → SSRF → кэш → живой фетч → кэш.
+    def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:
+        """Загружает ``url``: проверка плана → SSRF → кэш → живой фетч → кэш.
 
-        ``RenderMode.BROWSER`` этим адаптером не поддерживается (понятная ошибка).
+        ``FetchMode.BROWSER`` этим адаптером не поддерживается (понятная ошибка).
         """
-        if render == RenderMode.BROWSER:
+        if plan.fetch is FetchMode.BROWSER:
             raise CrawlError(
                 "HttpCrawler не поддерживает browser-рендер; "
                 "используйте ScrapyCrawler/playwright"
@@ -169,7 +172,7 @@ class HttpCrawler:
                 url=url,
                 content=content,
                 fetched_at=_now_iso(),
-                render_mode=RenderMode.HTTP,
+                fetch_mode=FetchMode.HTTP,
             )
         return self._get_real(url)
 
@@ -206,7 +209,7 @@ class HttpCrawler:
             url=str(response.url),
             content=response.content,
             fetched_at=_now_iso(),
-            render_mode=RenderMode.HTTP,
+            fetch_mode=FetchMode.HTTP,
             status_code=response.status_code,
             content_type=raw_type or None,
         )
@@ -224,7 +227,7 @@ class HttpCrawler:
             url=url,
             content=content,
             fetched_at=self._cache_mtime_iso(url),
-            render_mode=RenderMode.HTTP,
+            fetch_mode=FetchMode.HTTP,
         )
 
     def _cache_mtime_iso(self, url: str) -> str:

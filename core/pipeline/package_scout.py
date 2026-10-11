@@ -923,7 +923,7 @@ def scout_package(
     """Выполняет веб-заземлённую разведку пакета категории.
 
     Поток: query-planning (детерминированные шаблоны) → SERP (только URL-кандидаты, I19)
-    → rank/dedup → fetch seed+top-M (``RenderMode.HTTP``) → extract → context assembly
+    → rank/dedup → fetch seed+top-M (дефолтный ``FetchPlan``: HTTP) → extract → context assembly
     (whitelist = fetched ∪ search ∪ seed, делимитеры ``[source: url]``, усечение
     ``max_chars``) → 1–3 LLM-вызова (landscape/catalog/baselines) → консервативный маппинг
     → ``Candidate[]`` + profile.

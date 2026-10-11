@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://cohound.local/contracts/seam/fetch.schema.json",
   "title": "POST /v1/fetch payload",
-  "description": "Запрос фетча страницы/документа и ответ edge (07 §3). Сырые байты (raw) — retention; очищенный markdown (text) — при extract=true. Возвращается контент, не evidence (I19).",
+  "description": "Запрос фетча страницы/документа и ответ edge (07 §3, D2). Запрос несёт две оси: fetch (http|browser) и extract (auto|html|document) плюс опциональный wait_for. Сырые байты (raw) — retention; очищенный markdown (text) — результат извлечения. Возвращается контент, не evidence (I19).",
   "type": "object",
   "additionalProperties": false,
   "properties": {
@@ -40,9 +40,10 @@
       "required": ["url"],
       "properties": {
         "url": {"type": "string", "minLength": 1},
-        "render": {"enum": ["http", "browser"]},
+        "fetch": {"enum": ["http", "browser"]},
         "lang": {"type": ["string", "null"]},
-        "extract": {"type": "boolean"}
+        "extract": {"enum": ["auto", "html", "document"]},
+        "wait_for": {"type": ["string", "null"]}
       }
     },
     "raw": {

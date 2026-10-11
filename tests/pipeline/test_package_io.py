@@ -14,7 +14,7 @@ import pytest
 
 from core.config.run_config import load_catalog
 from core.domain.models import CatalogRow, ModuleDef, PackageManifest
-from core.domain.enums import Archetype, Importance, ParamType
+from core.domain.enums import Archetype, ExtractionRoute, FetchMode, Importance, ParamType
 from core.pipeline.lint import LintReport
 from core.pipeline.package_io import (
     ARTIFACT_FILES,
@@ -161,10 +161,11 @@ def test_save_artifact_wrong_type(tmp_path: Path) -> None:
 
 def test_save_artifact_scope_and_profiles(tmp_path: Path) -> None:
     save_artifact(tmp_path, "scope_attestation", "полная проверка")
-    save_artifact(tmp_path, "domain_profiles", {"dom": {"render": {"mode": "text"}}})
+    save_artifact(tmp_path, "domain_profiles", {"dom": {"fetch": "http", "extract": "html"}})
     reloaded = load_artifacts(tmp_path)
     assert reloaded.scope_attestation == "полная проверка"
-    assert reloaded.domain_profiles == {"dom": {"render": {"mode": "text"}}}
+    assert reloaded.domain_profiles["dom"].fetch is FetchMode.HTTP
+    assert reloaded.domain_profiles["dom"].extract is ExtractionRoute.HTML
 
 
 # ---------------------------------------------------------------------------

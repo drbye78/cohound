@@ -29,13 +29,18 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+from core.ports.types import ExtractionRoute, FetchMode
+
 __all__ = [
     "SEAM_SCHEMA_VERSION",
     "SCHEMA_DIR",
     "ENDPOINT_OPS",
+    "FETCH_VALUES",
+    "EXTRACT_VALUES",
     "load_schema",
     "validate_envelope",
     "validate_payload",
+    "validate_fetch_request",
     "contract_digest",
 ]
 
@@ -51,6 +56,11 @@ SCHEMA_DIR: Path = Path(__file__).resolve().parents[2] / "contracts" / "seam"
 ENDPOINT_OPS: frozenset[str] = frozenset(
     {"fetch", "search", "registry", "capabilities", "health"}
 )
+
+#: Допустимые значения оси ``fetch`` запроса ``/v1/fetch`` (D2).
+FETCH_VALUES: frozenset[str] = frozenset(mode.value for mode in FetchMode)
+#: Допустимые значения оси ``extract`` запроса ``/v1/fetch`` (D2).
+EXTRACT_VALUES: frozenset[str] = frozenset(route.value for route in ExtractionRoute)
 
 #: Допустимые статусы **ответного** конверта (07 §3). Запросный конверт несёт
 #: ``status="request"`` (внутренняя форма клиента) и здесь не валидируется.
@@ -315,6 +325,41 @@ _PAYLOAD_VALIDATORS = {
     "capabilities": _validate_capabilities,
     "health": _validate_health,
 }
+
+
+def _opt_enum(
+    violations: list[str], where: str, field: str, value: Any, allowed: frozenset[str]
+) -> None:
+    """Опциональное enum-поле: ``None`` допустим, иначе значение обязано быть в ``allowed``."""
+    if value is None:
+        return
+    if not isinstance(value, str) or value not in allowed:
+        violations.append(
+            f"{where}: {field} должен быть одним из {sorted(allowed)} или null"
+        )
+
+
+def validate_fetch_request(payload: Any) -> list[str]:
+    """Проверяет **запросный** payload ``POST /v1/fetch`` (D2, 07 §3); ``[]`` — валиден.
+
+    Контракт запроса: ``{url, fetch, extract, wait_for, lang}``. ``url`` обязателен;
+    ``fetch``/``extract`` — опциональные enum-оси (``http|browser``, ``auto|html|document``);
+    ``wait_for``/``lang`` — строки или ``null``. Неизвестное значение → нарушение
+    (edge отвечает ``status=error``).
+    """
+    if not isinstance(payload, Mapping):
+        return ["fetch: payload должен быть объектом"]
+    violations: list[str] = []
+    url = payload.get("url")
+    if not isinstance(url, str) or not url.strip():
+        violations.append("fetch: обязательное поле url — непустая строка")
+    _opt_enum(violations, "fetch", "fetch", payload.get("fetch"), FETCH_VALUES)
+    _opt_enum(violations, "fetch", "extract", payload.get("extract"), EXTRACT_VALUES)
+    for field in ("wait_for", "lang"):
+        value = payload.get(field)
+        if value is not None and not isinstance(value, str):
+            violations.append(f"fetch: {field} должен быть строкой или null")
+    return violations
 
 
 def validate_payload(op: str, payload: Any) -> list[str]:

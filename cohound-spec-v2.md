@@ -204,7 +204,7 @@ repo/
 
 ### 4.1. Словари и перечисления
 
-`docs/status-dictionary.yaml`: статусы (§2.1) · `source_kind` (registry|inheritance|distribution|documentation|web|manual) · `evidence_type` (direct|derived) · `absence_rule_type` (explicit|parameter_reference|distribution_absence|registry_absence) · `source_scope` (**exhaustive|partial|unknown** — свойство экземпляра источника, поле evidence) · `failure_kind` (search_failed|source_unavailable|evaluation_failed|validation_failed|parser_failed) · `cell_state` (pending|preliminary|evaluated|failed|reviewed) · `run_mode` · `ranking_policy` (capability_ranked|coverage_fallback|unranked) · `gate` (G1|G2|G3|G4) · `capability_policy` (resolved-only-v1) · `unknown_policy` (excluded|unknown_as_zero). `unexpected` — **run-level ошибка без ячейки** (системное исключение), в `failure_kind` не входит (S7): `failure_kind` описывает только сбой ячейки.
+`docs/status-dictionary.yaml`: статусы (§2.1) · `source_kind` (registry|inheritance|distribution|documentation|web|manual) · `evidence_type` (direct|derived) · `absence_rule_type` (explicit|parameter_reference|distribution_absence|registry_absence) · `source_scope` (**exhaustive|partial|unknown** — свойство экземпляра источника, поле evidence) · `failure_kind` (search_failed|source_unavailable|evaluation_failed|validation_failed|parser_failed) · `cell_state` (pending|preliminary|evaluated|failed|reviewed) · `run_mode` · `ranking_policy` (capability_ranked|coverage_fallback|unranked) · `gate` (G1|G2|G3|G4) · `capability_policy` (resolved-only-v1) · `unknown_policy` (excluded|unknown_as_zero) · `fetch_mode` (**http|browser**) · `extraction_route` (**auto|html|document**). `unexpected` — **run-level ошибка без ячейки** (системное исключение), в `failure_kind` не входит (S7): `failure_kind` описывает только сбой ячейки.
 
 **Оси сателлита:**
 
@@ -362,7 +362,7 @@ registry_facts(run_id, product_id, registry_id, fact_json, source_url, fetched_a
 Ш3  Реестровая волна (без LLM) → R-ячейки
 Ш4  Волна наследования: по baselines.csv при совпадении upstream;
     direct → статус · conditional → ревью/кандидат · blocked → пропуск (без LLM)
-Ш5  Корпус: краул (доменные профили) / SERP → экстракция → дедуп → чанкер
+Ш5  Корпус: краул (доменные профили: fetch × extract) / SERP → экстракция → дедуп → чанкер
     → tantivy + батч-эмбеддинги → .npy-продукт-партиции → index_manifest
     (весь внешний контент здесь получает source_id и content_hash — I19)
 Ш6  Оценка per (продукт × параметр), оценщик БЕЗ внешнего поиска (I18):

@@ -30,7 +30,7 @@ import uuid
 from collections.abc import Callable, Mapping
 from typing import Any
 
-from core.ports.types import ExtractedDoc, RawPage, RenderMode
+from core.ports.types import ExtractedDoc, FetchMode, RawPage
 from core.util.hashing import content_hash
 
 __all__ = [
@@ -378,7 +378,7 @@ def raw_page_from_response(
     response: Mapping[str, Any],
     *,
     url: str,
-    render: RenderMode = RenderMode.HTTP,
+    fetch: FetchMode = FetchMode.HTTP,
 ) -> RawPage:
     """Собирает ``RawPage`` из payload ответа ``/v1/fetch`` (07 §3).
 
@@ -416,7 +416,7 @@ def raw_page_from_response(
         url=str(final_url),
         content=content,
         fetched_at=str(fetched_at),
-        render_mode=render,
+        fetch_mode=fetch,
         lang=str(lang) if lang else None,
         status_code=int(status_code) if status_code is not None else None,
         content_type=str(content_type) if content_type else None,
@@ -426,10 +426,12 @@ def raw_page_from_response(
 def extracted_doc_from_response(
     response: Mapping[str, Any], *, version: str
 ) -> ExtractedDoc:
-    """Собирает ``ExtractedDoc`` из payload ответа ``/v1/fetch`` с ``extract=True``.
+    """Собирает ``ExtractedDoc`` из payload ответа ``/v1/fetch`` с извлечённым текстом.
 
-    ``text.content`` — очищенный markdown; ``text.hash`` пересчитывается ядром
-    (I19). ``text.extractor_version`` фиксирует версию экстрактора edge.
+    Запрос несёт ось ``extract`` (``auto`` | ``html`` | ``document``) — маршрут извлечения,
+    который применяет edge; извлечение best-effort, поэтому ``text`` может отсутствовать
+    (сырые байты при этом остаются). ``text.content`` — очищенный markdown; ``text.hash``
+    пересчитывается ядром (I19). ``text.extractor_version`` фиксирует версию экстрактора edge.
     Грациозная деградация: при отсутствии ``text`` и наличии ``error``
     возвращается ``ExtractedDoc`` с пустым ``text`` и заполненным ``error``.
     """
@@ -443,7 +445,7 @@ def extracted_doc_from_response(
                 extractor_version=version,
                 error=str(error),
             )
-        raise RemoteContentError("ответ edge без поля text (extract=True)")
+        raise RemoteContentError("ответ edge без поля text (извлечение не дало текста)")
 
     content = text.get("content")
     content_str = "" if content is None else str(content)

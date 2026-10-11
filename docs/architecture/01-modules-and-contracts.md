@@ -269,9 +269,9 @@ class SearchAdapterPort(Protocol):
 ### 3.5. `ports/{crawler,extractor,chunker,registry,store}.py`
 
 ```python
-class CrawlerPort(Protocol):     def fetch(self, url: str, render: RenderMode) -> RawPage: ...
+class CrawlerPort(Protocol):     def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage: ...
 class ExtractorPort(Protocol):   version: str
-                                 def extract(self, page: RawPage) -> ExtractedDoc: ...
+                                 def extract(self, page: RawPage, route: ExtractionRoute = ExtractionRoute.AUTO) -> ExtractedDoc: ...
 class ChunkerPort(Protocol):     version: str
                                  def chunk(self, doc: ExtractedDoc) -> list[Chunk]: ...
 class RegistryFetcherPort(Protocol):
@@ -284,7 +284,8 @@ class StorePort(Protocol):       # §4.4
     def read_manifest(...); def iter_cells(run_id) -> Iterator[Cell]
 ```
 
-`RawPage(url, bytes, fetched_at, render_mode, lang)` — retention-единица.
+`RawPage(url, bytes, fetched_at, fetch_mode, lang)` — retention-единица (ось получения — из
+`FetchPlan`; D2).
 `ExtractedDoc(text, extractor_version, content_hash, page_count, error)` — нормализованный документ;
 `error` — грациозная деградация адаптера (пустой `text` вместо исключения).
 `Chunk(chunk_no, text, heading_path, context_prefix, content_hash)`.

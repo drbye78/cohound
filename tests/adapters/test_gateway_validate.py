@@ -28,7 +28,7 @@ from core.adapters.gateway_validate import (
     validate_registry_payload,
     validate_search_payload,
 )
-from core.ports.types import ExtractedDoc, RawPage, RenderMode
+from core.ports.types import ExtractedDoc, RawPage, FetchMode
 from core.util.hashing import content_hash
 
 # ---------------------------------------------------------------------------
@@ -76,7 +76,7 @@ def test_raw_page_happy_path() -> None:
     assert isinstance(result.value, RawPage)
     assert result.value.content == content
     assert result.value.url == "https://site.test/final"
-    assert result.value.render_mode is RenderMode.HTTP
+    assert result.value.fetch_mode is FetchMode.HTTP
     assert result.value.status_code == 200
 
 

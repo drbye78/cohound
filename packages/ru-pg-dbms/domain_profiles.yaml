@@ -1,26 +1,15 @@
 docs.tantorlabs.ru:
-  index:
-    partition_key: product_id
-  render:
-    mode: text
+  fetch: http
+  extract: html
 jatoba.ru:
-  index:
-    partition_key: product_id
-  render:
-    mode: text
+  fetch: http
+  extract: html
 pangolin.sbertech.ru:
-  index:
-    partition_key: product_id
-  render:
-    mode: browser
-    spa: true
+  fetch: browser
+  extract: html
 postgrespro.ru:
-  index:
-    partition_key: product_id
-  render:
-    mode: text
+  fetch: http
+  extract: html
 sbertech.ru/documents:
-  index:
-    partition_key: product_id
-  render:
-    mode: pdf
+  fetch: http
+  extract: document

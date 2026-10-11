@@ -26,7 +26,7 @@ from core.pipeline.passport_scout import (
     scout_passport,
     write_passport_draft,
 )
-from core.ports.types import RawPage, RenderMode
+from core.ports.types import FetchPlan, RawPage
 from tests.fakes.ports import FakeExtractor
 from tests.helpers.scout import fake_crawler
 
@@ -251,7 +251,7 @@ def test_fetch_error_is_isolated() -> None:
     class _BoomCrawler:
         version = "boom"
 
-        def fetch(self, url: str, render: RenderMode = RenderMode.HTTP) -> RawPage:
+        def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:
             raise RuntimeError("network down")
 
     report = _report(crawler=_BoomCrawler())

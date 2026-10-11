@@ -1,10 +1,8 @@
-# ШАБЛОН доменных профилей рендера/индексации (D.2). Верхний уровень — словарь,
-# каждое значение — тоже словарь (проверяет core.config.run_config.load_domain_profiles).
-# TODO: заполнить реальными профилями; ключ = домен/категория.
-template:
-  # TODO: настройки рендера страниц домена.
-  render:
-    mode: "text"
-  # TODO: настройки партиционирования/индексации домена.
-  index:
-    partition_key: "product_id"
+# ШАБЛОН доменных профилей получения/извлечения (D.2). Верхний уровень — словарь,
+# каждое значение — профиль DomainProfile (fetch/extract/wait_for, strict extra=forbid).
+# Ключ = host с опциональным /path; резолв приоритета — pipeline.resolve_fetch_plan.
+template.example:
+  # Ось получения: http (httpx) | browser (Scrapy/playwright).
+  fetch: http
+  # Ось извлечения: auto (по формату) | html (trafilatura) | document (docling).
+  extract: auto

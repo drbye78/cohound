@@ -26,7 +26,15 @@ from core.ports.llm import EvaluatorPort, LLMRequest, LLMResponse, TokenUsage
 from core.ports.registry import RegistryFetcherPort, RegistryFact
 from core.ports.search import SearchAdapterPort, SearchQuery, SearchResult
 from core.ports.store import StorePort
-from core.ports.types import Chunk, ExtractedDoc, ProductRef, RawPage, RenderMode
+from core.ports.types import (
+    Chunk,
+    ExtractedDoc,
+    ExtractionRoute,
+    FetchMode,
+    FetchPlan,
+    ProductRef,
+    RawPage,
+)
 from core.ports.vector_index import RetrievedChunk, RetrievalResult, VectorIndexPort, VectorQuery
 
 __all__ = [
@@ -54,9 +62,11 @@ __all__ = [
     "StorePort",
     "Chunk",
     "ExtractedDoc",
+    "ExtractionRoute",
+    "FetchMode",
+    "FetchPlan",
     "ProductRef",
     "RawPage",
-    "RenderMode",
     "RetrievedChunk",
     "RetrievalResult",
     "VectorIndexPort",

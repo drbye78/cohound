@@ -216,3 +216,18 @@ class GoldenTier(StrEnum):
 
     FAST = "fast"
     FULL = "full"
+
+
+class FetchMode(StrEnum):
+    """Ось получения страницы (D2): обычный HTTP или браузерный рендер (JS)."""
+
+    HTTP = "http"
+    BROWSER = "browser"
+
+
+class ExtractionRoute(StrEnum):
+    """Ось извлечения (D2): авто-детект по формату, принудительный HTML или документ."""
+
+    AUTO = "auto"
+    HTML = "html"
+    DOCUMENT = "document"

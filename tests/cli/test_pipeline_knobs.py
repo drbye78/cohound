@@ -3,7 +3,7 @@
 Проверяют проводку ``hound run``:
 
 * ``--render-modes FILE`` — JSON/YAML ``{url: "http"|"browser"}`` парсится в
-  ``{url: RenderMode}`` и доходит до реестра фаз (Ш5); невалидный режим/форма/отсутствие
+  ``{url: FetchMode}`` и доходит до реестра фаз (Ш5); невалидный режим/форма/отсутствие
   файла → ``EXIT_USAGE`` (код ``render-modes``);
 * ``--cutoff-k K`` — зафиксированный ``retrieval_cutoff_K`` (I20) доходит до фаз;
   неположительное/нечисловое значение отвергается ``argparse`` (``EXIT_USAGE``);
@@ -30,7 +30,7 @@ from core.cli.wiring import (
     build_scout_crawler,
 )
 from core.config.deploy import CrawlConfig, DeployConfig
-from core.ports.types import RenderMode
+from core.ports.types import FetchMode
 from tests.helpers.packages import capturing_factory, run_argv, valid_package
 
 
@@ -58,9 +58,9 @@ def test_render_modes_json_propagates(
         [*run_argv(package, run_id="knobs-1", db=db, until="plan"), "--render-modes", str(modes)], phases_factory=factory
     )
     assert code == EXIT_OK
-    assert captured["render_modes"] == {
-        "https://docs.example/p1": RenderMode.BROWSER,
-        "https://docs.example/p2": RenderMode.HTTP,
+    assert captured["explicit_fetch"] == {
+        "https://docs.example/p1": FetchMode.BROWSER,
+        "https://docs.example/p2": FetchMode.HTTP,
     }
 
 
@@ -78,7 +78,7 @@ def test_render_modes_yaml_propagates(
         [*run_argv(package, run_id="knobs-1", db=db, until="plan"), "--render-modes", str(modes)], phases_factory=factory
     )
     assert code == EXIT_OK
-    assert captured["render_modes"] == {"https://docs.example/p1": RenderMode.BROWSER}
+    assert captured["explicit_fetch"] == {"https://docs.example/p1": FetchMode.BROWSER}
 
 
 def test_render_modes_default_empty(
@@ -91,7 +91,7 @@ def test_render_modes_default_empty(
     captured, factory = capturing_factory()
     code = main(run_argv(package, run_id="knobs-1", db=db, until="plan"), phases_factory=factory)
     assert code == EXIT_OK
-    assert captured["render_modes"] == {}
+    assert captured["explicit_fetch"] == {}
 
 
 def test_render_modes_invalid_value_usage_error(

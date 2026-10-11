@@ -15,7 +15,7 @@ import pytest
 
 from core.adapters.llm_discovery import DiscoveryLLM
 from core.cli.main import EXIT_OK, EXIT_USAGE, main
-from core.ports.types import RawPage, RenderMode
+from core.ports.types import FetchMode, FetchPlan, RawPage
 from tests.fakes.ports import FakeExtractor
 from tests.helpers.output import json_out
 from tests.helpers.scout import clear_env, fake_crawler
@@ -260,7 +260,7 @@ def test_errors_do_not_write_draft(
     class _BoomCrawler:
         version = "boom"
 
-        def fetch(self, url: str, render: RenderMode = RenderMode.HTTP) -> RawPage:
+        def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:
             raise RuntimeError("network down")
 
     from core.cli.main import EXIT_ERROR

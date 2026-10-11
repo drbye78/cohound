@@ -18,7 +18,7 @@ from typing import Any, Callable
 from core.domain import LLMCellOutput, RegistryFact
 from core.ports.index_builder import IndexMeta
 from core.ports.llm import LLMRequest, LLMResponse, TokenUsage
-from core.ports.types import Chunk, ExtractedDoc, ProductRef, RawPage, RenderMode
+from core.ports.types import Chunk, ExtractedDoc, ExtractionRoute, FetchPlan, ProductRef, RawPage
 from core.ports.vector_index import RetrievedChunk, VectorQuery
 
 #: Фиксированная метка времени (детерминизм фейков).
@@ -139,12 +139,12 @@ class FakeCrawler:
     def __init__(self, pages: dict[str, RawPage] | None = None) -> None:
         self.pages = dict(pages or {})
 
-    def fetch(self, url: str, render: RenderMode = RenderMode.HTTP) -> RawPage:
+    def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:
         """Возвращает заданную страницу; неизвестный URL — пустые байты."""
         page = self.pages.get(url)
         if page is not None:
             return page
-        return RawPage(url=url, content=b"", fetched_at=FIXED_TS, render_mode=render)
+        return RawPage(url=url, content=b"", fetched_at=FIXED_TS, fetch_mode=plan.fetch)
 
 
 class FakeExtractor:
@@ -152,7 +152,9 @@ class FakeExtractor:
 
     version = "fake-extractor-1"
 
-    def extract(self, page: RawPage) -> ExtractedDoc:
+    def extract(
+        self, page: RawPage, route: ExtractionRoute = ExtractionRoute.AUTO
+    ) -> ExtractedDoc:
         """Нормализует ``RawPage`` в ``ExtractedDoc`` детерминированно."""
         text = page.content.decode("utf-8", errors="replace")
         return ExtractedDoc(

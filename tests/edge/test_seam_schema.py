@@ -23,6 +23,7 @@ from core.edge.seam_schema import (
     contract_digest,
     load_schema,
     validate_envelope,
+    validate_fetch_request,
     validate_payload,
 )
 
@@ -211,6 +212,34 @@ def test_validate_payload_fetch_rejects_wrong_field_type() -> None:
 def test_validate_payload_fetch_rejects_empty_content() -> None:
     violations = validate_payload("fetch", {"final_url": "https://x.test"})
     assert any("raw" in v and "text" in v for v in violations)
+
+
+# ---------------------------------------------------------------------------
+# validate_fetch_request — запросные оси fetch/extract (D2)
+# ---------------------------------------------------------------------------
+
+
+def test_validate_fetch_request_accepts_two_axes() -> None:
+    assert validate_fetch_request({"url": "https://x.test"}) == []
+    assert validate_fetch_request(
+        {"url": "https://x.test", "fetch": "browser", "extract": "document", "wait_for": "() => 1"}
+    ) == []
+    assert validate_fetch_request(
+        {"url": "https://x.test", "fetch": None, "extract": None, "wait_for": None}
+    ) == []
+
+
+def test_validate_fetch_request_rejects_missing_url() -> None:
+    assert any("url" in v for v in validate_fetch_request({"fetch": "http"}))
+
+
+def test_validate_fetch_request_rejects_unknown_axes() -> None:
+    assert validate_fetch_request({"url": "https://x.test", "fetch": "flash"})
+    assert validate_fetch_request({"url": "https://x.test", "extract": "pdf"})
+
+
+def test_validate_fetch_request_rejects_wrong_wait_for_type() -> None:
+    assert validate_fetch_request({"url": "https://x.test", "wait_for": 5})
 
 
 # ---------------------------------------------------------------------------
