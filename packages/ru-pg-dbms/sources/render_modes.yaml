@@ -1,0 +1,9 @@
+# Per-URL режим рендера (--render-modes, Ш5) для кейса ru-pg-dbms.
+# Обычный HTTP (trafilatura) не извлекает текст из SPA/JS-страниц tantorlabs.ru —
+# для них нужен браузерный рендер (chromium/playwright). Требует
+# COHOUND_SCOUT_CRAWLER=scrapy (HttpCrawler browser не поддерживает).
+# Это операционный вход, а не данные методологии: URL здесь — кандидаты-источники,
+# не evidence до corpus_raw → hash → index (I19).
+https://tantorlabs.ru/: browser
+https://tantorlabs.ru/products/dbms/: browser
+https://docs.tantorlabs.ru/: browser

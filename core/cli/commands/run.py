@@ -108,7 +108,7 @@ def run(args: argparse.Namespace) -> int:
     # фазы дал бы иной ``run_id``/двойной линт (см. core/pipeline/phases.py). ``run_id``
     # переиспользуется тот же, что выведен выше, — второго derive нет.
     run_plan = _resolve_plan(args, inputs, run_id)
-    ports = _resolve_ports(args, deploy_config)
+    ports = _resolve_ports(args, deploy_config, inputs=inputs)
     phases = _resolve_phases(
         args,
         inputs=inputs,
@@ -173,6 +173,13 @@ def run(args: argparse.Namespace) -> int:
             )
     finally:
         store.close()
+        # Best-effort остановка краулера: только если он есть и умеет ``close`` (после
+        # разделения реактора — ScrapyCrawler; у HttpCrawler/None ``close`` нет). Проверка
+        # существования делает вызов безопасным для обоих краулеров.
+        close = getattr(ports, "crawler", None)
+        close = getattr(close, "close", None)
+        if callable(close):
+            close()
 
     payload = _run_report_payload(run_id, run_report, db_path)
     if instrumentation_errors:

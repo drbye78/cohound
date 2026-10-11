@@ -78,6 +78,7 @@ from core.ports.registry import RegistryFetcherPort
 from core.ports.search import SearchAdapterPort
 from core.ports.types import ExtractedDoc, RawPage
 from core.store.sqlite_store import SqliteStore
+from core.util.cache import ContentAddressedCache
 
 __all__ = [
     "LOCAL_PROFILE",
@@ -436,7 +437,12 @@ DEFAULT_SCOUT_CRAWLER = "http"
 SUPPORTED_SCOUT_CRAWLERS: tuple[str, ...] = ("http", "scrapy")
 
 
-def build_scout_crawler(*, deploy: DeployConfig | None = None) -> CrawlerPort:
+def build_scout_crawler(
+    *,
+    deploy: DeployConfig | None = None,
+    cache: ContentAddressedCache | None = None,
+    domain_profiles: Mapping[str, Any] | None = None,
+) -> CrawlerPort:
     """Собирает краулер для ``passport-scout`` (дефолт — лёгкий, A1/MVP).
 
     Обычный сайт = ``httpx`` (:class:`HttpCrawler`, ленивый импорт); браузерный
@@ -453,6 +459,14 @@ def build_scout_crawler(*, deploy: DeployConfig | None = None) -> CrawlerPort:
     (обратная совместимость). Недоступность зависимости даёт понятный ``CrawlError`` на
     фетче (адаптер не падает на конструкторе). Тесты инъектируют ``crawler`` в :func:`main`.
 
+    **R7-кэш и домен-профили.** ``cache`` — глобальный content-addressed кэш
+    (``core.util.cache``, ADR 0016); протягивается в оба краулера. ``domain_profiles``
+    (per-domain режимы рендера) применимы только к браузерному :class:`ScrapyCrawler`;
+    :class:`HttpCrawler` их **не принимает** (HTTP-only, R7/03 §D.5).
+
+    :param deploy: типизированный deploy-конфиг (политика ``crawl``); ``None`` → канон.
+    :param cache: глобальный кэш внешних вызовов; ``None`` → без кэша.
+    :param domain_profiles: per-domain рендер-профили (только для ``scrapy``).
     :raises WiringError: неизвестное значение ``COHOUND_SCOUT_CRAWLER``.
     """
     raw = os.environ.get(ENV_SCOUT_CRAWLER)
@@ -461,9 +475,9 @@ def build_scout_crawler(*, deploy: DeployConfig | None = None) -> CrawlerPort:
         name = DEFAULT_SCOUT_CRAWLER
     if name == "http":
         config = deploy if deploy is not None else load_deploy_config(None)
-        return HttpCrawler(**_http_crawler_kwargs(config))
+        return HttpCrawler(**_http_crawler_kwargs(config), cache=cache)
     if name == "scrapy":
-        return ScrapyCrawler()
+        return ScrapyCrawler(cache=cache, domain_profiles=domain_profiles)
     raise WiringError(
         f"{ENV_SCOUT_CRAWLER}: неизвестный краулер {name!r}; "
         f"поддерживаются: {', '.join(SUPPORTED_SCOUT_CRAWLERS)}"
@@ -607,6 +621,8 @@ def build_adapters(
     registry: RegistryFetcherPort | None = None,
     index_root: str | Path = "index_store",
     package: str | None = None,
+    cache: ContentAddressedCache | None = None,
+    domain_profiles: Mapping[str, Any] | None = None,
 ) -> Ports:
     """Собирает порты внешних систем по профилю развёртывания (``03`` §E.3).
 
@@ -632,6 +648,10 @@ def build_adapters(
         composition root передаёт resolved ``paths.index_store`` (``03`` §A.1); дефолт
         ``"index_store"`` совпадает с дефолтом :class:`~core.config.paths.PathsConfig`.
     :param package: пакет по умолчанию для ``NpyIndexBuilder`` (``local``).
+    :param cache: глобальный content-addressed кэш (R7, ADR 0016); протягивается в
+        локальный краулер корпуса (``local``).
+    :param domain_profiles: per-domain рендер-профили (``domain_profiles.yaml``,
+        ``03`` §D.2); применяются локальным браузерным краулером (``local``).
     :raises WiringError: неизвестный профиль или split без валидного deploy-конфига.
     """
     if profile == LOCAL_PROFILE:
@@ -639,7 +659,11 @@ def build_adapters(
         # (user_agent/timeout/follow_redirects) — данные оператора (03 D.5/D.6). Без
         # конфига — прежнее поведение (crawler=None; сетевые порты инъектируются).
         local_crawler = (
-            build_scout_crawler(deploy=deploy) if deploy is not None else None
+            build_scout_crawler(
+                deploy=deploy, cache=cache, domain_profiles=domain_profiles
+            )
+            if deploy is not None
+            else None
         )
         return _build_local_ports(
             evaluator=evaluator,

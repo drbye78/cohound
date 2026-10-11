@@ -58,6 +58,7 @@ from core.pipeline.review import ReviewItem
 from core.pipeline.runner import PhaseFn
 from core.ports.gateway import ContentGateway
 from core.ports.types import RenderMode
+from core.util.cache import ContentAddressedCache
 
 # -- Типовые швы (тестовые инъекции) --------------------------------------- #
 #: Фабрика диагностического gateway по deploy-конфигу (тестовый шов ``deploy-check``).
@@ -819,13 +820,24 @@ def _resolve_plan(
     return build_plan(inputs, run_id=run_id)
 
 
-def _resolve_ports(args: argparse.Namespace, deploy_config: DeployConfig | None) -> Ports:
+def _resolve_ports(
+    args: argparse.Namespace,
+    deploy_config: DeployConfig | None,
+    *,
+    inputs: RunInputs | None = None,
+) -> Ports:
     """Собирает порты профиля (``ports`` — тестовый шов; иначе :func:`build_adapters`).
 
     Для ``split`` используются инъектируемые швы (``deploy_transport``/``gateway_factory``),
     поэтому прогон в тестах не требует сокета. Корень индексного хранилища берётся из
     resolved-раскладки (``paths.index_store``, ``03`` §A.1), чтобы индекс-контур писался
     в настроенный каталог.
+
+    **R7-кэш и домен-профили.** При наличии resolved-раскладки (``args.paths``) строится
+    глобальный content-addressed кэш :class:`ContentAddressedCache` от ``paths.cache``
+    (``03`` §A.1); ``inputs.domain_profiles`` (``domain_profiles.yaml`` пакета, §D.2)
+    протягиваются в локальный краулер. ``inputs=None`` сохраняет прежнее поведение
+    (домен-профили не передаются) — обратная совместимость вызывающих.
     """
     injected = getattr(args, "ports", None)
     if injected is not None:
@@ -838,12 +850,15 @@ def _resolve_ports(args: argparse.Namespace, deploy_config: DeployConfig | None)
     )
     paths = getattr(args, "paths", None)
     index_root = str(paths.index_store) if paths is not None else "index_store"
+    cache = ContentAddressedCache(paths.cache) if paths is not None else None
     return build_adapters(
         profile=args.profile,
         deploy=deploy_config,
         transport=getattr(args, "deploy_transport", None),
         gateway=gateway,
         index_root=index_root,
+        cache=cache,
+        domain_profiles=(inputs.domain_profiles if inputs is not None else None),
     )
 
 
