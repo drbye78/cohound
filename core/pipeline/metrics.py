@@ -7,7 +7,7 @@
 * ``failure_rate`` — ``failed / (evaluated ∪ failed)`` (R13, I5);
 * ``coverage_aggregate`` — Evidence Coverage (§6);
 * ``search_calls_by_phase`` — расход поискового бюджета (I23);
-* ``llm_calls``/``tokens`` — стоимость (M1/§16);
+* ``llm_calls``/``tokens`` — стоимость (M1/§15);
 * ``duration_by_phase`` — производительность.
 
 Принципы
@@ -108,7 +108,7 @@ class RunMetrics:
     :param failure_rate: ``failed / (evaluated ∪ failed)`` (R13).
     :param coverage_aggregate: Evidence Coverage (0.0, если бандл не передан).
     :param search_calls_by_phase: вызовы поиска по фазам (I23).
-    :param llm_calls: число вызовов LLM (стоимость, M1/§16).
+    :param llm_calls: число вызовов LLM (стоимость, M1/§15).
     :param tokens: токены по категориям (``prompt``/``completion``/…).
     :param duration_by_phase: длительности фаз в секундах (инжектируются runner-ом).
     """

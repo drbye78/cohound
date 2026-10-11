@@ -303,7 +303,7 @@ class StorePort(Protocol):       # §4.4
 `corpus_chunks`/`cells`/`cell_evidence` по разным файлам SQLite не может обеспечить FK между
 `cell_evidence.source_id` и `corpus_chunks.chunk_id` (и `build_id`). Единая БД сохраняет FK и
 целостность provenance; объём корпуса — не основание для разнесения (триггеры масштабирования —
-§15/§12, а не смена модели данных).
+§14/§12, а не смена модели данных).
 
 ### 3.6. `ports/embedder.py`, `ports/index_builder.py`, `ports/gate_store.py`
 

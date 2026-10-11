@@ -17,7 +17,7 @@ from core.domain import LLMCellOutput
 
 @dataclass(frozen=True)
 class TokenUsage:
-    """Расход токенов вызова (стоимость кейса, §16)."""
+    """Расход токенов вызова (стоимость кейса, §15)."""
 
     prompt_tokens: int = 0
     completion_tokens: int = 0

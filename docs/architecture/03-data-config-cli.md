@@ -113,7 +113,7 @@ class SqliteStore:
   (`runs/{run_id}/cohound.db`). Вариант «отдельная корпусная БД» **отвергнут**: при разнесении
   таблиц SQLite не может обеспечить FK между `cell_evidence.source_id` и `corpus_chunks.chunk_id`,
   что ломает provenance (I10/I15/I19). Объём корпуса — не основание менять модель данных;
-  триггеры масштабирования — §15, а не разделение БД.
+  триггеры масштабирования — §14, а не разделение БД.
 - **Индексы:** `idx_cells_run_state`, `idx_chunks_product`, `idx_log_run_phase`,
   `idx_evidence_run_cell` (уже в DDL).
 

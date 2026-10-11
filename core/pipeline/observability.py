@@ -193,7 +193,7 @@ def write_run_metrics(
     :param cells: явный список ячеек (приоритетнее ``store``).
     :param score_bundle: готовый ``ScoreBundle`` (``failure_rate``/``coverage_aggregate``).
     :param search_log: iterable записей с атрибутом ``.phase`` (I23).
-    :param llm_calls: число вызовов LLM (стоимость, M1/§16).
+    :param llm_calls: число вызовов LLM (стоимость, M1/§15).
     :param tokens: токены по категориям (``prompt``/``completion``/…).
     :returns: путь записанного ``metrics.json``.
     """

@@ -54,7 +54,7 @@ class DiscoveryLLMResponse:
 
     ``reasoning_tokens`` — токены «размышления» reasoning-модели (``0``, если не
     применимо). Они входят в ``usage.completion_tokens``, но выделяются отдельно для
-    sidecar-провенанса (стоимость кейса, §16).
+    sidecar-провенанса (стоимость кейса, §15).
     """
 
     output: BaseModel

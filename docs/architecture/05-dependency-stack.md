@@ -75,7 +75,7 @@ CLI-ядро (`pydantic`+`pyyaml`+stdlib) ставится везде; инде�
 | `tantivy` | 0.26.x | MIT ✅ | **a** | актуальное имя официальных Python-биндингов (Rust, BM25). **НЕ `tantivy-py`** — это старое альфа-имя (0.11.0-rc.7) → d |
 | `faiss-cpu` | 1.15.x | MIT ✅ | **b** | следующий шаг ANN, когда product-партиции перестают влезать в RAM: 3M×1024 fp32 ≈ 12.3 ГБ. `.npy` остаётся source of truth |
 | `usearch` | 2.26.x | Apache-2.0 ✅ | **b** | лёгкая альтернатива ANN (3 зависимости) |
-| `qdrant-client` | 1.19.x | Apache-2.0 ✅ | **c** | требует сервиса; отложено по §15 |
+| `qdrant-client` | 1.19.x | Apache-2.0 ✅ | **c** | требует сервиса; отложено по §14 |
 | `chromadb` | 1.5.x | Apache-2.0 ✅ | **d** | 31 зависимость (onnxruntime, opentelemetry, uvicorn) — против A1 |
 | `hnswlib` | 0.8.0 | Apache-2.0 ✅ | **c** | релиз 2023, вялый; проигрывает faiss/usearch |
 | `bm25s` | 0.3.x | MIT ✅ | **b** | быстрый BM25 на numpy, но тянет `numba` (JIT/LLVM) — против минимализма |
@@ -147,7 +147,7 @@ CLI-ядро (`pydantic`+`pyyaml`+stdlib) ставится везде; инде�
 | `Scrapy` | 2.19.x | BSD-3 ✅ | **a** | `DOWNLOAD_SLOTS` per-domain, AutoThrottle, HttpCache |
 | `scrapy-playwright` | 0.0.48 | BSD-3 ✅ | **a** (с пином + smoke) | per-request `playwright=True` для JS-доменов. **V5: зрелый де-факто стандарт** (org `scrapy-plugins`, активные PR Zyte 2026, py3.14 поддержан PR #375); ярлык `0.0.x` = конвенция автора (classifier Beta), не заброшенность |
 | `playwright` | 1.63.x | Apache-2.0 ✅ | **a** (пин) | headless-рендер; браузеры качаются с CDN — в закрытом контуре зеркало (`PLAYWRIGHT_DOWNLOAD_HOST`/`PLAYWRIGHT_BROWSERS_PATH`) |
-| `httpx` | 0.28.x | BSD ✅ | **a** | общий HTTP-клиент (search API, tests). **Watch-item (2026-10):** апстрим-активность снизилась; Pydantic ведёт преемник `httpx2` (Scrapy 2.18+ использует его). `httpx` ещё не EOL; миграция — отдельное решение по триггеру (§15). `httpx2` — кандидат в этот реестр |
+| `httpx` | 0.28.x | BSD ✅ | **a** | общий HTTP-клиент (search API, tests). **Watch-item (2026-10):** апстрим-активность снизилась; Pydantic ведёт преемник `httpx2` (Scrapy 2.18+ использует его). `httpx` ещё не EOL; миграция — отдельное решение по триггеру (§14). `httpx2` — кандидат в этот реестр |
 | `curl_cffi` | 0.16.x | MIT ✅ | **b** | «дешёвый первый ярус» для антибот-доменов без JS (имитация TLS/JA3); не замена браузеру |
 | `trafilatura`/`courlan` (fetch) | 2.3.x | Apache-2.0 ✅ | **b** | простой политкорректный fetch |
 | `crawl4ai` | 0.9.x | Apache-2.0 ✅ | **c** | LLM-first, тянет litellm/patchright/stealth — избыточно (A1) |
@@ -355,4 +355,4 @@ air-gap) сетевого доступа к HF нет — либо загруз�
 **Область действия:** V4 касается **только PDF-контура** (`docling-slim[standard]`, extra
 `extract-pdf`). Office-форматы (DOCX/PPTX/XLSX, extra `extract`, `docling-slim[format-office]`)
 парсятся **без ML-моделей** — офлайн из коробки, веса не нужны. Поэтому блокер M0 по PDF
-(тест на 3–5 мануалах, §3.2/§16) включает и проверку офлайн-бандла весов.
+(тест на 3–5 мануалах, §3.2/§15) включает и проверку офлайн-бандла весов.
