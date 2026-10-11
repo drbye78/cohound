@@ -58,10 +58,13 @@ tests/selfcheck.py            # self-contained проверка фундамен
 tests/test_selfcheck.py       # pytest-обёртка над selfcheck (W1/T1.5)
 tests/domain/                 # property-тесты домена (hypothesis)
 tests/smoke_scrapy_playwright.py  # браузерный smoke scrapy-playwright (V5; 0/1/2)
-packages/{case_id}/           # пакеты категорий: package/catalog/baselines/cohort/golden
+packages/{case_id}/           # пакеты категорий: package.yaml/catalog.csv(+.lock)/
+                              #   baselines.csv/cohort.yaml/golden.csv/domain_profiles.yaml/
+                              #   scope_attestation.yaml/run.yaml; sources/ — авторские входы
 registries/ · docs/           # словари, регламент, absence-правила
+contracts/seam/               # публикуемые JSON-схемы шва DMZ (/v1/*; 07 §5/§8)
 passports/{product_id}/       # паспорта продуктов
-runs/{run_id}/                # прогоны: SQLite, логи, промпты, манифесты
+runs/{run_id}/                # прогоны: SQLite, логи, metrics.json, манифесты, plan_inputs.json
 index_store/{package}/{build}/{product_id}/  # иммутабельные индексные сборки (продукт-партиции)
 corpus_raw/{product_id}/      # retention сырых байтов
 cache/serp/{query_hash}.json · cache/http/{url_hash}.bin  # глобальный content-addressed кэш (R7)
@@ -104,8 +107,10 @@ python3 -c "import sys; sys.path.insert(0,'.'); from core.store.sqlite import co
 # python3 tests/smoke_scrapy_playwright.py   # 0 — ok, 1 — fail, 2 — skip (нет deps)
 ```
 
-Требуется Python **3.14** (базлайн; greenfield, контролируемое развёртывание, все зависимости
-стека имеют cp314/abi3-колёса — `docs/architecture/05-dependency-stack.md` §1), `pydantic>=2`, `pyyaml`.
+Требуется Python **3.14** (пин-базлайн проекта; greenfield, контролируемое развёртывание, все
+зависимости стека имеют cp314/abi3-колёса — `docs/architecture/05-dependency-stack.md` §1;
+актуальный стабильный CPython на 2026-10 — 3.15, апгрейд — отдельное решение),
+`pydantic>=2`, `pyyaml`.
 Dev/CI по §11.6: `pytest`+`hypothesis`+`pytest-cov` в extra `dev`; единая точка входа — `scripts/ci.sh`.
 Выбор внешних пакетов, лицензии и запреты — `docs/architecture/05-dependency-stack.md`
 (реестр решений; LangChain/LlamaIndex и все hosted-парсеры отклонены).
@@ -172,8 +177,14 @@ Dev/CI по §11.6: `pytest`+`hypothesis`+`pytest-cov` в extra `dev`; един�
   области при необходимости: `core: ...`, `docs: ...`, `spec: ...`, `tests: ...`.
 - Секреты не коммитить. `runs/`, `index_store/`, `corpus_raw/`, `__pycache__/` — в `.gitignore`.
 - Slug (`param_id`, `product_id`) иммутабельны; отмена — `deprecated` + `replaced_by` (§13).
-- Смена модели под сценарий или смена когорты — **версионная граница**: bump
-  `methodology_version`, обязателен `golden-full` (§13).
+- Смена модели под сценарий или смена когорты — **версионная граница класса
+  `execution_versions`** (условия измерения, commodity-слой по A2), а **не**
+  `methodology_version`: блокирует межцикловый diff с пометкой `execution_change`,
+  обязателен `golden-full` (§13, §7.4).
+- Смена **семантики правил** (словарь статусов, scoring-политика, absence/сателлитная/
+  evidence-модель, определения Coverage/Comparability/sensitivity) — версионная граница
+  класса `methodology_version`: `methodology_change`, обязательны `golden-full` **и
+  пере-аннотация golden** (§13).
 
 ## Чего НЕ делать
 

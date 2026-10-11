@@ -147,7 +147,7 @@ CLI-ядро (`pydantic`+`pyyaml`+stdlib) ставится везде; инде�
 | `Scrapy` | 2.19.x | BSD-3 ✅ | **a** | `DOWNLOAD_SLOTS` per-domain, AutoThrottle, HttpCache |
 | `scrapy-playwright` | 0.0.48 | BSD-3 ✅ | **a** (с пином + smoke) | per-request `playwright=True` для JS-доменов. **V5: зрелый де-факто стандарт** (org `scrapy-plugins`, активные PR Zyte 2026, py3.14 поддержан PR #375); ярлык `0.0.x` = конвенция автора (classifier Beta), не заброшенность |
 | `playwright` | 1.63.x | Apache-2.0 ✅ | **a** (пин) | headless-рендер; браузеры качаются с CDN — в закрытом контуре зеркало (`PLAYWRIGHT_DOWNLOAD_HOST`/`PLAYWRIGHT_BROWSERS_PATH`) |
-| `httpx` | 0.28.x | BSD ✅ | **a** | общий HTTP-клиент (search API, тесты) |
+| `httpx` | 0.28.x | BSD ✅ | **a** | общий HTTP-клиент (search API, tests). **Watch-item (2026-10):** апстрим-активность снизилась; Pydantic ведёт преемник `httpx2` (Scrapy 2.18+ использует его). `httpx` ещё не EOL; миграция — отдельное решение по триггеру (§15). `httpx2` — кандидат в этот реестр |
 | `curl_cffi` | 0.16.x | MIT ✅ | **b** | «дешёвый первый ярус» для антибот-доменов без JS (имитация TLS/JA3); не замена браузеру |
 | `trafilatura`/`courlan` (fetch) | 2.3.x | Apache-2.0 ✅ | **b** | простой политкорректный fetch |
 | `crawl4ai` | 0.9.x | Apache-2.0 ✅ | **c** | LLM-first, тянет litellm/patchright/stealth — избыточно (A1) |

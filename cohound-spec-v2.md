@@ -111,7 +111,7 @@ coHound не является: нагрузочным бенчмарком · з
 
 Масштаб: 35–55 паспортов; ≤ ~3300 ячеек на кейс; корпус ~0.4–0.7 млн чанков на кейс, 1–3 млн суммарно. Единая единица учёта — **чанков на продукт** (~60k, §3.2). Каждый кейс = пакет категории + прогон чеклиста нейтральности v2 (§11.4). Минимум один кейс на архетип.
 
-### 1.6. Когорта и якорь (новое)
+### 1.6. Когорта и якорь
 
 **Когорта** — фиксированный на цикл перечень продуктов (якорь + 6–10 аналогов), формируемый по декларируемым правилам и **замораживаемый на гейте G1**:
 
@@ -195,11 +195,14 @@ I23  поисковый бюджет    → фиксирован и залоги
 
 ### 3.1. Компоненты
 
-CLI-ядро (`resolve · plan · discover · run · review · report · golden · sensitivity · diff · promote`) · нормализатор входов с линтером · Discovery-агент · сборочный контур (краул, экстракция) · индексационный контур (чанкер, гибридный индекс) · движок наследования · реестровые фетчеры · **LLM-контур оценщика** (без поиска) · **search-контур** (SERP-адаптер, допустимо с веб-поиском) · очередь ревью / preliminary-рабочий стол · расчётно-отчётный модуль.
+CLI-ядро (`resolve · plan · run · diff · sensitivity · golden · report · discover · review · promote · gate · deploy-check`) · нормализатор входов с линтером · Discovery-агент · сборочный контур (краул, экстракция) · индексационный контур (чанкер, гибридный индекс) · движок наследования · реестровые фетчеры · **LLM-контур оценщика** (без поиска) · **search-контур** (SERP-адаптер, допустимо с веб-поиском) · очередь ревью / preliminary-рабочий стол · расчётно-отчётный модуль.
 
-> **Примечание.** Перечисленные десять команд — **методологическое ядро**. Полная CLI-поверхность
-> шире: помимо ядра — команды авторского и операционного контура (`package` с подкомандами,
-> `passport-scout`, `deploy-check`, `doctor`). Актуальный список и семантика — в
+> **Примечание.** Команды `resolve`/`plan`/`run`/`diff`/`sensitivity`/`golden`/`report`/
+> `discover`/`review`/`promote`/`gate`/`deploy-check` — **методологическое ядро**. Полная
+> CLI-поверхность шире: помимо ядра — команды авторского и операционного контура (`package` с
+> подкомандами, `passport-scout`, `doctor`). `gate` — единственная точка записи человеческих
+> решений G1–G4 (`gate_decisions`, S9; §4.2); принятие решения о N/A (I6/I7) или аттестации
+> `source_scope` без неё невозможно. Актуальный список и семантика — в
 > `docs/architecture/03-data-config-cli.md` §E.1 и в коде (`core/cli/`); при расхождении верен код.
 
 **Разделение ролей поиска (ключевое):** поиск в системе существует только как **источник входного контента** (Ш5: краул + SERP), который нормализуется, хэшируется и индексируется. Оценщик (§7, Ш6) **не имеет** доступа к внешнему поиску (I18). Подробности — §7.
@@ -208,19 +211,19 @@ CLI-ядро (`resolve · plan · discover · run · review · report · golden 
 
 | Слой | Выбор | Обоснование |
 |---|---|---|
-| Язык / данные | Python 3.14 (базлайн; см. `docs/architecture/05-dependency-stack.md` §1) · YAML+CSV в git · Pydantic | greenfield, контролируемое развёртывание; все зависимости стека имеют cp314/abi3-колёса |
-| Операционное хранилище | SQLite (WAL, батчевые записи) | без изменений |
+| Язык / данные | Python 3.14 (**пин-базлайн проекта**; актуальный стабильный CPython на 2026-10 — 3.15, апгрейд — отдельное решение) · YAML+CSV в git · Pydantic | greenfield, контролируемое развёртывание; все зависимости стека имеют cp314/abi3-колёса (`docs/architecture/05-dependency-stack.md` §1) |
+| Операционное хранилище | SQLite (WAL, батчевые записи) | встроенное, без внешнего сервиса; соответствует масштабу MVP (A1) |
 | **Векторный контур** | **NpyVectorIndex (in-process, brute-force cosine по .npy-шардам + манифест) — дефолт MVP**. Шардирование **по продукту**: `index_store/{package}/{build}/{product_id}/`. Порт `VectorIndex` сохраняется; Qdrant — отложенная подмена по измеримым триггерам (§15) | ретривал продукт-скоупед (I17): запрос не выходит за пределы ~60k чанков продукта и его сателлитов, поэтому brute-force укладывается в рабочие десятки мс; выбор Qdrant в v1.2 решал проблемы, спроектированные прочь — нарушение A3, исправлено |
 | **Лексический контур** | tantivy (BM25): **двойной профиль — стеммеры RU/EN + raw-identifier/ngram** для идентификаторов (GUC, утилиты, версии, аббревиатуры). **Проверено (V1, 2026-10-08):** русский стеммер и стоп-слова доступны нативно (`Filter.stemmer("russian")`, `Filter.stopword("russian")`), внешний `snowballstemmer` не нужен | стемминг вредит точным идентификаторам — ровно тем, ради которых лексическое плечо введено; профиль тестируется на retrieval-golden |
 | **Ретривал-профиль** | эксперимент в M1: R0=BM25 / R1=dense / R2=RRF-гибрид на retrieval-golden; дефолт фиксируется измерением и записывается в манифест. Параметр `retrieval_cutoff_K` (K единиц, отдаваемых оценщику) входит в профиль | ретривал принимается по evidence, не по предвидению (A3); гипотеза: R2 выигрывает на смешанном RU/EN корпусе — проверяемая, не предрешённая |
 | Эмбеддинги | локально, sentence-transformers: **BGE-M3 — основной кандидат** (приоритет RU, EN хорошо; 8192 контекста, dense; MIT); multilingual-e5-large — альтернатива; подтверждение на R9/R10 | **RU — абсолютный приоритет, EN тоже сильный** (целевой корпус RU-вендоров + международные ID/термины); данные не покидают контур; NC-лицензии исключены |
 | Краулинг | Scrapy + scrapy-playwright (per-domain рендер-профили); **robots.txt = obey** (при встраивании Scrapy как библиотеки флаг `ROBOTSTXT_OBEY` выставить явно — дефолт False). **V5 (2026-10-08):** scrapy-playwright — зрелый де-факто стандарт (org `scrapy-plugins`, BSD-3, py3.14); **smoke-тест пройден** на Scrapy 2.19 / playwright 1.63 (chromium + firefox) → жёсткий пин подтверждён. `curl_cffi` — первый ярус для антибот-доменов без JS | production-фреймворки; качество извлечения кормит цитатную валидацию; этическая норма §10 |
 | Экстракция | trafilatura (HTML) · docling (PDF + Office: DOCX/PPTX/XLSX, фич-матрицы → markdown); PyMuPDF исключён (AGPL); лицензии и транзитивные зависимости (pypdfium2, OCR-модели) верифицируются в M0 | docling выбран осознанно: нативно парсит Office Open XML (бэкенды python-docx/python-pptx/openpyxl). Не офисные форматы тянут torch; поэтому Office ставится лёгким `docling-slim[format-office]` (**без torch**, + `rtree` — не входит в `format-office`, но нужен для импорта `DocumentConverter`), PDF layout — `docling-slim[standard]` (torch) в отдельном окружении. Полный пакет `docling` = `docling-slim[standard]` и для Office избыточен. Риск потери табличной структуры фич-матриц; тест на 3–5 реальных мануалах РФ-вендоров (PDF + Office) — **блокер M0**, не M1 (§16) |
-| **LLM-оценщик** | self-host, контур РФ: vLLM/SGLang c **constrained decoding** (xgrammar/XGrammar) + greedy/seed; кандидаты — DeepSeek-V4.1-Flash (MIT), GLM-5.3-Flash (MIT), GigaChat3.5-432B (MIT, ru); лёгкие — GLM-4.5-Air (MIT), Qwen3.8-27B (Apache-2.0). **Без веб-тула.** Финал — измерением на golden (A3) | корпус не покидает контур безусловно; запрет поиска структурный (у сырых весов тула нет); self-host пинит веса/движок → лучше для R7 |
-| **Search-адаптер** | Yandex Search API + Yandex GPT Web Search Tool (РФ) — дефолт; альтернатива — GLM Web Search API. Commodity-слой, вне evidence-модели | даёт цитаты-кандидаты (`url_citation`/`link`), которые обязаны пройти corpus_raw → hash → index (I19) |
+| **LLM-оценщик** | self-host, контур РФ: vLLM/SGLang c **constrained decoding** (xgrammar/XGrammar; в vLLM 0.12+ — через `structured_outputs`, поле `guided_decoding_backend` удалено) + greedy/seed; кандидаты — DeepSeek-V4.1-Flash (MIT), GLM-5.3-Flash (MIT), GigaChat3.5-432B-A28B (MIT, ru); лёгкие — GLM-4.5-Air (MIT), Qwen3.8-27B (Apache-2.0). **Без веб-тула.** Финал — измерением на golden (A3) | корпус не покидает контур безусловно; запрет поиска структурный (у сырых весов тула нет); self-host пинит веса/движок → лучше для R7 |
+| **Search-адаптер** | Yandex Search API (РФ) — дефолт; название «Yandex GPT Web Search Tool» — **не подтверждено** в открытой документации (Yandex docs недоступны авто-фетчу), требует ручной сверки (§16); альтернатива — GLM Web Search API (верифицирован). Commodity-слой, вне evidence-модели | даёт цитаты-кандидаты (`url_citation`/`link`), которые обязаны пройти corpus_raw → hash → index (I19) |
 | **Санитайзинг контента** | nh3 (Rust/ammonia) · defusedxml; **bleach исключён (EOL с 2026-06)**. Чистка структуры (script/hidden), **без изменения текстовых узлов** — иначе ломается проверка «цитата — подстрока» (§10) | защита от prompt-injection; сохраняет инвариант цитатной валидации |
 | **Надёжность / логи** | tenacity (retry ≤2 → failed) · structlog (структурные JSON-логи для манифеста) | воспроизводимость R7 и §7 |
-| Отчёты / Оркестрация | openpyxl · однопроцессный Python + thread-pool (**дефолт MVP**, пересматривается по триггеру) | без изменений |
+| Отчёты / Оркестрация | openpyxl · однопроцессный Python + thread-pool (**дефолт MVP**, пересматривается по триггеру §15) | соответствует масштабу MVP; усложнение — только по измеримому триггеру (A1) |
 
 **Свой код сбора — три вещи:** доменные профили · чанкер с `heading_path` · retention сырых байтов + `extractor_version` (ре-извлечение без ре-фетча, A/B экстракторов). **Ручной drop-in корпус** — штатный escape hatch для антибот-доменов, с правилом симметрии (одинаково доступен всем продуктам кейса); обход CAPTCHA/антибота запрещён.
 
@@ -231,13 +234,15 @@ CLI-ядро (`resolve · plan · discover · run · review · report · golden 
 ```
 repo/
   core/                        # нейтральный код (грепп-тест)
-  packages/{case_id}/          # package.yaml · catalog.csv · baselines.csv
-                               # cohort.yaml · golden.csv · adversarial/ · domain_profiles.yaml
+  packages/{case_id}/          # package.yaml · catalog.csv(+.lock) · baselines.csv
+                               # cohort.yaml · golden.csv · domain_profiles.yaml
+                               # scope_attestation.yaml · run.yaml · adversarial/ · sources/ (авторские входы)
   registries/ · docs/          # словарь статусов, регламент, absence-правила
+  contracts/seam/              # публикуемые JSON-схемы шва DMZ (/v1/*)
   passports/{product_id}/{YYYY-MM-DD}.yaml
-  runs/{run_id}/               # SQLite, логи, промпты, манифесты
+  runs/{run_id}/               # SQLite, логи, metrics.json, манифесты, plan_inputs.json
   index_store/{package}/{build}/{product_id}/   # .npy-шарды + manifest (иммутабельные сборки)
-  corpus_raw/{product_id}/ · reports/ · tests/
+  corpus_raw/{product_id}/ · tests/
 ```
 
 ---
@@ -273,7 +278,7 @@ evidence_state:  verified | claimed
 
 **package.yaml:** `archetype (A|B|C)` · модули с весами (сумма=100) · реестр ролей (definition, markers, query_patterns RU/EN, core_coverage_allowed, multi_instance) · реестр базлайнов · `baseline_participant` (null для C) · юрисдикции+реестры · языки.
 
-**cohort.yaml (новое):** состав когорты и обоснование (§1.6): `product_id · role_overlap · selection_reason · anchor_relation · frozen_at`.
+**cohort.yaml:** состав когорты и обоснование (§1.6): `product_id · role_overlap · selection_reason · anchor_relation · frozen_at`.
 
 **catalog.csv (11 колонок):** `param_id` (slug, иммутабельный) · `title` · `module` · `group` · `importance` (Кр|Вж|Баз|Опц) · `param_type` (fact|showcase) · `rule` (граница зачёта) · **`absence_rule`** (тип из словаря; дефолт `explicit`) · `role_binding` · `concept_terms` (структура `{ru: [..], en: [..]}` — детерминированная синонимичная экспансия; **типизирована как map со списками**, а не как строка) · `search_langs`.
 
@@ -343,6 +348,7 @@ runs(run_id PK, created_at, mode, case_id, anchor_product_id, cohort_ref, focus_
      scoring_policy_version, methodology_version,
      index_build_id, retrieval_profile, retrieval_params_json,   -- профиль + fusion-параметры (rrf_k) — S1
      retrieval_cutoff_K, search_effort_budget_json, snapshot_date,
+     requested_ranking, computed_ranking,                         -- K6: запрошенный vs допустимый ранг
      settings_provenance_json,                                    -- A3 (v2.1): {param: {source: default|measured, experiment_id?}}
      state);
 
@@ -621,7 +627,11 @@ R17 оценщик не имеет веб-тула ни при каком сце
 
 ### 11.6. Preliminary-метрики и CI
 
-Yield · расхождение кандидат/strict на golden · время прохода. CI: грепп-нейтральность · линт · юнит на валидатор/резолвер/ренормализацию/инварианты · retrieval-CI на NpyVectorIndex (без контейнеров) · **JSON-schema conformance на constrained decoding** · golden-fast на PR.
+Yield · расхождение кандидат/strict на golden · время прохода. **CI — текущий vs целевой:**
+сегодня `scripts/ci.sh` гоняет selfcheck (словарь/схемы/DDL/инварианты + импорт-граф + нейтральность)
+и pytest с порогом покрытия ядра; **целевые гейты** (по мере готовности контуров): retrieval-CI на
+NpyVectorIndex (без контейнеров) · **JSON-schema conformance на constrained decoding** ·
+golden-fast на PR · линт-инварианты прогона.
 
 ### 11.7. Определение воспроизводимости (R7)
 
@@ -707,9 +717,7 @@ Yield · расхождение кандидат/strict на golden · врем�
 | Категории 6+ | стабильность 5 кейсов; онбординг — §11.4 |
 | Парсинг исходного кода (code-chunker) | кейс, где upstream-факт (архетипы A/B) доказуем только по исходникам; отдельный `ChunkerPort`-адаптер, без графа |
 | Граф знаний / GraphRAG (vector+graph) | потребность в кросс-продуктовых связях, не выражаемых `baselines.csv`/сателлитами; в текущем дизайне не требуется (A1/A2) |
-| Лёгкие Office-extras docling (`docling-slim[format-office]`) | если вес полного docling (torch) мешает установке/CI, а PDF-контур уже вынесен отдельно |
 | ANN графов (faiss-cpu / usearch) | product-партиция перестаёт влезать в RAM / p95 brute-force не укладывается в бюджет (реализовать как адаптер `VectorIndex`) |
-| Reranker по умолчанию | см. выше (измеренный прирост precision) |
 | `llama-cpp-python` (CPU/GGUF) как рабочий путь оценщика | отсутствие/дефицит GPU, но нужен self-host инференс |
 | Облачные/hosted-парсеры (LlamaParse и подобные) | **не берём**: SaaS выводит документы за периметр РФ (Юр-контур, §10); вернуться только при появлении полностью air-gapped on-prem поставки в РФ-юрисдикции |
 | Полные оркестраторы (LangChain/LlamaIndex/LangGraph) | **не берём**: дублируют порты, ломают инварианты и воспроизводимость, рискуют протащить веб-контур в оценщик (I18/A2). LangGraph — только как источник идей, не зависимость |
