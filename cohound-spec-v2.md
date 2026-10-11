@@ -204,7 +204,7 @@ repo/
 
 ### 4.1. Словари и перечисления
 
-`docs/status-dictionary.yaml`: статусы (§2.1) · `source_kind` (registry|inheritance|distribution|documentation|web|manual) · `evidence_type` (direct|derived) · `absence_rule_type` (explicit|parameter_reference|distribution_absence|registry_absence) · `source_scope` (**exhaustive|partial|unknown** — свойство экземпляра источника, поле evidence) · `failure_kind` (search_failed|source_unavailable|evaluation_failed|validation_failed|parser_failed) · `cell_state` (pending|preliminary|evaluated|failed|reviewed) · `run_mode` · `ranking_policy` (capability_ranked|coverage_fallback|unranked) · `gate` (G1|G2|G3|G4) · `capability_policy` (resolved-only-v1) · `unknown_policy` (excluded|unknown_as_zero) · `fetch_mode` (**http|browser**) · `extraction_route` (**auto|html|document**). `unexpected` — **run-level ошибка без ячейки** (системное исключение), в `failure_kind` не входит (S7): `failure_kind` описывает только сбой ячейки.
+`docs/status-dictionary.yaml`: статусы (§2.1) · `source_kind` (registry|inheritance|distribution|documentation|web|manual) · `evidence_type` (direct|derived) · `absence_rule_type` (explicit|parameter_reference|distribution_absence|registry_absence) · `source_scope` (**exhaustive|partial|unknown** — свойство экземпляра источника, поле evidence) · `failure_kind` (search_failed|source_unavailable|evaluation_failed|validation_failed|parser_failed) · `cell_state` (pending|preliminary|evaluated|failed|reviewed) · `run_mode` · `ranking_policy` (capability_ranked|coverage_fallback|unranked) · `gate` (G1|G2|G3|G4) · `capability_policy` (resolved-only-v1) · `unknown_policy` (excluded|unknown_as_zero) · `fetch_mode` (**http|browser**) · `extraction_route` (**auto|html|document**) · `fetch_status` (**pending|fetched|done|failed**). `unexpected` — **run-level ошибка без ячейки** (системное исключение), в `failure_kind` не входит (S7): `failure_kind` описывает только сбой ячейки.
 
 **Оси сателлита:**
 
@@ -345,9 +345,19 @@ search_exhaustion(run_id, product_id, param_id, protocol_json);
 -- protocol_json (I3, v2.1) перечисляет пройденные контуры [{contour: corpus|serp|registry|inheritance,
 --   queries: n, termination_reason: <из словаря>, ts}] — strict-❓ без обязательных контуров = аномалия (§5).
 registry_facts(run_id, product_id, registry_id, fact_json, source_url, fetched_at);
+
+-- D3/P3: durable per-URL учёт краула (аудит + очередь + resume без ре-фетча).
+-- НЕ search_log (тот — единственное место логирования поисковых вызовов, §7/I23).
+crawl_attempts(run_id, product_id, url, status, attempts, fetch_mode, extract_route,
+               http_status, content_type, content_hash, raw_path, error_kind, error,
+               first_seen, last_attempt, PRIMARY KEY (run_id, product_id, url));
+-- status: pending|fetched|done|failed (fetch_status); error_kind: FailureKind
+--   (source_unavailable — сбой краула; parser_failed — сбой экстракции);
+--   content_hash — хеш сырых байтов (basename raw_path). Resume: status ∈ {fetched, done}
+--   с retained raw → ре-экстракция без сетевого ре-фетча (I19); иначе — фетч.
 ```
 
-Валидация цитат — по чистому `text` чанка (`context_prefix` не входит). `content_hash` заполняется с первого дня. `search_log` — **единственное место** логирования любых поисковых вызовов, включая tool-based (§7, I23); поле `kind` разделяет внутренний ретривал (`retrieval`) и внешние поисковые запросы (`external`).
+Валидация цитат — по чистому `text` чанка (`context_prefix` не входит). `content_hash` заполняется с первого дня. `search_log` — **единственное место** логирования любых поисковых вызовов, включая tool-based (§7, I23); поле `kind` разделяет внутренний ретривал (`retrieval`) и внешние поисковые запросы (`external`). `crawl_attempts` ведёт **крауловый** аудит/очередь отдельно от поискового лога: `search_log` описывает поисковые запросы, `crawl_attempts` — пер-URL жизненный цикл фетча/экстракции (durable-носитель resume; сбой краула — данные, не падение фазы).
 
 ### 4.5. Конфигурация прогона (run.yaml)
 
