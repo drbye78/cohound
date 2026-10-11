@@ -312,12 +312,13 @@ corpus_docs(doc_id PK, product_id, url, fetched_at, content_hash,
             raw_path, extractor_version, render_mode, lang);
 corpus_chunks(chunk_id PK, doc_id, product_id, url, heading_path, lang,
               chunk_no, text, context_prefix, content_hash, build_id,   -- build_id: привязка чанка к сборке (S5)
-              embed_model_id, embedded_at);
+              extractor_version, embed_model_id, embedded_at);
 -- index_manifest: пакетная сборка (build_id, иммутабельна) × продукт-партиция.
 -- PK — составной (index_build_id, product_id): один build_id даёт N партиций (K1).
 index_manifest(index_build_id, product_id, package_id, partition_key,
                snapshot_date, chunker_version, embed_model_id, embed_dim,
-               lexical_engine_version, vector_store, store_path, created_at, stats_json,
+               extractor_version, lexical_engine_version, vector_store,
+               content_digest, store_path, created_at, stats_json,       -- content_digest: отпечаток контента партиции (I19)
                PRIMARY KEY (index_build_id, product_id));
 
 cells(run_id, product_id, param_id, state,
@@ -623,7 +624,9 @@ Preliminary-метрики: yield · расхождение кандидат/str
 
 **`methodology_version` — семантика правил** (изменение = версионная граница, инвалидирует межцикловый diff, требует `golden-full` + пере-аннотации golden): `status_dictionary_version` · `scoring_policy_version` (включая `partial_score`, `unknown_policy`) · отсутствие-правила/сателлитная модель/evidence-модель · определения Coverage/Comparability/sensitivity. Slug иммутабельны; deprecated + replaced_by.
 
-**`execution_versions` — условия измерения** (commodity-слой; смена не меняет правила, но делает сборки/ячейки несопоставимыми численно — тоже блокирует diff, но с иной причиной): `package_version` · `catalog_version` · индексный контур `index_build_id`, `embed_model_id`, `chunker_version`, `extractor_version`, `lexical_engine_version`, `retrieval_profile`, `retrieval_cutoff_K`, `retrieval_params_json` (fusion-параметры, включая `rrf_k`) · модель под сценарий (I21) · когорта. Сборки иммутабельны; смена любого из них = новая сборка + retrieval-golden (S1).
+**`execution_versions` — условия измерения** (commodity-слой; смена не меняет правила, но делает сборки/ячейки несопоставимыми численно — тоже блокирует diff, но с иной причиной): `package_version` · `catalog_version` · индексный контур `index_build_id`, `embed_model_id`, `chunker_version`, `extractor_version`, `lexical_engine_version`, `retrieval_profile`, `retrieval_cutoff_K`, `retrieval_params_json` (fusion-параметры, включая `rrf_k`) · модель под сценарий (I21) · когорта. Сборки иммутабельны; смена любого из них = новая сборка + retrieval-golden (S1). `methodology_version` — источник: `run.yaml` (поле `RunConfig`), дефолт — константа ядра; она входит в манифест и в границу diff (major).
+
+**`index_build_id` — контент-адресуемый батч-идентификатор.** Идентификатор индексной сборки — не произвольное подмножество `execution_versions`, а **вычисляемый из декларированных входов сборки + отпечатка контента**: `package_id`/`params_token`/`snapshot_date` (выбор контента) · `chunker_version` · `embed_model_id` · `extractor_version` · `lexical_engine_version` · `vector_store` (производство/формат партиции) · `content_token` — детерминированный отпечаток `(product_id, chunk_id, content_hash)` по всем продукт-партициям. **`retrieval_profile`/`retrieval_cutoff_K`/`retrieval_params_json` в `index_build_id` не входят** (ретривал-конфигурация не меняет чанкинг/векторы): они остаются run-level провенансом и пер-ячейкой, но по-прежнему блокируют diff как `execution_change`. Схема формулы версионируется (`_BUILD_ID_SCHEMA`), поэтому ревизия формулы всегда порождает новые id. Идентификатор финализируется **после ингеста и до физической сборки** (двухпроходный Ш5, §5), что исключает коллизию «тот же id — другой контент».
 
 **Diff-совместимость:** `hound diff` сравнивает манифесты и запрещает межцикловый diff при несовпадении **любого** из двух классов, но с **различной пометкой причины**: `methodology_change` (правила иные — сравнение семантически неверно) vs `execution_change` (условия измерения иные — сравнение численно несопоставимо). Major запрещает межцикловые diff.
 
