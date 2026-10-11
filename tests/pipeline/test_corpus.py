@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import datetime as _dt
+import inspect
 import json
 from pathlib import Path
 
@@ -23,7 +24,7 @@ from core.domain import (
     CohortEntry,
 )
 from core.pipeline import RunPlan
-from core.pipeline.corpus import IndexBuild, build_corpus
+from core.pipeline.corpus import IndexBuild, _derive_index_build_id, build_corpus
 from core.ports.types import (
     Chunk,
     ExtractedDoc,
@@ -335,38 +336,106 @@ def test_chunk_content_hash_from_text_and_build_id(tmp_path: Path) -> None:
             store=store,
         )
         build = _build_of(result)
-        rows = list(store.conn.execute("SELECT chunk_id, text, content_hash, build_id FROM corpus_chunks"))
+        rows = list(
+            store.conn.execute(
+                "SELECT chunk_id, text, content_hash, extractor_version, build_id"
+                " FROM corpus_chunks"
+            )
+        )
         assert rows, "чанки обязаны быть записаны"
         for row in rows:
             assert row["content_hash"] == content_hash(row["text"])
             assert row["content_hash"]  # I19
             assert row["build_id"] == build.index_build_id
+            # P2: версия экстрактора чанка персистится (re-extract-провенанс, §3.2).
+            assert row["extractor_version"] == "extractor-1"
     finally:
         store.close()
 
 
-def test_index_build_id_is_deterministic_and_version_sensitive(tmp_path: Path) -> None:
-    pages = {URL_P1_A: b"doc"}
-    urls = {"p1": [URL_P1_A]}
+def test_index_build_id_same_content_deterministic(tmp_path: Path) -> None:
+    """Те же входы и то же содержимое → один id (детерминизм, §B.1/§13)."""
+    pages = {URL_P1_A: b"doc", URL_P2_A: b"doc-two"}
+    urls = {"p1": [URL_P1_A], "p2": [URL_P2_A]}
     base = _build_of(_build(tmp_path / "a", pages=pages, urls=urls)).index_build_id
     again = _build_of(_build(tmp_path / "b", pages=pages, urls=urls)).index_build_id
     assert base == again
 
+
+def test_index_build_id_collision_regression(tmp_path: Path) -> None:
+    """P2: одинаковые декларированные входы + разный контент ⇒ РАЗНЫЙ id (коллизия)."""
+    urls = {"p1": [URL_P1_A]}
+    first = _build_of(
+        _build(tmp_path / "a", pages={URL_P1_A: b"content-a"}, urls=urls)
+    ).index_build_id
+    same = _build_of(
+        _build(tmp_path / "b", pages={URL_P1_A: b"content-a"}, urls=urls)
+    ).index_build_id
+    other = _build_of(
+        _build(tmp_path / "c", pages={URL_P1_A: b"content-b"}, urls=urls)
+    ).index_build_id
+    assert first == same
+    assert first != other
+
+
+def test_index_build_id_sensitive_to_declared_inputs(tmp_path: Path) -> None:
+    """P2: id меняется при смене chunker/embedder/extractor/lexical/vector/snapshot."""
+    pages = {URL_P1_A: b"doc"}
+    urls = {"p1": [URL_P1_A]}
+    base = _build_of(_build(tmp_path / "a", pages=pages, urls=urls)).index_build_id
+
     other_chunker = _build_of(
-        _build(tmp_path / "c", pages=pages, urls=urls, chunker_version="chunker-2")
+        _build(tmp_path / "b", pages=pages, urls=urls, chunker_version="chunker-2")
     ).index_build_id
     other_snapshot = _build_of(
-        _build(tmp_path / "d", pages=pages, urls=urls, snapshot_date="2026-02-01")
+        _build(tmp_path / "c", pages=pages, urls=urls, snapshot_date="2026-02-01")
     ).index_build_id
     other_embedder = _build_of(
-        _build(
-            tmp_path / "e",
-            pages=pages,
-            urls=urls,
-            embedder=_Embedder(model_id="embed-y"),
-        )
+        _build(tmp_path / "d", pages=pages, urls=urls, embedder=_Embedder(model_id="embed-y"))
     ).index_build_id
-    assert len({base, other_chunker, other_snapshot, other_embedder}) == 4
+
+    extractor = _Extractor()
+    extractor.version = "extractor-2"
+    other_extractor = _build_of(
+        _build(tmp_path / "e", pages=pages, urls=urls, extractor=extractor)
+    ).index_build_id
+
+    builder = _IndexBuilder()
+    builder.lexical_engine_version = "lex-2"
+    other_lexical = _build_of(
+        _build(tmp_path / "f", pages=pages, urls=urls, index_builder=builder)
+    ).index_build_id
+
+    builder2 = _IndexBuilder()
+    builder2.vector_store = "store-2"
+    other_vector = _build_of(
+        _build(tmp_path / "g", pages=pages, urls=urls, index_builder=builder2)
+    ).index_build_id
+
+    ids = {
+        base,
+        other_chunker,
+        other_snapshot,
+        other_embedder,
+        other_extractor,
+        other_lexical,
+        other_vector,
+    }
+    assert len(ids) == 7
+
+
+def test_index_build_id_ignores_retrieval_config() -> None:
+    """P2: ``retrieval_*`` не входят в формулу id (ретривал не меняет чанкинг/векторы)."""
+    params = set(inspect.signature(_derive_index_build_id).parameters)
+    assert not {name for name in params if name.startswith("retrieval")}
+    assert {
+        "chunker_version",
+        "embed_model_id",
+        "extractor_version",
+        "lexical_engine_version",
+        "vector_store",
+        "content_token",
+    } <= params
 
 
 # --------------------------------------------------------------------------- #
@@ -641,9 +710,10 @@ def _chunk_count(store: SqliteStore, build_id: str) -> int:
     return int(row["n"])
 
 
-def test_immutable_build_refused_leaves_db_unchanged(tmp_path: Path) -> None:
-    # Первый прогон фиксирует партицию p1 с одним чанком; второй прогон того же run_id
-    # меняет контент (два чанка) → физическая сборка отказана, БД не дорасширяется.
+def test_new_content_mints_new_build_leaves_previous_untouched(tmp_path: Path) -> None:
+    # P2: изменённый контент при тех же декларированных входах даёт **новую** сборку, а
+    # прошлая продукт-партиция не мутируется (append-only, K2/§13). Это заменяет прежний
+    # сценарий same-id/different-content: теперь он структурно невозможен.
     store = SqliteStore(":memory:")
     builder = _ImmutableBuilder()
     try:
@@ -669,13 +739,16 @@ def test_immutable_build_refused_leaves_db_unchanged(tmp_path: Path) -> None:
             index_builder=builder,
         )
         build_id_2 = _build_of(second).index_build_id
-        assert build_id_2 == build_id  # тот же run_id/params → тот же build_id
+        # Контент другой ⇒ РАЗНЫЙ id (контент-адресуемость P2).
+        assert build_id_2 != build_id
+        assert second.errors == []
 
-        # Манифест и чанки не изменились: БД согласована с иммутабельной партицией на диске.
+        # Прошлая сборка не изменилась: БД согласована с иммутабельной партицией на диске.
         assert _manifest_row(store, build_id, "p1") == manifest_before
         assert _chunk_count(store, build_id) == 1
-        assert any("ImmutableBuildError" in err for err in second.errors)
-        assert any("не зафиксирована" in err for err in second.errors)
+        # Новая сборка зафиксирована собственной партицией.
+        assert _manifest_row(store, build_id_2, "p1") is not None
+        assert _chunk_count(store, build_id_2) == 2
     finally:
         store.close()
 

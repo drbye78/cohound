@@ -702,8 +702,9 @@ class SqliteStore:
         sql = (
             "INSERT OR REPLACE INTO corpus_chunks"
             " (chunk_id, doc_id, product_id, url, heading_path, lang, chunk_no, text,"
-            "  context_prefix, content_hash, build_id, embed_model_id, embedded_at)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            "  context_prefix, content_hash, extractor_version, build_id, embed_model_id,"
+            "  embedded_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
         )
         rows = [
             (
@@ -717,6 +718,7 @@ class SqliteStore:
                 c.text,
                 c.context_prefix,
                 c.content_hash,
+                c.extractor_version,
                 c.build_id,
                 c.embed_model_id,
                 c.embedded_at,
@@ -732,9 +734,10 @@ class SqliteStore:
             self.conn.execute(
                 "INSERT OR REPLACE INTO index_manifest"
                 " (index_build_id, product_id, package_id, partition_key, snapshot_date,"
-                "  chunker_version, embed_model_id, embed_dim, lexical_engine_version,"
-                "  vector_store, store_path, created_at, stats_json)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "  chunker_version, extractor_version, embed_model_id, embed_dim,"
+                "  lexical_engine_version, vector_store, content_digest, store_path,"
+                "  created_at, stats_json)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     entry.index_build_id,
                     entry.product_id,
@@ -742,10 +745,12 @@ class SqliteStore:
                     entry.partition_key,
                     entry.snapshot_date,
                     entry.chunker_version,
+                    entry.extractor_version,
                     entry.embed_model_id,
                     entry.embed_dim,
                     entry.lexical_engine_version,
                     entry.vector_store,
+                    entry.content_digest,
                     entry.store_path,
                     entry.created_at,
                     _as_json_text(entry.stats_json),

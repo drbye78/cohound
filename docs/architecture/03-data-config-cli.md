@@ -77,9 +77,12 @@ runs/{run_id}/
 
 Схема §4.4 перенесена из бывшего `core/db.py` (удалён в T1.3) в `store/sqlite.py`
 (11 таблиц + `schema_meta`, индексы, триггеры I4/I6/I7/I13/I18). Константа `SCHEMA_VERSION`
-= **`2.1.0`** (v2.1/A3) — версия **SQLite-схемы**, не регламента; колонка
-`runs.settings_provenance_json` хранит провенанс настроек, а миграция additive/idempotent
-(`ALTER TABLE ... ADD COLUMN` при отсутствии). Методы доступа (реализация `StorePort`):
+= **`2.2.0`** (P2) — версия **SQLite-схемы**, не регламента; колонки `runs.settings_provenance_json`
+(v2.1/A3) и `corpus_chunks.extractor_version` / `index_manifest.extractor_version` /
+`index_manifest.content_digest` (P2) хранят провенанс настроек и build-id witness, а миграция
+additive/idempotent (`ALTER TABLE ... ADD COLUMN` при отсутствии). `index_build_id` —
+**контент-адресуемый** отпечаток батча (два прохода: ingest → финализация id → index; см. §B.1
+`02-subsystems.md`). Методы доступа (реализация `StorePort`):
 
 ```python
 class SqliteStore:
@@ -164,8 +167,11 @@ class SqliteStore:
 - Смена модели под сценарий (I21) → bump `methodology_version`, обязателен `golden-full`.
 - Смена когорты после G1 → новый цикл (межцикловый diff запрещён).
 - Смена `rule`/`absence_rule` параметра → bump `catalog_version` + golden.
-- Смена `retrieval_profile`/K → новая `index_build_id` + retrieval-golden.
-- Смена fusion-параметров (`rrf_k`) → `retrieval_params_json` + новая `index_build_id` + retrieval-golden (S1).
+- Смена контента/входов сборки (`chunker`/`embedder`/`extractor`/`lexical`/`vector_store`/
+  `snapshot_date`) → новая контент-адресуемая `index_build_id` + golden-full.
+- Смена `retrieval_profile`/K и fusion-параметров (`rrf_k`, `retrieval_params_json`) →
+  retrieval-golden и `execution_change` в diff, но **не** меняет `index_build_id`:
+  ретривал-конфиг не влияет на чанкинг/векторы (P2).
 - Смена prompt-шаблона → новый `prompt_hash`; ячейки с прошлым hash помечаются `stale_reason='prompt_template'`.
 - Смена `index_build_id` → затронутые ячейки помечаются `stale_reason='new_build'`; `stale`-ячейки
   не участвуют в расчёте до переоценки/ревью.

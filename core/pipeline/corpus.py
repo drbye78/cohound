@@ -23,9 +23,23 @@ retention пишется **до** экстракции; каждый индек�
 продукт-партициях — иначе ретривал продукта B не увидел бы собственный документ. Один
 ``IndexManifestEntry`` — на продукт-партицию.
 
-**Иммутабельность.** ``index_build_id`` = ``short_hash`` от (пакет/params + ``chunker_version`` +
-``embed_model_id`` + ``snapshot_date``). Любое изменение входов даёт новую сборку; старая не
-мутируется (§B.1/§13, K2).
+**Иммутабельность.** ``index_build_id`` — **контент-адресуемый** отпечаток батча сборки:
+``short_hash`` от (``_BUILD_ID_SCHEMA`` + пакет/params + ``snapshot_date`` + ``chunker_version``
++ ``embed_model_id`` + ``extractor_version`` + ``lexical_engine_version`` + ``vector_store`` +
+``content_token``). ``content_token`` — детерминированный (порядко-независимый) отпечаток
+содержимого **всех** продукт-партиций (sorted ``(chunk_id, content_hash)``). Поэтому разные
+корпуса не могут получить один id (same-id/different-content коллизия), а те же входы и то же
+содержимое — один. Любое изменение входов/контента даёт новую сборку; старая не мутируется
+(§B.1/§13, K2). ``retrieval_profile``/``retrieval_cutoff_K``/``retrieval_params_json`` **не**
+входят в id: ретривал-конфиг не меняет чанкинг/векторы.
+
+**Два прохода (один вызов, без ре-краула).** Pass A (ingest) по каждому продукту выполняет
+краул → retention (I19) → экстракцию → дедуп(``content_hash``) → чанкинг и копит
+``_ProductIngest`` в памяти; ``corpus_docs`` персистятся сразу (retention-провенанс не зависит
+от сборки), а ``build_id`` чанков пока ``None``. После Pass A финализируется ``index_build_id``
+(по всем чанкам + декларированным входам). Pass B (index) проставляет ``build_id``, строит
+``IndexManifestEntry`` и вызывает ``_embed_and_build``; при успехе персистятся ``corpus_chunks``
++ ``index_manifest`` («сначала диск, потом БД»). Никакого round/parent-чейнинга.
 
 **Порядок «сначала диск, потом БД».** Физическая продукт-партиция авторитетна. Пока
 ``index_builder.build`` не завершился успешно, фаза **не** пишет ``corpus_chunks``/
@@ -48,7 +62,7 @@ best-effort (сбой изолируется).
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -71,6 +85,10 @@ __all__ = ["IndexBuild", "build_corpus"]
 #: Разделитель полей material-строки ``index_build_id`` (unit separator — однозначная склейка).
 _FIELD_SEP = "\x1f"
 
+#: Схема формулы ``index_build_id`` (P2): входит в material, поэтому будущая ревизия формулы
+#: всегда даёт новые id (старые сборки не переиспользуются).
+_BUILD_ID_SCHEMA = "corpus-build-2"
+
 
 @dataclass
 class IndexBuild:
@@ -86,6 +104,20 @@ class IndexBuild:
     entries: list[IndexManifestEntry] = field(default_factory=list)
     docs: list[CorpusDoc] = field(default_factory=list)
     chunk_count: int = 0
+
+
+@dataclass
+class _ProductIngest:
+    """Промежуточный результат Pass A (ingest) по одному продукту.
+
+    Копит ``docs`` (retention + провенанс экстракции) и ``chunks`` **до** фиксации
+    ``index_build_id``. ``build_id`` чанков остаётся ``None``; ``corpus_chunks``/
+    ``index_manifest`` не пишутся до успешного физического ``build`` (Pass B).
+    """
+
+    product_id: str
+    docs: list[CorpusDoc] = field(default_factory=list)
+    chunks: list[CorpusChunk] = field(default_factory=list)
 
 
 # --------------------------------------------------------------------------- #
@@ -137,26 +169,97 @@ def _params_token(plan: Any) -> str:
 
 
 def _derive_index_build_id(
+    *,
     package_id: str,
     params_token: str,
+    snapshot_date: str | None,
     chunker_version: str,
     embed_model_id: str,
-    snapshot_date: str | None,
+    extractor_version: str,
+    lexical_engine_version: str,
+    vector_store: str,
+    content_token: str,
 ) -> str:
-    """Детерминированный ``index_build_id`` (без random/UUID, §B.1/§13).
+    """Детерминированный контент-адресуемый ``index_build_id`` (без random/UUID, §B.1/§13).
 
     Точные входы (склеены ``\\x1f``, порядок фиксирован):
 
+    0. ``_BUILD_ID_SCHEMA`` — версия формулы (P2);
     1. ``package_id`` — пакет корпуса (производный от ``plan`` либо явный);
     2. ``params_token`` — отпечаток выбранного каталога (``param_id``);
-    3. ``chunker_version``;
-    4. ``embed_model_id`` (пусто, если эмбеддер не подключён — W8);
-    5. ``snapshot_date``.
+    3. ``snapshot_date`` (пустая строка, если нет);
+    4. ``chunker_version``;
+    5. ``embed_model_id`` (пусто, если эмбеддер не подключён — W8);
+    6. ``extractor_version`` — композитная версия экстрактора (см. :func:`_extractor_token`);
+    7. ``lexical_engine_version``;
+    8. ``vector_store``;
+    9. ``content_token`` — отпечаток содержимого батча (см. :func:`_content_token`).
+
+    ``retrieval_*`` намеренно **не** входят: ретривал-конфиг не меняет чанкинг/векторы.
     """
     material = _FIELD_SEP.join(
-        (package_id, params_token, chunker_version, embed_model_id, snapshot_date or "")
+        (
+            _BUILD_ID_SCHEMA,
+            package_id,
+            params_token,
+            snapshot_date or "",
+            chunker_version,
+            embed_model_id,
+            extractor_version,
+            lexical_engine_version,
+            vector_store,
+            content_token,
+        )
     )
     return "ib_" + short_hash(material, 24)
+
+
+def _product_content_token(chunks: Sequence[CorpusChunk]) -> str:
+    """Отпечаток содержимого продукт-партиции: sorted ``(chunk_id, content_hash)``.
+
+    Порядко-независим (сортировка пар) и чувствителен к любому изменению контента. Пары
+    склеиваются ``_FIELD_SEP`` (``chunk_id`` не содержит разделителя) — однозначно.
+    """
+    material = _FIELD_SEP.join(
+        f"{chunk_id}{_FIELD_SEP}{chunk_hash}"
+        for chunk_id, chunk_hash in sorted(
+            (c.chunk_id, c.content_hash or "") for c in chunks
+        )
+    )
+    return short_hash(material, 24)
+
+
+def _content_token(per_product: Mapping[str, Sequence[CorpusChunk]]) -> str:
+    """Батч-отпечаток: product-delimited per-product токены (sorted ``product_id``).
+
+    Один ``index_build_id`` описывает **весь** батч продуктов, поэтому отпечаток склеивает
+    отпечатки продукт-партиций в детерминированном порядке продуктов. Пустой батч даёт
+    детерминированный отпечаток пустой строки.
+    """
+    parts = [
+        f"{product_id}{_FIELD_SEP}{_product_content_token(per_product[product_id])}"
+        for product_id in sorted(per_product)
+    ]
+    return short_hash(_FIELD_SEP.join(parts), 24)
+
+
+def _extractor_token(per_product: Mapping[str, Sequence[CorpusDoc]]) -> str:
+    """Композитная ``extractor_version`` из фактически извлечённых документов батча.
+
+    Собираются непустые ``CorpusDoc.extractor_version`` по всем продуктам, дедуплицируются и
+    сортируются (порядко-независимо) и склеиваются через запятую. При единогласии версий даёт
+    одну строку; при расхождении (например, разные extract-маршруты) — детерминированный
+    композит. Документы без версии игнорируются; если версий нет вовсе — пустая строка.
+    """
+    versions = sorted(
+        {
+            doc.extractor_version
+            for docs in per_product.values()
+            for doc in docs
+            if doc.extractor_version
+        }
+    )
+    return ",".join(versions)
 
 
 def _chunk_id(product_id: str, doc_hash: str, chunk_no: int) -> str:
@@ -347,24 +450,19 @@ def build_corpus(
         else str(getattr(chunker, "version", "") or "")
     )
     embed_model_id = str(getattr(embedder, "model_id", "") or "")
-    index_build_id = _derive_index_build_id(
-        package,
-        _params_token(plan),
-        resolved_chunker_version,
-        embed_model_id,
-        snapshot,
-    )
+    lexical_engine_version = str(getattr(index_builder, "lexical_engine_version", "") or "")
+    vector_store = str(getattr(index_builder, "vector_store", "") or "")
 
     errors: list[str] = []
-    all_docs: list[CorpusDoc] = []
-    entries: list[IndexManifestEntry] = []
-    chunk_count = 0
     duplicate_count = 0
     raw_root_path = Path(raw_root)
 
+    # --- Pass A (ingest): crawl → retention → extract → dedup → chunk ---------- #
+    # Векторы/физический индекс и персистенция corpus_chunks/index_manifest не выполняются:
+    # сначала собирается содержимое всего батча, затем финализируется index_build_id.
+    ingests: list[_ProductIngest] = []
     for product_id in products:
-        product_docs: list[CorpusDoc] = []
-        product_chunks: list[CorpusChunk] = []
+        ingest = _ProductIngest(product_id=product_id)
         # I17: дедуп в пределах продукт-партиции (см. docstring модуля).
         seen_docs: dict[str, str] = {}
         seen_chunk_ids: set[str] = set()
@@ -443,7 +541,7 @@ def build_corpus(
                 render_mode=_as_text(page.fetch_mode),
                 lang=page.lang,
             )
-            product_docs.append(doc)
+            ingest.docs.append(doc)
 
             # 5. Чанкер.
             try:
@@ -470,7 +568,7 @@ def build_corpus(
                     continue
                 seen_chunk_ids.add(cid)
 
-                product_chunks.append(
+                ingest.chunks.append(
                     CorpusChunk(
                         chunk_id=cid,
                         doc_id=document_id,
@@ -483,15 +581,56 @@ def build_corpus(
                         context_prefix=getattr(chunk, "context_prefix", "") or "",
                         # Авторитетный хеш — от чистого текста (I19/§10).
                         content_hash=content_hash(text),
-                        build_id=index_build_id,
+                        # build_id проставляется в Pass B после фиксации id сборки.
+                        build_id=None,
                         embed_model_id=embed_model_id or None,
                         embedded_at=None,
                     )
                 )
 
+        # Retention-провенанс не зависит от индексной сборки: docs персистятся в Pass A.
+        _persist_docs(store, ingest.docs, errors)
+        ingests.append(ingest)
+
+    # --- Финализация index_build_id (по батчу: декларированные входы + контент) --- #
+    # extractor_version: композит из фактически извлечённых документов; fallback — объявленная
+    # версия экстрактора-порта (если ExtractedDoc не нёс версии).
+    extractor_version_token = _extractor_token(
+        {ingest.product_id: ingest.docs for ingest in ingests}
+    ) or str(getattr(extractor, "version", "") or "")
+    content_token = _content_token(
+        {ingest.product_id: ingest.chunks for ingest in ingests}
+    )
+    index_build_id = _derive_index_build_id(
+        package_id=package,
+        params_token=_params_token(plan),
+        snapshot_date=snapshot,
+        chunker_version=resolved_chunker_version,
+        embed_model_id=embed_model_id,
+        extractor_version=extractor_version_token,
+        lexical_engine_version=lexical_engine_version,
+        vector_store=vector_store,
+        content_token=content_token,
+    )
+
+    # --- Pass B (index): build_id → manifest → physical build → persist --------- #
+    all_docs: list[CorpusDoc] = []
+    entries: list[IndexManifestEntry] = []
+    chunk_count = 0
+
+    for ingest in ingests:
+        product_id = ingest.product_id
+        product_chunks = ingest.chunks
         entry: IndexManifestEntry | None = None
+
         if product_chunks:
             chunk_count += len(product_chunks)
+            # build_id и extractor_version чанка — по финализированной сборке (Pass B).
+            doc_versions = {doc.doc_id: doc.extractor_version for doc in ingest.docs}
+            for chunk in product_chunks:
+                chunk.build_id = index_build_id
+                chunk.extractor_version = doc_versions.get(chunk.doc_id)
+
             entry = IndexManifestEntry(
                 index_build_id=index_build_id,
                 product_id=product_id,
@@ -499,10 +638,12 @@ def build_corpus(
                 partition_key=f"{index_build_id}:{product_id}",
                 snapshot_date=snapshot,
                 chunker_version=resolved_chunker_version or None,
+                extractor_version=extractor_version_token or None,
                 embed_model_id=embed_model_id or None,
                 embed_dim=getattr(embedder, "dim", None),
-                lexical_engine_version=getattr(index_builder, "lexical_engine_version", None),
-                vector_store=getattr(index_builder, "vector_store", None),
+                lexical_engine_version=lexical_engine_version or None,
+                vector_store=vector_store or None,
+                content_digest=_product_content_token(product_chunks),
                 store_path=f"index_store/{package}/{index_build_id}/{product_id}/",
                 created_at=snapshot,
                 stats_json=json.dumps(
@@ -534,8 +675,7 @@ def build_corpus(
                 errors=errors,
             )
 
-        all_docs.extend(product_docs)
-        _persist_docs(store, product_docs, errors)
+        all_docs.extend(ingest.docs)
         if physical_ok:
             _persist_chunks_and_manifest(store, product_chunks, entry, errors)
         else:

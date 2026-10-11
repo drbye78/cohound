@@ -30,8 +30,8 @@ from typing import Any, cast
 import yaml
 
 from core.cli.wiring import build_store
-from core.domain import CellState, LLMCellOutput, LLMEvidence, Status
-from core.pipeline.corpus import _derive_index_build_id
+from core.domain import CellState, CorpusChunk, LLMCellOutput, LLMEvidence, Status
+from core.pipeline.corpus import _content_token, _derive_index_build_id
 from core.pipeline.gates import gate_g1, gate_g2, gate_g3, gate_g4
 from core.pipeline.lint import lint_run_inputs
 from core.pipeline.normalize import RunInputs, load_inputs
@@ -87,15 +87,28 @@ def _load() -> tuple[RunInputs, RunPlan]:
 def _expected_build_id(inputs: RunInputs, run_plan: RunPlan) -> str:
     """``index_build_id`` корпуса — через ту же производящую функцию (без дублирования).
 
-    Пакет корпуса: у ``PackageManifest`` нет ``package_id``, поэтому
-    ``phases._package_id`` вернёт ``plan.run_id`` (см. ``corpus._resolve_package_id``).
+    P2: id **контент-адресуемый**, поэтому тест воспроизводит отпечаток содержимого
+    единственной продукт-партиции из тех же байтов страницы, что увидит корпус
+    (``content_hash`` чанка — от чистого текста, I19). Пакет корпуса: у ``PackageManifest``
+    нет ``package_id``, поэтому ``phases._package_id`` вернёт ``plan.run_id``.
     """
+    chunk = CorpusChunk(
+        chunk_id=CHUNK_ID,
+        doc_id=f"p1:{DOC_HASH}",
+        product_id="p1",
+        text=PAGE_TEXT,
+        content_hash=content_hash(PAGE_TEXT),
+    )
     return _derive_index_build_id(
-        run_plan.run_id,
-        ",".join(sorted(row.param_id for row in run_plan.params)),
-        FakeChunker.version,
-        FakeEmbedder().model_id,
-        str(inputs.run.snapshot_date),
+        package_id=run_plan.run_id,
+        params_token=",".join(sorted(row.param_id for row in run_plan.params)),
+        snapshot_date=str(inputs.run.snapshot_date),
+        chunker_version=FakeChunker.version,
+        embed_model_id=FakeEmbedder().model_id,
+        extractor_version=FakeExtractor.version,
+        lexical_engine_version=FakeIndexBuilder.lexical_engine_version,
+        vector_store=FakeIndexBuilder.vector_store,
+        content_token=_content_token({"p1": [chunk]}),
     )
 
 

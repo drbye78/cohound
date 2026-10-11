@@ -591,13 +591,20 @@ def _ports_type_reuse() -> None:
 def _db_smoke() -> None:
     conn = connect(":memory:")
     ver = conn.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()
-    _assert(ver is not None and ver["value"] == "2.1.0")
+    _assert(ver is not None and ver["value"] == "2.2.0")
 
     tables = {r["name"] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     for t in ("products", "runs", "llm_scenarios", "corpus_docs", "corpus_chunks",
               "index_manifest", "cells", "cell_evidence", "search_log",
               "search_exhaustion", "registry_facts"):
         _assert(t in tables)
+
+    # P2 (schema 2.2.0): build-id witness — extractor_version у чанка; extractor_version/
+    # content_digest у продукт-партиции манифеста.
+    chunk_cols = {r["name"] for r in conn.execute("PRAGMA table_info(corpus_chunks)")}
+    _assert("extractor_version" in chunk_cols)
+    manifest_cols = {r["name"] for r in conn.execute("PRAGMA table_info(index_manifest)")}
+    _assert("extractor_version" in manifest_cols and "content_digest" in manifest_cols)
 
     conn.execute(
         "INSERT INTO runs(run_id, created_at, mode, case_id, anchor_product_id) "
@@ -648,6 +655,38 @@ def _db_smoke() -> None:
     _assert("settings_provenance_json" in cols)
     migrated.close()
     _os.unlink(legacy_path)
+
+    # DDL-миграция v2.2 (P2): старая БД без extractor_version/content_digest мигрирует
+    # идемпотентно (повторный connect не падает и не дублирует колонки).
+    fd2, legacy2_path = _tf.mkstemp(suffix=".db")
+    _os.close(fd2)
+    legacy2 = _sqlite3.connect(legacy2_path)
+    legacy2.execute(
+        "CREATE TABLE corpus_chunks (chunk_id TEXT PRIMARY KEY, doc_id TEXT,"
+        " product_id TEXT, text TEXT, build_id TEXT)"
+    )
+    legacy2.execute(
+        "CREATE TABLE index_manifest (index_build_id TEXT, product_id TEXT,"
+        " chunker_version TEXT, PRIMARY KEY (index_build_id, product_id))"
+    )
+    legacy2.commit()
+    legacy2.close()
+
+    migrated2 = connect(legacy2_path)
+    m_chunk_cols = {r["name"] for r in migrated2.execute("PRAGMA table_info(corpus_chunks)")}
+    m_manifest_cols = {
+        r["name"] for r in migrated2.execute("PRAGMA table_info(index_manifest)")
+    }
+    _assert("extractor_version" in m_chunk_cols)
+    _assert("extractor_version" in m_manifest_cols and "content_digest" in m_manifest_cols)
+    migrated2.close()
+
+    # Идемпотентность: повторный connect на уже мигрированной БД — no-op.
+    migrated2b = connect(legacy2_path)
+    m2_chunk_cols = {r["name"] for r in migrated2b.execute("PRAGMA table_info(corpus_chunks)")}
+    _assert(m2_chunk_cols == m_chunk_cols)
+    migrated2b.close()
+    _os.unlink(legacy2_path)
 
 
 def _import_graph() -> None:

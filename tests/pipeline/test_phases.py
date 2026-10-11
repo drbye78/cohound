@@ -43,6 +43,7 @@ from core.domain import (
     InheritanceMode,
     LLMCellOutput,
     LLMEvidence,
+    METHODOLOGY_VERSION,
     ModuleDef,
     PackageManifest,
     ParamType,
@@ -746,7 +747,9 @@ def test_build_manifest_defaults_without_extra_run_fields() -> None:
         inputs=_inputs(), plan=_plan(), bundle=bundle, created_at=FIXED_TS
     )
     assert manifest.package_version == "1.2.3"
-    assert manifest.methodology_version == "0.0.0"  # входа нет — честный дефолт
+    # P2: ``RunConfig`` несёт пин-дефолт методологии; манифест берёт его со входа, а не
+    # «0.0.0» (заглушка остаётся лишь для промежуточной записи runs без версии).
+    assert manifest.methodology_version == METHODOLOGY_VERSION
     assert manifest.requested_ranking is RankingPolicy.CAPABILITY_RANKED
 
 

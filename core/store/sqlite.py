@@ -12,7 +12,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = "2.1.0"
+SCHEMA_VERSION = "2.2.0"
 
 DDL = """
 PRAGMA journal_mode = WAL;
@@ -102,6 +102,7 @@ CREATE TABLE IF NOT EXISTS corpus_chunks (
     text            TEXT NOT NULL,
     context_prefix  TEXT,                              -- НЕ входит в валидацию цитат (§4.4)
     content_hash    TEXT,
+    extractor_version TEXT,                            -- P2: версия экстрактора чанка
     build_id        TEXT,                              -- привязка чанка к сборке (S5)
     embed_model_id  TEXT,
     embedded_at     TEXT
@@ -116,10 +117,12 @@ CREATE TABLE IF NOT EXISTS index_manifest (
     partition_key   TEXT,                                -- (index_build_id, product_id)
     snapshot_date   TEXT,
     chunker_version TEXT,
+    extractor_version TEXT,                              -- P2: композитная версия экстрактора
     embed_model_id  TEXT,
     embed_dim       INTEGER,
     lexical_engine_version TEXT,
     vector_store    TEXT,
+    content_digest  TEXT,                                -- P2: отпечаток содержимого партиции
     store_path      TEXT,
     created_at      TEXT,
     stats_json      TEXT,
@@ -273,8 +276,23 @@ END;
 """
 
 
+def _ensure_columns(
+    conn: sqlite3.Connection, table: str, columns: dict[str, str]
+) -> None:
+    """Идемпотентно добавляет недостающие колонки ``table`` (DDL-миграция).
+
+    ``CREATE TABLE IF NOT EXISTS`` не меняет существующую таблицу, поэтому дельты схемы
+    добавляются явными ``ALTER TABLE ... ADD COLUMN``. Повторный вызов (в т.ч. на уже
+    мигрированной БД) — no-op (проверка через ``PRAGMA table_info``).
+    """
+    existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+    for name, ddl_type in columns.items():
+        if name not in existing:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {ddl_type}")
+
+
 def connect(db_path: str | Path = ":memory:") -> sqlite3.Connection:
-    """Открывает БД и применяет схему (+ идемпотентная миграция DDL-дельты v2.1)."""
+    """Открывает БД и применяет схему (+ идемпотентные DDL-миграции v2.1/v2.2)."""
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
     conn.executescript(DDL)
@@ -283,6 +301,14 @@ def connect(db_path: str | Path = ":memory:") -> sqlite3.Connection:
     columns = {row["name"] for row in conn.execute("PRAGMA table_info(runs)")}
     if "settings_provenance_json" not in columns:
         conn.execute("ALTER TABLE runs ADD COLUMN settings_provenance_json TEXT")
+    # DDL-миграция v2.2 (P2): content-addressed build-id witness — версия экстрактора у чанка
+    # и версия экстрактора + отпечаток содержимого у продукт-партиции манифеста.
+    _ensure_columns(conn, "corpus_chunks", {"extractor_version": "TEXT"})
+    _ensure_columns(
+        conn,
+        "index_manifest",
+        {"extractor_version": "TEXT", "content_digest": "TEXT"},
+    )
     conn.execute(
         "INSERT OR REPLACE INTO schema_meta(key, value) VALUES ('schema_version', ?)",
         (SCHEMA_VERSION,),

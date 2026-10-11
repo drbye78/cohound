@@ -208,7 +208,8 @@ Consequences). Реестр:
 и **разделение классов версий** diff-причин: `methodology_change` (`METHODOLOGY_FIELDS` + major
 `methodology_version`) vs `execution_change` (`EXECUTION_FIELDS`) — §13/B-7. `ranking_epsilon`
 (порог неразличимости) и `settings_provenance` (`default|measured`, A3) добавлены в `RunConfig`/
-`RunManifest`; `SCHEMA_VERSION` SQLite-схемы — `2.1.0`.
+`RunManifest`; `SCHEMA_VERSION` SQLite-схемы — `2.2.0` (P2: контент-адресуемый `index_build_id`,
+версии/`content_digest` в `corpus_chunks`/`index_manifest`).
 
 ---
 

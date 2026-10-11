@@ -44,6 +44,7 @@ from core.domain.enums import (
     TerminationReason,
 )
 from core.domain.models import (
+    METHODOLOGY_VERSION,
     CatalogRow,
     Cell,
     LLMEvidence,
@@ -316,6 +317,29 @@ def test_build_manifest_carries_provenance_and_epsilon(tmp_path: Path) -> None:
     )
     assert override.ranking_epsilon == 0.0
     assert override.settings_provenance == {"ranking_epsilon": {"source": "default"}}
+
+
+def test_run_config_methodology_version_default_and_flow() -> None:
+    """P2: ``RunConfig.methodology_version`` по умолчанию — пин проекта и идёт в манифест."""
+    cfg = RunConfig(
+        case_id="case-1",
+        anchor=PRODUCT_A,
+        cohort="cohort-1",
+        products=[PRODUCT_A],
+        package="pkg",
+        snapshot_date=_dt.date(2026, 1, 1),
+        mode=RunMode.STRICT,
+    )
+    assert cfg.methodology_version == METHODOLOGY_VERSION
+
+    inputs = SimpleNamespace(run=cfg, package=None)
+    plan = SimpleNamespace(
+        run_id="run-mv", anchor=PRODUCT_A, modules=[], cohort_ref="cohort-1"
+    )
+    manifest = build_manifest(
+        inputs=inputs, plan=plan, created_at="2026-01-01T00:00:00Z"  # type: ignore[arg-type]
+    )
+    assert manifest.methodology_version == METHODOLOGY_VERSION
 
 
 # ---------------------------------------------------------------------------

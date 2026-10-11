@@ -42,6 +42,13 @@ from core.domain.enums import (
 
 _BASE = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
+#: Версия методологии (§13): версионная граница **семантики** правил (словарь статусов,
+#: scoring-политика, absence/evidence-модель, определения Coverage/Comparability). В отличие
+#: от ``execution_versions`` (commodity-слой: модель/когорта/индекс), смена методологии
+#: требует пере-аннотации golden. Пин-значение проекта (регламент v2.1); попадает в
+#: ``RunConfig.methodology_version`` → ``RunManifest.methodology_version``.
+METHODOLOGY_VERSION = "2.1.0"
+
 
 # ---------------------------------------------------------------------------
 # §4.2 Пакет категории
@@ -284,6 +291,9 @@ class RunConfig(BaseModel):
     cohort: str
     products: list[str]
     package: str
+    #: §13: версия методологии (версионная граница семантики правил). Дефолт — пин проекта;
+    #: ``"0.0.0"`` в манифесте означает «не заполнено», а не реальную версию.
+    methodology_version: str = METHODOLOGY_VERSION
     focus: Focus = Field(default_factory=Focus)
     languages: list[str] = Field(default_factory=list)
     snapshot_date: _dt.date
@@ -727,6 +737,8 @@ class CorpusChunk(BaseModel):
     text: str
     context_prefix: str | None = None
     content_hash: str | None = None
+    #: Версия экстрактора, породившего текст чанка (re-extract без ре-фетча, §3.2/I19).
+    extractor_version: str | None = None
     build_id: str | None = None
     embed_model_id: str | None = None
     embedded_at: str | None = None
@@ -747,10 +759,14 @@ class IndexManifestEntry(BaseModel):
     partition_key: str | None = None
     snapshot_date: str | None = None
     chunker_version: str | None = None
+    #: Композитная версия экстрактора, использованного при сборке (build-id witness, §13).
+    extractor_version: str | None = None
     embed_model_id: str | None = None
     embed_dim: int | None = None
     lexical_engine_version: str | None = None
     vector_store: str | None = None
+    #: Отпечаток содержимого продукт-партиции (chunk_id × content_hash), независимый от векторов.
+    content_digest: str | None = None
     store_path: str | None = None
     created_at: str | None = None
     stats_json: str | None = None

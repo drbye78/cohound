@@ -36,6 +36,7 @@ import yaml
 
 from core.cli.wiring import build_store
 from core.domain import (
+    CorpusChunk,
     LLMCellOutput,
     LLMEvidence,
     RunManifest,
@@ -43,7 +44,7 @@ from core.domain import (
     Status,
 )
 from core.pipeline.compute import compute
-from core.pipeline.corpus import _derive_index_build_id
+from core.pipeline.corpus import _content_token, _derive_index_build_id
 from core.pipeline.gates import gate_g1, gate_g2, gate_g3, gate_g4
 from core.pipeline.lint import lint_run_inputs
 from core.pipeline.normalize import RunInputs, load_inputs
@@ -126,14 +127,19 @@ PROVENANCE_FIELDS: tuple[str, ...] = (
     "snapshot_date",
 )
 
-#: Базовые входы ``_derive_index_build_id`` для property-проверки чистоты.
-_BUILD_ID_BASE: tuple[str, str, str, str, str] = (
-    "e2e",
-    "feature.alpha",
-    "fake-chunker-1",
-    "fake-embedder-1",
-    "2026-06-01",
-)
+#: Базовые входы ``_derive_index_build_id`` для property-проверки чистоты (P2:
+#: контент-адресуемый id; ``retrieval_*`` намеренно не входит в формулу).
+_BUILD_ID_BASE: dict[str, Any] = {
+    "package_id": "e2e",
+    "params_token": "feature.alpha",
+    "snapshot_date": "2026-06-01",
+    "chunker_version": "fake-chunker-1",
+    "embed_model_id": "fake-embedder-1",
+    "extractor_version": "fake-extractor-1",
+    "lexical_engine_version": "fake-bm25-1",
+    "vector_store": "fake",
+    "content_token": "c0ffee",
+}
 
 
 class _Clock:
@@ -183,13 +189,28 @@ def _load() -> tuple[RunInputs, RunPlan]:
 
 
 def _expected_build_id(inputs: RunInputs, run_plan: RunPlan) -> str:
-    """``index_build_id`` корпуса — через ту же производящую функцию (без дублирования)."""
+    """``index_build_id`` корпуса — через ту же производящую функцию (без дублирования).
+
+    P2: id **контент-адресуемый**; отпечаток содержимого единственной партиции
+    воспроизводится из тех же байтов страницы, что увидит корпус.
+    """
+    chunk = CorpusChunk(
+        chunk_id=CHUNK_ID,
+        doc_id=f"p1:{DOC_HASH}",
+        product_id="p1",
+        text=PAGE_TEXT,
+        content_hash=content_hash(PAGE_TEXT),
+    )
     return _derive_index_build_id(
-        run_plan.run_id,
-        ",".join(sorted(row.param_id for row in run_plan.params)),
-        FakeChunker.version,
-        FakeEmbedder().model_id,
-        str(inputs.run.snapshot_date),
+        package_id=run_plan.run_id,
+        params_token=",".join(sorted(row.param_id for row in run_plan.params)),
+        snapshot_date=str(inputs.run.snapshot_date),
+        chunker_version=FakeChunker.version,
+        embed_model_id=FakeEmbedder().model_id,
+        extractor_version=FakeExtractor.version,
+        lexical_engine_version=FakeIndexBuilder.lexical_engine_version,
+        vector_store=FakeIndexBuilder.vector_store,
+        content_token=_content_token({"p1": [chunk]}),
     )
 
 
@@ -508,32 +529,41 @@ def test_json_provenance_is_sort_keyed(tmp_path: Path) -> None:
 
 
 def test_build_id_is_input_determined() -> None:
-    """``_derive_index_build_id`` детерминирован и чувствителен к каждому входу."""
-    base_id = _derive_index_build_id(*_BUILD_ID_BASE)
+    """``_derive_index_build_id`` детерминирован и чувствителен к каждому входу (P2)."""
+    base_id = _derive_index_build_id(**_BUILD_ID_BASE)
     assert base_id.startswith("ib_")
     # Чистота: повторный вызов с теми же входами → тот же id (без random/UUID).
-    assert _derive_index_build_id(*_BUILD_ID_BASE) == base_id
+    assert _derive_index_build_id(**_BUILD_ID_BASE) == base_id
 
-    # Изменение любого из пяти входов даёт другую сборку (иммутабельность §B.1).
+    # Изменение любого входа (включая новые P2: extractor/lexical/vector/content) даёт другую
+    # сборку (иммутабельность §B.1/§13).
     variants = [
-        ("other-package", "feature.alpha", "fake-chunker-1", "fake-embedder-1", "2026-06-01"),
-        ("e2e", "feature.beta", "fake-chunker-1", "fake-embedder-1", "2026-06-01"),
-        ("e2e", "feature.alpha", "fake-chunker-2", "fake-embedder-1", "2026-06-01"),
-        ("e2e", "feature.alpha", "fake-chunker-1", "fake-embedder-2", "2026-06-01"),
-        ("e2e", "feature.alpha", "fake-chunker-1", "fake-embedder-1", "2026-07-01"),
+        {"package_id": "other-package"},
+        {"params_token": "feature.beta"},
+        {"chunker_version": "fake-chunker-2"},
+        {"embed_model_id": "fake-embedder-2"},
+        {"snapshot_date": "2026-07-01"},
+        {"extractor_version": "fake-extractor-2"},
+        {"lexical_engine_version": "fake-bm25-2"},
+        {"vector_store": "other-store"},
+        {"content_token": "deadbeef"},
     ]
-    variant_ids = {_derive_index_build_id(*variant) for variant in variants}
+    variant_ids = {
+        _derive_index_build_id(**(_BUILD_ID_BASE | variant)) for variant in variants
+    }
     assert base_id not in variant_ids
     assert len(variant_ids) == len(variants)
 
     # ``None``-снимок эквивалентен пустой строке (документированный контракт функции).
-    assert _derive_index_build_id("e2e", "a", "c", "e", None) == _derive_index_build_id(
-        "e2e", "a", "c", "e", ""
+    none_snapshot = {**_BUILD_ID_BASE, "snapshot_date": None}
+    empty_snapshot = {**_BUILD_ID_BASE, "snapshot_date": ""}
+    assert _derive_index_build_id(**none_snapshot) == _derive_index_build_id(  # type: ignore[arg-type]
+        **empty_snapshot
     )
 
     # Отпечаток каталога — точный вход: порядок токенов значим. Каноническую сортировку
     # выполняет вызывающий (``corpus._params_token``), поэтому здесь проверяется
     # чувствительность, а не порядко-независимость.
     assert _derive_index_build_id(
-        "e2e", "a,b", "c", "e", "2026-06-01"
-    ) != _derive_index_build_id("e2e", "b,a", "c", "e", "2026-06-01")
+        **(_BUILD_ID_BASE | {"params_token": "a,b"})
+    ) != _derive_index_build_id(**(_BUILD_ID_BASE | {"params_token": "b,a"}))

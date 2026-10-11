@@ -25,6 +25,7 @@ from core.domain import (
     Focus,
     Gate,
     GateDecision,
+    IndexManifestEntry,
     LLMScenario,
     ProtocolExhaustion,
     RankingPolicy,
@@ -90,7 +91,7 @@ def test_schema_opens(store: SqliteStore) -> None:
     ver = store.conn.execute(
         "SELECT value FROM schema_meta WHERE key = 'schema_version'"
     ).fetchone()
-    assert ver["value"] == "2.1.0"
+    assert ver["value"] == "2.2.0"
     tables = {
         r["name"] for r in store.conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
     }
@@ -109,6 +110,12 @@ def test_schema_opens(store: SqliteStore) -> None:
         "registry_facts",
     ):
         assert t in tables
+    # P2 (schema 2.2.0): build-id witness — версии/отпечаток контента.
+    chunk_cols = {r["name"] for r in store.conn.execute("PRAGMA table_info(corpus_chunks)")}
+    assert "extractor_version" in chunk_cols
+    manifest_cols = {r["name"] for r in store.conn.execute("PRAGMA table_info(index_manifest)")}
+    assert "extractor_version" in manifest_cols
+    assert "content_digest" in manifest_cols
 
 
 def test_store_implements_protocols(store: SqliteStore) -> None:
@@ -594,6 +601,35 @@ def test_iter_chunks_unknown_build_is_empty(store: SqliteStore) -> None:
     store.add_chunks_batch([_chunk("p1-a", build_id="build-1")])
     assert list(store.iter_chunks("build-unknown")) == []
     assert list(store.iter_chunks("build-1", product_id="p9")) == []
+
+
+def test_p2_extractor_version_and_content_digest_roundtrip(store: SqliteStore) -> None:
+    """P2: ``extractor_version`` чанка и ``extractor_version``/``content_digest`` манифеста."""
+    store.upsert_corpus_doc(_doc("doc-1", "p1"))
+    chunk = _chunk("p1-a").model_copy(update={"extractor_version": "extractor-x"})
+    store.add_chunks_batch([chunk])
+    row = store.conn.execute(
+        "SELECT extractor_version FROM corpus_chunks WHERE chunk_id = 'p1-a'"
+    ).fetchone()
+    assert row["extractor_version"] == "extractor-x"
+
+    entry = IndexManifestEntry(
+        index_build_id="ib_x",
+        product_id="p1",
+        package_id="pkg",
+        chunker_version="chunker-1",
+        extractor_version="extractor-x",
+        lexical_engine_version="lex-1",
+        vector_store="npy",
+        content_digest="digest-x",
+    )
+    store.save_index_manifest(entry)
+    mrow = store.conn.execute(
+        "SELECT extractor_version, content_digest FROM index_manifest"
+        " WHERE index_build_id = 'ib_x' AND product_id = 'p1'"
+    ).fetchone()
+    assert mrow["extractor_version"] == "extractor-x"
+    assert mrow["content_digest"] == "digest-x"
 
 
 # --------------------------------------------------------------------------- #

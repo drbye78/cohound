@@ -31,7 +31,8 @@ class Runner:
 с фазы после последней завершённой (resume), если изменились только входы non-pinned.
 
 **Идемпотентность.** Фазы Ш3/Ш4/Ш6 перезаписывают ячейки по ключу `(run_id, product_id, param_id)`
-через upsert; Ш5 — иммутабельная сборка (новая `index_build_id` при любом изменении входов).
+через upsert; Ш5 — иммутабельная контент-адресуемая сборка (новая `index_build_id` при любом
+изменении входов **или содержимого** батча; P2).
 Evidence пишется по **детерминированному** `evidence_id = H(run_id, product_id, param_id,
 source_id, source_kind, seq)` (S8) — resume не порождает дублей.
 
@@ -91,15 +92,19 @@ report(run_id)                            # Ш9
 build_corpus(plan, crawler, extractor, chunker, embedder: EmbedderPort,
              index_builder: IndexBuilderPort, store)         # K3
 products × doc_domains
-  → resolve_fetch_plan(url, domain_profiles, explicit)  # pipeline: FetchPlan (fetch/extract/wait_for)
-  → CrawlerPort.fetch(url, plan)             # сырые байты → corpus_raw/{product}/{hash}.bin
-  → ExtractorPort.extract(page, plan.extract)  # auto | html (trafilatura) | document (docling)
-  → dedup(content_hash)                      # повтор перепечаток не индексируется
-  → ChunkerPort.chunk(doc)                   # heading_path, context_prefix
-  → EmbedderPort.embed(chunks)               # батч, локальная модель
-  → IndexBuilderPort.build(chunks, vectors, meta) -> build_id
-  → IndexBuilderPort.commit()                # .npy-шарды + tantivy (атомарно)
-  → index_manifest (одна запись на продукт-партицию)
+  Pass A (ingest):
+    → resolve_fetch_plan(url, domain_profiles, explicit)  # pipeline: FetchPlan (fetch/extract/wait_for)
+    → CrawlerPort.fetch(url, plan)             # сырые байты → corpus_raw/{product}/{hash}.bin
+    → ExtractorPort.extract(page, plan.extract)  # auto | html (trafilatura) | document (docling)
+    → dedup(content_hash)                      # повтор перепечаток не индексируется
+    → ChunkerPort.chunk(doc)                   # heading_path, context_prefix
+    ── corpus_docs персистятся (retention); build_id чанков ещё None
+  финализация index_build_id: декларированные входы + content_token всех партиций
+  Pass B (index):
+    → EmbedderPort.embed(chunks)               # батч, локальная модель
+    → IndexBuilderPort.build(chunks, vectors, meta) -> build_id
+    → IndexBuilderPort.commit()                # .npy-шарды + tantivy (атомарно)
+    → corpus_chunks + index_manifest (одна запись на продукт-партицию)
 ```
 
 `pipeline` **не работает с файлами индекса напрямую**: за запись `.npy`-шардов и tantivy отвечает
@@ -115,8 +120,13 @@ index`. Это делает DMZ-шов физической границей **I
 **Retention.** `corpus_docs.raw_path` → байты хранятся; `extractor_version` позволяет
 ре-извлечение без ре-фетча (A/B экстракторов). `content_hash` — с первого дня (I19).
 
-**Иммутабельность.** `index_build_id` = hash(пакет корпуса + `chunker_version` + `embed_model_id` +
-`snapshot_date`). Любое изменение → новая сборка. Старые не удаляются (§13).
+**Иммутабельность (контент-адресуемая, P2).** `index_build_id` = hash(schema-версия формулы +
+пакет корпуса + params + `snapshot_date` + `chunker_version` + `embed_model_id` +
+`extractor_version` + `lexical_engine_version` + `vector_store` + content-token). content-token —
+отпечаток содержимого **всех** продукт-партиций (sorted `(chunk_id, content_hash)`), поэтому
+разный контент при тех же декларированных входах даёт разные id (коллизия
+same-id/different-content устранена). Два прохода: ingest → финализация id → index.
+`retrieval_*` в id **не** входят. Любое изменение → новая сборка; старые не удаляются (§13).
 
 **SERP как вход Ш5.** Результаты search-адаптера (Ш5/SERP-фаза) проходят тот же путь:
 `SearchResult.raw_bytes → corpus_raw → extract → chunk → hash → index`. Это и есть I19:
