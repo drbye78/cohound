@@ -48,14 +48,14 @@ flowchart LR
     Customer([Заказчик]) -->|отчёты| SYS
     SYS -->|краул, SERP| Web[(Публичные источники / интернет)]
     SYS -->|реестровые запросы| Reg[(Реестры: РРПО, ФСТЭК, ...)]
-    SYS -->|инференс, без поиска| LLM[(Self-host LLM-контур РФ)]
+    SYS -->|инференс, без поиска| LLM[(LLM корп. облака: [OI]-совместимый API)]
     SYS -->|search grounding| SRCH[(Search-адаптер: Yandex/GLM)]
     SYS -->|артефакты| Out[(runs/, reports/, index_store/)]
 ```
 
 **Акторы:** аналитик (управляет прогоном, проходит G1–G4), заказчик (потребляет `battle_card`).
-**Внешние системы:** публичный веб, реестры, LLM-инференс (self-host), search-адаптер.
-**Границы данных:** корпус не покидает контур (оценщик self-host); search-адаптер — единственный
+**Внешние системы:** публичный веб, реестры, LLM-инференс (корпоративное облако, [OI]-совместимый API), search-адаптер.
+**Границы данных:** корпус не покидает контур (оценщик — на моделях корпоративного облака, без веб-тула); search-адаптер — единственный
 внешний канал поисковых запросов, логируемый (`search_log`).
 
 **Доверенные зоны (см. `07-deployment-topology.md`).** Система разворачивается в двух сетевых
@@ -78,7 +78,7 @@ IDP/DLP/IDS (`07` §8).
 ┌──────────────────────────────────────────────────────────────┐
 │ L4. Интерфейс        cli/                                     │  CLI-команды, сборка зависимостей (wiring)
 ├──────────────────────────────────────────────────────────────┤
-│ L3. Адаптеры         adapters/ · store/                       │  .npy, tantivy, vLLM/SGLang, Yandex/GLM, Scrapy, docling, SQLite
+│ L3. Адаптеры         adapters/ · store/                       │  .npy, tantivy, LLM-API ([OI]-совместимый), Yandex/GLM, Scrapy, docling, SQLite
 │      (реализуют порты)                                        │
 ├──────────────────────────────────────────────────────────────┤
 │ L2. Порты            ports/                                   │  Protocol-интерфейсы (LLM, VectorIndex, Lexical, Search, Fetcher, Crawler, Extractor, Chunker, Embedder, IndexBuilder, Store, GateStore)
@@ -160,7 +160,7 @@ IDP/DLP/IDS (`07` §8).
 ### 4.4. Адаптeры (L3)
 
 `adapters/vector_npy.py` (NpyVectorIndex, продукт-шарды) · `adapters/lexical_tantivy.py` ·
-`adapters/llm_local.py` (vLLM/SGLang) · `adapters/search_yandex.py` · `adapters/search_glm.py` ·
+`adapters/llm_local.py` ([OI]-совместимый endpoint корп. облака; без тулов, I18) · `adapters/search_yandex.py` · `adapters/search_glm.py` ·
 `adapters/crawl_scrapy.py` · `adapters/extract_html.py` (trafilatura) / `adapters/extract_document.py`
 (docling: PDF + Office docx/pptx/xlsx, лёгкий путь без torch для Office) · `adapters/chunker_*.py` ·
 `store/sqlite.py` (DDL) · **`config/paths.py`** (раскладка путей). Стек/пины/лицензии —
@@ -232,9 +232,9 @@ core/
                package_{io,admin,discovery,candidates,scout}.py
                passport_scout.py scout_common.py adversarial.py serp_loop.py golden.py
   adapters/    vector_npy.py index_npy.py index_format.py lexical_tantivy.py
-               embed_local.py llm_local.py llm_discovery.py llm_llamacpp.py
-               search_yandex.py search_glm.py search_google.py search_duckduckgo.py
-               search_openwebsearch.py crawl_scrapy.py crawl_http.py
+               embed_local.py llm_local.py llm_discovery.py
+               search_yandex.py search_glm.py
+               crawl_scrapy.py crawl_http.py
                extract_html.py extract_document.py chunker_markdown.py
                remote_gateway.py remote_crawler.py remote_search.py remote_registry.py
                remote_extractor.py registry_generic.py gateway_validate.py

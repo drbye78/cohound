@@ -60,7 +60,7 @@
 | Источник нестабильности | Контрмера |
 |---|---|
 | LLM sampling | greedy или seed; `temperature`/`seed` из `ScenarioBinding`; constrained decoding |
-| Версия весов/движка | pin в `run_manifest`; self-host |
+| Версия весов/движка | pin в `run_manifest`; endpoint корп. облака ([OI]-совместимый API) |
 | Порядок чанков | сортировка по fused-рангу с детерминированным tie-break (`chunk_id`) |
 | Внешний поиск/краул | кэш + `snapshot_date` |
 | Профиль/K по когорте | I16: единый `retrieval_profile`+K для всех продуктов; контроль в CI |
@@ -68,7 +68,7 @@
 | Поисковый бюджет | I23: фиксирован и залогирован в `search_log`; контроль в CI |
 | Provenance evidence | `source_id → source_url → content_hash → build_id` (R15); резолв без сети |
 | Плавающая сортировка путей | стабильная сортировка |
-| GPU non-determinism | документируется как известное ограничение (§11.7) |
+| Non-determinism удалённого инференса | документируется как известное ограничение (§11.7) |
 
 `hound run` дважды с идентичными входами и кэшем должен давать ≥95% совпадений `status` (R7).
 

@@ -36,9 +36,9 @@ application-layer firewall (L7). Функционал, которому нуже
    (`split`).
 
 **Ключевое следствие для методологии:**
-- **I18 усиливается до сетевого уровня.** Оценщик и его self-host LLM живут в доверенной зоне **без
-  маршрута в интернет**. «Без веб-тула» становится не только свойством порта, но и физическим
-  запретом маршрутизации.
+- **I18 усиливается до сетевого уровня.** Оценщик обращается к LLM корпоративного облака
+  ([OI]-совместимый API, внутренняя сеть) и живёт в доверенной зоне **без маршрута в интернет**.
+  «Без веб-тула» становится не только свойством порта, но и физическим запретом маршрутизации.
 - **I19 получает явную границу.** Внешний контент входит в ядро только как ответ edge на
   инициированный ядром запрос, и немедленно проходит `corpus_raw → hash → index`.
 - **A2 сохраняется.** Методология/инварианты/оценщик — в доверенном ядре; веб — commodity в DMZ.
@@ -49,10 +49,10 @@ application-layer firewall (L7). Функционал, которому нуже
 
 | Зона | Свойства | Что размещается |
 |---|---|---|
-| **Z0 CORE** (доверенная) | **нет** веб-эгрессии; недоступна для входящих из DMZ; секретов эгрессии нет | `pipeline` (оркестратор, гейты), `domain`, `store`, индексы/ретривал, **evaluator LLM (I18)**, `compute`, `report` |
+| **Z0 CORE** (доверенная) | **нет** веб-эгрессии; недоступна для входящих из DMZ; секретов эгрессии нет | `pipeline` (оркестратор, гейты), `domain`, `store`, индексы/ретривал, **клиент evaluator-LLM (I18)**, `compute`, `report` |
 | **Z1 EDGE / DMZ** (условно-доверенная) | есть веб-эгрессия; **считается компрометируемой**; процесс только отвечает, не инициирует в Z0 | `crawler` (Scrapy+playwright), HTTP-fetch, `search`-адаптер (SERP), `registry`-фетчеры, `extractor`/санитайзер (обработка недоверенного контента), discovery/concept-scout (search-enabled) |
 | **Z2 PARSE** (опц., позже) | hardening парсинга недоверенного контента | `extractor`/`sanitizer` отдельным процессом |
-| **Z3 LLM-GPU** (опц.) | self-host веса | evaluator-LLM (только Z0-originated трафик), discovery-LLM (search-enabled, Z1) |
+| **Зона LLM корп. облака** (внешняя, внутр. сеть) | [OI]-совместимый API; веса/движок — забота облака | evaluator-LLM (только Z0-originated трафик), discovery-LLM (search-enabled, Z1) |
 
 **Классификация портов (`Zone`):**
 
@@ -62,7 +62,7 @@ application-layer firewall (L7). Функционал, которому нуже
 | `ports/search.py` | **edge** | веб-эгрессия |
 | `ports/registry.py` | **edge** | веб-эгрессия |
 | `ports/extractor.py` | **edge** (по умолчанию) | обработка недоверенного контента |
-| `ports/llm.py` (evaluator) | **core** | self-host, без веба (I18) |
+| `ports/llm.py` (evaluator) | **core** | клиент корп. облака ([OI]-API), без веба (I18) |
 | `ports/{vector_index,lexical_index,index_builder,embedder}.py` | **core** | локальные вычисления |
 | `ports/{store,gate_store}.py` | **core** | доверенное хранилище |
 | `ports/chunker.py` | **core** | чистая функция над очищенным текстом |
@@ -159,8 +159,8 @@ edge:  fetch → extract → sanitize → вернуть (text, hashes, raw)   [
 | edge → internet | 80/443 | **ALLOW** (опц. allowlist доменов; robots-enforcement; rate-limit) |
 | **core → internet** | любой | **DENY** (нет маршрута) — усиливает I18 |
 | **edge → core** | инициирование | **DENY** (edge только отвечает; не может дозвониться до сервисов ядра) |
-| core → self-host LLM | внутренняя сеть | **ALLOW** |
-| **LLM → internet** | любой | **DENY** (оценщик без веба, I18) |
+| core → корпоративный LLM-endpoint ([OI]-совместимый API) | внутренняя сеть | **ALLOW** |
+| **LLM-endpoint → internet** | любой | **DENY** (оценщик без веба, I18) |
 | edge → discovery-LLM (search-enabled) | внутренняя сеть | **ALLOW** (только discovery/concept-scout) |
 
 **Принуждение инвариантов сетевым слоем:**
@@ -172,8 +172,8 @@ edge:  fetch → extract → sanitize → вернуть (text, hashes, raw)   [
   собственный аудит для форензики.
 
 **Секреты:** эгрессионные секреты (ключи SERP, прокси, egress-creds) хранятся **только в edge**.
-Ядро секретов эгрессии не имеет (компрометация ядра не даёт выхода в интернет). Ключи self-host LLM —
-только в Z0/Z3.
+Ядро секретов эгрессии не имеет (компрометация ядра не даёт выхода в интернет). Ключи доступа к
+LLM-endpoint корп. облака — только в Z0.
 
 **Валидация входящего из edge (обязательно):** схема ответа; лимиты размера/глубины; **повторный
 `content_hash`** (не верить хэшу edge); санитайзинг (nh3/defusedxml); никакого автозапуска
@@ -195,8 +195,11 @@ edge:  fetch → extract → sanitize → вернуть (text, hashes, raw)   [
 **«Инсталляция» — deployment-политика, а не методологический вопрос.** Под «инсталляцией» проекта
 понимается способ размещения контура, влияющий на §10 (применимость), 152-ФЗ и ops-бюджет, а не на
 семантику измерений:
-- **свой кластер** — self-host оценщика/индекса в собственном контуре (максимальный контроль R7/I18);
-- **аренда РФ-облака** — managed-GPU/хранение в юрисдикции РФ (компромисс контроля/стоимости);
+- **свой кластер** — развёртывание **нашего** конвейера, корпуса и индексов в собственном контуре
+  (максимальный контроль R7/I18); LLM при этом всегда потребляется через [OI]-совместимый API
+  корпоративного облака, а не хостится нами;
+- **аренда РФ-облака** — хранение/вычисление конвейера и индексов в юрисдикции РФ (компромисс
+  контроля/стоимости);
 - **вендорский контур** — исполнение на стороне вендора/интегратора (минимальный контроль, требует
   юридического и ИБ-согласования).
 
@@ -207,7 +210,7 @@ edge:  fetch → extract → sanitize → вернуть (text, hashes, raw)   [
 ```mermaid
 flowchart LR
   subgraph Z0["Z0 CORE (trusted, no egress)"]
-    ORCH[pipeline/runner] --> EVAL[evaluator LLM]
+    ORCH[pipeline/runner] --> EVAL[evaluator LLM-клиент]
     ORCH --> STORE[(store)]
     ORCH --> IDX[index/retrieval]
     PROXY[remote proxies] -.->|gateway| ORCH
@@ -218,11 +221,15 @@ flowchart LR
     GW --> RG[registry]
     GW --> EX[extractor/sanitizer]
   end
+  subgraph Z3["Зона LLM корп. облака ([OI]-совместимый API)"]
+    LLM[LLM endpoint]
+  end
   ORCH ==>|"L7: POST /v1/* (JSON, mTLS)"| GW
+  EVAL ==>|"внутр. сеть, ALLOW"| LLM
   CR --> NET[(Internet)]
   SE --> NET
   RG --> NET
-  EVAL -.->|DENY| NET
+  LLM -.->|DENY| NET
   ORCH -.->|DENY| NET
 ```
 
@@ -248,12 +255,22 @@ edge:
   audit: { sink: "file|syslog", target: "…" }   # экспорт аудита в SIEM (§8.4)
 registry_fetchers: edge             # список портов, исполняемых в edge (для split)
 extractor_zone: edge                # edge | core | separate
+llm:                                # модели корпоративного облака ([OI]-совместимый API)
+  slot: cheap                       # активный слот по умолчанию (cheap | flagship)
+  cheap:    {model_id: "deepseek-v4.1-flash:cxbc"}   # дефолт обоих слотов
+  flagship: {model_id: "deepseek-v4.1-flash:cxbc"}
+  # выбор слота: --llm-slot > env COHOUND_LLM_SLOT > run.yaml: llm_slot > deploy.llm.slot > cheap
+  # api_key: env COHOUND_LLM_API_KEY → PLUSVIBEAPI_API_KEY; endpoint — [OI]-совместимый API корп. облака
 search:
   budget: { ru: 5, en: 5 }          # симметрия I16
-  adapter: yandex
+  adapter: yandex                   # провайдер поиска по умолчанию (Yandex Search API)
+  # режим async (дефолт) | sync — env YANDEX_SEARCH_MODE (03 §D.6)
 ```
 
-Профиль `local` игнорирует `edge.*` (всё in-process). `deploy.yaml` версионируется отдельно от
+Профиль `local` игнорирует `edge.*` (всё in-process). Секция `llm:` задаёт два слотовых идентификатора
+модели корпоративного облака (`cheap`/`flagship`); активный слот резолвится детерминированно
+(CLI > env `COHOUND_LLM_SLOT` > `run.yaml` > `deploy.llm.slot` > `cheap`, см. `03` §D.6).
+`deploy.yaml` версионируется отдельно от
 `run_manifest.yaml`; связка — в манифест пишется `deploy_profile`, версии edge-компонентов
 (`/v1/capabilities`) и `edge_schema_version` для воспроизводимости R7.
 

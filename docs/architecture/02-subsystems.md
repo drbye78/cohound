@@ -220,7 +220,8 @@ Fusion-параметры (включая `rrf_k`) входят в `retrieval_pa
   эшелоном.
 - **Детерминизм:** greedy или seed; `temperature`/`seed` из `ScenarioBinding`; фиксируется
   в `run_manifest.yaml` (R7).
-- **I18 физически:** порт не принимает `tools`; адаптер self-host без веб-тула. Веб-поиск —
+- **I18 физически:** порт не принимает `tools`; адаптер подключается к [OI]-совместимому endpoint
+  корп. облака без веб-тула. Веб-поиск —
   отдельный порт, к оценщику не подключён.
 
 **Компиляция промпта (`pipeline/prompt.py`).**
@@ -250,8 +251,9 @@ retry ≤2 → `failed` (status=null, I4). В preliminary невалидная �
 
 ### C.3. Search-адаптер (Ш5, §7.2)
 
-- **Провайдеры:** `search_yandex.py` (Yandex Search API), `search_glm.py` (GLM Web Search API)
-  (Z.ai Web Search API) — оба за `ports/search.py`. В профиле `split` исполняются в DMZ (`edge/`),
+- **Провайдеры:** `search_yandex.py` (Yandex Search API — провайдер **по умолчанию**, режим `async` —
+  тоже дефолт), `search_glm.py` (GLM Web Search API / Z.ai Web Search API) — оба за `ports/search.py`.
+  В профиле `split` исполняются в DMZ (`edge/`),
   ядро вызывает через `gateway` (07).
 - **Бюджет:** фиксирован (≤5 RU + ≤5 EN на параметр-продукт по умолчанию), симметричен (I16).
 - **Логирование:** каждый вызов → `search_log` (`adapter_kind`, provider, query, results, termination);
@@ -266,14 +268,15 @@ retry ≤2 → `failed` (status=null, I4). В preliminary невалидная �
 ```yaml
 # в run_manifest.yaml
 llm_scenarios:
-  evaluator:      {model_id: ..., model_version: ..., endpoint_kind: self_host,
+  evaluator:      {model_id: ..., model_version: ..., endpoint_kind: api,
                    web_tool: false, decoder: xgrammar, seed: 0, temperature: 0.0}
   search_adapter: {provider: yandex, adapter_kind: serp}
-  discovery:      {model_id: ..., endpoint_kind: self_host, web_tool: true}
-  concept_scout:  {model_id: ..., endpoint_kind: self_host, web_tool: true}
+  discovery:      {model_id: ..., endpoint_kind: api, web_tool: true}
+  concept_scout:  {model_id: ..., endpoint_kind: api, web_tool: true}
 ```
 
-Маршрут задан **таблицей и фазой**, не решением LLM. Смена значения → версионная граница (§13).
+Маршрут задан **таблицей и фазой**, не решением LLM. `endpoint_kind` по умолчанию — `api` (модели
+корпоративного облака, [OI]-совместимый API). Смена значения → версионная граница (§13).
 
 ---
 

@@ -70,7 +70,7 @@
 - поднимать сервисы «на вырост» (Qdrant, PostgreSQL, отдельная корпусная БД) без триггера §14;
 - прятать предметную специфику в `core/` — нарушает §1.3;
 - автоматизировать гейты/статусы `N/A` — нарушает I6/I7;
-- тянуть облачные парсеры/инференс — нарушает контур данных (§10).
+- тянуть внешние SaaS-парсеры/инференс **вне** корпоративного контура — нарушает контур данных (§10).
 
 **Вывод:** план строится так, чтобы **каждое** продвижение было обратимым, измеримым и
 изолированным за портом. Тяжёлое и внешнее подключается последним.
@@ -96,7 +96,8 @@
 7. **Контур данных — с первого коммита.** SSRF/санитайзинг/robots и запрет исходящего контента
    закладываются в адаптеры Ш5/Ш6, а не добавляются «потом».
 8. **Два окружения.** Лёгкое CLI-ядро (Python 3.14 базлайн, 05 §1) и тяжёлые контуры (PDF-torch,
-   GPU-LLM, индекс-torch) — изолированы. Ядро не тянет torch.
+   индекс-torch) — изолированы. Ядро не тянет torch; LLM-инференс — внешний (корп. облако,
+   [OI]-совместимый API).
 9. **Непрерывная зелёность.** `tests/selfcheck.py` + грепп-нейтральность + импорт-граф проходят на
    каждом коммите; рефакторинги идут с transitional re-export-шимами.
 10. **Непрерывная интеграция документов.** Изменение контракта/инварианта — правка `00`–`06` в том
@@ -150,7 +151,7 @@ L7-инспектируемый JSON, публикуемые схемы, атр�
 | **W6** | Детерм. волны | `adapters/registry_generic.py`, `registries/*.yaml`, `pipeline/registry.py`, `inheritance.py` | W4, W5 |
 | **W7** | Корпус | `ports/{crawler,extractor,chunker}.py` + адаптеры (Scrapy/trafilatura/docling/чанкер), `pipeline/corpus.py`, retention, кэш | W5 |
 | **W8** | Ретривал и индекс | `embedder`/`index_builder`/`vector_index`/`lexical_index` + адаптеры (bge-m3, .npy, tantivy, RRF), эксперименты R0/R1/R2, retrieval-golden | W7 |
-| **W9** | Оценщик | `ports/llm.py`, `adapters/llm_local.py` (vLLM/SGLang), `pipeline/{prompt,evaluate,validate}.py`, `CellEvidence` | W8 |
+| **W9** | Оценщик | `ports/llm.py`, `adapters/llm_local.py` (клиент [OI]-совместимого endpoint корп. облака), `pipeline/{prompt,evaluate,validate}.py`, `CellEvidence` | W8 |
 | **W10** | Расчёт и отчёты | `pipeline/compute.py`→`domain/scoring`, `report.py`, `run_manifest.yaml` | W2, W9 |
 | **W11** | Search-адаптер | `ports/search.py`, `adapters/search_yandex.py`/`search_glm.py`, SERP-петля (append-only), `search_log` | W7, W9 |
 | **W12** | Прод-хардненинг | наблюдаемость, backup/GC, adversarial (R8), golden-full, кейсы 2–5, portability | W1–W11 |
@@ -189,7 +190,7 @@ LLM/SERP/краул — заглушки за портами.
 - риски R1/R3/R4/R5/R13 закрыты в каркасе.
 
 ### M1 — Конвейер (Strict-карта кейса 1 + preliminary-слой + профиль `split`)
-**Цель:** реальный корпус, ретривал, self-host оценщик без поиска, двухрежимная валидация;
+**Цель:** реальный корпус, ретривал, оценщик через [OI]-совместимый API корп. облака без поиска, двухрежимная валидация;
 **опция DMZ (`split`) доступна в MVP**.
 
 **Состав:** W7, W8, W9, W10 (частично), **W13 (DMZ/шов)**; эксперимент R0/R1/R2 + фиксация профиля/K;
@@ -230,7 +231,7 @@ preliminary-yield), калибровка порогов.
 | T1.3 | ✅ Расщепить прежний монолит `core/db.py` → `core/store/sqlite.py` (DDL+триггеры) + контракт `ports/store.py`; монолит **удалён** | 2 | T1.1 | DDL-тест + триггеры I4/I6/I7/I13/I18 зелёные |
 | T1.4 | CI: импорт-граф (`ast`-матрица 01 §1), грепп-нейтральность `core/domain|ports|pipeline`, `uv pip compile` на 3.14 | 2 | T1.2,T1.3 | гейты краснеют на учебном нарушении |
 | T1.5 | pytest+hypothesis в dev; обёртка над selfcheck; фикстуры; порог покрытия ядра | 1.5 | T1.2 | `pytest -q` зелёный; selfcheck остаётся автономным |
-| T1.6 | `uv.lock` + документация окружений (CLI-light / pdf / gpu / index) | 1 | T1.5 | lock воспроизводим; extras резолвятся |
+| T1.6 | `uv.lock` + документация окружений (CLI-light / pdf / index) | 1 | T1.5 | lock воспроизводим; extras резолвятся |
 
 **Итого W1 ≈ 11.5 дд.**
 
@@ -323,11 +324,11 @@ preliminary-yield), калибровка порогов.
 | ID | Задача | дд | Зависит | DoD |
 |---|---|---|---|---|
 | T9.1 | `pipeline/prompt.py` (template_version+rule+absence_rule+сателлиты+чанки; `prompt_hash`) | 2 | T2.1 | механическая компиляция; `prompts/{hash}.json` |
-| T9.2 | `ports/llm.py` + `adapters/llm_local.py` (vLLM/SGLang, xgrammar, seed/greedy) | 3.5 | T1.6 | constrained JSON валиден; детерминизм-тест |
+| T9.2 | `ports/llm.py` + `adapters/llm_local.py` — клиент [OI]-совместимого endpoint корп. облака (constrained decoding сервера, seed/greedy) | 3.5 | T1.6 | constrained JSON валиден; детерминизм-тест |
 | T9.3 | `pipeline/evaluate.py` (≤3 запроса, ретривал, вызов, retry≤2, `failed` при исчерпании) | 3 | T8.5, T9.1, T9.2 | I16/I17/I20; `failed`≠status (I4) |
 | T9.4 | `pipeline/validate.py` (source_id→url, цитата-подстрока, достаточность, аномалии) | 2.5 | T2.4, T9.3 | эшелон §10; preliminary-ветка |
 | T9.5 | `CellEvidence` + детерминированный `evidence_id`; `source_scope`/`scope_attested_by` | 2 | T9.4 | I1/I2/I2b/I19; тест |
-| T9.6 | `llama-cpp-python` fallback-путь (CPU/GGUF) для тестов порта | 1 | T9.2 | интеграционный тест без GPU |
+| T9.6 | `llama-cpp-python` fallback-путь (CPU/GGUF) для тестов порта | 1 | T9.2 | интеграционный тест клиента без внешнего endpoint |
 
 **Итого W9 ≈ 14 дд.**
 
@@ -433,7 +434,6 @@ preliminary-yield), калибровка порогов.
 | **cli-light** | ядро + `retrieval`(numpy/tantivy) + `crawl` + `extract` + `safety` + `ops` | везде, py3.14 |
 | **pdf** | `docling-slim[standard]` (+torch/CUDA) | отдельно (PDF-layout) |
 | **index** | `sentence-transformers` (+torch) | отдельно (эмбеддинги) |
-| **gpu** | `vLLM`/`SGLang` | Docker на GPU |
 | **edge** | те же `crawl`+`extract` extras (веб-адаптеры) | DMZ/Z1 (профиль `split`, 07) |
 | **test** | `pytest`/`hypothesis`/`respx` | dev/CI |
 
@@ -442,7 +442,7 @@ preliminary-yield), калибровка порогов.
 (`PLAYWRIGHT_DOWNLOAD_HOST`). `HF_HUB_OFFLINE=1` в контуре.
 
 **Установка (T1.6, extras из `pyproject.toml`).** Базлайн — Python 3.14; воспроизводимость — `uv.lock`
-(`uv sync --frozen --extra <name>`). Тяжёлые контуры (`pdf`/`index`/`gpu`) — в изолированных venv/образах,
+(`uv sync --frozen --extra <name>`). Тяжёлые контуры (`pdf`/`index`) — в изолированных venv/образах,
 ядро их не тянет (P7/A1).
 
 ```bash
@@ -464,7 +464,7 @@ uv sync --frozen --extra ann
 # test/dev — pytest + hypothesis + respx + coverage
 uv sync --frozen --extra dev
 
-# gpu — вне uv.lock: vLLM/SGLang в отдельном GPU-Docker-образе (05 §1)
+# LLM-инференс — вне uv.lock: модели корп. облака по [OI]-совместимому API (05 §2.3)
 ```
 
 Браузерные бинари (crawl): `playwright install chromium firefox` (зеркало — `PLAYWRIGHT_DOWNLOAD_HOST`).
@@ -480,7 +480,7 @@ uv sync --frozen --extra dev
 | Стоимость авторства категорий | выс. | высокое | доменный аналитик 0.3–0.5 FTE; шаблоны пакетов | >4 нед на пакет |
 | Python 3.14-совместимость тяжёлых колёс | низк. | среднее | V2 закрыт; изоляция окружений | отсутствие cp314-колёс |
 | bus-factor scrapy-playwright | низк. | среднее | изоляция за портом `crawler`; прямой playwright как fallback | плагин застрял/архив |
-| Утечка контента за контур | низк. | критич. | SaaS запрещён; self-host; SSRF/санитайзинг; robots | любой исходящий контент-канал |
+| Утечка контента за контур | низк. | критич. | SaaS вне контура запрещён; LLM — endpoint корп. облака ([OI]); SSRF/санитайзинг; robots | любой исходящий контент-канал |
 | Prompt-injection в корпусе | ср. | высокое | nh3/defusedxml; adversarial R8; оценщик без тулов | новая инъекция в adversarial |
 | Масштаб SQLite/индекса | низк. | среднее | WAL+батчи; продукт-партиции; триггеры §14 (ANN/PG) | p95>300–500мс; >3–5М чанков |
 | Дрейф контрактов портов | ср. | среднее | contract-tests + импорт-граф CI | расхождение адаптер/порт |
@@ -510,7 +510,7 @@ uv sync --frozen --extra dev
 4. **Retention/GC сборок** (T12.2): лимит по числу/времени; что с golden-зависимыми.
 5. **Backup/restore** (T12.2): снапшот `cohound.db` + `index_store`/`corpus_raw` (или только БД+хэши).
 6. **Публикация отчётов** (T10.3): адресация в `reports/`, признак «не публикация».
-7. **Выбор инференс-стека** (T9.2): vLLM vs SGLang; стратегия детерминизма.
+7. **Детерминизм инференса** (T9.2): seed/greedy на [OI]-совместимом endpoint (движок — забота облака); стратегия детерминизма.
 8. **Процедура/владелец `scope_attested_by`** для `exhaustive`-absence (W9).
 
 **Вне рамок работы:** аттестация шва против конкретных корпоративных IDP/DLP/IDS (какой IDP, какой

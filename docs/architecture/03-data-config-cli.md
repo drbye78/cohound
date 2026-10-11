@@ -281,10 +281,11 @@ edge:
 extractor_zone: edge           # edge | core | separate
 search:
   budget: { ru: 5, en: 5 }      # симметрия I16
-  adapter: yandex               # провайдер поиска по умолчанию
+  adapter: yandex               # провайдер поиска по умолчанию (Yandex Search API)
+  # режим Yandex `async` (дефолт) | `sync` — env YANDEX_SEARCH_MODE (§D.6), не поле YAML
   by_language:                  # переопределение по языку (география-прокси, I16)
     ru: yandex
-    en: duckduckgo
+    en: glm
 crawl:                         # операционная политика HTTP-краулинга корпуса (local|split)
   user_agent: "coHound-crawler/0.1"   # None → дефолт HttpCrawler
   timeout_s: 30                # None → дефолт HttpCrawler (30 с)
@@ -309,6 +310,7 @@ config-слой не импортирует `cli.wiring`; валидация п�
 не выдумываются). Выбранный провайдер фиксируется в провенансе/`search_log` (**I23**).
 Смена таблицы провайдеров меняет протокол поиска и потому влияет на сопоставимость
 циклов — это **версионная граница**: фиксируется в манифесте/провенансе (§13).
+Режим Yandex Search API — `async` (дефолт; переопределяется env `YANDEX_SEARCH_MODE`).
 
 Загрузчик `config/deploy.py` → `DeployConfig`
 (домен-нейтрален). `deploy_profile`, версии edge-компонентов (`/v1/capabilities`) и
@@ -322,8 +324,8 @@ config-слой не импортирует `cli.wiring`; валидация п�
 значений — `.env.example` в корне. Ключи передаются через среду процесса (в `split` —
 только в контейнере edge, см. ниже).
 
-**Контуры (I18/07).** Эгрессионные ключи внешнего поиска (`YANDEX_*`, `GLM_SEARCH_API_KEY`,
-`GOOGLE_*`, `OPEN_WEBSEARCH_*`, `DUCKDUCKGO_BACKEND`) в профиле `split` живут **только в
+**Контуры (I18/07).** Эгрессионные ключи внешнего поиска (`YANDEX_*`, `GLM_SEARCH_API_KEY`)
+в профиле `split` живут **только в
 edge** (composition root Z1, `07` §4/§7); ядро ходит за кандидатами через `/v1/*`-шов и
 этих переменных не читает. **Оценщик (Ш6, I18) веб-тула не имеет** и никакие поисковые
 ключи не читает — он работает только по переданным чанкам корпуса. В профиле `local`
@@ -331,10 +333,11 @@ edge** (composition root Z1, `07` §4/§7); ядро ходит за канди�
 
 | Переменная | Назначение | Обязательность | Fallback | Потребитель |
 |---|---|---|---|---|
-| `COHOUND_LLM_BASE_URL` | базовый URL openai-совместимого LLM-сервера | опц. | `https://plusvibeapi.ru/v1` | `wiring.build_discovery_llm` (LLM-разведка `passport-scout`, Ш2) |
+| `COHOUND_LLM_BASE_URL` | базовый URL [OI]-совместимого LLM-API корпоративного облака | опц. | `https://plusvibeapi.ru/v1` | `wiring.build_discovery_llm` (LLM-разведка `passport-scout`, Ш2) |
 | `COHOUND_LLM_API_KEY` | ключ LLM-разведки | **обязателен для вызова** | `PLUSVIBEAPI_API_KEY` | `wiring.build_discovery_llm` |
 | `PLUSVIBEAPI_API_KEY` | фолбэк ключа контура | опц. | — | `wiring.build_discovery_llm` |
-| `COHOUND_LLM_MODEL` | `model_id` LLM-разведки | опц. | `deepseek-v4.1-flash:cxbc` | `wiring.build_discovery_llm` |
+| `COHOUND_LLM_SLOT` | активный LLM-слот: `cheap`\|`flagship` (см. `deploy.yaml.llm`) | опц. | `cheap` | `wiring` (выбор модели) |
+| `COHOUND_LLM_MODEL` | `model_id` LLM-разведки (переопределяет активный слот) | опц. | `deepseek-v4.1-flash:cxbc` | `wiring.build_discovery_llm` |
 | `COHOUND_LLM_DECODER` | механизм декодирования (`none`/`json_object`/`json_schema`) | опц. | `json_object` | `wiring.build_discovery_llm` |
 | `COHOUND_LLM_TIMEOUT` | таймаут LLM-запроса, с (>0) | опц. | `120.0` | `wiring.build_discovery_llm` |
 | `COHOUND_LLM_MAX_TOKENS` | максимум токенов ответа (>0) | опц. | `4096` | `wiring.build_discovery_llm` |
@@ -343,23 +346,22 @@ edge** (composition root Z1, `07` §4/§7); ядро ходит за канди�
 | `COHOUND_REEXEC` | предохранитель от зацикливания перезапуска (ставит `hound.py`) | служебная | — | `hound.py` |
 | `YANDEX_SEARCH_API_KEY` | ключ Yandex Search API | **обязателен для адаптера** | — | `adapters.search_yandex` |
 | `YANDEX_FOLDER_ID` | folder-id Yandex Cloud | **обязателен для адаптера** | — | `adapters.search_yandex` |
-| `YANDEX_SEARCH_MODE` | режим поиска Yandex: `async`/`sync` | опц. | `async` | `adapters.search_yandex` |
+| `YANDEX_SEARCH_MODE` | режим поиска Yandex: `async` (дефолт) \| `sync` | опц. | `async` | `adapters.search_yandex` |
 | `GLM_SEARCH_API_KEY` | ключ GLM web-search | **обязателен для адаптера** | — | `adapters.search_glm` |
-| `GOOGLE_API_KEY` | ключ Google CSE | **обязателен для адаптера** | `GOOGLE_SEARCH_API_KEY` | `adapters.search_google` |
-| `GOOGLE_SEARCH_API_KEY` | альтернативное имя ключа Google CSE | опц. | — | `adapters.search_google` |
-| `GOOGLE_CSE_ID` | идентификатор поискового движка (cx) | **обязателен для адаптера** | `GOOGLE_SEARCH_ENGINE_ID` | `adapters.search_google` |
-| `GOOGLE_SEARCH_ENGINE_ID` | альтернативное имя cx | опц. | — | `adapters.search_google` |
-| `DUCKDUCKGO_BACKEND` | движок библиотеки `ddgs` | опц. | `duckduckgo` | `adapters.search_duckduckgo` |
-| `OPEN_WEBSEARCH_BIN` | путь/имя утилиты `open-websearch` | опц. | `open-websearch` | `adapters.search_openwebsearch` |
-| `OPEN_WEBSEARCH_ENGINE` | движок утилиты | опц. | `duckduckgo` | `adapters.search_openwebsearch` |
 
 Примечания:
 
 - **Обязательность** ключей поиска проявляется в `hound discover`: без пары
-  (`api_key`, `folder_id`/`cx`) адаптер считается недоступным, и кандидаты **не
+  (`api_key`, `folder_id`) адаптер считается недоступным, и кандидаты **не
   выдумываются** (I19) — команда возвращает `EXIT_ERROR` с явным сообщением.
 - Флаги CLI переопределяют env: `passport-scout --llm-base-url/--llm-model/--llm-decoder`,
   `discover --search-adapter`.
+- **Две слотовые модели (`deploy.yaml.llm`).** Секция `llm:` в `config/deploy.yaml` задаёт два
+  именованных слота — `cheap` и `flagship`; **оба по умолчанию** указывают на
+  `deepseek-v4.1-flash:cxbc`. Активный слот выбирается детерминированно по приоритету:
+  `--llm-slot` > env `COHOUND_LLM_SLOT` > `run.yaml: llm_slot` > `deploy.llm.slot` > `cheap`.
+  `api_key` берётся из env (`COHOUND_LLM_API_KEY` → `PLUSVIBEAPI_API_KEY`); endpoint — [OI]-совместимый
+  API корпоративного облака. Форма секции — `07` §7.
 
 **Runbook живого прогона корпуса.** Минимальный операторский запуск (профиль `local`,
 in-process, без Правки кода):

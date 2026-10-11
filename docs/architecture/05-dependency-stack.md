@@ -18,7 +18,7 @@
 ## 1. Базлайн окружения: Python 3.14
 
 **Решение (2026-10-08): базлайн проекта — Python 3.14** (не 3.11). Обоснование: greenfield,
-контролируемое развёртывание (self-host), один разработчик; базлайн 3.14 убирает матрицу версий и
+контролируемое развёртывание (свой контур), один разработчик; базлайн 3.14 убирает матрицу версий и
 legacy-шимы и совпадает с целевым окружением. Условие допустимости — **все зависимости стека имеют
 готовые колёса под `cp314`** (или `abi3`/`py3`, forward-совместимые) — проверено (ниже).
 
@@ -31,11 +31,13 @@ legacy-шимы и совпадает с целевым окружением. У
 | `py3-none-*` (Python-независимые) | `rtree`, `twisted` (чистый Python), `scrapy`, `trafilatura`, `docling-slim`, `html5lib`, `model2vec` | ✅ |
 
 **Отсеяно базлайном 3.14:** `unstructured` (`<3.14`) → d; `outlines` (`<3.14`) → c.
-`vllm` (`<3.15`) — совместим, но живёт в отдельном GPU-Docker (не в CLI-venv).
+`vllm` (`<3.15`) / `sglang` — **не наша зависимость**: возможные движки инференса в корпоративном
+облаке; coHound потребляет модели по [OI]-совместимому API и в стек не входит.
 
-**Следствие:** тяжёлые ML-зависимости (torch/vLLM) не обязаны разделять venv с CLI.
-CLI-ядро (`pydantic`+`pyyaml`+stdlib) ставится везде; индекс- и GPU-контуры —
-изолированные окружения/образы. Это согласуется с D1 (commodity за портами) и A1.
+**Следствие:** тяжёлые ML-зависимости эмбеддинг-контура (`torch`) не обязаны разделять venv с CLI.
+CLI-ядро (`pydantic`+`pyyaml`+stdlib) ставится везде; индекс-контур — изолированное окружение/образ,
+а LLM-инференс вообще внешний (корп. облако, §2.3). Это согласуется с D1 (commodity за портами)
+и A1.
 
 **Проверено резолвом и установкой на Python 3.14 (2026-10-08):** все лёгкие extras (ядро + `retrieval`,
 `crawl`, `extract`, `safety`, `ops`, `dev`, `ann`, `fallback`, `embed-lite`) разрешаются и
@@ -96,19 +98,21 @@ CLI-ядро (`pydantic`+`pyyaml`+stdlib) ставится везде; инде�
 | `ai-forever/ru-en-RoSBERTa` | — | MIT ✅ | **b** | ru+en, MIT — альтернативный билингвальный кандидат R9/R10 |
 | `model2vec` | 0.9.x | MIT ✅ | **b** | лёгкий fallback без torch (статичные эмбеддинги, CPU); качество RU 🟡 — как абляция |
 | `FlagEmbedding` | 1.4.x | MIT ✅ | **d** | training-тулкит (deepspeed, flash-attn); для инференса избыточен |
-| `vllm` | 0.31.x | Apache-2.0 ✅ | **a** | self-host сервер, встроенный xgrammar, reproducibility-режимы |
-| `sglang` | 0.5.x | Apache-2.0 ✅ | **a** | альтернатива vLLM; per-request seed, day-0 поддержка целевых моделей |
 | `llama-cpp-python` | 0.3.x | MIT ✅ | **b**/**a** | CPU/GGUF-путь (полезен без большого GPU и для интеграционных тестов порта). ⚠️ PyPI отдаёт **только sdist** (без wheels) → нужен C/C++/CMake-тулчейн; build-free альтернатива — first-party `llama.cpp` `llama-server` |
 | `transformers` | 5.19.x | Apache-2.0 ✅ | **c** | не для сервинга; приходит через ST |
 | `text-generation-inference` | — | Apache-2.0 | **d** | **архивирован 2026-03** ✅ — не строить |
 
+> **Облачный backend — не наша зависимость.** `vLLM`/`SGLang` — лишь *возможные* движки инференса
+> на стороне корпоративного облака. coHound **не ставит и не развёртывает** их: модели потребляются
+> по [OI]-совместимому API (endpoint `api`); выбор и версия движка — забота облака (commodity по A2).
+
 **Constrained decoding:** схема ячейки (`status/justification/evidence[]`) генерируется из
-`pydantic`-модели → JSON Schema → grammar-constrained decoding **на сервере** (`xgrammar` —
-движок-по-умолчанию внутри vLLM/SGLang). Отдельная зависимость не нужна.
+`pydantic`-модели → JSON Schema → grammar-constrained decoding **на стороне облачного endpoint**
+(конкретный движок — backend корпоративного облака). Отдельная зависимость не нужна.
 
 | Пакет | Вердикт | Обоснование |
 |---|---|---|
-| `xgrammar` | **a** (транзитивно, через сервер) | прямой вызов из кода не требуется |
+| `xgrammar` | **—** (на стороне облака) | прямой вызов из кода не требуется; решает endpoint |
 | `instructor` | **b** | клиентские ретраи поверх OpenAI-совместимого API; у нас своя pydantic-валидация §10 |
 | `outlines` | **c** | `<3.14` + тянет SDK провайдеров |
 | `guidance`, `lm-format-enforcer` | **c** | избыточны при серверном xgrammar |
@@ -273,8 +277,8 @@ robots.txt-запрос оставлять на дефолтном HTTP-handler 
 |---|---|---|---|
 | **LlamaParse** (LlamaIndex) | Cloud SaaS (Global/EU) | **Да** | **d**; «local cloud deployment» — только Enterprise, проприетарно 🟡 |
 | unstructured.io Transform API | Cloud | **Да** | **d** ($0.015/стр) |
-| Firecrawl Cloud | Cloud (US) | **Да** | **d**; self-host — AGPL-3.0 |
-| Jina Reader | SaaS `r.jina.ai` | **Да** | SaaS **d**; OSS self-host Apache-2.0, но **Node.js** и дублирует наш стек → **c** |
+| Firecrawl Cloud | Cloud (US) | **Да** | **d**; свой хостинг — AGPL-3.0 |
+| Jina Reader | SaaS `r.jina.ai` | **Да** | SaaS **d**; OSS-хостинг Apache-2.0, но **Node.js** и дублирует наш стек → **c** |
 | Reducto | Cloud | **Да** | **d**; VPC/air-gapped — проприетарно, вне РФ-юрисдикции 🟡 |
 
 Итог: **LlamaParse в coHound не применяется** — не по качеству, а по контуру данных. Локальную
@@ -292,7 +296,8 @@ robots.txt-запрос оставлять на дефолтном HTTP-handler 
 **Отдельные окружения (не в CLI-venv):**
 - **PDF layout:** `docling-slim[standard]` (torch+CUDA) — extra `extract-pdf`, блокер M0.
 - **Индекс-контур:** `sentence-transformers` (+torch) — extra `embed`, изолированный venv/образ.
-- **GPU-инференс:** `vLLM`/`SGLang` — отдельный Docker-образ на GPU.
+- **LLM-инференс:** модели корпоративного облака по [OI]-совместимому API — **вне наших окружений**
+  (не ставим и не развёртываем; `vLLM`/`SGLang` — возможный backend облака, §2.3).
 - **Опц. CPU-инференс:** `llama-cpp-python` (GGUF) для тестов порта.
 
 **Dev (`a`):** `pytest` · `hypothesis` · `respx` · `pytest-cov`.

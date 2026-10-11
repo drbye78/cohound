@@ -193,7 +193,8 @@ class EvaluatorPort(Protocol):
 ```
 
 **Гарантия I18:** у порта **нет** параметров `tools`/`web_search`; интерфейс физически не выражает
-веб-поиск. Адаптер `llm_local.py` подключается к self-host (vLLM/SGLang) без тулов.
+веб-поиск. Адаптер `llm_local.py` подключается к [OI]-совместимому endpoint корпоративного облака;
+без тулов (I18).
 Search-enabled модели обслуживаются **другим портом** (`ports/search.py`).
 
 ### 3.2. `ports/vector_index.py` (I17)
