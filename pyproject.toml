@@ -4,11 +4,12 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cohound"
-version = "0.0.0"
+version = "0.1.0"
 description = "coHound — сравнительная техническая карта продуктов по публично доказуемой функциональности"
 readme = "README.md"
 requires-python = ">=3.14"
-license = { text = "Proprietary" }
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [{ name = "Marusin Dmitry", email = "drbye@mail.ru" }]
 
 # Ядро (MVP, §3.2 + docs/architecture/05-dependency-stack.md).
