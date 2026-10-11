@@ -98,7 +98,7 @@ CLI-ядро (`pydantic`+`pyyaml`+stdlib) ставится везде; инде�
 | `FlagEmbedding` | 1.4.x | MIT ✅ | **d** | training-тулкит (deepspeed, flash-attn); для инференса избыточен |
 | `vllm` | 0.31.x | Apache-2.0 ✅ | **a** | self-host сервер, встроенный xgrammar, reproducibility-режимы |
 | `sglang` | 0.5.x | Apache-2.0 ✅ | **a** | альтернатива vLLM; per-request seed, day-0 поддержка целевых моделей |
-| `llama-cpp-python` | 0.3.x | MIT ✅ | **b**/**a** | CPU/GGUF-путь (полезен без большого GPU и для интеграционных тестов порта) |
+| `llama-cpp-python` | 0.3.x | MIT ✅ | **b**/**a** | CPU/GGUF-путь (полезен без большого GPU и для интеграционных тестов порта). ⚠️ PyPI отдаёт **только sdist** (без wheels) → нужен C/C++/CMake-тулчейн; build-free альтернатива — first-party `llama.cpp` `llama-server` |
 | `transformers` | 5.19.x | Apache-2.0 ✅ | **c** | не для сервинга; приходит через ST |
 | `text-generation-inference` | — | Apache-2.0 | **d** | **архивирован 2026-03** ✅ — не строить |
 
@@ -122,7 +122,7 @@ CLI-ядро (`pydantic`+`pyyaml`+stdlib) ставится везде; инде�
 | Пакет | Версия | Лицензия | Вердикт | Обоснование |
 |---|---|---|---|---|
 | `trafilatura` | 2.3.x | Apache-2.0 ✅ | **a** | main-content → markdown, заголовки/списки/таблицы |
-| `docling-slim[format-office]` + `rtree` | 2.135.x | MIT ✅ | **a** | DOCX/PPTX/XLSX нативно (python-docx/-pptx/openpyxl), **без torch**; namespace-импорт `docling`. **`rtree` обязателен** — `[format-office]` не покрывает импорт `DocumentConverter` |
+| `docling-slim[format-office]` | 2.135.x | MIT ✅ | **a** | DOCX/PPTX/XLSX нативно (python-docx/-pptx/openpyxl), **без torch**. `rtree` для Office **не нужен** (нужен только PDF-пути spatial/reading-order) и импорт `DocumentConverter` без него работает |
 | `docling-slim[standard]` | 2.135.x | MIT ✅ | **a** (отдельное окружение) | PDF layout+tables; **тянет torch+torchvision+CUDA**; обязателен для PDF-контура (блокер M0) |
 | `lxml` | 6.1.x | BSD-3 ✅ | **a** (транзитивно) | уже в дереве trafilatura/Scrapy |
 | `openpyxl` | 3.1.x | MIT ✅ | **a** | XLSX-отчёты; Office-бэкенд docling |
@@ -136,8 +136,10 @@ CLI-ядро (`pydantic`+`pyyaml`+stdlib) ставится везде; инде�
 | `unstructured` | 0.27.x | Apache-2.0 ✅ | **d** | `<3.14` + 24+ зависимостей + телеметрия on-by-default; OSS-таблицы слабые (0.426 vs 0.866) |
 | `html2text` | 2025.4.x | **GPL-3.0** ✅ | **d** | GPL несовместим с permissive-курсом; закрывается `markdownify` |
 
-⚠️ **docling offline:** при первом PDF-прогоне docling подтягивает веса с Hugging Face 🟡 — в
-РФ-контуре нужен предварительно закешированный артефакт (`HF_HUB_OFFLINE=1`).
+⚠️ **docling offline:** веса нужны **только PDF-контуру** (Office — без ML-моделей). Штатный
+офлайн-механизм — pipeline `artifacts_path` / env `DOCLING_ARTIFACTS_PATH`, заполняемый
+`docling-tools models download` (или `download_models()`); `HF_HUB_OFFLINE=1` — валидный, но
+вспомогательный hub-level guard, а не основной переключатель (§7).
 **Лицензии весов** ❓ — проверить перед редистрибуцией (лицензия кода ≠ лицензия весов).
 
 ### 2.5. Краулинг
@@ -320,7 +322,7 @@ bump `methodology_version`, обязателен `golden-full` (§13). Поэт�
 | V1 | RU/EN-стемминг `tantivy` из Python-биндингов | ✅ **закрыт (2026-10-08):** русский стеммер и стоп-слова доступны нативно — `Filter.stemmer("russian")`, `Filter.stopword("russian")` (tantivy 0.26.2); end-to-end индекс+поиск на смешанном RU/EN корпусе прошёл («экспорт» находит «Экспорт»/«экспорта»). Внешний `snowballstemmer` не нужен |
 | V2 | Колёса `torch`/`sentence-transformers` под Python 3.14 | ✅ **закрыт (2026-10-08):** `torch 2.14.1` и `sentence-transformers 6.1.0` имеют колёса `cp314`; резолв `uv` на 3.14 прошёл. См. `pyproject.toml` |
 | V3 | Выбор RU/EN-эмбеддинга | 🟡 **решение:** RU — абсолютный приоритет, EN — очень хорошо; **основной — `BAAI/bge-m3`** (MIT, 8192 контекста). Подтверждение и сравнение с RU-файнтюнами (`deepvk/USER-bge-m3`, `ai-forever/ru-en-RoSBERTa`) — R9/R10 |
-| V4 | docling offline-веса в контуре + лицензии весов | ⚠️ **механика подтверждена** (см. §7): `huggingface_hub.snapshot_download` при первом PDF-прогоне; PDF-контур требует предзакачанный кэш (`HF_HUB_OFFLINE=1`) + аудит лицензий весов |
+| V4 | docling offline-веса в контуре + лицензии весов | ⚠️ **механика уточнена:** штатный офлайн-механизм — `DOCLING_ARTIFACTS_PATH` / pipeline `artifacts_path`, заполняемый `docling-tools models download` (см. §7); `HF_HUB_OFFLINE=1` — вспомогательный guard; Office-форматы весов не требуют. Открыт аудит лицензий весов |
 | V5 | `scrapy-playwright` 0.0.x на сложных антибот-доменах | ✅ **закрыт smoke-тестом (2026-10-08):** зрелый де-факто стандарт (org `scrapy-plugins`, BSD-3, py3.14). Smoke `tests/smoke_scrapy_playwright.py` пройден на Scrapy 2.19.0 + scrapy-playwright 0.0.48 + playwright **1.63.0** (chromium + firefox) → **оставляем с жёстким пином**; связка 1.63/2.19 подтверждена, фолбэк 1.57 не нужен. Изолируется за портом `crawler`. Альтернативы не берём (см. §2.5) |
 
 ---
@@ -333,20 +335,27 @@ Hub при первом прогоне**. В РФ-контуре (данные/�
 air-gap) сетевого доступа к HF нет — либо загрузка упадёт, либо произойдёт нежелательное
 обращение наружу.
 
-**Механика (подтверждена в коде `docling 2.135.0`):**
-- `docling/models/utils/hf_model_download.py` → `huggingface_hub.snapshot_download(repo_id=…, revision=…)`;
+**Механика (подтверждена в коде `docling 2.135.0`; штатный офлайн — через artifacts-путь):**
+- штатный офлайн-switch — pipeline `artifacts_path` / env `DOCLING_ARTIFACTS_PATH`; бандл
+  заполняется `docling-tools models download` (или `download_models()`);
+- `HF_HUB_OFFLINE=1` (и `TRANSFORMERS_OFFLINE=1`) — валидный **hub-level** guard, но не основной
+  переключатель Docling: он лишь запрещает обращения к HF-hub, полагаясь на локальный кэш;
+- (внутренний путь загрузки) `docling/models/utils/hf_model_download.py` → `huggingface_hub.snapshot_download(repo_id=…, revision=…)`;
 - дефолтные репозитории моделей — `docling-project/docling-models`, `docling-project/TableFormerV2`,
   `docling-project/CodeFormulaV2`; OCR/VLM-варианты — `ibm-granite/*`, `nvidia/nemotron-ocr-v2` и др.;
 - часть моделей пинится по `revision` (напр. TableFormer `v2.3.0`) — плюс к воспроизводимости;
 - кэш — стандартный HF (`HF_HOME`), полем `local_dir` можно задать свой путь.
 
-**Статус:** ✅ план **подтверждён владельцем (2026-10-08)** — принят как порядок работ M0
-(предзакачка бандла → `HF_HUB_OFFLINE=1` → revision-пины → аудит лицензий весов).
+**Статус:** ✅ план **подтверждён владельцем (2026-10-08), механика уточнена 2026-10-12**
+(предзакачка бандла → `DOCLING_ARTIFACTS_PATH` + `HF_HUB_OFFLINE=1` как guard → revision-пины →
+аудит лицензий весов).
 
 **Что делать (план, закрывает V4):**
-1. **Предзакачать** нужные веса на машине с доступом к сети → положить в артефакт-бандл контура.
-2. В контуре выставить `HF_HUB_OFFLINE=1` (и `TRANSFORMERS_OFFLINE=1`) — тогда HF-hub читает
-   **только** локальный кэш и не пытается выйти в сеть. Это и тест «офлайн реально работает».
+1. **Предзакачать** нужные веса (`docling-tools models download`) на машине с доступом к сети →
+   положить в артефакт-бандл контура; указать путь через `DOCLING_ARTIFACTS_PATH`/`artifacts_path`.
+2. Дополнительно выставить `HF_HUB_OFFLINE=1` (и `TRANSFORMERS_OFFLINE=1`) как **guard**: даже при
+   неверно настроенном artifacts-пути HF-hub не выйдет в сеть. Это и тест «офлайн реально работает».
+   (Office-форматы весов не требуют — офлайн из коробки.)
 3. Указать кэш/пути через `HF_HOME`/`local_dir`; зафиксировать `revision` каждой модели в
    `run_manifest.yaml` (§13, воспроизводимость R7).
 4. **Аудит лицензий весов** — лицензия кода (MIT) ≠ лицензия весов. Для каждой модели в бандле

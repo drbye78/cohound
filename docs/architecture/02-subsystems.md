@@ -250,7 +250,7 @@ retry ≤2 → `failed` (status=null, I4). В preliminary невалидная �
 
 ### C.3. Search-адаптер (Ш5, §7.2)
 
-- **Провайдеры:** `search_yandex.py` (Yandex Search API / Web Search Tool), `search_glm.py`
+- **Провайдеры:** `search_yandex.py` (Yandex Search API), `search_glm.py` (GLM Web Search API)
   (Z.ai Web Search API) — оба за `ports/search.py`. В профиле `split` исполняются в DMZ (`edge/`),
   ядро вызывает через `gateway` (07).
 - **Бюджет:** фиксирован (≤5 RU + ≤5 EN на параметр-продукт по умолчанию), симметричен (I16).
