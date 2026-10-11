@@ -8,8 +8,7 @@ absence-evidence по формальным правилам.
 
 **Источник истины по семантике, инвариантам и архитектуре** — регламент
 [`cohound-spec-v2.md`](cohound-spec-v2.md) (v2.1). Архитектурный проект — в
-[`docs/architecture/`](docs/architecture/). `thesis_2.md` — предыдущая редакция (v1.3),
-оставлена для истории, не редактируется.
+[`docs/architecture/`](docs/architecture/).
 
 ## Аксиомы (§0 регламента)
 
