@@ -13,6 +13,8 @@ from pathlib import Path
 
 import pytest
 
+from core.adapters import index_format
+from core.adapters.index_npy import NpyIndexBuilder
 from core.domain import (
     AnchorRelation,
     CatalogRow,
@@ -24,6 +26,17 @@ from core.pipeline.corpus import IndexBuild, build_corpus
 from core.ports.types import Chunk, ExtractedDoc, RawPage, RenderMode
 from core.store.sqlite_store import SqliteStore
 from core.util.hashing import content_hash
+
+try:  # необязательная зависимость (extra ``retrieval``)
+    import numpy as _np  # type: ignore[import-not-found]
+except ImportError:  # pragma: no cover - зависит от окружения
+    _np = None  # type: ignore[assignment]
+
+requires_numpy = pytest.mark.skipif(_np is None, reason="numpy не установлен (extra retrieval)")
+
+
+class ImmutableBuildError(RuntimeError):
+    """Локальное зеркало имени адаптерного типа: проверяем строку ошибки, а не класс (K2)."""
 
 RUN_ID = "run-fixture"
 TS = "2026-01-01T00:00:00+00:00"
@@ -488,3 +501,212 @@ def test_no_urls_returns_empty_ok(tmp_path: Path) -> None:
 def test_urls_must_be_mapping(tmp_path: Path) -> None:
     with pytest.raises(ValueError):
         build_corpus(_plan(), _Crawler({}), _Extractor(), _Chunker(), urls=[URL_P1_A])  # type: ignore[arg-type]
+
+
+# --------------------------------------------------------------------------- #
+# «Disk first, DB second»: физическая сборка авторитетна (K2/§13)
+# --------------------------------------------------------------------------- #
+
+
+class _ImmutableBuilder:
+    """Сборщик, отказывающий во втором ``build`` того же ключа с другим содержимым.
+
+    Имитирует :class:`~core.adapters.index_npy.ImmutableBuildError` по имени класса:
+    сигнатура ``(chunk_id, content_hash)`` меняется вместе с контентом, поэтому повторная
+    сборка по тому же ``(package, build_id, product_id)`` поднимает ошибку.
+    """
+
+    lexical_engine_version = "lex-1"
+    vector_store = "npy"
+
+    def __init__(self) -> None:
+        self._signatures: dict[tuple[str, str, str], tuple] = {}
+        self.commits = 0
+
+    def build(self, chunks, vectors, meta):  # noqa: ANN001 — структурная заглушка порта
+        chunks = list(chunks)
+        signature = tuple((c.chunk_id, c.content_hash) for c in chunks)
+        key = (meta.package, (meta.extra or {}).get("index_build_id", ""), meta.product_id)
+        previous = self._signatures.get(key)
+        if previous is not None and previous != signature:
+            raise ImmutableBuildError(
+                "NpyIndexBuilder: сборка уже существует с другим содержимым (§13)"
+            )
+        self._signatures[key] = signature
+        return key[1]
+
+    def commit(self) -> None:
+        self.commits += 1
+
+
+class _RefusingBuilder:
+    """Сборщик, отказывающий в сборке заданных продуктов (прочие строит штатно)."""
+
+    lexical_engine_version = "lex-1"
+    vector_store = "npy"
+
+    def __init__(self, refuse: set[str] | None = None) -> None:
+        self.refuse = set(refuse or ())
+        self.built: list[tuple[int, str]] = []
+        self.commits = 0
+
+    def build(self, chunks, vectors, meta):  # noqa: ANN001 — структурная заглушка порта
+        self.built.append((len(list(chunks)), meta.product_id))
+        if meta.product_id in self.refuse:
+            raise ImmutableBuildError(
+                "NpyIndexBuilder: партиция уже зафиксирована на диске с другим содержимым (§13)"
+            )
+        return "builder-id"
+
+    def commit(self) -> None:
+        self.commits += 1
+
+
+def _manifest_row(store: SqliteStore, build_id: str, product_id: str):  # noqa: ANN202
+    return store.conn.execute(
+        "SELECT stats_json FROM index_manifest WHERE index_build_id = ? AND product_id = ?",
+        (build_id, product_id),
+    ).fetchone()
+
+
+def _chunk_count(store: SqliteStore, build_id: str) -> int:
+    row = store.conn.execute(
+        "SELECT COUNT(*) AS n FROM corpus_chunks WHERE build_id = ?", (build_id,)
+    ).fetchone()
+    return int(row["n"])
+
+
+def test_immutable_build_refused_leaves_db_unchanged(tmp_path: Path) -> None:
+    # Первый прогон фиксирует партицию p1 с одним чанком; второй прогон того же run_id
+    # меняет контент (два чанка) → физическая сборка отказана, БД не дорасширяется.
+    store = SqliteStore(":memory:")
+    builder = _ImmutableBuilder()
+    try:
+        first = _build(
+            tmp_path / "first",
+            pages={URL_P1_A: b"first"},
+            urls={"p1": [URL_P1_A]},
+            store=store,
+            embedder=_Embedder(),
+            index_builder=builder,
+        )
+        build_id = _build_of(first).index_build_id
+        manifest_before = _manifest_row(store, build_id, "p1")
+        assert manifest_before is not None
+        assert _chunk_count(store, build_id) == 1
+
+        second = _build(
+            tmp_path / "second",
+            pages={URL_P1_A: b"second-a", URL_P1_B: b"second-b"},
+            urls={"p1": [URL_P1_A, URL_P1_B]},
+            store=store,
+            embedder=_Embedder(),
+            index_builder=builder,
+        )
+        build_id_2 = _build_of(second).index_build_id
+        assert build_id_2 == build_id  # тот же run_id/params → тот же build_id
+
+        # Манифест и чанки не изменились: БД согласована с иммутабельной партицией на диске.
+        assert _manifest_row(store, build_id, "p1") == manifest_before
+        assert _chunk_count(store, build_id) == 1
+        assert any("ImmutableBuildError" in err for err in second.errors)
+        assert any("не зафиксирована" in err for err in second.errors)
+    finally:
+        store.close()
+
+
+@requires_numpy
+def test_successful_build_writes_manifest_matching_disk(tmp_path: Path) -> None:
+    index_root = tmp_path / "index_store"
+    store = SqliteStore(":memory:")
+    try:
+        result = _build(
+            tmp_path / "raw",
+            pages={URL_P1_A: b"physical"},
+            urls={"p1": [URL_P1_A]},
+            store=store,
+            embedder=_Embedder(),
+            index_builder=NpyIndexBuilder(index_root),
+        )
+        build = _build_of(result)
+        assert result.errors == []
+        package_id = build.entries[0].package_id or ""
+        partition = index_format.partition_dir(
+            index_root, package_id, build.index_build_id, "p1"
+        )
+        physical = json.loads((partition / "manifest.json").read_text(encoding="utf-8"))
+        persisted = _manifest_row(store, build.index_build_id, "p1")
+        assert persisted is not None
+        stats = json.loads(persisted["stats_json"])
+        assert stats["chunks"] == physical["stats"]["chunks"]
+        physical_lines = [
+            line
+            for line in (partition / "chunk_ids.jsonl").read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        assert _chunk_count(store, build.index_build_id) == len(physical_lines)
+    finally:
+        store.close()
+
+
+def test_docs_and_chunks_without_index_builder(tmp_path: Path) -> None:
+    # Легитимный путь «логический манифест без физического индекса»: без embedder/builder
+    # docs, chunks и index_manifest всё равно персистятся (обратная совместимость).
+    store = SqliteStore(":memory:")
+    try:
+        result = _build(
+            tmp_path,
+            pages={URL_P1_A: b"logical"},
+            urls={"p1": [URL_P1_A]},
+            store=store,
+        )
+        build = _build_of(result)
+        assert result.errors == []
+        docs = list(store.conn.execute("SELECT doc_id FROM corpus_docs"))
+        chunks = list(store.conn.execute("SELECT chunk_id FROM corpus_chunks"))
+        manifest = list(store.conn.execute("SELECT product_id FROM index_manifest"))
+        assert len(docs) == 1
+        assert len(chunks) == 1
+        assert [m["product_id"] for m in manifest] == ["p1"]
+        assert _chunk_count(store, build.index_build_id) == 1
+    finally:
+        store.close()
+
+
+def test_partial_product_failure(tmp_path: Path) -> None:
+    # p1 собирается физически, p2 отказан: p1 — чанки+манифест; p2 — только docs, без манифеста.
+    store = SqliteStore(":memory:")
+    builder = _RefusingBuilder(refuse={"p2"})
+    try:
+        result = _build(
+            tmp_path,
+            pages={URL_P1_A: b"ok-one", URL_P2_A: b"ok-two"},
+            urls={"p1": [URL_P1_A], "p2": [URL_P2_A]},
+            store=store,
+            embedder=_Embedder(),
+            index_builder=builder,
+        )
+        build = _build_of(result)
+
+        man_p1 = _manifest_row(store, build.index_build_id, "p1")
+        man_p2 = _manifest_row(store, build.index_build_id, "p2")
+        assert man_p1 is not None
+        assert man_p2 is None
+
+        p1_chunks = list(
+            store.conn.execute("SELECT chunk_id FROM corpus_chunks WHERE product_id = 'p1'")
+        )
+        p2_chunks = list(
+            store.conn.execute("SELECT chunk_id FROM corpus_chunks WHERE product_id = 'p2'")
+        )
+        assert len(p1_chunks) == 1
+        assert p2_chunks == []
+
+        p2_docs = list(
+            store.conn.execute("SELECT doc_id FROM corpus_docs WHERE product_id = 'p2'")
+        )
+        assert len(p2_docs) == 1
+
+        assert any("p2" in err and "не зафиксирована" in err for err in result.errors)
+    finally:
+        store.close()

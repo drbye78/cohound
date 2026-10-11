@@ -27,6 +27,15 @@ retention пишется **до** экстракции; каждый индек�
 ``embed_model_id`` + ``snapshot_date``). Любое изменение входов даёт новую сборку; старая не
 мутируется (§B.1/§13, K2).
 
+**Порядок «сначала диск, потом БД».** Физическая продукт-партиция авторитетна. Пока
+``index_builder.build`` не завершился успешно, фаза **не** пишет ``corpus_chunks``/
+``index_manifest`` в БД: иначе реестр заявлял бы сборку, которой нет (или не совпадает с
+иммутабельной партицией на диске). Если ``build`` отказал (в т.ч. ``ImmutableBuildError``
+при попытке изменить уже зафиксированную сборку, K2/§13), ``corpus_docs`` всё равно
+персистятся (retention), но ``corpus_chunks``/``index_manifest`` остаются неизменными, а
+отказ попадает в ``errors`` с указанием, что изменение корпуса требует нового
+``run_id``/раунда. Это зеркалит порядок в ``serp_loop`` (build → ``save_index_manifest``).
+
 **Внедрение зависимостей.** Адаптеры (``core/adapters/*``) здесь не импортируются: фаза
 работает только через порты (A1). ``embedder``/``index_builder`` опциональны — если они не
 переданы, фаза строит корпус и ``index_manifest``, а эмбеддинг/физическую сборку индекса
@@ -173,16 +182,16 @@ def _render_for(render_modes: Mapping[str, RenderMode] | None, url: str) -> Rend
 # --------------------------------------------------------------------------- #
 
 
-def _persist_corpus(
+def _persist_docs(
     store: Any,
     docs: list[CorpusDoc],
-    chunks: list[CorpusChunk],
-    entry: IndexManifestEntry | None,
     errors: list[str],
 ) -> None:
-    """Пишет документы → чанки → запись манифеста (порядок важен: FK ``doc_id``).
+    """Пишет ``corpus_docs`` (retention + provenance экстракции, §3.2).
 
-    Каждая запись обёрнута в try/except: сбой персистенции фиксируется в ``errors`` и не
+    Вызывается **всегда** — даже если физическая сборка индекса отказала: сырые байты и
+    провенанс экстракции не зависят от иммутабельности индексной сборки (I19). Каждая
+    запись обёрнута в try/except: сбой персистенции фиксируется в ``errors`` и не
     прерывает обработку остальных продуктов (контракт изоляции фаз, ``runner.py``).
     """
     if store is None:
@@ -192,6 +201,23 @@ def _persist_corpus(
             store.upsert_corpus_doc(doc)
         except Exception as exc:  # noqa: BLE001 — наблюдаемость важнее персистенции
             errors.append(f"upsert_corpus_doc({doc.doc_id}): {type(exc).__name__}: {exc}")
+
+
+def _persist_chunks_and_manifest(
+    store: Any,
+    chunks: list[CorpusChunk],
+    entry: IndexManifestEntry | None,
+    errors: list[str],
+) -> None:
+    """Пишет ``corpus_chunks`` → ``index_manifest`` (порядок: FK ``doc_id``).
+
+    Вызывается **только** когда физическая продукт-партиция реально зафиксирована на диске
+    («disk first, DB second»): реестр не должен заявлять сборку, которой нет (K2/§13).
+    Каждая запись обёрнута в try/except: сбой фиксируется в ``errors`` и не прерывает
+    обработку остальных продуктов (контракт изоляции фаз, ``runner.py``).
+    """
+    if store is None:
+        return
     if chunks:
         try:
             store.add_chunks_batch(chunks)
@@ -216,11 +242,17 @@ def _embed_and_build(
     snapshot_date: str | None,
     index_build_id: str,
     errors: list[str],
-) -> None:
+) -> bool:
     """Best-effort эмбеддинг и физическая сборка индекса продукт-партиции (K3, §B.1).
 
     ``pipeline`` не работает с файлами индекса напрямую: за ``.npy``-шарды/tantivy отвечает
     ``IndexBuilderPort``. Сбой изолируется в ``errors``.
+
+    :returns: ``True`` — если ``index_builder.build`` вернулся без исключения (партиция
+        физически зафиксирована); ``False`` — при **любом** исключении (в т.ч.
+        ``ImmutableBuildError`` при попытке изменить уже зафиксированную сборку, K2/§13).
+        Вызывающий использует результат как гейт для записи ``corpus_chunks``/
+        ``index_manifest`` («disk first, DB second»).
     """
     try:
         port_chunks = [
@@ -244,8 +276,10 @@ def _embed_and_build(
             extra={"index_build_id": index_build_id},
         )
         index_builder.build(port_chunks, vectors, meta)
+        return True
     except Exception as exc:  # noqa: BLE001 — изоляция по контракту фазы
         errors.append(f"{product_id}: index build: {type(exc).__name__}: {exc}")
+        return False
 
 
 # --------------------------------------------------------------------------- #
@@ -468,22 +502,35 @@ def build_corpus(
                 ),
             )
             entries.append(entry)
-            if embedder is not None and index_builder is not None:
-                _embed_and_build(
-                    embedder,
-                    index_builder,
-                    product_id,
-                    product_chunks,
-                    package_id=package,
-                    chunker_version=resolved_chunker_version,
-                    embed_model_id=embed_model_id,
-                    snapshot_date=snapshot,
-                    index_build_id=index_build_id,
-                    errors=errors,
-                )
+
+        # «Disk first, DB second»: физическая сборка авторитетна. Пока build не завершился
+        # успешно, corpus_chunks/index_manifest не пишутся (K2/§13); entry остаётся в entries
+        # для провенанса/log (IndexBuild).
+        physical_ok = True
+        if entry is not None and embedder is not None and index_builder is not None:
+            physical_ok = _embed_and_build(
+                embedder,
+                index_builder,
+                product_id,
+                product_chunks,
+                package_id=package,
+                chunker_version=resolved_chunker_version,
+                embed_model_id=embed_model_id,
+                snapshot_date=snapshot,
+                index_build_id=index_build_id,
+                errors=errors,
+            )
 
         all_docs.extend(product_docs)
-        _persist_corpus(store, product_docs, product_chunks, entry, errors)
+        _persist_docs(store, product_docs, errors)
+        if physical_ok:
+            _persist_chunks_and_manifest(store, product_chunks, entry, errors)
+        else:
+            errors.append(
+                f"{product_id}: физическая сборка индекса не зафиксирована — "
+                "corpus_chunks/index_manifest не записаны (K2/§13); "
+                "изменение корпуса требует нового run_id/раунда"
+            )
 
     if entries and embedder is not None and index_builder is not None:
         try:
