@@ -22,6 +22,11 @@ from core.domain import (
     CatalogRow,
     Cohort,
     CohortEntry,
+    CrawlAttempt,
+    FailureKind,
+    FetchStatus,
+    RunConfig,
+    RunMode,
 )
 from core.pipeline import RunPlan
 from core.pipeline.corpus import IndexBuild, _derive_index_build_id, build_corpus
@@ -95,6 +100,22 @@ def _plan(products: tuple[str, ...] = ("p1", "p2")) -> RunPlan:
             ],
         ),
         golden=[],
+    )
+
+
+def _make_run(store: SqliteStore, run_id: str = RUN_ID) -> None:
+    """Создаёт строку прогона (нужна для FK ``crawl_attempts.run_id`` при D3-resume)."""
+    store.create_run(
+        run_id,
+        RunConfig(
+            case_id="case",
+            anchor="p1",
+            cohort="case",
+            products=["p1", "p2"],
+            package="pkg",
+            snapshot_date=_dt.date(2026, 1, 1),
+            mode=RunMode.STRICT,
+        ),
     )
 
 
@@ -846,5 +867,301 @@ def test_partial_product_failure(tmp_path: Path) -> None:
         assert len(p2_docs) == 1
 
         assert any("p2" in err and "не зафиксирована" in err for err in result.errors)
+    finally:
+        store.close()
+
+
+# --------------------------------------------------------------------------- #
+# D3: durable-краул — аудит/очередь/resume (crawl_attempts)
+# --------------------------------------------------------------------------- #
+
+
+class _BombCrawler(_Crawler):
+    """Краулер, обязанный НЕ вызываться: любой ``fetch`` — провал теста (resume)."""
+
+    def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:
+        raise AssertionError("краулер вызван при наличии retained-байтов (D3 resume)")
+
+
+def test_resume_from_retained_raw_skips_refetch(tmp_path: Path) -> None:
+    """URL с prior FETCHED/DONE + retained raw НЕ фетчится повторно и ре-извлекается (D3)."""
+    store = SqliteStore(":memory:")
+    _make_run(store)
+    try:
+        first = _build(
+            tmp_path, pages={URL_P1_A: b"retained bytes"},
+            urls={"p1": [URL_P1_A]}, store=store, run_id=RUN_ID,
+        )
+        assert _build_of(first).chunk_count == 1
+        prior = next(iter(store.iter_crawl_attempts(RUN_ID)))
+        assert prior.status is FetchStatus.DONE
+        assert prior.raw_path and Path(prior.raw_path).is_file()
+
+        # Второй прогон с «бомбой»-краулером: фетча быть не должно.
+        second = _build(
+            tmp_path, pages={}, urls={"p1": [URL_P1_A]},
+            crawler=_BombCrawler({}), store=store, run_id=RUN_ID,
+        )
+        build = _build_of(second)
+        assert second.errors == []
+        assert build.chunk_count == 1
+        assert build.docs[0].content_hash == content_hash(b"retained bytes")
+        # Повторный DONE идемпотентен: один и тот же id сборки, статус DONE.
+        assert build.index_build_id == _build_of(first).index_build_id
+        assert next(iter(store.iter_crawl_attempts(RUN_ID))).status is FetchStatus.DONE
+    finally:
+        store.close()
+
+
+def test_crawl_failure_records_failed_source_unavailable(tmp_path: Path) -> None:
+    store = SqliteStore(":memory:")
+    _make_run(store)
+    bad = "https://docs.test/p1/broken"
+    try:
+        result = _build(
+            tmp_path, pages={}, urls={"p1": [bad]},
+            crawler=_Crawler({}, raising={bad}), store=store, run_id=RUN_ID,
+        )
+        row = next(iter(store.iter_crawl_attempts(RUN_ID)))
+        assert row.status is FetchStatus.FAILED
+        assert row.error_kind == FailureKind.SOURCE_UNAVAILABLE.value
+        assert row.error
+        assert any("crawl" in err for err in result.errors)
+        assert _build_of(result).crawl_failed == 1
+    finally:
+        store.close()
+
+
+def test_extraction_failure_records_failed_parser_and_retains_raw(tmp_path: Path) -> None:
+    store = SqliteStore(":memory:")
+    _make_run(store)
+    try:
+        result = _build(
+            tmp_path, pages={URL_P1_A: b"bytes"},
+            urls={"p1": [URL_P1_A]},
+            extractor=_Extractor(error_urls={URL_P1_A}),
+            store=store, run_id=RUN_ID,
+        )
+        row = next(iter(store.iter_crawl_attempts(RUN_ID)))
+        assert row.status is FetchStatus.FAILED
+        assert row.error_kind == FailureKind.PARSER_FAILED.value
+        # raw_path сохранён: поздний resume сможет ре-извлечь без ре-фетча (I19).
+        assert row.raw_path and Path(row.raw_path).is_file()
+        assert any("extract" in err for err in result.errors)
+    finally:
+        store.close()
+
+
+def test_no_run_id_degrades_to_no_crawl_attempts(tmp_path: Path) -> None:
+    """Без ``run_id`` durable-краул выключен: обычный фетч, счётчики — по invocation (D3)."""
+    store = SqliteStore(":memory:")
+    try:
+        crawler = _Crawler({URL_P1_A: b"x"})
+        result = _build(
+            tmp_path, pages={}, urls={"p1": [URL_P1_A]}, crawler=crawler, store=store
+        )
+        assert len(crawler.calls) == 1
+        assert list(store.iter_crawl_attempts(RUN_ID)) == []
+        assert _build_of(result).crawl_done == 1
+    finally:
+        store.close()
+
+
+def test_index_build_crawl_counters(tmp_path: Path) -> None:
+    store = SqliteStore(":memory:")
+    _make_run(store)
+    try:
+        result = _build(
+            tmp_path,
+            pages={URL_P1_A: b"one", URL_P2_A: b"two"},
+            urls={"p1": [URL_P1_A], "p2": [URL_P2_A]},
+            store=store, run_id=RUN_ID,
+        )
+        build = _build_of(result)
+        assert (build.crawl_done, build.crawl_failed) == (2, 0)
+        assert (build.crawl_pending, build.crawl_fetched) == (0, 0)
+    finally:
+        store.close()
+
+
+# --------------------------------------------------------------------------- #
+# D3 (must-fix): per-(product,url) resume, stale-raw, lang, counters
+# --------------------------------------------------------------------------- #
+
+
+def test_cross_product_same_url_resume_is_per_product(tmp_path: Path) -> None:
+    """Один URL под двумя продуктами: записи независимы (PK ``(run_id, product_id, url)``).
+
+    ``prior`` обязан ключеваться ``(product_id, url)``: иначе строка одного продукта
+    затирает строку другого и p1 (DONE+raw) был бы ошибочно ре-фетчен (I17/§4.4).
+    """
+    store = SqliteStore(":memory:")
+    _make_run(store)
+    url = "https://docs.test/shared"
+    try:
+        first = _build(
+            tmp_path, pages={url: b"shared"}, urls={"p1": [url], "p2": [url]},
+            store=store, run_id=RUN_ID,
+        )
+        assert _build_of(first).crawl_done == 2
+        rows = list(store.iter_crawl_attempts(RUN_ID))
+        assert {(r.product_id, r.url) for r in rows} == {("p1", url), ("p2", url)}
+
+        # p1 — валидная DONE-запись (raw сохранён). p2 — FAILED без raw.
+        p1_row = next(r for r in rows if r.product_id == "p1")
+        store.upsert_crawl_attempt(p1_row.model_copy(update={"status": FetchStatus.DONE}))
+        store.upsert_crawl_attempt(
+            CrawlAttempt(
+                run_id=RUN_ID, product_id="p2", url=url,
+                status=FetchStatus.FAILED, error_kind=FailureKind.SOURCE_UNAVAILABLE.value,
+            )
+        )
+
+        crawler = _Crawler({url: b"shared"})
+        second = _build(
+            tmp_path, pages={}, urls={"p1": [url], "p2": [url]},
+            crawler=crawler, store=store, run_id=RUN_ID,
+        )
+        # p1 резюмит без фетча, p2 фетчит → ровно один вызов краулера (только для p2).
+        assert [called for called, _ in crawler.calls] == [url]
+        assert _build_of(second).chunk_count == 2
+        assert second.errors == []
+    finally:
+        store.close()
+
+
+def test_stale_raw_mismatch_triggers_refetch(tmp_path: Path) -> None:
+    """Подменённый retained-файл (hash ≠ audited ``content_hash``) → обычный фетч, не resume."""
+    store = SqliteStore(":memory:")
+    _make_run(store)
+    try:
+        _build(
+            tmp_path, pages={URL_P1_A: b"original"},
+            urls={"p1": [URL_P1_A]}, store=store, run_id=RUN_ID,
+        )
+        row = next(iter(store.iter_crawl_attempts(RUN_ID)))
+        assert row.raw_path is not None and Path(row.raw_path).is_file()
+        Path(row.raw_path).write_bytes(b"corrupted-on-disk")
+
+        crawler = _Crawler({URL_P1_A: b"refetched"})
+        second = _build(
+            tmp_path, pages={}, urls={"p1": [URL_P1_A]},
+            crawler=crawler, store=store, run_id=RUN_ID,
+        )
+        assert len(crawler.calls) == 1  # расхождение хеша → снова фетч
+        doc = _build_of(second).docs[0]
+        assert doc.content_hash == content_hash(b"refetched")
+    finally:
+        store.close()
+
+
+def test_store_none_with_run_id_degrades_cleanly(tmp_path: Path) -> None:
+    """``store=None`` при заданном ``run_id``: durable-краул выключен, фаза штатна (D3)."""
+    crawler = _Crawler({URL_P1_A: b"x"})
+    result = _build(
+        tmp_path, pages={}, urls={"p1": [URL_P1_A]},
+        crawler=crawler, store=None, run_id=RUN_ID,
+    )
+    assert len(crawler.calls) == 1
+    assert result.errors == []
+    assert _build_of(result).crawl_done == 1
+
+
+def test_resume_from_failed_parser_failed_reextracts(tmp_path: Path) -> None:
+    """``FAILED``/``parser_failed`` с сохранённым raw → resume ре-извлекает без ре-фетча."""
+    store = SqliteStore(":memory:")
+    _make_run(store)
+    try:
+        _build(
+            tmp_path, pages={URL_P1_A: b"bytes"},
+            urls={"p1": [URL_P1_A]},
+            extractor=_Extractor(error_urls={URL_P1_A}),
+            store=store, run_id=RUN_ID,
+        )
+        row = next(iter(store.iter_crawl_attempts(RUN_ID)))
+        assert row.status is FetchStatus.FAILED
+        assert row.error_kind == FailureKind.PARSER_FAILED.value
+        assert row.raw_path and Path(row.raw_path).is_file()
+
+        # Рабочий экстрактор + «бомба»-краулер: raw уже есть, фетча быть не должно.
+        second = _build(
+            tmp_path, pages={}, urls={"p1": [URL_P1_A]},
+            crawler=_BombCrawler({}), store=store, run_id=RUN_ID,
+        )
+        assert second.errors == []
+        assert _build_of(second).chunk_count == 1
+        assert next(iter(store.iter_crawl_attempts(RUN_ID))).status is FetchStatus.DONE
+    finally:
+        store.close()
+
+
+def test_browser_unsupported_url_stays_pending(tmp_path: Path) -> None:
+    """Пропущенный (browser без поддержки) URL остаётся ``PENDING`` в счётчиках (D3)."""
+    browser_url = "https://browser.test/landing"
+    store = SqliteStore(":memory:")
+    _make_run(store)
+    crawler = _Crawler({browser_url: b"x"})
+    crawler.supports_browser = False  # type: ignore[attr-defined]
+    try:
+        result = _build(
+            tmp_path, pages={}, urls={"p1": [browser_url]}, crawler=crawler,
+            store=store, run_id=RUN_ID,
+            domain_profiles={"browser.test": DomainProfile(fetch=FetchMode.BROWSER)},
+        )
+        build = _build_of(result)
+        assert build.crawl_pending == 1
+        assert build.crawl_done == 0 and build.crawl_failed == 0
+        assert any("browser" in err for err in result.errors)
+        # URL пропущен до фетча — durable-запись не создаётся.
+        assert list(store.iter_crawl_attempts(RUN_ID)) == []
+    finally:
+        store.close()
+
+
+def test_retention_write_failure_marks_failed(tmp_path: Path) -> None:
+    """Сбой записи retention помечает URL ``FAILED`` (source_unavailable), не ``pending`` (D3)."""
+    store = SqliteStore(":memory:")
+    _make_run(store)
+    blocked = tmp_path / "blocked"
+    blocked.mkdir()
+    # Файл вместо каталога продукта → ``mkdir(parents=True, exist_ok=True)`` падает.
+    (blocked / "p1").write_bytes(b"not a directory")
+    try:
+        result = build_corpus(
+            _plan(),
+            _Crawler({URL_P1_A: b"x"}),
+            _Extractor(),
+            _Chunker(),
+            store,
+            urls={"p1": [URL_P1_A]},
+            raw_root=blocked,
+            run_id=RUN_ID,
+        )
+        row = next(iter(store.iter_crawl_attempts(RUN_ID)))
+        assert row.status is FetchStatus.FAILED
+        assert row.error_kind == FailureKind.SOURCE_UNAVAILABLE.value
+        assert any("retention" in err for err in result.errors)
+        assert _build_of(result).crawl_failed == 1
+    finally:
+        store.close()
+
+
+def test_lang_preserved_across_resume(tmp_path: Path) -> None:
+    """``lang`` персистится в записи краула и восстанавливается при resume (нет расхождения)."""
+    store = SqliteStore(":memory:")
+    _make_run(store)
+    try:
+        _build(
+            tmp_path, pages={URL_P1_A: b"bytes"},
+            urls={"p1": [URL_P1_A]}, store=store, run_id=RUN_ID,
+        )
+        row = next(iter(store.iter_crawl_attempts(RUN_ID)))
+        assert row.lang == "en"  # из _Crawler (RawPage.lang)
+
+        second = _build(
+            tmp_path, pages={}, urls={"p1": [URL_P1_A]},
+            crawler=_BombCrawler({}), store=store, run_id=RUN_ID,
+        )
+        assert _build_of(second).docs[0].lang == "en"
     finally:
         store.close()

@@ -18,6 +18,8 @@ from core.domain import (
     CellEvidence,
     CorpusChunk,
     CorpusDoc,
+    CrawlAttempt,
+    FetchStatus,
     GateDecision,
     IndexManifestEntry,
     ProtocolExhaustion,
@@ -89,6 +91,51 @@ class StorePort(Protocol):
     def add_chunks_batch(self, chunks: list[CorpusChunk]) -> None: ...
 
     def save_index_manifest(self, entry: IndexManifestEntry) -> None: ...
+
+    # -- краул (D3: durable audit/queue/resume) --------------------------- #
+    def upsert_crawl_attempt(self, attempt: CrawlAttempt) -> None:
+        """Полный upsert строки ``crawl_attempts`` по PK ``(run_id, product_id, url)``."""
+        ...
+
+    def mark_crawl_status(
+        self,
+        run_id: str,
+        product_id: str,
+        url: str,
+        status: FetchStatus,
+        *,
+        error_kind: str | None = None,
+        error: str | None = None,
+        content_hash: str | None = None,
+        raw_path: str | None = None,
+        http_status: int | None = None,
+        content_type: str | None = None,
+        lang: str | None = None,
+        fetch_mode: str | None = None,
+        extract_route: str | None = None,
+        ts: str | None = None,
+    ) -> None:
+        """Частичный upsert статуса per-URL записи краула (идемпотентный).
+
+        Сохраняет ``first_seen`` (проставляется один раз), обновляет ``last_attempt``
+        (``ts`` или текущее время), инкрементирует ``attempts`` на новом этапе-исходе
+        (``fetched``/``done``/``failed`` при смене статуса; повтор ``done`` идемпотентен).
+        Переданные (не ``None``) поля перекрывают текущие; прочие сохраняются.
+        """
+        ...
+
+    def iter_crawl_attempts(
+        self,
+        run_id: str,
+        product_id: str | None = None,
+        status: FetchStatus | None = None,
+    ) -> Iterator[CrawlAttempt]:
+        """Итерирует записи краула прогона; порядок ``product_id, url``; фильтры опциональны."""
+        ...
+
+    def clear_crawl_attempts(self, run_id: str, product_id: str | None = None) -> None:
+        """Удаляет durable-состояние краула прогона (все или по продукту) — ``--reset``."""
+        ...
 
     # -- чтение ---------------------------------------------------------- #
     def iter_cells(self, run_id: str, state: str | None = None) -> Iterator[Cell]: ...

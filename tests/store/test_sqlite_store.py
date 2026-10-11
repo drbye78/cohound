@@ -20,8 +20,10 @@ from core.domain import (
     CellState,
     CorpusChunk,
     CorpusDoc,
+    CrawlAttempt,
     EndpointKind,
     EvidenceType,
+    FetchStatus,
     Focus,
     Gate,
     GateDecision,
@@ -91,7 +93,7 @@ def test_schema_opens(store: SqliteStore) -> None:
     ver = store.conn.execute(
         "SELECT value FROM schema_meta WHERE key = 'schema_version'"
     ).fetchone()
-    assert ver["value"] == "2.2.0"
+    assert ver["value"] == "2.3.0"
     tables = {
         r["name"] for r in store.conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
     }
@@ -108,6 +110,7 @@ def test_schema_opens(store: SqliteStore) -> None:
         "search_log",
         "search_exhaustion",
         "registry_facts",
+        "crawl_attempts",
     ):
         assert t in tables
     # P2 (schema 2.2.0): build-id witness — версии/отпечаток контента.
@@ -630,6 +633,121 @@ def test_p2_extractor_version_and_content_digest_roundtrip(store: SqliteStore) -
     ).fetchone()
     assert mrow["extractor_version"] == "extractor-x"
     assert mrow["content_digest"] == "digest-x"
+
+
+# --------------------------------------------------------------------------- #
+# crawl_attempts (D3: durable per-URL аудит/очередь/resume)
+# --------------------------------------------------------------------------- #
+
+
+def test_crawl_attempt_round_trip(store: SqliteStore) -> None:
+    store.create_run(RUN_ID, _cfg())
+    attempt = CrawlAttempt(
+        run_id=RUN_ID,
+        product_id="p1",
+        url="https://docs.test/p1",
+        status=FetchStatus.FETCHED,
+        attempts=1,
+        fetch_mode="http",
+        extract_route="auto",
+        http_status=200,
+        content_type="text/html",
+        lang="en",
+        content_hash="h1",
+        raw_path="/tmp/p1/h1.bin",
+        first_seen="t0",
+        last_attempt="t1",
+    )
+    store.upsert_crawl_attempt(attempt)
+    got = list(store.iter_crawl_attempts(RUN_ID))
+    assert len(got) == 1
+    assert got[0].url == "https://docs.test/p1"
+    assert got[0].status is FetchStatus.FETCHED
+    assert got[0].attempts == 1
+    assert got[0].content_hash == "h1"
+    assert got[0].raw_path == "/tmp/p1/h1.bin"
+    assert got[0].http_status == 200
+    assert got[0].content_type == "text/html"
+    assert got[0].lang == "en"
+
+    # Полный upsert перекрывает строку по PK.
+    store.upsert_crawl_attempt(attempt.model_copy(update={"status": FetchStatus.DONE}))
+    assert [a.status for a in store.iter_crawl_attempts(RUN_ID)] == [FetchStatus.DONE]
+
+
+def test_mark_crawl_status_attempts_first_seen_last_attempt(store: SqliteStore) -> None:
+    store.create_run(RUN_ID, _cfg())
+    url = "https://docs.test/p1"
+    # Новый исход FETCHED: attempts=1, first_seen/last_attempt проставлены.
+    store.mark_crawl_status(
+        RUN_ID, "p1", url, FetchStatus.FETCHED,
+        content_hash="h1", raw_path="/tmp/h1.bin", ts="2026-01-01T00:00:00Z",
+    )
+    first = next(iter(store.iter_crawl_attempts(RUN_ID)))
+    assert first.attempts == 1
+    assert first.status is FetchStatus.FETCHED
+    assert first.first_seen == "2026-01-01T00:00:00Z"
+    assert first.last_attempt == "2026-01-01T00:00:00Z"
+    assert first.content_hash == "h1"
+
+    # Переход FETCHED → DONE: attempts растёт, first_seen сохраняется, last_attempt обновляется.
+    store.mark_crawl_status(RUN_ID, "p1", url, FetchStatus.DONE, ts="2026-01-02T00:00:00Z")
+    second = next(iter(store.iter_crawl_attempts(RUN_ID)))
+    assert second.attempts == 2
+    assert second.first_seen == "2026-01-01T00:00:00Z"
+    assert second.last_attempt == "2026-01-02T00:00:00Z"
+    # Поля предыдущего исхода сохранены (перекрываются только переданные).
+    assert second.content_hash == "h1"
+    assert second.raw_path == "/tmp/h1.bin"
+
+    # Повтор DONE идемпотентен: attempts/first_seen не меняются, last_attempt обновляется.
+    store.mark_crawl_status(RUN_ID, "p1", url, FetchStatus.DONE, ts="2026-01-03T00:00:00Z")
+    third = next(iter(store.iter_crawl_attempts(RUN_ID)))
+    assert third.attempts == 2
+    assert third.first_seen == "2026-01-01T00:00:00Z"
+    assert third.last_attempt == "2026-01-03T00:00:00Z"
+
+    # FAILED фиксирует error_kind/error (FailureKind.value), raw_path сохраняется.
+    store.mark_crawl_status(
+        RUN_ID, "p1", url, FetchStatus.FAILED,
+        error_kind="parser_failed", error="boom", ts="2026-01-04T00:00:00Z",
+    )
+    failed = next(iter(store.iter_crawl_attempts(RUN_ID)))
+    assert failed.status is FetchStatus.FAILED
+    assert failed.attempts == 3
+    assert failed.error_kind == "parser_failed"
+    assert failed.error == "boom"
+
+
+def test_iter_crawl_attempts_order_and_filters(store: SqliteStore) -> None:
+    store.create_run(RUN_ID, _cfg())
+    store.mark_crawl_status(RUN_ID, "p2", "https://docs.test/p2", FetchStatus.DONE)
+    store.mark_crawl_status(RUN_ID, "p1", "https://docs.test/p1/b", FetchStatus.FAILED,
+                            error_kind="source_unavailable")
+    store.mark_crawl_status(RUN_ID, "p1", "https://docs.test/p1/a", FetchStatus.DONE)
+    store.mark_crawl_status(RUN_ID, "p3", "https://docs.test/p3", FetchStatus.PENDING)
+
+    ordered = [(a.product_id, a.url) for a in store.iter_crawl_attempts(RUN_ID)]
+    assert ordered == [
+        ("p1", "https://docs.test/p1/a"),
+        ("p1", "https://docs.test/p1/b"),
+        ("p2", "https://docs.test/p2"),
+        ("p3", "https://docs.test/p3"),
+    ]
+    only_p1 = list(store.iter_crawl_attempts(RUN_ID, product_id="p1"))
+    assert [a.url for a in only_p1] == ["https://docs.test/p1/a", "https://docs.test/p1/b"]
+    failed = list(store.iter_crawl_attempts(RUN_ID, status=FetchStatus.FAILED))
+    assert [a.url for a in failed] == ["https://docs.test/p1/b"]
+
+
+def test_clear_crawl_attempts(store: SqliteStore) -> None:
+    store.create_run(RUN_ID, _cfg())
+    store.mark_crawl_status(RUN_ID, "p1", "https://docs.test/p1", FetchStatus.DONE)
+    store.mark_crawl_status(RUN_ID, "p2", "https://docs.test/p2", FetchStatus.DONE)
+    store.clear_crawl_attempts(RUN_ID, product_id="p1")
+    assert [a.product_id for a in store.iter_crawl_attempts(RUN_ID)] == ["p2"]
+    store.clear_crawl_attempts(RUN_ID)
+    assert list(store.iter_crawl_attempts(RUN_ID)) == []
 
 
 # --------------------------------------------------------------------------- #

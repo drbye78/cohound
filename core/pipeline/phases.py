@@ -265,6 +265,8 @@ def build_phases(
             package_id=_package_id(inputs, plan),
             domain_profiles=domain_profiles or {},
             explicit_fetch=explicit_fetch,
+            # D3: durable-краул (аудит/очередь/resume) привязан к прогону; store уже есть.
+            run_id=getattr(plan, "run_id", None),
         )
         _capture_index_build(holder, result)
         return _as_phase(result, "corpus")

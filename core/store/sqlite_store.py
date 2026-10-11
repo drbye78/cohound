@@ -1,7 +1,7 @@
 """coHound — конкретное операционное хранилище ``SqliteStore`` (L3, W3/T3.1, W3/T3.4).
 
 Реализует ``StorePort`` и ``GateStore`` (``core/ports/store.py``) поверх схемы §4.4
-(``core/store/sqlite.py``: 11 таблиц + ``schema_meta``, индексы, триггеры I4/I6/I7/I13/I18).
+(``core/store/sqlite.py``: 13 таблиц + ``schema_meta``, индексы, триггеры I4/I6/I7/I13/I18).
 Также реализует ``domain.anchors.SourceResolver`` (T3.4): детерминированный
 резолв ``source_id`` → URL + ``content_hash`` без сети (I10/I15/I19).
 
@@ -27,8 +27,10 @@ from core.domain import (
     CellState,
     CorpusChunk,
     CorpusDoc,
+    CrawlAttempt,
     EndpointKind,
     EvidenceType,
+    FetchStatus,
     Gate,
     GateDecision,
     IndexManifestEntry,
@@ -53,6 +55,12 @@ from core.util.ids import parse_source_id
 
 #: Размер пачки по умолчанию для батчевых записей (§B.2, T3.1).
 DEFAULT_BATCH_SIZE = 200
+
+#: D3: статусы-исходы попытки обработки URL — перевод в них инкрементирует ``attempts``
+#: (при смене статуса; повтор того же статуса идемпотентен). ``pending`` — не исход.
+_CRAWL_ATTEMPT_STATUSES = frozenset(
+    {FetchStatus.FETCHED.value, FetchStatus.DONE.value, FetchStatus.FAILED.value}
+)
 
 #: Колонки ``cells``, которые реально несёт доменная модель ``Cell``. Прочие колонки
 #: таблицы (``justification``/``rule_note``/``failure_kind``/``model_id``/… ) заполняются
@@ -756,6 +764,182 @@ class SqliteStore:
                     _as_json_text(entry.stats_json),
                 ),
             )
+
+    # -- crawl_attempts (D3: durable audit/queue/resume) ----------------- #
+    #: Колонки ``crawl_attempts`` (совпадают с полями ``CrawlAttempt``).
+    _CRAWL_COLUMNS = (
+        "run_id",
+        "product_id",
+        "url",
+        "status",
+        "attempts",
+        "fetch_mode",
+        "extract_route",
+        "http_status",
+        "content_type",
+        "lang",
+        "content_hash",
+        "raw_path",
+        "error_kind",
+        "error",
+        "first_seen",
+        "last_attempt",
+    )
+
+    @staticmethod
+    def _row_to_crawl_attempt(row: sqlite3.Row) -> CrawlAttempt:
+        """Восстанавливает ``CrawlAttempt`` из строки ``crawl_attempts``."""
+        attempts = row["attempts"]
+        return CrawlAttempt(
+            run_id=row["run_id"],
+            product_id=row["product_id"],
+            url=row["url"],
+            status=FetchStatus(row["status"]),
+            attempts=0 if attempts is None else int(attempts),
+            fetch_mode=row["fetch_mode"],
+            extract_route=row["extract_route"],
+            http_status=row["http_status"],
+            content_type=row["content_type"],
+            lang=row["lang"],
+            content_hash=row["content_hash"],
+            raw_path=row["raw_path"],
+            error_kind=row["error_kind"],
+            error=row["error"],
+            first_seen=row["first_seen"],
+            last_attempt=row["last_attempt"],
+        )
+
+    def _write_crawl_row(self, record: Mapping[str, Any]) -> None:
+        """Пишет полную строку ``crawl_attempts`` (INSERT OR REPLACE по PK)."""
+        placeholders = ", ".join("?" for _ in self._CRAWL_COLUMNS)
+        with self.conn:
+            self.conn.execute(
+                f"INSERT OR REPLACE INTO crawl_attempts"
+                f" ({', '.join(self._CRAWL_COLUMNS)}) VALUES ({placeholders})",
+                tuple(record[key] for key in self._CRAWL_COLUMNS),
+            )
+
+    def upsert_crawl_attempt(self, attempt: CrawlAttempt) -> None:
+        """Полный upsert строки ``crawl_attempts`` (PK ``(run_id, product_id, url)``)."""
+        self._write_crawl_row(
+            {
+                "run_id": attempt.run_id,
+                "product_id": attempt.product_id,
+                "url": attempt.url,
+                "status": attempt.status.value,
+                "attempts": attempt.attempts,
+                "fetch_mode": attempt.fetch_mode,
+                "extract_route": attempt.extract_route,
+                "http_status": attempt.http_status,
+                "content_type": attempt.content_type,
+                "lang": attempt.lang,
+                "content_hash": attempt.content_hash,
+                "raw_path": attempt.raw_path,
+                "error_kind": attempt.error_kind,
+                "error": attempt.error,
+                "first_seen": attempt.first_seen,
+                "last_attempt": attempt.last_attempt,
+            }
+        )
+
+    def mark_crawl_status(
+        self,
+        run_id: str,
+        product_id: str,
+        url: str,
+        status: FetchStatus,
+        *,
+        error_kind: str | None = None,
+        error: str | None = None,
+        content_hash: str | None = None,
+        raw_path: str | None = None,
+        http_status: int | None = None,
+        content_type: str | None = None,
+        lang: str | None = None,
+        fetch_mode: str | None = None,
+        extract_route: str | None = None,
+        ts: str | None = None,
+    ) -> None:
+        """Частичный upsert статуса per-URL записи краула (read-modify-write, идемпотентно).
+
+        ``first_seen`` проставляется один раз (при создании; далее сохраняется),
+        ``last_attempt`` обновляется всегда (``ts`` или текущее UTC-время). ``attempts``
+        инкрементируется при **смене** статуса на этап-исход (``fetched``/``done``/``failed``);
+        повторный ``done`` (как и любой повтор того же статуса) — идемпотентен, счётчик не растёт.
+        Переданные (не ``None``) поля перекрывают текущие, прочие сохраняются.
+        """
+        resolved = FetchStatus(_as_text(status))
+        now = ts or _now_iso()
+        existing = self.conn.execute(
+            "SELECT * FROM crawl_attempts WHERE run_id = ? AND product_id = ? AND url = ?",
+            (run_id, product_id, url),
+        ).fetchone()
+
+        if existing is None:
+            attempts = 0
+            first_seen = now
+            prev_status: str | None = None
+            record: dict[str, Any] = {key: None for key in self._CRAWL_COLUMNS}
+        else:
+            attempts = int(existing["attempts"] or 0)
+            first_seen = existing["first_seen"] or now
+            prev_status = existing["status"]
+            record = {key: existing[key] for key in self._CRAWL_COLUMNS}
+
+        if resolved.value in _CRAWL_ATTEMPT_STATUSES and resolved.value != prev_status:
+            attempts += 1
+
+        record["run_id"] = run_id
+        record["product_id"] = product_id
+        record["url"] = url
+        record["status"] = resolved.value
+        record["attempts"] = attempts
+        record["first_seen"] = first_seen
+        record["last_attempt"] = now
+        for key, value in (
+            ("error_kind", error_kind),
+            ("error", error),
+            ("content_hash", content_hash),
+            ("raw_path", raw_path),
+            ("http_status", http_status),
+            ("content_type", content_type),
+            ("lang", lang),
+            ("fetch_mode", fetch_mode),
+            ("extract_route", extract_route),
+        ):
+            if value is not None:
+                record[key] = value
+
+        self._write_crawl_row(record)
+
+    def iter_crawl_attempts(
+        self,
+        run_id: str,
+        product_id: str | None = None,
+        status: FetchStatus | None = None,
+    ) -> Iterator[CrawlAttempt]:
+        """Итерирует записи краула прогона; порядок ``product_id, url`` (детерминизм)."""
+        sql = "SELECT * FROM crawl_attempts WHERE run_id = ?"
+        params: list[Any] = [run_id]
+        if product_id is not None:
+            sql += " AND product_id = ?"
+            params.append(product_id)
+        if status is not None:
+            sql += " AND status = ?"
+            params.append(FetchStatus(_as_text(status)).value)
+        sql += " ORDER BY product_id, url"
+        for row in self.conn.execute(sql, params):
+            yield self._row_to_crawl_attempt(row)
+
+    def clear_crawl_attempts(self, run_id: str, product_id: str | None = None) -> None:
+        """Удаляет durable-состояние краула прогона (все или по продукту) — ``--reset``."""
+        sql = "DELETE FROM crawl_attempts WHERE run_id = ?"
+        params: list[Any] = [run_id]
+        if product_id is not None:
+            sql += " AND product_id = ?"
+            params.append(product_id)
+        with self.conn:
+            self.conn.execute(sql, params)
 
     def read_manifest(self, run_id: str) -> RunManifest:
         """Собирает ``RunManifest`` из строки ``runs`` (+ ``llm_scenarios``).

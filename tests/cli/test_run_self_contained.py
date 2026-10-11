@@ -275,3 +275,44 @@ def test_missing_snapshot_keeps_gap_note(
     )
     assert code == EXIT_OK
     assert "ГЭП" in _notes(json_out(capsys))
+
+
+# ---------------------------------------------------------------------------
+# D3: ``--reset`` очищает durable-краул (crawl_attempts)
+# ---------------------------------------------------------------------------
+
+
+def test_reset_clears_crawl_attempts(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """``hound run --reset`` вызывает ``store.clear_crawl_attempts(run_id)`` (D3)."""
+    from core.cli.wiring import run_db_path
+    from core.domain import FetchStatus
+    from core.store.sqlite_store import SqliteStore
+
+    runs_dir = tmp_path / "runs"
+    run_id = "sc-reset"
+    assert main(run_argv(E2E_FIXTURES, run_id=run_id, runs_dir=runs_dir)) == EXIT_BLOCKED
+    capsys.readouterr()
+    db_path = run_db_path(runs_dir, run_id)
+
+    store = SqliteStore(db_path)
+    try:
+        store.mark_crawl_status(
+            run_id, "p1", "https://example.com/a", FetchStatus.DONE
+        )
+        assert len(list(store.iter_crawl_attempts(run_id))) == 1
+    finally:
+        store.close()
+
+    # Повторный прогон с --reset очищает durable-состояние краула.
+    code = main(
+        run_argv(E2E_FIXTURES, run_id=run_id, runs_dir=runs_dir, extra=["--reset"])
+    )
+    assert code == EXIT_BLOCKED
+    capsys.readouterr()
+    store = SqliteStore(db_path)
+    try:
+        assert list(store.iter_crawl_attempts(run_id)) == []
+    finally:
+        store.close()

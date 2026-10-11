@@ -156,6 +156,16 @@ def run(args: argparse.Namespace) -> int:
         )
         if args.reset:
             runner.reset(run_id)
+            # D3: сброс durable-краула — очищаем crawl_attempts, чтобы resume не подхватил
+            # старые retained-записи. Глобальный R7-кэш может всё ещё дедуплицировать
+            # идентичные байты: --reset форсирует повторную попытку, но не обязательно живой
+            # сетевой фетч (явный --no-cache — документированный follow-up, вне рамок D3).
+            try:
+                store.clear_crawl_attempts(run_id)
+            except Exception as exc:  # noqa: BLE001 — сброс best-effort, не роняет прогон
+                instrumentation_errors.append(
+                    f"reset crawl_attempts: {type(exc).__name__}: {_concise(exc)}"
+                )
         run_report = runner.run(run_id, until=args.until)
         # Метрики (04 §B.2) пишутся ДО закрытия store (источник ячеек) и независимо от
         # остановки на гейте — отражают реально отработавшие фазы. Сбой наблюдаемости

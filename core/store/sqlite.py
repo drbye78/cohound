@@ -12,7 +12,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = "2.2.0"
+SCHEMA_VERSION = "2.3.0"
 
 DDL = """
 PRAGMA journal_mode = WAL;
@@ -221,12 +221,37 @@ CREATE TABLE IF NOT EXISTS registry_facts (
     fetched_at  TEXT
 );
 
+-- D3: durable per-URL аудит краула (audit + queue + resume). Отдельно от search_log
+-- (§4.4/I23: search_log — единственное место для поисковых вызовов).
+CREATE TABLE IF NOT EXISTS crawl_attempts (
+    run_id        TEXT NOT NULL,
+    product_id    TEXT NOT NULL,
+    url           TEXT NOT NULL,
+    status        TEXT NOT NULL,                       -- pending|fetched|done|failed
+    attempts      INTEGER NOT NULL DEFAULT 0,
+    fetch_mode    TEXT,                                -- http|browser (provenance)
+    extract_route TEXT,                                -- auto|html|document фактически применённый
+    http_status   INTEGER,
+    content_type  TEXT,
+    lang          TEXT,                                -- D3: язык страницы (resume без потери RawPage.lang)
+    content_hash  TEXT,                                -- hash сырых байтов (basename raw_path)
+    raw_path      TEXT,
+    error_kind    TEXT,                                -- FailureKind.value (source_unavailable|parser_failed|…)
+    error         TEXT,
+    first_seen    TEXT,
+    last_attempt  TEXT,
+    PRIMARY KEY (run_id, product_id, url),
+    FOREIGN KEY (run_id) REFERENCES runs(run_id)
+);
+
 CREATE INDEX IF NOT EXISTS idx_cells_run_state  ON cells(run_id, state);
 CREATE INDEX IF NOT EXISTS idx_chunks_product   ON corpus_chunks(product_id);
 CREATE INDEX IF NOT EXISTS idx_chunks_build     ON corpus_chunks(build_id);
 CREATE INDEX IF NOT EXISTS idx_log_run_phase    ON search_log(run_id, phase);
 CREATE INDEX IF NOT EXISTS idx_evidence_run_cell ON cell_evidence(run_id, product_id, param_id);
 CREATE INDEX IF NOT EXISTS idx_gate_run         ON gate_decisions(run_id, gate);
+CREATE INDEX IF NOT EXISTS idx_crawl_run_status  ON crawl_attempts(run_id, status);
+CREATE INDEX IF NOT EXISTS idx_crawl_run_product ON crawl_attempts(run_id, product_id);
 
 -- I18: оценщик (evaluator) не может быть зарегистрирован с веб-тулом.
 CREATE TRIGGER IF NOT EXISTS trg_evaluator_no_web_tool
@@ -292,7 +317,7 @@ def _ensure_columns(
 
 
 def connect(db_path: str | Path = ":memory:") -> sqlite3.Connection:
-    """Открывает БД и применяет схему (+ идемпотентные DDL-миграции v2.1/v2.2)."""
+    """Открывает БД и применяет схему (+ идемпотентные DDL-миграции v2.1–v2.3)."""
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
     conn.executescript(DDL)
@@ -309,6 +334,8 @@ def connect(db_path: str | Path = ":memory:") -> sqlite3.Connection:
         "index_manifest",
         {"extractor_version": "TEXT", "content_digest": "TEXT"},
     )
+    # DDL-миграция v2.3 (D3): crawl_attempts создаётся `CREATE TABLE IF NOT EXISTS` в DDL —
+    # ALTER не нужен (новая таблица), но вызов идемпотентен на любой БД.
     conn.execute(
         "INSERT OR REPLACE INTO schema_meta(key, value) VALUES ('schema_version', ?)",
         (SCHEMA_VERSION,),

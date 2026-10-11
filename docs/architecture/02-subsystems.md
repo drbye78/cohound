@@ -120,6 +120,17 @@ index`. Это делает DMZ-шов физической границей **I
 **Retention.** `corpus_docs.raw_path` → байты хранятся; `extractor_version` позволяет
 ре-извлечение без ре-фетча (A/B экстракторов). `content_hash` — с первого дня (I19).
 
+**Durable-краул (D3): аудит + очередь + resume.** Per-URL состояние попытки живёт в
+`crawl_attempts` (`PK (run_id, product_id, url)`, `FetchStatus`): `pending` → `fetched`
+(байты сохранены, retention) → `done`; сбой краула → `failed`/`source_unavailable`, сбой
+извлечения → `failed`/`parser_failed` с сохранённым `raw_path`. При наличии `store` и `run_id`
+Ш5 перед фетчем читает durable-записи и **не фетчит повторно** URL, у которого уже есть
+retained-байты: `RawPage` реконструируется из `corpus_raw` (I19: raw — источник), затем идёт
+ре-экстракция. `hound run --reset` очищает `crawl_attempts` (`clear_crawl_attempts`); глобальный
+R7-кэш при этом может всё ещё дедуплицировать идентичные байты (живой фетч не гарантирован).
+Ошибки записи изолируются (фаза остаётся `ok`-с-ошибками); счётчики `pending/fetched/done/failed`
+идут в `IndexBuild` (наблюдаемость).
+
 **Иммутабельность (контент-адресуемая, P2).** `index_build_id` = hash(schema-версия формулы +
 пакет корпуса + params + `snapshot_date` + `chunker_version` + `embed_model_id` +
 `extractor_version` + `lexical_engine_version` + `vector_store` + content-token). content-token —

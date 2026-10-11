@@ -241,6 +241,15 @@ extraction_route:
   - html
   - document
 
+# D3. Статус per-URL записи краула (crawl_attempts): durable audit/queue/resume.
+# pending — в очереди; fetched — сырые байты сохранены (retention); done — успешно
+# извлечён/нарезан; failed — терминально после попыток (error_kind: FailureKind).
+fetch_status:
+  - pending
+  - fetched
+  - done
+  - failed
+
 # §4.1 / Р-2. Маппинг сателлита на зачёт. Правила применяются сверху вниз,
 # первое совпавшее решает. cap — потолок статуса зачёта.
 # Дополняет §4.1 «Маппинг на зачёт (Р-2)».

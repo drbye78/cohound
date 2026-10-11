@@ -76,13 +76,14 @@ runs/{run_id}/
 ### B.1. Контракт `ports/store.py` → `store/sqlite.py`
 
 Схема §4.4 перенесена из бывшего `core/db.py` (удалён в T1.3) в `store/sqlite.py`
-(11 таблиц + `schema_meta`, индексы, триггеры I4/I6/I7/I13/I18). Константа `SCHEMA_VERSION`
-= **`2.2.0`** (P2) — версия **SQLite-схемы**, не регламента; колонки `runs.settings_provenance_json`
+(13 таблиц + `schema_meta`, индексы, триггеры I4/I6/I7/I13/I18). Константа `SCHEMA_VERSION`
+= **`2.3.0`** (D3) — версия **SQLite-схемы**, не регламента; колонки `runs.settings_provenance_json`
 (v2.1/A3) и `corpus_chunks.extractor_version` / `index_manifest.extractor_version` /
-`index_manifest.content_digest` (P2) хранят провенанс настроек и build-id witness, а миграция
-additive/idempotent (`ALTER TABLE ... ADD COLUMN` при отсутствии). `index_build_id` —
-**контент-адресуемый** отпечаток батча (два прохода: ingest → финализация id → index; см. §B.1
-`02-subsystems.md`). Методы доступа (реализация `StorePort`):
+`index_manifest.content_digest` (P2) хранят провенанс настроек и build-id witness, а таблица
+`crawl_attempts` (D3) — durable per-URL аудит/очередь/resume краула; миграция
+additive/idempotent (`ALTER TABLE ... ADD COLUMN`/`CREATE TABLE IF NOT EXISTS` при отсутствии).
+`index_build_id` — **контент-адресуемый** отпечаток батча (два прохода: ingest → финализация id
+→ index; см. §B.1 `02-subsystems.md`). Методы доступа (реализация `StorePort`):
 
 ```python
 class SqliteStore:
@@ -98,6 +99,9 @@ class SqliteStore:
     def save_registry_fact(rf: RegistryFact)
     def save_llm_scenarios(bindings: list[ScenarioBinding])
     def persist_manifest(run_id, manifest: RunManifest)   # версии/индекс/retrieval + settings_provenance_json
+    def upsert_crawl_attempt(attempt: CrawlAttempt)      # D3: durable per-URL аудит краула
+    def mark_crawl_status(run_id, product_id, url, status, *, ...)  # D3: идемпотентный переход статуса
+    def clear_crawl_attempts(run_id, product_id=None)    # D3: сброс при --reset
     # чтение
     def iter_cells(run_id, state=None) -> Iterator[Cell]
     def iter_exhaustions(run_id) -> Iterator[ProtocolExhaustion]    # I3/§5: протоколы исчерпания
@@ -105,6 +109,7 @@ class SqliteStore:
     def resolve_source_url(source_id) -> str    # I10/I15
     def read_manifest(run_id) -> RunManifest    # forward-compatible: settings_provenance/ranking_epsilon
     def iter_gate_decisions(run_id) -> Iterator[GateDecision]   # S9
+    def iter_crawl_attempts(run_id, product_id=None, status=None) -> Iterator[CrawlAttempt]  # D3
 ```
 
 ### B.2. Транзакции и производительность

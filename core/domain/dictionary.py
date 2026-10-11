@@ -15,6 +15,7 @@ from core.domain.enums import (
     CapabilityPolicy,
     ExtractionRoute,
     FetchMode,
+    FetchStatus,
     Gate,
     RankingPolicy,
     SearchKind,
@@ -58,6 +59,8 @@ def assert_dictionary_integrity(path: str | Path) -> None:
         # D2: оси получения/извлечения (domain_profiles.yaml / FetchPlan).
         "fetch_mode",
         "extraction_route",
+        # D3: статус per-URL записи краула (crawl_attempts).
+        "fetch_status",
     ]
     missing = [k for k in required if k not in data]
     if missing:
@@ -77,6 +80,7 @@ def assert_dictionary_integrity(path: str | Path) -> None:
         "stale_reason": {v.value for v in StaleReason},
         "fetch_mode": {v.value for v in FetchMode},
         "extraction_route": {v.value for v in ExtractionRoute},
+        "fetch_status": {v.value for v in FetchStatus},
     }
     for section, expected in checks.items():
         actual = set(data[section])

@@ -231,3 +231,18 @@ class ExtractionRoute(StrEnum):
     AUTO = "auto"
     HTML = "html"
     DOCUMENT = "document"
+
+
+class FetchStatus(StrEnum):
+    """D3: жизненный цикл per-URL записи краула (``crawl_attempts``) — durable audit/queue/resume.
+
+    ``PENDING`` — в очереди, ещё не фетчился; ``FETCHED`` — сырые байты сохранены (retention),
+    экстракция не завершена; ``DONE`` — fetched + extracted + chunked успешно; ``FAILED`` —
+    терминально после попыток (``error_kind``/``FailureKind`` указывает этап). Статус — часть
+    операционной таблицы краула, а не доменной ячейки (не путать с ``CellState``).
+    """
+
+    PENDING = "pending"
+    FETCHED = "fetched"
+    DONE = "done"
+    FAILED = "failed"

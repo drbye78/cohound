@@ -591,12 +591,12 @@ def _ports_type_reuse() -> None:
 def _db_smoke() -> None:
     conn = connect(":memory:")
     ver = conn.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()
-    _assert(ver is not None and ver["value"] == "2.2.0")
+    _assert(ver is not None and ver["value"] == "2.3.0")
 
     tables = {r["name"] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     for t in ("products", "runs", "llm_scenarios", "corpus_docs", "corpus_chunks",
               "index_manifest", "cells", "cell_evidence", "search_log",
-              "search_exhaustion", "registry_facts"):
+              "search_exhaustion", "registry_facts", "crawl_attempts"):
         _assert(t in tables)
 
     # P2 (schema 2.2.0): build-id witness — extractor_version у чанка; extractor_version/
@@ -605,6 +605,14 @@ def _db_smoke() -> None:
     _assert("extractor_version" in chunk_cols)
     manifest_cols = {r["name"] for r in conn.execute("PRAGMA table_info(index_manifest)")}
     _assert("extractor_version" in manifest_cols and "content_digest" in manifest_cols)
+
+    # D3 (schema 2.3.0): durable per-URL аудит краула — crawl_attempts с PK и FK на runs.
+    crawl_cols = {r["name"] for r in conn.execute("PRAGMA table_info(crawl_attempts)")}
+    _assert({"run_id", "product_id", "url", "status", "attempts",
+             "raw_path", "content_hash", "error_kind"} <= crawl_cols)
+    crawl_pk = [r["name"] for r in conn.execute("PRAGMA table_info(crawl_attempts)")
+                if r["pk"]]
+    _assert(crawl_pk == ["run_id", "product_id", "url"])
 
     conn.execute(
         "INSERT INTO runs(run_id, created_at, mode, case_id, anchor_product_id) "
