@@ -76,7 +76,10 @@ DEFAULT_MODEL_ID = "deepseek-v4.1-flash:cxbc"
 DEFAULT_ENDPOINT_KIND = "api"
 #: Механизм constrained decoding по умолчанию: без навязанной грамматики.
 DEFAULT_DECODER = "none"
-#: Адрес OI-совместимого API по умолчанию (переопределяется wiring/deploy-конфигом).
+#: Плейсхолдер адреса OI-совместимого API (не боевой endpoint). Реальный внутренний
+#: endpoint периметра всегда передаёт composition root (``build_evaluator_llm``); оценщик
+#: конструируется только при сконфигурированном endpoint. Значение непустое, т.к.
+#: конструктор отвергает пустой ``base_url``.
 DEFAULT_BASE_URL = "http://localhost:8000"
 #: Таймаут HTTP-запроса, с.
 DEFAULT_TIMEOUT = 120.0

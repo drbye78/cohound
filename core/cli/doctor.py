@@ -52,7 +52,6 @@ from core.cli.wiring import (
     ENV_LLM_MAX_TOKENS,
     ENV_LLM_MODEL,
     ENV_LLM_TIMEOUT,
-    ENV_PLUSVIBE_API_KEY,
     ENV_SCOUT_CRAWLER,
     SUPPORTED_SCOUT_CRAWLERS,
     SUPPORTED_SEARCH_ADAPTERS,
@@ -370,18 +369,14 @@ def _env_group() -> CheckGroup:
     # -- LLM-контур (env-ключи + фолбэки) --------------------------------- #
     builder.add(
         "llm_base_url",
-        lambda: (OK, "задан") if _env_set(ENV_LLM_BASE_URL) else (WARN, "не задан → дефолт"),
-        hint="пусто → DEFAULT_LLM_BASE_URL; переопределяется --llm-base-url",
+        lambda: (OK, "задан") if _env_set(ENV_LLM_BASE_URL) else (WARN, "не задан"),
+        hint="пусто → не сконфигурировано (нужен внутренний endpoint)",
     )
     builder.add(
         "llm_api_key",
         lambda: (OK, f"{ENV_LLM_API_KEY} задан")
         if _env_set(ENV_LLM_API_KEY)
-        else (
-            (OK, f"фолбэк {ENV_PLUSVIBE_API_KEY} задан")
-            if _env_set(ENV_PLUSVIBE_API_KEY)
-            else (WARN, f"ни {ENV_LLM_API_KEY}, ни {ENV_PLUSVIBE_API_KEY} не заданы")
-        ),
+        else (WARN, "не задан → LLM-разведка недоступна"),
         hint="нужен только для вызова LLM (passport-scout)",
     )
     builder.add(

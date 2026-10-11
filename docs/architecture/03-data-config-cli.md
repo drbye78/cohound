@@ -333,9 +333,8 @@ edge** (composition root Z1, `07` §4/§7); ядро ходит за канди�
 
 | Переменная | Назначение | Обязательность | Fallback | Потребитель |
 |---|---|---|---|---|
-| `COHOUND_LLM_BASE_URL` | базовый URL [OI]-совместимого LLM-API корпоративного облака | опц. | `https://plusvibeapi.ru/v1` | `wiring.build_discovery_llm` (LLM-разведка `passport-scout`, Ш2) |
-| `COHOUND_LLM_API_KEY` | ключ LLM-разведки | **обязателен для вызова** | `PLUSVIBEAPI_API_KEY` | `wiring.build_discovery_llm` |
-| `PLUSVIBEAPI_API_KEY` | фолбэк ключа контура | опц. | — | `wiring.build_discovery_llm` |
+| `COHOUND_LLM_BASE_URL` | базовый URL [OI]-совместимого LLM-API корпоративного облака | опц. | — (обязателен: внутренний endpoint) | `wiring.build_discovery_llm` (LLM-разведка `passport-scout`, Ш2) |
+| `COHOUND_LLM_API_KEY` | ключ LLM-разведки | **обязателен для вызова** | — (обязателен для вызова) | `wiring.build_discovery_llm` |
 | `COHOUND_LLM_SLOT` | активный LLM-слот: `cheap`\|`flagship` (см. `deploy.yaml.llm`) | опц. | `cheap` | `wiring` (выбор модели) |
 | `COHOUND_LLM_MODEL` | `model_id` LLM-разведки (переопределяет активный слот) | опц. | `deepseek-v4.1-flash:cxbc` | `wiring.build_discovery_llm` |
 | `COHOUND_LLM_DECODER` | механизм декодирования (`none`/`json_object`/`json_schema`) | опц. | `json_object` | `wiring.build_discovery_llm` |
@@ -360,7 +359,7 @@ edge** (composition root Z1, `07` §4/§7); ядро ходит за канди�
   именованных слота — `cheap` и `flagship`; **оба по умолчанию** указывают на
   `deepseek-v4.1-flash:cxbc`. Активный слот выбирается детерминированно по приоритету:
   `--llm-slot` > env `COHOUND_LLM_SLOT` > `run.yaml: llm_slot` > `deploy.llm.slot` > `cheap`.
-  `api_key` берётся из env (`COHOUND_LLM_API_KEY` → `PLUSVIBEAPI_API_KEY`); endpoint — [OI]-совместимый
+  `api_key` берётся из env (`COHOUND_LLM_API_KEY`); endpoint — [OI]-совместимый
   API корпоративного облака. Форма секции — `07` §7.
 
 **Runbook живого прогона корпуса.** Минимальный операторский запуск (профиль `local`,

@@ -148,7 +148,6 @@ def test_scout_crawler_invalid_gives_error_exit(
 def test_env_missing_is_warn_not_fail(monkeypatch: pytest.MonkeyPatch) -> None:
     for name in (
         "COHOUND_LLM_API_KEY",
-        "PLUSVIBEAPI_API_KEY",
         "YANDEX_SEARCH_API_KEY",
         "YANDEX_FOLDER_ID",
         "GLM_SEARCH_API_KEY",
@@ -163,12 +162,16 @@ def test_env_missing_is_warn_not_fail(monkeypatch: pytest.MonkeyPatch) -> None:
     assert all(c.status != doctor.FAIL for c in env_group.checks)
 
 
-def test_llm_api_key_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_llm_api_key_status(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("COHOUND_LLM_API_KEY", raising=False)
-    monkeypatch.setenv("PLUSVIBEAPI_API_KEY", "x")
     check = _check(run_doctor(), "llm_api_key")
-    assert check.status == doctor.OK
-    assert "PLUSVIBEAPI_API_KEY" in check.detail
+    assert check.status == doctor.WARN
+    assert "не задан" in check.detail
+
+    monkeypatch.setenv("COHOUND_LLM_API_KEY", "x")
+    ok = _check(run_doctor(), "llm_api_key")
+    assert ok.status == doctor.OK
+    assert "COHOUND_LLM_API_KEY" in ok.detail
 
 
 # ---------------------------------------------------------------------------

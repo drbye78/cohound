@@ -11,9 +11,9 @@
 #
 # LLM (`llm:`) — commodity/execution-слой (§7.4): две именованные слоты моделей
 # (`cheap`/`flagship`), активная выбирается в рантайме (--llm-slot / COHOUND_LLM_SLOT).
-# Модели доступны через OI-совместимый API корпоративного облака — это НЕ self-host
-# инсталляция. vLLM/SGLang — бэкенд облака, не наш стек/зависимость; секрет (api_key)
-# берётся из env (COHOUND_LLM_API_KEY → PLUSVIBEAPI_API_KEY), в YAML его нет.
+# Endpoint — [OI]-совместимый API **внутреннего** корпоративного периметра (внешние
+# хосты не используются). Секрет (api_key) берётся из env (COHOUND_LLM_API_KEY),
+# в YAML его нет.
 
 profile: local                 # local | split | split-hardened
 

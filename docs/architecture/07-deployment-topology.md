@@ -260,7 +260,7 @@ llm:                                # модели корпоративного 
   cheap:    {model_id: "deepseek-v4.1-flash:cxbc"}   # дефолт обоих слотов
   flagship: {model_id: "deepseek-v4.1-flash:cxbc"}
   # выбор слота: --llm-slot > env COHOUND_LLM_SLOT > run.yaml: llm_slot > deploy.llm.slot > cheap
-  # api_key: env COHOUND_LLM_API_KEY → PLUSVIBEAPI_API_KEY; endpoint — [OI]-совместимый API корп. облака
+  # api_key: env COHOUND_LLM_API_KEY; endpoint — [OI]-совместимый API внутри корп. периметра
 search:
   budget: { ru: 5, en: 5 }          # симметрия I16
   adapter: yandex                   # провайдер поиска по умолчанию (Yandex Search API)

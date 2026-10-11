@@ -29,7 +29,6 @@ from core.cli.wiring import (
     ENV_LLM_MODEL,
     ENV_LLM_SLOT,
     ENV_LLM_TIMEOUT,
-    ENV_PLUSVIBE_API_KEY,
     ENV_SCOUT_CRAWLER,
     build_discovery_llm,
     build_evaluator_llm,
@@ -45,7 +44,6 @@ _ENV_NAMES = (
     ENV_LLM_DECODER,
     ENV_LLM_TIMEOUT,
     ENV_LLM_MAX_TOKENS,
-    ENV_PLUSVIBE_API_KEY,
     ENV_SCOUT_CRAWLER,
 )
 
@@ -127,10 +125,10 @@ def test_build_discovery_llm_env_fields_override_slot(
 def test_build_discovery_llm_without_deploy_backward_compatible(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Без ``deploy_llm`` поведение прежнее: env > дефолт модуля."""
+    """Без ``deploy_llm`` env > дефолт модуля; base_url пуст (нет внешнего дефолта)."""
     _clear(monkeypatch)
     llm = build_discovery_llm()
-    assert llm.base_url == "https://plusvibeapi.ru/v1"
+    assert llm.base_url == ""
     assert llm.model_id == "deepseek-v4.1-flash:cxbc"
 
 
@@ -172,12 +170,11 @@ def test_build_evaluator_llm_slot_selected_by_env(
     assert ev.model_id == "m-cheap"
 
 
-def test_build_evaluator_llm_api_key_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Ключ берётся из env: ``COHOUND_LLM_API_KEY`` → ``PLUSVIBEAPI_API_KEY``."""
+def test_build_evaluator_llm_api_key_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ключ берётся только из ``COHOUND_LLM_API_KEY`` (внешних фолбэков нет)."""
     _clear(monkeypatch)
-    monkeypatch.setenv(ENV_PLUSVIBE_API_KEY, "fallback")
     ev = build_evaluator_llm(deploy_llm=_slots())
-    assert ev is not None and ev.api_key == "fallback"
+    assert ev is not None and ev.api_key is None
     monkeypatch.setenv(ENV_LLM_API_KEY, "primary")
     ev2 = build_evaluator_llm(deploy_llm=_slots())
     assert ev2 is not None and ev2.api_key == "primary"

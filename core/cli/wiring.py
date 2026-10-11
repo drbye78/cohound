@@ -144,11 +144,10 @@ ENV_LLM_MAX_TOKENS = "COHOUND_LLM_MAX_TOKENS"
 #: Env-переменная активного LLM-слота (``cheap``/``flagship``; ``--llm-slot`` переопределяет).
 ENV_LLM_SLOT = "COHOUND_LLM_SLOT"
 
-#: Env-фолбэк ключа контура (уже присутствует в среде развёртывания).
-ENV_PLUSVIBE_API_KEY = "PLUSVIBEAPI_API_KEY"
-
-#: Дефолтный base_url openai-совместимого сервера LLM-разведки (env-фолбэк; данные).
-DEFAULT_LLM_BASE_URL = "https://plusvibeapi.ru/v1"
+#: Дефолтный base_url OI-совместимого сервера LLM. Пусто → endpoint не сконфигурирован:
+#: оператор обязан явно задать внутренний [OI]-совместимый API корпоративного периметра
+#: (внешние хосты не используются).
+DEFAULT_LLM_BASE_URL = ""
 #: Дефолтная модель LLM-разведки (env-фолбэк; данные, не предметная категория).
 DEFAULT_LLM_MODEL = "deepseek-v4.1-flash:cxbc"
 
@@ -409,8 +408,8 @@ def build_discovery_llm(
     Источник конфигурации (по убыванию приоритета): явные аргументы (CLI-флаги) >
     env ``COHOUND_LLM_*`` > поля выбранного слота ``deploy_llm`` > дефолты модуля.
     Активный слот резолвится :func:`_resolve_llm_slot_and_config` (``slot`` >
-    ``COHOUND_LLM_SLOT`` > ``deploy_llm.slot`` > ``cheap``). Фолбэки ключа:
-    ``COHOUND_LLM_API_KEY`` → ``PLUSVIBEAPI_API_KEY``. Пустые ``base_url``/``model_id``
+    ``COHOUND_LLM_SLOT`` > ``deploy_llm.slot`` > ``cheap``). Ключ — единственный источник
+    ``COHOUND_LLM_API_KEY`` (внешних фолбэков нет). Пустые ``base_url``/``model_id``
     допустимы: готовность проверяет вызывающий (``cmd_passport_scout``) и выдаёт
     понятную ошибку ``llm`` (:data:`EXIT_USAGE`), а не падает.
 
@@ -443,7 +442,7 @@ def build_discovery_llm(
     resolved_key = (
         api_key
         if api_key is not None
-        else os.environ.get(ENV_LLM_API_KEY) or os.environ.get(ENV_PLUSVIBE_API_KEY)
+        else os.environ.get(ENV_LLM_API_KEY)
     )
     resolved_model = (
         model_id
@@ -499,8 +498,9 @@ def build_evaluator_llm(
 
     **Условие активности.** Если у выбранного слота (и env/аргументов) пустой ``base_url``
     — возвращается ``None``: оценщик не поднимается, поведение прогона прежнее (сценарий
-    evaluator требует явного endpoint корпоративного облака). ``api_key`` — из env
-    (``COHOUND_LLM_API_KEY`` → ``PLUSVIBEAPI_API_KEY``).
+    evaluator требует явного endpoint внутреннего [OI]-совместимого API корпоративного
+    периметра). ``api_key`` — единственный источник ``COHOUND_LLM_API_KEY`` (внешних
+    фолбэков нет).
 
     :param slot: явный активный слот (``--llm-slot``); ``None`` → env/run.yaml/deploy-слот.
     :param deploy_llm: секция ``llm`` deploy-конфига; ``None`` — нет слотов.
@@ -530,7 +530,7 @@ def build_evaluator_llm(
     resolved_key = (
         api_key
         if api_key is not None
-        else os.environ.get(ENV_LLM_API_KEY) or os.environ.get(ENV_PLUSVIBE_API_KEY)
+        else os.environ.get(ENV_LLM_API_KEY)
     )
     resolved_model = (
         model_id

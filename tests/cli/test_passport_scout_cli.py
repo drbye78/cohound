@@ -64,22 +64,24 @@ def test_missing_llm_config_is_usage_error(
     assert "llm" in err
 
 
-def test_wiring_defaults_and_api_key_fallback(
+def test_wiring_defaults_and_env_configuration(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """env-фолбэки: base_url/model/decoder по умолчанию; ключ COHOUND_LLM_API_KEY → PLUSVIBE."""
+    """Без env: base_url пуст, model/decoder — дефолты; env задаёт base_url и ключ."""
     clear_env(monkeypatch, _ENV_NAMES)
-    monkeypatch.setenv("PLUSVIBEAPI_API_KEY", "fallback-key")
     from core.cli.wiring import build_discovery_llm
 
     llm = build_discovery_llm()
-    assert llm.base_url == "https://plusvibeapi.ru/v1"
+    assert llm.base_url == ""
     assert llm.model_id == "deepseek-v4.1-flash:cxbc"
     assert llm.decoder == "json_object"
-    assert llm.api_key == "fallback-key"
+    assert llm.api_key is None
 
+    monkeypatch.setenv("COHOUND_LLM_BASE_URL", "https://llm.internal/v1")
     monkeypatch.setenv("COHOUND_LLM_API_KEY", "primary-key")
-    assert build_discovery_llm().api_key == "primary-key"
+    configured = build_discovery_llm()
+    assert configured.base_url == "https://llm.internal/v1"
+    assert configured.api_key == "primary-key"
 
 
 def test_llm_flags_override_env(

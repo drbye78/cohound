@@ -114,8 +114,8 @@ def _extract_json_object(text: str) -> str | None:
 class DiscoveryLLM:
     """Openai-совместимый клиент LLM-разведки за ``DiscoveryLLMPort``.
 
-    :param base_url: база сервера (например ``http://localhost:8000/v1``); пустая —
-        адаптер недоступен (кроме случая внедрённого ``generate``).
+    :param base_url: база сервера (например ``https://llm.internal/v1``);
+        пустая — адаптер недоступен (кроме случая внедрённого ``generate``).
     :param api_key: необязательный bearer-токен.
     :param model_id: идентификатор модели по умолчанию (переопределяется ``req.model_id``).
     :param timeout: таймаут HTTP-запроса, с.
