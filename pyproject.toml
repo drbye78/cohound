@@ -95,13 +95,6 @@ fallback = [
     "markdownify>=1.2,<2",
 ]
 
-# Внешний поиск (SERP): метапоиск-библиотека ddgs.
-# Google CSE — через httpx/stdlib, open-websearch — через subprocess (внешних pip-
-# зависимостей не требуют).
-search = [
-    "ddgs>=9,<10",
-]
-
 # Dev/CI (§11.6): pytest пока не установлен — нужен для CI.
 dev = [
     "pytest>=9.1,<10",

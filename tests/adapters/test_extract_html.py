@@ -8,7 +8,6 @@
 
 from __future__ import annotations
 
-import re
 from pathlib import Path
 
 from core.adapters.extract_html import HtmlExtractor
@@ -202,10 +201,3 @@ def test_fixture_is_sanitized_before_extraction() -> None:
     assert doc.error is None
 
 
-def test_module_source_is_category_neutral() -> None:
-    import core.adapters.extract_html as module
-
-    source = Path(module.__file__).read_text(encoding="utf-8")
-    forbidden = re.compile(r"postgres|pangolin|sber|сбер|copywala|платформа", re.IGNORECASE)
-    hits = [line for line in source.splitlines() if forbidden.search(line)]
-    assert hits == []

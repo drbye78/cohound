@@ -47,6 +47,13 @@ from core.adapters.llm_discovery import (
     DiscoveryLLM,
     GenerateFn as DiscoveryGenerateFn,
 )
+from core.adapters.llm_local import (
+    DEFAULT_DECODER as EVALUATOR_DEFAULT_DECODER,
+    DEFAULT_MODEL_ID as EVALUATOR_DEFAULT_MODEL_ID,
+    DEFAULT_TIMEOUT as EVALUATOR_DEFAULT_TIMEOUT,
+    GenerateFn as EvaluatorGenerateFn,
+    LocalEvaluator,
+)
 from core.adapters.remote_crawler import RemoteCrawler
 from core.adapters.remote_extractor import RemoteExtractor
 from core.adapters.remote_gateway import (
@@ -56,15 +63,15 @@ from core.adapters.remote_gateway import (
 )
 from core.adapters.remote_registry import RemoteRegistry
 from core.adapters.remote_search import RemoteSearch
-from core.adapters.search_duckduckgo import DuckDuckGoSearchAdapter
 from core.adapters.search_glm import GlmSearchAdapter
-from core.adapters.search_google import GoogleSearchAdapter
-from core.adapters.search_openwebsearch import OpenWebSearchAdapter
 from core.adapters.search_yandex import YandexSearchAdapter
 from core.config.deploy import (
     DeployConfig,
+    LLMDeployConfig,
+    LLMSlotConfig,
     is_split,
     load_deploy_config,
+    resolve_llm_slot,
     resolve_search_provider,
 )
 from core.config.domain_profiles import DomainProfile
@@ -87,6 +94,7 @@ __all__ = [
     "SUPPORTED_PROFILES",
     "SUPPORTED_SEARCH_ADAPTERS",
     "DEFAULT_REGISTRY_ID",
+    "ENV_LLM_SLOT",
     "ENV_SCOUT_CRAWLER",
     "DEFAULT_SCOUT_CRAWLER",
     "SUPPORTED_SCOUT_CRAWLERS",
@@ -97,6 +105,7 @@ __all__ = [
     "build_gateway",
     "build_search_adapter",
     "build_discovery_llm",
+    "build_evaluator_llm",
     "build_scout_crawler",
     "build_adapters",
     "build_runner",
@@ -114,12 +123,10 @@ SUPPORTED_PROFILES: tuple[str, ...] = (LOCAL_PROFILE, SPLIT_PROFILE)
 
 #: Известные внешние поисковые адаптеры для ``hound discover`` (``03`` §D.6).
 #: Провайдер — данные-конфигурация, а не предметная категория (§1.3).
+#: Yandex — дефолт (async), GLM — альтернатива (§3.2).
 SUPPORTED_SEARCH_ADAPTERS: tuple[str, ...] = (
     "yandex",
     "glm",
-    "google",
-    "duckduckgo",
-    "open-websearch",
 )
 
 #: Идентификатор реестра по умолчанию для remote-прокси (данные; ``deploy.yaml``
@@ -134,6 +141,8 @@ ENV_LLM_MODEL = "COHOUND_LLM_MODEL"
 ENV_LLM_DECODER = "COHOUND_LLM_DECODER"
 ENV_LLM_TIMEOUT = "COHOUND_LLM_TIMEOUT"
 ENV_LLM_MAX_TOKENS = "COHOUND_LLM_MAX_TOKENS"
+#: Env-переменная активного LLM-слота (``cheap``/``flagship``; ``--llm-slot`` переопределяет).
+ENV_LLM_SLOT = "COHOUND_LLM_SLOT"
 
 #: Env-фолбэк ключа контура (уже присутствует в среде развёртывания).
 ENV_PLUSVIBE_API_KEY = "PLUSVIBEAPI_API_KEY"
@@ -235,12 +244,6 @@ def build_search_adapter(adapter: str) -> SearchAdapterPort:
         return YandexSearchAdapter()
     if adapter == "glm":
         return GlmSearchAdapter()
-    if adapter == "google":
-        return GoogleSearchAdapter()
-    if adapter == "duckduckgo":
-        return DuckDuckGoSearchAdapter()
-    if adapter == "open-websearch":
-        return OpenWebSearchAdapter()
     raise WiringError(
         f"неизвестный поисковый адаптер: {adapter!r}; "
         f"поддерживаются: {', '.join(SUPPORTED_SEARCH_ADAPTERS)}"
@@ -257,11 +260,11 @@ def _llm_configured(adapter: Any) -> bool:
 def _search_adapter_configured(adapter: Any) -> bool:
     """Готов ли реальный поисковый адаптер к вызовам (зависимость и учётные данные).
 
-    Ключевые адаптеры (``yandex``/``glm``/``google``) выставляют атрибут ``api_key``;
-    без ключа такой адаптер не готов, и кандидаты не выдумываются (I19). Бесключевые
-    адаптеры (``duckduckgo``/``open-websearch``) атрибута ``api_key`` не имеют вовсе —
-    для них достаточна доступность (``available``), иначе они ошибочно блокировались
-    бы. Для инъектированного тестового шва проверка не применяется (см. ``cmd_discover``).
+    Все известные адаптеры (``yandex``/``glm``) выставляют атрибут ``api_key``; без
+    ключа такой адаптер не готов, и кандидаты не выдумываются (I19). Логика остаётся
+    generic: если у адаптера нет атрибута ``api_key`` вовсе, достаточно доступности
+    (``available``) — иначе он ошибочно блокировался бы. Для инъектированного
+    тестового шва проверка не применяется (см. ``cmd_discover``).
     """
     if not bool(getattr(adapter, "available", True)):
         return False
@@ -332,7 +335,7 @@ def resolve_and_build_search_adapter(
             "I19",
             "поисковый адаптер недоступен: нет httpx либо учётных данных "
             "(yandex: YANDEX_SEARCH_API_KEY/YANDEX_FOLDER_ID; "
-            "glm: GLM_SEARCH_API_KEY; google: GOOGLE_API_KEY+GOOGLE_CSE_ID); "
+            "glm: GLM_SEARCH_API_KEY); "
             "кандидаты не выдумываются",
         )
     return adapter, provider
@@ -366,6 +369,29 @@ def _env_int(name: str, default: int) -> int:
     return value
 
 
+def _resolve_llm_slot_and_config(
+    deploy_llm: LLMDeployConfig | None,
+    slot: str | None,
+    run_slot: str | None = None,
+) -> tuple[str, LLMSlotConfig | None]:
+    """Резолвит активный LLM-слот и его конфиг (CLI > env > run.yaml > deploy).
+
+    Приоритет имени слота (§7.4): явный ``slot`` (CLI ``--llm-slot``) > ``COHOUND_LLM_SLOT``
+    (env) > ``run_slot`` (``run.yaml: llm_slot``) > ``deploy_llm.slot`` > дефолт
+    (:data:`~core.config.deploy.DEFAULT_LLM_SLOT`). Первые три уровня передаются как
+    ``explicit`` в :func:`core.config.deploy.resolve_llm_slot` (который сам валидирует и
+    откатывается к ``deploy_llm.slot``/дефолту). Возвращает ``(slot, LLMSlotConfig|None)``.
+    """
+    explicit = (
+        slot
+        if slot is not None and str(slot).strip()
+        else os.environ.get(ENV_LLM_SLOT) or run_slot
+    )
+    resolved = resolve_llm_slot(deploy_llm, explicit=explicit)
+    config = getattr(deploy_llm, resolved) if deploy_llm is not None else None
+    return resolved, config
+
+
 def build_discovery_llm(
     *,
     base_url: str | None = None,
@@ -375,24 +401,44 @@ def build_discovery_llm(
     timeout: float | None = None,
     max_tokens: int | None = None,
     generate: DiscoveryGenerateFn | None = None,
+    slot: str | None = None,
+    deploy_llm: LLMDeployConfig | None = None,
 ) -> DiscoveryLLMPort:
-    """Собирает LLM-адаптер разведки паспорта из env с override CLI-флагами (``03`` §E.3).
+    """Собирает LLM-адаптер разведки паспорта (``03`` §E.3; слоты — :class:`LLMDeployConfig`).
 
-    Источник конфигурации — env ``COHOUND_LLM_*`` (префикс задан здесь); явные
-    аргументы (CLI-флаги) имеют приоритет. Фолбэки: ``COHOUND_LLM_API_KEY`` →
-    ``PLUSVIBEAPI_API_KEY``; ``COHOUND_LLM_BASE_URL`` → :data:`DEFAULT_LLM_BASE_URL`;
-    ``COHOUND_LLM_MODEL`` → :data:`DEFAULT_LLM_MODEL`; ``COHOUND_LLM_DECODER`` →
-    ``json_object`` (подтверждён рабочим). Пустые ``base_url``/``model_id`` допустимы:
-    готовность проверяет вызывающий (``cmd_passport_scout``) и выдаёт понятную ошибку
-    ``llm`` (:data:`EXIT_USAGE`), а не падает.
+    Источник конфигурации (по убыванию приоритета): явные аргументы (CLI-флаги) >
+    env ``COHOUND_LLM_*`` > поля выбранного слота ``deploy_llm`` > дефолты модуля.
+    Активный слот резолвится :func:`_resolve_llm_slot_and_config` (``slot`` >
+    ``COHOUND_LLM_SLOT`` > ``deploy_llm.slot`` > ``cheap``). Фолбэки ключа:
+    ``COHOUND_LLM_API_KEY`` → ``PLUSVIBEAPI_API_KEY``. Пустые ``base_url``/``model_id``
+    допустимы: готовность проверяет вызывающий (``cmd_passport_scout``) и выдаёт
+    понятную ошибку ``llm`` (:data:`EXIT_USAGE`), а не падает.
 
+    :param slot: явный активный слот (``--llm-slot``); ``None`` → env/deploy-слот.
+    :param deploy_llm: секция ``llm`` deploy-конфига (слоты моделей); ``None`` — нет.
     :param generate: тестовый/оффлайн-шов ``(prompt, schema) -> str`` (без сети).
     :raises WiringError: нечисловой/неположительный ``timeout``/``max_tokens`` из env.
+    :raises ValueError: неизвестный слот (``--llm-slot``/``COHOUND_LLM_SLOT``).
     """
+    _resolved_slot, slot_config = _resolve_llm_slot_and_config(deploy_llm, slot)
+    slot_base = slot_config.base_url if slot_config is not None else None
+    slot_model = slot_config.model_id if slot_config is not None else None
+    slot_decoder = slot_config.decoder if slot_config is not None else None
+    slot_timeout = (
+        slot_config.timeout_s
+        if slot_config is not None and slot_config.timeout_s is not None
+        else DISCOVERY_DEFAULT_TIMEOUT
+    )
+    slot_max_tokens = (
+        slot_config.max_tokens
+        if slot_config is not None and slot_config.max_tokens is not None
+        else DISCOVERY_DEFAULT_MAX_TOKENS
+    )
+
     resolved_base = (
         base_url
         if base_url is not None
-        else os.environ.get(ENV_LLM_BASE_URL) or DEFAULT_LLM_BASE_URL
+        else os.environ.get(ENV_LLM_BASE_URL) or slot_base or DEFAULT_LLM_BASE_URL
     )
     resolved_key = (
         api_key
@@ -402,22 +448,22 @@ def build_discovery_llm(
     resolved_model = (
         model_id
         if model_id is not None
-        else os.environ.get(ENV_LLM_MODEL) or DEFAULT_LLM_MODEL
+        else os.environ.get(ENV_LLM_MODEL) or slot_model or DEFAULT_LLM_MODEL
     )
     resolved_decoder = (
         decoder
         if decoder is not None
-        else os.environ.get(ENV_LLM_DECODER, DISCOVERY_DEFAULT_DECODER)
+        else os.environ.get(ENV_LLM_DECODER) or slot_decoder or DISCOVERY_DEFAULT_DECODER
     )
     resolved_timeout = (
         timeout
         if timeout is not None
-        else _env_float(ENV_LLM_TIMEOUT, DISCOVERY_DEFAULT_TIMEOUT)
+        else _env_float(ENV_LLM_TIMEOUT, slot_timeout)
     )
     resolved_max_tokens = (
         max_tokens
         if max_tokens is not None
-        else _env_int(ENV_LLM_MAX_TOKENS, DISCOVERY_DEFAULT_MAX_TOKENS)
+        else _env_int(ENV_LLM_MAX_TOKENS, slot_max_tokens)
     )
     return DiscoveryLLM(
         base_url=resolved_base or "",
@@ -427,6 +473,93 @@ def build_discovery_llm(
         timeout=resolved_timeout,
         max_tokens=resolved_max_tokens,
         generate=generate,
+    )
+
+
+def build_evaluator_llm(
+    *,
+    deploy_llm: LLMDeployConfig | None = None,
+    slot: str | None = None,
+    generate: EvaluatorGenerateFn | None = None,
+    base_url: str | None = None,
+    api_key: str | None = None,
+    model_id: str | None = None,
+    model_version: str | None = None,
+    decoder: str | None = None,
+    timeout: float | None = None,
+    run_slot: str | None = None,
+) -> EvaluatorPort | None:
+    """Собирает runtime-оценщик из активного LLM-слота; ``None`` — слот не сконфигурирован.
+
+    Оценщик (I18, без веб-тула) конструируется :class:`~core.adapters.llm_local.LocalEvaluator`
+    из **активного слота** (``slot`` (CLI) > ``COHOUND_LLM_SLOT`` (env) > ``run_slot``
+    (``run.yaml: llm_slot``) > ``deploy_llm.slot`` > ``cheap``, см.
+    :func:`_resolve_llm_slot_and_config`). Приоритет полей: явные аргументы > env
+    ``COHOUND_LLM_*`` > поля слота > дефолты модуля ``adapters.llm_local``.
+
+    **Условие активности.** Если у выбранного слота (и env/аргументов) пустой ``base_url``
+    — возвращается ``None``: оценщик не поднимается, поведение прогона прежнее (сценарий
+    evaluator требует явного endpoint корпоративного облака). ``api_key`` — из env
+    (``COHOUND_LLM_API_KEY`` → ``PLUSVIBEAPI_API_KEY``).
+
+    :param slot: явный активный слот (``--llm-slot``); ``None`` → env/run.yaml/deploy-слот.
+    :param deploy_llm: секция ``llm`` deploy-конфига; ``None`` — нет слотов.
+    :param run_slot: слот из ``run.yaml: llm_slot`` (§4.5); ниже env, выше ``deploy_llm.slot``.
+    :param generate: тестовый/оффлайн-шов ``(prompt, schema) -> str`` (без сети).
+    :raises ValueError: неизвестный слот (``--llm-slot``/``COHOUND_LLM_SLOT``/``run.yaml``).
+    """
+    _resolved_slot, slot_config = _resolve_llm_slot_and_config(deploy_llm, slot, run_slot)
+    slot_base = slot_config.base_url if slot_config is not None else None
+    slot_model = slot_config.model_id if slot_config is not None else None
+    slot_version = slot_config.model_version if slot_config is not None else None
+    slot_decoder = slot_config.decoder if slot_config is not None else None
+    slot_timeout = (
+        slot_config.timeout_s
+        if slot_config is not None and slot_config.timeout_s is not None
+        else EVALUATOR_DEFAULT_TIMEOUT
+    )
+
+    resolved_base = (
+        base_url
+        if base_url is not None
+        else os.environ.get(ENV_LLM_BASE_URL) or slot_base
+    )
+    if not (resolved_base and str(resolved_base).strip()):
+        return None
+
+    resolved_key = (
+        api_key
+        if api_key is not None
+        else os.environ.get(ENV_LLM_API_KEY) or os.environ.get(ENV_PLUSVIBE_API_KEY)
+    )
+    resolved_model = (
+        model_id
+        if model_id is not None
+        else os.environ.get(ENV_LLM_MODEL)
+        or slot_model
+        or EVALUATOR_DEFAULT_MODEL_ID
+    )
+    resolved_version = (
+        model_version if model_version is not None else slot_version
+    )
+    resolved_decoder = (
+        decoder
+        if decoder is not None
+        else os.environ.get(ENV_LLM_DECODER) or slot_decoder or EVALUATOR_DEFAULT_DECODER
+    )
+    resolved_timeout = (
+        timeout
+        if timeout is not None
+        else _env_float(ENV_LLM_TIMEOUT, slot_timeout)
+    )
+    return LocalEvaluator(
+        generate=generate,
+        model_id=resolved_model or EVALUATOR_DEFAULT_MODEL_ID,
+        model_version=resolved_version or "",
+        decoder=resolved_decoder or EVALUATOR_DEFAULT_DECODER,
+        base_url=str(resolved_base).strip(),
+        api_key=(resolved_key or None),
+        timeout=resolved_timeout,
     )
 
 
@@ -662,7 +795,8 @@ def build_adapters(
     :param registry_id: идентификатор реестра для ``RemoteRegistry`` (данные).
     :param extra_headers: доп. заголовки шва (напр. OIDC bearer).
     :param evaluator: готовый оценщик (``local``); ``None`` → остаётся ``None`` (не
-        конструируется автоматически: сценарий evaluator требует self-host backend).
+        конструируется автоматически: сценарий evaluator требует OI-совместимого endpoint
+        корпоративного облака, см. :func:`build_evaluator_llm`).
     :param registry: готовый реестровый фетчер (``local``); ``None`` → остаётся ``None``
         (конфиг реестра — данные вызывающего).
     :param index_root: корень индексного хранилища для ``NpyIndexBuilder`` (``local``);

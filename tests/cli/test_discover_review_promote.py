@@ -208,12 +208,9 @@ def test_supported_search_adapters_include_glm_and_yandex() -> None:
     from core.cli.wiring import SUPPORTED_SEARCH_ADAPTERS, build_search_adapter
     from core.ports.search import SearchAdapterPort
 
-    assert set(SUPPORTED_SEARCH_ADAPTERS) >= {
+    assert set(SUPPORTED_SEARCH_ADAPTERS) == {
         "yandex",
         "glm",
-        "google",
-        "duckduckgo",
-        "open-websearch",
     }
     for name in SUPPORTED_SEARCH_ADAPTERS:
         adapter = build_search_adapter(name)
@@ -223,12 +220,13 @@ def test_supported_search_adapters_include_glm_and_yandex() -> None:
         assert not hasattr(adapter, "add_evidence")
 
 
-def test_search_adapter_configured_keyless_adapters_allowed() -> None:
-    """Бесключевые адаптеры (duckduckgo/open-websearch) не блокируются в discover.
+def test_search_adapter_configured_generic_key_handling() -> None:
+    """``_search_adapter_configured`` требует ``api_key`` только при наличии атрибута.
 
-    ``_search_adapter_configured`` требует ``api_key`` только у ключевых адаптеров
-    (yandex/glm/google). Бесключевые атрибута ``api_key`` не имеют — для них достаточна
-    ``available``; иначе ``hound discover --search-adapter duckduckgo`` ложно падал бы.
+    Все реальные адаптеры (``yandex``/``glm``) ключевые: без ключа адаптер не готов, и
+    кандидаты не выдумываются (I19). Логика остаётся generic: если адаптер вообще не
+    выставляет атрибут ``api_key``, достаточно ``available`` — иначе такой адаптер
+    ошибочно блокировался бы.
     """
     from core.cli.main import _search_adapter_configured
 
@@ -250,43 +248,12 @@ def test_search_adapter_configured_keyless_adapters_allowed() -> None:
     class _Unavailable:
         available = False
 
-    assert _search_adapter_configured(_NoApiKeyAttr()) is True  # duckduckgo/open-websearch
+    assert _search_adapter_configured(_NoApiKeyAttr()) is True  # нет атрибута api_key
     assert _search_adapter_configured(_KeyedWithKey()) is True
-    assert _search_adapter_configured(_KeyedNoKey()) is False  # yandex/glm/google без ключа
+    assert _search_adapter_configured(_KeyedNoKey()) is False  # ключевой без ключа
     assert _search_adapter_configured(_Unavailable()) is False
-    # Явное присутствие атрибута api_key=None (даже у «keyless»-класса) → не готов.
+    # Явное присутствие атрибута api_key=None → не готов.
     assert _search_adapter_configured(_Keyless()) is False
-
-
-def test_discover_keyless_adapter_not_rejected_for_api_key(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """``discover`` с бесключевым реальным адаптером не отбивается из-за отсутствия ключа.
-
-    Проверяем, что после фикса бесключевой адаптер проходит проверку конфигурации:
-    подменяем ``build_search_adapter`` на бесключевой фейк и убеждаемся, что доходит до
-    вызова ``search`` (а не до ``EXIT_ERROR`` про «нет учётных данных»).
-    """
-    from core.cli import main as main_mod
-
-    class _KeylessAdapter(FakeSearchAdapter):
-        """Бесключевой адаптер: ``available=True`` и нет атрибута ``api_key``."""
-
-        provider = "keyless"
-
-    # ``core.cli`` экспортирует функцию ``main`` (не модуль) — берём модуль по имени.
-    cli_main = importlib.import_module("core.cli.main")
-    cli_wiring = importlib.import_module("core.cli.wiring")
-    monkeypatch.setattr(
-        cli_wiring, "build_search_adapter", lambda _name: _KeylessAdapter()
-    )
-    # Конфиг без явного адаптера → провайдер по умолчанию (yandex); иначе резолвер
-    # читал бы config/deploy.yaml репозитория (там пример-адаптер).
-    monkeypatch.setattr(
-        cli_wiring, "load_deploy_config", lambda _path=None: DeployConfig(profile="local")
-    )
-    code = cli_main.main(["discover", "--query", "q1", "--json"])
-    assert code == EXIT_OK
 
 
 def test_discover_provider_from_config_by_language(
@@ -307,12 +274,12 @@ def test_discover_provider_from_config_by_language(
         "load_deploy_config",
         lambda _path=None: DeployConfig(
             profile="local",
-            search=SearchDeployConfig(by_language={"ru": "yandex", "en": "duckduckgo"}),
+            search=SearchDeployConfig(by_language={"ru": "yandex", "en": "glm"}),
         ),
     )
     code = cli_main.main(["discover", "--query", "q1", "--lang", "en", "--json"])
     assert code == EXIT_OK
-    assert requested == ["duckduckgo"]
+    assert requested == ["glm"]
     payload = json_out(capsys)
     assert payload["provider"] == "fake"  # провенанс из адаптера (I23)
     assert payload["adapter_kind"] == "serp"
@@ -336,14 +303,14 @@ def test_discover_explicit_flag_overrides_config(
         "load_deploy_config",
         lambda _path=None: DeployConfig(
             profile="local",
-            search=SearchDeployConfig(adapter="yandex", by_language={"ru": "duckduckgo"}),
+            search=SearchDeployConfig(adapter="yandex", by_language={"ru": "yandex"}),
         ),
     )
     code = cli_main.main(
-        ["discover", "--query", "q1", "--search-adapter", "google", "--json"]
+        ["discover", "--query", "q1", "--search-adapter", "glm", "--json"]
     )
     assert code == EXIT_OK
-    assert requested == ["google"]
+    assert requested == ["glm"]
 
 
 def test_discover_unknown_provider_from_config_is_usage_error(

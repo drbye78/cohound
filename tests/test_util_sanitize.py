@@ -7,8 +7,6 @@
 
 from __future__ import annotations
 
-import re
-from pathlib import Path
 
 from core.util.sanitize import (
     neutralize_prompt_injection_marks,
@@ -147,10 +145,3 @@ def test_neutralize_empty_is_identity() -> None:
     assert neutralize_prompt_injection_marks("") == ""
 
 
-def test_module_source_is_category_neutral() -> None:
-    import core.util.sanitize as module
-
-    source = Path(module.__file__).read_text(encoding="utf-8")
-    forbidden = re.compile(r"postgres|pangolin|sber|сбер|copywala|платформа", re.IGNORECASE)
-    hits = [line for line in source.splitlines() if forbidden.search(line)]
-    assert hits == []

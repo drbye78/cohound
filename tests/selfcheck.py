@@ -379,9 +379,6 @@ def main() -> int:
     check("auth/audit: подделка отвергнута + поля SIEM (07 §8)", lambda: _edge_auth_audit())
     check("deploy.yaml: отсутствие → local; split требует base_url", lambda: _deploy_config())
 
-    section("Оценщик fallback (CPU) — W9")
-    check("llama-cpp: порт EvaluatorPort + I18 структурно", lambda: _llamacpp_fallback())
-
     section("Интеграция Ш1–Ш9 (composition root)")
     check("build_phases: 11 не-гейтовых фаз, гейты не переопределены", lambda: _build_phases_gate())
     check("walking-skeleton: реальные фазы + гейт g1 блокирует без решения", lambda: _walking_skeleton())
@@ -2013,32 +2010,6 @@ def _deploy_config() -> None:
             raise AssertionError("split без edge.base_url обязан отказать")
         except ValueError:
             pass
-
-
-def _llamacpp_fallback() -> None:
-    """CPU-fallback оценщика: конформность EvaluatorPort, I18 структурно."""
-    import inspect as _inspect
-
-    import core.adapters.llm_llamacpp as _m
-    from core.domain import LLMCellOutput, Status
-    from core.ports.llm import EvaluatorPort, LLMRequest
-
-    evaluator = _m.LlamaCppEvaluator(
-        model_path="/nonexistent.gguf",
-        generate=lambda req: '{"status":"✅","justification":"j",'
-                             '"evidence":[{"source_id":"c1","quote":"q"}]}',
-    )
-    if not isinstance(evaluator, EvaluatorPort):
-        raise AssertionError("LlamaCppEvaluator обязан реализовывать EvaluatorPort")
-    response = evaluator.complete(LLMRequest(prompt="p", response_schema=LLMCellOutput, model_id="m"))
-    if response.output.status is not Status.OK:
-        raise AssertionError("валидный JSON оценщика не разобран")
-    source = _inspect.getsource(_m)
-    for banned in ("web_search", "tool_choice", "search_tool"):
-        if banned in source:
-            raise AssertionError(f"I18: веб-тул в оценщике запрещён ({banned})")
-    if _m.LlamaCppEvaluator(model_path="/nonexistent.gguf").available:
-        raise AssertionError("available обязан быть False без пакета/модели")
 
 
 def _serp_loop() -> None:

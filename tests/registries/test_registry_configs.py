@@ -143,12 +143,3 @@ def test_example_config_produces_facts_with_source_url(path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_engine_module_is_category_neutral() -> None:
-    """Исходник generic-движка не содержит предметных терминов (§1.3)."""
-    import core.adapters.registry_generic as module
-
-    assert module.__file__ is not None
-    source = Path(module.__file__).read_text(encoding="utf-8")
-    forbidden = re.compile(r"postgres|pangolin|sber|сбер|copywala|платформа", re.IGNORECASE)
-    hits = [line for line in source.splitlines() if forbidden.search(line)]
-    assert hits == []

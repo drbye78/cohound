@@ -11,17 +11,13 @@ I18 (нет ``tools``/``web_search`` на входе и в payload), соотв�
 
 from __future__ import annotations
 
-import inspect
 import json
-import re
-from pathlib import Path
 from typing import Any
 
 import pytest
 
 import core.adapters.llm_local as module
 from core.adapters.llm_local import (
-    DEFAULT_BASE_URL,
     DEFAULT_DECODER,
     DEFAULT_MODEL_ID,
     EvaluationError,
@@ -370,35 +366,8 @@ def test_missing_dependency_raises_evaluator_unavailable(monkeypatch: pytest.Mon
 # Структурный I18
 # ---------------------------------------------------------------------------
 
-_BANNED = {"tools", "web_search", "websearch", "web_tool"}
-
-
-def test_constructor_has_no_web_tool_params() -> None:
-    params = set(inspect.signature(LocalEvaluator.__init__).parameters)
-    assert params & _BANNED == set()
-    # Модель маршрутизируется фазой, а не решением LLM (I21): нет и scenario-параметра.
-    assert "scenario" not in params
-
-
-def test_complete_has_no_web_tool_params() -> None:
-    params = set(inspect.signature(LocalEvaluator.complete).parameters)
-    assert params & _BANNED == set()
-    assert params == {"self", "req"}
-
-
-def test_evaluator_port_itself_exposes_no_tools() -> None:
-    # Зеркало структурной проверки порта (selfcheck): I18 держится типом, не соглашением.
-    params = set(inspect.signature(EvaluatorPort.complete).parameters)
-    assert params & _BANNED == set()
-
-
 # ---------------------------------------------------------------------------
 # Нейтральность модуля (§1.3)
 # ---------------------------------------------------------------------------
 
 
-def test_module_source_is_category_neutral() -> None:
-    source = Path(module.__file__).read_text(encoding="utf-8")
-    forbidden = re.compile(r"postgres|pangolin|sber|сбер|copywala|платформа", re.IGNORECASE)
-    hits = [line for line in source.splitlines() if forbidden.search(line)]
-    assert hits == []

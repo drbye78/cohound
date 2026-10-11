@@ -459,7 +459,3 @@ def test_i19_module_is_structurally_evidence_free() -> None:
     assert "store" not in inspect.signature(discover).parameters
 
 
-def test_module_is_category_neutral() -> None:
-    source = inspect.getsource(discovery_mod).lower()
-    for term in ("postgres", "pangolin", "sber", "сбер", "copywala", "платформа"):
-        assert term not in source

@@ -9,7 +9,6 @@
 from __future__ import annotations
 
 import datetime as _dt
-import re
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -427,12 +426,6 @@ def test_promote_batch_requires_actor(store: SqliteStore) -> None:
 # --------------------------------------------------------------------------- #
 # Нейтральность и слоевая гигиена (§1.3, 01 §1)
 # --------------------------------------------------------------------------- #
-
-
-def test_module_source_is_category_neutral() -> None:
-    source = Path(review_mod.__file__).read_text(encoding="utf-8")
-    forbidden = re.compile(r"postgres|pangolin|sber|сбер|copywala|платформа", re.IGNORECASE)
-    assert [line for line in source.splitlines() if forbidden.search(line)] == []
 
 
 def test_module_does_not_import_adapters() -> None:

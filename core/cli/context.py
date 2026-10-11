@@ -36,6 +36,7 @@ from core.cli.wiring import (
     LOCAL_PROFILE,
     SUPPORTED_PROFILES,
     build_adapters,
+    build_evaluator_llm,
     build_gateway,
     build_store,
     manifest_deploy_fields,
@@ -838,6 +839,12 @@ def _resolve_ports(
     (``03`` §A.1); ``inputs.domain_profiles`` (``domain_profiles.yaml`` пакета, §D.2)
     протягиваются в локальный краулер. ``inputs=None`` сохраняет прежнее поведение
     (домен-профили не передаются) — обратная совместимость вызывающих.
+
+    **Оценщик (Ш6, I18).** При наличии deploy-конфига оценщик собирается
+    :func:`build_evaluator_llm` из активного LLM-слота (``deploy.llm`` + ``--llm-slot``).
+    Если у слота пустой ``base_url`` (дефолт) — билдер вернёт ``None``: поведение
+    прежнее (оценщик не поднимается). Профиль ``split`` получает ``evaluator`` как
+    сегодня (remote-порты его не используют).
     """
     injected = getattr(args, "ports", None)
     if injected is not None:
@@ -851,11 +858,21 @@ def _resolve_ports(
     paths = getattr(args, "paths", None)
     index_root = str(paths.index_store) if paths is not None else "index_store"
     cache = ContentAddressedCache(paths.cache) if paths is not None else None
+    evaluator = (
+        build_evaluator_llm(
+            deploy_llm=deploy_config.llm,
+            slot=getattr(args, "llm_slot", None),
+            run_slot=getattr(getattr(inputs, "run", None), "llm_slot", None),
+        )
+        if deploy_config is not None
+        else None
+    )
     return build_adapters(
         profile=args.profile,
         deploy=deploy_config,
         transport=getattr(args, "deploy_transport", None),
         gateway=gateway,
+        evaluator=evaluator,
         index_root=index_root,
         cache=cache,
         domain_profiles=(inputs.domain_profiles if inputs is not None else None),

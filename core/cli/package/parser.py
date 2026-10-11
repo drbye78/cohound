@@ -577,6 +577,12 @@ def add_package_parser(subparsers: Any) -> None:
         help="механизм декодирования (override COHOUND_LLM_DECODER)",
     )
     p_scout.add_argument(
+        "--llm-slot",
+        choices=["cheap", "flagship"],
+        default=None,
+        help="активный LLM-слот (override COHOUND_LLM_SLOT/deploy.llm.slot)",
+    )
+    p_scout.add_argument(
         "--llm-max-tokens", type=int, default=None, help="потолок генерации LLM"
     )
     p_scout.add_argument(

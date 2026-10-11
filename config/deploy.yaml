@@ -8,6 +8,12 @@
 # TLS: доверие через корпоративный CA; certificate pinning НЕ поддерживается
 # намеренно — это не блокирует корпоративную TLS-инспекцию DLP/IDS (07 §8.1).
 # Не коммитить секреты: `client_key` — путь к файлу ключа, сам ключ вне репозитория.
+#
+# LLM (`llm:`) — commodity/execution-слой (§7.4): две именованные слоты моделей
+# (`cheap`/`flagship`), активная выбирается в рантайме (--llm-slot / COHOUND_LLM_SLOT).
+# Модели доступны через OI-совместимый API корпоративного облака — это НЕ self-host
+# инсталляция. vLLM/SGLang — бэкенд облака, не наш стек/зависимость; секрет (api_key)
+# берётся из env (COHOUND_LLM_API_KEY → PLUSVIBEAPI_API_KEY), в YAML его нет.
 
 profile: local                 # local | split | split-hardened
 
@@ -32,4 +38,26 @@ search:
   adapter: yandex              # провайдер по умолчанию (--search-adapter переопределяет)
   # Дифференциация по языку/географии (опционально; I16: маршрут — функция от lang,
   # одинаков для всех продуктов). Пример:
-  # by_language: { ru: yandex, en: duckduckgo }
+  # by_language: { ru: yandex, en: glm }
+
+# --- LLM (commodity/execution-слой; 07 §7 / 03 D.5) --------------------------
+# Две именованные слоты моделей; активная выбирается в рантайме. Оба слота по умолчанию
+# указывают на одну модель `deepseek-v4.1-flash:cxbc`. base_url пустой → слот не
+# сконфигурирован (оценщик не поднимается; поведение прежнее). Модели обслуживаются
+# OI-совместимым API корпоративного облака (не self-host). Ключ — из env.
+llm:
+  slot: cheap                 # активный slot: cheap | flagship (--llm-slot / COHOUND_LLM_SLOT переопределяют)
+  cheap:
+    base_url: ""              # OI-совместимый endpoint корпоративного облака (.../v1)
+    model_id: "deepseek-v4.1-flash:cxbc"
+    model_version: ""
+    decoder: json_object      # none | json_object | json_schema
+    timeout_s: 120
+    max_tokens: 4096
+  flagship:
+    base_url: ""
+    model_id: "deepseek-v4.1-flash:cxbc"
+    model_version: ""
+    decoder: json_object
+    timeout_s: 120
+    max_tokens: 4096

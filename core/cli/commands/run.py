@@ -261,5 +261,12 @@ def configure(sub: Any) -> None:
         help="retrieval_cutoff_K (I20) выреза ретривала для фазы оценки; дефолт — "
         "DEFAULT_RETRIEVAL_CUTOFF_K (10)",
     )
+    p_run.add_argument(
+        "--llm-slot",
+        dest="llm_slot",
+        choices=["cheap", "flagship"],
+        default=None,
+        help="активный LLM-слот оценщика (override COHOUND_LLM_SLOT/deploy.llm.slot)",
+    )
     _add_common(p_run)
     p_run.set_defaults(handler=run)

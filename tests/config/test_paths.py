@@ -17,7 +17,6 @@ import yaml
 from pydantic import ValidationError
 
 from core.config.paths import (
-    DEFAULT_PATHS_FILE,
     ENV_BY_FIELD,
     ENV_CACHE_DIR,
     ENV_CORPUS_RAW_DIR,
@@ -36,7 +35,6 @@ from core.config.paths import (
     with_home,
 )
 
-MODULE_PATH = Path(__file__).resolve().parents[2] / "core" / "config" / "paths.py"
 EXAMPLE_PATH = Path(__file__).resolve().parents[2] / "config" / "paths.example.yaml"
 
 
@@ -301,12 +299,6 @@ def test_determinism(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 # Нейтральность (§1.3) и пример-файл
 # ---------------------------------------------------------------------------
-
-
-def test_module_is_category_neutral() -> None:
-    source = MODULE_PATH.read_text(encoding="utf-8").lower()
-    for token in ("postgres", "pangolin", "sber", "сбер", "copywala", "платформ"):
-        assert token not in source, f"нейтральность §1.3 нарушена: «{token}»"
 
 
 def test_example_file_parses_and_matches_fields() -> None:

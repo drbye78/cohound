@@ -1,9 +1,13 @@
-"""Self-host оценщик — реализация ``EvaluatorPort`` (W9/T9.2, §7.1).
+"""Оценщик — реализация ``EvaluatorPort`` (W9/T9.2, §7.1).
 
-Адаптер обслуживает сценарий **evaluator** (I21): self-host vLLM/SGLang с
-**constrained decoding** (xgrammar/XGrammar) и детерминированным сэмплированием
-(greedy при ``temperature == 0.0`` + ``seed``). Модель работает **только по переданным
+Адаптер обслуживает сценарий **evaluator** (I21): модель, доступная через
+OI-совместимый API корпоративного облака, с **constrained decoding**
+(xgrammar/XGrammar) и детерминированным сэмплированием (greedy при
+``temperature == 0.0`` + ``seed``). Модель работает **только по переданным
 чанкам** промпта и не вызывает внешний поиск — это гарантия I18.
+
+**Не self-host.** Это клиент OI-совместимого API корпоративного облака (не установка
+vLLM/SGLang у нас): vLLM/SGLang могут быть бэкендом облака, но не нашим стеком/зависимостью.
 
 **I18 — структурная.** Порт ``EvaluatorPort`` физически не принимает ``tools``/
 ``web_search``, и конструктор/``complete`` этого адаптера их тоже не принимают и не
@@ -12,8 +16,9 @@
 отправляются только ``model``/``messages``/``temperature``/``seed``/``response_format``.
 
 **Constrained decoding — форма, не семантика.** Реальный путь передаёт JSON Schema
-ячейки (``response_format={"type": "json_schema", ...}``), из которой сервер vLLM/SGLang
-строит грамматику xgrammar и навязывает её на уровне сэмплера. Это гарантирует только
+ячейки (``response_format={"type": "json_schema", ...}``), из которой OI-совместимый
+сервер (например, на бэкенде vLLM/SGLang облака) строит грамматику xgrammar и навязывает
+её на уровне сэмплера. Это гарантирует только
 *форму*; механическая валидация (source_id→url, цитата-подстрока, достаточность) —
 отдельный эшелон §10 (``pipeline/validate.py``). Поле ``decoder`` в ``LLMResponse``
 фиксирует механизм (``"xgrammar"``/``"json_schema"``/``"none"``) для манифеста (R7).
@@ -24,15 +29,13 @@
 + absence_rule + отсортированные ``chunk_id``) компилируется в ``pipeline/prompt.py``
 (T9.1) и в данный порт полем не передаётся, поэтому адаптер хэширует сам промпт.
 
-**Ленивый тяжёлый импорт.** Модуль импортируется и тестируется без ``vllm``/``sglang``/
-``llama_cpp``/``httpx``: HTTP-клиент подтягивается только в реальном пути, а ``available``
-показывает готовность.
+**Ленивый тяжёлый импорт.** Модуль импортируется и тестируется без ``httpx``:
+HTTP-клиент подтягивается только в реальном пути, а ``available`` показывает готовность.
 
 **Изолированный шов для тестов.** Конструктор принимает ``generate`` — callable
 ``(prompt, response_schema) -> str`` (сырой JSON). Если он задан, реальный путь не
-задействуется: тесты/CPU/GGUF-ветка (``llama-cpp-python``, T9.6) не требуют GPU/сети.
-Если ``generate is None`` — реальный HTTP-путь к openai-совместимому ``/v1/chat/
-completions``.
+задействуется: тесты не требуют сети. Если ``generate is None`` — реальный HTTP-путь
+к openai-совместимому ``/v1/chat/completions``.
 
 **Ошибки.** Невалидный JSON/форма/нарушение инвариантов модели (I1/I7) →
 ``EvaluationError``; pipeline (T9.3) отображает его в ``evaluation_failed`` с retry ≤2
@@ -67,13 +70,13 @@ __all__ = [
     "CHAT_COMPLETIONS_PATH",
 ]
 
-#: Лёгкий self-host оценщик по умолчанию (§7.4, MVP). Переопределяется ``model_id``.
-DEFAULT_MODEL_ID = "GLM-4.5-Air"
-#: Профиль зоны (07): self-host контур РФ.
-DEFAULT_ENDPOINT_KIND = "self_host"
+#: Оценщик по умолчанию (§7.4, MVP): модель из корпоративного облака. Переопределяется ``model_id``.
+DEFAULT_MODEL_ID = "deepseek-v4.1-flash:cxbc"
+#: Профиль зоны (07): API корпоративного облака (OI-совместимый), не self-host инсталляция.
+DEFAULT_ENDPOINT_KIND = "api"
 #: Механизм constrained decoding по умолчанию: без навязанной грамматики.
 DEFAULT_DECODER = "none"
-#: Адрес vLLM/SGLang по умолчанию (openai-совместимый сервер).
+#: Адрес OI-совместимого API по умолчанию (переопределяется wiring/deploy-конфигом).
 DEFAULT_BASE_URL = "http://localhost:8000"
 #: Таймаут HTTP-запроса, с.
 DEFAULT_TIMEOUT = 120.0
@@ -101,18 +104,18 @@ def _httpx_available() -> bool:
 
 
 class LocalEvaluator:
-    """Self-host оценщик (vLLM/SGLang) за ``EvaluatorPort``. Без инструментов/веб-поиска.
+    """Оценщик за ``EvaluatorPort`` (OI-совместимый API корпоративного облака).
 
-    :param generate: шов для тестов/CPU-ветки; ``None`` → реальный HTTP-путь.
+    :param generate: шов для тестов; ``None`` → реальный HTTP-путь.
     :param model_id: идентификатор модели по умолчанию (переопределяется ``req.model_id``).
     :param model_version: версия весов (манифест §13); по умолчанию пусто.
-    :param endpoint_kind: профиль зоны (``self_host``/``api``), данные манифеста.
+    :param endpoint_kind: профиль зоны (``api``/``self_host``), данные манифеста.
     :param decoder: записываемый механизм constrained decoding
         (``"xgrammar"``/``"json_schema"``/``"none"``). ``"none"`` → без ``response_format``.
     :param seed: seed по умолчанию (детерминизм); переопределяется ``req.seed``.
     :param temperature: температура по умолчанию; ``0.0`` — greedy.
-    :param base_url: база openai-совместимого сервера (реальный путь).
-    :param api_key: необязательный bearer-токен (обычно не нужен для self-host).
+    :param base_url: база OI-совместимого API (реальный путь).
+    :param api_key: необязательный bearer-токен (ключ корпоративного облака).
     :param timeout: таймаут HTTP-запроса, с.
     """
 
@@ -219,7 +222,7 @@ class LocalEvaluator:
     def _http_complete(
         self, req: LLMRequest, *, seed: int, temperature: float
     ) -> tuple[str, TokenUsage]:
-        """Реальный вызов vLLM/SGLang. Схема → constrained decoding; без tools (I18)."""
+        """Реальный вызов OI-совместимого API. Схема → constrained decoding; без tools (I18)."""
         httpx = self._import_http()
         headers: dict[str, str] = {"Content-Type": "application/json"}
         if self.api_key:

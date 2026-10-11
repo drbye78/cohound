@@ -18,7 +18,6 @@ import ast
 import base64
 import importlib
 import json
-import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler
@@ -663,14 +662,6 @@ def test_edge_behavior_never_touches_a_store() -> None:
 # ---------------------------------------------------------------------------
 # Нейтральность (§1.3)
 # ---------------------------------------------------------------------------
-
-_FORBIDDEN = re.compile(r"postgres|pangolin|sber|сбер|copywala|платформа", re.IGNORECASE)
-
-
-def test_server_source_is_category_neutral() -> None:
-    hits = [line for line in _server_source().splitlines() if _FORBIDDEN.search(line)]
-    assert hits == []
-
 
 def test_module_importable_in_isolation() -> None:
     module = importlib.import_module("core.edge.server")

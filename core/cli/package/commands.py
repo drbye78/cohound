@@ -29,6 +29,7 @@ from core.cli.errors import (
 )
 from core.cli.output import concise, emit_error, print_json
 from core.cli.wiring import _llm_configured
+from core.config.deploy import load_deploy_config
 from core.pipeline.package_admin import (
     OpResult,
     PackageAdminError,
@@ -1334,6 +1335,8 @@ def cmd_package_scout(args: argparse.Namespace) -> int:
                 model_id=args.llm_model,
                 decoder=args.llm_decoder,
                 max_tokens=args.llm_max_tokens,
+                slot=getattr(args, "llm_slot", None),
+                deploy_llm=load_deploy_config(None).llm,
             )
         except WiringError as exc:
             emit_error(args, "llm", concise(exc))

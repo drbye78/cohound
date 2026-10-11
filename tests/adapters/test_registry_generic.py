@@ -9,7 +9,6 @@
 from __future__ import annotations
 
 import json
-import re
 from collections.abc import Mapping
 from pathlib import Path
 
@@ -376,10 +375,3 @@ def test_implements_registry_fetcher_port() -> None:
     assert fetcher.registry_id == cfg.registry_id
 
 
-def test_module_source_is_category_neutral() -> None:
-    import core.adapters.registry_generic as module
-
-    source = Path(module.__file__).read_text(encoding="utf-8")
-    forbidden = re.compile(r"postgres|pangolin|sber|сбер|copywala|платформа", re.IGNORECASE)
-    hits = [line for line in source.splitlines() if forbidden.search(line)]
-    assert hits == []

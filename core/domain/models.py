@@ -283,7 +283,9 @@ class Focus(BaseModel):
 
 
 class RunConfig(BaseModel):
-    """run.yaml (§4.5)."""
+    """run.yaml (§4.5): мандат прогона (case/anchor/cohort/products/package/mode) и
+    необязательный выбор активного LLM-слота ``llm_slot`` (§7.4).
+    """
 
     model_config = _BASE
 
@@ -300,6 +302,11 @@ class RunConfig(BaseModel):
     snapshot_date: _dt.date
     mode: RunMode
     ranking_policy: RankingPolicy = RankingPolicy.CAPABILITY_RANKED
+    #: §7.4: активный LLM-слот (``cheap``/``flagship``) из ``run.yaml``. ``None`` →
+    #: ``deploy.llm.slot``/дефолт. Строка (не enum/литерал): домен L0 не импортирует
+    #: ``core.config`` (матрица слоёв 01 §1); допустимые значения валидирует
+    #: composition root (:func:`core.config.deploy.resolve_llm_slot`).
+    llm_slot: str | None = None
     # §6/B-1 (v2.1): калибруемый порог неразличимости ранжирования (доля диапазона
     # агрегата); ``None`` → 0.0. Идёт в манифест с provenance (A3).
     ranking_epsilon: float | None = None

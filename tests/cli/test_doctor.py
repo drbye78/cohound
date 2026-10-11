@@ -152,15 +152,12 @@ def test_env_missing_is_warn_not_fail(monkeypatch: pytest.MonkeyPatch) -> None:
         "YANDEX_SEARCH_API_KEY",
         "YANDEX_FOLDER_ID",
         "GLM_SEARCH_API_KEY",
-        "GOOGLE_API_KEY",
-        "GOOGLE_CSE_ID",
     ):
         monkeypatch.delenv(name, raising=False)
     report = run_doctor()
     assert _check(report, "llm_api_key").status == doctor.WARN
     assert _check(report, "search_yandex").status == doctor.WARN
     assert _check(report, "search_glm").status == doctor.WARN
-    assert _check(report, "search_google").status == doctor.WARN
     # Отсутствие ключей — не fail (local-профиль работает без сети).
     env_group = next(g for g in report.groups if g.group == "env")
     assert all(c.status != doctor.FAIL for c in env_group.checks)

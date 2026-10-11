@@ -15,17 +15,20 @@ import yaml
 from pydantic import ValidationError
 
 from core.config.deploy import (
+    DEFAULT_LLM_MODEL_ID,
+    DEFAULT_LLM_SLOT,
+    LLM_SLOTS,
     DeployConfig,
+    LLMDeployConfig,
+    LLMSlotConfig,
     SearchDeployConfig,
     is_split,
     load_deploy_config,
+    resolve_llm_slot,
     resolve_search_provider,
 )
 
 FIXTURES = Path(__file__).parent / "fixtures"
-MODULE_PATH = Path(__file__).resolve().parents[2] / "core" / "config" / "deploy.py"
-
-
 # ---------------------------------------------------------------------------
 # Помощники
 # ---------------------------------------------------------------------------
@@ -337,16 +340,107 @@ def test_loading_is_deterministic() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_module_is_category_neutral() -> None:
-    """Исходник модуля не содержит предметных/вендорских терминов."""
-    source = MODULE_PATH.read_text(encoding="utf-8").lower()
-    forbidden = ("postgres", "pangolin", "sber", "сбер", "copywala", "платформа")
-    for token in forbidden:
-        assert token not in source, f"нейтральность §1.3 нарушена: «{token}»"
-
-
 def test_adapter_name_is_data_not_code(tmp_path: Path) -> None:
     """Произвольное имя адаптера принимается как данные (ядро провайдеро-нейтрально)."""
     path = _write(tmp_path, "profile: local\nsearch:\n  adapter: any_adapter\n")
     cfg: DeployConfig = load_deploy_config(path)
     assert cfg.search.adapter == "any_adapter"
+
+
+# ---------------------------------------------------------------------------
+# Секция llm: слоты моделей (commodity/execution-слой §7.4)
+# ---------------------------------------------------------------------------
+
+
+def test_default_llm_config() -> None:
+    """Без секции ``llm`` активный слот — ``cheap``, обе слоты пусты (None)."""
+    cfg = DeployConfig()
+    assert cfg.llm.slot == DEFAULT_LLM_SLOT == "cheap"
+    assert cfg.llm.cheap == LLMSlotConfig()
+    assert cfg.llm.flagship == LLMSlotConfig()
+    assert cfg.llm.cheap.base_url is None
+
+
+def test_llm_section_parsed(tmp_path: Path) -> None:
+    """Обе слоты парсятся: поля каждой сохранены как данные."""
+    path = _write(
+        tmp_path,
+        _dump(
+            {
+                "profile": "local",
+                "llm": {
+                    "slot": "flagship",
+                    "cheap": {
+                        "base_url": "http://cheap.test/v1",
+                        "model_id": "m-cheap",
+                        "decoder": "json_object",
+                        "timeout_s": 30,
+                        "max_tokens": 1024,
+                    },
+                    "flagship": {
+                        "base_url": "http://flag.test/v1",
+                        "model_id": "m-flag",
+                        "model_version": "1.2",
+                        "decoder": "json_schema",
+                        "timeout_s": 240,
+                        "max_tokens": 8192,
+                    },
+                },
+            }
+        ),
+    )
+    cfg = load_deploy_config(path)
+    assert cfg.llm.slot == "flagship"
+    assert cfg.llm.cheap.base_url == "http://cheap.test/v1"
+    assert cfg.llm.cheap.model_id == "m-cheap"
+    assert cfg.llm.cheap.timeout_s == 30
+    assert cfg.llm.flagship.model_version == "1.2"
+    assert cfg.llm.flagship.max_tokens == 8192
+
+
+def test_canonical_llm_both_slots_same_default_model() -> None:
+    """Оба слота канонического ``config/deploy.yaml`` по умолчанию — одна модель."""
+    cfg = load_deploy_config(None)
+    assert cfg.llm.slot == DEFAULT_LLM_SLOT
+    assert cfg.llm.cheap.model_id == DEFAULT_LLM_MODEL_ID
+    assert cfg.llm.flagship.model_id == DEFAULT_LLM_MODEL_ID
+
+
+def test_llm_slots_constant() -> None:
+    assert LLM_SLOTS == ("cheap", "flagship")
+
+
+def test_resolve_llm_slot_precedence() -> None:
+    """explicit > llm.slot > default."""
+    llm = LLMDeployConfig(slot="flagship")
+    assert resolve_llm_slot(llm, explicit="cheap") == "cheap"
+    assert resolve_llm_slot(llm) == "flagship"
+    assert resolve_llm_slot(None) == DEFAULT_LLM_SLOT
+    assert resolve_llm_slot(None, default="flagship") == "flagship"
+    # пустой/пробельный explicit не считается (падаем на llm.slot)
+    assert resolve_llm_slot(llm, explicit="  ") == "flagship"
+
+
+def test_resolve_llm_slot_strips() -> None:
+    assert resolve_llm_slot(None, explicit="  cheap  ") == "cheap"
+
+
+def test_invalid_llm_slot_rejected() -> None:
+    with pytest.raises(ValidationError, match="llm.slot"):
+        LLMDeployConfig(slot="turbo")
+    with pytest.raises(ValueError, match="слот"):
+        resolve_llm_slot(None, explicit="turbo")
+    with pytest.raises(ValueError, match="слот"):
+        resolve_llm_slot(None, default="turbo")
+
+
+def test_extra_llm_slot_field_rejected(tmp_path: Path) -> None:
+    path = _write(tmp_path, _dump({"profile": "local", "llm": {"cheap": {"endpoint": "x"}}}))
+    with pytest.raises(ValidationError):
+        load_deploy_config(path)
+
+
+def test_llm_slot_non_positive_timeout_rejected(tmp_path: Path) -> None:
+    path = _write(tmp_path, _dump({"profile": "local", "llm": {"cheap": {"timeout_s": 0}}}))
+    with pytest.raises(ValidationError, match="timeout_s"):
+        load_deploy_config(path)

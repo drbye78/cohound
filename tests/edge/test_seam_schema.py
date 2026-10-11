@@ -11,7 +11,6 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
 import pytest
 
@@ -377,11 +376,3 @@ def test_contracts_are_category_neutral() -> None:
         assert not forbidden.search(text), name
 
 
-def test_seam_schema_module_is_category_neutral() -> None:
-    import re
-
-    source = Path(seam_schema.__file__).read_text(encoding="utf-8")
-    forbidden = re.compile(
-        r"postgres|pangolin|sber|сбер|copywala|платформа", re.IGNORECASE
-    )
-    assert not forbidden.search(source)

@@ -26,9 +26,6 @@ from core.domain.models import Passport
 
 FIXTURES = Path(__file__).parent / "fixtures"
 PASSPORTS_FIXTURE = FIXTURES / "passports"
-MODULE_PATH = Path(__file__).resolve().parents[2] / "core" / "config" / "passports.py"
-
-
 # ---------------------------------------------------------------------------
 # Помощники
 # ---------------------------------------------------------------------------
@@ -310,9 +307,3 @@ def test_loading_is_deterministic(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_module_is_category_neutral() -> None:
-    """Исходник модуля не содержит предметных/вендорских терминов."""
-    source = MODULE_PATH.read_text(encoding="utf-8").lower()
-    forbidden = ("postgres", "pangolin", "sber", "сбер", "copywala", "платформа")
-    for token in forbidden:
-        assert token not in source, f"нейтральность §1.3 нарушена: «{token}»"

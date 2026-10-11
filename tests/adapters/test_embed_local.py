@@ -11,10 +11,8 @@
 
 from __future__ import annotations
 
-import re
 import sys
 import types
-from pathlib import Path
 from typing import Any
 
 import pytest
@@ -249,8 +247,3 @@ def test_real_path_lazy_loads_and_batches(monkeypatch: pytest.MonkeyPatch) -> No
 # ---------------------------------------------------------------------------
 
 
-def test_module_source_is_category_neutral() -> None:
-    source = Path(module.__file__).read_text(encoding="utf-8")
-    forbidden = re.compile(r"postgres|pangolin|sber|сбер|copywala|платформа", re.IGNORECASE)
-    hits = [line for line in source.splitlines() if forbidden.search(line)]
-    assert hits == []

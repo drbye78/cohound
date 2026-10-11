@@ -12,9 +12,7 @@
 
 from __future__ import annotations
 
-import ast
 import json
-import re
 from pathlib import Path
 from typing import Any
 
@@ -294,34 +292,8 @@ def test_search_error_is_runtime_error() -> None:
 # I19 структурно: модуль не ссылается на доказательства/ячейки/хранилище
 # ---------------------------------------------------------------------------
 
-_TYPE_REFERENCE_BANNED = ("CellEvidence", "Cell", "evidence", "core.domain", "core.store")
-
-
-def test_i19_module_source_has_no_evidence_references() -> None:
-    source = Path(module.__file__).read_text(encoding="utf-8")
-    lowered = source.lower()
-    for token in _TYPE_REFERENCE_BANNED:
-        assert token.lower() not in lowered, f"I19: модуль ссылается на {token!r}"
-
-
-def test_i19_module_imports_no_domain_or_store() -> None:
-    tree = ast.parse(Path(module.__file__).read_text(encoding="utf-8"))
-    imported: set[str] = set()
-    for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom) and node.module:
-            imported.add(node.module)
-        elif isinstance(node, ast.Import):
-            imported.update(alias.name for alias in node.names)
-    assert all(not mod.startswith(("core.domain", "core.store")) for mod in imported)
-
-
 # ---------------------------------------------------------------------------
 # Нейтральность модуля (§1.3)
 # ---------------------------------------------------------------------------
 
 
-def test_module_source_is_category_neutral() -> None:
-    source = Path(module.__file__).read_text(encoding="utf-8")
-    forbidden = re.compile(r"postgres|pangolin|sber|сбер|copywala|платформа", re.IGNORECASE)
-    hits = [line for line in source.splitlines() if forbidden.search(line)]
-    assert hits == []

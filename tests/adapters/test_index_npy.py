@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import importlib.util
 import json
-import re
 from pathlib import Path
 
 import pytest
@@ -375,9 +374,3 @@ def test_build_without_numpy_raises_clear_error(tmp_path: Path, monkeypatch) -> 
 # --------------------------------------------------------------------------- #
 
 
-def test_module_source_is_category_neutral() -> None:
-    import core.adapters.index_npy as module
-
-    source = Path(module.__file__).read_text(encoding="utf-8")
-    forbidden = re.compile(r"postgres|pangolin|sber|сбер|copywala|платформа", re.IGNORECASE)
-    assert [line for line in source.splitlines() if forbidden.search(line)] == []

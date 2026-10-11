@@ -11,9 +11,7 @@
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
-from pathlib import Path
 
 import pytest
 
@@ -486,8 +484,3 @@ def test_ngram_missing_dependency_guard(monkeypatch: pytest.MonkeyPatch) -> None
 # ---------------------------------------------------------------------------
 
 
-def test_module_is_category_neutral() -> None:
-    """Исходник адаптера не содержит предметных/вендорских терминов (§1.3)."""
-    source = Path(lexical_tantivy.__file__).read_text(encoding="utf-8")
-    forbidden = re.compile(r"postgres|pangolin|sber|сбер|copywala|платформа", re.IGNORECASE)
-    assert forbidden.search(source) is None

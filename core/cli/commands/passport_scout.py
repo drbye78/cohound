@@ -27,6 +27,7 @@ from core.cli.wiring import (
     build_discovery_llm,
     build_scout_crawler,
 )
+from core.config.deploy import load_deploy_config
 from core.pipeline import scout_passport, write_passport_draft
 from core.ports.crawler import CrawlerPort
 from core.ports.discovery_llm import DiscoveryLLMPort
@@ -58,6 +59,8 @@ def run(args: argparse.Namespace) -> int:
                 base_url=args.llm_base_url,
                 model_id=args.llm_model,
                 decoder=args.llm_decoder,
+                slot=getattr(args, "llm_slot", None),
+                deploy_llm=load_deploy_config(None).llm,
             )
         except WiringError as exc:
             _emit_error(args, "llm", _concise(exc))
@@ -168,6 +171,12 @@ def configure(sub: Any) -> None:
         choices=["none", "json_object", "json_schema"],
         default=None,
         help="механизм декодирования (override COHOUND_LLM_DECODER; дефолт none)",
+    )
+    p_scout.add_argument(
+        "--llm-slot",
+        choices=["cheap", "flagship"],
+        default=None,
+        help="активный LLM-слот (override COHOUND_LLM_SLOT/deploy.llm.slot)",
     )
     p_scout.add_argument(
         "--dry-run", action="store_true", help="показать черновик без записи файлов"

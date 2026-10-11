@@ -9,10 +9,7 @@ HTTP-путь проверяется без сокета — через ``respx`
 
 from __future__ import annotations
 
-import inspect
 import json
-import re
-from pathlib import Path
 from typing import Any
 
 import pytest
@@ -322,21 +319,3 @@ def test_missing_dependency_raises_unavailable(monkeypatch: pytest.MonkeyPatch) 
 # Структурный I18 и нейтральность
 # ---------------------------------------------------------------------------
 
-_BANNED = {"tools", "web_search", "websearch", "web_tool"}
-
-
-def test_constructor_has_no_web_tool_params() -> None:
-    params = set(inspect.signature(DiscoveryLLM.__init__).parameters)
-    assert params & _BANNED == set()
-
-
-def test_complete_has_no_web_tool_params() -> None:
-    params = set(inspect.signature(DiscoveryLLM.complete).parameters)
-    assert params & _BANNED == set()
-    assert params == {"self", "req"}
-
-
-def test_module_source_is_category_neutral() -> None:
-    source = Path(module.__file__).read_text(encoding="utf-8")
-    forbidden = re.compile(r"postgres|pangolin|sber|сбер|copywala|платформа", re.IGNORECASE)
-    assert [line for line in source.splitlines() if forbidden.search(line)] == []

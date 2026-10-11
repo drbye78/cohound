@@ -38,18 +38,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from core.adapters.search_duckduckgo import ENV_BACKEND as ENV_DDG_BACKEND
 from core.adapters.search_glm import ENV_API_KEY as ENV_GLM_API_KEY
-from core.adapters.search_google import (
-    ENV_API_KEY as ENV_GOOGLE_API_KEY,
-    ENV_API_KEY_ALT as ENV_GOOGLE_API_KEY_ALT,
-    ENV_CSE_ID as ENV_GOOGLE_CSE_ID,
-    ENV_CSE_ID_ALT as ENV_GOOGLE_CSE_ID_ALT,
-)
-from core.adapters.search_openwebsearch import (
-    ENV_BINARY as ENV_OWS_BIN,
-    ENV_ENGINE as ENV_OWS_ENGINE,
-)
 from core.adapters.search_yandex import (
     ENV_API_KEY as ENV_YANDEX_API_KEY,
     ENV_FOLDER_ID as ENV_YANDEX_FOLDER_ID,
@@ -122,7 +111,6 @@ OPERATIONAL_DIRS: tuple[str, ...] = ("runs", "index_store", "corpus_raw", "cache
 DEPENDENCY_GROUPS: tuple[tuple[str, bool, tuple[str, ...]], ...] = (
     ("deps:core", True, ("pydantic", "yaml")),
     ("deps:retrieval", False, ("numpy", "tantivy")),
-    ("deps:search", False, ("httpx", "ddgs")),
     ("deps:crawl", False, ("scrapy", "playwright")),
     ("deps:extract", False, ("trafilatura", "docling", "openpyxl", "rtree")),
     ("deps:safety", False, ("nh3", "defusedxml")),
@@ -429,30 +417,6 @@ def _env_group() -> CheckGroup:
         "search_glm",
         lambda: (OK, f"{ENV_GLM_API_KEY} задан") if _env_set(ENV_GLM_API_KEY) else (WARN, "не задан"),
         hint=_EGRESS_HINT,
-    )
-
-    def _google() -> tuple[str, str]:
-        key = _env_set(ENV_GOOGLE_API_KEY) or _env_set(ENV_GOOGLE_API_KEY_ALT)
-        cse = _env_set(ENV_GOOGLE_CSE_ID) or _env_set(ENV_GOOGLE_CSE_ID_ALT)
-        if key and cse:
-            return OK, "ключ + cx заданы"
-        missing = []
-        if not key:
-            missing.append(f"{ENV_GOOGLE_API_KEY}/{ENV_GOOGLE_API_KEY_ALT}")
-        if not cse:
-            missing.append(f"{ENV_GOOGLE_CSE_ID}/{ENV_GOOGLE_CSE_ID_ALT}")
-        return WARN, "не заданы: " + ", ".join(missing)
-
-    builder.add("search_google", _google, hint=_EGRESS_HINT)
-    builder.add(
-        "duckduckgo_backend",
-        lambda: (OK, "задан") if _env_set(ENV_DDG_BACKEND) else (WARN, "не задан → duckduckgo"),
-    )
-    builder.add(
-        "open_websearch",
-        lambda: (OK, "задан")
-        if (_env_set(ENV_OWS_BIN) or _env_set(ENV_OWS_ENGINE))
-        else (WARN, f"не заданы {ENV_OWS_BIN}/{ENV_OWS_ENGINE}"),
     )
 
     # -- Scout ------------------------------------------------------------ #

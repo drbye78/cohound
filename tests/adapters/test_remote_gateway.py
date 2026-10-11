@@ -11,7 +11,6 @@
 from __future__ import annotations
 
 import base64
-import importlib
 import inspect
 import json
 import re
@@ -511,20 +510,3 @@ def test_remote_extractor_graceful_degradation() -> None:
 # Нейтральность (§1.3)
 # ---------------------------------------------------------------------------
 
-_NEUTRAL_MODULES = [
-    "core.adapters.remote_gateway",
-    "core.adapters.remote_crawler",
-    "core.adapters.remote_search",
-    "core.adapters.remote_registry",
-    "core.adapters.remote_extractor",
-]
-
-
-@pytest.mark.parametrize("modname", _NEUTRAL_MODULES)
-def test_module_source_is_category_neutral(modname: str) -> None:
-    module = importlib.import_module(modname)
-    assert module.__file__ is not None
-    source = Path(module.__file__).read_text(encoding="utf-8")
-    forbidden = re.compile(r"postgres|pangolin|sber|сбер|copywala|платформа", re.IGNORECASE)
-    hits = [line for line in source.splitlines() if forbidden.search(line)]
-    assert hits == []

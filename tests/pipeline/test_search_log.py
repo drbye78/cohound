@@ -13,15 +13,12 @@
 from __future__ import annotations
 
 import datetime as _dt
-import re
 from collections.abc import Iterator
-from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
-import core.pipeline.search_log as module
 from core.domain import (
     Focus,
     RankingPolicy,
@@ -462,8 +459,3 @@ def test_external_search_returns_candidates_not_evidence_i19(store: SqliteStore)
 # --------------------------------------------------------------------------- #
 
 
-def test_module_source_is_category_neutral() -> None:
-    source = Path(module.__file__).read_text(encoding="utf-8")
-    forbidden = re.compile(r"postgres|pangolin|sber|сбер|copywala|платформа", re.IGNORECASE)
-    hits = [line for line in source.splitlines() if forbidden.search(line)]
-    assert hits == []

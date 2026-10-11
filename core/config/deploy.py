@@ -2,8 +2,11 @@
 
 Развёртывание отделено от методологического прогона (``run.yaml``): этот файл выбирает
 **профиль зон** (``local`` | ``split`` | ``split-hardened``) и адреса DMZ-шва (edge):
-base_url, TLS, аутентификация входящих, лимиты, экспорт аудита, зона экстрактора и
-бюджет/адаптер внешнего поиска.
+base_url, TLS, аутентификация входящих, лимиты, экспорт аудита, зона экстрактора,
+бюджет/адаптер внешнего поиска и **конфиг LLM-слотов** (``llm:``, commodity/execution-слой
+§7.4: ``cheap``/``flagship``, активный slot выбирается в рантайме). Модели обслуживаются
+OI-совместимым API корпоративного облака — это **не** self-host инсталляция; vLLM/SGLang —
+бэкенд облака, не наш стек.
 
 Модуль только **парсит и типизирует** значения (пути, адреса, лимиты) в
 :class:`DeployConfig`. Семантика зон/подстановки адаптеров — дело composition root
@@ -35,10 +38,16 @@ __all__ = [
     "EdgeConfig",
     "SearchDeployConfig",
     "CrawlConfig",
+    "LLMSlotConfig",
+    "LLMDeployConfig",
     "DeployConfig",
     "load_deploy_config",
     "is_split",
     "resolve_search_provider",
+    "resolve_llm_slot",
+    "LLM_SLOTS",
+    "DEFAULT_LLM_SLOT",
+    "DEFAULT_LLM_MODEL_ID",
 ]
 
 # Канонические допустимые значения (ЗЕРКАЛО 07 §7 / 03 D.5). Не выносим в доменные
@@ -48,6 +57,14 @@ SPLIT_PROFILES: frozenset[str] = frozenset({"split", "split-hardened"})
 AUTH_KINDS: tuple[str, ...] = ("mtls", "oidc")
 EXTRACTOR_ZONES: tuple[str, ...] = ("edge", "core", "separate")
 AUDIT_SINKS: tuple[str, ...] = ("file", "syslog")
+
+#: Именованные слоты моделей LLM (commodity/execution-слой §7.4). Активный slot
+#: выбирается в рантайме (``--llm-slot`` / ``COHOUND_LLM_SLOT``), см. :func:`resolve_llm_slot`.
+LLM_SLOTS: tuple[str, ...] = ("cheap", "flagship")
+#: Безопасный дефолт активного слота (лёгкая модель).
+DEFAULT_LLM_SLOT = "cheap"
+#: Дефолтный ``model_id`` слотов (данные; обе слоты по умолчанию на одну модель).
+DEFAULT_LLM_MODEL_ID = "deepseek-v4.1-flash:cxbc"
 
 # Путь по умолчанию относительно рабочего каталога (раскладка A.1).
 DEFAULT_DEPLOY_PATH: Path = Path("config/deploy.yaml")
@@ -183,7 +200,7 @@ class SearchDeployConfig(BaseModel):
 
     **Провайдер поиска.** ``adapter`` — провайдер **по умолчанию**; ``by_language`` —
     детерминированное переопределение по языку (география-прокси), например
-    ``{ru: yandex, en: duckduckgo}``. Выбор из ``by_language`` — функция **от языка**,
+    ``{ru: yandex, en: glm}``. Выбор из ``by_language`` — функция **от языка**,
     не от продукта, поэтому симметричный протокол I16 сохраняется. Имена провайдеров —
     свободные строки-данные: валидация против реестра (``SUPPORTED_SEARCH_ADAPTERS``)
     живёт в composition root (CLI), а не в config-слое (§1.3, 01 §1).
@@ -236,13 +253,58 @@ class CrawlConfig(BaseModel):
     follow_redirects: bool = True
 
 
+class LLMSlotConfig(BaseModel):
+    """Конфиг одного именованного LLM-слота (commodity/execution-слой §7.4).
+
+    Модели обслуживаются OI-совместимым API корпоративного облака (не self-host).
+    Пустые поля означают «взять дефолт» (модуль ``adapters.llm_local`` / wiring); так
+    сохраняется обратная совместимость и слот без ``base_url`` остаётся
+    неактивным (оценщик не поднимается). Секрет (``api_key``) в YAML не хранится —
+    только env.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    base_url: str | None = None
+    model_id: str | None = None
+    model_version: str | None = None
+    decoder: str | None = None
+    timeout_s: float | None = Field(default=None, gt=0)
+    max_tokens: int | None = Field(default=None, gt=0)
+
+
+class LLMDeployConfig(BaseModel):
+    """Слоты моделей LLM и активный slot (``llm:`` deploy-конфига; §7.4).
+
+    Обе слоты по умолчанию пусты; ``slot`` — активный слот, переопределяемый
+    ``--llm-slot``/``COHOUND_LLM_SLOT`` (см. :func:`resolve_llm_slot`).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    slot: str = DEFAULT_LLM_SLOT
+    cheap: LLMSlotConfig = Field(default_factory=LLMSlotConfig)
+    flagship: LLMSlotConfig = Field(default_factory=LLMSlotConfig)
+
+    @field_validator("slot")
+    @classmethod
+    def _check_slot(cls, value: str) -> str:
+        slot = value.strip()
+        if slot not in LLM_SLOTS:
+            raise ValueError(
+                f"llm.slot: недопустимый слот «{value}»; ожидается один из {list(LLM_SLOTS)}"
+            )
+        return slot
+
+
 class DeployConfig(BaseModel):
     """Профиль развёртывания и настройки зон (03 D.5).
 
     Для ``split``/``split-hardened`` обязателен ``edge.base_url``; для ``local``
     секция ``edge.*`` игнорируется. Секция ``crawl`` действует в обоих профилях
-    (операционная политика HTTP-краулинга; 03 D.5/D.6). Отсутствие файла даёт
-    безопасный дефолт ``profile: local`` (см. :func:`load_deploy_config`).
+    (операционная политика HTTP-краулинга; 03 D.5/D.6). Секция ``llm`` несёт слоты
+    моделей (commodity/execution-слой §7.4). Отсутствие файла даёт безопасный дефолт
+    ``profile: local`` (см. :func:`load_deploy_config`).
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -252,6 +314,7 @@ class DeployConfig(BaseModel):
     extractor_zone: str = "core"
     search: SearchDeployConfig = Field(default_factory=SearchDeployConfig)
     crawl: CrawlConfig = Field(default_factory=CrawlConfig)
+    llm: LLMDeployConfig = Field(default_factory=LLMDeployConfig)
 
     @field_validator("profile")
     @classmethod
@@ -367,5 +430,56 @@ def resolve_search_provider(
     if search is not None and search.adapter is not None and str(search.adapter).strip():
         return str(search.adapter).strip()
 
+    return default
+
+
+# ---------------------------------------------------------------------------
+# Резолвер активного LLM-слота (§7.4, commodity/execution-слой)
+# ---------------------------------------------------------------------------
+
+
+def resolve_llm_slot(
+    llm: LLMDeployConfig | None,
+    *,
+    explicit: str | None = None,
+    default: str = DEFAULT_LLM_SLOT,
+) -> str:
+    """Детерминированный выбор активного LLM-слота (03 D.5 / §7.4).
+
+    Приоритет (первый непустой побеждает):
+
+    1. ``explicit`` — явный ``--llm-slot``/``COHOUND_LLM_SLOT`` (CLI-флаг/среда оператора);
+    2. ``llm.slot`` — активный слот из ``config/deploy.yaml``;
+    3. ``default`` — безопасный дефолт (``cheap``).
+
+    Значение нормализуется (``strip``) и валидируется против :data:`LLM_SLOTS`:
+    неизвестный ``explicit``/``default`` → ``ValueError`` с понятным RU-сообщением
+    (а не молчаливая подмена). Маршрут вычисляется по правилу, не LLM (дух I21).
+
+    :param llm: секция ``llm`` deploy-конфига либо ``None`` (нет конфига).
+    :param explicit: явное переопределение (CLI/env); непустое побеждает всегда.
+    :param default: безопасный дефолт при отсутствии конфига/совпадений.
+    :raises ValueError: выбрано неизвестное имя слота.
+    """
+    if explicit is not None and str(explicit).strip():
+        slot = str(explicit).strip()
+        if slot not in LLM_SLOTS:
+            raise ValueError(
+                f"llm-slot: недопустимый слот «{explicit}»; ожидается один из {list(LLM_SLOTS)}"
+            )
+        return slot
+
+    if llm is not None and str(llm.slot).strip():
+        slot = str(llm.slot).strip()
+        if slot not in LLM_SLOTS:
+            raise ValueError(
+                f"llm.slot: недопустимый слот «{llm.slot}»; ожидается один из {list(LLM_SLOTS)}"
+            )
+        return slot
+
+    if default not in LLM_SLOTS:
+        raise ValueError(
+            f"llm-slot default: недопустимый слот «{default}»; ожидается один из {list(LLM_SLOTS)}"
+        )
     return default
 

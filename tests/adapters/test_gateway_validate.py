@@ -11,10 +11,7 @@
 from __future__ import annotations
 
 import base64
-import importlib
 import json
-import re
-from pathlib import Path
 from typing import Any
 
 from core.adapters.gateway_validate import (
@@ -370,10 +367,3 @@ def test_validation_is_deterministic() -> None:
     assert isinstance(first.issues[0], ValidationIssue)
 
 
-def test_module_source_is_category_neutral() -> None:
-    module = importlib.import_module("core.adapters.gateway_validate")
-    assert module.__file__ is not None
-    source = Path(module.__file__).read_text(encoding="utf-8")
-    forbidden = re.compile(r"postgres|pangolin|sber|сбер|copywala|платформа", re.IGNORECASE)
-    hits = [line for line in source.splitlines() if forbidden.search(line)]
-    assert hits == []

@@ -47,8 +47,6 @@ _ENV_NAMES = (
     "YANDEX_SEARCH_API_KEY",
     "YANDEX_FOLDER_ID",
     "GLM_SEARCH_API_KEY",
-    "GOOGLE_API_KEY",
-    "GOOGLE_CSE_ID",
 )
 
 
@@ -216,7 +214,7 @@ def test_search_provider_defaults_to_yandex_key_gate(
 def test_search_provider_resolved_from_config_by_language(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """``--lang en`` + ``by_language={en: duckduckgo}`` → выбран ``duckduckgo`` (I16)."""
+    """``--lang en`` + ``by_language={en: glm}`` → выбран ``glm`` (I16)."""
     clear_env(monkeypatch, _ENV_NAMES)
     requested: list[str] = []
 
@@ -229,7 +227,7 @@ def test_search_provider_resolved_from_config_by_language(
         "core.cli.wiring.load_deploy_config",
         lambda _path=None: DeployConfig(
             profile="local",
-            search=SearchDeployConfig(by_language={"ru": "yandex", "en": "duckduckgo"}),
+            search=SearchDeployConfig(by_language={"ru": "yandex", "en": "glm"}),
         ),
     )
     package = _package(tmp_path)
@@ -240,17 +238,17 @@ def test_search_provider_resolved_from_config_by_language(
         extractor=FakeExtractor(),
     )
     assert code == EXIT_OK
-    assert requested == ["duckduckgo"]
+    assert requested == ["glm"]
     payload = json_out(capsys)
     # Провенанс провайдера (I23): имя из резолвера + вид адаптера.
-    assert payload["search_provider"] == "duckduckgo"
+    assert payload["search_provider"] == "glm"
     assert payload["search_adapter_kind"] == "serp"
 
 
 def test_search_provider_explicit_flag_overrides_config(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Явный ``--search-adapter google`` побеждает ``by_language`` из конфига."""
+    """Явный ``--search-adapter glm`` побеждает ``by_language`` из конфига."""
     clear_env(monkeypatch, _ENV_NAMES)
     requested: list[str] = []
 
@@ -263,20 +261,20 @@ def test_search_provider_explicit_flag_overrides_config(
         "core.cli.wiring.load_deploy_config",
         lambda _path=None: DeployConfig(
             profile="local",
-            search=SearchDeployConfig(adapter="yandex", by_language={"ru": "duckduckgo"}),
+            search=SearchDeployConfig(adapter="yandex", by_language={"ru": "yandex"}),
         ),
     )
     package = _package(tmp_path)
     code = main(
-        _search_argv(package, tmp_path / "out", "--lang", "ru", "--search-adapter", "google"),
+        _search_argv(package, tmp_path / "out", "--lang", "ru", "--search-adapter", "glm"),
         discovery_llm=_llm(),
         crawler=fake_crawler(URL, PAGE_TEXT),
         extractor=FakeExtractor(),
     )
     assert code == EXIT_OK
-    assert requested == ["google"]
+    assert requested == ["glm"]
     payload = json_out(capsys)
-    assert payload["search_provider"] == "google"
+    assert payload["search_provider"] == "glm"
 
 
 def test_search_provider_unknown_from_config_is_usage_error(
