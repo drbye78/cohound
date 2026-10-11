@@ -37,3 +37,6 @@ cache/
 .coverage.*
 htmlcov/
 .hypothesis/
+
+# Deepwork session state (git-local)
+.slim/deepwork/
