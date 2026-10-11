@@ -8,7 +8,7 @@
 Происхождение идеи graceful-degradation (ошибка вместо падения) и способа вызова
 ``DocumentConverter.export_to_markdown()``: проект gag5 (`documents/parse.py`, MIT,
 Copyright (c) 2024). Реализация написана заново (чистая, без доменных хвостов и мёртвых
-веток gag5); расширена на Office-форматы. См. THIRD_PARTY_NOTICES.md. Нейтрален (§1.3).
+веток gag5); расширена на Office-форматы. Нейтрален (§1.3).
 
 Зависимость ``docling`` — необязательная и тяжёлая; импортируется лениво. Для офисных
 форматов достаточно лёгкого extras ``docling-slim[format-office]`` (без torch).

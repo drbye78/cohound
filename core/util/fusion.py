@@ -5,7 +5,7 @@ RRF-параметры (``rrf_k``) — часть retrieval-профиля и в
 (§13, ADR-0013/0016, ``retrieval_params_json``).
 
 Происхождение: адаптировано из проекта gag5 (`retrieval/fusion.py`, MIT License,
-Copyright (c) 2024) — см. THIRD_PARTY_NOTICES.md. Изменения: убраны доменные веса
+Copyright (c) 2024). Изменения: убраны доменные веса
 (graph/code/docs), ключ дедупа вынесен в параметр (coHound использует chunk_id),
 добавлена типизация. Категорийно нейтрален (§1.3).
 """

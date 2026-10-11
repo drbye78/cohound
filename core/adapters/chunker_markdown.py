@@ -5,7 +5,7 @@
 («чанкер с heading_path»), порт — ``core/ports/chunker.py`` (архитектура 01 §3.5).
 
 Происхождение: адаптировано из проекта gag5 (`ingestion/structural_chunker.py`,
-MIT License, Copyright (c) 2024) — см. THIRD_PARTY_NOTICES.md. Изменения: собственная
+MIT License, Copyright (c) 2024). Изменения: собственная
 модель ``Chunk`` (chunk_no/heading_path/context_prefix/content_hash), детерминированные
 id и hash, удалён хвост ``ingestion.chunker``, добавлена типизация. Нейтрален (§1.3).
 """

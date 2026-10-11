@@ -6,7 +6,7 @@
 
 **Происхождение:** адаптировано из проекта gtm (`skills/competitor-research/SKILL.md`,
 `skills/regulatory-watch/SKILL.md`, `skills/oss-solution-scout/SKILL.md` — собственная
-разработка владельца) — см. `THIRD_PARTY_NOTICES.md`. Доменная специфика удалена,
+разработка владельца). Доменная специфика удалена,
 операционные приёмы разведки сохранены.
 
 ## Роль и границы (§7 регламента)
