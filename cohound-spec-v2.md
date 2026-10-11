@@ -172,7 +172,8 @@ CLI-ядро (`resolve · plan · run · diff · sensitivity · golden · report
 | Эмбеддинги | локально, sentence-transformers: **BGE-M3 — основной кандидат** (приоритет RU, EN хорошо; 8192 контекста, dense; MIT); multilingual-e5-large — альтернатива; подтверждение на R9/R10 | **RU — абсолютный приоритет, EN тоже сильный** (целевой корпус RU-вендоров + международные ID/термины); данные не покидают контур; NC-лицензии исключены |
 | Краулинг | Scrapy + scrapy-playwright (per-domain рендер-профили); **robots.txt = obey** (при встраивании Scrapy как библиотеки флаг `ROBOTSTXT_OBEY` выставить явно — дефолт False). **V5 (2026-10-08):** scrapy-playwright — зрелый де-факто стандарт (org `scrapy-plugins`, BSD-3, py3.14); **smoke-тест пройден** на Scrapy 2.19 / playwright 1.63 (chromium + firefox) → жёсткий пин подтверждён. `curl_cffi` — первый ярус для антибот-доменов без JS | production-фреймворки; качество извлечения кормит цитатную валидацию; этическая норма §10 |
 | Экстракция | trafilatura (HTML) · docling (PDF + Office: DOCX/PPTX/XLSX, фич-матрицы → markdown); PyMuPDF исключён (AGPL); лицензии и транзитивные зависимости (pypdfium2, OCR-модели) верифицированы (M0) | docling выбран осознанно: нативно парсит Office Open XML (бэкенды python-docx/python-pptx/openpyxl). Не офисные форматы тянут torch; поэтому Office ставится лёгким `docling-slim[format-office]` (**без torch**), PDF layout — `docling-slim[standard]` (torch) в отдельном окружении. Полный пакет `docling` = `docling-slim[standard]` и для Office избыточен. `rtree` нужен **только PDF-контуру** (spatial/reading-order), не для Office и не для импорта `DocumentConverter`. Риск потери табличной структуры фич-матриц; тест на 3–5 реальных мануалах РФ-вендоров (PDF + Office) — **блокер M0**, не M1 (§15) |
-| **LLM-оценщик** | self-host, контур РФ: vLLM/SGLang c **constrained decoding** (xgrammar/XGrammar; API — `structured_outputs`/`StructuredOutputsParams`, поле `guided_decoding_backend` удалено в vLLM 0.12.0; актуальная ветка ~0.31.x / SGLang ~0.5.x) + greedy/seed; кандидаты — DeepSeek-V4.1-Flash (MIT), GLM-5.3-Flash (MIT), GigaChat3.5-432B-A28B (MIT, ru); лёгкие — GLM-4.5-Air (MIT), Qwen3.8-27B (Apache-2.0). **Без веб-тула.** Финал — измерением на golden (A3) | корпус не покидает контур безусловно; запрет поиска структурный (у сырых весов тула нет); self-host пинит веса/движок → лучше для R7 |
+| **LLM-оценщик** | **модели через [OI]-совместимый API в корпоративном облаке** (не своё железо и не self-host-инсталляция; vLLM/SGLang — возможный backend облака, но не наша зависимость). `endpoint_kind: api` по умолчанию. **Два слота модели** (`cheap` / `flagship`) в `config/deploy.yaml`, оба **дефолтом `deepseek-v4.1-flash:cxbc`**; активный слот — на этапе эксплуатации (CLI/`env` > `run.yaml` > `deploy.llm.slot`). **Constraint-декодирование** через API (`json_schema`/`json_object`) + greedy/seed. **Без веб-тула.** Финал модели — измерением на golden (A3) | корпус не покидает контур (endpoint — корпоративное облако, внутренняя сеть); запрет поиска структурный (порт без `tools`, I18); API-сервис пинит веса/движок → R7 |
+| **Search-адаптер** | **Yandex Search API (РФ) — дефолт**, режим **`async` по умолчанию** (`sync` — опция). Ныне под Yandex AI Studio (v2 + XML-совместимый v1; есть generative-response на YandexGPT). Прежнее имя «Yandex GPT Web Search Tool» — **не подтверждено/не существует, снято**. Альтернатива — GLM Web Search API (`POST api.z.ai/api/paas/v4/web_search`, верифицирован). Commodity-слой, вне evidence-модели | даёт цитаты-кандидаты (`url_citation`/`link`), которые обязаны пройти corpus_raw → hash → index (I19) |
 | **Search-адаптер** | Yandex Search API (РФ) — дефолт (реальный сервис Yandex Cloud, ныне под Yandex AI Studio; v2 + XML-совместимый v1; есть generative-response на YandexGPT). Прежнее имя «Yandex GPT Web Search Tool» — **не подтверждено/не существует, снято**. Альтернатива — GLM Web Search API (`POST api.z.ai/api/paas/v4/web_search`, верифицирован). Commodity-слой, вне evidence-модели | даёт цитаты-кандидаты (`url_citation`/`link`), которые обязаны пройти corpus_raw → hash → index (I19) |
 | **Санитайзинг контента** | nh3 (Rust/ammonia) · defusedxml; **bleach исключён (EOL с 2026-06)**. Чистка структуры (script/hidden), **без изменения текстовых узлов** — иначе ломается проверка «цитата — подстрока» (§10) | защита от prompt-injection; сохраняет инвариант цитатной валидации |
 | **Надёжность / логи** | tenacity (retry ≤2 → failed) · structlog (структурные JSON-логи для манифеста) | воспроизводимость R7 и §7 |
@@ -180,7 +181,7 @@ CLI-ядро (`resolve · plan · run · diff · sensitivity · golden · report
 
 **Свой код сбора — три вещи:** доменные профили · чанкер с `heading_path` · retention сырых байтов + `extractor_version` (ре-извлечение без ре-фетча, A/B экстракторов). **Ручной drop-in корпус** — штатный escape hatch для антибот-доменов, с правилом симметрии (одинаково доступен всем продуктам кейса); обход CAPTCHA/антибота запрещён.
 
-**Контур данных:** эмбеддинги — локально; оценщик — self-host в РФ (свой кластер / РФ-облако / вендорский контур); search-адаптер — РФ-контур. Корпус не покидает контур безусловно; поисковые запросы адаптера — второй, отдельно логируемый канал эгрессии (§10).
+**Контур данных:** эмбеддинги — локально; оценщик — **модели через [OI]-совместимый API в корпоративном облаке** (внутренняя сеть, корпус не покидает контур); search-адаптер — РФ-контур. Корпус не покидает контур безусловно; поисковые запросы адаптера — второй, отдельно логируемый канал эгрессии (§10).
 
 ### 3.3. Репозиторий
 
@@ -304,7 +305,7 @@ runs(run_id PK, created_at, mode, case_id, anchor_product_id, cohort_ref, focus_
      state);
 
 -- llm_scenarios — канонический носитель маршрутизации (S2; llm_scenario_map_json удалён).
-llm_scenarios(run_id, scenario, model_id, model_version, endpoint_kind,  -- self_host|api
+llm_scenarios(run_id, scenario, model_id, model_version, endpoint_kind,  -- api|self_host (дефолт api: [OI]-API корп. облака)
               web_tool, decoder, seed, temperature, constrained_decoding,
               PRIMARY KEY (run_id, scenario));
 
@@ -361,7 +362,7 @@ crawl_attempts(run_id, product_id, url, status, attempts, fetch_mode, extract_ro
 
 ### 4.5. Конфигурация прогона (run.yaml)
 
-`case_id · anchor · cohort · products · package · focus{modules, params} · languages · snapshot_date · mode · ranking_policy`. Фокус меняет scope и перенормировку весов, не методологию. Роли scope = объединение `role_binding` выбранных модулей. **Согласованность (S11):** `products` обязан совпадать с множеством `product_id` из `cohort.yaml` (один канонический источник состава — когорта; `products` — её проекция, проверяется линтером); `anchor ∈ products`; ровно один `anchor_relation: anchor` в когорте.
+`case_id · anchor · cohort · products · package · focus{modules, params} · languages · snapshot_date · mode · ranking_policy · llm_slot`. Фокус меняет scope и перенормировку весов, не методологию. Роли scope = объединение `role_binding` выбранных модулей. `llm_slot` (`cheap`/`flagship` | null) — опциональный дефолт выбора слота модели-оценщика для прогона (переопределяется CLI/`env`, §7.4); сам слот-каталог живёт в `deploy.yaml` (§3.2/07 §7), а не в методологическом конфиге. **Согласованность (S11):** `products` обязан совпадать с множеством `product_id` из `cohort.yaml` (один канонический источник состава — когорта; `products` — её проекция, проверяется линтером); `anchor ∈ products`; ровно один `anchor_relation: anchor` в когорте.
 
 ---
 
@@ -465,8 +466,8 @@ N/A вне знаменателя (человеческое решение о н
 
 | Сценарий | Выход | Модель | Внешний поиск |
 |---|---|---|---|
-| **Оценщик ячейки** (Ш6) | evidence (`source_id`+цитата) | self-host, РФ-контур | **запрещён структурно (I18)** |
-| **Search-адаптер** (Ш5/SERP) | url + сырые байты → корпус | Yandex Search API / GLM Web Search | это и есть поиск |
+| **Оценщик ячейки** (Ш6) | evidence (`source_id`+цитата) | [OI]-совместимый API корп. облака | **запрещён структурно (I18)** |
+| **Search-адаптер** (Ш5/SERP) | url + сырые байты → корпус | Yandex Search API (дефолт, `async`) / GLM Web Search | это и есть поиск |
 | **Discovery** (Ш2) | кандидат паспорта | search-enabled допустим | допустим (выход — гипотеза, G2) |
 | **Concept scout** (preliminary) | кандидаты словаря | любая | допустим (только preliminary) |
 
@@ -482,7 +483,7 @@ N/A вне знаменателя (человеческое решение о н
 
 Правила: ✅/⚠️ → evidence ≥1 · ❌ → absence-evidence (+`source_scope`/`scope_attested_by` по §4.2) · ❓ → evidence может отсутствовать · N/A запрещён.
 
-**Схема навязывается на уровне сэмплера.** При self-host используется constrained decoding (xgrammar в vLLM / XGrammar в SGLang) — гарантия *формы*, не семантики: механическая валидация остаётся обязательной.
+**Схема навязывается на уровне сэмплера.** Constraint-декодирование предоставляется API-сервисом (`json_schema`/`json_object` в ответе модели) — гарантия *формы*, не семантики: механическая валидация остаётся обязательной.
 
 **Валидация — эшелон (§10):** (1) существование source_id, резолв URL; (2) цитата — подстрока чистого текста чанка (strict); (3) достаточность: цитата подтверждает только то, что явно из неё следует; каждое утверждение justification должно иметь покрытие evidence (частично механически); over-claim → аномалия; (4) аномалии ревью: ✅ при слабом retrieval-скоре, расхождения по группе. Сбои → `failure_kind` → retry ≤2 → failed. LLM-экспансия запросов: запрещена в strict, допустима в preliminary как источник кандидатов для словарей концептов.
 
@@ -496,7 +497,7 @@ Discovery (Ш2) может использовать search-enabled модель;
 
 ### 7.4. Маршрутизация моделей
 
-Маршрут `scenario → {model_id, version, endpoint_kind, web_tool, decoder, seed, temperature}` **детерминирован по фазе** (не решением LLM) и зафиксирован в `llm_scenarios`/манифесте (I21). Смена модели под сценарий — версионная граница (§13): это **`execution_versions`** (условия измерения, commodity-слой по A2), а не `methodology_version`; блокирует межцикловый diff с пометкой `execution_change`, обязателен `golden-full`. Выбор модели — измерительная задача на golden (A3), как R0/R1/R2. Дефолт MVP: **лёгкий self-host оценщик** (GLM-4.5-Air / Qwen3.8-27B / GigaChat3.5-432B-A28B) с триггером возврата к флагман-классу по §14; search-enabled модель — только в ролях Ш2/scout/SERP.
+Маршрут `scenario → {model_id, version, endpoint_kind, web_tool, decoder, seed, temperature}` **детерминирован по фазе** (не решением LLM) и зафиксирован в `llm_scenarios`/манифесте (I21). **Модель-оценщик задаётся двумя слотами** (`cheap` / `flagship`) в `config/deploy.yaml` (`endpoint_kind: api`, [OI]-совместимый endpoint корпоративного облака); оба слота **дефолтом `deepseek-v4.1-flash:cxbc`**. Активный слот выбирается на этапе эксплуатации по приоритету: CLI `--llm-slot` > env `COHOUND_LLM_SLOT` > `run.yaml: llm_slot` > `deploy.llm.slot` > `cheap` (детерминированное правило, не решение LLM). Смена модели/слота под сценарий — версионная граница (§13): это **`execution_versions`** (условия измерения, commodity-слой по A2), а не `methodology_version`; блокирует межцикловый diff с пометкой `execution_change`, обязателен `golden-full`. Выбор модели-дефолта — измерительная задача на golden (A3), как R0/R1/R2; search-enabled модель — только в ролях Ш2/scout/SERP.
 
 ---
 
@@ -530,7 +531,7 @@ schema validation → source_id-резолв → цитатная валидац
 policy validation (absence+source_scope, границы зачёта) → аномалии → human review
 ```
 
-Adversarial-корпус — регрессионный gate («0 известных инъекций»), не заявление о безопасности. Краулинг: robots.txt, лимиты, ToS — дефолты; обход антибота запрещён; юрчек-лист до M1. **Контур данных:** эмбеддинги и оценщик — локально/self-host в РФ; корпус не покидает контур; search-адаптер — РФ-контур (поисковые запросы — отдельный логируемый канал, к ним применяется то же правило равного бюджета). 152-ФЗ. Юрисдикционная симметрия.
+Adversarial-корпус — регрессионный gate («0 известных инъекций»), не заявление о безопасности. Краулинг: robots.txt, лимиты, ToS — дефолты; обход антибота запрещён; юрчек-лист до M1. **Контур данных:** эмбеддинги — локально; оценщик — модели через [OI]-совместимый API корпоративного облака (внутренняя сеть); корпус не покидает контур; search-адаптер — РФ-контур (поисковые запросы — отдельный логируемый канал, к ним применяется то же правило равного бюджета). 152-ФЗ. Юрисдикционная симметрия.
 
 **Изоляция веб-контура сетевым слоем (доп. эшелон).** Веб-функции (краул, внешний поиск, реестровые фетчеры, экстракция недоверенного контента) могут быть вынесены в **DMZ**, а не-веб функции — в доверенную зону без веб-эгрессии; взаимодействие — только через **application-layer firewall** по явному протоколу. Это материализует **I18** на сетевом уровне (у оценщика физически нет маршрута в интернет) и делает границу **I19** явной. Проектный регламент — `docs/architecture/07-deployment-topology.md`; профиль `split` (DMZ) — опция уже в MVP (M1, поток W13), `local` (один процесс) — дефолт. Контракты между частями coHound проектируются **прозрачными для корпоративных IDP/DLP/IDS** (L7-инспектируемый JSON, публикуемые схемы, TLS без пиннинга, атрибуция запросов); аттестация против конкретных средств — вне рамок проекта.
 
@@ -594,7 +595,7 @@ Preliminary-метрики: yield · расхождение кандидат/str
 
 ### 11.7. Определение воспроизводимости (R7)
 
-«Двойной прогон» = два запуска с идентичными входами, `snapshot_date`, `index_build_id`, `retrieval_profile`+K, набором моделей и фиксированными `temperature`/`seed`/decoder, **без живого ре-фетча** (корпус и SERP — из кэша). **Кэш внешних вызовов content-addressed и глобальный** (вне `runs/{run_id}/`): сырые байты страниц — `corpus_raw/{product_id}/{content_hash}` (уже глобальны), ответы SERP — `cache/serp/{query_hash}.json`, HTTP — `cache/http/{url_hash}.bin` в корне репозитория. Это делает R7 достижимым **между разными `run_id`**: второй запуск читает тот же кэш по хэшу ключа, а не по идентификатору прогона. Метрика — доля совпавших `status` по всем ячейкам. Детерминизм обеспечивается: greedy или seed (SGLang: флаг `--enable-deterministic-inference` + per-request `sampling_seed`; vLLM: `VLLM_ENABLE_V1_MULTIPROCESSING=0`/batch invariance), зафиксированные версии весов и движка, одинаковое железо. Остаточный GPU non-determinism распределённых MoE конфигов документируется как известное ограничение.
+«Двойной прогон» = два запуска с идентичными входами, `snapshot_date`, `index_build_id`, `retrieval_profile`+K, набором моделей и фиксированными `temperature`/`seed`/decoder, **без живого ре-фетча** (корпус и SERP — из кэша). **Кэш внешних вызовов content-addressed и глобальный** (вне `runs/{run_id}/`): сырые байты страниц — `corpus_raw/{product_id}/{content_hash}` (уже глобальны), ответы SERP — `cache/serp/{query_hash}.json`, HTTP — `cache/http/{url_hash}.bin` в корне репозитория. Это делает R7 достижимым **между разными `run_id`**: второй запуск читает тот же кэш по хэшу ключа, а не по идентификатору прогона. Метрика — доля совпавших `status` по всем ячейкам. Детерминизм обеспечивается: greedy или seed и фиксированные `temperature`/decoder на стороне LLM-API, зафиксированные `model_id`/`model_version` (слот) и версии индексного контура. Детерминизм сэмплера — свойство сервиса корпоративного облака (какие именно ручки доступны, см. `docs/architecture/05-dependency-stack.md`); собственный стек инференса (vLLM/SGLang) мы не эксплуатируем. Остаточный недетерминизм распределённых MoE-конфигов документируется как известное ограничение.
 
 ---
 
@@ -651,8 +652,8 @@ Preliminary-метрики: yield · расхождение кандидат/str
 
 | Механизм | Триггер возврата |
 |---|---|
-| **Флагман-класс оценщика** (DeepSeek-V4.1-Flash ~614 GB / GLM-5.3-Flash ~306 GiB FP8) | лёгкий self-host оценщик (GLM-4.5-Air / Qwen3.8-27B / GigaChat3.5-432B-A28B) не достигает golden-порогов R6/R12 на измеримой задаче |
-| **Yandex on-prem (Stackland)** или вендорский контур | своя эксплуатация GPU-кластера дороже/медленнее, чем контур-интегратор; либо требование ИБ |
+| **Флагман-класс оценщика** (слот `flagship`: DeepSeek-V4.1-Flash ~614 GB / GLM-5.3-Flash ~306 GiB FP8 в облаке) | слот `cheap` (дефолт обоих — DeepSeek-V4.1-Flash) не достигает golden-порогов R6/R12 на измеримой задаче; расценки GPU-класса в корп. облаке приемлемы |
+| **Yandex on-prem (Stackland) / вендорский LLM-контур** | своя эксплуатация GPU-кластера дороже/медленнее, чем API корп. облака; либо требование ИБ изолировать LLM-контур |
 | **Huawei Ascend-путь** | подтверждённая доступность/цена Ascend 950PR в РФ и готовность конвертации весов (ModelSlim/CANN) |
 | **Search-enabled LLM как замена/дополнение SERP-адаптера** | измеренное превосходство по полноте/стоимости на retrieval-golden при сохранении симметрии и provenance (I19) |
 | Reranker по умолчанию | измеренный прирост precision на retrieval-golden |
@@ -677,11 +678,11 @@ Preliminary-метрики: yield · расхождение кандидат/str
 (каталог, `cohort.yaml`, `domain_profiles.yaml`, JS-домены) — **данные**, не открытые вопросы: их
 механизм определён (§4.2/§4.3, D2 `fetch: browser` + `wait_for`).
 
-- **LLM-провайдер по сценариям** (self-host оценщика): финал модели (лёгкий класс vs флагман) по R6/R9/R10/R12 + CPU/GPU-бюджет батчей; выбор инференс-стека (vLLM vs SGLang) и стратегии детерминизма. Лицензии кандидатов **верифицированы** (DeepSeek-V4.1-Flash/GLM-5.3-Flash/GLM-4.5-Air/GigaChat3.5-432B-A28B — MIT; Qwen3.8-27B — Apache-2.0); открыт юрстатус self-host. Дефолт — лёгкий класс (§7.4); возврат к флагману — по триггеру §14.
+- **LLM-провайдер по сценариям** (модели через [OI]-API корп. облака): финал дефолта слотов `cheap`/`flagship` по R6/R9/R10/R12 + бюджет токенов/GPU-класса; определение доступных ручек детерминизма у API-сервиса. Лицензии кандидатов **верифицированы** (DeepSeek-V4.1-Flash/GLM-5.3-Flash/GLM-4.5-Air/GigaChat3.5-432B-A28B — MIT; Qwen3.8-27B — Apache-2.0); открыт юрстатус облачного контура. Оба слота дефолтом — DeepSeek-V4.1-Flash (§7.4); возврат к флагману — по триггеру §14.
 - **PDF-контур:** тест docling на 3–5 реальных мануалах РФ-вендоров, PDF + Office (**блокер M0**); риск потери табличной структуры фич-матриц; офлайн-бандл весов и аудит лицензий (§3.2, `05-dependency-stack.md` §7).
 - **Профили tantivy (RU/EN/identifier)** — тюнинг на retrieval-golden per кейс (§11.2); механика (нативный ru-стеммер) закрыта V1 (`05` §V1).
 - **Search-адаптер:** Yandex Search API vs GLM Web Search (`adapter_kind`); бюджет, snapshot, сверка цитат. Продукты **верифицированы** (Yandex Search API — реальный сервис под Yandex AI Studio; GLM Web Search API); открыт выбор дефолта и юрстатус.
-- **Юрчек-лист (до M1):** краулинг/ToS по доменам, хранение сырых байтов, self-host весов.
+- **Юрчек-лист (до M1):** краулинг/ToS по доменам, хранение сырых байтов, использование LLM-API корпоративного облака (условия/юрисдикция обработки).
 - **Стоимость/токены одного полного кейса** (число вызовов оценщика ≈ параметры × продукты × ≤3 запроса + ревью) — может стать ограничением сильнее latency.
 - **Калибровка порогов** (Comparability, R6, R9/R10, yield, бюджеты G2/G3) и **`ranking_epsilon`** (порог неразличимости при устойчивости, §6) после кейса 1.
 
