@@ -775,6 +775,7 @@ class SqliteStore:
         "attempts",
         "fetch_mode",
         "extract_route",
+        "strategy",
         "http_status",
         "content_type",
         "lang",
@@ -798,6 +799,7 @@ class SqliteStore:
             attempts=0 if attempts is None else int(attempts),
             fetch_mode=row["fetch_mode"],
             extract_route=row["extract_route"],
+            strategy=row["strategy"],
             http_status=row["http_status"],
             content_type=row["content_type"],
             lang=row["lang"],
@@ -830,6 +832,7 @@ class SqliteStore:
                 "attempts": attempt.attempts,
                 "fetch_mode": attempt.fetch_mode,
                 "extract_route": attempt.extract_route,
+                "strategy": attempt.strategy,
                 "http_status": attempt.http_status,
                 "content_type": attempt.content_type,
                 "lang": attempt.lang,
@@ -858,6 +861,7 @@ class SqliteStore:
         lang: str | None = None,
         fetch_mode: str | None = None,
         extract_route: str | None = None,
+        strategy: str | None = None,
         ts: str | None = None,
     ) -> None:
         """Частичный upsert статуса per-URL записи краула (read-modify-write, идемпотентно).
@@ -906,6 +910,7 @@ class SqliteStore:
             ("lang", lang),
             ("fetch_mode", fetch_mode),
             ("extract_route", extract_route),
+            ("strategy", strategy),
         ):
             if value is not None:
                 record[key] = value

@@ -350,7 +350,7 @@ registry_facts(run_id, product_id, registry_id, fact_json, source_url, fetched_a
 
 -- D3/P3: durable per-URL учёт краула (аудит + очередь + resume без ре-фетча).
 -- НЕ search_log (тот — единственное место логирования поисковых вызовов, §7/I23).
-crawl_attempts(run_id, product_id, url, status, attempts, fetch_mode, extract_route,
+crawl_attempts(run_id, product_id, url, status, attempts, fetch_mode, extract_route, strategy,
                http_status, content_type, lang, content_hash, raw_path, error_kind, error,
                first_seen, last_attempt, PRIMARY KEY (run_id, product_id, url));
 -- status: pending|fetched|done|failed (fetch_status); error_kind: FailureKind

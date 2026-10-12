@@ -2,7 +2,7 @@
 
 **Документ:** `docs/architecture/01-modules-and-contracts.md`
 **Статус:** принято (ревью-гейт @oracle пройден 2026-10-08)
-**Опирается на:** `00-overview.md` (слои, драйверы D1–D11)
+**Опирается на:** `00-overview.md` (слои, драйверы **AD1–AD11**)
 **Источник истины:** `cohound-spec-v2.md` (регламент v2.1)
 **Смежное:** `05-dependency-stack.md` (пины/лицензии), `06-implementation-strategy.md` (план).
 

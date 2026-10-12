@@ -745,6 +745,7 @@ def build_corpus(
                     lang=page.lang,
                     fetch_mode=_as_text(fetch_plan.fetch),
                     extract_route=_as_text(fetch_plan.extract),
+                    strategy=_as_text(fetch_plan.strategy),
                 )
 
             # 3. Экстракция (грациозная деградация адаптера через .error).

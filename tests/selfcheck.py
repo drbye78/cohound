@@ -588,7 +588,7 @@ def _ports_type_reuse() -> None:
 def _db_smoke() -> None:
     conn = connect(":memory:")
     ver = conn.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()
-    _assert(ver is not None and ver["value"] == "2.3.0")
+    _assert(ver is not None and ver["value"] == "2.4.0")
 
     tables = {r["name"] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     for t in ("products", "runs", "llm_scenarios", "corpus_docs", "corpus_chunks",
@@ -604,9 +604,10 @@ def _db_smoke() -> None:
     _assert("extractor_version" in manifest_cols and "content_digest" in manifest_cols)
 
     # D3 (schema 2.3.0): durable per-URL аудит краула — crawl_attempts с PK и FK на runs.
+    # v2.4: additive-колонка provenance оси стратегии краула (``strategy``).
     crawl_cols = {r["name"] for r in conn.execute("PRAGMA table_info(crawl_attempts)")}
     _assert({"run_id", "product_id", "url", "status", "attempts",
-             "raw_path", "content_hash", "error_kind"} <= crawl_cols)
+             "raw_path", "content_hash", "error_kind", "strategy"} <= crawl_cols)
     crawl_pk = [r["name"] for r in conn.execute("PRAGMA table_info(crawl_attempts)")
                 if r["pk"]]
     _assert(crawl_pk == ["run_id", "product_id", "url"])

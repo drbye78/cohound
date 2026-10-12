@@ -1193,6 +1193,27 @@ def test_crawl_defaults_resolved_into_fetch_plan(tmp_path: Path) -> None:
     assert plan.rate_limit == RateLimitSpec(min_s=1.0, max_s=3.0)
 
 
+@pytest.mark.parametrize("strategy", [CrawlStrategy.HONEST, CrawlStrategy.HYBRID])
+def test_live_fetch_persists_crawl_strategy(tmp_path: Path, strategy: CrawlStrategy) -> None:
+    """v2.4: непустой ``FetchPlan.strategy`` при живом фетче доезжает в ``crawl_attempts``."""
+    store = SqliteStore(":memory:")
+    _make_run(store)
+    try:
+        _build(
+            tmp_path,
+            pages={URL_P1_A: b"page"},
+            urls={"p1": [URL_P1_A]},
+            store=store,
+            run_id=RUN_ID,
+            crawl_defaults=CrawlRunConfig(strategy=strategy),
+            domain_profiles={"docs.test": DomainProfile(fetch=FetchMode.BROWSER)},
+        )
+        row = next(iter(store.iter_crawl_attempts(RUN_ID)))
+        assert row.strategy == strategy.value
+    finally:
+        store.close()
+
+
 def test_crawl_defaults_strategy_normalized_on_http_url(tmp_path: Path) -> None:
     """HTTP-URL нормализует стратегию в ``AUTO`` (инвариант осей); rate_limit сохраняется."""
     crawler = _Crawler({URL_P1_A: b"page"})

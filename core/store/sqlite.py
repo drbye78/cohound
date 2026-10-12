@@ -12,7 +12,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = "2.3.0"
+SCHEMA_VERSION = "2.4.0"
 
 DDL = """
 PRAGMA journal_mode = WAL;
@@ -231,6 +231,7 @@ CREATE TABLE IF NOT EXISTS crawl_attempts (
     attempts      INTEGER NOT NULL DEFAULT 0,
     fetch_mode    TEXT,                                -- http|browser (provenance)
     extract_route TEXT,                                -- auto|html|document фактически применённый
+    strategy      TEXT,                                -- auto|honest|hybrid (provenance оси стратегии краула; §4.4)
     http_status   INTEGER,
     content_type  TEXT,
     lang          TEXT,                                -- D3: язык страницы (resume без потери RawPage.lang)
@@ -317,7 +318,7 @@ def _ensure_columns(
 
 
 def connect(db_path: str | Path = ":memory:") -> sqlite3.Connection:
-    """Открывает БД и применяет схему (+ идемпотентные DDL-миграции v2.1–v2.3)."""
+    """Открывает БД и применяет схему (+ идемпотентные DDL-миграции v2.1–v2.4)."""
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
     conn.executescript(DDL)
@@ -336,6 +337,8 @@ def connect(db_path: str | Path = ":memory:") -> sqlite3.Connection:
     )
     # DDL-миграция v2.3 (D3): crawl_attempts создаётся `CREATE TABLE IF NOT EXISTS` в DDL —
     # ALTER не нужен (новая таблица), но вызов идемпотентен на любой БД.
+    # DDL-миграция v2.4 (P4): ось стратегии краула — additive-колонка provenance.
+    _ensure_columns(conn, "crawl_attempts", {"strategy": "TEXT"})
     conn.execute(
         "INSERT OR REPLACE INTO schema_meta(key, value) VALUES ('schema_version', ?)",
         (SCHEMA_VERSION,),

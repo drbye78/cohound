@@ -93,7 +93,7 @@ def test_schema_opens(store: SqliteStore) -> None:
     ver = store.conn.execute(
         "SELECT value FROM schema_meta WHERE key = 'schema_version'"
     ).fetchone()
-    assert ver["value"] == "2.3.0"
+    assert ver["value"] == "2.4.0"
     tables = {
         r["name"] for r in store.conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
     }
@@ -650,6 +650,7 @@ def test_crawl_attempt_round_trip(store: SqliteStore) -> None:
         attempts=1,
         fetch_mode="http",
         extract_route="auto",
+        strategy="hybrid",
         http_status=200,
         content_type="text/html",
         lang="en",
@@ -669,6 +670,7 @@ def test_crawl_attempt_round_trip(store: SqliteStore) -> None:
     assert got[0].http_status == 200
     assert got[0].content_type == "text/html"
     assert got[0].lang == "en"
+    assert got[0].strategy == "hybrid"
 
     # Полный upsert перекрывает строку по PK.
     store.upsert_crawl_attempt(attempt.model_copy(update={"status": FetchStatus.DONE}))
@@ -717,6 +719,36 @@ def test_mark_crawl_status_attempts_first_seen_last_attempt(store: SqliteStore) 
     assert failed.attempts == 3
     assert failed.error_kind == "parser_failed"
     assert failed.error == "boom"
+
+
+def test_crawl_attempt_strategy_round_trip_and_rmw(store: SqliteStore) -> None:
+    """v2.4: provenance оси стратегии краула (``strategy``) — round-trip и сохранение в RMW."""
+    store.create_run(RUN_ID, _cfg())
+    url = "https://docs.test/p1"
+
+    # upsert_crawl_attempt: полное значение strategy круглится.
+    store.upsert_crawl_attempt(
+        CrawlAttempt(
+            run_id=RUN_ID,
+            product_id="p1",
+            url=url,
+            status=FetchStatus.FETCHED,
+            fetch_mode="browser",
+            extract_route="auto",
+            strategy="hybrid",
+        )
+    )
+    assert next(iter(store.iter_crawl_attempts(RUN_ID))).strategy == "hybrid"
+
+    # mark_crawl_status: strategy персистится и читается.
+    store.mark_crawl_status(RUN_ID, "p1", url, FetchStatus.FETCHED, strategy="honest")
+    assert next(iter(store.iter_crawl_attempts(RUN_ID))).strategy == "honest"
+
+    # RMW: strategy=None не затирает ранее записанное значение (перекрываются только не-None).
+    store.mark_crawl_status(RUN_ID, "p1", url, FetchStatus.DONE)
+    row = next(iter(store.iter_crawl_attempts(RUN_ID)))
+    assert row.status is FetchStatus.DONE
+    assert row.strategy == "honest"
 
 
 def test_iter_crawl_attempts_order_and_filters(store: SqliteStore) -> None:

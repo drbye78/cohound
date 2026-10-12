@@ -832,7 +832,7 @@ class CrawlAttempt(BaseModel):
     """Строка ``crawl_attempts`` (D3, §4.4): durable per-URL запись краула.
 
     Носитель аудита, очереди и resume Ш5: статус ``FetchStatus`` плюс провенанс попытки
-    (``fetch_mode``/``extract_route``/``http_status``/``content_type``/``lang``) и retention
+    (``fetch_mode``/``extract_route``/``strategy``/``http_status``/``content_type``/``lang``) и retention
     (``content_hash``/``raw_path``). ``error_kind`` переиспользует ``FailureKind`` (без нового
     перечисления): сбой краула → ``source_unavailable``, сбой извлечения → ``parser_failed``.
     ``status`` — часть операционной таблицы, а не доменной ячейки (см. ``FetchStatus``).
@@ -847,6 +847,9 @@ class CrawlAttempt(BaseModel):
     attempts: int = 0
     fetch_mode: str | None = None
     extract_route: str | None = None
+    #: Ось стратегии краула (``auto|honest|hybrid``) — provenance фактически применённой
+    #: стратегии фетча страницы (§4.4). Свободная строка-провенанс, зеркало ``CrawlStrategy``.
+    strategy: str | None = None
     http_status: int | None = None
     content_type: str | None = None
     #: Язык страницы (D3): персистится, чтобы resume не терял ``RawPage.lang`` (иначе

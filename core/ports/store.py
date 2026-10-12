@@ -113,6 +113,7 @@ class StorePort(Protocol):
         lang: str | None = None,
         fetch_mode: str | None = None,
         extract_route: str | None = None,
+        strategy: str | None = None,
         ts: str | None = None,
     ) -> None:
         """Частичный upsert статуса per-URL записи краула (идемпотентный).
