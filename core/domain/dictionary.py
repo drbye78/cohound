@@ -13,6 +13,7 @@ import yaml
 
 from core.domain.enums import (
     CapabilityPolicy,
+    CrawlStrategy,
     ExtractionRoute,
     FetchMode,
     FetchStatus,
@@ -59,6 +60,8 @@ def assert_dictionary_integrity(path: str | Path) -> None:
         # D2: оси получения/извлечения (domain_profiles.yaml / FetchPlan).
         "fetch_mode",
         "extraction_route",
+        # D4: стратегия краула (как используется браузер; FetchPlan).
+        "crawl_strategy",
         # D3: статус per-URL записи краула (crawl_attempts).
         "fetch_status",
     ]
@@ -80,6 +83,7 @@ def assert_dictionary_integrity(path: str | Path) -> None:
         "stale_reason": {v.value for v in StaleReason},
         "fetch_mode": {v.value for v in FetchMode},
         "extraction_route": {v.value for v in ExtractionRoute},
+        "crawl_strategy": {v.value for v in CrawlStrategy},
         "fetch_status": {v.value for v in FetchStatus},
     }
     for section, expected in checks.items():

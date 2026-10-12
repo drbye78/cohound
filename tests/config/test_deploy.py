@@ -18,6 +18,8 @@ from core.config.deploy import (
     DEFAULT_LLM_MODEL_ID,
     DEFAULT_LLM_SLOT,
     LLM_SLOTS,
+    CrawlBrowserConfig,
+    CrawlConfig,
     DeployConfig,
     LLMDeployConfig,
     LLMSlotConfig,
@@ -253,6 +255,282 @@ def test_extra_crawl_field_rejected(tmp_path: Path) -> None:
     path = _write(tmp_path, "profile: local\ncrawl:\n  user_agent: ua\n  robots: true\n")
     with pytest.raises(ValidationError):
         load_deploy_config(path)
+
+
+# ---------------------------------------------------------------------------
+# Секция crawl.browser (браузерный краулер; режимы cdp/persistent)
+# ---------------------------------------------------------------------------
+
+
+def test_crawl_browser_defaults() -> None:
+    """Дефолтный ``browser`` — плейсхолдер ``mode=None`` без явной конфигурации."""
+    browser = CrawlConfig().browser
+    assert browser.mode is None
+    assert browser.cdp_url is None
+    assert browser.user_data_dir is None
+    assert browser.headless is False
+    assert browser.channel is None
+    assert browser.timeout_ms == 30000
+
+
+def test_crawl_browser_default_equals_fresh_instance() -> None:
+    """Плейсхолдер конструируется без обязательного ``cdp_url`` (не сконфигурирован)."""
+    assert CrawlBrowserConfig() == CrawlConfig().browser
+    assert CrawlBrowserConfig().mode is None
+
+
+def test_crawl_browser_cdp_parsed(tmp_path: Path) -> None:
+    path = _write(
+        tmp_path,
+        _dump(
+            {
+                "profile": "local",
+                "crawl": {
+                    "browser": {
+                        "mode": "cdp",
+                        "cdp_url": "http://127.0.0.1:9222",
+                        "headless": True,
+                        "channel": "chrome",
+                        "timeout_ms": 15000,
+                    }
+                },
+            }
+        ),
+    )
+    cfg = load_deploy_config(path)
+    assert cfg.crawl.browser.mode == "cdp"
+    assert cfg.crawl.browser.cdp_url == "http://127.0.0.1:9222"
+    assert cfg.crawl.browser.headless is True
+    assert cfg.crawl.browser.channel == "chrome"
+    assert cfg.crawl.browser.timeout_ms == 15000
+
+
+def test_crawl_browser_persistent_parsed(tmp_path: Path) -> None:
+    path = _write(
+        tmp_path,
+        _dump(
+            {
+                "profile": "local",
+                "crawl": {
+                    "browser": {
+                        "mode": "persistent",
+                        "user_data_dir": "/var/lib/cohound/profile",
+                    }
+                },
+            }
+        ),
+    )
+    cfg = load_deploy_config(path)
+    assert cfg.crawl.browser.mode == "persistent"
+    assert cfg.crawl.browser.user_data_dir == "/var/lib/cohound/profile"
+    assert cfg.crawl.browser.cdp_url is None
+
+
+def test_crawl_browser_empty_strings_normalized_to_none(tmp_path: Path) -> None:
+    """Пустые/пробельные строки нормализуются: ``strip`` + ``""`` → ``None``."""
+    path = _write(
+        tmp_path,
+        _dump(
+            {
+                "profile": "local",
+                "crawl": {
+                    "browser": {
+                        "mode": "cdp",
+                        "cdp_url": "  http://127.0.0.1:9222  ",
+                        "channel": "   ",
+                    }
+                },
+            }
+        ),
+    )
+    cfg = load_deploy_config(path)
+    assert cfg.crawl.browser.cdp_url == "http://127.0.0.1:9222"
+    assert cfg.crawl.browser.channel is None
+
+
+def test_crawl_browser_unknown_mode_rejected(tmp_path: Path) -> None:
+    path = _write(
+        tmp_path,
+        _dump({"profile": "local", "crawl": {"browser": {"mode": "attach"}}}),
+    )
+    with pytest.raises(ValidationError, match="mode"):
+        load_deploy_config(path)
+
+
+def test_crawl_browser_cdp_without_cdp_url_rejected(tmp_path: Path) -> None:
+    path = _write(
+        tmp_path,
+        _dump(
+            {
+                "profile": "local",
+                "crawl": {"browser": {"mode": "cdp", "headless": True}},
+            }
+        ),
+    )
+    with pytest.raises(ValidationError, match="cdp_url"):
+        load_deploy_config(path)
+
+
+def test_crawl_browser_persistent_without_user_data_dir_rejected(tmp_path: Path) -> None:
+    path = _write(
+        tmp_path,
+        _dump({"profile": "local", "crawl": {"browser": {"mode": "persistent"}}}),
+    )
+    with pytest.raises(ValidationError, match="user_data_dir"):
+        load_deploy_config(path)
+
+
+def test_crawl_browser_cdp_with_user_data_dir_rejected(tmp_path: Path) -> None:
+    """Режим ``cdp`` несовместим с ``user_data_dir`` (взаимоисключение)."""
+    path = _write(
+        tmp_path,
+        _dump(
+            {
+                "profile": "local",
+                "crawl": {
+                    "browser": {
+                        "mode": "cdp",
+                        "cdp_url": "http://127.0.0.1:9222",
+                        "user_data_dir": "/tmp/profile",
+                    }
+                },
+            }
+        ),
+    )
+    with pytest.raises(ValidationError, match="взаимоисключение"):
+        load_deploy_config(path)
+
+
+def test_crawl_browser_persistent_with_cdp_url_rejected(tmp_path: Path) -> None:
+    path = _write(
+        tmp_path,
+        _dump(
+            {
+                "profile": "local",
+                "crawl": {
+                    "browser": {
+                        "mode": "persistent",
+                        "user_data_dir": "/tmp/profile",
+                        "cdp_url": "http://127.0.0.1:9222",
+                    }
+                },
+            }
+        ),
+    )
+    with pytest.raises(ValidationError, match="взаимоисключение"):
+        load_deploy_config(path)
+
+
+def test_crawl_browser_none_mode_allows_cross_fields(tmp_path: Path) -> None:
+    """``mode=None`` — плейсхолдер: перекрёстных требований нет (валиден)."""
+    cfg = load_deploy_config(
+        _write(tmp_path, "profile: local\ncrawl:\n  browser:\n    headless: true\n")
+    )
+    assert cfg.crawl.browser.mode is None
+    assert cfg.crawl.browser.headless is True
+
+
+def test_crawl_browser_non_positive_timeout_rejected(tmp_path: Path) -> None:
+    path = _write(
+        tmp_path,
+        _dump(
+            {
+                "profile": "local",
+                "crawl": {
+                    "browser": {
+                        "mode": "cdp",
+                        "cdp_url": "http://127.0.0.1:9222",
+                        "timeout_ms": 0,
+                    }
+                },
+            }
+        ),
+    )
+    with pytest.raises(ValidationError, match="timeout_ms"):
+        load_deploy_config(path)
+
+
+def test_crawl_browser_extra_field_rejected(tmp_path: Path) -> None:
+    path = _write(
+        tmp_path,
+        _dump(
+            {
+                "profile": "local",
+                "crawl": {
+                    "browser": {
+                        "mode": "cdp",
+                        "cdp_url": "http://127.0.0.1:9222",
+                        "stealth": True,
+                    }
+                },
+            }
+        ),
+    )
+    with pytest.raises(ValidationError):
+        load_deploy_config(path)
+
+
+def test_crawl_without_browser_section_still_loads(tmp_path: Path) -> None:
+    """Минимальный/дефолтный YAML по-прежнему грузится; ``browser`` — плейсхолдер."""
+    cfg = load_deploy_config(_write(tmp_path, "profile: local\ncrawl:\n  user_agent: ua\n"))
+    assert cfg.crawl.user_agent == "ua"
+    assert cfg.crawl.browser == CrawlBrowserConfig()
+    assert cfg.crawl.browser.mode is None
+
+
+# ---------------------------------------------------------------------------
+# Идемпотентность под dump→validate (persist/reload, model_copy, JSON-схема)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "browser",
+    [
+        CrawlBrowserConfig(),  # плейсхолдер (mode=None)
+        CrawlBrowserConfig(mode="cdp", cdp_url="http://127.0.0.1:9222"),
+        CrawlBrowserConfig(mode="persistent", user_data_dir="/tmp/profile"),
+    ],
+    ids=["placeholder", "cdp", "persistent"],
+)
+def test_crawl_browser_dump_validate_idempotent(
+    browser: CrawlBrowserConfig,
+) -> None:
+    """``model_validate(model_dump())`` не падает и сохраняет значения."""
+    again = CrawlBrowserConfig.model_validate(browser.model_dump())
+    assert again == browser
+
+
+@pytest.mark.parametrize(
+    "browser",
+    [
+        CrawlBrowserConfig(),
+        CrawlBrowserConfig(mode="cdp", cdp_url="http://127.0.0.1:9222"),
+        CrawlBrowserConfig(mode="persistent", user_data_dir="/tmp/profile"),
+    ],
+    ids=["placeholder", "cdp", "persistent"],
+)
+def test_deploy_config_dump_validate_idempotent(
+    browser: CrawlBrowserConfig,
+) -> None:
+    """``DeployConfig.model_validate(cfg.model_dump())`` — без ошибок, значения сохранены.
+
+    Регрессия: плейсхолдер ``CrawlBrowserConfig()`` раньше проваливал повторную
+    валидацию («режим cdp требует непустой cdp_url»), т.к. ``model_dump()`` терял
+    состояние «поле не задавалось» (``model_fields_set``). Теперь «не сконфигурировано» —
+    явное ``mode=None``.
+    """
+    cfg = DeployConfig(profile="local", crawl=CrawlConfig(browser=browser))
+    reloaded = DeployConfig.model_validate(cfg.model_dump())
+    assert reloaded == cfg
+    assert reloaded.crawl.browser == browser
+
+
+def test_deploy_config_dump_validate_default_is_idempotent() -> None:
+    """Дефолтный ``DeployConfig()`` (без явной секции) переваривает dump→validate."""
+    cfg = DeployConfig()
+    reloaded = DeployConfig.model_validate(cfg.model_dump())
+    assert reloaded == cfg
+    assert reloaded.crawl.browser.mode is None
 
 
 # ---------------------------------------------------------------------------

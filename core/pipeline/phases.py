@@ -265,6 +265,9 @@ def build_phases(
             package_id=_package_id(inputs, plan),
             domain_profiles=domain_profiles or {},
             explicit_fetch=explicit_fetch,
+            # D4 (P2-3): секция ``crawl`` run.yaml → дефолты оси стратегии/лимита для ``FetchPlan``.
+            # ``RunConfig`` доступен как ``inputs.run`` (RunInputs.run), поле ``crawl`` опционально.
+            crawl_defaults=getattr(getattr(inputs, "run", None), "crawl", None),
             # D3: durable-краул (аудит/очередь/resume) привязан к прогону; store уже есть.
             run_id=getattr(plan, "run_id", None),
         )

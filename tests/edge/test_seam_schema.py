@@ -19,6 +19,7 @@ from core.edge import seam_schema
 from core.edge.seam_schema import (
     ENDPOINT_OPS,
     SEAM_SCHEMA_VERSION,
+    STRATEGY_VALUES,
     contract_digest,
     load_schema,
     validate_envelope,
@@ -239,6 +240,34 @@ def test_validate_fetch_request_rejects_unknown_axes() -> None:
 
 def test_validate_fetch_request_rejects_wrong_wait_for_type() -> None:
     assert validate_fetch_request({"url": "https://x.test", "wait_for": 5})
+
+
+def test_strategy_values_exported() -> None:
+    """Ось ``strategy`` объявлена как реэкспортируемая константа ``auto|honest|hybrid``."""
+    assert STRATEGY_VALUES == frozenset({"auto", "honest", "hybrid"})
+
+
+def test_fetch_schema_declares_strategy_axis() -> None:
+    """Публикуемая схема запроса содержит ось ``strategy`` (additive, не в required)."""
+    schema = load_schema("fetch")
+    request = schema["$defs"]["request"]
+    assert request["properties"]["strategy"] == {"enum": ["auto", "honest", "hybrid"]}
+    assert "strategy" not in request.get("required", [])
+
+
+@pytest.mark.parametrize("value", ["auto", "honest", "hybrid"])
+def test_validate_fetch_request_accepts_strategy(value: str) -> None:
+    assert validate_fetch_request({"url": "https://x.test", "strategy": value}) == []
+
+
+def test_validate_fetch_request_strategy_optional_backward_compatible() -> None:
+    """Отсутствие ``strategy`` — валидно (обратная совместимость, поле additive)."""
+    assert validate_fetch_request({"url": "https://x.test"}) == []
+    assert validate_fetch_request({"url": "https://x.test", "strategy": None}) == []
+
+
+def test_validate_fetch_request_rejects_unknown_strategy() -> None:
+    assert validate_fetch_request({"url": "https://x.test", "strategy": "flash"})
 
 
 # ---------------------------------------------------------------------------

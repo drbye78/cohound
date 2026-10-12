@@ -38,6 +38,11 @@
 | D10 | **A1:** минимальные средства | Стек дефолтов прост (SQLite, .npy, in-process); тяжёлое — по триггерам §14 |
 | D11 | **§10:** эшелонированная защита | Валидация как отдельный слой-конвейер, независимый от LLM |
 
+> **Глоссарий нотации `D#`.** `D1–D11` в этой таблице — **драйверы архитектуры** (локальны для `00`).
+> Ссылки вида `(D2)`/`(D3)`/`(D4)` в описаниях осей краула и комментариях кода — **журнал проектных
+> решений** (оси `fetch`/`extract`; durable `crawl_attempts`; ось `strategy`), не путать с номерами
+> драйверов. Это две независимые нумерации.
+
 ---
 
 ## 2. Контекст системы (C4 уровень 1)
@@ -161,7 +166,7 @@ IDP/DLP/IDS (`07` §8).
 
 `adapters/vector_npy.py` (NpyVectorIndex, продукт-шарды) · `adapters/lexical_tantivy.py` ·
 `adapters/llm_local.py` ([OI]-совместимый endpoint корп. облака; без тулов, I18) · `adapters/search_yandex.py` · `adapters/search_glm.py` ·
-`adapters/crawl_scrapy.py` · `adapters/extract_html.py` (trafilatura) / `adapters/extract_document.py`
+`adapters/crawl_scrapy.py` · `adapters/crawl_browser.py` (прямой Playwright/CDP, honest/hybrid) · `adapters/extract_html.py` (trafilatura) / `adapters/extract_document.py`
 (docling: PDF + Office docx/pptx/xlsx, лёгкий путь без torch для Office) · `adapters/chunker_*.py` ·
 `store/sqlite.py` (DDL) · **`config/paths.py`** (раскладка путей). Стек/пины/лицензии —
 `05-dependency-stack.md`.
@@ -234,7 +239,7 @@ core/
   adapters/    vector_npy.py index_npy.py index_format.py lexical_tantivy.py
                embed_local.py llm_local.py llm_discovery.py
                search_yandex.py search_glm.py
-               crawl_scrapy.py crawl_http.py
+               crawl_scrapy.py crawl_http.py crawl_browser.py
                extract_html.py extract_document.py chunker_markdown.py
                remote_gateway.py remote_crawler.py remote_search.py remote_registry.py
                remote_extractor.py registry_generic.py gateway_validate.py
@@ -284,7 +289,7 @@ M0 должен давать **сквозной вертикальный сре�
 
 > **Стартовый актив (не greenfield).** К началу M0 уже существовали монолиты `core/schemas.py` / `core/db.py` (схемы + инварианты + DDL/триггеры), позже **расщеплены и удалены** (T1.2/T1.3);
 > утилиты (`text_utils`, `security`, `fusion`, `retrieval_eval`) и адаптеры (`chunker_markdown`,
-> `extract_document`, `lexical_bm25`), а также `tests/selfcheck.py` (ныне **87** проверок) и
+> `extract_document`, `lexical_bm25`), а также `tests/selfcheck.py` (ныне **86** проверок) и
 > пройденный браузерный smoke (V5). M0 — это **рефакторинг за порты**, а не написание с нуля.
 > Полная инвентаризация и влияние на оценки — `06` §0.
 

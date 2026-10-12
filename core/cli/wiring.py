@@ -33,6 +33,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from core.adapters.chunker_markdown import MarkdownChunkerPort
+from core.adapters.crawl_browser import BrowserCrawler
 from core.adapters.crawl_http import HttpCrawler
 from core.adapters.crawl_scrapy import ScrapyCrawler
 from core.adapters.embed_local import LocalEmbedder
@@ -563,12 +564,13 @@ def build_evaluator_llm(
     )
 
 
-#: Env-переменная выбора краулера ``passport-scout``: ``http`` (дефолт) | ``scrapy``.
+#: Env-переменная выбора краулера ``passport-scout``: ``http`` (дефолт) | ``scrapy`` | ``browser``.
 ENV_SCOUT_CRAWLER = "COHOUND_SCOUT_CRAWLER"
 #: Дефолтный (лёгкий) краулер scout — обычный HTTP без браузера (A1, MVP).
 DEFAULT_SCOUT_CRAWLER = "http"
-#: Поддерживаемые краулеры scout: лёгкий ``http`` и браузерный ``scrapy``.
-SUPPORTED_SCOUT_CRAWLERS: tuple[str, ...] = ("http", "scrapy")
+#: Поддерживаемые краулеры scout: лёгкий ``http``, браузерный ``scrapy`` и
+#: ``browser`` (:class:`BrowserCrawler` — честный/hybrid браузерный рендер, SPA/JS).
+SUPPORTED_SCOUT_CRAWLERS: tuple[str, ...] = ("http", "scrapy", "browser")
 
 
 def build_scout_crawler(
@@ -579,17 +581,23 @@ def build_scout_crawler(
 ) -> CrawlerPort:
     """Собирает краулер для ``passport-scout`` (дефолт — лёгкий, A1/MVP).
 
-    Обычный сайт = ``httpx`` (:class:`HttpCrawler`, ленивый импорт); браузерный
-    Scrapy/playwright — опция для SPA. Выбор — через env
+    Обычный сайт = ``httpx`` (:class:`HttpCrawler`, ленивый импорт); браузерный рендер —
+    опция для SPA/JS: ``scrapy`` (:class:`ScrapyCrawler`, Scrapy/playwright) или ``browser``
+    (:class:`BrowserCrawler`, прямой Playwright, honest/hybrid). Выбор — через env
     :data:`ENV_SCOUT_CRAWLER` ∈ :data:`SUPPORTED_SCOUT_CRAWLERS`:
 
     * ``http`` (дефолт) — :class:`HttpCrawler`;
-    * ``scrapy`` — :class:`ScrapyCrawler` (браузерный рендер).
+    * ``scrapy`` — :class:`ScrapyCrawler` (браузерный рендер через Scrapy/playwright);
+    * ``browser`` — :class:`BrowserCrawler` (честный/hybrid браузерный рендер, SPA/JS).
 
     Для ``http`` применяется операционная политика :class:`~core.config.deploy.CrawlConfig`
-    из ``deploy.yaml`` (``user_agent``/``timeout_s``/``follow_redirects``). ``deploy=None``
+    из ``deploy.yaml`` (``user_agent``/``timeout_s``/``follow_redirects``). Для ``browser``
+    применяется ``deploy.crawl`` (``user_agent``) и ``deploy.crawl.browser``
+    (:class:`~core.config.deploy.CrawlBrowserConfig`: ``cdp_url``/``user_data_dir``/
+    ``headless``/``channel``/``timeout_ms``); декларативный ``mode`` не передаётся —
+    фактическую ветку (CDP vs persistent-профиль) выводит сам адаптер по данным. ``deploy=None``
     → конфиг загружается канонически (:func:`load_deploy_config`); при профиле ``local``
-    без файла значения совпадают с дефолтами :class:`HttpCrawler` — поведение не меняется
+    без файла значения совпадают с дефолтами адаптера — поведение не меняется
     (обратная совместимость). Недоступность зависимости даёт понятный ``CrawlError`` на
     фетче (адаптер не падает на конструкторе). Тесты инъектируют ``crawler`` в :func:`main`.
 
@@ -597,12 +605,16 @@ def build_scout_crawler(
     исполнимости **не** делается здесь: иначе ``hound run`` падал бы на сборке композиции
     даже для ``--until plan`` и для наборов URL, не задевающих browser-домены. Она
     URL-скоупедится в pipeline (:func:`core.pipeline.corpus.build_corpus`): browser-URL при
-    HTTP-краулере пропускается с пофURL-ошибкой, не роняя фазу. Выбор ``http``/``scrapy`` —
-    только env :data:`ENV_SCOUT_CRAWLER`.
+    HTTP-краулере пропускается с пофURL-ошибкой, не роняя фазу. Выбор
+    ``http``/``scrapy``/``browser`` — только env :data:`ENV_SCOUT_CRAWLER`.
 
     **R7-кэш.** ``cache`` — глобальный content-addressed кэш (``core.util.cache``,
-    ADR 0016), протягивается в краулер. План (``FetchPlan``) резолвится в pipeline
+    ADR 0016), протягивается в краулер (у :class:`BrowserCrawler` кэшируется **только**
+    hybrid-путь; honest-рендер всегда живой). План (``FetchPlan``) резолвится в pipeline
     (:func:`core.pipeline.fetch_plan.resolve_fetch_plan`), поэтому профили сюда не передаются.
+
+    **Пейсинг — один источник.** Централизованный пейсинг живёт в corpus (полоса P2-3);
+    адаптерный ``rate_limiter`` здесь **не** передаётся (``None``) — двойного сна нет.
 
     :param deploy: типизированный deploy-конфиг (политика ``crawl``); ``None`` → канон.
     :param cache: глобальный кэш внешних вызовов; ``None`` → без кэша.
@@ -619,6 +631,9 @@ def build_scout_crawler(
         return HttpCrawler(**_http_crawler_kwargs(config), cache=cache)
     if name == "scrapy":
         return ScrapyCrawler(cache=cache)
+    if name == "browser":
+        config = deploy if deploy is not None else load_deploy_config(None)
+        return BrowserCrawler(**_browser_crawler_kwargs(config), cache=cache)
     raise WiringError(
         f"{ENV_SCOUT_CRAWLER}: неизвестный краулер {name!r}; "
         f"поддерживаются: {', '.join(SUPPORTED_SCOUT_CRAWLERS)}"
@@ -638,6 +653,39 @@ def _http_crawler_kwargs(deploy: DeployConfig) -> dict[str, Any]:
         kwargs["user_agent"] = crawl.user_agent
     if crawl.timeout_s is not None:
         kwargs["timeout"] = crawl.timeout_s
+    return kwargs
+
+
+def _browser_crawler_kwargs(deploy: DeployConfig) -> dict[str, Any]:
+    """Параметры :class:`BrowserCrawler` из ``deploy.crawl`` (дефолты адаптера при ``None``).
+
+    Значения ``None`` в конфиге **не** передаются: адаптер подставит собственные дефолты
+    (как в :func:`_http_crawler_kwargs`). Из ``deploy.crawl.browser``:
+
+    * ``headless``/``timeout_ms`` — передаются всегда (у них конкретные дефолты в
+      :class:`~core.config.deploy.CrawlBrowserConfig`);
+    * ``cdp_url``/``user_data_dir``/``channel`` — только если не ``None``;
+    * ``user_agent`` — из ``deploy.crawl.user_agent``, только если не ``None``.
+
+    Декларативный ``browser.mode`` **не** передаётся: это селектор ветки подключения, а
+    фактическую ветку (CDP vs persistent-профиль) выводит сам адаптер по ``cdp_url``/
+    ``user_data_dir``. Пейсинг (``rate_limiter``) тоже не передаётся — его источник один
+    (corpus, полоса P2-3).
+    """
+    crawl = deploy.crawl
+    browser = crawl.browser
+    kwargs: dict[str, Any] = {
+        "headless": browser.headless,
+        "timeout_ms": browser.timeout_ms,
+    }
+    if browser.cdp_url is not None:
+        kwargs["cdp_url"] = browser.cdp_url
+    if browser.user_data_dir is not None:
+        kwargs["user_data_dir"] = browser.user_data_dir
+    if browser.channel is not None:
+        kwargs["channel"] = browser.channel
+    if crawl.user_agent is not None:
+        kwargs["user_agent"] = crawl.user_agent
     return kwargs
 
 

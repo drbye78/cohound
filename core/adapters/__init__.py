@@ -2,6 +2,7 @@
 
 __all__ = [
     "chunker_markdown",
+    "crawl_browser",
     "crawl_http",
     "crawl_scrapy",
     "embed_local",

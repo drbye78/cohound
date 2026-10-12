@@ -415,11 +415,23 @@ def _env_group() -> CheckGroup:
     )
 
     # -- Scout ------------------------------------------------------------ #
+    def _browser_ready() -> tuple[str, str, str | None]:
+        """Готовность браузерного краулера: доступен ли ``playwright`` (без импорта/запуска)."""
+        if importlib.util.find_spec("playwright") is not None:
+            return OK, "browser (playwright доступен)", None
+        return (
+            WARN,
+            "browser (playwright не установлен)",
+            "установите extra 'crawl' и playwright install chromium",
+        )
+
     def _scout() -> tuple[str, str, str | None]:
         raw = os.environ.get(ENV_SCOUT_CRAWLER)
         if raw is None or not raw.strip():
             return OK, "не задан → http", None
         name = raw.strip().lower()
+        if name == "browser":
+            return _browser_ready()
         if name in SUPPORTED_SCOUT_CRAWLERS:
             return OK, f"{name}", None
         return (

@@ -40,7 +40,14 @@ from core.ports.extractor import ExtractorPort
 from core.ports.gateway import ContentGateway
 from core.ports.registry import RegistryFetcherPort
 from core.ports.search import SearchAdapterPort, SearchQuery, SearchResult
-from core.ports.types import ExtractedDoc, FetchMode, FetchPlan, ProductRef, RawPage
+from core.ports.types import (
+    CrawlStrategy,
+    ExtractedDoc,
+    FetchMode,
+    FetchPlan,
+    ProductRef,
+    RawPage,
+)
 from core.util.hashing import content_hash
 
 _REQUEST_ID = "0" * 32
@@ -267,6 +274,23 @@ def test_remote_crawler_decodes_base64_and_rehashes() -> None:
     assert seen["payload"]["url"] == "https://site.test/start"
     assert seen["payload"]["fetch"] == "browser"
     assert seen["payload"]["extract"] == "auto"
+
+
+@pytest.mark.parametrize("strategy", list(CrawlStrategy))
+def test_remote_crawler_forwards_strategy_axis(strategy: CrawlStrategy) -> None:
+    """Ось ``strategy`` из ``FetchPlan`` доезжает до payload ``/v1/fetch`` (additive)."""
+    seen: dict[str, Any] = {}
+
+    def respond(op: str, payload: Mapping[str, Any]) -> Any:
+        seen["payload"] = payload
+        return {"raw": {"content": "x"}}
+
+    RemoteCrawler(_gw(respond)).fetch(
+        "https://site.test/start", FetchPlan(strategy=strategy)
+    )
+
+    assert seen["payload"]["strategy"] == strategy.value
+    assert seen["payload"]["strategy"] in {"auto", "honest", "hybrid"}
 
 
 def test_remote_crawler_rejects_hash_mismatch() -> None:

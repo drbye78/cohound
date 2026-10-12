@@ -13,7 +13,7 @@ import pytest
 
 from core.config.domain_profiles import DomainProfile, load_domain_profiles
 from core.domain.enums import ExtractionRoute, FetchMode
-from core.ports.types import FetchPlan
+from core.ports.types import CrawlStrategy, FetchPlan, RateLimitSpec
 from core.pipeline.fetch_plan import resolve_fetch_plan
 
 
@@ -182,3 +182,146 @@ def test_load_domain_profiles_rejects_non_mapping_entry(tmp_path: Path) -> None:
     path.write_text("example.com: not_a_mapping\n", encoding="utf-8")
     with pytest.raises(ValueError, match="словарь"):
         load_domain_profiles(path)
+
+
+# ---------------------------------------------------------------------------
+# D4: ось стратегии краула + per-host rate_limit
+# ---------------------------------------------------------------------------
+
+
+def test_default_strategy_and_rate_propagate_to_browser() -> None:
+    rate = RateLimitSpec(min_s=2.0, max_s=5.0)
+    profiles = {"example.org": DomainProfile(fetch=FetchMode.BROWSER)}
+    plan = resolve_fetch_plan(
+        "https://example.org/a",
+        profiles,
+        default_strategy=CrawlStrategy.HONEST,
+        default_rate_limit=rate,
+    )
+    assert plan.strategy is CrawlStrategy.HONEST
+    assert plan.rate_limit == rate
+
+
+def test_default_strategy_normalized_to_auto_on_http() -> None:
+    # HTTP-фетч: стратегия браузера бессмысленна -> AUTO (инвариант осей).
+    plan = resolve_fetch_plan(
+        "https://unknown.test/a",
+        {},
+        default_strategy=CrawlStrategy.HONEST,
+    )
+    assert plan.fetch is FetchMode.HTTP
+    assert plan.strategy is CrawlStrategy.AUTO
+
+
+def test_default_plan_strategy_is_auto_without_rate() -> None:
+    plan = resolve_fetch_plan("https://unknown.test/a", {})
+    assert plan.strategy is CrawlStrategy.AUTO
+    assert plan.rate_limit is None
+
+
+def test_domain_profile_strategy_and_rate_override_defaults() -> None:
+    profiles = {
+        "example.org": DomainProfile(
+            fetch=FetchMode.BROWSER,
+            strategy=CrawlStrategy.HYBRID,
+            rate_limit=RateLimitSpec(min_s=1.0, max_s=2.0),
+        )
+    }
+    plan = resolve_fetch_plan(
+        "https://example.org/a",
+        profiles,
+        default_strategy=CrawlStrategy.HONEST,
+        default_rate_limit=RateLimitSpec(min_s=5.0, max_s=9.0),
+    )
+    assert plan.strategy is CrawlStrategy.HYBRID
+    assert plan.rate_limit == RateLimitSpec(min_s=1.0, max_s=2.0)
+
+
+def test_domain_profile_without_strategy_inherits_default() -> None:
+    profiles = {"example.org": DomainProfile(fetch=FetchMode.BROWSER)}
+    rate = RateLimitSpec(min_s=3.0, max_s=4.0)
+    plan = resolve_fetch_plan(
+        "https://example.org/a",
+        profiles,
+        default_strategy=CrawlStrategy.HONEST,
+        default_rate_limit=rate,
+    )
+    assert plan.strategy is CrawlStrategy.HONEST
+    assert plan.rate_limit == rate
+
+
+def test_profile_strategy_with_http_fetch_normalizes_to_auto() -> None:
+    profiles = {
+        "example.org": DomainProfile(
+            fetch=FetchMode.HTTP,
+            strategy=CrawlStrategy.HYBRID,
+        )
+    }
+    plan = resolve_fetch_plan("https://example.org/a", profiles)
+    assert plan.fetch is FetchMode.HTTP
+    assert plan.strategy is CrawlStrategy.AUTO
+
+
+def test_profile_browser_fetch_keeps_strategy() -> None:
+    profiles = {
+        "example.org": DomainProfile(
+            fetch=FetchMode.BROWSER,
+            strategy=CrawlStrategy.HYBRID,
+        )
+    }
+    plan = resolve_fetch_plan("https://example.org/a", profiles)
+    assert plan.fetch is FetchMode.BROWSER
+    assert plan.strategy is CrawlStrategy.HYBRID
+
+
+def test_explicit_override_to_http_normalizes_strategy_to_auto() -> None:
+    profiles = {
+        "example.org": DomainProfile(
+            fetch=FetchMode.BROWSER,
+            strategy=CrawlStrategy.HYBRID,
+        )
+    }
+    explicit = {"https://example.org/a": FetchMode.HTTP}
+    plan = resolve_fetch_plan("https://example.org/a", profiles, explicit)
+    assert plan.fetch is FetchMode.HTTP
+    assert plan.strategy is CrawlStrategy.AUTO
+
+
+def test_explicit_override_to_browser_keeps_strategy() -> None:
+    profiles = {"example.org": DomainProfile(fetch=FetchMode.HTTP)}
+    explicit = {"https://example.org/a": FetchMode.BROWSER}
+    plan = resolve_fetch_plan(
+        "https://example.org/a",
+        profiles,
+        explicit,
+        default_strategy=CrawlStrategy.HONEST,
+    )
+    assert plan.fetch is FetchMode.BROWSER
+    assert plan.strategy is CrawlStrategy.HONEST
+
+
+def test_domain_profile_accepts_strategy_and_rate_limit() -> None:
+    profile = DomainProfile(
+        strategy=CrawlStrategy.HONEST,
+        rate_limit=RateLimitSpec(min_s=0.5, max_s=1.5),
+    )
+    assert profile.strategy is CrawlStrategy.HONEST
+    assert profile.rate_limit == RateLimitSpec(min_s=0.5, max_s=1.5)
+
+
+def test_domain_profile_strategy_defaults_to_none() -> None:
+    profile = DomainProfile()
+    assert profile.strategy is None
+    assert profile.rate_limit is None
+
+
+def test_load_domain_profiles_with_strategy(tmp_path: Path) -> None:
+    path = tmp_path / "domain_profiles.yaml"
+    path.write_text(
+        "example.org: {fetch: browser, strategy: hybrid, "
+        "rate_limit: {min_s: 3, max_s: 10}}\n",
+        encoding="utf-8",
+    )
+    profile = load_domain_profiles(path)["example.org"]
+    assert profile.strategy is CrawlStrategy.HYBRID
+    assert profile.rate_limit == RateLimitSpec(min_s=3.0, max_s=10.0)

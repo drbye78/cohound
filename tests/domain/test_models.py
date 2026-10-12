@@ -9,10 +9,12 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from core.config.run_config import load_catalog
 from core.domain.enums import Importance, ParamType
-from core.domain.models import CatalogRow
+from core.domain.models import CatalogRow, CrawlRunConfig, RateLimitSpec
+from core.ports.types import FetchPlan
 
 
 def _row(**overrides: object) -> CatalogRow:
@@ -80,3 +82,86 @@ def test_load_catalog_bool_variants(tmp_path: Path, raw: str, expected: bool) ->
         encoding="utf-8",
     )
     assert load_catalog(path)[0].deprecated is expected
+
+
+# ---------------------------------------------------------------------------
+# D4: RateLimitSpec / CrawlRunConfig
+# ---------------------------------------------------------------------------
+
+
+def test_rate_limit_spec_equal_bounds_ok() -> None:
+    spec = RateLimitSpec(min_s=3.0, max_s=3.0)
+    assert spec.min_s == 3.0
+    assert spec.max_s == 3.0
+
+
+def test_rate_limit_spec_max_below_min_rejected() -> None:
+    with pytest.raises(ValidationError, match="max_s"):
+        RateLimitSpec(min_s=5.0, max_s=1.0)
+
+
+def test_rate_limit_spec_negative_rejected() -> None:
+    with pytest.raises(ValidationError):
+        RateLimitSpec(min_s=-1.0, max_s=2.0)
+
+
+def test_rate_limit_spec_strict_extra_rejected() -> None:
+    with pytest.raises(ValidationError):
+        RateLimitSpec(min_s=1.0, max_s=2.0, jitter=1.0)  # type: ignore[call-arg]
+
+
+def test_crawl_run_config_defaults() -> None:
+    cfg = CrawlRunConfig()
+    assert cfg.strategy == "auto"
+    assert cfg.rate_limit is None
+
+
+def test_crawl_run_config_strategy_and_rate() -> None:
+    cfg = CrawlRunConfig.model_validate(
+        {"strategy": "hybrid", "rate_limit": {"min_s": 3, "max_s": 10}}
+    )
+    assert cfg.strategy == "hybrid"
+    assert cfg.rate_limit == RateLimitSpec(min_s=3.0, max_s=10.0)
+
+
+# ---------------------------------------------------------------------------
+# D4: неизменяемость и числовая корректность RateLimitSpec (G1)
+# ---------------------------------------------------------------------------
+
+
+def test_rate_limit_spec_zero_zero_valid_no_throttle() -> None:
+    """``(0, 0)`` — валидный «без троттлинга»."""
+    spec = RateLimitSpec(min_s=0.0, max_s=0.0)
+    assert spec.min_s == 0.0
+    assert spec.max_s == 0.0
+
+
+def test_rate_limit_spec_rejects_inf() -> None:
+    with pytest.raises(ValidationError):
+        RateLimitSpec(min_s=0.0, max_s=float("inf"))
+
+
+def test_rate_limit_spec_rejects_nan() -> None:
+    with pytest.raises(ValidationError):
+        RateLimitSpec(min_s=float("nan"), max_s=1.0)
+
+
+def test_rate_limit_spec_is_frozen() -> None:
+    spec = RateLimitSpec(min_s=1.0, max_s=2.0)
+    with pytest.raises((ValidationError, TypeError)):
+        spec.min_s = 9.0
+
+
+def test_rate_limit_spec_hashable() -> None:
+    spec = RateLimitSpec(min_s=1.0, max_s=2.0)
+    assert hash(spec) == hash(RateLimitSpec(min_s=1.0, max_s=2.0))
+
+
+def test_fetch_plan_with_rate_limit_is_hashable() -> None:
+    """Непустой ``rate_limit`` не ломает хешируемость ``FetchPlan`` (frozen value-объект)."""
+    plan = FetchPlan(rate_limit=RateLimitSpec(min_s=1.0, max_s=2.0))
+    assert hash(plan) == hash(FetchPlan(rate_limit=RateLimitSpec(min_s=1.0, max_s=2.0)))
+
+
+def test_fetch_plan_without_rate_limit_hashable() -> None:
+    assert hash(FetchPlan()) == hash(FetchPlan())

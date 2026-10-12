@@ -52,7 +52,7 @@ core/                         # ядро: категорийно-НЕЙТРАЛ�
                               #   lexical_bm25, index_npy/index_format/lexical_tantivy, search_* — см. NOTICES
   util/                       # text_utils (RU/EN), security (SSRF/slug), fusion (RRF), retrieval_eval — см. NOTICES
 scripts/ci.sh                 # единая точка входа CI (§11.6): selfcheck + pytest + порог покрытия
-tests/selfcheck.py            # self-contained проверка фундамента (87 проверок)
+tests/selfcheck.py            # self-contained проверка фундамента (86 проверок)
 tests/test_selfcheck.py       # pytest-обёртка над selfcheck (W1/T1.5)
 tests/domain/                 # property-тесты домена (hypothesis)
 tests/smoke_scrapy_playwright.py  # браузерный smoke scrapy-playwright (V5; 0/1/2)
@@ -180,6 +180,11 @@ Dev/CI по §11.6: `pytest`+`hypothesis`+`pytest-cov` в extra `dev`; един�
   `execution_versions`** (условия измерения, commodity-слой по A2), а **не**
   `methodology_version`: блокирует межцикловый diff с пометкой `execution_change`,
   обязателен `golden-full` (§13, §7.4).
+- Смена **оси стратегии краула** (`crawl_strategy`/`crawl.rate_limit` — операционные дефолты
+  секции `crawl` в `run.yaml`) — версионная граница класса `execution_versions`
+  (`execution_change`), **не** `methodology_version` (§13): словарь
+  `docs/status-dictionary.yaml` несёт и методологические, и операционные перечисления, а класс
+  энума определяется его семантикой, не файлом-носителем.
 - Смена **семантики правил** (словарь статусов, scoring-политика, absence/сателлитная/
   evidence-модель, определения Coverage/Comparability/sensitivity) — версионная граница
   класса `methodology_version`: `methodology_change`, обязательны `golden-full` **и
@@ -191,6 +196,9 @@ Dev/CI по §11.6: `pytest`+`hypothesis`+`pytest-cov` в extra `dev`; един�
 - Не делать failed статусом; не выводить N/A автоматически.
 - Не придавать якорю вес/влияние на статусы (только порядок/фокус, anchor-blind).
 - Не реализовывать «LLM с веб-поиском» внутри оценщика.
+- Не обходить CAPTCHA, платные/авторизационные барьеры и закрытые разделы: coHound работает
+  **только с публичными сайтами**. Для публичных сайтов honest/hybrid-рендер штатного
+  JS-challenge публичной страницы — исполнение механизма самой страницы, а не обход (§10).
 - Не придавать запрошенному `ranking_policy` силу переопределять sensitivity-демотирование
   (запрошено ранжирование, вычислено демотирование — допустимое расхождение, `requested` vs `computed`).
 - Не мутировать иммутабельные индексные сборки: новый раунд/SERP → **новая** сборка; правка на месте запрещена.

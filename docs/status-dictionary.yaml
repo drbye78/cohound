@@ -1,9 +1,9 @@
 # coHound — словарь статусов и перечислений
 # Источник истины по §4.1 регламента cohound-spec-v2.md (v2.1).
-# Версия словаря: 2.1.0
+# Версия словаря: 2.2.0
 # Каталоги (package/catalog) версионируются отдельно; этот файл — их зависимость.
 
-status_dictionary_version: "2.1.0"
+status_dictionary_version: "2.2.0"
 
 # §2.1. Статусы ячейки. Порядок ординален: OK > PARTIAL > ABSENT.
 # unknown (❓) — не отрицательное свидетельство; N/A — только человеком.
@@ -240,6 +240,12 @@ extraction_route:
   - auto
   - html
   - document
+
+# D4. Ось стратегии краула (FetchPlan): как используется браузер.
+crawl_strategy:
+  - auto
+  - honest
+  - hybrid
 
 # D3. Статус per-URL записи краула (crawl_attempts): durable audit/queue/resume.
 # pending — в очереди; fetched — сырые байты сохранены (retention); done — успешно

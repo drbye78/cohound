@@ -10,6 +10,7 @@ from __future__ import annotations
 import datetime as _dt
 import inspect
 import json
+import random
 from pathlib import Path
 
 import pytest
@@ -23,8 +24,11 @@ from core.domain import (
     Cohort,
     CohortEntry,
     CrawlAttempt,
+    CrawlRunConfig,
+    CrawlStrategy,
     FailureKind,
     FetchStatus,
+    RateLimitSpec,
     RunConfig,
     RunMode,
 )
@@ -40,6 +44,7 @@ from core.ports.types import (
 )
 from core.store.sqlite_store import SqliteStore
 from core.util.hashing import content_hash
+from core.util.rate_limit import RateLimiter
 
 try:  # необязательная зависимость (extra ``retrieval``)
     import numpy as _np  # type: ignore[import-not-found]
@@ -1165,3 +1170,155 @@ def test_lang_preserved_across_resume(tmp_path: Path) -> None:
         assert _build_of(second).docs[0].lang == "en"
     finally:
         store.close()
+
+
+def test_crawl_defaults_resolved_into_fetch_plan(tmp_path: Path) -> None:
+    """``crawl_defaults`` (run.yaml ``crawl``) доезжает до ``FetchPlan`` краулера (D4)."""
+    crawler = _Crawler({URL_P1_A: b"page"})
+    defaults = CrawlRunConfig(
+        strategy=CrawlStrategy.HONEST,
+        rate_limit=RateLimitSpec(min_s=1.0, max_s=3.0),
+    )
+    result = _build(
+        tmp_path,
+        pages={},
+        urls={"p1": [URL_P1_A]},
+        crawler=crawler,
+        crawl_defaults=defaults,
+        domain_profiles={"docs.test": DomainProfile(fetch=FetchMode.BROWSER)},
+    )
+    assert result.status == "ok"
+    (_, plan) = crawler.calls[0]
+    assert plan.strategy is CrawlStrategy.HONEST
+    assert plan.rate_limit == RateLimitSpec(min_s=1.0, max_s=3.0)
+
+
+def test_crawl_defaults_strategy_normalized_on_http_url(tmp_path: Path) -> None:
+    """HTTP-URL нормализует стратегию в ``AUTO`` (инвариант осей); rate_limit сохраняется."""
+    crawler = _Crawler({URL_P1_A: b"page"})
+    defaults = CrawlRunConfig(
+        strategy=CrawlStrategy.HONEST,
+        rate_limit=RateLimitSpec(min_s=1.0, max_s=3.0),
+    )
+    _build(
+        tmp_path, pages={}, urls={"p1": [URL_P1_A]}, crawler=crawler,
+        crawl_defaults=defaults,
+    )
+    (_, plan) = crawler.calls[0]
+    assert plan.strategy is CrawlStrategy.AUTO
+    assert plan.rate_limit == RateLimitSpec(min_s=1.0, max_s=3.0)
+
+
+def test_crawl_defaults_absent_keeps_auto_strategy(tmp_path: Path) -> None:
+    """Без ``crawl_defaults`` план остаётся ``auto`` без rate-limit (поведение неизменно)."""
+    crawler = _Crawler({URL_P1_A: b"page"})
+    _build(tmp_path, pages={}, urls={"p1": [URL_P1_A]}, crawler=crawler)
+    (_, plan) = crawler.calls[0]
+    assert plan.strategy is CrawlStrategy.AUTO
+    assert plan.rate_limit is None
+
+
+# --------------------------------------------------------------------------- #
+# P2-3: централизованный politeness-пейсинг — единственный владелец corpus
+# --------------------------------------------------------------------------- #
+
+
+class _RecordingLimiter(RateLimiter):
+    """Пейсинг-шпион: пишет ``(host, spec)`` в ``wait``; ``slept`` — фактические задержки."""
+
+    def __init__(self, *, rng: random.Random | None = None) -> None:
+        self.slept: list[float] = []
+        super().__init__(sleep=self.slept.append, rng=rng)
+        self.calls: list[tuple[str, RateLimitSpec | None]] = []
+
+    def wait(self, host: str, spec: RateLimitSpec | None) -> float:
+        self.calls.append((host, spec))
+        return super().wait(host, spec)
+
+
+def test_corpus_paces_live_fetch_per_url(tmp_path: Path) -> None:
+    """Перед каждым живым фетчем — ``wait(host, plan.rate_limit)``; сон в границах spec."""
+    spec = RateLimitSpec(min_s=1.0, max_s=2.0)
+    defaults = CrawlRunConfig(strategy=CrawlStrategy.AUTO, rate_limit=spec)
+    limiter = _RecordingLimiter(rng=random.Random(7))
+    crawler = _Crawler({URL_P1_A: b"a", URL_P1_B: b"b"})
+
+    _build(
+        tmp_path,
+        pages={},
+        urls={"p1": [URL_P1_A, URL_P1_B]},
+        crawler=crawler,
+        crawl_defaults=defaults,
+        rate_limiter=limiter,
+    )
+
+    # Один wait на каждый живой фетч; host нормализован (lower), spec — из FetchPlan.
+    assert len(limiter.calls) == 2
+    assert [host for host, _ in limiter.calls] == ["docs.test", "docs.test"]
+    assert [s for _, s in limiter.calls] == [spec, spec]
+    # Сон реально происходил в границах spec (детерминизм через seeded rng).
+    assert len(limiter.slept) == 2
+    assert all(1.0 <= delay <= 2.0 for delay in limiter.slept)
+
+
+def test_corpus_pacing_no_sleep_when_rate_limit_absent(tmp_path: Path) -> None:
+    """``plan.rate_limit is None`` → ``wait`` вызван, но сна нет (0.0)."""
+    limiter = _RecordingLimiter()
+    crawler = _Crawler({URL_P1_A: b"x"})
+
+    _build(tmp_path, pages={}, urls={"p1": [URL_P1_A]}, crawler=crawler, rate_limiter=limiter)
+
+    assert limiter.calls == [("docs.test", None)]
+    assert limiter.slept == []
+
+
+def test_corpus_pacing_not_applied_on_resume(tmp_path: Path) -> None:
+    """Путь ``resume`` (retained raw) не пейсится: сетевого вызова нет (P2-3)."""
+    store = SqliteStore(":memory:")
+    _make_run(store)
+    try:
+        # Первый прогон: живой фетч → пейсинг был.
+        first_limiter = _RecordingLimiter()
+        _build(
+            tmp_path,
+            pages={URL_P1_A: b"retained"},
+            urls={"p1": [URL_P1_A]},
+            store=store,
+            run_id=RUN_ID,
+            rate_limiter=first_limiter,
+        )
+        assert len(first_limiter.calls) == 1
+
+        # Второй прогон: re-извлечение из retained raw (краулер-«бомба») → пейсинга нет.
+        second_limiter = _RecordingLimiter()
+        _build(
+            tmp_path,
+            pages={},
+            urls={"p1": [URL_P1_A]},
+            crawler=_BombCrawler({}),
+            store=store,
+            run_id=RUN_ID,
+            rate_limiter=second_limiter,
+        )
+        assert second_limiter.calls == []
+        assert second_limiter.slept == []
+    finally:
+        store.close()
+
+
+def test_browser_guard_error_suggests_browser_crawler(tmp_path: Path) -> None:
+    """Browser-guard подсказывает и ``scrapy``, и ``browser`` (P2-3)."""
+    browser_url = "https://browser.test/landing"
+    crawler = _Crawler({browser_url: b"x"})
+    crawler.supports_browser = False  # type: ignore[attr-defined]
+
+    result = _build(
+        tmp_path,
+        pages={},
+        urls={"p1": [browser_url]},
+        crawler=crawler,
+        domain_profiles={"browser.test": DomainProfile(fetch=FetchMode.BROWSER)},
+    )
+
+    assert result.status == "ok"
+    assert any("scrapy или browser" in err for err in result.errors)

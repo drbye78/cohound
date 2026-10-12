@@ -6,10 +6,17 @@
 
 Приоритет (сверху вниз):
 
-1. жёсткий дефолт :class:`FetchPlan` (HTTP + авто-извлечение);
-2. лучший профиль домена из ``domain_profiles.yaml`` (D.2);
+1. дефолт прогона (``default_strategy``/``default_rate_limit`` из run.yaml ``crawl``);
+2. лучший профиль домена из ``domain_profiles.yaml`` (D.2): его ``strategy``/``rate_limit``
+   (если заданы) переопределяют дефолт прогона;
 3. явное переопределение ``fetch`` по точному URL (``--render-modes``) — побеждает всегда,
-   но **только** ось ``fetch``: ``extract``/``wait_for`` остаются из профиля.
+   но **только** ось ``fetch``: ``extract``/``wait_for``/``strategy``/``rate_limit`` остаются
+   из профиля (или дефолта).
+
+Инвариант осей: ``fetch`` = «нужен ли браузер вообще», ``strategy`` = «**как** он
+используется **при browser-capable адаптере**». Итоговый план нормализуется: если
+``fetch == HTTP``, то ``strategy`` приводится к ``AUTO`` (стратегия браузера бессмысленна).
+Иначе — ``strategy != AUTO`` ⇒ ``fetch == BROWSER``. ``wait_for`` не нормализуется.
 
 Ключ профиля — ``host`` с опциональным ``/path`` (напр. ``example.org/documents``). Профиль
 совпадает, если host URL равен ``host_key`` либо оканчивается на ``"." + host_key`` **и**
@@ -28,7 +35,7 @@ from dataclasses import replace
 from urllib.parse import urlsplit
 
 from core.config.domain_profiles import DomainProfile
-from core.ports.types import FetchMode, FetchPlan
+from core.ports.types import CrawlStrategy, FetchMode, FetchPlan, RateLimitSpec
 
 __all__ = ["resolve_fetch_plan"]
 
@@ -60,13 +67,25 @@ def resolve_fetch_plan(
     url: str,
     profiles: Mapping[str, DomainProfile],
     explicit: Mapping[str, FetchMode] | None = None,
+    *,
+    default_strategy: CrawlStrategy = CrawlStrategy.AUTO,
+    default_rate_limit: RateLimitSpec | None = None,
 ) -> FetchPlan:
     """Резолвит :class:`FetchPlan` для ``url``: дефолт → профиль → явное переопределение.
+
+    Итоговый план нормализуется по инварианту осей: при ``fetch=HTTP`` ``strategy``
+    приводится к ``AUTO`` (таким образом ``strategy != AUTO`` ⇒ ``fetch == BROWSER``).
+    Нормализация выполняется **после** явного переопределения ``--render-modes``.
 
     :param url: целевой URL (scheme + host обязательны для доменного матчинга).
     :param profiles: профили доменов из ``domain_profiles.yaml`` (D.2).
     :param explicit: явные переопределения ``{url: FetchMode}`` (``--render-modes``);
-        переопределяют **только** ``fetch``, ``extract``/``wait_for`` берутся из профиля.
+        переопределяют **только** ``fetch``, ``extract``/``wait_for``/``strategy``/
+        ``rate_limit`` берутся из профиля (либо из дефолтов прогона).
+    :param default_strategy: дефолт оси стратегии (run.yaml ``crawl.strategy``); профиль,
+        задавший ``strategy``, его переопределяет. Действует при ``fetch == BROWSER`` (при HTTP нормализуется в ``AUTO``).
+    :param default_rate_limit: дефолт диапазона задержек (run.yaml ``crawl.rate_limit``);
+        профиль, задавший ``rate_limit``, его переопределяет.
     """
     parsed = urlsplit(url)
     url_host = (parsed.hostname or "").strip().lower()
@@ -93,14 +112,25 @@ def resolve_fetch_plan(
             if best is None or rank > best_rank or tie:  # type: ignore[operator]
                 best, best_rank, best_key = profile, rank, key
 
-    plan = (
-        FetchPlan(best.fetch, extract=best.extract, wait_for=best.wait_for)
-        if best is not None
-        else FetchPlan()
-    )
+    if best is not None:
+        plan = FetchPlan(
+            best.fetch,
+            extract=best.extract,
+            wait_for=best.wait_for,
+            strategy=best.strategy if best.strategy is not None else default_strategy,
+            rate_limit=best.rate_limit if best.rate_limit is not None else default_rate_limit,
+        )
+    else:
+        plan = FetchPlan(strategy=default_strategy, rate_limit=default_rate_limit)
 
     if explicit:
         override = explicit.get(url)
         if override is not None:
             plan = replace(plan, fetch=override)
+
+    # Нормализация осей (G1): ``strategy != AUTO`` ⇒ ``fetch == BROWSER``. При HTTP-фетче
+    # стратегия браузера бессмысленна — приводим к ``AUTO``. ``wait_for`` не трогаем.
+    if plan.fetch is FetchMode.HTTP:
+        plan = replace(plan, strategy=CrawlStrategy.AUTO)
+
     return plan

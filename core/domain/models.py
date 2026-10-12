@@ -17,6 +17,7 @@ from core.domain.enums import (
     AnchorRelation,
     Archetype,
     CellState,
+    CrawlStrategy,
     EndpointKind,
     EvidenceState,
     EvidenceType,
@@ -42,6 +43,16 @@ from core.domain.enums import (
 )
 
 _BASE = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+#: Неизменяемый конфиг для value-объектов, кладущихся в хешируемые frozen-контейнеры
+#: (``FetchPlan``): ``frozen=True`` делает модель хешируемой (value-семантика), а
+#: ``allow_inf_nan=False`` запрещает ``inf``/``nan`` в числовых полях.
+_FROZEN = ConfigDict(
+    extra="forbid",
+    str_strip_whitespace=True,
+    frozen=True,
+    allow_inf_nan=False,
+)
 
 #: Версия методологии (§13): версионная граница **семантики** правил (словарь статусов,
 #: scoring-политика, absence/evidence-модель, определения Coverage/Comparability). В отличие
@@ -282,6 +293,40 @@ class Focus(BaseModel):
     params: list[str] = Field(default_factory=list)
 
 
+class RateLimitSpec(BaseModel):
+    """Диапазон случайной задержки между запросами (сек), uniform(min_s, max_s), min_s<=max_s.
+
+    Неизменяемый value-объект (``frozen``): входит в хешируемый ``FetchPlan``. ``min_s=0`` и
+    ``max_s=0`` допустимы и означают «без троттлинга» (нулевая задержка). ``inf``/``nan``
+    запрещены (``allow_inf_nan=False``).
+    """
+
+    model_config = _FROZEN
+
+    min_s: float = Field(ge=0.0)
+    max_s: float = Field(ge=0.0)
+
+    @model_validator(mode="after")
+    def _check(self) -> RateLimitSpec:
+        if self.max_s < self.min_s:
+            raise ValueError("rate_limit: max_s обязан быть >= min_s")
+        return self
+
+
+class CrawlRunConfig(BaseModel):
+    """``run.yaml`` → секция ``crawl``: дефолты оси стратегии и диапазона задержек.
+
+    Ось ``strategy`` ортогональна ``FetchMode``: она задаёт, **как** используется браузер
+    (см. :class:`~core.domain.enums.CrawlStrategy`). ``rate_limit`` — необязательный
+    per-host диапазон uniform(min_s, max_s). При отсутствии секции поведение неизменно.
+    """
+
+    model_config = _BASE
+
+    strategy: CrawlStrategy = CrawlStrategy.AUTO
+    rate_limit: RateLimitSpec | None = None
+
+
 class RunConfig(BaseModel):
     """run.yaml (§4.5): мандат прогона (case/anchor/cohort/products/package/mode) и
     необязательный выбор активного LLM-слота ``llm_slot`` (§7.4).
@@ -313,6 +358,9 @@ class RunConfig(BaseModel):
     #: A3 (v2.1): провенанс настроек ``{setting: {"source": "default"|"measured",
     #: "experiment_id"?: str}}``. Строки настроек (не enum ядра) — словарь не трогаем.
     settings_provenance: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    #: Секция ``crawl`` (D4): дефолты оси стратегии и диапазона задержек. Отсутствие
+    #: секции (``None``) → поведение краула не меняется (обратная совместимость).
+    crawl: CrawlRunConfig | None = None
 
     @model_validator(mode="after")
     def _check(self) -> RunConfig:

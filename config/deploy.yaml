@@ -33,6 +33,16 @@ profile: local                 # local | split | split-hardened
 
 extractor_zone: core           # edge | core | separate
 
+# --- Crawl (операционная политика; 07) ----------------------------------------
+# Секция crawl действует в обоих профилях. Браузерный краулер — для SPA/JS-контента.
+# crawl:
+#   user_agent: coHound-crawler/0.1
+#   timeout_s: 30
+#   browser:                  # браузерный краулер (honest/hybrid); см. docs/architecture/07
+#     mode: cdp               # cdp | persistent
+#     cdp_url: http://127.0.0.1:9222
+#     headless: false
+
 search:
   budget: { ru: 5, en: 5 }     # симметрия I16
   adapter: yandex              # провайдер по умолчанию (--search-adapter переопределяет)

@@ -28,12 +28,14 @@ from core.domain import (
     AbsenceRuleType,
     AnchorRelation,
     Archetype,
+    CrawlStrategy,
     ExtractionRoute,
     FetchMode,
     GoldenTier,
     InheritanceMode,
     ParamType,
     RankingPolicy,
+    RateLimitSpec,
     RunMode,
     SourceKind,
     Status,
@@ -74,6 +76,31 @@ def test_load_run_config_happy() -> None:
     assert cfg.mode is RunMode.STRICT
     assert cfg.ranking_policy is RankingPolicy.CAPABILITY_RANKED
     assert cfg.focus.modules == ["mod_a"]
+
+
+def test_load_run_config_crawl_absent_is_none() -> None:
+    cfg = load_run_config(FIXTURES / "run.yaml")
+    assert cfg.crawl is None
+
+
+def test_load_run_config_crawl_parsed(tmp_path: Path) -> None:
+    data = _load_yaml(FIXTURES / "run.yaml")
+    data["crawl"] = {"strategy": "hybrid", "rate_limit": {"min_s": 3, "max_s": 10}}
+    path = _write(tmp_path, "run.yaml", yaml.safe_dump(data, allow_unicode=True))
+    cfg = load_run_config(path)
+    assert cfg.crawl is not None
+    assert cfg.crawl.strategy is CrawlStrategy.HYBRID
+    assert cfg.crawl.rate_limit == RateLimitSpec(min_s=3.0, max_s=10.0)
+
+
+def test_load_run_config_crawl_strategy_only(tmp_path: Path) -> None:
+    data = _load_yaml(FIXTURES / "run.yaml")
+    data["crawl"] = {"strategy": "honest"}
+    path = _write(tmp_path, "run.yaml", yaml.safe_dump(data, allow_unicode=True))
+    cfg = load_run_config(path)
+    assert cfg.crawl is not None
+    assert cfg.crawl.strategy is CrawlStrategy.HONEST
+    assert cfg.crawl.rate_limit is None
 
 
 def test_load_package_manifest_happy() -> None:

@@ -50,7 +50,7 @@ application-layer firewall (L7). Функционал, которому нуже
 | Зона | Свойства | Что размещается |
 |---|---|---|
 | **Z0 CORE** (доверенная) | **нет** веб-эгрессии; недоступна для входящих из DMZ; секретов эгрессии нет | `pipeline` (оркестратор, гейты), `domain`, `store`, индексы/ретривал, **клиент evaluator-LLM (I18)**, `compute`, `report` |
-| **Z1 EDGE / DMZ** (условно-доверенная) | есть веб-эгрессия; **считается компрометируемой**; процесс только отвечает, не инициирует в Z0 | `crawler` (Scrapy+playwright), HTTP-fetch, `search`-адаптер (SERP), `registry`-фетчеры, `extractor`/санитайзер (обработка недоверенного контента), discovery/concept-scout (search-enabled) |
+| **Z1 EDGE / DMZ** (условно-доверенная) | есть веб-эгрессия; **считается компрометируемой**; процесс только отвечает, не инициирует в Z0 | `crawler` (Scrapy+playwright · **прямой Playwright/CDP** — honest/hybrid, альтернатива Scrapy), HTTP-fetch, `search`-адаптер (SERP), `registry`-фетчеры, `extractor`/санитайзер (обработка недоверенного контента), discovery/concept-scout (search-enabled) |
 | **Z2 PARSE** (опц., позже) | hardening парсинга недоверенного контента | `extractor`/`sanitizer` отдельным процессом |
 | **Зона LLM корп. облака** (внешняя, внутр. сеть) | [OI]-совместимый API; веса/движок — забота облака | evaluator-LLM (только Z0-originated трафик), discovery-LLM (search-enabled, Z1) |
 
@@ -81,7 +81,7 @@ application-layer firewall (L7). Функционал, которому нуже
 **инициирует**; edge **отвечает**. Обратного инициирования из edge в core нет.
 
 ```
-POST /v1/fetch    {url, fetch: "http"|"browser", lang, extract: "auto"|"html"|"document", wait_for: str|null}
+POST /v1/fetch    {url, fetch: "http"|"browser", strategy: "auto"|"honest"|"hybrid", lang, extract: "auto"|"html"|"document", wait_for: str|null}
    → {request_id, final_url, status_code, content_type, fetched_at,
       raw:  {hash, size, bytes_b64? | ref},                 # сырые байты (retention)
       text: {content, hash, extractor_version} | null,      # очищенный markdown (результат extract-оси)
@@ -96,6 +96,11 @@ POST /v1/registry {registry_id, product_ref, scope}
 GET  /v1/capabilities → {extractor_version, crawler_version, search_engine, supported_formats}
 GET  /v1/health       → {status}
 ```
+
+**Аддитивное расширение `/v1/fetch` (совместимо).** Поле `strategy` (`auto`|`honest`|`hybrid`) добавлено
+**аддитивно**: старые клиенты его опускают — edge трактует отсутствие как `auto`. Поле ортогонально
+оси `fetch` (при `fetch: "http"` нормализуется в `auto`; `strategy != auto` ⇒ `fetch: "browser"`),
+поэтому не ломает существующих клиентов и не требует bump `schema_version`.
 
 **Оболочка:** `{schema_version, request_id, status, payload, error}`. `schema_version` — часть
 контракта; несовместимое изменение → bump версии (версионная граница §13).
@@ -116,7 +121,7 @@ GET  /v1/health       → {status}
 
 | Порт | Адаптер в edge (реальный) | Адаптер в core (remote-proxy) |
 |---|---|---|
-| `CrawlerPort` | `crawl_scrapy.py` (Scrapy+playwright) | `RemoteCrawler(gateway)` |
+| `CrawlerPort` | `crawl_scrapy.py` (Scrapy+playwright) · `crawl_browser.py` (`BrowserCrawler`, прямой Playwright/CDP, honest/hybrid) | `RemoteCrawler(gateway)` |
 | `SearchAdapterPort` | `search_yandex.py` / `search_glm.py` | `RemoteSearch(gateway)` |
 | `RegistryFetcherPort` | `registry_generic.py` | `RemoteRegistry(gateway)` |
 | `ExtractorPort` | `extract_html.py` / `extract_document.py` | `RemoteExtractor(gateway)` |
@@ -162,6 +167,13 @@ edge:  fetch → extract → sanitize → вернуть (text, hashes, raw)   [
 | core → корпоративный LLM-endpoint ([OI]-совместимый API) | внутренняя сеть | **ALLOW** |
 | **LLM-endpoint → internet** | любой | **DENY** (оценщик без веба, I18) |
 | edge → discovery-LLM (search-enabled) | внутренняя сеть | **ALLOW** (только discovery/concept-scout) |
+
+⚠️ **IP-репутация egress (deployment-условие anti-bot-класса).** Для сайтов с активной антибот-защитой
+тип egress-адреса доминирует над техникой рендера: **datacenter-egress получает `401`/`429` даже при
+реальном браузерном рендере**. Поэтому для anti-bot-класса требуется **доверенный/residential egress**
+(прокси-исходящий контура edge) — это **условие развёртывания**, а не свойство honest/hybrid:
+honest/hybrid исполняет штатный JS-challenge публичной страницы (§10), но при «загрязнённой» репутации
+IP штатный механизм не проходит. Egress-креды (в т.ч. прокси) живут **только в edge** (см. «Секреты»).
 
 **Принуждение инвариантов сетевым слоем:**
 - **I18:** evaluator и его LLM — в Z0 **без default-route в интернет**; даже при попытке тул не

@@ -29,7 +29,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from core.ports.types import ExtractionRoute, FetchMode
+from core.ports.types import CrawlStrategy, ExtractionRoute, FetchMode
 
 __all__ = [
     "SEAM_SCHEMA_VERSION",
@@ -37,6 +37,7 @@ __all__ = [
     "ENDPOINT_OPS",
     "FETCH_VALUES",
     "EXTRACT_VALUES",
+    "STRATEGY_VALUES",
     "load_schema",
     "validate_envelope",
     "validate_payload",
@@ -61,6 +62,8 @@ ENDPOINT_OPS: frozenset[str] = frozenset(
 FETCH_VALUES: frozenset[str] = frozenset(mode.value for mode in FetchMode)
 #: Допустимые значения оси ``extract`` запроса ``/v1/fetch`` (D2).
 EXTRACT_VALUES: frozenset[str] = frozenset(route.value for route in ExtractionRoute)
+#: Допустимые значения оси ``strategy`` запроса ``/v1/fetch`` (ось стратегии краула).
+STRATEGY_VALUES: frozenset[str] = frozenset(s.value for s in CrawlStrategy)
 
 #: Допустимые статусы **ответного** конверта (07 §3). Запросный конверт несёт
 #: ``status="request"`` (внутренняя форма клиента) и здесь не валидируется.
@@ -342,10 +345,11 @@ def _opt_enum(
 def validate_fetch_request(payload: Any) -> list[str]:
     """Проверяет **запросный** payload ``POST /v1/fetch`` (D2, 07 §3); ``[]`` — валиден.
 
-    Контракт запроса: ``{url, fetch, extract, wait_for, lang}``. ``url`` обязателен;
-    ``fetch``/``extract`` — опциональные enum-оси (``http|browser``, ``auto|html|document``);
-    ``wait_for``/``lang`` — строки или ``null``. Неизвестное значение → нарушение
-    (edge отвечает ``status=error``).
+    Контракт запроса: ``{url, fetch, extract, strategy, wait_for, lang}``. ``url`` обязателен;
+    ``fetch``/``extract``/``strategy`` — опциональные enum-оси (``http|browser``,
+    ``auto|html|document``, ``auto|honest|hybrid``); ``wait_for``/``lang`` — строки или
+    ``null``. ``strategy`` опционален: отсутствие = ``auto`` (обратная совместимость —
+    поле additive). Неизвестное значение → нарушение (edge отвечает ``status=error``).
     """
     if not isinstance(payload, Mapping):
         return ["fetch: payload должен быть объектом"]
@@ -355,6 +359,7 @@ def validate_fetch_request(payload: Any) -> list[str]:
         violations.append("fetch: обязательное поле url — непустая строка")
     _opt_enum(violations, "fetch", "fetch", payload.get("fetch"), FETCH_VALUES)
     _opt_enum(violations, "fetch", "extract", payload.get("extract"), EXTRACT_VALUES)
+    _opt_enum(violations, "fetch", "strategy", payload.get("strategy"), STRATEGY_VALUES)
     for field in ("wait_for", "lang"):
         value = payload.get(field)
         if value is not None and not isinstance(value, str):

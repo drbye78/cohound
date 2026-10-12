@@ -6,6 +6,7 @@ from pathlib import Path
 
 from core.domain import (
     CapabilityPolicy,
+    CrawlStrategy,
     Gate,
     RankingPolicy,
     SearchKind,
@@ -40,3 +41,4 @@ def test_new_enums_match_dictionary() -> None:
     assert set(data["gate"]) == {v.value for v in Gate}
     assert set(data["search_kind"]) == {v.value for v in SearchKind}
     assert set(data["stale_reason"]) == {v.value for v in StaleReason}
+    assert set(data["crawl_strategy"]) == {v.value for v in CrawlStrategy}

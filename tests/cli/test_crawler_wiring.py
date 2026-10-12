@@ -27,6 +27,11 @@ from typing import Any, cast
 import pytest
 
 import core.cli.context as context_mod
+from core.adapters.crawl_browser import (
+    DEFAULT_TIMEOUT_MS as DEFAULT_BROWSER_TIMEOUT_MS,
+    DEFAULT_USER_AGENT as DEFAULT_BROWSER_USER_AGENT,
+    BrowserCrawler,
+)
 from core.adapters.crawl_http import HttpCrawler
 from core.adapters.crawl_scrapy import ScrapyCrawler
 from core.cli.context import _resolve_ports
@@ -34,11 +39,12 @@ from core.cli.main import EXIT_BLOCKED, main
 from core.cli.wiring import (
     ENV_SCOUT_CRAWLER,
     LOCAL_PROFILE,
+    SUPPORTED_SCOUT_CRAWLERS,
     WiringError,
     build_adapters,
     build_scout_crawler,
 )
-from core.config.deploy import DeployConfig
+from core.config.deploy import CrawlBrowserConfig, CrawlConfig, DeployConfig
 from core.config.domain_profiles import DomainProfile
 from core.config.paths import PathsConfig
 from core.domain.enums import ExtractionRoute, FetchMode
@@ -174,6 +180,112 @@ def test_build_scout_crawler_no_args_backward_compatible(
 
 
 # ---------------------------------------------------------------------------
+# build_scout_crawler: browser (BrowserCrawler, honest/hybrid)
+# ---------------------------------------------------------------------------
+
+
+def test_supported_scout_crawlers_include_browser() -> None:
+    """Реестр краулеров расширен значением ``browser``."""
+    assert "browser" in SUPPORTED_SCOUT_CRAWLERS
+
+
+def test_build_scout_crawler_browser_threads_cache_and_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``browser``: ``BrowserCrawler`` с протянутым кэшем и полями ``deploy.crawl.browser``."""
+    monkeypatch.setenv(ENV_SCOUT_CRAWLER, "browser")
+    cache = _cache(tmp_path)
+    deploy = DeployConfig(
+        profile="local",
+        crawl=CrawlConfig(
+            browser=CrawlBrowserConfig(
+                mode="cdp",
+                cdp_url="http://127.0.0.1:9222",
+                headless=True,
+                timeout_ms=12345,
+            )
+        ),
+    )
+
+    crawler = build_scout_crawler(deploy=deploy, cache=cache)
+
+    assert isinstance(crawler, BrowserCrawler)
+    assert crawler.supports_browser is True
+    assert crawler._cache is cache
+    assert crawler._cdp_url == "http://127.0.0.1:9222"
+    assert crawler._headless is True
+    assert crawler._timeout_ms == 12345
+
+
+def test_build_scout_crawler_browser_persistent_and_user_agent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``persistent``-ветка: ``user_data_dir``/``user_agent`` доезжают; ``cdp_url`` пуст."""
+    monkeypatch.setenv(ENV_SCOUT_CRAWLER, "browser")
+    deploy = DeployConfig(
+        profile="local",
+        crawl=CrawlConfig(
+            user_agent="ua/9",
+            browser=CrawlBrowserConfig(mode="persistent", user_data_dir="/tmp/profile-x"),
+        ),
+    )
+
+    crawler = build_scout_crawler(deploy=deploy)
+
+    assert isinstance(crawler, BrowserCrawler)
+    assert crawler._user_data_dir == "/tmp/profile-x"
+    assert crawler._user_agent == "ua/9"
+    assert crawler._cdp_url is None
+
+
+def test_build_scout_crawler_browser_empty_config_uses_adapter_defaults(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Пустой ``crawl.browser`` (``mode=None``) → дефолты адаптера, без падения."""
+    monkeypatch.setenv(ENV_SCOUT_CRAWLER, "browser")
+
+    crawler = build_scout_crawler(deploy=DeployConfig(profile="local"))
+
+    assert isinstance(crawler, BrowserCrawler)
+    assert crawler._cdp_url is None
+    assert crawler._user_data_dir is None
+    assert crawler._headless is False
+    assert crawler._timeout_ms == DEFAULT_BROWSER_TIMEOUT_MS
+    assert crawler._user_agent == DEFAULT_BROWSER_USER_AGENT
+    assert crawler._rate_limiter is None  # пейсинг — в corpus, не в wiring
+
+
+def test_build_scout_crawler_browser_without_deploy_uses_defaults(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``deploy=None`` (нет канонического файла) → дефолты адаптера, без падения."""
+    monkeypatch.setenv(ENV_SCOUT_CRAWLER, "browser")
+    monkeypatch.chdir(tmp_path)  # нет config/deploy.yaml → канон-дефолт profile local
+
+    crawler = build_scout_crawler()
+
+    assert isinstance(crawler, BrowserCrawler)
+    assert crawler._cache is None
+    assert crawler._cdp_url is None
+    assert crawler._timeout_ms == DEFAULT_BROWSER_TIMEOUT_MS
+
+
+def test_build_scout_crawler_browser_with_browser_profile_not_blocked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Профиль ``fetch: browser`` на проводке не блокируется (исполнимость — по URL, D2)."""
+    monkeypatch.setenv(ENV_SCOUT_CRAWLER, "browser")
+
+    crawler = build_scout_crawler(
+        deploy=DeployConfig(profile="local"),
+        cache=_cache(tmp_path),
+        domain_profiles=_browser_profiles(),
+    )
+
+    assert isinstance(crawler, BrowserCrawler)
+
+
+# ---------------------------------------------------------------------------
 # build_adapters: проброс в ports.crawler
 # ---------------------------------------------------------------------------
 
@@ -227,6 +339,24 @@ def test_build_adapters_without_deploy_keeps_crawler_none(
     )
 
     assert ports.crawler is None
+
+
+def test_build_adapters_browser_threads_cache(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``local`` + ``browser``: ``BrowserCrawler`` с кэшем доходит до ``ports.crawler``."""
+    monkeypatch.setenv(ENV_SCOUT_CRAWLER, "browser")
+    cache = _cache(tmp_path)
+
+    ports = build_adapters(
+        profile=LOCAL_PROFILE,
+        deploy=DeployConfig(profile="local"),
+        cache=cache,
+        domain_profiles=_browser_profiles(),
+    )
+
+    assert isinstance(ports.crawler, BrowserCrawler)
+    assert ports.crawler._cache is cache
 
 
 # ---------------------------------------------------------------------------

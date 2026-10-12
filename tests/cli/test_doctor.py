@@ -135,6 +135,17 @@ def test_scout_crawler_valid_and_invalid(monkeypatch: pytest.MonkeyPatch) -> Non
     assert "selenium" in check.detail
 
 
+def test_scout_crawler_browser_is_accepted(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``browser`` — валидное значение: не FAIL; готовность playwright — OK/WARN."""
+    monkeypatch.setenv("COHOUND_SCOUT_CRAWLER", "browser")
+    check = _check(run_doctor(), "scout_crawler")
+    assert check.status in (doctor.OK, doctor.WARN)
+    assert check.status != doctor.FAIL
+    assert "browser" in check.detail
+    if check.status == doctor.WARN:
+        assert check.hint is not None and "playwright" in check.hint
+
+
 def test_scout_crawler_invalid_gives_error_exit(
     capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -285,6 +285,12 @@ class StorePort(Protocol):       # §4.4
     def read_manifest(...); def iter_cells(run_id) -> Iterator[Cell]
 ```
 
+`FetchPlan(fetch, extract, strategy, wait_for, rate_limit)` — единый value-объект плана (§3.5):
+оси `fetch` (`http`/`browser` — **нужен ли браузер вообще**), `extract`
+(`auto`/`html`/`document`) и **третья ось стратегии краула** `strategy` (`auto`/`honest`/`hybrid` —
+**как** используется браузер при browser-capable адаптере; D4), плюс опц. JS-условие `wait_for` и
+per-host диапазон `rate_limit`. Резолвится в pipeline (`pipeline/fetch_plan.py`); адаптеры план не
+строят.
 `RawPage(url, bytes, fetched_at, fetch_mode, lang)` — retention-единица (ось получения — из
 `FetchPlan`; D2).
 `ExtractedDoc(text, extractor_version, content_hash, page_count, error)` — нормализованный документ;

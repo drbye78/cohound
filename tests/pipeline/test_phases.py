@@ -26,6 +26,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import pytest
 import yaml
 
 from core.domain import (
@@ -39,6 +40,8 @@ from core.domain import (
     Citation,
     Cohort,
     CohortEntry,
+    CrawlRunConfig,
+    CrawlStrategy,
     Importance,
     InheritanceMode,
     LLMCellOutput,
@@ -49,6 +52,7 @@ from core.domain import (
     ParamType,
     Passport,
     RankingPolicy,
+    RateLimitSpec,
     RoleDef,
     RunConfig,
     RunMode,
@@ -381,6 +385,61 @@ def test_corpus_phase_builds_and_captures_index_build_id(tmp_path: Path) -> None
     build = result.log_entries[0]
     assert build.index_build_id.startswith("ib_")
     assert build.chunk_count == 2
+
+
+def test_corpus_phase_forwards_run_config_crawl(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``RunConfig.crawl`` (run.yaml ``crawl:``) доезжает до ``build_corpus`` (P2-3).
+
+    Замыкание ``corpus_phase`` обязано прокинуть секцию ``crawl`` как ``crawl_defaults``:
+    иначе ``run.yaml: crawl:`` — тихий no-op.
+    """
+    import core.pipeline.phases as phases_mod
+
+    captured: dict[str, Any] = {}
+
+    def _spy(*args: Any, **kwargs: Any) -> PhaseResult:
+        captured.update(kwargs)
+        return PhaseResult(status="ok", phase="corpus")
+
+    monkeypatch.setattr(phases_mod, "build_corpus", _spy)
+
+    crawl = CrawlRunConfig(
+        strategy=CrawlStrategy.HYBRID, rate_limit=RateLimitSpec(min_s=1.0, max_s=2.0)
+    )
+    inputs = replace(_inputs(), run=_run_config(crawl=crawl))
+    store = _store()
+    try:
+        phases = build_phases(inputs=inputs, plan=_plan(), ports=Ports())
+        result = phases["corpus"](_context(store, Ports()))
+    finally:
+        store.close()
+
+    assert result.status == "ok"
+    assert captured["crawl_defaults"] == crawl
+
+
+def test_corpus_phase_crawl_defaults_none_when_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Без секции ``crawl`` в run.yaml ``crawl_defaults is None`` (поведение неизменно)."""
+    import core.pipeline.phases as phases_mod
+
+    captured: dict[str, Any] = {}
+
+    def _spy(*args: Any, **kwargs: Any) -> PhaseResult:
+        captured.update(kwargs)
+        return PhaseResult(status="ok", phase="corpus")
+
+    monkeypatch.setattr(phases_mod, "build_corpus", _spy)
+
+    store = _store()
+    try:
+        phases = build_phases(inputs=_inputs(), plan=_plan(), ports=Ports())
+        phases["corpus"](_context(store, Ports()))
+    finally:
+        store.close()
+
+    assert captured["crawl_defaults"] is None
 
 
 def test_evaluate_phase_uses_retrieval_and_never_search() -> None:

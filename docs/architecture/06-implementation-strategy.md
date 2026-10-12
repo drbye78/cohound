@@ -28,7 +28,7 @@
 | `core/adapters/chunker_markdown.py` | чанкер с `heading_path` (gag5) | оборачивается в порт в W7/T7.3 |
 | `core/adapters/extract_document.py` | docling PDF+Office (написано заново) | оборачивается в порт в W7/T7.2 |
 | `core/adapters/lexical_bm25.py` | BM25-базлайн (gtm) | прототип W8/T8.3 |
-| `tests/selfcheck.py` | 87 проверок, без pytest; словарь/схемы/DDL | остаётся автономным; обёртка в W1/T1.5 |
+| `tests/selfcheck.py` | 86 проверок, без pytest; словарь/схемы/DDL | остаётся автономным; обёртка в W1/T1.5 |
 | `tests/smoke_scrapy_playwright.py` | браузерный smoke (V5) — **пройден** | вход W7/T7.1 |
 | `docs/status-dictionary.yaml` | источник истины перечислений (§4.1) | уже есть |
 | `pyproject.toml` | пины/extras (Python 3.14 базлайн) | уже есть; `uv.lock` — W1/T1.6 |
@@ -61,7 +61,7 @@
 | P5 | **Наблюдаема** | структурные логи по фазам; метрики прогона (`cells_by_state`, `failure_rate`, `coverage`, `tokens`) в манифесте/БД |
 | P6 | **Проверена** | тест-пирамида: чистое ядро (property-based) → контрактные тесты портов → фейки → golden |
 | P7 | **Упакована и портируема** | `pyproject.toml` + extras + `uv.lock`; изолированные окружения для тяжёлых контуров; `python3 tests/selfcheck.py` без pytest |
-| P8 | **Безопасна и в контуре** | SSRF-защита, санитайзинг, robots=obey; корпус не покидает РФ-контур; оценщик без веб-поиска (I18); веб-контур изолируем в DMZ за L7 (07) |
+| P8 | **Безопасна и в контуре** | SSRF-защита, санитайзинг, robots-энфорсмент (свойство **Scrapy-пути**; для прямого/браузерного пути — ответственность egress-слоя, 07 §5); корпус не покидает РФ-контур; оценщик без веб-поиска (I18); веб-контур изолируем в DMZ за L7 (07) |
 | P9 | **Эксплуатируема** | CLI с явными гейтами G1–G4, понятными ошибками (код инварианта), `--dry-run`/`--json` |
 
 **Антипаттерны, которые для coHound — дефект, а не «упрощение» (A1/A2):**
@@ -149,7 +149,7 @@ L7-инспектируемый JSON, публикуемые схемы, атр�
 | **W4** | Конвейер и гейты | `pipeline/runner.py`, `phase_state`, `gates.py`, `PhaseResult`, resume | W2, W3 |
 | **W5** | Конфиг и CLI | `config/run_config.py`, `pipeline/normalize.py`, `lint.py`, `cli/` (wiring) | W2–W4 |
 | **W6** | Детерм. волны | `adapters/registry_generic.py`, `registries/*.yaml`, `pipeline/registry.py`, `inheritance.py` | W4, W5 |
-| **W7** | Корпус | `ports/{crawler,extractor,chunker}.py` + адаптеры (Scrapy/trafilatura/docling/чанкер), `pipeline/corpus.py`, retention, кэш | W5 |
+| **W7** | Корпус | `ports/{crawler,extractor,chunker}.py` + адаптеры (Scrapy/прямой Playwright/honest·hybrid/trafilatura/docling/чанкер), `pipeline/corpus.py`, retention, кэш | W5 |
 | **W8** | Ретривал и индекс | `embedder`/`index_builder`/`vector_index`/`lexical_index` + адаптеры (bge-m3, .npy, tantivy, RRF), эксперименты R0/R1/R2, retrieval-golden | W7 |
 | **W9** | Оценщик | `ports/llm.py`, `adapters/llm_local.py` (клиент [OI]-совместимого endpoint корп. облака), `pipeline/{prompt,evaluate,validate}.py`, `CellEvidence` | W8 |
 | **W10** | Расчёт и отчёты | `pipeline/compute.py`→`domain/scoring`, `report.py`, `run_manifest.yaml` | W2, W9 |
@@ -296,7 +296,7 @@ preliminary-yield), калибровка порогов.
 
 | ID | Задача | дд | Зависит | DoD |
 |---|---|---|---|---|
-| T7.1 | `ports/crawler.py` + `adapters/crawl_scrapy.py` (per-domain профили, robots=obey, playwright per-request, retries/backoff, content-addressed кэш) | 4 | T1.1 | smoke V5 зелёный; robots соблюдён; кэш работает |
+| T7.1 | `ports/crawler.py` + `adapters/crawl_scrapy.py` (per-domain профили, robots=obey — **Scrapy-путь**, playwright per-request, retries/backoff, content-addressed кэш); **второй path** — `adapters/crawl_browser.py` (`BrowserCrawler`: прямой Playwright/CDP, honest/hybrid). **Порт `CrawlerPort` не меняется — меняется только адаптер** (A2) | 4 | T1.1 | smoke V5 зелёный; robots соблюдён **на Scrapy-пути** (для прямого/браузерного — egress-слой, 07 §5); кэш работает; honest/hybrid-рендер |
 | T7.2 | `ports/extractor.py` + `extract_html.py` (trafilatura) + обёртка над **существующим** `extract_document.py` (docling PDF+Office) | 2 | T1.1 | формат из url/content-type; `content_hash` |
 | T7.3 | `ports/chunker.py` + обёртка **существующего** `chunker_markdown.py` (`heading_path`, `context_prefix`) | 1 | T1.1 | детерминированный чанкинг; тест |
 | T7.4 | `pipeline/corpus.py`: raw retention → extract → dedup(hash) → chunk; `index_manifest` | 3 | T7.1–T7.3, T3.1 | retention+extractor_version; I19 |

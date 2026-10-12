@@ -206,6 +206,9 @@ ranking_policy: capability_ranked
 ranking_epsilon: 0.0            # §6/B-1: порог неразличимости ранжирования (доля диапазона)
 settings_provenance:            # A3: default|measured (+ experiment_id при measured)
   partial_score: {source: default}
+crawl:                          # §3.2/D4: дефолты оси стратегии краула и politeness-пейсинга
+  strategy: auto                # auto | honest | hybrid (как используется браузер)
+  rate_limit: {min_s: 1.0, max_s: 3.0}   # опц.: uniform(min_s, max_s) между запросами (per-host)
 ```
 
 Загрузчик `config/run_config.py` → `RunConfig` (домен) с валидацией (anchor ∈ products;
@@ -217,6 +220,12 @@ preliminary не совместим с capability_ranked — I13). `ranking_poli
 (A3). `products` — **проекция** `cohort.yaml` (один канонический источник состава);
 линтер проверяет совпадение множеств `products` и `cohort.product_id` (S11).
 
+Секция `crawl` — дефолты **оси стратегии краула** `CrawlStrategy` (`auto`|`honest`|`hybrid`:
+*как* используется браузер при browser-capable адаптере) и per-host диапазона задержек
+`RateLimitSpec` (`uniform(min_s, max_s)`, `min_s <= max_s`). При отсутствии секции поведение
+неизменно (`auto`, без пейсинга); резолв — `pipeline/fetch_plan.py` (дефолт прогона →
+профиль домена → явный `--render-modes`).
+
 ### D.2. Загрузчики пакета (`pipeline/normalize.py`)
 
 - `package.yaml` → `PackageManifest` (веса=100, уникальность id, C → baseline null).
@@ -224,21 +233,24 @@ preliminary не совместим с capability_ranked — I13). `ranking_poli
 - `baselines.csv` → `list[BaselineRow]`.
 - `cohort.yaml` → `Cohort` (ровно один якорь — §1.6).
 - `golden.csv` → `list[GoldenRow]` (тир fast/full; страта ❌ обязательна для full).
-- `domain_profiles.yaml` → `dict[str, DomainProfile]` — две независимые оси получения
-  контента: `fetch: http|browser` и `extract: auto|html|document` (+ опц. `wait_for` для
-  браузерного рендера). Ключ — `host` с опциональным `/path`; схема строгая
+- `domain_profiles.yaml` → `dict[str, DomainProfile]` — три независимые оси получения
+  контента: `fetch: http|browser`, `extract: auto|html|document` и ось стратегии краула
+  `strategy: auto|honest|hybrid` (+ опц. `wait_for` для браузерного рендера и per-host
+  `rate_limit`). Ключ — `host` с опциональным `/path`; схема строгая
   (`extra="forbid"`: старые `render`/`index`/`spa` отвергаются). Резолв `FetchPlan` для
   каждого URL — **в pipeline** (`pipeline/fetch_plan.py`), не в адаптерах:
 
   ```yaml
   docs.example:          {fetch: http,    extract: html}
-  app.example:           {fetch: browser, extract: html, wait_for: "() => document.readyState === 'complete'"}
+  app.example:           {fetch: browser, extract: html, strategy: honest, wait_for: "() => document.readyState === 'complete'"}
   example.org/documents: {fetch: http,    extract: document}
+  api.example:           {fetch: browser, extract: auto, strategy: hybrid, rate_limit: {min_s: 1.0, max_s: 3.0}}
   ```
 
   Матчинг: host (или родительский суффикс) + опциональный префикс пути; приоритет —
   длиннейший `path_key`, затем длиннейший `host_key`. Явный `--render-modes` по точному URL
-  переопределяет **только** ось `fetch`, оставляя `extract`/`wait_for` из профиля.
+  переопределяет **только** ось `fetch`, оставляя `extract`/`strategy`/`wait_for`/`rate_limit`
+  из профиля.
 
 ### D.3. Линтер (`pipeline/lint.py`, блокирует прогон)
 
@@ -290,12 +302,28 @@ crawl:                         # операционная политика HTTP-
   user_agent: "coHound-crawler/0.1"   # None → дефолт HttpCrawler
   timeout_s: 30                # None → дефолт HttpCrawler (30 с)
   follow_redirects: true
+  browser:                     # браузерный краулер BrowserCrawler (honest/hybrid; 07)
+    mode: cdp                  # cdp | persistent (декларативен; взаимоисключающие)
+    cdp_url: "http://127.0.0.1:9222"    # mode: cdp — подключение к существующему браузеру
+    user_data_dir: null        # mode: persistent — каталог профиля (взаимоисключим с cdp_url)
+    headless: false
+    channel: null              # канал браузера (напр. установленный дистрибутив)
+    timeout_ms: 30000
 ```
 
 Профиль `local` игнорирует `edge.*`. Секция `crawl` действует в обоих профилях: она
 переопределяет операционные параметры лёгкого `HttpCrawler` (`user_agent`/`timeout_s`/
 `follow_redirects`); при `None`/отсутствии поля берётся дефолт адаптера — обратная
 совместимость профиля `local` без файла.
+
+Вложенная секция `crawl.browser` (`CrawlBrowserConfig`) конфигурирует браузерный краулер
+`BrowserCrawler` (`crawl_browser.py`, прямой Playwright/CDP, honest/hybrid). Режимы
+взаимоисключающи: `mode: cdp` требует непустой `cdp_url` и запрещает `user_data_dir`;
+`mode: persistent` требует непустой `user_data_dir` и запрещает `cdp_url`. `mode`
+**декларативен** и не является источником истины рантайма — адаптер ветвится по заданным
+данным (`cdp_url`/`user_data_dir`). Требуется установленный браузер Playwright
+(`playwright install chromium`); в закрытом контуре — зеркало CDN
+(`PLAYWRIGHT_DOWNLOAD_HOST`/`PLAYWRIGHT_BROWSERS_PATH`).
 
 **Провайдер поиска (`search.adapter` / `search.by_language`).** Провайдер выбирается
 детерминированно (`core.config.deploy.resolve_search_provider`) по приоритету:
@@ -340,7 +368,7 @@ edge** (composition root Z1, `07` §4/§7); ядро ходит за канди�
 | `COHOUND_LLM_DECODER` | механизм декодирования (`none`/`json_object`/`json_schema`) | опц. | `json_object` | `wiring.build_discovery_llm` |
 | `COHOUND_LLM_TIMEOUT` | таймаут LLM-запроса, с (>0) | опц. | `120.0` | `wiring.build_discovery_llm` |
 | `COHOUND_LLM_MAX_TOKENS` | максимум токенов ответа (>0) | опц. | `4096` | `wiring.build_discovery_llm` |
-| `COHOUND_SCOUT_CRAWLER` | краулер `passport-scout`: `http`\|`scrapy` | опц. | `http` | `wiring.build_scout_crawler` |
+| `COHOUND_SCOUT_CRAWLER` | краулер `passport-scout`: `http`\|`scrapy`\|`browser` | опц. | `http` | `wiring.build_scout_crawler` |
 | `COHOUND_NO_REEXEC` | отключить автоперезапуск `hound.py` в проектной `.venv` | опц. | — | `hound.py` |
 | `COHOUND_REEXEC` | предохранитель от зацикливания перезапуска (ставит `hound.py`) | служебная | — | `hound.py` |
 | `YANDEX_SEARCH_API_KEY` | ключ Yandex Search API | **обязателен для адаптера** | — | `adapters.search_yandex` |
@@ -379,8 +407,8 @@ hound run \
   паспортов молча не фетчатся, I19).
 - `[--render-modes <render>.json]` — `{url: "http"|"browser"}`: явное переопределение оси
   `fetch` для SPA/JS-страниц (значение не из `http`/`browser` → `EXIT_USAGE`). **Явное
-  переопределение побеждает доменный профиль** по оси `fetch`; `extract`/`wait_for` при этом
-  берутся из `domain_profiles.yaml` (D.2).
+  переопределение побеждает доменный профиль** по оси `fetch`; `extract`/`strategy`/`wait_for`/
+  `rate_limit` при этом берутся из `domain_profiles.yaml` (D.2).
 - `--cutoff-k K` (I20) и `--render-modes` влияют на фазы Ш5/Ш6; `--cutoff-k` имеет смысл
   при прогоне до `evaluate`.
 
@@ -400,7 +428,7 @@ hound run \
 - `sentence_transformers` (extra `embed`) — плотные эмбеддинги bge-m3 (dense-ретривал);
   без него — лексический индекс (`tantivy`/BM25, extra `retrieval`) и/или sparse;
 - `scrapy` + `playwright` (extra `crawl`) — браузерный рендер SPA/JS; `COHOUND_SCOUT_CRAWLER=scrapy`
-  для `passport-scout`.
+  или `=browser` для `passport-scout` (прямой `BrowserCrawler`).
 
 ---
 

@@ -233,6 +233,24 @@ class ExtractionRoute(StrEnum):
     DOCUMENT = "document"
 
 
+class CrawlStrategy(StrEnum):
+    """Ось стратегии краула: **как** используется браузер **при browser-capable адаптере**.
+
+    Отличается от ``FetchMode`` («нужен ли браузер вообще»): ``auto`` — адаптер выбирает
+    безопасный дефолт (для браузерного адаптера = ``honest``); ``honest`` — все запросы
+    через браузер; ``hybrid`` — браузер только для антибот-cookie, остальное — лёгким HTTP
+    с переиспользованием cookie (fallback на ``honest``).
+
+    Инвариант (нормализуется в :func:`core.pipeline.fetch_plan.resolve_fetch_plan`):
+    ``strategy != AUTO`` ⇒ ``fetch == BROWSER``. При ``fetch=HTTP`` стратегия браузера
+    бессмысленна и приводится к ``AUTO``.
+    """
+
+    AUTO = "auto"
+    HONEST = "honest"
+    HYBRID = "hybrid"
+
+
 class FetchStatus(StrEnum):
     """D3: жизненный цикл per-URL записи краула (``crawl_attempts``) — durable audit/queue/resume.
 

@@ -1,15 +1,17 @@
 """coHound — загрузчик ``domain_profiles.yaml`` (D2, ``03`` §D.2).
 
-Профиль домена описывает **две независимые оси** получения/извлечения контента:
+Профиль домена описывает независимые оси получения/извлечения/стратегии контента:
 
-* ``fetch``   — ``http`` | ``browser`` (HTTP-фетч или браузерный рендер JS);
-* ``extract`` — ``auto`` | ``html`` | ``document`` (авто-детект по формату | HTML | документ);
-* ``wait_for``— опциональное JS-условие готовности для браузерного рендера.
+* ``fetch``    — ``http`` | ``browser`` (HTTP-фетч или браузерный рендер JS);
+* ``extract``  — ``auto`` | ``html`` | ``document`` (авто-детект по формату | HTML | документ);
+* ``strategy`` — ``auto`` | ``honest`` | ``hybrid`` (как используется браузер, D4);
+* ``wait_for`` — опциональное JS-условие готовности для браузерного рендера;
+* ``rate_limit`` — опциональный диапазон uniform(min_s, max_s) между запросами.
 
 Формат::
 
     example.com:        {fetch: browser, extract: html}
-    parent.test/path:   {fetch: http,    extract: document}
+    parent.test/path:   {fetch: browser, extract: document, strategy: hybrid}
 
 Ключ — ``host`` с опциональным ``/path``; сопоставление и приоритет профилей —
 ответственность pipeline (:func:`core.pipeline.fetch_plan.resolve_fetch_plan`), не адаптеров.
@@ -27,19 +29,26 @@ from typing import Any
 import yaml
 from pydantic import BaseModel, ConfigDict, ValidationError
 
-from core.domain.enums import ExtractionRoute, FetchMode
+from core.domain.enums import CrawlStrategy, ExtractionRoute, FetchMode
+from core.domain.models import RateLimitSpec
 
 __all__ = ["DomainProfile", "load_domain_profiles"]
 
 
 class DomainProfile(BaseModel):
-    """Профиль домена: оси ``fetch``/``extract`` + опциональное JS-ожидание (D2)."""
+    """Профиль домена: оси ``fetch``/``extract``/``strategy`` + JS-ожидание и rate-limit (D2/D4).
+
+    ``strategy``/``rate_limit`` опциональны: ``None`` → наследуется дефолт ``run.yaml``
+    (секция ``crawl``); при её отсутствии — ``CrawlStrategy.AUTO`` без ограничения задержек.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     fetch: FetchMode = FetchMode.HTTP
     extract: ExtractionRoute = ExtractionRoute.AUTO
     wait_for: str | None = None
+    strategy: CrawlStrategy | None = None
+    rate_limit: RateLimitSpec | None = None
 
 
 def _read_yaml(path: str | Path) -> Any:

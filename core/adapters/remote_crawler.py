@@ -41,14 +41,17 @@ class RemoteCrawler:
     def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:
         """``/v1/fetch`` → ``RawPage`` (сырые байты, retention).
 
-        План сериализуется целиком (``fetch``/``extract``/``wait_for``): edge исполняет
-        обе оси, а прокси потребляет сырые байты. Нейтрален (§1.3).
+        План сериализуется целиком (``fetch``/``extract``/``strategy``/``wait_for``):
+        edge исполняет оси, а прокси потребляет сырые байты. Ось ``strategy``
+        (``auto``/``honest``/``hybrid``) — **additive**: старые edge без неё продолжают
+        работать (поле необязательно). Нейтрален (§1.3).
         """
         payload = {
             "url": url,
             "fetch": plan.fetch.value,
             "lang": None,
             "extract": plan.extract.value,
+            "strategy": plan.strategy.value,
             "wait_for": plan.wait_for,
         }
         response = self._gateway.call("fetch", payload)

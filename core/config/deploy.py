@@ -38,6 +38,7 @@ __all__ = [
     "EdgeConfig",
     "SearchDeployConfig",
     "CrawlConfig",
+    "CrawlBrowserConfig",
     "LLMSlotConfig",
     "LLMDeployConfig",
     "DeployConfig",
@@ -57,6 +58,9 @@ SPLIT_PROFILES: frozenset[str] = frozenset({"split", "split-hardened"})
 AUTH_KINDS: tuple[str, ...] = ("mtls", "oidc")
 EXTRACTOR_ZONES: tuple[str, ...] = ("edge", "core", "separate")
 AUDIT_SINKS: tuple[str, ...] = ("file", "syslog")
+#: Режимы подключения браузерного краулера (07): внешний браузер по CDP либо
+#: персистентный профиль, которым владеет Playwright.
+CRAWL_BROWSER_MODES: tuple[str, ...] = ("cdp", "persistent")
 
 #: Именованные слоты моделей LLM (commodity/execution-слой §7.4). Активный slot
 #: выбирается в рантайме (``--llm-slot`` / ``COHOUND_LLM_SLOT``), см. :func:`resolve_llm_slot`.
@@ -236,14 +240,98 @@ class SearchDeployConfig(BaseModel):
         return value
 
 
-class CrawlConfig(BaseModel):
-    """Операционная политика HTTP-краулинга корпуса (03 D.5/D.6).
+class CrawlBrowserConfig(BaseModel):
+    """Параметры браузерного краулинга корпуса (07).
 
-    Секция применима к лёгкому :class:`~core.adapters.crawl_http.HttpCrawler`
-    (композиция — ``cli.wiring``): ``user_agent``, ``timeout_s`` (таймаут запроса, с) и
-    ``follow_redirects``. Значения **не** дублируют возможности адаптера, а лишь
-    выносят их в конфиг оператора (A1). Поля со значением ``None`` означают «взять
-    дефолт адаптера» — так сохраняется обратная совместимость профиля ``local`` без файла.
+    Операционный выбор оператора для браузерного краулера (SPA/JS-контент). ``mode`` —
+    **декларативный** селектор ветки подключения:
+
+    * ``"cdp"`` — подключение к **внешнему** процессу браузера по CDP (``cdp_url``);
+      профиль/сессия принадлежат этому процессу; ``user_data_dir`` запрещён;
+    * ``"persistent"`` — персистентный профиль (``user_data_dir``); ``cdp_url`` запрещён;
+    * ``None`` — **не сконфигурировано** (плейсхолдер): перекрёстных требований нет.
+
+    Фактическую ветку подключения выводит композиция/адаптер **по наличию**
+    ``cdp_url``/``user_data_dir``; ``mode`` здесь лишь декларирует намерение и не
+    является источником истины для рантайма (принятое проектное решение: адаптер
+    ветвится по данным, а не по этой строке). Значения нормализуются (``strip``); пустые
+    строки приводятся к ``None``. ``mode=None`` делает плейсхолдер **явным значением** —
+    модель идемпотентна под ``model_dump()→model_validate()`` (persist/reload,
+    ``model_copy``, JSON-схема), в отличие от неявного «поле не задавалось».
+    ``channel`` — свободная строка-данные (канал установленного браузера), не предметная
+    категория (§1.3).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    mode: str | None = None
+    cdp_url: str | None = None
+    user_data_dir: str | None = None
+    headless: bool = False
+    channel: str | None = None
+    timeout_ms: int = Field(default=30000, gt=0)
+
+    @field_validator("mode")
+    @classmethod
+    def _check_mode(cls, value: str | None) -> str | None:
+        """``None`` допустим (не сконфигурировано); иначе — из :data:`CRAWL_BROWSER_MODES`."""
+        if value is None:
+            return None
+        mode = value.strip()
+        if mode not in CRAWL_BROWSER_MODES:
+            raise ValueError(
+                f"crawl.browser.mode: недопустимый режим «{value}»; "
+                f"ожидается один из {list(CRAWL_BROWSER_MODES)}"
+            )
+        return mode
+
+    @field_validator("cdp_url", "user_data_dir", "channel")
+    @classmethod
+    def _empty_to_none(cls, value: str | None) -> str | None:
+        """Пустые/пробельные строки нормализует в ``None`` (как соседние конфиги)."""
+        if value is None:
+            return None
+        return value.strip() or None
+
+    @model_validator(mode="after")
+    def _check_mode_requirements(self) -> CrawlBrowserConfig:
+        """Требования режима — явная функция от ``mode`` (идемпотентно под dump→validate).
+
+        ``mode is None`` — плейсхолдер «не сконфигурировано»: требований нет. ``cdp``
+        требует непустой ``cdp_url`` и запрещает ``user_data_dir``; ``persistent``
+        требует непустой ``user_data_dir`` и запрещает ``cdp_url``.
+        """
+        if self.mode is None:
+            return self
+        if self.mode == "cdp":
+            if not self.cdp_url:
+                raise ValueError("crawl.browser: режим cdp требует непустой cdp_url")
+            if self.user_data_dir is not None:
+                raise ValueError(
+                    "crawl.browser: режим cdp несовместим с user_data_dir (взаимоисключение)"
+                )
+        else:  # persistent (mode уже провалидирован против CRAWL_BROWSER_MODES)
+            if not self.user_data_dir:
+                raise ValueError(
+                    "crawl.browser: режим persistent требует непустой user_data_dir"
+                )
+            if self.cdp_url is not None:
+                raise ValueError(
+                    "crawl.browser: режим persistent несовместим с cdp_url (взаимоисключение)"
+                )
+        return self
+
+
+class CrawlConfig(BaseModel):
+    """Операционная политика краулинга корпуса (03 D.5/D.6).
+
+    Секция покрывает и лёгкий :class:`~core.adapters.crawl_http.HttpCrawler`
+    (``user_agent``, ``timeout_s`` — таймаут запроса в секундах, ``follow_redirects``),
+    и браузерный краулер (``browser``, см. :class:`CrawlBrowserConfig`) для SPA/JS.
+    Значения **не** дублируют возможности адаптера, а лишь выносят их в конфиг оператора
+    (A1). Поля со значением ``None`` означают «взять дефолт адаптера/инфраструктуры» —
+    так сохраняется обратная совместимость профиля ``local`` без файла. Поле ``browser``
+    по умолчанию — валидный плейсхолдер «браузерный краулинг не сконфигурирован».
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -251,6 +339,7 @@ class CrawlConfig(BaseModel):
     user_agent: str | None = None
     timeout_s: float | None = Field(default=None, gt=0)
     follow_redirects: bool = True
+    browser: CrawlBrowserConfig = Field(default_factory=CrawlBrowserConfig)
 
 
 class LLMSlotConfig(BaseModel):

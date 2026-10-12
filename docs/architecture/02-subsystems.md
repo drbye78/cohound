@@ -93,7 +93,7 @@ build_corpus(plan, crawler, extractor, chunker, embedder: EmbedderPort,
              index_builder: IndexBuilderPort, store)         # K3
 products × doc_domains
   Pass A (ingest):
-    → resolve_fetch_plan(url, domain_profiles, explicit)  # pipeline: FetchPlan (fetch/extract/wait_for)
+    → resolve_fetch_plan(url, domain_profiles, explicit)  # pipeline: FetchPlan (fetch/extract/strategy/wait_for/rate_limit)
     → CrawlerPort.fetch(url, plan)             # сырые байты → corpus_raw/{product}/{hash}.bin
     → ExtractorPort.extract(page, plan.extract)  # auto | html (trafilatura) | document (docling)
     → dedup(content_hash)                      # повтор перепечаток не индексируется
@@ -109,6 +109,12 @@ products × doc_domains
 
 `pipeline` **не работает с файлами индекса напрямую**: за запись `.npy`-шардов и tantivy отвечает
 `IndexBuilderPort`, за эмбеддинги — `EmbedderPort` (K3).
+
+**Путь краула (§3.2).** За `CrawlerPort` стоят два адаптера: `crawl_scrapy.py` (Scrapy+playwright)
+и `crawl_browser.py` (`BrowserCrawler` — прямой Playwright/CDP, honest/hybrid); выбор — сменой
+адаптера (сам порт не меняется). **Единственный владелец politeness-пейсинга — `corpus`**: перед
+каждым **живым** фетчем он вызывает `RateLimiter.wait(host, plan.rate_limit)` (адаптерный
+`rate_limiter` — опц. хук для прямого/DMZ-использования, по умолчанию `None`, двойного сна нет).
 
 **Граница доверенных зон (07).** В профиле `split` шаги `CrawlerPort.fetch` и `ExtractorPort.extract`
 исполняются **в DMZ** (`edge/`), а ядро вызывает их через `ContentGateway` (remote-прокси). Сырые
@@ -439,7 +445,8 @@ flowchart LR
 ```
 
 **Профиль `split` (07):** шаг `SA` (search adapter) и `CR` (краул) исполняются в DMZ; ядро↔edge —
-через `/v1/search` и `/v1/fetch`. Сборка индекса (`CH`/`IX`) остаётся в ядре. Граница не меняет
+через `/v1/search` и `/v1/fetch` (поле `strategy` выбирает honest/hybrid для `BrowserCrawler`).
+Сборка индекса (`CH`/`IX`) остаётся в ядре. Граница не меняет
 семантику петли (append-only раунды, K2), а лишь размещает веб-часть в изолированной зоне.
 
 ---

@@ -74,12 +74,15 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from core.config.domain_profiles import DomainProfile
 from core.domain import (
     CorpusChunk,
     CorpusDoc,
     CrawlAttempt,
+    CrawlRunConfig,
+    CrawlStrategy,
     FailureKind,
     FetchStatus,
     IndexManifestEntry,
@@ -94,6 +97,7 @@ from core.ports.index_builder import IndexBuilderPort, IndexMeta
 from core.ports.types import Chunk as PortChunk
 from core.ports.types import FetchMode, FetchPlan, RawPage
 from core.util.hashing import content_hash, short_hash
+from core.util.rate_limit import RateLimiter
 
 __all__ = ["IndexBuild", "build_corpus"]
 
@@ -519,6 +523,8 @@ def build_corpus(
     index_builder: IndexBuilderPort | None = None,
     domain_profiles: Mapping[str, DomainProfile] | None = None,
     explicit_fetch: Mapping[str, FetchMode] | None = None,
+    crawl_defaults: CrawlRunConfig | None = None,
+    rate_limiter: RateLimiter | None = None,
     package_id: str | None = None,
     run_id: str | None = None,
 ) -> PhaseResult:
@@ -546,6 +552,16 @@ def build_corpus(
     :param domain_profiles: типизированные доменные профили (D.2) для резолва ``FetchPlan``.
     :param explicit_fetch: явные переопределения оси ``fetch`` по URL (``--render-modes``);
         побеждают профиль, но только по оси ``fetch`` (``extract``/``wait_for`` — из профиля).
+    :param crawl_defaults: дефолты секции ``crawl`` run.yaml (D4): ось ``strategy`` и
+        диапазон задержек ``rate_limit``. ``None`` → ``CrawlStrategy.AUTO`` без ограничения;
+        профиль домена, задавший соответствующее поле, его переопределяет. Проводка
+        используется краулером (P2/P3); здесь только резолвится в ``FetchPlan``.
+    :param rate_limiter: владелец politeness-пейсинга (**единственный** — corpus). Перед
+        каждым **живым** фетчем вызывается ``wait(host, fetch_plan.rate_limit)``;
+        ``spec is None`` → без сна. ``None`` → строится :class:`RateLimiter` с реальным
+        ``sleep``; тесты инжектят ``RateLimiter(sleep=lambda s: None, rng=random.Random(...))``.
+        Путь ``resume`` (re-извлечение из retained raw) пейсингом не облагается: живого
+        сетевого вызова нет.
     :param package_id: явный пакет корпуса; ``None`` → производный от ``plan``.
     :param run_id: идентификатор прогона для durable-краула (D3). При наличии ``store`` и
         ``run_id`` фаза ведёт ``crawl_attempts`` (аудит/очередь/resume): URL с сохранёнными
@@ -582,6 +598,15 @@ def build_corpus(
     errors: list[str] = []
     duplicate_count = 0
     raw_root_path = Path(raw_root)
+
+    # D4: дефолты оси стратегии/задержек из run.yaml ``crawl`` (профиль домена их переопределяет).
+    crawl_strategy_default = (
+        crawl_defaults.strategy if crawl_defaults is not None else CrawlStrategy.AUTO
+    )
+    crawl_rate_default = crawl_defaults.rate_limit if crawl_defaults is not None else None
+
+    # P2-3: единый владелец politeness-пейсинга — corpus (адаптерный ``rate_limiter`` — None).
+    limiter = rate_limiter if rate_limiter is not None else RateLimiter()
 
     # D3: prior durable-состояние краула (аудит/очередь/resume). Ключ — ``(product_id, url)``:
     # PK таблицы ``crawl_attempts`` = ``(run_id, product_id, url)``, поэтому один и тот же URL
@@ -622,7 +647,11 @@ def build_corpus(
         for url in url_map.get(product_id, []):
             # D2: единый план резолвится в pipeline и передаётся и краулеру, и экстрактору.
             fetch_plan = resolve_fetch_plan(
-                url, domain_profiles or {}, explicit_fetch
+                url,
+                domain_profiles or {},
+                explicit_fetch,
+                default_strategy=crawl_strategy_default,
+                default_rate_limit=crawl_rate_default,
             )
 
             # D3: resume — если по ``(product_id, url)`` есть durable-запись с сохранёнными
@@ -650,9 +679,15 @@ def build_corpus(
                     errors.append(
                         f"{product_id}/{url}: требует браузерный рендер, но краулер "
                         f"{type(crawler).__name__} не поддерживает browser; "
-                        f"задайте COHOUND_SCOUT_CRAWLER=scrapy"
+                        f"задайте COHOUND_SCOUT_CRAWLER=scrapy или browser"
                     )
                     continue
+
+                # P2-3: politeness-пейсинг — единый владелец corpus (R7-независимый;
+                # стратегия/лимит берутся из уже резолвнутого ``FetchPlan``). Применяется
+                # **только** к живому фетчу: путь ``resume`` (retained raw, выше) не пейсится.
+                host = (urlsplit(url).hostname or "").lower()
+                limiter.wait(host, fetch_plan.rate_limit)
 
                 # 1. Краул.
                 try:

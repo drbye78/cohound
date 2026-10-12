@@ -11,13 +11,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from core.domain.enums import ExtractionRoute, FetchMode
+from core.domain.enums import CrawlStrategy, ExtractionRoute, FetchMode
+from core.domain.models import RateLimitSpec
 
-# Переиспользуем доменные оси (D2): краулер видит ``fetch``/``extract`` как value-объекты,
-# не как строки. Реэкспорт — чтобы адаптеры/edge импортировали их из порт-слоя.
+# Переиспользуем доменные оси (D2/D4): краулер видит ``fetch``/``extract``/``strategy``
+# как value-объекты, не как строки. Реэкспорт — чтобы адаптеры/edge импортировали их из порт-слоя.
 __all__ = [
     "ExtractionRoute",
     "FetchMode",
+    "CrawlStrategy",
+    "RateLimitSpec",
     "FetchPlan",
     "RawPage",
     "ExtractedDoc",
@@ -28,17 +31,23 @@ __all__ = [
 
 @dataclass(frozen=True)
 class FetchPlan:
-    """План получения и извлечения страницы (D2).
+    """План получения и извлечения страницы (D2/D4).
 
-    Две независимые оси: ``fetch`` (HTTP/браузер) и ``extract`` (авто/HTML/документ),
-    плюс опциональное JS-условие ожидания для браузерного рендера. Единый value-объект
-    резолвится в pipeline (:func:`core.pipeline.fetch_plan.resolve_fetch_plan`) и
-    передаётся и краулеру, и экстрактору — адаптеры сами план не строят.
+    Оси: ``fetch`` (:class:`~core.domain.enums.FetchMode` — **нужен ли браузер вообще**),
+    ``extract`` (:class:`~core.domain.enums.ExtractionRoute` — авто/HTML/документ) и
+    ``strategy`` (:class:`~core.domain.enums.CrawlStrategy` — **как** браузер используется
+    **при browser-capable адаптере**; при ``fetch=HTTP`` нормализуется в ``AUTO``), плюс
+    опциональное JS-условие ожидания для браузерного рендера и опциональный per-host
+    диапазон задержек ``rate_limit``. Единый value-объект резолвится в pipeline
+    (:func:`core.pipeline.fetch_plan.resolve_fetch_plan`) и передаётся и краулеру, и
+    экстрактору — адаптеры сами план не строят.
     """
 
     fetch: FetchMode = FetchMode.HTTP
     extract: ExtractionRoute = ExtractionRoute.AUTO
     wait_for: str | None = None
+    strategy: CrawlStrategy = CrawlStrategy.AUTO
+    rate_limit: RateLimitSpec | None = None
 
 
 @dataclass(frozen=True)
