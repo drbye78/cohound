@@ -641,6 +641,10 @@ def build_corpus(
     # L1a: разрешённые цели краула (``engine``/``kind``) по ``(product_id, url)`` — провенанс
     # элемента сеанса.
     targets: dict[tuple[str, str], Any] = {}
+    #: Phase 2.1/S1: фактически применённый движок (имя транспорта адаптера) по
+    #: ``(product_id, url)``; ``None`` → откат на ``target.engine``. Отдельная карта, чтобы
+    #: **не мутировать** замороженный ``CrawlTarget``.
+    applied_engines: dict[tuple[str, str], str | None] = {}
 
     def _mark(pid: str, u: str, status: CrawlItemStatus, **fields: Any) -> None:
         """Помечает исход URL и (при активном сеансе) персистит элемент краула (L1a).
@@ -650,12 +654,19 @@ def build_corpus(
         сеанса поддерживаются стором транзакционно. Сбой изолируется в ``errors``; без
         сеанса durable-краул выключен — строка не пишется (наблюдаемость идёт из
         ``IndexBuild``-счётчиков, которые при отсутствии сеанса нулевые).
+
+        Phase 2.1/S1: ``engine`` — **применённый** транспорт (``applied_engines``), а не
+        запрошенный ``target.engine``; откат на ``target.engine`` при отсутствии записи.
         """
         if session is None:
             return
         key = (pid, u)
         base = items.get(key)
         target = targets.get(key)
+        applied = applied_engines.get(key)
+        engine_value = applied if applied is not None else (
+            target.engine if target is not None else None
+        )
         now = _now_iso()
         attempts = base.attempts if base is not None else 0
         if status in (CrawlItemStatus.FETCHED, CrawlItemStatus.FAILED) and (
@@ -668,7 +679,7 @@ def build_corpus(
             "url": u,
             "status": status,
             "attempts": attempts,
-            "engine": target.engine if target is not None else None,
+            "engine": engine_value,
             "kind": target.kind if target is not None else None,
             "fetch_mode": base.fetch_mode if base is not None else None,
             "extract_route": base.extract_route if base is not None else None,
@@ -726,6 +737,11 @@ def build_corpus(
             active = (
                 (crawlers or {}).get(target.engine) if target.engine else None
             ) or crawler
+            # Phase 2.1/S1: применяемый движок — фактический транспорт адаптера
+            # (``getattr(active, "engine", None)``), с откатом на запрошенный ``target.engine``.
+            applied_engines[(product_id, url)] = (
+                getattr(active, "engine", None) or target.engine
+            )
 
             # L1a: resume — если по ``(product_id, url)`` есть элемент сеанса с сохранёнными
             # байтами, НЕ фетчим: ре-извлекаем из retained raw (I19: raw — источник).
@@ -1053,13 +1069,15 @@ def build_corpus(
     # вызов на фазу. ``finished_at`` фиксирует момент завершения.
     if session is not None:
         try:
-            # Phase 2: провенанс сеанса — движки/виды источников из разрешённых целей краула
-            # (``engine``/``kind`` элементов) + дайджест конфигурации источников.
+            # Phase 2/2.1: провенанс сеанса — движки/виды источников из **персистенных
+            # элементов** (``items.values()``: фактически применённый ``engine`` и ``kind``
+            # элемента) + дайджест конфигурации источников. ``targets`` для агрегата не
+            # годится: там лишь запрошенный движок (может быть ``None``).
             engines = sorted(
-                {t.engine for t in targets.values() if getattr(t, "engine", None)}
+                {str(i.engine) for i in items.values() if i.engine}
             )
             kinds = sorted(
-                {t.kind for t in targets.values() if getattr(t, "kind", None)}
+                {str(i.kind) for i in items.values() if i.kind}
             )
             digest = (
                 crawl_sources_digest(crawl_sources)

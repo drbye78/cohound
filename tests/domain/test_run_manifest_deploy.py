@@ -106,3 +106,41 @@ def test_crawl_provenance_extra_forbid() -> None:
         CrawlSessionProvenance(
             session_id="s", profile="local", status="completed", unknown_field=1
         )
+
+
+def test_crawl_provenance_canonicalizes_engines_and_heterogeneous() -> None:
+    """Phase 2.1/S3: ``engines`` sorted/dedup, ``heterogeneous`` выводится по конструкции."""
+    hetero = CrawlProvenance(engines=["b", "a", "a"])
+    assert hetero.engines == ["a", "b"]  # sorted + dedup
+    assert hetero.heterogeneous is True
+
+    single = CrawlProvenance(engines=["a"])
+    assert single.engines == ["a"]
+    assert single.heterogeneous is False
+
+    empty = CrawlProvenance()
+    assert empty.engines == []
+    assert empty.heterogeneous is False
+
+    dedup_single = CrawlProvenance(engines=["a", "a"])
+    assert dedup_single.engines == ["a"]
+    assert dedup_single.heterogeneous is False
+
+
+def test_crawl_provenance_heterogeneous_ignores_stale_input() -> None:
+    """Флаг — производный: противоречивое входное значение перекрывается валидатором."""
+    assert CrawlProvenance(engines=["a"], heterogeneous=True).heterogeneous is False
+    assert CrawlProvenance(engines=["a", "b"], heterogeneous=False).heterogeneous is True
+
+
+def test_crawl_provenance_heterogeneous_survives_dump_validate() -> None:
+    """Phase 2.1/S3: ``heterogeneous`` переживает round-trip (persist→read) манифеста."""
+    provenance = CrawlProvenance(engines=["scrapy", "http"], kinds=["web", "feed"])
+    manifest = _manifest(crawl_provenance=provenance)
+    dumped = manifest.model_dump(mode="json")
+    restored = RunManifest(**dumped)
+    assert restored.crawl_provenance.heterogeneous is True
+    assert restored.crawl_provenance == provenance
+    # ``read_manifest`` валидирует JSON-текст так же — флаг не теряется под extra="forbid".
+    from_json = CrawlProvenance.model_validate(dumped["crawl_provenance"])
+    assert from_json.heterogeneous is True

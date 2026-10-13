@@ -487,6 +487,42 @@ def test_build_manifest_accepts_crawl_provenance_mapping(tmp_path: Path) -> None
     assert manifest.crawl_provenance.kinds == ["web"]
 
 
+def test_heterogeneous_flag_is_durable_even_when_battle_card_blocked(
+    store: SqliteStore, tmp_path: Path
+) -> None:
+    """Phase 2.1/S3: флаг переживает ``read_manifest`` даже при блокировке battle card (I11).
+
+    Шапка battle card использует **durable** флаг провенанса; блокировка публикации (I11/G4)
+    на сам провенанс не влияет — наблюдение остаётся в манифесте.
+    """
+    provenance = CrawlProvenance(engines=["http", "scrapy"], kinds=["web"])
+    inputs = SimpleNamespace(
+        run=SimpleNamespace(
+            methodology_version="2.0.0", ranking_epsilon=0.0, mode=RunMode.STRICT
+        ),
+        ranking_epsilon=None,
+    )
+    plan = SimpleNamespace(run_id=RUN_ID, methodology_version="2.0.0")
+    manifest = build_manifest(inputs=inputs, plan=plan, crawl_provenance=provenance)
+    store.persist_manifest(RUN_ID, manifest)
+    assert store.read_manifest(RUN_ID).crawl_provenance.heterogeneous is True
+
+    # Только N/A → Coverage отсутствует: battle card обязан отказать (I11/G4).
+    _save(store, [_cell(PRODUCT_A, "param.na", Status.NOT_APPLICABLE)])
+    cells = list(store.iter_cells(RUN_ID))
+    bundle = compute(store=store, run_id=RUN_ID, catalog=_catalog(), module_weights={})
+    with pytest.raises(PublishBlockedError):
+        render_battle_card(
+            bundle,
+            cells,
+            _catalog(),
+            tmp_path / "battle_card.xlsx",
+            crawl_provenance=store.read_manifest(RUN_ID).crawl_provenance,
+        )
+    assert not (tmp_path / "battle_card.xlsx").exists()
+    assert store.read_manifest(RUN_ID).crawl_provenance.heterogeneous is True
+
+
 def test_battle_card_refused_without_coverage(store: SqliteStore, tmp_path: Path) -> None:
     """G4/I11: нет Coverage вообще (только N/A) → battle card не публикуется."""
     _save(store, [_cell(PRODUCT_A, "param.na", Status.NOT_APPLICABLE)])

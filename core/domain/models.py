@@ -703,17 +703,32 @@ class CrawlSessionProvenance(BaseModel):
 class CrawlProvenance(BaseModel):
     """Провенанс краула прогона (§4.4, Phase 2): сеансы + агрегаты движков/видов + дайджест.
 
-    ``engines``/``kinds`` — агрегат по всем сеансам (sorted, dedup). ``crawl_sources_digest`` —
-    отпечаток конфигурации ``crawl_sources.yaml`` (:func:`core.pipeline.crawl_sources.crawl_sources_digest`).
-    Информационен: не влияет на Comparability/§6 и не входит в diff-границы (§13).
+    ``engines``/``kinds`` — агрегат по всем сеансам; канонизируется (sorted, dedup)
+    валидатором ``mode="after"`` при конструировании/чтении. ``heterogeneous`` — durable
+    флаг неоднородности транспорта (``len(set(engines)) > 1``), вычисляется тем же
+    валидатором: объявленное поле (а не ``computed_field``), поэтому переживает
+    ``model_validate`` под ``extra="forbid"`` и round-trip через манифест.
+    ``crawl_sources_digest`` — отпечаток конфигурации ``crawl_sources.yaml``
+    (:func:`core.pipeline.crawl_sources.crawl_sources_digest`). Информационен: не влияет
+    на Comparability/§6 и не входит в diff-границы (§13).
     """
 
     model_config = _BASE
 
     sessions: list[CrawlSessionProvenance] = Field(default_factory=list)
-    engines: list[str] = Field(default_factory=list)  # aggregate, sorted, dedup
-    kinds: list[str] = Field(default_factory=list)  # aggregate, sorted, dedup
+    engines: list[str] = Field(default_factory=list)  # aggregate, sorted, dedup (by construction)
+    kinds: list[str] = Field(default_factory=list)  # aggregate, sorted, dedup (by construction)
     crawl_sources_digest: str | None = None
+    #: Неоднородность транспорта (несколько движков) — информационный durable-флаг.
+    heterogeneous: bool = False
+
+    @model_validator(mode="after")
+    def _canonicalize(self) -> CrawlProvenance:
+        """Сортирует+дедуплицирует ``engines``/``kinds`` и выводит ``heterogeneous``."""
+        object.__setattr__(self, "engines", sorted(set(self.engines)))
+        object.__setattr__(self, "kinds", sorted(set(self.kinds)))
+        object.__setattr__(self, "heterogeneous", len(set(self.engines)) > 1)
+        return self
 
 
 class RunManifest(BaseModel):

@@ -720,11 +720,13 @@ def _battle_card_header(
         ("computed_ranking", bundle.computed_ranking),
         ("coverage_insufficient", insufficient),
     ]
-    # §4.4/Phase 2: провенанс краула — движки (информационно) и флаг неоднородности.
-    # Это **наблюдение**, а не демотирование: Comparability/§6 не затрагиваются (I11-only).
+    # §4.4/Phase 2/2.1: провенанс краула — движки (информационно) и durable-флаг
+    # неоднородности. ``crawl_engines`` публикуется безусловно (стабильная схема шапки);
+    # ``crawl_engines_heterogeneous`` — только при флаге. Это **наблюдение**, а не
+    # демотирование: Comparability/§6 не затрагиваются (I11-only).
     engines = sorted({str(e) for e in (getattr(crawl_provenance, "engines", None) or [])})
     rows.append(("crawl_engines", ", ".join(engines)))
-    if len(engines) > 1:
+    if getattr(crawl_provenance, "heterogeneous", False):
         rows.append(("crawl_engines_heterogeneous", True))
     if insufficient:
         rows.append(("note", INSUFFICIENT_COVERAGE_NOTE))

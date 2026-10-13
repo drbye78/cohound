@@ -127,6 +127,7 @@ PROVENANCE_FIELDS: tuple[str, ...] = (
     "requested_ranking",
     "computed_ranking",
     "snapshot_date",
+    "crawl_provenance",
 )
 
 #: Базовые входы ``_derive_index_build_id`` для property-проверки чистоты (P2:

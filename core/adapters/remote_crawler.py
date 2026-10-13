@@ -26,6 +26,8 @@ __all__ = ["RemoteCrawler"]
 class RemoteCrawler:
     """``CrawlerPort`` через DMZ-шов. Drop-in для реального краулера (07 §4)."""
 
+    #: Duck-typed имя транспорта (провенанс краула, Phase 2.1/S1).
+    engine = "remote"
     #: Браузерный рендер исполняется на edge (DMZ) — прокси поддерживает ``fetch: browser``.
     supports_browser = True
 

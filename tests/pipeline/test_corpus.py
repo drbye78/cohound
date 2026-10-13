@@ -130,19 +130,27 @@ def _make_run(store: SqliteStore, run_id: str = RUN_ID) -> None:
 
 
 class _Crawler:
-    """Краулер: ``url -> bytes``; опционально URL, бросающие исключение."""
+    """Краулер: ``url -> bytes``; опционально URL, бросающие исключение.
+
+    ``engine`` — duck-typed имя транспорта (Phase 2.1/S1): ``None`` (дефолт) повторяет
+    поведение адаптера без объявленного имени — провенанс запишет запрошенный
+    ``target.engine``; заданное имя приоритетнее запрошенного.
+    """
 
     version = "crawler-1"
+    engine: str | None = None
 
     def __init__(
         self,
         pages: dict[str, bytes],
         *,
         raising: set[str] | None = None,
+        engine: str | None = None,
     ) -> None:
         self.pages = dict(pages)
         self.raising = set(raising or ())
         self.calls: list[tuple[str, FetchPlan]] = []
+        self.engine = engine
 
     def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:
         self.calls.append((url, plan))
@@ -1323,6 +1331,70 @@ def test_engine_selected_crawler_used_and_recorded(tmp_path: Path) -> None:
         assert item.status is CrawlItemStatus.FETCHED
         assert item.engine == "fake"
         assert item.kind == "feed"
+    finally:
+        store.close()
+
+
+def test_applied_engine_recorded_without_requested_engine(tmp_path: Path) -> None:
+    """Phase 2.1/S1: без ``crawl_sources.engine`` провенанс несёт транспорт адаптера.
+
+    Резолвер возвращает ``engine=None`` (ни один слой не назвал движок), но фактически
+    применимый движок известен адаптеру (duck-typed ``engine``) — он и попадает в элемент.
+    """
+    store = SqliteStore(":memory:")
+    _make_run(store)
+    try:
+        result = _build(
+            tmp_path,
+            pages={},
+            urls={"p1": [URL_P1_A]},
+            crawler=_Crawler({URL_P1_A: b"x"}, engine="http"),
+            store=store,
+            run_id=RUN_ID,
+        )
+        assert result.errors == []
+        item = next(iter(_items(store)))
+        assert item.status is CrawlItemStatus.FETCHED
+        assert item.engine == "http"
+        assert item.kind is None
+
+        session = store.get_crawl_session(SESSION_ID)
+        assert session is not None
+        provenance = json.loads(session.provenance_json or "{}")
+        assert provenance["engines"] == ["http"]
+    finally:
+        store.close()
+
+
+def test_session_aggregates_applied_engines_from_items(tmp_path: Path) -> None:
+    """Phase 2.1/S1: агрегат движков сеанса — из персистенных элементов (смешанные движки)."""
+    store = SqliteStore(":memory:")
+    _make_run(store)
+    sources = CrawlSourcesConfig(
+        sites={
+            "p1": {"docs.test": CrawlSource(engine="http", kind="web")},
+            "p2": {"docs.test": CrawlSource(engine="browser", kind="web")},
+        }
+    )
+    http_crawler = _Crawler({URL_P1_A: b"a"}, engine="http")
+    browser_crawler = _Crawler({URL_P2_A: b"b"}, engine="browser")
+    try:
+        result = _build(
+            tmp_path,
+            pages={},
+            urls={"p1": [URL_P1_A], "p2": [URL_P2_A]},
+            crawler=_Crawler({}),
+            crawlers={"http": http_crawler, "browser": browser_crawler},
+            crawl_sources=sources,
+            store=store,
+            run_id=RUN_ID,
+        )
+        assert result.errors == []
+        session = store.get_crawl_session(SESSION_ID)
+        assert session is not None
+        provenance = json.loads(session.provenance_json or "{}")
+        assert provenance["engines"] == ["browser", "http"]
+        assert provenance["kinds"] == ["web"]
     finally:
         store.close()
 

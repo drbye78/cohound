@@ -100,6 +100,9 @@ class HttpCrawler:
     """
 
     version = "http-crawler-1"
+    #: Duck-typed имя транспорта (провенанс краула, Phase 2.1/S1): фактически
+    #: применённый движок попадает в ``crawl_session_items.engine``/манифест.
+    engine = "http"
     #: Лёгкий HTTP-краулер не умеет браузерный рендер (D2): pipeline пропускает
     #: ``fetch: browser``-URL для такого краулера с пофURL-ошибкой.
     supports_browser = False

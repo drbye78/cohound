@@ -427,6 +427,8 @@ class ScrapyCrawler:
     """
 
     version = "scrapy-crawler-2"
+    #: Duck-typed имя транспорта (провенанс краула, Phase 2.1/S1).
+    engine = "scrapy"
     #: Scrapy-краулер умеет per-request playwright-рендер (``fetch: browser``, D2).
     supports_browser = True
 

@@ -413,6 +413,8 @@ class BrowserCrawler:
     """
 
     version = "browser-crawler-1"
+    #: Duck-typed имя транспорта (провенанс краула, Phase 2.1/S1).
+    engine = "browser"
     #: Браузерный краулер поддерживает ``fetch: browser`` (D2).
     supports_browser = True
 
