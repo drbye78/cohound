@@ -681,6 +681,41 @@ class AlignmentReport(BaseModel):
     violations: list[str] = Field(default_factory=list)
 
 
+class CrawlSessionProvenance(BaseModel):
+    """Провенанс одного сеанса краула в манифесте прогона (§4.4, Phase 2).
+
+    Информационный снимок наблюдаемого исполнения краула (движки/виды источника, статус,
+    счётчики). Не входит в границы версий (§13): смена движка не меняет методологию.
+    """
+
+    model_config = _BASE
+
+    session_id: str
+    profile: str
+    status: str
+    engines: list[str] = Field(default_factory=list)
+    kinds: list[str] = Field(default_factory=list)
+    total: int = 0
+    fetched: int = 0
+    failed: int = 0
+
+
+class CrawlProvenance(BaseModel):
+    """Провенанс краула прогона (§4.4, Phase 2): сеансы + агрегаты движков/видов + дайджест.
+
+    ``engines``/``kinds`` — агрегат по всем сеансам (sorted, dedup). ``crawl_sources_digest`` —
+    отпечаток конфигурации ``crawl_sources.yaml`` (:func:`core.pipeline.crawl_sources.crawl_sources_digest`).
+    Информационен: не влияет на Comparability/§6 и не входит в diff-границы (§13).
+    """
+
+    model_config = _BASE
+
+    sessions: list[CrawlSessionProvenance] = Field(default_factory=list)
+    engines: list[str] = Field(default_factory=list)  # aggregate, sorted, dedup
+    kinds: list[str] = Field(default_factory=list)  # aggregate, sorted, dedup
+    crawl_sources_digest: str | None = None
+
+
 class RunManifest(BaseModel):
     """``run_manifest.yaml`` (§9, §13): агрегат всех версий и параметров прогона (R7).
 
@@ -733,6 +768,9 @@ class RunManifest(BaseModel):
     deploy_profile: str | None = None
     edge_schema_version: str | None = None
     edge_capabilities: dict[str, Any] = Field(default_factory=dict)  # версии edge-компонентов (gateway)
+    #: §4.4/Phase 2: провенанс краула (сеансы/движки/виды источника + дайджест источников).
+    #: Информационен — не влияет на §6/Comparability и не входит в diff-границы (§13).
+    crawl_provenance: CrawlProvenance = Field(default_factory=CrawlProvenance)
 
 
 class Violation(BaseModel):

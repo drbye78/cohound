@@ -29,15 +29,23 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
 from core.domain.anchors import SourceResolver
-from core.domain.models import Satellite
+from core.domain.enums import CrawlItemStatus, CrawlSessionStatus
+from core.domain.models import (
+    CrawlProvenance,
+    CrawlSessionProvenance,
+    Satellite,
+)
 from core.config.crawl_sources import CrawlSourcesConfig
 from core.config.domain_profiles import DomainProfile
 from core.pipeline.compute import compute, scope_universe
 from core.pipeline.corpus import build_corpus
+from core.pipeline.crawl_session import default_session_id
+from core.pipeline.crawl_sources import crawl_sources_digest
 from core.pipeline.discovery import discover
 from core.pipeline.evaluate import (
     DEFAULT_RETRIEVAL_CUTOFF_K,
@@ -139,6 +147,86 @@ def _created_at(ctx: RunContext) -> str | None:
     if now_iso is None:
         return None
     return str(now_iso())
+
+
+def _session_provenance_json(session: Any) -> dict[str, Any]:
+    """Читает ``provenance_json`` сеанса (Phase 2) как dict; любая ошибка → ``{}``."""
+    raw = getattr(session, "provenance_json", None)
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, ValueError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _crawl_provenance(store: Any, inputs: Any, run_id: str) -> CrawlProvenance:
+    """Собирает :class:`CrawlProvenance` из сеанса краула прогона (§4.4, Phase 2).
+
+    Читает ``crawl_sessions`` (``get_crawl_session``), элементы сеанса
+    (``iter_crawl_session_items``) и счётчики (``crawl_session_counts``). Движки/виды
+    берутся из провенанса сеанса (``provenance_json``), записанного
+    :func:`~core.pipeline.crawl_session.finalize_session`, объединяются с per-item
+    ``engine``/``kind``. Дайджест — отпечаток ``inputs.crawl_sources`` (Phase 2). Любая
+    ошибка чтения изолируется: провенанс **информационен** и не роняет фазу отчёта.
+    """
+    sources = getattr(inputs, "crawl_sources", None)
+    try:
+        digest = crawl_sources_digest(sources) if sources is not None else None
+    except Exception:  # noqa: BLE001 — провенанс информационен
+        digest = None
+
+    sessions: list[CrawlSessionProvenance] = []
+    engines: set[str] = set()
+    kinds: set[str] = set()
+    try:
+        session_id = default_session_id(run_id)
+        session = store.get_crawl_session(session_id)
+        if session is not None:
+            prov = _session_provenance_json(session)
+            item_engines: set[str] = set()
+            item_kinds: set[str] = set()
+            for item in store.iter_crawl_session_items(session_id):
+                if getattr(item, "engine", None):
+                    item_engines.add(str(item.engine))
+                if getattr(item, "kind", None):
+                    item_kinds.add(str(item.kind))
+            session_engines = sorted(
+                {str(e) for e in (prov.get("engines") or [])} | item_engines
+            )
+            session_kinds = sorted(
+                {str(k) for k in (prov.get("kinds") or [])} | item_kinds
+            )
+            counts = store.crawl_session_counts(session_id)
+            total = sum(int(n) for n in counts.values())
+            fetched = int(counts.get(CrawlItemStatus.FETCHED.value, 0))
+            failed = int(counts.get(CrawlItemStatus.FAILED.value, 0)) + int(
+                counts.get(CrawlItemStatus.CANCELLED.value, 0)
+            )
+            sessions.append(
+                CrawlSessionProvenance(
+                    session_id=session_id,
+                    profile=str(session.profile),
+                    status=str(session.status),
+                    engines=session_engines,
+                    kinds=session_kinds,
+                    total=total,
+                    fetched=fetched,
+                    failed=failed,
+                )
+            )
+            engines |= set(session_engines)
+            kinds |= set(session_kinds)
+    except Exception:  # noqa: BLE001 — провенанс информационен, фазу не роняем
+        pass
+
+    return CrawlProvenance(
+        sessions=sessions,
+        engines=sorted(engines),
+        kinds=sorted(kinds),
+        crawl_sources_digest=digest,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -361,6 +449,7 @@ def build_phases(
             retrieval_profile=holder.get("retrieval_profile"),
             retrieval_cutoff_K=holder.get("retrieval_cutoff_K"),
             retrieval_params_json=_retrieval_params_json(holder),
+            crawl_provenance=_crawl_provenance(ctx.store, inputs, plan.run_id),
         )
         # R7/§13: финальный манифест — самостоятельная запись воспроизведения,
         # поэтому персистится в операционную БД прогона (версии/индекс/провенанс).

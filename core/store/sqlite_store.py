@@ -28,6 +28,7 @@ from core.domain import (
     CorpusChunk,
     CorpusDoc,
     CrawlItemStatus,
+    CrawlProvenance,
     CrawlSession,
     CrawlSessionItem,
     CrawlSessionStatus,
@@ -639,12 +640,14 @@ class SqliteStore:
     def persist_manifest(self, run_id: str, manifest: RunManifest) -> None:
         """Персистит финальный манифест в строку ``runs`` (R7/§13, A3).
 
-        Обновляет версии, индексные/ретривал-поля и ``settings_provenance_json``
-        (провенанс настроек, включая ``ranking_epsilon``). ``UPDATE`` по существующей
+        Обновляет версии, индексные/ретривал-поля, ``settings_provenance_json``
+        (провенанс настроек, включая ``ranking_epsilon``) и ``crawl_provenance_json``
+        (провенанс краула, §4.4/Phase 2). ``UPDATE`` по существующей
         строке прогона: манифест — самостоятельная запись воспроизведения, а не
         источник создания прогона (его создаёт :meth:`create_run`).
         """
         provenance = manifest.settings_provenance or {}
+        crawl_provenance = manifest.crawl_provenance
         with self.conn:
             self.conn.execute(
                 "UPDATE runs SET"
@@ -653,7 +656,7 @@ class SqliteStore:
                 " index_build_id = ?, retrieval_profile = ?, retrieval_params_json = ?,"
                 " retrieval_cutoff_K = ?, search_effort_budget_json = ?,"
                 " requested_ranking = ?, computed_ranking = ?, snapshot_date = ?,"
-                " settings_provenance_json = ?"
+                " settings_provenance_json = ?, crawl_provenance_json = ?"
                 " WHERE run_id = ?",
                 (
                     manifest.package_version,
@@ -671,9 +674,15 @@ class SqliteStore:
                     _as_text(manifest.computed_ranking),
                     manifest.snapshot_date,
                     json.dumps(provenance, ensure_ascii=False, sort_keys=True),
+                    json.dumps(
+                        crawl_provenance.model_dump(mode="json"),
+                        ensure_ascii=False,
+                        sort_keys=True,
+                    ),
                     run_id,
                 ),
             )
+
     def upsert_corpus_doc(self, doc: CorpusDoc) -> None:
         """Upsert строки ``corpus_docs`` (raw retention + provenance экстракции, §3.2)."""
         with self.conn:
@@ -1090,6 +1099,17 @@ class SqliteStore:
                 "DELETE FROM crawl_sessions WHERE session_id = ?", (session_id,)
             )
 
+    def set_crawl_session_provenance(self, session_id: str, provenance_json: str) -> None:
+        """Записывает ``provenance_json`` сеанса (targeted ``UPDATE``; Phase 2).
+
+        Обновляет только колонку провенанса — счётчики/метаданные сеанса не задеваются.
+        """
+        with self.conn:
+            self.conn.execute(
+                "UPDATE crawl_sessions SET provenance_json = ? WHERE session_id = ?",
+                (provenance_json, session_id),
+            )
+
     def read_manifest(self, run_id: str) -> RunManifest:
         """Собирает ``RunManifest`` из строки ``runs`` (+ ``llm_scenarios``).
 
@@ -1137,6 +1157,11 @@ class SqliteStore:
         ) or {}
         eps_raw = _optional_row_value(row, "ranking_epsilon")
         ranking_epsilon = float(eps_raw) if eps_raw else 0.0
+        # §4.4/Phase 2: провенанс краула — forward-compatible чтение (на старой схеме
+        # колонки нет → пустой ``CrawlProvenance()``, без падения).
+        crawl_provenance_raw = _parse_json_text(
+            _optional_row_value(row, "crawl_provenance_json")
+        )
         return RunManifest(
             run_id=row["run_id"],
             case_id=row["case_id"],
@@ -1162,6 +1187,7 @@ class SqliteStore:
             computed_ranking=RankingPolicy(computed) if computed is not None else None,
             ranking_epsilon=ranking_epsilon,
             settings_provenance=settings_provenance,
+            crawl_provenance=CrawlProvenance.model_validate(crawl_provenance_raw or {}),
             llm_scenarios=scenarios,
             snapshot_date=row["snapshot_date"],
             deploy_profile=_optional_row_value(row, "deploy_profile"),

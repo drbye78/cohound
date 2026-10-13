@@ -20,6 +20,8 @@ from core.domain import (
     CellState,
     CorpusChunk,
     CorpusDoc,
+    CrawlProvenance,
+    CrawlSessionProvenance,
     EndpointKind,
     EvidenceType,
     Focus,
@@ -91,7 +93,7 @@ def test_schema_opens(store: SqliteStore) -> None:
     ver = store.conn.execute(
         "SELECT value FROM schema_meta WHERE key = 'schema_version'"
     ).fetchone()
-    assert ver["value"] == "3.1.0"
+    assert ver["value"] == "3.2.0"
     tables = {
         r["name"] for r in store.conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
     }
@@ -114,6 +116,9 @@ def test_schema_opens(store: SqliteStore) -> None:
         assert t in tables
     # L1b (schema 3.1.0): legacy crawl_attempts удалена (замещена сеансом краула).
     assert "crawl_attempts" not in tables
+    # Phase 2 (schema 3.2.0): провенанс краула в манифесте прогона.
+    runs_cols = {r["name"] for r in store.conn.execute("PRAGMA table_info(runs)")}
+    assert "crawl_provenance_json" in runs_cols
     # P2 (schema 2.2.0): build-id witness — версии/отпечаток контента.
     chunk_cols = {r["name"] for r in store.conn.execute("PRAGMA table_info(corpus_chunks)")}
     assert "extractor_version" in chunk_cols
@@ -720,6 +725,59 @@ def test_persist_manifest_roundtrip(store: SqliteStore) -> None:
     assert read.settings_provenance == {
         "ranking_epsilon": {"source": "measured", "experiment_id": "e1"}
     }
+
+
+def test_crawl_provenance_roundtrip(store: SqliteStore) -> None:
+    """§4.4/Phase 2: ``persist_manifest``/``read_manifest`` несут провенанс краула."""
+    store.create_run(RUN_ID, _cfg())
+    # Новый прогон без провенанса → пустой (не ``None``).
+    assert store.read_manifest(RUN_ID).crawl_provenance == CrawlProvenance()
+
+    provenance = CrawlProvenance(
+        sessions=[
+            CrawlSessionProvenance(
+                session_id="crawl:run-1",
+                profile="local",
+                status="partial",
+                engines=["http", "scrapy"],
+                kinds=["web"],
+                total=3,
+                fetched=2,
+                failed=1,
+            )
+        ],
+        engines=["http", "scrapy"],
+        kinds=["web"],
+        crawl_sources_digest="digest-1",
+    )
+    manifest = RunManifest(
+        run_id=RUN_ID,
+        case_id="case-1",
+        created_at="2026-01-01T00:00:00Z",
+        mode=RunMode.STRICT,
+        methodology_version="2.1.0",
+        package_version="pkg-1",
+        catalog_version="cat-1",
+        status_dict_version="sd-1",
+        scoring_policy_version="sp-1",
+        anchor_product_id="p1",
+        crawl_provenance=provenance,
+    )
+    store.persist_manifest(RUN_ID, manifest)
+    read = store.read_manifest(RUN_ID)
+    assert read.crawl_provenance == provenance
+    assert read.crawl_provenance.sessions[0].engines == ["http", "scrapy"]
+    assert read.crawl_provenance.crawl_sources_digest == "digest-1"
+
+
+def test_read_manifest_crawl_provenance_tolerates_null(store: SqliteStore) -> None:
+    """NULL в ``crawl_provenance_json`` → пустой ``CrawlProvenance`` (forward-compat)."""
+    store.create_run(RUN_ID, _cfg())
+    with store.conn:
+        store.conn.execute(
+            "UPDATE runs SET crawl_provenance_json = NULL WHERE run_id = ?", (RUN_ID,)
+        )
+    assert store.read_manifest(RUN_ID).crawl_provenance == CrawlProvenance()
 
 
 def test_iter_exhaustions(store: SqliteStore) -> None:

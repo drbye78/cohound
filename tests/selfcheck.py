@@ -603,7 +603,7 @@ def _crawl_session_dict_mirror() -> None:
 def _db_smoke() -> None:
     conn = connect(":memory:")
     ver = conn.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()
-    _assert(ver is not None and ver["value"] == "3.1.0")
+    _assert(ver is not None and ver["value"] == "3.2.0")
 
     tables = {r["name"] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     for t in ("products", "runs", "llm_scenarios", "corpus_docs", "corpus_chunks",
@@ -621,6 +621,10 @@ def _db_smoke() -> None:
 
     # L1b (schema 3.1.0): legacy crawl_attempts удалена (замещена сеансом краула).
     _assert("crawl_attempts" not in tables)
+
+    # Phase 2 (schema 3.2.0): провенанс краула в манифесте прогона.
+    runs_cols = {r["name"] for r in conn.execute("PRAGMA table_info(runs)")}
+    _assert("crawl_provenance_json" in runs_cols)
 
     # Lane B (schema 3.0.0): сеанс краула — crawl_sessions + элементы с PK и FK.
     sess_cols = {r["name"] for r in conn.execute("PRAGMA table_info(crawl_sessions)")}

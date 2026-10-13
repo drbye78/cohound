@@ -17,7 +17,11 @@ from core.config.crawl_sources import CrawlSource, CrawlSourcesConfig
 from core.config.domain_profiles import DomainProfile
 from core.domain.enums import CrawlStrategy, ExtractionRoute, FetchMode
 from core.domain.models import RateLimitSpec
-from core.pipeline.crawl_sources import CrawlTarget, resolve_crawl_target
+from core.pipeline.crawl_sources import (
+    CrawlTarget,
+    crawl_sources_digest,
+    resolve_crawl_target,
+)
 from core.pipeline.fetch_plan import resolve_fetch_plan, select_site_source
 from core.ports.types import FetchPlan
 
@@ -458,3 +462,30 @@ def test_resolve_fetch_plan_behavior_unchanged() -> None:
     assert plan2.wait_for == "w"
 
     assert resolve_fetch_plan("https://none.test/a", {}) == FetchPlan()
+
+
+# ---------------------------------------------------------------------------
+# Phase 2: дайджест конфигурации источников краула
+# ---------------------------------------------------------------------------
+
+
+def test_crawl_sources_digest_deterministic() -> None:
+    """Одинаковая конфигурация → один отпечаток (порядко-независимо)."""
+    cfg = CrawlSourcesConfig(
+        defaults=CrawlSource(kind="web", engine="http"),
+    )
+    assert crawl_sources_digest(cfg) == crawl_sources_digest(cfg)
+    assert isinstance(crawl_sources_digest(cfg), str)
+
+
+def test_crawl_sources_digest_empty_config() -> None:
+    assert isinstance(crawl_sources_digest(CrawlSourcesConfig()), str)
+
+
+def test_crawl_sources_digest_changes_on_semantic_change() -> None:
+    """Смена движка/оси меняет отпечаток (провенанс содержателен, а не константа)."""
+    base = CrawlSourcesConfig(defaults=CrawlSource(kind="web", engine="http"))
+    other_engine = CrawlSourcesConfig(defaults=CrawlSource(kind="web", engine="scrapy"))
+    other_kind = CrawlSourcesConfig(defaults=CrawlSource(kind="feed", engine="http"))
+    assert crawl_sources_digest(base) != crawl_sources_digest(other_engine)
+    assert crawl_sources_digest(base) != crawl_sources_digest(other_kind)

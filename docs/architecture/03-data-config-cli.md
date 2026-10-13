@@ -77,10 +77,11 @@ runs/{run_id}/
 
 Схема §4.4 перенесена из бывшего `core/db.py` (удалён в T1.3) в `store/sqlite.py`
 (14 таблиц + `schema_meta`, индексы, триггеры I4/I6/I7/I13/I18). Константа `SCHEMA_VERSION`
-= **`3.1.0`** (D3/D4/сеансы) — версия **SQLite-схемы**, не регламента; колонки
-`runs.settings_provenance_json` (v2.1/A3) и `corpus_chunks.extractor_version` /
-`index_manifest.extractor_version` / `index_manifest.content_digest` (P2) хранят провенанс настроек
-и build-id witness, а таблицы `crawl_sessions`/`crawl_session_items` — первоклассный сеанс краула
+= **`3.2.0`** (D3/D4/сеансы/провенанс краула) — версия **SQLite-схемы**, не регламента; колонки
+`runs.settings_provenance_json` (v2.1/A3), `runs.crawl_provenance_json` (v3.2/Phase 2) и
+`corpus_chunks.extractor_version` /
+`index_manifest.extractor_version` / `index_manifest.content_digest` (P2) хранят провенанс настроек,
+провенанс краула и build-id witness, а таблицы `crawl_sessions`/`crawl_session_items` — первоклассный сеанс краула
 (id/статус/прогресс/возобновляемость; legacy `crawl_attempts` удалена в v3.1.0); миграция
 additive/idempotent (`ALTER TABLE ... ADD COLUMN`/`CREATE TABLE IF NOT EXISTS` при отсутствии).
 `index_build_id` — **контент-адресуемый** отпечаток батча (два прохода: ingest → финализация id

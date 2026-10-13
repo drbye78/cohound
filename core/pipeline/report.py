@@ -48,7 +48,13 @@ import yaml
 
 from core.domain.enums import CellState, RankingPolicy, Status
 from core.domain.invariants import check_unknown_exhaustion
-from core.domain.models import CatalogRow, Cell, ProtocolExhaustion, RunManifest
+from core.domain.models import (
+    CatalogRow,
+    Cell,
+    CrawlProvenance,
+    ProtocolExhaustion,
+    RunManifest,
+)
 from core.domain.scoring import evidence_coverage
 from core.pipeline.compute import (
     ScoreBundle,
@@ -428,6 +434,7 @@ def build_manifest(
     created_at: str | None = None,
     settings_provenance: Mapping[str, Any] | None = None,
     ranking_epsilon: float | None = None,
+    crawl_provenance: CrawlProvenance | Mapping[str, Any] | None = None,
 ) -> RunManifest:
     """Собирает полностью заполненный :class:`RunManifest` (R7/§13) фазы Ш9.
 
@@ -447,6 +454,9 @@ def build_manifest(
     * §9/A3 (v2.1) — ``settings_provenance`` (провенанс настроек) и ``ranking_epsilon``
       берутся по цепочке ``аргумент → run → inputs → plan`` (``_first_present``); идут в
       манифест **как есть**, без пересчёта дефолтов «по предвидению».
+    * §4.4/Phase 2 — ``crawl_provenance`` (провенанс краула: сеансы/движки/виды + дайджест
+      источников) передаётся вызывающим как :class:`CrawlProvenance` (или mapping); идёт в
+      манифест информационно, вне границ версий (§13).
 
     Деплой-провенанс (``deploy_profile``/``edge_schema_version``) заполняется только если
     соответствующие поля есть в текущей схеме :class:`RunManifest` (defensive: иначе
@@ -568,6 +578,14 @@ def build_manifest(
         getattr(inputs, "ranking_epsilon", None),
         getattr(plan, "ranking_epsilon", None),
     )
+    # §4.4/Phase 2: провенанс краула — типизированный, информационный (вне diff-границ §13).
+    # Принимаем готовую модель либо mapping; ``None`` → пустой ``CrawlProvenance()``.
+    if crawl_provenance is None:
+        resolved_crawl_provenance = CrawlProvenance()
+    elif isinstance(crawl_provenance, CrawlProvenance):
+        resolved_crawl_provenance = crawl_provenance
+    else:
+        resolved_crawl_provenance = CrawlProvenance.model_validate(dict(crawl_provenance))
 
     extra: dict[str, Any] = {}
     manifest_fields = getattr(RunManifest, "model_fields", {})
@@ -647,6 +665,7 @@ def build_manifest(
             0.0 if resolved_ranking_epsilon is None else float(resolved_ranking_epsilon)
         ),
         settings_provenance=dict(resolved_provenance or {}),
+        crawl_provenance=resolved_crawl_provenance,
         snapshot_date=snapshot_date,
         **extra,
     )
@@ -676,9 +695,13 @@ def write_run_manifest(manifest: RunManifest, out_dir: str | Path) -> Path:
 
 
 def _battle_card_header(
-    bundle: ScoreBundle, fallback: bool, insufficient: bool
+    bundle: ScoreBundle,
+    fallback: bool,
+    insufficient: bool,
+    *,
+    crawl_provenance: CrawlProvenance | None = None,
 ) -> list[tuple[str, Any]]:
-    """Шапка battle card: метрики + аннотации (приглушение/fallback)."""
+    """Шапка battle card: метрики + аннотации (приглушение/fallback) + провенанс краула."""
     reasons = "; ".join(bundle.comparability.reasons)
     rows: list[tuple[str, Any]] = [
         ("capability", round(bundle.capability.value, 6)),
@@ -697,6 +720,12 @@ def _battle_card_header(
         ("computed_ranking", bundle.computed_ranking),
         ("coverage_insufficient", insufficient),
     ]
+    # §4.4/Phase 2: провенанс краула — движки (информационно) и флаг неоднородности.
+    # Это **наблюдение**, а не демотирование: Comparability/§6 не затрагиваются (I11-only).
+    engines = sorted({str(e) for e in (getattr(crawl_provenance, "engines", None) or [])})
+    rows.append(("crawl_engines", ", ".join(engines)))
+    if len(engines) > 1:
+        rows.append(("crawl_engines_heterogeneous", True))
     if insufficient:
         rows.append(("note", INSUFFICIENT_COVERAGE_NOTE))
     if fallback:
@@ -713,13 +742,16 @@ def _battle_card_sheets(
     *,
     fallback: bool,
     insufficient: bool,
+    crawl_provenance: CrawlProvenance | None = None,
 ) -> list[tuple[str, list[list[Any]]]]:
     """Собирает листы battle card (шапка/матрица/сателлиты/модули/sensitivity)."""
     by_key = {(str(c.product_id), str(c.param_id)): c for c in cells}
 
     header_rows: list[list[Any]] = [["field", "value"]]
     header_rows.extend(
-        [name, value] for name, value in _battle_card_header(bundle, fallback, insufficient)
+        [name, value] for name, value in _battle_card_header(
+            bundle, fallback, insufficient, crawl_provenance=crawl_provenance
+        )
     )
 
     matrix_rows: list[list[Any]] = [["product", *params]]
@@ -813,6 +845,8 @@ def render_battle_card(
     cells: Iterable[Any],
     catalog: Mapping[str, CatalogRow] | Iterable[CatalogRow],
     out_path: str | Path,
+    *,
+    crawl_provenance: CrawlProvenance | None = None,
 ) -> Path:
     """Пишет ``battle_card`` (XLSX; CSV-fallback) с G4/I11-гейтом (§9, 02 §E.2).
 
@@ -823,6 +857,10 @@ def render_battle_card(
     При недостаточном Coverage артефакт **приглушается** и помечается
     :data:`INSUFFICIENT_COVERAGE_NOTE`; при демотировании продукты упорядочиваются по
     Coverage и добавляется :data:`FALLBACK_ORDER_LABEL` (K6/A3).
+
+    :param crawl_provenance: опциональный провенанс краула (§4.4/Phase 2); в шапку
+        добавляются ``crawl_engines`` и (при >1 движке) ``crawl_engines_heterogeneous`` —
+        информационно, без влияния на Comparability/§6.
     """
     if _coverage_absent(bundle):
         raise PublishBlockedError(
@@ -844,6 +882,7 @@ def render_battle_card(
         params,
         fallback=fallback,
         insufficient=insufficient,
+        crawl_provenance=crawl_provenance,
     )
 
     out = Path(out_path)
@@ -1195,7 +1234,11 @@ def write_reports(
     assert_publishable(bundle)
     try:
         battle_card: Path | None = render_battle_card(
-            bundle, cell_list, catalog, outputs_dir / "battle_card.xlsx"
+            bundle,
+            cell_list,
+            catalog,
+            outputs_dir / "battle_card.xlsx",
+            crawl_provenance=manifest.crawl_provenance,
         )
     except PublishBlockedError:
         battle_card = None

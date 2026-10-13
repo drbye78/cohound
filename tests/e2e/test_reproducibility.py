@@ -37,6 +37,8 @@ import yaml
 from core.cli.wiring import build_store
 from core.domain import (
     CorpusChunk,
+    CrawlProvenance,
+    CrawlSessionProvenance,
     LLMCellOutput,
     LLMEvidence,
     RunManifest,
@@ -474,6 +476,7 @@ def _probe_manifest(
     retrieval_params: Any = None,
     search_effort_budget: Any = None,
     edge_capabilities: dict[str, Any] | None = None,
+    crawl_provenance: Any = None,
 ) -> RunManifest:
     """Собирает манифест из duck-typed входа (для проверки детерминизма сериализации)."""
     run = _ManifestProbe(
@@ -486,6 +489,7 @@ def _probe_manifest(
         inputs=cast(RunInputs, inputs),
         plan=cast(RunPlan, plan_like),
         edge_capabilities=edge_capabilities,
+        crawl_provenance=crawl_provenance,
     )
 
 
@@ -523,10 +527,37 @@ def test_json_provenance_is_sort_keyed(tmp_path: Path) -> None:
     assert path_c.read_bytes() == path_d.read_bytes()
 
 
+def test_crawl_provenance_is_stable_and_sort_keyed(tmp_path: Path) -> None:
+    """Phase 2: провенанс краула сериализуется детерминированно (R7)."""
+    provenance = CrawlProvenance(
+        sessions=[
+            CrawlSessionProvenance(
+                session_id="crawl:probe-run",
+                profile="local",
+                status="completed",
+                engines=["scrapy", "http"],
+                kinds=["web"],
+                total=2,
+                fetched=2,
+            )
+        ],
+        engines=["http", "scrapy"],
+        kinds=["web"],
+        crawl_sources_digest="digest-1",
+    )
+    manifest_a = _probe_manifest(crawl_provenance=provenance)
+    manifest_b = _probe_manifest(crawl_provenance=provenance.model_dump(mode="json"))
+
+    # Mapping и модель дают один и тот же типизированный провенанс.
+    assert manifest_a.crawl_provenance == manifest_b.crawl_provenance == provenance
+    path_a = write_run_manifest(manifest_a, tmp_path / "a")
+    path_b = write_run_manifest(manifest_b, tmp_path / "b")
+    assert path_a.read_bytes() == path_b.read_bytes()
+
+
 # ---------------------------------------------------------------------------
 # 5. ``index_build_id`` — чистая функция входов (§B.1/§13)
 # ---------------------------------------------------------------------------
-
 
 def test_build_id_is_input_determined() -> None:
     """``_derive_index_build_id`` детерминирован и чувствителен к каждому входу (P2)."""

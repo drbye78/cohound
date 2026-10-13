@@ -97,7 +97,7 @@ from core.pipeline.crawl_session import (
     open_session,
     prior_items,
 )
-from core.pipeline.crawl_sources import resolve_crawl_target
+from core.pipeline.crawl_sources import crawl_sources_digest, resolve_crawl_target
 from core.pipeline.runner import PhaseResult
 from core.ports.chunker import ChunkerPort
 from core.ports.crawler import CrawlerPort
@@ -1053,7 +1053,27 @@ def build_corpus(
     # вызов на фазу. ``finished_at`` фиксирует момент завершения.
     if session is not None:
         try:
-            finalize_session(store, session, finished_at=_now_iso())
+            # Phase 2: провенанс сеанса — движки/виды источников из разрешённых целей краула
+            # (``engine``/``kind`` элементов) + дайджест конфигурации источников.
+            engines = sorted(
+                {t.engine for t in targets.values() if getattr(t, "engine", None)}
+            )
+            kinds = sorted(
+                {t.kind for t in targets.values() if getattr(t, "kind", None)}
+            )
+            digest = (
+                crawl_sources_digest(crawl_sources)
+                if crawl_sources is not None
+                else None
+            )
+            finalize_session(
+                store,
+                session,
+                finished_at=_now_iso(),
+                engines=engines,
+                kinds=kinds,
+                crawl_sources_digest=digest,
+            )
         except Exception as exc:  # noqa: BLE001 — наблюдаемость важнее персистенции
             errors.append(f"finalize_crawl_session({session}): {type(exc).__name__}: {exc}")
 

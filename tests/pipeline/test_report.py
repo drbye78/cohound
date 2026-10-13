@@ -47,6 +47,8 @@ from core.domain.models import (
     METHODOLOGY_VERSION,
     CatalogRow,
     Cell,
+    CrawlProvenance,
+    CrawlSessionProvenance,
     LLMEvidence,
     ProtocolExhaustion,
     RunConfig,
@@ -407,6 +409,82 @@ def test_battle_card_dimmed_when_coverage_insufficient(store: SqliteStore, tmp_p
     assert path.exists()
     text = _artifact_text(path)
     assert INSUFFICIENT_COVERAGE_NOTE in text
+
+
+def test_battle_card_header_surfaces_heterogeneous_crawl_engines(
+    store: SqliteStore, tmp_path: Path
+) -> None:
+    """Phase 2: провенанс краула в шапке — движки + флаг неоднородности (информационно)."""
+    _save(store, [_cell(PRODUCT_A, "param.ok", Status.OK)])
+    cells = list(store.iter_cells(RUN_ID))
+    bundle = compute(store=store, run_id=RUN_ID, catalog=_catalog(), module_weights={})
+    provenance = CrawlProvenance(
+        sessions=[
+            CrawlSessionProvenance(
+                session_id="crawl:run-report",
+                profile="local",
+                status="completed",
+                engines=["http", "scrapy"],
+                kinds=["web"],
+                total=2,
+                fetched=2,
+            )
+        ],
+        engines=["http", "scrapy"],
+        kinds=["web"],
+        crawl_sources_digest="deadbeef",
+    )
+
+    path = render_battle_card(
+        bundle,
+        cells,
+        _catalog(),
+        tmp_path / "battle_card.xlsx",
+        crawl_provenance=provenance,
+    )
+    text = _artifact_text(path)
+    assert "crawl_engines" in text
+    assert "http, scrapy" in text
+    assert "crawl_engines_heterogeneous" in text
+
+
+def test_battle_card_header_homogeneous_engines_no_flag(
+    store: SqliteStore, tmp_path: Path
+) -> None:
+    """Один движок → флаг неоднородности не выставляется (наблюдение, не демотирование)."""
+    _save(store, [_cell(PRODUCT_A, "param.ok", Status.OK)])
+    cells = list(store.iter_cells(RUN_ID))
+    bundle = compute(store=store, run_id=RUN_ID, catalog=_catalog(), module_weights={})
+    provenance = CrawlProvenance(engines=["http"], kinds=["web"])
+
+    path = render_battle_card(
+        bundle,
+        cells,
+        _catalog(),
+        tmp_path / "battle_card.xlsx",
+        crawl_provenance=provenance,
+    )
+    text = _artifact_text(path)
+    assert "crawl_engines" in text
+    assert "crawl_engines_heterogeneous" not in text
+
+
+def test_build_manifest_accepts_crawl_provenance_mapping(tmp_path: Path) -> None:
+    """``build_manifest`` принимает mapping и валидирует его в ``CrawlProvenance``."""
+    inputs = SimpleNamespace(
+        run=SimpleNamespace(
+            methodology_version="2.0.0", ranking_epsilon=0.0, mode=RunMode.STRICT
+        ),
+        ranking_epsilon=None,
+    )
+    plan = SimpleNamespace(run_id="run-report", methodology_version="2.0.0")
+    manifest = build_manifest(
+        inputs=inputs,
+        plan=plan,
+        crawl_provenance={"engines": ["scrapy"], "kinds": ["web"]},
+    )
+    assert manifest.crawl_provenance.engines == ["scrapy"]
+    assert manifest.crawl_provenance.kinds == ["web"]
 
 
 def test_battle_card_refused_without_coverage(store: SqliteStore, tmp_path: Path) -> None:

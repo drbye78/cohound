@@ -159,6 +159,32 @@ def test_finalize_partial_when_any_failed_or_cancelled() -> None:
         assert finalize_session(store, SESSION_ID, finished_at="t") is CrawlSessionStatus.PARTIAL
 
 
+def test_finalize_provenance_written_on_finalize() -> None:
+    """Phase 2: ``finalize_session`` пишет компактный провенанс в ``provenance_json``."""
+    import json
+
+    with _store_with_run() as store:
+        open_session(store, session_id=SESSION_ID, run_id=RUN_ID)
+        store.upsert_crawl_session_item(
+            _item("p1", "https://docs.test/a", CrawlItemStatus.FETCHED)
+        )
+        finalize_session(
+            store,
+            SESSION_ID,
+            finished_at="t",
+            engines=["scrapy", "http", "http"],
+            kinds=["web"],
+            crawl_sources_digest="digest-1",
+        )
+        session = store.get_crawl_session(SESSION_ID)
+        assert session is not None
+        payload = json.loads(session.provenance_json or "{}")
+        assert payload["engines"] == ["http", "scrapy"]  # sorted + dedup
+        assert payload["kinds"] == ["web"]
+        assert payload["crawl_sources_digest"] == "digest-1"
+        assert payload["status"] == CrawlSessionStatus.COMPLETED.value
+
+
 def test_prior_items_keyed_by_product_and_url() -> None:
     with _store_with_run() as store:
         open_session(store, session_id=SESSION_ID, run_id=RUN_ID)

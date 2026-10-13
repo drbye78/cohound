@@ -12,7 +12,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = "3.1.0"
+SCHEMA_VERSION = "3.2.0"
 
 DDL = """
 PRAGMA journal_mode = WAL;
@@ -58,6 +58,7 @@ CREATE TABLE IF NOT EXISTS runs (
     requested_ranking     TEXT,                        -- запрошенный режим (run.yaml) — K6
     computed_ranking      TEXT,                        -- вычисленный допустимый ранг — K6
     settings_provenance_json TEXT,                     -- A3 (v2.1): {setting: {source, experiment_id?}}
+    crawl_provenance_json TEXT,                        -- §4.4/Phase 2: провенанс краула (сеансы/движки/дайджест)
     snapshot_date         TEXT,
     state                 TEXT
 );
@@ -344,7 +345,7 @@ def _ensure_columns(
 
 
 def connect(db_path: str | Path = ":memory:") -> sqlite3.Connection:
-    """Открывает БД и применяет схему (+ идемпотентные DDL-миграции v2.1–v3.1)."""
+    """Открывает БД и применяет схему (+ идемпотентные DDL-миграции v2.1–v3.2)."""
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
     conn.executescript(DDL)
@@ -353,6 +354,8 @@ def connect(db_path: str | Path = ":memory:") -> sqlite3.Connection:
     columns = {row["name"] for row in conn.execute("PRAGMA table_info(runs)")}
     if "settings_provenance_json" not in columns:
         conn.execute("ALTER TABLE runs ADD COLUMN settings_provenance_json TEXT")
+    # DDL-миграция v3.2 (Phase 2): провенанс краула (сеансы/движки/дайджест источников).
+    _ensure_columns(conn, "runs", {"crawl_provenance_json": "TEXT"})
     # DDL-миграция v2.2 (P2): content-addressed build-id witness — версия экстрактора у чанка
     # и версия экстрактора + отпечаток содержимого у продукт-партиции манифеста.
     _ensure_columns(conn, "corpus_chunks", {"extractor_version": "TEXT"})

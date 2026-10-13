@@ -391,6 +391,26 @@ def test_clear_crawl_session(store: SqliteStore) -> None:
     }
 
 
+def test_set_crawl_session_provenance_targeted_update(store: SqliteStore) -> None:
+    """Phase 2: ``set_crawl_session_provenance`` пишет только колонку провенанса."""
+    store.upsert_crawl_session(_session())
+    store.upsert_crawl_session_item(
+        _item("https://docs.test/p1", CrawlItemStatus.FETCHED)
+    )
+    before = store.get_crawl_session("s1")
+    assert before is not None
+
+    store.set_crawl_session_provenance("s1", '{"engines": ["http"]}')
+
+    after = store.get_crawl_session("s1")
+    assert after is not None
+    assert after.provenance_json == '{"engines": ["http"]}'
+    # Счётчики/статус/метаданные не затронуты (targeted UPDATE).
+    assert after.total == before.total
+    assert after.fetched == before.fetched
+    assert after.status is before.status
+
+
 def test_idempotent_double_run(store: SqliteStore) -> None:
     # Повторный upsert сеанса и элементов не дублирует строки и не портит агрегаты.
     store.upsert_crawl_session(_session())

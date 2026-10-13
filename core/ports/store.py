@@ -151,6 +151,14 @@ class StorePort(Protocol):
         """Удаляет элементы сеанса, затем сам сеанс (одна транзакция)."""
         ...
 
+    def set_crawl_session_provenance(self, session_id: str, provenance_json: str) -> None:
+        """Записывает ``provenance_json`` сеанса (targeted ``UPDATE``; Phase 2).
+
+        Не задевает счётчики/метаданные сеанса — безопасно для провенанса, вычисленного
+        по элементам после финализации.
+        """
+        ...
+
     # -- чтение ---------------------------------------------------------- #
     def iter_cells(self, run_id: str, state: str | None = None) -> Iterator[Cell]: ...
 

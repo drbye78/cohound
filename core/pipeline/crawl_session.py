@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import datetime as _dt
+import json
 from typing import Any
 
 from core.domain import (
@@ -89,13 +90,24 @@ def open_session(
 
 
 def finalize_session(
-    store: Any, session_id: str, *, finished_at: str
+    store: Any,
+    session_id: str,
+    *,
+    finished_at: str,
+    engines: list[str] | None = None,
+    kinds: list[str] | None = None,
+    crawl_sources_digest: str | None = None,
 ) -> CrawlSessionStatus:
     """Финализирует сеанс: ``COMPLETED`` (нет сбоев) либо ``PARTIAL`` (есть failed/cancelled).
 
     Статус вычисляется из фактических элементов (``store.crawl_session_counts``): любой
     ``FAILED``/``CANCELLED`` делает сеанс ``PARTIAL`` (часть краула добыта). ``finished_at``
     проставляется в той же записи статуса. Возвращает применённый статус.
+
+    Phase 2: в ``CrawlSession.provenance_json`` пишется компактный JSON-провенанс
+    ``{engines, kinds, crawl_sources_digest, status}`` (движки/виды, отсортированы и
+    дедуплицированы). Персистенция — через :meth:`StorePort.set_crawl_session_provenance`
+    (targeted ``UPDATE``; не задевает счётчики/метаданные — чище read-modify-write).
     """
     counts = store.crawl_session_counts(session_id)
     defects = counts.get(CrawlItemStatus.FAILED.value, 0) + counts.get(
@@ -107,6 +119,16 @@ def finalize_session(
         else CrawlSessionStatus.PARTIAL
     )
     store.update_crawl_session_status(session_id, status, finished_at=finished_at)
+    provenance = {
+        "engines": sorted({str(e) for e in (engines or []) if e}),
+        "kinds": sorted({str(k) for k in (kinds or []) if k}),
+        "crawl_sources_digest": crawl_sources_digest,
+        "status": status.value,
+    }
+    store.set_crawl_session_provenance(
+        session_id,
+        json.dumps(provenance, ensure_ascii=False, sort_keys=True),
+    )
     return status
 
 

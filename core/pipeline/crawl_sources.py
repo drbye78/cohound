@@ -27,6 +27,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from types import MappingProxyType
@@ -38,8 +39,9 @@ from core.domain.enums import CrawlStrategy, ExtractionRoute, FetchMode
 from core.domain.models import RateLimitSpec
 from core.pipeline.fetch_plan import select_domain_profile, select_site_source
 from core.ports.types import FetchPlan
+from core.util.hashing import short_hash
 
-__all__ = ["CrawlTarget", "resolve_crawl_target"]
+__all__ = ["CrawlTarget", "crawl_sources_digest", "resolve_crawl_target"]
 
 _T = TypeVar("_T")
 
@@ -65,6 +67,23 @@ def _last(*values: _T | None) -> _T | None:
         if value is not None:
             result = value
     return result
+
+
+def crawl_sources_digest(sources: CrawlSourcesConfig) -> str:
+    """Детерминированный отпечаток конфигурации ``crawl_sources.yaml`` (§4.4, Phase 2).
+
+    Канонизация: ``model_dump(mode="json", exclude_none=True)`` → ``json.dumps`` с
+    ``sort_keys=True``/``ensure_ascii=False`` (порядко-независимо, без ``None``-шумов) →
+    :func:`core.util.hashing.short_hash`. Одинаковый смысл конфигурации → один отпечаток;
+    любое содержательное изменение (движок/оси/``params``) → другой. Информационный маркер
+    провенанса, а не версионная граница (§13).
+    """
+    canonical = json.dumps(
+        sources.model_dump(mode="json", exclude_none=True),
+        sort_keys=True,
+        ensure_ascii=False,
+    )
+    return short_hash(canonical, 24)
 
 
 def resolve_crawl_target(
