@@ -14,10 +14,16 @@
 * **экстрактор** — композит HTML (trafilatura) поверх документов (docling) по маршруту
   ``ExtractionRoute`` (edge — веб-зона, документы — часть её контента);
 * **чанкер** — ``MarkdownChunkerPort`` (строится как часть корня; нарезка в MVP остаётся
-  в ядре — I19, шов отдаёт сырые байты/текст).
+  в ядре — I19, шов отдаёт сырые байты/текст);
+* **планировщик** — :class:`core.edge.scheduler.EdgeScheduler` (Phase 3.2/3.4a):
+  ``http`` исполняется in-process (потоки), ``scrapy``/``browser`` — в отдельных
+  процессах через module-level :func:`crawler_factory` (адаптеры не picklable, Playwright
+  не форк-безопасен). Планировщик инъецируется в :func:`serve` (``scheduler=``): сервер
+  запускает его до обслуживания и останавливает в ``finally``.
 
 Флаги: ``serve [--config FILE] [--host H] [--port P] [--check]``. ``--check`` собирает
-конфиг+адаптеры+gateway и выходит без привязки сокета (smoke).
+конфиг+адаптеры+gateway+планировщик и выходит без привязки сокета **и** без старта
+воркеров (smoke: misconfig всплывает до запуска).
 
 Нейтрален к предметной категории (§1.3).
 """
@@ -25,7 +31,10 @@
 from __future__ import annotations
 
 import argparse
+import signal
 import sys
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -37,13 +46,14 @@ from core.adapters.crawl_scrapy import CrawlError, ScrapyCrawler
 from core.adapters.extract_document import DoclingDocumentExtractor
 from core.adapters.extract_html import HtmlExtractor
 from core.edge.config import EdgeRuntimeConfig, load_edge_runtime_config
+from core.edge.scheduler import EdgeScheduler
 from core.edge.server import EdgeGateway, serve
 from core.ports.chunker import ChunkerPort
 from core.ports.crawler import CrawlerPort
 from core.ports.extractor import ExtractorPort
 from core.ports.types import ExtractionRoute, FetchMode, FetchPlan, RawPage
 
-__all__ = ["main"]
+__all__ = ["main", "crawler_factory"]
 
 #: Коды возврата edge-лаунчера (edge — отдельный composition root, CLI-ядро не импортирует).
 EXIT_OK = 0
@@ -208,6 +218,74 @@ def _build_gateway(
     return gateway, crawlers, chunker
 
 
+def crawler_factory(engine: str) -> CrawlerPort:
+    """Собирает **свежий** краулер движка внутри воркер-процесса (Phase 3.4a).
+
+    Module-level и picklable: планировщик передаёт эту функцию в инициализатор
+    ``ProcessPoolExecutor``, и экземпляр строится **в самом процессе** — адаптеры не
+    picklable, а Playwright не форк-безопасен, поэтому живой объект не пересекает границу
+    процессов. ``http``/``scrapy``/``browser`` → соответствующий адаптер; неизвестный
+    движок → ``ValueError`` (честный сбой воркера, без тихой подмены движка).
+    """
+    key = str(engine).strip().lower()
+    if key == "http":
+        return HttpCrawler()
+    if key == "scrapy":
+        return ScrapyCrawler()
+    if key == "browser":
+        return BrowserCrawler()
+    raise ValueError(f"неизвестный движок краула: {engine!r}")
+
+
+def _build_scheduler(
+    config: EdgeRuntimeConfig, crawlers: dict[str, CrawlerPort]
+) -> EdgeScheduler:
+    """Собирает ``EdgeScheduler``: ``http`` — in-process, ``scrapy``/``browser`` — процессы.
+
+    В карту in-process попадает **только** ``http`` (живой адаптер уже собран
+    ``_build_gateway``); ``scrapy``/``browser`` исполняются в процессах через
+    :func:`crawler_factory` — и лишь если для движка задано положительное число слотов
+    (фильтрация внутри планировщика: ``config.workers[engine] > 0``). Конструирование
+    не стартует воркеры и не трогает диск (``start()``/БД — лениво), поэтому безопасно
+    и для ``--check``.
+    """
+    in_process: dict[str, CrawlerPort] = {}
+    http = crawlers.get("http")
+    if http is not None:
+        in_process["http"] = http
+    return EdgeScheduler(config, in_process, crawler_factory=crawler_factory)
+
+
+def _raise_keyboard_interrupt(signum: int, frame: Any) -> None:
+    """Обработчик сигнала: ``SIGTERM`` → ``KeyboardInterrupt`` (graceful-останов)."""
+    raise KeyboardInterrupt
+
+
+@contextmanager
+def _sigterm_graceful() -> Iterator[None]:
+    """На время сервера переводит ``SIGTERM`` в ``KeyboardInterrupt`` (Phase 3.4a).
+
+    Позволяет :func:`serve` развернуть ``finally`` (``scheduler.stop()``) при остановке
+    узла штатным ``SIGTERM``. Если установка обработчика невозможна (не главный поток /
+    платформа без ``SIGTERM``) — тихо пропускается (поведение по умолчанию). Прежний
+    обработчик восстанавливается на выходе.
+    """
+    previous: Any = None
+    installed = False
+    if hasattr(signal, "SIGTERM"):
+        try:
+            previous = signal.getsignal(signal.SIGTERM)
+            signal.signal(signal.SIGTERM, _raise_keyboard_interrupt)
+            installed = True
+        except (ValueError, OSError, RuntimeError):  # pragma: no cover - не главный поток
+            installed = False
+    try:
+        yield
+    finally:
+        if installed:
+            signal.signal(signal.SIGTERM, previous)
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
@@ -250,9 +328,13 @@ def _system_exit_code(exc: SystemExit) -> int:
 def main(argv: list[str] | None = None) -> int:
     """Точка входа edge-узла. Возвращает код выхода (``0`` — успех).
 
-    ``serve`` собирает runtime-конфиг и адаптеры, печатает стартовую строку и запускает
-    блокирующий ``serve(..., scheduler=None)`` (хук планировщика — Wave 3.2).
-    ``--check`` собирает всё и выходит без сокета.
+    ``serve`` собирает runtime-конфиг, адаптеры и планировщик краула, печатает стартовую
+    строку и запускает блокирующий ``serve(..., scheduler=scheduler)``: сервер стартует
+    планировщик до обслуживания и останавливает в ``finally`` (Phase 3.4a). ``SIGTERM``/
+    ``KeyboardInterrupt`` трактуются как штатная остановка (код ``0``); ``scheduler.stop()``
+    при этом вызывается ровно один раз — внутри ``serve``, не здесь.
+    ``--check`` собирает всё (включая объект планировщика) и выходит без сокета и без старта
+    воркеров.
     """
     parser = _build_parser()
     try:
@@ -274,6 +356,7 @@ def main(argv: list[str] | None = None) -> int:
     port = args.port if args.port is not None else config.port
 
     gateway, crawlers, _chunker = _build_gateway(config)
+    scheduler = _build_scheduler(config, crawlers)
     engines = sorted(crawlers)
 
     if args.check:
@@ -281,8 +364,10 @@ def main(argv: list[str] | None = None) -> int:
             "edge check ok: "
             f"schema={config.schema_version} engines={engines} "
             f"extractor={gateway.capabilities()['extractor_version']} "
-            f"state_dir={config.state_dir} blob_dir={config.resolved_blob_dir}\n"
+            f"state_dir={config.state_dir} blob_dir={config.resolved_blob_dir} "
+            f"scheduler=ready\n"
         )
+        scheduler.close()  # воркеры не стартовали; соединение с БД не открывалось
         return EXIT_OK
 
     sys.stdout.write(
@@ -290,7 +375,14 @@ def main(argv: list[str] | None = None) -> int:
         f"engines={engines}\n"
     )
     sys.stdout.flush()
-    serve(host, port, gateway, scheduler=None)
+    try:
+        with _sigterm_graceful():
+            serve(host, port, gateway, scheduler=scheduler)
+    except KeyboardInterrupt:
+        # Штатная остановка: serve() уже вызвал scheduler.stop() в finally — не дублируем.
+        return EXIT_OK
+    finally:
+        scheduler.close()
     return EXIT_OK
 
 

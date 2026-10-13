@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import ast
+import pickle
 from pathlib import Path
 from typing import Any
 
@@ -19,7 +20,9 @@ import pytest
 from pydantic import ValidationError
 
 import core.edge.__main__ as edge_main
+from core.adapters.crawl_browser import BrowserCrawler
 from core.adapters.crawl_http import HttpCrawler
+from core.adapters.crawl_scrapy import ScrapyCrawler
 from core.edge.config import (
     ENV_EDGE_STATE_DIR,
     EdgeRuntimeConfig,
@@ -279,6 +282,152 @@ def test_edge_main_source_has_no_cli_or_store_import() -> None:
             imported.append(node.module)
         elif isinstance(node, ast.Import):
             imported.extend(alias.name for alias in node.names)
-    forbidden = ("core.cli", "core.store")
-    assert not [m for m in imported if m == forbidden[0] or m.startswith(f"{forbidden[0]}.")]
-    assert not [m for m in imported if m == forbidden[1] or m.startswith(f"{forbidden[1]}.")]
+    # edge не может импортировать cli/store/pipeline (матрица слоёв 01 §1, §1.3).
+    for forbidden in ("core.cli", "core.store", "core.pipeline"):
+        assert not [
+            m for m in imported if m == forbidden or m.startswith(f"{forbidden}.")
+        ], forbidden
+
+
+# ---------------------------------------------------------------------------
+# __main__: планировщик краула в composition root (Phase 3.4a)
+# ---------------------------------------------------------------------------
+
+
+class _FakeScheduler:
+    """Фейковый планировщик: фиксирует конструирование и жизненный цикл."""
+
+    instances: list["_FakeScheduler"] = []
+
+    def __init__(
+        self, config: Any, crawlers: Any, *, crawler_factory: Any = None
+    ) -> None:
+        self.config = config
+        self.crawlers = dict(crawlers)
+        self.crawler_factory = crawler_factory
+        self.started = False
+        self.closed = False
+        _FakeScheduler.instances.append(self)
+
+    def start(self) -> None:  # pragma: no cover - в main не вызывается
+        self.started = True
+
+    def stop(self, timeout: Any = None) -> None:  # pragma: no cover - зовёт serve
+        pass
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def _write_config(tmp_path: Path) -> Path:
+    """Пишет минимальный edge.yaml с локальным ``state_dir`` (без записи на диск сервера)."""
+    path = tmp_path / "edge.yaml"
+    path.write_text(f"state_dir: {tmp_path / 'state'}\n", encoding="utf-8")
+    return path
+
+
+def test_crawler_factory_builds_expected_adapters() -> None:
+    assert isinstance(edge_main.crawler_factory("http"), HttpCrawler)
+    assert isinstance(edge_main.crawler_factory("scrapy"), ScrapyCrawler)
+    assert isinstance(edge_main.crawler_factory("browser"), BrowserCrawler)
+    # Регистронезависимо (со strip); движок-атрибут совпадает с запрошенным (провенанс).
+    assert getattr(edge_main.crawler_factory("HTTP"), "engine") == "http"
+    assert getattr(edge_main.crawler_factory("Scrapy"), "engine") == "scrapy"
+    assert getattr(edge_main.crawler_factory(" browser "), "engine") == "browser"
+
+
+def test_crawler_factory_rejects_unknown_engine() -> None:
+    with pytest.raises(ValueError, match="движок"):
+        edge_main.crawler_factory("teleport")
+
+
+def test_crawler_factory_is_picklable_module_level() -> None:
+    # Фабрика уходит в инициализатор ProcessPoolExecutor → обязана быть picklable
+    # (module-level; лямбда/метод инстанса не прошли бы).
+    assert pickle.loads(pickle.dumps(edge_main.crawler_factory)) is edge_main.crawler_factory
+
+
+def test_build_scheduler_http_in_process_and_zero_engines_excluded() -> None:
+    config = EdgeRuntimeConfig(
+        state_dir="/tmp/unused", workers={"http": 2, "scrapy": 0, "browser": 0}
+    )
+    scheduler = edge_main._build_scheduler(config, {"http": _Crawler()})
+    try:
+        assert scheduler._thread_engines == {"http"}
+        assert scheduler._process_engines == ()
+    finally:
+        scheduler.close()
+
+
+def test_build_scheduler_process_engines_from_positive_workers() -> None:
+    config = EdgeRuntimeConfig(workers={"http": 1, "scrapy": 2, "browser": 3})
+    scheduler = edge_main._build_scheduler(config, {"http": _Crawler()})
+    try:
+        assert scheduler._thread_engines == {"http"}
+        assert set(scheduler._process_engines) == {"scrapy", "browser"}
+    finally:
+        scheduler.close()
+
+
+def test_main_check_builds_scheduler_without_starting(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``--check`` строит планировщик, но не стартует воркеры и не биндит сокет."""
+    _FakeScheduler.instances.clear()
+
+    def _boom(*args: Any, **kwargs: Any) -> None:  # pragma: no cover - не должен зваться
+        raise AssertionError("--check не должен запускать serve (привязка сокета)")
+
+    monkeypatch.setattr(edge_main, "EdgeScheduler", _FakeScheduler)
+    monkeypatch.setattr(edge_main, "serve", _boom)
+    code = edge_main.main(["serve", "--check"])
+    assert code == edge_main.EXIT_OK
+    assert len(_FakeScheduler.instances) == 1
+    built = _FakeScheduler.instances[0]
+    assert built.started is False  # воркеры не стартовали
+    assert built.crawler_factory is edge_main.crawler_factory  # процессы через фабрику
+    assert "http" in built.crawlers  # in-process только http
+    assert built.closed is True
+    out = capsys.readouterr().out
+    assert "edge check ok" in out and "scheduler=ready" in out
+
+
+def test_main_serve_passes_non_none_scheduler(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``serve`` получает построенный (не ``None``) планировщик; стартует его сам serve."""
+    _FakeScheduler.instances.clear()
+    captured: dict[str, Any] = {}
+
+    def _fake_serve(host: str, port: int, gateway: Any, **kwargs: Any) -> None:
+        captured["host"] = host
+        captured["port"] = port
+        captured["scheduler"] = kwargs.get("scheduler")
+
+    monkeypatch.setattr(edge_main, "EdgeScheduler", _FakeScheduler)
+    monkeypatch.setattr(edge_main, "serve", _fake_serve)
+    code = edge_main.main(["serve", "--config", str(_write_config(tmp_path))])
+    assert code == edge_main.EXIT_OK
+    assert captured["scheduler"] is not None
+    assert captured["scheduler"] is _FakeScheduler.instances[0]
+    # main не дублирует жизненный цикл: start/stop — ответственность serve().
+    assert _FakeScheduler.instances[0].started is False
+
+
+def test_main_serve_returns_ok_on_keyboard_interrupt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Штатный ``KeyboardInterrupt`` (в т.ч. от SIGTERM) → graceful-код 0."""
+    _FakeScheduler.instances.clear()
+
+    def _interrupt(*args: Any, **kwargs: Any) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(edge_main, "EdgeScheduler", _FakeScheduler)
+    monkeypatch.setattr(edge_main, "serve", _interrupt)
+    assert (
+        edge_main.main(["serve", "--config", str(_write_config(tmp_path))])
+        == edge_main.EXIT_OK
+    )
+    # serve() отвечает за stop(); main лишь закрывает ресурсы.
+    assert _FakeScheduler.instances[0].closed is True
