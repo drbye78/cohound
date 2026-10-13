@@ -719,11 +719,11 @@ def test_cli_artifact_list(capsys, tmp_path: Path) -> None:
     code, out, _ = _run(capsys, ["package", "artifact", "list", "--package", str(package), "--json"])
     assert code == EXIT_OK
     payload = json.loads(out)
-    assert payload["count"] == 8
+    assert payload["count"] == 9
     names = {item["name"] for item in payload["artifacts"]}
     assert names == {
         "package", "catalog", "baselines", "cohort",
-        "golden", "domain_profiles", "scope_attestation", "run",
+        "golden", "domain_profiles", "scope_attestation", "run", "crawl_sources",
     }
 
 

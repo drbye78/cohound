@@ -35,7 +35,7 @@ from urllib.parse import urlsplit
 from core.adapters.chunker_markdown import MarkdownChunkerPort
 from core.adapters.crawl_browser import BrowserCrawler
 from core.adapters.crawl_http import HttpCrawler
-from core.adapters.crawl_scrapy import ScrapyCrawler
+from core.adapters.crawl_scrapy import CrawlError, ScrapyCrawler
 from core.adapters.embed_local import LocalEmbedder
 from core.adapters.extract_document import DoclingDocumentExtractor
 from core.adapters.extract_html import HtmlExtractor
@@ -76,6 +76,7 @@ from core.config.deploy import (
     resolve_search_provider,
 )
 from core.config.domain_profiles import DomainProfile
+from core.config.crawl_sources import CrawlSourcesConfig
 from core.pipeline import Ports, Runner
 from core.pipeline.runner import PHASES, Clock, PhaseFn
 from core.ports.crawler import CrawlerPort
@@ -85,7 +86,7 @@ from core.ports.gateway import ContentGateway
 from core.ports.llm import EvaluatorPort
 from core.ports.registry import RegistryFetcherPort
 from core.ports.search import SearchAdapterPort
-from core.ports.types import ExtractedDoc, ExtractionRoute, RawPage
+from core.ports.types import ExtractedDoc, ExtractionRoute, FetchMode, RawPage
 from core.store.sqlite_store import SqliteStore
 from core.util.cache import ContentAddressedCache
 
@@ -108,6 +109,7 @@ __all__ = [
     "build_discovery_llm",
     "build_evaluator_llm",
     "build_scout_crawler",
+    "build_scout_crawlers",
     "build_adapters",
     "build_runner",
     "manifest_deploy_fields",
@@ -640,6 +642,87 @@ def build_scout_crawler(
     )
 
 
+def _referenced_crawl_engines(
+    domain_profiles: Mapping[str, DomainProfile] | None,
+    crawl_sources: CrawlSourcesConfig | None,
+) -> set[str]:
+    """Движки, реально запрошенные конфигурацией (для ленивой сборки тяжёлых адаптеров).
+
+    Источники признака: env :data:`ENV_SCOUT_CRAWLER` (явный выбор оператора), поля
+    ``engine`` слоёв ``crawl_sources`` (``defaults``/``products``/``sites``) и наличие
+    ``fetch: browser`` хотя бы в одном доменном профиле (нужен browser-capable движок).
+    :func:`build_scout_crawlers` строит ``scrapy``/``browser`` только для упомянутых
+    движков, чтобы не поднимать Playwright/Scrapy впустую (A1).
+    """
+    engines: set[str] = set()
+    env = os.environ.get(ENV_SCOUT_CRAWLER)
+    if env is not None and env.strip():
+        engines.add(env.strip().lower())
+    if crawl_sources is not None:
+        sources = [crawl_sources.defaults]
+        sources.extend(crawl_sources.products.values())
+        for hosts in crawl_sources.sites.values():
+            sources.extend(hosts.values())
+        for source in sources:
+            engine = getattr(source, "engine", None)
+            if engine and str(engine).strip():
+                engines.add(str(engine).strip().lower())
+    if domain_profiles:
+        for profile in domain_profiles.values():
+            if getattr(profile, "fetch", None) is FetchMode.BROWSER:
+                engines.add("browser")
+    return engines
+
+
+def build_scout_crawlers(
+    *,
+    deploy: DeployConfig | None = None,
+    cache: ContentAddressedCache | None = None,
+    domain_profiles: Mapping[str, DomainProfile] | None = None,
+    crawl_sources: CrawlSourcesConfig | None = None,
+) -> dict[str, CrawlerPort]:
+    """Собирает карту ``engine → CrawlerPort`` для per-engine выбора краулера (L3a).
+
+    Лёгкий ``http`` (:class:`HttpCrawler`) строится **всегда** (дефолтный движок).
+    Тяжёлые ``scrapy``/``browser`` строятся **только** для движков, реально упомянутых
+    конфигурацией (env :data:`ENV_SCOUT_CRAWLER`, поля ``engine`` в ``crawl_sources``,
+    либо ``fetch: browser`` в ``domain_profiles``; см. :func:`_referenced_crawl_engines`).
+    Это исключает ленивое поднятие Playwright/Scrapy, когда они не нужны (A1).
+
+    Сборка каждого тяжёлого адаптера обёрнута в guard: недоступность зависимости
+    (:class:`~core.adapters.crawl_scrapy.CrawlError`/``CrawlUnavailable``), ``ImportError``
+    или ошибка конфигурации (:class:`WiringError`) → движок **опускается**, а не валит всю
+    сборку. Отсутствующий ``engine`` в карте — не ошибка: в
+    :func:`core.pipeline.corpus.build_corpus` активным остаётся дефолтный ``crawler``.
+
+    :param deploy: типизированный deploy-конфиг; ``None`` → :func:`load_deploy_config`.
+    :param cache: глобальный content-addressed кэш (R7); ``None`` → без кэша.
+    :param domain_profiles: доменные профили (``domain_profiles.yaml``); ``fetch: browser``
+        помечает браузерный движок как запрошенный.
+    :param crawl_sources: слои источников краула (``crawl_sources.yaml``); их ``engine``
+        помечают соответствующие движки как запрошенные.
+    """
+    config = deploy if deploy is not None else load_deploy_config(None)
+    referenced = _referenced_crawl_engines(domain_profiles, crawl_sources)
+
+    crawlers: dict[str, CrawlerPort] = {
+        "http": HttpCrawler(**_http_crawler_kwargs(config), cache=cache),
+    }
+    if "scrapy" in referenced:
+        try:
+            crawlers["scrapy"] = ScrapyCrawler(cache=cache)
+        except (WiringError, ImportError, CrawlError):
+            pass
+    if "browser" in referenced:
+        try:
+            crawlers["browser"] = BrowserCrawler(
+                **_browser_crawler_kwargs(config), cache=cache
+            )
+        except (WiringError, ImportError, CrawlError):
+            pass
+    return crawlers
+
+
 def _http_crawler_kwargs(deploy: DeployConfig) -> dict[str, Any]:
     """Параметры :class:`HttpCrawler` из ``deploy.crawl`` (дефолты адаптера при ``None``).
 
@@ -763,6 +846,7 @@ def _build_local_ports(
     index_root: str | Path,
     package: str | None,
     crawler: CrawlerPort | None = None,
+    crawlers: Mapping[str, CrawlerPort] | None = None,
 ) -> Ports:
     """Собирает in-process порты профиля ``local`` (без сети/тяжёлых зависимостей).
 
@@ -806,6 +890,8 @@ def _build_local_ports(
         # §D.5); без конфига остаётся ``None`` — прежнее поведение. SERP/discovery для
         # local включаются явной инъекцией портов (в CLI-конфиге нет запросов).
         crawler=crawler,
+        # Lane A/L3a: карта ``engine → CrawlerPort`` для per-engine выбора в Ш5.
+        crawlers=crawlers,
         search=None,
         vector_index=None,
     )
@@ -825,6 +911,7 @@ def build_adapters(
     package: str | None = None,
     cache: ContentAddressedCache | None = None,
     domain_profiles: Mapping[str, DomainProfile] | None = None,
+    crawl_sources: CrawlSourcesConfig | None = None,
 ) -> Ports:
     """Собирает порты внешних систем по профилю развёртывания (``03`` §E.3).
 
@@ -856,6 +943,9 @@ def build_adapters(
     :param domain_profiles: типизированные доменные профили (``domain_profiles.yaml``,
         ``03`` §D.2); используются локальным краулером для fail-fast проверки ``fetch: browser``
         (план резолвится в pipeline).
+    :param crawl_sources: слои источников краула (``crawl_sources.yaml``, Lane A); их
+        поля ``engine`` определяют, какие per-engine краулеры строит
+        :func:`build_scout_crawlers` (ленивая сборка тяжёлых адаптеров).
     :raises WiringError: неизвестный профиль или split без валидного deploy-конфига.
     """
     if profile == LOCAL_PROFILE:
@@ -869,12 +959,21 @@ def build_adapters(
             if deploy is not None
             else None
         )
+        # Lane A/L3a: карта per-engine краулеров для Ш5 (http всегда; scrapy/browser —
+        # только при упоминании движка в crawl_sources/domain_profiles, лениво-guarded).
+        crawlers = build_scout_crawlers(
+            deploy=deploy,
+            cache=cache,
+            domain_profiles=domain_profiles,
+            crawl_sources=crawl_sources,
+        )
         return _build_local_ports(
             evaluator=evaluator,
             registry=registry,
             index_root=index_root,
             package=package,
             crawler=local_crawler,
+            crawlers=crawlers,
         )
     if profile == SPLIT_PROFILE:
         config = deploy if deploy is not None else load_deploy_config(None)
@@ -886,8 +985,15 @@ def build_adapters(
         content_gateway = gateway or build_gateway(
             config, transport=transport, extra_headers=extra_headers
         )
+        # B1 (I18/07 §4–§5): в split ядро **не** держит и не выбирает локальные веб-краулеры —
+        # иначе per-engine движок из ``crawl_sources`` заставил бы ядро фетчить страницы
+        # in-process (прямой веб-эгресс из Z0, нарушение зонной модели). Весь веб идёт через
+        # шов: ``crawlers=None`` → ``build_corpus`` для любого движка использует fallback
+        # ``RemoteCrawler`` (шов транспорт-агностичен; per-engine маршрутизация на edge —
+        # Phase 3).
         return Ports(
             crawler=RemoteCrawler(content_gateway),
+            crawlers=None,
             search=RemoteSearch(
                 content_gateway,
                 adapter_kind=(config.search.adapter or "remote"),

@@ -603,12 +603,12 @@ def _crawl_session_dict_mirror() -> None:
 def _db_smoke() -> None:
     conn = connect(":memory:")
     ver = conn.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()
-    _assert(ver is not None and ver["value"] == "3.0.0")
+    _assert(ver is not None and ver["value"] == "3.1.0")
 
     tables = {r["name"] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     for t in ("products", "runs", "llm_scenarios", "corpus_docs", "corpus_chunks",
               "index_manifest", "cells", "cell_evidence", "search_log",
-              "search_exhaustion", "registry_facts", "crawl_attempts",
+              "search_exhaustion", "registry_facts",
               "crawl_sessions", "crawl_session_items"):
         _assert(t in tables)
 
@@ -619,14 +619,8 @@ def _db_smoke() -> None:
     manifest_cols = {r["name"] for r in conn.execute("PRAGMA table_info(index_manifest)")}
     _assert("extractor_version" in manifest_cols and "content_digest" in manifest_cols)
 
-    # D3 (schema 2.3.0): durable per-URL аудит краула — crawl_attempts с PK и FK на runs.
-    # v2.4: additive-колонка provenance оси стратегии краула (``strategy``).
-    crawl_cols = {r["name"] for r in conn.execute("PRAGMA table_info(crawl_attempts)")}
-    _assert({"run_id", "product_id", "url", "status", "attempts",
-             "raw_path", "content_hash", "error_kind", "strategy"} <= crawl_cols)
-    crawl_pk = [r["name"] for r in conn.execute("PRAGMA table_info(crawl_attempts)")
-                if r["pk"]]
-    _assert(crawl_pk == ["run_id", "product_id", "url"])
+    # L1b (schema 3.1.0): legacy crawl_attempts удалена (замещена сеансом краула).
+    _assert("crawl_attempts" not in tables)
 
     # Lane B (schema 3.0.0): сеанс краула — crawl_sessions + элементы с PK и FK.
     sess_cols = {r["name"] for r in conn.execute("PRAGMA table_info(crawl_sessions)")}

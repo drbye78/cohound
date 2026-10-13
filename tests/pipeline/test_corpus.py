@@ -17,23 +17,26 @@ import pytest
 
 from core.adapters import index_format
 from core.adapters.index_npy import NpyIndexBuilder
+from core.config.crawl_sources import CrawlSource, CrawlSourcesConfig
 from core.config.domain_profiles import DomainProfile
 from core.domain import (
     AnchorRelation,
     CatalogRow,
     Cohort,
     CohortEntry,
-    CrawlAttempt,
+    CrawlItemStatus,
     CrawlRunConfig,
+    CrawlSessionItem,
+    CrawlSessionStatus,
     CrawlStrategy,
     FailureKind,
-    FetchStatus,
     RateLimitSpec,
     RunConfig,
     RunMode,
 )
 from core.pipeline import RunPlan
 from core.pipeline.corpus import IndexBuild, _derive_index_build_id, build_corpus
+from core.pipeline.crawl_session import default_session_id
 from core.ports.types import (
     Chunk,
     ExtractedDoc,
@@ -58,6 +61,8 @@ class ImmutableBuildError(RuntimeError):
     """Локальное зеркало имени адаптерного типа: проверяем строку ошибки, а не класс (K2)."""
 
 RUN_ID = "run-fixture"
+#: Идентификатор сеанса краула по умолчанию (L1a): ``f"crawl:{run_id}"``.
+SESSION_ID = default_session_id(RUN_ID)
 TS = "2026-01-01T00:00:00+00:00"
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -109,7 +114,7 @@ def _plan(products: tuple[str, ...] = ("p1", "p2")) -> RunPlan:
 
 
 def _make_run(store: SqliteStore, run_id: str = RUN_ID) -> None:
-    """Создаёт строку прогона (нужна для FK ``crawl_attempts.run_id`` при D3-resume)."""
+    """Создаёт строку прогона (нужна для FK ``crawl_sessions.run_id`` при L1a-resume)."""
     store.create_run(
         run_id,
         RunConfig(
@@ -877,7 +882,7 @@ def test_partial_product_failure(tmp_path: Path) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# D3: durable-краул — аудит/очередь/resume (crawl_attempts)
+# L1a: durable-краул — сеанс краула (crawl_sessions/crawl_session_items)
 # --------------------------------------------------------------------------- #
 
 
@@ -885,11 +890,16 @@ class _BombCrawler(_Crawler):
     """Краулер, обязанный НЕ вызываться: любой ``fetch`` — провал теста (resume)."""
 
     def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:
-        raise AssertionError("краулер вызван при наличии retained-байтов (D3 resume)")
+        raise AssertionError("краулер вызван при наличии retained-байтов (L1a resume)")
+
+
+def _items(store: SqliteStore) -> list[CrawlSessionItem]:
+    """Элементы сеанса краула прогона (порядок ``product_id, url``)."""
+    return list(store.iter_crawl_session_items(SESSION_ID))
 
 
 def test_resume_from_retained_raw_skips_refetch(tmp_path: Path) -> None:
-    """URL с prior FETCHED/DONE + retained raw НЕ фетчится повторно и ре-извлекается (D3)."""
+    """URL с prior ``FETCHED`` + retained raw НЕ фетчится повторно и ре-извлекается (L1a)."""
     store = SqliteStore(":memory:")
     _make_run(store)
     try:
@@ -898,8 +908,8 @@ def test_resume_from_retained_raw_skips_refetch(tmp_path: Path) -> None:
             urls={"p1": [URL_P1_A]}, store=store, run_id=RUN_ID,
         )
         assert _build_of(first).chunk_count == 1
-        prior = next(iter(store.iter_crawl_attempts(RUN_ID)))
-        assert prior.status is FetchStatus.DONE
+        prior = next(iter(_items(store)))
+        assert prior.status is CrawlItemStatus.FETCHED
         assert prior.raw_path and Path(prior.raw_path).is_file()
 
         # Второй прогон с «бомбой»-краулером: фетча быть не должно.
@@ -911,9 +921,12 @@ def test_resume_from_retained_raw_skips_refetch(tmp_path: Path) -> None:
         assert second.errors == []
         assert build.chunk_count == 1
         assert build.docs[0].content_hash == content_hash(b"retained bytes")
-        # Повторный DONE идемпотентен: один и тот же id сборки, статус DONE.
+        # Повторный resume идемпотентен: один и тот же id сборки, статус FETCHED.
         assert build.index_build_id == _build_of(first).index_build_id
-        assert next(iter(store.iter_crawl_attempts(RUN_ID))).status is FetchStatus.DONE
+        assert next(iter(_items(store))).status is CrawlItemStatus.FETCHED
+        # Сеанс финализирован без сбоев → ``COMPLETED``.
+        session = store.get_crawl_session(SESSION_ID)
+        assert session is not None and session.status is CrawlSessionStatus.COMPLETED
     finally:
         store.close()
 
@@ -927,12 +940,15 @@ def test_crawl_failure_records_failed_source_unavailable(tmp_path: Path) -> None
             tmp_path, pages={}, urls={"p1": [bad]},
             crawler=_Crawler({}, raising={bad}), store=store, run_id=RUN_ID,
         )
-        row = next(iter(store.iter_crawl_attempts(RUN_ID)))
-        assert row.status is FetchStatus.FAILED
+        row = next(iter(_items(store)))
+        assert row.status is CrawlItemStatus.FAILED
         assert row.error_kind == FailureKind.SOURCE_UNAVAILABLE.value
         assert row.error
         assert any("crawl" in err for err in result.errors)
         assert _build_of(result).crawl_failed == 1
+        # Есть сбойный элемент → сеанс ``PARTIAL``.
+        session = store.get_crawl_session(SESSION_ID)
+        assert session is not None and session.status is CrawlSessionStatus.PARTIAL
     finally:
         store.close()
 
@@ -947,8 +963,8 @@ def test_extraction_failure_records_failed_parser_and_retains_raw(tmp_path: Path
             extractor=_Extractor(error_urls={URL_P1_A}),
             store=store, run_id=RUN_ID,
         )
-        row = next(iter(store.iter_crawl_attempts(RUN_ID)))
-        assert row.status is FetchStatus.FAILED
+        row = next(iter(_items(store)))
+        assert row.status is CrawlItemStatus.FAILED
         assert row.error_kind == FailureKind.PARSER_FAILED.value
         # raw_path сохранён: поздний resume сможет ре-извлечь без ре-фетча (I19).
         assert row.raw_path and Path(row.raw_path).is_file()
@@ -957,8 +973,8 @@ def test_extraction_failure_records_failed_parser_and_retains_raw(tmp_path: Path
         store.close()
 
 
-def test_no_run_id_degrades_to_no_crawl_attempts(tmp_path: Path) -> None:
-    """Без ``run_id`` durable-краул выключен: обычный фетч, счётчики — по invocation (D3)."""
+def test_no_run_id_degrades_to_no_session_rows(tmp_path: Path) -> None:
+    """Без ``run_id`` durable-краул выключен: обычный фетч, строк сеанса нет, счётчики — 0."""
     store = SqliteStore(":memory:")
     try:
         crawler = _Crawler({URL_P1_A: b"x"})
@@ -966,8 +982,14 @@ def test_no_run_id_degrades_to_no_crawl_attempts(tmp_path: Path) -> None:
             tmp_path, pages={}, urls={"p1": [URL_P1_A]}, crawler=crawler, store=store
         )
         assert len(crawler.calls) == 1
-        assert list(store.iter_crawl_attempts(RUN_ID)) == []
-        assert _build_of(result).crawl_done == 1
+        assert list(store.iter_crawl_session_items(SESSION_ID)) == []
+        build = _build_of(result)
+        assert (
+            build.crawl_pending,
+            build.crawl_fetched,
+            build.crawl_done,
+            build.crawl_failed,
+        ) == (0, 0, 0, 0)
     finally:
         store.close()
 
@@ -983,22 +1005,23 @@ def test_index_build_crawl_counters(tmp_path: Path) -> None:
             store=store, run_id=RUN_ID,
         )
         build = _build_of(result)
+        # Элемент ``FETCHED`` = «ready»: ``crawl_done`` — зеркало ``crawl_fetched`` (L1a).
         assert (build.crawl_done, build.crawl_failed) == (2, 0)
-        assert (build.crawl_pending, build.crawl_fetched) == (0, 0)
+        assert (build.crawl_pending, build.crawl_fetched) == (0, 2)
     finally:
         store.close()
 
 
 # --------------------------------------------------------------------------- #
-# D3 (must-fix): per-(product,url) resume, stale-raw, lang, counters
+# L1a (must-fix): per-(product,url) resume, stale-raw, lang, counters
 # --------------------------------------------------------------------------- #
 
 
 def test_cross_product_same_url_resume_is_per_product(tmp_path: Path) -> None:
-    """Один URL под двумя продуктами: записи независимы (PK ``(run_id, product_id, url)``).
+    """Один URL под двумя продуктами: элементы независимы (PK ``(session_id, product_id, url)``).
 
-    ``prior`` обязан ключеваться ``(product_id, url)``: иначе строка одного продукта
-    затирает строку другого и p1 (DONE+raw) был бы ошибочно ре-фетчен (I17/§4.4).
+    ``prior`` обязан ключеваться ``(product_id, url)``: иначе элемент одного продукта
+    затирает элемент другого и p1 (FETCHED+raw) был бы ошибочно ре-фетчен (I17/§4.4).
     """
     store = SqliteStore(":memory:")
     _make_run(store)
@@ -1009,16 +1032,17 @@ def test_cross_product_same_url_resume_is_per_product(tmp_path: Path) -> None:
             store=store, run_id=RUN_ID,
         )
         assert _build_of(first).crawl_done == 2
-        rows = list(store.iter_crawl_attempts(RUN_ID))
+        rows = _items(store)
         assert {(r.product_id, r.url) for r in rows} == {("p1", url), ("p2", url)}
 
-        # p1 — валидная DONE-запись (raw сохранён). p2 — FAILED без raw.
+        # p1 — валидный FETCHED-элемент (raw сохранён). p2 — FAILED без raw.
         p1_row = next(r for r in rows if r.product_id == "p1")
-        store.upsert_crawl_attempt(p1_row.model_copy(update={"status": FetchStatus.DONE}))
-        store.upsert_crawl_attempt(
-            CrawlAttempt(
-                run_id=RUN_ID, product_id="p2", url=url,
-                status=FetchStatus.FAILED, error_kind=FailureKind.SOURCE_UNAVAILABLE.value,
+        store.upsert_crawl_session_item(p1_row)
+        store.upsert_crawl_session_item(
+            CrawlSessionItem(
+                session_id=SESSION_ID, product_id="p2", url=url,
+                status=CrawlItemStatus.FAILED,
+                error_kind=FailureKind.SOURCE_UNAVAILABLE.value,
             )
         )
 
@@ -1044,7 +1068,7 @@ def test_stale_raw_mismatch_triggers_refetch(tmp_path: Path) -> None:
             tmp_path, pages={URL_P1_A: b"original"},
             urls={"p1": [URL_P1_A]}, store=store, run_id=RUN_ID,
         )
-        row = next(iter(store.iter_crawl_attempts(RUN_ID)))
+        row = next(iter(_items(store)))
         assert row.raw_path is not None and Path(row.raw_path).is_file()
         Path(row.raw_path).write_bytes(b"corrupted-on-disk")
 
@@ -1061,7 +1085,7 @@ def test_stale_raw_mismatch_triggers_refetch(tmp_path: Path) -> None:
 
 
 def test_store_none_with_run_id_degrades_cleanly(tmp_path: Path) -> None:
-    """``store=None`` при заданном ``run_id``: durable-краул выключен, фаза штатна (D3)."""
+    """``store=None`` при заданном ``run_id``: durable-краул выключен, фаза штатна (L1a)."""
     crawler = _Crawler({URL_P1_A: b"x"})
     result = _build(
         tmp_path, pages={}, urls={"p1": [URL_P1_A]},
@@ -1069,7 +1093,7 @@ def test_store_none_with_run_id_degrades_cleanly(tmp_path: Path) -> None:
     )
     assert len(crawler.calls) == 1
     assert result.errors == []
-    assert _build_of(result).crawl_done == 1
+    assert _build_of(result).crawl_done == 0
 
 
 def test_resume_from_failed_parser_failed_reextracts(tmp_path: Path) -> None:
@@ -1083,8 +1107,8 @@ def test_resume_from_failed_parser_failed_reextracts(tmp_path: Path) -> None:
             extractor=_Extractor(error_urls={URL_P1_A}),
             store=store, run_id=RUN_ID,
         )
-        row = next(iter(store.iter_crawl_attempts(RUN_ID)))
-        assert row.status is FetchStatus.FAILED
+        row = next(iter(_items(store)))
+        assert row.status is CrawlItemStatus.FAILED
         assert row.error_kind == FailureKind.PARSER_FAILED.value
         assert row.raw_path and Path(row.raw_path).is_file()
 
@@ -1095,13 +1119,18 @@ def test_resume_from_failed_parser_failed_reextracts(tmp_path: Path) -> None:
         )
         assert second.errors == []
         assert _build_of(second).chunk_count == 1
-        assert next(iter(store.iter_crawl_attempts(RUN_ID))).status is FetchStatus.DONE
+        assert next(iter(_items(store))).status is CrawlItemStatus.FETCHED
     finally:
         store.close()
 
 
-def test_browser_unsupported_url_stays_pending(tmp_path: Path) -> None:
-    """Пропущенный (browser без поддержки) URL остаётся ``PENDING`` в счётчиках (D3)."""
+def test_browser_unsupported_url_with_session_marks_failed_and_partial(tmp_path: Path) -> None:
+    """B2: пропущенный (browser без поддержки) URL при активном сеансе → ``FAILED``-элемент.
+
+    Раньше пропуск не писал элемент и сеанс ложно финализировался ``COMPLETED``. Теперь
+    фиксируется ``FAILED`` (``source_unavailable``), сеанс становится ``PARTIAL`` (URL видим
+    и возобновляем), а счётчики берутся из элементов сеанса (``crawl_pending == 0``).
+    """
     browser_url = "https://browser.test/landing"
     store = SqliteStore(":memory:")
     _make_run(store)
@@ -1113,18 +1142,39 @@ def test_browser_unsupported_url_stays_pending(tmp_path: Path) -> None:
             store=store, run_id=RUN_ID,
             domain_profiles={"browser.test": DomainProfile(fetch=FetchMode.BROWSER)},
         )
-        build = _build_of(result)
-        assert build.crawl_pending == 1
-        assert build.crawl_done == 0 and build.crawl_failed == 0
+        assert result.status == "ok"
         assert any("browser" in err for err in result.errors)
-        # URL пропущен до фетча — durable-запись не создаётся.
-        assert list(store.iter_crawl_attempts(RUN_ID)) == []
+        # Пропуск оставляет durable-элемент ``FAILED`` (не «молчаливый pending»).
+        row = next(iter(_items(store)))
+        assert row.status is CrawlItemStatus.FAILED
+        assert row.error_kind == FailureKind.SOURCE_UNAVAILABLE.value
+        assert row.error and "browser" in row.error
+        build = _build_of(result)
+        assert (build.crawl_pending, build.crawl_fetched, build.crawl_failed) == (0, 0, 1)
+        # Сеанс не «ложно завершён»: есть неразрешённый URL → ``PARTIAL``.
+        session = store.get_crawl_session(SESSION_ID)
+        assert session is not None and session.status is CrawlSessionStatus.PARTIAL
     finally:
         store.close()
 
 
+def test_browser_unsupported_url_without_session_writes_no_rows(tmp_path: Path) -> None:
+    """B2: без сеанса (нет ``store``/``run_id``) пропущенный URL строк не пишет, счётчики — 0."""
+    browser_url = "https://browser.test/landing"
+    crawler = _Crawler({browser_url: b"x"})
+    crawler.supports_browser = False  # type: ignore[attr-defined]
+
+    result = _build(
+        tmp_path, pages={}, urls={"p1": [browser_url]}, crawler=crawler,
+        domain_profiles={"browser.test": DomainProfile(fetch=FetchMode.BROWSER)},
+    )
+    build = _build_of(result)
+    assert (build.crawl_pending, build.crawl_fetched, build.crawl_failed) == (0, 0, 0)
+    assert any("browser" in err for err in result.errors)
+
+
 def test_retention_write_failure_marks_failed(tmp_path: Path) -> None:
-    """Сбой записи retention помечает URL ``FAILED`` (source_unavailable), не ``pending`` (D3)."""
+    """Сбой записи retention помечает URL ``FAILED`` (source_unavailable), не ``pending`` (L1a)."""
     store = SqliteStore(":memory:")
     _make_run(store)
     blocked = tmp_path / "blocked"
@@ -1142,8 +1192,8 @@ def test_retention_write_failure_marks_failed(tmp_path: Path) -> None:
             raw_root=blocked,
             run_id=RUN_ID,
         )
-        row = next(iter(store.iter_crawl_attempts(RUN_ID)))
-        assert row.status is FetchStatus.FAILED
+        row = next(iter(_items(store)))
+        assert row.status is CrawlItemStatus.FAILED
         assert row.error_kind == FailureKind.SOURCE_UNAVAILABLE.value
         assert any("retention" in err for err in result.errors)
         assert _build_of(result).crawl_failed == 1
@@ -1152,7 +1202,7 @@ def test_retention_write_failure_marks_failed(tmp_path: Path) -> None:
 
 
 def test_lang_preserved_across_resume(tmp_path: Path) -> None:
-    """``lang`` персистится в записи краула и восстанавливается при resume (нет расхождения)."""
+    """``lang`` персистится в элементе сеанса и восстанавливается при resume (нет расхождения)."""
     store = SqliteStore(":memory:")
     _make_run(store)
     try:
@@ -1160,7 +1210,7 @@ def test_lang_preserved_across_resume(tmp_path: Path) -> None:
             tmp_path, pages={URL_P1_A: b"bytes"},
             urls={"p1": [URL_P1_A]}, store=store, run_id=RUN_ID,
         )
-        row = next(iter(store.iter_crawl_attempts(RUN_ID)))
+        row = next(iter(_items(store)))
         assert row.lang == "en"  # из _Crawler (RawPage.lang)
 
         second = _build(
@@ -1195,7 +1245,7 @@ def test_crawl_defaults_resolved_into_fetch_plan(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize("strategy", [CrawlStrategy.HONEST, CrawlStrategy.HYBRID])
 def test_live_fetch_persists_crawl_strategy(tmp_path: Path, strategy: CrawlStrategy) -> None:
-    """v2.4: непустой ``FetchPlan.strategy`` при живом фетче доезжает в ``crawl_attempts``."""
+    """v2.4/L1a: непустой ``FetchPlan.strategy`` при живом фетче доезжает в элемент сеанса."""
     store = SqliteStore(":memory:")
     _make_run(store)
     try:
@@ -1208,7 +1258,7 @@ def test_live_fetch_persists_crawl_strategy(tmp_path: Path, strategy: CrawlStrat
             crawl_defaults=CrawlRunConfig(strategy=strategy),
             domain_profiles={"docs.test": DomainProfile(fetch=FetchMode.BROWSER)},
         )
-        row = next(iter(store.iter_crawl_attempts(RUN_ID)))
+        row = next(iter(_items(store)))
         assert row.strategy == strategy.value
     finally:
         store.close()
@@ -1237,6 +1287,88 @@ def test_crawl_defaults_absent_keeps_auto_strategy(tmp_path: Path) -> None:
     (_, plan) = crawler.calls[0]
     assert plan.strategy is CrawlStrategy.AUTO
     assert plan.rate_limit is None
+
+
+# --------------------------------------------------------------------------- #
+# L1a: per-engine выбор краулера и финализация сеанса
+# --------------------------------------------------------------------------- #
+
+
+def test_engine_selected_crawler_used_and_recorded(tmp_path: Path) -> None:
+    """``crawl_sources`` → ``engine``: активный краулер берётся из ``crawlers[engine]`` (L1a).
+
+    Проверяется и выбор краулера (``selected`` вызывается, ``default`` — нет), и провенанс
+    элемента сеанса (``engine``/``kind``).
+    """
+    store = SqliteStore(":memory:")
+    _make_run(store)
+    default = _Crawler({})
+    selected = _Crawler({URL_P1_A: b"engine-bytes"})
+    sources = CrawlSourcesConfig(products={"p1": CrawlSource(engine="fake", kind="feed")})
+    try:
+        result = _build(
+            tmp_path,
+            pages={},
+            urls={"p1": [URL_P1_A]},
+            crawler=default,
+            crawlers={"fake": selected},
+            crawl_sources=sources,
+            store=store,
+            run_id=RUN_ID,
+        )
+        assert result.errors == []
+        assert [called for called, _ in selected.calls] == [URL_P1_A]
+        assert default.calls == []
+        item = next(iter(_items(store)))
+        assert item.status is CrawlItemStatus.FETCHED
+        assert item.engine == "fake"
+        assert item.kind == "feed"
+    finally:
+        store.close()
+
+
+def test_session_finalized_completed_when_all_fetched(tmp_path: Path) -> None:
+    """Сеанс без сбоев финализируется ``COMPLETED`` с ``finished_at`` (L1a)."""
+    store = SqliteStore(":memory:")
+    _make_run(store)
+    try:
+        _build(
+            tmp_path,
+            pages={URL_P1_A: b"x", URL_P2_A: b"y"},
+            urls={"p1": [URL_P1_A], "p2": [URL_P2_A]},
+            store=store,
+            run_id=RUN_ID,
+        )
+        session = store.get_crawl_session(SESSION_ID)
+        assert session is not None
+        assert session.status is CrawlSessionStatus.COMPLETED
+        assert session.finished_at
+        assert (session.fetched, session.failed) == (2, 0)
+    finally:
+        store.close()
+
+
+def test_session_finalized_partial_on_failure(tmp_path: Path) -> None:
+    """Сеанс с хотя бы одним сбойным элементом финализируется ``PARTIAL`` (L1a)."""
+    store = SqliteStore(":memory:")
+    _make_run(store)
+    bad = "https://docs.test/p1/broken"
+    try:
+        _build(
+            tmp_path,
+            pages={},
+            urls={"p1": [bad]},
+            crawler=_Crawler({}, raising={bad}),
+            store=store,
+            run_id=RUN_ID,
+        )
+        session = store.get_crawl_session(SESSION_ID)
+        assert session is not None
+        assert session.status is CrawlSessionStatus.PARTIAL
+        assert session.finished_at
+        assert (session.fetched, session.failed) == (0, 1)
+    finally:
+        store.close()
 
 
 # --------------------------------------------------------------------------- #

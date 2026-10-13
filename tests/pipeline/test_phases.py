@@ -59,6 +59,7 @@ from core.domain import (
     Status,
     Upstream,
 )
+from core.config.crawl_sources import CrawlSource, CrawlSourcesConfig
 from core.pipeline.compute import compute
 from core.pipeline.evaluate import evaluate_phase
 from core.pipeline.normalize import RunInputs
@@ -73,9 +74,10 @@ from core.pipeline.runner import (
     RunContext,
     Runner,
 )
-from core.ports.types import RawPage
+from core.ports.types import FetchPlan, RawPage
 from core.ports.vector_index import RetrievedChunk
 from core.store.sqlite_store import SqliteStore
+from core.util.rate_limit import RateLimiter
 from tests.fakes.ports import (
     FakeChunker,
     FakeCrawler,
@@ -440,6 +442,122 @@ def test_corpus_phase_crawl_defaults_none_when_absent(
         store.close()
 
     assert captured["crawl_defaults"] is None
+
+
+# ---------------------------------------------------------------------------
+# Lane A/L3a: проброс crawl_sources/crawlers/rate_limiter в build_corpus
+# ---------------------------------------------------------------------------
+
+
+def _forwards_spy(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+    """Подменяет ``build_corpus`` шпионом, собирающим переданные kwargs."""
+    import core.pipeline.phases as phases_mod
+
+    captured: dict[str, Any] = {}
+
+    def _spy(*args: Any, **kwargs: Any) -> PhaseResult:
+        captured.update(kwargs)
+        return PhaseResult(status="ok", phase="corpus")
+
+    monkeypatch.setattr(phases_mod, "build_corpus", _spy)
+    return captured
+
+
+def test_corpus_phase_forwards_crawl_sources_crawlers_rate_limiter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``crawl_sources``/``crawlers``/``rate_limiter`` доезжают до ``build_corpus`` (L3a)."""
+    captured = _forwards_spy(monkeypatch)
+    cfg = CrawlSourcesConfig(defaults=CrawlSource(engine="http"))
+    limiter = RateLimiter(sleep=lambda _s: None)
+    fake = FakeCrawler(pages={})
+    ports = Ports(crawlers={"http": fake})
+    store = _store()
+    try:
+        phases = build_phases(
+            inputs=_inputs(),
+            plan=_plan(),
+            ports=ports,
+            crawl_sources=cfg,
+            rate_limiter=limiter,
+        )
+        result = phases["corpus"](_context(store, ports))
+    finally:
+        store.close()
+
+    assert result.status == "ok"
+    assert captured["crawl_sources"] == cfg
+    assert captured["crawlers"] == {"http": fake}
+    assert captured["rate_limiter"] is limiter
+
+
+def test_corpus_phase_crawl_knobs_default_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Без новых kwargs ``crawl_sources``/``crawlers``/``rate_limiter`` = ``None`` (совместимо)."""
+    captured = _forwards_spy(monkeypatch)
+    store = _store()
+    try:
+        phases = build_phases(inputs=_inputs(), plan=_plan(), ports=Ports())
+        phases["corpus"](_context(store, Ports()))
+    finally:
+        store.close()
+
+    assert captured["crawl_sources"] is None
+    assert captured["crawlers"] is None
+    assert captured["rate_limiter"] is None
+
+
+class _RecordingCrawler:
+    """Краулер-заглушка, записывающий обращения (проверка выбора по ``engine``)."""
+
+    def __init__(self, pages: dict[str, RawPage]) -> None:
+        self.pages = dict(pages)
+        self.calls: list[str] = []
+
+    def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:
+        self.calls.append(url)
+        page = self.pages.get(url)
+        if page is not None:
+            return page
+        return RawPage(url=url, content=b"", fetched_at=FIXED_TS, fetch_mode=plan.fetch)
+
+
+def test_corpus_phase_selects_crawler_by_engine(tmp_path: Path) -> None:
+    """``crawl_sources.defaults.engine`` выбирает адаптер из ``Ports.crawlers`` (L3a)."""
+    url = "https://docs.test/p1"
+    pages = {
+        url: RawPage(
+            url=url, content="Свойство А доступно.".encode(), fetched_at=FIXED_TS
+        )
+    }
+    base = _RecordingCrawler(pages)
+    engine_crawler = _RecordingCrawler(pages)
+    cfg = CrawlSourcesConfig(defaults=CrawlSource(engine="scrapy"))
+    ports = Ports(
+        crawler=base,  # type: ignore[arg-type]
+        crawlers={"scrapy": engine_crawler},  # type: ignore[dict-item]
+        extractor=FakeExtractor(),
+        chunker=FakeChunker(),
+        embedder=FakeEmbedder(),
+        index_builder=FakeIndexBuilder(),
+    )
+    store = _store()
+    try:
+        result = build_phases(
+            inputs=_inputs(),
+            plan=_plan(),
+            ports=ports,
+            urls={"p1": [url]},
+            crawl_sources=cfg,
+            raw_root=str(tmp_path / "raw"),
+        )["corpus"](_context(store, ports))
+    finally:
+        store.close()
+
+    assert result.status == "ok"
+    assert engine_crawler.calls == [url]  # активный выбран по ``engine``
+    assert base.calls == []  # дефолтный fallback не тронут
 
 
 def test_evaluate_phase_uses_retrieval_and_never_search() -> None:

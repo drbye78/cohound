@@ -18,7 +18,6 @@ from core.domain.enums import (
     CrawlStrategy,
     ExtractionRoute,
     FetchMode,
-    FetchStatus,
     Gate,
     RankingPolicy,
     SearchKind,
@@ -64,8 +63,6 @@ def assert_dictionary_integrity(path: str | Path) -> None:
         "extraction_route",
         # D4: стратегия краула (как используется браузер; FetchPlan).
         "crawl_strategy",
-        # D3: статус per-URL записи краула (crawl_attempts).
-        "fetch_status",
         # Lane B: жизненный цикл сеанса краула и per-URL статус его элемента.
         "crawl_session_status",
         "crawl_item_status",
@@ -89,7 +86,6 @@ def assert_dictionary_integrity(path: str | Path) -> None:
         "fetch_mode": {v.value for v in FetchMode},
         "extraction_route": {v.value for v in ExtractionRoute},
         "crawl_strategy": {v.value for v in CrawlStrategy},
-        "fetch_status": {v.value for v in FetchStatus},
         "crawl_session_status": {v.value for v in CrawlSessionStatus},
         "crawl_item_status": {v.value for v in CrawlItemStatus},
     }

@@ -22,6 +22,7 @@ from typing import Any
 
 import yaml
 
+from core.config.crawl_sources import CrawlSourcesConfig, load_crawl_sources
 from core.config.domain_profiles import DomainProfile, load_domain_profiles
 from core.config.run_config import (
     cross_check_products,
@@ -72,6 +73,7 @@ class RunInputs:
     cohort: Cohort
     golden: list[GoldenRow]
     domain_profiles: dict[str, DomainProfile] = field(default_factory=dict)
+    crawl_sources: CrawlSourcesConfig = field(default_factory=CrawlSourcesConfig)
     scope_attestation_procedure: str | None = None
 
 
@@ -111,7 +113,7 @@ def load_inputs(run_yaml_path: str | Path, package_dir: str | Path) -> RunInputs
 
     Обязательны ``run.yaml`` и пять артефактов пакета (``package.yaml``,
     ``catalog.csv``, ``baselines.csv``, ``cohort.yaml``, ``golden.csv``);
-    ``domain_profiles.yaml`` и ``scope_attestation.yaml`` — опциональны.
+    ``domain_profiles.yaml``, ``crawl_sources.yaml`` и ``scope_attestation.yaml`` — опциональны.
 
     :raises ValueError: артефакт отсутствует или не разбирается/не валиден.
     """
@@ -126,6 +128,9 @@ def load_inputs(run_yaml_path: str | Path, package_dir: str | Path) -> RunInputs
     profiles_path = package_path / "domain_profiles.yaml"
     domain_profiles = load_domain_profiles(profiles_path) if profiles_path.exists() else {}
 
+    crawl_path = package_path / "crawl_sources.yaml"
+    crawl_sources = load_crawl_sources(crawl_path) if crawl_path.exists() else CrawlSourcesConfig()
+
     return RunInputs(
         run=run,
         package=package,
@@ -134,6 +139,7 @@ def load_inputs(run_yaml_path: str | Path, package_dir: str | Path) -> RunInputs
         cohort=cohort,
         golden=golden,
         domain_profiles=domain_profiles,
+        crawl_sources=crawl_sources,
         scope_attestation_procedure=load_scope_attestation(package_path),
     )
 

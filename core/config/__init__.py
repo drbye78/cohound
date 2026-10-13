@@ -2,8 +2,8 @@
 
 Пакет загрузки артефактов раскладки на диске (``03-data-config-cli.md`` §A.1/D.2):
 ``run.yaml``, ``package.yaml``, ``catalog.csv``, ``baselines.csv``, ``cohort.yaml``,
-``golden.csv``, ``domain_profiles.yaml``. Загрузчики валидируют данные в **доменные
-модели** (``core/domain/models.py``) и не несут предметной терминологии (§1.3).
+``golden.csv``, ``domain_profiles.yaml``, ``crawl_sources.yaml``. Загрузчики валидируют
+данные в **доменные модели** (``core/domain/models.py``) и не несут предметной терминологии (§1.3).
 
 Разрешённые зависимости слоя ``config`` — ``domain``/``config``/``util`` (01 §1).
 Поэтому пакет чист от I/O-портов и конвейера: он читает файлы, но не ходит в сеть
@@ -24,6 +24,12 @@ from core.config.run_config import (
 from core.config.domain_profiles import (
     DomainProfile,
     load_domain_profiles,
+)
+from core.config.crawl_sources import (
+    CRAWL_SOURCES_FILENAME,
+    CrawlSource,
+    CrawlSourcesConfig,
+    load_crawl_sources,
 )
 from core.config.deploy import (
     DeployConfig,
@@ -71,6 +77,11 @@ __all__ = [
     # domain_profiles.yaml (D.2)
     "DomainProfile",
     "load_domain_profiles",
+    # crawl_sources.yaml (Lane A: source-routing)
+    "CrawlSource",
+    "CrawlSourcesConfig",
+    "load_crawl_sources",
+    "CRAWL_SOURCES_FILENAME",
     # кросс-артефактная проверка S11 (§4.5)
     "cross_check_products",
     # deploy.yaml (D.5, 07)

@@ -150,12 +150,12 @@ def test_item_full_round_trip() -> None:
 
 def test_item_extra_forbidden() -> None:
     with pytest.raises(ValidationError):
-        _item(run_id="r1")  # crawl_attempts-поле, в элементе сеанса его нет
+        _item(run_id="r1")  # не поле элемента сеанса (ключ — ``session_id``), отвергается
 
 
 def test_item_status_required_and_typed() -> None:
     with pytest.raises(ValidationError):
-        _item(status="done")  # "done" — статус прежнего FetchStatus, не CrawlItemStatus
+        _item(status="done")  # "done" не входит в ``CrawlItemStatus``
 
 
 def test_enum_membership() -> None:

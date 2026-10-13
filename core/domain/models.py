@@ -23,7 +23,6 @@ from core.domain.enums import (
     EndpointKind,
     EvidenceState,
     EvidenceType,
-    FetchStatus,
     Gate,
     GoldenTier,
     Importance,
@@ -830,41 +829,6 @@ class IndexManifestEntry(BaseModel):
     stats_json: str | None = None
 
 
-class CrawlAttempt(BaseModel):
-    """Строка ``crawl_attempts`` (D3, §4.4): durable per-URL запись краула.
-
-    Носитель аудита, очереди и resume Ш5: статус ``FetchStatus`` плюс провенанс попытки
-    (``fetch_mode``/``extract_route``/``strategy``/``http_status``/``content_type``/``lang``) и retention
-    (``content_hash``/``raw_path``). ``error_kind`` переиспользует ``FailureKind`` (без нового
-    перечисления): сбой краула → ``source_unavailable``, сбой извлечения → ``parser_failed``.
-    ``status`` — часть операционной таблицы, а не доменной ячейки (см. ``FetchStatus``).
-    """
-
-    model_config = _BASE
-
-    run_id: str
-    product_id: str
-    url: str
-    status: FetchStatus
-    attempts: int = 0
-    fetch_mode: str | None = None
-    extract_route: str | None = None
-    #: Ось стратегии краула (``auto|honest|hybrid``) — provenance фактически применённой
-    #: стратегии фетча страницы (§4.4). Свободная строка-провенанс, зеркало ``CrawlStrategy``.
-    strategy: str | None = None
-    http_status: int | None = None
-    content_type: str | None = None
-    #: Язык страницы (D3): персистится, чтобы resume не терял ``RawPage.lang`` (иначе
-    #: ``corpus_docs.lang``/``corpus_chunks.lang`` расходились бы между свежим и возобновлённым прогоном).
-    lang: str | None = None
-    content_hash: str | None = None
-    raw_path: str | None = None
-    error_kind: str | None = None
-    error: str | None = None
-    first_seen: str | None = None
-    last_attempt: str | None = None
-
-
 class CrawlSession(BaseModel):
     """Строка ``crawl_sessions`` (Lane B, §4.4): durable намерение краула + агрегированный прогресс.
 
@@ -906,13 +870,12 @@ class CrawlSession(BaseModel):
 class CrawlSessionItem(BaseModel):
     """Строка ``crawl_session_items`` (Lane B, §4.4): per-URL элемент сеанса краула.
 
-    Преемник ``crawl_attempts`` (обратная совместимость не требуется): тот же провенанс
-    попытки (``fetch_mode``/``extract_route``/``strategy``/``http_status``/``content_type``/
-    ``lang``) и retention (``content_hash``/``raw_path``), но ключ — ``session_id`` и статус
-    ``CrawlItemStatus``. ``engine``/``kind`` — движок и вид источника (провенанс сеанса).
-    ``error_kind`` переиспользует ``FailureKind``: сбой краула → ``source_unavailable``,
-    сбой извлечения → ``parser_failed``. ``status`` — часть операционной таблицы, а не
-    доменной ячейки.
+    Per-URL элемент сеанса: провенанс попытки (``fetch_mode``/``extract_route``/``strategy``/
+    ``http_status``/``content_type``/``lang``) и retention (``content_hash``/``raw_path``); ключ —
+    ``session_id``, статус — ``CrawlItemStatus``. ``engine``/``kind`` — движок и вид источника
+    (провенанс сеанса). ``error_kind`` переиспользует ``FailureKind``: сбой краула →
+    ``source_unavailable``, сбой извлечения → ``parser_failed``. ``status`` — часть
+    операционной таблицы, а не доменной ячейки.
     """
 
     model_config = _BASE

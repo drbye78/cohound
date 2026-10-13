@@ -278,34 +278,56 @@ def test_missing_snapshot_keeps_gap_note(
 
 
 # ---------------------------------------------------------------------------
-# D3: ``--reset`` очищает durable-краул (crawl_attempts)
+# L1b: ``--reset`` очищает durable-краул (сеанс краула)
 # ---------------------------------------------------------------------------
 
 
-def test_reset_clears_crawl_attempts(
+def test_reset_clears_crawl_session(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """``hound run --reset`` вызывает ``store.clear_crawl_attempts(run_id)`` (D3)."""
+    """``hound run --reset`` очищает сеанс краула прогона ``f"crawl:{run_id}"`` (L1b)."""
     from core.cli.wiring import run_db_path
-    from core.domain import FetchStatus
+    from core.domain import (
+        CrawlItemStatus,
+        CrawlSession,
+        CrawlSessionItem,
+        CrawlSessionStatus,
+    )
+    from core.pipeline.crawl_session import default_session_id
     from core.store.sqlite_store import SqliteStore
 
     runs_dir = tmp_path / "runs"
     run_id = "sc-reset"
+    session_id = default_session_id(run_id)
     assert main(run_argv(E2E_FIXTURES, run_id=run_id, runs_dir=runs_dir)) == EXIT_BLOCKED
     capsys.readouterr()
     db_path = run_db_path(runs_dir, run_id)
 
     store = SqliteStore(db_path)
     try:
-        store.mark_crawl_status(
-            run_id, "p1", "https://example.com/a", FetchStatus.DONE
+        store.upsert_crawl_session(
+            CrawlSession(
+                session_id=session_id,
+                run_id=run_id,
+                profile="local",
+                status=CrawlSessionStatus.CREATED,
+                created_at="2026-01-01T00:00:00+00:00",
+            )
         )
-        assert len(list(store.iter_crawl_attempts(run_id))) == 1
+        store.upsert_crawl_session_item(
+            CrawlSessionItem(
+                session_id=session_id,
+                product_id="p1",
+                url="https://example.com/a",
+                status=CrawlItemStatus.FETCHED,
+            )
+        )
+        assert store.get_crawl_session(session_id) is not None
+        assert len(list(store.iter_crawl_session_items(session_id))) == 1
     finally:
         store.close()
 
-    # Повторный прогон с --reset очищает durable-состояние краула.
+    # Повторный прогон с --reset очищает durable-состояние краула (сеанс + элементы).
     code = main(
         run_argv(E2E_FIXTURES, run_id=run_id, runs_dir=runs_dir, extra=["--reset"])
     )
@@ -313,6 +335,7 @@ def test_reset_clears_crawl_attempts(
     capsys.readouterr()
     store = SqliteStore(db_path)
     try:
-        assert list(store.iter_crawl_attempts(run_id)) == []
+        assert store.get_crawl_session(session_id) is None
+        assert list(store.iter_crawl_session_items(session_id)) == []
     finally:
         store.close()

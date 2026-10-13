@@ -41,11 +41,14 @@ retention пишется **до** экстракции; каждый индек�
 ``IndexManifestEntry`` и вызывает ``_embed_and_build``; при успехе персистятся ``corpus_chunks``
 + ``index_manifest`` («сначала диск, потом БД»). Никакого round/parent-чейнинга.
 
-**Durable-краул (D3).** При наличии ``store`` и ``run_id`` фаза ведёт ``crawl_attempts``
-(аудит/очередь/resume): per-URL статус ``FetchStatus`` + провенанс попытки. URL с уже
-сохранёнными байтами **не фетчится повторно** — ``RawPage`` реконструируется из retained
-``corpus_raw`` (I19: raw — источник) и ре-извлекается детерминированно. ``store is None`` или
-``run_id is None`` → поведение без durable-краула. Все записи краула изолированы (сбой →
+**Durable-краул (D3/L1a).** При наличии ``store`` и ``run_id`` фаза ведёт **сеанс краула**
+(``crawl_sessions`` + ``crawl_session_items``; ядро-владелец сеанса, §4.4): per-URL элемент
+``CrawlItemStatus`` + провенанс попытки. Сеанс открывается через
+:mod:`core.pipeline.crawl_session` (get-or-create + recovery-on-open), идемпотентно на прогон
+(``session_id = f"crawl:{run_id}"``). URL с уже сохранёнными байтами **не фетчится повторно** —
+``RawPage`` реконструируется из retained ``corpus_raw`` (I19: raw — источник) и ре-извлекается
+детерминированно. ``store is None`` или ``run_id is None`` → поведение без durable-краула
+(счётчики ``crawl_*`` — нули, строк сеанса нет). Все записи сеанса изолированы (сбой →
 ``errors``, фаза остаётся ``ok``).
 
 **Порядок «сначала диск, потом БД».** Физическая продукт-партиция авторитетна. Пока
@@ -76,18 +79,25 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
+from core.config.crawl_sources import CrawlSourcesConfig
 from core.config.domain_profiles import DomainProfile
 from core.domain import (
     CorpusChunk,
     CorpusDoc,
-    CrawlAttempt,
+    CrawlItemStatus,
     CrawlRunConfig,
+    CrawlSessionItem,
     CrawlStrategy,
     FailureKind,
-    FetchStatus,
     IndexManifestEntry,
 )
-from core.pipeline.fetch_plan import resolve_fetch_plan
+from core.pipeline.crawl_session import (
+    default_session_id,
+    finalize_session,
+    open_session,
+    prior_items,
+)
+from core.pipeline.crawl_sources import resolve_crawl_target
 from core.pipeline.runner import PhaseResult
 from core.ports.chunker import ChunkerPort
 from core.ports.crawler import CrawlerPort
@@ -117,10 +127,14 @@ class IndexBuild:
     :param entries: по одной ``IndexManifestEntry`` на продукт-партицию (I17).
     :param docs: уникальные ``CorpusDoc`` (retention + provenance экстракции, §3.2).
     :param chunk_count: суммарное число проиндексированных чанков.
-    :param crawl_pending: D3-наблюдаемость: URL в очереди (не фетчились).
-    :param crawl_fetched: D3: сырые байты сохранены, экстракция не завершена.
-    :param crawl_done: D3: fetched+extracted+chunked успешно.
-    :param crawl_failed: D3: терминально после попыток.
+    :param crawl_pending: L1a-наблюдаемость: элементы сеанса в очереди (``PENDING``/``RUNNING``).
+    :param crawl_fetched: L1a: элементы ``FETCHED`` (сырые байты сохранены = «ready» для
+        материализации).
+    :param crawl_done: L1a: зеркало ``crawl_fetched`` (элемент ``FETCHED`` = готов к
+        извлечению; отдельного ``done`` на уровне элемента нет — сеанс трекает краул, не
+        экстракцию). Поле сохранено для обратной совместимости наблюдаемости.
+    :param crawl_failed: L1a: терминально сбойные элементы (``FAILED``; ``CANCELLED`` —
+        если у модели нет отдельного поля — складывается сюда только для счётчика).
     """
 
     index_build_id: str
@@ -155,6 +169,11 @@ class _ProductIngest:
 def _as_text(value: Any) -> Any:
     """Приводит enum-значение (``StrEnum``) к строке ``.value``; прочее — как есть."""
     return getattr(value, "value", value)
+
+
+def _now_iso() -> str:
+    """Текущее время в ISO-8601 (UTC) — для провенанса элементов сеанса (L1a)."""
+    return _dt.datetime.now(_dt.timezone.utc).isoformat()
 
 
 def _resolve_package_id(plan: Any, package_id: str | None) -> str:
@@ -406,43 +425,17 @@ def _embed_and_build(
 
 
 # --------------------------------------------------------------------------- #
-# Durable-краул (D3): аудит/очередь/resume per-URL
+# Durable-краул (L1a): сеанс краула — аудит/очередь/resume per-URL
 # --------------------------------------------------------------------------- #
 
 
-def _record_crawl(
-    store: Any,
-    run_id: str | None,
-    product_id: str,
-    url: str,
-    status: FetchStatus,
-    errors: list[str],
-    **fields: Any,
-) -> None:
-    """Изолированно пишет переход статуса краула в ``crawl_attempts`` (D3).
-
-    Сбой store фиксируется в ``errors`` и не прерывает фазу (контракт изоляции фаз,
-    ``runner.py``). ``store is None`` или ``run_id is None`` → no-op: ровно поведение без
-    durable-краула (обратная совместимость).
-    """
-    if store is None or run_id is None:
-        return
-    try:
-        store.mark_crawl_status(run_id, product_id, url, status, **fields)
-    except Exception as exc:  # noqa: BLE001 — наблюдаемость важнее персистенции
-        errors.append(
-            f"{product_id}/{url}: crawl_attempts {_as_text(status)}: "
-            f"{type(exc).__name__}: {exc}"
-        )
-
-
 def _resume_source(
-    attempt: CrawlAttempt | None,
+    item: CrawlSessionItem | None,
 ) -> tuple[bytes, Path] | None:
-    """Возвращает retained-байты для resume, если запись краула позволяет НЕ фетчить (D3).
+    """Возвращает retained-байты для resume, если элемент сеанса позволяет НЕ фетчить (D3).
 
-    Пригодны записи ``FETCHED``/``DONE`` (сырые байты уже сохранены) и ``FAILED`` с
-    сохранённым ``raw_path`` (re-extract из тех же байтов без сети). ``PENDING``/отсутствие
+    Пригодны элементы ``FETCHED`` (сырые байты уже сохранены) и ``FAILED`` с сохранённым
+    ``raw_path`` (re-extract из тех же байтов без сети). ``PENDING``/``RUNNING``/отсутствие
     записи, отсутствие ``raw_path`` или файла на диске → ``None`` (обычный путь фетча).
 
     **Верификация (D3).** Если в записи задан ``content_hash``, а хеш прочитанных байтов
@@ -450,35 +443,35 @@ def _resume_source(
     должен молча давать другой ``index_build_id`` и самопротиворечивую аудит-строку.
     I19: retained raw — источник; экстракция детерминирована.
     """
-    if attempt is None:
+    if item is None:
         return None
-    if attempt.status not in (FetchStatus.FETCHED, FetchStatus.DONE, FetchStatus.FAILED):
+    if item.status not in (CrawlItemStatus.FETCHED, CrawlItemStatus.FAILED):
         return None
-    if not attempt.raw_path:
+    if not item.raw_path:
         return None
-    path = Path(attempt.raw_path)
+    path = Path(item.raw_path)
     if not path.is_file():
         return None
     try:
         data = path.read_bytes()
     except OSError:
         return None
-    if attempt.content_hash and content_hash(data) != attempt.content_hash:
+    if item.content_hash and content_hash(data) != item.content_hash:
         return None
     return data, path
 
 
 def _resume_page(
-    attempt: CrawlAttempt, url: str, content: bytes, path: Path, fetch_plan: FetchPlan
+    item: CrawlSessionItem, url: str, content: bytes, path: Path, fetch_plan: FetchPlan
 ) -> RawPage:
-    """Реконструирует ``RawPage`` из retained-байтов и записи краула (без сети, D3).
+    """Реконструирует ``RawPage`` из retained-байтов и элемента сеанса (без сети, D3).
 
     ``fetched_at`` — из ``last_attempt`` записи, иначе mtime файла (UTC). ``fetch_mode`` —
     из записи (если распознаётся, иначе ``fetch_plan.fetch``). ``content_type``/``lang``/
-    ``status_code`` — из провенанса записи (``lang`` персистится с D3, иначе свежий и
+    ``status_code`` — из провенанса записи (``lang`` персистится, иначе свежий и
     возобновлённый прогоны расходились бы по ``corpus_docs.lang``/``corpus_chunks.lang``).
     """
-    fetched_at = attempt.last_attempt
+    fetched_at = item.last_attempt
     if not fetched_at:
         try:
             fetched_at = _dt.datetime.fromtimestamp(
@@ -487,9 +480,9 @@ def _resume_page(
         except OSError:
             fetched_at = ""
     fetch_mode = fetch_plan.fetch
-    if attempt.fetch_mode:
+    if item.fetch_mode:
         try:
-            fetch_mode = FetchMode(attempt.fetch_mode)
+            fetch_mode = FetchMode(item.fetch_mode)
         except ValueError:
             fetch_mode = fetch_plan.fetch
     return RawPage(
@@ -497,9 +490,9 @@ def _resume_page(
         content=content,
         fetched_at=fetched_at or "",
         fetch_mode=fetch_mode,
-        lang=attempt.lang,
-        status_code=attempt.http_status,
-        content_type=attempt.content_type,
+        lang=item.lang,
+        status_code=item.http_status,
+        content_type=item.content_type,
     )
 
 
@@ -527,6 +520,9 @@ def build_corpus(
     rate_limiter: RateLimiter | None = None,
     package_id: str | None = None,
     run_id: str | None = None,
+    crawl_sources: CrawlSourcesConfig | None = None,
+    crawlers: Mapping[str, CrawlerPort] | None = None,
+    session_id: str | None = None,
 ) -> PhaseResult:
     """Ш5: собирает корпус из ``plan × urls`` и возвращает ``PhaseResult``.
 
@@ -563,10 +559,20 @@ def build_corpus(
         Путь ``resume`` (re-извлечение из retained raw) пейсингом не облагается: живого
         сетевого вызова нет.
     :param package_id: явный пакет корпуса; ``None`` → производный от ``plan``.
-    :param run_id: идентификатор прогона для durable-краула (D3). При наличии ``store`` и
-        ``run_id`` фаза ведёт ``crawl_attempts`` (аудит/очередь/resume): URL с сохранёнными
-        байтами НЕ фетчится повторно, а ре-извлекается из retained raw. ``None`` (или
-        ``store is None``) → поведение без durable-краула.
+    :param run_id: идентификатор прогона для durable-краула (D3/L1a). При наличии ``store`` и
+        ``run_id`` фаза ведёт **сеанс краула** (``crawl_sessions``/``crawl_session_items``,
+        аудит/очередь/resume): URL с сохранёнными байтами НЕ фетчится повторно, а
+        ре-извлекается из retained raw. ``None`` (или ``store is None``) → поведение без
+        durable-краула (счётчики ``crawl_*`` — нули).
+    :param crawl_sources: опциональный ``CrawlSourcesConfig`` (Lane A) — слои источников
+        ``defaults``/``products``/``sites``; резолвится в ``FetchPlan``/``engine``/``kind``
+        через :func:`core.pipeline.crawl_sources.resolve_crawl_target`. ``None`` → пустой
+        конфиг (поведение как у одиночного профиля домена).
+    :param crawlers: опциональная карта ``engine → CrawlerPort``: активный краулер выбирается
+        по ``target.engine`` (fallback — ``crawler``). Позволяет per-engine адаптеры без
+        изменения сигнатуры ``crawler``.
+    :param session_id: явный идентификатор сеанса краула; ``None`` →
+        ``f"crawl:{run_id}"`` (идемпотентно на прогон). Игнорируется без ``store``/``run_id``.
 
     Возвращает ``PhaseResult`` со ``status='ok'`` (даже при изолированных ошибках),
     ``cells=[]`` (Ш5 не производит ячеек) и ``log_entries=[IndexBuild]`` (сборка + счётчики).
@@ -608,31 +614,87 @@ def build_corpus(
     # P2-3: единый владелец politeness-пейсинга — corpus (адаптерный ``rate_limiter`` — None).
     limiter = rate_limiter if rate_limiter is not None else RateLimiter()
 
-    # D3: prior durable-состояние краула (аудит/очередь/resume). Ключ — ``(product_id, url)``:
-    # PK таблицы ``crawl_attempts`` = ``(run_id, product_id, url)``, поэтому один и тот же URL
-    # под разными продуктами имеет независимые записи (иначе строки затирали бы друг друга —
-    # I17/§4.4: партиция и её retained raw принадлежат продукту).
-    prior: dict[tuple[str, str], CrawlAttempt] = {}
+    # L1a: сеанс краула (durable намерение + агрегат прогресса, §4.4). Идемпотентен на
+    # прогон: ``session_id`` по умолчанию ``f"crawl:{run_id}"``. Без ``store``/``run_id``
+    # durable-краул выключен (строк сеанса нет, счётчики ``crawl_*`` — нули).
+    session: str | None = None
     if store is not None and run_id is not None:
+        session = session_id if session_id is not None else default_session_id(run_id)
         try:
-            prior = {
-                (attempt.product_id, attempt.url): attempt
-                for attempt in store.iter_crawl_attempts(run_id)
-            }
+            open_session(store, session_id=session, run_id=run_id)
         except Exception as exc:  # noqa: BLE001 — resume best-effort, не роняет фазу
-            errors.append(f"iter_crawl_attempts: {type(exc).__name__}: {exc}")
-            prior = {}
+            errors.append(f"open_crawl_session: {type(exc).__name__}: {exc}")
+            session = None
 
-    # D3: наблюдаемые финальные статусы per-URL (для счётчиков IndexBuild).
-    crawl_status: dict[tuple[str, str], FetchStatus] = {}
-    for pid in products:
-        for u in url_map.get(pid, []):
-            crawl_status[(pid, u)] = FetchStatus.PENDING
+    # L1a: априорные элементы сеанса (аудит/очередь/resume). Ключ — ``(product_id, url)``:
+    # PK ``crawl_session_items`` = ``(session_id, product_id, url)``, поэтому один URL под
+    # разными продуктами имеет независимые записи (I17/§4.4: партиция и её retained raw
+    # принадлежат продукту).
+    items: dict[tuple[str, str], CrawlSessionItem] = {}
+    if session is not None:
+        try:
+            items = prior_items(store, session)
+        except Exception as exc:  # noqa: BLE001 — resume best-effort, не роняет фазу
+            errors.append(f"iter_crawl_session_items: {type(exc).__name__}: {exc}")
+            items = {}
 
-    def _mark(pid: str, u: str, status: FetchStatus, **fields: Any) -> None:
-        """Помечает статус URL и (при store+run_id) персистит его в ``crawl_attempts``."""
-        crawl_status[(pid, u)] = status
-        _record_crawl(store, run_id, pid, u, status, errors, **fields)
+    # L1a: разрешённые цели краула (``engine``/``kind``) по ``(product_id, url)`` — провенанс
+    # элемента сеанса.
+    targets: dict[tuple[str, str], Any] = {}
+
+    def _mark(pid: str, u: str, status: CrawlItemStatus, **fields: Any) -> None:
+        """Помечает исход URL и (при активном сеансе) персистит элемент краула (L1a).
+
+        Пишет **полную** строку ``crawl_session_items``: поля предыдущего элемента
+        переносятся (carry-forward), переданные не-``None`` поля перекрывают. Счётчики
+        сеанса поддерживаются стором транзакционно. Сбой изолируется в ``errors``; без
+        сеанса durable-краул выключен — строка не пишется (наблюдаемость идёт из
+        ``IndexBuild``-счётчиков, которые при отсутствии сеанса нулевые).
+        """
+        if session is None:
+            return
+        key = (pid, u)
+        base = items.get(key)
+        target = targets.get(key)
+        now = _now_iso()
+        attempts = base.attempts if base is not None else 0
+        if status in (CrawlItemStatus.FETCHED, CrawlItemStatus.FAILED) and (
+            base is None or base.status is not status
+        ):
+            attempts += 1
+        record: dict[str, Any] = {
+            "session_id": session,
+            "product_id": pid,
+            "url": u,
+            "status": status,
+            "attempts": attempts,
+            "engine": target.engine if target is not None else None,
+            "kind": target.kind if target is not None else None,
+            "fetch_mode": base.fetch_mode if base is not None else None,
+            "extract_route": base.extract_route if base is not None else None,
+            "strategy": base.strategy if base is not None else None,
+            "http_status": base.http_status if base is not None else None,
+            "content_type": base.content_type if base is not None else None,
+            "lang": base.lang if base is not None else None,
+            "content_hash": base.content_hash if base is not None else None,
+            "raw_path": base.raw_path if base is not None else None,
+            "error_kind": base.error_kind if base is not None else None,
+            "error": base.error if base is not None else None,
+            "first_seen": (base.first_seen if base is not None and base.first_seen else now),
+            "last_attempt": now,
+        }
+        for name, value in fields.items():
+            if value is not None:
+                record[name] = value
+        try:
+            item = CrawlSessionItem(**record)
+            store.upsert_crawl_session_item(item)
+            items[key] = item
+        except Exception as exc:  # noqa: BLE001 — наблюдаемость важнее персистенции
+            errors.append(
+                f"{pid}/{u}: crawl_session_item {_as_text(status)}: "
+                f"{type(exc).__name__}: {exc}"
+            )
 
     # --- Pass A (ingest): crawl → retention → extract → dedup → chunk ---------- #
     # Векторы/физический индекс и персистенция corpus_chunks/index_manifest не выполняются:
@@ -645,41 +707,63 @@ def build_corpus(
         seen_chunk_ids: set[str] = set()
 
         for url in url_map.get(product_id, []):
-            # D2: единый план резолвится в pipeline и передаётся и краулеру, и экстрактору.
-            fetch_plan = resolve_fetch_plan(
+            # D2/Lane A: единая цель краула резолвится в pipeline и передаётся и краулеру, и
+            # экстрактору (``plan`` + идентификаторы ``engine``/``kind`` из слоёв источников).
+            target = resolve_crawl_target(
+                product_id,
                 url,
-                domain_profiles or {},
-                explicit_fetch,
-                default_strategy=crawl_strategy_default,
-                default_rate_limit=crawl_rate_default,
+                sources=crawl_sources or CrawlSourcesConfig(),
+                profiles=domain_profiles or {},
+                explicit=explicit_fetch,
+                run_default_strategy=crawl_strategy_default,
+                run_default_rate_limit=crawl_rate_default,
             )
+            fetch_plan = target.plan
+            targets[(product_id, url)] = target
 
-            # D3: resume — если по ``(product_id, url)`` есть durable-запись с сохранёнными
+            # L1a: активный краулер выбирается по ``target.engine`` (fallback — базовый
+            # ``crawler``); browser-guard проверяется на **выбранном** краулере.
+            active = (
+                (crawlers or {}).get(target.engine) if target.engine else None
+            ) or crawler
+
+            # L1a: resume — если по ``(product_id, url)`` есть элемент сеанса с сохранёнными
             # байтами, НЕ фетчим: ре-извлекаем из retained raw (I19: raw — источник).
-            attempt = prior.get((product_id, url))
-            resume = _resume_source(attempt) if attempt is not None else None
+            prior_item = items.get((product_id, url))
+            resume = _resume_source(prior_item) if prior_item is not None else None
 
             if resume is not None:
-                assert attempt is not None  # resume возможен только при наличии записи
+                assert prior_item is not None  # resume возможен только при наличии элемента
                 content, raw_path = resume
-                raw_hash = attempt.content_hash or content_hash(content)
-                page = _resume_page(attempt, url, content, raw_path, fetch_plan)
-                # D3: счётчик отражает статус возобновляемой записи (FETCHED — retryable,
-                # DONE — успех), а не ``pending``; при последующем сбое chunker'а URL будет
-                # посчитан как ``fetched``, а не потерян.
-                crawl_status[(product_id, url)] = attempt.status
+                raw_hash = prior_item.content_hash or content_hash(content)
+                page = _resume_page(prior_item, url, content, raw_path, fetch_plan)
+                # Счётчик отражает статус возобновляемого элемента (FETCHED — retryable,
+                # FAILED — re-extract), а не ``pending``: он уже персистится в сеансе, и при
+                # последующем сбое chunker'а URL будет посчитан как ``fetched``, а не потерян.
             else:
                 # D2: браузерный рендер требует поддерживающего краулера. Проверка
                 # URL-скоупедирована (а не на сборке композиции): фаза не падает, пропускается
                 # только этот URL. Резолв проверяется — явный override на ``http`` снимает ошибку.
                 if (
-                    getattr(crawler, "supports_browser", True) is False
+                    getattr(active, "supports_browser", True) is False
                     and fetch_plan.fetch is FetchMode.BROWSER
                 ):
-                    errors.append(
+                    reason = (
                         f"{product_id}/{url}: требует браузерный рендер, но краулер "
-                        f"{type(crawler).__name__} не поддерживает browser; "
+                        f"{type(active).__name__} не поддерживает browser; "
                         f"задайте COHOUND_SCOUT_CRAWLER=scrapy или browser"
+                    )
+                    errors.append(reason)
+                    # B2: пропущенный URL — неразрешённый исход, а не «не записанный pending».
+                    # При активном сеансе фиксируем элемент ``FAILED`` (source_unavailable),
+                    # чтобы сеанс финализировался ``PARTIAL`` (а не ложно ``COMPLETED``), а URL
+                    # оставался видимым/возобновляемым. Без сеанса — прежнее поведение (строки нет).
+                    _mark(
+                        product_id,
+                        url,
+                        CrawlItemStatus.FAILED,
+                        error_kind=FailureKind.SOURCE_UNAVAILABLE.value,
+                        error=reason,
                     )
                     continue
 
@@ -691,14 +775,14 @@ def build_corpus(
 
                 # 1. Краул.
                 try:
-                    page = crawler.fetch(url, fetch_plan)
+                    page = active.fetch(url, fetch_plan)
                 except Exception as exc:  # noqa: BLE001 — изоляция по контракту фазы
                     reason = f"{type(exc).__name__}: {exc}"
                     errors.append(f"{product_id}/{url}: crawl: {reason}")
                     _mark(
                         product_id,
                         url,
-                        FetchStatus.FAILED,
+                        CrawlItemStatus.FAILED,
                         error_kind=FailureKind.SOURCE_UNAVAILABLE.value,
                         error=reason,
                     )
@@ -708,7 +792,7 @@ def build_corpus(
                     _mark(
                         product_id,
                         url,
-                        FetchStatus.FAILED,
+                        CrawlItemStatus.FAILED,
                         error_kind=FailureKind.SOURCE_UNAVAILABLE.value,
                         error="пустой RawPage",
                     )
@@ -723,21 +807,21 @@ def build_corpus(
                 except Exception as exc:  # noqa: BLE001
                     reason = f"{type(exc).__name__}: {exc}"
                     errors.append(f"{product_id}/{url}: retention: {reason}")
-                    # D3: сбой сохранения байтов = недоступность источника по этому URL;
+                    # L1a: сбой сохранения байтов = недоступность источника по этому URL;
                     # помечаем FAILED, чтобы очередь/счётчики были правдивы (не ``pending``).
                     _mark(
                         product_id,
                         url,
-                        FetchStatus.FAILED,
+                        CrawlItemStatus.FAILED,
                         error_kind=FailureKind.SOURCE_UNAVAILABLE.value,
                         error=f"retention: {reason}",
                     )
                     continue
-                # D3: байты сохранены — durable-след попытки (provenance фетча).
+                # L1a: байты сохранены — durable-элемент сеанса (provenance фетча).
                 _mark(
                     product_id,
                     url,
-                    FetchStatus.FETCHED,
+                    CrawlItemStatus.FETCHED,
                     content_hash=raw_hash,
                     raw_path=str(raw_path),
                     http_status=page.status_code,
@@ -757,7 +841,7 @@ def build_corpus(
                 _mark(
                     product_id,
                     url,
-                    FetchStatus.FAILED,
+                    CrawlItemStatus.FAILED,
                     error_kind=FailureKind.PARSER_FAILED.value,
                     error=reason,
                     raw_path=str(raw_path),
@@ -769,7 +853,7 @@ def build_corpus(
                 _mark(
                     product_id,
                     url,
-                    FetchStatus.FAILED,
+                    CrawlItemStatus.FAILED,
                     error_kind=FailureKind.PARSER_FAILED.value,
                     error=reason,
                     raw_path=str(raw_path),
@@ -782,7 +866,7 @@ def build_corpus(
                 _mark(
                     product_id,
                     url,
-                    FetchStatus.FAILED,
+                    CrawlItemStatus.FAILED,
                     error_kind=FailureKind.PARSER_FAILED.value,
                     error="ExtractedDoc без content_hash",
                     raw_path=str(raw_path),
@@ -793,7 +877,7 @@ def build_corpus(
             if doc_hash in seen_docs:
                 duplicate_count += 1
                 # Байты сохранены и контент уже проиндексирован близнецом в этой партиции.
-                _mark(product_id, url, FetchStatus.DONE, raw_path=str(raw_path))
+                _mark(product_id, url, CrawlItemStatus.FETCHED, raw_path=str(raw_path))
                 continue
             seen_docs[doc_hash] = url
 
@@ -858,8 +942,9 @@ def build_corpus(
                     )
                 )
 
-            # D3: документ успешно извлечён и нарезан → терминальный DONE.
-            _mark(product_id, url, FetchStatus.DONE, raw_path=str(raw_path))
+            # L1a: документ успешно добыт и нарезан → элемент сеанса терминален ``FETCHED``
+            # (сеанс трекает краул: сырые байты сохранены = «ready» для материализации).
+            _mark(product_id, url, CrawlItemStatus.FETCHED, raw_path=str(raw_path))
 
         # Retention-провенанс не зависит от индексной сборки: docs персистятся в Pass A.
         _persist_docs(store, ingest.docs, errors)
@@ -964,20 +1049,41 @@ def build_corpus(
         except Exception as exc:  # noqa: BLE001 — изоляция по контракту фазы
             errors.append(f"index commit: {type(exc).__name__}: {exc}")
 
-    # D3: счётчики durable-краула (наблюдаемость). Статус per-URL — финальный исход попытки.
-    crawl_counts = {status.value: 0 for status in FetchStatus}
-    for status in crawl_status.values():
-        crawl_counts[status.value] = crawl_counts.get(status.value, 0) + 1
+    # L1a: финализация сеанса (``COMPLETED`` без сбоев, иначе ``PARTIAL``) — единственный
+    # вызов на фазу. ``finished_at`` фиксирует момент завершения.
+    if session is not None:
+        try:
+            finalize_session(store, session, finished_at=_now_iso())
+        except Exception as exc:  # noqa: BLE001 — наблюдаемость важнее персистенции
+            errors.append(f"finalize_crawl_session({session}): {type(exc).__name__}: {exc}")
+
+    # L1a/C2: счётчики durable-краула (наблюдаемость) — целиком из элементов сеанса. Без
+    # сеанса (``store``/``run_id`` не заданы) — нули. ``crawl_done`` — зеркало ``crawl_fetched``
+    # (элемент ``FETCHED`` = «ready»); отдельных ``done``/``cancelled`` у элемента нет, поэтому
+    # ``CANCELLED`` складывается в ``crawl_failed`` только для счётчика.
+    crawl_pending = crawl_fetched = crawl_failed = 0
+    if session is not None:
+        try:
+            counts = store.crawl_session_counts(session)
+            crawl_pending = counts.get(CrawlItemStatus.PENDING.value, 0) + counts.get(
+                CrawlItemStatus.RUNNING.value, 0
+            )
+            crawl_fetched = counts.get(CrawlItemStatus.FETCHED.value, 0)
+            crawl_failed = counts.get(CrawlItemStatus.FAILED.value, 0) + counts.get(
+                CrawlItemStatus.CANCELLED.value, 0
+            )
+        except Exception as exc:  # noqa: BLE001 — наблюдаемость важнее персистенции
+            errors.append(f"crawl_session_counts: {type(exc).__name__}: {exc}")
 
     build = IndexBuild(
         index_build_id=index_build_id,
         entries=entries,
         docs=all_docs,
         chunk_count=chunk_count,
-        crawl_pending=crawl_counts[FetchStatus.PENDING.value],
-        crawl_fetched=crawl_counts[FetchStatus.FETCHED.value],
-        crawl_done=crawl_counts[FetchStatus.DONE.value],
-        crawl_failed=crawl_counts[FetchStatus.FAILED.value],
+        crawl_pending=crawl_pending,
+        crawl_fetched=crawl_fetched,
+        crawl_done=crawl_fetched,
+        crawl_failed=crawl_failed,
     )
     # Примечание: индексная сборка «возвращается» в log_entries (PhaseResult — контракт фазы;
     # W8 читает IndexBuild отсюда). Счётчики — в полях IndexBuild; дубликаты — в errors.

@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 
+from core.config import CrawlSourcesConfig
 from core.domain import FetchMode, Focus
 from core.pipeline.normalize import RunInputs, cross_check, load_inputs
 from core.pipeline.plan import load_plan, plan
@@ -64,7 +65,27 @@ def test_load_inputs_happy() -> None:
     assert {entry.product_id for entry in inputs.cohort.entries} == {"p1", "p2"}
     assert len(inputs.golden) == 2
     assert inputs.domain_profiles["case_x"].fetch is FetchMode.HTTP
+    assert inputs.crawl_sources == CrawlSourcesConfig()
     assert inputs.scope_attestation_procedure is None
+
+
+def test_load_inputs_reads_optional_crawl_sources(tmp_path: Path) -> None:
+    for name in _PACKAGE_FILES:
+        (tmp_path / name).symlink_to(FIXTURES / name)
+    (tmp_path / "crawl_sources.yaml").write_text(
+        "defaults: {kind: web, engine: http}\n"
+        "products:\n"
+        "  p1: {engine: scrapy}\n"
+        "sites:\n"
+        "  p1:\n"
+        "    example.com: {kind: feed}\n",
+        encoding="utf-8",
+    )
+    inputs = load_inputs(RUN_YAML, tmp_path)
+    assert inputs.crawl_sources.defaults.kind == "web"
+    assert inputs.crawl_sources.defaults.engine == "http"
+    assert inputs.crawl_sources.products["p1"].engine == "scrapy"
+    assert inputs.crawl_sources.sites["p1"]["example.com"].kind == "feed"
 
 
 def test_load_inputs_reads_optional_attestation(tmp_path: Path) -> None:

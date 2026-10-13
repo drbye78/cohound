@@ -2,7 +2,8 @@
 
 Модуль отвечает за **детерминированное** чтение и запись артефактов раскладки пакета
 (``03`` §A.1): ``package.yaml``, ``catalog.csv``, ``baselines.csv``, ``cohort.yaml``,
-``golden.csv``, ``domain_profiles.yaml``, ``scope_attestation.yaml``, ``run.yaml``.
+``golden.csv``, ``domain_profiles.yaml``, ``crawl_sources.yaml``, ``scope_attestation.yaml``,
+``run.yaml``.
 
 Ключевые свойства
 -----------------
@@ -40,6 +41,7 @@ from typing import Any, Union
 import yaml
 from pydantic import BaseModel
 
+from core.config.crawl_sources import CrawlSourcesConfig, load_crawl_sources
 from core.config.domain_profiles import DomainProfile, load_domain_profiles
 from core.config.run_config import (
     _BASELINE_COLUMNS,
@@ -106,6 +108,7 @@ ARTIFACT_FILES: dict[str, str] = {
     "cohort": "cohort.yaml",
     "golden": "golden.csv",
     "domain_profiles": "domain_profiles.yaml",
+    "crawl_sources": "crawl_sources.yaml",
     "scope_attestation": "scope_attestation.yaml",
     "run": "run.yaml",
 }
@@ -136,6 +139,7 @@ class PackageArtifacts:
     cohort: Cohort | None = None
     golden: list[GoldenRow] = field(default_factory=list)
     domain_profiles: dict[str, DomainProfile] = field(default_factory=dict)
+    crawl_sources: CrawlSourcesConfig = field(default_factory=CrawlSourcesConfig)
     scope_attestation: str | None = None
     run: RunConfig | None = None
 
@@ -464,6 +468,10 @@ def load_artifacts(package_dir: str | Path) -> PackageArtifacts:
     if profiles_file.is_file():
         artifacts.domain_profiles = load_domain_profiles(profiles_file)
 
+    crawl_file = base / "crawl_sources.yaml"
+    if crawl_file.is_file():
+        artifacts.crawl_sources = load_crawl_sources(crawl_file)
+
     artifacts.scope_attestation = load_scope_attestation(base)
 
     run_file = base / "run.yaml"
@@ -482,6 +490,7 @@ def _artifact_value(artifacts: PackageArtifacts, name: str) -> Any:
         "cohort": artifacts.cohort,
         "golden": artifacts.golden,
         "domain_profiles": artifacts.domain_profiles,
+        "crawl_sources": artifacts.crawl_sources,
         "scope_attestation": artifacts.scope_attestation,
         "run": artifacts.run,
     }[name]
@@ -518,6 +527,11 @@ def _artifact_count(artifacts: PackageArtifacts, name: str) -> int | None:
         return len(artifacts.cohort.entries) if artifacts.cohort is not None else None
     if name == "domain_profiles":
         return len(artifacts.domain_profiles)
+    if name == "crawl_sources":
+        crawl = artifacts.crawl_sources
+        return len(crawl.products) + sum(
+            len(hosts) for hosts in crawl.sites.values()
+        )
     if name == "scope_attestation":
         return 1 if artifacts.scope_attestation is not None else 0
     if name == "run":
@@ -526,13 +540,14 @@ def _artifact_count(artifacts: PackageArtifacts, name: str) -> int | None:
 
 
 def list_artifacts(package_dir: str | Path) -> list[dict[str, Any]]:
-    """Обзор всех 8 артефактов пакета (read-only): присутствие, размер, счётчик, путь.
+    """Обзор всех артефактов пакета (read-only): присутствие, размер, счётчик, путь.
 
     Порядок совпадает с :data:`ARTIFACT_FILES` (детерминирован). ``count`` — число
     строк/записей артефакта (для ``package`` — число модулей; ``cohort`` — число записей;
-    ``run`` — число продуктов; ``scope_attestation`` — ``1``/``0``), либо ``None``, если
-    файл отсутствует или пакет не разбирается. Ничего не пишет; ошибки разбора не
-    поднимаются — обзор остаётся доступным по файловой системе.
+    ``run`` — число продуктов; ``domain_profiles`` — число профилей; ``crawl_sources`` —
+    число явных источников (продукты + site-записи); ``scope_attestation`` — ``1``/``0``),
+    либо ``None``, если файл отсутствует или пакет не разбирается. Ничего не пишет; ошибки
+    разбора не поднимаются — обзор остаётся доступным по файловой системе.
     """
     base = Path(package_dir)
     artifacts: PackageArtifacts | None
@@ -591,7 +606,7 @@ def get_artifact(
 def save_artifact(package_dir: str | Path, name: str, data: Any) -> Path:
     """Детерминированно сериализует артефакт ``name`` в каталог пакета.
 
-    YAML-артефакты (``package``/``cohort``/``run``/``domain_profiles``/
+    YAML-артефакты (``package``/``cohort``/``run``/``domain_profiles``/``crawl_sources``/
     ``scope_attestation``) пишутся через :func:`_dump_yaml`; табличные
     (``catalog``/``baselines``/``golden``) — CSV строго по каноническим колонкам.
 
@@ -627,6 +642,12 @@ def save_artifact(package_dir: str | Path, name: str, data: Any) -> Path:
             for key, value in data.items()
         }
         return atomic_write_text(path, _dump_yaml(serializable))
+    if name == "crawl_sources":
+        if not isinstance(data, CrawlSourcesConfig):
+            raise ValueError("crawl_sources: ожидался CrawlSourcesConfig")
+        return atomic_write_text(
+            path, _dump_yaml(data.model_dump(mode="json", exclude_none=True))
+        )
     if name == "scope_attestation":
         if not isinstance(data, str):
             raise ValueError("scope_attestation: ожидалась строка процедуры")
@@ -732,6 +753,7 @@ def build_run_inputs(artifacts: PackageArtifacts) -> RunInputs:
         cohort=cohort,
         golden=list(artifacts.golden),
         domain_profiles=dict(artifacts.domain_profiles),
+        crawl_sources=artifacts.crawl_sources,
         scope_attestation_procedure=artifacts.scope_attestation,
     )
 

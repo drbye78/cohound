@@ -1113,7 +1113,7 @@ def cmd_package_run_show(args: argparse.Namespace) -> int:
 
 
 def cmd_package_artifact_list(args: argparse.Namespace) -> int:
-    """``artifact list`` — обзор всех 8 артефактов пакета (read-only)."""
+    """``artifact list`` — обзор всех артефактов пакета (read-only)."""
     gate = _require_package(args)
     if gate is not None:
         return gate

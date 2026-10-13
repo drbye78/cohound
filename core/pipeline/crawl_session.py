@@ -1,0 +1,125 @@
+"""coHound — локальная оркестрация сеанса краула (Lane B/L1a) для фазы корпуса.
+
+Тонкий in-core слой над ``StorePort`` (ядро-владелец сеанса, §4.4 ``crawl_sessions`` /
+``crawl_session_items``): открытие/восстановление сеанса, чтение априорных элементов и
+финализация. Исполнение краула здесь **не** абстрагируется: сменный порт-исполнитель
+(``CrawlExecutorPort`` для ``split``/edge-планировщика) отложен до Phase 3 (A1/YAGNI).
+Модуль — чистая оркестрация над стором, без I/O и без сетевых вызовов.
+
+Сеанс идемпотентен на прогон: ``session_id`` по умолчанию — ``f"crawl:{run_id}"``
+(:func:`default_session_id`), поэтому повторный вызов фазы открывает тот же сеанс и
+восстанавливает ``running``-элементы в ``pending`` (:func:`open_session` →
+``store.recover_crawl_session``).
+
+Нейтрален к предметной категории (§1.3).
+"""
+
+from __future__ import annotations
+
+import datetime as _dt
+from typing import Any
+
+from core.domain import (
+    CrawlItemStatus,
+    CrawlSession,
+    CrawlSessionItem,
+    CrawlSessionStatus,
+)
+
+__all__ = [
+    "default_session_id",
+    "open_session",
+    "finalize_session",
+    "prior_items",
+]
+
+
+def _now_iso() -> str:
+    """Текущее время в ISO-8601 (UTC)."""
+    return _dt.datetime.now(_dt.timezone.utc).isoformat()
+
+
+def default_session_id(run_id: str) -> str:
+    """Детерминированный ``session_id`` сеанса краула прогона (идемпотентность resume).
+
+    Один прогон → один сеанс, пока ``session_id`` не задан явно.
+    """
+    return f"crawl:{run_id}"
+
+
+def open_session(
+    store: Any,
+    *,
+    session_id: str,
+    run_id: str | None,
+    profile: str = "local",
+) -> CrawlSession:
+    """Get-or-create сеанса + recovery-on-open + переход в ``RUNNING``.
+
+    Если сеанса нет — создаётся ``CrawlSession`` в статусе ``CREATED``. Затем вызывается
+    ``store.recover_crawl_session``: элементы, застрявшие в ``running`` от прерванного
+    процесса, возвращаются в ``pending``, счётчики пересчитываются.
+
+    Далее сеанс переводится в ``RUNNING`` с ``started_at`` = текущее UTC-время
+    (:meth:`StorePort.update_crawl_session_status`): открытие сеанса означает начало его
+    исполнения. Это применимо и к терминальному сеансу (``completed``/``partial``/
+    ``cancelled``/``failed``), переоткрываемому для resume — resume есть **новый запуск** того
+    же сеанса, поэтому он снова ``RUNNING``, а ``update_crawl_session_status`` сбрасывает
+    ``finished_at``/``error`` (C3), снимая признаки прежнего завершения. Возвращает актуальный
+    (после восстановления и перехода) сеанс.
+    """
+    if store.get_crawl_session(session_id) is None:
+        store.upsert_crawl_session(
+            CrawlSession(
+                session_id=session_id,
+                run_id=run_id,
+                profile=profile,
+                status=CrawlSessionStatus.CREATED,
+                created_at=_now_iso(),
+            )
+        )
+    store.recover_crawl_session(session_id)
+    store.update_crawl_session_status(
+        session_id, CrawlSessionStatus.RUNNING, started_at=_now_iso()
+    )
+    session = store.get_crawl_session(session_id)
+    if session is None:  # pragma: no cover — защита от рассинхрона store
+        raise RuntimeError(f"сеанс краула не открылся: {session_id!r}")
+    return session
+
+
+def finalize_session(
+    store: Any, session_id: str, *, finished_at: str
+) -> CrawlSessionStatus:
+    """Финализирует сеанс: ``COMPLETED`` (нет сбоев) либо ``PARTIAL`` (есть failed/cancelled).
+
+    Статус вычисляется из фактических элементов (``store.crawl_session_counts``): любой
+    ``FAILED``/``CANCELLED`` делает сеанс ``PARTIAL`` (часть краула добыта). ``finished_at``
+    проставляется в той же записи статуса. Возвращает применённый статус.
+    """
+    counts = store.crawl_session_counts(session_id)
+    defects = counts.get(CrawlItemStatus.FAILED.value, 0) + counts.get(
+        CrawlItemStatus.CANCELLED.value, 0
+    )
+    status = (
+        CrawlSessionStatus.COMPLETED
+        if defects == 0
+        else CrawlSessionStatus.PARTIAL
+    )
+    store.update_crawl_session_status(session_id, status, finished_at=finished_at)
+    return status
+
+
+def prior_items(
+    store: Any, session_id: str
+) -> dict[tuple[str, str], CrawlSessionItem]:
+    """Априорные элементы сеанса, ключ ``(product_id, url)`` (для resume без ре-фетча).
+
+    Ключ совпадает с PK ``crawl_session_items`` без ``session_id``: один и тот же URL под
+    разными продуктами имеет независимые записи (I17/§4.4: партиция и её retained raw
+    принадлежат продукту).
+    """
+    return {
+        (item.product_id, item.url): item
+        for item in store.iter_crawl_session_items(session_id)
+    }

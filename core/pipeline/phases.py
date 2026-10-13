@@ -34,6 +34,7 @@ from typing import TYPE_CHECKING, Any
 
 from core.domain.anchors import SourceResolver
 from core.domain.models import Satellite
+from core.config.crawl_sources import CrawlSourcesConfig
 from core.config.domain_profiles import DomainProfile
 from core.pipeline.compute import compute, scope_universe
 from core.pipeline.corpus import build_corpus
@@ -49,6 +50,7 @@ from core.pipeline.report import build_manifest, write_reports
 from core.pipeline.retrieve import RetrievalProfile
 from core.pipeline.runner import PhaseFn, PhaseResult, Ports, RunContext
 from core.ports.types import FetchMode
+from core.util.rate_limit import RateLimiter
 
 if TYPE_CHECKING:  # только аннотации: без рантайм-импорта входа/плана
     from core.pipeline.normalize import RunInputs
@@ -158,6 +160,8 @@ def build_phases(
     cutoff_k: int | None = None,
     domain_profiles: Mapping[str, DomainProfile] | None = None,
     explicit_fetch: Mapping[str, FetchMode] | None = None,
+    crawl_sources: CrawlSourcesConfig | None = None,
+    rate_limiter: RateLimiter | None = None,
     satellites: Sequence[Satellite] = (),
     resolver: SourceResolver | None = None,
     strict: bool = True,
@@ -265,6 +269,11 @@ def build_phases(
             package_id=_package_id(inputs, plan),
             domain_profiles=domain_profiles or {},
             explicit_fetch=explicit_fetch,
+            # Lane A/L3a: слои источников краула и карта per-engine краулеров; пейсинг —
+            # единый владелец (RateLimiter), протягивается composition root'ом.
+            crawl_sources=crawl_sources,
+            crawlers=getattr(ctx.ports, "crawlers", None),
+            rate_limiter=rate_limiter,
             # D4 (P2-3): секция ``crawl`` run.yaml → дефолты оси стратегии/лимита для ``FetchPlan``.
             # ``RunConfig`` доступен как ``inputs.run`` (RunInputs.run), поле ``crawl`` опционально.
             crawl_defaults=getattr(getattr(inputs, "run", None), "crawl", None),

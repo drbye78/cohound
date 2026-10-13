@@ -12,7 +12,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = "3.0.0"
+SCHEMA_VERSION = "3.1.0"
 
 DDL = """
 PRAGMA journal_mode = WAL;
@@ -223,33 +223,9 @@ CREATE TABLE IF NOT EXISTS registry_facts (
     fetched_at  TEXT
 );
 
--- D3: durable per-URL аудит краула (audit + queue + resume). Отдельно от search_log
--- (§4.4/I23: search_log — единственное место для поисковых вызовов).
-CREATE TABLE IF NOT EXISTS crawl_attempts (
-    run_id        TEXT NOT NULL,
-    product_id    TEXT NOT NULL,
-    url           TEXT NOT NULL,
-    status        TEXT NOT NULL,                       -- pending|fetched|done|failed
-    attempts      INTEGER NOT NULL DEFAULT 0,
-    fetch_mode    TEXT,                                -- http|browser (provenance)
-    extract_route TEXT,                                -- auto|html|document фактически применённый
-    strategy      TEXT,                                -- auto|honest|hybrid (provenance оси стратегии краула; §4.4)
-    http_status   INTEGER,
-    content_type  TEXT,
-    lang          TEXT,                                -- D3: язык страницы (resume без потери RawPage.lang)
-    content_hash  TEXT,                                -- hash сырых байтов (basename raw_path)
-    raw_path      TEXT,
-    error_kind    TEXT,                                -- FailureKind.value (source_unavailable|parser_failed|…)
-    error         TEXT,
-    first_seen    TEXT,
-    last_attempt  TEXT,
-    PRIMARY KEY (run_id, product_id, url),
-    FOREIGN KEY (run_id) REFERENCES runs(run_id)
-);
-
--- Lane B (schema 3.0.0): сеанс краула — ядро-владеемое durable намерение + агрегированный
--- прогресс; элементы сеанса — преемник crawl_attempts (back-compat не требуется). Счётчики
--- сеанса поддерживаются транзакционно при записи элемента (см. SqliteStore).
+-- Lane B (schema 3.0.0; removal — 3.1.0): сеанс краула — ядро-владеемое durable намерение +
+-- агрегированный прогресс. Счётчики сеанса поддерживаются транзакционно при записи элемента
+-- (см. SqliteStore). Legacy per-URL таблица попыток удалена в 3.1.0 (заменена сеансом краула).
 CREATE TABLE IF NOT EXISTS crawl_sessions (
     session_id    TEXT PRIMARY KEY,
     run_id        TEXT,                    -- soft-link на прогон; NULL = standalone-сеанс
@@ -300,8 +276,6 @@ CREATE INDEX IF NOT EXISTS idx_chunks_build     ON corpus_chunks(build_id);
 CREATE INDEX IF NOT EXISTS idx_log_run_phase    ON search_log(run_id, phase);
 CREATE INDEX IF NOT EXISTS idx_evidence_run_cell ON cell_evidence(run_id, product_id, param_id);
 CREATE INDEX IF NOT EXISTS idx_gate_run         ON gate_decisions(run_id, gate);
-CREATE INDEX IF NOT EXISTS idx_crawl_run_status  ON crawl_attempts(run_id, status);
-CREATE INDEX IF NOT EXISTS idx_crawl_run_product ON crawl_attempts(run_id, product_id);
 CREATE INDEX IF NOT EXISTS idx_crawl_sessions_run    ON crawl_sessions(run_id, status);
 CREATE INDEX IF NOT EXISTS idx_crawl_items_session   ON crawl_session_items(session_id, status);
 CREATE INDEX IF NOT EXISTS idx_crawl_items_product   ON crawl_session_items(session_id, product_id);
@@ -370,7 +344,7 @@ def _ensure_columns(
 
 
 def connect(db_path: str | Path = ":memory:") -> sqlite3.Connection:
-    """Открывает БД и применяет схему (+ идемпотентные DDL-миграции v2.1–v3.0)."""
+    """Открывает БД и применяет схему (+ идемпотентные DDL-миграции v2.1–v3.1)."""
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
     conn.executescript(DDL)
@@ -387,14 +361,12 @@ def connect(db_path: str | Path = ":memory:") -> sqlite3.Connection:
         "index_manifest",
         {"extractor_version": "TEXT", "content_digest": "TEXT"},
     )
-    # DDL-миграция v2.3 (D3): crawl_attempts создаётся `CREATE TABLE IF NOT EXISTS` в DDL —
-    # ALTER не нужен (новая таблица), но вызов идемпотентен на любой БД.
-    # DDL-миграция v2.4 (P4): ось стратегии краула — additive-колонка provenance.
-    _ensure_columns(conn, "crawl_attempts", {"strategy": "TEXT"})
     # DDL-миграция v3.0 (Lane B): crawl_sessions/crawl_session_items создаются
     # `CREATE TABLE IF NOT EXISTS` в DDL — ALTER не нужен (новые таблицы), вызов
     # идемпотентен на любой БД. Гэп forward-compat закрывается `_ensure_columns` при
     # появлении additive-колонок в будущем.
+    # v3.1.0 — удаление legacy per-URL таблицы попыток (полностью замещена сеансом краула,
+    # back-compat не требуется): DDL-таблицы/индексов и их миграции больше нет.
     conn.execute(
         "INSERT OR REPLACE INTO schema_meta(key, value) VALUES ('schema_version', ?)",
         (SCHEMA_VERSION,),

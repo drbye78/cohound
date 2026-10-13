@@ -60,6 +60,7 @@ from core.pipeline.runner import PhaseFn
 from core.ports.gateway import ContentGateway
 from core.ports.types import FetchMode
 from core.util.cache import ContentAddressedCache
+from core.util.rate_limit import RateLimiter
 
 # -- Типовые швы (тестовые инъекции) --------------------------------------- #
 #: Фабрика диагностического gateway по deploy-конфигу (тестовый шов ``deploy-check``).
@@ -876,6 +877,9 @@ def _resolve_ports(
         index_root=index_root,
         cache=cache,
         domain_profiles=(inputs.domain_profiles if inputs is not None else None),
+        # Lane A/L3a: слои источников краула (crawl_sources.yaml) — wiring решает по их
+        # ``engine``, какие per-engine краулеры строить. Без ``inputs`` — не передаются.
+        crawl_sources=(getattr(inputs, "crawl_sources", None) if inputs is not None else None),
     )
 
 
@@ -1057,6 +1061,10 @@ def _resolve_phases(
         # оси fetch (--render-modes); резолв FetchPlan — в pipeline Ш5.
         "domain_profiles": inputs.domain_profiles,
         "explicit_fetch": render_modes or {},
+        # Lane A/L3a: слои источников краула (crawl_sources.yaml) и единый владелец
+        # politeness-пейсинга (RateLimiter) — протягиваются в фазу корпуса Ш5.
+        "crawl_sources": getattr(inputs, "crawl_sources", None),
+        "rate_limiter": RateLimiter(),
     }
     factory = getattr(args, "phases_factory", None)
     if factory is not None:

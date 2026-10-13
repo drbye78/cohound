@@ -6,7 +6,8 @@
   (``HttpCrawler``/``ScrapyCrawler``); ``domain_profiles`` на проводке не блокируют
   ``http`` (исполнимость browser-URL проверяется URL-скоупедированно в pipeline, D2);
 * :func:`build_adapters` — оба параметра доходят до ``ports.crawler`` (профиль ``local``),
-  а без ``deploy`` краулер остаётся ``None`` (обратная совместимость);
+  а без ``deploy`` краулер остаётся ``None`` (обратная совместимость); профиль ``split``
+  **не** держит локальных веб-краулеров (``Ports.crawlers is None``, только remote-шов, B1);
 * :func:`_resolve_ports` — строит ``ContentAddressedCache(paths.cache)`` из resolved
   раскладки и передаёт ``inputs.domain_profiles`` в ``build_adapters``; без ``inputs``
   домен-профили не передаются; без ``paths`` кэш не строится; инъекция ``ports``
@@ -27,6 +28,7 @@ from typing import Any, cast
 import pytest
 
 import core.cli.context as context_mod
+import core.cli.wiring as wiring_mod
 from core.adapters.crawl_browser import (
     DEFAULT_TIMEOUT_MS as DEFAULT_BROWSER_TIMEOUT_MS,
     DEFAULT_USER_AGENT as DEFAULT_BROWSER_USER_AGENT,
@@ -34,16 +36,20 @@ from core.adapters.crawl_browser import (
 )
 from core.adapters.crawl_http import HttpCrawler
 from core.adapters.crawl_scrapy import ScrapyCrawler
+from core.adapters.remote_crawler import RemoteCrawler
 from core.cli.context import _resolve_ports
 from core.cli.main import EXIT_BLOCKED, main
 from core.cli.wiring import (
     ENV_SCOUT_CRAWLER,
     LOCAL_PROFILE,
+    SPLIT_PROFILE,
     SUPPORTED_SCOUT_CRAWLERS,
     WiringError,
     build_adapters,
     build_scout_crawler,
+    build_scout_crawlers,
 )
+from core.config.crawl_sources import CrawlSource, CrawlSourcesConfig
 from core.config.deploy import CrawlBrowserConfig, CrawlConfig, DeployConfig
 from core.config.domain_profiles import DomainProfile
 from core.config.paths import PathsConfig
@@ -499,3 +505,281 @@ def test_run_tolerates_crawler_without_close_in_finally(
     )
 
     assert code == EXIT_BLOCKED
+
+
+# ---------------------------------------------------------------------------
+# build_scout_crawlers: карта engine → CrawlerPort (L3a, per-engine выбор в Ш5)
+# ---------------------------------------------------------------------------
+
+
+def test_build_scout_crawlers_always_includes_http(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``http`` строится всегда — дефолтный движок (без env/профилей)."""
+    clear_env(monkeypatch, [ENV_SCOUT_CRAWLER])
+
+    crawlers = build_scout_crawlers()
+
+    assert set(crawlers) == {"http"}
+    assert isinstance(crawlers["http"], HttpCrawler)
+
+
+def test_build_scout_crawlers_omits_unreferenced_heavy_engines(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Без упоминания ``scrapy``/``browser`` тяжёлые адаптеры не строятся (A1)."""
+    clear_env(monkeypatch, [ENV_SCOUT_CRAWLER])
+
+    crawlers = build_scout_crawlers(
+        cache=_cache(tmp_path), domain_profiles=_profiles()
+    )
+
+    assert "scrapy" not in crawlers
+    assert "browser" not in crawlers
+
+
+def test_build_scout_crawlers_threads_cache_into_http(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R7-кэш доходит до ``http`` краулера карты."""
+    clear_env(monkeypatch, [ENV_SCOUT_CRAWLER])
+    cache = _cache(tmp_path)
+
+    crawlers = build_scout_crawlers(cache=cache)
+
+    assert crawlers["http"]._cache is cache
+
+
+def test_build_scout_crawlers_browser_referenced_by_domain_profile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``fetch: browser`` в доменном профиле помечает браузерный движок → он строится (без Playwright)."""
+    clear_env(monkeypatch, [ENV_SCOUT_CRAWLER])
+    cache = _cache(tmp_path)
+
+    crawlers = build_scout_crawlers(
+        deploy=DeployConfig(profile="local"),
+        cache=cache,
+        domain_profiles=_browser_profiles(),
+    )
+
+    assert isinstance(crawlers.get("browser"), BrowserCrawler)
+    assert crawlers["browser"]._cache is cache
+
+
+def test_build_scout_crawlers_browser_referenced_by_crawl_sources(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Поле ``engine: browser`` в ``crawl_sources`` помечает браузерный движок."""
+    clear_env(monkeypatch, [ENV_SCOUT_CRAWLER])
+    cfg = CrawlSourcesConfig(defaults=CrawlSource(engine="browser"))
+
+    crawlers = build_scout_crawlers(
+        deploy=DeployConfig(profile="local"), crawl_sources=cfg
+    )
+
+    assert isinstance(crawlers.get("browser"), BrowserCrawler)
+
+
+def test_build_scout_crawlers_scrapy_referenced_by_crawl_sources_site_layer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``engine: scrapy`` в site-слое ``crawl_sources`` помечает scrapy-движок."""
+    clear_env(monkeypatch, [ENV_SCOUT_CRAWLER])
+    cfg = CrawlSourcesConfig(
+        sites={"p1": {"example.com": CrawlSource(engine="scrapy")}}
+    )
+
+    crawlers = build_scout_crawlers(
+        deploy=DeployConfig(profile="local"), crawl_sources=cfg
+    )
+
+    assert isinstance(crawlers.get("scrapy"), ScrapyCrawler)
+
+
+def test_build_scout_crawlers_engine_referenced_by_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Явный env-выбор ``COHOUND_SCOUT_CRAWLER=scrapy`` помечает движок."""
+    monkeypatch.setenv(ENV_SCOUT_CRAWLER, "scrapy")
+
+    crawlers = build_scout_crawlers(deploy=DeployConfig(profile="local"))
+
+    assert isinstance(crawlers.get("scrapy"), ScrapyCrawler)
+
+
+def test_build_scout_crawlers_omits_engine_when_construction_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Недоступность зависимости при сборке движка опускает его, не валя всю сборку."""
+    clear_env(monkeypatch, [ENV_SCOUT_CRAWLER])
+
+    class _Boom:
+        def __init__(self, **kwargs: Any) -> None:
+            raise ImportError("нет playwright")
+
+    monkeypatch.setattr(wiring_mod, "BrowserCrawler", _Boom)
+
+    crawlers = build_scout_crawlers(
+        deploy=DeployConfig(profile="local"), domain_profiles=_browser_profiles()
+    )
+
+    assert "http" in crawlers  # лёгкий движок жив
+    assert "browser" not in crawlers  # тяжёлый опущен
+
+
+def test_build_scout_crawlers_omits_engine_on_wiring_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``WiringError`` при сборке движка тоже опускает только этот движок."""
+    clear_env(monkeypatch, [ENV_SCOUT_CRAWLER])
+
+    class _Boom:
+        def __init__(self, **kwargs: Any) -> None:
+            raise WiringError("плохой конфиг")
+
+    monkeypatch.setattr(wiring_mod, "BrowserCrawler", _Boom)
+
+    crawlers = build_scout_crawlers(
+        deploy=DeployConfig(profile="local"), domain_profiles=_browser_profiles()
+    )
+
+    assert "http" in crawlers
+    assert "browser" not in crawlers
+
+
+# ---------------------------------------------------------------------------
+# build_adapters / _resolve_ports: Ports.crawlers (L3a)
+# ---------------------------------------------------------------------------
+
+
+def test_build_adapters_local_sets_crawlers_mapping(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``local`` заполняет ``Ports.crawlers`` (минимум ``http``)."""
+    clear_env(monkeypatch, [ENV_SCOUT_CRAWLER])
+
+    ports = build_adapters(
+        profile=LOCAL_PROFILE,
+        cache=_cache(tmp_path),
+        domain_profiles=_profiles(),
+    )
+
+    assert ports.crawlers is not None
+    assert isinstance(ports.crawlers["http"], HttpCrawler)
+    assert "browser" not in ports.crawlers and "scrapy" not in ports.crawlers
+
+
+def test_build_adapters_local_builds_browser_when_referenced(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``local`` + ``engine: browser`` в ``crawl_sources`` → ``Ports.crawlers`` несёт браузер."""
+    clear_env(monkeypatch, [ENV_SCOUT_CRAWLER])
+    cfg = CrawlSourcesConfig(defaults=CrawlSource(engine="browser"))
+
+    ports = build_adapters(
+        profile=LOCAL_PROFILE,
+        deploy=DeployConfig(profile="local"),
+        cache=_cache(tmp_path),
+        crawl_sources=cfg,
+    )
+
+    assert ports.crawlers is not None
+    assert isinstance(ports.crawlers.get("browser"), BrowserCrawler)
+
+
+def test_build_adapters_split_has_no_local_crawlers() -> None:
+    """B1 (I18/07 §4–§5): ``split`` НЕ держит локальные веб-краулеры — только remote-шов.
+
+    Per-engine движок из ``crawl_sources`` не должен превращаться в in-process
+    ``HttpCrawler``/``BrowserCrawler`` (прямой веб-эгресс из ядра). ``Ports.crawlers`` —
+    ``None``; падение на ``ports.crawler`` — ``RemoteCrawler`` (шов транспорт-агностичен).
+    """
+    config = DeployConfig.model_validate(
+        {"profile": "split", "edge": {"base_url": "https://edge.test"}}
+    )
+    gateway = SimpleNamespace()  # RemoteCrawler/Search только хранят шов, не вызывают
+
+    ports = build_adapters(profile=SPLIT_PROFILE, deploy=config, gateway=gateway)  # type: ignore[arg-type]
+
+    assert ports.crawlers is None
+    assert isinstance(ports.crawler, RemoteCrawler)
+
+
+def test_build_adapters_split_has_no_local_web_crawlers_explicit() -> None:
+    """B1: в ``split`` ни один локальный веб-краулер не достижим через ``Ports``."""
+    config = DeployConfig.model_validate(
+        {"profile": "split", "edge": {"base_url": "https://edge.test"}}
+    )
+    gateway = SimpleNamespace()
+
+    ports = build_adapters(profile=SPLIT_PROFILE, deploy=config, gateway=gateway)  # type: ignore[arg-type]
+
+    crawlers = ports.crawlers or {}
+    for local_type in (HttpCrawler, BrowserCrawler, ScrapyCrawler):
+        assert not isinstance(ports.crawler, local_type)
+        assert not any(isinstance(c, local_type) for c in crawlers.values())
+
+
+def test_resolve_ports_forwards_crawl_sources(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``_resolve_ports`` передаёт ``inputs.crawl_sources`` в ``build_adapters``."""
+    cfg = CrawlSourcesConfig(defaults=CrawlSource(engine="browser"))
+    inputs = cast(
+        RunInputs, SimpleNamespace(domain_profiles={}, crawl_sources=cfg)
+    )
+    captured: dict[str, Any] = {}
+
+    def fake_build_adapters(**kwargs: Any) -> Any:
+        captured.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(context_mod, "build_adapters", fake_build_adapters)
+
+    _resolve_ports(
+        _ports_args(PathsConfig(cache=tmp_path / "cache")),
+        deploy_config=None,
+        inputs=inputs,
+    )
+
+    assert captured["crawl_sources"] is cfg
+
+
+def test_resolve_ports_without_inputs_forwards_none_crawl_sources(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Без ``inputs`` слой ``crawl_sources`` не передаётся (обратная совместимость)."""
+    captured: dict[str, Any] = {}
+
+    def fake_build_adapters(**kwargs: Any) -> Any:
+        captured.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(context_mod, "build_adapters", fake_build_adapters)
+
+    _resolve_ports(_ports_args(PathsConfig(cache=tmp_path / "cache")), deploy_config=None)
+
+    assert captured["crawl_sources"] is None
+
+
+def test_resolve_ports_real_build_sets_ports_crawlers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Реальная сборка ``_resolve_ports`` даёт ``Ports.crawlers`` c ``http``."""
+    monkeypatch.chdir(tmp_path)  # нет config/deploy.yaml → канон-дефолт profile local
+    clear_env(monkeypatch, [ENV_SCOUT_CRAWLER])
+    inputs = cast(
+        RunInputs,
+        SimpleNamespace(domain_profiles={}, crawl_sources=CrawlSourcesConfig()),
+    )
+
+    ports = _resolve_ports(
+        _ports_args(PathsConfig(cache=tmp_path / "cache")),
+        deploy_config=None,
+        inputs=inputs,
+    )
+
+    assert ports.crawlers is not None
+    assert "http" in ports.crawlers
+    assert isinstance(ports.crawlers["http"], HttpCrawler)

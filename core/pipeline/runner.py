@@ -23,7 +23,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol, runtime_checkable
 
@@ -109,6 +109,10 @@ class Ports:
     """Внедрённые порты (ручной DI, A1). Все поля опциональны: фаза берёт нужные.
 
     ``pipeline`` никогда не инстанцирует адаптеры — их собирает composition root (``cli/``).
+
+    ``crawler`` — краулер по умолчанию (fallback). ``crawlers`` — карта ``engine → CrawlerPort``
+    для per-engine выбора в фазе корпуса (Ш5): ``build_corpus`` берёт адаптер по
+    разрешённому ``engine`` источника краула, а при отсутствии/``None`` — ``crawler``.
     """
 
     evaluator: EvaluatorPort | None = None
@@ -118,6 +122,7 @@ class Ports:
     index_builder: IndexBuilderPort | None = None
     search: SearchAdapterPort | None = None
     crawler: CrawlerPort | None = None
+    crawlers: Mapping[str, CrawlerPort] | None = None
     extractor: ExtractorPort | None = None
     chunker: ChunkerPort | None = None
     registry: RegistryFetcherPort | None = None

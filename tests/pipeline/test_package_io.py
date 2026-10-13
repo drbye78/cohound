@@ -12,9 +12,17 @@ from pathlib import Path
 
 import pytest
 
+from core.config.crawl_sources import CrawlSource, CrawlSourcesConfig
 from core.config.run_config import load_catalog
 from core.domain.models import CatalogRow, ModuleDef, PackageManifest
-from core.domain.enums import Archetype, ExtractionRoute, FetchMode, Importance, ParamType
+from core.domain.enums import (
+    Archetype,
+    CrawlStrategy,
+    ExtractionRoute,
+    FetchMode,
+    Importance,
+    ParamType,
+)
 from core.pipeline.lint import LintReport
 from core.pipeline.package_io import (
     ARTIFACT_FILES,
@@ -24,6 +32,7 @@ from core.pipeline.package_io import (
     atomic_write_csv,
     atomic_write_text,
     build_run_inputs,
+    delete_artifact,
     get_artifact,
     list_artifacts,
     load_artifacts,
@@ -169,6 +178,73 @@ def test_save_artifact_scope_and_profiles(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# crawl_sources.yaml (Lane A): чтение/запись артефакта источников краула
+# ---------------------------------------------------------------------------
+
+
+def _crawl_sources() -> CrawlSourcesConfig:
+    """Нейтральный конфиг источников: defaults + product + site-слой."""
+    return CrawlSourcesConfig(
+        defaults=CrawlSource(kind="web", engine="http"),
+        products={"p1": CrawlSource(engine="scrapy", strategy=CrawlStrategy.HONEST)},
+        sites={
+            "p1": {
+                "example.com": CrawlSource(
+                    kind="feed", params={"selector": "item"}
+                )
+            }
+        },
+    )
+
+
+def test_load_artifacts_without_crawl_sources_defaults(tmp_path: Path) -> None:
+    # Отсутствующий crawl_sources.yaml → пустой конфиг по умолчанию.
+    artifacts = load_artifacts(tmp_path)
+    assert artifacts.crawl_sources == CrawlSourcesConfig()
+
+
+def test_save_and_reload_crawl_sources_round_trip(tmp_path: Path) -> None:
+    cfg = _crawl_sources()
+    save_artifact(tmp_path, "crawl_sources", cfg)
+    assert (tmp_path / "crawl_sources.yaml").is_file()
+    reloaded = load_artifacts(tmp_path)
+    assert reloaded.crawl_sources == cfg
+
+
+def test_save_artifact_crawl_sources_wrong_type(tmp_path: Path) -> None:
+    with pytest.raises(ValueError):
+        save_artifact(tmp_path, "crawl_sources", {"not": "a config"})
+
+
+def test_list_artifacts_crawl_sources_count(tmp_path: Path) -> None:
+    save_artifact(tmp_path, "crawl_sources", _crawl_sources())
+    items = {item["name"]: item for item in list_artifacts(tmp_path)}
+    # Счётчик — число явных источников: 1 продукт + 1 site-запись.
+    assert items["crawl_sources"]["present"] is True
+    assert items["crawl_sources"]["count"] == 2
+    assert items["crawl_sources"]["size"] > 0
+
+
+def test_get_artifact_crawl_sources_structured(tmp_path: Path) -> None:
+    save_artifact(tmp_path, "crawl_sources", _crawl_sources())
+    view, path = get_artifact(tmp_path, "crawl_sources")
+    assert path == tmp_path / "crawl_sources.yaml"
+    assert isinstance(view, dict)
+    assert set(view) == {"defaults", "products", "sites"}
+    assert view["products"]["p1"]["engine"] == "scrapy"
+    raw, _ = get_artifact(tmp_path, "crawl_sources", raw=True)
+    assert isinstance(raw, str) and raw
+
+
+def test_delete_crawl_sources_resets_to_default(tmp_path: Path) -> None:
+    save_artifact(tmp_path, "crawl_sources", _crawl_sources())
+    assert delete_artifact(tmp_path, "crawl_sources") is True
+    assert not (tmp_path / "crawl_sources.yaml").exists()
+    assert load_artifacts(tmp_path).crawl_sources == CrawlSourcesConfig()
+    assert delete_artifact(tmp_path, "crawl_sources") is False
+
+
+# ---------------------------------------------------------------------------
 # Проспективный линт
 # ---------------------------------------------------------------------------
 
@@ -213,6 +289,7 @@ def test_artifact_files_cover_all_names() -> None:
         "cohort",
         "golden",
         "domain_profiles",
+        "crawl_sources",
         "scope_attestation",
         "run",
     }
@@ -229,7 +306,12 @@ def test_list_artifacts_reports_presence_size_and_count() -> None:
     items = list_artifacts(TEMPLATE)
     assert [item["name"] for item in items] == list(ARTIFACT_FILES)
     by_name = {item["name"]: item for item in items}
-    assert all(item["present"] for item in items)
+    # Шаблон не содержит crawl_sources.yaml — он опционален; прочие на месте.
+    assert all(
+        item["present"] for item in items if item["name"] != "crawl_sources"
+    )
+    assert by_name["crawl_sources"]["present"] is False
+    assert by_name["crawl_sources"]["count"] is None
     assert by_name["package"]["count"] == 2  # два модуля шаблона
     assert by_name["catalog"]["count"] == len(template.catalog)
     assert by_name["catalog"]["size"] > 0

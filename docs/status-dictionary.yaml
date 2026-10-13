@@ -249,15 +249,6 @@ crawl_strategy:
   - honest
   - hybrid
 
-# D3. Статус per-URL записи краула (crawl_attempts): durable audit/queue/resume.
-# pending — в очереди; fetched — сырые байты сохранены (retention); done — успешно
-# извлечён/нарезан; failed — терминально после попыток (error_kind: FailureKind).
-fetch_status:
-  - pending
-  - fetched
-  - done
-  - failed
-
 # Сеанс краула: жизненный цикл (crawl_sessions).
 crawl_session_status:
   - created

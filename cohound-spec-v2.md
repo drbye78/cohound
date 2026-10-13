@@ -348,18 +348,23 @@ search_exhaustion(run_id, product_id, param_id, protocol_json);
 --   queries: n, termination_reason: <из словаря>, ts}] — strict-❓ без обязательных контуров = аномалия (§5).
 registry_facts(run_id, product_id, registry_id, fact_json, source_url, fetched_at);
 
--- D3/P3: durable per-URL учёт краула (аудит + очередь + resume без ре-фетча).
+-- Durable-краул: сеанс (аудит + очередь + resume без ре-фетча).
 -- НЕ search_log (тот — единственное место логирования поисковых вызовов, §7/I23).
-crawl_attempts(run_id, product_id, url, status, attempts, fetch_mode, extract_route, strategy,
-               http_status, content_type, lang, content_hash, raw_path, error_kind, error,
-               first_seen, last_attempt, PRIMARY KEY (run_id, product_id, url));
--- status: pending|fetched|done|failed (fetch_status); error_kind: FailureKind
+crawl_sessions(session_id, run_id, profile, status, created_at, started_at, finished_at,
+               total, pending, running, fetched, failed, cancelled, error, options_json,
+               provenance_json, PRIMARY KEY (session_id));
+-- status: created|running|paused|cancelled|completed|partial|failed (crawl_session_status)
+crawl_session_items(session_id, product_id, url, status, attempts, engine, kind, fetch_mode,
+                    extract_route, strategy, http_status, content_type, lang, content_hash,
+                    raw_path, error_kind, error, first_seen, last_attempt,
+                    PRIMARY KEY (session_id, product_id, url));
+-- status: pending|running|fetched|failed|cancelled (crawl_item_status); error_kind: FailureKind
 --   (source_unavailable — сбой краула; parser_failed — сбой экстракции);
---   content_hash — хеш сырых байтов (basename raw_path). Resume: status ∈ {fetched, done}
+--   content_hash — хеш сырых байтов (basename raw_path). Resume: status = fetched
 --   с retained raw → ре-экстракция без сетевого ре-фетча (I19); иначе — фетч.
 ```
 
-Валидация цитат — по чистому `text` чанка (`context_prefix` не входит). `content_hash` заполняется с первого дня. `search_log` — **единственное место** логирования любых поисковых вызовов, включая tool-based (§7, I23); поле `kind` разделяет внутренний ретривал (`retrieval`) и внешние поисковые запросы (`external`). `crawl_attempts` ведёт **крауловый** аудит/очередь отдельно от поискового лога: `search_log` описывает поисковые запросы, `crawl_attempts` — пер-URL жизненный цикл фетча/экстракции (durable-носитель resume; сбой краула — данные, не падение фазы).
+Валидация цитат — по чистому `text` чанка (`context_prefix` не входит). `content_hash` заполняется с первого дня. `search_log` — **единственное место** логирования любых поисковых вызовов, включая tool-based (§7, I23); поле `kind` разделяет внутренний ретривал (`retrieval`) и внешние поисковые запросы (`external`). **Сеанс краула** (`crawl_sessions` + `crawl_session_items`) ведёт durable-аудит/очередь/resume краула отдельно от поискового лога: `search_log` описывает поисковые запросы, сеанс — пер-URL жизненный цикл фетча/экстракции (durable-носитель resume; сбой краула — данные, не падение фазы).
 
 ### 4.5. Конфигурация прогона (run.yaml)
 
