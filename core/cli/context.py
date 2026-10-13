@@ -23,6 +23,8 @@ from core.adapters.gateway_validate import validate_envelope_shape
 from core.adapters.remote_gateway import (
     DEFAULT_SCHEMA_VERSION,
     GatewayError,
+    GatewayStatusError,
+    GatewayTransportError,
     TransportFn,
 )
 from core.cli.errors import EXIT_USAGE, FALLBACK_CODE, CliError
@@ -684,6 +686,10 @@ def _seam_diagnostics(
 
     Сбои транспорта/схемы ловятся в ``GatewayError`` и попадают в ``issues`` (не
     роняют команду): команда возвращает ненулевой код, но отчёт остаётся машинночитаемым.
+
+    Дополнительно выполняется **неразрушающий** зонд crawl-операций
+    (:func:`_crawl_probe`): его результат кладётся в ``crawl`` и описывает доступность
+    очереди краула edge, но **не** влияет на ``ok``/код возврата (аддитивно, 07 §3).
     """
     issues: list[str] = []
     health: Any = None
@@ -727,8 +733,64 @@ def _seam_diagnostics(
         }
         if isinstance(capabilities, Mapping)
         else {},
+        "crawl": _crawl_probe(gateway),
         "issues": issues,
     }
+
+
+#: Фиктивный ``job_id`` для безопасного зонда ``crawl/status`` (только чтение, без мутаций).
+_CRAWL_PROBE_JOB_ID = "__deploy_check_probe__"
+
+
+def _crawl_probe(gateway: ContentGateway) -> dict[str, Any]:
+    """Неразрушающе проверяет доступность crawl-операций edge (Phase 3.4b).
+
+    **Выбор зонда.** ``/v1/capabilities`` машиночитаемо crawl-ops не рекламирует (схема
+    фиксирована, 07 §3), поэтому доступность выводится поведенчески: вызывается
+    **только чтение** ``crawl/status`` с заведомо несуществующим ``job_id``. Задание не
+    подаётся, состояние edge не мутируется.
+
+    Интерпретация ответа:
+
+    * транспортный сбой (в т.ч. HTTP 404 на неизвестном маршруте) → edge не публикует
+      crawl-операции;
+    * ``status=error`` с признаком неизвестного задания → операция маршрутизируется и
+      планировщик ответил (``available``);
+    * ``status=error`` «crawl scheduler is not available …» → операция есть, планировщик
+      не сконфигурирован (``unavailable``);
+    * ``status=error`` «неизвестная операция» → edge не публикует crawl-операции;
+    * ``status=ok`` (payload) → планировщик ответил успешно (``available``).
+
+    :returns: ``{"available": bool, "reason": str | None}`` — причина только при недоступности.
+    """
+    try:
+        gateway.call("crawl/status", {"job_id": _CRAWL_PROBE_JOB_ID})
+    except GatewayStatusError as exc:
+        message = _concise(exc)
+        lowered = message.lower()
+        if "неизвестн" in lowered and "задани" in lowered:
+            # Операция маршрутизировалась, планировщик отверг несуществующее задание —
+            # очередь краула жива (liveness-доказательство без мутаций).
+            return {"available": True, "reason": None}
+        if "scheduler" in lowered:
+            return {
+                "available": False,
+                "reason": "crawl-планировщик не сконфигурирован на edge",
+            }
+        if "неизвестная операция" in lowered:
+            return {
+                "available": False,
+                "reason": "edge не публикует crawl-операции",
+            }
+        return {"available": False, "reason": message}
+    except GatewayTransportError:
+        return {
+            "available": False,
+            "reason": "edge не публикует crawl-операции (транспорт/404)",
+        }
+    except GatewayError as exc:
+        return {"available": False, "reason": f"{type(exc).__name__}: {_concise(exc)}"}
+    return {"available": True, "reason": None}
 
 
 def _validate_health_payload(payload: Any) -> list[str]:
@@ -772,6 +834,13 @@ def _emit_deploy_check(args: argparse.Namespace, payload: dict[str, Any]) -> Non
         lines.append(f"edge_schema_version: {payload['edge_schema_version']}")
         lines.append(f"health: {_short_json(payload.get('health'))}")
         lines.append(f"capabilities: {_short_json(payload.get('capabilities'))}")
+        crawl = payload.get("crawl")
+        if isinstance(crawl, Mapping):
+            if crawl.get("available"):
+                lines.append("crawl: available")
+            else:
+                reason = crawl.get("reason") or "недоступно"
+                lines.append(f"crawl: unavailable ({reason})")
     else:
         lines.append(f"note: {payload['note']}")
     for issue in payload.get("issues", ()):

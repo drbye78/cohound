@@ -127,6 +127,154 @@ def _split_config() -> DeployConfig:
     )
 
 
+def _error_envelope(request_id: str, error: str, *, schema: str = "1") -> dict[str, Any]:
+    """Конверт ответа edge со ``status=error`` (как у ``core/edge/server.py``)."""
+    return {
+        "schema_version": schema,
+        "request_id": request_id,
+        "status": "error",
+        "payload": None,
+        "error": error,
+    }
+
+
+def _crawl_transport(crawl_error: str, *, ops: list[str] | None = None) -> Any:
+    """Транспорт с health/capabilities + настраиваемым ответом ``crawl/status``.
+
+    ``crawl_error`` — текст ``status=error`` для crawl-зонда (имитация живого планировщика,
+    не сконфигурированного планировщика или неподдерживаемой операции). Остальные ops,
+    кроме health/capabilities, отвечают «неизвестная операция».
+    """
+
+    def _transport(op: str, envelope: Mapping[str, Any]) -> Mapping[str, Any]:
+        if ops is not None:
+            ops.append(op)
+        rid = str(envelope["request_id"])
+        if op == "crawl/status":
+            return _error_envelope(rid, crawl_error)
+        payloads: dict[str, Any] = {"health": _HEALTH, "capabilities": _CAPABILITIES}
+        if op not in payloads:
+            return _error_envelope(rid, f"неизвестная операция {op!r}")
+        return _envelope(op, rid, payloads[op])
+
+    return _transport
+
+
+# ---------------------------------------------------------------------------
+# deploy-check: crawl-зонд (Phase 3.4b)
+# ---------------------------------------------------------------------------
+
+
+def test_deploy_check_reports_crawl_available_json(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Живой планировщик: ``crawl/status`` отвечает «неизвестное задание» → available."""
+    cfg = write_text(tmp_path, "deploy.yaml", _SPLIT_YAML)
+    told = _crawl_transport(
+        "ValueError: неизвестное задание краула: '__deploy_check_probe__'"
+    )
+
+    code = main(["deploy-check", "--deploy", str(cfg), "--json"], deploy_transport=told)
+    assert code == EXIT_OK
+    payload = json_out(capsys)
+    assert payload["ok"] is True
+    assert payload["crawl"] == {"available": True, "reason": None}
+    assert payload["issues"] == []
+
+
+def test_deploy_check_reports_crawl_unavailable_scheduler_json(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Операция есть, планировщик не сконфигурирован → unavailable, но ``ok``/код не падают."""
+    cfg = write_text(tmp_path, "deploy.yaml", _SPLIT_YAML)
+    told = _crawl_transport("crawl scheduler is not available on this edge node")
+
+    code = main(["deploy-check", "--deploy", str(cfg), "--json"], deploy_transport=told)
+    assert code == EXIT_OK  # аддитивно: недоступность crawl не меняет код возврата
+    payload = json_out(capsys)
+    assert payload["ok"] is True
+    assert payload["crawl"]["available"] is False
+    assert "планировщик" in payload["crawl"]["reason"]
+    assert payload["issues"] == []
+
+
+def test_deploy_check_reports_crawl_not_advertised_json(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Edge не публикует crawl-операции (``_edge_transport``) → unavailable, ``ok`` True."""
+    cfg = write_text(tmp_path, "deploy.yaml", _SPLIT_YAML)
+
+    code = main(
+        ["deploy-check", "--deploy", str(cfg), "--json"], deploy_transport=_edge_transport
+    )
+    assert code == EXIT_OK
+    payload = json_out(capsys)
+    assert payload["ok"] is True
+    assert payload["crawl"]["available"] is False
+    assert "не публикует crawl-операции" in payload["crawl"]["reason"]
+
+
+def test_deploy_check_crawl_probe_transport_error_degrades(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Транспортный сбой только на crawl-зонде деградирует, health остаётся ``ok``."""
+    cfg = write_text(tmp_path, "deploy.yaml", _SPLIT_YAML)
+
+    def _transport(op: str, envelope: Mapping[str, Any]) -> Mapping[str, Any]:
+        if op == "crawl/status":
+            raise GatewayTransportError("edge: crawl недостижим")
+        rid = str(envelope["request_id"])
+        payloads = {"health": _HEALTH, "capabilities": _CAPABILITIES}
+        return _envelope(op, rid, payloads[op])
+
+    code = main(["deploy-check", "--deploy", str(cfg), "--json"], deploy_transport=_transport)
+    assert code == EXIT_OK
+    payload = json_out(capsys)
+    assert payload["ok"] is True
+    assert payload["crawl"]["available"] is False
+
+
+def test_deploy_check_human_output_has_crawl_line(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    cfg = write_text(tmp_path, "deploy.yaml", _SPLIT_YAML)
+    told = _crawl_transport(
+        "ValueError: неизвестное задание краула: '__deploy_check_probe__'"
+    )
+
+    code = main(["deploy-check", "--deploy", str(cfg)], deploy_transport=told)
+    assert code == EXIT_OK
+    out = capsys.readouterr().out
+    assert "crawl: available" in out
+
+
+def test_deploy_check_human_output_crawl_unavailable_reason(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    cfg = write_text(tmp_path, "deploy.yaml", _SPLIT_YAML)
+    told = _crawl_transport("crawl scheduler is not available on this edge node")
+
+    code = main(["deploy-check", "--deploy", str(cfg)], deploy_transport=told)
+    assert code == EXIT_OK
+    out = capsys.readouterr().out
+    assert "crawl: unavailable (crawl-планировщик не сконфигурирован на edge)" in out
+
+
+def test_deploy_check_crawl_probe_is_read_only(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Зонд не мутирует edge: вызывается только ``crawl/status``, никаких submit/cancel/collect."""
+    cfg = write_text(tmp_path, "deploy.yaml", _SPLIT_YAML)
+    ops: list[str] = []
+    told = _crawl_transport("crawl scheduler is not available on this edge node", ops=ops)
+
+    code = main(["deploy-check", "--deploy", str(cfg), "--json"], deploy_transport=told)
+    assert code == EXIT_OK
+    assert ops == ["health", "capabilities", "crawl/status"]
+    for mutating in ("crawl/submit", "crawl/cancel", "crawl/collect"):
+        assert mutating not in ops
+
+
 # ---------------------------------------------------------------------------
 # Профиль local — без изменений; split без валидного конфига — отказ
 # ---------------------------------------------------------------------------

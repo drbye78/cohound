@@ -464,7 +464,7 @@ hound run \
 | `hound diff <run_a> <run_b>` | межцикловый diff (запрещён через major) | diff.md |
 | `hound promote --validated-only` | preliminary → strict (переаттестация) | cells |
 | `hound gate --gate G1..G4 --actor <вы>` | запись **человеческого решения** гейта G1–G4 (утверждение); гейт проходит фактом строки в `gate_decisions`, отказ — отсутствие строки (S9/I6/I7) | gate_decisions |
-| `hound deploy-check` | диагностика профиля: достижимость DMZ-шва, версии/форматы edge (`/v1/health`, `/v1/capabilities`) | — (отчёт) |
+| `hound deploy-check` | диагностика профиля: достижимость DMZ-шва, версии/форматы edge (`/v1/health`, `/v1/capabilities`) + неразрушающий зонд очереди краула (`crawl/status` → строка `crawl`; без подачи задания) | — (отчёт) |
 | `hound doctor [--strict] [--with-selfcheck]` | самодиагностика инсталляции: runtime, зависимости по extras, env/ключи, конфиг, каталоги, CLI-поверхность | — (отчёт) |
 
 Подкоманды `hound package …` принимают `--package` как **путь к каталогу пакета**, так и

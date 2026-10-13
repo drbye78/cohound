@@ -383,6 +383,25 @@ preliminary-yield), калибровка порогов.
 
 **Итого W13 ≈ 18.5 дд. Входит в M1 (MVP).**
 
+**Phase 3 — долгоиграющий краул за швом (после W13; landed).** Краул корпуса вынесен за шов и
+исполняется edge-планировщиком:
+
+- **Операции шва.** `crawl/{submit,status,cancel,collect}` — аддитивное расширение `/v1/*`
+  (`schema_version` остаётся `"1"`), scope `crawl` для авторизации; схемы — `contracts/seam/crawl.schema.json`,
+  валидация — `core/edge/seam_schema.py`/`core/edge/auth.py`.
+- **Edge-планировщик.** `core/edge/scheduler.py` (`EdgeScheduler`): собственная SQLite-очередь
+  (`edge_jobs.db`, WAL) + content-addressed блоб-хранилище; воркеры — потоки для `http`,
+  процессы для `scrapy`/`browser` (module-level `crawler_factory`); back-pressure по `queue_limit`;
+  идемпотентный `submit`; recovery-on-start (`running→pending`).
+- **Launcher узла.** `python -m core.edge serve [--check]` (`core/edge/__main__.py`) с
+  `EdgeRuntimeConfig` (`core/edge/config.py`).
+- **Клиент/исполнитель.** Порт-исполнитель `core/ports/crawl_executor.py` + edge-executor
+  `core/adapters/remote_crawl_executor.py`; ветка `executor` в `core/pipeline/corpus.py`:
+  профиль `split` маршрутизирует краул через шов, `local` остаётся in-process. Retention,
+  re-hash и нарезка — по-прежнему в ядре (I19).
+- **Диагностика.** `hound deploy-check` добавляет неразрушающий зонд `crawl/status` (строка
+  `crawl: available|unavailable`), аддитивно к health/capabilities.
+
 ### Сводка по коду (без доменной работы)
 
 | Поток | дд |

@@ -93,6 +93,15 @@ POST /v1/search   {query, lang, limit, phase}
 POST /v1/registry {registry_id, product_ref, scope}
    → [{fact_json, source_url, fetched_at}]                  # R1: source_url обязателен
 
+POST /v1/crawl/submit  {run_id, session_id, idempotency_key, profile, items:[{product_id, url, engine?, kind?, fetch?, extract?, strategy?, wait_for?, lang?}]}
+   → {job_id, accepted, total, session_id}                  # постановка задания очереди краула
+POST /v1/crawl/status  {job_id}
+   → {job_id, status, total, pending, running, fetched, failed, cancelled, engines, kinds}
+POST /v1/crawl/cancel  {job_id}
+   → {job_id, status: "cancelled", cancelled}
+POST /v1/crawl/collect {job_id, cursor?, limit?}
+   → {items: [{product_id, url, status, engine, kind, http_status, content_type, fetched_at, content_hash, raw?, error}], next_cursor, done}
+
 GET  /v1/capabilities → {extractor_version, crawler_version, search_engine, supported_formats}
 GET  /v1/health       → {status}
 ```
@@ -101,6 +110,15 @@ GET  /v1/health       → {status}
 **аддитивно**: старые клиенты его опускают — edge трактует отсутствие как `auto`. Поле ортогонально
 оси `fetch` (при `fetch: "http"` нормализуется в `auto`; `strategy != auto` ⇒ `fetch: "browser"`),
 поэтому не ломает существующих клиентов и не требует bump `schema_version`.
+
+**Очередь краула `crawl/*` (аддитивно, Phase 3.1–3.4).** Четыре POST-операции переносят
+долгоиграющий краул корпуса за шов: `submit` ставит задание (идемпотентно по
+`(run_id, session_id, idempotency_key)`), `status` сообщает счётчики, `cancel` снимает
+незавершённые элементы, `collect` постранично отдаёт результаты (сырые байты/хэши — контент,
+**не** evidence, I19; ядро пересчитывает `content_hash`). `collect` идемпотентен: непрозрачный
+`cursor` (стабильный порядок `(product_id, url)`), `done` — все элементы терминальны. Транспорт —
+тот же L7-JSON; авторизация — scope `crawl` (см. §8.2). Расширение **аддитивно** и не меняет
+`schema_version` (остаётся `"1"`).
 
 **Оболочка:** `{schema_version, request_id, status, payload, error}`. `schema_version` — часть
 контракта; несовместимое изменение → bump версии (версионная граница §13).
@@ -149,6 +167,25 @@ core:  план → запрос к edge → приём сырья → corpus_ra
 edge:  fetch → extract → sanitize → вернуть (text, hashes, raw)   [без доступа к store/domain]
 ```
 
+**Launcher edge-узла.** Второй composition root запускается как
+`python -m core.edge serve [--config FILE] [--host H] [--port P] [--check]`. Конфигурация узла —
+собственная (`config/edge.yaml` → `EdgeRuntimeConfig`; env `COHOUND_EDGE_STATE_DIR` переопределяет
+`state_dir`): каталог состояния, адрес/порт прослушивания, карта `workers` (число слотов на движок),
+`queue_limit`, `ttl_s`. Флаг `--check` собирает конфиг+адаптеры+gateway+планировщик и выходит без
+привязки сокета и без старта воркеров (smoke: misconfig всплывает до запуска); ошибка конфигурации
+→ код возврата `2`. Launcher остаётся в edge-слое: не импортирует `cli`/`store`/`pipeline`.
+
+**Edge-локальный планировщик краула (`core/edge/scheduler.py`).** Исполняет операции `crawl/*`:
+собственная SQLite-БД (`{state_dir}/edge_jobs.db`, WAL) хранит задания/элементы и счётчики;
+content-addressed блоб-хранилище (`{resolved_blob_dir}/{job_id}/{hash}.bin`) хранит сырые байты
+(retention, I19). Модель исполнения по движкам: `http` — **потоки** in-process; `scrapy`/`browser`
+— **процессы** (`ProcessPoolExecutor`) через module-level `crawler_factory` (адаптеры не picklable,
+Playwright не форк-безопасен — краулер строится внутри воркера, а запись блобов/БД делает родитель).
+Back-pressure по `queue_limit`; `submit` идемпотентен по `(run_id, session_id, idempotency_key)`;
+recovery-on-start возвращает застрявшие `running`-элементы в `pending` (зеркало
+`store.recover_crawl_session`). SSRF-валидация каждого URL — на постановке (`util.security.validate_url`).
+Диагностика числа воркеров не стартует: планировщик строится лениво.
+
 ---
 
 ## 5. Модель угроз и принуждение (L7 firewall)
@@ -160,7 +197,7 @@ edge:  fetch → extract → sanitize → вернуть (text, hashes, raw)   [
 
 | Поток | Направление | Политика L7 |
 |---|---|---|
-| core → edge | к DMZ app-порту (напр. 8443) | **ALLOW**: allowlist методов/путей (`/v1/fetch`, `/v1/search`, `/v1/registry`, `/v1/health`, `/v1/capabilities`), JSON-schema-валидация, лимиты размера |
+| core → edge | к DMZ app-порту (напр. 8443) | **ALLOW**: allowlist методов/путей (`/v1/fetch`, `/v1/search`, `/v1/registry`, `/v1/crawl/submit`, `/v1/crawl/status`, `/v1/crawl/cancel`, `/v1/crawl/collect`, `/v1/health`, `/v1/capabilities`), JSON-schema-валидация, лимиты размера |
 | edge → internet | 80/443 | **ALLOW** (опц. allowlist доменов; robots-enforcement; rate-limit) |
 | **core → internet** | любой | **DENY** (нет маршрута) — усиливает I18 |
 | **edge → core** | инициирование | **DENY** (edge только отвечает; не может дозвониться до сервисов ядра) |
@@ -212,6 +249,12 @@ LLM-endpoint корп. облака — только в Z0.
 Профиль — **конфигурация подстановки адаптеров**, а не ветка в коде. Конвейер (`pipeline`) не
 знает о зонах: он получает порты, как и раньше (00 §8.1). Это сохраняет A1: `local` не платит за DMZ.
 
+**Отображение профиля на транспорт краула.** `local` исполняет краул **in-process** (реальные
+адаптеры прямо в ядре). `split`/`split-hardened` маршрутизируют краул через шов: ядро подаёт работы
+исполнителю, edge-планировщик их исполняет, ядро забирает результаты операцией `crawl/collect`
+(retention/re-hash/нарезка остаются в ядре — I19). Контракт портов при этом не меняется — меняется
+подстановка адаптера (remote-прокси поверх `ContentGateway`).
+
 **«Инсталляция» — deployment-политика, а не методологический вопрос.** Под «инсталляцией» проекта
 понимается способ размещения контура, влияющий на §10 (применимость), 152-ФЗ и ops-бюджет, а не на
 семантику измерений:
@@ -240,6 +283,8 @@ flowchart LR
     GW --> SE[search]
     GW --> RG[registry]
     GW --> EX[extractor/sanitizer]
+    GW --> SCHED[crawl scheduler]
+    SCHED --> CR
   end
   subgraph Z3["Зона LLM корп. облака ([OI]-совместимый API)"]
     LLM[LLM endpoint]
@@ -294,6 +339,12 @@ search:
 `run_manifest.yaml`; связка — в манифест пишется `deploy_profile`, версии edge-компонентов
 (`/v1/capabilities`) и `edge_schema_version` для воспроизводимости R7.
 
+Runtime-конфигурация **edge-узла** отделена от `deploy.yaml` ядра: `config/edge.yaml`
+(`EdgeRuntimeConfig`) задаёт `state_dir`/`blob_dir`, `host`/`port`, карту `workers`
+(`{http, scrapy, browser} → слоты`), `queue_limit`, `ttl_s`. Env `COHOUND_EDGE_STATE_DIR`
+переопределяет `state_dir`. Файл читает launcher `python -m core.edge serve --config …`
+(§4); отсутствие файла → безопасные дефолты.
+
 ---
 
 ## 8. Прозрачность контрактов для корпоративных IDP / DLP / IDS
@@ -324,7 +375,7 @@ edge→core DENY, §5), поэтому одна точка инспекции п
 | Требование | Как обеспечено |
 |---|---|
 | Атрибуция запроса | mTLS **workload-identity** (клиентский сертификат от корп. PKI/IDP) **или** OIDC/JWT bearer (issuer = корп. IDP, claims: сервисный субъект, scopes) |
-| Авторизация по операции | allowlist `identity → {fetch, search, registry}`; иные операции — deny |
+| Авторизация по операции | allowlist `identity → {fetch, search, registry, crawl}`; иные операции — deny |
 | Корреляция | `request_id` в каждом запросе/ответе; сквозной в аудит-логе ядра и edge |
 | Ротация/отзыв | средствами IDP; coHound не держит «долгоживущих» аутентификационных секретов (эгрессионные креды — в edge, за IDP) |
 
@@ -334,7 +385,9 @@ edge→core DENY, §5), поэтому одна точка инспекции п
   репозиторий (`docs/contracts/` и/или `edge/openapi.yaml`).
 - IDP/DLP/IDS-политики пишутся **по опубликованным схемам**; используемая версия фиксируется в
   `run_manifest.yaml` (`edge_schema_version`) для воспроизводимости R7.
-- Любое изменение контракта — **версионная граница** (bump `schema_version`), как в §13 регламента.
+- Любое **несовместимое** изменение контракта — **версионная граница** (bump `schema_version`), как
+  в §13 регламента. **Аддитивные** расширения (новые операции/поля) совместимы и версию не меняют:
+  так введены ось `strategy` в `/v1/fetch` и операции `crawl/*` — `schema_version` остаётся `"1"`.
 
 ### 8.4. Аудит и SIEM
 

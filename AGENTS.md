@@ -47,7 +47,8 @@ core/                         # ядро: категорийно-НЕЙТРАЛ�
                               #   package/* (add_package_parser, cmd_package_*); package_commands.py —
                               #   re-export-шим (обратная совместимость)
   edge/                       # composition root Z1/DMZ — веб-адаптеры за швом (07): server.py, auth.py,
-                              #   audit.py, seam_schema.py
+                              #   audit.py, seam_schema.py, scheduler.py (очередь краула), config.py
+                              #   (EdgeRuntimeConfig), __main__.py (launcher: python -m core.edge serve)
   adapters/                   # chunker_markdown (heading_path), extract_document (docling: pdf+office),
                               #   lexical_bm25, index_npy/index_format/lexical_tantivy, search_* — см. NOTICES
   util/                       # text_utils (RU/EN), security (SSRF/slug), fusion (RRF), retrieval_eval — см. NOTICES
