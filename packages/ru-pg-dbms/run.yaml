@@ -19,3 +19,7 @@ products:
 - jatoba
 ranking_policy: capability_ranked
 snapshot_date: '2026-10-01'
+crawl:
+  # Операционные (execution) дефолты краула; не методология (§13).
+  strategy: honest          # для browser-доменов; HTTP-домены нормализуются в auto
+  rate_limit: {min_s: 1.0, max_s: 3.0}   # politeness-пейсинг (corpus), per-host

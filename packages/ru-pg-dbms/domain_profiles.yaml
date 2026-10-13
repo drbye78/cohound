@@ -1,3 +1,15 @@
+# Профили доменов кейса ru-pg-dbms (03 §D.2).
+#
+# Оси: fetch (http|browser), extract (auto|html|document), strategy (auto|honest|hybrid),
+# wait_for (JS-условие готовности), rate_limit (uniform(min_s, max_s)).
+# Сопоставление host[+path] и приоритет — pipeline (resolve_fetch_plan), не адаптеры.
+#
+# Обоснование (живые замеры, 2026-10):
+#  - домены *.sbertech.ru отдают 401 обычному HTTP (антибот) → нужен browser-рендер;
+#    pangolin.sbertech.ru дополнительно требует wait_for: JS-challenge завершается и
+#    перезагружает страницу ПОСЛЕ domcontentloaded, поэтому снапшот без ожидания — заглушка.
+#  - tantorlabs.ru/products/dbms/ — 403 обычному HTTP → browser.
+#  - остальные отдают 200 обычному HTTP — браузер не требуется.
 docs.tantorlabs.ru:
   fetch: http
   extract: html
@@ -7,9 +19,31 @@ jatoba.ru:
 pangolin.sbertech.ru:
   fetch: browser
   extract: html
+  strategy: honest
+  wait_for: "() => document.body && document.body.innerText.length > 200"
+platformv.sbertech.ru:
+  fetch: browser
+  extract: html
+  strategy: honest
 postgrespro.ru:
   fetch: http
   extract: html
+sbertech.ru:
+  fetch: browser
+  extract: html
+  strategy: honest
 sbertech.ru/documents:
-  fetch: http
+  fetch: browser
   extract: document
+  strategy: honest
+tantorlabs.ru:
+  fetch: browser
+  extract: html
+  strategy: honest
+tantorlabs.ru/products/dbms:
+  fetch: browser
+  extract: html
+  strategy: honest
+wiki.astralinux.ru:
+  fetch: http
+  extract: html
