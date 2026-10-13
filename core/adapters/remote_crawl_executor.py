@@ -32,9 +32,11 @@ from core.ports.crawl_executor import (
     CrawlBatch,
     CrawlProgress,
     CrawlResultItem,
+    CrawlSubmitResult,
     CrawlWorkItem,
 )
 from core.ports.gateway import ContentGateway
+from core.util.security import validate_url
 
 __all__ = ["ACTIVE_JOB_STATUSES", "DEFAULT_MAX_BATCH_ITEMS", "EdgeCrawlExecutor"]
 
@@ -61,6 +63,16 @@ def _opt_int(value: Any) -> int | None:
         return None
     try:
         return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _opt_float(value: Any) -> float | None:
+    """``float`` или ``None``; ``bool`` не принимается (это подкласс ``int``)."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return float(value)
     except (TypeError, ValueError):
         return None
 
@@ -109,12 +121,16 @@ class EdgeCrawlExecutor:
         run_id: str,
         profile: str,
         idempotency_key: str,
-    ) -> str:
-        """``POST /v1/crawl/submit`` → ``job_id``.
+    ) -> CrawlSubmitResult:
+        """``POST /v1/crawl/submit`` → :class:`CrawlSubmitResult`.
 
         Payload: ``{run_id, session_id, idempotency_key, profile, items}``; каждый элемент —
         ``{product_id, url, engine, kind, fetch, extract, strategy, wait_for, lang}`` (оси —
         строковые значения enum). Пустой набор работ — ошибка содержимого.
+
+        Back-pressure (C2): ``accepted`` (по умолчанию ``True``, если поле отсутствует) и
+        опциональный ``retry_after`` (секунды) прокидываются в результат — ядро решает,
+        повторять ли подачу. При ``accepted=True`` отсутствие/пустота ``job_id`` — ошибка.
         """
         if not items:
             raise RemoteContentError("crawl/submit: пустой список работ")
@@ -126,10 +142,16 @@ class EdgeCrawlExecutor:
             "items": [self._work_item_payload(item) for item in items],
         }
         response = self._call("crawl/submit", payload)
+        accepted_raw = response.get("accepted")
+        accepted = True if accepted_raw is None else bool(accepted_raw)
         job_id = response.get("job_id")
-        if not isinstance(job_id, str) or not job_id:
+        if accepted and (not isinstance(job_id, str) or not job_id):
             raise RemoteContentError("crawl/submit: ответ без непустого job_id")
-        return job_id
+        return CrawlSubmitResult(
+            job_id=job_id if isinstance(job_id, str) else "",
+            accepted=accepted,
+            retry_after_s=_opt_float(response.get("retry_after")),
+        )
 
     def status(self, handle: str) -> CrawlProgress:
         """``POST /v1/crawl/status`` → прогресс задания."""
@@ -242,6 +264,15 @@ class EdgeCrawlExecutor:
             raise RemoteContentError("crawl/collect.items: product_id — непустая строка")
         if not isinstance(url, str) or not url:
             raise RemoteContentError("crawl/collect.items: url — непустая строка")
+        # C1: SSRF-перепроверка URL на стороне ядра (edge не доверяем): непубличные/
+        # невалидные адреса (в т.ч. литеральные private/loopback/metadata) отвергаются —
+        # их контент не принимается (§5/§10).
+        try:
+            validate_url(url)
+        except ValueError as exc:
+            raise RemoteContentError(
+                f"crawl/collect.items: небезопасный url ({exc})"
+            ) from exc
 
         raw = item.get("raw")
         claimed_hash = item.get("content_hash")

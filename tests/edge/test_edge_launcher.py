@@ -347,6 +347,52 @@ def test_crawler_factory_is_picklable_module_level() -> None:
     assert pickle.loads(pickle.dumps(edge_main.crawler_factory)) is edge_main.crawler_factory
 
 
+def test_crawler_factory_module_is_not_main() -> None:
+    """B1: фабрика обязана жить в импортируемом модуле, а не в ``__main__``.
+
+    Launcher исполняется как ``python -m core.edge`` (``core/edge/__main__.py`` →
+    ``__module__ == "__main__"``); определённая там фабрика не picklable by reference →
+    ``BrokenProcessPool`` для scrapy/browser. Фабрика вынесена в
+    ``core.edge.crawler_factory``; ``__main__`` её реэкспортирует.
+    """
+    from core.edge import crawler_factory as factory_module
+
+    factory = factory_module.crawler_factory
+    assert factory.__module__ == "core.edge.crawler_factory"
+    assert factory.__module__ != "__main__"
+    # Реэкспорт из ``__main__`` — тот же объект (единая точка истины).
+    assert edge_main.crawler_factory is factory
+
+
+def _build_crawler_in_worker(engine: str) -> str:
+    """Module-level probe: строит краулер реальной фабрикой в воркер-процессе (B1).
+
+    Должен быть picklable by reference (module-level тестового модуля) — иначе
+    ``ProcessPoolExecutor`` не поднимется; это ровно тот случай, что ломался у
+    ``__main__``-фабрики.
+    """
+    from core.edge.crawler_factory import crawler_factory
+
+    return type(crawler_factory(engine)).__name__
+
+
+@pytest.mark.parametrize("method", ["forkserver", "spawn"])
+def test_worker_process_runs_real_crawler_factory(method: str) -> None:
+    """B1: реальная фабрика выполняется в отдельном процессе (без сети/scrapy).
+
+    ``http`` — дешёвый движок: строим адаптер, но НЕ фетчим (сеть не нужна).
+    """
+    import multiprocessing
+    from concurrent.futures import ProcessPoolExecutor
+
+    try:
+        context = multiprocessing.get_context(method)
+    except ValueError:  # pragma: no cover - платформо-зависимо
+        pytest.skip(f"метод multiprocessing {method!r} недоступен")
+    with ProcessPoolExecutor(max_workers=1, mp_context=context) as executor:
+        assert executor.submit(_build_crawler_in_worker, "http").result(timeout=30) == "HttpCrawler"
+
+
 def test_build_scheduler_http_in_process_and_zero_engines_excluded() -> None:
     config = EdgeRuntimeConfig(
         state_dir="/tmp/unused", workers={"http": 2, "scrapy": 0, "browser": 0}

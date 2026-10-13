@@ -15,6 +15,7 @@ from core.ports.crawl_executor import (
     CrawlExecutorPort,
     CrawlProgress,
     CrawlResultItem,
+    CrawlSubmitResult,
     CrawlWorkItem,
 )
 from core.ports.crawler import CrawlerPort
@@ -51,6 +52,7 @@ __all__ = [
     "CrawlExecutorPort",
     "CrawlProgress",
     "CrawlResultItem",
+    "CrawlSubmitResult",
     "CrawlWorkItem",
     "DiscoveryLLMPort",
     "DiscoveryLLMRequest",

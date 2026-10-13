@@ -24,6 +24,7 @@ import pytest
 from core.edge.config import EdgeRuntimeConfig
 from core.edge.scheduler import (
     EdgeScheduler,
+    ITEM_CANCELLED,
     ITEM_FETCHED,
     ITEM_PENDING,
     ITEM_RUNNING,
@@ -565,3 +566,152 @@ def test_stop_drains_running_items_to_pending(make_scheduler: Any) -> None:
         "SELECT COUNT(*) FROM edge_job_items WHERE status = ?", (ITEM_RUNNING,)
     ).fetchone()[0]
     assert running == 0
+
+
+# ---------------------------------------------------------------------------
+# C3 — сирота-блоб при отмене во время фетча
+# ---------------------------------------------------------------------------
+
+
+def test_no_orphan_blob_when_item_cancelled_during_fetch(make_scheduler: Any) -> None:
+    """C3: блоб пишется только после подтверждённого перехода ``running→fetched``.
+
+    Элемент отменяют, пока воркер ещё фетчит; по завершении guard-``UPDATE`` не находит
+    ``running`` (0 строк) → блоб НЕ создаётся (нет сироты), элемент остаётся ``cancelled``.
+    """
+    gate = threading.Event()
+    scheduler = make_scheduler(crawlers={"http": BlockingCrawler(gate)}, workers={"http": 1})
+    try:
+        scheduler.submit(_submit_payload(items=[_item("p1", "https://x.test/a")]))
+        assert _wait_until(lambda: scheduler.status("job1")["running"] >= 1)
+        result = scheduler.cancel("job1")
+        assert result == {"job_id": "job1", "cancelled": 1}
+    finally:
+        gate.set()  # отпускаем воркер уже ПОСЛЕ отмены
+    # Ждём завершения callback-а (inflight → 0), чтобы гарантированно поймать запись.
+    assert _wait_until(lambda: scheduler._inflight == 0)
+    conn = scheduler._connect()
+    row = conn.execute("SELECT * FROM edge_job_items WHERE job_id = 'job1'").fetchone()
+    assert row["status"] == ITEM_CANCELLED
+    assert row["blob_ref"] is None
+    # Сироты блоба нет: под заданием не создано ни одного файла.
+    blob_dir = Path(scheduler._config.resolved_blob_dir)
+    assert not list(blob_dir.rglob("*.bin"))
+
+
+# ---------------------------------------------------------------------------
+# C4 — recovery/claim не трогают элементы терминальных заданий
+# ---------------------------------------------------------------------------
+
+
+def _insert_job(
+    conn: Any,
+    job_id: str,
+    status: str,
+    *,
+    key: str,
+    item_status: str,
+    product_id: str = "p1",
+    url: str = "https://x.test/a",
+) -> None:
+    """Вставляет задание + один элемент напрямую (детерминированная подготовка C4)."""
+    with conn:
+        conn.execute(
+            "INSERT INTO edge_jobs (job_id, run_id, session_id, idempotency_key, status,"
+            " total, pending, running, fetched, failed, cancelled, created_at, started_at)"
+            " VALUES (?, 'r1', 's1', ?, ?, 1, 0, 1, 0, 0, 0, ?, ?)",
+            (job_id, key, status, _FIXED_TIME, _FIXED_TIME),
+        )
+        conn.execute(
+            "INSERT INTO edge_job_items (job_id, product_id, url, status) VALUES (?, ?, ?, ?)",
+            (job_id, product_id, url, item_status),
+        )
+
+
+def test_recovery_does_not_revive_terminal_jobs(make_scheduler: Any) -> None:
+    """C4: ``running``-элемент ТЕРМИНАЛЬНОГО задания не восстанавливается в ``pending``."""
+    scheduler = make_scheduler()
+    conn = scheduler._connect()
+    _insert_job(conn, "jcancel", "cancelled", key="kc", item_status=ITEM_RUNNING)
+    _insert_job(conn, "jlive", "running", key="kl", item_status=ITEM_RUNNING)
+
+    scheduler._recover(conn)
+
+    assert (
+        conn.execute("SELECT status FROM edge_job_items WHERE job_id = 'jcancel'").fetchone()[0]
+        == ITEM_RUNNING  # не ожил
+    )
+    assert (
+        conn.execute("SELECT status FROM edge_job_items WHERE job_id = 'jlive'").fetchone()[0]
+        == ITEM_PENDING  # восстановлен
+    )
+
+
+def test_claim_skips_items_of_terminal_jobs(make_scheduler: Any) -> None:
+    """C4: элементы терминального задания никогда не клеймятся (не воскресают)."""
+    scheduler = make_scheduler()
+    conn = scheduler._connect()
+    _insert_job(conn, "jcancel", "cancelled", key="kc", item_status=ITEM_PENDING)
+    _insert_job(conn, "jlive", "created", key="kl", item_status=ITEM_PENDING)
+
+    scheduler.start()  # recovery + dispatch: клеймится только нетерминальное задание
+    state = _wait_terminal(scheduler, "jlive")
+    assert state["status"] == JOB_COMPLETED
+
+    terminal_item = conn.execute(
+        "SELECT status FROM edge_job_items WHERE job_id = 'jcancel'"
+    ).fetchone()[0]
+    assert terminal_item == ITEM_PENDING  # элемент отменённого задания не клеймлен
+
+
+# ---------------------------------------------------------------------------
+# C5a — защита от реэнтрантного ``_dispatch``
+# ---------------------------------------------------------------------------
+
+
+def test_dispatch_is_not_reentrant(make_scheduler: Any) -> None:
+    """C5a: повторный вход в ``_dispatch`` при активном диспетчере ничего не клеймит."""
+    scheduler = make_scheduler()
+    scheduler.start()  # пулы собраны, очередь пуста
+    conn = scheduler._connect()
+    _insert_job(conn, "jz", "created", key="kz", item_status=ITEM_PENDING)
+
+    # Имитируем реэнтрантный вызов из done-callback: флаг уже поднят «внешним» циклом.
+    scheduler._dispatching = True
+    scheduler._dispatch()
+    assert (
+        conn.execute("SELECT status FROM edge_job_items WHERE job_id = 'jz'").fetchone()[0]
+        == ITEM_PENDING  # активен другой диспетчер — новый ничего не взял
+    )
+
+    # Снимаем флаг — элемент нормально диспетчеризуется и добывается.
+    scheduler._dispatching = False
+    scheduler._dispatch()
+    state = _wait_terminal(scheduler, "jz")
+    assert state["status"] == JOB_COMPLETED
+
+
+# ---------------------------------------------------------------------------
+# C5b — ``stop(timeout)`` не висит на заблокированном воркере, а предупреждает
+# ---------------------------------------------------------------------------
+
+
+def test_stop_honors_timeout_and_warns(
+    make_scheduler: Any, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """C5b: ``stop(timeout)`` ограниченно ждёт и пишет предупреждение, не висит молча."""
+    gate = threading.Event()
+    scheduler = make_scheduler(crawlers={"http": BlockingCrawler(gate)}, workers={"http": 1})
+    try:
+        scheduler.submit(_submit_payload(items=[_item("p1", "https://x.test/a")]))
+        assert _wait_until(lambda: scheduler.status("job1")["running"] >= 1)
+
+        start = time.monotonic()
+        scheduler.stop(timeout=0.3)
+        elapsed = time.monotonic() - start
+
+        assert elapsed < 5.0  # не ждём заблокированный воркер бесконечно
+        err = capsys.readouterr().err
+        assert "scheduler.stop()" in err and "не завершились" in err
+    finally:
+        gate.set()  # отпускаем воркер, чтобы поток завершился

@@ -26,6 +26,7 @@ from core.ports.crawl_executor import (
     CrawlExecutorPort,
     CrawlProgress,
     CrawlResultItem,
+    CrawlSubmitResult,
     CrawlWorkItem,
 )
 from core.util.hashing import content_hash
@@ -107,7 +108,7 @@ def test_submit_builds_payload_and_returns_job_id() -> None:
     gateway = _FakeGateway({"crawl/submit": {"job_id": "job-1", "accepted": True, "total": 1}})
     executor = EdgeCrawlExecutor(gateway, profile="split")
 
-    handle = executor.submit(
+    submission = executor.submit(
         [
             _work_item(
                 engine="scrapy",
@@ -125,7 +126,10 @@ def test_submit_builds_payload_and_returns_job_id() -> None:
         idempotency_key="idem-1",
     )
 
-    assert handle == "job-1"
+    assert isinstance(submission, CrawlSubmitResult)
+    assert submission.job_id == "job-1"
+    assert submission.accepted is True
+    assert submission.retry_after_s is None
     op, payload = gateway.calls[-1]
     assert op == "crawl/submit"
     assert payload["run_id"] == "run-1"
@@ -453,3 +457,101 @@ def test_non_mapping_gateway_response_raises() -> None:
     executor = EdgeCrawlExecutor(_FakeGateway({"crawl/status": ["not", "a", "mapping"]}))
     with pytest.raises(RemoteContentError):
         executor.status("job-1")
+
+
+def test_submit_backpressure_returns_not_accepted_with_retry_after() -> None:
+    """C2: ``accepted=false`` → ``CrawlSubmitResult`` с пустым ``job_id`` и ``retry_after_s``."""
+    gateway = _FakeGateway(
+        {"crawl/submit": {"job_id": "", "accepted": False, "retry_after": 1.5}}
+    )
+    executor = EdgeCrawlExecutor(gateway)
+
+    submission = executor.submit(
+        [_work_item()], session_id="s", run_id="r", profile="split", idempotency_key="k"
+    )
+
+    assert isinstance(submission, CrawlSubmitResult)
+    assert submission.accepted is False
+    assert submission.job_id == ""
+    assert submission.retry_after_s == pytest.approx(1.5)
+
+
+def test_submit_accepted_defaults_true_when_absent() -> None:
+    """C2: отсутствие поля ``accepted`` трактуется как принятие (обратная совместимость)."""
+    gateway = _FakeGateway({"crawl/submit": {"job_id": "job-9"}})
+    executor = EdgeCrawlExecutor(gateway)
+
+    submission = executor.submit(
+        [_work_item()], session_id="s", run_id="r", profile="split", idempotency_key="k"
+    )
+
+    assert submission.accepted is True
+    assert submission.job_id == "job-9"
+    assert submission.retry_after_s is None
+
+
+def test_submit_retry_after_absent_is_none() -> None:
+    """C2: принятая подача без ``retry_after`` → ``retry_after_s is None``."""
+    gateway = _FakeGateway({"crawl/submit": {"job_id": "job-1", "accepted": True}})
+    executor = EdgeCrawlExecutor(gateway)
+
+    assert executor.submit(
+        [_work_item()], session_id="s", run_id="r", profile="split", idempotency_key="k"
+    ).retry_after_s is None
+
+
+def test_collect_rejects_non_public_url() -> None:
+    """C1: SSRF-перепроверка собранного URL — непубличный адрес отвергается ядром."""
+    gateway = _FakeGateway(
+        {
+            "crawl/collect": {
+                "items": [_item(url="http://127.0.0.1/secret")],
+                "done": True,
+            }
+        }
+    )
+    executor = EdgeCrawlExecutor(gateway)
+
+    with pytest.raises(RemoteContentError, match="небезопасный url"):
+        executor.collect("job-1")
+
+
+def test_collect_rejects_metadata_url() -> None:
+    """C1: metadata-эндпоинт облака отвергается на стороне ядра."""
+    gateway = _FakeGateway(
+        {
+            "crawl/collect": {
+                "items": [_item(url="http://169.254.169.254/latest/meta-data")],
+                "done": True,
+            }
+        }
+    )
+    executor = EdgeCrawlExecutor(gateway)
+
+    with pytest.raises(RemoteContentError, match="небезопасный url"):
+        executor.collect("job-1")
+
+
+def test_collect_accepts_public_url() -> None:
+    """C1: публичный URL проходит SSRF-перепроверку (не ложное срабатывание)."""
+    payload = b"ok"
+    gateway = _FakeGateway(
+        {
+            "crawl/collect": {
+                "items": [
+                    _item(
+                        raw=_raw(
+                            base64.b64encode(payload).decode("ascii"),
+                            claimed=content_hash(payload),
+                        )
+                    )
+                ],
+                "done": True,
+            }
+        }
+    )
+    executor = EdgeCrawlExecutor(gateway)
+
+    (item,) = executor.collect("job-1").items
+    assert item.url == URL_A  # https://docs.test/... — публичный
+    assert item.raw_bytes == payload

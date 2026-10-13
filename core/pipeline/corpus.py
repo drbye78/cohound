@@ -125,6 +125,11 @@ _FIELD_SEP = "\x1f"
 #: всегда даёт новые id (старые сборки не переиспользуются).
 _BUILD_ID_SCHEMA = "corpus-build-2"
 
+#: Phase 3 B2: максимум попыток подачи работ исполнителю при back-pressure
+#: (``accepted=False``). После исчерпания — изолированный ``FAILED`` (``source_unavailable``),
+#: а не тихий провал всего прогона.
+_SUBMIT_MAX_ATTEMPTS = 5
+
 
 @dataclass
 class IndexBuild:
@@ -181,6 +186,37 @@ def _as_text(value: Any) -> Any:
 def _now_iso() -> str:
     """Текущее время в ISO-8601 (UTC) — для провенанса элементов сеанса (L1a)."""
     return _dt.datetime.now(_dt.timezone.utc).isoformat()
+
+
+def _work_set_idempotency_key(work: Sequence[CrawlWorkItem]) -> str:
+    """Ключ идемпотентности по **набору работ** попытки (Phase 3 B2, детерминирован).
+
+    Ключ выводится из содержимого ``work`` (``product_id``/``url`` + применённые оси), а
+    не из ``session_id``: resume пропускает уже добытые URL, поэтому набор работ
+    сокращается → ключ меняется → edge создаёт **новое** задание для оставшихся/сбойных
+    URL (иначе он вернул бы старое терминальное задание и молча потерял новые работы).
+    Повторная подача идентичного набора даёт тот же ключ (идемпотентно). Идемпотентность —
+    **по набору работ**, не по сеансу.
+
+    Канонизация: ``sorted`` по ``(product_id, url)`` (уникальны в наборе) →
+    ``json.dumps(sort_keys=True, ensure_ascii=False)`` → :func:`short_hash`.
+    """
+    rows = sorted(
+        (
+            (
+                w.product_id,
+                w.url,
+                w.engine,
+                _as_text(w.fetch),
+                _as_text(w.strategy),
+                w.wait_for,
+            )
+            for w in work
+        ),
+        key=lambda row: (row[0], row[1]),
+    )
+    material = json.dumps(rows, sort_keys=True, ensure_ascii=False)
+    return short_hash(material, 24)
 
 
 def _resolve_package_id(plan: Any, package_id: str | None) -> str:
@@ -912,6 +948,9 @@ def build_corpus(
         недостающие результаты трактуются как ``source_unavailable`` при ingest. Возвращает
         карту ``(product_id, url) → CrawlResultItem``.
         """
+        # Вызывается только при наличии исполнителя (``if executor is not None``); assert
+        # сужает тип для статического анализа внутри замыкания.
+        assert executor is not None
         work: list[CrawlWorkItem] = []
         for product_id in products:
             for url in url_map.get(product_id, []):
@@ -946,16 +985,50 @@ def build_corpus(
         if not work:
             return {}
 
-        key = session or default_session_id(str(run_id or ""))
-        try:
-            handle = executor.submit(
-                work,
-                session_id=key,
-                run_id=str(run_id or ""),
-                profile=getattr(executor, "profile", None) or "split",
-                idempotency_key=key,
+        # B2: ``session_id`` стабилен на прогон, а ``idempotency_key`` — по набору работ
+        # этой попытки (resume сокращает набор → новый ключ → новое задание для остатка).
+        session_key = session or default_session_id(str(run_id or ""))
+        idempotency_key = _work_set_idempotency_key(work)
+        profile = getattr(executor, "profile", None) or "split"
+
+        # C2: подача с повтором при back-pressure (``accepted=False``), ограниченно.
+        handle = ""
+        accepted = False
+        for attempt in range(_SUBMIT_MAX_ATTEMPTS):
+            try:
+                submission = executor.submit(
+                    work,
+                    session_id=session_key,
+                    run_id=str(run_id or ""),
+                    profile=profile,
+                    idempotency_key=idempotency_key,
+                )
+            except Exception as exc:  # noqa: BLE001 — изоляция по контракту фазы
+                errors.append(f"executor.submit: {type(exc).__name__}: {exc}")
+                return {}
+            if submission.accepted:
+                handle = submission.job_id
+                accepted = True
+                break
+            # Back-pressure: подождать (сначала ``retry_after_s``, иначе интервал опроса).
+            if attempt + 1 < _SUBMIT_MAX_ATTEMPTS:
+                executor_sleep(
+                    submission.retry_after_s
+                    if submission.retry_after_s is not None
+                    else executor_poll_interval
+                )
+
+        if not accepted:
+            # Back-pressure не снят: изолированный сбой подачи (не тихий провал прогона);
+            # работы помечаются ``source_unavailable`` при ingest (результатов нет).
+            errors.append(
+                "executor.submit: back-pressure не снят после "
+                f"{_SUBMIT_MAX_ATTEMPTS} попыток (accepted=false)"
             )
-            # Опрос до терминального статуса (уже терминальное задание не пейсится).
+            return {}
+
+        # Опрос до терминального статуса (уже терминальное задание не пейсится).
+        try:
             progress = executor.status(handle)
             while progress.status in ACTIVE_JOB_STATUSES:
                 executor_sleep(executor_poll_interval)

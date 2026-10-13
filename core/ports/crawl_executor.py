@@ -27,6 +27,7 @@ __all__ = [
     "CrawlExecutorPort",
     "CrawlProgress",
     "CrawlResultItem",
+    "CrawlSubmitResult",
     "CrawlWorkItem",
 ]
 
@@ -115,13 +116,30 @@ class CrawlBatch:
     done: bool = True
 
 
+@dataclass(frozen=True)
+class CrawlSubmitResult:
+    """Результат подачи набора работ (back-pressure, Phase 3 B2/C2).
+
+    ``accepted=False`` — исполнитель отклонил подачу (напр. перегрузка/back-pressure):
+    ядро обязано подождать ``retry_after_s`` (если задано) и повторить подачу. При отказе
+    ``job_id`` — пустая строка; иначе — handle созданного (или ранее созданного по тому же
+    ключу идемпотентности) задания.
+    """
+
+    job_id: str
+    accepted: bool = True
+    retry_after_s: float | None = None
+
+
 @runtime_checkable
 class CrawlExecutorPort(Protocol):
     """Исполнение краула (``split``): submit → status → collect (+ cancel).
 
     Контракт транспорт-агностичен: локальный планировщик и edge-планировщик DMZ
-    взаимозаменяемы. ``submit`` идемпотентен по ``idempotency_key`` (повторная подача
-    того же набора работ не создаёт дублей). ``collect`` отдаёт **сырые байты** (I19).
+    взаимозаменяемы. ``submit`` идемпотентен по ``idempotency_key`` — **по набору работ**,
+    не по сеансу (повторная подача того же набора не создаёт дублей; изменившийся набор —
+    новое задание). ``submit`` возвращает :class:`CrawlSubmitResult` (в т.ч. ``accepted`` —
+    сигнал back-pressure). ``collect`` отдаёт **сырые байты** (I19).
     """
 
     version: str
@@ -134,8 +152,8 @@ class CrawlExecutorPort(Protocol):
         run_id: str,
         profile: str,
         idempotency_key: str,
-    ) -> str:
-        """Подаёт набор работ; возвращает ``job_id`` (handle задания)."""
+    ) -> CrawlSubmitResult:
+        """Подаёт набор работ; возвращает :class:`CrawlSubmitResult` (handle + back-pressure)."""
         ...
 
     def status(self, handle: str) -> CrawlProgress:

@@ -37,7 +37,9 @@ import base64
 import multiprocessing
 import os
 import sqlite3
+import sys
 import threading
+import time
 import uuid
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
@@ -104,6 +106,24 @@ JOB_FAILED = "failed"
 JOB_TERMINAL: frozenset[str] = frozenset(
     {JOB_COMPLETED, JOB_PARTIAL, JOB_CANCELLED, JOB_FAILED}
 )
+
+#: Placeholder-строка и параметры фильтра «задание нетерминально» для SQL (C4).
+#: Используется в recovery/claim/stop, чтобы элементы терминальных заданий не оживали.
+_TERMINAL_PLACEHOLDERS = ",".join("?" for _ in JOB_TERMINAL)
+_TERMINAL_PARAMS: tuple[str, ...] = tuple(sorted(JOB_TERMINAL))
+
+
+def _non_terminal_job_filter() -> str:
+    """SQL-фрагмент «элемент принадлежит нетерминальному заданию» (C4).
+
+    Подставляется в ``UPDATE``/``SELECT`` по ``edge_job_items``; параметры —
+    :data:`_TERMINAL_PARAMS`. Так recovery/claim/stop никогда не трогают элементы
+    заданий в терминальном статусе (``completed|partial|cancelled|failed``).
+    """
+    return (
+        "job_id IN (SELECT job_id FROM edge_jobs"
+        f" WHERE status NOT IN ({_TERMINAL_PLACEHOLDERS}))"
+    )
 
 #: Движки, исполняемые в отдельных процессах (тяжёлые/не форк-безопасные).
 _PROCESS_ENGINES: tuple[str, ...] = ("scrapy", "browser")
@@ -253,6 +273,24 @@ def _bool_int(value: Any, default: int = 0) -> int:
         return default
 
 
+def _pool_workers(pool: Any) -> list[Any]:
+    """Возвращает воркер-потоки/процессы пула для ограниченного join (C5b).
+
+    ``ThreadPoolExecutor`` хранит потоки в ``_threads``, ``ProcessPoolExecutor`` —
+    процессы в ``_processes`` (dict ``pid -> Process``). Атрибуты — приватные детали
+    stdlib, но стабильные; при их отсутствии возвращается пустой список (остановка
+    тогда опирается на таймауты адаптеров).
+    """
+    workers: list[Any] = []
+    threads = getattr(pool, "_threads", None)
+    if threads:
+        workers.extend(list(threads))
+    processes = getattr(pool, "_processes", None)
+    if processes:
+        workers.extend(list(processes.values()) if isinstance(processes, Mapping) else list(processes))
+    return workers
+
+
 # ---------------------------------------------------------------------------
 # Планировщик
 # ---------------------------------------------------------------------------
@@ -314,6 +352,10 @@ class EdgeScheduler:
         self._inflight = 0
         self._started = False
         self._stopped = False
+        #: Флаг реэнтрантности ``_dispatch`` (C5a): done-callback может сработать
+        #: синхронно из ``_submit_row`` и вызвать ``_dispatch`` повторно; флаг
+        #: гарантирует единственного активного диспетчера (без рекурсии).
+        self._dispatching = False
 
     # -- жизненный цикл --------------------------------------------------------
 
@@ -345,13 +387,14 @@ class EdgeScheduler:
             if conn is not None:
                 with conn:
                     conn.execute(
-                        "UPDATE edge_job_items SET status = ? WHERE status = ?",
-                        (ITEM_PENDING, ITEM_RUNNING),
+                        "UPDATE edge_job_items SET status = ? WHERE status = ?"
+                        f" AND {_non_terminal_job_filter()}",
+                        (ITEM_PENDING, ITEM_RUNNING, *_TERMINAL_PARAMS),
                     )
                 rows = conn.execute(
                     "SELECT job_id FROM edge_jobs WHERE status NOT IN "
-                    f"({','.join('?' for _ in JOB_TERMINAL)})",
-                    tuple(sorted(JOB_TERMINAL)),
+                    f"({_TERMINAL_PLACEHOLDERS})",
+                    _TERMINAL_PARAMS,
                 ).fetchall()
                 for row in rows:
                     self._recompute_job(conn, str(row["job_id"]))
@@ -717,21 +760,48 @@ class EdgeScheduler:
         process_pool: ProcessPoolExecutor | None,
         timeout: float | None,
     ) -> None:
-        """Сливает пулы: дожидается исполняемых задач, отменяет не начатые.
+        """Сливает пулы: снимает не начатые задачи и ограниченно ждёт запущенные (C5b).
 
-        ``shutdown(wait=True)`` финализирует уже запущенные фетчи (слоты не бросаются);
-        ``cancel_futures=True`` снимает ещё не начатые. ``timeout`` — **советующий** бюджет
-        (интерфейс-совместимость): жёсткий дедлайн обеспечивается таймаутами самих
-        адаптеров, а не планировщика.
+        * ``cancel_futures=True`` снимает ещё не начатые фьючеры;
+        * при ``timeout is None`` — ждём завершения запущенных воркеров без лимита
+          (``shutdown(wait=True)``);
+        * при заданном ``timeout`` — **ограниченный** join воркер-потоков/процессов по
+          дедлайну; если кто-то не завершился, пишем предупреждение в ``stderr`` и
+          продолжаем остановку (не висим молча). Жёсткий дедлайн самого фетча — на
+          стороне адаптеров (их таймауты), это лишь следствие.
         """
-        _ = timeout  # бюджет ожидания — на стороне адаптеров; см. докстринг
-        for pool in (thread_pool, process_pool):
-            if pool is None:
-                continue
+        pools = [pool for pool in (thread_pool, process_pool) if pool is not None]
+        if timeout is None:
+            for pool in pools:
+                try:
+                    pool.shutdown(wait=True, cancel_futures=True)
+                except Exception:  # noqa: BLE001 - останов обязан быть graceful
+                    pass
+            return
+
+        deadline = time.monotonic() + max(0.0, float(timeout))
+        for pool in pools:
             try:
-                pool.shutdown(wait=True, cancel_futures=True)
-            except Exception:  # noqa: BLE001 - останов обязан быть graceful
+                pool.shutdown(wait=False, cancel_futures=True)
+            except Exception:  # noqa: BLE001
                 pass
+        alive: list[Any] = []
+        for pool in pools:
+            for worker in _pool_workers(pool):
+                remaining = deadline - time.monotonic()
+                if remaining > 0:
+                    try:
+                        worker.join(remaining)
+                    except Exception:  # noqa: BLE001
+                        pass
+                if worker.is_alive():
+                    alive.append(worker)
+        if alive:
+            sys.stderr.write(
+                f"edge: scheduler.stop(): {len(alive)} воркер(ов) не завершились за "
+                f"{float(timeout)} с; продолжаю остановку "
+                "(жёсткий дедлайн фетча — на стороне адаптеров)\n"
+            )
 
     # -- recovery --------------------------------------------------------------
 
@@ -740,17 +810,22 @@ class EdgeScheduler:
 
         Зеркалит ``store.recover_crawl_session``: прерванный процесс не теряет
         намерения краула. Идемпотентно.
+
+        **Скоуп — только нетерминальные задания (C4).** Элементы заданий в терминальном
+        статусе не «оживают»: крах между claim и cancel не должен воскрешать элементы
+        отменённого/проваленного задания.
         """
         with self._lock:
             with conn:
                 conn.execute(
-                    "UPDATE edge_job_items SET status = ? WHERE status = ?",
-                    (ITEM_PENDING, ITEM_RUNNING),
+                    "UPDATE edge_job_items SET status = ? WHERE status = ?"
+                    f" AND {_non_terminal_job_filter()}",
+                    (ITEM_PENDING, ITEM_RUNNING, *_TERMINAL_PARAMS),
                 )
             rows = conn.execute(
                 "SELECT job_id FROM edge_jobs WHERE status NOT IN "
-                f"({','.join('?' for _ in JOB_TERMINAL)})",
-                tuple(sorted(JOB_TERMINAL)),
+                f"({_TERMINAL_PLACEHOLDERS})",
+                _TERMINAL_PARAMS,
             ).fetchall()
             for row in rows:
                 self._recompute_job(conn, str(row["job_id"]))
@@ -758,28 +833,44 @@ class EdgeScheduler:
     # -- диспетчеризация -------------------------------------------------------
 
     def _dispatch(self) -> None:
-        """Заполняет свободные слоты: атомарный claim ``pending`` → submit в пул."""
+        """Заполняет свободные слоты: атомарный claim ``pending`` → submit в пул.
+
+        **Без реэнтрантности (C5a).** Done-callback ``_on_done`` может сработать синхронно
+        прямо из ``_submit_row`` (future уже готов) и вызвать ``_dispatch`` повторно.
+        Флаг :attr:`_dispatching` делает активным ровно одного диспетчера: реэнтрантный
+        вызов сразу выходит, а внешний цикл продолжает добирать слоты (``_inflight`` уже
+        уменьшен callback-ом). Это исключает рекурсию/двойной claim.
+        """
         if not self._started:
             self.start()
             return
         with self._lock:
-            if self._stopped:
+            if self._stopped or self._dispatching:
                 return
-            while self._inflight < self._max_inflight():
-                row = self._claim_pending()
-                if row is None:
-                    break
-                self._inflight += 1
-                self._submit_row(row)
+            self._dispatching = True
+            try:
+                while self._inflight < self._max_inflight():
+                    row = self._claim_pending()
+                    if row is None:
+                        break
+                    self._inflight += 1
+                    self._submit_row(row)
+            finally:
+                self._dispatching = False
 
     def _claim_pending(self) -> sqlite3.Row | None:
-        """Атомарно берёт один ``pending``-элемент (под ``self._lock``: без гонок)."""
+        """Атомарно берёт один ``pending``-элемент (под ``self._lock``: без гонок).
+
+        Скоуп — только нетерминальные задания (C4): элементы терминального задания
+        (``completed|partial|cancelled|failed``) никогда не клеймятся.
+        """
         conn = self._conn
         assert conn is not None
         row = conn.execute(
             "SELECT * FROM edge_job_items WHERE status = ?"
+            f" AND {_non_terminal_job_filter()}"
             " ORDER BY job_id, product_id, url LIMIT 1",
-            (ITEM_PENDING,),
+            (ITEM_PENDING, *_TERMINAL_PARAMS),
         ).fetchone()
         if row is None:
             return None
@@ -860,12 +951,20 @@ class EdgeScheduler:
             self._dispatch()
 
     def _finish_fetched(self, row: sqlite3.Row, page: Any) -> None:
-        """Записывает блоб и метаданные успешного фетча (только если элемент ``running``)."""
+        """Записывает блоб и метаданные успешного фетча (только если элемент ``running``).
+
+        **Блоб пишется после подтверждённого перехода (C3).** Сначала выполняется
+        guard-``UPDATE ... WHERE status = RUNNING``; если он затронул 0 строк (элемент
+        отменён/снят, пока воркер фетчил), блоб **не** пишется — иначе он остался бы
+        сиротой. Content-addressed дедуп сохраняется: ``_write_blob`` идемпотентен по
+        ``{job_id}/{hash}.bin``.
+        """
         if page is None:
             self._finish_failed(row, "воркер вернул пустой результат")
             return
         content = bytes(getattr(page, "content", b"") or b"")
-        digest, blob_ref = self._write_blob(str(row["job_id"]), content)
+        digest = content_hash(content)
+        blob_ref = self._blob_ref(str(row["job_id"]), digest)
         engine = _opt_str(getattr(page, "engine", None)) or _opt_str(row["engine"])
         fetched_at = _opt_str(getattr(page, "fetched_at", None)) or self._clock()
         status_code = _opt_int(getattr(page, "status_code", None))
@@ -873,7 +972,7 @@ class EdgeScheduler:
         conn = self._conn
         assert conn is not None
         with conn:
-            conn.execute(
+            cursor = conn.execute(
                 "UPDATE edge_job_items SET status = ?, engine = ?, http_status = ?,"
                 " content_type = ?, fetched_at = ?, content_hash = ?, blob_ref = ?, error = NULL"
                 " WHERE job_id = ? AND product_id = ? AND url = ? AND status = ?",
@@ -891,6 +990,11 @@ class EdgeScheduler:
                     ITEM_RUNNING,
                 ),
             )
+        if (cursor.rowcount or 0) == 0:
+            # Элемент больше не ``running`` (отменён/восстановлен) — перехода не было,
+            # блоб не создаём: сирота не возникает (C3).
+            return
+        self._write_blob(str(row["job_id"]), content)
 
     def _finish_failed(self, row: sqlite3.Row, error: str) -> None:
         """Помечает элемент ``failed`` c текстом ошибки (только если он ``running``)."""
@@ -961,10 +1065,15 @@ class EdgeScheduler:
 
     # -- блоб-хранилище (content-addressed) ------------------------------------
 
+    @staticmethod
+    def _blob_ref(job_id: str, digest: str) -> str:
+        """Относительная ссылка блоба ``{job_id}/{hash}.bin`` (единый формат)."""
+        return f"{job_id}/{digest}.bin"
+
     def _write_blob(self, job_id: str, content: bytes) -> tuple[str, str]:
         """Пишет байты в ``{blob_dir}/{job_id}/{hash}.bin`` (атомарно); ``(hash, ref)``."""
         digest = content_hash(content)
-        ref = f"{job_id}/{digest}.bin"
+        ref = self._blob_ref(job_id, digest)
         path = self._blob_dir / ref
         path.parent.mkdir(parents=True, exist_ok=True)
         if not path.exists():

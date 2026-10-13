@@ -46,6 +46,7 @@ from core.adapters.crawl_scrapy import CrawlError, ScrapyCrawler
 from core.adapters.extract_document import DoclingDocumentExtractor
 from core.adapters.extract_html import HtmlExtractor
 from core.edge.config import EdgeRuntimeConfig, load_edge_runtime_config
+from core.edge.crawler_factory import crawler_factory
 from core.edge.scheduler import EdgeScheduler
 from core.edge.server import EdgeGateway, serve
 from core.ports.chunker import ChunkerPort
@@ -218,25 +219,6 @@ def _build_gateway(
     return gateway, crawlers, chunker
 
 
-def crawler_factory(engine: str) -> CrawlerPort:
-    """Собирает **свежий** краулер движка внутри воркер-процесса (Phase 3.4a).
-
-    Module-level и picklable: планировщик передаёт эту функцию в инициализатор
-    ``ProcessPoolExecutor``, и экземпляр строится **в самом процессе** — адаптеры не
-    picklable, а Playwright не форк-безопасен, поэтому живой объект не пересекает границу
-    процессов. ``http``/``scrapy``/``browser`` → соответствующий адаптер; неизвестный
-    движок → ``ValueError`` (честный сбой воркера, без тихой подмены движка).
-    """
-    key = str(engine).strip().lower()
-    if key == "http":
-        return HttpCrawler()
-    if key == "scrapy":
-        return ScrapyCrawler()
-    if key == "browser":
-        return BrowserCrawler()
-    raise ValueError(f"неизвестный движок краула: {engine!r}")
-
-
 def _build_scheduler(
     config: EdgeRuntimeConfig, crawlers: dict[str, CrawlerPort]
 ) -> EdgeScheduler:
@@ -244,10 +226,12 @@ def _build_scheduler(
 
     В карту in-process попадает **только** ``http`` (живой адаптер уже собран
     ``_build_gateway``); ``scrapy``/``browser`` исполняются в процессах через
-    :func:`crawler_factory` — и лишь если для движка задано положительное число слотов
-    (фильтрация внутри планировщика: ``config.workers[engine] > 0``). Конструирование
-    не стартует воркеры и не трогает диск (``start()``/БД — лениво), поэтому безопасно
-    и для ``--check``.
+    :func:`core.edge.crawler_factory.crawler_factory` — и лишь если для движка задано
+    положительное число слотов (фильтрация внутри планировщика: ``config.workers[engine] > 0``).
+    Фабрика вынесена в отдельный импортируемый модуль (B1): при ``python -m core.edge``
+    локальная фабрика имела бы ``__module__ == "__main__"`` и не была бы picklable для
+    ``ProcessPoolExecutor``. Конструирование не стартует воркеры и не трогает диск
+    (``start()``/БД — лениво), поэтому безопасно и для ``--check``.
     """
     in_process: dict[str, CrawlerPort] = {}
     http = crawlers.get("http")

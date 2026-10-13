@@ -36,13 +36,20 @@ from core.domain import (
     RunMode,
 )
 from core.pipeline import RunPlan
-from core.pipeline.corpus import IndexBuild, _derive_index_build_id, build_corpus
+from core.pipeline.corpus import (
+    IndexBuild,
+    _SUBMIT_MAX_ATTEMPTS,
+    _derive_index_build_id,
+    _work_set_idempotency_key,
+    build_corpus,
+)
 from core.pipeline.crawl_session import default_session_id
 from core.ports.crawl_executor import (
     CrawlBatch,
     CrawlExecutorPort,
     CrawlProgress,
     CrawlResultItem,
+    CrawlSubmitResult,
     CrawlWorkItem,
 )
 from core.ports.types import (
@@ -1585,6 +1592,8 @@ class _FakeExecutor:
         statuses: list[str] | None = None,
         collect_error: str | None = None,
         extra_items: list[CrawlResultItem] | None = None,
+        accept_sequence: list[bool] | None = None,
+        retry_after_s: float | None = None,
     ) -> None:
         self.pages = dict(pages or {})
         self.errors = dict(errors or {})
@@ -1596,7 +1605,10 @@ class _FakeExecutor:
         self.submit_kwargs: list[dict[str, Any]] = []
         self.status_calls: list[str] = []
         self.collect_cursors: list[str | None] = []
+        self.accept_sequence = accept_sequence
+        self.retry_after_s = retry_after_s
         self._status_i = 0
+        self._accept_i = 0
 
     def submit(
         self,
@@ -1606,7 +1618,7 @@ class _FakeExecutor:
         run_id: str,
         profile: str,
         idempotency_key: str,
-    ) -> str:
+    ) -> CrawlSubmitResult:
         self.submits.append(list(items))
         self.submit_kwargs.append(
             {
@@ -1616,7 +1628,17 @@ class _FakeExecutor:
                 "idempotency_key": idempotency_key,
             }
         )
-        return "job-1"
+        if self.accept_sequence is None:
+            accepted = True
+        else:
+            pos = min(self._accept_i, len(self.accept_sequence) - 1)
+            accepted = self.accept_sequence[pos]
+            self._accept_i += 1
+        return CrawlSubmitResult(
+            job_id="job-1" if accepted else "",
+            accepted=accepted,
+            retry_after_s=self.retry_after_s if not accepted else None,
+        )
 
     def status(self, handle: str) -> CrawlProgress:
         value = self.statuses[min(self._status_i, len(self.statuses) - 1)]
@@ -1700,7 +1722,11 @@ def test_executor_ingests_marks_and_finalizes(tmp_path: Path) -> None:
         assert kwargs["session_id"] == SESSION_ID
         assert kwargs["run_id"] == RUN_ID
         assert kwargs["profile"] == "split"
-        assert kwargs["idempotency_key"] == SESSION_ID
+        # B2: ключ идемпотентности — по набору работ, НЕ по сеансу.
+        assert kwargs["idempotency_key"] != SESSION_ID
+        assert kwargs["idempotency_key"] == _work_set_idempotency_key(
+            executor.submits[0]
+        )
     finally:
         store.close()
 
@@ -1950,5 +1976,127 @@ def test_executor_ignores_local_crawler_even_if_available(tmp_path: Path) -> Non
         )
         assert local.calls == []
         assert _build_of(result).docs[0].content_hash == content_hash(b"from executor")
+    finally:
+        store.close()
+
+
+def test_work_set_idempotency_key_is_content_based() -> None:
+    """B2: ключ детерминирован по содержимому набора работ (порядко-независим, чувствителен)."""
+    a = CrawlWorkItem(product_id="p1", url=URL_P1_A)
+    b = CrawlWorkItem(product_id="p1", url=URL_P1_B)
+    # Порядко-независимость: один и тот же набор → один ключ.
+    assert _work_set_idempotency_key([a, b]) == _work_set_idempotency_key([b, a])
+    # Чувствительность к содержимому набора: изменился набор → другой ключ.
+    assert _work_set_idempotency_key([a, b]) != _work_set_idempotency_key([a])
+    # Повторная подача идентичного набора идемпотентна (тот же ключ).
+    assert _work_set_idempotency_key([a]) == _work_set_idempotency_key(
+        [CrawlWorkItem(product_id="p1", url=URL_P1_A)]
+    )
+
+
+def test_executor_retry_after_partial_resume_new_key(tmp_path: Path) -> None:
+    """B2: после частичного успеха повторная подача несёт только сбойные URL и новый ключ.
+
+    Первый прогон: ``URL_P1_A`` добыт (retained raw), ``URL_P1_B`` сбойный (без raw). Второй
+    прогон в том же сеансе: ``A`` resum'ится (не подаётся), ``B`` подаётся заново — набор
+    работ изменился, значит и ``idempotency_key`` другой (edge создаст НОВОЕ задание, а не
+    вернёт старое терминальное). Без фикса (ключ == session_id) ``B`` остался бы не добыт.
+    """
+    store = SqliteStore(":memory:")
+    _make_run(store)
+    first_executor = _FakeExecutor(pages={URL_P1_A: b"ok-a"}, errors={URL_P1_B: "boom"})
+    try:
+        _build(
+            tmp_path,
+            pages={},
+            urls={"p1": [URL_P1_A, URL_P1_B]},
+            executor=first_executor,
+            executor_poll_interval=0.0,
+            executor_sleep=lambda _s: None,
+            store=store,
+            run_id=RUN_ID,
+        )
+        by_url = {i.url: i for i in _items(store)}
+        assert by_url[URL_P1_A].status is CrawlItemStatus.FETCHED
+        assert by_url[URL_P1_B].status is CrawlItemStatus.FAILED
+        first_key = first_executor.submit_kwargs[0]["idempotency_key"]
+
+        second_executor = _FakeExecutor(pages={URL_P1_B: b"ok-b"})
+        _build(
+            tmp_path,
+            pages={},
+            urls={"p1": [URL_P1_A, URL_P1_B]},
+            executor=second_executor,
+            executor_poll_interval=0.0,
+            executor_sleep=lambda _s: None,
+            store=store,
+            run_id=RUN_ID,
+        )
+        assert len(second_executor.submits) == 1
+        (work,) = second_executor.submits[0]
+        assert work.url == URL_P1_B  # только сбойный URL (A резюмирован из retained raw)
+        second_key = second_executor.submit_kwargs[0]["idempotency_key"]
+        assert second_key != first_key  # набор работ изменился → новое задание
+        assert second_key == _work_set_idempotency_key(second_executor.submits[0])
+        assert {i.url: i for i in _items(store)}[URL_P1_B].status is CrawlItemStatus.FETCHED
+    finally:
+        store.close()
+
+
+def test_executor_retries_submit_on_backpressure(tmp_path: Path) -> None:
+    """C2: ``accepted=false`` → ядро ждёт ``retry_after`` и повторяет подачу, пока не примут."""
+    store = SqliteStore(":memory:")
+    _make_run(store)
+    slept: list[float] = []
+    executor = _FakeExecutor(
+        pages={URL_P1_A: b"x"},
+        accept_sequence=[False, True],
+        retry_after_s=0.25,
+    )
+    try:
+        result = _build(
+            tmp_path,
+            pages={},
+            urls={"p1": [URL_P1_A]},
+            executor=executor,
+            executor_poll_interval=0.0,
+            executor_sleep=slept.append,
+            store=store,
+            run_id=RUN_ID,
+        )
+        assert result.errors == []
+        assert len(executor.submits) == 2  # отклонена, затем принята
+        assert slept == [0.25]  # пауза по retry_after_s
+        assert next(iter(_items(store))).status is CrawlItemStatus.FETCHED
+    finally:
+        store.close()
+
+
+def test_executor_backpressure_exhausted_marks_failed(tmp_path: Path) -> None:
+    """C2: persistent ``accepted=false`` → ограниченные попытки затем ясный ``FAILED``.
+
+    Не тихий провал всего прогона: фаза завершается ``ok`` с изолированной ошибкой, а работы
+    помечаются ``source_unavailable`` (результатов нет).
+    """
+    store = SqliteStore(":memory:")
+    _make_run(store)
+    executor = _FakeExecutor(pages={}, accept_sequence=[False])  # всегда отклоняет
+    try:
+        result = _build(
+            tmp_path,
+            pages={},
+            urls={"p1": [URL_P1_A]},
+            executor=executor,
+            executor_poll_interval=0.0,
+            executor_sleep=lambda _s: None,
+            store=store,
+            run_id=RUN_ID,
+        )
+        assert result.status == "ok"
+        assert len(executor.submits) == _SUBMIT_MAX_ATTEMPTS
+        assert any("back-pressure" in err for err in result.errors)
+        item = next(iter(_items(store)))
+        assert item.status is CrawlItemStatus.FAILED
+        assert item.error_kind == FailureKind.SOURCE_UNAVAILABLE.value
     finally:
         store.close()
