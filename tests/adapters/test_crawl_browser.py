@@ -9,6 +9,8 @@ cookie-мост, родовую детекцию challenge (по статусу)
 
 from __future__ import annotations
 
+import sys
+import types
 from pathlib import Path
 from typing import Any
 
@@ -546,3 +548,140 @@ def test_version_and_port_conformance() -> None:
     assert crawler.supports_browser is True
     assert isinstance(crawler, CrawlerPort)
     assert callable(crawler.fetch)
+
+
+# ---------------------------------------------------------------------------
+# Запуск браузера: automation-сигнал (persistent) vs CDP (P4)
+# ---------------------------------------------------------------------------
+
+
+class _FakeContext:
+    """Мини-дублёр persistent-context: нужен только ``close``."""
+
+    def close(self) -> None:
+        pass
+
+
+class _FakeBrowser:
+    """Мини-дублёр CDP-браузера: ``contexts``/``new_context``/``close``."""
+
+    def __init__(self) -> None:
+        self.contexts: list[Any] = []
+
+    def new_context(self) -> _FakeContext:
+        return _FakeContext()
+
+    def close(self) -> None:
+        pass
+
+
+class _FakeChromium:
+    """Перехватывает kwargs запуска обоих взаимоисключающих путей backend."""
+
+    def __init__(self) -> None:
+        self.persistent_calls: list[dict[str, Any]] = []
+        self.cdp_calls: list[str] = []
+
+    def launch_persistent_context(self, **kwargs: Any) -> _FakeContext:
+        self.persistent_calls.append(kwargs)
+        return _FakeContext()
+
+    def connect_over_cdp(self, url: str) -> _FakeBrowser:
+        self.cdp_calls.append(url)
+        return _FakeBrowser()
+
+
+class _FakeEngine:
+    def __init__(self, chromium: _FakeChromium) -> None:
+        self.chromium = chromium
+
+    def stop(self) -> None:
+        pass
+
+
+class _FakeSyncPlaywright:
+    def __init__(self, chromium: _FakeChromium) -> None:
+        self._chromium = chromium
+
+    def start(self) -> _FakeEngine:
+        return _FakeEngine(self._chromium)
+
+
+@pytest.fixture()
+def fake_chromium(monkeypatch: pytest.MonkeyPatch) -> _FakeChromium:
+    """Подменяет ``playwright`` лёгким фейком; возвращает перехватчик kwargs запуска.
+
+    ``_playwright_available`` форсируется в ``True``, а ``playwright``/``playwright.sync_api``
+    кладутся в ``sys.modules`` — реальный браузер и сеть не задействуются.
+    """
+    import core.adapters.crawl_browser as mod
+
+    chromium = _FakeChromium()
+    sync_api = types.ModuleType("playwright.sync_api")
+    sync_api.sync_playwright = lambda: _FakeSyncPlaywright(chromium)  # type: ignore[attr-defined]
+    package = types.ModuleType("playwright")
+    package.sync_api = sync_api  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "playwright", package)
+    monkeypatch.setitem(sys.modules, "playwright.sync_api", sync_api)
+    monkeypatch.setattr(mod, "_playwright_available", lambda: True)
+    return chromium
+
+
+def test_persistent_launch_neutralizes_automation_flag(fake_chromium: _FakeChromium) -> None:
+    """persistent-ветка: ``args`` снимает automation, ``ignore_default_args`` убирает дефолт."""
+    import core.adapters.crawl_browser as mod
+
+    backend = mod._PlaywrightBackend(
+        cdp_url=None, user_data_dir=None, headless=False, channel=None, timeout_ms=1000,
+    )
+    try:
+        backend._ensure_context()
+    finally:
+        backend.close()
+
+    assert len(fake_chromium.persistent_calls) == 1
+    kwargs = fake_chromium.persistent_calls[0]
+    assert kwargs["args"] == ["--disable-blink-features=AutomationControlled"]
+    assert kwargs["ignore_default_args"] == ["--enable-automation"]
+    # Единый источник: kwargs совпадают с модульными константами.
+    assert kwargs["args"] == list(mod._LAUNCH_ARGS)
+    assert kwargs["ignore_default_args"] == list(mod._IGNORE_DEFAULT_ARGS)
+    # Политика дефолтов не тронута: headed (``headless=False``) пробрасывается как есть.
+    assert kwargs["headless"] is False
+    assert kwargs["user_data_dir"]  # временный профиль создан
+
+
+def test_cdp_branch_connects_without_persistent_launch(
+    fake_chromium: _FakeChromium,
+) -> None:
+    """CDP-ветка: ``connect_over_cdp``, persistent-context (и его флаги) не создаётся."""
+    import core.adapters.crawl_browser as mod
+
+    backend = mod._PlaywrightBackend(
+        cdp_url="http://127.0.0.1:9222", user_data_dir=None, headless=False,
+        channel=None, timeout_ms=1000,
+    )
+    try:
+        backend._ensure_context()
+    finally:
+        backend.close()
+
+    assert fake_chromium.cdp_calls == ["http://127.0.0.1:9222"]
+    assert fake_chromium.persistent_calls == []
+
+
+def test_crawler_real_backend_uses_launch_flags(fake_chromium: _FakeChromium) -> None:
+    """Сквозь ``BrowserCrawler`` реальный backend получает те же launch-флаги (P4)."""
+    import core.adapters.crawl_browser as mod  # noqa: F401
+
+    crawler = BrowserCrawler()  # без backend → ленивый реальный Playwright
+    try:
+        backend: Any = crawler._ensure_backend()
+        backend._ensure_context()
+    finally:
+        crawler.close()
+
+    assert len(fake_chromium.persistent_calls) == 1
+    kwargs = fake_chromium.persistent_calls[0]
+    assert kwargs["args"] == ["--disable-blink-features=AutomationControlled"]
+    assert kwargs["ignore_default_args"] == ["--enable-automation"]

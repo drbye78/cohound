@@ -29,6 +29,16 @@
     jittered-backoff, а при исчерпании — возврат **уже полученного браузерного рендера** (без
     лишнего честного фетча). **Сбой транспорта — fallback на honest** (живой рендер).
 
+**Запуск браузера и automation-сигнал.** Антибот-класс публичных сайтов требует **headed**
+браузера (``headless=False``; headless распознаётся отдельно) и снятия артефакта автоматизации:
+Playwright при ``launch``/``launch_persistent_context`` добавляет ``--enable-automation``, из-за
+чего ``navigator.webdriver === true`` и страница отдаётся как interstitial (401) **без запуска
+штатного JS-челленджа**. Поэтому собственный persistent-context запускается с
+``ignore_default_args=["--enable-automation"]`` **и**
+``args=["--disable-blink-features=AutomationControlled"]`` (в одиночку недостаточно; см.
+``_LAUNCH_ARGS``/``_IGNORE_DEFAULT_ARGS``). CDP-ветка (``connect_over_cdp``) не затрагивается —
+браузер запускает оператор. Это исполнение механизма самой публичной страницы, а не обход (§10).
+
 **Детекция challenge — родовая.** Никаких вендорных строк/префиксов (§1.3/A2); специфика
 сайтов — данные в ``packages/``. Два сигнала:
 
@@ -127,6 +137,17 @@ _REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
 INTERSTITIAL_MIN_RENDER_BYTES = 512
 #: Порог interstitial: HTTP-тело короче ``ratio * len(rendered)`` ⇒ похоже на заглушку.
 INTERSTITIAL_LENGTH_RATIO = 0.25
+
+#: Флаги собственного запуска браузера (persistent-ветка; CDP-ветку не затрагивают).
+#: Playwright по умолчанию добавляет ``--enable-automation`` → ``navigator.webdriver=true``,
+#: по которому публичные антибот-системы отдают interstitial без челленджа. Нейтрализуем
+#: артефакт автоматизации: ``--disable-blink-features=AutomationControlled`` (единственный
+#: необходимый и достаточный по замерам). Это НЕ подделка: реальный JS-движок исполняет
+#: штатный челлендж страницы как обычный браузер; §10 (только публичные сайты).
+_LAUNCH_ARGS: tuple[str, ...] = ("--disable-blink-features=AutomationControlled",)
+#: Убирает дефолтный ``--enable-automation`` (в одиночку не помогает — нужен вместе с
+#: ``_LAUNCH_ARGS``; см. замеры в докстринге модуля).
+_IGNORE_DEFAULT_ARGS: tuple[str, ...] = ("--enable-automation",)
 
 
 class CrawlUnavailable(CrawlError):
@@ -256,8 +277,11 @@ class _PlaywrightBackend:
     """Реальный драйвер Playwright: один контекст, новые страницы на сессию.
 
     Запускается лениво (при первом ``open``); взаимоисключающие пути: ``cdp_url`` →
-    подключение к существующему браузеру, иначе persistent-context (``user_data_dir``;
-    при отсутствии — временный профиль). Ошибка запуска (нет бинарей и т.п.) →
+    подключение к существующему браузеру (запуск — на операторе; automation-флаги не
+    применяются), иначе persistent-context (``user_data_dir``; при отсутствии — временный
+    профиль). Для антибот-класса нужен **headed** (``headless=False``, дефолт) и снятие
+    automation-сигнала: persistent-запуск идёт с ``_IGNORE_DEFAULT_ARGS``/``_LAUNCH_ARGS``
+    (см. докстринг модуля). Ошибка запуска (нет бинарей и т.п.) →
     :class:`CrawlUnavailable` с понятным текстом.
     """
 
@@ -315,6 +339,10 @@ class _PlaywrightBackend:
                 kwargs: dict[str, Any] = {
                     "user_data_dir": user_data_dir,
                     "headless": self._headless,
+                    # Снятие automation-сигнала (см. ``_LAUNCH_ARGS``/докстринг модуля):
+                    # без него публичные антибот-системы отдают interstitial без челленджа.
+                    "ignore_default_args": list(_IGNORE_DEFAULT_ARGS),
+                    "args": list(_LAUNCH_ARGS),
                 }
                 if self._channel:
                     kwargs["channel"] = self._channel
