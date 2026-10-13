@@ -41,6 +41,10 @@ class FetchPlan:
     диапазон задержек ``rate_limit``. Единый value-объект резолвится в pipeline
     (:func:`core.pipeline.fetch_plan.resolve_fetch_plan`) и передаётся и краулеру, и
     экстрактору — адаптеры сами план не строят.
+
+    ``engine`` — идентификатор движка/транспорта краула, фактически использованного для
+    страницы (напр. ``http``/``scrapy``/``browser``): свободная строка-данные, валидируется
+    composition root, **не** доменный enum.
     """
 
     fetch: FetchMode = FetchMode.HTTP
@@ -48,11 +52,16 @@ class FetchPlan:
     wait_for: str | None = None
     strategy: CrawlStrategy = CrawlStrategy.AUTO
     rate_limit: RateLimitSpec | None = None
+    engine: str | None = None
 
 
 @dataclass(frozen=True)
 class RawPage:
-    """Сырая страница — retention-единица (§3.2). ``content`` хранится как байты."""
+    """Сырая страница — retention-единица (§3.2). ``content`` хранится как байты.
+
+    ``engine`` — идентификатор движка/транспорта, фактически доставившего байты (свободная
+    строка-данные, валидируется composition root; **не** доменный enum).
+    """
 
     url: str
     content: bytes
@@ -61,6 +70,7 @@ class RawPage:
     lang: str | None = None
     status_code: int | None = None
     content_type: str | None = None
+    engine: str | None = None
 
 
 @dataclass(frozen=True)

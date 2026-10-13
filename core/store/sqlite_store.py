@@ -28,6 +28,10 @@ from core.domain import (
     CorpusChunk,
     CorpusDoc,
     CrawlAttempt,
+    CrawlItemStatus,
+    CrawlSession,
+    CrawlSessionItem,
+    CrawlSessionStatus,
     EndpointKind,
     EvidenceType,
     FetchStatus,
@@ -945,6 +949,335 @@ class SqliteStore:
             params.append(product_id)
         with self.conn:
             self.conn.execute(sql, params)
+
+    # -- crawl_sessions (Lane B: durable намерение + агрегат прогресса) -- #
+    #: Колонки ``crawl_sessions`` (совпадают с полями ``CrawlSession``).
+    _CRAWL_SESSION_COLUMNS = (
+        "session_id",
+        "run_id",
+        "profile",
+        "status",
+        "created_at",
+        "started_at",
+        "finished_at",
+        "total",
+        "pending",
+        "running",
+        "fetched",
+        "failed",
+        "cancelled",
+        "error",
+        "options_json",
+        "provenance_json",
+    )
+
+    #: Метаданные сеанса, обновляемые при ``ON CONFLICT`` (B2): счётчики прогресса
+    #: (``total/pending/running/fetched/failed/cancelled``) сюда **не** входят — их
+    #: единственные владельцы ``upsert_crawl_session_item``/``recover_crawl_session``.
+    _CRAWL_SESSION_METADATA_COLUMNS = (
+        "run_id",
+        "profile",
+        "status",
+        "created_at",
+        "started_at",
+        "finished_at",
+        "error",
+        "options_json",
+        "provenance_json",
+    )
+
+    #: Колонки ``crawl_session_items`` (совпадают с полями ``CrawlSessionItem``).
+    _CRAWL_ITEM_COLUMNS = (
+        "session_id",
+        "product_id",
+        "url",
+        "status",
+        "attempts",
+        "engine",
+        "kind",
+        "fetch_mode",
+        "extract_route",
+        "strategy",
+        "http_status",
+        "content_type",
+        "lang",
+        "content_hash",
+        "raw_path",
+        "error_kind",
+        "error",
+        "first_seen",
+        "last_attempt",
+    )
+
+    @staticmethod
+    def _row_to_crawl_session(row: sqlite3.Row) -> CrawlSession:
+        """Восстанавливает ``CrawlSession`` из строки ``crawl_sessions``."""
+        return CrawlSession(
+            session_id=row["session_id"],
+            run_id=row["run_id"],
+            profile=row["profile"],
+            status=CrawlSessionStatus(row["status"]),
+            created_at=row["created_at"],
+            started_at=row["started_at"],
+            finished_at=row["finished_at"],
+            total=int(row["total"] or 0),
+            pending=int(row["pending"] or 0),
+            running=int(row["running"] or 0),
+            fetched=int(row["fetched"] or 0),
+            failed=int(row["failed"] or 0),
+            cancelled=int(row["cancelled"] or 0),
+            error=row["error"],
+            options_json=row["options_json"],
+            provenance_json=row["provenance_json"],
+        )
+
+    @staticmethod
+    def _row_to_crawl_item(row: sqlite3.Row) -> CrawlSessionItem:
+        """Восстанавливает ``CrawlSessionItem`` из строки ``crawl_session_items``."""
+        attempts = row["attempts"]
+        return CrawlSessionItem(
+            session_id=row["session_id"],
+            product_id=row["product_id"],
+            url=row["url"],
+            status=CrawlItemStatus(row["status"]),
+            attempts=0 if attempts is None else int(attempts),
+            engine=row["engine"],
+            kind=row["kind"],
+            fetch_mode=row["fetch_mode"],
+            extract_route=row["extract_route"],
+            strategy=row["strategy"],
+            http_status=row["http_status"],
+            content_type=row["content_type"],
+            lang=row["lang"],
+            content_hash=row["content_hash"],
+            raw_path=row["raw_path"],
+            error_kind=row["error_kind"],
+            error=row["error"],
+            first_seen=row["first_seen"],
+            last_attempt=row["last_attempt"],
+        )
+
+    def upsert_crawl_session(self, session: CrawlSession) -> None:
+        """Upsert строки ``crawl_sessions`` по PK ``session_id`` (полная запись метаданных).
+
+        ``ON CONFLICT DO UPDATE`` (не ``INSERT OR REPLACE``): REPLACE удалял бы строку, а с
+        ней — по FK — ссылающиеся элементы сеанса. При INSERT счётчики берутся из модели
+        (первичная запись); при конфликте counter-колонки **исключены из SET** (B2) — их
+        владельцы :meth:`upsert_crawl_session_item`/:meth:`recover_crawl_session`, иначе
+        stale-модель обнуляла бы прогресс.
+        """
+        placeholders = ", ".join("?" for _ in self._CRAWL_SESSION_COLUMNS)
+        updates = ", ".join(
+            f"{name} = excluded.{name}"
+            for name in self._CRAWL_SESSION_METADATA_COLUMNS
+        )
+        values = (
+            session.session_id,
+            session.run_id,
+            session.profile,
+            _as_text(session.status),
+            session.created_at,
+            session.started_at,
+            session.finished_at,
+            session.total,
+            session.pending,
+            session.running,
+            session.fetched,
+            session.failed,
+            session.cancelled,
+            session.error,
+            session.options_json,
+            session.provenance_json,
+        )
+        with self.conn:
+            self.conn.execute(
+                f"INSERT INTO crawl_sessions ({', '.join(self._CRAWL_SESSION_COLUMNS)})"
+                f" VALUES ({placeholders}) ON CONFLICT(session_id) DO UPDATE SET {updates}",
+                values,
+            )
+
+    def get_crawl_session(self, session_id: str) -> CrawlSession | None:
+        """Возвращает сеанс краула как доменную ``CrawlSession`` или ``None``."""
+        row = self.conn.execute(
+            "SELECT * FROM crawl_sessions WHERE session_id = ?", (session_id,)
+        ).fetchone()
+        if row is None:
+            return None
+        return self._row_to_crawl_session(row)
+
+    def update_crawl_session_status(
+        self,
+        session_id: str,
+        status: CrawlSessionStatus,
+        *,
+        started_at: str | None = None,
+        finished_at: str | None = None,
+        error: str | None = None,
+    ) -> None:
+        """Частичный upsert жизненного цикла сеанса (идемпотентный).
+
+        Переданные (не ``None``) поля перекрывают текущие (``COALESCE``); прочие сохраняются.
+        Счётчики прогресса не трогаются — их ведёт :meth:`upsert_crawl_session_item` /
+        :meth:`recover_crawl_session`.
+
+        Семантика «переход в ``running``/``created`` очищает признаки завершённости» (C3):
+        при таком переходе ``finished_at`` и ``error`` сбрасываются в ``NULL`` (если не
+        переданы явно) — иначе ``completed → running`` оставлял бы старый ``finished_at``.
+        """
+        resolved = CrawlSessionStatus(_as_text(status))
+        # При возобновлении/старте сеанс вновь «не завершён»: очищаем метки финала.
+        if resolved in {CrawlSessionStatus.RUNNING, CrawlSessionStatus.CREATED}:
+            finished_clause = "finished_at = ?"
+            error_clause = "error = ?"
+        else:
+            finished_clause = "finished_at = COALESCE(?, finished_at)"
+            error_clause = "error = COALESCE(?, error)"
+        with self.conn:
+            self.conn.execute(
+                "UPDATE crawl_sessions SET"
+                " status = ?,"
+                " started_at = COALESCE(?, started_at),"
+                f" {finished_clause},"
+                f" {error_clause}"
+                " WHERE session_id = ?",
+                (
+                    resolved.value,
+                    started_at,
+                    finished_at,
+                    error,
+                    session_id,
+                ),
+            )
+
+    def _recompute_crawl_session_counters(self, session_id: str) -> None:
+        """Пересчитывает и персистит агрегаты сеанса из его элементов (полный recount).
+
+        Вызывается **внутри** транзакции вызывающего: даёт простую и корректную поддержку
+        счётчиков без риска расхождения инкрементов. При отсутствии элементов обнуляет.
+        """
+        counts = {s.value: 0 for s in CrawlItemStatus}
+        total = 0
+        for row in self.conn.execute(
+            "SELECT status, COUNT(*) AS n FROM crawl_session_items WHERE session_id = ?"
+            " GROUP BY status",
+            (session_id,),
+        ):
+            n = int(row["n"])
+            counts[row["status"]] = n
+            total += n
+        self.conn.execute(
+            "UPDATE crawl_sessions SET total = ?, pending = ?, running = ?,"
+            " fetched = ?, failed = ?, cancelled = ? WHERE session_id = ?",
+            (
+                total,
+                counts[CrawlItemStatus.PENDING.value],
+                counts[CrawlItemStatus.RUNNING.value],
+                counts[CrawlItemStatus.FETCHED.value],
+                counts[CrawlItemStatus.FAILED.value],
+                counts[CrawlItemStatus.CANCELLED.value],
+                session_id,
+            ),
+        )
+
+    def upsert_crawl_session_item(self, item: CrawlSessionItem) -> None:
+        """Upsert элемента сеанса по PK ``(session_id, product_id, url)`` (атомарно).
+
+        В **одной** транзакции пишет строку элемента и пересчитывает агрегаты сеанса
+        (полный recount из элементов) — прогресс не имеет разрывов. Требует существующего
+        сеанса (FK на ``crawl_sessions``).
+        """
+        placeholders = ", ".join("?" for _ in self._CRAWL_ITEM_COLUMNS)
+        values = (
+            item.session_id,
+            item.product_id,
+            item.url,
+            _as_text(item.status),
+            item.attempts,
+            item.engine,
+            item.kind,
+            item.fetch_mode,
+            item.extract_route,
+            item.strategy,
+            item.http_status,
+            item.content_type,
+            item.lang,
+            item.content_hash,
+            item.raw_path,
+            item.error_kind,
+            item.error,
+            item.first_seen,
+            item.last_attempt,
+        )
+        with self.conn:
+            self.conn.execute(
+                f"INSERT OR REPLACE INTO crawl_session_items"
+                f" ({', '.join(self._CRAWL_ITEM_COLUMNS)}) VALUES ({placeholders})",
+                values,
+            )
+            self._recompute_crawl_session_counters(item.session_id)
+
+    def iter_crawl_session_items(
+        self,
+        session_id: str,
+        *,
+        product_id: str | None = None,
+        status: CrawlItemStatus | None = None,
+    ) -> Iterator[CrawlSessionItem]:
+        """Итерирует элементы сеанса; порядок ``product_id, url`` (детерминизм)."""
+        sql = "SELECT * FROM crawl_session_items WHERE session_id = ?"
+        params: list[Any] = [session_id]
+        if product_id is not None:
+            sql += " AND product_id = ?"
+            params.append(product_id)
+        if status is not None:
+            sql += " AND status = ?"
+            params.append(CrawlItemStatus(_as_text(status)).value)
+        sql += " ORDER BY product_id, url"
+        for row in self.conn.execute(sql, params):
+            yield self._row_to_crawl_item(row)
+
+    def crawl_session_counts(self, session_id: str) -> dict[str, int]:
+        """Число элементов сеанса по каждому статусу ``CrawlItemStatus``.
+
+        Ключи — все пять статусов элемента (отсутствующие — ``0``); форма стабильна.
+        """
+        counts = {s.value: 0 for s in CrawlItemStatus}
+        for row in self.conn.execute(
+            "SELECT status, COUNT(*) AS n FROM crawl_session_items WHERE session_id = ?"
+            " GROUP BY status",
+            (session_id,),
+        ):
+            counts[row["status"]] = int(row["n"])
+        return counts
+
+    def recover_crawl_session(self, session_id: str) -> int:
+        """Recovery-on-open: ``running`` → ``pending`` + пересчёт счётчиков (одна транзакция).
+
+        Возвращает число восстановленных элементов. Идемпотентен: повторный вызов не находит
+        ``running`` и возвращает ``0``.
+        """
+        with self.conn:
+            cursor = self.conn.execute(
+                "UPDATE crawl_session_items SET status = ? WHERE session_id = ? AND status = ?",
+                (
+                    CrawlItemStatus.PENDING.value,
+                    session_id,
+                    CrawlItemStatus.RUNNING.value,
+                ),
+            )
+            recovered = cursor.rowcount if cursor.rowcount and cursor.rowcount > 0 else 0
+            self._recompute_crawl_session_counters(session_id)
+        return recovered
+
+    def clear_crawl_session(self, session_id: str) -> None:
+        """Удаляет элементы сеанса, затем сам сеанс (одна транзакция)."""
+        with self.conn:
+            self.conn.execute(
+                "DELETE FROM crawl_session_items WHERE session_id = ?", (session_id,)
+            )
+            self.conn.execute(
+                "DELETE FROM crawl_sessions WHERE session_id = ?", (session_id,)
+            )
 
     def read_manifest(self, run_id: str) -> RunManifest:
         """Собирает ``RunManifest`` из строки ``runs`` (+ ``llm_scenarios``).

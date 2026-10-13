@@ -89,6 +89,10 @@ def main() -> int:
         "целостность status-dictionary.yaml",
         lambda: assert_dictionary_integrity(ROOT / "docs" / "status-dictionary.yaml"),
     )
+    check(
+        "crawl-сеанс: enum↔словарь (crawl_session_status/crawl_item_status)",
+        lambda: _crawl_session_dict_mirror(),
+    )
 
     section("Пакет категории §4.2 / когорта §1.6")
     check(
@@ -585,15 +589,27 @@ def _ports_type_reuse() -> None:
         raise AssertionError("extractor ExtractedDoc должен быть ports.types.ExtractedDoc")
 
 
+def _crawl_session_dict_mirror() -> None:
+    """Lane B: словарь несёт оба новых перечисления, синхронно с доменными ``StrEnum``."""
+    from core.domain import CrawlItemStatus, CrawlSessionStatus, load_dictionary
+
+    data = load_dictionary(ROOT / "docs" / "status-dictionary.yaml")
+    if set(data["crawl_session_status"]) != {s.value for s in CrawlSessionStatus}:
+        raise AssertionError("crawl_session_status рассинхронизирован со схемой")
+    if set(data["crawl_item_status"]) != {s.value for s in CrawlItemStatus}:
+        raise AssertionError("crawl_item_status рассинхронизирован со схемой")
+
+
 def _db_smoke() -> None:
     conn = connect(":memory:")
     ver = conn.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()
-    _assert(ver is not None and ver["value"] == "2.4.0")
+    _assert(ver is not None and ver["value"] == "3.0.0")
 
     tables = {r["name"] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     for t in ("products", "runs", "llm_scenarios", "corpus_docs", "corpus_chunks",
               "index_manifest", "cells", "cell_evidence", "search_log",
-              "search_exhaustion", "registry_facts", "crawl_attempts"):
+              "search_exhaustion", "registry_facts", "crawl_attempts",
+              "crawl_sessions", "crawl_session_items"):
         _assert(t in tables)
 
     # P2 (schema 2.2.0): build-id witness — extractor_version у чанка; extractor_version/
@@ -611,6 +627,26 @@ def _db_smoke() -> None:
     crawl_pk = [r["name"] for r in conn.execute("PRAGMA table_info(crawl_attempts)")
                 if r["pk"]]
     _assert(crawl_pk == ["run_id", "product_id", "url"])
+
+    # Lane B (schema 3.0.0): сеанс краула — crawl_sessions + элементы с PK и FK.
+    sess_cols = {r["name"] for r in conn.execute("PRAGMA table_info(crawl_sessions)")}
+    _assert({"session_id", "run_id", "profile", "status", "created_at", "started_at",
+             "finished_at", "total", "pending", "running", "fetched", "failed",
+             "cancelled", "options_json", "provenance_json"} <= sess_cols)
+    sess_pk = [r["name"] for r in conn.execute("PRAGMA table_info(crawl_sessions)")
+               if r["pk"]]
+    _assert(sess_pk == ["session_id"])
+    item_cols = {r["name"] for r in conn.execute("PRAGMA table_info(crawl_session_items)")}
+    _assert({"session_id", "product_id", "url", "status", "attempts", "engine", "kind",
+             "fetch_mode", "extract_route", "strategy", "http_status", "content_type",
+             "lang", "content_hash", "raw_path", "error_kind", "error", "first_seen",
+             "last_attempt"} <= item_cols)
+    item_pk = [r["name"] for r in conn.execute("PRAGMA table_info(crawl_session_items)")
+               if r["pk"]]
+    _assert(item_pk == ["session_id", "product_id", "url"])
+    # Прагмы соединения (Lane B): busy_timeout=5000, synchronous=NORMAL(=1) применены.
+    _assert(conn.execute("PRAGMA busy_timeout").fetchone()[0] == 5000)
+    _assert(conn.execute("PRAGMA synchronous").fetchone()[0] == 1)
 
     conn.execute(
         "INSERT INTO runs(run_id, created_at, mode, case_id, anchor_product_id) "

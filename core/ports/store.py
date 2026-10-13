@@ -19,6 +19,10 @@ from core.domain import (
     CorpusChunk,
     CorpusDoc,
     CrawlAttempt,
+    CrawlItemStatus,
+    CrawlSession,
+    CrawlSessionItem,
+    CrawlSessionStatus,
     FetchStatus,
     GateDecision,
     IndexManifestEntry,
@@ -136,6 +140,63 @@ class StorePort(Protocol):
 
     def clear_crawl_attempts(self, run_id: str, product_id: str | None = None) -> None:
         """Удаляет durable-состояние краула прогона (все или по продукту) — ``--reset``."""
+        ...
+
+    # -- сеанс краула (Lane B: durable намерение + прогресс) --------------- #
+    def upsert_crawl_session(self, session: CrawlSession) -> None:
+        """Upsert строки ``crawl_sessions`` по PK ``session_id`` (полная запись)."""
+        ...
+
+    def get_crawl_session(self, session_id: str) -> CrawlSession | None:
+        """Возвращает сеанс краула или ``None``, если он неизвестен."""
+        ...
+
+    def update_crawl_session_status(
+        self,
+        session_id: str,
+        status: CrawlSessionStatus,
+        *,
+        started_at: str | None = None,
+        finished_at: str | None = None,
+        error: str | None = None,
+    ) -> None:
+        """Частичный upsert жизненного цикла сеанса (идемпотентный).
+
+        Переданные (не ``None``) поля перекрывают текущие; прочие сохраняются.
+        """
+        ...
+
+    def upsert_crawl_session_item(self, item: CrawlSessionItem) -> None:
+        """Upsert элемента сеанса по PK ``(session_id, product_id, url)``.
+
+        Атомарно (в одной транзакции) пишет строку элемента **и** пересчитывает/персистит
+        агрегированные счётчики сеанса — прогресс не имеет разрывов.
+        """
+        ...
+
+    def iter_crawl_session_items(
+        self,
+        session_id: str,
+        *,
+        product_id: str | None = None,
+        status: CrawlItemStatus | None = None,
+    ) -> Iterator[CrawlSessionItem]:
+        """Итерирует элементы сеанса; порядок ``product_id, url``; фильтры опциональны."""
+        ...
+
+    def crawl_session_counts(self, session_id: str) -> dict[str, int]:
+        """Число элементов сеанса по каждому статусу ``CrawlItemStatus`` (отсутствующие — 0)."""
+        ...
+
+    def recover_crawl_session(self, session_id: str) -> int:
+        """Recovery-on-open: ``running`` → ``pending`` и пересчёт счётчиков (одна транзакция).
+
+        Возвращает число восстановленных элементов.
+        """
+        ...
+
+    def clear_crawl_session(self, session_id: str) -> None:
+        """Удаляет элементы сеанса, затем сам сеанс (одна транзакция)."""
         ...
 
     # -- чтение ---------------------------------------------------------- #

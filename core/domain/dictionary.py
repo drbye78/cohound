@@ -13,6 +13,8 @@ import yaml
 
 from core.domain.enums import (
     CapabilityPolicy,
+    CrawlItemStatus,
+    CrawlSessionStatus,
     CrawlStrategy,
     ExtractionRoute,
     FetchMode,
@@ -64,6 +66,9 @@ def assert_dictionary_integrity(path: str | Path) -> None:
         "crawl_strategy",
         # D3: статус per-URL записи краула (crawl_attempts).
         "fetch_status",
+        # Lane B: жизненный цикл сеанса краула и per-URL статус его элемента.
+        "crawl_session_status",
+        "crawl_item_status",
     ]
     missing = [k for k in required if k not in data]
     if missing:
@@ -85,6 +90,8 @@ def assert_dictionary_integrity(path: str | Path) -> None:
         "extraction_route": {v.value for v in ExtractionRoute},
         "crawl_strategy": {v.value for v in CrawlStrategy},
         "fetch_status": {v.value for v in FetchStatus},
+        "crawl_session_status": {v.value for v in CrawlSessionStatus},
+        "crawl_item_status": {v.value for v in CrawlItemStatus},
     }
     for section, expected in checks.items():
         actual = set(data[section])

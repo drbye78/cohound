@@ -12,11 +12,13 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = "2.4.0"
+SCHEMA_VERSION = "3.0.0"
 
 DDL = """
 PRAGMA journal_mode = WAL;
 PRAGMA foreign_keys = ON;
+PRAGMA busy_timeout = 5000;
+PRAGMA synchronous = NORMAL;
 
 CREATE TABLE IF NOT EXISTS schema_meta (
     key   TEXT PRIMARY KEY,
@@ -245,6 +247,53 @@ CREATE TABLE IF NOT EXISTS crawl_attempts (
     FOREIGN KEY (run_id) REFERENCES runs(run_id)
 );
 
+-- Lane B (schema 3.0.0): сеанс краула — ядро-владеемое durable намерение + агрегированный
+-- прогресс; элементы сеанса — преемник crawl_attempts (back-compat не требуется). Счётчики
+-- сеанса поддерживаются транзакционно при записи элемента (см. SqliteStore).
+CREATE TABLE IF NOT EXISTS crawl_sessions (
+    session_id    TEXT PRIMARY KEY,
+    run_id        TEXT,                    -- soft-link на прогон; NULL = standalone-сеанс
+    profile       TEXT NOT NULL,
+    status        TEXT NOT NULL,           -- created|running|paused|cancelled|completed|partial|failed
+    created_at    TEXT NOT NULL,
+    started_at    TEXT,
+    finished_at   TEXT,
+    total         INTEGER NOT NULL DEFAULT 0,
+    pending       INTEGER NOT NULL DEFAULT 0,
+    running       INTEGER NOT NULL DEFAULT 0,
+    fetched       INTEGER NOT NULL DEFAULT 0,
+    failed        INTEGER NOT NULL DEFAULT 0,
+    cancelled     INTEGER NOT NULL DEFAULT 0,
+    error         TEXT,
+    options_json  TEXT,
+    provenance_json TEXT,
+    FOREIGN KEY (run_id) REFERENCES runs(run_id)
+);
+
+CREATE TABLE IF NOT EXISTS crawl_session_items (
+    session_id    TEXT NOT NULL,
+    product_id    TEXT NOT NULL,
+    url           TEXT NOT NULL,
+    status        TEXT NOT NULL,           -- pending|running|fetched|failed|cancelled
+    attempts      INTEGER NOT NULL DEFAULT 0,
+    engine        TEXT,
+    kind          TEXT,
+    fetch_mode    TEXT,
+    extract_route TEXT,
+    strategy      TEXT,
+    http_status   INTEGER,
+    content_type  TEXT,
+    lang          TEXT,
+    content_hash  TEXT,
+    raw_path      TEXT,
+    error_kind    TEXT,
+    error         TEXT,
+    first_seen    TEXT,
+    last_attempt  TEXT,
+    PRIMARY KEY (session_id, product_id, url),
+    FOREIGN KEY (session_id) REFERENCES crawl_sessions(session_id)
+);
+
 CREATE INDEX IF NOT EXISTS idx_cells_run_state  ON cells(run_id, state);
 CREATE INDEX IF NOT EXISTS idx_chunks_product   ON corpus_chunks(product_id);
 CREATE INDEX IF NOT EXISTS idx_chunks_build     ON corpus_chunks(build_id);
@@ -253,6 +302,9 @@ CREATE INDEX IF NOT EXISTS idx_evidence_run_cell ON cell_evidence(run_id, produc
 CREATE INDEX IF NOT EXISTS idx_gate_run         ON gate_decisions(run_id, gate);
 CREATE INDEX IF NOT EXISTS idx_crawl_run_status  ON crawl_attempts(run_id, status);
 CREATE INDEX IF NOT EXISTS idx_crawl_run_product ON crawl_attempts(run_id, product_id);
+CREATE INDEX IF NOT EXISTS idx_crawl_sessions_run    ON crawl_sessions(run_id, status);
+CREATE INDEX IF NOT EXISTS idx_crawl_items_session   ON crawl_session_items(session_id, status);
+CREATE INDEX IF NOT EXISTS idx_crawl_items_product   ON crawl_session_items(session_id, product_id);
 
 -- I18: оценщик (evaluator) не может быть зарегистрирован с веб-тулом.
 CREATE TRIGGER IF NOT EXISTS trg_evaluator_no_web_tool
@@ -318,7 +370,7 @@ def _ensure_columns(
 
 
 def connect(db_path: str | Path = ":memory:") -> sqlite3.Connection:
-    """Открывает БД и применяет схему (+ идемпотентные DDL-миграции v2.1–v2.4)."""
+    """Открывает БД и применяет схему (+ идемпотентные DDL-миграции v2.1–v3.0)."""
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
     conn.executescript(DDL)
@@ -339,6 +391,10 @@ def connect(db_path: str | Path = ":memory:") -> sqlite3.Connection:
     # ALTER не нужен (новая таблица), но вызов идемпотентен на любой БД.
     # DDL-миграция v2.4 (P4): ось стратегии краула — additive-колонка provenance.
     _ensure_columns(conn, "crawl_attempts", {"strategy": "TEXT"})
+    # DDL-миграция v3.0 (Lane B): crawl_sessions/crawl_session_items создаются
+    # `CREATE TABLE IF NOT EXISTS` в DDL — ALTER не нужен (новые таблицы), вызов
+    # идемпотентен на любой БД. Гэп forward-compat закрывается `_ensure_columns` при
+    # появлении additive-колонок в будущем.
     conn.execute(
         "INSERT OR REPLACE INTO schema_meta(key, value) VALUES ('schema_version', ?)",
         (SCHEMA_VERSION,),

@@ -177,10 +177,12 @@ IDP/DLP/IDS (`07` §8).
 (`VectorIndexPort`); `adapters/embed_local.py` — `EmbedderPort`. `pipeline` не пишет `.npy`/tantivy
 напрямую. Реализация `StorePort`/`GateStore` — `store/sqlite_store.py` поверх DDL `store/sqlite.py`;
 бэкап/восстановление прогона — `store/backup.py`. Схема БД версионируется константой
-`SCHEMA_VERSION` = **`2.4.0`** (версия SQLite-схемы, **не** регламента); `runs.settings_provenance_json`
+`SCHEMA_VERSION` = **`3.0.0`** (версия SQLite-схемы, **не** регламента); `runs.settings_provenance_json`
 хранит провенанс настроек (A3), `corpus_chunks.extractor_version` и `index_manifest.extractor_version`/
-`content_digest` — build-id witness (P2), а `crawl_attempts` — durable per-URL аудит/очередь/resume
-краула (D3); миграция additive/idempotent (`ALTER TABLE`/`CREATE TABLE IF NOT EXISTS` при отсутствии).
+`content_digest` — build-id witness (P2), `crawl_attempts` — durable per-URL аудит/очередь/resume
+краула (D3), а `crawl_sessions`/`crawl_session_items` — первоклассный сеанс краула
+(id/статус/прогресс/возобновляемость, фаза сеансов); миграция additive/idempotent
+(`ALTER TABLE`/`CREATE TABLE IF NOT EXISTS` при отсутствии).
 
 **Реестровые фетчеры:** `ports/registry.py` — нейтральный порт; конкретные реестры (РРПО, ФСТЭК)
 описываются данными в `registries/*.yaml` и обслуживаются **generic config-driven HTTP/JSON/HTML

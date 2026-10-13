@@ -2,6 +2,8 @@
 # Источник истины по §4.1 регламента cohound-spec-v2.md (v2.1).
 # Версия словаря: 2.2.0
 # Каталоги (package/catalog) версионируются отдельно; этот файл — их зависимость.
+# NB: счётчик методологический (§13, METHODOLOGY_FIELDS). Операционные перечисления
+# (напр. crawl_session_status/crawl_item_status) добавляются БЕЗ бампа этой версии.
 
 status_dictionary_version: "2.2.0"
 
@@ -255,6 +257,24 @@ fetch_status:
   - fetched
   - done
   - failed
+
+# Сеанс краула: жизненный цикл (crawl_sessions).
+crawl_session_status:
+  - created
+  - running
+  - paused
+  - cancelled
+  - completed
+  - partial
+  - failed
+
+# Элемент сеанса краула: per-URL статус (crawl_session_items).
+crawl_item_status:
+  - pending
+  - running
+  - fetched
+  - failed
+  - cancelled
 
 # §4.1 / Р-2. Маппинг сателлита на зачёт. Правила применяются сверху вниз,
 # первое совпавшее решает. cap — потолок статуса зачёта.

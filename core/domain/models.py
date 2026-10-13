@@ -17,6 +17,8 @@ from core.domain.enums import (
     AnchorRelation,
     Archetype,
     CellState,
+    CrawlItemStatus,
+    CrawlSessionStatus,
     CrawlStrategy,
     EndpointKind,
     EvidenceState,
@@ -854,6 +856,80 @@ class CrawlAttempt(BaseModel):
     content_type: str | None = None
     #: Язык страницы (D3): персистится, чтобы resume не терял ``RawPage.lang`` (иначе
     #: ``corpus_docs.lang``/``corpus_chunks.lang`` расходились бы между свежим и возобновлённым прогоном).
+    lang: str | None = None
+    content_hash: str | None = None
+    raw_path: str | None = None
+    error_kind: str | None = None
+    error: str | None = None
+    first_seen: str | None = None
+    last_attempt: str | None = None
+
+
+class CrawlSession(BaseModel):
+    """Строка ``crawl_sessions`` (Lane B, §4.4): durable намерение краула + агрегированный прогресс.
+
+    Ядро владеет сеансом (одинаков для ``local``/``split``), исполнение — сменный порт.
+    Счётчики ``total/pending/running/fetched/failed/cancelled`` — агрегат по элементам сеанса,
+    поддерживается транзакционно при записи элемента. ``options_json`` — сериализованные опции
+    сеанса (from-scratch, only-фильтры); ``provenance_json`` — движки/источники (фаза провенанса).
+    Статус ``CrawlSessionStatus`` — операционная сущность краула, а не доменная ячейка.
+    """
+
+    model_config = _BASE
+
+    session_id: str
+    #: Soft-link на прогон: ``None`` для standalone-сеанса (``runs/_crawl/{session_id}/``),
+    #: не привязанного к строке ``runs``; FK на ``runs`` сохранён, ``NULL`` FK допустим.
+    run_id: str | None = None
+    #: Деплой-профиль зон: ``local`` (один процесс) | ``split`` (DMZ-планировщик), а также
+    #: производные (``split-hardened`` и пр.). Значения — свободная строка: допустимый набор
+    #: задаёт composition root (``core.cli.wiring.SUPPORTED_PROFILES``); домен L0 не
+    #: импортирует ``cli`` (матрица слоёв 01 §1), поэтому здесь значение не валидируется.
+    profile: str
+    status: CrawlSessionStatus
+    created_at: str
+    started_at: str | None = None
+    finished_at: str | None = None
+    total: int = 0
+    pending: int = 0
+    running: int = 0
+    fetched: int = 0
+    failed: int = 0
+    cancelled: int = 0
+    error: str | None = None
+    #: Сериализованные опции сеанса (from-scratch, only-фильтры).
+    options_json: str | None = None
+    #: Движки/источники сеанса (заполняется в фазе провенанса).
+    provenance_json: str | None = None
+
+
+class CrawlSessionItem(BaseModel):
+    """Строка ``crawl_session_items`` (Lane B, §4.4): per-URL элемент сеанса краула.
+
+    Преемник ``crawl_attempts`` (обратная совместимость не требуется): тот же провенанс
+    попытки (``fetch_mode``/``extract_route``/``strategy``/``http_status``/``content_type``/
+    ``lang``) и retention (``content_hash``/``raw_path``), но ключ — ``session_id`` и статус
+    ``CrawlItemStatus``. ``engine``/``kind`` — движок и вид источника (провенанс сеанса).
+    ``error_kind`` переиспользует ``FailureKind``: сбой краула → ``source_unavailable``,
+    сбой извлечения → ``parser_failed``. ``status`` — часть операционной таблицы, а не
+    доменной ячейки.
+    """
+
+    model_config = _BASE
+
+    session_id: str
+    product_id: str
+    url: str
+    status: CrawlItemStatus
+    attempts: int = 0
+    engine: str | None = None
+    kind: str | None = None
+    fetch_mode: str | None = None
+    extract_route: str | None = None
+    #: Ось стратегии краула (``auto|honest|hybrid``) — фактически применённая стратегия фетча.
+    strategy: str | None = None
+    http_status: int | None = None
+    content_type: str | None = None
     lang: str | None = None
     content_hash: str | None = None
     raw_path: str | None = None

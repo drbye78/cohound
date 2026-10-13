@@ -25,6 +25,9 @@
 ``/documents/x``, но **не** ``/documents-archive``. Побеждает самый длинный ``path_key``, затем
 самый длинный ``host_key``, затем лексикографически меньший ключ.
 
+Селекторы :func:`select_domain_profile` и :func:`select_site_source` переиспользуют ту же
+семантику host/path-матчинга для других слоёв (Lane A: source-routing).
+
 Нейтрален к предметной категории (§1.3): домены — данные.
 """
 
@@ -32,12 +35,15 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import replace
+from typing import TypeVar
 from urllib.parse import urlsplit
 
 from core.config.domain_profiles import DomainProfile
 from core.ports.types import CrawlStrategy, FetchMode, FetchPlan, RateLimitSpec
 
-__all__ = ["resolve_fetch_plan"]
+__all__ = ["resolve_fetch_plan", "select_domain_profile", "select_site_source"]
+
+_T = TypeVar("_T")
 
 
 def _split_key(raw_key: str) -> tuple[str, str]:
@@ -61,6 +67,58 @@ def _host_matches(url_host: str, host_key: str) -> bool:
 def _profile_rank(host_key: str, path_key: str) -> tuple[int, int]:
     """Ранг профиля: сначала длина пути, затем длина host (больше — приоритетнее)."""
     return (len(path_key), len(host_key))
+
+
+def _select_best(url: str, mapping: Mapping[str, _T]) -> _T | None:
+    """Возвращает значение лучшего по ключу ``host[+path]`` из ``mapping`` или ``None``.
+
+    Семантика матчинга/приоритета — общая для профилей доменов и site-слоя источников краула:
+    host равен ключу или его поддомен; путь (если задан) матчит по границе сегмента; побеждает
+    самый длинный ``path_key``, затем самый длинный ``host_key``, затем лексикографически
+    меньший ключ.
+    """
+    parsed = urlsplit(url)
+    url_host = (parsed.hostname or "").strip().lower()
+    url_path = parsed.path or "/"
+
+    best: _T | None = None
+    best_rank: tuple[int, int] | None = None
+    best_key: str | None = None
+
+    if url_host:
+        for raw_key, value in mapping.items():
+            host_key, path_key = _split_key(raw_key)
+            if not host_key or not _host_matches(url_host, host_key):
+                continue
+            if path_key and not (
+                url_path == path_key or url_path.startswith(path_key + "/")
+            ):
+                continue
+            rank = _profile_rank(host_key, path_key)
+            key = str(raw_key)
+            tie = best_rank is not None and rank == best_rank and (
+                best_key is not None and key < best_key
+            )
+            if best is None or rank > best_rank or tie:  # type: ignore[operator]
+                best, best_rank, best_key = value, rank, key
+
+    return best
+
+
+def select_domain_profile(
+    url: str, profiles: Mapping[str, DomainProfile]
+) -> DomainProfile | None:
+    """Выбирает лучший профиль домена для ``url`` (или ``None``, если совпадений нет)."""
+    return _select_best(url, profiles)
+
+
+def select_site_source(url: str, mapping: Mapping[str, _T]) -> _T | None:
+    """Выбирает лучший site-источник ``host[+path]`` для ``url`` (или ``None``).
+
+    Использует ту же семантику матчинга, что и :func:`select_domain_profile`; тип значения
+    обобщён (site-слой источников краула).
+    """
+    return _select_best(url, mapping)
 
 
 def resolve_fetch_plan(
@@ -87,30 +145,7 @@ def resolve_fetch_plan(
     :param default_rate_limit: дефолт диапазона задержек (run.yaml ``crawl.rate_limit``);
         профиль, задавший ``rate_limit``, его переопределяет.
     """
-    parsed = urlsplit(url)
-    url_host = (parsed.hostname or "").strip().lower()
-    url_path = parsed.path or "/"
-
-    best: DomainProfile | None = None
-    best_rank: tuple[int, int] | None = None
-    best_key: str | None = None
-
-    if url_host:
-        for raw_key, profile in profiles.items():
-            host_key, path_key = _split_key(raw_key)
-            if not host_key or not _host_matches(url_host, host_key):
-                continue
-            if path_key and not (
-                url_path == path_key or url_path.startswith(path_key + "/")
-            ):
-                continue
-            rank = _profile_rank(host_key, path_key)
-            key = str(raw_key)
-            tie = best_rank is not None and rank == best_rank and (
-                best_key is not None and key < best_key
-            )
-            if best is None or rank > best_rank or tie:  # type: ignore[operator]
-                best, best_rank, best_key = profile, rank, key
+    best = select_domain_profile(url, profiles)
 
     if best is not None:
         plan = FetchPlan(

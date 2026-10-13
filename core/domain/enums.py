@@ -264,3 +264,46 @@ class FetchStatus(StrEnum):
     FETCHED = "fetched"
     DONE = "done"
     FAILED = "failed"
+
+
+class CrawlSessionStatus(StrEnum):
+    """Жизненный цикл сеанса краула (``crawl_sessions``) — durable намерение + прогресс.
+
+    ``CREATED`` — сеанс объявлен, работа не начата; ``RUNNING`` — исполняется; ``PAUSED`` —
+    приостановлен (возобновим); ``CANCELLED`` — снят оператором/системой; ``COMPLETED`` — все
+    элементы успешно добыты; ``PARTIAL`` — часть элементов упала, но тело краула добыто;
+    ``FAILED`` — терминальный сбой сеанса. Терминальные: ``completed|partial|cancelled|failed``.
+
+    ``partial`` закрывает гэп «упавшие URL прячутся за ``ok``»: успешно добытый, но неполный
+    краул не выдаётся за полный. Статус относится к операционной сущности сеанса, а не к
+    доменной ячейке (не путать с ``CellState``). Со временем сеанс замещает per-URL
+    ``FetchStatus`` (элементы несут :class:`CrawlItemStatus`).
+    """
+
+    CREATED = "created"
+    RUNNING = "running"
+    PAUSED = "paused"
+    CANCELLED = "cancelled"
+    COMPLETED = "completed"
+    PARTIAL = "partial"
+    FAILED = "failed"
+
+
+class CrawlItemStatus(StrEnum):
+    """Per-URL статус элемента сеанса краула (``crawl_session_items``).
+
+    ``PENDING`` — в очереди, ещё не фетчился; ``RUNNING`` — в обработке (при рестарте
+    восстанавливается в ``PENDING`` — recovery-on-open); ``FETCHED`` — сырые байты сохранены
+    (retention); ``FAILED`` — терминально после попыток (``error_kind``/``FailureKind``);
+    ``CANCELLED`` — снят с работы. Терминальные: ``fetched|failed|cancelled``.
+
+    Жизненный цикл элемента сеанса, а не доменной ячейки; преемник ``FetchStatus`` (обратная
+    совместимость не требуется), но с явным ``running`` и без промежуточного ``done``
+    (материализация — отдельная фаза).
+    """
+
+    PENDING = "pending"
+    RUNNING = "running"
+    FETCHED = "fetched"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
