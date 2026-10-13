@@ -705,11 +705,20 @@ def serve(
     *,
     server_factory: Callable[..., Any] = ThreadingHTTPServer,
     handler_factory: Callable[..., type[BaseHTTPRequestHandler]] = make_handler,
+    scheduler: Any = None,
+    on_start: Callable[[], None] | None = None,
 ) -> None:
     """Запускает блокирующий HTTP-сервер ``/v1/*`` (stdlib).
 
     Опциональный режим развёртывания ``split`` (07 §6). Сокет поднимает только
     ``serve``; ``EdgeGateway`` и ``route_request`` тестируются без сети.
+
+    **Хук планировщика (Phase 3.0).** ``scheduler`` — необязательный фоновый компонент
+    (напр. пул воркеров/очередь, Wave 3.2) с методами ``start()``/``stop()``. При
+    ``scheduler is not None``: ``on_start()`` (если задан) → ``scheduler.start()`` →
+    ``serve_forever()``; ``scheduler.stop()`` гарантированно вызывается в ``finally``
+    вокруг ``server_close()`` (даже при сбое ``serve_forever``/``server_close``).
+    При ``scheduler is None`` и ``on_start is None`` поведение прежнее, байт-в-байт.
     """
     server = build_server(
         host,
@@ -718,7 +727,15 @@ def serve(
         server_factory=server_factory,
         handler_factory=handler_factory,
     )
+    if on_start is not None:
+        on_start()
+    if scheduler is not None:
+        scheduler.start()
     try:
         server.serve_forever()
     finally:
-        server.server_close()
+        try:
+            server.server_close()
+        finally:
+            if scheduler is not None:
+                scheduler.stop()
