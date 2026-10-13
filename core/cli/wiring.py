@@ -55,6 +55,7 @@ from core.adapters.llm_local import (
     GenerateFn as EvaluatorGenerateFn,
     LocalEvaluator,
 )
+from core.adapters.remote_crawl_executor import EdgeCrawlExecutor
 from core.adapters.remote_crawler import RemoteCrawler
 from core.adapters.remote_extractor import RemoteExtractor
 from core.adapters.remote_gateway import (
@@ -994,6 +995,10 @@ def build_adapters(
         return Ports(
             crawler=RemoteCrawler(content_gateway),
             crawlers=None,
+            # Phase 3.3: краул split исполняется через edge-планировщик (``CrawlExecutorPort``):
+            # submit/status/collect по шву. ``crawler=RemoteCrawler`` оставлен для обратной
+            # совместимости (non-executor путь); при наличии ``executor`` фаза его не использует.
+            executor=EdgeCrawlExecutor(content_gateway),
             search=RemoteSearch(
                 content_gateway,
                 adapter_kind=(config.search.adapter or "remote"),

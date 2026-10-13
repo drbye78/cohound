@@ -73,7 +73,8 @@ from __future__ import annotations
 
 import datetime as _dt
 import json
-from collections.abc import Mapping, Sequence
+import time
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -100,6 +101,12 @@ from core.pipeline.crawl_session import (
 from core.pipeline.crawl_sources import crawl_sources_digest, resolve_crawl_target
 from core.pipeline.runner import PhaseResult
 from core.ports.chunker import ChunkerPort
+from core.ports.crawl_executor import (
+    ACTIVE_JOB_STATUSES,
+    CrawlExecutorPort,
+    CrawlResultItem,
+    CrawlWorkItem,
+)
 from core.ports.crawler import CrawlerPort
 from core.ports.embedder import EmbedderPort
 from core.ports.extractor import ExtractorPort
@@ -523,6 +530,9 @@ def build_corpus(
     crawl_sources: CrawlSourcesConfig | None = None,
     crawlers: Mapping[str, CrawlerPort] | None = None,
     session_id: str | None = None,
+    executor: CrawlExecutorPort | None = None,
+    executor_poll_interval: float = 0.25,
+    executor_sleep: Callable[[float], None] = time.sleep,
 ) -> PhaseResult:
     """Ш5: собирает корпус из ``plan × urls`` и возвращает ``PhaseResult``.
 
@@ -573,6 +583,16 @@ def build_corpus(
         изменения сигнатуры ``crawler``.
     :param session_id: явный идентификатор сеанса краула; ``None`` →
         ``f"crawl:{run_id}"`` (идемпотентно на прогон). Игнорируется без ``store``/``run_id``.
+    :param executor: опциональный исполнитель краула (``CrawlExecutorPort``, Phase 3.3). При
+        наличии краул исполняется **через него** (``split``/edge-планировщик): работы
+        подаются одним batch-запросом, результаты забираются пагинацией, а retention/
+        экстракция/дедуп/нарезка и сеансовое трекинг — общие с локальным путём
+        (``_ingest_one``). ``crawler``/``crawlers`` при этом не используются. ``None`` →
+        прежний локальный per-URL путь.
+    :param executor_poll_interval: пауза между опросами прогресса задания исполнителя, с
+        (только при ``executor``); уже терминальное задание не пейсится.
+    :param executor_sleep: хук сна опроса (по умолчанию ``time.sleep``); тесты инжектят
+        no-op, чтобы не платить реальное время.
 
     Возвращает ``PhaseResult`` со ``status='ok'`` (даже при изолированных ошибках),
     ``cells=[]`` (Ш5 не производит ячеек) и ``log_entries=[IndexBuild]`` (сборка + счётчики).
@@ -707,10 +727,271 @@ def build_corpus(
                 f"{type(exc).__name__}: {exc}"
             )
 
+    def _retain(
+        product_id: str, url: str, page: RawPage, fetch_plan: FetchPlan
+    ) -> Path | None:
+        """Retention сырых байтов (I19) + durable-элемент ``FETCHED``; ``None`` при сбое.
+
+        Байты пишутся в ``raw_root/{product_id}/{raw_hash}.bin`` **до** экстракции; при
+        удаче элемент сеанса фиксируется ``FETCHED`` (provenance фетча). Сбой сохранения =
+        недоступность источника по этому URL: строка помечается ``FAILED``
+        (``source_unavailable``), чтобы очередь/счётчики были правдивы; возвращается ``None``.
+        Общий шаг локального и executor путей (без дублирования).
+        """
+        raw_hash = content_hash(page.content)
+        try:
+            raw_path = raw_root_path / product_id / f"{raw_hash}.bin"
+            raw_path.parent.mkdir(parents=True, exist_ok=True)
+            raw_path.write_bytes(page.content)
+        except Exception as exc:  # noqa: BLE001
+            reason = f"{type(exc).__name__}: {exc}"
+            errors.append(f"{product_id}/{url}: retention: {reason}")
+            # L1a: сбой сохранения байтов = недоступность источника по этому URL;
+            # помечаем FAILED, чтобы очередь/счётчики были правдивы (не ``pending``).
+            _mark(
+                product_id,
+                url,
+                CrawlItemStatus.FAILED,
+                error_kind=FailureKind.SOURCE_UNAVAILABLE.value,
+                error=f"retention: {reason}",
+            )
+            return None
+        # L1a: байты сохранены — durable-элемент сеанса (provenance фетча).
+        _mark(
+            product_id,
+            url,
+            CrawlItemStatus.FETCHED,
+            content_hash=raw_hash,
+            raw_path=str(raw_path),
+            http_status=page.status_code,
+            content_type=page.content_type,
+            lang=page.lang,
+            fetch_mode=_as_text(fetch_plan.fetch),
+            extract_route=_as_text(fetch_plan.extract),
+            strategy=_as_text(fetch_plan.strategy),
+        )
+        return raw_path
+
+    def _ingest_one(
+        product_id: str,
+        url: str,
+        page: RawPage,
+        fetch_plan: FetchPlan,
+        raw_path: Path,
+        ingest: _ProductIngest,
+        seen_docs: dict[str, str],
+        seen_chunk_ids: set[str],
+    ) -> None:
+        """Экстракция → дедуп → нарезка одного URL (общая часть локального/executor путей).
+
+        Сырые байты уже сохранены (``raw_path``); шаги изолируют ошибки в ``errors`` и
+        фиксируют терминальный статус элемента сеанса через ``_mark``. Логика идентична для
+        обоих путей корпуса — вынесена, чтобы не дублировать её.
+        """
+        nonlocal duplicate_count
+        # 3. Экстракция (грациозная деградация адаптера через .error).
+        try:
+            extracted = extractor.extract(page, fetch_plan.extract)
+        except Exception as exc:  # noqa: BLE001
+            reason = f"{type(exc).__name__}: {exc}"
+            errors.append(f"{product_id}/{url}: extract: {reason}")
+            _mark(
+                product_id,
+                url,
+                CrawlItemStatus.FAILED,
+                error_kind=FailureKind.PARSER_FAILED.value,
+                error=reason,
+                raw_path=str(raw_path),
+            )
+            return
+        if extracted is None or getattr(extracted, "error", None):
+            reason = getattr(extracted, "error", None) or "пустой ExtractedDoc"
+            errors.append(f"{product_id}/{url}: extract: {reason}")
+            _mark(
+                product_id,
+                url,
+                CrawlItemStatus.FAILED,
+                error_kind=FailureKind.PARSER_FAILED.value,
+                error=reason,
+                raw_path=str(raw_path),
+            )
+            return
+
+        doc_hash = str(getattr(extracted, "content_hash", "") or "")
+        if not doc_hash:
+            errors.append(f"I19: {product_id}/{url}: ExtractedDoc без content_hash — отклонён")
+            _mark(
+                product_id,
+                url,
+                CrawlItemStatus.FAILED,
+                error_kind=FailureKind.PARSER_FAILED.value,
+                error="ExtractedDoc без content_hash",
+                raw_path=str(raw_path),
+            )
+            return
+
+        # 4. Дедуп по content_hash (в пределах продукта).
+        if doc_hash in seen_docs:
+            duplicate_count += 1
+            # Байты сохранены и контент уже проиндексирован близнецом в этой партиции.
+            _mark(product_id, url, CrawlItemStatus.FETCHED, raw_path=str(raw_path))
+            return
+        seen_docs[doc_hash] = url
+
+        document_id = f"{product_id}:{doc_hash}"
+        doc = CorpusDoc(
+            doc_id=document_id,
+            product_id=product_id,
+            url=page.url,
+            fetched_at=page.fetched_at,
+            content_hash=doc_hash,
+            raw_path=str(raw_path),
+            extractor_version=getattr(extracted, "extractor_version", None),
+            render_mode=_as_text(page.fetch_mode),
+            lang=page.lang,
+        )
+        ingest.docs.append(doc)
+
+        # 5. Чанкер.
+        try:
+            chunks = chunker.chunk(extracted, document_id)
+        except Exception as exc:  # noqa: BLE001
+            # Сбой нарезки — не отказ источника/парсера: raw сохранён (FETCHED),
+            # повторный resume сможет ре-извлечь без ре-фетча.
+            errors.append(f"{product_id}/{url}: chunk: {type(exc).__name__}: {exc}")
+            return
+
+        for chunk in sorted(chunks or [], key=lambda c: getattr(c, "chunk_no", 0)):
+            provided_hash = str(getattr(chunk, "content_hash", "") or "").strip()
+            text = getattr(chunk, "text", "") or ""
+            # I19: у каждого индексируемого чанка обязан быть непустой hash.
+            if not provided_hash:
+                errors.append(f"I19: {document_id}: чанк без content_hash отклонён")
+                continue
+            if not text.strip():
+                errors.append(f"I19: {document_id}: чанк с пустым текстом отклонён")
+                continue
+
+            chunk_no = int(getattr(chunk, "chunk_no", 0))
+            cid = _chunk_id(product_id, doc_hash, chunk_no)
+            if cid in seen_chunk_ids:
+                errors.append(f"{document_id}: дублирующийся chunk_id {cid!r} отклонён")
+                continue
+            seen_chunk_ids.add(cid)
+
+            ingest.chunks.append(
+                CorpusChunk(
+                    chunk_id=cid,
+                    doc_id=document_id,
+                    product_id=product_id,
+                    url=page.url,
+                    heading_path=getattr(chunk, "heading_path", "") or "",
+                    lang=page.lang,
+                    chunk_no=chunk_no,
+                    text=text,
+                    context_prefix=getattr(chunk, "context_prefix", "") or "",
+                    # Авторитетный хеш — от чистого текста (I19/§10).
+                    content_hash=content_hash(text),
+                    # build_id проставляется в Pass B после фиксации id сборки.
+                    build_id=None,
+                    embed_model_id=embed_model_id or None,
+                    embedded_at=None,
+                )
+            )
+
+        # L1a: документ успешно добыт и нарезан → элемент сеанса терминален ``FETCHED``
+        # (сеанс трекает краул: сырые байты сохранены = «ready» для материализации).
+        _mark(product_id, url, CrawlItemStatus.FETCHED, raw_path=str(raw_path))
+
+    def _run_executor() -> dict[tuple[str, str], CrawlResultItem]:
+        """Phase 3.3: submit → poll → collect работ через ``executor`` (только ``split``).
+
+        Цели краула резолвятся здесь и кладутся в ``targets``/``applied_engines`` (как в
+        локальном пути); уже resum'ащиеся элементы (retained raw на диске) НЕ подаются —
+        их ingest идёт без обращения к исполнителю. Ошибки шва изолируются в ``errors``;
+        недостающие результаты трактуются как ``source_unavailable`` при ingest. Возвращает
+        карту ``(product_id, url) → CrawlResultItem``.
+        """
+        work: list[CrawlWorkItem] = []
+        for product_id in products:
+            for url in url_map.get(product_id, []):
+                target = resolve_crawl_target(
+                    product_id,
+                    url,
+                    sources=crawl_sources or CrawlSourcesConfig(),
+                    profiles=domain_profiles or {},
+                    explicit=explicit_fetch,
+                    run_default_strategy=crawl_strategy_default,
+                    run_default_rate_limit=crawl_rate_default,
+                )
+                targets[(product_id, url)] = target
+                applied_engines[(product_id, url)] = target.engine
+                prior_item = items.get((product_id, url))
+                if _resume_source(prior_item) is not None:
+                    continue  # resume без подачи: ingest ре-извлечёт из retained raw
+                plan_i = target.plan
+                work.append(
+                    CrawlWorkItem(
+                        product_id=product_id,
+                        url=url,
+                        engine=target.engine,
+                        kind=target.kind,
+                        fetch=plan_i.fetch,
+                        extract=plan_i.extract,
+                        strategy=plan_i.strategy,
+                        wait_for=plan_i.wait_for,
+                        lang=None,
+                    )
+                )
+        if not work:
+            return {}
+
+        key = session or default_session_id(str(run_id or ""))
+        try:
+            handle = executor.submit(
+                work,
+                session_id=key,
+                run_id=str(run_id or ""),
+                profile=getattr(executor, "profile", None) or "split",
+                idempotency_key=key,
+            )
+            # Опрос до терминального статуса (уже терминальное задание не пейсится).
+            progress = executor.status(handle)
+            while progress.status in ACTIVE_JOB_STATUSES:
+                executor_sleep(executor_poll_interval)
+                progress = executor.status(handle)
+        except Exception as exc:  # noqa: BLE001 — изоляция по контракту фазы
+            errors.append(f"executor: {type(exc).__name__}: {exc}")
+            return {}
+
+        # Сбор результатов пагинацией (``next_cursor``/``done``).
+        collected: dict[tuple[str, str], CrawlResultItem] = {}
+        cursor: str | None = None
+        try:
+            while True:
+                batch = executor.collect(handle, cursor=cursor)
+                for result in batch.items:
+                    collected[(result.product_id, result.url)] = result
+                if batch.done or not batch.next_cursor:
+                    break
+                cursor = batch.next_cursor
+        except Exception as exc:  # noqa: BLE001 — изоляция по контракту фазы
+            errors.append(f"executor.collect: {type(exc).__name__}: {exc}")
+        return collected
+
     # --- Pass A (ingest): crawl → retention → extract → dedup → chunk ---------- #
     # Векторы/физический индекс и персистенция corpus_chunks/index_manifest не выполняются:
     # сначала собирается содержимое всего батча, затем финализируется index_build_id.
+    #
+    # Phase 3.3: две ветки исполнения краула — локальная (``crawler``/``crawlers``, прежнее
+    # поведение) и через ``executor`` (``split``/edge-планировщик). Общая часть (retention/
+    # экстракция/дедуп/нарезка/сеансовый трекинг) вынесена в ``_retain``/``_ingest_one`` —
+    # обе ветки используют её, не дублируя логику.
     ingests: list[_ProductIngest] = []
+    collected: dict[tuple[str, str], CrawlResultItem] = (
+        _run_executor() if executor is not None else {}
+    )
+
     for product_id in products:
         ingest = _ProductIngest(product_id=product_id)
         # I17: дедуп в пределах продукт-партиции (см. docstring модуля).
@@ -718,249 +999,166 @@ def build_corpus(
         seen_chunk_ids: set[str] = set()
 
         for url in url_map.get(product_id, []):
-            # D2/Lane A: единая цель краула резолвится в pipeline и передаётся и краулеру, и
-            # экстрактору (``plan`` + идентификаторы ``engine``/``kind`` из слоёв источников).
-            target = resolve_crawl_target(
-                product_id,
-                url,
-                sources=crawl_sources or CrawlSourcesConfig(),
-                profiles=domain_profiles or {},
-                explicit=explicit_fetch,
-                run_default_strategy=crawl_strategy_default,
-                run_default_rate_limit=crawl_rate_default,
-            )
-            fetch_plan = target.plan
-            targets[(product_id, url)] = target
-
-            # L1a: активный краулер выбирается по ``target.engine`` (fallback — базовый
-            # ``crawler``); browser-guard проверяется на **выбранном** краулере.
-            active = (
-                (crawlers or {}).get(target.engine) if target.engine else None
-            ) or crawler
-            # Phase 2.1/S1: применяемый движок — фактический транспорт адаптера
-            # (``getattr(active, "engine", None)``), с откатом на запрошенный ``target.engine``.
-            applied_engines[(product_id, url)] = (
-                getattr(active, "engine", None) or target.engine
-            )
-
             # L1a: resume — если по ``(product_id, url)`` есть элемент сеанса с сохранёнными
             # байтами, НЕ фетчим: ре-извлекаем из retained raw (I19: raw — источник).
             prior_item = items.get((product_id, url))
             resume = _resume_source(prior_item) if prior_item is not None else None
 
-            if resume is not None:
-                assert prior_item is not None  # resume возможен только при наличии элемента
-                content, raw_path = resume
-                raw_hash = prior_item.content_hash or content_hash(content)
-                page = _resume_page(prior_item, url, content, raw_path, fetch_plan)
-                # Счётчик отражает статус возобновляемого элемента (FETCHED — retryable,
-                # FAILED — re-extract), а не ``pending``: он уже персистится в сеансе, и при
-                # последующем сбое chunker'а URL будет посчитан как ``fetched``, а не потерян.
+            if executor is None:
+                # D2/Lane A: единая цель краула резолвится в pipeline и передаётся и краулеру, и
+                # экстрактору (``plan`` + идентификаторы ``engine``/``kind`` из слоёв источников).
+                target = resolve_crawl_target(
+                    product_id,
+                    url,
+                    sources=crawl_sources or CrawlSourcesConfig(),
+                    profiles=domain_profiles or {},
+                    explicit=explicit_fetch,
+                    run_default_strategy=crawl_strategy_default,
+                    run_default_rate_limit=crawl_rate_default,
+                )
+                fetch_plan = target.plan
+                targets[(product_id, url)] = target
+
+                # L1a: активный краулер выбирается по ``target.engine`` (fallback — базовый
+                # ``crawler``); browser-guard проверяется на **выбранном** краулере.
+                active = (
+                    (crawlers or {}).get(target.engine) if target.engine else None
+                ) or crawler
+                # Phase 2.1/S1: применяемый движок — фактический транспорт адаптера
+                # (``getattr(active, "engine", None)``), с откатом на запрошенный ``target.engine``.
+                applied_engines[(product_id, url)] = (
+                    getattr(active, "engine", None) or target.engine
+                )
+
+                if resume is not None:
+                    assert prior_item is not None  # resume возможен только при наличии элемента
+                    content, raw_path = resume
+                    page = _resume_page(prior_item, url, content, raw_path, fetch_plan)
+                    # Счётчик отражает статус возобновляемого элемента (FETCHED — retryable,
+                    # FAILED — re-extract), а не ``pending``: он уже персистится в сеансе, и при
+                    # последующем сбое chunker'а URL будет посчитан как ``fetched``, а не потерян.
+                else:
+                    # D2: браузерный рендер требует поддерживающего краулера. Проверка
+                    # URL-скоупедирована (а не на сборке композиции): фаза не падает, пропускается
+                    # только этот URL. Резолв проверяется — явный override на ``http`` снимает ошибку.
+                    if (
+                        getattr(active, "supports_browser", True) is False
+                        and fetch_plan.fetch is FetchMode.BROWSER
+                    ):
+                        reason = (
+                            f"{product_id}/{url}: требует браузерный рендер, но краулер "
+                            f"{type(active).__name__} не поддерживает browser; "
+                            f"задайте COHOUND_SCOUT_CRAWLER=scrapy или browser"
+                        )
+                        errors.append(reason)
+                        # B2: пропущенный URL — неразрешённый исход, а не «не записанный pending».
+                        # При активном сеансе фиксируем элемент ``FAILED`` (source_unavailable),
+                        # чтобы сеанс финализировался ``PARTIAL`` (а не ложно ``COMPLETED``), а URL
+                        # оставался видимым/возобновляемым. Без сеанса — прежнее поведение (строки нет).
+                        _mark(
+                            product_id,
+                            url,
+                            CrawlItemStatus.FAILED,
+                            error_kind=FailureKind.SOURCE_UNAVAILABLE.value,
+                            error=reason,
+                        )
+                        continue
+
+                    # P2-3: politeness-пейсинг — единый владелец corpus (R7-независимый;
+                    # стратегия/лимит берутся из уже резолвнутого ``FetchPlan``). Применяется
+                    # **только** к живому фетчу: путь ``resume`` (retained raw, выше) не пейсится.
+                    host = (urlsplit(url).hostname or "").lower()
+                    limiter.wait(host, fetch_plan.rate_limit)
+
+                    # 1. Краул.
+                    try:
+                        page = active.fetch(url, fetch_plan)
+                    except Exception as exc:  # noqa: BLE001 — изоляция по контракту фазы
+                        reason = f"{type(exc).__name__}: {exc}"
+                        errors.append(f"{product_id}/{url}: crawl: {reason}")
+                        _mark(
+                            product_id,
+                            url,
+                            CrawlItemStatus.FAILED,
+                            error_kind=FailureKind.SOURCE_UNAVAILABLE.value,
+                            error=reason,
+                        )
+                        continue
+                    if page is None:
+                        errors.append(f"{product_id}/{url}: crawl: пустой RawPage")
+                        _mark(
+                            product_id,
+                            url,
+                            CrawlItemStatus.FAILED,
+                            error_kind=FailureKind.SOURCE_UNAVAILABLE.value,
+                            error="пустой RawPage",
+                        )
+                        continue
+
+                    # 2. Retention (I19): сырые байты пишутся ДО экстракции (общий шаг).
+                    raw_path = _retain(product_id, url, page, fetch_plan)
+                    if raw_path is None:
+                        continue
             else:
-                # D2: браузерный рендер требует поддерживающего краулера. Проверка
-                # URL-скоупедирована (а не на сборке композиции): фаза не падает, пропускается
-                # только этот URL. Резолв проверяется — явный override на ``http`` снимает ошибку.
-                if (
-                    getattr(active, "supports_browser", True) is False
-                    and fetch_plan.fetch is FetchMode.BROWSER
-                ):
-                    reason = (
-                        f"{product_id}/{url}: требует браузерный рендер, но краулер "
-                        f"{type(active).__name__} не поддерживает browser; "
-                        f"задайте COHOUND_SCOUT_CRAWLER=scrapy или browser"
+                # Phase 3.3: executor-ветка — цель уже разрешена при подаче работ; результат
+                # берётся из сбора (или resum'ится из retained raw без подачи).
+                target = targets[(product_id, url)]
+                fetch_plan = target.plan
+
+                if resume is not None:
+                    assert prior_item is not None  # resume возможен только при наличии элемента
+                    content, raw_path = resume
+                    page = _resume_page(prior_item, url, content, raw_path, fetch_plan)
+                else:
+                    result = collected.get((product_id, url))
+                    if result is None:
+                        errors.append(f"{product_id}/{url}: executor: результат не получен")
+                        _mark(
+                            product_id,
+                            url,
+                            CrawlItemStatus.FAILED,
+                            error_kind=FailureKind.SOURCE_UNAVAILABLE.value,
+                            error="executor: результат не получен",
+                        )
+                        continue
+                    if result.error or result.raw_bytes is None:
+                        reason = result.error or "executor: пустой raw_bytes"
+                        errors.append(f"{product_id}/{url}: executor: {reason}")
+                        _mark(
+                            product_id,
+                            url,
+                            CrawlItemStatus.FAILED,
+                            error_kind=FailureKind.SOURCE_UNAVAILABLE.value,
+                            error=reason,
+                        )
+                        continue
+                    # S1: применяемый движок — фактический транспорт из результата шва.
+                    applied_engines[(product_id, url)] = result.engine or target.engine
+                    page = RawPage(
+                        url=result.url,
+                        content=result.raw_bytes,
+                        fetched_at=result.fetched_at or "",
+                        fetch_mode=fetch_plan.fetch,
+                        lang=None,
+                        status_code=result.http_status,
+                        content_type=result.content_type,
                     )
-                    errors.append(reason)
-                    # B2: пропущенный URL — неразрешённый исход, а не «не записанный pending».
-                    # При активном сеансе фиксируем элемент ``FAILED`` (source_unavailable),
-                    # чтобы сеанс финализировался ``PARTIAL`` (а не ложно ``COMPLETED``), а URL
-                    # оставался видимым/возобновляемым. Без сеанса — прежнее поведение (строки нет).
-                    _mark(
-                        product_id,
-                        url,
-                        CrawlItemStatus.FAILED,
-                        error_kind=FailureKind.SOURCE_UNAVAILABLE.value,
-                        error=reason,
-                    )
-                    continue
+                    # 2. Retention (I19) — общий шаг с локальным путём.
+                    raw_path = _retain(product_id, url, page, fetch_plan)
+                    if raw_path is None:
+                        continue
 
-                # P2-3: politeness-пейсинг — единый владелец corpus (R7-независимый;
-                # стратегия/лимит берутся из уже резолвнутого ``FetchPlan``). Применяется
-                # **только** к живому фетчу: путь ``resume`` (retained raw, выше) не пейсится.
-                host = (urlsplit(url).hostname or "").lower()
-                limiter.wait(host, fetch_plan.rate_limit)
-
-                # 1. Краул.
-                try:
-                    page = active.fetch(url, fetch_plan)
-                except Exception as exc:  # noqa: BLE001 — изоляция по контракту фазы
-                    reason = f"{type(exc).__name__}: {exc}"
-                    errors.append(f"{product_id}/{url}: crawl: {reason}")
-                    _mark(
-                        product_id,
-                        url,
-                        CrawlItemStatus.FAILED,
-                        error_kind=FailureKind.SOURCE_UNAVAILABLE.value,
-                        error=reason,
-                    )
-                    continue
-                if page is None:
-                    errors.append(f"{product_id}/{url}: crawl: пустой RawPage")
-                    _mark(
-                        product_id,
-                        url,
-                        CrawlItemStatus.FAILED,
-                        error_kind=FailureKind.SOURCE_UNAVAILABLE.value,
-                        error="пустой RawPage",
-                    )
-                    continue
-
-                # 2. Retention (I19): сырые байты пишутся ДО экстракции.
-                raw_hash = content_hash(page.content)
-                try:
-                    raw_path = raw_root_path / product_id / f"{raw_hash}.bin"
-                    raw_path.parent.mkdir(parents=True, exist_ok=True)
-                    raw_path.write_bytes(page.content)
-                except Exception as exc:  # noqa: BLE001
-                    reason = f"{type(exc).__name__}: {exc}"
-                    errors.append(f"{product_id}/{url}: retention: {reason}")
-                    # L1a: сбой сохранения байтов = недоступность источника по этому URL;
-                    # помечаем FAILED, чтобы очередь/счётчики были правдивы (не ``pending``).
-                    _mark(
-                        product_id,
-                        url,
-                        CrawlItemStatus.FAILED,
-                        error_kind=FailureKind.SOURCE_UNAVAILABLE.value,
-                        error=f"retention: {reason}",
-                    )
-                    continue
-                # L1a: байты сохранены — durable-элемент сеанса (provenance фетча).
-                _mark(
-                    product_id,
-                    url,
-                    CrawlItemStatus.FETCHED,
-                    content_hash=raw_hash,
-                    raw_path=str(raw_path),
-                    http_status=page.status_code,
-                    content_type=page.content_type,
-                    lang=page.lang,
-                    fetch_mode=_as_text(fetch_plan.fetch),
-                    extract_route=_as_text(fetch_plan.extract),
-                    strategy=_as_text(fetch_plan.strategy),
-                )
-
-            # 3. Экстракция (грациозная деградация адаптера через .error).
-            try:
-                extracted = extractor.extract(page, fetch_plan.extract)
-            except Exception as exc:  # noqa: BLE001
-                reason = f"{type(exc).__name__}: {exc}"
-                errors.append(f"{product_id}/{url}: extract: {reason}")
-                _mark(
-                    product_id,
-                    url,
-                    CrawlItemStatus.FAILED,
-                    error_kind=FailureKind.PARSER_FAILED.value,
-                    error=reason,
-                    raw_path=str(raw_path),
-                )
-                continue
-            if extracted is None or getattr(extracted, "error", None):
-                reason = getattr(extracted, "error", None) or "пустой ExtractedDoc"
-                errors.append(f"{product_id}/{url}: extract: {reason}")
-                _mark(
-                    product_id,
-                    url,
-                    CrawlItemStatus.FAILED,
-                    error_kind=FailureKind.PARSER_FAILED.value,
-                    error=reason,
-                    raw_path=str(raw_path),
-                )
-                continue
-
-            doc_hash = str(getattr(extracted, "content_hash", "") or "")
-            if not doc_hash:
-                errors.append(f"I19: {product_id}/{url}: ExtractedDoc без content_hash — отклонён")
-                _mark(
-                    product_id,
-                    url,
-                    CrawlItemStatus.FAILED,
-                    error_kind=FailureKind.PARSER_FAILED.value,
-                    error="ExtractedDoc без content_hash",
-                    raw_path=str(raw_path),
-                )
-                continue
-
-            # 4. Дедуп по content_hash (в пределах продукта).
-            if doc_hash in seen_docs:
-                duplicate_count += 1
-                # Байты сохранены и контент уже проиндексирован близнецом в этой партиции.
-                _mark(product_id, url, CrawlItemStatus.FETCHED, raw_path=str(raw_path))
-                continue
-            seen_docs[doc_hash] = url
-
-            document_id = f"{product_id}:{doc_hash}"
-            doc = CorpusDoc(
-                doc_id=document_id,
-                product_id=product_id,
-                url=page.url,
-                fetched_at=page.fetched_at,
-                content_hash=doc_hash,
-                raw_path=str(raw_path),
-                extractor_version=getattr(extracted, "extractor_version", None),
-                render_mode=_as_text(page.fetch_mode),
-                lang=page.lang,
+            # 3-5. Экстракция/дедуп/нарезка — общая часть обоих путей (``_ingest_one``).
+            _ingest_one(
+                product_id,
+                url,
+                page,
+                fetch_plan,
+                raw_path,
+                ingest,
+                seen_docs,
+                seen_chunk_ids,
             )
-            ingest.docs.append(doc)
-
-            # 5. Чанкер.
-            try:
-                chunks = chunker.chunk(extracted, document_id)
-            except Exception as exc:  # noqa: BLE001
-                # Сбой нарезки — не отказ источника/парсера: raw сохранён (FETCHED),
-                # повторный resume сможет ре-извлечь без ре-фетча.
-                errors.append(f"{product_id}/{url}: chunk: {type(exc).__name__}: {exc}")
-                continue
-
-            for chunk in sorted(chunks or [], key=lambda c: getattr(c, "chunk_no", 0)):
-                provided_hash = str(getattr(chunk, "content_hash", "") or "").strip()
-                text = getattr(chunk, "text", "") or ""
-                # I19: у каждого индексируемого чанка обязан быть непустой hash.
-                if not provided_hash:
-                    errors.append(f"I19: {document_id}: чанк без content_hash отклонён")
-                    continue
-                if not text.strip():
-                    errors.append(f"I19: {document_id}: чанк с пустым текстом отклонён")
-                    continue
-
-                chunk_no = int(getattr(chunk, "chunk_no", 0))
-                cid = _chunk_id(product_id, doc_hash, chunk_no)
-                if cid in seen_chunk_ids:
-                    errors.append(f"{document_id}: дублирующийся chunk_id {cid!r} отклонён")
-                    continue
-                seen_chunk_ids.add(cid)
-
-                ingest.chunks.append(
-                    CorpusChunk(
-                        chunk_id=cid,
-                        doc_id=document_id,
-                        product_id=product_id,
-                        url=page.url,
-                        heading_path=getattr(chunk, "heading_path", "") or "",
-                        lang=page.lang,
-                        chunk_no=chunk_no,
-                        text=text,
-                        context_prefix=getattr(chunk, "context_prefix", "") or "",
-                        # Авторитетный хеш — от чистого текста (I19/§10).
-                        content_hash=content_hash(text),
-                        # build_id проставляется в Pass B после фиксации id сборки.
-                        build_id=None,
-                        embed_model_id=embed_model_id or None,
-                        embedded_at=None,
-                    )
-                )
-
-            # L1a: документ успешно добыт и нарезан → элемент сеанса терминален ``FETCHED``
-            # (сеанс трекает краул: сырые байты сохранены = «ready» для материализации).
-            _mark(product_id, url, CrawlItemStatus.FETCHED, raw_path=str(raw_path))
 
         # Retention-провенанс не зависит от индексной сборки: docs персистятся в Pass A.
         _persist_docs(store, ingest.docs, errors)

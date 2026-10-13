@@ -12,6 +12,7 @@ import inspect
 import json
 import random
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -37,6 +38,13 @@ from core.domain import (
 from core.pipeline import RunPlan
 from core.pipeline.corpus import IndexBuild, _derive_index_build_id, build_corpus
 from core.pipeline.crawl_session import default_session_id
+from core.ports.crawl_executor import (
+    CrawlBatch,
+    CrawlExecutorPort,
+    CrawlProgress,
+    CrawlResultItem,
+    CrawlWorkItem,
+)
 from core.ports.types import (
     Chunk,
     ExtractedDoc,
@@ -1547,3 +1555,400 @@ def test_browser_guard_error_suggests_browser_crawler(tmp_path: Path) -> None:
 
     assert result.status == "ok"
     assert any("scrapy или browser" in err for err in result.errors)
+
+
+# --------------------------------------------------------------------------- #
+# Phase 3.3: executor-ветка (CrawlExecutorPort) — ingest через исполнителя
+# --------------------------------------------------------------------------- #
+
+
+class _ExecutorError(RuntimeError):
+    """Локальная ошибка фейкового исполнителя (тест не импортирует адаптеры, A1)."""
+
+
+class _FakeExecutor:
+    """Фейковый ``CrawlExecutorPort``: отдаёт заранее заданные байты/ошибки по URL.
+
+    ``statuses`` задаёт последовательность статусов опроса (последний повторяется);
+    ``pages``/``errors``/``engines`` — исход по URL. Журналирует submit/status/collect.
+    """
+
+    version = "fake-executor-1"
+    profile = "split"
+
+    def __init__(
+        self,
+        *,
+        pages: dict[str, bytes] | None = None,
+        errors: dict[str, str] | None = None,
+        engines: dict[str, str] | None = None,
+        statuses: list[str] | None = None,
+        collect_error: str | None = None,
+        extra_items: list[CrawlResultItem] | None = None,
+    ) -> None:
+        self.pages = dict(pages or {})
+        self.errors = dict(errors or {})
+        self.engines = dict(engines or {})
+        self.statuses = list(statuses or ["completed"])
+        self.collect_error = collect_error
+        self.extra_items = list(extra_items or [])
+        self.submits: list[list[CrawlWorkItem]] = []
+        self.submit_kwargs: list[dict[str, Any]] = []
+        self.status_calls: list[str] = []
+        self.collect_cursors: list[str | None] = []
+        self._status_i = 0
+
+    def submit(
+        self,
+        items: list[CrawlWorkItem],
+        *,
+        session_id: str,
+        run_id: str,
+        profile: str,
+        idempotency_key: str,
+    ) -> str:
+        self.submits.append(list(items))
+        self.submit_kwargs.append(
+            {
+                "session_id": session_id,
+                "run_id": run_id,
+                "profile": profile,
+                "idempotency_key": idempotency_key,
+            }
+        )
+        return "job-1"
+
+    def status(self, handle: str) -> CrawlProgress:
+        value = self.statuses[min(self._status_i, len(self.statuses) - 1)]
+        self._status_i += 1
+        self.status_calls.append(value)
+        return CrawlProgress(job_id=handle, status=value)
+
+    def cancel(self, handle: str) -> CrawlProgress:
+        return CrawlProgress(job_id=handle, status="cancelled")
+
+    def collect(
+        self, handle: str, *, cursor: str | None = None, limit: int | None = None
+    ) -> CrawlBatch:
+        self.collect_cursors.append(cursor)
+        if self.collect_error is not None:
+            raise _ExecutorError(self.collect_error)
+        items = [self._result(work) for work in self.submits[-1]]
+        items.extend(self.extra_items)
+        return CrawlBatch(items=items, next_cursor=None, done=True)
+
+    def _result(self, work: CrawlWorkItem) -> CrawlResultItem:
+        engine = self.engines.get(work.url, work.engine)
+        if work.url in self.errors:
+            return CrawlResultItem(
+                product_id=work.product_id,
+                url=work.url,
+                status="failed",
+                engine=engine,
+                kind=work.kind,
+                error=self.errors[work.url],
+            )
+        content = self.pages.get(work.url, b"")
+        return CrawlResultItem(
+            product_id=work.product_id,
+            url=work.url,
+            status="fetched",
+            engine=engine or "http",
+            kind=work.kind,
+            content_hash=content_hash(content),
+            raw_bytes=content,
+        )
+
+
+def test_fake_executor_satisfies_port() -> None:
+    assert isinstance(_FakeExecutor(), CrawlExecutorPort)
+
+
+def test_executor_ingests_marks_and_finalizes(tmp_path: Path) -> None:
+    """Executor-ветка: ingest через исполнителя, сеанс помечен/финализирован, счётчики."""
+    store = SqliteStore(":memory:")
+    _make_run(store)
+    executor = _FakeExecutor(pages={URL_P1_A: b"executor page"}, engines={URL_P1_A: "scrapy"})
+    try:
+        result = _build(
+            tmp_path,
+            pages={},
+            urls={"p1": [URL_P1_A]},
+            crawler=_BombCrawler({}),  # локальный краулер НЕ должен вызываться
+            executor=executor,
+            executor_poll_interval=0.0,
+            executor_sleep=lambda _s: None,
+            store=store,
+            run_id=RUN_ID,
+        )
+        assert result.errors == []
+        build = _build_of(result)
+        assert build.chunk_count == 1
+        assert build.docs[0].content_hash == content_hash(b"executor page")
+        item = next(iter(_items(store)))
+        assert item.status is CrawlItemStatus.FETCHED
+        assert item.engine == "scrapy"  # S1: применённый движок из результата шва
+        assert item.raw_path and Path(item.raw_path).is_file()
+        session = store.get_crawl_session(SESSION_ID)
+        assert session is not None and session.status is CrawlSessionStatus.COMPLETED
+        assert (build.crawl_fetched, build.crawl_failed) == (1, 0)
+        # Исполнитель получил ровно одну работу, с корректными метаданными подачи.
+        assert len(executor.submits) == 1
+        (work,) = executor.submits[0]
+        assert (work.product_id, work.url) == ("p1", URL_P1_A)
+        kwargs = executor.submit_kwargs[0]
+        assert kwargs["session_id"] == SESSION_ID
+        assert kwargs["run_id"] == RUN_ID
+        assert kwargs["profile"] == "split"
+        assert kwargs["idempotency_key"] == SESSION_ID
+    finally:
+        store.close()
+
+
+def test_executor_records_resolved_axes_in_work_items(tmp_path: Path) -> None:
+    """Оси работы (engine/kind/fetch/extract/strategy) берутся из ``resolve_crawl_target``."""
+    store = SqliteStore(":memory:")
+    _make_run(store)
+    sources = CrawlSourcesConfig(
+        sites={"p1": {"docs.test": CrawlSource(engine="scrapy", kind="web")}}
+    )
+    executor = _FakeExecutor(pages={URL_P1_A: b"x"})
+    try:
+        _build(
+            tmp_path,
+            pages={},
+            urls={"p1": [URL_P1_A]},
+            executor=executor,
+            executor_poll_interval=0.0,
+            executor_sleep=lambda _s: None,
+            crawl_sources=sources,
+            store=store,
+            run_id=RUN_ID,
+        )
+        (work,) = executor.submits[0]
+        assert work.engine == "scrapy"
+        assert work.kind == "web"
+        assert work.fetch is FetchMode.HTTP
+        assert work.extract is ExtractionRoute.AUTO
+        assert work.strategy is CrawlStrategy.AUTO
+    finally:
+        store.close()
+
+
+def test_executor_resume_skips_submission(tmp_path: Path) -> None:
+    """Resume: URL с retained raw не подаётся — исполнитель не вызывается (как локально)."""
+    store = SqliteStore(":memory:")
+    _make_run(store)
+    try:
+        first = _build(
+            tmp_path,
+            pages={},
+            urls={"p1": [URL_P1_A]},
+            executor=_FakeExecutor(pages={URL_P1_A: b"retained"}),
+            executor_poll_interval=0.0,
+            executor_sleep=lambda _s: None,
+            store=store,
+            run_id=RUN_ID,
+        )
+        assert _build_of(first).chunk_count == 1
+
+        # Второй прогон: submit не должен вызываться (всё resum'ится из retained raw).
+        second_executor = _FakeExecutor(pages={})
+        second = _build(
+            tmp_path,
+            pages={},
+            urls={"p1": [URL_P1_A]},
+            executor=second_executor,
+            executor_poll_interval=0.0,
+            executor_sleep=lambda _s: None,
+            store=store,
+            run_id=RUN_ID,
+        )
+        assert second.errors == []
+        assert second_executor.submits == []
+        assert _build_of(second).chunk_count == 1
+        assert _build_of(second).index_build_id == _build_of(first).index_build_id
+    finally:
+        store.close()
+
+
+def test_executor_failure_marks_source_unavailable_and_partial(tmp_path: Path) -> None:
+    """Сбойный результат исполнителя → элемент ``FAILED``, сеанс ``PARTIAL``."""
+    store = SqliteStore(":memory:")
+    _make_run(store)
+    executor = _FakeExecutor(pages={}, errors={URL_P1_A: "http_503"})
+    try:
+        result = _build(
+            tmp_path,
+            pages={},
+            urls={"p1": [URL_P1_A]},
+            executor=executor,
+            executor_poll_interval=0.0,
+            executor_sleep=lambda _s: None,
+            store=store,
+            run_id=RUN_ID,
+        )
+        item = next(iter(_items(store)))
+        assert item.status is CrawlItemStatus.FAILED
+        assert item.error_kind == FailureKind.SOURCE_UNAVAILABLE.value
+        assert any("http_503" in err for err in result.errors)
+        assert _build_of(result).crawl_failed == 1
+        session = store.get_crawl_session(SESSION_ID)
+        assert session is not None and session.status is CrawlSessionStatus.PARTIAL
+    finally:
+        store.close()
+
+
+def test_executor_missing_result_marks_failed(tmp_path: Path) -> None:
+    """Работа без результата (исполнитель не вернул item) → ``FAILED``."""
+    store = SqliteStore(":memory:")
+    _make_run(store)
+
+    class _EmptyCollect(_FakeExecutor):
+        def collect(self, handle, *, cursor=None, limit=None):  # type: ignore[override]
+            self.collect_cursors.append(cursor)
+            return CrawlBatch(items=[], next_cursor=None, done=True)
+
+    try:
+        result = _build(
+            tmp_path,
+            pages={},
+            urls={"p1": [URL_P1_A]},
+            executor=_EmptyCollect(),
+            executor_poll_interval=0.0,
+            executor_sleep=lambda _s: None,
+            store=store,
+            run_id=RUN_ID,
+        )
+        item = next(iter(_items(store)))
+        assert item.status is CrawlItemStatus.FAILED
+        assert item.error_kind == FailureKind.SOURCE_UNAVAILABLE.value
+        assert any("результат не получен" in err for err in result.errors)
+    finally:
+        store.close()
+
+
+def test_executor_collect_error_is_isolated(tmp_path: Path) -> None:
+    """Сбой ``collect`` изолируется: работа → ``FAILED``, фаза не падает."""
+    store = SqliteStore(":memory:")
+    _make_run(store)
+    executor = _FakeExecutor(collect_error="edge down")
+    try:
+        result = _build(
+            tmp_path,
+            pages={},
+            urls={"p1": [URL_P1_A]},
+            executor=executor,
+            executor_poll_interval=0.0,
+            executor_sleep=lambda _s: None,
+            store=store,
+            run_id=RUN_ID,
+        )
+        assert result.status == "ok"
+        assert any("executor.collect" in err for err in result.errors)
+        item = next(iter(_items(store)))
+        assert item.status is CrawlItemStatus.FAILED
+    finally:
+        store.close()
+
+
+def test_executor_submit_error_is_isolated(tmp_path: Path) -> None:
+    """Сбой ``submit`` изолируется: работа → ``FAILED``, фаза не падает."""
+    store = SqliteStore(":memory:")
+    _make_run(store)
+
+    class _BadSubmit(_FakeExecutor):
+        def submit(self, items, *, session_id, run_id, profile, idempotency_key):  # type: ignore[override]
+            raise _ExecutorError("submit boom")
+
+    try:
+        result = _build(
+            tmp_path,
+            pages={},
+            urls={"p1": [URL_P1_A]},
+            executor=_BadSubmit(),
+            executor_poll_interval=0.0,
+            executor_sleep=lambda _s: None,
+            store=store,
+            run_id=RUN_ID,
+        )
+        assert result.status == "ok"
+        assert any("submit boom" in err for err in result.errors)
+        assert next(iter(_items(store))).status is CrawlItemStatus.FAILED
+    finally:
+        store.close()
+
+
+def test_executor_polls_until_terminal(tmp_path: Path) -> None:
+    """Опрос продолжается, пока статус не-терминальный; пауза — через инжектированный sleep."""
+    store = SqliteStore(":memory:")
+    _make_run(store)
+    slept: list[float] = []
+    executor = _FakeExecutor(
+        pages={URL_P1_A: b"x"},
+        statuses=["pending", "running", "completed"],
+    )
+    try:
+        _build(
+            tmp_path,
+            pages={},
+            urls={"p1": [URL_P1_A]},
+            executor=executor,
+            executor_poll_interval=0.5,
+            executor_sleep=slept.append,
+            store=store,
+            run_id=RUN_ID,
+        )
+        assert executor.status_calls == ["pending", "running", "completed"]
+        # Две паузы: перед вторым и третьим опросом (терминальный не пейсится).
+        assert slept == [0.5, 0.5]
+    finally:
+        store.close()
+
+
+def test_executor_collects_only_once_when_terminal(tmp_path: Path) -> None:
+    """Уже терминальное задание не пейсится; сбор — одна страница (``done``)."""
+    store = SqliteStore(":memory:")
+    _make_run(store)
+    slept: list[float] = []
+    executor = _FakeExecutor(pages={URL_P1_A: b"x"})
+    try:
+        _build(
+            tmp_path,
+            pages={},
+            urls={"p1": [URL_P1_A]},
+            executor=executor,
+            executor_poll_interval=0.5,
+            executor_sleep=slept.append,
+            store=store,
+            run_id=RUN_ID,
+        )
+        assert slept == []
+        assert executor.status_calls == ["completed"]
+        assert executor.collect_cursors == [None]
+    finally:
+        store.close()
+
+
+def test_executor_ignores_local_crawler_even_if_available(tmp_path: Path) -> None:
+    """При наличии ``executor`` локальные ``crawler``/``crawlers`` не используются."""
+    store = SqliteStore(":memory:")
+    _make_run(store)
+    local = _Crawler({URL_P1_A: b"local should not be used"})
+    try:
+        result = _build(
+            tmp_path,
+            pages={},
+            urls={"p1": [URL_P1_A]},
+            crawler=local,
+            crawlers={"http": local},
+            executor=_FakeExecutor(pages={URL_P1_A: b"from executor"}),
+            executor_poll_interval=0.0,
+            executor_sleep=lambda _s: None,
+            store=store,
+            run_id=RUN_ID,
+        )
+        assert local.calls == []
+        assert _build_of(result).docs[0].content_hash == content_hash(b"from executor")
+    finally:
+        store.close()

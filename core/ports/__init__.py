@@ -10,6 +10,13 @@
 from __future__ import annotations
 
 from core.ports.chunker import ChunkerPort
+from core.ports.crawl_executor import (
+    CrawlBatch,
+    CrawlExecutorPort,
+    CrawlProgress,
+    CrawlResultItem,
+    CrawlWorkItem,
+)
 from core.ports.crawler import CrawlerPort
 from core.ports.discovery_llm import (
     DiscoveryLLMPort,
@@ -40,6 +47,11 @@ from core.ports.vector_index import RetrievedChunk, RetrievalResult, VectorIndex
 __all__ = [
     "ChunkerPort",
     "CrawlerPort",
+    "CrawlBatch",
+    "CrawlExecutorPort",
+    "CrawlProgress",
+    "CrawlResultItem",
+    "CrawlWorkItem",
     "DiscoveryLLMPort",
     "DiscoveryLLMRequest",
     "DiscoveryLLMResponse",

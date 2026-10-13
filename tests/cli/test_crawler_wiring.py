@@ -36,6 +36,7 @@ from core.adapters.crawl_browser import (
 )
 from core.adapters.crawl_http import HttpCrawler
 from core.adapters.crawl_scrapy import ScrapyCrawler
+from core.adapters.remote_crawl_executor import EdgeCrawlExecutor
 from core.adapters.remote_crawler import RemoteCrawler
 from core.cli.context import _resolve_ports
 from core.cli.main import EXIT_BLOCKED, main
@@ -719,6 +720,41 @@ def test_build_adapters_split_has_no_local_web_crawlers_explicit() -> None:
     for local_type in (HttpCrawler, BrowserCrawler, ScrapyCrawler):
         assert not isinstance(ports.crawler, local_type)
         assert not any(isinstance(c, local_type) for c in crawlers.values())
+
+
+# ---------------------------------------------------------------------------
+# Phase 3.3: Ports.executor (EdgeCrawlExecutor) — split vs local
+# ---------------------------------------------------------------------------
+
+
+def test_build_adapters_split_sets_executor() -> None:
+    """``split`` собирает ``EdgeCrawlExecutor`` поверх шва (``Ports.executor``)."""
+    config = DeployConfig.model_validate(
+        {"profile": "split", "edge": {"base_url": "https://edge.test"}}
+    )
+    gateway = SimpleNamespace()
+
+    ports = build_adapters(profile=SPLIT_PROFILE, deploy=config, gateway=gateway)  # type: ignore[arg-type]
+
+    assert isinstance(ports.executor, EdgeCrawlExecutor)
+    assert ports.executor._gateway is gateway
+    # ``crawler`` оставлен для обратной совместимости (non-executor путь).
+    assert isinstance(ports.crawler, RemoteCrawler)
+
+
+def test_build_adapters_local_executor_is_none(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``local`` не собирает исполнителя: ``Ports.executor is None`` (прежний путь)."""
+    clear_env(monkeypatch, [ENV_SCOUT_CRAWLER])
+
+    ports = build_adapters(
+        profile=LOCAL_PROFILE,
+        cache=_cache(tmp_path),
+        domain_profiles=_profiles(),
+    )
+
+    assert ports.executor is None
 
 
 def test_resolve_ports_forwards_crawl_sources(

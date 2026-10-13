@@ -362,6 +362,9 @@ def build_phases(
             crawl_sources=crawl_sources,
             crawlers=getattr(ctx.ports, "crawlers", None),
             rate_limiter=rate_limiter,
+            # Phase 3.3: исполнитель краула (``split``/edge-планировщик). ``None`` → локальный
+            # per-URL путь (``crawler``/``crawlers``); при наличии — краул через шов.
+            executor=getattr(ctx.ports, "executor", None),
             # D4 (P2-3): секция ``crawl`` run.yaml → дефолты оси стратегии/лимита для ``FetchPlan``.
             # ``RunConfig`` доступен как ``inputs.run`` (RunInputs.run), поле ``crawl`` опционально.
             crawl_defaults=getattr(getattr(inputs, "run", None), "crawl", None),
