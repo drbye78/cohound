@@ -35,6 +35,7 @@ __all__ = [
     "SEAM_SCHEMA_VERSION",
     "SCHEMA_DIR",
     "ENDPOINT_OPS",
+    "CRAWL_OPS",
     "FETCH_VALUES",
     "EXTRACT_VALUES",
     "STRATEGY_VALUES",
@@ -42,6 +43,7 @@ __all__ = [
     "validate_envelope",
     "validate_payload",
     "validate_fetch_request",
+    "validate_crawl_request",
     "contract_digest",
 ]
 
@@ -53,9 +55,19 @@ SEAM_SCHEMA_VERSION = "1"
 #: Каталог опубликованных контрактов (``<repo>/contracts/seam``).
 SCHEMA_DIR: Path = Path(__file__).resolve().parents[2] / "contracts" / "seam"
 
-#: Операции протокола ``/v1/*`` (07 §3).
+#: Операции протокола ``/v1/*`` (07 §3). Crawl-операции сохраняют слэш (``crawl/submit``).
 ENDPOINT_OPS: frozenset[str] = frozenset(
-    {"fetch", "search", "registry", "capabilities", "health"}
+    {
+        "fetch",
+        "search",
+        "registry",
+        "capabilities",
+        "health",
+        "crawl/submit",
+        "crawl/status",
+        "crawl/cancel",
+        "crawl/collect",
+    }
 )
 
 #: Допустимые значения оси ``fetch`` запроса ``/v1/fetch`` (D2).
@@ -71,7 +83,12 @@ _RESPONSE_STATUSES: frozenset[str] = frozenset({"ok", "error"})
 
 #: Имена ``*_schema.json``, за которые отвечает :func:`load_schema`.
 _SCHEMA_NAMES: frozenset[str] = frozenset(
-    {"envelope", "fetch", "search", "registry", "capabilities", "health"}
+    {"envelope", "fetch", "search", "registry", "capabilities", "health", "crawl"}
+)
+
+#: Crawl-операции очереди краула (Phase 3.1): POST /v1/crawl/{submit,status,cancel,collect}.
+CRAWL_OPS: frozenset[str] = frozenset(
+    {"crawl/submit", "crawl/status", "crawl/cancel", "crawl/collect"}
 )
 
 
@@ -137,6 +154,30 @@ def _check_opt_int(violations: list[str], where: str, field: str, value: Any) ->
     """Поле, если присутствует/не ``None``, должно быть целым."""
     if value is not None and not _is_int(value):
         violations.append(f"{where}: поле {field} должно быть целым числом или null")
+
+
+def _check_required_str(
+    violations: list[str], where: str, field: str, value: Any, *, nonempty: bool = True
+) -> None:
+    """Поле обязано присутствовать и быть строкой (по умолчанию — непустой)."""
+    if not isinstance(value, str) or (nonempty and not value):
+        violations.append(f"{where}: обязательное поле {field} — непустая строка")
+
+
+def _check_opt_bool(violations: list[str], where: str, field: str, value: Any) -> None:
+    """Поле, если присутствует/не ``None``, должно быть булевым."""
+    if value is not None and not isinstance(value, bool):
+        violations.append(f"{where}: поле {field} должно быть булевым или null")
+
+
+def _check_opt_str_list(
+    violations: list[str], where: str, field: str, value: Any
+) -> None:
+    """Опциональное поле-список строк: ``None``/список допустимы."""
+    if value is None:
+        return
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        violations.append(f"{where}: поле {field} должно быть списком строк или null")
 
 
 # ---------------------------------------------------------------------------
@@ -321,12 +362,104 @@ def _validate_health(payload: Any) -> list[str]:
     return []
 
 
+def _validate_crawl_submit_response(payload: Any) -> list[str]:
+    """Payload ``POST /v1/crawl/submit`` (Phase 3.1): ``{job_id, accepted, total, session_id}``."""
+    if not isinstance(payload, Mapping):
+        return ["crawl/submit: payload должен быть объектом"]
+    violations: list[str] = []
+    where = "crawl/submit"
+    _check_required_str(violations, where, "job_id", payload.get("job_id"))
+    _check_opt_bool(violations, where, "accepted", payload.get("accepted"))
+    _check_opt_int(violations, where, "total", payload.get("total"))
+    _check_required_str(violations, where, "session_id", payload.get("session_id"))
+    return violations
+
+
+def _validate_crawl_status_response(payload: Any) -> list[str]:
+    """Payload ``POST /v1/crawl/status`` (Phase 3.1): счётчики очереди.
+
+    Контракт: ``{job_id, status, total, pending, running, fetched, failed, cancelled,
+    engines, kinds}``; ``engines``/``kinds`` — списки строк.
+    """
+    if not isinstance(payload, Mapping):
+        return ["crawl/status: payload должен быть объектом"]
+    violations: list[str] = []
+    where = "crawl/status"
+    _check_required_str(violations, where, "job_id", payload.get("job_id"))
+    _check_required_str(violations, where, "status", payload.get("status"))
+    for field in ("total", "pending", "running", "fetched", "failed", "cancelled"):
+        _check_opt_int(violations, where, field, payload.get(field))
+    _check_opt_str_list(violations, where, "engines", payload.get("engines"))
+    _check_opt_str_list(violations, where, "kinds", payload.get("kinds"))
+    return violations
+
+
+def _validate_crawl_cancel_response(payload: Any) -> list[str]:
+    """Payload ``POST /v1/crawl/cancel`` (Phase 3.1): ``{job_id, status, cancelled}``.
+
+    ``status`` фиксирован строкой ``"cancelled"``.
+    """
+    if not isinstance(payload, Mapping):
+        return ["crawl/cancel: payload должен быть объектом"]
+    violations: list[str] = []
+    where = "crawl/cancel"
+    _check_required_str(violations, where, "job_id", payload.get("job_id"))
+    if payload.get("status") != "cancelled":
+        violations.append(f"{where}: поле status должно быть 'cancelled'")
+    _check_opt_int(violations, where, "cancelled", payload.get("cancelled"))
+    return violations
+
+
+def _validate_crawl_collect_item(item: Any, index: int) -> list[str]:
+    """Элемент ``items`` ответа ``POST /v1/crawl/collect`` (Phase 3.1)."""
+    where = f"crawl/collect.items[{index}]"
+    if not isinstance(item, Mapping):
+        return [f"{where}: элемент должен быть объектом"]
+    violations: list[str] = []
+    _check_required_str(violations, where, "product_id", item.get("product_id"))
+    _check_required_str(violations, where, "url", item.get("url"))
+    for field in ("status", "engine", "kind", "content_type", "fetched_at", "content_hash"):
+        _check_opt_str(violations, where, field, item.get(field))
+    _check_opt_int(violations, where, "http_status", item.get("http_status"))
+    _check_opt_str(violations, where, "error", item.get("error"))
+    raw = item.get("raw")
+    if raw is not None:
+        if not isinstance(raw, Mapping):
+            violations.append(f"{where}.raw: должен быть объектом или null")
+        else:
+            _check_required_str(violations, f"{where}.raw", "hash", raw.get("hash"))
+            _check_opt_int(violations, f"{where}.raw", "size", raw.get("size"))
+            _check_opt_str(violations, f"{where}.raw", "bytes_b64", raw.get("bytes_b64"))
+    return violations
+
+
+def _validate_crawl_collect_response(payload: Any) -> list[str]:
+    """Payload ``POST /v1/crawl/collect`` (Phase 3.1): ``{items, next_cursor, done}``."""
+    if not isinstance(payload, Mapping):
+        return ["crawl/collect: payload должен быть объектом"]
+    violations: list[str] = []
+    where = "crawl/collect"
+    items = payload.get("items")
+    if not isinstance(items, list):
+        violations.append(f"{where}: поле items должно быть списком")
+    else:
+        for index, item in enumerate(items):
+            violations.extend(_validate_crawl_collect_item(item, index))
+    _check_opt_str(violations, where, "next_cursor", payload.get("next_cursor"))
+    _check_opt_bool(violations, where, "done", payload.get("done"))
+    return violations
+
+
 _PAYLOAD_VALIDATORS = {
     "fetch": _validate_fetch,
     "search": _validate_search,
     "registry": _validate_registry,
     "capabilities": _validate_capabilities,
     "health": _validate_health,
+    "crawl/submit": _validate_crawl_submit_response,
+    "crawl/status": _validate_crawl_status_response,
+    "crawl/cancel": _validate_crawl_cancel_response,
+    "crawl/collect": _validate_crawl_collect_response,
 }
 
 
@@ -367,10 +500,91 @@ def validate_fetch_request(payload: Any) -> list[str]:
     return violations
 
 
+def validate_crawl_request(op: str, payload: Any) -> list[str]:
+    """Проверяет **запросный** payload crawl-операции (Phase 3.1); ``[]`` — валиден.
+
+    Контракты запросов (все — POST ``/v1/crawl/*``):
+
+    * ``crawl/submit``: ``{run_id, session_id, idempotency_key, profile, items}``;
+      ``items`` — непустой список объектов, каждый с ``product_id`` и ``url`` и
+      опциональными осями ``engine``/``kind``/``fetch``/``extract``/``strategy``/
+      ``wait_for``/``lang``;
+    * ``crawl/status`` / ``crawl/cancel``: ``{job_id}``;
+    * ``crawl/collect``: ``{job_id, cursor?, limit?}``.
+
+    :param op: ``crawl/submit`` | ``crawl/status`` | ``crawl/cancel`` | ``crawl/collect``.
+    """
+    where = str(op).strip().lower()
+    if where == "crawl/submit":
+        return _validate_crawl_submit_request(payload)
+    if where in ("crawl/status", "crawl/cancel"):
+        return _validate_crawl_job_request(where, payload)
+    if where == "crawl/collect":
+        return _validate_crawl_collect_request(payload)
+    return [f"неизвестная crawl-операция {op!r} (ожидается одна из: {sorted(CRAWL_OPS)})"]
+
+
+def _validate_crawl_job_request(where: str, payload: Any) -> list[str]:
+    """Запрос ``crawl/status``/``crawl/cancel``: обязательный непустой ``job_id``."""
+    if not isinstance(payload, Mapping):
+        return [f"{where}: payload должен быть объектом"]
+    violations: list[str] = []
+    _check_required_str(violations, where, "job_id", payload.get("job_id"))
+    return violations
+
+
+def _validate_crawl_collect_request(payload: Any) -> list[str]:
+    """Запрос ``crawl/collect``: ``{job_id, cursor?, limit?}``."""
+    if not isinstance(payload, Mapping):
+        return ["crawl/collect: payload должен быть объектом"]
+    violations: list[str] = []
+    where = "crawl/collect"
+    _check_required_str(violations, where, "job_id", payload.get("job_id"))
+    _check_opt_str(violations, where, "cursor", payload.get("cursor"))
+    _check_opt_int(violations, where, "limit", payload.get("limit"))
+    return violations
+
+
+def _validate_crawl_submit_request(payload: Any) -> list[str]:
+    """Запрос ``crawl/submit``: метаданные сессии + непустой список ``items``."""
+    if not isinstance(payload, Mapping):
+        return ["crawl/submit: payload должен быть объектом"]
+    violations: list[str] = []
+    where = "crawl/submit"
+    for field in ("run_id", "session_id", "idempotency_key", "profile"):
+        _check_required_str(violations, where, field, payload.get(field))
+    items = payload.get("items")
+    if not isinstance(items, list) or not items:
+        violations.append(f"{where}: поле items — непустой список")
+        return violations
+    for index, item in enumerate(items):
+        violations.extend(_validate_crawl_submit_item(item, index))
+    return violations
+
+
+def _validate_crawl_submit_item(item: Any, index: int) -> list[str]:
+    """Элемент ``items`` запроса ``crawl/submit`` (оси фетча — как у ``/v1/fetch``)."""
+    where = f"crawl/submit.items[{index}]"
+    if not isinstance(item, Mapping):
+        return [f"{where}: элемент должен быть объектом"]
+    violations: list[str] = []
+    for field in ("product_id", "url"):
+        _check_required_str(violations, where, field, item.get(field))
+    for field in ("engine", "kind"):
+        _check_opt_str(violations, where, field, item.get(field))
+    _opt_enum(violations, where, "fetch", item.get("fetch"), FETCH_VALUES)
+    _opt_enum(violations, where, "extract", item.get("extract"), EXTRACT_VALUES)
+    _opt_enum(violations, where, "strategy", item.get("strategy"), STRATEGY_VALUES)
+    for field in ("wait_for", "lang"):
+        _check_opt_str(violations, where, field, item.get(field))
+    return violations
+
+
 def validate_payload(op: str, payload: Any) -> list[str]:
     """Проверяет payload операции ``/v1/*``; ``[]`` — валиден.
 
-    :param op: ``fetch`` | ``search`` | ``registry`` | ``capabilities`` | ``health``.
+    :param op: ``fetch`` | ``search`` | ``registry`` | ``capabilities`` | ``health`` |
+        ``crawl/submit`` | ``crawl/status`` | ``crawl/cancel`` | ``crawl/collect``.
     :param payload: вложенный ``payload`` конверта ответа.
     """
     key = str(op).strip().lower()

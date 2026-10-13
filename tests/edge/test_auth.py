@@ -23,6 +23,7 @@ from core.edge.auth import (
     AUTHORIZED_OPS,
     PUBLIC_OPS,
     SCOPE_CAPABILITIES,
+    SCOPE_CRAWL,
     SCOPE_FETCH,
     SCOPE_REGISTRY,
     SCOPE_SEARCH,
@@ -280,6 +281,14 @@ def test_authorize_op_scope_matrix() -> None:
     assert authorize(_principal(set()), "fetch") is False
 
 
+def test_authorize_crawl_ops_require_crawl_scope() -> None:
+    """Все crawl-операции покрыты единым scope ``crawl`` (Phase 3.1)."""
+    for op in ("crawl/submit", "crawl/status", "crawl/cancel", "crawl/collect"):
+        assert authorize(_principal({SCOPE_CRAWL}), op) is True
+        assert authorize(_principal({SCOPE_FETCH}), op) is False
+        assert authorize(None, op) is False
+
+
 def test_authorize_health_is_public() -> None:
     """``health`` — публичная диагностика: доступна без принципала."""
     assert authorize(None, "health") is True
@@ -298,7 +307,17 @@ def test_authorize_unknown_op_denied() -> None:
 
 def test_authorized_ops_allowlist_exact() -> None:
     assert AUTHORIZED_OPS == frozenset(
-        {"fetch", "search", "registry", "capabilities", "health"}
+        {
+            "fetch",
+            "search",
+            "registry",
+            "capabilities",
+            "health",
+            "crawl/submit",
+            "crawl/status",
+            "crawl/cancel",
+            "crawl/collect",
+        }
     )
     assert PUBLIC_OPS == frozenset({"health"})
 
@@ -306,6 +325,7 @@ def test_authorized_ops_allowlist_exact() -> None:
 def test_required_scope_lookup() -> None:
     assert required_scope("fetch") == SCOPE_FETCH
     assert required_scope("Search") == SCOPE_SEARCH
+    assert required_scope("crawl/submit") == SCOPE_CRAWL
     assert required_scope("nope") is None
 
 

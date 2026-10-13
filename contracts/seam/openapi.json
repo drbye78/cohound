@@ -39,7 +39,15 @@
       "RegistryRequest": {"$ref": "registry.schema.json#/$defs/request"},
       "RegistryResponse": {"$ref": "registry.schema.json"},
       "CapabilitiesResponse": {"$ref": "capabilities.schema.json"},
-      "HealthResponse": {"$ref": "health.schema.json"}
+      "HealthResponse": {"$ref": "health.schema.json"},
+      "CrawlSubmitRequest": {"$ref": "crawl.schema.json#/$defs/submit_request"},
+      "CrawlSubmitResponse": {"$ref": "crawl.schema.json#/$defs/submit_response"},
+      "CrawlStatusRequest": {"$ref": "crawl.schema.json#/$defs/status_request"},
+      "CrawlStatusResponse": {"$ref": "crawl.schema.json#/$defs/status_response"},
+      "CrawlCancelRequest": {"$ref": "crawl.schema.json#/$defs/cancel_request"},
+      "CrawlCancelResponse": {"$ref": "crawl.schema.json#/$defs/cancel_response"},
+      "CrawlCollectRequest": {"$ref": "crawl.schema.json#/$defs/collect_request"},
+      "CrawlCollectResponse": {"$ref": "crawl.schema.json#/$defs/collect_response"}
     }
   },
   "paths": {
@@ -149,6 +157,158 @@
                   "allOf": [
                     {"$ref": "#/components/schemas/Envelope"},
                     {"properties": {"payload": {"$ref": "#/components/schemas/RegistryResponse"}}}
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/crawl/submit": {
+      "post": {
+        "operationId": "crawl/submit",
+        "summary": "Постановка задания краула в очередь (контент, не evidence — I19)",
+        "parameters": [
+          {"$ref": "#/components/parameters/RequestId"},
+          {"$ref": "#/components/parameters/SchemaVersion"}
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "allOf": [
+                  {"$ref": "#/components/schemas/RequestEnvelope"},
+                  {"properties": {"payload": {"$ref": "#/components/schemas/CrawlSubmitRequest"}}}
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Задание принято: {job_id, accepted, total, session_id}.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {"$ref": "#/components/schemas/Envelope"},
+                    {"properties": {"payload": {"$ref": "#/components/schemas/CrawlSubmitResponse"}}}
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/crawl/status": {
+      "post": {
+        "operationId": "crawl/status",
+        "summary": "Прогресс задания краула (счётчики по состояниям)",
+        "parameters": [
+          {"$ref": "#/components/parameters/RequestId"},
+          {"$ref": "#/components/parameters/SchemaVersion"}
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "allOf": [
+                  {"$ref": "#/components/schemas/RequestEnvelope"},
+                  {"properties": {"payload": {"$ref": "#/components/schemas/CrawlStatusRequest"}}}
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "{job_id, status, total, pending, running, fetched, failed, cancelled, engines, kinds}.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {"$ref": "#/components/schemas/Envelope"},
+                    {"properties": {"payload": {"$ref": "#/components/schemas/CrawlStatusResponse"}}}
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/crawl/cancel": {
+      "post": {
+        "operationId": "crawl/cancel",
+        "summary": "Отмена задания краула",
+        "parameters": [
+          {"$ref": "#/components/parameters/RequestId"},
+          {"$ref": "#/components/parameters/SchemaVersion"}
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "allOf": [
+                  {"$ref": "#/components/schemas/RequestEnvelope"},
+                  {"properties": {"payload": {"$ref": "#/components/schemas/CrawlCancelRequest"}}}
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "{job_id, status=\"cancelled\", cancelled}.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {"$ref": "#/components/schemas/Envelope"},
+                    {"properties": {"payload": {"$ref": "#/components/schemas/CrawlCancelResponse"}}}
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/crawl/collect": {
+      "post": {
+        "operationId": "crawl/collect",
+        "summary": "Постраничный забор результатов задания (сырые байты/хэши; не evidence — I19)",
+        "parameters": [
+          {"$ref": "#/components/parameters/RequestId"},
+          {"$ref": "#/components/parameters/SchemaVersion"}
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "allOf": [
+                  {"$ref": "#/components/schemas/RequestEnvelope"},
+                  {"properties": {"payload": {"$ref": "#/components/schemas/CrawlCollectRequest"}}}
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "{items, next_cursor, done}; items несут контент, не evidence (I19).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {"$ref": "#/components/schemas/Envelope"},
+                    {"properties": {"payload": {"$ref": "#/components/schemas/CrawlCollectResponse"}}}
                   ]
                 }
               }

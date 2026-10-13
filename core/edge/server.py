@@ -29,7 +29,7 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
-from core.edge.seam_schema import validate_fetch_request
+from core.edge.seam_schema import validate_crawl_request, validate_fetch_request
 from core.ports.crawler import CrawlerPort
 from core.ports.extractor import ExtractorPort
 from core.ports.search import SearchAdapterPort, SearchQuery
@@ -53,7 +53,18 @@ __all__ = [
 EDGE_SCHEMA_VERSION = "1"
 
 #: Операции, которые в протоколе edge принимают тело (07 §3).
-_POST_OPS = frozenset({"fetch", "search", "registry"})
+#: Crawl-операции очереди краула (Phase 3.1) — тоже POST.
+_POST_OPS = frozenset(
+    {
+        "fetch",
+        "search",
+        "registry",
+        "crawl/submit",
+        "crawl/status",
+        "crawl/cancel",
+        "crawl/collect",
+    }
+)
 #: Операции без тела (диагностика, 07 §3).
 _GET_OPS = frozenset({"health", "capabilities"})
 #: Полный allowlist маршрутов шва (07 §5).
@@ -213,6 +224,10 @@ class EdgeGateway:
     :param extractor_version: переопределение версии экстрактора для capabilities.
     :param supported_formats: переопределение списка форматов для capabilities.
     :param schema_version: версия конверта (по умолчанию ``EDGE_SCHEMA_VERSION``).
+    :param scheduler: необязательный компонент очереди краула (Phase 3.1; Wave 3.2) с
+        методами ``submit(request)``, ``status(job_id)``, ``cancel(job_id)``,
+        ``collect(job_id, cursor=…, limit=…)``. При ``None`` crawl-операции отвечают
+        ``status=error`` (планировщик недоступен на этом edge-узле).
     """
 
     def __init__(
@@ -231,6 +246,7 @@ class EdgeGateway:
         extractor_version: str | None = None,
         supported_formats: Sequence[str] | None = None,
         schema_version: str = EDGE_SCHEMA_VERSION,
+        scheduler: Any = None,
     ) -> None:
         self._crawler = crawler
         self._extractors = _normalize_adapters(extractor)
@@ -244,6 +260,7 @@ class EdgeGateway:
             list(supported_formats) if supported_formats is not None else None
         )
         self.schema_version = schema_version
+        self._scheduler = scheduler
 
     # -- идентификаторы --------------------------------------------------------
 
@@ -342,7 +359,8 @@ class EdgeGateway:
     # -- чистая диспетчеризация ------------------------------------------------
 
     def handle(self, op: str, payload: Mapping[str, Any]) -> Any:
-        """Чистая диспетчеризация по ``fetch``/``search``/``registry``/``capabilities``/``health``.
+        """Чистая диспетчеризация по ``fetch``/``search``/``registry``/``capabilities``/``health``
+        и crawl-операциям ``crawl/{submit,status,cancel,collect}`` (Phase 3.1).
 
         Возвращает **payload** конверта (оборачивает ``envelope``). Неизвестный op →
         ``EdgeRequestError``. Сбои адаптеров становятся ``EdgeAdapterError``.
@@ -355,6 +373,10 @@ class EdgeGateway:
             "registry": self._handle_registry,
             "capabilities": self._handle_capabilities,
             "health": self._handle_health,
+            "crawl/submit": self._handle_crawl_submit,
+            "crawl/status": self._handle_crawl_status,
+            "crawl/cancel": self._handle_crawl_cancel,
+            "crawl/collect": self._handle_crawl_collect,
         }.get(op)
         if handler is None:
             raise EdgeRequestError(f"неизвестная операция: {op!r}")
@@ -505,6 +527,152 @@ class EdgeGateway:
                 }
             )
         return items
+
+    # -- crawl (Phase 3.1; планировщик Wave 3.2 инъецируется опционально) ----------
+
+    def _require_crawl_scheduler(self) -> Any:
+        """Возвращает инъецированный планировщик краула либо бросает ``EdgeError``."""
+        if self._scheduler is None:
+            raise EdgeError("crawl scheduler is not available on this edge node")
+        return self._scheduler
+
+    def _call_crawl(self, method: str, *args: Any, **kwargs: Any) -> Mapping[str, Any]:
+        """Вызывает метод планировщика и нормализует результат в отображение.
+
+        Сбой планировщика (кроме :class:`EdgeError`) → :class:`EdgeAdapterError`
+        без traceback (07 §5).
+        """
+        scheduler = self._require_crawl_scheduler()
+        try:
+            result = getattr(scheduler, method)(*args, **kwargs)
+        except EdgeError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - грациозная граница адаптера
+            raise EdgeAdapterError(f"crawl/{method}: {exc}") from exc
+        if not isinstance(result, Mapping):
+            raise EdgeAdapterError(
+                f"crawl/{method}: планировщик вернул не-объект "
+                f"({type(result).__name__})"
+            )
+        return result
+
+    def _crawl_counts(self, result: Mapping[str, Any], fields: Sequence[str]) -> dict[str, int]:
+        """Целочисленные счётчики из ответа планировщика (дефолт 0)."""
+        return {field: self._crawl_int(result.get(field), default=0) for field in fields}
+
+    @staticmethod
+    def _crawl_int(value: Any, *, default: int) -> int:
+        """Мягкое приведение счётчика к ``int`` (нечисло → ``default``)."""
+        if value is None:
+            return default
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default
+
+    @staticmethod
+    def _crawl_str_list(value: Any) -> list[str]:
+        """Список строк (порядок сохраняется); иное → ``[]``."""
+        if not isinstance(value, (list, tuple)):
+            return []
+        return [str(item) for item in value]
+
+    @staticmethod
+    def _crawl_collect_item(item: Any) -> dict[str, Any]:
+        """Нормализует элемент ``items`` ответа ``crawl/collect``."""
+        if not isinstance(item, Mapping):
+            raise EdgeAdapterError("crawl/collect: элемент items обязан быть объектом")
+        raw = item.get("raw")
+        normalized_raw: dict[str, Any] | None = None
+        if isinstance(raw, Mapping):
+            normalized_raw = {
+                "hash": str(raw.get("hash") or ""),
+                "size": EdgeGateway._crawl_int(raw.get("size"), default=0),
+                "bytes_b64": raw.get("bytes_b64"),
+            }
+        return {
+            "product_id": str(item.get("product_id") or ""),
+            "url": str(item.get("url") or ""),
+            "status": item.get("status"),
+            "engine": item.get("engine"),
+            "kind": item.get("kind"),
+            "http_status": item.get("http_status"),
+            "content_type": item.get("content_type"),
+            "fetched_at": item.get("fetched_at"),
+            "content_hash": item.get("content_hash"),
+            "raw": normalized_raw,
+            "error": item.get("error"),
+        }
+
+    def _handle_crawl_submit(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        """``/v1/crawl/submit`` → ``{job_id, accepted, total, session_id}`` (Phase 3.1).
+
+        Планировщик не реализуется здесь (Wave 3.2): при его отсутствии —
+        ``EdgeError`` (конверт ``status=error``), при наличии — делегирование.
+        """
+        self._check_crawl_request("crawl/submit", payload)
+        result = self._call_crawl("submit", payload)
+        return {
+            "job_id": str(result.get("job_id") or ""),
+            "accepted": bool(result.get("accepted")),
+            "total": self._crawl_int(result.get("total"), default=0),
+            "session_id": str(result.get("session_id") or payload.get("session_id") or ""),
+        }
+
+    def _handle_crawl_status(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        """``/v1/crawl/status`` → счётчики очереди для ``job_id`` (Phase 3.1)."""
+        self._check_crawl_request("crawl/status", payload)
+        job_id = str(payload["job_id"])
+        result = self._call_crawl("status", job_id)
+        response: dict[str, Any] = {
+            "job_id": str(result.get("job_id") or job_id),
+            "status": str(result.get("status") or "unknown"),
+        }
+        response.update(
+            self._crawl_counts(
+                result, ("total", "pending", "running", "fetched", "failed", "cancelled")
+            )
+        )
+        response["engines"] = self._crawl_str_list(result.get("engines"))
+        response["kinds"] = self._crawl_str_list(result.get("kinds"))
+        return response
+
+    def _handle_crawl_cancel(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        """``/v1/crawl/cancel`` → ``{job_id, status:"cancelled", cancelled}`` (Phase 3.1)."""
+        self._check_crawl_request("crawl/cancel", payload)
+        job_id = str(payload["job_id"])
+        result = self._call_crawl("cancel", job_id)
+        return {
+            "job_id": str(result.get("job_id") or job_id),
+            "status": "cancelled",
+            "cancelled": self._crawl_int(result.get("cancelled"), default=0),
+        }
+
+    def _handle_crawl_collect(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        """``/v1/crawl/collect`` → ``{items, next_cursor, done}`` — контент, не evidence (I19)."""
+        self._check_crawl_request("crawl/collect", payload)
+        job_id = str(payload["job_id"])
+        cursor = payload.get("cursor")
+        limit = payload.get("limit")
+        result = self._call_crawl(
+            "collect", job_id, cursor=cursor, limit=limit
+        )
+        items = result.get("items")
+        if not isinstance(items, (list, tuple)):
+            raise EdgeAdapterError("crawl/collect: поле items обязано быть списком")
+        next_cursor = result.get("next_cursor")
+        return {
+            "items": [self._crawl_collect_item(item) for item in items],
+            "next_cursor": None if next_cursor is None else str(next_cursor),
+            "done": bool(result.get("done")),
+        }
+
+    @staticmethod
+    def _check_crawl_request(op: str, payload: Mapping[str, Any]) -> None:
+        """Валидирует запрос crawl-операции; нарушения → :class:`EdgeRequestError`."""
+        violations = validate_crawl_request(op, payload)
+        if violations:
+            raise EdgeRequestError("; ".join(violations))
 
     # -- выбор инъецированного адаптера ----------------------------------------
 

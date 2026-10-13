@@ -46,6 +46,7 @@ __all__ = [
     "SCOPE_REGISTRY",
     "SCOPE_CAPABILITIES",
     "SCOPE_HEALTH",
+    "SCOPE_CRAWL",
     "AUTHORIZED_OPS",
     "PUBLIC_OPS",
     "AuthRequest",
@@ -84,10 +85,22 @@ SCOPE_REGISTRY = "registry"
 SCOPE_CAPABILITIES = "capabilities"
 #: Scope операции ``health`` (по умолчанию операция публична).
 SCOPE_HEALTH = "health"
+#: Scope, требуемый для всех операций очереди краула ``crawl/{submit,status,cancel,collect}``.
+SCOPE_CRAWL = "crawl"
 
 #: Allowlist операций шва (07 §3/§5). Неизвестная операция авторизации не подлежит.
 AUTHORIZED_OPS: frozenset[str] = frozenset(
-    {"fetch", "search", "registry", "capabilities", "health"}
+    {
+        "fetch",
+        "search",
+        "registry",
+        "capabilities",
+        "health",
+        "crawl/submit",
+        "crawl/status",
+        "crawl/cancel",
+        "crawl/collect",
+    }
 )
 
 #: Публичные операции: доступны без аутентификации (диагностика, 07 §3).
@@ -100,6 +113,10 @@ _OP_SCOPE: dict[str, str] = {
     "registry": SCOPE_REGISTRY,
     "capabilities": SCOPE_CAPABILITIES,
     "health": SCOPE_HEALTH,
+    "crawl/submit": SCOPE_CRAWL,
+    "crawl/status": SCOPE_CRAWL,
+    "crawl/cancel": SCOPE_CRAWL,
+    "crawl/collect": SCOPE_CRAWL,
 }
 
 #: Входящий запрос шва, как его видит аутентификатор: отображение заголовков.

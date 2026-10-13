@@ -17,11 +17,13 @@ import pytest
 from core.adapters.remote_gateway import DEFAULT_SCHEMA_VERSION, HttpContentGateway
 from core.edge import seam_schema
 from core.edge.seam_schema import (
+    CRAWL_OPS,
     ENDPOINT_OPS,
     SEAM_SCHEMA_VERSION,
     STRATEGY_VALUES,
     contract_digest,
     load_schema,
+    validate_crawl_request,
     validate_envelope,
     validate_fetch_request,
     validate_payload,
@@ -35,11 +37,12 @@ _SCHEMA_FILES = (
     "registry.schema.json",
     "capabilities.schema.json",
     "health.schema.json",
+    "crawl.schema.json",
     "openapi.json",
 )
 
 #: Контрактные файлы схем (без OpenAPI), пригодные для :func:`load_schema`.
-_LOADABLE = ("envelope", "fetch", "search", "registry", "capabilities", "health")
+_LOADABLE = ("envelope", "fetch", "search", "registry", "capabilities", "health", "crawl")
 
 _REQUEST_ID = "0" * 32
 
@@ -268,6 +271,189 @@ def test_validate_fetch_request_strategy_optional_backward_compatible() -> None:
 
 def test_validate_fetch_request_rejects_unknown_strategy() -> None:
     assert validate_fetch_request({"url": "https://x.test", "strategy": "flash"})
+
+
+# ---------------------------------------------------------------------------
+# crawl — запросы (Phase 3.1)
+# ---------------------------------------------------------------------------
+
+_VALID_SUBMIT = {
+    "run_id": "r1",
+    "session_id": "s1",
+    "idempotency_key": "k1",
+    "profile": "public",
+    "items": [{"product_id": "p1", "url": "https://x.test"}],
+}
+
+
+def test_crawl_ops_exported() -> None:
+    assert CRAWL_OPS == frozenset(
+        {"crawl/submit", "crawl/status", "crawl/cancel", "crawl/collect"}
+    )
+    assert CRAWL_OPS <= ENDPOINT_OPS
+
+
+def test_crawl_schema_declares_all_ops() -> None:
+    schema = load_schema("crawl")
+    defs = schema["$defs"]
+    for op in ("submit", "status", "cancel", "collect"):
+        assert f"{op}_request" in defs
+        assert f"{op}_response" in defs
+    assert schema["$defs"]["submit_response"]["required"] == [
+        "job_id",
+        "accepted",
+        "total",
+        "session_id",
+    ]
+    assert schema["$defs"]["cancel_response"]["properties"]["status"] == {
+        "const": "cancelled"
+    }
+
+
+def test_validate_crawl_request_submit_accepts() -> None:
+    assert validate_crawl_request("crawl/submit", _VALID_SUBMIT) == []
+    with_axes = {
+        **_VALID_SUBMIT,
+        "items": [
+            {
+                "product_id": "p1",
+                "url": "https://x.test",
+                "engine": "serp",
+                "kind": "html",
+                "fetch": "browser",
+                "extract": "document",
+                "strategy": "hybrid",
+                "wait_for": "() => 1",
+                "lang": "ru",
+            }
+        ],
+    }
+    assert validate_crawl_request("crawl/submit", with_axes) == []
+
+
+def test_validate_crawl_request_submit_rejects_missing_metadata() -> None:
+    violations = validate_crawl_request("crawl/submit", {"items": [{"product_id": "p"}]})
+    assert any("run_id" in v for v in violations)
+    assert any("session_id" in v for v in violations)
+    assert any("idempotency_key" in v for v in violations)
+    assert any("profile" in v for v in violations)
+
+
+def test_validate_crawl_request_submit_rejects_empty_items() -> None:
+    assert any(
+        "items" in v
+        for v in validate_crawl_request("crawl/submit", {**_VALID_SUBMIT, "items": []})
+    )
+
+
+def test_validate_crawl_request_submit_rejects_item_without_url() -> None:
+    violations = validate_crawl_request(
+        "crawl/submit", {**_VALID_SUBMIT, "items": [{"product_id": "p1"}]}
+    )
+    assert any("url" in v for v in violations)
+
+
+def test_validate_crawl_request_submit_rejects_unknown_item_axis() -> None:
+    violations = validate_crawl_request(
+        "crawl/submit",
+        {**_VALID_SUBMIT, "items": [{"product_id": "p1", "url": "u", "fetch": "flash"}]},
+    )
+    assert any("fetch" in v for v in violations)
+
+
+@pytest.mark.parametrize("op", ["crawl/status", "crawl/cancel"])
+def test_validate_crawl_request_job_ops_require_job_id(op: str) -> None:
+    assert validate_crawl_request(op, {"job_id": "j1"}) == []
+    assert any("job_id" in v for v in validate_crawl_request(op, {}))
+
+
+def test_validate_crawl_request_collect_optional_fields() -> None:
+    assert validate_crawl_request("crawl/collect", {"job_id": "j1"}) == []
+    assert validate_crawl_request(
+        "crawl/collect", {"job_id": "j1", "cursor": "c", "limit": 5}
+    ) == []
+    assert any(
+        "limit" in v
+        for v in validate_crawl_request("crawl/collect", {"job_id": "j1", "limit": "x"})
+    )
+
+
+def test_validate_crawl_request_unknown_op() -> None:
+    violations = validate_crawl_request("crawl/teleport", {})
+    assert violations and "crawl/teleport" in violations[0]
+
+
+# ---------------------------------------------------------------------------
+# crawl — payload ответов (Phase 3.1)
+# ---------------------------------------------------------------------------
+
+
+def test_validate_payload_crawl_submit_accepts_and_requires() -> None:
+    assert validate_payload(
+        "crawl/submit",
+        {"job_id": "j1", "accepted": True, "total": 2, "session_id": "s1"},
+    ) == []
+    assert validate_payload("crawl/submit", {"accepted": True})
+
+
+def test_validate_payload_crawl_status_accepts() -> None:
+    assert validate_payload(
+        "crawl/status",
+        {
+            "job_id": "j1",
+            "status": "running",
+            "total": 3,
+            "pending": 1,
+            "running": 1,
+            "fetched": 1,
+            "failed": 0,
+            "cancelled": 0,
+            "engines": ["http"],
+            "kinds": ["html"],
+        },
+    ) == []
+    assert validate_payload("crawl/status", {"job_id": "j1", "engines": [1]})
+
+
+def test_validate_payload_crawl_cancel_requires_cancelled_status() -> None:
+    assert validate_payload(
+        "crawl/cancel", {"job_id": "j1", "status": "cancelled", "cancelled": 2}
+    ) == []
+    assert validate_payload(
+        "crawl/cancel", {"job_id": "j1", "status": "running", "cancelled": 0}
+    )
+
+
+def test_validate_payload_crawl_collect_accepts_items_and_raw() -> None:
+    payload = {
+        "items": [
+            {
+                "product_id": "p1",
+                "url": "https://x.test",
+                "status": "fetched",
+                "engine": "http",
+                "kind": "html",
+                "http_status": 200,
+                "content_type": "text/html",
+                "fetched_at": "T",
+                "content_hash": "h",
+                "raw": {"hash": "h", "size": 2, "bytes_b64": "YQ=="},
+                "error": None,
+            }
+        ],
+        "next_cursor": None,
+        "done": True,
+    }
+    assert validate_payload("crawl/collect", payload) == []
+
+
+def test_validate_payload_crawl_collect_rejects_bad_item() -> None:
+    assert validate_payload("crawl/collect", {"items": [{"product_id": "p1"}]})
+    assert validate_payload("crawl/collect", {"items": "nope"})
+    assert validate_payload(
+        "crawl/collect",
+        {"items": [], "next_cursor": None, "done": "yes"},
+    )
 
 
 # ---------------------------------------------------------------------------

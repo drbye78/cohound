@@ -191,6 +191,80 @@ class FakeRegistry:
         return list(self._facts)
 
 
+class FakeScheduler:
+    """Стенд-планировщик краула (Phase 3.1): детерминированные ответы без фоновых задач.
+
+    Реальный планировщик — Wave 3.2; здесь только форма контракта ``/v1/crawl/*``.
+    """
+
+    def __init__(self, *, raises: Exception | None = None) -> None:
+        self._raises = raises
+        self.submitted: list[dict[str, Any]] = []
+        self.status_calls: list[str] = []
+        self.cancel_calls: list[str] = []
+        self.collect_calls: list[tuple[str, Any, Any]] = []
+
+    def submit(self, request: Mapping[str, Any]) -> dict[str, Any]:
+        if self._raises is not None:
+            raise self._raises
+        self.submitted.append(dict(request))
+        return {
+            "job_id": "job-1",
+            "accepted": True,
+            "total": len(list(request.get("items") or [])),
+            "session_id": request.get("session_id"),
+        }
+
+    def status(self, job_id: str) -> dict[str, Any]:
+        if self._raises is not None:
+            raise self._raises
+        self.status_calls.append(job_id)
+        return {
+            "job_id": job_id,
+            "status": "running",
+            "total": 3,
+            "pending": 1,
+            "running": 1,
+            "fetched": 1,
+            "failed": 0,
+            "cancelled": 0,
+            "engines": ["http"],
+            "kinds": ["html"],
+        }
+
+    def cancel(self, job_id: str) -> dict[str, Any]:
+        if self._raises is not None:
+            raise self._raises
+        self.cancel_calls.append(job_id)
+        return {"job_id": job_id, "cancelled": 2}
+
+    def collect(
+        self, job_id: str, *, cursor: Any = None, limit: Any = None
+    ) -> dict[str, Any]:
+        if self._raises is not None:
+            raise self._raises
+        self.collect_calls.append((job_id, cursor, limit))
+        return {
+            "items": [
+                {
+                    "product_id": "p1",
+                    "url": "https://site.test/x",
+                    "status": "fetched",
+                    "engine": "http",
+                    "kind": "html",
+                    "http_status": 200,
+                    "content_type": "text/html",
+                    "fetched_at": _FIXED_TIME,
+                    "content_hash": "h",
+                    "raw": {"hash": "h", "size": 2, "bytes_b64": "YQ=="},
+                    "error": None,
+                }
+            ],
+            "next_cursor": None,
+            "done": True,
+        }
+
+
 # ---------------------------------------------------------------------------
 # Хелперы
 # ---------------------------------------------------------------------------
@@ -415,6 +489,139 @@ def test_registry_r1_missing_source_url_is_error() -> None:
     )
     assert env["status"] == "error"
     assert "source_url" in env["error"]
+
+
+# ---------------------------------------------------------------------------
+# /v1/crawl/* (Phase 3.1; планировщик инъецируется, Wave 3.2 — реализация)
+# ---------------------------------------------------------------------------
+
+_SUBMIT_REQUEST: dict[str, Any] = {
+    "run_id": "r1",
+    "session_id": "s1",
+    "idempotency_key": "k1",
+    "profile": "public",
+    "items": [{"product_id": "p1", "url": "https://site.test/x"}],
+}
+
+
+def test_crawl_submit_envelope_shape() -> None:
+    scheduler = FakeScheduler()
+    env = _edge(scheduler=scheduler).envelope("crawl/submit", _SUBMIT_REQUEST)
+    assert env["status"] == "ok"
+    assert env["payload"] == {
+        "job_id": "job-1",
+        "accepted": True,
+        "total": 1,
+        "session_id": "s1",
+    }
+    assert scheduler.submitted == [_SUBMIT_REQUEST]
+
+
+def test_crawl_status_envelope_shape() -> None:
+    scheduler = FakeScheduler()
+    env = _edge(scheduler=scheduler).envelope("crawl/status", {"job_id": "job-1"})
+    assert env["status"] == "ok"
+    assert env["payload"] == {
+        "job_id": "job-1",
+        "status": "running",
+        "total": 3,
+        "pending": 1,
+        "running": 1,
+        "fetched": 1,
+        "failed": 0,
+        "cancelled": 0,
+        "engines": ["http"],
+        "kinds": ["html"],
+    }
+    assert scheduler.status_calls == ["job-1"]
+
+
+def test_crawl_cancel_envelope_shape() -> None:
+    env = _edge(scheduler=FakeScheduler()).envelope("crawl/cancel", {"job_id": "job-1"})
+    assert env["status"] == "ok"
+    assert env["payload"] == {"job_id": "job-1", "status": "cancelled", "cancelled": 2}
+
+
+def test_crawl_collect_envelope_shape_is_content_not_evidence() -> None:
+    scheduler = FakeScheduler()
+    env = _edge(scheduler=scheduler).envelope(
+        "crawl/collect", {"job_id": "job-1", "cursor": "c", "limit": 5}
+    )
+    assert env["status"] == "ok"
+    payload = env["payload"]
+    assert payload["next_cursor"] is None
+    assert payload["done"] is True
+    item = payload["items"][0]
+    assert item["product_id"] == "p1"
+    assert item["raw"] == {"hash": "h", "size": 2, "bytes_b64": "YQ=="}
+    assert scheduler.collect_calls == [("job-1", "c", 5)]
+
+
+def test_crawl_without_scheduler_is_status_error() -> None:
+    env = _edge().envelope("crawl/submit", _SUBMIT_REQUEST)
+    assert env["status"] == "error"
+    assert env["error"] == "crawl scheduler is not available on this edge node"
+    assert env["payload"] is None
+
+
+def test_crawl_request_validation_error_without_scheduler() -> None:
+    env = _edge().envelope("crawl/submit", {**_SUBMIT_REQUEST, "items": []})
+    assert env["status"] == "error"
+    assert "items" in env["error"]
+
+
+def test_crawl_scheduler_exception_becomes_status_error_without_traceback() -> None:
+    edge = _edge(scheduler=FakeScheduler(raises=RuntimeError("queue down")))
+    env = edge.envelope("crawl/status", {"job_id": "job-1"})
+    assert env["status"] == "error"
+    assert "queue down" in env["error"]
+    assert "Traceback" not in env["error"]
+
+
+def test_crawl_scheduler_non_mapping_is_error() -> None:
+    class BadScheduler:
+        def submit(self, request: Mapping[str, Any]) -> list[str]:
+            return ["nope"]
+
+    env = _edge(scheduler=BadScheduler()).envelope("crawl/submit", _SUBMIT_REQUEST)
+    assert env["status"] == "error"
+
+
+def test_route_post_crawl_ops_are_routed() -> None:
+    scheduler = FakeScheduler()
+    edge = _edge(scheduler=scheduler)
+
+    body = json.dumps(_SUBMIT_REQUEST).encode("utf-8")
+    code, env = route_request(edge, "POST", "/v1/crawl/submit", body)
+    assert code == 200
+    assert env["payload"]["job_id"] == "job-1"
+
+    code, env = route_request(
+        edge, "POST", "/v1/crawl/status", b'{"job_id": "job-1"}'
+    )
+    assert code == 200 and env["payload"]["status"] == "running"
+
+    code, env = route_request(
+        edge, "POST", "/v1/crawl/cancel", b'{"job_id": "job-1"}'
+    )
+    assert code == 200 and env["payload"]["status"] == "cancelled"
+
+    code, env = route_request(
+        edge, "POST", "/v1/crawl/collect", b'{"job_id": "job-1"}'
+    )
+    assert code == 200 and env["payload"]["done"] is True
+
+
+def test_route_get_crawl_is_405() -> None:
+    code, env = route_request(_edge(), "GET", "/v1/crawl/submit")
+    assert code == 405
+    assert env["status"] == "error"
+
+
+def test_route_unknown_crawl_op_is_404() -> None:
+    code, env = route_request(_edge(), "POST", "/v1/crawl/teleport", b"{}")
+    assert code == 404
+    assert env["status"] == "error"
 
 
 # ---------------------------------------------------------------------------

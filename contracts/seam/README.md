@@ -17,6 +17,7 @@
 | `fetch.schema.json` | `POST /v1/fetch` — запрос `{url, fetch, extract, wait_for, lang}` и ответ (сырые байты `raw` / markdown `text`; извлечение best-effort, D2) |
 | `search.schema.json` | `POST /v1/search` — запрос `{query, lang, limit, phase}` и ответ-список `{url, title, snippet, rank}` |
 | `registry.schema.json` | `POST /v1/registry` — запрос `{registry_id, product_ref, scope}` и ответ-список `{fact_json, source_url, fetched_at}` (R1: `source_url` обязателен) |
+| `crawl.schema.json` | `POST /v1/crawl/{submit,status,cancel,collect}` — постановка задания краула (`items`), прогресс (счётчики), отмена и постраничный забор результатов (`items`+`next_cursor`+`done`); контент, не evidence (I19) |
 | `capabilities.schema.json` | `GET /v1/capabilities` → `{extractor_version, crawler_version, search_engine, supported_formats}` |
 | `health.schema.json` | `GET /v1/health` → `{status}` |
 | `openapi.json` | OpenAPI 3.1 по всем эндпоинтам; конверт — схема ответа, `schema_version` документирован |
@@ -32,7 +33,7 @@
 - **IDS.** Метаданные L7-трафика — `request_id`, `op` (путь), `schema_version`, размеры —
   видны по OpenAPI; коррелируются с аудитом по `request_id` (07 §8.1/§8.4).
 - **IDP.** Идентичность — mTLS workload-identity или OIDC/JWT bearer (07 §8.2);
-  авторизация по операции (`fetch`/`search`/`registry`). Схемы `openapi.json`
+  авторизация по операции (`fetch`/`search`/`registry`/`crawl`). Схемы `openapi.json`
   фиксируют allowlist путей и заголовки `X-Request-Id` / `X-Schema-Version`.
 - **TLS-инспекция не блокируется:** никакого certificate pinning; доверие к
   корпоративному CA настраивается на стороне развёртывания (07 §8.1).

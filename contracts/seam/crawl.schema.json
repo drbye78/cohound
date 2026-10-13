@@ -1,0 +1,171 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cohound.local/contracts/seam/crawl.schema.json",
+  "title": "POST /v1/crawl/* payloads",
+  "description": "Контракты очереди краула (Phase 3.1): submit (постановка), status (прогресс), cancel (отмена) и collect (забор результатов). Все четыре операции — POST; каждая имеет собственные request/response в $defs. Ответ collect несёт контент (сырые байты/хэши), не evidence (I19). Планировщик (Wave 3.2) инъецируется в edge; при его отсутствии операция отвечает status=error.",
+  "type": "object",
+  "oneOf": [
+    {"$ref": "#/$defs/submit_response"},
+    {"$ref": "#/$defs/status_response"},
+    {"$ref": "#/$defs/cancel_response"},
+    {"$ref": "#/$defs/collect_response"}
+  ],
+  "$defs": {
+    "submit_request": {
+      "title": "POST /v1/crawl/submit request payload",
+      "description": "Постановка задания краула: метаданные сессии/прогона и непустой список items. У item оси fetch/extract/strategy/wait_for/lang — как у /v1/fetch (additive).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["run_id", "session_id", "idempotency_key", "profile", "items"],
+      "properties": {
+        "run_id": {"type": "string", "minLength": 1},
+        "session_id": {"type": "string", "minLength": 1},
+        "idempotency_key": {"type": "string", "minLength": 1},
+        "profile": {"type": "string", "minLength": 1},
+        "items": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/submit_item"}
+        }
+      }
+    },
+    "submit_item": {
+      "title": "Элемент items запроса crawl/submit",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["product_id", "url"],
+      "properties": {
+        "product_id": {"type": "string", "minLength": 1},
+        "url": {"type": "string", "minLength": 1},
+        "engine": {"type": ["string", "null"]},
+        "kind": {"type": ["string", "null"]},
+        "fetch": {"enum": ["http", "browser"]},
+        "extract": {"enum": ["auto", "html", "document"]},
+        "strategy": {"enum": ["auto", "honest", "hybrid"]},
+        "wait_for": {"type": ["string", "null"]},
+        "lang": {"type": ["string", "null"]}
+      }
+    },
+    "submit_response": {
+      "title": "POST /v1/crawl/submit response payload",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["job_id", "accepted", "total", "session_id"],
+      "properties": {
+        "job_id": {"type": "string", "minLength": 1},
+        "accepted": {"type": "boolean"},
+        "total": {"type": "integer"},
+        "session_id": {"type": "string", "minLength": 1}
+      }
+    },
+    "status_request": {
+      "title": "POST /v1/crawl/status request payload",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["job_id"],
+      "properties": {
+        "job_id": {"type": "string", "minLength": 1}
+      }
+    },
+    "status_response": {
+      "title": "POST /v1/crawl/status response payload",
+      "description": "Прогресс задания: счётчики по состояниям и наблюдаемые движки/типы.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["job_id", "status"],
+      "properties": {
+        "job_id": {"type": "string", "minLength": 1},
+        "status": {"type": "string", "minLength": 1},
+        "total": {"type": "integer"},
+        "pending": {"type": "integer"},
+        "running": {"type": "integer"},
+        "fetched": {"type": "integer"},
+        "failed": {"type": "integer"},
+        "cancelled": {"type": "integer"},
+        "engines": {"type": "array", "items": {"type": "string"}},
+        "kinds": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "cancel_request": {
+      "title": "POST /v1/crawl/cancel request payload",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["job_id"],
+      "properties": {
+        "job_id": {"type": "string", "minLength": 1}
+      }
+    },
+    "cancel_response": {
+      "title": "POST /v1/crawl/cancel response payload",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["job_id", "status", "cancelled"],
+      "properties": {
+        "job_id": {"type": "string", "minLength": 1},
+        "status": {"const": "cancelled"},
+        "cancelled": {"type": "integer"}
+      }
+    },
+    "collect_request": {
+      "title": "POST /v1/crawl/collect request payload",
+      "description": "Постраничный забор результатов: job_id, опциональные cursor (непрозрачный маркер) и limit (размер страницы).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["job_id"],
+      "properties": {
+        "job_id": {"type": "string", "minLength": 1},
+        "cursor": {"type": ["string", "null"]},
+        "limit": {"type": ["integer", "null"]}
+      }
+    },
+    "collect_response": {
+      "title": "POST /v1/crawl/collect response payload",
+      "description": "Страница результатов: items (контент, не evidence — I19), следующий cursor и признак завершения.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["items", "next_cursor", "done"],
+      "properties": {
+        "items": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/collect_item"}
+        },
+        "next_cursor": {"type": ["string", "null"]},
+        "done": {"type": "boolean"}
+      }
+    },
+    "collect_item": {
+      "title": "Элемент items ответа crawl/collect",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["product_id", "url"],
+      "properties": {
+        "product_id": {"type": "string", "minLength": 1},
+        "url": {"type": "string", "minLength": 1},
+        "status": {"type": ["string", "null"]},
+        "engine": {"type": ["string", "null"]},
+        "kind": {"type": ["string", "null"]},
+        "http_status": {"type": ["integer", "null"]},
+        "content_type": {"type": ["string", "null"]},
+        "fetched_at": {"type": ["string", "null"]},
+        "content_hash": {"type": ["string", "null"]},
+        "raw": {
+          "oneOf": [
+            {"$ref": "#/$defs/raw"},
+            {"type": "null"}
+          ]
+        },
+        "error": {"type": ["string", "null"]}
+      }
+    },
+    "raw": {
+      "title": "Сырые байты фетча (retention, I19)",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "hash": {"type": "string"},
+        "size": {"type": "integer"},
+        "bytes_b64": {"type": ["string", "null"]}
+      }
+    }
+  }
+}
