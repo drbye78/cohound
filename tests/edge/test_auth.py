@@ -282,8 +282,8 @@ def test_authorize_op_scope_matrix() -> None:
 
 
 def test_authorize_crawl_ops_require_crawl_scope() -> None:
-    """Все crawl-операции покрыты единым scope ``crawl`` (Phase 3.1)."""
-    for op in ("crawl/submit", "crawl/status", "crawl/cancel", "crawl/collect"):
+    """Все crawl-операции покрыты единым scope ``crawl`` (Phase 3.1; Wave 5.1 poll)."""
+    for op in ("crawl/submit", "crawl/status", "crawl/cancel", "crawl/collect", "crawl/poll"):
         assert authorize(_principal({SCOPE_CRAWL}), op) is True
         assert authorize(_principal({SCOPE_FETCH}), op) is False
         assert authorize(None, op) is False
@@ -317,6 +317,7 @@ def test_authorized_ops_allowlist_exact() -> None:
             "crawl/status",
             "crawl/cancel",
             "crawl/collect",
+            "crawl/poll",
         }
     )
     assert PUBLIC_OPS == frozenset({"health"})
@@ -326,6 +327,7 @@ def test_required_scope_lookup() -> None:
     assert required_scope("fetch") == SCOPE_FETCH
     assert required_scope("Search") == SCOPE_SEARCH
     assert required_scope("crawl/submit") == SCOPE_CRAWL
+    assert required_scope("crawl/poll") == SCOPE_CRAWL
     assert required_scope("nope") is None
 
 

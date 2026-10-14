@@ -2,13 +2,14 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://cohound.local/contracts/seam/crawl.schema.json",
   "title": "POST /v1/crawl/* payloads",
-  "description": "Контракты очереди краула (Phase 3.1): submit (постановка), status (прогресс), cancel (отмена) и collect (забор результатов). Все четыре операции — POST; каждая имеет собственные request/response в $defs. Ответ collect несёт контент (сырые байты/хэши), не evidence (I19). Планировщик (Wave 3.2) инъецируется в edge; при его отсутствии операция отвечает status=error.",
+  "description": "Контракты очереди краула (Phase 3.1): submit (постановка), status (прогресс), cancel (отмена) и collect (забор результатов), плюс poll (опрос фида/канала, Wave 5.1). Все пять операций — POST; каждая имеет собственные request/response в $defs. Ответ collect несёт контент (сырые байты/хэши), а poll — только ссылки на записи (URL+метаданные); ни то, ни другое не evidence (I19). Планировщик (Wave 3.2) и сервис опроса (Wave 5.1) инъецируются в edge; при отсутствии операция отвечает status=error.",
   "type": "object",
   "oneOf": [
     {"$ref": "#/$defs/submit_response"},
     {"$ref": "#/$defs/status_response"},
     {"$ref": "#/$defs/cancel_response"},
-    {"$ref": "#/$defs/collect_response"}
+    {"$ref": "#/$defs/collect_response"},
+    {"$ref": "#/$defs/poll_response"}
   ],
   "$defs": {
     "submit_request": {
@@ -165,6 +166,59 @@
         "hash": {"type": "string"},
         "size": {"type": "integer"},
         "bytes_b64": {"type": ["string", "null"]}
+      }
+    },
+    "poll_request": {
+      "title": "POST /v1/crawl/poll request payload",
+      "description": "Опрос фида/канала (Wave 5.1): url каталогового документа и его вид (feed — RSS/Atom/RDF-XML, channel — список ссылок/JSON). Оси fetch/extract/strategy/wait_for — как у /v1/fetch (additive). params — опциональные caps: since (строка) и limit (целое).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["url", "kind"],
+      "properties": {
+        "url": {"type": "string", "minLength": 1},
+        "kind": {"enum": ["feed", "channel"]},
+        "fetch": {"enum": ["http", "browser"]},
+        "extract": {"enum": ["auto", "html", "document"]},
+        "strategy": {"enum": ["auto", "honest", "hybrid"]},
+        "wait_for": {"type": ["string", "null"]},
+        "params": {"$ref": "#/$defs/poll_params"}
+      }
+    },
+    "poll_params": {
+      "title": "params запроса crawl/poll",
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "properties": {
+        "since": {"type": ["string", "null"]},
+        "limit": {"type": ["integer", "null"]}
+      }
+    },
+    "poll_entry": {
+      "title": "Ссылка на запись ответа crawl/poll",
+      "description": "Только ссылка (URL+метаданные), без байтов (I19).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["url"],
+      "properties": {
+        "url": {"type": "string", "minLength": 1},
+        "guid": {"type": ["string", "null"]},
+        "published_at": {"type": ["string", "null"]},
+        "title": {"type": ["string", "null"]}
+      }
+    },
+    "poll_response": {
+      "title": "POST /v1/crawl/poll response payload",
+      "description": "Ссылки на записи фида/канала: entries, count и признак усечения по limit/max_entries.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["entries", "count", "truncated"],
+      "properties": {
+        "entries": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/poll_entry"}
+        },
+        "count": {"type": "integer"},
+        "truncated": {"type": "boolean"}
       }
     }
   }

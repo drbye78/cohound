@@ -39,6 +39,7 @@ __all__ = [
     "FETCH_VALUES",
     "EXTRACT_VALUES",
     "STRATEGY_VALUES",
+    "POLL_KIND_VALUES",
     "load_schema",
     "validate_envelope",
     "validate_payload",
@@ -67,6 +68,7 @@ ENDPOINT_OPS: frozenset[str] = frozenset(
         "crawl/status",
         "crawl/cancel",
         "crawl/collect",
+        "crawl/poll",
     }
 )
 
@@ -87,9 +89,13 @@ _SCHEMA_NAMES: frozenset[str] = frozenset(
 )
 
 #: Crawl-операции очереди краула (Phase 3.1): POST /v1/crawl/{submit,status,cancel,collect}.
+#: ``crawl/poll`` (Wave 5.1) — опрос фида/канала тем же семейством POST ``/v1/crawl/*``.
 CRAWL_OPS: frozenset[str] = frozenset(
-    {"crawl/submit", "crawl/status", "crawl/cancel", "crawl/collect"}
+    {"crawl/submit", "crawl/status", "crawl/cancel", "crawl/collect", "crawl/poll"}
 )
+
+#: Допустимые виды каталогового документа запроса ``/v1/crawl/poll`` (Wave 5.1).
+POLL_KIND_VALUES: frozenset[str] = frozenset({"feed", "channel"})
 
 
 # ---------------------------------------------------------------------------
@@ -450,6 +456,43 @@ def _validate_crawl_collect_response(payload: Any) -> list[str]:
     return violations
 
 
+def _validate_crawl_poll_entry(item: Any, index: int) -> list[str]:
+    """Элемент ``entries`` ответа ``POST /v1/crawl/poll`` (Wave 5.1).
+
+    Ссылка на запись: обязательный непустой ``url``; ``guid``/``published_at``/``title``
+    — строки или ``null`` (без байтов — I19).
+    """
+    where = f"crawl/poll.entries[{index}]"
+    if not isinstance(item, Mapping):
+        return [f"{where}: элемент должен быть объектом"]
+    violations: list[str] = []
+    _check_required_str(violations, where, "url", item.get("url"))
+    for field in ("guid", "published_at", "title"):
+        _check_opt_str(violations, where, field, item.get(field))
+    return violations
+
+
+def _validate_crawl_poll_response(payload: Any) -> list[str]:
+    """Payload ``POST /v1/crawl/poll`` (Wave 5.1): ``{entries, count, truncated}``.
+
+    ``entries`` — список ссылок на записи (URL+метаданные); ``count`` — целое;
+    ``truncated`` — булево (усечение по ``limit``/``max_entries``).
+    """
+    if not isinstance(payload, Mapping):
+        return ["crawl/poll: payload должен быть объектом"]
+    violations: list[str] = []
+    where = "crawl/poll"
+    entries = payload.get("entries")
+    if not isinstance(entries, list):
+        violations.append(f"{where}: поле entries должно быть списком")
+    else:
+        for index, item in enumerate(entries):
+            violations.extend(_validate_crawl_poll_entry(item, index))
+    _check_opt_int(violations, where, "count", payload.get("count"))
+    _check_opt_bool(violations, where, "truncated", payload.get("truncated"))
+    return violations
+
+
 _PAYLOAD_VALIDATORS = {
     "fetch": _validate_fetch,
     "search": _validate_search,
@@ -460,6 +503,7 @@ _PAYLOAD_VALIDATORS = {
     "crawl/status": _validate_crawl_status_response,
     "crawl/cancel": _validate_crawl_cancel_response,
     "crawl/collect": _validate_crawl_collect_response,
+    "crawl/poll": _validate_crawl_poll_response,
 }
 
 
@@ -510,9 +554,11 @@ def validate_crawl_request(op: str, payload: Any) -> list[str]:
       опциональными осями ``engine``/``kind``/``fetch``/``extract``/``strategy``/
       ``wait_for``/``lang``;
     * ``crawl/status`` / ``crawl/cancel``: ``{job_id}``;
-    * ``crawl/collect``: ``{job_id, cursor?, limit?}``.
+    * ``crawl/collect``: ``{job_id, cursor?, limit?}``;
+    * ``crawl/poll``: ``{url, kind, params?, fetch?, extract?, strategy?, wait_for?}``.
 
-    :param op: ``crawl/submit`` | ``crawl/status`` | ``crawl/cancel`` | ``crawl/collect``.
+    :param op: ``crawl/submit`` | ``crawl/status`` | ``crawl/cancel`` | ``crawl/collect`` |
+        ``crawl/poll``.
     """
     where = str(op).strip().lower()
     if where == "crawl/submit":
@@ -521,6 +567,8 @@ def validate_crawl_request(op: str, payload: Any) -> list[str]:
         return _validate_crawl_job_request(where, payload)
     if where == "crawl/collect":
         return _validate_crawl_collect_request(payload)
+    if where == "crawl/poll":
+        return _validate_crawl_poll_request(payload)
     return [f"неизвестная crawl-операция {op!r} (ожидается одна из: {sorted(CRAWL_OPS)})"]
 
 
@@ -542,6 +590,46 @@ def _validate_crawl_collect_request(payload: Any) -> list[str]:
     _check_required_str(violations, where, "job_id", payload.get("job_id"))
     _check_opt_str(violations, where, "cursor", payload.get("cursor"))
     _check_opt_int(violations, where, "limit", payload.get("limit"))
+    return violations
+
+
+def _validate_crawl_poll_request(payload: Any) -> list[str]:
+    """Запрос ``crawl/poll`` (Wave 5.1): ``{url, kind, params?, <оси фетча>}``.
+
+    ``url`` — обязательный непустой; ``kind`` — обязательный enum
+    (``feed|channel``, :data:`POLL_KIND_VALUES`); ``params`` — опциональный объект
+    (``since`` строка/``limit`` целое); оси фетча — как у ``/v1/fetch``.
+    """
+    if not isinstance(payload, Mapping):
+        return ["crawl/poll: payload должен быть объектом"]
+    violations: list[str] = []
+    where = "crawl/poll"
+    _check_required_str(violations, where, "url", payload.get("url"))
+    _opt_enum(violations, where, "kind", payload.get("kind"), POLL_KIND_VALUES)
+    if payload.get("kind") is None:
+        violations.append(
+            f"{where}: обязательное поле kind — одно из {sorted(POLL_KIND_VALUES)}"
+        )
+    _opt_enum(violations, where, "fetch", payload.get("fetch"), FETCH_VALUES)
+    _opt_enum(violations, where, "extract", payload.get("extract"), EXTRACT_VALUES)
+    _opt_enum(violations, where, "strategy", payload.get("strategy"), STRATEGY_VALUES)
+    wait_for = payload.get("wait_for")
+    if wait_for is not None and not isinstance(wait_for, str):
+        violations.append(f"{where}: wait_for должен быть строкой или null")
+    params = payload.get("params")
+    if params is not None:
+        violations.extend(_validate_crawl_poll_params(params))
+    return violations
+
+
+def _validate_crawl_poll_params(params: Any) -> list[str]:
+    """``params`` запроса ``crawl/poll``: ``since`` строка/``limit`` целое (или ``null``)."""
+    where = "crawl/poll.params"
+    if not isinstance(params, Mapping):
+        return [f"{where}: должен быть объектом"]
+    violations: list[str] = []
+    _check_opt_str(violations, where, "since", params.get("since"))
+    _check_opt_int(violations, where, "limit", params.get("limit"))
     return violations
 
 
@@ -584,7 +672,8 @@ def validate_payload(op: str, payload: Any) -> list[str]:
     """Проверяет payload операции ``/v1/*``; ``[]`` — валиден.
 
     :param op: ``fetch`` | ``search`` | ``registry`` | ``capabilities`` | ``health`` |
-        ``crawl/submit`` | ``crawl/status`` | ``crawl/cancel`` | ``crawl/collect``.
+        ``crawl/submit`` | ``crawl/status`` | ``crawl/cancel`` | ``crawl/collect`` |
+        ``crawl/poll``.
     :param payload: вложенный ``payload`` конверта ответа.
     """
     key = str(op).strip().lower()

@@ -47,7 +47,9 @@
       "CrawlCancelRequest": {"$ref": "crawl.schema.json#/$defs/cancel_request"},
       "CrawlCancelResponse": {"$ref": "crawl.schema.json#/$defs/cancel_response"},
       "CrawlCollectRequest": {"$ref": "crawl.schema.json#/$defs/collect_request"},
-      "CrawlCollectResponse": {"$ref": "crawl.schema.json#/$defs/collect_response"}
+      "CrawlCollectResponse": {"$ref": "crawl.schema.json#/$defs/collect_response"},
+      "CrawlPollRequest": {"$ref": "crawl.schema.json#/$defs/poll_request"},
+      "CrawlPollResponse": {"$ref": "crawl.schema.json#/$defs/poll_response"}
     }
   },
   "paths": {
@@ -309,6 +311,44 @@
                   "allOf": [
                     {"$ref": "#/components/schemas/Envelope"},
                     {"properties": {"payload": {"$ref": "#/components/schemas/CrawlCollectResponse"}}}
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/crawl/poll": {
+      "post": {
+        "operationId": "crawl/poll",
+        "summary": "Опрос фида/канала (ссылки на записи, не evidence — I19)",
+        "parameters": [
+          {"$ref": "#/components/parameters/RequestId"},
+          {"$ref": "#/components/parameters/SchemaVersion"}
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "allOf": [
+                  {"$ref": "#/components/schemas/RequestEnvelope"},
+                  {"properties": {"payload": {"$ref": "#/components/schemas/CrawlPollRequest"}}}
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "{entries, count, truncated}; entries — ссылки (URL+метаданные), не evidence (I19).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {"$ref": "#/components/schemas/Envelope"},
+                    {"properties": {"payload": {"$ref": "#/components/schemas/CrawlPollResponse"}}}
                   ]
                 }
               }

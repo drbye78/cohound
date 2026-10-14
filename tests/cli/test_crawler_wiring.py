@@ -36,6 +36,7 @@ from core.adapters.crawl_browser import (
 )
 from core.adapters.crawl_http import HttpCrawler
 from core.adapters.crawl_scrapy import ScrapyCrawler
+from core.adapters.feed_poller import LocalFeedPoller, RemoteFeedPoller
 from core.adapters.remote_crawl_executor import EdgeCrawlExecutor
 from core.adapters.remote_crawler import RemoteCrawler
 from core.cli.context import _resolve_ports
@@ -840,3 +841,75 @@ def test_resolve_ports_real_build_sets_ports_crawlers(
     assert ports.crawlers is not None
     assert "http" in ports.crawlers
     assert isinstance(ports.crawlers["http"], HttpCrawler)
+
+
+# ---------------------------------------------------------------------------
+# Phase 5.1: Ports.pollers (LocalFeedPoller / RemoteFeedPoller) — local vs split
+# ---------------------------------------------------------------------------
+
+
+def test_build_adapters_local_sets_pollers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``local`` + ``deploy`` → ``Ports.pollers`` несёт ``LocalFeedPoller`` для feed/channel."""
+    monkeypatch.setenv(ENV_SCOUT_CRAWLER, "http")
+
+    ports = build_adapters(
+        profile=LOCAL_PROFILE,
+        deploy=DeployConfig(profile="local"),
+        cache=_cache(tmp_path),
+        domain_profiles=_profiles(),
+    )
+
+    assert ports.pollers is not None
+    assert set(ports.pollers) == {"feed", "channel"}
+    assert all(isinstance(poller, LocalFeedPoller) for poller in ports.pollers.values())
+    # Поллер использует тот же локальный краулер (транспорт фетча ленты).
+    assert ports.pollers["feed"]._crawler is ports.crawler
+
+
+def test_build_adapters_local_without_deploy_has_no_pollers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Без ``deploy`` нет краулера → поллеры не собираются (``None``)."""
+    clear_env(monkeypatch, [ENV_SCOUT_CRAWLER])
+
+    ports = build_adapters(
+        profile=LOCAL_PROFILE,
+        cache=_cache(tmp_path),
+        domain_profiles=_profiles(),
+    )
+
+    assert ports.crawler is None
+    assert ports.pollers is None
+
+
+def test_build_adapters_split_sets_remote_pollers() -> None:
+    """``split`` → ``Ports.pollers`` несёт ``RemoteFeedPoller`` поверх шва."""
+    config = DeployConfig.model_validate(
+        {"profile": "split", "edge": {"base_url": "https://edge.test"}}
+    )
+    gateway = SimpleNamespace()
+
+    ports = build_adapters(profile=SPLIT_PROFILE, deploy=config, gateway=gateway)  # type: ignore[arg-type]
+
+    assert ports.pollers is not None
+    assert set(ports.pollers) == {"feed", "channel"}
+    assert all(isinstance(poller, RemoteFeedPoller) for poller in ports.pollers.values())
+    assert ports.pollers["feed"]._gateway is gateway
+
+
+def test_build_adapters_local_pollers_are_ports(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Поллеры удовлетворяют ``PollPort`` (конформность на проводке)."""
+    from core.ports.poller import PollPort
+
+    monkeypatch.setenv(ENV_SCOUT_CRAWLER, "http")
+    ports = build_adapters(
+        profile=LOCAL_PROFILE,
+        deploy=DeployConfig(profile="local"),
+        cache=_cache(tmp_path),
+        domain_profiles=_profiles(),
+    )
+
+    assert ports.pollers is not None
+    assert all(isinstance(poller, PollPort) for poller in ports.pollers.values())

@@ -288,7 +288,7 @@ _VALID_SUBMIT = {
 
 def test_crawl_ops_exported() -> None:
     assert CRAWL_OPS == frozenset(
-        {"crawl/submit", "crawl/status", "crawl/cancel", "crawl/collect"}
+        {"crawl/submit", "crawl/status", "crawl/cancel", "crawl/collect", "crawl/poll"}
     )
     assert CRAWL_OPS <= ENDPOINT_OPS
 
@@ -296,7 +296,7 @@ def test_crawl_ops_exported() -> None:
 def test_crawl_schema_declares_all_ops() -> None:
     schema = load_schema("crawl")
     defs = schema["$defs"]
-    for op in ("submit", "status", "cancel", "collect"):
+    for op in ("submit", "status", "cancel", "collect", "poll"):
         assert f"{op}_request" in defs
         assert f"{op}_response" in defs
     assert schema["$defs"]["submit_response"]["required"] == [
@@ -308,6 +308,18 @@ def test_crawl_schema_declares_all_ops() -> None:
     assert schema["$defs"]["cancel_response"]["properties"]["status"] == {
         "const": "cancelled"
     }
+    # crawl/poll (Wave 5.1): ссылки на записи, без байтов (I19).
+    assert schema["$defs"]["poll_request"]["required"] == ["url", "kind"]
+    assert schema["$defs"]["poll_request"]["properties"]["kind"] == {
+        "enum": ["feed", "channel"]
+    }
+    assert schema["$defs"]["poll_response"]["required"] == [
+        "entries",
+        "count",
+        "truncated",
+    ]
+    assert schema["$defs"]["poll_entry"]["required"] == ["url"]
+    assert {"$ref": "#/$defs/poll_response"} in schema["oneOf"]
 
 
 def test_validate_crawl_request_submit_accepts() -> None:
@@ -453,6 +465,103 @@ def test_validate_payload_crawl_collect_rejects_bad_item() -> None:
     assert validate_payload(
         "crawl/collect",
         {"items": [], "next_cursor": None, "done": "yes"},
+    )
+
+
+# ---------------------------------------------------------------------------
+# crawl/poll — запрос и ответ (Wave 5.1)
+# ---------------------------------------------------------------------------
+
+
+def test_validate_crawl_request_poll_accepts() -> None:
+    assert validate_crawl_request(
+        "crawl/poll", {"url": "https://x.test/feed", "kind": "feed"}
+    ) == []
+    assert validate_crawl_request(
+        "crawl/poll",
+        {
+            "url": "https://x.test/feed",
+            "kind": "channel",
+            "params": {"since": "2026-01-01", "limit": 10},
+            "fetch": "http",
+            "extract": "auto",
+            "strategy": "honest",
+            "wait_for": None,
+        },
+    ) == []
+
+
+def test_validate_crawl_request_poll_requires_url_and_kind() -> None:
+    assert any("url" in v for v in validate_crawl_request("crawl/poll", {"kind": "feed"}))
+    assert any(
+        "kind" in v for v in validate_crawl_request("crawl/poll", {"url": "https://x.test"})
+    )
+
+
+def test_validate_crawl_request_poll_rejects_unknown_kind() -> None:
+    assert validate_crawl_request(
+        "crawl/poll", {"url": "https://x.test", "kind": "sitemap"}
+    )
+
+
+def test_validate_crawl_request_poll_rejects_bad_params() -> None:
+    assert any(
+        "limit" in v
+        for v in validate_crawl_request(
+            "crawl/poll", {"url": "https://x.test", "kind": "feed", "params": {"limit": "x"}}
+        )
+    )
+    assert any(
+        "params" in v
+        for v in validate_crawl_request(
+            "crawl/poll", {"url": "https://x.test", "kind": "feed", "params": "nope"}
+        )
+    )
+
+
+def test_validate_crawl_request_poll_rejects_unknown_axis() -> None:
+    assert any(
+        "strategy" in v
+        for v in validate_crawl_request(
+            "crawl/poll", {"url": "https://x.test", "kind": "feed", "strategy": "flash"}
+        )
+    )
+
+
+def test_validate_payload_crawl_poll_accepts_entries() -> None:
+    payload = {
+        "entries": [
+            {
+                "url": "https://x.test/a",
+                "guid": "g1",
+                "published_at": "2026-01-01",
+                "title": "A",
+            },
+            {"url": "https://x.test/b", "guid": None, "published_at": None, "title": None},
+        ],
+        "count": 2,
+        "truncated": False,
+    }
+    assert validate_payload("crawl/poll", payload) == []
+    assert validate_payload("crawl/poll", {"entries": [], "count": 0, "truncated": True}) == []
+
+
+def test_validate_payload_crawl_poll_requires_entry_url() -> None:
+    assert validate_payload(
+        "crawl/poll", {"entries": [{"title": "no url"}], "count": 1, "truncated": False}
+    )
+    assert validate_payload("crawl/poll", {"entries": "nope", "count": 0, "truncated": False})
+
+
+def test_validate_payload_crawl_poll_rejects_bad_types() -> None:
+    assert validate_payload(
+        "crawl/poll", {"entries": [], "count": "2", "truncated": False}
+    )
+    assert validate_payload(
+        "crawl/poll", {"entries": [], "count": 0, "truncated": "no"}
+    )
+    assert validate_payload(
+        "crawl/poll", {"entries": [{"url": 5}], "count": 1, "truncated": False}
     )
 
 

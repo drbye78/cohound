@@ -53,7 +53,7 @@ __all__ = [
 EDGE_SCHEMA_VERSION = "1"
 
 #: Операции, которые в протоколе edge принимают тело (07 §3).
-#: Crawl-операции очереди краула (Phase 3.1) — тоже POST.
+#: Crawl-операции очереди краула (Phase 3.1) и опрос фидов (Wave 5.1) — тоже POST.
 _POST_OPS = frozenset(
     {
         "fetch",
@@ -63,6 +63,7 @@ _POST_OPS = frozenset(
         "crawl/status",
         "crawl/cancel",
         "crawl/collect",
+        "crawl/poll",
     }
 )
 #: Операции без тела (диагностика, 07 §3).
@@ -228,6 +229,9 @@ class EdgeGateway:
         методами ``submit(request)``, ``status(job_id)``, ``cancel(job_id)``,
         ``collect(job_id, cursor=…, limit=…)``. При ``None`` crawl-операции отвечают
         ``status=error`` (планировщик недоступен на этом edge-узле).
+    :param poller: необязательный сервис опроса фидов/каналов (Wave 5.1) с методом
+        ``poll(request) -> {entries, count, truncated}``. При ``None`` операция
+        ``crawl/poll`` отвечает ``status=error`` (сервис недоступен на этом edge-узле).
     """
 
     def __init__(
@@ -247,6 +251,7 @@ class EdgeGateway:
         supported_formats: Sequence[str] | None = None,
         schema_version: str = EDGE_SCHEMA_VERSION,
         scheduler: Any = None,
+        poller: Any = None,
     ) -> None:
         self._crawler = crawler
         self._extractors = _normalize_adapters(extractor)
@@ -261,6 +266,7 @@ class EdgeGateway:
         )
         self.schema_version = schema_version
         self._scheduler = scheduler
+        self._poller = poller
 
     # -- идентификаторы --------------------------------------------------------
 
@@ -377,6 +383,7 @@ class EdgeGateway:
             "crawl/status": self._handle_crawl_status,
             "crawl/cancel": self._handle_crawl_cancel,
             "crawl/collect": self._handle_crawl_collect,
+            "crawl/poll": self._handle_crawl_poll,
         }.get(op)
         if handler is None:
             raise EdgeRequestError(f"неизвестная операция: {op!r}")
@@ -578,6 +585,14 @@ class EdgeGateway:
         return [str(item) for item in value]
 
     @staticmethod
+    def _crawl_opt_str(value: Any) -> str | None:
+        """Опциональное строковое поле (``None``/пустое → ``None``); иначе ``str``."""
+        if value is None:
+            return None
+        text = str(value)
+        return text or None
+
+    @staticmethod
     def _crawl_collect_item(item: Any) -> dict[str, Any]:
         """Нормализует элемент ``items`` ответа ``crawl/collect``."""
         if not isinstance(item, Mapping):
@@ -665,6 +680,50 @@ class EdgeGateway:
             "items": [self._crawl_collect_item(item) for item in items],
             "next_cursor": None if next_cursor is None else str(next_cursor),
             "done": bool(result.get("done")),
+        }
+
+    def _handle_crawl_poll(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        """``/v1/crawl/poll`` → ``{entries, count, truncated}`` — ссылки, не evidence (I19).
+
+        Фетчится **только каталоговый документ** фида/канала; записи возвращаются как
+        ссылки (URL+метаданные), без байтов. Сервис инъецируется (``poller``); при его
+        отсутствии — ``EdgeError`` (сервис недоступен на этом edge-узле).
+        """
+        self._check_crawl_request("crawl/poll", payload)
+        if self._poller is None:
+            raise EdgeError("crawl poller is not available on this edge node")
+        try:
+            result = self._poller.poll(payload)
+        except EdgeError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - грациозная граница адаптера
+            raise EdgeAdapterError(f"crawl/poll: {exc}") from exc
+        if not isinstance(result, Mapping):
+            raise EdgeAdapterError(
+                f"crawl/poll: сервис вернул не-объект ({type(result).__name__})"
+            )
+        entries = result.get("entries")
+        if not isinstance(entries, (list, tuple)):
+            raise EdgeAdapterError("crawl/poll: поле entries обязано быть списком")
+        return {
+            "entries": [self._crawl_poll_entry(item) for item in entries],
+            "count": self._crawl_int(result.get("count"), default=0),
+            "truncated": bool(result.get("truncated")),
+        }
+
+    @staticmethod
+    def _crawl_poll_entry(item: Any) -> dict[str, Any]:
+        """Нормализует элемент ``entries`` ответа ``crawl/poll`` (URL обязателен)."""
+        if not isinstance(item, Mapping):
+            raise EdgeAdapterError("crawl/poll: элемент entries обязан быть объектом")
+        url = item.get("url")
+        if not isinstance(url, str) or not url:
+            raise EdgeAdapterError("crawl/poll: элемент entries требует непустой url")
+        return {
+            "url": url,
+            "guid": EdgeGateway._crawl_opt_str(item.get("guid")),
+            "published_at": EdgeGateway._crawl_opt_str(item.get("published_at")),
+            "title": EdgeGateway._crawl_opt_str(item.get("title")),
         }
 
     @staticmethod

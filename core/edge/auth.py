@@ -100,6 +100,7 @@ AUTHORIZED_OPS: frozenset[str] = frozenset(
         "crawl/status",
         "crawl/cancel",
         "crawl/collect",
+        "crawl/poll",
     }
 )
 
@@ -117,6 +118,7 @@ _OP_SCOPE: dict[str, str] = {
     "crawl/status": SCOPE_CRAWL,
     "crawl/cancel": SCOPE_CRAWL,
     "crawl/collect": SCOPE_CRAWL,
+    "crawl/poll": SCOPE_CRAWL,
 }
 
 #: Входящий запрос шва, как его видит аутентификатор: отображение заголовков.

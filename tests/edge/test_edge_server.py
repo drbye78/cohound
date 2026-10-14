@@ -265,6 +265,32 @@ class FakeScheduler:
         }
 
 
+class FakePoller:
+    """Стенд-сервис опроса фидов/каналов (Wave 5.1): детерминированные ссылки."""
+
+    def __init__(self, *, raises: Exception | None = None) -> None:
+        self._raises = raises
+        self.calls: list[dict[str, Any]] = []
+
+    def poll(self, request: Mapping[str, Any]) -> dict[str, Any]:
+        if self._raises is not None:
+            raise self._raises
+        self.calls.append(dict(request))
+        return {
+            "entries": [
+                {
+                    "url": "https://site.test/a",
+                    "guid": "g1",
+                    "published_at": "2026-01-01",
+                    "title": "A",
+                },
+                {"url": "https://site.test/b", "guid": None, "published_at": None, "title": None},
+            ],
+            "count": 2,
+            "truncated": False,
+        }
+
+
 # ---------------------------------------------------------------------------
 # Хелперы
 # ---------------------------------------------------------------------------
@@ -621,6 +647,96 @@ def test_route_get_crawl_is_405() -> None:
 def test_route_unknown_crawl_op_is_404() -> None:
     code, env = route_request(_edge(), "POST", "/v1/crawl/teleport", b"{}")
     assert code == 404
+    assert env["status"] == "error"
+
+
+# ---------------------------------------------------------------------------
+# /v1/crawl/poll (Wave 5.1; сервис инъецируется)
+# ---------------------------------------------------------------------------
+
+
+def test_crawl_poll_envelope_shape_is_links_not_evidence() -> None:
+    poller = FakePoller()
+    env = _edge(poller=poller).envelope(
+        "crawl/poll", {"url": "https://site.test/feed", "kind": "feed"}
+    )
+    assert env["status"] == "ok"
+    assert env["payload"] == {
+        "entries": [
+            {
+                "url": "https://site.test/a",
+                "guid": "g1",
+                "published_at": "2026-01-01",
+                "title": "A",
+            },
+            {"url": "https://site.test/b", "guid": None, "published_at": None, "title": None},
+        ],
+        "count": 2,
+        "truncated": False,
+    }
+    assert poller.calls == [{"url": "https://site.test/feed", "kind": "feed"}]
+
+
+def test_crawl_poll_without_poller_is_status_error() -> None:
+    env = _edge().envelope("crawl/poll", {"url": "https://site.test/feed", "kind": "feed"})
+    assert env["status"] == "error"
+    assert env["error"] == "crawl poller is not available on this edge node"
+    assert env["payload"] is None
+
+
+def test_crawl_poll_request_validation_error_without_poller() -> None:
+    env = _edge().envelope("crawl/poll", {"url": "https://site.test/feed"})
+    assert env["status"] == "error"
+    assert "kind" in env["error"]
+
+
+def test_crawl_poll_poller_exception_becomes_status_error_without_traceback() -> None:
+    edge = _edge(poller=FakePoller(raises=RuntimeError("feed down")))
+    env = edge.envelope("crawl/poll", {"url": "https://site.test/feed", "kind": "feed"})
+    assert env["status"] == "error"
+    assert "feed down" in env["error"]
+    assert "Traceback" not in env["error"]
+
+
+def test_crawl_poll_poller_non_mapping_is_error() -> None:
+    class BadPoller:
+        def poll(self, request: Mapping[str, Any]) -> list[str]:
+            return ["nope"]
+
+    env = _edge(poller=BadPoller()).envelope(
+        "crawl/poll", {"url": "https://site.test/feed", "kind": "feed"}
+    )
+    assert env["status"] == "error"
+
+
+def test_crawl_poll_poller_entry_requires_url() -> None:
+    class NoUrlPoller:
+        def poll(self, request: Mapping[str, Any]) -> dict[str, Any]:
+            return {"entries": [{"title": "no url"}], "count": 1, "truncated": False}
+
+    env = _edge(poller=NoUrlPoller()).envelope(
+        "crawl/poll", {"url": "https://site.test/feed", "kind": "feed"}
+    )
+    assert env["status"] == "error"
+    assert "url" in env["error"]
+
+
+def test_route_post_crawl_poll_is_routed() -> None:
+    poller = FakePoller()
+    code, env = route_request(
+        _edge(poller=poller),
+        "POST",
+        "/v1/crawl/poll",
+        json.dumps({"url": "https://site.test/feed", "kind": "channel"}).encode("utf-8"),
+    )
+    assert code == 200
+    assert env["payload"]["count"] == 2
+    assert poller.calls == [{"url": "https://site.test/feed", "kind": "channel"}]
+
+
+def test_route_get_crawl_poll_is_405() -> None:
+    code, env = route_request(_edge(), "GET", "/v1/crawl/poll")
+    assert code == 405
     assert env["status"] == "error"
 
 

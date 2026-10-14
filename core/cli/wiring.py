@@ -39,6 +39,7 @@ from core.adapters.crawl_scrapy import CrawlError, ScrapyCrawler
 from core.adapters.embed_local import LocalEmbedder
 from core.adapters.extract_document import DoclingDocumentExtractor
 from core.adapters.extract_html import HtmlExtractor
+from core.adapters.feed_poller import LocalFeedPoller, RemoteFeedPoller
 from core.adapters.index_npy import NpyIndexBuilder, numpy_available
 from core.adapters.lexical_tantivy import TantivyLexicalIndex, tantivy_available
 from core.adapters.llm_discovery import (
@@ -85,6 +86,7 @@ from core.ports.discovery_llm import DiscoveryLLMPort
 from core.ports.extractor import ExtractorPort
 from core.ports.gateway import ContentGateway
 from core.ports.llm import EvaluatorPort
+from core.ports.poller import PollPort
 from core.ports.registry import RegistryFetcherPort
 from core.ports.search import SearchAdapterPort
 from core.ports.types import ExtractedDoc, ExtractionRoute, FetchMode, RawPage
@@ -848,6 +850,7 @@ def _build_local_ports(
     package: str | None,
     crawler: CrawlerPort | None = None,
     crawlers: Mapping[str, CrawlerPort] | None = None,
+    pollers: Mapping[str, PollPort] | None = None,
 ) -> Ports:
     """Собирает in-process порты профиля ``local`` (без сети/тяжёлых зависимостей).
 
@@ -857,6 +860,8 @@ def _build_local_ports(
     ``crawler`` — опциональный HTTP-краулер корпуса, собранный composition root из
     ``deploy.crawl`` (:func:`build_scout_crawler`); ``None`` → не инстанцируется (прежнее
     поведение, сетевые адаптеры включаются явной инъекцией).
+    ``pollers`` — карта ``kind → PollPort`` (Phase 5.1: ``LocalFeedPoller`` для
+    ``feed``/``channel``), собранная из того же краулера; ``None`` → опрос фидов выключен.
     """
     html = HtmlExtractor()
     documents = DoclingDocumentExtractor()
@@ -893,6 +898,8 @@ def _build_local_ports(
         crawler=crawler,
         # Lane A/L3a: карта ``engine → CrawlerPort`` для per-engine выбора в Ш5.
         crawlers=crawlers,
+        # Phase 5.1: карта ``kind → PollPort`` для опроса фидов/каналов в Ш5.
+        pollers=pollers,
         search=None,
         vector_index=None,
     )
@@ -968,6 +975,17 @@ def build_adapters(
             domain_profiles=domain_profiles,
             crawl_sources=crawl_sources,
         )
+        # Phase 5.1: поллеры фидов/каналов (``kind → PollPort``) строятся из того же
+        # локального краулера (фетч ленты — транспортом краула); без краулера (нет
+        # deploy-конфига) опрос фидов выключен (``None``), как и прочие сетевые порты.
+        pollers: dict[str, PollPort] | None = (
+            {
+                "feed": LocalFeedPoller(local_crawler),
+                "channel": LocalFeedPoller(local_crawler),
+            }
+            if local_crawler is not None
+            else None
+        )
         return _build_local_ports(
             evaluator=evaluator,
             registry=registry,
@@ -975,6 +993,7 @@ def build_adapters(
             package=package,
             crawler=local_crawler,
             crawlers=crawlers,
+            pollers=pollers,
         )
     if profile == SPLIT_PROFILE:
         config = deploy if deploy is not None else load_deploy_config(None)
@@ -999,6 +1018,12 @@ def build_adapters(
             # submit/status/collect по шву. ``crawler=RemoteCrawler`` оставлен для обратной
             # совместимости (non-executor путь); при наличии ``executor`` фаза его не использует.
             executor=EdgeCrawlExecutor(content_gateway),
+            # Phase 5.1: опрос фидов/каналов делегируется DMZ-шву (op ``crawl/poll``); ядро
+            # не фетчит ленты in-process (веб-эгресс только через шов, 07 §4–§5).
+            pollers={
+                "feed": RemoteFeedPoller(content_gateway),
+                "channel": RemoteFeedPoller(content_gateway),
+            },
             search=RemoteSearch(
                 content_gateway,
                 adapter_kind=(config.search.adapter or "remote"),

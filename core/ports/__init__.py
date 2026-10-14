@@ -31,6 +31,7 @@ from core.ports.gateway import ContentGateway
 from core.ports.index_builder import IndexBuilderPort, IndexMeta
 from core.ports.lexical_index import LexicalIndexPort
 from core.ports.llm import EvaluatorPort, LLMRequest, LLMResponse, TokenUsage
+from core.ports.poller import PollPort
 from core.ports.registry import RegistryFetcherPort, RegistryFact
 from core.ports.search import SearchAdapterPort, SearchQuery, SearchResult
 from core.ports.store import StorePort
@@ -68,6 +69,7 @@ __all__ = [
     "LLMRequest",
     "LLMResponse",
     "TokenUsage",
+    "PollPort",
     "RegistryFetcherPort",
     "RegistryFact",
     "SearchAdapterPort",

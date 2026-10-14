@@ -36,6 +36,7 @@ from core.ports.extractor import ExtractorPort
 from core.ports.index_builder import IndexBuilderPort
 from core.ports.lexical_index import LexicalIndexPort
 from core.ports.llm import EvaluatorPort
+from core.ports.poller import PollPort
 from core.ports.registry import RegistryFetcherPort
 from core.ports.search import SearchAdapterPort
 from core.ports.store import StorePort
@@ -118,6 +119,11 @@ class Ports:
     ``executor`` — опциональный исполнитель краула (``CrawlExecutorPort``, Phase 3.3):
     при наличии ``build_corpus`` исполняет краул **через него** (``split``/edge-планировщик),
     а ``crawler``/``crawlers`` не используются. ``None`` → прежний локальный per-URL путь.
+
+    ``pollers`` — карта ``kind → PollPort`` (Phase 5.1), параллельная ``crawlers``: фаза
+    корпуса (Ш5) берёт поллер по виду источника (``feed``/``channel``), чтобы дополнить
+    корпус ссылками из публичных лент/каналов (кандидаты, не evidence — I19). ``None`` →
+    опрос фидов выключен.
     """
 
     evaluator: EvaluatorPort | None = None
@@ -129,6 +135,7 @@ class Ports:
     crawler: CrawlerPort | None = None
     crawlers: Mapping[str, CrawlerPort] | None = None
     executor: CrawlExecutorPort | None = None
+    pollers: Mapping[str, PollPort] | None = None
     extractor: ExtractorPort | None = None
     chunker: ChunkerPort | None = None
     registry: RegistryFetcherPort | None = None
