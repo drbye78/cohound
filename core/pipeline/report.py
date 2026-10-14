@@ -54,6 +54,7 @@ from core.domain.models import (
     CrawlProvenance,
     ProtocolExhaustion,
     RunManifest,
+    canonical_rate_limit,
 )
 from core.domain.scoring import evidence_coverage
 from core.pipeline.compute import (
@@ -132,6 +133,10 @@ EXECUTION_FIELDS: tuple[str, ...] = (
     "retrieval_cutoff_K",
     "retrieval_params_json",
     "llm_scenarios",
+    # Backlog B (§13): операционные оси краула (commodity-слой, A2). Их смена —
+    # версионная граница класса ``execution_change`` (не ``methodology_change``).
+    "crawl_strategy",
+    "crawl_rate_limit",
 )
 
 #: Обратно-совместимый алиас (v2.0): прежде границей считался только исполнительный
@@ -457,6 +462,9 @@ def build_manifest(
     * §4.4/Phase 2 — ``crawl_provenance`` (провенанс краула: сеансы/движки/виды + дайджест
       источников) передаётся вызывающим как :class:`CrawlProvenance` (или mapping); идёт в
       манифест информационно, вне границ версий (§13).
+    * §13/Backlog B — ``crawl_strategy``/``crawl_rate_limit`` берутся из ``run.crawl``
+      (секция ``crawl`` ``run.yaml``); при её отсутствии — ``None``. Это **граница**
+      ``execution_change`` (операционные оси commodity-слоя, A2), а не ``methodology_change``.
 
     Деплой-провенанс (``deploy_profile``/``edge_schema_version``) заполняется только если
     соответствующие поля есть в текущей схеме :class:`RunManifest` (defensive: иначе
@@ -587,6 +595,21 @@ def build_manifest(
     else:
         resolved_crawl_provenance = CrawlProvenance.model_validate(dict(crawl_provenance))
 
+    # §13 (Backlog B): операционные оси краула — стратегия и диапазон задержек (commodity-слой,
+    # A2). Заполняются из ``run.crawl`` (если секция задана); при отсутствии секции — ``None``
+    # (прежние манифесты не меняются). Их смена — граница класса ``execution_change``.
+    crawl_cfg = getattr(run, "crawl", None)
+    crawl_strategy: str | None = None
+    crawl_rate_limit: str | None = None
+    if crawl_cfg is not None:
+        strategy_value = getattr(crawl_cfg, "strategy", None)
+        crawl_strategy = (
+            None
+            if strategy_value is None
+            else str(getattr(strategy_value, "value", strategy_value))
+        )
+        crawl_rate_limit = canonical_rate_limit(getattr(crawl_cfg, "rate_limit", None))
+
     extra: dict[str, Any] = {}
     manifest_fields = getattr(RunManifest, "model_fields", {})
     if "deploy_profile" in manifest_fields:
@@ -666,6 +689,8 @@ def build_manifest(
         ),
         settings_provenance=dict(resolved_provenance or {}),
         crawl_provenance=resolved_crawl_provenance,
+        crawl_strategy=crawl_strategy,
+        crawl_rate_limit=crawl_rate_limit,
         snapshot_date=snapshot_date,
         **extra,
     )

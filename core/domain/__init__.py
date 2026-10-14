@@ -82,6 +82,7 @@ from core.domain.models import (
     Upstream,
     UpstreamRef,
     Violation,
+    canonical_rate_limit,
     derived_evidence_id,
 )
 from core.domain.r2 import apply_r2
@@ -190,6 +191,7 @@ __all__ = [
     "Upstream",
     "UpstreamRef",
     "Violation",
+    "canonical_rate_limit",
     "derived_evidence_id",
     # r2
     "apply_r2",

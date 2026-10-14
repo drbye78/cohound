@@ -12,7 +12,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = "3.2.0"
+SCHEMA_VERSION = "3.3.0"
 
 DDL = """
 PRAGMA journal_mode = WAL;
@@ -59,6 +59,8 @@ CREATE TABLE IF NOT EXISTS runs (
     computed_ranking      TEXT,                        -- вычисленный допустимый ранг — K6
     settings_provenance_json TEXT,                     -- A3 (v2.1): {setting: {source, experiment_id?}}
     crawl_provenance_json TEXT,                        -- §4.4/Phase 2: провенанс краула (сеансы/движки/дайджест)
+    crawl_strategy        TEXT,                        -- §13/Backlog B: ось стратегии краула (execution_change)
+    crawl_rate_limit      TEXT,                        -- §13/Backlog B: канон. форма rate_limit (execution_change)
     snapshot_date         TEXT,
     state                 TEXT
 );
@@ -345,7 +347,7 @@ def _ensure_columns(
 
 
 def connect(db_path: str | Path = ":memory:") -> sqlite3.Connection:
-    """Открывает БД и применяет схему (+ идемпотентные DDL-миграции v2.1–v3.2)."""
+    """Открывает БД и применяет схему (+ идемпотентные DDL-миграции v2.1–v3.3)."""
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
     conn.executescript(DDL)
@@ -356,6 +358,13 @@ def connect(db_path: str | Path = ":memory:") -> sqlite3.Connection:
         conn.execute("ALTER TABLE runs ADD COLUMN settings_provenance_json TEXT")
     # DDL-миграция v3.2 (Phase 2): провенанс краула (сеансы/движки/дайджест источников).
     _ensure_columns(conn, "runs", {"crawl_provenance_json": "TEXT"})
+    # DDL-миграция v3.3 (Backlog B): операционные оси краула (стратегия/диапазон задержек) —
+    # границы класса ``execution_change`` (§13); additive, старые БД получают колонки.
+    _ensure_columns(
+        conn,
+        "runs",
+        {"crawl_strategy": "TEXT", "crawl_rate_limit": "TEXT"},
+    )
     # DDL-миграция v2.2 (P2): content-addressed build-id witness — версия экстрактора у чанка
     # и версия экстрактора + отпечаток содержимого у продукт-партиции манифеста.
     _ensure_columns(conn, "corpus_chunks", {"extractor_version": "TEXT"})

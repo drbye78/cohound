@@ -603,7 +603,7 @@ def _crawl_session_dict_mirror() -> None:
 def _db_smoke() -> None:
     conn = connect(":memory:")
     ver = conn.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()
-    _assert(ver is not None and ver["value"] == "3.2.0")
+    _assert(ver is not None and ver["value"] == "3.3.0")
 
     tables = {r["name"] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     for t in ("products", "runs", "llm_scenarios", "corpus_docs", "corpus_chunks",
@@ -625,6 +625,9 @@ def _db_smoke() -> None:
     # Phase 2 (schema 3.2.0): провенанс краула в манифесте прогона.
     runs_cols = {r["name"] for r in conn.execute("PRAGMA table_info(runs)")}
     _assert("crawl_provenance_json" in runs_cols)
+
+    # Backlog B (schema 3.3.0): операционные оси краула — границы ``execution_change`` (§13).
+    _assert("crawl_strategy" in runs_cols and "crawl_rate_limit" in runs_cols)
 
     # Lane B (schema 3.0.0): сеанс краула — crawl_sessions + элементы с PK и FK.
     sess_cols = {r["name"] for r in conn.execute("PRAGMA table_info(crawl_sessions)")}
@@ -1636,13 +1639,13 @@ def _report_gates() -> None:
         except PublishBlockedError:
             pass
 
-        def _manifest(index_build_id: str):
+        def _manifest(index_build_id: str, crawl_strategy=None):
             return RunManifest(
                 run_id="r1", case_id="c", created_at="2026-01-01", mode=RunMode.STRICT,
                 methodology_version="2.0.0", package_version="1", catalog_version="1",
                 status_dict_version="1", scoring_policy_version="1", anchor_product_id="p1",
                 index_build_id=index_build_id, retrieval_profile="R1", retrieval_cutoff_K=20,
-                retrieval_params_json="{}",
+                retrieval_params_json="{}", crawl_strategy=crawl_strategy,
             )
 
         try:
@@ -1655,6 +1658,18 @@ def _report_gates() -> None:
         reasons = diff_boundary_violations(_manifest("ib_a"), _manifest("ib_b"))
         if not reasons or not all(r.startswith("execution_change:") for r in reasons):
             raise AssertionError(f"§13/B-7: ожидалась метка execution_change, получено {reasons}")
+
+        # Backlog B (§13): смена оси краула (crawl.strategy) — тоже execution_change.
+        crawl_reasons = diff_boundary_violations(
+            _manifest("ib_a", crawl_strategy="auto"),
+            _manifest("ib_a", crawl_strategy="hybrid"),
+        )
+        if not crawl_reasons or not all(
+            r.startswith("execution_change:") for r in crawl_reasons
+        ) or not any("crawl_strategy" in r for r in crawl_reasons):
+            raise AssertionError(
+                f"§13/Backlog B: ожидался execution_change по crawl_strategy, получено {crawl_reasons}"
+            )
 
         # §5/I3 (v2.1): strict-❓ без полного протокола → аномалия (статус не меняется).
         unknown = Cell(

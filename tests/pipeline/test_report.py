@@ -36,6 +36,7 @@ import yaml
 from core.domain import REQUIRED_EXHAUSTION_CONTOURS
 from core.domain.enums import (
     CellState,
+    CrawlStrategy,
     EndpointKind,
     LLMScenario,
     RankingPolicy,
@@ -48,12 +49,15 @@ from core.domain.models import (
     CatalogRow,
     Cell,
     CrawlProvenance,
+    CrawlRunConfig,
     CrawlSessionProvenance,
     LLMEvidence,
     ProtocolExhaustion,
+    RateLimitSpec,
     RunConfig,
     RunManifest,
     ScenarioBinding,
+    canonical_rate_limit,
 )
 from core.domain.scoring import Comparability, Coverage, Score, SensitivityReport
 from core.pipeline.compute import ScoreBundle, compute, publish_warnings
@@ -342,6 +346,66 @@ def test_run_config_methodology_version_default_and_flow() -> None:
         inputs=inputs, plan=plan, created_at="2026-01-01T00:00:00Z"  # type: ignore[arg-type]
     )
     assert manifest.methodology_version == METHODOLOGY_VERSION
+
+
+def test_build_manifest_carries_crawl_axes_from_run_config() -> None:
+    """Backlog B (§13): ``crawl.strategy``/``crawl.rate_limit`` идут из ``run.crawl`` в манифест."""
+    cfg = RunConfig(
+        case_id="case-1",
+        anchor=PRODUCT_A,
+        cohort="cohort-1",
+        products=[PRODUCT_A],
+        package="pkg",
+        snapshot_date=_dt.date(2026, 1, 1),
+        mode=RunMode.STRICT,
+        crawl=CrawlRunConfig(
+            strategy=CrawlStrategy.HYBRID,
+            rate_limit=RateLimitSpec(min_s=0.5, max_s=2.0),
+        ),
+    )
+    inputs = SimpleNamespace(run=cfg, package=None)
+    plan = SimpleNamespace(
+        run_id="run-crawl", anchor=PRODUCT_A, modules=[], cohort_ref="cohort-1"
+    )
+    manifest = build_manifest(
+        inputs=inputs, plan=plan, created_at="2026-01-01T00:00:00Z"  # type: ignore[arg-type]
+    )
+    assert manifest.crawl_strategy == "hybrid"
+    assert manifest.crawl_rate_limit == canonical_rate_limit(
+        RateLimitSpec(min_s=0.5, max_s=2.0)
+    )
+
+
+def test_build_manifest_crawl_axes_none_without_section() -> None:
+    """Backlog B: без секции ``crawl`` оси — ``None`` (прежние манифесты не меняются)."""
+    cfg = RunConfig(
+        case_id="case-1",
+        anchor=PRODUCT_A,
+        cohort="cohort-1",
+        products=[PRODUCT_A],
+        package="pkg",
+        snapshot_date=_dt.date(2026, 1, 1),
+        mode=RunMode.STRICT,
+    )
+    inputs = SimpleNamespace(run=cfg, package=None)
+    plan = SimpleNamespace(
+        run_id="run-nocrawl", anchor=PRODUCT_A, modules=[], cohort_ref="cohort-1"
+    )
+    manifest = build_manifest(
+        inputs=inputs, plan=plan, created_at="2026-01-01T00:00:00Z"  # type: ignore[arg-type]
+    )
+    assert manifest.crawl_strategy is None
+    assert manifest.crawl_rate_limit is None
+
+
+def test_canonical_rate_limit_is_stable_string() -> None:
+    """Backlog B: каноническая форма ``RateLimitSpec`` детерминирована; ``None`` → ``None``."""
+    assert canonical_rate_limit(None) is None
+    assert canonical_rate_limit(RateLimitSpec(min_s=0, max_s=0)) == "uniform(min=0.0,max=0.0)"
+    assert (
+        canonical_rate_limit(RateLimitSpec(min_s=0.5, max_s=2.0))
+        == "uniform(min=0.5,max=2.0)"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -778,6 +842,43 @@ def test_diff_boundary_violations_are_class_labeled() -> None:
     assert exec_reasons
     assert all(r.startswith("execution_change:") for r in exec_reasons)
     assert any("index_build_id" in r for r in exec_reasons)
+
+
+def test_diff_boundary_violations_on_crawl_axes() -> None:
+    """Backlog B (§13): смена осей краула → ``execution_change``; идентичность → нет."""
+    prev = _manifest(
+        crawl_strategy="auto", crawl_rate_limit=canonical_rate_limit(
+            RateLimitSpec(min_s=0.5, max_s=2.0)
+        )
+    )
+    # Идентичные оси (в т.ч. каноническая форма) — ложного срабатывания нет.
+    assert diff_boundary_violations(prev, _manifest(
+        crawl_strategy="auto", crawl_rate_limit="uniform(min=0.5,max=2.0)"
+    )) == []
+
+    strategy_reasons = diff_boundary_violations(prev, _manifest(crawl_strategy="hybrid"))
+    assert strategy_reasons
+    assert all(r.startswith("execution_change:") for r in strategy_reasons)
+    assert any("crawl_strategy" in r for r in strategy_reasons)
+
+    rate_reasons = diff_boundary_violations(
+        prev, _manifest(crawl_rate_limit="uniform(min=1.0,max=3.0)")
+    )
+    assert rate_reasons
+    assert all(r.startswith("execution_change:") for r in rate_reasons)
+    assert any("crawl_rate_limit" in r for r in rate_reasons)
+
+
+def test_diff_guard_marks_execution_change_on_crawl_axis(tmp_path: Path) -> None:
+    """Живой diff-guard: разная ось краула → отказ с меткой ``execution_change`` (§13)."""
+    prev = _manifest(crawl_strategy="auto")
+    curr = _manifest(crawl_strategy="hybrid")
+    with pytest.raises(CrossCycleDiffError) as excinfo:
+        render_diff(prev, curr, [], [], tmp_path / "diff.md")
+    message = str(excinfo.value)
+    assert "execution_change" in message
+    assert "crawl_strategy" in message
+    assert not (tmp_path / "diff.md").exists()
 
 
 def test_diff_guard_marks_execution_change_on_index_build(tmp_path: Path) -> None:

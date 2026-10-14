@@ -177,9 +177,10 @@ IDP/DLP/IDS (`07` §8).
 (`VectorIndexPort`); `adapters/embed_local.py` — `EmbedderPort`. `pipeline` не пишет `.npy`/tantivy
 напрямую. Реализация `StorePort`/`GateStore` — `store/sqlite_store.py` поверх DDL `store/sqlite.py`;
 бэкап/восстановление прогона — `store/backup.py`. Схема БД версионируется константой
-`SCHEMA_VERSION` = **`3.2.0`** (версия SQLite-схемы, **не** регламента); `runs.settings_provenance_json`
+`SCHEMA_VERSION` = **`3.3.0`** (версия SQLite-схемы, **не** регламента); `runs.settings_provenance_json`
 хранит провенанс настроек (A3), `runs.crawl_provenance_json` — провенанс краула (сеансы/движки/дайджест
-источников, Phase 2), `corpus_chunks.extractor_version` и `index_manifest.extractor_version`/
+источников, Phase 2), `runs.crawl_strategy`/`runs.crawl_rate_limit` — операционные оси краула
+(границы `execution_change`, §13), `corpus_chunks.extractor_version` и `index_manifest.extractor_version`/
 `content_digest` — build-id witness (P2), а `crawl_sessions`/`crawl_session_items` — первоклассный
 сеанс краула (id/статус/прогресс/возобновляемость, фаза сеансов; legacy `crawl_attempts` удалена);
 миграция additive/idempotent (`ALTER TABLE`/`CREATE TABLE IF NOT EXISTS` при отсутствии).

@@ -641,10 +641,11 @@ class SqliteStore:
         """Персистит финальный манифест в строку ``runs`` (R7/§13, A3).
 
         Обновляет версии, индексные/ретривал-поля, ``settings_provenance_json``
-        (провенанс настроек, включая ``ranking_epsilon``) и ``crawl_provenance_json``
-        (провенанс краула, §4.4/Phase 2). ``UPDATE`` по существующей
-        строке прогона: манифест — самостоятельная запись воспроизведения, а не
-        источник создания прогона (его создаёт :meth:`create_run`).
+        (провенанс настроек, включая ``ranking_epsilon``), ``crawl_provenance_json``
+        (провенанс краула, §4.4/Phase 2) и ``crawl_strategy``/``crawl_rate_limit``
+        (операционные оси краула — границы ``execution_change``, §13/Backlog B). ``UPDATE``
+        по существующей строке прогона: манифест — самостоятельная запись воспроизведения,
+        а не источник создания прогона (его создаёт :meth:`create_run`).
         """
         provenance = manifest.settings_provenance or {}
         crawl_provenance = manifest.crawl_provenance
@@ -656,7 +657,8 @@ class SqliteStore:
                 " index_build_id = ?, retrieval_profile = ?, retrieval_params_json = ?,"
                 " retrieval_cutoff_K = ?, search_effort_budget_json = ?,"
                 " requested_ranking = ?, computed_ranking = ?, snapshot_date = ?,"
-                " settings_provenance_json = ?, crawl_provenance_json = ?"
+                " settings_provenance_json = ?, crawl_provenance_json = ?,"
+                " crawl_strategy = ?, crawl_rate_limit = ?"
                 " WHERE run_id = ?",
                 (
                     manifest.package_version,
@@ -679,6 +681,8 @@ class SqliteStore:
                         ensure_ascii=False,
                         sort_keys=True,
                     ),
+                    manifest.crawl_strategy,
+                    manifest.crawl_rate_limit,
                     run_id,
                 ),
             )
@@ -1188,6 +1192,10 @@ class SqliteStore:
             ranking_epsilon=ranking_epsilon,
             settings_provenance=settings_provenance,
             crawl_provenance=CrawlProvenance.model_validate(crawl_provenance_raw or {}),
+            # §13/Backlog B: операционные оси краула — forward-compatible чтение (на старой
+            # схеме колонок нет → ``None``, без падения).
+            crawl_strategy=_optional_row_value(row, "crawl_strategy"),
+            crawl_rate_limit=_optional_row_value(row, "crawl_rate_limit"),
             llm_scenarios=scenarios,
             snapshot_date=row["snapshot_date"],
             deploy_profile=_optional_row_value(row, "deploy_profile"),

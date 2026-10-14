@@ -77,8 +77,10 @@ runs/{run_id}/
 
 Схема §4.4 перенесена из бывшего `core/db.py` (удалён в T1.3) в `store/sqlite.py`
 (14 таблиц + `schema_meta`, индексы, триггеры I4/I6/I7/I13/I18). Константа `SCHEMA_VERSION`
-= **`3.2.0`** (D3/D4/сеансы/провенанс краула) — версия **SQLite-схемы**, не регламента; колонки
-`runs.settings_provenance_json` (v2.1/A3), `runs.crawl_provenance_json` (v3.2/Phase 2) и
+= **`3.3.0`** (D3/D4/сеансы/провенанс краула) — версия **SQLite-схемы**, не регламента; колонки
+`runs.settings_provenance_json` (v2.1/A3), `runs.crawl_provenance_json` (v3.2/Phase 2),
+`runs.crawl_strategy` / `runs.crawl_rate_limit` (v3.3/Backlog B: операционные оси краула,
+границы `execution_change`, §13) и
 `corpus_chunks.extractor_version` /
 `index_manifest.extractor_version` / `index_manifest.content_digest` (P2) хранят провенанс настроек,
 провенанс краула и build-id witness, а таблицы `crawl_sessions`/`crawl_session_items` — первоклассный сеанс краула
@@ -170,7 +172,9 @@ class SqliteStore:
 `unknown_policy`, `partial_score`); `execution_change` — расхождение поля `EXECUTION_FIELDS`
 (`case_id`, `cohort_ref`, `index_build_id`, `embed_model_id`, `chunker_version`, `extractor_version`,
 `lexical_engine_version`, `vector_store`, `retrieval_profile`, `retrieval_cutoff_K`,
-`retrieval_params_json`, `llm_scenarios`). `DIFF_BOUNDARY_FIELDS` сохранён алиасом
+`retrieval_params_json`, `llm_scenarios`, `crawl_strategy`, `crawl_rate_limit`). Две последние —
+операционные оси краула (`run.yaml:crawl.strategy`/`crawl.rate_limit`, commodity-слой A2):
+их смена — `execution_change`, не `methodology_change` (Backlog B). `DIFF_BOUNDARY_FIELDS` сохранён алиасом
 `EXECUTION_FIELDS` (обратная совместимость). Дифф отказывает при обеих классах причин (§13).
 
 ### C.2. Версионные границы (bump + golden-full)
@@ -183,6 +187,8 @@ class SqliteStore:
 - Смена `retrieval_profile`/K и fusion-параметров (`rrf_k`, `retrieval_params_json`) →
   retrieval-golden и `execution_change` в diff, но **не** меняет `index_build_id`:
   ретривал-конфиг не влияет на чанкинг/векторы (P2).
+- Смена операционных осей краула (`crawl.strategy`/`crawl.rate_limit`) → `execution_change`
+  в diff (§13, Backlog B), без bump `methodology_version`: это commodity-слой exec-условий (A2).
 - Смена prompt-шаблона → новый `prompt_hash`; ячейки с прошлым hash помечаются `stale_reason='prompt_template'`.
 - Смена `index_build_id` → затронутые ячейки помечаются `stale_reason='new_build'`; `stale`-ячейки
   не участвуют в расчёте до переоценки/ревью.

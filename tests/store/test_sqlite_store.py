@@ -93,7 +93,7 @@ def test_schema_opens(store: SqliteStore) -> None:
     ver = store.conn.execute(
         "SELECT value FROM schema_meta WHERE key = 'schema_version'"
     ).fetchone()
-    assert ver["value"] == "3.2.0"
+    assert ver["value"] == "3.3.0"
     tables = {
         r["name"] for r in store.conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
     }
@@ -119,6 +119,9 @@ def test_schema_opens(store: SqliteStore) -> None:
     # Phase 2 (schema 3.2.0): провенанс краула в манифесте прогона.
     runs_cols = {r["name"] for r in store.conn.execute("PRAGMA table_info(runs)")}
     assert "crawl_provenance_json" in runs_cols
+    # Backlog B (schema 3.3.0): операционные оси краула — границы ``execution_change`` (§13).
+    assert "crawl_strategy" in runs_cols
+    assert "crawl_rate_limit" in runs_cols
     # P2 (schema 2.2.0): build-id witness — версии/отпечаток контента.
     chunk_cols = {r["name"] for r in store.conn.execute("PRAGMA table_info(corpus_chunks)")}
     assert "extractor_version" in chunk_cols
@@ -778,6 +781,33 @@ def test_read_manifest_crawl_provenance_tolerates_null(store: SqliteStore) -> No
             "UPDATE runs SET crawl_provenance_json = NULL WHERE run_id = ?", (RUN_ID,)
         )
     assert store.read_manifest(RUN_ID).crawl_provenance == CrawlProvenance()
+
+
+def test_crawl_axes_roundtrip(store: SqliteStore) -> None:
+    """Backlog B (§13): ``persist_manifest``/``read_manifest`` несут оси краула."""
+    store.create_run(RUN_ID, _cfg())
+    # Новый прогон без секции ``crawl`` → ``None`` (граница не заполнена).
+    assert store.read_manifest(RUN_ID).crawl_strategy is None
+    assert store.read_manifest(RUN_ID).crawl_rate_limit is None
+
+    manifest = RunManifest(
+        run_id=RUN_ID,
+        case_id="case-1",
+        created_at="2026-01-01T00:00:00Z",
+        mode=RunMode.STRICT,
+        methodology_version="2.0.0",
+        package_version="pkg-1",
+        catalog_version="cat-1",
+        status_dict_version="sd-1",
+        scoring_policy_version="sp-1",
+        anchor_product_id="p1",
+        crawl_strategy="hybrid",
+        crawl_rate_limit="uniform(min=0.5,max=2.0)",
+    )
+    store.persist_manifest(RUN_ID, manifest)
+    read = store.read_manifest(RUN_ID)
+    assert read.crawl_strategy == "hybrid"
+    assert read.crawl_rate_limit == "uniform(min=0.5,max=2.0)"
 
 
 def test_iter_exhaustions(store: SqliteStore) -> None:

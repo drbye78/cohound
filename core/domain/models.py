@@ -314,6 +314,20 @@ class RateLimitSpec(BaseModel):
         return self
 
 
+def canonical_rate_limit(spec: RateLimitSpec | None) -> str | None:
+    """Каноническая текстовая форма :class:`RateLimitSpec` для манифеста (§13, Backlog B).
+
+    Форма стабильна и детерминирована (граница версий не должна «дрожать» от формата
+    чисел): ``uniform(min=<min_s>,max=<max_s>)``, числа — ``repr(float(...))``
+    (кратчайшая round-trippable запись CPython). ``None`` → ``None`` (секция ``crawl``
+    в ``run.yaml`` отсутствует → граница не заполняется). Манифест — **запись**:
+    обратный разбор не требуется, сравнение — строковое.
+    """
+    if spec is None:
+        return None
+    return f"uniform(min={repr(float(spec.min_s))},max={repr(float(spec.max_s))})"
+
+
 class CrawlRunConfig(BaseModel):
     """``run.yaml`` → секция ``crawl``: дефолты оси стратегии и диапазона задержек.
 
@@ -786,6 +800,13 @@ class RunManifest(BaseModel):
     #: §4.4/Phase 2: провенанс краула (сеансы/движки/виды источника + дайджест источников).
     #: Информационен — не влияет на §6/Comparability и не входит в diff-границы (§13).
     crawl_provenance: CrawlProvenance = Field(default_factory=CrawlProvenance)
+    #: §13 (Backlog B): ось стратегии краула (``run.yaml:crawl.strategy``) и каноническая
+    #: форма диапазона задержек (``run.yaml:crawl.rate_limit``, :func:`canonical_rate_limit`).
+    #: Это **операционные** дефолты commodity-слоя (A2): их смена — граница класса
+    #: ``execution_change`` (§13), не ``methodology_change``. ``None`` — секция ``crawl``
+    #: не задана (граница не заполняется, манифесты без ``crawl`` не меняются).
+    crawl_strategy: str | None = None
+    crawl_rate_limit: str | None = None
 
 
 class Violation(BaseModel):

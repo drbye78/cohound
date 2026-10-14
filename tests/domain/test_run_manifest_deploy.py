@@ -60,6 +60,30 @@ def test_run_manifest_extra_forbid_preserved() -> None:
         _manifest(unknown_deploy_field="x")
 
 
+# --- Backlog B: операционные оси краула (§13) ------------------------------- #
+
+
+def test_crawl_axes_default_none() -> None:
+    """Backlog B: без секции ``crawl`` оси краула — ``None`` (граница не заполнена)."""
+    manifest = _manifest()
+    assert manifest.crawl_strategy is None
+    assert manifest.crawl_rate_limit is None
+
+
+def test_crawl_axes_round_trip_through_dump() -> None:
+    """Backlog B: оси краула сериализуются как строки и переживают round-trip."""
+    manifest = _manifest(
+        crawl_strategy="hybrid", crawl_rate_limit="uniform(min=0.5,max=2.0)"
+    )
+    dumped = manifest.model_dump(mode="json")
+    assert dumped["crawl_strategy"] == "hybrid"
+    assert dumped["crawl_rate_limit"] == "uniform(min=0.5,max=2.0)"
+    restored = RunManifest(**dumped)
+    assert restored == manifest
+    assert restored.crawl_strategy == "hybrid"
+    assert restored.crawl_rate_limit == "uniform(min=0.5,max=2.0)"
+
+
 # --- Phase 2: провенанс краула --------------------------------------------- #
 
 

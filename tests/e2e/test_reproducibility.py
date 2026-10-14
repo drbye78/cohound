@@ -128,6 +128,9 @@ PROVENANCE_FIELDS: tuple[str, ...] = (
     "computed_ranking",
     "snapshot_date",
     "crawl_provenance",
+    # Backlog B (§13): операционные оси краула (границы ``execution_change``).
+    "crawl_strategy",
+    "crawl_rate_limit",
 )
 
 #: Базовые входы ``_derive_index_build_id`` для property-проверки чистоты (P2:
