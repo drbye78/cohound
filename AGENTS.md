@@ -53,12 +53,13 @@ core/                         # ядро: категорийно-НЕЙТРАЛ�
                               #   lexical_bm25, index_npy/index_format/lexical_tantivy, search_* — см. NOTICES
   util/                       # text_utils (RU/EN), security (SSRF/slug), fusion (RRF), retrieval_eval — см. NOTICES
 scripts/ci.sh                 # единая точка входа CI (§11.6): selfcheck + pytest + порог покрытия
-tests/selfcheck.py            # self-contained проверка фундамента (86 проверок)
+tests/selfcheck.py            # self-contained проверка фундамента (90 проверок)
 tests/test_selfcheck.py       # pytest-обёртка над selfcheck (W1/T1.5)
 tests/domain/                 # property-тесты домена (hypothesis)
 tests/smoke_scrapy_playwright.py  # браузерный smoke scrapy-playwright (V5; 0/1/2)
 packages/{case_id}/           # пакеты категорий: package.yaml/catalog.csv(+.lock)/
                               #   baselines.csv/cohort.yaml/golden.csv/domain_profiles.yaml/
+                              #   crawl_sources.yaml (source routing: feed/channel)/
                               #   scope_attestation.yaml/run.yaml; sources/ — авторские входы
 registries/ · docs/           # словари, регламент, absence-правила
 contracts/seam/               # публикуемые JSON-схемы шва DMZ (/v1/*; 07 §5/§8)
@@ -117,6 +118,9 @@ Dev/CI по §11.6: `pytest`+`hypothesis`+`pytest-cov` в extra `dev`; един�
 `docs/architecture/06-implementation-strategy.md`.
 Развёртывание: доверенные зоны и DMZ-шов (application-layer firewall) —
 `docs/architecture/07-deployment-topology.md`.
+Source routing краула (`crawl_sources.yaml`): директорные источники `feed`/`channel` разворачиваются
+в записи через `PollPort` (local `LocalFeedPoller` ‖ split `RemoteFeedPoller`→шов `crawl/poll`) —
+`docs/architecture/03-data-config-cli.md` §D.2.1, `02-subsystems.md` §B.1.
 Переменные окружения и внешние ключи (LLM, scout, поисковые адаптеры) + runbook живого
 прогона корпуса — шаблон без секретов `.env.example` и `docs/architecture/03-data-config-cli.md` §D.6.
 

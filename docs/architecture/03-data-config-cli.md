@@ -264,6 +264,71 @@ preliminary не совместим с capability_ranked — I13). `ranking_poli
   переопределяет **только** ось `fetch`, оставляя `extract`/`strategy`/`wait_for`/`rate_limit`
   из профиля.
 
+### D.2.1. Источники краула (`packages/{case_id}/crawl_sources.yaml`) — source routing
+
+Пакетный артефакт `crawl_sources.yaml` (`CRAWL_SOURCES_FILENAME`) задаёт **маршрутизацию
+источников** краула: как каждый URL продукта добывается и разбирается. Слои (низкий → высокий
+приоритет в резолвере `pipeline/crawl_sources.py::resolve_crawl_target`):
+
+* `defaults` — дефолтный источник пакета (fallback для всех продуктов);
+* `products` — источник на продукт (`product_id → CrawlSource`);
+* `sites` — источник на сайт продукта (`product_id → {host[+path] → CrawlSource}`), лучший
+  `host[+path]`-ключ побеждает.
+
+Каждый `CrawlSource` несёт независимые оси (`fetch`/`extract`/`strategy`/`wait_for`/`rate_limit`),
+строковые `kind`/`engine` (семантика источника и идентификатор движка транспорта — свободные
+строки-данные, не доменные enum) и свободный per-source `params` (`dict[str, Any]`, сливается по
+слоям: поздний ключ побеждает). Схема строгая (`extra="forbid"`).
+
+```yaml
+# packages/{case_id}/crawl_sources.yaml
+defaults:
+  kind: web                 # kind ∈ {web, feed, channel} — строки-данные
+  engine: http
+products:
+  p1:
+    engine: scrapy          # per-product: движок транспорта (побеждает defaults)
+sites:
+  p1:
+    feed.example.com:       # per-site: каталог-фид
+      kind: feed
+      params: {limit: 50, since: "2026-01-01"}
+    channel.example.com:    # per-site: канал
+      kind: channel
+      params: {token_env: "CHANNEL_TOKEN"}   # секреты — только по ссылке на env
+```
+
+**`kind` и директорные источники.** `kind` — свободная строка-данные; `web` — обычная страница.
+`feed`/`channel` — **директорные** виды (`_DIRECTORY_KINDS = {"feed","channel"}`): такой источник
+**разворачивается в список ссылок-записей** (`FeedEntry`), а не индексируется сам. Ленты
+разбираются чистыми парсерами `core/util/feed.py` (`feed` — XML: RSS/Atom/RDF; `channel` —
+JSON/JSON-lines/список URL). Записи получают **провенанс каталога** (`kind` = `feed`/`channel`,
+`engine` — собственный движок URL-записи), затем добываются как **обычные страницы** штатным путём:
+retention сырых байтов → extract → chunk → index (I19). Развёртка — **ровно один уровень** (записи
+не ре-расширяются, даже если их `kind` тоже директорный). Сам **документ каталога не ретейнится и
+не ингестится** (не evidence, I19); его элемент сеанса помечается `fetched` **без** `raw_path`.
+
+**`params`.** Свободный `dict`; валидируется реализацией `PollPort.validate_params` **до** опроса
+(в фазе корпуса). Базовые ключи: `limit` (целое > 0), `since` (ISO-8601/RFC822 — отсекает
+доказуемо старые записи; неизвестная дата сохраняется консервативно), `token_env` (имя
+env-переменной с токеном канала — **единственный** допустимый способ секрета; инлайн-ключи вида
+`token`/`api_key`/`authorization` отвергаются). Проблемы `params` (или отсутствие поллера, или
+сбой опроса) → каталог `failed`/`source_unavailable`, сеанс финализируется `partial` (не «тихо
+пусто»). Каждое действие опроса проверяется **на входе** (URL ленты) и **на каждой записи**
+(SSRF-политика `core/util/security.py::validate_url`); небезопасная запись отбрасывается.
+
+**Паритет `local`/`split` и шов.** Логика развёртки одна; различается транспорт опроса:
+в профиле `local` — `LocalFeedPoller` (in-process `CrawlerPort`), в профиле `split` —
+`RemoteFeedPoller` через op шва **`crawl/poll`** (scope `crawl`, `schema_version` шва остаётся
+`"1"`). Шов добывает **только документ каталога**; записи возвращаются как **ссылки**
+(`{entries, count, truncated}`), их байты — не через этот опрос, а обычным фетчем (I19).
+В `executor`-режиме (`split`, долгоиграющий краул) развёртка каталогов исполняется **отдельной
+волной** с собственным `idempotency_key` (волна 1 — top-level URL, волна 2 — записи).
+
+**Версионирование.** Операционные оси краула `run.yaml:crawl.strategy`/`crawl.rate_limit` — это
+версионная граница класса `execution_change` (§13, `03 §C.1`/Backlog B), а отпечаток конфигурации
+источников `crawl_sources_digest` — **информационный** маркер провенанса (не граница §13).
+
 ### D.3. Линтер (`pipeline/lint.py`, блокирует прогон)
 
 Всё из §4.2 + новые: `absence_rule` с аттестацией без процедуры `scope_attested_by` → ошибка;

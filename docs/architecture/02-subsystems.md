@@ -141,6 +141,26 @@ recovery-on-open переводит «зависшие» `running` обратн�
 (живой фетч не гарантирован). Ошибки записи изолируются (фаза остаётся `ok`-с-ошибками); счётчики
 `pending/fetched/failed` идут в `IndexBuild` (наблюдаемость).
 
+**Источники-каталоги (`feed`/`channel`) — развёртка в записи.** Помимо обычных страниц, Ш5
+поддерживает **директорные** источники (`kind ∈ _DIRECTORY_KINDS = {feed, channel}`,
+`core/pipeline/corpus.py`): такой URL не индексируется напрямую, а разворачивается в список
+ссылок-записей. Развёртка делегируется порту `ports/poller.py::PollPort`
+(`poll(url, *, kind, params, plan) → list[FeedEntry]`, `validate_params`): в профиле `local` —
+`LocalFeedPoller` (in-process `CrawlerPort` + чистые парсеры `core/util/feed.py`), в профиле
+`split` — `RemoteFeedPoller` через op шва **`crawl/poll`** (DMZ добывает **только документ
+каталога**, записи возвращаются как ссылки). Поддержаны форматы лент `feed` (XML: RSS/Atom/RDF) и
+`channel` (JSON/JSON-lines/список URL). Ограничения выборки `params` (`limit`/`since`/`token_env`)
+валидируются `PollPort.validate_params` **до** опроса; секреты — только по ссылке на env
+(`token_env`). **Сам каталог не ретейнится и не ингестится** (I19): его элемент сеанса помечается
+`fetched` **без** `raw_path`; `feed`/`channel` — кандидаты, не evidence. Записи становятся
+**обычными retained-страницами** (retention `corpus_raw` → extract → chunk → index) с провенансом
+каталога (`kind`); это **один уровень** развёртки (записи повторно не расширяются). SSRF-политика
+(`validate_url`) проверяется на входе (URL ленты) и на **каждой** записи; небезопасная запись
+отбрасывается. Сбой каталога (нет поллера / плохие `params` / ошибка опроса) → терминальный
+`failed`/`source_unavailable` → сеанс `partial` (не «тихо пусто»). В `executor`-режиме (`split`)
+развёртка каталогов исполняется **отдельной волной** с собственным `idempotency_key`: волна 1 —
+top-level URL, затем опрос каталогов, волна 2 — записи (`_run_executor_waves`, `work_by_product`).
+
 **Иммутабельность (контент-адресуемая, P2).** `index_build_id` = hash(schema-версия формулы +
 пакет корпуса + params + `snapshot_date` + `chunker_version` + `embed_model_id` +
 `extractor_version` + `lexical_engine_version` + `vector_store` + content-token). content-token —

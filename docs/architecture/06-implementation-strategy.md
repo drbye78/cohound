@@ -402,6 +402,32 @@ preliminary-yield), калибровка порогов.
 - **Диагностика.** `hound deploy-check` добавляет неразрушающий зонд `crawl/status` (строка
   `crawl: available|unavailable`), аддитивно к health/capabilities.
 
+**Phase 5 — source routing фидов/каналов (feed/channel; landed).** Директорные источники
+(`kind ∈ {feed, channel}`) разворачиваются в записи через `PollPort`:
+
+- **W5.0 парсер.** Чистый `core/util/feed.py` (`parse_feed`/`parse_channel_document`, `FeedEntry`,
+  `FeedParseError`; defusedxml; общие хелперы времени `parse_instant`/`entry_not_before`).
+- **W5.1 порт/адаптеры/шов.** `core/ports/poller.py::PollPort`; `core/adapters/feed_poller.py`
+  (`LocalFeedPoller` ‖ `RemoteFeedPoller`); edge-сервис `core/edge/poller.py::FeedPollService`; op
+  **`crawl/poll`** (`schema_version` остаётся `"1"`, scope `crawl`); `Ports.pollers` + wiring
+  (`local`/`split`).
+- **W5.2 локальная развёртка.** `_expand_directory` в `core/pipeline/corpus.py`: каталог не
+  ретейнится/не ингестится (I19), записи — обычные retained-страницы, SSRF-перепроверка входа и
+  каждой записи, caps `limit`/`since`, один уровень развёртки.
+- **W5.3 развёртка в executor-режиме.** `_run_executor_waves`/`work_by_product`: `split` исполняет
+  развёртку каталогов отдельной волной с собственным `idempotency_key` (волна 1 — top-level,
+  волна 2 — записи).
+- **W5.4 финализация.** Документация (`02`/`03`), пример `crawl_sources.yaml`, selfcheck-проверки
+  source-routing/pollers/directory-kinds.
+
+**Остаточные риски (Phase 5).** (1) GET документа каталога не занимает слот планировщика краула —
+нагрузка ограничена семафором опроса (`poll_concurrency`), а не очередью заданий. (2) DMZ
+разбирает **недоверенный** XML/JSON лент — защита `defusedxml` + потолки `max_feed_bytes`/
+`max_entries`. (3) Нет capability-negotiation: старый edge без `crawl/poll` → `status=error` →
+деградация к `source_unavailable` (не тихий дроп). (4) Усечение документа по `max_feed_bytes`
+**лоссово** (хвост ленты теряется; при поломке разбора — явная ошибка размера). (5) Элемент
+`kind="feed"`/`"channel"` попадает в счётчики сеанса (`crawl_session_counts`) без `raw_path`.
+
 ### Сводка по коду (без доменной работы)
 
 | Поток | дд |

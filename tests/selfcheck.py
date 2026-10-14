@@ -383,6 +383,11 @@ def main() -> int:
     check("auth/audit: подделка отвергнута + поля SIEM (07 §8)", lambda: _edge_auth_audit())
     check("deploy.yaml: отсутствие → local; split требует base_url", lambda: _deploy_config())
 
+    section("Источники краула feed/channel (Wave 5.4)")
+    check("crawl_sources: слои defaults→products→sites + digest", lambda: _crawl_sources_routing())
+    check("pollers/seam: PollPort + crawl/poll (scope crawl, schema=1)", lambda: _pollers_seam())
+    check("directory kinds + общие хелперы времени (Ш5)", lambda: _directory_kinds_helpers())
+
     section("Интеграция Ш1–Ш9 (composition root)")
     check("build_phases: 11 не-гейтовых фаз, гейты не переопределены", lambda: _build_phases_gate())
     check("walking-skeleton: реальные фазы + гейт g1 блокирует без решения", lambda: _walking_skeleton())
@@ -2066,6 +2071,130 @@ def _deploy_config() -> None:
             raise AssertionError("split без edge.base_url обязан отказать")
         except ValueError:
             pass
+
+
+def _crawl_sources_routing() -> None:
+    """``crawl_sources.yaml``: послойный резолв ``kind``/``engine``/``params`` + стабильный digest.
+
+    Lane A: слои ``defaults → products → sites`` (site побеждает по ``kind``/``params``,
+    поздний ключ ``params`` перекрывает); источник-каталог ``feed`` даёт директорный ``kind``
+    с ``params`` (``limit``/``since``); секреты — только по ссылке (``token_env``).
+    """
+    import pathlib as _pl
+    import tempfile as _tf
+
+    from core.config.crawl_sources import CrawlSourcesConfig, load_crawl_sources
+    from core.pipeline.crawl_sources import crawl_sources_digest, resolve_crawl_target
+
+    yaml_text = (
+        "defaults: {kind: web, engine: http}\n"
+        "products:\n"
+        "  p1: {engine: scrapy}\n"
+        "sites:\n"
+        "  p1:\n"
+        "    feed.example.com: {kind: feed, params: {limit: 50, since: '2026-01-01'}}\n"
+        "    channel.example.com: {kind: channel, params: {token_env: CHANNEL_TOKEN}}\n"
+    )
+    with _tf.TemporaryDirectory() as td:
+        path = _pl.Path(td) / "crawl_sources.yaml"
+        path.write_text(yaml_text, encoding="utf-8")
+        cfg = load_crawl_sources(path)
+        if not isinstance(cfg, CrawlSourcesConfig):
+            raise AssertionError("load_crawl_sources обязан вернуть CrawlSourcesConfig")
+        web = resolve_crawl_target("p1", "https://docs.example.com/x", sources=cfg, profiles={})
+        if (web.kind, web.engine) != ("web", "scrapy"):
+            raise AssertionError(f"defaults/site для web: ожидалось (web, scrapy), дано "
+                                 f"({web.kind}, {web.engine})")
+        feed = resolve_crawl_target(
+            "p1", "https://feed.example.com/rss", sources=cfg, profiles={}
+        )
+        if feed.kind != "feed" or dict(feed.params) != {"limit": 50, "since": "2026-01-01"}:
+            raise AssertionError(f"site-слой feed: kind/params неверны ({feed.kind}, {feed.params})")
+        channel = resolve_crawl_target(
+            "p1", "https://channel.example.com/c", sources=cfg, profiles={}
+        )
+        if channel.kind != "channel" or dict(channel.params) != {"token_env": "CHANNEL_TOKEN"}:
+            raise AssertionError("секрет обязан передаваться ссылкой token_env, не инлайном")
+        if crawl_sources_digest(cfg) != crawl_sources_digest(load_crawl_sources(path)):
+            raise AssertionError("crawl_sources_digest обязан быть детерминирован")
+
+
+def _pollers_seam() -> None:
+    """``PollPort`` runtimе-checkable + реализуемы обоими поллерами; ``crawl/poll`` в шве.
+
+    Проверяется регистрация операции в allowlist/scope (07 §8), схема шва (``schema_version``
+    остаётся ``"1"``) и то, что адаптеры структурно удовлетворяют ``PollPort``.
+    """
+    from core.adapters.feed_poller import LocalFeedPoller, RemoteFeedPoller
+    from core.edge import auth as _auth
+    from core.edge.seam_schema import (
+        CRAWL_OPS,
+        ENDPOINT_OPS,
+        POLL_KIND_VALUES,
+        SEAM_SCHEMA_VERSION,
+    )
+    from core.ports import PollPort
+
+    if not getattr(PollPort, "_is_runtime_protocol", False):
+        raise AssertionError("PollPort обязан быть @runtime_checkable")
+    if "crawl/poll" not in _auth.AUTHORIZED_OPS:
+        raise AssertionError("crawl/poll обязан быть в AUTHORIZED_OPS (allowlist 07 §8)")
+    if _auth._OP_SCOPE.get("crawl/poll") != _auth.SCOPE_CRAWL:
+        raise AssertionError("crawl/poll обязан требовать scope crawl")
+    if "crawl/poll" not in ENDPOINT_OPS or "crawl/poll" not in CRAWL_OPS:
+        raise AssertionError("crawl/poll обязан быть заявлен в ENDPOINT_OPS/CRAWL_OPS")
+    if SEAM_SCHEMA_VERSION != "1":
+        raise AssertionError("schema_version шва обязан оставаться '1' (аддитивное расширение)")
+    if set(POLL_KIND_VALUES) != {"feed", "channel"}:
+        raise AssertionError(f"POLL_KIND_VALUES: ожидалось feed/channel, дано {POLL_KIND_VALUES}")
+
+    class _Crawler:
+        version = "c1"
+
+        def fetch(self, url, plan=None):  # pragma: no cover - структура
+            raise NotImplementedError
+
+    class _Gateway:
+        schema_version = "1"
+
+        def call(self, op, payload):  # pragma: no cover - структура
+            raise NotImplementedError
+
+        def capabilities(self):  # pragma: no cover - структура
+            return {}
+
+    if not isinstance(LocalFeedPoller(_Crawler()), PollPort):
+        raise AssertionError("LocalFeedPoller обязан удовлетворять PollPort")
+    if not isinstance(RemoteFeedPoller(_Gateway()), PollPort):
+        raise AssertionError("RemoteFeedPoller обязан удовлетворять PollPort")
+
+
+def _directory_kinds_helpers() -> None:
+    """Директорные ``kind`` корпуса и общие хелперы времени ``since`` (local/edge паритет).
+
+    N1 (Wave 5.2): ``parse_instant``/``entry_not_before`` живут в ``core.util.feed`` и
+    используются обоими поллерами; ``RFC822`` и ISO ``Z`` разбираются единообразно.
+    """
+    import datetime as _dt
+
+    from core.pipeline.corpus import _DIRECTORY_KINDS
+    from core.util.feed import FeedEntry, entry_not_before, parse_instant
+
+    if _DIRECTORY_KINDS != frozenset({"feed", "channel"}):
+        raise AssertionError(f"директорные kind неверны: {_DIRECTORY_KINDS}")
+    threshold = parse_instant("2026-10-08T00:00:00Z")
+    if threshold is None or threshold.tzinfo is None:
+        raise AssertionError("parse_instant обязан вернуть aware datetime")
+    # RFC822 10 Oct 2026 новее порога (лексикографически было бы меньше).
+    newer = FeedEntry(url="https://x.test/a", published_at="10 Oct 2026 00:00:00 GMT")
+    older = FeedEntry(url="https://x.test/b", published_at="01 Jan 2026 00:00:00 GMT")
+    unknown = FeedEntry(url="https://x.test/c")
+    if not entry_not_before(newer, threshold) or entry_not_before(older, threshold):
+        raise AssertionError("фильтр since обязан разбирать дату, а не сравнивать строки")
+    if not entry_not_before(unknown, threshold):
+        raise AssertionError("неизвестная дата записи обязана сохраняться (консервативно)")
+    if parse_instant("") is not None:
+        raise AssertionError("пустая метка времени → None")
 
 
 def _serp_loop() -> None:
