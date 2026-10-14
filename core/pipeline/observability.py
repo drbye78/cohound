@@ -177,6 +177,7 @@ def write_run_metrics(
     search_log: Iterable[Any] | None = None,
     llm_calls: int = 0,
     tokens: Mapping[str, Any] | None = None,
+    crawl_counts: Mapping[str, Any] | None = None,
 ) -> Path:
     """Считает :class:`~core.pipeline.metrics.RunMetrics` и пишет ``runs/{run_id}/metrics.json``.
 
@@ -195,6 +196,8 @@ def write_run_metrics(
     :param search_log: iterable записей с атрибутом ``.phase`` (I23).
     :param llm_calls: число вызовов LLM (стоимость, M1/§15).
     :param tokens: токены по категориям (``prompt``/``completion``/…).
+    :param crawl_counts: счётчики durable-сеанса краула (Backlog A) — источник поля
+        ``crawl`` метрик; ``None`` → пустая карта.
     :returns: путь записанного ``metrics.json``.
     """
     metrics = compute_metrics(
@@ -206,6 +209,7 @@ def write_run_metrics(
         phase_durations=durations,
         llm_calls=llm_calls,
         tokens=tokens,
+        crawl_counts=crawl_counts,
     )
     target = Path(out_dir) / sanitize_filename(run_id) / METRICS_FILENAME
     target.parent.mkdir(parents=True, exist_ok=True)

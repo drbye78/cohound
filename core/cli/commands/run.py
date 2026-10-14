@@ -9,23 +9,30 @@
 from __future__ import annotations
 
 import argparse
+import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from core.cli.context import (
     _add_common,
+    _add_phase4_flags,
     _concise,
     _ensure_run,
+    _filter_corpus_urls,
+    _follow_session,
+    _load_corpus_urls,
     _load_render_modes,
     _phases_until,
     _positive_int,
     _print_json,
     _print_run_dry,
     _print_run_report,
+    _progress_callback,
     _resolve_plan,
     _resolve_ports,
     _resolve_phases,
     _run_report_payload,
+    _session_snapshot,
     _snapshot_run_inputs,
 )
 from core.cli.errors import EXIT_BLOCKED, EXIT_ERROR, EXIT_OK, LintFailure
@@ -38,6 +45,7 @@ from core.cli.wiring import (
     run_db_path,
 )
 from core.config.deploy import is_split, load_deploy_config
+from core.domain import CrawlSessionStatus
 from core.pipeline import GATE_PHASES, PHASES
 from core.pipeline.crawl_session import default_session_id
 from core.pipeline.lint import lint_run_inputs
@@ -45,6 +53,9 @@ from core.pipeline.normalize import load_inputs
 from core.pipeline.observability import instrument_phases, write_run_metrics
 from core.pipeline.plan import derive_run_id
 from core.pipeline.runner import PhaseFn, _gate_phase
+
+#: Phase 4: хук сна цикла ``--follow`` (тесты инжектят no-op через monkeypatch).
+_SLEEP: Callable[[float], None] = time.sleep
 
 
 def run(args: argparse.Namespace) -> int:
@@ -109,7 +120,35 @@ def run(args: argparse.Namespace) -> int:
     # фазы дал бы иной ``run_id``/двойной линт (см. core/pipeline/phases.py). ``run_id``
     # переиспользуется тот же, что выведен выше, — второго derive нет.
     run_plan = _resolve_plan(args, inputs, run_id)
-    ports = _resolve_ports(args, deploy_config, inputs=inputs)
+
+    # Phase 4: ``--from-scratch`` не строит R7-кэш (cache=None) — живой ре-фетч; URL-фильтры
+    # (``--only-failed``/``--only-product``) читают durable-сеанс до сборки фаз, чтобы
+    # исполнитель и локальный путь видели один work-set.
+    from_scratch = bool(getattr(args, "from_scratch", False))
+    only_failed = bool(getattr(args, "only_failed", False))
+    only_product = getattr(args, "only_product", None)
+    max_attempts = getattr(args, "max_attempts", None)
+    follow = bool(getattr(args, "follow", False))
+    interval = float(getattr(args, "interval", 1.0) or 0.0)
+    session_id = default_session_id(run_id)
+    filter_notes: list[str] = []
+    corpus_urls = _load_corpus_urls(getattr(args, "urls", None))
+    if only_failed or only_product is not None:
+        filter_store = build_store(db_path, profile=args.profile)
+        try:
+            corpus_urls, filter_notes = _filter_corpus_urls(
+                corpus_urls,
+                store=filter_store,
+                session_id=session_id,
+                only_failed=only_failed,
+                only_product=only_product,
+            )
+        finally:
+            filter_store.close()
+
+    ports = _resolve_ports(
+        args, deploy_config, inputs=inputs, no_cache=from_scratch
+    )
     phases = _resolve_phases(
         args,
         inputs=inputs,
@@ -117,6 +156,13 @@ def run(args: argparse.Namespace) -> int:
         ports=ports,
         paths=getattr(args, "paths", None),
         render_modes=render_modes,
+        urls=corpus_urls,
+        max_attempts=max_attempts,
+        progress=(
+            _progress_callback(session_id=session_id, json_mode=bool(args.json))
+            if follow
+            else None
+        ),
     )
     # Наблюдаемость (W12/T12.1, 04 §B.1/§B.2): оборачиваем фазы логом+таймингом.
     # Гейты — дефолтные замыкания Runner; оборачиваем и их, чтобы §B.1-лог покрывал
@@ -133,6 +179,7 @@ def run(args: argparse.Namespace) -> int:
     )
 
     instrumentation_errors: list[str] = []
+    final_status: str | None = None
     store = build_store(db_path, profile=args.profile)
     try:
         _ensure_run(store, run_id, inputs)
@@ -155,16 +202,14 @@ def run(args: argparse.Namespace) -> int:
             phases=instrumentation.phases,
             clock=clock,
         )
-        if args.reset:
+        if args.reset or from_scratch:
             runner.reset(run_id)
             # D3/L1b: сброс durable-краула — очищаем сеанс краула прогона, чтобы resume не
             # подхватил старые retained-элементы. Канонический ``session_id`` сеанса прогона —
             # ``f"crawl:{run_id}"`` (:func:`core.pipeline.crawl_session.default_session_id`).
-            # Глобальный R7-кэш может всё ещё дедуплицировать идентичные байты: --reset
-            # форсирует повторную попытку, но не обязательно живой сетевой фетч (явный
-            # --no-cache — документированный follow-up, вне рамок D3).
+            # Phase 4 ``--from-scratch`` = сброс сеанса + живой ре-фетч (cache=None);
+            # ``--reset`` форсирует повторную попытку, но кэш не обходит.
             try:
-                session_id = default_session_id(run_id)
                 if store.get_crawl_session(session_id) is not None:
                     store.clear_crawl_session(session_id)
             except Exception as exc:  # noqa: BLE001 — сброс best-effort, не роняет прогон
@@ -172,15 +217,43 @@ def run(args: argparse.Namespace) -> int:
                     f"reset crawl_session: {type(exc).__name__}: {_concise(exc)}"
                 )
         run_report = runner.run(run_id, until=args.until)
+        # Phase 4: ``--follow``/``--watch`` — прогресс до терминала (foreground: сеанс уже
+        # терминален → один финальный снимок). Иначе — финальный статус для кода возврата.
+        try:
+            if follow:
+                final_status = _follow_session(
+                    store,
+                    session_id,
+                    interval=interval,
+                    json_mode=bool(args.json),
+                    sleep=_SLEEP,
+                )
+            else:
+                final_status, _ = _session_snapshot(store, session_id)
+        except Exception as exc:  # noqa: BLE001 — наблюдение не роняет прогон
+            final_status = None
+            instrumentation_errors.append(
+                f"follow: {type(exc).__name__}: {_concise(exc)}"
+            )
         # Метрики (04 §B.2) пишутся ДО закрытия store (источник ячеек) и независимо от
         # остановки на гейте — отражают реально отработавшие фазы. Сбой наблюдаемости
         # фиксируется, но не подменяет код возврата прогона.
         try:
+            # Backlog A: счётчики durable-сеанса краула в метрики. Соглашение об
+            # ``session_id`` живёт на стороне CLI (least coupling): метрики не знают о нём.
+            crawl_counts = None
+            try:
+                crawl_counts = store.crawl_session_counts(default_session_id(run_id))
+            except Exception as exc:  # noqa: BLE001 — метрики best-effort
+                instrumentation_errors.append(
+                    f"crawl_counts: {type(exc).__name__}: {_concise(exc)}"
+                )
             write_run_metrics(
                 run_id=run_id,
                 out_dir=args.runs_dir,
                 durations=instrumentation.durations,
                 store=store,
+                crawl_counts=crawl_counts,
             )
         except Exception as exc:  # noqa: BLE001 — наблюдаемость не роняет прогон
             instrumentation_errors.append(
@@ -197,6 +270,12 @@ def run(args: argparse.Namespace) -> int:
             close()
 
     payload = _run_report_payload(run_id, run_report, db_path)
+    payload["session_id"] = session_id
+    payload["session_status"] = final_status
+    if follow:
+        payload["follow"] = True
+    if filter_notes:
+        payload["filter_notes"] = list(filter_notes)
     if instrumentation_errors:
         payload["instrumentation_errors"] = instrumentation_errors
     if deploy_fields:
@@ -206,6 +285,13 @@ def run(args: argparse.Namespace) -> int:
     else:
         _print_run_report(payload)
     if run_report.stopped_at is None:
+        # Phase 4: полный краул (или его отсутствие) → EXIT_OK; ``partial``/``failed`` сеанс
+        # (исчерпание попыток, back-pressure, source_unavailable) → EXIT_ERROR.
+        if final_status in (
+            CrawlSessionStatus.PARTIAL.value,
+            CrawlSessionStatus.FAILED.value,
+        ):
+            return EXIT_ERROR
         return EXIT_OK
     if run_report.status == "blocked":
         return EXIT_BLOCKED
@@ -236,6 +322,7 @@ def configure(sub: Any) -> None:
     p_run.add_argument(
         "--reset", action="store_true", help="форсировать полный перезапуск (обход resume)"
     )
+    _add_phase4_flags(p_run)
     p_run.add_argument(
         "--passports-dir",
         default=None,

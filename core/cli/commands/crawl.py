@@ -28,19 +28,26 @@ from __future__ import annotations
 import argparse
 import datetime as _dt
 import sys
+import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from core.cli.context import (
     _add_common,
+    _add_phase4_flags,
     _ensure_run,
+    _filter_corpus_urls,
+    _follow_session,
+    _load_corpus_urls,
     _load_render_modes,
     _phases_until,
     _print_json,
+    _progress_callback,
     _resolve_db_path,
     _resolve_plan,
     _resolve_ports,
     _resolve_phases,
+    _session_snapshot,
 )
 from core.cli.errors import (
     EXIT_ERROR,
@@ -69,6 +76,9 @@ __all__ = [
     "restart",
     "cancel",
 ]
+
+#: Phase 4: хук сна цикла ``--follow`` (тесты инжектят no-op через monkeypatch).
+_SLEEP: Callable[[float], None] = time.sleep
 
 
 # ---------------------------------------------------------------------------
@@ -187,6 +197,8 @@ def _print_crawl_run(payload: dict[str, Any]) -> None:
     ]
     if payload.get("cleared"):
         lines.append("session: очищен перед запуском")
+    if payload.get("session_status"):
+        lines.append(f"session_status: {payload['session_status']}")
     counts = payload.get("crawl") or {}
     if counts:
         lines.append(
@@ -213,6 +225,12 @@ def _execute_crawl(
 
     Сеанс открывается/восстанавливается/финализируется самим ``build_corpus``; здесь
     только DI: план/порты/фазы строятся тем же composition root'ом, что и ``run``.
+
+    Phase 4: ``from_scratch`` — сброс сеанса + живой ре-фетч в обход R7-кэша
+    (``cache=None``); ``--only-failed``/``--only-product`` фильтруют URL **до** сборки фаз
+    (исполнитель, чей work-set выводится из ``urls``, видит тот же набор); ``--max-attempts``
+    — потолок попыток; ``--follow`` печатает прогресс сеанса до терминального статуса. Код
+    возврата различает полный краул и ``partial`` (частичные сбои → :data:`EXIT_ERROR`).
     """
     inputs = load_inputs(args.run_yaml, args.package)
     report = lint_run_inputs(inputs)
@@ -225,30 +243,59 @@ def _execute_crawl(
     render_modes = _load_render_modes(getattr(args, "render_modes", None))
     deploy_config = load_deploy_config(None)
 
-    run_plan = _resolve_plan(args, inputs, run_id)
-    ports = _resolve_ports(args, deploy_config, inputs=inputs)
-    phases = _resolve_phases(
-        args,
-        inputs=inputs,
-        plan=run_plan,
-        ports=ports,
-        paths=getattr(args, "paths", None),
-        render_modes=render_modes,
-    )
-
     session_id = default_session_id(run_id)
     until = getattr(args, "until", None) or "corpus"
+    json_mode = bool(getattr(args, "json", False))
+    only_failed = bool(getattr(args, "only_failed", False))
+    only_product = getattr(args, "only_product", None)
+    max_attempts = getattr(args, "max_attempts", None)
+    follow = bool(getattr(args, "follow", False))
+    interval = float(getattr(args, "interval", 1.0) or 0.0)
+    # Phase 4: ``--from-scratch`` обходит R7-кэш (cache=None — единственный способ) и по
+    # семантике «сброс + живой ре-фетч» очищает сеанс (как ``--reset``/``restart``).
+    no_cache = bool(from_scratch)
+    clear_first = clear_first or bool(getattr(args, "reset", False)) or no_cache
+
     notes: list[str] = []
     if from_scratch:
-        notes.append(
-            "from-scratch: обход R7-кэша — Phase 4 (флаг принят, кэш пока не обходится)"
-        )
+        notes.append("from-scratch: R7-кэш обойдён (cache=None) — живой ре-фетч")
 
     store = build_store(db_path, profile=args.profile)
+    ports: Any = None
     result: Any = None
     cleared = False
+    final_status: str | None = None
     try:
         _ensure_run(store, run_id, inputs)
+        # Phase 4: фильтр URL по durable-сеансу — ДО резолва фаз, чтобы исполнитель
+        # (work-set выводится из ``urls``) и локальный путь видели один набор.
+        corpus_urls, filter_notes = _filter_corpus_urls(
+            _load_corpus_urls(getattr(args, "urls", None)),
+            store=store,
+            session_id=session_id,
+            only_failed=only_failed,
+            only_product=only_product,
+        )
+        notes.extend(filter_notes)
+
+        run_plan = _resolve_plan(args, inputs, run_id)
+        ports = _resolve_ports(args, deploy_config, inputs=inputs, no_cache=no_cache)
+        progress = (
+            _progress_callback(session_id=session_id, json_mode=json_mode)
+            if follow
+            else None
+        )
+        phases = _resolve_phases(
+            args,
+            inputs=inputs,
+            plan=run_plan,
+            ports=ports,
+            paths=getattr(args, "paths", None),
+            render_modes=render_modes,
+            urls=corpus_urls,
+            max_attempts=max_attempts,
+            progress=progress,
+        )
         if clear_first:
             store.clear_crawl_session(session_id)
             cleared = True
@@ -262,6 +309,18 @@ def _execute_crawl(
             result = phases["corpus"](ctx)
         else:
             notes.append(f"корпус отсечён --until={until}")
+        # Phase 4: ``--follow``/``--watch`` — опрос до терминала (foreground: сеанс уже
+        # терминален → один финальный снимок). Иначе читаем финальный статус для кода возврата.
+        if follow:
+            final_status = _follow_session(
+                store,
+                session_id,
+                interval=interval,
+                json_mode=json_mode,
+                sleep=_SLEEP,
+            )
+        else:
+            final_status, _ = _session_snapshot(store, session_id)
     finally:
         store.close()
         close = getattr(getattr(ports, "crawler", None), "close", None)
@@ -276,7 +335,9 @@ def _execute_crawl(
         "session_id": session_id,
         "db": str(db_path),
         "status": phase_status,
+        "session_status": final_status,
         "cleared": cleared,
+        "follow": follow,
         "crawl": _crawl_counts(result),
         "errors": list(getattr(result, "errors", []) or []),
         "notes": notes,
@@ -285,23 +346,36 @@ def _execute_crawl(
         _print_json(payload)
     else:
         _print_crawl_run(payload)
-    if phase_status == "ok":
-        return EXIT_OK
-    if phase_status == "skipped":
-        return EXIT_OK
-    return EXIT_ERROR
+    if phase_status not in ("ok", "skipped"):
+        return EXIT_ERROR
+    # Phase 4: ``partial``/``failed`` сеанс (исчерпание попыток, back-pressure, любые
+    # ``source_unavailable``) → :data:`EXIT_ERROR`; полный краул/без сеанса → :data:`EXIT_OK`.
+    if final_status in (
+        CrawlSessionStatus.PARTIAL.value,
+        CrawlSessionStatus.FAILED.value,
+    ):
+        return EXIT_ERROR
+    return EXIT_OK
 
 
 def run(args: argparse.Namespace) -> int:
     """``crawl run``: запустить сеанс краула (``--reset`` очищает сеанс до старта)."""
     return _execute_crawl(
-        args, mode="run", clear_first=bool(getattr(args, "reset", False))
+        args,
+        mode="run",
+        clear_first=bool(getattr(args, "reset", False)),
+        from_scratch=bool(getattr(args, "from_scratch", False)),
     )
 
 
 def resume(args: argparse.Namespace) -> int:
     """``crawl resume``: продолжить сеанс (идемпотентно; ``FETCHED`` не пере-фетчатся)."""
-    return _execute_crawl(args, mode="resume", clear_first=False)
+    return _execute_crawl(
+        args,
+        mode="resume",
+        clear_first=False,
+        from_scratch=bool(getattr(args, "from_scratch", False)),
+    )
 
 
 def restart(args: argparse.Namespace) -> int:
@@ -520,6 +594,7 @@ def configure(sub: Any) -> None:
     p_run.add_argument(
         "--reset", action="store_true", help="очистить сеанс краула перед запуском"
     )
+    _add_phase4_flags(p_run)
     _add_common(p_run)
     p_run.set_defaults(handler=run)
 
@@ -539,18 +614,14 @@ def configure(sub: Any) -> None:
     p_resume = crawl.add_parser("resume", help="продолжить прерванный сеанс (идемпотентно)")
     _add_run_target_flags(p_resume)
     _add_source_flags(p_resume)
+    _add_phase4_flags(p_resume)
     _add_common(p_resume)
     p_resume.set_defaults(handler=resume)
 
     p_restart = crawl.add_parser("restart", help="очистить сеанс и запустить заново")
     _add_run_target_flags(p_restart)
     _add_source_flags(p_restart)
-    p_restart.add_argument(
-        "--from-scratch",
-        dest="from_scratch",
-        action="store_true",
-        help="документирует обход R7-кэша (Phase 4; сейчас кэш не обходится)",
-    )
+    _add_phase4_flags(p_restart)
     _add_common(p_restart)
     p_restart.set_defaults(handler=restart)
 

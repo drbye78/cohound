@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from core.domain.enums import CellState
@@ -100,6 +100,13 @@ def _normalize_durations(phase_durations: Mapping[str, Any] | None) -> dict[str,
     return dict(sorted((str(key), float(value)) for key, value in phase_durations.items()))
 
 
+def _normalize_crawl(crawl_counts: Mapping[str, Any] | None) -> dict[str, int]:
+    """Нормализует счётчики краула к ``{str: int}`` с сортировкой ключей (Backlog A)."""
+    if not crawl_counts:
+        return {}
+    return dict(sorted((str(key), int(value)) for key, value in crawl_counts.items()))
+
+
 @dataclass
 class RunMetrics:
     """Метрики прогона (04 §B.2); JSON-совместимы и детерминированы.
@@ -120,6 +127,9 @@ class RunMetrics:
     llm_calls: int
     tokens: dict[str, int]
     duration_by_phase: dict[str, float]
+    #: Backlog A (Phase 4): счётчики durable-сеанса краула (``{status: count}``) из
+    #: ``crawl_session_counts``; пустая карта, если сеанса/краула нет.
+    crawl: dict[str, int] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         """Плоский JSON-совместимый словарь метрик (для манифеста/логов)."""
@@ -131,6 +141,7 @@ class RunMetrics:
             "llm_calls": self.llm_calls,
             "tokens": dict(self.tokens),
             "duration_by_phase": dict(self.duration_by_phase),
+            "crawl": dict(self.crawl),
         }
 
     def to_manifest_json(self) -> str:
@@ -175,6 +186,7 @@ def compute_metrics(
     phase_durations: Mapping[str, Any] | None = None,
     llm_calls: int = 0,
     tokens: Mapping[str, Any] | None = None,
+    crawl_counts: Mapping[str, Any] | None = None,
 ) -> RunMetrics:
     """Собирает :class:`RunMetrics` прогона (04 §B.2, W12/T12.1).
 
@@ -187,6 +199,9 @@ def compute_metrics(
     :param phase_durations: явная карта ``{phase: seconds}`` (тайминг инжектирует runner).
     :param llm_calls: число вызовов LLM (передаёт evaluator/runner).
     :param tokens: токены (передаёт evaluator/runner).
+    :param crawl_counts: счётчики durable-сеанса краула (``crawl_session_counts``) — источник
+        поля ``crawl`` (Backlog A). Вызывающий читает их у стора (least coupling: метрика
+        не знает соглашения об ``session_id``). ``None`` → пустая карта.
     """
     resolved = _resolve_cells(store, run_id, cells)
     if score_bundle is not None:
@@ -203,4 +218,5 @@ def compute_metrics(
         llm_calls=int(llm_calls),
         tokens=_normalize_tokens(tokens),
         duration_by_phase=_normalize_durations(phase_durations),
+        crawl=_normalize_crawl(crawl_counts),
     )

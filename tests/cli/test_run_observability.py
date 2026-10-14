@@ -21,7 +21,7 @@ from core.cli.main import EXIT_BLOCKED, EXIT_OK, main
 #: Корень e2e-фикстур (``tests/fixtures/e2e``).
 E2E_FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "e2e"
 
-#: Ожидаемые ключи метрик §B.2.
+#: Ожидаемые ключи метрик §B.2 (+ Backlog A ``crawl``).
 B2_KEYS = {
     "cells_by_state",
     "failure_rate",
@@ -30,6 +30,7 @@ B2_KEYS = {
     "llm_calls",
     "tokens",
     "duration_by_phase",
+    "crawl",
 }
 
 
@@ -86,6 +87,15 @@ def test_run_blocked_at_g1_still_writes_phase_logs_and_metrics(tmp_path: Path) -
     assert {"normalize", "lint", "plan", "g1"} <= set(metrics["duration_by_phase"])
     # До compute/report не дошли — в знаменателе нет ячеек.
     assert metrics["cells_by_state"]["evaluated"] == 0
+    # Backlog A: счётчики краула присутствуют и нулевы (до Ш5 не дошли).
+    assert set(metrics["crawl"]) == {
+        "pending",
+        "running",
+        "fetched",
+        "failed",
+        "cancelled",
+    }
+    assert all(value == 0 for value in metrics["crawl"].values())
 
 
 def test_run_dry_run_writes_no_logs_or_metrics(tmp_path: Path) -> None:
@@ -97,3 +107,43 @@ def test_run_dry_run_writes_no_logs_or_metrics(tmp_path: Path) -> None:
 
     assert not (runs_dir / run_id / "logs").exists()
     assert not (runs_dir / run_id / "metrics.json").exists()
+
+
+def test_run_parser_accepts_phase4_flags() -> None:
+    """Phase 4: ``run`` принимает флаги кэша/фильтров/потолка/follow (парсер-контракт)."""
+    from core.cli.main import build_parser
+
+    args = build_parser().parse_args(
+        [
+            "run",
+            "--run-yaml",
+            "run.yaml",
+            "--package",
+            "pkg",
+            "--from-scratch",
+            "--only-failed",
+            "--only-product",
+            "p1",
+            "--max-attempts",
+            "3",
+            "--follow",
+            "--interval",
+            "0.5",
+        ]
+    )
+    assert args.from_scratch is True
+    assert args.only_failed is True
+    assert args.only_product == "p1"
+    assert args.max_attempts == 3
+    assert args.follow is True
+    assert args.interval == 0.5
+
+
+def test_run_parser_watch_is_follow_alias() -> None:
+    """Phase 4: ``--watch`` — алиас ``--follow``."""
+    from core.cli.main import build_parser
+
+    args = build_parser().parse_args(
+        ["run", "--run-yaml", "run.yaml", "--package", "pkg", "--watch"]
+    )
+    assert args.follow is True

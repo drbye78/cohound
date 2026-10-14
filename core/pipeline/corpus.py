@@ -130,6 +130,11 @@ _BUILD_ID_SCHEMA = "corpus-build-2"
 #: а не тихий провал всего прогона.
 _SUBMIT_MAX_ATTEMPTS = 5
 
+#: Phase 4: ``error_kind`` терминального ``FAILED`` при исчерпании ``--max-attempts``.
+#: Свободная строка-данные (``CrawlSessionItem.error_kind`` — не доменный enum): отличает
+#: «попытки кончились» от сетевого/браузерного сбоя.
+_MAX_ATTEMPTS_ERROR_KIND = "attempts_exhausted"
+
 
 @dataclass
 class IndexBuild:
@@ -569,6 +574,8 @@ def build_corpus(
     executor: CrawlExecutorPort | None = None,
     executor_poll_interval: float = 0.25,
     executor_sleep: Callable[[float], None] = time.sleep,
+    max_attempts: int | None = None,
+    progress: Callable[[dict[str, int]], None] | None = None,
 ) -> PhaseResult:
     """Ш5: собирает корпус из ``plan × urls`` и возвращает ``PhaseResult``.
 
@@ -629,6 +636,13 @@ def build_corpus(
         (только при ``executor``); уже терминальное задание не пейсится.
     :param executor_sleep: хук сна опроса (по умолчанию ``time.sleep``); тесты инжектят
         no-op, чтобы не платить реальное время.
+    :param max_attempts: Phase 4 — потолок попыток по ``(product_id, url)``. URL с уже
+        сохранённым ``CrawlSessionItem.attempts >= max_attempts`` **не** фетчится и **не**
+        подаётся исполнителю: он помечается терминальным ``FAILED`` с ``error_kind =
+        "attempts_exhausted"`` и понятной ошибкой (не тихий дроп). ``None`` → без потолка.
+    :param progress: Phase 4 — опциональный колбэк прогресса: вызывается со снимком
+        ``crawl_session_counts`` (``{status: count}``) по ходу фазы (для ``--follow``).
+        Ошибки колбэка изолируются и не роняют фазу. ``None`` → без прогресс-вывода.
 
     Возвращает ``PhaseResult`` со ``status='ok'`` (даже при изолированных ошибках),
     ``cells=[]`` (Ш5 не производит ячеек) и ``log_entries=[IndexBuild]`` (сборка + счётчики).
@@ -968,6 +982,14 @@ def build_corpus(
                 prior_item = items.get((product_id, url))
                 if _resume_source(prior_item) is not None:
                     continue  # resume без подачи: ingest ре-извлечёт из retained raw
+                # Phase 4: исчерпавшие попытки URL не подаются исполнителю — их помечает
+                # терминальным ``FAILED`` основной цикл (``max_attempts``).
+                if (
+                    max_attempts is not None
+                    and prior_item is not None
+                    and prior_item.attempts >= max_attempts
+                ):
+                    continue
                 plan_i = target.plan
                 work.append(
                     CrawlWorkItem(
@@ -1065,6 +1087,21 @@ def build_corpus(
         _run_executor() if executor is not None else {}
     )
 
+    def _emit_progress() -> None:
+        """Phase 4: снимок прогресса сеанса для колбэка ``progress`` (``--follow``).
+
+        Читает ``crawl_session_counts`` (единственный владелец — стор); ошибки колбэка/
+        чтения изолируются (наблюдаемость не роняет фазу). Без активного сеанса — no-op.
+        """
+        if progress is None or session is None:
+            return
+        try:
+            progress(dict(store.crawl_session_counts(session)))
+        except Exception:  # noqa: BLE001 — прогресс информационен
+            pass
+
+    _emit_progress()
+
     for product_id in products:
         ingest = _ProductIngest(product_id=product_id)
         # I17: дедуп в пределах продукт-партиции (см. docstring модуля).
@@ -1076,6 +1113,29 @@ def build_corpus(
             # байтами, НЕ фетчим: ре-извлекаем из retained raw (I19: raw — источник).
             prior_item = items.get((product_id, url))
             resume = _resume_source(prior_item) if prior_item is not None else None
+
+            # Phase 4: потолок попыток (``--max-attempts``). URL, уже исчерпавший попытки,
+            # не фетчится и не подаётся исполнителю: терминальный ``FAILED`` с явным
+            # ``error_kind`` (не тихий дроп) → сеанс финализируется ``PARTIAL``.
+            if (
+                max_attempts is not None
+                and prior_item is not None
+                and prior_item.attempts >= max_attempts
+            ):
+                reason = (
+                    f"max_attempts exhausted "
+                    f"(attempts={prior_item.attempts} >= {max_attempts})"
+                )
+                errors.append(f"{product_id}/{url}: {reason}")
+                _mark(
+                    product_id,
+                    url,
+                    CrawlItemStatus.FAILED,
+                    error_kind=_MAX_ATTEMPTS_ERROR_KIND,
+                    error=reason,
+                )
+                _emit_progress()
+                continue
 
             if executor is None:
                 # D2/Lane A: единая цель краула резолвится в pipeline и передаётся и краулеру, и
@@ -1232,10 +1292,13 @@ def build_corpus(
                 seen_docs,
                 seen_chunk_ids,
             )
+            _emit_progress()
 
         # Retention-провенанс не зависит от индексной сборки: docs персистятся в Pass A.
         _persist_docs(store, ingest.docs, errors)
         ingests.append(ingest)
+
+    _emit_progress()
 
     # --- Финализация index_build_id (по батчу: декларированные входы + контент) --- #
     # extractor_version: композит из фактически извлечённых документов; fallback — объявленная

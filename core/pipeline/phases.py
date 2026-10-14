@@ -30,7 +30,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
 from core.domain.anchors import SourceResolver
@@ -256,6 +256,8 @@ def build_phases(
     deploy_profile: str | None = None,
     edge_schema_version: str | None = None,
     edge_capabilities: Mapping[str, Any] | None = None,
+    max_attempts: int | None = None,
+    progress: Callable[[dict[str, int]], None] | None = None,
 ) -> dict[str, PhaseFn]:
     """Возвращает реестр ``{phase_name: PhaseFn}`` для не-гейтовых фаз конвейера.
 
@@ -288,6 +290,11 @@ def build_phases(
         не заполняется.
     :param edge_capabilities: версии edge-компонентов (gateway) для манифеста Ш9; ``None`` →
         пустой mapping (backward-compatible).
+    :param max_attempts: Phase 4 — потолок попыток по ``(product_id, url)`` в Ш5
+        (``--max-attempts``); исчерпавшие URL → терминальный ``FAILED`` ``attempts_exhausted``.
+        ``None`` → без потолка.
+    :param progress: Phase 4 — колбэк снимка прогресса сеанса краула (``--follow``); ошибки
+        изолируются в :func:`core.pipeline.corpus.build_corpus`. ``None`` → без прогресса.
 
     Каждое замыкание детерминировано и не импортирует адаптеры; единственный
     межфазовый канал — замыкание ``holder`` (см. docstring модуля).
@@ -370,6 +377,9 @@ def build_phases(
             crawl_defaults=getattr(getattr(inputs, "run", None), "crawl", None),
             # D3: durable-краул (аудит/очередь/resume) привязан к прогону; store уже есть.
             run_id=getattr(plan, "run_id", None),
+            # Phase 4: потолок попыток (--max-attempts) и колбэк прогресса (--follow).
+            max_attempts=max_attempts,
+            progress=progress,
         )
         _capture_index_build(holder, result)
         return _as_phase(result, "corpus")

@@ -1721,6 +1721,12 @@ def _run_metrics() -> None:
         raise AssertionError(f"failure_rate сломан: {m.failure_rate}")
     if m.search_calls_by_phase != {"corpus": 2} or m.llm_calls != 3:
         raise AssertionError("search/llm-метрики сломаны")
+    # Backlog A: счётчики краула — опциональны и сортированы; дефолт — пустая карта.
+    if compute_metrics(cells=cells).crawl != {}:
+        raise AssertionError("crawl по умолчанию обязан быть пустым")
+    m_crawl = compute_metrics(cells=cells, crawl_counts={"fetched": 2, "failed": 1})
+    if m_crawl.crawl != {"failed": 1, "fetched": 2}:
+        raise AssertionError(f"crawl-метрика сломана: {m_crawl.crawl}")
 
 
 def _backup_gc() -> None:

@@ -31,7 +31,7 @@ from core.pipeline.runner import PhaseResult
 #: Поля записи §B.1 (04-reliability-adr).
 B1_FIELDS = {"ts", "run_id", "phase", "component", "level", "message", "ctx", "invariant"}
 
-#: Ключи метрик §B.2.
+#: Ключи метрик §B.2 (+ Backlog A ``crawl``).
 B2_KEYS = {
     "cells_by_state",
     "failure_rate",
@@ -40,6 +40,7 @@ B2_KEYS = {
     "llm_calls",
     "tokens",
     "duration_by_phase",
+    "crawl",
 }
 
 STAMP = "2026-10-09T00:00:00+00:00"
@@ -257,6 +258,20 @@ def test_write_run_metrics_writes_expected_keys(tmp_path: Path) -> None:
         "preliminary": 0,
         "reviewed": 0,
     }
+    # Backlog A: без переданных счётчиков краула поле — пустая карта (стабильная форма).
+    assert data["crawl"] == {}
+
+
+def test_write_run_metrics_includes_crawl_counts(tmp_path: Path) -> None:
+    """Backlog A: ``crawl_counts`` протягиваются в ``metrics.json`` (сортированные ключи)."""
+    path = write_run_metrics(
+        run_id="run_y",
+        out_dir=tmp_path,
+        crawl_counts={"fetched": 3, "failed": 1},
+    )
+    data = json.loads(path.read_text(encoding="utf-8"))
+    assert data["crawl"] == {"failed": 1, "fetched": 3}
+    assert list(data["crawl"]) == ["failed", "fetched"]
 
 
 def test_write_run_metrics_is_deterministic_and_sort_keys(tmp_path: Path) -> None:

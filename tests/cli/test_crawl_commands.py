@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +16,7 @@ import pytest
 
 from core.cli.commands import COMMANDS
 from core.cli.main import (
+    EXIT_ERROR,
     EXIT_NOT_FOUND,
     EXIT_OK,
     EXIT_USAGE,
@@ -42,13 +44,18 @@ class _RecordingCrawler:
 
     version = "recording-crawler-1"
 
-    def __init__(self, pages: dict[str, RawPage] | None = None) -> None:
+    def __init__(
+        self, pages: dict[str, RawPage] | None = None, *, raising: set[str] | None = None
+    ) -> None:
         self.pages = dict(pages or {})
+        self.raising = set(raising or ())
         self.calls: list[str] = []
 
     def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:
         """Помечает URL и возвращает заданную страницу (или пустые байты)."""
         self.calls.append(url)
+        if url in self.raising:
+            raise RuntimeError(f"crawl failed: {url}")
         page = self.pages.get(url)
         if page is not None:
             return page
@@ -391,3 +398,146 @@ def test_crawl_run_until_before_corpus_skips(
     assert payload["status"] == "skipped"
     assert crawler.calls == []
     assert payload["crawl"] == {}
+
+
+# ---------------------------------------------------------------------------
+# Phase 4: фильтры / потолок попыток / follow / код возврата
+# ---------------------------------------------------------------------------
+
+
+def test_crawl_only_product_filters_url_set(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``--only-product p1`` фетчит только URL продукта ``p1``."""
+    monkeypatch.chdir(tmp_path)
+    package = valid_package(tmp_path)
+    crawler = _RecordingCrawler(_pages())
+    code = main(
+        _run_argv(
+            package, action="run", run_id="cr-op", db=tmp_path / "cr-op.db",
+            urls=_urls_file(tmp_path), extra=("--only-product", "p1"),
+        ),
+        ports=_ports(crawler),
+    )
+    assert code == EXIT_OK
+    payload = json_out(capsys)
+    assert payload["session_status"] == "completed"
+    assert crawler.calls == [URL_P1]
+
+
+def test_crawl_only_failed_refetches_failed_only(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``--only-failed`` ретраит только ``FAILED``-URL, не трогая ``FETCHED``."""
+    monkeypatch.chdir(tmp_path)
+    package = valid_package(tmp_path)
+    db = tmp_path / "cr-of.db"
+    urls = _urls_file(tmp_path)
+    failing = _RecordingCrawler(_pages(), raising={URL_P2})
+    assert main(
+        _run_argv(package, action="run", run_id="cr-of", db=db, urls=urls),
+        ports=_ports(failing),
+    ) == EXIT_ERROR  # p2 упал → сеанс PARTIAL
+    capsys.readouterr()
+
+    retry = _RecordingCrawler(_pages())
+    code = main(
+        _run_argv(
+            package, action="resume", run_id="cr-of", db=db, urls=urls,
+            extra=("--only-failed",),
+        ),
+        ports=_ports(retry),
+    )
+    assert code == EXIT_OK
+    assert retry.calls == [URL_P2]  # только упавший URL
+    payload = json_out(capsys)
+    assert payload["session_status"] == "completed"
+
+
+def test_crawl_only_failed_without_session_is_graceful(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``--only-failed`` без сеанса не применяется (graceful) — обычный прогон + note."""
+    monkeypatch.chdir(tmp_path)
+    package = valid_package(tmp_path)
+    crawler = _RecordingCrawler(_pages())
+    code = main(
+        _run_argv(
+            package, action="run", run_id="cr-nf", db=tmp_path / "cr-nf.db",
+            urls=_urls_file(tmp_path), extra=("--only-failed",),
+        ),
+        ports=_ports(crawler),
+    )
+    assert code == EXIT_OK
+    payload = json_out(capsys)
+    assert sorted(crawler.calls) == [URL_P1, URL_P2]
+    assert any("only-failed" in note for note in payload["notes"])
+
+
+def test_crawl_max_attempts_flag_skips_exhausted(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``--max-attempts 1`` после сбоя: URL не пере-фетчится, терминальный ``failed``."""
+    monkeypatch.chdir(tmp_path)
+    package = valid_package(tmp_path)
+    db = tmp_path / "cr-ma.db"
+    urls = _urls_file(tmp_path)
+    failing = _RecordingCrawler(_pages(), raising={URL_P2})
+    first = main(
+        _run_argv(package, action="run", run_id="cr-ma", db=db, urls=urls),
+        ports=_ports(failing),
+    )
+    assert first == EXIT_ERROR
+    capsys.readouterr()
+
+    retry = _RecordingCrawler(_pages())
+    code = main(
+        _run_argv(
+            package, action="resume", run_id="cr-ma", db=db, urls=urls,
+            extra=("--max-attempts", "1"),
+        ),
+        ports=_ports(retry),
+    )
+    assert code == EXIT_ERROR
+    assert retry.calls == []
+
+
+def test_crawl_follow_emits_ndjson_progress(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``--follow --json`` печатает NDJSON-снимки прогресса и финальный payload."""
+    monkeypatch.chdir(tmp_path)
+    package = valid_package(tmp_path)
+    crawler = _RecordingCrawler(_pages())
+    code = main(
+        _run_argv(
+            package, action="run", run_id="cr-fo", db=tmp_path / "cr-fo.db",
+            urls=_urls_file(tmp_path), extra=("--follow", "--interval", "0"),
+        ),
+        ports=_ports(crawler),
+    )
+    assert code == EXIT_OK
+    out = capsys.readouterr().out.strip().splitlines()
+    records = [json.loads(line) for line in out]
+    progress = [r for r in records if r.get("event") == "crawl_progress"]
+    assert progress, "ожидались NDJSON-снимки crawl_progress"
+    assert records[-1]["session_id"] == "crawl:cr-fo"
+
+
+def test_crawl_partial_session_returns_error_code(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Частичный краул (упавший URL) → ``EXIT_ERROR`` (не маскируется ``ok``)."""
+    monkeypatch.chdir(tmp_path)
+    package = valid_package(tmp_path)
+    crawler = _RecordingCrawler(_pages(), raising={URL_P2})
+    code = main(
+        _run_argv(
+            package, action="run", run_id="cr-part", db=tmp_path / "cr-part.db",
+            urls=_urls_file(tmp_path),
+        ),
+        ports=_ports(crawler),
+    )
+    assert code == EXIT_ERROR
+    payload = json_out(capsys)
+    assert payload["session_status"] == "partial"

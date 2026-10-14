@@ -52,7 +52,7 @@ from core.config import (
     passport_urls,
 )
 from core.config.deploy import DeployConfig
-from core.domain.enums import Status
+from core.domain.enums import CrawlItemStatus, CrawlSessionStatus, Status
 from core.domain.models import CatalogRow, Cohort
 from core.pipeline import PHASES, Ports, RunReport, build_phases
 from core.pipeline.normalize import RunInputs, load_inputs
@@ -896,6 +896,7 @@ def _resolve_ports(
     deploy_config: DeployConfig | None,
     *,
     inputs: RunInputs | None = None,
+    no_cache: bool = False,
 ) -> Ports:
     """Собирает порты профиля (``ports`` — тестовый шов; иначе :func:`build_adapters`).
 
@@ -910,11 +911,17 @@ def _resolve_ports(
     протягиваются в локальный краулер. ``inputs=None`` сохраняет прежнее поведение
     (домен-профили не передаются) — обратная совместимость вызывающих.
 
+    **Phase 4 ``--from-scratch``.** ``no_cache=True`` собирает краулеры **без** R7-кэша
+    (``cache=None``) — единственный документированный способ обхода кэша: живой фетч
+    игнорирует дедупликацию идентичных байтов. Семантика — «сброс + живой ре-фетч».
+
     **Оценщик (Ш6, I18).** При наличии deploy-конфига оценщик собирается
     :func:`build_evaluator_llm` из активного LLM-слота (``deploy.llm`` + ``--llm-slot``).
     Если у слота пустой ``base_url`` (дефолт) — билдер вернёт ``None``: поведение
     прежнее (оценщик не поднимается). Профиль ``split`` получает ``evaluator`` как
     сегодня (remote-порты его не используют).
+
+    :param no_cache: Phase 4 — не строить/не передавать R7-кэш (``--from-scratch``).
     """
     injected = getattr(args, "ports", None)
     if injected is not None:
@@ -927,7 +934,11 @@ def _resolve_ports(
     )
     paths = getattr(args, "paths", None)
     index_root = str(paths.index_store) if paths is not None else "index_store"
-    cache = ContentAddressedCache(paths.cache) if paths is not None else None
+    cache = (
+        None
+        if no_cache
+        else (ContentAddressedCache(paths.cache) if paths is not None else None)
+    )
     evaluator = (
         build_evaluator_llm(
             deploy_llm=deploy_config.llm,
@@ -1023,6 +1034,161 @@ def _load_corpus_urls(path: str | Path | None) -> dict[str, list[str]]:
     return result
 
 
+def _filter_corpus_urls(
+    urls: Mapping[str, list[str]],
+    *,
+    store: Any,
+    session_id: str,
+    only_failed: bool,
+    only_product: str | None,
+) -> tuple[dict[str, list[str]], list[str]]:
+    """Phase 4: фильтр набора URL по durable-сеансу краула (``--only-failed``/``--only-product``).
+
+    Единственный владелец состояния — ``store``; чтение сеанса делается здесь, до резолва
+    фаз, чтобы исполнитель (его work-set выводится из отфильтрованных ``urls``) увидел тот
+    же набор, что и локальный путь.
+
+    * ``--only-failed`` — оставляет только ``(product_id, url)`` со статусом элемента
+      ``FAILED`` (``iter_crawl_session_items(..., status=FAILED)``). Сеанс отсутствует →
+      фильтр **не** применяется (graceful degradation: нечего ретраить — обычный прогон),
+      и в ``notes`` попадает пояснение.
+    * ``--only-product <id>`` — оставляет только этот продукт (независимо от сеанса).
+
+    Возвращает ``(отфильтрованные_urls, notes)``; ``notes`` — человекочитаемые пояснения
+    для payload (ни один фильтр не «пропадает» тихо).
+
+    :param store: открытый стор прогона (методы ``get_crawl_session``/
+        ``iter_crawl_session_items``).
+    :param session_id: канонический ``f"crawl:{run_id}"``.
+    """
+    result = {str(pid): [str(u) for u in values] for pid, values in urls.items()}
+    notes: list[str] = []
+    if not only_failed and only_product is None:
+        return result, notes
+
+    failed: set[tuple[str, str]] | None = None
+    if only_failed:
+        session = store.get_crawl_session(session_id) if session_id else None
+        if session is None:
+            notes.append(
+                "only-failed: сеанса нет — фильтр не применён (прогон по всем URL)"
+            )
+        else:
+            failed = {
+                (item.product_id, item.url)
+                for item in store.iter_crawl_session_items(
+                    session_id, status=CrawlItemStatus.FAILED
+                )
+            }
+
+    filtered: dict[str, list[str]] = {}
+    for product_id, product_urls in result.items():
+        if only_product is not None and product_id != str(only_product):
+            continue
+        kept = (
+            [url for url in product_urls if (product_id, url) in failed]
+            if failed is not None
+            else list(product_urls)
+        )
+        if kept:
+            filtered[product_id] = kept
+
+    if only_product is not None and str(only_product) not in result:
+        notes.append(f"only-product: {only_product!r} нет в --urls — набор пуст")
+    if only_failed and failed is not None and not filtered:
+        notes.append("only-failed: failed-элементов нет — пере-фетчить нечего")
+    return filtered, notes
+
+
+#: Phase 4: терминальные статусы сеанса краула (дальнейший опрос бесполезен).
+_TERMINAL_SESSION_STATUSES: frozenset[CrawlSessionStatus] = frozenset(
+    {
+        CrawlSessionStatus.COMPLETED,
+        CrawlSessionStatus.PARTIAL,
+        CrawlSessionStatus.CANCELLED,
+        CrawlSessionStatus.FAILED,
+    }
+)
+
+
+def _is_terminal_session_status(status: str | None) -> bool:
+    """Phase 4: терминален ли статус сеанса (``completed|partial|cancelled|failed``)."""
+    if status is None:
+        return True
+    try:
+        return CrawlSessionStatus(status) in _TERMINAL_SESSION_STATUSES
+    except ValueError:
+        return True
+
+
+def _session_snapshot(store: Any, session_id: str) -> tuple[str | None, dict[str, int]]:
+    """Phase 4: ``(status, counts)`` сеанса краула; ``status=None`` при отсутствии сеанса."""
+    session = store.get_crawl_session(session_id)
+    status = session.status.value if session is not None else None
+    return status, dict(store.crawl_session_counts(session_id))
+
+
+def _emit_session_progress(
+    status: str | None,
+    counts: Mapping[str, int],
+    *,
+    session_id: str,
+    json_mode: bool,
+) -> None:
+    """Phase 4: одна строка прогресса (NDJSON при ``--json``, иначе человекочитаемо).
+
+    Пишется в stdout и работает при перенаправлении (TTY не требуется).
+    """
+    if json_mode:
+        _print_json(
+            {
+                "event": "crawl_progress",
+                "session_id": session_id,
+                "status": status,
+                "counts": dict(sorted(counts.items())),
+            }
+        )
+    else:
+        summary = ", ".join(f"{key}={counts[key]}" for key in sorted(counts))
+        sys.stdout.write(f"crawl[{status or '—'}]: {summary or '—'}\n")
+        sys.stdout.flush()
+
+
+def _progress_callback(
+    *, session_id: str, json_mode: bool
+) -> Callable[[dict[str, int]], None]:
+    """Phase 4: колбэк прогресса во время ``build_corpus`` (``--follow``)."""
+
+    def _callback(counts: dict[str, int]) -> None:
+        _emit_session_progress(None, counts, session_id=session_id, json_mode=json_mode)
+
+    return _callback
+
+
+def _follow_session(
+    store: Any,
+    session_id: str,
+    *,
+    interval: float,
+    json_mode: bool,
+    sleep: Callable[[float], None],
+) -> str | None:
+    """Phase 4 (``--follow``/``--watch``): опрос сеанса до терминального статуса.
+
+    Печатает снимок ``crawl_session_counts`` (NDJSON при ``--json``) и возвращает итоговый
+    статус. Терминал/no-сеанс → один снимок без сна. ``sleep`` инжектируется (тесты —
+    no-op). Работает при перенаправлении (TTY не требуется).
+    """
+    while True:
+        status, counts = _session_snapshot(store, session_id)
+        _emit_session_progress(
+            status, counts, session_id=session_id, json_mode=json_mode
+        )
+        if _is_terminal_session_status(status):
+            return status
+        sleep(interval)
+
+
 def _load_render_modes(path: str | Path | None) -> dict[str, FetchMode]:
     """Читает опциональный JSON/YAML-файл ``{url: "http"|"browser"}`` (Ш5).
 
@@ -1089,6 +1255,9 @@ def _resolve_phases(
     args: argparse.Namespace, *, inputs: RunInputs, plan: RunPlan, ports: Ports,
     paths: Any = None,
     render_modes: Mapping[str, FetchMode] | None = None,
+    urls: Mapping[str, list[str]] | None = None,
+    max_attempts: int | None = None,
+    progress: Callable[[dict[str, int]], None] | None = None,
 ) -> dict[str, PhaseFn]:
     """Собирает реестр не-гейтовых фаз (``phases_factory`` — тестовый шов).
 
@@ -1107,6 +1276,12 @@ def _resolve_phases(
     Гейты ``g1``–``g4`` сюда не входят — их (де)фолтные замыкания остаются в
     :class:`Runner` (I6/I7, S9), поэтому ``run`` честно останавливается ``blocked`` без
     человеческого решения.
+
+    :param urls: Phase 4 — готовый (уже отфильтрованный ``--only-failed``/``--only-product``)
+        набор ``product_id → [url]``; ``None`` → читается ``--urls`` как раньше.
+    :param max_attempts: Phase 4 — потолок попыток корпуса (``--max-attempts``); ``None`` →
+        без потолка (протягивается в :func:`build_phases`/``build_corpus``).
+    :param progress: Phase 4 — колбэк снимка прогресса сеанса (``--follow``); ``None`` → без.
     """
     passports_dir = getattr(args, "passports_dir", None)
     if passports_dir is None and paths is not None:
@@ -1114,12 +1289,17 @@ def _resolve_phases(
     if passports_dir is None:
         passports_dir = "passports"
     raw_root = str(paths.corpus_raw) if paths is not None else "corpus_raw"
+    corpus_urls = (
+        dict(urls)
+        if urls is not None
+        else _load_corpus_urls(getattr(args, "urls", None))
+    )
     kwargs: dict[str, Any] = {
         "inputs": inputs,
         "plan": plan,
         "ports": ports,
         # URLs: только явный операторский вход; doc_domains не фетчатся молча (I19).
-        "urls": _load_corpus_urls(getattr(args, "urls", None)),
+        "urls": corpus_urls,
         # Паспорта: --passports-dir либо resolved paths.passports; отсутствие → {}.
         "passports": _load_passports_dir(passports_dir),
         "out_dir": getattr(args, "runs_dir", None) or "runs",
@@ -1134,6 +1314,9 @@ def _resolve_phases(
         # politeness-пейсинга (RateLimiter) — протягиваются в фазу корпуса Ш5.
         "crawl_sources": getattr(inputs, "crawl_sources", None),
         "rate_limiter": RateLimiter(),
+        # Phase 4: потолок попыток (--max-attempts) и колбэк прогресса (--follow).
+        "max_attempts": max_attempts,
+        "progress": progress,
     }
     factory = getattr(args, "phases_factory", None)
     if factory is not None:
@@ -1263,3 +1446,53 @@ def _positive_int(raw: str) -> int:
     if value <= 0:
         raise argparse.ArgumentTypeError(f"значение обязано быть положительным, получено {raw!r}")
     return value
+
+
+def _add_phase4_flags(parser: argparse.ArgumentParser) -> None:
+    """Phase 4: флаги ``run``/``crawl run|resume|restart`` — кэш, фильтры, потолок, follow.
+
+    ``--from-scratch`` — сброс сеанса + живой ре-фетч в обход R7-кэша (``cache=None``);
+    ``--only-failed``/``--only-product`` — фильтр URL по durable-сеансу; ``--max-attempts`` —
+    потолок попыток по URL; ``--follow``/``--watch`` (+``--interval``) — прогресс до терминала.
+    """
+    parser.add_argument(
+        "--from-scratch",
+        dest="from_scratch",
+        action="store_true",
+        help="сброс сеанса + живой ре-фетч в обход R7-кэша (cache=None)",
+    )
+    parser.add_argument(
+        "--only-failed",
+        dest="only_failed",
+        action="store_true",
+        help="только URL со статусом failed в сеансе (нет сеанса → обычный прогон)",
+    )
+    parser.add_argument(
+        "--only-product",
+        dest="only_product",
+        default=None,
+        metavar="ID",
+        help="только указанный продукт из --urls",
+    )
+    parser.add_argument(
+        "--max-attempts",
+        dest="max_attempts",
+        type=_positive_int,
+        default=None,
+        metavar="N",
+        help="потолок попыток по URL; исчерпание → терминальный failed (attempts_exhausted)",
+    )
+    parser.add_argument(
+        "--follow",
+        "--watch",
+        dest="follow",
+        action="store_true",
+        help="печатать прогресс сеанса до терминального статуса",
+    )
+    parser.add_argument(
+        "--interval",
+        type=float,
+        default=1.0,
+        metavar="S",
+        help="период опроса при --follow (секунды, дефолт 1.0)",
+    )

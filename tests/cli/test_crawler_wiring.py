@@ -411,6 +411,27 @@ def test_resolve_ports_builds_cache_and_forwards_profiles(
     assert captured["domain_profiles"] == profiles
 
 
+def test_resolve_ports_no_cache_bypasses_r7_cache(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Phase 4 ``--from-scratch``: ``no_cache=True`` → ``build_adapters(cache=None)``."""
+    captured: dict[str, Any] = {}
+
+    def fake_build_adapters(**kwargs: Any) -> Any:
+        captured.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(context_mod, "build_adapters", fake_build_adapters)
+
+    _resolve_ports(
+        _ports_args(PathsConfig(cache=tmp_path / "cache")),
+        deploy_config=None,
+        no_cache=True,
+    )
+
+    assert captured["cache"] is None
+
+
 def test_resolve_ports_without_inputs_forwards_none_profiles(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

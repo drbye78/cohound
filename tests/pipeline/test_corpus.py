@@ -976,6 +976,60 @@ def test_crawl_failure_records_failed_source_unavailable(tmp_path: Path) -> None
         store.close()
 
 
+def test_max_attempts_skips_exhausted_url_and_marks_failed(tmp_path: Path) -> None:
+    """Phase 4: URL с ``attempts >= max_attempts`` не фетчится → терминальный ``FAILED``.
+
+    Первый прогон изолированно фиксирует сбой (``attempts=1``); повторный с ``max_attempts=1``
+    URL не фетчит (не тихий дроп), пишет ``error_kind="attempts_exhausted"`` и финализирует
+    сеанс ``PARTIAL``.
+    """
+    store = SqliteStore(":memory:")
+    _make_run(store)
+    failing = _Crawler({URL_P1_A: b"one"}, raising={URL_P1_A})
+    try:
+        _build(
+            tmp_path, pages={}, urls={"p1": [URL_P1_A]},
+            crawler=failing, store=store, run_id=RUN_ID,
+        )
+        first = next(iter(_items(store)))
+        assert first.status is CrawlItemStatus.FAILED and first.attempts == 1
+
+        working = _Crawler({URL_P1_A: b"one"})
+        result = _build(
+            tmp_path, pages={}, urls={"p1": [URL_P1_A]},
+            crawler=working, store=store, run_id=RUN_ID, max_attempts=1,
+        )
+        assert working.calls == []  # попытки исчерпаны — живого фетча нет
+        assert any("max_attempts" in err for err in result.errors)
+        row = next(iter(_items(store)))
+        assert row.error_kind == "attempts_exhausted"
+        assert row.attempts == 1
+        assert _build_of(result).crawl_failed == 1
+        session = store.get_crawl_session(SESSION_ID)
+        assert session is not None and session.status is CrawlSessionStatus.PARTIAL
+    finally:
+        store.close()
+
+
+def test_progress_callback_receives_session_counts(tmp_path: Path) -> None:
+    """Phase 4: колбэк ``progress`` получает снимки ``crawl_session_counts`` по ходу фазы."""
+    store = SqliteStore(":memory:")
+    _make_run(store)
+    snapshots: list[dict[str, int]] = []
+    try:
+        _build(
+            tmp_path, pages={URL_P1_A: b"one"}, urls={"p1": [URL_P1_A]},
+            crawler=_Crawler({URL_P1_A: b"one"}), store=store, run_id=RUN_ID,
+            progress=snapshots.append,
+        )
+        assert snapshots, "колбэк прогресса обязан вызываться"
+        last = snapshots[-1]
+        assert set(last) == {"pending", "running", "fetched", "failed", "cancelled"}
+        assert last["fetched"] == 1
+    finally:
+        store.close()
+
+
 def test_extraction_failure_records_failed_parser_and_retains_raw(tmp_path: Path) -> None:
     store = SqliteStore(":memory:")
     _make_run(store)
@@ -1794,6 +1848,33 @@ def test_executor_resume_skips_submission(tmp_path: Path) -> None:
         assert second_executor.submits == []
         assert _build_of(second).chunk_count == 1
         assert _build_of(second).index_build_id == _build_of(first).index_build_id
+    finally:
+        store.close()
+
+
+def test_executor_max_attempts_excludes_url_from_work_set(tmp_path: Path) -> None:
+    """Phase 4: исчерпавший попытки URL не подаётся исполнителю (work-set его исключает)."""
+    store = SqliteStore(":memory:")
+    _make_run(store)
+    try:
+        _build(
+            tmp_path, pages={}, urls={"p1": [URL_P1_A]},
+            executor=_FakeExecutor(pages={}, errors={URL_P1_A: "http_503"}),
+            executor_poll_interval=0.0, executor_sleep=lambda _s: None,
+            store=store, run_id=RUN_ID,
+        )
+        assert next(iter(_items(store))).attempts == 1
+
+        second = _FakeExecutor(pages={URL_P1_A: b"x"})
+        result = _build(
+            tmp_path, pages={}, urls={"p1": [URL_P1_A]},
+            executor=second, executor_poll_interval=0.0,
+            executor_sleep=lambda _s: None,
+            store=store, run_id=RUN_ID, max_attempts=1,
+        )
+        assert second.submits == []
+        assert any("max_attempts" in err for err in result.errors)
+        assert next(iter(_items(store))).error_kind == "attempts_exhausted"
     finally:
         store.close()
 
