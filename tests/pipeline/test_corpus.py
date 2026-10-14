@@ -2608,3 +2608,380 @@ def test_real_poller_catalog_bytes_not_retained_entry_retained(tmp_path: Path) -
         assert build.docs[0].content_hash == content_hash(entry_bytes)
     finally:
         store.close()
+
+
+# --------------------------------------------------------------------------- #
+# Phase 5.3: executor-ветка (split) — развёртка каталогов волнами
+# --------------------------------------------------------------------------- #
+
+EXEC_FEED_URL = "https://feed.test/p1/rss"
+EXEC_CHANNEL_URL = "https://feed.test/p1/list"
+EXEC_E1 = "https://feed.test/p1/e1"
+EXEC_E2 = "https://feed.test/p1/e2"
+
+
+def _mixed_sources(kind: str) -> CrawlSourcesConfig:
+    """Продукт — ``web``; хост ``feed.test`` — каталог ``kind`` (site-слой)."""
+    return CrawlSourcesConfig(
+        products={"p1": CrawlSource(engine="http", kind="web")},
+        sites={"p1": {"feed.test": CrawlSource(kind=kind, engine="http")}},
+    )
+
+
+def _run_executor_build(tmp_path: Path, store, executor, **kwargs):  # noqa: ANN001
+    """Вызов ``_build`` в executor-режиме с общими дефолтами (локальный краулер — «бомба»)."""
+    return _build(
+        tmp_path,
+        pages={},
+        crawler=_BombCrawler({}),
+        executor=executor,
+        executor_poll_interval=0.0,
+        executor_sleep=lambda _s: None,
+        store=store,
+        run_id=RUN_ID,
+        **kwargs,
+    )
+
+
+def test_executor_directory_feed_two_waves(tmp_path: Path) -> None:
+    """Phase 5.3: feed-каталог → волна 1 (top-level) + волна 2 (записи), два submit."""
+    store = SqliteStore(":memory:")
+    _make_run(store)
+    poller = _FakePoller([FeedEntry(url=EXEC_E1), FeedEntry(url=EXEC_E2)])
+    executor = _FakeExecutor(
+        pages={URL_P1_A: b"top", EXEC_E1: b"one", EXEC_E2: b"two"}
+    )
+    try:
+        result = _run_executor_build(
+            tmp_path,
+            store,
+            executor,
+            urls={"p1": [URL_P1_A, EXEC_FEED_URL]},
+            crawl_sources=_mixed_sources("feed"),
+            pollers={"feed": poller},
+        )
+        assert result.errors == []
+        # Две волны → два submit с разными ключами идемпотентности (каталог не подан).
+        assert len(executor.submits) == 2
+        wave1 = [w.url for w in executor.submits[0]]
+        wave2 = [w.url for w in executor.submits[1]]
+        assert wave1 == [URL_P1_A]
+        assert wave2 == [EXEC_E1, EXEC_E2]
+        assert EXEC_FEED_URL not in wave1 + wave2
+        keys = [k["idempotency_key"] for k in executor.submit_kwargs]
+        assert keys[0] != keys[1]
+        assert all(k["session_id"] == SESSION_ID for k in executor.submit_kwargs)
+
+        items = {i.url: i for i in _items(store)}
+        catalog = items[EXEC_FEED_URL]
+        assert catalog.status is CrawlItemStatus.FETCHED
+        assert not catalog.raw_path  # каталог не ретейнится (I19)
+        assert catalog.kind == "feed"
+        for eu in (EXEC_E1, EXEC_E2):
+            it = items[eu]
+            assert it.status is CrawlItemStatus.FETCHED
+            assert it.raw_path and Path(it.raw_path).is_file()
+            assert it.kind == "feed"  # провенанс записи = kind каталога
+        # Записи добыты исполнителем и сохранены (I19), каталог — нет.
+        assert (tmp_path / "p1" / f"{content_hash(b'one')}.bin").exists()
+        assert (tmp_path / "p1" / f"{content_hash(b'two')}.bin").exists()
+        assert len(_build_of(result).docs) == 3
+        assert [c[0] for c in poller.calls] == [EXEC_FEED_URL]
+    finally:
+        store.close()
+
+
+def test_executor_directory_channel_two_waves(tmp_path: Path) -> None:
+    """Phase 5.3: ``channel``-каталог — та же волновая развёртка (kind провенанса = channel)."""
+    store = SqliteStore(":memory:")
+    _make_run(store)
+    poller = _FakePoller([FeedEntry(url=EXEC_E1)])
+    executor = _FakeExecutor(pages={URL_P1_A: b"top", EXEC_E1: b"ch"})
+    try:
+        result = _run_executor_build(
+            tmp_path,
+            store,
+            executor,
+            urls={"p1": [URL_P1_A, EXEC_CHANNEL_URL]},
+            crawl_sources=_mixed_sources("channel"),
+            pollers={"channel": poller},
+        )
+        assert result.errors == []
+        assert len(executor.submits) == 2
+        assert [w.url for w in executor.submits[1]] == [EXEC_E1]
+        items = {i.url: i for i in _items(store)}
+        assert items[EXEC_CHANNEL_URL].status is CrawlItemStatus.FETCHED
+        assert not items[EXEC_CHANNEL_URL].raw_path
+        assert items[EXEC_E1].kind == "channel"
+    finally:
+        store.close()
+
+
+def test_executor_directory_poll_failure_partial(tmp_path: Path) -> None:
+    """Сбой опроса каталога → каталог ``FAILED source_unavailable``, без волны 2, ``PARTIAL``."""
+    store = SqliteStore(":memory:")
+    _make_run(store)
+    poller = _FakePoller(raising=RuntimeError("feed down"))
+    executor = _FakeExecutor(pages={URL_P1_A: b"top"})
+    try:
+        result = _run_executor_build(
+            tmp_path,
+            store,
+            executor,
+            urls={"p1": [URL_P1_A, EXEC_FEED_URL]},
+            crawl_sources=_mixed_sources("feed"),
+            pollers={"feed": poller},
+        )
+        # Волна 2 пуста → второй submit не выполняется.
+        assert len(executor.submits) == 1
+        assert [w.url for w in executor.submits[0]] == [URL_P1_A]
+        catalog = {i.url: i for i in _items(store)}[EXEC_FEED_URL]
+        assert catalog.status is CrawlItemStatus.FAILED
+        assert catalog.error_kind == FailureKind.SOURCE_UNAVAILABLE.value
+        assert any("poll" in e and "feed down" in e for e in result.errors)
+        session = store.get_crawl_session(SESSION_ID)
+        assert session is not None and session.status is CrawlSessionStatus.PARTIAL
+    finally:
+        store.close()
+
+
+def test_executor_directory_missing_poller_partial(tmp_path: Path) -> None:
+    """Каталог без сконфигурированного поллера → ``FAILED source_unavailable``, ``PARTIAL``."""
+    store = SqliteStore(":memory:")
+    _make_run(store)
+    executor = _FakeExecutor(pages={URL_P1_A: b"top"})
+    try:
+        result = _run_executor_build(
+            tmp_path,
+            store,
+            executor,
+            urls={"p1": [URL_P1_A, EXEC_FEED_URL]},
+            crawl_sources=_mixed_sources("feed"),
+            pollers=None,
+        )
+        assert len(executor.submits) == 1
+        catalog = {i.url: i for i in _items(store)}[EXEC_FEED_URL]
+        assert catalog.status is CrawlItemStatus.FAILED
+        assert catalog.error_kind == FailureKind.SOURCE_UNAVAILABLE.value
+        assert any("поллер не сконфигурирован" in e for e in result.errors)
+        session = store.get_crawl_session(SESSION_ID)
+        assert session is not None and session.status is CrawlSessionStatus.PARTIAL
+    finally:
+        store.close()
+
+
+def test_executor_directory_bad_params_partial(tmp_path: Path) -> None:
+    """Некорректные ``params`` каталога → ``FAILED source_unavailable``, без опроса/волны 2."""
+    store = SqliteStore(":memory:")
+    _make_run(store)
+    poller = _FakePoller([FeedEntry(url=EXEC_E1)], params_problems=["limit недопустим"])
+    executor = _FakeExecutor(pages={URL_P1_A: b"top"})
+    try:
+        result = _run_executor_build(
+            tmp_path,
+            store,
+            executor,
+            urls={"p1": [URL_P1_A, EXEC_FEED_URL]},
+            crawl_sources=_mixed_sources("feed"),
+            pollers={"feed": poller},
+        )
+        assert poller.calls == []  # до поллинга не дошло
+        assert len(executor.submits) == 1
+        catalog = {i.url: i for i in _items(store)}[EXEC_FEED_URL]
+        assert catalog.status is CrawlItemStatus.FAILED
+        assert any("limit недопустим" in e for e in result.errors)
+    finally:
+        store.close()
+
+
+def test_executor_directory_entry_ssrf_dropped(tmp_path: Path) -> None:
+    """Запись-каталога с приватным URL отбрасывается SSRF-политикой (не подаётся в волну 2)."""
+    store = SqliteStore(":memory:")
+    _make_run(store)
+    evil = "http://169.254.169.254/latest/meta-data"
+    poller = _FakePoller([FeedEntry(url=evil), FeedEntry(url=EXEC_E1)])
+    executor = _FakeExecutor(pages={URL_P1_A: b"top", EXEC_E1: b"safe"})
+    try:
+        result = _run_executor_build(
+            tmp_path,
+            store,
+            executor,
+            urls={"p1": [URL_P1_A, EXEC_FEED_URL]},
+            crawl_sources=_mixed_sources("feed"),
+            pollers={"feed": poller},
+        )
+        assert [w.url for w in executor.submits[1]] == [EXEC_E1]
+        assert any("SSRF" in e and evil in e for e in result.errors)
+        assert evil not in {i.url for i in _items(store)}
+    finally:
+        store.close()
+
+
+def test_executor_directory_self_referential_entry_skipped(tmp_path: Path) -> None:
+    """N2: запись с URL == URL каталога не подаётся в волну 2 (self-listing фид)."""
+    store = SqliteStore(":memory:")
+    _make_run(store)
+    poller = _FakePoller([FeedEntry(url=EXEC_FEED_URL), FeedEntry(url=EXEC_E1)])
+    executor = _FakeExecutor(pages={URL_P1_A: b"top", EXEC_E1: b"one"})
+    try:
+        _run_executor_build(
+            tmp_path,
+            store,
+            executor,
+            urls={"p1": [URL_P1_A, EXEC_FEED_URL]},
+            crawl_sources=_mixed_sources("feed"),
+            pollers={"feed": poller},
+        )
+        assert [w.url for w in executor.submits[1]] == [EXEC_E1]
+        catalog = {i.url: i for i in _items(store)}[EXEC_FEED_URL]
+        assert catalog.status is CrawlItemStatus.FETCHED
+        assert not catalog.raw_path
+    finally:
+        store.close()
+
+
+def test_executor_directory_entry_resume_not_submitted(tmp_path: Path) -> None:
+    """Запись с retained raw (prior ``FETCHED``) не подаётся: ре-ингест из raw (I19)."""
+    store = SqliteStore(":memory:")
+    _make_run(store)
+    poller = _FakePoller([FeedEntry(url=EXEC_E1)])
+    try:
+        first = _run_executor_build(
+            tmp_path,
+            store,
+            _FakeExecutor(pages={EXEC_E1: b"entry bytes"}),
+            urls={"p1": [EXEC_FEED_URL]},
+            crawl_sources=_mixed_sources("feed"),
+            pollers={"feed": poller},
+        )
+        assert _build_of(first).chunk_count == 1
+        assert {i.url: i for i in _items(store)}[EXEC_E1].raw_path
+
+        # Повторный прогон: запись resum'ится, поллер всё ещё вызывается, submit'ов нет.
+        second_poller = _FakePoller([FeedEntry(url=EXEC_E1)])
+        second_executor = _FakeExecutor(pages={})
+        second = _run_executor_build(
+            tmp_path,
+            store,
+            second_executor,
+            urls={"p1": [EXEC_FEED_URL]},
+            crawl_sources=_mixed_sources("feed"),
+            pollers={"feed": second_poller},
+        )
+        assert second.errors == []
+        assert second_executor.submits == []  # волна 1 пуста, запись resum'ится
+        assert [c[0] for c in second_poller.calls] == [EXEC_FEED_URL]
+        assert _build_of(second).chunk_count == 1
+        assert _build_of(second).index_build_id == _build_of(first).index_build_id
+    finally:
+        store.close()
+
+
+def test_executor_directory_entry_max_attempts_not_submitted(tmp_path: Path) -> None:
+    """Phase 4: исчерпавшая попытки запись каталога не подаётся — терминальный ``FAILED``."""
+    store = SqliteStore(":memory:")
+    _make_run(store)
+    poller = _FakePoller([FeedEntry(url=EXEC_E1)])
+    try:
+        first = _run_executor_build(
+            tmp_path,
+            store,
+            _FakeExecutor(pages={EXEC_E1: b"entry"}),
+            urls={"p1": [EXEC_FEED_URL]},
+            crawl_sources=_mixed_sources("feed"),
+            pollers={"feed": poller},
+        )
+        assert _build_of(first).chunk_count == 1
+
+        # Имитируем запись, исчерпавшую попытки (2 >= max_attempts; raw убран → не resume).
+        prior = {i.url: i for i in _items(store)}[EXEC_E1]
+        store.upsert_crawl_session_item(
+            prior.model_copy(
+                update={
+                    "status": CrawlItemStatus.FAILED,
+                    "attempts": 2,
+                    "raw_path": None,
+                    "error_kind": FailureKind.SOURCE_UNAVAILABLE.value,
+                }
+            )
+        )
+
+        second_executor = _FakeExecutor(pages={EXEC_E1: b"x"})
+        result = _run_executor_build(
+            tmp_path,
+            store,
+            second_executor,
+            urls={"p1": [EXEC_FEED_URL]},
+            crawl_sources=_mixed_sources("feed"),
+            pollers={"feed": _FakePoller([FeedEntry(url=EXEC_E1)])},
+            max_attempts=2,
+        )
+        assert second_executor.submits == []  # исчерпано — волна 2 пуста
+        assert any("max_attempts" in e for e in result.errors)
+        assert {i.url: i for i in _items(store)}[EXEC_E1].error_kind == "attempts_exhausted"
+    finally:
+        store.close()
+
+
+def test_executor_top_level_max_attempts_exhausted_not_submitted(tmp_path: Path) -> None:
+    """Phase 4: исчерпавший попытки top-level URL не попадает в волну 1 (не подаётся)."""
+    store = SqliteStore(":memory:")
+    _make_run(store)
+    try:
+        _run_executor_build(
+            tmp_path,
+            store,
+            _FakeExecutor(pages={}, errors={URL_P1_A: "http_503"}),
+            urls={"p1": [URL_P1_A]},
+        )
+        assert next(iter(_items(store))).attempts == 1
+
+        second_executor = _FakeExecutor(pages={URL_P1_A: b"x"})
+        result = _run_executor_build(
+            tmp_path,
+            store,
+            second_executor,
+            urls={"p1": [URL_P1_A]},
+            max_attempts=1,
+        )
+        assert second_executor.submits == []
+        assert any("max_attempts" in e for e in result.errors)
+        assert next(iter(_items(store))).error_kind == "attempts_exhausted"
+    finally:
+        store.close()
+
+
+def test_executor_work_order_mirrors_local_interleaving(tmp_path: Path) -> None:
+    """Порядок ingest в Pass A зеркалит локальный: записи каталога — на месте каталога."""
+    store = SqliteStore(":memory:")
+    _make_run(store)
+    # URL сортируются лексикографически (``url_map``); ``zzz.test`` идёт после ``feed.test``,
+    # поэтому записи каталога обязаны встать МЕЖДУ top-level URL (в месте каталога).
+    zzz = "https://zzz.test/p1/page"
+    poller = _FakePoller([FeedEntry(url=EXEC_E1), FeedEntry(url=EXEC_E2)])
+    executor = _FakeExecutor(
+        pages={URL_P1_A: b"top", zzz: b"zzz", EXEC_E1: b"one", EXEC_E2: b"two"}
+    )
+    try:
+        result = _run_executor_build(
+            tmp_path,
+            store,
+            executor,
+            urls={"p1": [URL_P1_A, EXEC_FEED_URL, zzz]},
+            crawl_sources=_mixed_sources("feed"),
+            pollers={"feed": poller},
+        )
+        assert result.errors == []
+        # Волна 1 — top-level в порядке url_map; волна 2 — записи в порядке поллера.
+        assert [w.url for w in executor.submits[0]] == [URL_P1_A, zzz]
+        assert [w.url for w in executor.submits[1]] == [EXEC_E1, EXEC_E2]
+        # Порядок документов = порядок ingest: top, e1, e2, zzz (записи на месте каталога).
+        order = [d.content_hash for d in _build_of(result).docs]
+        assert order == [
+            content_hash(b"top"),
+            content_hash(b"one"),
+            content_hash(b"two"),
+            content_hash(b"zzz"),
+        ]
+    finally:
+        store.close()

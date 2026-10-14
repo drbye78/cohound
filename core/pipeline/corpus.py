@@ -970,62 +970,20 @@ def build_corpus(
         # (сеанс трекает краул: сырые байты сохранены = «ready» для материализации).
         _mark(product_id, url, CrawlItemStatus.FETCHED, raw_path=str(raw_path))
 
-    def _run_executor() -> dict[tuple[str, str], CrawlResultItem]:
-        """Phase 3.3: submit → poll → collect работ через ``executor`` (только ``split``).
+    def _submit_collect(work: list[CrawlWorkItem]) -> dict[tuple[str, str], CrawlResultItem]:
+        """Phase 3.3/5.3: подача набора работ исполнителю → ожидание → сбор результатов.
 
-        Цели краула резолвятся здесь и кладутся в ``targets``/``applied_engines`` (как в
-        локальном пути); уже resum'ащиеся элементы (retained raw на диске) НЕ подаются —
-        их ingest идёт без обращения к исполнителю. Ошибки шва изолируются в ``errors``;
-        недостающие результаты трактуются как ``source_unavailable`` при ingest. Возвращает
-        карту ``(product_id, url) → CrawlResultItem``.
+        Единая машинерия одной «волны» (submit с back-pressure → опрос статуса → сбор
+        пагинацией); ошибки шва изолируются в ``errors``. Пустой набор → ``{}`` без обращения
+        к исполнителю. ``idempotency_key`` — по набору работ **этой** волны (разные волны ⇒
+        разные ключи ⇒ разные задания), ``session_id`` стабилен на прогон.
         """
-        # Вызывается только при наличии исполнителя (``if executor is not None``); assert
-        # сужает тип для статического анализа внутри замыкания.
         assert executor is not None
-        work: list[CrawlWorkItem] = []
-        for product_id in products:
-            for url in url_map.get(product_id, []):
-                target = resolve_crawl_target(
-                    product_id,
-                    url,
-                    sources=crawl_sources or CrawlSourcesConfig(),
-                    profiles=domain_profiles or {},
-                    explicit=explicit_fetch,
-                    run_default_strategy=crawl_strategy_default,
-                    run_default_rate_limit=crawl_rate_default,
-                )
-                targets[(product_id, url)] = target
-                applied_engines[(product_id, url)] = target.engine
-                prior_item = items.get((product_id, url))
-                if _resume_source(prior_item) is not None:
-                    continue  # resume без подачи: ingest ре-извлечёт из retained raw
-                # Phase 4: исчерпавшие попытки URL не подаются исполнителю — их помечает
-                # терминальным ``FAILED`` основной цикл (``max_attempts``).
-                if (
-                    max_attempts is not None
-                    and prior_item is not None
-                    and prior_item.attempts >= max_attempts
-                ):
-                    continue
-                plan_i = target.plan
-                work.append(
-                    CrawlWorkItem(
-                        product_id=product_id,
-                        url=url,
-                        engine=target.engine,
-                        kind=target.kind,
-                        fetch=plan_i.fetch,
-                        extract=plan_i.extract,
-                        strategy=plan_i.strategy,
-                        wait_for=plan_i.wait_for,
-                        lang=None,
-                    )
-                )
         if not work:
             return {}
 
-        # B2: ``session_id`` стабилен на прогон, а ``idempotency_key`` — по набору работ
-        # этой попытки (resume сокращает набор → новый ключ → новое задание для остатка).
+        # B2: ``session_id`` стабилен на прогон, а ``idempotency_key`` — по набору работ этой
+        # волны (resume/развёртка каталога меняют набор → новый ключ → новое задание).
         session_key = session or default_session_id(str(run_id or ""))
         idempotency_key = _work_set_idempotency_key(work)
         profile = getattr(executor, "profile", None) or "split"
@@ -1091,6 +1049,61 @@ def build_corpus(
             errors.append(f"executor.collect: {type(exc).__name__}: {exc}")
         return collected
 
+    def _work_item(pid: str, url: str, target: Any) -> CrawlWorkItem:
+        """Собирает работу волны из резолвнутой цели (оси ``FetchPlan`` + провенанс)."""
+        plan_i = target.plan
+        return CrawlWorkItem(
+            product_id=pid,
+            url=url,
+            engine=target.engine,
+            kind=target.kind,
+            fetch=plan_i.fetch,
+            extract=plan_i.extract,
+            strategy=plan_i.strategy,
+            wait_for=plan_i.wait_for,
+            lang=None,
+        )
+
+    def _run_executor() -> list[CrawlWorkItem]:
+        """Phase 3.3/5.3: волна 1 — top-level НЕ-директорные работы через ``executor``.
+
+        Резолвит цель каждого top-level URL и кладёт её в ``targets``/``applied_engines`` (как
+        локальный путь). Источники-каталоги (``kind ∈ _DIRECTORY_KINDS``) сюда не попадают:
+        их разворачивает :func:`_run_executor_waves` (волна 2). Уже resum'ащиеся элементы
+        (retained raw на диске) и исчерпавшие попытки (``--max-attempts``) НЕ подаются —
+        ingest/re-mark идёт в основном цикле Pass A. Возвращает список работ волны 1.
+        """
+        assert executor is not None
+        work: list[CrawlWorkItem] = []
+        for product_id in products:
+            for url in url_map.get(product_id, []):
+                target = resolve_crawl_target(
+                    product_id,
+                    url,
+                    sources=crawl_sources or CrawlSourcesConfig(),
+                    profiles=domain_profiles or {},
+                    explicit=explicit_fetch,
+                    run_default_strategy=crawl_strategy_default,
+                    run_default_rate_limit=crawl_rate_default,
+                )
+                targets[(product_id, url)] = target
+                applied_engines[(product_id, url)] = target.engine
+                if target.kind in _DIRECTORY_KINDS:
+                    continue  # каталог — волна 2 (разворачивается ``_run_executor_waves``)
+                prior_item = items.get((product_id, url))
+                if _resume_source(prior_item) is not None:
+                    continue  # resume без подачи: ingest ре-извлечёт из retained raw
+                # Phase 4: исчерпавшие попытки URL не подаются исполнителю — их помечает
+                # терминальным ``FAILED`` основной цикл (``max_attempts``).
+                if (
+                    max_attempts is not None
+                    and prior_item is not None
+                    and prior_item.attempts >= max_attempts
+                ):
+                    continue
+                work.append(_work_item(product_id, url, target))
+        return work
+
     # --- Pass A (ingest): crawl → retention → extract → dedup → chunk ---------- #
     # Векторы/физический индекс и персистенция corpus_chunks/index_manifest не выполняются:
     # сначала собирается содержимое всего батча, затем финализируется index_build_id.
@@ -1100,9 +1113,6 @@ def build_corpus(
     # экстракция/дедуп/нарезка/сеансовый трекинг) вынесена в ``_retain``/``_ingest_one`` —
     # обе ветки используют её, не дублируя логику.
     ingests: list[_ProductIngest] = []
-    collected: dict[tuple[str, str], CrawlResultItem] = (
-        _run_executor() if executor is not None else {}
-    )
 
     def _emit_progress() -> None:
         """Phase 4: снимок прогресса сеанса для колбэка ``progress`` (``--follow``).
@@ -1300,13 +1310,121 @@ def build_corpus(
             return None
         return page, raw_path, fetch_plan
 
+    def _run_executor_waves() -> tuple[
+        dict[tuple[str, str], CrawlResultItem], dict[str, list[str]]
+    ]:
+        """Phase 5.3: исполнение краула через ``executor`` волнами (профиль ``split``).
+
+        Волна 1 — top-level НЕ-директорные URL (:func:`_run_executor`); затем опрос каталогов
+        (``feed``/``channel``) через ``pollers[kind]`` (:func:`_expand_directory`); затем
+        **волна 2** — записи каталогов, отдельным ``submit`` с собственным
+        ``idempotency_key``. Каталог не ретейнится и не ингестится (I19); записи добываются
+        исполнителем и проходят штатный rehash. Один уровень развёртки (записи не
+        ре-расширяются). Возвращает ``(collected, work_by_product)``: карту результатов по
+        ``(product_id, url)`` и упорядоченный (как в локальном пути) список ingest-URL
+        по продукту для Pass A.
+        """
+        assert executor is not None
+
+        # --- Волна 1: top-level НЕ-директорные работы (отдельный submit) --- #
+        wave1 = _run_executor()
+        collected: dict[tuple[str, str], CrawlResultItem] = dict(_submit_collect(wave1))
+
+        # --- Опрос каталогов + волна 2: записи каталогов --- #
+        wave2: list[CrawlWorkItem] = []
+        # Порядок ingest в Pass A зеркалит локальный: не-директорный URL даёт себя, каталог —
+        # свои записи (в порядке поллера) на своём месте.
+        work_by_product: dict[str, list[str]] = {pid: [] for pid in products}
+        for product_id in products:
+            for url in url_map.get(product_id, []):
+                target = targets[(product_id, url)]
+                if target.kind not in _DIRECTORY_KINDS:
+                    work_by_product[product_id].append(url)
+                    continue
+
+                # Phase 4: исчерпавший попытки каталог не поллится — терминальный ``FAILED``
+                # (сеанс финализируется ``PARTIAL``); в Pass A каталог не входит.
+                prior_item = items.get((product_id, url))
+                if (
+                    max_attempts is not None
+                    and prior_item is not None
+                    and prior_item.attempts >= max_attempts
+                ):
+                    reason = (
+                        f"max_attempts exhausted "
+                        f"(attempts={prior_item.attempts} >= {max_attempts})"
+                    )
+                    errors.append(f"{product_id}/{url}: {reason}")
+                    _mark(
+                        product_id,
+                        url,
+                        CrawlItemStatus.FAILED,
+                        error_kind=_MAX_ATTEMPTS_ERROR_KIND,
+                        error=reason,
+                    )
+                    _emit_progress()
+                    continue
+
+                # ``_expand_directory`` помечает каталог ``FETCHED`` (без raw) либо
+                # ``FAILED source_unavailable`` (нет поллера/плохие params/ошибка опроса).
+                entry_urls = _expand_directory(product_id, url, target) or []
+                for entry_url in entry_urls:
+                    work_by_product[product_id].append(entry_url)
+
+                    etarget = resolve_crawl_target(
+                        product_id,
+                        entry_url,
+                        sources=crawl_sources or CrawlSourcesConfig(),
+                        profiles=domain_profiles or {},
+                        explicit=explicit_fetch,
+                        run_default_strategy=crawl_strategy_default,
+                        run_default_rate_limit=crawl_rate_default,
+                    )
+                    # Провенанс записи = ``kind`` каталога-источника + собственный engine
+                    # URL-записи (схему не меняем — только ``CrawlTarget``).
+                    entry_target = CrawlTarget(
+                        plan=etarget.plan,
+                        engine=etarget.engine,
+                        kind=target.kind,
+                        params=etarget.params,
+                    )
+                    targets[(product_id, entry_url)] = entry_target
+
+                    e_prior = items.get((product_id, entry_url))
+                    if _resume_source(e_prior) is not None:
+                        continue  # resume без подачи: ingest ре-извлечёт из retained raw
+                    if (
+                        max_attempts is not None
+                        and e_prior is not None
+                        and e_prior.attempts >= max_attempts
+                    ):
+                        continue  # исчерпано: пометит терминальным ``FAILED`` Pass A
+                    wave2.append(_work_item(product_id, entry_url, entry_target))
+
+        # --- Волна 2: отдельный submit с собственным ``idempotency_key`` --- #
+        collected.update(_submit_collect(wave2))
+        return collected, work_by_product
+
+    # Phase 5.3: в executor-режиме состав/порядок ingest-URL задаёт волновая развёртка;
+    # локальный путь по-прежнему идёт по ``url_map``.
+    collected: dict[tuple[str, str], CrawlResultItem] = {}
+    work_by_product: dict[str, list[str]] = {}
+    if executor is not None:
+        collected, work_by_product = _run_executor_waves()
+
     for product_id in products:
         ingest = _ProductIngest(product_id=product_id)
         # I17: дедуп в пределах продукт-партиции (см. docstring модуля).
         seen_docs: dict[str, str] = {}
         seen_chunk_ids: set[str] = set()
 
-        for url in url_map.get(product_id, []):
+        # Phase 5.3: в executor-режиме итерируем по волновому набору (каталоги уже опрошены,
+        # их URL в наборе нет; записи — на месте каталогов). Локальный путь — по ``url_map``.
+        for url in (
+            url_map.get(product_id, [])
+            if executor is None
+            else work_by_product.get(product_id, [])
+        ):
             # L1a: resume — если по ``(product_id, url)`` есть элемент сеанса с сохранёнными
             # байтами, НЕ фетчим: ре-извлекаем из retained raw (I19: raw — источник).
             prior_item = items.get((product_id, url))
