@@ -15,6 +15,7 @@ from typing import Any
 
 import pytest
 
+from core.adapters.feed_poller import LocalFeedPoller
 from core.edge.poller import FeedPollService
 from core.edge.server import EdgeError
 from core.ports.types import FetchPlan, RawPage
@@ -299,3 +300,53 @@ def test_poll_accepts_mapping_subclass() -> None:
     svc = _service(FakeCrawler(_RSS))
     request: Mapping[str, Any] = MyRequest(url="https://feed.test/rss", kind="feed")
     assert svc.poll(request)["count"] == 2
+
+
+# ---------------------------------------------------------------------------
+# N1: семантика ``since`` общая с локальным поллером (разбор, не строковое сравнение)
+# ---------------------------------------------------------------------------
+
+#: RFC822-дата ``10 Oct 2026`` лексикографически МЕНЬШЕ порога ``2026-10-08…``
+#: (``'1' < '2'``), но по разобранному времени — новее порога. Лексикографический фильтр
+#: ошибочно отбросил бы запись A.
+_LEX_RSS = (
+    b'<?xml version="1.0" encoding="utf-8"?>'
+    b'<rss version="2.0"><channel>'
+    b"<item><title>A</title><link>https://feed.test/a</link>"
+    b"<pubDate>10 Oct 2026 00:00:00 GMT</pubDate></item>"
+    b"<item><title>B</title><link>https://feed.test/b</link>"
+    b"<pubDate>01 Jan 2026 00:00:00 GMT</pubDate></item>"
+    b"<item><title>C</title><link>https://feed.test/c</link>"
+    b"<pubDate>2026-10-20T00:00:00Z</pubDate></item>"
+    b"</channel></rss>"
+)
+
+_SINCE = "2026-10-08T00:00:00Z"
+
+
+def test_poll_since_parses_rfc822_not_lexicographic() -> None:
+    """Регрессия N1: RFC822 ``10 Oct 2026`` (новее ``since``) сохраняется, старый — нет."""
+    svc = _service(FakeCrawler(_LEX_RSS))
+    result = svc.poll(
+        {"url": "https://feed.test/rss", "kind": "feed", "params": {"since": _SINCE}}
+    )
+    urls = [entry["url"] for entry in result["entries"]]
+    # Лексикографический фильтр отбросил бы A (``'1' < '2'``) — корректный разбор сохраняет.
+    assert urls == ["https://feed.test/a", "https://feed.test/c"]
+
+
+def test_poll_since_matches_local_poller() -> None:
+    """N1: edge-сервис и ``LocalFeedPoller`` дают одинаковый набор при одном ``since``."""
+    edge_urls = [
+        entry["url"]
+        for entry in _service(FakeCrawler(_LEX_RSS)).poll(
+            {"url": "https://feed.test/rss", "kind": "feed", "params": {"since": _SINCE}}
+        )["entries"]
+    ]
+    local_urls = [
+        entry.url
+        for entry in LocalFeedPoller(FakeCrawler(_LEX_RSS)).poll(
+            "https://feed.test/rss", kind="feed", params={"since": _SINCE}, plan=FetchPlan()
+        )
+    ]
+    assert edge_urls == local_urls == ["https://feed.test/a", "https://feed.test/c"]

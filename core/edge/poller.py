@@ -31,8 +31,10 @@ from core.ports.types import (
 from core.util.feed import (
     FeedEntry,
     FeedParseError,
+    entry_not_before,
     parse_channel_document,
     parse_feed,
+    parse_instant,
 )
 from core.util.security import validate_url
 
@@ -185,6 +187,7 @@ class FeedPollService:
         признак ``truncated`` ответа объединяет его с усечением по лимиту записей.
         """
         since = _clean(params.get("since")) or None
+        threshold = parse_instant(since) if since is not None else None
         requested_limit = _opt_int(params.get("limit"))
         effective_limit = self._max_entries
         if requested_limit is not None and requested_limit > 0:
@@ -193,9 +196,10 @@ class FeedPollService:
         selected: list[FeedEntry] = []
         truncated = bool(input_truncated)
         for entry in entries:
-            if since is not None and entry.published_at is not None:
-                if entry.published_at < since:
-                    continue
+            # N1: семантика ``since`` общая с локальным поллером (разбор метки, не строковое
+            # сравнение); неизвестная/неразборчивая дата записи — консервативно сохраняется.
+            if threshold is not None and not entry_not_before(entry, threshold):
+                continue
             entry_url = _clean(entry.url)
             if not entry_url:
                 continue

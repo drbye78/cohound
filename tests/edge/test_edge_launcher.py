@@ -28,6 +28,7 @@ from core.edge.config import (
     EdgeRuntimeConfig,
     load_edge_runtime_config,
 )
+from core.edge.poller import FeedPollService
 from core.edge.server import EdgeGateway, serve
 from core.ports.types import ExtractedDoc, ExtractionRoute, FetchPlan, RawPage
 
@@ -250,6 +251,7 @@ def test_main_check_builds_and_exits_without_serve(
     out = capsys.readouterr().out
     assert "edge check ok" in out
     assert "engines=" in out
+    assert "poller=ready" in out
 
 
 def test_main_no_subcommand_is_usage(
@@ -270,6 +272,56 @@ def test_build_gateway_always_includes_http() -> None:
     assert isinstance(crawlers["http"], HttpCrawler)
     assert chunker is not None
     assert isinstance(gateway, EdgeGateway)
+
+
+class _FeedCrawler:
+    """Стенд-краулер: отдаёт валидный RSS-фид (без сети) для ``crawl/poll``."""
+
+    version = "fake-feed-crawler-1"
+    engine = "http"
+
+    def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:
+        return RawPage(
+            url=url,
+            content=(
+                b'<?xml version="1.0" encoding="utf-8"?>'
+                b'<rss version="2.0"><channel>'
+                b"<item><title>A</title><link>https://feed.test/a</link></item>"
+                b"</channel></rss>"
+            ),
+            fetched_at="t",
+            content_type="application/rss+xml",
+        )
+
+
+def test_build_gateway_wires_poller_for_crawl_poll(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``_build_gateway`` инъецирует ``FeedPollService`` тем же диспетчером, что и ``fetch``."""
+    monkeypatch.setattr(
+        edge_main, "_build_crawlers", lambda config: {"http": _FeedCrawler()}
+    )
+    gateway, _crawlers, _chunker = edge_main._build_gateway(EdgeRuntimeConfig())
+
+    # Диспетчер построен один раз: gateway и поллер держат один объект (Wave 5.1).
+    assert isinstance(gateway._poller, FeedPollService)
+    assert gateway._poller._crawler is gateway._crawler
+
+    env = gateway.envelope("crawl/poll", {"url": "https://feed.test/rss", "kind": "feed"})
+    assert env["status"] == "ok"
+    assert env["payload"] == {
+        "entries": [
+            {"url": "https://feed.test/a", "guid": None, "published_at": None, "title": "A"}
+        ],
+        "count": 1,
+        "truncated": False,
+    }
+
+    # SSRF-защита работает и через реальную конфигурацию composition root.
+    bad = gateway.envelope(
+        "crawl/poll", {"url": "http://169.254.169.254/", "kind": "feed"}
+    )
+    assert bad["status"] == "error"
 
 
 def test_edge_main_source_has_no_cli_or_store_import() -> None:

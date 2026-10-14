@@ -23,8 +23,6 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from datetime import datetime, timezone
-from email.utils import parsedate_to_datetime
 from typing import Any, TypeGuard
 
 from core.adapters.remote_gateway import RemoteContentError
@@ -33,8 +31,10 @@ from core.ports.gateway import ContentGateway
 from core.ports.types import FetchPlan
 from core.util.feed import (
     FeedEntry,
+    entry_not_before,
     parse_channel_document,
     parse_feed,
+    parse_instant,
 )
 from core.util.security import validate_url
 
@@ -87,45 +87,6 @@ def _is_secret_key(key: str) -> bool:
     return any(fragment in name for fragment in _SECRET_KEY_FRAGMENTS)
 
 
-def _parse_instant(value: str) -> datetime | None:
-    """Разбирает метку времени (ISO-8601 либо RFC822) в aware ``datetime`` (UTC).
-
-    ``None`` — неразборчивое значение (вызывающий сам решает: ``validate_params``
-    отвергает, а фильтр ``since`` — нет, консервативно сохраняя запись).
-    """
-    text = value.strip()
-    if not text:
-        return None
-    iso = text[:-1] + "+00:00" if text.endswith(("Z", "z")) else text
-    instant: datetime | None
-    try:
-        instant = datetime.fromisoformat(iso)
-    except ValueError:
-        try:
-            instant = parsedate_to_datetime(text)
-        except (TypeError, ValueError):
-            return None
-    if instant is None:
-        return None
-    if instant.tzinfo is None:
-        instant = instant.replace(tzinfo=timezone.utc)
-    return instant
-
-
-def _not_before(entry: FeedEntry, threshold: datetime) -> bool:
-    """Оставить ли запись при пороге ``since``: неизвестное время — сохраняем.
-
-    Записи без ``published_at`` или с неразборчивой датой **сохраняются** (нельзя
-    доказать, что они старее порога); отбрасываются лишь доказуемо старые.
-    """
-    if not entry.published_at:
-        return True
-    instant = _parse_instant(entry.published_at)
-    if instant is None:
-        return True
-    return instant >= threshold
-
-
 def _params_messages(kind: str, params: Mapping[str, Any]) -> list[str]:
     """Общая проверка ``kind``/``params`` для обоих поллеров (см. контракт ``PollPort``)."""
     messages: list[str] = []
@@ -154,7 +115,7 @@ def _params_messages(kind: str, params: Mapping[str, Any]) -> list[str]:
 
     since = params.get("since")
     if since is not None:
-        if not isinstance(since, str) or _parse_instant(since) is None:
+        if not isinstance(since, str) or parse_instant(since) is None:
             messages.append(
                 f"params.since={since!r} недопустим: ожидается ISO-8601/RFC822-метка времени"
             )
@@ -177,9 +138,9 @@ def _apply_params(
 
     since = params.get("since")
     if since:
-        threshold = _parse_instant(str(since))
+        threshold = parse_instant(str(since))
         if threshold is not None:
-            entries = [entry for entry in entries if _not_before(entry, threshold)]
+            entries = [entry for entry in entries if entry_not_before(entry, threshold)]
     return entries
 
 

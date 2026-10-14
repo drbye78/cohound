@@ -101,6 +101,8 @@ POST /v1/crawl/cancel  {job_id}
    → {job_id, status: "cancelled", cancelled}
 POST /v1/crawl/collect {job_id, cursor?, limit?}
    → {items: [{product_id, url, status, engine, kind, http_status, content_type, fetched_at, content_hash, raw?, error}], next_cursor, done}
+POST /v1/crawl/poll    {url, kind, params?, fetch?, extract?, strategy?, wait_for?}
+   → {entries: [{url, guid?, published_at?, title?}], count, truncated}  # ссылки на записи, НЕ content/evidence (I19)
 
 GET  /v1/capabilities → {extractor_version, crawler_version, search_engine, supported_formats}
 GET  /v1/health       → {status}
@@ -119,6 +121,15 @@ GET  /v1/health       → {status}
 `cursor` (стабильный порядок `(product_id, url)`), `done` — все элементы терминальны. Транспорт —
 тот же L7-JSON; авторизация — scope `crawl` (см. §8.2). Расширение **аддитивно** и не меняет
 `schema_version` (остаётся `"1"`).
+
+**Опрос фидов/каналов `crawl/poll` (аддитивно, Wave 5.1).** Пятая POST-операция семейства
+`crawl/*`: `url` + `kind` (`feed` — XML: RSS/Atom/RDF; `channel` — JSON/JSON-lines/список URL)
+опрос каталогового документа ленты. Edge фетчит **только сам каталог** и возвращает **ссылки**
+на записи (`{url, guid?, published_at?, title?}`), а не их контент: `entries` — кандидаты, не
+content и не evidence (I19). Контент записей добывается обычными `fetch`/`crawl/collect`.
+`params` (`since?`, `limit?`) ограничивают выборку, `truncated` сигнализирует усечение; URL
+ленты и каждой записи проходит SSRF-проверку. Авторизация — scope `crawl` (см. §8.2).
+Расширение **аддитивно** и не меняет `schema_version` (остаётся `"1"`).
 
 **Оболочка:** `{schema_version, request_id, status, payload, error}`. `schema_version` — часть
 контракта; несовместимое изменение → bump версии (версионная граница §13).
@@ -197,7 +208,7 @@ recovery-on-start возвращает застрявшие `running`-элеме
 
 | Поток | Направление | Политика L7 |
 |---|---|---|
-| core → edge | к DMZ app-порту (напр. 8443) | **ALLOW**: allowlist методов/путей (`/v1/fetch`, `/v1/search`, `/v1/registry`, `/v1/crawl/submit`, `/v1/crawl/status`, `/v1/crawl/cancel`, `/v1/crawl/collect`, `/v1/health`, `/v1/capabilities`), JSON-schema-валидация, лимиты размера |
+| core → edge | к DMZ app-порту (напр. 8443) | **ALLOW**: allowlist методов/путей (`/v1/fetch`, `/v1/search`, `/v1/registry`, `/v1/crawl/submit`, `/v1/crawl/status`, `/v1/crawl/cancel`, `/v1/crawl/collect`, `/v1/crawl/poll`, `/v1/health`, `/v1/capabilities`), JSON-schema-валидация, лимиты размера |
 | edge → internet | 80/443 | **ALLOW** (опц. allowlist доменов; robots-enforcement; rate-limit) |
 | **core → internet** | любой | **DENY** (нет маршрута) — усиливает I18 |
 | **edge → core** | инициирование | **DENY** (edge только отвечает; не может дозвониться до сервисов ядра) |

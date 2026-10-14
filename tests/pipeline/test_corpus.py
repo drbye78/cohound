@@ -17,6 +17,7 @@ from typing import Any
 import pytest
 
 from core.adapters import index_format
+from core.adapters.feed_poller import LocalFeedPoller
 from core.adapters.index_npy import NpyIndexBuilder
 from core.config.crawl_sources import CrawlSource, CrawlSourcesConfig
 from core.config.domain_profiles import DomainProfile
@@ -61,6 +62,7 @@ from core.ports.types import (
     RawPage,
 )
 from core.store.sqlite_store import SqliteStore
+from core.util.feed import FeedEntry
 from core.util.hashing import content_hash
 from core.util.rate_limit import RateLimiter
 
@@ -1381,7 +1383,7 @@ def test_engine_selected_crawler_used_and_recorded(tmp_path: Path) -> None:
     _make_run(store)
     default = _Crawler({})
     selected = _Crawler({URL_P1_A: b"engine-bytes"})
-    sources = CrawlSourcesConfig(products={"p1": CrawlSource(engine="fake", kind="feed")})
+    sources = CrawlSourcesConfig(products={"p1": CrawlSource(engine="fake", kind="web")})
     try:
         result = _build(
             tmp_path,
@@ -1399,7 +1401,7 @@ def test_engine_selected_crawler_used_and_recorded(tmp_path: Path) -> None:
         item = next(iter(_items(store)))
         assert item.status is CrawlItemStatus.FETCHED
         assert item.engine == "fake"
-        assert item.kind == "feed"
+        assert item.kind == "web"
     finally:
         store.close()
 
@@ -2179,5 +2181,430 @@ def test_executor_backpressure_exhausted_marks_failed(tmp_path: Path) -> None:
         item = next(iter(_items(store)))
         assert item.status is CrawlItemStatus.FAILED
         assert item.error_kind == FailureKind.SOURCE_UNAVAILABLE.value
+    finally:
+        store.close()
+
+
+# --------------------------------------------------------------------------- #
+# Phase 5.2: источники-каталоги (feed/channel) — локальный fan-out
+# --------------------------------------------------------------------------- #
+
+FEED_URL = "https://docs.test/p1/feed"
+ENTRY_1 = "https://docs.test/p1/entries/1"
+ENTRY_2 = "https://docs.test/p1/entries/2"
+
+
+class _FakePoller:
+    """Детерминированный ``PollPort``-двойник: заданные записи/сбои/проблемы ``params``."""
+
+    version = "poller-1"
+
+    def __init__(
+        self,
+        entries: list[FeedEntry] | None = None,
+        *,
+        params_problems: list[str] | None = None,
+        raising: Exception | None = None,
+    ) -> None:
+        self.entries = list(entries or ())
+        self.params_problems = list(params_problems or ())
+        self.raising = raising
+        self.calls: list[tuple[str, str, dict[str, Any]]] = []
+        self.validated: list[tuple[str, dict[str, Any]]] = []
+
+    def validate_params(self, kind: str, params: dict[str, Any]) -> list[str]:
+        self.validated.append((kind, dict(params)))
+        return list(self.params_problems)
+
+    def poll(
+        self, url: str, *, kind: str, params: dict[str, Any], plan: FetchPlan
+    ) -> list[FeedEntry]:
+        self.calls.append((url, kind, dict(params)))
+        if self.raising is not None:
+            raise self.raising
+        return list(self.entries)
+
+
+def _feed_sources() -> CrawlSourcesConfig:
+    return CrawlSourcesConfig(products={"p1": CrawlSource(engine="http", kind="feed")})
+
+
+def test_directory_feed_fanout_fetches_retains_ingests(tmp_path: Path) -> None:
+    """feed-каталог → записи фетчатся/ретейнятся/индексируются; сам каталог — не контент."""
+    store = SqliteStore(":memory:")
+    _make_run(store)
+    poller = _FakePoller([FeedEntry(url=ENTRY_1), FeedEntry(url=ENTRY_2)])
+    crawler = _Crawler({ENTRY_1: b"entry one", ENTRY_2: b"entry two"})
+    try:
+        result = _build(
+            tmp_path,
+            pages={},
+            urls={"p1": [FEED_URL]},
+            crawler=crawler,
+            crawl_sources=_feed_sources(),
+            pollers={"feed": poller},
+            store=store,
+            run_id=RUN_ID,
+        )
+        assert result.errors == []
+        # Каталог поллится ровно один раз и краулером НЕ фетчится.
+        assert [c[0] for c in poller.calls] == [FEED_URL]
+        assert [u for u, _ in crawler.calls] == [ENTRY_1, ENTRY_2]
+        build = _build_of(result)
+        # Индексируются только две записи (каталог не даёт документа).
+        assert build.chunk_count == 2
+        assert len(build.docs) == 2
+        assert {d.product_id for d in build.docs} == {"p1"}
+
+        items = {i.url: i for i in _items(store)}
+        feed_item = items[FEED_URL]
+        assert feed_item.status is CrawlItemStatus.FETCHED
+        assert not feed_item.raw_path  # каталог не ретейнится (не evidence)
+        assert feed_item.kind == "feed"
+        for entry_url in (ENTRY_1, ENTRY_2):
+            it = items[entry_url]
+            assert it.status is CrawlItemStatus.FETCHED
+            assert it.raw_path and Path(it.raw_path).is_file()
+            assert it.kind == "feed"
+        session = store.get_crawl_session(SESSION_ID)
+        assert session is not None and session.status is CrawlSessionStatus.COMPLETED
+    finally:
+        store.close()
+
+
+def test_directory_feed_url_not_retained(tmp_path: Path) -> None:
+    """URL каталога не даёт ``CorpusDoc``/retention: только записи становятся контентом (I19)."""
+    store = SqliteStore(":memory:")
+    _make_run(store)
+    poller = _FakePoller([FeedEntry(url=ENTRY_1)])
+    try:
+        result = _build(
+            tmp_path,
+            pages={},
+            urls={"p1": [FEED_URL]},
+            crawler=_Crawler({ENTRY_1: b"only entry"}),
+            crawl_sources=_feed_sources(),
+            pollers={"feed": poller},
+            store=store,
+            run_id=RUN_ID,
+        )
+        build = _build_of(result)
+        assert len(build.docs) == 1
+        assert build.docs[0].content_hash == content_hash(b"only entry")
+        # Ни один ретейнед-файл не соответствует байтам каталога.
+        assert not (tmp_path / "p1" / f"{content_hash(b'feed bytes')}.bin").exists()
+    finally:
+        store.close()
+
+
+def test_directory_poll_failure_marks_source_unavailable(tmp_path: Path) -> None:
+    """Сбой поллинга → терминальный ``FAILED source_unavailable`` (не «тихо пусто»), ``PARTIAL``."""
+    store = SqliteStore(":memory:")
+    _make_run(store)
+    poller = _FakePoller(raising=RuntimeError("feed down"))
+    crawler = _Crawler({})
+    try:
+        result = _build(
+            tmp_path,
+            pages={},
+            urls={"p1": [FEED_URL]},
+            crawler=crawler,
+            crawl_sources=_feed_sources(),
+            pollers={"feed": poller},
+            store=store,
+            run_id=RUN_ID,
+        )
+        assert crawler.calls == []  # записей нет — фетча нет
+        feed_item = {i.url: i for i in _items(store)}[FEED_URL]
+        assert feed_item.status is CrawlItemStatus.FAILED
+        assert feed_item.error_kind == FailureKind.SOURCE_UNAVAILABLE.value
+        assert feed_item.raw_path in (None, "")
+        assert any("poll" in err and "feed down" in err for err in result.errors)
+        session = store.get_crawl_session(SESSION_ID)
+        assert session is not None and session.status is CrawlSessionStatus.PARTIAL
+    finally:
+        store.close()
+
+
+def test_directory_bad_params_marks_source_unavailable(tmp_path: Path) -> None:
+    """Некорректные ``params`` (``validate_params``) → ``FAILED`` без вызова ``poll``."""
+    store = SqliteStore(":memory:")
+    _make_run(store)
+    poller = _FakePoller([FeedEntry(url=ENTRY_1)], params_problems=["limit должен быть > 0"])
+    try:
+        result = _build(
+            tmp_path,
+            pages={},
+            urls={"p1": [FEED_URL]},
+            crawler=_Crawler({ENTRY_1: b"x"}),
+            crawl_sources=_feed_sources(),
+            pollers={"feed": poller},
+            store=store,
+            run_id=RUN_ID,
+        )
+        assert poller.calls == []  # до поллинга дело не дошло
+        feed_item = {i.url: i for i in _items(store)}[FEED_URL]
+        assert feed_item.status is CrawlItemStatus.FAILED
+        assert feed_item.error_kind == FailureKind.SOURCE_UNAVAILABLE.value
+        assert any("limit должен быть > 0" in err for err in result.errors)
+    finally:
+        store.close()
+
+
+def test_directory_missing_poller_marks_source_unavailable(tmp_path: Path) -> None:
+    """kind-каталог без сконфигурированного поллера → ``FAILED source_unavailable``."""
+    store = SqliteStore(":memory:")
+    _make_run(store)
+    try:
+        result = _build(
+            tmp_path,
+            pages={},
+            urls={"p1": [FEED_URL]},
+            crawler=_Crawler({}),
+            crawl_sources=_feed_sources(),
+            pollers=None,
+            store=store,
+            run_id=RUN_ID,
+        )
+        feed_item = {i.url: i for i in _items(store)}[FEED_URL]
+        assert feed_item.status is CrawlItemStatus.FAILED
+        assert feed_item.error_kind == FailureKind.SOURCE_UNAVAILABLE.value
+        assert any("поллер не сконфигурирован" in err for err in result.errors)
+    finally:
+        store.close()
+
+
+def test_directory_entry_ssrf_dropped(tmp_path: Path) -> None:
+    """Запись на приватный/метаданные-IP отбрасывается SSRF-политикой; безопасная — добывается."""
+    store = SqliteStore(":memory:")
+    _make_run(store)
+    evil = "http://169.254.169.254/latest/meta-data"
+    poller = _FakePoller([FeedEntry(url=evil), FeedEntry(url=ENTRY_1)])
+    crawler = _Crawler({ENTRY_1: b"safe"})
+    try:
+        result = _build(
+            tmp_path,
+            pages={},
+            urls={"p1": [FEED_URL]},
+            crawler=crawler,
+            crawl_sources=_feed_sources(),
+            pollers={"feed": poller},
+            store=store,
+            run_id=RUN_ID,
+        )
+        assert [u for u, _ in crawler.calls] == [ENTRY_1]
+        assert any("SSRF" in err and evil in err for err in result.errors)
+        urls = {i.url for i in _items(store)}
+        assert evil not in urls
+        assert ENTRY_1 in urls
+    finally:
+        store.close()
+
+
+def test_directory_duplicate_entries_deduped(tmp_path: Path) -> None:
+    """Дубли записей каталога дедуплицируются с сохранением порядка → один фетч."""
+    store = SqliteStore(":memory:")
+    _make_run(store)
+    poller = _FakePoller(
+        [FeedEntry(url=ENTRY_1), FeedEntry(url=ENTRY_1), FeedEntry(url=ENTRY_2)]
+    )
+    crawler = _Crawler({ENTRY_1: b"one", ENTRY_2: b"two"})
+    try:
+        _build(
+            tmp_path,
+            pages={},
+            urls={"p1": [FEED_URL]},
+            crawler=crawler,
+            crawl_sources=_feed_sources(),
+            pollers={"feed": poller},
+            store=store,
+            run_id=RUN_ID,
+        )
+        assert [u for u, _ in crawler.calls] == [ENTRY_1, ENTRY_2]
+    finally:
+        store.close()
+
+
+def test_directory_entries_not_re_expanded(tmp_path: Path) -> None:
+    """Один уровень развёртки: записи каталога повторно не расширяются (поллер зовётся раз)."""
+    store = SqliteStore(":memory:")
+    _make_run(store)
+    poller = _FakePoller([FeedEntry(url=ENTRY_1)])
+    crawler = _Crawler({ENTRY_1: b"one"})
+    try:
+        _build(
+            tmp_path,
+            pages={},
+            urls={"p1": [FEED_URL]},
+            crawler=crawler,
+            crawl_sources=_feed_sources(),
+            pollers={"feed": poller},
+            store=store,
+            run_id=RUN_ID,
+        )
+        # Записи унаследовали kind="feed", но повторно не поллились.
+        assert [c[0] for c in poller.calls] == [FEED_URL]
+        assert [i.kind for i in _items(store) if i.url == ENTRY_1] == ["feed"]
+    finally:
+        store.close()
+
+
+def test_non_directory_kind_unchanged(tmp_path: Path) -> None:
+    """kind="web" (не каталог) обрабатывается как обычная страница; поллер не вызывается."""
+    store = SqliteStore(":memory:")
+    _make_run(store)
+    poller = _FakePoller([FeedEntry(url=ENTRY_1)])
+    crawler = _Crawler({URL_P1_A: b"page"})
+    try:
+        result = _build(
+            tmp_path,
+            pages={},
+            urls={"p1": [URL_P1_A]},
+            crawler=crawler,
+            crawl_sources=CrawlSourcesConfig(
+                products={"p1": CrawlSource(engine="http", kind="web")}
+            ),
+            pollers={"feed": poller},
+            store=store,
+            run_id=RUN_ID,
+        )
+        assert poller.calls == []
+        assert poller.validated == []
+        assert [u for u, _ in crawler.calls] == [URL_P1_A]
+        assert result.errors == []
+    finally:
+        store.close()
+
+
+def test_pollers_none_web_unchanged(tmp_path: Path) -> None:
+    """``pollers=None`` + kind="web" — прежний путь без обращения к поллерам."""
+    store = SqliteStore(":memory:")
+    _make_run(store)
+    crawler = _Crawler({URL_P1_A: b"page"})
+    try:
+        result = _build(
+            tmp_path,
+            pages={},
+            urls={"p1": [URL_P1_A]},
+            crawler=crawler,
+            crawl_sources=CrawlSourcesConfig(
+                products={"p1": CrawlSource(engine="http", kind="web")}
+            ),
+            pollers=None,
+            store=store,
+            run_id=RUN_ID,
+        )
+        assert [u for u, _ in crawler.calls] == [URL_P1_A]
+        assert result.errors == []
+    finally:
+        store.close()
+
+
+def test_directory_max_attempts_exhausted_skips_poll(tmp_path: Path) -> None:
+    """``max_attempts`` исчерпан на URL каталога → поллинг не выполняется, ``attempts_exhausted``."""
+    store = SqliteStore(":memory:")
+    _make_run(store)
+    failing = _FakePoller(raising=RuntimeError("down"))
+    try:
+        _build(
+            tmp_path,
+            pages={},
+            urls={"p1": [FEED_URL]},
+            crawler=_Crawler({}),
+            crawl_sources=_feed_sources(),
+            pollers={"feed": failing},
+            store=store,
+            run_id=RUN_ID,
+        )
+        prior = {i.url: i for i in _items(store)}[FEED_URL]
+        assert prior.status is CrawlItemStatus.FAILED and prior.attempts == 1
+
+        working = _FakePoller([FeedEntry(url=ENTRY_1)])
+        result = _build(
+            tmp_path,
+            pages={},
+            urls={"p1": [FEED_URL]},
+            crawler=_Crawler({ENTRY_1: b"x"}),
+            crawl_sources=_feed_sources(),
+            pollers={"feed": working},
+            store=store,
+            run_id=RUN_ID,
+            max_attempts=1,
+        )
+        assert working.calls == []  # исчерпано — поллинга нет
+        assert any("max_attempts" in err for err in result.errors)
+        row = {i.url: i for i in _items(store)}[FEED_URL]
+        assert row.error_kind == "attempts_exhausted"
+        assert row.attempts == 1
+    finally:
+        store.close()
+
+
+def test_directory_entry_equal_to_catalog_url_skipped(tmp_path: Path) -> None:
+    """N2: запись с URL == URL каталога (self-listing фид) не фетчится/не ретейнится повторно."""
+    store = SqliteStore(":memory:")
+    _make_run(store)
+    poller = _FakePoller([FeedEntry(url=FEED_URL), FeedEntry(url=ENTRY_1)])
+    crawler = _Crawler({ENTRY_1: b"entry one"})
+    try:
+        result = _build(
+            tmp_path,
+            pages={},
+            urls={"p1": [FEED_URL]},
+            crawler=crawler,
+            crawl_sources=_feed_sources(),
+            pollers={"feed": poller},
+            store=store,
+            run_id=RUN_ID,
+        )
+        # Каталог-URL не подставляется как работа повторно: фетчится только запись.
+        assert [u for u, _ in crawler.calls] == [ENTRY_1]
+        items = {i.url: i for i in _items(store)}
+        feed_item = items[FEED_URL]
+        assert feed_item.status is CrawlItemStatus.FETCHED
+        assert not feed_item.raw_path  # каталог не ретейнится
+        assert items[ENTRY_1].status is CrawlItemStatus.FETCHED
+        assert len(_build_of(result).docs) == 1
+    finally:
+        store.close()
+
+
+def test_real_poller_catalog_bytes_not_retained_entry_retained(tmp_path: Path) -> None:
+    """N3 (I19): реальный ``LocalFeedPoller`` — байты каталога НЕ ретейнятся, байты записи — да."""
+    store = SqliteStore(":memory:")
+    _make_run(store)
+    rss = (
+        b'<?xml version="1.0"?><rss version="2.0"><channel>'
+        b"<item><title>E</title><link>https://docs.test/p1/entry-1</link></item>"
+        b"</channel></rss>"
+    )
+    entry_url = "https://docs.test/p1/entry-1"
+    entry_bytes = b"entry raw bytes"
+    feed_url = "https://docs.test/p1/feed"
+    crawler = _Crawler({feed_url: rss, entry_url: entry_bytes})
+    try:
+        result = _build(
+            tmp_path,
+            pages={},
+            urls={"p1": [feed_url]},
+            crawler=crawler,
+            crawl_sources=_feed_sources(),
+            pollers={"feed": LocalFeedPoller(crawler)},
+            store=store,
+            run_id=RUN_ID,
+        )
+        items = {i.url: i for i in _items(store)}
+        feed_item = items[feed_url]
+        assert feed_item.status is CrawlItemStatus.FETCHED
+        assert feed_item.raw_path is None  # каталог — не контент/evidence (I19)
+        # Байты каталога отсутствуют под corpus_raw/<product>/.
+        assert not (tmp_path / "p1" / f"{content_hash(rss)}.bin").exists()
+        # Байты записи присутствуют и ретейнятся (I19).
+        entry_bin = tmp_path / "p1" / f"{content_hash(entry_bytes)}.bin"
+        assert entry_bin.exists() and entry_bin.read_bytes() == entry_bytes
+        assert items[entry_url].raw_path and Path(items[entry_url].raw_path).is_file()
+        build = _build_of(result)
+        assert len(build.docs) == 1
+        assert build.docs[0].content_hash == content_hash(entry_bytes)
     finally:
         store.close()

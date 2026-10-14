@@ -28,6 +28,8 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from typing import Any
 from urllib.parse import urljoin
 
@@ -39,8 +41,10 @@ from core.util.sanitize import strip_control_chars
 __all__ = [
     "FeedEntry",
     "FeedParseError",
+    "entry_not_before",
     "parse_feed",
     "parse_channel_document",
+    "parse_instant",
 ]
 
 #: Пространства имён, значимые для детекции (``dc:date`` ловится по локальному имени).
@@ -83,6 +87,53 @@ class FeedEntry:
     guid: str | None = None
     published_at: str | None = None
     title: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# Метки времени публикации (общая семантика ``since`` для local/edge)
+# ---------------------------------------------------------------------------
+
+
+def parse_instant(value: str) -> datetime | None:
+    """Разбирает метку времени (ISO-8601 либо RFC822) в aware ``datetime`` (UTC).
+
+    Общая семантика фильтра ``since`` для локального и edge-поллеров (N1): обе стороны
+    обязаны трактовать RFC822/ISO (в т.ч. ``Z``/``+00:00``) единообразно, а не строковым
+    сравнением. ``None`` — неразборчивое значение (вызывающий сам решает: ``validate_params``
+    отвергает, а фильтр ``since`` — нет, консервативно сохраняя запись).
+    """
+    text = value.strip()
+    if not text:
+        return None
+    iso = text[:-1] + "+00:00" if text.endswith(("Z", "z")) else text
+    instant: datetime | None
+    try:
+        instant = datetime.fromisoformat(iso)
+    except ValueError:
+        try:
+            instant = parsedate_to_datetime(text)
+        except (TypeError, ValueError):
+            return None
+    if instant is None:
+        return None
+    if instant.tzinfo is None:
+        instant = instant.replace(tzinfo=timezone.utc)
+    return instant
+
+
+def entry_not_before(entry: FeedEntry, threshold: datetime) -> bool:
+    """Оставить ли запись при пороге ``since``: неизвестное время — сохраняем.
+
+    Записи без ``published_at`` или с неразборчивой датой **сохраняются** (нельзя
+    доказать, что они старее порога); отбрасываются лишь доказуемо старые. Сравнение —
+    по разобранным инстантам (:func:`parse_instant`), а не лексикографически (N1).
+    """
+    if not entry.published_at:
+        return True
+    instant = parse_instant(entry.published_at)
+    if instant is None:
+        return True
+    return instant >= threshold
 
 
 # ---------------------------------------------------------------------------

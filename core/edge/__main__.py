@@ -20,6 +20,10 @@
   процессах через module-level :func:`crawler_factory` (адаптеры не picklable, Playwright
   не форк-безопасен). Планировщик инъецируется в :func:`serve` (``scheduler=``): сервер
   запускает его до обслуживания и останавливает в ``finally``.
+* **поллер фидов** — :class:`core.edge.poller.FeedPollService` (Wave 5.1) поверх того же
+  краулер-диспетчера: обслуживает ``crawl/poll`` (фетчит **только каталоговый документ**
+  ленты/канала, возвращает ссылки-записи; контент записей — через обычный ``fetch``/
+  ``crawl/collect``). Инъецируется в ``EdgeGateway`` (``poller=``).
 
 Флаги: ``serve [--config FILE] [--host H] [--port P] [--check]``. ``--check`` собирает
 конфиг+адаптеры+gateway+планировщик и выходит без привязки сокета **и** без старта
@@ -47,6 +51,7 @@ from core.adapters.extract_document import DoclingDocumentExtractor
 from core.adapters.extract_html import HtmlExtractor
 from core.edge.config import EdgeRuntimeConfig, load_edge_runtime_config
 from core.edge.crawler_factory import crawler_factory
+from core.edge.poller import FeedPollService
 from core.edge.scheduler import EdgeScheduler
 from core.edge.server import EdgeGateway, serve
 from core.ports.chunker import ChunkerPort
@@ -206,15 +211,21 @@ def _build_gateway(
 
     Возвращает ``(gateway, crawlers, chunker)``: ``crawlers``/``chunker`` — для статуса
     запуска (чанкер пока не протянут в шов: нарезка в ядре, I19); gateway публикует
-    краулер-диспетчер и композит-экстрактор.
+    краулер-диспетчер (:class:`_EngineCrawler`) и композит-экстрактор.
+
+    Диспетчер строится **один раз** и передаётся и в ``EdgeGateway``, и в
+    :class:`FeedPollService` (поллер фетчит каталоговый документ тем же диспетчером,
+    что и ``fetch``): единая точка выбора движка по оси ``fetch``.
     """
     crawlers = _build_crawlers(config)
+    dispatcher = _EngineCrawler(crawlers)
     extractor: ExtractorPort = _EdgeExtractor()
     chunker: ChunkerPort = MarkdownChunkerPort()
     gateway = EdgeGateway(
-        _EngineCrawler(crawlers),
+        dispatcher,
         extractor,
         schema_version=config.schema_version,
+        poller=FeedPollService(dispatcher),
     )
     return gateway, crawlers, chunker
 
@@ -349,7 +360,7 @@ def main(argv: list[str] | None = None) -> int:
             f"schema={config.schema_version} engines={engines} "
             f"extractor={gateway.capabilities()['extractor_version']} "
             f"state_dir={config.state_dir} blob_dir={config.resolved_blob_dir} "
-            f"scheduler=ready\n"
+            f"scheduler=ready poller=ready\n"
         )
         scheduler.close()  # воркеры не стартовали; соединение с БД не открывалось
         return EXIT_OK

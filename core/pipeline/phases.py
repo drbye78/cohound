@@ -368,6 +368,8 @@ def build_phases(
             # единый владелец (RateLimiter), протягивается composition root'ом.
             crawl_sources=crawl_sources,
             crawlers=getattr(ctx.ports, "crawlers", None),
+            # Phase 5.2: карта ``kind → PollPort`` для источников-каталогов (feed/channel).
+            pollers=getattr(ctx.ports, "pollers", None),
             rate_limiter=rate_limiter,
             # Phase 3.3: исполнитель краула (``split``/edge-планировщик). ``None`` → локальный
             # per-URL путь (``crawler``/``crawlers``); при наличии — краул через шов.

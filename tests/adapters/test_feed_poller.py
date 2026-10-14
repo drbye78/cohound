@@ -365,3 +365,30 @@ def test_remote_validate_params_ok() -> None:
     assert RemoteFeedPoller(_FakeGateway(_poll_response([]))).validate_params(
         "channel", {"limit": 1}
     ) == []
+
+
+# ---------------------------------------------------------------------------
+# N1: ``since`` — разбор метки, а не лексикографическое сравнение
+# ---------------------------------------------------------------------------
+
+#: RFC822-дата ``10 Oct 2026`` строково меньше порога ``2026-10-08…``, но по времени новее.
+_LEX_RSS = (
+    b'<?xml version="1.0"?><rss version="2.0"><channel>'
+    b"<item><link>https://docs.test/a</link>"
+    b"<pubDate>10 Oct 2026 00:00:00 GMT</pubDate></item>"
+    b"<item><link>https://docs.test/b</link>"
+    b"<pubDate>2026-10-20T00:00:00Z</pubDate></item>"
+    b"</channel></rss>"
+)
+
+
+def test_local_poll_since_parses_rfc822_not_lexicographic() -> None:
+    """N1: RFC822-запись новее ``since`` сохраняется (лексикографический фильтр отбросил бы)."""
+    poller = LocalFeedPoller(_FakeCrawler(_LEX_RSS))
+    entries = poller.poll(
+        FEED_URL,
+        kind="feed",
+        params={"since": "2026-10-08T00:00:00Z"},
+        plan=FetchPlan(),
+    )
+    assert _urls(entries) == ["https://docs.test/a", "https://docs.test/b"]
