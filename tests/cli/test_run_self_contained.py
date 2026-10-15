@@ -1,10 +1,10 @@
-"""Самодостаточность каталога прогона: снимок входов (``03`` §A.2).
+"""Самодостаточность каталога прогона: снимок входов в БД (``run_inputs``, P1).
 
-``cmd_run`` записывает в ``runs/{run_id}/`` иммутабельную копию ``run.yaml`` и снимок
-входов плана ``plan_inputs.json`` (каталог/веса/когорта). Последующие команды
-(``sensitivity``/``report``/``golden``) восстанавливают из них каталог **без** исходного
-пакета. Явные ``--run-yaml``/``--package`` сохраняют приоритет; при отсутствии обоих
-источников сохраняется прежний ГЭП-путь.
+``cmd_run`` пишет в БД прогона снимок плановых входов (каталог/веса/когорта) и
+производный экспорт ``runs/{run_id}/plan_inputs.json`` **и** ``run.yaml``. Последующие
+команды (``sensitivity``/``report``/``golden``) восстанавливают каталог из БД **без**
+исходного пакета и **без** side-файла. Явные ``--run-yaml``/``--package`` сохраняют
+приоритет; при отсутствии записи в БД остаётся пустой каталог и заметка-ограничение.
 
 Фикстуры категорийно нейтральны (§1.3): ``tests/fixtures/e2e`` + ``tests/config/fixtures``.
 Сеть не используется: прогон доходит лишь до человеческого гейта ``g1``.
@@ -127,15 +127,22 @@ def test_second_run_does_not_overwrite_differing_run_yaml(
 # ---------------------------------------------------------------------------
 
 
-def test_sensitivity_restores_from_snapshot(
+def test_sensitivity_restores_from_db(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    """Источник каталога — БД прогона (``run_inputs``); side-файл не обязателен."""
+    from core.cli.wiring import run_db_path
+
     runs_dir = tmp_path / "runs"
     run_id = "sc-sens"
     assert main(run_argv(E2E_FIXTURES, run_id=run_id, runs_dir=runs_dir)) == EXIT_BLOCKED
     capsys.readouterr()
 
-    # Ни --run-yaml, ни --package: единственный источник — снимок прогона.
+    # Убираем производный экспорт: БД остаётся единственным источником (регрессия P1).
+    (runs_dir / run_id / "plan_inputs.json").unlink()
+    assert run_db_path(runs_dir, run_id).exists()
+
+    # Ни --run-yaml, ни --package: единственный источник — БД прогона.
     code = main(
         ["sensitivity", "--runs-dir", str(runs_dir), "--run-id", run_id, "--json"]
     )
@@ -143,14 +150,14 @@ def test_sensitivity_restores_from_snapshot(
     payload = json_out(capsys)
     assert payload["run_id"] == run_id
     notes = _notes(payload)
-    assert "plan_inputs.json" in notes
-    assert "ГЭП" not in notes
+    assert "БД прогона" in notes
+    assert "отсутствуют в БД прогона" not in notes
 
 
-def test_sensitivity_restores_from_snapshot_via_db_parent(
+def test_sensitivity_restores_from_db_via_db_parent(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """``--db runs/{run_id}/cohound.db`` выводит каталог прогона из родителя БД."""
+    """``--db runs/{run_id}/cohound.db`` берёт каталог из БД того же прогона."""
     runs_dir = tmp_path / "runs"
     run_id = "sc-db-parent"
     assert main(run_argv(E2E_FIXTURES, run_id=run_id, runs_dir=runs_dir)) == EXIT_BLOCKED
@@ -167,10 +174,10 @@ def test_sensitivity_restores_from_snapshot_via_db_parent(
         ]
     )
     assert code == EXIT_OK
-    assert "plan_inputs.json" in _notes(json_out(capsys))
+    assert "БД прогона" in _notes(json_out(capsys))
 
 
-def test_report_restores_from_snapshot(
+def test_report_restores_from_db(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     runs_dir = tmp_path / "runs"
@@ -194,12 +201,12 @@ def test_report_restores_from_snapshot(
     assert code == EXIT_OK
     payload = json_out(capsys)
     notes = _notes(payload)
-    assert "plan_inputs.json" in notes
-    assert "ГЭП" not in notes
+    assert "БД прогона" in notes
+    assert "отсутствуют в БД прогона" not in notes
     assert Path(payload["artifacts"]["manifest"]).exists()
 
 
-def test_golden_restores_from_snapshot(
+def test_golden_restores_from_db(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     runs_dir = tmp_path / "runs"
@@ -208,7 +215,7 @@ def test_golden_restores_from_snapshot(
     capsys.readouterr()
 
     # Код возврата зависит от вердиктов (ячеек нет → приёмка не пройдена); проверяем
-    # именно источник каталога: снимок использован, ГЭП-заметки нет.
+    # именно источник каталога: БД использована, заметки-ограничения нет.
     main(
         [
             "golden",
@@ -223,11 +230,43 @@ def test_golden_restores_from_snapshot(
     )
     payload = json_out(capsys)
     notes = _notes(payload)
-    assert "plan_inputs.json" in notes
-    assert "ГЭП" not in notes
+    assert "БД прогона" in notes
+    assert "отсутствуют в БД прогона" not in notes
 
 
-def test_explicit_inputs_take_priority_over_snapshot(
+def test_run_persists_plan_inputs_to_db(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """``cmd_run`` пишет снимок плановых входов в ``run_inputs`` (P1): payload + sha256."""
+    from core.cli.wiring import run_db_path
+    from core.store.sqlite_store import SqliteStore
+
+    runs_dir = tmp_path / "runs"
+    run_id = "sc-db-row"
+    assert main(run_argv(E2E_FIXTURES, run_id=run_id, runs_dir=runs_dir)) == EXIT_BLOCKED
+    capsys.readouterr()
+
+    store = SqliteStore(run_db_path(runs_dir, run_id))
+    try:
+        payload = store.read_plan_inputs(run_id)
+        row = store.conn.execute(
+            "SELECT snapshot_version, payload_sha256 FROM run_inputs WHERE run_id = ?",
+            (run_id,),
+        ).fetchone()
+    finally:
+        store.close()
+
+    assert payload is not None
+    assert payload["run_id"] == run_id
+    assert payload["package_id"] == "e2e"
+    assert {row_["param_id"] for row_ in payload["params"]} == {"feature.alpha"}
+    assert payload["renormalized_weights"] == {"m1": 1.0}
+    assert row is not None
+    assert row["snapshot_version"] == PLAN_INPUTS_SNAPSHOT_VERSION
+    assert row["payload_sha256"]  # детерминированный дайджест записан
+
+
+def test_explicit_inputs_take_priority_over_db(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     runs_dir = tmp_path / "runs"
@@ -252,29 +291,35 @@ def test_explicit_inputs_take_priority_over_snapshot(
     )
     assert code == EXIT_OK
     payload = json_out(capsys)
-    # Явный источник: ни restore-заметки, ни ГЭП (снимок не читался).
+    # Явный источник: ни restore-заметки, ни ограничения (БД/снимок не читались).
     assert payload["notes"] == []
 
 
-def test_missing_snapshot_keeps_gap_note(
+def test_absent_run_inputs_keeps_limit_note(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Без снимка и без явных входов сохраняется прежний ГЭП-путь (не выдумываем)."""
-    from core.cli.wiring import run_db_path  # локально: helper раскладки
+    """Без записи ``run_inputs`` и без явных входов — пустой каталог + заметка (не выдумываем)."""
+    from core.cli.wiring import run_db_path
+    from core.store.sqlite_store import SqliteStore
 
     runs_dir = tmp_path / "runs"
     run_id = "sc-gap"
     assert main(run_argv(E2E_FIXTURES, run_id=run_id, runs_dir=runs_dir)) == EXIT_BLOCKED
     capsys.readouterr()
 
-    (runs_dir / run_id / "plan_inputs.json").unlink()
-    assert run_db_path(runs_dir, run_id).exists()
+    # Эмулируем прогон без персиста входов: удаляем запись из БД.
+    store = SqliteStore(run_db_path(runs_dir, run_id))
+    try:
+        with store.conn:
+            store.conn.execute("DELETE FROM run_inputs WHERE run_id = ?", (run_id,))
+    finally:
+        store.close()
 
     code = main(
         ["sensitivity", "--runs-dir", str(runs_dir), "--run-id", run_id, "--json"]
     )
     assert code == EXIT_OK
-    assert "ГЭП" in _notes(json_out(capsys))
+    assert "отсутствуют в БД прогона" in _notes(json_out(capsys))
 
 
 # ---------------------------------------------------------------------------

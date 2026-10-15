@@ -100,12 +100,13 @@ def run(args: argparse.Namespace) -> int:
     if not report.ok:
         raise LintFailure(report.blocking, report.warnings)
 
-    # R7 (07 §7): сведения о профиле зон для манифеста прогона. ГЭП: CLI W5 ещё не
-    # собирает run_manifest.yaml (это W10/T10.4), поэтому поля добавляются в отчёт
-    # прогона (`deploy`) и готовы для edge_capabilities через manifest_deploy_fields.
-    # Конфиг загружается всегда: секция ``crawl`` (03 §D.5/D.6) — операционная политика
-    # HTTP-краулинга корпуса и в профиле ``local``; для ``split`` дополнительно
-    # валидируется шов и собираются deploy-поля манифеста.
+    # R7 (07 §7): деплой-провенанс манифеста прогона. Конфиг загружается всегда:
+    # секция ``crawl`` (03 §D.5/D.6) — операционная политика HTTP-краулинга корпуса и в
+    # профиле ``local``; для ``split`` дополнительно валидируется шов. Сам деплой-провенанс
+    # манифеста течёт через ``_resolve_phases(deploy_config=…)`` → фазу Ш9 (run_manifest.yaml
+    # и строка ``runs``); здесь те же поля кладутся в отчёт прогона (``deploy``) для
+    # наблюдаемости CLI. Версии edge-компонентов (``/v1/capabilities``) cmd_run не собирает —
+    # пусто, если не известны (значения не выдумываются).
     deploy_fields: dict[str, Any] = {}
     deploy_config = load_deploy_config(None)
     if args.profile == SPLIT_PROFILE:
@@ -114,7 +115,7 @@ def run(args: argparse.Namespace) -> int:
                 "профиль split требует deploy-конфиг с profile split/split-hardened "
                 "(07 §6/§7)"
             )
-        deploy_fields = manifest_deploy_fields(deploy_config)
+    deploy_fields = manifest_deploy_fields(deploy_config)
 
     # План строится ОДИН раз здесь и переиспользуется фазами: повторный ``plan()`` внутри
     # фазы дал бы иной ``run_id``/двойной линт (см. core/pipeline/phases.py). ``run_id``
@@ -154,6 +155,7 @@ def run(args: argparse.Namespace) -> int:
         inputs=inputs,
         plan=run_plan,
         ports=ports,
+        deploy_config=deploy_config,
         paths=getattr(args, "paths", None),
         render_modes=render_modes,
         urls=corpus_urls,
@@ -183,13 +185,16 @@ def run(args: argparse.Namespace) -> int:
     store = build_store(db_path, profile=args.profile)
     try:
         _ensure_run(store, run_id, inputs)
-        # 03 §A.2: снимок входов прогона (иммутабельная копия run.yaml + plan_inputs.json)
-        # записывается ДО исполнения фаз, чтобы последующие команды были самодостаточны.
-        # Сбой снимка не роняет прогон: фиксируется в instrumentation_errors и не
-        # подменяет код возврата.
+        # 03 §A.2 / P1: снимок входов прогона (иммутабельная копия run.yaml +
+        # производный plan_inputs.json) и источник истины — таблица ``run_inputs`` в БД
+        # (каталог/веса/когорта). Пишется ДО исполнения фаз, чтобы последующие команды
+        # были самодостаточны без исходного пакета. Сбой снимка не роняет прогон:
+        # фиксируется в instrumentation_errors и не подменяет код возврата.
         try:
             instrumentation_errors.extend(
-                _snapshot_run_inputs(args, run_id, inputs=inputs, run_plan=run_plan)
+                _snapshot_run_inputs(
+                    args, run_id, inputs=inputs, run_plan=run_plan, store=store
+                )
             )
         except Exception as exc:  # noqa: BLE001 — самодостаточность не роняет прогон
             instrumentation_errors.append(

@@ -7,7 +7,7 @@
   ``violations``/``notes``); фильтр ``--tier`` до оценки; argparse-обязательные
   аргументы;
 * ``report`` — пересборка артефактов из БД в ``{out}/{run_id}/outputs/`` (``--json``
-  отдаёт пути), вывод заметок ГЭП без ``--run-yaml``/``--package``, пометка
+  отдаёт пути), вывод заметок-ограничений без ``--run-yaml``/``--package``, пометка
   незаполненного манифеста, резолв ``--runs-dir`` и вывод ``run_id`` по единственному
   прогону.
 
@@ -113,7 +113,7 @@ def test_golden_pass_returns_ok(
     assert payload["total"] == 2
     assert payload["has_absent_stratum"] is True
     assert payload["violations"] == []
-    # ГЭП: каталог не передан → явная заметка.
+    # Нет --run-yaml/--package и нет записи run_inputs → явная заметка-ограничение.
     assert payload["notes"]
 
 
@@ -291,9 +291,10 @@ def test_report_writes_artifacts(
     assert Path(artifacts["preliminary_findings"]).exists()
 
 
-def test_report_without_package_notes_gap_and_still_writes(
+def test_report_without_run_inputs_notes_limit_and_still_writes(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    """Прогон без записи ``run_inputs`` → пустой каталог и заметка-ограничение."""
     db = tmp_path / "cohound.db"
     _seed_run(db, "run.r", cells=[(PRODUCT_A, PARAM_A, Status.OK)])
     out = tmp_path / "runs"
@@ -302,7 +303,7 @@ def test_report_without_package_notes_gap_and_still_writes(
     assert code == EXIT_OK
     payload = json_out(capsys)
     assert payload["notes"]
-    assert any("ГЭП" in note for note in payload["notes"])
+    assert any("отсутствуют в БД прогона" in note for note in payload["notes"])
     assert Path(payload["artifacts"]["manifest"]).exists()
 
 

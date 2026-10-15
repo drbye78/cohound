@@ -12,7 +12,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = "3.3.0"
+SCHEMA_VERSION = "3.4.0"
 
 DDL = """
 PRAGMA journal_mode = WAL;
@@ -61,6 +61,10 @@ CREATE TABLE IF NOT EXISTS runs (
     crawl_provenance_json TEXT,                        -- §4.4/Phase 2: провенанс краула (сеансы/движки/дайджест)
     crawl_strategy        TEXT,                        -- §13/Backlog B: ось стратегии краула (execution_change)
     crawl_rate_limit      TEXT,                        -- §13/Backlog B: канон. форма rate_limit (execution_change)
+    ranking_epsilon       REAL,                        -- §6/B-1: порог неразличимости ранжирования
+    deploy_profile        TEXT,                        -- 07 §7: профиль доверенных зон (R7)
+    edge_schema_version   TEXT,                        -- 07 §7: версия контракта шва /v1/* (execution-class)
+    edge_capabilities_json TEXT,                       -- 07 §7: версии edge-компонентов gateway (R7)
     snapshot_date         TEXT,
     state                 TEXT
 );
@@ -226,6 +230,18 @@ CREATE TABLE IF NOT EXISTS registry_facts (
     fetched_at  TEXT
 );
 
+-- P1 (self-containment): снимок плановых входов прогона (каталог/веса/когорта) в БД.
+-- Источник истины для пост-хок команд (sensitivity/golden/report); side-файл
+-- plan_inputs.json — лишь производный экспорт. payload_sha256 — детерминированный
+-- дайджест канонической JSON-формы (§13/R7, diff-visible).
+CREATE TABLE IF NOT EXISTS run_inputs (
+    run_id           TEXT PRIMARY KEY,
+    snapshot_version INTEGER NOT NULL,
+    payload_json     TEXT NOT NULL,
+    payload_sha256   TEXT NOT NULL,
+    created_at       TEXT NOT NULL
+);
+
 -- Lane B (schema 3.0.0; removal — 3.1.0): сеанс краула — ядро-владеемое durable намерение +
 -- агрегированный прогресс. Счётчики сеанса поддерживаются транзакционно при записи элемента
 -- (см. SqliteStore). Legacy per-URL таблица попыток удалена в 3.1.0 (заменена сеансом краула).
@@ -372,6 +388,19 @@ def connect(db_path: str | Path = ":memory:") -> sqlite3.Connection:
         conn,
         "index_manifest",
         {"extractor_version": "TEXT", "content_digest": "TEXT"},
+    )
+    # DDL-миграция v3.4 (P1): деплой-провенанс манифеста (07 §7) и порог ранжирования
+    # (§6/B-1) — реальные колонки. Back-compat не требуется: forward-compat хелпер чтения
+    # удалён, старая БД получает колонки, значения остаются NULL до записи манифеста.
+    _ensure_columns(
+        conn,
+        "runs",
+        {
+            "ranking_epsilon": "REAL",
+            "deploy_profile": "TEXT",
+            "edge_schema_version": "TEXT",
+            "edge_capabilities_json": "TEXT",
+        },
     )
     # DDL-миграция v3.0 (Lane B): crawl_sessions/crawl_session_items создаются
     # `CREATE TABLE IF NOT EXISTS` в DDL — ALTER не нужен (новые таблицы), вызов

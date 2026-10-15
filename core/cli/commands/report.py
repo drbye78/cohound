@@ -38,8 +38,8 @@ def run(args: argparse.Namespace) -> int:
     ``{out}/{run_id}/outputs/`` (``--out``; дефолт — ``--runs-dir`` либо ``runs``).
 
     Каталог/веса/когорта восстанавливаются из явных ``--run-yaml`` + ``--package`` либо из
-    снимка прогона ``runs/{run_id}/plan_inputs.json``; лишь без обоих источников расчёт идёт
-    с пустым каталогом и явной заметкой о ГЭП.
+    снимка прогона в БД (``run_inputs``; ``cmd_run`` пишет его — прогон самодостаточен);
+    лишь без обоих источников расчёт идёт с пустым каталогом и явной заметкой-ограничением.
     Если ``read_manifest`` вернул незаполненный манифест (финальная фаза ``report`` не
     завершалась), это также сообщается в ``notes`` — артефакты строятся из текущего
     состояния ячеек, а не выдумываются версии.
@@ -58,10 +58,10 @@ def run(args: argparse.Namespace) -> int:
             run_id = _infer_run_id(store)
         manifest = store.read_manifest(run_id)
         catalog, module_weights, cohort, notes = _restore_plan_inputs(
-            args, run_id, purpose="report", run_dir=Path(db_path).parent
+            args, run_id, purpose="report", store=store
         )
         # §6/B-3a: при наличии когорты вселенная scope задаёт знаменатель Coverage;
-        # без когорты — legacy-режим (по существующим ячейкам) + ГЭП-заметка.
+        # без когорты — legacy-режим (по существующим ячейкам) + заметка-ограничение.
         universe = (
             scope_universe(catalog, [entry.product_id for entry in cohort.entries])
             if cohort is not None

@@ -8,8 +8,9 @@
 * ``hound deploy-check``: успешный путь (health+capabilities валидны), недостижимость
   (ненулевой код), несовпадение ``schema_version``, нарушение формы конверта, ``--json``;
 * сверку конвертов транспорта с **опубликованным** контрактом ``core/edge/seam_schema``;
-* ГЭП манифеста: ``manifest_deploy_fields`` кладёт ``deploy_profile``/``edge_schema_version``
-  в ``edge_capabilities`` (отдельных доменных полей нет).
+* деплой-провенанс манифеста: ``manifest_deploy_fields`` даёт ``deploy_profile``/
+  ``edge_schema_version``/``edge_capabilities`` и они текут через ``run`` в фазы Ш9
+  (``run_manifest.yaml`` + строка ``runs``) для профилей ``local`` и ``split``.
 
 Данные категорийно-нейтральны (§1.3). Сеть не используется: ``transport`` зеркалит
 edge-сервер, как в ``tests/edge/``.
@@ -47,7 +48,12 @@ from core.edge.seam_schema import SEAM_SCHEMA_VERSION, validate_envelope, valida
 from core.pipeline import Ports
 from core.ports.search import SearchQuery
 from tests.helpers.output import json_out
-from tests.helpers.packages import write_text
+from tests.helpers.packages import (
+    capturing_factory,
+    run_argv,
+    valid_package,
+    write_text,
+)
 
 # ---------------------------------------------------------------------------
 # Фикстуры и швы (категорийно-нейтральные)
@@ -483,7 +489,7 @@ def test_deploy_check_gateway_factory_injection(
 
 
 # ---------------------------------------------------------------------------
-# Сверка с опубликованным контрактом и ГЭП манифеста
+# Сверка с опубликованным контрактом и деплой-провенанс манифеста
 # ---------------------------------------------------------------------------
 
 
@@ -498,16 +504,67 @@ def test_transport_envelopes_match_published_contract() -> None:
     assert validate_payload("capabilities", caps["payload"]) == []
 
 
-def test_manifest_deploy_fields_gap_documented() -> None:
-    """ГЭП: отдельного доменного поля нет — поля идут в ``edge_capabilities``."""
+def test_manifest_deploy_fields_structured() -> None:
+    """``manifest_deploy_fields`` даёт раздельные поля манифеста + версии edge (07 §7)."""
     config = _split_config()
     fields = manifest_deploy_fields(config)
-    assert fields == {"deploy_profile": "split", "edge_schema_version": SEAM_SCHEMA_VERSION}
+    assert fields == {
+        "deploy_profile": "split",
+        "edge_schema_version": SEAM_SCHEMA_VERSION,
+        "edge_capabilities": {},
+    }
 
-    merged = manifest_deploy_fields(config, {"crawler_version": "c-1"})
-    assert merged["deploy_profile"] == "split"
-    assert merged["edge_schema_version"] == SEAM_SCHEMA_VERSION
-    assert merged["crawler_version"] == "c-1"
+    with_caps = manifest_deploy_fields(config, {"crawler_version": "c-1"})
+    assert with_caps["deploy_profile"] == "split"
+    assert with_caps["edge_schema_version"] == SEAM_SCHEMA_VERSION
+    assert with_caps["edge_capabilities"] == {"crawler_version": "c-1"}
+
+
+def test_run_passes_local_deploy_provenance_to_phases(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``run`` (local) прокидывает деплой-поля в фазы Ш9 из resolved deploy-конфига.
+
+    Без ``config/deploy.yaml`` дефолт — ``local``; версии edge-компонентов неизвестны
+    (cmd_run не зовёт ``/v1/capabilities``) → ``edge_capabilities`` пуст (не выдумываем).
+    """
+    monkeypatch.chdir(tmp_path)
+    package = valid_package(tmp_path)
+    db = tmp_path / "cohound.db"
+    captured, factory = capturing_factory()
+
+    code = main(
+        run_argv(package, run_id="dp-local", db=db, until="plan"),
+        phases_factory=factory,
+    )
+    assert code == EXIT_OK
+    assert captured["deploy_profile"] == LOCAL_PROFILE
+    assert captured["edge_schema_version"] == SEAM_SCHEMA_VERSION
+    assert captured["edge_capabilities"] == {}
+
+
+def test_run_passes_split_deploy_provenance_to_phases(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``run --profile split`` прокидывает деплой-поля в фазы Ш9 (split deploy.yaml)."""
+    monkeypatch.chdir(tmp_path)
+    cfg_dir = tmp_path / "config"
+    cfg_dir.mkdir()
+    (cfg_dir / "deploy.yaml").write_text(_SPLIT_YAML, encoding="utf-8")
+    package = valid_package(tmp_path)
+    db = tmp_path / "cohound.db"
+    captured, factory = capturing_factory()
+
+    code = main(
+        run_argv(
+            package, run_id="dp-split", db=db, until="plan", extra=["--profile", "split"]
+        ),
+        phases_factory=factory,
+    )
+    assert code == EXIT_OK
+    assert captured["deploy_profile"] == SPLIT_PROFILE
+    assert captured["edge_schema_version"] == SEAM_SCHEMA_VERSION
+    assert captured["edge_capabilities"] == {}
 
 
 def test_default_deploy_config_is_local() -> None:

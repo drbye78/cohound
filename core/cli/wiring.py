@@ -136,8 +136,7 @@ SUPPORTED_SEARCH_ADAPTERS: tuple[str, ...] = (
 )
 
 #: Идентификатор реестра по умолчанию для remote-прокси (данные; ``deploy.yaml``
-#: в модели ``DeployConfig`` не несёт ``registry_fetchers`` — см. ГЭП в
-#: :func:`manifest_deploy_fields`).
+#: в модели ``DeployConfig`` не несёт ``registry_fetchers`` — берётся дефолт).
 DEFAULT_REGISTRY_ID = "edge"
 
 #: Префикс env-переменных LLM-разведки (``passport-scout``). Провайдер/модель — данные.
@@ -1038,28 +1037,27 @@ def build_adapters(
 def manifest_deploy_fields(
     deploy: DeployConfig, capabilities: Mapping[str, Any] | None = None
 ) -> dict[str, Any]:
-    """Поля развёртывания для ``run_manifest.yaml`` (R7; ``07`` §7).
+    """Поля деплой-провенанса манифеста прогона (R7; ``07`` §7).
 
-    Возвращает сведения, которые кладутся в ``RunManifest.edge_capabilities`` —
-    единственное существующее поле манифеста для версий edge:
+    Возвращает три раздельных ключа, каждый из которых ложится в собственное поле
+    :class:`~core.domain.models.RunManifest`:
 
     * ``deploy_profile`` — выбранный профиль зон (``local``/``split``/``split-hardened``);
-    * ``edge_schema_version`` — версия контракта шва (версионная граница §13);
-    * версии edge-компонентов из ``/v1/capabilities`` (если переданы).
+    * ``edge_schema_version`` — версия контракта шва (``/v1/*``); **execution-class**
+      провенанс (§13, не методологическая версия) — константа :data:`DEFAULT_SCHEMA_VERSION`;
+    * ``edge_capabilities`` — версии edge-компонентов из ``/v1/capabilities``
+      (если переданы; иначе пусто — значения не выдумываются).
 
-    **ГЭП (T13.4).** У доменного ``RunManifest`` (``core/domain/models.py``) нет
-    отдельных полей ``deploy_profile`` и ``edge_schema_version``; ``SqliteStore.
-    read_manifest`` не заполняет ``edge_capabilities``. Правка доменной модели/стора
-    вне write-scope T13.4, поэтому поля возвращаются этим хелпером и складываются в
-    ``edge_capabilities`` вызывающей стороной (манифест-писатель W10/T10.4).
+    Деплой-провенанс течёт в манифест композицией: ``DeployConfig`` → ``_resolve_phases``
+    → ``build_phases`` → фаза ``report`` → ``build_manifest`` → ``run_manifest.yaml``/
+    ``SqliteStore.persist_manifest``. Хелпер даёт единый источник этих полей для
+    композиции и диагностики шва.
     """
-    fields: dict[str, Any] = {
+    return {
         "deploy_profile": deploy.profile,
         "edge_schema_version": DEFAULT_SCHEMA_VERSION,
+        "edge_capabilities": dict(capabilities or {}),
     }
-    if capabilities:
-        fields.update(dict(capabilities))
-    return fields
 
 
 def build_runner(

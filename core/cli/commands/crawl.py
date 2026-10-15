@@ -290,6 +290,7 @@ def _execute_crawl(
             inputs=inputs,
             plan=run_plan,
             ports=ports,
+            deploy_config=deploy_config,
             paths=getattr(args, "paths", None),
             render_modes=render_modes,
             urls=corpus_urls,

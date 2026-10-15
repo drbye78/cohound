@@ -7,7 +7,7 @@
   (:class:`CrossCycleDiffError`, :data:`EXIT_ERROR`);
 * ``sensitivity`` — человекочитаемые оси/устойчивость и JSON-форма
   (``per_axis``/``stable``/``unstable_pairs``/``requested_ranking``/``computed_ranking``);
-  ГЭП-заметка при отсутствии ``--run-yaml``/``--package`` и её отсутствие при передаче;
+  заметка-ограничение при отсутствии ``--run-yaml``/``--package`` и её отсутствие при передаче;
 * argparse-отказ при отсутствующих обязательных аргументах.
 
 Работают на ``tmp_path`` и ``SqliteStore``; фикстуры категорийно нейтральны (§1.3).
@@ -231,7 +231,7 @@ def test_sensitivity_json_shape(
     assert isinstance(payload["unstable_pairs"], list)
     assert payload["requested_ranking"] == "capability_ranked"
     assert payload["computed_ranking"] in ("capability_ranked", "coverage_fallback")
-    # ГЭП: каталог/веса/когорта не переносятся в БД — заметка обязательна.
+    # Прогон посеян напрямую (без записи ``run_inputs``): каталог пуст → заметка обязательна.
     assert payload["notes"]
 
 

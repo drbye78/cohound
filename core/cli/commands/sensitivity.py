@@ -11,7 +11,6 @@ from __future__ import annotations
 from typing import Any
 
 import argparse
-from pathlib import Path
 
 from core.cli.context import (
     _add_common,
@@ -35,10 +34,9 @@ def run(args: argparse.Namespace) -> int:
 
     Бандл пересобирается :func:`core.pipeline.compute.compute` из ячеек прогона. Источник
     каталога/весов/когорты (приоритет): явные ``--run-yaml`` + ``--package``, иначе снимок
-    прогона ``runs/{run_id}/plan_inputs.json`` (``cmd_run`` пишет его — прогон
-    самодостаточен, ``03`` §A.2). Лишь при отсутствии обоих источников расчёт идёт с
-    **пустым** каталогом (вес ячейки = 1.0) и без когорты, а ограничение явно печатается
-    в поле ``notes`` (значения не выдумываются).
+    прогона в БД (``run_inputs``; ``cmd_run`` пишет его — прогон самодостаточен, ``03`` §A.2).
+    Лишь при отсутствии обоих источников расчёт идёт с **пустым** каталогом (вес ячейки = 1.0)
+    и без когорты, а ограничение явно печатается в поле ``notes`` (значения не выдумываются).
 
     Печатает оси ``per_axis``, флаг ``stable``, ``unstable_pairs`` и
     ``requested_ranking``/``computed_ranking`` (человеку или JSON).
@@ -52,7 +50,7 @@ def run(args: argparse.Namespace) -> int:
             run_id = _infer_run_id(store)
         store.read_manifest(run_id)  # валидация: прогон существует
         catalog, module_weights, cohort, notes = _restore_plan_inputs(
-            args, run_id, purpose="sensitivity", run_dir=Path(db_path).parent
+            args, run_id, purpose="sensitivity", store=store
         )
         # §6/B-3a: при наличии когорты Coverage считается по вселенной scope; иначе legacy.
         universe = (

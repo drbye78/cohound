@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
 from collections.abc import Callable, Mapping
@@ -114,8 +115,8 @@ __all__ = [
     "_load_render_modes",
     "_load_package_roles",
     "_restore_plan_inputs",
-    "_resolve_run_dir",
-    "_load_plan_inputs_snapshot",
+    "_plan_inputs_from_payload",
+    "_plan_inputs_sha256",
     "_read_cycle",
     "_infer_run_id",
     "_resolve_db_path",
@@ -415,23 +416,23 @@ def _restore_plan_inputs(
     run_id: str,
     *,
     purpose: str,
-    run_dir: str | Path | None = None,
+    store: Any,
 ) -> tuple[dict[str, Any], dict[str, float], Any, list[str]]:
     """Восстанавливает ``(catalog, module_weights, cohort, notes)`` для пост-хок команд.
 
     Приоритет источников:
 
-    (a) **явные** ``--run-yaml`` + ``--package`` — высший приоритет (поведение сохранено);
-    (b) **снимок прогона** ``runs/{run_id}/plan_inputs.json`` (``03`` §A.2), если каталог
-        пакета больше не нужен — прогон самодостаточен. Заметка сообщает, что значения
-        восстановлены из снимка (ГЭП отсутствует);
-    (c) иначе — **пустые** значения и явная ГЭП-заметка: каталог/веса/когорта **не
-        выдумываются** (вес ячейки = 1.0, когорта ``None``).
+    (a) **явные** ``--run-yaml`` + ``--package`` — высший приоритет: escape-hatch
+        ре-деривации каталога из исходного пакета;
+    (b) **снимок прогона в БД** (``run_inputs``; P1) — источник истины самодостаточности
+        ``runs/{run_id}``. Заметка сообщает, что значения восстановлены из БД прогона;
+    (c) иначе — **пустые** значения и явная заметка-ограничение (defense-in-depth):
+        каталог/веса/когорта **не выдумываются** (вес ячейки = 1.0, когорта ``None``).
 
-    :param run_dir: каталог прогона (``runs/{run_id}``); ``None`` → выводится из
-        ``--runs-dir``/``--db`` (:func:`_resolve_run_dir`). Команды передают родителя
-        резолвнутой БД, что покрывает оба контракта выбора хранилища.
-    :param purpose: имя команды в тексте ГЭП-заметки (``sensitivity``/``golden``/``report``).
+    :param store: открытый стор прогона (метод ``read_plan_inputs``); источник (b).
+        Post-hoc команды уже резолвят БД (:func:`_resolve_db_path`) и передают стор сюда.
+    :param purpose: имя команды в тексте ограничивающей заметки
+        (``sensitivity``/``golden``/``report``).
     """
     notes: list[str] = []
     if args.run_yaml and args.package:
@@ -448,59 +449,43 @@ def _restore_plan_inputs(
     if args.run_yaml or args.package:
         notes.append(
             "для восстановления каталога нужны ОБА --run-yaml и --package; указан только "
-            "один — предпринята попытка восстановления из plan_inputs.json прогона"
+            "один — предпринята попытка восстановления из БД прогона"
         )
 
-    resolved_dir = run_dir if run_dir is not None else _resolve_run_dir(args, run_id)
-    restored = _load_plan_inputs_snapshot(resolved_dir, run_id)
+    raw: Any = None
+    if store is not None:
+        try:
+            raw = store.read_plan_inputs(run_id)
+        except Exception as exc:  # noqa: BLE001 — чтение best-effort, не роняет команду
+            notes.append(f"входы плана из БД недоступны: {_concise(exc)}")
+            raw = None
+    restored = _plan_inputs_from_payload(raw, run_id) if raw is not None else None
     if restored is not None:
         catalog, module_weights, cohort = restored
-        notes.append("каталог/веса/когорта восстановлены из plan_inputs.json прогона")
+        notes.append("каталог/веса/когорта восстановлены из БД прогона")
         return catalog, module_weights, cohort, notes
 
     notes.append(
-        "ГЭП: каталог/веса/когорта не персистятся в БД прогона — "
+        "входы плана (каталог/веса/когорта) отсутствуют в БД прогона — "
         f"{purpose} рассчитан с пустым каталогом (вес ячейки = 1.0) и без когорты; "
         "передайте --run-yaml и --package для точного воспроизведения"
     )
     return {}, {}, None, notes
 
 
-def _resolve_run_dir(args: argparse.Namespace, run_id: str) -> Path | None:
-    """Выводит каталог прогона ``runs/{run_id}`` из аргументов команды.
-
-    Приоритет: явный ``--runs-dir`` (``{runs_dir}/{run_id}``), иначе родитель явного
-    ``--db`` (для канонической раскладки ``--db runs/{run_id}/cohound.db`` это тот же
-    каталог). ``--db :memory:`` и отсутствие обоих дают ``None`` — снимок не ищется,
-    команда честно уходит в ГЭП-ветку.
-    """
-    runs_dir = getattr(args, "runs_dir", None)
-    if runs_dir:
-        return Path(runs_dir) / run_id
-    db = getattr(args, "db", None)
-    if db is not None and str(db) != ":memory:":
-        return Path(db).parent
-    return None
-
-
-def _load_plan_inputs_snapshot(
-    run_dir: str | Path | None, run_id: str
+def _plan_inputs_from_payload(
+    data: Any, run_id: str
 ) -> tuple[dict[str, Any], dict[str, float], Any] | None:
-    """Читает и валидирует ``runs/{run_id}/plan_inputs.json`` (снимок входов плана).
+    """Валидирует разобранный снимок входов плана и восстанавливает его значения.
 
     Возвращает ``(catalog, module_weights, cohort)`` либо ``None`` при отсутствии/
     частичности/несовместимой версии снимка или ``run_id``-несоответствии. Несовпадение
     ``run_id`` трактуется как чужой снимок: значения не подставляются (не выдумываем).
+
+    Единая точка валидации формата снимка (``snapshot_version``/``run_id`` + состав),
+    общая для чтения из БД (``StorePort.read_plan_inputs``) и производного экспорта
+    ``plan_inputs.json`` (:func:`_snapshot_plan_inputs`).
     """
-    if run_dir is None:
-        return None
-    path = Path(run_dir) / PLAN_INPUTS_FILENAME
-    if not path.is_file():
-        return None
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
     if not isinstance(data, Mapping):
         return None
     if data.get("snapshot_version") != PLAN_INPUTS_SNAPSHOT_VERSION:
@@ -531,23 +516,39 @@ def _load_plan_inputs_snapshot(
     return catalog, module_weights, cohort
 
 
+def _plan_inputs_sha256(payload: Mapping[str, Any]) -> str:
+    """Детерминированный SHA-256 канонической JSON-формы снимка входов (P1/§13/R7).
+
+    ``sort_keys=True``/``ensure_ascii=False`` — та же канонизация, что кладётся в
+    ``run_inputs.payload_json``; повторная запись идентичного снимка даёт тот же хеш
+    (diff-visible провенанс; каталог/когорта и так ``execution_versions``, поэтому
+    нового версионного класса не возникает).
+    """
+    canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 def _snapshot_run_inputs(
     args: argparse.Namespace,
     run_id: str,
     *,
     inputs: RunInputs,
     run_plan: RunPlan,
+    store: Any = None,
 ) -> list[str]:
-    """Пишет снимок входов прогона в ``runs/{run_id}/`` (``03`` §A.2).
+    """Пишет снимок входов прогона: в БД прогона (источник истины) и в ``runs/{run_id}/``.
 
     Состав:
 
+    * ``run_inputs`` (БД, P1) — **источник истины** самодостаточности ``runs/{run_id}``:
+      пост-хок команды восстанавливают каталог/веса/когорту без исходного пакета и без
+      side-файла (``StorePort.save_plan_inputs``; дайджест — :func:`_plan_inputs_sha256`);
     * ``run.yaml`` — **иммутабельная копия** входа (байт-в-байт); существующий
       отличающийся файл **не** перезаписывается (иначе мутировал бы завершённый
       прогон), идентичный — оставляется как есть;
-    * ``plan_inputs.json`` — детерминированный JSON (``sort_keys=True``,
-      ``ensure_ascii=False``) с тем, что нужно для пересборки каталога/весов/когорты
-      без исходного пакета (см. :func:`_plan_inputs_payload`).
+    * ``plan_inputs.json`` — **производный экспорт** того же снимка (детерминированный
+      JSON, ``sort_keys=True``/``ensure_ascii=False``); читатели на него больше не
+      опираются (источник — БД), но файл сохраняется как человекочитаемый артефакт.
 
     Никогда не бросает исключений: любая ошибка записи возвращается строкой для
     ``instrumentation_errors`` прогона (сбой снимка не подменяет код возврата).
@@ -558,8 +559,18 @@ def _snapshot_run_inputs(
     except OSError as exc:
         return [f"snapshot: не удалось создать каталог прогона {run_dir}: {_concise(exc)}"]
 
+    payload = _plan_inputs_payload(run_id, inputs=inputs, run_plan=run_plan)
     issues = _snapshot_run_yaml(args.run_yaml, run_dir)
-    issues.extend(_snapshot_plan_inputs(run_dir, run_id, inputs=inputs, run_plan=run_plan))
+    issues.extend(_snapshot_plan_inputs(run_dir, payload))
+    if store is not None:
+        try:
+            store.save_plan_inputs(
+                run_id, payload=payload, payload_sha256=_plan_inputs_sha256(payload)
+            )
+        except Exception as exc:  # noqa: BLE001 — самодостаточность best-effort
+            issues.append(
+                f"snapshot: не удалось записать входы плана в БД прогона: {_concise(exc)}"
+            )
     return issues
 
 
@@ -590,12 +601,13 @@ def _snapshot_run_yaml(source: str | Path, run_dir: Path) -> list[str]:
     return []
 
 
-def _snapshot_plan_inputs(
-    run_dir: Path, run_id: str, *, inputs: RunInputs, run_plan: RunPlan
-) -> list[str]:
-    """Пишет ``plan_inputs.json`` — снимок плановых входов для пост-хок команд."""
+def _snapshot_plan_inputs(run_dir: Path, payload: Mapping[str, Any]) -> list[str]:
+    """Пишет ``plan_inputs.json`` — производный экспорт снимка плановых входов (P1).
+
+    Источник истины — таблица ``run_inputs`` в БД прогона; файл лишь удобен человеку и
+    больше не читается пост-хок командами.
+    """
     target = run_dir / PLAN_INPUTS_FILENAME
-    payload = _plan_inputs_payload(run_id, inputs=inputs, run_plan=run_plan)
     try:
         text = json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2) + "\n"
         target.write_text(text, encoding="utf-8")
@@ -613,7 +625,7 @@ def _plan_inputs_payload(
     (``run_id``/``case_id``/``package_id``/``package_version``), и то, что нужно для
     пересборки без пакета — ``params`` (``CatalogRow.model_dump(mode="json")``),
     ``module_weights``/``renormalized_weights`` и ``cohort`` (``Cohort``). Ключей
-    ``params``/``cohort`` достаточно для :func:`_load_plan_inputs_snapshot`; прочие —
+    ``params``/``cohort`` достаточно для :func:`_plan_inputs_from_payload`; прочие —
     провенанс, а не «истина о продукте».
     """
     return {
@@ -1253,6 +1265,7 @@ def _load_render_modes(path: str | Path | None) -> dict[str, FetchMode]:
 
 def _resolve_phases(
     args: argparse.Namespace, *, inputs: RunInputs, plan: RunPlan, ports: Ports,
+    deploy_config: DeployConfig | None = None,
     paths: Any = None,
     render_modes: Mapping[str, FetchMode] | None = None,
     urls: Mapping[str, list[str]] | None = None,
@@ -1273,10 +1286,18 @@ def _resolve_phases(
     Операционные каталоги (``out_dir``, ``raw_root``) берутся из resolved-раскладки
     (``paths``): ``runs`` для отчётов Ш9, ``corpus_raw`` для retention сырых байтов Ш5.
 
+    **Деплой-провенанс (07 §7).** Из resolved :class:`DeployConfig` выводятся
+    ``deploy_profile``/``edge_schema_version``/``edge_capabilities`` и протягиваются в
+    :func:`build_phases` → фазу Ш9, откуда попадают в ``run_manifest.yaml`` и в
+    ``runs`` (реальные колонки). Версии edge-компонентов известны лишь split-пути
+    диагностики (``/v1/capabilities``); здесь они не выдумываются — пусто, если не заданы.
+
     Гейты ``g1``–``g4`` сюда не входят — их (де)фолтные замыкания остаются в
     :class:`Runner` (I6/I7, S9), поэтому ``run`` честно останавливается ``blocked`` без
     человеческого решения.
 
+    :param deploy_config: resolved профиль развёртывания; ``None`` → деплой-провенанс
+        манифеста не заполняется (значения не выдумываются).
     :param urls: Phase 4 — готовый (уже отфильтрованный ``--only-failed``/``--only-product``)
         набор ``product_id → [url]``; ``None`` → читается ``--urls`` как раньше.
     :param max_attempts: Phase 4 — потолок попыток корпуса (``--max-attempts``); ``None`` →
@@ -1294,10 +1315,22 @@ def _resolve_phases(
         if urls is not None
         else _load_corpus_urls(getattr(args, "urls", None))
     )
+    # 07 §7: деплой-провенанс манифеста — из resolved deploy-конфига; иначе пусто.
+    deploy_profile: str | None = None
+    edge_schema_version: str | None = None
+    edge_capabilities: Mapping[str, Any] = {}
+    if deploy_config is not None:
+        deploy_fields = manifest_deploy_fields(deploy_config)
+        deploy_profile = deploy_fields["deploy_profile"]
+        edge_schema_version = deploy_fields["edge_schema_version"]
+        edge_capabilities = deploy_fields["edge_capabilities"]
     kwargs: dict[str, Any] = {
         "inputs": inputs,
         "plan": plan,
         "ports": ports,
+        "deploy_profile": deploy_profile,
+        "edge_schema_version": edge_schema_version,
+        "edge_capabilities": edge_capabilities,
         # URLs: только явный операторский вход; doc_domains не фетчатся молча (I19).
         "urls": corpus_urls,
         # Паспорта: --passports-dir либо resolved paths.passports; отсутствие → {}.

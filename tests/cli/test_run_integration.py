@@ -205,3 +205,9 @@ def test_cmd_run_full_local_writes_manifest_with_real_compute_report(
 
     loaded = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
     assert loaded["run_id"] == run_id
+    # R7/07 §7 (P1): деплой-провенанс манифеста реально заполнен (профиль local).
+    from core.edge.seam_schema import SEAM_SCHEMA_VERSION
+
+    assert loaded["deploy_profile"] == LOCAL_PROFILE
+    assert loaded["edge_schema_version"] == SEAM_SCHEMA_VERSION
+    assert loaded["edge_capabilities"] == {}

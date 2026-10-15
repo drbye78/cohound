@@ -1,7 +1,7 @@
 """coHound — конкретное операционное хранилище ``SqliteStore`` (L3, W3/T3.1, W3/T3.4).
 
 Реализует ``StorePort`` и ``GateStore`` (``core/ports/store.py``) поверх схемы §4.4
-(``core/store/sqlite.py``: 14 таблиц + ``schema_meta``, индексы, триггеры I4/I6/I7/I13/I18).
+(``core/store/sqlite.py``: 15 таблиц + ``schema_meta``, индексы, триггеры I4/I6/I7/I13/I18).
 Также реализует ``domain.anchors.SourceResolver`` (T3.4): детерминированный
 резолв ``source_id`` → URL + ``content_hash`` без сети (I10/I15/I19).
 
@@ -185,21 +185,6 @@ def _get(obj: Any, name: str, default: Any = None) -> Any:
     if isinstance(obj, Mapping):
         return obj.get(name, default)
     return getattr(obj, name, default)
-
-
-def _optional_row_value(row: sqlite3.Row, name: str) -> str | None:
-    """Значение колонки, если она присутствует в строке; иначе ``None``.
-
-    Схема §4.4 (``runs``) **не содержит** ``deploy_profile``/``edge_schema_version``:
-    деплой-провенанс манифеста на текущий момент не персистится в операционной БД
-    (см. docstring :meth:`SqliteStore.read_manifest`). Хелпер делает чтение
-    forward-compatible: если колонка появится в будущей схеме, значение подхватится,
-    а на текущих БД (``runs`` без этих колонок) вернётся ``None`` без исключения.
-    """
-    if name not in row.keys():
-        return None
-    value = row[name]
-    return str(value) if value is not None else None
 
 
 class SqliteStore:
@@ -637,15 +622,62 @@ class SqliteStore:
         with self.conn:
             self.conn.executemany(sql, rows)
 
+    # -- план-входы прогона (P1: самодостаточность runs/{run_id}) --------- #
+    #: Колонки ``run_inputs`` (снимок плановых входов; P1).
+    _RUN_INPUTS_COLUMNS = (
+        "run_id",
+        "snapshot_version",
+        "payload_json",
+        "payload_sha256",
+        "created_at",
+    )
+
+    def save_plan_inputs(
+        self, run_id: str, *, payload: Mapping[str, Any], payload_sha256: str
+    ) -> None:
+        """Персистит снимок плановых входов в ``run_inputs`` (P1; ``INSERT OR REPLACE``).
+
+        ``payload`` кладётся в ``payload_json`` канонической формой
+        (``sort_keys=True``/``ensure_ascii=False``) — семантически байт-идентичной при
+        повторной записи. ``snapshot_version`` выносится отдельной колонкой-контрактом.
+        """
+        snapshot_version = int(payload.get("snapshot_version") or 0)
+        payload_json = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+        with self.conn:
+            self.conn.execute(
+                "INSERT OR REPLACE INTO run_inputs"
+                " (run_id, snapshot_version, payload_json, payload_sha256, created_at)"
+                " VALUES (?, ?, ?, ?, ?)",
+                (
+                    run_id,
+                    snapshot_version,
+                    payload_json,
+                    payload_sha256,
+                    _now_iso(),
+                ),
+            )
+
+    def read_plan_inputs(self, run_id: str) -> dict[str, Any] | None:
+        """Читает снимок плановых входов прогона; ``None``, если записи нет/повреждена."""
+        row = self.conn.execute(
+            "SELECT payload_json FROM run_inputs WHERE run_id = ?", (run_id,)
+        ).fetchone()
+        if row is None:
+            return None
+        parsed = _parse_json_text(row["payload_json"])
+        return parsed if isinstance(parsed, dict) else None
+
     def persist_manifest(self, run_id: str, manifest: RunManifest) -> None:
         """Персистит финальный манифест в строку ``runs`` (R7/§13, A3).
 
-        Обновляет версии, индексные/ретривал-поля, ``settings_provenance_json``
-        (провенанс настроек, включая ``ranking_epsilon``), ``crawl_provenance_json``
-        (провенанс краула, §4.4/Phase 2) и ``crawl_strategy``/``crawl_rate_limit``
-        (операционные оси краула — границы ``execution_change``, §13/Backlog B). ``UPDATE``
-        по существующей строке прогона: манифест — самостоятельная запись воспроизведения,
-        а не источник создания прогона (его создаёт :meth:`create_run`).
+        Обновляет версии, индексные/ретривал-поля, ``settings_provenance_json`` и
+        ``ranking_epsilon`` (провенанс настроек), ``crawl_provenance_json``
+        (провенанс краула, §4.4/Phase 2), ``crawl_strategy``/``crawl_rate_limit``
+        (операционные оси краула — границы ``execution_change``, §13/Backlog B) и
+        деплой-провенанс ``deploy_profile``/``edge_schema_version``/``edge_capabilities_json``
+        (07 §7; execution-class, не методологическая версия). ``UPDATE`` по существующей
+        строке прогона: манифест — самостоятельная запись воспроизведения, а не источник
+        создания прогона (его создаёт :meth:`create_run`).
         """
         provenance = manifest.settings_provenance or {}
         crawl_provenance = manifest.crawl_provenance
@@ -657,8 +689,10 @@ class SqliteStore:
                 " index_build_id = ?, retrieval_profile = ?, retrieval_params_json = ?,"
                 " retrieval_cutoff_K = ?, search_effort_budget_json = ?,"
                 " requested_ranking = ?, computed_ranking = ?, snapshot_date = ?,"
-                " settings_provenance_json = ?, crawl_provenance_json = ?,"
-                " crawl_strategy = ?, crawl_rate_limit = ?"
+                " settings_provenance_json = ?, ranking_epsilon = ?,"
+                " crawl_provenance_json = ?,"
+                " crawl_strategy = ?, crawl_rate_limit = ?,"
+                " deploy_profile = ?, edge_schema_version = ?, edge_capabilities_json = ?"
                 " WHERE run_id = ?",
                 (
                     manifest.package_version,
@@ -676,6 +710,7 @@ class SqliteStore:
                     _as_text(manifest.computed_ranking),
                     manifest.snapshot_date,
                     json.dumps(provenance, ensure_ascii=False, sort_keys=True),
+                    float(manifest.ranking_epsilon or 0.0),
                     json.dumps(
                         crawl_provenance.model_dump(mode="json"),
                         ensure_ascii=False,
@@ -683,6 +718,13 @@ class SqliteStore:
                     ),
                     manifest.crawl_strategy,
                     manifest.crawl_rate_limit,
+                    manifest.deploy_profile,
+                    manifest.edge_schema_version,
+                    json.dumps(
+                        dict(manifest.edge_capabilities or {}),
+                        ensure_ascii=False,
+                        sort_keys=True,
+                    ),
                     run_id,
                 ),
             )
@@ -1117,13 +1159,12 @@ class SqliteStore:
     def read_manifest(self, run_id: str) -> RunManifest:
         """Собирает ``RunManifest`` из строки ``runs`` (+ ``llm_scenarios``).
 
-        **Ограничение деплой-провенанса.** Поля ``deploy_profile`` и
-        ``edge_schema_version`` (R7/§13, 07 §7) на текущий момент **не персистятся**
-        в операционной БД: колонок в ``runs`` нет, а ``run_manifest.yaml`` пишется
-        отдельно (``core.pipeline.report.write_run_manifest``). Поэтому при обычном
-        прогоне здесь возвращается ``None``. Чтение сделано forward-compatible —
-        :func:`_optional_row_value` подхватит значения, если соответствующие колонки
-        появятся в ``runs`` (без миграции и без падения на старой схеме).
+        Деплой-провенанс (``deploy_profile``/``edge_schema_version``/``edge_capabilities``,
+        07 §7) и провенанс настроек (``settings_provenance``/``ranking_epsilon``) читаются
+        из реальных колонок ``runs`` (схема v3.4, P1). Поля, не записанные манифестом,
+        дают ``None`` (деплой-профиль/версия шва) либо пустой/дефолтный контейнер
+        (``edge_capabilities``/``settings_provenance``/``CrawlProvenance``) — значения
+        не выдумываются.
 
         :raises ValueError: если строка прогона отсутствует.
         """
@@ -1154,17 +1195,16 @@ class SqliteStore:
         focus_modules = _parse_json_text(row["focus_modules"]) or []
         requested = row["requested_ranking"]
         computed = row["computed_ranking"]
-        # A3 (v2.1): провенанс настроек и ranking_epsilon — forward-compatible чтение
-        # (на старой схеме колонок нет → дефолты, без падения).
-        settings_provenance = _parse_json_text(
-            _optional_row_value(row, "settings_provenance_json")
-        ) or {}
-        eps_raw = _optional_row_value(row, "ranking_epsilon")
-        ranking_epsilon = float(eps_raw) if eps_raw else 0.0
-        # §4.4/Phase 2: провенанс краула — forward-compatible чтение (на старой схеме
-        # колонки нет → пустой ``CrawlProvenance()``, без падения).
-        crawl_provenance_raw = _parse_json_text(
-            _optional_row_value(row, "crawl_provenance_json")
+        # A3 (v2.1): провенанс настроек и порог неразличимости — реальные колонки.
+        settings_provenance = _parse_json_text(row["settings_provenance_json"]) or {}
+        eps_raw = row["ranking_epsilon"]
+        ranking_epsilon = float(eps_raw) if eps_raw is not None else 0.0
+        # §4.4/Phase 2: провенанс краула (NULL → пустой ``CrawlProvenance()``).
+        crawl_provenance_raw = _parse_json_text(row["crawl_provenance_json"])
+        # 07 §7: версии edge-компонентов; NULL → пусто (значения не выдумываются).
+        edge_capabilities_raw = _parse_json_text(row["edge_capabilities_json"])
+        edge_capabilities = (
+            edge_capabilities_raw if isinstance(edge_capabilities_raw, dict) else {}
         )
         return RunManifest(
             run_id=row["run_id"],
@@ -1192,14 +1232,14 @@ class SqliteStore:
             ranking_epsilon=ranking_epsilon,
             settings_provenance=settings_provenance,
             crawl_provenance=CrawlProvenance.model_validate(crawl_provenance_raw or {}),
-            # §13/Backlog B: операционные оси краула — forward-compatible чтение (на старой
-            # схеме колонок нет → ``None``, без падения).
-            crawl_strategy=_optional_row_value(row, "crawl_strategy"),
-            crawl_rate_limit=_optional_row_value(row, "crawl_rate_limit"),
+            # §13/Backlog B: операционные оси краула — реальные колонки.
+            crawl_strategy=row["crawl_strategy"],
+            crawl_rate_limit=row["crawl_rate_limit"],
             llm_scenarios=scenarios,
             snapshot_date=row["snapshot_date"],
-            deploy_profile=_optional_row_value(row, "deploy_profile"),
-            edge_schema_version=_optional_row_value(row, "edge_schema_version"),
+            deploy_profile=row["deploy_profile"],
+            edge_schema_version=row["edge_schema_version"],
+            edge_capabilities=edge_capabilities,
         )
 
     # -- corpus ---------------------------------------------------------- #

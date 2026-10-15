@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any, Iterable, Iterator, Protocol, runtime_checkable
 
 from core.domain import (
@@ -80,8 +81,32 @@ class StorePort(Protocol):
     def persist_manifest(self, run_id: str, manifest: RunManifest) -> None:
         """Персистит финальный манифест прогона в операционную БД (R7/§13, A3).
 
-        Обновляет версии/индексные/ретривал-поля строки ``runs`` и ``settings_provenance_json``
-        из манифеста (в т.ч. ``ranking_epsilon`` в составе провенанса настроек).
+        Обновляет версии/индексные/ретривал-поля строки ``runs``,
+        ``settings_provenance_json``/``ranking_epsilon`` (провенанс настроек) и
+        деплой-провенанс (``deploy_profile``/``edge_schema_version``/``edge_capabilities``,
+        07 §7).
+        """
+        ...
+
+    def save_plan_inputs(
+        self, run_id: str, *, payload: Mapping[str, Any], payload_sha256: str
+    ) -> None:
+        """Персистит снимок плановых входов прогона (каталог/веса/когорта) в ``run_inputs``.
+
+        Источник истины самодостаточности ``runs/{run_id}`` (P1): пост-хок команды
+        восстанавливают каталог без исходного пакета и без side-файла ``plan_inputs.json``.
+        ``payload`` — канонический снимок (:func:`core.cli.context._plan_inputs_payload`);
+        ``payload_sha256`` — детерминированный дайджест его канонической формы
+        (``json.dumps(sort_keys=True)``). Запись идемпотентна (``INSERT OR REPLACE``).
+        """
+        ...
+
+    def read_plan_inputs(self, run_id: str) -> dict[str, Any] | None:
+        """Читает снимок плановых входов прогона; ``None``, если записи нет.
+
+        Возвращает уже разобранный ``payload`` (каноническая форма хранится в
+        ``run_inputs.payload_json``); валидацию ``snapshot_version``/``run_id`` выполняет
+        вызывающий. Метод не бросает исключений на неизвестный ``run_id``.
         """
         ...
 

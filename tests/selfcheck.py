@@ -403,7 +403,7 @@ def main() -> int:
 
     section("CLI-поверхность (03 §D.6) — T10.4")
     check("commands: полный набор resolve/plan/run/discover/review/promote/…", lambda: _cli_surface())
-    check("run-dir: снимок входов (run.yaml/plan_inputs.json) читается (03 §A.2)", lambda: _cli_run_self_contained())
+    check("run-dir: входы плана персистятся в БД (run_inputs) и восстанавливаются (03 §A.2/P1)", lambda: _cli_run_self_contained())
 
     section("Лексический индекс (W8) — двойной профиль")
     check("lexical: профили stemmed/identifier/raw/ngram + порт", lambda: _lexical_profiles())
@@ -608,12 +608,12 @@ def _crawl_session_dict_mirror() -> None:
 def _db_smoke() -> None:
     conn = connect(":memory:")
     ver = conn.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()
-    _assert(ver is not None and ver["value"] == "3.3.0")
+    _assert(ver is not None and ver["value"] == "3.4.0")
 
     tables = {r["name"] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     for t in ("products", "runs", "llm_scenarios", "corpus_docs", "corpus_chunks",
               "index_manifest", "cells", "cell_evidence", "search_log",
-              "search_exhaustion", "registry_facts",
+              "search_exhaustion", "registry_facts", "run_inputs",
               "crawl_sessions", "crawl_session_items"):
         _assert(t in tables)
 
@@ -633,6 +633,17 @@ def _db_smoke() -> None:
 
     # Backlog B (schema 3.3.0): операционные оси краула — границы ``execution_change`` (§13).
     _assert("crawl_strategy" in runs_cols and "crawl_rate_limit" in runs_cols)
+
+    # P1 (schema 3.4.0): деплой-провенанс манифеста (07 §7) и порог ранжирования (§6/B-1)
+    # — реальные колонки; ``run_inputs`` — источник истины самодостаточности прогона.
+    _assert({"deploy_profile", "edge_schema_version", "edge_capabilities_json",
+             "ranking_epsilon"} <= runs_cols)
+    inputs_cols = {r["name"] for r in conn.execute("PRAGMA table_info(run_inputs)")}
+    _assert({"run_id", "snapshot_version", "payload_json", "payload_sha256",
+             "created_at"} <= inputs_cols)
+    inputs_pk = [r["name"] for r in conn.execute("PRAGMA table_info(run_inputs)")
+                 if r["pk"]]
+    _assert(inputs_pk == ["run_id"])
 
     # Lane B (schema 3.0.0): сеанс краула — crawl_sessions + элементы с PK и FK.
     sess_cols = {r["name"] for r in conn.execute("PRAGMA table_info(crawl_sessions)")}
@@ -2568,13 +2579,14 @@ def _cli_surface() -> None:
 
 
 def _cli_run_self_contained() -> None:
-    """Самодостаточность прогона (03 §A.2): ``plan_inputs.json`` читается и валидируется.
+    """Самодостаточность прогона (03 §A.2 / P1): входы плана персистятся в БД (``run_inputs``).
 
     Проверяется контракт границы читатель/формат без полной сборки ``RunInputs``:
-    корректный снимок даёт каталог/веса/когорту; чужая версия, чужой ``run_id`` и
-    отсутствующий файл — ``None`` (значения не подставляются, не выдумываются).
+    round-trip снимка (write→read) даёт те же значения; ``_restore_plan_inputs``
+    восстанавливает каталог/веса/когорту из БД прогона без side-файла; чужой
+    ``run_id``, несовместимая версия и отсутствующая запись — значения не подставляются.
     """
-    import json as _json
+    import argparse as _argparse
     import tempfile as _tempfile
     from pathlib import Path as _Path
 
@@ -2590,6 +2602,7 @@ def _cli_run_self_contained() -> None:
             raise AssertionError(f"core.cli.main.{const} отсутствует (03 §A.2)")
 
     from core.domain.models import CatalogRow, Cohort
+    from core.store.sqlite_store import SqliteStore
 
     row = CatalogRow.model_validate(
         {
@@ -2624,36 +2637,52 @@ def _cli_run_self_contained() -> None:
         "renormalized_weights": {"m": 0.5},
         "cohort": cohort.model_dump(mode="json"),
     }
-
-    def _write(dir_path, data):
-        target = _Path(dir_path) / main.PLAN_INPUTS_FILENAME
-        target.write_text(_json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    args = _argparse.Namespace(run_yaml=None, package=None)
 
     with _tempfile.TemporaryDirectory() as td:
-        _write(td, payload)
-        loaded = main._load_plan_inputs_snapshot(td, "run_selfcheck")
-        if loaded is None:
-            raise AssertionError("валидный снимок не прочитан")
-        catalog, weights, restored = loaded
-        if set(catalog) != {row.param_id}:
-            raise AssertionError("каталог из снимка восстановлен неверно")
-        if weights != {"m": 0.5}:
-            raise AssertionError(f"веса из снимка неверны: {weights!r}")
-        if restored.case_id != cohort.case_id:
-            raise AssertionError("когорта из снимка восстановлена неверно")
-
-        # Чужой run_id и чужая версия — не подставляем.
-        if main._load_plan_inputs_snapshot(td, "other_run") is not None:
-            raise AssertionError("чужой run_id должен давать None")
-
-    with _tempfile.TemporaryDirectory() as td:
-        _write(td, {**payload, "snapshot_version": 999})
-        if main._load_plan_inputs_snapshot(td, "run_selfcheck") is not None:
-            raise AssertionError("несовместимая версия снимка должна давать None")
-
-    with _tempfile.TemporaryDirectory() as td:
-        if main._load_plan_inputs_snapshot(td, "run_selfcheck") is not None:
-            raise AssertionError("отсутствующий снимок должен давать None")
+        store = SqliteStore(str(_Path(td) / "cohound.db"))
+        try:
+            sha = main._plan_inputs_sha256(payload)
+            store.save_plan_inputs("run_selfcheck", payload=payload, payload_sha256=sha)
+            # Round-trip: payload из БД семантически равен записанному.
+            stored = store.read_plan_inputs("run_selfcheck")
+            if stored != payload:
+                raise AssertionError("снимок из БД не совпал с записанным")
+            # Детерминизм канонизации: повторная запись даёт тот же sha256.
+            store.save_plan_inputs("run_selfcheck", payload=payload, payload_sha256=sha)
+            rowsha = store.conn.execute(
+                "SELECT payload_sha256 FROM run_inputs WHERE run_id = ?",
+                ("run_selfcheck",),
+            ).fetchone()["payload_sha256"]
+            if rowsha != sha:
+                raise AssertionError("sha256 снимка нестабилен между записями")
+            # _restore_plan_inputs читает из БД (side-файла нет вовсе).
+            catalog, weights, restored, notes = main._restore_plan_inputs(
+                args, "run_selfcheck", purpose="selfcheck", store=store
+            )
+            if set(catalog) != {row.param_id}:
+                raise AssertionError("каталог из БД восстановлен неверно")
+            if weights != {"m": 0.5}:
+                raise AssertionError(f"веса из БД неверны: {weights!r}")
+            if restored.case_id != cohort.case_id:
+                raise AssertionError("когорта из БД восстановлена неверно")
+            if any("отсутствуют в БД прогона" in note for note in notes):
+                raise AssertionError("валидный снимок не должен давать заметку-ограничение")
+            # Чужой run_id — не подставляем (ни на уровне БД, ни на уровне валидатора).
+            if store.read_plan_inputs("other_run") is not None:
+                raise AssertionError("чужой run_id должен давать None")
+            if main._plan_inputs_from_payload(payload, "other_run") is not None:
+                raise AssertionError("чужой run_id должен давать None")
+            # Несовместимая версия снимка — не подставляем.
+            if main._plan_inputs_from_payload(
+                {**payload, "snapshot_version": 999}, "run_selfcheck"
+            ) is not None:
+                raise AssertionError("несовместимая версия снимка должна давать None")
+            # Отсутствующая запись — None.
+            if store.read_plan_inputs("absent") is not None:
+                raise AssertionError("отсутствующая запись должна давать None")
+        finally:
+            store.close()
 
 
 def _lexical_profiles() -> None:

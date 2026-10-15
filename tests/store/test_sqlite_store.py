@@ -93,7 +93,7 @@ def test_schema_opens(store: SqliteStore) -> None:
     ver = store.conn.execute(
         "SELECT value FROM schema_meta WHERE key = 'schema_version'"
     ).fetchone()
-    assert ver["value"] == "3.3.0"
+    assert ver["value"] == "3.4.0"
     tables = {
         r["name"] for r in store.conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
     }
@@ -110,6 +110,7 @@ def test_schema_opens(store: SqliteStore) -> None:
         "search_log",
         "search_exhaustion",
         "registry_facts",
+        "run_inputs",
         "crawl_sessions",
         "crawl_session_items",
     ):
@@ -122,6 +123,13 @@ def test_schema_opens(store: SqliteStore) -> None:
     # Backlog B (schema 3.3.0): операционные оси краула — границы ``execution_change`` (§13).
     assert "crawl_strategy" in runs_cols
     assert "crawl_rate_limit" in runs_cols
+    # P1 (schema 3.4.0): деплой-провенанс манифеста (07 §7) и порог ранжирования (§6/B-1).
+    assert {"deploy_profile", "edge_schema_version", "edge_capabilities_json",
+            "ranking_epsilon"} <= runs_cols
+    # P1: снимок плановых входов прогона — реальная таблица.
+    inputs_cols = {r["name"] for r in store.conn.execute("PRAGMA table_info(run_inputs)")}
+    assert {"run_id", "snapshot_version", "payload_json", "payload_sha256",
+            "created_at"} <= inputs_cols
     # P2 (schema 2.2.0): build-id witness — версии/отпечаток контента.
     chunk_cols = {r["name"] for r in store.conn.execute("PRAGMA table_info(corpus_chunks)")}
     assert "extractor_version" in chunk_cols
@@ -650,26 +658,93 @@ def test_p2_extractor_version_and_content_digest_roundtrip(store: SqliteStore) -
 
 
 def test_read_manifest_deploy_fields_default_none(store: SqliteStore) -> None:
-    """Схема ``runs`` не персистит деплой-поля — без них ``read_manifest`` даёт ``None``."""
+    """Колонки деплой-провенанса реальны, но не записаны → ``read_manifest`` даёт ``None``."""
     store.create_run(RUN_ID, _cfg())
     manifest = store.read_manifest(RUN_ID)
     assert manifest.deploy_profile is None
     assert manifest.edge_schema_version is None
+    assert manifest.edge_capabilities == {}
 
 
-def test_read_manifest_reads_deploy_fields_when_present(store: SqliteStore) -> None:
-    """Forward-compatible: если колонки появятся в ``runs``, значения подхватятся."""
+def test_read_manifest_reads_deploy_fields_from_columns(store: SqliteStore) -> None:
+    """Поля деплой-провенанса читаются из реальных колонок ``runs`` (P1, 07 §7)."""
     store.create_run(RUN_ID, _cfg())
     with store.conn:
-        store.conn.execute("ALTER TABLE runs ADD COLUMN deploy_profile TEXT")
-        store.conn.execute("ALTER TABLE runs ADD COLUMN edge_schema_version TEXT")
         store.conn.execute(
-            "UPDATE runs SET deploy_profile = ?, edge_schema_version = ? WHERE run_id = ?",
-            ("split", "1.0.0", RUN_ID),
+            "UPDATE runs SET deploy_profile = ?, edge_schema_version = ?,"
+            " edge_capabilities_json = ? WHERE run_id = ?",
+            ("split", "1.0.0", '{"gateway": "0.4.2"}', RUN_ID),
         )
     manifest = store.read_manifest(RUN_ID)
     assert manifest.deploy_profile == "split"
     assert manifest.edge_schema_version == "1.0.0"
+    assert manifest.edge_capabilities == {"gateway": "0.4.2"}
+
+
+def test_persist_manifest_roundtrips_deploy_fields(store: SqliteStore) -> None:
+    """``persist_manifest``→``read_manifest`` несут деплой-провенанс (P1, 07 §7)."""
+    store.create_run(RUN_ID, _cfg())
+    # До записи манифеста деплой-провенанс пуст.
+    assert store.read_manifest(RUN_ID).deploy_profile is None
+
+    manifest = RunManifest(
+        run_id=RUN_ID,
+        case_id="case-1",
+        created_at="2026-01-01T00:00:00Z",
+        mode=RunMode.STRICT,
+        methodology_version="2.0.0",
+        package_version="pkg-1",
+        catalog_version="cat-1",
+        status_dict_version="sd-1",
+        scoring_policy_version="sp-1",
+        anchor_product_id="p1",
+        deploy_profile="local",
+        edge_schema_version="1",
+        edge_capabilities={"gateway": "0.4.2", "edge": "1"},
+    )
+    store.persist_manifest(RUN_ID, manifest)
+    read = store.read_manifest(RUN_ID)
+    assert read.deploy_profile == "local"
+    assert read.edge_schema_version == "1"
+    assert read.edge_capabilities == {"gateway": "0.4.2", "edge": "1"}
+
+
+# --------------------------------------------------------------------------- #
+# P1: снимок плановых входов прогона (run_inputs)
+# --------------------------------------------------------------------------- #
+
+
+def test_save_read_plan_inputs_roundtrip(store: SqliteStore) -> None:
+    """``save_plan_inputs``→``read_plan_inputs`` сохраняет payload и стабильный sha256."""
+    import hashlib
+
+    payload = {
+        "snapshot_version": 1,
+        "run_id": RUN_ID,
+        "params": [{"param_id": "p1"}],
+        "cohort": {"case_id": "case-1", "frozen_at": "2026-01-01", "entries": []},
+        "module_weights": {"m": 1.0},
+    }
+    sha = hashlib.sha256(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    ).hexdigest()
+
+    assert store.read_plan_inputs(RUN_ID) is None  # ещё не записано
+
+    store.save_plan_inputs(RUN_ID, payload=payload, payload_sha256=sha)
+    assert store.read_plan_inputs(RUN_ID) == payload
+
+    # Повторная запись идентичного снимка: sha256 стабилен, payload тот же.
+    store.save_plan_inputs(RUN_ID, payload=payload, payload_sha256=sha)
+    row = store.conn.execute(
+        "SELECT snapshot_version, payload_sha256 FROM run_inputs WHERE run_id = ?",
+        (RUN_ID,),
+    ).fetchone()
+    assert row["snapshot_version"] == 1
+    assert row["payload_sha256"] == sha
+    assert store.read_plan_inputs(RUN_ID) == payload
+    # Чужой run_id — нет записи.
+    assert store.read_plan_inputs("other") is None
 
 
 # --------------------------------------------------------------------------- #

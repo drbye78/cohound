@@ -13,7 +13,6 @@ from typing import Any
 import argparse
 import json
 import sys
-from pathlib import Path
 
 from core.cli.context import (
     _add_common,
@@ -36,8 +35,8 @@ def run(args: argparse.Namespace) -> int:
     ``--run-id`` → ``runs/{run_id}/cohound.db``.
 
     Каталог (для классификации критических параметров, R12) берётся из явных
-    ``--run-yaml`` + ``--package`` при их наличии, иначе из снимка прогона
-    ``runs/{run_id}/plan_inputs.json``. Лишь если оба источника недоступны, ``evaluate_golden``
+    ``--run-yaml`` + ``--package`` при их наличии, иначе из снимка прогона в БД
+    (``run_inputs``). Лишь если оба источника недоступны, ``evaluate_golden``
     получает **пустой** каталог и важность параметров неизвестна — правило «false ❌ на Кр»
     тогда не срабатывает, что честно печатается в ``notes``.
 
@@ -64,7 +63,7 @@ def run(args: argparse.Namespace) -> int:
         if args.tier is not None:
             golden = [row for row in golden if row.tier.value == args.tier]
         catalog, _weights, _cohort, notes = _restore_plan_inputs(
-            args, run_id, purpose="golden", run_dir=Path(db_path).parent
+            args, run_id, purpose="golden", store=store
         )
         report = evaluate_golden(
             golden=golden, store=store, run_id=run_id, catalog=catalog
