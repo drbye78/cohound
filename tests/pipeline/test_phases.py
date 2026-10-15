@@ -56,6 +56,7 @@ from core.domain import (
     RoleDef,
     RunConfig,
     RunMode,
+    SkipReason,
     Status,
     Upstream,
 )
@@ -769,7 +770,9 @@ def test_discovery_noop_without_adapter() -> None:
     phases = build_phases(inputs=inputs, plan=plan, ports=Ports())
     store = _store()
     result = phases["discovery"](_context(store, Ports()))
-    assert result.status == "ok"
+    # P2a: отсутствие адаптера — ``skipped`` с машинной причиной, а не фиктивное ``ok``.
+    assert result.status == "skipped"
+    assert result.skip_reason is SkipReason.NO_SEARCH_ADAPTER
     assert result.log_entries == []  # без адаптера никаких кандидатов (I19)
 
 

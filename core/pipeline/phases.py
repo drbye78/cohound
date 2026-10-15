@@ -10,12 +10,16 @@
 
 * ``normalize``/``lint``/``plan`` — явные no-op: предполётные ``load_inputs → lint → plan``
   выполняет composition root (CLI), а повторный ``plan()`` внутри фазы дал бы иной
-  ``run_id`` и двойной линт. Фазы фиксируют факт «уже посчитано», не пересчитывая.
-* ``discovery`` — no-op, пока не задан search-адаптер **и** запросы; иначе
-  :func:`~core.pipeline.discovery.discover` и только кандидаты/гипотезы (I19, без evidence).
+  ``run_id`` и двойной линт. Фазы возвращают ``ok`` с самодокументирующей заметкой в
+  ``log_entries`` («сделано предполётом»), чтобы читатель отличал «сделано в другом месте»
+  от «работы не было» (последнее — ``skipped``).
+* ``discovery`` — ``skipped`` с ``skip_reason`` (``no_search_adapter``/``no_queries``), пока
+  не заданы search-адаптер **и** запросы; иначе :func:`~core.pipeline.discovery.discover`
+  и только кандидаты/гипотезы (I19, без evidence).
 * ``registry``/``inheritance``/``corpus``/``evaluate``/``compute``/``report`` — делегаты
   к существующим реализациям; логика не дублируется.
-* ``review`` — no-op: отдельного модуля ревью пока нет.
+* ``review`` — ``ok`` без работы: очередь ревью подключается к ``pending`` в P2b (I6/I7 не
+  автоматизируем; ``pending`` — advisory и не меняет статус).
 * Гейты ``g1``–``g4`` — **не** переопределяются: замыкания гейтов остаются дефолтными
   (``_gate_phase`` в ``runner.py``, S9).
 
@@ -34,7 +38,7 @@ from collections.abc import Callable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
 from core.domain.anchors import SourceResolver
-from core.domain.enums import CrawlItemStatus, CrawlSessionStatus
+from core.domain.enums import CrawlItemStatus, CrawlSessionStatus, SkipReason
 from core.domain.models import (
     CrawlProvenance,
     CrawlSessionProvenance,
@@ -229,6 +233,18 @@ def _crawl_provenance(store: Any, inputs: Any, run_id: str) -> CrawlProvenance:
     )
 
 
+def _preflight_noop(phase: str, reason: str) -> PhaseResult:
+    """Явный no-op фазы, чья работа выполнена предполётом composition root (CLI).
+
+    Статус — ``ok``: работа **сделана** (в другом месте), а не пропущена (для «работы не
+    было» есть ``skipped``). Самодокументирующая заметка в ``log_entries`` отличает
+    «сделано предполётом» от «фаза ничего не сделала».
+    """
+    return PhaseResult(
+        status="ok", phase=phase, log_entries=[f"preflight (CLI): {reason}"]
+    )
+
+
 # ---------------------------------------------------------------------------
 # Публичная сборка фаз
 # ---------------------------------------------------------------------------
@@ -303,25 +319,43 @@ def build_phases(
 
     # -- Ш1–Ш2: предполёт уже выполнен composition root (CLI) ---------------- #
     def normalize_phase(ctx: RunContext) -> PhaseResult:
-        """Ш1: no-op — нормализацию входов выполняет composition root (CLI) до ``Runner``."""
-        return PhaseResult(status="ok", phase="normalize")
+        """Ш1: ``ok``-no-op — нормализацию входов выполнил composition root (CLI).
+
+        Не ``skipped``: работа не пропущена, а сделана предполётом (``normalize.load_inputs``);
+        заметка в ``log_entries`` фиксирует это для читателя.
+        """
+        return _preflight_noop("normalize", "входы нормализованы (normalize.load_inputs)")
 
     def lint_phase(ctx: RunContext) -> PhaseResult:
-        """Ш2: no-op — блокирующий линт выполняет composition root (CLI) до ``Runner``."""
-        return PhaseResult(status="ok", phase="lint")
+        """Ш2: ``ok``-no-op — блокирующий линт выполнил composition root (CLI) предполётом."""
+        return _preflight_noop("lint", "линт выполнен (lint.lint_run_inputs)")
 
     def plan_phase(ctx: RunContext) -> PhaseResult:
-        """Ш2: no-op — план строит composition root (CLI); повторный ``plan()`` запрещён."""
-        return PhaseResult(status="ok", phase="plan")
+        """Ш2: ``ok``-no-op — план построил composition root (CLI); повторный ``plan()`` запрещён."""
+        return _preflight_noop("plan", "план построен (plan.plan); повторный plan() запрещён")
 
     # -- Ш2: разведка (кандидаты, не evidence, I19) ------------------------- #
     discovery_queries = _discovery_queries(inputs)
 
     def discovery_phase(ctx: RunContext) -> PhaseResult:
-        """Ш2: разведка кандидатов; без адаптера/запросов — no-op (I19: не evidence)."""
+        """Ш2: разведка кандидатов; без адаптера/запросов — ``skipped`` (I19: не evidence).
+
+        Отсутствие адаптера/запросов — легитимная предпосылка, а не сбой и не ``ok``:
+        статус ``skipped`` с машинной причиной, прогон продолжается.
+        """
         adapter = getattr(ctx.ports, "search", None)
-        if adapter is None or not discovery_queries:
-            return PhaseResult(status="ok", phase="discovery")
+        if adapter is None:
+            return PhaseResult(
+                status="skipped",
+                phase="discovery",
+                skip_reason=SkipReason.NO_SEARCH_ADAPTER,
+            )
+        if not discovery_queries:
+            return PhaseResult(
+                status="skipped",
+                phase="discovery",
+                skip_reason=SkipReason.NO_QUERIES,
+            )
         report = discover(
             queries=list(discovery_queries),
             adapter=adapter,
@@ -414,7 +448,13 @@ def build_phases(
 
     # -- Ревью: модуля нет ------------------------------------------------ #
     def review_phase(ctx: RunContext) -> PhaseResult:
-        """Ревью: no-op — отдельного модуля ревью в ядре пока нет (I6/I7 не автоматизируем)."""
+        """Ревью: ``ok`` без работы — очередь ревью в ядре ещё не подключена к фазе.
+
+        ``ok`` здесь честен только как «нечего исполнять»: G3 останавливает прогон до человека
+        (``_gate_phase``), поэтому фаза не решает ничего за него. P2b (не здесь) прикрепит
+        ``review_queue(ctx.store, plan.run_id)`` как ``pending`` — сигнал «что осталось», не
+        смена статуса (I6/I7: N/A и преодоление ``❓`` — только человеком).
+        """
         return PhaseResult(status="ok", phase="review")
 
     # -- Ш8: расчёт (бандл → holder для report) ----------------------------- #

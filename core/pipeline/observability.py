@@ -6,7 +6,8 @@
 * пишет ``INFO``-запись о старте и ``INFO``/``WARN``-запись о завершении в
   ``runs/{run_id}/logs/{phase}.jsonl`` через :class:`~core.util.logging.PhaseLogger`
   (поля §B.1: ``ts``/``run_id``/``phase``/``component``/``level``/``message``/``ctx``;
-  ``ctx`` несёт ``status``/``cells``/``errors``);
+  ``ctx`` несёт ``status``/``cells``/``errors``). ``WARN`` — только на ``blocked``/``failed``;
+  ``skipped`` — легитимное «работы не было», поэтому ``INFO``;
 * измеряет длительность ``time.perf_counter`` (карта ``{phase: seconds}``);
 * возвращает **исходный** :class:`~core.pipeline.runner.PhaseResult` без мутаций
   (``status``/``cells``/``errors`` не переписываются).
@@ -110,7 +111,9 @@ def _instrument_phase(
             )
             raise
         instrumented.durations[phase] = time.perf_counter() - started
-        level = "INFO" if result.status == "ok" else "WARN"
+        # ``skipped`` — легитимное «работы не было» (не аномалия): INFO, как ``ok``.
+        # WARN остаётся за ``blocked``/``failed``.
+        level = "INFO" if result.status in ("ok", "skipped") else "WARN"
         _safe_log(
             instrumented,
             phase,

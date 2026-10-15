@@ -391,6 +391,7 @@ def main() -> int:
     section("Интеграция Ш1–Ш9 (composition root)")
     check("build_phases: 11 не-гейтовых фаз, гейты не переопределены", lambda: _build_phases_gate())
     check("walking-skeleton: реальные фазы + гейт g1 блокирует без решения", lambda: _walking_skeleton())
+    check("phase-vocabulary: skipped не стопит; незарегистрированная фаза → failed", lambda: _phase_vocabulary())
 
     section("Паспорта продукта (§4.3)")
     check("passports: latest-by-date + кандидаты URL (не evidence, I19)", lambda: _passports())
@@ -1106,8 +1107,19 @@ def _pipeline_gates_resume() -> None:
 
     from core.domain import Gate, RunConfig, RunMode
     from core.pipeline.gates import is_gate_passed, record_decision
-    from core.pipeline.runner import Runner
+    from core.pipeline.runner import GATE_PHASES, PHASES, PhaseResult, Runner
     from core.store.sqlite_store import SqliteStore
+
+    def _ok_phases() -> dict:
+        """Не-гейтовые фазы-успехи: изолируют поведение гейта/resume (реестр по умолчанию — гейты)."""
+
+        def make(phase: str):
+            def _fn(ctx):
+                return PhaseResult(status="ok", phase=phase)
+
+            return _fn
+
+        return {name: make(name) for name in PHASES if name not in GATE_PHASES}
 
     cfg = RunConfig(
         case_id="c",
@@ -1121,14 +1133,14 @@ def _pipeline_gates_resume() -> None:
     with SqliteStore(":memory:") as store:
         store.create_run("r1", cfg)
         # Гейт не пройден без строки; прогон останавливается на g1.
-        r1 = Runner(store)
+        r1 = Runner(store, phases=_ok_phases())
         rep = r1.run("r1", until="g1")
         if rep.stopped_at != "g1" or rep.status != "blocked":
             raise AssertionError("гейт обязан остановить прогон без решения (S9)")
         if is_gate_passed(store, "r1", Gate.G1):
             raise AssertionError("гейт не пройден без строки gate_decisions")
         # Durable resume: новый Runner видит завершённые фазы через store.
-        r2 = Runner(store)
+        r2 = Runner(store, phases=_ok_phases())
         rep2 = r2.run("r1", until="plan")
         if rep2.results:
             raise AssertionError(f"durable resume: ok-фазы должны пропускаться, выполнено {[x.phase for x in rep2.results]}")
@@ -2355,6 +2367,77 @@ def _walking_skeleton() -> None:
             raise AssertionError("неожиданный режим e2e-фикстуры")
     finally:
         store.close()
+
+
+def _phase_vocabulary() -> None:
+    """P2a: словарь фаз — ``skipped`` не стопит прогон; незарегистрированная фаза → ``failed``.
+
+    Проверяет: (1) фаза со ``skipped`` не останавливает прогон и последующие фазы исполняются;
+    (2) дурабельное состояние ``skipped`` персистится; (3) незарегистрированная фаза даёт
+    ``failed``, а не подделку ``ok``; (4) ``skip_reason`` синхронен словарю §4.1.
+    """
+    import datetime as _dt
+
+    from core.domain import RunConfig, RunMode, SkipReason, load_dictionary
+    from core.pipeline.runner import GATE_PHASES, PHASES, PhaseResult, Runner
+    from core.store.sqlite_store import SqliteStore
+
+    # (4) closed vocabulary синхронна словарю.
+    data = load_dictionary(ROOT / "docs" / "status-dictionary.yaml")
+    if set(data["skip_reason"]) != {r.value for r in SkipReason}:
+        raise AssertionError("skip_reason рассинхронизирован со схемой")
+
+    cfg = RunConfig(
+        case_id="c",
+        anchor="p1",
+        cohort="co1",
+        products=["p1", "p2"],
+        package="pk",
+        snapshot_date=_dt.date(2026, 1, 1),
+        mode=RunMode.STRICT,
+    )
+
+    # (1)+(2) ``skipped`` не останавливает прогон.
+    with SqliteStore(":memory:") as store:
+        store.create_run("rv", cfg)
+        calls: list[str] = []
+
+        def ok(phase: str):
+            def _fn(ctx):
+                calls.append(phase)
+                return PhaseResult(status="ok", phase=phase)
+
+            return _fn
+
+        def skipped(phase: str):
+            def _fn(ctx):
+                calls.append(phase)
+                return PhaseResult(
+                    status="skipped", phase=phase, skip_reason=SkipReason.NO_SEARCH_ADAPTER
+                )
+
+            return _fn
+
+        phases = {name: ok(name) for name in PHASES if name not in GATE_PHASES}
+        phases["discovery"] = skipped("discovery")
+        for gate in GATE_PHASES:
+            phases[gate] = ok(gate)
+        report = Runner(store, phases=phases).run("rv")
+        if report.stopped_at is not None or report.status != "ok":
+            raise AssertionError("skipped обязан НЕ останавливать прогон")
+        if calls != list(PHASES):
+            raise AssertionError("после skipped последующие фазы обязаны исполниться")
+        if store.get_phase_state("rv").get("discovery") != "skipped":
+            raise AssertionError("durable-состояние skipped обязано персиститься")
+
+    # (3) Незарегистрированная фаза → failed (реализация отсутствует), не фиктивное ok.
+    with SqliteStore(":memory:") as store:
+        store.create_run("rv2", cfg)
+        rep = Runner(store).run("rv2", until="normalize")
+        if rep.status != "failed" or rep.stopped_at != "normalize":
+            raise AssertionError("незарегистрированная фаза обязана дать failed")
+        if not any("не зарегистрирована" in err for err in rep.results[0].errors):
+            raise AssertionError("failed незарегистрированной фазы обязан нести явную причину")
 
 
 def _here(*, tests_root: bool = False):

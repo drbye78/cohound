@@ -273,6 +273,28 @@ class CrawlSessionStatus(StrEnum):
     FAILED = "failed"
 
 
+class SkipReason(StrEnum):
+    """Машинная причина пропуска фазы конвейера (``PhaseStatus == "skipped"``).
+
+    Фаза, которой **нечего было делать** (предпосылка отсутствует), обязана назвать причину
+    явно, а не выдавать фиктивное ``ok``. Это операционное перечисление (не доменный статус):
+    пропуск не меняет статусов ячеек и не отменяет I6/I7. Значения «данные», поэтому секция
+    словаря ``skip_reason`` добавляется без бампа методологической версии (§13).
+
+    * ``no_search_adapter`` — нет поискового адаптера (Ш2/I19);
+    * ``no_queries`` — не заданы запросы разведки;
+    * ``no_urls`` — не задан план URL (Ш5);
+    * ``no_embedder`` — нет эмбеддера для плотной ветви;
+    * ``no_registry_spec`` — нет реестровой спецификации (Ш3).
+    """
+
+    NO_SEARCH_ADAPTER = "no_search_adapter"
+    NO_QUERIES = "no_queries"
+    NO_URLS = "no_urls"
+    NO_EMBEDDER = "no_embedder"
+    NO_REGISTRY_SPEC = "no_registry_spec"
+
+
 class CrawlItemStatus(StrEnum):
     """Per-URL статус элемента сеанса краула (``crawl_session_items``).
 

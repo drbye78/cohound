@@ -21,6 +21,7 @@ from core.domain.enums import (
     Gate,
     RankingPolicy,
     SearchKind,
+    SkipReason,
     StaleReason,
     Status,
     UnknownPolicy,
@@ -66,6 +67,8 @@ def assert_dictionary_integrity(path: str | Path) -> None:
         # Lane B: жизненный цикл сеанса краула и per-URL статус его элемента.
         "crawl_session_status",
         "crawl_item_status",
+        # P2a: машинная причина пропуска фазы (PhaseStatus="skipped").
+        "skip_reason",
     ]
     missing = [k for k in required if k not in data]
     if missing:
@@ -88,6 +91,7 @@ def assert_dictionary_integrity(path: str | Path) -> None:
         "crawl_strategy": {v.value for v in CrawlStrategy},
         "crawl_session_status": {v.value for v in CrawlSessionStatus},
         "crawl_item_status": {v.value for v in CrawlItemStatus},
+        "skip_reason": {v.value for v in SkipReason},
     }
     for section, expected in checks.items():
         actual = set(data[section])
