@@ -12,6 +12,19 @@
 * возвращает **исходный** :class:`~core.pipeline.runner.PhaseResult` без мутаций
   (``status``/``cells``/``errors`` не переписываются).
 
+**Словарь фаз (P2a/P2b).** Запись завершения несёт ``status`` и — ортогонально —
+``skip_reason`` (машинная причина при ``skipped``, ``None`` иначе) и ``pending``
+(число незакрытых для человека пунктов) + ``pending_items`` (сам список, ограничен фазой).
+Самодокументирующая заметка о предполёте живёт в ``log_entries`` фазы, а не в ``ctx``.
+
+**Политика пропуска (N3).** ``skipped`` при отсутствии предпосылки — **не** аномалия:
+он логируется на ``INFO`` (``WARN`` остаётся за ``blocked``/``failed``). Пропуск, который
+«морит» нижележащие фазы (напр. пустой корпус → ``evaluate`` без входов), не эскалируется
+до ``WARN``: любая такая фаза обязана сама быть precondition-guarded и выдать свой
+``skipped``/``ok``, а не выдумать результат. Run-level сводка пропусков выносится
+**не** в лог, а в CLI-JSON отчёт (``_run_report_payload``: ``skip_summary``) — лог на фазу
+остаётся точным, а оператор видит «что не отработало» в одном месте.
+
 Метрики прогона (04 §B.2) собираются :func:`write_run_metrics` в
 ``runs/{run_id}/metrics.json`` — детерминированный JSON (``sort_keys=True``,
 ``ensure_ascii=False``), в том числе при остановке на гейте (метрики отражают то, что
@@ -114,6 +127,8 @@ def _instrument_phase(
         # ``skipped`` — легитимное «работы не было» (не аномалия): INFO, как ``ok``.
         # WARN остаётся за ``blocked``/``failed``.
         level = "INFO" if result.status in ("ok", "skipped") else "WARN"
+        pending = list(getattr(result, "pending", None) or ())
+        skip_reason = getattr(result, "skip_reason", None)
         _safe_log(
             instrumented,
             phase,
@@ -124,6 +139,11 @@ def _instrument_phase(
                 "status": result.status,
                 "cells": len(getattr(result, "cells", None) or ()),
                 "errors": len(getattr(result, "errors", None) or ()),
+                # Причина пропуска (машиночитаемо) и объём незакрытых пунктов для человека
+                # (advisory ``pending``); сам список — ``pending_items`` (ограничен фазой).
+                "skip_reason": skip_reason.value if skip_reason is not None else None,
+                "pending": len(pending),
+                "pending_items": pending,
             },
         )
         return result

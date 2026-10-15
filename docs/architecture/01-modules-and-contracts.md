@@ -377,8 +377,10 @@ class ContentGateway(Protocol):
 (1) `title`; (2) `concept_terms` (сначала ru, затем en, затем порядок в пакете). Состав запросов не
 зависит от реализации/LLM (сохраняет симметрию I16).
 
-**Общий контракт фазы:** `PhaseResult(status: ok|blocked|failed, cells, log_entries, errors)`.
-Конвейер (`pipeline/runner.py`) оркестрирует последовательность и останавливается на гейтах.
+**Общий контракт фазы:** `PhaseResult(status: ok|skipped|blocked|failed, phase, cells, log_entries, errors, skip_reason, pending)`.
+`skip_reason` задан ⟺ `status == "skipped"` (инвариант `__post_init__`); `pending` — advisory
+(никогда не статус). Конвейер (`pipeline/runner.py`) оркестрирует последовательность,
+останавливается на `blocked`/`failed` и продолжает прогон на `skipped`.
 
 ---
 

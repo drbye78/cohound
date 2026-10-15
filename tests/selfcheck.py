@@ -2374,7 +2374,8 @@ def _phase_vocabulary() -> None:
 
     Проверяет: (1) фаза со ``skipped`` не останавливает прогон и последующие фазы исполняются;
     (2) дурабельное состояние ``skipped`` персистится; (3) незарегистрированная фаза даёт
-    ``failed``, а не подделку ``ok``; (4) ``skip_reason`` синхронен словарю §4.1.
+    ``failed``, а не подделку ``ok``; (4) ``skip_reason`` синхронен словарю §4.1;
+    (5) инвариант ``PhaseResult``: ``skip_reason`` задан ⟺ ``status == "skipped"``.
     """
     import datetime as _dt
 
@@ -2438,6 +2439,20 @@ def _phase_vocabulary() -> None:
             raise AssertionError("незарегистрированная фаза обязана дать failed")
         if not any("не зарегистрирована" in err for err in rep.results[0].errors):
             raise AssertionError("failed незарегистрированной фазы обязан нести явную причину")
+
+    # (5) Инвариант в коде: skip_reason задан ⟺ status == "skipped".
+    try:
+        PhaseResult(status="skipped", phase="discovery")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("skipped без skip_reason обязан падать (инвариант PhaseResult)")
+    try:
+        PhaseResult(status="ok", phase="review", skip_reason=SkipReason.NO_QUERIES)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("skip_reason при ok обязан падать (инвариант PhaseResult)")
 
 
 def _here(*, tests_root: bool = False):

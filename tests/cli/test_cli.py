@@ -282,12 +282,48 @@ def test_run_resume_skips_completed_phases(
     assert main(common) == EXIT_OK
     first = json_out(capsys)
     assert [item["phase"] for item in first["results"]] == ["normalize", "lint", "plan"]
-    assert first["skipped"] == []
+    assert first["resumed_skipped"] == []
 
     assert main(common) == EXIT_OK
     second = json_out(capsys)
-    assert second["skipped"] == ["normalize", "lint", "plan"]
+    assert second["resumed_skipped"] == ["normalize", "lint", "plan"]
     assert second["results"] == []
+
+
+def test_run_report_payload_carries_skip_reason_and_pending(tmp_path: Path) -> None:
+    """P2b: JSON-отчёт различает skip_reason/pending и не сливает два ``skipped`` (N6).
+
+    ``results[].skip_reason`` отличает ``no_queries`` от ``no_search_adapter``;
+    ``results[].pending`` несёт advisory-очередь (Ш7); ``skip_summary`` — run-level срез;
+    resume-список назван ``resumed_skipped``, а не ``skipped``.
+    """
+    from core.cli.context import _run_report_payload
+    from core.domain.enums import SkipReason
+    from core.pipeline.runner import PhaseResult, RunReport
+
+    report = RunReport(run_id="r1")
+    report.skipped = ["normalize"]
+    report.results = [
+        PhaseResult(
+            status="skipped", phase="discovery", skip_reason=SkipReason.NO_QUERIES
+        ),
+        PhaseResult(
+            status="ok", phase="review", pending=["review: 1 ячеек ожидают решения"]
+        ),
+    ]
+    payload = _run_report_payload("r1", report, tmp_path / "cohound.db")
+
+    discovery, review = payload["results"]
+    assert discovery["skip_reason"] == "no_queries"
+    assert discovery["pending"] == []
+    assert review["skip_reason"] is None
+    assert review["pending"] == ["review: 1 ячеек ожидают решения"]
+    assert payload["skip_summary"] == [
+        {"phase": "discovery", "skip_reason": "no_queries"}
+    ]
+    # N6: resume-список однозначен; старого двусмысленного ключа нет.
+    assert payload["resumed_skipped"] == ["normalize"]
+    assert "skipped" not in payload
 
 
 def test_run_stops_at_gate_blocked(

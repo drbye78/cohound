@@ -18,8 +18,9 @@
   и только кандидаты/гипотезы (I19, без evidence).
 * ``registry``/``inheritance``/``corpus``/``evaluate``/``compute``/``report`` — делегаты
   к существующим реализациям; логика не дублируется.
-* ``review`` — ``ok`` без работы: очередь ревью подключается к ``pending`` в P2b (I6/I7 не
-  автоматизируем; ``pending`` — advisory и не меняет статус).
+* ``review`` — ``ok`` + advisory ``pending`` (сводка :func:`~core.pipeline.review.review_queue`):
+  сообщает, что осталось человеку, но **ничего не решает** за него (I6/I7 не автоматизируем;
+  ``pending`` не меняет статус).
 * Гейты ``g1``–``g4`` — **не** переопределяются: замыкания гейтов остаются дефолтными
   (``_gate_phase`` в ``runner.py``, S9).
 
@@ -60,6 +61,7 @@ from core.pipeline.inheritance import inheritance_wave
 from core.pipeline.registry import registry_wave
 from core.pipeline.report import build_manifest, write_reports
 from core.pipeline.retrieve import RetrievalProfile
+from core.pipeline.review import review_queue
 from core.pipeline.runner import PhaseFn, PhaseResult, Ports, RunContext
 from core.ports.types import FetchMode
 from core.util.rate_limit import RateLimiter
@@ -243,6 +245,22 @@ def _preflight_noop(phase: str, reason: str) -> PhaseResult:
     return PhaseResult(
         status="ok", phase=phase, log_entries=[f"preflight (CLI): {reason}"]
     )
+
+
+def _review_pending_summary(items: Sequence[Any], *, preview: int = 3) -> str:
+    """Ограниченная человекочитаемая сводка очереди ревью (advisory ``pending``, I6/I7).
+
+    Возвращает **одну** строку вида
+    ``review: N ячеек ожидают решения (states=preliminary,reviewed; первые: p1/param_a, …)``.
+    Список ключей ограничен ``preview`` (а не всей очередью): ``pending`` — сигнал человеку,
+    а не второй реестр; полная очередь — за командой ``hound review`` (G3).
+    """
+    states = ",".join(sorted({str(item.state.value) for item in items}))
+    keys = ", ".join(f"{item.product_id}/{item.param_id}" for item in items[:preview])
+    if len(items) > preview:
+        keys += f" (+{len(items) - preview})"
+    tail = f"; первые: {keys}" if keys else ""
+    return f"review: {len(items)} ячеек ожидают решения (states={states}{tail})"
 
 
 # ---------------------------------------------------------------------------
@@ -446,16 +464,36 @@ def build_phases(
             strict=strict,
         )
 
-    # -- Ревью: модуля нет ------------------------------------------------ #
+    # -- Ш7: ревью (advisory-очередь, ничего не решает за человека) ---------- #
     def review_phase(ctx: RunContext) -> PhaseResult:
-        """Ревью: ``ok`` без работы — очередь ревью в ядре ещё не подключена к фазе.
+        """Ш7: прикрепляет очередь ревью как **advisory** ``pending``; ничего не решает.
 
-        ``ok`` здесь честен только как «нечего исполнять»: G3 останавливает прогон до человека
-        (``_gate_phase``), поэтому фаза не решает ничего за него. P2b (не здесь) прикрепит
-        ``review_queue(ctx.store, plan.run_id)`` как ``pending`` — сигнал «что осталось», не
-        смена статуса (I6/I7: N/A и преодоление ``❓`` — только человеком).
+        Фаза читает :func:`~core.pipeline.review.review_queue` (preliminary-контур I13 +
+        ``❓`` ``evaluated``-кандидаты I3) и возвращает ``ok`` с ограниченной сводкой в
+        :attr:`PhaseResult.pending` — сигналом «что осталось человеку». **Ничего не
+        разрешает**: не промоутит, не пишет ``N/A``, не трогает статусы ячеек, не
+        превращает ``pending`` в статус (I6/I7: N/A и преодоление ``❓`` — только человеком).
+        G3 уже останавливает прогон до человека (``_gate_phase``), поэтому второго стопа
+        здесь нет; ``pending`` не влияет ни на ``status``, ни на resume, ни на гейты.
+
+        Пустая очередь → ``pending == []`` (честное «нечего решать»). Сбой чтения очереди
+        изолируется (ср. изоляцию ``run_isolated``/информационный провенанс Ш9): фаза
+        возвращает ``ok`` с самодокументирующей заметкой в ``log_entries``, а не роняет
+        прогон ``failed`` — очередь ревью вторична к прогону, а остановка на человеке и без
+        того обеспечена G3.
         """
-        return PhaseResult(status="ok", phase="review")
+        try:
+            items = review_queue(ctx.store, plan.run_id)
+        except Exception as exc:  # noqa: BLE001 — очередь ревью вторична к прогону
+            return PhaseResult(
+                status="ok",
+                phase="review",
+                log_entries=[
+                    f"review: очередь недоступна: {type(exc).__name__}: {exc}"
+                ],
+            )
+        pending = [_review_pending_summary(items)] if items else []
+        return PhaseResult(status="ok", phase="review", pending=pending)
 
     # -- Ш8: расчёт (бандл → holder для report) ----------------------------- #
     def compute_phase(ctx: RunContext) -> PhaseResult:

@@ -809,6 +809,90 @@ def test_discovery_runs_with_adapter_and_queries() -> None:
 
 
 # ---------------------------------------------------------------------------
+# review: advisory `pending` (P2b) — ничего не решает, не меняет ячейки (I6/I7)
+# ---------------------------------------------------------------------------
+
+
+def _save_preliminary(store: SqliteStore, product_id: str, param_id: str) -> None:
+    """Кладёт в store ``preliminary``-ячейку (кандидат очереди ревью Ш7)."""
+    store.save_cell(
+        Cell(
+            run_id=RUN_ID,
+            product_id=product_id,
+            param_id=param_id,
+            state=CellState.PRELIMINARY,
+            status=None,
+        )
+    )
+
+
+def test_review_phase_attaches_pending_summary_when_queue_non_empty() -> None:
+    """Ш7: непустая очередь → ``ok`` + ограниченная сводка в ``pending`` (не статус)."""
+    store = _store()
+    _save_preliminary(store, "p1", "param_a")
+    _save_preliminary(store, "p2", "param_b")
+    phases = build_phases(inputs=_inputs(), plan=_plan(), ports=Ports())
+    result = phases["review"](_context(store, Ports()))
+
+    assert result.status == "ok"  # pending — advisory, статус не меняет (I6/I7)
+    assert len(result.pending) == 1
+    summary = result.pending[0]
+    assert "review: 2 ячеек ожидают решения" in summary
+    assert "states=preliminary" in summary
+    assert "p1/param_a" in summary and "p2/param_b" in summary
+
+
+def test_review_phase_pending_empty_when_queue_empty() -> None:
+    """Ш7: пустая очередь → ``pending == []`` (честное «нечего решать»)."""
+    store = _store()
+    phases = build_phases(inputs=_inputs(), plan=_plan(), ports=Ports())
+    result = phases["review"](_context(store, Ports()))
+
+    assert result.status == "ok"
+    assert result.pending == []
+
+
+def test_review_phase_does_not_mutate_cell_state() -> None:
+    """I6/I7-регрессия: фаза ревью **не** трогает статусы ячеек (byte-identical).
+
+    Ни ``N/A``, ни promote, ни преодоление ``❓`` — очередь только читается; снимок строк
+    до/после обязан совпасть побайтово.
+    """
+    store = _store()
+    _save_preliminary(store, "p1", "param_a")
+    store.save_cell(
+        Cell(
+            run_id=RUN_ID,
+            product_id="p2",
+            param_id="param_b",
+            state=CellState.EVALUATED,
+            status=Status.UNKNOWN,
+        )
+    )
+    store.save_cell(
+        Cell(
+            run_id=RUN_ID,
+            product_id="p1",
+            param_id="param_c",
+            state=CellState.EVALUATED,
+            status=Status.OK,
+            evidence=[LLMEvidence(source_id="src.1", quote="q")],  # ✅ — не в очереди
+        )
+    )
+
+    def _snapshot() -> list[str]:
+        return sorted(cell.model_dump_json() for cell in store.iter_cells(RUN_ID))
+
+    before = _snapshot()
+    phases = build_phases(inputs=_inputs(), plan=_plan(), ports=Ports())
+    result = phases["review"](_context(store, Ports()))
+
+    assert result.status == "ok"
+    assert result.cells == []  # фаза ничего не «производит»
+    assert _snapshot() == before  # ни один статус/состояние не изменился
+
+
+# ---------------------------------------------------------------------------
 # build_manifest: детерминизм и провенанс
 # ---------------------------------------------------------------------------
 

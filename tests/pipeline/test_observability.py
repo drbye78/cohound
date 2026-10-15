@@ -26,6 +26,7 @@ from core.pipeline.observability import (
     instrument_phases,
     write_run_metrics,
 )
+from core.domain.enums import SkipReason
 from core.pipeline.runner import PhaseResult
 
 #: Поля записи §B.1 (04-reliability-adr).
@@ -138,6 +139,9 @@ def test_each_phase_writes_one_jsonl_file_with_b1_fields(tmp_path: Path) -> None
             "status": "ok",
             "cells": 0,
             "errors": 0,
+            "skip_reason": None,
+            "pending": 0,
+            "pending_items": [],
         }
 
 
@@ -153,6 +157,33 @@ def test_non_ok_end_is_warn_and_carries_errors_count(tmp_path: Path) -> None:
     assert [event["level"] for event in events] == ["INFO", "WARN"]
     assert events[1]["ctx"]["status"] == "blocked"
     assert events[1]["ctx"]["errors"] == 1
+
+
+def test_skipped_end_surfaces_skip_reason_and_pending(tmp_path: Path) -> None:
+    """P2b: ``skipped`` логируется ``INFO`` и несёт машинную причину + advisory pending."""
+    reason = SkipReason.NO_QUERIES
+    result = PhaseResult(
+        status="skipped",
+        phase="discovery",
+        skip_reason=reason,
+        pending=["нужен человек: задать запросы разведки"],
+    )
+
+    def fn(ctx: Any) -> PhaseResult:
+        return result
+
+    instrumented = instrument_phases(
+        {"discovery": fn}, run_id="run_x", logs_root=tmp_path, clock=_Clock()
+    )
+    instrumented.phases["discovery"](_ctx())
+    events = _events(tmp_path / "run_x" / "logs" / "discovery.jsonl")
+
+    assert [event["level"] for event in events] == ["INFO", "INFO"]  # не WARN
+    ctx = events[1]["ctx"]
+    assert ctx["status"] == "skipped"
+    assert ctx["skip_reason"] == reason.value
+    assert ctx["pending"] == 1
+    assert ctx["pending_items"] == ["нужен человек: задать запросы разведки"]
 
 
 def test_phase_exception_logs_error_and_reraises(tmp_path: Path) -> None:

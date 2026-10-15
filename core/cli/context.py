@@ -1375,19 +1375,44 @@ def _plan_payload(result: RunPlan) -> dict[str, Any]:
 
 
 def _run_report_payload(run_id: str, report: RunReport, db_path: Path) -> dict[str, Any]:
-    """Сериализует :class:`RunReport` в JSON-совместимый словарь."""
+    """Сериализует :class:`RunReport` в JSON-совместимый словарь.
+
+    Словарь фаз (P2a/P2b) поверхностен и здесь: каждый результат несёт ``skip_reason``
+    (машинную причину при ``skipped``, иначе ``None``) и ``pending`` (advisory-пункты для
+    человека — напр. сводка очереди ревью Ш7). ``skip_summary`` — run-level срез «что не
+    отработало» (N3), чтобы пропуск не оставался виден только внутри ``results``.
+
+    **N6.** ``resumed_skipped`` — список фаз, короткозамкнутых персистентным ``ok`` при
+    resume (:attr:`RunReport.skipped`); это **не** ``PhaseStatus.skipped`` (тот виден как
+    ``results[].status == "skipped"``). Ключ назван однозначно, чтобы два ``skipped`` не
+    сливались в одном payload.
+    """
     return {
         "ok": report.ok,
         "run_id": run_id,
         "status": report.status,
         "stopped_at": report.stopped_at,
         "db": str(db_path),
-        "skipped": list(report.skipped),
+        "resumed_skipped": list(report.skipped),
+        "skip_summary": [
+            {
+                "phase": item.phase,
+                "skip_reason": (
+                    item.skip_reason.value if item.skip_reason is not None else None
+                ),
+            }
+            for item in report.results
+            if item.status == "skipped"
+        ],
         "errors": list(report.errors),
         "results": [
             {
                 "phase": item.phase,
                 "status": item.status,
+                "skip_reason": (
+                    item.skip_reason.value if item.skip_reason is not None else None
+                ),
+                "pending": list(item.pending),
                 "errors": list(item.errors),
             }
             for item in report.results
@@ -1441,10 +1466,14 @@ def _print_run_report(payload: dict[str, Any]) -> None:
     ]
     for item in payload["results"]:
         lines.append(f"phase {item['phase']}: {item['status']}")
+        if item.get("skip_reason"):
+            lines.append(f"  skip: {item['skip_reason']}")
+        for note in item.get("pending", ()):
+            lines.append(f"  pending: {note}")
         for error in item["errors"]:
             lines.append(f"  error: {error}")
-    if payload["skipped"]:
-        lines.append(f"skipped: {', '.join(payload['skipped'])}")
+    if payload["resumed_skipped"]:
+        lines.append(f"resumed (ok, пропущены): {', '.join(payload['resumed_skipped'])}")
     if payload["stopped_at"] is not None:
         lines.append(
             "примечание: гейт требует явного человеческого решения (03 §E.2); "

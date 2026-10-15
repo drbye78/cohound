@@ -501,3 +501,24 @@ def test_pending_does_not_turn_into_status(store: SqliteStore) -> None:
     assert discovery.pending == ["нужен человек: задать запросы разведки"]
     # Никакой ячейки/статуса N/A из pending не следует: ячеек фаза не производит.
     assert discovery.cells == []
+
+
+def test_phase_result_guard_requires_skip_reason_iff_skipped() -> None:
+    """Инвариант в коде: ``skip_reason`` задан ⟺ ``status == "skipped"``.
+
+    ``skipped`` без причины — немая неполнота; ``skip_reason`` при другом статусе —
+    противоречивая запись. Оба случая обязаны падать на конструировании.
+    """
+    with pytest.raises(ValueError, match="skip_reason"):
+        PhaseResult(status="skipped", phase="discovery")
+    with pytest.raises(ValueError, match="skip_reason"):
+        PhaseResult(status="ok", phase="review", skip_reason=SkipReason.NO_QUERIES)
+    with pytest.raises(ValueError, match="skip_reason"):
+        PhaseResult(status="failed", phase="corpus", skip_reason=SkipReason.NO_URLS)
+
+    # Согласованные конструкции принимаются.
+    assert PhaseResult(status="ok", phase="review").skip_reason is None
+    skipped = PhaseResult(
+        status="skipped", phase="discovery", skip_reason=SkipReason.NO_QUERIES
+    )
+    assert skipped.skip_reason is SkipReason.NO_QUERIES

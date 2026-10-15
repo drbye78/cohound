@@ -29,6 +29,16 @@
 in-memory-журнале он разогревается из ``StorePort.get_phase_state``, поэтому **новый
 процесс/``Runner`` продолжает прерванный прогон** (cross-process resume, 02 §A.1).
 
+**Инвариант ``skipped`` (N4): пропуск обязан быть side-effect-free или идемпотентным.**
+``skipped`` **не** короткозамкнут: он пересчитывается на каждом ``run``/``resume``.
+Поэтому фаза, завершившаяся ``skipped``, не имеет права оставлять мутацию, которую
+следующий прогон применил бы повторно (иначе побочный эффект «проточится» на каждый
+resume). Единственное допустимое поведение пропуска — чистое наблюдение/детект
+предпосылки; любая запись в store должна быть идемпотентной. Персистится лишь сам
+статус фазы (``set_phase_state``); ``skip_reason``/``pending`` **намеренно не**
+персистятся (resume'у нужен только статус) — они поверхностны и доступны в CLI-JSON
+(``_run_report_payload``) и в ctx-логе фазы (``observability``).
+
 Нейтрален (§1.3).
 """
 
@@ -118,10 +128,15 @@ class PhaseResult:
     ``skip_reason`` — машинная причина при ``status == "skipped"``
     (:class:`~core.domain.enums.SkipReason`); ``None`` для прочих статусов.
 
-    ``pending`` — незакрытые пункты, требующие человека (напр. очередь ревью, Ш10/Ш11;
-    наполняется в P2b). **Advisory**: ``pending`` никогда не меняет ``status`` и не
-    порождает автоматический ``N/A`` — иначе I6/I7 были бы нарушены (N/A и преодоление
-    ``❓`` — только человеком, не автоматикой).
+    ``pending`` — незакрытые пункты, требующие человека (напр. очередь ревью, Ш7).
+    **Advisory**: ``pending`` никогда не меняет ``status`` и не порождает автоматический
+    ``N/A`` — иначе I6/I7 были бы нарушены (N/A и преодоление ``❓`` — только человеком,
+    не автоматикой).
+
+    **Инвариант (код, не комментарий).** ``skip_reason`` заполнен **тогда и только тогда**,
+    когда ``status == "skipped"`` (см. :meth:`__post_init__`): ``skipped`` без причины —
+    немая неполнота, а причина у ``ok``/``blocked``/``failed`` — противоречивая запись
+    (у ``blocked``/``failed`` причина иная — ``errors``).
     """
 
     status: PhaseStatus
@@ -131,6 +146,19 @@ class PhaseResult:
     errors: list[str] = field(default_factory=list)
     skip_reason: SkipReason | None = None
     pending: list[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        """Инвариант: ``skip_reason`` задан ⟺ ``status == "skipped"``.
+
+        Словарь статусов не позволяет пользоваться ими несогласованно: ``skipped`` без
+        :attr:`skip_reason` (немая неполнота) и :attr:`skip_reason` при любом другом
+        статусе (противоречивая запись) одинаково запрещены.
+        """
+        if (self.skip_reason is not None) != (self.status == "skipped"):
+            raise ValueError(
+                "PhaseResult: skip_reason обязан быть задан ⟺ status == 'skipped' "
+                f"(status={self.status!r}, skip_reason={self.skip_reason!r})"
+            )
 
 
 @dataclass
@@ -195,7 +223,10 @@ class RunReport:
 
     ``skipped`` — имена фаз, **короткозамкнутых** персистентным ``ok`` (resume), а не фазы
     со статусом ``PhaseStatus.skipped`` (те попадают в ``results`` как обычные результаты).
-    ``stopped_at`` — фаза, остановившая прогон: только ``blocked`` или ``failed``.
+    Во избежание путаницы в CLI-JSON это поле сериализуется под ключом ``resumed_skipped``
+    (см. :func:`core.cli.context._run_report_payload`), а ``PhaseStatus.skipped`` —
+    как ``results[].status == "skipped"``. ``stopped_at`` — фаза, остановившая прогон:
+    только ``blocked`` или ``failed``.
     """
 
     run_id: str
@@ -428,6 +459,12 @@ class Runner:
 
         Персистится и ``skipped`` (состояние видно в ``runs.state``), но короткое замыкание
         resume — **только** по ``ok``: ``skipped`` пересчитывается при следующем прогоне.
+
+        **Персистится только ``status`` (осознанно).** Resume'у нужна лишь строка статуса,
+        поэтому :attr:`PhaseResult.skip_reason`/``pending`` в ledger **не** пишутся — их
+        поверхностный след идёт в CLI-JSON (``_run_report_payload``) и ctx-лог фазы
+        (``observability``). Расширение формы ledger до полной записи ``PhaseResult`` не
+        требуется и не делается: единый источник строки статуса — ``set_phase_state``.
         """
         try:
             self.store.set_phase_state(run_id, phase, result.status)
