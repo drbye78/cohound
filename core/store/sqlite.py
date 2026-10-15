@@ -363,15 +363,13 @@ def _ensure_columns(
 
 
 def connect(db_path: str | Path = ":memory:") -> sqlite3.Connection:
-    """Открывает БД и применяет схему (+ идемпотентные DDL-миграции v2.1–v3.3)."""
+    """Открывает БД и применяет схему (+ идемпотентные DDL-миграции v2.1–v3.4)."""
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
     conn.executescript(DDL)
     # DDL-миграция v2.1 (A3): старая БД без settings_provenance_json получает колонку.
     # CREATE TABLE IF NOT EXISTS не меняет существующую таблицу — добавляем явно.
-    columns = {row["name"] for row in conn.execute("PRAGMA table_info(runs)")}
-    if "settings_provenance_json" not in columns:
-        conn.execute("ALTER TABLE runs ADD COLUMN settings_provenance_json TEXT")
+    _ensure_columns(conn, "runs", {"settings_provenance_json": "TEXT"})
     # DDL-миграция v3.2 (Phase 2): провенанс краула (сеансы/движки/дайджест источников).
     _ensure_columns(conn, "runs", {"crawl_provenance_json": "TEXT"})
     # DDL-миграция v3.3 (Backlog B): операционные оси краула (стратегия/диапазон задержек) —
