@@ -9,12 +9,14 @@ URL-сорсинг, правка файла с сохранением шапки
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from core.adapters.crawl_browser import BrowserCrawler, CrawlUnavailable
 from core.adapters.crawl_scrapy import CrawlError
 from core.domain.enums import CrawlStrategy, ExtractionRoute, FetchMode
+from core.ports.types import RawPage
 from core.pipeline.crawl_probe import (
     MIN_USABLE_TEXT,
     Observation,
@@ -638,3 +640,122 @@ def test_reported_extract_is_document_on_document_evidence() -> None:
     verdict = _run(http, url=doc_url)
     assert verdict.extract is ExtractionRoute.DOCUMENT
     assert verdict.as_dict()["extract"] == "document"
+
+
+# ---------------------------------------------------------------------------
+# Авторское ``wait_for`` ключа: прокидывается, виден в артефакте, не синтезируется
+# ---------------------------------------------------------------------------
+
+
+def test_authored_wait_for_reaches_both_browser_tiers_and_is_surfaced() -> None:
+    """⚠ Авторское ``wait_for`` уходит в plan обоих браузерных тиров и видно в наблюдении.
+
+    Лестница исчерпана до honest: hybrid рендерит заглушку, honest даёт контент. Оба плана
+    обязаны нести **авторское** условие, а наблюдение — ``wait_for_applied=True``.
+    """
+    stub = page(
+        URL, fetch_mode=FetchMode.BROWSER, status_code=None, content=b"<html>wait</html>"
+    )
+    usable = page(URL, fetch_mode=FetchMode.BROWSER, status_code=None)
+    http = ScriptedHttpCrawler({URL: page(URL, status_code=403)})
+    browser = ScriptedBrowserCrawler(hybrid={URL: stub}, honest={URL: usable})
+    authored = "() => document.body && document.body.innerText.length > 1"
+    verdict = _run(http, browser, wait_for_by_key={KEY: authored})
+
+    assert [plan.strategy for plan in browser.plan_calls] == [
+        CrawlStrategy.HYBRID,
+        CrawlStrategy.HONEST,
+    ]
+    assert all(plan.wait_for == authored for plan in browser.plan_calls)
+    browser_obs = [o for o in verdict.observations if o.is_browser]
+    assert browser_obs and all(o.wait_for_applied for o in browser_obs)
+    assert all(o.as_dict()["wait_for_applied"] for o in browser_obs)
+    # Пригодный контент **с** условием ключа — подтверждение, а не «условие не нужно».
+    assert verdict.resolved
+    assert verdict.wait_for_confirmed is True
+    assert verdict.as_dict()["wait_for_confirmed"] is True
+
+
+def test_absent_authored_wait_for_probes_with_none_and_no_synthesis() -> None:
+    """⚠ Ключ без авторского ``wait_for`` зондируется с ``wait_for=None`` (синтеза нет)."""
+    http = ScriptedHttpCrawler({URL: page(URL, status_code=403)})
+    browser = ScriptedBrowserCrawler(
+        honest={URL: page(URL, fetch_mode=FetchMode.BROWSER, status_code=None)}
+    )
+    verdict = _run(http, browser)  # ``wait_for_by_key`` не задан
+
+    assert browser.plan_calls and all(plan.wait_for is None for plan in browser.plan_calls)
+    assert all(not o.wait_for_applied for o in verdict.observations)
+    assert verdict.wait_for_confirmed is False
+    assert verdict.wait_for_recommended is False
+
+
+class _WaitForGatedBrowser:
+    """Браузерный тир, отдающий контент **только** при применённом ``wait_for``."""
+
+    version = "fake-gated-browser-1"
+    engine = "browser"
+    supports_browser = True
+
+    def __init__(self, content: bytes) -> None:
+        self._content = content
+        self.plans: list[Any] = []
+
+    def fetch(self, url: str, plan: Any = None) -> RawPage:
+        """Контент при ``plan.wait_for``; иначе — короткая заглушка (непригодно)."""
+        self.plans.append(plan)
+        if getattr(plan, "wait_for", None):
+            return page(
+                url, fetch_mode=FetchMode.BROWSER, status_code=None, content=self._content
+            )
+        return page(
+            url,
+            fetch_mode=FetchMode.BROWSER,
+            status_code=None,
+            content=b"<html>stub</html>",
+        )
+
+
+def test_wait_for_gated_browser_resolves_only_with_authored_wait_for() -> None:
+    """⚠ Тир даёт контент только с ``wait_for``: авторское условие разрешает ключ.
+
+    Без авторского условия тот же тир отдаёт заглушку → честный ``unresolved`` с
+    ``wait_for_recommended``; синтезированное условие не появляется ни в одном плане.
+    """
+    body = b"<html><body><p>" + ("content " * 200).encode("utf-8") + b"</p></body></html>"
+    http = ScriptedHttpCrawler({URL: page(URL, status_code=403)})
+    resolved = _run(
+        http, _WaitForGatedBrowser(body), wait_for_by_key={KEY: "() => ready"}
+    )
+    assert resolved.resolved
+    assert resolved.fetch is FetchMode.BROWSER
+    assert resolved.strategy is CrawlStrategy.HONEST
+    assert resolved.wait_for_confirmed is True
+
+    http2 = ScriptedHttpCrawler({URL: page(URL, status_code=403)})
+    gated = _WaitForGatedBrowser(body)
+    stub = _run(http2, gated)
+    assert not stub.resolved
+    assert stub.wait_for_recommended is True
+    assert stub.needs_confirmation is True
+    # Ни один план не несёт синтезированного условия.
+    assert gated.plans and all(getattr(plan, "wait_for", None) is None for plan in gated.plans)
+
+
+def test_stub_with_applied_wait_for_is_marked_and_not_recommended() -> None:
+    """⚠ Заглушка **с** применённым ``wait_for``: ``detail`` помечен, рекомендации нет.
+
+    Условие ключа уже применено, и рендер всё равно остался заглушкой: рекомендовать
+    добавить ``wait_for`` (он есть) неинформативно, но факт применения обязан быть виден.
+    """
+    http = ScriptedHttpCrawler({URL: page(URL, status_code=403)})
+    stub = page(
+        URL, fetch_mode=FetchMode.BROWSER, status_code=None, content=b"<html>wait</html>"
+    )
+    browser = ScriptedBrowserCrawler(hybrid={URL: stub}, honest={URL: stub})
+    verdict = _run(http, browser, wait_for_by_key={KEY: "() => document.body && 1"})
+
+    assert not verdict.resolved
+    assert "[wait_for применён]" in (verdict.detail or "")
+    assert all(o.wait_for_applied for o in verdict.observations if o.is_browser)
+    assert verdict.wait_for_recommended is False

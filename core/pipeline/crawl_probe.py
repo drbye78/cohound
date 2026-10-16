@@ -17,10 +17,13 @@ proposal/правка файла — тонкие обёртки над :func:`c
 :func:`core.pipeline.fetch_plan.resolve_fetch_plan`); ``extract: document`` предлагается
 только по положительному свидетельству формата, иначе в вердикте честно стоит ``null``
 («не определено — существующее значение сохраняется»: ``--write`` перетирает ``extract``
-лишь при ``document``); ``wait_for`` не синтезируется — только флаг-подсказка
-``wait_for_recommended`` при положительном свидетельстве (заглушка честного рендера);
-``rate_limit`` не трогается, кроме наблюдённого ``429`` (антибот ``401/403`` — не сигнал
-частоты).
+лишь при ``document``); ``wait_for`` не синтезируется **никогда** — если ключ уже несёт
+авторское ``wait_for``, драйвер применяет **именно его** к браузерным тирам (это измерение
+с задокументированной конфигурацией, не изобретение значения), а наблюдение честно несёт
+``wait_for_applied``; при отсутствии авторского условия — ``wait_for=None`` и лишь
+флаг-подсказка ``wait_for_recommended`` при положительном свидетельстве (заглушка честного
+рендера); ``rate_limit`` не трогается, кроме наблюдённого ``429`` (антибот ``401/403`` — не
+сигнал частоты).
 
 **Робот-этика.** :class:`RobotsGate` разбирает ``robots.txt`` (``urllib.robotparser``);
 текст ленты инъектируется (локальный путь не идёт через egress-слой, энфорсящий robots).
@@ -175,7 +178,10 @@ class Observation:
     тир не смог исполниться вовсе (нет зависимости/бинарей, ``CrawlUnavailable``).
     ``status_code is None`` — **неизвестно**, а не сбой (как и ``content_type=None``).
     ``text_chars`` — длина **извлечённого** текста (реальный экстрактор), ``content_bytes`` —
-    объём сырых байтов (для отличения пустого ответа от заглушки).
+    объём сырых байтов (для отличения пустого ответа от заглушки). ``wait_for_applied`` —
+    было ли к этому браузерному тиру применено **авторское** JS-условие ключа (``False`` у
+    HTTP-тира и у браузерного без авторского условия): оператор отличает «browser+wait_for
+    сработал» от «сработал голый browser».
     """
 
     tier: ProbeTier
@@ -190,6 +196,7 @@ class Observation:
     text_chars: int = 0
     error: str | None = None
     attempts: int = 1
+    wait_for_applied: bool = False
 
     @property
     def confidence(self) -> ProbeConfidence:
@@ -240,6 +247,7 @@ class Observation:
             "text_chars": self.text_chars,
             "error": self.error,
             "attempts": self.attempts,
+            "wait_for_applied": self.wait_for_applied,
         }
 
 
@@ -355,6 +363,9 @@ class Verdict:
     strategy: CrawlStrategy | None = None
     extract: ExtractionRoute | None = None
     wait_for_recommended: bool = False
+    #: Авторское ``wait_for`` ключа было применено и дало пригодный контент (не «условие
+    #: не нужно» — наоборот, подтверждение, что измерение шло с ним).
+    wait_for_confirmed: bool = False
     needs_confirmation: bool = False
     rate_limit_hint: RateLimitSpec | None = None
     reasons: tuple[str, ...] = ()
@@ -380,6 +391,7 @@ class Verdict:
             "strategy": self.strategy.value if self.strategy is not None else None,
             "extract": self.extract.value if self.extract is not None else None,
             "wait_for_recommended": self.wait_for_recommended,
+            "wait_for_confirmed": self.wait_for_confirmed,
             "needs_confirmation": self.needs_confirmation,
             "rate_limit_hint": (
                 {"min_s": hint.min_s, "max_s": hint.max_s} if hint is not None else None
@@ -413,8 +425,14 @@ def _rate_limit_hint(observations: Sequence[Observation]) -> RateLimitSpec | Non
 
 
 def _stub_flag(observations: Sequence[Observation]) -> bool:
-    """Есть ли положительное свидетельство заглушки честного рендера (мотив ``wait_for``)."""
-    return any(o.looks_like_stub for o in observations)
+    """Есть ли положительное свидетельство заглушки честного рендера (мотив ``wait_for``).
+
+    Учитываются только наблюдения **без** применённого ``wait_for``: если ключ уже несёт
+    авторское условие и рендер с ним всё равно остался заглушкой, рекомендовать добавить
+    ``wait_for`` (он уже есть) — неинформативно; сам факт применения виден в
+    ``Observation.wait_for_applied``.
+    """
+    return any(o.looks_like_stub and not o.wait_for_applied for o in observations)
 
 
 def _reached_content(observation: Observation) -> bool:
@@ -441,7 +459,19 @@ def _extraction_empty(observation: Observation) -> bool:
 
 
 def _tier_detail(observation: Observation) -> str:
-    """Одна строка ``detail`` про тир: что сработало — транспорт, экстракция или порог."""
+    """Одна строка ``detail`` про тир: что сработало — транспорт, экстракция или порог.
+
+    При применённом авторском ``wait_for`` строка помечается (``[wait_for применён]``):
+    оператор видит, что браузерный тир шёл **с** условием ключа, а не «голым».
+    """
+    detail = _tier_detail_core(observation)
+    if observation.wait_for_applied:
+        return f"{detail} [wait_for применён]"
+    return detail
+
+
+def _tier_detail_core(observation: Observation) -> str:
+    """Ядро :func:`_tier_detail` без пометки о ``wait_for``."""
     tier = observation.tier.value
     error = f" ({observation.error})" if observation.error else ""
     if observation.raised or observation.unavailable:
@@ -552,6 +582,9 @@ def _verdict_from_probe(
                     observation.url, observation.content_type, supported_suffixes
                 ),
                 wait_for_recommended=stub,
+                # Пригодный контент **с** авторским ``wait_for`` — подтверждение условия,
+                # а не свидетельство его ненужности (не понижаем и не снимаем его).
+                wait_for_confirmed=observation.wait_for_applied,
                 needs_confirmation=bool(stub or hint is not None),
                 rate_limit_hint=hint,
                 observations=observations,

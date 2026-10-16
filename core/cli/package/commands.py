@@ -1706,6 +1706,12 @@ def cmd_package_crawl_probe(args: argparse.Namespace) -> int:
 
     supported = tuple(SUPPORTED_FORMATS)
 
+    # Авторское ``wait_for`` ключа (A3: измеряем с задокументированной конфигурацией, а не
+    # выдумываем условие). Ключ без ``wait_for`` зондируется с ``None`` — синтеза нет.
+    wait_for_by_key = {
+        key: (profiles[key].wait_for if key in profiles else None) for key in keys
+    }
+
     # 3. Зонд.
     verdicts = _invoke(
         lambda: run_probe(
@@ -1715,6 +1721,7 @@ def cmd_package_crawl_probe(args: argparse.Namespace) -> int:
             no_browser=args.no_browser,
             max_urls_per_key=args.max_urls_per_key,
             supported_suffixes=supported,
+            wait_for_by_key=wait_for_by_key,
         )
     )
     for key in unknown:
@@ -1798,10 +1805,12 @@ def _print_crawl_probe_lines(
         if verdict.resolved:
             strategy = f" strategy={verdict.strategy.value}" if verdict.strategy else ""
             extract = verdict.extract.value if verdict.extract else "-"
+            # Подтверждённое авторское ``wait_for``: контент получен **с** ним (видно в артефакте).
+            wait_for = " wait_for=confirmed" if verdict.wait_for_confirmed else ""
             lines.append(
                 f"  {verdict.key}: fetch={verdict.fetch.value}{strategy} "
                 f"extract={extract} source={verdict.source.value} "
-                f"confidence={verdict.confidence.value}"
+                f"confidence={verdict.confidence.value}{wait_for}"
             )
         else:
             reason = ",".join(verdict.reasons) or "?"

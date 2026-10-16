@@ -4,6 +4,20 @@
 ``domain_profiles.yaml``. Краулеры и экстрактор **инъектируются** (:class:`ProbePorts`),
 поэтому тесты идут без сети; здесь нет импорта адаптеров/хранилища (матрица ``pipeline``).
 
+**Авторское ``wait_for`` ключа.** Если ключ уже несёт ``wait_for`` в ``domain_profiles.yaml``,
+драйвер применяет **именно его** к обоим браузерным тирам (``hybrid`` и ``honest``) —
+измерение с задокументированной конфигурацией (A3), а не изобретение значения. Ключи без
+авторского условия зондируются с ``wait_for=None`` (условие **никогда** не синтезируется).
+Факт применения виден в :attr:`~core.pipeline.crawl_probe.Observation.wait_for_applied`.
+
+**Robustness (наблюдение, не баг зонда).** Оркестратор отмечал интермиттентный сбой запуска
+реального браузерного тира **дважды подряд в одном процессе** (``CrawlUnavailable: не удалось
+запустить браузер Playwright``): первый запуск успешен, сразу следующий — нет, тогда как свежий
+процесс успешен. Зонд строит **один** ``BrowserCrawler`` на весь прогон и переиспользует его
+контекст между ключами (реальный бэкенд ``_ensure_context`` ленив и идемпотентен), поэтому
+повторного запуска «на ключ» нет; на живом прогоне браузерные ключи в одном процессе прошли без
+``CrawlUnavailable``. Митигейшн не добавлялся (``BrowserCrawler`` в этой задаче не трогаем).
+
 **Лестница (дизамбигуатор — исход браузерного тира).**
 
 1. Tier 1 — обычный HTTP (:data:`~core.domain.enums.FetchMode.HTTP`) с bounded-retry
@@ -139,8 +153,14 @@ def _observe_page(
     requested_url: str,
     source: ProbeSource,
     extractor: Any,
+    *,
+    wait_for_applied: bool = False,
 ) -> Observation:
-    """Строит наблюдение из страницы, измеряя **извлечённый** текст реальным экстрактором."""
+    """Строит наблюдение из страницы, измеряя **извлечённый** текст реальным экстрактором.
+
+    ``wait_for_applied`` — было ли к фетчу применено авторское JS-условие ключа (видно в
+    артефакте: «browser+wait_for сработал» против «сработал голый browser»).
+    """
     text_chars = 0
     error: str | None = None
     try:
@@ -160,6 +180,7 @@ def _observe_page(
         content_bytes=len(getattr(page, "content", b"") or b""),
         text_chars=text_chars,
         error=error,
+        wait_for_applied=wait_for_applied,
     )
 
 
@@ -218,9 +239,15 @@ def _probe_tier_browser(
     ports: ProbePorts,
     pacer: _HostPacer,
     budget: _Budget,
+    wait_for: str | None = None,
 ) -> Observation:
-    """Браузерный тир (``hybrid``/``honest``): ``RawPage`` либо ``raised``/``unavailable``."""
-    plan = FetchPlan(FetchMode.BROWSER, strategy=strategy)
+    """Браузерный тир (``hybrid``/``honest``): ``RawPage`` либо ``raised``/``unavailable``.
+
+    ``wait_for`` — **авторское** JS-условие ключа (или ``None``); уходит в ``FetchPlan`` и
+    отражается в наблюдении как ``wait_for_applied``. Условие не синтезируется здесь.
+    """
+    plan = FetchPlan(FetchMode.BROWSER, strategy=strategy, wait_for=wait_for)
+    applied = bool(wait_for)
     if not budget.spend():
         return Observation(
             tier=tier,
@@ -241,8 +268,11 @@ def _probe_tier_browser(
             raised=True,
             unavailable=_is_unavailable(exc),
             error=f"{type(exc).__name__}: {exc}",
+            wait_for_applied=applied,
         )
-    return _observe_page(page, tier, url, source, ports.extractor)
+    return _observe_page(
+        page, tier, url, source, ports.extractor, wait_for_applied=applied
+    )
 
 
 def _probe_url(
@@ -255,8 +285,12 @@ def _probe_url(
     no_browser: bool,
     retries: int,
     supported_suffixes: Sequence[str],
+    wait_for: str | None = None,
 ) -> UrlProbe:
-    """Прогон лестницы тиров по одному URL (ранний выход при пригодном результате)."""
+    """Прогон лестницы тиров по одному URL (ранний выход при пригодном результате).
+
+    ``wait_for`` — авторское JS-условие ключа, применяемое к обоим браузерным тирам.
+    """
     observations: list[Observation] = []
     http_obs = _probe_tier_http(
         url, source, ports=ports, pacer=pacer, budget=budget, retries=retries
@@ -284,6 +318,7 @@ def _probe_url(
         ports=ports,
         pacer=pacer,
         budget=budget,
+        wait_for=wait_for,
     )
     observations.append(hybrid)
     if is_usable(hybrid, supported_suffixes=supported_suffixes) or hybrid.unavailable:
@@ -297,6 +332,7 @@ def _probe_url(
         ports=ports,
         pacer=pacer,
         budget=budget,
+        wait_for=wait_for,
     )
     observations.append(honest)
     return UrlProbe(url, source, tuple(observations))
@@ -312,6 +348,7 @@ def run_probe(
     supported_suffixes: Sequence[str] = tuple(DEFAULT_DOCUMENT_SUFFIXES),
     http_retries: int = HTTP_RETRIES,
     max_total_fetches: int = MAX_TOTAL_FETCHES,
+    wait_for_by_key: Mapping[str, str | None] | None = None,
 ) -> list[Verdict]:
     """Зондирует ключи и возвращает по вердикту на ключ (порядок ключей сохранён).
 
@@ -319,6 +356,10 @@ def run_probe(
     кандидаты; драйвер применяет детерминированный отбор (:func:`pick_urls`) и робот-этику.
     Ключ без кандидатов, с запретом ``robots.txt`` или без бюджета становится ``unresolved``
     с причиной — не подставляет дефолт и не исчезает (A3).
+
+    ``wait_for_by_key[key]`` — **авторское** ``wait_for`` ключа из ``domain_profiles.yaml``
+    (``None``/отсутствие ⇒ ``wait_for=None``). Условие передаётся в браузерные тиры как есть
+    и **никогда** не синтезируется драйвером.
     """
     limiter = RateLimiter(sleep=ports.sleep, rng=ports.rng)
     pacer = _HostPacer(limiter)
@@ -359,6 +400,9 @@ def run_probe(
                 )
             )
             continue
+        key_wait_for = (
+            None if wait_for_by_key is None else wait_for_by_key.get(key)
+        )
         probes = [
             _probe_url(
                 url,
@@ -369,6 +413,7 @@ def run_probe(
                 no_browser=no_browser,
                 retries=http_retries,
                 supported_suffixes=supported_suffixes,
+                wait_for=key_wait_for,
             )
             for url in allowed
         ]

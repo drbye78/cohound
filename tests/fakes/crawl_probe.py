@@ -140,10 +140,13 @@ class ScriptedBrowserCrawler:
         self.honest = dict(honest or {})
         self.default = default
         self.calls: list[tuple[str, CrawlStrategy]] = []
+        #: Полные планы фетча (для проверки прокинутого ``wait_for``/``strategy``).
+        self.plan_calls: list[FetchPlan] = []
 
     def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:
         """Возвращает заданный результат тира; ``None`` ⇒ ``CrawlError``."""
         self.calls.append((url, plan.strategy))
+        self.plan_calls.append(plan)
         table = self.hybrid if plan.strategy is CrawlStrategy.HYBRID else self.honest
         result = table.get(url, self.default)
         if result is None:

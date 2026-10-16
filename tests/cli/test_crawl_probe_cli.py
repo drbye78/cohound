@@ -385,3 +385,79 @@ def test_write_changes_only_measured_key_and_keeps_others_verbatim(
     loaded = load_domain_profiles(pkg / "domain_profiles.yaml")
     assert loaded["alpha.test"].fetch is FetchMode.BROWSER
     assert loaded["beta.test"].fetch is FetchMode.BROWSER
+
+
+# ---------------------------------------------------------------------------
+# Авторское ``wait_for``: сохраняется, не понижается, синтез условия запрещён
+# ---------------------------------------------------------------------------
+
+
+def test_write_preserves_authored_wait_for_and_never_synthesizes(
+    capsys, tmp_path: Path
+) -> None:
+    """⚠ ``--write`` сохраняет авторское ``wait_for`` и не синтезирует условие для других.
+
+    ``alpha.test`` несёт авторское условие и резолвится браузером **с** ним
+    (``wait_for_confirmed``); ``beta.test`` без условия остаётся честной заглушкой
+    (``wait_for_recommended``), но условие для него **не** выдумывается.
+    """
+    profiles = (
+        HEADER
+        + "alpha.test:\n  fetch: http\n  extract: html\n  strategy: honest\n"
+        + '  wait_for: "() => document.body && 1"\n'
+        + "beta.test:\n  fetch: http\n"
+    )
+    pkg = _package(tmp_path, profiles)
+    out = tmp_path / "probe"
+    alpha_url = "https://alpha.test/"
+    beta_url = "https://beta.test/"
+    http = ScriptedHttpCrawler(
+        {
+            alpha_url: page(alpha_url, status_code=403),
+            beta_url: page(beta_url, status_code=403),
+        }
+    )
+    stub = page(
+        beta_url, fetch_mode=FetchMode.BROWSER, status_code=None, content=b"<html>stub</html>"
+    )
+    browser = ScriptedBrowserCrawler(
+        hybrid={beta_url: stub},
+        honest={
+            alpha_url: page(alpha_url, fetch_mode=FetchMode.BROWSER, status_code=None),
+            beta_url: stub,
+        },
+    )
+    code, payload, _ = _run(
+        capsys,
+        _argv(
+            pkg,
+            out,
+            "--write",
+            "--actor",
+            "tester",
+            "--only",
+            "alpha.test",
+            "--only",
+            "beta.test",
+        ),
+        _ports(http, browser),
+    )
+    assert code == EXIT_OK
+    assert payload["changed"] is True
+    by_key = {v["key"]: v for v in payload["verdicts"]}
+    assert by_key["alpha.test"]["fetch"] == "browser"
+    assert by_key["alpha.test"]["wait_for_confirmed"] is True
+    assert by_key["beta.test"]["status"] == "unresolved"
+    assert by_key["beta.test"]["wait_for_recommended"] is True
+    # Артефакт показывает применение условия у наблюдения (browser+wait_for).
+    proposal_text = Path(payload["proposal_path"]).read_text(encoding="utf-8")
+    assert "wait_for_applied: true" in proposal_text
+
+    from core.config.domain_profiles import load_domain_profiles
+
+    loaded = load_domain_profiles(pkg / "domain_profiles.yaml")
+    assert loaded["alpha.test"].fetch is FetchMode.BROWSER
+    assert loaded["alpha.test"].wait_for == "() => document.body && 1"  # не снято/не понижено
+    assert loaded["beta.test"].wait_for is None  # синтеза нет
+    updated = (pkg / "domain_profiles.yaml").read_text(encoding="utf-8")
+    assert updated.count("wait_for") == 1  # ровно одно — авторское
