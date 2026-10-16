@@ -811,6 +811,49 @@ def build_roles() -> list[dict]:
     ]
 
 
+def build_domain_profiles() -> dict[str, dict[str, object]]:
+    """Профили доменов (``domain_profiles.yaml``) в схеме D.2 (``03`` §D.2/D4).
+
+    Оси :class:`~core.config.domain_profiles.DomainProfile` (``extra="forbid"``):
+    ``fetch`` (``http``|``browser``), ``extract`` (``auto``|``html``|``document``),
+    ``strategy`` (``auto``|``honest``|``hybrid``), ``wait_for`` (JS-условие готовности).
+    Ключ — ``host`` с опциональным ``/path`` (приоритет резолвит pipeline).
+
+    Значения согласованы с живыми замерами (2026-10): ``*.sbertech.ru`` отдают 401
+    обычному HTTP (антибот) → ``browser``; ``pangolin.sbertech.ru`` дополнительно требует
+    ``wait_for`` (JS-challenge завершается и перезагружает страницу после
+    ``domcontentloaded``); ``tantorlabs.ru/products/dbms`` — 403 обычному HTTP → ``browser``;
+    остальные домены отдают 200 обычному HTTP.
+
+    Набор ключей совпадает с эталонным ``packages/ru-pg-dbms/domain_profiles.yaml``
+    (повторный прогон генератора идемпотентен и не затирает домены).
+
+    Функция — чистая (без I/O/сети): её выход проверяется тестом против строгой
+    модели, чтобы дрейф схемы (старые ``render``/``index``) не вернулся.
+    """
+    return {
+        "docs.tantorlabs.ru": {"fetch": "http", "extract": "html"},
+        "jatoba.ru": {"fetch": "http", "extract": "html"},
+        "pangolin.sbertech.ru": {
+            "fetch": "browser",
+            "extract": "html",
+            "strategy": "honest",
+            "wait_for": "() => document.body && document.body.innerText.length > 200",
+        },
+        "platformv.sbertech.ru": {"fetch": "browser", "extract": "html", "strategy": "honest"},
+        "postgrespro.ru": {"fetch": "http", "extract": "html"},
+        "sbertech.ru": {"fetch": "browser", "extract": "html", "strategy": "honest"},
+        "sbertech.ru/documents": {
+            "fetch": "browser",
+            "extract": "document",
+            "strategy": "honest",
+        },
+        "tantorlabs.ru": {"fetch": "browser", "extract": "html", "strategy": "honest"},
+        "tantorlabs.ru/products/dbms": {"fetch": "browser", "extract": "html", "strategy": "honest"},
+        "wiki.astralinux.ru": {"fetch": "http", "extract": "html"},
+    }
+
+
 # ---------------------------------------------------------------------------
 # Генерация артефактов
 # ---------------------------------------------------------------------------
@@ -1102,29 +1145,7 @@ def main() -> int:
     }
     write_text("scope_attestation.yaml", yaml_dump(scope_yaml))
 
-    domain_yaml = {
-        "postgrespro.ru": {
-            "render": {"mode": "text"},
-            "index": {"partition_key": "product_id"},
-        },
-        "docs.tantorlabs.ru": {
-            "render": {"mode": "text"},
-            "index": {"partition_key": "product_id"},
-        },
-        "jatoba.ru": {
-            "render": {"mode": "text"},
-            "index": {"partition_key": "product_id"},
-        },
-        "pangolin.sbertech.ru": {
-            "render": {"mode": "browser", "spa": True},
-            "index": {"partition_key": "product_id"},
-        },
-        "sbertech.ru/documents": {
-            "render": {"mode": "pdf"},
-            "index": {"partition_key": "product_id"},
-        },
-    }
-    write_text("domain_profiles.yaml", yaml_dump(domain_yaml))
+    write_text("domain_profiles.yaml", yaml_dump(build_domain_profiles()))
 
     provenance_yaml = {
         "case_id": CASE_ID,

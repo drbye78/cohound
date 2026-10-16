@@ -1,9 +1,9 @@
 """Generic config-driven реестровый fetcher — реализация ``RegistryFetcherPort``.
 
 Механизм: конкретный внешний реестр описывается **данными** (YAML-конфиг
-``registries/{id}.yaml``: URL-шаблон, формат ``json|html``, маппинг полей), а этот
-адаптер интерпретирует конфиг. Никакой предметной специфики в ядре нет (§1.3,
-архитектура 01 §7; 02 §D.1).
+``packages/{case_id}/registries/{registry_id}.yaml``: URL-шаблон, формат ``json|html``,
+маппинг полей), а этот адаптер интерпретирует конфиг. Никакой предметной специфики в
+ядре нет (§1.3, архитектура 01 §7; 02 §D.1).
 
 **R1.** Каждый возвращаемый ``RegistryFact`` несёт непустой ``source_url`` — это
 фактический URL запроса (для GET он же — URL источника).
@@ -33,9 +33,10 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import string
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from datetime import datetime, timezone
 from html.parser import HTMLParser
 from pathlib import Path
@@ -51,12 +52,17 @@ from core.ports.types import ProductRef
 __all__ = [
     "GenericRegistryFetcher",
     "HttpClient",
+    "REGISTRY_SPECS_DIRNAME",
     "RegistryConfig",
     "RegistryConfigError",
     "RegistryError",
     "RegistryFetchError",
     "RegistryParseError",
+    "load_package_registry_configs",
     "load_registry_config",
+    "package_registry_dir",
+    "registry_spec_path",
+    "resolve_registry_headers",
 ]
 
 
@@ -87,12 +93,20 @@ class RegistryParseError(RegistryError):
 
 
 class RegistryConfig(BaseModel):
-    """Конфиг одного реестра (``registries/{registry_id}.yaml``, 03 §D.4).
+    """Конфиг одного реестра (``packages/{case_id}/registries/{registry_id}.yaml``, 03 §D.4).
 
     Специфика внешнего источника живёт здесь как данные: URL-шаблон, метод, формат,
-    маппинг. Соответствует эскизу 03 §D.4 (поля ``registry_id``/``jurisdiction``/
-    ``endpoint``/``method``/``format``/``mapping``) с добавленными ``records_path``,
-    ``query_param``, ``headers`` и ``timeout``.
+    маппинг. Поля ``registry_id``/``jurisdiction``/``endpoint``/``method``/``format``/
+    ``mapping`` — из эскиза 03 §D.4; дополнительно ``records_path``, ``query_param``,
+    ``headers``, ``headers_env`` и ``timeout``.
+
+    **Секреты.** ``headers`` — только не-секретные заголовки (``Accept`` и т.п.);
+    секретные значения (токены, API-ключи) в спеке **не хранятся** (AGENTS: секреты не
+    коммитятся; ``store/backup.py`` исключает ключевой материал). Для них —
+    ``headers_env``: отображение ``имя_заголовка → имя env-переменной``; значение
+    подставляется из окружения в момент запроса. Переменная не задана → заголовок
+    опускается (значение не выдумывается). ``headers_env`` переопределяет ``headers``
+    при совпадении имени.
     """
 
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
@@ -106,6 +120,8 @@ class RegistryConfig(BaseModel):
     query_param: str | None = None
     records_path: str | None = None
     headers: dict[str, str] = Field(default_factory=dict)
+    #: Секретные заголовки: ``имя_заголовка → env-переменная`` (значение — из окружения).
+    headers_env: dict[str, str] = Field(default_factory=dict)
     timeout: float | None = Field(default=None, gt=0)
 
     @model_validator(mode="after")
@@ -151,6 +167,89 @@ def load_registry_config(
         return RegistryConfig(**data)
     except ValidationError as exc:
         raise RegistryConfigError(f"некорректный конфиг реестра: {exc}") from exc
+
+
+# ---------------------------------------------------------------------------
+# Package-scoped спецификации реестров (03 §D.4)
+# ---------------------------------------------------------------------------
+
+#: Имя подкаталога пакета со спецификациями реестров: ``packages/{case_id}/registries/``.
+REGISTRY_SPECS_DIRNAME = "registries"
+
+
+def package_registry_dir(package_dir: str | Path) -> Path:
+    """Каталог package-scoped спецификаций реестров: ``{package_dir}/registries/``."""
+    return Path(package_dir) / REGISTRY_SPECS_DIRNAME
+
+
+def registry_spec_path(package_dir: str | Path, registry_id: str) -> Path:
+    """Путь спецификации конкретного реестра: ``{package_dir}/registries/{registry_id}.yaml``.
+
+    Идентификатор валидируется как slug ``[a-z0-9_]+`` (защита path-конфайнмента):
+    спецификации — package-scoped данные, исходящие из ``package.yaml: registries``.
+    """
+    if not re.fullmatch(r"[a-z0-9_]+", registry_id or ""):
+        raise RegistryConfigError(f"некорректный registry_id: {registry_id!r}")
+    return package_registry_dir(package_dir) / f"{registry_id}.yaml"
+
+
+def load_package_registry_configs(
+    package_dir: str | Path,
+    registry_ids: Iterable[str] | None = None,
+) -> dict[str, RegistryConfig]:
+    """Загружает package-scoped спецификации реестров → ``{registry_id: RegistryConfig}``.
+
+    ``registry_ids=None`` — все ``*.yaml`` в ``{package_dir}/registries/``; заданный
+    список — только указанные (как в ``package.yaml: registries``), и отсутствующая
+    спецификация из списка — ошибка (объявленный реестр без данных). Пустой каталог
+    (или отсутствующий) без объявленных id → ``{}``: реестры — опциональная часть пакета.
+
+    Путь-конфайнмент: ``registry_id`` из манифеста проверяется slug-регуляркой
+    (:func:`registry_spec_path`), поэтому ``..``/абсолютные вставки невозможны.
+
+    :raises RegistryConfigError: нечитаемая/невалидная спецификация; объявленный, но
+        отсутствующий реестр; некорректный ``registry_id``.
+    """
+    base = package_registry_dir(package_dir)
+    if registry_ids is None:
+        if not base.is_dir():
+            return {}
+        ids = sorted(path.stem for path in base.glob("*.yaml"))
+    else:
+        ids = list(dict.fromkeys(str(item) for item in registry_ids))
+    configs: dict[str, RegistryConfig] = {}
+    for registry_id in ids:
+        path = registry_spec_path(package_dir, registry_id)
+        if not path.is_file():
+            raise RegistryConfigError(
+                f"спецификация реестра '{registry_id}' не найдена: {path}"
+            )
+        configs[registry_id] = load_registry_config(path)
+    return configs
+
+
+def resolve_registry_headers(
+    config: RegistryConfig,
+    env: Mapping[str, str] | None = None,
+) -> dict[str, str]:
+    """Заголовки запроса: не-секретные ``headers`` + значения ``headers_env`` из окружения.
+
+    Секреты в спеке **не хранятся** — для каждого имени из ``headers_env`` значение
+    читается из переменной окружения (``env``; ``None`` → ``os.environ``). Незаданная/
+    пустая переменная → заголовок **опускается** (значение не выдумывается и не
+    подставляется плейсхолдером). ``headers_env`` имеет приоритет над ``headers`` при
+    совпадении имени. Возвращаемый mapping детерминирован (сортировка по имени).
+    """
+    source = os.environ if env is None else env
+    resolved: dict[str, str] = dict(config.headers)
+    for header, var in config.headers_env.items():
+        value = source.get(var)
+        if value is None or not str(value).strip():
+            resolved.pop(header, None)
+            continue
+        resolved[header] = str(value)
+    return {key: resolved[key] for key in sorted(resolved)}
+
 
 
 # ---------------------------------------------------------------------------
@@ -426,7 +525,7 @@ class GenericRegistryFetcher:
     # -- транспорт ------------------------------------------------------- #
 
     def _request(self, url: str) -> bytes | str:
-        headers = dict(self.config.headers)
+        headers = resolve_registry_headers(self.config)
         client: Any = self._http_get
         getter = getattr(client, "get", None)
         try:

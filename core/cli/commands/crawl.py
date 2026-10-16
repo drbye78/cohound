@@ -234,8 +234,8 @@ def _execute_crawl(
     """
     inputs = load_inputs(args.run_yaml, args.package)
     report = lint_run_inputs(inputs)
-    if not report.ok:
-        raise LintFailure(report.blocking, report.warnings)
+    if not report.ready:
+        raise LintFailure([*report.blocking, *report.incomplete], report.warnings)
 
     run_id = args.run_id or derive_run_id(inputs)
     _set_runs_dir(args)

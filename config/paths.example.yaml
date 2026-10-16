@@ -20,5 +20,7 @@
 # index_store: index_store      # иммутабельные индексные сборки индекс-контура
 # corpus_raw: corpus_raw        # retention сырых байтов страниц (content-addressed)
 # cache: cache                  # глобальный content-addressed кэш (cache/serp, cache/http)
-# registries: registries        # конфиги реестровых фетчеров registries/{id}.yaml
 # reports: reports              # публикуемые артефакты вне runs/ (опционально)
+#
+# NB: реестровые спецификации — package-scoped (packages/{case_id}/registries/*.yaml),
+# отдельного операционного каталога раскладки для них нет (03 §D.4).

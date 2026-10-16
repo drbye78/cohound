@@ -1,7 +1,8 @@
 """Порт реестрового фетчера — ``RegistryFetcherPort`` (Ш3, R1).
 
 Нейтральный порт: конкретные реестры (endpoint/формат/маппинг) — **данные** в
-``registries/*.yaml``, обслуживаются generic config-driven адаптером вне домена (§1.3).
+``packages/{case_id}/registries/*.yaml``, обслуживаются generic config-driven адаптером
+вне домена (§1.3).
 R1: каждый факт обязан нести ``source_url``. В профиле ``split`` исполняется в DMZ.
 
 ``RegistryFact`` — доменный объект (``core.domain.models``). До T2.1 объявлялся здесь;

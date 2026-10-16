@@ -36,7 +36,7 @@
 
 **Следствие для §1.3:** `domain/`, `ports/`, `pipeline/` не содержат предметных терминов.
 Адаптеры, работающие с реестрами/доменами, остаются нейтральными: специфика — в данных
-(`registries/*.yaml`, `packages/*`), не в коде.
+(`packages/{case_id}/registries/*.yaml`, `packages/*`), не в коде.
 
 ---
 
@@ -432,9 +432,10 @@ class ContentGateway(Protocol):
 Конкретные реестры (РРПО, ФСТЭК, …) **не кодируются в `core/`**. Механизм:
 
 ```
-registries/
-  rrp.yaml        # endpoint, формат, маппинг полей, юрисдикция
-  fstec.yaml
+packages/{case_id}/
+  registries/
+    rrp.yaml        # endpoint, формат, маппинг полей, юрисдикция
+    fstec.yaml
 ```
 
 `adapters/registry_generic.py` читает YAML (config-driven: URL-шаблон, метод, парсер `json|html`,

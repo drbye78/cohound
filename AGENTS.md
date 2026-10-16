@@ -60,8 +60,9 @@ tests/smoke_scrapy_playwright.py  # браузерный smoke scrapy-playwright
 packages/{case_id}/           # пакеты категорий: package.yaml/catalog.csv(+.lock)/
                               #   baselines.csv/cohort.yaml/golden.csv/domain_profiles.yaml/
                               #   crawl_sources.yaml (source routing: feed/channel)/
-                              #   scope_attestation.yaml/run.yaml; sources/ — авторские входы
-registries/ · docs/           # словари, регламент, absence-правила
+                              #   scope_attestation.yaml/run.yaml; sources/ — авторские входы;
+                              #   registries/ — реестровые спецификации (package-scoped, 03 §D.4)
+docs/ · docs/templates/registries/  # словари, регламент, absence-правила, шаблоны реестров
 contracts/seam/               # публикуемые JSON-схемы шва DMZ (/v1/*; 07 §5/§8)
 passports/{product_id}/       # паспорта продуктов
 runs/{run_id}/                # прогоны: SQLite, логи, metrics.json, манифесты, plan_inputs.json

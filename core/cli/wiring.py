@@ -135,8 +135,12 @@ SUPPORTED_SEARCH_ADAPTERS: tuple[str, ...] = (
     "glm",
 )
 
-#: Идентификатор реестра по умолчанию для remote-прокси (данные; ``deploy.yaml``
-#: в модели ``DeployConfig`` не несёт ``registry_fetchers`` — берётся дефолт).
+#: Идентификатор реестра по умолчанию для remote-прокси (``split``, ``RemoteRegistry``).
+#: Рабочие спецификации реестров — **package-scoped** (``packages/{case_id}/registries/
+#: {registry_id}.yaml``, перечислены в ``package.yaml: registries``, 03 §D.4); корневого
+#: ``registries/`` больше нет. ``DeployConfig`` не несёт ``registry_fetchers``, поэтому
+#: ``split``-прокси использует этот плейсхолдер-идентификатор, а конкретные id приходят
+#: из манифеста пакета (данные, не предметная категория).
 DEFAULT_REGISTRY_ID = "edge"
 
 #: Префикс env-переменных LLM-разведки (``passport-scout``). Провайдер/модель — данные.

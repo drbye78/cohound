@@ -144,6 +144,8 @@ class OpResult:
         по построению (иначе поднят :class:`PackageAdminError`); warnings допустимы.
     :param dry_run: запись не производилась.
     :param warnings: предупреждения линта (и дополнительные §13-предупреждения).
+    :param incomplete: авторские поля, не заполненные человеком (A3); не блокируют
+        операцию, но запрещают прогон (``LintReport.ready``).
     :param created_id: идентификатор созданной сущности (расширение I1; ``param_id`` и т.п.).
     """
 
@@ -152,6 +154,7 @@ class OpResult:
     lint: dict[str, list[str]] = field(default_factory=dict)
     dry_run: bool = False
     warnings: list[str] = field(default_factory=list)
+    incomplete: list[str] = field(default_factory=list)
     created_id: str | None = None
 
 
@@ -259,6 +262,7 @@ def _finalize(
         lint={"blocking": [], "warnings": warnings},
         dry_run=dry_run,
         warnings=warnings,
+        incomplete=list(after.incomplete),
     )
 
 
@@ -281,7 +285,7 @@ def _empty_artifacts(case_id: str, archetype: Archetype) -> PackageArtifacts:
             CohortEntry(
                 product_id="anchor",
                 role_overlap=1.0,
-                selection_reason="TODO: заполнить обоснование выбора якоря",
+                selection_reason=None,
                 anchor_relation=AnchorRelation.ANCHOR,
             )
         ],
@@ -428,6 +432,7 @@ def create_package(
         lint={"blocking": [], "warnings": warnings},
         dry_run=dry_run,
         warnings=warnings,
+        incomplete=list(report.incomplete),
     )
 
 
@@ -450,6 +455,8 @@ def show_package(package_dir: str | Path) -> dict[str, Any]:
         "golden": len(artifacts.golden),
         "cohort": len(artifacts.cohort.entries) if artifacts.cohort is not None else 0,
         "lint": {"blocking": list(report.blocking), "warnings": list(report.warnings)},
+        "incomplete": list(report.incomplete),
+        "complete": report.complete,
         "cross_check": cross_check(inputs),
         "ok": report.ok,
     }
@@ -479,6 +486,7 @@ def validate_package(package_dir: str | Path) -> OpResult:
         lint={"blocking": list(report.blocking), "warnings": list(report.warnings)},
         dry_run=True,
         warnings=list(report.warnings),
+        incomplete=list(report.incomplete),
     )
 
 
@@ -727,7 +735,7 @@ def list_modules(package_dir: str | Path, *, query: str | None = None) -> list[M
 
 def _build_role(
     role_id: str,
-    definition: str,
+    definition: str | None,
     *,
     markers: list[str] | None,
     query_patterns: dict[str, list[str]] | None,
@@ -750,7 +758,7 @@ def _build_role(
 def add_role(
     package_dir: str | Path,
     role_id: str,
-    definition: str,
+    definition: str | None = None,
     *,
     markers: list[str] | None = None,
     query_patterns: dict[str, list[str]] | None = None,

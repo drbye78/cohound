@@ -1,0 +1,17 @@
+# ШАБЛОН-ДОКУМЕНТАЦИЯ (не продакшн). Рабочие спецификации — package-scoped:
+# packages/{case_id}/registries/{registry_id}.yaml (03 §D.4). TLD `.invalid`
+# зарезервирован под примеры (RFC 2606) — это НЕ рабочий endpoint.
+registry_id: example_html
+jurisdiction: XX
+endpoint: "https://example.invalid/registry/list"
+method: GET
+format: html
+records_path: tr
+query_param: name
+headers:
+  Accept: text/html
+timeout: 30.0
+mapping:
+  name: "#text"
+  version: "@data-version"
+  detail_url: "@data-href"

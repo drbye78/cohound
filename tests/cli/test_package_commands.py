@@ -56,8 +56,42 @@ def test_cli_show_and_validate(capsys, tmp_path: Path) -> None:
     package = _new(capsys, tmp_path)
     code, out, _ = _run(capsys, ["package", "show", "--package", str(package), "--json"])
     assert code == EXIT_OK
-    assert json.loads(out)["ok"] is True
+    payload = json.loads(out)
+    # Свежий пакет линт-чист (нет блокирующих), но неполон: авторские поля не заполнены.
+    assert payload["ok"] is True
+    assert payload["complete"] is False
+    assert payload["incomplete"]
 
+    code, out, _ = _run(capsys, ["package", "validate", "--package", str(package), "--json"])
+    # Неполнота не проходит молча: validate завершается EXIT_BLOCKED с «incomplete:».
+    assert code == EXIT_BLOCKED
+    payload = json.loads(out)
+    assert payload["ok"] is False
+    assert payload["complete"] is False
+    assert payload["incomplete"]
+
+
+def test_cli_validate_ok_when_authoring_filled(capsys, tmp_path: Path) -> None:
+    """Заполненные авторские поля (definition/selection_reason) → validate EXIT_OK."""
+    package = _new(capsys, tmp_path)
+    for role_id in ("role_primary", "role_secondary"):
+        code, _, _ = _run(
+            capsys,
+            ["package", "role", "update", "--package", str(package),
+             "--role-id", role_id, "--definition", f"роль {role_id}"],
+        )
+        assert code == EXIT_OK
+    entries = _write(
+        tmp_path / "entries.yaml",
+        "- product_id: product_anchor\n  role_overlap: 1.0\n  selection_reason: якорь\n  anchor_relation: anchor\n"
+        "- product_id: product_analog_a\n  role_overlap: 0.8\n  selection_reason: аналог A\n  anchor_relation: analog\n"
+        "- product_id: product_analog_b\n  role_overlap: 0.6\n  selection_reason: аналог B\n  anchor_relation: analog\n",
+    )
+    code, _, _ = _run(
+        capsys,
+        ["package", "cohort", "set", "--package", str(package), "--entries", str(entries), "--actor", "t", "--json"],
+    )
+    assert code == EXIT_OK
     code, out, _ = _run(capsys, ["package", "validate", "--package", str(package), "--json"])
     assert code == EXIT_OK
     assert json.loads(out)["ok"] is True

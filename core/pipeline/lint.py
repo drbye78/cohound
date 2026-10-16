@@ -13,7 +13,12 @@ pydantic-валидаторами домена (нужно сопоставле�
   ``fast``/``full`` в golden-наборе → warning;
 - ``showcase`` с ``rule`` без публичной величины/метрики → **блок** (зеркало домена);
 - ``param_id`` не в нижнем регистре → **блок** (зеркало домена);
-- ``products`` — проекция когорты (S11) и ``anchor ∈ products`` → **блок** (§4.5).
+- ``products`` — проекция когорты (S11) и ``anchor ∈ products`` → **блок** (§4.5);
+- авторские поля, не заполненные человеком (пустые ``definition`` роли и
+  ``selection_reason`` записи когорты) → **incomplete** (A3): не блокирует создание/
+  правку пакета, но запрещает прогон (иначе неполный пакет молча выдал бы
+  evaluated-ячейки). Обязательные непустые CSV-поля каталога (``title``/``rule``) уже
+  отклоняются загрузчиком (``_req``), поэтому отдельного уровня не требуют.
 
 Каждое правило — отдельный маленький предикат из :data:`RULES`, поэтому оно
 тестируется изолированно и адресуется кодом (``code``). Нейтрален к предметной
@@ -48,10 +53,13 @@ __all__ = [
     "check_slug_lowercase",
     "check_anchor_in_products",
     "check_products_match_cohort",
+    "check_unfilled_authoring",
 ]
 
-#: Уровень правила: блокирует прогон или только предупреждает.
-Severity = Literal["blocking", "warning"]
+#: Уровень правила: блокирует прогон, только предупреждает или помечает неполноту (A3).
+#: ``incomplete`` — авторские поля ещё не заполнены человеком: не блокирует создание и
+#: правку пакета, но запрещает прогон (см. :attr:`LintReport.ready`).
+Severity = Literal["blocking", "warning", "incomplete"]
 
 #: absence-правила, требующие действующей процедуры аттестации ``source_scope`` (I2b).
 _ATTESTED_ABSENCE_RULES: frozenset[AbsenceRuleType] = frozenset(
@@ -66,19 +74,32 @@ _SHOWCASE_TOKENS: tuple[str, ...] = ("величин", "metric", "велич", "
 
 @dataclass
 class LintReport:
-    """Отчёт линтера: блокирующие нарушения и предупреждения.
+    """Отчёт линтера: блокирующие нарушения, предупреждения и неполнота (A3).
 
     ``ok`` = нет блокирующих. :meth:`raise_if_blocking` превращает блокирующие
-    сообщения в :class:`ValueError` (сводки для CLI, ``03`` §E.2).
+    сообщения в :class:`ValueError` (сводки для CLI, ``03`` §E.2). ``incomplete`` —
+    авторские поля, ещё не заполненные человеком: отдельный уровень, не блокирующий
+    создание/правку пакета, но блокирующий прогон (:attr:`ready`).
     """
 
     blocking: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    incomplete: list[str] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
         """Прогон разрешён: нет ни одного блокирующего нарушения."""
         return not self.blocking
+
+    @property
+    def complete(self) -> bool:
+        """Все обязательные авторские поля заполнены человеком (A3)."""
+        return not self.incomplete
+
+    @property
+    def ready(self) -> bool:
+        """Пакет готов к прогону: нет блокирующих нарушений И нет незаполненных полей."""
+        return not self.blocking and not self.incomplete
 
     def raise_if_blocking(self) -> None:
         """Поднимает :class:`ValueError` со склейкой блокирующих сообщений."""
@@ -236,6 +257,33 @@ def check_products_match_cohort(inputs: RunInputs) -> list[str]:
     return sorted(cross_check_products(inputs.run, inputs.cohort))
 
 
+def check_unfilled_authoring(inputs: RunInputs) -> list[str]:
+    """A3: обязательные авторские поля, ещё не заполненные человеком.
+
+    Незаполненность выражается явно (``None`` у опциональных полей роли/когорты) и не
+    подменяется правдоподобным текстом-заглушкой.
+    Возвращает детерминированный список сообщений ``A3:`` — прогон такого пакета
+    запрещён (:attr:`LintReport.ready`), но создание/правка разрешены.
+
+    Покрытые поля: ``RoleDef.definition`` (пусто/``None``) и
+    ``CohortEntry.selection_reason``. Обязательные непустые CSV-поля каталога
+    (``title``/``rule``) отклоняются загрузчиком (``run_config._req``) до линтера.
+    """
+    messages: list[str] = []
+    for role in inputs.package.roles:
+        if not (role.definition or "").strip():
+            messages.append(
+                f"A3: роль '{role.role_id}' не заполнена автором (definition)"
+            )
+    for entry in inputs.cohort.entries:
+        if not (entry.selection_reason or "").strip():
+            messages.append(
+                f"A3: продукт '{entry.product_id}' когорты: обоснование выбора не "
+                "заполнено автором (selection_reason)"
+            )
+    return sorted(messages)
+
+
 #: Все правила линтера в детерминированном порядке.
 RULES: tuple[LintRule, ...] = (
     LintRule("weights-sum-100", "blocking", check_weights_sum_to_100),
@@ -246,6 +294,7 @@ RULES: tuple[LintRule, ...] = (
     LintRule("slug-lowercase", "blocking", check_slug_lowercase),
     LintRule("anchor-in-products", "blocking", check_anchor_in_products),
     LintRule("products-match-cohort", "blocking", check_products_match_cohort),
+    LintRule("unfilled-authoring", "incomplete", check_unfilled_authoring),
     LintRule("empty-concept-terms", "warning", check_empty_concept_terms),
     LintRule("golden-presence", "warning", check_golden_presence),
 )
@@ -275,6 +324,8 @@ def lint_run_inputs(inputs: RunInputs) -> LintReport:
         messages = rule.check(inputs)
         if rule.severity == "blocking":
             report.blocking.extend(messages)
+        elif rule.severity == "incomplete":
+            report.incomplete.extend(messages)
         else:
             report.warnings.extend(messages)
     return report

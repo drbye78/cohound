@@ -8,7 +8,7 @@ products:
   - product_analog_b
 package: template
 focus:
-  # TODO: сузить до нужных модулей/параметров реального прогона.
+  # Сузьте до нужных модулей/параметров реального прогона.
   modules:
     - module_core
     - module_ecosystem

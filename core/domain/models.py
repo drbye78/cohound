@@ -69,12 +69,18 @@ METHODOLOGY_VERSION = "2.1.0"
 
 
 class RoleDef(BaseModel):
-    """Роль — инженерная функция с реестром в пакете (нейтрально к категории)."""
+    """Роль — инженерная функция с реестром в пакете (нейтрально к категории).
+
+    ``definition`` опционально: ``None`` — **не заполнено автором** (A3). Пустой
+    definition не выдаётся за контент: заполненность проверяет линтер
+    (``core.pipeline.lint.check_unfilled_authoring``), а прогон неполного пакета
+    блокируется. Никаких выдуманных формулировок роль не несёт.
+    """
 
     model_config = _BASE
 
     role_id: str
-    definition: str
+    definition: str | None = None
     markers: list[str] = Field(default_factory=list)
     query_patterns: dict[str, list[str]] = Field(default_factory=dict)  # {"ru": [...], "en": [...]}
     core_coverage_allowed: bool = False
@@ -122,13 +128,18 @@ class PackageManifest(BaseModel):
 
 
 class CohortEntry(BaseModel):
-    """cohort.yaml (§1.6)."""
+    """cohort.yaml (§1.6).
+
+    ``selection_reason`` опционально: ``None`` — **не заполнено автором** (A3). Значение
+    не подменяется правдоподобным текстом: незаполненность явна и проверяется линтером
+    (``check_unfilled_authoring``), блокируя прогон неполного пакета.
+    """
 
     model_config = _BASE
 
     product_id: str
     role_overlap: float = Field(ge=0, le=1)
-    selection_reason: str
+    selection_reason: str | None = None
     anchor_relation: AnchorRelation
 
 

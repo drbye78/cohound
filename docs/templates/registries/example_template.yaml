@@ -1,0 +1,20 @@
+# ШАБЛОН-ДОКУМЕНТАЦИЯ реестрового конфига (не продакшн). Рабочие спецификации —
+# package-scoped: packages/{case_id}/registries/{registry_id}.yaml (03 §D.4).
+# TLD `.invalid` зарезервирован под примеры (RFC 2606) — это НЕ рабочий endpoint.
+# Схема: core/adapters/registry_generic.py::RegistryConfig (extra="forbid").
+# Секреты в файле не хранятся: используйте headers_env (имя_заголовка → env-переменная).
+registry_id: example_template
+jurisdiction: XX
+endpoint: "https://registry.example.invalid/api/v1/search/{query}"
+method: GET
+format: json
+records_path: items
+headers:
+  Accept: application/json
+timeout: 30.0
+mapping:
+  # Приведите пути к реальной структуре ответа.
+  name: "name"
+  version: "version"
+  registration_id: "id"
+  detail_url: "detail_url"

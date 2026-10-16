@@ -34,7 +34,7 @@ repo/
     golden.csv
     adversarial/
     domain_profiles.yaml
-  registries/{registry_id}.yaml   # generic-конфиг фетчеров (§1.3-совместимо)
+    registries/{registry_id}.yaml   # package-scoped generic-конфиг фетчеров (§D.4)
   passports/{product_id}/{YYYY-MM-DD}.yaml
   docs/status-dictionary.yaml
   docs/architecture/*.md
@@ -339,7 +339,13 @@ env-переменной с токеном канала — **единствен
 (1) `title`; (2) `concept_terms` (сначала ru, затем en, затем порядок в пакете). Линтер не
 блокирует при большем числе концептов, но предупреждает, что лишние в запрос не войдут.
 
-### D.4. Реестровый конфиг (`registries/{id}.yaml`)
+### D.4. Реестровый конфиг (`packages/{case_id}/registries/{id}.yaml`)
+
+Спецификации реестров — **package-scoped**: `packages/{case_id}/registries/{registry_id}.yaml`,
+перечисленные в `package.yaml` (`PackageManifest.registries`). Загрузка —
+`core.adapters.registry_generic.load_package_registry_configs(package_dir, registry_ids)`;
+корневого `registries/` нет (шаблоны — `docs/templates/registries/`). Секретные заголовки —
+через `headers_env` (`имя_заголовка → env-переменная`), а не значениями в файле.
 
 ```yaml
 registry_id: rrp
@@ -348,6 +354,7 @@ endpoint: "https://.../{query}"
 method: GET
 format: json            # json | html
 mapping: { name: "$.items[*].name", version: "$.items[*].version" }
+# headers_env: { Authorization: RRP_TOKEN }   # значение — из окружения, не из файла
 ```
 
 `adapters/registry_generic.py` интерпретирует; код ядра не знает названий реестров (§1.3).
@@ -547,7 +554,9 @@ hound run \
 
 `hound doctor` — read-only и по умолчанию **без сети**: проверяет Python/venv, наличие
 зависимостей по группам extras (`find_spec`, без импорта тяжёлых), заданность env/ключей
-(значения **не** печатаются), файлы `config/deploy.yaml`/`registries`/`.env.example`/`packages`,
+(значения **не** печатаются), файлы `config/deploy.yaml`/`.env.example`/`packages` и
+package-scoped реестровые спецификации (`package.yaml: registries` → `packages/{case_id}/
+registries/`, при `--package`),
 запись в операционные каталоги (`runs/`/`index_store/`/`corpus_raw/`/`cache/`) и полноту
 CLI-поверхности. Каждая проверка обёрнута в try/except и даёт запись `ok|warn|fail`;
 секреты эгрессии в профиле `split` живут только в edge (07). `--json` — машинный отчёт

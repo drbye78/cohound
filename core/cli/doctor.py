@@ -450,7 +450,7 @@ def _env_group() -> CheckGroup:
 # ---------------------------------------------------------------------------
 
 
-def _config_group(root: Path) -> CheckGroup:
+def _config_group(root: Path, package: str | Path | None = None) -> CheckGroup:
     builder = _GroupBuilder("config")
 
     def _deploy() -> tuple[str, str, str | None]:
@@ -467,13 +467,35 @@ def _config_group(root: Path) -> CheckGroup:
     builder.add("deploy_yaml", _deploy)
 
     def _registries() -> tuple[str, str]:
-        reg = root / "registries"
-        if not reg.is_dir():
-            return WARN, "каталог registries/ отсутствует"
-        yamls = sorted(p.name for p in reg.glob("*.yaml"))
+        """Реестровые спецификации — **package-scoped** (``packages/{case_id}/registries/``).
+
+        Корневой ``registries/`` больше не операционный путь (только шаблоны в
+        ``docs/templates/registries/``), поэтому его отсутствие/пустота — не WARN.
+        Без ``--package`` проверка информационна; с ``--package`` загружает каждую
+        спецификацию строгим ``load_registry_config`` (схема + отсутствие секретов в файле).
+        """
+        from core.adapters.registry_generic import load_registry_config, package_registry_dir
+
+        base = package_registry_dir(package) if package is not None else None
+        if base is None:
+            return OK, (
+                "package-scoped (packages/{case_id}/registries/); "
+                "укажите --package для проверки"
+            )
+        if not base.is_dir():
+            return OK, "package-scoped спецификаций нет (реестры опциональны)"
+        yamls = sorted(base.glob("*.yaml"))
         if not yamls:
-            return WARN, "registries/ без *.yaml"
-        return OK, f"{len(yamls)} yaml: {', '.join(yamls)}"
+            return OK, "package-scoped каталог без *.yaml"
+        broken: list[str] = []
+        for spec in yamls:
+            try:
+                load_registry_config(spec)
+            except Exception as exc:  # noqa: BLE001 — диагностика не падает
+                broken.append(f"{spec.name}: {exc}")
+        if broken:
+            return FAIL, "; ".join(broken)
+        return OK, f"{len(yamls)} package-scoped: {', '.join(p.name for p in yamls)}"
 
     builder.add("registries", _registries)
 
@@ -703,7 +725,8 @@ def _foundation_group(root: Path, *, with_selfcheck: bool) -> CheckGroup:
 
 
 def run_doctor(
-    *, root: str | Path | None = None, with_selfcheck: bool = False
+    *, root: str | Path | None = None, with_selfcheck: bool = False,
+    package: str | Path | None = None,
 ) -> DoctorReport:
     """Собирает полный отчёт диагностики (read-only, без сети, не бросает исключений).
 
@@ -713,6 +736,8 @@ def run_doctor(
     :param root: корень репозитория; ``None`` → :func:`repo_root`.
     :param with_selfcheck: запускать ли ``tests/selfcheck.py`` как subprocess (по умолчанию
         нет — только проверка наличия файла).
+    :param package: каталог пакета категории; задан → проверяются его package-scoped
+        реестровые спецификации (``packages/{case_id}/registries/``, 03 §D.4).
     """
     base = Path(root) if root is not None else repo_root()
     report = DoctorReport()
@@ -720,7 +745,7 @@ def run_doctor(
     for group_name, required, modules in DEPENDENCY_GROUPS:
         report.groups.append(_dependency_group(group_name, required, modules))
     report.groups.append(_env_group())
-    report.groups.append(_config_group(base))
+    report.groups.append(_config_group(base, package))
     report.groups.append(_layout_group())
     report.groups.append(_dirs_group(base))
     report.groups.append(_cli_group())
@@ -750,12 +775,16 @@ def cmd_doctor(args: Any) -> int:
 
     ``--json`` — детерминированный JSON (``sort_keys=True``, ``ensure_ascii=False``).
     ``--with-selfcheck`` — дополнительно прогнать ``tests/selfcheck.py``.
+    ``--package`` — проверить package-scoped реестровые спецификации пакета.
     ``--strict`` — любой ``warn`` даёт ненулевой код.
 
     :returns: :data:`~core.cli.main.EXIT_OK`, если нет ``fail`` (и при ``--strict`` нет
         ``warn``); иначе :data:`~core.cli.main.EXIT_ERROR`.
     """
-    report = run_doctor(with_selfcheck=bool(getattr(args, "with_selfcheck", False)))
+    report = run_doctor(
+        with_selfcheck=bool(getattr(args, "with_selfcheck", False)),
+        package=getattr(args, "package", None),
+    )
     payload = report.to_payload()
     if getattr(args, "json", False):
         sys.stdout.write(

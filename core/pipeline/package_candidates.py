@@ -239,7 +239,7 @@ def apply_candidate(
         return _admin.add_role(
             package_dir,
             payload["role_id"],
-            payload.get("definition", ""),
+            payload.get("definition"),
             markers=payload.get("markers"),
             query_patterns=payload.get("query_patterns"),
             core_coverage_allowed=bool(payload.get("core_coverage_allowed", False)),
@@ -286,7 +286,9 @@ def apply_candidate(
             {
                 "product_id": payload["product_id"],
                 "role_overlap": payload.get("role_overlap", 0.5),
-                "selection_reason": payload.get("selection_reason", "TODO: обоснование (кандидат)"),
+                # A3: без явного обоснования поле остаётся незаполненным (None), а не
+                # подменяется правдоподобным текстом. Прогон такого пакета запрещён.
+                "selection_reason": payload.get("selection_reason"),
                 "anchor_relation": payload.get("anchor_relation", "analog"),
             }
         )

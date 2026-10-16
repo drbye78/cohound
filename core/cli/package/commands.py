@@ -189,11 +189,13 @@ def _op_payload(result: OpResult) -> dict[str, Any]:
     """JSON-представление :class:`OpResult`."""
     return {
         "ok": not result.lint.get("blocking"),
+        "complete": not result.incomplete,
         "dry_run": result.dry_run,
         "changed": list(result.changed),
         "written": [str(path) for path in result.written],
         "created_id": result.created_id,
         "lint": result.lint,
+        "incomplete": list(result.incomplete),
         "warnings": list(result.warnings),
     }
 
@@ -209,6 +211,8 @@ def _op_lines(result: OpResult) -> list[str]:
         lines.append(f"created_id: {result.created_id}")
     for message in result.lint.get("warnings", []):
         lines.append(f"warning: {message}")
+    for message in result.incomplete:
+        lines.append(f"incomplete: {message}")
     lines.append("ok: yes")
     return lines
 
@@ -417,17 +421,25 @@ def cmd_package_show(args: argparse.Namespace) -> int:
         f"catalog: {payload['catalog']} (deprecated: {len(payload['deprecated_params'])})",
         f"baselines/golden/cohort: {payload['baselines']}/{payload['golden']}/{payload['cohort']}",
         f"ok: {'yes' if payload['ok'] else 'no'}",
+        f"complete: {'yes' if payload.get('complete', True) else 'no'}",
     ]
     for message in payload["lint"]["blocking"]:
         lines.append(f"blocking: {message}")
     for message in payload["lint"]["warnings"]:
         lines.append(f"warning: {message}")
+    for message in payload.get("incomplete", []):
+        lines.append(f"incomplete: {message}")
     _emit(args, payload, lines)
     return EXIT_OK
 
 
 def cmd_package_validate(args: argparse.Namespace) -> int:
-    """``hound package validate`` — линт пакета без записи."""
+    """``hound package validate`` — линт пакета без записи.
+
+    ``ok`` — пакет готов к прогону: нет ни блокирующих нарушений, ни незаполненных
+    авторских полей (A3). Незаполненные поля печатаются как ``incomplete:`` и дают
+    :data:`EXIT_BLOCKED` — неполнота не проходит молча.
+    """
     # Несуществующий каталог — not-found, а не ложный ``ok: yes``. Существующий каталог
     # без ``package.yaml`` — не «пустой пакет», а невалидный: fail-closed (EXIT_BLOCKED),
     # чтобы не выдавать ``ok: yes``. Это вердикт валидации, а не отсутствие объекта,
@@ -439,24 +451,31 @@ def cmd_package_validate(args: argparse.Namespace) -> int:
     if not (Path(args.package) / "package.yaml").is_file():
         payload: dict[str, Any] = {
             "ok": False,
+            "complete": False,
             "dry_run": False,
             "changed": [],
             "written": [],
             "created_id": None,
             "lint": {"blocking": ["package.yaml отсутствует"], "warnings": []},
+            "incomplete": [],
             "warnings": [],
         }
         _emit(args, payload, ["ok: no", "blocking: package.yaml отсутствует"])
         return EXIT_BLOCKED
     result = _invoke(lambda: validate_package(args.package))
     payload = _op_payload(result)
-    lines = [f"ok: {'yes' if payload['ok'] else 'no'}"]
+    # Готовность к прогону = нет блокирующих И нет незаполненных авторских полей (A3).
+    ready = payload["ok"] and payload["complete"]
+    payload["ok"] = ready
+    lines = [f"ok: {'yes' if ready else 'no'}"]
     for message in result.lint.get("blocking", []):
         lines.append(f"blocking: {message}")
     for message in result.lint.get("warnings", []):
         lines.append(f"warning: {message}")
+    for message in result.incomplete:
+        lines.append(f"incomplete: {message}")
     _emit(args, payload, lines)
-    return EXIT_OK if payload["ok"] else EXIT_BLOCKED
+    return EXIT_OK if ready else EXIT_BLOCKED
 
 
 def cmd_package_list(args: argparse.Namespace) -> int:
@@ -665,7 +684,7 @@ def cmd_package_role_list(args: argparse.Namespace) -> int:
     payload = {"ok": True, "count": len(roles), "roles": [role.model_dump(mode="json") for role in roles]}
     lines = [f"roles: {len(roles)}"]
     for role in roles:
-        lines.append(f"  {role.role_id}: {role.definition}")
+        lines.append(f"  {role.role_id}: {role.definition if role.definition else '— (не заполнено)'}")
     _emit(args, payload, lines)
     return EXIT_OK
 
@@ -676,7 +695,7 @@ def cmd_package_role_get(args: argparse.Namespace) -> int:
     if role is None:
         return _not_found(args, "role_id", args.role_id)
     payload = {"ok": True, "found": True, "role": role.model_dump(mode="json")}
-    lines = [f"role_id: {role.role_id}", f"definition: {role.definition}"]
+    lines = [f"role_id: {role.role_id}", f"definition: {role.definition if role.definition else '— (не заполнено)'}"]
     _emit(args, payload, lines)
     return EXIT_OK
 

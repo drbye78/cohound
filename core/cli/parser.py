@@ -46,6 +46,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="запустить tests/selfcheck.py (subprocess) и включить результат в отчёт",
     )
     p_doctor.add_argument(
+        "--package",
+        default=None,
+        help="каталог пакета: проверить его package-scoped реестровые спецификации "
+        "(packages/{case_id}/registries/)",
+    )
+    p_doctor.add_argument(
         "--strict",
         action="store_true",
         help="считать warn ошибкой (ненулевой код возврата при предупреждениях)",

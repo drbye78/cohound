@@ -28,8 +28,8 @@ def run(args: argparse.Namespace) -> int:
     """
     inputs = load_inputs(args.run_yaml, args.package)
     report = lint_run_inputs(inputs)
-    if not report.ok:
-        raise LintFailure(report.blocking, report.warnings)
+    if not report.ready:
+        raise LintFailure([*report.blocking, *report.incomplete], report.warnings)
 
     result = build_plan(inputs, run_id=args.run_id)
     payload = _plan_payload(result)

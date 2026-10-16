@@ -1,0 +1,20 @@
+# ШАБЛОН-ДОКУМЕНТАЦИЯ (не продакшн). Рабочие спецификации — package-scoped:
+# packages/{case_id}/registries/{registry_id}.yaml (03 §D.4). TLD `.invalid`
+# зарезервирован под примеры (RFC 2606) — это НЕ рабочий endpoint.
+# Секреты (токены) в файле не хранятся: используйте headers_env.
+registry_id: example_json
+jurisdiction: XX
+endpoint: "https://example.invalid/api/search/{query}"
+method: GET
+format: json
+records_path: items
+headers:
+  Accept: application/json
+# headers_env:
+#   Authorization: EXAMPLE_REGISTRY_TOKEN
+timeout: 30.0
+mapping:
+  name: "name"
+  version: "version"
+  registration_id: "id"
+  detail_url: "detail_url"

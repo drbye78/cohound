@@ -696,7 +696,7 @@ def _synthesized_cohort(case_id: str) -> Cohort:
             CohortEntry(
                 product_id="anchor",
                 role_overlap=1.0,
-                selection_reason="синтетический якорь (пакет без cohort.yaml)",
+                selection_reason=None,
                 anchor_relation=AnchorRelation.ANCHOR,
             )
         ],

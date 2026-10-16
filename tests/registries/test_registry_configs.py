@@ -1,12 +1,16 @@
-"""Валидация реестровых конфигов ``registries/*.yaml`` (W6/T6.2).
+"""Валидация шаблонов реестровых конфигов ``docs/templates/registries/*.yaml`` (W6/T6.2).
 
-Проверяет, что **каждый** файл ``registries/*.yaml`` загружается движком
+Проверяет, что **каждый** файл-шаблон загружается движком
 (``core.adapters.registry_generic.load_registry_config``) и удовлетворяет схеме
 ``RegistryConfig``; что примеры-шаблоны ``example_*.yaml`` имеют непустой ``mapping``,
 используют зарезервированный TLD ``.invalid`` и порождают непустой ``source_url`` (R1);
 что исходник движка категорийно-нейтрален (§1.3).
 
-Сеть отсутствует — HTTP-клиент полностью подставной. Если каталог ``registries/`` пуст,
+Шаблоны перенесены из корневого ``registries/`` в ``docs/templates/registries/`` (P3):
+корневой каталог больше не операционный путь — рабочие спецификации package-scoped
+(``packages/{case_id}/registries/{registry_id}.yaml``, 03 §D.4).
+
+Сеть отсутствует — HTTP-клиент полностью подставной. Если каталог шаблонов пуст,
 тесты валидации пропускаются (skip), а не падают.
 """
 
@@ -27,7 +31,7 @@ from core.adapters.registry_generic import (
 from core.ports.types import ProductRef
 
 ROOT = Path(__file__).resolve().parents[2]
-REGISTRY_DIR = ROOT / "registries"
+REGISTRY_DIR = ROOT / "docs" / "templates" / "registries"
 
 # Список конфигов собирается один раз при импорте модуля.
 REGISTRY_YAML = sorted(REGISTRY_DIR.glob("*.yaml"))
@@ -69,9 +73,9 @@ def _minimal_payload(config: RegistryConfig) -> bytes:
 
 
 def test_registry_directory_is_not_empty_or_skip() -> None:
-    """Каталог непуст; при пустом каталоге — грациозный skip."""
+    """Каталог шаблонов непуст; при пустом каталоге — грациозный skip."""
     if not REGISTRY_YAML:
-        pytest.skip("каталог registries/ пуст — нет конфигов для проверки")
+        pytest.skip("каталог docs/templates/registries/ пуст — нет конфигов для проверки")
     assert REGISTRY_YAML
 
 
@@ -82,7 +86,7 @@ def test_registry_directory_is_not_empty_or_skip() -> None:
 
 @pytest.mark.parametrize("path", REGISTRY_YAML, ids=lambda p: p.name)
 def test_every_registry_config_validates(path: Path) -> None:
-    """Любой ``registries/*.yaml`` загружается и соответствует ``RegistryConfig``."""
+    """Любой ``docs/templates/registries/*.yaml`` загружается и соответствует ``RegistryConfig``."""
     cfg = load_registry_config(path)
 
     assert isinstance(cfg, RegistryConfig)

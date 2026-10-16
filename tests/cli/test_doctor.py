@@ -208,8 +208,6 @@ def test_required_dependency_missing_is_fail(monkeypatch: pytest.MonkeyPatch) ->
 def test_config_group_reads_deploy_and_packages(tmp_path: Path) -> None:
     (tmp_path / "config").mkdir()
     (tmp_path / "config" / "deploy.yaml").write_text("profile: local\n", encoding="utf-8")
-    (tmp_path / "registries").mkdir()
-    (tmp_path / "registries" / "one.yaml").write_text("registry_id: x\n", encoding="utf-8")
     (tmp_path / "packages" / "a").mkdir(parents=True)
     (tmp_path / "packages" / "a" / "package.yaml").write_text("package_id: a\n", encoding="utf-8")
     (tmp_path / "packages" / "b").mkdir()
@@ -219,10 +217,46 @@ def test_config_group_reads_deploy_and_packages(tmp_path: Path) -> None:
     report = run_doctor(root=tmp_path)
     assert _check(report, "deploy_yaml").status == doctor.OK
     assert "profile=local" in _check(report, "deploy_yaml").detail
+    # Реестры — package-scoped: без --package это информационная проверка (не WARN).
     assert _check(report, "registries").status == doctor.OK
     assert _check(report, "packages").status == doctor.OK
     assert "a, b" in _check(report, "packages").detail
     assert _check(report, "env_example").status == doctor.OK
+
+
+def test_registries_check_does_not_warn_on_missing_root(tmp_path: Path) -> None:
+    """Отсутствие корневого ``registries/`` больше не WARN (false signal, P3)."""
+    report = run_doctor(root=tmp_path)
+    assert _check(report, "registries").status == doctor.OK
+
+
+def test_registries_check_validates_package_scoped_specs(tmp_path: Path) -> None:
+    """``--package`` → проверяются package-scoped спецификации пакета."""
+    package = tmp_path / "packages" / "case_a"
+    (package / "registries").mkdir(parents=True)
+    (package / "registries" / "reg_a.yaml").write_text(
+        "registry_id: reg_a\njurisdiction: XX\n"
+        "endpoint: 'https://example.invalid/api/search/{query}'\n"
+        "format: json\nrecords_path: items\nmapping:\n  name: name\n",
+        encoding="utf-8",
+    )
+    report = run_doctor(root=tmp_path, package=package)
+    check = _check(report, "registries")
+    assert check.status == doctor.OK
+    assert "reg_a.yaml" in check.detail
+
+
+def test_registries_check_fails_on_bad_package_spec(tmp_path: Path) -> None:
+    """Некорректная package-scoped спецификация → FAIL (заметно в doctor)."""
+    package = tmp_path / "packages" / "case_b"
+    (package / "registries").mkdir(parents=True)
+    (package / "registries" / "bad.yaml").write_text(
+        "registry_id: bad\njurisdiction: XX\nendpoint: 'https://x.invalid/'\n"
+        "format: json\nmapping: {}\n",
+        encoding="utf-8",
+    )
+    report = run_doctor(root=tmp_path, package=package)
+    assert _check(report, "registries").status == doctor.FAIL
 
 
 def test_dir_check_fails_on_file_in_place(tmp_path: Path) -> None:

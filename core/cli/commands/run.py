@@ -79,8 +79,8 @@ def run(args: argparse.Namespace) -> int:
     render_modes = _load_render_modes(getattr(args, "render_modes", None))
 
     if args.dry_run:
-        if not report.ok:
-            raise LintFailure(report.blocking, report.warnings)
+        if not report.ready:
+            raise LintFailure([*report.blocking, *report.incomplete], report.warnings)
         payload = {
             "ok": True,
             "dry_run": True,
@@ -97,8 +97,8 @@ def run(args: argparse.Namespace) -> int:
             _print_run_dry(payload)
         return EXIT_OK
 
-    if not report.ok:
-        raise LintFailure(report.blocking, report.warnings)
+    if not report.ready:
+        raise LintFailure([*report.blocking, *report.incomplete], report.warnings)
 
     # R7 (07 §7): деплой-провенанс манифеста прогона. Конфиг загружается всегда:
     # секция ``crawl`` (03 §D.5/D.6) — операционная политика HTTP-краулинга корпуса и в

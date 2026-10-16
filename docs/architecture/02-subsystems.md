@@ -320,7 +320,7 @@ llm_scenarios:
 Результат → R-ячейки (`source_kind=registry`).
 
 **Нейтральность.** Нет кода под конкретный реестр: `adapters/registry_generic.py` +
-`registries/*.yaml` (endpoint, формат `json|html`, JSONPath-маппинг). См. итерацию 1 §7.
+`packages/{case_id}/registries/*.yaml` (endpoint, формат `json|html`, JSONPath-маппинг). См. итерацию 1 §7.
 
 **Зона (07).** Реестровые фетчеры — веб-функция: в профиле `split` `registry_generic.py` исполняется
 в DMZ (`edge/`), ядро вызывает через `gateway` (`/v1/registry`). Результат (`RegistryFact` с

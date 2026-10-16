@@ -414,6 +414,10 @@ def main() -> int:
         "templates: пакет линтуется без блоков и warnings; паспорт/реестр валидны",
         lambda: _data_templates(),
     )
+    check(
+        "registries: package-scoped спецификации + headers_env без секретов",
+        lambda: _registry_package_scoped(),
+    )
 
     print(f"\n{CHECKS - len(FAILURES)}/{CHECKS} проверок пройдено")
     if FAILURES:
@@ -2516,8 +2520,8 @@ def _data_templates() -> None:
     """Шаблоны данных (T6.5): пакет/паспорт/реестр валидны, линт без блоков и warnings.
 
     Шаблоны в ``packages/_template``, ``passports/_template`` и
-    ``registries/example_template.yaml`` — нейтральные скелеты: они обязаны проходить
-    тот же контур валидации, что и реальные данные (``load_inputs`` → ``lint`` →
+    ``docs/templates/registries/example_template.yaml`` — нейтральные скелеты: они обязаны
+    проходить тот же контур валидации, что и реальные данные (``load_inputs`` → ``lint`` →
     ``cross_check``, ``load_passport``, ``load_registry_config``), но без выдуманных
     значений. Нарушение любого условия — понятный ``AssertionError``.
     """
@@ -2551,9 +2555,76 @@ def _data_templates() -> None:
     if not passport.doc_domains or not all(".invalid" in d for d in passport.doc_domains):
         raise AssertionError("шаблон паспорта: doc_domains обязаны быть на TLD .invalid")
 
-    registry = load_registry_config(root / "registries" / "example_template.yaml")
+    registry = load_registry_config(
+        root / "docs" / "templates" / "registries" / "example_template.yaml"
+    )
     if registry.registry_id != "example_template":
         raise AssertionError("шаблон реестра example_template не загрузился")
+
+
+def _registry_package_scoped() -> None:
+    """Реестровые спецификации — package-scoped (P3, 03 §D.4).
+
+    Проверяет нейтральный загрузчик ``load_package_registry_configs``: спецификация
+    читается из ``packages/{case_id}/registries/{registry_id}.yaml`` (а не из корневого
+    ``registries/``), ``registry_id`` из манифеста проверяется path-конфайнментом, а
+    ``headers_env`` не хранит секрет в файле — значение берётся из окружения в момент
+    запроса (не задано → заголовок опускается).
+    """
+    import tempfile
+
+    from core.adapters.registry_generic import (
+        RegistryConfigError,
+        load_package_registry_configs,
+        resolve_registry_headers,
+    )
+
+    spec = (
+        "registry_id: reg_a\n"
+        "jurisdiction: XX\n"
+        "endpoint: 'https://example.invalid/api/search/{query}'\n"
+        "format: json\n"
+        "records_path: items\n"
+        "headers:\n"
+        "  Accept: application/json\n"
+        "headers_env:\n"
+        "  Authorization: COHOUND_TEST_REGISTRY_TOKEN\n"
+        "mapping:\n"
+        "  name: name\n"
+    )
+    with tempfile.TemporaryDirectory() as td:
+        pkg = Path(td) / "case_a"
+        (pkg / "registries").mkdir(parents=True)
+        (pkg / "registries" / "reg_a.yaml").write_text(spec, encoding="utf-8")
+
+        configs = load_package_registry_configs(pkg, ["reg_a"])
+        if set(configs) != {"reg_a"}:
+            raise AssertionError("package-scoped спецификация не загрузилась")
+        cfg = configs["reg_a"]
+
+        # Значение секрета берётся из окружения, а не из файла.
+        resolved = resolve_registry_headers(cfg, env={"COHOUND_TEST_REGISTRY_TOKEN": "SEKRET"})
+        if resolved.get("Authorization") != "SEKRET" or resolved.get("Accept") != "application/json":
+            raise AssertionError("headers_env не подставил секрет из окружения")
+        # Переменная не задана → секретный заголовок опускается (не выдумывается).
+        empty = resolve_registry_headers(cfg, env={})
+        if "Authorization" in empty:
+            raise AssertionError("незаданная env-переменная не должна давать заголовок")
+        if "SEKRET" in (pkg / "registries" / "reg_a.yaml").read_text(encoding="utf-8"):
+            raise AssertionError("секрет не должен храниться в спецификации")
+
+        # Некорректный registry_id (path-конфайнмент) отвергается.
+        try:
+            load_package_registry_configs(pkg, ["../evil"])
+            raise AssertionError("некорректный registry_id обязан поднять RegistryConfigError")
+        except RegistryConfigError:
+            pass
+        # Объявленный, но отсутствующий реестр — понятная ошибка.
+        try:
+            load_package_registry_configs(pkg, ["reg_missing"])
+            raise AssertionError("отсутствующая спецификация обязана поднять RegistryConfigError")
+        except RegistryConfigError:
+            pass
 
 
 def _golden_harness() -> None:

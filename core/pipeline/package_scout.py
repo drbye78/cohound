@@ -698,14 +698,17 @@ def build_seed_from_hypotheses(
         if not role_id or role_id == "node" or role_id in role_ids:
             continue
         role_ids.append(role_id)
-        role_specs.append(
-            {
-                "role_id": role_id,
-                "definition": _clean(role.definition) or "TODO: описание роли (кандидат)",
-                "markers": [str(marker) for marker in role.markers if str(marker).strip()],
-                "query_patterns": _normalize_query_patterns(role.query_patterns),
-            }
-        )
+        spec: dict[str, Any] = {
+            "role_id": role_id,
+            "markers": [str(marker) for marker in role.markers if str(marker).strip()],
+            "query_patterns": _normalize_query_patterns(role.query_patterns),
+        }
+        # A3: описание роли переносится только при наличии; пустое — не выдумывается
+        # (кандидат остаётся неполным до явного заполнения человеком).
+        definition = _clean(role.definition or "")
+        if definition:
+            spec["definition"] = definition
+        role_specs.append(spec)
     if role_specs:
         profile["roles"] = role_specs
     allowed_roles = set(role_ids) | existing_role_set
@@ -728,15 +731,16 @@ def build_seed_from_hypotheses(
         if not product_id or product_id == "node" or product_id in seen_products:
             continue
         seen_products.add(product_id)
-        cohort_specs.append(
-            {
-                "product_id": product_id,
-                "role_overlap": 0.5,
-                "selection_reason": _clean(product.role_hint)
-                or "кандидат веб-разведки (не подтверждён человеком)",
-                "anchor_relation": "analog",
-            }
-        )
+        spec: dict[str, Any] = {
+            "product_id": product_id,
+            "role_overlap": 0.5,
+            "anchor_relation": "analog",
+        }
+        # A3: обоснование — только при наличии role_hint; иначе поле не выдумывается.
+        role_hint = _clean(product.role_hint)
+        if role_hint:
+            spec["selection_reason"] = role_hint
+        cohort_specs.append(spec)
     if cohort_specs:
         profile["cohort_members"] = cohort_specs
 

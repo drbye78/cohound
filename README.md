@@ -79,9 +79,8 @@ core/                # ядро, категорийно-нейтральный �
   util/              # текстовые утилиты (RU/EN), security (SSRF/slug), fusion (RRF)
 docs/                # архитектурный проект, регламент, absence-правила
 docs/status-dictionary.yaml  # источник истины по перечислениям/статусам (§4.1)
-packages/{case_id}/  # пакеты категорий (catalog/baselines/cohort/golden)
+packages/{case_id}/  # пакеты категорий (catalog/baselines/cohort/golden/registries)
 passports/{product_id}/  # паспорта продуктов и сателлитов
-registries/          # реестры как конфиг-данные
 runs/ · index_store/ · corpus_raw/ · cache/  # операционные каталоги (runtime)
 tests/               # selfcheck, property-тесты домена, smoke scrapy-playwright
 ```

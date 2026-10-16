@@ -51,7 +51,6 @@ from core.config.paths import (
     ENV_PACKAGES_DIR,
     ENV_PASSPORTS_DIR,
     ENV_PATHS_FILE,
-    ENV_REGISTRIES_DIR,
     ENV_REPORTS_DIR,
     ENV_RUNS_DIR,
     HARNESS_FIELDS,
@@ -108,6 +107,5 @@ __all__ = [
     "ENV_INDEX_STORE_DIR",
     "ENV_CORPUS_RAW_DIR",
     "ENV_CACHE_DIR",
-    "ENV_REGISTRIES_DIR",
     "ENV_REPORTS_DIR",
 ]

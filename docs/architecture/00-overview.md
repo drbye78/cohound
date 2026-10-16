@@ -186,7 +186,7 @@ IDP/DLP/IDS (`07` §8).
 миграция additive/idempotent (`ALTER TABLE`/`CREATE TABLE IF NOT EXISTS` при отсутствии).
 
 **Реестровые фетчеры:** `ports/registry.py` — нейтральный порт; конкретные реестры (РРПО, ФСТЭК)
-описываются данными в `registries/*.yaml` и обслуживаются **generic config-driven HTTP/JSON/HTML
+описываются данными в `packages/{case_id}/registries/*.yaml` и обслуживаются **generic config-driven HTTP/JSON/HTML
 адаптером** вне `core/`, чтобы не нарушать §1.3.
 
 ---
@@ -283,7 +283,7 @@ M0 должен давать **сквозной вертикальный сре�
 
 | Статус | Модули |
 |---|---|
-| **Реально в M0** | `domain/*` (enums, models, invariants, scoring, r2, anchors); `store/sqlite.py`; `pipeline/normalize.py` + `lint.py` + `plan.py`; `pipeline/gates.py`; CLI `resolve`/`plan`; реестровый generic-адаптер + `registries/*.yaml`; golden-каркас |
+| **Реально в M0** | `domain/*` (enums, models, invariants, scoring, r2, anchors); `store/sqlite.py`; `pipeline/normalize.py` + `lint.py` + `plan.py`; `pipeline/gates.py`; CLI `resolve`/`plan`; реестровый generic-адаптер + `packages/{case_id}/registries/*.yaml`; golden-каркас |
 | **Заглушки (stub)** | LLM-оценщик (`evaluate`); SERP/`search`-адаптер; crawler; vector/lexical-индексы (и `embedder`/`index_builder`); `edge/`-сервис (не запускается в `local`) |
 
 Заглушки реализуют свои порты и дают детерминированный пустой ответ: конвейер собирается сквозь

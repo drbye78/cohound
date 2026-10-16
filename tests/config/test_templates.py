@@ -1,7 +1,7 @@
 """Тесты нейтральных шаблонов-скелетов данных (T6.5).
 
 Проверяют, что пакет ``packages/_template``, паспорт ``passports/_template`` и
-реестровый конфиг ``registries/example_template.yaml`` проходят тот же контур
+реестровый шаблон ``docs/templates/registries/example_template.yaml`` проходят тот же контур
 валидации, что и реальные данные: ``load_inputs`` → ``lint_run_inputs`` →
 ``cross_check``, ``load_passport``, ``load_registry_config``.
 
@@ -27,7 +27,7 @@ from core.pipeline.normalize import cross_check, load_inputs
 ROOT = Path(__file__).resolve().parents[2]
 TEMPLATE_PACKAGE = ROOT / "packages" / "_template"
 TEMPLATE_PASSPORTS = ROOT / "passports" / "_template"
-TEMPLATE_REGISTRY = ROOT / "registries" / "example_template.yaml"
+TEMPLATE_REGISTRY = ROOT / "docs" / "templates" / "registries" / "example_template.yaml"
 
 #: Обязательные артефакты раскладки пакета (``03`` §A.1, ``normalize.load_inputs``).
 MANDATORY_PACKAGE_FILES = (

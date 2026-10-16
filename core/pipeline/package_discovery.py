@@ -429,10 +429,12 @@ def suggest_roles(profile: dict[str, Any]) -> list[Any]:
         if not role_id or role_id in seen:
             continue
         seen.add(role_id)
-        payload: dict[str, Any] = {
-            "role_id": role_id,
-            "definition": str(spec.get("definition", "TODO: описание роли (кандидат)")),
-        }
+        payload: dict[str, Any] = {"role_id": role_id}
+        # A3: обоснование/описание — только из профиля. Нет данных — поле не выдумывается
+        # (кандидат остаётся неполным; заполнит человек через явную CRUD-операцию).
+        definition = spec.get("definition")
+        if definition is not None:
+            payload["definition"] = str(definition)
         for key in ("markers", "query_patterns", "core_coverage_allowed", "multi_instance"):
             if key in spec:
                 payload[key] = spec[key]
@@ -467,9 +469,11 @@ def suggest_cohort_members(profile: dict[str, Any]) -> list[Any]:
         payload: dict[str, Any] = {
             "product_id": product_id,
             "role_overlap": spec.get("role_overlap", 0.5),
-            "selection_reason": str(spec.get("selection_reason", "TODO: обоснование (кандидат)")),
             "anchor_relation": str(spec.get("anchor_relation", "analog")),
         }
+        # A3: обоснование выбора — только из профиля. Нет данных — поле не выдумывается.
+        if spec.get("selection_reason") is not None:
+            payload["selection_reason"] = str(spec["selection_reason"])
         result.append(
             _candidate(
                 kind="cohort_member",
