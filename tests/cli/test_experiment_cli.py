@@ -5,9 +5,10 @@
 * команда разрешает зафиксированную сборку **из строки runs** (``index_build_id``/
   ``package_id`` + ``index_manifest``), прогоняет R0/R1/R2 на инъектированном
   детерминированном эмбеддере и записывает измерение в ``runs``;
-* выбранный профиль/K/``rrf_k``/``embed_model_id`` и ``settings_provenance`` =
-  ``{"…": {"source": "measured"}}`` действительно персистятся и видны ``read_manifest``
-  + §13-границе ``diff`` (``execution_change``);
+* выбранный профиль персистится с честным ``settings_provenance``: ``source: measured``
+  получает только профиль и только при **полном** сравнении; K/``rrf_k``/``embed_model_id``
+  — предпосылки, они ``source: default`` (A3); всё это видно ``read_manifest`` + §13-границе
+  ``diff`` (``execution_change``);
 * **NB1**: расхождение эмбеддера запроса и сборки (сравнение по ``model_id``, не по ``dim``)
   → отказ с обоими идентификаторами; отсутствие сборки/эмбеддера → честный ``skipped``
   (N3), без выдуманного ранжирования и без падения.
@@ -207,15 +208,61 @@ def test_experiment_measures_and_persists_provenance(
     assert json.loads(post.retrieval_params_json or "{}")["selected_profile"] == payload[
         "selected_profile"
     ]
-    for name in ("retrieval_profile", "retrieval_cutoff_K", "embed_model_id", "rrf_k"):
-        assert post.settings_provenance[name]["source"] == "measured"
-        assert post.settings_provenance[name]["experiment_id"] == f"retrieval/{BUILD}/K3"
+    # A3: измерен ровно профиль (сравнение полное); K/rrf_k/embed_model_id — предпосылки.
+    assert post.settings_provenance["retrieval_profile"]["source"] == "measured"
+    assert post.settings_provenance["retrieval_profile"]["experiment_id"] == f"retrieval/{BUILD}/K3"
+    for name in ("retrieval_cutoff_K", "rrf_k", "embed_model_id"):
+        assert post.settings_provenance[name]["source"] == "default"
 
     # Кто наблюдает: §13-граница diff помечает изменение как execution_change.
     violations = diff_boundary_violations(pre, post)
     assert any(v.startswith("execution_change: retrieval_profile:") for v in violations)
     assert any(v.startswith("execution_change: retrieval_cutoff_K:") for v in violations)
     assert not any(v.startswith("methodology_change") for v in violations)
+
+
+def test_experiment_partial_comparison_is_not_measured(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A3/B1: неполное сравнение (часть профилей ``skipped``) → профиль ``default``, не ``measured``.
+
+    Только лексический индекс (без dense) ⇒ R1/R2 пропускаются, побеждает R0 **не потому,
+    что измерен лучше**, а потому что плотные плечи не поехали. Выдавать такой выбор за
+    измерение запрещено (A3): ``source`` обязан быть ``default``.
+    """
+    index_root = tmp_path / "index_store"
+    _write_build(index_root)
+    monkeypatch.setenv("COHOUND_INDEX_STORE_DIR", str(index_root))
+    db = tmp_path / "runs" / "run.p" / "cohound.db"
+    _store(db, "run.p")
+
+    with SqliteStore(db) as store:
+        ports = _ports(index_root, store, embedder=_fake_embedder())
+        # Снимаем dense-плечо: R1/R2 не смогут отработать, R0 останется.
+        ports.vector_index = None
+        code = main(
+            [
+                "experiment",
+                "retrieval",
+                "--db",
+                str(db),
+                "--run-id",
+                "run.p",
+                "--golden",
+                str(_golden(tmp_path)),
+                "--json",
+            ],
+            ports=ports,
+        )
+    payload = json_out(capsys)
+    assert code == EXIT_OK
+    assert payload["skipped"]  # неполное сравнение состоялось
+    assert payload["provenance"] == "default"
+
+    with SqliteStore(db) as store:
+        post = store.read_manifest("run.p")
+    assert post.settings_provenance["retrieval_profile"]["source"] == "default"
+    assert post.settings_provenance["retrieval_profile"]["skipped"]
 
 
 def test_experiment_cutoff_falls_back_to_manifest_K(

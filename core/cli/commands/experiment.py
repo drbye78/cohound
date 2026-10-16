@@ -9,9 +9,16 @@ R0/R1/R2 (:func:`core.pipeline.experiments.run_retrieval_experiment`).
 Результат измерения **не является тупиком** (A3 «дефолт → измерение»): выбранный профиль,
 ``retrieval_cutoff_K``, ``rrf_k`` и ``embed_model_id`` персистятся в строку ``runs``
 (``retrieval_profile``/``retrieval_cutoff_K``/``retrieval_params_json``/``embed_model_id``)
-вместе с ``settings_provenance_json`` = ``{"…": {"source": "measured", "experiment_id": …}}``.
-Это наблюдают ``hound report`` (манифест) и ``hound diff`` (граница ``execution_change``
-§13); версии — класс ``execution_versions``, бампа ``methodology_version`` нет.
+вместе с ``settings_provenance_json``. Это наблюдают ``hound report`` (манифест) и
+``hound diff`` (граница ``execution_change`` §13); версии — класс ``execution_versions``,
+бампа ``methodology_version`` нет.
+
+**A3 (что именно «измерено»).** ``source: measured`` получает только то, что этот прогон
+действительно измерил: ``retrieval_profile``, и лишь когда сравнение было **полным** (все
+профили реально прогнаны). K задан извне, ``rrf_k`` экспериментом не варьируется,
+``embed_model_id`` прочитан из сборки — они записываются как ``source: default``.
+Неполное сравнение (часть профилей ``skipped``) тоже даёт ``default``: выбор профиля по
+усечённому сравнению — не измерение, и выдавать его за измерение запрещает A3.
 
 **NB1 (эмбеддер ↔ сборка).** Перед прогоном ``embedder.model_id`` сверяется с
 ``embed_model_id`` сборки (из on-disk ``manifest.json``): равенства ``dim`` недостаточно —
@@ -53,13 +60,17 @@ from core.pipeline.retrieve import DEFAULT_RRF_K
 
 __all__ = ["run", "configure"]
 
-#: Настройки, фиксируемые измерением (класс ``execution_versions``, §13, A3).
-#: Пишутся в ``runs.settings_provenance_json`` как ``source: measured``.
-MEASURED_SETTINGS: tuple[str, ...] = (
-    "retrieval_profile",
+#: Настройка, измеряемая этим экспериментом (A3): сравнение профилей R0/R1/R2.
+MEASURED_SETTINGS: tuple[str, ...] = ("retrieval_profile",)
+
+#: Настройки-предпосылки: попадают в артефакт, но НЕ измерены этим прогоном.
+#: ``retrieval_cutoff_K`` задан оператором/зафиксирован ранее, ``rrf_k`` не варьируется
+#: экспериментом, ``embed_model_id`` прочитан из сборки. Помечать их ``measured`` —
+#: ровно тот подлог, который запрещает A3 (§13: предположение ≠ измерение).
+INPUT_SETTINGS: tuple[str, ...] = (
     "retrieval_cutoff_K",
-    "embed_model_id",
     "rrf_k",
+    "embed_model_id",
 )
 
 #: Причины пропуска (командный уровень, N3). ``no_embedder`` переиспользует словарь фаз.
@@ -95,17 +106,34 @@ def _resolve_ports(args: argparse.Namespace, store: Any, target: Any) -> Any:
 
 
 def _fixation_manifest(
-    manifest: Any, report: Any, *, embed_model_id: str | None, experiment_id: str
+    manifest: Any,
+    report: Any,
+    *,
+    embed_model_id: str | None,
+    experiment_id: str,
+    profile_measured: bool,
 ) -> Any:
-    """Манифест с зафиксированным измерением: профиль/K/params + ``provenance: measured``.
+    """Манифест с зафиксированным результатом: профиль + честный провенанс (A3, §13).
 
-    Читает текущий манифест прогона и возвращает копию с измеренными ретривал-полями и
-    дополненным (не затёртым) ``settings_provenance``. Никаких side-файлов: запись идёт
-    через существующий путь ``StorePort.persist_manifest`` (его читают ``report``/``diff``).
+    Читает текущий манифест прогона и возвращает копию с ретривал-полями и дополненным
+    (не затёртым) ``settings_provenance``. Никаких side-файлов: запись идёт через
+    существующий путь ``StorePort.persist_manifest`` (его читают ``report``/``diff``).
+
+    ``source: measured`` ставится **только** тому, что этот прогон действительно измерил:
+    ``retrieval_profile`` — и лишь при ``profile_measured`` (все три профиля реально
+    прогнаны). Иначе записывается ``default`` с картой ``skipped``: выбор профиля по
+    неполному сравнению — не измерение, и выдавать его за измерение запрещает A3.
+    Настройки-предпосылки (:data:`INPUT_SETTINGS`) всегда ``default``: K задан извне,
+    ``rrf_k`` экспериментом не варьируется, ``embed_model_id`` прочитан из сборки.
     """
     provenance = dict(getattr(manifest, "settings_provenance", None) or {})
-    for name in MEASURED_SETTINGS:
-        provenance[name] = {"source": "measured", "experiment_id": experiment_id}
+    provenance["retrieval_profile"] = (
+        {"source": "measured", "experiment_id": experiment_id}
+        if profile_measured
+        else {"source": "default", "skipped": dict(report.skipped)}
+    )
+    for name in INPUT_SETTINGS:
+        provenance[name] = {"source": "default"}
     return manifest.model_copy(
         update={
             "retrieval_profile": report.selected_profile,
@@ -251,11 +279,15 @@ def run(args: argparse.Namespace) -> int:
         )
 
         experiment_id = f"retrieval/{target.build_id}/K{report.k}"
+        # A3: профиль считается измеренным только если сравнение было полным (все три
+        # профиля реально прогнаны). Частичное сравнение → provenance: default.
+        profile_measured = not report.skipped
         updated = _fixation_manifest(
             manifest,
             report,
             embed_model_id=target.embed_model_id,
             experiment_id=experiment_id,
+            profile_measured=profile_measured,
         )
         store.persist_manifest(run_id, updated)
 
@@ -274,7 +306,7 @@ def run(args: argparse.Namespace) -> int:
         "metrics": metrics,
         "skipped": dict(report.skipped),
         "experiment_id": experiment_id,
-        "provenance": "measured",
+        "provenance": "measured" if profile_measured else "default",
     }
     _emit_measured(args, payload)
     return EXIT_OK
