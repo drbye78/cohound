@@ -179,9 +179,11 @@ class SqliteStore:
 `unknown_policy`, `partial_score`); `execution_change` — расхождение поля `EXECUTION_FIELDS`
 (`case_id`, `cohort_ref`, `index_build_id`, `embed_model_id`, `chunker_version`, `extractor_version`,
 `lexical_engine_version`, `vector_store`, `retrieval_profile`, `retrieval_cutoff_K`,
-`retrieval_params_json`, `llm_scenarios`, `crawl_strategy`, `crawl_rate_limit`). Две последние —
-операционные оси краула (`run.yaml:crawl.strategy`/`crawl.rate_limit`, commodity-слой A2):
-их смена — `execution_change`, не `methodology_change` (Backlog B). `DIFF_BOUNDARY_FIELDS` сохранён алиасом
+`retrieval_params_json`, `llm_scenarios`, `crawl_strategy`, `crawl_rate_limit`,
+`crawl_max_workers`, `crawl_max_depth`, `crawl_max_documents`, `crawl_exclude_paths`,
+`crawl_exclude_documents`). Последние семь —
+операционные оси краула (`run.yaml:crawl`, commodity-слой A2):
+их смена — `execution_change`, не `methodology_change` (Backlog B, D1/D2). `DIFF_BOUNDARY_FIELDS` сохранён алиасом
 `EXECUTION_FIELDS` (обратная совместимость). Дифф отказывает при обеих классах причин (§13).
 
 ### C.2. Версионные границы (bump + golden-full)
@@ -194,8 +196,10 @@ class SqliteStore:
 - Смена `retrieval_profile`/K и fusion-параметров (`rrf_k`, `retrieval_params_json`) →
   retrieval-golden и `execution_change` в diff, но **не** меняет `index_build_id`:
   ретривал-конфиг не влияет на чанкинг/векторы (P2).
-- Смена операционных осей краула (`crawl.strategy`/`crawl.rate_limit`) → `execution_change`
-  в diff (§13, Backlog B), без bump `methodology_version`: это commodity-слой exec-условий (A2).
+- Смена операционных осей краула (`crawl.strategy`/`crawl.rate_limit`/`crawl.max_depth`/
+  `crawl.max_documents`/`crawl.exclude_paths`/`crawl.exclude_documents`/`crawl.max_workers`) →
+  `execution_change` в diff (§13, Backlog B/D1), без bump `methodology_version`: commodity-слой
+  exec-условий (A2).
 - Смена prompt-шаблона → новый `prompt_hash`; ячейки с прошлым hash помечаются `stale_reason='prompt_template'`.
 - Смена `index_build_id` → затронутые ячейки помечаются `stale_reason='new_build'`; `stale`-ячейки
   не участвуют в расчёте до переоценки/ревью.
@@ -228,6 +232,11 @@ settings_provenance:            # A3: default|measured (+ experiment_id при m
 crawl:                          # §3.2/D4: дефолты оси стратегии краула и politeness-пейсинга
   strategy: auto                # auto | honest | hybrid (как используется браузер)
   rate_limit: {min_s: 1.0, max_s: 3.0}   # опц.: uniform(min_s, max_s) между запросами (per-host)
+  max_workers: 4                # опц. (>0): D4-задел конкурентности (пока однопоточно)
+  max_depth: 2                  # опц. (>=0): глубина BFS-обхода in-site ссылок (0 — только seeds)
+  max_documents: 500            # опц. (>0): потолок добытых страниц на (продукт, seed-root)
+  exclude_paths: ["/private/*"] # опц.: glob блэклиста по пути URL (fnmatchcase)
+  exclude_documents: ["*.pdf"]  # опц.: glob блэклиста по basename URL
 ```
 
 Загрузчик `config/run_config.py` → `RunConfig` (домен) с валидацией (anchor ∈ products;
@@ -244,6 +253,19 @@ preliminary не совместим с capability_ranked — I13). `ranking_poli
 `RateLimitSpec` (`uniform(min_s, max_s)`, `min_s <= max_s`). При отсутствии секции поведение
 неизменно (`auto`, без пейсинга); резолв — `pipeline/fetch_plan.py` (дефолт прогона →
 профиль домена → явный `--render-modes`).
+
+Секция `crawl` несёт также **оси контроля краула** (`max_workers`/`max_depth`/`max_documents`/
+`exclude_paths`/`exclude_documents`), разрешаемые **отдельной** цепочкой
+`deploy.yaml:crawl` (application default) < `run.yaml:crawl` (run profile) <
+`domain_profiles.yaml` (per-site) — `pipeline/crawl_frontier.py:resolve_crawl_limits`. Это
+**не** оси `crawl_sources.yaml` и **не** `FetchPlan`: отдельный канал, чтобы не сломать
+приоритет source-routing. `max_depth` дефолт `0` (только seeds) и под executor/split
+**отвергается** явной конфиг-ошибкой (BFS доступен только локальному пути до волнового
+паритета). `max_documents=0` отвергается на загрузке (`>0`). Блэклисты — glob (`fnmatchcase`,
+case-sensitive): `exclude_paths` по пути URL, `exclude_documents` по basename (`*.pdf`);
+применяются и к seeds, и к обнаруженным ссылкам. Усечение (`max_documents`/`max_depth`)
+честно фиксируется: сеанс краула не рапортуется `COMPLETED` (→ `PARTIAL`), а absence-evidence
+`source_scope: exhaustive` поверх усечённого продукта даёт аномалию для человека (§G/D1).
 
 ### D.2. Загрузчики пакета (`pipeline/normalize.py`)
 
@@ -270,6 +292,12 @@ preliminary не совместим с capability_ranked — I13). `ranking_poli
   длиннейший `path_key`, затем длиннейший `host_key`. Явный `--render-modes` по точному URL
   переопределяет **только** ось `fetch`, оставляя `extract`/`strategy`/`wait_for`/`rate_limit`
   из профиля.
+
+  Профиль домена — **высший** слой цепочки осей контроля краула (D1/D2): per-site
+  `max_workers`/`max_depth`/`max_documents`/`exclude_paths`/`exclude_documents`
+  переопределяют run/app-дефолты (`resolve_crawl_limits`). Например,
+  `example.org/documents: {fetch: http, max_depth: 1, exclude_documents: ["*.pdf"]}`.
+  Схема остаётся строгой (`extra="forbid"`).
 
 ### D.2.1. Источники краула (`packages/{case_id}/crawl_sources.yaml`) — source routing
 
@@ -397,6 +425,13 @@ crawl:                         # операционная политика HTTP-
   user_agent: "coHound-crawler/0.1"   # None → дефолт HttpCrawler
   timeout_s: 30                # None → дефолт HttpCrawler (30 с)
   follow_redirects: true
+  # D1/D2: application-слой осей контроля краула (низший приоритет app < run < site;
+  # резолв — pipeline/crawl_frontier.py:resolve_crawl_limits).
+  max_workers: 4               # опц. (>0): D4-задел конкурентности (исполнение пока однопоточное)
+  max_depth: 0                 # >=0: 0 = только seeds (под executor/split >0 отвергается)
+  max_documents: null          # опц. (>0): потолок добытых страниц на (продукт, seed-root)
+  exclude_paths: []            # glob блэклиста по пути URL (fnmatchcase)
+  exclude_documents: []        # glob блэклиста по basename URL, напр. ["*.pdf"]
   browser:                     # браузерный краулер BrowserCrawler (honest/hybrid; 07)
     mode: cdp                  # cdp | persistent (декларативен; взаимоисключающие)
     cdp_url: "http://127.0.0.1:9222"    # mode: cdp — подключение к существующему браузеру
@@ -564,8 +599,16 @@ hound run \
 | `hound baseline-agreement --annotations <csv>` | согласие независимых аннотаторов §11.5: Cohen's κ по полному набору меток **и отдельно** по бинарному решению N/A-vs-не-N/A (N/A задаёт знаменатель Coverage, I6/I7), + матрица расхождений и счётчики. Непарные ячейки исключаются и перечисляются; нулевая вариация маргиналов → `undefined` (не выдуманное число). Разметку не создаёт: это ручная работа человека | — (отчёт; артефакт разметки — вход) |
 | `hound package crawl-probe` | **измерение** оптимальных осей краула для каждого ключа `domain_profiles.yaml` (A3): лестница `http` → `browser/hybrid` → `browser/honest`; решение принимает исход **браузерного** яруса (`RawPage.fetch_mode`), а не текст ошибки — оба яруса провалились ⇒ `unresolved` с причиной (транзиентный сбой не выдаётся за `browser`); причина **диагностична**: сбой транспорта (`both_tiers_failed`) отличается от «транспорт дошёл, но экстракция дала 0 символов» (`extraction_empty` — смотреть экстрактор, не краулер; при расхождении ярусов в отчёте обе причины). Пригодность меряется **выходом реального экстрактора**, не размером байт. `wait_for`/`rate_limit` не выдумываются: только подсказка (`needs_confirmation`) и только при `429`. URL — `--urls` > `corpus_docs` (`--corpus-db`) > синтез `https://{host}{path}/` (`confidence: low`). По умолчанию **только предложение**; `--write` (требует `--actor`) правит `domain_profiles.yaml`, сохраняя шапку байт-в-байт и не тронутые блоки дословно, при отсутствии изменений — no-op. Смена осей краула — граница `execution_change` (§13), не `methodology_version` | `packages/{case_id}/sources/crawl_probe/{date}.proposal.yaml` |
 
-Подкоманды `hound package …` принимают `--package` как **путь к каталогу пакета**, так и
-**`case_id`** (резолвится в каталоге пакетов: `--dir`, иначе resolved `paths.packages`);
+**Флаги контроля краула (`hound run`, D1/D2).** В дополнение к `--max-attempts` команда
+принимает оси контроля краула: `--max-depth D` (BFS-обход in-site ссылок; `0` — только seeds,
+дефолт), `--max-documents N` (`>0`; потолок добытых страниц на `(продукт, seed-root)`),
+`--exclude-path GLOB` и `--exclude-document GLOB` (повторяемые glob-блэклисты по пути URL и
+по basename). Флаги уточняют **run-слой** поверх `run.yaml:crawl` (цепочка app < run < site);
+усечение (`max_documents`/`max_depth`) фиксируется честно — сеанс краула не рапортуется
+`COMPLETED`, а absence `source_scope: exhaustive` поверх усечённого продукта даёт аномалию.
+Под `--profile split`/executor `--max-depth > 0` отвергается явной конфиг-ошибкой.
+
+Подкоманды `hound package …` принимают `--package` как **путь к каталогу пакета**, так и**`case_id`** (резолвится в каталоге пакетов: `--dir`, иначе resolved `paths.packages`);
 несуществующий пакет — честный `EXIT_NOT_FOUND` (команды чтения fail-closed, а не ложный успех).
 `hound package validate` дополнительно fail-closed, когда каталог есть, но `package.yaml`
 отсутствует: `EXIT_BLOCKED` с `blocking: package.yaml отсутствует` (не `EXIT_NOT_FOUND`

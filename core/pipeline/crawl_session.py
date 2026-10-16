@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import json
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 from core.domain import (
@@ -97,6 +98,10 @@ def finalize_session(
     engines: list[str] | None = None,
     kinds: list[str] | None = None,
     crawl_sources_digest: str | None = None,
+    truncated: bool = False,
+    effective_limits: Mapping[str, Any] | None = None,
+    pages_fetched: int | None = None,
+    truncated_products: Sequence[str] | None = None,
 ) -> CrawlSessionStatus:
     """Финализирует сеанс: ``COMPLETED`` (нет сбоев) либо ``PARTIAL`` (есть failed/cancelled).
 
@@ -104,26 +109,37 @@ def finalize_session(
     ``FAILED``/``CANCELLED`` делает сеанс ``PARTIAL`` (часть краула добыта). ``finished_at``
     проставляется в той же записи статуса. Возвращает применённый статус.
 
+    D1/G («честность усечения»): **явно усечённый** краул (потолок ``max_documents`` или
+    граница ``max_depth``) **никогда** не рапортуется ``COMPLETED`` — используется
+    ``PARTIAL`` (частичный статус сеанса), чтобы политико-усечённый корпус не выглядел
+    полным. Усечение, эффективные лимиты и число добытых страниц попадают в провенанс.
+
     Phase 2: в ``CrawlSession.provenance_json`` пишется компактный JSON-провенанс
-    ``{engines, kinds, crawl_sources_digest, status}`` (движки/виды, отсортированы и
-    дедуплицированы). Персистенция — через :meth:`StorePort.set_crawl_session_provenance`
-    (targeted ``UPDATE``; не задевает счётчики/метаданные — чище read-modify-write).
+    ``{engines, kinds, crawl_sources_digest, status, truncated, effective_limits,
+    pages_fetched}``. Персистенция — через :meth:`StorePort.set_crawl_session_provenance`
+    (targeted ``UPDATE``).
     """
     counts = store.crawl_session_counts(session_id)
     defects = counts.get(CrawlItemStatus.FAILED.value, 0) + counts.get(
         CrawlItemStatus.CANCELLED.value, 0
     )
     status = (
-        CrawlSessionStatus.COMPLETED
-        if defects == 0
-        else CrawlSessionStatus.PARTIAL
+        CrawlSessionStatus.PARTIAL
+        if truncated or defects > 0
+        else CrawlSessionStatus.COMPLETED
     )
     store.update_crawl_session_status(session_id, status, finished_at=finished_at)
-    provenance = {
+    provenance: dict[str, Any] = {
         "engines": sorted({str(e) for e in (engines or []) if e}),
         "kinds": sorted({str(k) for k in (kinds or []) if k}),
         "crawl_sources_digest": crawl_sources_digest,
         "status": status.value,
+        # D1/G: машинно-читаемая запись о политике усечения (всегда присутствует).
+        "truncated": bool(truncated),
+        "effective_limits": dict(effective_limits or {}),
+        "pages_fetched": pages_fetched,
+        # D1/G: продукты, чей краул усечён (для аномалии exhaustive-absence в отчёте).
+        "truncated_products": sorted({str(p) for p in (truncated_products or []) if p}),
     }
     store.set_crawl_session_provenance(
         session_id,

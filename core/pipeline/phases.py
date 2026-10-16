@@ -42,10 +42,12 @@ from core.domain.anchors import SourceResolver
 from core.domain.enums import CrawlItemStatus, CrawlSessionStatus, SkipReason
 from core.domain.models import (
     CrawlProvenance,
+    CrawlRunConfig,
     CrawlSessionProvenance,
     Satellite,
 )
 from core.config.crawl_sources import CrawlSourcesConfig
+from core.config.deploy import CrawlConfig
 from core.config.domain_profiles import DomainProfile
 from core.pipeline.compute import compute, scope_universe
 from core.pipeline.corpus import build_corpus
@@ -220,6 +222,10 @@ def _crawl_provenance(store: Any, inputs: Any, run_id: str) -> CrawlProvenance:
                     total=total,
                     fetched=fetched,
                     failed=failed,
+                    truncated=bool(prov.get("truncated")),
+                    truncated_products=sorted(
+                        {str(p) for p in (prov.get("truncated_products") or [])}
+                    ),
                 )
             )
             engines |= set(session_engines)
@@ -292,6 +298,11 @@ def build_phases(
     edge_capabilities: Mapping[str, Any] | None = None,
     max_attempts: int | None = None,
     progress: Callable[[dict[str, int]], None] | None = None,
+    max_depth: int | None = None,
+    max_documents: int | None = None,
+    exclude_paths: Sequence[str] | None = None,
+    exclude_documents: Sequence[str] | None = None,
+    crawl_app: CrawlConfig | None = None,
 ) -> dict[str, PhaseFn]:
     """Возвращает реестр ``{phase_name: PhaseFn}`` для не-гейтовых фаз конвейера.
 
@@ -402,6 +413,23 @@ def build_phases(
     # -- Ш5: сборка корпуса и индекса --------------------------------------- #
     def corpus_phase(ctx: RunContext) -> PhaseResult:
         """Ш5: retention → extract → chunk → index; I19 обеспечивается ``build_corpus``."""
+        # D1/D2: CLI-флаги (--max-depth/--max-documents/--exclude-*) — операторское уточнение
+        # **run-слоя** (поверх run.yaml): цепочка остаётся трёхуровневой app < run < site.
+        run_crawl: CrawlRunConfig | None = getattr(
+            getattr(inputs, "run", None), "crawl", None
+        )
+        override: dict[str, Any] = {}
+        if max_depth is not None:
+            override["max_depth"] = max_depth
+        if max_documents is not None:
+            override["max_documents"] = max_documents
+        if exclude_paths:
+            override["exclude_paths"] = list(exclude_paths)
+        if exclude_documents:
+            override["exclude_documents"] = list(exclude_documents)
+        if override:
+            base = run_crawl if run_crawl is not None else CrawlRunConfig()
+            run_crawl = base.model_copy(update=override)
         result = build_corpus(
             plan,
             getattr(ctx.ports, "crawler", None),  # type: ignore[arg-type]
@@ -428,7 +456,9 @@ def build_phases(
             executor=getattr(ctx.ports, "executor", None),
             # D4 (P2-3): секция ``crawl`` run.yaml → дефолты оси стратегии/лимита для ``FetchPlan``.
             # ``RunConfig`` доступен как ``inputs.run`` (RunInputs.run), поле ``crawl`` опционально.
-            crawl_defaults=getattr(getattr(inputs, "run", None), "crawl", None),
+            crawl_defaults=run_crawl,
+            # D1/D2: application-слой осей краула (deploy.yaml:crawl) — низший приоритет.
+            crawl_app=crawl_app,
             # D3: durable-краул (аудит/очередь/resume) привязан к прогону; store уже есть.
             run_id=getattr(plan, "run_id", None),
             # Phase 4: потолок попыток (--max-attempts) и колбэк прогресса (--follow).

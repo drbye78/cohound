@@ -81,6 +81,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from core.config.crawl_sources import CrawlSourcesConfig
+from core.config.deploy import CrawlConfig
 from core.config.domain_profiles import DomainProfile
 from core.domain import (
     CorpusChunk,
@@ -92,6 +93,7 @@ from core.domain import (
     FailureKind,
     IndexManifestEntry,
 )
+from core.pipeline.crawl_frontier import Frontier, resolve_crawl_limits
 from core.pipeline.crawl_session import (
     default_session_id,
     finalize_session,
@@ -103,6 +105,7 @@ from core.pipeline.crawl_sources import (
     crawl_sources_digest,
     resolve_crawl_target,
 )
+from core.pipeline.fetch_plan import _host_matches
 from core.pipeline.runner import PhaseResult
 from core.ports.chunker import ChunkerPort
 from core.ports.crawl_executor import (
@@ -119,6 +122,7 @@ from core.ports.poller import PollPort
 from core.ports.types import Chunk as PortChunk
 from core.ports.types import FetchMode, FetchPlan, RawPage
 from core.util.hashing import content_hash, short_hash
+from core.util.html_links import extract_links
 from core.util.rate_limit import RateLimiter
 from core.util.security import validate_url
 
@@ -174,6 +178,13 @@ class IndexBuild:
     crawl_fetched: int = 0
     crawl_done: int = 0
     crawl_failed: int = 0
+    #: D1/G: корпус был **политико-усечён** (``max_documents``/``max_depth``) — краул не
+    #: исчерпал домен. Машинно-читаемый флаг на результате фазы (log_entry); связанные
+    #: записи — ``truncation``. Политико-усечённый корпус не «полон» (см. статус сеанса).
+    truncated: bool = False
+    #: D1/G: детализация усечения по ``(product, seed-root)``: эффективные лимиты, число
+    #: добытых страниц, причина (``max_documents``/``max_depth``), зачёркнутые блэклистом URL.
+    truncation: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass
@@ -198,6 +209,40 @@ class _ProductIngest:
 def _as_text(value: Any) -> Any:
     """Приводит enum-значение (``StrEnum``) к строке ``.value``; прочее — как есть."""
     return getattr(value, "value", value)
+
+
+def _looks_like_html(page: RawPage) -> bool:
+    """Похожа ли страница на HTML (для извлечения ссылок при ``max_depth > 0``, D1).
+
+    Если ``content_type`` известен — по нему (``html``/``xml``); иначе — эвристика по телу
+    (маркер ``<html``/``<!doctype`` или наличие ``<a `` в начале). Не-HTML (PDF/бинарники)
+    не парсится на ссылки.
+    """
+    content_type = (page.content_type or "").lower()
+    if content_type:
+        return "html" in content_type or "xml" in content_type
+    head = page.content.lstrip()[:256].lower()
+    return head.startswith(b"<html") or head.startswith(b"<!doctype") or b"<a " in head
+
+
+def _max_depth_requested(
+    app: CrawlConfig | None,
+    run: CrawlRunConfig | None,
+    profiles: Mapping[str, DomainProfile] | None,
+) -> int:
+    """Максимум ``max_depth``, запрошенный любым слоем app/run/site (D1, guard executor).
+
+    Нужен, чтобы под executor/split **явно** отвергнуть ``max_depth > 0`` (молчаливое
+    игнорирование дало бы расходящиеся корпуса профилей — ловушка сравнимости).
+    """
+    values: list[int] = [app.max_depth if app is not None else 0]
+    if run is not None and run.max_depth is not None:
+        values.append(int(run.max_depth))
+    for profile in (profiles or {}).values():
+        depth = getattr(profile, "max_depth", None)
+        if depth is not None:
+            values.append(int(depth))
+    return max(values) if values else 0
 
 
 def _now_iso() -> str:
@@ -589,6 +634,7 @@ def build_corpus(
     executor_sleep: Callable[[float], None] = time.sleep,
     max_attempts: int | None = None,
     progress: Callable[[dict[str, int]], None] | None = None,
+    crawl_app: CrawlConfig | None = None,
 ) -> PhaseResult:
     """Ш5: собирает корпус из ``plan × urls`` и возвращает ``PhaseResult``.
 
@@ -660,6 +706,12 @@ def build_corpus(
     :param progress: Phase 4 — опциональный колбэк прогресса: вызывается со снимком
         ``crawl_session_counts`` (``{status: count}``) по ходу фазы (для ``--follow``).
         Ошибки колбэка изолируются и не роняют фазу. ``None`` → без прогресс-вывода.
+    :param crawl_app: D1/D2 — application-слой осей контроля краула (``deploy.yaml:crawl``,
+        :class:`~core.config.deploy.CrawlConfig`): низший приоритет цепочки
+        ``app < run < site`` для ``max_workers``/``max_depth``/``max_documents``/
+        ``exclude_paths``/``exclude_documents`` (:func:`core.pipeline.crawl_frontier.resolve_crawl_limits`).
+        ``None`` → дефолт :class:`CrawlConfig` (``max_depth=0``, без лимитов/блэклистов —
+        поведение неизменно).
 
     Возвращает ``PhaseResult`` со ``status='ok'`` (даже при изолированных ошибках),
     ``cells=[]`` (Ш5 не производит ячеек) и ``log_entries=[IndexBuild]`` (сборка + счётчики).
@@ -766,6 +818,7 @@ def build_corpus(
             "url": u,
             "status": status,
             "attempts": attempts,
+            "depth": base.depth if base is not None else None,
             "engine": engine_value,
             "kind": target.kind if target is not None else None,
             "fetch_mode": base.fetch_mode if base is not None else None,
@@ -795,7 +848,12 @@ def build_corpus(
             )
 
     def _retain(
-        product_id: str, url: str, page: RawPage, fetch_plan: FetchPlan
+        product_id: str,
+        url: str,
+        page: RawPage,
+        fetch_plan: FetchPlan,
+        *,
+        depth: int | None = None,
     ) -> Path | None:
         """Retention сырых байтов (I19) + durable-элемент ``FETCHED``; ``None`` при сбое.
 
@@ -821,6 +879,7 @@ def build_corpus(
                 CrawlItemStatus.FAILED,
                 error_kind=FailureKind.SOURCE_UNAVAILABLE.value,
                 error=f"retention: {reason}",
+                depth=depth,
             )
             return None
         # L1a: байты сохранены — durable-элемент сеанса (provenance фетча).
@@ -836,6 +895,7 @@ def build_corpus(
             fetch_mode=_as_text(fetch_plan.fetch),
             extract_route=_as_text(fetch_plan.extract),
             strategy=_as_text(fetch_plan.strategy),
+            depth=depth,
         )
         return raw_path
 
@@ -1223,14 +1283,30 @@ def build_corpus(
         return entry_urls
 
     def _process_local(
-        pid: str, wu: str, wtarget: Any
-    ) -> tuple[RawPage, Path, FetchPlan] | None:
+        pid: str,
+        wu: str,
+        wtarget: Any,
+        *,
+        depth: int | None = None,
+        scope_host: str | None = None,
+    ) -> tuple[RawPage, Path, FetchPlan, bool] | None:
         """Локальный per-URL путь: resume/браузер-guard/пейсинг/фетч/retention (Ш5).
 
         Общая часть локального пути для обычных страниц и записей каталога. Возвращает
-        ``(page, raw_path, fetch_plan)`` для последующей ``_ingest_one``; ``None`` — исход
-        пропущен/сбой (терминальный ``FAILED`` уже проставлен ``_mark``), вызывающий делает
-        ``continue``. Активный краулер выбирается по ``wtarget.engine`` (fallback — ``crawler``).
+        ``(page, raw_path, fetch_plan, freshly_fetched)`` для последующей ``_ingest_one``;
+        ``None`` — исход пропущен/сбой (терминальный ``FAILED`` уже проставлен ``_mark``),
+        вызывающий делает ``continue``. ``freshly_fetched=False`` — resume из retained raw
+        (живого фетча не было; ``max_documents`` его не считает). Активный краулер выбирается
+        по ``wtarget.engine`` (fallback — ``crawler``).
+
+        ``depth`` — глубина URL в BFS-frontier (персистится в элементе сеанса). ``scope_host``
+        — host seed-root: финальный ``RawPage.url`` после редиректов пере-проверяется на
+        принадлежность scope (D1: redirect-escape не ретейнится).
+
+        **Известное ограничение.** ``BrowserCrawler`` рапортует **запрошенный** URL
+        (``RawPage.url == url``), поэтому браузерный redirect-escape из ``RawPage`` не
+        детектируется — проверка работает только на HTTP-пути (``httpx``/hybrid), где
+        ``RawPage.url`` — финальный URL после редиректов. Это не «залатано» намеренно.
         """
         fetch_plan = wtarget.plan
         prior_item = items.get((pid, wu))
@@ -1246,7 +1322,7 @@ def build_corpus(
             # Счётчик отражает статус возобновляемого элемента (FETCHED — retryable,
             # FAILED — re-extract), а не ``pending``: он уже персистится в сеансе, и при
             # последующем сбое chunker'а URL будет посчитан как ``fetched``, а не потерян.
-            return page, raw_path, fetch_plan
+            return page, raw_path, fetch_plan, False
 
         # D2: браузерный рендер требует поддерживающего краулера. Проверка URL-скоупедирована
         # (а не на сборке композиции): фаза не падает, пропускается только этот URL.
@@ -1270,6 +1346,7 @@ def build_corpus(
                 CrawlItemStatus.FAILED,
                 error_kind=FailureKind.SOURCE_UNAVAILABLE.value,
                 error=reason,
+                depth=depth,
             )
             return None
 
@@ -1284,13 +1361,19 @@ def build_corpus(
             page = active.fetch(wu, fetch_plan)
         except Exception as exc:  # noqa: BLE001 — изоляция по контракту фазы
             reason = f"{type(exc).__name__}: {exc}"
+            # D1/§10: robots-отказ несёт собственный ``refusal_reason`` (не сбой источника).
+            error_kind = (
+                getattr(exc, "refusal_reason", None)
+                or FailureKind.SOURCE_UNAVAILABLE.value
+            )
             errors.append(f"{pid}/{wu}: crawl: {reason}")
             _mark(
                 pid,
                 wu,
                 CrawlItemStatus.FAILED,
-                error_kind=FailureKind.SOURCE_UNAVAILABLE.value,
+                error_kind=error_kind,
                 error=reason,
+                depth=depth,
             )
             return None
         if page is None:
@@ -1301,14 +1384,36 @@ def build_corpus(
                 CrawlItemStatus.FAILED,
                 error_kind=FailureKind.SOURCE_UNAVAILABLE.value,
                 error="пустой RawPage",
+                depth=depth,
             )
             return None
 
+        # D1: redirect-escape. Финальный URL (после HTTP-редиректов) обязан остаться в host-
+        # scope корня; иначе страницу не ретейним и не расширяем frontier (не «вытаскиваем»
+        # чужой контент под видом in-site страницы).
+        if scope_host:
+            final_host = (urlsplit(page.url).hostname or "").lower()
+            if final_host and not _host_matches(final_host, scope_host):
+                reason = (
+                    f"redirect вышел из scope: {page.url!r} "
+                    f"(root host {scope_host!r})"
+                )
+                errors.append(f"{pid}/{wu}: {reason}")
+                _mark(
+                    pid,
+                    wu,
+                    CrawlItemStatus.FAILED,
+                    error_kind="redirect_out_of_scope",
+                    error=reason,
+                    depth=depth,
+                )
+                return None
+
         # 2. Retention (I19): сырые байты пишутся ДО экстракции (общий шаг).
-        raw_path = _retain(pid, wu, page, fetch_plan)
+        raw_path = _retain(pid, wu, page, fetch_plan, depth=depth)
         if raw_path is None:
             return None
-        return page, raw_path, fetch_plan
+        return page, raw_path, fetch_plan, True
 
     def _run_executor_waves() -> tuple[
         dict[tuple[str, str], CrawlResultItem], dict[str, list[str]]
@@ -1409,6 +1514,25 @@ def build_corpus(
     # локальный путь по-прежнему идёт по ``url_map``.
     collected: dict[tuple[str, str], CrawlResultItem] = {}
     work_by_product: dict[str, list[str]] = {}
+
+    # D1/G: accumulators честности усечения. ``truncation_records`` — детализация по
+    # ``(product, seed-root)``; флаг/продукты уходят в провенанс сеанса и ``IndexBuild``.
+    truncation_records: list[dict[str, Any]] = []
+    truncated_products: set[str] = set()
+    pages_fetched_total = 0
+
+    # D1: развёртка ссылок (BFS) несовместима с executor/split до появления волнового
+    # паритета. Молча игнорировать ``max_depth`` нельзя — это дало бы разные корпуса у
+    # профилей (ловушка сравнимости). Явная конфиг-ошибка.
+    if executor is not None and _max_depth_requested(
+        crawl_app, crawl_defaults, domain_profiles
+    ) > 0:
+        raise ValueError(
+            "max_depth > 0 не поддержан при executor/split: BFS-frontier доступен только "
+            "локальному пути (до волнового паритета). Уберите max_depth или используйте "
+            "профиль local."
+        )
+
     if executor is not None:
         collected, work_by_product = _run_executor_waves()
 
@@ -1417,6 +1541,107 @@ def build_corpus(
         # I17: дедуп в пределах продукт-партиции (см. docstring модуля).
         seen_docs: dict[str, str] = {}
         seen_chunk_ids: set[str] = set()
+
+        def _drain_root(pid: str, root_url: str, root_target: Any) -> Frontier:
+            """D1: BFS-drain одного seed-root (scope/блэклист/лимиты/глубина).
+
+            Seeds — глубина 0; ссылка со страницы глубины ``d`` → ``d+1``. Ставка в очередь
+            гейтится scope (host+path-граница) и блэклистом; ``max_documents`` — жёсткий стоп
+            (не исключение): останавливает постановку/обход этого корня. Возвращает frontier
+            с провенансом усечения (``fetched``/``truncated``/``truncated_reason``).
+            """
+            limits = resolve_crawl_limits(
+                root_url,
+                app=crawl_app or CrawlConfig(),
+                run=crawl_defaults,
+                profiles=domain_profiles or {},
+            )
+            frontier = Frontier(root_url, limits)
+            seed_status = frontier.add_seed(root_url)
+            if seed_status == "blacklisted":
+                errors.append(
+                    f"{pid}/{root_url}: seed зачёркнут блэклистом "
+                    "(exclude_paths/exclude_documents) — не enqueued"
+                )
+                _emit_progress()
+                return frontier
+            if seed_status == "truncated":
+                errors.append(
+                    f"{pid}/{root_url}: seed не поставлен — достигнут max_documents"
+                )
+                _emit_progress()
+                return frontier
+
+            while True:
+                node = frontier.next()
+                if node is None:
+                    break
+                work_url, depth = node
+                # D1/H: блэклист применяется и перед фетчем (в дополнение к постановке).
+                if frontier.blacklisted(work_url):
+                    errors.append(
+                        f"{pid}/{work_url}: зачёркнут блэклистом перед фетчем — пропущен"
+                    )
+                    continue
+                prior_item = items.get((pid, work_url))
+                if (
+                    max_attempts is not None
+                    and prior_item is not None
+                    and prior_item.attempts >= max_attempts
+                ):
+                    reason = (
+                        f"max_attempts exhausted "
+                        f"(attempts={prior_item.attempts} >= {max_attempts})"
+                    )
+                    errors.append(f"{pid}/{work_url}: {reason}")
+                    _mark(
+                        pid,
+                        work_url,
+                        CrawlItemStatus.FAILED,
+                        error_kind=_MAX_ATTEMPTS_ERROR_KIND,
+                        error=reason,
+                        depth=depth,
+                    )
+                    _emit_progress()
+                    continue
+
+                work_target = targets.get((pid, work_url))
+                if work_target is None:
+                    work_target = resolve_crawl_target(
+                        pid,
+                        work_url,
+                        sources=crawl_sources or CrawlSourcesConfig(),
+                        profiles=domain_profiles or {},
+                        explicit=explicit_fetch,
+                        run_default_strategy=crawl_strategy_default,
+                        run_default_rate_limit=crawl_rate_default,
+                    )
+                    targets[(pid, work_url)] = work_target
+
+                outcome = _process_local(
+                    pid, work_url, work_target, depth=depth, scope_host=frontier.root_host
+                )
+                if outcome is None:
+                    continue  # отказ/сбой — frontier от него не расширяется
+                page, raw_path, fetch_plan, freshly_fetched = outcome
+                if freshly_fetched:
+                    frontier.note_fetched()
+                _ingest_one(
+                    pid,
+                    work_url,
+                    page,
+                    fetch_plan,
+                    raw_path,
+                    ingest,
+                    seen_docs,
+                    seen_chunk_ids,
+                )
+                _emit_progress()
+                # D1: извлечение in-site ссылок и следующий уровень BFS. При max_depth=0
+                # извлечение не выполняется вовсе (байт-в-байт прежнее поведение).
+                if limits.max_depth > 0 and _looks_like_html(page):
+                    frontier.offer(extract_links(page.content, page.url), depth)
+            return frontier
 
         # Phase 5.3: в executor-режиме итерируем по волновому набору (каталоги уже опрошены,
         # их URL в наборе нет; записи — на месте каталогов). Локальный путь — по ``url_map``.
@@ -1468,12 +1693,13 @@ def build_corpus(
                 targets[(product_id, url)] = target
 
                 # Phase 5.2: источник-каталог (feed/channel) разворачивается в ссылки-записи;
-                # каждая добывается обычным путём (один уровень развёртки, без ре-расширения).
+                # каждая запись — **отдельный seed-root** глубины 0 (один уровень развёртки,
+                # без ре-расширения). Обычный URL — единственный корень.
                 entry_urls = _expand_directory(product_id, url, target)
                 if entry_urls is None:
-                    work: list[tuple[str, Any]] = [(url, target)]
+                    roots: list[tuple[str, Any]] = [(url, target)]
                 else:
-                    work = []
+                    roots = []
                     for entry_url in entry_urls:
                         etarget = resolve_crawl_target(
                             product_id,
@@ -1493,24 +1719,26 @@ def build_corpus(
                             params=etarget.params,
                         )
                         targets[(product_id, entry_url)] = entry_target
-                        work.append((entry_url, entry_target))
+                        roots.append((entry_url, entry_target))
 
-                for work_url, work_target in work:
-                    outcome = _process_local(product_id, work_url, work_target)
-                    if outcome is None:
-                        continue
-                    page, raw_path, fetch_plan = outcome
-                    _ingest_one(
-                        product_id,
-                        work_url,
-                        page,
-                        fetch_plan,
-                        raw_path,
-                        ingest,
-                        seen_docs,
-                        seen_chunk_ids,
+                # D1: BFS-frontier по каждому seed-root (``max_depth=0`` → только seeds,
+                # поведение неизменно). Провенанс усечения копится для сеанса/``IndexBuild``.
+                for root_url, root_target in roots:
+                    frontier = _drain_root(product_id, root_url, root_target)
+                    pages_fetched_total += frontier.fetched
+                    if frontier.truncated:
+                        truncated_products.add(product_id)
+                    truncation_records.append(
+                        {
+                            "product_id": product_id,
+                            "root": root_url,
+                            "pages_fetched": frontier.fetched,
+                            "truncated": frontier.truncated,
+                            "truncated_reason": frontier.truncated_reason,
+                            "limits": frontier.limits.as_dict(),
+                            "skipped_blacklisted": list(frontier.skipped_blacklisted),
+                        }
                     )
-                    _emit_progress()
                 continue
 
             # Phase 3.3: executor-ветка — цель уже разрешена при подаче работ; результат
@@ -1705,6 +1933,12 @@ def build_corpus(
                 engines=engines,
                 kinds=kinds,
                 crawl_sources_digest=digest,
+                # D1/G: политико-усечённый краул не рапортуется ``COMPLETED`` (→ ``PARTIAL``);
+                # эффективные лимиты/число добытых страниц/усечённые продукты — в провенанс.
+                truncated=bool(truncated_products),
+                effective_limits={"roots": truncation_records},
+                pages_fetched=pages_fetched_total,
+                truncated_products=sorted(truncated_products),
             )
         except Exception as exc:  # noqa: BLE001 — наблюдаемость важнее персистенции
             errors.append(f"finalize_crawl_session({session}): {type(exc).__name__}: {exc}")
@@ -1736,6 +1970,8 @@ def build_corpus(
         crawl_fetched=crawl_fetched,
         crawl_done=crawl_fetched,
         crawl_failed=crawl_failed,
+        truncated=bool(truncated_products),
+        truncation=truncation_records,
     )
     # Примечание: индексная сборка «возвращается» в log_entries (PhaseResult — контракт фазы;
     # W8 читает IndexBuild отсюда). Счётчики — в полях IndexBuild; дубликаты — в errors.

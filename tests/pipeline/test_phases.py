@@ -445,6 +445,76 @@ def test_corpus_phase_crawl_defaults_none_when_absent(
     assert captured["crawl_defaults"] is None
 
 
+def test_corpus_phase_cli_limits_merge_into_run_layer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """D1/D2: CLI-флаги (--max-depth/--max-documents/--exclude-*) уточняют run-слой.
+
+    Слияние идёт поверх ``run.yaml:crawl`` (прочие оси сохраняются), цепочка остаётся
+    трёхуровневой app < run < site.
+    """
+    import core.pipeline.phases as phases_mod
+
+    captured: dict[str, Any] = {}
+
+    def _spy(*args: Any, **kwargs: Any) -> PhaseResult:
+        captured.update(kwargs)
+        return PhaseResult(status="ok", phase="corpus")
+
+    monkeypatch.setattr(phases_mod, "build_corpus", _spy)
+
+    crawl = CrawlRunConfig(strategy=CrawlStrategy.HYBRID, max_depth=1)
+    inputs = replace(_inputs(), run=_run_config(crawl=crawl))
+    store = _store()
+    try:
+        phases = build_phases(
+            inputs=inputs,
+            plan=_plan(),
+            ports=Ports(),
+            max_depth=3,
+            max_documents=4,
+            exclude_paths=["/x/*"],
+            exclude_documents=["*.pdf"],
+        )
+        phases["corpus"](_context(store, Ports()))
+    finally:
+        store.close()
+
+    merged = captured["crawl_defaults"]
+    assert isinstance(merged, CrawlRunConfig)
+    assert merged.max_depth == 3  # CLI побеждает run.yaml
+    assert merged.max_documents == 4
+    assert merged.exclude_paths == ["/x/*"]
+    assert merged.exclude_documents == ["*.pdf"]
+    assert merged.strategy == CrawlStrategy.HYBRID  # прочие оси run.yaml сохранены
+
+
+def test_corpus_phase_forwards_crawl_app(monkeypatch: pytest.MonkeyPatch) -> None:
+    """D1/D2: application-слой (deploy.yaml:crawl) доезжает до ``build_corpus``."""
+    import core.pipeline.phases as phases_mod
+    from core.config.deploy import CrawlConfig
+
+    captured: dict[str, Any] = {}
+
+    def _spy(*args: Any, **kwargs: Any) -> PhaseResult:
+        captured.update(kwargs)
+        return PhaseResult(status="ok", phase="corpus")
+
+    monkeypatch.setattr(phases_mod, "build_corpus", _spy)
+
+    app = CrawlConfig(max_documents=9)
+    store = _store()
+    try:
+        phases = build_phases(
+            inputs=_inputs(), plan=_plan(), ports=Ports(), crawl_app=app
+        )
+        phases["corpus"](_context(store, Ports()))
+    finally:
+        store.close()
+
+    assert captured["crawl_app"] == app
+
+
 # ---------------------------------------------------------------------------
 # Lane A/L3a: проброс crawl_sources/crawlers/rate_limiter в build_corpus
 # ---------------------------------------------------------------------------

@@ -422,3 +422,18 @@ def test_idempotent_double_run(store: SqliteStore) -> None:
     assert _counts(store)["pending"] == 1
     session = store.get_crawl_session("s1")
     assert session is not None and session.total == 1
+
+
+def test_crawl_item_depth_round_trip(store: SqliteStore) -> None:
+    """D1: глубина BFS-frontier персистится и читается (best-effort resume)."""
+    store.upsert_crawl_session(_session())
+    store.upsert_crawl_session_item(
+        _item("https://docs.test/p1", CrawlItemStatus.FETCHED, depth=2)
+    )
+    store.upsert_crawl_session_item(
+        _item("https://docs.test/p2", CrawlItemStatus.PENDING, product_id="p2")
+    )
+    items = {(i.product_id, i.url): i for i in store.iter_crawl_session_items("s1")}
+    assert items[("p1", "https://docs.test/p1")].depth == 2
+    assert items[("p2", "https://docs.test/p2")].depth is None
+

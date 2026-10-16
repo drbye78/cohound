@@ -340,6 +340,29 @@ class CrawlConfig(BaseModel):
     timeout_s: float | None = Field(default=None, gt=0)
     follow_redirects: bool = True
     browser: CrawlBrowserConfig = Field(default_factory=CrawlBrowserConfig)
+    # D1/D2: оси контроля краула (application default; ``deploy.yaml:crawl``). Разрешаются
+    # цепочкой app < run (``run.yaml:crawl``) < site (``domain_profiles.yaml``) в
+    # :func:`core.pipeline.crawl_frontier.resolve_crawl_limits`. ``max_depth`` дефолт 0 =
+    # текущее поведение (только seeds); ``max_documents=0`` отвергается (пустой корпус —
+    # конфиг-ошибка, не молчаливый ноль); ``exclude_*`` — glob (путь / basename).
+    max_workers: int | None = Field(default=None, ge=1)
+    max_depth: int = Field(default=0, ge=0)
+    max_documents: int | None = Field(default=None, gt=0)
+    exclude_paths: list[str] | None = None
+    exclude_documents: list[str] | None = None
+
+    @field_validator("exclude_paths", "exclude_documents")
+    @classmethod
+    def _check_globs(cls, value: list[str] | None) -> list[str] | None:
+        """Отвергает не-строки/пустые glob (D1/H: предсказуемый блэклист)."""
+        if value is None:
+            return None
+        for item in value:
+            if not isinstance(item, str) or not item.strip():
+                raise ValueError(
+                    "crawl.exclude_paths/exclude_documents: ожидались непустые строки-glob"
+                )
+        return value
 
 
 class LLMSlotConfig(BaseModel):

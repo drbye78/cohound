@@ -46,7 +46,7 @@ from typing import TYPE_CHECKING, Any
 
 import yaml
 
-from core.domain.enums import CellState, RankingPolicy, Status
+from core.domain.enums import CellState, RankingPolicy, SourceScope, Status
 from core.domain.invariants import check_unknown_exhaustion
 from core.domain.models import (
     CatalogRow,
@@ -86,6 +86,7 @@ __all__ = [
     "render_diff",
     "write_reports",
     "collect_i3_anomalies",
+    "collect_crawl_truncation_anomalies",
 ]
 
 #: Порог «недостаточного» Coverage для приглушения battle card (§9/02 §E.2).
@@ -137,6 +138,13 @@ EXECUTION_FIELDS: tuple[str, ...] = (
     # версионная граница класса ``execution_change`` (не ``methodology_change``).
     "crawl_strategy",
     "crawl_rate_limit",
+    # D1/D2 (§13): оси контроля краула (глубина/потолок документов/блэклисты/воркеры) —
+    # тот же класс ``execution_change``.
+    "crawl_max_workers",
+    "crawl_max_depth",
+    "crawl_max_documents",
+    "crawl_exclude_paths",
+    "crawl_exclude_documents",
 )
 
 #: Обратно-совместимый алиас (v2.0): прежде границей считался только исполнительный
@@ -601,6 +609,11 @@ def build_manifest(
     crawl_cfg = getattr(run, "crawl", None)
     crawl_strategy: str | None = None
     crawl_rate_limit: str | None = None
+    crawl_max_workers: int | None = None
+    crawl_max_depth: int | None = None
+    crawl_max_documents: int | None = None
+    crawl_exclude_paths: list[str] = []
+    crawl_exclude_documents: list[str] = []
     if crawl_cfg is not None:
         strategy_value = getattr(crawl_cfg, "strategy", None)
         crawl_strategy = (
@@ -609,6 +622,13 @@ def build_manifest(
             else str(getattr(strategy_value, "value", strategy_value))
         )
         crawl_rate_limit = canonical_rate_limit(getattr(crawl_cfg, "rate_limit", None))
+        crawl_max_workers = getattr(crawl_cfg, "max_workers", None)
+        crawl_max_depth = getattr(crawl_cfg, "max_depth", None)
+        crawl_max_documents = getattr(crawl_cfg, "max_documents", None)
+        crawl_exclude_paths = list(getattr(crawl_cfg, "exclude_paths", None) or [])
+        crawl_exclude_documents = list(
+            getattr(crawl_cfg, "exclude_documents", None) or []
+        )
 
     extra: dict[str, Any] = {}
     manifest_fields = getattr(RunManifest, "model_fields", {})
@@ -691,6 +711,11 @@ def build_manifest(
         crawl_provenance=resolved_crawl_provenance,
         crawl_strategy=crawl_strategy,
         crawl_rate_limit=crawl_rate_limit,
+        crawl_max_workers=crawl_max_workers,
+        crawl_max_depth=crawl_max_depth,
+        crawl_max_documents=crawl_max_documents,
+        crawl_exclude_paths=crawl_exclude_paths,
+        crawl_exclude_documents=crawl_exclude_documents,
         snapshot_date=snapshot_date,
         **extra,
     )
@@ -1030,6 +1055,54 @@ def collect_i3_anomalies(
     return anomalies
 
 
+def collect_crawl_truncation_anomalies(
+    cells: Iterable[Any],
+    truncated_products: Iterable[str] | None = None,
+) -> list[dict[str, Any]]:
+    """D1/G: аномалия «``exhaustive`` при усечённом крауле» для человеческой аттестации.
+
+    Если cell несёт absence-evidence с ``source_scope: exhaustive``, а краул её продукта был
+    **политико-усечён** (``max_documents``/``max_depth``, см.
+    :func:`core.pipeline.crawl_session.finalize_session`), заявленная исчерпывающость охвата
+    недоказуема — corpus неполон по построению. Это **аномалия**, а не смена статуса и не
+    жёсткая блокировка: она требует повторной аттестации человеком (паттерн I3
+    ``reviewed_by``). Возвращает детерминированный (``product_id, param_id``) список записей
+    ``{"product_id", "param_id", "reason"}``.
+    """
+    truncated = {str(p) for p in (truncated_products or []) if p}
+    if not truncated:
+        return []
+    anomalies: list[dict[str, Any]] = []
+    for cell in _cell_list(cells):
+        pid = str(getattr(cell, "product_id", "") or "")
+        if pid not in truncated:
+            continue
+        absences = getattr(cell, "absence_evidence", None) or []
+        declared = False
+        for entry in absences:
+            scope = (
+                entry.get("source_scope")
+                if isinstance(entry, Mapping)
+                else getattr(entry, "source_scope", None)
+            )
+            if scope in (SourceScope.EXHAUSTIVE, SourceScope.EXHAUSTIVE.value):
+                declared = True
+                break
+        if declared:
+            anomalies.append(
+                {
+                    "product_id": pid,
+                    "param_id": str(getattr(cell, "param_id", "") or ""),
+                    "reason": (
+                        "I2b/G: source_scope=exhaustive при усечённом крауле продукта "
+                        "(max_documents/max_depth) — требуется повторная аттестация "
+                        "человеком (reviewed_by)"
+                    ),
+                }
+            )
+    return sorted(anomalies, key=lambda row: (row["product_id"], row["param_id"]))
+
+
 # ---------------------------------------------------------------------------
 # preliminary_findings
 # ---------------------------------------------------------------------------
@@ -1287,11 +1360,21 @@ def write_reports(
     else:
         diff = _write_placeholder_diff(outputs_dir / "diff.md", manifest)
 
+    # D1/G: усечённый краул продукта + заявленный ``exhaustive`` — аномалия для человека
+    # (паттерн I3 reviewed_by); статус ячейки не меняется и прогон не блокируется.
+    truncated_products = {
+        product
+        for session in manifest.crawl_provenance.sessions
+        for product in (session.truncated_products or [])
+    }
+    anomalies = collect_i3_anomalies(cell_list, exhaustions)
+    anomalies.extend(collect_crawl_truncation_anomalies(cell_list, truncated_products))
+
     return Artifacts(
         battle_card=battle_card,
         preliminary_findings=preliminary,
         nda_questions=nda_questions,
         diff=diff,
         manifest=manifest_path,
-        i3_anomalies=collect_i3_anomalies(cell_list, exhaustions),
+        i3_anomalies=anomalies,
     )

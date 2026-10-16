@@ -43,9 +43,10 @@ from collections.abc import Callable
 from datetime import datetime, timezone
 from typing import Any
 
-from core.adapters.crawl_scrapy import CrawlError, CrawlUrlError
+from core.adapters.crawl_scrapy import CrawlError, CrawlRefused, CrawlUrlError
 from core.ports.types import FetchMode, FetchPlan, RawPage
 from core.util.cache import ContentAddressedCache, http_key
+from core.util.robots import RobotsGate
 from core.util.security import validate_url
 
 __all__ = [
@@ -116,6 +117,7 @@ class HttpCrawler:
         timeout: float = DEFAULT_TIMEOUT,
         user_agent: str | None = DEFAULT_USER_AGENT,
         follow_redirects: bool = True,
+        robots: RobotsGate | None = None,
     ) -> None:
         if fetcher is not None and http_get is not None:
             raise ValueError("задайте только один шов: fetcher или http_get")
@@ -126,6 +128,9 @@ class HttpCrawler:
         self.timeout = timeout
         self.user_agent = user_agent
         self.follow_redirects = follow_redirects
+        # D1/§10: per-host политика robots.txt (egress-слой). ``None`` → без проверки
+        # (обратная совместимость); тесты инъектят политику без сети.
+        self._robots = robots
 
     @property
     def available(self) -> bool:
@@ -148,6 +153,19 @@ class HttpCrawler:
             validate_url(url)
         except ValueError as exc:
             raise CrawlUrlError(f"URL отклонён SSRF-валидацией: {exc}") from exc
+
+        # D1/§10: robots.txt-запрет — отказ (не сбой). Персистентный отказ не латаем
+        # кэшем: проверяем до обращения к кэшу (кэш мог быть добыт до появления правил).
+        if self._robots is not None:
+            try:
+                allowed = self._robots.allowed(url)
+            except Exception:  # noqa: BLE001 — сбой robots-проверки не роняет краул
+                allowed = True
+            if not allowed:
+                raise CrawlRefused(
+                    f"robots.txt запрещает краул {url!r}",
+                    refusal_reason="robots_disallow",
+                )
 
         key = http_key(url)
         if self._cache is not None:

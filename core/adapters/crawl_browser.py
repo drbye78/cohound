@@ -83,11 +83,13 @@ from datetime import datetime, timezone
 from typing import Any, Protocol
 from urllib.parse import urljoin, urlsplit
 
-from core.adapters.crawl_scrapy import CrawlError, CrawlUrlError
+from core.adapters.crawl_scrapy import CrawlError, CrawlRefused, CrawlUrlError
 from core.domain.enums import CrawlStrategy
+from core.domain.models import RateLimitSpec
 from core.ports.types import FetchMode, FetchPlan, RawPage
 from core.util.cache import ContentAddressedCache, http_key
 from core.util.rate_limit import RateLimiter, jittered_backoff
+from core.util.robots import RobotsGate
 from core.util.security import validate_url
 
 __all__ = [
@@ -431,6 +433,7 @@ class BrowserCrawler:
         timeout_ms: int = DEFAULT_TIMEOUT_MS,
         user_agent: str | None = DEFAULT_USER_AGENT,
         rate_limiter: RateLimiter | None = None,
+        robots: RobotsGate | None = None,
     ) -> None:
         self._backend = backend
         self._http_get = http_get
@@ -442,6 +445,9 @@ class BrowserCrawler:
         self._timeout_ms = timeout_ms
         self._user_agent = user_agent
         self._rate_limiter = rate_limiter
+        # D1/§10: per-host политика robots.txt (egress-слой). ``None`` → без проверки;
+        # тесты инъектят политику без сети.
+        self._robots = robots
         self._closed = False
 
     @property
@@ -465,9 +471,29 @@ class BrowserCrawler:
         except ValueError as exc:
             raise CrawlUrlError(f"URL отклонён SSRF-валидацией: {exc}") from exc
 
+        # D1/§10: robots.txt-запрет — отказ (не сбой транспорта); элемент терминален, и
+        # frontier от него не расширяется (обрабатывает pipeline).
+        if self._robots is not None:
+            try:
+                allowed = self._robots.allowed(url)
+            except Exception:  # noqa: BLE001 — сбой robots-проверки не роняет краул
+                allowed = True
+            if not allowed:
+                raise CrawlRefused(
+                    f"robots.txt запрещает краул {url!r}",
+                    refusal_reason="robots_disallow",
+                )
+
         if self._rate_limiter is not None:
             host = (urlsplit(url).hostname or "").lower()
-            self._rate_limiter.wait(host, plan.rate_limit)
+            # D1: ``Crawl-delay`` — только floor и только при отсутствии явного
+            # ``rate_limit`` (явный лимит всегда важнее).
+            delay_spec = plan.rate_limit
+            if delay_spec is None and self._robots is not None:
+                delay = self._robots.crawl_delay(url)
+                if delay:
+                    delay_spec = RateLimitSpec(min_s=delay, max_s=delay)
+            self._rate_limiter.wait(host, delay_spec)
 
         if plan.strategy is CrawlStrategy.HYBRID:
             try:

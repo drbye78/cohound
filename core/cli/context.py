@@ -14,7 +14,7 @@ import argparse
 import hashlib
 import json
 import sys
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -1271,6 +1271,10 @@ def _resolve_phases(
     urls: Mapping[str, list[str]] | None = None,
     max_attempts: int | None = None,
     progress: Callable[[dict[str, int]], None] | None = None,
+    max_depth: int | None = None,
+    max_documents: int | None = None,
+    exclude_paths: Sequence[str] | None = None,
+    exclude_documents: Sequence[str] | None = None,
 ) -> dict[str, PhaseFn]:
     """Собирает реестр не-гейтовых фаз (``phases_factory`` — тестовый шов).
 
@@ -1350,6 +1354,13 @@ def _resolve_phases(
         # Phase 4: потолок попыток (--max-attempts) и колбэк прогресса (--follow).
         "max_attempts": max_attempts,
         "progress": progress,
+        # D1/D2: CLI-уточнения run-слоя осей краула (пробрасываются в build_phases →
+        # run-слой CrawlRunConfig) и application-слой (deploy.yaml:crawl).
+        "max_depth": max_depth,
+        "max_documents": max_documents,
+        "exclude_paths": list(exclude_paths) if exclude_paths else None,
+        "exclude_documents": list(exclude_documents) if exclude_documents else None,
+        "crawl_app": deploy_config.crawl if deploy_config is not None else None,
     }
     factory = getattr(args, "phases_factory", None)
     if factory is not None:
@@ -1510,6 +1521,22 @@ def _positive_int(raw: str) -> int:
     return value
 
 
+def _non_negative_int(raw: str) -> int:
+    """``argparse``-тип: целое ``>= 0`` (для ``--max-depth``; 0 — только seeds, D1).
+
+    :raises argparse.ArgumentTypeError: нечисловое либо отрицательное значение.
+    """
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"ожидалось целое, получено {raw!r}") from exc
+    if value < 0:
+        raise argparse.ArgumentTypeError(
+            f"значение обязано быть неотрицательным, получено {raw!r}"
+        )
+    return value
+
+
 def _add_phase4_flags(parser: argparse.ArgumentParser) -> None:
     """Phase 4: флаги ``run``/``crawl run|resume|restart`` — кэш, фильтры, потолок, follow.
 
@@ -1543,6 +1570,39 @@ def _add_phase4_flags(parser: argparse.ArgumentParser) -> None:
         default=None,
         metavar="N",
         help="потолок попыток по URL; исчерпание → терминальный failed (attempts_exhausted)",
+    )
+    # D1/D2: оси контроля краула (run-слой поверх run.yaml; цепочка app < run < site).
+    parser.add_argument(
+        "--max-depth",
+        dest="max_depth",
+        type=_non_negative_int,
+        default=None,
+        metavar="D",
+        help="глубина BFS-обхода in-site ссылок (0 — только seeds; дефолт 0)",
+    )
+    parser.add_argument(
+        "--max-documents",
+        dest="max_documents",
+        type=_positive_int,
+        default=None,
+        metavar="N",
+        help="потолок добытых страниц на (продукт, seed-root); усечение → partial-сеанс",
+    )
+    parser.add_argument(
+        "--exclude-path",
+        dest="exclude_paths",
+        action="append",
+        default=None,
+        metavar="GLOB",
+        help="glob блэклиста по пути URL (fnmatchcase, повторяемый)",
+    )
+    parser.add_argument(
+        "--exclude-document",
+        dest="exclude_documents",
+        action="append",
+        default=None,
+        metavar="GLOB",
+        help="glob блэклиста по basename URL, напр. '*.pdf' (повторяемый)",
     )
     parser.add_argument(
         "--follow",

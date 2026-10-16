@@ -37,13 +37,12 @@ from __future__ import annotations
 import copy
 import datetime as _dt
 import re
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
-from urllib.robotparser import RobotFileParser
 
 import yaml
 
@@ -51,6 +50,7 @@ from core.domain.enums import CrawlStrategy, ExtractionRoute, FetchMode
 from core.domain.models import RateLimitSpec
 from core.pipeline.fetch_plan import _select_best
 from core.pipeline.package_io import atomic_write_text
+from core.util.robots import RobotsGate
 
 __all__ = [
     "MIN_USABLE_TEXT",
@@ -909,48 +909,9 @@ def render_profiles_with_verdicts(
 
 
 # ---------------------------------------------------------------------------
-# Robots (urllib.robotparser; текст ленты инъектируется)
+# Robots: единственная реализация — ``core.util.robots`` (:class:`RobotsGate`
+# промотирован туда; здесь только ре-экспорт для обратной совместимости импортов)
 # ---------------------------------------------------------------------------
-
-
-class RobotsGate:
-    """Per-host политика ``robots.txt`` (разбор ``urllib.robotparser``, инъектируемый фетч).
-
-    ``fetch(host)`` → текст ``robots.txt`` либо ``None`` (недоступен). Недоступная лента
-    трактуется как «правил нет» (как 404 в штатной семантике robots). Проверка — только
-    запрет: ``allowed`` возвращает ``False`` лишь при явном ``Disallow``.
-    """
-
-    def __init__(
-        self, fetch: Callable[[str], str | None], *, user_agent: str = "*"
-    ) -> None:
-        self._fetch = fetch
-        self._user_agent = user_agent
-        self._parsers: dict[str, RobotFileParser] = {}
-
-    def _parser(self, host: str) -> RobotFileParser:
-        parser = self._parsers.get(host)
-        if parser is not None:
-            return parser
-        text: str | None
-        try:
-            text = self._fetch(host)
-        except Exception:  # noqa: BLE001 — недоступный robots.txt = «правил нет»
-            text = None
-        parser = RobotFileParser()
-        parser.parse((text or "").splitlines())
-        self._parsers[host] = parser
-        return parser
-
-    def allowed(self, url: str) -> bool:
-        """Разрешён ли ``url`` для нашего агента (``True`` при отсутствии запрета)."""
-        host = (urlsplit(url).hostname or "").lower()
-        if not host:
-            return True
-        try:
-            return bool(self._parser(host).can_fetch(self._user_agent, url))
-        except Exception:  # noqa: BLE001 — не роняем зонд из-за разбора robots
-            return True
 
 
 # ---------------------------------------------------------------------------

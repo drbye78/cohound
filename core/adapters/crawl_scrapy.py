@@ -67,6 +67,7 @@ from core.util.security import validate_url
 __all__ = [
     "CrawlError",
     "CrawlUrlError",
+    "CrawlRefused",
     "DEFAULT_SCRAPY_SETTINGS",
     "ScrapyCrawler",
 ]
@@ -131,6 +132,21 @@ class CrawlUrlError(CrawlError, ValueError):
     Множественное наследование намеренно: вызывающий может ловить и как
     ``CrawlError``, и как ``ValueError`` (``validate_url`` поднимает ``ValueError``).
     """
+
+
+class CrawlRefused(CrawlError):
+    """Краул URL **отказан** по политике (не сбой транспорта). D1/§10.
+
+    Единственный носитель — ``robots.txt``-запрет: адаптер (egress-слой) отказывает URL,
+    происходит ли это от ``Disallow``. ``refusal_reason`` — машинный код причины
+    (``"robots_disallow"``); pipeline помечает элемент терминальным с этим кодом и **не**
+    расширяет frontier от отказа. Отличается от ``CrawlError`` (недоступность источника)
+    намеренно: отказ — не «источник упал», а соблюдение политики.
+    """
+
+    def __init__(self, message: str, *, refusal_reason: str = "robots_disallow") -> None:
+        super().__init__(message)
+        self.refusal_reason = refusal_reason
 
 
 @runtime_checkable

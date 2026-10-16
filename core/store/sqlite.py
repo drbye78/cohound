@@ -271,6 +271,7 @@ CREATE TABLE IF NOT EXISTS crawl_session_items (
     url           TEXT NOT NULL,
     status        TEXT NOT NULL,           -- pending|running|fetched|failed|cancelled
     attempts      INTEGER NOT NULL DEFAULT 0,
+    depth         INTEGER,
     engine        TEXT,
     kind          TEXT,
     fetch_mode    TEXT,
@@ -404,6 +405,10 @@ def connect(db_path: str | Path = ":memory:") -> sqlite3.Connection:
     # `CREATE TABLE IF NOT EXISTS` в DDL — ALTER не нужен (новые таблицы), вызов
     # идемпотентен на любой БД. Гэп forward-compat закрывается `_ensure_columns` при
     # появлении additive-колонок в будущем.
+    # DDL-миграция v3.5 (D1): глубина URL в BFS-frontier seed-root — additive-колонка
+    # `crawl_session_items.depth`; старые БД получают NULL (глубина неизвестна, resume
+    # best-effort). Значение доменного класса — execution/операционный провенанс (не §13).
+    _ensure_columns(conn, "crawl_session_items", {"depth": "INTEGER"})
     # v3.1.0 — удаление legacy per-URL таблицы попыток (полностью замещена сеансом краула,
     # back-compat не требуется): DDL-таблицы/индексов и их миграции больше нет.
     conn.execute(

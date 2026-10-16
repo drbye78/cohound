@@ -129,6 +129,10 @@ def run(args: argparse.Namespace) -> int:
     only_failed = bool(getattr(args, "only_failed", False))
     only_product = getattr(args, "only_product", None)
     max_attempts = getattr(args, "max_attempts", None)
+    max_depth = getattr(args, "max_depth", None)
+    max_documents = getattr(args, "max_documents", None)
+    exclude_paths = getattr(args, "exclude_paths", None)
+    exclude_documents = getattr(args, "exclude_documents", None)
     follow = bool(getattr(args, "follow", False))
     interval = float(getattr(args, "interval", 1.0) or 0.0)
     session_id = default_session_id(run_id)
@@ -160,6 +164,10 @@ def run(args: argparse.Namespace) -> int:
         render_modes=render_modes,
         urls=corpus_urls,
         max_attempts=max_attempts,
+        max_depth=max_depth,
+        max_documents=max_documents,
+        exclude_paths=exclude_paths,
+        exclude_documents=exclude_documents,
         progress=(
             _progress_callback(session_id=session_id, json_mode=bool(args.json))
             if follow

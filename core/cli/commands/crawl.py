@@ -249,6 +249,10 @@ def _execute_crawl(
     only_failed = bool(getattr(args, "only_failed", False))
     only_product = getattr(args, "only_product", None)
     max_attempts = getattr(args, "max_attempts", None)
+    max_depth = getattr(args, "max_depth", None)
+    max_documents = getattr(args, "max_documents", None)
+    exclude_paths = getattr(args, "exclude_paths", None)
+    exclude_documents = getattr(args, "exclude_documents", None)
     follow = bool(getattr(args, "follow", False))
     interval = float(getattr(args, "interval", 1.0) or 0.0)
     # Phase 4: ``--from-scratch`` обходит R7-кэш (cache=None — единственный способ) и по
@@ -295,6 +299,10 @@ def _execute_crawl(
             render_modes=render_modes,
             urls=corpus_urls,
             max_attempts=max_attempts,
+            max_depth=max_depth,
+            max_documents=max_documents,
+            exclude_paths=exclude_paths,
+            exclude_documents=exclude_documents,
             progress=progress,
         )
         if clear_first:

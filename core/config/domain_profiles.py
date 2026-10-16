@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from core.domain.enums import CrawlStrategy, ExtractionRoute, FetchMode
 from core.domain.models import RateLimitSpec
@@ -49,6 +49,29 @@ class DomainProfile(BaseModel):
     wait_for: str | None = None
     strategy: CrawlStrategy | None = None
     rate_limit: RateLimitSpec | None = None
+    # D1/D2: per-site слой осей контроля краула (высший приоритет цепочки app < run < site).
+    # ``None`` = «не задано на этом слое» (наследуется run/app default). Резолв —
+    # :func:`core.pipeline.crawl_frontier.resolve_crawl_limits`. Схема остаётся строгой
+    # (``extra="forbid"``): неизвестные поля отвергаются по-прежнему.
+    max_workers: int | None = Field(default=None, ge=1)
+    max_depth: int | None = Field(default=None, ge=0)
+    max_documents: int | None = Field(default=None, gt=0)
+    exclude_paths: list[str] | None = None
+    exclude_documents: list[str] | None = None
+
+    @field_validator("exclude_paths", "exclude_documents")
+    @classmethod
+    def _check_globs(cls, value: list[str] | None) -> list[str] | None:
+        """Отвергает не-строки/пустые glob (D1/H)."""
+        if value is None:
+            return None
+        for item in value:
+            if not isinstance(item, str) or not item.strip():
+                raise ValueError(
+                    "domain_profiles.exclude_paths/exclude_documents: "
+                    "ожидались непустые строки-glob"
+                )
+        return value
 
 
 def _read_yaml(path: str | Path) -> Any:

@@ -429,6 +429,9 @@ def main() -> int:
     section("Зонд осей краула (crawl-probe)")
     check("crawl_probe: предикат/лестница/шапка/зеркало словаря", lambda: _crawl_probe())
 
+    section("Оси контроля краула (D1/D2)")
+    check("crawl_control: precedence/scope/блэклист/усечение", lambda: _crawl_control_axes())
+
     print(f"\n{CHECKS - len(FAILURES)}/{CHECKS} проверок пройдено")
     if FAILURES:
         print("\nПровалы:")
@@ -721,8 +724,8 @@ def _db_smoke() -> None:
                if r["pk"]]
     _assert(sess_pk == ["session_id"])
     item_cols = {r["name"] for r in conn.execute("PRAGMA table_info(crawl_session_items)")}
-    _assert({"session_id", "product_id", "url", "status", "attempts", "engine", "kind",
-             "fetch_mode", "extract_route", "strategy", "http_status", "content_type",
+    _assert({"session_id", "product_id", "url", "status", "attempts", "depth", "engine",
+             "kind", "fetch_mode", "extract_route", "strategy", "http_status", "content_type",
              "lang", "content_hash", "raw_path", "error_kind", "error", "first_seen",
              "last_attempt"} <= item_cols)
     item_pk = [r["name"] for r in conn.execute("PRAGMA table_info(crawl_session_items)")
@@ -3038,6 +3041,61 @@ def _lexical_profiles() -> None:
         raise AssertionError("неизвестный профиль обязан быть отвергнут")
     except ValueError:
         pass
+
+
+def _crawl_control_axes() -> None:
+    """D1/D2: оси контроля краула — precedence, scope, блэклист, честность усечения.
+
+    Инварианты: цепочка ``app < run < site`` для новых осей (отдельно от source-routing);
+    ``max_depth`` дефолт 0; ``max_documents=0`` отвергается; scope по seed-root (host +
+    граница пути); блэклисты glob (путь/basename); ``RobotsGate`` — единственная реализация
+    (``core.util.robots``, ре-экспорт из crawl-probe); извлечение ссылок не выходит за
+    ``http(s)``.
+    """
+    from core.config.deploy import CrawlConfig
+    from core.config.domain_profiles import DomainProfile
+    from core.domain.models import CrawlRunConfig
+    from core.pipeline.crawl_frontier import (
+        Frontier,
+        is_blacklisted,
+        resolve_crawl_limits,
+    )
+    from core.pipeline.crawl_probe import RobotsGate as ProbeRobotsGate
+    from core.util.html_links import extract_links
+    from core.util.robots import RobotsGate
+    from pydantic import ValidationError
+
+    app = CrawlConfig()
+    assert resolve_crawl_limits("https://h/a", app=app).max_depth == 0
+    run = CrawlRunConfig(max_depth=2, max_documents=5)
+    limits = resolve_crawl_limits("https://h/a", app=app, run=run)
+    assert limits.max_depth == 2 and limits.max_documents == 5
+    site = resolve_crawl_limits(
+        "https://h/a", app=app, run=run, profiles={"h": DomainProfile(max_depth=4)}
+    )
+    assert site.max_depth == 4  # site побеждает run
+    _assert(RobotsGate is ProbeRobotsGate)
+    try:
+        DomainProfile(bogus=1)  # type: ignore[call-arg]
+        raise AssertionError("DomainProfile обязан отвергать неизвестные поля")
+    except ValidationError:
+        pass
+    try:
+        CrawlConfig(max_documents=0)
+        raise AssertionError("max_documents=0 обязан отвергаться")
+    except ValidationError:
+        pass
+    frontier = Frontier("https://h/documents", limits)
+    assert frontier.in_scope("https://h/documents/x")
+    assert not frontier.in_scope("https://h/documents-archive")
+    assert not frontier.in_scope("mailto:x@y")
+    bl = resolve_crawl_limits(
+        "https://h/", app=app, run=CrawlRunConfig(exclude_documents=["*.pdf"])
+    )
+    assert is_blacklisted("https://h/a.pdf", bl) and not is_blacklisted("https://h/a.PDF", bl)
+    assert extract_links(
+        b'<a href="/p#f">x</a><a href="mailto:a@b">m</a>', "https://H:443/dir/"
+    ) == ["https://h/p"]
 
 
 def _crawl_probe() -> None:

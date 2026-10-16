@@ -9,7 +9,7 @@ from __future__ import annotations
 import datetime as _dt
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from core.domain.enums import (
     AbsenceRuleType,
@@ -345,12 +345,35 @@ class CrawlRunConfig(BaseModel):
     Ось ``strategy`` ортогональна ``FetchMode``: она задаёт, **как** используется браузер
     (см. :class:`~core.domain.enums.CrawlStrategy`). ``rate_limit`` — необязательный
     per-host диапазон uniform(min_s, max_s). При отсутствии секции поведение неизменно.
+
+    D1/D2: здесь же — run-profile слой осей контроля краула (``max_workers``/``max_depth``/
+    ``max_documents``/``exclude_paths``/``exclude_documents``); ``None`` = «не задано на этом
+    слое» (наследуется application default). Резолв цепочки app < run < site — в
+    :func:`core.pipeline.crawl_frontier.resolve_crawl_limits`. ``max_documents=0`` отвергается.
     """
 
     model_config = _BASE
 
     strategy: CrawlStrategy = CrawlStrategy.AUTO
     rate_limit: RateLimitSpec | None = None
+    max_workers: int | None = Field(default=None, ge=1)
+    max_depth: int | None = Field(default=None, ge=0)
+    max_documents: int | None = Field(default=None, gt=0)
+    exclude_paths: list[str] | None = None
+    exclude_documents: list[str] | None = None
+
+    @field_validator("exclude_paths", "exclude_documents")
+    @classmethod
+    def _check_globs(cls, value: list[str] | None) -> list[str] | None:
+        """Отвергает не-строки/пустые glob (D1/H)."""
+        if value is None:
+            return None
+        for item in value:
+            if not isinstance(item, str) or not item.strip():
+                raise ValueError(
+                    "crawl.exclude_paths/exclude_documents: ожидались непустые строки-glob"
+                )
+        return value
 
 
 class RunConfig(BaseModel):
@@ -723,6 +746,12 @@ class CrawlSessionProvenance(BaseModel):
     total: int = 0
     fetched: int = 0
     failed: int = 0
+    #: D1/G: сеанс был **политико-усечён** (``max_documents``/``max_depth``). Информационный
+    #: durable-флаг (не §13): нужен отчёту, чтобы не трактовать усечённый корпус как
+    #: ``exhaustive`` (срабатывает аномалия для человека — :func:`collect_crawl_truncation_anomalies`).
+    truncated: bool = False
+    #: D1/G: продукты с усечённым краулом (для аномалии ``exhaustive``-absence по продукту).
+    truncated_products: list[str] = Field(default_factory=list)
 
 
 class CrawlProvenance(BaseModel):
@@ -818,6 +847,14 @@ class RunManifest(BaseModel):
     #: не задана (граница не заполняется, манифесты без ``crawl`` не меняются).
     crawl_strategy: str | None = None
     crawl_rate_limit: str | None = None
+    #: §13 (D1/D2): операционные оси контроля краула (``run.yaml:crawl``). Их смена —
+    #: граница класса ``execution_change`` (§13). ``None``/пусто — секция/поле не заданы
+    #: (манифесты без новых осей не меняются).
+    crawl_max_workers: int | None = None
+    crawl_max_depth: int | None = None
+    crawl_max_documents: int | None = None
+    crawl_exclude_paths: list[str] = Field(default_factory=list)
+    crawl_exclude_documents: list[str] = Field(default_factory=list)
 
 
 class Violation(BaseModel):
@@ -970,6 +1007,9 @@ class CrawlSessionItem(BaseModel):
     url: str
     status: CrawlItemStatus
     attempts: int = 0
+    #: D1: глубина URL в BFS-frontier seed-root (seeds — 0; ссылка с глубины ``d`` → ``d+1``).
+    #: Персистится для best-effort resume; ``None`` — глубина не зафиксирована (старые записи).
+    depth: int | None = None
     engine: str | None = None
     kind: str | None = None
     fetch_mode: str | None = None
