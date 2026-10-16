@@ -35,7 +35,7 @@ from core.cli.context import (
     _session_snapshot,
     _snapshot_run_inputs,
 )
-from core.cli.errors import EXIT_BLOCKED, EXIT_ERROR, EXIT_OK, LintFailure
+from core.cli.errors import EXIT_BLOCKED, EXIT_ERROR, EXIT_OK, CliError, LintFailure
 from core.cli.wiring import (
     SPLIT_PROFILE,
     WiringError,
@@ -56,7 +56,9 @@ from core.pipeline.lint import lint_run_inputs
 from core.pipeline.normalize import load_inputs
 from core.pipeline.observability import instrument_phases, write_run_metrics
 from core.pipeline.plan import derive_run_id
+from core.pipeline.phases import resolve_measured_retrieval
 from core.pipeline.report import Artifacts
+from core.pipeline.retrieve import RetrievalProfile
 from core.pipeline.runner import PhaseFn, _gate_phase
 
 #: Phase 4: хук сна цикла ``--follow`` (тесты инжектят no-op через monkeypatch).
@@ -104,6 +106,29 @@ def run(args: argparse.Namespace) -> int:
 
     if not report.ready:
         raise LintFailure([*report.blocking, *report.incomplete], report.warnings)
+
+    # E1/A3 (R7/§13): не-понижающий персист измеренной фиксации ретривала **и её
+    # усыновление**. Резолвим персистентную фиксацию ДО сборки фаз: обычный повторный
+    # прогон должен **усыновить** измеренные значения (профиль + K) в аргументы, чтобы
+    # оценка и ячейки несли ту же настройку, что и манифест. Прежнее поведение
+    # (переклеить только манифест) давало ЛОЖНУЮ запись: ячейки R0, манифест measured R2 —
+    # это ломало §13-diff и сравнение golden-выреза I20. Явный CLI-профиль/``--cutoff-k``
+    # приоритетнее фиксации и не переопределяется молча; явный **противоречащий** профиль
+    # отвергается (A3: изменить измеренное можно только пере-измерением).
+    explicit_profile = getattr(args, "retrieval_profile", None)
+    explicit_cutoff = getattr(args, "cutoff_k", None)
+    if db_path.exists():
+        with build_store(db_path, profile=args.profile) as check_store:
+            try:
+                fixation = resolve_measured_retrieval(
+                    check_store, run_id, explicit_profile
+                )
+            except ValueError as exc:
+                raise CliError(str(exc), code="§13", exit_code=EXIT_ERROR) from exc
+        if fixation is not None and explicit_profile is None:
+            args.retrieval_profile = fixation["retrieval_profile"]
+            if explicit_cutoff is None and fixation["retrieval_cutoff_K"] is not None:
+                args.cutoff_k = fixation["retrieval_cutoff_K"]
 
     # R7 (07 §7): деплой-провенанс манифеста прогона. Конфиг загружается всегда:
     # секция ``crawl`` (03 §D.5/D.6) — операционная политика HTTP-краулинга корпуса и в
@@ -405,6 +430,15 @@ def configure(sub: Any) -> None:
         metavar="FILE",
         help="опциональный JSON/YAML {url: \"http\"|\"browser\"} — per-URL режим рендера Ш5 "
         "(дефолт: HTTP/по домен-профилю)",
+    )
+    p_run.add_argument(
+        "--retrieval-profile",
+        dest="retrieval_profile",
+        choices=[profile.value for profile in RetrievalProfile],
+        default=None,
+        metavar="PROFILE",
+        help="зафиксированный профиль ретривала R0|R1|R2 (I16). Изменение измеренной "
+        "настройки требует пере-измерения (`hound experiment retrieval`, A3)",
     )
     p_run.add_argument(
         "--cutoff-k",

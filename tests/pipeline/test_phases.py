@@ -834,6 +834,128 @@ def test_build_phases_forwards_explicit_retrieval_provenance(tmp_path: Path) -> 
     }
 
 
+# ---------------------------------------------------------------------------
+# E1 (A3/§13): не-понижающий персист измеренной фиксации ретривала
+# ---------------------------------------------------------------------------
+
+
+def _seed_measured_retrieval(
+    store: SqliteStore,
+    *,
+    profile: str = "R2",
+    cutoff: int = 7,
+    experiment_id: str = "exp-1",
+) -> None:
+    """Помечает ``retrieval_profile`` измеренным в строке ``runs`` (как experiment, A3)."""
+    manifest = store.read_manifest(RUN_ID)
+    provenance = dict(manifest.settings_provenance or {})
+    provenance["retrieval_profile"] = {
+        "source": "measured",
+        "experiment_id": experiment_id,
+    }
+    store.persist_manifest(
+        RUN_ID,
+        manifest.model_copy(
+            update={
+                "retrieval_profile": profile,
+                "retrieval_cutoff_K": cutoff,
+                "retrieval_params_json": json.dumps(
+                    {"profile": profile, "cutoff_K": cutoff},
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ),
+                "settings_provenance": provenance,
+            }
+        ),
+    )
+
+
+def _seed_cell(store: SqliteStore) -> None:
+    """Кладёт одну evaluated-ячейку, чтобы Ш8 (compute) построил бандл."""
+    store.save_cell(
+        Cell(
+            run_id=RUN_ID,
+            product_id="p1",
+            param_id="param_a",
+            state=CellState.EVALUATED,
+            status=Status.OK,
+            evidence=[LLMEvidence(source_id="src.1", quote="quote")],
+        )
+    )
+
+
+def _compute_report_manifest(
+    tmp_path: Path, store: SqliteStore, **phase_kwargs: Any
+) -> dict[str, Any]:
+    """Гоняет ``compute``→``report`` на заданном store (без Ш6) и читает манифест Ш9."""
+    _seed_cell(store)
+    phases = build_phases(
+        inputs=_inputs(),
+        plan=_plan(),
+        ports=Ports(),
+        out_dir=str(tmp_path),
+        raw_root=str(tmp_path / "raw"),
+        **phase_kwargs,
+    )
+    ctx = _context(store, Ports())
+    assert phases["compute"](ctx).status == "ok"
+    result = phases["report"](ctx)
+    assert result.status == "ok", result.errors
+    artifacts = result.log_entries[0]
+    return yaml.safe_load(artifacts.manifest.read_text(encoding="utf-8"))
+
+
+def test_report_phase_preserves_measured_retrieval_profile(tmp_path: Path) -> None:
+    """E1/A3: повторный прогон без флага не понижает измеренную фиксацию дефолтом."""
+    store = _store()
+    _seed_measured_retrieval(store, profile="R2", cutoff=7)
+    manifest = _compute_report_manifest(tmp_path, store)
+    assert manifest["retrieval_profile"] == "R2"
+    assert manifest["retrieval_cutoff_K"] == 7
+    assert manifest["settings_provenance"]["retrieval_profile"] == {
+        "source": "measured",
+        "experiment_id": "exp-1",
+    }
+
+
+def test_report_phase_accepts_explicit_profile_equal_to_measured(tmp_path: Path) -> None:
+    """E1/A3: явный профиль, равный измеренному, принимается (не отказ)."""
+    store = _store()
+    _seed_measured_retrieval(store, profile="R2", cutoff=7)
+    manifest = _compute_report_manifest(tmp_path, store, retrieval_profile="R2")
+    assert manifest["retrieval_profile"] == "R2"
+    assert manifest["settings_provenance"]["retrieval_profile"]["source"] == "measured"
+
+
+def test_report_phase_refuses_conflicting_explicit_profile(tmp_path: Path) -> None:
+    """E1/A3: явный профиль, противоречащий измеренному, отвергается (только пере-измерение)."""
+    store = _store()
+    _seed_measured_retrieval(store, profile="R2", cutoff=7)
+    _seed_cell(store)
+    phases = build_phases(
+        inputs=_inputs(),
+        plan=_plan(),
+        ports=Ports(),
+        out_dir=str(tmp_path),
+        raw_root=str(tmp_path / "raw"),
+        retrieval_profile="R1",
+    )
+    ctx = _context(store, Ports())
+    assert phases["compute"](ctx).status == "ok"
+    with pytest.raises(ValueError, match="hound experiment retrieval"):
+        phases["report"](ctx)
+    # Персистентная измеренная фиксация не переписана отказом.
+    assert store.read_manifest(RUN_ID).retrieval_profile == "R2"
+
+
+def test_report_phase_explicit_profile_free_without_measurement(tmp_path: Path) -> None:
+    """E1: без измеренной фиксации флаг работает свободно (манифест несёт явный профиль)."""
+    manifest = _run_chain_to_report(tmp_path, retrieval_profile="R1")
+    assert manifest["retrieval_profile"] == "R1"
+    entry = (manifest.get("settings_provenance") or {}).get("retrieval_profile")
+    assert entry is None or entry.get("source") != "measured"
+
+
 def test_discovery_noop_without_adapter() -> None:
     inputs = _inputs()
     plan = _plan()

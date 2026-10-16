@@ -72,7 +72,13 @@ if TYPE_CHECKING:  # только аннотации: без рантайм-им
     from core.pipeline.normalize import RunInputs
     from core.pipeline.plan import RunPlan
 
-__all__ = ["build_phases"]
+__all__ = [
+    "build_phases",
+    "MEASURED_RETRIEVAL_SETTING",
+    "measured_retrieval_fixation",
+    "measured_conflict_message",
+    "resolve_measured_retrieval",
+]
 
 #: Имена фаз, реализуемых этим модулем (гейты намеренно отсутствуют).
 IMPLEMENTED_PHASES: tuple[str, ...] = (
@@ -110,6 +116,80 @@ def _retrieval_params_json(holder: Mapping[str, Any]) -> str | None:
     return _json.dumps(
         {"profile": profile, "cutoff_K": cutoff}, ensure_ascii=False, sort_keys=True
     )
+
+
+#: Настройка, измеряемая экспериментом фиксации (``hound experiment retrieval``, A3).
+#: Единственный писатель ``source: measured`` — та команда; run-путь только **читает**
+#: персистентную фиксацию и не должен молча понижать её дефолтом (``default``).
+MEASURED_RETRIEVAL_SETTING = "retrieval_profile"
+
+
+def _profile_value(profile: Any) -> str | None:
+    """Нормализует профиль ретривала (``StrEnum`` либо строка) к строковому значению."""
+    if profile is None:
+        return None
+    return str(getattr(profile, "value", profile))
+
+
+def measured_retrieval_fixation(store: Any, run_id: str) -> dict[str, Any] | None:
+    """Возвращает персистентную измеренную фиксацию ретривала, если она есть (A3/§13).
+
+    Измеренной считается настройка :data:`MEASURED_RETRIEVAL_SETTING`, чей провенанс в уже
+    записанной строке ``runs`` помечен ``source: measured``. Значение+провенанс читаются из
+    персистентного манифеста (``read_manifest``), а не пересчитываются «по предвидению»
+    (A3). Любая ошибка чтения (нет строки/БД, чужой store) трактуется как «фиксации нет» —
+    значения не выдумываются.
+    """
+    try:
+        persisted = store.read_manifest(run_id)
+    except Exception:  # noqa: BLE001 — нет строки/БД ⇒ нет фиксации
+        return None
+    provenance = getattr(persisted, "settings_provenance", None) or {}
+    entry = provenance.get(MEASURED_RETRIEVAL_SETTING)
+    if not isinstance(entry, dict) or entry.get("source") != "measured":
+        return None
+    profile = _profile_value(getattr(persisted, "retrieval_profile", None))
+    if profile is None:
+        return None
+    return {
+        "retrieval_profile": profile,
+        "retrieval_cutoff_K": getattr(persisted, "retrieval_cutoff_K", None),
+        "retrieval_params_json": getattr(persisted, "retrieval_params_json", None),
+        "provenance": dict(entry),
+    }
+
+
+def measured_conflict_message(requested: Any, measured: str) -> str:
+    """Сообщение отказа при явном профиле, противоречащем измеренному (A3/§13)."""
+    return (
+        f"настройка retrieval_profile измерена как {measured}; запрошен "
+        f"{_profile_value(requested)}. Изменение измеренной настройки требует "
+        "пере-измерения — выполните `hound experiment retrieval` (§13/A3)."
+    )
+
+
+def resolve_measured_retrieval(
+    store: Any, run_id: str, explicit_profile: Any
+) -> dict[str, Any] | None:
+    """Резолвит измеренную фиксацию ретривала, отвергая противоречащий явный профиль.
+
+    Возвращает фиксацию (см. :func:`measured_retrieval_fixation`) либо ``None``, если
+    настройка не измерена. Явный профиль, **равный** измеренному, принимается; явный
+    **противоречащий** — отвергается (A3): изменить измеренную настройку можно только
+    пере-измерением.
+
+    :raises ValueError: явный профиль противоречит измеренному.
+    """
+    fixation = measured_retrieval_fixation(store, run_id)
+    if fixation is None:
+        return None
+    if explicit_profile is not None and _profile_value(explicit_profile) != fixation[
+        "retrieval_profile"
+    ]:
+        raise ValueError(
+            measured_conflict_message(explicit_profile, fixation["retrieval_profile"])
+        )
+    return fixation
 
 
 def _as_phase(result: Any, phase: str) -> PhaseResult:
@@ -580,6 +660,35 @@ def build_phases(
         )
         # R7/§13: финальный манифест — самостоятельная запись воспроизведения,
         # поэтому персистится в операционную БД прогона (версии/индекс/провенанс).
+        # E1/A3: персист **не-понижающий** — измеренная фиксация ретривала не затирается
+        # дефолтом повторного прогона. Значение+провенанс берутся из уже персистентной
+        # строки ``runs``; явный противоречащий ``--retrieval-profile`` отвергнут (A3:
+        # изменить измеренную настройку можно только пере-измерением). Явный аргумент
+        # сохраняет приоритет в ``build_manifest`` — тот код (report.py) не меняется.
+        fixation = resolve_measured_retrieval(
+            ctx.store, plan.run_id, retrieval_profile
+        )
+        if fixation is not None:
+            provenance = dict(manifest.settings_provenance or {})
+            provenance[MEASURED_RETRIEVAL_SETTING] = fixation["provenance"]
+            update: dict[str, Any] = {
+                "retrieval_profile": fixation["retrieval_profile"],
+                "settings_provenance": provenance,
+            }
+            # K/params — НЕ измеренная настройка (input-setting): заполняем из фиксации
+            # только если манифест их не несёт (Ш6 не исполнялся/resume). Явный
+            # ``--cutoff-k`` не переопределяется молча — приоритет оператора сохраняется.
+            if (
+                fixation["retrieval_cutoff_K"] is not None
+                and manifest.retrieval_cutoff_K is None
+            ):
+                update["retrieval_cutoff_K"] = fixation["retrieval_cutoff_K"]
+            if (
+                fixation["retrieval_params_json"] is not None
+                and manifest.retrieval_params_json is None
+            ):
+                update["retrieval_params_json"] = fixation["retrieval_params_json"]
+            manifest = manifest.model_copy(update=update)
         ctx.store.persist_manifest(plan.run_id, manifest)
         # I3/§5: протоколы исчерпания идут в nda_questions и в сбор аномалий.
         exhaustions = {

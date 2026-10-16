@@ -147,7 +147,14 @@ def main(
     args.ports = ports
     args.phases_factory = phases_factory
     args.plan_factory = plan_factory
-    args.retrieval_profile = retrieval_profile
+    # ``--retrieval-profile`` (CLI) выставляется парсером; инъекция ``retrieval_profile`` —
+    # тестовый шов и переопределяет CLI только при явном значении (иначе сохраняем ввод
+    # оператора). Безусловная присвоение здесь делало бы dest-имя нагрузочным: переименование
+    # молча возвращало бы баг (флаг игнорировался). Зеркалит ``cutoff_k`` ниже.
+    if retrieval_profile is not None:
+        args.retrieval_profile = retrieval_profile
+    elif not hasattr(args, "retrieval_profile"):
+        args.retrieval_profile = None
     # ``--cutoff-k`` (CLI) выставляется парсером; инъекция ``cutoff_k`` — тестовый шов и
     # переопределяет CLI только при явном значении (иначе сохраняем ввод оператора).
     if cutoff_k is not None:
