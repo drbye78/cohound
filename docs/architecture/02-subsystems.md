@@ -61,7 +61,7 @@ source_id, source_kind, seq)` (S8) — resume не порождает дубле
 
 ```
 inputs = normalize(run_yaml, package_dir)
-report = lint(inputs); if report.blocking: stop
+report = lint(inputs); if not report.ready: stop   # ready = нет blocking и нет incomplete (A3)
 plan = plan(inputs)                       # scope, роли, когорта, перенормировка
 gate(G1, plan)                            # человек
 passports = discovery(plan, search)       # Ш2, кандидаты

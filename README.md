@@ -57,10 +57,11 @@ bash scripts/ci.sh         # CI-гейты: selfcheck + pytest + порог по
 ./hound.py run --run-yaml packages/{case_id}/run.yaml --package packages/{case_id}
 ```
 
-Остальная CLI-поверхность (`diff`, `sensitivity`, `golden`, `report`, `discover`,
-`passport-scout`, `review`, `promote`, `deploy-check`, `doctor`, `package …`) описана в
-`docs/architecture/03-data-config-cli.md` §E.1. **Источник истины по CLI — код
-(`core/cli/`); документ — его зеркало.**
+Остальная CLI-поверхность (`crawl`, `diff`, `sensitivity`, `golden`, `report`, `discover`,
+`passport-scout`, `review`, `promote`, `gate`, `deploy-check`, `experiment retrieval`,
+`baseline-agreement`, `doctor`,
+`package …`) описана в `docs/architecture/03-data-config-cli.md` §E.1. **Источник истины по CLI —
+код (`core/cli/`); документ — его зеркало.** Актуальный список — `./hound.py --help`.
 
 ## Структура репозитория (сжато)
 
@@ -93,7 +94,7 @@ tests/               # selfcheck, property-тесты домена, smoke scrapy
 - [`03-data-config-cli.md`](docs/architecture/03-data-config-cli.md) — данные/хранилища, конфиг, CLI.
 - [`04-reliability-adr.md`](docs/architecture/04-reliability-adr.md) — надёжность и ADR-реестр.
 - [`05-dependency-stack.md`](docs/architecture/05-dependency-stack.md) — стек, лицензии, пины.
-- [`06-implementation-strategy.md`](docs/architecture/06-implementation-strategy.md) — стратегия и план.
+- [`06-implementation-strategy.md`](docs/architecture/06-implementation-strategy.md) — стратегия и статус реализации.
 - [`07-deployment-topology.md`](docs/architecture/07-deployment-topology.md) — доверенные зоны и DMZ.
 
 ## Доверенные зоны и DMZ (дисклеймер)

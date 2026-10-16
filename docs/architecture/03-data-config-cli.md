@@ -54,6 +54,7 @@ runs/{run_id}/
   run.yaml                   # вход (копия, иммутабельна)
   run_manifest.yaml          # §9: все версии, модели, index_build, профиль+K, бюджет
   cohound.db                 # SQLite (операционные данные прогона) + WAL
+  plan_inputs.json           # производный экспорт снимка плановых входов (источник истины — run_inputs в cohound.db)
   logs/{phase}.jsonl         # структурированные логи по фазам
   prompts/{prompt_hash}.json # скомпилированные промпты (для аудита/воспроизводимости)
   outputs/
@@ -76,15 +77,19 @@ runs/{run_id}/
 ### B.1. Контракт `ports/store.py` → `store/sqlite.py`
 
 Схема §4.4 перенесена из бывшего `core/db.py` (удалён в T1.3) в `store/sqlite.py`
-(14 таблиц + `schema_meta`, индексы, триггеры I4/I6/I7/I13/I18). Константа `SCHEMA_VERSION`
-= **`3.3.0`** (D3/D4/сеансы/провенанс краула) — версия **SQLite-схемы**, не регламента; колонки
+(15 таблиц + `schema_meta`, индексы, триггеры I4/I6/I7/I13/I18). Константа `SCHEMA_VERSION`
+= **`3.4.0`** (D3/D4/сеансы/провенанс краула/P1-самодостаточность) — версия **SQLite-схемы**, не регламента; колонки
 `runs.settings_provenance_json` (v2.1/A3), `runs.crawl_provenance_json` (v3.2/Phase 2),
 `runs.crawl_strategy` / `runs.crawl_rate_limit` (v3.3/Backlog B: операционные оси краула,
-границы `execution_change`, §13) и
+границы `execution_change`, §13), `runs.ranking_epsilon` / `runs.deploy_profile` /
+`runs.edge_schema_version` / `runs.edge_capabilities_json` (v3.4/P1: порог ранжирования §6/B-1
+и деплой-провенанс манифеста, 07 §7) и
 `corpus_chunks.extractor_version` /
 `index_manifest.extractor_version` / `index_manifest.content_digest` (P2) хранят провенанс настроек,
 провенанс краула и build-id witness, а таблицы `crawl_sessions`/`crawl_session_items` — первоклассный сеанс краула
-(id/статус/прогресс/возобновляемость; legacy `crawl_attempts` удалена в v3.1.0); миграция
+(id/статус/прогресс/возобновляемость; legacy `crawl_attempts` удалена в v3.1.0); таблица `run_inputs`
+(снимок плановых входов: `catalog`/веса/когорта) делает `runs/{run_id}` самодостаточным — источник
+истины пост-хок команд, а `plan_inputs.json` — лишь производный экспорт (P1). Миграция
 additive/idempotent (`ALTER TABLE ... ADD COLUMN`/`CREATE TABLE IF NOT EXISTS` при отсутствии).
 `index_build_id` — **контент-адресуемый** отпечаток батча (два прохода: ingest → финализация id
 → index; см. §B.1 `02-subsystems.md`). Методы доступа (реализация `StorePort`):
@@ -103,6 +108,7 @@ class SqliteStore:
     def save_registry_fact(rf: RegistryFact)
     def save_llm_scenarios(bindings: list[ScenarioBinding])
     def persist_manifest(run_id, manifest: RunManifest)   # версии/индекс/retrieval + settings_provenance_json
+    def save_plan_inputs(run_id, *, payload, payload_sha256)  # run_inputs: снимок плановых входов (P1)
     def upsert_crawl_session(session: CrawlSession)       # сеанс краула: durable намерение + прогресс
     def upsert_crawl_session_item(item: CrawlSessionItem) # per-URL элемент; счётчики сеанса — в той же транзакции
     def update_crawl_session_status(session_id, status, *, ...)  # жизненный цикл сеанса
@@ -114,6 +120,7 @@ class SqliteStore:
     def get_chunk(chunk_id) -> Chunk            # для валидации цитат
     def resolve_source_url(source_id) -> str    # I10/I15
     def read_manifest(run_id) -> RunManifest    # forward-compatible: settings_provenance/ranking_epsilon
+    def read_plan_inputs(run_id) -> dict | None # снимок плановых входов из run_inputs (P1); None если нет
     def iter_gate_decisions(run_id) -> Iterator[GateDecision]   # S9
     def get_crawl_session(session_id) -> CrawlSession | None
     def iter_crawl_session_items(session_id, *, product_id=None, status=None) -> Iterator[CrawlSessionItem]
@@ -333,7 +340,11 @@ env-переменной с токеном канала — **единствен
 
 Всё из §4.2 + новые: `absence_rule` с аттестацией без процедуры `scope_attested_by` → ошибка;
 непустой baselines для архетипа C → **ошибка**; пустые `concept_terms` → warning; golden-full без
-страты ❌ → ошибка. `LintReport(blocking, warnings)`.
+страты ❌ → ошибка; незаполненные авторские поля (`definition` роли, `selection_reason` когорты) →
+**`incomplete`** (A3; выражается как `None`, а не текст-заглушка). `LintReport(blocking, warnings,
+incomplete)`; `ok` = нет блокирующих, `complete` = нет `incomplete`, **`ready` = нет ни блокирующих,
+ни `incomplete`** — гейт `run`/`plan`/`crawl` и `package validate`. Авторские команды пакета
+(`package …`) ориентируются на `blocking`/`complete` и `incomplete` **не** блокирует создание/правку.
 
 **Усечение запросов (S13).** На ячейку допускается ≤3 запроса, приоритет детерминирован:
 (1) `title`; (2) `concept_terms` (сначала ru, затем en, затем порядок в пакете). Линтер не
@@ -511,6 +522,10 @@ hound run \
   документные форматы деградируют, HTML обрабатывается `trafilatura`;
 - `sentence_transformers` (extra `embed`) — плотные эмбеддинги bge-m3 (dense-ретривал);
   без него — лексический индекс (`tantivy`/BM25, extra `retrieval`) и/или sparse;
+- `model2vec` (extra `embed-lite`, без `torch`) — лёгкие офлайн-эмбеддинги
+  (`adapters/embed_model2vec.py`; дефолт `minishlab/potion-multilingual-128M`, dim=256);
+  альтернатива `embed` для контуров без GPU/torch; отсутствие модели/зависимости — честный
+  `EmbedderUnavailable`, нулевыми векторами не подменяется;
 - `scrapy` + `playwright` (extra `crawl`) — браузерный рендер SPA/JS; `COHOUND_SCOUT_CRAWLER=scrapy`
   или `=browser` для `passport-scout` (прямой `BrowserCrawler`).
 
@@ -535,6 +550,7 @@ hound run \
 | `hound package scout` | веб-заземлённая разведка пакета категории: pipeline сам делает SERP+краул+extract, tool-less LLM синтезирует гипотезы → консервативный маппинг → кандидаты (`needs_human=True`; auto-approve нет, I18/I19/A3). Провайдер поиска резолвится из `config/deploy.yaml` (`search.adapter`/`search.by_language` по `--lang`) детерминированно; `--search-adapter` переопределяет (I16/I21/I23) | `packages/{case_id}/sources/scout/{date}.candidates.json` (+ `.provenance.json`, в т.ч. `search_provider`) |
 | `hound package {module\|role\|param\|baseline\|scope\|golden\|run\|artifact} {get\|list\|show}` | read-плоскость управления пакетом: единичные элементы и наборы по критерию поиска (`--search`/`--product`/`--param`), обзор/чтение всех 8 артефактов (`artifact list`/`artifact get [--raw]`), `--json` | — (read-only) |
 | `hound run [--until PHASE]` | конвейер Ш1–Ш9 | БД, артефакты |
+| `hound crawl {run\|status\|list\|resume\|restart\|cancel}` | сеансы краула (`local`): durable-запуск фазы корпуса Ш5, статус/счётчики, resume/restart/cancel | `crawl_sessions`, `crawl_session_items` |
 | `hound review` | очередь ревью / preliminary-стол | cells (reviewed) |
 | `hound report` | сборка артефактов | outputs |
 | `hound golden [--tier fast\|full]` | прогон golden | отчёт |
@@ -543,7 +559,9 @@ hound run \
 | `hound promote --validated-only` | preliminary → strict (переаттестация) | cells |
 | `hound gate --gate G1..G4 --actor <вы>` | запись **человеческого решения** гейта G1–G4 (утверждение); гейт проходит фактом строки в `gate_decisions`, отказ — отсутствие строки (S9/I6/I7) | gate_decisions |
 | `hound deploy-check` | диагностика профиля: достижимость DMZ-шва, версии/форматы edge (`/v1/health`, `/v1/capabilities`) + неразрушающий зонд очереди краула (`crawl/status` → строка `crawl`; без подачи задания) | — (отчёт) |
+| `hound experiment retrieval` | прогон R0/R1/R2 на retrieval-golden и фиксация измеренного `retrieval_profile`/`retrieval_cutoff_K`/`embed_model_id`/`rrf_k` как `settings_provenance` со `source: measured` (A3, T8.6, I20). Фиксация — **только профиль**, и **только** при полном сравнении; частичное сравнение/`skipped` → `source: default`. Требует зафиксированную индексную сборку в `runs`; рассинхрон «эмбеддер запроса ↔ сборка» → отказ (§13), отсутствие предпосылки → `skipped` (N3) | `runs.settings_provenance_json`, `runs.retrieval_*` |
 | `hound doctor [--strict] [--with-selfcheck]` | самодиагностика инсталляции: runtime, зависимости по extras, env/ключи, конфиг, каталоги, CLI-поверхность | — (отчёт) |
+| `hound baseline-agreement --annotations <csv>` | согласие независимых аннотаторов §11.5: Cohen's κ по полному набору меток **и отдельно** по бинарному решению N/A-vs-не-N/A (N/A задаёт знаменатель Coverage, I6/I7), + матрица расхождений и счётчики. Непарные ячейки исключаются и перечисляются; нулевая вариация маргиналов → `undefined` (не выдуманное число). Разметку не создаёт: это ручная работа человека | — (отчёт; артефакт разметки — вход) |
 
 Подкоманды `hound package …` принимают `--package` как **путь к каталогу пакета**, так и
 **`case_id`** (резолвится в каталоге пакетов: `--dir`, иначе resolved `paths.packages`);
@@ -551,6 +569,9 @@ hound run \
 `hound package validate` дополнительно fail-closed, когда каталог есть, но `package.yaml`
 отсутствует: `EXIT_BLOCKED` с `blocking: package.yaml отсутствует` (не `EXIT_NOT_FOUND`
 и не ложный `ok: yes`; терпимость к частичным пакетам с манифестом сохраняется).
+`ok: yes` требует `LintReport.ready` (нет блокирующих **и** нет `incomplete`): незаполненные
+авторские поля печатаются `incomplete:` и дают `EXIT_BLOCKED` — неполнота не проходит молча
+(при этом `incomplete` **не** блокирует команды авторства, только прогон/валидацию).
 
 `hound doctor` — read-only и по умолчанию **без сети**: проверяет Python/venv, наличие
 зависимостей по группам extras (`find_spec`, без импорта тяжёлых), заданность env/ключей
@@ -572,7 +593,9 @@ CLI-поверхности. Каждая проверка обёрнута в tr
   **фактом строки** в `gate_decisions`; «отказ» выражается **отсутствием** строки — прогон
   остаётся `blocked`. Повторная подача того же решения идемпотентна (та же строка).
 - **Идемпотентность и resume:** повторный `hound run` продолжает с последней завершённой фазы;
-  `--until` даёт пошаговый контроль.
+  `--until` даёт пошаговый контроль. В CLI-JSON resume-короткое-замыкание уже завершённых фаз
+  сериализуется под ключом `resumed_skipped` — это **отдельно** от `PhaseStatus.skipped` (пропуск
+  из-за отсутствия предпосылки, §5); прогон останавливают только `blocked`/`failed`.
 - **Сухой прогон:** `--dry-run` показывает план/бюджеты без исполнения.
 - **Машинночитаемый вывод:** `--json` для CI и интеграций.
 - **Понятные ошибки с кодом инварианта:** например `I2b: parameter_reference требует exhaustive

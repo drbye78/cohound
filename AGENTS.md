@@ -34,11 +34,12 @@ core/                         # ядро: категорийно-НЕЙТРАЛ�
                               #   crawler, extractor, chunker, registry, store, gate_store, gateway, types
   store/                      # SQLite DDL §4.4 + триггеры (sqlite.py); StorePort/GateStore-реализация
                               #   (sqlite_store.py); backup.py — бэкап/восстановление прогона
-  pipeline/                   # сценарии Ш1–Ш9, гейты G1–G4, эксперименты; авторство пакета:
-                              #   package_{io,admin,discovery,candidates,scout}.py, passport_scout.py,
-                              #   scout_common.py
+  pipeline/                   # сценарии Ш1–Ш9, гейты G1–G4, эксперименты; source routing краула
+                              #   (crawl_sources.py), сеанс краула (crawl_session.py), SERP-петля/search_log,
+                              #   авторство пакета: package_{io,admin,discovery,candidates,scout}.py,
+                              #   passport_scout.py, scout_common.py
   config/                     # загрузка run.yaml/пакетов, deploy.yaml (профиль зон), раскладка путей
-                              #   (paths.py), passports.py
+                              #   (paths.py), доменные профили (domain_profiles.py), crawl_sources.py, passports.py
   cli/                        # composition root Z0 (ядро): main.py (тонкий вход + реэкспорт),
                               #   parser.py (build_parser), context.py (общие DI/ГЭП-хелперы),
                               #   errors.py (EXIT_*/CliError), output.py (--json/emit_*),
@@ -50,10 +51,13 @@ core/                         # ядро: категорийно-НЕЙТРАЛ�
                               #   audit.py, seam_schema.py, scheduler.py (очередь краула), config.py
                               #   (EdgeRuntimeConfig), __main__.py (launcher: python -m core.edge serve)
   adapters/                   # chunker_markdown (heading_path), extract_document (docling: pdf+office),
-                              #   lexical_bm25, index_npy/index_format/lexical_tantivy, search_* — см. NOTICES
-  util/                       # text_utils (RU/EN), security (SSRF/slug), fusion (RRF), retrieval_eval — см. NOTICES
+                              #   extract_html, lexical_{bm25,tantivy}, index_npy/index_format, vector_npy,
+                              #   embed_{local,model2vec}, llm_{local,discovery}, search_*, crawl_*,
+                              #   feed_poller, remote_* — см. NOTICES
+  util/                       # text_utils (RU/EN), security (SSRF/slug), sanitize, fusion (RRF),
+                              #   retrieval_eval, feed (feed/channel-парсер), rate_limit, cache, ids/hashing/logging — см. NOTICES
 scripts/ci.sh                 # единая точка входа CI (§11.6): selfcheck + pytest + порог покрытия
-tests/selfcheck.py            # self-contained проверка фундамента (90 проверок)
+tests/selfcheck.py            # self-contained проверка фундамента (автономная, без pytest)
 tests/test_selfcheck.py       # pytest-обёртка над selfcheck (W1/T1.5)
 tests/domain/                 # property-тесты домена (hypothesis)
 tests/smoke_scrapy_playwright.py  # браузерный smoke scrapy-playwright (V5; 0/1/2)
@@ -65,7 +69,8 @@ packages/{case_id}/           # пакеты категорий: package.yaml/ca
 docs/ · docs/templates/registries/  # словари, регламент, absence-правила, шаблоны реестров
 contracts/seam/               # публикуемые JSON-схемы шва DMZ (/v1/*; 07 §5/§8)
 passports/{product_id}/       # паспорта продуктов
-runs/{run_id}/                # прогоны: SQLite, логи, metrics.json, манифесты, plan_inputs.json
+runs/{run_id}/                # прогоны: SQLite (вкл. run_inputs — источник истины входов плана),
+                              #   логи, metrics.json, манифесты; plan_inputs.json — производный экспорт
 index_store/{package}/{build}/{product_id}/  # иммутабельные индексные сборки (продукт-партиции)
 corpus_raw/{product_id}/      # retention сырых байтов
 cache/serp/{query_hash}.json · cache/http/{url_hash}.bin  # глобальный content-addressed кэш (R7)
@@ -115,7 +120,7 @@ python3 -c "import sys; sys.path.insert(0,'.'); from core.store.sqlite import co
 Dev/CI по §11.6: `pytest`+`hypothesis`+`pytest-cov` в extra `dev`; единая точка входа — `scripts/ci.sh`.
 Выбор внешних пакетов, лицензии и запреты — `docs/architecture/05-dependency-stack.md`
 (реестр решений; LangChain/LlamaIndex и все hosted-парсеры отклонены).
-Стратегия и детальный план реализации (потоки W1–W13, майлстоуны, DoD) —
+Стратегия и статус реализации (потоки W1–W13 as-built, майлстоуны M0–M3, DoD) —
 `docs/architecture/06-implementation-strategy.md`.
 Развёртывание: доверенные зоны и DMZ-шов (application-layer firewall) —
 `docs/architecture/07-deployment-topology.md`.

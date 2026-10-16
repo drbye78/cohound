@@ -153,7 +153,9 @@ CLI-ядро (`resolve · plan · run · diff · sensitivity · golden · report
 > **Примечание.** Команды `resolve`/`plan`/`run`/`diff`/`sensitivity`/`golden`/`report`/
 > `discover`/`review`/`promote`/`gate`/`deploy-check` — **методологическое ядро**. Полная
 > CLI-поверхность шире: помимо ядра — команды авторского и операционного контура (`package` с
-> подкомандами, `passport-scout`, `doctor`). `gate` — единственная точка записи человеческих
+> подкомандами, `passport-scout`, `doctor`), а также операционные команды `crawl` (durable-сеансы
+> краула) и `experiment retrieval` (фиксация ретривал-профиля/K измерением, A3). `gate` —
+> единственная точка записи человеческих
 > решений G1–G4 (`gate_decisions`, S9; §4.2); принятие решения о N/A (I6/I7) или аттестации
 > `source_scope` без неё невозможно. Актуальный список и семантика — в
 > `docs/architecture/03-data-config-cli.md` §E.1 и в коде (`core/cli/`); при расхождении верен код.
@@ -169,7 +171,7 @@ CLI-ядро (`resolve · plan · run · diff · sensitivity · golden · report
 | **Векторный контур** | **NpyVectorIndex (in-process, brute-force cosine по .npy-шардам + манифест) — дефолт MVP**. Шардирование **по продукту**: `index_store/{package}/{build}/{product_id}/`. Порт `VectorIndex` сохраняется; Qdrant — отложенная подмена по измеримым триггерам (§14) | ретривал продукт-скоупед (I17): запрос не выходит за пределы ~60k чанков продукта и его сателлитов, поэтому brute-force укладывается в рабочие десятки мс |
 | **Лексический контур** | tantivy (BM25): **двойной профиль — стеммеры RU/EN + raw-identifier/ngram** для идентификаторов (GUC, утилиты, версии, аббревиатуры). **Проверено (V1, 2026-10-08):** русский стеммер и стоп-слова доступны нативно (`Filter.stemmer("russian")`, `Filter.stopword("russian")`), внешний `snowballstemmer` не нужен | стемминг вредит точным идентификаторам — ровно тем, ради которых лексическое плечо введено; профиль тестируется на retrieval-golden |
 | **Ретривал-профиль** | эксперимент в M1: R0=BM25 / R1=dense / R2=RRF-гибрид на retrieval-golden; дефолт фиксируется измерением и записывается в манифест. Параметр `retrieval_cutoff_K` (K единиц, отдаваемых оценщику) входит в профиль | ретривал принимается по evidence, не по предвидению (A3); гипотеза: R2 выигрывает на смешанном RU/EN корпусе — проверяемая, не предрешённая |
-| Эмбеддинги | локально (инференс в контуре — без внешней эгрессии): **BGE-M3 — основной кандидат** (приоритет RU, EN хорошо; 8192 контекста, dense; MIT; **доступна во внутреннем корпоративном периметре**); multilingual-e5-large — альтернатива; подтверждение на R9/R10 | **RU — абсолютный приоритет, EN тоже сильный** (целевой корпус RU-вендоров + международные ID/термины); данные не покидают периметр; NC-лицензии исключены |
+| Эмбеддинги | локально (инференс в контуре — без внешней эгрессии): **BGE-M3 — основной кандидат** (приоритет RU, EN хорошо; 8192 контекста, dense; MIT; **доступна во внутреннем корпоративном периметре**); multilingual-e5-large — альтернатива; подтверждение на R9/R10. Лёгкий офлайн-путь (extra `embed-lite`, без `torch`): `model2vec`-адаптер (`adapters/embed_model2vec.py`, дефолт `minishlab/potion-multilingual-128M`, dim=256) — для контуров без GPU/torch; `embed_model_id` (включая ревизию снапшота) входит в `index_build_id`/манифест как граница `execution_versions` (§13) | **RU — абсолютный приоритет, EN тоже сильный** (целевой корпус RU-вендоров + международные ID/термины); данные не покидают периметр; NC-лицензии исключены |
 | Краулинг | Scrapy + scrapy-playwright (per-domain рендер-профили); **robots.txt = obey** (при встраивании Scrapy как библиотеки флаг `ROBOTSTXT_OBEY` выставить явно — дефолт False). **V5 (2026-10-08):** scrapy-playwright — зрелый де-факто стандарт (org `scrapy-plugins`, BSD-3, py3.14); **smoke-тест пройден** на Scrapy 2.19 / playwright 1.63 (chromium + firefox) → жёсткий пин подтверждён. `curl_cffi` — первый ярус для антибот-доменов без JS. **Второй путь (прямой, без Scrapy):** `BrowserCrawler` на Playwright/CDP — `honest` (реальный JS-рендер) и `hybrid` (прогрев браузером → лёгкий HTTP с cookie-мостом, fallback на `honest`); ось стратегии ортогональна `fetch` (`CrawlStrategy`, §10) | production-фреймворки; качество извлечения кормит цитатную валидацию; этическая норма §10 |
 | Экстракция | trafilatura (HTML) · docling (PDF + Office: DOCX/PPTX/XLSX, фич-матрицы → markdown); PyMuPDF исключён (AGPL); лицензии и транзитивные зависимости (pypdfium2, OCR-модели) верифицированы (M0) | docling выбран осознанно: нативно парсит Office Open XML (бэкенды python-docx/python-pptx/openpyxl). Не офисные форматы тянут torch; поэтому Office ставится лёгким `docling-slim[format-office]` (**без torch**), PDF layout — `docling-slim[standard]` (torch) в отдельном окружении. Полный пакет `docling` = `docling-slim[standard]` и для Office избыточен. `rtree` нужен **только PDF-контуру** (spatial/reading-order), не для Office и не для импорта `DocumentConverter`. Риск потери табличной структуры фич-матриц; тест на 3–5 реальных мануалах РФ-вендоров (PDF + Office) — **блокер M0**, не M1 (§15) |
 | **LLM-оценщик** | **модели через [OI]-совместимый API _внутри корпоративного периметра_** (не своё железо и не self-host-инсталляция; vLLM/SGLang — возможный backend облака, но не наша зависимость). Контур замкнут: **внешние LLM-хосты и внешние ключи не используются**; endpoint задаётся явно (`config/deploy.yaml: llm.<slot>.base_url`, внутренняя сеть). `endpoint_kind: api` по умолчанию. **Два слота модели** (`cheap` / `flagship`), оба **дефолтом `deepseek-v4.1-flash:cxbc`**; активный слот — на этапе эксплуатации (CLI/`env` > `run.yaml` > `deploy.llm.slot`). **Constraint-декодирование** через API (`json_schema`/`json_object`) + greedy/seed. **Без веб-тула.** Авторизация — `COHOUND_LLM_API_KEY` (единственный источник). Финал модели — измерением на golden (A3) | корпус не покидает периметр (внутренний endpoint); запрет поиска структурный (порт без `tools`, I18); API-сервис пинит веса/движок → R7; гарантии провайдера no-train + retention + аудит (§10) |
@@ -190,12 +192,13 @@ CLI-ядро (`resolve · plan · run · diff · sensitivity · golden · report
 repo/
   core/                        # нейтральный код (грепп-тест)
   packages/{case_id}/          # package.yaml · catalog.csv(+.lock) · baselines.csv
-                               # cohort.yaml · golden.csv · domain_profiles.yaml
+                               # cohort.yaml · golden.csv · domain_profiles.yaml · crawl_sources.yaml
                                # scope_attestation.yaml · run.yaml · adversarial/ · sources/ (авторские входы)
-  registries/ · docs/          # словарь статусов, регламент, absence-правила
+                               # registries/{registry_id}.yaml (package-scoped; secrets через headers_env)
+  docs/                        # словарь статусов, регламент, absence-правила, шаблоны реестров (docs/templates/registries/)
   contracts/seam/              # публикуемые JSON-схемы шва DMZ (/v1/*)
   passports/{product_id}/{YYYY-MM-DD}.yaml
-  runs/{run_id}/               # SQLite, логи, metrics.json, манифесты, plan_inputs.json
+  runs/{run_id}/               # SQLite, логи, metrics.json, манифесты; plan_inputs.json — производный экспорт (источник истины — run_inputs в БД)
   index_store/{package}/{build}/{product_id}/   # .npy-шарды + manifest (иммутабельные сборки)
   corpus_raw/{product_id}/ · tests/
 ```
@@ -262,6 +265,8 @@ evidence_state:  verified | claimed
 
 **Линтер (блокирует прогон):** уникальность slug; разрешимость FK; валидность enum; showcase → rule упоминает величину; веса=100; ссылки baselines; `absence_rule` из реестра; **ошибка** при непустом `baselines.csv` для архетипа C; warning при пустых `concept_terms`; **ошибка** при `absence_rule ∈ {parameter_reference, distribution_absence}` без действующей процедуры аттестации `source_scope`.
 
+**Уровни линтера и готовность пакета.** `LintReport` несёт три уровня: `blocking` (нарушение правила), `warning` (не блокирует) и **`incomplete`** (A3: обязательное авторское поле ещё не заполнено человеком — напр. `definition` роли, `selection_reason` записи когорты). Незаполненность выражается **явно** (`None`), а не текстом-заглушкой `TODO:`. Уровень `incomplete` **не блокирует** создание/правку пакета (авторство), но запрещает прогон: готовность к прогону = нет блокирующих **и** нет `incomplete` (`LintReport.ready`). Гейт `ready` применяют `run`/`plan`/`crawl` и `package validate`; команды авторства пакета ориентируются на `blocking`.
+
 ### 4.3. Паспорт продукта
 
 `passports/{product_id}/{YYYY-MM-DD}.yaml`. **Precision-first:** Discovery не устанавливает принадлежность компонента продукту без relationship evidence; доказываются две независимые вещи — существование и связь в роли.
@@ -299,10 +304,15 @@ products(product_id PK, canonical_name, vendor, jurisdiction, first_seen, last_s
 runs(run_id PK, created_at, mode, case_id, anchor_product_id, cohort_ref, focus_text,
      focus_modules, package_id, package_version, catalog_version, status_dict_version,
      scoring_policy_version, methodology_version,
+     embed_model_id,
      index_build_id, retrieval_profile, retrieval_params_json,   -- профиль + fusion-параметры (rrf_k) — S1
      retrieval_cutoff_K, search_effort_budget_json, snapshot_date,
      requested_ranking, computed_ranking,                         -- K6: запрошенный vs допустимый ранг
      settings_provenance_json,                                    -- A3 (v2.1): {param: {source: default|measured, experiment_id?}}
+     crawl_provenance_json,                                       -- провенанс краула (сеансы/движки/дайджест источников)
+     crawl_strategy, crawl_rate_limit,                            -- операционные оси краула (§13, execution_change)
+     ranking_epsilon,                                             -- §6/B-1: порог неразличимости ранжирования
+     deploy_profile, edge_schema_version, edge_capabilities_json, -- 07 §7: деплой-провенанс манифеста (R7)
      state);
 
 -- llm_scenarios — канонический носитель маршрутизации (S2; llm_scenario_map_json удалён).
@@ -348,6 +358,12 @@ search_exhaustion(run_id, product_id, param_id, protocol_json);
 --   queries: n, termination_reason: <из словаря>, ts}] — strict-❓ без обязательных контуров = аномалия (§5).
 registry_facts(run_id, product_id, registry_id, fact_json, source_url, fetched_at);
 
+-- Самодостаточность прогона (P1): снимок плановых входов (каталог/веса/когорта) в БД —
+-- источник истины для пост-хок команд (sensitivity/golden/report); side-файл
+-- runs/{run_id}/plan_inputs.json — лишь производный экспорт. payload_sha256 — детерминированный
+-- дайджест канонической JSON-формы (§13/R7, diff-visible).
+run_inputs(run_id PK, snapshot_version, payload_json, payload_sha256, created_at);
+
 -- Durable-краул: сеанс (аудит + очередь + resume без ре-фетча).
 -- НЕ search_log (тот — единственное место логирования поисковых вызовов, §7/I23).
 crawl_sessions(session_id, run_id, profile, status, created_at, started_at, finished_at,
@@ -364,7 +380,7 @@ crawl_session_items(session_id, product_id, url, status, attempts, engine, kind,
 --   с retained raw → ре-экстракция без сетевого ре-фетча (I19); иначе — фетч.
 ```
 
-Валидация цитат — по чистому `text` чанка (`context_prefix` не входит). `content_hash` заполняется с первого дня. `search_log` — **единственное место** логирования любых поисковых вызовов, включая tool-based (§7, I23); поле `kind` разделяет внутренний ретривал (`retrieval`) и внешние поисковые запросы (`external`). **Сеанс краула** (`crawl_sessions` + `crawl_session_items`) ведёт durable-аудит/очередь/resume краула отдельно от поискового лога: `search_log` описывает поисковые запросы, сеанс — пер-URL жизненный цикл фетча/экстракции (durable-носитель resume; сбой краула — данные, не падение фазы).
+Валидация цитат — по чистому `text` чанка (`context_prefix` не входит). `content_hash` заполняется с первого дня. `search_log` — **единственное место** логирования любых поисковых вызовов, включая tool-based (§7, I23); поле `kind` разделяет внутренний ретривал (`retrieval`) и внешние поисковые запросы (`external`). **Сеанс краула** (`crawl_sessions` + `crawl_session_items`) ведёт durable-аудит/очередь/resume краула отдельно от поискового лога: `search_log` описывает поисковые запросы, сеанс — пер-URL жизненный цикл фетча/экстракции (durable-носитель resume; сбой краула — данные, не падение фазы). **Плановые входы прогона** (`catalog`/`module_weights`/`cohort`) персистятся в `run_inputs` — это источник истины самодостаточности `runs/{run_id}`; `plan_inputs.json` — производный экспорт того же снимка, ни одна пост-хок команда не читает его как авторитет.
 
 ### 4.5. Конфигурация прогона (run.yaml)
 
@@ -395,6 +411,8 @@ crawl_session_items(session_id, product_id, url, status, attempts, engine, kind,
 Ш8  Расчёт: Resolved Capability + Coverage (+модульные)            ── ГЕЙТ G4
 Ш9  Отчёты: battle_card · preliminary_findings · nda_questions · diff · manifest
 ```
+
+**Контракт фазы (реализация).** Каждая фаза возвращает `PhaseResult(status: ok|skipped|blocked|failed, …)`. `skipped` — предпосылка отсутствует (работа не выполнялась, не сбой), несёт машинную причину `skip_reason`; прогон продолжают только `blocked`/`failed`, прогон на `skipped` не останавливается. Пропуск фазы **не меняет статусы ячеек** и не отменяет I6/I7; Ш7 присоединяет очередь ревью как **advisory**-`pending` и ничего не решает за человека. Незарегистрированная фаза даёт `failed` (не фиктивный `ok`). Полный контракт — `docs/architecture/01-modules-and-contracts.md`.
 
 **SERP-раунды и иммутабельность корпуса (K2).** Иммутабельность индексной сборки относится к
 *содержимому* продукт-партиции, а не к числу раундов. Корпус append-only и версионируется по

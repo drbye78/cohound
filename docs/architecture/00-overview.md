@@ -177,12 +177,15 @@ IDP/DLP/IDS (`07` §8).
 (`VectorIndexPort`); `adapters/embed_local.py` — `EmbedderPort`. `pipeline` не пишет `.npy`/tantivy
 напрямую. Реализация `StorePort`/`GateStore` — `store/sqlite_store.py` поверх DDL `store/sqlite.py`;
 бэкап/восстановление прогона — `store/backup.py`. Схема БД версионируется константой
-`SCHEMA_VERSION` = **`3.3.0`** (версия SQLite-схемы, **не** регламента); `runs.settings_provenance_json`
+`SCHEMA_VERSION` = **`3.4.0`** (версия SQLite-схемы, **не** регламента); `runs.settings_provenance_json`
 хранит провенанс настроек (A3), `runs.crawl_provenance_json` — провенанс краула (сеансы/движки/дайджест
 источников, Phase 2), `runs.crawl_strategy`/`runs.crawl_rate_limit` — операционные оси краула
-(границы `execution_change`, §13), `corpus_chunks.extractor_version` и `index_manifest.extractor_version`/
-`content_digest` — build-id witness (P2), а `crawl_sessions`/`crawl_session_items` — первоклассный
-сеанс краула (id/статус/прогресс/возобновляемость, фаза сеансов; legacy `crawl_attempts` удалена);
+(границы `execution_change`, §13), `runs.ranking_epsilon`/`runs.deploy_profile`/`runs.edge_schema_version`/
+`runs.edge_capabilities_json` — порог ранжирования и деплой-провенанс (P1), `corpus_chunks.extractor_version` и `index_manifest.extractor_version`/
+`content_digest` — build-id witness (P2), `crawl_sessions`/`crawl_session_items` — первоклассный
+сеанс краула (id/статус/прогресс/возобновляемость, фаза сеансов; legacy `crawl_attempts` удалена),
+а `run_inputs` — снимок плановых входов (самодостаточность `runs/{run_id}`; `plan_inputs.json` —
+производный экспорт, P1);
 миграция additive/idempotent (`ALTER TABLE`/`CREATE TABLE IF NOT EXISTS` при отсутствии).
 
 **Реестровые фетчеры:** `ports/registry.py` — нейтральный порт; конкретные реестры (РРПО, ФСТЭК)
@@ -253,7 +256,7 @@ core/
   edge/        server.py auth.py audit.py seam_schema.py                    # composition root Z1 (DMZ)
   util/        ids.py hashing.py logging.py cache.py sanitize.py fusion.py
                security.py text_utils.py retrieval_eval.py
-packages/{case_id}/, registries/, passports/, runs/, index_store/, corpus_raw/, cache/
+packages/{case_id}/, passports/, runs/, index_store/, corpus_raw/, cache/
 ```
 
 Монолит `core/schemas.py` расщеплён на `domain/{models,enums,invariants}.py` (T1.2, файл
@@ -292,7 +295,7 @@ M0 должен давать **сквозной вертикальный сре�
 
 > **Стартовый актив (не greenfield).** К началу M0 уже существовали монолиты `core/schemas.py` / `core/db.py` (схемы + инварианты + DDL/триггеры), позже **расщеплены и удалены** (T1.2/T1.3);
 > утилиты (`text_utils`, `security`, `fusion`, `retrieval_eval`) и адаптеры (`chunker_markdown`,
-> `extract_document`, `lexical_bm25`), а также `tests/selfcheck.py` (ныне **86** проверок) и
+> `extract_document`, `lexical_bm25`), а также `tests/selfcheck.py` (автономная самопроверка) и
 > пройденный браузерный smoke (V5). M0 — это **рефакторинг за порты**, а не написание с нуля.
 > Полная инвентаризация и влияние на оценки — `06` §0.
 
