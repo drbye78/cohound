@@ -98,7 +98,7 @@ CLI-ядро (`pydantic`+`pyyaml`+stdlib) ставится везде; инде�
 | `ai-forever/ru-en-RoSBERTa` | — | MIT ✅ | **b** | ru+en, MIT — альтернативный билингвальный кандидат R9/R10 |
 | `model2vec` | 0.9.x | MIT ✅ | **b** | лёгкий fallback без torch (статичные эмбеддинги, CPU); качество RU 🟡 — как абляция |
 | `FlagEmbedding` | 1.4.x | MIT ✅ | **d** | training-тулкит (deepspeed, flash-attn); для инференса избыточен |
-| `llama-cpp-python` | 0.3.x | MIT ✅ | **b**/**a** | CPU/GGUF-путь (полезен без большого GPU и для интеграционных тестов порта). ⚠️ PyPI отдаёт **только sdist** (без wheels) → нужен C/C++/CMake-тулчейн; build-free альтернатива — first-party `llama.cpp` `llama-server` |
+| `llama-cpp-python` | 0.3.x | MIT ✅ | ~~**b**/**a**~~ | **снято (2026-10, см. `06` §5.W9/§5.13):** офлайн-fallback для тестов порта не реализован и вытеснен [OI]-совместимым LLM-клиентом внутреннего периметра (`core/adapters/llm_local.py`). Строка сохранена как исторический след решения, конвейер путь не использует. ⚠️ PyPI отдаёт **только sdist** (без wheels) → потребовал бы C/C++/CMake-тулчейн; build-free альтернатива — first-party `llama.cpp` `llama-server` |
 | `transformers` | 5.19.x | Apache-2.0 ✅ | **c** | не для сервинга; приходит через ST |
 | `text-generation-inference` | — | Apache-2.0 | **d** | **архивирован 2026-03** ✅ — не строить |
 
@@ -298,7 +298,8 @@ robots.txt-запрос оставлять на дефолтном HTTP-handler 
 - **Индекс-контур:** `sentence-transformers` (+torch) — extra `embed`, изолированный venv/образ.
 - **LLM-инференс:** модели корпоративного облака по [OI]-совместимому API — **вне наших окружений**
   (не ставим и не развёртываем; `vLLM`/`SGLang` — возможный backend облака, §2.3).
-- **Опц. CPU-инференс:** `llama-cpp-python` (GGUF) для тестов порта.
+- **Опц. CPU-инференс:** ~~`llama-cpp-python` (GGUF) для тестов порта~~ — **снято** (не реализовано;
+  вытеснено [OI]-совместимым клиентом внутреннего периметра, см. `06` §5.W9/§5.13).
 
 **Dev (`a`):** `pytest` · `hypothesis` · `respx` · `pytest-cov`.
 

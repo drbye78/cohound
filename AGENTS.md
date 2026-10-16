@@ -55,7 +55,8 @@ core/                         # ядро: категорийно-НЕЙТРАЛ�
                               #   embed_{local,model2vec}, llm_{local,discovery}, search_*, crawl_*,
                               #   feed_poller, remote_* — см. NOTICES
   util/                       # text_utils (RU/EN), security (SSRF/slug), sanitize, fusion (RRF),
-                              #   retrieval_eval, feed (feed/channel-парсер), rate_limit, cache, ids/hashing/logging — см. NOTICES
+                              #   retrieval_eval, agreement (Cohen's κ §11.5), feed (feed/channel-парсер),
+                              #   rate_limit, cache, ids/hashing/logging — см. NOTICES
 scripts/ci.sh                 # единая точка входа CI (§11.6): selfcheck + pytest + порог покрытия
 tests/selfcheck.py            # self-contained проверка фундамента (автономная, без pytest)
 tests/test_selfcheck.py       # pytest-обёртка над selfcheck (W1/T1.5)
