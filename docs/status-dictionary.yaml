@@ -249,6 +249,30 @@ crawl_strategy:
   - honest
   - hybrid
 
+# hound package crawl-probe: наблюдаемые значения зонда осей краула по ключам
+# domain_profiles.yaml. Операционное перечисление — без бампа версии словаря.
+# source — приоритет источника URL (первый хит на ключ); status — исход зонда;
+# reason — причина unresolved (A3: ключ честно репортится, не дефолтится).
+crawl_probe_status:
+  - resolved
+  - unresolved
+crawl_probe_source:
+  - urls
+  - corpus
+  - synthesized
+crawl_probe_confidence:
+  - high
+  - medium
+  - low
+crawl_probe_reason:
+  - no_url
+  - unknown_key
+  - both_tiers_failed
+  - browser_unavailable
+  - browser_disabled
+  - robots_disallowed
+  - fetch_budget_exhausted
+
 # Сеанс краула: жизненный цикл (crawl_sessions).
 crawl_session_status:
   - created

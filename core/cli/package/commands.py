@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as _dt
+import sqlite3
 import sys
 from pathlib import Path
 from typing import Any
@@ -30,6 +31,19 @@ from core.cli.errors import (
 from core.cli.output import concise, emit_error, print_json
 from core.cli.wiring import _llm_configured
 from core.config.deploy import load_deploy_config
+from core.domain.enums import FetchMode
+from core.ports.types import FetchPlan
+from core.pipeline.crawl_probe import (
+    ProbeReason,
+    ProbeSource,
+    RobotsGate,
+    group_urls_by_key,
+    render_profiles_with_verdicts,
+    synthesize_url,
+    unresolved_verdict,
+    write_crawl_probe_proposal,
+)
+from core.pipeline.crawl_probe_driver import ProbePorts, run_probe
 from core.pipeline.package_admin import (
     OpResult,
     PackageAdminError,
@@ -145,6 +159,7 @@ __all__ = [
     "cmd_package_candidates",
     "cmd_package_apply",
     "cmd_package_scout",
+    "cmd_package_crawl_probe",
     "_invoke",
     "_emit",
     "_op_payload",
@@ -1513,6 +1528,287 @@ def _print_package_scout_lines(payload: dict[str, Any]) -> list[str]:
     for error in payload["errors"]:
         lines.append(f"error: {error}")
     lines.append(f"ok: {'yes' if payload['ok'] else 'no'}")
+    return lines
+
+
+# ---------------------------------------------------------------------------
+# Хендлер: автоподбор осей краула (crawl-probe)
+# ---------------------------------------------------------------------------
+
+
+def _load_urls_file(path: str | Path) -> dict[str, list[str]]:
+    """Читает ``--urls`` (JSON/YAML ``{key: url | [url, ...]}``); иначе ``EXIT_USAGE``."""
+    data = _read_mapping(path)
+    result: dict[str, list[str]] = {}
+    for key, value in data.items():
+        if isinstance(value, str):
+            result[str(key)] = [value]
+        elif isinstance(value, list) and all(isinstance(item, str) for item in value):
+            result[str(key)] = [str(item) for item in value]
+        else:
+            raise CliError(
+                f"--urls[{key}]: ожидался URL или список URL, получено {type(value).__name__}",
+                code="usage",
+                exit_code=EXIT_USAGE,
+            )
+    return result
+
+
+def _corpus_urls(db_path: str | Path) -> list[str]:
+    """Читает URL из ``corpus_docs`` БД прогона **read-only** (``mode=ro``, без миграций).
+
+    :raises CliError: файла нет либо таблица не читается (понятная ошибка вместо краха).
+    """
+    path = Path(db_path)
+    if not path.is_file():
+        raise CliError(
+            f"--corpus-db: файл не найден: {path}", code="usage", exit_code=EXIT_USAGE
+        )
+    try:
+        conn = sqlite3.connect(f"file:{path.as_posix()}?mode=ro", uri=True)
+    except sqlite3.Error as exc:
+        raise CliError(
+            f"--corpus-db: не открывается {path}: {exc}", code="usage", exit_code=EXIT_USAGE
+        ) from exc
+    conn.row_factory = sqlite3.Row
+    try:
+        rows = conn.execute(
+            "SELECT url FROM corpus_docs WHERE url IS NOT NULL AND url != ''"
+        ).fetchall()
+    except sqlite3.Error as exc:
+        raise CliError(
+            f"--corpus-db: {path}: не читается corpus_docs: {exc}",
+            code="usage",
+            exit_code=EXIT_USAGE,
+        ) from exc
+    finally:
+        conn.close()
+    return sorted({str(row["url"]) for row in rows})
+
+
+def _make_robots_fetcher(http_crawler: Any) -> Any:
+    """Фетчер ``robots.txt`` через HTTP-краулер (без кэша); недоступно → ``None``."""
+    def fetch(host: str) -> str | None:
+        url = f"https://{host}/robots.txt"
+        try:
+            page = http_crawler.fetch(url, FetchPlan(FetchMode.HTTP))
+        except Exception:  # noqa: BLE001 — недоступный robots.txt = «правил нет»
+            return None
+        raw = getattr(page, "content", b"") or b""
+        return raw.decode("utf-8", errors="replace") if raw else None
+
+    return fetch
+
+
+def cmd_package_crawl_probe(args: argparse.Namespace) -> int:
+    """``hound package crawl-probe`` — автоподбор осей краула по ключам ``domain_profiles``.
+
+    Зондирует каждый ключ лестницей http → browser/hybrid → browser/honest и пишет proposal
+    (``--out/{date}.proposal.yaml``) — по умолчанию **только предложение** (A3). ``--write``
+    вносит измеренные оси в ``domain_profiles.yaml`` (**требует ``--actor``**), сохраняя
+    шапку файла байт-в-байт, неизмеренные поля и неизменённые профили дословно. Нет
+    семантических изменений ⇒ файл не трогается, payload несёт ``changed: false`` (шумный
+    diff без правок недопустим). Неразрешимые ключи честно попадают в ``unresolved`` с
+    причиной. Ничего не пишет в БД прогона/артефакты пакета, кроме выбранного режима.
+    """
+    from core.adapters.crawl_browser import BrowserCrawler
+    from core.adapters.crawl_http import HttpCrawler
+    from core.adapters.extract_document import SUPPORTED_FORMATS
+    from core.cli.wiring import (
+        LOCAL_PROFILE,
+        _browser_crawler_kwargs,
+        _http_crawler_kwargs,
+        build_adapters,
+    )
+
+    if getattr(args, "write", False) and not getattr(args, "actor", None):
+        raise CliError(
+            "--write требует --actor (человек, изменяющий domain_profiles.yaml)",
+            code="usage",
+            exit_code=EXIT_USAGE,
+        )
+    if args.max_urls_per_key < 1:
+        raise CliError(
+            f"--max-urls-per-key обязан быть >= 1, получено {args.max_urls_per_key}",
+            code="usage",
+            exit_code=EXIT_USAGE,
+        )
+    if getattr(args, "profile", LOCAL_PROFILE) != LOCAL_PROFILE:
+        raise CliError(
+            "crawl-probe исполняется в профиле local (прямые краулеры); split не поддержан",
+            code="usage",
+            exit_code=EXIT_USAGE,
+        )
+
+    pkg_dir = Path(args.package)
+    if not (pkg_dir / "package.yaml").is_file():
+        raise CliError(
+            f"{args.package}: package.yaml отсутствует — это не пакет категории",
+            code="package",
+            exit_code=EXIT_USAGE,
+        )
+
+    artifacts = _invoke(lambda: load_artifacts(pkg_dir))
+    profiles = artifacts.domain_profiles
+    if not profiles:
+        raise CliError(
+            f"{pkg_dir / 'domain_profiles.yaml'}: нет ключей доменов — нечего зондировать",
+            code="package",
+            exit_code=EXIT_USAGE,
+        )
+    case_id = artifacts.manifest.case_id if artifacts.manifest is not None else pkg_dir.name
+
+    only = list(dict.fromkeys(args.only or []))
+    keys = [key for key in sorted(profiles) if not only or key in only]
+    unknown = [key for key in only if key not in profiles]
+
+    # 1. URL-сорсинг: (a) --urls > (b) corpus_docs > (c) synthesized (первый хит на ключ).
+    notes: list[str] = []
+    urls_file: dict[str, list[str]] = _invoke(lambda: _load_urls_file(args.urls)) if args.urls else {}
+    corpus_grouped: dict[str, list[str]] = {}
+    if args.corpus_db:
+        corpus_urls = _invoke(lambda: _corpus_urls(args.corpus_db))
+        if not corpus_urls:
+            notes.append(f"--corpus-db: в corpus_docs нет URL ({args.corpus_db})")
+        corpus_grouped = group_urls_by_key(corpus_urls, profiles)
+
+    candidates: dict[str, tuple[ProbeSource, list[str]]] = {}
+    for key in keys:
+        if key in urls_file:
+            candidates[key] = (ProbeSource.URLS, list(urls_file[key]))
+        elif corpus_grouped.get(key):
+            candidates[key] = (ProbeSource.CORPUS, list(corpus_grouped[key]))
+        else:
+            candidates[key] = (ProbeSource.SYNTHESIZED, [synthesize_url(key)])
+
+    # 2. Порты: инъекция теста либо реальные адаптеры (cache=None — R7 не читаем/не пишем).
+    injected = getattr(args, "crawl_probe_ports", None)
+    if injected is not None:
+        ports = injected
+    else:
+        deploy = load_deploy_config(None)
+        http = HttpCrawler(cache=None, **_http_crawler_kwargs(deploy))
+        browser: Any = None
+        if not args.no_browser:
+            try:
+                browser = BrowserCrawler(cache=None, **_browser_crawler_kwargs(deploy))
+            except Exception as exc:  # noqa: BLE001 — недоступность браузера не роняет зонд
+                notes.append(f"browser-краулер не собран: {type(exc).__name__}: {concise(exc)}")
+        extractor = getattr(args, "extractor", None) or build_adapters(
+            profile=LOCAL_PROFILE, package=str(pkg_dir)
+        ).extractor
+        ports = ProbePorts(
+            http=http,
+            browser=browser,
+            extractor=extractor,
+            robots=RobotsGate(_make_robots_fetcher(http)),
+        )
+
+    supported = tuple(SUPPORTED_FORMATS)
+
+    # 3. Зонд.
+    verdicts = _invoke(
+        lambda: run_probe(
+            keys,
+            candidates=candidates,
+            ports=ports,
+            no_browser=args.no_browser,
+            max_urls_per_key=args.max_urls_per_key,
+            supported_suffixes=supported,
+        )
+    )
+    for key in unknown:
+        verdicts.append(
+            unresolved_verdict(
+                key,
+                ProbeReason.UNKNOWN_KEY,
+                detail="ключ отсутствует в domain_profiles.yaml",
+            )
+        )
+
+    # 4. Proposal (пакет-скоупед; не трогает прогон).
+    date_str = _today()
+    out_dir = Path(args.out) if args.out else pkg_dir / "sources" / "crawl_probe"
+    meta: dict[str, Any] = {
+        "case_id": case_id,
+        "generated_at": date_str,
+        "actor": args.actor,
+        "write": bool(args.write),
+        "max_urls_per_key": args.max_urls_per_key,
+        "no_browser": bool(args.no_browser),
+        "only": only,
+        "notes": notes,
+    }
+    proposal_path = _invoke(
+        lambda: write_crawl_probe_proposal(out_dir, date_str, meta, verdicts)
+    )
+
+    # 5. --write: правка отображения с сохранением шапки байт-в-байт. Нет семантических
+    #    изменений ⇒ render возвращает исходный текст, файл не трогаем и честно сообщаем.
+    profiles_path = pkg_dir / "domain_profiles.yaml"
+    changed = False
+    if args.write:
+        raw = _invoke(lambda: profiles_path.read_text(encoding="utf-8"))
+        updated = _invoke(
+            lambda: render_profiles_with_verdicts(
+                raw, verdicts, supported_suffixes=supported
+            )
+        )
+        changed = updated != raw
+        if changed:
+            _invoke(lambda: atomic_write_text(profiles_path, updated))
+
+    unresolved = [
+        {"key": v.key, "reason": list(v.reasons), "detail": v.detail, "urls": list(v.urls)}
+        for v in verdicts
+        if not v.resolved
+    ]
+    payload: dict[str, Any] = {
+        "ok": True,
+        "case_id": case_id,
+        "package": str(pkg_dir),
+        "keys": len(verdicts),
+        "resolved": sum(1 for v in verdicts if v.resolved),
+        "unresolved": unresolved,
+        "proposal_path": str(proposal_path),
+        "write": bool(args.write),
+        "changed": changed,
+        "actor": args.actor,
+        "notes": notes,
+        "verdicts": [v.as_dict() for v in verdicts],
+    }
+    lines = _print_crawl_probe_lines(payload, verdicts)
+    _emit(args, payload, lines)
+    return EXIT_OK
+
+
+def _print_crawl_probe_lines(
+    payload: dict[str, Any], verdicts: list[Any]
+) -> list[str]:
+    """Строит строки человекочитаемого вывода ``package crawl-probe``."""
+    lines = [
+        f"case_id: {payload['case_id']}",
+        f"keys: {payload['keys']} (resolved: {payload['resolved']})",
+        f"write: {'yes' if payload['write'] else 'no'}",
+        f"proposal: {payload['proposal_path']}",
+    ]
+    if payload["write"]:
+        lines.append(f"changed: {'yes' if payload['changed'] else 'no'}")
+    for verdict in verdicts:
+        if verdict.resolved:
+            strategy = f" strategy={verdict.strategy.value}" if verdict.strategy else ""
+            extract = verdict.extract.value if verdict.extract else "-"
+            lines.append(
+                f"  {verdict.key}: fetch={verdict.fetch.value}{strategy} "
+                f"extract={extract} source={verdict.source.value} "
+                f"confidence={verdict.confidence.value}"
+            )
+        else:
+            reason = ",".join(verdict.reasons) or "?"
+            detail = f" ({verdict.detail})" if verdict.detail else ""
+            lines.append(f"  {verdict.key}: unresolved [{reason}]{detail}")
+    for note in payload["notes"]:
+        lines.append(f"note: {note}")
     return lines
 
 

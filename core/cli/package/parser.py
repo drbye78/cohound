@@ -58,6 +58,7 @@ from core.cli.package.commands import (
     cmd_package_candidates,
     cmd_package_apply,
     cmd_package_scout,
+    cmd_package_crawl_probe,
     cmd_package,
 )
 
@@ -591,5 +592,68 @@ def add_package_parser(subparsers: Any) -> None:
         help="каталог артефактов scout (дефолт packages/{case_id}/sources/scout)",
     )
     p_scout.set_defaults(handler=cmd_package_scout)
+
+    # crawl-probe (автоподбор осей краула) --------------------------------- #
+    from core.cli.context import _add_common
+
+    p_probe = pkg.add_parser(
+        "crawl-probe",
+        help="зонд осей краула по ключам domain_profiles (proposal; --write правит файл)",
+    )
+    _add_common(p_probe)
+    p_probe.add_argument(
+        "--package",
+        required=True,
+        help="пакет: путь или case_id (резолвится в каталоге пакетов)",
+    )
+    p_probe.add_argument(
+        "--urls",
+        default=None,
+        metavar="FILE",
+        help="явное отображение {key: [url, ...]} (JSON/YAML; приоритет над corpus/synth)",
+    )
+    p_probe.add_argument(
+        "--corpus-db",
+        dest="corpus_db",
+        default=None,
+        metavar="DB",
+        help="БД прогона: источники URL из corpus_docs (read-only)",
+    )
+    p_probe.add_argument(
+        "--only",
+        action="append",
+        default=None,
+        metavar="KEY",
+        help="зондировать только эти ключи domain_profiles (повторяемо)",
+    )
+    p_probe.add_argument(
+        "--out",
+        default=None,
+        help="каталог proposal (дефолт packages/{case_id}/sources/crawl_probe)",
+    )
+    p_probe.add_argument(
+        "--max-urls-per-key",
+        dest="max_urls_per_key",
+        type=int,
+        default=1,
+        help="сколько URL на ключ зондировать (по умолчанию 1)",
+    )
+    p_probe.add_argument(
+        "--no-browser",
+        dest="no_browser",
+        action="store_true",
+        help="только Tier 1 (обычный HTTP), без эскалации на браузер",
+    )
+    p_probe.add_argument(
+        "--write",
+        action="store_true",
+        help="внести измеренные оси в domain_profiles.yaml (требует --actor)",
+    )
+    p_probe.add_argument(
+        "--actor",
+        default=None,
+        help="человек, выполняющий запись (обязателен с --write)",
+    )
+    p_probe.set_defaults(handler=cmd_package_crawl_probe)
 
     p_package.set_defaults(handler=cmd_package, _package_parser=p_package)

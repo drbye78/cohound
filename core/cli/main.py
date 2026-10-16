@@ -104,6 +104,7 @@ def main(
     discovery_llm: DiscoveryLLMPort | None = None,
     crawler: CrawlerPort | None = None,
     extractor: Any = None,
+    crawl_probe_ports: Any = None,
 ) -> int:
     """Точка входа CLI. Возвращает код выхода (``0`` — успех).
 
@@ -129,6 +130,8 @@ def main(
     :param discovery_llm: инъекция ``DiscoveryLLMPort`` для ``passport-scout`` (тесты без сети).
     :param crawler: инъекция ``CrawlerPort`` для ``passport-scout`` (тесты без сети).
     :param extractor: инъекция ``ExtractorPort`` для ``passport-scout`` (тесты без сети).
+    :param crawl_probe_ports: инъекция :class:`~core.pipeline.crawl_probe_driver.ProbePorts`
+        для ``package crawl-probe`` (тесты без сети).
     """
     parser = build_parser()
     try:
@@ -156,6 +159,8 @@ def main(
     args.discovery_llm = discovery_llm
     args.crawler = crawler
     args.extractor = extractor
+    # ``package crawl-probe``: инъекция HTTP/браузер-краулеров и робот-политики (тесты без сети).
+    args.crawl_probe_ports = crawl_probe_ports
 
     if getattr(args, "command", None) is None:
         parser.print_help()

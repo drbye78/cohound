@@ -425,6 +425,9 @@ def main() -> int:
         lambda: _registry_package_scoped(),
     )
 
+    section("Зонд осей краула (crawl-probe)")
+    check("crawl_probe: предикат/лестница/шапка/зеркало словаря", lambda: _crawl_probe())
+
     print(f"\n{CHECKS - len(FAILURES)}/{CHECKS} проверок пройдено")
     if FAILURES:
         print("\nПровалы:")
@@ -3001,6 +3004,178 @@ def _lexical_profiles() -> None:
         raise AssertionError("неизвестный профиль обязан быть отвергнут")
     except ValueError:
         pass
+
+
+def _crawl_probe() -> None:
+    """Зонд осей краула: предикат пригодности, лестница ``decide``, шапка, зеркало словаря.
+
+    Инварианты: ``status_code=None`` — не сбой; ``401/403`` эскалируются, но не трогают
+    ``rate_limit``; оба тира провалились ⇒ ``unresolved`` (не ``browser``); ``strategy``
+    пишется только для ``browser``; правка файла сохраняет шапку байт-в-байт и неизмеренные
+    поля. Перечисления зонда зеркалируются ``docs/status-dictionary.yaml`` (источник истины).
+    """
+    from core.domain.enums import CrawlStrategy, ExtractionRoute, FetchMode
+    from core.pipeline.crawl_probe import (
+        ProbeConfidence,
+        ProbeKeyStatus,
+        ProbeReason,
+        ProbeSource,
+        ProbeTier,
+        Observation,
+        UrlProbe,
+        decide,
+        is_usable,
+        render_profiles_with_verdicts,
+        split_header,
+    )
+    from core.domain.dictionary import load_dictionary
+
+    def obs(**kw):
+        base = dict(
+            tier=ProbeTier.HTTP,
+            url="https://example.test/",
+            source=ProbeSource.URLS,
+            status_code=200,
+            content_type="text/html",
+            content_bytes=10,
+            text_chars=500,
+        )
+        base.update(kw)
+        return Observation(**base)
+
+    # Предикат: None-статус — неизвестно (не сбой); короткий текст — непригодно.
+    if not is_usable(obs(status_code=None)):
+        raise AssertionError("status_code=None обязан быть пригодным (неизвестно ≠ сбой)")
+    if is_usable(obs(status_code=401)):
+        raise AssertionError("401 обязан быть непригодным (антибот)")
+    if is_usable(obs(text_chars=10)):
+        raise AssertionError("короткий извлечённый текст обязан быть непригодным")
+
+    # Лестница: http пригоден ⇒ fetch=http (без strategy).
+    v = decide("k", [UrlProbe("https://example.test/", ProbeSource.URLS, (obs(),))])
+    if v.fetch is not FetchMode.HTTP or v.strategy is not None or not v.resolved:
+        raise AssertionError("http-вердикт некорректен (strategy на http писать нельзя)")
+    if v.extract is not None:
+        raise AssertionError(
+            "extract без документа обязан быть null (не авто): пишем только document"
+        )
+
+    # Документное свидетельство ⇒ extract=document (единственная ось, которую пишет --write).
+    doc_url = "https://example.test/report.pdf"
+    doc = decide(
+        "k",
+        [
+            UrlProbe(
+                doc_url,
+                ProbeSource.URLS,
+                (obs(url=doc_url, content_type="application/pdf"),),
+            )
+        ],
+    )
+    if doc.extract is not ExtractionRoute.DOCUMENT:
+        raise AssertionError("документное свидетельство обязано дать extract=document")
+
+    # hybrid с fetch_mode=HTTP ⇒ strategy=hybrid; fetch_mode=BROWSER ⇒ strategy=honest.
+    hybrid = decide(
+        "k",
+        [
+            UrlProbe(
+                "https://example.test/",
+                ProbeSource.URLS,
+                (
+                    obs(status_code=403),
+                    obs(tier=ProbeTier.HYBRID, status_code=200, fetch_mode=FetchMode.HTTP),
+                ),
+            )
+        ],
+    )
+    if hybrid.strategy is not CrawlStrategy.HYBRID:
+        raise AssertionError("мост hybrid (fetch_mode=HTTP) обязан дать strategy=hybrid")
+    honest = decide(
+        "k",
+        [
+            UrlProbe(
+                "https://example.test/",
+                ProbeSource.URLS,
+                (
+                    obs(status_code=403),
+                    obs(tier=ProbeTier.HONEST, fetch_mode=FetchMode.BROWSER),
+                ),
+            )
+        ],
+    )
+    if honest.strategy is not CrawlStrategy.HONEST:
+        raise AssertionError("рендер (fetch_mode=BROWSER) обязан дать strategy=honest")
+
+    # Оба тира провалились ⇒ unresolved (не browser) с причиной.
+    failed = decide(
+        "k",
+        [
+            UrlProbe(
+                "https://example.test/",
+                ProbeSource.URLS,
+                (
+                    obs(raised=True, error="http: transient", status_code=None, text_chars=0),
+                    obs(
+                        tier=ProbeTier.HONEST,
+                        raised=True,
+                        error="browser: fail",
+                        status_code=None,
+                        text_chars=0,
+                    ),
+                ),
+            )
+        ],
+    )
+    if failed.resolved or failed.fetch is not None:
+        raise AssertionError("оба провалившихся тира обязаны дать unresolved, не browser")
+    if ProbeReason.BOTH_TIERS_FAILED.value not in failed.reasons:
+        raise AssertionError("причина both_tiers_failed обязана быть записана")
+
+    # Синтез URL: source=synthesized ⇒ confidence=low на наблюдении.
+    synth = decide(
+        "k",
+        [
+            UrlProbe(
+                "https://k.test/",
+                ProbeSource.SYNTHESIZED,
+                (obs(source=ProbeSource.SYNTHESIZED),),
+            )
+        ],
+    )
+    if synth.observations[0].confidence is not ProbeConfidence.LOW:
+        raise AssertionError("synth-наблюдение обязано нести confidence=low")
+    if synth.confidence is not ProbeConfidence.LOW:
+        raise AssertionError("вердикт по synth-URL обязан быть low")
+
+    # Шапка: байт-в-байт + неизмеренные поля сохраняются.
+    raw = "# шапка\n# вторая строка\n\n" "a.test:\n  fetch: browser\n  strategy: honest\n  wait_for: \"x\"\n"
+    empty = decide("a.test", [])
+    header, _ = split_header(raw)
+    rendered = render_profiles_with_verdicts(raw, [empty])
+    if not rendered.startswith(header):
+        raise AssertionError("шапка обязана сохраняться байт-в-байт")
+    if "wait_for" not in rendered:
+        raise AssertionError("неизмеренное поле wait_for обязано сохраниться")
+    if "strategy" not in rendered:
+        raise AssertionError("неизмеренное поле strategy обязано сохраниться")
+    if "version" in rendered:
+        raise AssertionError("version в domain_profiles.yaml добавлять нельзя")
+
+    # Зеркало словаря (источник истины перечислений).
+    data = load_dictionary(ROOT / "docs" / "status-dictionary.yaml")
+    mirror = {
+        "crawl_probe_status": {v.value for v in ProbeKeyStatus},
+        "crawl_probe_source": {v.value for v in ProbeSource},
+        "crawl_probe_confidence": {v.value for v in ProbeConfidence},
+        "crawl_probe_reason": {v.value for v in ProbeReason},
+    }
+    for section, expected in mirror.items():
+        if set(data.get(section, [])) != expected:
+            raise AssertionError(
+                f"словарь.{section} рассинхронизирован: словарь={sorted(data.get(section, []))}, "
+                f"схема={sorted(expected)}"
+            )
 
 
 if __name__ == "__main__":
