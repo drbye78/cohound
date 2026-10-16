@@ -210,6 +210,7 @@ robots.txt-запрос оставлять на дефолтном HTTP-handler 
 | `hypothesis` | 6.168.x | MPL-2.0 ✅ | **a** | property-based проверка инвариантов I1–I23 и парсеров |
 | `respx` | 0.23.x | BSD-3 ✅ | **a** | мок `httpx` для LLM/SERP-адаптеров без сети |
 | `pytest-cov` | 7.1.x | MIT ✅ | **b** | покрытие |
+| `pytest-xdist` | 3.8.x | MIT ✅ | **b** | параллельный прогон (`-n auto --dist worksteal`); CI ускоряется ~2x. Транзитивно тянет `execnet` (MIT) |
 | `rich` / `typer` / `click` | 15.0 / 0.27 / 8.5 | MIT / BSD-3 ✅ | **b** | `argparse` хватает для MVP (A1); typer — при росте подкоманд |
 | `pydantic-settings` | 2.15.x | MIT ✅ | **b** | конфиг — YAML, поэтому опц.; **не ставить `[all]`** (boto3/azure) |
 | `orjson` | 3.13.x | Apache-2.0 ✅ | **b** | скорость сериализации; stdlib `json` достаточен |
@@ -301,7 +302,7 @@ robots.txt-запрос оставлять на дефолтном HTTP-handler 
 - **Опц. CPU-инференс:** ~~`llama-cpp-python` (GGUF) для тестов порта~~ — **снято** (не реализовано;
   вытеснено [OI]-совместимым клиентом внутреннего периметра, см. `06` §5.W9/§5.13).
 
-**Dev (`a`):** `pytest` · `hypothesis` · `respx` · `pytest-cov`.
+**Dev (`a`):** `pytest` · `pytest-xdist` · `hypothesis` · `respx` · `pytest-cov`.
 
 **Опционально (`b`):** `faiss-cpu`/`usearch` (ANN при росте), `model2vec` (лёгкая эмбеддинг-ветка),
 `markitdown`/`pypdf`/`pdfplumber` (fallback-экстракция), `selectolax`/`bs4`/`markdownify`,

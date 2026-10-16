@@ -18,12 +18,24 @@ echo "== selfcheck (автономный, без pytest) =="
 
 echo
 echo "== pytest + coverage ядра (порог в pyproject.toml) =="
+# Параллельный прогон, если доступен pytest-xdist; иначе — последовательно
+# (окружение минимально и провайдер-нейтрально, поэтому деградация мягкая).
+# Ограничение BLAS-потоков: тесты работают на малых массивах (индексы/векторы),
+# многопоточность не нужна, а под xdist она ведёт к переподписке ядер.
+export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 NUMEXPR_NUM_THREADS=1
+jobs=()
+if "$py" -c "import xdist" >/dev/null 2>&1; then
+  jobs=(-n auto --dist worksteal)
+  echo "   pytest-xdist доступен → параллельный прогон (-n auto --dist worksteal)"
+else
+  echo "   pytest-xdist не установлен → последовательный прогон"
+fi
 if "$py" -c "import pytest" >/dev/null 2>&1; then
   if "$py" -c "import pytest_cov" >/dev/null 2>&1; then
-    "$py" -m pytest -q --cov=core --cov-report=term-missing
+    "$py" -m pytest -q ${jobs[@]+"${jobs[@]}"} --cov=core --cov-report=term-missing
   else
     echo "pytest-cov не установлен — запускаю pytest без порога покрытия."
-    "$py" -m pytest -q
+    "$py" -m pytest -q ${jobs[@]+"${jobs[@]}"}
   fi
 else
   echo "pytest не установлен — пропускаю (selfcheck уже прошёл)."

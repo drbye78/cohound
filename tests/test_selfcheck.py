@@ -8,9 +8,12 @@ from __future__ import annotations
 
 import importlib
 
+import pytest
+
 import selfcheck
 
 
+@pytest.mark.slow
 def test_selfcheck_green() -> None:
     importlib.reload(selfcheck)
     assert selfcheck.main() == 0

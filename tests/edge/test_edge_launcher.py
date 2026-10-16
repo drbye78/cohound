@@ -400,6 +400,7 @@ def _build_crawler_in_worker(engine: str) -> str:
     return type(crawler_factory(engine)).__name__
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("method", ["forkserver", "spawn"])
 def test_worker_process_runs_real_crawler_factory(method: str) -> None:
     """B1: реальная фабрика выполняется в отдельном процессе (без сети/scrapy).

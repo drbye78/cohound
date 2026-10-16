@@ -99,6 +99,11 @@ bash scripts/ci.sh
 uv pip install -e '.[dev]'           # или воспроизводимо из лока: uv sync --frozen --extra dev
 python3 -m pytest -q
 
+# Параллельный прогон (pytest-xdist в extra dev) — ~2x быстрее последовательного;
+# ровно так же поступает scripts/ci.sh, если модуль xdist доступен:
+python3 -m pytest -q -n auto --dist worksteal                  # полный набор
+python3 -m pytest -q -n auto --dist worksteal -m "not slow"    # быстрое подмножество
+
 # Грепп-нейтральность ядра (§1.3) — предметных терминов в core/ быть не должно
 grep -rniE "postgres|pangolin|sber|сбер|copywala|платформа" core/
 
@@ -118,7 +123,7 @@ python3 -c "import sys; sys.path.insert(0,'.'); from core.store.sqlite import co
 зависимости стека имеют cp314/abi3-колёса — `docs/architecture/05-dependency-stack.md` §1;
 актуальный стабильный CPython на 2026-10 — 3.15, апгрейд — отдельное решение),
 `pydantic>=2`, `pyyaml`.
-Dev/CI по §11.6: `pytest`+`hypothesis`+`pytest-cov` в extra `dev`; единая точка входа — `scripts/ci.sh`.
+Dev/CI по §11.6: `pytest`+`pytest-xdist`+`hypothesis`+`pytest-cov` в extra `dev`; единая точка входа — `scripts/ci.sh`.
 Выбор внешних пакетов, лицензии и запреты — `docs/architecture/05-dependency-stack.md`
 (реестр решений; LangChain/LlamaIndex и все hosted-парсеры отклонены).
 Стратегия и статус реализации (потоки W1–W13 as-built, майлстоуны M0–M3, DoD) —

@@ -102,8 +102,11 @@ fallback = [
 ]
 
 # Dev/CI (§11.6): pytest пока не установлен — нужен для CI.
+# pytest-xdist — параллельный прогон (`-n auto`); CI включает его автоматически,
+# если модуль `xdist` доступен (иначе — последовательный graceful-fallback).
 dev = [
     "pytest>=9.1,<10",
+    "pytest-xdist>=3.8,<4",
     "hypothesis>=6.168,<7",
     "respx>=0.23,<0.24",
     "pytest-cov>=7.1,<8",
@@ -112,6 +115,11 @@ dev = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["selfcheck.py", "test_*.py"]
+markers = [
+    # Быстрое подмножество: `pytest -m "not slow"`. Маркер помечает тяжёлые
+    # интеграционные/IO-прогоны; отбор — по `--durations`, не по размеру файла.
+    "slow: тяжёлые интеграционные/IO-прогоны; исключаются быстрым подмножеством (-m 'not slow')",
+]
 
 [tool.coverage.run]
 source = ["core"]
