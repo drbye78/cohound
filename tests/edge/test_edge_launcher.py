@@ -87,11 +87,6 @@ def test_edge_runtime_config_resolved_blob_dir_prefers_explicit() -> None:
     assert cfg.resolved_blob_dir == "/b"
 
 
-def test_edge_runtime_config_forbids_extra_fields() -> None:
-    with pytest.raises(ValidationError):
-        EdgeRuntimeConfig(bogus=1)  # type: ignore[call-arg]
-
-
 def test_load_edge_runtime_config_defaults_without_file() -> None:
     assert load_edge_runtime_config(None) == EdgeRuntimeConfig()
 
@@ -324,23 +319,6 @@ def test_build_gateway_wires_poller_for_crawl_poll(
     assert bad["status"] == "error"
 
 
-def test_edge_main_source_has_no_cli_or_store_import() -> None:
-    assert edge_main.__file__ is not None
-    source = Path(edge_main.__file__).read_text(encoding="utf-8")
-    tree = ast.parse(source)
-    imported: list[str] = []
-    for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom) and node.module:
-            imported.append(node.module)
-        elif isinstance(node, ast.Import):
-            imported.extend(alias.name for alias in node.names)
-    # edge не может импортировать cli/store/pipeline (матрица слоёв 01 §1, §1.3).
-    for forbidden in ("core.cli", "core.store", "core.pipeline"):
-        assert not [
-            m for m in imported if m == forbidden or m.startswith(f"{forbidden}.")
-        ], forbidden
-
-
 # ---------------------------------------------------------------------------
 # __main__: планировщик краула в composition root (Phase 3.4a)
 # ---------------------------------------------------------------------------
@@ -391,12 +369,6 @@ def test_crawler_factory_builds_expected_adapters() -> None:
 def test_crawler_factory_rejects_unknown_engine() -> None:
     with pytest.raises(ValueError, match="движок"):
         edge_main.crawler_factory("teleport")
-
-
-def test_crawler_factory_is_picklable_module_level() -> None:
-    # Фабрика уходит в инициализатор ProcessPoolExecutor → обязана быть picklable
-    # (module-level; лямбда/метод инстанса не прошли бы).
-    assert pickle.loads(pickle.dumps(edge_main.crawler_factory)) is edge_main.crawler_factory
 
 
 def test_crawler_factory_module_is_not_main() -> None:

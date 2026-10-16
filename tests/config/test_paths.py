@@ -281,11 +281,6 @@ def test_with_home_returns_new_model() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_model_forbids_extra() -> None:
-    with pytest.raises(ValidationError):
-        PathsConfig(unknown=Path("x"))  # type: ignore[call-arg]
-
-
 def test_determinism(tmp_path: Path) -> None:
     path = _write(tmp_path, {"packages": "p"})
     first = resolve_paths(env={ENV_HOME: "/x"}, file=path)

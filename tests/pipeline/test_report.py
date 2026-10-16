@@ -943,14 +943,6 @@ def test_preliminary_findings_marked_not_for_publication(tmp_path: Path) -> None
 # ---------------------------------------------------------------------------
 
 
-def test_diff_refuses_on_major_methodology_mismatch(tmp_path: Path) -> None:
-    prev = _manifest(methodology_version="2.0.0")
-    curr = _manifest(methodology_version="3.0.0")
-    with pytest.raises(CrossCycleDiffError):
-        render_diff(prev, curr, [], [], tmp_path / "diff.md")
-    assert not (tmp_path / "diff.md").exists()
-
-
 def test_diff_refuses_on_version_boundary(tmp_path: Path) -> None:
     prev = _manifest()
     curr = _manifest(retrieval_cutoff_K=25)

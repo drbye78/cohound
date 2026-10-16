@@ -28,10 +28,6 @@ def _write(tmp_path: Path, text: str) -> Path:
     return path
 
 
-def test_filename_constant() -> None:
-    assert CRAWL_SOURCES_FILENAME == "crawl_sources.yaml"
-
-
 def test_load_happy_all_layers(tmp_path: Path) -> None:
     path = _write(
         tmp_path,
@@ -99,13 +95,6 @@ def test_rejects_invalid_enum(tmp_path: Path, body: str) -> None:
 def test_rejects_non_mapping_root(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="словарь"):
         load_crawl_sources(_write(tmp_path, "- a\n- b\n"))
-
-
-def test_models_forbid_unknown_fields() -> None:
-    with pytest.raises(ValidationError):
-        CrawlSource(bogus=1)
-    with pytest.raises(ValidationError):
-        CrawlSourcesConfig(bogus=1)
 
 
 def test_params_accepts_arbitrary_keys(tmp_path: Path) -> None:

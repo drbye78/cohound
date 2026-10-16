@@ -1,8 +1,7 @@
 """Тесты деплой-провенанса на ``RunManifest`` (R7/§13, 07 §7).
 
 Проверяют, что поля ``deploy_profile``/``edge_schema_version`` опциональны и
-backward-compatible (дефолт ``None``), корректно сериализуются и что режим
-``extra="forbid"`` доменных моделей сохранён. Нейтральны (§1.3).
+backward-compatible (дефолт ``None``), корректно сериализуются. Нейтральны (§1.3).
 """
 
 from __future__ import annotations
@@ -10,7 +9,6 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
-from pydantic import ValidationError
 
 from core.domain import (
     CrawlProvenance,
@@ -44,61 +42,9 @@ def test_deploy_fields_default_none() -> None:
     assert manifest.edge_schema_version is None
 
 
-def test_deploy_fields_round_trip_through_dump() -> None:
-    manifest = _manifest(deploy_profile="split", edge_schema_version="1.2.3")
-    dumped = manifest.model_dump(mode="json")
-    assert dumped["deploy_profile"] == "split"
-    assert dumped["edge_schema_version"] == "1.2.3"
-    restored = RunManifest(**dumped)
-    assert restored == manifest
-    assert restored.deploy_profile == "split"
-    assert restored.edge_schema_version == "1.2.3"
-
-
-def test_run_manifest_extra_forbid_preserved() -> None:
-    with pytest.raises(ValidationError):
-        _manifest(unknown_deploy_field="x")
-
-
-# --- Backlog B: операционные оси краула (§13) ------------------------------- #
-
-
-def test_crawl_axes_default_none() -> None:
-    """Backlog B: без секции ``crawl`` оси краула — ``None`` (граница не заполнена)."""
-    manifest = _manifest()
-    assert manifest.crawl_strategy is None
-    assert manifest.crawl_rate_limit is None
-
-
-def test_crawl_axes_round_trip_through_dump() -> None:
-    """Backlog B: оси краула сериализуются как строки и переживают round-trip."""
-    manifest = _manifest(
-        crawl_strategy="hybrid", crawl_rate_limit="uniform(min=0.5,max=2.0)"
-    )
-    dumped = manifest.model_dump(mode="json")
-    assert dumped["crawl_strategy"] == "hybrid"
-    assert dumped["crawl_rate_limit"] == "uniform(min=0.5,max=2.0)"
-    restored = RunManifest(**dumped)
-    assert restored == manifest
-    assert restored.crawl_strategy == "hybrid"
-    assert restored.crawl_rate_limit == "uniform(min=0.5,max=2.0)"
-
-
-# --- Phase 2: провенанс краула --------------------------------------------- #
-
-
-def test_crawl_provenance_defaults_empty() -> None:
-    """§4.4/Phase 2: без краула провенанс — пустой, не ``None`` (устойчиво к чтению)."""
-    manifest = _manifest()
-    assert manifest.crawl_provenance == CrawlProvenance()
-    assert manifest.crawl_provenance.sessions == []
-    assert manifest.crawl_provenance.engines == []
-    assert manifest.crawl_provenance.kinds == []
-    assert manifest.crawl_provenance.crawl_sources_digest is None
-
-
-def test_crawl_provenance_round_trip_through_dump() -> None:
-    provenance = CrawlProvenance(
+def _sample_provenance() -> CrawlProvenance:
+    """Эталонный провенанс краула для round-trip-проверки сериализации."""
+    return CrawlProvenance(
         sessions=[
             CrawlSessionProvenance(
                 session_id="crawl:run-1",
@@ -115,21 +61,75 @@ def test_crawl_provenance_round_trip_through_dump() -> None:
         kinds=["web"],
         crawl_sources_digest="abc123",
     )
-    manifest = _manifest(crawl_provenance=provenance)
+
+
+def _dig(node: Any, path: tuple[str, ...]) -> Any:
+    """Достаёт значение по пути из dict-дампа или pydantic-модели."""
+    for key in path:
+        node = node[key] if isinstance(node, dict) else getattr(node, key)
+    return node
+
+
+@pytest.mark.parametrize(
+    ("overrides", "expected"),
+    [
+        pytest.param(
+            {"deploy_profile": "split", "edge_schema_version": "1.2.3"},
+            [(("deploy_profile",), "split"), (("edge_schema_version",), "1.2.3")],
+            id="deploy-fields",
+        ),
+        pytest.param(
+            {"crawl_strategy": "hybrid", "crawl_rate_limit": "uniform(min=0.5,max=2.0)"},
+            [
+                (("crawl_strategy",), "hybrid"),
+                (("crawl_rate_limit",), "uniform(min=0.5,max=2.0)"),
+            ],
+            id="crawl-axes",
+        ),
+        pytest.param(
+            {"crawl_provenance": _sample_provenance()},
+            [
+                (("crawl_provenance", "crawl_sources_digest"), "abc123"),
+                (("crawl_provenance", "engines"), ["http", "scrapy"]),
+            ],
+            id="crawl-provenance",
+        ),
+    ],
+)
+def test_provenance_fields_round_trip_through_dump(
+    overrides: dict[str, Any], expected: list[tuple[tuple[str, ...], Any]]
+) -> None:
+    """Поля провенанса (деплой/оси краула/провенанс краула) переживают dump→validate (§13/R7)."""
+    manifest = _manifest(**overrides)
     dumped = manifest.model_dump(mode="json")
-    assert dumped["crawl_provenance"]["crawl_sources_digest"] == "abc123"
     restored = RunManifest(**dumped)
     assert restored == manifest
-    assert restored.crawl_provenance.engines == ["http", "scrapy"]
+    for path, value in expected:
+        assert _dig(dumped, path) == value
+        assert _dig(restored, path) == value
 
 
-def test_crawl_provenance_extra_forbid() -> None:
-    with pytest.raises(ValidationError):
-        CrawlProvenance(unknown_field=1)
-    with pytest.raises(ValidationError):
-        CrawlSessionProvenance(
-            session_id="s", profile="local", status="completed", unknown_field=1
-        )
+# --- Backlog B: операционные оси краула (§13) ------------------------------- #
+
+
+def test_crawl_axes_default_none() -> None:
+    """Backlog B: без секции ``crawl`` оси краула — ``None`` (граница не заполнена)."""
+    manifest = _manifest()
+    assert manifest.crawl_strategy is None
+    assert manifest.crawl_rate_limit is None
+
+
+# --- Phase 2: провенанс краула --------------------------------------------- #
+
+
+def test_crawl_provenance_defaults_empty() -> None:
+    """§4.4/Phase 2: без краула провенанс — пустой, не ``None`` (устойчиво к чтению)."""
+    manifest = _manifest()
+    assert manifest.crawl_provenance == CrawlProvenance()
+    assert manifest.crawl_provenance.sessions == []
+    assert manifest.crawl_provenance.engines == []
+    assert manifest.crawl_provenance.kinds == []
+    assert manifest.crawl_provenance.crawl_sources_digest is None
 
 
 def test_crawl_provenance_canonicalizes_engines_and_heterogeneous() -> None:

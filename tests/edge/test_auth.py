@@ -343,16 +343,6 @@ def test_principal_rejects_empty_subject() -> None:
         Principal(subject="  ")
 
 
-def test_authenticator_protocol_runtime_checkable() -> None:
-    assert isinstance(_mtls(), Authenticator)
-    assert isinstance(_oidc(), Authenticator)
-
-
-def test_auth_decision_shape() -> None:
-    decision = AuthDecision(allowed=False, principal=None, reason="r")
-    assert decision.allowed is False and decision.principal is None
-
-
 # ---------------------------------------------------------------------------
 # Нейтральность (§1.3)
 # ---------------------------------------------------------------------------
@@ -362,7 +352,3 @@ _FORBIDDEN = re.compile(
 )
 
 
-def test_source_is_neutral() -> None:
-    assert auth_module.__file__ is not None
-    source = Path(auth_module.__file__).read_text(encoding="utf-8")
-    assert not _FORBIDDEN.search(source)

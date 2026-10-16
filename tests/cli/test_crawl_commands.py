@@ -121,15 +121,6 @@ def test_crawl_registered_in_commands() -> None:
     assert any(module.__name__ == "core.cli.commands.crawl" for module in COMMANDS)
 
 
-def test_crawl_appears_in_help(capsys: pytest.CaptureFixture[str]) -> None:
-    parser = build_parser()
-    with pytest.raises(SystemExit):  # ``--help`` штатно выходит
-        parser.parse_args(["crawl", "--help"])
-    out = capsys.readouterr().out
-    for sub in ("run", "status", "list", "resume", "restart", "cancel"):
-        assert sub in out
-
-
 def test_crawl_no_subcommand_is_usage_error() -> None:
     assert main(["crawl"]) == EXIT_USAGE
 

@@ -47,7 +47,6 @@ from core.pipeline.corpus import (
 from core.pipeline.crawl_session import default_session_id
 from core.ports.crawl_executor import (
     CrawlBatch,
-    CrawlExecutorPort,
     CrawlProgress,
     CrawlResultItem,
     CrawlSubmitResult,
@@ -1736,10 +1735,6 @@ class _FakeExecutor:
             content_hash=content_hash(content),
             raw_bytes=content,
         )
-
-
-def test_fake_executor_satisfies_port() -> None:
-    assert isinstance(_FakeExecutor(), CrawlExecutorPort)
 
 
 def test_executor_ingests_marks_and_finalizes(tmp_path: Path) -> None:

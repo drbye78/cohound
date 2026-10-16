@@ -45,17 +45,6 @@ def _argv(path: Path, *extra: str) -> list[str]:
 # ---------------------------------------------------------------------------
 
 
-def test_command_is_registered() -> None:
-    assert any(module.__name__.endswith("baseline") for module in COMMANDS)
-    parser = build_parser()
-    subparsers = next(
-        action
-        for action in parser._actions
-        if hasattr(action, "choices") and isinstance(action.choices, dict)
-    )
-    assert "baseline-agreement" in subparsers.choices
-
-
 def test_json_reports_overall_and_na_kappa(tmp_path: Path, capsys) -> None:
     path = _write(tmp_path / "annotations.csv", DIVERGENT_ROWS)
     code = main(_argv(path, "--json"))

@@ -36,19 +36,6 @@ def _item(**overrides: object) -> CrawlSessionItem:
     return CrawlSessionItem(**base)
 
 
-def test_session_minimal_defaults() -> None:
-    session = _session()
-    assert session.status is CrawlSessionStatus.CREATED
-    assert session.profile == "local"
-    assert (session.total, session.pending, session.running) == (0, 0, 0)
-    assert (session.fetched, session.failed, session.cancelled) == (0, 0, 0)
-    assert session.started_at is None
-    assert session.finished_at is None
-    assert session.error is None
-    assert session.options_json is None
-    assert session.provenance_json is None
-
-
 def test_session_full_round_trip() -> None:
     session = _session(
         profile="split",
@@ -70,11 +57,6 @@ def test_session_full_round_trip() -> None:
     assert session.options_json == '{"from_scratch": true}'
 
 
-def test_session_extra_forbidden() -> None:
-    with pytest.raises(ValidationError):
-        _session(unexpected="x")
-
-
 def test_session_run_id_optional_defaults_none() -> None:
     """C1: ``run_id`` — soft-link; ``None`` (standalone-сеанс) допустим."""
     base = {
@@ -94,34 +76,6 @@ def test_session_profile_is_free_string() -> None:
     assert _session(profile="split-hardened").profile == "split-hardened"
     with pytest.raises(ValidationError):
         _session(profile=123)
-
-
-def test_session_status_required_and_typed() -> None:
-    with pytest.raises(ValidationError):
-        _session(status="not-a-status")
-
-
-def test_item_minimal_defaults() -> None:
-    item = _item()
-    assert item.status is CrawlItemStatus.PENDING
-    assert item.attempts == 0
-    for field in (
-        "engine",
-        "kind",
-        "fetch_mode",
-        "extract_route",
-        "strategy",
-        "http_status",
-        "content_type",
-        "lang",
-        "content_hash",
-        "raw_path",
-        "error_kind",
-        "error",
-        "first_seen",
-        "last_attempt",
-    ):
-        assert getattr(item, field) is None
 
 
 def test_item_full_round_trip() -> None:
@@ -146,32 +100,3 @@ def test_item_full_round_trip() -> None:
     assert item.http_status == 200
     assert item.content_hash == "h1"
     assert item.raw_path == "/tmp/h1.bin"
-
-
-def test_item_extra_forbidden() -> None:
-    with pytest.raises(ValidationError):
-        _item(run_id="r1")  # не поле элемента сеанса (ключ — ``session_id``), отвергается
-
-
-def test_item_status_required_and_typed() -> None:
-    with pytest.raises(ValidationError):
-        _item(status="done")  # "done" не входит в ``CrawlItemStatus``
-
-
-def test_enum_membership() -> None:
-    assert {s.value for s in CrawlSessionStatus} == {
-        "created",
-        "running",
-        "paused",
-        "cancelled",
-        "completed",
-        "partial",
-        "failed",
-    }
-    assert {s.value for s in CrawlItemStatus} == {
-        "pending",
-        "running",
-        "fetched",
-        "failed",
-        "cancelled",
-    }

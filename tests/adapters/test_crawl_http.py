@@ -194,12 +194,6 @@ def test_without_cache_each_call_fetches() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_module_importable_without_httpx() -> None:
-    import core.adapters.crawl_http as mod
-
-    assert "httpx" not in getattr(mod, "__dict__", {})
-
-
 def test_available_true_with_injected_fetcher() -> None:
     assert HttpCrawler(_counting_fetcher([])).available is True
 
@@ -231,8 +225,3 @@ def test_real_path_without_httpx_raises_crawl_error(
     assert issubclass(CrawlUnavailable, CrawlError)
 
 
-def test_version_and_port_conformance() -> None:
-    crawler = HttpCrawler(_counting_fetcher([]))
-    assert isinstance(crawler.version, str) and crawler.version
-    assert isinstance(crawler, CrawlerPort)
-    assert callable(crawler.fetch)

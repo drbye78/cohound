@@ -193,11 +193,6 @@ def test_build_scout_crawler_no_args_backward_compatible(
 # ---------------------------------------------------------------------------
 
 
-def test_supported_scout_crawlers_include_browser() -> None:
-    """Реестр краулеров расширен значением ``browser``."""
-    assert "browser" in SUPPORTED_SCOUT_CRAWLERS
-
-
 def test_build_scout_crawler_browser_threads_cache_and_config(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

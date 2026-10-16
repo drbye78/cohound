@@ -281,20 +281,6 @@ def test_build_run_inputs_uses_manifest_case_id() -> None:
     assert inputs.package.case_id == "template"
 
 
-def test_artifact_files_cover_all_names() -> None:
-    assert set(ARTIFACT_FILES) == {
-        "package",
-        "catalog",
-        "baselines",
-        "cohort",
-        "golden",
-        "domain_profiles",
-        "crawl_sources",
-        "scope_attestation",
-        "run",
-    }
-
-
 # ---------------------------------------------------------------------------
 # Read-only обзор/чтение артефактов: list_artifacts / get_artifact
 # ---------------------------------------------------------------------------

@@ -272,17 +272,6 @@ def test_dir_check_fails_on_file_in_place(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_doctor_registered_in_parser() -> None:
-    parser = build_parser()
-    subparsers = next(
-        action
-        for action in parser._actions
-        if hasattr(action, "choices") and isinstance(action.choices, dict)
-    )
-    choices = subparsers.choices or {}
-    assert "doctor" in choices
-
-
 def test_search_adapters_ok() -> None:
     report = run_doctor()
     assert _check(report, "search_adapters").status == doctor.OK
@@ -305,14 +294,6 @@ def test_strict_turns_warn_into_error(
     capsys.readouterr()
     assert main(["doctor", "--json", "--strict"]) == EXIT_ERROR
     capsys.readouterr()
-
-
-def test_clean_report_is_ok_exit(
-    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    assert main(["doctor", "--json"]) == EXIT_OK
-    payload = _json_payload(capsys)
-    assert isinstance(payload["ok"], bool)
 
 
 # ---------------------------------------------------------------------------

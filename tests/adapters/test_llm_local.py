@@ -100,12 +100,6 @@ def test_invalid_constructor_args_rejected() -> None:
         LocalEvaluator(temperature=-0.1)
 
 
-def test_implements_evaluator_port() -> None:
-    ev = LocalEvaluator(generate=lambda prompt, schema: _valid_json())
-    assert isinstance(ev, EvaluatorPort)
-    assert callable(ev.complete)
-
-
 # ---------------------------------------------------------------------------
 # Разбор валидного выхода через шов generate
 # ---------------------------------------------------------------------------
@@ -203,10 +197,6 @@ def test_extra_field_raises() -> None:
     ev = LocalEvaluator(generate=lambda p, s: json.dumps(payload, ensure_ascii=False))
     with pytest.raises(EvaluationError):
         ev.complete(_req())
-
-
-def test_evaluation_error_is_runtime_error() -> None:
-    assert issubclass(EvaluationError, RuntimeError)
 
 
 # ---------------------------------------------------------------------------

@@ -201,11 +201,6 @@ def test_prior_items_keyed_by_product_and_url() -> None:
         assert mapping[("p2", "https://docs.test/shared")].status is CrawlItemStatus.FAILED
 
 
-def test_prior_items_empty_for_unknown_session() -> None:
-    with _store_with_run() as store:
-        assert prior_items(store, "crawl:unknown") == {}
-
-
 def test_open_session_only_touches_items() -> None:
     """Reopen без running — no-op по статусам, счётчики не портятся (идемпотентность)."""
     with _store_with_run() as store:

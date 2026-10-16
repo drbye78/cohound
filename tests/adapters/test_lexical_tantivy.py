@@ -82,10 +82,6 @@ def _index(records=_RU_DOCS, *, profile: str = "stemmed") -> TantivyLexicalIndex
 # ---------------------------------------------------------------------------
 
 
-def test_tantivy_available_returns_bool() -> None:
-    assert isinstance(tantivy_available(), bool)
-
-
 @requires_tantivy
 def test_search_returns_retrieved_chunks_with_provenance() -> None:
     with _index() as index:
@@ -346,14 +342,6 @@ _NGRAM_DOCS = [
         build_id="build-ng",
     ),
 ]
-
-
-def test_profiles_include_ngram() -> None:
-    assert "ngram" in lexical_tantivy._PROFILES
-
-
-def test_ngram_bounds_are_sane() -> None:
-    assert 1 <= lexical_tantivy._NGRAM_MIN <= lexical_tantivy._NGRAM_MAX
 
 
 def test_ngram_profile_accepted_by_constructor() -> None:

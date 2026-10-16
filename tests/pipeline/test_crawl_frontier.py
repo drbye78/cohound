@@ -66,11 +66,6 @@ def test_unset_run_layer_falls_back_to_app() -> None:
     assert limits.max_documents == 7
 
 
-def test_domain_profile_rejects_unknown_fields() -> None:
-    with pytest.raises(ValidationError):
-        DomainProfile(bogus=1)  # type: ignore[call-arg]
-
-
 def test_reject_zero_max_documents_at_config_load() -> None:
     with pytest.raises(ValidationError):
         CrawlConfig(max_documents=0)

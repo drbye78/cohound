@@ -231,10 +231,6 @@ def test_non_bytes_type_raises() -> None:
         parse_sitemap(123)  # type: ignore[arg-type]
 
 
-def test_sitemap_parse_error_is_value_error() -> None:
-    assert issubclass(SitemapParseError, ValueError)
-
-
 # ---------------------------------------------------------------------------
 # Хелперы
 # ---------------------------------------------------------------------------

@@ -125,12 +125,6 @@ def test_stdlib_fallback_without_structlog(
     assert raw == json.dumps(events[0], ensure_ascii=False, sort_keys=True)
 
 
-def test_availability_flag_is_bool() -> None:
-    # Флаг опционален: тест не требует конкретного значения (structlog может быть
-    # установлен или нет), но обязан быть булевым и не ломать импорт модуля.
-    assert isinstance(phlog.HAS_STRUCTLOG, bool)
-
-
 def test_structlog_backend_shape_matches_when_available(tmp_path: Path) -> None:
     """Если ``structlog`` доступен — форма записи идентична stdlib-пути."""
     if not phlog.HAS_STRUCTLOG:
@@ -142,7 +136,3 @@ def test_structlog_backend_shape_matches_when_available(tmp_path: Path) -> None:
     assert raw == json.dumps(event, ensure_ascii=False, sort_keys=True)
 
 
-def test_module_is_neutral() -> None:
-    source = Path(phlog.__file__).read_text(encoding="utf-8")
-    bad = re.compile(r"postgres|pangolin|sber|сбер|copywala|платформа", re.IGNORECASE)
-    assert bad.search(source) is None

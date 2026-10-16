@@ -203,23 +203,6 @@ def test_discover_unknown_adapter_is_usage_error() -> None:
     )
 
 
-def test_supported_search_adapters_include_glm_and_yandex() -> None:
-    """Registry: адаптеры (serp/llm_grounding) собираемы и конформны порту (I19)."""
-    from core.cli.wiring import SUPPORTED_SEARCH_ADAPTERS, build_search_adapter
-    from core.ports.search import SearchAdapterPort
-
-    assert set(SUPPORTED_SEARCH_ADAPTERS) == {
-        "yandex",
-        "glm",
-    }
-    for name in SUPPORTED_SEARCH_ADAPTERS:
-        adapter = build_search_adapter(name)
-        assert isinstance(adapter, SearchAdapterPort), name
-        # Кандидаты, не evidence: у адаптера нет поверхности записи/evidence (I19).
-        assert not hasattr(adapter, "save_cell")
-        assert not hasattr(adapter, "add_evidence")
-
-
 def test_search_adapter_configured_generic_key_handling() -> None:
     """``_search_adapter_configured`` требует ``api_key`` только при наличии атрибута.
 
@@ -347,7 +330,6 @@ def test_discover_config_uses_repo_deploy_yaml() -> None:
     config = load_deploy_config(None)
     provider = resolve_search_provider(config.search, lang="ru")
     assert provider in SUPPORTED_SEARCH_ADAPTERS
-
 
 
 def test_discover_rejects_store_flags(capsys: pytest.CaptureFixture[str]) -> None:

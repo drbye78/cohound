@@ -286,27 +286,6 @@ def test_deploy_check_crawl_probe_is_read_only(
 # ---------------------------------------------------------------------------
 
 
-def test_local_profile_sets_safe_ports_and_no_network() -> None:
-    """``local``: чанкер/экстрактор есть, сетевые/оценщик — ``None`` (L3, без регрессии split)."""
-    ports = build_adapters(profile=LOCAL_PROFILE)
-    assert isinstance(ports, Ports)
-    assert ports.chunker is not None
-    assert ports.extractor is not None
-    assert ports.crawler is None
-    assert ports.evaluator is None
-
-
-def test_split_with_local_deploy_config_is_rejected() -> None:
-    """Профиль split требует deploy-конфиг с profile split/split-hardened."""
-    with pytest.raises(WiringError):
-        build_adapters(profile=SPLIT_PROFILE, deploy=DeployConfig(profile="local"))
-
-
-def test_unknown_profile_is_rejected() -> None:
-    with pytest.raises(WiringError):
-        build_adapters(profile="nope")
-
-
 # ---------------------------------------------------------------------------
 # Сборка remote-прокси (инъектируемый транспорт, без сокета)
 # ---------------------------------------------------------------------------

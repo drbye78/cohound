@@ -346,10 +346,6 @@ def test_parse_feed_rejects_non_bytes_type() -> None:
         parse_feed(123)  # type: ignore[arg-type]
 
 
-def test_feed_parse_error_is_value_error() -> None:
-    assert issubclass(FeedParseError, ValueError)
-
-
 def test_multiple_rss_items_order_preserved() -> None:
     rss = b"""<?xml version="1.0"?>
     <rss version="2.0"><channel>

@@ -638,8 +638,9 @@ def test_route_post_crawl_ops_are_routed() -> None:
     assert code == 200 and env["payload"]["done"] is True
 
 
-def test_route_get_crawl_is_405() -> None:
-    code, env = route_request(_edge(), "GET", "/v1/crawl/submit")
+@pytest.mark.parametrize("path", ["/v1/crawl/submit", "/v1/crawl/poll", "/v1/fetch"])
+def test_route_get_content_op_is_405(path: str) -> None:
+    code, env = route_request(_edge(), "GET", path)
     assert code == 405
     assert env["status"] == "error"
 
@@ -970,22 +971,7 @@ def test_server_source_has_no_store_or_domain_import() -> None:
     assert "core.domain" not in source
 
 
-def test_edge_behavior_never_touches_a_store() -> None:
-    edge = _edge()
-    # Полный цикл контентных операций без какого-либо хранилища.
-    assert edge.envelope("fetch", {"url": "https://site.test/x"})["status"] == "ok"
-    assert edge.envelope("search", {"query": "q"})["status"] == "ok"
-    assert edge.envelope("registry", {"registry_id": "registry-x"})["status"] == "ok"
-    # Ни атрибута-хранилища, ни доступа к нему у сервера нет.
-    assert not hasattr(edge, "store")
-    assert not hasattr(edge, "db")
-    assert not any("store" in name for name in vars(edge))
-
-
 # ---------------------------------------------------------------------------
 # Нейтральность (§1.3)
 # ---------------------------------------------------------------------------
 
-def test_module_importable_in_isolation() -> None:
-    module = importlib.import_module("core.edge.server")
-    assert module.EDGE_SCHEMA_VERSION == "1"

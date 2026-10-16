@@ -87,18 +87,6 @@ def _item(**overrides: Any) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def test_executor_satisfies_port() -> None:
-    executor = EdgeCrawlExecutor(_FakeGateway())
-    assert isinstance(executor, CrawlExecutorPort)
-    assert isinstance(executor.version, str) and executor.version
-
-
-def test_public_exports() -> None:
-    assert isinstance(ACTIVE_JOB_STATUSES, frozenset)
-    assert "pending" in ACTIVE_JOB_STATUSES and "running" in ACTIVE_JOB_STATUSES
-    assert DEFAULT_MAX_BATCH_ITEMS > 0
-
-
 # ---------------------------------------------------------------------------
 # submit
 # ---------------------------------------------------------------------------

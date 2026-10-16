@@ -226,18 +226,6 @@ def test_golden_with_package_catalog_has_no_gap_note(
     assert payload["notes"] == []
 
 
-def test_golden_argparse_requires_golden_and_source() -> None:
-    assert main(["golden", "--db", "x.db"]) == EXIT_USAGE
-    assert main(["golden", "--golden", "g.csv"]) == EXIT_USAGE
-
-
-def test_golden_runs_dir_without_run_id_is_usage_error(
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    assert main(["golden", "--golden", "g.csv", "--runs-dir", "runs"]) == EXIT_USAGE
-    assert "run-id" in capsys.readouterr().err
-
-
 # ---------------------------------------------------------------------------
 # report
 # ---------------------------------------------------------------------------
@@ -377,5 +365,3 @@ def test_report_human_prints_paths(
     assert "nda_questions:" in text
 
 
-def test_report_missing_source_is_usage_error() -> None:
-    assert main(["report"]) == EXIT_USAGE

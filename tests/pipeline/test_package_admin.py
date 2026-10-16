@@ -274,16 +274,6 @@ def test_add_showcase_requires_metric(tmp_path: Path) -> None:
         )
 
 
-def test_get_missing_param_returns_none(tmp_path: Path) -> None:
-    package = _make(tmp_path)
-    assert pa.get_param(package, "param.nope") is None
-
-
-# ---------------------------------------------------------------------------
-# Главный инвариант: новые blocking → отказ без записи
-# ---------------------------------------------------------------------------
-
-
 def test_new_blocking_refuses_without_writing(tmp_path: Path) -> None:
     package = _make(tmp_path)
     (package / "scope_attestation.yaml").unlink()

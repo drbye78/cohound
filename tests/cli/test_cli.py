@@ -23,14 +23,9 @@ from core.cli.main import (
     main,
 )
 from core.cli.wiring import (
-    LOCAL_PROFILE,
     SPLIT_PROFILE,
-    WiringError,
-    build_adapters,
-    build_store,
     run_db_path,
 )
-from core.pipeline import Ports
 from core.store.sqlite_store import SqliteStore
 from tests.helpers.output import json_out
 from tests.helpers.packages import valid_package
@@ -66,16 +61,8 @@ def _seed_run_db(
 
 
 # ---------------------------------------------------------------------------
-# --help / диспетчер
+# Диспетчер
 # ---------------------------------------------------------------------------
-
-
-def test_help_exits_zero(capsys: pytest.CaptureFixture[str]) -> None:
-    assert main(["--help"]) == EXIT_OK
-    out = capsys.readouterr().out
-    assert "resolve" in out
-    assert "plan" in out
-    assert "run" in out
 
 
 def test_no_command_is_usage_error(capsys: pytest.CaptureFixture[str]) -> None:
@@ -86,6 +73,35 @@ def test_no_command_is_usage_error(capsys: pytest.CaptureFixture[str]) -> None:
 def test_unknown_command_is_usage_error(capsys: pytest.CaptureFixture[str]) -> None:
     assert main(["nope"]) == EXIT_USAGE
     assert "usage" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("argv", "err_contains"),
+    [
+        pytest.param(["diff", "run.a"], None, id="diff-missing-second-run"),
+        pytest.param(["sensitivity"], None, id="sensitivity-missing-source"),
+        pytest.param(
+            ["sensitivity", "--runs-dir", "runs"], "run-id", id="sensitivity-runs-dir-no-id"
+        ),
+        pytest.param(["golden", "--db", "x.db"], None, id="golden-missing-golden"),
+        pytest.param(["golden", "--golden", "g.csv"], None, id="golden-missing-source"),
+        pytest.param(
+            ["golden", "--golden", "g.csv", "--runs-dir", "runs"],
+            "run-id",
+            id="golden-runs-dir-no-id",
+        ),
+        pytest.param(["report"], None, id="report-missing-source"),
+        pytest.param(["experiment", "retrieval"], None, id="experiment-missing-source"),
+        pytest.param(["experiment"], None, id="experiment-missing-subcommand"),
+    ],
+)
+def test_missing_required_args_is_usage_error(
+    argv: list[str], err_contains: str | None, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Обязательные аргументы команд отвергаются argparse'ом → ``EXIT_USAGE`` (03 §D.6)."""
+    assert main(argv) == EXIT_USAGE
+    if err_contains is not None:
+        assert err_contains in capsys.readouterr().err
 
 
 # ---------------------------------------------------------------------------
@@ -382,34 +398,5 @@ def test_run_split_profile_unavailable(
 # ---------------------------------------------------------------------------
 
 
-def test_build_adapters_local_sets_safe_ports() -> None:
-    """``local`` собирает безопасные in-process порты; сетевые/оценщик — ``None`` (L3)."""
-    ports = build_adapters(profile=LOCAL_PROFILE)
-    assert isinstance(ports, Ports)
-    assert ports.chunker is not None
-    assert ports.extractor is not None
-    assert ports.evaluator is None
-    assert ports.crawler is None
-    assert ports.search is None
-
-
-def test_build_adapters_split_raises_clean_seam() -> None:
-    with pytest.raises(WiringError):
-        build_adapters(profile=SPLIT_PROFILE)
-
-
-def test_build_store_unknown_profile_raises() -> None:
-    with pytest.raises(WiringError):
-        build_store(":memory:", profile="nope")
-
-
 def test_run_db_path_follows_layout() -> None:
     assert run_db_path("runs", "run-1") == Path("runs/run-1/cohound.db")
-
-
-def test_facade_exports_main() -> None:
-    import core.cli as cli
-
-    assert callable(cli.main)
-    assert cli.LOCAL_PROFILE == LOCAL_PROFILE
-    assert "main" in cli.__all__

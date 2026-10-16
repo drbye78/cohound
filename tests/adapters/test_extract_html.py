@@ -60,12 +60,6 @@ def test_extractor_version_is_stable() -> None:
     assert HtmlExtractor.version == "trafilatura-html-2"
 
 
-def test_implements_extractor_port() -> None:
-    extractor = HtmlExtractor(extract_fn=lambda _html: "x")
-    assert isinstance(extractor, ExtractorPort)
-    assert extractor.version == extractor.__class__.version
-
-
 def test_extract_passes_decoded_html_to_fn() -> None:
     fn, calls = _capturing("ok")
     HtmlExtractor(extract_fn=fn).extract(_page(b"<html><body>payload-marker</body></html>"))

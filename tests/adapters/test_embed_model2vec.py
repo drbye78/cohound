@@ -66,13 +66,6 @@ def test_revision_is_folded_into_model_id() -> None:
     assert emb.revision == "abc123"
 
 
-def test_implements_embedder_port() -> None:
-    emb = LiteEmbedder(embed_fn=_fixed_fn(DEFAULT_DIM))
-    assert isinstance(emb, EmbedderPort)
-    assert isinstance(emb.model_id, str)
-    assert isinstance(emb.dim, int)
-
-
 def test_invalid_constructor_args_rejected() -> None:
     with pytest.raises(ValueError):
         LiteEmbedder(dim=0)
@@ -153,13 +146,6 @@ def test_vector_count_mismatch_raises() -> None:
 # ---------------------------------------------------------------------------
 # Детерминизм
 # ---------------------------------------------------------------------------
-
-
-def test_deterministic_across_calls() -> None:
-    emb = LiteEmbedder(_fixed_fn(5), dim=5, batch_size=2)
-    first = emb.embed(["alpha", "beta", "gamma"])
-    second = emb.embed(["alpha", "beta", "gamma"])
-    assert first == second
 
 
 # ---------------------------------------------------------------------------

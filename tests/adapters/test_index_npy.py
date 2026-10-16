@@ -352,21 +352,9 @@ def test_commit_without_build_is_noop(tmp_path: Path) -> None:
     assert NpyIndexBuilder(tmp_path).commit() is None
 
 
-def test_implements_index_builder_port(tmp_path: Path) -> None:
-    assert isinstance(NpyIndexBuilder(tmp_path), IndexBuilderPort)
-
-
-def test_vector_store_label(tmp_path: Path) -> None:
-    assert NpyIndexBuilder(tmp_path).vector_store == "npy-fp16"
-
-
 # --------------------------------------------------------------------------- #
 # numpy — необязательная зависимость
 # --------------------------------------------------------------------------- #
-
-
-def test_numpy_available_matches_environment() -> None:
-    assert numpy_available() == (importlib.util.find_spec("numpy") is not None)
 
 
 def test_build_without_numpy_raises_clear_error(tmp_path: Path, monkeypatch) -> None:

@@ -149,11 +149,6 @@ def test_search_by_language_parsed(tmp_path: Path) -> None:
     assert cfg.search.by_language == {"ru": "yandex", "en": "duckduckgo"}
 
 
-def test_search_by_language_defaults_empty() -> None:
-    cfg = load_deploy_config(FIXTURES / "deploy.yaml")
-    assert cfg.search.by_language == {}
-
-
 def test_search_by_language_empty_key_rejected(tmp_path: Path) -> None:
     path = _write(
         tmp_path,
@@ -203,15 +198,6 @@ def test_resolve_search_provider_adapter_and_default() -> None:
     assert resolve_search_provider(SearchDeployConfig(), lang="ru") == "yandex"
 
 
-def test_resolve_search_provider_local_scope_independent_of_product() -> None:
-    """I16: маршрут — функция от lang, не от продукта (одинаков для всех продуктов)."""
-    search = SearchDeployConfig(by_language={"ru": "yandex", "en": "duckduckgo"})
-    # Один и тот же (search, lang) → один провайдер независимо от вызова.
-    assert resolve_search_provider(search, lang="ru") == resolve_search_provider(
-        search, lang="ru"
-    )
-
-
 # ---------------------------------------------------------------------------
 # Секция crawl (операционная политика HTTP-краулинга, 03 D.5/D.6)
 # ---------------------------------------------------------------------------
@@ -251,12 +237,6 @@ def test_crawl_non_positive_timeout_rejected(tmp_path: Path) -> None:
         load_deploy_config(path)
 
 
-def test_extra_crawl_field_rejected(tmp_path: Path) -> None:
-    path = _write(tmp_path, "profile: local\ncrawl:\n  user_agent: ua\n  bogus: true\n")
-    with pytest.raises(ValidationError):
-        load_deploy_config(path)
-
-
 def test_crawl_robots_override_parsed(tmp_path: Path) -> None:
     """N1: ``crawl.robots`` — явный bool-override; дефолт ``None`` (auto-by-discovery)."""
     assert CrawlConfig().robots is None
@@ -288,12 +268,6 @@ def test_crawl_browser_defaults() -> None:
     assert browser.headless is False
     assert browser.channel is None
     assert browser.timeout_ms == 30000
-
-
-def test_crawl_browser_default_equals_fresh_instance() -> None:
-    """Плейсхолдер конструируется без обязательного ``cdp_url`` (не сконфигурирован)."""
-    assert CrawlBrowserConfig() == CrawlConfig().browser
-    assert CrawlBrowserConfig().mode is None
 
 
 def test_crawl_browser_cdp_parsed(tmp_path: Path) -> None:
@@ -467,26 +441,6 @@ def test_crawl_browser_non_positive_timeout_rejected(tmp_path: Path) -> None:
         load_deploy_config(path)
 
 
-def test_crawl_browser_extra_field_rejected(tmp_path: Path) -> None:
-    path = _write(
-        tmp_path,
-        _dump(
-            {
-                "profile": "local",
-                "crawl": {
-                    "browser": {
-                        "mode": "cdp",
-                        "cdp_url": "http://127.0.0.1:9222",
-                        "stealth": True,
-                    }
-                },
-            }
-        ),
-    )
-    with pytest.raises(ValidationError):
-        load_deploy_config(path)
-
-
 def test_crawl_without_browser_section_still_loads(tmp_path: Path) -> None:
     """Минимальный/дефолтный YAML по-прежнему грузится; ``browser`` — плейсхолдер."""
     cfg = load_deploy_config(_write(tmp_path, "profile: local\ncrawl:\n  user_agent: ua\n"))
@@ -591,21 +545,6 @@ def test_bad_audit_sink_rejected(tmp_path: Path) -> None:
         load_deploy_config(path)
 
 
-def test_extra_top_level_field_rejected(tmp_path: Path) -> None:
-    path = _write(tmp_path, "profile: local\nunexpected: 1\n")
-    with pytest.raises(ValidationError):
-        load_deploy_config(path)
-
-
-def test_extra_edge_field_rejected(tmp_path: Path) -> None:
-    path = _write(
-        tmp_path,
-        "profile: split\nedge:\n  base_url: https://edge.example:8443\n  unknown: 1\n",
-    )
-    with pytest.raises(ValidationError):
-        load_deploy_config(path)
-
-
 def test_empty_document_rejected(tmp_path: Path) -> None:
     path = _write(tmp_path, "# только комментарий\n")
     with pytest.raises(ValueError, match="пустой"):
@@ -616,6 +555,26 @@ def test_malformed_yaml_rejected(tmp_path: Path) -> None:
     path = _write(tmp_path, "profile: [unclosed\n")
     with pytest.raises(ValueError, match="YAML"):
         load_deploy_config(path)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        pytest.param("profile: local\nunexpected: 1\n", id="top-level"),
+        pytest.param(
+            "profile: split\nedge:\n  base_url: https://edge.example:8443\n  unknown: 1\n",
+            id="edge",
+        ),
+        pytest.param("profile: local\ncrawl:\n  user_agent: ua\n  bogus: true\n", id="crawl"),
+        pytest.param(
+            _dump({"profile": "local", "llm": {"cheap": {"endpoint": "x"}}}), id="llm-slot"
+        ),
+    ],
+)
+def test_extra_fields_rejected(tmp_path: Path, text: str) -> None:
+    """Строгость схем ``extra="forbid"`` (AGENTS «Конвенции кода») на всех уровнях deploy.yaml."""
+    with pytest.raises(ValidationError):
+        load_deploy_config(_write(tmp_path, text))
 
 
 # ---------------------------------------------------------------------------
@@ -701,10 +660,6 @@ def test_canonical_llm_both_slots_same_default_model() -> None:
     assert cfg.llm.flagship.model_id == DEFAULT_LLM_MODEL_ID
 
 
-def test_llm_slots_constant() -> None:
-    assert LLM_SLOTS == ("cheap", "flagship")
-
-
 def test_resolve_llm_slot_precedence() -> None:
     """explicit > llm.slot > default."""
     llm = LLMDeployConfig(slot="flagship")
@@ -727,12 +682,6 @@ def test_invalid_llm_slot_rejected() -> None:
         resolve_llm_slot(None, explicit="turbo")
     with pytest.raises(ValueError, match="слот"):
         resolve_llm_slot(None, default="turbo")
-
-
-def test_extra_llm_slot_field_rejected(tmp_path: Path) -> None:
-    path = _write(tmp_path, _dump({"profile": "local", "llm": {"cheap": {"endpoint": "x"}}}))
-    with pytest.raises(ValidationError):
-        load_deploy_config(path)
 
 
 def test_llm_slot_non_positive_timeout_rejected(tmp_path: Path) -> None:

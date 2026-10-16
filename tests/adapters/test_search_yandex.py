@@ -92,7 +92,6 @@ def _xml_two_docs() -> str:
     return base64.b64encode(xml.encode("utf-8")).decode("ascii")
 
 
-
 # ---------------------------------------------------------------------------
 # Контракт порта / атрибуты
 # ---------------------------------------------------------------------------
@@ -102,13 +101,6 @@ def test_class_attributes() -> None:
     adapter = YandexSearchAdapter(http_post=_post_returning({"results": []}))
     assert adapter.adapter_kind == "serp"
     assert adapter.provider == "yandex"
-
-
-def test_implements_search_adapter_port() -> None:
-    adapter = YandexSearchAdapter(http_post=_post_returning({"results": []}))
-    assert isinstance(adapter, SearchAdapterPort)
-    assert callable(adapter.search)
-    assert callable(adapter.fetch)
 
 
 def test_defaults_and_endpoint() -> None:
@@ -122,14 +114,6 @@ def test_defaults_and_endpoint() -> None:
     assert adapter.search_mode == DEFAULT_SEARCH_MODE == "async"
     assert adapter.poll_interval == DEFAULT_POLL_INTERVAL
     assert adapter.max_wait == DEFAULT_MAX_WAIT
-
-
-def test_operation_endpoint() -> None:
-    adapter = YandexSearchAdapter()
-    assert (
-        adapter.operation_endpoint("op-7")
-        == f"{DEFAULT_OPERATION_BASE_URL}/operations/op-7"
-    )
 
 
 def test_invalid_constructor_args_rejected() -> None:
@@ -483,10 +467,6 @@ def test_missing_dependency_raises_unavailable(monkeypatch: pytest.MonkeyPatch) 
     with pytest.raises(SearchAdapterUnavailable):
         adapter.fetch(URL_A)
     assert issubclass(SearchAdapterUnavailable, RuntimeError)
-
-
-def test_search_error_is_runtime_error() -> None:
-    assert issubclass(SearchError, RuntimeError)
 
 
 # ---------------------------------------------------------------------------

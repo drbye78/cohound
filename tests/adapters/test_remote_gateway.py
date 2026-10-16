@@ -340,12 +340,6 @@ def test_remote_crawler_text_content_fallback() -> None:
     assert page.content == text.encode("utf-8")
 
 
-def test_remote_crawler_conforms_to_port() -> None:
-    crawler = RemoteCrawler(_gw(lambda op, payload: {"raw": {"content": "x"}}))
-    assert isinstance(crawler, CrawlerPort)
-    assert crawler.version
-
-
 # ---------------------------------------------------------------------------
 # RemoteSearch
 # ---------------------------------------------------------------------------

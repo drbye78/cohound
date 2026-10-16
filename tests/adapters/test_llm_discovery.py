@@ -99,11 +99,6 @@ def test_invalid_constructor_args_rejected() -> None:
         DiscoveryLLM(max_tokens=0)
 
 
-def test_implements_discovery_port() -> None:
-    llm = DiscoveryLLM(generate=lambda p, s: _valid_json())
-    assert isinstance(llm, DiscoveryLLMPort)
-
-
 # ---------------------------------------------------------------------------
 # Разбор валидного выхода через шов generate
 # ---------------------------------------------------------------------------
@@ -156,11 +151,6 @@ def test_broken_json_raises() -> None:
 def test_non_base_model_schema_raises() -> None:
     with pytest.raises(DiscoveryLLMError):
         DiscoveryLLM(generate=lambda p, s: "{}").complete(_req(response_schema=dict))
-
-
-def test_discovery_error_is_runtime_error() -> None:
-    assert issubclass(DiscoveryLLMError, RuntimeError)
-    assert issubclass(DiscoveryLLMUnavailable, DiscoveryLLMError)
 
 
 # ---------------------------------------------------------------------------

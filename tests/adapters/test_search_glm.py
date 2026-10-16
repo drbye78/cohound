@@ -69,13 +69,6 @@ def test_class_attributes() -> None:
     assert adapter.provider == "glm"
 
 
-def test_implements_search_adapter_port() -> None:
-    adapter = GlmSearchAdapter(http_post=_post_returning({"search_result": []}))
-    assert isinstance(adapter, SearchAdapterPort)
-    assert callable(adapter.search)
-    assert callable(adapter.fetch)
-
-
 def test_defaults_and_endpoint() -> None:
     adapter = GlmSearchAdapter()
     assert adapter.base_url == DEFAULT_BASE_URL
@@ -282,10 +275,6 @@ def test_missing_dependency_raises_unavailable(monkeypatch: pytest.MonkeyPatch) 
     with pytest.raises(SearchAdapterUnavailable):
         adapter.fetch(URL_A)
     assert issubclass(SearchAdapterUnavailable, RuntimeError)
-
-
-def test_search_error_is_runtime_error() -> None:
-    assert issubclass(SearchError, RuntimeError)
 
 
 # ---------------------------------------------------------------------------

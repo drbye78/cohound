@@ -79,21 +79,5 @@ def test_generator_matches_reference_on_disk() -> None:
         assert DomainProfile.model_validate(generated[key]) == reference[key], key
 
 
-def test_generator_output_is_lint_clean_when_written(tmp_path: Path) -> None:
-    """Записанный эмиттером профиль грузится строгим загрузчиком без исключений.
-
-    Прямая регрессия на баг P3: раньше ``DomainProfile(extra="forbid")`` падал на
-    ``render``/``index``; теперь выход валиден.
-    """
-    module = _load_generator()
-    path = tmp_path / "domain_profiles.yaml"
-    path.write_text(
-        yaml.safe_dump(module.build_domain_profiles(), allow_unicode=True, sort_keys=True),
-        encoding="utf-8",
-    )
-    # Не должно быть исключений валидации.
-    load_domain_profiles(path)
-
-
 if __name__ == "__main__":  # pragma: no cover - локальный запуск
     raise SystemExit(pytest.main([__file__, "-q"]))

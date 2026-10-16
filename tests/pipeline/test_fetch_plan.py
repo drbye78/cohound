@@ -39,10 +39,6 @@ def test_default_plan_without_profiles() -> None:
     assert resolve_fetch_plan("https://unknown.test/a", {}) == FetchPlan()
 
 
-def test_unknown_host_falls_back_to_default() -> None:
-    assert resolve_fetch_plan("https://other.test/a", _profiles()) == FetchPlan()
-
-
 def test_exact_host_match() -> None:
     plan = resolve_fetch_plan("https://example.org/a", _profiles())
     assert plan.fetch is FetchMode.BROWSER

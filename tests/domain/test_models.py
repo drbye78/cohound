@@ -105,11 +105,6 @@ def test_rate_limit_spec_negative_rejected() -> None:
         RateLimitSpec(min_s=-1.0, max_s=2.0)
 
 
-def test_rate_limit_spec_strict_extra_rejected() -> None:
-    with pytest.raises(ValidationError):
-        RateLimitSpec(min_s=1.0, max_s=2.0, jitter=1.0)  # type: ignore[call-arg]
-
-
 def test_crawl_run_config_defaults() -> None:
     cfg = CrawlRunConfig()
     assert cfg.strategy == "auto"
@@ -146,22 +141,17 @@ def test_rate_limit_spec_rejects_nan() -> None:
         RateLimitSpec(min_s=float("nan"), max_s=1.0)
 
 
-def test_rate_limit_spec_is_frozen() -> None:
-    spec = RateLimitSpec(min_s=1.0, max_s=2.0)
-    with pytest.raises((ValidationError, TypeError)):
-        spec.min_s = 9.0
-
-
-def test_rate_limit_spec_hashable() -> None:
-    spec = RateLimitSpec(min_s=1.0, max_s=2.0)
-    assert hash(spec) == hash(RateLimitSpec(min_s=1.0, max_s=2.0))
-
-
-def test_fetch_plan_with_rate_limit_is_hashable() -> None:
-    """Непустой ``rate_limit`` не ломает хешируемость ``FetchPlan`` (frozen value-объект)."""
-    plan = FetchPlan(rate_limit=RateLimitSpec(min_s=1.0, max_s=2.0))
-    assert hash(plan) == hash(FetchPlan(rate_limit=RateLimitSpec(min_s=1.0, max_s=2.0)))
-
-
-def test_fetch_plan_without_rate_limit_hashable() -> None:
-    assert hash(FetchPlan()) == hash(FetchPlan())
+@pytest.mark.parametrize(
+    ("factory", "kwargs"),
+    [
+        pytest.param(RateLimitSpec, {"min_s": 1.0, "max_s": 2.0}, id="rate-limit-spec"),
+        pytest.param(
+            FetchPlan,
+            {"rate_limit": RateLimitSpec(min_s=1.0, max_s=2.0)},
+            id="fetch-plan-with-rate-limit",
+        ),
+    ],
+)
+def test_frozen_value_objects_hashable(factory, kwargs) -> None:
+    """Frozen value-объекты хешируемы (в т.ч. непустой ``rate_limit`` не ломает ``FetchPlan``)."""
+    assert hash(factory(**kwargs)) == hash(factory(**kwargs))

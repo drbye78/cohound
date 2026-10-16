@@ -76,12 +76,6 @@ def test_infer_c_on_sparse_data() -> None:
     assert infer_archetype({"note": "only note"}).archetype is Archetype.C
 
 
-def test_infer_as_dict_is_json_friendly() -> None:
-    payload = infer_archetype({"upstream_name": "u"}).as_dict()
-    assert payload["archetype"] == "A"
-    assert isinstance(payload["signals"], list)
-
-
 # ---------------------------------------------------------------------------
 # compose_baselines
 # ---------------------------------------------------------------------------

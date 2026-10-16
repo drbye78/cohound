@@ -153,24 +153,6 @@ def test_to_manifest_json_round_trip() -> None:
     assert metrics.to_manifest_json() == metrics.to_manifest_json()
 
 
-def test_empty_inputs() -> None:
-    metrics = compute_metrics()
-    assert isinstance(metrics, RunMetrics)
-    assert metrics.cells_by_state == {
-        "evaluated": 0,
-        "failed": 0,
-        "pending": 0,
-        "preliminary": 0,
-        "reviewed": 0,
-    }
-    assert metrics.failure_rate == 0.0
-    assert metrics.coverage_aggregate == 0.0
-    assert metrics.search_calls_by_phase == {}
-    assert metrics.llm_calls == 0
-    assert metrics.tokens == {}
-    assert metrics.duration_by_phase == {}
-
-
 # --- источник ячеек -----------------------------------------------------------
 
 

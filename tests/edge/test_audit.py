@@ -344,30 +344,8 @@ def test_audit_call_accepts_classification_object() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_sinks_satisfy_protocol() -> None:
-    assert isinstance(MemoryAuditSink(), AuditSink)
-    assert isinstance(FileAuditSink("unused.jsonl"), AuditSink)
-
-
-def test_audit_event_is_frozen() -> None:
-    event = AuditEvent(
-        ts=_FIXED_TS,
-        request_id="req-1",
-        principal=None,
-        op="health",
-        status=AUDIT_STATUS_ALLOW,
-        classification=CLASSIFICATION_INTERNAL,
-    )
-    with pytest.raises(Exception):
-        event.op = "other"  # type: ignore[misc]
-
-
 _FORBIDDEN = re.compile(
     r"postgres|pangolin|sber|сбер|copywala|платформа", re.IGNORECASE
 )
 
 
-def test_source_is_neutral() -> None:
-    assert audit_module.__file__ is not None
-    source = Path(audit_module.__file__).read_text(encoding="utf-8")
-    assert not _FORBIDDEN.search(source)

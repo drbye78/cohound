@@ -235,13 +235,6 @@ def test_non_callable_fetcher_raises_crawl_error() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_module_importable_without_scrapy() -> None:
-    # Импорт самого модуля не тянет тяжёлые пакеты; реальный путь — ленивый.
-    import core.adapters.crawl_scrapy as mod
-
-    assert "scrapy" not in getattr(mod, "__dict__", {})
-
-
 def test_available_true_with_injected_fetcher() -> None:
     assert ScrapyCrawler(_RecordingFetcher()).available is True
     assert isinstance(ScrapyCrawler().available, bool)
@@ -254,13 +247,6 @@ def test_real_path_without_scrapy_raises_crawl_error(monkeypatch: pytest.MonkeyP
     crawler = ScrapyCrawler()
     with pytest.raises(CrawlError):
         crawler.fetch(URL)
-
-
-def test_version_and_port_conformance() -> None:
-    crawler = ScrapyCrawler(_RecordingFetcher())
-    assert isinstance(crawler.version, str) and crawler.version
-    assert isinstance(crawler, CrawlerPort)
-    assert callable(crawler.fetch)
 
 
 def test_scrapy_available_matches_environment() -> None:

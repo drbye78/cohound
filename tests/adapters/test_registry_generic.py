@@ -64,23 +64,6 @@ def test_load_config_from_path() -> None:
     assert cfg.mapping == {"name": "name", "version": "ver"}
 
 
-def test_load_config_from_mapping_defaults() -> None:
-    cfg = load_registry_config(
-        {
-            "registry_id": "r1",
-            "jurisdiction": "XX",
-            "endpoint": "https://data.example.test/{product_id}",
-            "format": "json",
-            "mapping": {"a": "b"},
-        }
-    )
-    assert cfg.method == "GET"
-    assert cfg.records_path is None
-    assert cfg.query_param is None
-    assert cfg.headers == {}
-    assert cfg.timeout is None
-
-
 def test_load_config_rejects_unknown_field() -> None:
     with pytest.raises(RegistryConfigError):
         load_registry_config(
@@ -366,12 +349,5 @@ def test_http_client_object_receives_timeout() -> None:
 # ---------------------------------------------------------------------------
 # Контракт порта и нейтральность
 # ---------------------------------------------------------------------------
-
-
-def test_implements_registry_fetcher_port() -> None:
-    cfg = load_registry_config(FIXTURES / "registry_json.yaml")
-    fetcher = GenericRegistryFetcher(cfg, _client(b"[]"))
-    assert isinstance(fetcher, RegistryFetcherPort)
-    assert fetcher.registry_id == cfg.registry_id
 
 

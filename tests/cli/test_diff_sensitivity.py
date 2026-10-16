@@ -23,7 +23,6 @@ import pytest
 from core.cli.main import (
     EXIT_ERROR,
     EXIT_OK,
-    EXIT_USAGE,
     main,
 )
 from core.domain.enums import (
@@ -300,23 +299,3 @@ def test_sensitivity_with_package_has_no_gap_note(
     assert payload["notes"] == []
     # Каталог из пакета применён: ось весов присутствует в форме плана.
     assert set(payload["per_axis"]["weights"]["rankings"]) == {"declared", "uniform"}
-
-
-# ---------------------------------------------------------------------------
-# argparse: обязательные аргументы
-# ---------------------------------------------------------------------------
-
-
-def test_diff_missing_positional_is_usage_error() -> None:
-    assert main(["diff", "run.a"]) == EXIT_USAGE
-
-
-def test_sensitivity_missing_source_is_usage_error() -> None:
-    assert main(["sensitivity"]) == EXIT_USAGE
-
-
-def test_sensitivity_runs_dir_without_run_id_is_usage_error(
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    assert main(["sensitivity", "--runs-dir", "runs"]) == EXIT_USAGE
-    assert "run-id" in capsys.readouterr().err

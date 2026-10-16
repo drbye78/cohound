@@ -20,7 +20,6 @@ from core.edge.seam_schema import (
     CRAWL_OPS,
     ENDPOINT_OPS,
     SEAM_SCHEMA_VERSION,
-    STRATEGY_VALUES,
     contract_digest,
     load_schema,
     validate_crawl_request,
@@ -69,18 +68,15 @@ def test_schema_files_exist_at_expected_paths() -> None:
         assert (seam_schema.SCHEMA_DIR / name).is_file(), name
 
 
-@pytest.mark.parametrize("name", _SCHEMA_FILES)
-def test_contracts_are_valid_json(name: str) -> None:
-    data = json.loads((seam_schema.SCHEMA_DIR / name).read_text(encoding="utf-8"))
-    assert isinstance(data, dict)
-
-
-@pytest.mark.parametrize("name", _SCHEMA_FILES)
-def test_contracts_declare_draft_2020_12(name: str) -> None:
-    data = json.loads((seam_schema.SCHEMA_DIR / name).read_text(encoding="utf-8"))
-    # openapi.json — не JSON Schema; у схем $schema обязателен.
-    if name != "openapi.json":
-        assert data["$schema"] == "https://json-schema.org/draft/2020-12/schema"
+def test_contracts_are_valid_json_and_declare_draft() -> None:
+    for name in _SCHEMA_FILES:
+        data = json.loads((seam_schema.SCHEMA_DIR / name).read_text(encoding="utf-8"))
+        assert isinstance(data, dict), name
+        # openapi.json — не JSON Schema; у схем $schema обязателен.
+        if name != "openapi.json":
+            assert (
+                data["$schema"] == "https://json-schema.org/draft/2020-12/schema"
+            ), name
 
 
 def test_envelope_schema_declares_contract_version() -> None:
@@ -92,12 +88,6 @@ def test_envelope_schema_declares_contract_version() -> None:
 def test_schema_version_matches_client_constant() -> None:
     # Клиент и публикуемая схема обязаны согласовываться (версионная граница §13).
     assert SEAM_SCHEMA_VERSION == DEFAULT_SCHEMA_VERSION
-
-
-def test_load_schema_accepts_full_filename_and_openapi() -> None:
-    assert load_schema("envelope.schema.json")["title"].startswith("coHound")
-    assert load_schema("openapi")["openapi"] == "3.1.0"
-    assert isinstance(load_schema("fetch"), dict)
 
 
 def test_load_schema_rejects_unknown_and_traversal() -> None:
@@ -112,58 +102,39 @@ def test_load_schema_rejects_unknown_and_traversal() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_validate_envelope_accepts_well_formed() -> None:
+def test_validate_envelope_accepts_ok_and_error_forms() -> None:
     assert validate_envelope(_ok({"answer": 42})) == []
+    assert (
+        validate_envelope(_ok(None) | {"status": "error", "error": "edge unavailable"})
+        == []
+    )
 
 
-def test_validate_envelope_rejects_non_mapping() -> None:
+def test_validate_envelope_rejects_invalid_forms() -> None:
     assert validate_envelope(["not", "a", "mapping"])  # type: ignore[arg-type]
 
+    missing_version = _ok({})
+    del missing_version["schema_version"]
+    assert any("schema_version" in v for v in validate_envelope(missing_version))
+    assert any(
+        "schema_version" in v
+        for v in validate_envelope(_ok({}) | {"schema_version": "999"})
+    )
 
-def test_validate_envelope_rejects_missing_schema_version() -> None:
-    envelope = _ok({})
-    del envelope["schema_version"]
-    violations = validate_envelope(envelope)
-    assert any("schema_version" in v for v in violations)
+    assert any("status" in v for v in validate_envelope(_ok({}) | {"status": "banana"}))
+    assert any(
+        "error" in v
+        for v in validate_envelope(_ok(None) | {"status": "error", "error": None})
+    )
 
+    missing_payload = _ok(None)
+    del missing_payload["payload"]
+    assert any("payload" in v for v in validate_envelope(missing_payload))
+    assert any("payload" in v for v in validate_envelope(_ok(None)))
 
-def test_validate_envelope_rejects_wrong_version() -> None:
-    violations = validate_envelope(_ok({}) | {"schema_version": "999"})
-    assert any("schema_version" in v for v in violations)
-
-
-def test_validate_envelope_rejects_unknown_status() -> None:
-    violations = validate_envelope(_ok({}) | {"status": "banana"})
-    assert any("status" in v for v in violations)
-
-
-def test_validate_envelope_rejects_error_without_error() -> None:
-    envelope = _ok(None) | {"status": "error", "error": None}
-    violations = validate_envelope(envelope)
-    assert any("error" in v for v in violations)
-
-
-def test_validate_envelope_rejects_ok_without_payload() -> None:
-    envelope = _ok(None)
-    del envelope["payload"]
-    violations = validate_envelope(envelope)
-    assert any("payload" in v for v in violations)
-
-
-def test_validate_envelope_rejects_ok_with_none_payload() -> None:
-    violations = validate_envelope(_ok(None))
-    assert any("payload" in v for v in violations)
-
-
-def test_validate_envelope_accepts_error_form() -> None:
-    envelope = _ok(None) | {"status": "error", "error": "edge unavailable"}
-    assert validate_envelope(envelope) == []
-
-
-def test_validate_envelope_rejects_missing_request_id() -> None:
-    envelope = _ok({})
-    del envelope["request_id"]
-    assert any("request_id" in v for v in validate_envelope(envelope))
+    missing_request_id = _ok({})
+    del missing_request_id["request_id"]
+    assert any("request_id" in v for v in validate_envelope(missing_request_id))
 
 
 # ---------------------------------------------------------------------------
@@ -203,18 +174,15 @@ def test_validate_payload_fetch_accepts_raw_or_text_or_error() -> None:
     assert validate_payload("fetch", {"text": None, "error": "gone"}) == []
 
 
-def test_validate_payload_fetch_rejects_non_mapping() -> None:
+def test_validate_payload_fetch_rejects_bad_forms() -> None:
     assert validate_payload("fetch", ["nope"])
-
-
-def test_validate_payload_fetch_rejects_wrong_field_type() -> None:
-    violations = validate_payload("fetch", {"status_code": "200"})
-    assert any("status_code" in v for v in violations)
-
-
-def test_validate_payload_fetch_rejects_empty_content() -> None:
-    violations = validate_payload("fetch", {"final_url": "https://x.test"})
-    assert any("raw" in v and "text" in v for v in violations)
+    assert any(
+        "status_code" in v for v in validate_payload("fetch", {"status_code": "200"})
+    )
+    assert any(
+        "raw" in v and "text" in v
+        for v in validate_payload("fetch", {"final_url": "https://x.test"})
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -243,11 +211,6 @@ def test_validate_fetch_request_rejects_unknown_axes() -> None:
 
 def test_validate_fetch_request_rejects_wrong_wait_for_type() -> None:
     assert validate_fetch_request({"url": "https://x.test", "wait_for": 5})
-
-
-def test_strategy_values_exported() -> None:
-    """Ось ``strategy`` объявлена как реэкспортируемая константа ``auto|honest|hybrid``."""
-    assert STRATEGY_VALUES == frozenset({"auto", "honest", "hybrid"})
 
 
 def test_fetch_schema_declares_strategy_axis() -> None:
@@ -578,15 +541,12 @@ def test_validate_payload_crawl_poll_rejects_bad_types() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_validate_payload_search_accepts_candidates() -> None:
+def test_validate_payload_search_accepts_candidates_and_wrapper() -> None:
     payload = [
         {"url": "https://a.test", "title": "A", "snippet": "sa", "rank": 1},
         {"url": "https://b.test", "title": "B", "snippet": "sb", "rank": 2},
     ]
     assert validate_payload("search", payload) == []
-
-
-def test_validate_payload_search_accepts_results_wrapper() -> None:
     assert validate_payload("search", {"results": [{"url": "https://a.test"}]}) == []
 
 

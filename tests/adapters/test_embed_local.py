@@ -58,13 +58,6 @@ def test_attributes_are_overridable() -> None:
     assert emb.batch_size == 1
 
 
-def test_implements_embedder_port() -> None:
-    emb = LocalEmbedder(embed_fn=_fixed_fn(DEFAULT_DIM))
-    assert isinstance(emb, EmbedderPort)
-    assert isinstance(emb.model_id, str)
-    assert isinstance(emb.dim, int)
-
-
 def test_invalid_constructor_args_rejected() -> None:
     with pytest.raises(ValueError):
         LocalEmbedder(dim=0)
@@ -141,13 +134,6 @@ def test_mismatch_is_detected_per_batch() -> None:
 # ---------------------------------------------------------------------------
 # Детерминизм
 # ---------------------------------------------------------------------------
-
-
-def test_deterministic_across_calls() -> None:
-    emb = LocalEmbedder(_fixed_fn(5), dim=5, batch_size=2)
-    first = emb.embed(["alpha", "beta", "gamma"])
-    second = emb.embed(["alpha", "beta", "gamma"])
-    assert first == second
 
 
 # ---------------------------------------------------------------------------

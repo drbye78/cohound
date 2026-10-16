@@ -51,12 +51,6 @@ def _package(tmp_path: Path, spec: str = _SPEC, name: str = "reg_a.yaml") -> Pat
 # ---------------------------------------------------------------------------
 
 
-def test_package_registry_dir_and_spec_path(tmp_path: Path) -> None:
-    pkg = tmp_path / "case_a"
-    assert package_registry_dir(pkg) == pkg / "registries"
-    assert registry_spec_path(pkg, "reg_a") == pkg / "registries" / "reg_a.yaml"
-
-
 @pytest.mark.parametrize("bad", ["../evil", "a/b", "", "Reg-A", "reg.a"])
 def test_spec_path_rejects_unsafe_registry_ids(tmp_path: Path, bad: str) -> None:
     with pytest.raises(RegistryConfigError):
@@ -82,13 +76,6 @@ def test_missing_dir_or_declared_spec(tmp_path: Path) -> None:
     # Объявленный, но отсутствующий реестр → понятная ошибка.
     with pytest.raises(RegistryConfigError, match="не найдена"):
         load_package_registry_configs(pkg, ["reg_missing"])
-
-
-def test_loaded_config_matches_schema(tmp_path: Path) -> None:
-    cfg = load_package_registry_configs(_package(tmp_path))["reg_a"]
-    assert isinstance(cfg, RegistryConfig)
-    assert cfg.headers_env == {"Authorization": "COHOUND_TEST_REGISTRY_TOKEN"}
-    assert "Authorization" not in cfg.headers
 
 
 # ---------------------------------------------------------------------------

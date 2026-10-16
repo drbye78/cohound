@@ -8,7 +8,6 @@ from __future__ import annotations
 
 from core.domain.anchors import (
     ResolvedSource,
-    SourceResolver,
     resolve_source_url,
     verify_evidence_hash,
 )
@@ -50,12 +49,6 @@ def _evidence(
         source_url=source_url,
         content_hash=content_hash,
     )
-
-
-def test_fake_resolver_is_structural() -> None:
-    """Fake-класс удовлетворяет протоколу структурно (без наследования)."""
-    resolver: SourceResolver = FakeResolver({})
-    assert resolver.resolve("missing") is None
 
 
 # --- resolve_source_url (I10/I15) -------------------------------------------

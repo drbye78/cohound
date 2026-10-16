@@ -409,7 +409,3 @@ def test_experiment_skips_when_build_lacks_embed_model_id(
     assert payload["skip_reason"] == "embedder_unverified"
 
 
-def test_experiment_requires_args(tmp_path: Path) -> None:
-    """Без обязательных аргументов (``--db``/``--runs-dir``, ``--golden``) — usage."""
-    assert main(["experiment", "retrieval"]) == EXIT_USAGE
-    assert main(["experiment"]) == EXIT_USAGE

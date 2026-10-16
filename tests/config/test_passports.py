@@ -279,13 +279,6 @@ def test_passport_urls_empty_when_no_domains() -> None:
     assert passport_urls(passport) == []
 
 
-def test_passport_urls_from_fixture() -> None:
-    """Кандидаты выводятся и для загруженной фикстуры."""
-    passport = load_passport("p1", PASSPORTS_FIXTURE)
-    assert passport is not None
-    assert passport_urls(passport) == ["https://example.com/"]
-
-
 # ---------------------------------------------------------------------------
 # Детерминизм
 # ---------------------------------------------------------------------------

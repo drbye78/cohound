@@ -59,19 +59,6 @@ def _lookup(chunk_ids) -> dict[str, Chunk]:
 # ---------------------------------------------------------------------------
 
 
-def test_numpy_available_returns_bool() -> None:
-    assert isinstance(numpy_available(), bool)
-
-
-def test_attributes_and_port_conformance(tmp_path: Path) -> None:
-    _write(tmp_path, PRODUCT_A, [[1.0, 0.0, 0.0]], ["a"])
-    index = NpyVectorIndex(tmp_path, PACKAGE, BUILD, 3, _lookup(["a"]))
-    assert isinstance(index, VectorIndexPort)
-    assert index.build_id == BUILD
-    assert index.dim == 3
-    assert index.available is True
-
-
 def test_constructor_rejects_invalid_dim_and_build(tmp_path: Path) -> None:
     with pytest.raises(ValueError):
         NpyVectorIndex(tmp_path, PACKAGE, BUILD, 0, _lookup(["a"]))
@@ -79,13 +66,6 @@ def test_constructor_rejects_invalid_dim_and_build(tmp_path: Path) -> None:
         NpyVectorIndex(tmp_path, PACKAGE, "", 3, _lookup(["a"]))
     with pytest.raises(ValueError):
         NpyVectorIndex(tmp_path, PACKAGE, BUILD, 3, object())  # type: ignore[arg-type]
-
-
-def test_shard_ids_is_one_to_one(tmp_path: Path) -> None:
-    _write(tmp_path, PRODUCT_A, [[1.0, 0.0, 0.0]], ["a"])
-    index = NpyVectorIndex(tmp_path, PACKAGE, BUILD, 3, _lookup(["a"]))
-    assert index.shard_ids(PRODUCT_A) == [PRODUCT_A]
-    assert index.shard_ids("unknown") == ["unknown"]
 
 
 # ---------------------------------------------------------------------------

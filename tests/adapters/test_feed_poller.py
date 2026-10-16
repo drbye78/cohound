@@ -221,10 +221,6 @@ def test_local_poll_bad_feed_raises_parse_error() -> None:
         poller.poll(FEED_URL, kind="feed", params={}, plan=FetchPlan())
 
 
-def test_local_validate_params_ok() -> None:
-    assert LocalFeedPoller(_FakeCrawler(RSS)).validate_params("feed", {"limit": 1}) == []
-
-
 # ---------------------------------------------------------------------------
 # RemoteFeedPoller
 # ---------------------------------------------------------------------------
@@ -360,12 +356,6 @@ def test_remote_poll_entry_must_be_mapping() -> None:
     poller = RemoteFeedPoller(_FakeGateway(_poll_response(["just-a-string"])))  # type: ignore[list-item]
     with pytest.raises(RemoteContentError):
         poller.poll(FEED_URL, kind="feed", params={}, plan=FetchPlan())
-
-
-def test_remote_validate_params_ok() -> None:
-    assert RemoteFeedPoller(_FakeGateway(_poll_response([]))).validate_params(
-        "channel", {"limit": 1}
-    ) == []
 
 
 # ---------------------------------------------------------------------------

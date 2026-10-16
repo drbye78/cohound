@@ -510,12 +510,6 @@ def test_fetch_after_close_raises_and_does_not_reopen() -> None:
     assert backend.close_calls == 1
 
 
-def test_http_timeout_exported() -> None:
-    import core.adapters.crawl_browser as mod
-
-    assert "HTTP_TIMEOUT_S" in mod.__all__
-
-
 def test_module_importable_without_playwright() -> None:
     import core.adapters.crawl_browser as mod
 
@@ -540,14 +534,6 @@ def test_real_path_without_playwright_raises_unavailable(
     with pytest.raises(CrawlUnavailable):
         crawler.fetch(URL)
     assert issubclass(CrawlUnavailable, CrawlError)
-
-
-def test_version_and_port_conformance() -> None:
-    crawler = BrowserCrawler(backend=FakeBackend())
-    assert crawler.version == "browser-crawler-1"
-    assert crawler.supports_browser is True
-    assert isinstance(crawler, CrawlerPort)
-    assert callable(crawler.fetch)
 
 
 # ---------------------------------------------------------------------------

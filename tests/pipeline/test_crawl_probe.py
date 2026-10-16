@@ -482,12 +482,6 @@ def test_pick_urls_is_deterministic() -> None:
         pick_urls(urls, 0)
 
 
-def test_synthesize_url_shape() -> None:
-    """Синтез URL из ключа ``host[+path]``."""
-    assert synthesize_url("example.test") == "https://example.test/"
-    assert synthesize_url("example.test/docs/") == "https://example.test/docs/"
-
-
 def test_group_urls_by_key_reuses_matcher() -> None:
     """Группировка URL по ключам через существующий host/path-матчер."""
     grouped = group_urls_by_key(

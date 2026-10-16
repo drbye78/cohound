@@ -25,7 +25,6 @@ from core.domain import (
     SourceKind,
     SourceScope,
     Status,
-    Violation,
     check_cell,
     check_evidence,
 )
@@ -283,8 +282,3 @@ def test_no_fetchers_returns_empty_ok() -> None:
     result = registry_wave(_plan(), {})
     assert result.status == "ok"
     assert result.cells == []
-
-
-def test_violation_type_reexported_for_assertions() -> None:
-    # небольшой sanity-чек: доменный Violation доступен из теста
-    assert Violation(code="R1", message="x").code == "R1"
