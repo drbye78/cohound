@@ -309,6 +309,10 @@ def main() -> int:
     check("text_utils: RU-нормализация токенов", lambda: _util_ru_tokenize())
     check("BM25: продукт-скоупед и детерминизм (I17/R7)", lambda: _bm25())
     check("retrieval_eval: hit@K/recall@K/MRR (I20)", lambda: _retrieval_eval())
+    check(
+        "agreement: Cohen's κ ок/отдельно по N/A, undefined вместо выдумки (§11.5)",
+        lambda: _agreement_kappa(),
+    )
 
     section("Порты (L2) — контракты (01 §3, W1/T1.1)")
     check("порты импортируются, все — Protocol", lambda: _ports_contracts())
@@ -560,6 +564,58 @@ def _retrieval_eval() -> None:
     # I20: cut-off K усекает ранжирование.
     short = evaluate_retrieval(queries, lambda q, k: ranking.get(q, []), k=1)
     _assert(abs(short.hit_at_k - 1 / 3) < 1e-9)      # только c2 на ранке 1
+
+
+def _agreement_kappa() -> None:
+    """§11.5: κ ок/отдельно по N/A, непарные ячейки, ``undefined`` вместо выдумки.
+
+    Инварианты согласия (чистая арифметика :mod:`core.util.agreement`): полное согласие → κ=1;
+    вырожденный маргинал → ``kappa is None`` (не 0/1); ячейка, размеченная одним аннотатором,
+    не считается согласием и исключается; N/A-κ считается по бинарному решению и **может**
+    расходиться с общим κ (ради чего §11.5 и требует публиковать его отдельно).
+    """
+    from core.domain.enums import Status
+    from core.util.agreement import compute_agreement, parse_annotations_csv
+
+    ok, absent, na = Status.OK.value, Status.ABSENT.value, Status.NOT_APPLICABLE.value
+    known = [s.value for s in Status]
+
+    rows = parse_annotations_csv(
+        "product_id,param_id,annotator_a,annotator_b\n"
+        f"p1,a,{ok},{ok}\n"
+        f"p1,b,{absent},{absent}\n"
+        f"p1,c,{na},\n"  # непарная: размечена одним аннотатором
+    )
+    report = compute_agreement(rows, na_label=na, known_labels=known)
+    _assert(report.paired_items == 2 and report.total_items == 3)
+    _assert(report.unpaired_items == ("p1/c",))
+    _assert(report.overall.kappa == 1.0 and report.overall.n == 2)
+
+    # Полное согласие по одной метке → ожидаемое согласие = 1 → κ не определён (не 0/1).
+    flat = compute_agreement(
+        parse_annotations_csv(f"product_id,param_id,annotator_a,annotator_b\np1,a,{ok},{ok}\n"),
+        na_label=na,
+        known_labels=known,
+    )
+    _assert(flat.overall.kappa is None and flat.overall.undefined_reason is not None)
+
+    # N/A-κ расходится с общим: у A и B по 3 N/A-решения, все — противоположные ячейки.
+    divergent = [(ok, ok)] * 10 + [(absent, absent)] * 4 + [(na, absent)] * 3 + [(absent, na)] * 3
+    text = "product_id,param_id,annotator_a,annotator_b\n" + "".join(
+        f"p1,x{i},{a},{b}\n" for i, (a, b) in enumerate(divergent)
+    )
+    div = compute_agreement(parse_annotations_csv(text), na_label=na, known_labels=known)
+    _assert(div.overall.kappa is not None and div.na_binary is not None)
+    _assert(div.na_binary.kappa is not None and div.na_binary.kappa < div.overall.kappa)
+    _assert(div.na_count_a == 3 and div.na_count_b == 3)
+
+    # Метка вне словаря не выкидывается молча — попадает в отчёт.
+    unknown = compute_agreement(
+        parse_annotations_csv(f"product_id,param_id,annotator_a,annotator_b\np1,a,OK,{ok}\n"),
+        na_label=na,
+        known_labels=known,
+    )
+    _assert(unknown.unknown_labels == {"OK": 1})
 
 
 def _ports_contracts() -> None:
@@ -2799,6 +2855,7 @@ def _cli_surface() -> None:
     required = {
         "resolve", "plan", "run", "discover", "review", "promote",
         "report", "golden", "sensitivity", "diff", "deploy-check", "doctor",
+        "baseline-agreement",
     }
     missing = required - commands
     if missing:

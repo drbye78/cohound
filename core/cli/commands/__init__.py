@@ -10,6 +10,7 @@ argparse) и :func:`run` (тело команды). :data:`COMMANDS` фикси�
 from __future__ import annotations
 
 from core.cli.commands import (
+    baseline,
     crawl,
     deploy,
     diff,
@@ -36,6 +37,7 @@ COMMANDS = (
     diff,
     sensitivity,
     golden,
+    baseline,
     report,
     discover,
     passport_scout,

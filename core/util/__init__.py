@@ -5,6 +5,7 @@ __all__ = [
     "security",
     "fusion",
     "retrieval_eval",
+    "agreement",
     "ids",
     "hashing",
     "cache",
