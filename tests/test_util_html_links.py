@@ -70,3 +70,26 @@ def test_does_not_raise_on_broken_html() -> None:
     assert extract_links(b'<a href="/x">no closing', BASE) == [
         "https://example.com/x"
     ]
+
+
+# --------------------------------------------------------------------------- #
+# (N3) <base href> как база разрешения относительных ссылок
+# --------------------------------------------------------------------------- #
+
+
+def test_base_href_overrides_resolution_base() -> None:
+    """N3: первый ``<base href>`` задаёт базу; последующие игнорируются."""
+    html = b'<base href="/root/"><a href="rel">r</a><base href="/ignored/">'
+    assert extract_links(html, BASE) == ["https://example.com/root/rel"]
+
+
+def test_without_base_href_uses_page_url() -> None:
+    """N3-контроль: без ``<base>`` поведение прежнее (база — URL страницы)."""
+    html = b'<a href="rel">r</a>'
+    assert extract_links(html, BASE) == ["https://example.com/dir/rel"]
+
+
+def test_base_href_absolute_host() -> None:
+    """N3: абсолютный ``<base>`` меняет host разрешения (как в браузере)."""
+    html = b'<base href="https://cdn.example.org/assets/"><a href="a">a</a>'
+    assert extract_links(html, BASE) == ["https://cdn.example.org/assets/a"]

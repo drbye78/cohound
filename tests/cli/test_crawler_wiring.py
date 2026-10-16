@@ -56,6 +56,7 @@ from core.config.deploy import CrawlBrowserConfig, CrawlConfig, DeployConfig
 from core.config.domain_profiles import DomainProfile
 from core.config.paths import PathsConfig
 from core.domain.enums import ExtractionRoute, FetchMode
+from core.domain.models import CrawlRunConfig
 from core.pipeline import Ports
 from core.pipeline.normalize import RunInputs
 from core.util.cache import ContentAddressedCache
@@ -913,3 +914,102 @@ def test_build_adapters_local_pollers_are_ports(tmp_path: Path, monkeypatch: pyt
 
     assert ports.pollers is not None
     assert all(isinstance(poller, PollPort) for poller in ports.pollers.values())
+
+
+# ---------------------------------------------------------------------------
+# N1: robots принуждается в адаптерах только при включённом discovery
+# ---------------------------------------------------------------------------
+
+
+def test_robots_disabled_without_discovery(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Без discovery (нет ``max_depth>0``/``sitemap``) robots не инъектируется."""
+    clear_env(monkeypatch, [ENV_SCOUT_CRAWLER])
+    monkeypatch.setenv(ENV_SCOUT_CRAWLER, "http")
+
+    crawler = build_scout_crawler(
+        deploy=DeployConfig(profile="local"),
+        cache=_cache(tmp_path),
+        domain_profiles=_profiles(),
+    )
+
+    assert isinstance(crawler, HttpCrawler)
+    assert crawler._robots is None
+
+
+def test_robots_enabled_by_run_max_depth(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """``run.yaml:crawl.max_depth>0`` (run-слой) включает robots."""
+    monkeypatch.setenv(ENV_SCOUT_CRAWLER, "http")
+
+    crawler = build_scout_crawler(
+        deploy=DeployConfig(profile="local"),
+        cache=_cache(tmp_path),
+        run_crawl=CrawlRunConfig(max_depth=1),
+    )
+
+    assert crawler._robots is not None
+
+
+def test_robots_enabled_by_sitemap_profile(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Сконфигурированный per-site ``sitemap`` включает robots (discovery)."""
+    monkeypatch.setenv(ENV_SCOUT_CRAWLER, "http")
+    profiles = {"example.com": DomainProfile(sitemap="https://example.com/sitemap.xml")}
+
+    crawler = build_scout_crawler(
+        deploy=DeployConfig(profile="local"),
+        cache=_cache(tmp_path),
+        domain_profiles=profiles,
+    )
+
+    assert crawler._robots is not None
+
+
+def test_robots_override_true_without_discovery(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Явный ``crawl.robots=True`` (app-слой) включает robots даже без discovery."""
+    monkeypatch.setenv(ENV_SCOUT_CRAWLER, "http")
+    deploy = DeployConfig(profile="local", crawl=CrawlConfig(robots=True))
+
+    crawler = build_scout_crawler(deploy=deploy, cache=_cache(tmp_path))
+
+    assert crawler._robots is not None
+
+
+def test_robots_override_false_with_discovery(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Явный ``crawl.robots=False`` выключает robots даже при discovery."""
+    monkeypatch.setenv(ENV_SCOUT_CRAWLER, "http")
+    deploy = DeployConfig(profile="local", crawl=CrawlConfig(robots=False))
+
+    crawler = build_scout_crawler(
+        deploy=deploy, cache=_cache(tmp_path), run_crawl=CrawlRunConfig(max_depth=1)
+    )
+
+    assert crawler._robots is None
+
+
+def test_wiring_robots_gate_refusal_is_distinct() -> None:
+    """N1: gate из проводки даёт отдельную причину ``robots_disallow`` (не общий сбой)."""
+    from core.adapters.crawl_scrapy import CrawlRefused
+
+    class _RobotsFetcher:
+        engine = "http"
+
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        def fetch(self, url: str, plan: Any = None) -> Any:
+            self.calls.append(url)
+            from core.ports.types import RawPage
+
+            return RawPage(
+                url=url,
+                content=b"User-agent: *\nDisallow: /blocked\n",
+                fetched_at="2026-01-01T00:00:00+00:00",
+            )
+
+    fetcher = _RobotsFetcher()
+    gate = wiring_mod._robots_gate(fetcher, user_agent="*")  # type: ignore[arg-type]
+    crawler = HttpCrawler(fetcher=lambda url: b"x", robots=gate)
+
+    with pytest.raises(CrawlRefused) as excinfo:
+        crawler.fetch("https://example.com/blocked")
+    assert excinfo.value.refusal_reason == "robots_disallow"
+    assert fetcher.calls == ["https://example.com/robots.txt"]

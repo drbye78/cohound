@@ -252,9 +252,26 @@ def test_crawl_non_positive_timeout_rejected(tmp_path: Path) -> None:
 
 
 def test_extra_crawl_field_rejected(tmp_path: Path) -> None:
-    path = _write(tmp_path, "profile: local\ncrawl:\n  user_agent: ua\n  robots: true\n")
+    path = _write(tmp_path, "profile: local\ncrawl:\n  user_agent: ua\n  bogus: true\n")
     with pytest.raises(ValidationError):
         load_deploy_config(path)
+
+
+def test_crawl_robots_override_parsed(tmp_path: Path) -> None:
+    """N1: ``crawl.robots`` — явный bool-override; дефолт ``None`` (auto-by-discovery)."""
+    assert CrawlConfig().robots is None
+    on_dir = tmp_path / "on"
+    on_dir.mkdir()
+    off_dir = tmp_path / "off"
+    off_dir.mkdir()
+    on = load_deploy_config(
+        _write(on_dir, "profile: local\ncrawl:\n  robots: true\n")
+    )
+    assert on.crawl.robots is True
+    off = load_deploy_config(
+        _write(off_dir, "profile: local\ncrawl:\n  robots: false\n")
+    )
+    assert off.crawl.robots is False
 
 
 # ---------------------------------------------------------------------------

@@ -541,3 +541,43 @@ def test_crawl_partial_session_returns_error_code(
     assert code == EXIT_ERROR
     payload = json_out(capsys)
     assert payload["session_status"] == "partial"
+
+
+def test_crawl_truncation_only_exits_ok_with_warning(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """N4: PARTIAL только из-за политического усечения → ``EXIT_OK`` + предупреждение,
+    усечение видно в payload."""
+    monkeypatch.chdir(tmp_path)
+    package = valid_package(tmp_path)
+    crawler = _RecordingCrawler(_pages())
+    code = main(
+        _run_argv(
+            package, action="run", run_id="cr-tr", db=tmp_path / "cr-tr.db",
+            urls=_urls_file(tmp_path), extra=("--max-documents", "1"),
+        ),
+        ports=_ports(crawler),
+    )
+    assert code == EXIT_OK
+    payload = json_out(capsys)
+    assert payload["session_status"] == "partial"
+    assert payload["crawl_truncation"]["truncated"] is True
+    assert payload["crawl_truncation"]["truncated_reason"] == "max_documents"
+    assert any("усечён политикой" in note for note in payload["notes"])
+
+
+def test_crawl_policy_truncation_with_failures_keeps_error(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """N4: реальный сбой фетча сохраняет ``EXIT_ERROR`` даже при наличии усечения."""
+    monkeypatch.chdir(tmp_path)
+    package = valid_package(tmp_path)
+    crawler = _RecordingCrawler(_pages(), raising={URL_P2})
+    code = main(
+        _run_argv(
+            package, action="run", run_id="cr-trf", db=tmp_path / "cr-trf.db",
+            urls=_urls_file(tmp_path), extra=("--max-documents", "1"),
+        ),
+        ports=_ports(crawler),
+    )
+    assert code == EXIT_ERROR

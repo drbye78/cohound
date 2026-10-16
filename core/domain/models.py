@@ -855,6 +855,12 @@ class RunManifest(BaseModel):
     crawl_max_documents: int | None = None
     crawl_exclude_paths: list[str] = Field(default_factory=list)
     crawl_exclude_documents: list[str] = Field(default_factory=list)
+    #: §13 (N6): стабильный дайджест **разрешённой** конфигурации контроля краула
+    #: (app ``deploy.yaml:crawl`` < run ``run.yaml:crawl`` < per-site ``domain_profiles``,
+    #: per site key). Одно поле ловит смену осей на **любом** слое (включая app/per-site,
+    #: которые индивидуальные поля ``crawl_max_*`` не покрывают) — и потому помечает
+    #: ``execution_change`` (§13), не ``methodology_change``.
+    crawl_config_digest: str | None = None
 
 
 class Violation(BaseModel):

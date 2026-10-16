@@ -201,6 +201,7 @@ def write_run_metrics(
     llm_calls: int = 0,
     tokens: Mapping[str, Any] | None = None,
     crawl_counts: Mapping[str, Any] | None = None,
+    crawl_truncation: Mapping[str, Any] | None = None,
 ) -> Path:
     """Считает :class:`~core.pipeline.metrics.RunMetrics` и пишет ``runs/{run_id}/metrics.json``.
 
@@ -221,6 +222,8 @@ def write_run_metrics(
     :param tokens: токены по категориям (``prompt``/``completion``/…).
     :param crawl_counts: счётчики durable-сеанса краула (Backlog A) — источник поля
         ``crawl`` метрик; ``None`` → пустая карта.
+    :param crawl_truncation: сводка политического усечения краула (N4) — источник поля
+        ``crawl_truncation``; ``None`` → пустой dict (не выдумываем усечение).
     :returns: путь записанного ``metrics.json``.
     """
     metrics = compute_metrics(
@@ -233,6 +236,7 @@ def write_run_metrics(
         llm_calls=llm_calls,
         tokens=tokens,
         crawl_counts=crawl_counts,
+        crawl_truncation=crawl_truncation,
     )
     target = Path(out_dir) / sanitize_filename(run_id) / METRICS_FILENAME
     target.parent.mkdir(parents=True, exist_ok=True)

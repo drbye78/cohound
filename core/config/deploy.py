@@ -350,6 +350,11 @@ class CrawlConfig(BaseModel):
     max_documents: int | None = Field(default=None, gt=0)
     exclude_paths: list[str] | None = None
     exclude_documents: list[str] | None = None
+    # D1/§10 (N1): явное включение/выключение принуждения ``robots.txt`` в адаптерах
+    # (egress-слой). ``None`` = auto: robots включается ровно тогда, когда включён обход
+    # (любой эффективный ``max_depth > 0`` или сконфигурированный per-site ``sitemap``),
+    # чтобы прогоны без discovery оставались байт-в-байт прежними (без fetch robots.txt).
+    robots: bool | None = None
 
     @field_validator("exclude_paths", "exclude_documents")
     @classmethod

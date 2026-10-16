@@ -61,6 +61,7 @@ CREATE TABLE IF NOT EXISTS runs (
     crawl_provenance_json TEXT,                        -- §4.4/Phase 2: провенанс краула (сеансы/движки/дайджест)
     crawl_strategy        TEXT,                        -- §13/Backlog B: ось стратегии краула (execution_change)
     crawl_rate_limit      TEXT,                        -- §13/Backlog B: канон. форма rate_limit (execution_change)
+    crawl_config_digest   TEXT,                        -- §13/N6: дайджест разрешённой конфигурации контроля краула (execution_change)
     ranking_epsilon       REAL,                        -- §6/B-1: порог неразличимости ранжирования
     deploy_profile        TEXT,                        -- 07 §7: профиль доверенных зон (R7)
     edge_schema_version   TEXT,                        -- 07 §7: версия контракта шва /v1/* (execution-class)
@@ -380,6 +381,9 @@ def connect(db_path: str | Path = ":memory:") -> sqlite3.Connection:
         "runs",
         {"crawl_strategy": "TEXT", "crawl_rate_limit": "TEXT"},
     )
+    # DDL-миграция v3.4 (N6): дайджест разрешённой конфигурации контроля краула — граница
+    # класса ``execution_change`` (§13); additive, старые БД получают колонку.
+    _ensure_columns(conn, "runs", {"crawl_config_digest": "TEXT"})
     # DDL-миграция v2.2 (P2): content-addressed build-id witness — версия экстрактора у чанка
     # и версия экстрактора + отпечаток содержимого у продукт-партиции манифеста.
     _ensure_columns(conn, "corpus_chunks", {"extractor_version": "TEXT"})

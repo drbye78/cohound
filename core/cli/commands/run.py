@@ -45,13 +45,18 @@ from core.cli.wiring import (
     run_db_path,
 )
 from core.config.deploy import is_split, load_deploy_config
-from core.domain import CrawlSessionStatus
+from core.domain import CrawlItemStatus, CrawlSessionStatus
 from core.pipeline import GATE_PHASES, PHASES
-from core.pipeline.crawl_session import default_session_id
+from core.pipeline.crawl_session import (
+    default_session_id,
+    read_provenance,
+    truncation_summary,
+)
 from core.pipeline.lint import lint_run_inputs
 from core.pipeline.normalize import load_inputs
 from core.pipeline.observability import instrument_phases, write_run_metrics
 from core.pipeline.plan import derive_run_id
+from core.pipeline.report import Artifacts
 from core.pipeline.runner import PhaseFn, _gate_phase
 
 #: Phase 4: хук сна цикла ``--follow`` (тесты инжектят no-op через monkeypatch).
@@ -190,6 +195,8 @@ def run(args: argparse.Namespace) -> int:
 
     instrumentation_errors: list[str] = []
     final_status: str | None = None
+    crawl_counts: dict[str, int] = {}
+    truncation: dict[str, Any] = {}
     store = build_store(db_path, profile=args.profile)
     try:
         _ensure_run(store, run_id, inputs)
@@ -254,9 +261,15 @@ def run(args: argparse.Namespace) -> int:
         try:
             # Backlog A: счётчики durable-сеанса краула в метрики. Соглашение об
             # ``session_id`` живёт на стороне CLI (least coupling): метрики не знают о нём.
-            crawl_counts = None
+            # N4: сводка политического усечения — из провенанса сеанса (для metrics.json).
             try:
+                session = store.get_crawl_session(default_session_id(run_id))
                 crawl_counts = store.crawl_session_counts(default_session_id(run_id))
+                truncation = (
+                    truncation_summary(read_provenance(session))
+                    if session is not None
+                    else {}
+                )
             except Exception as exc:  # noqa: BLE001 — метрики best-effort
                 instrumentation_errors.append(
                     f"crawl_counts: {type(exc).__name__}: {_concise(exc)}"
@@ -267,6 +280,7 @@ def run(args: argparse.Namespace) -> int:
                 durations=instrumentation.durations,
                 store=store,
                 crawl_counts=crawl_counts,
+                crawl_truncation=truncation or None,
             )
         except Exception as exc:  # noqa: BLE001 — наблюдаемость не роняет прогон
             instrumentation_errors.append(
@@ -285,6 +299,25 @@ def run(args: argparse.Namespace) -> int:
     payload = _run_report_payload(run_id, run_report, db_path)
     payload["session_id"] = session_id
     payload["session_status"] = final_status
+    # B3: аномалии (I3 ❓-протокол + crawl-усечение) — из артефактов фазы report, если она
+    # отработала; видны в run/--json payload (не только в nda_questions.csv).
+    artifacts_obj = next(
+        (
+            entry
+            for result_item in run_report.results
+            for entry in getattr(result_item, "log_entries", []) or []
+            if isinstance(entry, Artifacts)
+        ),
+        None,
+    )
+    if artifacts_obj is not None:
+        payload["i3_anomalies"] = list(artifacts_obj.i3_anomalies)
+        payload["crawl_truncation_anomalies"] = list(
+            artifacts_obj.crawl_truncation_anomalies
+        )
+    if truncation:
+        # N4: усечение видно в run/--json payload (а не только в провенансе сеанса).
+        payload["crawl_truncation"] = truncation
     if follow:
         payload["follow"] = True
     if filter_notes:
@@ -293,17 +326,33 @@ def run(args: argparse.Namespace) -> int:
         payload["instrumentation_errors"] = instrumentation_errors
     if deploy_fields:
         payload["deploy"] = deploy_fields
+    # N4: «только политическое усечение» — PARTIAL без реальных сбоев фетча. Такой прогон
+    # честно завершён (лимит достигнут), а не сломан: exit success + явная строка-предупреждение.
+    truncation_only = bool(truncation.get("truncated")) and not (
+        int(crawl_counts.get(CrawlItemStatus.FAILED.value, 0))
+        + int(crawl_counts.get(CrawlItemStatus.CANCELLED.value, 0))
+    )
+    if truncation_only:
+        warning = (
+            "краул усечён политикой (max_documents/max_depth): корпус неполон; "
+            f"продукты={truncation.get('truncated_products')}; "
+            f"страниц={truncation.get('pages_fetched')}"
+        )
+        payload["crawl_truncation_warning"] = warning
     if args.json:
         _print_json(payload)
     else:
         _print_run_report(payload)
     if run_report.stopped_at is None:
         # Phase 4: полный краул (или его отсутствие) → EXIT_OK; ``partial``/``failed`` сеанс
-        # (исчерпание попыток, back-pressure, source_unavailable) → EXIT_ERROR.
+        # (исчерпание попыток, back-pressure, source_unavailable) → EXIT_ERROR. N4: PARTIAL
+        # только из-за политического усечения (сбоев фетча нет) — EXIT_OK с предупреждением.
         if final_status in (
             CrawlSessionStatus.PARTIAL.value,
             CrawlSessionStatus.FAILED.value,
         ):
+            if truncation_only and final_status == CrawlSessionStatus.PARTIAL.value:
+                return EXIT_OK
             return EXIT_ERROR
         return EXIT_OK
     if run_report.status == "blocked":

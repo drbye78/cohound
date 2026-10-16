@@ -33,6 +33,8 @@ __all__ = [
     "open_session",
     "finalize_session",
     "prior_items",
+    "read_provenance",
+    "truncation_summary",
 ]
 
 
@@ -160,4 +162,46 @@ def prior_items(
     return {
         (item.product_id, item.url): item
         for item in store.iter_crawl_session_items(session_id)
+    }
+
+
+def read_provenance(session: Any) -> dict[str, Any]:
+    """Читает ``provenance_json`` сеанса как dict; пусто/сбой → ``{}`` (N4).
+
+    Публичная обёртка над разбором (единый источник для CLI: метрики/код возврата
+    читают политику усечения отсюда, не дублируя формат).
+    """
+    raw = getattr(session, "provenance_json", None)
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, ValueError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def truncation_summary(provenance: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Сводка политического усечения для payload/метрик (N4).
+
+    Форма — стабильная: ``truncated``/``truncated_reason``/``truncated_products``/
+    ``pages_fetched``/``effective_limits``. ``truncated_reason`` — первая причина
+    (``max_documents``/``max_depth``) среди записей ``effective_limits.roots``. Отсутствие
+    провенанса → нейтральный «не усечён» (не выдумываем усечение).
+    """
+    prov = provenance or {}
+    roots = (prov.get("effective_limits") or {}).get("roots") or []
+    reason: str | None = None
+    for record in roots:
+        if isinstance(record, Mapping) and record.get("truncated"):
+            reason = record.get("truncated_reason")
+            break
+    return {
+        "truncated": bool(prov.get("truncated")),
+        "truncated_reason": reason,
+        "truncated_products": sorted(
+            {str(p) for p in (prov.get("truncated_products") or [])}
+        ),
+        "pages_fetched": prov.get("pages_fetched"),
+        "effective_limits": dict(prov.get("effective_limits") or {}),
     }

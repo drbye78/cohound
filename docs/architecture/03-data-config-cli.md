@@ -181,9 +181,13 @@ class SqliteStore:
 `lexical_engine_version`, `vector_store`, `retrieval_profile`, `retrieval_cutoff_K`,
 `retrieval_params_json`, `llm_scenarios`, `crawl_strategy`, `crawl_rate_limit`,
 `crawl_max_workers`, `crawl_max_depth`, `crawl_max_documents`, `crawl_exclude_paths`,
-`crawl_exclude_documents`). Последние семь —
+`crawl_exclude_documents`, `crawl_config_digest`). Последние восемь —
 операционные оси краула (`run.yaml:crawl`, commodity-слой A2):
-их смена — `execution_change`, не `methodology_change` (Backlog B, D1/D2). `DIFF_BOUNDARY_FIELDS` сохранён алиасом
+их смена — `execution_change`, не `methodology_change` (Backlog B, D1/D2).
+`crawl_config_digest` (N6) — стабильный хеш **разрешённой** конфигурации контроля краула
+(цепочка app < run < per-site, по каждому site-key + `__default__`): ловит смену на
+**app-/per-site-слое**, которую индивидуальные `crawl_max_*` (только run-слой) не видят.
+`DIFF_BOUNDARY_FIELDS` сохранён алиасом
 `EXECUTION_FIELDS` (обратная совместимость). Дифф отказывает при обеих классах причин (§13).
 
 ### C.2. Версионные границы (bump + golden-full)
@@ -197,9 +201,10 @@ class SqliteStore:
   retrieval-golden и `execution_change` в diff, но **не** меняет `index_build_id`:
   ретривал-конфиг не влияет на чанкинг/векторы (P2).
 - Смена операционных осей краула (`crawl.strategy`/`crawl.rate_limit`/`crawl.max_depth`/
-  `crawl.max_documents`/`crawl.exclude_paths`/`crawl.exclude_documents`/`crawl.max_workers`) →
-  `execution_change` в diff (§13, Backlog B/D1), без bump `methodology_version`: commodity-слой
-  exec-условий (A2).
+  `crawl.max_documents`/`crawl.exclude_paths`/`crawl.exclude_documents`/`crawl.max_workers`/
+  `crawl.robots`) → `execution_change` в diff (§13, Backlog B/D1/N6), без bump
+  `methodology_version`: commodity-слой exec-условий (A2). Оси ловятся и на app-/per-site-слое
+  через `crawl_config_digest` (N6).
 - Смена prompt-шаблона → новый `prompt_hash`; ячейки с прошлым hash помечаются `stale_reason='prompt_template'`.
 - Смена `index_build_id` → затронутые ячейки помечаются `stale_reason='new_build'`; `stale`-ячейки
   не участвуют в расчёте до переоценки/ревью.
@@ -255,17 +260,44 @@ preliminary не совместим с capability_ranked — I13). `ranking_poli
 профиль домена → явный `--render-modes`).
 
 Секция `crawl` несёт также **оси контроля краула** (`max_workers`/`max_depth`/`max_documents`/
-`exclude_paths`/`exclude_documents`), разрешаемые **отдельной** цепочкой
+`exclude_paths`/`exclude_documents`/`robots`), разрешаемые **отдельной** цепочкой
 `deploy.yaml:crawl` (application default) < `run.yaml:crawl` (run profile) <
 `domain_profiles.yaml` (per-site) — `pipeline/crawl_frontier.py:resolve_crawl_limits`. Это
 **не** оси `crawl_sources.yaml` и **не** `FetchPlan`: отдельный канал, чтобы не сломать
 приоритет source-routing. `max_depth` дефолт `0` (только seeds) и под executor/split
 **отвергается** явной конфиг-ошибкой (BFS доступен только локальному пути до волнового
-паритета). `max_documents=0` отвергается на загрузке (`>0`). Блэклисты — glob (`fnmatchcase`,
-case-sensitive): `exclude_paths` по пути URL, `exclude_documents` по basename (`*.pdf`);
-применяются и к seeds, и к обнаруженным ссылкам. Усечение (`max_documents`/`max_depth`)
-честно фиксируется: сеанс краула не рапортуется `COMPLETED` (→ `PARTIAL`), а absence-evidence
-`source_scope: exhaustive` поверх усечённого продукта даёт аномалию для человека (§G/D1).
+паритета), причём только для host'ов, реально краулимых под executor (N8). `max_documents=0`
+отвергается на загрузке (`>0`). Блэклисты — glob (`fnmatchcase`, case-sensitive):
+`exclude_paths` по пути URL (паттерн принимается и с ведущим `/`, и без — `docs/*` ≡
+`/docs/*`, N5), `exclude_documents` по basename пути (`*.pdf`); применяются и к seeds, и к
+обнаруженным ссылкам. **Caveat `exclude_documents`:** имя файла, переданное только в
+query-строке (`/download?file=report.pdf`), basename не является и паттерном не ловится.
+
+`max_documents` — жёсткий потолок **на `(продукт, seed-root)`** (не исключение): в drain-цикле
+проверяется ёмкость, поэтому даже пакетно поставленные seeds/ссылки сверх потолка не
+фетчатся. На **resume** того же `session_id` бюджет корня инициализируется по durable-элементам
+сеанса (retained, в scope корня), поэтому повторный прогон не превышает потолок и не теряет
+признак усечения (B2). Усечение (`max_documents`/`max_depth`) честно фиксируется: сеанс краула
+не рапортуется `COMPLETED` (→ `PARTIAL`), а absence-evidence `source_scope: exhaustive` поверх
+усечённого продукта даёт аномалию для человека — строка `anomaly_kind=crawl_truncation` в
+`nda_questions.csv` и поле в JSON-payload артефактов/прогона (§G/D1, B3). Если **единственная**
+неполнота прогона — политическое усечение (сбоев фетча нет), команда завершается **успешно**
+с явным предупреждением; реальные сбои фетча сохраняют ненулевой код (N4).
+
+**Redirect-scope (B4).** Жёсткая проверка финального URL после редиректов применяется
+**только при discovery** (`max_depth > 0`): на глубине 0 оператор явно запросил URL, и
+финальная страница ретейнится как прежде (в т.ч. cross-host редирект) — это устраняет
+тихую потерю корпуса. При discovery проверка **симметрична** (`www↔apex`/родительский
+редирект не теряется), а настоящий уход из host-семейства поднимает явный
+`redirect_out_of_scope` (не молчаливый дроп).
+
+**robots (N1, §10).** Принуждение `robots.txt` в адаптерах (egress-слой, `RobotsGate`)
+включается **автоматически ровно при discovery** (любой эффективный `max_depth > 0` или
+сконфигурированный per-site `sitemap`); прогоны без discovery остаются байт-в-байт прежними
+(ни одного лишнего fetch `robots.txt`). Явный `crawl.robots: true|false` (app-слой)
+переопределяет автодетект. Отказ `Disallow` несёт отдельную причину `robots_disallow`
+(не общий сбой); фетч `robots.txt` ленивый и идёт внутри уже пейсимого `fetch`, поэтому
+владелец пейсинга остаётся один (`RateLimiter`, P2-3).
 
 ### D.2. Загрузчики пакета (`pipeline/normalize.py`)
 
@@ -450,8 +482,9 @@ crawl:                         # операционная политика HTTP-
   max_workers: 4               # опц. (>0): D4-задел конкурентности (исполнение пока однопоточное)
   max_depth: 0                 # >=0: 0 = только seeds (под executor/split >0 отвергается)
   max_documents: null          # опц. (>0): потолок добытых страниц на (продукт, seed-root)
-  exclude_paths: []            # glob блэклиста по пути URL (fnmatchcase)
+  exclude_paths: []            # glob блэклиста по пути URL (fnmatchcase; ведущий "/" опционален)
   exclude_documents: []        # glob блэклиста по basename URL, напр. ["*.pdf"]
+  robots: null                 # N1: null=auto (robots при discovery); true/false — явно
   browser:                     # браузерный краулер BrowserCrawler (honest/hybrid; 07)
     mode: cdp                  # cdp | persistent (декларативен; взаимоисключающие)
     cdp_url: "http://127.0.0.1:9222"    # mode: cdp — подключение к существующему браузеру
@@ -625,8 +658,15 @@ hound run \
 `--exclude-path GLOB` и `--exclude-document GLOB` (повторяемые glob-блэклисты по пути URL и
 по basename). Флаги уточняют **run-слой** поверх `run.yaml:crawl` (цепочка app < run < site);
 усечение (`max_documents`/`max_depth`) фиксируется честно — сеанс краула не рапортуется
-`COMPLETED`, а absence `source_scope: exhaustive` поверх усечённого продукта даёт аномалию.
-Под `--profile split`/executor `--max-depth > 0` отвергается явной конфиг-ошибкой.
+`COMPLETED` (→ `PARTIAL`), а absence `source_scope: exhaustive` поверх усечённого продукта
+даёт аномалию (в `nda_questions.csv` и JSON-payload). При **resume** бюджет `max_documents`
+корня восстанавливается из durable-элементов сеанса — потолок не превышается (B2).
+Под `--profile split`/executor `--max-depth > 0` отвергается явной конфиг-ошибкой (для
+host'ов в охвате прогона, N8).
+Поля `truncated`/`truncated_reason`/`effective_limits`/`pages_fetched` видны в
+`crawl`/`run` payload и в `metrics.json` (`crawl_truncation`); при **единственной**
+неполноте — политическом усечении без сбоев фетча — код возврата `EXIT_OK` с явным
+предупреждением; реальные сбои сохраняют `EXIT_ERROR` (N4).
 
 Подкоманды `hound package …` принимают `--package` как **путь к каталогу пакета**, так и**`case_id`** (резолвится в каталоге пакетов: `--dir`, иначе resolved `paths.packages`);
 несуществующий пакет — честный `EXIT_NOT_FOUND` (команды чтения fail-closed, а не ложный успех).

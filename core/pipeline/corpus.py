@@ -241,20 +241,27 @@ def _max_depth_requested(
     app: CrawlConfig | None,
     run: CrawlRunConfig | None,
     profiles: Mapping[str, DomainProfile] | None,
+    urls: Sequence[str] = (),
 ) -> int:
-    """Максимум ``max_depth``, запрошенный любым слоем app/run/site (D1, guard executor).
+    """Максимум ``max_depth``, запрошенный для **фактически краулимых** URL (D1, N8).
 
     Нужен, чтобы под executor/split **явно** отвергнуть ``max_depth > 0`` (молчаливое
     игнорирование дало бы расходящиеся корпуса профилей — ловушка сравнимости).
+    Резолв — через :func:`resolve_crawl_limits` по каждому URL работы: профиль, чей
+    ``max_depth > 0`` задан для host'а, который под executor **не** краулится, ошибкой
+    не становится (N8: guard не должен быть строже фактического охвата). App/run-уровни
+    учитываются безусловно (они применяются ко всем URL).
     """
-    values: list[int] = [app.max_depth if app is not None else 0]
+    app_config = app if app is not None else CrawlConfig()
+    best = int(app_config.max_depth or 0)
     if run is not None and run.max_depth is not None:
-        values.append(int(run.max_depth))
-    for profile in (profiles or {}).values():
-        depth = getattr(profile, "max_depth", None)
-        if depth is not None:
-            values.append(int(depth))
-    return max(values) if values else 0
+        best = max(best, int(run.max_depth))
+    for url in urls:
+        limits = resolve_crawl_limits(
+            url, app=app_config, run=run, profiles=profiles or {}
+        )
+        best = max(best, limits.max_depth)
+    return best
 
 
 def _now_iso() -> str:
@@ -1434,6 +1441,7 @@ def build_corpus(
         *,
         depth: int | None = None,
         scope_host: str | None = None,
+        enforce_redirect_scope: bool = False,
     ) -> tuple[RawPage, Path, FetchPlan, bool] | None:
         """Локальный per-URL путь: resume/браузер-guard/пейсинг/фетч/retention (Ш5).
 
@@ -1445,8 +1453,13 @@ def build_corpus(
         по ``wtarget.engine`` (fallback — ``crawler``).
 
         ``depth`` — глубина URL в BFS-frontier (персистится в элементе сеанса). ``scope_host``
-        — host seed-root: финальный ``RawPage.url`` после редиректов пере-проверяется на
-        принадлежность scope (D1: redirect-escape не ретейнится).
+        — host seed-root, ``enforce_redirect_scope`` — включён ли жёсткий redirect-scope
+        (B4/D1): проверка финального URL применяется **только** при ``max_depth > 0``
+        (discovery). На глубине 0 оператор явно запросил URL — финальная страница
+        ретейнится как прежде (восстановленное поведение до D1). При discovery проверка
+        **симметрична** (``_host_matches(final, root) or _host_matches(root, final)``):
+        www↔apex / родительский редирект не теряется, а настоящий уход из семейства
+        поднимает явный ``redirect_out_of_scope`` (не молчаливый дроп).
 
         **Известное ограничение.** ``BrowserCrawler`` рапортует **запрошенный** URL
         (``RawPage.url == url``), поэтому браузерный redirect-escape из ``RawPage`` не
@@ -1533,12 +1546,18 @@ def build_corpus(
             )
             return None
 
-        # D1: redirect-escape. Финальный URL (после HTTP-редиректов) обязан остаться в host-
-        # scope корня; иначе страницу не ретейним и не расширяем frontier (не «вытаскиваем»
-        # чужой контент под видом in-site страницы).
-        if scope_host:
+        # D1/B4: redirect-escape. При discovery (``max_depth > 0``) финальный URL (после
+        # HTTP-редиректов) обязан остаться в host-scope корня — иначе страницу не ретейним
+        # и не расширяем frontier (не «вытаскиваем» чужой контент под видом in-site).
+        # На глубине 0 проверка выключена (оператор явно запросил URL) — прежнее поведение.
+        if scope_host and enforce_redirect_scope:
             final_host = (urlsplit(page.url).hostname or "").lower()
-            if final_host and not _host_matches(final_host, scope_host):
+            # Симметрия: www→apex и apex→www — одно семейство; сравнение «final в root»
+            # в одну сторону теряло бы легитимный redirect www↔apex.
+            if final_host and not (
+                _host_matches(final_host, scope_host)
+                or _host_matches(scope_host, final_host)
+            ):
                 reason = (
                     f"redirect вышел из scope: {page.url!r} "
                     f"(root host {scope_host!r})"
@@ -1694,7 +1713,10 @@ def build_corpus(
     # паритета. Молча игнорировать ``max_depth`` нельзя — это дало бы разные корпуса у
     # профилей (ловушка сравнимости). Явная конфиг-ошибка.
     if executor is not None and _max_depth_requested(
-        crawl_app, crawl_defaults, domain_profiles
+        crawl_app,
+        crawl_defaults,
+        domain_profiles,
+        [url for urls_for_product in url_map.values() for url in urls_for_product],
     ) > 0:
         raise ValueError(
             "max_depth > 0 не поддержан при executor/split: BFS-frontier доступен только "
@@ -1734,6 +1756,19 @@ def build_corpus(
                 profiles=domain_profiles or {},
             )
             frontier = Frontier(root_url, limits)
+            # B2 (resume-бюджет): уже израсходованные страницы этого корня считаются из
+            # durable-элементов сеанса (status FETCHED/FAILED с реально доступным retained
+            # raw), чей URL в scope корня. Иначе повторный прогон того же session_id начал
+            # бы ``fetched`` с нуля, заново обошёл resumed-страницу, превысил max_documents
+            # и ложно финализировался COMPLETED. Считаем только resume-пригодные элементы
+            # (fresh-фетч этого прогона инкрементит счётчик сам), чтобы не задвоить бюджет.
+            consumed = sum(
+                1
+                for (ipid, iurl), item in items.items()
+                if ipid == pid and frontier.in_scope(iurl)
+                and _resume_source(item) is not None
+            )
+            frontier.note_consumed(consumed)
             seed_status = frontier.add_seed(root_url)
             if seed_status == "blacklisted":
                 errors.append(
@@ -1815,7 +1850,14 @@ def build_corpus(
                     targets[(pid, work_url)] = work_target
 
                 outcome = _process_local(
-                    pid, work_url, work_target, depth=depth, scope_host=frontier.root_host
+                    pid,
+                    work_url,
+                    work_target,
+                    depth=depth,
+                    scope_host=frontier.root_host,
+                    # B4: жёсткий redirect-scope — только при discovery (max_depth > 0);
+                    # на глубине 0 финальная страница ретейнится как прежде.
+                    enforce_redirect_scope=limits.max_depth > 0,
                 )
                 if outcome is None:
                     continue  # отказ/сбой — frontier от него не расширяется

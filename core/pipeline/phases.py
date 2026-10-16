@@ -573,6 +573,10 @@ def build_phases(
             retrieval_cutoff_K=holder.get("retrieval_cutoff_K"),
             retrieval_params_json=_retrieval_params_json(holder),
             crawl_provenance=_crawl_provenance(ctx.store, inputs, plan.run_id),
+            # N6: разрешённая конфигурация контроля краула (app<run<site) — дайджест в
+            # манифест, чтобы смена осей на app/per-site слое тоже давала execution_change.
+            domain_profiles=domain_profiles,
+            crawl_app=crawl_app,
         )
         # R7/§13: финальный манифест — самостоятельная запись воспроизведения,
         # поэтому персистится в операционную БД прогона (версии/индекс/провенанс).

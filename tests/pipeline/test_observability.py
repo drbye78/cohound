@@ -42,6 +42,7 @@ B2_KEYS = {
     "tokens",
     "duration_by_phase",
     "crawl",
+    "crawl_truncation",
 }
 
 STAMP = "2026-10-09T00:00:00+00:00"

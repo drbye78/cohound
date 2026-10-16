@@ -60,6 +60,8 @@ from core.domain.models import (
     canonical_rate_limit,
 )
 from core.domain.scoring import Comparability, Coverage, Score, SensitivityReport
+from core.config.deploy import CrawlConfig
+from core.config.domain_profiles import DomainProfile
 from core.pipeline.compute import ScoreBundle, compute, publish_warnings
 from core.pipeline.report import (
     DIFF_BOUNDARY_FIELDS,
@@ -396,6 +398,59 @@ def test_build_manifest_crawl_axes_none_without_section() -> None:
     )
     assert manifest.crawl_strategy is None
     assert manifest.crawl_rate_limit is None
+
+
+def test_crawl_config_digest_covers_all_layers_and_flags_execution_change() -> None:
+    """N6: дайджест разрешённой конфигурации контроля краула ловит смену на app/per-site
+    слое и помечает ``execution_change`` (§13)."""
+    cfg = RunConfig(
+        case_id="case-1",
+        anchor=PRODUCT_A,
+        cohort="cohort-1",
+        products=[PRODUCT_A],
+        package="pkg",
+        snapshot_date=_dt.date(2026, 1, 1),
+        mode=RunMode.STRICT,
+    )
+    inputs = SimpleNamespace(run=cfg, package=None)
+    plan = SimpleNamespace(
+        run_id="run-digest", anchor=PRODUCT_A, modules=[], cohort_ref="cohort-1"
+    )
+    base = build_manifest(
+        inputs=inputs, plan=plan, created_at="2026-01-01T00:00:00Z"  # type: ignore[arg-type]
+    )
+    assert "crawl_config_digest" in EXECUTION_FIELDS
+    assert base.crawl_config_digest
+
+    # App-слой (deploy.yaml:crawl) — run-поле не менялось, но дайджест обязан измениться.
+    app = CrawlConfig(max_depth=1)
+    app_changed = build_manifest(
+        inputs=inputs,
+        plan=plan,
+        created_at="2026-01-01T00:00:00Z",  # type: ignore[arg-type]
+        crawl_app=app,
+    )
+    assert app_changed.crawl_config_digest != base.crawl_config_digest
+    violations = diff_boundary_violations(base, app_changed)
+    assert any(
+        v.startswith("execution_change: crawl_config_digest") for v in violations
+    )
+
+    # Per-site слой (domain_profiles) — тоже обязан изменить дайджест.
+    site_a = build_manifest(
+        inputs=inputs,
+        plan=plan,
+        created_at="2026-01-01T00:00:00Z",  # type: ignore[arg-type]
+        domain_profiles={"example.com": DomainProfile(max_depth=1)},
+    )
+    site_b = build_manifest(
+        inputs=inputs,
+        plan=plan,
+        created_at="2026-01-01T00:00:00Z",  # type: ignore[arg-type]
+        domain_profiles={"example.com": DomainProfile(max_depth=2)},
+    )
+    assert site_a.crawl_config_digest != site_b.crawl_config_digest
+    assert site_a.crawl_config_digest != base.crawl_config_digest
 
 
 def test_canonical_rate_limit_is_stable_string() -> None:
@@ -762,6 +817,107 @@ def test_nda_questions_records_i3_anomaly(tmp_path: Path) -> None:
         (PRODUCT_A, "param.missing"),
     }
     assert all(a["reason"].startswith("I3:") for a in anomalies)
+
+
+def test_nda_questions_includes_crawl_truncation_rows(tmp_path: Path) -> None:
+    """B3: аномалии усечённого краула дописываются в операторский CSV и отличимы."""
+    cells = [_cell(PRODUCT_A, "param.u", Status.UNKNOWN)]
+    truncation = [
+        {"product_id": PRODUCT_A, "param_id": "param.abs", "reason": "I2b/G: ..."}
+    ]
+    path_with = render_nda_questions(
+        cells,
+        tmp_path / "with.csv",
+        crawl_truncation_anomalies=truncation,
+    )
+    rows = _read_csv(path_with)
+    trunc_rows = [r for r in rows if r.get("anomaly_kind") == "crawl_truncation"]
+    assert len(trunc_rows) == 1
+    assert trunc_rows[0]["status"] == "crawl_truncation"
+    assert trunc_rows[0]["product_id"] == PRODUCT_A
+    assert "I2b/G" in trunc_rows[0]["i3_anomaly"]
+    # I3-строки остаются отличимыми.
+    assert all(
+        r["anomaly_kind"] == "i3_protocol"
+        for r in rows
+        if r.get("anomaly_kind") != "crawl_truncation"
+    )
+
+    # Без усечения — ни одной crawl_truncation-строки.
+    path_without = render_nda_questions(cells, tmp_path / "without.csv")
+    assert not [
+        r
+        for r in _read_csv(path_without)
+        if r.get("anomaly_kind") == "crawl_truncation"
+    ]
+
+
+def test_write_reports_surfaces_truncation_anomaly_in_artifacts_and_csv(
+    store: SqliteStore, tmp_path: Path
+) -> None:
+    """B3: усечённый продукт + ``exhaustive``-absence → строкa в CSV и поле в артефактах;
+    untruncated-прогон их не даёт."""
+    from core.cli.context import _artifacts_payload
+
+    cells = [
+        Cell(
+            run_id=RUN_ID,
+            product_id=PRODUCT_A,
+            param_id="param.abs",
+            state=CellState.EVALUATED,
+            status=Status.ABSENT,
+            absence_evidence=[
+                {"source_scope": "exhaustive", "scope_attested_by": "human"}
+            ],
+        )
+    ]
+    bundle = compute(store=store, run_id=RUN_ID, catalog=_catalog(), module_weights={})
+    provenance = CrawlProvenance(
+        sessions=[
+            CrawlSessionProvenance(
+                session_id="crawl:run-report",
+                profile="local",
+                status="partial",
+                truncated=True,
+                truncated_products=[PRODUCT_A],
+            )
+        ]
+    )
+    manifest = _manifest(crawl_provenance=provenance)
+
+    artifacts = write_reports(
+        bundle=bundle,
+        cells=cells,
+        catalog=_catalog(),
+        manifest=manifest,
+        out_dir=tmp_path,
+        run_id=RUN_ID,
+    )
+
+    assert artifacts.crawl_truncation_anomalies
+    assert artifacts.crawl_truncation_anomalies[0]["product_id"] == PRODUCT_A
+    rows = _read_csv(artifacts.nda_questions)
+    assert any(r.get("anomaly_kind") == "crawl_truncation" for r in rows)
+
+    payload = _artifacts_payload(artifacts)
+    assert payload["crawl_truncation_anomalies"][0]["product_id"] == PRODUCT_A
+    assert payload["i3_anomalies"]
+
+    # Untruncated-прогон — ни строки, ни артефакт-записи.
+    clean = write_reports(
+        bundle=bundle,
+        cells=cells,
+        catalog=_catalog(),
+        manifest=_manifest(),
+        out_dir=tmp_path / "clean",
+        run_id=RUN_ID,
+    )
+    assert clean.crawl_truncation_anomalies == []
+    assert not any(
+        r.get("anomaly_kind") == "crawl_truncation"
+        for r in _read_csv(clean.nda_questions)
+    )
+    assert _artifacts_payload(clean)["crawl_truncation_anomalies"] == []
 
 
 # ---------------------------------------------------------------------------

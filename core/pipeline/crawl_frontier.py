@@ -35,7 +35,7 @@ from collections import deque
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from fnmatch import fnmatchcase
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 
 from core.config.deploy import CrawlConfig
 from core.config.domain_profiles import DomainProfile
@@ -47,6 +47,7 @@ __all__ = [
     "CrawlLimits",
     "Frontier",
     "blacklist_match",
+    "decoded_scope_path",
     "is_blacklisted",
     "resolve_crawl_limits",
     "root_path_prefix",
@@ -136,14 +137,25 @@ def resolve_crawl_limits(
 
 
 def blacklist_match(url: str, limits: CrawlLimits) -> str | None:
-    """Возвращает заматчивший паттерн блэклиста или ``None`` (D1/D2).
+    """Возвращает заматчивший паттерн блэклиста или ``None`` (D1/D2, N5).
 
     ``exclude_paths`` — по пути URL, ``exclude_documents`` — по basename. ``fnmatchcase``
     (case-sensitive) без regex/подстрок.
+
+    **Leading-slash tolerance (N5).** Паттерн пути принимается и с ведущим ``/``, и без
+    него: ``docs/*`` нормализуется к ``/docs/*`` (путь URL всегда начинается с ``/``),
+    поэтому ``docs/*`` матчит ``/docs/x`` как и ``/docs/*``. Паттерн-``/`` (зачёркивает
+    host-корень) сохраняется.
+
+    **Caveat ``exclude_documents`` (N5).** Сравнивается basename **пути** URL (файл —
+    сегмент пути, напр. ``/docs/report.pdf``). Имя файла, переданное **только** в
+    query-строке (``/download?file=report.pdf``), basename не является и паттерном не
+    ловится — это задокументированное ограничение (см. ``03`` §D.2), а не догадка.
     """
     path = urlsplit(url).path or "/"
     for pattern in limits.exclude_paths:
-        if fnmatchcase(path, pattern):
+        normalized = "/" + pattern.lstrip("/")
+        if fnmatchcase(path, normalized):
             return pattern
     base = path.rsplit("/", 1)[-1]
     for pattern in limits.exclude_documents:
@@ -175,6 +187,20 @@ def _path_within(url_path: str, prefix: str) -> bool:
     return url_path == prefix or url_path.startswith(prefix + "/")
 
 
+def decoded_scope_path(path: str) -> str | None:
+    """Percent-декодирует путь для scope-сравнения; ``None`` — dot-segment ``..`` (N2).
+
+    Сырой путь сравнивать нельзя: ``%2e%2e`` сервер декодирует в ``..`` и обходит
+    path-префикс (``/documents/%2e%2e/private`` обслуживается вне ``/documents``). Любой
+    сегмент ``..`` **после** декодирования — вне scope (traversal), в т.ч. буквальный
+    ``..`` (нулевая нормализация ``urllib`` его не сворачивает).
+    """
+    decoded = unquote(path or "/")
+    if any(segment == ".." for segment in decoded.split("/")):
+        return None
+    return decoded
+
+
 class Frontier:
     """BFS-очередь одного seed-root: scope/блэклист/лимиты при постановке (D1/D2).
 
@@ -202,7 +228,11 @@ class Frontier:
     # -- scope -------------------------------------------------------------- #
 
     def in_scope(self, url: str) -> bool:
-        """Проходит ли ``url`` scope корня (SSRF + host + path-prefix по границе сегмента)."""
+        """Проходит ли ``url`` scope корня (SSRF + host + path-prefix по границе сегмента).
+
+        Путь перед сравнением percent-декодируется, а ``..``-сегменты отвергаются (N2):
+        иначе ``%2e%2e`` обошёл бы префикс.
+        """
         try:
             validate_url(url)
         except ValueError:
@@ -211,7 +241,10 @@ class Frontier:
         host = (parsed.hostname or "").lower()
         if not host or not _host_matches(host, self.root_host):
             return False
-        return _path_within(parsed.path or "/", self.path_prefix)
+        decoded = decoded_scope_path(parsed.path or "/")
+        if decoded is None:
+            return False
+        return _path_within(decoded, self.path_prefix)
 
     def blacklisted(self, url: str) -> bool:
         """Блэклист (путь + basename) — см. :func:`blacklist_match`."""
@@ -227,6 +260,16 @@ class Frontier:
     def note_fetched(self) -> None:
         """Учесть успешно добытую (retained) страницу этого корня."""
         self.fetched += 1
+
+    def note_consumed(self, count: int) -> None:
+        """Учесть уже израсходованный бюджет корня (retained-страницы resume, B2).
+
+        Инициализация из durable-элементов сеанса: resumed root **не может** превысить
+        ``max_documents`` при повторном прогоне того же сеанса (иначе бюджет начинался бы
+        с нуля и лишние страницы тихо добывались бы заново).
+        """
+        if count > 0:
+            self.fetched += int(count)
 
     def mark_truncated(self, reason: str) -> None:
         """Отметить политико-усечённый обход (первый повод побеждает; D1/G, D3)."""

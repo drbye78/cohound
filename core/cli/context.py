@@ -246,8 +246,13 @@ def _manifest_partial(manifest: Any) -> bool:
     return getattr(manifest, "methodology_version", None) in (None, "", "0.0.0")
 
 
-def _artifacts_payload(artifacts: Any) -> dict[str, str | None]:
-    """JSON-совместимое представление :class:`~core.pipeline.report.Artifacts`."""
+def _artifacts_payload(artifacts: Any) -> dict[str, Any]:
+    """JSON-совместимое представление :class:`~core.pipeline.report.Artifacts`.
+
+    B3: помимо путей, несёт собранные аномалии — I3 ``❓``-протокола (§5) и
+    crawl-усечения (D1/G). Так оператор видит их в ``--json`` payload, а не только в
+    ``nda_questions.csv``.
+    """
 
     def _path(value: Any) -> str | None:
         return str(value) if value is not None else None
@@ -258,6 +263,10 @@ def _artifacts_payload(artifacts: Any) -> dict[str, str | None]:
         "nda_questions": _path(artifacts.nda_questions),
         "diff": _path(artifacts.diff),
         "manifest": _path(artifacts.manifest),
+        "i3_anomalies": list(getattr(artifacts, "i3_anomalies", None) or []),
+        "crawl_truncation_anomalies": list(
+            getattr(artifacts, "crawl_truncation_anomalies", None) or []
+        ),
     }
 
 
@@ -972,6 +981,14 @@ def _resolve_ports(
         # Lane A/L3a: слои источников краула (crawl_sources.yaml) — wiring решает по их
         # ``engine``, какие per-engine краулеры строить. Без ``inputs`` — не передаются.
         crawl_sources=(getattr(inputs, "crawl_sources", None) if inputs is not None else None),
+        # N1: run-слой осей краула и CLI ``--max-depth`` — для автодетекта discovery,
+        # включающего принуждение ``robots.txt`` в адаптерах (без discovery — не трогаем).
+        run_crawl=(
+            getattr(getattr(inputs, "run", None), "crawl", None)
+            if inputs is not None
+            else None
+        ),
+        cli_max_depth=getattr(args, "max_depth", None),
     )
 
 
@@ -1485,6 +1502,8 @@ def _print_run_report(payload: dict[str, Any]) -> None:
             lines.append(f"  error: {error}")
     if payload["resumed_skipped"]:
         lines.append(f"resumed (ok, пропущены): {', '.join(payload['resumed_skipped'])}")
+    if payload.get("crawl_truncation_warning"):
+        lines.append(f"warning: {payload['crawl_truncation_warning']}")
     if payload["stopped_at"] is not None:
         lines.append(
             "примечание: гейт требует явного человеческого решения (03 §E.2); "

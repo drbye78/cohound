@@ -87,6 +87,7 @@ from core.config.deploy import (
 )
 from core.config.domain_profiles import DomainProfile
 from core.config.crawl_sources import CrawlSourcesConfig
+from core.domain.models import CrawlRunConfig
 from core.pipeline import Ports, Runner
 from core.pipeline.runner import PHASES, Clock, PhaseFn
 from core.ports.crawler import CrawlerPort
@@ -101,10 +102,12 @@ from core.ports.registry import RegistryFetcherPort
 from core.ports.search import SearchAdapterPort
 from core.ports.store import StorePort
 from core.ports.types import Chunk, ExtractedDoc, ExtractionRoute, FetchMode, RawPage
+from core.ports.types import FetchPlan
 from core.ports.vector_index import VectorIndexPort
 from core.store.backup import list_builds
 from core.store.sqlite_store import SqliteStore
 from core.util.cache import ContentAddressedCache
+from core.util.robots import RobotsGate
 from core.util.sitemap import MAX_SITEMAP_ENTRIES
 
 __all__ = [
@@ -826,11 +829,70 @@ DEFAULT_SCOUT_CRAWLER = "http"
 SUPPORTED_SCOUT_CRAWLERS: tuple[str, ...] = ("http", "scrapy", "browser")
 
 
+def _crawl_discovery_enabled(
+    crawl: CrawlConfig,
+    *,
+    run_crawl: CrawlRunConfig | None = None,
+    cli_max_depth: int | None = None,
+    domain_profiles: Mapping[str, DomainProfile] | None = None,
+) -> bool:
+    """Включает ли эффективная конфигурация обход ссылок (discovery) — N1/§10.
+
+    Discovery включён, если хоть один слой (app ``deploy.yaml:crawl`` < run ``run.yaml`` <
+    per-site ``domain_profiles``) просит ``max_depth > 0`` **или** у сайта задан ``sitemap``
+    (его ``<loc>`` — дополнительные seeds). Явный ``crawl.robots`` (app-слой) переопределяет
+    автодетект: ``True`` — принуждать robots даже без discovery, ``False`` — не принуждать
+    даже при нём. Без discovery robots не трогается вовсе — прогон остаётся байт-в-байт
+    прежним (никаких лишних fetch ``robots.txt``).
+    """
+    if crawl.robots is not None:
+        return bool(crawl.robots)
+    depths: list[int] = []
+    if crawl.max_depth:
+        depths.append(int(crawl.max_depth))
+    if run_crawl is not None and getattr(run_crawl, "max_depth", None):
+        depths.append(int(run_crawl.max_depth))
+    if cli_max_depth is not None:
+        depths.append(int(cli_max_depth))
+    for profile in (domain_profiles or {}).values():
+        depth = getattr(profile, "max_depth", None)
+        if depth:
+            depths.append(int(depth))
+    if any(depth > 0 for depth in depths):
+        return True
+    return any(getattr(profile, "sitemap", None) for profile in (domain_profiles or {}).values())
+
+
+def _robots_gate(http_crawler: CrawlerPort, *, user_agent: str | None) -> RobotsGate:
+    """``RobotsGate`` поверх отдельного HTTP-краулера (фетч ``robots.txt``) — N1.
+
+    Фетч ``robots.txt`` — ленивый (при первом ``allowed(host)``) и происходит **внутри**
+    ``fetch`` страницы, который corpus уже пейсит единым владельцем (:class:`RateLimiter`,
+    P2-3): отдельного пейсера не заводим (иначе было бы два владельца). Недоступная лента
+    трактуется как «правил нет» (:class:`RobotsGate`), отказ ``Disallow`` несёт
+    ``refusal_reason="robots_disallow"`` (адаптер, egress-слой).
+    """
+
+    def fetch(host: str) -> str | None:
+        try:
+            page = http_crawler.fetch(
+                f"https://{host}/robots.txt", FetchPlan(FetchMode.HTTP)
+            )
+        except Exception:  # noqa: BLE001 — недоступный robots.txt = «правил нет»
+            return None
+        raw = getattr(page, "content", b"") or b""
+        return raw.decode("utf-8", errors="replace") if raw else None
+
+    return RobotsGate(fetch, user_agent=user_agent or "*")
+
+
 def build_scout_crawler(
     *,
     deploy: DeployConfig | None = None,
     cache: ContentAddressedCache | None = None,
     domain_profiles: Mapping[str, DomainProfile] | None = None,
+    run_crawl: CrawlRunConfig | None = None,
+    cli_max_depth: int | None = None,
 ) -> CrawlerPort:
     """Собирает краулер для ``passport-scout`` (дефолт — лёгкий, A1/MVP).
 
@@ -873,6 +935,9 @@ def build_scout_crawler(
     :param cache: глобальный кэш внешних вызовов; ``None`` → без кэша.
     :param domain_profiles: зарезервирован для совместимости сигнатуры; исполнимость
         профилей проверяется URL-скоупедированно в pipeline (D2).
+    :param run_crawl: ``crawl``-секция ``run.yaml`` (run-слой) — участвует в автодетекте
+        discovery для robots (N1).
+    :param cli_max_depth: ``--max-depth`` оператора — участвует в автодетекте discovery (N1).
     :raises WiringError: неизвестное значение ``COHOUND_SCOUT_CRAWLER``.
     """
     raw = os.environ.get(ENV_SCOUT_CRAWLER)
@@ -881,16 +946,59 @@ def build_scout_crawler(
         name = DEFAULT_SCOUT_CRAWLER
     if name == "http":
         config = deploy if deploy is not None else load_deploy_config(None)
-        return HttpCrawler(**_http_crawler_kwargs(config), cache=cache)
+        robots = _crawler_robots(
+            config,
+            run_crawl=run_crawl,
+            cli_max_depth=cli_max_depth,
+            domain_profiles=domain_profiles,
+            cache=cache,
+        )
+        return HttpCrawler(**_http_crawler_kwargs(config), cache=cache, robots=robots)
     if name == "scrapy":
+        # ScrapyCrawler уже выставляет ``ROBOTSTXT_OBEY`` в дефолтных настройках.
         return ScrapyCrawler(cache=cache)
     if name == "browser":
         config = deploy if deploy is not None else load_deploy_config(None)
-        return BrowserCrawler(**_browser_crawler_kwargs(config), cache=cache)
+        robots = _crawler_robots(
+            config,
+            run_crawl=run_crawl,
+            cli_max_depth=cli_max_depth,
+            domain_profiles=domain_profiles,
+            cache=cache,
+        )
+        return BrowserCrawler(
+            **_browser_crawler_kwargs(config), cache=cache, robots=robots
+        )
     raise WiringError(
         f"{ENV_SCOUT_CRAWLER}: неизвестный краулер {name!r}; "
         f"поддерживаются: {', '.join(SUPPORTED_SCOUT_CRAWLERS)}"
     )
+
+
+def _crawler_robots(
+    config: DeployConfig,
+    *,
+    run_crawl: CrawlRunConfig | None,
+    cli_max_depth: int | None,
+    domain_profiles: Mapping[str, DomainProfile] | None,
+    cache: ContentAddressedCache | None,
+) -> RobotsGate | None:
+    """``RobotsGate`` для адаптера при включённом discovery, иначе ``None`` (N1).
+
+    Без discovery возвращается ``None``: адаптер не делает ни одного лишнего запроса
+    ``robots.txt`` — прогон байт-в-байт прежний. При discovery gate строится поверх
+    отдельного HTTP-краулера (без самого gate — рекурсии нет).
+    """
+    crawl = config.crawl
+    if not _crawl_discovery_enabled(
+        crawl,
+        run_crawl=run_crawl,
+        cli_max_depth=cli_max_depth,
+        domain_profiles=domain_profiles,
+    ):
+        return None
+    fetcher_crawler = HttpCrawler(**_http_crawler_kwargs(config), cache=cache)
+    return _robots_gate(fetcher_crawler, user_agent=crawl.user_agent)
 
 
 def _referenced_crawl_engines(
@@ -931,6 +1039,8 @@ def build_scout_crawlers(
     cache: ContentAddressedCache | None = None,
     domain_profiles: Mapping[str, DomainProfile] | None = None,
     crawl_sources: CrawlSourcesConfig | None = None,
+    run_crawl: CrawlRunConfig | None = None,
+    cli_max_depth: int | None = None,
 ) -> dict[str, CrawlerPort]:
     """Собирает карту ``engine → CrawlerPort`` для per-engine выбора краулера (L3a).
 
@@ -952,12 +1062,24 @@ def build_scout_crawlers(
         помечает браузерный движок как запрошенный.
     :param crawl_sources: слои источников краула (``crawl_sources.yaml``); их ``engine``
         помечают соответствующие движки как запрошенные.
+    :param run_crawl: ``crawl``-секция ``run.yaml`` (run-слой) — участвует в автодетекте
+        discovery для robots (N1).
+    :param cli_max_depth: ``--max-depth`` оператора — участвует в автодетекте discovery (N1).
     """
     config = deploy if deploy is not None else load_deploy_config(None)
     referenced = _referenced_crawl_engines(domain_profiles, crawl_sources)
+    robots = _crawler_robots(
+        config,
+        run_crawl=run_crawl,
+        cli_max_depth=cli_max_depth,
+        domain_profiles=domain_profiles,
+        cache=cache,
+    )
 
     crawlers: dict[str, CrawlerPort] = {
-        "http": HttpCrawler(**_http_crawler_kwargs(config), cache=cache),
+        "http": HttpCrawler(
+            **_http_crawler_kwargs(config), cache=cache, robots=robots
+        ),
     }
     if "scrapy" in referenced:
         try:
@@ -967,7 +1089,7 @@ def build_scout_crawlers(
     if "browser" in referenced:
         try:
             crawlers["browser"] = BrowserCrawler(
-                **_browser_crawler_kwargs(config), cache=cache
+                **_browser_crawler_kwargs(config), cache=cache, robots=robots
             )
         except (WiringError, ImportError, CrawlError):
             pass
@@ -1229,6 +1351,8 @@ def build_adapters(
     vector_index: VectorIndexPort | None = None,
     lexical_index: LexicalIndexPort | None = None,
     embedder: EmbedderPort | None = None,
+    run_crawl: CrawlRunConfig | None = None,
+    cli_max_depth: int | None = None,
 ) -> Ports:
     """Собирает порты внешних систем по профилю развёртывания (``03`` §E.3).
 
@@ -1260,6 +1384,10 @@ def build_adapters(
     :param domain_profiles: типизированные доменные профили (``domain_profiles.yaml``,
         ``03`` §D.2); используются локальным краулером для fail-fast проверки ``fetch: browser``
         (план резолвится в pipeline).
+    :param run_crawl: ``crawl``-секция ``run.yaml`` (run-слой осей краула) — для автодетекта
+        discovery при включении принуждения ``robots.txt`` (N1).
+    :param cli_max_depth: ``--max-depth`` оператора — также участвует в автодетекте
+        discovery (N1).
     :param crawl_sources: слои источников краула (``crawl_sources.yaml``, Lane A); их
         поля ``engine`` определяют, какие per-engine краулеры строит
         :func:`build_scout_crawlers` (ленивая сборка тяжёлых адаптеров).
@@ -1283,7 +1411,11 @@ def build_adapters(
         # конфига — прежнее поведение (crawler=None; сетевые порты инъектируются).
         local_crawler = (
             build_scout_crawler(
-                deploy=deploy, cache=cache, domain_profiles=domain_profiles
+                deploy=deploy,
+                cache=cache,
+                domain_profiles=domain_profiles,
+                run_crawl=run_crawl,
+                cli_max_depth=cli_max_depth,
             )
             if deploy is not None
             else None
@@ -1295,6 +1427,8 @@ def build_adapters(
             cache=cache,
             domain_profiles=domain_profiles,
             crawl_sources=crawl_sources,
+            run_crawl=run_crawl,
+            cli_max_depth=cli_max_depth,
         )
         # Phase 5.1: поллеры фидов/каналов (``kind → PollPort``) строятся из того же
         # локального краулера (фетч ленты — транспортом краула); без краулера (нет

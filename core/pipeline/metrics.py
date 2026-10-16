@@ -107,6 +107,34 @@ def _normalize_crawl(crawl_counts: Mapping[str, Any] | None) -> dict[str, int]:
     return dict(sorted((str(key), int(value)) for key, value in crawl_counts.items()))
 
 
+def _normalize_crawl_truncation(
+    crawl_truncation: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Нормализует сводку усечения краула к детерминированному dict (N4).
+
+    Отсутствие/пустота → ``{}`` (поле присутствует всегда, но нейтрально). ``roots``
+    сортируются по ``(product_id, root)`` — детерминизм JSON.
+    """
+    if not crawl_truncation:
+        return {}
+    data = dict(crawl_truncation)
+    roots = data.get("effective_limits", {}).get("roots") if isinstance(
+        data.get("effective_limits"), Mapping
+    ) else None
+    if roots:
+        data["effective_limits"] = {
+            **dict(data["effective_limits"]),
+            "roots": sorted(
+                (dict(root) for root in roots),
+                key=lambda r: (str(r.get("product_id", "")), str(r.get("root", ""))),
+            ),
+        }
+    products = data.get("truncated_products")
+    if products is not None:
+        data["truncated_products"] = sorted({str(p) for p in products})
+    return data
+
+
 @dataclass
 class RunMetrics:
     """Метрики прогона (04 §B.2); JSON-совместимы и детерминированы.
@@ -130,6 +158,9 @@ class RunMetrics:
     #: Backlog A (Phase 4): счётчики durable-сеанса краула (``{status: count}``) из
     #: ``crawl_session_counts``; пустая карта, если сеанса/краула нет.
     crawl: dict[str, int] = field(default_factory=dict)
+    #: N4: сводка политического усечения краула (``truncated``/``truncated_reason``/
+    #: ``truncated_products``/``pages_fetched``/``effective_limits``); пусто, если не усечён.
+    crawl_truncation: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         """Плоский JSON-совместимый словарь метрик (для манифеста/логов)."""
@@ -142,6 +173,7 @@ class RunMetrics:
             "tokens": dict(self.tokens),
             "duration_by_phase": dict(self.duration_by_phase),
             "crawl": dict(self.crawl),
+            "crawl_truncation": dict(self.crawl_truncation),
         }
 
     def to_manifest_json(self) -> str:
@@ -187,6 +219,7 @@ def compute_metrics(
     llm_calls: int = 0,
     tokens: Mapping[str, Any] | None = None,
     crawl_counts: Mapping[str, Any] | None = None,
+    crawl_truncation: Mapping[str, Any] | None = None,
 ) -> RunMetrics:
     """Собирает :class:`RunMetrics` прогона (04 §B.2, W12/T12.1).
 
@@ -202,6 +235,9 @@ def compute_metrics(
     :param crawl_counts: счётчики durable-сеанса краула (``crawl_session_counts``) — источник
         поля ``crawl`` (Backlog A). Вызывающий читает их у стора (least coupling: метрика
         не знает соглашения об ``session_id``). ``None`` → пустая карта.
+    :param crawl_truncation: сводка политического усечения краула (N4) — источник поля
+        ``crawl_truncation`` (:func:`core.pipeline.crawl_session.truncation_summary``).
+        ``None`` → пустой dict.
     """
     resolved = _resolve_cells(store, run_id, cells)
     if score_bundle is not None:
@@ -219,4 +255,5 @@ def compute_metrics(
         tokens=_normalize_tokens(tokens),
         duration_by_phase=_normalize_durations(phase_durations),
         crawl=_normalize_crawl(crawl_counts),
+        crawl_truncation=_normalize_crawl_truncation(crawl_truncation),
     )

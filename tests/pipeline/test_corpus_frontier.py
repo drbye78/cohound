@@ -389,6 +389,8 @@ def test_redirect_escape_off_host_dropped(tmp_path: Path) -> None:
             crawler=crawler,
             store=store,
             run_id=RUN_ID,
+            # B4: жёсткий redirect-scope включён только при discovery (max_depth > 0).
+            crawl_defaults=CrawlRunConfig(max_depth=1),
         )
         items = {
             (i.product_id, i.url): i
@@ -406,6 +408,104 @@ def test_redirect_escape_off_host_dropped(tmp_path: Path) -> None:
     assert item is not None and item.error_kind == "redirect_out_of_scope"
 
 
+def test_redirect_escape_off_host_retained_at_depth_zero(tmp_path: Path) -> None:
+    """B4: на глубине 0 (discovery выключен) оператор явно запросил URL — финальная
+    cross-host страница ретейнится как прежде (без silent corpus loss)."""
+    pages = {ROOT: b"<html>landing</html>"}
+    crawler = _Crawler(pages, final_url={ROOT: "https://other.test/landing"})
+    store = SqliteStore(":memory:")
+    try:
+        _make_run(store)
+        result = _build(
+            tmp_path, pages=pages, crawler=crawler, store=store, run_id=RUN_ID
+        )
+        items = {
+            (i.product_id, i.url): i
+            for i in store.iter_crawl_session_items(SESSION_ID)
+        }
+    finally:
+        store.close()
+    build = _build_of(result)
+    assert build.crawl_fetched == 1
+    assert build.docs  # страница ingested
+    assert items[("p1", ROOT)].error_kind is None
+
+
+def test_www_to_apex_seed_retained_at_depth_zero(tmp_path: Path) -> None:
+    """B4-регрессия: www→apex редирект seed'а на глубине 0 НЕ теряет страницу
+    (асимметрия ``_host_matches`` больше не роняет корпус: ``crawl_fetched >= 1``)."""
+    www = "https://www.docs.test/"
+    apex = "https://docs.test/"
+    pages = {www: b"<html>apex landing</html>"}
+    crawler = _Crawler(pages, final_url={www: apex})
+    store = SqliteStore(":memory:")
+    try:
+        _make_run(store)
+        result = _build(
+            tmp_path,
+            pages=pages,
+            crawler=crawler,
+            urls={"p1": [www]},
+            store=store,
+            run_id=RUN_ID,
+        )
+        item = {
+            (i.product_id, i.url): i
+            for i in store.iter_crawl_session_items(SESSION_ID)
+        }[("p1", www)]
+    finally:
+        store.close()
+    build = _build_of(result)
+    assert build.crawl_fetched >= 1
+    assert build.docs  # build не пуст
+    assert crawler.calls == [www]
+    # B4: глубина персистится как 0 (не NULL) — seed-root это глубина 0.
+    assert item.depth == 0
+
+
+def test_www_to_apex_retained_under_discovery(tmp_path: Path) -> None:
+    """B4: при discovery (``max_depth>0``) проверка симметрична — www→apex не теряется."""
+    www = "https://www.docs.test/"
+    apex = "https://docs.test/"
+    pages = {www: b"<html>apex landing</html>"}
+    crawler = _Crawler(pages, final_url={www: apex})
+    result = _build(
+        tmp_path,
+        pages=pages,
+        crawler=crawler,
+        urls={"p1": [www]},
+        crawl_defaults=CrawlRunConfig(max_depth=1),
+    )
+    assert _build_of(result).docs
+    assert crawler.calls == [www]
+
+
+def test_unrelated_redirect_dropped_with_reason_under_discovery(tmp_path: Path) -> None:
+    """B4: при discovery настоящий уход из семейства → явный ``redirect_out_of_scope``."""
+    pages = {ROOT: b"<html>landing</html>"}
+    crawler = _Crawler(pages, final_url={ROOT: "https://unrelated.test/x"})
+    store = SqliteStore(":memory:")
+    try:
+        _make_run(store)
+        result = _build(
+            tmp_path,
+            pages=pages,
+            crawler=crawler,
+            store=store,
+            run_id=RUN_ID,
+            crawl_defaults=CrawlRunConfig(max_depth=1),
+        )
+        item = {
+            (i.product_id, i.url): i
+            for i in store.iter_crawl_session_items(SESSION_ID)
+        }[("p1", ROOT)]
+    finally:
+        store.close()
+    assert _build_of(result).docs == []
+    assert item.error_kind == "redirect_out_of_scope"
+    assert any("redirect" in e for e in result.errors)
+
+
 # --------------------------------------------------------------------------- #
 # (i) max_depth > 0 под executor/split — конфиг-ошибка
 # --------------------------------------------------------------------------- #
@@ -419,3 +519,139 @@ def test_max_depth_under_executor_is_config_error(tmp_path: Path) -> None:
             executor=object(),
             crawl_defaults=CrawlRunConfig(max_depth=1),
         )
+
+
+# --------------------------------------------------------------------------- #
+# (B1) max_documents как жёсткий потолок: batched seeds, cap >= 2
+# --------------------------------------------------------------------------- #
+
+
+def test_max_documents_cap_two_batched_seed_fetches_exactly_two(
+    tmp_path: Path,
+) -> None:
+    """B1-регрессия: seed с 3 ссылками, ``max_documents=2`` → ровно 2 фетча (потолок)."""
+    pages = {
+        ROOT: (
+            b'<html>'
+            b'<a href="/a">a</a><a href="/b">b</a><a href="/c">c</a>'
+            b"</html>"
+        ),
+        "https://docs.test/a": b"<html>a</html>",
+        "https://docs.test/b": b"<html>b</html>",
+        "https://docs.test/c": b"<html>c</html>",
+    }
+    crawler = _Crawler(pages)
+    result = _build(
+        tmp_path,
+        pages=pages,
+        crawler=crawler,
+        crawl_defaults=CrawlRunConfig(max_depth=1, max_documents=2),
+    )
+    assert len(crawler.calls) == 2
+    assert crawler.calls[0] == ROOT
+    build = _build_of(result)
+    assert build.truncated is True
+    assert build.truncation[0]["truncated_reason"] == "max_documents"
+
+
+def test_two_roots_each_get_own_budget(tmp_path: Path) -> None:
+    """B1: бюджет ``max_documents`` — per (product, seed-root), а не общий на продукт."""
+    root_a = "https://docs.test/a"
+    root_b = "https://docs.test/b"
+    pages = {
+        root_a: b'<html><a href="/a/x">x</a></html>',
+        root_b: b'<html><a href="/b/y">y</a></html>',
+        "https://docs.test/a/x": b"<html>x</html>",
+        "https://docs.test/b/y": b"<html>y</html>",
+    }
+    crawler = _Crawler(pages)
+    result = _build(
+        tmp_path,
+        pages=pages,
+        crawler=crawler,
+        urls={"p1": [root_a, root_b]},
+        crawl_defaults=CrawlRunConfig(max_depth=1, max_documents=1),
+    )
+    # Каждый корень израсходовал собственный бюджет=1 (свой seed) — всего два фетча.
+    assert set(crawler.calls) == {root_a, root_b}
+    build = _build_of(result)
+    records = {row["root"]: row for row in build.truncation}
+    assert records[root_a]["pages_fetched"] == 1
+    assert records[root_b]["pages_fetched"] == 1
+    assert records[root_a]["truncated"] is True
+
+
+# --------------------------------------------------------------------------- #
+# (B2) resume не превышает бюджет и остаётся PARTIAL
+# --------------------------------------------------------------------------- #
+
+
+def test_resume_respects_remaining_budget_and_stays_partial(tmp_path: Path) -> None:
+    """B2-регрессия: повторный прогон того же session_id не превышает ``max_documents``,
+    не пере-фетчит и остаётся ``PARTIAL`` с ``truncated=True`` в провенансе."""
+    pages = {
+        ROOT: b'<html><a href="/a">a</a><a href="/b">b</a></html>',
+        "https://docs.test/a": b"<html>a</html>",
+        "https://docs.test/b": b"<html>b</html>",
+    }
+    store = SqliteStore(":memory:")
+    try:
+        _make_run(store)
+        first_crawler = _Crawler(pages)
+        _build(
+            tmp_path,
+            pages=pages,
+            crawler=first_crawler,
+            store=store,
+            run_id=RUN_ID,
+            crawl_defaults=CrawlRunConfig(max_depth=1, max_documents=2),
+        )
+        assert len(first_crawler.calls) == 2  # seed + 1 ссылка
+
+        second_crawler = _Crawler(pages)
+        _build(
+            tmp_path,
+            pages=pages,
+            crawler=second_crawler,
+            store=store,
+            run_id=RUN_ID,
+            crawl_defaults=CrawlRunConfig(max_depth=1, max_documents=2),
+        )
+        # Остаток бюджета = 0 → ни одного нового фетча (бюджет пережил новый прогон).
+        assert second_crawler.calls == []
+
+        session = store.get_crawl_session(SESSION_ID)
+        assert session is not None
+        assert session.status is CrawlSessionStatus.PARTIAL
+        assert session.provenance_json is not None
+        assert '"truncated": true' in session.provenance_json
+    finally:
+        store.close()
+
+
+# --------------------------------------------------------------------------- #
+# (N8) guard executor: max_depth учитывается только для краулимых host'ов
+# --------------------------------------------------------------------------- #
+
+
+def test_max_depth_requested_narrowed_to_crawled_hosts() -> None:
+    """N8: профиль с ``max_depth>0`` для host'а вне охвата executor не блокирует прогон."""
+    from core.config.deploy import CrawlConfig
+    from core.config.domain_profiles import DomainProfile
+    from core.pipeline.corpus import _max_depth_requested
+
+    app = CrawlConfig()
+    profiles = {
+        "uncrawled.test": DomainProfile(max_depth=3),
+        "crawled.test": DomainProfile(),
+    }
+    # Краулим host без max_depth → не ошибка (профиль uncrawled.test не в охвате).
+    assert (
+        _max_depth_requested(app, None, profiles, ["https://crawled.test/x"]) == 0
+    )
+    # Краулим host с max_depth>0 → глубина запрошена (guard сработает).
+    assert (
+        _max_depth_requested(app, None, profiles, ["https://uncrawled.test/x"]) == 3
+    )
+    # App/run-уровни учитываются безусловно.
+    assert _max_depth_requested(app, CrawlRunConfig(max_depth=4), profiles, []) == 4

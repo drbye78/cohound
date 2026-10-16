@@ -61,7 +61,11 @@ from core.cli.wiring import build_store
 from core.config.deploy import load_deploy_config
 from core.domain import CrawlItemStatus, CrawlSessionStatus
 from core.pipeline import PHASES
-from core.pipeline.crawl_session import default_session_id
+from core.pipeline.crawl_session import (
+    default_session_id,
+    read_provenance,
+    truncation_summary,
+)
 from core.pipeline.lint import lint_run_inputs
 from core.pipeline.normalize import load_inputs
 from core.pipeline.plan import derive_run_id
@@ -269,6 +273,8 @@ def _execute_crawl(
     result: Any = None
     cleared = False
     final_status: str | None = None
+    final_counts: dict[str, int] = {}
+    truncation: dict[str, Any] = {}
     try:
         _ensure_run(store, run_id, inputs)
         # Phase 4: фильтр URL по durable-сеансу — ДО резолва фаз, чтобы исполнитель
@@ -330,6 +336,18 @@ def _execute_crawl(
             )
         else:
             final_status, _ = _session_snapshot(store, session_id)
+        # N4: сводка усечения и счётчики — из сеанса (до закрытия стора), для payload и
+        # различения «усечено политикой» vs «реальные сбои фетча» при выборе кода возврата.
+        try:
+            session_obj = store.get_crawl_session(session_id)
+            final_counts = store.crawl_session_counts(session_id)
+            truncation = (
+                truncation_summary(read_provenance(session_obj))
+                if session_obj is not None
+                else {}
+            )
+        except Exception as exc:  # noqa: BLE001 — наблюдаемость best-effort
+            notes.append(f"truncation: {type(exc).__name__}: {exc}")
     finally:
         store.close()
         close = getattr(getattr(ports, "crawler", None), "close", None)
@@ -351,6 +369,20 @@ def _execute_crawl(
         "errors": list(getattr(result, "errors", []) or []),
         "notes": notes,
     }
+    if truncation:
+        # N4: усечение видно в crawl/--json payload (не только во внутреннем провенансе).
+        payload["crawl_truncation"] = truncation
+    truncation_only = bool(truncation.get("truncated")) and not (
+        int(final_counts.get(CrawlItemStatus.FAILED.value, 0))
+        + int(final_counts.get(CrawlItemStatus.CANCELLED.value, 0))
+    )
+    if truncation_only:
+        warning = (
+            "краул усечён политикой (max_documents/max_depth): корпус неполон; "
+            f"продукты={truncation.get('truncated_products')}; "
+            f"страниц={truncation.get('pages_fetched')}"
+        )
+        payload.setdefault("notes", []).append(warning)
     if args.json:
         _print_json(payload)
     else:
@@ -359,10 +391,14 @@ def _execute_crawl(
         return EXIT_ERROR
     # Phase 4: ``partial``/``failed`` сеанс (исчерпание попыток, back-pressure, любые
     # ``source_unavailable``) → :data:`EXIT_ERROR`; полный краул/без сеанса → :data:`EXIT_OK`.
+    # N4: PARTIAL исключительно из-за политического усечения (сбоев фетча нет) — честно
+    # завершённый ограниченный краул: exit success + предупреждение, не ошибка.
     if final_status in (
         CrawlSessionStatus.PARTIAL.value,
         CrawlSessionStatus.FAILED.value,
     ):
+        if truncation_only and final_status == CrawlSessionStatus.PARTIAL.value:
+            return EXIT_OK
         return EXIT_ERROR
     return EXIT_OK
 

@@ -693,6 +693,7 @@ class SqliteStore:
                 " settings_provenance_json = ?, ranking_epsilon = ?,"
                 " crawl_provenance_json = ?,"
                 " crawl_strategy = ?, crawl_rate_limit = ?,"
+                " crawl_config_digest = ?,"
                 " deploy_profile = ?, edge_schema_version = ?, edge_capabilities_json = ?"
                 " WHERE run_id = ?",
                 (
@@ -719,6 +720,7 @@ class SqliteStore:
                     ),
                     manifest.crawl_strategy,
                     manifest.crawl_rate_limit,
+                    manifest.crawl_config_digest,
                     manifest.deploy_profile,
                     manifest.edge_schema_version,
                     json.dumps(
@@ -1239,6 +1241,8 @@ class SqliteStore:
             # §13/Backlog B: операционные оси краула — реальные колонки.
             crawl_strategy=row["crawl_strategy"],
             crawl_rate_limit=row["crawl_rate_limit"],
+            # §13/N6: дайджест разрешённой конфигурации контроля краула.
+            crawl_config_digest=row["crawl_config_digest"],
             llm_scenarios=scenarios,
             snapshot_date=row["snapshot_date"],
             deploy_profile=row["deploy_profile"],

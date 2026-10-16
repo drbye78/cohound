@@ -62,6 +62,8 @@ from core.pipeline.compute import (
     assert_publishable,
     publish_warnings,
 )
+from core.pipeline.crawl_frontier import resolve_crawl_limits
+from core.util.hashing import short_hash
 
 if TYPE_CHECKING:  # только для аннотаций: без рантайм-связности слоёв
     from core.pipeline.normalize import RunInputs
@@ -145,6 +147,9 @@ EXECUTION_FIELDS: tuple[str, ...] = (
     "crawl_max_documents",
     "crawl_exclude_paths",
     "crawl_exclude_documents",
+    # N6 (§13): дайджест разрешённой конфигурации контроля краула (все слои) — смена на
+    # любом слое (app/run/per-site) помечается ``execution_change``.
+    "crawl_config_digest",
 )
 
 #: Обратно-совместимый алиас (v2.0): прежде границей считался только исполнительный
@@ -173,7 +178,9 @@ class Artifacts:
     Остальные поля — пути записанных файлов; ``manifest`` — ``run_manifest.yaml``.
 
     ``i3_anomalies`` — собранные аномалии I3 (§5): strict-``❓`` без полного протокола
-    исчерпания. Это **наблюдения**, а не изменение статуса ячейки.
+    исчерпания, **вместе** с D1/G-аномалиями усечённого краула (обратная совместимость
+    имени). ``crawl_truncation_anomalies`` — только подмножество последних, чтобы CLI/JSON
+    мог их отличить (B3).
     """
 
     battle_card: Path | None
@@ -182,6 +189,7 @@ class Artifacts:
     diff: Path | None
     manifest: Path
     i3_anomalies: list[dict[str, Any]] = field(default_factory=list)
+    crawl_truncation_anomalies: list[dict[str, Any]] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -432,6 +440,38 @@ def _coerce_int(value: Any) -> int | None:
     return int(value)
 
 
+def _crawl_control_digest(
+    *,
+    run_crawl: Any,
+    app: Any,
+    profiles: Mapping[str, Any] | None,
+) -> str | None:
+    """Стабильный дайджест **разрешённой** конфигурации контроля краула (N6/§13).
+
+    Разрешает ``CrawlLimits`` цепочкой app (``deploy.yaml:crawl``) < run (``run.yaml:crawl``)
+    < per-site (``domain_profiles``) — по одному «входу на каждый site key» плюс
+    ``__default__`` (app<run без per-site). Канонизируется ``json.dumps(sort_keys=True)``
+    и хешируется :func:`short_hash`. Смена осей на **любом** слое меняет дайджест → манифест
+    помечает ``execution_change`` (§13), не ``methodology_change``.
+    """
+    from core.config.deploy import CrawlConfig
+
+    app_config = app if isinstance(app, CrawlConfig) else CrawlConfig()
+    payload: dict[str, Any] = {
+        "__default__": resolve_crawl_limits(
+            "", app=app_config, run=run_crawl, profiles={}
+        ).as_dict()
+    }
+    site_profiles = dict(profiles or {})
+    for key in sorted(site_profiles):
+        url = str(key) if "://" in str(key) else f"https://{key}"
+        payload[str(key)] = resolve_crawl_limits(
+            url, app=app_config, run=run_crawl, profiles=site_profiles
+        ).as_dict()
+    material = json.dumps(payload, sort_keys=True, ensure_ascii=False)
+    return short_hash(material, 24)
+
+
 def build_manifest(
     *,
     inputs: RunInputs,
@@ -448,6 +488,8 @@ def build_manifest(
     settings_provenance: Mapping[str, Any] | None = None,
     ranking_epsilon: float | None = None,
     crawl_provenance: CrawlProvenance | Mapping[str, Any] | None = None,
+    domain_profiles: Mapping[str, Any] | None = None,
+    crawl_app: Any = None,
 ) -> RunManifest:
     """Собирает полностью заполненный :class:`RunManifest` (R7/§13) фазы Ш9.
 
@@ -630,6 +672,13 @@ def build_manifest(
             getattr(crawl_cfg, "exclude_documents", None) or []
         )
 
+    # N6/§13: дайджест **разрешённой** конфигурации контроля краула (app < run < per-site).
+    crawl_config_digest = _crawl_control_digest(
+        run_crawl=crawl_cfg,
+        app=crawl_app,
+        profiles=domain_profiles,
+    )
+
     extra: dict[str, Any] = {}
     manifest_fields = getattr(RunManifest, "model_fields", {})
     if "deploy_profile" in manifest_fields:
@@ -716,6 +765,7 @@ def build_manifest(
         crawl_max_documents=crawl_max_documents,
         crawl_exclude_paths=crawl_exclude_paths,
         crawl_exclude_documents=crawl_exclude_documents,
+        crawl_config_digest=crawl_config_digest,
         snapshot_date=snapshot_date,
         **extra,
     )
@@ -957,6 +1007,7 @@ def render_nda_questions(
     out_path: str | Path,
     *,
     exhaustions: Mapping[tuple[str, str], Any] | None = None,
+    crawl_truncation_anomalies: Iterable[Mapping[str, Any]] | None = None,
 ) -> Path:
     """Пишет ``nda_questions.csv`` — все ``❓`` (продукт, параметр, исчерпанные контуры).
 
@@ -967,6 +1018,12 @@ def render_nda_questions(
     ``protocol_status`` ∈ {``complete``, ``incomplete``, ``unknown``} и ``i3_anomaly``
     (сообщение :func:`core.domain.invariants.check_unknown_exhaustion`). Это наблюдение
     о полноте протокола — **статус ячейки при этом не меняется**.
+
+    **B3/D1-G.** ``crawl_truncation_anomalies`` — аномалии «``exhaustive``-absence при
+    усечённом крауле» (:func:`collect_crawl_truncation_anomalies`); они **дописываются**
+    строками в тот же операторский CSV (колонка ``anomaly_kind="crawl_truncation"``,
+    ``status="crawl_truncation"``), чтобы человек их увидел, а не только машина. Как и I3,
+    это **наблюдение**, не запуск и не жёсткая блокировка.
     """
     rows: list[dict[str, Any]] = []
     for cell in _cell_list(cells):
@@ -983,6 +1040,19 @@ def render_nda_questions(
                 "exhausted_contours": contours,
                 "protocol_status": _i3_protocol_status(cell, exhaustion),
                 "i3_anomaly": _i3_violations(cell, exhaustion),
+                "anomaly_kind": "i3_protocol",
+            }
+        )
+    for anomaly in crawl_truncation_anomalies or ():
+        rows.append(
+            {
+                "product_id": anomaly.get("product_id", ""),
+                "param_id": anomaly.get("param_id", ""),
+                "status": "crawl_truncation",
+                "exhausted_contours": "",
+                "protocol_status": "",
+                "i3_anomaly": anomaly.get("reason", ""),
+                "anomaly_kind": "crawl_truncation",
             }
         )
     return _write_csv(
@@ -994,6 +1064,7 @@ def render_nda_questions(
             "exhausted_contours",
             "protocol_status",
             "i3_anomaly",
+            "anomaly_kind",
         ],
         rows,
     )
@@ -1343,8 +1414,23 @@ def write_reports(
     except PublishBlockedError:
         battle_card = None
 
+    # D1/G/B3: усечённый краул продукта + заявленный ``exhaustive`` — аномалия для человека
+    # (паттерн I3 reviewed_by); статус ячейки не меняется и прогон не блокируется. Вычисляем
+    # ДО ``nda_questions``, чтобы аномалии попали в операторский CSV (B3).
+    truncated_products = {
+        product
+        for session in manifest.crawl_provenance.sessions
+        for product in (session.truncated_products or [])
+    }
+    truncation_anomalies = collect_crawl_truncation_anomalies(
+        cell_list, truncated_products
+    )
+
     nda_questions = render_nda_questions(
-        cell_list, outputs_dir / "nda_questions.csv", exhaustions=exhaustions
+        cell_list,
+        outputs_dir / "nda_questions.csv",
+        exhaustions=exhaustions,
+        crawl_truncation_anomalies=truncation_anomalies,
     )
     preliminary = render_preliminary_findings(
         cell_list, outputs_dir / "preliminary_findings.xlsx"
@@ -1360,15 +1446,8 @@ def write_reports(
     else:
         diff = _write_placeholder_diff(outputs_dir / "diff.md", manifest)
 
-    # D1/G: усечённый краул продукта + заявленный ``exhaustive`` — аномалия для человека
-    # (паттерн I3 reviewed_by); статус ячейки не меняется и прогон не блокируется.
-    truncated_products = {
-        product
-        for session in manifest.crawl_provenance.sessions
-        for product in (session.truncated_products or [])
-    }
     anomalies = collect_i3_anomalies(cell_list, exhaustions)
-    anomalies.extend(collect_crawl_truncation_anomalies(cell_list, truncated_products))
+    anomalies.extend(truncation_anomalies)
 
     return Artifacts(
         battle_card=battle_card,
@@ -1377,4 +1456,5 @@ def write_reports(
         diff=diff,
         manifest=manifest_path,
         i3_anomalies=anomalies,
+        crawl_truncation_anomalies=truncation_anomalies,
     )

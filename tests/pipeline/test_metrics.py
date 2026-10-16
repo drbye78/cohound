@@ -190,6 +190,33 @@ def test_explicit_cells_take_priority_over_store() -> None:
     assert metrics.cells_by_state["evaluated"] == 0
 
 
+def test_crawl_truncation_passthrough_and_deterministic() -> None:
+    """N4: сводка усечения проходит в метрики, нормализуется детерминированно."""
+    metrics = compute_metrics(
+        crawl_truncation={
+            "truncated": True,
+            "truncated_reason": "max_documents",
+            "truncated_products": ["p2", "p1"],
+            "pages_fetched": 2,
+            "effective_limits": {
+                "roots": [
+                    {"product_id": "p1", "root": "https://b"},
+                    {"product_id": "p1", "root": "https://a"},
+                ]
+            },
+        }
+    )
+    assert metrics.crawl_truncation["truncated"] is True
+    assert metrics.crawl_truncation["truncated_products"] == ["p1", "p2"]
+    assert [
+        r["root"] for r in metrics.crawl_truncation["effective_limits"]["roots"]
+    ] == ["https://a", "https://b"]
+    assert json.loads(metrics.to_manifest_json())["crawl_truncation"] == (
+        metrics.crawl_truncation
+    )
+    assert compute_metrics().crawl_truncation == {}
+
+
 # --- collect_phase_durations --------------------------------------------------
 
 

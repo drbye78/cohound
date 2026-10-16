@@ -8,7 +8,8 @@
 Нормализация каждой ссылки:
 
 * ``urljoin(base_url, href)`` — относительные ссылки разрешаются против базового URL
-  (финального URL страницы после редиректов, если он известен вызывающему);
+  (финального URL страницы после редиректов, если он известен вызывающему); первый
+  ``<base href>`` документа (N3) переопределяет базу разрешения, как в браузере;
 * ``href`` пустой или начинающийся с ``#`` — отбрасывается (внутристраничная навигация);
 * ``validate_url`` (SSRF-политика, ``core.util.security``) отсекает не-``http(s)``
   схемы (``mailto:``/``javascript:``/``data:``/``tel:``/``ftp:``) и приватные/
@@ -39,15 +40,27 @@ _DEFAULT_PORTS = {"http": "80", "https": "443"}
 
 
 class _AnchorParser(HTMLParser):
-    """Минимальный парсер: собирает значения ``href`` только у тега ``<a>``."""
+    """Минимальный парсер: собирает значения ``href`` тега ``<a>`` и первый ``<base href>``.
+
+    ``<base href>`` — документная база для разрешения относительных ссылок (N3); берётся
+    **первый** (как браузер: последующие игнорируются).
+    """
 
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
         self.hrefs: list[str] = []
+        self.base_href: str | None = None
 
     def handle_starttag(
         self, tag: str, attrs: list[tuple[str, str | None]]
     ) -> None:
+        if tag == "base":
+            if self.base_href is None:
+                for name, value in attrs:
+                    if name == "href" and value:
+                        self.base_href = value
+                        break
+            return
         if tag != "a":
             return
         for name, value in attrs:
@@ -106,10 +119,16 @@ def extract_links(content: bytes, base_url: str) -> list[str]:
     except Exception:  # noqa: BLE001, S110 — битый HTML не должен ронять краул
         pass
 
+    # N3: первый ``<base href>`` задаёт базу разрешения относительных ссылок (как браузер);
+    # если тега нет — базой остаётся финальный URL страницы.
+    resolution_base = base_url
+    if parser.base_href:
+        resolution_base = urljoin(base_url, parser.base_href)
+
     seen: set[str] = set()
     links: list[str] = []
     for href in parser.hrefs:
-        url = _normalize(base_url, href)
+        url = _normalize(resolution_base, href)
         if url is None or url in seen:
             continue
         seen.add(url)

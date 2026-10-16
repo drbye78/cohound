@@ -31,6 +31,7 @@ B2_KEYS = {
     "tokens",
     "duration_by_phase",
     "crawl",
+    "crawl_truncation",
 }
 
 

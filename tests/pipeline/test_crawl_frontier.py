@@ -160,3 +160,47 @@ def test_frontier_blacklisted_seed_surfaced() -> None:
     frontier = Frontier("https://h/", limits)
     assert frontier.add_seed("https://h/blocked") == "blacklisted"
     assert frontier.skipped_blacklisted == ["https://h/blocked"]
+
+
+# --------------------------------------------------------------------------- #
+# (N2) percent-encoded path traversal не обходит path-scope
+# --------------------------------------------------------------------------- #
+
+
+def test_frontier_rejects_encoded_dot_dot_traversal() -> None:
+    """N2: ``%2e%2e`` и буквальный ``..`` отвергаются, обычный путь — нет."""
+    from core.pipeline.crawl_frontier import decoded_scope_path
+
+    limits = CrawlLimits(max_depth=3)
+    frontier = Frontier("https://docs.test/documents", limits)
+    # Буквальная и percent-encoded формы dot-segment — вне scope (сервер декодирует → ../).
+    assert frontier.in_scope("https://docs.test/documents/../private") is False
+    assert frontier.in_scope("https://docs.test/documents/%2e%2e/private") is False
+    assert frontier.in_scope("https://docs.test/documents/%2E%2E/private") is False
+    # Нормальный вложенный путь остаётся в scope.
+    assert frontier.in_scope("https://docs.test/documents/x") is True
+    # Декодер отдаёт декодированный путь и ``None`` на traversal.
+    assert decoded_scope_path("/documents/a%20b") == "/documents/a b"
+    assert decoded_scope_path("/documents/%2e%2e/x") is None
+
+
+# --------------------------------------------------------------------------- #
+# (N5) блэклист: tolerance ведущего слэша; document-basename caveat
+# --------------------------------------------------------------------------- #
+
+
+def test_blacklist_path_pattern_without_leading_slash() -> None:
+    """N5: ``docs/*`` без ведущего ``/`` матчит ``/docs/x`` как ``/docs/*``."""
+    limits = CrawlLimits(exclude_paths=["docs/*", "/private/*"])
+    assert blacklist_match("https://h/docs/x", limits) == "docs/*"
+    assert blacklist_match("https://h/private/a", limits) == "/private/*"
+    assert is_blacklisted("https://h/public/x", limits) is False
+
+
+def test_exclude_documents_matches_path_basename_with_query() -> None:
+    """N5: basename берётся из пути (query отбрасывается); имя только в query — caveat."""
+    limits = CrawlLimits(exclude_documents=["*.pdf"])
+    # Query-строка не мешает: basename — из path-компонента.
+    assert blacklist_match("https://h/docs/report.pdf?ver=1", limits) == "*.pdf"
+    # Caveat: имя файла, переданное только в query, basename не является (задокументировано).
+    assert is_blacklisted("https://h/download?file=report.pdf", limits) is False
