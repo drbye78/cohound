@@ -31,6 +31,8 @@ from core.util.cache import ContentAddressedCache, http_key
 from core.util.rate_limit import RateLimiter
 
 URL = "https://example.com/page"
+#: Пост-редиректный URL, который отдаёт браузер (``page.url`` после ``goto``).
+FINAL_URL = "https://example.com/redirected"
 COOKIE = {"name": "session", "value": "abc", "domain": "example.com", "path": "/"}
 
 
@@ -40,7 +42,11 @@ COOKIE = {"name": "session", "value": "abc", "domain": "example.com", "path": "/
 
 
 class FakeSession:
-    """Фейковая ``BrowserSession``: рендер/ cookie из конструктора, запись вызовов."""
+    """Фейковая ``BrowserSession``: рендер/cookie из конструктора, запись вызовов.
+
+    ``final_url`` моделирует пост-редиректный ``page.url``: ``None`` → финальный URL равен
+    запрошенному; заданная строка (в т.ч. пустая) — отдаётся как есть.
+    """
 
     def __init__(
         self,
@@ -48,19 +54,21 @@ class FakeSession:
         content: bytes = b"<html>rendered</html>",
         cookies: list[dict[str, Any]] | None = None,
         navigate_error: Exception | None = None,
+        final_url: str | None = None,
     ) -> None:
         self.content = content
         self.cookie_list = list(cookies or [])
         self.navigate_error = navigate_error
+        self.final_url = final_url
         self.navigated: list[tuple[str, str | None]] = []
         self.cookies_asked: list[str] = []
         self.closed = False
 
-    def navigate(self, url: str, wait_for: str | None = None) -> bytes:
+    def navigate(self, url: str, wait_for: str | None = None) -> tuple[str, bytes]:
         self.navigated.append((url, wait_for))
         if self.navigate_error is not None:
             raise self.navigate_error
-        return self.content
+        return (self.final_url if self.final_url is not None else url), self.content
 
     def cookies(self, url: str) -> list[dict[str, Any]]:
         self.cookies_asked.append(url)
@@ -79,10 +87,12 @@ class FakeBackend:
         content: bytes = b"<html>rendered</html>",
         cookies: list[dict[str, Any]] | None = None,
         navigate_error: Exception | None = None,
+        final_url: str | None = None,
     ) -> None:
         self.content = content
         self.cookies = cookies
         self.navigate_error = navigate_error
+        self.final_url = final_url
         self.sessions: list[FakeSession] = []
         self.close_calls = 0
 
@@ -91,6 +101,7 @@ class FakeBackend:
             content=self.content,
             cookies=self.cookies,
             navigate_error=self.navigate_error,
+            final_url=self.final_url,
         )
         self.sessions.append(session)
         return session
@@ -179,7 +190,7 @@ def _no_real_sleep(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_honest_navigates_and_returns_browser_page(tmp_path: Path) -> None:
-    backend = FakeBackend(content=b"<html>hello</html>")
+    backend = FakeBackend(content=b"<html>hello</html>", final_url=FINAL_URL)
     cache = ContentAddressedCache(tmp_path)
     crawler = BrowserCrawler(backend=backend, cache=cache)
 
@@ -189,10 +200,23 @@ def test_honest_navigates_and_returns_browser_page(tmp_path: Path) -> None:
     assert page.fetch_mode is FetchMode.BROWSER
     assert page.content == b"<html>hello</html>"
     assert page.fetched_at
+    # A3: в RawPage.url едет ФИНАЛЬНЫЙ (пост-редиректный) URL браузера, не запрошенный.
+    assert page.url == FINAL_URL
     assert backend.sessions[0].navigated == [(URL, None)]
     assert backend.sessions[0].closed is True
     # honest-рендер НЕ кэшируется (R7).
     assert cache.get_bytes("http", http_key(URL)) is None
+
+
+def test_honest_missing_final_url_falls_back_to_requested() -> None:
+    # Финальный URL недоступен (пустая строка) ⇒ откат на запрошенный (никогда ``""``).
+    backend = FakeBackend(content=b"<html>x</html>", final_url="")
+    crawler = BrowserCrawler(backend=backend)
+
+    page = crawler.fetch(URL, _plan(CrawlStrategy.HONEST))
+
+    assert page.url == URL
+    assert page.content == b"<html>x</html>"
 
 
 def test_auto_strategy_dispatches_to_honest() -> None:
@@ -245,6 +269,30 @@ def test_hybrid_bridges_cookies_and_returns_http_page(tmp_path: Path) -> None:
     assert "Accept-Language" in headers
     # успешный hybrid-ответ закэширован по http_key(url).
     assert cache.get_bytes("http", http_key(URL)) == b"hybrid-body"
+
+
+def test_hybrid_success_reports_browser_final_url() -> None:
+    # A3: успех hybrid — в RawPage.url идёт финальный (пост-редиректный) URL прогрева.
+    backend = FakeBackend(content=b"<html>", cookies=[COOKIE], final_url=FINAL_URL)
+    getter = RecordingHttpGet([(200, b"http-body", {"Content-Type": "text/html"})])
+    crawler = BrowserCrawler(backend=backend, http_get=getter)
+
+    page = crawler.fetch(URL, _plan(CrawlStrategy.HYBRID))
+
+    assert page.fetch_mode is FetchMode.HTTP
+    assert page.url == FINAL_URL
+
+
+def test_hybrid_fallback_reports_browser_final_url() -> None:
+    # A3: fallback (challenge не снят) возвращает рендер — URL также финальный.
+    backend = FakeBackend(content=b"<html>render</html>", cookies=[COOKIE], final_url=FINAL_URL)
+    getter = RecordingHttpGet([(403, b"denied", {})])
+    crawler = BrowserCrawler(backend=backend, http_get=getter)
+
+    page = crawler.fetch(URL, _plan(CrawlStrategy.HYBRID))
+
+    assert page.fetch_mode is FetchMode.BROWSER
+    assert page.url == FINAL_URL
 
 
 def test_hybrid_warm_uses_browser_session() -> None:

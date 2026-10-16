@@ -159,8 +159,12 @@ class CrawlUnavailable(CrawlError):
 class BrowserSession(Protocol):
     """Сессия браузера: рендер страницы и чтение cookie хоста (шов для тестов)."""
 
-    def navigate(self, url: str, wait_for: str | None = None) -> bytes:
-        """Открывает ``url`` (опционально ждёт JS-условие ``wait_for``) → байты рендера."""
+    def navigate(self, url: str, wait_for: str | None = None) -> tuple[str, bytes]:
+        """Открывает ``url`` (опц. ждёт JS-условие ``wait_for``) → ``(финальный URL, байты)``.
+
+        Финальный URL — пост-редиректный ``page.url`` (A3): именно он кладётся в
+        ``RawPage.url``, чтобы браузерный redirect-эскейп был детектируем, как у Scrapy/httpx.
+        """
         ...
 
     def cookies(self, url: str) -> list[dict[str, Any]]:
@@ -215,6 +219,24 @@ def _looks_like_interstitial(http_body: bytes, rendered: bytes | None) -> bool:
     return len(http_body) < INTERSTITIAL_LENGTH_RATIO * len(rendered)
 
 
+def _navigate_page(
+    session: BrowserSession, url: str, wait_for: str | None
+) -> tuple[str, bytes]:
+    """``session.navigate`` с нормализацией в ``(финальный URL, байты рендера)``.
+
+    Финальный URL — пост-редиректный ``page.url`` браузера (A3), он попадает в
+    ``RawPage.url``. Если сессия его не сообщает (пусто/``None``) либо это шов старого
+    образца, возвращающий только байты, — используется запрошенный ``url`` (откат;
+    ``RawPage.url`` никогда не пуст).
+    """
+    result = session.navigate(url, wait_for)
+    if isinstance(result, tuple):
+        final_url, content = result
+        return (str(final_url) if final_url else url), bytes(content)
+    # Совместимость: шов вернул только байты (финальный URL недоступен) → запрошенный URL.
+    return url, bytes(result)
+
+
 # ---------------------------------------------------------------------------
 # Реальный backend Playwright (ленивая зависимость)
 # ---------------------------------------------------------------------------
@@ -229,11 +251,12 @@ class _PlaywrightSession:
         self._timeout_ms = timeout_ms
         self._closed = False
 
-    def navigate(self, url: str, wait_for: str | None = None) -> bytes:
-        """``goto`` с ожиданием DOM; при ``wait_for`` — ожидание JS-условия → байты HTML.
+    def navigate(self, url: str, wait_for: str | None = None) -> tuple[str, bytes]:
+        """``goto`` с ожиданием DOM; при ``wait_for`` — ожидание JS-условия.
 
-        После навигации финальный URL повторно валидируется (SSRF через редирект
-        браузера не обходит защиту).
+        Возвращает ``(финальный URL, байты HTML)``: финальный URL — пост-редиректный
+        ``page.url`` (A3), он же повторно валидируется (SSRF через редирект браузера не
+        обходит защиту).
         """
         if self._closed:
             raise CrawlError("браузерная сессия уже закрыта")
@@ -249,7 +272,7 @@ class _PlaywrightSession:
             if wait_for:
                 # ``wait_for`` — JS-условие (совместимо с ``plan.wait_for``/crawl_scrapy).
                 self._page.wait_for_function(wait_for, timeout=self._timeout_ms)
-            return self._page.content().encode("utf-8")
+            return final_url, self._page.content().encode("utf-8")
         except CrawlError:
             raise
         except Exception as exc:  # noqa: BLE001 - унификация ошибок адаптера
@@ -521,14 +544,16 @@ class BrowserCrawler:
         """Честный браузерный рендер: ``navigate(url, wait_for)`` → ``RawPage(BROWSER)``.
 
         Без кэша. Байты — DOM-сериализация браузера (транскодирование), не байт-в-байт.
+        ``RawPage.url`` — **финальный** (пост-редиректный) URL навигации (A3), а не
+        запрошенный.
         """
         session = self._open_session()
         try:
-            content = bytes(session.navigate(url, plan.wait_for))
+            final_url, content = _navigate_page(session, url, plan.wait_for)
         finally:
             session.close()
         return RawPage(
-            url=url,
+            url=final_url,
             content=content,
             fetched_at=_now_iso(),
             fetch_mode=FetchMode.BROWSER,
@@ -551,12 +576,13 @@ class BrowserCrawler:
 
         last_status: int | None = None
         last_rendered: bytes | None = None
+        last_render_url: str = url
         for attempt in range(HYBRID_MAX_ATTEMPTS):
-            cookies, rendered = self._warm(url, plan)
+            cookies, render_url, rendered = self._warm(url, plan)
             status, body, resp_headers = self._http_get_hybrid(url, cookies)
             if 200 <= status < 300 and not _looks_like_interstitial(body, rendered):
                 page = RawPage(
-                    url=url,
+                    url=render_url,
                     content=bytes(body),
                     fetched_at=_now_iso(),
                     fetch_mode=FetchMode.HTTP,
@@ -569,13 +595,14 @@ class BrowserCrawler:
             # Challenge / не-2xx / interstitial: сохраняем рендер для возможного возврата.
             last_status = status
             last_rendered = rendered
+            last_render_url = render_url
             if attempt < HYBRID_MAX_ATTEMPTS - 1:
                 time.sleep(jittered_backoff(attempt))
 
         if last_rendered:
             # Переиспользуем уже полученный честный рендер (без лишнего фетча). Не кэшируется.
             return RawPage(
-                url=url,
+                url=last_render_url,
                 content=bytes(last_rendered),
                 fetched_at=_now_iso(),
                 fetch_mode=FetchMode.BROWSER,
@@ -585,18 +612,21 @@ class BrowserCrawler:
             f"(status={last_status})"
         )
 
-    def _warm(self, url: str, plan: FetchPlan) -> tuple[list[dict[str, Any]], bytes]:
-        """Прогревает сессию браузером: ``(cookie хоста, байты рендера)``.
+    def _warm(
+        self, url: str, plan: FetchPlan
+    ) -> tuple[list[dict[str, Any]], str, bytes]:
+        """Прогревает сессию браузером: ``(cookie хоста, финальный URL, байты рендера)``.
 
         Рендер — эталон честного пути (используется гейтом interstitial и как fallback).
+        Финальный URL — пост-редиректный ``page.url`` (A3).
         """
         session = self._open_session()
         try:
-            rendered = bytes(session.navigate(url, plan.wait_for))
+            final_url, rendered = _navigate_page(session, url, plan.wait_for)
             cookies = list(session.cookies(url))
         finally:
             session.close()
-        return cookies, rendered
+        return cookies, final_url, rendered
 
     def _http_get_hybrid(
         self, url: str, cookies: list[dict[str, Any]]
@@ -691,7 +721,14 @@ class BrowserCrawler:
     # -- кэш ------------------------------------------------------------------
 
     def _page_from_cache(self, url: str, content: bytes) -> RawPage:
-        """``RawPage`` из закэшированных байтов (``status_code``/``content_type`` пусты)."""
+        """``RawPage`` из закэшированных байтов (``status_code``/``content_type`` пусты).
+
+        Кэш content-addressed и хранит **только тело** по ``http_key(url)``, финальный
+        (пост-редиректный) URL в нём не сохраняется. Поэтому кэш-хит осознанно ставит
+        ``url`` = **запрошенный** URL — восстановить финальный невозможно без изменения
+        формата кэша (вне рамок A3). Это же расхождение предсуществует в Scrapy-пути
+        (``crawl_scrapy.py`` ``_page_from_cache``) — здесь оно только зафиксировано.
+        """
         return RawPage(
             url=url,
             content=content,
