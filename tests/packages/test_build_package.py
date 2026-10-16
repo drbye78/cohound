@@ -28,8 +28,12 @@ ON_DISK_PROFILES = ROOT / "packages" / "ru-pg-dbms" / "domain_profiles.yaml"
 
 
 def _load_generator():
-    """Загружает генератор по пути (каталог ``packages/`` не является пакетом)."""
-    pytest.importorskip("openpyxl")  # extra 'extract': без него модуль не импортируется
+    """Загружает генератор по пути (каталог ``packages/`` не является пакетом).
+
+    Модуль импортируется **без** extra ``extract``: ``openpyxl`` теперь ленивый (только
+    внутри читателей xlsx), иначе этот регрессионный тест молча скипался бы в каноническом
+    dev/CI-окружении, а дрейф схемы ``domain_profiles`` вернулся бы незамеченным.
+    """
     spec = importlib.util.spec_from_file_location("_ru_pg_dbms_build_package", GENERATOR)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)

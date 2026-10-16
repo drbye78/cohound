@@ -37,8 +37,12 @@ import re
 import sys
 from pathlib import Path
 
-import openpyxl
 import yaml
+
+# ``openpyxl`` (extra ``extract``) импортируется лениво внутри читателей xlsx: чистые
+# эмиттеры артефактов (напр. ``build_domain_profiles``) обязаны быть импортируемы в
+# каноническом dev/CI-окружении (``--extra dev``), где openpyxl не выставлен. Иначе
+# регрессионный тест генератора молча скипался бы и дрейф схемы вернулся бы незамеченным.
 
 # ---------------------------------------------------------------------------
 # Константы кейса
@@ -555,6 +559,8 @@ def ensure_unique(candidate: str, used: set[str]) -> str:
 
 def read_psq() -> list[dict]:
     """Читает лист ``final`` psq: список строк-параметров (119)."""
+    import openpyxl  # extra 'extract' — нужен только реальному чтению xlsx
+
     wb = openpyxl.load_workbook(SRC_PSQ, data_only=True)
     ws = wb[PSQ_SHEET]
     rows: list[dict] = []
@@ -585,6 +591,8 @@ def read_psq() -> list[dict]:
 
 def read_golden() -> dict[str, dict]:
     """Читает golden: ``{normalized_title: {postgrespro, pangolin}}`` (277 параметров)."""
+    import openpyxl  # extra 'extract' — нужен только реальному чтению xlsx
+
     wb = openpyxl.load_workbook(SRC_GOLDEN, data_only=True)
     ws = wb[GOLDEN_SHEET]
     result: dict[str, dict] = {}
