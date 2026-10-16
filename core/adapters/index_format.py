@@ -29,6 +29,7 @@ __all__ = [
     "PartitionData",
     "build_root",
     "partition_dir",
+    "list_partitions",
     "write_partition",
     "read_partition",
     "read_manifest",
@@ -68,6 +69,20 @@ def is_committed(
     """Зафиксирована ли партиция (все три артефакта на месте)."""
     root = build_root(index_root, package, build_id, product_id)
     return all((root / name).is_file() for name in (_VECTORS, _CHUNK_IDS, _MANIFEST))
+
+
+def list_partitions(
+    index_root: str | Path, package: str, build_id: str
+) -> list[str]:
+    """Продукт-партиции сборки (имена подкаталогов), отсортированные детерминированно.
+
+    Единый носитель раскладки: читатель индекса не дублирует знание о том, что партиция —
+    это подкаталог ``{product_id}/``. Пустой список — сборки/пакета нет.
+    """
+    build_dir = Path(index_root) / package / build_id
+    if not build_dir.is_dir():
+        return []
+    return sorted(child.name for child in build_dir.iterdir() if child.is_dir())
 
 
 def write_partition(

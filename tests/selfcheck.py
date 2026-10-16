@@ -348,7 +348,9 @@ def main() -> int:
     check("R0/R1/R2: профиль явный, продукт-скоуп (I16/I17)", lambda: _retrieve_profiles())
     check("RRF-фьюжн: дедуп + провенанс + tie-break (R7)", lambda: _rrf_fusion())
     check("LocalEmbedder: батч + torque-free шов (T8.1)", lambda: _embed_local())
+    check("LiteEmbedder: оффлайн-шов + guard пустого входа (P4a)", lambda: _embed_model2vec())
     check("NpyIndexBuilder/VectorIndex: партиции + cosine (T8.2/T8.4)", lambda: _index_roundtrip())
+    check("retrieval read-loop: сборка → vector_index, product-scoped (P4a/I17)", lambda: _retrieval_read_loop())
 
     section("Расчёт (Ш8) — W10")
     check("compute: I5 (failed в Coverage, вне Capability) + K6", lambda: _compute_i5())
@@ -1435,6 +1437,29 @@ def _embed_local() -> None:
         raise AssertionError(f"батчинг сломан: {batches}")
 
 
+def _embed_model2vec() -> None:
+    """LiteEmbedder (P4a): оффлайн-шов, guard пустого входа, пин ревизии в ``model_id``."""
+    from core.adapters.embed_model2vec import DEFAULT_MODEL_ID, LiteEmbedder
+    from core.ports.embedder import EmbedderPort
+
+    def _fake(texts):
+        return [[0.0] * 3 for _ in texts]
+
+    emb = LiteEmbedder(embed_fn=_fake, dim=3, revision="sha1")
+    if not isinstance(emb, EmbedderPort) or emb.dim != 3:
+        raise AssertionError("LiteEmbedder не соответствует EmbedderPort")
+    if emb.model_id != f"{DEFAULT_MODEL_ID}@sha1":
+        raise AssertionError(f"ревизия не в model_id: {emb.model_id!r}")
+    out = emb.embed(["a", "b"])
+    if len(out) != 2 or any(len(v) != 3 for v in out):
+        raise AssertionError("LiteEmbedder.embed обязан вернуть N×dim")
+    try:
+        emb.embed(["   "])
+        raise AssertionError("пустой текст обязан отвергаться (иначе нулевой вектор)")
+    except ValueError:
+        pass
+
+
 def _index_roundtrip() -> None:
     """Индексная сборка .npy: round-trip партиции + cosine-поиск (T8.2/T8.4, I17).
 
@@ -1472,6 +1497,8 @@ def _index_roundtrip() -> None:
         builder.commit()
         if bid != "ib_sc" or not index_format.is_committed(tmp, "pk", "ib_sc", "p1"):
             raise AssertionError("сборка .npy-партиции не зафиксирована")
+        if index_format.list_partitions(tmp, "pk", "ib_sc") != ["p1"]:
+            raise AssertionError("list_partitions обязан вернуть продукт-партиции сборки")
 
         lookup = {c.chunk_id: c for c in chunks}
         vindex = NpyVectorIndex(
@@ -1482,6 +1509,47 @@ def _index_roundtrip() -> None:
         hits = vindex.search(VectorQuery(product_ids=["p1"], top_k=2, vector=[0.9, 0.1]))
         if not hits or hits[0].chunk_id != "c0" or hits[0].content_hash != "h0":
             raise AssertionError(f"cosine/provenance сломан: {[h.chunk_id for h in hits]}")
+
+
+def _retrieval_read_loop() -> None:
+    """P4a: ``vector_index`` строится из зафиксированной сборки (product-scoped, I17).
+
+    Проверяет, что composition-хелпер ``build_vector_index`` резолвит единственную
+    сборку пакета, читает ``dim`` из манифеста и возвращает рабочий ``NpyVectorIndex``;
+    без резолвера чанков — честный ``None`` (явное отсутствие, N3). Пропускается без numpy.
+    """
+    try:
+        import numpy  # noqa: F401
+    except ImportError:
+        return
+    import tempfile
+
+    from core.adapters import index_format
+    from core.cli.wiring import build_vector_index
+    from core.ports.types import Chunk
+    from core.ports.vector_index import VectorQuery
+
+    with tempfile.TemporaryDirectory() as tmp:
+        index_format.write_partition(
+            tmp, "pk", "ib_rl", "pA", [[1.0, 0.0]], ["ca"], {"dim": 2}
+        )
+        index_format.write_partition(
+            tmp, "pk", "ib_rl", "pB", [[0.0, 1.0]], ["cb"], {"dim": 2}
+        )
+        lookup = {
+            "ca": Chunk(chunk_id="ca", chunk_no=0, text="A", heading_path="",
+                        context_prefix="", content_hash="hA"),
+            "cb": Chunk(chunk_id="cb", chunk_no=0, text="B", heading_path="",
+                        context_prefix="", content_hash="hB"),
+        }
+        if build_vector_index(index_root=tmp, package="pk", chunk_lookup=None) is not None:
+            raise AssertionError("без chunk_lookup индекс обязан быть None (N3)")
+        index = build_vector_index(index_root=tmp, package="pk", chunk_lookup=lookup)
+        if index is None or index.build_id != "ib_rl" or index.dim != 2:
+            raise AssertionError("dense read-loop не собрался из сборки")
+        only_a = index.search(VectorQuery(product_ids=["pA"], top_k=5, vector=[1.0, 0.0]))
+        if [c.chunk_id for c in only_a] != ["ca"]:
+            raise AssertionError(f"I17 нарушен: {[c.chunk_id for c in only_a]}")
 
 
 def _compute_i5() -> None:

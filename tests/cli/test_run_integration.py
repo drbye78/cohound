@@ -31,6 +31,7 @@ from core.cli.wiring import (
     SPLIT_PROFILE,
     WiringError,
     build_adapters,
+    build_lite_embedder,
     build_store,
 )
 from core.domain import LLMCellOutput, Status
@@ -76,11 +77,15 @@ def test_local_adapters_set_safe_ports_and_skip_missing_heavy() -> None:
     assert ports.search is None
     assert ports.evaluator is None
     assert ports.registry is None
+    # Dense-плечо: без ``chunk_lookup``/зафиксированной сборки — явный ``None`` (P4a, N3).
     assert ports.vector_index is None
-    # Тяжёлые опциональные: ровно тогда, когда доступна зависимость (graceful, без raise).
-    assert (ports.embedder is not None) is _has_module("sentence_transformers")
+    # Лексическое плечо симметрично: без store/сборки порт не поднимается (P4a, N3).
+    assert ports.lexical_index is None
+    # Эмбеддер (P4a): оффлайн-lite при готовой модели → качественный bge-m3 при
+    # sentence-transformers → иначе ``None`` (адаптер не фабрикуется, A3/I19).
+    lite_ready = _has_module("model2vec") and build_lite_embedder().available
+    assert (ports.embedder is not None) is (lite_ready or _has_module("sentence_transformers"))
     assert (ports.index_builder is not None) is _has_module("numpy")
-    assert (ports.lexical_index is not None) is _has_module("tantivy")
 
 
 def test_local_adapters_accept_injected_evaluator_and_registry() -> None:

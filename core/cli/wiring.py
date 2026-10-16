@@ -37,11 +37,18 @@ from core.adapters.crawl_browser import BrowserCrawler
 from core.adapters.crawl_http import HttpCrawler
 from core.adapters.crawl_scrapy import CrawlError, ScrapyCrawler
 from core.adapters.embed_local import LocalEmbedder
+from core.adapters.embed_model2vec import LiteEmbedder, model2vec_available
 from core.adapters.extract_document import DoclingDocumentExtractor
 from core.adapters.extract_html import HtmlExtractor
 from core.adapters.feed_poller import LocalFeedPoller, RemoteFeedPoller
 from core.adapters.index_npy import NpyIndexBuilder, numpy_available
-from core.adapters.lexical_tantivy import TantivyLexicalIndex, tantivy_available
+from core.adapters import index_format
+from core.adapters.lexical_tantivy import (
+    LexicalChunk,
+    TantivyLexicalIndex,
+    tantivy_available,
+)
+from core.adapters.vector_npy import ChunkLookup, NpyVectorIndex
 from core.adapters.llm_discovery import (
     DEFAULT_DECODER as DISCOVERY_DEFAULT_DECODER,
     DEFAULT_MAX_TOKENS as DISCOVERY_DEFAULT_MAX_TOKENS,
@@ -83,13 +90,18 @@ from core.pipeline import Ports, Runner
 from core.pipeline.runner import PHASES, Clock, PhaseFn
 from core.ports.crawler import CrawlerPort
 from core.ports.discovery_llm import DiscoveryLLMPort
+from core.ports.embedder import EmbedderPort
 from core.ports.extractor import ExtractorPort
 from core.ports.gateway import ContentGateway
+from core.ports.lexical_index import LexicalIndexPort
 from core.ports.llm import EvaluatorPort
 from core.ports.poller import PollPort
 from core.ports.registry import RegistryFetcherPort
 from core.ports.search import SearchAdapterPort
-from core.ports.types import ExtractedDoc, ExtractionRoute, FetchMode, RawPage
+from core.ports.store import StorePort
+from core.ports.types import Chunk, ExtractedDoc, ExtractionRoute, FetchMode, RawPage
+from core.ports.vector_index import VectorIndexPort
+from core.store.backup import list_builds
 from core.store.sqlite_store import SqliteStore
 from core.util.cache import ContentAddressedCache
 
@@ -103,6 +115,9 @@ __all__ = [
     "ENV_SCOUT_CRAWLER",
     "DEFAULT_SCOUT_CRAWLER",
     "SUPPORTED_SCOUT_CRAWLERS",
+    "ENV_EMBED_LITE_MODEL",
+    "ENV_EMBED_LITE_REVISION",
+    "ENV_EMBED_LITE_PATH",
     "PHASES",
     "WiringError",
     "run_db_path",
@@ -111,6 +126,9 @@ __all__ = [
     "build_search_adapter",
     "build_discovery_llm",
     "build_evaluator_llm",
+    "build_lite_embedder",
+    "build_vector_index",
+    "seed_lexical_index",
     "build_scout_crawler",
     "build_scout_crawlers",
     "build_adapters",
@@ -160,9 +178,131 @@ DEFAULT_LLM_BASE_URL = ""
 #: Дефолтная модель LLM-разведки (env-фолбэк; данные, не предметная категория).
 DEFAULT_LLM_MODEL = "deepseek-v4.1-flash:cxbc"
 
+#: Env-переопределения лёгкого оффлайн-эмбеддера (P4a; данные, не предметная категория):
+#: HF-идентификатор модели, пин ревизии (sha/тег → входит в ``embed_model_id`` как ``repo@sha``,
+#: граница ``execution_versions`` §13) и явный локальный каталог снапшота (оффлайн-инференс).
+ENV_EMBED_LITE_MODEL = "COHOUND_EMBED_LITE_MODEL"
+ENV_EMBED_LITE_REVISION = "COHOUND_EMBED_LITE_REVISION"
+ENV_EMBED_LITE_PATH = "COHOUND_EMBED_LITE_PATH"
+
 
 class WiringError(ValueError):
     """Ошибка сборки зависимостей: неизвестный или ещё не реализованный профиль."""
+
+
+def build_lite_embedder() -> LiteEmbedder:
+    """Собирает оффлайн-эмбеддер ``model2vec`` из env-данных (P4a, A3).
+
+    Модель/ревизия/локальный путь — **данные** оператора (env, ``05`` §2.3), не предметная
+    категория (§1.3): дефолты берёт сам адаптер. Ревизия попадает в ``model_id``
+    (``repo@sha``) и, как следствие, в ``index_build_id``/манифест (§13, ``execution``-граница).
+    Вызывающий обязан проверить ``available`` прежде чем использовать порт: отсутствие
+    снапшота/зависимости не подменяется выдуманными векторами.
+    """
+    model_id = os.environ.get(ENV_EMBED_LITE_MODEL) or None
+    revision = os.environ.get(ENV_EMBED_LITE_REVISION) or None
+    model_path = os.environ.get(ENV_EMBED_LITE_PATH) or None
+    kwargs: dict[str, Any] = {"revision": revision, "model_path": model_path}
+    if model_id:
+        kwargs["model_id"] = model_id
+    return LiteEmbedder(**kwargs)
+
+
+def _single_persisted_build(index_root: str | Path, package: str | None) -> str | None:
+    """Единственная зафиксированная сборка пакета или ``None`` (детерминированно).
+
+    Переиспользует существующий перечислитель сборок ``backup.list_builds`` (единый
+    носитель раскладки ``index_store/{package}/{build}/``). При **неоднозначности**
+    (>1 сборки) возвращает ``None``: выбор произвольной сборки сломал бы воспроизводимость
+    (A3/§13) — вызывающий обязан передать явный ``build_id`` (из манифеста прогона).
+    """
+    if not package:
+        return None
+    builds = list_builds(index_root, package)
+    return builds[0][0] if len(builds) == 1 else None
+
+
+def _build_dim(index_root: str | Path, package: str, build_id: str) -> int | None:
+    """Размерность вектора из манифеста первой продукт-партиции сборки (или ``None``)."""
+    for product_id in index_format.list_partitions(index_root, package, build_id):
+        dim = index_format.read_manifest(index_root, package, build_id, product_id).get("dim")
+        if isinstance(dim, int) and dim > 0:
+            return dim
+    return None
+
+
+def build_vector_index(
+    *,
+    index_root: str | Path,
+    package: str | None,
+    chunk_lookup: ChunkLookup | None,
+    build_id: str | None = None,
+) -> VectorIndexPort | None:
+    """Собирает ``NpyVectorIndex`` (dense-плечо R1/R2), либо ``None`` — явное отсутствие.
+
+    Порт строится только когда **все** предпосылки налицо: установлен ``numpy``, известен
+    пакет, есть резолвер метаданных чанков (``chunk_lookup``) и разрешена зафиксированная
+    сборка (явный ``build_id`` либо единственная сборка пакета). Иначе возвращается ``None``:
+    отсутствие предпосылки — легитимный no-op (N3), который эксперимент фиксирует как
+    ``skipped``/``no_embedder``, а не молчаливая дыра и не выдуманный индекс.
+
+    ``dim`` берётся из манифеста сборки (авторитетный on-disk источник), поэтому индекс
+    согласован с физическими векторами независимо от текущего эмбеддера. Продукт-скоуп
+    (I17) обеспечивает сам ``NpyVectorIndex``.
+    """
+    if not numpy_available() or not package or chunk_lookup is None:
+        return None
+    resolved = build_id or _single_persisted_build(index_root, package)
+    if resolved is None:
+        return None
+    dim = _build_dim(index_root, package, resolved)
+    if dim is None:
+        return None
+    return NpyVectorIndex(index_root, package, resolved, dim, chunk_lookup)
+
+
+def seed_lexical_index(
+    *,
+    index_root: str | Path,
+    package: str | None,
+    store: StorePort | None,
+    build_id: str | None = None,
+) -> LexicalIndexPort | None:
+    """Собирает лексический индекс (BM25, R0/R2) из персистентных чанков сборки.
+
+    Лексическое плечо симметрично dense: ``TantivyLexicalIndex`` сам по себе непригоден
+    (пустой индекс отвергает поиск), поэтому порт строится/засевается только при наличии
+    ``tantivy``, ``store`` и разрешённой сборки. Чанки берутся продукт-партициями из
+    ``store.iter_chunks(build_id, product_id=…)`` (``product_id`` известен из раскладки
+    ``index_format.list_partitions``), поэтому поиск остаётся продукт-скоупед (I17).
+    Иначе — ``None`` (явное отсутствие; эксперимент пропускает R0/R2, N3).
+    """
+    if not tantivy_available() or not package or store is None:
+        return None
+    resolved = build_id or _single_persisted_build(index_root, package)
+    if resolved is None:
+        return None
+    records: list[LexicalChunk] = []
+    for product_id in index_format.list_partitions(index_root, package, resolved):
+        for chunk in store.iter_chunks(resolved, product_id=product_id):
+            records.append(_lexical_record(chunk, product_id, resolved))
+    if not records:
+        return None
+    index = TantivyLexicalIndex()
+    index.index(records, build_id=resolved)
+    return index
+
+
+def _lexical_record(chunk: Chunk, product_id: str, build_id: str) -> LexicalChunk:
+    """``ports.types.Chunk`` + ``product_id`` (из партиции) → запись лексического индекса."""
+    return LexicalChunk(
+        chunk_id=chunk.chunk_id,
+        product_id=product_id,
+        text=chunk.text,
+        heading_path=chunk.heading_path,
+        content_hash=chunk.content_hash,
+        build_id=build_id,
+    )
 
 
 def run_db_path(runs_dir: str | Path, run_id: str) -> Path:
@@ -854,6 +994,12 @@ def _build_local_ports(
     crawler: CrawlerPort | None = None,
     crawlers: Mapping[str, CrawlerPort] | None = None,
     pollers: Mapping[str, PollPort] | None = None,
+    store: StorePort | None = None,
+    chunk_lookup: ChunkLookup | None = None,
+    index_build_id: str | None = None,
+    embedder: EmbedderPort | None = None,
+    vector_index: VectorIndexPort | None = None,
+    lexical_index: LexicalIndexPort | None = None,
 ) -> Ports:
     """Собирает in-process порты профиля ``local`` (без сети/тяжёлых зависимостей).
 
@@ -865,6 +1011,18 @@ def _build_local_ports(
     поведение, сетевые адаптеры включаются явной инъекцией).
     ``pollers`` — карта ``kind → PollPort`` (Phase 5.1: ``LocalFeedPoller`` для
     ``feed``/``channel``), собранная из того же краулера; ``None`` → опрос фидов выключен.
+
+    **Эмбеддер (P4a).** Предпочитается оффлайн-путь ``LiteEmbedder`` (``model2vec``, без
+    ``torch``), если он готов (зависимость + локальный снапшот модели); иначе — качественный
+    ``LocalEmbedder`` (bge-m3) при наличии ``sentence-transformers``; иначе ``None``.
+    Выдуманных векторов/подмены модели нет: недоступность — явный ``None`` (A3).
+
+    **Dense- и лексическое плечи (P4a, I17).** ``vector_index``/``lexical_index`` строятся
+    :func:`build_vector_index`/:func:`seed_lexical_index` только при наличии предпосылок
+    (``numpy``/``tantivy``, ``chunk_lookup``/``store`` и разрешённая зафиксированная сборка
+    ``index_build_id``). Отсутствие предпосылки — явный ``None`` (N3): эксперимент фиксирует
+    это как ``skipped``, а не как молчаливую дыру или выдуманный индекс. Явно
+    инъецированные порты имеют приоритет (ручной DI, A1).
     """
     html = HtmlExtractor()
     documents = DoclingDocumentExtractor()
@@ -875,26 +1033,43 @@ def _build_local_ports(
     )
 
     # Тяжёлые опциональные адаптеры: только при выполненной availability-предикате.
-    embedder = (
-        LocalEmbedder() if _module_installed("sentence_transformers") else None
-    )
+    resolved_embedder = embedder if embedder is not None else _resolve_embedder()
     index_builder = (
         NpyIndexBuilder(index_root=index_root, package=package)
         if numpy_available()
         else None
     )
-    lexical_index = TantivyLexicalIndex() if tantivy_available() else None
+    resolved_vector_index = (
+        vector_index
+        if vector_index is not None
+        else build_vector_index(
+            index_root=index_root,
+            package=package,
+            chunk_lookup=chunk_lookup,
+            build_id=index_build_id,
+        )
+    )
+    resolved_lexical_index = (
+        lexical_index
+        if lexical_index is not None
+        else seed_lexical_index(
+            index_root=index_root,
+            package=package,
+            store=store,
+            build_id=index_build_id,
+        )
+    )
 
     return Ports(
         evaluator=evaluator,
         registry=registry,
         chunker=MarkdownChunkerPort(),
         extractor=extractor,
-        embedder=embedder,
+        embedder=resolved_embedder,
         index_builder=index_builder,
         # Adapter/port mismatch (engine_version: property vs mutable attr) — статическая
         # несовместимость протокола; runtime_checkable проверяет методы, поведение корректно.
-        lexical_index=lexical_index,  # type: ignore[arg-type]
+        lexical_index=resolved_lexical_index,  # type: ignore[arg-type]
         # Краулер корпуса: инстанцируется composition root'ом из ``deploy.crawl`` (R7/03
         # §D.5); без конфига остаётся ``None`` — прежнее поведение. SERP/discovery для
         # local включаются явной инъекцией портов (в CLI-конфиге нет запросов).
@@ -904,8 +1079,28 @@ def _build_local_ports(
         # Phase 5.1: карта ``kind → PollPort`` для опроса фидов/каналов в Ш5.
         pollers=pollers,
         search=None,
-        vector_index=None,
+        vector_index=resolved_vector_index,
     )
+
+
+def _resolve_embedder() -> EmbedderPort | None:
+    """Выбирает эмбеддер: оффлайн ``LiteEmbedder`` → ``LocalEmbedder`` → ``None`` (P4a).
+
+    Приоритет — лёгкий путь без ``torch`` (CI/fixation-friendly): он берётся, если
+    ``model2vec`` установлен **и** локальный снапшот модели разрешается (оффлайн). Иначе
+    сохраняется качественный ``LocalEmbedder`` (bge-m3) при наличии ``sentence-transformers``.
+    Если недоступно ни то, ни другое — ``None``: адаптер **не** фабрикуется (I19/A3).
+    """
+    if model2vec_available():
+        try:
+            lite = build_lite_embedder()
+        except Exception:  # noqa: BLE001 — сборка портов не бросает (грациозная деградация)
+            lite = None
+        if lite is not None and lite.available:
+            return lite
+    if _module_installed("sentence_transformers"):
+        return LocalEmbedder()
+    return None
 
 
 def build_adapters(
@@ -923,6 +1118,11 @@ def build_adapters(
     cache: ContentAddressedCache | None = None,
     domain_profiles: Mapping[str, DomainProfile] | None = None,
     crawl_sources: CrawlSourcesConfig | None = None,
+    store: StorePort | None = None,
+    chunk_lookup: ChunkLookup | None = None,
+    index_build_id: str | None = None,
+    vector_index: VectorIndexPort | None = None,
+    lexical_index: LexicalIndexPort | None = None,
 ) -> Ports:
     """Собирает порты внешних систем по профилю развёртывания (``03`` §E.3).
 
@@ -957,6 +1157,15 @@ def build_adapters(
     :param crawl_sources: слои источников краула (``crawl_sources.yaml``, Lane A); их
         поля ``engine`` определяют, какие per-engine краулеры строит
         :func:`build_scout_crawlers` (ленивая сборка тяжёлых адаптеров).
+    :param store: операционное хранилище прогона (``local``); ``None`` → недоступно. Нужно
+        для засева лексического индекса из персистентных чанков (:func:`seed_lexical_index`,
+        P4a/I17). Не открывается здесь: состав хранения — ответственность вызывающего.
+    :param chunk_lookup: резолвер метаданных чанка (``Mapping``/callable) для
+        ``NpyVectorIndex`` (P4a); ``None`` → dense-плечо остаётся ``None`` (явное отсутствие).
+    :param index_build_id: явный идентификатор зафиксированной сборки (из манифеста прогона);
+        ``None`` → берётся единственная сборка пакета, при неоднозначности — ``None``.
+    :param vector_index / lexical_index: явно инъецированные порты ретривала (ручной DI, A1);
+        приоритетнее автосборки (тесты/засеянные сборки).
     :raises WiringError: неизвестный профиль или split без валидного deploy-конфига.
     """
     if profile == LOCAL_PROFILE:
@@ -997,6 +1206,11 @@ def build_adapters(
             crawler=local_crawler,
             crawlers=crawlers,
             pollers=pollers,
+            store=store,
+            chunk_lookup=chunk_lookup,
+            index_build_id=index_build_id,
+            vector_index=vector_index,
+            lexical_index=lexical_index,
         )
     if profile == SPLIT_PROFILE:
         config = deploy if deploy is not None else load_deploy_config(None)

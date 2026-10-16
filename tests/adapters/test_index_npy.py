@@ -129,6 +129,18 @@ def test_chunk_ids_jsonl_format(tmp_path: Path) -> None:
     assert [json.loads(ln)["chunk_id"] for ln in lines] == [c.chunk_id for c in chunks]
 
 
+def test_list_partitions_deterministic_and_absent(tmp_path: Path) -> None:
+    """``list_partitions`` — единый носитель раскладки: отсортировано, пусто без сборки."""
+    assert index_format.list_partitions(tmp_path, PKG, "ib_missing") == []
+    if np is None:
+        return
+    for product in ("pB", "pA"):
+        index_format.write_partition(
+            tmp_path, PKG, "ib_multi", product, [[1.0, 0.0]], [f"c-{product}"], {"dim": 1}
+        )
+    assert index_format.list_partitions(tmp_path, PKG, "ib_multi") == ["pA", "pB"]
+
+
 # --------------------------------------------------------------------------- #
 # build_id: детерминизм, чувствительность, приоритет
 # --------------------------------------------------------------------------- #

@@ -77,8 +77,13 @@ embed = [
 ]
 
 # Лёгкая эмбеддинг-ветка без torch (CPU, статичные эмбеддинги).
+# model2vec 0.9.0 не объявляет huggingface_hub (он приходит транзитивно) — фиксируем
+# явно, т.к. адаптер резолвит пин ревизии через snapshot_download. numpy — выходной
+# dtype/форма. torch/sentence-transformers сюда сознательно НЕ входят (§2.3, V3).
 embed-lite = [
     "model2vec>=0.9,<0.10",
+    "huggingface_hub>=1,<2",
+    "numpy>=2.5,<3",
 ]
 
 # ANN-подмена NpyVectorIndex по триггеру §15.

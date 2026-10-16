@@ -6,6 +6,7 @@ __all__ = [
     "crawl_http",
     "crawl_scrapy",
     "embed_local",
+    "embed_model2vec",
     "extract_document",
     "extract_html",
     "index_format",
