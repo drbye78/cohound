@@ -34,7 +34,7 @@ from core.ports.llm import EvaluatorPort, LLMRequest, LLMResponse, TokenUsage
 from core.ports.poller import PollPort
 from core.ports.registry import RegistryFetcherPort, RegistryFact
 from core.ports.search import SearchAdapterPort, SearchQuery, SearchResult
-from core.ports.store import StorePort
+from core.ports.store import RunIndexRef, StorePort
 from core.ports.types import (
     Chunk,
     ExtractedDoc,
@@ -76,6 +76,7 @@ __all__ = [
     "SearchQuery",
     "SearchResult",
     "StorePort",
+    "RunIndexRef",
     "Chunk",
     "ExtractedDoc",
     "ExtractionRoute",

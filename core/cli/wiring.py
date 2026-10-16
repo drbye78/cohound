@@ -28,6 +28,7 @@ from __future__ import annotations
 import importlib.util
 import os
 from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -129,6 +130,10 @@ __all__ = [
     "build_lite_embedder",
     "build_vector_index",
     "seed_lexical_index",
+    "ExperimentTarget",
+    "resolve_experiment_target",
+    "EmbedderBuildMismatch",
+    "assert_embedder_matches_build",
     "build_scout_crawler",
     "build_scout_crawlers",
     "build_adapters",
@@ -302,6 +307,105 @@ def _lexical_record(chunk: Chunk, product_id: str, build_id: str) -> LexicalChun
         heading_path=chunk.heading_path,
         content_hash=chunk.content_hash,
         build_id=build_id,
+    )
+
+
+@dataclass(frozen=True)
+class ExperimentTarget:
+    """Зафиксированный объект эксперимента ретривала (P4b): сборка, пакет, продукты, модель.
+
+    Разрешается **из БД прогона** (:meth:`StorePort.read_run_index_ref` +
+    :meth:`StorePort.iter_index_manifest`), а не сканированием ``index_store/``: сборка
+    берётся из ``runs.index_build_id``, пакет — из записи ``index_manifest`` (авторитетно
+    для раскладки сборки) с фолбэком на ``runs.package_id``. ``embed_model_id`` —
+    согласованность «запросный эмбеддер ↔ физическая сборка» (NB1): два *одинаково
+    размерных* разных эмбеддера дают бессмысленный скор, поэтому сверяется именно id.
+    """
+
+    package: str
+    build_id: str
+    product_ids: tuple[str, ...] = ()
+    embed_model_id: str | None = None
+
+
+class EmbedderBuildMismatch(WiringError):
+    """§13/I17 (NB1): запросный эмбеддер не совпадает со сборкой — эксперимент запрещён.
+
+    Несёт оба идентификатора (запроса и сборки), чтобы ошибка называла расхождение явно.
+    """
+
+    def __init__(self, query_model_id: str, build_model_id: str) -> None:
+        super().__init__(
+            f"эмбеддер запроса ({query_model_id!r}) не совпадает с эмбеддером сборки "
+            f"({build_model_id!r}): скор был бы бессмысленным (NB1/§13). "
+            "Пересоберите индекс тем же эмбеддером либо смените эмбеддер запроса."
+        )
+        self.query_model_id = query_model_id
+        self.build_model_id = build_model_id
+
+
+def assert_embedder_matches_build(query_model_id: str, build_model_id: str) -> None:
+    """Отказ при расхождении эмбеддера запроса и сборки (NB1; сравнение по id, не по dim).
+
+    :raises EmbedderBuildMismatch: ``query_model_id != build_model_id`` — называет оба id.
+    """
+    if query_model_id != build_model_id:
+        raise EmbedderBuildMismatch(query_model_id, build_model_id)
+
+
+def _build_embed_model_id(
+    index_root: str | Path, package: str, build_id: str, product_ids: tuple[str, ...]
+) -> str | None:
+    """``embed_model_id`` из ``manifest.json`` первой продукт-партиции сборки (или ``None``).
+
+    On-disk манифест — авторитетный источник того, чем **физически** собраны векторы.
+    """
+    for product_id in product_ids:
+        manifest = index_format.read_manifest(index_root, package, build_id, product_id)
+        model_id = manifest.get("embed_model_id")
+        if isinstance(model_id, str) and model_id:
+            return model_id
+    return None
+
+
+def resolve_experiment_target(
+    store: StorePort, run_id: str, *, index_root: str | Path = "index_store"
+) -> ExperimentTarget | None:
+    """Разрешает зафиксированную сборку прогона из БД (P4b, нейтрально).
+
+    Источники (без сканирования каталогов, A1): ``runs.index_build_id`` даёт сборку;
+    ``index_manifest`` этой сборки — пакет раскладки, продукт-партиции и (фолбэк)
+    ``embed_model_id``; ``runs.package_id`` — фолбэк пакета, если запись
+    ``index_manifest`` пакета не несёт. ``embed_model_id`` предпочитается из on-disk
+    ``manifest.json`` партиции (авторитетный on-disk источник, §13).
+
+    :returns: :class:`ExperimentTarget` или ``None`` — предпосылка отсутствует: нет строки
+        прогона, не записан ``index_build_id`` или не разрешён пакет. Отсутствие явное
+        (N3), значения не выдумываются.
+    """
+    ref = store.read_run_index_ref(run_id)
+    if ref is None or not ref.index_build_id:
+        return None
+    build_id = ref.index_build_id
+    entries = list(store.iter_index_manifest(build_id))
+    package = next((entry.package_id for entry in entries if entry.package_id), None) or (
+        ref.package_id
+    )
+    if not package:
+        return None
+    product_ids = tuple(sorted({entry.product_id for entry in entries})) or tuple(
+        index_format.list_partitions(index_root, package, build_id)
+    )
+    embed_model_id = _build_embed_model_id(index_root, package, build_id, product_ids)
+    if embed_model_id is None:
+        embed_model_id = next(
+            (entry.embed_model_id for entry in entries if entry.embed_model_id), None
+        )
+    return ExperimentTarget(
+        package=package,
+        build_id=build_id,
+        product_ids=product_ids,
+        embed_model_id=embed_model_id,
     )
 
 
@@ -1123,6 +1227,7 @@ def build_adapters(
     index_build_id: str | None = None,
     vector_index: VectorIndexPort | None = None,
     lexical_index: LexicalIndexPort | None = None,
+    embedder: EmbedderPort | None = None,
 ) -> Ports:
     """Собирает порты внешних систем по профилю развёртывания (``03`` §E.3).
 
@@ -1166,6 +1271,9 @@ def build_adapters(
         ``None`` → берётся единственная сборка пакета, при неоднозначности — ``None``.
     :param vector_index / lexical_index: явно инъецированные порты ретривала (ручной DI, A1);
         приоритетнее автосборки (тесты/засеянные сборки).
+    :param embedder: явно инъецированный эмбеддер (ручной DI, A1); приоритетнее авторезолва
+        (:func:`_resolve_embedder`). Нужен команде эксперимента (P4b): детерминированный шов
+        без загрузки модели.
     :raises WiringError: неизвестный профиль или split без валидного deploy-конфига.
     """
     if profile == LOCAL_PROFILE:
@@ -1211,6 +1319,7 @@ def build_adapters(
             index_build_id=index_build_id,
             vector_index=vector_index,
             lexical_index=lexical_index,
+            embedder=embedder,
         )
     if profile == SPLIT_PROFILE:
         config = deploy if deploy is not None else load_deploy_config(None)

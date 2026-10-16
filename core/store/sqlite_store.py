@@ -52,6 +52,7 @@ from core.domain import (
     Status,
     TerminationReason,
 )
+from core.ports.store import RunIndexRef
 from core.ports.types import Chunk
 from core.store.sqlite import connect
 from core.util.ids import parse_source_id
@@ -1241,6 +1242,52 @@ class SqliteStore:
             edge_schema_version=row["edge_schema_version"],
             edge_capabilities=edge_capabilities,
         )
+
+    def read_run_index_ref(self, run_id: str) -> RunIndexRef | None:
+        """Читает ``runs.package_id``/``runs.index_build_id`` прогона (P4b).
+
+        Возвращает :class:`RunIndexRef` или ``None`` на неизвестный ``run_id``. Значения
+        пакета/сборки — как записаны (могут быть ``None``; значения не выдумываются).
+        """
+        row = self.conn.execute(
+            "SELECT package_id, index_build_id FROM runs WHERE run_id = ?", (run_id,)
+        ).fetchone()
+        if row is None:
+            return None
+        return RunIndexRef(
+            run_id=run_id,
+            package_id=row["package_id"],
+            index_build_id=row["index_build_id"],
+        )
+
+    def iter_index_manifest(self, index_build_id: str) -> Iterator[IndexManifestEntry]:
+        """Итерирует продукт-партиции индексной сборки ``index_build_id`` (P4b).
+
+        Зеркало :meth:`save_index_manifest`: пост-хок эксперимент разрешает пакет сборки и её
+        ``embed_model_id``/``embed_dim`` из БД, не сканируя ``index_store/``. Порядок —
+        ``product_id`` (детерминизм). Пустой итератор — сборки в БД нет.
+        """
+        for row in self.conn.execute(
+            "SELECT * FROM index_manifest WHERE index_build_id = ? ORDER BY product_id",
+            (index_build_id,),
+        ):
+            yield IndexManifestEntry(
+                index_build_id=row["index_build_id"],
+                product_id=row["product_id"],
+                package_id=row["package_id"],
+                partition_key=row["partition_key"],
+                snapshot_date=row["snapshot_date"],
+                chunker_version=row["chunker_version"],
+                extractor_version=row["extractor_version"],
+                embed_model_id=row["embed_model_id"],
+                embed_dim=row["embed_dim"],
+                lexical_engine_version=row["lexical_engine_version"],
+                vector_store=row["vector_store"],
+                content_digest=row["content_digest"],
+                store_path=row["store_path"],
+                created_at=row["created_at"],
+                stats_json=row["stats_json"],
+            )
 
     # -- corpus ---------------------------------------------------------- #
     #: Колонки ``corpus_chunks``, которые несёт порт-тип ``Chunk``. ``url`` намеренно

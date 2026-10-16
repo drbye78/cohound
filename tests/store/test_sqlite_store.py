@@ -45,7 +45,7 @@ from core.domain import (
     Status,
     TerminationReason,
 )
-from core.ports.store import GateStore, StorePort
+from core.ports.store import GateStore, RunIndexRef, StorePort
 from core.ports.types import Chunk
 from core.store.sqlite_store import SqliteStore
 
@@ -803,6 +803,51 @@ def test_persist_manifest_roundtrip(store: SqliteStore) -> None:
     assert read.settings_provenance == {
         "ranking_epsilon": {"source": "measured", "experiment_id": "e1"}
     }
+
+
+def test_read_run_index_ref_and_iter_index_manifest(store: SqliteStore) -> None:
+    """P4b: сборка разрешается из ``runs``/``index_manifest`` без сканирования каталогов."""
+    store.create_run(RUN_ID, _cfg())
+    # До персистенции манифеста поля пусты — честное отсутствие, не подстановка.
+    ref = store.read_run_index_ref(RUN_ID)
+    assert ref is not None and ref.index_build_id is None
+    assert list(store.iter_index_manifest("ib_x")) == []
+
+    store.conn.execute(
+        "UPDATE runs SET index_build_id = ?, package_id = ? WHERE run_id = ?",
+        ("ib_x", "pkg-1", RUN_ID),
+    )
+    store.save_index_manifest(
+        IndexManifestEntry(
+            index_build_id="ib_x",
+            product_id="p2",
+            package_id="pkg-1",
+            embed_model_id="model@sha",
+            embed_dim=8,
+            stats_json='{"chunks": 2}',
+        )
+    )
+    store.save_index_manifest(
+        IndexManifestEntry(
+            index_build_id="ib_x",
+            product_id="p1",
+            package_id="pkg-1",
+            embed_model_id="model@sha",
+            embed_dim=8,
+        )
+    )
+    store.conn.commit()
+
+    ref = store.read_run_index_ref(RUN_ID)
+    assert ref == RunIndexRef(run_id=RUN_ID, package_id="pkg-1", index_build_id="ib_x")
+    entries = list(store.iter_index_manifest("ib_x"))
+    assert [entry.product_id for entry in entries] == ["p1", "p2"]  # детерминированный порядок
+    assert entries[1].embed_model_id == "model@sha"
+    assert entries[1].embed_dim == 8
+    assert entries[1].stats_json == '{"chunks": 2}'
+    # Неизвестный прогон/сборка — ``None``/пусто, без исключения.
+    assert store.read_run_index_ref("nope") is None
+    assert list(store.iter_index_manifest("ib_absent")) == []
 
 
 def test_crawl_provenance_roundtrip(store: SqliteStore) -> None:

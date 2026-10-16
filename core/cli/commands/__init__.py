@@ -14,6 +14,7 @@ from core.cli.commands import (
     deploy,
     diff,
     discover,
+    experiment,
     gate,
     golden,
     passport_scout,
@@ -42,6 +43,7 @@ COMMANDS = (
     promote,
     gate,
     deploy,
+    experiment,
 )
 
 __all__ = ["COMMANDS"]

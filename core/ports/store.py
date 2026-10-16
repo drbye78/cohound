@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Any, Iterable, Iterator, Protocol, runtime_checkable
 
 from core.domain import (
@@ -33,6 +34,22 @@ from core.domain import (
     SearchLogEntry,
 )
 from core.ports.types import Chunk
+
+
+@dataclass(frozen=True)
+class RunIndexRef:
+    """Ссылка на индексную сборку прогона из строки ``runs`` (P4b, нейтрально, §13/I17).
+
+    Несёт ровно то, что нужно пост-хок команде эксперимента, чтобы найти **зафиксированную**
+    индексную сборку **без** сканирования каталогов ``index_store/``: объявленный пакет
+    (``runs.package_id``) и идентификатор сборки (``runs.index_build_id``; заполняется
+    персистенцией манифеста на фазе отчёта). ``None``-поля — значения не выдумываются:
+    отсутствие — явное.
+    """
+
+    run_id: str
+    package_id: str | None = None
+    index_build_id: str | None = None
 
 
 @runtime_checkable
@@ -206,6 +223,24 @@ class StorePort(Protocol):
     def resolve_source_url(self, source_id: str) -> str | None: ...
 
     def read_manifest(self, run_id: str) -> RunManifest: ...
+
+    def read_run_index_ref(self, run_id: str) -> RunIndexRef | None:
+        """Читает ``runs.package_id``/``runs.index_build_id`` прогона (P4b).
+
+        Возвращает :class:`RunIndexRef` либо ``None``, если прогон неизвестен. Значения
+        (пакет/сборка) могут быть ``None``, пока их не записал манифест — это честное
+        отсутствие, а не подстановка. Метод не бросает исключений на неизвестный ``run_id``.
+        """
+        ...
+
+    def iter_index_manifest(self, index_build_id: str) -> Iterator[IndexManifestEntry]:
+        """Итерирует продукт-партиции индексной сборки ``index_build_id`` (P4b).
+
+        Зеркало :meth:`save_index_manifest`: пост-хок эксперимент разрешает пакет сборки и её
+        ``embed_model_id``/``embed_dim`` из БД, не сканируя ``index_store/``. Порядок
+        детерминирован — ``product_id``. Пустой итератор — сборки в БД нет.
+        """
+        ...
 
     def iter_gate_decisions(self, run_id: str) -> Iterator[GateDecision]: ...
 
