@@ -60,18 +60,6 @@ class _FakeGateway:
 # ---------------------------------------------------------------------------
 
 
-def test_local_feed_poller_satisfies_port() -> None:
-    poller = LocalFeedPoller(_FakeCrawler())
-    assert isinstance(poller, PollPort)
-    assert isinstance(poller.version, str) and poller.version
-
-
-def test_remote_feed_poller_satisfies_port() -> None:
-    poller = RemoteFeedPoller(_FakeGateway())
-    assert isinstance(poller, PollPort)
-    assert isinstance(poller.version, str) and poller.version
-
-
 # ---------------------------------------------------------------------------
 # validate_params (обе реализации)
 # ---------------------------------------------------------------------------

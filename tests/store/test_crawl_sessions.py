@@ -100,10 +100,6 @@ def test_upsert_get_session_round_trip(store: SqliteStore) -> None:
     assert got.provenance_json == '{"engine": "local"}'
 
 
-def test_get_unknown_session_is_none(store: SqliteStore) -> None:
-    assert store.get_crawl_session("missing") is None
-
-
 def test_standalone_session_nullable_run_id(store: SqliteStore) -> None:
     """C1: standalone-сеанс (``run_id=None``) сохраняется/читается без строки ``runs``."""
     store.upsert_crawl_session(

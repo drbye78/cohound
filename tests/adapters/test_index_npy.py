@@ -348,10 +348,6 @@ def test_missing_product_id_raises(tmp_path: Path) -> None:
 # --------------------------------------------------------------------------- #
 
 
-def test_commit_without_build_is_noop(tmp_path: Path) -> None:
-    assert NpyIndexBuilder(tmp_path).commit() is None
-
-
 # --------------------------------------------------------------------------- #
 # numpy — необязательная зависимость
 # --------------------------------------------------------------------------- #

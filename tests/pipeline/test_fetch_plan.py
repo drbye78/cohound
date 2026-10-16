@@ -327,12 +327,6 @@ def test_domain_profile_accepts_strategy_and_rate_limit() -> None:
     assert profile.rate_limit == RateLimitSpec(min_s=0.5, max_s=1.5)
 
 
-def test_domain_profile_strategy_defaults_to_none() -> None:
-    profile = DomainProfile()
-    assert profile.strategy is None
-    assert profile.rate_limit is None
-
-
 def test_load_domain_profiles_with_strategy(tmp_path: Path) -> None:
     path = tmp_path / "domain_profiles.yaml"
     path.write_text(

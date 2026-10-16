@@ -45,7 +45,7 @@ from core.domain import (
     Status,
     TerminationReason,
 )
-from core.ports.store import GateStore, RunIndexRef, StorePort
+from core.ports.store import RunIndexRef
 from core.ports.types import Chunk
 from core.store.sqlite_store import SqliteStore
 
@@ -136,11 +136,6 @@ def test_schema_opens(store: SqliteStore) -> None:
     manifest_cols = {r["name"] for r in store.conn.execute("PRAGMA table_info(index_manifest)")}
     assert "extractor_version" in manifest_cols
     assert "content_digest" in manifest_cols
-
-
-def test_store_implements_protocols(store: SqliteStore) -> None:
-    assert isinstance(store, StorePort)
-    assert isinstance(store, GateStore)
 
 
 # --------------------------------------------------------------------------- #

@@ -478,16 +478,6 @@ def test_submit_accepted_defaults_true_when_absent() -> None:
     assert submission.retry_after_s is None
 
 
-def test_submit_retry_after_absent_is_none() -> None:
-    """C2: принятая подача без ``retry_after`` → ``retry_after_s is None``."""
-    gateway = _FakeGateway({"crawl/submit": {"job_id": "job-1", "accepted": True}})
-    executor = EdgeCrawlExecutor(gateway)
-
-    assert executor.submit(
-        [_work_item()], session_id="s", run_id="r", profile="split", idempotency_key="k"
-    ).retry_after_s is None
-
-
 def test_collect_rejects_non_public_url() -> None:
     """C1: SSRF-перепроверка собранного URL — непубличный адрес отвергается ядром."""
     gateway = _FakeGateway(

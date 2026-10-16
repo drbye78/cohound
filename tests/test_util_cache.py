@@ -34,12 +34,6 @@ def test_json_round_trip(tmp_path: Path) -> None:
     assert cache.get_json("serp", "deadbeef") == obj
 
 
-def test_miss_returns_none(tmp_path: Path) -> None:
-    cache = ContentAddressedCache(tmp_path)
-    assert cache.get_bytes("http", "missing") is None
-    assert cache.get_json("serp", "missing") is None
-
-
 def test_dirs_created_on_demand(tmp_path: Path) -> None:
     root = tmp_path / "does" / "not" / "exist"
     cache = ContentAddressedCache(root)

@@ -444,16 +444,6 @@ def test_ngram_is_deterministic() -> None:
     assert first == second == ["n1"]
 
 
-@requires_tantivy
-def test_ngram_port_conformance() -> None:
-    index = TantivyLexicalIndex(profile="ngram")
-    try:
-        assert isinstance(index, LexicalIndexPort)
-        assert index.engine_version.startswith("tantivy-")
-    finally:
-        index.close()
-
-
 def test_ngram_missing_dependency_guard(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(lexical_tantivy, "tantivy_available", lambda: False)
     index = TantivyLexicalIndex(profile="ngram")

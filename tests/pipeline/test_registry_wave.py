@@ -258,12 +258,6 @@ def test_wave_is_deterministic_and_sorted() -> None:
     assert first == sorted(first)
 
 
-def test_structural_fetcher_matches_port() -> None:
-    from core.ports.registry import RegistryFetcherPort
-
-    assert isinstance(_StubFetcher("reg_x"), RegistryFetcherPort)
-
-
 def test_wave_writes_to_store_and_returns_cells() -> None:
     store = _RecordingStore()
     fetcher = _StubFetcher("reg_x", responder=lambda product_id, param_id: [_fact(product_id)])

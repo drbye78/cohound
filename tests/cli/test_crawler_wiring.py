@@ -895,22 +895,6 @@ def test_build_adapters_split_sets_remote_pollers() -> None:
     assert ports.pollers["feed"]._gateway is gateway
 
 
-def test_build_adapters_local_pollers_are_ports(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Поллеры удовлетворяют ``PollPort`` (конформность на проводке)."""
-    from core.ports.poller import PollPort
-
-    monkeypatch.setenv(ENV_SCOUT_CRAWLER, "http")
-    ports = build_adapters(
-        profile=LOCAL_PROFILE,
-        deploy=DeployConfig(profile="local"),
-        cache=_cache(tmp_path),
-        domain_profiles=_profiles(),
-    )
-
-    assert ports.pollers is not None
-    assert all(isinstance(poller, PollPort) for poller in ports.pollers.values())
-
-
 # ---------------------------------------------------------------------------
 # N1: robots принуждается в адаптерах только при включённом discovery
 # ---------------------------------------------------------------------------

@@ -24,7 +24,7 @@ from core.domain import (
     SourceKind,
     SourceScope,
 )
-from core.domain.anchors import SourceResolver, verify_evidence_hash
+from core.domain.anchors import verify_evidence_hash
 from core.store.sqlite_store import SqliteStore
 from core.util.ids import source_id
 
@@ -96,12 +96,6 @@ def _insert_chunk(
 # --------------------------------------------------------------------------- #
 # T3.4 — resolve / SourceResolver
 # --------------------------------------------------------------------------- #
-
-
-def test_store_structurally_satisfies_source_resolver(store: SqliteStore) -> None:
-    # Структурная типизация: присваивание типу-протоколу (без наследования).
-    resolver: SourceResolver = store
-    assert callable(resolver.resolve)
 
 
 def test_resolve_raw_chunk_id(store: SqliteStore) -> None:

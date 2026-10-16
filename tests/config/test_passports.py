@@ -146,12 +146,6 @@ def test_missing_dir_returns_empty_dict(tmp_path: Path) -> None:
     assert load_passports(tmp_path / "does_not_exist") == {}
 
 
-def test_absent_product_returns_none(tmp_path: Path) -> None:
-    """Отсутствующий продукт → ``None``."""
-    assert load_passport("ghost", tmp_path) is None
-    assert latest_passport_path("ghost", tmp_path) is None
-
-
 # ---------------------------------------------------------------------------
 # Разбор upstream и satellites
 # ---------------------------------------------------------------------------

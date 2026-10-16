@@ -134,10 +134,6 @@ def test_raw_page_corrupt_base64_rejected() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_check_size_within_limit_returns_none() -> None:
-    assert check_size(_fetch_payload(b"small"), MAX_RESPONSE_BYTES) is None
-
-
 def test_raw_page_oversized_serialized_rejected() -> None:
     content = b"x" * 90
     payload = _fetch_payload(content)

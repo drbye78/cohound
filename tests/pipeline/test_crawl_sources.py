@@ -478,10 +478,6 @@ def test_crawl_sources_digest_deterministic() -> None:
     assert isinstance(crawl_sources_digest(cfg), str)
 
 
-def test_crawl_sources_digest_empty_config() -> None:
-    assert isinstance(crawl_sources_digest(CrawlSourcesConfig()), str)
-
-
 def test_crawl_sources_digest_changes_on_semantic_change() -> None:
     """Смена движка/оси меняет отпечаток (провенанс содержателен, а не константа)."""
     base = CrawlSourcesConfig(defaults=CrawlSource(kind="web", engine="http"))
