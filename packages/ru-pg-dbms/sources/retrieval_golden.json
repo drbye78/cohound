@@ -1,0 +1,128 @@
+[
+  {
+    "query": "защищённая СУБД Jatoba на модернизированном ядре PostgreSQL",
+    "expected_ids": [
+      "jatoba:ce3107fa7d2f9ca9c495c4accfb4e85f9f27ced827debd8921d010b6bfce1936:0"
+    ],
+    "lang": "ru"
+  },
+  {
+    "query": "катастрофоустойчивый кластер географически распределённая архитектура СУБД",
+    "expected_ids": [
+      "jatoba:ce3107fa7d2f9ca9c495c4accfb4e85f9f27ced827debd8921d010b6bfce1936:1"
+    ],
+    "lang": "ru"
+  },
+  {
+    "query": "контроль производительности визуализация планов выполнения запросов pg_profile",
+    "expected_ids": [
+      "jatoba:ce3107fa7d2f9ca9c495c4accfb4e85f9f27ced827debd8921d010b6bfce1936:2"
+    ],
+    "lang": "ru"
+  },
+  {
+    "query": "SQL Firewall защита баз данных от чтения и реверс-инжиниринга",
+    "expected_ids": [
+      "jatoba:ce3107fa7d2f9ca9c495c4accfb4e85f9f27ced827debd8921d010b6bfce1936:1"
+    ],
+    "lang": "ru"
+  },
+  {
+    "query": "совместимость с Windows Server 2016 2019 2022",
+    "expected_ids": [
+      "jatoba:ce3107fa7d2f9ca9c495c4accfb4e85f9f27ced827debd8921d010b6bfce1936:5"
+    ],
+    "lang": "ru"
+  },
+  {
+    "query": "текущие версии СУБД Jatoba 18.4.1 6.14.1 5.18.1",
+    "expected_ids": [
+      "jatoba:ce3107fa7d2f9ca9c495c4accfb4e85f9f27ced827debd8921d010b6bfce1936:6"
+    ],
+    "lang": "ru"
+  },
+  {
+    "query": "крупнейший российский разработчик СУБД Postgres Professional",
+    "expected_ids": [
+      "postgrespro:edb75902f72e3b4ff2232c3d932651b40ae868e7801b0e3e82c05df0ef6110f0:0"
+    ],
+    "lang": "ru"
+  },
+  {
+    "query": "полный перевод документации PostgreSQL на русский язык",
+    "expected_ids": [
+      "postgrespro:70a3342808e370953036d392d6d7dca052e514e26fa817480cc5d6c58a2f07ff:0"
+    ],
+    "lang": "ru"
+  },
+  {
+    "query": "новое поколение Postgres Pro Enterprise 18 для крупного бизнеса",
+    "expected_ids": [
+      "postgrespro:c46c4290b6b38a8c97d9370d74f3e5c5e1732e108c34a712fd83b1461284ac62:0"
+    ],
+    "lang": "ru"
+  },
+  {
+    "query": "миграция банковской системы отказ от зарубежной СУБД без прерывания обслуживания",
+    "expected_ids": [
+      "postgrespro:edb75902f72e3b4ff2232c3d932651b40ae868e7801b0e3e82c05df0ef6110f0:1"
+    ],
+    "lang": "ru"
+  },
+  {
+    "query": "отказоустойчивый кластер BiHA модуль резервного копирования Backup Enterprise",
+    "expected_ids": [
+      "postgrespro:c46c4290b6b38a8c97d9370d74f3e5c5e1732e108c34a712fd83b1461284ac62:1"
+    ],
+    "lang": "ru"
+  },
+  {
+    "query": "сертификат поддержки на 1 ядро x86-64 стоимость",
+    "expected_ids": [
+      "postgrespro:c46c4290b6b38a8c97d9370d74f3e5c5e1732e108c34a712fd83b1461284ac62:2"
+    ],
+    "lang": "ru"
+  },
+  {
+    "query": "российская СУБД Tantor на PostgreSQL отечественные базы данных",
+    "expected_ids": [
+      "tantor:5ac2257d868a77a6df92cbdc65caab9959b9830565484eae96b2640f298428a3:0"
+    ],
+    "lang": "ru"
+  },
+  {
+    "query": "машины баз данных Tantor XData для высоких нагрузок сертификация ФСТЭК",
+    "expected_ids": [
+      "tantor:5ac2257d868a77a6df92cbdc65caab9959b9830565484eae96b2640f298428a3:2"
+    ],
+    "lang": "ru"
+  },
+  {
+    "query": "оперативная вендорская поддержка победитель TAdviser IT Prize",
+    "expected_ids": [
+      "tantor:5ac2257d868a77a6df92cbdc65caab9959b9830565484eae96b2640f298428a3:3"
+    ],
+    "lang": "ru"
+  },
+  {
+    "query": "интеграция с централизованными системами резервного копирования автоматизация задач",
+    "expected_ids": [
+      "tantor:5ac2257d868a77a6df92cbdc65caab9959b9830565484eae96b2640f298428a3:4"
+    ],
+    "lang": "ru"
+  },
+  {
+    "query": "платформа для организации ETL/ELT-процессов и КХД",
+    "expected_ids": [
+      "tantor:5ac2257d868a77a6df92cbdc65caab9959b9830565484eae96b2640f298428a3:5"
+    ],
+    "lang": "ru"
+  },
+  {
+    "query": "информация для разработчиков программного обеспечения Astra Linux",
+    "expected_ids": [
+      "tantor:65b6b49ba5e8f14b5fb376edb0ead89170b750e62ea5b53219a61fd9806d4f45:1"
+    ],
+    "lang": "ru"
+  }
+]

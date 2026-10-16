@@ -155,7 +155,7 @@ L7-инспектируемый JSON, публикуемые схемы, атр�
 | **W5** | Конфиг и CLI | `core/config/run_config.py`, `core/pipeline/{normalize,lint,plan}.py`, `core/cli/` | ✅ done |
 | **W6** | Детерм. волны | `core/adapters/registry_generic.py`, `core/pipeline/{registry,inheritance}.py`, package-scoped `registries/` | ✅ done (спецификации — package-scoped, P3) |
 | **W7** | Корпус | `core/ports/{crawler,extractor,chunker}.py` + `crawl_*`/`extract_*`, `core/pipeline/{corpus,fetch_plan,crawl_session,crawl_sources}.py`, `core/util/{cache,sanitize,feed,rate_limit}.py` | ✅ done (+ source routing, Phase 5) |
-| **W8** | Ретривал и индекс | `core/adapters/{embed_local,embed_model2vec,index_npy,index_format,vector_npy,lexical_tantivy,lexical_bm25}.py`, `core/pipeline/{retrieve,experiments,extraction_eval}.py` | ✅ код done; ⏳ R0/R1/R2+K на реальном golden не прогонялся |
+| **W8** | Ретривал и индекс | `core/adapters/{embed_local,embed_model2vec,index_npy,index_format,vector_npy,lexical_tantivy,lexical_bm25}.py`, `core/pipeline/{retrieve,experiments,extraction_eval}.py` | ✅ код done; ✅ **реальная фиксация выполнена** (2026-10, `runs/ru-pg-dbms-fixation`, K=3, профиль R1, bge-m3) — на **авторском** golden из 18 пар и малом корпусе (34 чанка) |
 | **W9** | Оценщик | `core/ports/llm.py`, `core/adapters/llm_local.py`, `core/pipeline/{prompt,evaluate,validate}.py` | ✅ код done; ⏳ живой прогон оценщика не выполнялся; T9.6 снят (§5.W9) |
 | **W10** | Расчёт и отчёты | `core/pipeline/{compute,report}.py`, `run_manifest.yaml` | ✅ done |
 | **W11** | Search-адаптер | `core/adapters/{search_yandex,search_glm}.py`, `core/pipeline/{serp_loop,search_log,discovery}.py` | ✅ код done; ⏳ живой SERP-раунд в прогоне кейса не выполнялся |
@@ -188,10 +188,9 @@ L7-инспектируемый JSON, публикуемые схемы, атр�
 
 - ✅ W7 (корпус), W8 (ретривал/индекс), W9 (оценщик), W10 (расчёт/отчёты), **W13 (DMZ/шов)** — код.
 - ✅ Оба профиля развёртывания (`local`/`split`) поддержаны; шов публикует `/v1/*`-схемы (07 §8).
-- ⏳ **Не выполнено:** R0/R1/R2 + фиксация профиля/K на retrieval-golden **реальным прогоном**
-  (команда `hound experiment retrieval` реализована — §5.W8 — но измерение на живом golden ещё не
-  производилось); живой прогон оценщика против внутреннего [OI]-endpoint; вендорного снапшота
-  эмбеддера в репозитории нет (модель подтягивается из внутреннего зеркала/локально).
+- ⏳ **Не выполнено:** живой прогон оценщика против внутреннего [OI]-endpoint. ✅ Фиксация ретривала
+  (R0/R1/R2+K) **выполнена** на реальном индексе — см. §5.W8 и §12; ограничения: авторский golden
+  (18 пар), малый корпус (34 чанка), из-за чего `recall@10` насыщается и зафиксирован K=3.
 
 ### M2 — Приёмка кейса 1 — 🟡 частично (код-инструменты готовы, приёмка не проведена)
 
@@ -300,8 +299,14 @@ L7-инспектируемый JSON, публикуемые схемы, атр�
   из персистентной сборки; команда **`hound experiment retrieval`** прогоняет R0/R1/R2 и персистит
   измеренные `retrieval_profile`/`retrieval_cutoff_K`/`embed_model_id`/`rrf_k` как `settings_provenance`
   со `source: measured` — **и только профиль, и только при полном сравнении** (иначе `source: default`).
-- ⏳ **Осталось:** реальный прогон R0/R1/R2+K на retrieval-golden (измерение на живом golden);
-  вендорного снапшота модели в репозитории нет.
+- ✅ **Фиксация выполнена (2026-10)** на прогоне `runs/ru-pg-dbms-fixation` (сборка
+  `ib_89238aaa1352987d3539956b`, эмбеддер `BAAI/bge-m3`): зафиксированы профиль **R1** и **K=3**
+  (`settings_provenance.retrieval_profile.source = measured`; `retrieval_cutoff_K`/`rrf_k`/
+  `embed_model_id` — `default`, т.к. это входы, а не измерение). K=3 выбран по K-свипу
+  (`runs/ru-pg-dbms-fixation/retrieval_ksweep.txt`): при K=10 `recall@10` насыщается у всех профилей
+  и выбор решается тай-брейком, при K≤3 профили различаются (R1 recall 1.000 vs R0 0.944).
+- ⏳ **Осталось:** заменить авторский golden (18 пар) на полноценный retrieval-golden кейса;
+  живой прогон оценщика; вендорного снапшота модели в репозитории нет (снапшот лежит вне репо).
 
 ### W9 — Оценщик — ✅ код done; ⏳ живой прогон не выполнялся
 
@@ -399,7 +404,7 @@ P5), но строка помечена здесь как неактуальна
 |---|---|---|
 | W1–W6 | ✅ done | — |
 | W7 | ✅ done | — |
-| W8 | ✅ код | реальное измерение R0/R1/R2+K; вендорный снапшот эмбеддера |
+| W8 | ✅ код | полный retrieval-golden кейса (сейчас — авторский, 18 пар, малый корпус); вендорный снапшот эмбеддера |
 | W9 | ✅ код | живой прогон оценщика (внутренний endpoint) |
 | W10 | ✅ done | — |
 | W11 | ✅ код | живой SERP-раунд в прогоне кейса |
@@ -568,5 +573,6 @@ DLP, набор IDS-правил) — design-требования зафикси
   перенесён в `02`/`03`. Считать зафиксированным здесь как известное остаточное, а не закрытое.
 - **M2/M3:** приёмочные прогоны (golden-full, adversarial, §11.5-baseline) и авторство кейсов 2–5
   не выполнены; §4 помечает M2 как 🟡, M3 как ⛔ — это факт, а не план.
-- **Измерения:** реальный прогон R0/R1/R2+K и живой прогон оценщика/SERP — за пределами кодового
-  репозитория (требуют внутреннего endpoint/модели). Команда фиксации готова.
+- **Измерения:** ✅ фиксация R0/R1/R2+K **выполнена** (2026-10, `runs/ru-pg-dbms-fixation`; K=3, R1) —
+  но на **авторском** golden из 18 пар и малом корпусе (34 чанка), поэтому результат индикативен, а
+  не приёмочен; полноценный retrieval-golden кейса и живой прогон оценщика/SERP остаются открытыми.
