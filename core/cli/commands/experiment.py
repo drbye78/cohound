@@ -54,14 +54,11 @@ from core.cli.wiring import (
     resolve_experiment_target,
 )
 from core.domain.enums import SkipReason
-from core.pipeline import load_retrieval_golden, run_retrieval_experiment
+from core.pipeline import DEFAULT_PROFILES, load_retrieval_golden, run_retrieval_experiment
 from core.pipeline.evaluate import DEFAULT_RETRIEVAL_CUTOFF_K
 from core.pipeline.retrieve import DEFAULT_RRF_K
 
 __all__ = ["run", "configure"]
-
-#: Настройка, измеряемая этим экспериментом (A3): сравнение профилей R0/R1/R2.
-MEASURED_SETTINGS: tuple[str, ...] = ("retrieval_profile",)
 
 #: Настройки-предпосылки: попадают в артефакт, но НЕ измерены этим прогоном.
 #: ``retrieval_cutoff_K`` задан оператором/зафиксирован ранее, ``rrf_k`` не варьируется
@@ -72,6 +69,9 @@ INPUT_SETTINGS: tuple[str, ...] = (
     "rrf_k",
     "embed_model_id",
 )
+
+#: Единственная настройка, которую этот эксперимент действительно измеряет (A3).
+MEASURED_SETTING = "retrieval_profile"
 
 #: Причины пропуска (командный уровень, N3). ``no_embedder`` переиспользует словарь фаз.
 SKIP_NO_INDEX_BUILD = "no_index_build"
@@ -127,7 +127,7 @@ def _fixation_manifest(
     ``rrf_k`` экспериментом не варьируется, ``embed_model_id`` прочитан из сборки.
     """
     provenance = dict(getattr(manifest, "settings_provenance", None) or {})
-    provenance["retrieval_profile"] = (
+    provenance[MEASURED_SETTING] = (
         {"source": "measured", "experiment_id": experiment_id}
         if profile_measured
         else {"source": "default", "skipped": dict(report.skipped)}
@@ -171,6 +171,7 @@ def _emit_measured(args: argparse.Namespace, payload: dict[str, Any]) -> None:
     lines = [
         f"run_id: {payload['run_id']}",
         "status: measured",
+        f"provenance: {payload.get('provenance', 'measured')}",
         f"package: {payload['package']}",
         f"index_build_id: {payload['index_build_id']}",
         f"embed_model_id: {payload['embed_model_id']}",
@@ -279,9 +280,10 @@ def run(args: argparse.Namespace) -> int:
         )
 
         experiment_id = f"retrieval/{target.build_id}/K{report.k}"
-        # A3: профиль считается измеренным только если сравнение было полным (все три
-        # профиля реально прогнаны). Частичное сравнение → provenance: default.
-        profile_measured = not report.skipped
+        # A3: профиль считается измеренным только если сравнение было **полным** — прогнаны
+        # все запрошенные профили (не только «нет skipped»: сужаем запрос — тоже неполнота).
+        # Частичное сравнение → provenance: default (выбор по усечённому сравнению ≠ измерение).
+        profile_measured = not report.skipped and len(report.by_profile) == len(DEFAULT_PROFILES)
         updated = _fixation_manifest(
             manifest,
             report,

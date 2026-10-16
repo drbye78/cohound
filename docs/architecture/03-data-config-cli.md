@@ -216,7 +216,7 @@ snapshot_date: 2026-06-01
 mode: strict
 ranking_policy: capability_ranked
 ranking_epsilon: 0.0            # §6/B-1: порог неразличимости ранжирования (доля диапазона)
-settings_provenance:            # A3: default|measured (+ experiment_id при measured)
+settings_provenance:            # A3: default|measured (+ experiment_id при measured, + skipped)
   partial_score: {source: default}
 crawl:                          # §3.2/D4: дефолты оси стратегии краула и politeness-пейсинга
   strategy: auto                # auto | honest | hybrid (как используется браузер)

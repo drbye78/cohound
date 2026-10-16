@@ -57,7 +57,7 @@ CREATE TABLE IF NOT EXISTS runs (
     search_effort_budget_json TEXT,                    -- I23
     requested_ranking     TEXT,                        -- запрошенный режим (run.yaml) — K6
     computed_ranking      TEXT,                        -- вычисленный допустимый ранг — K6
-    settings_provenance_json TEXT,                     -- A3 (v2.1): {setting: {source, experiment_id?}}
+    settings_provenance_json TEXT,                     -- A3 (v2.1): {setting: {source, experiment_id?, skipped?}}
     crawl_provenance_json TEXT,                        -- §4.4/Phase 2: провенанс краула (сеансы/движки/дайджест)
     crawl_strategy        TEXT,                        -- §13/Backlog B: ось стратегии краула (execution_change)
     crawl_rate_limit      TEXT,                        -- §13/Backlog B: канон. форма rate_limit (execution_change)
