@@ -82,6 +82,7 @@ import datetime as _dt
 import json
 import time
 from collections.abc import Callable, Mapping, Sequence
+from concurrent.futures import Executor, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -211,6 +212,56 @@ class _ProductIngest:
     product_id: str
     docs: list[CorpusDoc] = field(default_factory=list)
     chunks: list[CorpusChunk] = field(default_factory=list)
+
+
+@dataclass
+class _LocalFetch:
+    """D4: дескриптор отложенного сетевого фетча локального пути.
+
+    Расщепляет ``_process_local`` на три фазы: **pre-fetch** (главный поток — resume,
+    browser-guard, решение о пейсинге/ёмкости), **fetch** (пул — только
+    ``limiter.wait`` + ``active.fetch``) и **post-fetch** (главный поток — redirect-scope
+    и retention). Дескриптор несёт всё нужное пост-фазе и не содержит мутаций.
+
+    ``resume``/``browser_blocked`` вычисляются пре-фазой (чисто), а коммитятся
+    (соответственно ``_resume_page`` или ``FAILED``-``_mark``) пост-фазой в FIFO-порядке
+    отправки (детерминизм победителя дедупа и ``errors``).
+
+    ``poolable`` — идёт ли живой фетч в пул: ``True`` только для не-браузерного живого
+    фетча (resume/browser-guard/``FetchMode.BROWSER`` — всегда inline на главном потоке).
+    """
+
+    pid: str
+    wu: str
+    depth: int | None
+    fetch_plan: FetchPlan
+    active: Any
+    engine_value: str | None
+    prior_item: CrawlSessionItem | None
+    resume: tuple[bytes, Path] | None
+    browser_blocked: bool
+    poolable: bool
+    host: str
+    scope_host: str | None
+    enforce_redirect_scope: bool
+
+
+@dataclass
+class _WaveEntry:
+    """D4: элемент волны дренажа frontier.
+
+    Порядок элементов — порядок отправки (FIFO). ``kind``:
+    ``"blacklisted"`` | ``"attempts"`` (мутации коммитятся пост-фазой) | ``"fetch"``
+    (несёт ``desc`` и, если фетч реально нужен, ``future`` пула).
+    """
+
+    pid: str
+    wu: str
+    depth: int | None
+    kind: str
+    desc: _LocalFetch | None = None
+    future: Any = None
+    prior_item: CrawlSessionItem | None = None
 
 
 # --------------------------------------------------------------------------- #
@@ -651,6 +702,7 @@ def build_corpus(
     executor: CrawlExecutorPort | None = None,
     executor_poll_interval: float = 0.25,
     executor_sleep: Callable[[float], None] = time.sleep,
+    pool_factory: Callable[[int], Executor] | None = None,
     max_attempts: int | None = None,
     progress: Callable[[dict[str, int]], None] | None = None,
     crawl_app: CrawlConfig | None = None,
@@ -720,6 +772,13 @@ def build_corpus(
         (только при ``executor``); уже терминальное задание не пейсится.
     :param executor_sleep: хук сна опроса (по умолчанию ``time.sleep``); тесты инжектят
         no-op, чтобы не платить реальное время.
+    :param pool_factory: D4 — фабрика ограниченного пула ``Callable[[int], Executor]`` для
+        **сетевого fetch** локального пути; ``int`` — размер волны (``CrawlLimits.max_workers``
+        корня). ``None`` → stdlib :class:`concurrent.futures.ThreadPoolExecutor`. Инъекция
+        нужна только детерминированным тестам (зеркалит ``executor_sleep``). Пул создаётся
+        лишь при ``max_workers > 1``: ``max_workers in (None, 1)`` — прежний однопоточный путь
+        без пула. **Инъецируемые** ``sleep``/``rng`` лимитера (при заданном ``rate_limiter``)
+        должны быть потокобезопасны — pacing зовётся из fetch-воркеров.
     :param max_attempts: Phase 4 — потолок попыток по ``(product_id, url)``. URL с уже
         сохранённым ``CrawlSessionItem.attempts >= max_attempts`` **не** фетчится и **не**
         подаётся исполнителю: он помечается терминальным ``FAILED`` с ``error_kind =
@@ -1434,7 +1493,7 @@ def build_corpus(
             fresh.append(loc)
         return tuple(fresh)
 
-    def _process_local(
+    def _local_prefetch(
         pid: str,
         wu: str,
         wtarget: Any,
@@ -1442,15 +1501,86 @@ def build_corpus(
         depth: int | None = None,
         scope_host: str | None = None,
         enforce_redirect_scope: bool = False,
-    ) -> tuple[RawPage, Path, FetchPlan, bool] | None:
-        """Локальный per-URL путь: resume/браузер-guard/пейсинг/фетч/retention (Ш5).
+    ) -> _LocalFetch:
+        """D4 pre-fetch (главный поток): resume/browser-guard/решение о пейсинге.
 
-        Общая часть локального пути для обычных страниц и записей каталога. Возвращает
-        ``(page, raw_path, fetch_plan, freshly_fetched)`` для последующей ``_ingest_one``;
-        ``None`` — исход пропущен/сбой (терминальный ``FAILED`` уже проставлен ``_mark``),
-        вызывающий делает ``continue``. ``freshly_fetched=False`` — resume из retained raw
-        (живого фетча не было; ``max_documents`` его не считает). Активный краулер выбирается
-        по ``wtarget.engine`` (fallback — ``crawler``).
+        **Чистая** фаза: не пишет ни в ``errors``, ни в сеанс, ни в ``applied_engines``.
+        Все мутации отложены в :func:`_commit_local` (FIFO-порядок коммита) — это позволяет
+        исполнять саму сеть в пуле, а исходы коммитить детерминированно на главном потоке.
+        Активный краулер выбирается по ``wtarget.engine`` (fallback — ``crawler``).
+        """
+        fetch_plan = wtarget.plan
+        prior_item = items.get((pid, wu))
+        resume = _resume_source(prior_item) if prior_item is not None else None
+        active = ((crawlers or {}).get(wtarget.engine) if wtarget.engine else None) or crawler
+        browser_blocked = (
+            getattr(active, "supports_browser", True) is False
+            and fetch_plan.fetch is FetchMode.BROWSER
+        )
+        # D4/e: в пул идёт ТОЛЬКО живой не-браузерный фетч. Браузерные элементы (даже при
+        # ``supports_browser`` краулере) — никогда: ``BrowserCrawler`` водит единственную
+        # ``_page`` без лока. Resume живого фетча не делает вовсе.
+        poolable = (
+            resume is None
+            and not browser_blocked
+            and fetch_plan.fetch is not FetchMode.BROWSER
+        )
+        host = (urlsplit(wu).hostname or "").lower()
+        return _LocalFetch(
+            pid=pid,
+            wu=wu,
+            depth=depth,
+            fetch_plan=fetch_plan,
+            active=active,
+            engine_value=getattr(active, "engine", None) or wtarget.engine,
+            prior_item=prior_item,
+            resume=resume,
+            browser_blocked=browser_blocked,
+            poolable=poolable,
+            host=host,
+            scope_host=scope_host,
+            enforce_redirect_scope=enforce_redirect_scope,
+        )
+
+    def _local_fetch(desc: _LocalFetch) -> RawPage:
+        """D4 fetch-фаза (**единственный** вызов, идущий в пул): pacing + ``active.fetch``.
+
+        Никакой мутации состояния сеанса здесь нет — только живой сетевой вызов.
+        ``limiter.wait`` остаётся per-request (``RateLimiter`` стателесс); при инъекции
+        ``sleep``/``rng`` они должны быть **потокобезопасны**, т.к. воркеры пула зовут pacing
+        конкурентно.
+        """
+        limiter.wait(desc.host, desc.fetch_plan.rate_limit)
+        return desc.active.fetch(desc.wu, desc.fetch_plan)
+
+    def _fetch_and_commit(
+        desc: _LocalFetch,
+    ) -> tuple[RawPage, Path, FetchPlan, bool] | None:
+        """Inline-фетч на главном потоке + коммит (последовательный путь и browser-режим D4).
+
+        Используется, когда фетч **не** уходит в пул: ``max_workers in (None, 1)`` либо
+        browser-элемент (``BrowserCrawler`` не потокобезопасен). ``limiter.wait`` — вне
+        ``try`` (как в прежнем ``_process_local``): его сбой — не сбой источника.
+        """
+        limiter.wait(desc.host, desc.fetch_plan.rate_limit)
+        try:
+            page = desc.active.fetch(desc.wu, desc.fetch_plan)
+        except Exception as exc:  # noqa: BLE001 — изоляция по контракту фазы
+            return _commit_local(desc, exc=exc)
+        return _commit_local(desc, page=page)
+
+    def _commit_local(
+        desc: _LocalFetch,
+        *,
+        page: RawPage | None = None,
+        exc: Exception | None = None,
+    ) -> tuple[RawPage, Path, FetchPlan, bool] | None:
+        """D4 post-fetch (главный поток): мутации исхода в FIFO-порядке отправки.
+
+        Возвращает ``(page, raw_path, fetch_plan, freshly_fetched)`` для последующей
+        ``_ingest_one``; ``None`` — исход пропущен/сбой (терминальный ``FAILED`` уже
+        проставлен ``_mark``), вызывающий делает ``continue``. ``freshly_fetched=False`` —
+        resume из retained raw (живого фетча не было; ``max_documents`` его не считает).
 
         ``depth`` — глубина URL в BFS-frontier (персистится в элементе сеанса). ``scope_host``
         — host seed-root, ``enforce_redirect_scope`` — включён ли жёсткий redirect-scope
@@ -1461,22 +1591,24 @@ def build_corpus(
         www↔apex / родительский редирект не теряется, а настоящий уход из семейства
         поднимает явный ``redirect_out_of_scope`` (не молчаливый дроп).
 
-        **Известное ограничение.** ``BrowserCrawler`` рапортует **запрошенный** URL
-        (``RawPage.url == url``), поэтому браузерный redirect-escape из ``RawPage`` не
-        детектируется — проверка работает только на HTTP-пути (``httpx``/hybrid), где
-        ``RawPage.url`` — финальный URL после редиректов. Это не «залатано» намеренно.
+        **Детектируемость браузерного redirect-escape (A3).** ``BrowserCrawler`` теперь несёт в
+        ``RawPage.url`` **финальный** (пост-редиректный) URL навигации — так же, как Scrapy и httpx,
+        поэтому проверка ниже покрывает и браузерный путь. Исключение — кэш-хит браузера
+        (``BrowserCrawler._page_from_cache``): content-addressed кэш хранит только тело по ключу
+        запрошенного URL, восстановить финальный URL из него нельзя, поэтому для кэшированных
+        страниц браузерный escape по-прежнему недетектируем (задокументировано там же).
         """
-        fetch_plan = wtarget.plan
-        prior_item = items.get((pid, wu))
-        resume = _resume_source(prior_item) if prior_item is not None else None
+        pid, wu = desc.pid, desc.wu
+        fetch_plan = desc.fetch_plan
 
-        active = ((crawlers or {}).get(wtarget.engine) if wtarget.engine else None) or crawler
-        applied_engines[(pid, wu)] = getattr(active, "engine", None) or wtarget.engine
+        # S1/Phase 2.1: применяемый движок — первая мутация исхода (ориентир для ``_mark``),
+        # как и прежде; всегда до resume-guard/бrowser-guard.
+        applied_engines[(pid, wu)] = desc.engine_value
 
-        if resume is not None:
-            assert prior_item is not None  # resume возможен только при наличии элемента
-            content, raw_path = resume
-            page = _resume_page(prior_item, wu, content, raw_path, fetch_plan)
+        if desc.resume is not None:
+            assert desc.prior_item is not None  # resume возможен только при наличии элемента
+            content, raw_path = desc.resume
+            page = _resume_page(desc.prior_item, wu, content, raw_path, fetch_plan)
             # Счётчик отражает статус возобновляемого элемента (FETCHED — retryable,
             # FAILED — re-extract), а не ``pending``: он уже персистится в сеансе, и при
             # последующем сбое chunker'а URL будет посчитан как ``fetched``, а не потерян.
@@ -1484,13 +1616,10 @@ def build_corpus(
 
         # D2: браузерный рендер требует поддерживающего краулера. Проверка URL-скоупедирована
         # (а не на сборке композиции): фаза не падает, пропускается только этот URL.
-        if (
-            getattr(active, "supports_browser", True) is False
-            and fetch_plan.fetch is FetchMode.BROWSER
-        ):
+        if desc.browser_blocked:
             reason = (
                 f"{pid}/{wu}: требует браузерный рендер, но краулер "
-                f"{type(active).__name__} не поддерживает browser; "
+                f"{type(desc.active).__name__} не поддерживает browser; "
                 f"задайте COHOUND_SCOUT_CRAWLER=scrapy или browser"
             )
             errors.append(reason)
@@ -1504,20 +1633,12 @@ def build_corpus(
                 CrawlItemStatus.FAILED,
                 error_kind=FailureKind.SOURCE_UNAVAILABLE.value,
                 error=reason,
-                depth=depth,
+                depth=desc.depth,
             )
             return None
 
-        # P2-3: politeness-пейсинг — единый владелец corpus (R7-независимый; стратегия/лимит
-        # берутся из уже резолвнутого ``FetchPlan``). Применяется **только** к живому фетчу:
-        # путь ``resume`` (retained raw, выше) не пейсится.
-        host = (urlsplit(wu).hostname or "").lower()
-        limiter.wait(host, fetch_plan.rate_limit)
-
-        # 1. Краул.
-        try:
-            page = active.fetch(wu, fetch_plan)
-        except Exception as exc:  # noqa: BLE001 — изоляция по контракту фазы
+        # 1. Краул: сбой/пустой RawPage — изоляция по контракту фазы.
+        if exc is not None:
             reason = f"{type(exc).__name__}: {exc}"
             # D1/§10: robots-отказ несёт собственный ``refusal_reason`` (не сбой источника).
             error_kind = (
@@ -1531,7 +1652,7 @@ def build_corpus(
                 CrawlItemStatus.FAILED,
                 error_kind=error_kind,
                 error=reason,
-                depth=depth,
+                depth=desc.depth,
             )
             return None
         if page is None:
@@ -1542,7 +1663,7 @@ def build_corpus(
                 CrawlItemStatus.FAILED,
                 error_kind=FailureKind.SOURCE_UNAVAILABLE.value,
                 error="пустой RawPage",
-                depth=depth,
+                depth=desc.depth,
             )
             return None
 
@@ -1550,17 +1671,17 @@ def build_corpus(
         # HTTP-редиректов) обязан остаться в host-scope корня — иначе страницу не ретейним
         # и не расширяем frontier (не «вытаскиваем» чужой контент под видом in-site).
         # На глубине 0 проверка выключена (оператор явно запросил URL) — прежнее поведение.
-        if scope_host and enforce_redirect_scope:
+        if desc.scope_host and desc.enforce_redirect_scope:
             final_host = (urlsplit(page.url).hostname or "").lower()
             # Симметрия: www→apex и apex→www — одно семейство; сравнение «final в root»
             # в одну сторону теряло бы легитимный redirect www↔apex.
             if final_host and not (
-                _host_matches(final_host, scope_host)
-                or _host_matches(scope_host, final_host)
+                _host_matches(final_host, desc.scope_host)
+                or _host_matches(desc.scope_host, final_host)
             ):
                 reason = (
                     f"redirect вышел из scope: {page.url!r} "
-                    f"(root host {scope_host!r})"
+                    f"(root host {desc.scope_host!r})"
                 )
                 errors.append(f"{pid}/{wu}: {reason}")
                 _mark(
@@ -1569,15 +1690,46 @@ def build_corpus(
                     CrawlItemStatus.FAILED,
                     error_kind="redirect_out_of_scope",
                     error=reason,
-                    depth=depth,
+                    depth=desc.depth,
                 )
                 return None
 
         # 2. Retention (I19): сырые байты пишутся ДО экстракции (общий шаг).
-        raw_path = _retain(pid, wu, page, fetch_plan, depth=depth)
+        raw_path = _retain(pid, wu, page, fetch_plan, depth=desc.depth)
         if raw_path is None:
             return None
         return page, raw_path, fetch_plan, True
+
+    def _process_local(
+        pid: str,
+        wu: str,
+        wtarget: Any,
+        *,
+        depth: int | None = None,
+        scope_host: str | None = None,
+        enforce_redirect_scope: bool = False,
+    ) -> tuple[RawPage, Path, FetchPlan, bool] | None:
+        """Локальный per-URL путь (последовательный): pre-fetch → fetch → post-fetch (D4).
+
+        Точка входа для ``max_workers in (None, 1)`` — прежний однопоточный путь (пул не
+        создаётся). Расщепление на фазы — задел под волновой пул (см.
+        :func:`_local_prefetch`/:func:`_local_fetch`/:func:`_commit_local`); здесь фетч
+        исполняется inline на главном потоке.
+        """
+        desc = _local_prefetch(
+            pid,
+            wu,
+            wtarget,
+            depth=depth,
+            scope_host=scope_host,
+            enforce_redirect_scope=enforce_redirect_scope,
+        )
+        if desc.resume is not None or desc.browser_blocked:
+            return _commit_local(desc)
+
+        # P2-3: politeness-пейсинг — единый владелец corpus (R7-независимый). Применяется
+        # **только** к живому фетчу: путь ``resume`` (retained raw, выше) не пейсится.
+        return _fetch_and_commit(desc)
 
     def _run_executor_waves() -> tuple[
         dict[tuple[str, str], CrawlResultItem], dict[str, list[str]]
@@ -1798,69 +1950,35 @@ def build_corpus(
                         f"{pid}/{extra}: sitemap-seed не поставлен — достигнут max_documents"
                     )
 
-            while True:
-                if not frontier.has_capacity:
-                    # D3: seeds sitemap ставятся пачкой; ``max_documents`` обязан ограничивать
-                    # и их (не только обнаруженные ссылки). Без лимита — всегда есть ёмкость.
-                    frontier.mark_truncated("max_documents")
-                    break
-                node = frontier.next()
-                if node is None:
-                    break
-                work_url, depth = node
-                # D1/H: блэклист применяется и перед фетчем (в дополнение к постановке).
-                if frontier.blacklisted(work_url):
-                    errors.append(
-                        f"{pid}/{work_url}: зачёркнут блэклистом перед фетчем — пропущен"
-                    )
-                    continue
-                prior_item = items.get((pid, work_url))
-                if (
-                    max_attempts is not None
-                    and prior_item is not None
-                    and prior_item.attempts >= max_attempts
-                ):
-                    reason = (
-                        f"max_attempts exhausted "
-                        f"(attempts={prior_item.attempts} >= {max_attempts})"
-                    )
-                    errors.append(f"{pid}/{work_url}: {reason}")
-                    _mark(
+            def _resolve_target(pid: str, url: str) -> Any:
+                """Разрешает ``CrawlTarget`` URL (кэш ``targets``), как в обоих путях."""
+                target = targets.get((pid, url))
+                if target is None:
+                    target = resolve_crawl_target(
                         pid,
-                        work_url,
-                        CrawlItemStatus.FAILED,
-                        error_kind=_MAX_ATTEMPTS_ERROR_KIND,
-                        error=reason,
-                        depth=depth,
-                    )
-                    _emit_progress()
-                    continue
-
-                work_target = targets.get((pid, work_url))
-                if work_target is None:
-                    work_target = resolve_crawl_target(
-                        pid,
-                        work_url,
+                        url,
                         sources=crawl_sources or CrawlSourcesConfig(),
                         profiles=domain_profiles or {},
                         explicit=explicit_fetch,
                         run_default_strategy=crawl_strategy_default,
                         run_default_rate_limit=crawl_rate_default,
                     )
-                    targets[(pid, work_url)] = work_target
+                    targets[(pid, url)] = target
+                return target
 
-                outcome = _process_local(
-                    pid,
-                    work_url,
-                    work_target,
-                    depth=depth,
-                    scope_host=frontier.root_host,
-                    # B4: жёсткий redirect-scope — только при discovery (max_depth > 0);
-                    # на глубине 0 финальная страница ретейнится как прежде.
-                    enforce_redirect_scope=limits.max_depth > 0,
-                )
+            def _commit_outcome(
+                pid: str,
+                work_url: str,
+                depth: int | None,
+                outcome: tuple[RawPage, Path, FetchPlan, bool] | None,
+            ) -> None:
+                """Общий пост-ингест дренажа: retention-счётчик, ``_ingest_one``, BFS-расширение.
+
+                Вызывается на главном потоке в FIFO-порядке; ``note_fetched`` — только здесь
+                (жёсткий стоп ``max_documents`` не может быть превышен из воркеров пула).
+                """
                 if outcome is None:
-                    continue  # отказ/сбой — frontier от него не расширяется
+                    return  # отказ/сбой — frontier от него не расширяется
                 page, raw_path, fetch_plan, freshly_fetched = outcome
                 if freshly_fetched:
                     frontier.note_fetched()
@@ -1879,6 +1997,188 @@ def build_corpus(
                 # извлечение не выполняется вовсе (байт-в-байт прежнее поведение).
                 if limits.max_depth > 0 and _looks_like_html(page):
                     frontier.offer(extract_links(page.content, page.url), depth)
+
+            def _commit_wave(entries: list[_WaveEntry]) -> None:
+                """Коммитит исходы волны на главном потоке в FIFO-порядке отправки (D4).
+
+                Порядок коммита = порядок отправки: детерминированы ``errors``, ``_mark``,
+                победитель дедупа (``seen_docs[doc_hash] = url``) и ``offer`` — единственные
+                порядко-чувствительные артефакты (идентичность корпуса content-addressed).
+                """
+                for entry in entries:
+                    if entry.kind == "blacklisted":
+                        # D1/H: блэклист применяется и перед фетчем (в дополнение к постановке).
+                        errors.append(
+                            f"{entry.pid}/{entry.wu}: зачёркнут блэклистом перед фетчем — пропущен"
+                        )
+                        continue
+                    if entry.kind == "attempts":
+                        prior_item = entry.prior_item
+                        assert prior_item is not None
+                        reason = (
+                            f"max_attempts exhausted "
+                            f"(attempts={prior_item.attempts} >= {max_attempts})"
+                        )
+                        errors.append(f"{entry.pid}/{entry.wu}: {reason}")
+                        _mark(
+                            entry.pid,
+                            entry.wu,
+                            CrawlItemStatus.FAILED,
+                            error_kind=_MAX_ATTEMPTS_ERROR_KIND,
+                            error=reason,
+                            depth=entry.depth,
+                        )
+                        _emit_progress()
+                        continue
+                    desc = entry.desc
+                    assert desc is not None
+                    if entry.future is not None:
+                        try:
+                            page = entry.future.result()
+                        except Exception as exc:  # noqa: BLE001 — изоляция по контракту фазы
+                            outcome = _commit_local(desc, exc=exc)
+                        else:
+                            outcome = _commit_local(desc, page=page)
+                    elif desc.resume is not None or desc.browser_blocked:
+                        # resume/browser-guard: живого фетча нет, пул не задействован.
+                        outcome = _commit_local(desc)
+                    else:
+                        # browser-режим (``supports_browser`` краулер): в пул не идёт —
+                        # фетч inline на главном потоке (``_fetch_and_commit``), как прежде.
+                        outcome = _fetch_and_commit(desc)
+                    _commit_outcome(entry.pid, entry.wu, entry.depth, outcome)
+
+            # D4: ограниченный пул ТОЛЬКО на сетевой fetch локального пути. Пул создаётся
+            # лишь при ``max_workers > 1``: ``None``/``1`` — прежний однопоточный путь без
+            # пула (байт-в-байт). В пул идут лишь work-items с живым HTTP-фетчем; браузерные
+            # элементы — никогда (см. ``_local_prefetch``).
+            max_workers = limits.max_workers
+            pool: Executor | None = None
+            if max_workers is not None and int(max_workers) > 1:
+                pool = (
+                    pool_factory(int(max_workers))
+                    if pool_factory is not None
+                    else ThreadPoolExecutor(max_workers=int(max_workers))
+                )
+            try:
+                while True:
+                    if not frontier.has_capacity:
+                        # D3: seeds sitemap ставятся пачкой; ``max_documents`` обязан
+                        # ограничивать и их (не только обнаруженные ссылки). Без лимита —
+                        # всегда есть ёмкость. Проверка — в голове цикла на главном потоке.
+                        frontier.mark_truncated("max_documents")
+                        break
+                    if pool is None:
+                        # --- Последовательный путь (max_workers None/1): как прежде. --- #
+                        node = frontier.next()
+                        if node is None:
+                            break
+                        work_url, depth = node
+                        # D1/H: блэклист применяется и перед фетчем (в дополнение к постановке).
+                        if frontier.blacklisted(work_url):
+                            errors.append(
+                                f"{pid}/{work_url}: зачёркнут блэклистом перед фетчем — пропущен"
+                            )
+                            continue
+                        prior_item = items.get((pid, work_url))
+                        if (
+                            max_attempts is not None
+                            and prior_item is not None
+                            and prior_item.attempts >= max_attempts
+                        ):
+                            reason = (
+                                f"max_attempts exhausted "
+                                f"(attempts={prior_item.attempts} >= {max_attempts})"
+                            )
+                            errors.append(f"{pid}/{work_url}: {reason}")
+                            _mark(
+                                pid,
+                                work_url,
+                                CrawlItemStatus.FAILED,
+                                error_kind=_MAX_ATTEMPTS_ERROR_KIND,
+                                error=reason,
+                                depth=depth,
+                            )
+                            _emit_progress()
+                            continue
+
+                        work_target = _resolve_target(pid, work_url)
+                        outcome = _process_local(
+                            pid,
+                            work_url,
+                            work_target,
+                            depth=depth,
+                            scope_host=frontier.root_host,
+                            # B4: жёсткий redirect-scope — только при discovery (max_depth > 0);
+                            # на глубине 0 финальная страница ретейнится как прежде.
+                            enforce_redirect_scope=limits.max_depth > 0,
+                        )
+                        _commit_outcome(pid, work_url, depth, outcome)
+                        continue
+
+                    # --- D4: волна fetch-only. Размер волны = min(K, остаток ёмкости, длина
+                    # очереди): пере-удержание ``max_documents`` структурно невозможно.
+                    # Диспатч (prefetch + submit) и коммит — на главном потоке; off-thread
+                    # идёт только ``limiter.wait`` + ``active.fetch``. --- #
+                    remaining = (
+                        None
+                        if limits.max_documents is None
+                        else limits.max_documents - frontier.fetched
+                    )
+                    wave_size = (
+                        max_workers if remaining is None else min(max_workers, remaining)
+                    )
+                    wave_size = min(int(wave_size), len(frontier))
+                    if wave_size <= 0:
+                        break
+                    entries: list[_WaveEntry] = []
+                    for _ in range(wave_size):
+                        node = frontier.next()
+                        if node is None:
+                            break
+                        work_url, depth = node
+                        if frontier.blacklisted(work_url):
+                            entries.append(
+                                _WaveEntry(pid, work_url, depth, "blacklisted")
+                            )
+                            continue
+                        prior_item = items.get((pid, work_url))
+                        if (
+                            max_attempts is not None
+                            and prior_item is not None
+                            and prior_item.attempts >= max_attempts
+                        ):
+                            entries.append(
+                                _WaveEntry(
+                                    pid, work_url, depth, "attempts", prior_item=prior_item
+                                )
+                            )
+                            continue
+                        work_target = _resolve_target(pid, work_url)
+                        desc = _local_prefetch(
+                            pid,
+                            work_url,
+                            work_target,
+                            depth=depth,
+                            scope_host=frontier.root_host,
+                            enforce_redirect_scope=limits.max_depth > 0,
+                        )
+                        # D2/e: browser-элементы НИКОГДА не пулятся (``BrowserCrawler`` водит
+                        # единственную ``_page`` без лока) — идут inline на главном потоке;
+                        # resume-элементы тоже минуют пул (живого фетча нет; ``poolable``).
+                        future = None
+                        if desc.poolable:
+                            assert pool is not None
+                            future = pool.submit(_local_fetch, desc)
+                        entries.append(
+                            _WaveEntry(
+                                pid, work_url, depth, "fetch", desc=desc, future=future
+                            )
+                        )
+                    _commit_wave(entries)
+            finally:
+                if pool is not None:
+                    pool.shutdown(wait=True)
             return frontier
 
         # Phase 5.3: в executor-режиме итерируем по волновому набору (каталоги уже опрошены,
