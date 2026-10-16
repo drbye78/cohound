@@ -144,7 +144,7 @@ def test_poll_requires_url() -> None:
 def test_poll_requires_known_kind() -> None:
     svc = _service(FakeCrawler(_RSS))
     with pytest.raises(EdgeError, match="kind"):
-        svc.poll({"url": "https://feed.test/rss", "kind": "sitemap"})
+        svc.poll({"url": "https://feed.test/rss", "kind": "calendar"})
 
 
 # ---------------------------------------------------------------------------
@@ -350,3 +350,100 @@ def test_poll_since_matches_local_poller() -> None:
         )
     ]
     assert edge_urls == local_urls == ["https://feed.test/a", "https://feed.test/c"]
+
+
+# ---------------------------------------------------------------------------
+# D3: sitemap (urlset / gzip / sitemapindex / caps / SSRF / вложенный индекс)
+# ---------------------------------------------------------------------------
+
+_SITEMAP = (
+    b'<?xml version="1.0"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
+    b"<url><loc>https://e.test/a</loc></url>"
+    b"<url><loc>https://e.test/b</loc></url>"
+    b"</urlset>"
+)
+
+_SITEMAP_INDEX = (
+    b'<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
+    b"<sitemap><loc>https://e.test/sm-1.xml</loc></sitemap>"
+    b"</sitemapindex>"
+)
+
+
+class _MapCrawler:
+    """``CrawlerPort``-стенд с картой ``url -> bytes`` (для развёртки sitemapindex)."""
+
+    version = "fake-crawler-1"
+    engine = "http"
+
+    def __init__(self, pages: dict[str, bytes]) -> None:
+        self._pages = dict(pages)
+        self.calls: list[str] = []
+
+    def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:
+        self.calls.append(url)
+        return RawPage(url=url, content=self._pages[url], fetched_at="2026-01-01T00:00:00Z")
+
+
+def test_poll_sitemap_urlset_returns_entries() -> None:
+    svc = _service(FakeCrawler(_SITEMAP, content_type="application/xml"))
+    result = svc.poll({"url": "https://e.test/sitemap.xml", "kind": "sitemap"})
+    assert [e["url"] for e in result["entries"]] == ["https://e.test/a", "https://e.test/b"]
+    assert result["count"] == 2 and result["truncated"] is False
+
+
+def test_poll_sitemap_gzip_supported() -> None:
+    import gzip as _gzip
+
+    svc = _service(FakeCrawler(_gzip.compress(_SITEMAP), content_type="application/x-gzip"))
+    result = svc.poll({"url": "https://e.test/sitemap.xml.gz", "kind": "sitemap"})
+    assert [e["url"] for e in result["entries"]] == ["https://e.test/a", "https://e.test/b"]
+
+
+def test_poll_sitemap_index_expands_children() -> None:
+    crawler = _MapCrawler(
+        {
+            "https://e.test/sitemap.xml": _SITEMAP_INDEX,
+            "https://e.test/sm-1.xml": b"<urlset><url><loc>https://e.test/1</loc></url></urlset>",
+        }
+    )
+    svc = _service(crawler)
+    result = svc.poll({"url": "https://e.test/sitemap.xml", "kind": "sitemap"})
+    assert [e["url"] for e in result["entries"]] == ["https://e.test/1"]
+    assert crawler.calls == ["https://e.test/sitemap.xml", "https://e.test/sm-1.xml"]
+
+
+def test_poll_sitemap_nested_index_errors() -> None:
+    crawler = _MapCrawler(
+        {"https://e.test/sitemap.xml": _SITEMAP_INDEX,
+         "https://e.test/sm-1.xml": _SITEMAP_INDEX}
+    )
+    svc = _service(crawler)
+    with pytest.raises(EdgeError, match="вложенный"):
+        svc.poll({"url": "https://e.test/sitemap.xml", "kind": "sitemap"})
+
+
+def test_poll_sitemap_soft_drops_ssrf_locs() -> None:
+    payload = (
+        b"<urlset><url><loc>https://ok.test/a</loc></url>"
+        b"<url><loc>http://127.0.0.1/x</loc></url></urlset>"
+    )
+    svc = _service(FakeCrawler(payload, content_type="application/xml"))
+    result = svc.poll({"url": "https://e.test/sitemap.xml", "kind": "sitemap"})
+    assert [e["url"] for e in result["entries"]] == ["https://ok.test/a"]
+
+
+def test_poll_sitemap_limit_truncates_and_flags() -> None:
+    svc = _service(FakeCrawler(_SITEMAP, content_type="application/xml"))
+    result = svc.poll(
+        {"url": "https://e.test/sitemap.xml", "kind": "sitemap", "params": {"limit": 1}}
+    )
+    assert result["count"] == 1 and result["truncated"] is True
+
+
+def test_poll_sitemap_rejects_ssrf_root_before_fetch() -> None:
+    crawler = FakeCrawler(_SITEMAP)
+    svc = _service(crawler)
+    with pytest.raises(EdgeError, match="URL sitemap"):
+        svc.poll({"url": "http://169.254.169.254/sitemap.xml", "kind": "sitemap"})
+    assert crawler.calls == []

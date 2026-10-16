@@ -2985,3 +2985,321 @@ def test_executor_work_order_mirrors_local_interleaving(tmp_path: Path) -> None:
         ]
     finally:
         store.close()
+
+
+# --------------------------------------------------------------------------- #
+# D3: per-site sitemap (urlset/gzip/sitemapindex; seeds; блэклист/бюджет/SSRF)
+# --------------------------------------------------------------------------- #
+
+SITEMAP_URL = "https://docs.test/p1/sitemap.xml"
+SITEMAP_CHILD = "https://docs.test/p1/sm-child.xml"
+SITEMAP_LOC_1 = "https://docs.test/p1/loc-1"
+SITEMAP_LOC_2 = "https://docs.test/p1/loc-2"
+
+
+def _sitemap_profile(**overrides: Any) -> dict[str, DomainProfile]:
+    """Per-site профиль ``docs.test`` с заданным sitemap (и опциональными осями D1/D2)."""
+    return {"docs.test": DomainProfile(sitemap=SITEMAP_URL, **overrides)}
+
+
+def _urlset(*locs: str) -> bytes:
+    body = b"".join(f"<url><loc>{loc}</loc></url>".encode() for loc in locs)
+    return b"<urlset>" + body + b"</urlset>"
+
+
+def test_sitemap_locs_become_depth0_seeds_and_sitemap_not_retained(tmp_path: Path) -> None:
+    """``<loc>`` — дополнительные depth-0 seeds; сам sitemap не ретейнится/не ингестится."""
+    store = SqliteStore(":memory:")
+    _make_run(store)
+    poller = _FakePoller([FeedEntry(url=SITEMAP_LOC_1), FeedEntry(url=SITEMAP_LOC_2)])
+    crawler = _Crawler(
+        {
+            URL_P1_A: b"seed page",
+            SITEMAP_LOC_1: b"loc one",
+            SITEMAP_LOC_2: b"loc two",
+        }
+    )
+    try:
+        result = _build(
+            tmp_path,
+            pages={},
+            urls={"p1": [URL_P1_A]},
+            crawler=crawler,
+            domain_profiles=_sitemap_profile(),
+            pollers={"sitemap": poller},
+            store=store,
+            run_id=RUN_ID,
+        )
+        assert result.errors == []
+        # sitemap опрошен один раз; страницы (seed + locs) — краулером.
+        assert [c[0] for c in poller.calls] == [SITEMAP_URL]
+        assert [u for u, _ in crawler.calls] == [URL_P1_A, SITEMAP_LOC_1, SITEMAP_LOC_2]
+        build = _build_of(result)
+        assert build.chunk_count == 3
+        assert {d.url for d in build.docs} == {URL_P1_A, SITEMAP_LOC_1, SITEMAP_LOC_2}
+
+        items = {i.url: i for i in _items(store)}
+        sitemap_item = items[SITEMAP_URL]
+        assert sitemap_item.status is CrawlItemStatus.FETCHED
+        assert not sitemap_item.raw_path  # не страница → нет retained байтов (I19)
+        assert sitemap_item.kind == "sitemap"
+        session = store.get_crawl_session(SESSION_ID)
+        assert session is not None and session.status is CrawlSessionStatus.COMPLETED
+    finally:
+        store.close()
+
+
+def test_sitemap_gzip_via_local_poller(tmp_path: Path) -> None:
+    """gzip ``sitemap.xml.gz`` распознаётся по magic-байтам (реальный ``LocalFeedPoller``)."""
+    import gzip as _gzip
+
+    store = SqliteStore(":memory:")
+    _make_run(store)
+    crawler = _Crawler(
+        {
+            URL_P1_A: b"seed",
+            SITEMAP_URL: _gzip.compress(_urlset(SITEMAP_LOC_1)),
+            SITEMAP_LOC_1: b"loc",
+        }
+    )
+    try:
+        result = _build(
+            tmp_path,
+            pages={},
+            urls={"p1": [URL_P1_A]},
+            crawler=crawler,
+            domain_profiles=_sitemap_profile(),
+            pollers={"sitemap": LocalFeedPoller(crawler)},
+            store=store,
+            run_id=RUN_ID,
+        )
+        assert result.errors == []
+        assert {d.url for d in _build_of(result).docs} == {URL_P1_A, SITEMAP_LOC_1}
+    finally:
+        store.close()
+
+
+def test_sitemap_index_one_level_via_local_poller(tmp_path: Path) -> None:
+    """``sitemapindex`` разворачивается на один уровень; вложенный индекс — отказ (изолирован)."""
+    store = SqliteStore(":memory:")
+    _make_run(store)
+    index = (
+        b"<sitemapindex><sitemap><loc>" + SITEMAP_CHILD.encode() + b"</loc></sitemap></sitemapindex>"
+    )
+    crawler = _Crawler(
+        {
+            URL_P1_A: b"seed",
+            SITEMAP_URL: index,
+            SITEMAP_CHILD: index,  # дочерний — сам индекс → глубже одного уровня
+        }
+    )
+    try:
+        result = _build(
+            tmp_path,
+            pages={},
+            urls={"p1": [URL_P1_A]},
+            crawler=crawler,
+            domain_profiles=_sitemap_profile(),
+            pollers={"sitemap": LocalFeedPoller(crawler)},
+            store=store,
+            run_id=RUN_ID,
+        )
+        assert any("вложенный" in e for e in result.errors)
+        items = {i.url: i for i in _items(store)}
+        assert items[SITEMAP_URL].status is CrawlItemStatus.FAILED
+        # seed оператора всё равно добыт (аугментация, не замена).
+        assert URL_P1_A in {d.url for d in _build_of(result).docs}
+        session = store.get_crawl_session(SESSION_ID)
+        assert session is not None and session.status is CrawlSessionStatus.PARTIAL
+    finally:
+        store.close()
+
+
+def test_sitemap_poller_entry_cap_enforced(tmp_path: Path) -> None:
+    """Потолок ``max_entries`` поллера ограничивает число ``<loc>``-seeds."""
+    store = SqliteStore(":memory:")
+    _make_run(store)
+    crawler = _Crawler(
+        {
+            URL_P1_A: b"seed",
+            SITEMAP_URL: _urlset(SITEMAP_LOC_1, SITEMAP_LOC_2),
+            SITEMAP_LOC_1: b"a",
+            SITEMAP_LOC_2: b"b",
+        }
+    )
+    try:
+        result = _build(
+            tmp_path,
+            pages={},
+            urls={"p1": [URL_P1_A]},
+            crawler=crawler,
+            domain_profiles=_sitemap_profile(),
+            pollers={"sitemap": LocalFeedPoller(crawler, max_entries=1)},
+            store=store,
+            run_id=RUN_ID,
+        )
+        assert result.errors == []
+        assert {d.url for d in _build_of(result).docs} == {URL_P1_A, SITEMAP_LOC_1}
+    finally:
+        store.close()
+
+
+def test_sitemap_loc_ssrf_rejected(tmp_path: Path) -> None:
+    """Небезопасный ``<loc>`` (приватный IP) отбрасывается до становления seed."""
+    store = SqliteStore(":memory:")
+    _make_run(store)
+    unsafe = "http://127.0.0.1/secret"
+    poller = _FakePoller([FeedEntry(url=SITEMAP_LOC_1), FeedEntry(url=unsafe)])
+    crawler = _Crawler({URL_P1_A: b"seed", SITEMAP_LOC_1: b"ok"})
+    try:
+        result = _build(
+            tmp_path,
+            pages={},
+            urls={"p1": [URL_P1_A]},
+            crawler=crawler,
+            domain_profiles=_sitemap_profile(),
+            pollers={"sitemap": poller},
+            store=store,
+            run_id=RUN_ID,
+        )
+        assert any("sitemap <loc>" in e for e in result.errors)
+        assert unsafe not in [u for u, _ in crawler.calls]
+        assert {d.url for d in _build_of(result).docs} == {URL_P1_A, SITEMAP_LOC_1}
+    finally:
+        store.close()
+
+
+def test_sitemap_loc_obeys_blacklist(tmp_path: Path) -> None:
+    """``<loc>`` подчиняется блэклисту профиля (``exclude_documents``) как обычный seed."""
+    store = SqliteStore(":memory:")
+    _make_run(store)
+    pdf = "https://docs.test/p1/private/report.pdf"
+    poller = _FakePoller([FeedEntry(url=SITEMAP_LOC_1), FeedEntry(url=pdf)])
+    crawler = _Crawler({URL_P1_A: b"seed", SITEMAP_LOC_1: b"ok"})
+    try:
+        result = _build(
+            tmp_path,
+            pages={},
+            urls={"p1": [URL_P1_A]},
+            crawler=crawler,
+            domain_profiles=_sitemap_profile(exclude_documents=["*.pdf"]),
+            pollers={"sitemap": poller},
+            store=store,
+            run_id=RUN_ID,
+        )
+        assert any("блэклист" in e for e in result.errors)
+        assert pdf not in [u for u, _ in crawler.calls]
+        assert {d.url for d in _build_of(result).docs} == {URL_P1_A, SITEMAP_LOC_1}
+    finally:
+        store.close()
+
+
+def test_sitemap_seeds_obey_max_documents(tmp_path: Path) -> None:
+    """``max_documents`` — жёсткий потолок и для sitemap-seeds (тихая штатная остановка)."""
+    store = SqliteStore(":memory:")
+    _make_run(store)
+    poller = _FakePoller([FeedEntry(url=SITEMAP_LOC_1), FeedEntry(url=SITEMAP_LOC_2)])
+    crawler = _Crawler(
+        {URL_P1_A: b"seed", SITEMAP_LOC_1: b"a", SITEMAP_LOC_2: b"b"}
+    )
+    try:
+        result = _build(
+            tmp_path,
+            pages={},
+            urls={"p1": [URL_P1_A]},
+            crawler=crawler,
+            domain_profiles=_sitemap_profile(max_documents=1),
+            pollers={"sitemap": poller},
+            store=store,
+            run_id=RUN_ID,
+        )
+        build = _build_of(result)
+        assert {d.url for d in build.docs} == {URL_P1_A}
+        assert build.truncated is True
+        assert any(rec["truncated_reason"] == "max_documents" for rec in build.truncation)
+    finally:
+        store.close()
+
+
+def test_sitemap_absent_behaviour_unchanged(tmp_path: Path) -> None:
+    """Без ``sitemap`` в профиле поллер не вызывается и ошибок нет (поведение неизменно)."""
+    store = SqliteStore(":memory:")
+    _make_run(store)
+    poller = _FakePoller(raising=RuntimeError("не должен вызываться"))
+    try:
+        result = _build(
+            tmp_path,
+            pages={URL_P1_A: b"only seed"},
+            urls={"p1": [URL_P1_A]},
+            crawler=_Crawler({URL_P1_A: b"only seed"}),
+            domain_profiles={"docs.test": DomainProfile()},
+            pollers={"sitemap": poller},
+            store=store,
+            run_id=RUN_ID,
+        )
+        assert result.errors == []
+        assert poller.calls == []
+        assert {d.url for d in _build_of(result).docs} == {URL_P1_A}
+    finally:
+        store.close()
+
+
+def test_sitemap_without_poller_records_error(tmp_path: Path) -> None:
+    """``sitemap`` задан, но поллер не сконфигурирован → ``FAILED source_unavailable``."""
+    store = SqliteStore(":memory:")
+    _make_run(store)
+    try:
+        result = _build(
+            tmp_path,
+            pages={},
+            urls={"p1": [URL_P1_A]},
+            crawler=_Crawler({URL_P1_A: b"seed"}),
+            domain_profiles=_sitemap_profile(),
+            pollers=None,
+            store=store,
+            run_id=RUN_ID,
+        )
+        assert any("поллер sitemap не сконфигурирован" in e for e in result.errors)
+        items = {i.url: i for i in _items(store)}
+        assert items[SITEMAP_URL].status is CrawlItemStatus.FAILED
+        assert URL_P1_A in {d.url for d in _build_of(result).docs}
+    finally:
+        store.close()
+
+
+def test_sitemap_domain_profile_rejects_unknown_field() -> None:
+    """``extra="forbid"`` сохранён: неизвестное поле профиля (и ``sitemap``-опечатки) — отказ."""
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        DomainProfile(sitemaps="https://docs.test/sitemap.xml")  # type: ignore[call-arg]
+    with pytest.raises(ValidationError):
+        DomainProfile(sitemap="docs.test/sitemap.xml")  # нет схемы http(s)
+    assert DomainProfile(sitemap="https://docs.test/sitemap.xml").sitemap == (
+        "https://docs.test/sitemap.xml"
+    )
+
+
+def test_executor_sitemap_locs_go_to_wave2(tmp_path: Path) -> None:
+    """``executor``/split: ``<loc>`` sitemap подаются волной 2 (как записи каталога)."""
+    store = SqliteStore(":memory:")
+    _make_run(store)
+    poller = _FakePoller([FeedEntry(url=SITEMAP_LOC_1)])
+    executor = _FakeExecutor(pages={URL_P1_A: b"top", SITEMAP_LOC_1: b"loc"})
+    try:
+        result = _run_executor_build(
+            tmp_path,
+            store,
+            executor,
+            urls={"p1": [URL_P1_A]},
+            domain_profiles=_sitemap_profile(),
+            pollers={"sitemap": poller},
+        )
+        assert result.errors == []
+        assert [w.url for w in executor.submits[0]] == [URL_P1_A]
+        assert [w.url for w in executor.submits[1]] == [SITEMAP_LOC_1]
+        assert {d.url for d in _build_of(result).docs} == {URL_P1_A, SITEMAP_LOC_1}
+    finally:
+        store.close()
+
+

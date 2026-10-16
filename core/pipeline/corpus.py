@@ -23,6 +23,13 @@ retention пишется **до** экстракции; каждый индек�
 продукт-партициях — иначе ретривал продукта B не увидел бы собственный документ. Один
 ``IndexManifestEntry`` — на продукт-партицию.
 
+**Sitemap (D3).** Per-site ``DomainProfile.sitemap`` разворачивается через ``PollPort``
+(``kind="sitemap"``; local in-process ‖ split через шов ``crawl/poll``) ровно на один уровень:
+``<loc>`` становятся **дополнительными depth-0 seeds** того же seed-root, что и seed
+оператора (``sitemapindex`` разворачивается один уровень; глубже — отказ). Сам sitemap — не
+страница: не ретейнится/не ингестится (I19). ``<loc>`` проходят ``validate_url`` (SSRF) и
+далее тот же блэклист/``max_documents``/``max_depth``, что и прочие seeds.
+
 **Иммутабельность.** ``index_build_id`` — **контент-адресуемый** отпечаток батча сборки:
 ``short_hash`` от (``_BUILD_ID_SCHEMA`` + пакет/params + ``snapshot_date`` + ``chunker_version``
 + ``embed_model_id`` + ``extractor_version`` + ``lexical_engine_version`` + ``vector_store`` +
@@ -105,7 +112,7 @@ from core.pipeline.crawl_sources import (
     crawl_sources_digest,
     resolve_crawl_target,
 )
-from core.pipeline.fetch_plan import _host_matches
+from core.pipeline.fetch_plan import _host_matches, select_domain_profile
 from core.pipeline.runner import PhaseResult
 from core.ports.chunker import ChunkerPort
 from core.ports.crawl_executor import (
@@ -150,6 +157,11 @@ _MAX_ATTEMPTS_ERROR_KIND = "attempts_exhausted"
 #: ``Ports.pollers[kind]``, а полученные ссылки-записи добываются обычным путём. Один уровень
 #: развёртки: записи повторно не расширяются.
 _DIRECTORY_KINDS: frozenset[str] = frozenset({"feed", "channel"})
+
+#: D3: ``kind`` опроса sitemap (``DomainProfile.sitemap``) — свободная строка-данные. Sitemap
+#: не входит в ``_DIRECTORY_KINDS``: это per-site опция профиля домена, а не источник
+#: ``crawl_sources.yaml``. Разворачивается через ``pollers["sitemap"]`` (local ‖ split).
+_SITEMAP_KIND = "sitemap"
 
 
 @dataclass
@@ -657,7 +669,8 @@ def build_corpus(
         root передаёт resolved ``paths.corpus_raw`` (``03`` §A.1).
     :param embedder: опциональный ``EmbedderPort`` (W8); при наличии — батч-эмбеддинг.
     :param index_builder: опциональный ``IndexBuilderPort`` (W8); при наличии — build/commit.
-    :param domain_profiles: типизированные доменные профили (D.2) для резолва ``FetchPlan``.
+    :param domain_profiles: типизированные доменные профили (D.2) для резолва ``FetchPlan``,
+        осей контроля краула (D1/D2) и per-site ``sitemap`` (D3).
     :param explicit_fetch: явные переопределения оси ``fetch`` по URL (``--render-modes``);
         побеждают профиль, но только по оси ``fetch`` (``extract``/``wait_for`` — из профиля).
     :param crawl_defaults: дефолты секции ``crawl`` run.yaml (D4): ось ``strategy`` и
@@ -683,10 +696,11 @@ def build_corpus(
     :param crawlers: опциональная карта ``engine → CrawlerPort``: активный краулер выбирается
         по ``target.engine`` (fallback — ``crawler``). Позволяет per-engine адаптеры без
         изменения сигнатуры ``crawler``.
-    :param pollers: Phase 5.2 — карта ``kind → PollPort`` для источников-каталогов
-        (``feed``/``channel``): ``kind`` направления резолвится в pipeline, каталог поллится,
-        entries — ссылки; контент добывается обычным путём. ``None`` → источники-каталоги не
-        разворачиваются (URL с директорийным ``kind`` помечается ``FAILED`` ``source_unavailable``).
+    :param pollers: Phase 5.2/D3 — карта ``kind → PollPort`` для источников-каталогов
+        (``feed``/``channel``) и sitemap (``sitemap``): ``kind`` направления резолвится в
+        pipeline, каталог/sitemap поллится, entries — ссылки; контент добывается обычным
+        путём. ``None`` → источники-каталоги не разворачиваются (URL с директорийным ``kind``
+        помечается ``FAILED`` ``source_unavailable``), а per-site ``sitemap`` фиксирует ошибку.
     :param session_id: явный идентификатор сеанса краула; ``None`` →
         ``f"crawl:{run_id}"`` (идемпотентно на прогон). Игнорируется без ``store``/``run_id``.
     :param executor: опциональный исполнитель краула (``CrawlExecutorPort``, Phase 3.3). При
@@ -1282,6 +1296,137 @@ def build_corpus(
             entry_urls.append(entry_url)
         return entry_urls
 
+    # D3: sitemap разворачивается через ``PollPort(kind="sitemap")`` (local in-process ‖
+    # split через шов ``crawl/poll``) и кэшируется по ``(product, sitemap_url)``: сайт
+    # опрашивается один раз, даже если у него несколько seed-URL.
+    sitemap_cache: dict[tuple[str, str], list[str]] = {}
+    #: ``<loc>``, уже прикреплённые к какому-либо seed-root продукта (дедуп между seeds).
+    sitemap_seed_used: set[tuple[str, str]] = set()
+
+    def _sitemap_url_for(seed_url: str) -> str | None:
+        """URL sitemap из лучшего per-site профиля seed-URL (``DomainProfile.sitemap``)."""
+        profile = select_domain_profile(seed_url, domain_profiles or {})
+        if profile is None:
+            return None
+        value = getattr(profile, "sitemap", None)
+        return str(value) if value else None
+
+    def _expand_sitemap(pid: str, seed_url: str) -> list[str]:
+        """D3: разворачивает per-site ``sitemap`` в дополнительные depth-0 seed-URLs.
+
+        Возвращает ``<loc>`` (после SSRF-проверки) или ``[]``, если у сайта нет sitemap. Сам
+        sitemap — не страница: не ретейнится/не ингестится (элемент сеанса ``FETCHED`` без
+        ``raw_path``, I19). Сбой/отсутствие поллера изолируется в ``errors`` (seed оператора
+        сохраняется). Кэш по ``(product, sitemap_url)`` — один опрос на сайт.
+        """
+        sitemap_url = _sitemap_url_for(seed_url)
+        if not sitemap_url:
+            return []
+        key = (pid, sitemap_url)
+        cached = sitemap_cache.get(key)
+        if cached is not None:
+            return list(cached)
+
+        locs: list[str] = []
+        poller = (pollers or {}).get(_SITEMAP_KIND)
+        if poller is None:
+            reason = (
+                f"{pid}/{sitemap_url}: sitemap задан профилем домена, "
+                "но поллер sitemap не сконфигурирован"
+            )
+            errors.append(reason)
+            _mark(
+                pid,
+                sitemap_url,
+                CrawlItemStatus.FAILED,
+                error_kind=FailureKind.SOURCE_UNAVAILABLE.value,
+                error=reason,
+            )
+            _emit_progress()
+            sitemap_cache[key] = locs
+            return locs
+
+        problems = poller.validate_params(_SITEMAP_KIND, {})
+        if problems:
+            reason = f"{pid}/{sitemap_url}: sitemap: " + "; ".join(problems)
+            errors.append(reason)
+            _mark(
+                pid,
+                sitemap_url,
+                CrawlItemStatus.FAILED,
+                error_kind=FailureKind.SOURCE_UNAVAILABLE.value,
+                error=reason,
+            )
+            _emit_progress()
+            sitemap_cache[key] = locs
+            return locs
+
+        # Провенанс: sitemap — не страница, собственный ``kind="sitemap"`` (строка-данные).
+        starget = resolve_crawl_target(
+            pid,
+            sitemap_url,
+            sources=crawl_sources or CrawlSourcesConfig(),
+            profiles=domain_profiles or {},
+            explicit=explicit_fetch,
+            run_default_strategy=crawl_strategy_default,
+            run_default_rate_limit=crawl_rate_default,
+        )
+        targets[(pid, sitemap_url)] = CrawlTarget(
+            plan=starget.plan, engine=starget.engine, kind=_SITEMAP_KIND, params={}
+        )
+        try:
+            entries = poller.poll(
+                sitemap_url, kind=_SITEMAP_KIND, params={}, plan=starget.plan
+            )
+        except Exception as exc:  # noqa: BLE001 — изоляция sitemap (не роняет фазу)
+            reason = f"{pid}/{sitemap_url}: sitemap poll: {type(exc).__name__}: {exc}"
+            errors.append(reason)
+            _mark(
+                pid,
+                sitemap_url,
+                CrawlItemStatus.FAILED,
+                error_kind=FailureKind.SOURCE_UNAVAILABLE.value,
+                error=reason,
+            )
+            _emit_progress()
+            sitemap_cache[key] = locs
+            return locs
+
+        applied_engines[(pid, sitemap_url)] = starget.engine
+        _mark(pid, sitemap_url, CrawlItemStatus.FETCHED)  # без raw: не контент (I19)
+        _emit_progress()
+
+        # ``<loc>`` — кандидаты: SSRF-перепроверка до становления seed (не ``evidence``).
+        seen: set[str] = {sitemap_url}
+        for entry in entries:
+            loc = str(getattr(entry, "url", "") or "")
+            if not loc or loc in seen:
+                continue
+            try:
+                validate_url(loc)
+            except Exception as exc:  # noqa: BLE001 — SSRF-политика на каждом <loc>
+                errors.append(f"{pid}/{loc}: sitemap <loc> отклонён SSRF-политикой: {exc}")
+                continue
+            seen.add(loc)
+            locs.append(loc)
+        sitemap_cache[key] = locs
+        return list(locs)
+
+    def _fresh_sitemap_seeds(pid: str, seed_url: str) -> tuple[str, ...]:
+        """``<loc>`` sitemap, ещё не прикреплённые ни к одному seed-root продукта (дедуп).
+
+        Один и тот же sitemap у нескольких seed-URL даёт один набор ``<loc>``; прикреплять
+        их к каждому корню — двойной фетч/бюджет, поэтому свежие seeds отдаются один раз.
+        """
+        fresh: list[str] = []
+        for loc in _expand_sitemap(pid, seed_url):
+            key = (pid, loc)
+            if key in sitemap_seed_used:
+                continue
+            sitemap_seed_used.add(key)
+            fresh.append(loc)
+        return tuple(fresh)
+
     def _process_local(
         pid: str,
         wu: str,
@@ -1435,16 +1580,40 @@ def build_corpus(
         wave1 = _run_executor()
         collected: dict[tuple[str, str], CrawlResultItem] = dict(_submit_collect(wave1))
 
-        # --- Опрос каталогов + волна 2: записи каталогов --- #
+        # --- Опрос каталогов/sitemap + волна 2: записи каталогов и ``<loc>`` sitemap --- #
         wave2: list[CrawlWorkItem] = []
-        # Порядок ingest в Pass A зеркалит локальный: не-директорный URL даёт себя, каталог —
-        # свои записи (в порядке поллера) на своём месте.
+        # Порядок ingest в Pass A зеркалит локальный: не-директорный URL даёт себя (+ свои
+        # ``<loc>`` sitemap, D3), каталог — свои записи (в порядке поллера) на своём месте.
         work_by_product: dict[str, list[str]] = {pid: [] for pid in products}
         for product_id in products:
             for url in url_map.get(product_id, []):
                 target = targets[(product_id, url)]
                 if target.kind not in _DIRECTORY_KINDS:
                     work_by_product[product_id].append(url)
+                    # D3: ``<loc>`` per-site sitemap — дополнительные depth-0 seeds в волну 2
+                    # (тот же путь, что записи каталога: resolve → resume/max_attempts → submit).
+                    for loc in _fresh_sitemap_seeds(product_id, url):
+                        work_by_product[product_id].append(loc)
+                        ltarget = resolve_crawl_target(
+                            product_id,
+                            loc,
+                            sources=crawl_sources or CrawlSourcesConfig(),
+                            profiles=domain_profiles or {},
+                            explicit=explicit_fetch,
+                            run_default_strategy=crawl_strategy_default,
+                            run_default_rate_limit=crawl_rate_default,
+                        )
+                        targets[(product_id, loc)] = ltarget
+                        l_prior = items.get((product_id, loc))
+                        if _resume_source(l_prior) is not None:
+                            continue  # resume без подачи: ingest ре-извлечёт из retained raw
+                        if (
+                            max_attempts is not None
+                            and l_prior is not None
+                            and l_prior.attempts >= max_attempts
+                        ):
+                            continue  # исчерпано: пометит терминальным ``FAILED`` Pass A
+                        wave2.append(_work_item(product_id, loc, ltarget))
                     continue
 
                 # Phase 4: исчерпавший попытки каталог не поллится — терминальный ``FAILED``
@@ -1542,13 +1711,21 @@ def build_corpus(
         seen_docs: dict[str, str] = {}
         seen_chunk_ids: set[str] = set()
 
-        def _drain_root(pid: str, root_url: str, root_target: Any) -> Frontier:
-            """D1: BFS-drain одного seed-root (scope/блэклист/лимиты/глубина).
+        def _drain_root(
+            pid: str,
+            root_url: str,
+            root_target: Any,
+            extra_seeds: Sequence[str] = (),
+        ) -> Frontier:
+            """D1/D3: BFS-drain одного seed-root (scope/блэклист/лимиты/глубина).
 
-            Seeds — глубина 0; ссылка со страницы глубины ``d`` → ``d+1``. Ставка в очередь
-            гейтится scope (host+path-граница) и блэклистом; ``max_documents`` — жёсткий стоп
-            (не исключение): останавливает постановку/обход этого корня. Возвращает frontier
-            с провенансом усечения (``fetched``/``truncated``/``truncated_reason``).
+            Seeds — глубина 0; ссылка со страницы глубины ``d`` → ``d+1``. ``extra_seeds`` —
+            дополнительные depth-0 seeds этого корня (D3: ``<loc>`` sitemap); их
+            проверяет тот же блэклист/бюджет ``max_documents``, что и seed оператора.
+            Ставка в очередь гейтится scope (host+path-граница) и блэклистом; ``max_documents``
+            — жёсткий стоп (не исключение): останавливает постановку/обход этого корня.
+            Возвращает frontier с провенансом усечения (``fetched``/``truncated``/
+            ``truncated_reason``).
             """
             limits = resolve_crawl_limits(
                 root_url,
@@ -1572,7 +1749,26 @@ def build_corpus(
                 _emit_progress()
                 return frontier
 
+            # D3: дополнительные depth-0 seeds (``<loc>`` sitemap) — под тем же блэклистом и
+            # бюджетом, что и seed оператора (``add_seed`` возвращает статус).
+            for extra in extra_seeds:
+                extra_status = frontier.add_seed(extra)
+                if extra_status == "blacklisted":
+                    errors.append(
+                        f"{pid}/{extra}: sitemap-seed зачёркнут блэклистом "
+                        "(exclude_paths/exclude_documents) — не enqueued"
+                    )
+                elif extra_status == "truncated":
+                    errors.append(
+                        f"{pid}/{extra}: sitemap-seed не поставлен — достигнут max_documents"
+                    )
+
             while True:
+                if not frontier.has_capacity:
+                    # D3: seeds sitemap ставятся пачкой; ``max_documents`` обязан ограничивать
+                    # и их (не только обнаруженные ссылки). Без лимита — всегда есть ёмкость.
+                    frontier.mark_truncated("max_documents")
+                    break
                 node = frontier.next()
                 if node is None:
                     break
@@ -1697,7 +1893,12 @@ def build_corpus(
                 # без ре-расширения). Обычный URL — единственный корень.
                 entry_urls = _expand_directory(product_id, url, target)
                 if entry_urls is None:
-                    roots: list[tuple[str, Any]] = [(url, target)]
+                    # D3: seed оператора + ``<loc>`` его per-site sitemap как дополнительные
+                    # depth-0 seeds этого же корня (аугментация, не замена). Без sitemap —
+                    # пусто (поведение неизменно).
+                    roots: list[tuple[str, Any, tuple[str, ...]]] = [
+                        (url, target, _fresh_sitemap_seeds(product_id, url))
+                    ]
                 else:
                     roots = []
                     for entry_url in entry_urls:
@@ -1719,12 +1920,14 @@ def build_corpus(
                             params=etarget.params,
                         )
                         targets[(product_id, entry_url)] = entry_target
-                        roots.append((entry_url, entry_target))
+                        roots.append((entry_url, entry_target, ()))
 
                 # D1: BFS-frontier по каждому seed-root (``max_depth=0`` → только seeds,
                 # поведение неизменно). Провенанс усечения копится для сеанса/``IndexBuild``.
-                for root_url, root_target in roots:
-                    frontier = _drain_root(product_id, root_url, root_target)
+                for root_url, root_target, extra_seeds in roots:
+                    frontier = _drain_root(
+                        product_id, root_url, root_target, extra_seeds
+                    )
                     pages_fetched_total += frontier.fetched
                     if frontier.truncated:
                         truncated_products.add(product_id)

@@ -170,13 +170,13 @@
     },
     "poll_request": {
       "title": "POST /v1/crawl/poll request payload",
-      "description": "Опрос фида/канала (Wave 5.1): url каталогового документа и его вид (feed — RSS/Atom/RDF-XML, channel — список ссылок/JSON). Оси fetch/extract/strategy/wait_for — как у /v1/fetch (additive). params — опциональные caps: since (строка) и limit (целое).",
+      "description": "Опрос каталогового документа (Wave 5.1/D3): url и его вид (feed — RSS/Atom/RDF-XML, channel — список ссылок/JSON, sitemap — sitemap.xml/sitemap.xml.gz с urlset/sitemapindex). Оси fetch/extract/strategy/wait_for — как у /v1/fetch (additive). params — опциональные caps: since (строка) и limit (целое).",
       "type": "object",
       "additionalProperties": false,
       "required": ["url", "kind"],
       "properties": {
         "url": {"type": "string", "minLength": 1},
-        "kind": {"enum": ["feed", "channel"]},
+        "kind": {"enum": ["feed", "channel", "sitemap"]},
         "fetch": {"enum": ["http", "browser"]},
         "extract": {"enum": ["auto", "html", "document"]},
         "strategy": {"enum": ["auto", "honest", "hybrid"]},
@@ -208,7 +208,7 @@
     },
     "poll_response": {
       "title": "POST /v1/crawl/poll response payload",
-      "description": "Ссылки на записи фида/канала: entries, count и признак усечения по limit/max_entries.",
+      "description": "Ссылки на записи каталогового документа: entries, count и признак усечения по limit/max_entries.",
       "type": "object",
       "additionalProperties": false,
       "required": ["entries", "count", "truncated"],

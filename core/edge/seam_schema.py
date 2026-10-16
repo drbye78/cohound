@@ -94,8 +94,8 @@ CRAWL_OPS: frozenset[str] = frozenset(
     {"crawl/submit", "crawl/status", "crawl/cancel", "crawl/collect", "crawl/poll"}
 )
 
-#: Допустимые виды каталогового документа запроса ``/v1/crawl/poll`` (Wave 5.1).
-POLL_KIND_VALUES: frozenset[str] = frozenset({"feed", "channel"})
+#: Допустимые виды каталогового документа запроса ``/v1/crawl/poll`` (Wave 5.1/D3).
+POLL_KIND_VALUES: frozenset[str] = frozenset({"feed", "channel", "sitemap"})
 
 
 # ---------------------------------------------------------------------------
@@ -597,7 +597,7 @@ def _validate_crawl_poll_request(payload: Any) -> list[str]:
     """Запрос ``crawl/poll`` (Wave 5.1): ``{url, kind, params?, <оси фетча>}``.
 
     ``url`` — обязательный непустой; ``kind`` — обязательный enum
-    (``feed|channel``, :data:`POLL_KIND_VALUES`); ``params`` — опциональный объект
+    (``feed|channel|sitemap``, :data:`POLL_KIND_VALUES`); ``params`` — опциональный объект
     (``since`` строка/``limit`` целое); оси фетча — как у ``/v1/fetch``.
     """
     if not isinstance(payload, Mapping):

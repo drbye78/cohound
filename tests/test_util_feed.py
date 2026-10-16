@@ -221,6 +221,8 @@ def test_doctype_bomb_is_rejected() -> None:
 
 
 def test_unrecognized_root_raises() -> None:
+    # ``parse_feed`` разбирает только RSS/Atom/RDF; sitemap — у отдельного парсера
+    # (``core.util.sitemap.parse_sitemap``, D3), поэтому здесь корень отвергается.
     with pytest.raises(FeedParseError):
         parse_feed(b'<?xml version="1.0"?><sitemap><url/></sitemap>')
 

@@ -105,6 +105,7 @@ from core.ports.vector_index import VectorIndexPort
 from core.store.backup import list_builds
 from core.store.sqlite_store import SqliteStore
 from core.util.cache import ContentAddressedCache
+from core.util.sitemap import MAX_SITEMAP_ENTRIES
 
 __all__ = [
     "LOCAL_PROFILE",
@@ -1113,8 +1114,8 @@ def _build_local_ports(
     ``crawler`` — опциональный HTTP-краулер корпуса, собранный composition root из
     ``deploy.crawl`` (:func:`build_scout_crawler`); ``None`` → не инстанцируется (прежнее
     поведение, сетевые адаптеры включаются явной инъекцией).
-    ``pollers`` — карта ``kind → PollPort`` (Phase 5.1: ``LocalFeedPoller`` для
-    ``feed``/``channel``), собранная из того же краулера; ``None`` → опрос фидов выключен.
+    ``pollers`` — карта ``kind → PollPort`` (Phase 5.1/D3: ``LocalFeedPoller`` для
+    ``feed``/``channel``/``sitemap``), собранная из того же краулера; ``None`` → опрос выключен.
 
     **Эмбеддер (P4a).** Предпочитается оффлайн-путь ``LiteEmbedder`` (``model2vec``, без
     ``torch``), если он готов (зависимость + локальный снапшот модели); иначе — качественный
@@ -1302,6 +1303,11 @@ def build_adapters(
             {
                 "feed": LocalFeedPoller(local_crawler),
                 "channel": LocalFeedPoller(local_crawler),
+                # D3: sitemap — тот же локальный транспорт; потолок записей — спековый
+                # потолок одного sitemap (``MAX_SITEMAP_ENTRIES``), не дефолт feed/channel.
+                "sitemap": LocalFeedPoller(
+                    local_crawler, max_entries=MAX_SITEMAP_ENTRIES
+                ),
             }
             if local_crawler is not None
             else None
@@ -1349,6 +1355,10 @@ def build_adapters(
             pollers={
                 "feed": RemoteFeedPoller(content_gateway),
                 "channel": RemoteFeedPoller(content_gateway),
+                # D3: развёртку sitemap исполняет DMZ (тот же шов ``crawl/poll``).
+                "sitemap": RemoteFeedPoller(
+                    content_gateway, max_entries=MAX_SITEMAP_ENTRIES
+                ),
             },
             search=RemoteSearch(
                 content_gateway,

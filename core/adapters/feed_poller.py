@@ -1,14 +1,20 @@
-"""Опрос фидов/каналов — ``LocalFeedPoller`` и ``RemoteFeedPoller`` (Phase 5.1; §3.2, Ш5).
+"""Опрос фидов/каналов/sitemap — ``LocalFeedPoller`` и ``RemoteFeedPoller`` (Phase 5.1/D3; §3.2, Ш5).
 
-Реализации :class:`~core.ports.poller.PollPort`: получают публичную ленту/канал и
-возвращают список ссылок-кандидатов :class:`~core.util.feed.FeedEntry` (не evidence, I19).
+Реализации :class:`~core.ports.poller.PollPort`: получают публичный каталоговый документ
+(лента/канал/sitemap) и возвращают список ссылок-кандидатов
+:class:`~core.util.feed.FeedEntry` (не evidence, I19).
 
-* :class:`LocalFeedPoller` — in-process (профиль ``local``): фетчит ленту локальным
-  ``CrawlerPort`` (сырые байты), разбирает ``core.util.feed`` по ``kind`` и применяет
-  ограничения ``params``.
+* :class:`LocalFeedPoller` — in-process (профиль ``local``): фетчит каталог локальным
+  ``CrawlerPort`` (сырые байты), разбирает ``core.util.feed``/``core.util.sitemap`` по
+  ``kind`` и применяет ограничения ``params``.
 * :class:`RemoteFeedPoller` — прокси поверх :class:`~core.ports.gateway.ContentGateway`
   (профиль ``split``): DMZ исполняет опрос (op ``crawl/poll``), ядро валидирует форму
   ответа и **повторно** проверяет URL записей (SSRF; edge не доверяем, 07 §5).
+
+**``kind`` и sitemap (D3).** ``feed`` — XML RSS/Atom/RDF; ``channel`` — JSON/JSON-lines/
+список URL; ``sitemap`` — ``sitemap.xml``/``sitemap.xml.gz`` (urlset; ``sitemapindex``
+разворачивается ровно на один уровень). Для ``sitemap`` в ``split`` DMZ исполняет и
+развёртку индекса, ядру возвращаются уже плоские ссылки (I19).
 
 **Границы доверия.** Поллер производит кандидатов, а не evidence (I19): SSRF-проверка
 (``core.util.security.validate_url``) выполняется на входе (URL ленты) и на каждой записи.
@@ -37,11 +43,17 @@ from core.util.feed import (
     parse_instant,
 )
 from core.util.security import validate_url
+from core.util.sitemap import (
+    SitemapDocument,
+    decompress_if_gzip,
+    expand_sitemap,
+    parse_sitemap,
+)
 
 __all__ = ["LocalFeedPoller", "RemoteFeedPoller"]
 
-#: Поддерживаемые виды опроса: XML-фид и «канальный» документ.
-_SUPPORTED_KINDS: frozenset[str] = frozenset({"feed", "channel"})
+#: Поддерживаемые виды опроса: XML-фид, «канальный» документ и sitemap (D3).
+_SUPPORTED_KINDS: frozenset[str] = frozenset({"feed", "channel", "sitemap"})
 
 #: Фрагменты имени параметра, выдающие инлайн-секрет. ``token_env`` — легитимен и
 #: исключается явно (секрет берётся из окружения, а не передаётся значением).
@@ -162,11 +174,12 @@ def _safe_entries(entries: list[FeedEntry]) -> list[FeedEntry]:
 
 
 class LocalFeedPoller:
-    """``PollPort`` in-process: локальный краулер + ``core.util.feed`` (профиль ``local``).
+    """``PollPort`` in-process: локальный краулер + ``core.util.feed``/``sitemap`` (``local``).
 
-    :param crawler: краулер для получения байтов ленты (:class:`CrawlerPort`).
-    :param max_feed_bytes: потолок размера байтов ленты (обрезка перед разбором; защита
-        ядра от раздутого документа). ``<= 0`` — без потолка.
+    :param crawler: краулер для получения байтов каталогового документа (:class:`CrawlerPort`).
+    :param max_feed_bytes: потолок размера байтов документа (обрезка перед разбором; для
+        sitemap применяется к распакованному gzip; защита ядра от раздутого документа).
+        ``<= 0`` — без потолка.
     :param max_entries: потолок числа записей-кандидатов (обрезка результата). ``<= 0`` —
         без потолка.
     """
@@ -196,30 +209,66 @@ class LocalFeedPoller:
         params: Mapping[str, Any],
         plan: FetchPlan,
     ) -> list[FeedEntry]:
-        """Фетчит ленту, разбирает по ``kind`` и применяет caps ``params``.
+        """Фетчит каталог, разбирает по ``kind`` и применяет caps ``params``.
 
-        :raises ValueError: небезопасный/недопустимый URL ленты (SSRF) либо неизвестный
+        :raises ValueError: небезопасный/недопустимый URL каталога (SSRF) либо неизвестный
             ``kind``.
-        :raises FeedParseError: небезопасный/некорректный фид.
+        :raises FeedParseError: небезопасный/некорректный фид/канал.
+        :raises SitemapParseError: небезопасный/некорректный sitemap (в т.ч. gzip-бомба,
+            вложенный ``sitemapindex``).
         """
         validate_url(url)
         page = self._crawler.fetch(url, plan)
         content = page.content
-        if self._max_feed_bytes > 0 and len(content) > self._max_feed_bytes:
-            content = content[: self._max_feed_bytes]
-
         content_type = getattr(page, "content_type", None)
-        if kind == "feed":
-            entries = parse_feed(content, content_type=content_type, base_url=url)
-        elif kind == "channel":
-            entries = parse_channel_document(content, content_type=content_type, base_url=url)
+
+        if kind == "sitemap":
+            # gzip распаковывается ДО байтового потолка (иначе усечение ломает поток).
+            entries = self._poll_sitemap(url, content, plan)
         else:
-            raise ValueError(
-                f"неизвестный kind опроса {kind!r}: ожидается один из {sorted(_SUPPORTED_KINDS)}"
-            )
+            if self._max_feed_bytes > 0 and len(content) > self._max_feed_bytes:
+                content = content[: self._max_feed_bytes]
+
+            if kind == "feed":
+                entries = parse_feed(content, content_type=content_type, base_url=url)
+            elif kind == "channel":
+                entries = parse_channel_document(content, content_type=content_type, base_url=url)
+            else:
+                raise ValueError(
+                    f"неизвестный kind опроса {kind!r}: ожидается один из {sorted(_SUPPORTED_KINDS)}"
+                )
 
         entries = _apply_params(entries, params, self._max_entries)
         return _safe_entries(entries)
+
+    def _bounded_sitemap_bytes(self, content: bytes) -> bytes:
+        """Распаковывает gzip (по magic) и применяет потолок ``max_feed_bytes`` к результату."""
+        data = decompress_if_gzip(content)
+        if self._max_feed_bytes > 0 and len(data) > self._max_feed_bytes:
+            data = data[: self._max_feed_bytes]
+        return data
+
+    def _poll_sitemap(self, url: str, content: bytes, plan: FetchPlan) -> list[FeedEntry]:
+        """Разбирает sitemap и (для ``sitemapindex``) разворачивает **один** уровень (D3).
+
+        Сам sitemap — не страница (не ретейнится/не ингестится). Дочерние sitemap фетчатся
+        тем же краулером (robots/politeness — политика транспорта); каждый дочерний URL
+        проходит ``validate_url`` (SSRF) **до** фетча. Потолки развёртки —
+        ``MAX_CHILD_SITEMAPS``/``MAX_SITEMAP_ENTRIES``; вложенный индекс — отказ.
+        """
+        root = parse_sitemap(self._bounded_sitemap_bytes(content), base_url=url)
+
+        def fetch_child(child_url: str) -> SitemapDocument:
+            validate_url(child_url)
+            page = self._crawler.fetch(child_url, plan)
+            return parse_sitemap(
+                self._bounded_sitemap_bytes(page.content),
+                content_type=getattr(page, "content_type", None),
+                base_url=child_url,
+            )
+
+        entries, _truncated = expand_sitemap(root, fetch_child)
+        return entries
 
 
 # ---------------------------------------------------------------------------
@@ -229,6 +278,10 @@ class LocalFeedPoller:
 
 class RemoteFeedPoller:
     """``PollPort`` поверх DMZ-шва (op ``crawl/poll``; профиль ``split``).
+
+    Виды ``feed``/``channel``/``sitemap`` исполняет DMZ (веб-эгресс только через шов, 07 §4):
+    для ``sitemap`` edge разворачивает (при необходимости) ``sitemapindex`` и возвращает
+    плоские ссылки; ядро валидирует форму ответа и повторно проверяет URL записей (SSRF).
 
     :param gateway: ``ContentGateway`` — транспорт ядро→edge (07 §3).
     :param max_entries: потолок числа записей-кандидатов (обрезка результата). ``<= 0`` —

@@ -311,7 +311,7 @@ def test_crawl_schema_declares_all_ops() -> None:
     # crawl/poll (Wave 5.1): ссылки на записи, без байтов (I19).
     assert schema["$defs"]["poll_request"]["required"] == ["url", "kind"]
     assert schema["$defs"]["poll_request"]["properties"]["kind"] == {
-        "enum": ["feed", "channel"]
+        "enum": ["feed", "channel", "sitemap"]
     }
     assert schema["$defs"]["poll_response"]["required"] == [
         "entries",
@@ -500,7 +500,15 @@ def test_validate_crawl_request_poll_requires_url_and_kind() -> None:
 
 def test_validate_crawl_request_poll_rejects_unknown_kind() -> None:
     assert validate_crawl_request(
-        "crawl/poll", {"url": "https://x.test", "kind": "sitemap"}
+        "crawl/poll", {"url": "https://x.test", "kind": "calendar"}
+    )
+
+
+def test_validate_crawl_request_poll_accepts_sitemap_kind() -> None:
+    """D3: ``sitemap`` — допустимый ``kind`` опроса (аддитивное расширение контракта)."""
+    assert (
+        validate_crawl_request("crawl/poll", {"url": "https://x.test/sitemap.xml", "kind": "sitemap"})
+        == []
     )
 
 

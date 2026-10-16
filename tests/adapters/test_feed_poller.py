@@ -18,6 +18,7 @@ from core.adapters.feed_poller import LocalFeedPoller, RemoteFeedPoller
 from core.adapters.remote_gateway import RemoteContentError
 from core.ports.types import FetchPlan, RawPage
 from core.util.feed import FeedEntry, FeedParseError
+from core.util.sitemap import SitemapParseError
 
 RSS = (
     b"<?xml version=\"1.0\"?>"
@@ -136,7 +137,7 @@ def test_local_poll_channel_json_returns_entries() -> None:
 def test_local_poll_unknown_kind_raises() -> None:
     poller = LocalFeedPoller(_FakeCrawler(RSS))
     with pytest.raises(ValueError, match="kind"):
-        poller.poll(FEED_URL, kind="sitemap", params={}, plan=FetchPlan())
+        poller.poll(FEED_URL, kind="calendar", params={}, plan=FetchPlan())
 
 
 # ---------------------------------------------------------------------------
@@ -392,3 +393,111 @@ def test_local_poll_since_parses_rfc822_not_lexicographic() -> None:
         plan=FetchPlan(),
     )
     assert _urls(entries) == ["https://docs.test/a", "https://docs.test/b"]
+
+
+# ---------------------------------------------------------------------------
+# D3: sitemap (urlset / gzip / sitemapindex / caps / SSRF)
+# ---------------------------------------------------------------------------
+
+SITEMAP = (
+    b'<?xml version="1.0"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
+    b"<url><loc>https://docs.test/a</loc><lastmod>2026-10-01</lastmod></url>"
+    b"<url><loc>https://docs.test/b</loc></url>"
+    b"</urlset>"
+)
+
+SITEMAP_INDEX = (
+    b'<?xml version="1.0"?><sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
+    b"<sitemap><loc>https://docs.test/sm-1.xml</loc></sitemap>"
+    b"<sitemap><loc>https://docs.test/sm-2.xml</loc></sitemap>"
+    b"</sitemapindex>"
+)
+
+
+class _MapCrawler:
+    """``CrawlerPort``-заглушка с картой ``url -> bytes`` (для развёртки sitemapindex)."""
+
+    version = "fake-crawler-1"
+
+    def __init__(self, pages: dict[str, bytes], *, content_type: str | None = None) -> None:
+        self._pages = dict(pages)
+        self._content_type = content_type
+        self.calls: list[str] = []
+
+    def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:
+        self.calls.append(url)
+        return RawPage(
+            url=url,
+            content=self._pages[url],
+            fetched_at="2026-01-01T00:00:00Z",
+            content_type=self._content_type,
+        )
+
+
+def test_local_poll_sitemap_urlset_returns_locs() -> None:
+    crawler = _FakeCrawler(SITEMAP)
+    poller = LocalFeedPoller(crawler)
+    entries = poller.poll(FEED_URL, kind="sitemap", params={}, plan=FetchPlan())
+    assert _urls(entries) == ["https://docs.test/a", "https://docs.test/b"]
+    assert entries[0].published_at == "2026-10-01"
+    assert crawler.calls == [FEED_URL]
+
+
+def test_local_poll_sitemap_gzip_is_supported() -> None:
+    import gzip as _gzip
+
+    poller = LocalFeedPoller(_FakeCrawler(_gzip.compress(SITEMAP)))
+    entries = poller.poll(FEED_URL, kind="sitemap", params={}, plan=FetchPlan())
+    assert _urls(entries) == ["https://docs.test/a", "https://docs.test/b"]
+
+
+def test_local_poll_sitemap_index_expands_children() -> None:
+    crawler = _MapCrawler(
+        {
+            FEED_URL: SITEMAP_INDEX,
+            "https://docs.test/sm-1.xml": b"<urlset><url><loc>https://docs.test/1</loc></url></urlset>",
+            "https://docs.test/sm-2.xml": b"<urlset><url><loc>https://docs.test/2</loc></url></urlset>",
+        }
+    )
+    poller = LocalFeedPoller(crawler)
+    entries = poller.poll(FEED_URL, kind="sitemap", params={}, plan=FetchPlan())
+    assert _urls(entries) == ["https://docs.test/1", "https://docs.test/2"]
+    assert crawler.calls[0] == FEED_URL  # корень — первым, дети — после
+
+
+def test_local_poll_sitemap_nested_index_refused() -> None:
+    crawler = _MapCrawler(
+        {FEED_URL: SITEMAP_INDEX, "https://docs.test/sm-1.xml": SITEMAP_INDEX,
+         "https://docs.test/sm-2.xml": SITEMAP_INDEX}
+    )
+    poller = LocalFeedPoller(crawler)
+    with pytest.raises(SitemapParseError, match="вложенный"):
+        poller.poll(FEED_URL, kind="sitemap", params={}, plan=FetchPlan())
+
+
+def test_local_poll_sitemap_drops_unsafe_locs() -> None:
+    smap = (
+        b"<urlset>"
+        b"<url><loc>https://docs.test/ok</loc></url>"
+        b"<url><loc>http://127.0.0.1/secret</loc></url>"
+        b"</urlset>"
+    )
+    poller = LocalFeedPoller(_FakeCrawler(smap))
+    entries = poller.poll(FEED_URL, kind="sitemap", params={}, plan=FetchPlan())
+    assert _urls(entries) == ["https://docs.test/ok"]
+
+
+def test_local_poll_sitemap_params_limit_applied() -> None:
+    poller = LocalFeedPoller(_FakeCrawler(SITEMAP))
+    entries = poller.poll(FEED_URL, kind="sitemap", params={"limit": 1}, plan=FetchPlan())
+    assert _urls(entries) == ["https://docs.test/a"]
+
+
+def test_remote_poll_sitemap_builds_kind_payload() -> None:
+    gateway = _FakeGateway(_poll_response([{"url": "https://docs.test/a"}]))
+    poller = RemoteFeedPoller(gateway)
+    entries = poller.poll("https://docs.test/sitemap.xml", kind="sitemap", params={}, plan=FetchPlan())
+    assert _urls(entries) == ["https://docs.test/a"]
+    op, payload = gateway.calls[-1]
+    assert op == "crawl/poll" and payload["kind"] == "sitemap"
+

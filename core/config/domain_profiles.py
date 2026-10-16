@@ -6,12 +6,15 @@
 * ``extract``  — ``auto`` | ``html`` | ``document`` (авто-детект по формату | HTML | документ);
 * ``strategy`` — ``auto`` | ``honest`` | ``hybrid`` (как используется браузер, D4);
 * ``wait_for`` — опциональное JS-условие готовности для браузерного рендера;
-* ``rate_limit`` — опциональный диапазон uniform(min_s, max_s) между запросами.
+* ``rate_limit`` — опциональный диапазон uniform(min_s, max_s) между запросами;
+* ``sitemap``  — опциональный URL публичного ``sitemap.xml`` (D3): его ``<loc>`` добавляются
+  дополнительными depth-0 seeds (сам sitemap — не страница).
 
 Формат::
 
     example.com:        {fetch: browser, extract: html}
     parent.test/path:   {fetch: browser, extract: document, strategy: hybrid}
+    docs.example:       {sitemap: "https://docs.example/sitemap.xml"}
 
 Ключ — ``host`` с опциональным ``/path``; сопоставление и приоритет профилей —
 ответственность pipeline (:func:`core.pipeline.fetch_plan.resolve_fetch_plan`), не адаптеров.
@@ -58,6 +61,11 @@ class DomainProfile(BaseModel):
     max_documents: int | None = Field(default=None, gt=0)
     exclude_paths: list[str] | None = None
     exclude_documents: list[str] | None = None
+    # D3: per-site URL публичного ``sitemap.xml`` (опц.). ``None`` = не задан (поведение
+    # неизменно). ``<loc>`` sitemap становятся **дополнительными** depth-0 seeds (не заменяют
+    # seed-URL оператора); сам sitemap — не страница (не ретейнится/не ингестится, I19).
+    # Развёртка ``sitemapindex`` — один уровень (потолки в ``core.util.sitemap``).
+    sitemap: str | None = None
 
     @field_validator("exclude_paths", "exclude_documents")
     @classmethod
@@ -72,6 +80,22 @@ class DomainProfile(BaseModel):
                     "ожидались непустые строки-glob"
                 )
         return value
+
+    @field_validator("sitemap")
+    @classmethod
+    def _check_sitemap(cls, value: str | None) -> str | None:
+        """Отвергает пустой/не-``http(s)`` URL sitemap (D3): ранняя ошибка конфигурации."""
+        if value is None:
+            return None
+        text = value.strip()
+        if not text:
+            raise ValueError("domain_profiles.sitemap: ожидается непустой URL")
+        if not text.lower().startswith(("http://", "https://")):
+            raise ValueError(
+                "domain_profiles.sitemap: ожидается http(s)-URL "
+                "(например https://example.com/sitemap.xml)"
+            )
+        return text
 
 
 def _read_yaml(path: str | Path) -> Any:

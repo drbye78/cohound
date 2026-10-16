@@ -322,7 +322,7 @@
     "/v1/crawl/poll": {
       "post": {
         "operationId": "crawl/poll",
-        "summary": "Опрос фида/канала (ссылки на записи, не evidence — I19)",
+        "summary": "Опрос каталогового документа (фид/канал/sitemap; ссылки на записи, не evidence — I19)",
         "parameters": [
           {"$ref": "#/components/parameters/RequestId"},
           {"$ref": "#/components/parameters/SchemaVersion"}

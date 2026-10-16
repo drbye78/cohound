@@ -161,6 +161,28 @@ def test_load_domain_profiles_happy(tmp_path: Path) -> None:
     assert profiles["example.org/documents"].fetch is FetchMode.HTTP
 
 
+def test_load_domain_profiles_with_sitemap(tmp_path: Path) -> None:
+    """D3: per-site ``sitemap`` грузится (scalar URL) и доступен на профиле."""
+    path = tmp_path / "domain_profiles.yaml"
+    path.write_text(
+        "example.org: {fetch: http, sitemap: 'https://example.org/sitemap.xml'}\n",
+        encoding="utf-8",
+    )
+    profiles = load_domain_profiles(path)
+    assert profiles["example.org"].sitemap == "https://example.org/sitemap.xml"
+    assert profiles["example.org"].fetch is FetchMode.HTTP
+
+
+def test_load_domain_profiles_rejects_non_http_sitemap(tmp_path: Path) -> None:
+    """D3: sitemap без схемы http(s) отвергается на загрузке (ранняя ошибка конфигурации)."""
+    path = tmp_path / "domain_profiles.yaml"
+    path.write_text(
+        "example.org: {sitemap: 'example.org/sitemap.xml'}\n", encoding="utf-8"
+    )
+    with pytest.raises(ValueError, match="профиль"):
+        load_domain_profiles(path)
+
+
 @pytest.mark.parametrize("field", ["spa", "index", "render"])
 def test_load_domain_profiles_rejects_unknown_field(tmp_path: Path, field: str) -> None:
     path = tmp_path / "domain_profiles.yaml"

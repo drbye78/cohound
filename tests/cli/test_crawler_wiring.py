@@ -851,7 +851,7 @@ def test_resolve_ports_real_build_sets_ports_crawlers(
 def test_build_adapters_local_sets_pollers(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """``local`` + ``deploy`` → ``Ports.pollers`` несёт ``LocalFeedPoller`` для feed/channel."""
+    """``local`` + ``deploy`` → ``Ports.pollers`` несёт ``LocalFeedPoller`` для feed/channel/sitemap."""
     monkeypatch.setenv(ENV_SCOUT_CRAWLER, "http")
 
     ports = build_adapters(
@@ -862,7 +862,7 @@ def test_build_adapters_local_sets_pollers(
     )
 
     assert ports.pollers is not None
-    assert set(ports.pollers) == {"feed", "channel"}
+    assert set(ports.pollers) == {"feed", "channel", "sitemap"}
     assert all(isinstance(poller, LocalFeedPoller) for poller in ports.pollers.values())
     # Поллер использует тот же локальный краулер (транспорт фетча ленты).
     assert ports.pollers["feed"]._crawler is ports.crawler
@@ -894,7 +894,7 @@ def test_build_adapters_split_sets_remote_pollers() -> None:
     ports = build_adapters(profile=SPLIT_PROFILE, deploy=config, gateway=gateway)  # type: ignore[arg-type]
 
     assert ports.pollers is not None
-    assert set(ports.pollers) == {"feed", "channel"}
+    assert set(ports.pollers) == {"feed", "channel", "sitemap"}
     assert all(isinstance(poller, RemoteFeedPoller) for poller in ports.pollers.values())
     assert ports.pollers["feed"]._gateway is gateway
 

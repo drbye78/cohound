@@ -228,6 +228,10 @@ class Frontier:
         """Учесть успешно добытую (retained) страницу этого корня."""
         self.fetched += 1
 
+    def mark_truncated(self, reason: str) -> None:
+        """Отметить политико-усечённый обход (первый повод побеждает; D1/G, D3)."""
+        self._mark_truncated(reason)
+
     # -- enqueue ------------------------------------------------------------ #
 
     def add_seed(self, url: str) -> str:

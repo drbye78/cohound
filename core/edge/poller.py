@@ -8,9 +8,10 @@ evidence. Он фетчит **только каталоговый докумен
 Границы слоя — edge: допускаются ``ports``/``domain``/``util``; **никогда**
 ``store``/``pipeline``/``cli``. Опора — stdlib + ``util``. Нейтрален (§1.3).
 
-Безопасность. URL самого фида и **каждый** URL записи проходят ``validate_url``
+Безопасность. URL самого каталога и **каждый** URL записи проходят ``validate_url``
 (SSRF) перед возвратом; сервис не фетчит записи. Пустые/небезопасные URL записей
-отбрасываются. Разбор XML — через ``core.util.feed.parse_feed`` (defusedxml).
+отбрасываются. Разбор XML — через ``core.util.feed.parse_feed`` / ``core.util.sitemap``
+(defusedxml); для sitemap edge сам разворачивает ``sitemapindex`` на один уровень (D3).
 """
 
 from __future__ import annotations
@@ -37,13 +38,22 @@ from core.util.feed import (
     parse_instant,
 )
 from core.util.security import validate_url
+from core.util.sitemap import (
+    MAX_SITEMAP_ENTRIES,
+    SitemapDocument,
+    SitemapParseError,
+    decompress_if_gzip,
+    expand_sitemap,
+    parse_sitemap,
+)
 
 __all__ = ["FeedPollService"]
 
-#: Виды каталогового документа, поддерживаемые опросом (fixed contract).
+#: Виды каталогового документа, поддерживаемые опросом (fixed contract): фид, канал, sitemap.
 _KIND_FEED = "feed"
 _KIND_CHANNEL = "channel"
-SUPPORTED_KINDS: frozenset[str] = frozenset({_KIND_FEED, _KIND_CHANNEL})
+_KIND_SITEMAP = "sitemap"
+SUPPORTED_KINDS: frozenset[str] = frozenset({_KIND_FEED, _KIND_CHANNEL, _KIND_SITEMAP})
 
 #: Допустимые значения осей фетча/экстракции/стратегии (совпадают со seam-контрактом).
 _FETCH_VALUES = frozenset(mode.value for mode in FetchMode)
@@ -104,9 +114,9 @@ class FeedPollService:
         params = dict(params) if isinstance(params, Mapping) else {}
         plan = self._build_plan(request)
 
-        # SSRF фида — до фетча (сервис возвращает недоверенные ссылки, но сам ходит строго
+        # SSRF каталога — до фетча (сервис возвращает недоверенные ссылки, но сам ходит строго
         # по валидному публичному http(s)).
-        self._validate(url, "feed")
+        self._validate(url, kind)
 
         if not self._semaphore.acquire(blocking=False):
             raise EdgeError("poll busy")
@@ -117,6 +127,9 @@ class FeedPollService:
 
         content = bytes(getattr(page, "content", b"") or b"")
         content_type = getattr(page, "content_type", None)
+        if kind == _KIND_SITEMAP:
+            return self._poll_sitemap(url, content, plan, params, content_type)
+
         was_truncated = len(content) > self._max_feed_bytes
         if was_truncated:
             content = content[: self._max_feed_bytes]
@@ -166,12 +179,74 @@ class FeedPollService:
                 content, content_type=_mime(content_type), base_url=url
             )
         except FeedParseError as exc:
-            if was_truncated:
+            raise self._size_error(exc, was_truncated) from exc
+
+    def _poll_sitemap(
+        self,
+        url: str,
+        content: bytes,
+        plan: FetchPlan,
+        params: Mapping[str, Any],
+        content_type: Any,
+    ) -> dict[str, Any]:
+        """Разбирает sitemap и (для ``sitemapindex``) разворачивает **один** уровень (D3).
+
+        Сам sitemap — не страница (не ретейнится/не ингестится). Дочерние sitemap фетчатся
+        тем же краулером (robots/politeness — политика транспорта); каждый дочерний URL
+        проходит ``validate_url`` (SSRF) **до** фетча. Потолки — ``MAX_CHILD_SITEMAPS``/
+        ``MAX_SITEMAP_ENTRIES`` (см. ``core.util.sitemap``); вложенный индекс → ``EdgeError``.
+        Ссылки ``<loc>`` — кандидаты (не evidence, I19): байты страниц здесь не добываются.
+        """
+        data = decompress_if_gzip(content)
+        was_truncated = len(data) > self._max_feed_bytes
+        if was_truncated:
+            data = data[: self._max_feed_bytes]
+
+        try:
+            root = parse_sitemap(data, content_type=_mime(content_type), base_url=url)
+        except SitemapParseError as exc:
+            raise self._size_error(exc, was_truncated) from exc
+
+        def fetch_child(child_url: str) -> SitemapDocument:
+            try:
+                validate_url(child_url)
+            except ValueError as exc:
                 raise EdgeError(
-                    f"crawl/poll: документ превысил лимит {self._max_feed_bytes} байт "
-                    "и был усечён до неразбираемого состояния"
+                    f"crawl/poll: небезопасный URL дочернего sitemap: {exc}"
                 ) from exc
-            raise EdgeError(f"crawl/poll: parse: {exc}") from exc
+            page = self._fetch(child_url, plan)
+            child_bytes = decompress_if_gzip(bytes(getattr(page, "content", b"") or b""))
+            if len(child_bytes) > self._max_feed_bytes:
+                child_bytes = child_bytes[: self._max_feed_bytes]
+            try:
+                return parse_sitemap(
+                    child_bytes,
+                    content_type=_mime(getattr(page, "content_type", None)),
+                    base_url=child_url,
+                )
+            except SitemapParseError as exc:
+                raise EdgeError(f"crawl/poll: дочерний sitemap: {exc}") from exc
+
+        try:
+            entries, expand_truncated = expand_sitemap(root, fetch_child)
+        except SitemapParseError as exc:
+            raise EdgeError(f"crawl/poll: {exc}") from exc
+
+        return self._finalize(
+            entries,
+            params,
+            was_truncated or expand_truncated,
+            max_entries=MAX_SITEMAP_ENTRIES,
+        )
+
+    def _size_error(self, exc: Exception, was_truncated: bool) -> EdgeError:
+        """Ошибка разбора: при усечении по ``max_feed_bytes`` — понятное сообщение о размере."""
+        if was_truncated:
+            return EdgeError(
+                f"crawl/poll: документ превысил лимит {self._max_feed_bytes} байт "
+                "и был усечён до неразбираемого состояния"
+            )
+        return EdgeError(f"crawl/poll: parse: {exc}")
 
     # -- нормализация/caps ------------------------------------------------------
 
@@ -180,18 +255,21 @@ class FeedPollService:
         entries: list[FeedEntry],
         params: Mapping[str, Any],
         input_truncated: bool,
+        max_entries: int | None = None,
     ) -> dict[str, Any]:
         """Применяет caps (``since``/``limit``), SSRF-фильтр записей, собирает ответ.
 
-        ``input_truncated`` — документ был усечён по ``max_feed_bytes`` до разбора;
-        признак ``truncated`` ответа объединяет его с усечением по лимиту записей.
+        ``input_truncated`` — документ был усечён по ``max_feed_bytes``/потолкам sitemap до
+        разбора; признак ``truncated`` ответа объединяет его с усечением по лимиту записей.
+        ``max_entries`` — жёсткий потолок ответа (по умолчанию ``self._max_entries``; для
+        sitemap — ``MAX_SITEMAP_ENTRIES``).
         """
         since = _clean(params.get("since")) or None
         threshold = parse_instant(since) if since is not None else None
         requested_limit = _opt_int(params.get("limit"))
-        effective_limit = self._max_entries
+        effective_limit = self._max_entries if max_entries is None else max_entries
         if requested_limit is not None and requested_limit > 0:
-            effective_limit = min(requested_limit, self._max_entries)
+            effective_limit = min(requested_limit, effective_limit)
 
         selected: list[FeedEntry] = []
         truncated = bool(input_truncated)

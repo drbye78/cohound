@@ -96,9 +96,15 @@ def test_validate_params_allows_token_env(poller: PollPort) -> None:
 
 
 def test_validate_params_unknown_kind(poller: PollPort) -> None:
-    messages = poller.validate_params("sitemap", {})
+    messages = poller.validate_params("calendar", {})
     assert messages
     assert any("kind" in message for message in messages)
+
+
+def test_validate_params_sitemap_kind_supported(poller: PollPort) -> None:
+    """D3: ``sitemap`` — поддерживаемый ``kind`` (не отвергается как неизвестный)."""
+    assert poller.validate_params("sitemap", {}) == []
+    assert poller.validate_params("sitemap", {"limit": 5}) == []
 
 
 @pytest.mark.parametrize("bad_limit", [0, -1, "5", 1.5, True, None])

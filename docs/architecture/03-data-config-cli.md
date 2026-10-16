@@ -299,6 +299,16 @@ case-sensitive): `exclude_paths` по пути URL, `exclude_documents` по bas
   `example.org/documents: {fetch: http, max_depth: 1, exclude_documents: ["*.pdf"]}`.
   Схема остаётся строгой (`extra="forbid"`).
 
+  Профиль домена несёт также per-site URL публичного **sitemap** (D3):
+  `example.org: {sitemap: "https://example.org/sitemap.xml"}`. Его `<loc>` добавляются
+  **дополнительными** depth-0 seeds того же seed-root (не заменяют seed-URL оператора;
+  sitemap-only работа — если seed-URL не задан). Сам sitemap — не страница: не ретейнится
+  и не ингестится (не evidence, I19). Опрос идёт через `PollPort` (`kind=sitemap`, §D.2.1);
+  `sitemapindex` разворачивается **ровно на один уровень** (потолки `MAX_CHILD_SITEMAPS`/
+  `MAX_SITEMAP_ENTRIES` в `core/util/sitemap.py`; вложенный индекс → отказ). `<loc>` проходят
+  `validate_url` (SSRF), затем тот же блэклист/`max_documents`/`max_depth`, что и прочие seeds.
+  Пример: `example.org: {fetch: http, sitemap: "https://example.org/sitemap.xml"}`.
+
 ### D.2.1. Источники краула (`packages/{case_id}/crawl_sources.yaml`) — source routing
 
 Пакетный артефакт `crawl_sources.yaml` (`CRAWL_SOURCES_FILENAME`) задаёт **маршрутизацию
@@ -318,7 +328,7 @@ case-sensitive): `exclude_paths` по пути URL, `exclude_documents` по bas
 ```yaml
 # packages/{case_id}/crawl_sources.yaml
 defaults:
-  kind: web                 # kind ∈ {web, feed, channel} — строки-данные
+  kind: web                 # kind ∈ {web, feed, channel} — строки-данные (sitemap — в D.2)
   engine: http
 products:
   p1:
@@ -343,6 +353,12 @@ retention сырых байтов → extract → chunk → index (I19). Раз�
 не ре-расширяются, даже если их `kind` тоже директорный). Сам **документ каталога не ретейнится и
 не ингестится** (не evidence, I19); его элемент сеанса помечается `fetched` **без** `raw_path`.
 
+**`sitemap` — не вид `crawl_sources.yaml` (D3).** Публичный sitemap задаётся **per-site** в
+`domain_profiles.yaml` (`DomainProfile.sitemap`, §D.2), а не в `crawl_sources.yaml`, и **не**
+входит в `_DIRECTORY_KINDS`. Транспорт опроса — тот же `PollPort`, но с отдельным `kind`
+`"sitemap"` (`LocalFeedPoller` ‖ `RemoteFeedPoller` → шов `crawl/poll`); парсер —
+`core/util/sitemap.py` (`urlset`; `sitemapindex` — один уровень; gzip — по magic-байтам).
+
 **`params`.** Свободный `dict`; валидируется реализацией `PollPort.validate_params` **до** опроса
 (в фазе корпуса). Базовые ключи: `limit` (целое > 0), `since` (ISO-8601/RFC822 — отсекает
 доказуемо старые записи; неизвестная дата сохраняется консервативно), `token_env` (имя
@@ -355,10 +371,14 @@ env-переменной с токеном канала — **единствен
 **Паритет `local`/`split` и шов.** Логика развёртки одна; различается транспорт опроса:
 в профиле `local` — `LocalFeedPoller` (in-process `CrawlerPort`), в профиле `split` —
 `RemoteFeedPoller` через op шва **`crawl/poll`** (scope `crawl`, `schema_version` шва остаётся
-`"1"`). Шов добывает **только документ каталога**; записи возвращаются как **ссылки**
+`"1"`; `kind` аддитивно расширен до `feed|channel|sitemap`). Для `sitemap` DMZ исполняет и
+развёртку `sitemapindex` (один уровень), ядру возвращаются уже плоские ссылки. Шов добывает
+**только документ каталога/sitemap**; записи возвращаются как **ссылки**
 (`{entries, count, truncated}`), их байты — не через этот опрос, а обычным фетчем (I19).
-В `executor`-режиме (`split`, долгоиграющий краул) развёртка каталогов исполняется **отдельной
-волной** с собственным `idempotency_key` (волна 1 — top-level URL, волна 2 — записи).
+В `executor`-режиме (`split`, долгоиграющий краул) развёртка каталогов и `<loc>` sitemap
+исполняется **отдельной волной** с собственным `idempotency_key` (волна 1 — top-level URL,
+волна 2 — записи каталогов и `<loc>` sitemap; локальный путь ставит `<loc>` как
+дополнительные depth-0 seeds того же seed-root).
 
 **Версионирование.** Операционные оси краула `run.yaml:crawl.strategy`/`crawl.rate_limit` — это
 версионная граница класса `execution_change` (§13, `03 §C.1`/Backlog B), а отпечаток конфигурации

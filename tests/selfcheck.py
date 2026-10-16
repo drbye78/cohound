@@ -390,7 +390,7 @@ def main() -> int:
     check("auth/audit: подделка отвергнута + поля SIEM (07 §8)", lambda: _edge_auth_audit())
     check("deploy.yaml: отсутствие → local; split требует base_url", lambda: _deploy_config())
 
-    section("Источники краула feed/channel (Wave 5.4)")
+    section("Источники краула feed/channel/sitemap (Wave 5.4/D3)")
     check("crawl_sources: слои defaults→products→sites + digest", lambda: _crawl_sources_routing())
     check("pollers/seam: PollPort + crawl/poll (scope crawl, schema=1)", lambda: _pollers_seam())
     check("directory kinds + общие хелперы времени (Ш5)", lambda: _directory_kinds_helpers())
@@ -2336,8 +2336,10 @@ def _pollers_seam() -> None:
         raise AssertionError("crawl/poll обязан быть заявлен в ENDPOINT_OPS/CRAWL_OPS")
     if SEAM_SCHEMA_VERSION != "1":
         raise AssertionError("schema_version шва обязан оставаться '1' (аддитивное расширение)")
-    if set(POLL_KIND_VALUES) != {"feed", "channel"}:
-        raise AssertionError(f"POLL_KIND_VALUES: ожидалось feed/channel, дано {POLL_KIND_VALUES}")
+    if set(POLL_KIND_VALUES) != {"feed", "channel", "sitemap"}:
+        raise AssertionError(
+            f"POLL_KIND_VALUES: ожидалось feed/channel/sitemap, дано {POLL_KIND_VALUES}"
+        )
 
     class _Crawler:
         version = "c1"
