@@ -76,6 +76,89 @@ def test_sanitize_html_is_deterministic_and_idempotent() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Инвариант оболочки документа (регрессия T7.5): санитайзинг не должен
+# обнулять извлечение trafilatura, выбрасывая оболочку документа.
+# ---------------------------------------------------------------------------
+
+# Полный документ с оболочкой и главным контентом.
+_FULL_DOCUMENT = (
+    "<html><head><title>Документ: главная</title>"
+    "<style>body { color: red; }</style></head>"
+    "<body><article><h1>Заголовок</h1>"
+    "<p>main-content-marker: основной текст статьи.</p>"
+    "</article></body></html>"
+)
+
+
+def test_sanitize_html_preserves_document_shell() -> None:
+    """Оболочка документа (маркер ``<title>``) переживает санитайзинг.
+
+    ``nh3`` сериализует body-фрагмент, поэтому literal ``<html>``/``<body>`` он не
+    выводит; сохраняемым маркером документа, который нужен ``trafilatura``, является
+    ``<title>``. Без него основной контент страницы не извлекался (регрессия T7.5).
+    """
+    cleaned = sanitize_html(_FULL_DOCUMENT)
+    assert "<title>" in cleaned
+    assert "Документ: главная" in cleaned
+    assert "main-content-marker" in cleaned
+    assert "Заголовок" in cleaned
+
+
+def test_sanitize_html_shell_preserved_via_stdlib_fallback_too() -> None:
+    """stdlib-fallback также сохраняет оболочку (literal-теги) и текст.
+
+    Оба пути санитайзинга обязаны оставлять ``<html>``/``<body>``/``<title>``
+    (проверяем на fallback-пути, который теги не выбрасывает).
+    """
+    from core.util.sanitize import _stdlib_sanitize_html
+
+    cleaned = _stdlib_sanitize_html(_FULL_DOCUMENT)
+    assert "<html>" in cleaned
+    assert "<body>" in cleaned
+    assert "<title>" in cleaned
+    assert "main-content-marker" in cleaned
+
+
+def test_sanitize_html_shell_with_adversarial_content_stays_neutralized() -> None:
+    """Оболочка сохраняется, но активный контент по-прежнему вырезан."""
+    html = (
+        "<html><head><title>T</title><style>body { color: red; }</style></head>"
+        '<body><p>main-content-marker</p><script>alert(1)</script>'
+        '<iframe src="https://evil.test/x"></iframe><object></object><embed>'
+        "<template><b>t</b></template>"
+        '<img src="x" onerror="steal()">'
+        '<a href="javascript:alert(2)">j</a>'
+        '<a href="data:text/html;base64,PHNjcmlwdD4=">d</a>'
+        "</body></html>"
+    )
+    cleaned = sanitize_html(html)
+    # Оболочка/контент на месте.
+    assert "<title>" in cleaned
+    assert "main-content-marker" in cleaned
+    # Активные теги вырезаны.
+    for tag in ("<script", "<style", "<iframe", "<object", "<embed", "<template"):
+        assert tag not in cleaned.lower(), tag
+    # Содержимое script/style и обработчики/URL-схемы нейтрализованы.
+    assert "alert(" not in cleaned
+    assert "color: red" not in cleaned
+    assert "onerror" not in cleaned.lower()
+    assert "steal" not in cleaned
+    assert "javascript:" not in cleaned.lower()
+    assert "data:text/html" not in cleaned.lower()
+
+
+def test_stdlib_sanitize_removes_dangerous_block_content() -> None:
+    """Fallback вырезает опасные блоки вместе с содержимым (все семь тегов)."""
+    from core.util.sanitize import _DANGEROUS_BLOCK_TAGS, _stdlib_sanitize_html
+
+    for tag in _DANGEROUS_BLOCK_TAGS:
+        cleaned = _stdlib_sanitize_html(f"<p>x</p><{tag}>danger-{tag}</{tag}><p>y</p>")
+        assert "danger-" not in cleaned, tag
+        assert f"<{tag}" not in cleaned.lower(), tag
+        assert "x" in cleaned and "y" in cleaned
+
+
+# ---------------------------------------------------------------------------
 # strip_control_chars
 # ---------------------------------------------------------------------------
 

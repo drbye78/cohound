@@ -629,7 +629,7 @@ def test_validate_payload_registry_rejects_empty_source_url() -> None:
 
 def test_validate_payload_capabilities_accepts() -> None:
     payload = {
-        "extractor_version": "trafilatura-html-1",
+        "extractor_version": "trafilatura-html-2",
         "crawler_version": "scrapy-1",
         "search_engine": "serp-x",
         "supported_formats": ["html", "pdf"],

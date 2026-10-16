@@ -77,7 +77,7 @@ def _default_extract(html: str) -> str | None:
 class HtmlExtractor:
     """HTML → markdown (trafilatura). Реализация ``ExtractorPort`` (Ш5)."""
 
-    version = "trafilatura-html-1"
+    version = "trafilatura-html-2"
 
     def __init__(self, extract_fn: ExtractFn | None = None, *, sanitize: bool = True) -> None:
         """``extract_fn`` — внедряемая функция извлечения (для тестов/AB).

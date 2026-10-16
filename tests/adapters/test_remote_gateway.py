@@ -482,7 +482,7 @@ def test_remote_extractor_returns_doc_and_rehashes() -> None:
             "text": {
                 "content": text,
                 "hash": content_hash(text),
-                "extractor_version": "trafilatura-html-1",
+                "extractor_version": "trafilatura-html-2",
             },
             "error": None,
         }
@@ -494,7 +494,7 @@ def test_remote_extractor_returns_doc_and_rehashes() -> None:
     assert isinstance(doc, ExtractedDoc)
     assert doc.text == text
     assert doc.content_hash == content_hash(text)  # пересчитан ядром (I19)
-    assert doc.extractor_version == "trafilatura-html-1"
+    assert doc.extractor_version == "trafilatura-html-2"
     assert doc.error is None
     # 07 §3: /v1/fetch с осью extract (auto по умолчанию).
     assert seen["op"] == "fetch"

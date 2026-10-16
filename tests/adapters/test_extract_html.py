@@ -57,7 +57,7 @@ def test_extract_returns_extracted_doc() -> None:
 
 
 def test_extractor_version_is_stable() -> None:
-    assert HtmlExtractor.version == "trafilatura-html-1"
+    assert HtmlExtractor.version == "trafilatura-html-2"
 
 
 def test_implements_extractor_port() -> None:
