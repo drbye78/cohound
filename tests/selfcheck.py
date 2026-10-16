@@ -345,6 +345,7 @@ def main() -> int:
     section("Корпус (Ш5) — W7")
     check("content-addressed кэш: get_or_fetch + ключи (R7)", lambda: _util_cache())
     check("HtmlExtractor: hash/деградация (I19)", lambda: _extract_html())
+    check("sanitize_html: оболочка документа + активный HTML удалён (T7.5)", lambda: _util_sanitize())
     check("ScrapyCrawler: кэш + SSRF + домен-профиль", lambda: _crawl_scrapy())
     check("MarkdownChunkerPort удовлетворяет ChunkerPort (T7.3)", lambda: _chunker_port())
 
@@ -1352,6 +1353,39 @@ def _extract_html() -> None:
     degraded = bad.extract(RawPage(url="https://e.test/a", content=b"<p>x</p>", fetched_at="t"))
     if not degraded.error or degraded.text != "":
         raise AssertionError("сбой извлечения обязан деградировать в error без исключения")
+
+
+def _util_sanitize() -> None:
+    """Санитайзинг сохраняет оболочку документа и вырезает активный HTML (T7.5)."""
+    from core.util.sanitize import _DANGEROUS_BLOCK_TAGS, _stdlib_sanitize_html, sanitize_html
+
+    doc = (
+        "<html><head><title>Документ: главная</title>"
+        "<style>body { color: red; }</style></head>"
+        "<body><article><h1>Заголовок</h1>"
+        "<p>main-content-marker: основной текст.</p></article>"
+        "<script>alert(1)</script>"
+        '<img src="x" onerror="steal()">'
+        '<a href="javascript:alert(2)">j</a></body></html>'
+    )
+    cleaned = sanitize_html(doc)
+    # Оболочка документа (маркер ``<title>``) сохраняется — иначе trafilatura
+    # извлекает пустой текст (регрессия T7.5).
+    _assert("<title>" in cleaned)
+    _assert("main-content-marker" in cleaned)
+    # Активный контент по-прежнему вырезан.
+    _assert("script" not in cleaned.lower())
+    _assert("style" not in cleaned.lower())
+    _assert("onerror" not in cleaned.lower())
+    _assert("steal" not in cleaned)
+    _assert("javascript:" not in cleaned.lower())
+    # Fallback: сохраняет оболочку literal-тегами и вырезает опасные блоки с содержимым.
+    fb = _stdlib_sanitize_html(doc)
+    _assert("<html>" in fb and "<body>" in fb and "<title>" in fb)
+    for tag in _DANGEROUS_BLOCK_TAGS:
+        text = _stdlib_sanitize_html(f"<p>x</p><{tag}>danger</{tag}><p>y</p>")
+        _assert(f"<{tag}" not in text.lower())
+        _assert("danger" not in text and "x" in text and "y" in text)
 
 
 def _crawl_scrapy() -> None:
@@ -3010,9 +3044,11 @@ def _crawl_probe() -> None:
     """Зонд осей краула: предикат пригодности, лестница ``decide``, шапка, зеркало словаря.
 
     Инварианты: ``status_code=None`` — не сбой; ``401/403`` эскалируются, но не трогают
-    ``rate_limit``; оба тира провалились ⇒ ``unresolved`` (не ``browser``); ``strategy``
-    пишется только для ``browser``; правка файла сохраняет шапку байт-в-байт и неизмеренные
-    поля. Перечисления зонда зеркалируются ``docs/status-dictionary.yaml`` (источник истины).
+    ``rate_limit``; оба тира провалились ⇒ ``unresolved`` (не ``browser``); сбой транспорта
+    (``both_tiers_failed``) отличается от «транспорт дошёл, экстракция дала 0»
+    (``extraction_empty``); ``strategy`` пишется только для ``browser``; правка файла
+    сохраняет шапку байт-в-байт и неизмеренные поля. Перечисления зонда зеркалируются
+    ``docs/status-dictionary.yaml`` (источник истины).
     """
     from core.domain.enums import CrawlStrategy, ExtractionRoute, FetchMode
     from core.pipeline.crawl_probe import (
@@ -3131,6 +3167,70 @@ def _crawl_probe() -> None:
         raise AssertionError("оба провалившихся тира обязаны дать unresolved, не browser")
     if ProbeReason.BOTH_TIERS_FAILED.value not in failed.reasons:
         raise AssertionError("причина both_tiers_failed обязана быть записана")
+    if len(failed.reasons) != 1:
+        raise AssertionError(
+            "чистый транспортный сбой обязан давать ровно одну причину (без extraction_empty)"
+        )
+
+    # Транспорт дошёл до контента, экстракция дала 0 символов ⇒ extraction_empty: это сбой
+    # экстрактора, а не краулера (лживый both_tiers_failed недопустим), ось fetch не гадаем.
+    empty = decide(
+        "k",
+        [
+            UrlProbe(
+                "https://example.test/",
+                ProbeSource.URLS,
+                (
+                    obs(text_chars=0, content_bytes=1840439, error="extract: no text"),
+                    obs(
+                        tier=ProbeTier.HONEST,
+                        text_chars=0,
+                        content_bytes=260,
+                        error="extract: no text",
+                    ),
+                ),
+            )
+        ],
+    )
+    if empty.reasons != (ProbeReason.EXTRACTION_EMPTY.value,):
+        raise AssertionError(
+            f"транспорт дошёл + 0 символов обязаны дать extraction_empty, получено {empty.reasons}"
+        )
+    if empty.fetch is not None:
+        raise AssertionError("при extraction_empty ось fetch обязана остаться null (не гадаем)")
+    if "экстракт" not in (empty.detail or ""):
+        raise AssertionError("detail при extraction_empty обязан указывать на экстрактор")
+
+    # Расхождение тиров (один упал по транспорту, другой извлёк 0) ⇒ обе причины.
+    mixed = decide(
+        "k",
+        [
+            UrlProbe(
+                "https://example.test/",
+                ProbeSource.URLS,
+                (
+                    obs(
+                        raised=True,
+                        error="http: transient",
+                        status_code=None,
+                        text_chars=0,
+                        content_bytes=0,
+                    ),
+                    obs(
+                        tier=ProbeTier.HONEST,
+                        text_chars=0,
+                        content_bytes=260,
+                        error="extract: no text",
+                    ),
+                ),
+            )
+        ],
+    )
+    if set(mixed.reasons) != {
+        ProbeReason.BOTH_TIERS_FAILED.value,
+        ProbeReason.EXTRACTION_EMPTY.value,
+    }:
+        raise AssertionError("расхождение тиров обязано нести обе причины в вердикте")
 
     # Синтез URL: source=synthesized ⇒ confidence=low на наблюдении.
     synth = decide(

@@ -10,11 +10,12 @@
 
 from __future__ import annotations
 
+import hashlib
 from typing import Any
 
 from core.adapters.crawl_scrapy import CrawlError
-from core.domain.enums import CrawlStrategy, FetchMode
-from core.ports.types import FetchPlan, RawPage
+from core.domain.enums import CrawlStrategy, ExtractionRoute, FetchMode
+from core.ports.types import ExtractedDoc, FetchPlan, RawPage
 
 __all__ = [
     "FakeBackend",
@@ -22,6 +23,7 @@ __all__ = [
     "RecordingHttpGet",
     "ScriptedBrowserCrawler",
     "ScriptedHttpCrawler",
+    "SilentExtractor",
     "html_page",
     "page",
 ]
@@ -56,6 +58,40 @@ def html_page(text: str = USABLE_TEXT) -> RawPage:
     return RawPage(
         url="about:blank", content=body, fetched_at="2026-01-01T00:00:00+00:00"
     )
+
+
+class SilentExtractor:
+    """Экстрактор, воспроизводящий **сбой извлечения**: 0 символов при непустых байтах.
+
+    Зеркалит грациозную деградацию адаптера (``ExtractedDoc.text == ""`` + ``error`` вместо
+    исключения), чтобы тесты отличали сбой экстрактора от сбоя транспорта без реальных
+    зависимостей. ``text`` позволяет задать и «малый ненулевой» выход.
+    """
+
+    version = "fake-silent-extractor-1"
+
+    def __init__(
+        self,
+        error: str = "trafilatura: извлечение не дало текста",
+        text: str = "",
+    ) -> None:
+        self.error = error
+        self.text = text
+        self.calls: list[str] = []
+
+    def extract(
+        self, page: RawPage, route: ExtractionRoute = ExtractionRoute.AUTO
+    ) -> ExtractedDoc:
+        """Возвращает заданный текст (по умолчанию пустой) с диагностикой ``error``."""
+        self.calls.append(getattr(page, "url", ""))
+        content = getattr(page, "content", b"") or b""
+        return ExtractedDoc(
+            text=self.text,
+            content_hash=hashlib.sha256(content).hexdigest(),
+            extractor_version=self.version,
+            page_count=1,
+            error=self.error,
+        )
 
 
 class ScriptedHttpCrawler:

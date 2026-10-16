@@ -38,6 +38,7 @@ from tests.fakes.crawl_probe import (
     RecordingHttpGet,
     ScriptedBrowserCrawler,
     ScriptedHttpCrawler,
+    SilentExtractor,
     html_page,
     page,
 )
@@ -310,6 +311,132 @@ def test_multiple_urls_prefer_resolved_and_merge_unresolved() -> None:
     assert ProbeReason.BOTH_TIERS_FAILED.value in merged.reasons
     assert len(merged.urls) == 2
     assert merged.detail and merged.detail.count("transient") >= 2
+
+
+def _silent_ports(
+    http: ScriptedHttpCrawler, browser: ScriptedBrowserCrawler | None = None
+) -> ProbePorts:
+    """Порты с экстрактором, воспроизводящим сбой извлечения (0 символов при байтах > 0)."""
+    return ProbePorts(
+        http=http,
+        browser=browser,
+        extractor=SilentExtractor(),
+        robots=_AllowRobots(),
+        sleep=lambda _seconds: None,
+    )
+
+
+#: Тело страницы, дошедшей до нас целиком (транспорт сработал), но не поддавшейся экстракции.
+_BIG_BODY = b"<html>" + b"c" * 5000 + b"</html>"
+
+#: Тело реальной 260-байтной заглушки JS-челленджа (форма живого замера).
+_STUB_BODY = b"<html>" + b"s" * 247 + b"</html>"
+
+
+def test_all_tiers_reach_content_but_extract_nothing_is_extraction_empty() -> None:
+    """⚠ Транспорт сработал во всех тирах, экстракция дала 0 символов ⇒ ``extraction_empty``.
+
+    Это сбой **экстрактора**, а не краулера: ``both_tiers_failed`` здесь был бы ложью.
+    Ось ``fetch`` остаётся неопределённой (``null``) — пригодность мереется извлечением.
+    """
+    http = ScriptedHttpCrawler({URL: page(URL, content=_BIG_BODY)})
+    browser = ScriptedBrowserCrawler(
+        default=page(
+            URL, fetch_mode=FetchMode.BROWSER, status_code=None, content=_BIG_BODY
+        )
+    )
+    verdict = _run(http, browser, ports=_silent_ports(http, browser))
+    assert not verdict.resolved
+    assert verdict.fetch is None  # не угадываем http
+    assert verdict.reasons == (ProbeReason.EXTRACTION_EMPTY.value,)
+    assert ProbeReason.BOTH_TIERS_FAILED.value not in verdict.reasons
+    assert "экстрактор" in (verdict.detail or "")
+    # Наблюдения несут доказательство: транспорт дошёл (байты есть), текста нет.
+    assert verdict.observations
+    assert all(o.raised is False and o.unavailable is False for o in verdict.observations)
+    assert all(o.content_bytes > 0 for o in verdict.observations)
+    assert all(o.text_chars == 0 for o in verdict.observations)
+    first = verdict.as_dict()["observations"][0]
+    assert first["content_bytes"] > 0 and first["text_chars"] == 0
+    assert first["error"]  # диагностика экстрактора сохранена в артефакте
+
+
+def test_http_401_raise_with_browser_stub_reports_both_reasons() -> None:
+    """⚠ Форма живого замера: http упал (401), браузерные тиры дошли, но дали 0 символов.
+
+    Решение: **обе** причины. Транспортный сбой Tier 1 (антибот ``401``) — реальный барьер,
+    и называть ситуацию только «сбоем экстракции» значило бы спрятать его; но и ``0``
+    извлечённых символов при непустом ответе — отдельный сигнал. ``detail`` разводит тиры.
+    """
+    assert len(_STUB_BODY) == 260  # форма живого наблюдения
+    http = ScriptedHttpCrawler({URL: CrawlError("HTTP 401 Unauthorized")})
+    browser = ScriptedBrowserCrawler(
+        default=page(
+            URL, fetch_mode=FetchMode.BROWSER, status_code=None, content=_STUB_BODY
+        )
+    )
+    verdict = _run(http, browser, ports=_silent_ports(http, browser))
+    assert verdict.reasons == (
+        ProbeReason.BOTH_TIERS_FAILED.value,
+        ProbeReason.EXTRACTION_EMPTY.value,
+    )
+    assert verdict.fetch is None
+    detail = verdict.detail or ""
+    assert "http: транспортный сбой" in detail
+    assert "HTTP 401" in detail  # назван именно Tier 1
+    assert "hybrid: транспорт дошёл" in detail
+    assert "экстракт" in detail
+    assert verdict.wait_for_recommended is True  # заглушка рендера — мотив wait_for
+    assert verdict.needs_confirmation is True
+
+
+def test_http_extracts_zero_while_browser_tiers_raise_reports_both_reasons() -> None:
+    """Обратное расхождение: http дошёл, но извлёк 0; браузерные тиры упали ⇒ обе причины."""
+    http = ScriptedHttpCrawler({URL: page(URL, content=_BIG_BODY)})
+    browser = ScriptedBrowserCrawler(default=CrawlError("render failed"))
+    verdict = _run(http, browser, ports=_silent_ports(http, browser))
+    assert verdict.reasons == (
+        ProbeReason.BOTH_TIERS_FAILED.value,
+        ProbeReason.EXTRACTION_EMPTY.value,
+    )
+    detail = verdict.detail or ""
+    assert "http: транспорт дошёл" in detail
+    assert "honest: транспортный сбой" in detail
+
+
+def test_all_tiers_raised_stays_both_tiers_failed_without_extraction_reason() -> None:
+    """Чистый транспортный сбой (все тиры raise) ⇒ только ``both_tiers_failed`` (не extraction)."""
+    http = ScriptedHttpCrawler({URL: CrawlError("timeout")})
+    browser = ScriptedBrowserCrawler(default=CrawlError("render failed"))
+    verdict = _run(http, browser)
+    assert verdict.reasons == (ProbeReason.BOTH_TIERS_FAILED.value,)
+    assert ProbeReason.EXTRACTION_EMPTY.value not in verdict.reasons
+    detail = verdict.detail or ""
+    assert "timeout" in detail and "render failed" in detail
+
+
+def test_small_nonzero_text_stays_both_tiers_failed() -> None:
+    """Малый **ненулевой** текст — не ``extraction_empty`` (консервативно ``both_tiers_failed``)."""
+    http = ScriptedHttpCrawler({URL: page(URL, content=_STUB_BODY)})
+    browser = ScriptedBrowserCrawler(default=CrawlError("render failed"))
+    ports = ProbePorts(
+        http=http,
+        browser=browser,
+        extractor=SilentExtractor(text="тридцать символов текста"),
+        robots=_AllowRobots(),
+        sleep=lambda _seconds: None,
+    )
+    verdict = _run(http, browser, ports=ports)
+    assert verdict.reasons == (ProbeReason.BOTH_TIERS_FAILED.value,)
+
+
+def test_crawl_probe_reason_mirrors_status_dictionary() -> None:
+    """⚠ Словарь — источник истины: ``crawl_probe_reason`` зеркалит ``ProbeReason``."""
+    from core.domain.dictionary import load_dictionary
+
+    dictionary = Path(__file__).resolve().parents[2] / "docs" / "status-dictionary.yaml"
+    data = load_dictionary(dictionary)
+    assert set(data["crawl_probe_reason"]) == {reason.value for reason in ProbeReason}
 
 
 def test_max_urls_per_key_caps_to_shortest_path() -> None:

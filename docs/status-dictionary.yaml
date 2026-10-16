@@ -267,7 +267,8 @@ crawl_probe_confidence:
 crawl_probe_reason:
   - no_url
   - unknown_key
-  - both_tiers_failed
+  - both_tiers_failed      # сбой транспорта (raise/unavailable/не-2xx/пустой ответ)
+  - extraction_empty       # транспорт дошёл, экстракция дала 0 символов (смотреть экстрактор)
   - browser_unavailable
   - browser_disabled
   - robots_disallowed

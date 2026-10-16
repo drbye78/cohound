@@ -7,7 +7,10 @@ proposal/правка файла — тонкие обёртки над :func:`c
 
 **A3 (замена дефолта — по измерению).** Любая ось предлагается только по наблюдению
 (измерению). Неразрешимый ключ **честно** попадает в вердикт как ``unresolved`` с причиной —
-он не подставляется дефолтом и не исчезает из отчёта.
+он не подставляется дефолтом и не исчезает из отчёта. Причина диагностична: сбой
+**транспорта** (``both_tiers_failed``) отличается от «транспорт дошёл, но экстракция дала
+0 символов» (``extraction_empty``, :func:`_extraction_empty`) — оператор видит, куда
+смотреть: на краулер или на экстрактор.
 
 **Оси (D2/D4).** ``fetch`` решается лестницей; ``strategy`` пишется **только** для
 ``fetch: browser`` (при ``http`` она нормализуется в ``AUTO``, см.
@@ -141,11 +144,18 @@ class ProbeKeyStatus(StrEnum):
 
 
 class ProbeReason(StrEnum):
-    """Причина ``unresolved`` (не подставляем дефолт — A3)."""
+    """Причина ``unresolved`` (не подставляем дефолт — A3).
+
+    ``BOTH_TIERS_FAILED`` — сбой **транспорта** (raise/``unavailable``, не-2xx, пустой
+    ответ); ``EXTRACTION_EMPTY`` — транспорт дошёл до контента, но экстракция дала 0
+    символов (сбой **экстрактора**). Это разные диагнозы: первый смотрит на краулер,
+    второй — на экстрактор.
+    """
 
     NO_URL = "no_url"
     UNKNOWN_KEY = "unknown_key"
     BOTH_TIERS_FAILED = "both_tiers_failed"
+    EXTRACTION_EMPTY = "extraction_empty"
     BROWSER_UNAVAILABLE = "browser_unavailable"
     BROWSER_DISABLED = "browser_disabled"
     ROBOTS_DISALLOWED = "robots_disallowed"
@@ -407,6 +417,77 @@ def _stub_flag(observations: Sequence[Observation]) -> bool:
     return any(o.looks_like_stub for o in observations)
 
 
+def _reached_content(observation: Observation) -> bool:
+    """Дошёл ли **транспорт** до контента (не raise/``unavailable``, 2xx-или-неизвестен, байты > 0).
+
+    Именно этот предикат отделяет сбой транспорта от сбоя экстракции: ``False`` — фетч не
+    доставил байты (raise, недоступный движок, антибот-статус, пустой ответ).
+    """
+    if observation.raised or observation.unavailable:
+        return False
+    if observation.status_code is not None and not (200 <= observation.status_code < 300):
+        return False
+    return observation.content_bytes > 0
+
+
+def _extraction_empty(observation: Observation) -> bool:
+    """Транспорт дошёл до контента, но экстракция дала 0 символов ⇒ сбой **экстрактора**.
+
+    Речь строго о **нуле**: малый ненулевой текст остаётся консервативным
+    ``both_tiers_failed`` (порог пригодности — не диагноз сбоя). ``status_code=None``
+    трактуется как «неизвестно, а не сбой» (как в :func:`is_usable`).
+    """
+    return _reached_content(observation) and observation.text_chars == 0
+
+
+def _tier_detail(observation: Observation) -> str:
+    """Одна строка ``detail`` про тир: что сработало — транспорт, экстракция или порог."""
+    tier = observation.tier.value
+    error = f" ({observation.error})" if observation.error else ""
+    if observation.raised or observation.unavailable:
+        return f"{tier}: транспортный сбой{error}"
+    status = "unknown" if observation.status_code is None else str(observation.status_code)
+    if observation.status_code is not None and not (200 <= observation.status_code < 300):
+        return f"{tier}: транспорт вернул не-2xx (status={status}){error}"
+    if observation.content_bytes <= 0:
+        return f"{tier}: транспорт вернул пустой ответ (status={status}){error}"
+    if _extraction_empty(observation):
+        return (
+            f"{tier}: транспорт дошёл (status={status}, bytes={observation.content_bytes}), "
+            f"но экстракция дала 0 символов — сбой экстрактора, не краулера{error}"
+        )
+    return (
+        f"{tier}: транспорт дошёл (status={status}, bytes={observation.content_bytes}), "
+        f"но извлечено {observation.text_chars} символов (< {MIN_USABLE_TEXT}){error}"
+    )
+
+
+def _outcome_detail(observations: Sequence[Observation]) -> str:
+    """``detail`` исчерпанной лестницы: по каждому тиру — что сделал транспорт/экстрактор."""
+    return "; ".join(_tier_detail(observation) for observation in observations)
+
+
+def _unresolved_reasons(observations: Sequence[Observation]) -> tuple[ProbeReason, ...]:
+    """Причины исчерпанной лестницы в порядке приоритета (диагностика, A3).
+
+    * ``both_tiers_failed`` — есть тир, чей **транспорт** не дошёл до контента
+      (raise/``unavailable``/не-2xx/пустой ответ): сбой фетча.
+    * ``extraction_empty`` — есть тир, который дошёл до контента, но извлёк 0 символов:
+      сбой **экстрактора**. Если тиры разошлись, в отчёт идут обе причины — ``detail``
+      (:func:`_outcome_detail`) называет, какой тир что сделал.
+    * Ни того, ни другого (дошли до контента, но извлекли мало ненулевого текста) —
+      консервативно ``both_tiers_failed`` (поведение не меняется).
+    """
+    transport_failed = any(not _reached_content(o) for o in observations)
+    extraction_empty = any(_extraction_empty(o) for o in observations)
+    reasons: list[ProbeReason] = []
+    if transport_failed or not extraction_empty:
+        reasons.append(ProbeReason.BOTH_TIERS_FAILED)
+    if extraction_empty:
+        reasons.append(ProbeReason.EXTRACTION_EMPTY)
+    return tuple(reasons)
+
+
 def _verdict_from_probe(
     key: str, probe: UrlProbe, supported_suffixes: Iterable[str]
 ) -> Verdict:
@@ -492,13 +573,24 @@ def _verdict_from_probe(
 
     # Ни один тир не дал пригодной страницы. Пустой список браузерных тиров означает, что
     # их и не пробовали (``--no-browser``) — это не «оба тира провалились».
-    reason = (
-        ProbeReason.BROWSER_DISABLED if not browser_obs else ProbeReason.BOTH_TIERS_FAILED
-    )
+    if not browser_obs:
+        return unresolved_verdict(
+            key,
+            ProbeReason.BROWSER_DISABLED,
+            detail=_outcome_detail(observations),
+            source=probe.source,
+            url=probe.url,
+            observations=observations,
+            rate_limit_hint=hint,
+            wait_for_recommended=stub,
+        )
+
+    reasons = _unresolved_reasons(observations)
     return unresolved_verdict(
         key,
-        reason,
-        detail=_join_detail(observations),
+        reasons[0],
+        extra_reasons=reasons[1:],
+        detail=_outcome_detail(observations),
         source=probe.source,
         url=probe.url,
         observations=observations,
@@ -507,20 +599,11 @@ def _verdict_from_probe(
     )
 
 
-def _join_detail(observations: Sequence[Observation]) -> str:
-    """Склеивает тексты ошибок наблюдений для ``detail`` (оба тира — в причине)."""
-    parts = [
-        f"{o.tier.value}: {o.error}"
-        for o in observations
-        if o.error
-    ]
-    return "; ".join(parts)
-
-
 def unresolved_verdict(
     key: str,
     reason: ProbeReason,
     *,
+    extra_reasons: Sequence[ProbeReason] = (),
     detail: str | None = None,
     source: ProbeSource | None = None,
     url: str | None = None,
@@ -529,7 +612,12 @@ def unresolved_verdict(
     wait_for_recommended: bool = False,
     urls: Sequence[str] = (),
 ) -> Verdict:
-    """Собирает честный ``unresolved``-вердикт (причина обязательна, A3)."""
+    """Собирает честный ``unresolved``-вердикт (причина обязательна, A3).
+
+    ``extra_reasons`` — добавочные причины, когда диагноз не один (тиры разошлись: один —
+    сбой транспорта, другой — пустая экстракция): порядок сохраняется, дубликаты сняты.
+    """
+    reasons = tuple(dict.fromkeys((reason, *extra_reasons)))
     return Verdict(
         key=key,
         status=ProbeKeyStatus.UNRESOLVED,
@@ -539,7 +627,7 @@ def unresolved_verdict(
         wait_for_recommended=wait_for_recommended,
         needs_confirmation=bool(wait_for_recommended or rate_limit_hint is not None),
         rate_limit_hint=rate_limit_hint,
-        reasons=(reason.value,),
+        reasons=tuple(item.value for item in reasons),
         detail=detail,
         observations=tuple(observations),
         urls=tuple(urls) if urls else ((url,) if url else ()),
