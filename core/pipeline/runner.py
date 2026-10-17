@@ -179,6 +179,15 @@ class Ports:
     корпуса (Ш5) берёт поллер по виду источника (``feed``/``channel``), чтобы дополнить
     корпус ссылками из публичных лент/каналов (кандидаты, не evidence — I19). ``None`` →
     опрос фидов выключен.
+
+    ``registry`` — одиночный реестровый фетчер (legacy-поле). ``registry_fetchers`` —
+    карта ``registry_id → RegistryFetcherPort``, собранная composition root из
+    package-scoped спецификаций (``packages/{case_id}/registries/*.yaml``, E2/03 §D.4):
+    реестровая волна Ш3 передаёт её в ``registry_wave``. ``None``/пусто → реестры не
+    сконфигурированы (волна пуста, без ячеек). ``registry_spec_digest`` — стабильный
+    дайджест загруженных спецификаций (провенанс манифеста, §13 ``execution_change``);
+    персистится в ``runs.registry_spec_digest`` и читается обратно ``read_manifest``, поэтому
+    ``hound diff`` действительно видит смену спецификации реестра. ``None`` — спецификаций нет.
     """
 
     evaluator: EvaluatorPort | None = None
@@ -194,6 +203,8 @@ class Ports:
     extractor: ExtractorPort | None = None
     chunker: ChunkerPort | None = None
     registry: RegistryFetcherPort | None = None
+    registry_fetchers: Mapping[str, RegistryFetcherPort] | None = None
+    registry_spec_digest: str | None = None
 
 
 @runtime_checkable

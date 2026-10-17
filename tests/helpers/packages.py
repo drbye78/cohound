@@ -8,14 +8,18 @@
 from __future__ import annotations
 
 import shutil
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
+
+import yaml
 
 from core.pipeline import build_phases
 
 #: Общий каталог фикстур пакета (``tests/config/fixtures``).
 CONFIG_FIXTURES = Path(__file__).resolve().parent.parent / "config" / "fixtures"
+#: Каталог реестровых фикстур (package-scoped спецификации ``registries/*.yaml``, E2).
+REGISTRY_FIXTURES = Path(__file__).resolve().parent.parent / "config" / "fixtures_registry"
 #: Имя run-манифеста в пакете.
 RUN_YAML_NAME = "run.yaml"
 #: Тело процедуры аттестации полноты источника (снимает блок I2b).
@@ -23,6 +27,7 @@ _SCOPE_ATTESTATION = 'procedure: "ручная аттестация полнот
 
 __all__ = [
     "CONFIG_FIXTURES",
+    "REGISTRY_FIXTURES",
     "RUN_YAML_NAME",
     "capturing_factory",
     "run_argv",
@@ -36,17 +41,34 @@ def valid_package(
     *,
     fixtures: Path = CONFIG_FIXTURES,
     scope_attestation: bool = True,
+    registries: Mapping[str, str] | None = None,
 ) -> Path:
     """Копия ``fixtures`` → ``tmp_path/package`` (линт-чистый пакет при аттестации).
 
     ``scope_attestation=False`` повторяет вариант без ``scope_attestation.yaml`` —
     каталог/веса/когорта восстанавливаются из пакета без процедуры аттестации.
+
+    ``registries`` — опциональная карта ``{registry_id: spec_yaml}`` (E2): пишет
+    package-scoped спецификации в ``package/registries/`` и объявляет их в
+    ``package.yaml: registries``. Общий фикстур ``fixtures`` намеренно spec-less
+    (многие run-тесты зависят от него), поэтому реестровый пакет собирается отдельно.
     """
     package = tmp_path / "package"
     package.mkdir()
     for item in fixtures.iterdir():
         if item.is_file():
             shutil.copy(item, package / item.name)
+    if registries:
+        registry_dir = package / "registries"
+        registry_dir.mkdir()
+        for registry_id, spec in registries.items():
+            (registry_dir / f"{registry_id}.yaml").write_text(spec, encoding="utf-8")
+        package_yaml = package / "package.yaml"
+        data = yaml.safe_load(package_yaml.read_text(encoding="utf-8"))
+        data["registries"] = sorted(registries)
+        package_yaml.write_text(
+            yaml.safe_dump(data, allow_unicode=True, sort_keys=False), encoding="utf-8"
+        )
     if scope_attestation:
         (package / "scope_attestation.yaml").write_text(_SCOPE_ATTESTATION, encoding="utf-8")
     return package

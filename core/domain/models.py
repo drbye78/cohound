@@ -861,6 +861,15 @@ class RunManifest(BaseModel):
     #: которые индивидуальные поля ``crawl_max_*`` не покрывают) — и потому помечает
     #: ``execution_change`` (§13), не ``methodology_change``.
     crawl_config_digest: str | None = None
+    #: §13 (E2): стабильный дайджест **загруженных** package-scoped спецификаций реестров
+    #: (``packages/{case_id}/registries/*.yaml``), отсортированных по ``registry_id``
+    #: (канонические байты — детерминированная JSON-сериализация валидированного
+    #: ``RegistryConfig``). Персистится в ``runs.registry_spec_digest`` (D1/E2) и потому
+    #: читается обратно :meth:`SqliteStore.read_manifest`, делая смену спецификации реальной
+    #: границей ``execution_change`` в ``hound diff`` (§13), не ``methodology_change``.
+    #: ``None`` — реестры не сконфигурированы (пакеты без реестров не меняются: поле
+    #: аддитивно/опционально).
+    registry_spec_digest: str | None = None
 
 
 class Violation(BaseModel):

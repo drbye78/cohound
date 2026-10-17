@@ -326,16 +326,37 @@ def test_every_closure_returns_phase_result(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_registry_phase_adapts_single_port_to_mapping() -> None:
+def test_registry_phase_passes_registry_fetchers_mapping() -> None:
+    """E2: ``registry_phase`` передаёт ``Ports.registry_fetchers`` (mapping) в волну Ш3.
+
+    Mapping собирает composition root (package-scoped спецификации); фаза больше не
+    адаптирует одиночный ``Ports.registry`` — источник истины один (mapping).
+    """
+    inputs = _inputs()
+    plan = _plan()
+    fetchers = {"reg_x": FakeRegistryFetcher(registry_id="reg_x", run_id=RUN_ID)}
+    ports = Ports(registry_fetchers=fetchers)
+    store = _store()
+    result = build_phases(inputs=inputs, plan=plan, ports=ports)["registry"](_context(store, ports))
+    assert result.status == "ok"
+    assert result.cells and {c.product_id for c in result.cells} == {"p1", "p2"}
+    # R1/Ш3: ячейки реестровые (mapping сработал).
+    assert all(c.source_kind is not None and c.source_kind.value == "registry" for c in result.cells)
+
+
+def test_registry_phase_is_inert_without_fetchers() -> None:
+    """E2: без mapping (реестры не сконфигурированы) волна пуста — ``ok`` без ячеек.
+
+    Одиночный legacy ``Ports.registry`` больше не «оживляет» фазу молча: единственный вход —
+    ``registry_fetchers`` (проводка только в composition root).
+    """
     inputs = _inputs()
     plan = _plan()
     ports = Ports(registry=FakeRegistryFetcher(registry_id="reg_x", run_id=RUN_ID))
     store = _store()
     result = build_phases(inputs=inputs, plan=plan, ports=ports)["registry"](_context(store, ports))
     assert result.status == "ok"
-    assert result.cells and {c.product_id for c in result.cells} == {"p1", "p2"}
-    # R1/Ш3: ячейки реестровые (адаптация одного порта в mapping сработала).
-    assert all(c.source_kind is not None and c.source_kind.value == "registry" for c in result.cells)
+    assert result.cells == []
 
 
 def test_inheritance_phase_uses_baselines_and_passports() -> None:
@@ -681,7 +702,7 @@ def test_full_phase_chain_writes_report_artifacts(tmp_path: Path) -> None:
     ports = Ports(
         evaluator=FakeEvaluator(default=_ok_output()),
         lexical_index=_chunks_index(),
-        registry=FakeRegistryFetcher(registry_id="reg_x", run_id=RUN_ID),
+        registry_fetchers={"reg_x": FakeRegistryFetcher(registry_id="reg_x", run_id=RUN_ID)},
         crawler=FakeCrawler(pages=pages),
         extractor=FakeExtractor(),
         chunker=FakeChunker(),
@@ -750,7 +771,7 @@ def _run_chain_to_report(tmp_path: Path, **phase_kwargs: Any) -> dict[str, Any]:
     ports = Ports(
         evaluator=FakeEvaluator(default=_ok_output()),
         lexical_index=_chunks_index(),
-        registry=FakeRegistryFetcher(registry_id="reg_x", run_id=RUN_ID),
+        registry_fetchers={"reg_x": FakeRegistryFetcher(registry_id="reg_x", run_id=RUN_ID)},
         crawler=FakeCrawler(pages=pages),
         extractor=FakeExtractor(),
         chunker=FakeChunker(),

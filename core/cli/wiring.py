@@ -26,6 +26,7 @@ remote-прокси веб-контура (``07`` §4); не-веб порты �
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -72,6 +73,11 @@ from core.adapters.remote_gateway import (
     HttpContentGateway,
     TransportFn,
 )
+from core.adapters.registry_generic import (
+    GenericRegistryFetcher,
+    RegistryConfig,
+    RegistryFetchError,
+)
 from core.adapters.remote_registry import RemoteRegistry
 from core.adapters.remote_search import RemoteSearch
 from core.adapters.search_glm import GlmSearchAdapter
@@ -107,6 +113,7 @@ from core.ports.vector_index import VectorIndexPort
 from core.store.backup import list_builds
 from core.store.sqlite_store import SqliteStore
 from core.util.cache import ContentAddressedCache
+from core.util.hashing import short_hash
 from core.util.robots import RobotsGate
 from core.util.sitemap import MAX_SITEMAP_ENTRIES
 
@@ -1216,6 +1223,8 @@ def _build_local_ports(
     *,
     evaluator: EvaluatorPort | None,
     registry: RegistryFetcherPort | None,
+    registry_fetchers: Mapping[str, RegistryFetcherPort] | None = None,
+    registry_spec_digest: str | None = None,
     index_root: str | Path,
     package: str | None,
     crawler: CrawlerPort | None = None,
@@ -1233,6 +1242,8 @@ def _build_local_ports(
     Гарантия: никогда не бросает из-за отсутствия опциональной зависимости — недоступный
     тяжёлый адаптер остаётся ``None``. ``evaluator``/``registry`` не создаются сами:
     передаются вызывающим (генератор/конфиг; I6/I7/I18 не автоматизируются).
+    ``registry_fetchers``/``registry_spec_digest`` (E2) — готовые mapping фетчеров
+    (``registry_id → RegistryFetcherPort``) и дайджест их спецификаций из composition root.
     ``crawler`` — опциональный HTTP-краулер корпуса, собранный composition root из
     ``deploy.crawl`` (:func:`build_scout_crawler`); ``None`` → не инстанцируется (прежнее
     поведение, сетевые адаптеры включаются явной инъекцией).
@@ -1290,6 +1301,10 @@ def _build_local_ports(
     return Ports(
         evaluator=evaluator,
         registry=registry,
+        # E2: mapping реестровых фетчеров (registry_id → fetcher) из package-scoped
+        # спецификаций + дайджест спецификаций (провенанс манифеста, §13).
+        registry_fetchers=registry_fetchers,
+        registry_spec_digest=registry_spec_digest,
         chunker=MarkdownChunkerPort(),
         extractor=extractor,
         embedder=resolved_embedder,
@@ -1330,6 +1345,73 @@ def _resolve_embedder() -> EmbedderPort | None:
     return None
 
 
+def registry_specs_digest(specs: Mapping[str, RegistryConfig]) -> str | None:
+    """Стабильный дайджест загруженных package-scoped спецификаций реестров (E2/§13).
+
+    Канонические байты спецификации — детерминированная JSON-сериализация валидированного
+    :class:`RegistryConfig` (``sort_keys=True``): смена **эффективного** содержания меняет
+    дайджест, а комментарии/форматирование YAML — нет (не влияют на исполнение). Спецификации
+    сортируются по ``registry_id`` (порядок не влияет). Пустой набор → ``None`` (реестры не
+    сконфигурированы: поле манифеста не заполняется, нетронутые прогоны не меняются).
+    """
+    if not specs:
+        return None
+    parts = [
+        f"{registry_id}\x1f"
+        f"{json.dumps(specs[registry_id].model_dump(mode='json'), sort_keys=True, ensure_ascii=False)}"
+        for registry_id in sorted(specs)
+    ]
+    return short_hash("\x1e".join(parts), 24)
+
+
+class _RegistryHttpClient:
+    """Минимальный HTTP-клиент реестрового адаптера (ленивый ``httpx``).
+
+    Форма ``get(url, headers, timeout) -> bytes`` ожидается
+    :class:`~core.adapters.registry_generic.GenericRegistryFetcher`. Сеть не хардкодится:
+    composition root/тесты могут подменить клиент (шов ``registry_http_get``).
+    """
+
+    def get(
+        self, url: str, headers: Mapping[str, str], timeout: float | None = None
+    ) -> bytes:
+        httpx = self._import_http()
+        try:
+            response = httpx.get(
+                url, headers=dict(headers), timeout=timeout, follow_redirects=True
+            )
+            response.raise_for_status()
+        except Exception as exc:  # noqa: BLE001 — единая граница ошибки реестра
+            raise RegistryFetchError(f"HTTP-запрос к реестру не удался: {url}") from exc
+        return bytes(response.content)
+
+    @staticmethod
+    def _import_http() -> Any:
+        """Лениво импортирует ``httpx``; при отсутствии — явная ошибка реестра."""
+        if importlib.util.find_spec("httpx") is None:
+            raise RegistryFetchError(
+                "httpx не установлен: реальный HTTP-путь реестра недоступен"
+            )
+        import httpx
+
+        return httpx
+
+
+def _build_local_registry_fetchers(
+    specs: Mapping[str, RegistryConfig],
+    http_get: Any,
+) -> dict[str, RegistryFetcherPort]:
+    """Собирает ``{registry_id: GenericRegistryFetcher}`` (профиль ``local``).
+
+    Единственное место конструирования локальных реестровых фетчеров (composition root Z0).
+    Порядок ключей детерминирован (сортировка по ``registry_id``).
+    """
+    return {
+        registry_id: GenericRegistryFetcher(specs[registry_id], http_get)
+        for registry_id in sorted(specs)
+    }
+
+
 def build_adapters(
     *,
     profile: str = LOCAL_PROFILE,
@@ -1340,6 +1422,8 @@ def build_adapters(
     extra_headers: Mapping[str, str] | None = None,
     evaluator: EvaluatorPort | None = None,
     registry: RegistryFetcherPort | None = None,
+    registry_specs: Mapping[str, RegistryConfig] | None = None,
+    registry_http_get: Any | None = None,
     index_root: str | Path = "index_store",
     package: str | None = None,
     cache: ContentAddressedCache | None = None,
@@ -1374,7 +1458,15 @@ def build_adapters(
         конструируется автоматически: сценарий evaluator требует OI-совместимого endpoint
         корпоративного облака, см. :func:`build_evaluator_llm`).
     :param registry: готовый реестровый фетчер (``local``); ``None`` → остаётся ``None``
-        (конфиг реестра — данные вызывающего).
+        (legacy-поле; конфиг реестра — данные вызывающего).
+    :param registry_specs: загруженные package-scoped спецификации реестров
+        (``{registry_id: RegistryConfig}``, 03 §D.4) — из них собирается **mapping**
+        ``Ports.registry_fetchers`` (``GenericRegistryFetcher`` для ``local``,
+        ``RemoteRegistry`` для ``split``) и дайджест спецификаций. ``None``/пусто → реестры
+        не сконфигурированы. Пустой реестр без спеки — не «молчаливая дыра»: загрузку и её
+        ошибки поднимает composition root (``_resolve_ports``).
+    :param registry_http_get: шов HTTP-клиента реестра (``local``; тесты без сети); ``None`` →
+        реальный ленивый ``httpx`` (:class:`_RegistryHttpClient`).
     :param index_root: корень индексного хранилища для ``NpyIndexBuilder`` (``local``);
         composition root передаёт resolved ``paths.index_store`` (``03`` §A.1); дефолт
         ``"index_store"`` совпадает с дефолтом :class:`~core.config.paths.PathsConfig`.
@@ -1446,9 +1538,19 @@ def build_adapters(
             if local_crawler is not None
             else None
         )
+        # E2: mapping ``registry_id → GenericRegistryFetcher`` из package-scoped спецификаций
+        # (единственная точка конструирования локальных фетчеров). Пусто → реестры не
+        # сконфигурированы (прежнее поведение: волна пуста).
+        resolved_specs = dict(registry_specs or {})
+        local_registry_fetchers = _build_local_registry_fetchers(
+            resolved_specs,
+            registry_http_get if registry_http_get is not None else _RegistryHttpClient(),
+        )
         return _build_local_ports(
             evaluator=evaluator,
             registry=registry,
+            registry_fetchers=local_registry_fetchers or None,
+            registry_spec_digest=registry_specs_digest(resolved_specs),
             index_root=index_root,
             package=package,
             crawler=local_crawler,
@@ -1471,6 +1573,13 @@ def build_adapters(
         content_gateway = gateway or build_gateway(
             config, transport=transport, extra_headers=extra_headers
         )
+        # E2: mapping ``registry_id → RemoteRegistry`` из package-scoped спецификаций —
+        # по одному remote-прокси на объявленный реестр (multi-registry на split).
+        resolved_specs = dict(registry_specs or {})
+        split_registry_fetchers = {
+            spec_id: RemoteRegistry(content_gateway, registry_id=spec_id)
+            for spec_id in sorted(resolved_specs)
+        }
         # B1 (I18/07 §4–§5): в split ядро **не** держит и не выбирает локальные веб-краулеры —
         # иначе per-engine движок из ``crawl_sources`` заставил бы ядро фетчить страницы
         # in-process (прямой веб-эгресс из Z0, нарушение зонной модели). Весь веб идёт через
@@ -1501,6 +1610,8 @@ def build_adapters(
             ),
             extractor=RemoteExtractor(content_gateway),
             registry=RemoteRegistry(content_gateway, registry_id=registry_id),
+            registry_fetchers=split_registry_fetchers or None,
+            registry_spec_digest=registry_specs_digest(resolved_specs),
         )
     raise WiringError(f"неизвестный профиль развёртывания: {profile!r}")
 

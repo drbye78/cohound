@@ -236,7 +236,7 @@ L7-инспектируемый JSON, публикуемые схемы, атр�
 
 ### W3 — Store — ✅ done
 
-- `core/store/sqlite.py` — DDL §4.4 + триггеры I4/I6/I7/I13/I18, `SCHEMA_VERSION = 3.4.0`.
+- `core/store/sqlite.py` — DDL §4.4 + триггеры I4/I6/I7/I13/I18, `SCHEMA_VERSION = 3.5.0`.
 - `core/store/sqlite_store.py` — реализация `StorePort`/`GateStore`; батчевые транзакции, WAL.
 - `core/store/backup.py` — backup/restore прогона + GC иммутабельных индексных сборок (T12.2).
 - `run_inputs` — снимок плановых входов (самодостаточность `runs/{run_id}`, P1).

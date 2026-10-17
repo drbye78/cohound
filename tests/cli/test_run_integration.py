@@ -52,7 +52,7 @@ from tests.fakes.ports import (
     FakeVectorIndex,
 )
 from tests.helpers.output import json_out
-from tests.helpers.packages import run_argv, valid_package
+from tests.helpers.packages import REGISTRY_FIXTURES, run_argv, valid_package
 
 
 # ---------------------------------------------------------------------------
@@ -106,6 +106,122 @@ def test_local_adapters_accept_injected_evaluator_and_registry() -> None:
 
     assert ports.evaluator is evaluator
     assert ports.registry is registry
+
+
+_REGISTRY_SPEC = (
+    "registry_id: reg_x\n"
+    "jurisdiction: XX\n"
+    "endpoint: 'https://registry.example.invalid/api/search/{query}'\n"
+    "method: GET\n"
+    "format: json\n"
+    "records_path: items\n"
+    "mapping:\n"
+    "  name: name\n"
+)
+
+
+def _package_with_registry(tmp_path: Path, name: str = "reg_x") -> Path:
+    """Каталог пакета с одной package-scoped спецификацией реестра (E2, 03 §D.4)."""
+    pkg = tmp_path / "pkg_registry"
+    (pkg / "registries").mkdir(parents=True)
+    (pkg / "registries" / f"{name}.yaml").write_text(
+        _REGISTRY_SPEC.replace("reg_x", name), encoding="utf-8"
+    )
+    return pkg
+
+
+def test_build_adapters_wires_local_registry_fetchers_and_digest(tmp_path: Path) -> None:
+    """E2: спецификации реестров → mapping ``Ports.registry_fetchers`` + дайджест (local)."""
+    from core.adapters.registry_generic import (
+        GenericRegistryFetcher,
+        load_package_registry_configs,
+    )
+
+    pkg = _package_with_registry(tmp_path)
+    specs = load_package_registry_configs(pkg, ["reg_x"])
+    ports = build_adapters(
+        profile=LOCAL_PROFILE,
+        registry_specs=specs,
+        registry_http_get=lambda *a, **k: b'{"items": []}',
+    )
+
+    assert ports.registry_fetchers is not None
+    assert set(ports.registry_fetchers) == {"reg_x"}
+    fetcher = ports.registry_fetchers["reg_x"]
+    assert isinstance(fetcher, GenericRegistryFetcher)
+    assert fetcher.registry_id == "reg_x"
+    assert ports.registry_spec_digest
+
+
+def test_registry_specs_digest_is_canonical_and_change_sensitive(tmp_path: Path) -> None:
+    """E2: дайджест стабилен к комментариям, но меняется при смене эффективной спеки."""
+    from core.adapters.registry_generic import load_package_registry_configs
+    from core.cli.wiring import registry_specs_digest
+
+    pkg = _package_with_registry(tmp_path)
+    spec_path = pkg / "registries" / "reg_x.yaml"
+    base = registry_specs_digest(load_package_registry_configs(pkg, ["reg_x"]))
+    assert base and registry_specs_digest({}) is None
+
+    spec_path.write_text("# комментарий\n" + spec_path.read_text("utf-8"), encoding="utf-8")
+    commented = registry_specs_digest(load_package_registry_configs(pkg, ["reg_x"]))
+    assert commented == base  # форматирование/комментарии не влияют на исполнение
+
+    spec_path.write_text(
+        spec_path.read_text("utf-8").replace("/api/search/", "/api/v2/search/"),
+        encoding="utf-8",
+    )
+    changed = registry_specs_digest(load_package_registry_configs(pkg, ["reg_x"]))
+    assert changed != base
+
+
+def test_build_adapters_wires_split_registry_fetchers_multi(tmp_path: Path) -> None:
+    """E2: split — по одному ``RemoteRegistry`` на объявленный реестр (multi-registry)."""
+    from core.adapters.remote_gateway import HttpContentGateway
+    from core.adapters.remote_registry import RemoteRegistry
+    from core.config.deploy import DeployConfig
+
+    pkg = _package_with_registry(tmp_path)
+    (pkg / "registries" / "reg_y.yaml").write_text(
+        _REGISTRY_SPEC.replace("reg_x", "reg_y"), encoding="utf-8"
+    )
+    from core.adapters.registry_generic import load_package_registry_configs
+
+    specs = load_package_registry_configs(pkg, ["reg_x", "reg_y"])
+    deploy = DeployConfig.model_validate(
+        {
+            "profile": "split",
+            "edge": {"base_url": "https://edge.test:8443", "timeout_s": 5, "max_retries": 0},
+            "extractor_zone": "edge",
+            "search": {"budget": {"ru": 1}, "adapter": "example_adapter"},
+        }
+    )
+    gateway = HttpContentGateway("https://edge.test", transport=lambda *a, **k: {})
+    ports = build_adapters(
+        profile=SPLIT_PROFILE, deploy=deploy, gateway=gateway, registry_specs=specs
+    )
+
+    assert ports.registry_fetchers is not None
+    assert set(ports.registry_fetchers) == {"reg_x", "reg_y"}
+    assert all(isinstance(f, RemoteRegistry) for f in ports.registry_fetchers.values())
+    assert {f.registry_id for f in ports.registry_fetchers.values()} == {"reg_x", "reg_y"}
+    assert ports.registry_spec_digest
+
+
+def test_load_registry_specs_raises_on_declared_missing(tmp_path: Path) -> None:
+    """E2: объявленный реестр без спецификации — понятная ошибка (не молчаливая дыра)."""
+    from types import SimpleNamespace
+
+    from core.cli.context import _load_registry_specs
+    from core.cli.errors import CliError
+
+    args = SimpleNamespace(package=str(tmp_path / "pkg"))
+    inputs = SimpleNamespace(package=SimpleNamespace(registries=["reg_missing"]))
+    with pytest.raises(CliError):
+        _load_registry_specs(args, inputs)
+
+    # Пакет без объявленных реестров → пусто (реестры опциональны).
+    assert _load_registry_specs(args, SimpleNamespace(package=SimpleNamespace(registries=[]))) == {}
 
 
 def test_unknown_profile_still_rejected() -> None:
@@ -224,6 +340,65 @@ def test_cmd_run_full_local_writes_manifest_with_real_compute_report(
     assert loaded["deploy_profile"] == LOCAL_PROFILE
     assert loaded["edge_schema_version"] == SEAM_SCHEMA_VERSION
     assert loaded["edge_capabilities"] == {}
+
+
+def test_cmd_run_wires_package_registry_specs_end_to_end(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D3/E2: реальный CLI ``run`` (без инъекции ``ports=``) с package-scoped спекой реестра.
+
+    Покрывает всю проводку ``_resolve_ports`` → ``_load_registry_specs`` → ``build_adapters``:
+    реестровая волна Ш3 производит R-ячейки, а ``registry_spec_digest`` попадает в
+    экспортированный ``run_manifest.yaml``. Сеть не используется — транспорт реестра и
+    оценщик подменяются детерминированными заглушками (это ортогонально реестровой
+    проводке; ``ports=`` намеренно **не** инъектируется — именно его обход и был гэпом D3).
+    """
+    spec = (REGISTRY_FIXTURES / "reg_x.yaml").read_text(encoding="utf-8")
+    package = valid_package(tmp_path, registries={"reg_x": spec})
+    db = tmp_path / "cohound.db"
+    runs_dir = tmp_path / "runs"
+    run_id = "registry-e2e"
+    argv = run_argv(package, run_id=run_id, db=db, runs_dir=runs_dir)
+
+    from core.cli import context as context_mod
+    from core.cli import wiring as wiring_mod
+
+    monkeypatch.setattr(
+        wiring_mod._RegistryHttpClient,
+        "get",
+        lambda self, url, headers, timeout=None: b'{"items": [{"name": "value"}]}',
+    )
+    monkeypatch.setattr(
+        context_mod,
+        "build_evaluator_llm",
+        lambda **kwargs: FakeEvaluator(
+            default=LLMCellOutput(
+                status=Status.ABSENT, justification="нет в срезе", evidence=[]
+            )
+        ),
+    )
+
+    # Предполёт (реальный composition root: спека реестра загружается уже здесь).
+    assert main([*argv, "--until", "plan"]) == EXIT_OK
+    with build_store(db) as store:
+        for gate_fn in (gate_g1, gate_g2, gate_g3, gate_g4):
+            gate_fn(store, run_id, actor="cli-test")
+
+    # Реестровая волна Ш3 в реальном CLI-прогоне: R-ячейки пишутся в store.
+    assert main([*argv, "--until", "registry"]) == EXIT_OK
+    with build_store(db) as store:
+        registry_cells = [
+            cell
+            for cell in store.iter_cells(run_id)
+            if cell.source_kind is not None and cell.source_kind.value == "registry"
+        ]
+    assert registry_cells
+    assert {cell.product_id for cell in registry_cells} == {"p1", "p2"}
+
+    # Полный прогон (resume с Ш3) до Ш9: манифест несёт дайджест спецификаций реестров.
+    assert main(argv) == EXIT_OK
+    loaded = yaml.safe_load((runs_dir / run_id / "run_manifest.yaml").read_text("utf-8"))
+    assert loaded["registry_spec_digest"]
 
 
 # ---------------------------------------------------------------------------

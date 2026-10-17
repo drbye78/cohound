@@ -150,6 +150,14 @@ EXECUTION_FIELDS: tuple[str, ...] = (
     # N6 (§13): дайджест разрешённой конфигурации контроля краула (все слои) — смена на
     # любом слое (app/run/per-site) помечается ``execution_change``.
     "crawl_config_digest",
+    # E2 (§13): дайджест загруженных package-scoped спецификаций реестров. Персистится в
+    # ``runs.registry_spec_digest`` (D1/E2) и читается обратно ``read_manifest``, поэтому смена
+    # спеки (или появление/исчезновение реестра) реально помечается ``execution_change``
+    # в ``hound diff``. Граница — по **загруженным спецификациям** (провенанс исполнения), а НЕ
+    # по выходам: R-ячейки реестровой волны перезаписываются оценщиком Ш6 для того же
+    # ``(run_id, product_id, param_id)`` (открытый остаток Ш3↔Ш6, см. progress.md), поэтому
+    # «меняет выходные R-ячейки» здесь не утверждается.
+    "registry_spec_digest",
 )
 
 #: Обратно-совместимый алиас (v2.0): прежде границей считался только исполнительный
@@ -490,6 +498,7 @@ def build_manifest(
     crawl_provenance: CrawlProvenance | Mapping[str, Any] | None = None,
     domain_profiles: Mapping[str, Any] | None = None,
     crawl_app: Any = None,
+    registry_spec_digest: str | None = None,
 ) -> RunManifest:
     """Собирает полностью заполненный :class:`RunManifest` (R7/§13) фазы Ш9.
 
@@ -515,6 +524,9 @@ def build_manifest(
     * §13/Backlog B — ``crawl_strategy``/``crawl_rate_limit`` берутся из ``run.crawl``
       (секция ``crawl`` ``run.yaml``); при её отсутствии — ``None``. Это **граница**
       ``execution_change`` (операционные оси commodity-слоя, A2), а не ``methodology_change``.
+    * §13/E2 — ``registry_spec_digest`` (дайджест загруженных package-scoped спецификаций
+      реестров) передаётся вызывающим; при отсутствии реестров — ``None``. Это **граница**
+      ``execution_change`` (смена спеки меняет выходные R-ячейки).
 
     Деплой-провенанс (``deploy_profile``/``edge_schema_version``) заполняется только если
     соответствующие поля есть в текущей схеме :class:`RunManifest` (defensive: иначе
@@ -766,6 +778,9 @@ def build_manifest(
         crawl_exclude_paths=crawl_exclude_paths,
         crawl_exclude_documents=crawl_exclude_documents,
         crawl_config_digest=crawl_config_digest,
+        # E2/§13: дайджест package-scoped спецификаций реестров (``None`` — нет реестров;
+        # поле аддитивно, нетронутые манифесты без реестров не меняются по значению).
+        registry_spec_digest=registry_spec_digest,
         snapshot_date=snapshot_date,
         **extra,
     )

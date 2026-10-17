@@ -678,7 +678,7 @@ def _crawl_session_dict_mirror() -> None:
 def _db_smoke() -> None:
     conn = connect(":memory:")
     ver = conn.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()
-    _assert(ver is not None and ver["value"] == "3.4.0")
+    _assert(ver is not None and ver["value"] == "3.5.0")
 
     tables = {r["name"] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     for t in ("products", "runs", "llm_scenarios", "corpus_docs", "corpus_chunks",
@@ -708,6 +708,9 @@ def _db_smoke() -> None:
     # — реальные колонки; ``run_inputs`` — источник истины самодостаточности прогона.
     _assert({"deploy_profile", "edge_schema_version", "edge_capabilities_json",
              "ranking_epsilon"} <= runs_cols)
+    # E2 (schema 3.5.0): дайджест package-scoped спецификаций реестров — граница
+    # ``execution_change`` (§13); персистится, иначе ``hound diff`` её не видит (D1).
+    _assert("registry_spec_digest" in runs_cols)
     inputs_cols = {r["name"] for r in conn.execute("PRAGMA table_info(run_inputs)")}
     _assert({"run_id", "snapshot_version", "payload_json", "payload_sha256",
              "created_at"} <= inputs_cols)

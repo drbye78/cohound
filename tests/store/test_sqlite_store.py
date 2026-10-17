@@ -9,6 +9,7 @@ import datetime as _dt
 import json
 import sqlite3
 from collections.abc import Iterator
+from pathlib import Path
 
 import pytest
 
@@ -93,7 +94,7 @@ def test_schema_opens(store: SqliteStore) -> None:
     ver = store.conn.execute(
         "SELECT value FROM schema_meta WHERE key = 'schema_version'"
     ).fetchone()
-    assert ver["value"] == "3.4.0"
+    assert ver["value"] == "3.5.0"
     tables = {
         r["name"] for r in store.conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
     }
@@ -126,6 +127,8 @@ def test_schema_opens(store: SqliteStore) -> None:
     # P1 (schema 3.4.0): деплой-провенанс манифеста (07 §7) и порог ранжирования (§6/B-1).
     assert {"deploy_profile", "edge_schema_version", "edge_capabilities_json",
             "ranking_epsilon"} <= runs_cols
+    # E2 (schema 3.5.0): дайджест package-scoped спецификаций реестров — граница §13.
+    assert "registry_spec_digest" in runs_cols
     # P1: снимок плановых входов прогона — реальная таблица.
     inputs_cols = {r["name"] for r in store.conn.execute("PRAGMA table_info(run_inputs)")}
     assert {"run_id", "snapshot_version", "payload_json", "payload_sha256",
@@ -923,6 +926,68 @@ def test_crawl_axes_roundtrip(store: SqliteStore) -> None:
     read = store.read_manifest(RUN_ID)
     assert read.crawl_strategy == "hybrid"
     assert read.crawl_rate_limit == "uniform(min=0.5,max=2.0)"
+
+
+def test_registry_spec_digest_roundtrip(store: SqliteStore) -> None:
+    """D1/E2 (§13): ``persist_manifest``/``read_manifest`` несут дайджест спецификаций реестров.
+
+    Без персистенции ``hound diff`` читал бы всегда ``None`` — граница ``execution_change``
+    была бы декоративной (ровно дефект D1).
+    """
+    store.create_run(RUN_ID, _cfg())
+    # Новый прогон без реестров → ``None`` (граница не заполнена).
+    assert store.read_manifest(RUN_ID).registry_spec_digest is None
+
+    manifest = RunManifest(
+        run_id=RUN_ID,
+        case_id="case-1",
+        created_at="2026-01-01T00:00:00Z",
+        mode=RunMode.STRICT,
+        methodology_version="2.0.0",
+        package_version="pkg-1",
+        catalog_version="cat-1",
+        status_dict_version="sd-1",
+        scoring_policy_version="sp-1",
+        anchor_product_id="p1",
+        registry_spec_digest="digest-e2",
+    )
+    store.persist_manifest(RUN_ID, manifest)
+    assert store.read_manifest(RUN_ID).registry_spec_digest == "digest-e2"
+
+
+def test_connect_migrates_legacy_runs_without_registry_spec_digest(tmp_path: Path) -> None:
+    """D1/E2: старая ``runs`` без ``registry_spec_digest`` мигрирует; строки/значения целы."""
+    from core.store.sqlite import connect
+
+    db = tmp_path / "legacy_runs.db"
+    legacy = sqlite3.connect(db)
+    legacy.execute(
+        "CREATE TABLE runs (run_id TEXT PRIMARY KEY, created_at TEXT NOT NULL,"
+        " mode TEXT, case_id TEXT, anchor_product_id TEXT, crawl_config_digest TEXT)"
+    )
+    legacy.execute(
+        "INSERT INTO runs(run_id, created_at, mode, case_id, anchor_product_id,"
+        " crawl_config_digest) VALUES ('r1','now','strict','c','p','d')"
+    )
+    legacy.commit()
+    legacy.close()
+
+    migrated = connect(db)
+    cols = {r["name"] for r in migrated.execute("PRAGMA table_info(runs)")}
+    assert "registry_spec_digest" in cols
+    row = migrated.execute(
+        "SELECT run_id, crawl_config_digest, registry_spec_digest FROM runs"
+    ).fetchone()
+    # Существующая строка сохранена; новая колонка — NULL (значение не выдумывается).
+    assert row["run_id"] == "r1"
+    assert row["crawl_config_digest"] == "d"
+    assert row["registry_spec_digest"] is None
+    migrated.close()
+
+    # Идемпотентность: повторный ``connect`` не падает и не дублирует колонку.
+    again = connect(db)
+    assert {r["name"] for r in again.execute("PRAGMA table_info(runs)")} == cols
+    again.close()
 
 
 def test_iter_exhaustions(store: SqliteStore) -> None:

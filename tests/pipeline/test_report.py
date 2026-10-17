@@ -1041,6 +1041,35 @@ def test_diff_guard_marks_execution_change_on_index_build(tmp_path: Path) -> Non
     assert not (tmp_path / "diff.md").exists()
 
 
+def test_diff_boundary_flags_registry_spec_digest_change() -> None:
+    """D1/E2 (§13): циклы, различающиеся **только** ``registry_spec_digest``, — ``execution_change``.
+
+    Дайджест персистится (``runs.registry_spec_digest``) и читается ``read_manifest``,
+    поэтому смена спецификации реестра — реальная граница, а не декоративная.
+    """
+    assert "registry_spec_digest" in EXECUTION_FIELDS
+    prev = _manifest(registry_spec_digest=None)
+    assert diff_boundary_violations(prev, prev) == []
+
+    curr = _manifest(registry_spec_digest="digest-e2")
+    reasons = diff_boundary_violations(prev, curr)
+    assert reasons
+    assert all(r.startswith("execution_change:") for r in reasons)
+    assert any("registry_spec_digest" in r for r in reasons)
+
+
+def test_diff_guard_marks_execution_change_on_registry_spec_digest(tmp_path: Path) -> None:
+    """Живой diff-guard: разный ``registry_spec_digest`` → отказ ``execution_change`` (§13)."""
+    prev = _manifest(registry_spec_digest="digest-a")
+    curr = _manifest(registry_spec_digest="digest-b")
+    with pytest.raises(CrossCycleDiffError) as excinfo:
+        render_diff(prev, curr, [], [], tmp_path / "diff.md")
+    message = str(excinfo.value)
+    assert "execution_change" in message
+    assert "registry_spec_digest" in message
+    assert not (tmp_path / "diff.md").exists()
+
+
 def test_diff_guard_marks_methodology_change_on_major(tmp_path: Path) -> None:
     """Major ``methodology_version`` → отказ с меткой ``methodology_change``."""
     prev = _manifest(methodology_version="2.0.0")

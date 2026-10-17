@@ -674,7 +674,9 @@ class SqliteStore:
         Обновляет версии, индексные/ретривал-поля, ``settings_provenance_json`` и
         ``ranking_epsilon`` (провенанс настроек), ``crawl_provenance_json``
         (провенанс краула, §4.4/Phase 2), ``crawl_strategy``/``crawl_rate_limit``
-        (операционные оси краула — границы ``execution_change``, §13/Backlog B) и
+        (операционные оси краула — границы ``execution_change``, §13/Backlog B),
+        ``crawl_config_digest`` (§13/N6) и ``registry_spec_digest`` (§13/E2 — дайджест
+        package-scoped спецификаций реестров), а также
         деплой-провенанс ``deploy_profile``/``edge_schema_version``/``edge_capabilities_json``
         (07 §7; execution-class, не методологическая версия). ``UPDATE`` по существующей
         строке прогона: манифест — самостоятельная запись воспроизведения, а не источник
@@ -693,7 +695,7 @@ class SqliteStore:
                 " settings_provenance_json = ?, ranking_epsilon = ?,"
                 " crawl_provenance_json = ?,"
                 " crawl_strategy = ?, crawl_rate_limit = ?,"
-                " crawl_config_digest = ?,"
+                " crawl_config_digest = ?, registry_spec_digest = ?,"
                 " deploy_profile = ?, edge_schema_version = ?, edge_capabilities_json = ?"
                 " WHERE run_id = ?",
                 (
@@ -721,6 +723,7 @@ class SqliteStore:
                     manifest.crawl_strategy,
                     manifest.crawl_rate_limit,
                     manifest.crawl_config_digest,
+                    manifest.registry_spec_digest,
                     manifest.deploy_profile,
                     manifest.edge_schema_version,
                     json.dumps(
@@ -1243,6 +1246,8 @@ class SqliteStore:
             crawl_rate_limit=row["crawl_rate_limit"],
             # §13/N6: дайджест разрешённой конфигурации контроля краула.
             crawl_config_digest=row["crawl_config_digest"],
+            # §13/E2: дайджест package-scoped спецификаций реестров (граница ``execution_change``).
+            registry_spec_digest=row["registry_spec_digest"],
             llm_scenarios=scenarios,
             snapshot_date=row["snapshot_date"],
             deploy_profile=row["deploy_profile"],

@@ -78,10 +78,11 @@ runs/{run_id}/
 
 Схема §4.4 перенесена из бывшего `core/db.py` (удалён в T1.3) в `store/sqlite.py`
 (15 таблиц + `schema_meta`, индексы, триггеры I4/I6/I7/I13/I18). Константа `SCHEMA_VERSION`
-= **`3.4.0`** (D3/D4/сеансы/провенанс краула/P1-самодостаточность) — версия **SQLite-схемы**, не регламента; колонки
+= **`3.5.0`** (E2: дайджест спецификаций реестров; D3/D4/сеансы/провенанс краула/P1-самодостаточность) — версия **SQLite-схемы**, не регламента; колонки
 `runs.settings_provenance_json` (v2.1/A3), `runs.crawl_provenance_json` (v3.2/Phase 2),
 `runs.crawl_strategy` / `runs.crawl_rate_limit` (v3.3/Backlog B: операционные оси краула,
-границы `execution_change`, §13), `runs.ranking_epsilon` / `runs.deploy_profile` /
+границы `execution_change`, §13), `runs.registry_spec_digest` (v3.5/E2: дайджест package-scoped
+спецификаций реестров — граница `execution_change`, §13), `runs.ranking_epsilon` / `runs.deploy_profile` /
 `runs.edge_schema_version` / `runs.edge_capabilities_json` (v3.4/P1: порог ранжирования §6/B-1
 и деплой-провенанс манифеста, 07 §7) и
 `corpus_chunks.extractor_version` /

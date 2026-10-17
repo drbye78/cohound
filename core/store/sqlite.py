@@ -12,7 +12,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = "3.4.0"
+SCHEMA_VERSION = "3.5.0"
 
 DDL = """
 PRAGMA journal_mode = WAL;
@@ -62,6 +62,7 @@ CREATE TABLE IF NOT EXISTS runs (
     crawl_strategy        TEXT,                        -- §13/Backlog B: ось стратегии краула (execution_change)
     crawl_rate_limit      TEXT,                        -- §13/Backlog B: канон. форма rate_limit (execution_change)
     crawl_config_digest   TEXT,                        -- §13/N6: дайджест разрешённой конфигурации контроля краула (execution_change)
+    registry_spec_digest  TEXT,                        -- §13/E2: дайджест package-scoped спецификаций реестров (execution_change)
     ranking_epsilon       REAL,                        -- §6/B-1: порог неразличимости ранжирования
     deploy_profile        TEXT,                        -- 07 §7: профиль доверенных зон (R7)
     edge_schema_version   TEXT,                        -- 07 §7: версия контракта шва /v1/* (execution-class)
@@ -365,7 +366,7 @@ def _ensure_columns(
 
 
 def connect(db_path: str | Path = ":memory:") -> sqlite3.Connection:
-    """Открывает БД и применяет схему (+ идемпотентные DDL-миграции v2.1–v3.4)."""
+    """Открывает БД и применяет схему (+ идемпотентные DDL-миграции v2.1–v3.5)."""
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
     conn.executescript(DDL)
@@ -384,6 +385,10 @@ def connect(db_path: str | Path = ":memory:") -> sqlite3.Connection:
     # DDL-миграция v3.4 (N6): дайджест разрешённой конфигурации контроля краула — граница
     # класса ``execution_change`` (§13); additive, старые БД получают колонку.
     _ensure_columns(conn, "runs", {"crawl_config_digest": "TEXT"})
+    # DDL-миграция v3.5 (E2): дайджест package-scoped спецификаций реестров — граница класса
+    # ``execution_change`` (§13); additive, старые БД получают колонку (без неё ``hound diff``
+    # не видел смену спецификации реестра).
+    _ensure_columns(conn, "runs", {"registry_spec_digest": "TEXT"})
     # DDL-миграция v2.2 (P2): content-addressed build-id witness — версия экстрактора у чанка
     # и версия экстрактора + отпечаток содержимого у продукт-партиции манифеста.
     _ensure_columns(conn, "corpus_chunks", {"extractor_version": "TEXT"})

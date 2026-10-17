@@ -1,0 +1,8 @@
+registry_id: reg_x
+jurisdiction: XX
+endpoint: 'https://registry.example.invalid/api/search/{query}'
+method: GET
+format: json
+records_path: items
+mapping:
+  name: name

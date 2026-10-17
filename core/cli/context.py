@@ -21,6 +21,11 @@ from typing import Any
 import yaml
 
 from core.adapters.gateway_validate import validate_envelope_shape
+from core.adapters.registry_generic import (
+    RegistryConfig,
+    RegistryConfigError,
+    load_package_registry_configs,
+)
 from core.adapters.remote_gateway import (
     DEFAULT_SCHEMA_VERSION,
     GatewayError,
@@ -912,6 +917,33 @@ def _resolve_plan(
     return build_plan(inputs, run_id=run_id)
 
 
+def _load_registry_specs(
+    args: argparse.Namespace, inputs: RunInputs | None
+) -> dict[str, RegistryConfig]:
+    """Загружает package-scoped спецификации реестров из ``package.registries`` (E2, 03 §D.4).
+
+    Composition root (Z0) — единственное место загрузки спецификаций; pipeline получает уже
+    готовый mapping фетчеров (``Ports.registry_fetchers``). Пакет без объявленных реестров
+    (или без ``inputs``/``--package``) → ``{}``: реестры опциональны. Объявленный, но
+    нечитаемый/отсутствующий реестр — **понятная ошибка CLI**, а не молчаливая частичная
+    проводка (объявленный реестр без данных недопустим).
+
+    :raises CliError: объявленная спецификация реестра отсутствует/невалидна.
+    """
+    package_dir = getattr(args, "package", None)
+    if inputs is None or not package_dir:
+        return {}
+    declared = list(getattr(getattr(inputs, "package", None), "registries", None) or [])
+    if not declared:
+        return {}
+    try:
+        return load_package_registry_configs(package_dir, declared)
+    except RegistryConfigError as exc:
+        raise CliError(
+            f"реестры пакета: {exc}", code="registries", exit_code=EXIT_USAGE
+        ) from exc
+
+
 def _resolve_ports(
     args: argparse.Namespace,
     deploy_config: DeployConfig | None,
@@ -942,6 +974,12 @@ def _resolve_ports(
     прежнее (оценщик не поднимается). Профиль ``split`` получает ``evaluator`` как
     сегодня (remote-порты его не используют).
 
+    **Реестры (E2).** Package-scoped спецификации (``packages/{case_id}/registries/*.yaml``,
+    объявленные в ``package.yaml: registries``) загружаются здесь (:func:`_load_registry_specs`)
+    и передаются в :func:`build_adapters`, который собирает mapping ``Ports.registry_fetchers``
+    и дайджест спецификаций. Так реестровая волна Ш3 перестаёт быть инертной. Объявленный
+    несобираемый реестр — понятная ошибка CLI (не молчаливая частичная проводка).
+
     :param no_cache: Phase 4 — не строить/не передавать R7-кэш (``--from-scratch``).
     """
     injected = getattr(args, "ports", None)
@@ -969,12 +1007,17 @@ def _resolve_ports(
         if deploy_config is not None
         else None
     )
+    # E2: package-scoped спецификации реестров → mapping фетчеров в ``build_adapters``
+    # (``local``: GenericRegistryFetcher; ``split``: RemoteRegistry) + дайджест в манифест.
+    # Объявленный несобираемый реестр — явная ошибка (не молчаливая частичная проводка).
+    registry_specs = _load_registry_specs(args, inputs)
     return build_adapters(
         profile=args.profile,
         deploy=deploy_config,
         transport=getattr(args, "deploy_transport", None),
         gateway=gateway,
         evaluator=evaluator,
+        registry_specs=registry_specs,
         index_root=index_root,
         cache=cache,
         domain_profiles=(inputs.domain_profiles if inputs is not None else None),

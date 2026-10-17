@@ -474,10 +474,14 @@ def build_phases(
 
     # -- Ш3: реестровая волна (без LLM) ------------------------------------- #
     def registry_phase(ctx: RunContext) -> PhaseResult:
-        """Ш3: реестровая волна. ``Ports.registry`` — один фетчер → адаптер в mapping."""
-        registry = getattr(ctx.ports, "registry", None)
-        fetchers: dict[str, Any] = (
-            {str(registry.registry_id): registry} if registry is not None else {}
+        """Ш3: реестровая волна. ``Ports.registry_fetchers`` — mapping ``registry_id → fetcher``.
+
+        Mapping собирает composition root (E2) из package-scoped спецификаций; фаза только
+        передаёт его в :func:`registry_wave` (контракт волны не меняется). Пусто/``None`` →
+        волна пуста (реестры не сконфигурированы) — не молчаливая подмена одним портом.
+        """
+        fetchers: dict[str, Any] = dict(
+            getattr(ctx.ports, "registry_fetchers", None) or {}
         )
         return _as_phase(registry_wave(plan, fetchers, ctx.store), "registry")
 
@@ -657,6 +661,10 @@ def build_phases(
             # манифест, чтобы смена осей на app/per-site слое тоже давала execution_change.
             domain_profiles=domain_profiles,
             crawl_app=crawl_app,
+            # E2/§13: дайджест загруженных package-scoped спецификаций реестров — провенанс
+            # аудируемости (R7). Composition root кладёт его на ``Ports``; здесь лишь
+            # прокидывается в манифест (``None`` — реестры не сконфигурированы).
+            registry_spec_digest=getattr(ctx.ports, "registry_spec_digest", None),
         )
         # R7/§13: финальный манифест — самостоятельная запись воспроизведения,
         # поэтому персистится в операционную БД прогона (версии/индекс/провенанс).

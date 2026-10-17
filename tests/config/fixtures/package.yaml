@@ -18,5 +18,5 @@ roles:
 baselines: [baseline_a]
 baseline_participant: baseline_a
 jurisdictions: [RU]
-registries: [reg_a]
+registries: []
 languages: [ru, en]

@@ -177,10 +177,12 @@ IDP/DLP/IDS (`07` §8).
 (`VectorIndexPort`); `adapters/embed_local.py` — `EmbedderPort`. `pipeline` не пишет `.npy`/tantivy
 напрямую. Реализация `StorePort`/`GateStore` — `store/sqlite_store.py` поверх DDL `store/sqlite.py`;
 бэкап/восстановление прогона — `store/backup.py`. Схема БД версионируется константой
-`SCHEMA_VERSION` = **`3.4.0`** (версия SQLite-схемы, **не** регламента); `runs.settings_provenance_json`
+`SCHEMA_VERSION` = **`3.5.0`** (версия SQLite-схемы, **не** регламента); `runs.settings_provenance_json`
 хранит провенанс настроек (A3), `runs.crawl_provenance_json` — провенанс краула (сеансы/движки/дайджест
 источников, Phase 2), `runs.crawl_strategy`/`runs.crawl_rate_limit` — операционные оси краула
-(границы `execution_change`, §13), `runs.ranking_epsilon`/`runs.deploy_profile`/`runs.edge_schema_version`/
+(границы `execution_change`, §13), `runs.crawl_config_digest`/`runs.registry_spec_digest` —
+дайджесты разрешённой конфигурации контроля краула (N6) и package-scoped спецификаций реестров
+(E2) — границы `execution_change` (§13), `runs.ranking_epsilon`/`runs.deploy_profile`/`runs.edge_schema_version`/
 `runs.edge_capabilities_json` — порог ранжирования и деплой-провенанс (P1), `corpus_chunks.extractor_version` и `index_manifest.extractor_version`/
 `content_digest` — build-id witness (P2), `crawl_sessions`/`crawl_session_items` — первоклассный
 сеанс краула (id/статус/прогресс/возобновляемость, фаза сеансов; legacy `crawl_attempts` удалена),
