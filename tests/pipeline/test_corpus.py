@@ -620,6 +620,59 @@ def test_explicit_http_override_avoids_browser_support_error(tmp_path: Path) -> 
     assert [url for url, _ in crawler.calls] == [browser_url]
 
 
+def test_domain_profile_browser_routes_to_browser_crawler(tmp_path: Path) -> None:
+    """Пакет без ``crawl_sources``: ``fetch: browser`` профиля домена → ``crawlers['browser']``.
+
+    Локальная паритетность edge ``scheduler._resolve_engine`` и
+    ``wiring._referenced_crawl_engines``: при пустом ``wtarget.engine`` ключ движка
+    выводится из оси ``fetch``. Регрессия на ошибку «краулер HttpCrawler не поддерживает
+    browser» для браузерных URL, чей движок задан только профилем домена.
+    """
+    browser_url = "https://browser.test/landing"
+    http_fake = _Crawler({})
+    http_fake.supports_browser = False  # type: ignore[attr-defined]
+    browser_fake = _Crawler({browser_url: b"rendered"})
+
+    result = _build(
+        tmp_path,
+        pages={},
+        urls={"p1": [browser_url]},
+        crawler=http_fake,
+        crawlers={"http": http_fake, "browser": browser_fake},
+        domain_profiles={"browser.test": DomainProfile(fetch=FetchMode.BROWSER)},
+    )
+    build = _build_of(result)
+
+    assert result.errors == []
+    assert [url for url, _ in browser_fake.calls] == [browser_url]
+    assert http_fake.calls == []
+    assert build.chunk_count == 1
+
+
+def test_domain_profile_browser_without_browser_crawler_keeps_error(
+    tmp_path: Path,
+) -> None:
+    """Карта без ``browser`` — прежний честный URL-скоупедированный отказ (без тихой подмены)."""
+    browser_url = "https://browser.test/landing"
+    http_fake = _Crawler({browser_url: b"x"})
+    http_fake.supports_browser = False  # type: ignore[attr-defined]
+
+    result = _build(
+        tmp_path,
+        pages={},
+        urls={"p1": [browser_url]},
+        crawler=http_fake,
+        crawlers={"http": http_fake},
+        domain_profiles={"browser.test": DomainProfile(fetch=FetchMode.BROWSER)},
+    )
+
+    assert http_fake.calls == []
+    assert any(
+        browser_url in err and "browser" in err and "scrapy" in err
+        for err in result.errors
+    )
+
+
 # --------------------------------------------------------------------------- #
 # Персистенция через StorePort
 # --------------------------------------------------------------------------- #

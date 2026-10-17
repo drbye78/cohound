@@ -1527,7 +1527,18 @@ def build_corpus(
         )
         prior_item = items.get((pid, wu))
         resume = _resume_source(prior_item) if prior_item is not None else None
-        active = ((crawlers or {}).get(wtarget.engine) if wtarget.engine else None) or crawler
+        # Движок: явный ``wtarget.engine`` (из ``crawl_sources``) приоритетен; при его
+        # отсутствии ключ выводится из оси профиля домена (``fetch: browser`` → ``"browser"``).
+        # Зеркало edge ``scheduler._resolve_engine`` и ``wiring._referenced_crawl_engines``
+        # (последний кладёт ``browser`` в карту именно по ``domain_profiles.fetch``).
+        # Литерал ``"browser"`` совпадает с ключом карты в ``wiring`` (импорт CLI-константы
+        # нарушил бы слой ``pipeline ↛ cli``). Если карта не содержит ``"browser"``
+        # (зависимость недоступна) — прежний фолбэк на ``crawler``, и честная
+        # URL-скоупедированная ошибка D2 ниже срабатывает как раньше.
+        engine_key = wtarget.engine or (
+            "browser" if fetch_plan.fetch is FetchMode.BROWSER else None
+        )
+        active = ((crawlers or {}).get(engine_key) if engine_key else None) or crawler
         browser_blocked = (
             getattr(active, "supports_browser", True) is False
             and fetch_plan.fetch is FetchMode.BROWSER
