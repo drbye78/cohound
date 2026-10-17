@@ -34,7 +34,7 @@ sbertech.ru:
   strategy: honest
 sbertech.ru/documents:
   fetch: browser
-  extract: document
+  extract: auto
   strategy: honest
 tantorlabs.ru:
   fetch: browser

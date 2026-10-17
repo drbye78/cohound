@@ -853,7 +853,7 @@ def build_domain_profiles() -> dict[str, dict[str, object]]:
         "sbertech.ru": {"fetch": "browser", "extract": "html", "strategy": "honest"},
         "sbertech.ru/documents": {
             "fetch": "browser",
-            "extract": "document",
+            "extract": "auto",
             "strategy": "honest",
         },
         "tantorlabs.ru": {"fetch": "browser", "extract": "html", "strategy": "honest"},
