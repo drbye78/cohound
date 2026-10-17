@@ -446,7 +446,7 @@ golden-full, adversarial как приёмочный прогон) — **хар�
 | Окружение | Содержимое | Где |
 |---|---|---|
 | **cli-light** | ядро + `retrieval`(numpy/tantivy) + `crawl` + `extract` + `safety` + `ops` | везде, py3.14 |
-| **pdf** | `docling-slim[standard]` (+torch/CUDA) | отдельно (PDF-layout) |
+| **pdf** | `docling-slim[standard]` (+torch/torchvision, CPU-ядра) | отдельно (PDF-layout) |
 | **index** | `sentence-transformers` (+torch) — bge-m3; либо `embed-lite` (model2vec, без torch) | отдельно |
 | **edge** | те же `crawl`+`extract` extras (веб-адаптеры) | DMZ/Z1 (профиль `split`, 07) |
 | **test** | `pytest`/`hypothesis`/`respx` | dev/CI |
@@ -466,10 +466,10 @@ uv sync --frozen --extra retrieval --extra crawl --extra extract --extra safety 
 # edge (DMZ/Z1) — только веб-экстракторы (профиль split, 07)
 uv sync --frozen --extra crawl --extra extract
 
-# pdf — отдельное окружение с layout-моделями (torch/CUDA); блокер M0, §3.2/§15
+# pdf — отдельное окружение с layout-моделями (torch/torchvision, CPU); блокер M0, §3.2/§15
 uv sync --frozen --extra extract-pdf
 
-# index — локальные эмбеддинги bge-m3 (torch, CPU/GPU); изолированно от ядра
+# index — локальные эмбеддинги bge-m3 (torch, CPU); изолированно от ядра
 uv sync --frozen --extra embed        # bge-m3 (sentence-transformers); или --extra embed-lite (model2vec, без torch)
 
 # ann — подмена NpyVectorIndex при росте (триггер §14)

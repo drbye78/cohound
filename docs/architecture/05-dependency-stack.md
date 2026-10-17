@@ -42,7 +42,8 @@ CLI-ядро (`pydantic`+`pyyaml`+stdlib) ставится везде; инде�
 **Проверено резолвом и установкой на Python 3.14 (2026-10-08):** все лёгкие extras (ядро + `retrieval`,
 `crawl`, `extract`, `safety`, `ops`, `dev`, `ann`, `fallback`, `embed-lite`) разрешаются и
 устанавливаются; `torch`/`sentence-transformers` (`embed`) — тоже (колёса `cp314` есть). Полный
-совместный набор — 137 пакетов, без torch по умолчанию. `extract-pdf` намеренно тяжёлый (torch+CUDA).
+совместный набор — 137 пакетов, без torch по умолчанию. `extract-pdf` намеренно тяжёлый
+(`torch`+`torchvision`, CPU-ядра — см. §2.4/§4).
 `requires-python = ">=3.14"` в `pyproject.toml`; CI резолвит на 3.14.
 
 **Escape hatch.** Если появится вынужденно старый целевой хост (без возможности поставить 3.14 через
@@ -51,11 +52,28 @@ CLI-ядро (`pydantic`+`pyyaml`+stdlib) ставится везде; инде�
 (фиксируется по мере появления).
 
 **Находка (docling):** пакет `docling` = ровно `docling-slim[standard]` и тянет
-**torch+torchvision+CUDA** (~гигабайты). Для Office (DOCX/PPTX/XLSX) это не нужно:
+**torch+torchvision** (~гигабайты). Для Office (DOCX/PPTX/XLSX) это не нужно:
 `docling-slim[format-office]` ставит только python-docx/python-pptx/openpyxl/pylatexenc.
 `docling-slim` предоставляет namespace-импорт `docling` (`docling/document_converter.py`) —
 адаптер `extract_document.py` менять не нужно. Разделены extras `extract` (лёгкий) и
 `extract-pdf` (тяжёлый, отдельное окружение).
+
+**Решение (2026-10-17): CPU-ядра PyTorch — декларативно из индекса `pytorch-cpu`.** Контуры
+`extract-pdf` (PDF-layout) и `embed` (индекс-контур) используют **CPU-only** сборки PyTorch
+(`torch 2.14.1+cpu`, `torchvision 0.29.1+cpu`) — без CUDA/nvidia-колёс. Пиннинг —
+декларативный и единственно возможный на `uv 0.11.16`: `[[tool.uv.index]]` `pytorch-cpu`
+(`https://download.pytorch.org/whl/cpu`, `explicit = true`) + `[tool.uv.sources]`
+`torch`/`torchvision` → этот индекс; CPU-ядра объявлены **прямыми** зависимостями
+`extract-pdf`, иначе транзитивный `docling` притянул бы CUDA-колесо `torchvision` с pypi.org
+(ABI-несовместимость с CPU-`torch`). `[tool.uv.sources]` действует **проектно-глобально**:
+`embed` (`sentence-transformers` → `torch`) тоже резолвит CPU-ядра — это **осознанно и
+объявлено здесь**, а не побочный эффект. `[tool.uv] torch-backend = "cpu"` резолвером проекта
+(`lock`/`sync`) **молча игнорируется**; `--torch-backend` есть только у `uv pip` — поэтому
+index+sources и есть единственная декларативная опция. Новый supply-chain host —
+`download.pytorch.org` (редиректит на `download-r2.pytorch.org`) — при зеркалировании закрытого
+контура учитывать как отдельный источник. **Escape hatch (GPU-хост):**
+`uv pip install --torch-backend=auto --reinstall-package torch --reinstall-package torchvision` —
+пересобирает только эти два колеса под хост, `uv.lock` при этом не меняется.
 
 ---
 
@@ -127,7 +145,7 @@ CLI-ядро (`pydantic`+`pyyaml`+stdlib) ставится везде; инде�
 |---|---|---|---|---|
 | `trafilatura` | 2.3.x | Apache-2.0 ✅ | **a** | main-content → markdown, заголовки/списки/таблицы |
 | `docling-slim[format-office]` | 2.135.x | MIT ✅ | **a** | DOCX/PPTX/XLSX нативно (python-docx/-pptx/openpyxl), **без torch**. `rtree` для Office **не нужен** (нужен только PDF-пути spatial/reading-order) и импорт `DocumentConverter` без него работает |
-| `docling-slim[standard]` | 2.135.x | MIT ✅ | **a** (отдельное окружение) | PDF layout+tables; **тянет torch+torchvision+CUDA**; обязателен для PDF-контура (блокер M0) |
+| `docling-slim[standard]` | 2.135.x | MIT ✅ | **a** (отдельное окружение) | PDF layout+tables; **тянет torch+torchvision** (CPU-ядра из индекса `pytorch-cpu`, §1); обязателен для PDF-контура (блокер M0) |
 | `lxml` | 6.1.x | BSD-3 ✅ | **a** (транзитивно) | уже в дереве trafilatura/Scrapy |
 | `openpyxl` | 3.1.x | MIT ✅ | **a** | XLSX-отчёты; Office-бэкенд docling |
 | `python-docx` / `python-pptx` | 1.2.x / 1.0.x | MIT ✅ | **b** (через docling) | отдельно не нужны |
@@ -295,8 +313,8 @@ robots.txt-запрос оставлять на дефолтном HTTP-handler 
 Собирается как extras в `pyproject.toml`: `retrieval`, `crawl`, `extract`, `safety`, `ops`.
 
 **Отдельные окружения (не в CLI-venv):**
-- **PDF layout:** `docling-slim[standard]` (torch+CUDA) — extra `extract-pdf`, блокер M0.
-- **Индекс-контур:** `sentence-transformers` (+torch) — extra `embed`, изолированный venv/образ.
+- **PDF layout:** `docling-slim[standard]` (torch+torchvision, CPU-ядра — §1) — extra `extract-pdf`, блокер M0.
+- **Индекс-контур:** `sentence-transformers` (+torch, CPU-ядра — проектно-глобальные `[tool.uv.sources]`, §1) — extra `embed`, изолированный venv/образ.
 - **LLM-инференс:** модели корпоративного облака по [OI]-совместимому API — **вне наших окружений**
   (не ставим и не развёртываем; `vLLM`/`SGLang` — возможный backend облака, §2.3).
 - **Опц. CPU-инференс:** ~~`llama-cpp-python` (GGUF) для тестов порта~~ — **снято** (не реализовано;

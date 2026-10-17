@@ -40,8 +40,10 @@ crawl = [
 ]
 
 # Экстракция HTML + Office (лёгкая, БЕЗ torch).
-# ВАЖНО: полный пакет `docling` = `docling-slim[standard]` и тянет torch+torchvision+CUDA
+# ВАЖНО: полный пакет `docling` = `docling-slim[standard]` и тянет torch+torchvision
 # (~гигабайты) — не нужен для Office. Office Open XML парсится нативно, без моделей.
+# В PDF-контуре (`extract-pdf`) torch/torchvision берутся из CPU-индекса `pytorch-cpu`
+# (без CUDA/nvidia) — см. [tool.uv.sources]/[[tool.uv.index]] ниже.
 # ВАЖНО: `[format-office]` НЕ покрывает импорт `DocumentConverter` — его цепочка
 # (pipeline→models.factories→base_ocr_model→datamodel.spatial) требует `rtree`;
 # в `docling-slim` он объявлен только в extra `standard`. Добавляем явно.
@@ -56,6 +58,12 @@ extract = [
 # Отдельное окружение; для PDF-контура обязателен (блокер M0, §3.2/§16).
 extract-pdf = [
     "docling-slim[standard]>=2.135,<3",
+    # CPU-ядра PyTorch — прямые зависимости, чтобы применился [tool.uv.sources] ниже
+    # (sources действуют только для прямых зависимостей проекта). Иначе docling тянет
+    # CUDA-колесо torchvision с pypi.org, несовместимое с CPU-torch (ABI: «operator
+    # torchvision::nms does not exist»), и PDF-контур даёт пустой текст.
+    "torch>=2.14.1,<2.15",
+    "torchvision>=0.29.1,<0.30",
 ]
 
 # Безопасность контента (защита от prompt-injection, §10).
@@ -111,6 +119,18 @@ dev = [
     "respx>=0.23,<0.24",
     "pytest-cov>=7.1,<8",
 ]
+
+# CPU-ядра PyTorch — из официального CPU-индекса (без CUDA/nvidia-зависимостей).
+# explicit = true: индекс используется только при явной ссылке из [tool.uv.sources],
+# иначе он бы переопределял pypi.org для всех пакетов.
+[tool.uv.sources]
+torch = [{ index = "pytorch-cpu" }]
+torchvision = [{ index = "pytorch-cpu" }]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
