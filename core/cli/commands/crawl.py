@@ -257,6 +257,7 @@ def _execute_crawl(
     max_documents = getattr(args, "max_documents", None)
     exclude_paths = getattr(args, "exclude_paths", None)
     exclude_documents = getattr(args, "exclude_documents", None)
+    document_level = getattr(args, "document_level", None)
     follow = bool(getattr(args, "follow", False))
     interval = float(getattr(args, "interval", 1.0) or 0.0)
     # Phase 4: ``--from-scratch`` обходит R7-кэш (cache=None — единственный способ) и по
@@ -309,6 +310,7 @@ def _execute_crawl(
             max_documents=max_documents,
             exclude_paths=exclude_paths,
             exclude_documents=exclude_documents,
+            document_level=document_level,
             progress=progress,
         )
         if clear_first:

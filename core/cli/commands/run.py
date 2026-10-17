@@ -163,6 +163,7 @@ def run(args: argparse.Namespace) -> int:
     max_documents = getattr(args, "max_documents", None)
     exclude_paths = getattr(args, "exclude_paths", None)
     exclude_documents = getattr(args, "exclude_documents", None)
+    document_level = getattr(args, "document_level", None)
     follow = bool(getattr(args, "follow", False))
     interval = float(getattr(args, "interval", 1.0) or 0.0)
     session_id = default_session_id(run_id)
@@ -198,6 +199,7 @@ def run(args: argparse.Namespace) -> int:
         max_documents=max_documents,
         exclude_paths=exclude_paths,
         exclude_documents=exclude_documents,
+        document_level=document_level,
         progress=(
             _progress_callback(session_id=session_id, json_mode=bool(args.json))
             if follow

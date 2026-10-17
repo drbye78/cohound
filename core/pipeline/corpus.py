@@ -100,6 +100,7 @@ from core.domain import (
     CrawlRunConfig,
     CrawlSessionItem,
     CrawlStrategy,
+    DocumentLevel,
     FailureKind,
     IndexManifestEntry,
 )
@@ -137,6 +138,7 @@ from core.ports.types import (
     FetchPlan,
     RawPage,
 )
+from core.util.document_formats import document_content_type, document_suffix
 from core.util.hashing import content_hash, short_hash
 from core.util.html_links import extract_links
 from core.util.rate_limit import RateLimiter
@@ -218,32 +220,73 @@ class _ExtractRequest:
     content_type: str | None
     engine: str | None
     route: ExtractionRoute
+    #: P5: уровень извлечения документных форматов (``crawl.document_level``). Едет в payload
+    #: для самодостаточности задания и корректности под будущие режимы; по построению пул —
+    #: per-seed-root (один уровень на пул), поэтому воркер кэширует конвертер по уровню.
+    level: DocumentLevel = DocumentLevel.FULL
 
 
 @dataclass(frozen=True)
 class ExtractionPool:
     """P4: инъекция исполнителя экстракции из composition root (A1, ``pipeline ↛ adapters``).
 
-    :param pool_factory: фабрика ``int → Executor`` (размер = ``limits.extract_workers``);
-        ``local`` — ``ProcessPoolExecutor`` (forkserver, инициализатор строит экстрактор на
-        воркер), ``split`` — ``ThreadPoolExecutor`` (``RemoteExtractor`` I/O-bound).
+    :param pool_factory: фабрика ``(int, DocumentLevel) → Executor`` (размер =
+        ``limits.extract_workers``; уровень — per-seed-root, P5); ``local`` —
+        ``ProcessPoolExecutor`` (forkserver, инициализатор строит экстрактор нужного уровня
+        на воркер), ``split`` — ``ThreadPoolExecutor`` (``RemoteExtractor`` I/O-bound; ось
+        ``document_level`` под ``split`` не действует — R-S).
     :param worker: рабочая функция ``_ExtractRequest → ExtractedDoc``. Для процессов —
         module-level (picklable by reference); для потоков допустим bound/closure.
     """
 
-    pool_factory: Callable[[int], Executor]
+    pool_factory: Callable[..., Executor]
     worker: Callable[[_ExtractRequest], ExtractedDoc]
 
 
 #: P4: глобальный экстрактор воркер-процесса. Устанавливается инициализатором пула
 #: (composition root строит адаптер **внутри** процесса — объекты не пересекают границу).
 _WORKER_EXTRACTOR: ExtractorPort | None = None
+#: P5: уровень глобального экстрактора воркера (``None`` — «подходит для любого», split).
+_WORKER_EXTRACTOR_LEVEL: DocumentLevel | None = None
+#: P5: фабрика per-level экстрактора в воркере (защитный lazy-путь, если уровень задания
+#: не совпал с инициализированным). Передаётся ссылкой из composition root.
+_WORKER_EXTRACTOR_FACTORY: Callable[[DocumentLevel], ExtractorPort] | None = None
 
 
-def set_worker_extractor(extractor: ExtractorPort | None) -> None:
-    """Устанавливает экстрактор воркер-процесса (зовётся ``initializer`` пула, P4)."""
-    global _WORKER_EXTRACTOR
+def set_worker_extractor(
+    extractor: ExtractorPort | None,
+    *,
+    level: DocumentLevel | None = None,
+    factory: Callable[[DocumentLevel], ExtractorPort] | None = None,
+) -> None:
+    """Устанавливает экстрактор воркер-процесса (зовётся ``initializer`` пула, P4/P5).
+
+    ``level`` — уровень установленного экстрактора (``None`` — универсальный, напр. split);
+    ``factory`` — фабрика per-level, если задание принесло иной уровень (защитный путь).
+    """
+    global _WORKER_EXTRACTOR, _WORKER_EXTRACTOR_LEVEL, _WORKER_EXTRACTOR_FACTORY
     _WORKER_EXTRACTOR = extractor
+    _WORKER_EXTRACTOR_LEVEL = level
+    _WORKER_EXTRACTOR_FACTORY = factory
+
+
+def _worker_extractor_for(level: DocumentLevel) -> ExtractorPort | None:
+    """Экстрактор воркера для ``level`` (кэш размера 1; per-root пул — P5).
+
+    Если инициализированный экстрактор подходит (уровень совпал или универсален) — он и
+    используется. Иначе (защитный путь) строится фабрикой и кэшируется. Кэш по построению
+    размера 1 не является рабочим (пул per seed-root).
+    """
+    if _WORKER_EXTRACTOR is not None and (
+        _WORKER_EXTRACTOR_LEVEL is None or _WORKER_EXTRACTOR_LEVEL == level
+    ):
+        return _WORKER_EXTRACTOR
+    if _WORKER_EXTRACTOR_FACTORY is not None:
+        set_worker_extractor(
+            _WORKER_EXTRACTOR_FACTORY(level), level=level, factory=_WORKER_EXTRACTOR_FACTORY
+        )
+        return _WORKER_EXTRACTOR
+    return _WORKER_EXTRACTOR
 
 
 def _run_extract(extractor: ExtractorPort, request: _ExtractRequest) -> ExtractedDoc:
@@ -279,7 +322,15 @@ def _extract_worker(request: _ExtractRequest) -> ExtractedDoc:
             extractor_version="",
             error="extraction worker без экстрактора (initializer не отработал)",
         )
-    return _run_extract(_WORKER_EXTRACTOR, request)
+    extractor = _worker_extractor_for(request.level)
+    if extractor is None:  # pragma: no cover — защита от неверной сборки
+        return ExtractedDoc(
+            text="",
+            content_hash="",
+            extractor_version="",
+            error="extraction worker без экстрактора для уровня",
+        )
+    return _run_extract(extractor, request)
 
 
 @dataclass
@@ -315,6 +366,10 @@ class IndexBuild:
     #: D1/G: детализация усечения по ``(product, seed-root)``: эффективные лимиты, число
     #: добытых страниц, причина (``max_documents``/``max_depth``), зачёркнутые блэклистом URL.
     truncation: list[dict[str, Any]] = field(default_factory=list)
+    #: P5: видимые пропуски документов уровнем ``off`` (решение **никогда** не тихо):
+    #: ``{product_id, url, reason: url_suffix|content_type, level}``. Питает канал
+    #: усечения/аномалии (``source_scope: exhaustive`` поверх «прореженного» продукта).
+    document_skips: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass
@@ -814,6 +869,7 @@ def build_corpus(
     executor_wave_items: int | None = None,
     pool_factory: Callable[[int], Executor] | None = None,
     extraction_pool: ExtractionPool | None = None,
+    extractor_factory: Callable[[DocumentLevel], ExtractorPort] | None = None,
     extract_task_timeout_s: float | None = None,
     max_attempts: int | None = None,
     progress: Callable[[dict[str, int]], None] | None = None,
@@ -905,6 +961,13 @@ def build_corpus(
         (не более ``W`` экстракций «в полёте»), доводка строго FIFO. ``None`` при заданной
         оси ``>1`` — явная запись в ``errors`` + inline-fallback (не тихо). Воркер получает
         только :class:`_ExtractRequest` (примитивы + ``raw_path``); байты не пиклятся (I19).
+    :param extractor_factory: P5 — фабрика per-level экстрактора ``Callable[[DocumentLevel],
+        ExtractorPort]``, переданная ссылкой из composition root (слой-матрица: pipeline не
+        импортирует адаптеры). Применяется к **inline**-пути (``extract_workers`` None/``1``):
+        для уровня корня, отличного от ``full``, строится экстрактор этого уровня; ``full``
+        переиспользует переданный ``extractor`` (дефолт — без лишней загрузки весов docling).
+        ``None`` → уровень на inline-пути не действует (поведение как прежде; пул-путь всё
+        равно получает уровень через ``extraction_pool.pool_factory``).
     :param extract_task_timeout_s: P4 — потолок ожидания ``future.result`` одного задания
         экстракции (guard от зависшего воркера, не SLA). ``None`` →
         :data:`_EXTRACT_TASK_TIMEOUT_S`. По таймауту пул reap'ится, in-flight → ``FAILED``,
@@ -953,6 +1016,9 @@ def build_corpus(
     errors: list[str] = []
     duplicate_count = 0
     raw_root_path = Path(raw_root)
+    #: P5: видимые пропуски документов уровнем ``off`` (никогда не тихо) — агрегат по всем
+    #: корням/продуктам прогона; кладётся в ``IndexBuild.document_skips``.
+    document_skips: list[dict[str, Any]] = []
 
     # D4: дефолты оси стратегии/задержек из run.yaml ``crawl`` (профиль домена их переопределяет).
     crawl_strategy_default = (
@@ -1134,15 +1200,17 @@ def build_corpus(
         ingest: _ProductIngest,
         seen_docs: dict[str, str],
         seen_chunk_ids: set[str],
+        extractor_obj: ExtractorPort,
     ) -> None:
         """Inline-экстракция → доводка одного URL (путь без пула, ``None``/``1``).
 
-        Тело экстракции (``extractor.extract``) вынесено в :func:`_finish_one`; здесь —
+        Тело экстракции (``extractor_obj.extract``) вынесено в :func:`_finish_one`; здесь —
         только inline-вызов и перевод исключения в ту же ошибку ``parser_failed``, что и
-        пул-путь (P4: единая семантика отказа).
+        пул-путь (P4: единая семантика отказа). ``extractor_obj`` — экстрактор уровня
+        корня (P5; ``full`` переиспользует переданный порт).
         """
         try:
-            extracted = extractor.extract(page, fetch_plan.extract)
+            extracted = extractor_obj.extract(page, fetch_plan.extract)
         except Exception as exc:  # noqa: BLE001 — изоляция по контракту фазы
             _finish_one(
                 product_id,
@@ -1983,6 +2051,48 @@ def build_corpus(
                 profiles=domain_profiles or {},
             )
             frontier = Frontier(root_url, limits)
+            # P5: уровень извлечения документов — свойство корня (per seed-root; один конвертер
+            # на пул). ``full`` переиспользует переданный экстрактор (дефолт — без лишней
+            # загрузки весов); иной уровень строится фабрикой, если она передана.
+            level = limits.document_level
+            root_extractor: ExtractorPort = extractor
+            if level is not DocumentLevel.FULL and extractor_factory is not None:
+                try:
+                    root_extractor = extractor_factory(level)
+                except Exception as exc:  # noqa: BLE001 — изоляция по контракту фазы
+                    errors.append(
+                        f"{pid}/{root_url}: extractor_factory({level.value}): "
+                        f"{type(exc).__name__}: {exc} — уровень понижен до переданного "
+                        "экстрактора"
+                    )
+                    root_extractor = extractor
+
+            def _record_document_skip(url: str, reason: str) -> None:
+                """P5: видимая запись пропуска документа (frontier + агрегат ``IndexBuild``)."""
+                frontier.note_document_skip(url, reason)
+                document_skips.append(
+                    {
+                        "product_id": pid,
+                        "url": url,
+                        "reason": reason,
+                        "level": level.value,
+                    }
+                )
+
+            def _skip_document_prefetch(work_url: str) -> bool:
+                """P5: pre-fetch-пропуск документа при ``off`` (суффикс URL).
+
+                ``True`` — URL пропущен (не фетчится, не ретейнится, не входит в
+                ``max_documents``; запись видна в ``document_skips``). Блэклист побеждает
+                (проверяется раньше). Content-type-детект суффикс-less URL — post-fetch путь.
+                """
+                if level is not DocumentLevel.OFF:
+                    return False
+                if document_suffix(work_url) is None:
+                    return False
+                _record_document_skip(work_url, "url_suffix")
+                return True
+
             # P4: окно экстракции — **per seed-root**, лениво. ``None``/``1`` ⇒ пул не
             # создаётся (экстракция inline, байт-в-байт). ``W`` всегда конечный ``int ≥ 2``.
             extract_window = (
@@ -2093,6 +2203,16 @@ def build_corpus(
                 page, raw_path, fetch_plan, freshly_fetched = outcome
                 if freshly_fetched:
                     frontier.note_fetched()
+                # P5: post-fetch-пропуск документа при ``off`` (тип узнан только по Content-Type;
+                # фетч был ⇒ страница уже учтена в ``max_documents``, элемент сеанса — FETCHED
+                # из retention; ``FAILED`` не ставим — skip ≠ сбой, §2/§11.3). Байты ретейнены.
+                if (
+                    level is DocumentLevel.OFF
+                    and document_content_type(page.content_type) is not None
+                ):
+                    _record_document_skip(work_url, "content_type")
+                    _emit_progress()
+                    return
                 if extracted is _INLINE:
                     _ingest_one(
                         pid,
@@ -2103,6 +2223,7 @@ def build_corpus(
                         ingest,
                         seen_docs,
                         seen_chunk_ids,
+                        root_extractor,
                     )
                 else:
                     _finish_one(
@@ -2137,6 +2258,7 @@ def build_corpus(
                     content_type=page.content_type,
                     engine=page.engine,
                     route=fetch_plan.extract,
+                    level=level,
                 )
 
             def _inflight_fresh() -> int:
@@ -2283,7 +2405,7 @@ def build_corpus(
                 if extract_executor is None:
                     try:
                         extract_executor = extraction_pool.pool_factory(  # type: ignore[union-attr]
-                            extract_window
+                            extract_window, level
                         )
                     except Exception as exc:  # noqa: BLE001 — изоляция по контракту фазы
                         errors.append(
@@ -2449,6 +2571,10 @@ def build_corpus(
                                     _WaveEntry(pid, work_url, depth, "blacklisted")
                                 )
                                 continue
+                            if _skip_document_prefetch(work_url):
+                                # P5: документ при ``off`` — pre-fetch-пропуск (виден).
+                                _emit_progress()
+                                continue
                             prior_item = items.get((pid, work_url))
                             if (
                                 max_attempts is not None
@@ -2587,6 +2713,10 @@ def build_corpus(
                                 f"{pid}/{work_url}: зачёркнут блэклистом перед фетчем — пропущен"
                             )
                             continue
+                        if _skip_document_prefetch(work_url):
+                            # P5: документ при ``off`` — pre-fetch-пропуск (виден; не в max_documents).
+                            _emit_progress()
+                            continue
                         prior_item = items.get((pid, work_url))
                         if (
                             max_attempts is not None
@@ -2651,6 +2781,10 @@ def build_corpus(
                             entries.append(
                                 _WaveEntry(pid, work_url, depth, "blacklisted")
                             )
+                            continue
+                        if _skip_document_prefetch(work_url):
+                            # P5: документ при ``off`` — pre-fetch-пропуск (виден).
+                            _emit_progress()
                             continue
                         prior_item = items.get((pid, work_url))
                         if (
@@ -2782,6 +2916,12 @@ def build_corpus(
                 pages_fetched_total += frontier.fetched
                 if frontier.truncated:
                     truncated_products.add(product_id)
+                # P5: пропуск документов «прореживает» корпус продукта по построению — он
+                # питает тот же канал аномалии, что и усечение (защита от false ❌ I2/I2b:
+                # `source_scope: exhaustive` поверх «прореженного» продукта — аномалия
+                # для человека). Причина — не ``max_*``, а ``document_level=off``.
+                if frontier.skipped_documents:
+                    truncated_products.add(product_id)
                 truncation_records.append(
                     {
                         "product_id": product_id,
@@ -2791,6 +2931,8 @@ def build_corpus(
                         "truncated_reason": frontier.truncated_reason,
                         "limits": frontier.limits.as_dict(),
                         "skipped_blacklisted": list(frontier.skipped_blacklisted),
+                        # P5: видимые пропуски документов (``url_suffix``/``content_type``).
+                        "skipped_documents": [dict(rec) for rec in frontier.skipped_documents],
                     }
                 )
 
@@ -2964,6 +3106,7 @@ def build_corpus(
         crawl_failed=crawl_failed,
         truncated=bool(truncated_products),
         truncation=truncation_records,
+        document_skips=list(document_skips),
     )
     # Примечание: индексная сборка «возвращается» в log_entries (PhaseResult — контракт фазы;
     # W8 читает IndexBuild отсюда). Счётчики — в полях IndexBuild; дубликаты — в errors.

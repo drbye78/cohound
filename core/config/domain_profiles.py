@@ -32,7 +32,7 @@ from typing import Any
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
-from core.domain.enums import CrawlStrategy, ExtractionRoute, FetchMode
+from core.domain.enums import CrawlStrategy, DocumentLevel, ExtractionRoute, FetchMode
 from core.domain.models import RateLimitSpec
 
 __all__ = ["DomainProfile", "load_domain_profiles"]
@@ -64,6 +64,10 @@ class DomainProfile(BaseModel):
     max_documents: int | None = Field(default=None, gt=0)
     exclude_paths: list[str] | None = None
     exclude_documents: list[str] | None = None
+    # P5: per-site слой уровня извлечения документных форматов (высший приоритет цепочки
+    # app < run < site). ``None`` = не задано на этом слое (наследуется run/app). Это
+    # операторский escape hatch от «слишком медленного PDF» — без правки кода.
+    document_level: DocumentLevel | None = None
     # D3: per-site URL публичного ``sitemap.xml`` (опц.). ``None`` = не задан (поведение
     # неизменно). ``<loc>`` sitemap становятся **дополнительными** depth-0 seeds (не заменяют
     # seed-URL оператора); сам sitemap — не страница (не ретейнится/не ингестится, I19).

@@ -233,6 +233,33 @@ class ExtractionRoute(StrEnum):
     DOCUMENT = "document"
 
 
+class DocumentLevel(StrEnum):
+    """P5: уровень извлечения **документных** форматов (ось ``crawl.document_level``).
+
+    Единая лестница от «не извлекать документы вовсе» до «сегодняшнего максимума
+    coHound». Применяется только к документным форматам (PDF/Office); HTML не затрагивается
+    ни при каком значении. Дефолт — ``full`` = сегодняшнее эффективное поведение
+    (layout Heron + TableFormer ACCURATE + cell-matching + авто-OCR).
+
+    * ``off`` — документы **не извлекаются**: суффикс-детектируемые пропускаются до фетча,
+      определяемые только по ``Content-Type`` — после фетча (feтч нужен, чтобы узнать тип);
+    * ``text`` — моделе-независимый ``NativePdfPipeline`` (текст + координаты);
+    * ``layout`` — только layout-модель (без таблиц и OCR);
+    * ``layout_tables`` — layout + TableFormer FAST, **OCR выключен**;
+    * ``full`` — Heron layout + таблицы ACCURATE + cell-matching + авто-OCR (дефолт).
+
+    Операционное перечисление (commodity-слой, A2): его смена — граница класса
+    ``execution_change`` (§13), не ``methodology_change``. Источник истины —
+    ``docs/status-dictionary.yaml`` (секция ``document_level``).
+    """
+
+    OFF = "off"
+    TEXT = "text"
+    LAYOUT = "layout"
+    LAYOUT_TABLES = "layout_tables"
+    FULL = "full"
+
+
 class CrawlStrategy(StrEnum):
     """Ось стратегии краула: **как** используется браузер **при browser-capable адаптере**.
 

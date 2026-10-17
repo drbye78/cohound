@@ -265,7 +265,8 @@ class _FakePool:
 
 
 def _recording_factory(created: list[_FakePool], **kw: Any):
-    def factory(n: int) -> _FakePool:
+    # P5: фабрика получает (размер, уровень) — уровень здесь несущественен (фейк).
+    def factory(n: int, level: Any = None) -> _FakePool:
         pool = _FakePool(n, **kw)
         created.append(pool)
         return pool
@@ -622,7 +623,7 @@ def test_extract_failure_keeps_out_links_like_inline(tmp_path: Path) -> None:
         # (c) пул, воркер умер (``BrokenProcessPool`` на root) — регресс-путь ``_fail_extract``.
         created: list[_FakePool] = []
 
-        def crash_factory(n: int) -> _FakePool:
+        def crash_factory(n: int, level: Any = None) -> _FakePool:
             # 1-й пул: падает на 1-м ``result()``; 2-й (rebuild): рабочий.
             fake = _FakePool(n, crash_on=1 if not created else None)
             created.append(fake)
@@ -669,7 +670,7 @@ def test_extract_worker_crash_reaps_and_degrades(tmp_path: Path) -> None:
         pages = _site_dup()
         created: list[_FakePool] = []
 
-        def factory(n: int) -> _FakePool:
+        def factory(n: int, level: Any = None) -> _FakePool:
             # 1-й пул: падает на 2-м ``result()``; 2-й (rebuild): рабочий.
             crash_on = 2 if not created else None
             fake = _FakePool(n, crash_on=crash_on)
@@ -752,6 +753,8 @@ def test_extract_request_carries_no_bytes(tmp_path: Path) -> None:
         "content_type",
         "engine",
         "route",
+        # P5: уровень извлечения (аддитивное поле payload; примитив StrEnum).
+        "level",
     }
     # Байты не пиклятся: у payload нет поля content/bytes (только путь к retained-файлу).
     assert "content" not in names and "bytes" not in names and "raw_bytes" not in names

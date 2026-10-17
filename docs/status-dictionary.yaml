@@ -249,6 +249,20 @@ crawl_strategy:
   - honest
   - hybrid
 
+# P5. Уровень извлечения документных форматов (crawl.document_level): единая лестница.
+# Операционное перечисление (commodity-слой, A2) — добавление без бампа версии словаря
+# (§13: класс энума — по семантике, не по файлу-носителю). Значения: off — документы не
+# извлекаются; text — моделе-независимый нативный парсер; layout — layout-модель без
+# таблиц/OCR; layout_tables — layout + TableFormer FAST, OCR off; full — дефолт =
+# сегодняшнее поведение (Heron layout + таблицы ACCURATE + авто-OCR).
+document_level:
+  # NB: ``off`` кавычится — YAML 1.1 трактует unquoted ``off`` как boolean (PyYAML).
+  - "off"
+  - text
+  - layout
+  - layout_tables
+  - full
+
 # hound package crawl-probe: наблюдаемые значения зонда осей краула по ключам
 # domain_profiles.yaml. Операционное перечисление — без бампа версии словаря.
 # source — приоритет источника URL (первый хит на ключ); status — исход зонда;

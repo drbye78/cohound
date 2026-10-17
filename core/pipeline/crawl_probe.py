@@ -50,6 +50,11 @@ from core.domain.enums import CrawlStrategy, ExtractionRoute, FetchMode
 from core.domain.models import RateLimitSpec
 from core.pipeline.fetch_plan import _select_best
 from core.pipeline.package_io import atomic_write_text
+from core.util.document_formats import (
+    DOCUMENT_SUFFIXES,
+    document_content_type,
+    document_suffix,
+)
 from core.util.robots import RobotsGate
 
 __all__ = [
@@ -91,20 +96,12 @@ PROBE_RATE_LIMIT = RateLimitSpec(min_s=1.0, max_s=3.0)
 #: Консервативный диапазон, предлагаемый при наблюдённом ``429`` (требует подтверждения).
 RATE_LIMIT_HINT = RateLimitSpec(min_s=2.0, max_s=5.0)
 
-#: Реестр документных расширений (зеркало ``adapters/extract_document.SUPPORTED_FORMATS``;
-#: composition root передаёт актуальный набор, здесь — дефолт для чистых тестов).
-DEFAULT_DOCUMENT_SUFFIXES: frozenset[str] = frozenset({".pdf", ".docx", ".pptx", ".xlsx"})
+#: Реестр документных расширений (единый источник — ``core.util.document_formats``;
+#: ``adapters/extract_document.SUPPORTED_FORMATS`` строится из того же набора).
+DEFAULT_DOCUMENT_SUFFIXES: frozenset[str] = frozenset(DOCUMENT_SUFFIXES)
 
 #: HTML-подобные типы контента (родовая классификация, без вендорных строк).
 _HTML_CONTENT_TYPES: frozenset[str] = frozenset({"text/html", "application/xhtml+xml"})
-
-#: ``content-type`` → документное расширение (детерминированный маппинг формата).
-_DOC_SUFFIX_BY_CONTENT_TYPE: dict[str, str] = {
-    "application/pdf": ".pdf",
-    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
-    "application/vnd.openxmlformats-officedocument.presentationml.presentation": ".pptx",
-    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ".xlsx",
-}
 
 #: Статус, трактуемый как сигнал частоты (единственный; 401/403 — антибот, не частота).
 _RATE_SIGNAL_STATUS = 429
@@ -263,15 +260,17 @@ def detect_document_suffix(
 ) -> str | None:
     """Документное расширение по URL (суффикс пути) или ``content_type``, иначе ``None``.
 
-    Та же логика, что :func:`core.cli.wiring._detect_document_filename`: сначала суффикс
-    пути, затем карта ``content-type``. ``None`` ⇒ HTML-путь (trafilatura).
+    Классификация — единый источник :mod:`core.util.document_formats` (тот же, что
+    ``crawl.document_level=off`` и роутинг экстрактора): сначала суффикс пути URL
+    (percent-декодированный), затем карта ``content-type``. ``None`` ⇒ HTML-путь
+    (trafilatura). ``supported_suffixes`` — композиционный фильтр: результат принимается,
+    только если входит в переданный набор (дефолт — реестр util).
     """
     suffixes = frozenset(str(suffix).lower() for suffix in supported_suffixes)
-    suffix = Path(urlsplit(url).path).suffix.lower()
-    if suffix and suffix in suffixes:
-        return suffix
-    mapped = _DOC_SUFFIX_BY_CONTENT_TYPE.get(_base_content_type(content_type))
-    return mapped if mapped in suffixes else None
+    suffix = document_suffix(url)
+    if suffix is None:
+        suffix = document_content_type(content_type)
+    return suffix if suffix in suffixes else None
 
 
 def detect_extract_route(

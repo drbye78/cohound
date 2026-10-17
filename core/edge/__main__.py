@@ -39,9 +39,7 @@ import signal
 import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
-from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit
 
 from core.adapters.chunker_markdown import MarkdownChunkerPort
 from core.adapters.crawl_browser import BrowserCrawler
@@ -58,6 +56,7 @@ from core.ports.chunker import ChunkerPort
 from core.ports.crawler import CrawlerPort
 from core.ports.extractor import ExtractorPort
 from core.ports.types import ExtractionRoute, FetchMode, FetchPlan, RawPage
+from core.util.document_formats import document_content_type, document_suffix
 
 __all__ = ["main", "crawler_factory"]
 
@@ -68,14 +67,6 @@ EXIT_ERROR = 1
 #: Ошибка входа/конфигурации (неизвестная подкоманда, невалидный конфиг).
 EXIT_USAGE = 2
 
-#: Форматы документов docling → расширение для детекции маршрута (зеркало 03 §D.2).
-_DOC_SUFFIX_BY_CONTENT_TYPE: dict[str, str] = {
-    "application/pdf": ".pdf",
-    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
-    "application/vnd.openxmlformats-officedocument.presentationml.presentation": ".pptx",
-    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ".xlsx",
-}
-
 
 # ---------------------------------------------------------------------------
 # Экстрактор: композит HTML (trafilatura) + документы (docling)
@@ -85,15 +76,15 @@ _DOC_SUFFIX_BY_CONTENT_TYPE: dict[str, str] = {
 def _detect_document_filename(page: RawPage) -> str | None:
     """Имя документа с расширением, если формат обрабатывает docling (иначе ``None``).
 
-    Формат выводится из URL (суффикс пути), затем из ``content_type``. ``None`` — страницу
-    обрабатывает HTML-путь. Используется только при маршруте ``AUTO`` (07 §3).
+    Формат выводится единым классификатором :mod:`core.util.document_formats`: сначала
+    суффикс пути URL (percent-декодированный), затем ``Content-Type``. ``None`` — «нет
+    документного сигнала» ⇒ страницу обрабатывает HTML-путь. Используется только при
+    маршруте ``AUTO`` (07 §3).
     """
-    suffix = Path(urlsplit(page.url).path).suffix.lower()
-    if suffix and DoclingDocumentExtractor.supports(f"document{suffix}"):
-        return f"document{suffix}"
-    content_type = (page.content_type or "").split(";")[0].strip().lower()
-    doc_suffix = _DOC_SUFFIX_BY_CONTENT_TYPE.get(content_type)
-    return f"document{doc_suffix}" if doc_suffix is not None else None
+    suffix = document_suffix(page.url)
+    if suffix is None:
+        suffix = document_content_type(page.content_type)
+    return f"document{suffix}" if suffix is not None else None
 
 
 class _EdgeExtractor:

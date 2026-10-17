@@ -48,6 +48,7 @@ from core.cli.wiring import (
     build_extraction_pool,
     build_gateway,
     build_store,
+    build_worker_extractor,
     manifest_deploy_fields,
     run_db_path,
 )
@@ -59,7 +60,12 @@ from core.config import (
     passport_urls,
 )
 from core.config.deploy import DeployConfig
-from core.domain.enums import CrawlItemStatus, CrawlSessionStatus, Status
+from core.domain.enums import (
+    CrawlItemStatus,
+    CrawlSessionStatus,
+    DocumentLevel,
+    Status,
+)
 from core.domain.models import CatalogRow, Cohort
 from core.pipeline import PHASES, Ports, RunReport, build_phases
 from core.pipeline.normalize import RunInputs, load_inputs
@@ -1336,6 +1342,7 @@ def _resolve_phases(
     max_documents: int | None = None,
     exclude_paths: Sequence[str] | None = None,
     exclude_documents: Sequence[str] | None = None,
+    document_level: DocumentLevel | None = None,
 ) -> dict[str, PhaseFn]:
     """Собирает реестр не-гейтовых фаз (``phases_factory`` — тестовый шов).
 
@@ -1421,6 +1428,8 @@ def _resolve_phases(
         "max_documents": max_documents,
         "exclude_paths": list(exclude_paths) if exclude_paths else None,
         "exclude_documents": list(exclude_documents) if exclude_documents else None,
+        # P5: CLI-уточнение run-слоя уровня извлечения документов (--document-level).
+        "document_level": document_level,
         "crawl_app": deploy_config.crawl if deploy_config is not None else None,
         # P4: исполнитель параллельной экстракции по профилю зон (local — процессы,
         # split — потоки поверх RemoteExtractor). Ось ``crawl.extract_workers`` решается
@@ -1428,6 +1437,14 @@ def _resolve_phases(
         "extraction_pool": build_extraction_pool(
             deploy_config.profile if deploy_config is not None else LOCAL_PROFILE,
             extractor=getattr(ports, "extractor", None),
+        ),
+        # P5: фабрика per-level экстрактора для inline-пути. Под ``split`` ось
+        # ``document_level`` не действует (R-S: edge строит конвертеры сам) — ``None``.
+        "extractor_factory": (
+            build_worker_extractor
+            if (deploy_config.profile if deploy_config is not None else LOCAL_PROFILE)
+            == LOCAL_PROFILE
+            else None
         ),
     }
     factory = getattr(args, "phases_factory", None)
@@ -1591,6 +1608,19 @@ def _positive_int(raw: str) -> int:
     return value
 
 
+def _document_level(raw: str) -> DocumentLevel:
+    """``argparse``-тип оси ``--document-level`` (P5): значение enum ``DocumentLevel``.
+
+    :raises argparse.ArgumentTypeError: значение вне лестницы ``off|text|layout|layout_tables|full``.
+    """
+    try:
+        return DocumentLevel(raw)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            f"ожидался один из off|text|layout|layout_tables|full, получено {raw!r}"
+        ) from exc
+
+
 def _non_negative_int(raw: str) -> int:
     """``argparse``-тип: целое ``>= 0`` (для ``--max-depth``; 0 — только seeds, D1).
 
@@ -1673,6 +1703,18 @@ def _add_phase4_flags(parser: argparse.ArgumentParser) -> None:
         default=None,
         metavar="GLOB",
         help="glob блэклиста по basename URL, напр. '*.pdf' (повторяемый)",
+    )
+    # P5: уровень извлечения документных форматов (run-слой поверх run.yaml).
+    parser.add_argument(
+        "--document-level",
+        dest="document_level",
+        type=_document_level,
+        default=None,
+        metavar="LEVEL",
+        help=(
+            "уровень извлечения документов: off|text|layout|layout_tables|full "
+            "(дефолт full = сегодняшнее поведение)"
+        ),
     )
     parser.add_argument(
         "--follow",

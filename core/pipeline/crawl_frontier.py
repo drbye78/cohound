@@ -39,6 +39,7 @@ from urllib.parse import unquote, urlsplit
 
 from core.config.deploy import CrawlConfig
 from core.config.domain_profiles import DomainProfile
+from core.domain.enums import DocumentLevel
 from core.domain.models import CrawlRunConfig
 from core.pipeline.fetch_plan import _host_matches, select_domain_profile
 from core.util.security import validate_url
@@ -71,6 +72,10 @@ class CrawlLimits:
     max_documents: int | None = None
     exclude_paths: tuple[str, ...] = ()
     exclude_documents: tuple[str, ...] = ()
+    #: P5: уровень извлечения документных форматов (ось ``crawl.document_level``). Дефолт
+    #: ``full`` = сегодняшнее эффективное поведение. Резолвится той же цепочкой app < run <
+    #: site; per seed-root (один корень = один уровень).
+    document_level: DocumentLevel = DocumentLevel.FULL
 
     def as_dict(self) -> dict[str, object]:
         """Канонический словарь для провенанса/манифеста (сортированно-стабильно)."""
@@ -81,6 +86,7 @@ class CrawlLimits:
             "max_documents": self.max_documents,
             "exclude_paths": list(self.exclude_paths),
             "exclude_documents": list(self.exclude_documents),
+            "document_level": self.document_level.value,
         }
 
 
@@ -119,6 +125,9 @@ def resolve_crawl_limits(
     run_max_documents = run.max_documents if run is not None else None
     run_exclude_paths = run.exclude_paths if run is not None else None
     run_exclude_documents = run.exclude_documents if run is not None else None
+    run_document_level = (
+        getattr(run, "document_level", None) if run is not None else None
+    )
 
     max_workers = _pick(app.max_workers, run_max_workers, site_attr("max_workers"))
     extract_workers = _pick(
@@ -136,6 +145,11 @@ def resolve_crawl_limits(
     exclude_documents = _pick(
         app.exclude_documents, run_exclude_documents, site_attr("exclude_documents")
     )
+    document_level = _pick(
+        getattr(app, "document_level", None),
+        run_document_level,
+        site_attr("document_level"),
+    )
 
     return CrawlLimits(
         max_workers=None if max_workers is None else int(max_workers),  # type: ignore[arg-type]
@@ -148,6 +162,9 @@ def resolve_crawl_limits(
         ),
         exclude_paths=tuple(exclude_paths or ()),  # type: ignore[arg-type]
         exclude_documents=tuple(exclude_documents or ()),  # type: ignore[arg-type]
+        document_level=DocumentLevel(
+            DocumentLevel.FULL if document_level is None else document_level
+        ),
     )
 
 
@@ -239,6 +256,10 @@ class Frontier:
         self.truncated_reason: str | None = None
         #: Seeds/ссылки, отброшенные блэклистом (наблюдаемость: «не молчаливый дроп»).
         self.skipped_blacklisted: list[str] = []
+        #: P5: документы, пропущенные уровнем ``off`` (pre-fetch по суффиксу / post-fetch
+        #: по content-type). Записи ``{"url", "reason"}`` (`url_suffix`/`content_type`) —
+        #: решение обязано быть видимым (никогда не тихо), и питать канал усечения/аномалии.
+        self.skipped_documents: list[dict[str, str]] = []
 
     # -- scope -------------------------------------------------------------- #
 
@@ -275,6 +296,15 @@ class Frontier:
     def note_fetched(self) -> None:
         """Учесть успешно добытую (retained) страницу этого корня."""
         self.fetched += 1
+
+    def note_document_skip(self, url: str, reason: str) -> None:
+        """P5: отметить пропуск документа уровнем ``off`` (видимость решения).
+
+        ``reason`` — ``url_suffix`` (pre-fetch skip) либо ``content_type`` (post-fetch).
+        Идемпотентности нет намеренно: дубликат-совпадение не пропускается, но URL в
+        потоке дренажа уникален (dedup frontier).
+        """
+        self.skipped_documents.append({"url": url, "reason": reason})
 
     def note_consumed(self, count: int) -> None:
         """Учесть уже израсходованный бюджет корня (retained-страницы resume, B2).
@@ -367,6 +397,8 @@ class Frontier:
         clone._seen = set(self._seen)
         clone._queue = deque(self._queue)
         clone.fetched = self.fetched
+        clone.skipped_blacklisted = list(self.skipped_blacklisted)
+        clone.skipped_documents = [dict(rec) for rec in self.skipped_documents]
         return clone
 
     # -- внутреннее --------------------------------------------------------- #

@@ -32,7 +32,6 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit
 
 from core.adapters.chunker_markdown import MarkdownChunkerPort
 from core.adapters.crawl_browser import BrowserCrawler
@@ -93,6 +92,7 @@ from core.config.deploy import (
 )
 from core.config.domain_profiles import DomainProfile
 from core.config.crawl_sources import CrawlSourcesConfig
+from core.domain.enums import DocumentLevel
 from core.domain.models import CrawlRunConfig
 from core.pipeline import Ports, Runner
 from core.pipeline.corpus import ExtractionPool
@@ -114,6 +114,7 @@ from core.ports.vector_index import VectorIndexPort
 from core.store.backup import list_builds
 from core.store.sqlite_store import SqliteStore
 from core.util.cache import ContentAddressedCache
+from core.util.document_formats import document_content_type, document_suffix
 from core.util.hashing import short_hash
 from core.util.robots import RobotsGate
 from core.util.sitemap import MAX_SITEMAP_ENTRIES
@@ -1154,28 +1155,19 @@ def _browser_crawler_kwargs(deploy: DeployConfig) -> dict[str, Any]:
     return kwargs
 
 
-#: Формат документа → расширение (роутинг композитного экстрактора на docling).
-_DOC_SUFFIX_BY_CONTENT_TYPE: dict[str, str] = {
-    "application/pdf": ".pdf",
-    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
-    "application/vnd.openxmlformats-officedocument.presentationml.presentation": ".pptx",
-    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ".xlsx",
-}
-
-
 def _detect_document_filename(page: RawPage) -> str | None:
     """Имя файла с документным расширением, если формат страницы обрабатывает docling.
 
-    Формат выводится из URL (суффикс пути), затем из ``content_type``. Возврат ``None``
-    означает, что страницу обрабатывает HTML-путь (trafilatura). Используется только при
-    маршруте ``AUTO``; ``HTML``/``DOCUMENT`` задают путь явно (D2).
+    Формат выводится единым классификатором :mod:`core.util.document_formats`: сначала
+    суффикс пути URL (percent-декодированный), затем ``Content-Type``. Возврат ``None``
+    означает, что страницу обрабатывает HTML-путь (trafilatura) — «нет документного
+    сигнала ⇒ HTML». Используется только при маршруте ``AUTO``; ``HTML``/``DOCUMENT``
+    задают путь явно (D2).
     """
-    suffix = Path(urlsplit(page.url).path).suffix.lower()
-    if suffix and DoclingDocumentExtractor.supports(f"document{suffix}"):
-        return f"document{suffix}"
-    content_type = (page.content_type or "").split(";")[0].strip().lower()
-    doc_suffix = _DOC_SUFFIX_BY_CONTENT_TYPE.get(content_type)
-    return f"document{doc_suffix}" if doc_suffix is not None else None
+    suffix = document_suffix(page.url)
+    if suffix is None:
+        suffix = document_content_type(page.content_type)
+    return f"document{suffix}" if suffix is not None else None
 
 
 class _LocalExtractor:
@@ -1226,35 +1218,47 @@ class _LocalExtractor:
 # --------------------------------------------------------------------------- #
 
 
-def build_worker_extractor() -> ExtractorPort:
-    """Строит экстрактор **внутри** воркер-процесса (P4; picklable by reference, §7).
+def build_worker_extractor(level: DocumentLevel = DocumentLevel.FULL) -> ExtractorPort:
+    """Строит экстрактор **внутри** воркер-процесса (P4/P5; picklable by reference, §7).
 
     Один экстрактор (HTML + документы при наличии docling) на воркер — амортизирует
     загрузку весов между заданиями. Объекты не пересекают границу процессов: фабрика
-    передаётся инициализатору ссылкой, вызов происходит в ребёнке.
+    передаётся инициализатору ссылкой, вызов происходит в ребёнке. ``level`` (P5) задаёт
+    уровень документной экстракции; ``off`` → docling **не** строится вовсе (документы
+    пропускаются pipeline'ом, HTML обычен).
     """
     html = HtmlExtractor()
-    documents = DoclingDocumentExtractor()
+    if level is DocumentLevel.OFF:
+        return html
+    documents = DoclingDocumentExtractor(level=level)
     return _LocalExtractor(html, documents) if documents.available else html
 
 
-def _extract_worker_init(extractor_factory: Callable[[], ExtractorPort]) -> None:
-    """Инициализатор воркер-процесса пула экстракции (P4/§7): ставит его экстрактор.
+def _extract_worker_init(
+    extractor_factory: Callable[[DocumentLevel], ExtractorPort],
+    level: DocumentLevel,
+) -> None:
+    """Инициализатор воркер-процесса пула экстракции (P4/P5/§7): ставит его экстрактор.
 
-    ``extractor_factory`` — module-level (picklable by reference); глобал экстрактора живёт
-    в ``core.pipeline.corpus`` (общий воркер :func:`core.pipeline.corpus._extract_worker`).
+    ``extractor_factory`` — module-level (picklable by reference); ``level`` — уровень корня
+    (пул per-seed-root, P5). Глобал экстрактора живёт в ``core.pipeline.corpus`` (общий
+    воркер :func:`core.pipeline.corpus._extract_worker`); фабрика передаётся и туда —
+    защитный lazy-путь, если задание принесёт иной уровень.
     """
     from core.pipeline.corpus import set_worker_extractor
 
-    set_worker_extractor(extractor_factory())
+    set_worker_extractor(extractor_factory(level), level=level, factory=extractor_factory)
 
 
-def _local_extract_pool_factory(max_workers: int) -> Any:
-    """``ProcessPoolExecutor`` (forkserver) для локальной экстракции (P4/§7).
+def _local_extract_pool_factory(
+    max_workers: int, level: DocumentLevel = DocumentLevel.FULL
+) -> Any:
+    """``ProcessPoolExecutor`` (forkserver) для локальной экстракции (P4/P5/§7).
 
     ``forkserver`` (дефолт Python 3.14 на Linux) не форкает прогретый родитель (torch уже
     загружен в ядре при docling-экстракции) — безопасно; инициализатор строит экстрактор
-    на воркер. Прецедент процессов — edge-планировщик (``core/edge/scheduler.py``).
+    **нужного уровня** на воркер (``level`` — свойство корня, P5). Прецедент процессов —
+    edge-планировщик (``core/edge/scheduler.py``).
     """
     import multiprocessing
     from concurrent.futures import ProcessPoolExecutor
@@ -1263,7 +1267,7 @@ def _local_extract_pool_factory(max_workers: int) -> Any:
         max_workers=max_workers,
         mp_context=multiprocessing.get_context("forkserver"),
         initializer=_extract_worker_init,
-        initargs=(build_worker_extractor,),
+        initargs=(build_worker_extractor, level),
     )
 
 
@@ -1295,8 +1299,11 @@ def build_extraction_pool(
         def _remote_worker(request: Any) -> Any:
             return _run_extract(extractor, request)
 
+        # P5: ось ``document_level`` здесь не действует (R-S): под ``split`` документную
+        # экстракцию исполняет edge своим конфигом. Уровень принимается и игнорируется, чтобы
+        # подпись фабрики совпадала с локальной.
         return ExtractionPool(
-            pool_factory=lambda n: _thread_pool(n),
+            pool_factory=lambda n, level=DocumentLevel.FULL: _thread_pool(n),
             worker=_remote_worker,
         )
     return None

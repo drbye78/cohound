@@ -30,6 +30,8 @@ from typing import Any
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from core.domain.enums import DocumentLevel
+
 __all__ = [
     "TLSConfig",
     "AuthConfig",
@@ -355,6 +357,12 @@ class CrawlConfig(BaseModel):
     max_documents: int | None = Field(default=None, gt=0)
     exclude_paths: list[str] | None = None
     exclude_documents: list[str] | None = None
+    # P5: уровень извлечения документных форматов (PDF/Office). Дефолт ``full`` =
+    # сегодняшнее эффективное поведение (layout Heron + таблицы ACCURATE + авто-OCR); его
+    # смена — граница класса ``execution_change`` (§13), не ``methodology_change``. Резолв —
+    # та же цепочка app < run < site (:func:`core.pipeline.crawl_frontier.resolve_crawl_limits`),
+    # per seed-root. ``off`` — документы не извлекаются (видимые ``document_skips``).
+    document_level: DocumentLevel = DocumentLevel.FULL
     # D1/§10 (N1): явное включение/выключение принуждения ``robots.txt`` в адаптерах
     # (egress-слой). ``None`` = auto: robots включается ровно тогда, когда включён обход
     # (любой эффективный ``max_depth > 0`` или сконфигурированный per-site ``sitemap``),

@@ -407,6 +407,22 @@ P5), но строка помечена здесь как неактуальна
   `_commit_outcome`. Дефолт `None`/`1` ⇒ inline, байт-в-байт. Класс версий — `execution_change`
   (дайджест/поле; `golden-full` из-за контента не требуется — измерена байт-идентичность
   docling между процессами). Память ≈ `W × 2 GiB` (`03` §D.5).
+- **Уровни извлечения документов (P5, as-built).** Ось `crawl.document_level`
+  (`off`|`text`|`layout`|`layout_tables`|`full`; app < run < site, per seed-root,
+  `CrawlLimits.document_level`, манифест-поле `crawl_document_level`, `crawl_config_digest`)
+  — единая лестница качества PDF-экстракции, где **дефолт `full` = сегодняшнее эффективное
+  поведение** (layout Heron + таблицы TableFormer `ACCURATE` + cell-matching + **авто-OCR**;
+  мёртвый `use_ocr`/дока-«ложь» исправлены). `off` — документы не извлекаются (pre-fetch по
+  суффиксу / post-fetch по `Content-Type`; видимые `document_skips` + канал аномалии усечения;
+  сессионный статус не перезаписывается, skip ≠ `FAILED`). Уровень входит в
+  `extractor_version` (`docling-doc-3:<level>`) ⇒ `index_build_id` (сборки иммутабельны).
+  Класс — `execution_change`; дефолт контент не меняет. Байт-идентичность якоря
+  (`tests/pipeline/test_document_levels.py::test_docling_explicit_full_equals_bare_default`,
+  `full` ≡ bare `DocumentConverter()`) **реализована**, но её прогон — **офлайн/gated**
+  (opt-in по `COHOUND_RUN_DOCLING_LEVELS=1`, в обычном CI не выполняется);
+  churn `index_build_id`/дайджеста при дефолте — принят (R1). Пул — свойство корня
+  (`pool_factory(W, level)`); память = `W × footprint(level)`. Под `split` ось **не** действует
+  (R-S: edge строит конвертеры сам). Новых зависимостей нет.
 
 ### Сводка статуса (вместо дневных оценок)
 

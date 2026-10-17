@@ -240,7 +240,9 @@ crawl:                          # §3.2/D4: дефолты оси стратег
   rate_limit: {min_s: 1.0, max_s: 3.0}   # опц.: uniform(min_s, max_s) между запросами (per-host)
   max_workers: 4                # опц. (>0): D4-пул потоков на сетевой fetch (None/1 = inline)
   extract_workers: null         # опц. (>0): P4-пул экстракции (local — процессы, split —
-                                # потоки; None/1 = inline). Память: W × ~2 GiB (docling)
+                                # потоки; None/1 = inline). Память: W × footprint(level)
+  document_level: full          # опц.: P5-уровень извлечения документов
+                                # (off|text|layout|layout_tables|full; дефолт full)
   max_depth: 2                  # опц. (>=0): глубина BFS-обхода in-site ссылок (0 — только seeds)
   max_documents: 500            # опц. (>0): потолок добытых страниц на (продукт, seed-root)
   exclude_paths: ["/private/*"] # опц.: glob блэклиста по пути URL (fnmatchcase)
@@ -281,6 +283,59 @@ seeds); BFS-обход идёт и локальным путём, и через 
 basename пути (`*.pdf`); применяются и к seeds, и к обнаруженным ссылкам. **Caveat
 `exclude_documents`:** имя файла, переданное только в query-строке
 (`/download?file=report.pdf`), basename не является и паттерном не ловится.
+
+**`document_level` (P5) — уровень извлечения документов.** Ось `crawl.document_level`
+(`off`|`text`|`layout`|`layout_tables`|`full`) едет **той же** цепочкой
+`app < run < site` (`resolve_crawl_limits`) и резолвится **per seed-root** (один корень —
+один уровень). Применяется только к документным форматам (PDF/Office Open XML); HTML не
+затрагивается ни при каком значении. **Дефолт `full`** = сегодняшнее эффективное поведение
+(Heron layout + таблицы TableFormer `ACCURATE` + cell-matching + **авто-OCR**;
+`images_scale=1.0`). Лестница: `text` — моделе-независимый `NativePdfPipeline` (текст +
+координаты; без reading order/заголовков/таблиц); `layout` — только layout-модель (без
+таблиц и OCR); `layout_tables` — layout + `TableFormer FAST`, **OCR off**; `full` — OCR on
+(OCR включён только на верхнем уровне — distinguishes `full`). Уровень входит в
+`extractor_version` (`docling-doc-3:<level>`) и потому в `index_build_id`: смена уровня
+**не может** молча дать ту же сборку (сборки иммутабельны — новый уровень = новая сборка).
+Класс изменения — `execution_change` (§13), не `methodology_change`; дефолт контент не
+меняет (кроме churn `index_build_id`/`crawl_config_digest`).
+
+**`off` — режим «игнорировать документы».** Документы **не извлекаются/не индексируются**,
+docling не вызывается:
+* **суффикс известен** (`.pdf/.docx/...` по пути URL) ⇒ **pre-fetch-пропуск**: URL не
+  фетчится, не ретейнится и **не входит** в `max_documents`; причина — `url_suffix`;
+* **суффикс неизвестен**, но `Content-Type` документный ⇒ **post-fetch-пропуск**: страница
+  фетчится (иначе тип не узнать) и **ретейнится** (I19/R7), элемент сеанса остаётся
+  `FETCHED` (**не** `FAILED` — skip ≠ сбой), **входит** в `max_documents`; причина —
+  `content_type`;
+* **HTML не затрагивается**: обычные страницы обрабатываются как прежде.
+
+Пропуски **видимы** (никогда не тихо): `IndexBuild.document_skips` +
+`truncation[].skipped_documents` (`metrics.json`/payload). Продукт с пропущенными документами
+«прорежен» по построению ⇒ попадает в `truncated_products`: absence-evidence
+`source_scope: exhaustive` поверх него даёт **аномалию** (`crawl_truncation`, защита от
+false ❌ I2/I2b), а сеанс не рапортуется `COMPLETED`. `off` **не экономит фетч**
+суффикс-less PDF (content-type узнаётся только после фетча) — экономится лишь **docling**.
+Блэклисты (`exclude_documents`) **побеждают** `off` (проверяются раньше и по другому ключу —
+basename/path без знания content-type); «полная» экономия фетча — только блэклист/суффикс.
+
+**Память по уровням.** Пик = `W × footprint(level корня)` (`W` = `extract_workers`), где
+`footprint(full)` ≈ 2.0 GiB/процесс; у `text` ML-весов нет (заметно ниже), у `layout`/
+`layout_tables` — промежуточно (`full` ≈ 2.0 GiB peak, 2.6–7.5 с/стр). Пулы корней
+**последовательны** (создаются лениво на корень и `shutdown` в `finally`), поэтому пик —
+**максимум** по корням, а **не** сумма: прогон с site A `full` и site B `off` не складывает
+память. `off`-корень docling не строит вовсе (0). Операторский escape hatch от «слишком
+медленного PDF» — понизить уровень per-site (`domain_profiles.yaml: document_level: layout`),
+взять `off` или уменьшить `extract_workers` — **без правки кода**.
+
+**Развёртывание `split`.** Под `split` документную **экстракцию** исполняет **edge** своим
+конфигом; поэтому уровни **качества** извлечения (`text`/`layout`/`layout_tables`/`full`) в
+ядре **не действуют** — они не распространяются на edge, а распространение требует
+аддитивного расширения шва (`/v1/*`) — **отдельное** решение. Но **`off` действует и под
+`split`**: skip-решение принимает ядро/pipeline, а не edge. Pre-fetch-пропуск по суффиксу URL
+(`_skip_document_prefetch`) исполняется в drain-цикле и в executor-ветке
+(`core/pipeline/corpus.py`, `if executor is not None:`), post-fetch-пропуск по `Content-Type` —
+в `_commit_outcome`; обе ветки активны под `split` (остаток R-S относится к качеству
+извлечения на edge, не к `off`).
 
 `max_documents` — жёсткий потолок **на `(продукт, seed-root)`** (не исключение): в drain-цикле
 проверяется ёмкость, поэтому даже пакетно поставленные seeds/ссылки сверх потолка не
@@ -335,10 +390,12 @@ basename пути (`*.pdf`); применяются и к seeds, и к обна�
   из профиля.
 
   Профиль домена — **высший** слой цепочки осей контроля краула (D1/D2): per-site
-  `max_workers`/`max_depth`/`max_documents`/`exclude_paths`/`exclude_documents`
-  переопределяют run/app-дефолты (`resolve_crawl_limits`). Например,
+  `max_workers`/`extract_workers`/`max_depth`/`max_documents`/`exclude_paths`/
+  `exclude_documents`/`document_level` переопределяют run/app-дефолты
+  (`resolve_crawl_limits`). Например,
   `example.org/documents: {fetch: http, max_depth: 1, exclude_documents: ["*.pdf"]}`.
-  Схема остаётся строгой (`extra="forbid"`).
+  Схема остаётся строгой (`extra="forbid"`). Per-site `document_level` (P5) — операторский
+  escape hatch от «слишком медленного PDF»: `example.org: {document_level: layout}`.
 
   Профиль домена несёт также per-site URL публичного **sitemap** (D3):
   `example.org: {sitemap: "https://example.org/sitemap.xml"}`. Его `<loc>` добавляются
@@ -490,7 +547,9 @@ crawl:                         # операционная политика HTTP-
   # резолв — pipeline/crawl_frontier.py:resolve_crawl_limits).
   max_workers: 4               # опц. (>0): D4-пул потоков на сетевой fetch (None/1 = inline)
   extract_workers: null        # опц. (>0): P4-пул экстракции (процессы local / потоки split;
-                               # None/1 = inline). Память: W × ~2 GiB (docling/воркер)
+                               # None/1 = inline). Память: W × footprint(document_level)
+  document_level: full         # P5: уровень извлечения документов (off|text|layout|
+                               # layout_tables|full; дефолт full = сегодняшнее поведение)
   max_depth: 0                 # >=0: 0 = только seeds (BFS идёт и под executor/split — A2/R2)
   max_documents: null          # опц. (>0): потолок добытых страниц на (продукт, seed-root)
   exclude_paths: []            # glob блэклиста по пути URL (fnmatchcase; ведущий "/" опционален)
@@ -515,12 +574,19 @@ crawl:                         # операционная политика HTTP-
 воркер), `split` — пул потоков поверх `RemoteExtractor` (шов `/v1/*` не меняется). Окно
 `W` = `extract_workers`: «в полёте» не более `W` экстракций, доводка строго FIFO (порядок
 коммита = порядок отправки). Дефолт `None` (выключено) ⇒ поведение **байт-в-байт** сегодняшнее.
-**Бюджет памяти: `W × ~2 GiB` RSS на процесс** (измерено: `import docling` + первый `convert`
-≈ 2.0 GiB peak; см. `05` §V4) — планируйте `W` против доступной RAM хоста; авто-детект не
-вводится (A1: не угадывать). Один медленный PDF в голове FIFO задерживает доводку окна —
-следствие FIFO-детерминизма, не регресс. Отказ воркера (краш/OOM/таймаут) → явный `FAILED`
-+ сеанс `PARTIAL`, пул пересобирается (bounded) либо остаток идёт inline; авто-ретрая нет
-(восстановление — повторный прогон того же `session_id` по retained raw, без ре-фетча).
+**Бюджет памяти: `W × footprint(document_level)` RSS на процесс** (у `full` измерено `≈2.0 GiB`
+peak: `import docling` + первый `convert`; см. `05` §V4) — планируйте `W` против доступной RAM
+хоста; авто-детект не вводится (A1: не угадывать). `footprint` зависит от уровня (P5):
+`full` ≈ 2.0 GiB/процесс (ML-веса layout+TableFormer+OCR), `text` — заметно ниже (ML-весов
+нет), `layout`/`layout_tables` — промежуточно; **экстраполировать 2.0 GiB на `text/layout`
+нельзя — мерьте** (`full` 2.6–7.5 с/стр). Пулы создаются **per seed-root** и `shutdown` в
+`finally`, корни обходятся **последовательно**, поэтому пик = `W × footprint(level корня)` —
+**максимум** по корням, а не сумма: прогон с site A `full` и site B `off` не складывает
+память (`off`-корень docling не строит вовсе). Один медленный PDF в голове FIFO задерживает
+доводку окна — следствие FIFO-детерминизма, не регресс. Отказ воркера (краш/OOM/таймаут) →
+явный `FAILED` + сеанс `PARTIAL`, пул пересобирается (bounded) либо остаток идёт inline;
+авто-ретрая нет (восстановление — повторный прогон того же `session_id` по retained raw без
+ре-фетча).
 
 Вложенная секция `crawl.browser` (`CrawlBrowserConfig`) конфигурирует браузерный краулер
 `BrowserCrawler` (`crawl_browser.py`, прямой Playwright/CDP, honest/hybrid). Режимы

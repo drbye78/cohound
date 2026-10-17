@@ -144,6 +144,7 @@ EXECUTION_FIELDS: tuple[str, ...] = (
     # тот же класс ``execution_change``.
     "crawl_max_workers",
     "crawl_extract_workers",
+    "crawl_document_level",
     "crawl_max_depth",
     "crawl_max_documents",
     "crawl_exclude_paths",
@@ -449,6 +450,13 @@ def _coerce_int(value: Any) -> int | None:
     return int(value)
 
 
+def _document_level_value(value: Any) -> str | None:
+    """P5: строковое значение оси ``document_level`` (``StrEnum``) либо ``None``."""
+    if value is None:
+        return None
+    return str(getattr(value, "value", value))
+
+
 def _crawl_control_digest(
     *,
     run_crawl: Any,
@@ -666,6 +674,7 @@ def build_manifest(
     crawl_rate_limit: str | None = None
     crawl_max_workers: int | None = None
     crawl_extract_workers: int | None = None
+    crawl_document_level: str | None = None
     crawl_max_depth: int | None = None
     crawl_max_documents: int | None = None
     crawl_exclude_paths: list[str] = []
@@ -686,6 +695,18 @@ def build_manifest(
         crawl_exclude_documents = list(
             getattr(crawl_cfg, "exclude_documents", None) or []
         )
+        crawl_document_level = _document_level_value(
+            getattr(crawl_cfg, "document_level", None)
+        )
+    # P5: если run-слой не задал уровень явно — фиксируем **эффективный дефолт** app-слоя
+    # (``CrawlConfig.document_level``, дефолт ``full``), чтобы манифест не молчал об оси.
+    # ``crawl_app`` может быть не передан (модульные теста/исторические вызовы) — тогда
+    # ``None`` (значение не выдумываем: A3).
+    if crawl_document_level is None:
+        from core.config.deploy import CrawlConfig
+
+        if isinstance(crawl_app, CrawlConfig):
+            crawl_document_level = crawl_app.document_level.value
 
     # N6/§13: дайджест **разрешённой** конфигурации контроля краула (app < run < per-site).
     crawl_config_digest = _crawl_control_digest(
@@ -777,6 +798,7 @@ def build_manifest(
         crawl_rate_limit=crawl_rate_limit,
         crawl_max_workers=crawl_max_workers,
         crawl_extract_workers=crawl_extract_workers,
+        crawl_document_level=crawl_document_level,
         crawl_max_depth=crawl_max_depth,
         crawl_max_documents=crawl_max_documents,
         crawl_exclude_paths=crawl_exclude_paths,

@@ -20,6 +20,7 @@ from core.domain.enums import (
     CrawlItemStatus,
     CrawlSessionStatus,
     CrawlStrategy,
+    DocumentLevel,
     EndpointKind,
     EvidenceState,
     EvidenceType,
@@ -364,6 +365,10 @@ class CrawlRunConfig(BaseModel):
     max_documents: int | None = Field(default=None, gt=0)
     exclude_paths: list[str] | None = None
     exclude_documents: list[str] | None = None
+    # P5: run-слой уровня извлечения документных форматов (``run.yaml:crawl.document_level``).
+    # ``None`` = не задано на этом слое (наследуется app-дефолт ``full``). Резолв —
+    # :func:`core.pipeline.crawl_frontier.resolve_crawl_limits`.
+    document_level: DocumentLevel | None = None
 
     @field_validator("exclude_paths", "exclude_documents")
     @classmethod
@@ -858,6 +863,10 @@ class RunManifest(BaseModel):
     #: от ``crawl_max_workers`` (сетевой fetch-пул); её смена — та же граница класса
     #: ``execution_change`` (§13). ``None`` — ось не задана (поведение неизменно).
     crawl_extract_workers: int | None = None
+    #: P5/§13: уровень извлечения документных форматов (``crawl.document_level``). Его смена —
+    #: та же граница класса ``execution_change``. ``None`` — не разрешён явно (в дайджесте
+    #: всё равно зафиксирован эффективный ``full`` по app-дефолту).
+    crawl_document_level: str | None = None
     crawl_max_depth: int | None = None
     crawl_max_documents: int | None = None
     crawl_exclude_paths: list[str] = Field(default_factory=list)

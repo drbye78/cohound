@@ -39,7 +39,12 @@ from collections.abc import Callable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
 from core.domain.anchors import SourceResolver
-from core.domain.enums import CrawlItemStatus, CrawlSessionStatus, SkipReason
+from core.domain.enums import (
+    CrawlItemStatus,
+    CrawlSessionStatus,
+    DocumentLevel,
+    SkipReason,
+)
 from core.domain.models import (
     CrawlProvenance,
     CrawlRunConfig,
@@ -65,6 +70,7 @@ from core.pipeline.report import build_manifest, write_reports
 from core.pipeline.retrieve import RetrievalProfile
 from core.pipeline.review import review_queue
 from core.pipeline.runner import PhaseFn, PhaseResult, Ports, RunContext
+from core.ports.extractor import ExtractorPort
 from core.ports.types import FetchMode
 from core.util.rate_limit import RateLimiter
 
@@ -371,6 +377,7 @@ def build_phases(
     crawl_sources: CrawlSourcesConfig | None = None,
     rate_limiter: RateLimiter | None = None,
     extraction_pool: ExtractionPool | None = None,
+    extractor_factory: Callable[[DocumentLevel], ExtractorPort] | None = None,
     satellites: Sequence[Satellite] = (),
     resolver: SourceResolver | None = None,
     strict: bool = True,
@@ -384,6 +391,7 @@ def build_phases(
     exclude_paths: Sequence[str] | None = None,
     exclude_documents: Sequence[str] | None = None,
     crawl_app: CrawlConfig | None = None,
+    document_level: DocumentLevel | None = None,
 ) -> dict[str, PhaseFn]:
     """Возвращает реестр ``{phase_name: PhaseFn}`` для не-гейтовых фаз конвейера.
 
@@ -515,6 +523,8 @@ def build_phases(
             override["exclude_paths"] = list(exclude_paths)
         if exclude_documents:
             override["exclude_documents"] = list(exclude_documents)
+        if document_level is not None:
+            override["document_level"] = document_level
         if override:
             base = run_crawl if run_crawl is not None else CrawlRunConfig()
             run_crawl = base.model_copy(update=override)
@@ -542,6 +552,9 @@ def build_phases(
             # P4: исполнитель экстракции (process-local / thread-split) — аддитивная ось
             # ``crawl.extract_workers``; ``None`` ⇒ inline (поведение байт-в-байт).
             extraction_pool=extraction_pool,
+            # P5: фабрика per-level экстрактора для inline-пути (переданная ссылка из
+            # composition root; ``None`` ⇒ уровень на inline-пути не действует, как прежде).
+            extractor_factory=extractor_factory,
             # Phase 3.3: исполнитель краула (``split``/edge-планировщик). ``None`` → локальный
             # per-URL путь (``crawler``/``crawlers``); при наличии — краул через шов.
             executor=getattr(ctx.ports, "executor", None),
