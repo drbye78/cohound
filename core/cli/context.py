@@ -45,6 +45,7 @@ from core.cli.wiring import (
     SUPPORTED_PROFILES,
     build_adapters,
     build_evaluator_llm,
+    build_extraction_pool,
     build_gateway,
     build_store,
     manifest_deploy_fields,
@@ -1421,6 +1422,13 @@ def _resolve_phases(
         "exclude_paths": list(exclude_paths) if exclude_paths else None,
         "exclude_documents": list(exclude_documents) if exclude_documents else None,
         "crawl_app": deploy_config.crawl if deploy_config is not None else None,
+        # P4: исполнитель параллельной экстракции по профилю зон (local — процессы,
+        # split — потоки поверх RemoteExtractor). Ось ``crawl.extract_workers`` решается
+        # в pipeline; при ``None``/``1`` пул не создаётся (поведение байт-в-байт).
+        "extraction_pool": build_extraction_pool(
+            deploy_config.profile if deploy_config is not None else LOCAL_PROFILE,
+            extractor=getattr(ports, "extractor", None),
+        ),
     }
     factory = getattr(args, "phases_factory", None)
     if factory is not None:

@@ -60,10 +60,13 @@ class CrawlLimits:
 
     ``max_depth`` уже с дефолтом 0 (текущее поведение: только seeds). ``max_documents`` —
     ``None`` = без лимита. ``max_workers`` (D4, конкурентность) резолвится и попадает в
-    провенанс, но исполнение пока однопоточное — задел под D4.
+    провенанс; ``max_workers`` управляет **сетевым** fetch-пулом, ``extract_workers`` (P4) —
+    отдельной осью **экстракции** (CPU-параллелизм). Обе оси — ``int | None`` (``None``/``1``
+    ⇒ пул не создаётся).
     """
 
     max_workers: int | None = None
+    extract_workers: int | None = None
     max_depth: int = 0
     max_documents: int | None = None
     exclude_paths: tuple[str, ...] = ()
@@ -73,6 +76,7 @@ class CrawlLimits:
         """Канонический словарь для провенанса/манифеста (сортированно-стабильно)."""
         return {
             "max_workers": self.max_workers,
+            "extract_workers": self.extract_workers,
             "max_depth": self.max_depth,
             "max_documents": self.max_documents,
             "exclude_paths": list(self.exclude_paths),
@@ -108,12 +112,20 @@ def resolve_crawl_limits(
         return getattr(profile, name) if profile is not None else None
 
     run_max_workers = run.max_workers if run is not None else None
+    run_extract_workers = (
+        getattr(run, "extract_workers", None) if run is not None else None
+    )
     run_max_depth = run.max_depth if run is not None else None
     run_max_documents = run.max_documents if run is not None else None
     run_exclude_paths = run.exclude_paths if run is not None else None
     run_exclude_documents = run.exclude_documents if run is not None else None
 
     max_workers = _pick(app.max_workers, run_max_workers, site_attr("max_workers"))
+    extract_workers = _pick(
+        getattr(app, "extract_workers", None),
+        run_extract_workers,
+        site_attr("extract_workers"),
+    )
     max_depth = _pick(app.max_depth, run_max_depth, site_attr("max_depth"))
     max_documents = _pick(
         app.max_documents, run_max_documents, site_attr("max_documents")
@@ -127,6 +139,9 @@ def resolve_crawl_limits(
 
     return CrawlLimits(
         max_workers=None if max_workers is None else int(max_workers),  # type: ignore[arg-type]
+        extract_workers=(
+            None if extract_workers is None else int(extract_workers)  # type: ignore[arg-type]
+        ),
         max_depth=0 if max_depth is None else int(max_depth),  # type: ignore[arg-type]
         max_documents=(
             None if max_documents is None else int(max_documents)  # type: ignore[arg-type]

@@ -238,7 +238,9 @@ settings_provenance:            # A3: default|measured (+ experiment_id при m
 crawl:                          # §3.2/D4: дефолты оси стратегии краула и politeness-пейсинга
   strategy: auto                # auto | honest | hybrid (как используется браузер)
   rate_limit: {min_s: 1.0, max_s: 3.0}   # опц.: uniform(min_s, max_s) между запросами (per-host)
-  max_workers: 4                # опц. (>0): D4-задел конкурентности (пока однопоточно)
+  max_workers: 4                # опц. (>0): D4-пул потоков на сетевой fetch (None/1 = inline)
+  extract_workers: null         # опц. (>0): P4-пул экстракции (local — процессы, split —
+                                # потоки; None/1 = inline). Память: W × ~2 GiB (docling)
   max_depth: 2                  # опц. (>=0): глубина BFS-обхода in-site ссылок (0 — только seeds)
   max_documents: 500            # опц. (>0): потолок добытых страниц на (продукт, seed-root)
   exclude_paths: ["/private/*"] # опц.: glob блэклиста по пути URL (fnmatchcase)
@@ -260,19 +262,25 @@ preliminary не совместим с capability_ranked — I13). `ranking_poli
 неизменно (`auto`, без пейсинга); резолв — `pipeline/fetch_plan.py` (дефолт прогона →
 профиль домена → явный `--render-modes`).
 
-Секция `crawl` несёт также **оси контроля краула** (`max_workers`/`max_depth`/`max_documents`/
-`exclude_paths`/`exclude_documents`/`robots`), разрешаемые **отдельной** цепочкой
-`deploy.yaml:crawl` (application default) < `run.yaml:crawl` (run profile) <
-`domain_profiles.yaml` (per-site) — `pipeline/crawl_frontier.py:resolve_crawl_limits`. Это
-**не** оси `crawl_sources.yaml` и **не** `FetchPlan`: отдельный канал, чтобы не сломать
-приоритет source-routing. `max_depth` дефолт `0` (только seeds) и под executor/split
-**отвергается** явной конфиг-ошибкой (BFS доступен только локальному пути до волнового
-паритета), причём только для host'ов, реально краулимых под executor (N8). `max_documents=0`
-отвергается на загрузке (`>0`). Блэклисты — glob (`fnmatchcase`, case-sensitive):
-`exclude_paths` по пути URL (паттерн принимается и с ведущим `/`, и без — `docs/*` ≡
-`/docs/*`, N5), `exclude_documents` по basename пути (`*.pdf`); применяются и к seeds, и к
-обнаруженным ссылкам. **Caveat `exclude_documents`:** имя файла, переданное только в
-query-строке (`/download?file=report.pdf`), basename не является и паттерном не ловится.
+Секция `crawl` несёт также **оси контроля краула** (`max_workers`/`extract_workers`/
+`max_depth`/`max_documents`/`exclude_paths`/`exclude_documents`/`robots`), разрешаемые
+**отдельной** цепочкой `deploy.yaml:crawl` (application default) < `run.yaml:crawl`
+(run profile) < `domain_profiles.yaml` (per-site) —
+`pipeline/crawl_frontier.py:resolve_crawl_limits`. Это **не** оси `crawl_sources.yaml` и
+**не** `FetchPlan`: отдельный канал, чтобы не сломать приоритет source-routing. Две
+**независимые** оси конкурентности: `max_workers` — пул потоков на **сетевой fetch**
+(локальный путь; «у одной оси не может быть двух смыслов», A2/P3), а `extract_workers`
+(P4) — пул **экстракции** (процессы на `local`, потоки на `split`): «в полёте» не более
+`W` экстракций, доводка строго FIFO; байты страниц через границу процессов не пиклятся —
+воркер перечитывает retained-`raw_path` (I19). Обе оси — `int | None`: `None`/`1` ⇒ пул
+не создаётся, исполнение inline (байт-в-байт сегодняшнее). `max_depth` дефолт `0` (только
+seeds); BFS-обход идёт и локальным путём, и через executor/split (A2/R2, с предохранителем
+раундов `round_budget` под executor). `max_documents=0` отвергается на загрузке (`>0`).
+Блэклисты — glob (`fnmatchcase`, case-sensitive): `exclude_paths` по пути URL (паттерн
+принимается и с ведущим `/`, и без — `docs/*` ≡ `/docs/*`, N5), `exclude_documents` по
+basename пути (`*.pdf`); применяются и к seeds, и к обнаруженным ссылкам. **Caveat
+`exclude_documents`:** имя файла, переданное только в query-строке
+(`/download?file=report.pdf`), basename не является и паттерном не ловится.
 
 `max_documents` — жёсткий потолок **на `(продукт, seed-root)`** (не исключение): в drain-цикле
 проверяется ёмкость, поэтому даже пакетно поставленные seeds/ссылки сверх потолка не
@@ -480,8 +488,10 @@ crawl:                         # операционная политика HTTP-
   follow_redirects: true
   # D1/D2: application-слой осей контроля краула (низший приоритет app < run < site;
   # резолв — pipeline/crawl_frontier.py:resolve_crawl_limits).
-  max_workers: 4               # опц. (>0): D4-задел конкурентности (исполнение пока однопоточное)
-  max_depth: 0                 # >=0: 0 = только seeds (под executor/split >0 отвергается)
+  max_workers: 4               # опц. (>0): D4-пул потоков на сетевой fetch (None/1 = inline)
+  extract_workers: null        # опц. (>0): P4-пул экстракции (процессы local / потоки split;
+                               # None/1 = inline). Память: W × ~2 GiB (docling/воркер)
+  max_depth: 0                 # >=0: 0 = только seeds (BFS идёт и под executor/split — A2/R2)
   max_documents: null          # опц. (>0): потолок добытых страниц на (продукт, seed-root)
   exclude_paths: []            # glob блэклиста по пути URL (fnmatchcase; ведущий "/" опционален)
   exclude_documents: []        # glob блэклиста по basename URL, напр. ["*.pdf"]
@@ -499,6 +509,18 @@ crawl:                         # операционная политика HTTP-
 переопределяет операционные параметры лёгкого `HttpCrawler` (`user_agent`/`timeout_s`/
 `follow_redirects`); при `None`/отсутствии поля берётся дефолт адаптера — обратная
 совместимость профиля `local` без файла.
+
+**`extract_workers` (P4, runbook памяти).** Параллельная экстракция документов:
+`local` — пул процессов (`ProcessPoolExecutor`/forkserver, docling-экстрактор строится на
+воркер), `split` — пул потоков поверх `RemoteExtractor` (шов `/v1/*` не меняется). Окно
+`W` = `extract_workers`: «в полёте» не более `W` экстракций, доводка строго FIFO (порядок
+коммита = порядок отправки). Дефолт `None` (выключено) ⇒ поведение **байт-в-байт** сегодняшнее.
+**Бюджет памяти: `W × ~2 GiB` RSS на процесс** (измерено: `import docling` + первый `convert`
+≈ 2.0 GiB peak; см. `05` §V4) — планируйте `W` против доступной RAM хоста; авто-детект не
+вводится (A1: не угадывать). Один медленный PDF в голове FIFO задерживает доводку окна —
+следствие FIFO-детерминизма, не регресс. Отказ воркера (краш/OOM/таймаут) → явный `FAILED`
++ сеанс `PARTIAL`, пул пересобирается (bounded) либо остаток идёт inline; авто-ретрая нет
+(восстановление — повторный прогон того же `session_id` по retained raw, без ре-фетча).
 
 Вложенная секция `crawl.browser` (`CrawlBrowserConfig`) конфигурирует браузерный краулер
 `BrowserCrawler` (`crawl_browser.py`, прямой Playwright/CDP, honest/hybrid). Режимы
@@ -662,8 +684,9 @@ hound run \
 `COMPLETED` (→ `PARTIAL`), а absence `source_scope: exhaustive` поверх усечённого продукта
 даёт аномалию (в `nda_questions.csv` и JSON-payload). При **resume** бюджет `max_documents`
 корня восстанавливается из durable-элементов сеанса — потолок не превышается (B2).
-Под `--profile split`/executor `--max-depth > 0` отвергается явной конфиг-ошибкой (для
-host'ов в охвате прогона, N8).
+Под `--profile split`/executor `--max-depth > 0` **поддержан** (A2/R2): BFS-раунды ведёт ядро
+тем же `_drain_root`, что и локальный путь; предохранитель — `round_budget` (не молчаливая
+остановка). Ось `--max-attempts`/`extract_workers` действует на обоих профилях.
 Поля `truncated`/`truncated_reason`/`effective_limits`/`pages_fetched` видны в
 `crawl`/`run` payload и в `metrics.json` (`crawl_truncation`); при **единственной**
 неполноте — политическом усечении без сбоев фетча — код возврата `EXIT_OK` с явным

@@ -81,8 +81,10 @@ from __future__ import annotations
 import datetime as _dt
 import json
 import time
+from collections import deque
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import Executor, ThreadPoolExecutor
+from concurrent.futures.process import BrokenProcessPool
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
@@ -128,13 +130,19 @@ from core.ports.extractor import ExtractorPort
 from core.ports.index_builder import IndexBuilderPort, IndexMeta
 from core.ports.poller import PollPort
 from core.ports.types import Chunk as PortChunk
-from core.ports.types import FetchMode, FetchPlan, RawPage
+from core.ports.types import (
+    ExtractedDoc,
+    ExtractionRoute,
+    FetchMode,
+    FetchPlan,
+    RawPage,
+)
 from core.util.hashing import content_hash, short_hash
 from core.util.html_links import extract_links
 from core.util.rate_limit import RateLimiter
 from core.util.security import validate_url
 
-__all__ = ["IndexBuild", "build_corpus"]
+__all__ = ["ExtractionPool", "IndexBuild", "build_corpus"]
 
 #: Разделитель полей material-строки ``index_build_id`` (unit separator — однозначная склейка).
 _FIELD_SEP = "\x1f"
@@ -176,6 +184,102 @@ _EXECUTOR_WAVE_ITEMS = 64
 #: ``round_budget`` + явная запись в ``errors`` + сеанс ``PARTIAL`` (никогда не тихая
 #: остановка). У локального пути аналога нет (остаточное расхождение R3).
 _EXECUTOR_MAX_WAVES_PER_ROOT = 1000
+
+#: P4: предохранитель от зависшего воркера экстракции — потолок ожидания ``future.result``
+#: (НЕ SLA: заведомо щедрый дефолт; конфигурируется аддитивным kwarg ``extract_task_timeout_s``
+#: зеркально ``executor_sleep``). По таймауту пул reap'ится (``terminate_workers``) и остаток
+#: корня идёт inline — никогда не тихо.
+_EXTRACT_TASK_TIMEOUT_S = 1800.0
+
+#: P4: ограниченное число пересборок мёртвого пула экстракции (краш/OOM/таймаут). После
+#: исчерпания — inline-fallback остатка корня с явной записью в ``errors`` (без авто-ретрая).
+_EXTRACT_MAX_POOL_REBUILDS = 2
+
+#: P4: сентинел «экстракция не была отложена» для :func:`build_corpus`-интернала
+#: ``_commit_outcome`` (inline-путь вызывает ``_ingest_one``; пул передаёт готовый результат).
+_INLINE = object()
+
+
+@dataclass(frozen=True)
+class _ExtractRequest:
+    """P4: payload одного задания экстракции — **только примитивы** (picklable by construction).
+
+    Байты страницы **не** передаются: retention (I19) уже положил их в ``raw_path``; воркер
+    перечитывает ровно эти байты и реконструирует тот же ``RawPage`` перед ``extractor.extract``.
+    ``route`` — ось извлечения, ``fetch_mode`` — ось получения (обе — ``StrEnum``-примитивы).
+    """
+
+    raw_path: str
+    url: str
+    fetched_at: str
+    fetch_mode: FetchMode
+    lang: str | None
+    status_code: int | None
+    content_type: str | None
+    engine: str | None
+    route: ExtractionRoute
+
+
+@dataclass(frozen=True)
+class ExtractionPool:
+    """P4: инъекция исполнителя экстракции из composition root (A1, ``pipeline ↛ adapters``).
+
+    :param pool_factory: фабрика ``int → Executor`` (размер = ``limits.extract_workers``);
+        ``local`` — ``ProcessPoolExecutor`` (forkserver, инициализатор строит экстрактор на
+        воркер), ``split`` — ``ThreadPoolExecutor`` (``RemoteExtractor`` I/O-bound).
+    :param worker: рабочая функция ``_ExtractRequest → ExtractedDoc``. Для процессов —
+        module-level (picklable by reference); для потоков допустим bound/closure.
+    """
+
+    pool_factory: Callable[[int], Executor]
+    worker: Callable[[_ExtractRequest], ExtractedDoc]
+
+
+#: P4: глобальный экстрактор воркер-процесса. Устанавливается инициализатором пула
+#: (composition root строит адаптер **внутри** процесса — объекты не пересекают границу).
+_WORKER_EXTRACTOR: ExtractorPort | None = None
+
+
+def set_worker_extractor(extractor: ExtractorPort | None) -> None:
+    """Устанавливает экстрактор воркер-процесса (зовётся ``initializer`` пула, P4)."""
+    global _WORKER_EXTRACTOR
+    _WORKER_EXTRACTOR = extractor
+
+
+def _run_extract(extractor: ExtractorPort, request: _ExtractRequest) -> ExtractedDoc:
+    """Перечитывает retained-байты (I19) и вызывает ``extractor.extract`` на том же ``RawPage``.
+
+    Общий шаг модульного воркер-процесса (:func:`_extract_worker`) и потокового воркера
+    (``split``): источник байтов — retained-файл, а не буфер родителя (I19).
+    """
+    content = Path(request.raw_path).read_bytes()
+    page = RawPage(
+        url=request.url,
+        content=content,
+        fetched_at=request.fetched_at,
+        fetch_mode=request.fetch_mode,
+        lang=request.lang,
+        status_code=request.status_code,
+        content_type=request.content_type,
+        engine=request.engine,
+    )
+    return extractor.extract(page, request.route)
+
+
+def _extract_worker(request: _ExtractRequest) -> ExtractedDoc:
+    """Module-level воркер экстракции для процессов (picklable by reference, P4/§7).
+
+    Использует экстрактор, построенный инициализатором в этом процессе; ``store``/``session``
+    воркеру недоступны by construction (payload — только примитивы).
+    """
+    if _WORKER_EXTRACTOR is None:  # pragma: no cover — защита от неверной сборки
+        return ExtractedDoc(
+            text="",
+            content_hash="",
+            extractor_version="",
+            error="extraction worker без экстрактора (initializer не отработал)",
+        )
+    return _run_extract(_WORKER_EXTRACTOR, request)
 
 
 @dataclass
@@ -275,6 +379,25 @@ class _WaveEntry:
     desc: _LocalFetch | None = None
     future: Any = None
     prior_item: CrawlSessionItem | None = None
+
+
+@dataclass
+class _PendingExtract:
+    """P4: отложенная экстракция (главный поток, FIFO-очередь доводки).
+
+    Несёт всё, что нужно финишу: реконструированный ``RawPage``, ``raw_path`` (перечитывается
+    воркером, I19), ``fetch_plan`` (ось ``extract``), флаг свежести (для ``note_fetched`` и
+    учёта ёмкости с in-flight) и ``future`` пула. Мутаций состояния сеанса/корпуса здесь нет.
+    """
+
+    pid: str
+    url: str
+    depth: int | None
+    page: RawPage
+    raw_path: Path
+    fetch_plan: FetchPlan
+    freshly_fetched: bool
+    future: Any
 
 
 # --------------------------------------------------------------------------- #
@@ -690,6 +813,8 @@ def build_corpus(
     executor_sleep: Callable[[float], None] = time.sleep,
     executor_wave_items: int | None = None,
     pool_factory: Callable[[int], Executor] | None = None,
+    extraction_pool: ExtractionPool | None = None,
+    extract_task_timeout_s: float | None = None,
     max_attempts: int | None = None,
     progress: Callable[[dict[str, int]], None] | None = None,
     crawl_app: CrawlConfig | None = None,
@@ -773,6 +898,17 @@ def build_corpus(
         лишь при ``max_workers > 1``: ``max_workers in (None, 1)`` — прежний однопоточный путь
         без пула. **Инъецируемые** ``sleep``/``rng`` лимитера (при заданном ``rate_limiter``)
         должны быть потокобезопасны — pacing зовётся из fetch-воркеров.
+    :param extraction_pool: P4 — инъекция исполнителя **экстракции** (:class:`ExtractionPool`:
+        фабрика пула + рабочий вызов). Отдельная ось ``CrawlLimits.extract_workers``
+        (``app < run < site``): ``None``/``1`` ⇒ пул не создаётся и экстракция inline
+        (поведение байт-в-байт). Пул — per seed-root, лениво, с ``shutdown``; окно ``W``
+        (не более ``W`` экстракций «в полёте»), доводка строго FIFO. ``None`` при заданной
+        оси ``>1`` — явная запись в ``errors`` + inline-fallback (не тихо). Воркер получает
+        только :class:`_ExtractRequest` (примитивы + ``raw_path``); байты не пиклятся (I19).
+    :param extract_task_timeout_s: P4 — потолок ожидания ``future.result`` одного задания
+        экстракции (guard от зависшего воркера, не SLA). ``None`` →
+        :data:`_EXTRACT_TASK_TIMEOUT_S`. По таймауту пул reap'ится, in-flight → ``FAILED``,
+        пул пересобирается (bounded) либо inline-fallback; авто-ретрая нет.
     :param max_attempts: Phase 4 — потолок попыток по ``(product_id, url)``. URL с уже
         сохранённым ``CrawlSessionItem.attempts >= max_attempts`` **не** фетчится и **не**
         подаётся исполнителю: он помечается терминальным ``FAILED`` с ``error_kind =
@@ -833,6 +969,14 @@ def build_corpus(
         executor_wave_items
         if executor_wave_items is not None
         else _EXECUTOR_WAVE_ITEMS
+    )
+
+    # P4: потолок ожидания задания экстракции (guard от зависшего воркера). Инъекция
+    # приоритетнее модульной константы (тесты дают крошечный таймаут).
+    _extract_timeout = (
+        extract_task_timeout_s
+        if extract_task_timeout_s is not None
+        else _EXTRACT_TASK_TIMEOUT_S
     )
 
     # L1a: сеанс краула (durable намерение + агрегат прогресса, §4.4). Идемпотентен на
@@ -991,25 +1135,70 @@ def build_corpus(
         seen_docs: dict[str, str],
         seen_chunk_ids: set[str],
     ) -> None:
-        """Экстракция → дедуп → нарезка одного URL (общая часть локального/executor путей).
+        """Inline-экстракция → доводка одного URL (путь без пула, ``None``/``1``).
 
-        Сырые байты уже сохранены (``raw_path``); шаги изолируют ошибки в ``errors`` и
-        фиксируют терминальный статус элемента сеанса через ``_mark``. Логика идентична для
-        обоих путей корпуса — вынесена, чтобы не дублировать её.
+        Тело экстракции (``extractor.extract``) вынесено в :func:`_finish_one`; здесь —
+        только inline-вызов и перевод исключения в ту же ошибку ``parser_failed``, что и
+        пул-путь (P4: единая семантика отказа).
+        """
+        try:
+            extracted = extractor.extract(page, fetch_plan.extract)
+        except Exception as exc:  # noqa: BLE001 — изоляция по контракту фазы
+            _finish_one(
+                product_id,
+                url,
+                page,
+                fetch_plan,
+                raw_path,
+                None,
+                ingest,
+                seen_docs,
+                seen_chunk_ids,
+                extract_error=f"{type(exc).__name__}: {exc}",
+            )
+            return
+        _finish_one(
+            product_id,
+            url,
+            page,
+            fetch_plan,
+            raw_path,
+            extracted,
+            ingest,
+            seen_docs,
+            seen_chunk_ids,
+        )
+
+    def _finish_one(
+        product_id: str,
+        url: str,
+        page: RawPage,
+        fetch_plan: FetchPlan,
+        raw_path: Path,
+        extracted: Any,
+        ingest: _ProductIngest,
+        seen_docs: dict[str, str],
+        seen_chunk_ids: set[str],
+        *,
+        extract_error: str | None = None,
+    ) -> None:
+        """Доводка одного URL после экстракции: дедуп → нарезка → ``_mark`` (главный поток).
+
+        P4: граница расщепления проходит **механически** по ``extracted`` — результат
+        экстракции приходит либо из inline-вызова, либо из ``future.result()`` пула. Сырые
+        байты уже сохранены (``raw_path``); шаги изолируют ошибки в ``errors`` и фиксируют
+        терминальный статус элемента сеанса через ``_mark`` (FIFO на главном потоке).
         """
         nonlocal duplicate_count
         # 3. Экстракция (грациозная деградация адаптера через .error).
-        try:
-            extracted = extractor.extract(page, fetch_plan.extract)
-        except Exception as exc:  # noqa: BLE001
-            reason = f"{type(exc).__name__}: {exc}"
-            errors.append(f"{product_id}/{url}: extract: {reason}")
+        if extract_error is not None:
+            errors.append(f"{product_id}/{url}: extract: {extract_error}")
             _mark(
                 product_id,
                 url,
                 CrawlItemStatus.FAILED,
                 error_kind=FailureKind.PARSER_FAILED.value,
-                error=reason,
+                error=extract_error,
                 raw_path=str(raw_path),
             )
             return
@@ -1794,6 +1983,24 @@ def build_corpus(
                 profiles=domain_profiles or {},
             )
             frontier = Frontier(root_url, limits)
+            # P4: окно экстракции — **per seed-root**, лениво. ``None``/``1`` ⇒ пул не
+            # создаётся (экстракция inline, байт-в-байт). ``W`` всегда конечный ``int ≥ 2``.
+            extract_window = (
+                int(limits.extract_workers)
+                if limits.extract_workers is not None and int(limits.extract_workers) > 1
+                else None
+            )
+            if extract_window is not None and extraction_pool is None:
+                # Ось задана, но пул не сконфигурирован — не тихо: явная запись + inline.
+                errors.append(
+                    f"{pid}/{root_url}: crawl.extract_workers={extract_window} задан, "
+                    "но пул экстракции не сконфигурирован — экстракция inline"
+                )
+            #: Исполнять ли экстракцию в пуле (снимается inline-fallback'ом при отказе).
+            defer_extract = extract_window is not None and extraction_pool is not None
+            extract_executor: Executor | None = None
+            extract_rebuilds = 0
+            pending: deque[_PendingExtract] = deque()
             # A2b/§6(b)/§10: egress-политика robots — **условна от discovery** и
             # вычисляется ядром **на корень** (edge строит краулеры «голыми»). Явный
             # ``crawl.robots`` (app-слой) переопределяет автодетект; иначе robots включён
@@ -1868,32 +2075,251 @@ def build_corpus(
                 work_url: str,
                 depth: int | None,
                 outcome: tuple[RawPage, Path, FetchPlan, bool] | None,
+                *,
+                extracted: Any = _INLINE,
+                extract_error: str | None = None,
             ) -> None:
-                """Общий пост-ингест дренажа: retention-счётчик, ``_ingest_one``, BFS-расширение.
+                """Общий пост-ингест дренажа: retention-счётчик, доводка, BFS-расширение.
 
                 Вызывается на главном потоке в FIFO-порядке; ``note_fetched`` — только здесь
                 (жёсткий стоп ``max_documents`` не может быть превышен из воркеров пула).
+
+                P4: ``extracted`` — результат экстракции от пула (``_INLINE`` ⇒ inline через
+                ``_ingest_one``; иначе ``_finish_one`` с готовым ``ExtractedDoc``/``None`` и
+                ``extract_error``). Граница расщепления — механическая (по ``extractor.extract``).
                 """
                 if outcome is None:
                     return  # отказ/сбой — frontier от него не расширяется
                 page, raw_path, fetch_plan, freshly_fetched = outcome
                 if freshly_fetched:
                     frontier.note_fetched()
-                _ingest_one(
-                    pid,
-                    work_url,
-                    page,
-                    fetch_plan,
-                    raw_path,
-                    ingest,
-                    seen_docs,
-                    seen_chunk_ids,
-                )
+                if extracted is _INLINE:
+                    _ingest_one(
+                        pid,
+                        work_url,
+                        page,
+                        fetch_plan,
+                        raw_path,
+                        ingest,
+                        seen_docs,
+                        seen_chunk_ids,
+                    )
+                else:
+                    _finish_one(
+                        pid,
+                        work_url,
+                        page,
+                        fetch_plan,
+                        raw_path,
+                        extracted,
+                        ingest,
+                        seen_docs,
+                        seen_chunk_ids,
+                        extract_error=extract_error,
+                    )
                 _emit_progress()
                 # D1: извлечение in-site ссылок и следующий уровень BFS. При max_depth=0
                 # извлечение не выполняется вовсе (байт-в-байт прежнее поведение).
                 if limits.max_depth > 0 and _looks_like_html(page):
                     frontier.offer(extract_links(page.content, page.url), depth)
+
+            def _make_extract_request(
+                page: RawPage, raw_path: Path, fetch_plan: FetchPlan
+            ) -> _ExtractRequest:
+                """Строит picklable payload экстракции (примитивы + ``raw_path``; без байтов)."""
+                return _ExtractRequest(
+                    raw_path=str(raw_path),
+                    url=page.url,
+                    fetched_at=page.fetched_at,
+                    fetch_mode=page.fetch_mode,
+                    lang=page.lang,
+                    status_code=page.status_code,
+                    content_type=page.content_type,
+                    engine=page.engine,
+                    route=fetch_plan.extract,
+                )
+
+            def _inflight_fresh() -> int:
+                """Свеже-добытые страницы «в полёте» (учёт ёмкости с окном, P4/§3)."""
+                return sum(1 for item in pending if item.freshly_fetched)
+
+            def _has_fetch_capacity() -> bool:
+                """Ёмкость корня с учётом in-flight: ``max_documents − fetched − inflight``."""
+                if limits.max_documents is None:
+                    return True
+                return limits.max_documents - frontier.fetched - _inflight_fresh() > 0
+
+            def _discard_extract_executor() -> None:
+                nonlocal extract_executor
+                executor_obj = extract_executor
+                if executor_obj is None:
+                    return
+                try:
+                    executor_obj.shutdown(wait=False)
+                except Exception:  # noqa: BLE001 — reaping best-effort
+                    pass
+                extract_executor = None
+
+            def _recover_extract_pool() -> None:
+                """Отравленный пул: discard + bounded rebuild либо inline-fallback (§4).
+
+                Повторное использование мёртвого пула запрещено; авто-ретрая нет.
+                """
+                nonlocal extract_rebuilds, defer_extract
+                _discard_extract_executor()
+                if extract_rebuilds < _EXTRACT_MAX_POOL_REBUILDS:
+                    extract_rebuilds += 1
+                else:
+                    defer_extract = False
+                    errors.append(
+                        f"{pid}/{root_url}: пул экстракции исчерпал пересборки "
+                        f"({_EXTRACT_MAX_POOL_REBUILDS}) — остаток корня inline"
+                    )
+
+            def _fail_extract(item: _PendingExtract, reason: str) -> None:
+                """Явный терминальный ``FAILED parser_failed`` через ``_commit_outcome``.
+
+                Страница уже ретейнена (``raw_path`` записан в submit-фазе), поэтому свежая
+                считается в бюджете ``max_documents`` (``note_fetched``) — как в inline-пути
+                (там ``note_fetched`` вызывается до экстракции). Иначе после отказов пул мог бы
+                добрать замены сверх потолка.
+
+                P4/§11.6: отказ доводится **единственным** упорядоченным путём —
+                ``_commit_outcome`` с ``extracted=None``/``extract_error=reason`` (тот же
+                ``note_fetched`` + дедуп/чанкер + ``_mark`` + ``errors`` + ``offer`` исходящих
+                ссылок + ``_emit_progress``), а не изолированной ветвью. Иначе краш/таймаут
+                терял бы BFS-выходы упавшей страницы (inline-путь их всегда предлагает), а
+                ``note_fetched`` вызывался бы в обход ``_commit_outcome`` (§12.5).
+                """
+                _commit_outcome(
+                    item.pid,
+                    item.url,
+                    item.depth,
+                    (item.page, item.raw_path, item.fetch_plan, item.freshly_fetched),
+                    extracted=None,
+                    extract_error=reason,
+                )
+
+            def _abort_inflight(reason: str) -> None:
+                """Помечает все in-flight (кроме уже снятого текущего) ``FAILED``."""
+                while pending:
+                    _fail_extract(pending.popleft(), reason)
+
+            def _terminate_extract_executor() -> None:
+                """Reaping зависшего пула (``terminate_workers`` доступен в Python 3.14)."""
+                executor_obj = extract_executor
+                if executor_obj is None:
+                    return
+                terminate = getattr(executor_obj, "terminate_workers", None)
+                if terminate is not None:
+                    try:
+                        terminate()
+                    except Exception:  # noqa: BLE001 — reaping best-effort
+                        pass
+
+            def _finish_pending(item: _PendingExtract) -> None:
+                """Доводит oldest pending: ``future.result`` → ``_commit_outcome`` (FIFO).
+
+                P4/§4: ``BrokenProcessPool`` — воркер умер (краш/OOM): все in-flight →
+                ``FAILED``, пул discard+rebuild (bounded) либо inline-fallback. Таймаут —
+                reap пула + то же. Никакого авто-ретрая.
+                """
+                try:
+                    extracted = item.future.result(timeout=_extract_timeout)
+                except TimeoutError:
+                    _terminate_extract_executor()
+                    _fail_extract(item, "extraction timeout")
+                    _abort_inflight("extraction pool terminated after timeout")
+                    _recover_extract_pool()
+                    return
+                except BrokenProcessPool:
+                    _fail_extract(item, "extraction worker died")
+                    _abort_inflight("extraction worker died")
+                    _recover_extract_pool()
+                    return
+                except Exception as exc:  # noqa: BLE001 — изоляция по контракту фазы
+                    _commit_outcome(
+                        item.pid,
+                        item.url,
+                        item.depth,
+                        (item.page, item.raw_path, item.fetch_plan, item.freshly_fetched),
+                        extracted=None,
+                        extract_error=f"{type(exc).__name__}: {exc}",
+                    )
+                    return
+                _commit_outcome(
+                    item.pid,
+                    item.url,
+                    item.depth,
+                    (item.page, item.raw_path, item.fetch_plan, item.freshly_fetched),
+                    extracted=extracted,
+                )
+
+            def _drain_for_window() -> None:
+                """Доводит oldest, пока окно полно или ёмкость исчерпана (с in-flight)."""
+                while pending and (
+                    len(pending) >= extract_window or not _has_fetch_capacity()
+                ):
+                    _finish_pending(pending.popleft())
+
+            def _commit_or_defer(
+                pid_arg: str,
+                url_arg: str,
+                depth_arg: int | None,
+                outcome: tuple[RawPage, Path, FetchPlan, bool] | None,
+            ) -> None:
+                """P4 submit/finish-шов: пул активен ⇒ отложить экстракцию в FIFO-очередь.
+
+                Иначе — немедленный :func:`_commit_outcome` (inline, байт-в-байт). Отправка
+                идёт с главного потока в порядке узлов (FIFO); окно не превышается инлайн-дренажем.
+                """
+                nonlocal extract_executor, defer_extract
+                if outcome is None:
+                    return
+                if not defer_extract:
+                    _commit_outcome(pid_arg, url_arg, depth_arg, outcome)
+                    return
+                page, raw_path, fetch_plan, freshly_fetched = outcome
+                if extract_executor is None:
+                    try:
+                        extract_executor = extraction_pool.pool_factory(  # type: ignore[union-attr]
+                            extract_window
+                        )
+                    except Exception as exc:  # noqa: BLE001 — изоляция по контракту фазы
+                        errors.append(
+                            f"{pid_arg}/{url_arg}: extract pool: "
+                            f"{type(exc).__name__}: {exc} — inline"
+                        )
+                        defer_extract = False
+                        _commit_outcome(pid_arg, url_arg, depth_arg, outcome)
+                        return
+                try:
+                    future = extract_executor.submit(
+                        extraction_pool.worker,  # type: ignore[union-attr]
+                        _make_extract_request(page, raw_path, fetch_plan),
+                    )
+                except Exception as exc:  # noqa: BLE001 — непиклящийся вход/сбой submit
+                    errors.append(
+                        f"{pid_arg}/{url_arg}: extract submit: "
+                        f"{type(exc).__name__}: {exc}"
+                    )
+                    _commit_outcome(pid_arg, url_arg, depth_arg, outcome)
+                    return
+                pending.append(
+                    _PendingExtract(
+                        pid_arg,
+                        url_arg,
+                        depth_arg,
+                        page,
+                        raw_path,
+                        fetch_plan,
+                        freshly_fetched,
+                        future,
+                    )
+                )
+                # Окно: не более ``W`` экстракций «в полёте» (доводка FIFO).
+                while len(pending) >= extract_window:
+                    _finish_pending(pending.popleft())
 
             def _commit_wave(entries: list[_WaveEntry]) -> None:
                 """Коммитит исходы волны на главном потоке в FIFO-порядке отправки (D4).
@@ -1943,7 +2369,7 @@ def build_corpus(
                         # browser-режим (``supports_browser`` краулер): в пул не идёт —
                         # фетч inline на главном потоке (``_fetch_and_commit``), как прежде.
                         outcome = _fetch_and_commit(desc)
-                    _commit_outcome(entry.pid, entry.wu, entry.depth, outcome)
+                    _commit_or_defer(entry.pid, entry.wu, entry.depth, outcome)
 
             # D4: ограниченный пул ТОЛЬКО на сетевой fetch локального пути. Пул создаётся
             # лишь при ``max_workers > 1``: ``None``/``1`` — прежний однопоточный путь без
@@ -1966,7 +2392,16 @@ def build_corpus(
             waves = 0
             try:
                 while True:
-                    if not frontier.has_capacity:
+                    # P4: доводим окно экстракции (окно полно и/или ёмкость исчерпана с
+                    # учётом in-flight) до постановки/выхода — иначе пере-удержание.
+                    if pending:
+                        _drain_for_window()
+                    if pending and len(frontier) == 0:
+                        # Очередь корня пуста, но доводка in-flight может добавить ссылки
+                        # (``offer``/BFS на finish) — доводим всё, прежде чем счесть исчерпание.
+                        while pending:
+                            _finish_pending(pending.popleft())
+                    if not _has_fetch_capacity() and not pending:
                         # D3: seeds sitemap ставятся пачкой; ``max_documents`` обязан
                         # ограничивать и их (не только обнаруженные ссылки). Без лимита —
                         # всегда есть ёмкость. Проверка — в голове цикла на главном потоке.
@@ -1991,7 +2426,9 @@ def build_corpus(
                         remaining = (
                             None
                             if limits.max_documents is None
-                            else limits.max_documents - frontier.fetched
+                            else limits.max_documents
+                            - frontier.fetched
+                            - _inflight_fresh()
                         )
                         wave_size = (
                             wave_items if remaining is None else min(wave_items, remaining)
@@ -2093,7 +2530,7 @@ def build_corpus(
                             if desc.resume is not None:
                                 # Resume: живого фетча нет — коммит локально без submit.
                                 outcome = _commit_local(desc)
-                                _commit_outcome(entry.pid, entry.wu, entry.depth, outcome)
+                                _commit_or_defer(entry.pid, entry.wu, entry.depth, outcome)
                                 continue
                             result = collected.get((entry.pid, entry.wu))
                             if result is None:
@@ -2136,7 +2573,7 @@ def build_corpus(
                                 engine=result.engine,
                             )
                             outcome = _commit_local(desc, page=page)
-                            _commit_outcome(entry.pid, entry.wu, entry.depth, outcome)
+                            _commit_or_defer(entry.pid, entry.wu, entry.depth, outcome)
                         continue
                     if pool is None:
                         # --- Последовательный путь (max_workers None/1): как прежде. --- #
@@ -2184,7 +2621,7 @@ def build_corpus(
                             enforce_redirect_scope=limits.max_depth > 0,
                             robots=robots_enabled,
                         )
-                        _commit_outcome(pid, work_url, depth, outcome)
+                        _commit_or_defer(pid, work_url, depth, outcome)
                         continue
 
                     # --- D4: волна fetch-only. Размер волны = min(K, остаток ёмкости, длина
@@ -2194,7 +2631,9 @@ def build_corpus(
                     remaining = (
                         None
                         if limits.max_documents is None
-                        else limits.max_documents - frontier.fetched
+                        else limits.max_documents
+                        - frontier.fetched
+                        - _inflight_fresh()
                     )
                     wave_size = (
                         max_workers if remaining is None else min(max_workers, remaining)
@@ -2248,9 +2687,13 @@ def build_corpus(
                             )
                         )
                     _commit_wave(entries)
+                # P4: pending обязан доводиться до конца корня (весь дренаж, FIFO).
+                while pending:
+                    _finish_pending(pending.popleft())
             finally:
                 if pool is not None:
                     pool.shutdown(wait=True)
+                _discard_extract_executor()
             return frontier
 
         # P3-A2: **однопутевой** product-цикл. Развёртка каталогов/sitemap делается один раз

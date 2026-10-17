@@ -50,7 +50,7 @@ from core.config.crawl_sources import CrawlSourcesConfig
 from core.config.deploy import CrawlConfig
 from core.config.domain_profiles import DomainProfile
 from core.pipeline.compute import compute, scope_universe
-from core.pipeline.corpus import build_corpus
+from core.pipeline.corpus import ExtractionPool, build_corpus
 from core.pipeline.crawl_session import default_session_id
 from core.pipeline.crawl_sources import crawl_sources_digest
 from core.pipeline.discovery import discover
@@ -370,6 +370,7 @@ def build_phases(
     explicit_fetch: Mapping[str, FetchMode] | None = None,
     crawl_sources: CrawlSourcesConfig | None = None,
     rate_limiter: RateLimiter | None = None,
+    extraction_pool: ExtractionPool | None = None,
     satellites: Sequence[Satellite] = (),
     resolver: SourceResolver | None = None,
     strict: bool = True,
@@ -420,6 +421,9 @@ def build_phases(
         ``None`` → без потолка.
     :param progress: Phase 4 — колбэк снимка прогресса сеанса краула (``--follow``); ошибки
         изолируются в :func:`core.pipeline.corpus.build_corpus`. ``None`` → без прогресса.
+    :param extraction_pool: P4 — исполнитель параллельной экстракции (:class:`ExtractionPool`,
+        фабрика пула + воркер от composition root), протягивается в Ш5. Отдельная ось
+        ``crawl.extract_workers``; ``None`` ⇒ экстракция inline (поведение байт-в-байт).
 
     Каждое замыкание детерминировано и не импортирует адаптеры; единственный
     межфазовый канал — замыкание ``holder`` (см. docstring модуля).
@@ -535,6 +539,9 @@ def build_phases(
             # Phase 5.2: карта ``kind → PollPort`` для источников-каталогов (feed/channel).
             pollers=getattr(ctx.ports, "pollers", None),
             rate_limiter=rate_limiter,
+            # P4: исполнитель экстракции (process-local / thread-split) — аддитивная ось
+            # ``crawl.extract_workers``; ``None`` ⇒ inline (поведение байт-в-байт).
+            extraction_pool=extraction_pool,
             # Phase 3.3: исполнитель краула (``split``/edge-планировщик). ``None`` → локальный
             # per-URL путь (``crawler``/``crawlers``); при наличии — краул через шов.
             executor=getattr(ctx.ports, "executor", None),

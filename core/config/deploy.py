@@ -346,6 +346,11 @@ class CrawlConfig(BaseModel):
     # текущее поведение (только seeds); ``max_documents=0`` отвергается (пустой корпус —
     # конфиг-ошибка, не молчаливый ноль); ``exclude_*`` — glob (путь / basename).
     max_workers: int | None = Field(default=None, ge=1)
+    # P4: отдельная ось CPU-параллелизма **экстракции** (пул процессов локального пути /
+    # потоков split). ``None``/``1`` = сегодняшнее поведение (inline, байт-в-байт); не
+    # смешивается с ``max_workers`` (осью сетевого fetch-пула). Резолв — та же цепочка
+    # app < run < site. Память: ``W × ~2 GiB`` на процесс docling (см. 03 §D.5).
+    extract_workers: int | None = Field(default=None, ge=1)
     max_depth: int = Field(default=0, ge=0)
     max_documents: int | None = Field(default=None, gt=0)
     exclude_paths: list[str] | None = None

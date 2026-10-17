@@ -994,3 +994,60 @@ def test_wiring_robots_gate_refusal_is_distinct() -> None:
         crawler.fetch("https://example.com/blocked", FetchPlan(robots=True))
     assert excinfo.value.refusal_reason == "robots_disallow"
     assert fetcher.calls == ["https://example.com/robots.txt"]
+
+
+# ---------------------------------------------------------------------------
+# P4: build_extraction_pool — split-профиль (потоковый пул поверх экстрактора)
+# ---------------------------------------------------------------------------
+
+
+def test_build_extraction_pool_split_thread_pool(tmp_path: Path) -> None:
+    """P4/§7: ``split`` — потоковый пул поверх переданного ``RemoteExtractor`` (шов не нужен).
+
+    ``build_corpus`` получает ``ExtractionPool`` с реальным ``ThreadPoolExecutor``; ``worker``
+    реконструирует ``RawPage`` из retained-файла (I19) и зовёт переданный экстрактор. Фейк
+    детерминирован — seam/gateway не задействован.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    from core.cli.wiring import build_extraction_pool
+    from core.pipeline.corpus import _ExtractRequest
+    from core.ports.types import ExtractedDoc, RawPage
+    from core.util.hashing import content_hash
+
+    class _FakeRemoteExtractor:
+        version = "remote-1"
+
+        def extract(
+            self, page: RawPage, route: ExtractionRoute = ExtractionRoute.AUTO
+        ) -> ExtractedDoc:
+            return ExtractedDoc(
+                text=page.content.decode("utf-8", errors="replace"),
+                content_hash=content_hash(page.content),
+                extractor_version=self.version,
+                page_count=1,
+            )
+
+    pool = build_extraction_pool(SPLIT_PROFILE, extractor=_FakeRemoteExtractor())
+    assert pool is not None
+    executor = pool.pool_factory(2)
+    assert isinstance(executor, ThreadPoolExecutor)
+    try:
+        raw = tmp_path / "page.bin"
+        raw.write_bytes(b"<html>hi</html>")
+        request = _ExtractRequest(
+            raw_path=str(raw),
+            url="https://x.test/a",
+            fetched_at="2026-01-01T00:00:00+00:00",
+            fetch_mode=FetchMode.HTTP,
+            lang="en",
+            status_code=200,
+            content_type="text/html",
+            engine="http",
+            route=ExtractionRoute.HTML,
+        )
+        doc = executor.submit(pool.worker, request).result(timeout=30)
+        assert doc.text == "<html>hi</html>"
+        assert doc.content_hash == content_hash(b"<html>hi</html>")
+    finally:
+        executor.shutdown()

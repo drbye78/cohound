@@ -397,6 +397,16 @@ P5), но строка помечена здесь как неактуальна
   операционных каталогов, `COHOUND_HOME`/`COHOUND_*_DIR`), `domain_profiles.py` (три оси получения
   контента `fetch`/`extract`/`strategy`), `passports.py` (загрузка `passports/{product_id}/{date}.yaml`),
   `crawl_sources.py` (см. выше).
+- **Параллельная экстракция (P4, as-built).** Ось `crawl.extract_workers` (app < run < site,
+  `CrawlLimits.extract_workers`, `crawl_config_digest`/манифест-поле `crawl_extract_workers`) —
+  пул экстракции в `core/pipeline/corpus.py` (`ExtractionPool`: фабрика исполнителя + воркер
+  от composition root). `local` — процессы (`ProcessPoolExecutor`/forkserver, экстрактор на
+  воркер через `core/cli/wiring.py`), `split` — потоки поверх `RemoteExtractor`; шов
+  (`/v1/*`, `SEAM_SCHEMA_VERSION`) **не** менялся. Воркер читает retained-`raw_path` (I19;
+  байты не пиклятся), «в полёте» ≤ `W` экстракций, доводка FIFO, `note_fetched` остаётся в
+  `_commit_outcome`. Дефолт `None`/`1` ⇒ inline, байт-в-байт. Класс версий — `execution_change`
+  (дайджест/поле; `golden-full` из-за контента не требуется — измерена байт-идентичность
+  docling между процессами). Память ≈ `W × 2 GiB` (`03` §D.5).
 
 ### Сводка статуса (вместо дневных оценок)
 

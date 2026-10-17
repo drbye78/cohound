@@ -357,6 +357,9 @@ class CrawlRunConfig(BaseModel):
     strategy: CrawlStrategy = CrawlStrategy.AUTO
     rate_limit: RateLimitSpec | None = None
     max_workers: int | None = Field(default=None, ge=1)
+    # P4: отдельная ось CPU-параллелизма экстракции (пул процессов/потоков). ``None``/``1``
+    # = поведение байт-в-байт (inline); не смешивается с ``max_workers`` (сетевой fetch-пул).
+    extract_workers: int | None = Field(default=None, ge=1)
     max_depth: int | None = Field(default=None, ge=0)
     max_documents: int | None = Field(default=None, gt=0)
     exclude_paths: list[str] | None = None
@@ -851,6 +854,10 @@ class RunManifest(BaseModel):
     #: граница класса ``execution_change`` (§13). ``None``/пусто — секция/поле не заданы
     #: (манифесты без новых осей не меняются).
     crawl_max_workers: int | None = None
+    #: P4/§13: ось CPU-параллелизма экстракции (``run.yaml:crawl.extract_workers``). Отдельная
+    #: от ``crawl_max_workers`` (сетевой fetch-пул); её смена — та же граница класса
+    #: ``execution_change`` (§13). ``None`` — ось не задана (поведение неизменно).
+    crawl_extract_workers: int | None = None
     crawl_max_depth: int | None = None
     crawl_max_documents: int | None = None
     crawl_exclude_paths: list[str] = Field(default_factory=list)

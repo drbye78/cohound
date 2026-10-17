@@ -143,6 +143,7 @@ EXECUTION_FIELDS: tuple[str, ...] = (
     # D1/D2 (§13): оси контроля краула (глубина/потолок документов/блэклисты/воркеры) —
     # тот же класс ``execution_change``.
     "crawl_max_workers",
+    "crawl_extract_workers",
     "crawl_max_depth",
     "crawl_max_documents",
     "crawl_exclude_paths",
@@ -664,6 +665,7 @@ def build_manifest(
     crawl_strategy: str | None = None
     crawl_rate_limit: str | None = None
     crawl_max_workers: int | None = None
+    crawl_extract_workers: int | None = None
     crawl_max_depth: int | None = None
     crawl_max_documents: int | None = None
     crawl_exclude_paths: list[str] = []
@@ -677,6 +679,7 @@ def build_manifest(
         )
         crawl_rate_limit = canonical_rate_limit(getattr(crawl_cfg, "rate_limit", None))
         crawl_max_workers = getattr(crawl_cfg, "max_workers", None)
+        crawl_extract_workers = getattr(crawl_cfg, "extract_workers", None)
         crawl_max_depth = getattr(crawl_cfg, "max_depth", None)
         crawl_max_documents = getattr(crawl_cfg, "max_documents", None)
         crawl_exclude_paths = list(getattr(crawl_cfg, "exclude_paths", None) or [])
@@ -773,6 +776,7 @@ def build_manifest(
         crawl_strategy=crawl_strategy,
         crawl_rate_limit=crawl_rate_limit,
         crawl_max_workers=crawl_max_workers,
+        crawl_extract_workers=crawl_extract_workers,
         crawl_max_depth=crawl_max_depth,
         crawl_max_documents=crawl_max_documents,
         crawl_exclude_paths=crawl_exclude_paths,

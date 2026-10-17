@@ -28,7 +28,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -95,6 +95,7 @@ from core.config.domain_profiles import DomainProfile
 from core.config.crawl_sources import CrawlSourcesConfig
 from core.domain.models import CrawlRunConfig
 from core.pipeline import Ports, Runner
+from core.pipeline.corpus import ExtractionPool
 from core.pipeline.runner import PHASES, Clock, PhaseFn
 from core.ports.crawler import CrawlerPort
 from core.ports.discovery_llm import DiscoveryLLMPort
@@ -149,6 +150,7 @@ __all__ = [
     "build_scout_crawlers",
     "build_adapters",
     "build_runner",
+    "build_extraction_pool",
     "manifest_deploy_fields",
     "SearchResolutionError",
     "resolve_and_build_search_adapter",
@@ -1217,6 +1219,95 @@ class _LocalExtractor:
         if filename is not None:
             return self._documents.extract_bytes(page.content, filename)
         return self._html.extract(page, route)
+
+
+# --------------------------------------------------------------------------- #
+# P4: пул экстракции (composition root) — модульные (picklable) воркер/инициализатор
+# --------------------------------------------------------------------------- #
+
+
+def build_worker_extractor() -> ExtractorPort:
+    """Строит экстрактор **внутри** воркер-процесса (P4; picklable by reference, §7).
+
+    Один экстрактор (HTML + документы при наличии docling) на воркер — амортизирует
+    загрузку весов между заданиями. Объекты не пересекают границу процессов: фабрика
+    передаётся инициализатору ссылкой, вызов происходит в ребёнке.
+    """
+    html = HtmlExtractor()
+    documents = DoclingDocumentExtractor()
+    return _LocalExtractor(html, documents) if documents.available else html
+
+
+def _extract_worker_init(extractor_factory: Callable[[], ExtractorPort]) -> None:
+    """Инициализатор воркер-процесса пула экстракции (P4/§7): ставит его экстрактор.
+
+    ``extractor_factory`` — module-level (picklable by reference); глобал экстрактора живёт
+    в ``core.pipeline.corpus`` (общий воркер :func:`core.pipeline.corpus._extract_worker`).
+    """
+    from core.pipeline.corpus import set_worker_extractor
+
+    set_worker_extractor(extractor_factory())
+
+
+def _local_extract_pool_factory(max_workers: int) -> Any:
+    """``ProcessPoolExecutor`` (forkserver) для локальной экстракции (P4/§7).
+
+    ``forkserver`` (дефолт Python 3.14 на Linux) не форкает прогретый родитель (torch уже
+    загружен в ядре при docling-экстракции) — безопасно; инициализатор строит экстрактор
+    на воркер. Прецедент процессов — edge-планировщик (``core/edge/scheduler.py``).
+    """
+    import multiprocessing
+    from concurrent.futures import ProcessPoolExecutor
+
+    return ProcessPoolExecutor(
+        max_workers=max_workers,
+        mp_context=multiprocessing.get_context("forkserver"),
+        initializer=_extract_worker_init,
+        initargs=(build_worker_extractor,),
+    )
+
+
+def build_extraction_pool(
+    profile: str,
+    *,
+    extractor: ExtractorPort | None = None,
+) -> ExtractionPool | None:
+    """Собирает исполнитель экстракции по профилю развёртывания (P4/§7).
+
+    * ``local`` — процессный пул (``ProcessPoolExecutor``/forkserver); воркер —
+      module-level :func:`core.pipeline.corpus._extract_worker`, экстрактор строится
+      инициализатором **в** процессе.
+    * ``split`` — потоковый пул (``ThreadPoolExecutor``) поверх переданного
+      ``extractor`` (``RemoteExtractor`` I/O-bound); шов (``/v1/*``) не меняется.
+    * иначе/без экстрактора — ``None`` (фаза отработает ось ``extract_workers`` inline).
+
+    Сам пул создаётся **лениво** в ``build_corpus`` (per seed-root, только при ``W>1``):
+    ``None``/``1`` на оси ⇒ ``pool_factory`` не вызывается вовсе (поведение байт-в-байт).
+    """
+    from core.pipeline.corpus import _extract_worker, _run_extract
+
+    if profile == LOCAL_PROFILE:
+        return ExtractionPool(
+            pool_factory=_local_extract_pool_factory,
+            worker=_extract_worker,
+        )
+    if profile == SPLIT_PROFILE and extractor is not None:
+        def _remote_worker(request: Any) -> Any:
+            return _run_extract(extractor, request)
+
+        return ExtractionPool(
+            pool_factory=lambda n: _thread_pool(n),
+            worker=_remote_worker,
+        )
+    return None
+
+
+def _thread_pool(max_workers: int) -> Any:
+    """``ThreadPoolExecutor`` для потокового окна экстракции (split; P4/§7)."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    return ThreadPoolExecutor(max_workers=max_workers)
+
 
 
 def _build_local_ports(
