@@ -83,7 +83,7 @@ import json
 import time
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import Executor, ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -163,6 +163,19 @@ _DIRECTORY_KINDS: frozenset[str] = frozenset({"feed", "channel"})
 #: не входит в ``_DIRECTORY_KINDS``: это per-site опция профиля домена, а не источник
 #: ``crawl_sources.yaml``. Разворачивается через ``pollers["sitemap"]`` (local ‖ split).
 _SITEMAP_KIND = "sitemap"
+
+#: P3-A2: размер волны (раунда) executor-транспорта — число узлов фронтьера на один
+#: ``_submit_collect``. **Не** ``CrawlLimits.max_workers``: ``max_workers`` — ось локального
+#: пула и остаётся локальной (у одной оси не может быть двух смыслов). 64 ≪ дефолтного
+#: ``queue_limit`` edge, поэтому превысить back-pressure может только размер одной волны.
+_EXECUTOR_WAVE_ITEMS = 64
+
+#: P3-A2 (§1(iii)): предохранитель от неограниченного BFS по общему edge — максимум раундов
+#: (волн) на один seed-root. ``max_depth`` не ограничивает **число** страниц, поэтому без
+#: предохранителя неограниченный BFS был бы самонаведённым DoS. При исчерпании — усечение
+#: ``round_budget`` + явная запись в ``errors`` + сеанс ``PARTIAL`` (никогда не тихая
+#: остановка). У локального пути аналога нет (остаточное расхождение R3).
+_EXECUTOR_MAX_WAVES_PER_ROOT = 1000
 
 
 @dataclass
@@ -286,33 +299,6 @@ def _looks_like_html(page: RawPage) -> bool:
         return "html" in content_type or "xml" in content_type
     head = page.content.lstrip()[:256].lower()
     return head.startswith(b"<html") or head.startswith(b"<!doctype") or b"<a " in head
-
-
-def _max_depth_requested(
-    app: CrawlConfig | None,
-    run: CrawlRunConfig | None,
-    profiles: Mapping[str, DomainProfile] | None,
-    urls: Sequence[str] = (),
-) -> int:
-    """Максимум ``max_depth``, запрошенный для **фактически краулимых** URL (D1, N8).
-
-    Нужен, чтобы под executor/split **явно** отвергнуть ``max_depth > 0`` (молчаливое
-    игнорирование дало бы расходящиеся корпуса профилей — ловушка сравнимости).
-    Резолв — через :func:`resolve_crawl_limits` по каждому URL работы: профиль, чей
-    ``max_depth > 0`` задан для host'а, который под executor **не** краулится, ошибкой
-    не становится (N8: guard не должен быть строже фактического охвата). App/run-уровни
-    учитываются безусловно (они применяются ко всем URL).
-    """
-    app_config = app if app is not None else CrawlConfig()
-    best = int(app_config.max_depth or 0)
-    if run is not None and run.max_depth is not None:
-        best = max(best, int(run.max_depth))
-    for url in urls:
-        limits = resolve_crawl_limits(
-            url, app=app_config, run=run, profiles=profiles or {}
-        )
-        best = max(best, limits.max_depth)
-    return best
 
 
 def _now_iso() -> str:
@@ -702,6 +688,7 @@ def build_corpus(
     executor: CrawlExecutorPort | None = None,
     executor_poll_interval: float = 0.25,
     executor_sleep: Callable[[float], None] = time.sleep,
+    executor_wave_items: int | None = None,
     pool_factory: Callable[[int], Executor] | None = None,
     max_attempts: int | None = None,
     progress: Callable[[dict[str, int]], None] | None = None,
@@ -764,14 +751,21 @@ def build_corpus(
         ``f"crawl:{run_id}"`` (идемпотентно на прогон). Игнорируется без ``store``/``run_id``.
     :param executor: опциональный исполнитель краула (``CrawlExecutorPort``, Phase 3.3). При
         наличии краул исполняется **через него** (``split``/edge-планировщик): работы
-        подаются одним batch-запросом, результаты забираются пагинацией, а retention/
-        экстракция/дедуп/нарезка и сеансовое трекинг — общие с локальным путём
-        (``_ingest_one``). ``crawler``/``crawlers`` при этом не используются. ``None`` →
-        прежний локальный per-URL путь.
+        подаются batch-волнами, результаты забираются пагинацией, а retention/экстракция/
+        дедуп/нарезка и сеансовое трекинг — общие с локальным путём (``_ingest_one``).
+        ``crawler``/``crawlers`` при этом не используются. **P3-A2:** ``executor`` — лишь
+        подключаемый **batch-транспорт** того же drain-алгоритма, что и локальный пул
+        (``_drain_root``): BFS-раунды, ``Frontier``, блэклисты, ``max_depth``/``max_documents``
+        и redirect-scope — на стороне ядра, одинаково для обоих профилей. ``None`` →
+        локальный per-URL путь (пул/последовательный).
     :param executor_poll_interval: пауза между опросами прогресса задания исполнителя, с
         (только при ``executor``); уже терминальное задание не пейсится.
     :param executor_sleep: хук сна опроса (по умолчанию ``time.sleep``); тесты инжектят
         no-op, чтобы не платить реальное время.
+    :param executor_wave_items: P3-A2 — размер волны executor-транспорта (число узлов
+        фронтьера на один ``_submit_collect``); ``None`` → :data:`_EXECUTOR_WAVE_ITEMS`.
+        Инжектируемый параметр для детерминированных тестов (зеркалит ``pool_factory``);
+        **не** ось локального пула.
     :param pool_factory: D4 — фабрика ограниченного пула ``Callable[[int], Executor]`` для
         **сетевого fetch** локального пути; ``int`` — размер волны (``CrawlLimits.max_workers``
         корня). ``None`` → stdlib :class:`concurrent.futures.ThreadPoolExecutor`. Инъекция
@@ -832,6 +826,14 @@ def build_corpus(
 
     # P2-3: единый владелец politeness-пейсинга — corpus (адаптерный ``rate_limiter`` — None).
     limiter = rate_limiter if rate_limiter is not None else RateLimiter()
+
+    # P3-A2: размер волны executor-транспорта. Читаем модульную константу в момент вызова
+    # (тесты могут её подменить) — но инъекция через параметр приоритетнее.
+    wave_items = (
+        executor_wave_items
+        if executor_wave_items is not None
+        else _EXECUTOR_WAVE_ITEMS
+    )
 
     # L1a: сеанс краула (durable намерение + агрегат прогресса, §4.4). Идемпотентен на
     # прогон: ``session_id`` по умолчанию ``f"crawl:{run_id}"``. Без ``store``/``run_id``
@@ -1117,6 +1119,15 @@ def build_corpus(
         пагинацией); ошибки шва изолируются в ``errors``. Пустой набор → ``{}`` без обращения
         к исполнителю. ``idempotency_key`` — по набору работ **этой** волны (разные волны ⇒
         разные ключи ⇒ разные задания), ``session_id`` стабилен на прогон.
+
+        **P3-A2 (§3): бисекция back-pressure.** Если после :data:`_SUBMIT_MAX_ATTEMPTS`
+        попыток волна всё ещё отвергнута (``accepted=false``), она делится **пополам** и
+        каждая половина обрабатывается как своя волна (свой ``idempotency_key`` — он выводится
+        из набора работ); рекурсия до одиночных элементов. Одиночный элемент, всё ещё
+        отвергнутый, возвращается синтетическим ``CrawlResultItem(status="failed",
+        error=...)`` — вызывающий честно помечает его per-URL ``FAILED`` ``source_unavailable``
+        (без молчаливого дропа), сеанс финализируется ``PARTIAL``. Отвергнутые ``submit`` не
+        создают заданий, поэтому повтор после деления безопасен.
         """
         assert executor is not None
         if not work:
@@ -1156,13 +1167,35 @@ def build_corpus(
                 )
 
         if not accepted:
-            # Back-pressure не снят: изолированный сбой подачи (не тихий провал прогона);
-            # работы помечаются ``source_unavailable`` при ingest (результатов нет).
+            # §3: back-pressure не снят. Одиночный элемент — честный per-URL ``FAILED``;
+            # иначе — бисекция волны (рекурсия до одиночных).
+            if len(work) == 1:
+                only = work[0]
+                reason = (
+                    "executor.submit: back-pressure не снят после "
+                    f"{_SUBMIT_MAX_ATTEMPTS} попыток (accepted=false)"
+                )
+                errors.append(f"{only.product_id}/{only.url}: {reason}")
+                return {
+                    (only.product_id, only.url): CrawlResultItem(
+                        product_id=only.product_id,
+                        url=only.url,
+                        status="failed",
+                        engine=only.engine,
+                        kind=only.kind,
+                        error=reason,
+                    )
+                }
+            mid = len(work) // 2
             errors.append(
                 "executor.submit: back-pressure не снят после "
-                f"{_SUBMIT_MAX_ATTEMPTS} попыток (accepted=false)"
+                f"{_SUBMIT_MAX_ATTEMPTS} попыток (accepted=false) для волны из "
+                f"{len(work)} работ — бисекция пополам"
             )
-            return {}
+            left = _submit_collect(work[:mid])
+            right = _submit_collect(work[mid:])
+            left.update(right)
+            return left
 
         # Опрос до терминального статуса (уже терминальное задание не пейсится).
         try:
@@ -1189,8 +1222,19 @@ def build_corpus(
             errors.append(f"executor.collect: {type(exc).__name__}: {exc}")
         return collected
 
-    def _work_item(pid: str, url: str, target: Any) -> CrawlWorkItem:
-        """Собирает работу волны из резолвнутой цели (оси ``FetchPlan`` + провенанс)."""
+    def _work_item(
+        pid: str, url: str, target: Any, *, robots: bool = False
+    ) -> CrawlWorkItem:
+        """Собирает работу волны из резолвнутой цели (оси ``FetchPlan`` + провенанс).
+
+        P3-A2/A2c: ``rate_limit`` переносится per-item — ровно тот **резолвнутый** лимит
+        (``target.plan.rate_limit``), что локально лежит в ``desc.fetch_plan.rate_limit``
+        после иерархии источников; pacing исполняет edge (§11). ``None`` — без пейсинга.
+
+        A2b/§6(b): ``robots`` — egress-политика, вычисленная ядром на **корень**; edge
+        строит краулеры «голыми», поэтому флаг обязан ехать с работы (иначе split-discovery
+        не применяет robots и расходится с local по контенту).
+        """
         plan_i = target.plan
         return CrawlWorkItem(
             product_id=pid,
@@ -1202,47 +1246,9 @@ def build_corpus(
             strategy=plan_i.strategy,
             wait_for=plan_i.wait_for,
             lang=None,
+            rate_limit=plan_i.rate_limit,
+            robots=robots,
         )
-
-    def _run_executor() -> list[CrawlWorkItem]:
-        """Phase 3.3/5.3: волна 1 — top-level НЕ-директорные работы через ``executor``.
-
-        Резолвит цель каждого top-level URL и кладёт её в ``targets``/``applied_engines`` (как
-        локальный путь). Источники-каталоги (``kind ∈ _DIRECTORY_KINDS``) сюда не попадают:
-        их разворачивает :func:`_run_executor_waves` (волна 2). Уже resum'ащиеся элементы
-        (retained raw на диске) и исчерпавшие попытки (``--max-attempts``) НЕ подаются —
-        ingest/re-mark идёт в основном цикле Pass A. Возвращает список работ волны 1.
-        """
-        assert executor is not None
-        work: list[CrawlWorkItem] = []
-        for product_id in products:
-            for url in url_map.get(product_id, []):
-                target = resolve_crawl_target(
-                    product_id,
-                    url,
-                    sources=crawl_sources or CrawlSourcesConfig(),
-                    profiles=domain_profiles or {},
-                    explicit=explicit_fetch,
-                    run_default_strategy=crawl_strategy_default,
-                    run_default_rate_limit=crawl_rate_default,
-                )
-                targets[(product_id, url)] = target
-                applied_engines[(product_id, url)] = target.engine
-                if target.kind in _DIRECTORY_KINDS:
-                    continue  # каталог — волна 2 (разворачивается ``_run_executor_waves``)
-                prior_item = items.get((product_id, url))
-                if _resume_source(prior_item) is not None:
-                    continue  # resume без подачи: ingest ре-извлечёт из retained raw
-                # Phase 4: исчерпавшие попытки URL не подаются исполнителю — их помечает
-                # терминальным ``FAILED`` основной цикл (``max_attempts``).
-                if (
-                    max_attempts is not None
-                    and prior_item is not None
-                    and prior_item.attempts >= max_attempts
-                ):
-                    continue
-                work.append(_work_item(product_id, url, target))
-        return work
 
     # --- Pass A (ingest): crawl → retention → extract → dedup → chunk ---------- #
     # Векторы/физический индекс и персистенция corpus_chunks/index_manifest не выполняются:
@@ -1501,6 +1507,7 @@ def build_corpus(
         depth: int | None = None,
         scope_host: str | None = None,
         enforce_redirect_scope: bool = False,
+        robots: bool = False,
     ) -> _LocalFetch:
         """D4 pre-fetch (главный поток): resume/browser-guard/решение о пейсинге.
 
@@ -1508,8 +1515,16 @@ def build_corpus(
         Все мутации отложены в :func:`_commit_local` (FIFO-порядок коммита) — это позволяет
         исполнять саму сеть в пуле, а исходы коммитить детерминированно на главном потоке.
         Активный краулер выбирается по ``wtarget.engine`` (fallback — ``crawler``).
+
+        A2b/§6(b): ``robots`` проставляется в ``plan.robots`` (``dataclasses.replace``) —
+        адаптер применяет ``robots.txt``-гейт только при ``self._robots is not None and
+        plan.robots``; без discovery/принуждения флаг False (никаких лишних ``robots.txt``).
         """
-        fetch_plan = wtarget.plan
+        fetch_plan = (
+            wtarget.plan
+            if getattr(wtarget.plan, "robots", False) == robots
+            else replace(wtarget.plan, robots=robots)
+        )
         prior_item = items.get((pid, wu))
         resume = _resume_source(prior_item) if prior_item is not None else None
         active = ((crawlers or {}).get(wtarget.engine) if wtarget.engine else None) or crawler
@@ -1708,6 +1723,7 @@ def build_corpus(
         depth: int | None = None,
         scope_host: str | None = None,
         enforce_redirect_scope: bool = False,
+        robots: bool = False,
     ) -> tuple[RawPage, Path, FetchPlan, bool] | None:
         """Локальный per-URL путь (последовательный): pre-fetch → fetch → post-fetch (D4).
 
@@ -1723,6 +1739,7 @@ def build_corpus(
             depth=depth,
             scope_host=scope_host,
             enforce_redirect_scope=enforce_redirect_scope,
+            robots=robots,
         )
         if desc.resume is not None or desc.browser_blocked:
             return _commit_local(desc)
@@ -1731,153 +1748,11 @@ def build_corpus(
         # **только** к живому фетчу: путь ``resume`` (retained raw, выше) не пейсится.
         return _fetch_and_commit(desc)
 
-    def _run_executor_waves() -> tuple[
-        dict[tuple[str, str], CrawlResultItem], dict[str, list[str]]
-    ]:
-        """Phase 5.3: исполнение краула через ``executor`` волнами (профиль ``split``).
-
-        Волна 1 — top-level НЕ-директорные URL (:func:`_run_executor`); затем опрос каталогов
-        (``feed``/``channel``) через ``pollers[kind]`` (:func:`_expand_directory`); затем
-        **волна 2** — записи каталогов, отдельным ``submit`` с собственным
-        ``idempotency_key``. Каталог не ретейнится и не ингестится (I19); записи добываются
-        исполнителем и проходят штатный rehash. Один уровень развёртки (записи не
-        ре-расширяются). Возвращает ``(collected, work_by_product)``: карту результатов по
-        ``(product_id, url)`` и упорядоченный (как в локальном пути) список ingest-URL
-        по продукту для Pass A.
-        """
-        assert executor is not None
-
-        # --- Волна 1: top-level НЕ-директорные работы (отдельный submit) --- #
-        wave1 = _run_executor()
-        collected: dict[tuple[str, str], CrawlResultItem] = dict(_submit_collect(wave1))
-
-        # --- Опрос каталогов/sitemap + волна 2: записи каталогов и ``<loc>`` sitemap --- #
-        wave2: list[CrawlWorkItem] = []
-        # Порядок ingest в Pass A зеркалит локальный: не-директорный URL даёт себя (+ свои
-        # ``<loc>`` sitemap, D3), каталог — свои записи (в порядке поллера) на своём месте.
-        work_by_product: dict[str, list[str]] = {pid: [] for pid in products}
-        for product_id in products:
-            for url in url_map.get(product_id, []):
-                target = targets[(product_id, url)]
-                if target.kind not in _DIRECTORY_KINDS:
-                    work_by_product[product_id].append(url)
-                    # D3: ``<loc>`` per-site sitemap — дополнительные depth-0 seeds в волну 2
-                    # (тот же путь, что записи каталога: resolve → resume/max_attempts → submit).
-                    for loc in _fresh_sitemap_seeds(product_id, url):
-                        work_by_product[product_id].append(loc)
-                        ltarget = resolve_crawl_target(
-                            product_id,
-                            loc,
-                            sources=crawl_sources or CrawlSourcesConfig(),
-                            profiles=domain_profiles or {},
-                            explicit=explicit_fetch,
-                            run_default_strategy=crawl_strategy_default,
-                            run_default_rate_limit=crawl_rate_default,
-                        )
-                        targets[(product_id, loc)] = ltarget
-                        l_prior = items.get((product_id, loc))
-                        if _resume_source(l_prior) is not None:
-                            continue  # resume без подачи: ingest ре-извлечёт из retained raw
-                        if (
-                            max_attempts is not None
-                            and l_prior is not None
-                            and l_prior.attempts >= max_attempts
-                        ):
-                            continue  # исчерпано: пометит терминальным ``FAILED`` Pass A
-                        wave2.append(_work_item(product_id, loc, ltarget))
-                    continue
-
-                # Phase 4: исчерпавший попытки каталог не поллится — терминальный ``FAILED``
-                # (сеанс финализируется ``PARTIAL``); в Pass A каталог не входит.
-                prior_item = items.get((product_id, url))
-                if (
-                    max_attempts is not None
-                    and prior_item is not None
-                    and prior_item.attempts >= max_attempts
-                ):
-                    reason = (
-                        f"max_attempts exhausted "
-                        f"(attempts={prior_item.attempts} >= {max_attempts})"
-                    )
-                    errors.append(f"{product_id}/{url}: {reason}")
-                    _mark(
-                        product_id,
-                        url,
-                        CrawlItemStatus.FAILED,
-                        error_kind=_MAX_ATTEMPTS_ERROR_KIND,
-                        error=reason,
-                    )
-                    _emit_progress()
-                    continue
-
-                # ``_expand_directory`` помечает каталог ``FETCHED`` (без raw) либо
-                # ``FAILED source_unavailable`` (нет поллера/плохие params/ошибка опроса).
-                entry_urls = _expand_directory(product_id, url, target) or []
-                for entry_url in entry_urls:
-                    work_by_product[product_id].append(entry_url)
-
-                    etarget = resolve_crawl_target(
-                        product_id,
-                        entry_url,
-                        sources=crawl_sources or CrawlSourcesConfig(),
-                        profiles=domain_profiles or {},
-                        explicit=explicit_fetch,
-                        run_default_strategy=crawl_strategy_default,
-                        run_default_rate_limit=crawl_rate_default,
-                    )
-                    # Провенанс записи = ``kind`` каталога-источника + собственный engine
-                    # URL-записи (схему не меняем — только ``CrawlTarget``).
-                    entry_target = CrawlTarget(
-                        plan=etarget.plan,
-                        engine=etarget.engine,
-                        kind=target.kind,
-                        params=etarget.params,
-                    )
-                    targets[(product_id, entry_url)] = entry_target
-
-                    e_prior = items.get((product_id, entry_url))
-                    if _resume_source(e_prior) is not None:
-                        continue  # resume без подачи: ingest ре-извлечёт из retained raw
-                    if (
-                        max_attempts is not None
-                        and e_prior is not None
-                        and e_prior.attempts >= max_attempts
-                    ):
-                        continue  # исчерпано: пометит терминальным ``FAILED`` Pass A
-                    wave2.append(_work_item(product_id, entry_url, entry_target))
-
-        # --- Волна 2: отдельный submit с собственным ``idempotency_key`` --- #
-        collected.update(_submit_collect(wave2))
-        return collected, work_by_product
-
-    # Phase 5.3: в executor-режиме состав/порядок ingest-URL задаёт волновая развёртка;
-    # локальный путь по-прежнему идёт по ``url_map``.
-    collected: dict[tuple[str, str], CrawlResultItem] = {}
-    work_by_product: dict[str, list[str]] = {}
-
     # D1/G: accumulators честности усечения. ``truncation_records`` — детализация по
     # ``(product, seed-root)``; флаг/продукты уходят в провенанс сеанса и ``IndexBuild``.
     truncation_records: list[dict[str, Any]] = []
     truncated_products: set[str] = set()
     pages_fetched_total = 0
-
-    # D1: развёртка ссылок (BFS) несовместима с executor/split до появления волнового
-    # паритета. Молча игнорировать ``max_depth`` нельзя — это дало бы разные корпуса у
-    # профилей (ловушка сравнимости). Явная конфиг-ошибка.
-    if executor is not None and _max_depth_requested(
-        crawl_app,
-        crawl_defaults,
-        domain_profiles,
-        [url for urls_for_product in url_map.values() for url in urls_for_product],
-    ) > 0:
-        raise ValueError(
-            "max_depth > 0 не поддержан при executor/split: BFS-frontier доступен только "
-            "локальному пути (до волнового паритета). Уберите max_depth или используйте "
-            "профиль local."
-        )
-
-    if executor is not None:
-        collected, work_by_product = _run_executor_waves()
 
     for product_id in products:
         ingest = _ProductIngest(product_id=product_id)
@@ -1908,6 +1783,17 @@ def build_corpus(
                 profiles=domain_profiles or {},
             )
             frontier = Frontier(root_url, limits)
+            # A2b/§6(b)/§10: egress-политика robots — **условна от discovery** и
+            # вычисляется ядром **на корень** (edge строит краулеры «голыми»). Явный
+            # ``crawl.robots`` (app-слой) переопределяет автодетект; иначе robots включён
+            # ровно при обходе ссылок (``max_depth > 0``) или наличии sitemap у сайта корня.
+            # Без discovery — ``False`` (никаких лишних fetch ``robots.txt``, байт-в-байт).
+            if crawl_app is not None and crawl_app.robots is not None:
+                robots_enabled = bool(crawl_app.robots)
+            else:
+                robots_enabled = (
+                    limits.max_depth > 0 or _sitemap_url_for(root_url) is not None
+                )
             # B2 (resume-бюджет): уже израсходованные страницы этого корня считаются из
             # durable-элементов сеанса (status FETCHED/FAILED с реально доступным retained
             # raw), чей URL в scope корня. Иначе повторный прогон того же session_id начал
@@ -2054,12 +1940,19 @@ def build_corpus(
             # элементы — никогда (см. ``_local_prefetch``).
             max_workers = limits.max_workers
             pool: Executor | None = None
-            if max_workers is not None and int(max_workers) > 1:
+            # P3-A2: executor — подключаемый batch-транспорт; локальный пул при нём не нужен.
+            if (
+                executor is None
+                and max_workers is not None
+                and int(max_workers) > 1
+            ):
                 pool = (
                     pool_factory(int(max_workers))
                     if pool_factory is not None
                     else ThreadPoolExecutor(max_workers=int(max_workers))
                 )
+            # P3-A2 (§1(iii)): счётчик раундов executor-транспорта на этот корень.
+            waves = 0
             try:
                 while True:
                     if not frontier.has_capacity:
@@ -2068,6 +1961,172 @@ def build_corpus(
                         # всегда есть ёмкость. Проверка — в голове цикла на главном потоке.
                         frontier.mark_truncated("max_documents")
                         break
+                    if executor is not None:
+                        # --- P3-A2: executor-волна (раунд). Один раунд = один submit; --- #
+                        # раунды строго последовательны (набор работы N+1 зависит от ссылок N).
+                        if waves >= _EXECUTOR_MAX_WAVES_PER_ROOT:
+                            # Предохранитель (§1(iii)): неограниченный BFS по общему edge —
+                            # самонаведённый DoS. Никогда не останавливаться молча: усечение
+                            # ``round_budget`` + явная ошибка + сеанс ``PARTIAL``.
+                            frontier.mark_truncated("round_budget")
+                            errors.append(
+                                f"{pid}/{root_url}: предохранитель раундов исчерпан "
+                                f"({_EXECUTOR_MAX_WAVES_PER_ROOT} волн) — обход остановлен "
+                                "(round_budget)"
+                            )
+                            _emit_progress()
+                            break
+                        waves += 1
+                        remaining = (
+                            None
+                            if limits.max_documents is None
+                            else limits.max_documents - frontier.fetched
+                        )
+                        wave_size = (
+                            wave_items if remaining is None else min(wave_items, remaining)
+                        )
+                        wave_size = min(int(wave_size), len(frontier))
+                        if wave_size <= 0:
+                            break
+                        entries: list[_WaveEntry] = []
+                        work: list[CrawlWorkItem] = []
+                        for _ in range(wave_size):
+                            node = frontier.next()
+                            if node is None:
+                                break
+                            work_url, depth = node
+                            if frontier.blacklisted(work_url):
+                                # D1/H: блэклист применяется и перед фетчем.
+                                entries.append(
+                                    _WaveEntry(pid, work_url, depth, "blacklisted")
+                                )
+                                continue
+                            prior_item = items.get((pid, work_url))
+                            if (
+                                max_attempts is not None
+                                and prior_item is not None
+                                and prior_item.attempts >= max_attempts
+                            ):
+                                entries.append(
+                                    _WaveEntry(
+                                        pid,
+                                        work_url,
+                                        depth,
+                                        "attempts",
+                                        prior_item=prior_item,
+                                    )
+                                )
+                                continue
+                            work_target = _resolve_target(pid, work_url)
+                            resume = (
+                                _resume_source(prior_item)
+                                if prior_item is not None
+                                else None
+                            )
+                            # Дескриптор коммита строится вручную (не ``_local_prefetch``):
+                            # browser-guard/``active`` — оси локального краулера, а здесь
+                            # байты доставляет исполнитель; ``browser_blocked`` всегда False.
+                            desc = _LocalFetch(
+                                pid=pid,
+                                wu=work_url,
+                                depth=depth,
+                                fetch_plan=work_target.plan,
+                                active=None,
+                                engine_value=work_target.engine,
+                                prior_item=prior_item,
+                                resume=resume,
+                                browser_blocked=False,
+                                poolable=False,
+                                host=(urlsplit(work_url).hostname or "").lower(),
+                                scope_host=frontier.root_host,
+                                enforce_redirect_scope=limits.max_depth > 0,
+                            )
+                            entries.append(
+                                _WaveEntry(pid, work_url, depth, "fetch", desc=desc)
+                            )
+                            if resume is None:
+                                # Только живой фетч подаётся исполнителю; resume минует submit.
+                                work.append(
+                                    _work_item(
+                                        pid, work_url, work_target, robots=robots_enabled
+                                    )
+                                )
+                        collected = _submit_collect(work)
+                        for entry in entries:
+                            if entry.kind == "blacklisted":
+                                errors.append(
+                                    f"{entry.pid}/{entry.wu}: зачёркнут блэклистом "
+                                    "перед фетчем — пропущен"
+                                )
+                                continue
+                            if entry.kind == "attempts":
+                                prior_item = entry.prior_item
+                                assert prior_item is not None
+                                reason = (
+                                    f"max_attempts exhausted "
+                                    f"(attempts={prior_item.attempts} >= {max_attempts})"
+                                )
+                                errors.append(f"{entry.pid}/{entry.wu}: {reason}")
+                                _mark(
+                                    entry.pid,
+                                    entry.wu,
+                                    CrawlItemStatus.FAILED,
+                                    error_kind=_MAX_ATTEMPTS_ERROR_KIND,
+                                    error=reason,
+                                    depth=entry.depth,
+                                )
+                                _emit_progress()
+                                continue
+                            desc = entry.desc
+                            assert desc is not None
+                            if desc.resume is not None:
+                                # Resume: живого фетча нет — коммит локально без submit.
+                                outcome = _commit_local(desc)
+                                _commit_outcome(entry.pid, entry.wu, entry.depth, outcome)
+                                continue
+                            result = collected.get((entry.pid, entry.wu))
+                            if result is None:
+                                errors.append(
+                                    f"{entry.pid}/{entry.wu}: executor: результат не получен"
+                                )
+                                _mark(
+                                    entry.pid,
+                                    entry.wu,
+                                    CrawlItemStatus.FAILED,
+                                    error_kind=FailureKind.SOURCE_UNAVAILABLE.value,
+                                    error="executor: результат не получен",
+                                    depth=entry.depth,
+                                )
+                                _emit_progress()
+                                continue
+                            if result.error or result.raw_bytes is None:
+                                reason = result.error or "executor: пустой raw_bytes"
+                                errors.append(f"{entry.pid}/{entry.wu}: executor: {reason}")
+                                _mark(
+                                    entry.pid,
+                                    entry.wu,
+                                    CrawlItemStatus.FAILED,
+                                    error_kind=FailureKind.SOURCE_UNAVAILABLE.value,
+                                    error=reason,
+                                    depth=entry.depth,
+                                )
+                                _emit_progress()
+                                continue
+                            # S1: применяемый движок — фактический транспорт из результата шва.
+                            desc.engine_value = result.engine or desc.engine_value
+                            page = RawPage(
+                                url=result.final_url or result.url,
+                                content=result.raw_bytes,
+                                fetched_at=result.fetched_at or "",
+                                fetch_mode=desc.fetch_plan.fetch,
+                                lang=None,
+                                status_code=result.http_status,
+                                content_type=result.content_type,
+                                engine=result.engine,
+                            )
+                            outcome = _commit_local(desc, page=page)
+                            _commit_outcome(entry.pid, entry.wu, entry.depth, outcome)
+                        continue
                     if pool is None:
                         # --- Последовательный путь (max_workers None/1): как прежде. --- #
                         node = frontier.next()
@@ -2112,6 +2171,7 @@ def build_corpus(
                             # B4: жёсткий redirect-scope — только при discovery (max_depth > 0);
                             # на глубине 0 финальная страница ретейнится как прежде.
                             enforce_redirect_scope=limits.max_depth > 0,
+                            robots=robots_enabled,
                         )
                         _commit_outcome(pid, work_url, depth, outcome)
                         continue
@@ -2162,6 +2222,7 @@ def build_corpus(
                             depth=depth,
                             scope_host=frontier.root_host,
                             enforce_redirect_scope=limits.max_depth > 0,
+                            robots=robots_enabled,
                         )
                         # D2/e: browser-элементы НИКОГДА не пулятся (``BrowserCrawler`` водит
                         # единственную ``_page`` без лока) — идут inline на главном потоке;
@@ -2181,21 +2242,16 @@ def build_corpus(
                     pool.shutdown(wait=True)
             return frontier
 
-        # Phase 5.3: в executor-режиме итерируем по волновому набору (каталоги уже опрошены,
-        # их URL в наборе нет; записи — на месте каталогов). Локальный путь — по ``url_map``.
-        for url in (
-            url_map.get(product_id, [])
-            if executor is None
-            else work_by_product.get(product_id, [])
-        ):
-            # L1a: resume — если по ``(product_id, url)`` есть элемент сеанса с сохранёнными
-            # байтами, НЕ фетчим: ре-извлекаем из retained raw (I19: raw — источник).
+        # P3-A2: **однопутевой** product-цикл. Развёртка каталогов/sitemap делается один раз
+        # до drain (общий блок построения корней); транспорт выбирается по ``executor is None``.
+        # Порядок expand → seed → drain на корень совпадает с локальным и является порядком
+        # ingest (interleaving-трюк ``work_by_product`` больше не нужен).
+        for url in url_map.get(product_id, []):
             prior_item = items.get((product_id, url))
-            resume = _resume_source(prior_item) if prior_item is not None else None
 
             # Phase 4: потолок попыток (``--max-attempts``). URL, уже исчерпавший попытки,
-            # не фетчится и не подаётся исполнителю: терминальный ``FAILED`` с явным
-            # ``error_kind`` (не тихий дроп) → сеанс финализируется ``PARTIAL``.
+            # не фетчится/не разворачивается: терминальный ``FAILED`` с явным ``error_kind``
+            # (не тихий дроп) → сеанс финализируется ``PARTIAL``.
             if (
                 max_attempts is not None
                 and prior_item is not None
@@ -2216,136 +2272,73 @@ def build_corpus(
                 _emit_progress()
                 continue
 
-            if executor is None:
-                # D2/Lane A: единая цель краула резолвится в pipeline и передаётся и краулеру,
-                # и экстрактору (``plan`` + идентификаторы ``engine``/``kind`` из слоёв источников).
-                target = resolve_crawl_target(
-                    product_id,
-                    url,
-                    sources=crawl_sources or CrawlSourcesConfig(),
-                    profiles=domain_profiles or {},
-                    explicit=explicit_fetch,
-                    run_default_strategy=crawl_strategy_default,
-                    run_default_rate_limit=crawl_rate_default,
-                )
-                targets[(product_id, url)] = target
-
-                # Phase 5.2: источник-каталог (feed/channel) разворачивается в ссылки-записи;
-                # каждая запись — **отдельный seed-root** глубины 0 (один уровень развёртки,
-                # без ре-расширения). Обычный URL — единственный корень.
-                entry_urls = _expand_directory(product_id, url, target)
-                if entry_urls is None:
-                    # D3: seed оператора + ``<loc>`` его per-site sitemap как дополнительные
-                    # depth-0 seeds этого же корня (аугментация, не замена). Без sitemap —
-                    # пусто (поведение неизменно).
-                    roots: list[tuple[str, Any, tuple[str, ...]]] = [
-                        (url, target, _fresh_sitemap_seeds(product_id, url))
-                    ]
-                else:
-                    roots = []
-                    for entry_url in entry_urls:
-                        etarget = resolve_crawl_target(
-                            product_id,
-                            entry_url,
-                            sources=crawl_sources or CrawlSourcesConfig(),
-                            profiles=domain_profiles or {},
-                            explicit=explicit_fetch,
-                            run_default_strategy=crawl_strategy_default,
-                            run_default_rate_limit=crawl_rate_default,
-                        )
-                        # Провенанс записи = ``kind`` каталога-источника + собственный engine
-                        # URL-записи (схему не меняем — только ``CrawlTarget``).
-                        entry_target = CrawlTarget(
-                            plan=etarget.plan,
-                            engine=etarget.engine,
-                            kind=target.kind,
-                            params=etarget.params,
-                        )
-                        targets[(product_id, entry_url)] = entry_target
-                        roots.append((entry_url, entry_target, ()))
-
-                # D1: BFS-frontier по каждому seed-root (``max_depth=0`` → только seeds,
-                # поведение неизменно). Провенанс усечения копится для сеанса/``IndexBuild``.
-                for root_url, root_target, extra_seeds in roots:
-                    frontier = _drain_root(
-                        product_id, root_url, root_target, extra_seeds
-                    )
-                    pages_fetched_total += frontier.fetched
-                    if frontier.truncated:
-                        truncated_products.add(product_id)
-                    truncation_records.append(
-                        {
-                            "product_id": product_id,
-                            "root": root_url,
-                            "pages_fetched": frontier.fetched,
-                            "truncated": frontier.truncated,
-                            "truncated_reason": frontier.truncated_reason,
-                            "limits": frontier.limits.as_dict(),
-                            "skipped_blacklisted": list(frontier.skipped_blacklisted),
-                        }
-                    )
-                continue
-
-            # Phase 3.3: executor-ветка — цель уже разрешена при подаче работ; результат
-            # берётся из сбора (или resum'ится из retained raw без подачи).
-            target = targets[(product_id, url)]
-            fetch_plan = target.plan
-
-            if resume is not None:
-                assert prior_item is not None  # resume возможен только при наличии элемента
-                content, raw_path = resume
-                page = _resume_page(prior_item, url, content, raw_path, fetch_plan)
-            else:
-                result = collected.get((product_id, url))
-                if result is None:
-                    errors.append(f"{product_id}/{url}: executor: результат не получен")
-                    _mark(
-                        product_id,
-                        url,
-                        CrawlItemStatus.FAILED,
-                        error_kind=FailureKind.SOURCE_UNAVAILABLE.value,
-                        error="executor: результат не получен",
-                    )
-                    continue
-                if result.error or result.raw_bytes is None:
-                    reason = result.error or "executor: пустой raw_bytes"
-                    errors.append(f"{product_id}/{url}: executor: {reason}")
-                    _mark(
-                        product_id,
-                        url,
-                        CrawlItemStatus.FAILED,
-                        error_kind=FailureKind.SOURCE_UNAVAILABLE.value,
-                        error=reason,
-                    )
-                    continue
-                # S1: применяемый движок — фактический транспорт из результата шва.
-                applied_engines[(product_id, url)] = result.engine or target.engine
-                page = RawPage(
-                    url=result.url,
-                    content=result.raw_bytes,
-                    fetched_at=result.fetched_at or "",
-                    fetch_mode=fetch_plan.fetch,
-                    lang=None,
-                    status_code=result.http_status,
-                    content_type=result.content_type,
-                )
-                # 2. Retention (I19) — общий шаг с локальным путём.
-                raw_path = _retain(product_id, url, page, fetch_plan)
-                if raw_path is None:
-                    continue
-
-            # 3-5. Экстракция/дедуп/нарезка — общая часть обоих путей (``_ingest_one``).
-            _ingest_one(
+            # D2/Lane A: единая цель краула резолвится в pipeline и передаётся и краулеру,
+            # и экстрактору (``plan`` + идентификаторы ``engine``/``kind`` из слоёв источников).
+            target = resolve_crawl_target(
                 product_id,
                 url,
-                page,
-                fetch_plan,
-                raw_path,
-                ingest,
-                seen_docs,
-                seen_chunk_ids,
+                sources=crawl_sources or CrawlSourcesConfig(),
+                profiles=domain_profiles or {},
+                explicit=explicit_fetch,
+                run_default_strategy=crawl_strategy_default,
+                run_default_rate_limit=crawl_rate_default,
             )
-            _emit_progress()
+            targets[(product_id, url)] = target
+
+            # Phase 5.2: источник-каталог (feed/channel) разворачивается в ссылки-записи;
+            # каждая запись — **отдельный seed-root** глубины 0 (один уровень развёртки,
+            # без ре-расширения). Обычный URL — единственный корень.
+            entry_urls = _expand_directory(product_id, url, target)
+            if entry_urls is None:
+                # D3: seed оператора + ``<loc>`` его per-site sitemap как дополнительные
+                # depth-0 seeds этого же корня (аугментация, не замена). Без sitemap —
+                # пусто (поведение неизменно).
+                roots: list[tuple[str, Any, tuple[str, ...]]] = [
+                    (url, target, _fresh_sitemap_seeds(product_id, url))
+                ]
+            else:
+                roots = []
+                for entry_url in entry_urls:
+                    etarget = resolve_crawl_target(
+                        product_id,
+                        entry_url,
+                        sources=crawl_sources or CrawlSourcesConfig(),
+                        profiles=domain_profiles or {},
+                        explicit=explicit_fetch,
+                        run_default_strategy=crawl_strategy_default,
+                        run_default_rate_limit=crawl_rate_default,
+                    )
+                    # Провенанс записи = ``kind`` каталога-источника + собственный engine
+                    # URL-записи (схему не меняем — только ``CrawlTarget``).
+                    entry_target = CrawlTarget(
+                        plan=etarget.plan,
+                        engine=etarget.engine,
+                        kind=target.kind,
+                        params=etarget.params,
+                    )
+                    targets[(product_id, entry_url)] = entry_target
+                    roots.append((entry_url, entry_target, ()))
+
+            # D1: BFS-frontier по каждому seed-root (``max_depth=0`` → только seeds,
+            # поведение неизменно). Провенанс усечения копится для сеанса/``IndexBuild``.
+            for root_url, root_target, extra_seeds in roots:
+                frontier = _drain_root(
+                    product_id, root_url, root_target, extra_seeds
+                )
+                pages_fetched_total += frontier.fetched
+                if frontier.truncated:
+                    truncated_products.add(product_id)
+                truncation_records.append(
+                    {
+                        "product_id": product_id,
+                        "root": root_url,
+                        "pages_fetched": frontier.fetched,
+                        "truncated": frontier.truncated,
+                        "truncated_reason": frontier.truncated_reason,
+                        "limits": frontier.limits.as_dict(),
+                        "skipped_blacklisted": list(frontier.skipped_blacklisted),
+                    }
+                )
 
         # Retention-провенанс не зависит от индексной сборки: docs персистятся в Pass A.
         _persist_docs(store, ingest.docs, errors)

@@ -11,8 +11,6 @@ import json
 from pathlib import Path
 from typing import Any
 
-import pytest
-
 from core.domain import (
     AnchorRelation,
     CatalogRow,
@@ -507,21 +505,6 @@ def test_unrelated_redirect_dropped_with_reason_under_discovery(tmp_path: Path) 
 
 
 # --------------------------------------------------------------------------- #
-# (i) max_depth > 0 под executor/split — конфиг-ошибка
-# --------------------------------------------------------------------------- #
-
-
-def test_max_depth_under_executor_is_config_error(tmp_path: Path) -> None:
-    with pytest.raises(ValueError, match="max_depth"):
-        _build(
-            tmp_path,
-            pages={ROOT: b"<html>x</html>"},
-            executor=object(),
-            crawl_defaults=CrawlRunConfig(max_depth=1),
-        )
-
-
-# --------------------------------------------------------------------------- #
 # (B1) max_documents как жёсткий потолок: batched seeds, cap >= 2
 # --------------------------------------------------------------------------- #
 
@@ -627,31 +610,3 @@ def test_resume_respects_remaining_budget_and_stays_partial(tmp_path: Path) -> N
         assert '"truncated": true' in session.provenance_json
     finally:
         store.close()
-
-
-# --------------------------------------------------------------------------- #
-# (N8) guard executor: max_depth учитывается только для краулимых host'ов
-# --------------------------------------------------------------------------- #
-
-
-def test_max_depth_requested_narrowed_to_crawled_hosts() -> None:
-    """N8: профиль с ``max_depth>0`` для host'а вне охвата executor не блокирует прогон."""
-    from core.config.deploy import CrawlConfig
-    from core.config.domain_profiles import DomainProfile
-    from core.pipeline.corpus import _max_depth_requested
-
-    app = CrawlConfig()
-    profiles = {
-        "uncrawled.test": DomainProfile(max_depth=3),
-        "crawled.test": DomainProfile(),
-    }
-    # Краулим host без max_depth → не ошибка (профиль uncrawled.test не в охвате).
-    assert (
-        _max_depth_requested(app, None, profiles, ["https://crawled.test/x"]) == 0
-    )
-    # Краулим host с max_depth>0 → глубина запрошена (guard сработает).
-    assert (
-        _max_depth_requested(app, None, profiles, ["https://uncrawled.test/x"]) == 3
-    )
-    # App/run-уровни учитываются безусловно.
-    assert _max_depth_requested(app, CrawlRunConfig(max_depth=4), profiles, []) == 4

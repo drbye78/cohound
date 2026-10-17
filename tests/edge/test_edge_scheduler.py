@@ -13,6 +13,8 @@ from __future__ import annotations
 import base64
 import itertools
 import pickle
+import random
+import sqlite3
 import threading
 import time
 from collections.abc import Iterator, Mapping
@@ -21,7 +23,10 @@ from typing import Any
 
 import pytest
 
+from core.adapters.remote_crawl_executor import EdgeCrawlExecutor
+from core.domain.models import RateLimitSpec
 from core.edge.config import EdgeRuntimeConfig
+from core.edge.crawler_factory import crawler_factory
 from core.edge.scheduler import (
     EdgeScheduler,
     ITEM_CANCELLED,
@@ -34,7 +39,10 @@ from core.edge.scheduler import (
     _process_fetch,
     _process_worker_init,
 )
+from core.edge.seam_schema import validate_crawl_request
+from core.ports.crawl_executor import CrawlWorkItem
 from core.ports.types import FetchPlan, RawPage
+from core.util.rate_limit import RateLimiter
 
 _FIXED_TIME = "2026-01-01T00:00:00+00:00"
 _CONTENT = b"<html>scheduled body</html>"
@@ -80,8 +88,11 @@ class FakeCrawler:
         )
 
 
-def FakeCrawler_factory(engine: str) -> FakeCrawler:
-    """Module-level picklable фабрика для процесс-движков (вызывается в воркере)."""
+def FakeCrawler_factory(engine: str, *, robots: Any = None) -> FakeCrawler:
+    """Module-level picklable фабрика для процесс-движков (вызывается в воркере).
+
+    Принимает ``robots`` (§10): воркер-процесс строит политику сам и передаёт её фабрике.
+    """
     return FakeCrawler(engine=engine, content=f"proc:{engine}".encode())
 
 
@@ -108,6 +119,92 @@ class BlockingCrawler:
         )
 
 
+class BlockingThenFastCrawler:
+    """Блокируется на **первом** фетче (до ``gate``), далее отдаёт мгновенно.
+
+    Моделирует «одна волна держит воркер»: доказательство back-pressure (нет дедлока,
+    ``status``/``collect`` обслуживаются, пока воркер заблокирован).
+    """
+
+    version = "blocking-then-fast-1"
+
+    def __init__(self, gate: threading.Event, engine: str = "http") -> None:
+        self.engine = engine
+        self._gate = gate
+        self._blocked = False
+        self.calls: list[str] = []
+
+    def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:
+        self.calls.append(url)
+        if not self._blocked:
+            self._blocked = True
+            self._gate.wait(timeout=10)
+        return RawPage(
+            url=url,
+            content=b"<html>drained</html>",
+            fetched_at=_FIXED_TIME,
+            status_code=200,
+            content_type="text/html",
+            engine=self.engine,
+        )
+
+
+class RedirectCrawler:
+    """Отдаёт ``RawPage`` с **финальным** URL, отличным от запрошенного (§6a)."""
+
+    version = "redirect-1"
+
+    def __init__(self, final_url: str, engine: str = "http") -> None:
+        self.engine = engine
+        self._final = final_url
+
+    def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:
+        return RawPage(
+            url=self._final,
+            content=b"<html>redirected</html>",
+            fetched_at=_FIXED_TIME,
+            status_code=200,
+            content_type="text/html",
+            engine=self.engine,
+        )
+
+
+class RecordingRateLimiter(RateLimiter):
+    """``RateLimiter`` со стаб-``sleep``/``rng``: записывает сны и ``(host, spec)``.
+
+    Без реальных задержек: ``sleep`` — список-рекордер, ``rng`` — детерминированный
+    ``random.Random(seed)`` (детерминизм §11.6).
+    """
+
+    def __init__(self, seed: int = 1234) -> None:
+        self.sleeps: list[float] = []
+        self.waits: list[tuple[str, Any]] = []
+        super().__init__(sleep=self.sleeps.append, rng=random.Random(seed))
+
+    def wait(self, host: str, spec: Any) -> float:
+        self.waits.append((host, spec))
+        return super().wait(host, spec)
+
+
+class StubRobotsGate:
+    """Стаб ``RobotsGate`` без сети: фиксированный вердикт + запись проверок (§10)."""
+
+    def __init__(self, *, allowed: bool = True) -> None:
+        self._allowed = allowed
+        self.calls: list[str] = []
+
+    def allowed(self, url: str) -> bool:
+        self.calls.append(url)
+        return self._allowed
+
+
+class NoopGateway:
+    """Заглушка ``ContentGateway`` (в тестах сериализации шва не вызывается)."""
+
+    def call(self, op: str, payload: Mapping[str, Any]) -> Mapping[str, Any]:
+        raise AssertionError("gateway не должен вызываться в тесте сериализации")
+
+
 # ---------------------------------------------------------------------------
 # Хелперы
 # ---------------------------------------------------------------------------
@@ -129,6 +226,9 @@ def make_scheduler(tmp_path: Path) -> Iterator[Any]:
         crawlers: Mapping[str, Any] | None = None,
         crawler_factory: Any = None,
         state_dir: Path | None = None,
+        limiter: Any = None,
+        limiter_factory: Any = None,
+        robots_factory: Any = None,
         **overrides: Any,
     ) -> EdgeScheduler:
         config = EdgeRuntimeConfig(state_dir=str(state_dir or tmp_path), **overrides)
@@ -140,6 +240,9 @@ def make_scheduler(tmp_path: Path) -> Iterator[Any]:
             crawler_factory=crawler_factory,
             clock=lambda: _FIXED_TIME,
             id_factory=_ids(),
+            limiter=limiter,
+            limiter_factory=limiter_factory,
+            robots_factory=robots_factory,
         )
         created.append(scheduler)
         return scheduler
@@ -715,3 +818,342 @@ def test_stop_honors_timeout_and_warns(
         assert "scheduler.stop()" in err and "не завершились" in err
     finally:
         gate.set()  # отпускаем воркер, чтобы поток завершился
+
+
+# ---------------------------------------------------------------------------
+# §9.10–9.12 — back-pressure/ёмкость/миграция (A2)
+# ---------------------------------------------------------------------------
+
+
+def test_edge_repeated_rounds_no_deadlock_no_orphan_jobs(make_scheduler: Any) -> None:
+    """§3/§9.10: повторные волны не дедлочат, элементы/задания терминальны, ``_inflight``→0.
+
+    Моделирует протокол раундов ядра: одна волна в полёте, следующая — только после
+    терминала предыдущей. Первый фетч блокируется (edge обслуживает ``status``/``collect``
+    своими потоками — циклического ожидания нет), затем отпускается.
+    """
+    gate = threading.Event()
+    crawler = BlockingThenFastCrawler(gate)
+    scheduler = make_scheduler(crawlers={"http": crawler}, workers={"http": 1}, queue_limit=8)
+    observed_jobs: list[str] = []
+    try:
+        for round_no in range(3):
+            items = [
+                _item(f"p{round_no}{i}", f"https://x.test/r{round_no}/{i}") for i in range(3)
+            ]
+            result = scheduler.submit(_submit_payload(items=items, key=f"k{round_no}"))
+            assert result["accepted"] is True
+            observed_jobs.append(result["job_id"])
+            # Первая волна держит единственного воркера: ``status`` всё равно отвечает.
+            assert _wait_until(
+                lambda jid=result["job_id"]: scheduler.status(jid)["running"] >= 1
+            )
+            gate.set()  # отпускаем заблокированный фетч (последующие не блокируются)
+            state = _wait_terminal(scheduler, result["job_id"])
+            assert state["status"] in (JOB_COMPLETED, JOB_PARTIAL)
+    finally:
+        gate.set()
+
+    assert _wait_until(lambda: scheduler._inflight == 0)
+    conn = scheduler._connect()
+    non_terminal_items = conn.execute(
+        "SELECT COUNT(*) FROM edge_job_items"
+        " WHERE status NOT IN ('fetched', 'failed', 'cancelled')"
+    ).fetchone()[0]
+    assert non_terminal_items == 0
+    non_terminal_jobs = conn.execute(
+        "SELECT COUNT(*) FROM edge_jobs"
+        " WHERE status NOT IN ('completed', 'partial', 'cancelled', 'failed')"
+    ).fetchone()[0]
+    assert non_terminal_jobs == 0
+    # Все 9 страниц добыты (SUM(fetched) = ожидаемый набор многораундового сайта).
+    total_fetched = conn.execute("SELECT COALESCE(SUM(fetched), 0) FROM edge_jobs").fetchone()[0]
+    assert total_fetched == 9
+    assert len(observed_jobs) == 3
+    assert scheduler._inflight == 0
+
+
+def test_edge_queue_limit_smaller_than_wave(make_scheduler: Any) -> None:
+    """§3/§9.11: волна > ``queue_limit`` отвергается (``accepted=False``), затем бисекция.
+
+    Edge — чистый back-pressure: отвергнутая волна НЕ создаёт джоб; ядро делит её
+    пополам. Одиночный элемент (≤ ``queue_limit``) принимается.
+    """
+    gate = threading.Event()
+    scheduler = make_scheduler(
+        crawlers={"http": BlockingCrawler(gate)}, workers={"http": 1}, queue_limit=1
+    )
+    try:
+        holding = scheduler.submit(
+            _submit_payload(items=[_item("p0", "https://x.test/hold")], key="khold")
+        )
+        assert holding["accepted"] is True
+        assert _wait_until(lambda: scheduler.status(holding["job_id"])["running"] >= 1)
+
+        wave = [_item(f"p{i}", f"https://x.test/w{i}") for i in range(3)]
+        rejected = scheduler.submit(_submit_payload(items=wave, key="kwave"))
+        assert rejected == {"job_id": "", "accepted": False, "total": 0, "session_id": "s1"}
+        # Отвергнутая волна не создала джоб (повтор после деления безопасен).
+        conn = scheduler._connect()
+        assert conn.execute(
+            "SELECT COUNT(*) FROM edge_jobs WHERE idempotency_key = 'kwave'"
+        ).fetchone()[0] == 0
+    finally:
+        gate.set()
+    _wait_terminal(scheduler, holding["job_id"])
+
+    # Бисекция: половина волны (один элемент) укладывается в ``queue_limit``.
+    half = scheduler.submit(_submit_payload(items=[wave[0]], key="khalf"))
+    assert half["accepted"] is True
+    assert _wait_terminal(scheduler, half["job_id"])["status"] == JOB_COMPLETED
+
+
+def test_edge_collect_returns_final_url(make_scheduler: Any) -> None:
+    """§6a/§9.12: ``final_url`` персистится из ``RawPage.url`` и отдаётся в ``collect``."""
+    requested = "https://x.test/start"
+    final = "https://x.test/landing/"
+    scheduler = make_scheduler(crawlers={"http": RedirectCrawler(final)})
+    scheduler.submit(_submit_payload(items=[_item("p1", requested)]))
+    assert _wait_terminal(scheduler, "job1")["status"] == JOB_COMPLETED
+
+    item = scheduler.collect("job1")["items"][0]
+    assert item["url"] == requested  # ключ элемента сеанса — ЗАПРОШЕННЫЙ URL
+    assert item["final_url"] == final  # база ссылок/redirect-scope — финальный URL
+    row = scheduler._connect().execute(
+        "SELECT final_url FROM edge_job_items WHERE job_id = 'job1'"
+    ).fetchone()
+    assert row["final_url"] == final
+
+
+_OLD_SCHEMA = """
+CREATE TABLE edge_jobs (
+    job_id          TEXT PRIMARY KEY,
+    run_id          TEXT NOT NULL,
+    session_id      TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL,
+    status          TEXT NOT NULL,
+    total           INTEGER NOT NULL DEFAULT 0,
+    pending         INTEGER NOT NULL DEFAULT 0,
+    running         INTEGER NOT NULL DEFAULT 0,
+    fetched         INTEGER NOT NULL DEFAULT 0,
+    failed          INTEGER NOT NULL DEFAULT 0,
+    cancelled       INTEGER NOT NULL DEFAULT 0,
+    created_at      TEXT NOT NULL,
+    started_at      TEXT,
+    finished_at     TEXT,
+    error           TEXT,
+    UNIQUE (run_id, session_id, idempotency_key)
+);
+
+CREATE TABLE edge_job_items (
+    job_id       TEXT NOT NULL,
+    product_id   TEXT NOT NULL,
+    url          TEXT NOT NULL,
+    status       TEXT NOT NULL,
+    attempts     INTEGER NOT NULL DEFAULT 0,
+    engine       TEXT,
+    kind         TEXT,
+    fetch        TEXT,
+    extract      TEXT,
+    strategy     TEXT,
+    wait_for     TEXT,
+    lang         TEXT,
+    http_status  INTEGER,
+    content_type TEXT,
+    fetched_at   TEXT,
+    content_hash TEXT,
+    blob_ref     TEXT,
+    error        TEXT,
+    PRIMARY KEY (job_id, product_id, url)
+);
+"""
+
+
+def test_edge_schema_migration_adds_final_url(make_scheduler: Any, tmp_path: Path) -> None:
+    """§6a/§11.6.6: старая ``edge_jobs.db`` доливается колонками, строки целы.
+
+    ``CREATE TABLE IF NOT EXISTS`` не расширяет существующую таблицу — миграция обязана
+    добавить ``robots``/``final_url``/``rate_limit`` идемпотентно, не трогая строки.
+    """
+    db_path = tmp_path / "edge_jobs.db"
+    legacy = sqlite3.connect(str(db_path))
+    try:
+        legacy.executescript(_OLD_SCHEMA)
+        with legacy:
+            legacy.execute(
+                "INSERT INTO edge_jobs (job_id, run_id, session_id, idempotency_key, status,"
+                " total, pending, running, fetched, failed, cancelled, created_at, started_at)"
+                " VALUES ('jold', 'r1', 's1', 'kold', 'completed', 1, 0, 0, 1, 0, 0, ?, ?)",
+                (_FIXED_TIME, _FIXED_TIME),
+            )
+            legacy.execute(
+                "INSERT INTO edge_job_items (job_id, product_id, url, status, content_hash)"
+                " VALUES ('jold', 'p1', 'https://x.test/old', 'fetched', 'legacy-hash')"
+            )
+        legacy.commit()
+    finally:
+        legacy.close()
+
+    scheduler = make_scheduler(state_dir=tmp_path)
+    scheduler.start()  # recovery + миграция
+    conn = scheduler._connect()
+    columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(edge_job_items)")}
+    assert {"final_url", "rate_limit", "robots"} <= columns
+
+    # Существующая строка цела (не пересоздана, значения сохранены).
+    row = conn.execute(
+        "SELECT url, status, content_hash FROM edge_job_items WHERE job_id = 'jold'"
+    ).fetchone()
+    assert row["url"] == "https://x.test/old"
+    assert row["status"] == "fetched"
+    assert row["content_hash"] == "legacy-hash"
+
+    # Идемпотентность: повторная миграция — no-op (набор колонок не меняется).
+    scheduler._migrate(conn)
+    assert {str(r[1]) for r in conn.execute("PRAGMA table_info(edge_job_items)")} == columns
+
+
+# ---------------------------------------------------------------------------
+# §11.6 — pacing (A2c, контент-нейтрально)
+# ---------------------------------------------------------------------------
+
+
+def test_edge_paces_thread_engine_with_injected_limiter(make_scheduler: Any) -> None:
+    """§11.6.1: ровно один сон ожидаемой длительности; ``host``/spec дошли до лимитера."""
+    limiter = RecordingRateLimiter()
+    scheduler = make_scheduler(limiter=limiter)
+    scheduler.submit(
+        _submit_payload(
+            items=[_item("p1", "https://x.test/a", rate_limit={"min_s": 0.5, "max_s": 0.5})]
+        )
+    )
+    assert _wait_terminal(scheduler, "job1")["status"] == JOB_COMPLETED
+    assert limiter.sleeps == [0.5]
+    assert limiter.waits == [("x.test", RateLimitSpec(min_s=0.5, max_s=0.5))]
+
+
+def test_edge_no_pacing_when_rate_limit_absent(make_scheduler: Any) -> None:
+    """§11.6.2: ``rate_limit`` отсутствует ⇒ ноль снов (байт-идентичность дефолта)."""
+    limiter = RecordingRateLimiter()
+    scheduler = make_scheduler(limiter=limiter)
+    scheduler.submit(_submit_payload(items=[_item("p1", "https://x.test/a")]))
+    assert _wait_terminal(scheduler, "job1")["status"] == JOB_COMPLETED
+    assert limiter.sleeps == []
+    assert limiter.waits == [("x.test", None)]
+
+
+def test_edge_browser_not_double_paced(monkeypatch: pytest.MonkeyPatch) -> None:
+    """§11.6.3: browser не пейсится дважды (голый адаптер + ровно один ``wait`` в обёртке)."""
+    # ``crawler_factory`` строит BrowserCrawler голым ⇒ внутренний хук адаптера инертен.
+    assert crawler_factory("browser")._rate_limiter is None
+
+    import core.edge.scheduler as sched
+
+    limiter = RecordingRateLimiter()
+    stub = FakeCrawler(engine="browser", content=b"browser-body")
+    monkeypatch.setattr(sched, "_WORKER_LIMITER", limiter)
+    monkeypatch.setattr(sched, "_WORKER_CRAWLERS", {"browser": stub})
+
+    plan = FetchPlan(rate_limit=RateLimitSpec(min_s=0.0, max_s=0.0), robots=False)
+    result = _process_fetch("browser", "https://x.test/a", plan)
+    assert result["ok"] is True
+    assert stub.calls == 1
+    assert len(limiter.waits) == 1  # ровно один pacing в обёртке (не два)
+
+
+def test_seam_submit_item_rate_limit_roundtrip(make_scheduler: Any) -> None:
+    """§11.6.4: ``RateLimitSpec`` round-trip ядро→шов→edge; malformed → ``None`` (без падения)."""
+    executor = EdgeCrawlExecutor(NoopGateway())  # type: ignore[arg-type]
+    spec = RateLimitSpec(min_s=0.1, max_s=0.2)
+    payload_item = executor._work_item_payload(
+        CrawlWorkItem(product_id="p1", url="https://x.test/a", rate_limit=spec)
+    )
+    assert payload_item["rate_limit"] == {"min_s": 0.1, "max_s": 0.2}
+    assert payload_item["robots"] is False
+
+    scheduler = make_scheduler()
+    normalized = scheduler._normalize_items([payload_item])
+    assert normalized[0]["rate_limit"] == spec
+    assert normalized[0]["robots"] is False
+
+    # Сквозной round-trip через БД: submit → строка → ``_plan_for`` восстанавливает spec.
+    scheduler.submit(_submit_payload(items=[payload_item]))
+    assert _wait_terminal(scheduler, "job1")["status"] == JOB_COMPLETED
+    row = scheduler._connect().execute(
+        "SELECT * FROM edge_job_items WHERE job_id = 'job1'"
+    ).fetchone()
+    plan = scheduler._plan_for(row)
+    assert plan.rate_limit == spec
+    assert plan.robots is False
+
+    # Malformed/отсутствующий вход мягко деградирует в ``None`` (submit не падает).
+    for bad in (
+        {"min_s": "x", "max_s": 1},
+        {"min_s": 0.5},
+        {"min_s": 0.5, "max_s": 0.1},
+        {"min_s": -1, "max_s": 1},
+        "nope",
+        42,
+        None,
+    ):
+        parsed = scheduler._normalize_items(
+            [{"product_id": "p", "url": "https://x.test/z", "rate_limit": bad}]
+        )
+        assert parsed[0]["rate_limit"] is None
+
+
+def test_seam_rate_limit_none_is_null() -> None:
+    """§11.6.5: ``None`` → ``null``/отсутствие, схемо-валидно."""
+    executor = EdgeCrawlExecutor(NoopGateway())  # type: ignore[arg-type]
+    payload_item = executor._work_item_payload(
+        CrawlWorkItem(product_id="p1", url="https://x.test/a")
+    )
+    assert payload_item["rate_limit"] is None
+    request = {
+        "run_id": "r1",
+        "session_id": "s1",
+        "idempotency_key": "k1",
+        "profile": "public",
+        "items": [payload_item],
+    }
+    assert validate_crawl_request("crawl/submit", request) == []
+
+
+# ---------------------------------------------------------------------------
+# §10 (A2b) — robots-политика на edge (условна от ``plan.robots``)
+# ---------------------------------------------------------------------------
+
+
+def test_edge_robots_gate_applied_only_when_plan_robots(
+    make_scheduler: Any,
+) -> None:
+    """§10/A2b: гейт вешается на краулер, но применяется ТОЛЬКО при ``plan.robots``.
+
+    ``robots=True`` → отказ (элемент ``failed``, гейт опрошен); ``robots=False`` →
+    фетч без обращения к ``robots.txt`` (дефолтные прогоны байт-идентичны).
+    """
+    from core.adapters.crawl_http import HttpCrawler
+
+    gate = StubRobotsGate(allowed=False)
+    scheduler = make_scheduler(
+        crawlers={"http": HttpCrawler(fetcher=lambda url: b"<html>ok</html>")},
+        robots_factory=lambda user_agent: gate,
+    )
+    # robots=True: политика применяется (гейт отклоняет) → честный failed.
+    scheduler.submit(
+        _submit_payload(
+            items=[_item("p1", "https://x.test/blocked", robots=True)], key="k1"
+        )
+    )
+    assert _wait_terminal(scheduler, "job1")["failed"] == 1
+    assert gate.calls == ["https://x.test/blocked"]
+
+    # robots=False: тот же краулер фетчит, гейт НЕ опрашивается.
+    scheduler.submit(
+        _submit_payload(
+            items=[_item("p2", "https://x.test/allowed", robots=False)], key="k2"
+        )
+    )
+    assert _wait_terminal(scheduler, "job2")["status"] == JOB_COMPLETED
+    assert gate.calls == ["https://x.test/blocked"]
+

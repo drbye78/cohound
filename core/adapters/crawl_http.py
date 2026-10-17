@@ -156,7 +156,9 @@ class HttpCrawler:
 
         # D1/§10: robots.txt-запрет — отказ (не сбой). Персистентный отказ не латаем
         # кэшем: проверяем до обращения к кэшу (кэш мог быть добыт до появления правил).
-        if self._robots is not None:
+        # Гейт **условен**: проверяем только когда политика внедрена И ``plan.robots``
+        # (политика приходит с ядра; при выключенном robots лишних fetch нет).
+        if self._robots is not None and plan.robots:
             try:
                 allowed = self._robots.allowed(url)
             except Exception:  # noqa: BLE001 — сбой robots-проверки не роняет краул

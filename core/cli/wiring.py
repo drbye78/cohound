@@ -1592,7 +1592,7 @@ def build_adapters(
             # Phase 3.3: краул split исполняется через edge-планировщик (``CrawlExecutorPort``):
             # submit/status/collect по шву. ``crawler=RemoteCrawler`` оставлен для обратной
             # совместимости (non-executor путь); при наличии ``executor`` фаза его не использует.
-            executor=EdgeCrawlExecutor(content_gateway),
+            executor=EdgeCrawlExecutor(content_gateway, user_agent=config.crawl.user_agent),
             # Phase 5.1: опрос фидов/каналов делегируется DMZ-шву (op ``crawl/poll``); ядро
             # не фетчит ленты in-process (веб-эгресс только через шов, 07 §4–§5).
             pollers={

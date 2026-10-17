@@ -1632,7 +1632,9 @@ class _FakeExecutor:
     """Фейковый ``CrawlExecutorPort``: отдаёт заранее заданные байты/ошибки по URL.
 
     ``statuses`` задаёт последовательность статусов опроса (последний повторяется);
-    ``pages``/``errors``/``engines`` — исход по URL. Журналирует submit/status/collect.
+    ``pages``/``errors``/``engines`` — исход по URL; ``final_url`` — пост-редиректный URL
+    результата (P3-A2/A2a; ``None`` ⇒ ядро трактует как запрошенный ``url``). Журналирует
+    submit/status/collect; ``submits`` — наборы работ **по раундам** (P3-A2).
     """
 
     version = "fake-executor-1"
@@ -1649,10 +1651,12 @@ class _FakeExecutor:
         extra_items: list[CrawlResultItem] | None = None,
         accept_sequence: list[bool] | None = None,
         retry_after_s: float | None = None,
+        final_url: dict[str, str] | None = None,
     ) -> None:
         self.pages = dict(pages or {})
         self.errors = dict(errors or {})
         self.engines = dict(engines or {})
+        self.final_url = dict(final_url or {})
         self.statuses = list(statuses or ["completed"])
         self.collect_error = collect_error
         self.extra_items = list(extra_items or [])
@@ -1734,6 +1738,7 @@ class _FakeExecutor:
             kind=work.kind,
             content_hash=content_hash(content),
             raw_bytes=content,
+            final_url=self.final_url.get(work.url),
         )
 
 
@@ -2638,8 +2643,8 @@ def _run_executor_build(tmp_path: Path, store, executor, **kwargs):  # noqa: ANN
     )
 
 
-def test_executor_directory_feed_two_waves(tmp_path: Path) -> None:
-    """Phase 5.3: feed-каталог → волна 1 (top-level) + волна 2 (записи), два submit."""
+def test_executor_directory_feed_entries_each_own_root(tmp_path: Path) -> None:
+    """P3-A2: feed-каталог → каждая запись — свой seed-root (свой раунд/``submit``)."""
     store = SqliteStore(":memory:")
     _make_run(store)
     poller = _FakePoller([FeedEntry(url=EXEC_E1), FeedEntry(url=EXEC_E2)])
@@ -2656,15 +2661,18 @@ def test_executor_directory_feed_two_waves(tmp_path: Path) -> None:
             pollers={"feed": poller},
         )
         assert result.errors == []
-        # Две волны → два submit с разными ключами идемпотентности (каталог не подан).
-        assert len(executor.submits) == 2
-        wave1 = [w.url for w in executor.submits[0]]
-        wave2 = [w.url for w in executor.submits[1]]
-        assert wave1 == [URL_P1_A]
-        assert wave2 == [EXEC_E1, EXEC_E2]
-        assert EXEC_FEED_URL not in wave1 + wave2
+        # Каждый корень дренится своим раундом (в порядке ``url_map``); записи каталога —
+        # отдельные depth-0 корни. Сам каталог как страница НЕ подаётся.
+        assert [[w.url for w in s] for s in executor.submits] == [
+            [URL_P1_A],
+            [EXEC_E1],
+            [EXEC_E2],
+        ]
+        assert EXEC_FEED_URL not in {
+            w.url for s in executor.submits for w in s
+        }
         keys = [k["idempotency_key"] for k in executor.submit_kwargs]
-        assert keys[0] != keys[1]
+        assert len(set(keys)) == 3  # разные наборы работ ⇒ разные ключи
         assert all(k["session_id"] == SESSION_ID for k in executor.submit_kwargs)
 
         items = {i.url: i for i in _items(store)}
@@ -2946,12 +2954,15 @@ def test_executor_top_level_max_attempts_exhausted_not_submitted(tmp_path: Path)
         store.close()
 
 
-def test_executor_work_order_mirrors_local_interleaving(tmp_path: Path) -> None:
-    """Порядок ingest в Pass A зеркалит локальный: записи каталога — на месте каталога."""
+def test_executor_root_order_matches_local(tmp_path: Path) -> None:
+    """P3-A2: корни дренируются в порядке ``url_map`` — ingest-порядок = локальный.
+
+    URL сортируются лексикографически; ``zzz.test`` идёт после ``feed.test``, поэтому
+    записи каталога обязаны встать МЕЖДУ top-level URL (в месте каталога). Однопутевой
+    product-цикл делает это по построению — трюк с interleaving больше не нужен.
+    """
     store = SqliteStore(":memory:")
     _make_run(store)
-    # URL сортируются лексикографически (``url_map``); ``zzz.test`` идёт после ``feed.test``,
-    # поэтому записи каталога обязаны встать МЕЖДУ top-level URL (в месте каталога).
     zzz = "https://zzz.test/p1/page"
     poller = _FakePoller([FeedEntry(url=EXEC_E1), FeedEntry(url=EXEC_E2)])
     executor = _FakeExecutor(
@@ -2967,9 +2978,14 @@ def test_executor_work_order_mirrors_local_interleaving(tmp_path: Path) -> None:
             pollers={"feed": poller},
         )
         assert result.errors == []
-        # Волна 1 — top-level в порядке url_map; волна 2 — записи в порядке поллера.
-        assert [w.url for w in executor.submits[0]] == [URL_P1_A, zzz]
-        assert [w.url for w in executor.submits[1]] == [EXEC_E1, EXEC_E2]
+        # Каждый корень — свой раунд, в порядке ``url_map`` (docs < feed < zzz); записи
+        # каталога разворачиваются на месте каталога.
+        assert [[w.url for w in s] for s in executor.submits] == [
+            [URL_P1_A],
+            [EXEC_E1],
+            [EXEC_E2],
+            [zzz],
+        ]
         # Порядок документов = порядок ingest: top, e1, e2, zzz (записи на месте каталога).
         order = [d.content_hash for d in _build_of(result).docs]
         assert order == [
@@ -3275,8 +3291,8 @@ def test_sitemap_domain_profile_rejects_unknown_field() -> None:
     )
 
 
-def test_executor_sitemap_locs_go_to_wave2(tmp_path: Path) -> None:
-    """``executor``/split: ``<loc>`` sitemap подаются волной 2 (как записи каталога)."""
+def test_executor_sitemap_locs_share_root_frontier(tmp_path: Path) -> None:
+    """P3-A2: ``<loc>`` sitemap — ``extra_seeds`` того же корня (один раунд, общий бюджет)."""
     store = SqliteStore(":memory:")
     _make_run(store)
     poller = _FakePoller([FeedEntry(url=SITEMAP_LOC_1)])
@@ -3291,10 +3307,425 @@ def test_executor_sitemap_locs_go_to_wave2(tmp_path: Path) -> None:
             pollers={"sitemap": poller},
         )
         assert result.errors == []
-        assert [w.url for w in executor.submits[0]] == [URL_P1_A]
-        assert [w.url for w in executor.submits[1]] == [SITEMAP_LOC_1]
+        # Seed оператора и ``<loc>`` делят один фронтир → один раунд (как в local).
+        assert [[w.url for w in s] for s in executor.submits] == [
+            [URL_P1_A, SITEMAP_LOC_1]
+        ]
         assert {d.url for d in _build_of(result).docs} == {URL_P1_A, SITEMAP_LOC_1}
     finally:
         store.close()
+
+
+# --------------------------------------------------------------------------- #
+# P3-A2: протокол раундов executor-транспорта (единый drain-алгоритм local/split)
+# --------------------------------------------------------------------------- #
+
+SPLIT_ROOT = "https://split.test/"
+SPLIT_D1A = "https://split.test/a"
+SPLIT_D1B = "https://split.test/b"
+SPLIT_D1C = "https://split.test/c"
+SPLIT_D2A = "https://split.test/a/1"
+SPLIT_D2B = "https://split.test/b/1"
+SPLIT_BLOCKED = "https://split.test/blocked"
+SPLIT_REDIR = "https://split.test/redir"
+SPLIT_OFFSITE = "https://other.test/x"
+
+
+def _split_profile(**overrides: Any) -> dict[str, DomainProfile]:
+    """Per-site профиль ``split.test`` с заданными осями контроля краула (D1/D2)."""
+    return {"split.test": DomainProfile(**overrides)}
+
+
+def test_split_bfs_rounds_until_frontier_drained(tmp_path: Path) -> None:
+    """P3-A2 (якорь): сайт глубины 2 — обнаруженные URL в отдельных раундах, терминация.
+
+    Раунд 1 — seed (depth 0); раунд 2 — depth-1; раунд 3 — depth-2; затем фронтир пуст.
+    Падает на старом коде (отказ ``max_depth>0``) и на наивной «третьей статической волне»
+    (depth-2 фетчились бы в раунде depth-1).
+    """
+    store = SqliteStore(":memory:")
+    _make_run(store)
+    pages = {
+        SPLIT_ROOT: b'<a href="/a">a</a><a href="/b">b</a>',
+        SPLIT_D1A: b'<a href="/a/1">a1</a>',
+        SPLIT_D1B: b'<a href="/b/1">b1</a>',
+        SPLIT_D2A: b"leaf a1",
+        SPLIT_D2B: b"leaf b1",
+    }
+    executor = _FakeExecutor(pages=pages)
+    try:
+        result = _run_executor_build(
+            tmp_path,
+            store,
+            executor,
+            urls={"p1": [SPLIT_ROOT]},
+            domain_profiles=_split_profile(max_depth=2),
+        )
+        assert result.errors == []
+        assert [[w.url for w in s] for s in executor.submits] == [
+            [SPLIT_ROOT],
+            [SPLIT_D1A, SPLIT_D1B],
+            [SPLIT_D2A, SPLIT_D2B],
+        ]
+        assert {d.url for d in _build_of(result).docs} == {
+            SPLIT_ROOT,
+            SPLIT_D1A,
+            SPLIT_D1B,
+            SPLIT_D2A,
+            SPLIT_D2B,
+        }
+        session = store.get_crawl_session(SESSION_ID)
+        assert session is not None and session.status is CrawlSessionStatus.COMPLETED
+    finally:
+        store.close()
+
+
+def test_split_round_respects_max_documents_across_rounds(tmp_path: Path) -> None:
+    """P3-A2/§2: ``max_documents`` зажимает размер раунда; пере-удержание невозможно."""
+    store = SqliteStore(":memory:")
+    _make_run(store)
+    pages = {
+        SPLIT_ROOT: (
+            b'<a href="/a">a</a><a href="/b">b</a><a href="/c">c</a>'
+        ),
+        SPLIT_D1A: b"leaf a",
+        SPLIT_D1B: b"leaf b",
+        SPLIT_D1C: b"leaf c",
+    }
+    executor = _FakeExecutor(pages=pages)
+    try:
+        result = _run_executor_build(
+            tmp_path,
+            store,
+            executor,
+            urls={"p1": [SPLIT_ROOT]},
+            domain_profiles=_split_profile(max_depth=1, max_documents=2),
+        )
+        # Ровно два фетча: seed + один depth-1; дальше ёмкость исчерпана (тихая остановка).
+        assert [[w.url for w in s] for s in executor.submits] == [
+            [SPLIT_ROOT],
+            [SPLIT_D1A],
+        ]
+        build = _build_of(result)
+        assert len(build.docs) == 2
+        assert build.truncated is True
+        assert any(
+            rec["truncated_reason"] == "max_documents" for rec in build.truncation
+        )
+        session = store.get_crawl_session(SESSION_ID)
+        assert session is not None and session.status is CrawlSessionStatus.PARTIAL
+    finally:
+        store.close()
+
+
+def test_split_round_budget_valve_truncates(tmp_path: Path, monkeypatch: Any) -> None:
+    """P3-A2/§1(iii): предохранитель раундов усекает ``round_budget``, не молчит."""
+    monkeypatch.setattr(
+        "core.pipeline.corpus._EXECUTOR_MAX_WAVES_PER_ROOT", 1
+    )
+    store = SqliteStore(":memory:")
+    _make_run(store)
+    pages = {SPLIT_ROOT: b'<a href="/a">a</a>', SPLIT_D1A: b"leaf a"}
+    executor = _FakeExecutor(pages=pages)
+    try:
+        result = _run_executor_build(
+            tmp_path,
+            store,
+            executor,
+            urls={"p1": [SPLIT_ROOT]},
+            domain_profiles=_split_profile(max_depth=1),
+        )
+        assert len(executor.submits) == 1  # второй раунд остановлен клапаном
+        build = _build_of(result)
+        assert build.truncated is True
+        assert any(
+            rec["truncated_reason"] == "round_budget" for rec in build.truncation
+        )
+        assert any("round_budget" in e for e in result.errors)
+        session = store.get_crawl_session(SESSION_ID)
+        assert session is not None and session.status is CrawlSessionStatus.PARTIAL
+    finally:
+        store.close()
+
+
+def test_split_resume_charges_budget_once(tmp_path: Path) -> None:
+    """P3-A2/B2: resume-элементы заряжают бюджет корня; повторного ``submit`` нет."""
+    store = SqliteStore(":memory:")
+    _make_run(store)
+    profile = _split_profile(max_depth=1, max_documents=2)
+    pages = {
+        SPLIT_ROOT: (
+            b'<a href="/a">a</a><a href="/b">b</a><a href="/c">c</a>'
+        ),
+        SPLIT_D1A: b"leaf a",
+        SPLIT_D1B: b"leaf b",
+        SPLIT_D1C: b"leaf c",
+    }
+    try:
+        first = _run_executor_build(
+            tmp_path,
+            store,
+            _FakeExecutor(pages=pages),
+            urls={"p1": [SPLIT_ROOT]},
+            domain_profiles=profile,
+        )
+        assert len(_build_of(first).docs) == 2  # бюджет исчерпан (root + /a)
+        first_items = {i.url: i for i in _items(store)}
+        assert first_items[SPLIT_ROOT].raw_path
+        assert first_items[SPLIT_D1A].raw_path
+
+        second_executor = _FakeExecutor(pages=pages)
+        second = _run_executor_build(
+            tmp_path,
+            store,
+            second_executor,
+            urls={"p1": [SPLIT_ROOT]},
+            domain_profiles=profile,
+        )
+        assert second_executor.submits == []  # бюджет заряжен resume-элементами
+        assert any("max_documents" in e for e in second.errors)
+        session = store.get_crawl_session(SESSION_ID)
+        assert session is not None and session.status is CrawlSessionStatus.PARTIAL
+    finally:
+        store.close()
+
+
+def test_split_blacklist_and_scope_enforced(tmp_path: Path) -> None:
+    """P3-A2/§5: блэклист и scope применяются к обнаруженным URL (не только в local)."""
+    store = SqliteStore(":memory:")
+    _make_run(store)
+    pages = {
+        SPLIT_ROOT: (
+            b'<a href="/blocked">b</a><a href="/a">a</a>'
+            b'<a href="https://other.test/x">x</a>'
+        ),
+        SPLIT_D1A: b"leaf a",
+    }
+    executor = _FakeExecutor(pages=pages)
+    try:
+        result = _run_executor_build(
+            tmp_path,
+            store,
+            executor,
+            urls={"p1": [SPLIT_ROOT]},
+            domain_profiles=_split_profile(max_depth=1, exclude_paths=["/blocked"]),
+        )
+        assert result.errors == []
+        # Заблэклистенный и вне-scope URL не подаются; только seed и легитимная ссылка.
+        assert [[w.url for w in s] for s in executor.submits] == [
+            [SPLIT_ROOT],
+            [SPLIT_D1A],
+        ]
+        assert {d.url for d in _build_of(result).docs} == {SPLIT_ROOT, SPLIT_D1A}
+        record = _build_of(result).truncation[0]
+        assert SPLIT_BLOCKED in record["skipped_blacklisted"]
+    finally:
+        store.close()
+
+
+def test_split_redirect_scope_uses_final_url(tmp_path: Path) -> None:
+    """P3-A2/A2a/§4: off-host ``final_url`` → ``FAILED redirect_out_of_scope``, без ретейна."""
+    store = SqliteStore(":memory:")
+    _make_run(store)
+    pages = {
+        SPLIT_ROOT: b'<a href="/redir">r</a>',
+        SPLIT_REDIR: b'<a href="/should-not-fetch">x</a>',
+    }
+    executor = _FakeExecutor(
+        pages=pages, final_url={SPLIT_REDIR: SPLIT_OFFSITE}
+    )
+    try:
+        result = _run_executor_build(
+            tmp_path,
+            store,
+            executor,
+            urls={"p1": [SPLIT_ROOT]},
+            domain_profiles=_split_profile(max_depth=1),
+        )
+        assert [[w.url for w in s] for s in executor.submits] == [
+            [SPLIT_ROOT],
+            [SPLIT_REDIR],
+        ]
+        # Финальный URL ушёл из scope → страница не ретейнится и ссылки не расширяются.
+        assert {d.url for d in _build_of(result).docs} == {SPLIT_ROOT}
+        item = {i.url: i for i in _items(store)}[SPLIT_REDIR]
+        assert item.status is CrawlItemStatus.FAILED
+        assert item.error_kind == "redirect_out_of_scope"
+        assert any("redirect вышел из scope" in e for e in result.errors)
+    finally:
+        store.close()
+
+
+def test_split_round_idempotency_keys_distinct_per_round_and_session_stable(
+    tmp_path: Path,
+) -> None:
+    """P3-A2/B2: ключ идемпотентности — по набору работ раунда; ``session_id`` стабилен."""
+    store = SqliteStore(":memory:")
+    _make_run(store)
+    pages = {
+        SPLIT_ROOT: b'<a href="/a">a</a><a href="/b">b</a>',
+        SPLIT_D1A: b'<a href="/a/1">a1</a>',
+        SPLIT_D1B: b'<a href="/b/1">b1</a>',
+        SPLIT_D2A: b"leaf a1",
+        SPLIT_D2B: b"leaf b1",
+    }
+    executor = _FakeExecutor(pages=pages)
+    try:
+        _run_executor_build(
+            tmp_path,
+            store,
+            executor,
+            urls={"p1": [SPLIT_ROOT]},
+            domain_profiles=_split_profile(max_depth=2),
+        )
+        keys = [k["idempotency_key"] for k in executor.submit_kwargs]
+        assert len(set(keys)) == len(keys)  # разные наборы работ ⇒ разные ключи
+        for work, kwargs in zip(executor.submits, executor.submit_kwargs):
+            assert kwargs["idempotency_key"] == _work_set_idempotency_key(work)
+            assert kwargs["session_id"] == SESSION_ID
+    finally:
+        store.close()
+
+
+def test_split_backpressure_bisects_and_singleton_fails_honestly(
+    tmp_path: Path,
+) -> None:
+    """P3-A2/§3: отвергнутая волна делится пополам; отвергнутый одиночка — честный FAILED."""
+    store = SqliteStore(":memory:")
+    _make_run(store)
+
+    class _RejectLargeWaves(_FakeExecutor):
+        """Принимает одиночные работы; волну из >1 — отклоняет (back-pressure)."""
+
+        def submit(  # type: ignore[override]
+            self, items, *, session_id, run_id, profile, idempotency_key
+        ) -> CrawlSubmitResult:
+            self.submits.append(list(items))
+            self.submit_kwargs.append(
+                {
+                    "session_id": session_id,
+                    "run_id": run_id,
+                    "profile": profile,
+                    "idempotency_key": idempotency_key,
+                }
+            )
+            if len(items) > 1:
+                return CrawlSubmitResult(job_id="", accepted=False, retry_after_s=None)
+            return CrawlSubmitResult(job_id="job-1", accepted=True, retry_after_s=None)
+
+    pages = {
+        SPLIT_ROOT: b'<a href="/a">a</a><a href="/b">b</a>',
+        SPLIT_D1A: b"leaf a",
+        SPLIT_D1B: b"leaf b",
+    }
+    executor = _RejectLargeWaves(pages=pages)
+    try:
+        result = _run_executor_build(
+            tmp_path,
+            store,
+            executor,
+            urls={"p1": [SPLIT_ROOT]},
+            domain_profiles=_split_profile(max_depth=1),
+        )
+        assert any("бисекция" in e for e in result.errors)
+        # Обе половины добыты: волна из двух отвергнута, затем принята по частям.
+        assert {d.url for d in _build_of(result).docs} == {
+            SPLIT_ROOT,
+            SPLIT_D1A,
+            SPLIT_D1B,
+        }
+        items = {i.url: i for i in _items(store)}
+        assert items[SPLIT_D1A].status is CrawlItemStatus.FETCHED
+        assert items[SPLIT_D1B].status is CrawlItemStatus.FETCHED
+    finally:
+        store.close()
+
+    # Синглтон, отвергнутый после всех ретраев → per-URL FAILED, сеанс PARTIAL (не тихо).
+    store2 = SqliteStore(":memory:")
+    _make_run(store2)
+    try:
+        result = _run_executor_build(
+            tmp_path,
+            store2,
+            _FakeExecutor(pages={}, accept_sequence=[False]),
+            urls={"p1": [SPLIT_ROOT]},
+        )
+        item = next(iter(_items(store2)))
+        assert item.status is CrawlItemStatus.FAILED
+        assert item.error_kind == FailureKind.SOURCE_UNAVAILABLE.value
+        assert any("back-pressure" in e for e in result.errors)
+        session = store2.get_crawl_session(SESSION_ID)
+        assert session is not None and session.status is CrawlSessionStatus.PARTIAL
+    finally:
+        store2.close()
+
+
+def test_split_missing_result_marks_failed(tmp_path: Path) -> None:
+    """P3-A2/§4: работа без результата в раунде → ``FAILED source_unavailable`` (не тихо)."""
+    store = SqliteStore(":memory:")
+    _make_run(store)
+
+    class _PartialCollect(_FakeExecutor):
+        """Отдаёт результаты только для части работ волны (``/b`` пропадает)."""
+
+        def collect(self, handle, *, cursor=None, limit=None):  # type: ignore[override]
+            self.collect_cursors.append(cursor)
+            items = [
+                self._result(w)
+                for w in self.submits[-1]
+                if w.url != SPLIT_D1B
+            ]
+            return CrawlBatch(items=items, next_cursor=None, done=True)
+
+    pages = {
+        SPLIT_ROOT: b'<a href="/a">a</a><a href="/b">b</a>',
+        SPLIT_D1A: b"leaf a",
+        SPLIT_D1B: b"leaf b",
+    }
+    executor = _PartialCollect(pages=pages)
+    try:
+        result = _run_executor_build(
+            tmp_path,
+            store,
+            executor,
+            urls={"p1": [SPLIT_ROOT]},
+            domain_profiles=_split_profile(max_depth=1),
+        )
+        items = {i.url: i for i in _items(store)}
+        assert items[SPLIT_D1A].status is CrawlItemStatus.FETCHED
+        assert items[SPLIT_D1B].status is CrawlItemStatus.FAILED
+        assert items[SPLIT_D1B].error_kind == FailureKind.SOURCE_UNAVAILABLE.value
+        assert any("результат не получен" in e for e in result.errors)
+        assert {d.url for d in _build_of(result).docs} == {SPLIT_ROOT, SPLIT_D1A}
+    finally:
+        store.close()
+
+
+def test_split_polls_until_terminal(tmp_path: Path) -> None:
+    """P3-A2/§1: каждый раунд поллится до терминального статуса; пауза — инжектированный sleep."""
+    store = SqliteStore(":memory:")
+    _make_run(store)
+    slept: list[float] = []
+    pages = {SPLIT_ROOT: b'<a href="/a">a</a>', SPLIT_D1A: b"leaf a"}
+    executor = _FakeExecutor(pages=pages, statuses=["pending", "completed"])
+    try:
+        _build(
+            tmp_path,
+            pages={},
+            crawler=_BombCrawler({}),
+            executor=executor,
+            executor_poll_interval=0.5,
+            executor_sleep=slept.append,
+            urls={"p1": [SPLIT_ROOT]},
+            domain_profiles=_split_profile(max_depth=1),
+            store=store,
+            run_id=RUN_ID,
+        )
+        # Раунд 1: pending → пауза → completed. Раунд 2: уже терминально (без паузы).
+        assert executor.status_calls == ["pending", "completed", "completed"]
+        assert slept == [0.5]
+    finally:
+        store.close()
+
 
 

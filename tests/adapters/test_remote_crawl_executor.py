@@ -9,7 +9,9 @@
 from __future__ import annotations
 
 import base64
+import json
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -21,6 +23,7 @@ from core.adapters.remote_crawl_executor import (
 )
 from core.adapters.remote_gateway import RemoteContentError
 from core.domain.enums import CrawlStrategy, ExtractionRoute, FetchMode
+from core.domain.models import RateLimitSpec
 from core.ports.crawl_executor import (
     CrawlBatch,
     CrawlExecutorPort,
@@ -135,6 +138,8 @@ def test_submit_builds_payload_and_returns_job_id() -> None:
             "strategy": "hybrid",
             "wait_for": "selector",
             "lang": "ru",
+            "robots": False,
+            "rate_limit": None,
         }
     ]
 
@@ -156,6 +161,114 @@ def test_submit_defaults_axes_when_unset() -> None:
     assert item["extract"] == "auto"
     assert item["strategy"] == "auto"
     assert item["engine"] is None and item["kind"] is None
+    assert item["robots"] is False
+    assert item["rate_limit"] is None
+
+
+def test_submit_emits_robots_and_structured_rate_limit() -> None:
+    """§6b/§11.1: ``robots`` — bool, ``rate_limit`` — структурные числа ``{min_s,max_s}``."""
+    gateway = _FakeGateway({"crawl/submit": {"job_id": "job-rl"}})
+    executor = EdgeCrawlExecutor(gateway)
+
+    executor.submit(
+        [_work_item(robots=True, rate_limit=RateLimitSpec(min_s=0.5, max_s=1.5))],
+        session_id="s",
+        run_id="r",
+        profile="split",
+        idempotency_key="k",
+    )
+
+    item = gateway.calls[-1][1]["items"][0]
+    assert item["robots"] is True
+    assert item["rate_limit"] == {"min_s": 0.5, "max_s": 1.5}
+    # именно структурные числа, а не строка canonical_rate_limit
+    assert all(isinstance(v, float) for v in item["rate_limit"].values())
+
+
+def test_submit_rate_limit_none_is_null() -> None:
+    """§11.6: ``rate_limit=None`` сериализуется как ``null`` (без пейсинга)."""
+    gateway = _FakeGateway({"crawl/submit": {"job_id": "job-none"}})
+    executor = EdgeCrawlExecutor(gateway)
+
+    executor.submit(
+        [_work_item(robots=False, rate_limit=None)],
+        session_id="s",
+        run_id="r",
+        profile="split",
+        idempotency_key="k",
+    )
+
+    item = gateway.calls[-1][1]["items"][0]
+    assert item["rate_limit"] is None
+
+
+def _submit_request_schema() -> dict[str, Any]:
+    """Опубликованная схема ``#/$defs/submit_request`` для jsonschema-валидации.
+
+    Собирает самодостаточный документ из опубликованного ``crawl.schema.json``
+    (draft 2020-12), чтобы валидировать именно публикуемую форму запроса.
+    """
+    root = Path(__file__).resolve().parents[2]
+    doc = json.loads(
+        (root / "contracts" / "seam" / "crawl.schema.json").read_text(encoding="utf-8")
+    )
+    return {
+        "$schema": doc["$schema"],
+        "$defs": doc["$defs"],
+        "$ref": "#/$defs/submit_request",
+    }
+
+
+def test_submit_emits_user_agent_when_set() -> None:
+    """§6b: ``user_agent`` — request-level поле, схемо-валидное, вне элемента items."""
+    jsonschema = pytest.importorskip("jsonschema")
+    gateway = _FakeGateway({"crawl/submit": {"job_id": "job-ua"}})
+    executor = EdgeCrawlExecutor(gateway, user_agent="ua/9")
+
+    executor.submit(
+        [_work_item()], session_id="s", run_id="r", profile="split", idempotency_key="k"
+    )
+
+    payload = gateway.calls[-1][1]
+    assert payload["user_agent"] == "ua/9"
+    assert "user_agent" not in payload["items"][0]  # request-level, не per-item
+    # порядок: рядом с прочими request-level полями, до items
+    assert list(payload) == [
+        "run_id",
+        "session_id",
+        "idempotency_key",
+        "profile",
+        "user_agent",
+        "items",
+    ]
+    jsonschema.Draft202012Validator(_submit_request_schema()).validate(payload)
+
+
+def test_submit_omits_user_agent_when_unset() -> None:
+    """§6b: без ``user_agent`` ключ отсутствует (не ``null``) и payload схемо-валиден."""
+    jsonschema = pytest.importorskip("jsonschema")
+    gateway = _FakeGateway({"crawl/submit": {"job_id": "job-no-ua"}})
+    executor = EdgeCrawlExecutor(gateway)  # user_agent не задан
+
+    executor.submit(
+        [_work_item()], session_id="s", run_id="r", profile="split", idempotency_key="k"
+    )
+
+    payload = gateway.calls[-1][1]
+    assert "user_agent" not in payload
+    jsonschema.Draft202012Validator(_submit_request_schema()).validate(payload)
+
+
+def test_submit_omits_empty_user_agent() -> None:
+    """§6b: пустая строка ⇒ ключ не отправляется (схема объявляет строку, не ``null``)."""
+    gateway = _FakeGateway({"crawl/submit": {"job_id": "job-empty"}})
+    executor = EdgeCrawlExecutor(gateway, user_agent="")
+
+    executor.submit(
+        [_work_item()], session_id="s", run_id="r", profile="split", idempotency_key="k"
+    )
+
+    assert "user_agent" not in gateway.calls[-1][1]
 
 
 def test_submit_rejects_empty_work() -> None:
@@ -321,6 +434,43 @@ def test_collect_without_raw_keeps_error_and_no_hash() -> None:
     assert item.raw_bytes is None
     assert item.content_hash is None  # заявленному edge хэшу не доверяем (I19)
     assert item.error == "timeout"
+
+
+def test_collect_parses_final_url() -> None:
+    """§6a: опциональный ``final_url`` (финальный URL после редиректов) доезжает."""
+    gateway = _FakeGateway(
+        {
+            "crawl/collect": {
+                "items": [_item(final_url="https://docs.test/p1/final/")],
+                "done": True,
+            }
+        }
+    )
+    executor = EdgeCrawlExecutor(gateway)
+
+    (item,) = executor.collect("job-1").items
+    assert item.final_url == "https://docs.test/p1/final/"
+    assert item.url == URL_A  # запрошенный URL сохранён (ключ элемента сеанса)
+
+
+def test_collect_final_url_absent_is_none() -> None:
+    """R7: отсутствующий ``final_url`` ⇒ ``None`` (ядро трактует как запрошенный URL)."""
+    gateway = _FakeGateway({"crawl/collect": {"items": [_item()], "done": True}})
+    executor = EdgeCrawlExecutor(gateway)
+
+    (item,) = executor.collect("job-1").items
+    assert item.final_url is None
+
+
+def test_collect_final_url_malformed_degrades_to_none() -> None:
+    """Malformed ``final_url`` (не-строка) не роняет сбор — деградирует в ``None``."""
+    gateway = _FakeGateway(
+        {"crawl/collect": {"items": [_item(final_url=123)], "done": True}}
+    )
+    executor = EdgeCrawlExecutor(gateway)
+
+    (item,) = executor.collect("job-1").items
+    assert item.final_url is None
 
 
 def test_collect_error_item_is_not_trusted_as_success() -> None:

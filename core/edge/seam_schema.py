@@ -424,7 +424,15 @@ def _validate_crawl_collect_item(item: Any, index: int) -> list[str]:
     violations: list[str] = []
     _check_required_str(violations, where, "product_id", item.get("product_id"))
     _check_required_str(violations, where, "url", item.get("url"))
-    for field in ("status", "engine", "kind", "content_type", "fetched_at", "content_hash"):
+    for field in (
+        "status",
+        "engine",
+        "kind",
+        "content_type",
+        "fetched_at",
+        "content_hash",
+        "final_url",
+    ):
         _check_opt_str(violations, where, field, item.get(field))
     _check_opt_int(violations, where, "http_status", item.get("http_status"))
     _check_opt_str(violations, where, "error", item.get("error"))
@@ -641,6 +649,7 @@ def _validate_crawl_submit_request(payload: Any) -> list[str]:
     where = "crawl/submit"
     for field in ("run_id", "session_id", "idempotency_key", "profile"):
         _check_required_str(violations, where, field, payload.get(field))
+    _check_opt_str(violations, where, "user_agent", payload.get("user_agent"))
     items = payload.get("items")
     if not isinstance(items, list) or not items:
         violations.append(f"{where}: поле items — непустой список")
@@ -651,7 +660,11 @@ def _validate_crawl_submit_request(payload: Any) -> list[str]:
 
 
 def _validate_crawl_submit_item(item: Any, index: int) -> list[str]:
-    """Элемент ``items`` запроса ``crawl/submit`` (оси фетча — как у ``/v1/fetch``)."""
+    """Элемент ``items`` запроса ``crawl/submit`` (оси фетча — как у ``/v1/fetch``).
+
+    Опциональные additive-поля: ``robots`` (bool, egress-вежливость) и ``rate_limit``
+    (per-item диапазон задержек ``{min_s, max_s}`` — форма из §11.1).
+    """
     where = f"crawl/submit.items[{index}]"
     if not isinstance(item, Mapping):
         return [f"{where}: элемент должен быть объектом"]
@@ -665,7 +678,33 @@ def _validate_crawl_submit_item(item: Any, index: int) -> list[str]:
     _opt_enum(violations, where, "strategy", item.get("strategy"), STRATEGY_VALUES)
     for field in ("wait_for", "lang"):
         _check_opt_str(violations, where, field, item.get(field))
+    _check_opt_bool(violations, where, "robots", item.get("robots"))
+    _validate_rate_limit(violations, where, item.get("rate_limit"))
     return violations
+
+
+def _validate_rate_limit(violations: list[str], where: str, value: Any) -> None:
+    """Опциональный ``rate_limit`` элемента ``crawl/submit`` (§11.1).
+
+    Форма: ``{min_s, max_s}`` — оба обязательные неотрицательные числа (или ``null``/
+    отсутствие ⇒ без пейсинга). Дополнительные ключи не допускаются.
+    """
+    if value is None:
+        return
+    if not isinstance(value, Mapping):
+        violations.append(f"{where}: поле rate_limit должно быть объектом или null")
+        return
+    extra = set(value) - {"min_s", "max_s"}
+    if extra:
+        violations.append(
+            f"{where}: rate_limit допускает только min_s/max_s, лишние: {sorted(extra)}"
+        )
+    for field in ("min_s", "max_s"):
+        number = value.get(field)
+        if isinstance(number, bool) or not isinstance(number, (int, float)):
+            violations.append(f"{where}: rate_limit.{field} должно быть числом")
+        elif number < 0:
+            violations.append(f"{where}: rate_limit.{field} не может быть отрицательным")
 
 
 def validate_payload(op: str, payload: Any) -> list[str]:

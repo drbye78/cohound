@@ -23,6 +23,7 @@
         "session_id": {"type": "string", "minLength": 1},
         "idempotency_key": {"type": "string", "minLength": 1},
         "profile": {"type": "string", "minLength": 1},
+        "user_agent": {"type": "string"},
         "items": {
           "type": "array",
           "minItems": 1,
@@ -44,7 +45,17 @@
         "extract": {"enum": ["auto", "html", "document"]},
         "strategy": {"enum": ["auto", "honest", "hybrid"]},
         "wait_for": {"type": ["string", "null"]},
-        "lang": {"type": ["string", "null"]}
+        "lang": {"type": ["string", "null"]},
+        "robots": {"type": "boolean"},
+        "rate_limit": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "properties": {
+            "min_s": {"type": "number", "minimum": 0},
+            "max_s": {"type": "number", "minimum": 0}
+          },
+          "required": ["min_s", "max_s"]
+        }
       }
     },
     "submit_response": {
@@ -149,6 +160,7 @@
         "content_type": {"type": ["string", "null"]},
         "fetched_at": {"type": ["string", "null"]},
         "content_hash": {"type": ["string", "null"]},
+        "final_url": {"type": ["string", "null"]},
         "raw": {
           "oneOf": [
             {"$ref": "#/$defs/raw"},

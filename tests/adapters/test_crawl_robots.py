@@ -62,7 +62,7 @@ def test_http_crawler_refuses_robots_disallow_without_fetching() -> None:
         robots=RobotsGate(lambda _host: DISALLOW),
     )
     with pytest.raises(CrawlRefused) as excinfo:
-        crawler.fetch("https://example.com/blocked")
+        crawler.fetch("https://example.com/blocked", FetchPlan(robots=True))
     assert excinfo.value.refusal_reason == "robots_disallow"
     assert calls == []  # отказ до сетевого шага
 
@@ -71,7 +71,26 @@ def test_http_crawler_allows_when_robots_unavailable() -> None:
     crawler = HttpCrawler(
         fetcher=lambda _url: b"ok", robots=RobotsGate(lambda _host: None)
     )
-    assert crawler.fetch("https://example.com/ok").content == b"ok"
+    assert crawler.fetch("https://example.com/ok", FetchPlan(robots=True)).content == b"ok"
+
+
+def test_http_crawler_skips_robots_when_plan_robots_off() -> None:
+    """§6b: политика внедрена, но ``plan.robots`` ложно ⇒ robots не трогается вовсе."""
+    gate_calls: list[str] = []
+    fetched: list[str] = []
+
+    def _feed(host: str) -> str:
+        gate_calls.append(host)
+        return DISALLOW
+
+    crawler = HttpCrawler(
+        fetcher=lambda url: fetched.append(url) or b"ok",
+        robots=RobotsGate(_feed),
+    )
+    page = crawler.fetch("https://example.com/blocked")  # plan.robots по умолчанию False
+    assert page.content == b"ok"
+    assert fetched == ["https://example.com/blocked"]
+    assert gate_calls == []  # robots.txt даже не запрошен (нет лишнего fetch)
 
 
 def test_browser_crawler_refuses_robots_disallow() -> None:
@@ -79,8 +98,17 @@ def test_browser_crawler_refuses_robots_disallow() -> None:
         backend=_Backend(), robots=RobotsGate(lambda _host: DISALLOW)
     )
     with pytest.raises(CrawlRefused) as excinfo:
-        crawler.fetch("https://example.com/blocked")
+        crawler.fetch("https://example.com/blocked", FetchPlan(robots=True))
     assert excinfo.value.refusal_reason == "robots_disallow"
+
+
+def test_browser_crawler_skips_robots_when_plan_robots_off() -> None:
+    """§6b: ``plan.robots`` ложно ⇒ robots-гейт не применяется (страница рендерится)."""
+    backend = _Backend()
+    crawler = BrowserCrawler(backend=backend, robots=RobotsGate(lambda _host: DISALLOW))
+    page = crawler.fetch("https://example.com/blocked")  # plan.robots по умолчанию False
+    assert page.content == b"<html>ok</html>"
+    assert backend.opened == 1
 
 
 def test_browser_crawl_delay_floor_used_without_explicit_rate_limit() -> None:

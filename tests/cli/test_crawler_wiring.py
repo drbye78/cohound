@@ -988,7 +988,9 @@ def test_wiring_robots_gate_refusal_is_distinct() -> None:
     gate = wiring_mod._robots_gate(fetcher, user_agent="*")  # type: ignore[arg-type]
     crawler = HttpCrawler(fetcher=lambda url: b"x", robots=gate)
 
+    from core.ports.types import FetchPlan
+
     with pytest.raises(CrawlRefused) as excinfo:
-        crawler.fetch("https://example.com/blocked")
+        crawler.fetch("https://example.com/blocked", FetchPlan(robots=True))
     assert excinfo.value.refusal_reason == "robots_disallow"
     assert fetcher.calls == ["https://example.com/robots.txt"]

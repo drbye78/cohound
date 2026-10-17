@@ -27,6 +27,7 @@ from core.adapters.gateway_validate import (
     check_size,
 )
 from core.adapters.remote_gateway import RemoteContentError, verify_content_hash
+from core.domain.models import RateLimitSpec
 from core.ports.crawl_executor import (
     ACTIVE_JOB_STATUSES,
     CrawlBatch,
@@ -55,6 +56,18 @@ def _opt_str(value: Any) -> str | None:
         return None
     text = str(value)
     return text if text else None
+
+
+def _opt_url(value: Any) -> str | None:
+    """URL-строка или ``None``: не-строка/пустая → ``None`` (malformed не роняет сбор).
+
+    Строже :func:`_opt_str`: для ``final_url`` коэрция числа/объекта в строку дала бы
+    мусорный URL — безопаснее трактовать как отсутствие (R7: нет ``final_url`` ⇒
+    запрошенный URL).
+    """
+    if isinstance(value, str) and value:
+        return value
+    return None
 
 
 def _opt_int(value: Any) -> int | None:
@@ -91,6 +104,10 @@ class EdgeCrawlExecutor:
     :param profile: деплой-профиль зон, передаваемый в ``crawl/submit`` (``split``/
         ``split-hardened``); ``None`` → ``"split"``.
     :param version: версия адаптера (провенанс/манифест).
+    :param user_agent: значение ``User-Agent`` для egress/robots-политики исполнителя
+        (та же операционная настройка, что ``deploy.yaml:crawl.user_agent``). Пустое/
+        ``None`` ⇒ ключ ``user_agent`` в ``crawl/submit`` **не отправляется** (схема
+        объявляет его строкой, не ``null``).
     :param max_batch_items: лимит числа элементов в одной странице ``collect``.
     :param max_batch_bytes: лимит размера декодированной/сериализованной страницы
         ``collect`` (защита ядра, 07 §7).
@@ -102,12 +119,14 @@ class EdgeCrawlExecutor:
         *,
         profile: str | None = "split",
         version: str = "edge-crawl-executor-1",
+        user_agent: str | None = None,
         max_batch_items: int = DEFAULT_MAX_BATCH_ITEMS,
         max_batch_bytes: int = MAX_RESPONSE_BYTES,
     ) -> None:
         self._gateway = gateway
         self.profile = profile or "split"
         self.version = version
+        self._user_agent = user_agent
         self._max_batch_items = max(0, int(max_batch_items))
         self._max_batch_bytes = int(max_batch_bytes)
 
@@ -124,9 +143,12 @@ class EdgeCrawlExecutor:
     ) -> CrawlSubmitResult:
         """``POST /v1/crawl/submit`` → :class:`CrawlSubmitResult`.
 
-        Payload: ``{run_id, session_id, idempotency_key, profile, items}``; каждый элемент —
-        ``{product_id, url, engine, kind, fetch, extract, strategy, wait_for, lang}`` (оси —
-        строковые значения enum). Пустой набор работ — ошибка содержимого.
+        Payload: ``{run_id, session_id, idempotency_key, profile, [user_agent], items}``;
+        каждый элемент — ``{product_id, url, engine, kind, fetch, extract, strategy,
+        wait_for, lang, robots, rate_limit}`` (оси — строковые значения enum;
+        ``robots``/``rate_limit`` — additive, §6b/§11.1). ``user_agent`` — request-level
+        (§6b), отправляется только когда он непустой (схема объявляет его строкой).
+        Пустой набор работ — ошибка содержимого.
 
         Back-pressure (C2): ``accepted`` (по умолчанию ``True``, если поле отсутствует) и
         опциональный ``retry_after`` (секунды) прокидываются в результат — ядро решает,
@@ -134,13 +156,17 @@ class EdgeCrawlExecutor:
         """
         if not items:
             raise RemoteContentError("crawl/submit: пустой список работ")
-        payload = {
+        payload: dict[str, Any] = {
             "run_id": run_id,
             "session_id": session_id,
             "idempotency_key": idempotency_key,
             "profile": profile,
-            "items": [self._work_item_payload(item) for item in items],
         }
+        # §6b: request-level egress-политика; ключ — только для непустой строки
+        # (схема ``submit_request.user_agent`` = ``{"type": "string"}``, ``null`` запрещён).
+        if self._user_agent:
+            payload["user_agent"] = self._user_agent
+        payload["items"] = [self._work_item_payload(item) for item in items]
         response = self._call("crawl/submit", payload)
         accepted_raw = response.get("accepted")
         accepted = True if accepted_raw is None else bool(accepted_raw)
@@ -190,7 +216,13 @@ class EdgeCrawlExecutor:
     # -- сериализация запроса -------------------------------------------------- #
 
     def _work_item_payload(self, item: CrawlWorkItem) -> dict[str, Any]:
-        """Элемент ``items`` запроса ``crawl/submit`` (оси — строковые значения enum)."""
+        """Элемент ``items`` запроса ``crawl/submit`` (оси — строковые значения enum).
+
+        Additive (§11.1/§6b): ``robots`` (bool, egress-вежливость) и ``rate_limit`` —
+        резолвнутый per-item диапазон как **структурные числа** ``{min_s, max_s}``
+        (или ``None``), чтобы edge восстановил ``RateLimitSpec`` (не строка
+        ``canonical_rate_limit``).
+        """
         return {
             "product_id": item.product_id,
             "url": item.url,
@@ -201,7 +233,16 @@ class EdgeCrawlExecutor:
             "strategy": _as_text(item.strategy),
             "wait_for": item.wait_for,
             "lang": item.lang,
+            "robots": bool(item.robots),
+            "rate_limit": self._rate_limit_payload(item.rate_limit),
         }
+
+    @staticmethod
+    def _rate_limit_payload(spec: RateLimitSpec | None) -> dict[str, float] | None:
+        """``RateLimitSpec`` → ``{"min_s", "max_s"}``; ``None`` → ``None`` (без пейсинга)."""
+        if spec is None:
+            return None
+        return {"min_s": float(spec.min_s), "max_s": float(spec.max_s)}
 
     # -- разбор ответов -------------------------------------------------------- #
 
@@ -300,6 +341,7 @@ class EdgeCrawlExecutor:
             content_hash=computed_hash,
             raw_bytes=raw_bytes,
             error=_opt_str(item.get("error")),
+            final_url=_opt_url(item.get("final_url")),
         )
 
     def _decode_raw(self, raw: Mapping[str, Any]) -> bytes | None:

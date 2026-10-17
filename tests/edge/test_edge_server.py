@@ -249,6 +249,7 @@ class FakeScheduler:
                 {
                     "product_id": "p1",
                     "url": "https://site.test/x",
+                    "final_url": "https://site.test/final",
                     "status": "fetched",
                     "engine": "http",
                     "kind": "html",
@@ -579,6 +580,8 @@ def test_crawl_collect_envelope_shape_is_content_not_evidence() -> None:
     assert payload["done"] is True
     item = payload["items"][0]
     assert item["product_id"] == "p1"
+    # §6a: база ссылок/redirect-scope — финальный URL проходит шов без потерь.
+    assert item["final_url"] == "https://site.test/final"
     assert item["raw"] == {"hash": "h", "size": 2, "bytes_b64": "YQ=="}
     assert scheduler.collect_calls == [("job-1", "c", 5)]
 

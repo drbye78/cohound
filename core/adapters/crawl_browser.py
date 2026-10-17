@@ -495,8 +495,9 @@ class BrowserCrawler:
             raise CrawlUrlError(f"URL отклонён SSRF-валидацией: {exc}") from exc
 
         # D1/§10: robots.txt-запрет — отказ (не сбой транспорта); элемент терминален, и
-        # frontier от него не расширяется (обрабатывает pipeline).
-        if self._robots is not None:
+        # frontier от него не расширяется (обрабатывает pipeline). Гейт **условен**:
+        # проверяем только когда политика внедрена И ``plan.robots`` (политика с ядра).
+        if self._robots is not None and plan.robots:
             try:
                 allowed = self._robots.allowed(url)
             except Exception:  # noqa: BLE001 — сбой robots-проверки не роняет краул

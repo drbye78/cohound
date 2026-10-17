@@ -45,6 +45,10 @@ class FetchPlan:
     ``engine`` — идентификатор движка/транспорта краула, фактически использованного для
     страницы (напр. ``http``/``scrapy``/``browser``): свободная строка-данные, валидируется
     composition root, **не** доменный enum.
+
+    ``robots`` — флаг egress-вежливости (§10): адаптер проверяет ``robots.txt`` только
+    если у него **есть** политика (``_robots is not None``) **и** ``robots`` истинно.
+    Дефолт ``False`` сохраняет обратную совместимость (никаких лишних fetch ``robots.txt``).
     """
 
     fetch: FetchMode = FetchMode.HTTP
@@ -53,6 +57,7 @@ class FetchPlan:
     strategy: CrawlStrategy = CrawlStrategy.AUTO
     rate_limit: RateLimitSpec | None = None
     engine: str | None = None
+    robots: bool = False
 
 
 @dataclass(frozen=True)

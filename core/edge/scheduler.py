@@ -29,11 +29,26 @@ evidence; ядро пересчитывает хэш. Опора — тольк�
 Recovery-on-start зеркалит ``core.pipeline``-семантику: застрявшие ``running``-элементы
 возвращаются в ``pending``, счётчики пересчитываются (прерванный процесс не теряет
 намерения краула).
+
+**§10 / pacing (A2c).** Под ``split`` pacing исполняется на стороне edge **per executing
+context**: один стателесс :class:`~core.util.rate_limit.RateLimiter` в процессе планировщика
+для потоковых движков и по одному в каждом воркер-процессе для ``scrapy``/``browser``. Это
+**не** глобальный per-host rate-гейт: при ``workers>1`` параллельные фетчи одного хоста не
+ограничены сверху, а кросс-процессный pacing не разделяет состояние. Полное соблюдение
+``rate_limit`` как глобального per-host лимита **не заявляется**. Локальный путь имеет тот же
+характер при ``max_workers>1`` (лимитер стателесс, ``sleep(uniform(min,max))`` на запрос),
+поэтому расхождение ``local``/``split`` по контенту отсутствует; тайминг не нормируется ни в
+одном профиле. ``rate_limit=None`` (дефолт) ⇒ ноль снов (дефолтные прогоны байт-идентичны).
+
+**Robots (§10, A2b).** Edge — стателесс-фетчер: политику приносит ядро пер-элемент
+(``plan.robots``), а политику ``robots.txt`` edge строит сам (:func:`build_robots_gate`) и
+отдаёт краулерам. Фетч ``robots.txt`` происходит только когда ``plan.robots`` истинно.
 """
 
 from __future__ import annotations
 
 import base64
+import json
 import multiprocessing
 import os
 import sqlite3
@@ -46,11 +61,21 @@ from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from core.edge.config import EdgeRuntimeConfig
+from core.edge.crawler_factory import build_robots_gate
 from core.ports.crawler import CrawlerPort
-from core.ports.types import CrawlStrategy, ExtractionRoute, FetchMode, FetchPlan
+from core.ports.types import (
+    CrawlStrategy,
+    ExtractionRoute,
+    FetchMode,
+    FetchPlan,
+    RateLimitSpec,
+)
 from core.util.hashing import content_hash
+from core.util.rate_limit import RateLimiter
+from core.util.robots import RobotsGate
 from core.util.security import validate_url
 
 __all__ = [
@@ -173,12 +198,24 @@ CREATE TABLE IF NOT EXISTS edge_job_items (
     content_hash TEXT,
     blob_ref     TEXT,
     error        TEXT,
+    robots       INTEGER,
+    final_url    TEXT,
+    rate_limit   TEXT,
     PRIMARY KEY (job_id, product_id, url)
 );
 
 CREATE INDEX IF NOT EXISTS idx_edge_job_items_job_status
     ON edge_job_items (job_id, status);
 """
+
+#: Аддитивные колонки ``edge_job_items`` (имя, тип), добавляемые идемпотентной миграцией
+#: (§6a/§11). ``CREATE TABLE IF NOT EXISTS`` НЕ расширяет существующую ``edge_jobs.db`` —
+#: колонки доливаются через ``ALTER TABLE`` (``_connect`` → ``_migrate``).
+_ITEM_MIGRATED_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("robots", "INTEGER"),
+    ("final_url", "TEXT"),
+    ("rate_limit", "TEXT"),
+)
 
 
 def _utc_now_iso() -> str:
@@ -210,41 +247,73 @@ def _default_process_context() -> Any:
 # ---------------------------------------------------------------------------
 
 #: Фабрика краулеров, установленная инициализатором воркер-процесса.
-_WORKER_FACTORY: Callable[[str], CrawlerPort] | None = None
+_WORKER_FACTORY: Callable[..., CrawlerPort] | None = None
 #: Построенные краулеры воркер-процесса (по движку; переиспользуются между задачами).
 _WORKER_CRAWLERS: dict[str, CrawlerPort] = {}
+#: Пейсер воркер-процесса (A2c): один на процесс, строится инициализатором (дефолт
+#: :class:`RateLimiter`). ``None`` — до инициализации.
+_WORKER_LIMITER: RateLimiter | None = None
+#: Политика ``robots.txt`` воркер-процесса (§10): строится инициализатором из
+#: ``user_agent`` запроса. ``None`` — до инициализации.
+_WORKER_ROBOTS: RobotsGate | None = None
 
 
 def _process_worker_init(
-    crawler_factory: Callable[[str], CrawlerPort], engines: Sequence[str]
+    crawler_factory: Callable[..., CrawlerPort],
+    engines: Sequence[str],
+    limiter_factory: Callable[[], RateLimiter] = RateLimiter,
+    robots_user_agent: str | None = None,
 ) -> None:
-    """Инициализатор воркер-процесса: сохраняет фабрику (краулеры строятся лениво).
+    """Инициализатор воркер-процесса: сохраняет фабрику + строит пейсер/robots-политику.
 
     Каждый процесс строит **собственный** экземпляр краулера — Playwright/адаптеры
-    не пересекают границу процессов.
+    не пересекают границу процессов. Пейсер (A2c) и robots-политика (§10) также строятся
+    **в процессе** (объекты не picklable через границу): ``limiter_factory`` picklable by
+    reference (дефолт :class:`RateLimiter`), ``robots_user_agent`` — строка с ядра.
     """
-    global _WORKER_FACTORY
+    global _WORKER_FACTORY, _WORKER_LIMITER, _WORKER_ROBOTS
     _WORKER_FACTORY = crawler_factory
     _WORKER_CRAWLERS.clear()
+    _WORKER_LIMITER = limiter_factory()
+    _WORKER_ROBOTS = build_robots_gate(robots_user_agent)
 
 
 def _worker_crawler(engine: str) -> CrawlerPort:
-    """Лениво строит (и кэширует) краулер движка внутри воркер-процесса."""
+    """Лениво строит (и кэширует) краулер движка внутри воркер-процесса.
+
+    Robots-политика воркера передаётся в фабрику: ``plan.robots=False`` (дефолт) делает
+    её инертной — лишних fetch ``robots.txt`` нет.
+    """
     crawler = _WORKER_CRAWLERS.get(engine)
     if crawler is None:
         if _WORKER_FACTORY is None:  # pragma: no cover - защита от неверной сборки
             raise RuntimeError("воркер-процесс без crawler_factory")
-        crawler = _WORKER_FACTORY(engine)
+        crawler = _WORKER_FACTORY(engine, robots=_WORKER_ROBOTS)
         _WORKER_CRAWLERS[engine] = crawler
     return crawler
 
 
+def _worker_limiter() -> RateLimiter:
+    """Пейсер воркер-процесса (ленивая сборка дефолтом, если инициализатор не позвали)."""
+    global _WORKER_LIMITER
+    if _WORKER_LIMITER is None:  # pragma: no cover - защита от неверной сборки
+        _WORKER_LIMITER = RateLimiter()
+    return _WORKER_LIMITER
+
+
+def _fetch_host(url: str) -> str:
+    """Хост запрошенного URL для пейсинга (зеркало ``corpus``: ``hostname`` в нижнем регистре)."""
+    return (urlsplit(url).hostname or "").lower()
+
+
 def _process_fetch(engine: str, url: str, plan: FetchPlan) -> dict[str, Any]:
-    """Воркер-процесс: строит краулер и фетчит; возвращает picklable-результат.
+    """Воркер-процесс: пейсит, строит краулер и фетчит; возвращает picklable-результат.
 
     Исключения **не** пробрасываются через границу процессов (их pickle/traceback
-    хрупок) — сводятся к строке ``error``.
+    хрупок) — сводятся к строке ``error``. ``limiter.wait`` — до фетча (A2c, §11.2);
+    ``plan.rate_limit=None`` ⇒ без сна.
     """
+    _worker_limiter().wait(_fetch_host(url), plan.rate_limit)
     try:
         page = _worker_crawler(engine).fetch(url, plan)
     except BaseException as exc:  # noqa: BLE001 - сбой воркера → строковый результат
@@ -253,9 +322,14 @@ def _process_fetch(engine: str, url: str, plan: FetchPlan) -> dict[str, Any]:
 
 
 def _thread_fetch(
-    crawler: CrawlerPort, engine: str, url: str, plan: FetchPlan
+    crawler: CrawlerPort, engine: str, url: str, plan: FetchPlan, limiter: RateLimiter
 ) -> dict[str, Any]:
-    """Воркер-поток (in-process): фетч инъецированным краулером; та же форма результата."""
+    """Воркер-поток (in-process): пейсит, фетчит инъецированным краулером; та же форма.
+
+    ``limiter.wait`` — до фетча (A2c, §11.2, зеркало ``corpus._local_fetch``); при
+    ``plan.rate_limit=None`` :meth:`RateLimiter.wait` возвращает ``0.0`` **без** ``sleep``.
+    """
+    limiter.wait(_fetch_host(url), plan.rate_limit)
     try:
         page = crawler.fetch(url, plan)
     except BaseException as exc:  # noqa: BLE001 - единый контракт результата
@@ -310,6 +384,13 @@ class EdgeScheduler:
     :param id_factory: генератор ``job_id`` (детерминизм в тестах).
     :param poll_interval: интервал ожидания координатора, сек (резерв под фоновое ожидание).
     :param process_context: контекст ``multiprocessing`` (по умолчанию ``forkserver``/``spawn``).
+    :param limiter: пейсер потоковых движков (A2c, §11.2) — один стателесс
+        :class:`~core.util.rate_limit.RateLimiter` на процесс планировщика; ``None`` →
+        ``RateLimiter()``. Инжектируем в тестах (стаб ``sleep``/``rng``).
+    :param limiter_factory: picklable-фабрика пейсера **воркер-процесса** (``scrapy``/
+        ``browser``); ``None`` → :class:`RateLimiter`. Вызывается внутри процесса.
+    :param robots_factory: фабрика политики ``robots.txt`` (§10) ``(user_agent) -> RobotsGate``;
+        ``None`` → :func:`core.edge.crawler_factory.build_robots_gate`.
     """
 
     def __init__(
@@ -322,6 +403,9 @@ class EdgeScheduler:
         id_factory: Callable[[], str] | None = None,
         poll_interval: float = 0.05,
         process_context: Any = None,
+        limiter: RateLimiter | None = None,
+        limiter_factory: Callable[[], RateLimiter] | None = None,
+        robots_factory: Callable[[str | None], RobotsGate] | None = None,
     ) -> None:
         self._config = config
         self._crawlers: dict[str, CrawlerPort] = dict(crawlers or {})
@@ -329,6 +413,13 @@ class EdgeScheduler:
         self._clock = clock or _utc_now_iso
         self._id_factory = id_factory or _default_id_factory
         self._poll = max(0.001, float(poll_interval))
+        # A2c: пейсер потоковых движков (стателесс) + фабрика пейсера воркер-процесса.
+        self._limiter = limiter if limiter is not None else RateLimiter()
+        self._limiter_factory = limiter_factory or RateLimiter
+        # §10: фабрика robots-политики; сама политика строится лениво из ``user_agent`` submit.
+        self._robots_factory = robots_factory or build_robots_gate
+        self._robots_user_agent: str | None = None
+        self._robots_gate: RobotsGate | None = None
 
         self._state_dir = Path(config.state_dir)
         self._blob_dir = Path(config.resolved_blob_dir)
@@ -429,9 +520,25 @@ class EdgeScheduler:
                 conn.execute("PRAGMA busy_timeout = 5000")
                 conn.execute("PRAGMA synchronous = NORMAL")
                 conn.executescript(_SCHEMA)
+                self._migrate(conn)
                 conn.commit()
                 self._conn = conn
             return self._conn
+
+    @staticmethod
+    def _migrate(conn: sqlite3.Connection) -> None:
+        """Идемпотентно доливает аддитивные колонки ``edge_job_items`` (§6a/§11).
+
+        ``CREATE TABLE IF NOT EXISTS`` НЕ добавляет колонку в **существующую**
+        ``edge_jobs.db`` — поэтому недостающие колонки (``robots``/``final_url``/
+        ``rate_limit``) доливаются через ``ALTER TABLE ... ADD COLUMN``. Повторный вызов
+        — no-op (колонка уже есть); существующие строки не трогаются. Имена колонок —
+        литералы модуля (не из данных), SQL-инъекция невозможна.
+        """
+        existing = {str(row[1]) for row in conn.execute("PRAGMA table_info(edge_job_items)")}
+        for column, column_type in _ITEM_MIGRATED_COLUMNS:
+            if column not in existing:
+                conn.execute(f"ALTER TABLE edge_job_items ADD COLUMN {column} {column_type}")
 
     def _get_job(self, conn: sqlite3.Connection, job_id: str) -> sqlite3.Row:
         """Строка задания; неизвестное задание → ``ValueError`` (edge честно ошибается)."""
@@ -466,6 +573,9 @@ class EdgeScheduler:
                 raise ValueError(f"crawl/submit: обязательное поле {field} — непустая строка")
         items = self._normalize_items(request.get("items"))
         conn = self._connect()
+        # §10: robots-политика строится из request-level ``user_agent`` (дефолт ``"*"``) и
+        # вешается на краулеры до диспатча; ``plan.robots=False`` делает её инертной.
+        self._configure_robots(_opt_str(request.get("user_agent")))
 
         with self._lock:
             existing = conn.execute(
@@ -514,8 +624,8 @@ class EdgeScheduler:
                 )
                 conn.executemany(
                     "INSERT INTO edge_job_items (job_id, product_id, url, status, engine,"
-                    " kind, fetch, extract, strategy, wait_for, lang)"
-                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    " kind, fetch, extract, strategy, wait_for, lang, robots, rate_limit)"
+                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     [
                         (
                             job_id,
@@ -529,6 +639,8 @@ class EdgeScheduler:
                             item["strategy"],
                             item["wait_for"],
                             item["lang"],
+                            int(item["robots"]),
+                            _rate_limit_json(item["rate_limit"]),
                         )
                         for item in items
                     ],
@@ -570,6 +682,9 @@ class EdgeScheduler:
                     "strategy": _opt_str(item.get("strategy")),
                     "wait_for": _opt_str(item.get("wait_for")),
                     "lang": _opt_str(item.get("lang")),
+                    # §10/§11.1: additive-оси терпимо (malformed → False/None, без падения submit).
+                    "robots": _opt_bool(item.get("robots")),
+                    "rate_limit": _opt_rate_limit(item.get("rate_limit")),
                 }
             )
         return normalized
@@ -599,6 +714,25 @@ class EdgeScheduler:
                 if engine in available:
                     return engine
         return requested
+
+    def _configure_robots(self, user_agent: str | None) -> None:
+        """Строит robots-политику из request-level ``user_agent`` и вешает её на краулеры (§10).
+
+        Политика ``robots.txt`` приходит с ядра **условно от discovery** (пер-элемент
+        ``plan.robots``), но сам ``RobotsGate`` edge строит сам — поверх отдельного
+        HTTP-краулера (фетч ``robots.txt`` ленивый, только при ``plan.robots``). Гейт
+        вешается на in-process краулеры; процессные получают его из ``user_agent`` в
+        инициализаторе воркера. Смена ``user_agent`` пересобирает политику (кеш парсеров
+        привязан к агенту).
+        """
+        with self._lock:
+            if self._robots_gate is not None and self._robots_user_agent == user_agent:
+                return
+            self._robots_user_agent = user_agent
+            gate = self._robots_factory(user_agent)
+            self._robots_gate = gate
+            for crawler in self._crawlers.values():
+                _attach_robots(crawler, gate)
 
     # -- status / cancel / collect --------------------------------------------
 
@@ -716,6 +850,7 @@ class EdgeScheduler:
             "content_type": _opt_str(row["content_type"]),
             "fetched_at": _opt_str(row["fetched_at"]),
             "content_hash": _opt_str(row["content_hash"]),
+            "final_url": _opt_str(row["final_url"]),
             "raw": raw,
             "error": _opt_str(row["error"]),
         }
@@ -747,7 +882,12 @@ class EdgeScheduler:
                 max_workers=self._process_slots,
                 mp_context=context,
                 initializer=_process_worker_init,
-                initargs=(self._crawler_factory, self._process_engines),
+                initargs=(
+                    self._crawler_factory,
+                    self._process_engines,
+                    self._limiter_factory,
+                    self._robots_user_agent,
+                ),
             )
 
     def _max_inflight(self) -> int:
@@ -919,18 +1059,24 @@ class EdgeScheduler:
                 self._recompute_job(self._conn, str(row["job_id"]))
                 return
             future = thread_pool.submit(
-                _thread_fetch, crawler, engine, str(row["url"]), plan
+                _thread_fetch, crawler, engine, str(row["url"]), plan, self._limiter
             )
         future.add_done_callback(lambda fut, r=row: self._on_done(r, fut))
 
     def _plan_for(self, row: sqlite3.Row) -> FetchPlan:
-        """Строит ``FetchPlan`` из осей элемента (мягкая деградация к дефолтам)."""
+        """Строит ``FetchPlan`` из осей элемента (мягкая деградация к дефолтам).
+
+        ``robots`` (§10) и ``rate_limit`` (A2c, §11.2) переносятся с ядра пер-элемент;
+        отсутствие/``NULL`` ⇒ ``False``/``None`` (дефолтные прогоны байт-идентичны).
+        """
         return FetchPlan(
             fetch=_coerce_enum(FetchMode, row["fetch"], FetchMode.HTTP),
             extract=_coerce_enum(ExtractionRoute, row["extract"], ExtractionRoute.AUTO),
             strategy=_coerce_enum(CrawlStrategy, row["strategy"], CrawlStrategy.AUTO),
             wait_for=_opt_str(row["wait_for"]),
             engine=str(row["engine"]) if row["engine"] else None,
+            robots=bool(_bool_int(row["robots"])),
+            rate_limit=_rate_limit_from_json(row["rate_limit"]),
         )
 
     def _on_done(self, row: sqlite3.Row, future: Any) -> None:
@@ -969,12 +1115,16 @@ class EdgeScheduler:
         fetched_at = _opt_str(getattr(page, "fetched_at", None)) or self._clock()
         status_code = _opt_int(getattr(page, "status_code", None))
         content_type = _opt_str(getattr(page, "content_type", None))
+        # §6a: финальный URL после редиректов (``RawPage.url``) — ядру нужен для базы
+        # ссылок и redirect-scope; ключ элемента сеанса остаётся запрошенным ``url``.
+        final_url = _opt_str(getattr(page, "url", None))
         conn = self._conn
         assert conn is not None
         with conn:
             cursor = conn.execute(
                 "UPDATE edge_job_items SET status = ?, engine = ?, http_status = ?,"
-                " content_type = ?, fetched_at = ?, content_hash = ?, blob_ref = ?, error = NULL"
+                " content_type = ?, fetched_at = ?, content_hash = ?, blob_ref = ?,"
+                " final_url = ?, error = NULL"
                 " WHERE job_id = ? AND product_id = ? AND url = ? AND status = ?",
                 (
                     ITEM_FETCHED,
@@ -984,6 +1134,7 @@ class EdgeScheduler:
                     fetched_at,
                     digest,
                     blob_ref,
+                    final_url,
                     row["job_id"],
                     row["product_id"],
                     row["url"],
@@ -1118,6 +1269,76 @@ def _opt_int(value: Any) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _opt_float(value: Any) -> float | None:
+    """``None`` → ``None``; иначе ``float`` (``bool``/нечисло/``inf``/``nan`` → ``None``)."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if number != number or number in (float("inf"), float("-inf")):  # nan/inf
+        return None
+    return number
+
+
+def _opt_bool(value: Any) -> bool:
+    """Терпимый ``bool``: истинно только ``True``; иное (в т.ч. malformed) → ``False``."""
+    return value is True
+
+
+def _opt_rate_limit(value: Any) -> RateLimitSpec | None:
+    """Терпимый разбор ``rate_limit`` (§11.1): ``{min_s,max_s}`` → ``RateLimitSpec``.
+
+    Отсутствие/``null``/malformed (не-объект, не-числа, отрицательные, ``max_s < min_s``)
+    → ``None`` (без пейсинга). Никогда не бросает — submit не падает из-за поля политики.
+    """
+    if not isinstance(value, Mapping):
+        return None
+    min_s = _opt_float(value.get("min_s"))
+    max_s = _opt_float(value.get("max_s"))
+    if min_s is None or max_s is None or min_s < 0.0 or max_s < min_s:
+        return None
+    try:
+        return RateLimitSpec(min_s=min_s, max_s=max_s)
+    except ValueError:
+        return None
+
+
+def _rate_limit_json(spec: RateLimitSpec | None) -> str | None:
+    """``RateLimitSpec`` → JSON ``{"min_s","max_s"}`` для хранения; ``None`` → ``NULL``."""
+    if spec is None:
+        return None
+    return json.dumps({"min_s": float(spec.min_s), "max_s": float(spec.max_s)})
+
+
+def _rate_limit_from_json(value: Any) -> RateLimitSpec | None:
+    """Обратный разбор ``rate_limit`` из БД (терпимо: ``NULL``/битый JSON → ``None``)."""
+    if value in (None, ""):
+        return None
+    try:
+        decoded = json.loads(str(value))
+    except (TypeError, ValueError):
+        return None
+    return _opt_rate_limit(decoded)
+
+
+def _attach_robots(crawler: Any, gate: RobotsGate) -> None:
+    """Вешает robots-политику на адаптер (§10).
+
+    Адаптеры читают политику из ``self._robots`` (``HttpCrawler``/``BrowserCrawler``), но
+    публичного сеттера нет, а in-process краулеры построены composition root'ом **до**
+    того, как edge узнал ``user_agent`` из submit-запроса. Поэтому политика вешается
+    присваиванием — это ровно тот атрибут, по которому адаптеры гейтят
+    (``self._robots is not None and plan.robots``). ``plan.robots=False`` делает её
+    инертной (никаких лишних fetch ``robots.txt``).
+    """
+    try:
+        crawler._robots = gate  # noqa: SLF001 - документированный seam адаптеров (§10)
+    except (AttributeError, TypeError):  # pragma: no cover - защита от нестандартных краулеров
+        pass
 
 
 def _coerce_enum(enum_cls: Any, value: Any, default: Any) -> Any:

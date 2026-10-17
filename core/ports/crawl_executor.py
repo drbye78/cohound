@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
 
 from core.domain.enums import CrawlStrategy, ExtractionRoute, FetchMode
+from core.domain.models import RateLimitSpec
 
 __all__ = [
     "ACTIVE_JOB_STATUSES",
@@ -45,6 +46,11 @@ class CrawlWorkItem:
     и передаются готовыми: исполнитель (edge) их лишь исполняет. ``engine``/``kind`` —
     свободные строки-данные (движок транспорта и вид источника), ``None`` — не задано
     на слое источников.
+
+    ``robots`` — флаг egress-вежливости (§10): включать ли проверку ``robots.txt`` для
+    этого элемента (политика, не методология). ``rate_limit`` — **резолвнутый per-item**
+    диапазон задержек egress (:class:`~core.domain.models.RateLimitSpec`); ``None`` ⇒ без
+    пейсинга (дефолт сохраняет байт-идентичность прогонов).
     """
 
     product_id: str
@@ -56,6 +62,8 @@ class CrawlWorkItem:
     strategy: CrawlStrategy = CrawlStrategy.AUTO
     wait_for: str | None = None
     lang: str | None = None
+    robots: bool = False
+    rate_limit: RateLimitSpec | None = None
 
 
 @dataclass(frozen=True)
@@ -87,7 +95,10 @@ class CrawlResultItem:
     ``None`` означает «байтов нет» (сбой источника/извлечения — смотреть ``error``).
     ``content_hash`` — хэш, **пересчитанный ядром** по декодированным байтам (I19):
     заявленному исполнителем значению ядро не доверяет. ``engine``/``kind`` — фактически
-    применённый транспорт и вид источника (провенанс элемента сеанса).
+    применённый транспорт и вид источника (провенанс элемента сеанса). ``final_url`` —
+    финальный URL после редиректов (``None`` ⇒ трактуется как ``url``); ядро берёт его
+    как ``RawPage.url`` (база ссылок, redirect-scope), ключ элемента сеанса остаётся
+    запрошенным ``url``.
     """
 
     product_id: str
@@ -101,6 +112,7 @@ class CrawlResultItem:
     content_hash: str | None = None
     raw_bytes: bytes | None = None
     error: str | None = None
+    final_url: str | None = None
 
 
 @dataclass(frozen=True)

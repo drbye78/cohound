@@ -615,6 +615,7 @@ class EdgeGateway:
             "content_type": item.get("content_type"),
             "fetched_at": item.get("fetched_at"),
             "content_hash": item.get("content_hash"),
+            "final_url": EdgeGateway._crawl_opt_str(item.get("final_url")),
             "raw": normalized_raw,
             "error": item.get("error"),
         }
