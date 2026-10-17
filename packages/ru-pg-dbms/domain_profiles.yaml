@@ -12,25 +12,25 @@
 #  - остальные отдают 200 обычному HTTP — браузер не требуется.
 docs.tantorlabs.ru:
   fetch: http
-  extract: html
+  extract: auto
 jatoba.ru:
   fetch: http
-  extract: html
+  extract: auto
 pangolin.sbertech.ru:
   fetch: browser
-  extract: html
+  extract: auto
   strategy: honest
   wait_for: "() => document.body && document.body.innerText.length > 200"
 platformv.sbertech.ru:
   fetch: browser
-  extract: html
+  extract: auto
   strategy: honest
 postgrespro.ru:
   fetch: http
-  extract: html
+  extract: auto
 sbertech.ru:
   fetch: browser
-  extract: html
+  extract: auto
   strategy: honest
 sbertech.ru/documents:
   fetch: browser
@@ -38,12 +38,12 @@ sbertech.ru/documents:
   strategy: honest
 tantorlabs.ru:
   fetch: browser
-  extract: html
+  extract: auto
   strategy: honest
 tantorlabs.ru/products/dbms:
   fetch: browser
-  extract: html
+  extract: auto
   strategy: honest
 wiki.astralinux.ru:
   fetch: http
-  extract: html
+  extract: auto

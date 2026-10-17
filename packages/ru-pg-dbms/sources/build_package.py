@@ -840,25 +840,25 @@ def build_domain_profiles() -> dict[str, dict[str, object]]:
     модели, чтобы дрейф схемы (старые ``render``/``index``) не вернулся.
     """
     return {
-        "docs.tantorlabs.ru": {"fetch": "http", "extract": "html"},
-        "jatoba.ru": {"fetch": "http", "extract": "html"},
+        "docs.tantorlabs.ru": {"fetch": "http", "extract": "auto"},
+        "jatoba.ru": {"fetch": "http", "extract": "auto"},
         "pangolin.sbertech.ru": {
             "fetch": "browser",
-            "extract": "html",
+            "extract": "auto",
             "strategy": "honest",
             "wait_for": "() => document.body && document.body.innerText.length > 200",
         },
-        "platformv.sbertech.ru": {"fetch": "browser", "extract": "html", "strategy": "honest"},
-        "postgrespro.ru": {"fetch": "http", "extract": "html"},
-        "sbertech.ru": {"fetch": "browser", "extract": "html", "strategy": "honest"},
+        "platformv.sbertech.ru": {"fetch": "browser", "extract": "auto", "strategy": "honest"},
+        "postgrespro.ru": {"fetch": "http", "extract": "auto"},
+        "sbertech.ru": {"fetch": "browser", "extract": "auto", "strategy": "honest"},
         "sbertech.ru/documents": {
             "fetch": "browser",
             "extract": "auto",
             "strategy": "honest",
         },
-        "tantorlabs.ru": {"fetch": "browser", "extract": "html", "strategy": "honest"},
-        "tantorlabs.ru/products/dbms": {"fetch": "browser", "extract": "html", "strategy": "honest"},
-        "wiki.astralinux.ru": {"fetch": "http", "extract": "html"},
+        "tantorlabs.ru": {"fetch": "browser", "extract": "auto", "strategy": "honest"},
+        "tantorlabs.ru/products/dbms": {"fetch": "browser", "extract": "auto", "strategy": "honest"},
+        "wiki.astralinux.ru": {"fetch": "http", "extract": "auto"},
     }
 
 
