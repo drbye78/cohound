@@ -733,6 +733,24 @@ def _docling_comment() -> None:
         pytest.skip("нет cached PDF в corpus_raw/*/*.bin")
 
 
+# Инициализатор и работа воркер-процесса offline-теста (§7.14). ОБЯЗАНЫ быть module-level:
+# `ProcessPoolExecutor(mp_context="forkserver")` пиклит их **по ссылке**, поэтому локальные
+# функции дают `PicklingError` — на это и упал первый прогон gated-набора (тест не доходил
+# до измерения).
+_CHILD_EXTRACTOR: Any = None
+
+
+def _docling_child_init() -> None:
+    global _CHILD_EXTRACTOR  # noqa: PLW0603 — глобал воркера, как в проде (P4/§7)
+    from core.adapters.extract_document import DoclingDocumentExtractor
+
+    _CHILD_EXTRACTOR = DoclingDocumentExtractor(DocumentLevel.LAYOUT)
+
+
+def _docling_child_hash(path: str) -> str:
+    return _CHILD_EXTRACTOR.extract_bytes(Path(path).read_bytes(), "document.pdf").content_hash
+
+
 @pytest.mark.slow
 def test_docling_explicit_full_equals_bare_default() -> None:
     """§8 п.1: явные опции ``full`` ≡ голый ``DocumentConverter()`` (байт-идентичность).
@@ -816,31 +834,32 @@ def test_docling_levels_distinct() -> None:
 
 @pytest.mark.slow
 def test_docling_level_determinism_across_processes() -> None:
-    """§7.14: байт-идентичность уровня в ``ProcessPoolExecutor`` (расширение P4 §5)."""
+    """§7.14: байт-идентичность уровня в ``ProcessPoolExecutor`` (расширение P4 §5).
+
+    Файл — малый cached PDF (как в замере гейта): проверяется сам факт кросс-процессной
+    идентичности, а не объём документа; тяжёлый 7 МБ PDF делал gated-набор непрактичным.
+    """
     import multiprocessing
     import os
     from concurrent.futures import ProcessPoolExecutor
 
     if os.environ.get("COHOUND_RUN_DOCLING_LEVELS") != "1":
         pytest.skip("тяжёлый offline-тест: нужен COHOUND_RUN_DOCLING_LEVELS=1")
+    from core.adapters.extract_document import DoclingDocumentExtractor
+
     _docling_comment()
-    pdf = _cached_pdfs(7_500_000)[0]
-
-    def _init() -> None:
-        global _CHILD_EXTRACTOR
-        from core.adapters.extract_document import DoclingDocumentExtractor
-
-        _CHILD_EXTRACTOR = DoclingDocumentExtractor(DocumentLevel.LAYOUT)
-
-    def _work(path: str) -> str:
-        from pathlib import Path as _P
-
-        return _CHILD_EXTRACTOR.extract_bytes(_P(path).read_bytes(), "document.pdf").content_hash
+    pdf = _cached_pdfs(300_000)[0]
+    inline = DoclingDocumentExtractor(DocumentLevel.LAYOUT).extract_bytes(
+        pdf.read_bytes(), "document.pdf"
+    )
+    assert inline.error is None, inline.error
 
     try:
         context = multiprocessing.get_context("forkserver")
     except ValueError:  # pragma: no cover
         pytest.skip("метод multiprocessing 'forkserver' недоступен")
-    with ProcessPoolExecutor(max_workers=2, mp_context=context, initializer=_init) as pool:
-        results = list(pool.map(_work, [str(pdf), str(pdf)]))
-    assert results[0] == results[1]
+    with ProcessPoolExecutor(
+        max_workers=2, mp_context=context, initializer=_docling_child_init
+    ) as pool:
+        results = list(pool.map(_docling_child_hash, [str(pdf), str(pdf)]))
+    assert results[0] == results[1] == inline.content_hash
