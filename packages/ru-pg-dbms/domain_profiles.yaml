@@ -37,8 +37,9 @@ gaz-is.ru:
   max_documents: 10
 gaz-is.ru/produkty/inform-sistemy/subd-jatoba:
   # Реальная раскладка сайта — /produkty/...: robots.txt перечисляет
-  # /produkty/inform-sistemy/subd-jotoba (старый слаг), он 302 → .../subd-jatoba;
-  # seed /products/jatoba/ из corpus_urls.yaml отдаёт 404. Внутри поддерева обход уместен.
+  # /produkty/inform-sistemy/subd-jotoba (старый слаг), он 302 → .../subd-jatoba.
+  # Прежний seed /products/jatoba/ отдавал 404 и исправлен в паспорте jatoba
+  # (corpus_urls.yaml регенерирован). Внутри поддерева обход уместен.
   extract: auto
   fetch: http
   max_depth: 8
@@ -117,7 +118,19 @@ tantorlabs.ru/products/dbms:
   max_documents: 200
   strategy: honest
 wiki.astralinux.ru:
-  # Confluence, sitemap 404 → глубина как единственный ориентир.
+  # Host-root seed (https://wiki.astralinux.ru/) — корень общего справочного центра
+  # Astra Linux, а не продукта: discovery с depth > 0 затянет в партицию tantor чужие
+  # страницы (I17). Тантор-контент живёт в отдельном Confluence-пространстве TANDOCS
+  # («База Знаний Tantor»), публичные URL — /tandocs/<slug>-<id>.html (живой замер
+  # 2026-10: 68 уникальных /tandocs-ссылок с домашней страницы пространства;
+  # /display/TANDOCS 302 → /tandocs/baza-znanij-tantor-238752972.html). Префикс —
+  # именно /tandocs (path-матч литеральный; /display/TANDOCS после 302 вне scope).
+  extract: auto
+  fetch: http
+  max_depth: 0
+  max_documents: 10
+wiki.astralinux.ru/tandocs:
+  # Обход — только внутри пространства TANDOCS (sitemap 404 → глубина как ориентир).
   extract: auto
   fetch: http
   max_depth: 8

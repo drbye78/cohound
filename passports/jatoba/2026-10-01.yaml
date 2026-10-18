@@ -14,7 +14,7 @@ jurisdiction: RU
 doc_domains:
   - "jatoba.ru"
   - "www.gaz-is.ru"
-  - "www.gaz-is.ru/products/jatoba"
+  - "www.gaz-is.ru/produkty/inform-sistemy/subd-jatoba"
 satellites:
   # Установлен: прямая фраза «Интеграция с КриптоПро».
   - role: security_crypto

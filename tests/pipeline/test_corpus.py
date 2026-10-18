@@ -3291,6 +3291,70 @@ def test_sitemap_seeds_obey_max_documents(tmp_path: Path) -> None:
         store.close()
 
 
+#: F13: host-корень и вложенный path-корень — общий durable-URL лежит в scope обоих.
+HOST_SCOPE_ROOT = "https://docs.test/"
+PATH_SCOPE_ROOT = "https://docs.test/p1/"
+SHARED_DURABLE = "https://docs.test/p1/shared"
+
+
+def test_sitemap_multi_root_resume_budget_counts_shared_url_once(tmp_path: Path) -> None:
+    """F13 (multi-root, секция sitemap/бюджет): URL в scope двух корней заряжает
+    ``max_documents`` **один раз** (продукт).
+
+    Раньше ``consumed`` считался по каждому корню отдельно: URL, лежащий в scope host-корня
+    и вложенного path-корня, заряжался обоим, и на resume бюджет вложенного корня
+    исчерпывался досрочно (ложный ``truncated``). Теперь первый корень-претендент помечает
+    URL, последующие его не пересчитывают; fresh-путь (``note_fetched``) не изменён.
+    """
+    store = SqliteStore(":memory:")
+    _make_run(store)
+    try:
+        # Первый прогон: host-корень обходит ссылку /p1/shared → durable-элементы обоих.
+        _build(
+            tmp_path,
+            pages={},
+            urls={"p1": [HOST_SCOPE_ROOT]},
+            crawler=_Crawler(
+                {
+                    HOST_SCOPE_ROOT: f'<a href="{SHARED_DURABLE}">x</a>'.encode(),
+                    SHARED_DURABLE: b"shared",
+                }
+            ),
+            domain_profiles={"docs.test": DomainProfile(max_depth=1)},
+            store=store,
+            run_id=RUN_ID,
+        )
+        assert {i.url for i in _items(store)} >= {HOST_SCOPE_ROOT, SHARED_DURABLE}
+
+        # Второй прогон: host-корень идёт первым (сортировка URL) и забирает оба durable-URL;
+        # вложенному корню бюджет не заряжается повторно.
+        crawler = _Crawler({PATH_SCOPE_ROOT: b"path seed"})
+        result = _build(
+            tmp_path,
+            pages={},
+            urls={"p1": [PATH_SCOPE_ROOT, HOST_SCOPE_ROOT]},
+            crawler=crawler,
+            domain_profiles={
+                "docs.test": DomainProfile(max_documents=5),
+                "docs.test/p1": DomainProfile(max_documents=2),
+            },
+            store=store,
+            run_id=RUN_ID,
+        )
+        assert result.errors == []
+        records = {rec["root"]: rec for rec in _build_of(result).truncation}
+        # Host-корень заряжен обоими durable-URL (2 < 5) — не усечён.
+        assert records[HOST_SCOPE_ROOT]["pages_fetched"] == 2
+        assert records[HOST_SCOPE_ROOT]["truncated"] is False
+        # Вложенный корень: 0 заряженных (URL уже учтён продуктом) + 1 свежий seed.
+        assert records[PATH_SCOPE_ROOT]["pages_fetched"] == 1
+        assert records[PATH_SCOPE_ROOT]["truncated"] is False
+        assert [u for u, _ in crawler.calls] == [PATH_SCOPE_ROOT]
+        assert PATH_SCOPE_ROOT in {d.url for d in _build_of(result).docs}
+    finally:
+        store.close()
+
+
 def test_sitemap_absent_behaviour_unchanged(tmp_path: Path) -> None:
     """Без ``sitemap`` в профиле поллер не вызывается и ошибок нет (поведение неизменно)."""
     store = SqliteStore(":memory:")

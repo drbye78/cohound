@@ -1800,6 +1800,13 @@ def build_corpus(
         loc, отвергнутый этим корнем, остаётся доступным другому корню продукта. Кэш опроса
         sitemap (``(pid, sitemap_url)``) остаётся нефильтрованным.
 
+        Пометка ``(pid, loc)`` **не** делается здесь (F12): loc может быть отвергнут уже
+        после scope — блэклистом профиля корня (``exclude_paths``/``exclude_documents``) или
+        ``max_documents`` при постановке в очередь. Такой loc обязан остаться доступным
+        другому корню продукта, поэтому ``sitemap_seed_used`` пополняется в
+        :func:`_drain_root` только по факту приёма в очередь (``add_seed`` → ``queued``/
+        ``dup``).
+
         Отказ scope — **провенанс**, не ``errors`` (F10): host-wide sitemap при path-scoped
         seed отвергает большинство ``<loc>`` штатно. Отказы агрегируются по классу
         (:func:`_sitemap_skip_class`): ``host`` (sitemap рекламирует другой host) отдельно
@@ -1815,7 +1822,6 @@ def build_corpus(
             key = (pid, loc)
             if key in sitemap_seed_used:
                 continue
-            sitemap_seed_used.add(key)
             fresh.append(loc)
         skipped: list[dict[str, Any]] = []
         for reason, label in (
@@ -2114,6 +2120,10 @@ def build_corpus(
         # I17: дедуп в пределах продукт-партиции (см. docstring модуля).
         seen_docs: dict[str, str] = {}
         seen_chunk_ids: set[str] = set()
+        #: F13: durable-URL, уже заряженные в resume-бюджет **продукта** (первый корень-
+        #: претендент побеждает). URL, лежащий в scope нескольких корней, не должен
+        #: расходовать ``max_documents`` каждого из них — иначе бюджет исчерпывается досрочно.
+        resume_counted: set[str] = set()
 
         def _drain_root(
             pid: str,
@@ -2142,8 +2152,10 @@ def build_corpus(
             )
             frontier = Frontier(root_url, limits)
             # D3/дефект B (I17): ``<loc>`` sitemap — кандидаты **этого** корня; scope-фильтр
-            # применяется до дедупа ``(pid, loc)``. Без sitemap ``_expand_sitemap`` отдаёт
-            # ``[]`` без обращения к поллеру — путь не исполняется (поведение байт-в-байт).
+            # применяется до дедупа ``(pid, loc)``. Дедуп-пометка — не здесь, а по факту
+            # приёма в очередь (F12, см. цикл ``extra_seeds`` ниже). Без sitemap
+            # ``_expand_sitemap`` отдаёт ``[]`` без обращения к поллеру — путь не исполняется
+            # (поведение байт-в-байт).
             sitemap = (
                 _fresh_sitemap_seeds(pid, root_url, frontier)
                 if sitemap_seeds
@@ -2227,12 +2239,22 @@ def build_corpus(
             # бы ``fetched`` с нуля, заново обошёл resumed-страницу, превысил max_documents
             # и ложно финализировался COMPLETED. Считаем только resume-пригодные элементы
             # (fresh-фетч этого прогона инкрементит счётчик сам), чтобы не задвоить бюджет.
-            consumed = sum(
-                1
-                for (ipid, iurl), item in items.items()
-                if ipid == pid and frontier.in_scope(iurl)
-                and _resume_source(item) is not None
-            )
+            #
+            # F13: бюджет — **продукта**, а не корня. При нескольких корнях на host URL
+            # в scope двух корней иначе заряжался бы обоим, и ``max_documents`` исчерпывался
+            # бы досрочно на resume. Первый корень-претендент помечает URL в
+            # ``resume_counted``; последующие корни его не пересчитывают (fresh-путь
+            # неизменен: ``note_fetched`` — только на реально добытую страницу).
+            consumed = 0
+            for (ipid, iurl), item in items.items():
+                if ipid != pid or iurl in resume_counted:
+                    continue
+                if not frontier.in_scope(iurl):
+                    continue
+                if _resume_source(item) is None:
+                    continue
+                consumed += 1
+                resume_counted.add(iurl)
             frontier.note_consumed(consumed)
             seed_status = frontier.add_seed(root_url)
             if seed_status == "blacklisted":
@@ -2254,9 +2276,16 @@ def build_corpus(
             # живёт **ровно в одном месте** — ``_fresh_sitemap_seeds`` (тот же ``frontier``):
             # ``extra_seeds`` приходят только оттуда, поэтому повторный scope-чек здесь был бы
             # недостижимой защитой (F7 — удалён; тест на удаление фильтра есть).
+            #
+            # F12: ``(pid, loc)`` помечается использованным **только при приёме в очередь**
+            # (``queued``/``dup`` — loc уже у этого корня). Отказ блэклистом/бюджетом не
+            # расходует loc: другой корень того же продукта ещё вправе его взять. Инвариант
+            # «один loc — не более одного фетча на продукт» держится именно этой пометкой.
             for extra in extra_seeds:
                 extra_status = frontier.add_seed(extra)
-                if extra_status == "blacklisted":
+                if extra_status in ("queued", "dup"):
+                    sitemap_seed_used.add((pid, extra))
+                elif extra_status == "blacklisted":
                     errors.append(
                         f"{pid}/{extra}: sitemap-seed зачёркнут блэклистом "
                         "(exclude_paths/exclude_documents) — не enqueued"

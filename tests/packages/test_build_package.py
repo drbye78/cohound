@@ -39,6 +39,7 @@ ROOT = Path(__file__).resolve().parents[2]
 GENERATOR = ROOT / "packages" / "ru-pg-dbms" / "sources" / "build_package.py"
 ON_DISK_PROFILES = ROOT / "packages" / "ru-pg-dbms" / "domain_profiles.yaml"
 ON_DISK_RUN = ROOT / "packages" / "ru-pg-dbms" / "run.yaml"
+CORPUS_URLS = ROOT / "packages" / "ru-pg-dbms" / "sources" / "corpus_urls.yaml"
 
 #: Допустимые поля профиля (строгая схема ``DomainProfile``; ``extra="forbid"``).
 PROFILE_FIELDS = {
@@ -213,7 +214,10 @@ def test_run_crawl_axes_accepted_by_strict_loader() -> None:
         ("https://jatoba.ru/", 2, 50),
         # sitemap 404 → глубина как ориентир.
         ("https://docs.tantorlabs.ru/", 8, 300),
-        ("https://wiki.astralinux.ru/", 8, 300),
+        # Host-root общего справочного центра Astra — не продуктовый корень (I17).
+        ("https://wiki.astralinux.ru/", 0, 10),
+        # Тантор-контент — Confluence-пространство TANDOCS (стабильный префикс /tandocs).
+        ("https://wiki.astralinux.ru/tandocs/baza-znanij-tantor-238752972.html", 8, 300),
     ],
 )
 def test_resolve_crawl_limits_per_site(url: str, max_depth: int, max_documents: int) -> None:
@@ -259,6 +263,57 @@ def test_www_gaz_is_host_root_does_not_discover() -> None:
     assert product_profile.fetch is FetchMode.HTTP
     assert product_profile.max_depth == 8
     assert product_profile.max_documents == 200
+
+
+def test_corpus_urls_jatoba_seed_is_live_product_page() -> None:
+    """Регенерированный seed jatoba — живая продуктовая страница, а не 404.
+
+    Живая проверка (2026-10): ``www.gaz-is.ru/products/jatoba`` — 404 (http↔https
+    301-пинг-понг → 404); реальная страница — ``/produkty/inform-sistemy/subd-jatoba``
+    (200; robots.txt ссылается на старый слаг ``subd-jotoba`` → 302 на ``subd-jatoba``).
+    Пин: файл остаётся детерминированной деривацией паспортов (``passport_urls``), т.е.
+    правка паспорта и регенерация не разъедутся.
+    """
+    from core.config.passports import load_passports, passport_urls
+
+    seeds = yaml.safe_load(CORPUS_URLS.read_text(encoding="utf-8"))
+    assert "https://www.gaz-is.ru/products/jatoba/" not in seeds["jatoba"]
+    assert "https://www.gaz-is.ru/produkty/inform-sistemy/subd-jatoba/" in seeds["jatoba"]
+    derived = {
+        pid: passport_urls(passport)
+        for pid, passport in load_passports(ROOT / "passports").items()
+    }
+    assert seeds == derived, "corpus_urls.yaml обязан совпадать с деривацией из паспортов"
+
+
+def test_wiki_astralinux_host_root_does_not_discover_tandocs_is_scoped() -> None:
+    """``wiki.astralinux.ru`` — общий справочный центр Astra: host-корень не обходит.
+
+    Тантор-контент живёт в Confluence-пространстве TANDOCS («База Знаний Tantor»),
+    публичные URL — ``/tandocs/<slug>-<id>.html`` (замер 2026-10: 68 уникальных
+    ``/tandocs``-ссылок с домашней страницы пространства; ``/display/TANDOCS`` 302 →
+    ``/tandocs/baza-znanij-tantor-238752972.html``). Префикс профиля — ``/tandocs``:
+    path-матч литеральный, канонический ``/display/TANDOCS`` после 302 вне scope.
+    """
+    profiles = load_domain_profiles(ON_DISK_PROFILES)
+
+    host_profile = select_domain_profile("https://wiki.astralinux.ru/", profiles)
+    assert host_profile is not None
+    assert host_profile.max_depth == 0, "host-корень wiki не должен discover'ить (I17)"
+    assert host_profile.max_documents == 10
+
+    space_profile = select_domain_profile(
+        "https://wiki.astralinux.ru/tandocs/baza-znanij-tantor-238752972.html", profiles
+    )
+    assert space_profile is not None
+    assert space_profile is not host_profile
+    assert space_profile.max_depth == 8
+    assert space_profile.max_documents == 300
+
+    # Канонический Confluence-путь пространства не попадает под /tandocs-префикс.
+    assert select_domain_profile("https://wiki.astralinux.ru/display/TANDOCS", profiles) is (
+        host_profile
+    )
 
 
 def test_sitemap_declared_only_on_most_specific_sbertech_key() -> None:

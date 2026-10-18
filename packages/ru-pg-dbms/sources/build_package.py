@@ -843,9 +843,11 @@ def build_domain_profiles() -> dict[str, dict[str, object]]:
     **Host-root seed ≠ продуктовый seed (I17).** Корень сайта компании — не корень
     продукта. Любой discovery на host-корне мульти-продуктового сайта (BFS или host-wide
     sitemap) затянет в партицию одного продукта страницы соседних продуктов. Поэтому
-    host-ключи ``sbertech.ru`` и ``gaz-is.ru`` объявлены с ``max_depth: 0`` (только сам
-    корень) и малым ``max_documents``; обход живёт на path-ключе продукта
-    (``sbertech.ru/documents``, ``gaz-is.ru/produkty/inform-sistemy/subd-jatoba``).
+    host-ключи ``sbertech.ru``, ``gaz-is.ru`` и ``wiki.astralinux.ru`` объявлены с
+    ``max_depth: 0`` (только сам корень) и малым ``max_documents``; обход живёт на
+    path-ключе продукта (``sbertech.ru/documents``,
+    ``gaz-is.ru/produkty/inform-sistemy/subd-jatoba``, ``wiki.astralinux.ru/tandocs`` —
+    Confluence-пространство TANDOCS «База Знаний Tantor»).
 
     **Sitemap — только там, где он даёт покрытие.** Path-scoped seed внутри host-wide
     sitemap почти не получает ``<loc>`` в scope (``platformv.sbertech.ru`` — 1 из 801,
@@ -874,8 +876,9 @@ def build_domain_profiles() -> dict[str, dict[str, object]]:
             "max_documents": 10,
         },
         # Продуктовый путь jatoba (реальная раскладка сайта — /produkty/...: robots.txt
-        # перечисляет /produkty/inform-sistemy/subd-jotoba, он 302 → .../subd-jatoba;
-        # seed /products/jatoba/ отдаёт 404). Внутри поддерева обход уместен.
+        # перечисляет /produkty/inform-sistemy/subd-jotoba, он 302 → .../subd-jatoba).
+        # Прежний seed /products/jatoba/ отдавал 404 и исправлен в паспорте jatoba
+        # (corpus_urls.yaml регенерирован). Внутри поддерева обход уместен.
         "gaz-is.ru/produkty/inform-sistemy/subd-jatoba": {
             "fetch": "http",
             "extract": "auto",
@@ -950,7 +953,20 @@ def build_domain_profiles() -> dict[str, dict[str, object]]:
             # (58 <loc>, в scope 3) ⇒ почти no-op плюс запись об отказе на каждом прогоне.
             # Host-ключ tantorlabs.ru свой sitemap сохраняет.
         },
+        # Host-root seed (https://wiki.astralinux.ru/) — корень общего справочного центра
+        # Astra Linux, а не продукта: discovery с depth > 0 затянет в партицию tantor чужие
+        # страницы (I17). Тантор-контент — Confluence-пространство TANDOCS («База Знаний
+        # Tantor»), публичные URL — /tandocs/<slug>-<id>.html (замер 2026-10: 68 уникальных
+        # /tandocs-ссылок с домашней страницы пространства; /display/TANDOCS 302 →
+        # /tandocs/baza-znanij-tantor-238752972.html). Префикс — /tandocs: path-матч
+        # литеральный, /display/TANDOCS после 302 вне scope.
         "wiki.astralinux.ru": {
+            "fetch": "http",
+            "extract": "auto",
+            "max_depth": 0,
+            "max_documents": 10,
+        },
+        "wiki.astralinux.ru/tandocs": {
             "fetch": "http",
             "extract": "auto",
             "max_depth": 8,

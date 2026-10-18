@@ -27,7 +27,16 @@ from typing import Any
 from core.config.domain_profiles import DomainProfile
 from core.util.feed import FeedEntry
 
-from test_corpus import _Crawler, _FakePoller, _build, _build_of
+from test_corpus import (
+    RUN_ID,
+    SqliteStore,
+    _Crawler,
+    _FakePoller,
+    _build,
+    _build_of,
+    _items,
+    _make_run,
+)
 
 HOST = "docs.test"
 SITEMAP_URL = f"https://{HOST}/sitemap.xml"
@@ -240,6 +249,111 @@ def test_same_loc_offered_by_two_roots_fetched_once(tmp_path: Path) -> None:
     # Дедуп — не отказ: ни у одного корня провенанса отказов нет.
     assert _skips(result, ROOT_HOST) == []
     assert _skips(result, ROOT_A) == []
+
+
+# --------------------------------------------------------------------------- #
+# F12: loc отвергнут корнем A (блэклист/бюджет) — не «съеден», достаётся корню B
+# --------------------------------------------------------------------------- #
+
+#: Вложенные корни: ``ROOT_INNER`` ⊂ ``ROOT_OUTER`` ⇒ ``LOC_SHARED`` в scope обоих.
+ROOT_OUTER = f"https://{HOST}/p1"
+ROOT_INNER = f"https://{HOST}/p1/a"
+LOC_SHARED = f"https://{HOST}/p1/a/page"
+
+
+def test_loc_blacklisted_at_root_a_still_offered_to_root_b(tmp_path: Path) -> None:
+    """Loc заблэклистен профилем корня A — не помечен использованным, берётся корнем B.
+
+    Блэклист резолвится по **корню** (``resolve_crawl_limits(root_url)``), поэтому вложенные
+    корни могут иметь разные ``exclude_paths``: loc не выходит из scope, но у A он зачёркнут,
+    у B — нет. Раньше ``(pid, loc)`` помечался сразу после scope-чека, и B его уже не получал
+    (F12). Корни обходятся в лексикографическом порядке URL, поэтому A — внешний ``/p1``.
+    """
+    poller = _locs(LOC_SHARED)
+    crawler = _Crawler({ROOT_INNER: b"a", ROOT_OUTER: b"b", LOC_SHARED: b"loc"})
+    profiles = {
+        f"{HOST}/p1": DomainProfile(sitemap=SITEMAP_URL, exclude_paths=["/p1/a/page"]),
+        f"{HOST}/p1/a": DomainProfile(sitemap=SITEMAP_URL),
+    }
+    result = _build(
+        tmp_path,
+        pages={},
+        urls={"p1": [ROOT_INNER, ROOT_OUTER]},
+        crawler=crawler,
+        domain_profiles=profiles,
+        pollers={"sitemap": poller},
+    )
+    # Sitemap опрошен один раз (кэш по ``(pid, sitemap_url)``).
+    assert [c[0] for c in poller.calls] == [SITEMAP_URL]
+    # Корень A отказал блэклистом (видимо), корень B поставил loc и добыл его.
+    assert any(
+        f"{LOC_SHARED}: sitemap-seed зачёркнут блэклистом" in e
+        for e in result.errors
+    )
+    assert [u for u, _ in crawler.calls] == [ROOT_OUTER, ROOT_INNER, LOC_SHARED]
+    assert {d.url for d in _build_of(result).docs} == {
+        ROOT_INNER,
+        ROOT_OUTER,
+        LOC_SHARED,
+    }
+
+
+def test_loc_budget_rejected_root_a_still_offered_to_root_b(tmp_path: Path) -> None:
+    """Бюджет корня A исчерпан resume'ом — его locs не «съедены» и достаются корню B.
+
+    ``max_documents`` host-корня A = 1, а durable-страницы A уже занимают бюджет ⇒ seed A не
+    ставится (``truncated``, ранний выход). Раньше ``_fresh_sitemap_seeds`` успевал пометить
+    все in-scope ``<loc>`` использованными до этой проверки, и вложенный корень B не получал
+    ничего (F12). Теперь пометка — только по факту ``add_seed`` ∈ {queued, dup}.
+    """
+    store = SqliteStore(":memory:")
+    _make_run(store)
+    extra_loc = f"https://{HOST}/p1/a/extra"
+    try:
+        # Первый прогон: durable-страницы под /p1/a (seed + одна ссылка).
+        _build(
+            tmp_path,
+            pages={},
+            urls={"p1": [ROOT_INNER]},
+            crawler=_Crawler(
+                {ROOT_INNER: f'<a href="{LOC_SHARED}">x</a>'.encode(), LOC_SHARED: b"x"}
+            ),
+            domain_profiles={f"{HOST}/p1/a": DomainProfile(max_depth=1)},
+            store=store,
+            run_id=RUN_ID,
+        )
+        assert {i.url for i in _items(store)} >= {ROOT_INNER, LOC_SHARED}
+
+        # Второй прогон: host-корень A (идёт первым) уже без бюджета; B — вложенный /p1/a.
+        crawler = _Crawler({ROOT_INNER: b"inner", extra_loc: b"extra"})
+        poller = _locs(LOC_SHARED, extra_loc)
+        result = _build(
+            tmp_path,
+            pages={},
+            urls={"p1": [ROOT_INNER, ROOT_HOST]},
+            crawler=crawler,
+            domain_profiles={
+                HOST: DomainProfile(sitemap=SITEMAP_URL, max_documents=1),
+                f"{HOST}/p1/a": DomainProfile(sitemap=SITEMAP_URL, max_documents=3),
+            },
+            pollers={"sitemap": poller},
+            store=store,
+            run_id=RUN_ID,
+        )
+        # A отвергнут бюджетом (seed), но loc не «съеден»: B поставил его и добыл.
+        assert any(
+            f"{ROOT_HOST}: seed не поставлен — достигнут max_documents" in e
+            for e in result.errors
+        )
+        assert [u for u, _ in crawler.calls].count(extra_loc) == 1
+        assert extra_loc in {d.url for d in _build_of(result).docs}
+        host_record = _root_record(result, ROOT_HOST)
+        assert host_record["truncated"] is True
+        assert host_record["truncated_reason"] == "max_documents"
+        inner_record = _root_record(result, ROOT_INNER)
+        assert inner_record["truncated"] is False
+    finally:
+        store.close()
 
 
 def test_no_sitemap_never_calls_poller(tmp_path: Path) -> None:
