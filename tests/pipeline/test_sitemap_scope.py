@@ -7,9 +7,13 @@ scope-чека, поэтому host-wide sitemap при path-scoped seed зал�
 паспорта продукта и его сателлитов). Гейт: ``p7-crawl-completeness-gate.md`` §2.
 
 Проверяется: loc внутри path-scope корня фетчится; loc вне scope — не фетчится и виден
-в ``errors`` (не тихий дроп); host-root seed по-прежнему означает «весь host в scope»;
-loc, отвергнутый корнем A, остаётся доступным корню B того же продукта; один и тот же
-loc двух корней фетчится не более одного раза; без sitemap поллер не вызывается.
+в **провенансе усечения** корня (``skipped_out_of_scope``), но **не** в ``errors``
+(host-wide sitemap при path-scoped seed — штатная конфигурация, F10); классы отказа
+``host`` (sitemap рекламирует другой host) и ``path`` (тот же host, путь вне префикса)
+считаются раздельно (F6); отказы агрегируются одной записью на класс с точным счётчиком
+(F8); host-root seed по-прежнему означает «весь host в scope»; loc, отвергнутый корнем A,
+остаётся доступным корню B того же продукта; один и тот же loc двух корней фетчится не
+более одного раза; без sitemap поллер не вызывается и провенанс не меняется.
 
 Харнесс переиспользуется из ``test_corpus`` (те же детерминированные фейки портов):
 ``tests/pipeline`` без ``__init__.py``, поэтому pytest кладёт каталог в ``sys.path``.
@@ -18,6 +22,7 @@ loc двух корней фетчится не более одного раза
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 from core.config.domain_profiles import DomainProfile
 from core.util.feed import FeedEntry
@@ -31,6 +36,9 @@ SITEMAP_URL = f"https://{HOST}/sitemap.xml"
 ROOT_A = f"https://{HOST}/p1/a"
 LOC_A_IN = f"https://{HOST}/p1/a/page"
 LOC_A_OUT = f"https://{HOST}/p1/b/page"
+
+#: ``<loc>`` чужого host: sitemap рекламирует другой сайт (класс ``host``, не ``path``).
+LOC_FOREIGN_HOST = "https://evil.test/p1/a/page"
 
 #: Второй корень того же продукта (свой path-scope).
 ROOT_B = f"https://{HOST}/p2/b"
@@ -50,6 +58,24 @@ def _locs(*urls: str) -> _FakePoller:
     return _FakePoller([FeedEntry(url=url) for url in urls])
 
 
+def _root_record(result: Any, root: str) -> dict[str, Any]:
+    """Провенанс-запись ровно одного seed-root продукта (``p1``)."""
+    records = [rec for rec in _build_of(result).truncation if rec["root"] == root]
+    assert len(records) == 1
+    return records[0]
+
+
+def _skips(result: Any, root: str) -> list[dict[str, Any]]:
+    """Агрегированные записи отказов scope у ``<loc>`` sitemap этого корня."""
+    return list(_root_record(result, root).get("skipped_out_of_scope", []))
+
+
+def _by_reason(skips: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Индекс записей по классу отказа (``host``/``path``); дубликат класса — провал."""
+    assert len({rec["reason"] for rec in skips}) == len(skips)
+    return {rec["reason"]: rec for rec in skips}
+
+
 def test_loc_inside_path_scope_is_fetched(tmp_path: Path) -> None:
     """``<loc>`` под path-префиксом корня — ставится и фетчится (аугментация seed'а)."""
     poller = _locs(LOC_A_IN)
@@ -66,10 +92,12 @@ def test_loc_inside_path_scope_is_fetched(tmp_path: Path) -> None:
     assert [c[0] for c in poller.calls] == [SITEMAP_URL]
     assert [u for u, _ in crawler.calls] == [ROOT_A, LOC_A_IN]
     assert {d.url for d in _build_of(result).docs} == {ROOT_A, LOC_A_IN}
+    # Всё в scope ⇒ отказов нет ⇒ ключа провенанса нет (запись не «шумит»).
+    assert "skipped_out_of_scope" not in _root_record(result, ROOT_A)
 
 
-def test_loc_outside_path_scope_not_fetched_and_visible(tmp_path: Path) -> None:
-    """``<loc>`` вне path-scope корня не ставится, но отказ виден в ``errors``."""
+def test_loc_outside_path_scope_recorded_in_provenance_not_errors(tmp_path: Path) -> None:
+    """``<loc>`` вне path-scope не ставится; отказ — провенанс корня, а не ``errors``."""
     poller = _locs(LOC_A_IN, LOC_A_OUT)
     crawler = _Crawler({ROOT_A: b"seed", LOC_A_IN: b"loc", LOC_A_OUT: b"other"})
     result = _build(
@@ -81,12 +109,74 @@ def test_loc_outside_path_scope_not_fetched_and_visible(tmp_path: Path) -> None:
         pollers={"sitemap": poller},
     )
     assert LOC_A_OUT not in [u for u, _ in crawler.calls]
-    # Не тихий дроп: запись называет loc и корень, относительно scope которого он отвергнут.
-    assert any(
-        LOC_A_OUT in err and "вне scope корня" in err and ROOT_A in err
-        for err in result.errors
-    )
     assert {d.url for d in _build_of(result).docs} == {ROOT_A, LOC_A_IN}
+    # F10: штатный отказ scope не деградирует канал сбоев и не делает корпус усечённым.
+    assert result.errors == []
+    assert _build_of(result).truncated is False
+    # F8: отказ виден, посчитан и назван (класс + корень + сам loc).
+    record = _root_record(result, ROOT_A)
+    assert record["truncated"] is False
+    (skip,) = _skips(result, ROOT_A)
+    assert skip["reason"] == "path"
+    assert skip["count"] == 1
+    assert skip["examples"] == [LOC_A_OUT]
+    assert LOC_A_OUT in skip["message"]
+    assert "вне scope корня" in skip["message"]
+    assert ROOT_A in skip["message"]
+    assert "path вне префикса" in skip["message"]
+
+
+def test_foreign_host_loc_counted_apart_from_path_rejections(tmp_path: Path) -> None:
+    """Чужой host и path-сосед — разные классы: два счётчика, две записи, не смешаны."""
+    poller = _locs(LOC_A_OUT, LOC_FOREIGN_HOST)
+    crawler = _Crawler({ROOT_A: b"seed"})
+    result = _build(
+        tmp_path,
+        pages={},
+        urls={"p1": [ROOT_A]},
+        crawler=crawler,
+        domain_profiles=_sitemap_profile(),
+        pollers={"sitemap": poller},
+    )
+    assert result.errors == []
+    assert [u for u, _ in crawler.calls] == [ROOT_A]
+    skips = _by_reason(_skips(result, ROOT_A))
+    assert set(skips) == {"host", "path"}
+    # Host-класс: sitemap рекламирует другой host — отдельный сигнал, не «path-сосед».
+    assert skips["host"]["count"] == 1
+    assert skips["host"]["examples"] == [LOC_FOREIGN_HOST]
+    assert "чужой host" in skips["host"]["message"]
+    # Path-класс: тот же host, путь вне префикса корня.
+    assert skips["path"]["count"] == 1
+    assert skips["path"]["examples"] == [LOC_A_OUT]
+    assert "path вне префикса" in skips["path"]["message"]
+    assert LOC_FOREIGN_HOST not in skips["path"]["examples"]
+    assert LOC_A_OUT not in skips["host"]["examples"]
+
+
+def test_large_rejection_set_is_one_aggregated_record_with_exact_count(
+    tmp_path: Path,
+) -> None:
+    """500 отвергнутых ``<loc>`` → ровно одна запись с точным счётчиком и хвостом «и ещё»."""
+    out_of_scope = tuple(f"https://{HOST}/p1/b/page-{i}" for i in range(500))
+    poller = _locs(*out_of_scope)
+    crawler = _Crawler({ROOT_A: b"seed"})
+    result = _build(
+        tmp_path,
+        pages={},
+        urls={"p1": [ROOT_A]},
+        crawler=crawler,
+        domain_profiles=_sitemap_profile(),
+        pollers={"sitemap": poller},
+    )
+    assert result.errors == []
+    assert [u for u, _ in crawler.calls] == [ROOT_A]
+    (skip,) = _skips(result, ROOT_A)  # одна запись на класс, не 500
+    assert skip["reason"] == "path"
+    assert skip["count"] == 500
+    assert skip["examples"] == list(out_of_scope[:3])
+    assert "500" in skip["message"]
+    assert "и ещё 497" in skip["message"]
 
 
 def test_host_root_seed_keeps_whole_host_in_scope(tmp_path: Path) -> None:
@@ -105,6 +195,7 @@ def test_host_root_seed_keeps_whole_host_in_scope(tmp_path: Path) -> None:
     assert result.errors == []
     assert [u for u, _ in crawler.calls] == [ROOT_HOST, *locs]
     assert {d.url for d in _build_of(result).docs} == {ROOT_HOST, *locs}
+    assert _skips(result, ROOT_HOST) == []
 
 
 def test_loc_rejected_by_root_a_still_offered_to_root_b(tmp_path: Path) -> None:
@@ -122,12 +213,13 @@ def test_loc_rejected_by_root_a_still_offered_to_root_b(tmp_path: Path) -> None:
     # Sitemap опрошен один раз на продукт (кэш ``(pid, sitemap_url)``), loc — у корня B.
     assert [c[0] for c in poller.calls] == [SITEMAP_URL]
     assert [u for u, _ in crawler.calls] == [ROOT_A, ROOT_B, LOC_B_IN]
-    # Отказ корня A наблюдаем (именно он, не корень B).
-    assert any(
-        LOC_B_IN in err and "вне scope корня" in err and ROOT_A in err
-        for err in result.errors
-    )
-    assert not any(f"корня {ROOT_B}" in err for err in result.errors)
+    # Отказ корня A наблюдаем (именно он, не корень B) — и это не ``errors``.
+    assert result.errors == []
+    (skip,) = _skips(result, ROOT_A)
+    assert skip["reason"] == "path"
+    assert skip["examples"] == [LOC_B_IN]
+    assert ROOT_A in skip["message"]
+    assert _skips(result, ROOT_B) == []
 
 
 def test_same_loc_offered_by_two_roots_fetched_once(tmp_path: Path) -> None:
@@ -145,10 +237,13 @@ def test_same_loc_offered_by_two_roots_fetched_once(tmp_path: Path) -> None:
     assert result.errors == []
     assert [u for u, _ in crawler.calls].count(LOC_A_IN) == 1
     assert {d.url for d in _build_of(result).docs} == {ROOT_HOST, ROOT_A, LOC_A_IN}
+    # Дедуп — не отказ: ни у одного корня провенанса отказов нет.
+    assert _skips(result, ROOT_HOST) == []
+    assert _skips(result, ROOT_A) == []
 
 
 def test_no_sitemap_never_calls_poller(tmp_path: Path) -> None:
-    """Без sitemap путь не исполняется: ни обращений к поллеру, ни новых seeds/errors."""
+    """Без sitemap путь не исполняется: ни поллера, ни новых seeds/errors/провенанса."""
     poller = _FakePoller(raising=RuntimeError("поллер не должен вызываться"))
     crawler = _Crawler({ROOT_A: b"seed"})
     result = _build(
@@ -163,3 +258,5 @@ def test_no_sitemap_never_calls_poller(tmp_path: Path) -> None:
     assert result.errors == []
     assert [u for u, _ in crawler.calls] == [ROOT_A]
     assert {d.url for d in _build_of(result).docs} == {ROOT_A}
+    # Без sitemap запись корня байт-в-байт прежняя: ключа провенанса отказов нет.
+    assert "skipped_out_of_scope" not in _root_record(result, ROOT_A)

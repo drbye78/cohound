@@ -30,8 +30,12 @@ retention пишется **до** экстракции; каждый индек�
 страница: не ретейнится/не ингестится (I19). ``<loc>`` — **подчинённые** seeds: проходят
 ``validate_url`` (SSRF) и scope корня (``Frontier.in_scope``: host + path-граница +
 traversal-guard), затем тот же блэклист/``max_documents``/``max_depth``, что и прочие seeds.
-Вне scope корня loc не ставится и попадает в ``errors`` (I17: host-wide sitemap при
-path-scoped seed не заливает чужие продукты).
+Вне scope корня loc не ставится (I17: host-wide sitemap при path-scoped seed не заливает
+чужие продукты) и попадает в **провенанс усечения** корня
+(``truncation_records[*].skipped_out_of_scope``), а не в ``errors``: при path-scoped seed
+это нормальная конфигурация, а не сбой. Классы отказа разделены: ``host`` — sitemap
+рекламирует другой host (сигнал чужого сайта/SSRF), ``path`` — тот же host, но путь вне
+префикса корня.
 
 **Иммутабельность.** ``index_build_id`` — **контент-адресуемый** отпечаток батча сборки:
 ``short_hash`` от (``_BUILD_ID_SCHEMA`` + пакет/params + ``snapshot_date`` + ``chunker_version``
@@ -176,6 +180,13 @@ _DIRECTORY_KINDS: frozenset[str] = frozenset({"feed", "channel"})
 #: не входит в ``_DIRECTORY_KINDS``: это per-site опция профиля домена, а не источник
 #: ``crawl_sources.yaml``. Разворачивается через ``pollers["sitemap"]`` (local ‖ split).
 _SITEMAP_KIND = "sitemap"
+
+#: Классы отказа ``<loc>`` sitemap от scope корня (F6): ``host`` — sitemap рекламирует
+#: другой host (сигнал чужого сайта/SSRF), ``path`` — host тот же, но путь вне префикса
+#: корня (host-wide sitemap при path-scoped seed — **нормальная** конфигурация). Классы
+#: считаются и репортятся раздельно: их смешение скрывало бы host-сигнал в массе path-отказов.
+_SITEMAP_SKIP_HOST = "host"
+_SITEMAP_SKIP_PATH = "path"
 
 #: P3-A2: размер волны (раунда) executor-транспорта — число узлов фронтьера на один
 #: ``_submit_collect``. **Не** ``CrawlLimits.max_workers``: ``max_workers`` — ось локального
@@ -458,6 +469,21 @@ class _PendingExtract:
     future: Any
 
 
+@dataclass(frozen=True)
+class _SitemapSeeds:
+    """D3: развёртка sitemap корня — свежие ``<loc>``-seeds + отвергнутые scope.
+
+    :param fresh: ``<loc>`` в scope корня, ещё не прикреплённые ни к одному корню продукта.
+    :param skipped: агрегированный **провенанс** отказов scope: не более одной записи на
+        класс (``host``/``path``) на корень — ``{"reason", "count", "examples", "message"}``.
+        Отказ scope — не ``errors`` (F10): host-wide sitemap при path-scoped seed отвергает
+        большинство ``<loc>`` штатно, и канал сбоев не должен выглядеть деградировавшим.
+    """
+
+    fresh: tuple[str, ...] = ()
+    skipped: tuple[dict[str, Any], ...] = ()
+
+
 # --------------------------------------------------------------------------- #
 # Детерминированные выводы (версии/идентификаторы)
 # --------------------------------------------------------------------------- #
@@ -480,6 +506,22 @@ def _looks_like_html(page: RawPage) -> bool:
         return "html" in content_type or "xml" in content_type
     head = page.content.lstrip()[:256].lower()
     return head.startswith(b"<html") or head.startswith(b"<!doctype") or b"<a " in head
+
+
+def _sitemap_skip_class(loc: str, root_url: str) -> str:
+    """Класс отказа ``<loc>`` sitemap от scope корня (F6): ``host`` либо ``path``.
+
+    ``host`` — host ``<loc>`` не совпадает с host корня (sitemap рекламирует другой сайт —
+    сигнал чужого host/SSRF). ``path`` — host тот же, но путь вне path-префикса корня
+    (в т.ч. traversal-guard ``..``): host-wide sitemap при path-scoped seed, т.е. штатная
+    конфигурация. Вызывается только для loc, уже отвергнутых ``Frontier.in_scope`` (SSRF-
+    отклонённые loc до этого не доходят — у них своя построчная запись в ``_expand_sitemap``).
+    """
+    root_host = (urlsplit(root_url).hostname or "").lower()
+    host = (urlsplit(loc).hostname or "").lower()
+    if not host or not _host_matches(host, root_host):
+        return _SITEMAP_SKIP_HOST
+    return _SITEMAP_SKIP_PATH
 
 
 def _now_iso() -> str:
@@ -1746,7 +1788,7 @@ def build_corpus(
 
     def _fresh_sitemap_seeds(
         pid: str, seed_url: str, frontier: Frontier
-    ) -> tuple[str, ...]:
+    ) -> _SitemapSeeds:
         """``<loc>`` sitemap, ещё не прикреплённые ни к одному seed-root продукта (дедуп).
 
         Один и тот же sitemap у нескольких seed-URL даёт один набор ``<loc>``; прикреплять
@@ -1755,33 +1797,51 @@ def build_corpus(
         ``<loc>`` — **подчинённые** seeds корня, а не задающие scope: loc проходит тот же
         ``frontier.in_scope`` (host + path-граница + traversal-guard), что и обнаруженная
         ссылка. Scope-чек исполняется **до** пометки ``(pid, loc)`` использованным, поэтому
-        loc, отвергнутый этим корнем, остаётся доступным другому корню продукта; отказ
-        виден в ``errors`` (не тихий дроп). Кэш опроса sitemap (``(pid, sitemap_url)``)
-        остаётся нефильтрованным.
+        loc, отвергнутый этим корнем, остаётся доступным другому корню продукта. Кэш опроса
+        sitemap (``(pid, sitemap_url)``) остаётся нефильтрованным.
+
+        Отказ scope — **провенанс**, не ``errors`` (F10): host-wide sitemap при path-scoped
+        seed отвергает большинство ``<loc>`` штатно. Отказы агрегируются по классу
+        (:func:`_sitemap_skip_class`): ``host`` (sitemap рекламирует другой host) отдельно
+        от ``path`` (тот же host, путь вне префикса) — иначе host-сигнал тонул бы в массе
+        path-отказов. На корень — не более одной записи на класс (не на loc).
         """
         fresh: list[str] = []
-        rejected: list[str] = []
+        rejected: dict[str, list[str]] = {_SITEMAP_SKIP_HOST: [], _SITEMAP_SKIP_PATH: []}
         for loc in _expand_sitemap(pid, seed_url):
             if not frontier.in_scope(loc):
-                rejected.append(loc)
+                rejected[_sitemap_skip_class(loc, frontier.root_url)].append(loc)
                 continue
             key = (pid, loc)
             if key in sitemap_seed_used:
                 continue
             sitemap_seed_used.add(key)
             fresh.append(loc)
-        # Отказ виден, но **одной** записью на корень: host-wide sitemap при узком seed
-        # отвергает сотни <loc> (напр. 748-URL sitemap при path-scoped seed) — построчные
-        # записи затопили бы ``errors`` и отчёт. Примеры — первые три.
-        if rejected:
-            preview = ", ".join(rejected[:3])
-            if len(rejected) > 3:
-                preview += f" и ещё {len(rejected) - 3}"
-            errors.append(
-                f"{pid}/{seed_url}: sitemap: {len(rejected)} <loc> вне scope корня "
-                f"{frontier.root_url} — не enqueued (например: {preview})"
+        skipped: list[dict[str, Any]] = []
+        for reason, label in (
+            (_SITEMAP_SKIP_HOST, "чужой host"),
+            (_SITEMAP_SKIP_PATH, "path вне префикса корня"),
+        ):
+            locs = rejected[reason]
+            if not locs:
+                continue
+            # Сотни loc на один корень (host-wide sitemap при узком seed) — одна запись:
+            # построчные затопили бы провенанс. Примеры — первые три (счётчик — точный).
+            preview = ", ".join(locs[:3])
+            if len(locs) > 3:
+                preview += f" и ещё {len(locs) - 3}"
+            skipped.append(
+                {
+                    "reason": reason,
+                    "count": len(locs),
+                    "examples": list(locs[:3]),
+                    "message": (
+                        f"{pid}/{seed_url}: sitemap: {len(locs)} <loc> вне scope корня "
+                        f"{frontier.root_url} ({label}) — не enqueued (например: {preview})"
+                    ),
+                }
             )
-        return tuple(fresh)
+        return _SitemapSeeds(fresh=tuple(fresh), skipped=tuple(skipped))
 
     def _local_prefetch(
         pid: str,
@@ -2061,7 +2121,7 @@ def build_corpus(
             root_target: Any,
             *,
             sitemap_seeds: bool = False,
-        ) -> Frontier:
+        ) -> tuple[Frontier, list[dict[str, Any]]]:
             """D1/D3: BFS-drain одного seed-root (scope/блэклист/лимиты/глубина).
 
             Seeds — глубина 0; ссылка со страницы глубины ``d`` → ``d+1``. ``sitemap_seeds``
@@ -2071,7 +2131,8 @@ def build_corpus(
             Ставка в очередь гейтится scope (host+path-граница) и блэклистом; ``max_documents``
             — жёсткий стоп (не исключение): останавливает постановку/обход этого корня.
             Возвращает frontier с провенансом усечения (``fetched``/``truncated``/
-            ``truncated_reason``).
+            ``truncated_reason``) и агрегированный провенанс отказов scope у ``<loc>``
+            (пусто без sitemap/без отказов).
             """
             limits = resolve_crawl_limits(
                 root_url,
@@ -2083,9 +2144,12 @@ def build_corpus(
             # D3/дефект B (I17): ``<loc>`` sitemap — кандидаты **этого** корня; scope-фильтр
             # применяется до дедупа ``(pid, loc)``. Без sitemap ``_expand_sitemap`` отдаёт
             # ``[]`` без обращения к поллеру — путь не исполняется (поведение байт-в-байт).
-            extra_seeds = (
-                _fresh_sitemap_seeds(pid, root_url, frontier) if sitemap_seeds else ()
+            sitemap = (
+                _fresh_sitemap_seeds(pid, root_url, frontier)
+                if sitemap_seeds
+                else _SitemapSeeds()
             )
+            extra_seeds = sitemap.fresh
             # P5: уровень извлечения документов — свойство корня (per seed-root; один конвертер
             # на пул). ``full`` переиспользует переданный экстрактор (дефолт — без лишней
             # загрузки весов); иной уровень строится фабрикой, если она передана.
@@ -2177,24 +2241,20 @@ def build_corpus(
                     "(exclude_paths/exclude_documents) — не enqueued"
                 )
                 _emit_progress()
-                return frontier
+                return frontier, list(sitemap.skipped)
             if seed_status == "truncated":
                 errors.append(
                     f"{pid}/{root_url}: seed не поставлен — достигнут max_documents"
                 )
                 _emit_progress()
-                return frontier
+                return frontier, list(sitemap.skipped)
 
             # D3: дополнительные depth-0 seeds (``<loc>`` sitemap) — под тем же блэклистом и
-            # бюджетом, что и seed оператора (``add_seed`` возвращает статус). Defence-in-depth:
-            # scope-чек и на постановке (``_fresh_sitemap_seeds`` уже отфильтровал по scope).
+            # бюджетом, что и seed оператора (``add_seed`` возвращает статус). Scope-фильтр
+            # живёт **ровно в одном месте** — ``_fresh_sitemap_seeds`` (тот же ``frontier``):
+            # ``extra_seeds`` приходят только оттуда, поэтому повторный scope-чек здесь был бы
+            # недостижимой защитой (F7 — удалён; тест на удаление фильтра есть).
             for extra in extra_seeds:
-                if not frontier.in_scope(extra):
-                    errors.append(
-                        f"{pid}/{extra}: sitemap <loc> вне scope корня {root_url} — "
-                        "не enqueued"
-                    )
-                    continue
                 extra_status = frontier.add_seed(extra)
                 if extra_status == "blacklisted":
                     errors.append(
@@ -2870,7 +2930,7 @@ def build_corpus(
                 if pool is not None:
                     pool.shutdown(wait=True)
                 _discard_extract_executor()
-            return frontier
+            return frontier, list(sitemap.skipped)
 
         # P3-A2: **однопутевой** product-цикл. Развёртка каталогов/sitemap делается один раз
         # до drain (общий блок построения корней); транспорт выбирается по ``executor is None``.
@@ -2953,7 +3013,7 @@ def build_corpus(
             # D1: BFS-frontier по каждому seed-root (``max_depth=0`` → только seeds,
             # поведение неизменно). Провенанс усечения копится для сеанса/``IndexBuild``.
             for root_url, root_target, sitemap_seeds in roots:
-                frontier = _drain_root(
+                frontier, sitemap_skips = _drain_root(
                     product_id, root_url, root_target, sitemap_seeds=sitemap_seeds
                 )
                 pages_fetched_total += frontier.fetched
@@ -2965,19 +3025,25 @@ def build_corpus(
                 # для человека). Причина — не ``max_*``, а ``document_level=off``.
                 if frontier.skipped_documents:
                     truncated_products.add(product_id)
-                truncation_records.append(
-                    {
-                        "product_id": product_id,
-                        "root": root_url,
-                        "pages_fetched": frontier.fetched,
-                        "truncated": frontier.truncated,
-                        "truncated_reason": frontier.truncated_reason,
-                        "limits": frontier.limits.as_dict(),
-                        "skipped_blacklisted": list(frontier.skipped_blacklisted),
-                        # P5: видимые пропуски документов (``url_suffix``/``content_type``).
-                        "skipped_documents": [dict(rec) for rec in frontier.skipped_documents],
-                    }
-                )
+                record: dict[str, Any] = {
+                    "product_id": product_id,
+                    "root": root_url,
+                    "pages_fetched": frontier.fetched,
+                    "truncated": frontier.truncated,
+                    "truncated_reason": frontier.truncated_reason,
+                    "limits": frontier.limits.as_dict(),
+                    "skipped_blacklisted": list(frontier.skipped_blacklisted),
+                    # P5: видимые пропуски документов (``url_suffix``/``content_type``).
+                    "skipped_documents": [dict(rec) for rec in frontier.skipped_documents],
+                }
+                # D3/F10: отказы scope у ``<loc>`` sitemap — провенанс, не ``errors``.
+                # Ключ появляется только при наличии отказов: без sitemap запись байт-в-байт
+                # прежняя. Классы ``host``/``path`` раздельны (F6).
+                if sitemap_skips:
+                    record["skipped_out_of_scope"] = [
+                        dict(skip) for skip in sitemap_skips
+                    ]
+                truncation_records.append(record)
 
         # Retention-провенанс не зависит от индексной сборки: docs персистятся в Pass A.
         _persist_docs(store, ingest.docs, errors)
