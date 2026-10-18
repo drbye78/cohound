@@ -11,10 +11,16 @@
 шаблону как он написан, звёздочки учитываются); при равенстве ``Allow`` важнее ``Disallow``.
 Ничего не совпало — разрешено. Пустой ``Disallow:`` = «разрешено всё».
 
-**Семантика ленты.** Недоступная лента (``None``/исключение) трактуется как «правил нет»
-(как 404 в штатной семантике robots) — это **дефолт-разрешение**, а не молчаливый обход.
-``allowed`` возвращает ``False`` только при явном выигравшем ``Disallow`` для нашего агента.
-Сбой разбора не роняет краул (``True``).
+Матчинг — **линейный glob-матчер** (шаблон делится по ``*``, отрезки ищутся последовательным
+``str.find``), без регулярных выражений: ``robots.txt`` — недоверенный вход (RFC 9309 §3),
+и вложенные звёздочки не должны вызывать катастрофический бэктрекинг при проверке каждого URL.
+
+**Семантика ленты.** Недоступная лента (``None``/исключение, включая 5xx) трактуется как
+«правил нет» — **дефолт-разрешение**. Это **осознанное отступление** от RFC 9309 §2.3.1.4,
+который предписывает при 5xx/недоступности считать хост полностью запрещённым: выбрано,
+чтобы транзиентный сбой не выключал молча целый хост. ``allowed`` возвращает ``False``
+**только** при явном выигравшем ``Disallow`` для нашего агента; сбой разбора не роняет краул
+(``True``).
 
 ``crawl_delay`` отдаёт объявленную агенту задержку (сек), если она есть: адаптеры могут
 использовать её как **floor** (не как источник пейсинга — им владеет corpus, P2-3);
@@ -25,7 +31,6 @@
 
 from __future__ import annotations
 
-import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from urllib.parse import urlsplit
@@ -72,24 +77,48 @@ def _normalize(value: str) -> str:
     return "".join(out)
 
 
-def _compile(pattern: str) -> re.Pattern[str]:
-    """Скомпилировать шаблон robots-правила (``*`` — любой отрезок, ``$`` — якорь конца)."""
-    anchored = pattern.endswith("$")
-    body = pattern[:-1] if anchored else pattern
-    pieces: list[str] = []
-    for char in body:
-        pieces.append(".*" if char == "*" else re.escape(char))
-    suffix = "$" if anchored else ""
-    return re.compile("^" + "".join(pieces) + suffix)
+def _matches(segments: tuple[str, ...], anchored: bool, target: str) -> bool:
+    """Линейно сопоставить шаблон (разбитый по ``*``) с нормализованной целью.
+
+    Шаблон ``seg0 * seg1 * … * segN`` читается как «``seg0``, затем любой отрезок, затем
+    ``seg1``, …». Первый отрезок — префикс; средние ищутся последовательным ``str.find``
+    от текущей позиции (самое левое вхождение оставляет максимум места следующим, поэтому
+    полнота не теряется); последний отрезок при ``$`` — суффикс, иначе ищется как обычный
+    отрезок (шаблон без ``$`` префиксный, хвост цели свободен).
+
+    Сложность — ``O(len(target) · число отрезков)``, без бэктрекинга: недоверенный
+    ``robots.txt`` не может подвесить проверку URL.
+    """
+    first = segments[0]
+    if not target.startswith(first):
+        return False
+    if len(segments) == 1:
+        # Звёздочек нет: без ``$`` — префикс, с ``$`` — точное совпадение.
+        return len(target) == len(first) if anchored else True
+    position = len(first)
+    last = segments[-1]
+    for segment in segments[1:-1]:
+        found = target.find(segment, position)
+        if found < 0:
+            return False
+        position = found + len(segment)
+    if anchored:
+        start = len(target) - len(last)
+        return start >= position and target.endswith(last)
+    return target.find(last, position) >= 0
 
 
 @dataclass(frozen=True)
 class _Rule:
-    """Одно правило группы: шаблон как он написан, вид и скомпилированное выражение."""
+    """Одно правило группы: шаблон как он написан, вид и разбиение для матчинга."""
 
     pattern: str
     allow: bool
-    regex: re.Pattern[str]
+    segments: tuple[str, ...]
+    anchored: bool
+
+    def matches(self, target: str) -> bool:
+        return _matches(self.segments, self.anchored, target)
 
 
 @dataclass
@@ -102,7 +131,16 @@ class _Group:
 
 
 def _parse(text: str) -> list[_Group]:
-    """Разобрать текст ``robots.txt`` в группы (RFC 9309, неизвестные ключи игнорируются)."""
+    """Разобрать текст ``robots.txt`` в группы (RFC 9309, неизвестные ключи игнорируются).
+
+    Пустая строка **не** закрывает группу: ABNF RFC 9309 §2.1 допускает ``emptyline`` и
+    между ``User-agent``, и между правилами (``group = startgroupline *(startgroupline /
+    emptyline) *(rule / emptyline)``). Новую группу открывает только ``User-agent``,
+    встреченный после правил. Ведущий UTF-8 BOM отбрасывается: иначе первый ключ не
+    распознаётся и вся первая группа молча теряется.
+    """
+    if text.startswith("\ufeff"):
+        text = text[1:]
     groups: list[_Group] = []
     group = _Group()
     in_rules = False
@@ -117,7 +155,7 @@ def _parse(text: str) -> list[_Group]:
     for raw_line in text.splitlines():
         line = raw_line.split("#", 1)[0].strip()
         if not line:
-            flush()
+            # Пустая строка внутри группы правил — часть группы, а не её конец.
             continue
         key, separator, value = line.partition(":")
         if not separator:
@@ -138,8 +176,16 @@ def _parse(text: str) -> list[_Group]:
             if not value:
                 # Пустой Disallow/Allow — «нет правила» (пустой Disallow = разрешено всё).
                 continue
+            normalized = _normalize(value)
+            anchored = normalized.endswith("$")
+            body = normalized[:-1] if anchored else normalized
             group.rules.append(
-                _Rule(pattern=value, allow=key == "allow", regex=_compile(_normalize(value)))
+                _Rule(
+                    pattern=value,
+                    allow=key == "allow",
+                    segments=tuple(body.split("*")),
+                    anchored=anchored,
+                )
             )
         elif key == "crawl-delay":
             in_rules = True
@@ -166,7 +212,7 @@ class _Policy:
         """Разрешён ли нормализованный ``target`` (путь + query)."""
         best: tuple[int, bool] | None = None
         for rule in self._rules:
-            if rule.regex.match(target) is None:
+            if not rule.matches(target):
                 continue
             # Длиннее — важнее; при равенстве True (Allow) важнее False (Disallow).
             key = (len(rule.pattern), rule.allow)
@@ -179,8 +225,10 @@ class RobotsGate:
     """Per-host политика ``robots.txt`` (собственный RFC 9309-матчер, инъектируемый фетч).
 
     ``fetch(host)`` → текст ``robots.txt`` либо ``None`` (недоступен). Недоступная лента
-    трактуется как «правил нет» (как 404 в штатной семантике robots). Проверка — только
-    запрет: ``allowed`` возвращает ``False`` лишь при явном выигравшем ``Disallow``.
+    трактуется как «правил нет» — **осознанное отступление** от RFC 9309 §2.3.1.4 (там при
+    5xx предписано считать хост полностью запрещённым), чтобы транзиентный сбой не выключал
+    молча целый хост. Проверка — только запрет: ``allowed`` возвращает ``False`` лишь при
+    явном выигравшем ``Disallow``.
     """
 
     def __init__(

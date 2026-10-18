@@ -2,11 +2,14 @@
 
 Без сети: текст ленты robots инъектируется. Проверяются дефолт-разрешение при недоступной
 ленте, явный запрет, ``Crawl-delay``, RFC 9309-матчинг (``*``/``$``/query, самое длинное
-правило, при равенстве ``Allow``) и то, что ``core.pipeline.crawl_probe`` ре-экспортирует
+правило, при равенстве ``Allow``), ABNF-пустые строки внутри группы, UTF-8 BOM, линейность
+матчера на вложенных звёздочках и то, что ``core.pipeline.crawl_probe`` ре-экспортирует
 ту же реализацию (single implementation).
 """
 
 from __future__ import annotations
+
+import time
 
 from core.pipeline.crawl_probe import RobotsGate as ProbeRobotsGate
 from core.util.robots import RobotsGate
@@ -23,6 +26,34 @@ Disallow: /tables
 Allow: /*page=*
 Allow: /*.gif
 Allow: *.css*
+"""
+
+# Точная форма живой ленты https://jatoba.ru/robots.txt (F2): пустая строка сразу после
+# ``User-agent: *``, затем правила. Раньше пустая строка закрывала группу и все 7 правил
+# терялись (хост, реально входящий в пакет кейса).
+JATOBA = """Host: jatoba.ru
+User-agent: *
+
+Disallow: /cms/
+Disallow: /install.php
+Disallow: *&etext=
+Disallow: *&pco=
+Disallow: *&matchtype=
+Disallow: *erid
+Disallow: *etext
+
+
+User-agent: Yandex
+Clean-Param: erid
+Clean-Param: utm
+Clean-Param: etext
+Disallow: /cms/
+Disallow: /install.php
+Disallow: *&etext=
+Disallow: *&pco=
+Disallow: *&matchtype=
+Disallow: *erid
+Disallow: *etext
 """
 
 
@@ -145,3 +176,80 @@ def test_real_world_rule_shapes() -> None:
     assert gate.allowed("https://example.com/tables?page=2") is True
     assert gate.allowed("https://example.com/logo.gif") is True
     assert gate.allowed("https://example.com/static/site.css") is True
+
+
+def test_blank_line_inside_group_keeps_rules() -> None:
+    """F2: ``emptyline`` допустима внутри группы (ABNF RFC 9309 §2.1).
+
+    Регрессия на точной форме живой ленты ``jatoba.ru``: пустая строка сразу после
+    ``User-agent: *`` не должна выбрасывать всю группу.
+    """
+    gate = _gate(JATOBA)
+    assert gate.allowed("https://jatoba.ru/cms/admin") is False
+    assert gate.allowed("https://jatoba.ru/install.php") is False
+    assert gate.allowed("https://jatoba.ru/x?&etext=1") is False
+    assert gate.allowed("https://jatoba.ru/x?&pco=2") is False
+    assert gate.allowed("https://jatoba.ru/x?&matchtype=a") is False
+    assert gate.allowed("https://jatoba.ru/erid") is False
+    assert gate.allowed("https://jatoba.ru/x?etext=1") is False
+    assert gate.allowed("https://jatoba.ru/") is True
+    assert gate.allowed("https://jatoba.ru/x?y=1") is True
+
+
+def test_blank_lines_between_rules_stay_in_group() -> None:
+    """F2: пустые строки между правилами — часть той же группы."""
+    gate = _gate("User-agent: *\nDisallow: /a\n\nDisallow: /b\n\n\nDisallow: /c\n")
+    assert gate.allowed("https://example.com/a") is False
+    assert gate.allowed("https://example.com/b") is False
+    assert gate.allowed("https://example.com/c") is False
+    assert gate.allowed("https://example.com/d") is True
+
+
+def test_blank_line_between_groups_still_separates() -> None:
+    """F2: ``User-agent`` после правил открывает новую группу (пустые строки не мешают)."""
+    text = "User-agent: *\nDisallow: /a\n\nUser-agent: other\nDisallow: /b\n"
+    gate = _gate(text)
+    assert gate.allowed("https://example.com/a") is False
+    assert gate.allowed("https://example.com/b") is True
+    named = RobotsGate(lambda _host: text, user_agent="other")
+    assert named.allowed("https://example.com/a") is True
+    assert named.allowed("https://example.com/b") is False
+
+
+def test_utf8_bom_does_not_drop_first_group() -> None:
+    """F5: ведущий UTF-8 BOM не должен «съедать» первый ключ и всю группу ``*``."""
+    gate = _gate("\ufeffUser-agent: *\nDisallow: /secret\n")
+    assert gate.allowed("https://example.com/secret") is False
+    assert gate.allowed("https://example.com/open") is True
+
+
+def test_multiple_stars_match_sequentially() -> None:
+    """Линейный матчер: средние отрезки ищутся по порядку, ``$`` якорит конец."""
+    gate = _gate("User-agent: *\nDisallow: /a*b*c$\n")
+    assert gate.allowed("https://example.com/axxbyyc") is False
+    assert gate.allowed("https://example.com/abc") is False
+    assert gate.allowed("https://example.com/axxbyycd") is True  # не конец
+    assert gate.allowed("https://example.com/axxcyyb") is True  # порядок нарушен
+
+
+def test_nested_wildcards_are_linear_not_catastrophic() -> None:
+    """F3/ReDoS: ~12 звёздочек против 400-символьного пути — линейный матчер.
+
+    Прежняя regex-реализация (``.*`` на каждую ``*`` + ``re.match``) на этом входе
+    бэктрекала экспоненциально и не завершалась за минуты. Граница ``< 0.5 s`` — про
+    **сложность** (линейный проход), а не про скорость конкретной машины.
+    """
+    pattern = "/a" + "*a" * 12 + "b$"
+    gate = _gate(f"User-agent: *\nDisallow: {pattern}\n")
+
+    started = time.perf_counter()
+    # Нет завершающего ``b`` — правило не совпало, хост разрешён.
+    assert gate.allowed("https://example.com/" + "a" * 400) is True
+    elapsed = time.perf_counter() - started
+    assert elapsed < 0.5, f"нелинейный матчинг: {elapsed:.3f}s"
+
+    started = time.perf_counter()
+    # Завершающий ``b`` — правило совпало.
+    assert gate.allowed("https://example.com/" + "a" * 400 + "b") is False
+    elapsed = time.perf_counter() - started
+    assert elapsed < 0.5, f"нелинейный матчинг: {elapsed:.3f}s"
