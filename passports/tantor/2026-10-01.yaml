@@ -15,7 +15,9 @@ doc_domains:
   - "tantorlabs.ru"
   - "tantorlabs.ru/products/dbms"
   - "docs.tantorlabs.ru"
-  - "wiki.astralinux.ru"
+  # Прямой путь к Confluence-пространству TANDOCS («База Знаний Tantor»): host-root
+  # вики уводит в общую документацию Astra, а не в контент продукта.
+  - "wiki.astralinux.ru/tandocs"
 satellites:
   # Установлен: платформа управления (management_console).
   - role: management_console
