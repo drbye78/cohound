@@ -94,7 +94,7 @@ def test_schema_opens(store: SqliteStore) -> None:
     ver = store.conn.execute(
         "SELECT value FROM schema_meta WHERE key = 'schema_version'"
     ).fetchone()
-    assert ver["value"] == "3.5.0"
+    assert ver["value"] == "3.6.0"
     tables = {
         r["name"] for r in store.conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
     }

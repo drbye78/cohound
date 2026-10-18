@@ -70,9 +70,11 @@ __all__ = [
     "review_queue",
 ]
 
-#: Состояния по умолчанию в очереди ревью: preliminary-контур + уже отревьюенные строки.
+#: Состояния по умолчанию в очереди ревью: preliminary-контур, pending-кандидаты
+#: (конфликт источников / условное наследование) и уже отревьюенные строки.
 DEFAULT_REVIEW_STATES: tuple[CellState, ...] = (
     CellState.PRELIMINARY,
+    CellState.PENDING,
     CellState.REVIEWED,
 )
 
@@ -135,6 +137,11 @@ def _review_reason(cell: Cell) -> str:
         )
     if cell.state is CellState.REVIEWED:
         return "ячейка, отмеченная reviewed"
+    if cell.state is CellState.PENDING:
+        reason = getattr(cell, "review_reason", None)
+        if reason:
+            return f"pending ({reason}): ожидает решения человека (I6/I7)"
+        return "pending: ожидает решения человека (I6/I7)"
     # evaluated + ❓
     return "unknown (❓): протокол исчерпан или требуется человек (I3)"
 
@@ -161,8 +168,9 @@ def review_queue(
     """Очередь ревью Ш7 для прогона: ячейки в ``states`` + ``❓`` ``evaluated``-кандидаты.
 
     Детерминирована: сортировка по ``(product_id, param_id)``. ``states`` по умолчанию —
-    ``(preliminary, reviewed)``; ``preliminary`` — это preliminary-контур (I13, вне
-    расчётов). Дополнительно **всегда** включаются ``evaluated``-ячейки со
+    ``(preliminary, pending, reviewed)``; ``preliminary`` — preliminary-контур (I13, вне
+    расчётов), ``pending`` — кандидаты на решение человека (конфликт источников,
+    условное наследование). Дополнительно **всегда** включаются ``evaluated``-ячейки со
     ``status = ❓`` (``UNKNOWN``): это кандидаты на человеческое решение (I3, §9
     ``nda_questions``/G3), независимо от ``states``.
     """

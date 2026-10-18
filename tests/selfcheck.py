@@ -678,7 +678,7 @@ def _crawl_session_dict_mirror() -> None:
 def _db_smoke() -> None:
     conn = connect(":memory:")
     ver = conn.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()
-    _assert(ver is not None and ver["value"] == "3.5.0")
+    _assert(ver is not None and ver["value"] == "3.6.0")
 
     tables = {r["name"] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     for t in ("products", "runs", "llm_scenarios", "corpus_docs", "corpus_chunks",

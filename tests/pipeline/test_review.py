@@ -23,6 +23,7 @@ from core.domain import (
     REQUIRED_EXHAUSTION_CONTOURS,
     RunConfig,
     RunMode,
+    SourceKind,
     Status,
     TerminationReason,
     check_unknown_exhaustion,
@@ -149,6 +150,41 @@ def test_review_queue_lists_preliminary_and_unknown_deterministically(
 def test_review_queue_empty(store: SqliteStore) -> None:
     store.save_cell(_evaluated("p1", "param.a", Status.OK))
     assert review_queue(store, RUN_ID) == []
+
+
+def test_review_queue_includes_pending_with_reason(store: SqliteStore) -> None:
+    """PENDING по умолчанию в очереди: иначе конфликт/условное наследование — тихий pending."""
+    store.save_cell(
+        Cell(
+            run_id=RUN_ID,
+            product_id="p1",
+            param_id="param.a",
+            state=CellState.PENDING,
+            status=None,
+            source_kind=SourceKind.INHERITANCE,
+            review_reason="conditional_inheritance",
+        )
+    )
+    store.save_cell(
+        Cell(
+            run_id=RUN_ID,
+            product_id="p1",
+            param_id="param.b",
+            state=CellState.PENDING,
+            status=Status.ABSENT,
+            source_kind=SourceKind.REGISTRY,
+            review_reason="precedence_conflict",
+        )
+    )
+
+    queue = review_queue(store, RUN_ID)
+
+    assert [(i.product_id, i.param_id) for i in queue] == [
+        ("p1", "param.a"),
+        ("p1", "param.b"),
+    ]
+    assert "conditional_inheritance" in queue[0].reason
+    assert "precedence_conflict" in queue[1].reason
 
 
 def test_review_queue_custom_states_still_includes_unknown(store: SqliteStore) -> None:

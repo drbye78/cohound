@@ -189,6 +189,7 @@ def test_conditional_goes_to_pending_not_resolved() -> None:
     [cell] = result.cells
     assert cell.state is CellState.PENDING
     assert cell.status is None  # НЕ разрешённый статус
+    assert cell.review_reason  # дискриминатор причины для очереди ревью
     assert check_cell(cell) == []
 
 

@@ -75,6 +75,24 @@ _CELL_COLUMNS = (
     "retrieval_profile",
     "retrieval_params_json",
     "stale_reason",
+    "review_reason",
+)
+
+#: Источники, стоящие в порядке §2.2 п.7 **ниже** реестра. Guard использует это только
+#: как узкую страховку (defense-in-depth), а не как несущую логику прецедента: полный
+#: порядок и решение о ``pending`` живут в ``core.pipeline.precedence`` (слой выше).
+_LOWER_THAN_REGISTRY: frozenset[SourceKind] = frozenset(
+    {
+        SourceKind.INHERITANCE,
+        SourceKind.DISTRIBUTION,
+        SourceKind.DOCUMENTATION,
+        SourceKind.WEB,
+    }
+)
+
+#: Наличие-статусы (I2/§2.2 п.2): только для них «иной статус» означает конфликт.
+_PRESENCE_STATUSES: frozenset[Status] = frozenset(
+    {Status.OK, Status.PARTIAL, Status.ABSENT}
 )
 
 _EVIDENCE_COLUMNS = (
@@ -320,13 +338,53 @@ class SqliteStore:
             cell.retrieval_profile,
             _as_json_text(cell.retrieval_params_json),
             _as_text(cell.stale_reason),
+            cell.review_reason,
+        )
+
+    def _guard_against_downgrade(self, cell: Cell) -> None:
+        """Defense-in-depth: запрет тихой замены evaluated-ячейки высокого источника.
+
+        Guard срабатывает только когда **уже лежащая** ячейка ``evaluated`` и её
+        ``source_kind=registry``, а входящая ячейка — нижнего источника (§2.2 п.7) с
+        **иным** наличием-статусом и не является ``pending``/``reviewed``. Легитимный
+        конфликт всегда оформляется как ``pending`` (или ``reviewed``) и проходит.
+        Нарушение видно вызывающему: бросается :class:`ValueError` (не тихий no-op).
+        """
+        row = self.conn.execute(
+            "SELECT state, status, source_kind FROM cells"
+            " WHERE run_id = ? AND product_id = ? AND param_id = ?",
+            (cell.run_id, cell.product_id, cell.param_id),
+        ).fetchone()
+        if row is None or row["state"] != CellState.EVALUATED.value:
+            return
+        if row["source_kind"] != SourceKind.REGISTRY.value:
+            return
+        if cell.state in {CellState.PENDING, CellState.REVIEWED}:
+            return
+        if cell.source_kind not in _LOWER_THAN_REGISTRY:
+            return
+        existing_status = row["status"]
+        if existing_status is None:
+            return
+        existing = Status(existing_status)
+        if existing not in _PRESENCE_STATUSES:
+            return
+        incoming = cell.status.value if cell.status is not None else None
+        if incoming == existing_status:
+            return
+        raise ValueError(
+            "прецедент источника: evaluated-ячейку высокого источника нельзя заменить "
+            "ячейкой нижнего источника с иным наличием-статусом "
+            f"({existing.value!r} → {incoming!r}); конфликт оформляется как "
+            "pending/reviewed, а не тихой перезаписью"
         )
 
     def save_cell(self, cell: Cell) -> None:
         """Upsert ячейки по PK ``(run_id, product_id, param_id)``.
 
         Enum-поля сериализуются в ``.value``; ``status=None`` для failed/preliminary
-        сохраняется как NULL. Триггеры I4/I6/I7/I13 применяются БД.
+        сохраняется как NULL. Триггеры I4/I6/I7/I13 применяются БД. Перед записью
+        срабатывает guard против тихого понижения высокого источника (defense-in-depth).
 
         Примечание (T3.1): ``absence_rule``/``evidence``/``absence_evidence`` не имеют
         колонок в ``cells`` — evidence живёт в ``cell_evidence``, ``absence_rule`` —
@@ -334,6 +392,7 @@ class SqliteStore:
         """
         placeholders = ", ".join("?" for _ in _CELL_COLUMNS)
         with self.conn:
+            self._guard_against_downgrade(cell)
             self.conn.execute(
                 f"INSERT OR REPLACE INTO cells ({', '.join(_CELL_COLUMNS)})"
                 f" VALUES ({placeholders})",
@@ -341,7 +400,10 @@ class SqliteStore:
             )
 
     def save_cells_batch(self, cells: list[Cell], chunk_size: int = DEFAULT_BATCH_SIZE) -> None:
-        """Пишет ячейки пачками: одна транзакция на ``chunk_size`` (по умолчанию 200)."""
+        """Пишет ячейки пачками: одна транзакция на ``chunk_size`` (по умолчанию 200).
+
+        Каждая ячейка проходит тот же guard, что и :meth:`save_cell`.
+        """
         if chunk_size <= 0:
             raise ValueError("chunk_size обязан быть > 0")
         placeholders = ", ".join("?" for _ in _CELL_COLUMNS)
@@ -352,6 +414,8 @@ class SqliteStore:
         for start in range(0, len(cells), chunk_size):
             part = cells[start : start + chunk_size]
             with self.conn:
+                for cell in part:
+                    self._guard_against_downgrade(cell)
                 self.conn.executemany(sql, [self._cell_row(c) for c in part])
 
     def iter_cells(self, run_id: str, state: str | None = None) -> Iterator[Cell]:
@@ -370,6 +434,18 @@ class SqliteStore:
         cursor = self.conn.execute(sql, params)
         for row in cursor:
             yield self._row_to_cell(row)
+
+    def iter_registry_cells(self, run_id: str) -> Iterator[Cell]:
+        """Итерирует ячейки реестрового источника прогона (документированная поверхность).
+
+        Нужна Ш6, чтобы наложить прецедент поверх реестровых ячеек (§2.2 п.7/п.8):
+        ``iter_cells`` не фильтрует по ``source_kind``, а evidence в доменной ячейке
+        отсутствует (живёт в ``cell_evidence``). Порядок детерминирован (как у
+        ``iter_cells``); фильтр — ``source_kind is registry``.
+        """
+        for cell in self.iter_cells(run_id):
+            if cell.source_kind is SourceKind.REGISTRY:
+                yield cell
 
     @staticmethod
     def _row_to_cell(row: sqlite3.Row) -> Cell:
@@ -397,6 +473,7 @@ class SqliteStore:
             retrieval_profile=row["retrieval_profile"],
             retrieval_params_json=row["retrieval_params_json"],
             stale_reason=StaleReason(stale_reason) if stale_reason is not None else None,
+            review_reason=row["review_reason"],
         )
 
     # -- evidence -------------------------------------------------------- #

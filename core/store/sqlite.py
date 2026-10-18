@@ -12,7 +12,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = "3.5.0"
+SCHEMA_VERSION = "3.6.0"
 
 DDL = """
 PRAGMA journal_mode = WAL;
@@ -159,6 +159,7 @@ CREATE TABLE IF NOT EXISTS cells (
     retrieval_profile TEXT,
     retrieval_params_json TEXT,
     stale_reason      TEXT,                             -- инвалидация при смене сборки/prompt
+    review_reason     TEXT,                             -- аннотация причины pending (не статус)
     primary_evidence_id TEXT,
     reviewed_by       TEXT,
     updated_at        TEXT,
@@ -366,7 +367,7 @@ def _ensure_columns(
 
 
 def connect(db_path: str | Path = ":memory:") -> sqlite3.Connection:
-    """Открывает БД и применяет схему (+ идемпотентные DDL-миграции v2.1–v3.5)."""
+    """Открывает БД и применяет схему (+ идемпотентные DDL-миграции v2.1–v3.6)."""
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
     conn.executescript(DDL)
@@ -389,6 +390,9 @@ def connect(db_path: str | Path = ":memory:") -> sqlite3.Connection:
     # ``execution_change`` (§13); additive, старые БД получают колонку (без неё ``hound diff``
     # не видел смену спецификации реестра).
     _ensure_columns(conn, "runs", {"registry_spec_digest": "TEXT"})
+    # DDL-миграция v3.6 (P6): аннотация причины pending-ячейки (конфликт источников vs
+    # условное наследование). Аддитивно и идемпотентно; это не статус и не перечисление.
+    _ensure_columns(conn, "cells", {"review_reason": "TEXT"})
     # DDL-миграция v2.2 (P2): content-addressed build-id witness — версия экстрактора у чанка
     # и версия экстрактора + отпечаток содержимого у продукт-партиции манифеста.
     _ensure_columns(conn, "corpus_chunks", {"extractor_version": "TEXT"})

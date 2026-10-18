@@ -536,6 +536,9 @@ class Cell(BaseModel):
     retrieval_profile: str | None = None
     retrieval_params_json: str | None = None
     stale_reason: StaleReason | None = None
+    # Свободнотекстовая аннотация причины ``pending`` (не статус, не перечисление):
+    # позволяет читателю отличить конфликт источников от условного наследования.
+    review_reason: str | None = None
 
     @model_validator(mode="after")
     def _enforce_invariants(self) -> Cell:

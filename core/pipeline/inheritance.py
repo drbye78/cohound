@@ -51,6 +51,12 @@ from core.domain import (
     check_inheritance,
     derived_evidence_id,
 )
+from core.pipeline.precedence import (
+    CONDITIONAL_REVIEW_REASON,
+    apply_precedence,
+    collect_protected_cells,
+    resolve_precedence,
+)
 from core.pipeline.runner import PhaseResult
 from core.util.hashing import content_hash
 
@@ -235,7 +241,26 @@ def _conditional_cell(
         state=CellState.PENDING,
         status=None,
         source_kind=SourceKind.INHERITANCE,
+        review_reason=CONDITIONAL_REVIEW_REASON,
     )
+
+
+def _apply_higher_source(
+    cell: Cell,
+    protected: Mapping[tuple[str, str], Cell],
+    product_id: str,
+    param_id: str,
+) -> Cell | None:
+    """Накладывает более высокий источник (реестр) на унаследованную ячейку (Fork D).
+
+    Возвращает унаследованную ячейку, ``pending``-кандидата (расхождение) либо ``None``
+    (согласие/inconclusive: высокий источник уже в store, писать нечего).
+    """
+    high = protected.get((product_id, param_id))
+    if high is None or high.source_kind is not SourceKind.REGISTRY:
+        return cell
+    result = resolve_precedence(high, cell)
+    return None if result.kept_high else result.cell
 
 
 def inheritance_wave(
@@ -262,6 +287,9 @@ def inheritance_wave(
     )
     passport_by_product = _passport_index(passports)
     baseline_by_key = _baseline_index(baselines)
+    # Ш3 уже отработал (PHASES: registry → inheritance): реестровые ячейки — высокий
+    # источник, который Ш4 не должен молча затирать (Fork D, §2.2 п.7).
+    protected = collect_protected_cells(store, run_id)
 
     cells: list[Cell] = []
     evidence_items: list[CellEvidence] = []
@@ -299,6 +327,10 @@ def inheritance_wave(
                 run_id, product_id, row.param_id, baseline, passport, errors
             )
             if cell is not None:
+                cell = _apply_higher_source(
+                    cell, protected, product_id, row.param_id
+                )
+            if cell is not None:
                 cells.append(cell)
             if evidence is not None:
                 evidence_items.append(evidence)
@@ -327,17 +359,3 @@ def _persist(
             store.save_cell(cell)
         except Exception as exc:  # noqa: BLE001
             errors.append(f"save_cell: {type(exc).__name__}: {exc}")
-
-
-def apply_precedence(inherited_cell: Cell, direct_cell: Cell) -> Cell:
-    """П>В (§2.2 п.8): прямое доказательство Ш6 старше наследования.
-
-    Если ``direct_cell`` несёт разрешённый статус, **отличающийся** от унаследованного,
-    возвращается кандидат на ревью: копия прямой ячейки с ``state=pending``. Прямой статус
-    **не** применяется автоматически и унаследованная ячейка не перезаписывается — решение
-    принимает человек на ревью (I6/I7-дисциплина). Совпадающий (или отсутствующий у прямого)
-    статус означает отсутствие противоречия: возвращается ``inherited_cell`` без изменений.
-    """
-    if direct_cell.status is None or direct_cell.status == inherited_cell.status:
-        return inherited_cell
-    return direct_cell.model_copy(update={"state": CellState.PENDING})

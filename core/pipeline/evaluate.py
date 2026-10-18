@@ -55,6 +55,11 @@ from core.domain import (
     Status,
 )
 from core.domain.anchors import SourceResolver
+from core.pipeline.precedence import (
+    PRECEDENCE_REVIEW_REASON,
+    collect_protected_cells,
+    resolve_precedence,
+)
 from core.pipeline.prompt import CompiledPrompt, compile_prompt, render_queries
 from core.pipeline.retrieve import (
     DEFAULT_RRF_K,
@@ -382,12 +387,35 @@ def _unresolved_cell(
 
 
 def _persist(
-    store: StorePort | None, cell: Cell, validation: ValidationResult | None
+    store: StorePort | None,
+    cell: Cell,
+    validation: ValidationResult | None,
+    *,
+    protected: Cell | None = None,
 ) -> None:
-    """Пишет ячейку и её evidence в store (идемпотентный upsert по PK/evidence_id, S8)."""
+    """Пишет ячейку и её evidence в store (идемпотентный upsert по PK/evidence_id, S8).
+
+    ``protected`` — ячейка более высокого источника (реестр/наследование), уже лежащая
+    в store. Ш6 работает **поверх** неё (§2.2 п.7/п.8): согласие/inconclusive оставляют
+    высокую ячейку без записи; расхождение сохраняется как ``pending``-кандидат ревью,
+    несущий провенанс высокого источника. Evidence обоих контуров пишется всегда —
+    строки ``cell_evidence`` детерминированы и переживают upsert ячейки.
+    """
     if store is None:
         return
-    store.save_cell(cell)
+    to_save: Cell | None = cell
+    if (
+        protected is not None
+        and protected.state
+        in {CellState.EVALUATED, CellState.PENDING, CellState.REVIEWED}
+        and protected.status is not None
+    ):
+        result = resolve_precedence(
+            protected, cell, reason=PRECEDENCE_REVIEW_REASON
+        )
+        to_save = None if result.kept_high else result.cell
+    if to_save is not None:
+        store.save_cell(to_save)
     if validation is not None and validation.resolved_evidence:
         store.add_evidence_batch(validation.resolved_evidence)
 
@@ -407,6 +435,7 @@ def evaluate_cell(
     store: StorePort | None = None,
     model_id: str | None = None,
     min_retrieval_score: float | None = None,
+    protected: Cell | None = None,
 ) -> EvaluationOutcome:
     """Оценивает одну ячейку Ш6 и возвращает :class:`EvaluationOutcome` (§5/§7.1).
 
@@ -422,6 +451,8 @@ def evaluate_cell(
     :param store: если задан — ячейка и её evidence персистятся (идемпотентно, S8).
     :param model_id: переопределение ``model_id`` (иначе берётся у оценщика, I21).
     :param min_retrieval_score: порог аномалии §10.4 (заметка, не сбой).
+    :param protected: ячейка более высокого источника для наложения (реестр/наследование,
+        §2.2 п.7/п.8); ``None`` — обычная запись Ш6.
 
     Повтор переиздаёт тот же запрос — для детерминированного оценщика это ограниченный
     no-op, полезный только для транзиентных ошибок адаптера; см. докстринг модуля.
@@ -505,6 +536,7 @@ def evaluate_cell(
                     prompt_hash=compiled.prompt_hash,
                     store=store,
                     raw=last_response.raw,
+                    protected=protected,
                 )
         cell = _evaluated_cell(
             out_status=out.status,
@@ -515,7 +547,7 @@ def evaluate_cell(
             run_id=run_id,
             provenance=provenance,
         )
-        _persist(store, cell, last_validation)
+        _persist(store, cell, last_validation, protected=protected)
         return EvaluationOutcome(
             cell=cell,
             prompt_hash=compiled.prompt_hash,
@@ -537,6 +569,7 @@ def evaluate_cell(
         prompt_hash=compiled.prompt_hash,
         store=store,
         raw=last_response.raw if last_response is not None else None,
+        protected=protected,
     )
 
 
@@ -553,6 +586,7 @@ def _unresolved_outcome(
     prompt_hash: str,
     store: StorePort | None,
     raw: str | None,
+    protected: Cell | None = None,
 ) -> EvaluationOutcome:
     """Собирает исход несостоявшейся валидации: ``failed`` (I4) либо preliminary (I13).
 
@@ -579,7 +613,7 @@ def _unresolved_outcome(
         run_id=run_id,
         provenance=provenance,
     )
-    _persist(store, cell, None)
+    _persist(store, cell, None, protected=protected)
     return EvaluationOutcome(
         cell=cell,
         prompt_hash=prompt_hash,
@@ -604,6 +638,7 @@ def evaluate_batch(
     retrievals_by_param: Mapping[
         str, RetrievalResult | Sequence[RetrievalResult]
     ] | None = None,
+    protected_by_param: Mapping[str, Cell] | None = None,
 ) -> tuple[list[EvaluationOutcome], list[str]]:
     """Прогоняет :func:`evaluate_cell` по параметрам с изоляцией сбоев (§A.1).
 
@@ -624,6 +659,7 @@ def evaluate_batch(
             retrievals=(retrievals_by_param or {}).get(param.param_id),
             max_retries=max_retries,
             store=store,
+            protected=(protected_by_param or {}).get(param.param_id),
         )
 
     return run_isolated(params, _one)
@@ -688,7 +724,17 @@ def evaluate_phase(
     cells: list[Cell] = []
     errors: list[str] = []
 
+    # Ш6 работает поверх более высоких источников (§2.2 п.7/п.8, 02 §D.3). Порядок фаз
+    # заморожен (registry → inheritance → corpus → evaluate), поэтому карта стабильна.
+    # Читаем один раз на главном потоке — не в воркерах ретривала/оценки.
+    protected_cells = collect_protected_cells(store, run_id)
+
     for product_id in plan.products:
+        protected_by_param = {
+            param_id: cell
+            for (owner_id, param_id), cell in protected_cells.items()
+            if owner_id == product_id
+        }
         chunks_by_param: dict[str, Sequence[ChunkLike]] = {}
         retrievals_by_param: dict[str, RetrievalResult] = {}
         for param in plan.params:
@@ -722,6 +768,7 @@ def evaluate_phase(
             strict=strict,
             store=store,
             retrievals_by_param=retrievals_by_param,
+            protected_by_param=protected_by_param,
         )
         cells.extend(outcome.cell for outcome in outcomes)
         errors.extend(batch_errors)
