@@ -27,6 +27,14 @@
 docling гонял RapidOCR. Теперь параметр удалён, а поведение (OCR включён при ``full``)
 описано честно.
 
+**OCR при ``full`` проверяется, а не предполагается.** docling выбирает OCR-движок
+лениво (``OcrAutoModel``), и при несовместимой установке ``rapidocr`` все кандидаты
+отвергаются: конвертер молча работает без OCR, а текст помечается ``full``. Поэтому
+``_build_converter`` для ``full`` строит auto-OCR для опций уровня и требует непустой
+``_engine``; иначе — :class:`OcrEngineUnavailableError` (фаза фиксирует
+``parser_failed``). Уровни ``layout``/``layout_tables``/``text`` OCR выключают явно и
+проверку не выполняют.
+
 Происхождение идеи graceful-degradation (ошибка вместо падения) и способа вызова
 ``DocumentConverter.export_to_markdown()``: проект gag5 (`documents/parse.py`, MIT,
 Copyright (c) 2024). Реализация написана заново (чистая, без доменных хвостов и мёртвых
@@ -39,6 +47,7 @@ Copyright (c) 2024). Реализация написана заново (чис�
 from __future__ import annotations
 
 import hashlib
+import logging
 import tempfile
 from pathlib import Path
 
@@ -85,6 +94,70 @@ SUPPORTED_FORMATS: dict[str, str] = {
     suffix: ("layout" if suffix == ".pdf" else "office") for suffix in DOCUMENT_SUFFIXES
 }
 
+_log = logging.getLogger(__name__)
+
+
+class OcrEngineUnavailableError(RuntimeError):
+    """``document_level=full`` требует рабочий OCR, но docling его не нашёл.
+
+    Поднимается из :meth:`DoclingDocumentExtractor._build_converter`: молчаливое
+    извлечение без OCR, помеченное как ``full``, — ложь о качестве текста. Ошибка
+    доходит до фазы как ``parser_failed`` (видимая запись ``errors``), а не превращается
+    в пустой/неполный текст.
+    """
+
+
+class _OcrProbeUnsupported(RuntimeError):
+    """Внутренний API docling не позволяет проверить OCR (переименование/новая версия).
+
+    Не ошибка OCR: вызывающий деградирует в warning, а не падает (version-tolerant).
+    """
+
+
+def _probe_ocr_engine(pdf_options: object) -> object | None:
+    """Строит auto-OCR для PDF-опций уровня и возвращает выбранный движок.
+
+    ``None`` — docling отверг всех кандидатов (``OcrAutoModel._engine is None``): OCR
+    фактически недоступен. Проверяется именно тот выбор, который сделает пайплайн
+    (``OcrAutoModel``), но **без** инициализации тяжёлых layout/table-моделей: для
+    офисного документа цена проверки не должна быть ценой PDF-конвейера.
+
+    Если docling переименует внутренности (``OcrAutoModel``/``_engine``), поднимается
+    :class:`_OcrProbeUnsupported` — это деградация проверки, не отказ извлечения.
+    """
+    try:
+        from docling.models.stages.ocr.auto_ocr_model import (  # type: ignore[import-not-found]
+            OcrAutoModel,
+        )
+    except ImportError as exc:  # pragma: no cover - зависит от версии docling
+        raise _OcrProbeUnsupported(f"нет OcrAutoModel: {exc}") from exc
+
+    ocr_options = getattr(pdf_options, "ocr_options", None)
+    accelerator_options = getattr(pdf_options, "accelerator_options", None)
+    if ocr_options is None or accelerator_options is None:
+        raise _OcrProbeUnsupported("у PDF-опций нет ocr_options/accelerator_options")
+
+    artifacts_path = getattr(pdf_options, "artifacts_path", None)
+    if artifacts_path is None:
+        # Как в BasePipeline: неявный путь артефактов — из настроек docling.
+        try:
+            from docling.datamodel.settings import settings  # type: ignore[import-not-found]
+        except ImportError:  # pragma: no cover - зависит от версии docling
+            settings = None
+        artifacts_path = getattr(settings, "artifacts_path", None)
+
+    try:
+        auto = OcrAutoModel(
+            enabled=True,
+            artifacts_path=artifacts_path,
+            options=ocr_options,
+            accelerator_options=accelerator_options,
+        )
+    except (TypeError, AttributeError) as exc:  # pragma: no cover - смена API docling
+        raise _OcrProbeUnsupported(f"OcrAutoModel несовместим: {exc}") from exc
+    return getattr(auto, "_engine", auto)
+
+
 #: §6 (P5): щедрый per-level ``document_timeout`` (секунды). ``full`` — ``None``
 #: (без таймаута = сегодняшнее поведение; иначе можно было бы потерять документ, который
 #: сегодня успешно извлекается). ``text``/``layout`` короче, ``layout_tables`` длиннее.
@@ -123,6 +196,8 @@ class DoclingDocumentExtractor:
         # §6: явный таймаут оператора приоритетен; иначе — щедрый per-level дефолт.
         self._document_timeout = document_timeout
         self._converter = None
+        #: OCR проверен (``full``): повторные PDF не пере-строят auto-OCR.
+        self._ocr_checked = False
 
     @property
     def level(self) -> DocumentLevel:
@@ -168,27 +243,67 @@ class DoclingDocumentExtractor:
         # ``full`` — байт-в-байт дефолты docling (OCR включён, таблицы ACCURATE).
         return PdfPipelineOptions(document_timeout=timeout)
 
-    def _build_converter(self):  # noqa: ANN202 - тип docling необязателен
-        """Собирает ``DocumentConverter`` с per-level PDF-опциями (Office — дефолт docling)."""
+    def _build_converter(self, *, pdf: bool = True):  # noqa: ANN202 - тип docling необязателен
+        """Собирает ``DocumentConverter`` с per-level PDF-опциями (Office — дефолт docling).
+
+        ``pdf=False`` — конвертер строится для офисного документа: OCR (и его проверка)
+        не нужны, а в окружении ``extract`` (Office без torch/OCR) их может не быть.
+        Для PDF при ``full`` здесь же **проверяется** рабочий OCR-движок: уровень обещает
+        OCR, поэтому его отсутствие — явная ошибка (:class:`OcrEngineUnavailableError`),
+        а не тихое извлечение без OCR. Уровни ``layout``/``layout_tables``/``text`` OCR
+        выключают осознанно — проверка для них не выполняется.
+        """
         if self._level is DocumentLevel.OFF:
             return DocumentConverter()
+        pdf_options = self._pdf_options()
         if self._level is DocumentLevel.TEXT:
             format_options = {
-                InputFormat.PDF: NativePdfFormatOption(
-                    pipeline_options=self._pdf_options()
-                )
+                InputFormat.PDF: NativePdfFormatOption(pipeline_options=pdf_options)
             }
         else:
             format_options = {
-                InputFormat.PDF: PdfFormatOption(pipeline_options=self._pdf_options())
+                InputFormat.PDF: PdfFormatOption(pipeline_options=pdf_options)
             }
-        return DocumentConverter(format_options=format_options)
+        converter = DocumentConverter(format_options=format_options)
+        if self._level is DocumentLevel.FULL and pdf:
+            self._require_working_ocr(pdf_options)
+        return converter
+
+    def _require_working_ocr(self, pdf_options: object) -> None:
+        """``full`` обязан иметь рабочий OCR; иначе — отказ, а не текст «как full»."""
+        if self._ocr_checked:
+            return
+        try:
+            engine = _probe_ocr_engine(pdf_options)
+        except _OcrProbeUnsupported as exc:
+            # docling переименовал внутренности: проверка невозможна. Это не повод
+            # ломать извлечение — фиксируем предупреждением (version-tolerant).
+            _log.warning(
+                "document_level=full: не удалось проверить OCR-движок docling (%s) — "
+                "проверка пропущена",
+                exc,
+            )
+            self._ocr_checked = True
+            return
+        if engine is None:
+            raise OcrEngineUnavailableError(
+                "document_level=full требует OCR, но docling не нашёл ни одного "
+                "OCR-движка: установленный rapidocr/onnxruntime несовместим "
+                "(docling 2.135 импортирует PP_OCRV6_LANGS, удалённый в rapidocr "
+                "3.10.0; нужен rapidocr>=3.9.1,<3.10). Извлечение остановлено, чтобы "
+                "не выдать текст без OCR за уровень full."
+            )
+        self._ocr_checked = True
 
     def extract_bytes(self, content: bytes, filename: str = "document.pdf") -> ExtractedDoc:
         """Извлекает markdown из байтов документа (retention-единица — байты, §3.2).
 
         ``filename`` определяет формат (расширение). Неподдерживаемое расширение →
         ``ExtractedDoc`` с ``error`` (без исключения).
+
+        Исключение: ``full`` без рабочего OCR-движка — :class:`OcrEngineUnavailableError`
+        (ошибка конфигурации, а не грациозная деградация). Фаза переводит её в
+        ``parser_failed``; текст без OCR никогда не помечается уровнем ``full``.
         """
         suffix = Path(filename).suffix.lower() or ".pdf"
         if suffix not in SUPPORTED_FORMATS:
@@ -200,7 +315,12 @@ class DoclingDocumentExtractor:
         if not self.available:
             return self._error("docling не установлен")
 
-        converter = self._converter or self._build_converter()
+        # ``full`` обещает OCR именно для PDF; офисный документ OCR не использует, поэтому
+        # проверка выполняется только на PDF-пути (окружение ``extract`` без OCR остаётся
+        # рабочим). Ошибка — до конвертации: никакой текст без OCR не помечается ``full``.
+        if suffix == ".pdf" and self._level is DocumentLevel.FULL:
+            self._require_working_ocr(self._pdf_options())
+        converter = self._converter or self._build_converter(pdf=suffix == ".pdf")
         self._converter = converter
         tmp_path: str | None = None
         try:

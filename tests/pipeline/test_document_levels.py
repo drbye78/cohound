@@ -863,3 +863,76 @@ def test_docling_level_determinism_across_processes() -> None:
     ) as pool:
         results = list(pool.map(_docling_child_hash, [str(pdf), str(pdf)]))
     assert results[0] == results[1] == inline.content_hash
+
+
+# --------------------------------------------------------------------------- #
+# (15) OCR при full: движок реально есть, а скан даёт OCR-текст
+# --------------------------------------------------------------------------- #
+
+
+def _ocr_deps_available() -> bool:
+    """Есть ли OCR-зависимости docling (``rapidocr`` + ``onnxruntime``)."""
+    try:
+        import onnxruntime  # noqa: F401
+        import rapidocr  # noqa: F401
+    except Exception:  # noqa: BLE001 — зависимость недоступна
+        return False
+    return True
+
+
+def _scanned_pdf_bytes(text: str = "SCANNED OCR 12345") -> bytes:
+    """PDF с одной растровой страницей (без текстового слоя) — скан-стиль."""
+    from io import BytesIO
+
+    from PIL import Image, ImageDraw, ImageFont
+
+    font_path = Path("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf")
+    if not font_path.is_file():  # pragma: no cover — зависит от окружения
+        pytest.skip("нет TTF-шрифта для генерации скан-PDF")
+    image = Image.new("RGB", (1600, 500), "white")
+    ImageDraw.Draw(image).text(
+        (60, 160),
+        text,
+        fill="black",
+        font=ImageFont.truetype(str(font_path), 96),
+    )
+    buffer = BytesIO()
+    image.save(buffer, format="PDF", resolution=200.0)
+    return buffer.getvalue()
+
+
+@pytest.mark.slow
+def test_docling_full_has_working_ocr_engine() -> None:
+    """``full`` обязан иметь реальный OCR-движок, а не тихо извлекать без OCR.
+
+    Мутационный якорь к пину ``rapidocr>=3.9.1,<3.10``: docling 2.135 импортирует
+    ``PP_OCRV6_LANGS``, которого нет в 3.10.0 — тогда auto-OCR отвергает все кандидаты
+    и ``_engine`` остаётся ``None`` (извлечение «full» без OCR). Скан-стиль PDF
+    (только растр) доказывает, что текст получен именно OCR.
+    """
+    import os
+
+    if os.environ.get("COHOUND_RUN_DOCLING_LEVELS") != "1":
+        pytest.skip("тяжёлый offline-тест: нужен COHOUND_RUN_DOCLING_LEVELS=1")
+    if not _docling_available():
+        pytest.skip("docling/веса недоступны (offline)")
+    if not _ocr_deps_available():
+        pytest.skip("OCR-зависимости (rapidocr/onnxruntime) недоступны")
+
+    from docling.models.base_ocr_model import BaseOcrModel
+
+    from core.adapters.extract_document import (
+        DoclingDocumentExtractor,
+        _probe_ocr_engine,
+    )
+
+    extractor = DoclingDocumentExtractor(DocumentLevel.FULL)
+    engine = _probe_ocr_engine(extractor._pdf_options())
+    assert engine is not None, "document_level=full: docling не выбрал OCR-движок"
+    assert isinstance(engine, BaseOcrModel), type(engine).__name__
+
+    doc = extractor.extract_bytes(_scanned_pdf_bytes(), "scan.pdf")
+    assert doc.error is None, doc.error
+    assert doc.extractor_version == "docling-doc-3:full"
+    assert "SCANNED" in doc.text.upper(), doc.text
+    assert "12345" in doc.text, doc.text

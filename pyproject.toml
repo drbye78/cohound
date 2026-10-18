@@ -58,6 +58,13 @@ extract = [
 # Отдельное окружение; для PDF-контура обязателен (блокер M0, §3.2/§16).
 extract-pdf = [
     "docling-slim[standard]>=2.135,<3",
+    # OCR-движок docling 2.135 (RapidOcrModel) импортирует PP_OCRV6_LANGS из
+    # rapidocr.utils.model_resolver, а rapidocr 3.10.0 этот символ удалил. Метаданные
+    # docling объявляют лишь `rapidocr<4.0.0,>=3.9.1`, поэтому 3.10.0 проходит резолв,
+    # но ломает импорт: «No OCR engine found» → при document_level=full OCR молча
+    # выключается. Прямой пин держит рабочую ветку 3.9.x; диапазон перепроверить при
+    # обновлении docling (возможно, 3.10+ станет совместим).
+    "rapidocr>=3.9.1,<3.10",
     # CPU-ядра PyTorch — прямые зависимости, чтобы применился [tool.uv.sources] ниже
     # (sources действуют только для прямых зависимостей проекта). Иначе docling тянет
     # CUDA-колесо torchvision с pypi.org, несовместимое с CPU-torch (ABI: «operator

@@ -2167,6 +2167,11 @@ def build_corpus(
             # загрузки весов); иной уровень строится фабрикой, если она передана.
             level = limits.document_level
             root_extractor: ExtractorPort = extractor
+            # ``full`` сюда не попадает: переданный экстрактор и есть уровень ``full``,
+            # поэтому «понижение до переданного» для него невозможно. Отказ OCR на
+            # ``full`` приходит из адаптера на построении конвертера и становится
+            # ``parser_failed`` (видимая запись ``errors`` через ``_finish_one``/
+            # ``_finish_pending``), а не тихой подменой уровня.
             if level is not DocumentLevel.FULL and extractor_factory is not None:
                 try:
                     root_extractor = extractor_factory(level)
