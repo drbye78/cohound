@@ -23,3 +23,20 @@ crawl:
   # Операционные (execution) дефолты краула; не методология (§13).
   strategy: honest          # для browser-доменов; HTTP-домены нормализуются в auto
   rate_limit: {min_s: 1.0, max_s: 3.0}   # politeness-пейсинг (corpus), per-host
+  # Потолок глубины (сегментов пути) от seed-root. Глубина — не ограничитель полноты:
+  # где есть sitemap, хватает 2–3 (sitemap сам даёт depth-0 seeds), 8 — где его нет.
+  max_depth: 8
+  # Потолок документов на (продукт, seed-root) — реальный ограничитель объёма.
+  max_documents: 300
+  # Сетевой пул воркеров; browser-фетч всё равно inline (не параллелится).
+  max_workers: 2
+  # Пул экстракции: ~2 GiB/воркер при document_level=full ⇒ ~4 GiB пик (машина 6 GiB).
+  extract_workers: 2
+  # Уровень извлечения документных форматов (off|text|layout|layout_tables|full).
+  document_level: full
+  # Маркетинговый шум вне технического корпуса (glob по пути URL).
+  exclude_paths: ['/blog/*', '/news/*', '/events/*', '/cases/*', '/mediacenter/*']
+  # Недокументные/архивные расширения — не ингестятся (glob по basename URL).
+  exclude_documents: ['*.zip', '*.rar', '*.7z', '*.gz', '*.tar', '*.exe', '*.msi', '*.dmg',
+                      '*.iso', '*.mp4', '*.avi', '*.css', '*.js', '*.png', '*.jpg', '*.jpeg',
+                      '*.gif', '*.svg', '*.webp', '*.ico', '*.woff', '*.woff2', '*.ttf']

@@ -824,14 +824,21 @@ def build_domain_profiles() -> dict[str, dict[str, object]]:
 
     Оси :class:`~core.config.domain_profiles.DomainProfile` (``extra="forbid"``):
     ``fetch`` (``http``|``browser``), ``extract`` (``auto``|``html``|``document``),
-    ``strategy`` (``auto``|``honest``|``hybrid``), ``wait_for`` (JS-условие готовности).
-    Ключ — ``host`` с опциональным ``/path`` (приоритет резолвит pipeline).
+    ``strategy`` (``auto``|``honest``|``hybrid``), ``wait_for`` (JS-условие готовности),
+    плюс бюджетные оси контроля краула ``max_depth``/``max_documents`` и per-site
+    ``sitemap`` (D3). Ключ — ``host`` с опциональным ``/path`` (приоритет резолвит pipeline).
 
     Значения согласованы с живыми замерами (2026-10): ``*.sbertech.ru`` отдают 401
     обычному HTTP (антибот) → ``browser``; ``pangolin.sbertech.ru`` дополнительно требует
     ``wait_for`` (JS-challenge завершается и перезагружает страницу после
     ``domcontentloaded``); ``tantorlabs.ru/products/dbms`` — 403 обычному HTTP → ``browser``;
     остальные домены отдают 200 обычному HTTP.
+
+    **Ловушка матчинга sitemap (P7).** ``_sitemap_url_for(seed)`` берёт **самый
+    специфичный** профиль (``sbertech.ru/documents`` приоритетнее ``sbertech.ru``), поэтому
+    host-wide ``https://sbertech.ru/sitemap.xml`` объявлен только на path-ключе
+    ``sbertech.ru/documents``: на host-ключе он при seed-корне ``https://sbertech.ru/``
+    затянул бы в партицию все 89 продуктов (нарушение I17). Host-ключ намеренно без sitemap.
 
     Набор ключей совпадает с эталонным ``packages/ru-pg-dbms/domain_profiles.yaml``
     (повторный прогон генератора идемпотентен и не затирает домены).
@@ -840,25 +847,87 @@ def build_domain_profiles() -> dict[str, dict[str, object]]:
     модели, чтобы дрейф схемы (старые ``render``/``index``) не вернулся.
     """
     return {
-        "docs.tantorlabs.ru": {"fetch": "http", "extract": "auto"},
-        "jatoba.ru": {"fetch": "http", "extract": "auto"},
+        "docs.tantorlabs.ru": {
+            "fetch": "http",
+            "extract": "auto",
+            "max_depth": 8,
+            "max_documents": 300,
+        },
+        "gaz-is.ru": {
+            "fetch": "http",
+            "extract": "auto",
+            "max_depth": 8,
+            "max_documents": 200,
+        },
+        "jatoba.ru": {
+            "fetch": "http",
+            "extract": "auto",
+            "max_depth": 2,
+            "max_documents": 50,
+            "sitemap": "https://jatoba.ru/sitemap.xml",
+        },
         "pangolin.sbertech.ru": {
             "fetch": "browser",
             "extract": "auto",
             "strategy": "honest",
             "wait_for": "() => document.body && document.body.innerText.length > 200",
+            "max_depth": 2,
+            "max_documents": 60,
+            "sitemap": "https://pangolin.sbertech.ru/sitemap.xml",
         },
-        "platformv.sbertech.ru": {"fetch": "browser", "extract": "auto", "strategy": "honest"},
-        "postgrespro.ru": {"fetch": "http", "extract": "auto"},
-        "sbertech.ru": {"fetch": "browser", "extract": "auto", "strategy": "honest"},
+        "platformv.sbertech.ru": {
+            "fetch": "browser",
+            "extract": "auto",
+            "strategy": "honest",
+            "max_depth": 8,
+            "max_documents": 300,
+            "sitemap": "https://platformv.sbertech.ru/sitemap.xml",
+        },
+        "postgrespro.ru": {
+            "fetch": "http",
+            "extract": "auto",
+            "max_depth": 8,
+            "max_documents": 500,
+        },
+        # Sitemap намеренно НЕ на host-ключе (см. ловушку матчинга в докстринге):
+        # host-wide <loc> затянул бы другие продукты в партицию якоря (I17).
+        "sbertech.ru": {
+            "fetch": "browser",
+            "extract": "auto",
+            "strategy": "honest",
+            "max_depth": 2,
+            "max_documents": 400,
+        },
         "sbertech.ru/documents": {
             "fetch": "browser",
             "extract": "auto",
             "strategy": "honest",
+            "max_depth": 2,
+            "max_documents": 400,
+            "sitemap": "https://sbertech.ru/sitemap.xml",
         },
-        "tantorlabs.ru": {"fetch": "browser", "extract": "auto", "strategy": "honest"},
-        "tantorlabs.ru/products/dbms": {"fetch": "browser", "extract": "auto", "strategy": "honest"},
-        "wiki.astralinux.ru": {"fetch": "http", "extract": "auto"},
+        "tantorlabs.ru": {
+            "fetch": "browser",
+            "extract": "auto",
+            "strategy": "honest",
+            "max_depth": 3,
+            "max_documents": 200,
+            "sitemap": "https://tantorlabs.ru/sitemap.xml",
+        },
+        "tantorlabs.ru/products/dbms": {
+            "fetch": "browser",
+            "extract": "auto",
+            "strategy": "honest",
+            "max_depth": 8,
+            "max_documents": 200,
+            "sitemap": "https://tantorlabs.ru/sitemap.xml",
+        },
+        "wiki.astralinux.ru": {
+            "fetch": "http",
+            "extract": "auto",
+            "max_depth": 8,
+            "max_documents": 300,
+        },
     }
 
 
@@ -1135,6 +1204,30 @@ def main() -> int:
         "snapshot_date": SNAPSHOT_DATE,
         "mode": "strict",
         "ranking_policy": "capability_ranked",
+        # Операционные (execution) дефолты краула — не методология (§13). Генератор
+        # обязан эмитить тот же блок, что лежит в ``run.yaml`` (иначе повторная
+        # генерация молча обнулит бюджеты обхода — дрейф, P7).
+        "crawl": {
+            "strategy": "honest",
+            "rate_limit": {"min_s": 1.0, "max_s": 3.0},
+            "max_depth": 8,
+            "max_documents": 300,
+            "max_workers": 2,
+            "extract_workers": 2,
+            "document_level": "full",
+            "exclude_paths": [
+                "/blog/*",
+                "/news/*",
+                "/events/*",
+                "/cases/*",
+                "/mediacenter/*",
+            ],
+            "exclude_documents": [
+                "*.zip", "*.rar", "*.7z", "*.gz", "*.tar", "*.exe", "*.msi", "*.dmg",
+                "*.iso", "*.mp4", "*.avi", "*.css", "*.js", "*.png", "*.jpg", "*.jpeg",
+                "*.gif", "*.svg", "*.webp", "*.ico", "*.woff", "*.woff2", "*.ttf",
+            ],
+        },
     }
     write_text("run.yaml", yaml_dump(run_yaml))
 

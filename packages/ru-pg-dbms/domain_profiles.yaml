@@ -1,7 +1,8 @@
 # Профили доменов кейса ru-pg-dbms (03 §D.2).
 #
 # Оси: fetch (http|browser), extract (auto|html|document), strategy (auto|honest|hybrid),
-# wait_for (JS-условие готовности), rate_limit (uniform(min_s, max_s)).
+# wait_for (JS-условие готовности), rate_limit (uniform(min_s, max_s)) и бюджетные оси
+# контроля краула max_depth / max_documents + per-site sitemap (D3).
 # Сопоставление host[+path] и приоритет — pipeline (resolve_fetch_plan), не адаптеры.
 #
 # Обоснование (живые замеры, 2026-10):
@@ -10,40 +11,92 @@
 #    перезагружает страницу ПОСЛЕ domcontentloaded, поэтому снапшот без ожидания — заглушка.
 #  - tantorlabs.ru/products/dbms/ — 403 обычному HTTP → browser.
 #  - остальные отдают 200 обычному HTTP — браузер не требуется.
+#
+# Бюджеты (P7, execution_change §13, не методология): глубина — потолок, но НЕ ограничитель
+# полноты; где sitemap есть, хватает 2–3 уровней (sitemap сам даёт depth-0 seeds), 8 — там,
+# где sitemap отсутствует (404/500 у хоста) и глубина измеряется только эмпирически.
+# Реальный ограничитель объёма — max_documents на (продукт, seed-root).
 docs.tantorlabs.ru:
-  fetch: http
+  # sitemap 404 → глубина как единственный ориентир.
   extract: auto
+  fetch: http
+  max_depth: 8
+  max_documents: 300
+gaz-is.ru:
+  # Новый ключ: www.gaz-is.ru раньше не матчился ни одним профилем и молча падал в
+  # app-дефолты. robots хоста запрещает *.pdf$ — PDF в корпус не попадут (§10).
+  extract: auto
+  fetch: http
+  max_depth: 8
+  max_documents: 200
 jatoba.ru:
+  # 2 URL, из них 1 PDF — бюджет заведомо покрывает сайт.
+  extract: auto
   fetch: http
-  extract: auto
+  max_depth: 2
+  max_documents: 50
+  sitemap: https://jatoba.ru/sitemap.xml
 pangolin.sbertech.ru:
-  fetch: browser
   extract: auto
+  fetch: browser
+  max_depth: 2
+  max_documents: 60
+  # 23 URL, плоско — depth 1 + один хоп на документ.
+  sitemap: https://pangolin.sbertech.ru/sitemap.xml
   strategy: honest
-  wait_for: "() => document.body && document.body.innerText.length > 200"
+  wait_for: () => document.body && document.body.innerText.length > 200
 platformv.sbertech.ru:
-  fetch: browser
+  # seed — глубокий путь, поэтому 8; <loc> вне scope корня отсекаются (дефект-B-фикс).
   extract: auto
+  fetch: browser
+  max_depth: 8
+  max_documents: 300
+  sitemap: https://platformv.sbertech.ru/sitemap.xml
   strategy: honest
 postgrespro.ru:
+  # Портал /docs без sitemap (advertised → 404): бюджет и есть ограничитель.
+  extract: auto
   fetch: http
-  extract: auto
+  max_depth: 8
+  max_documents: 500
 sbertech.ru:
-  fetch: browser
+  # Sitemap НАМЕРЕННО отсутствует на host-ключе. _sitemap_url_for(seed) резолвит самый
+  # специфичный профиль, но для seed-корня https://sbertech.ru/ матчится именно этот ключ:
+  # host-wide https://sbertech.ru/sitemap.xml затянул бы в партицию якоря все 89 продуктов
+  # (нарушение I17). Sitemap объявлен ниже — на path-ключе sbertech.ru/documents.
   extract: auto
+  fetch: browser
+  max_depth: 2
+  max_documents: 400
   strategy: honest
 sbertech.ru/documents:
-  fetch: browser
+  # Path-scope: 502 документа из 748 URL sitemap лежат в /documents/{slug}/{version},
+  # остальные <loc> отсекаются фильтром scope (дефект B).
   extract: auto
+  fetch: browser
+  max_depth: 2
+  max_documents: 400
+  sitemap: https://sbertech.ru/sitemap.xml
   strategy: honest
 tantorlabs.ru:
-  fetch: browser
+  # 283 URL, 3 уровня on-host; sitemap — индекс фидов, off-host habr не берём.
   extract: auto
+  fetch: browser
+  max_depth: 3
+  max_documents: 200
+  sitemap: https://tantorlabs.ru/sitemap.xml
   strategy: honest
 tantorlabs.ru/products/dbms:
-  fetch: browser
+  # Seed — глубокий путь внутри sitemap-хоста ⇒ нужен запас глубины.
   extract: auto
+  fetch: browser
+  max_depth: 8
+  max_documents: 200
+  sitemap: https://tantorlabs.ru/sitemap.xml
   strategy: honest
 wiki.astralinux.ru:
-  fetch: http
+  # Confluence, sitemap 404 → глубина как единственный ориентир.
   extract: auto
+  fetch: http
+  max_depth: 8
+  max_documents: 300
