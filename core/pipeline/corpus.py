@@ -27,8 +27,11 @@ retention пишется **до** экстракции; каждый индек�
 (``kind="sitemap"``; local in-process ‖ split через шов ``crawl/poll``) ровно на один уровень:
 ``<loc>`` становятся **дополнительными depth-0 seeds** того же seed-root, что и seed
 оператора (``sitemapindex`` разворачивается один уровень; глубже — отказ). Сам sitemap — не
-страница: не ретейнится/не ингестится (I19). ``<loc>`` проходят ``validate_url`` (SSRF) и
-далее тот же блэклист/``max_documents``/``max_depth``, что и прочие seeds.
+страница: не ретейнится/не ингестится (I19). ``<loc>`` — **подчинённые** seeds: проходят
+``validate_url`` (SSRF) и scope корня (``Frontier.in_scope``: host + path-граница +
+traversal-guard), затем тот же блэклист/``max_documents``/``max_depth``, что и прочие seeds.
+Вне scope корня loc не ставится и попадает в ``errors`` (I17: host-wide sitemap при
+path-scoped seed не заливает чужие продукты).
 
 **Иммутабельность.** ``index_build_id`` — **контент-адресуемый** отпечаток батча сборки:
 ``short_hash`` от (``_BUILD_ID_SCHEMA`` + пакет/params + ``snapshot_date`` + ``chunker_version``
@@ -1741,19 +1744,43 @@ def build_corpus(
         sitemap_cache[key] = locs
         return list(locs)
 
-    def _fresh_sitemap_seeds(pid: str, seed_url: str) -> tuple[str, ...]:
+    def _fresh_sitemap_seeds(
+        pid: str, seed_url: str, frontier: Frontier
+    ) -> tuple[str, ...]:
         """``<loc>`` sitemap, ещё не прикреплённые ни к одному seed-root продукта (дедуп).
 
         Один и тот же sitemap у нескольких seed-URL даёт один набор ``<loc>``; прикреплять
         их к каждому корню — двойной фетч/бюджет, поэтому свежие seeds отдаются один раз.
+
+        ``<loc>`` — **подчинённые** seeds корня, а не задающие scope: loc проходит тот же
+        ``frontier.in_scope`` (host + path-граница + traversal-guard), что и обнаруженная
+        ссылка. Scope-чек исполняется **до** пометки ``(pid, loc)`` использованным, поэтому
+        loc, отвергнутый этим корнем, остаётся доступным другому корню продукта; отказ
+        виден в ``errors`` (не тихий дроп). Кэш опроса sitemap (``(pid, sitemap_url)``)
+        остаётся нефильтрованным.
         """
         fresh: list[str] = []
+        rejected: list[str] = []
         for loc in _expand_sitemap(pid, seed_url):
+            if not frontier.in_scope(loc):
+                rejected.append(loc)
+                continue
             key = (pid, loc)
             if key in sitemap_seed_used:
                 continue
             sitemap_seed_used.add(key)
             fresh.append(loc)
+        # Отказ виден, но **одной** записью на корень: host-wide sitemap при узком seed
+        # отвергает сотни <loc> (напр. 748-URL sitemap при path-scoped seed) — построчные
+        # записи затопили бы ``errors`` и отчёт. Примеры — первые три.
+        if rejected:
+            preview = ", ".join(rejected[:3])
+            if len(rejected) > 3:
+                preview += f" и ещё {len(rejected) - 3}"
+            errors.append(
+                f"{pid}/{seed_url}: sitemap: {len(rejected)} <loc> вне scope корня "
+                f"{frontier.root_url} — не enqueued (например: {preview})"
+            )
         return tuple(fresh)
 
     def _local_prefetch(
@@ -2032,13 +2059,15 @@ def build_corpus(
             pid: str,
             root_url: str,
             root_target: Any,
-            extra_seeds: Sequence[str] = (),
+            *,
+            sitemap_seeds: bool = False,
         ) -> Frontier:
             """D1/D3: BFS-drain одного seed-root (scope/блэклист/лимиты/глубина).
 
-            Seeds — глубина 0; ссылка со страницы глубины ``d`` → ``d+1``. ``extra_seeds`` —
-            дополнительные depth-0 seeds этого корня (D3: ``<loc>`` sitemap); их
-            проверяет тот же блэклист/бюджет ``max_documents``, что и seed оператора.
+            Seeds — глубина 0; ссылка со страницы глубины ``d`` → ``d+1``. ``sitemap_seeds``
+            — развернуть per-site sitemap корня в дополнительные depth-0 seeds (D3); они
+            **подчинены** scope корня (``frontier.in_scope``), проходят тот же блэклист/
+            бюджет ``max_documents``, что и seed оператора.
             Ставка в очередь гейтится scope (host+path-граница) и блэклистом; ``max_documents``
             — жёсткий стоп (не исключение): останавливает постановку/обход этого корня.
             Возвращает frontier с провенансом усечения (``fetched``/``truncated``/
@@ -2051,6 +2080,12 @@ def build_corpus(
                 profiles=domain_profiles or {},
             )
             frontier = Frontier(root_url, limits)
+            # D3/дефект B (I17): ``<loc>`` sitemap — кандидаты **этого** корня; scope-фильтр
+            # применяется до дедупа ``(pid, loc)``. Без sitemap ``_expand_sitemap`` отдаёт
+            # ``[]`` без обращения к поллеру — путь не исполняется (поведение байт-в-байт).
+            extra_seeds = (
+                _fresh_sitemap_seeds(pid, root_url, frontier) if sitemap_seeds else ()
+            )
             # P5: уровень извлечения документов — свойство корня (per seed-root; один конвертер
             # на пул). ``full`` переиспользует переданный экстрактор (дефолт — без лишней
             # загрузки весов); иной уровень строится фабрикой, если она передана.
@@ -2151,8 +2186,15 @@ def build_corpus(
                 return frontier
 
             # D3: дополнительные depth-0 seeds (``<loc>`` sitemap) — под тем же блэклистом и
-            # бюджетом, что и seed оператора (``add_seed`` возвращает статус).
+            # бюджетом, что и seed оператора (``add_seed`` возвращает статус). Defence-in-depth:
+            # scope-чек и на постановке (``_fresh_sitemap_seeds`` уже отфильтровал по scope).
             for extra in extra_seeds:
+                if not frontier.in_scope(extra):
+                    errors.append(
+                        f"{pid}/{extra}: sitemap <loc> вне scope корня {root_url} — "
+                        "не enqueued"
+                    )
+                    continue
                 extra_status = frontier.add_seed(extra)
                 if extra_status == "blacklisted":
                     errors.append(
@@ -2878,12 +2920,11 @@ def build_corpus(
             # без ре-расширения). Обычный URL — единственный корень.
             entry_urls = _expand_directory(product_id, url, target)
             if entry_urls is None:
-                # D3: seed оператора + ``<loc>`` его per-site sitemap как дополнительные
-                # depth-0 seeds этого же корня (аугментация, не замена). Без sitemap —
-                # пусто (поведение неизменно).
-                roots: list[tuple[str, Any, tuple[str, ...]]] = [
-                    (url, target, _fresh_sitemap_seeds(product_id, url))
-                ]
+                # D3: seed оператора; его per-site sitemap разворачивается в **подчинённые**
+                # depth-0 seeds того же корня уже внутри ``_drain_root`` — там есть frontier,
+                # чей scope фильтрует ``<loc>`` (дефект B/I17). Без sitemap — путь не
+                # исполняется (поведение неизменно).
+                roots: list[tuple[str, Any, bool]] = [(url, target, True)]
             else:
                 roots = []
                 for entry_url in entry_urls:
@@ -2905,13 +2946,15 @@ def build_corpus(
                         params=etarget.params,
                     )
                     targets[(product_id, entry_url)] = entry_target
-                    roots.append((entry_url, entry_target, ()))
+                    # Запись каталога — самостоятельный корень без sitemap-аугментации
+                    # (развёртка sitemap — свойство seed оператора, не записей каталога).
+                    roots.append((entry_url, entry_target, False))
 
             # D1: BFS-frontier по каждому seed-root (``max_depth=0`` → только seeds,
             # поведение неизменно). Провенанс усечения копится для сеанса/``IndexBuild``.
-            for root_url, root_target, extra_seeds in roots:
+            for root_url, root_target, sitemap_seeds in roots:
                 frontier = _drain_root(
-                    product_id, root_url, root_target, extra_seeds
+                    product_id, root_url, root_target, sitemap_seeds=sitemap_seeds
                 )
                 pages_fetched_total += frontier.fetched
                 if frontier.truncated:

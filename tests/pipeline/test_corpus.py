@@ -3060,6 +3060,12 @@ SITEMAP_CHILD = "https://docs.test/p1/sm-child.xml"
 SITEMAP_LOC_1 = "https://docs.test/p1/loc-1"
 SITEMAP_LOC_2 = "https://docs.test/p1/loc-2"
 
+#: Seed-корень **каталогом** (``/p1/``): его path-scope — ``/p1``, поэтому ``<loc>``-соседи
+#: ``/p1/loc-*`` в scope. Раньше здесь стоял страничный seed ``/p1/index``; после фикса
+#: дефекта B (``<loc>`` подчинены scope корня, а не задают его) такой seed законно отсекал
+#: соседей — страница не является каталогом. Все реальные seeds пакета — каталоги (``/``).
+SITEMAP_ROOT = "https://docs.test/p1/"
+
 
 def _sitemap_profile(**overrides: Any) -> dict[str, DomainProfile]:
     """Per-site профиль ``docs.test`` с заданным sitemap (и опциональными осями D1/D2)."""
@@ -3078,7 +3084,7 @@ def test_sitemap_locs_become_depth0_seeds_and_sitemap_not_retained(tmp_path: Pat
     poller = _FakePoller([FeedEntry(url=SITEMAP_LOC_1), FeedEntry(url=SITEMAP_LOC_2)])
     crawler = _Crawler(
         {
-            URL_P1_A: b"seed page",
+            SITEMAP_ROOT: b"seed page",
             SITEMAP_LOC_1: b"loc one",
             SITEMAP_LOC_2: b"loc two",
         }
@@ -3087,7 +3093,7 @@ def test_sitemap_locs_become_depth0_seeds_and_sitemap_not_retained(tmp_path: Pat
         result = _build(
             tmp_path,
             pages={},
-            urls={"p1": [URL_P1_A]},
+            urls={"p1": [SITEMAP_ROOT]},
             crawler=crawler,
             domain_profiles=_sitemap_profile(),
             pollers={"sitemap": poller},
@@ -3097,10 +3103,10 @@ def test_sitemap_locs_become_depth0_seeds_and_sitemap_not_retained(tmp_path: Pat
         assert result.errors == []
         # sitemap опрошен один раз; страницы (seed + locs) — краулером.
         assert [c[0] for c in poller.calls] == [SITEMAP_URL]
-        assert [u for u, _ in crawler.calls] == [URL_P1_A, SITEMAP_LOC_1, SITEMAP_LOC_2]
+        assert [u for u, _ in crawler.calls] == [SITEMAP_ROOT, SITEMAP_LOC_1, SITEMAP_LOC_2]
         build = _build_of(result)
         assert build.chunk_count == 3
-        assert {d.url for d in build.docs} == {URL_P1_A, SITEMAP_LOC_1, SITEMAP_LOC_2}
+        assert {d.url for d in build.docs} == {SITEMAP_ROOT, SITEMAP_LOC_1, SITEMAP_LOC_2}
 
         items = {i.url: i for i in _items(store)}
         sitemap_item = items[SITEMAP_URL]
@@ -3121,7 +3127,7 @@ def test_sitemap_gzip_via_local_poller(tmp_path: Path) -> None:
     _make_run(store)
     crawler = _Crawler(
         {
-            URL_P1_A: b"seed",
+            SITEMAP_ROOT: b"seed",
             SITEMAP_URL: _gzip.compress(_urlset(SITEMAP_LOC_1)),
             SITEMAP_LOC_1: b"loc",
         }
@@ -3130,7 +3136,7 @@ def test_sitemap_gzip_via_local_poller(tmp_path: Path) -> None:
         result = _build(
             tmp_path,
             pages={},
-            urls={"p1": [URL_P1_A]},
+            urls={"p1": [SITEMAP_ROOT]},
             crawler=crawler,
             domain_profiles=_sitemap_profile(),
             pollers={"sitemap": LocalFeedPoller(crawler)},
@@ -3138,7 +3144,7 @@ def test_sitemap_gzip_via_local_poller(tmp_path: Path) -> None:
             run_id=RUN_ID,
         )
         assert result.errors == []
-        assert {d.url for d in _build_of(result).docs} == {URL_P1_A, SITEMAP_LOC_1}
+        assert {d.url for d in _build_of(result).docs} == {SITEMAP_ROOT, SITEMAP_LOC_1}
     finally:
         store.close()
 
@@ -3152,7 +3158,7 @@ def test_sitemap_index_one_level_via_local_poller(tmp_path: Path) -> None:
     )
     crawler = _Crawler(
         {
-            URL_P1_A: b"seed",
+            SITEMAP_ROOT: b"seed",
             SITEMAP_URL: index,
             SITEMAP_CHILD: index,  # дочерний — сам индекс → глубже одного уровня
         }
@@ -3161,7 +3167,7 @@ def test_sitemap_index_one_level_via_local_poller(tmp_path: Path) -> None:
         result = _build(
             tmp_path,
             pages={},
-            urls={"p1": [URL_P1_A]},
+            urls={"p1": [SITEMAP_ROOT]},
             crawler=crawler,
             domain_profiles=_sitemap_profile(),
             pollers={"sitemap": LocalFeedPoller(crawler)},
@@ -3172,7 +3178,7 @@ def test_sitemap_index_one_level_via_local_poller(tmp_path: Path) -> None:
         items = {i.url: i for i in _items(store)}
         assert items[SITEMAP_URL].status is CrawlItemStatus.FAILED
         # seed оператора всё равно добыт (аугментация, не замена).
-        assert URL_P1_A in {d.url for d in _build_of(result).docs}
+        assert SITEMAP_ROOT in {d.url for d in _build_of(result).docs}
         session = store.get_crawl_session(SESSION_ID)
         assert session is not None and session.status is CrawlSessionStatus.PARTIAL
     finally:
@@ -3185,7 +3191,7 @@ def test_sitemap_poller_entry_cap_enforced(tmp_path: Path) -> None:
     _make_run(store)
     crawler = _Crawler(
         {
-            URL_P1_A: b"seed",
+            SITEMAP_ROOT: b"seed",
             SITEMAP_URL: _urlset(SITEMAP_LOC_1, SITEMAP_LOC_2),
             SITEMAP_LOC_1: b"a",
             SITEMAP_LOC_2: b"b",
@@ -3195,7 +3201,7 @@ def test_sitemap_poller_entry_cap_enforced(tmp_path: Path) -> None:
         result = _build(
             tmp_path,
             pages={},
-            urls={"p1": [URL_P1_A]},
+            urls={"p1": [SITEMAP_ROOT]},
             crawler=crawler,
             domain_profiles=_sitemap_profile(),
             pollers={"sitemap": LocalFeedPoller(crawler, max_entries=1)},
@@ -3203,7 +3209,7 @@ def test_sitemap_poller_entry_cap_enforced(tmp_path: Path) -> None:
             run_id=RUN_ID,
         )
         assert result.errors == []
-        assert {d.url for d in _build_of(result).docs} == {URL_P1_A, SITEMAP_LOC_1}
+        assert {d.url for d in _build_of(result).docs} == {SITEMAP_ROOT, SITEMAP_LOC_1}
     finally:
         store.close()
 
@@ -3214,12 +3220,12 @@ def test_sitemap_loc_ssrf_rejected(tmp_path: Path) -> None:
     _make_run(store)
     unsafe = "http://127.0.0.1/secret"
     poller = _FakePoller([FeedEntry(url=SITEMAP_LOC_1), FeedEntry(url=unsafe)])
-    crawler = _Crawler({URL_P1_A: b"seed", SITEMAP_LOC_1: b"ok"})
+    crawler = _Crawler({SITEMAP_ROOT: b"seed", SITEMAP_LOC_1: b"ok"})
     try:
         result = _build(
             tmp_path,
             pages={},
-            urls={"p1": [URL_P1_A]},
+            urls={"p1": [SITEMAP_ROOT]},
             crawler=crawler,
             domain_profiles=_sitemap_profile(),
             pollers={"sitemap": poller},
@@ -3228,7 +3234,7 @@ def test_sitemap_loc_ssrf_rejected(tmp_path: Path) -> None:
         )
         assert any("sitemap <loc>" in e for e in result.errors)
         assert unsafe not in [u for u, _ in crawler.calls]
-        assert {d.url for d in _build_of(result).docs} == {URL_P1_A, SITEMAP_LOC_1}
+        assert {d.url for d in _build_of(result).docs} == {SITEMAP_ROOT, SITEMAP_LOC_1}
     finally:
         store.close()
 
@@ -3239,12 +3245,12 @@ def test_sitemap_loc_obeys_blacklist(tmp_path: Path) -> None:
     _make_run(store)
     pdf = "https://docs.test/p1/private/report.pdf"
     poller = _FakePoller([FeedEntry(url=SITEMAP_LOC_1), FeedEntry(url=pdf)])
-    crawler = _Crawler({URL_P1_A: b"seed", SITEMAP_LOC_1: b"ok"})
+    crawler = _Crawler({SITEMAP_ROOT: b"seed", SITEMAP_LOC_1: b"ok"})
     try:
         result = _build(
             tmp_path,
             pages={},
-            urls={"p1": [URL_P1_A]},
+            urls={"p1": [SITEMAP_ROOT]},
             crawler=crawler,
             domain_profiles=_sitemap_profile(exclude_documents=["*.pdf"]),
             pollers={"sitemap": poller},
@@ -3253,7 +3259,7 @@ def test_sitemap_loc_obeys_blacklist(tmp_path: Path) -> None:
         )
         assert any("блэклист" in e for e in result.errors)
         assert pdf not in [u for u, _ in crawler.calls]
-        assert {d.url for d in _build_of(result).docs} == {URL_P1_A, SITEMAP_LOC_1}
+        assert {d.url for d in _build_of(result).docs} == {SITEMAP_ROOT, SITEMAP_LOC_1}
     finally:
         store.close()
 
@@ -3264,13 +3270,13 @@ def test_sitemap_seeds_obey_max_documents(tmp_path: Path) -> None:
     _make_run(store)
     poller = _FakePoller([FeedEntry(url=SITEMAP_LOC_1), FeedEntry(url=SITEMAP_LOC_2)])
     crawler = _Crawler(
-        {URL_P1_A: b"seed", SITEMAP_LOC_1: b"a", SITEMAP_LOC_2: b"b"}
+        {SITEMAP_ROOT: b"seed", SITEMAP_LOC_1: b"a", SITEMAP_LOC_2: b"b"}
     )
     try:
         result = _build(
             tmp_path,
             pages={},
-            urls={"p1": [URL_P1_A]},
+            urls={"p1": [SITEMAP_ROOT]},
             crawler=crawler,
             domain_profiles=_sitemap_profile(max_documents=1),
             pollers={"sitemap": poller},
@@ -3278,7 +3284,7 @@ def test_sitemap_seeds_obey_max_documents(tmp_path: Path) -> None:
             run_id=RUN_ID,
         )
         build = _build_of(result)
-        assert {d.url for d in build.docs} == {URL_P1_A}
+        assert {d.url for d in build.docs} == {SITEMAP_ROOT}
         assert build.truncated is True
         assert any(rec["truncated_reason"] == "max_documents" for rec in build.truncation)
     finally:
@@ -3293,9 +3299,9 @@ def test_sitemap_absent_behaviour_unchanged(tmp_path: Path) -> None:
     try:
         result = _build(
             tmp_path,
-            pages={URL_P1_A: b"only seed"},
-            urls={"p1": [URL_P1_A]},
-            crawler=_Crawler({URL_P1_A: b"only seed"}),
+            pages={SITEMAP_ROOT: b"only seed"},
+            urls={"p1": [SITEMAP_ROOT]},
+            crawler=_Crawler({SITEMAP_ROOT: b"only seed"}),
             domain_profiles={"docs.test": DomainProfile()},
             pollers={"sitemap": poller},
             store=store,
@@ -3303,7 +3309,7 @@ def test_sitemap_absent_behaviour_unchanged(tmp_path: Path) -> None:
         )
         assert result.errors == []
         assert poller.calls == []
-        assert {d.url for d in _build_of(result).docs} == {URL_P1_A}
+        assert {d.url for d in _build_of(result).docs} == {SITEMAP_ROOT}
     finally:
         store.close()
 
@@ -3316,8 +3322,8 @@ def test_sitemap_without_poller_records_error(tmp_path: Path) -> None:
         result = _build(
             tmp_path,
             pages={},
-            urls={"p1": [URL_P1_A]},
-            crawler=_Crawler({URL_P1_A: b"seed"}),
+            urls={"p1": [SITEMAP_ROOT]},
+            crawler=_Crawler({SITEMAP_ROOT: b"seed"}),
             domain_profiles=_sitemap_profile(),
             pollers=None,
             store=store,
@@ -3326,7 +3332,7 @@ def test_sitemap_without_poller_records_error(tmp_path: Path) -> None:
         assert any("поллер sitemap не сконфигурирован" in e for e in result.errors)
         items = {i.url: i for i in _items(store)}
         assert items[SITEMAP_URL].status is CrawlItemStatus.FAILED
-        assert URL_P1_A in {d.url for d in _build_of(result).docs}
+        assert SITEMAP_ROOT in {d.url for d in _build_of(result).docs}
     finally:
         store.close()
 
@@ -3349,22 +3355,22 @@ def test_executor_sitemap_locs_share_root_frontier(tmp_path: Path) -> None:
     store = SqliteStore(":memory:")
     _make_run(store)
     poller = _FakePoller([FeedEntry(url=SITEMAP_LOC_1)])
-    executor = _FakeExecutor(pages={URL_P1_A: b"top", SITEMAP_LOC_1: b"loc"})
+    executor = _FakeExecutor(pages={SITEMAP_ROOT: b"top", SITEMAP_LOC_1: b"loc"})
     try:
         result = _run_executor_build(
             tmp_path,
             store,
             executor,
-            urls={"p1": [URL_P1_A]},
+            urls={"p1": [SITEMAP_ROOT]},
             domain_profiles=_sitemap_profile(),
             pollers={"sitemap": poller},
         )
         assert result.errors == []
         # Seed оператора и ``<loc>`` делят один фронтир → один раунд (как в local).
         assert [[w.url for w in s] for s in executor.submits] == [
-            [URL_P1_A, SITEMAP_LOC_1]
+            [SITEMAP_ROOT, SITEMAP_LOC_1]
         ]
-        assert {d.url for d in _build_of(result).docs} == {URL_P1_A, SITEMAP_LOC_1}
+        assert {d.url for d in _build_of(result).docs} == {SITEMAP_ROOT, SITEMAP_LOC_1}
     finally:
         store.close()
 
