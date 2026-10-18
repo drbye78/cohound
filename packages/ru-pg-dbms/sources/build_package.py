@@ -840,6 +840,18 @@ def build_domain_profiles() -> dict[str, dict[str, object]]:
     ``sbertech.ru/documents``: на host-ключе он при seed-корне ``https://sbertech.ru/``
     затянул бы в партицию все 89 продуктов (нарушение I17). Host-ключ намеренно без sitemap.
 
+    **Host-root seed ≠ продуктовый seed (I17).** Корень сайта компании — не корень
+    продукта. Любой discovery на host-корне мульти-продуктового сайта (BFS или host-wide
+    sitemap) затянет в партицию одного продукта страницы соседних продуктов. Поэтому
+    host-ключи ``sbertech.ru`` и ``gaz-is.ru`` объявлены с ``max_depth: 0`` (только сам
+    корень) и малым ``max_documents``; обход живёт на path-ключе продукта
+    (``sbertech.ru/documents``, ``gaz-is.ru/produkty/inform-sistemy/subd-jatoba``).
+
+    **Sitemap — только там, где он даёт покрытие.** Path-scoped seed внутри host-wide
+    sitemap почти не получает ``<loc>`` в scope (``platformv.sbertech.ru`` — 1 из 801,
+    ``tantorlabs.ru/products/dbms`` — 3 из 58) и лишь порождает запись об отказе на каждом
+    прогоне, поэтому sitemap объявлен на host-ключах, а не на этих path-ключах.
+
     Набор ключей совпадает с эталонным ``packages/ru-pg-dbms/domain_profiles.yaml``
     (повторный прогон генератора идемпотентен и не затирает домены).
 
@@ -853,7 +865,18 @@ def build_domain_profiles() -> dict[str, dict[str, object]]:
             "max_depth": 8,
             "max_documents": 300,
         },
+        # Host-root seed (https://www.gaz-is.ru/) — корень компании, а не продукта:
+        # любой обход с depth > 0 затянет в партицию jatoba чужие продукты (I17).
         "gaz-is.ru": {
+            "fetch": "http",
+            "extract": "auto",
+            "max_depth": 0,
+            "max_documents": 10,
+        },
+        # Продуктовый путь jatoba (реальная раскладка сайта — /produkty/...: robots.txt
+        # перечисляет /produkty/inform-sistemy/subd-jotoba, он 302 → .../subd-jatoba;
+        # seed /products/jatoba/ отдаёт 404). Внутри поддерева обход уместен.
+        "gaz-is.ru/produkty/inform-sistemy/subd-jatoba": {
             "fetch": "http",
             "extract": "auto",
             "max_depth": 8,
@@ -881,7 +904,8 @@ def build_domain_profiles() -> dict[str, dict[str, object]]:
             "strategy": "honest",
             "max_depth": 8,
             "max_documents": 300,
-            "sitemap": "https://platformv.sbertech.ru/sitemap.xml",
+            # Sitemap намеренно НЕ задан: seed — глубокий путь внутри host-wide sitemap
+            # (801 <loc>, в scope 1) ⇒ почти no-op плюс запись об отказе на каждом прогоне.
         },
         "postgrespro.ru": {
             "fetch": "http",
@@ -891,12 +915,14 @@ def build_domain_profiles() -> dict[str, dict[str, object]]:
         },
         # Sitemap намеренно НЕ на host-ключе (см. ловушку матчинга в докстринге):
         # host-wide <loc> затянул бы другие продукты в партицию якоря (I17).
+        # Host-root seed (https://sbertech.ru/) — корень компании: discovery запрещён
+        # (max_depth 0), иначе BFS уходит в /documents → 89 продуктов (I17).
         "sbertech.ru": {
             "fetch": "browser",
             "extract": "auto",
             "strategy": "honest",
-            "max_depth": 2,
-            "max_documents": 400,
+            "max_depth": 0,
+            "max_documents": 10,
         },
         "sbertech.ru/documents": {
             "fetch": "browser",
@@ -920,7 +946,9 @@ def build_domain_profiles() -> dict[str, dict[str, object]]:
             "strategy": "honest",
             "max_depth": 8,
             "max_documents": 200,
-            "sitemap": "https://tantorlabs.ru/sitemap.xml",
+            # Sitemap намеренно НЕ задан: path-scoped seed внутри host-wide sitemap
+            # (58 <loc>, в scope 3) ⇒ почти no-op плюс запись об отказе на каждом прогоне.
+            # Host-ключ tantorlabs.ru свой sitemap сохраняет.
         },
         "wiki.astralinux.ru": {
             "fetch": "http",

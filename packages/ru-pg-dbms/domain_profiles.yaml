@@ -16,6 +16,11 @@
 # полноты; где sitemap есть, хватает 2–3 уровней (sitemap сам даёт depth-0 seeds), 8 — там,
 # где sitemap отсутствует (404/500 у хоста) и глубина измеряется только эмпирически.
 # Реальный ограничитель объёма — max_documents на (продукт, seed-root).
+#
+# Host-root seed ≠ продуктовый seed. Корень сайта компании — это не корень продукта: любой
+# discovery (BFS или host-wide sitemap) затянет в партицию одного продукта страницы соседних
+# продуктов (I17). Поэтому host-ключи мульти-продуктовых сайтов объявляются с max_depth 0
+# (только сама страница корня), а обход живёт на path-ключе продукта.
 docs.tantorlabs.ru:
   # sitemap 404 → глубина как единственный ориентир.
   extract: auto
@@ -23,8 +28,17 @@ docs.tantorlabs.ru:
   max_depth: 8
   max_documents: 300
 gaz-is.ru:
-  # Новый ключ: www.gaz-is.ru раньше не матчился ни одним профилем и молча падал в
-  # app-дефолты. robots хоста запрещает *.pdf$ — PDF в корпус не попадут (§10).
+  # Host-root seed (https://www.gaz-is.ru/) — корень компании, а не продукта: любой обход
+  # с depth > 0 затянет в партицию jatoba чужие продукты (I17). Продуктовые страницы
+  # jatoba — на отдельном path-ключе ниже.
+  extract: auto
+  fetch: http
+  max_depth: 0
+  max_documents: 10
+gaz-is.ru/produkty/inform-sistemy/subd-jatoba:
+  # Реальная раскладка сайта — /produkty/...: robots.txt перечисляет
+  # /produkty/inform-sistemy/subd-jotoba (старый слаг), он 302 → .../subd-jatoba;
+  # seed /products/jatoba/ из corpus_urls.yaml отдаёт 404. Внутри поддерева обход уместен.
   extract: auto
   fetch: http
   max_depth: 8
@@ -47,11 +61,12 @@ pangolin.sbertech.ru:
   wait_for: () => document.body && document.body.innerText.length > 200
 platformv.sbertech.ru:
   # seed — глубокий путь, поэтому 8; <loc> вне scope корня отсекаются (дефект-B-фикс).
+  # Sitemap намеренно не задан: seed — path внутри host-wide sitemap (801 <loc>, в scope 1)
+  # ⇒ почти no-op плюс запись об отказе на каждом прогоне.
   extract: auto
   fetch: browser
   max_depth: 8
   max_documents: 300
-  sitemap: https://platformv.sbertech.ru/sitemap.xml
   strategy: honest
 postgrespro.ru:
   # Портал /docs без sitemap (advertised → 404): бюджет и есть ограничитель.
@@ -64,10 +79,16 @@ sbertech.ru:
   # специфичный профиль, но для seed-корня https://sbertech.ru/ матчится именно этот ключ:
   # host-wide https://sbertech.ru/sitemap.xml затянул бы в партицию якоря все 89 продуктов
   # (нарушение I17). Sitemap объявлен ниже — на path-ключе sbertech.ru/documents.
+  #
+  # Discovery на host-корне запрещён (max_depth 0): BFS с depth 2 доходит до /documents
+  # (это sitemap-URL, depth 1), затем до /documents/{slug}/{version} (depth 2) — 501 URL
+  # на 89 продуктов, из которых pangolin только 22. Это та же утечка I17, что и через
+  # sitemap, но BFS-путём (Frontier.in_scope матчит и поддомены). Документы pangolin
+  # покрыты seed'ом /documents/platform-v-pangolin-se/ (path-ключ ниже).
   extract: auto
   fetch: browser
-  max_depth: 2
-  max_documents: 400
+  max_depth: 0
+  max_documents: 10
   strategy: honest
 sbertech.ru/documents:
   # Path-scope: 502 документа из 748 URL sitemap лежат в /documents/{slug}/{version},
@@ -88,11 +109,12 @@ tantorlabs.ru:
   strategy: honest
 tantorlabs.ru/products/dbms:
   # Seed — глубокий путь внутри sitemap-хоста ⇒ нужен запас глубины.
+  # Sitemap намеренно не задан: path-scoped seed внутри host-wide sitemap (58 <loc>,
+  # в scope 3) ⇒ почти no-op; host-ключ tantorlabs.ru свой sitemap сохраняет.
   extract: auto
   fetch: browser
   max_depth: 8
   max_documents: 200
-  sitemap: https://tantorlabs.ru/sitemap.xml
   strategy: honest
 wiki.astralinux.ru:
   # Confluence, sitemap 404 → глубина как единственный ориентир.

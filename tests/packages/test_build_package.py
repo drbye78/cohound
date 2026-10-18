@@ -13,6 +13,10 @@
 P7 (полнота корпуса): добавлены пины на бюджетные оси ``max_depth``/``max_documents``,
 на per-site ``sitemap`` (включая ловушку матчинга ``sbertech.ru``) и на блок ``crawl:``
 в эмитируемом ``run.yaml`` (дрейф «файл правили руками, генератор — нет»).
+
+F1/F10 (I17): host-корни мульти-продуктовых сайтов (``sbertech.ru``, ``gaz-is.ru``) не
+discover'ят (``max_depth == 0``), обход — на path-ключе продукта; sitemap снят с
+path-ключей, где он почти no-op (``platformv.sbertech.ru``, ``tantorlabs.ru/products/dbms``).
 """
 
 from __future__ import annotations
@@ -192,12 +196,14 @@ def test_run_crawl_axes_accepted_by_strict_loader() -> None:
         ("https://postgrespro.ru/docs/16/", 8, 500),
         # 23 URL, плоско.
         ("https://pangolin.sbertech.ru/", 2, 60),
-        # Новый ключ: www.gaz-is.ru раньше не матчился ничем.
-        ("https://www.gaz-is.ru/", 8, 200),
+        # Host-root мульти-продуктового сайта: discovery запрещён (I17) — только корень.
+        ("https://www.gaz-is.ru/", 0, 10),
+        # Продуктовый путь jatoba (реальная раскладка сайта — /produkty/...) — обход уместен.
+        ("https://www.gaz-is.ru/produkty/inform-sistemy/subd-jatoba/", 8, 200),
         # path-ключ приоритетнее host-ключа (sitemap только здесь).
         ("https://sbertech.ru/documents/platform-v-pangolin-se", 2, 400),
-        # host-ключ: без sitemap (иначе host-root seed тянет 89 продуктов).
-        ("https://sbertech.ru/", 2, 400),
+        # host-ключ: без sitemap и без discovery (иначе BFS тянет 89 продуктов, I17).
+        ("https://sbertech.ru/", 0, 10),
         # seed — глубокий путь, 8 уровней запаса.
         ("https://platformv.sbertech.ru/products/pangolin", 8, 300),
         # path-ключ внутри sitemap-хоста.
@@ -229,16 +235,30 @@ def test_resolve_crawl_limits_per_site(url: str, max_depth: int, max_documents: 
     assert list(limits.exclude_documents) == RUN_CRAWL_EXCLUDE_DOCUMENTS
 
 
-def test_www_gaz_is_matches_new_profile() -> None:
-    """``www.gaz-is.ru`` матчится новым ключом ``gaz-is.ru`` (раньше — app-дефолты)."""
+def test_www_gaz_is_host_root_does_not_discover() -> None:
+    """``www.gaz-is.ru`` матчится ключом ``gaz-is.ru``, но host-корень не обходится (I17).
+
+    Корень — страница компании (у вендора десятки продуктов), поэтому ``max_depth == 0``:
+    только сам URL. Обход живёт на path-ключе продукта jatoba (реальная раскладка сайта —
+    ``/produkty/inform-sistemy/subd-jatoba``, robots.txt; seed ``/products/jatoba/`` — 404).
+    """
     profiles = load_domain_profiles(ON_DISK_PROFILES)
-    profile = select_domain_profile("https://www.gaz-is.ru/", profiles)
-    assert profile is not None, "www.gaz-is.ru обязан матчиться профилем gaz-is.ru"
-    assert profile.fetch is FetchMode.HTTP
-    assert profile.extract.value == "auto"
-    assert profile.max_depth == 8
-    assert profile.max_documents == 200
-    assert profile.sitemap is None, "у gaz-is.ru sitemap нет (500 на /sitemap.xml)"
+
+    host_profile = select_domain_profile("https://www.gaz-is.ru/", profiles)
+    assert host_profile is not None, "www.gaz-is.ru обязан матчиться профилем gaz-is.ru"
+    assert host_profile.fetch is FetchMode.HTTP
+    assert host_profile.extract.value == "auto"
+    assert host_profile.max_depth == 0, "host-корень не должен discover'ить (I17)"
+    assert host_profile.max_documents == 10
+    assert host_profile.sitemap is None, "у gaz-is.ru sitemap нет (500 на /sitemap.xml)"
+
+    product_profile = select_domain_profile(
+        "https://www.gaz-is.ru/produkty/inform-sistemy/subd-jatoba/", profiles
+    )
+    assert product_profile is not None, "продуктовый path-ключ jatoba обязан матчиться"
+    assert product_profile.fetch is FetchMode.HTTP
+    assert product_profile.max_depth == 8
+    assert product_profile.max_documents == 200
 
 
 def test_sitemap_declared_only_on_most_specific_sbertech_key() -> None:
@@ -246,16 +266,56 @@ def test_sitemap_declared_only_on_most_specific_sbertech_key() -> None:
 
     ``_sitemap_url_for(seed)`` берёт самый специфичный профиль: host-root seed матчит
     host-ключ, поэтому host-wide sitemap там затянул бы все продукты в партицию (I17).
+    Host-ключ дополнительно без discovery: BFS с depth 2 доходит до
+    ``/documents/{slug}/{version}`` — 89 продуктов (та же утечка I17, BFS-путём).
     """
     profiles = load_domain_profiles(ON_DISK_PROFILES)
 
     host_profile = select_domain_profile("https://sbertech.ru/", profiles)
     assert host_profile is not None
     assert host_profile.sitemap is None, "host-ключ sbertech.ru обязан быть без sitemap"
+    assert host_profile.max_depth == 0, "host-корень sbertech.ru не должен discover'ить"
+    assert host_profile.max_documents == 10
 
     path_profile = select_domain_profile("https://sbertech.ru/documents/anything", profiles)
     assert path_profile is not None
     assert path_profile.sitemap == "https://sbertech.ru/sitemap.xml"
+    assert path_profile.max_depth == 2
+    assert path_profile.max_documents == 400
+
+
+def test_noop_path_sitemaps_dropped_host_sitemaps_kept() -> None:
+    """Path-scoped seed внутри host-wide sitemap — почти no-op: sitemap там не объявляем.
+
+    Замеры: ``platformv.sbertech.ru`` — 1 <loc> из 801 в scope, ``tantorlabs.ru/products/dbms``
+    — 3 из 58. Каждый такой sitemap даёт запись об отказе на каждом прогоне, не добавляя
+    покрытия; host-ключи свои sitemap сохраняют.
+    """
+    profiles = load_domain_profiles(ON_DISK_PROFILES)
+
+    platformv = select_domain_profile(
+        "https://platformv.sbertech.ru/products/rabota-s-dannymi/pangolin/", profiles
+    )
+    assert platformv is not None
+    assert platformv.sitemap is None, "path-scoped seed внутри host-wide sitemap — no-op"
+
+    tantor_path = select_domain_profile("https://tantorlabs.ru/products/dbms/", profiles)
+    assert tantor_path is not None
+    assert tantor_path.sitemap is None
+
+    tantor_host = select_domain_profile("https://tantorlabs.ru/", profiles)
+    assert tantor_host is not None
+    assert tantor_host.sitemap == "https://tantorlabs.ru/sitemap.xml"
+
+    # Остальные объявленные sitemap не тронуты.
+    for url, expected in (
+        ("https://jatoba.ru/", "https://jatoba.ru/sitemap.xml"),
+        ("https://pangolin.sbertech.ru/", "https://pangolin.sbertech.ru/sitemap.xml"),
+        ("https://sbertech.ru/documents/anything", "https://sbertech.ru/sitemap.xml"),
+    ):
+        profile = select_domain_profile(url, profiles)
+        assert profile is not None
+        assert profile.sitemap == expected, url
 
 
 if __name__ == "__main__":  # pragma: no cover - локальный запуск
