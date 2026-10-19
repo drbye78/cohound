@@ -160,6 +160,7 @@ EXECUTION_FIELDS: tuple[str, ...] = (
     "crawl_max_workers",
     "crawl_extract_workers",
     "crawl_extract_max_tasks_per_child",
+    "crawl_max_response_bytes",
     "crawl_document_level",
     "crawl_max_depth",
     "crawl_max_documents",
@@ -693,6 +694,7 @@ def build_manifest(
     crawl_max_workers: int | None = None
     crawl_extract_workers: int | None = None
     crawl_extract_max_tasks_per_child: int | None = None
+    crawl_max_response_bytes: int | None = None
     crawl_document_level: str | None = None
     crawl_max_depth: int | None = None
     crawl_max_documents: int | None = None
@@ -711,6 +713,7 @@ def build_manifest(
         crawl_extract_max_tasks_per_child = getattr(
             crawl_cfg, "extract_max_tasks_per_child", None
         )
+        crawl_max_response_bytes = getattr(crawl_cfg, "max_response_bytes", None)
         crawl_max_depth = getattr(crawl_cfg, "max_depth", None)
         crawl_max_documents = getattr(crawl_cfg, "max_documents", None)
         crawl_exclude_paths = list(getattr(crawl_cfg, "exclude_paths", None) or [])
@@ -821,6 +824,7 @@ def build_manifest(
         crawl_max_workers=crawl_max_workers,
         crawl_extract_workers=crawl_extract_workers,
         crawl_extract_max_tasks_per_child=crawl_extract_max_tasks_per_child,
+        crawl_max_response_bytes=crawl_max_response_bytes,
         crawl_document_level=crawl_document_level,
         crawl_max_depth=crawl_max_depth,
         crawl_max_documents=crawl_max_documents,

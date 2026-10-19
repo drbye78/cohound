@@ -72,6 +72,7 @@ from datetime import datetime, timezone
 from typing import Any, Protocol, cast, runtime_checkable
 
 from core.domain.enums import FailureKind
+from core.domain.models import DEFAULT_MAX_RESPONSE_BYTES
 from core.ports.types import FetchMode, FetchPlan, RawPage
 from core.util.cache import ContentAddressedCache, http_key
 from core.util.security import validate_url
@@ -81,7 +82,9 @@ __all__ = [
     "CrawlUrlError",
     "CrawlRefused",
     "CrawlNotFound",
+    "CrawlPayloadTooLarge",
     "NOT_FOUND_STATUSES",
+    "DEFAULT_MAX_RESPONSE_BYTES",
     "DEFAULT_SCRAPY_SETTINGS",
     "ScrapyCrawler",
 ]
@@ -189,6 +192,24 @@ class CrawlNotFound(CrawlError):
         message: str,
         *,
         failure_kind: str = FailureKind.NOT_FOUND.value,
+    ) -> None:
+        super().__init__(message)
+        self.failure_kind = failure_kind
+
+
+class CrawlPayloadTooLarge(CrawlError):
+    """Ответ превысил потолок ``max_response_bytes`` (P0/OOM).
+
+    Несёт ``failure_kind = payload_too_large``: pipeline помечает элемент терминальным
+    ``FAILED``, **не** ретейнит байты и не запускает экстракцию. Это осознанная граница
+    исполнения, а не транзиентная недоступность; повтор не помогает (I4: failed, не статус).
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        failure_kind: str = FailureKind.PAYLOAD_TOO_LARGE.value,
     ) -> None:
         super().__init__(message)
         self.failure_kind = failure_kind
@@ -401,6 +422,13 @@ def _default_crawl(settings: Mapping[str, Any], spec: _CrawlSpec) -> Any:
                 spec.error_kind = FailureKind.NOT_FOUND.value
                 spec.error = f"HTTP {status} для {spec.url!r}: ресурс отсутствует"
                 return
+            if _is_oversize_failure(failure):
+                spec.error_kind = FailureKind.PAYLOAD_TOO_LARGE.value
+                spec.error = (
+                    f"Scrapy-краул {spec.url!r}: ответ превысил "
+                    f"DOWNLOAD_MAXSIZE ({_failure_value(failure)})"
+                )
+                return
             spec.error = (
                 f"Scrapy-краул {spec.url!r} не удался: {_failure_value(failure)}"
             )
@@ -430,6 +458,27 @@ def _failure_value(failure: Any) -> BaseException:
     """Достаёт исключение из Twisted ``Failure`` (или возвращает объект как есть)."""
     value = getattr(failure, "value", None)
     return value if isinstance(value, BaseException) else cast(BaseException, failure)
+
+
+def _is_oversize_failure(failure: Any) -> bool:
+    """Похоже ли исключение на превышение ``DOWNLOAD_MAXSIZE`` (Scrapy/Twisted).
+
+    Scrapy не гарантирует стабильного типа между версиями (``FileSizeError``/
+    ``StopDownload``/``PotentialDataLoss``), поэтому класс и сообщение проверяются
+    терпимо; этого достаточно, чтобы отобразить исход в ``payload_too_large``, а не в
+    бесцветный ``source_unavailable``.
+    """
+    value = _failure_value(failure)
+    name = type(value).__name__.lower()
+    message = str(value).lower()
+    return (
+        "filesize" in name
+        or "stopdownload" in name
+        or "maxsize" in message
+        or "maximum size" in message
+        or "downloaded more than" in message
+        or "too large" in message
+    )
 
 
 def _as_crawl_error(url: str, exc: BaseException) -> CrawlError:
@@ -596,6 +645,7 @@ class ScrapyCrawler:
         cache: ContentAddressedCache | None = None,
         scrapy_settings: Mapping[str, Any] | None = None,
         worker: _ReactorWorker | None = None,
+        max_response_bytes: int = DEFAULT_MAX_RESPONSE_BYTES,
     ) -> None:
         """``fetcher`` — тестовый шов; ``cache`` — глобальный кэш; ``scrapy_settings`` —
         переопределения настроек реального пути; ``worker`` — тестовый шов общего
@@ -605,10 +655,16 @@ class ScrapyCrawler:
         в pipeline (:func:`core.pipeline.fetch_plan.resolve_fetch_plan`) и передаётся
         готовым в :meth:`fetch`.
         """
+        if max_response_bytes <= 0:
+            raise ValueError(
+                "max_response_bytes должен быть положительным, "
+                f"получено {max_response_bytes!r}"
+            )
         self._fetcher = fetcher
         self._cache = cache
         self._scrapy_settings = dict(scrapy_settings or {})
         self._worker = worker
+        self._max_response_bytes = int(max_response_bytes)
 
     @property
     def available(self) -> bool:
@@ -721,12 +777,28 @@ class ScrapyCrawler:
         """
         if self._fetcher is not None:
             try:
-                return self._call_fetcher(self._fetcher, url, plan)
+                page = self._call_fetcher(self._fetcher, url, plan)
             except CrawlError:
                 raise
             except Exception as exc:  # noqa: BLE001 - унификация ошибок адаптера
                 raise CrawlError(f"фетч {url!r} не удался: {exc}") from exc
+            self._check_size(url, page.content, plan)
+            return page
         return self._fetch_with_scrapy(url, plan, cached)
+
+    def _cap_for(self, plan: FetchPlan) -> int:
+        """Эффективный потолок: per-plan (site/run) поверх дефолта адаптера."""
+        if plan.max_response_bytes is not None:
+            return int(plan.max_response_bytes)
+        return self._max_response_bytes
+
+    def _check_size(self, url: str, content: bytes, plan: FetchPlan) -> None:
+        """Единая проверка размера для внедрённого шва (реальный путь режет загрузчик)."""
+        cap = self._cap_for(plan)
+        if len(content) > cap:
+            raise CrawlPayloadTooLarge(
+                f"ответ {url!r}: {len(content)} байт > лимита {cap} (payload_too_large)"
+            )
 
     @staticmethod
     def _call_fetcher(fetcher: FetchFn | PageFetcher, url: str, plan: FetchPlan) -> RawPage:
@@ -754,7 +826,7 @@ class ScrapyCrawler:
                 "(scrapy/scrapy-playwright/playwright) или внедрите fetcher"
             )
 
-        settings = self._build_settings(plan.fetch)
+        settings = self._build_settings(plan)
         # Условные заголовки имеют смысл только для HTTP-пути (у браузерного рендера
         # нет кэш-записи для тела 304).
         headers = _conditional_headers(plan) if plan.fetch is FetchMode.HTTP else {}
@@ -772,6 +844,10 @@ class ScrapyCrawler:
         if spec.error:
             if spec.error_kind == FailureKind.NOT_FOUND.value:
                 raise CrawlNotFound(spec.error, failure_kind=spec.error_kind)
+            if spec.error_kind == FailureKind.PAYLOAD_TOO_LARGE.value:
+                raise CrawlPayloadTooLarge(
+                    spec.error, failure_kind=spec.error_kind
+                )
             raise CrawlError(spec.error)
         if not spec.collected:
             raise CrawlError(f"Scrapy не вернул контент для {url!r}")
@@ -804,10 +880,18 @@ class ScrapyCrawler:
         if worker is not None:
             worker.close()
 
-    def _build_settings(self, fetch: FetchMode) -> dict[str, Any]:
-        """Итоговые настройки Scrapy: дефолты → playwright (для browser) → overrides."""
+    def _build_settings(self, plan: FetchPlan) -> dict[str, Any]:
+        """Итоговые настройки Scrapy: дефолты → axis cap → playwright → overrides.
+
+        ``DOWNLOAD_MAXSIZE`` берётся из оси ``crawl.max_response_bytes`` (per-plan поверх
+        дефолта адаптера 20 MiB); ``DOWNLOAD_WARNSIZE`` не выше потолка. Явные
+        ``scrapy_settings`` оператора по-прежнему побеждают (обратная совместимость).
+        """
         settings = dict(DEFAULT_SCRAPY_SETTINGS)
-        if fetch is FetchMode.BROWSER:
+        cap = self._cap_for(plan)
+        settings["DOWNLOAD_MAXSIZE"] = cap
+        settings["DOWNLOAD_WARNSIZE"] = min(cap, 33_554_432)
+        if plan.fetch is FetchMode.BROWSER:
             settings.update(_PLAYWRIGHT_SETTINGS)
         settings.update(self._scrapy_settings)
         return settings

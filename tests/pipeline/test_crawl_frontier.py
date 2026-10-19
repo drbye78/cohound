@@ -199,3 +199,59 @@ def test_exclude_documents_matches_path_basename_with_query() -> None:
     assert blacklist_match("https://h/docs/report.pdf?ver=1", limits) == "*.pdf"
     # Caveat: имя файла, переданное только в query, basename не является (задокументировано).
     assert is_blacklisted("https://h/download?file=report.pdf", limits) is False
+
+
+# --------------------------------------------------------------------------- #
+# (h) P0/OOM: max_response_bytes — дефолт 20 MiB и цепочка app < run < site
+# --------------------------------------------------------------------------- #
+
+
+def test_max_response_bytes_default_is_20_mib_and_digest_neutral() -> None:
+    limits = resolve_crawl_limits(URL, app=CrawlConfig())
+    assert limits.max_response_bytes == 20_971_520
+    # Дефолт app не «задан явно» — ключ не попадает в дайджест (байт-идентичность).
+    assert "max_response_bytes" not in limits.as_dict()
+
+
+def test_max_response_bytes_precedence_app_run_site() -> None:
+    app = CrawlConfig(max_response_bytes=1000)
+    run = CrawlRunConfig(max_response_bytes=2000)
+    site = DomainProfile(max_response_bytes=3000)
+    assert (
+        resolve_crawl_limits(
+            URL, app=app, run=run, profiles={"example.com": site}
+        ).max_response_bytes
+        == 3000
+    )
+    assert (
+        resolve_crawl_limits(URL, app=app, run=run, profiles={}).max_response_bytes
+        == 2000
+    )
+    assert (
+        resolve_crawl_limits(URL, app=app, run=None, profiles={}).max_response_bytes
+        == 1000
+    )
+
+
+def test_max_response_bytes_explicit_enters_as_dict() -> None:
+    limits = resolve_crawl_limits(
+        URL, app=CrawlConfig(), run=CrawlRunConfig(max_response_bytes=777)
+    )
+    assert limits.as_dict()["max_response_bytes"] == 777
+    assert (
+        resolve_crawl_limits(
+            URL,
+            app=CrawlConfig(),
+            profiles={"example.com": DomainProfile(max_response_bytes=888)},
+        ).as_dict()["max_response_bytes"]
+        == 888
+    )
+
+
+def test_max_response_bytes_rejects_non_positive() -> None:
+    with pytest.raises(ValidationError):
+        CrawlConfig(max_response_bytes=0)
+    with pytest.raises(ValidationError):
+        CrawlRunConfig(max_response_bytes=0)
+    with pytest.raises(ValidationError):
+        DomainProfile(max_response_bytes=0)

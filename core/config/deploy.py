@@ -31,6 +31,7 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from core.domain.enums import DocumentLevel
+from core.domain.models import DEFAULT_MAX_RESPONSE_BYTES
 
 __all__ = [
     "TLSConfig",
@@ -357,6 +358,11 @@ class CrawlConfig(BaseModel):
     # (``ProcessPoolExecutor(max_tasks_per_child=N)``). ``None`` — ось не задана
     # (поведение байт-в-байт). Резолв — та же цепочка app < run < site.
     extract_max_tasks_per_child: int | None = Field(default=None, ge=1)
+    # P0/OOM: потолок одного HTTP-ответа (и retained-файла на resume), байты. Дефолт
+    # 20 MiB — тот же масштаб, что edge-лимит (``EdgeConfig.max_response_bytes``);
+    # ``EdgeConfig`` не меняется. Ось операционная (``execution_change``), резолв —
+    # app < run < site. Превышение — терминальный ``payload_too_large`` (без retention).
+    max_response_bytes: int = Field(default=DEFAULT_MAX_RESPONSE_BYTES, gt=0)
     max_depth: int = Field(default=0, ge=0)
     max_documents: int | None = Field(default=None, gt=0)
     exclude_paths: list[str] | None = None

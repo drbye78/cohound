@@ -89,6 +89,7 @@ best-effort (сбой изолируется).
 from __future__ import annotations
 
 import datetime as _dt
+import hashlib
 import json
 import time
 from collections import deque
@@ -131,6 +132,7 @@ from core.pipeline.crawl_sources import (
 from core.pipeline.extract_cache import ExtractionCache
 from core.pipeline.fetch_plan import _host_matches, select_domain_profile
 from core.pipeline.runner import PhaseResult
+from core.util.document_formats import unsupported_binary_reason
 from core.ports.chunker import ChunkerPort
 from core.ports.crawl_executor import (
     ACTIVE_JOB_STATUSES,
@@ -220,6 +222,21 @@ _EXTRACT_MAX_POOL_REBUILDS = 2
 #: P4: сентинел «экстракция не была отложена» для :func:`build_corpus`-интернала
 #: ``_commit_outcome`` (inline-путь вызывает ``_ingest_one``; пул передаёт готовый результат).
 _INLINE = object()
+
+#: P0/OOM: явно очистить carry-forward поле элемента сеанса (``_mark`` пропускает ``None``).
+_CLEAR = object()
+
+#: P0: размер порции потокового хеширования retained-байтов (resume).
+_RESUME_READ_CHUNK = 1024 * 1024
+
+
+@dataclass(frozen=True)
+class _RetainedReject:
+    """Retained raw не пригоден по границе исполнения (P0): терминально, без экстракции."""
+
+    error_kind: FailureKind
+    reason: str
+    path: Path
 
 
 def _canonical_failure_kind(reason: str | None) -> str:
@@ -602,6 +619,8 @@ class _LocalFetch:
     scope_host: str | None
     enforce_redirect_scope: bool
     terminal: bool = False
+    #: P0: retained raw отклонён по размеру/бинарности — терминальный исход без экстракции.
+    reject: _RetainedReject | None = None
 
 
 @dataclass
@@ -993,12 +1012,20 @@ def _embed_and_build(
 
 def _resume_source(
     item: CrawlSessionItem | None,
-) -> tuple[bytes, Path] | None:
+    *,
+    max_bytes: int | None = None,
+) -> tuple[bytes, Path] | _RetainedReject | None:
     """Возвращает retained-байты для resume, если элемент сеанса позволяет НЕ фетчить (D3).
 
     Пригодны элементы ``FETCHED`` (сырые байты уже сохранены) и ``FAILED`` с сохранённым
     ``raw_path`` (re-extract из тех же байтов без сети). ``PENDING``/``RUNNING``/отсутствие
     записи, отсутствие ``raw_path`` или файла на диске → ``None`` (обычный путь фетча).
+
+    **P0/OOM.** Размер проверяется по ``stat`` **до** чтения: retained-файл больше
+    ``max_bytes`` → :class:`_RetainedReject` ``payload_too_large`` (терминально, без
+    экстракции) — это защищает от poison, уже лежащего на диске. Хеш считается
+    **потоково** (1 MiB): файл не читается целиком ради ``read_bytes``. Бинарный
+    не-документ (post-fetch эвристика) → ``_RetainedReject`` ``unsupported_binary``.
 
     **Верификация (D3).** Если в записи задан ``content_hash``, а хеш прочитанных байтов
     не совпадает, файл считается непригодным (повреждён/подменён) → ``None``: резюм не
@@ -1015,30 +1042,83 @@ def _resume_source(
     if not path.is_file():
         return None
     try:
-        data = path.read_bytes()
+        size = path.stat().st_size
     except OSError:
         return None
-    if item.content_hash and content_hash(data) != item.content_hash:
+    if max_bytes is not None and size > max_bytes:
+        return _RetainedReject(
+            FailureKind.PAYLOAD_TOO_LARGE,
+            f"retained {size} байт > лимита {max_bytes} (payload_too_large)",
+            path,
+        )
+    hasher = hashlib.sha256()
+    buffer = bytearray()
+    try:
+        with path.open("rb") as handle:
+            while True:
+                chunk = handle.read(_RESUME_READ_CHUNK)
+                if not chunk:
+                    break
+                if max_bytes is not None and len(buffer) + len(chunk) > max_bytes:
+                    # Файл вырос после stat: режем до буферизации остатка.
+                    return _RetainedReject(
+                        FailureKind.PAYLOAD_TOO_LARGE,
+                        f"retained превысил лимит {max_bytes} при чтении "
+                        "(payload_too_large)",
+                        path,
+                    )
+                hasher.update(chunk)
+                buffer.extend(chunk)
+    except OSError:
         return None
+    data = bytes(buffer)
+    if item.content_hash and hasher.hexdigest() != item.content_hash:
+        return None
+    binary_reason = unsupported_binary_reason(
+        data, url=item.url, content_type=item.content_type
+    )
+    if binary_reason is not None:
+        return _RetainedReject(
+            FailureKind.UNSUPPORTED_BINARY,
+            f"retained: {binary_reason}",
+            path,
+        )
     return data, path
 
 
-def _terminal_not_found(item: CrawlSessionItem | None) -> bool:
-    """Терминален ли элемент: определённый ответ «ресурса нет» (HTTP 404/410).
+#: Терминальные классы: повторный фетч/экстракция не дадут нового знания (P0/I4).
+_TERMINAL_FAILURE_KINDS: frozenset[FailureKind] = frozenset(
+    {
+        FailureKind.NOT_FOUND,
+        FailureKind.PAYLOAD_TOO_LARGE,
+        FailureKind.UNSUPPORTED_BINARY,
+    }
+)
 
-    ``not_found`` — не транзиентный сбой: origin уже ответил, повторный фетч не даст
-    нового знания, а лишь тратит запросы (на масштабе корпуса — материально). Поэтому
-    такой элемент **не** пере-фетчивается при resume и **не** превращается в
-    ``attempts_exhausted`` (это сменило бы класс сбоя на «попытки кончились»).
+
+def _terminal_failure_kind(item: CrawlSessionItem | None) -> FailureKind | None:
+    """Терминальный класс ``FAILED``-элемента (``not_found``/``payload_too_large``/
+    ``unsupported_binary``) либо ``None``.
+
+    Это не транзиентные сбои: origin уже дал определённый ответ/исполнение упёрлось в
+    осознанную границу (потолок байтов, бинарный не-документ). Такой элемент **не**
+    пере-фетчивается при resume и **не** превращается в ``attempts_exhausted``.
 
     Терминальность — только для ``FAILED``: ``FETCHED`` с этим классом невозможен, а
     ``pending``/``running`` не несут окончательного ответа.
     """
-    return (
-        item is not None
-        and item.status is CrawlItemStatus.FAILED
-        and item.error_kind == FailureKind.NOT_FOUND.value
-    )
+    if item is None or item.status is not CrawlItemStatus.FAILED or not item.error_kind:
+        return None
+    try:
+        kind = FailureKind(item.error_kind)
+    except ValueError:
+        return None
+    return kind if kind in _TERMINAL_FAILURE_KINDS else None
+
+
+def _terminal_not_found(item: CrawlSessionItem | None) -> bool:
+    """Совместимость: терминален ли элемент определённым ответом «ресурса нет»."""
+    return _terminal_failure_kind(item) is FailureKind.NOT_FOUND
 
 
 def _resume_page(
@@ -1378,6 +1458,9 @@ def build_corpus(
             "last_attempt": now,
         }
         for name, value in fields.items():
+            if value is _CLEAR:
+                record[name] = None
+                continue
             if value is not None:
                 if name == "error_kind":
                     # Ф0: единственная воронка записи ``crawl_session_items`` — здесь
@@ -2096,6 +2179,7 @@ def build_corpus(
         scope_host: str | None = None,
         enforce_redirect_scope: bool = False,
         robots: bool = False,
+        max_response_bytes: int,
     ) -> _LocalFetch:
         """D4 pre-fetch (главный поток): resume/browser-guard/решение о пейсинге.
 
@@ -2113,10 +2197,23 @@ def build_corpus(
             if getattr(wtarget.plan, "robots", False) == robots
             else replace(wtarget.plan, robots=robots)
         )
+        # P0: per-site/run потолок ответа едет на плане (адаптер применяет его к стриму).
+        fetch_plan = replace(fetch_plan, max_response_bytes=max_response_bytes)
         prior_item = items.get((pid, wu))
-        resume = _resume_source(prior_item) if prior_item is not None else None
-        # Терминальный ``not_found``: живой фетч не нужен и вреден (см. helper).
-        terminal = _terminal_not_found(prior_item)
+        resume_source = (
+            _resume_source(prior_item, max_bytes=max_response_bytes)
+            if prior_item is not None
+            else None
+        )
+        reject = (
+            resume_source
+            if isinstance(resume_source, _RetainedReject)
+            else None
+        )
+        resume = resume_source if isinstance(resume_source, tuple) else None
+        # Терминальный класс (not_found/payload_too_large/unsupported_binary): живой
+        # фетч не нужен и вреден (см. helper).
+        terminal = _terminal_failure_kind(prior_item) is not None
         # Движок: явный ``wtarget.engine`` (из ``crawl_sources``) приоритетен; при его
         # отсутствии ключ выводится из оси профиля домена (``fetch: browser`` → ``"browser"``).
         # Зеркало edge ``scheduler._resolve_engine`` и ``wiring._referenced_crawl_engines``
@@ -2138,6 +2235,7 @@ def build_corpus(
         # ``_page`` без лока. Resume живого фетча не делает вовсе.
         poolable = (
             resume is None
+            and reject is None
             and not terminal
             and not browser_blocked
             and fetch_plan.fetch is not FetchMode.BROWSER
@@ -2158,6 +2256,7 @@ def build_corpus(
             scope_host=scope_host,
             enforce_redirect_scope=enforce_redirect_scope,
             terminal=terminal,
+            reject=reject,
         )
 
     def _local_fetch(desc: _LocalFetch) -> RawPage:
@@ -2224,22 +2323,47 @@ def build_corpus(
         # как и прежде; всегда до resume-guard/бrowser-guard.
         applied_engines[(pid, wu)] = desc.engine_value
 
-        # Терминальный ``not_found``: определённый ответ уже получен, живой фетч не
-        # выполняется. Элемент остаётся ``FAILED``/``not_found`` (класс сбоя, не статус),
-        # ``attempts`` не растёт (``_mark`` инкрементит только при смене статуса), поэтому
-        # исход не превращается в ``attempts_exhausted``.
+        # Терминальный класс (not_found/payload_too_large/unsupported_binary): определённый
+        # ответ уже получен либо исполнение упёрлось в осознанную границу; живой фетч не
+        # выполняется. Элемент остаётся ``FAILED`` (класс сбоя, не статус), ``attempts`` не
+        # растёт (``_mark`` инкрементит только при смене статуса), поэтому исход не
+        # превращается в ``attempts_exhausted``.
         if desc.terminal:
             prior = desc.prior_item
+            kind = _terminal_failure_kind(prior) or FailureKind.NOT_FOUND
             _mark(
                 pid,
                 wu,
                 CrawlItemStatus.FAILED,
-                error_kind=FailureKind.NOT_FOUND.value,
+                error_kind=kind.value,
                 error=(
                     prior.error
                     if prior is not None and prior.error
-                    else "not_found: ресурс отсутствует (терминально, без повтора)"
+                    else f"{kind.value}: терминально, без повтора"
                 ),
+                depth=desc.depth,
+            )
+            return None
+
+        # P0: retained raw отклонён по размеру/бинарности — терминально, без экстракции.
+        # Для бинарного артефакта сессия не должна ссылаться на байты: чистим raw_path/
+        # content_hash и удаляем retained-файл (он не evidence). Для oversize — та же
+        # очистка (на диске остаётся, но сессия больше на него не опирается).
+        if desc.reject is not None:
+            reject = desc.reject
+            try:
+                reject.path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            errors.append(f"{pid}/{wu}: {reject.error_kind.value}: {reject.reason}")
+            _mark(
+                pid,
+                wu,
+                CrawlItemStatus.FAILED,
+                error_kind=reject.error_kind.value,
+                error=reject.reason,
+                raw_path=_CLEAR,
+                content_hash=_CLEAR,
                 depth=desc.depth,
             )
             return None
@@ -2336,6 +2460,45 @@ def build_corpus(
                 )
                 return None
 
+        # P0: границы исполнения ДО retention/экстракции. Сначала размер (OVA/образ
+        # должен стать payload_too_large, а не binary-sniff), затем бинарный не-документ.
+        cap = fetch_plan.max_response_bytes
+        if cap is not None and len(page.content) > cap:
+            reason = (
+                f"payload_too_large: {len(page.content)} байт > лимита {cap}"
+            )
+            errors.append(f"{pid}/{wu}: {reason}")
+            _mark(
+                pid,
+                wu,
+                CrawlItemStatus.FAILED,
+                error_kind=FailureKind.PAYLOAD_TOO_LARGE.value,
+                error=reason,
+                raw_path=_CLEAR,
+                content_hash=_CLEAR,
+                depth=desc.depth,
+            )
+            return None
+        binary_reason = unsupported_binary_reason(
+            page.content,
+            url=page.url or wu,
+            content_type=page.content_type,
+        )
+        if binary_reason is not None:
+            reason = f"unsupported_binary: {binary_reason}"
+            errors.append(f"{pid}/{wu}: {reason}")
+            _mark(
+                pid,
+                wu,
+                CrawlItemStatus.FAILED,
+                error_kind=FailureKind.UNSUPPORTED_BINARY.value,
+                error=reason,
+                raw_path=_CLEAR,
+                content_hash=_CLEAR,
+                depth=desc.depth,
+            )
+            return None
+
         # 2. Retention (I19): сырые байты пишутся ДО экстракции (общий шаг).
         raw_path = _retain(pid, wu, page, fetch_plan, depth=desc.depth)
         if raw_path is None:
@@ -2351,6 +2514,7 @@ def build_corpus(
         scope_host: str | None = None,
         enforce_redirect_scope: bool = False,
         robots: bool = False,
+        max_response_bytes: int,
     ) -> tuple[RawPage, Path, FetchPlan, bool] | None:
         """Локальный per-URL путь (последовательный): pre-fetch → fetch → post-fetch (D4).
 
@@ -2367,8 +2531,14 @@ def build_corpus(
             scope_host=scope_host,
             enforce_redirect_scope=enforce_redirect_scope,
             robots=robots,
+            max_response_bytes=max_response_bytes,
         )
-        if desc.resume is not None or desc.browser_blocked or desc.terminal:
+        if (
+            desc.resume is not None
+            or desc.reject is not None
+            or desc.browser_blocked
+            or desc.terminal
+        ):
             return _commit_local(desc)
 
         # P2-3: politeness-пейсинг — единый владелец corpus (R7-независимый). Применяется
@@ -2521,6 +2691,9 @@ def build_corpus(
                 )
             #: Исполнять ли экстракцию в пуле (снимается inline-fallback'ом при отказе).
             defer_extract = extract_window is not None and extraction_pool is not None
+            #: P0/OOM: пул исчерпал пересборки — остаток корня терминально FAILED, без
+            #: inline-экстракции (на memory-constrained хосте inline — худший fallback).
+            pool_abandoned = False
             extract_executor: Executor | None = None
             extract_rebuilds = 0
             pending: deque[_PendingExtract] = deque()
@@ -2553,7 +2726,11 @@ def build_corpus(
                     continue
                 if not frontier.in_scope(iurl):
                     continue
-                if _resume_source(item) is None:
+                counted = _resume_source(
+                    item, max_bytes=limits.max_response_bytes
+                )
+                if not isinstance(counted, tuple):
+                    # Нет пригодного resume (oversize/binary/несовпадение) — не бюджет.
                     continue
                 consumed += 1
                 resume_counted.add(iurl)
@@ -2717,7 +2894,15 @@ def build_corpus(
                 if executor_obj is None:
                     return
                 try:
-                    executor_obj.shutdown(wait=False)
+                    # P0/OOM: дождаться реального завершения воркеров и отменить
+                    # запланированное. ``wait=False`` оставлял старые docling-процессы
+                    # живыми поверх следующего корня (двойной рабочий набор → OOM).
+                    executor_obj.shutdown(wait=True, cancel_futures=True)
+                except TypeError:  # фейки/старые исполнители без cancel_futures
+                    try:
+                        executor_obj.shutdown(wait=True)
+                    except Exception:  # noqa: BLE001 — reaping best-effort
+                        pass
                 except Exception:  # noqa: BLE001 — reaping best-effort
                     pass
                 extract_executor = None
@@ -2727,15 +2912,19 @@ def build_corpus(
 
                 Повторное использование мёртвого пула запрещено; авто-ретрая нет.
                 """
-                nonlocal extract_rebuilds, defer_extract
+                nonlocal extract_rebuilds, defer_extract, pool_abandoned
                 _discard_extract_executor()
                 if extract_rebuilds < _EXTRACT_MAX_POOL_REBUILDS:
                     extract_rebuilds += 1
                 else:
-                    defer_extract = False
+                    # Inline после исчерпания пересборок — худший режим на constrained
+                    # хосте (docling в родителе). Остаток корня доводится терминальным
+                    # FAILED, без повторной экстракции; ошибка видима.
+                    pool_abandoned = True
                     errors.append(
                         f"{pid}/{root_url}: пул экстракции исчерпал пересборки "
-                        f"({_EXTRACT_MAX_POOL_REBUILDS}) — остаток корня inline"
+                        f"({_EXTRACT_MAX_POOL_REBUILDS}) — остаток корня терминально "
+                        "FAILED (parser_failed), без inline-экстракции"
                     )
 
             def _fail_extract(item: _PendingExtract, reason: str) -> None:
@@ -2838,6 +3027,21 @@ def build_corpus(
                 nonlocal extract_executor, defer_extract
                 if outcome is None:
                     return
+                if pool_abandoned:
+                    # Пул исчерпал пересборки: никакой inline-экстракции. Страница
+                    # ретейнена, но исход терминален и видим (parser_failed).
+                    _commit_outcome(
+                        pid_arg,
+                        url_arg,
+                        depth_arg,
+                        outcome,
+                        extracted=None,
+                        extract_error=(
+                            "extraction pool exhausted after "
+                            f"{_EXTRACT_MAX_POOL_REBUILDS} rebuilds — inline disabled"
+                        ),
+                    )
+                    return
                 if not defer_extract:
                     _commit_outcome(pid_arg, url_arg, depth_arg, outcome)
                     return
@@ -2935,8 +3139,13 @@ def build_corpus(
                             outcome = _commit_local(desc, exc=exc)
                         else:
                             outcome = _commit_local(desc, page=page)
-                    elif desc.resume is not None or desc.browser_blocked or desc.terminal:
-                        # resume/browser-guard/терминальный not_found: живого фетча нет.
+                    elif (
+                        desc.resume is not None
+                        or desc.reject is not None
+                        or desc.browser_blocked
+                        or desc.terminal
+                    ):
+                        # resume/reject/browser-guard/терминальный класс: живого фетча нет.
                         outcome = _commit_local(desc)
                     else:
                         # browser-режим (``supports_browser`` краулер): в пул не идёт —
@@ -3027,7 +3236,7 @@ def build_corpus(
                                 _emit_progress()
                                 continue
                             prior_item = items.get((pid, work_url))
-                            if _terminal_not_found(prior_item):
+                            if _terminal_failure_kind(prior_item) is not None:
                                 # Определённый ответ «ресурса нет» уже получен: в работу
                                 # не подаём (иначе 404 стоил бы запросов на каждом цикле).
                                 entries.append(
@@ -3056,9 +3265,22 @@ def build_corpus(
                                 )
                                 continue
                             work_target = _resolve_target(pid, work_url)
-                            resume = (
-                                _resume_source(prior_item)
+                            resume_source = (
+                                _resume_source(
+                                    prior_item,
+                                    max_bytes=limits.max_response_bytes,
+                                )
                                 if prior_item is not None
+                                else None
+                            )
+                            reject = (
+                                resume_source
+                                if isinstance(resume_source, _RetainedReject)
+                                else None
+                            )
+                            resume = (
+                                resume_source
+                                if isinstance(resume_source, tuple)
                                 else None
                             )
                             # Дескриптор коммита строится вручную (не ``_local_prefetch``):
@@ -3068,7 +3290,10 @@ def build_corpus(
                                 pid=pid,
                                 wu=work_url,
                                 depth=depth,
-                                fetch_plan=work_target.plan,
+                                fetch_plan=replace(
+                                    work_target.plan,
+                                    max_response_bytes=limits.max_response_bytes,
+                                ),
                                 active=None,
                                 engine_value=work_target.engine,
                                 prior_item=prior_item,
@@ -3078,11 +3303,12 @@ def build_corpus(
                                 host=(urlsplit(work_url).hostname or "").lower(),
                                 scope_host=frontier.root_host,
                                 enforce_redirect_scope=limits.max_depth > 0,
+                                reject=reject,
                             )
                             entries.append(
                                 _WaveEntry(pid, work_url, depth, "fetch", desc=desc)
                             )
-                            if resume is None:
+                            if resume is None and reject is None:
                                 # Только живой фетч подаётся исполнителю; resume минует submit.
                                 work.append(
                                     _work_item(
@@ -3098,19 +3324,22 @@ def build_corpus(
                                 )
                                 continue
                             if entry.kind == "terminal_not_found":
-                                # Определённый ответ «ресурса нет» уже получен: повторного
-                                # фетча не было, элемент остаётся ``FAILED``/``not_found``.
+                                # Терминальный класс уже получен: повторного фетча не было,
+                                # элемент остаётся ``FAILED`` со своим ``error_kind``.
                                 prior_item = entry.prior_item
+                                kind = (
+                                    _terminal_failure_kind(prior_item)
+                                    or FailureKind.NOT_FOUND
+                                )
                                 _mark(
                                     entry.pid,
                                     entry.wu,
                                     CrawlItemStatus.FAILED,
-                                    error_kind=FailureKind.NOT_FOUND.value,
+                                    error_kind=kind.value,
                                     error=(
                                         prior_item.error
                                         if prior_item is not None and prior_item.error
-                                        else "not_found: ресурс отсутствует "
-                                        "(терминально, без повтора)"
+                                        else f"{kind.value}: терминально, без повтора"
                                     ),
                                     depth=entry.depth,
                                 )
@@ -3136,8 +3365,8 @@ def build_corpus(
                                 continue
                             desc = entry.desc
                             assert desc is not None
-                            if desc.resume is not None:
-                                # Resume: живого фетча нет — коммит локально без submit.
+                            if desc.resume is not None or desc.reject is not None:
+                                # Resume/reject: живого фетча нет — коммит локально без submit.
                                 outcome = _commit_local(desc)
                                 _commit_or_defer(entry.pid, entry.wu, entry.depth, outcome)
                                 continue
@@ -3205,7 +3434,7 @@ def build_corpus(
                             max_attempts is not None
                             and prior_item is not None
                             and prior_item.attempts >= max_attempts
-                            and not _terminal_not_found(prior_item)
+                            and _terminal_failure_kind(prior_item) is None
                         ):
                             reason = (
                                 f"max_attempts exhausted "
@@ -3234,6 +3463,7 @@ def build_corpus(
                             # на глубине 0 финальная страница ретейнится как прежде.
                             enforce_redirect_scope=limits.max_depth > 0,
                             robots=robots_enabled,
+                            max_response_bytes=limits.max_response_bytes,
                         )
                         _commit_or_defer(pid, work_url, depth, outcome)
                         continue
@@ -3275,7 +3505,7 @@ def build_corpus(
                             max_attempts is not None
                             and prior_item is not None
                             and prior_item.attempts >= max_attempts
-                            and not _terminal_not_found(prior_item)
+                            and _terminal_failure_kind(prior_item) is None
                         ):
                             entries.append(
                                 _WaveEntry(
@@ -3292,6 +3522,7 @@ def build_corpus(
                             scope_host=frontier.root_host,
                             enforce_redirect_scope=limits.max_depth > 0,
                             robots=robots_enabled,
+                            max_response_bytes=limits.max_response_bytes,
                         )
                         # D2/e: browser-элементы НИКОГДА не пулятся (``BrowserCrawler`` водит
                         # единственную ``_page`` без лока) — идут inline на главном потоке;
@@ -3329,7 +3560,7 @@ def build_corpus(
                 max_attempts is not None
                 and prior_item is not None
                 and prior_item.attempts >= max_attempts
-                and not _terminal_not_found(prior_item)
+                and _terminal_failure_kind(prior_item) is None
             ):
                 reason = (
                     f"max_attempts exhausted "

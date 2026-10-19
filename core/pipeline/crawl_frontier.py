@@ -40,7 +40,7 @@ from urllib.parse import unquote, urlsplit
 from core.config.deploy import CrawlConfig
 from core.config.domain_profiles import DomainProfile
 from core.domain.enums import DocumentLevel
-from core.domain.models import CrawlRunConfig
+from core.domain.models import DEFAULT_MAX_RESPONSE_BYTES, CrawlRunConfig
 from core.pipeline.fetch_plan import _host_matches, select_domain_profile
 from core.util.security import validate_url
 
@@ -71,6 +71,11 @@ class CrawlLimits:
     #: P4/OOM: рециклинг воркер-процессов локальной экстракции (``None`` — ось не задана).
     #: Значение резолвится той же цепочкой app < run < site, что и ``extract_workers``.
     extract_max_tasks_per_child: int | None = None
+    #: P0/OOM: эффективный потолок одного ответа/retained-файла (байты). Дефолт 20 MiB
+    #: действует всегда; ``max_response_bytes_explicit`` отмечает, что ось задана на
+    #: одном из слоёв (только тогда ключ попадает в ``as_dict``/дайджест).
+    max_response_bytes: int = DEFAULT_MAX_RESPONSE_BYTES
+    max_response_bytes_explicit: bool = False
     max_depth: int = 0
     max_documents: int | None = None
     exclude_paths: tuple[str, ...] = ()
@@ -98,6 +103,8 @@ class CrawlLimits:
         }
         if self.extract_max_tasks_per_child is not None:
             payload["extract_max_tasks_per_child"] = self.extract_max_tasks_per_child
+        if self.max_response_bytes_explicit:
+            payload["max_response_bytes"] = self.max_response_bytes
         return payload
 
 
@@ -135,6 +142,9 @@ def resolve_crawl_limits(
     run_extract_max_tasks = (
         getattr(run, "extract_max_tasks_per_child", None) if run is not None else None
     )
+    run_max_response_bytes = (
+        getattr(run, "max_response_bytes", None) if run is not None else None
+    )
     run_max_depth = run.max_depth if run is not None else None
     run_max_documents = run.max_documents if run is not None else None
     run_exclude_paths = run.exclude_paths if run is not None else None
@@ -153,6 +163,18 @@ def resolve_crawl_limits(
         getattr(app, "extract_max_tasks_per_child", None),
         run_extract_max_tasks,
         site_attr("extract_max_tasks_per_child"),
+    )
+    app_max_response_bytes = getattr(app, "max_response_bytes", None)
+    site_max_response_bytes = site_attr("max_response_bytes")
+    max_response_bytes = _pick(
+        app_max_response_bytes, run_max_response_bytes, site_max_response_bytes
+    )
+    # «Явно задано» — поле пришло на site/run-слое либо было передано в app-конструктор.
+    # Дефолт app не делает дайджест другим (байт-идентичность старых прогонов §13).
+    max_response_bytes_explicit = bool(
+        site_max_response_bytes is not None
+        or run_max_response_bytes is not None
+        or "max_response_bytes" in getattr(app, "model_fields_set", set())
     )
     max_depth = _pick(app.max_depth, run_max_depth, site_attr("max_depth"))
     max_documents = _pick(
@@ -180,6 +202,12 @@ def resolve_crawl_limits(
             if extract_max_tasks is None
             else int(extract_max_tasks)  # type: ignore[arg-type]
         ),
+        max_response_bytes=(
+            DEFAULT_MAX_RESPONSE_BYTES
+            if max_response_bytes is None
+            else int(max_response_bytes)  # type: ignore[arg-type]
+        ),
+        max_response_bytes_explicit=max_response_bytes_explicit,
         max_depth=0 if max_depth is None else int(max_depth),  # type: ignore[arg-type]
         max_documents=(
             None if max_documents is None else int(max_documents)  # type: ignore[arg-type]

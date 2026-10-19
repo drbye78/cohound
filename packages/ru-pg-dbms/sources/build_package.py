@@ -1287,9 +1287,10 @@ def main() -> int:
                 "/mediacenter/*",
             ],
             "exclude_documents": [
-                "*.zip", "*.rar", "*.7z", "*.gz", "*.tar", "*.exe", "*.msi", "*.dmg",
-                "*.iso", "*.mp4", "*.avi", "*.css", "*.js", "*.png", "*.jpg", "*.jpeg",
-                "*.gif", "*.svg", "*.webp", "*.ico", "*.woff", "*.woff2", "*.ttf",
+                "*.zip", "*.rar", "*.7z", "*.gz", "*.tar", "*.tgz", "*.exe", "*.msi", "*.dmg",
+                "*.iso", "*.ova", "*.vmdk", "*.qcow2", "*.mp4", "*.avi", "*.css", "*.js",
+                "*.png", "*.jpg", "*.jpeg", "*.gif", "*.svg", "*.webp", "*.ico", "*.woff",
+                "*.woff2", "*.ttf",
             ],
         },
     }

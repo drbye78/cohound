@@ -75,6 +75,12 @@ class FailureKind(StrEnum):
     QUARANTINED = "quarantined"
     # Класс таймаута извлечения (отделим от прочих parser-сбоев).
     EXTRACTION_TIMEOUT = "extraction_timeout"
+    #: Ось ``crawl.max_response_bytes``: ответ/retained-файл превысил потолок байтов.
+    #: Терминальный класс (без повторов): тот же URL снова упрётся в тот же потолок.
+    PAYLOAD_TOO_LARGE = "payload_too_large"
+    #: Post-fetch эвристика «бинарный артефакт — не документ»: содержимое не является
+    #: ни документным форматом, ни текстом/HTML. Терминальный класс (без повторов).
+    UNSUPPORTED_BINARY = "unsupported_binary"
 
 
 #: Классы сбоев, которые делают корпус продукта **неполным по построению** (I2c, Ф0).
@@ -91,7 +97,10 @@ class FailureKind(StrEnum):
 #:   ловится отдельным правилом нечитаемого origin'а;
 #: * ``redirect_out_of_scope`` — уход за границу охвата по определению;
 #: * ``search_failed``/``evaluation_failed``/``validation_failed`` — сбои конвейера
-#:   оценки, а не наблюдения корпуса.
+#:   оценки, а не наблюдения корпуса;
+#: * ``payload_too_large``/``unsupported_binary`` — осознанные границы исполнения:
+#:   потолок байтов и отказ трактовать бинарный артефакт как документ (как
+#:   ``exclude_documents``): материал присутствует, но по политике не читается.
 BLOCKING_FAILURE_KINDS: frozenset[FailureKind] = frozenset(
     {
         FailureKind.ROBOTS_DISALLOW,

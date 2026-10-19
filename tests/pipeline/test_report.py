@@ -1280,3 +1280,41 @@ class _CellView:
     absence_evidence: list[Any] = field(default_factory=list)
     justification: str = ""
     satellites: list[Any] = field(default_factory=list)
+
+
+def test_max_response_bytes_is_execution_axis_and_changes_digest() -> None:
+    """P0: ось ``crawl.max_response_bytes`` — ``execution_change``, не methodology."""
+    cfg = RunConfig(
+        case_id="case-1",
+        anchor=PRODUCT_A,
+        cohort="cohort-1",
+        products=[PRODUCT_A],
+        package="pkg",
+        snapshot_date=_dt.date(2026, 1, 1),
+        mode=RunMode.STRICT,
+    )
+    plan = SimpleNamespace(
+        run_id="run-response-bytes", anchor=PRODUCT_A, modules=[], cohort_ref="cohort-1"
+    )
+    base = build_manifest(
+        inputs=SimpleNamespace(run=cfg, package=None),  # type: ignore[arg-type]
+        plan=plan,
+        created_at="2026-01-01T00:00:00Z",  # type: ignore[arg-type]
+    )
+    assert "crawl_max_response_bytes" in EXECUTION_FIELDS
+    assert base.crawl_max_response_bytes is None
+
+    cfg2 = cfg.model_copy(
+        update={"crawl": CrawlRunConfig(max_response_bytes=1_048_576)}
+    )
+    changed = build_manifest(
+        inputs=SimpleNamespace(run=cfg2, package=None),  # type: ignore[arg-type]
+        plan=plan,
+        created_at="2026-01-01T00:00:00Z",  # type: ignore[arg-type]
+    )
+    assert changed.crawl_max_response_bytes == 1_048_576
+    assert changed.crawl_config_digest != base.crawl_config_digest
+    assert any(
+        v.startswith("execution_change: crawl_max_response_bytes")
+        for v in diff_boundary_violations(base, changed)
+    )

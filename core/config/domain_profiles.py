@@ -63,6 +63,9 @@ class DomainProfile(BaseModel):
     # P4/OOM: per-site override рециклинга воркеров локальной экстракции (высший приоритет
     # цепочки app < run < site). ``None`` = не задано на этом слое (наследуется run/app).
     extract_max_tasks_per_child: int | None = Field(default=None, ge=1)
+    # P0/OOM: per-site потолок одного ответа/retained-файла (байты; высший приоритет
+    # цепочки app < run < site). ``None`` = не задано на этом слое.
+    max_response_bytes: int | None = Field(default=None, gt=0)
     max_depth: int | None = Field(default=None, ge=0)
     max_documents: int | None = Field(default=None, gt=0)
     exclude_paths: list[str] | None = None

@@ -16,7 +16,12 @@ from typing import Any
 import pytest
 
 from core.adapters.crawl_http import CrawlUnavailable, HttpCrawler
-from core.adapters.crawl_scrapy import CrawlError, CrawlNotFound, CrawlUrlError
+from core.adapters.crawl_scrapy import (
+    CrawlError,
+    CrawlNotFound,
+    CrawlPayloadTooLarge,
+    CrawlUrlError,
+)
 from core.domain.enums import FailureKind
 from core.ports.crawler import CrawlerPort
 from core.ports.types import FetchPlan, FetchMode, RawPage
@@ -48,6 +53,7 @@ class _FakeResponse:
         content_type: str | None = "text/html; charset=utf-8",
         etag: str | None = None,
         last_modified: str | None = None,
+        content_length: int | None = None,
     ) -> None:
         self.url = url
         self.content = content
@@ -59,11 +65,24 @@ class _FakeResponse:
             self.headers["ETag"] = etag
         if last_modified:
             self.headers["Last-Modified"] = last_modified
+        if content_length is not None:
+            self.headers["Content-Length"] = str(content_length)
 
     def raise_for_status(self) -> None:
         """Как ``httpx``: 4xx/5xx — ошибка, ``304`` — не ошибка."""
         if self.status_code >= 400:
             raise RuntimeError(f"HTTP {self.status_code}")
+
+    def iter_bytes(self):  # noqa: ANN201 - дублёр потокового тела httpx
+        """Потоковое тело: один чанк (достаточно для проверки cap)."""
+        if self.content:
+            yield self.content
+
+    def __enter__(self) -> "_FakeResponse":
+        return self
+
+    def __exit__(self, *_exc: object) -> bool:
+        return False
 
 
 class _FakeHttpx:
@@ -74,6 +93,13 @@ class _FakeHttpx:
         self.calls: list[tuple[str, dict[str, str]]] = []
 
     def get(self, url: str, **kwargs: Any) -> _FakeResponse:
+        self.calls.append((url, dict(kwargs.get("headers") or {})))
+        index = min(len(self.calls) - 1, len(self._responses) - 1)
+        return self._responses[index]
+
+    def stream(self, method: str, url: str, **kwargs: Any) -> _FakeResponse:
+        """Потоковый путь: та же запись вызовов, ответ — контекстный менеджер."""
+        assert method == "GET"
         self.calls.append((url, dict(kwargs.get("headers") or {})))
         index = min(len(self.calls) - 1, len(self._responses) - 1)
         return self._responses[index]
@@ -594,3 +620,73 @@ def test_forbidden_is_unchanged_generic_failure(
 
 
 
+
+
+# ---------------------------------------------------------------------------
+# P0/OOM: потолок ответа (axis crawl.max_response_bytes)
+# ---------------------------------------------------------------------------
+
+
+def test_default_max_response_bytes_is_20_mib() -> None:
+    from core.adapters.crawl_http import DEFAULT_MAX_RESPONSE_BYTES
+
+    assert DEFAULT_MAX_RESPONSE_BYTES == 20_971_520
+    assert HttpCrawler(_counting_fetcher([]))._max_response_bytes == 20_971_520
+
+
+def test_oversize_by_content_length_is_typed_and_not_cached(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cache = ContentAddressedCache(tmp_path)
+    crawler, fake = _crawler_with_httpx(
+        monkeypatch,
+        [
+            _FakeResponse(
+                url=URL,
+                content=b"x" * 10,
+                status_code=200,
+                content_length=1_000_000,
+            )
+        ],
+        cache,
+    )
+
+    with pytest.raises(CrawlPayloadTooLarge) as excinfo:
+        crawler.fetch(URL, FetchPlan(max_response_bytes=128))
+
+    assert getattr(excinfo.value, "failure_kind", None) == "payload_too_large"
+    assert cache.get_bytes("http", http_key(URL)) is None
+    assert len(fake.calls) == 1
+
+
+def test_oversize_without_content_length_aborts_stream(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cache = ContentAddressedCache(tmp_path)
+    crawler, _fake = _crawler_with_httpx(
+        monkeypatch,
+        [_FakeResponse(url=URL, content=b"y" * 4096, status_code=200)],
+        cache,
+    )
+
+    with pytest.raises(CrawlPayloadTooLarge):
+        crawler.fetch(URL, FetchPlan(max_response_bytes=128))
+
+    assert cache.get_bytes("http", http_key(URL)) is None
+
+
+def test_payload_within_cap_is_returned(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    crawler, _fake = _crawler_with_httpx(
+        monkeypatch,
+        [_FakeResponse(url=URL, content=b"ok", status_code=200)],
+        ContentAddressedCache(tmp_path),
+    )
+    assert crawler.fetch(URL, FetchPlan(max_response_bytes=2)).content == b"ok"
+
+
+def test_injected_fetcher_respects_cap() -> None:
+    crawler = HttpCrawler(_counting_fetcher([], b"z" * 100), max_response_bytes=10)
+    with pytest.raises(CrawlPayloadTooLarge):
+        crawler.fetch(URL)

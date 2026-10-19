@@ -966,7 +966,10 @@ def build_scout_crawler(
         return HttpCrawler(**_http_crawler_kwargs(config), cache=cache, robots=robots)
     if name == "scrapy":
         # ScrapyCrawler уже выставляет ``ROBOTSTXT_OBEY`` в дефолтных настройках.
-        return ScrapyCrawler(cache=cache)
+        config = deploy if deploy is not None else load_deploy_config(None)
+        return ScrapyCrawler(
+            cache=cache, max_response_bytes=config.crawl.max_response_bytes
+        )
     if name == "browser":
         config = deploy if deploy is not None else load_deploy_config(None)
         robots = _crawler_robots(
@@ -1093,7 +1096,9 @@ def build_scout_crawlers(
     }
     if "scrapy" in referenced:
         try:
-            crawlers["scrapy"] = ScrapyCrawler(cache=cache)
+            crawlers["scrapy"] = ScrapyCrawler(
+                cache=cache, max_response_bytes=config.crawl.max_response_bytes
+            )
         except (WiringError, ImportError, CrawlError):
             pass
     if "browser" in referenced:
@@ -1119,6 +1124,8 @@ def _http_crawler_kwargs(deploy: DeployConfig) -> dict[str, Any]:
         kwargs["user_agent"] = crawl.user_agent
     if crawl.timeout_s is not None:
         kwargs["timeout"] = crawl.timeout_s
+    # P0/OOM: app-дефолт потолка ответа; per-site/run значение приходит на FetchPlan.
+    kwargs["max_response_bytes"] = crawl.max_response_bytes
     return kwargs
 
 

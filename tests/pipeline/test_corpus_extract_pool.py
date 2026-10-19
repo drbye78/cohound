@@ -45,6 +45,7 @@ from core.domain import (
 )
 from core.pipeline import RunPlan
 from core.pipeline.corpus import (
+    _EXTRACT_MAX_POOL_REBUILDS,
     _ExtractRequest,
     ExtractionPool,
     IndexBuild,
@@ -250,6 +251,8 @@ class _FakePool:
         self.completions: list[str] = []
         self.terminate_calls = 0
         self.shutdown_calls = 0
+        self.shutdown_wait: bool | None = None
+        self.shutdown_cancel_futures: bool | None = None
 
     def submit(self, fn: Any, request: _ExtractRequest) -> _FakeFuture:
         self.submitted_requests.append(request)
@@ -257,8 +260,10 @@ class _FakePool:
         self.max_inflight = max(self.max_inflight, self._open)
         return _FakeFuture(self, fn, request)
 
-    def shutdown(self, wait: bool = True) -> None:
+    def shutdown(self, wait: bool = True, cancel_futures: bool = False) -> None:
         self.shutdown_calls += 1
+        self.shutdown_wait = wait
+        self.shutdown_cancel_futures = cancel_futures
 
     def terminate_workers(self) -> None:
         self.terminate_calls += 1
@@ -1164,3 +1169,84 @@ def test_docling_determinism_across_processes() -> None:
             result = future.result(timeout=1800)
             assert result["hash"] == inline.content_hash
             assert result["text"] == inline.text
+
+
+# --------------------------------------------------------------------------- #
+# (10) P0/OOM: shutdown пула — wait=True + cancel_futures; исчерпание
+#      пересборок не сваливается в inline-экстракцию (явный терминал)
+# --------------------------------------------------------------------------- #
+
+
+def test_pool_shutdown_waits_and_cancels_futures(tmp_path: Path) -> None:
+    store = SqliteStore(":memory:")
+    try:
+        _make_run(store)
+        created: list[_FakePool] = []
+        pool = ExtractionPool(
+            pool_factory=_recording_factory(created), worker=_reconstruct_worker
+        )
+        _build(
+            tmp_path,
+            pages={ROOT: b"<html>one</html>"},
+            store=store,
+            run_id=RUN_ID,
+            crawl_defaults=CrawlRunConfig(extract_workers=2),
+            extraction_pool=pool,
+        )
+        assert created
+        # Каждый сданный пул закрывается синхронно и не оставляет воркеров поверх
+        # следующего корня (иначе двойной рабочий набор docling → OOM).
+        assert all(p.shutdown_wait is True for p in created)
+        assert all(p.shutdown_cancel_futures is True for p in created)
+    finally:
+        store.close()
+
+
+def test_extract_pool_rebuild_exhaustion_is_terminal_no_inline(tmp_path: Path) -> None:
+    store = SqliteStore(":memory:")
+    try:
+        _make_run(store)
+        created: list[_FakePool] = []
+
+        def always_crash(n: int, level: Any = None) -> _FakePool:
+            fake = _FakePool(n, crash_on=1)
+            created.append(fake)
+            return fake
+
+        pool = ExtractionPool(pool_factory=always_crash, worker=_reconstruct_worker)
+        # Девять страниц > трёх волн по 2: после исчерпания пересборок остаётся остаток,
+        # который должен стать терминальным ``parser_failed``, а не уйти в inline docling.
+        pages = {
+            ROOT: (
+                "<html>"
+                + "".join(f'<a href="/p{i}">p</a>' for i in range(8))
+                + "</html>"
+            ).encode()
+        }
+        for i in range(8):
+            pages[f"https://docs.test/p{i}"] = f"<html>page {i}</html>".encode()
+        result = _build(
+            tmp_path,
+            pages=pages,
+            store=store,
+            run_id=RUN_ID,
+            crawl_defaults=CrawlRunConfig(max_depth=1, extract_workers=2),
+            extraction_pool=pool,
+        )
+        items = _session_items(store)
+
+        # Пересборки ограничены; после исчерпания остаток корня доводится терминально
+        # (parser_failed), а не inline docling'ом в родителе.
+        assert len(created) == _EXTRACT_MAX_POOL_REBUILDS + 1
+        assert any(
+            "терминально" in e and "inline" in e for e in result.errors
+        )
+        assert any(
+            "extraction pool exhausted" in (i.error or "")
+            for i in items.values()
+        )
+        assert all(
+            i.status is not CrawlItemStatus.FETCHED for i in items.values()
+        )
+    finally:
+        store.close()

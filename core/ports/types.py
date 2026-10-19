@@ -65,6 +65,10 @@ class FetchPlan:
     robots: bool = False
     if_none_match: str | None = None
     if_modified_since: str | None = None
+    #: P0/OOM: потолок одного ответа (байты) для этого запроса. ``None`` — адаптер
+    #: применяет собственный дефолт (20 MiB). Резолвится из ``CrawlLimits`` per seed-root
+    #: и переносится на план, чтобы per-site ось дошла до транспорта.
+    max_response_bytes: int | None = None
 
 
 @dataclass(frozen=True)

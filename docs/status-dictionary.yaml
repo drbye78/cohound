@@ -101,6 +101,10 @@ failure_kind:
   - dlp_blocked
   - quarantined
   - extraction_timeout
+  # Осознанные границы исполнения (не блокируют complete, как exclude_documents):
+  # потолок ответа crawl.max_response_bytes и бинарный не-документ (post-fetch sniff).
+  - payload_too_large
+  - unsupported_binary
 
 # §4.1. cell_state — жизненный цикл ячейки.
 # evaluated+status → разрешённая; failed → status=null (I4), в знаменателе Coverage (I5).

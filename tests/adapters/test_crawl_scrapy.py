@@ -597,3 +597,39 @@ def test_scrapy_failure_status_extraction() -> None:
     assert _scrapy_failure_status(_FakeFailure(_FakeHttpError(410))) == 410
     assert _scrapy_failure_status(_FakeFailure(_FakeHttpError(500))) == 500
     assert _scrapy_failure_status(_FakeFailure(RuntimeError("network"))) is None
+
+
+# ---------------------------------------------------------------------------
+# P0/OOM: ось crawl.max_response_bytes → DOWNLOAD_MAXSIZE/WARNSIZE
+# ---------------------------------------------------------------------------
+
+
+def test_default_max_response_bytes_is_20_mib() -> None:
+    from core.adapters.crawl_scrapy import DEFAULT_MAX_RESPONSE_BYTES
+
+    assert DEFAULT_MAX_RESPONSE_BYTES == 20_971_520
+    crawler = ScrapyCrawler(fetcher=_page)
+    settings = crawler._build_settings(FetchPlan())
+    assert settings["DOWNLOAD_MAXSIZE"] == 20_971_520
+    assert settings["DOWNLOAD_WARNSIZE"] <= settings["DOWNLOAD_MAXSIZE"]
+
+
+def test_axis_overrides_download_maxsize_and_warnsize() -> None:
+    crawler = ScrapyCrawler(fetcher=_page, max_response_bytes=999)
+    settings = crawler._build_settings(FetchPlan(max_response_bytes=4096))
+    assert settings["DOWNLOAD_MAXSIZE"] == 4096
+    assert settings["DOWNLOAD_WARNSIZE"] <= 4096
+
+
+def test_oversize_failure_is_classified() -> None:
+    from core.adapters.crawl_scrapy import _is_oversize_failure
+
+    class FileSizeError(RuntimeError):
+        pass
+
+    class _Failure:
+        def __init__(self, value: BaseException) -> None:
+            self.value = value
+
+    assert _is_oversize_failure(_Failure(FileSizeError("downloaded more than 100")))
+    assert not _is_oversize_failure(_Failure(RuntimeError("network down")))

@@ -77,6 +77,12 @@ _FROZEN = ConfigDict(
 #: ``BLOCKING_FAILURE_KINDS``, а не только «origin с нулём FETCHED».
 METHODOLOGY_VERSION = "2.2.0"
 
+#: P0/OOM: дефолтный потолок одного HTTP-ответа/retained-файла — 20 MiB. Операционная
+#: ось исполнения (``crawl.max_response_bytes``), не методология; адаптеры используют
+#: его как собственный дефолт, чтобы probe/прочие call-site без ``CrawlLimits``
+#: получали тот же предел.
+DEFAULT_MAX_RESPONSE_BYTES = 20_971_520
+
 
 # ---------------------------------------------------------------------------
 # §4.2 Пакет категории
@@ -382,6 +388,10 @@ class CrawlRunConfig(BaseModel):
     # ``extract_workers == 1``, а воркер пересоздаётся после N заданий: рабочий набор
     # тяжёлого конвертера (docling) не накапливается в долгоживущем процессе.
     extract_max_tasks_per_child: int | None = Field(default=None, ge=1)
+    # P0/OOM: run-слой потолка одного HTTP-ответа/retained-файла (байты). ``None`` —
+    # не задано на этом слое (наследуется app-дефолт 20 MiB). Резолв — та же цепочка
+    # app < run < site; смена — ``execution_change`` (§13), не methodology.
+    max_response_bytes: int | None = Field(default=None, gt=0)
     max_depth: int | None = Field(default=None, ge=0)
     max_documents: int | None = Field(default=None, gt=0)
     exclude_paths: list[str] | None = None
@@ -899,6 +909,10 @@ class RunManifest(BaseModel):
     #: (``crawl.extract_max_tasks_per_child``). Та же граница класса ``execution_change``
     #: (§13): меняет условия измерения. ``None`` — ось не задана (манифесты не меняются).
     crawl_extract_max_tasks_per_child: int | None = None
+    #: P0/§13: потолок одного HTTP-ответа/retained-файла (``crawl.max_response_bytes``).
+    #: Операционная ось (``execution_change``), не methodology. ``None`` — run-слой не
+    #: задавал явно (в дайджесте зафиксирован эффективный дефолт 20 MiB).
+    crawl_max_response_bytes: int | None = None
     #: P5/§13: уровень извлечения документных форматов (``crawl.document_level``). Его смена —
     #: та же граница класса ``execution_change``. ``None`` — не разрешён явно (в дайджесте
     #: всё равно зафиксирован эффективный ``full`` по app-дефолту).

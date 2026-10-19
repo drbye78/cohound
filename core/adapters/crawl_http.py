@@ -57,9 +57,11 @@ from datetime import datetime, timezone
 from typing import Any
 
 from core.adapters.crawl_scrapy import (
+    DEFAULT_MAX_RESPONSE_BYTES,
     NOT_FOUND_STATUSES,
     CrawlError,
     CrawlNotFound,
+    CrawlPayloadTooLarge,
     CrawlRefused,
     CrawlUrlError,
 )
@@ -72,6 +74,7 @@ __all__ = [
     "CrawlUnavailable",
     "HttpCrawler",
     "HttpGetFn",
+    "DEFAULT_MAX_RESPONSE_BYTES",
     "DEFAULT_TIMEOUT",
     "DEFAULT_USER_AGENT",
     "DEFAULT_ACCEPT",
@@ -137,11 +140,17 @@ class HttpCrawler:
         user_agent: str | None = DEFAULT_USER_AGENT,
         follow_redirects: bool = True,
         robots: RobotsGate | None = None,
+        max_response_bytes: int = DEFAULT_MAX_RESPONSE_BYTES,
     ) -> None:
         if fetcher is not None and http_get is not None:
             raise ValueError("задайте только один шов: fetcher или http_get")
         if timeout <= 0:
             raise ValueError(f"timeout обязан быть положительным, получено {timeout!r}")
+        if max_response_bytes <= 0:
+            raise ValueError(
+                "max_response_bytes должен быть положительным, "
+                f"получено {max_response_bytes!r}"
+            )
         self._fetcher = fetcher if fetcher is not None else http_get
         self._cache = cache
         self.timeout = timeout
@@ -150,6 +159,7 @@ class HttpCrawler:
         # D1/§10: per-host политика robots.txt (egress-слой). ``None`` → без проверки
         # (обратная совместимость); тесты инъектят политику без сети.
         self._robots = robots
+        self._max_response_bytes = int(max_response_bytes)
 
     @property
     def available(self) -> bool:
@@ -243,6 +253,7 @@ class HttpCrawler:
                 raise
             except Exception as exc:  # noqa: BLE001 - унификация ошибок адаптера
                 raise CrawlError(f"фетч {url!r} не удался: {exc}") from exc
+            self._check_size(url, content, plan)
             return RawPage(
                 url=url,
                 content=content,
@@ -251,32 +262,72 @@ class HttpCrawler:
             )
         return self._get_real(url, plan)
 
+    def _cap_for(self, plan: FetchPlan) -> int:
+        """Эффективный потолок: per-plan (site/run) поверх дефолта адаптера."""
+        if plan.max_response_bytes is not None:
+            return int(plan.max_response_bytes)
+        return self._max_response_bytes
+
+    def _check_size(self, url: str, content: bytes, plan: FetchPlan) -> None:
+        """Проверка размера для внедрённого шва (реальный путь режется потоково)."""
+        cap = self._cap_for(plan)
+        if len(content) > cap:
+            raise CrawlPayloadTooLarge(
+                f"ответ {url!r}: {len(content)} байт > лимита {cap} (payload_too_large)"
+            )
+
     def _get_real(self, url: str, plan: FetchPlan) -> RawPage:
-        """Реальный GET; ``304`` — не ошибка, а подтверждение кэша (см. ниже)."""
+        """Потоковый GET; ``304`` — не ошибка, а подтверждение кэша (см. ниже).
+
+        Тело **не** буферизуется целиком до проверки: ``Content-Length`` проверяется до
+        чтения, а поток обрывается сразу при превышении ``max_response_bytes``. Так
+        многогигабайтный артефакт (OVA/образ) не попадает ни в память, ни в retention.
+        """
         httpx = self._import_http()
+        cap = self._cap_for(plan)
         try:
-            response = httpx.get(
+            with httpx.stream(
+                "GET",
                 url,
                 timeout=self.timeout,
                 follow_redirects=self.follow_redirects,
                 headers=self._headers(plan),
-            )
-            if int(response.status_code) == 304:
-                return self._page_not_modified(url, response)
-            # 404/410 — определённый ответ «ресурса нет», а не недоступность источника.
-            # Классифицируем ДО ``raise_for_status``: иначе статус схлопнулся бы в
-            # бесцветный ``CrawlError`` и pipeline записал бы ``source_unavailable``.
-            status = int(response.status_code)
-            if status in NOT_FOUND_STATUSES:
-                raise CrawlNotFound(
-                    f"HTTP {status} для {url!r}: ресурс отсутствует",
-                )
-            response.raise_for_status()
+            ) as response:
+                if int(response.status_code) == 304:
+                    return self._page_not_modified(url, response)
+                # 404/410 — определённый ответ «ресурса нет», а не недоступность источника.
+                # Классифицируем ДО ``raise_for_status``: иначе статус схлопнулся бы в
+                # бесцветный ``CrawlError`` и pipeline записал бы ``source_unavailable``.
+                status = int(response.status_code)
+                if status in NOT_FOUND_STATUSES:
+                    raise CrawlNotFound(
+                        f"HTTP {status} для {url!r}: ресурс отсутствует",
+                    )
+                response.raise_for_status()
+                declared = response.headers.get("Content-Length")
+                if declared is not None:
+                    try:
+                        declared_size = int(declared)
+                    except (TypeError, ValueError):
+                        declared_size = None
+                    if declared_size is not None and declared_size > cap:
+                        raise CrawlPayloadTooLarge(
+                            f"ответ {url!r}: Content-Length {declared_size} байт "
+                            f"> лимита {cap} (payload_too_large)"
+                        )
+                buffer = bytearray()
+                for chunk in response.iter_bytes():
+                    if len(buffer) + len(chunk) > cap:
+                        raise CrawlPayloadTooLarge(
+                            f"ответ {url!r}: тело превысило лимит {cap} байт "
+                            "(payload_too_large)"
+                        )
+                    buffer.extend(chunk)
+                return self._page_from_response(response, bytes(buffer))
         except CrawlError:
             raise
         except Exception as exc:  # noqa: BLE001 - унификация ошибок адаптера
             raise CrawlError(f"HTTP-фетч {url!r} не удался: {exc}") from exc
-        return self._page_from_response(response)
 
     def _headers(self, plan: FetchPlan | None = None) -> dict[str, str]:
         """Заголовки запроса: ``Accept``/``Accept-Language``, ``User-Agent`` и валидаторы.
@@ -298,18 +349,20 @@ class HttpCrawler:
         return headers
 
     @staticmethod
-    def _page_from_response(response: Any) -> RawPage:
+    def _page_from_response(response: Any, content: bytes | None = None) -> RawPage:
         """Отображает объект ответа ``httpx`` в ``RawPage`` (финальный URL, статус, тип).
 
-        Заголовки ``ETag``/``Last-Modified`` сохраняются как валидаторы для следующего
-        условного запроса.
+        ``content`` — уже прочитанное потоковое тело; ``None`` (прямой вызов/тест) —
+        ``response.content``. Заголовки ``ETag``/``Last-Modified`` сохраняются как
+        валидаторы для следующего условного запроса.
         """
         raw_type = response.headers.get("Content-Type")
         etag = response.headers.get("ETag")
         last_modified = response.headers.get("Last-Modified")
+        body = response.content if content is None else content
         return RawPage(
             url=str(response.url),
-            content=response.content,
+            content=body,
             fetched_at=_now_iso(),
             fetch_mode=FetchMode.HTTP,
             status_code=response.status_code,
