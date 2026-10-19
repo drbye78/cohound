@@ -59,6 +59,7 @@ from core.cli.package.commands import (
     cmd_package_apply,
     cmd_package_scout,
     cmd_package_crawl_probe,
+    cmd_package_add_product,
     cmd_package,
 )
 
@@ -655,5 +656,35 @@ def add_package_parser(subparsers: Any) -> None:
         help="человек, выполняющий запись (обязателен с --write)",
     )
     p_probe.set_defaults(handler=cmd_package_crawl_probe)
+
+    # add-product (продукт → когорта + домены; plan-only по умолчанию) ------------- #
+    p_add = pkg.add_parser(
+        "add-product",
+        help="добавить продукт в когорту: SERP+scout+ключи доменов (plan-only; --apply пишет)",
+    )
+    _add_op_common(p_add)
+    p_add.add_argument("product_name", metavar="NAME", help="человеческое имя продукта")
+    p_add.add_argument(
+        "--url", default=None, help="подсказка URL продукта (идентификация при синонимах)"
+    )
+    p_add.add_argument("--category", default=None, help="категория (для запросов/артефакта)")
+    p_add.add_argument(
+        "--reason", default=None, help="selection_reason когорты (иначе — из scout)"
+    )
+    p_add.add_argument(
+        "--apply", action="store_true", help="применить план (требует --actor); без него — plan-only"
+    )
+    p_add.add_argument(
+        "--passport", action="store_true", help="также записать черновик паспорта (с --apply)"
+    )
+    p_add.add_argument(
+        "--passports-dir",
+        default=None,
+        help="каталог паспортов для --passport (дефолт — resolved paths.passports)",
+    )
+    p_add.add_argument("--lang", choices=["ru", "en"], default="ru", help="язык SERP-запросов")
+    p_add.add_argument("--limit", type=int, default=10, help="лимит результатов SERP на запрос")
+    p_add.add_argument("--max-pages", type=int, default=5, help="потолок фетчей разведки")
+    p_add.set_defaults(handler=cmd_package_add_product)
 
     p_package.set_defaults(handler=cmd_package, _package_parser=p_package)

@@ -44,6 +44,11 @@ from core.pipeline.crawl_probe import (
     write_crawl_probe_proposal,
 )
 from core.pipeline.crawl_probe_driver import ProbePorts, run_probe
+from core.pipeline.package_add_product import (
+    AddProductError,
+    apply_add_product,
+    plan_add_product,
+)
 from core.pipeline.package_admin import (
     OpResult,
     PackageAdminError,
@@ -160,6 +165,7 @@ __all__ = [
     "cmd_package_apply",
     "cmd_package_scout",
     "cmd_package_crawl_probe",
+    "cmd_package_add_product",
     "_invoke",
     "_emit",
     "_op_payload",
@@ -1818,6 +1824,209 @@ def _print_crawl_probe_lines(
             lines.append(f"  {verdict.key}: unresolved [{reason}]{detail}")
     for note in payload["notes"]:
         lines.append(f"note: {note}")
+    return lines
+
+
+def _add_product_ports(args: argparse.Namespace, pkg_dir: Path, extractor: Any) -> Any:
+    """Собирает :class:`ProbePorts` для ``add-product`` (инъекция либо local-адаптеры)."""
+    from core.adapters.crawl_browser import BrowserCrawler
+    from core.adapters.crawl_http import HttpCrawler
+    from core.cli.wiring import _browser_crawler_kwargs, _http_crawler_kwargs
+
+    injected = getattr(args, "crawl_probe_ports", None)
+    if injected is not None:
+        return injected
+    deploy = load_deploy_config(None)
+    http = HttpCrawler(cache=None, **_http_crawler_kwargs(deploy))
+    browser: Any = None
+    try:
+        browser = BrowserCrawler(cache=None, **_browser_crawler_kwargs(deploy))
+    except Exception:  # noqa: BLE001 — недоступность браузера не роняет зонд
+        browser = None
+    return ProbePorts(
+        http=http,
+        browser=browser,
+        extractor=extractor,
+        robots=RobotsGate(_make_robots_fetcher(http)),
+    )
+
+
+def cmd_package_add_product(args: argparse.Namespace) -> int:
+    """``hound package add-product`` — добавить продукт в когорту (plan-only по умолчанию).
+
+    URL разрешается из SERP при отсутствии ``--url`` (детерминированный скоринг; слабый
+    или неоднозначный кандидат → ``EXIT_USAGE``). Разведка паспорта даёт product info;
+    сайты/ключи выводятся из resolved/fetched/satellite/SERP URL. Оси краула зондируются
+    тем же драйвером, что ``crawl-probe`` (wait_for не синтезируется). ``--apply --actor``
+    пишет когорту, ``domain_profiles.yaml`` и review-артефакт; ``--passport`` добавляет
+    черновик паспорта. Без ``--apply`` ничего не пишется.
+    """
+    from core.cli.wiring import (
+        LOCAL_PROFILE,
+        SearchResolutionError,
+        WiringError,
+        build_adapters,
+        build_discovery_llm,
+        build_scout_crawler,
+        resolve_and_build_search_adapter,
+    )
+
+    if getattr(args, "apply", False) and not getattr(args, "actor", None):
+        raise CliError(
+            "--apply требует --actor (человек, изменяющий пакет)",
+            code="usage",
+            exit_code=EXIT_USAGE,
+        )
+    profile = getattr(args, "profile", LOCAL_PROFILE)
+    if profile != LOCAL_PROFILE:
+        raise CliError(
+            "add-product исполняется в профиле local (прямые краулеры); split не поддержан",
+            code="usage",
+            exit_code=EXIT_USAGE,
+        )
+    pkg_dir = Path(args.package)
+    if not (pkg_dir / "package.yaml").is_file():
+        raise CliError(
+            f"{args.package}: package.yaml отсутствует — это не пакет категории",
+            code="package",
+            exit_code=EXIT_USAGE,
+        )
+
+    # 1. LLM-разведка: инъекция теста либо сборка из env/флагов.
+    injected_llm = getattr(args, "discovery_llm", None)
+    if injected_llm is not None:
+        discovery_llm = injected_llm
+    else:
+        try:
+            discovery_llm = build_discovery_llm(
+                base_url=getattr(args, "llm_base_url", None),
+                model_id=getattr(args, "llm_model", None),
+                decoder=getattr(args, "llm_decoder", None),
+                slot=getattr(args, "llm_slot", None),
+                deploy_llm=load_deploy_config(None).llm,
+            )
+        except WiringError as exc:
+            emit_error(args, "llm", concise(exc))
+            return EXIT_USAGE
+    if not _llm_configured(discovery_llm):
+        emit_error(
+            args,
+            "llm",
+            "LLM-разведка не сконфигурирована: задайте --llm-base-url/--llm-model "
+            "или COHOUND_LLM_BASE_URL/COHOUND_LLM_MODEL; URL/данные не выдумываются",
+        )
+        return EXIT_USAGE
+
+    # 2. Поиск: нужен всегда (SERP расширяет набор сайтов); инъекция имеет приоритет.
+    #    Без --url недоступность поиска — usage; с --url план честно предупредит об
+    #    отсутствии SERP (URL остаётся подсказкой идентификации).
+    search = getattr(args, "search_adapter", None)
+    if search is None:
+        try:
+            search, _provider = resolve_and_build_search_adapter(
+                lang=args.lang, explicit=None, injected=None, no_search=False
+            )
+        except SearchResolutionError as exc:
+            if not args.url:
+                emit_error(
+                    args,
+                    "usage",
+                    "URL не задан, а поисковый адаптер недоступен; укажите --url "
+                    f"({concise(exc)})",
+                )
+                return EXIT_USAGE
+        except WiringError as exc:
+            if not args.url:
+                emit_error(
+                    args, "usage", f"поиск недоступен ({concise(exc)}); укажите --url"
+                )
+                return EXIT_USAGE
+
+    # 3. Краул/экстракция — как в ``passport-scout``/``package scout``.
+    profile_ports = build_adapters(profile=LOCAL_PROFILE, package=str(pkg_dir))
+    crawler = getattr(args, "crawler", None) or build_scout_crawler()
+    extractor: Any = getattr(args, "extractor", None) or profile_ports.extractor
+    probe_ports = _add_product_ports(args, pkg_dir, extractor)
+
+    try:
+        plan = plan_add_product(
+            pkg_dir,
+            args.product_name,
+            url=args.url,
+            category=args.category,
+            reason=args.reason,
+            lang=args.lang,
+            limit=args.limit,
+            max_pages=args.max_pages,
+            discovery_llm=discovery_llm,
+            crawler=crawler,
+            extractor=extractor,
+            search=search,
+            probe_ports=probe_ports,
+        )
+    except AddProductError as exc:
+        emit_error(args, exc.code, concise(exc))
+        return EXIT_USAGE if exc.code == "usage" else EXIT_ERROR
+
+    writing = bool(args.apply) and not bool(args.dry_run)
+    applied: dict[str, Any] | None = None
+    if writing:
+        passports_dir = getattr(args, "passports_dir", None)
+        if passports_dir is None and getattr(args, "paths", None) is not None:
+            passports_dir = str(args.paths.passports)
+        try:
+            applied = apply_add_product(
+                pkg_dir,
+                plan,
+                actor=str(args.actor),
+                write_passport=bool(args.passport),
+                passports_dir=passports_dir,
+            )
+        except AddProductError as exc:
+            emit_error(args, exc.code, concise(exc))
+            return EXIT_USAGE if exc.code == "usage" else EXIT_ERROR
+        except PackageAdminError as exc:
+            exit_code = EXIT_BLOCKED if exc.kind == "blocked" else EXIT_USAGE
+            raise CliError(str(exc), code=exc.code, exit_code=exit_code) from exc
+
+    payload: dict[str, Any] = {
+        **plan.as_dict(),
+        "ok": True,
+        "dry_run": not writing,
+        "applied": applied is not None,
+        "package": str(pkg_dir),
+    }
+    if applied is not None:
+        payload.update(applied)
+    _emit(args, payload, _print_add_product_lines(payload, plan))
+    return EXIT_OK
+
+
+def _print_add_product_lines(payload: dict[str, Any], plan: Any) -> list[str]:
+    """Строит строки человекочитаемого вывода ``package add-product``."""
+    lines = [
+        f"product: {payload['product_name']} ({payload['product_id']})",
+        f"url: {payload['resolved_url']} [{payload['url_source']}]",
+        f"dry-run: {'yes' if payload['dry_run'] else 'no'}",
+        f"keys: {len(plan.sites)}",
+    ]
+    for site in plan.sites:
+        budget = plan.budget_basis.get(site.key, {})
+        lines.append(
+            f"  {site.key}: fetch={plan.profiles[site.key].get('fetch')} "
+            f"extract={plan.profiles[site.key].get('extract')} "
+            f"max_depth={budget.get('max_depth')} "
+            f"max_documents={budget.get('max_documents')} "
+            f"sitemap={'yes' if budget.get('sitemap_found') else 'no'}"
+        )
+    for item in payload.get("needs_human", []):
+        lines.append(f"needs_human: {item}")
+    for item in payload.get("warnings", []):
+        lines.append(f"warning: {item}")
+    if payload.get("applied"):
+        lines.append(f"written: {len(payload.get('written_files', []))} файл(ов)")
+        for path in payload.get("written_files", []):
+            lines.append(f"  {path}")
     return lines
 
 

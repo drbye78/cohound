@@ -262,6 +262,14 @@ from core.pipeline.package_candidates import (
     loads_candidates,
     plan_candidates,
 )
+from core.pipeline.package_add_product import (
+    AddProductError,
+    AddProductPlan,
+    DiscoveredSite,
+    apply_add_product,
+    plan_add_product,
+    write_domain_profiles_with_new_keys,
+)
 from core.pipeline.package_scout import (
     BASELINE_TEMPLATE_VERSION,
     CATALOG_TEMPLATE_VERSION,
@@ -406,6 +414,13 @@ __all__ = [
     "build_passport_draft",
     "scout_passport",
     "write_passport_draft",
+    # add-product (авторское добавление продукта в когорту)
+    "AddProductError",
+    "AddProductPlan",
+    "DiscoveredSite",
+    "apply_add_product",
+    "plan_add_product",
+    "write_domain_profiles_with_new_keys",
     # adversarial (T12.3), R8
     "AdversarialCase",
     "AdversarialReport",
