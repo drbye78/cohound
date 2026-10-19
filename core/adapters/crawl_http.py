@@ -18,9 +18,15 @@
   ``run_id``); промах → живой фетч + запись;
 * **условный повторный фетч** — рядом с ``.bin`` лежит JSON-сайдкар
   (``.meta.json``) с ``etag``/``last_modified``/``status_code``/``content_type``/
-  ``final_url``. Если ``plan`` несёт ``if_none_match``/``if_modified_since``,
-  кэш-шорткат **не** применяется: заголовки уходят на сервер, а ``304`` возвращает
-  ``not_modified=True`` и **закэшированные** байты (пустое тело — ошибка).
+  ``final_url``. Приоритет валидаторов: **план → мета кэша → безусловный GET**.
+  Валидаторы ``plan.if_none_match``/``plan.if_modified_since`` (явное намерение
+  вызывающего) имеют приоритет; если их нет, а сайдкар несёт ``etag``/
+  ``last_modified``, адаптер сам строит эффективный план (``dataclasses.replace``)
+  и делает **живой** условный запрос — кэш-шорткат не применяется, сервер
+  спрашивается «актуально ли?» и отвечает дешёвым ``304``. Если валидаторов нет
+  нигде — поведение прежнее (попадание отдаёт байты, промах фетчит). ``304``
+  возвращает ``not_modified=True`` и **закэшированные** байты (пустое тело —
+  ошибка).
 
 **Ленивый ``httpx``.** Модуль импортируется без ``httpx``; пакет подтягивается только
 в реальном пути. ``available`` показывает готовность (``httpx`` установлен или внедрён
@@ -45,6 +51,7 @@ from __future__ import annotations
 
 import importlib.util
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Any
 
@@ -145,8 +152,10 @@ class HttpCrawler:
     # -- публичный контракт ---------------------------------------------------
 
     def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:
-        """Загружает ``url``: проверка плана → SSRF → кэш → живой фетч → кэш.
+        """Загружает ``url``: проверка плана → SSRF → валидаторы → кэш/живой фетч → кэш.
 
+        Валидаторы берутся из плана, иначе — из сайдкара кэша (см. модульный докстринг):
+        при наличии любых валидаторов запрос уходит на сервер (возможен ``304``).
         ``FetchMode.BROWSER`` этим адаптером не поддерживается (понятная ошибка).
         """
         if plan.fetch is FetchMode.BROWSER:
@@ -175,15 +184,32 @@ class HttpCrawler:
                 )
 
         key = http_key(url)
-        # Условный запрос обязан дойти до сервера: кэш-шорткат его бы проглотил.
-        conditional = bool(plan.if_none_match or plan.if_modified_since)
         meta = self._cache.get_meta("http", key) if self._cache is not None else None
+        # Приоритет валидаторов: план → мета кэша → безусловный GET. Валидаторы плана —
+        # явное намерение вызывающего (их же прокидывает шов DMZ). Иначе адаптер сам
+        # достаёт валидаторы прошлого получения из сайдкара и делает **живой** условный
+        # запрос: без этого недельный цикл всегда получал бы полный ``200`` и экономия
+        # ``304`` была бы нулевой. План вызывающего не мутируем.
+        effective_plan = plan
+        if not (plan.if_none_match or plan.if_modified_since) and meta is not None:
+            cached_etag = meta.get("etag")
+            cached_modified = meta.get("last_modified")
+            if cached_etag or cached_modified:
+                effective_plan = replace(
+                    plan,
+                    if_none_match=str(cached_etag) if cached_etag else None,
+                    if_modified_since=str(cached_modified) if cached_modified else None,
+                )
+        # Условный запрос обязан дойти до сервера: кэш-шорткат его бы проглотил.
+        conditional = bool(
+            effective_plan.if_none_match or effective_plan.if_modified_since
+        )
         if self._cache is not None and not conditional:
             cached = self._cache.get_bytes("http", key)
             if cached is not None:
                 return self._page_from_cache(url, cached, meta)
 
-        page = self._fetch_live(url, plan)
+        page = self._fetch_live(url, effective_plan)
         if self._cache is not None and not page.not_modified:
             self._cache.put_bytes("http", key, page.content)
             self._cache.put_meta(

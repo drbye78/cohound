@@ -391,3 +391,141 @@ def test_legacy_cache_entry_without_meta_behaves_as_before(
     assert page.not_modified is False
 
 
+# ---------------------------------------------------------------------------
+# Ф1.1: адаптер сам замыкает цикл валидаторов (план → мета кэша → безусловный)
+# ---------------------------------------------------------------------------
+
+
+def _seed_cache_with_validators(
+    cache: ContentAddressedCache,
+    *,
+    content: bytes = b"cached-representation",
+    etag: str | None = '"v1"',
+    last_modified: str | None = "Wed, 21 Oct 2026 07:28:00 GMT",
+) -> None:
+    """Кладёт в кэш тело и сайдкар прошлого получения (как после живого ``200``)."""
+    cache.put_bytes("http", http_key(URL), content)
+    cache.put_meta(
+        "http",
+        http_key(URL),
+        {
+            "etag": etag,
+            "last_modified": last_modified,
+            "status_code": 200,
+            "content_type": "text/html",
+            "final_url": "https://example.com/final",
+        },
+    )
+
+
+def test_cache_meta_validators_produce_conditional_request_and_304(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Регрессия Ф1.1: план без валидаторов — адаптер берёт их из меты кэша.
+
+    Без этой ветки недельный цикл всегда отправлял безусловный GET и получал полный
+    ``200``: «главный рычаг» экономии не работал. Здесь проверяется, что условные
+    заголовки реально доехали до транспорта, а ``304`` отдал кэшированные байты.
+    """
+    cache = ContentAddressedCache(tmp_path)
+    _seed_cache_with_validators(cache)
+    crawler, fake = _crawler_with_httpx(
+        monkeypatch,
+        [_FakeResponse(url=URL, content=b"", status_code=304)],
+        cache,
+    )
+
+    def _no_write(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("304 не должен писать новую запись кэша")
+
+    monkeypatch.setattr(cache, "put_bytes", _no_write)
+    monkeypatch.setattr(cache, "put_meta", _no_write)
+
+    plan = FetchPlan()  # валидаторов нет — их обязан подставить адаптер
+    page = crawler.fetch(URL, plan)
+
+    # Живой условный запрос: заголовки дошли до транспорта, а не только до плана.
+    assert len(fake.calls) == 1
+    headers = fake.calls[0][1]
+    assert headers["If-None-Match"] == '"v1"'
+    assert headers["If-Modified-Since"] == "Wed, 21 Oct 2026 07:28:00 GMT"
+    # 304: байты из кэша, not_modified=True, пустого тела нет.
+    assert page.not_modified is True
+    assert page.status_code == 304
+    assert page.content == b"cached-representation"
+    assert page.etag == '"v1"'
+    assert page.last_modified == "Wed, 21 Oct 2026 07:28:00 GMT"
+    # План вызывающего не мутирован.
+    assert plan.if_none_match is None
+    assert plan.if_modified_since is None
+
+
+def test_plan_validators_override_cache_meta(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cache = ContentAddressedCache(tmp_path)
+    _seed_cache_with_validators(cache)
+    crawler, fake = _crawler_with_httpx(
+        monkeypatch,
+        [_FakeResponse(url=URL, content=b"fresh-body", status_code=200)],
+        cache,
+    )
+
+    page = crawler.fetch(URL, FetchPlan(if_none_match='"plan-version"'))
+
+    headers = fake.calls[0][1]
+    assert headers["If-None-Match"] == '"plan-version"'  # план, не '"v1"' из меты
+    assert "If-Modified-Since" not in headers  # план не задавал — мета не подмешана
+    assert page.content == b"fresh-body"
+    assert page.not_modified is False
+
+
+def test_cache_hit_with_meta_but_without_validators_is_served_from_cache(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cache = ContentAddressedCache(tmp_path)
+    cache.put_bytes("http", http_key(URL), b"cached-body")
+    cache.put_meta(
+        "http",
+        http_key(URL),
+        {
+            "etag": None,
+            "last_modified": None,
+            "status_code": 200,
+            "content_type": "text/html",
+            "final_url": "https://example.com/final",
+        },
+    )
+    fake = _FakeHttpx([])  # любое обращение к транспорту — ошибка теста
+    monkeypatch.setattr(HttpCrawler, "_import_http", staticmethod(lambda: fake))
+    crawler = HttpCrawler(cache=cache)
+
+    page = crawler.fetch(URL)
+
+    assert fake.calls == []  # валидаторов нет нигде → прежний кэш-шорткат
+    assert page.content == b"cached-body"
+    assert page.status_code == 200
+    assert page.content_type == "text/html"
+    assert page.url == "https://example.com/final"
+    assert page.not_modified is False
+
+
+def test_meta_fallback_304_without_cached_bytes_is_explicit_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Условный запрос возник из-за меты кэша, но тела нет — ошибка, не пустая страница.
+    cache = ContentAddressedCache(tmp_path)
+    cache.put_meta("http", http_key(URL), {"etag": '"v1"'})
+    crawler, fake = _crawler_with_httpx(
+        monkeypatch,
+        [_FakeResponse(url=URL, content=b"", status_code=304)],
+        cache,
+    )
+
+    with pytest.raises(CrawlError, match="304"):
+        crawler.fetch(URL)
+
+    assert fake.calls[0][1]["If-None-Match"] == '"v1"'
+
+
+

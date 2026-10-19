@@ -470,6 +470,128 @@ def test_hybrid_challenge_not_cached(tmp_path: Path) -> None:
     assert cache.get_bytes("http", http_key(URL)) is None
 
 
+# ---------------------------------------------------------------------------
+# Ф1.1 для hybrid: условный GET (план → мета кэша) и 304 из кэша
+# ---------------------------------------------------------------------------
+
+
+def _seed_hybrid_cache(
+    cache: ContentAddressedCache,
+    *,
+    content: bytes = b"cached-hybrid",
+    etag: str | None = '"v1"',
+    last_modified: str | None = "Wed, 21 Oct 2026 07:28:00 GMT",
+) -> None:
+    """Тело + сайдкар прошлого hybrid-получения (как после успешного ``200``)."""
+    cache.put_bytes("http", http_key(URL), content)
+    cache.put_meta(
+        "http",
+        http_key(URL),
+        {
+            "etag": etag,
+            "last_modified": last_modified,
+            "status_code": 200,
+            "content_type": "text/html",
+            "final_url": FINAL_URL,
+        },
+    )
+
+
+def _hybrid_plan(**kwargs: Any) -> FetchPlan:
+    """Hybrid-план; ``kwargs`` — валидаторы (``if_none_match``/``if_modified_since``)."""
+    return FetchPlan(fetch=FetchMode.BROWSER, strategy=CrawlStrategy.HYBRID, **kwargs)
+
+
+def test_hybrid_cache_meta_validators_attach_conditional_headers(tmp_path: Path) -> None:
+    # План без валидаторов: hybrid обязан взять их из меты и спросить сервер вживую.
+    backend = FakeBackend(content=b"<html>", cookies=[COOKIE])
+    getter = RecordingHttpGet([(200, b"hybrid-body", {"Content-Type": "text/html"})])
+    cache = ContentAddressedCache(tmp_path)
+    _seed_hybrid_cache(cache)
+    crawler = BrowserCrawler(backend=backend, http_get=getter, cache=cache)
+
+    page = crawler.fetch(URL, _hybrid_plan())
+
+    (_, headers, _) = getter.calls[0]
+    assert headers["If-None-Match"] == '"v1"'
+    assert headers["If-Modified-Since"] == "Wed, 21 Oct 2026 07:28:00 GMT"
+    # Живой запрос, а не слепой кэш-шорткат: сервер ответил новым телом.
+    assert page.content == b"hybrid-body"
+    assert page.not_modified is False
+
+
+def test_hybrid_plan_validators_override_cache_meta(tmp_path: Path) -> None:
+    backend = FakeBackend(content=b"<html>", cookies=[COOKIE])
+    getter = RecordingHttpGet([(200, b"hybrid-body", {"Content-Type": "text/html"})])
+    cache = ContentAddressedCache(tmp_path)
+    _seed_hybrid_cache(cache)
+    crawler = BrowserCrawler(backend=backend, http_get=getter, cache=cache)
+
+    crawler.fetch(URL, _hybrid_plan(if_none_match='"plan-version"'))
+
+    (_, headers, _) = getter.calls[0]
+    assert headers["If-None-Match"] == '"plan-version"'  # план, не '"v1"' из меты
+    assert "If-Modified-Since" not in headers
+
+
+def test_hybrid_304_returns_cached_bytes_without_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    backend = FakeBackend(content=b"<html>", cookies=[COOKIE], final_url=FINAL_URL)
+    getter = RecordingHttpGet([(304, b"", {})])
+    cache = ContentAddressedCache(tmp_path)
+    _seed_hybrid_cache(cache)
+    crawler = BrowserCrawler(backend=backend, http_get=getter, cache=cache)
+
+    def _no_write(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("304 не должен писать новую запись кэша")
+
+    monkeypatch.setattr(cache, "put_bytes", _no_write)
+    monkeypatch.setattr(cache, "put_meta", _no_write)
+
+    page = crawler.fetch(URL, _hybrid_plan())
+
+    (_, headers, _) = getter.calls[0]
+    assert headers["If-None-Match"] == '"v1"'
+    # 304 наблюдаем напрямую (httpx не поднимает на 304): тело — из кэша, не пустое.
+    assert page.not_modified is True
+    assert page.status_code == 304
+    assert page.content == b"cached-hybrid"
+    assert page.url == FINAL_URL
+    assert page.etag == '"v1"'
+    assert page.last_modified == "Wed, 21 Oct 2026 07:28:00 GMT"
+
+
+def test_hybrid_304_without_cached_bytes_is_explicit_error() -> None:
+    backend = FakeBackend(content=b"<html>", cookies=[COOKIE])
+    getter = RecordingHttpGet([(304, b"", {})])
+    crawler = BrowserCrawler(backend=backend, http_get=getter)
+
+    with pytest.raises(CrawlError, match="304"):
+        crawler._fetch_hybrid(URL, _hybrid_plan(if_none_match='"v1"'))
+
+    assert getter.calls[0][1]["If-None-Match"] == '"v1"'
+
+
+def test_honest_ignores_plan_validators_and_never_claims_not_modified() -> None:
+    # Honest-путь не может предъявить валидаторы: условный GET невозможен, 304 нет.
+    backend = FakeBackend(content=b"<html>honest</html>")
+    crawler = BrowserCrawler(backend=backend)
+    plan = FetchPlan(
+        fetch=FetchMode.BROWSER,
+        strategy=CrawlStrategy.HONEST,
+        if_none_match='"v1"',
+        if_modified_since="Wed, 21 Oct 2026 07:28:00 GMT",
+    )
+
+    page = crawler.fetch(URL, plan)
+
+    assert page.content == b"<html>honest</html>"
+    assert page.etag is None
+    assert page.last_modified is None
+    assert page.not_modified is False
+
+
 def test_hybrid_transport_error_falls_back_to_honest() -> None:
     backend = FakeBackend(content=b"<html>fallback-on-error</html>", cookies=[COOKIE])
     getter = RecordingHttpGet(error=CrawlError("transport down"))

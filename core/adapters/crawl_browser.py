@@ -28,6 +28,11 @@
     (challenge/не-2xx/interstitial) **не кэшируется**: ограниченный повтор с ре-прогревом и
     jittered-backoff, а при исчерпании — возврат **уже полученного браузерного рендера** (без
     лишнего честного фетча). **Сбой транспорта — fallback на honest** (живой рендер).
+    Hybrid-GET **условный**: заголовки ``If-None-Match``/``If-Modified-Since`` берутся из
+    плана, иначе — из сайдкара кэша (приоритет: план → мета кэша → безусловный GET);
+    ``304`` возвращает закэшированные байты с ``not_modified=True`` (пустое тело —
+    ошибка). Честный рендер ``_fetch_honest`` валидаторов не имеет и ``not_modified``
+    не заявляет — см. его докстринг.
 
 **Запуск браузера и automation-сигнал.** Антибот-класс публичных сайтов требует **headed**
 браузера (``headless=False``; headless распознаётся отдельно) и снятия артефакта автоматизации:
@@ -79,6 +84,7 @@ import shutil
 import tempfile
 import time
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Any, Protocol
 from urllib.parse import urljoin, urlsplit
@@ -550,8 +556,10 @@ class BrowserCrawler:
 
         **Ограничение условного запроса.** Реализация Playwright-навигации здесь не
         отдаёт HTTP-заголовки ответа, поэтому честный рендер **не может** предъявить
-        ``ETag``/``Last-Modified`` и **не** заявляет ``not_modified``. Такие страницы
-        всегда пере-фетчиваются целиком; фабриковать валидаторы или ``304`` запрещено.
+        ``ETag``/``Last-Modified`` и **не** заявляет ``not_modified``. Условные заголовки
+        в навигацию не добавляются (их некуда применить: это не лёгкий GET), а мета кэша
+        здесь не читается — honest-путь кэш не использует. Такие страницы всегда
+        пере-фетчиваются целиком; фабриковать валидаторы или ``304`` запрещено.
         """
         session = self._open_session()
         try:
@@ -571,22 +579,52 @@ class BrowserCrawler:
     def _fetch_hybrid(self, url: str, plan: FetchPlan) -> RawPage:
         """Прогрев → HTTP-GET с cookie-мостом; успех ⇔ 2xx и не-interstitial → кэш.
 
+        Условный GET: приоритет валидаторов **план → мета кэша → безусловный GET**.
+        Валидаторы плана (``if_none_match``/``if_modified_since``) — явное намерение
+        вызывающего; иначе берутся ``etag``/``last_modified`` из сайдкара прошлого
+        получения, и запрос идёт вживую (кэш-шорткат не применяется), чтобы сервер мог
+        ответить дешёвым ``304``. ``304`` → закэшированные байты с ``not_modified=True``;
+        нет кэша/байтов — ``CrawlError`` (``fetch`` уйдёт в honest), пустая страница не
+        фабрикуется.
+
         Любой иной исход (challenge/не-2xx/interstitial) не кэшируется; при исчерпании
         повторов возвращается **уже полученный браузерный рендер**. Сбой транспорта
         (``CrawlError`` из :meth:`_http_get_hybrid`) пробрасывается — ``fetch`` уйдёт в honest.
         """
         key = http_key(url)
+        cached: bytes | None = None
+        meta: dict[str, Any] | None = None
         if self._cache is not None:
             cached = self._cache.get_bytes("http", key)
-            if cached is not None:
-                return self._page_from_cache(url, cached, self._cache.get_meta("http", key))
+            meta = self._cache.get_meta("http", key)
+
+        effective_plan = plan
+        if not (plan.if_none_match or plan.if_modified_since) and meta is not None:
+            cached_etag = meta.get("etag")
+            cached_modified = meta.get("last_modified")
+            if cached_etag or cached_modified:
+                effective_plan = replace(
+                    plan,
+                    if_none_match=str(cached_etag) if cached_etag else None,
+                    if_modified_since=str(cached_modified) if cached_modified else None,
+                )
+        conditional = bool(
+            effective_plan.if_none_match or effective_plan.if_modified_since
+        )
+        # Условный запрос обязан дойти до сервера: кэш-шорткат его бы проглотил.
+        if cached is not None and not conditional:
+            return self._page_from_cache(url, cached, meta)
 
         last_status: int | None = None
         last_rendered: bytes | None = None
         last_render_url: str = url
         for attempt in range(HYBRID_MAX_ATTEMPTS):
             cookies, render_url, rendered = self._warm(url, plan)
-            status, body, resp_headers = self._http_get_hybrid(url, cookies)
+            status, body, resp_headers = self._http_get_hybrid(url, cookies, effective_plan)
+            if status == 304:
+                # ``httpx`` не поднимает на 304 (follow_redirects=False): статус читаем
+                # напрямую. Тело ``304`` не несёт представления — берём байты из кэша.
+                return self._page_not_modified(url, cached, meta, resp_headers)
             if 200 <= status < 300 and not _looks_like_interstitial(body, rendered):
                 # Валидаторы hybrid-GET доступны в ``resp_headers`` (в отличие от honest).
                 etag = resp_headers.get("ETag") or resp_headers.get("etag")
@@ -654,10 +692,14 @@ class BrowserCrawler:
         return cookies, final_url, rendered
 
     def _http_get_hybrid(
-        self, url: str, cookies: list[dict[str, Any]]
+        self, url: str, cookies: list[dict[str, Any]], plan: FetchPlan | None = None
     ) -> tuple[int, bytes, dict[str, str]]:
-        """Лёгкий HTTP-GET с зеркалированием заголовков и cookie-моста."""
-        headers = self._headers()
+        """Лёгкий HTTP-GET с зеркалированием заголовков и cookie-моста.
+
+        ``plan`` добавляет условные заголовки (``If-None-Match``/``If-Modified-Since``);
+        без валидаторов набор заголовков байт-идентичен прежнему.
+        """
+        headers = self._headers(plan)
         getter = self._http_get or self._default_http_get
         try:
             status, body, resp_headers = getter(url, headers, cookies)
@@ -667,15 +709,64 @@ class BrowserCrawler:
             raise CrawlError(f"hybrid HTTP-GET {url!r} не удался: {exc}") from exc
         return int(status), bytes(body), dict(resp_headers or {})
 
-    def _headers(self) -> dict[str, str]:
-        """Зеркалируемые заголовки запроса (общие для hybrid-GET)."""
+    def _headers(self, plan: FetchPlan | None = None) -> dict[str, str]:
+        """Зеркалируемые заголовки запроса (общие для hybrid-GET) + валидаторы плана.
+
+        ``If-None-Match``/``If-Modified-Since`` добавляются только когда эффективный
+        план несёт валидаторы; иначе набор заголовков прежний.
+        """
         headers = {
             "Accept": DEFAULT_ACCEPT,
             "Accept-Language": DEFAULT_ACCEPT_LANGUAGE,
         }
         if self._user_agent:
             headers["User-Agent"] = self._user_agent
+        if plan is not None:
+            if plan.if_none_match:
+                headers["If-None-Match"] = plan.if_none_match
+            if plan.if_modified_since:
+                headers["If-Modified-Since"] = plan.if_modified_since
         return headers
+
+    def _page_not_modified(
+        self,
+        url: str,
+        content: bytes | None,
+        meta: dict[str, Any] | None,
+        resp_headers: dict[str, str],
+    ) -> RawPage:
+        """``304`` hybrid-GET: сервер подтвердил актуальность — отдаём байты из кэша.
+
+        ``304`` не несёт представления, поэтому пустое тело было бы ложью. Нет байтов в
+        кэше — неконсистентный условный запрос: явная ``CrawlError`` (``fetch`` уйдёт в
+        honest-рендер), а не пустая страница и не сфабрикованный ответ. Валидаторы берутся
+        из ответа ``304`` (сервер может их повторить), иначе — из сайдкара кэша.
+        """
+        if content is None:
+            raise CrawlError(
+                f"hybrid HTTP 304 для {url!r}, но в кэше нет байтов представления "
+                "(неконсистентный условный запрос)"
+            )
+        meta = meta or {}
+        etag = resp_headers.get("ETag") or resp_headers.get("etag") or meta.get("etag")
+        last_modified = (
+            resp_headers.get("Last-Modified")
+            or resp_headers.get("last-modified")
+            or meta.get("last_modified")
+        )
+        content_type = resp_headers.get("Content-Type") or meta.get("content_type")
+        final_url = meta.get("final_url")
+        return RawPage(
+            url=str(final_url) if final_url else url,
+            content=content,
+            fetched_at=_now_iso(),
+            fetch_mode=FetchMode.HTTP,
+            status_code=304,
+            content_type=str(content_type) if content_type else None,
+            etag=str(etag) if etag else None,
+            last_modified=str(last_modified) if last_modified else None,
+            not_modified=True,
+        )
 
     def _default_http_get(
         self, url: str, headers: dict[str, str], cookies: list[dict[str, Any]]

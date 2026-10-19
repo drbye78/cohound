@@ -13,10 +13,14 @@ I19; 02 §B.1). Ответственность адаптера (01 §3.2, ``por
   фетч + ``put_bytes("http", http_key(url), content)`` (R7 между ``run_id``).
   Кэш применяется **только** к ``FetchMode.HTTP``: браузерный рендер всегда
   идёт вживую и не пишется в кэш (детерминизм R7; см. ``fetch``);
-* **условный запрос** — валидаторы плана (``if_none_match``/``if_modified_since``)
-  уходят заголовками ``If-None-Match``/``If-Modified-Since``, а ``ETag``/
-  ``Last-Modified`` ответа попадают в ``RawPage``. Ответ ``304`` возвращает
-  **закэшированные** байты с ``not_modified=True``; без кэша это явная ошибка.
+* **условный запрос** — приоритет валидаторов: **план → мета кэша → безусловный GET**.
+  Валидаторы плана (``if_none_match``/``if_modified_since``) уходят заголовками
+  ``If-None-Match``/``If-Modified-Since``; если план их не несёт, адаптер берёт их из
+  сайдкара ``.meta.json`` прошлого получения и делает **живой** условный запрос.
+  ``ETag``/``Last-Modified`` успешного ответа сохраняются в ``RawPage`` **и** в
+  сайдкар (без записи сайдкара цикл условных запросов не мог бы начаться). Ответ
+  ``304`` возвращает **закэшированные** байты с ``not_modified=True``; без кэша это
+  явная ошибка.
 
 **Один реактор на процесс.** Twisted-реактор одноразовый (``ReactorNotRestartable``),
 поэтому ``CrawlerProcess.start()`` на каждый URL недопустим (``hound run`` делает
@@ -60,7 +64,7 @@ import threading
 from collections.abc import Callable, Mapping
 from concurrent.futures import Future
 from concurrent.futures import TimeoutError as FuturesTimeoutError
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from typing import Any, Protocol, cast, runtime_checkable
 
@@ -534,9 +538,10 @@ class ScrapyCrawler:
     def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:
         """Загружает ``url`` по готовому ``plan`` (fetch/extract/wait_for).
 
-        Порядок: SSRF-валидация → (для HTTP) кэш → живой фетч → (для HTTP) запись в
-        кэш. Браузерный рендер **не** консультирует и не пишет кэш: он недетерминирован,
-        а общий ключ ``http_key(url)`` дал бы кросс-контаминацию HTTP/browser по одному URL.
+        Порядок: SSRF-валидация → (для HTTP) валидаторы (план → мета кэша) → кэш/живой
+        фетч → (для HTTP) запись в кэш (байты + сайдкар). Браузерный рендер **не**
+        консультирует и не пишет кэш: он недетерминирован, а общий ключ
+        ``http_key(url)`` дал бы кросс-контаминацию HTTP/browser по одному URL.
         """
         try:
             validate_url(url)
@@ -544,18 +549,37 @@ class ScrapyCrawler:
             raise CrawlUrlError(f"URL отклонён SSRF-валидацией: {exc}") from exc
 
         use_cache = plan.fetch is FetchMode.HTTP
-        conditional = use_cache and bool(plan.if_none_match or plan.if_modified_since)
+        key = http_key(url)
         cached: bytes | None = None
+        meta: dict[str, Any] | None = None
+        effective_plan = plan
 
         if use_cache and self._cache is not None:
-            cached = self._cache.get_bytes("http", http_key(url))
+            cached = self._cache.get_bytes("http", key)
+            meta = self._cache.get_meta("http", key)
+            # Приоритет валидаторов: план → мета кэша → безусловный GET. Явные валидаторы
+            # плана не переопределяем; иначе берём валидаторы прошлого получения из
+            # сайдкара, чтобы запрос дошёл до сервера и мог вернуть дешёвый ``304``.
+            # План вызывающего не мутируем.
+            if not (plan.if_none_match or plan.if_modified_since) and meta is not None:
+                cached_etag = meta.get("etag")
+                cached_modified = meta.get("last_modified")
+                if cached_etag or cached_modified:
+                    effective_plan = replace(
+                        plan,
+                        if_none_match=str(cached_etag) if cached_etag else None,
+                        if_modified_since=str(cached_modified) if cached_modified else None,
+                    )
             # Условный запрос обязан дойти до сервера: кэш-шорткат его бы проглотил.
+            conditional = bool(
+                effective_plan.if_none_match or effective_plan.if_modified_since
+            )
             if cached is not None and not conditional:
                 return self._page_from_cache(url, cached, plan.fetch)
 
-        page = self._fetch_live(url, plan, cached)
+        page = self._fetch_live(url, effective_plan, cached)
         if use_cache and not page.not_modified:
-            self._store(url, http_key(url), page.content)
+            self._store(url, key, page)
         return page
 
     # -- кэш ------------------------------------------------------------------
@@ -584,11 +608,27 @@ class ScrapyCrawler:
             return _now_iso()
         return datetime.fromtimestamp(stamp, tz=timezone.utc).isoformat()
 
-    def _store(self, url: str, key: str, content: bytes) -> None:
-        """Пишет байты в глобальный кэш (R7), если кэш внедрён."""
+    def _store(self, url: str, key: str, page: RawPage) -> None:
+        """Пишет байты и сайдкар валидаторов в глобальный кэш (R7), если кэш внедрён.
+
+        Сайдкар обязателен для цикла условных запросов: без него следующее получение
+        не сможет предъявить ``ETag``/``Last-Modified`` и всегда будет полным ``200``.
+        Состав совпадает с HTTP-адаптером (``crawl_http.py``).
+        """
         if self._cache is None:
             return
-        self._cache.put_bytes("http", key, content)
+        self._cache.put_bytes("http", key, page.content)
+        self._cache.put_meta(
+            "http",
+            key,
+            {
+                "etag": page.etag,
+                "last_modified": page.last_modified,
+                "status_code": page.status_code,
+                "content_type": page.content_type,
+                "final_url": page.url,
+            },
+        )
 
     # -- фетч -----------------------------------------------------------------
 

@@ -368,3 +368,157 @@ def test_conditional_plan_bypasses_cache_and_does_not_write_on_304(
     assert page.not_modified is True
     # 304 не создаёт новую запись: байты кэша не перезаписаны.
     assert cache.get_bytes("http", http_key(URL)) == b"cached-representation"
+
+
+# ---------------------------------------------------------------------------
+# Ф1.1 для Scrapy: сайдкар меты на 200 и замыкание цикла (план → мета → GET)
+# ---------------------------------------------------------------------------
+
+
+class _FakeWorker:
+    """Шов воркера: фиксирует ``_CrawlSpec`` и отдаёт заготовленный ответ Scrapy.
+
+    Позволяет проверить реальный путь ``fetch → _fetch_with_scrapy`` (включая
+    фактические заголовки запроса в ``spec.headers``) без Twisted и сети.
+    """
+
+    def __init__(self, response: _FakeScrapyResponse) -> None:
+        self.response = response
+        self.specs: list[_CrawlSpec] = []
+        self.closed = False
+
+    def submit(self, settings, spec: _CrawlSpec, fut, timeout_s) -> None:
+        self.specs.append(spec)
+        page = _raw_page_from_scrapy_response(spec, self.response)
+        if page is not None:
+            spec.collected.append(page)
+        fut.set_result(True)
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def _seed_cache(
+    cache: ContentAddressedCache,
+    *,
+    content: bytes = b"cached-representation",
+    etag: str | None = '"v1"',
+    last_modified: str | None = "Wed, 21 Oct 2026 07:28:00 GMT",
+) -> None:
+    """Тело + сайдкар прошлого получения (как после успешного ``200``)."""
+    cache.put_bytes("http", http_key(URL), content)
+    cache.put_meta(
+        "http",
+        http_key(URL),
+        {
+            "etag": etag,
+            "last_modified": last_modified,
+            "status_code": 200,
+            "content_type": "text/html",
+            "final_url": URL,
+        },
+    )
+
+
+def test_scrapy_writes_meta_sidecar_on_200(tmp_path: Path) -> None:
+    # Без сайдкара цикл условных запросов в Scrapy-пути не мог бы начаться.
+    cache = ContentAddressedCache(tmp_path)
+    worker = _FakeWorker(
+        _FakeScrapyResponse(
+            body=b"fresh-body",
+            status=200,
+            headers={
+                b"Content-Type": b"text/html; charset=utf-8",
+                b"ETag": b'"v1"',
+                b"Last-Modified": b"Wed, 21 Oct 2026 07:28:00 GMT",
+            },
+        )
+    )
+    crawler = ScrapyCrawler(worker=worker, cache=cache)
+
+    page = crawler.fetch(URL)
+
+    assert page.content == b"fresh-body"
+    meta = cache.get_meta("http", http_key(URL))
+    assert meta == {
+        "etag": '"v1"',
+        "last_modified": "Wed, 21 Oct 2026 07:28:00 GMT",
+        "status_code": 200,
+        "content_type": "text/html; charset=utf-8",
+        "final_url": URL,
+    }
+    assert (tmp_path / "http" / f"{http_key(URL)}.meta.json").is_file()
+
+
+def test_scrapy_cache_meta_validators_produce_conditional_request_and_304(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cache = ContentAddressedCache(tmp_path)
+    _seed_cache(cache)
+    worker = _FakeWorker(_FakeScrapyResponse(body=b"", status=304))
+    crawler = ScrapyCrawler(worker=worker, cache=cache)
+
+    def _no_write(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("304 не должен писать новую запись кэша")
+
+    monkeypatch.setattr(cache, "put_bytes", _no_write)
+    monkeypatch.setattr(cache, "put_meta", _no_write)
+
+    page = crawler.fetch(URL)  # план без валидаторов
+
+    # Заголовки реально ушли в запрос Scrapy (``_conditional_headers`` из меты).
+    assert len(worker.specs) == 1
+    assert worker.specs[0].headers == {
+        "If-None-Match": '"v1"',
+        "If-Modified-Since": "Wed, 21 Oct 2026 07:28:00 GMT",
+    }
+    assert worker.specs[0].cached == b"cached-representation"
+    assert page.not_modified is True
+    assert page.status_code == 304
+    assert page.content == b"cached-representation"
+
+
+def test_scrapy_meta_fallback_304_without_cached_bytes_is_explicit_error(
+    tmp_path: Path,
+) -> None:
+    cache = ContentAddressedCache(tmp_path)
+    cache.put_meta("http", http_key(URL), {"etag": '"v1"'})  # мета без тела
+    worker = _FakeWorker(_FakeScrapyResponse(body=b"", status=304))
+    crawler = ScrapyCrawler(worker=worker, cache=cache)
+
+    with pytest.raises(CrawlError, match="304"):
+        crawler.fetch(URL)
+
+    assert worker.specs[0].headers == {"If-None-Match": '"v1"'}
+
+
+def test_scrapy_plan_validators_override_cache_meta(tmp_path: Path) -> None:
+    cache = ContentAddressedCache(tmp_path)
+    _seed_cache(cache)
+    seen: list[FetchPlan] = []
+
+    def fetcher(url: str, plan: FetchPlan = FetchPlan()) -> RawPage:
+        seen.append(plan)
+        return _page(url, b"fresh-body")
+
+    crawler = ScrapyCrawler(fetcher, cache=cache)
+
+    page = crawler.fetch(URL, FetchPlan(if_none_match='"plan-version"'))
+
+    assert seen[0].if_none_match == '"plan-version"'  # план, не '"v1"' из меты
+    assert seen[0].if_modified_since is None
+    assert page.content == b"fresh-body"
+
+
+def test_scrapy_cache_hit_with_meta_but_without_validators_served_from_cache(
+    tmp_path: Path,
+) -> None:
+    cache = ContentAddressedCache(tmp_path)
+    _seed_cache(cache, etag=None, last_modified=None)
+    fetcher = _RecordingFetcher(b"live-body")
+    crawler = ScrapyCrawler(fetcher, cache=cache)
+
+    page = crawler.fetch(URL)
+
+    assert fetcher.calls == []  # валидаторов нет нигде → прежний кэш-шорткат
+    assert page.content == b"cached-representation"
