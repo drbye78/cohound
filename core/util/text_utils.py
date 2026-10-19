@@ -28,6 +28,25 @@ except ImportError:  # pragma: no cover - зависит от окружения
     LangDetectException = Exception  # type: ignore[assignment,misc]
 
 
+__all__ = [
+    "ENGLISH_STOP_WORDS",
+    "RUSSIAN_STOP_WORDS",
+    "TextLanguage",
+    "clean_whitespace",
+    "detect_language",
+    "is_cyrillic",
+    "is_latin",
+    "is_stop_word",
+    "normalize_cyrillic",
+    "normalize_ru_token",
+    "normalize_text",
+    "remove_diacritics",
+    "split_sentences",
+    "tokenize_lexical",
+    "transliterate",
+]
+
+
 class TextLanguage(StrEnum):
     RUSSIAN = "ru"
     ENGLISH = "en"
@@ -98,6 +117,60 @@ def normalize_cyrillic(text: str) -> str:
     for old, new in _RUSSIAN_EQUIVALENTS.items():
         text = text.replace(old, new)
     return text
+
+
+#: ISO-9/GOST-подобная транслитерация русского алфавита (латиница проходит без изменений).
+_TRANSLITERATION_LOWER: dict[str, str] = {
+    "а": "a",
+    "б": "b",
+    "в": "v",
+    "г": "g",
+    "д": "d",
+    "е": "e",
+    "ё": "yo",
+    "ж": "zh",
+    "з": "z",
+    "и": "i",
+    "й": "y",
+    "к": "k",
+    "л": "l",
+    "м": "m",
+    "н": "n",
+    "о": "o",
+    "п": "p",
+    "р": "r",
+    "с": "s",
+    "т": "t",
+    "у": "u",
+    "ф": "f",
+    "х": "kh",
+    "ц": "ts",
+    "ч": "ch",
+    "ш": "sh",
+    "щ": "shch",
+    "ъ": "",
+    "ы": "y",
+    "ь": "",
+    "э": "e",
+    "ю": "yu",
+    "я": "ya",
+}
+
+_TRANSLITERATION = {
+    **_TRANSLITERATION_LOWER,
+    **{char.upper(): value.capitalize() for char, value in _TRANSLITERATION_LOWER.items()},
+}
+_TRANSLITERATION_TABLE = str.maketrans(_TRANSLITERATION)
+
+
+def transliterate(text: str) -> str:
+    """Транслитерирует кириллицу в латиницу (ISO-9/GOST-подобно).
+
+    Нужна для стабильных slug-идентификаторов из русских имён (``product_id`` и т.п.):
+    ``"Квант-Гибрид"`` → ``"Kvant-Gibrid"``. Латиница и прочие символы не меняются,
+    поэтому смешанные строки (``"Postgres Квант"``) безопасны.
+    """
+    return str(text or "").translate(_TRANSLITERATION_TABLE)
 
 
 def remove_diacritics(text: str) -> str:

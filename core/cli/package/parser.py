@@ -667,6 +667,14 @@ def add_package_parser(subparsers: Any) -> None:
     p_add.add_argument(
         "--url", default=None, help="подсказка URL продукта (идентификация при синонимах)"
     )
+    p_add.add_argument(
+        "--search-adapter",
+        dest="search_adapter_kind",
+        default=None,
+        choices=list(SUPPORTED_SEARCH_ADAPTERS),
+        help="провайдер поиска; по умолчанию — из config/deploy.yaml "
+        "(search.adapter/by_language по --lang) или yandex",
+    )
     p_add.add_argument("--category", default=None, help="категория (для запросов/артефакта)")
     p_add.add_argument(
         "--reason", default=None, help="selection_reason когорты (иначе — из scout)"

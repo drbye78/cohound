@@ -170,6 +170,47 @@ def test_explicit_url_identifies_among_synonyms(tmp_path: Path) -> None:
     assert plan.resolved_url == START
 
 
+def test_external_serp_hosts_stay_candidates_not_sites(tmp_path: Path) -> None:
+    """Реселлер вне вендорского домена — ``external_host`` в кандидатах, не в sites."""
+    pkg = valid_package(tmp_path)
+    vendor_sub = "https://web.acme.test/products/acme"
+    reseller = "https://granit-concern.ru/kvant"
+    plan = _plan(
+        pkg,
+        url=START,
+        search=_serp(vendor_sub, reseller),
+        crawler=_crawler(START, vendor_sub, reseller),
+    )
+    hosts = {site.key.split("/", 1)[0] for site in plan.sites}
+    assert hosts <= {"acme.test", "web.acme.test"}
+    assert "granit-concern.ru" not in hosts
+    external = [
+        item for item in plan.url_candidates if item.get("reason") == "external_host"
+    ]
+    assert any("granit-concern.ru" in item["url"] for item in external)
+
+
+def test_plan_transliterates_cyrillic_product_id(tmp_path: Path) -> None:
+    """«Квант-Гибрид» → ``kvant-gibrid`` в product_id и когорте (не ``-``)."""
+    pkg = valid_package(tmp_path)
+    plan = plan_add_product(
+        pkg,
+        "Квант-Гибрид",
+        url=START,
+        reason="аналог (тест)",
+        discovery_llm=_llm(),
+        crawler=_crawler(START),
+        extractor=FakeExtractor(),
+        search=None,
+        search_warning="SERP недоступен (SearchResolutionError: HTTP 429)",
+        probe_ports=_ports(),
+        today="2026-06-01",
+    )
+    assert plan.product_id == "kvant-gibrid"
+    assert plan.cohort_entry["product_id"] == "kvant-gibrid"
+    assert any("429" in warning for warning in plan.warnings)
+
+
 # ---------------------------------------------------------------------------
 # Key derivation
 # ---------------------------------------------------------------------------
@@ -202,6 +243,58 @@ def test_ftdata_dedicated_host_gets_normal_budget() -> None:
     assert budget["max_depth"] == 8
     assert budget["max_documents"] == 200
     assert budget["sitemap_url"] is None
+
+
+def test_seed_path_scopes_product_and_not_sibling_products() -> None:
+    """Seed-путь ``/products/qhb`` — граница сегмента: ``qhb-sert``/``qss`` не матчатся."""
+    seed = "https://quantom.info/products/qhb/"
+    sites = _derive_sites(
+        [
+            seed,
+            "https://quantom.info/products/qhb/docs/",
+            "https://quantom.info/products/qhb-sert/",
+            "https://quantom.info/products/qss/",
+        ],
+        product_name="Квант-Гибрид",
+        seed_url=seed,
+    )
+    by_key = {site.key: site for site in sites}
+    assert by_key["quantom.info/products/qhb"].urls == [
+        seed,
+        "https://quantom.info/products/qhb/docs/",
+    ]
+    assert "quantom.info/products/qhb-sert" not in by_key
+    assert "quantom.info/products/qss" not in by_key
+
+
+def test_seed_path_sibling_host_reuses_product_prefix() -> None:
+    """Sibling-поддомен с тем же ``products/qhb`` → продуктовый ключ, не ``products``."""
+    seed = "https://quantom.info/products/qhb/"
+    sites = _derive_sites(
+        [
+            seed,
+            "https://web.quantom.info/products/qhb/",
+            "https://web.quantom.info/products/qhb-sert/",
+            "https://web.quantom.info/products/qss/",
+        ],
+        product_name="Квант-Гибрид",
+        seed_url=seed,
+    )
+    keys = {site.key for site in sites}
+    assert "web.quantom.info/products/qhb" in keys
+    assert "web.quantom.info/products" not in keys
+    assert "web.quantom.info/products/qhb-sert" not in keys
+    assert "web.quantom.info/products/qss" not in keys
+
+
+def test_docs_host_uses_first_non_generic_segment() -> None:
+    """Док-хост: ``/qhb/std-1/...`` → ``repo.quantom.info/qhb`` (не глубокая страница)."""
+    sites = _derive_sites(
+        ["https://repo.quantom.info/qhb/std-1/doc/1.5.3/ru/x.html"],
+        product_name="Квант-Гибрид",
+        seed_url="https://quantom.info/products/qhb/",
+    )
+    assert [site.key for site in sites] == ["repo.quantom.info/qhb"]
 
 
 # ---------------------------------------------------------------------------
@@ -262,6 +355,46 @@ def test_sitemap_present_budget(tmp_path: Path) -> None:
     assert budget["max_documents"] == 50  # max(50, min(1000, 2 * 2))
 
 
+def test_sitemap_in_scope_uses_seed_product_prefix() -> None:
+    """Sitemap-зонд: in-scope только product-префикс; ``qhb-sert``/``qss`` отсечены."""
+    site = DiscoveredSite(
+        key="quantom.info/products/qhb",
+        urls=["https://quantom.info/products/qhb/"],
+        reason="path",
+        is_root=False,
+    )
+    xml = (
+        "<urlset xmlns='http://www.sitemaps.org/schemas/sitemap/0.9'>"
+        "<url><loc>https://quantom.info/products/qhb/</loc></url>"
+        "<url><loc>https://quantom.info/products/qhb/docs/</loc></url>"
+        "<url><loc>https://quantom.info/products/qhb-sert/</loc></url>"
+        "<url><loc>https://quantom.info/products/qss/</loc></url>"
+        "</urlset>"
+    )
+    http = ScriptedHttpCrawler(
+        {
+            "https://quantom.info/robots.txt": page(
+                "https://quantom.info/robots.txt",
+                content=b"Sitemap: https://quantom.info/sitemap.xml\n",
+                content_type="text/plain",
+            ),
+            "https://quantom.info/sitemap.xml": page(
+                "https://quantom.info/sitemap.xml",
+                content=xml.encode(),
+                content_type="application/xml",
+            ),
+        }
+    )
+    budget = _sitemap_budget(site, ports=_ports(http))
+    assert budget["in_scope_count"] == 2
+    assert budget["in_scope_urls"] == [
+        "https://quantom.info/products/qhb/",
+        "https://quantom.info/products/qhb/docs/",
+    ]
+    assert budget["sitemap_found"] is True
+    assert budget["sitemap"] is False  # path-ключ: в профиль не эмитится
+
+
 def test_path_key_with_host_sitemap_has_no_sitemap_field() -> None:
     """Path-ключ: sitemap-счётчики в бюджете, но ``sitemap:`` в профиль не пишется."""
     site = DiscoveredSite(
@@ -295,6 +428,7 @@ def test_path_key_with_host_sitemap_has_no_sitemap_field() -> None:
     assert budget["sitemap_found"] is True
     assert budget["in_scope_count"] == 3
     assert budget["sitemap_url"] is None
+    assert budget["sitemap"] is False
     verdict = Verdict(
         key=site.key,
         status=ProbeKeyStatus.RESOLVED,

@@ -1921,10 +1921,14 @@ def cmd_package_add_product(args: argparse.Namespace) -> int:
     #    Без --url недоступность поиска — usage; с --url план честно предупредит об
     #    отсутствии SERP (URL остаётся подсказкой идентификации).
     search = getattr(args, "search_adapter", None)
+    search_warning: str | None = None
     if search is None:
         try:
             search, _provider = resolve_and_build_search_adapter(
-                lang=args.lang, explicit=None, injected=None, no_search=False
+                lang=args.lang,
+                explicit=getattr(args, "search_adapter_kind", None),
+                injected=None,
+                no_search=False,
             )
         except SearchResolutionError as exc:
             if not args.url:
@@ -1935,12 +1939,18 @@ def cmd_package_add_product(args: argparse.Namespace) -> int:
                     f"({concise(exc)})",
                 )
                 return EXIT_USAGE
+            search_warning = (
+                f"SERP недоступен ({type(exc).__name__}: {concise(exc)})"
+            )
         except WiringError as exc:
             if not args.url:
                 emit_error(
                     args, "usage", f"поиск недоступен ({concise(exc)}); укажите --url"
                 )
                 return EXIT_USAGE
+            search_warning = (
+                f"SERP недоступен ({type(exc).__name__}: {concise(exc)})"
+            )
 
     # 3. Краул/экстракция — как в ``passport-scout``/``package scout``.
     profile_ports = build_adapters(profile=LOCAL_PROFILE, package=str(pkg_dir))
@@ -1962,6 +1972,7 @@ def cmd_package_add_product(args: argparse.Namespace) -> int:
             crawler=crawler,
             extractor=extractor,
             search=search,
+            search_warning=search_warning,
             probe_ports=probe_ports,
         )
     except AddProductError as exc:

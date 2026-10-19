@@ -16,6 +16,7 @@ import yaml
 
 from core.adapters.llm_discovery import DiscoveryLLM
 from core.cli.main import EXIT_OK, EXIT_USAGE, main
+from core.cli.wiring import SearchResolutionError
 from core.pipeline.crawl_probe import RobotsGate
 from core.pipeline.crawl_probe_driver import ProbePorts
 from core.ports.search import SearchResult
@@ -194,3 +195,23 @@ def test_ambiguous_url_is_usage_and_writes_nothing(capsys, tmp_path: Path) -> No
     assert payload["ok"] is False
     assert str(pkg) not in payload.get("message", "")
     assert _snapshot(pkg) == before
+
+
+def test_search_failure_reason_reaches_warning_with_url(
+    capsys, tmp_path: Path, monkeypatch
+) -> None:
+    """Сбой резолва поиска при ``--url`` виден в warning (не только generic-строка)."""
+
+    def _failing_resolver(**_kwargs):
+        raise SearchResolutionError("search", "HTTP 429 quota exceeded")
+
+    monkeypatch.setattr(
+        "core.cli.wiring.resolve_and_build_search_adapter", _failing_resolver
+    )
+    pkg = valid_package(tmp_path)
+    code, payload = _run(capsys, _argv(pkg, "--url", START))
+    assert code == EXIT_OK
+    assert any(
+        "SERP недоступен" in warning and "429" in warning
+        for warning in payload.get("warnings", [])
+    )

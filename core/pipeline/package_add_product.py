@@ -42,6 +42,7 @@ from core.pipeline.package_io import atomic_write_text, load_artifacts
 from core.pipeline.scout_common import dedupe, url_allowed
 from core.ports.types import FetchPlan
 from core.util.security import sanitize_slug
+from core.util.text_utils import transliterate
 from core.util.sitemap import (
     ROUTE_INDEX,
     SitemapParseError,
@@ -61,6 +62,10 @@ __all__ = [
 
 #: Потолок фетчей ограниченного sitemap-зонда на один ключ (robots + sitemap + дети).
 SITEMAP_MAX_FETCHES = 5
+
+#: ``product_id`` — стабильный slug: длина и допустимый алфавит (lowercase).
+_PRODUCT_ID_MAX_LENGTH = 64
+_PRODUCT_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 
 #: Потолки бюджетов обхода (D1): path-ключи с/без sitemap и host-root (I17 trap).
 _PATH_BUDGET_SITEMAP = (2, None)  # max_depth; max_documents считается от in-scope
@@ -249,6 +254,88 @@ def _is_non_product_host(host: str) -> bool:
     """Соцсеть/видео/вики/агрегатор/доска вакансий — не продуктовый сайт."""
     host = host.lower()
     return any(host == suffix or host.endswith(f".{suffix}") for suffix in _NON_PRODUCT_SUFFIXES)
+
+
+def _host_in_domain(host: str, domain: str) -> bool:
+    """``host`` равен ``domain`` или является его поддоменом."""
+    return bool(host and domain) and (host == domain or host.endswith(f".{domain}"))
+
+
+#: Токены хоста, указывающие на документационный узел (не реселлер/каталог).
+_DOC_HOST_TOKENS = frozenset(
+    {
+        "doc",
+        "docs",
+        "documentation",
+        "wiki",
+        "help",
+        "manual",
+        "reference",
+        "repo",
+        "support",
+        "tandocs",
+    }
+)
+
+
+def _is_docs_like_host(host: str) -> bool:
+    """Хост похож на документационный (``docs.*``/``repo.*``/``wiki.*``)."""
+    return any(token in _DOC_HOST_TOKENS for token in _host_tokens(host))
+
+
+def _passport_satellite_hosts(passport: Any) -> set[str]:
+    """Хосты, подтверждённые свидетельством сателлита (сильное исключение I17)."""
+    hosts: set[str] = set()
+    for satellite in getattr(passport, "satellites", []) or []:
+        evidence = getattr(satellite, "relationship_evidence", None)
+        raw_url = getattr(evidence, "url", None) if evidence is not None else None
+        if raw_url:
+            host = _host(_normalize_url(str(raw_url)))
+            if host:
+                hosts.add(host)
+        origin = getattr(satellite, "origin", None)
+        origin_value = getattr(origin, "value", origin)
+        if isinstance(origin_value, str) and ("." in origin_value or "://" in origin_value):
+            host = _host(_normalize_url(origin_value))
+            if host:
+                hosts.add(host)
+    return hosts
+
+
+def _passport_doc_hosts(passport: Any, report: Any | None = None) -> set[str]:
+    """Легитимные хосты доков/сателлитов из scout (исключение из vendor-фильтра).
+
+    ``doc_domains`` скаута включают и непосещённые SERP-URL, поэтому при наличии
+    ``report.fetched`` оставляем только реально успешно фетченные хосты (I19): хост,
+    известный лишь по поисковой выдаче/ошибке фетча, не становится сайтом.
+    """
+    doc_hosts: set[str] = set()
+    for raw in getattr(passport, "doc_domains", []) or []:
+        host = _host(_normalize_url(str(raw)))
+        if host:
+            doc_hosts.add(host)
+    satellite_hosts = _passport_satellite_hosts(passport)
+
+    fetched: list[Any] = list(getattr(report, "fetched", []) or []) if report else []
+    if not fetched:
+        return doc_hosts | satellite_hosts
+    fetched_hosts: set[str] = set()
+    for item in fetched:
+        if not isinstance(item, Mapping):
+            continue
+        host = _host(_normalize_url(str(item.get("url", ""))))
+        if host and not item.get("error"):
+            fetched_hosts.add(host)
+    return satellite_hosts | (doc_hosts & fetched_hosts)
+
+
+def _site_host_allowed(host: str, *, seed_host: str, extra_hosts: set[str]) -> bool:
+    """Хост принадлежит вендорскому домену seed либо разрешённым докам/сателлитам."""
+    if not host:
+        return False
+    if _is_seed_relative_host(host, seed_host):
+        return True
+    return any(_host_in_domain(host, domain) for domain in extra_hosts)
 
 
 def _is_docs_path(path: str) -> bool:
@@ -468,11 +555,71 @@ def _path_key(host: str, path: str, *, name_tokens: Sequence[str], dedicated: bo
     return None
 
 
-def _derive_sites(urls: Sequence[str], *, product_name: str) -> list[DiscoveredSite]:
-    """Выводит ключи ``host``/``host/path`` и помечает корпоративные host-root ключи."""
+def _path_segments(path: str) -> list[str]:
+    """Сегменты пути без пустых элементов."""
+    return [segment for segment in (path or "").split("/") if segment]
+
+
+def _trim_seed_prefix(path: str) -> str:
+    """Продуктовый префикс seed-пути: без хвостового ``/`` и ``index.*``."""
+    segments = _path_segments(path)
+    if segments and re.fullmatch(
+        r"index\.(?:html?|php|aspx?)", segments[-1], re.IGNORECASE
+    ):
+        segments.pop()
+    return "/".join(segments)
+
+
+def _path_under_prefix(path: str, prefix: str) -> bool:
+    """``path`` равен префиксу или лежит под ним на границе сегмента."""
+    if not prefix:
+        return True
+    normalized = f"/{prefix.strip('/')}"
+    path = path or "/"
+    return path == normalized or path.startswith(f"{normalized}/")
+
+
+def _url_product_prefix(path: str) -> str | None:
+    """Префикс пути до первого не-служебного сегмента (``products/qhb``, ``qhb``)."""
+    segments = _path_segments(path)
+    for index, segment in enumerate(segments):
+        if segment.lower() not in _SPECIFIC_PATH_SEGMENTS:
+            return "/".join(segments[: index + 1])
+    return None
+
+
+def _is_seed_relative_host(host: str, seed_host: str) -> bool:
+    """Хост — тот же/поддомен/наддомен seed-хоста (один вендорский домен)."""
+    if not host or not seed_host:
+        return False
+    return (
+        host == seed_host
+        or host.endswith(f".{seed_host}")
+        or seed_host.endswith(f".{host}")
+    )
+
+
+def _derive_sites(
+    urls: Sequence[str],
+    *,
+    product_name: str,
+    seed_url: str | None = None,
+) -> list[DiscoveredSite]:
+    """Выводит ключи ``host``/``host/path`` и помечает корпоративные host-root ключи.
+
+    ``seed_url`` — якорь области (I17): для seed-хоста продуктовый ключ выводится из
+    seed-пути (``/products/qhb``), а не из generic-сегмента; sibling-хосты используют
+    тот же префикс. Без seed работают эвристики имени (обратная совместимость).
+    """
     name_tokens = _name_tokens(product_name) or _name_tokens(sanitize_slug(product_name))
+    seed = _normalize_url(seed_url) if seed_url else ""
+    seed_host = _host(seed)
+    seed_prefix = _trim_seed_prefix(urlsplit(seed).path) if seed else ""
+    seed_root = seed_prefix.split("/", 1)[0].lower() if seed_prefix else ""
+
+    values = list(urls)
     by_host: dict[str, list[str]] = {}
-    for url in urls:
+    for url in values:
         host = _host(url)
         if host:
             by_host.setdefault(host, []).append(url)
@@ -482,13 +629,77 @@ def _derive_sites(urls: Sequence[str], *, product_name: str) -> list[DiscoveredS
         dedicated = any(token in _host_tokens(host) for token in name_tokens)
         root_urls: list[str] = []
         path_map: dict[str, list[str]] = {}
-        for url in sorted(by_host[host]):
-            path = urlsplit(url).path or "/"
-            key_path = _path_key(host, path, name_tokens=name_tokens, dedicated=dedicated)
-            if key_path is None:
-                root_urls.append(url)
-            else:
-                path_map.setdefault(key_path, []).append(url)
+
+        if not seed:
+            for url in sorted(by_host[host]):
+                path = urlsplit(url).path or "/"
+                key_path = _path_key(
+                    host, path, name_tokens=name_tokens, dedicated=dedicated
+                )
+                if key_path is None:
+                    root_urls.append(url)
+                else:
+                    path_map.setdefault(key_path, []).append(url)
+        elif host == seed_host and seed_prefix:
+            key = f"{host}/{seed_prefix}"
+            for url in sorted(by_host[host]):
+                if _path_under_prefix(urlsplit(url).path or "/", seed_prefix):
+                    path_map.setdefault(key, []).append(url)
+                else:
+                    # Вне продуктового префикса seed — только host-root (I17).
+                    root_urls.append(url)
+        elif host == seed_host:
+            # Seed указывает на корень хоста: продуктовый путь ищем по токенам имени.
+            for url in sorted(by_host[host]):
+                path = urlsplit(url).path or "/"
+                key_path = _path_key(
+                    host, path, name_tokens=name_tokens, dedicated=dedicated
+                )
+                if key_path is None:
+                    root_urls.append(url)
+                else:
+                    path_map.setdefault(key_path, []).append(url)
+        else:
+            sibling = _is_seed_relative_host(host, seed_host)
+            generic_only: list[tuple[str, str]] = []
+            for url in sorted(by_host[host]):
+                path = urlsplit(url).path or "/"
+                segments = _path_segments(path)
+                if not segments:
+                    root_urls.append(url)
+                    continue
+                if sibling and seed_prefix and _path_under_prefix(path, seed_prefix):
+                    # Sibling-хост зеркалит продуктовый префикс seed.
+                    path_map.setdefault(f"{host}/{seed_prefix}", []).append(url)
+                    continue
+                if sibling and seed_root and segments[0].lower() == seed_root:
+                    # Sibling-продукт под тем же generic-корнем (``qhb-sert``/``qss``)
+                    # не матчится префиксом продукта — не даём ему отдельный ключ.
+                    root_urls.append(url)
+                    continue
+                prefix = _url_product_prefix(path)
+                if prefix is None:
+                    generic_only.append((url, path))
+                else:
+                    path_map.setdefault(f"{host}/{prefix}", []).append(url)
+            if generic_only:
+                cleaned = [
+                    segments
+                    for segments in (_path_segments(path) for _url, path in generic_only)
+                    if segments
+                ]
+                anchor = ""
+                if cleaned:
+                    shallowest = min(
+                        cleaned, key=lambda segments: (len(segments), "/".join(segments))
+                    )
+                    anchor = "/".join(shallowest)
+                for url, path in generic_only:
+                    if anchor and _path_under_prefix(path, anchor):
+                        path_map.setdefault(f"{host}/{anchor}", []).append(url)
+                    else:
+                        root_urls.append(url)
+
         if root_urls or not path_map:
             sites.append(
                 DiscoveredSite(
@@ -656,7 +867,7 @@ def _sitemap_budget(
         "sitemap_found": found_url is not None,
         "sitemap_url": profile_sitemap_url,
         "sitemap_source_url": found_url,
-        "sitemap": found_url is not None,
+        "sitemap": profile_sitemap_url is not None,
         "in_scope_count": len(in_scope),
         "in_scope_urls": in_scope[:20],
         "fetches": fetches,
@@ -736,6 +947,7 @@ def plan_add_product(
     crawler: Any,
     extractor: Any,
     search: Any = None,
+    search_warning: str | None = None,
     probe_ports: ProbePorts,
     today: _dt.date | str | None = None,
     discover: Any = None,
@@ -773,7 +985,10 @@ def plan_add_product(
             )
         resolved_url = explicit_url
         url_source = "explicit"
-        warnings.append("SERP недоступен: поиск связанных сайтов не выполнялся")
+        warnings.append(
+            search_warning
+            or "SERP недоступен: поиск связанных сайтов не выполнялся"
+        )
     else:
         resolved_url, url_candidates, serp_notes = _resolve_url_from_serp(
             product_name=name,
@@ -820,13 +1035,48 @@ def plan_add_product(
     }
     needs_human.extend(str(item) for item in getattr(report, "needs_human", []) or [])
 
+    # 2b. Vendor scope (I17): SERP-кандидаты вне вендорского домена (реселлеры,
+    #     каталоги) остаются в ``url_candidates`` с причиной ``external_host``, но не
+    #     становятся сайтами. Исключение — доки/сателлиты из scout.
+    doc_hosts = _passport_doc_hosts(passport, report)
+    satellite_hosts = _passport_satellite_hosts(passport)
+    seed_host = _host(resolved_url)
+    name_tokens = _name_tokens(name) or _name_tokens(sanitize_slug(name))
+    for candidate in url_candidates:
+        host = str(candidate.get("host") or _host(str(candidate.get("url") or "")))
+        related_by_name = any(token in _host_tokens(host) for token in name_tokens)
+        docs_from_scout = host in doc_hosts and _is_docs_like_host(host)
+        if not (
+            _is_seed_relative_host(host, seed_host)
+            or host in satellite_hosts
+            or related_by_name
+            or docs_from_scout
+        ):
+            candidate["reason"] = "external_host"
+    vendor_candidates = [
+        candidate
+        for candidate in url_candidates
+        if candidate.get("reason") != "external_host"
+    ]
+    external_hosts = {
+        str(candidate.get("host") or _host(str(candidate.get("url") or "")))
+        for candidate in url_candidates
+        if candidate.get("reason") == "external_host"
+    }
+
     # 3. Сайты/ключи.
     urls = _site_urls(
         resolved_url=resolved_url,
         report=report,
-        serp_candidates=url_candidates,
+        serp_candidates=vendor_candidates,
     )
-    sites = _derive_sites(urls, product_name=name)
+    urls = [
+        url
+        for url in urls
+        if _site_host_allowed(_host(url), seed_host=seed_host, extra_hosts=doc_hosts)
+        and _host(url) not in external_hosts
+    ]
+    sites = _derive_sites(urls, product_name=name, seed_url=resolved_url)
     if not any(_normalize_url(url) in site.urls for site in sites for url in [resolved_url]):
         sites.insert(
             0,
@@ -878,8 +1128,17 @@ def plan_add_product(
                 f"{site.key}: рекомендуется wait_for (не синтезирован; задайте вручную)"
             )
 
-    # 5. Когорта.
-    product_id = sanitize_slug(name) or "product"
+    # 5. Когорта. ``product_id`` — из транслитерированного имени (кириллица → латиница),
+    #    иначе slug вырождается в неинформативный ``-``/``_`` и непригоден как ID.
+    product_id = sanitize_slug(
+        transliterate(name), max_length=_PRODUCT_ID_MAX_LENGTH
+    ).lower()
+    if not _PRODUCT_ID_RE.fullmatch(product_id):
+        raise AddProductError(
+            f"не удалось вывести product_id из имени {name!r}: {product_id!r}; "
+            "задайте имя латиницей (нужен slug ^[a-z0-9][a-z0-9_-]{0,63}$)",
+            code="usage",
+        )
     selection_reason = str(reason).strip() if reason else _scout_selection_reason(report)
     cohort_entry = {
         "product_id": product_id,
