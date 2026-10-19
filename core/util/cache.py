@@ -6,6 +6,11 @@
 разными ``run_id``**: второй прогон читает тот же кэш по хэшу ключа, без живого
 ре-фетча (03 §A.2, 04 §A.2/§A.3, ADR 0016).
 
+Рядом с HTTP-байтами может лежать **метаданные-сайдкар** ``cache/http/{url_hash}.meta.json``
+(:meth:`ContentAddressedCache.put_meta`/:meth:`ContentAddressedCache.get_meta`):
+валидаторы условного запроса (``etag``/``last_modified``), ``status_code``,
+``content_type`` и ``final_url``. Отсутствие сайдкара — легаси-запись (только байты).
+
 Модуль категорийно-нейтрален (§1.3), использует только stdlib и другие утилиты
 ядра; внешних зависимостей нет.
 
@@ -47,12 +52,15 @@ _FIELD_SEP = "\x1f"
 # Длина ключа в hex-символах (см. докстринг модуля).
 _KEY_LEN = 32
 
-# Суффиксы по назначению: сырые байты HTTP и JSON-ответы SERP (03 §A.1).
+# Суффиксы по назначению: сырые байты HTTP, JSON-ответы SERP (03 §A.1) и
+# метаданные-сайдкар HTTP-записи (валидаторы/статус/финальный URL).
 _BYTES_SUFFIX = ".bin"
 _JSON_SUFFIX = ".json"
+_META_SUFFIX = ".meta.json"
 
-# Допустимый суффикс файла: точка + алфанумерика, без разделителей пути.
-_SUFFIX_RE = re.compile(r"^\.[A-Za-z0-9]+$")
+# Допустимый суффикс файла: точка + алфанумерика, возможно несколько сегментов
+# (``.bin``, ``.json``, ``.meta.json``); разделители пути и ``..`` не проходят.
+_SUFFIX_RE = re.compile(r"^\.[A-Za-z0-9]+(?:\.[A-Za-z0-9]+)*$")
 
 # Стандартные подкаталоги кэша в корне репозитория (03 §A.1).
 _DEFAULT_SUBDIRS: tuple[str, ...] = ("serp", "http")
@@ -176,6 +184,37 @@ class ContentAddressedCache:
             obj, ensure_ascii=False, sort_keys=True, separators=(",", ":")
         ).encode("utf-8")
         target = self.path_for(kind, key, _JSON_SUFFIX)
+        return self._write_atomic(target, payload)
+
+    def get_meta(self, kind: str, key: str) -> dict[str, Any] | None:
+        """Метаданные-сайдкар записи (``{key}.meta.json``) или ``None``.
+
+        Сайдкар хранит данные, которых нет в сырых байтах: валидаторы условного
+        запроса (``etag``/``last_modified``), ``status_code``/``content_type`` и
+        ``final_url``. Отсутствие файла (легаси-запись) — ``None``; битый/не-объект
+        JSON тоже ``None``: кэш не должен ронять краул из-за порчи сайдкара.
+        """
+        target = self.path_for(kind, key, _META_SUFFIX)
+        if not target.is_file():
+            return None
+        try:
+            data = json.loads(target.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        return data if isinstance(data, dict) else None
+
+    def put_meta(self, kind: str, key: str, data: dict[str, Any]) -> Path:
+        """Атомарно пишет метаданные-сайдкар (``{key}.meta.json``); возвращает путь.
+
+        Формат — канонический JSON (как :meth:`put_json`), поэтому одинаковый
+        словарь даёт байт-идентичный файл. ``data`` обязан быть ``dict``.
+        """
+        if not isinstance(data, dict):
+            raise TypeError("meta должен быть dict")
+        payload = json.dumps(
+            data, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+        target = self.path_for(kind, key, _META_SUFFIX)
         return self._write_atomic(target, payload)
 
     def get_or_fetch(

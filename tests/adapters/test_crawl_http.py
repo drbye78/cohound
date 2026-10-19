@@ -11,6 +11,7 @@ content-addressed кэшем (промах → фетч → запись → п�
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -44,11 +45,37 @@ class _FakeResponse:
         content: bytes = BODY,
         status_code: int = 200,
         content_type: str | None = "text/html; charset=utf-8",
+        etag: str | None = None,
+        last_modified: str | None = None,
     ) -> None:
         self.url = url
         self.content = content
         self.status_code = status_code
-        self.headers = {"Content-Type": content_type} if content_type else {}
+        self.headers: dict[str, str] = {}
+        if content_type:
+            self.headers["Content-Type"] = content_type
+        if etag:
+            self.headers["ETag"] = etag
+        if last_modified:
+            self.headers["Last-Modified"] = last_modified
+
+    def raise_for_status(self) -> None:
+        """Как ``httpx``: 4xx/5xx — ошибка, ``304`` — не ошибка."""
+        if self.status_code >= 400:
+            raise RuntimeError(f"HTTP {self.status_code}")
+
+
+class _FakeHttpx:
+    """Мини-дублёр ``httpx``: отдаёт заготовленные ответы, пишет заголовки запроса."""
+
+    def __init__(self, responses: list[_FakeResponse]) -> None:
+        self._responses = list(responses)
+        self.calls: list[tuple[str, dict[str, str]]] = []
+
+    def get(self, url: str, **kwargs: Any) -> _FakeResponse:
+        self.calls.append((url, dict(kwargs.get("headers") or {})))
+        index = min(len(self.calls) - 1, len(self._responses) - 1)
+        return self._responses[index]
 
 
 # ---------------------------------------------------------------------------
@@ -98,6 +125,8 @@ def test_page_from_response_maps_final_url_status_and_type() -> None:
             url="https://example.com/redirected",
             content=b"redirected-body",
             status_code=203,
+            etag='"v1"',
+            last_modified="Wed, 21 Oct 2026 07:28:00 GMT",
         )
     )
     assert page.url == "https://example.com/redirected"
@@ -105,11 +134,17 @@ def test_page_from_response_maps_final_url_status_and_type() -> None:
     assert page.status_code == 203
     assert page.content_type == "text/html; charset=utf-8"
     assert page.fetch_mode is FetchMode.HTTP
+    # Валидаторы ответа сохраняются для следующего условного запроса.
+    assert page.etag == '"v1"'
+    assert page.last_modified == "Wed, 21 Oct 2026 07:28:00 GMT"
+    assert page.not_modified is False
 
 
 def test_page_from_response_without_content_type() -> None:
     page = HttpCrawler._page_from_response(_FakeResponse(content_type=None))
     assert page.content_type is None
+    assert page.etag is None
+    assert page.last_modified is None
 
 
 # ---------------------------------------------------------------------------
@@ -223,5 +258,136 @@ def test_real_path_without_httpx_raises_crawl_error(
     with pytest.raises(CrawlError):
         crawler.fetch(URL)
     assert issubclass(CrawlUnavailable, CrawlError)
+
+
+# ---------------------------------------------------------------------------
+# Условный повторный фетч (ETag/Last-Modified → 304)
+# ---------------------------------------------------------------------------
+
+
+def _crawler_with_httpx(
+    monkeypatch: pytest.MonkeyPatch,
+    responses: list[_FakeResponse],
+    cache: ContentAddressedCache,
+) -> tuple[HttpCrawler, _FakeHttpx]:
+    """Краулер на фейковом ``httpx`` (сеть не используется)."""
+    fake = _FakeHttpx(responses)
+    monkeypatch.setattr(HttpCrawler, "_import_http", staticmethod(lambda: fake))
+    return HttpCrawler(cache=cache), fake
+
+
+def test_first_fetch_sends_no_conditional_headers_and_writes_meta(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cache = ContentAddressedCache(tmp_path)
+    crawler, fake = _crawler_with_httpx(
+        monkeypatch,
+        [
+            _FakeResponse(
+                content=BODY,
+                status_code=200,
+                etag='"v1"',
+                last_modified="Wed, 21 Oct 2026 07:28:00 GMT",
+            )
+        ],
+        cache,
+    )
+
+    page = crawler.fetch(URL)
+
+    headers = fake.calls[0][1]
+    assert "If-None-Match" not in headers
+    assert "If-Modified-Since" not in headers
+    assert page.etag == '"v1"'
+    assert page.last_modified == "Wed, 21 Oct 2026 07:28:00 GMT"
+    assert page.not_modified is False
+    # Метаданные-сайдкар записаны рядом с .bin.
+    meta = cache.get_meta("http", http_key(URL))
+    assert meta is not None
+    assert meta["etag"] == '"v1"'
+    assert meta["last_modified"] == "Wed, 21 Oct 2026 07:28:00 GMT"
+    assert meta["status_code"] == 200
+    assert meta["final_url"] == "https://example.com/final"
+    assert (tmp_path / "http" / f"{http_key(URL)}.meta.json").is_file()
+
+
+def test_second_fetch_with_validators_304_returns_cached_bytes_without_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cache = ContentAddressedCache(tmp_path)
+    cache.put_bytes("http", http_key(URL), b"cached-representation")
+    cache.put_meta(
+        "http",
+        http_key(URL),
+        {
+            "etag": '"v1"',
+            "last_modified": "Wed, 21 Oct 2026 07:28:00 GMT",
+            "status_code": 200,
+            "content_type": "text/html",
+            "final_url": "https://example.com/final",
+        },
+    )
+    crawler, fake = _crawler_with_httpx(
+        monkeypatch,
+        [_FakeResponse(url=URL, content=b"", status_code=304)],
+        cache,
+    )
+
+    def _no_write(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("304 не должен писать новую запись кэша")
+
+    monkeypatch.setattr(cache, "put_bytes", _no_write)
+    monkeypatch.setattr(cache, "put_meta", _no_write)
+
+    page = crawler.fetch(
+        URL,
+        FetchPlan(
+            if_none_match='"v1"',
+            if_modified_since="Wed, 21 Oct 2026 07:28:00 GMT",
+        ),
+    )
+
+    headers = fake.calls[0][1]
+    assert headers["If-None-Match"] == '"v1"'
+    assert headers["If-Modified-Since"] == "Wed, 21 Oct 2026 07:28:00 GMT"
+    assert page.not_modified is True
+    assert page.status_code == 304
+    assert page.content == b"cached-representation"
+    assert page.etag == '"v1"'
+    assert page.last_modified == "Wed, 21 Oct 2026 07:28:00 GMT"
+
+
+def test_304_with_empty_cache_is_explicit_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    crawler, _fake = _crawler_with_httpx(
+        monkeypatch,
+        [_FakeResponse(url=URL, content=b"", status_code=304)],
+        ContentAddressedCache(tmp_path),
+    )
+
+    with pytest.raises(CrawlError, match="304"):
+        crawler.fetch(URL, FetchPlan(if_none_match='"v1"'))
+
+
+def test_legacy_cache_entry_without_meta_behaves_as_before(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cache = ContentAddressedCache(tmp_path)
+    cache.put_bytes("http", http_key(URL), b"legacy-body")
+    fake = _FakeHttpx([])
+    monkeypatch.setattr(HttpCrawler, "_import_http", staticmethod(lambda: fake))
+    crawler = HttpCrawler(cache=cache)
+
+    page = crawler.fetch(URL)
+
+    assert fake.calls == []  # кэш-хит без обращения к сети
+    assert page.content == b"legacy-body"
+    assert page.url == URL
+    assert page.status_code is None
+    assert page.content_type is None
+    assert page.etag is None
+    assert page.last_modified is None
+    assert page.not_modified is False
 
 

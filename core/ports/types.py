@@ -49,6 +49,11 @@ class FetchPlan:
     ``robots`` — флаг egress-вежливости (§10): адаптер проверяет ``robots.txt`` только
     если у него **есть** политика (``_robots is not None``) **и** ``robots`` истинно.
     Дефолт ``False`` сохраняет обратную совместимость (никаких лишних fetch ``robots.txt``).
+
+    ``if_none_match``/``if_modified_since`` — **условный запрос** (additive): значения
+    заголовков ``If-None-Match``/``If-Modified-Since`` из валидаторов предыдущего
+    получения (``RawPage.etag``/``RawPage.last_modified``). ``None`` (дефолт) — обычный
+    безусловный GET, байт-идентичный прежнему поведению.
     """
 
     fetch: FetchMode = FetchMode.HTTP
@@ -58,6 +63,8 @@ class FetchPlan:
     rate_limit: RateLimitSpec | None = None
     engine: str | None = None
     robots: bool = False
+    if_none_match: str | None = None
+    if_modified_since: str | None = None
 
 
 @dataclass(frozen=True)
@@ -66,6 +73,16 @@ class RawPage:
 
     ``engine`` — идентификатор движка/транспорта, фактически доставившего байты (свободная
     строка-данные, валидируется composition root; **не** доменный enum).
+
+    ``etag``/``last_modified`` — **валидаторы ответа** для условного повторного получения
+    (заголовки ``ETag``/``Last-Modified``): их передают обратно в
+    :attr:`FetchPlan.if_none_match`/:attr:`FetchPlan.if_modified_since` при следующем
+    цикле. ``None`` — сервер валидаторов не дал (или транспорт их не видит).
+
+    ``not_modified`` — сервер подтвердил (``304``), что закэшированное представление
+    актуально. Тогда ``content`` — **байты из кэша** (никогда не пустое тело и не
+    сфабрикованный ответ); pipeline может пропустить retention/экстракцию. ``False``
+    (дефолт) — обычный ответ с новым телом.
     """
 
     url: str
@@ -76,6 +93,9 @@ class RawPage:
     status_code: int | None = None
     content_type: str | None = None
     engine: str | None = None
+    etag: str | None = None
+    last_modified: str | None = None
+    not_modified: bool = False
 
 
 @dataclass(frozen=True)

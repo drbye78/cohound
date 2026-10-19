@@ -15,7 +15,12 @@
   редиректов (``str(response.url)``), ``status_code``/``content_type`` — из ответа;
 * **content-addressed кэш** — при внедрённом ``ContentAddressedCache`` попадание по
   ``http_key(url)`` отдаёт ``RawPage`` из байтов с mtime (детерминизм R7 между
-  ``run_id``); промах → живой фетч + запись.
+  ``run_id``); промах → живой фетч + запись;
+* **условный повторный фетч** — рядом с ``.bin`` лежит JSON-сайдкар
+  (``.meta.json``) с ``etag``/``last_modified``/``status_code``/``content_type``/
+  ``final_url``. Если ``plan`` несёт ``if_none_match``/``if_modified_since``,
+  кэш-шорткат **не** применяется: заголовки уходят на сервер, а ``304`` возвращает
+  ``not_modified=True`` и **закэшированные** байты (пустое тело — ошибка).
 
 **Ленивый ``httpx``.** Модуль импортируется без ``httpx``; пакет подтягивается только
 в реальном пути. ``available`` показывает готовность (``httpx`` установлен или внедрён
@@ -170,19 +175,33 @@ class HttpCrawler:
                 )
 
         key = http_key(url)
-        if self._cache is not None:
+        # Условный запрос обязан дойти до сервера: кэш-шорткат его бы проглотил.
+        conditional = bool(plan.if_none_match or plan.if_modified_since)
+        meta = self._cache.get_meta("http", key) if self._cache is not None else None
+        if self._cache is not None and not conditional:
             cached = self._cache.get_bytes("http", key)
             if cached is not None:
-                return self._page_from_cache(url, cached)
+                return self._page_from_cache(url, cached, meta)
 
-        page = self._fetch_live(url)
-        if self._cache is not None:
+        page = self._fetch_live(url, plan)
+        if self._cache is not None and not page.not_modified:
             self._cache.put_bytes("http", key, page.content)
+            self._cache.put_meta(
+                "http",
+                key,
+                {
+                    "etag": page.etag,
+                    "last_modified": page.last_modified,
+                    "status_code": page.status_code,
+                    "content_type": page.content_type,
+                    "final_url": page.url,
+                },
+            )
         return page
 
     # -- фетч -----------------------------------------------------------------
 
-    def _fetch_live(self, url: str) -> RawPage:
+    def _fetch_live(self, url: str, plan: FetchPlan) -> RawPage:
         """Живой фетч: внедрённый шов или реальный ``httpx``."""
         if self._fetcher is not None:
             try:
@@ -197,37 +216,56 @@ class HttpCrawler:
                 fetched_at=_now_iso(),
                 fetch_mode=FetchMode.HTTP,
             )
-        return self._get_real(url)
+        return self._get_real(url, plan)
 
-    def _get_real(self, url: str) -> RawPage:
-        """Реальный GET; отсутствие зависимости → ``CrawlUnavailable``."""
+    def _get_real(self, url: str, plan: FetchPlan) -> RawPage:
+        """Реальный GET; ``304`` — не ошибка, а подтверждение кэша (см. ниже)."""
         httpx = self._import_http()
         try:
             response = httpx.get(
                 url,
                 timeout=self.timeout,
                 follow_redirects=self.follow_redirects,
-                headers=self._headers(),
+                headers=self._headers(plan),
             )
+            if int(response.status_code) == 304:
+                return self._page_not_modified(url, response)
             response.raise_for_status()
+        except CrawlError:
+            raise
         except Exception as exc:  # noqa: BLE001 - унификация ошибок адаптера
             raise CrawlError(f"HTTP-фетч {url!r} не удался: {exc}") from exc
         return self._page_from_response(response)
 
-    def _headers(self) -> dict[str, str]:
-        """Заголовки запроса: ``Accept``/``Accept-Language`` и опциональный ``User-Agent``."""
+    def _headers(self, plan: FetchPlan | None = None) -> dict[str, str]:
+        """Заголовки запроса: ``Accept``/``Accept-Language``, ``User-Agent`` и валидаторы.
+
+        ``If-None-Match``/``If-Modified-Since`` добавляются только когда план несёт
+        валидаторы предыдущего получения; иначе набор байт-идентичен прежнему.
+        """
         headers = {
             "Accept": DEFAULT_ACCEPT,
             "Accept-Language": DEFAULT_ACCEPT_LANGUAGE,
         }
         if self.user_agent:
             headers["User-Agent"] = self.user_agent
+        if plan is not None:
+            if plan.if_none_match:
+                headers["If-None-Match"] = plan.if_none_match
+            if plan.if_modified_since:
+                headers["If-Modified-Since"] = plan.if_modified_since
         return headers
 
     @staticmethod
     def _page_from_response(response: Any) -> RawPage:
-        """Отображает объект ответа ``httpx`` в ``RawPage`` (финальный URL, статус, тип)."""
+        """Отображает объект ответа ``httpx`` в ``RawPage`` (финальный URL, статус, тип).
+
+        Заголовки ``ETag``/``Last-Modified`` сохраняются как валидаторы для следующего
+        условного запроса.
+        """
         raw_type = response.headers.get("Content-Type")
+        etag = response.headers.get("ETag")
+        last_modified = response.headers.get("Last-Modified")
         return RawPage(
             url=str(response.url),
             content=response.content,
@@ -235,22 +273,72 @@ class HttpCrawler:
             fetch_mode=FetchMode.HTTP,
             status_code=response.status_code,
             content_type=raw_type or None,
+            etag=etag or None,
+            last_modified=last_modified or None,
+        )
+
+    def _page_not_modified(self, url: str, response: Any) -> RawPage:
+        """``304``: сервер подтвердил актуальность кэша — отдаём **закэшированные** байты.
+
+        Пустое тело здесь было бы ложью: ``304`` не несёт представления. Если кэш не
+        внедрён или байтов нет, условный запрос был неконсистентен — это явная ошибка
+        (``CrawlError``), а не пустая страница.
+        """
+        if self._cache is None:
+            raise CrawlError(
+                f"HTTP 304 для {url!r}, но кэш не внедрён: нет байтов представления"
+            )
+        key = http_key(url)
+        cached = self._cache.get_bytes("http", key)
+        if cached is None:
+            raise CrawlError(
+                f"HTTP 304 для {url!r}, но в кэше нет байтов представления "
+                "(неконсистентный условный запрос)"
+            )
+        meta = self._cache.get_meta("http", key) or {}
+        raw_type = response.headers.get("Content-Type") or meta.get("content_type")
+        etag = response.headers.get("ETag") or meta.get("etag")
+        last_modified = response.headers.get("Last-Modified") or meta.get("last_modified")
+        return RawPage(
+            url=str(response.url) or url,
+            content=cached,
+            fetched_at=_now_iso(),
+            fetch_mode=FetchMode.HTTP,
+            status_code=304,
+            content_type=raw_type or None,
+            etag=etag or None,
+            last_modified=last_modified or None,
+            not_modified=True,
         )
 
     # -- кэш ------------------------------------------------------------------
 
-    def _page_from_cache(self, url: str, content: bytes) -> RawPage:
+    def _page_from_cache(
+        self, url: str, content: bytes, meta: dict[str, Any] | None = None
+    ) -> RawPage:
         """Собирает ``RawPage`` из кэшированных байтов.
 
-        Кэшируются только байты, поэтому ``status_code``/``content_type`` в попадании
-        пусты, а ``fetched_at`` берётся из mtime файла кэша (момент первого фетча) —
-        это сохраняет детерминизм R7 между ``run_id``.
+        Без сайдкара (легаси-запись) поведение прежнее: ``status_code``/``content_type``
+        пусты, ``url`` — запрошенный, ``fetched_at`` — mtime файла кэша. При наличии
+        сайдкара восстанавливаются статус/тип/финальный URL и валидаторы (``etag``/
+        ``last_modified``), чтобы вызывающий мог построить условный запрос следующего
+        цикла. ``not_modified`` всегда ``False``: это кэш-хит, а не подтверждение ``304``.
         """
+        meta = meta or {}
+        status = meta.get("status_code")
+        content_type = meta.get("content_type")
+        etag = meta.get("etag")
+        last_modified = meta.get("last_modified")
+        final_url = meta.get("final_url")
         return RawPage(
-            url=url,
+            url=str(final_url) if final_url else url,
             content=content,
             fetched_at=self._cache_mtime_iso(url),
             fetch_mode=FetchMode.HTTP,
+            status_code=int(status) if isinstance(status, int) else None,
+            content_type=str(content_type) if content_type else None,
+            etag=str(etag) if etag else None,
+            last_modified=str(last_modified) if last_modified else None,
         )
 
     def _cache_mtime_iso(self, url: str) -> str:

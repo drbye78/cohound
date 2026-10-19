@@ -77,6 +77,41 @@ def test_raw_page_happy_path() -> None:
     assert result.value.status_code == 200
 
 
+def test_raw_page_preserves_conditional_fields() -> None:
+    """Валидаторы и ``not_modified`` проходят валидацию ядра (additive)."""
+    content = b"cached-representation"
+    payload = _fetch_payload(content)
+    payload.update(
+        {
+            "status_code": 304,
+            "etag": '"v1"',
+            "last_modified": "Wed, 21 Oct 2026 07:28:00 GMT",
+            "not_modified": True,
+        }
+    )
+
+    result = validate_raw_page(payload, url=_URL)
+
+    assert result.ok is True
+    assert result.value is not None
+    assert result.value.not_modified is True
+    assert result.value.etag == '"v1"'
+    assert result.value.last_modified == "Wed, 21 Oct 2026 07:28:00 GMT"
+    # 304 несёт закэшированные байты, не пустое тело.
+    assert result.value.content == content
+
+
+def test_raw_page_not_modified_without_bytes_rejected() -> None:
+    """``not_modified=true`` и пустое тело — отклоняющее нарушение схемы."""
+    payload = _fetch_payload(b"")
+    payload.update({"not_modified": True, "status_code": 304})
+
+    result = validate_raw_page(payload, url=_URL)
+
+    assert result.ok is False
+    assert any("not_modified" in issue.message for issue in result.issues)
+
+
 # ---------------------------------------------------------------------------
 # T13.5 DoD: испорченный ответ отвергается (re-hash, I19)
 # ---------------------------------------------------------------------------

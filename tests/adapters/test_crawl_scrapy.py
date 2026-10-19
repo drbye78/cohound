@@ -15,7 +15,13 @@ from pathlib import Path
 
 import pytest
 
-from core.adapters.crawl_scrapy import CrawlError, CrawlUrlError, ScrapyCrawler
+from core.adapters.crawl_scrapy import (
+    CrawlError,
+    CrawlUrlError,
+    ScrapyCrawler,
+    _CrawlSpec,
+    _raw_page_from_scrapy_response,
+)
 from core.ports.crawler import CrawlerPort
 from core.ports.types import FetchMode, FetchPlan, RawPage
 from core.util.cache import ContentAddressedCache, http_key
@@ -259,3 +265,106 @@ def _spec_present(name: str) -> bool:
     import importlib.util
 
     return importlib.util.find_spec(name) is not None
+
+
+# ---------------------------------------------------------------------------
+# Условный фетч: валидаторы из bytes-заголовков Scrapy и тело 304 из кэша
+# ---------------------------------------------------------------------------
+
+
+class _FakeScrapyResponse:
+    """Мини-дублёр ответа Scrapy: ``headers`` — ``bytes``-ключи, ``body``/``status``."""
+
+    def __init__(
+        self,
+        *,
+        url: str = URL,
+        body: bytes = b"fresh-body",
+        status: int = 200,
+        headers: dict[bytes, bytes] | None = None,
+    ) -> None:
+        self.url = url
+        self.body = body
+        self.status = status
+        self.headers = dict(headers or {})
+
+
+def test_scrapy_collect_captures_validators_from_bytes_headers() -> None:
+    spec = _CrawlSpec(url=URL, fetch=FetchMode.HTTP, wait_for=None)
+    response = _FakeScrapyResponse(
+        headers={
+            b"Content-Type": b"text/html; charset=utf-8",
+            b"ETag": b'"v1"',
+            b"Last-Modified": b"Wed, 21 Oct 2026 07:28:00 GMT",
+        }
+    )
+
+    page = _raw_page_from_scrapy_response(spec, response)
+
+    assert page is not None
+    assert page.content == b"fresh-body"
+    assert page.content_type == "text/html; charset=utf-8"
+    assert page.etag == '"v1"'
+    assert page.last_modified == "Wed, 21 Oct 2026 07:28:00 GMT"
+    assert page.not_modified is False
+
+
+def test_scrapy_304_returns_cached_bytes() -> None:
+    spec = _CrawlSpec(
+        url=URL,
+        fetch=FetchMode.HTTP,
+        wait_for=None,
+        cached=b"cached-representation",
+    )
+
+    page = _raw_page_from_scrapy_response(
+        spec, _FakeScrapyResponse(body=b"", status=304)
+    )
+
+    assert page is not None
+    assert page.not_modified is True
+    assert page.status_code == 304
+    assert page.content == b"cached-representation"
+    assert spec.error is None
+
+
+def test_scrapy_304_without_cache_is_explicit_error() -> None:
+    spec = _CrawlSpec(url=URL, fetch=FetchMode.HTTP, wait_for=None)
+
+    page = _raw_page_from_scrapy_response(
+        spec, _FakeScrapyResponse(body=b"", status=304)
+    )
+
+    assert page is None  # пустую страницу не фабрикуем
+    assert spec.error is not None and "304" in spec.error
+
+
+def test_conditional_plan_bypasses_cache_and_does_not_write_on_304(
+    tmp_path: Path,
+) -> None:
+    cache = ContentAddressedCache(tmp_path)
+    cache.put_bytes("http", http_key(URL), b"cached-representation")
+    seen: list[FetchPlan] = []
+
+    def fetcher(url: str, plan: FetchPlan = FetchPlan()) -> RawPage:
+        seen.append(plan)
+        return RawPage(
+            url=url,
+            content=b"cached-representation",
+            fetched_at=FIXED_TS,
+            fetch_mode=FetchMode.HTTP,
+            status_code=304,
+            not_modified=True,
+        )
+
+    crawler = ScrapyCrawler(fetcher, cache=cache)
+    page = crawler.fetch(
+        URL, FetchPlan(if_none_match='"v1"', if_modified_since="Wed, 21 Oct 2026")
+    )
+
+    # Условный запрос дошёл до фетчера (кэш-шорткат не проглотил его).
+    assert len(seen) == 1
+    assert seen[0].if_none_match == '"v1"'
+    assert page.not_modified is True
+    # 304 не создаёт новую запись: байты кэша не перезаписаны.
+    assert cache.get_bytes("http", http_key(URL)) == b"cached-representation"

@@ -547,6 +547,11 @@ class BrowserCrawler:
         Без кэша. Байты — DOM-сериализация браузера (транскодирование), не байт-в-байт.
         ``RawPage.url`` — **финальный** (пост-редиректный) URL навигации (A3), а не
         запрошенный.
+
+        **Ограничение условного запроса.** Реализация Playwright-навигации здесь не
+        отдаёт HTTP-заголовки ответа, поэтому честный рендер **не может** предъявить
+        ``ETag``/``Last-Modified`` и **не** заявляет ``not_modified``. Такие страницы
+        всегда пере-фетчиваются целиком; фабриковать валидаторы или ``304`` запрещено.
         """
         session = self._open_session()
         try:
@@ -558,6 +563,7 @@ class BrowserCrawler:
             content=content,
             fetched_at=_now_iso(),
             fetch_mode=FetchMode.BROWSER,
+            not_modified=False,
         )
 
     # -- hybrid ---------------------------------------------------------------
@@ -573,7 +579,7 @@ class BrowserCrawler:
         if self._cache is not None:
             cached = self._cache.get_bytes("http", key)
             if cached is not None:
-                return self._page_from_cache(url, cached)
+                return self._page_from_cache(url, cached, self._cache.get_meta("http", key))
 
         last_status: int | None = None
         last_rendered: bytes | None = None
@@ -582,6 +588,11 @@ class BrowserCrawler:
             cookies, render_url, rendered = self._warm(url, plan)
             status, body, resp_headers = self._http_get_hybrid(url, cookies)
             if 200 <= status < 300 and not _looks_like_interstitial(body, rendered):
+                # Валидаторы hybrid-GET доступны в ``resp_headers`` (в отличие от honest).
+                etag = resp_headers.get("ETag") or resp_headers.get("etag")
+                last_modified = resp_headers.get("Last-Modified") or resp_headers.get(
+                    "last-modified"
+                )
                 page = RawPage(
                     url=render_url,
                     content=bytes(body),
@@ -589,9 +600,22 @@ class BrowserCrawler:
                     fetch_mode=FetchMode.HTTP,
                     status_code=status,
                     content_type=resp_headers.get("Content-Type") or None,
+                    etag=etag or None,
+                    last_modified=last_modified or None,
                 )
                 if self._cache is not None:
                     self._cache.put_bytes("http", key, page.content)
+                    self._cache.put_meta(
+                        "http",
+                        key,
+                        {
+                            "etag": page.etag,
+                            "last_modified": page.last_modified,
+                            "status_code": page.status_code,
+                            "content_type": page.content_type,
+                            "final_url": page.url,
+                        },
+                    )
                 return page
             # Challenge / не-2xx / interstitial: сохраняем рендер для возможного возврата.
             last_status = status
@@ -721,20 +745,32 @@ class BrowserCrawler:
 
     # -- кэш ------------------------------------------------------------------
 
-    def _page_from_cache(self, url: str, content: bytes) -> RawPage:
-        """``RawPage`` из закэшированных байтов (``status_code``/``content_type`` пусты).
+    def _page_from_cache(
+        self, url: str, content: bytes, meta: dict[str, Any] | None = None
+    ) -> RawPage:
+        """``RawPage`` из закэшированных байтов.
 
-        Кэш content-addressed и хранит **только тело** по ``http_key(url)``, финальный
-        (пост-редиректный) URL в нём не сохраняется. Поэтому кэш-хит осознанно ставит
-        ``url`` = **запрошенный** URL — восстановить финальный невозможно без изменения
-        формата кэша (вне рамок A3). Это же расхождение предсуществует в Scrapy-пути
-        (``crawl_scrapy.py`` ``_page_from_cache``) — здесь оно только зафиксировано.
+        Кэш хранит **тело** по ``http_key(url)``; метаданные-сайдкар (если есть) даёт
+        ``status_code``/``content_type``/финальный URL и валидаторы. Без сайдкара
+        (легаси-запись) ``status_code``/``content_type`` пусты, а ``url`` —
+        **запрошенный**: восстановить финальный тогда невозможно. Это расхождение
+        предсуществует в Scrapy-пути (``crawl_scrapy.py`` ``_page_from_cache``).
         """
+        meta = meta or {}
+        status = meta.get("status_code")
+        content_type = meta.get("content_type")
+        etag = meta.get("etag")
+        last_modified = meta.get("last_modified")
+        final_url = meta.get("final_url")
         return RawPage(
-            url=url,
+            url=str(final_url) if final_url else url,
             content=content,
             fetched_at=self._cache_mtime_iso(url),
             fetch_mode=FetchMode.HTTP,
+            status_code=int(status) if isinstance(status, int) else None,
+            content_type=str(content_type) if content_type else None,
+            etag=str(etag) if etag else None,
+            last_modified=str(last_modified) if last_modified else None,
         )
 
     def _cache_mtime_iso(self, url: str) -> str:

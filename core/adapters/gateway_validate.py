@@ -426,6 +426,17 @@ def validate_raw_page(
         if sanitize:
             issues.extend(_sanitize_issues(content, response.get("content_type")))
 
+    not_modified = response.get("not_modified") is True
+    if not_modified and not content:
+        # 304 не несёт представления: пустое тело — неконсистентный ответ edge.
+        issues.append(
+            ValidationIssue(
+                "schema",
+                "not_modified=true без закэшированных байтов представления",
+                "raw",
+            )
+        )
+
     issues.extend(_url_issues(url, "url"))
     final_url = response.get("final_url")
     if final_url:
@@ -436,6 +447,8 @@ def validate_raw_page(
         status_code = response.get("status_code")
         lang = response.get("lang")
         content_type = response.get("content_type")
+        etag = response.get("etag")
+        last_modified = response.get("last_modified")
         value = RawPage(
             url=str(final_url or url),
             content=content if content is not None else b"",
@@ -444,6 +457,9 @@ def validate_raw_page(
             lang=str(lang) if lang else None,
             status_code=int(status_code) if status_code is not None else None,
             content_type=str(content_type) if content_type else None,
+            etag=str(etag) if etag else None,
+            last_modified=str(last_modified) if last_modified else None,
+            not_modified=bool(response.get("not_modified")),
         )
     return ValidatedResponse(ok=not _has_rejecting(issues), issues=issues, value=value)
 

@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://cohound.local/contracts/seam/crawl.schema.json",
   "title": "POST /v1/crawl/* payloads",
-  "description": "Контракты очереди краула (Phase 3.1): submit (постановка), status (прогресс), cancel (отмена) и collect (забор результатов), плюс poll (опрос фида/канала, Wave 5.1). Все пять операций — POST; каждая имеет собственные request/response в $defs. Ответ collect несёт контент (сырые байты/хэши), а poll — только ссылки на записи (URL+метаданные); ни то, ни другое не evidence (I19). Планировщик (Wave 3.2) и сервис опроса (Wave 5.1) инъецируются в edge; при отсутствии операция отвечает status=error.",
+  "description": "Контракты очереди краула (Phase 3.1): submit (постановка), status (прогресс), cancel (отмена) и collect (забор результатов), плюс poll (опрос фида/канала, Wave 5.1). Все пять операций — POST; каждая имеет собственные request/response в $defs. Ответ collect несёт контент (сырые байты/хэши) и валидаторы условного фетча (etag/last_modified/not_modified), а poll — только ссылки на записи (URL+метаданные); ни то, ни другое не evidence (I19). Планировщик (Wave 3.2) и сервис опроса (Wave 5.1) инъецируются в edge; при отсутствии операция отвечает status=error.",
   "type": "object",
   "oneOf": [
     {"$ref": "#/$defs/submit_response"},
@@ -47,6 +47,8 @@
         "wait_for": {"type": ["string", "null"]},
         "lang": {"type": ["string", "null"]},
         "robots": {"type": "boolean"},
+        "if_none_match": {"type": ["string", "null"]},
+        "if_modified_since": {"type": ["string", "null"]},
         "rate_limit": {
           "type": ["object", "null"],
           "additionalProperties": false,
@@ -161,6 +163,9 @@
         "fetched_at": {"type": ["string", "null"]},
         "content_hash": {"type": ["string", "null"]},
         "final_url": {"type": ["string", "null"]},
+        "etag": {"type": ["string", "null"]},
+        "last_modified": {"type": ["string", "null"]},
+        "not_modified": {"type": "boolean"},
         "raw": {
           "oneOf": [
             {"$ref": "#/$defs/raw"},

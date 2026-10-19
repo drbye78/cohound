@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://cohound.local/contracts/seam/fetch.schema.json",
   "title": "POST /v1/fetch payload",
-  "description": "Запрос фетча страницы/документа и ответ edge (07 §3, D2). Запрос несёт три оси: fetch (http|browser), extract (auto|html|document) и strategy (auto|honest|hybrid) плюс опциональный wait_for. Сырые байты (raw) — retention; очищенный markdown (text) — результат извлечения. Возвращается контент, не evidence (I19).",
+  "description": "Запрос фетча страницы/документа и ответ edge (07 §3, D2). Запрос несёт три оси: fetch (http|browser), extract (auto|html|document) и strategy (auto|honest|hybrid) плюс опциональный wait_for и валидаторы условного повторного получения (if_none_match/if_modified_since). Сырые байты (raw) — retention; очищенный markdown (text) — результат извлечения. Ответ несёт валидаторы (etag/last_modified) и признак not_modified (304: raw — закэшированное представление). Возвращается контент, не evidence (I19).",
   "type": "object",
   "additionalProperties": false,
   "properties": {
@@ -12,6 +12,9 @@
     "content_type": {"type": ["string", "null"]},
     "fetched_at": {"type": "string"},
     "lang": {"type": ["string", "null"]},
+    "etag": {"type": ["string", "null"]},
+    "last_modified": {"type": ["string", "null"]},
+    "not_modified": {"type": "boolean"},
     "raw": {
       "oneOf": [
         {"$ref": "#/$defs/raw"},
@@ -45,7 +48,9 @@
         "lang": {"type": ["string", "null"]},
         "extract": {"enum": ["auto", "html", "document"]},
         "strategy": {"enum": ["auto", "honest", "hybrid"]},
-        "wait_for": {"type": ["string", "null"]}
+        "wait_for": {"type": ["string", "null"]},
+        "if_none_match": {"type": ["string", "null"]},
+        "if_modified_since": {"type": ["string", "null"]}
       }
     },
     "raw": {

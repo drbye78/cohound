@@ -407,11 +407,21 @@ def raw_page_from_response(
     if claimed_hash is not None:
         verify_content_hash(content, claimed_hash)
 
+    not_modified = response.get("not_modified") is True
+    if not_modified and not content:
+        # 304 означает «закэшированное представление актуально»: пустое тело —
+        # неконсистентный ответ edge, а не валидная страница.
+        raise RemoteContentError(
+            "ответ edge: not_modified=true без закэшированных байтов представления"
+        )
+
     final_url = response.get("final_url") or url
     status_code = response.get("status_code")
     content_type = response.get("content_type")
     fetched_at = response.get("fetched_at") or ""
     lang = response.get("lang")
+    etag = response.get("etag")
+    last_modified = response.get("last_modified")
     return RawPage(
         url=str(final_url),
         content=content,
@@ -420,6 +430,9 @@ def raw_page_from_response(
         lang=str(lang) if lang else None,
         status_code=int(status_code) if status_code is not None else None,
         content_type=str(content_type) if content_type else None,
+        etag=str(etag) if etag else None,
+        last_modified=str(last_modified) if last_modified else None,
+        not_modified=not_modified,
     )
 
 

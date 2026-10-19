@@ -149,6 +149,9 @@ def test_client_shaped_envelope_from_http_gateway_validates() -> None:
         "status_code": 200,
         "content_type": "text/html; charset=utf-8",
         "fetched_at": "2026-01-01T00:00:00Z",
+        "etag": '"v1"',
+        "last_modified": "Wed, 21 Oct 2026 07:28:00 GMT",
+        "not_modified": False,
         "raw": {"hash": "abc", "size": 3, "bytes_b64": "YWJj"},
         "text": None,
         "error": None,
@@ -163,6 +166,18 @@ def test_client_shaped_envelope_from_http_gateway_validates() -> None:
     assert validate_payload("fetch", payload) == []
 
 
+def test_fetch_payload_without_conditional_fields_still_validates() -> None:
+    """Старый payload без новых полей остаётся валидным (additive-контракт)."""
+    payload = {
+        "final_url": "https://site.test/final",
+        "status_code": 200,
+        "fetched_at": "2026-01-01T00:00:00Z",
+        "raw": {"hash": "abc", "size": 3, "bytes_b64": "YWJj"},
+    }
+    assert validate_payload("fetch", payload) == []
+    assert SEAM_SCHEMA_VERSION == "1"
+
+
 # ---------------------------------------------------------------------------
 # validate_payload — fetch
 # ---------------------------------------------------------------------------
@@ -172,6 +187,18 @@ def test_validate_payload_fetch_accepts_raw_or_text_or_error() -> None:
     assert validate_payload("fetch", {"raw": {"hash": "h", "size": 1}}) == []
     assert validate_payload("fetch", {"text": {"content": "# md"}}) == []
     assert validate_payload("fetch", {"text": None, "error": "gone"}) == []
+
+
+def test_validate_payload_fetch_accepts_conditional_fields() -> None:
+    payload = {
+        "raw": {"hash": "h", "size": 1},
+        "etag": '"v1"',
+        "last_modified": "Wed, 21 Oct 2026 07:28:00 GMT",
+        "not_modified": True,
+    }
+    assert validate_payload("fetch", payload) == []
+    assert validate_payload("fetch", {"raw": {"hash": "h"}, "not_modified": "yes"})
+    assert validate_payload("fetch", {"raw": {"hash": "h"}, "etag": 1})
 
 
 def test_validate_payload_fetch_rejects_bad_forms() -> None:
@@ -198,6 +225,18 @@ def test_validate_fetch_request_accepts_two_axes() -> None:
     assert validate_fetch_request(
         {"url": "https://x.test", "fetch": None, "extract": None, "wait_for": None}
     ) == []
+
+
+def test_validate_fetch_request_accepts_conditional_validators() -> None:
+    payload = {
+        "url": "https://x.test",
+        "if_none_match": '"v1"',
+        "if_modified_since": "Wed, 21 Oct 2026 07:28:00 GMT",
+    }
+    assert validate_fetch_request(payload) == []
+    # Старый запрос без валидаторов остаётся валидным (additive).
+    assert validate_fetch_request({"url": "https://x.test"}) == []
+    assert validate_fetch_request({"url": "https://x.test", "if_none_match": 1})
 
 
 def test_validate_fetch_request_rejects_missing_url() -> None:
@@ -412,6 +451,10 @@ def test_validate_payload_crawl_collect_accepts_items_and_raw() -> None:
                 "content_type": "text/html",
                 "fetched_at": "T",
                 "content_hash": "h",
+                "final_url": "https://x.test/final",
+                "etag": '"v1"',
+                "last_modified": "Wed, 21 Oct 2026 07:28:00 GMT",
+                "not_modified": True,
                 "raw": {"hash": "h", "size": 2, "bytes_b64": "YQ=="},
                 "error": None,
             }
@@ -422,12 +465,35 @@ def test_validate_payload_crawl_collect_accepts_items_and_raw() -> None:
     assert validate_payload("crawl/collect", payload) == []
 
 
+def test_validate_payload_crawl_collect_old_payload_still_validates() -> None:
+    """Элемент без полей условного фетча остаётся валидным (additive)."""
+    payload = {
+        "items": [
+            {
+                "product_id": "p1",
+                "url": "https://x.test",
+                "status": "fetched",
+                "http_status": 200,
+                "raw": {"hash": "h", "size": 2, "bytes_b64": "YQ=="},
+            }
+        ],
+        "next_cursor": None,
+        "done": True,
+    }
+    assert validate_payload("crawl/collect", payload) == []
+    assert SEAM_SCHEMA_VERSION == "1"
+
+
 def test_validate_payload_crawl_collect_rejects_bad_item() -> None:
     assert validate_payload("crawl/collect", {"items": [{"product_id": "p1"}]})
     assert validate_payload("crawl/collect", {"items": "nope"})
     assert validate_payload(
         "crawl/collect",
         {"items": [], "next_cursor": None, "done": "yes"},
+    )
+    assert validate_payload(
+        "crawl/collect",
+        {"items": [{"product_id": "p1", "url": "https://x.test", "not_modified": "yes"}]},
     )
 
 

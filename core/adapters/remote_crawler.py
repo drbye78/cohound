@@ -56,6 +56,12 @@ class RemoteCrawler:
             "strategy": plan.strategy.value,
             "wait_for": plan.wait_for,
         }
+        # Условный запрос (additive): ключи только при наличии валидаторов — старые
+        # edge без этих полей продолжают работать, безусловный GET не меняется.
+        if plan.if_none_match:
+            payload["if_none_match"] = plan.if_none_match
+        if plan.if_modified_since:
+            payload["if_modified_since"] = plan.if_modified_since
         response = self._gateway.call("fetch", payload)
         if not isinstance(response, Mapping):
             raise RemoteContentError("fetch: payload ответа edge не является отображением")

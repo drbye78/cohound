@@ -169,6 +169,30 @@ class RedirectCrawler:
         )
 
 
+class ConditionalCrawler:
+    """Отдаёт подтверждение ``304`` с валидаторами и записывает полученный ``FetchPlan``."""
+
+    version = "conditional-1"
+    engine = "http"
+
+    def __init__(self, content: bytes = b"cached-representation") -> None:
+        self._content = content
+        self.plans: list[FetchPlan] = []
+
+    def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:
+        self.plans.append(plan)
+        return RawPage(
+            url=url,
+            content=self._content,
+            fetched_at=_FIXED_TIME,
+            status_code=304,
+            content_type="text/html",
+            etag='"v1"',
+            last_modified="Wed, 21 Oct 2026 07:28:00 GMT",
+            not_modified=True,
+        )
+
+
 class RecordingRateLimiter(RateLimiter):
     """``RateLimiter`` со стаб-``sleep``/``rng``: записывает сны и ``(host, spec)``.
 
@@ -925,6 +949,48 @@ def test_edge_collect_returns_final_url(make_scheduler: Any) -> None:
     assert row["final_url"] == final
 
 
+def test_edge_conditional_fetch_roundtrip(make_scheduler: Any) -> None:
+    """Валидаторы: submit → ``FetchPlan`` → ``RawPage`` → БД → ``collect``."""
+    crawler = ConditionalCrawler()
+    scheduler = make_scheduler(crawlers={"http": crawler})
+    scheduler.submit(
+        _submit_payload(
+            items=[
+                _item(
+                    "p1",
+                    "https://x.test/a",
+                    if_none_match='"v1"',
+                    if_modified_since="Wed, 21 Oct 2026 07:28:00 GMT",
+                )
+            ]
+        )
+    )
+    assert _wait_terminal(scheduler, "job1")["status"] == JOB_COMPLETED
+
+    # Валидаторы запроса дошли до плана, который получил краулер.
+    assert len(crawler.plans) == 1
+    assert crawler.plans[0].if_none_match == '"v1"'
+    assert crawler.plans[0].if_modified_since == "Wed, 21 Oct 2026 07:28:00 GMT"
+
+    item = scheduler.collect("job1")["items"][0]
+    assert item["not_modified"] is True
+    assert item["http_status"] == 304
+    assert item["etag"] == '"v1"'
+    assert item["last_modified"] == "Wed, 21 Oct 2026 07:28:00 GMT"
+    # 304 несёт закэшированные байты, а не пустое тело.
+    assert base64.b64decode(item["raw"]["bytes_b64"]) == b"cached-representation"
+
+    row = scheduler._connect().execute(
+        "SELECT if_none_match, if_modified_since, etag, last_modified, not_modified"
+        " FROM edge_job_items WHERE job_id = 'job1'"
+    ).fetchone()
+    assert row["if_none_match"] == '"v1"'
+    assert row["if_modified_since"] == "Wed, 21 Oct 2026 07:28:00 GMT"
+    assert row["etag"] == '"v1"'
+    assert row["last_modified"] == "Wed, 21 Oct 2026 07:28:00 GMT"
+    assert row["not_modified"] == 1
+
+
 _OLD_SCHEMA = """
 CREATE TABLE edge_jobs (
     job_id          TEXT PRIMARY KEY,
@@ -973,7 +1039,8 @@ def test_edge_schema_migration_adds_final_url(make_scheduler: Any, tmp_path: Pat
     """§6a/§11.6.6: старая ``edge_jobs.db`` доливается колонками, строки целы.
 
     ``CREATE TABLE IF NOT EXISTS`` не расширяет существующую таблицу — миграция обязана
-    добавить ``robots``/``final_url``/``rate_limit`` идемпотентно, не трогая строки.
+    добавить ``robots``/``final_url``/``rate_limit`` и колонки условного фетча
+    идемпотентно, не трогая строки.
     """
     db_path = tmp_path / "edge_jobs.db"
     legacy = sqlite3.connect(str(db_path))
@@ -998,7 +1065,16 @@ def test_edge_schema_migration_adds_final_url(make_scheduler: Any, tmp_path: Pat
     scheduler.start()  # recovery + миграция
     conn = scheduler._connect()
     columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(edge_job_items)")}
-    assert {"final_url", "rate_limit", "robots"} <= columns
+    assert {
+        "final_url",
+        "rate_limit",
+        "robots",
+        "if_none_match",
+        "if_modified_since",
+        "etag",
+        "last_modified",
+        "not_modified",
+    } <= columns
 
     # Существующая строка цела (не пересоздана, значения сохранены).
     row = conn.execute(

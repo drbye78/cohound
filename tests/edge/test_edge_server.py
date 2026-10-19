@@ -385,6 +385,9 @@ def test_fetch_returns_raw_and_extracted_text() -> None:
         "status_code",
         "content_type",
         "fetched_at",
+        "etag",
+        "last_modified",
+        "not_modified",
         "raw",
         "text",
         "error",
@@ -394,6 +397,10 @@ def test_fetch_returns_raw_and_extracted_text() -> None:
     assert payload["status_code"] == 200
     assert payload["content_type"] == "text/html; charset=utf-8"
     assert payload["fetched_at"] == _FIXED_TIME
+    # FakeCrawler не даёт валидаторов — поля additive и пустые (не фабрикуются).
+    assert payload["etag"] is None
+    assert payload["last_modified"] is None
+    assert payload["not_modified"] is False
     assert payload["raw"]["hash"] == content_hash(content)
     assert payload["raw"]["size"] == len(content)
     assert base64.b64decode(payload["raw"]["bytes_b64"]) == content

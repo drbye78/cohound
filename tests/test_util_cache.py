@@ -34,6 +34,40 @@ def test_json_round_trip(tmp_path: Path) -> None:
     assert cache.get_json("serp", "deadbeef") == obj
 
 
+def test_meta_round_trip_is_canonical_sidecar(tmp_path: Path) -> None:
+    cache = ContentAddressedCache(tmp_path)
+    meta = {
+        "etag": '"v1"',
+        "last_modified": "Wed, 21 Oct 2026 07:28:00 GMT",
+        "status_code": 200,
+        "content_type": "text/html",
+        "final_url": "https://example.com/final",
+    }
+    path = cache.put_meta("http", "abc123", meta)
+    assert path == tmp_path / "http" / "abc123.meta.json"
+    assert cache.get_meta("http", "abc123") == meta
+    # Канонический JSON: порядок ключей не влияет на байты.
+    cache.put_meta("http", "abc124", dict(reversed(list(meta.items()))))
+    assert path.read_bytes() == (tmp_path / "http" / "abc124.meta.json").read_bytes()
+
+
+def test_meta_missing_or_corrupt_degrades_to_none(tmp_path: Path) -> None:
+    cache = ContentAddressedCache(tmp_path)
+    assert cache.get_meta("http", "absent") is None
+    target = tmp_path / "http" / "broken.meta.json"
+    target.parent.mkdir(parents=True)
+    target.write_text("{not json", encoding="utf-8")
+    assert cache.get_meta("http", "broken") is None
+    target.write_text("[]", encoding="utf-8")
+    assert cache.get_meta("http", "broken") is None
+
+
+def test_put_meta_rejects_non_dict(tmp_path: Path) -> None:
+    cache = ContentAddressedCache(tmp_path)
+    with pytest.raises(TypeError):
+        cache.put_meta("http", "k", ["not", "a", "dict"])  # type: ignore[arg-type]
+
+
 def test_dirs_created_on_demand(tmp_path: Path) -> None:
     root = tmp_path / "does" / "not" / "exist"
     cache = ContentAddressedCache(root)

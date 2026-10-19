@@ -144,6 +144,43 @@ def test_submit_builds_payload_and_returns_job_id() -> None:
     ]
 
 
+def test_submit_forwards_conditional_validators() -> None:
+    gateway = _FakeGateway({"crawl/submit": {"job_id": "job-1"}})
+    executor = EdgeCrawlExecutor(gateway)
+
+    executor.submit(
+        [
+            _work_item(
+                if_none_match='"v1"',
+                if_modified_since="Wed, 21 Oct 2026 07:28:00 GMT",
+            )
+        ],
+        session_id="s",
+        run_id="r",
+        profile="split",
+        idempotency_key="k",
+    )
+
+    item = gateway.calls[-1][1]["items"][0]
+    assert item["if_none_match"] == '"v1"'
+    assert item["if_modified_since"] == "Wed, 21 Oct 2026 07:28:00 GMT"
+
+
+def test_submit_unconditional_item_omits_validator_keys() -> None:
+    gateway = _FakeGateway({"crawl/submit": {"job_id": "job-1"}})
+    EdgeCrawlExecutor(gateway).submit(
+        [_work_item()],
+        session_id="s",
+        run_id="r",
+        profile="split",
+        idempotency_key="k",
+    )
+
+    item = gateway.calls[-1][1]["items"][0]
+    assert "if_none_match" not in item
+    assert "if_modified_since" not in item
+
+
 def test_submit_defaults_axes_when_unset() -> None:
     gateway = _FakeGateway({"crawl/submit": {"job_id": "job-2"}})
     executor = EdgeCrawlExecutor(gateway)
@@ -460,6 +497,55 @@ def test_collect_final_url_absent_is_none() -> None:
 
     (item,) = executor.collect("job-1").items
     assert item.final_url is None
+
+
+def test_collect_preserves_conditional_fetch_fields() -> None:
+    """Сейм проносит ``etag``/``last_modified``/``not_modified`` (additive)."""
+    body = b"cached-representation"
+    b64 = base64.b64encode(body).decode("ascii")
+    gateway = _FakeGateway(
+        {
+            "crawl/collect": {
+                "items": [
+                    _item(
+                        http_status=304,
+                        etag='"v1"',
+                        last_modified="Wed, 21 Oct 2026 07:28:00 GMT",
+                        not_modified=True,
+                        content_hash=content_hash(body),
+                        raw=_raw(b64, claimed=content_hash(body)),
+                    )
+                ],
+                "done": True,
+            }
+        }
+    )
+    executor = EdgeCrawlExecutor(gateway)
+
+    (item,) = executor.collect("job-1").items
+    assert item.not_modified is True
+    assert item.etag == '"v1"'
+    assert item.last_modified == "Wed, 21 Oct 2026 07:28:00 GMT"
+    assert item.raw_bytes == body  # 304 несёт закэшированные байты, не пустое тело
+
+
+def test_collect_conditional_fields_absent_default_false_none() -> None:
+    gateway = _FakeGateway({"crawl/collect": {"items": [_item()], "done": True}})
+
+    (item,) = EdgeCrawlExecutor(gateway).collect("job-1").items
+    assert item.etag is None
+    assert item.last_modified is None
+    assert item.not_modified is False
+
+
+def test_collect_not_modified_without_bytes_raises() -> None:
+    """``not_modified=true`` без байтов представления — неконсистентный ответ edge."""
+    gateway = _FakeGateway(
+        {"crawl/collect": {"items": [_item(not_modified=True)], "done": True}}
+    )
+
+    with pytest.raises(RemoteContentError, match="not_modified"):
+        EdgeCrawlExecutor(gateway).collect("job-1")
 
 
 def test_collect_final_url_malformed_degrades_to_none() -> None:

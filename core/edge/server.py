@@ -139,6 +139,14 @@ def _coerce_wait_for(value: Any) -> str | None:
     return text or None
 
 
+def _coerce_opt_str(value: Any) -> str | None:
+    """Приводит опциональное строковое поле payload к строке либо ``None``."""
+    if value is None:
+        return None
+    text = str(value)
+    return text or None
+
+
 def _coerce_int(value: Any, *, default: int) -> int:
     """Приводит числовое поле payload к ``int``; нечисло → ``EdgeRequestError``."""
     if value is None:
@@ -417,6 +425,8 @@ class EdgeGateway:
             fetch=_coerce_fetch(payload.get("fetch")),
             extract=_coerce_extract(payload.get("extract")),
             wait_for=_coerce_wait_for(payload.get("wait_for")),
+            if_none_match=_coerce_opt_str(payload.get("if_none_match")),
+            if_modified_since=_coerce_opt_str(payload.get("if_modified_since")),
         )
 
         try:
@@ -445,6 +455,10 @@ class EdgeGateway:
             "status_code": getattr(page, "status_code", None),
             "content_type": getattr(page, "content_type", None),
             "fetched_at": str(getattr(page, "fetched_at", None) or self._clock()),
+            # Валидаторы условного запроса (additive, 07 §3/§8).
+            "etag": getattr(page, "etag", None),
+            "last_modified": getattr(page, "last_modified", None),
+            "not_modified": bool(getattr(page, "not_modified", False)),
             "raw": raw,
             "text": text_obj,
             "error": extract_error,
@@ -616,6 +630,9 @@ class EdgeGateway:
             "fetched_at": item.get("fetched_at"),
             "content_hash": item.get("content_hash"),
             "final_url": EdgeGateway._crawl_opt_str(item.get("final_url")),
+            "etag": EdgeGateway._crawl_opt_str(item.get("etag")),
+            "last_modified": EdgeGateway._crawl_opt_str(item.get("last_modified")),
+            "not_modified": bool(item.get("not_modified")),
             "raw": normalized_raw,
             "error": item.get("error"),
         }

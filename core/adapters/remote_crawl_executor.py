@@ -223,7 +223,7 @@ class EdgeCrawlExecutor:
         (или ``None``), чтобы edge восстановил ``RateLimitSpec`` (не строка
         ``canonical_rate_limit``).
         """
-        return {
+        payload = {
             "product_id": item.product_id,
             "url": item.url,
             "engine": item.engine,
@@ -236,6 +236,13 @@ class EdgeCrawlExecutor:
             "robots": bool(item.robots),
             "rate_limit": self._rate_limit_payload(item.rate_limit),
         }
+        # Условный запрос (additive): ключи только при наличии валидаторов — старые
+        # edge без этих полей продолжают работать, безусловный GET не меняется.
+        if item.if_none_match:
+            payload["if_none_match"] = item.if_none_match
+        if item.if_modified_since:
+            payload["if_modified_since"] = item.if_modified_since
+        return payload
 
     @staticmethod
     def _rate_limit_payload(spec: RateLimitSpec | None) -> dict[str, float] | None:
@@ -328,6 +335,13 @@ class EdgeCrawlExecutor:
                 raw_bytes, None if claimed_hash is None else str(claimed_hash)
             )
 
+        not_modified = item.get("not_modified") is True
+        if not_modified and not raw_bytes:
+            # 304 без байтов представления — неконсистентный ответ edge.
+            raise RemoteContentError(
+                "crawl/collect.items: not_modified=true без закэшированных байтов"
+            )
+
         return CrawlResultItem(
             product_id=product_id,
             url=url,
@@ -342,6 +356,9 @@ class EdgeCrawlExecutor:
             raw_bytes=raw_bytes,
             error=_opt_str(item.get("error")),
             final_url=_opt_url(item.get("final_url")),
+            etag=_opt_str(item.get("etag")),
+            last_modified=_opt_str(item.get("last_modified")),
+            not_modified=not_modified,
         )
 
     def _decode_raw(self, raw: Mapping[str, Any]) -> bytes | None:

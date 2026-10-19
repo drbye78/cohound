@@ -293,6 +293,68 @@ def test_remote_crawler_forwards_strategy_axis(strategy: CrawlStrategy) -> None:
     assert seen["payload"]["strategy"] in {"auto", "honest", "hybrid"}
 
 
+def test_remote_crawler_round_trips_conditional_validators() -> None:
+    """Сейм сохраняет ``etag``/``last_modified``/``not_modified`` и шлёт валидаторы."""
+    content = b"cached-representation"
+    seen: dict[str, Any] = {}
+
+    def respond(op: str, payload: Mapping[str, Any]) -> Any:
+        seen["payload"] = payload
+        return {
+            "final_url": "https://site.test/final",
+            "status_code": 304,
+            "content_type": "text/html",
+            "fetched_at": "2026-01-01T00:00:00Z",
+            "etag": '"v1"',
+            "last_modified": "Wed, 21 Oct 2026 07:28:00 GMT",
+            "not_modified": True,
+            "raw": {"hash": content_hash(content), "bytes_b64": base64.b64encode(content).decode()},
+        }
+
+    page = RemoteCrawler(_gw(respond)).fetch(
+        "https://site.test/start",
+        FetchPlan(
+            if_none_match='"v1"',
+            if_modified_since="Wed, 21 Oct 2026 07:28:00 GMT",
+        ),
+    )
+
+    assert page.not_modified is True
+    assert page.etag == '"v1"'
+    assert page.last_modified == "Wed, 21 Oct 2026 07:28:00 GMT"
+    assert page.content == content
+    assert seen["payload"]["if_none_match"] == '"v1"'
+    assert seen["payload"]["if_modified_since"] == "Wed, 21 Oct 2026 07:28:00 GMT"
+
+
+def test_remote_crawler_unconditional_request_omits_validator_keys() -> None:
+    """Безусловный GET не несёт новых ключей (additive-совместимость со старым edge)."""
+    seen: dict[str, Any] = {}
+
+    def respond(op: str, payload: Mapping[str, Any]) -> Any:
+        seen["payload"] = payload
+        return {"raw": {"content": "x"}}
+
+    RemoteCrawler(_gw(respond)).fetch("https://site.test/x")
+
+    assert "if_none_match" not in seen["payload"]
+    assert "if_modified_since" not in seen["payload"]
+
+
+def test_remote_crawler_rejects_not_modified_without_cached_bytes() -> None:
+    """``not_modified=true`` с пустым телом — неконсистентный ответ edge, не страница."""
+
+    def respond(op: str, payload: Mapping[str, Any]) -> Any:
+        return {
+            "not_modified": True,
+            "status_code": 304,
+            "raw": {"hash": content_hash(b""), "bytes_b64": ""},
+        }
+
+    with pytest.raises(RemoteContentError, match="not_modified"):
+        RemoteCrawler(_gw(respond)).fetch("https://site.test/x")
+
+
 def test_remote_crawler_rejects_hash_mismatch() -> None:
     def respond(op: str, payload: Mapping[str, Any]) -> Any:
         return {

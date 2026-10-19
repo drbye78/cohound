@@ -245,6 +245,20 @@ def test_plan_fetch_http_still_renders_browser() -> None:
     assert page.content == b"rendered-despite-fetch-http"
 
 
+def test_honest_render_cannot_supply_validators() -> None:
+    # Честный Playwright-рендер не отдаёт заголовки ответа: валидаторов нет,
+    # not_modified не заявляется (страница всегда пере-фетчивается целиком).
+    backend = FakeBackend(content=b"<html>honest</html>")
+    crawler = BrowserCrawler(backend=backend)
+
+    page = crawler.fetch(URL, _plan(CrawlStrategy.HONEST))
+
+    assert page.content == b"<html>honest</html>"
+    assert page.etag is None
+    assert page.last_modified is None
+    assert page.not_modified is False
+
+
 # ---------------------------------------------------------------------------
 # hybrid
 # ---------------------------------------------------------------------------
@@ -252,7 +266,19 @@ def test_plan_fetch_http_still_renders_browser() -> None:
 
 def test_hybrid_bridges_cookies_and_returns_http_page(tmp_path: Path) -> None:
     backend = FakeBackend(content=b"<html>", cookies=[COOKIE])
-    getter = RecordingHttpGet([(200, b"hybrid-body", {"Content-Type": "text/html; charset=utf-8"})])
+    getter = RecordingHttpGet(
+        [
+            (
+                200,
+                b"hybrid-body",
+                {
+                    "Content-Type": "text/html; charset=utf-8",
+                    "ETag": '"v1"',
+                    "Last-Modified": "Wed, 21 Oct 2026 07:28:00 GMT",
+                },
+            )
+        ]
+    )
     cache = ContentAddressedCache(tmp_path)
     crawler = BrowserCrawler(backend=backend, http_get=getter, cache=cache)
 
@@ -262,13 +288,22 @@ def test_hybrid_bridges_cookies_and_returns_http_page(tmp_path: Path) -> None:
     assert page.content == b"hybrid-body"
     assert page.status_code == 200
     assert page.content_type == "text/html; charset=utf-8"
+    # Hybrid-GET видит заголовки ответа ⇒ валидаторы сохраняются (в отличие от honest).
+    assert page.etag == '"v1"'
+    assert page.last_modified == "Wed, 21 Oct 2026 07:28:00 GMT"
+    assert page.not_modified is False
     # cookie-мост: cookie из сессии доехали в http_get.
     (_, headers, cookies) = getter.calls[0]
     assert cookies == [COOKIE]
     assert "User-Agent" in headers
     assert "Accept-Language" in headers
-    # успешный hybrid-ответ закэширован по http_key(url).
+    # успешный hybrid-ответ закэширован по http_key(url); сайдкар несёт валидаторы.
     assert cache.get_bytes("http", http_key(URL)) == b"hybrid-body"
+    meta = cache.get_meta("http", http_key(URL))
+    assert meta is not None
+    assert meta["etag"] == '"v1"'
+    assert meta["last_modified"] == "Wed, 21 Oct 2026 07:28:00 GMT"
+    assert meta["status_code"] == 200
 
 
 def test_hybrid_success_reports_browser_final_url() -> None:

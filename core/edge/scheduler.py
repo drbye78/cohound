@@ -201,6 +201,11 @@ CREATE TABLE IF NOT EXISTS edge_job_items (
     robots       INTEGER,
     final_url    TEXT,
     rate_limit   TEXT,
+    if_none_match      TEXT,
+    if_modified_since  TEXT,
+    etag               TEXT,
+    last_modified      TEXT,
+    not_modified       INTEGER,
     PRIMARY KEY (job_id, product_id, url)
 );
 
@@ -215,6 +220,12 @@ _ITEM_MIGRATED_COLUMNS: tuple[tuple[str, str], ...] = (
     ("robots", "INTEGER"),
     ("final_url", "TEXT"),
     ("rate_limit", "TEXT"),
+    # Условный фетч (additive): валидаторы запроса/ответа и признак 304.
+    ("if_none_match", "TEXT"),
+    ("if_modified_since", "TEXT"),
+    ("etag", "TEXT"),
+    ("last_modified", "TEXT"),
+    ("not_modified", "INTEGER"),
 )
 
 
@@ -624,8 +635,9 @@ class EdgeScheduler:
                 )
                 conn.executemany(
                     "INSERT INTO edge_job_items (job_id, product_id, url, status, engine,"
-                    " kind, fetch, extract, strategy, wait_for, lang, robots, rate_limit)"
-                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    " kind, fetch, extract, strategy, wait_for, lang, robots, rate_limit,"
+                    " if_none_match, if_modified_since)"
+                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     [
                         (
                             job_id,
@@ -641,6 +653,8 @@ class EdgeScheduler:
                             item["lang"],
                             int(item["robots"]),
                             _rate_limit_json(item["rate_limit"]),
+                            item["if_none_match"],
+                            item["if_modified_since"],
                         )
                         for item in items
                     ],
@@ -685,6 +699,9 @@ class EdgeScheduler:
                     # §10/§11.1: additive-оси терпимо (malformed → False/None, без падения submit).
                     "robots": _opt_bool(item.get("robots")),
                     "rate_limit": _opt_rate_limit(item.get("rate_limit")),
+                    # Условный фетч: валидаторы запроса (None ⇒ безусловный GET).
+                    "if_none_match": _opt_str(item.get("if_none_match")),
+                    "if_modified_since": _opt_str(item.get("if_modified_since")),
                 }
             )
         return normalized
@@ -851,6 +868,9 @@ class EdgeScheduler:
             "fetched_at": _opt_str(row["fetched_at"]),
             "content_hash": _opt_str(row["content_hash"]),
             "final_url": _opt_str(row["final_url"]),
+            "etag": _opt_str(row["etag"]),
+            "last_modified": _opt_str(row["last_modified"]),
+            "not_modified": bool(_bool_int(row["not_modified"])),
             "raw": raw,
             "error": _opt_str(row["error"]),
         }
@@ -1077,6 +1097,9 @@ class EdgeScheduler:
             engine=str(row["engine"]) if row["engine"] else None,
             robots=bool(_bool_int(row["robots"])),
             rate_limit=_rate_limit_from_json(row["rate_limit"]),
+            # Условный фетч: валидаторы из submit (NULL ⇒ безусловный GET).
+            if_none_match=_opt_str(row["if_none_match"]),
+            if_modified_since=_opt_str(row["if_modified_since"]),
         )
 
     def _on_done(self, row: sqlite3.Row, future: Any) -> None:
@@ -1118,13 +1141,18 @@ class EdgeScheduler:
         # §6a: финальный URL после редиректов (``RawPage.url``) — ядру нужен для базы
         # ссылок и redirect-scope; ключ элемента сеанса остаётся запрошенным ``url``.
         final_url = _opt_str(getattr(page, "url", None))
+        # Условный фетч: валидаторы ответа и признак 304 (тело — закэшированные байты).
+        etag = _opt_str(getattr(page, "etag", None))
+        last_modified = _opt_str(getattr(page, "last_modified", None))
+        not_modified = 1 if getattr(page, "not_modified", False) else 0
         conn = self._conn
         assert conn is not None
         with conn:
             cursor = conn.execute(
                 "UPDATE edge_job_items SET status = ?, engine = ?, http_status = ?,"
                 " content_type = ?, fetched_at = ?, content_hash = ?, blob_ref = ?,"
-                " final_url = ?, error = NULL"
+                " final_url = ?, etag = ?, last_modified = ?, not_modified = ?,"
+                " error = NULL"
                 " WHERE job_id = ? AND product_id = ? AND url = ? AND status = ?",
                 (
                     ITEM_FETCHED,
@@ -1135,6 +1163,9 @@ class EdgeScheduler:
                     digest,
                     blob_ref,
                     final_url,
+                    etag,
+                    last_modified,
+                    not_modified,
                     row["job_id"],
                     row["product_id"],
                     row["url"],

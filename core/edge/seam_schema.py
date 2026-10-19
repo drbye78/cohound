@@ -267,6 +267,10 @@ def _validate_fetch(payload: Any) -> list[str]:
         _check_opt_str(violations, where, field, payload.get(field))
     _check_opt_int(violations, where, "status_code", payload.get("status_code"))
     _check_opt_str(violations, where, "error", payload.get("error"))
+    # Условный фетч (additive): валидаторы ответа и признак 304.
+    for field in ("etag", "last_modified"):
+        _check_opt_str(violations, where, field, payload.get(field))
+    _check_opt_bool(violations, where, "not_modified", payload.get("not_modified"))
 
     raw = payload.get("raw")
     if raw is not None:
@@ -432,9 +436,12 @@ def _validate_crawl_collect_item(item: Any, index: int) -> list[str]:
         "fetched_at",
         "content_hash",
         "final_url",
+        "etag",
+        "last_modified",
     ):
         _check_opt_str(violations, where, field, item.get(field))
     _check_opt_int(violations, where, "http_status", item.get("http_status"))
+    _check_opt_bool(violations, where, "not_modified", item.get("not_modified"))
     _check_opt_str(violations, where, "error", item.get("error"))
     raw = item.get("raw")
     if raw is not None:
@@ -530,11 +537,14 @@ def _opt_enum(
 def validate_fetch_request(payload: Any) -> list[str]:
     """Проверяет **запросный** payload ``POST /v1/fetch`` (D2, 07 §3); ``[]`` — валиден.
 
-    Контракт запроса: ``{url, fetch, extract, strategy, wait_for, lang}``. ``url`` обязателен;
+    Контракт запроса: ``{url, fetch, extract, strategy, wait_for, lang,
+    if_none_match, if_modified_since}``. ``url`` обязателен;
     ``fetch``/``extract``/``strategy`` — опциональные enum-оси (``http|browser``,
     ``auto|html|document``, ``auto|honest|hybrid``); ``wait_for``/``lang`` — строки или
     ``null``. ``strategy`` опционален: отсутствие = ``auto`` (обратная совместимость —
-    поле additive). Неизвестное значение → нарушение (edge отвечает ``status=error``).
+    поле additive). ``if_none_match``/``if_modified_since`` — валидаторы условного
+    повторного получения (additive; отсутствие = безусловный GET). Неизвестное
+    значение → нарушение (edge отвечает ``status=error``).
     """
     if not isinstance(payload, Mapping):
         return ["fetch: payload должен быть объектом"]
@@ -545,7 +555,7 @@ def validate_fetch_request(payload: Any) -> list[str]:
     _opt_enum(violations, "fetch", "fetch", payload.get("fetch"), FETCH_VALUES)
     _opt_enum(violations, "fetch", "extract", payload.get("extract"), EXTRACT_VALUES)
     _opt_enum(violations, "fetch", "strategy", payload.get("strategy"), STRATEGY_VALUES)
-    for field in ("wait_for", "lang"):
+    for field in ("wait_for", "lang", "if_none_match", "if_modified_since"):
         value = payload.get(field)
         if value is not None and not isinstance(value, str):
             violations.append(f"fetch: {field} должен быть строкой или null")
@@ -663,7 +673,8 @@ def _validate_crawl_submit_item(item: Any, index: int) -> list[str]:
     """Элемент ``items`` запроса ``crawl/submit`` (оси фетча — как у ``/v1/fetch``).
 
     Опциональные additive-поля: ``robots`` (bool, egress-вежливость) и ``rate_limit``
-    (per-item диапазон задержек ``{min_s, max_s}`` — форма из §11.1).
+    (per-item диапазон задержек ``{min_s, max_s}`` — форма из §11.1), а также
+    ``if_none_match``/``if_modified_since`` (валидаторы условного запроса).
     """
     where = f"crawl/submit.items[{index}]"
     if not isinstance(item, Mapping):
@@ -676,7 +687,7 @@ def _validate_crawl_submit_item(item: Any, index: int) -> list[str]:
     _opt_enum(violations, where, "fetch", item.get("fetch"), FETCH_VALUES)
     _opt_enum(violations, where, "extract", item.get("extract"), EXTRACT_VALUES)
     _opt_enum(violations, where, "strategy", item.get("strategy"), STRATEGY_VALUES)
-    for field in ("wait_for", "lang"):
+    for field in ("wait_for", "lang", "if_none_match", "if_modified_since"):
         _check_opt_str(violations, where, field, item.get(field))
     _check_opt_bool(violations, where, "robots", item.get("robots"))
     _validate_rate_limit(violations, where, item.get("rate_limit"))

@@ -51,6 +51,9 @@ class CrawlWorkItem:
     этого элемента (политика, не методология). ``rate_limit`` — **резолвнутый per-item**
     диапазон задержек egress (:class:`~core.domain.models.RateLimitSpec`); ``None`` ⇒ без
     пейсинга (дефолт сохраняет байт-идентичность прогонов).
+
+    ``if_none_match``/``if_modified_since`` — валидаторы условного повторного получения
+    (additive): ``None`` ⇒ безусловный GET, байт-идентичный прежнему поведению.
     """
 
     product_id: str
@@ -64,6 +67,8 @@ class CrawlWorkItem:
     lang: str | None = None
     robots: bool = False
     rate_limit: RateLimitSpec | None = None
+    if_none_match: str | None = None
+    if_modified_since: str | None = None
 
 
 @dataclass(frozen=True)
@@ -99,6 +104,10 @@ class CrawlResultItem:
     финальный URL после редиректов (``None`` ⇒ трактуется как ``url``); ядро берёт его
     как ``RawPage.url`` (база ссылок, redirect-scope), ключ элемента сеанса остаётся
     запрошенным ``url``.
+
+    ``etag``/``last_modified``/``not_modified`` — валидаторы ответа и признак ``304``
+    (additive): ``not_modified=True`` означает, что ``raw_bytes`` — **закэшированное**
+    представление, подтверждённое сервером; пустых байтов в этом случае не бывает.
     """
 
     product_id: str
@@ -113,6 +122,9 @@ class CrawlResultItem:
     raw_bytes: bytes | None = None
     error: str | None = None
     final_url: str | None = None
+    etag: str | None = None
+    last_modified: str | None = None
+    not_modified: bool = False
 
 
 @dataclass(frozen=True)
