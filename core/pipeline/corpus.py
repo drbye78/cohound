@@ -2144,9 +2144,10 @@ def build_corpus(
         """D4 fetch-фаза (**единственный** вызов, идущий в пул): pacing + ``active.fetch``.
 
         Никакой мутации состояния сеанса здесь нет — только живой сетевой вызов.
-        ``limiter.wait`` остаётся per-request (``RateLimiter`` стателесс); при инъекции
-        ``sleep``/``rng`` они должны быть **потокобезопасны**, т.к. воркеры пула зовут pacing
-        конкурентно.
+        ``limiter.wait`` даёт интервал **по origin**: воркеры пула зовут pacing
+        конкурентно, и ``RateLimiter`` резервирует слот на origin под локом, а спит уже
+        вне него — иначе один хост блокировал бы все остальные. Гарантия — внутри
+        процесса; при пуле процессов состояние не разделяется (см. ``util/rate_limit``).
         """
         limiter.wait(desc.host, desc.fetch_plan.rate_limit)
         return desc.active.fetch(desc.wu, desc.fetch_plan)

@@ -31,14 +31,18 @@ Recovery-on-start зеркалит ``core.pipeline``-семантику: зас�
 намерения краула).
 
 **§10 / pacing (A2c).** Под ``split`` pacing исполняется на стороне edge **per executing
-context**: один стателесс :class:`~core.util.rate_limit.RateLimiter` в процессе планировщика
-для потоковых движков и по одному в каждом воркер-процессе для ``scrapy``/``browser``. Это
-**не** глобальный per-host rate-гейт: при ``workers>1`` параллельные фетчи одного хоста не
-ограничены сверху, а кросс-процессный pacing не разделяет состояние. Полное соблюдение
-``rate_limit`` как глобального per-host лимита **не заявляется**. Локальный путь имеет тот же
-характер при ``max_workers>1`` (лимитер стателесс, ``sleep(uniform(min,max))`` на запрос),
-поэтому расхождение ``local``/``split`` по контенту отсутствует; тайминг не нормируется ни в
-одном профиле. ``rate_limit=None`` (дефолт) ⇒ ноль снов (дефолтные прогоны байт-идентичны).
+context**: один :class:`~core.util.rate_limit.RateLimiter` в процессе планировщика для
+потоковых движков и по одному в каждом воркер-процессе для ``scrapy``/``browser``.
+Лимитер даёт **интервал по origin внутри процесса** (резервирование времени; см.
+``core.util.rate_limit``): потоки одного процесса, фетчащие один хост, разнесены не
+меньше чем на ``rate_limit``. Это по-прежнему **не** глобальный per-host rate-гейт:
+воркер-процессы не разделяют состояние, поэтому при нескольких процессах на один хост
+суммарная частота остаётся ``процессы × 1/задержка``. Глобальный лимит требует
+разделяемого состояния и здесь **не заявляется**. Локальный путь имеет тот же характер:
+per-origin интервал внутри процесса, кросс-процессное умножение при пуле процессов;
+поэтому расхождение ``local``/``split`` по контенту отсутствует, тайминг не нормируется
+ни в одном профиле. ``rate_limit=None`` (дефолт) ⇒ ноль снов (дефолтные прогоны
+байт-идентичны).
 
 **Robots (§10, A2b).** Edge — стателесс-фетчер: политику приносит ядро пер-элемент
 (``plan.robots``), а политику ``robots.txt`` edge строит сам (:func:`build_robots_gate`) и
@@ -395,9 +399,10 @@ class EdgeScheduler:
     :param id_factory: генератор ``job_id`` (детерминизм в тестах).
     :param poll_interval: интервал ожидания координатора, сек (резерв под фоновое ожидание).
     :param process_context: контекст ``multiprocessing`` (по умолчанию ``forkserver``/``spawn``).
-    :param limiter: пейсер потоковых движков (A2c, §11.2) — один стателесс
-        :class:`~core.util.rate_limit.RateLimiter` на процесс планировщика; ``None`` →
-        ``RateLimiter()``. Инжектируем в тестах (стаб ``sleep``/``rng``).
+    :param limiter: пейсер потоковых движков (A2c, §11.2) — один
+        :class:`~core.util.rate_limit.RateLimiter` на процесс планировщика (состояние
+        резервов по origin живёт в процессе); ``None`` → ``RateLimiter()``. Инжектируем
+        в тестах (стаб ``sleep``/``clock``/``rng``).
     :param limiter_factory: picklable-фабрика пейсера **воркер-процесса** (``scrapy``/
         ``browser``); ``None`` → :class:`RateLimiter`. Вызывается внутри процесса.
     :param robots_factory: фабрика политики ``robots.txt`` (§10) ``(user_agent) -> RobotsGate``;
@@ -424,7 +429,8 @@ class EdgeScheduler:
         self._clock = clock or _utc_now_iso
         self._id_factory = id_factory or _default_id_factory
         self._poll = max(0.001, float(poll_interval))
-        # A2c: пейсер потоковых движков (стателесс) + фабрика пейсера воркер-процесса.
+        # A2c: пейсер потоковых движков (резервы по origin в этом процессе) + фабрика
+        # пейсера воркер-процесса.
         self._limiter = limiter if limiter is not None else RateLimiter()
         self._limiter_factory = limiter_factory or RateLimiter
         # §10: фабрика robots-политики; сама политика строится лениво из ``user_agent`` submit.

@@ -626,7 +626,15 @@ def test_parity_pacing_content_neutral(tmp_path: Path) -> None:
     )
 
     sleeps: list[float] = []
-    limiter = RateLimiter(sleep=sleeps.append, rng=random.Random(0))
+    now = [0.0]
+
+    def _fake_sleep(seconds: float) -> None:
+        # Часы двигаются на проспанное время (как ``time.sleep``): последовательные
+        # резервы не накапливаются, сон равен сэмплированной задержке.
+        sleeps.append(seconds)
+        now[0] += seconds
+
+    limiter = RateLimiter(sleep=_fake_sleep, rng=random.Random(0), clock=lambda: now[0])
 
     plain_local_result, plain_local, _ = _run_local(
         tmp_path / "plain",

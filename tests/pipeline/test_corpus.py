@@ -1860,12 +1860,22 @@ def test_session_finalized_partial_on_failure(tmp_path: Path) -> None:
 
 
 class _RecordingLimiter(RateLimiter):
-    """Пейсинг-шпион: пишет ``(host, spec)`` в ``wait``; ``slept`` — фактические задержки."""
+    """Пейсинг-шпион: пишет ``(host, spec)`` в ``wait``; ``slept`` — фактические задержки.
+
+    ``sleep`` двигает фейковые часы на проспанное время (как реальный ``time.sleep``),
+    поэтому последовательные резервы не накапливаются и сон равен сэмплированной
+    задержке — без wall-clock.
+    """
 
     def __init__(self, *, rng: random.Random | None = None) -> None:
         self.slept: list[float] = []
-        super().__init__(sleep=self.slept.append, rng=rng)
+        self._now = 0.0
+        super().__init__(sleep=self._fake_sleep, rng=rng, clock=lambda: self._now)
         self.calls: list[tuple[str, RateLimitSpec | None]] = []
+
+    def _fake_sleep(self, seconds: float) -> None:
+        self.slept.append(seconds)
+        self._now += seconds
 
     def wait(self, host: str, spec: RateLimitSpec | None) -> float:
         self.calls.append((host, spec))
