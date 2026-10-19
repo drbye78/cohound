@@ -24,10 +24,16 @@
   краулер-диспетчера: обслуживает ``crawl/poll`` (фетчит **только каталоговый документ**
   ленты/канала, возвращает ссылки-записи; контент записей — через обычный ``fetch``/
   ``crawl/collect``). Инъецируется в ``EdgeGateway`` (``poller=``).
+* **middleware шва** — :class:`core.edge.auth.Authenticator` (mTLS/OIDC) и
+  :class:`core.edge.audit.AuditSink` (файл JSON-lines) собираются из ``config.auth``/
+  ``config.audit`` и **протягиваются** в :func:`core.edge.server.serve` вместе с
+  ``max_body_bytes``. Это не библиотека «в запасе»: без проводки auth/audit остались бы
+  мёртвым кодом. ``auth.mode=none`` допустим только на loopback — bind вне петли без
+  аутентификации отвергается при старте (fail-fast).
 
 Флаги: ``serve [--config FILE] [--host H] [--port P] [--check]``. ``--check`` собирает
 конфиг+адаптеры+gateway+планировщик и выходит без привязки сокета **и** без старта
-воркеров (smoke: misconfig всплывает до запуска).
+воркеров (smoke: misconfig всплывает до запуска, включая небезопасный bind).
 
 Нейтрален к предметной категории (§1.3).
 """
@@ -47,11 +53,13 @@ from core.adapters.crawl_http import HttpCrawler
 from core.adapters.crawl_scrapy import CrawlError, ScrapyCrawler
 from core.adapters.extract_document import DoclingDocumentExtractor
 from core.adapters.extract_html import HtmlExtractor
+from core.edge.audit import AuditSink, FileAuditSink
+from core.edge.auth import Authenticator, MTLSAuthenticator, OIDCAuthenticator
 from core.edge.config import EdgeRuntimeConfig, load_edge_runtime_config
 from core.edge.crawler_factory import crawler_factory
 from core.edge.poller import FeedPollService
 from core.edge.scheduler import EdgeScheduler
-from core.edge.server import EdgeGateway, serve
+from core.edge.server import EdgeError, EdgeGateway, ensure_safe_binding, serve
 from core.ports.chunker import ChunkerPort
 from core.ports.crawler import CrawlerPort
 from core.ports.extractor import ExtractorPort
@@ -242,6 +250,45 @@ def _build_scheduler(
     return EdgeScheduler(config, in_process, crawler_factory=crawler_factory)
 
 
+# ---------------------------------------------------------------------------
+# Middleware шва: аутентификатор и аудит из конфига
+# ---------------------------------------------------------------------------
+
+
+def _build_authenticator(config: EdgeRuntimeConfig) -> Authenticator | None:
+    """Собирает аутентификатор шва из ``config.auth`` (``None`` при ``mode="none"``).
+
+    Поля конфига зеркалят конструкторы реальных аутентификаторов
+    (:mod:`core.edge.auth`): mTLS — реестр ``subjects`` + заголовок субъекта;
+    OIDC — ``issuer``/``audience`` + заголовок bearer. Верификатор подписи OIDC
+    остаётся кодовым швом (``verifier=``), секреты в YAML не попадают.
+    """
+    auth = config.auth
+    if auth.mode == "none":
+        return None
+    if auth.mode == "mtls":
+        return MTLSAuthenticator(
+            auth.subjects, header=auth.subject_header, issuer=auth.issuer
+        )
+    if auth.mode == "oidc":
+        return OIDCAuthenticator(
+            issuer=auth.issuer, audience=auth.audience, header=auth.token_header
+        )
+    raise ValueError(f"неизвестный auth.mode: {auth.mode!r}")  # pragma: no cover
+
+
+def _build_audit_sink(config: EdgeRuntimeConfig) -> AuditSink | None:
+    """Собирает приёмник аудита из ``config.audit`` (``None`` при ``sink="none"``)."""
+    if config.audit.sink == "none":
+        return None
+    if config.audit.sink == "file":
+        assert config.audit.path is not None  # гарантировано моделью конфига
+        return FileAuditSink(config.audit.path)
+    raise ValueError(
+        f"неизвестный audit.sink: {config.audit.sink!r}"
+    )  # pragma: no cover
+
+
 def _raise_keyboard_interrupt(signum: int, frame: Any) -> None:
     """Обработчик сигнала: ``SIGTERM`` → ``KeyboardInterrupt`` (graceful-останов)."""
     raise KeyboardInterrupt
@@ -341,6 +388,17 @@ def main(argv: list[str] | None = None) -> int:
     host = args.host if args.host is not None else config.host
     port = args.port if args.port is not None else config.port
 
+    try:
+        # Middleware конструируется здесь и **протягивается** в serve — иначе
+        # auth/audit остались бы библиотекой, не подключённой к запросу (07 §8.2/§8.4).
+        authenticator = _build_authenticator(config)
+        audit_sink = _build_audit_sink(config)
+        # Fail-fast: bind вне петли без auth отвергается до создания сокета.
+        ensure_safe_binding(host, authenticator)
+    except (ValueError, EdgeError) as exc:
+        sys.stderr.write(f"edge: {exc}\n")
+        return EXIT_USAGE
+
     gateway, crawlers, _chunker = _build_gateway(config)
     scheduler = _build_scheduler(config, crawlers)
     engines = sorted(crawlers)
@@ -351,6 +409,8 @@ def main(argv: list[str] | None = None) -> int:
             f"schema={config.schema_version} engines={engines} "
             f"extractor={gateway.capabilities()['extractor_version']} "
             f"state_dir={config.state_dir} blob_dir={config.resolved_blob_dir} "
+            f"auth={config.auth.mode} audit={config.audit.sink} "
+            f"max_body_bytes={config.max_body_bytes} "
             f"scheduler=ready poller=ready\n"
         )
         scheduler.close()  # воркеры не стартовали; соединение с БД не открывалось
@@ -358,15 +418,27 @@ def main(argv: list[str] | None = None) -> int:
 
     sys.stdout.write(
         f"edge serve: http://{host}:{port} schema={config.schema_version} "
-        f"engines={engines}\n"
+        f"engines={engines} auth={config.auth.mode} audit={config.audit.sink}\n"
     )
     sys.stdout.flush()
     try:
         with _sigterm_graceful():
-            serve(host, port, gateway, scheduler=scheduler)
+            serve(
+                host,
+                port,
+                gateway,
+                scheduler=scheduler,
+                authenticator=authenticator,
+                audit_sink=audit_sink,
+                max_body_bytes=config.max_body_bytes,
+            )
     except KeyboardInterrupt:
         # Штатная остановка: serve() уже вызвал scheduler.stop() в finally — не дублируем.
         return EXIT_OK
+    except EdgeError as exc:
+        # Второй рубеж fail-fast (например, прямой вызов serve в обход main).
+        sys.stderr.write(f"edge: {exc}\n")
+        return EXIT_USAGE
     finally:
         scheduler.close()
     return EXIT_OK

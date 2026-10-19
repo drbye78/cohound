@@ -15,6 +15,21 @@ store/domain: конфиг описывает только ресурсы веб
     queue_limit: 256
     ttl_s: 86400
     schema_version: "1"
+    # Потолок тела запроса, байты (413 при превышении; см. server.DEFAULT_MAX_BODY_BYTES).
+    max_body_bytes: 1048576
+    # Аутентификация шва (07 §8.2). mode=none — дефолт: допустим ТОЛЬКО на loopback;
+    # bind на не-loopback без auth отвергается при старте (fail-fast).
+    auth:
+      mode: none            # none | mtls | oidc
+      issuer: null          # mtls: издатель (CA); oidc: ожидаемый iss (обязателен)
+      audience: null        # oidc: ожидаемый aud (обязателен)
+      subjects: {}          # mtls: субъект сертификата -> [scopes]
+      subject_header: X-Client-Cert-Subject
+      token_header: Authorization
+    # Аудит (07 §8.4): одна JSON-строка на вызов, пригодна для SIEM.
+    audit:
+      sink: none            # none | file
+      path: null            # file: путь JSON-lines (обязателен при sink=file)
 
 Env ``COHOUND_EDGE_STATE_DIR`` переопределяет ``state_dir`` (операторский шов раскладки
 edge; симметрично ``COHOUND_*_DIR`` ядра). Схема строгая (``extra="forbid"``).
@@ -24,14 +39,18 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+
+from core.edge.server import DEFAULT_MAX_BODY_BYTES
 
 __all__ = [
     "ENV_EDGE_STATE_DIR",
     "DEFAULT_EDGE_RUNTIME_FILE",
+    "EdgeAuthConfig",
+    "EdgeAuditConfig",
     "EdgeRuntimeConfig",
     "load_edge_runtime_config",
 ]
@@ -44,6 +63,83 @@ DEFAULT_EDGE_RUNTIME_FILE: Path = Path("config/edge.yaml")
 
 #: Дефолтная карта воркеров движков (кол-во параллельных слотов на движок).
 _DEFAULT_WORKERS: dict[str, int] = {"http": 4, "scrapy": 2, "browser": 1}
+
+
+class EdgeAuthConfig(BaseModel):
+    """Аутентификация/авторизация шва (07 §8.2) — конфигурация composition root.
+
+    Поля **зеркалят** конструкторы реальных аутентификаторов
+    (:class:`core.edge.auth.MTLSAuthenticator` /
+    :class:`core.edge.auth.OIDCAuthenticator`), а не изобретают новые параметры:
+
+    * ``mode="mtls"`` → ``MTLSAuthenticator(subjects, header=subject_header,
+      issuer=issuer)``; ``subjects`` — реестр ``субъект сертификата → scopes``;
+    * ``mode="oidc"`` → ``OIDCAuthenticator(issuer=…, audience=…,
+      header=token_header)``. Верификатор подписи — **кодовый** шов
+      (``verifier=``), а не YAML: ключи/секреты в конфиг не попадают.
+
+    ``mode="none"`` (дефолт) — поведение локального профиля: допустимо только на
+    петлевом адресе, иначе :func:`core.edge.server.build_server` отказывает в старте.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    #: Режим: без аутентификации | mTLS workload-identity | OIDC/JWT bearer.
+    mode: Literal["none", "mtls", "oidc"] = "none"
+    #: Издатель: для mTLS — CA (атрибуция), для OIDC — ожидаемый ``iss``.
+    issuer: str | None = None
+    #: Ожидаемый ``aud`` OIDC-токена (обязателен при ``mode="oidc"``).
+    audience: str | None = None
+    #: mTLS: отображение ``subject сертификата → список scopes``.
+    subjects: dict[str, list[str]] = Field(default_factory=dict)
+    #: mTLS: заголовок с уже проверенным субъектом (от терминирующего прокси).
+    subject_header: str = "X-Client-Cert-Subject"
+    #: OIDC: заголовок с bearer-токеном.
+    token_header: str = "Authorization"
+
+    @model_validator(mode="after")
+    def _check_mode(self) -> "EdgeAuthConfig":
+        """Fail-closed на уровне конфига: режим без нужных полей не собирается."""
+        if self.mode == "mtls" and not self.subjects:
+            raise ValueError(
+                "auth.mode=mtls требует непустой auth.subjects "
+                "(субъект сертификата → scopes)"
+            )
+        if self.mode == "oidc":
+            missing = [
+                name
+                for name in ("issuer", "audience")
+                if not str(getattr(self, name) or "").strip()
+            ]
+            if missing:
+                raise ValueError(
+                    "auth.mode=oidc требует " + ", ".join(f"auth.{name}" for name in missing)
+                )
+        return self
+
+
+class EdgeAuditConfig(BaseModel):
+    """Аудит шва (07 §8.4): приёмник событий.
+
+    ``sink="none"`` (дефолт) — аудит выключен, поведение прежнее.
+    ``sink="file"`` — :class:`core.edge.audit.FileAuditSink` (JSON-lines, одна
+    строка на вызов); ``path`` обязателен. Токены/тела/креденшелы в события не
+    попадают (см. ``core.edge.audit``).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    #: Приёмник: без аудита | файл JSON-lines.
+    sink: Literal["none", "file"] = "none"
+    #: Путь файла аудита (обязателен при ``sink="file"``).
+    path: str | None = None
+
+    @model_validator(mode="after")
+    def _check_path(self) -> "EdgeAuditConfig":
+        """``sink=file`` без пути — ошибка конфигурации, а не молчаливый no-op."""
+        if self.sink == "file" and not str(self.path or "").strip():
+            raise ValueError("audit.sink=file требует непустой audit.path")
+        return self
 
 
 class EdgeRuntimeConfig(BaseModel):
@@ -76,6 +172,12 @@ class EdgeRuntimeConfig(BaseModel):
     ttl_s: int = 86400
     #: Версия конверта шва (совпадает с ``EDGE_SCHEMA_VERSION``, 07 §3/§7).
     schema_version: str = "1"
+    #: Потолок тела запроса, байты; превышение → HTTP 413 (07 §8.1).
+    max_body_bytes: int = Field(default=DEFAULT_MAX_BODY_BYTES, gt=0)
+    #: Аутентификация/авторизация шва (07 §8.2); дефолт — без auth (только loopback).
+    auth: EdgeAuthConfig = Field(default_factory=EdgeAuthConfig)
+    #: Аудит вызовов (07 §8.4); дефолт — выключен.
+    audit: EdgeAuditConfig = Field(default_factory=EdgeAuditConfig)
 
     @property
     def resolved_blob_dir(self) -> str:

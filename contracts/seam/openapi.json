@@ -4,7 +4,8 @@
     "title": "coHound DMZ seam API",
     "version": "1",
     "description": "Единственный канал core↔edge (application-layer firewall, L7). Ядро (Z0) инициирует, edge (Z1/DMZ) отвечает; обратного инициирования нет (07 §3/§5). Конверт: {schema_version, request_id, status, payload, error}. schema_version=\"1\"; несовместимое изменение контракта — версионная граница §13 (07 §8.3). Схемы публикуются для написания DLP/IDS/IDP-политик по контракту (07 §8); аттестация против конкретных средств — вне рамок проекта.",
-    "x-schema-version": "1"
+    "x-schema-version": "1",
+    "x-auth-enforcement": "auth/audit/body-limit are enforced only when configured; auth.mode=none is allowed on loopback only; a non-loopback bind without auth refuses to start (fail-fast)."
   },
   "servers": [
     {
@@ -19,37 +20,94 @@
         "in": "header",
         "required": true,
         "description": "Корреляция вызова (совпадает с request_id конверта; SIEM/IDS, 07 §8.1/§8.4).",
-        "schema": {"type": "string", "minLength": 1}
+        "schema": {
+          "type": "string",
+          "minLength": 1
+        }
       },
       "SchemaVersion": {
         "name": "X-Schema-Version",
         "in": "header",
         "required": true,
         "description": "Версия контракта шва; несовпадение — версионная граница §13.",
-        "schema": {"const": "1"}
+        "schema": {
+          "const": "1"
+        }
       }
     },
     "schemas": {
-      "Envelope": {"$ref": "envelope.schema.json"},
-      "RequestEnvelope": {"$ref": "envelope.schema.json#/$defs/request"},
-      "FetchRequest": {"$ref": "fetch.schema.json#/$defs/request"},
-      "FetchResponse": {"$ref": "fetch.schema.json"},
-      "SearchRequest": {"$ref": "search.schema.json#/$defs/request"},
-      "SearchResponse": {"$ref": "search.schema.json"},
-      "RegistryRequest": {"$ref": "registry.schema.json#/$defs/request"},
-      "RegistryResponse": {"$ref": "registry.schema.json"},
-      "CapabilitiesResponse": {"$ref": "capabilities.schema.json"},
-      "HealthResponse": {"$ref": "health.schema.json"},
-      "CrawlSubmitRequest": {"$ref": "crawl.schema.json#/$defs/submit_request"},
-      "CrawlSubmitResponse": {"$ref": "crawl.schema.json#/$defs/submit_response"},
-      "CrawlStatusRequest": {"$ref": "crawl.schema.json#/$defs/status_request"},
-      "CrawlStatusResponse": {"$ref": "crawl.schema.json#/$defs/status_response"},
-      "CrawlCancelRequest": {"$ref": "crawl.schema.json#/$defs/cancel_request"},
-      "CrawlCancelResponse": {"$ref": "crawl.schema.json#/$defs/cancel_response"},
-      "CrawlCollectRequest": {"$ref": "crawl.schema.json#/$defs/collect_request"},
-      "CrawlCollectResponse": {"$ref": "crawl.schema.json#/$defs/collect_response"},
-      "CrawlPollRequest": {"$ref": "crawl.schema.json#/$defs/poll_request"},
-      "CrawlPollResponse": {"$ref": "crawl.schema.json#/$defs/poll_response"}
+      "Envelope": {
+        "$ref": "envelope.schema.json"
+      },
+      "RequestEnvelope": {
+        "$ref": "envelope.schema.json#/$defs/request"
+      },
+      "FetchRequest": {
+        "$ref": "fetch.schema.json#/$defs/request"
+      },
+      "FetchResponse": {
+        "$ref": "fetch.schema.json"
+      },
+      "SearchRequest": {
+        "$ref": "search.schema.json#/$defs/request"
+      },
+      "SearchResponse": {
+        "$ref": "search.schema.json"
+      },
+      "RegistryRequest": {
+        "$ref": "registry.schema.json#/$defs/request"
+      },
+      "RegistryResponse": {
+        "$ref": "registry.schema.json"
+      },
+      "CapabilitiesResponse": {
+        "$ref": "capabilities.schema.json"
+      },
+      "HealthResponse": {
+        "$ref": "health.schema.json"
+      },
+      "CrawlSubmitRequest": {
+        "$ref": "crawl.schema.json#/$defs/submit_request"
+      },
+      "CrawlSubmitResponse": {
+        "$ref": "crawl.schema.json#/$defs/submit_response"
+      },
+      "CrawlStatusRequest": {
+        "$ref": "crawl.schema.json#/$defs/status_request"
+      },
+      "CrawlStatusResponse": {
+        "$ref": "crawl.schema.json#/$defs/status_response"
+      },
+      "CrawlCancelRequest": {
+        "$ref": "crawl.schema.json#/$defs/cancel_request"
+      },
+      "CrawlCancelResponse": {
+        "$ref": "crawl.schema.json#/$defs/cancel_response"
+      },
+      "CrawlCollectRequest": {
+        "$ref": "crawl.schema.json#/$defs/collect_request"
+      },
+      "CrawlCollectResponse": {
+        "$ref": "crawl.schema.json#/$defs/collect_response"
+      },
+      "CrawlPollRequest": {
+        "$ref": "crawl.schema.json#/$defs/poll_request"
+      },
+      "CrawlPollResponse": {
+        "$ref": "crawl.schema.json#/$defs/poll_response"
+      }
+    },
+    "securitySchemes": {
+      "mtls": {
+        "type": "mutualTLS",
+        "description": "Клиентский сертификат корпоративного PKI (workload-identity, 07 §8.2). TLS-handshake завершается на доверенном прокси; edge получает уже проверенный субъект. Применяется только при auth.mode=mtls."
+      },
+      "bearerJWT": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "JWT",
+        "description": "OIDC/JWT bearer от корпоративного IDP; проверяются подпись, iss, aud, exp и scopes (07 §8.2). Применяется только при auth.mode=oidc."
+      }
     }
   },
   "paths": {
@@ -58,8 +116,12 @@
         "operationId": "fetch",
         "summary": "Фетч страницы/документа (сырые байты + опц. очищенный markdown)",
         "parameters": [
-          {"$ref": "#/components/parameters/RequestId"},
-          {"$ref": "#/components/parameters/SchemaVersion"}
+          {
+            "$ref": "#/components/parameters/RequestId"
+          },
+          {
+            "$ref": "#/components/parameters/SchemaVersion"
+          }
         ],
         "requestBody": {
           "required": true,
@@ -67,8 +129,16 @@
             "application/json": {
               "schema": {
                 "allOf": [
-                  {"$ref": "#/components/schemas/RequestEnvelope"},
-                  {"properties": {"payload": {"$ref": "#/components/schemas/FetchRequest"}}}
+                  {
+                    "$ref": "#/components/schemas/RequestEnvelope"
+                  },
+                  {
+                    "properties": {
+                      "payload": {
+                        "$ref": "#/components/schemas/FetchRequest"
+                      }
+                    }
+                  }
                 ]
               }
             }
@@ -81,14 +151,61 @@
               "application/json": {
                 "schema": {
                   "allOf": [
-                    {"$ref": "#/components/schemas/Envelope"},
-                    {"properties": {"payload": {"$ref": "#/components/schemas/FetchResponse"}}}
+                    {
+                      "$ref": "#/components/schemas/Envelope"
+                    },
+                    {
+                      "properties": {
+                        "payload": {
+                          "$ref": "#/components/schemas/FetchResponse"
+                        }
+                      }
+                    }
                   ]
                 }
               }
             }
+          },
+          "401": {
+            "description": "Не аутентифицирован: отсутствуют/невалидны креденшелы. Возвращается только при настроенной аутентификации (auth.mode != none).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Идентичность подтверждена, но у субъекта нет scope операции. Возвращается только при настроенной аутентификации (auth.mode != none).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Тело запроса превышает max_body_bytes (Content-Length отвергается до чтения; соединение закрывается — Connection: close).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
           }
-        }
+        },
+        "security": [
+          {
+            "mtls": []
+          },
+          {
+            "bearerJWT": []
+          }
+        ],
+        "x-auth-enforcement": "configurable: auth.mode in {mtls, oidc}"
       }
     },
     "/v1/search": {
@@ -96,8 +213,12 @@
         "operationId": "search",
         "summary": "Внешний поиск (кандидаты, не evidence)",
         "parameters": [
-          {"$ref": "#/components/parameters/RequestId"},
-          {"$ref": "#/components/parameters/SchemaVersion"}
+          {
+            "$ref": "#/components/parameters/RequestId"
+          },
+          {
+            "$ref": "#/components/parameters/SchemaVersion"
+          }
         ],
         "requestBody": {
           "required": true,
@@ -105,8 +226,16 @@
             "application/json": {
               "schema": {
                 "allOf": [
-                  {"$ref": "#/components/schemas/RequestEnvelope"},
-                  {"properties": {"payload": {"$ref": "#/components/schemas/SearchRequest"}}}
+                  {
+                    "$ref": "#/components/schemas/RequestEnvelope"
+                  },
+                  {
+                    "properties": {
+                      "payload": {
+                        "$ref": "#/components/schemas/SearchRequest"
+                      }
+                    }
+                  }
                 ]
               }
             }
@@ -119,14 +248,61 @@
               "application/json": {
                 "schema": {
                   "allOf": [
-                    {"$ref": "#/components/schemas/Envelope"},
-                    {"properties": {"payload": {"$ref": "#/components/schemas/SearchResponse"}}}
+                    {
+                      "$ref": "#/components/schemas/Envelope"
+                    },
+                    {
+                      "properties": {
+                        "payload": {
+                          "$ref": "#/components/schemas/SearchResponse"
+                        }
+                      }
+                    }
                   ]
                 }
               }
             }
+          },
+          "401": {
+            "description": "Не аутентифицирован: отсутствуют/невалидны креденшелы. Возвращается только при настроенной аутентификации (auth.mode != none).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Идентичность подтверждена, но у субъекта нет scope операции. Возвращается только при настроенной аутентификации (auth.mode != none).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Тело запроса превышает max_body_bytes (Content-Length отвергается до чтения; соединение закрывается — Connection: close).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
           }
-        }
+        },
+        "security": [
+          {
+            "mtls": []
+          },
+          {
+            "bearerJWT": []
+          }
+        ],
+        "x-auth-enforcement": "configurable: auth.mode in {mtls, oidc}"
       }
     },
     "/v1/registry": {
@@ -134,8 +310,12 @@
         "operationId": "registry",
         "summary": "Реестровый фетчер (факты с обязательным source_url, R1)",
         "parameters": [
-          {"$ref": "#/components/parameters/RequestId"},
-          {"$ref": "#/components/parameters/SchemaVersion"}
+          {
+            "$ref": "#/components/parameters/RequestId"
+          },
+          {
+            "$ref": "#/components/parameters/SchemaVersion"
+          }
         ],
         "requestBody": {
           "required": true,
@@ -143,8 +323,16 @@
             "application/json": {
               "schema": {
                 "allOf": [
-                  {"$ref": "#/components/schemas/RequestEnvelope"},
-                  {"properties": {"payload": {"$ref": "#/components/schemas/RegistryRequest"}}}
+                  {
+                    "$ref": "#/components/schemas/RequestEnvelope"
+                  },
+                  {
+                    "properties": {
+                      "payload": {
+                        "$ref": "#/components/schemas/RegistryRequest"
+                      }
+                    }
+                  }
                 ]
               }
             }
@@ -157,14 +345,61 @@
               "application/json": {
                 "schema": {
                   "allOf": [
-                    {"$ref": "#/components/schemas/Envelope"},
-                    {"properties": {"payload": {"$ref": "#/components/schemas/RegistryResponse"}}}
+                    {
+                      "$ref": "#/components/schemas/Envelope"
+                    },
+                    {
+                      "properties": {
+                        "payload": {
+                          "$ref": "#/components/schemas/RegistryResponse"
+                        }
+                      }
+                    }
                   ]
                 }
               }
             }
+          },
+          "401": {
+            "description": "Не аутентифицирован: отсутствуют/невалидны креденшелы. Возвращается только при настроенной аутентификации (auth.mode != none).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Идентичность подтверждена, но у субъекта нет scope операции. Возвращается только при настроенной аутентификации (auth.mode != none).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Тело запроса превышает max_body_bytes (Content-Length отвергается до чтения; соединение закрывается — Connection: close).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
           }
-        }
+        },
+        "security": [
+          {
+            "mtls": []
+          },
+          {
+            "bearerJWT": []
+          }
+        ],
+        "x-auth-enforcement": "configurable: auth.mode in {mtls, oidc}"
       }
     },
     "/v1/crawl/submit": {
@@ -172,8 +407,12 @@
         "operationId": "crawl/submit",
         "summary": "Постановка задания краула в очередь (контент, не evidence — I19)",
         "parameters": [
-          {"$ref": "#/components/parameters/RequestId"},
-          {"$ref": "#/components/parameters/SchemaVersion"}
+          {
+            "$ref": "#/components/parameters/RequestId"
+          },
+          {
+            "$ref": "#/components/parameters/SchemaVersion"
+          }
         ],
         "requestBody": {
           "required": true,
@@ -181,8 +420,16 @@
             "application/json": {
               "schema": {
                 "allOf": [
-                  {"$ref": "#/components/schemas/RequestEnvelope"},
-                  {"properties": {"payload": {"$ref": "#/components/schemas/CrawlSubmitRequest"}}}
+                  {
+                    "$ref": "#/components/schemas/RequestEnvelope"
+                  },
+                  {
+                    "properties": {
+                      "payload": {
+                        "$ref": "#/components/schemas/CrawlSubmitRequest"
+                      }
+                    }
+                  }
                 ]
               }
             }
@@ -195,14 +442,61 @@
               "application/json": {
                 "schema": {
                   "allOf": [
-                    {"$ref": "#/components/schemas/Envelope"},
-                    {"properties": {"payload": {"$ref": "#/components/schemas/CrawlSubmitResponse"}}}
+                    {
+                      "$ref": "#/components/schemas/Envelope"
+                    },
+                    {
+                      "properties": {
+                        "payload": {
+                          "$ref": "#/components/schemas/CrawlSubmitResponse"
+                        }
+                      }
+                    }
                   ]
                 }
               }
             }
+          },
+          "401": {
+            "description": "Не аутентифицирован: отсутствуют/невалидны креденшелы. Возвращается только при настроенной аутентификации (auth.mode != none).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Идентичность подтверждена, но у субъекта нет scope операции. Возвращается только при настроенной аутентификации (auth.mode != none).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Тело запроса превышает max_body_bytes (Content-Length отвергается до чтения; соединение закрывается — Connection: close).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
           }
-        }
+        },
+        "security": [
+          {
+            "mtls": []
+          },
+          {
+            "bearerJWT": []
+          }
+        ],
+        "x-auth-enforcement": "configurable: auth.mode in {mtls, oidc}"
       }
     },
     "/v1/crawl/status": {
@@ -210,8 +504,12 @@
         "operationId": "crawl/status",
         "summary": "Прогресс задания краула (счётчики по состояниям)",
         "parameters": [
-          {"$ref": "#/components/parameters/RequestId"},
-          {"$ref": "#/components/parameters/SchemaVersion"}
+          {
+            "$ref": "#/components/parameters/RequestId"
+          },
+          {
+            "$ref": "#/components/parameters/SchemaVersion"
+          }
         ],
         "requestBody": {
           "required": true,
@@ -219,8 +517,16 @@
             "application/json": {
               "schema": {
                 "allOf": [
-                  {"$ref": "#/components/schemas/RequestEnvelope"},
-                  {"properties": {"payload": {"$ref": "#/components/schemas/CrawlStatusRequest"}}}
+                  {
+                    "$ref": "#/components/schemas/RequestEnvelope"
+                  },
+                  {
+                    "properties": {
+                      "payload": {
+                        "$ref": "#/components/schemas/CrawlStatusRequest"
+                      }
+                    }
+                  }
                 ]
               }
             }
@@ -233,14 +539,61 @@
               "application/json": {
                 "schema": {
                   "allOf": [
-                    {"$ref": "#/components/schemas/Envelope"},
-                    {"properties": {"payload": {"$ref": "#/components/schemas/CrawlStatusResponse"}}}
+                    {
+                      "$ref": "#/components/schemas/Envelope"
+                    },
+                    {
+                      "properties": {
+                        "payload": {
+                          "$ref": "#/components/schemas/CrawlStatusResponse"
+                        }
+                      }
+                    }
                   ]
                 }
               }
             }
+          },
+          "401": {
+            "description": "Не аутентифицирован: отсутствуют/невалидны креденшелы. Возвращается только при настроенной аутентификации (auth.mode != none).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Идентичность подтверждена, но у субъекта нет scope операции. Возвращается только при настроенной аутентификации (auth.mode != none).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Тело запроса превышает max_body_bytes (Content-Length отвергается до чтения; соединение закрывается — Connection: close).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
           }
-        }
+        },
+        "security": [
+          {
+            "mtls": []
+          },
+          {
+            "bearerJWT": []
+          }
+        ],
+        "x-auth-enforcement": "configurable: auth.mode in {mtls, oidc}"
       }
     },
     "/v1/crawl/cancel": {
@@ -248,8 +601,12 @@
         "operationId": "crawl/cancel",
         "summary": "Отмена задания краула",
         "parameters": [
-          {"$ref": "#/components/parameters/RequestId"},
-          {"$ref": "#/components/parameters/SchemaVersion"}
+          {
+            "$ref": "#/components/parameters/RequestId"
+          },
+          {
+            "$ref": "#/components/parameters/SchemaVersion"
+          }
         ],
         "requestBody": {
           "required": true,
@@ -257,8 +614,16 @@
             "application/json": {
               "schema": {
                 "allOf": [
-                  {"$ref": "#/components/schemas/RequestEnvelope"},
-                  {"properties": {"payload": {"$ref": "#/components/schemas/CrawlCancelRequest"}}}
+                  {
+                    "$ref": "#/components/schemas/RequestEnvelope"
+                  },
+                  {
+                    "properties": {
+                      "payload": {
+                        "$ref": "#/components/schemas/CrawlCancelRequest"
+                      }
+                    }
+                  }
                 ]
               }
             }
@@ -271,14 +636,61 @@
               "application/json": {
                 "schema": {
                   "allOf": [
-                    {"$ref": "#/components/schemas/Envelope"},
-                    {"properties": {"payload": {"$ref": "#/components/schemas/CrawlCancelResponse"}}}
+                    {
+                      "$ref": "#/components/schemas/Envelope"
+                    },
+                    {
+                      "properties": {
+                        "payload": {
+                          "$ref": "#/components/schemas/CrawlCancelResponse"
+                        }
+                      }
+                    }
                   ]
                 }
               }
             }
+          },
+          "401": {
+            "description": "Не аутентифицирован: отсутствуют/невалидны креденшелы. Возвращается только при настроенной аутентификации (auth.mode != none).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Идентичность подтверждена, но у субъекта нет scope операции. Возвращается только при настроенной аутентификации (auth.mode != none).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Тело запроса превышает max_body_bytes (Content-Length отвергается до чтения; соединение закрывается — Connection: close).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
           }
-        }
+        },
+        "security": [
+          {
+            "mtls": []
+          },
+          {
+            "bearerJWT": []
+          }
+        ],
+        "x-auth-enforcement": "configurable: auth.mode in {mtls, oidc}"
       }
     },
     "/v1/crawl/collect": {
@@ -286,8 +698,12 @@
         "operationId": "crawl/collect",
         "summary": "Постраничный забор результатов задания (сырые байты/хэши; не evidence — I19)",
         "parameters": [
-          {"$ref": "#/components/parameters/RequestId"},
-          {"$ref": "#/components/parameters/SchemaVersion"}
+          {
+            "$ref": "#/components/parameters/RequestId"
+          },
+          {
+            "$ref": "#/components/parameters/SchemaVersion"
+          }
         ],
         "requestBody": {
           "required": true,
@@ -295,8 +711,16 @@
             "application/json": {
               "schema": {
                 "allOf": [
-                  {"$ref": "#/components/schemas/RequestEnvelope"},
-                  {"properties": {"payload": {"$ref": "#/components/schemas/CrawlCollectRequest"}}}
+                  {
+                    "$ref": "#/components/schemas/RequestEnvelope"
+                  },
+                  {
+                    "properties": {
+                      "payload": {
+                        "$ref": "#/components/schemas/CrawlCollectRequest"
+                      }
+                    }
+                  }
                 ]
               }
             }
@@ -309,14 +733,61 @@
               "application/json": {
                 "schema": {
                   "allOf": [
-                    {"$ref": "#/components/schemas/Envelope"},
-                    {"properties": {"payload": {"$ref": "#/components/schemas/CrawlCollectResponse"}}}
+                    {
+                      "$ref": "#/components/schemas/Envelope"
+                    },
+                    {
+                      "properties": {
+                        "payload": {
+                          "$ref": "#/components/schemas/CrawlCollectResponse"
+                        }
+                      }
+                    }
                   ]
                 }
               }
             }
+          },
+          "401": {
+            "description": "Не аутентифицирован: отсутствуют/невалидны креденшелы. Возвращается только при настроенной аутентификации (auth.mode != none).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Идентичность подтверждена, но у субъекта нет scope операции. Возвращается только при настроенной аутентификации (auth.mode != none).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Тело запроса превышает max_body_bytes (Content-Length отвергается до чтения; соединение закрывается — Connection: close).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
           }
-        }
+        },
+        "security": [
+          {
+            "mtls": []
+          },
+          {
+            "bearerJWT": []
+          }
+        ],
+        "x-auth-enforcement": "configurable: auth.mode in {mtls, oidc}"
       }
     },
     "/v1/crawl/poll": {
@@ -324,8 +795,12 @@
         "operationId": "crawl/poll",
         "summary": "Опрос каталогового документа (фид/канал/sitemap; ссылки на записи, не evidence — I19)",
         "parameters": [
-          {"$ref": "#/components/parameters/RequestId"},
-          {"$ref": "#/components/parameters/SchemaVersion"}
+          {
+            "$ref": "#/components/parameters/RequestId"
+          },
+          {
+            "$ref": "#/components/parameters/SchemaVersion"
+          }
         ],
         "requestBody": {
           "required": true,
@@ -333,8 +808,16 @@
             "application/json": {
               "schema": {
                 "allOf": [
-                  {"$ref": "#/components/schemas/RequestEnvelope"},
-                  {"properties": {"payload": {"$ref": "#/components/schemas/CrawlPollRequest"}}}
+                  {
+                    "$ref": "#/components/schemas/RequestEnvelope"
+                  },
+                  {
+                    "properties": {
+                      "payload": {
+                        "$ref": "#/components/schemas/CrawlPollRequest"
+                      }
+                    }
+                  }
                 ]
               }
             }
@@ -347,14 +830,61 @@
               "application/json": {
                 "schema": {
                   "allOf": [
-                    {"$ref": "#/components/schemas/Envelope"},
-                    {"properties": {"payload": {"$ref": "#/components/schemas/CrawlPollResponse"}}}
+                    {
+                      "$ref": "#/components/schemas/Envelope"
+                    },
+                    {
+                      "properties": {
+                        "payload": {
+                          "$ref": "#/components/schemas/CrawlPollResponse"
+                        }
+                      }
+                    }
                   ]
                 }
               }
             }
+          },
+          "401": {
+            "description": "Не аутентифицирован: отсутствуют/невалидны креденшелы. Возвращается только при настроенной аутентификации (auth.mode != none).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Идентичность подтверждена, но у субъекта нет scope операции. Возвращается только при настроенной аутентификации (auth.mode != none).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Тело запроса превышает max_body_bytes (Content-Length отвергается до чтения; соединение закрывается — Connection: close).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
           }
-        }
+        },
+        "security": [
+          {
+            "mtls": []
+          },
+          {
+            "bearerJWT": []
+          }
+        ],
+        "x-auth-enforcement": "configurable: auth.mode in {mtls, oidc}"
       }
     },
     "/v1/capabilities": {
@@ -362,8 +892,12 @@
         "operationId": "capabilities",
         "summary": "Версии edge-компонентов (для манифеста; R7)",
         "parameters": [
-          {"$ref": "#/components/parameters/RequestId"},
-          {"$ref": "#/components/parameters/SchemaVersion"}
+          {
+            "$ref": "#/components/parameters/RequestId"
+          },
+          {
+            "$ref": "#/components/parameters/SchemaVersion"
+          }
         ],
         "responses": {
           "200": {
@@ -372,14 +906,61 @@
               "application/json": {
                 "schema": {
                   "allOf": [
-                    {"$ref": "#/components/schemas/Envelope"},
-                    {"properties": {"payload": {"$ref": "#/components/schemas/CapabilitiesResponse"}}}
+                    {
+                      "$ref": "#/components/schemas/Envelope"
+                    },
+                    {
+                      "properties": {
+                        "payload": {
+                          "$ref": "#/components/schemas/CapabilitiesResponse"
+                        }
+                      }
+                    }
                   ]
                 }
               }
             }
+          },
+          "401": {
+            "description": "Не аутентифицирован: отсутствуют/невалидны креденшелы. Возвращается только при настроенной аутентификации (auth.mode != none).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Идентичность подтверждена, но у субъекта нет scope операции. Возвращается только при настроенной аутентификации (auth.mode != none).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Тело запроса превышает max_body_bytes (Content-Length отвергается до чтения; соединение закрывается — Connection: close).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
           }
-        }
+        },
+        "security": [
+          {
+            "mtls": []
+          },
+          {
+            "bearerJWT": []
+          }
+        ],
+        "x-auth-enforcement": "configurable: auth.mode in {mtls, oidc}"
       }
     },
     "/v1/health": {
@@ -387,8 +968,12 @@
         "operationId": "health",
         "summary": "Диагностика достижимости шва",
         "parameters": [
-          {"$ref": "#/components/parameters/RequestId"},
-          {"$ref": "#/components/parameters/SchemaVersion"}
+          {
+            "$ref": "#/components/parameters/RequestId"
+          },
+          {
+            "$ref": "#/components/parameters/SchemaVersion"
+          }
         ],
         "responses": {
           "200": {
@@ -397,9 +982,47 @@
               "application/json": {
                 "schema": {
                   "allOf": [
-                    {"$ref": "#/components/schemas/Envelope"},
-                    {"properties": {"payload": {"$ref": "#/components/schemas/HealthResponse"}}}
+                    {
+                      "$ref": "#/components/schemas/Envelope"
+                    },
+                    {
+                      "properties": {
+                        "payload": {
+                          "$ref": "#/components/schemas/HealthResponse"
+                        }
+                      }
+                    }
                   ]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Не аутентифицирован: отсутствуют/невалидны креденшелы. Возвращается только при настроенной аутентификации (auth.mode != none).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Идентичность подтверждена, но у субъекта нет scope операции. Возвращается только при настроенной аутентификации (auth.mode != none).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Тело запроса превышает max_body_bytes (Content-Length отвергается до чтения; соединение закрывается — Connection: close).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
                 }
               }
             }

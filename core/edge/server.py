@@ -22,6 +22,7 @@ edge **отвечает**; обратного инициирования нет 
 from __future__ import annotations
 
 import base64
+import ipaddress
 import json
 import uuid
 from collections.abc import Callable, Mapping, Sequence
@@ -29,6 +30,21 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
+from core.edge.audit import (
+    AUDIT_STATUS_ALLOW,
+    AUDIT_STATUS_DENY,
+    AUDIT_STATUS_ERROR,
+    AuditSink,
+    Classification,
+    audit_call,
+)
+from core.edge.auth import (
+    AuthRequest,
+    Authenticator,
+    Principal,
+    PUBLIC_OPS,
+    authorize,
+)
 from core.edge.seam_schema import validate_crawl_request, validate_fetch_request
 from core.ports.crawler import CrawlerPort
 from core.ports.extractor import ExtractorPort
@@ -38,10 +54,14 @@ from core.util.hashing import content_hash
 
 __all__ = [
     "EDGE_SCHEMA_VERSION",
+    "DEFAULT_MAX_BODY_BYTES",
     "EdgeError",
     "EdgeRequestError",
     "EdgeAdapterError",
+    "EdgeSecurityError",
     "EdgeGateway",
+    "is_loopback_host",
+    "ensure_safe_binding",
     "route_request",
     "make_handler",
     "build_server",
@@ -51,6 +71,21 @@ __all__ = [
 #: Версия конверта (07 §3/§7/§8.3). Совпадает с клиентским дефолтом
 #: (``core/adapters/remote_gateway.DEFAULT_SCHEMA_VERSION``) — версионная граница.
 EDGE_SCHEMA_VERSION = "1"
+
+#: Потолок тела запроса по умолчанию, байты (1 MiB).
+#:
+#: Обоснование — по самой крупной легитимной форме запроса. Тело несут только
+#: POST-операции; единственная «массовая» из них — ``crawl/submit``, где ``items``
+#: — список работ одной волны. Ядро по умолчанию подаёт волну
+#: ``_EXECUTOR_WAVE_ITEMS = 64`` элементов (``core/pipeline/corpus.py``), каждый —
+#: ``{product_id, url, engine, kind, fetch, extract, strategy, wait_for, lang,
+#: robots, rate_limit}`` (``crawl.schema.json#/$defs/submit_item``); при URL ~2 КБ
+#: это ~128 КБ. Остальные запросы (``fetch``/``search``/``registry``/``crawl/*``)
+#: несут единицы полей и на порядки меньше. 1 MiB даёт ~8× запас над волной
+#: дефолтного размера (и покрывает увеличенные волны) и при этом не превращает
+#: DMZ в приёмник произвольных объёмов. Оператор переопределяет
+#: ``max_body_bytes`` в ``edge.yaml``.
+DEFAULT_MAX_BODY_BYTES = 1_048_576
 
 #: Операции, которые в протоколе edge принимают тело (07 §3).
 #: Crawl-операции очереди краула (Phase 3.1) и опрос фидов (Wave 5.1) — тоже POST.
@@ -96,6 +131,15 @@ class EdgeAdapterError(EdgeError):
     """Сбой инъецированного адаптера; наружу — только сообщение, без traceback."""
 
 
+class EdgeSecurityError(EdgeError):
+    """Небезопасная конфигурация шва: отказ запуска (fail-fast).
+
+    Возникает, когда сервер просят привязать к **не-loopback** адресу без
+    настроенной аутентификации: публиковать неаутентифицированный шов в
+    маршрутизируемый интерфейс — это и есть фактическая угроза (07 §8.2).
+    """
+
+
 # ---------------------------------------------------------------------------
 # Утилиты (детерминизм и нейтральность)
 # ---------------------------------------------------------------------------
@@ -104,6 +148,78 @@ class EdgeAdapterError(EdgeError):
 def _utc_now_iso() -> str:
     """Текущий UTC-таймстемп ISO-8601 (дефолтные часы, если адаптер не дал ``fetched_at``)."""
     return datetime.now(timezone.utc).isoformat()
+
+
+def is_loopback_host(host: str | None) -> bool:
+    """Является ли ``host`` петлевым адресом (``True`` — можно без аутентификации).
+
+    Петлевыми считаются **литеральные** адреса с ``ipaddress.is_loopback``
+    (весь ``127.0.0.0/8`` и ``::1``) и имя ``localhost`` (регистронезависимо).
+    Имена не разрешаются через DNS: разрешение сделало бы проверку
+    непредсказуемой и зависимой от окружения, а «localhost» в конфиге и так
+    означает петлю по соглашению. Всё остальное (включая ``0.0.0.0``, ``::`` и
+    внешние имена) — **не** loopback.
+    """
+    text = str(host or "").strip()
+    if text.startswith("[") and text.endswith("]"):
+        text = text[1:-1].strip()
+    if not text:
+        return False
+    if text.lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(text).is_loopback
+    except ValueError:
+        return False
+
+
+def ensure_safe_binding(host: str, authenticator: Authenticator | None) -> None:
+    """Fail-fast: неаутентифицированный шов нельзя публиковать вне петли.
+
+    ``authenticator is None`` — законный дефолт локального профиля, но только на
+    петлевом адресе (:func:`is_loopback_host`). Привязка к любому иному адресу
+    без аутентификации отвергается :class:`EdgeSecurityError` **до** создания
+    сокета: «забыли настроить auth» не должно молча превращаться в открытый
+    веб-эндпоинт (07 §8.2).
+    """
+    if authenticator is None and not is_loopback_host(host):
+        raise EdgeSecurityError(
+            f"отказ запуска: host={host!r} не является loopback, "
+            "а аутентификация не настроена (auth.mode=none); "
+            "настройте auth (mtls/oidc) или слушайте 127.0.0.1/::1/localhost"
+        )
+
+
+def _audit_event(
+    sink: AuditSink | None,
+    *,
+    request_id: str,
+    principal: Principal | None,
+    op: str,
+    status: str,
+    payload: Mapping[str, Any] | None,
+    remote: str | None,
+    classification: Classification | None,
+) -> None:
+    """Пишет ровно одно аудит-событие вызова (``sink=None`` — no-op).
+
+    ``classification`` — операторский маркер; метка для конкретного вызова
+    вычисляется через :meth:`Classification.for_call` (07 §8.5). В событие не
+    попадают ни тело, ни заголовки авторизации: только ``op``/``status``/
+    ``request_id``/субъект/peer/метка (07 §8.4).
+    """
+    if sink is None:
+        return
+    marker = classification if classification is not None else Classification()
+    audit_call(
+        sink,
+        request_id=request_id,
+        principal=principal,
+        op=op,
+        status=status,
+        classification=marker.for_call(op, payload or {}),
+        remote=remote,
+    )
 
 
 def _default_id_factory() -> str:
@@ -844,59 +960,178 @@ def route_request(
     body: Any = b"",
     *,
     request_id: str | None = None,
+    authenticator: Authenticator | None = None,
+    auth_request: AuthRequest | None = None,
+    audit_sink: AuditSink | None = None,
+    classification: Classification | None = None,
+    remote: str | None = None,
+    max_body_bytes: int = DEFAULT_MAX_BODY_BYTES,
 ) -> tuple[int, dict[str, Any]]:
     """Чистая маршрутизация HTTP → конверт: ``(http_status, envelope)``.
 
     Отделена от сокета, чтобы тесты не открывали порт. Прикладные сбои остаются
-    HTTP 200 с ``envelope.status == "error"``; 4xx — только транспортные
-    (нет маршрута/метода/валидного JSON).
+    HTTP 200 с ``envelope.status == "error"``; 4xx — транспортные/охранные
+    (нет маршрута/метода/валидного JSON, отказ аутентификации/авторизации,
+    превышение лимита тела).
+
+    **Порядок операций (важен):**
+
+    1. разрешение ``op`` и проверка маршрута/метода — 404/405;
+    2. **аутентификация** (если ``authenticator`` задан и операция не публичная):
+       сбой → 401, конверт ``status="error"``, аудит ``DENY``;
+    3. **авторизация** ``principal`` по ``op`` через :func:`authorize`:
+       нет права → 403, аудит ``DENY``;
+    4. **лимит тела** ``max_body_bytes`` → 413, аудит ``ERROR``;
+    5. разбор JSON → 400, аудит ``ERROR``;
+    6. диспетчеризация в :meth:`EdgeGateway.envelope`;
+    7. **аудит** ровно одного события с финальным статусом (``ALLOW``/``ERROR``).
+
+    Функция остаётся **чистой**: состояние (аутентификатор, sink, лимит)
+    приходит параметрами, а ``request_id`` генерируется инъецированным в gateway
+    ``id_factory``. Один и тот же ``request_id`` попадает и в конверт, и в
+    аудит-событие — второго идентификатора для одного вызова не существует.
+    При ``authenticator=None`` и ``audit_sink=None`` поведение прежнее,
+    байт-в-байт (локальный профиль, петлевой адрес).
     """
+    # Единый идентификатор вызова: конверт и аудит обязаны совпадать (07 §8.2/§8.4).
+    rid = str(request_id) if request_id else gateway._new_id()
     method = (method or "").upper()
     op = _parse_op(path)
+    audit_op = op or path or "unknown"
+    principal: Principal | None = None
+
+    def deny(
+        code: int, error: str, status: str, *, payload: Mapping[str, Any] | None = None
+    ) -> tuple[int, dict[str, Any]]:
+        """Отказ/ошибка до диспетчеризации: аудит → конверт с тем же ``rid``."""
+        _audit_event(
+            audit_sink,
+            request_id=rid,
+            principal=principal,
+            op=audit_op,
+            status=status,
+            payload=payload,
+            remote=remote,
+            classification=classification,
+        )
+        return code, gateway.error_envelope(error, request_id=rid)
+
+    # 1. Маршрут и метод (404/405 — как раньше).
     if op is None or op not in _KNOWN_OPS:
-        return 404, gateway.error_envelope(f"маршрут не найден: {path!r}", request_id=request_id)
+        return deny(404, f"маршрут не найден: {path!r}", AUDIT_STATUS_ERROR)
 
     if method == "POST":
         if op not in _POST_OPS:
-            return 405, gateway.error_envelope(
-                f"POST не поддерживается для {op!r}", request_id=request_id
-            )
-        payload, error = _decode_json_body(body)
-        if error is not None:
-            return 400, gateway.error_envelope(error, request_id=request_id)
-        assert payload is not None  # гарантировано ветвлением выше
+            return deny(405, f"POST не поддерживается для {op!r}", AUDIT_STATUS_ERROR)
     elif method == "GET":
         if op not in _GET_OPS:
-            return 405, gateway.error_envelope(
-                f"GET не поддерживается для {op!r}", request_id=request_id
-            )
-        payload = {}
+            return deny(405, f"GET не поддерживается для {op!r}", AUDIT_STATUS_ERROR)
     else:
-        return 405, gateway.error_envelope(
-            f"метод {method!r} не поддерживается", request_id=request_id
+        return deny(
+            405, f"метод {method!r} не поддерживается", AUDIT_STATUS_ERROR
         )
 
-    return 200, gateway.envelope(op, payload, request_id=request_id)
+    # 2–3. Аутентификация и авторизация. Публичные операции (``health``) —
+    # диагностика достижимости: доступны без идентичности (07 §3), авторизация
+    # для них заведомо проходит (``auth.PUBLIC_OPS``).
+    if authenticator is not None and op not in PUBLIC_OPS:
+        decision = authenticator.authenticate(auth_request or {})
+        if not decision.allowed or decision.principal is None:
+            return deny(
+                401,
+                f"не аутентифицирован: {decision.reason}",
+                AUDIT_STATUS_DENY,
+            )
+        principal = decision.principal
+        if not authorize(principal, op):
+            return deny(
+                403,
+                f"доступ к операции {op!r} запрещён для субъекта "
+                f"{principal.subject!r}",
+                AUDIT_STATUS_DENY,
+            )
+
+    # 4. Лимит тела — до разбора JSON и до аллокаций по декларации клиента.
+    raw_body = body.encode("utf-8") if isinstance(body, str) else bytes(body or b"")
+    if len(raw_body) > max_body_bytes:
+        return deny(
+            413,
+            f"тело запроса превышает лимит {max_body_bytes} байт",
+            AUDIT_STATUS_ERROR,
+        )
+
+    # 5. Тело → payload.
+    if method == "POST":
+        payload, error = _decode_json_body(raw_body)
+        if error is not None:
+            return deny(400, error, AUDIT_STATUS_ERROR)
+        assert payload is not None  # гарантировано ветвлением выше
+    else:
+        payload = {}
+
+    # 6. Диспетчеризация.
+    envelope = gateway.envelope(op, payload, request_id=rid)
+
+    # 7. Аудит финального статуса (прикладной сбой адаптера — ``ERROR``).
+    _audit_event(
+        audit_sink,
+        request_id=rid,
+        principal=principal,
+        op=op,
+        status=(
+            AUDIT_STATUS_ALLOW if envelope.get("status") == "ok" else AUDIT_STATUS_ERROR
+        ),
+        payload=payload,
+        remote=remote,
+        classification=classification,
+    )
+    return 200, envelope
+
+
+def _declared_content_length(headers: Any) -> int | None:
+    """``Content-Length`` запроса как ``int`` либо ``None`` (нет/битое/отрицательное).
+
+    Отсутствие отличается от нуля: ``None`` означает «клиент не объявил длину»
+    (нужен ограниченный дочитывающий путь), ``0`` — явно пустое тело.
+    """
+    raw = headers.get("Content-Length")
+    if raw is None or str(raw).strip() == "":
+        return None
+    try:
+        value = int(str(raw).strip())
+    except (TypeError, ValueError):
+        return None
+    return value if value >= 0 else None
 
 
 def _content_length(headers: Any) -> int:
     """Content-Length запроса как неотрицательное ``int`` (0 на битое/отсутствие)."""
-    raw = headers.get("Content-Length")
-    if not raw:
-        return 0
-    try:
-        return max(0, int(raw))
-    except (TypeError, ValueError):
-        return 0
+    declared = _declared_content_length(headers)
+    return 0 if declared is None else declared
 
 
 def make_handler(
-    gateway: EdgeGateway, *, request_id_header: str = REQUEST_ID_HEADER
+    gateway: EdgeGateway,
+    *,
+    request_id_header: str = REQUEST_ID_HEADER,
+    authenticator: Authenticator | None = None,
+    audit_sink: AuditSink | None = None,
+    classification: Classification | None = None,
+    max_body_bytes: int = DEFAULT_MAX_BODY_BYTES,
 ) -> type[BaseHTTPRequestHandler]:
     """Фабрика ``BaseHTTPRequestHandler`` поверх ``route_request`` (тестируемо без сокета).
 
     POST ``/v1/{fetch,search,registry}`` и GET ``/v1/{health,capabilities}``;
-    ``X-Request-Id`` запроса эхо-возвращается в конверте (07 §8.2).
+    ``X-Request-Id`` запроса эхо-возвращается в конверте (07 §8.2). Middleware
+    (аутентификация/авторизация/аудит) прокидывается в :func:`route_request`
+    параметрами; ``None`` — прежнее поведение.
+
+    Тело читается **только** в пределах ``max_body_bytes``: объявленный
+    ``Content-Length`` сверх лимита отвергается (413) до чтения, а чтение
+    ограничено ``max_body_bytes + 1`` — ``read()`` без границы не вызывается
+    никогда. На 413 соединение закрывается (``Connection: close``): при
+    ``HTTP/1.1`` сокет переиспользуется, и непрочитанное тело было бы разобрано
+    как следующий запрос — это рассинхронизация, а не просто мусор в ответе.
     """
 
     class _EdgeRequestHandler(BaseHTTPRequestHandler):
@@ -904,19 +1139,118 @@ def make_handler(
         sys_version = ""
         protocol_version = "HTTP/1.1"
 
-        def _dispatch(self, method: str) -> None:
-            length = _content_length(self.headers)
-            body = self.rfile.read(length) if length > 0 else b""
-            rid = self.headers.get(request_id_header)
-            code, envelope = route_request(
-                gateway, method, self.path, body, request_id=rid
-            )
+        def _send_envelope(
+            self, code: int, envelope: Mapping[str, Any], *, close: bool = False
+        ) -> None:
+            """Пишет JSON-конверт; ``close=True`` — ``Connection: close`` + закрытие."""
             data = json.dumps(envelope, ensure_ascii=False).encode("utf-8")
             self.send_response(code)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Content-Length", str(len(data)))
+            if close:
+                self.send_header("Connection", "close")
+                self.close_connection = True
             self.end_headers()
             self.wfile.write(data)
+
+        def _audit_transport(
+            self, request_id: str | None, op: str, status: str
+        ) -> None:
+            """Аудит транспортного отказа, не дошедшего до ``route_request``."""
+            _audit_event(
+                audit_sink,
+                request_id=request_id or gateway._new_id(),
+                principal=None,
+                op=op,
+                status=status,
+                payload=None,
+                remote=self._remote(),
+                classification=classification,
+            )
+
+        def _remote(self) -> str | None:
+            """Peer-адрес клиента для аудита (``None``, если недоступен)."""
+            address = getattr(self, "client_address", None)
+            if isinstance(address, (tuple, list)) and address:
+                return str(address[0])
+            return None
+
+        def _dispatch(self, method: str) -> None:
+            # Один request_id на вызов: заголовок клиента либо сгенерированный
+            # здесь — конверт и аудит обязаны нести одно и то же значение.
+            rid = self.headers.get(request_id_header) or gateway._new_id()
+            op = _parse_op(self.path) or self.path or "unknown"
+            declared = _declared_content_length(self.headers)
+
+            # Транспортный guard (ресурсная защита, раньше прикладного конвейера):
+            # объявленная длина сверх лимита отвергается без чтения тела.
+            if declared is not None and declared > max_body_bytes:
+                self._audit_transport(rid, op, AUDIT_STATUS_ERROR)
+                self._send_envelope(
+                    413,
+                    gateway.error_envelope(
+                        f"тело запроса превышает лимит {max_body_bytes} байт",
+                        request_id=rid,
+                    ),
+                    close=True,
+                )
+                return
+
+            body = b""
+            if method == "POST":
+                transfer_encoding = self.headers.get("Transfer-Encoding")
+                if declared is None and transfer_encoding:
+                    # Framing chunked шов не поддерживает (контракт — L7 JSON с
+                    # Content-Length). Дочитываем не более лимита+1, чтобы не
+                    # аллоцировать по декларации, и закрываем соединение: остаток
+                    # chunked-потока иначе был бы разобран как следующий запрос.
+                    body = self.rfile.read(max_body_bytes + 1)
+                    if len(body) > max_body_bytes:
+                        self._audit_transport(rid, op, AUDIT_STATUS_ERROR)
+                        self._send_envelope(
+                            413,
+                            gateway.error_envelope(
+                                f"тело запроса превышает лимит {max_body_bytes} байт",
+                                request_id=rid,
+                            ),
+                            close=True,
+                        )
+                        return
+                    self._audit_transport(rid, op, AUDIT_STATUS_ERROR)
+                    self._send_envelope(
+                        400,
+                        gateway.error_envelope(
+                            "Transfer-Encoding: chunked не поддерживается швом; "
+                            "используйте Content-Length",
+                            request_id=rid,
+                        ),
+                        close=True,
+                    )
+                    return
+                if declared is not None and declared > 0:
+                    # Верхняя граница чтения — лимит+1 (защита от лживой/битой
+                    # декларации); объявленный сверх лимита уже отвергнут выше.
+                    body = self.rfile.read(min(declared, max_body_bytes + 1))
+                # Content-Length нет и chunked не объявлен → по HTTP/1.1 тела нет.
+                # «Дочитать на всякий случай» здесь нельзя: read(cap+1) на
+                # keep-alive соединении заблокировался бы до EOF.
+
+            code, envelope = route_request(
+                gateway,
+                method,
+                self.path,
+                body,
+                request_id=rid,
+                authenticator=authenticator,
+                auth_request=dict(self.headers),
+                audit_sink=audit_sink,
+                classification=classification,
+                remote=self._remote(),
+                max_body_bytes=max_body_bytes,
+            )
+            # 413: тело могло остаться непрочитанным — закрываем, чтобы не
+            # разобрать его как следующий запрос на переиспользуемом сокете.
+            self._send_envelope(code, envelope, close=code == 413)
 
         def do_GET(self) -> None:  # noqa: N802 - контракт BaseHTTPRequestHandler
             self._dispatch("GET")
@@ -937,9 +1271,26 @@ def build_server(
     *,
     server_factory: Callable[..., Any] = ThreadingHTTPServer,
     handler_factory: Callable[..., type[BaseHTTPRequestHandler]] = make_handler,
+    authenticator: Authenticator | None = None,
+    audit_sink: AuditSink | None = None,
+    classification: Classification | None = None,
+    max_body_bytes: int = DEFAULT_MAX_BODY_BYTES,
 ) -> Any:
-    """Создаёт HTTP-сервер (без запуска). ``server_factory`` инъецируется для тестов."""
-    handler_cls = handler_factory(gateway)
+    """Создаёт HTTP-сервер (без запуска). ``server_factory`` инъецируется для тестов.
+
+    **Fail-fast (07 §8.2):** если ``authenticator is None``, а ``host`` — не
+    петлевой (:func:`is_loopback_host`), запуск отвергается
+    :class:`EdgeSecurityError` до создания сокета. Петля без аутентификации —
+    штатный локальный профиль; маршрутизируемый интерфейс без неё — нет.
+    """
+    ensure_safe_binding(host, authenticator)
+    handler_cls = handler_factory(
+        gateway,
+        authenticator=authenticator,
+        audit_sink=audit_sink,
+        classification=classification,
+        max_body_bytes=max_body_bytes,
+    )
     return server_factory((host, port), handler_cls)
 
 
@@ -952,11 +1303,18 @@ def serve(
     handler_factory: Callable[..., type[BaseHTTPRequestHandler]] = make_handler,
     scheduler: Any = None,
     on_start: Callable[[], None] | None = None,
+    authenticator: Authenticator | None = None,
+    audit_sink: AuditSink | None = None,
+    classification: Classification | None = None,
+    max_body_bytes: int = DEFAULT_MAX_BODY_BYTES,
 ) -> None:
     """Запускает блокирующий HTTP-сервер ``/v1/*`` (stdlib).
 
     Опциональный режим развёртывания ``split`` (07 §6). Сокет поднимает только
     ``serve``; ``EdgeGateway`` и ``route_request`` тестируются без сети.
+    ``authenticator``/``audit_sink``/``max_body_bytes`` — middleware шва
+    (07 §8.2/§8.4); при ``None``/дефолте поведение прежнее. Fail-fast по
+    привязке наследуется от :func:`build_server`.
 
     **Хук планировщика (Phase 3.0).** ``scheduler`` — необязательный фоновый компонент
     (напр. пул воркеров/очередь, Wave 3.2) с методами ``start()``/``stop()``. При
@@ -971,6 +1329,10 @@ def serve(
         gateway,
         server_factory=server_factory,
         handler_factory=handler_factory,
+        authenticator=authenticator,
+        audit_sink=audit_sink,
+        classification=classification,
+        max_body_bytes=max_body_bytes,
     )
     if on_start is not None:
         on_start()
