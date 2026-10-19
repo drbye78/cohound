@@ -1441,19 +1441,24 @@ def _resolve_phases(
             extractor=getattr(ports, "extractor", None),
         ),
         # Ф1.2: межпрогонный кэш экстракции. Каталог — resolved ``paths.extract_cache``
-        # (``COHOUND_EXTRACT_CACHE_DIR`` / ``COHOUND_HOME`` / ``paths.yaml``); дефолт
-        # совпадает с :class:`PathsConfig`. Бюджет не задаётся: вытеснение по размеру —
-        # операционное решение, дефолт — без вытеснения. Ключ — хеш ретенированных
-        # байтов (I19), поэтому кэш не может подсунуть неверифицированный контент.
-        "extract_cache": ExtractionCache(
-            str(paths.extract_cache) if paths is not None else "extract_cache"
+        # (``COHOUND_EXTRACT_CACHE_DIR`` / ``COHOUND_HOME`` / ``paths.yaml``).
+        # ``paths is None`` ⇒ кэш **выключен**, а не «относительно CWD»: у кэша без
+        # resolved-раскладки нет определённой области, а CWD-дефолт делает его общим
+        # для всех вызовов процесса — ровно та же причина, по которой ``_resolve_ports``
+        # отдаёт ``cache=None``. Иначе тесты и параллельные прогоны делят состояние.
+        # Бюджет не задаётся: вытеснение по размеру — операционное решение, дефолт —
+        # без вытеснения. Ключ — хеш ретенированных байтов (I19), поэтому кэш не может
+        # подсунуть неверифицированный контент.
+        "extract_cache": (
+            ExtractionCache(str(paths.extract_cache)) if paths is not None else None
         ),
         # Ф3: межпрогонный кэш вердиктов оценщика. Каталог — resolved ``paths.eval_cache``
-        # (``COHOUND_EVAL_CACHE_DIR`` / ``COHOUND_HOME`` / ``paths.yaml``); дефолт совпадает
-        # с :class:`PathsConfig`. Ключ — отрендеренный промпт + конфигурация оценщика,
-        # поэтому смена сателлитов/заголовка/чанков/модели не даёт ложных хитов.
-        "eval_cache": EvalVerdictCache(
-            str(paths.eval_cache) if paths is not None else "eval_cache"
+        # (``COHOUND_EVAL_CACHE_DIR`` / ``COHOUND_HOME`` / ``paths.yaml``); ``paths is None``
+        # ⇒ выключен, по той же причине, что и выше. Ключ — отрендеренный промпт +
+        # конфигурация оценщика, поэтому смена сателлитов/заголовка/чанков/модели не даёт
+        # ложных хитов.
+        "eval_cache": (
+            EvalVerdictCache(str(paths.eval_cache)) if paths is not None else None
         ),
         # P5: фабрика per-level экстрактора для inline-пути. Под ``split`` ось
         # ``document_level`` не действует (R-S: edge строит конвертеры сам) — ``None``.
