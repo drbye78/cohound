@@ -24,9 +24,9 @@ from core.pipeline.package_scout import (
     write_scout_artifacts,
 )
 from core.ports.search import SearchQuery, SearchResult
-from core.ports.types import RawPage
+from core.ports.types import FetchPlan, RawPage
 from tests.fakes.ports import FakeExtractor
-from tests.helpers.scout import fake_crawler
+from tests.helpers.scout import FIXED_TS, fake_crawler
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "package_scout"
 URL = "https://docs.test/alpha"
@@ -257,6 +257,55 @@ def test_search_failure_is_isolated() -> None:
     report = _report(search=_BoomSearch())
     assert report.ok is False
     assert any("search" in error for error in report.errors)
+
+
+def test_unavailable_candidate_page_is_soft_error() -> None:
+    """Один 404 среди SERP-кандидатов не роняет разведку пакета."""
+
+    class _Search:
+        adapter_kind = "serp"
+        provider = "fake"
+
+        def search(self, q: SearchQuery) -> list[SearchResult]:
+            return [SearchResult(url=URL2, title="beta", rank=1)]
+
+        def fetch(self, url: str) -> RawPage:  # pragma: no cover - не используется
+            raise AssertionError
+
+    class _PartialCrawler:
+        version = "partial"
+
+        def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:
+            if url == URL:
+                return RawPage(
+                    url=URL,
+                    content=PAGE_TEXT.encode("utf-8"),
+                    fetched_at=FIXED_TS,
+                )
+            raise RuntimeError("HTTP 404")
+
+    report = _report(crawler=_PartialCrawler(), search=_Search())
+    assert report.ok is True
+    assert report.errors == []
+    assert report.page_errors and "404" in report.page_errors[0]
+    assert any("недоступна" in item for item in report.needs_human)
+    assert report.sidecar["page_errors"] == report.page_errors
+    assert any(
+        item.get("url") == URL2 and item.get("error") for item in report.fetched
+    )
+
+
+def test_no_page_extracted_is_fatal() -> None:
+    class _BoomCrawler:
+        version = "boom"
+
+        def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:
+            raise RuntimeError("network down")
+
+    report = _report(crawler=_BoomCrawler())
+    assert report.ok is False
+    assert any("ни одна страница не извлечена" in error for error in report.errors)
+    assert report.page_errors
 
 
 def test_search_urls_extend_whitelist() -> None:

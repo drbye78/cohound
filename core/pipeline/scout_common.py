@@ -66,19 +66,24 @@ def fetch_one(
     extractor: ExtractorPort,
     fetched: list[dict[str, Any]],
     page_texts: dict[str, str],
-    errors: list[str],
+    page_errors: list[str],
 ) -> None:
-    """Фетчит и извлекает одну страницу; ошибки изолируются (без исключений наружу)."""
+    """Фетчит и извлекает одну страницу; сбой страницы — **мягкая** ошибка.
+
+    Недоступная страница-кандидат (404/410/таймаут) не делает разведку неуспешной:
+    сообщение попадает в ``page_errors`` (и в ``fetched[].error``), а вызывающий
+    решает, достаточно ли оставшихся страниц. Исключения наружу не летят.
+    """
     try:
         page = crawler.fetch(url)
     except Exception as exc:  # noqa: BLE001 — сбой фетча изолируется по документу
-        errors.append(f"fetch {url}: {type(exc).__name__}: {exc}")
+        page_errors.append(f"fetch {url}: {type(exc).__name__}: {exc}")
         fetched.append({"url": url, "error": f"{type(exc).__name__}: {exc}"})
         return
     try:
         doc = extractor.extract(page)
     except Exception as exc:  # noqa: BLE001 — сбой экстракции изолируется по документу
-        errors.append(f"extract {url}: {type(exc).__name__}: {exc}")
+        page_errors.append(f"extract {url}: {type(exc).__name__}: {exc}")
         fetched.append(
             {
                 "url": url,

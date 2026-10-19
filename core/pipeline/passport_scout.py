@@ -143,6 +143,8 @@ class PassportScoutReport:
         ``usage``, ``fetched[]`` с URL/``content_hash``, ``needs_human``, провенанс полей).
     :param needs_human: поля/URL, требующие человеческого решения.
     :param fetched: список фетчей (URL, ``content_hash``, версия экстрактора, ошибка).
+    :param page_errors: мягкие сбои отдельных страниц-кандидатов (404/410/таймаут);
+        не делают разведку неуспешной, если хотя бы одна страница извлеклась.
     :param ok: ``False``, если были ошибки сбора/инференса (черновик не публикуется).
     :param errors: человекочитаемые ошибки (без трассировок).
     """
@@ -151,6 +153,7 @@ class PassportScoutReport:
     candidates_json: dict[str, Any]
     needs_human: list[str] = field(default_factory=list)
     fetched: list[dict[str, Any]] = field(default_factory=list)
+    page_errors: list[str] = field(default_factory=list)
     ok: bool = True
     errors: list[str] = field(default_factory=list)
 
@@ -401,6 +404,7 @@ def scout_passport(
     """
     snapshot = _as_date(today)
     errors: list[str] = []
+    page_errors: list[str] = []
     fetched: list[dict[str, Any]] = []
     page_texts: dict[str, str] = {}
     search_urls: list[str] = []
@@ -412,7 +416,7 @@ def scout_passport(
         extractor=extractor,
         fetched=fetched,
         page_texts=page_texts,
-        errors=errors,
+        page_errors=page_errors,
     )
 
     # 2. Опциональный внешний поиск: только URL-кандидаты + их фетч (в пределах max_pages).
@@ -438,8 +442,12 @@ def scout_passport(
                 extractor=extractor,
                 fetched=fetched,
                 page_texts=page_texts,
-                errors=errors,
+                page_errors=page_errors,
             )
+
+    # Порог заземления: без единой извлечённой страницы разведка не имеет опоры.
+    if not page_texts:
+        errors.append("fetch: ни одна страница не извлечена")
 
     allowed: set[str] = set(page_texts) | set(search_urls) | {url}
     corpus_text = _join_pages(page_texts, max_chars)
@@ -500,12 +508,19 @@ def scout_passport(
         "search_urls": list(search_urls),
         "needs_human": list(needs_human),
         "field_provenance": provenance,
+        "page_errors": list(page_errors),
     }
+    if page_errors:
+        needs_human = _dedupe(
+            [*needs_human, f"часть страниц-кандидатов недоступна ({len(page_errors)})"]
+        )
+        candidates_json["needs_human"] = list(needs_human)
     return PassportScoutReport(
         passport=passport,
         candidates_json=candidates_json,
         needs_human=needs_human,
         fetched=fetched,
+        page_errors=page_errors,
         ok=not errors,
         errors=errors,
     )

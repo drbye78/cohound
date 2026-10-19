@@ -279,6 +279,8 @@ class PackageScoutReport:
     :param needs_human: элементы, требующие человеческого решения.
     :param sidecar: sidecar-провенанс (шаблоны, ``prompt_hash``, ``usage``, ``fetched`` …).
     :param fetched: список фетчей (URL, ``content_hash``, версия экстрактора, ошибка).
+    :param page_errors: мягкие сбои отдельных страниц-кандидатов (404/410/таймаут);
+        не делают разведку неуспешной, если хотя бы одна страница извлеклась.
     :param search_calls: число фактических вызовов ``SearchAdapterPort.search``.
     :param ok: ``False``, если были ошибки сбора/инференса.
     :param errors: человекочитаемые ошибки (без трассировок).
@@ -291,6 +293,7 @@ class PackageScoutReport:
     needs_human: list[str] = field(default_factory=list)
     sidecar: dict[str, Any] = field(default_factory=dict)
     fetched: list[dict[str, Any]] = field(default_factory=list)
+    page_errors: list[str] = field(default_factory=list)
     search_calls: int = 0
     ok: bool = True
     errors: list[str] = field(default_factory=list)
@@ -944,6 +947,7 @@ def scout_package(
     snapshot = _as_date(snapshot_date)
     selected = _normalize_only(only)
     errors: list[str] = []
+    page_errors: list[str] = []
     fetched: list[dict[str, Any]] = []
     page_texts: dict[str, str] = {}
     search_urls: list[str] = []
@@ -991,8 +995,12 @@ def scout_package(
             extractor=extractor,
             fetched=fetched,
             page_texts=page_texts,
-            errors=errors,
+            page_errors=page_errors,
         )
+
+    # Порог заземления: без единой извлечённой страницы разведка не имеет опоры.
+    if not page_texts:
+        errors.append("fetch: ни одна страница не извлечена")
 
     allowed: set[str] = set(page_texts) | set(search_urls) | set(seed_list)
     corpus_text = _join_pages(page_texts, max_chars)
@@ -1103,6 +1111,10 @@ def scout_package(
         needs_human = _dedupe(
             [*needs_human, "разведка завершилась с ошибками — кандидаты частичные (report.ok=False)"]
         )
+    if page_errors:
+        needs_human = _dedupe(
+            [*needs_human, f"часть страниц-кандидатов недоступна ({len(page_errors)})"]
+        )
 
     sidecar = _sidecar(
         subject_name=subject_name,
@@ -1114,6 +1126,7 @@ def scout_package(
         archetype=archetype,
         profile=profile,
         fetched=fetched,
+        page_errors=page_errors,
         search_urls=search_urls,
         search_calls=search_calls,
         needs_human=needs_human,
@@ -1129,6 +1142,7 @@ def scout_package(
         needs_human=needs_human,
         sidecar=sidecar,
         fetched=fetched,
+        page_errors=page_errors,
         search_calls=search_calls,
         ok=ok,
         errors=errors,
@@ -1146,6 +1160,7 @@ def _sidecar(
     archetype: ArchetypeHypothesis,
     profile: dict[str, Any],
     fetched: list[dict[str, Any]],
+    page_errors: list[str],
     search_urls: list[str],
     search_calls: int,
     needs_human: list[str],
@@ -1180,6 +1195,7 @@ def _sidecar(
             "cohort_members": [spec.get("product_id") for spec in profile.get("cohort_members", [])],
         },
         "fetched": fetched,
+        "page_errors": list(page_errors),
         "search_urls": list(search_urls),
         "search_calls": search_calls,
         "needs_human": list(needs_human),

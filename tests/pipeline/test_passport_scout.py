@@ -26,12 +26,14 @@ from core.pipeline.passport_scout import (
     scout_passport,
     write_passport_draft,
 )
+from core.ports.search import SearchQuery, SearchResult
 from core.ports.types import FetchPlan, RawPage
 from tests.fakes.ports import FakeExtractor
-from tests.helpers.scout import fake_crawler
+from tests.helpers.scout import FIXED_TS, fake_crawler
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "passport_scout"
 URL = "https://docs.test/alpha"
+URL2 = "https://docs.test/beta"
 PAGE_TEXT = (
     "Alpha Product documentation.\n"
     "Vendor: ACME.\n"
@@ -256,8 +258,45 @@ def test_fetch_error_is_isolated() -> None:
 
     report = _report(crawler=_BoomCrawler())
     assert report.ok is False
-    assert any("fetch" in error for error in report.errors)
+    assert any("ни одна страница не извлечена" in error for error in report.errors)
+    assert report.page_errors
     assert report.fetched[0]["error"]
+
+
+def test_unavailable_candidate_page_is_soft_error() -> None:
+    """Один 404 среди SERP-кандидатов не роняет разведку (живой дефект FTData)."""
+
+    class _Search:
+        adapter_kind = "serp"
+        provider = "fake"
+
+        def search(self, q: SearchQuery) -> list[SearchResult]:
+            return [SearchResult(url=URL2, title="beta", rank=1)]
+
+        def fetch(self, url: str) -> RawPage:  # pragma: no cover - не используется
+            raise AssertionError
+
+    class _PartialCrawler:
+        version = "partial"
+
+        def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:
+            if url == URL:
+                return RawPage(
+                    url=URL,
+                    content=PAGE_TEXT.encode("utf-8"),
+                    fetched_at=FIXED_TS,
+                )
+            raise RuntimeError("HTTP 404")
+
+    report = _report(crawler=_PartialCrawler(), search=_Search())
+    assert report.ok is True
+    assert report.errors == []
+    assert report.page_errors and "404" in report.page_errors[0]
+    assert any("недоступна" in item for item in report.needs_human)
+    assert report.candidates_json["page_errors"] == report.page_errors
+    assert any(
+        item.get("url") == URL2 and item.get("error") for item in report.fetched
+    )
 
 
 # ---------------------------------------------------------------------------
