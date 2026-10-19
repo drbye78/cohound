@@ -47,6 +47,7 @@ from core.pipeline.corpus import (
     derive_corpus_coverage,
 )
 from core.pipeline.crawl_session import default_session_id
+from core.pipeline.extract_cache import ExtractionCache
 from core.ports.crawl_executor import (
     CrawlBatch,
     CrawlProgress,
@@ -183,6 +184,44 @@ class _Crawler:
         )
 
 
+class _NotFoundError(RuntimeError):
+    """Сбой с машинным классом ``not_found`` (duck-typed контракт адаптеров).
+
+    Тест pipeline не импортирует адаптеры: ``corpus._commit_local`` читает атрибут
+    ``failure_kind`` через ``getattr`` — ровно как ``refusal_reason`` у robots-отказа.
+    """
+
+    failure_kind = FailureKind.NOT_FOUND.value
+
+
+class _NotFoundCrawler(_Crawler):
+    """Краулер, на каждом URL поднимающий ``not_found`` (HTTP 404/410)."""
+
+    def __init__(self) -> None:
+        super().__init__({})
+
+    def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:
+        self.calls.append((url, plan))
+        raise _NotFoundError(f"HTTP 404: {url}")
+
+
+class _RefusedError(RuntimeError):
+    """Robots-отказ: ``refusal_reason`` вместо ``failure_kind`` (D1/§10)."""
+
+    refusal_reason = "robots_disallow"
+
+
+class _RefusedCrawler(_Crawler):
+    """Краулер, на каждом URL поднимающий robots-отказ."""
+
+    def __init__(self) -> None:
+        super().__init__({})
+
+    def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:
+        self.calls.append((url, plan))
+        raise _RefusedError(f"robots.txt запрещает краул {url!r}")
+
+
 class _Extractor:
     """Экстрактор: текст — декодированные байты; ``error_urls`` → грациозная ошибка."""
 
@@ -190,8 +229,11 @@ class _Extractor:
 
     def __init__(self, *, error_urls: set[str] | None = None) -> None:
         self.error_urls = set(error_urls or ())
+        #: Ф1.2: сколько раз реально вызывался экстрактор (кэш-хит его не вызывает).
+        self.calls = 0
 
     def extract(self, page: RawPage, route: ExtractionRoute = ExtractionRoute.AUTO) -> ExtractedDoc:
+        self.calls += 1
         if page.url in self.error_urls:
             return ExtractedDoc(
                 text="",
@@ -1165,6 +1207,113 @@ def test_crawl_failure_records_failed_source_unavailable(tmp_path: Path) -> None
         # Есть сбойный элемент → сеанс ``PARTIAL``.
         session = store.get_crawl_session(SESSION_ID)
         assert session is not None and session.status is CrawlSessionStatus.PARTIAL
+    finally:
+        store.close()
+
+
+def test_not_found_is_terminal_and_not_retried_on_resume(tmp_path: Path) -> None:
+    """404/410 — определённый ответ: один фетч, без повторов и ``attempts_exhausted``.
+
+    Регрессия расточительности: ``not_found`` раньше записывался как
+    ``source_unavailable``, а FAILED-элемент без retained-байтов пере-фетчивался на
+    каждом resume (и при ``max_attempts`` превращался в ``attempts_exhausted``).
+    """
+    store = SqliteStore(":memory:")
+    _make_run(store)
+    crawler = _NotFoundCrawler()
+    try:
+        _build(
+            tmp_path, pages={}, urls={"p1": [URL_P1_A]},
+            crawler=crawler, store=store, run_id=RUN_ID,
+        )
+        row = next(iter(_items(store)))
+        assert row.status is CrawlItemStatus.FAILED
+        assert row.error_kind == FailureKind.NOT_FOUND.value
+        assert row.attempts == 1
+        assert len(crawler.calls) == 1
+
+        # Resume без потолка: определённый ответ не повторяется.
+        _build(
+            tmp_path, pages={}, urls={"p1": [URL_P1_A]},
+            crawler=crawler, store=store, run_id=RUN_ID,
+        )
+        assert len(crawler.calls) == 1
+        row = next(iter(_items(store)))
+        assert row.error_kind == FailureKind.NOT_FOUND.value
+        assert row.attempts == 1
+
+        # ``max_attempts`` не переклассифицирует терминальный not_found.
+        result = _build(
+            tmp_path, pages={}, urls={"p1": [URL_P1_A]},
+            crawler=crawler, store=store, run_id=RUN_ID, max_attempts=1,
+        )
+        assert len(crawler.calls) == 1
+        row = next(iter(_items(store)))
+        assert row.error_kind == FailureKind.NOT_FOUND.value
+        assert row.error_kind != "attempts_exhausted"
+        assert row.attempts == 1
+        assert not any("max_attempts" in err for err in result.errors)
+    finally:
+        store.close()
+
+
+def test_single_url_origin_not_found_is_complete(tmp_path: Path) -> None:
+    """404 на единственном URL origin'а: origin прочитан, покрытие полное."""
+    store = SqliteStore(":memory:")
+    _make_run(store)
+    try:
+        _build(
+            tmp_path, pages={}, urls={"p1": [URL_P1_A]},
+            crawler=_NotFoundCrawler(), store=store, run_id=RUN_ID,
+        )
+        coverage = store.read_corpus_coverage(RUN_ID, "p1")
+        assert coverage is not None
+        assert coverage.complete is True
+        assert coverage.unreadable_origins == []
+        assert coverage.partial_blocks == {}
+        assert coverage.blocked == {FailureKind.NOT_FOUND.value: 1}
+        assert coverage.expected_sources == 1
+        assert coverage.observed_sources == 0
+    finally:
+        store.close()
+
+
+def test_all_not_found_origin_is_complete_and_absence_provable(tmp_path: Path) -> None:
+    """Origin, где всё 404: сайт ответил — отсутствие доказуемо, complete=True."""
+    store = SqliteStore(":memory:")
+    _make_run(store)
+    gone = ["https://gone.test/a", "https://gone.test/b"]
+    try:
+        _build(
+            tmp_path, pages={}, urls={"p1": gone},
+            crawler=_NotFoundCrawler(), store=store, run_id=RUN_ID,
+        )
+        coverage = store.read_corpus_coverage(RUN_ID, "p1")
+        assert coverage is not None
+        assert coverage.complete is True
+        assert coverage.unreadable_origins == []
+        assert coverage.partial_blocks == {}
+        assert coverage.blocked == {FailureKind.NOT_FOUND.value: 2}
+        assert coverage.expected_sources == 2
+        assert coverage.observed_sources == 0
+    finally:
+        store.close()
+
+
+def test_robots_refusal_still_yields_robots_disallow(tmp_path: Path) -> None:
+    """Robots-отказ не задет: ``refusal_reason`` по-прежнему побеждает дефолт."""
+    store = SqliteStore(":memory:")
+    _make_run(store)
+    crawler = _RefusedCrawler()
+    try:
+        _build(
+            tmp_path, pages={}, urls={"p1": [URL_P1_A]},
+            crawler=crawler, store=store, run_id=RUN_ID,
+        )
+        row = next(iter(_items(store)))
+        assert row.status is CrawlItemStatus.FAILED
+        assert row.error_kind == FailureKind.ROBOTS_DISALLOW.value
+        assert len(crawler.calls) == 1
     finally:
         store.close()
 
@@ -4257,6 +4406,64 @@ def test_build_corpus_persists_product_coverage(tmp_path: Path) -> None:
         assert coverage.truncated is False
     finally:
         store.close()
+
+
+def test_extract_cache_skips_second_extraction_of_identical_bytes(
+    tmp_path: Path,
+) -> None:
+    """Ф1.2: кэш экстракции переживает прогон и снимает вызов экстрактора.
+
+    Это регрессия на «кэш объявлен, но не подключён»: недельный цикл открывает
+    **новую** per-run БД, поэтому без межпрогонного кэша docling гоняется заново
+    на байт-идентичных документах. Ключ — хеш ретенированных байтов (I19), а не
+    URL: второй прогон с другим URL и теми же байтами тоже обязан попасть в кэш.
+    """
+    cache = ExtractionCache(tmp_path / "extract_cache")
+    page = b"identical bytes"
+
+    first = _Extractor()
+    _build(
+        tmp_path / "run1",
+        pages={URL_P1_A: page},
+        urls={"p1": [URL_P1_A]},
+        extractor=first,
+        extract_cache=cache,
+    )
+    assert first.calls == 1, "первый прогон обязан извлечь документ"
+
+    second = _Extractor()
+    _build(
+        tmp_path / "run2",
+        pages={URL_P1_A: page},
+        urls={"p1": [URL_P1_A]},
+        extractor=second,
+        extract_cache=cache,
+    )
+    assert second.calls == 0, "байт-идентичный документ обязан взять из кэша"
+
+    third = _Extractor()
+    _build(
+        tmp_path / "run3",
+        pages={URL_P1_A: b"changed bytes"},
+        urls={"p1": [URL_P1_A]},
+        extractor=third,
+        extract_cache=cache,
+    )
+    assert third.calls == 1, "изменившиеся байты обязаны извлечься заново"
+
+
+def test_extract_cache_none_preserves_byte_identical_behaviour(
+    tmp_path: Path,
+) -> None:
+    """Ф1.2: без кэша поведение прежнее — экстрактор вызывается на каждый документ."""
+    extractor = _Extractor()
+    _build(
+        tmp_path,
+        pages={URL_P1_A: b"page one"},
+        urls={"p1": [URL_P1_A]},
+        extractor=extractor,
+    )
+    assert extractor.calls == 1
 
 
 

@@ -1,7 +1,7 @@
 """coHound — резолвер раскладки операционных каталогов (``config/paths.yaml``, 03 §A.1).
 
 Модуль отделяет **операционные** каталоги (``packages/``, ``passports/``, ``runs/``,
-``index_store/``, ``corpus_raw/``, ``cache/``, ``reports/``) от кода:
+``index_store/``, ``corpus_raw/``, ``cache/``, ``extract_cache/``, ``reports/``) от кода:
 оператор может задать свои пути через ``config/paths.yaml``, env-переменные
 ``COHOUND_*_DIR`` и CLI-флаги, не редактируя исходники. Единый корень ``COHOUND_HOME``
 позволяет унести весь рабочий каталог в произвольное место, оставив относительные
@@ -45,6 +45,7 @@ __all__ = [
     "ENV_INDEX_STORE_DIR",
     "ENV_CORPUS_RAW_DIR",
     "ENV_CACHE_DIR",
+    "ENV_EXTRACT_CACHE_DIR",
     "ENV_REPORTS_DIR",
     # Модель и API
     "PathsConfig",
@@ -69,6 +70,7 @@ ENV_RUNS_DIR = "COHOUND_RUNS_DIR"
 ENV_INDEX_STORE_DIR = "COHOUND_INDEX_STORE_DIR"
 ENV_CORPUS_RAW_DIR = "COHOUND_CORPUS_RAW_DIR"
 ENV_CACHE_DIR = "COHOUND_CACHE_DIR"
+ENV_EXTRACT_CACHE_DIR = "COHOUND_EXTRACT_CACHE_DIR"
 ENV_REPORTS_DIR = "COHOUND_REPORTS_DIR"
 
 #: Канонический путь ``paths.yaml`` относительно CWD (раскладка A.1).
@@ -82,6 +84,7 @@ HARNESS_FIELDS: tuple[str, ...] = (
     "index_store",
     "corpus_raw",
     "cache",
+    "extract_cache",
     "reports",
 )
 
@@ -93,6 +96,7 @@ ENV_BY_FIELD: dict[str, str] = {
     "index_store": ENV_INDEX_STORE_DIR,
     "corpus_raw": ENV_CORPUS_RAW_DIR,
     "cache": ENV_CACHE_DIR,
+    "extract_cache": ENV_EXTRACT_CACHE_DIR,
     "reports": ENV_REPORTS_DIR,
 }
 
@@ -122,6 +126,10 @@ class PathsConfig(BaseModel):
     index_store: Path = Path("index_store")
     corpus_raw: Path = Path("corpus_raw")
     cache: Path = Path("cache")
+    #: Межпрогонный кэш экстракции (``core/pipeline/extract_cache.py``): контент-адресуемые
+    #: результаты извлечения документов. Отдельно от ``cache`` (SERP/HTTP), т.к. это не
+    #: сетевой кэш и у него свой жизненный цикл/бюджет.
+    extract_cache: Path = Path("extract_cache")
     reports: Path = Path("reports")
 
 

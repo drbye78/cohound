@@ -56,6 +56,7 @@ from core.config.deploy import CrawlConfig
 from core.config.domain_profiles import DomainProfile
 from core.pipeline.compute import compute, scope_universe
 from core.pipeline.corpus import ExtractionPool, build_corpus
+from core.pipeline.extract_cache import ExtractionCache
 from core.pipeline.crawl_session import default_session_id
 from core.pipeline.crawl_sources import crawl_sources_digest
 from core.pipeline.discovery import discover
@@ -378,6 +379,7 @@ def build_phases(
     rate_limiter: RateLimiter | None = None,
     extraction_pool: ExtractionPool | None = None,
     extractor_factory: Callable[[DocumentLevel], ExtractorPort] | None = None,
+    extract_cache: ExtractionCache | None = None,
     satellites: Sequence[Satellite] = (),
     resolver: SourceResolver | None = None,
     strict: bool = True,
@@ -432,6 +434,9 @@ def build_phases(
     :param extraction_pool: P4 — исполнитель параллельной экстракции (:class:`ExtractionPool`,
         фабрика пула + воркер от composition root), протягивается в Ш5. Отдельная ось
         ``crawl.extract_workers``; ``None`` ⇒ экстракция inline (поведение байт-в-байт).
+    :param extract_cache: Ф1.2 — межпрогонный кэш экстракции (:class:`ExtractionCache`),
+        протягивается в Ш5. ``None`` ⇒ кэш выключен (поведение байт-в-байт). Ключ —
+        хеш ретенированных байтов (I19), поэтому хит не подменяет контент.
 
     Каждое замыкание детерминировано и не импортирует адаптеры; единственный
     межфазовый канал — замыкание ``holder`` (см. docstring модуля).
@@ -555,6 +560,9 @@ def build_phases(
             # P5: фабрика per-level экстрактора для inline-пути (переданная ссылка из
             # composition root; ``None`` ⇒ уровень на inline-пути не действует, как прежде).
             extractor_factory=extractor_factory,
+            # Ф1.2: межпрогонный кэш экстракции (content-addressed по ретенированным байтам).
+            # ``None`` ⇒ кэш выключен, поведение байт-в-байт прежнее.
+            extract_cache=extract_cache,
             # Phase 3.3: исполнитель краула (``split``/edge-планировщик). ``None`` → локальный
             # per-URL путь (``crawler``/``crawlers``); при наличии — краул через шов.
             executor=getattr(ctx.ports, "executor", None),

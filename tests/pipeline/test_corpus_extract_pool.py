@@ -755,9 +755,15 @@ def test_extract_request_carries_no_bytes(tmp_path: Path) -> None:
         "route",
         # P5: уровень извлечения (аддитивное поле payload; примитив StrEnum).
         "level",
+        # Ф1.2: корень и бюджет межпрогонного кэша экстракции — примитивы, не объект
+        # кэша: воркер строит свой экземпляр (иначе счётчики были бы копией родителя).
+        "cache_root",
+        "cache_max_bytes",
     }
     # Байты не пиклятся: у payload нет поля content/bytes (только путь к retained-файлу).
     assert "content" not in names and "bytes" not in names and "raw_bytes" not in names
+    # Кэш не пересекает границу процесса как объект — только примитивы конфигурации.
+    assert "cache" not in names and "extract_cache" not in names
 
     # Воркер получает ровно один аргумент (payload) и не несёт ссылок на store/session.
     from core.pipeline.corpus import _extract_worker

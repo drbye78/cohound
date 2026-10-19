@@ -20,6 +20,7 @@ from core.config.paths import (
     ENV_BY_FIELD,
     ENV_CACHE_DIR,
     ENV_CORPUS_RAW_DIR,
+    ENV_EXTRACT_CACHE_DIR,
     ENV_HOME,
     ENV_INDEX_STORE_DIR,
     ENV_PACKAGES_DIR,
@@ -71,7 +72,7 @@ def test_defaults_without_env_or_file(tmp_path: Path) -> None:
 def test_defaults_field_names() -> None:
     assert set(HARNESS_FIELDS) == {
         "packages", "passports", "runs", "index_store",
-        "corpus_raw", "cache", "reports",
+        "corpus_raw", "cache", "extract_cache", "reports",
     }
     assert set(ENV_BY_FIELD) == set(HARNESS_FIELDS)
 
@@ -196,6 +197,7 @@ _ENV_FIELDS = (
     ENV_INDEX_STORE_DIR,
     ENV_CORPUS_RAW_DIR,
     ENV_CACHE_DIR,
+    ENV_EXTRACT_CACHE_DIR,
     ENV_REPORTS_DIR,
 )
 
@@ -295,7 +297,7 @@ def test_determinism(tmp_path: Path) -> None:
 
 
 def test_example_file_parses_and_matches_fields() -> None:
-    """Пример ``paths.example.yaml`` — валидный YAML; все 8 полей упомянуты."""
+    """Пример ``paths.example.yaml`` — валидный YAML; все поля раскладки упомянуты."""
     text = EXAMPLE_PATH.read_text(encoding="utf-8")
     data = yaml.safe_load(text)
     assert data is None or isinstance(data, dict)

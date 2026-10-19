@@ -127,6 +127,7 @@ from core.pipeline.crawl_sources import (
     crawl_sources_digest,
     resolve_crawl_target,
 )
+from core.pipeline.extract_cache import ExtractionCache
 from core.pipeline.fetch_plan import _host_matches, select_domain_profile
 from core.pipeline.runner import PhaseResult
 from core.ports.chunker import ChunkerPort
@@ -364,6 +365,11 @@ class _ExtractRequest:
     #: для самодостаточности задания и корректности под будущие режимы; по построению пул —
     #: per-seed-root (один уровень на пул), поэтому воркер кэширует конвертер по уровню.
     level: DocumentLevel = DocumentLevel.FULL
+    #: Ф1.2: корень и бюджет межпрогонного кэша экстракции. Едут **примитивами** — сам
+    #: объект кэша не пиклится (payload остаётся picklable by construction); воркер
+    #: строит экземпляр из этих полей. ``None`` → кэш в воркере выключен.
+    cache_root: str | None = None
+    cache_max_bytes: int | None = None
 
 
 @dataclass(frozen=True)
@@ -446,7 +452,25 @@ def _run_extract(extractor: ExtractorPort, request: _ExtractRequest) -> Extracte
         content_type=request.content_type,
         engine=request.engine,
     )
-    return extractor.extract(page, request.route)
+    # Ф1.2: кэш экстракции. Ключ — хеш байтов, **только что прочитанных из retained-файла**
+    # (I19): хит принимается лишь при совпадении ключа конверта с этими байтами, поэтому
+    # кэш не может подсунуть неверифицированный контент. Пропускается ровно вызов
+    # экстрактора — чтение и хеширование retained-байтов остаются.
+    level_text = _as_text(request.level)
+    key = content_hash(content)
+    cache = (
+        ExtractionCache(request.cache_root, max_bytes=request.cache_max_bytes)
+        if request.cache_root
+        else None
+    )
+    if cache is not None:
+        cached = cache.get(key, getattr(extractor, "version", ""), level_text)
+        if cached is not None:
+            return cached
+    extracted = extractor.extract(page, request.route)
+    if cache is not None:
+        cache.put(extracted, level=level_text, content_hash=key)
+    return extracted
 
 
 def _extract_worker(request: _ExtractRequest) -> ExtractedDoc:
@@ -540,7 +564,11 @@ class _LocalFetch:
     отправки (детерминизм победителя дедупа и ``errors``).
 
     ``poolable`` — идёт ли живой фетч в пул: ``True`` только для не-браузерного живого
-    фетча (resume/browser-guard/``FetchMode.BROWSER`` — всегда inline на главном потоке).
+    фетча (resume/browser-guard/терминальный ``not_found``/``FetchMode.BROWSER`` — всегда
+    inline на главном потоке).
+
+    ``terminal`` — элемент уже получил определённый ответ «ресурса нет» (``not_found``):
+    живой фетч не выполняется, пост-фаза лишь подтверждает терминальный исход.
     """
 
     pid: str
@@ -556,6 +584,7 @@ class _LocalFetch:
     host: str
     scope_host: str | None
     enforce_redirect_scope: bool
+    terminal: bool = False
 
 
 @dataclass
@@ -563,7 +592,8 @@ class _WaveEntry:
     """D4: элемент волны дренажа frontier.
 
     Порядок элементов — порядок отправки (FIFO). ``kind``:
-    ``"blacklisted"`` | ``"attempts"`` (мутации коммитятся пост-фазой) | ``"fetch"``
+    ``"blacklisted"`` | ``"attempts"`` | ``"terminal_not_found"`` (мутации коммитятся
+    пост-фазой; терминальный ``not_found`` не подаётся в работу) | ``"fetch"``
     (несёт ``desc`` и, если фетч реально нужен, ``future`` пула).
     """
 
@@ -976,6 +1006,24 @@ def _resume_source(
     return data, path
 
 
+def _terminal_not_found(item: CrawlSessionItem | None) -> bool:
+    """Терминален ли элемент: определённый ответ «ресурса нет» (HTTP 404/410).
+
+    ``not_found`` — не транзиентный сбой: origin уже ответил, повторный фетч не даст
+    нового знания, а лишь тратит запросы (на масштабе корпуса — материально). Поэтому
+    такой элемент **не** пере-фетчивается при resume и **не** превращается в
+    ``attempts_exhausted`` (это сменило бы класс сбоя на «попытки кончились»).
+
+    Терминальность — только для ``FAILED``: ``FETCHED`` с этим классом невозможен, а
+    ``pending``/``running`` не несут окончательного ответа.
+    """
+    return (
+        item is not None
+        and item.status is CrawlItemStatus.FAILED
+        and item.error_kind == FailureKind.NOT_FOUND.value
+    )
+
+
 def _resume_page(
     item: CrawlSessionItem, url: str, content: bytes, path: Path, fetch_plan: FetchPlan
 ) -> RawPage:
@@ -1046,6 +1094,7 @@ def build_corpus(
     pool_factory: Callable[[int], Executor] | None = None,
     extraction_pool: ExtractionPool | None = None,
     extractor_factory: Callable[[DocumentLevel], ExtractorPort] | None = None,
+    extract_cache: ExtractionCache | None = None,
     extract_task_timeout_s: float | None = None,
     max_attempts: int | None = None,
     progress: Callable[[dict[str, int]], None] | None = None,
@@ -1144,6 +1193,10 @@ def build_corpus(
         переиспользует переданный ``extractor`` (дефолт — без лишней загрузки весов docling).
         ``None`` → уровень на inline-пути не действует (поведение как прежде; пул-путь всё
         равно получает уровень через ``extraction_pool.pool_factory``).
+    :param extract_cache: Ф1.2 — межпрогонный кэш экстракции (:class:`ExtractionCache`).
+        ``None`` → кэш выключен, поведение байт-в-байт прежнее. Ключ — хеш **ретенированных**
+        байтов (I19), поэтому хит не может подсунуть неверифицированный контент: хеш
+        пересчитывается из тех же байтов, которые прочитал бы экстрактор.
     :param extract_task_timeout_s: P4 — потолок ожидания ``future.result`` одного задания
         экстракции (guard от зависшего воркера, не SLA). ``None`` →
         :data:`_EXTRACT_TASK_TIMEOUT_S`. По таймауту пул reap'ится, in-flight → ``FAILED``,
@@ -1152,6 +1205,8 @@ def build_corpus(
         сохранённым ``CrawlSessionItem.attempts >= max_attempts`` **не** фетчится и **не**
         подаётся исполнителю: он помечается терминальным ``FAILED`` с ``error_kind =
         "attempts_exhausted"`` и понятной ошибкой (не тихий дроп). ``None`` → без потолка.
+        Терминальный ``not_found`` (404/410) этому потолку не подлежит: определённый
+        ответ не повторяется и не переклассифицируется в ``attempts_exhausted``.
     :param progress: Phase 4 — опциональный колбэк прогресса: вызывается со снимком
         ``crawl_session_counts`` (``{status: count}``) по ходу фазы (для ``--follow``).
         Ошибки колбэка изолируются и не роняют фазу. ``None`` → без прогресс-вывода.
@@ -1382,16 +1437,36 @@ def build_corpus(
         seen_docs: dict[str, str],
         seen_chunk_ids: set[str],
         extractor_obj: ExtractorPort,
+        level: DocumentLevel,
     ) -> None:
         """Inline-экстракция → доводка одного URL (путь без пула, ``None``/``1``).
 
         Тело экстракции (``extractor_obj.extract``) вынесено в :func:`_finish_one`; здесь —
         только inline-вызов и перевод исключения в ту же ошибку ``parser_failed``, что и
         пул-путь (P4: единая семантика отказа). ``extractor_obj`` — экстрактор уровня
-        корня (P5; ``full`` переиспользует переданный порт).
+        корня (P5; ``full`` переиспользует переданный порт). ``level`` — уровень корня:
+        нужен как ключ кэша экстракции (Ф1.2) и не выводится из ``extractor_obj``, потому
+        что ``full`` переиспользует переданный порт.
         """
         try:
-            extracted = extractor_obj.extract(page, fetch_plan.extract)
+            level_text = _as_text(level)
+            # I19: ключ — хеш тех же байтов, что retention положил в ``raw_path``
+            # (``page.content``). Хит принимается лишь при совпадении ключа конверта
+            # с этими байтами, поэтому кэш не может подсунуть неверифицированный текст.
+            cache_key = content_hash(page.content)
+            extracted = (
+                None
+                if extract_cache is None
+                else extract_cache.get(
+                    cache_key, getattr(extractor_obj, "version", ""), level_text
+                )
+            )
+            if extracted is None:
+                extracted = extractor_obj.extract(page, fetch_plan.extract)
+                if extract_cache is not None:
+                    extract_cache.put(
+                        extracted, level=level_text, content_hash=cache_key
+                    )
         except Exception as exc:  # noqa: BLE001 — изоляция по контракту фазы
             _finish_one(
                 product_id,
@@ -2020,6 +2095,8 @@ def build_corpus(
         )
         prior_item = items.get((pid, wu))
         resume = _resume_source(prior_item) if prior_item is not None else None
+        # Терминальный ``not_found``: живой фетч не нужен и вреден (см. helper).
+        terminal = _terminal_not_found(prior_item)
         # Движок: явный ``wtarget.engine`` (из ``crawl_sources``) приоритетен; при его
         # отсутствии ключ выводится из оси профиля домена (``fetch: browser`` → ``"browser"``).
         # Зеркало edge ``scheduler._resolve_engine`` и ``wiring._referenced_crawl_engines``
@@ -2041,6 +2118,7 @@ def build_corpus(
         # ``_page`` без лока. Resume живого фетча не делает вовсе.
         poolable = (
             resume is None
+            and not terminal
             and not browser_blocked
             and fetch_plan.fetch is not FetchMode.BROWSER
         )
@@ -2059,6 +2137,7 @@ def build_corpus(
             host=host,
             scope_host=scope_host,
             enforce_redirect_scope=enforce_redirect_scope,
+            terminal=terminal,
         )
 
     def _local_fetch(desc: _LocalFetch) -> RawPage:
@@ -2124,6 +2203,26 @@ def build_corpus(
         # как и прежде; всегда до resume-guard/бrowser-guard.
         applied_engines[(pid, wu)] = desc.engine_value
 
+        # Терминальный ``not_found``: определённый ответ уже получен, живой фетч не
+        # выполняется. Элемент остаётся ``FAILED``/``not_found`` (класс сбоя, не статус),
+        # ``attempts`` не растёт (``_mark`` инкрементит только при смене статуса), поэтому
+        # исход не превращается в ``attempts_exhausted``.
+        if desc.terminal:
+            prior = desc.prior_item
+            _mark(
+                pid,
+                wu,
+                CrawlItemStatus.FAILED,
+                error_kind=FailureKind.NOT_FOUND.value,
+                error=(
+                    prior.error
+                    if prior is not None and prior.error
+                    else "not_found: ресурс отсутствует (терминально, без повтора)"
+                ),
+                depth=desc.depth,
+            )
+            return None
+
         if desc.resume is not None:
             assert desc.prior_item is not None  # resume возможен только при наличии элемента
             content, raw_path = desc.resume
@@ -2159,9 +2258,12 @@ def build_corpus(
         # 1. Краул: сбой/пустой RawPage — изоляция по контракту фазы.
         if exc is not None:
             reason = f"{type(exc).__name__}: {exc}"
-            # D1/§10: robots-отказ несёт собственный ``refusal_reason`` (не сбой источника).
+            # Класс исхода несёт сам адаптер: ``failure_kind`` (404/410 → ``not_found``)
+            # либо ``refusal_reason`` (robots-отказ, D1/§10). Нет атрибута — честный
+            # дефолт ``source_unavailable``. ``_mark`` канонизирует значение.
             error_kind = (
-                getattr(exc, "refusal_reason", None)
+                getattr(exc, "failure_kind", None)
+                or getattr(exc, "refusal_reason", None)
                 or FailureKind.SOURCE_UNAVAILABLE.value
             )
             errors.append(f"{pid}/{wu}: crawl: {reason}")
@@ -2245,7 +2347,7 @@ def build_corpus(
             enforce_redirect_scope=enforce_redirect_scope,
             robots=robots,
         )
-        if desc.resume is not None or desc.browser_blocked:
+        if desc.resume is not None or desc.browser_blocked or desc.terminal:
             return _commit_local(desc)
 
         # P2-3: politeness-пейсинг — единый владелец corpus (R7-независимый). Применяется
@@ -2503,6 +2605,7 @@ def build_corpus(
                         seen_docs,
                         seen_chunk_ids,
                         root_extractor,
+                        level,
                     )
                 else:
                     _finish_one(
@@ -2538,6 +2641,12 @@ def build_corpus(
                     engine=page.engine,
                     route=fetch_plan.extract,
                     level=level,
+                    cache_root=(
+                        str(extract_cache.root) if extract_cache is not None else None
+                    ),
+                    cache_max_bytes=(
+                        extract_cache.max_bytes if extract_cache is not None else None
+                    ),
                 )
 
             def _inflight_fresh() -> int:
@@ -2763,8 +2872,8 @@ def build_corpus(
                             outcome = _commit_local(desc, exc=exc)
                         else:
                             outcome = _commit_local(desc, page=page)
-                    elif desc.resume is not None or desc.browser_blocked:
-                        # resume/browser-guard: живого фетча нет, пул не задействован.
+                    elif desc.resume is not None or desc.browser_blocked or desc.terminal:
+                        # resume/browser-guard/терминальный not_found: живого фетча нет.
                         outcome = _commit_local(desc)
                     else:
                         # browser-режим (``supports_browser`` краулер): в пул не идёт —
@@ -2855,6 +2964,19 @@ def build_corpus(
                                 _emit_progress()
                                 continue
                             prior_item = items.get((pid, work_url))
+                            if _terminal_not_found(prior_item):
+                                # Определённый ответ «ресурса нет» уже получен: в работу
+                                # не подаём (иначе 404 стоил бы запросов на каждом цикле).
+                                entries.append(
+                                    _WaveEntry(
+                                        pid,
+                                        work_url,
+                                        depth,
+                                        "terminal_not_found",
+                                        prior_item=prior_item,
+                                    )
+                                )
+                                continue
                             if (
                                 max_attempts is not None
                                 and prior_item is not None
@@ -2911,6 +3033,25 @@ def build_corpus(
                                     f"{entry.pid}/{entry.wu}: зачёркнут блэклистом "
                                     "перед фетчем — пропущен"
                                 )
+                                continue
+                            if entry.kind == "terminal_not_found":
+                                # Определённый ответ «ресурса нет» уже получен: повторного
+                                # фетча не было, элемент остаётся ``FAILED``/``not_found``.
+                                prior_item = entry.prior_item
+                                _mark(
+                                    entry.pid,
+                                    entry.wu,
+                                    CrawlItemStatus.FAILED,
+                                    error_kind=FailureKind.NOT_FOUND.value,
+                                    error=(
+                                        prior_item.error
+                                        if prior_item is not None and prior_item.error
+                                        else "not_found: ресурс отсутствует "
+                                        "(терминально, без повтора)"
+                                    ),
+                                    depth=entry.depth,
+                                )
+                                _emit_progress()
                                 continue
                             if entry.kind == "attempts":
                                 prior_item = entry.prior_item
@@ -3001,6 +3142,7 @@ def build_corpus(
                             max_attempts is not None
                             and prior_item is not None
                             and prior_item.attempts >= max_attempts
+                            and not _terminal_not_found(prior_item)
                         ):
                             reason = (
                                 f"max_attempts exhausted "
@@ -3070,6 +3212,7 @@ def build_corpus(
                             max_attempts is not None
                             and prior_item is not None
                             and prior_item.attempts >= max_attempts
+                            and not _terminal_not_found(prior_item)
                         ):
                             entries.append(
                                 _WaveEntry(
@@ -3123,6 +3266,7 @@ def build_corpus(
                 max_attempts is not None
                 and prior_item is not None
                 and prior_item.attempts >= max_attempts
+                and not _terminal_not_found(prior_item)
             ):
                 reason = (
                     f"max_attempts exhausted "
