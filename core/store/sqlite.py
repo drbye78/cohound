@@ -12,7 +12,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = "3.6.0"
+SCHEMA_VERSION = "3.7.0"
 
 DDL = """
 PRAGMA journal_mode = WAL;
@@ -285,12 +285,27 @@ CREATE TABLE IF NOT EXISTS crawl_session_items (
     lang          TEXT,
     content_hash  TEXT,
     raw_path      TEXT,
-    error_kind    TEXT,
+    error_kind    TEXT,                    -- FailureKind (валидируется доменной моделью)
     error         TEXT,
     first_seen    TEXT,
     last_attempt  TEXT,
     PRIMARY KEY (session_id, product_id, url),
     FOREIGN KEY (session_id) REFERENCES crawl_sessions(session_id)
+);
+
+-- Ф0 (schema 3.7.0): покрытие корпуса продукта по исходам краула — первоклассный факт.
+-- Производно от персистентных ``crawl_session_items`` + записей об усечении; гейтит
+-- публикацию ``❌`` (I2c). Аддитивная таблица, идемпотентная через CREATE TABLE IF NOT EXISTS.
+CREATE TABLE IF NOT EXISTS corpus_coverage (
+    run_id            TEXT NOT NULL,
+    product_id        TEXT NOT NULL,
+    complete          INTEGER NOT NULL,
+    expected_sources  INTEGER NOT NULL DEFAULT 0,
+    observed_sources  INTEGER NOT NULL DEFAULT 0,
+    blocked_json      TEXT NOT NULL DEFAULT '{}',   -- {"error_kind": count}
+    truncated         INTEGER NOT NULL DEFAULT 0,
+    computed_at       TEXT NOT NULL,
+    PRIMARY KEY (run_id, product_id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_cells_run_state  ON cells(run_id, state);
@@ -302,6 +317,7 @@ CREATE INDEX IF NOT EXISTS idx_gate_run         ON gate_decisions(run_id, gate);
 CREATE INDEX IF NOT EXISTS idx_crawl_sessions_run    ON crawl_sessions(run_id, status);
 CREATE INDEX IF NOT EXISTS idx_crawl_items_session   ON crawl_session_items(session_id, status);
 CREATE INDEX IF NOT EXISTS idx_crawl_items_product   ON crawl_session_items(session_id, product_id);
+CREATE INDEX IF NOT EXISTS idx_corpus_coverage_run   ON corpus_coverage(run_id);
 
 -- I18: оценщик (evaluator) не может быть зарегистрирован с веб-тулом.
 CREATE TRIGGER IF NOT EXISTS trg_evaluator_no_web_tool
@@ -422,6 +438,8 @@ def connect(db_path: str | Path = ":memory:") -> sqlite3.Connection:
     # `crawl_session_items.depth`; старые БД получают NULL (глубина неизвестна, resume
     # best-effort). Значение доменного класса — execution/операционный провенанс (не §13).
     _ensure_columns(conn, "crawl_session_items", {"depth": "INTEGER"})
+    # DDL-миграция v3.7.0 (Ф0): ``corpus_coverage`` создаётся ``CREATE TABLE IF NOT EXISTS``
+    # в DDL — новые таблицы не требуют ALTER; вызов идемпотентен на любой БД.
     # v3.1.0 — удаление legacy per-URL таблицы попыток (полностью замещена сеансом краула,
     # back-compat не требуется): DDL-таблицы/индексов и их миграции больше нет.
     conn.execute(

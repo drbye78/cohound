@@ -1,7 +1,7 @@
 """coHound — конкретное операционное хранилище ``SqliteStore`` (L3, W3/T3.1, W3/T3.4).
 
 Реализует ``StorePort`` и ``GateStore`` (``core/ports/store.py``) поверх схемы §4.4
-(``core/store/sqlite.py``: 15 таблиц + ``schema_meta``, индексы, триггеры I4/I6/I7/I13/I18).
+(``core/store/sqlite.py``: 16 таблиц + ``schema_meta``, индексы, триггеры I4/I6/I7/I13/I18).
 Также реализует ``domain.anchors.SourceResolver`` (T3.4): детерминированный
 резолв ``source_id`` → URL + ``content_hash`` без сети (I10/I15/I19).
 
@@ -26,6 +26,7 @@ from core.domain import (
     CellEvidence,
     CellState,
     CorpusChunk,
+    CorpusCoverage,
     CorpusDoc,
     CrawlItemStatus,
     CrawlProvenance,
@@ -1241,6 +1242,71 @@ class SqliteStore:
                 "UPDATE crawl_sessions SET provenance_json = ? WHERE session_id = ?",
                 (provenance_json, session_id),
             )
+
+    @staticmethod
+    def _row_to_corpus_coverage(row: sqlite3.Row) -> CorpusCoverage:
+        """Восстанавливает ``CorpusCoverage`` из строки ``corpus_coverage``."""
+        raw = _parse_json_text(row["blocked_json"])
+        blocked = raw if isinstance(raw, dict) else {}
+        return CorpusCoverage(
+            product_id=row["product_id"],
+            complete=bool(row["complete"]),
+            expected_sources=int(row["expected_sources"] or 0),
+            observed_sources=int(row["observed_sources"] or 0),
+            blocked={str(k): int(v) for k, v in blocked.items()},
+            truncated=bool(row["truncated"]),
+            computed_at=row["computed_at"],
+        )
+
+    def save_corpus_coverage(self, run_id: str, coverage: CorpusCoverage) -> None:
+        """Идемпотентный upsert покрытия корпуса по PK ``(run_id, product_id)``."""
+        blocked_json = json.dumps(
+            dict(sorted(coverage.blocked.items())),
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        with self.conn:
+            self.conn.execute(
+                "INSERT INTO corpus_coverage"
+                " (run_id, product_id, complete, expected_sources, observed_sources,"
+                "  blocked_json, truncated, computed_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+                " ON CONFLICT(run_id, product_id) DO UPDATE SET"
+                "  complete = excluded.complete,"
+                "  expected_sources = excluded.expected_sources,"
+                "  observed_sources = excluded.observed_sources,"
+                "  blocked_json = excluded.blocked_json,"
+                "  truncated = excluded.truncated,"
+                "  computed_at = excluded.computed_at",
+                (
+                    run_id,
+                    coverage.product_id,
+                    int(coverage.complete),
+                    coverage.expected_sources,
+                    coverage.observed_sources,
+                    blocked_json,
+                    int(coverage.truncated),
+                    coverage.computed_at,
+                ),
+            )
+
+    def read_corpus_coverage(
+        self, run_id: str, product_id: str
+    ) -> CorpusCoverage | None:
+        """Читает покрытие продукта; ``None``, если записи нет."""
+        row = self.conn.execute(
+            "SELECT * FROM corpus_coverage WHERE run_id = ? AND product_id = ?",
+            (run_id, product_id),
+        ).fetchone()
+        return None if row is None else self._row_to_corpus_coverage(row)
+
+    def iter_corpus_coverage(self, run_id: str) -> Iterator[CorpusCoverage]:
+        """Итерирует покрытие прогона; порядок ``product_id`` (детерминизм)."""
+        for row in self.conn.execute(
+            "SELECT * FROM corpus_coverage WHERE run_id = ? ORDER BY product_id",
+            (run_id,),
+        ):
+            yield self._row_to_corpus_coverage(row)
 
     def read_manifest(self, run_id: str) -> RunManifest:
         """Собирает ``RunManifest`` из строки ``runs`` (+ ``llm_scenarios``).

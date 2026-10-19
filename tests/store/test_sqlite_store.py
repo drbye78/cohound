@@ -20,6 +20,7 @@ from core.domain import (
     CellEvidence,
     CellState,
     CorpusChunk,
+    CorpusCoverage,
     CorpusDoc,
     CrawlProvenance,
     CrawlSessionProvenance,
@@ -94,7 +95,7 @@ def test_schema_opens(store: SqliteStore) -> None:
     ver = store.conn.execute(
         "SELECT value FROM schema_meta WHERE key = 'schema_version'"
     ).fetchone()
-    assert ver["value"] == "3.6.0"
+    assert ver["value"] == "3.7.0"
     tables = {
         r["name"] for r in store.conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
     }
@@ -114,6 +115,7 @@ def test_schema_opens(store: SqliteStore) -> None:
         "run_inputs",
         "crawl_sessions",
         "crawl_session_items",
+        "corpus_coverage",
     ):
         assert t in tables
     # L1b (schema 3.1.0): legacy crawl_attempts удалена (замещена сеансом краула).
@@ -1020,3 +1022,43 @@ def test_iter_exhaustions(store: SqliteStore) -> None:
     assert items[0].rounds == 2
     # Неизвестный прогон → пустая итерация.
     assert list(store.iter_exhaustions("does-not-exist")) == []
+
+
+def test_corpus_coverage_round_trip_and_idempotent_upsert(
+    store: SqliteStore,
+) -> None:
+    """Ф0: покрытие корпуса читается/перезаписывается по PK, blocked — канонический."""
+    store.create_run(RUN_ID, _cfg())
+    coverage = CorpusCoverage(
+        product_id="p1",
+        complete=False,
+        expected_sources=7,
+        observed_sources=4,
+        blocked={"robots_disallow": 3},
+        truncated=False,
+        computed_at="2026-01-01T00:00:00+00:00",
+    )
+    store.save_corpus_coverage(RUN_ID, coverage)
+    assert store.read_corpus_coverage(RUN_ID, "p1") == coverage
+    assert store.read_corpus_coverage(RUN_ID, "missing") is None
+
+    # Идемпотентный upsert: та же пара (run_id, product_id) перекрывается.
+    updated = coverage.model_copy(
+        update={"blocked": {"robots_disallow": 2, "parser_failed": 1}}
+    )
+    store.save_corpus_coverage(RUN_ID, updated)
+    assert store.read_corpus_coverage(RUN_ID, "p1") == updated
+    # Детерминированный порядок итерации — product_id.
+    store.save_corpus_coverage(
+        RUN_ID,
+        coverage.model_copy(
+            update={
+                "product_id": "p2",
+                "complete": True,
+                "expected_sources": 1,
+                "observed_sources": 1,
+                "blocked": {},
+            }
+        ),
+    )
+    assert [c.product_id for c in store.iter_corpus_coverage(RUN_ID)] == ["p1", "p2"]

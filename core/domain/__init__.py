@@ -56,6 +56,7 @@ from core.domain.models import (
     CohortEntry,
     CorpusChunk,
     CorpusDoc,
+    CorpusCoverage,
     CrawlProvenance,
     CrawlRunConfig,
     CrawlSession,
@@ -90,6 +91,7 @@ from core.domain.models import (
 from core.domain.r2 import apply_r2
 from core.domain.invariants import (
     REQUIRED_EXHAUSTION_CONTOURS,
+    check_absence_coverage,
     check_cell,
     check_derived_evidence,
     check_evidence,
@@ -167,6 +169,7 @@ __all__ = [
     "CohortEntry",
     "CorpusChunk",
     "CorpusDoc",
+    "CorpusCoverage",
     "CrawlProvenance",
     "CrawlRunConfig",
     "CrawlSession",
@@ -200,6 +203,7 @@ __all__ = [
     # r2
     "apply_r2",
     # invariants (T2.2)
+    "check_absence_coverage",
     "check_cell",
     "check_evidence",
     "check_inheritance",

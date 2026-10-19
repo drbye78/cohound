@@ -731,6 +731,7 @@ def build_phases(
             out_dir=out_dir,
             run_id=plan.run_id,
             exhaustions=exhaustions,
+            store=ctx.store,
         )
         holder["artifacts"] = artifacts
         return PhaseResult(status="ok", phase="report", log_entries=[artifacts])

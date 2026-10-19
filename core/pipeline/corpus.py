@@ -49,8 +49,10 @@ traversal-guard), затем тот же блэклист/``max_documents``/``ma
 
 **Два прохода (один вызов, без ре-краула).** Pass A (ingest) по каждому продукту выполняет
 краул → retention (I19) → экстракцию → дедуп(``content_hash``) → чанкинг и копит
-``_ProductIngest`` в памяти; ``corpus_docs`` персистятся сразу (retention-провенанс не зависит
-от сборки), а ``build_id`` чанков пока ``None``. После Pass A финализируется ``index_build_id``
+``_ProductIngest`` в памяти; ``corpus_docs`` персистятся **инкрементально** — сразу при
+коммите каждого документа (retention-провенанс не зависит от сборки), поэтому жёсткое
+убийство теряет максимум документ «в полёте», а не весь продукт; ``build_id`` чанков пока
+``None``. После Pass A финализируется ``index_build_id``
 (по всем чанкам + декларированным входам). Pass B (index) проставляет ``build_id``, строит
 ``IndexManifestEntry`` и вызывает ``_embed_and_build``; при успехе персистятся ``corpus_chunks``
 + ``index_manifest`` («сначала диск, потом БД»). Никакого round/parent-чейнинга.
@@ -69,8 +71,9 @@ traversal-guard), затем тот же блэклист/``max_documents``/``ma
 ``index_builder.build`` не завершился успешно, фаза **не** пишет ``corpus_chunks``/
 ``index_manifest`` в БД: иначе реестр заявлял бы сборку, которой нет (или не совпадает с
 иммутабельной партицией на диске). Если ``build`` отказал (в т.ч. ``ImmutableBuildError``
-при попытке изменить уже зафиксированную сборку, K2/§13), ``corpus_docs`` всё равно
-персистятся (retention), но ``corpus_chunks``/``index_manifest`` остаются неизменными, а
+при попытке изменить уже зафиксированную сборку, K2/§13), ``corpus_docs`` уже
+персистенчены инкрементально (retention), но ``corpus_chunks``/``index_manifest`` остаются
+неизменными, а
 отказ попадает в ``errors`` с указанием, что изменение корпуса требует нового
 ``run_id``/раунда. Это зеркалит порядок в ``serp_loop`` (build → ``save_index_manifest``).
 
@@ -89,7 +92,7 @@ import datetime as _dt
 import json
 import time
 from collections import deque
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from concurrent.futures import Executor, ThreadPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
 from dataclasses import dataclass, field, replace
@@ -102,6 +105,7 @@ from core.config.deploy import CrawlConfig
 from core.config.domain_profiles import DomainProfile
 from core.domain import (
     CorpusChunk,
+    CorpusCoverage,
     CorpusDoc,
     CrawlItemStatus,
     CrawlRunConfig,
@@ -151,7 +155,7 @@ from core.util.html_links import extract_links
 from core.util.rate_limit import RateLimiter
 from core.util.security import validate_url
 
-__all__ = ["ExtractionPool", "IndexBuild", "build_corpus"]
+__all__ = ["ExtractionPool", "IndexBuild", "build_corpus", "derive_corpus_coverage"]
 
 #: Разделитель полей material-строки ``index_build_id`` (unit separator — однозначная склейка).
 _FIELD_SEP = "\x1f"
@@ -165,10 +169,10 @@ _BUILD_ID_SCHEMA = "corpus-build-2"
 #: а не тихий провал всего прогона.
 _SUBMIT_MAX_ATTEMPTS = 5
 
-#: Phase 4: ``error_kind`` терминального ``FAILED`` при исчерпании ``--max-attempts``.
-#: Свободная строка-данные (``CrawlSessionItem.error_kind`` — не доменный enum): отличает
-#: «попытки кончились» от сетевого/браузерного сбоя.
-_MAX_ATTEMPTS_ERROR_KIND = "attempts_exhausted"
+#: Phase 4/Ф0: ``error_kind`` терминального ``FAILED`` при исчерпании ``--max-attempts``.
+#: Канонический класс сбоя (``FailureKind.ATTEMPTS_EXHAUSTED``): отличает «попытки
+#: кончились» от сетевого/браузерного сбоя, не выходя за словарь §4.1.
+_MAX_ATTEMPTS_ERROR_KIND = FailureKind.ATTEMPTS_EXHAUSTED.value
 
 #: Phase 5.2: семантика источника-каталога (свободная строка-данные, не доменный enum).
 #: URL с таким ``target.kind`` — не контент-страница, а лента/канал: он **поллится** через
@@ -214,6 +218,77 @@ _EXTRACT_MAX_POOL_REBUILDS = 2
 #: P4: сентинел «экстракция не была отложена» для :func:`build_corpus`-интернала
 #: ``_commit_outcome`` (inline-путь вызывает ``_ingest_one``; пул передаёт готовый результат).
 _INLINE = object()
+
+
+def _canonical_failure_kind(reason: str | None) -> str:
+    """Единый маппинг любого ``error_kind``-значения в канонический :class:`FailureKind`.
+
+    Все записи ``crawl_session_items`` идут через :func:`_mark`, который вызывает этот
+    helper: ad-hoc-литералы (``redirect_out_of_scope``) и ``refusal_reason`` адаптеров
+    (``robots_disallow``) канонизируются в одном месте, а не в каждом write-site.
+    Неизвестное значение не выдумывает класс: это ``source_unavailable`` (честный дефолт).
+    """
+    if not reason:
+        return FailureKind.SOURCE_UNAVAILABLE.value
+    try:
+        return FailureKind(reason).value
+    except ValueError:
+        return FailureKind.SOURCE_UNAVAILABLE.value
+
+
+def derive_corpus_coverage(
+    *,
+    product_id: str,
+    items: Iterable[CrawlSessionItem],
+    truncated: bool,
+    computed_at: str,
+) -> CorpusCoverage:
+    """Строит :class:`CorpusCoverage` продукта из персистентных элементов сеанса (Ф0).
+
+    Детерминированно: ``expected_sources`` — число элементов, ``observed_sources`` —
+    дошедшие до ``FETCHED``, ``blocked`` — счётчики ``FAILED`` по ``error_kind``.
+    ``complete`` ложно при любом усечении, блокировке или потере (failed/cancelled/
+    pending/running): нечитаемый источник не позволяет доказать отсутствие.
+    """
+    expected = 0
+    observed = 0
+    blocked: dict[str, int] = {}
+    for item in items:
+        expected += 1
+        if item.status is CrawlItemStatus.FETCHED:
+            observed += 1
+        elif item.status is CrawlItemStatus.FAILED and item.error_kind:
+            blocked[item.error_kind] = blocked.get(item.error_kind, 0) + 1
+    return CorpusCoverage(
+        product_id=product_id,
+        complete=(not truncated) and observed == expected and not blocked,
+        expected_sources=expected,
+        observed_sources=observed,
+        blocked=dict(sorted(blocked.items())),
+        truncated=truncated,
+        computed_at=computed_at,
+    )
+
+
+def _persist_corpus_coverage(
+    store: Any,
+    run_id: str,
+    session_id: str,
+    truncated_products: set[str],
+    computed_at: str,
+) -> None:
+    """Вычисляет и персистит покрытие каждого продукта сеанса (Ф0, идемпотентно)."""
+    by_product: dict[str, list[CrawlSessionItem]] = {}
+    for item in store.iter_crawl_session_items(session_id):
+        by_product.setdefault(item.product_id, []).append(item)
+    for product_id in sorted(by_product):
+        coverage = derive_corpus_coverage(
+            product_id=product_id,
+            items=by_product[product_id],
+            truncated=product_id in truncated_products,
+            computed_at=computed_at,
+        )
+        store.save_corpus_coverage(run_id, coverage)
 
 
 @dataclass(frozen=True)
@@ -715,10 +790,15 @@ def _persist_docs(
 ) -> None:
     """Пишет ``corpus_docs`` (retention + provenance экстракции, §3.2).
 
-    Вызывается **всегда** — даже если физическая сборка индекса отказала: сырые байты и
-    провенанс экстракции не зависят от иммутабельности индексной сборки (I19). Каждая
-    запись обёрнута в try/except: сбой персистенции фиксируется в ``errors`` и не
-    прерывает обработку остальных продуктов (контракт изоляции фаз, ``runner.py``).
+    **Единственная** точка записи ``corpus_docs``. В Pass A вызывается инкрементально —
+    сразу после ``ingest.docs.append`` для каждого полностью сформированного документа
+    (см. ``_finish_one``), поэтому при жёстком убийстве теряется максимум документ
+    «в полёте». Retention-провенанс не зависит от иммутабельности индексной сборки (I19),
+    поэтому запись не откладывается до Pass B.
+
+    Каждая запись обёрнута в try/except: сбой одного ``upsert_corpus_doc`` фиксируется в
+    ``errors`` и не прерывает ни обработку остальных документов, ни краул (контракт
+    изоляции фаз, ``runner.py``).
     """
     if store is None:
         return
@@ -1173,6 +1253,11 @@ def build_corpus(
         }
         for name, value in fields.items():
             if value is not None:
+                if name == "error_kind":
+                    # Ф0: единственная воронка записи ``crawl_session_items`` — здесь
+                    # канонизируем класс сбоя, чтобы persisted-значение всегда было
+                    # членом FailureKind (или source_unavailable для неизвестного).
+                    value = _canonical_failure_kind(value)
                 record[name] = value
         try:
             item = CrawlSessionItem(**record)
@@ -1362,6 +1447,13 @@ def build_corpus(
             lang=page.lang,
         )
         ingest.docs.append(doc)
+        # Инкрементальная персистенция retention-провенанса: ``doc`` полностью сформирован
+        # выше (``doc_id``/``content_hash``/``raw_path``/``extractor_version``/``lang``/
+        # ``render_mode``), а сырые байты уже на диске (retention выполнен до экстракции).
+        # Поэтому пишем строку сразу, а не в конце продукта: жёсткое убийство (OOM/SIGKILL)
+        # теряет максимум документ «в полёте» (ещё извлекаемый), а не весь накопленный
+        # продукт. ``_persist_docs`` изолирует сбой записи в ``errors`` — краул продолжается.
+        _persist_docs(store, [doc], errors)
 
         # 5. Чанкер.
         try:
@@ -3079,8 +3171,11 @@ def build_corpus(
                     ]
                 truncation_records.append(record)
 
-        # Retention-провенанс не зависит от индексной сборки: docs персистятся в Pass A.
-        _persist_docs(store, ingest.docs, errors)
+        # Retention-провенанс не зависит от индексной сборки и уже персистенчен
+        # инкрементально: единственная точка ``ingest.docs.append`` — ``_finish_one``,
+        # где ``_persist_docs`` вызывается сразу после коммита документа. Финального
+        # «дампа» продукта здесь нет намеренно: он лишь повторно писал бы те же строки
+        # (``INSERT OR REPLACE`` по PK) и удваивал бы транзакции без выигрыша в durability.
         ingests.append(ingest)
 
     _emit_progress()
@@ -3219,6 +3314,22 @@ def build_corpus(
             )
         except Exception as exc:  # noqa: BLE001 — наблюдаемость важнее персистенции
             errors.append(f"finalize_crawl_session({session}): {type(exc).__name__}: {exc}")
+
+        # Ф0: покрытие корпуса продукта — первоклассный факт для гейта ❌ (I2c).
+        # Производно от **персистентных** элементов сеанса и записей об усечении; пишется
+        # после финализации, чтобы провенанс/усечение уже были зафиксированы.
+        try:
+            _persist_corpus_coverage(
+                store,
+                run_id,
+                session,
+                truncated_products,
+                _now_iso(),
+            )
+        except Exception as exc:  # noqa: BLE001 — наблюдаемость важнее персистенции
+            errors.append(
+                f"corpus_coverage({session}): {type(exc).__name__}: {exc}"
+            )
 
     # L1a/C2: счётчики durable-краула (наблюдаемость) — целиком из элементов сеанса. Без
     # сеанса (``store``/``run_id`` не заданы) — нули. ``crawl_done`` — зеркало ``crawl_fetched``

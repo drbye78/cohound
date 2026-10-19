@@ -19,6 +19,7 @@ from core.domain import (
     CatalogRow,
     Cell,
     CellState,
+    CorpusCoverage,
     Importance,
     LLMCellOutput,
     ParamType,
@@ -110,6 +111,17 @@ class _RecordingStore:
         self.evidence.extend(evs)
 
 
+class _CoverageStore(_RecordingStore):
+    """Приёмник записей + чтение покрытия (проверяет store-путь гейта Ф0)."""
+
+    def __init__(self, coverage) -> None:  # noqa: ANN001
+        super().__init__()
+        self.coverage = coverage
+
+    def read_corpus_coverage(self, run_id: str, product_id: str):  # noqa: ANN201
+        return self.coverage if product_id == self.coverage.product_id else None
+
+
 def _evaluate(  # noqa: ANN001 - тестовый helper
     data: dict,
     evaluator,
@@ -119,6 +131,8 @@ def _evaluate(  # noqa: ANN001 - тестовый helper
     store=None,
     retrievals=None,
     min_retrieval_score: float | None = None,
+    coverage=None,
+    scope_attested_by: str | None = None,
 ):
     return evaluate_cell(
         param=_param(data),
@@ -131,6 +145,8 @@ def _evaluate(  # noqa: ANN001 - тестовый helper
         store=store,
         retrievals=retrievals,
         min_retrieval_score=min_retrieval_score,
+        coverage=coverage,
+        scope_attested_by=scope_attested_by,
     )
 
 
@@ -253,6 +269,117 @@ def test_store_persists_cell_and_evidence() -> None:
     assert store.cells == [outcome.cell]
     assert len(store.evidence) == len(outcome.validation.resolved_evidence) == 1
     assert outcome.cell.source_kind is SourceKind.DOCUMENTATION
+
+
+# ---------------------------------------------------------------------------
+# Ф0: покрытие корпуса гейтит ❌ (I2c)
+# ---------------------------------------------------------------------------
+
+
+def _absent_output() -> LLMCellOutput:
+    """ABSENT без цитат: отсутствие подтверждается протоколом над срезом."""
+    return LLMCellOutput(
+        status=Status.ABSENT,
+        justification="Свойство не найдено в переданном срезе.",
+        evidence=[],
+    )
+
+
+def _coverage(*, complete: bool, blocked: dict[str, int] | None = None) -> CorpusCoverage:
+    blocked = dict(blocked or {})
+    expected = 6
+    observed = expected if complete else expected - sum(blocked.values())
+    return CorpusCoverage(
+        product_id="p1",
+        complete=complete,
+        expected_sources=expected,
+        observed_sources=observed,
+        blocked=blocked,
+        truncated=False,
+        computed_at="2026-01-01T00:00:00+00:00",
+    )
+
+
+def test_incomplete_corpus_absence_becomes_pending_candidate() -> None:
+    """Ф0: заблокированный источник + ABSENT → pending, а не ❌ (I2c)."""
+    data = _data()
+    evaluator = _ScriptedEvaluator([_absent_output()])
+    store = _RecordingStore()
+    coverage = _coverage(complete=False, blocked={"robots_disallow": 4})
+
+    outcome = _evaluate(data, evaluator, store=store, coverage=coverage)
+
+    assert outcome.cell.state is CellState.PENDING
+    assert outcome.cell.status is Status.ABSENT  # предложенный, не опубликованный
+    assert outcome.cell.review_reason == "corpus_incomplete_absence"
+    assert outcome.cell.reviewed_by is None  # I6/I7: решает человек
+    assert store.cells == [outcome.cell]
+    audit = [
+        entry
+        for entry in outcome.cell.absence_evidence
+        if entry.get("corpus_complete") is False
+    ]
+    assert audit and audit[0]["corpus_blocked"] == {"robots_disallow": 4}
+    assert audit[0]["corpus_observed_sources"] == 2
+
+
+def test_incomplete_corpus_with_human_attestation_keeps_absent_and_records_counts() -> None:
+    """Ф0: человек принял риск (scope_attested_by) — ❌ остаётся, счётчики в evidence."""
+    data = _data()
+    evaluator = _ScriptedEvaluator([_absent_output()])
+    coverage = _coverage(complete=False, blocked={"robots_disallow": 4})
+
+    outcome = _evaluate(
+        data,
+        evaluator,
+        coverage=coverage,
+        scope_attested_by="human-reviewer",
+    )
+
+    assert outcome.cell.state is CellState.EVALUATED
+    assert outcome.cell.status is Status.ABSENT
+    assert outcome.cell.review_reason is None
+    audit = [
+        entry
+        for entry in outcome.cell.absence_evidence
+        if entry.get("corpus_complete") is False
+    ]
+    assert audit and audit[0]["corpus_blocked"] == {"robots_disallow": 4}
+    assert audit[0]["scope_attested_by"] == "human-reviewer"
+
+
+def test_complete_corpus_absence_is_byte_identical_to_previous_behaviour() -> None:
+    """Ф0: полное покрытие не меняет ячейку — сравнение с исходом без coverage."""
+    data = _data()
+    baseline = _evaluate(data, _ScriptedEvaluator([_absent_output()]))
+    with_coverage = _evaluate(
+        data,
+        _ScriptedEvaluator([_absent_output()]),
+        coverage=_coverage(complete=True),
+    )
+
+    assert baseline.cell.state is CellState.EVALUATED
+    assert baseline.cell.status is Status.ABSENT
+    assert with_coverage.cell == baseline.cell
+    assert with_coverage.validation == baseline.validation
+    assert with_coverage.prompt_hash == baseline.prompt_hash
+
+
+def test_gate_reads_coverage_from_store_when_not_passed() -> None:
+    """Ф0: оценщик читает покрытие из store (путь фазы Ш6), не только из аргумента."""
+    data = _data()
+    coverage = _coverage(complete=False, blocked={"robots_disallow": 4})
+    store = _CoverageStore(coverage)
+
+    outcome = _evaluate(
+        data,
+        _ScriptedEvaluator([_absent_output()]),
+        store=store,
+    )
+
+    assert outcome.cell.state is CellState.PENDING
+    assert outcome.cell.review_reason == "corpus_incomplete_absence"
+    assert store.cells == [outcome.cell]
 
 
 # ---------------------------------------------------------------------------

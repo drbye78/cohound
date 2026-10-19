@@ -47,6 +47,7 @@ from core.domain import (
     CatalogRow,
     Cell,
     CellState,
+    CorpusCoverage,
     FailureKind,
     LLMCellOutput,
     Satellite,
@@ -76,6 +77,7 @@ from core.ports.store import StorePort
 from core.ports.vector_index import RetrievedChunk, VectorIndexPort
 
 __all__ = [
+    "CORPUS_INCOMPLETE_REVIEW_REASON",
     "DEFAULT_RETRIEVAL_CUTOFF_K",
     "DEFAULT_RETRIEVAL_PROFILE",
     "EvaluationOutcome",
@@ -85,6 +87,10 @@ __all__ = [
     "retrieve_for_cell",
     "run_queries_for_cell",
 ]
+
+#: Ф0: причина ``pending``-кандидата, когда ``❌`` предложен при неполном корпусе.
+#: Свободнотекстовая аннотация (не статус/не перечисление), как ``precedence_conflict``.
+CORPUS_INCOMPLETE_REVIEW_REASON = "corpus_incomplete_absence"
 
 #: Максимум запросов на ячейку (S13/I16): title + концепт-термины ru → en.
 MAX_QUERIES = 3
@@ -280,7 +286,10 @@ def _absence_dict(ev) -> dict:  # noqa: ANN001 - CellEvidence, без импор
 
 
 def _build_absence_evidence(
-    param: CatalogRow, validation: ValidationResult
+    param: CatalogRow,
+    validation: ValidationResult,
+    *,
+    scope_attested_by: str | None = None,
 ) -> tuple[list[dict], str | None]:
     """Строит ``absence_evidence`` для ``❌`` и проверяет I2b.
 
@@ -291,6 +300,10 @@ def _build_absence_evidence(
     цитат нет, ставится синтетическая запись протокола над срезом; недоказуемость на
     уровне эшелона (нехватка exhaustive/attestation) возвращается как ошибка — вызывающий
     уводит её в ``failed``/preliminary, а не публикует ``❌`` молча.
+
+    ``scope_attested_by`` — явная человеческая аттестация, переданная вызывающим
+    (composition root / решение гейта). Она проставляется на синтетическую запись, чтобы
+    Ф0-гейт мог отличить принятый человеком риск от машинного ``❌`` при неполном корпусе.
     """
     absences = [_absence_dict(ev) for ev in validation.resolved_evidence]
     if not absences:
@@ -299,7 +312,7 @@ def _build_absence_evidence(
                 "evidence_id": None,
                 "source_id": None,
                 "source_scope": SourceScope.UNKNOWN.value,
-                "scope_attested_by": None,
+                "scope_attested_by": scope_attested_by,
                 "note": "явное отсутствие по переданному срезу фрагментов",
             }
         )
@@ -325,6 +338,68 @@ def _build_absence_evidence(
         if not exhaustive:
             return absences, "I2b: registry_absence — exhaustive по построению"
     return absences, None
+
+
+def _absence_attested(absence_evidence: list[dict]) -> bool:
+    """Есть ли в absence-evidence человеческая аттестация охвата (``scope_attested_by``)."""
+    return any(bool(entry.get("scope_attested_by")) for entry in absence_evidence)
+
+
+def _coverage_for(
+    coverage: CorpusCoverage | None,
+    store: StorePort | None,
+    run_id: str,
+    product_id: str,
+) -> CorpusCoverage | None:
+    """Покрытие продукта: явный аргумент либо чтение из store (``None`` — неизвестно)."""
+    if coverage is not None:
+        return coverage
+    reader = getattr(store, "read_corpus_coverage", None)
+    if not callable(reader):
+        return None
+    try:
+        return reader(run_id, product_id)
+    except Exception:  # noqa: BLE001 — чтение покрытия не должно ронять оценку
+        return None
+
+
+def _record_corpus_coverage(
+    absence_evidence: list[dict],
+    coverage: CorpusCoverage,
+    *,
+    attested_by: str | None = None,
+) -> None:
+    """Дописывает в absence-evidence аудит блокировок корпуса (Ф0, I2c).
+
+    Запись машинно-читаема (``corpus_blocked``/``corpus_complete``/счётчики) и остаётся
+    в ячейке, поэтому отчёт видит факт неполного покрытия без чтения БД. Для аттестованного
+    человеком ``❌`` она фиксирует, что риск принят осознанно.
+    """
+    attested_by = attested_by or next(
+        (
+            entry.get("scope_attested_by")
+            for entry in absence_evidence
+            if entry.get("scope_attested_by")
+        ),
+        None,
+    )
+    absence_evidence.append(
+        {
+            "evidence_id": None,
+            "source_id": None,
+            "source_scope": SourceScope.UNKNOWN.value,
+            "scope_attested_by": attested_by,
+            "note": (
+                "Ф0: неполное покрытие корпуса — блокировки учтены; "
+                "❌ допустим только с человеческой аттестацией"
+            ),
+            "corpus_complete": False,
+            "corpus_expected_sources": coverage.expected_sources,
+            "corpus_observed_sources": coverage.observed_sources,
+            "corpus_blocked": dict(sorted(coverage.blocked.items())),
+            "corpus_truncated": coverage.truncated,
+        }
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -436,6 +511,8 @@ def evaluate_cell(
     model_id: str | None = None,
     min_retrieval_score: float | None = None,
     protected: Cell | None = None,
+    coverage: CorpusCoverage | None = None,
+    scope_attested_by: str | None = None,
 ) -> EvaluationOutcome:
     """Оценивает одну ячейку Ш6 и возвращает :class:`EvaluationOutcome` (§5/§7.1).
 
@@ -453,6 +530,10 @@ def evaluate_cell(
     :param min_retrieval_score: порог аномалии §10.4 (заметка, не сбой).
     :param protected: ячейка более высокого источника для наложения (реестр/наследование,
         §2.2 п.7/п.8); ``None`` — обычная запись Ш6.
+    :param coverage: покрытие корпуса продукта (Ф0). ``None`` — прочитать из store
+        (``read_corpus_coverage``) либо, если записи нет, сохранить прежнее поведение.
+    :param scope_attested_by: человеческая аттестация охвата для ``❌`` (Ф0). Не
+        подставляется автоматически: это решение человека, переданное вызывающим.
 
     Повтор переиздаёт тот же запрос — для детерминированного оценщика это ограниченный
     no-op, полезный только для транзиентных ошибок адаптера; см. докстринг модуля.
@@ -521,7 +602,9 @@ def evaluate_cell(
         out = last_response.output
         absence_evidence: list[dict] = []
         if out.status is Status.ABSENT:
-            absence_evidence, absence_error = _build_absence_evidence(param, last_validation)
+            absence_evidence, absence_error = _build_absence_evidence(
+                param, last_validation, scope_attested_by=scope_attested_by
+            )
             if absence_error is not None:
                 # Механически недоказуемое ❌ → не публикуем: failed (strict) / кандидат.
                 return _unresolved_outcome(
@@ -537,6 +620,45 @@ def evaluate_cell(
                     store=store,
                     raw=last_response.raw,
                     protected=protected,
+                )
+
+            # Ф0/I2c: неполный корпус не доказывает отсутствие. Машинный ``❌`` при
+            # ``absence_rule=explicit`` без человеческой аттестации понижается до
+            # ``pending``-кандидата (I6/I7: решает человек). Прочие absence_rule уже
+            # требуют exhaustive/attestation (I2b) — их правила не меняются.
+            effective_coverage = _coverage_for(coverage, store, run_id, product_id)
+            if effective_coverage is not None and not effective_coverage.complete:
+                attested = bool(scope_attested_by) or _absence_attested(absence_evidence)
+                if param.absence_rule is AbsenceRuleType.EXPLICIT and not attested:
+                    _record_corpus_coverage(absence_evidence, effective_coverage)
+                    pending = _evaluated_cell(
+                        out_status=out.status,
+                        evidence=out.evidence,
+                        absence_evidence=absence_evidence,
+                        param=param,
+                        product_id=product_id,
+                        run_id=run_id,
+                        provenance=provenance,
+                    ).model_copy(
+                        update={
+                            "state": CellState.PENDING,
+                            "review_reason": CORPUS_INCOMPLETE_REVIEW_REASON,
+                        }
+                    )
+                    _persist(store, pending, last_validation, protected=protected)
+                    return EvaluationOutcome(
+                        cell=pending,
+                        prompt_hash=compiled.prompt_hash,
+                        validation=last_validation,
+                        failure_kind=None,
+                        raw=last_response.raw,
+                    )
+                # Аттестованный человеком ❌ (или иной absence_rule с уже пройденным I2b)
+                # остаётся, но блокировки фиксируются в evidence — принятие риска видно.
+                _record_corpus_coverage(
+                    absence_evidence,
+                    effective_coverage,
+                    attested_by=scope_attested_by,
                 )
         cell = _evaluated_cell(
             out_status=out.status,
@@ -639,6 +761,8 @@ def evaluate_batch(
         str, RetrievalResult | Sequence[RetrievalResult]
     ] | None = None,
     protected_by_param: Mapping[str, Cell] | None = None,
+    coverage: CorpusCoverage | None = None,
+    scope_attested_by: str | None = None,
 ) -> tuple[list[EvaluationOutcome], list[str]]:
     """Прогоняет :func:`evaluate_cell` по параметрам с изоляцией сбоев (§A.1).
 
@@ -660,6 +784,8 @@ def evaluate_batch(
             max_retries=max_retries,
             store=store,
             protected=(protected_by_param or {}).get(param.param_id),
+            coverage=coverage,
+            scope_attested_by=scope_attested_by,
         )
 
     return run_isolated(params, _one)
@@ -676,6 +802,7 @@ def evaluate_phase(
     profile: RetrievalProfile | str | None = None,
     cutoff_k: int | None = None,
     strict: bool = True,
+    scope_attested_by: str | None = None,
 ) -> PhaseResult:
     """Фаза оценки Ш6 на уровне конвейера: продукты × параметры → ретривал → оценщик.
 
@@ -702,6 +829,8 @@ def evaluate_phase(
     :param profile: зафиксированный профиль R0/R1/R2; ``None`` → :data:`DEFAULT_RETRIEVAL_PROFILE`.
     :param cutoff_k: зафиксированный ``retrieval_cutoff_K``; ``None`` → :data:`DEFAULT_RETRIEVAL_CUTOFF_K`.
     :param strict: strict (failed при исчерпании) vs preliminary (кандидат).
+    :param scope_attested_by: человеческая аттестация охвата для ``❌`` (Ф0); передаётся
+        вызывающим из решения гейта/ревью, никогда не выводится автоматически.
 
     При ``ports.evaluator is None`` фаза сразу ``failed``: без оценщика Ш6 не имеет смысла,
     а молчаливый ``ok`` скрыл бы неполноту карты.
@@ -737,6 +866,9 @@ def evaluate_phase(
         }
         chunks_by_param: dict[str, Sequence[ChunkLike]] = {}
         retrievals_by_param: dict[str, RetrievalResult] = {}
+        # Ф0: покрытие корпуса продукта читается один раз (на главном потоке) и
+        # прокидывается в ячейки; отсутствие записи — прежнее поведение (coverage=None).
+        coverage = _coverage_for(None, store, run_id, product_id)
         for param in plan.params:
             try:
                 result = retrieve_for_cell(
@@ -769,6 +901,8 @@ def evaluate_phase(
             store=store,
             retrievals_by_param=retrievals_by_param,
             protected_by_param=protected_by_param,
+            coverage=coverage,
+            scope_attested_by=scope_attested_by,
         )
         cells.extend(outcome.cell for outcome in outcomes)
         errors.extend(batch_errors)

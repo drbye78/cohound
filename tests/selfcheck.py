@@ -327,6 +327,7 @@ def main() -> int:
 
     section("Домен (L0) — W2")
     check("инварианты домена возвращают Violation (I1/I4/I13/I7)", lambda: _domain_invariants())
+    check("Ф0: ❌ при неполном корпусе требует аттестации (I2c)", lambda: _corpus_coverage_invariant())
     check("derived-evidence требует hash/резолв (I1/I10/I15/I19, K5)", lambda: _domain_derived())
     check("source_id round-trip + резолв с hash (I10/I15/I19)", lambda: _domain_anchors())
     check("content_hash/prompt_hash детерминированы (§5/I19)", lambda: _util_hashing())
@@ -678,13 +679,13 @@ def _crawl_session_dict_mirror() -> None:
 def _db_smoke() -> None:
     conn = connect(":memory:")
     ver = conn.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()
-    _assert(ver is not None and ver["value"] == "3.6.0")
+    _assert(ver is not None and ver["value"] == "3.7.0")
 
     tables = {r["name"] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     for t in ("products", "runs", "llm_scenarios", "corpus_docs", "corpus_chunks",
               "index_manifest", "cells", "cell_evidence", "search_log",
               "search_exhaustion", "registry_facts", "run_inputs",
-              "crawl_sessions", "crawl_session_items"):
+              "crawl_sessions", "crawl_session_items", "corpus_coverage"):
         _assert(t in tables)
 
     # P2 (schema 2.2.0): build-id witness — extractor_version у чанка; extractor_version/
@@ -734,6 +735,13 @@ def _db_smoke() -> None:
     item_pk = [r["name"] for r in conn.execute("PRAGMA table_info(crawl_session_items)")
                if r["pk"]]
     _assert(item_pk == ["session_id", "product_id", "url"])
+    # Ф0 (schema 3.7.0): покрытие корпуса продукта — PK (run_id, product_id).
+    cov_cols = {r["name"] for r in conn.execute("PRAGMA table_info(corpus_coverage)")}
+    _assert({"run_id", "product_id", "complete", "expected_sources", "observed_sources",
+             "blocked_json", "truncated", "computed_at"} <= cov_cols)
+    cov_pk = [r["name"] for r in conn.execute("PRAGMA table_info(corpus_coverage)")
+              if r["pk"]]
+    _assert(cov_pk == ["run_id", "product_id"])
     # Прагмы соединения (Lane B): busy_timeout=5000, synchronous=NORMAL(=1) применены.
     _assert(conn.execute("PRAGMA busy_timeout").fetchone()[0] == 5000)
     _assert(conn.execute("PRAGMA synchronous").fetchone()[0] == 1)
@@ -998,6 +1006,76 @@ def _domain_invariants() -> None:
     )
     if check_cell(clean):
         raise AssertionError("registry_absence exhaustive должен быть чистым")
+
+
+def _corpus_coverage_invariant() -> None:
+    """Ф0/I2c: ``❌`` при неполном покрытии корпуса без аттестации — нарушение.
+
+    «Инварианты — это код»: проверка живёт в ``core.domain.invariants``, а selfcheck
+    прогоняет её на обеих ветках (машинный ❌ vs человечески аттестованный ❌) и на
+    полном покрытии. Плюс модель ``CorpusCoverage`` не даёт объявить усечённый корпус
+    полным.
+    """
+    from core.domain.enums import AbsenceRuleType, CellState, Status
+    from core.domain.invariants import check_absence_coverage
+    from core.domain.models import Cell, CorpusCoverage
+
+    incomplete = CorpusCoverage(
+        product_id="p",
+        complete=False,
+        expected_sources=5,
+        observed_sources=2,
+        blocked={"robots_disallow": 3},
+        truncated=False,
+        computed_at="2026-01-01T00:00:00+00:00",
+    )
+    machine_absent = Cell(
+        run_id="r",
+        product_id="p",
+        param_id="x",
+        state=CellState.EVALUATED,
+        status=Status.ABSENT,
+        absence_rule=AbsenceRuleType.EXPLICIT,
+        absence_evidence=[{"source_scope": "unknown", "scope_attested_by": None}],
+    )
+    codes = {v.code for v in check_absence_coverage(machine_absent, incomplete)}
+    if "I2c" not in codes:
+        raise AssertionError("I2c: ❌ при неполном корпусе без аттестации не пойман")
+
+    attested = machine_absent.model_copy(
+        update={
+            "absence_evidence": [
+                {"source_scope": "unknown", "scope_attested_by": "human"}
+            ]
+        }
+    )
+    if check_absence_coverage(attested, incomplete):
+        raise AssertionError("I2c: аттестованный человеком ❌ обязан быть допустим")
+
+    complete = incomplete.model_copy(
+        update={
+            "complete": True,
+            "observed_sources": 5,
+            "blocked": {},
+        }
+    )
+    if check_absence_coverage(machine_absent, complete):
+        raise AssertionError("I2c: полное покрытие не должно блокировать ❌")
+
+    try:
+        CorpusCoverage(
+            product_id="p",
+            complete=True,
+            expected_sources=5,
+            observed_sources=2,
+            blocked={},
+            truncated=True,
+            computed_at="2026-01-01T00:00:00+00:00",
+        )
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("CorpusCoverage: truncated=True несовместим с complete=True")
 
 
 def _domain_derived() -> None:

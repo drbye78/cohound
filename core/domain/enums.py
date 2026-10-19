@@ -45,11 +45,32 @@ class SourceScope(StrEnum):
 
 
 class FailureKind(StrEnum):
+    """Класс сбоя; ``failed`` никогда не статус (I4).
+
+    Первые пять значений — исходные классы конвейера. Остальные — наблюдаемые исходы
+    краула/egress-слоя, которые пишутся в ``crawl_session_items.error_kind`` (persisted
+    data: строковые значения стабильны). ``dlp_blocked``/``quarantined`` — классы,
+    зарезервированные под DLP/quarantine-контур (08-crawl-platform-evolution-plan);
+    на сегодняшний день write-site'ов у них нет, но словарь обязан их знать заранее,
+    иначе первый же такой исход станет невалидным. ``extraction_timeout`` также пока
+    не выставляется отдельно: таймаут пула экстракции доводится как ``parser_failed``
+    (существующее отображение не меняется — меняется только представимость класса).
+    """
+
     SEARCH_FAILED = "search_failed"
     SOURCE_UNAVAILABLE = "source_unavailable"
     EVALUATION_FAILED = "evaluation_failed"
     VALIDATION_FAILED = "validation_failed"
     PARSER_FAILED = "parser_failed"
+    # Наблюдаемые исходы краула (write-site'ы — ``core/pipeline/corpus.py``).
+    ROBOTS_DISALLOW = "robots_disallow"
+    ATTEMPTS_EXHAUSTED = "attempts_exhausted"
+    REDIRECT_OUT_OF_SCOPE = "redirect_out_of_scope"
+    # Зарезервированные классы egress-слоя (08 §quarantine/DLP).
+    DLP_BLOCKED = "dlp_blocked"
+    QUARANTINED = "quarantined"
+    # Класс таймаута извлечения (отделим от прочих parser-сбоев).
+    EXTRACTION_TIMEOUT = "extraction_timeout"
 
 
 class CellState(StrEnum):

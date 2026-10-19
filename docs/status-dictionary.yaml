@@ -83,12 +83,21 @@ source_scope:
   - unknown
 
 # §4.1. failure_kind — класс сбоя; failed никогда не статус (I4).
+# Исходы краула (crawl_session_items.error_kind) — persisted-данные: строки стабильны.
+# dlp_blocked/quarantined зарезервированы под egress-контур (08); extraction_timeout
+# отделяет таймаут извлечения от прочих parser-сбоев.
 failure_kind:
   - search_failed
   - source_unavailable
   - evaluation_failed
   - validation_failed
   - parser_failed
+  - robots_disallow
+  - attempts_exhausted
+  - redirect_out_of_scope
+  - dlp_blocked
+  - quarantined
+  - extraction_timeout
 
 # §4.1. cell_state — жизненный цикл ячейки.
 # evaluated+status → разрешённая; failed → status=null (I4), в знаменателе Coverage (I5).

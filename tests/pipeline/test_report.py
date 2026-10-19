@@ -48,6 +48,7 @@ from core.domain.models import (
     METHODOLOGY_VERSION,
     CatalogRow,
     Cell,
+    CorpusCoverage,
     CrawlProvenance,
     CrawlRunConfig,
     CrawlSessionProvenance,
@@ -75,6 +76,7 @@ from core.pipeline.report import (
     PublishBlockedError,
     build_manifest,
     collect_i3_anomalies,
+    collect_corpus_coverage_anomalies,
     diff_boundary_violations,
     render_battle_card,
     render_diff,
@@ -918,6 +920,87 @@ def test_write_reports_surfaces_truncation_anomaly_in_artifacts_and_csv(
         for r in _read_csv(clean.nda_questions)
     )
     assert _artifacts_payload(clean)["crawl_truncation_anomalies"] == []
+
+
+def test_corpus_coverage_anomaly_is_visible_in_csv_and_artifacts(
+    store: SqliteStore, tmp_path: Path
+) -> None:
+    """Ф0: неполное покрытие продукта видно в отчёте рядом с truncation-аномалией."""
+    coverage = CorpusCoverage(
+        product_id=PRODUCT_A,
+        complete=False,
+        expected_sources=10,
+        observed_sources=6,
+        blocked={"robots_disallow": 4},
+        truncated=False,
+        computed_at="2026-01-01T00:00:00+00:00",
+    )
+    bundle = compute(store=store, run_id=RUN_ID, catalog=_catalog(), module_weights={})
+
+    anomalies = collect_corpus_coverage_anomalies([], {PRODUCT_A: coverage})
+    assert anomalies[0]["product_id"] == PRODUCT_A
+    assert anomalies[0]["complete"] is False
+    assert anomalies[0]["blocked"] == {"robots_disallow": 4}
+
+    artifacts = write_reports(
+        bundle=bundle,
+        cells=[],
+        catalog=_catalog(),
+        manifest=_manifest(),
+        out_dir=tmp_path,
+        run_id=RUN_ID,
+        coverage={PRODUCT_A: coverage},
+    )
+    assert artifacts.corpus_coverage_anomalies
+    rows = _read_csv(artifacts.nda_questions)
+    coverage_rows = [r for r in rows if r.get("anomaly_kind") == "corpus_incomplete"]
+    assert coverage_rows and "robots_disallow" in coverage_rows[0]["i3_anomaly"]
+    # I12: аномалия — наблюдение; она входит в общий список аномалий.
+    assert any(
+        a.get("product_id") == PRODUCT_A for a in artifacts.i3_anomalies
+    )
+
+
+def test_corpus_coverage_anomaly_derived_from_pending_cell_without_store(
+    store: SqliteStore, tmp_path: Path
+) -> None:
+    """Ф0: гейт пишет аудит покрытия в ячейку — отчёт видит его без чтения БД."""
+    pending = Cell(
+        run_id=RUN_ID,
+        product_id=PRODUCT_A,
+        param_id="param.abs",
+        state=CellState.PENDING,
+        status=Status.ABSENT,
+        review_reason="corpus_incomplete_absence",
+        absence_evidence=[
+            {
+                "source_scope": "unknown",
+                "scope_attested_by": None,
+                "corpus_complete": False,
+                "corpus_expected_sources": 5,
+                "corpus_observed_sources": 2,
+                "corpus_blocked": {"robots_disallow": 3},
+                "corpus_truncated": False,
+            }
+        ],
+    )
+    anomalies = collect_corpus_coverage_anomalies([pending])
+    assert len(anomalies) == 1
+    assert anomalies[0]["blocked"] == {"robots_disallow": 3}
+    assert anomalies[0]["expected_sources"] == 5
+    assert anomalies[0]["observed_sources"] == 2
+
+    bundle = compute(store=store, run_id=RUN_ID, catalog=_catalog(), module_weights={})
+    artifacts = write_reports(
+        bundle=bundle,
+        cells=[pending],
+        catalog=_catalog(),
+        manifest=_manifest(),
+        out_dir=tmp_path,
+        run_id=RUN_ID,
+    )
+    rows = _read_csv(artifacts.nda_questions)
+    assert any(r.get("anomaly_kind") == "corpus_incomplete" for r in rows)
 
 
 # ---------------------------------------------------------------------------

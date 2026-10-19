@@ -24,6 +24,7 @@ from core.domain.enums import (
     EndpointKind,
     EvidenceState,
     EvidenceType,
+    FailureKind,
     Gate,
     GoldenTier,
     Importance,
@@ -45,6 +46,10 @@ from core.domain.enums import (
 )
 
 _BASE = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+#: Канонические значения :class:`FailureKind` — единый набор для валидаторов persisted-полей
+#: (``crawl_session_items.error_kind`` и ``corpus_coverage.blocked``).
+_KNOWN_FAILURE_KINDS: frozenset[str] = frozenset(kind.value for kind in FailureKind)
 
 #: Неизменяемый конфиг для value-объектов, кладущихся в хешируемые frozen-контейнеры
 #: (``FetchPlan``): ``frozen=True`` делает модель хешируемой (value-семантика), а
@@ -1060,4 +1065,88 @@ class CrawlSessionItem(BaseModel):
     first_seen: str | None = None
     last_attempt: str | None = None
 
+    @field_validator("error_kind")
+    @classmethod
+    def _validate_error_kind(cls, value: str | None) -> str | None:
+        """Валидирует ``error_kind`` против :class:`FailureKind` (Ф0).
+
+        Значения — persisted-данные, поэтому поле остаётся ``str``, но запись и чтение
+        проходят один и тот же валидатор: неизвестный класс — явная ошибка, а не тихий
+        дрейф. Документированных legacy-значений сверх ``FailureKind`` нет (все
+        наблюдённые в прогонах значения — ``robots_disallow``/``attempts_exhausted``/
+        ``redirect_out_of_scope`` — теперь канонические члены enum'а).
+        """
+        if value is None or value == "":
+            return None
+        known = _KNOWN_FAILURE_KINDS
+        if value not in known:
+            raise ValueError(
+                f"error_kind={value!r} вне FailureKind "
+                f"(допустимо: {', '.join(sorted(known))})"
+            )
+        return value
+
+
+class CorpusCoverage(BaseModel):
+    """Покрытие корпуса продукта по исходам краула (Ф0, §2.3/§4.4).
+
+    Первоклассный факт, производный от **персистентных** элементов сеанса краула и
+    записей об усечении — не от wall-clock и не от порядка обхода. Нужен, чтобы
+    ``❌`` нельзя было опубликовать как доказательство отсутствия, когда часть
+    источников продукта нечитаема (robots/сеть/парсер/усечение).
+
+    :param product_id: продукт-партиция.
+    :param complete: ``False``, если хотя бы один вклад-источник нечитаем (failed/
+        cancelled/pending) либо краул усечён политикой.
+    :param expected_sources: всего элементов сеанса по продукту.
+    :param observed_sources: элементов, дошедших до ``FETCHED``.
+    :param blocked: ``error_kind → count`` по ``FAILED``-элементам (канонические классы).
+    :param truncated: продукт попал в ``truncated_products`` сеанса.
+    :param computed_at: момент вычисления (ISO-8601); детерминизм обеспечивает вызывающий.
+    """
+
+    model_config = _BASE
+
+    product_id: str
+    complete: bool
+    expected_sources: int = 0
+    observed_sources: int = 0
+    blocked: dict[str, int] = Field(default_factory=dict)
+    truncated: bool = False
+    computed_at: str
+
+    @field_validator("blocked")
+    @classmethod
+    def _validate_blocked(cls, value: dict[str, int]) -> dict[str, int]:
+        """Ключи ``blocked`` — только канонические ``FailureKind``; порядок детерминирован."""
+        known = _KNOWN_FAILURE_KINDS
+        unknown = sorted(set(value) - known)
+        if unknown:
+            raise ValueError(
+                f"corpus_coverage.blocked: неизвестные error_kind {unknown}; "
+                f"допустимо: {', '.join(sorted(known))}"
+            )
+        if any(int(count) < 0 for count in value.values()):
+            raise ValueError("corpus_coverage.blocked: счётчики не могут быть отрицательными")
+        return {key: int(value[key]) for key in sorted(value)}
+
+    @model_validator(mode="after")
+    def _check_consistency(self) -> CorpusCoverage:
+        """``complete=True`` несовместимо с усечением/блокировками/потерями."""
+        if self.expected_sources < 0 or self.observed_sources < 0:
+            raise ValueError("corpus_coverage: счётчики не могут быть отрицательными")
+        if self.observed_sources > self.expected_sources:
+            raise ValueError(
+                "corpus_coverage: observed_sources не может превышать expected_sources"
+            )
+        if self.complete and (
+            self.truncated
+            or self.blocked
+            or self.observed_sources != self.expected_sources
+        ):
+            raise ValueError(
+                "corpus_coverage: complete=True требует отсутствия усечения, "
+                "блокировок и потерь (observed == expected)"
+            )
+        return self
 

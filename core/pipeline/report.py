@@ -51,6 +51,7 @@ from core.domain.invariants import check_unknown_exhaustion
 from core.domain.models import (
     CatalogRow,
     Cell,
+    CorpusCoverage,
     CrawlProvenance,
     ProtocolExhaustion,
     RunManifest,
@@ -63,6 +64,7 @@ from core.pipeline.compute import (
     publish_warnings,
 )
 from core.pipeline.crawl_frontier import resolve_crawl_limits
+from core.pipeline.evaluate import CORPUS_INCOMPLETE_REVIEW_REASON
 from core.util.hashing import short_hash
 
 if TYPE_CHECKING:  # только для аннотаций: без рантайм-связности слоёв
@@ -89,6 +91,7 @@ __all__ = [
     "write_reports",
     "collect_i3_anomalies",
     "collect_crawl_truncation_anomalies",
+    "collect_corpus_coverage_anomalies",
 ]
 
 #: Порог «недостаточного» Coverage для приглушения battle card (§9/02 §E.2).
@@ -190,7 +193,8 @@ class Artifacts:
     ``i3_anomalies`` — собранные аномалии I3 (§5): strict-``❓`` без полного протокола
     исчерпания, **вместе** с D1/G-аномалиями усечённого краула (обратная совместимость
     имени). ``crawl_truncation_anomalies`` — только подмножество последних, чтобы CLI/JSON
-    мог их отличить (B3).
+    мог их отличить (B3). ``corpus_coverage_anomalies`` — Ф0-аномалии неполного покрытия
+    корпуса (blocked counts + ``complete``), также входят в ``i3_anomalies``.
     """
 
     battle_card: Path | None
@@ -200,6 +204,7 @@ class Artifacts:
     manifest: Path
     i3_anomalies: list[dict[str, Any]] = field(default_factory=list)
     crawl_truncation_anomalies: list[dict[str, Any]] = field(default_factory=list)
+    corpus_coverage_anomalies: list[dict[str, Any]] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -1049,6 +1054,7 @@ def render_nda_questions(
     *,
     exhaustions: Mapping[tuple[str, str], Any] | None = None,
     crawl_truncation_anomalies: Iterable[Mapping[str, Any]] | None = None,
+    corpus_coverage_anomalies: Iterable[Mapping[str, Any]] | None = None,
 ) -> Path:
     """Пишет ``nda_questions.csv`` — все ``❓`` (продукт, параметр, исчерпанные контуры).
 
@@ -1065,6 +1071,11 @@ def render_nda_questions(
     строками в тот же операторский CSV (колонка ``anomaly_kind="crawl_truncation"``,
     ``status="crawl_truncation"``), чтобы человек их увидел, а не только машина. Как и I3,
     это **наблюдение**, не запуск и не жёсткая блокировка.
+
+    **Ф0.** ``corpus_coverage_anomalies`` — неполное покрытие корпуса продукта
+    (:func:`collect_corpus_coverage_anomalies`); строки ``anomaly_kind="corpus_incomplete"``
+    несут blocked counts и флаг ``complete`` рядом с truncation-аномалией. Статус ячейки
+    не меняется (I12): ``pending``-кандидат — видимый исход, CSV — аудит-след.
     """
     rows: list[dict[str, Any]] = []
     for cell in _cell_list(cells):
@@ -1094,6 +1105,18 @@ def render_nda_questions(
                 "protocol_status": "",
                 "i3_anomaly": anomaly.get("reason", ""),
                 "anomaly_kind": "crawl_truncation",
+            }
+        )
+    for anomaly in corpus_coverage_anomalies or ():
+        rows.append(
+            {
+                "product_id": anomaly.get("product_id", ""),
+                "param_id": anomaly.get("param_id", ""),
+                "status": "corpus_incomplete",
+                "exhausted_contours": "",
+                "protocol_status": "",
+                "i3_anomaly": anomaly.get("reason", ""),
+                "anomaly_kind": "corpus_incomplete",
             }
         )
     return _write_csv(
@@ -1212,6 +1235,101 @@ def collect_crawl_truncation_anomalies(
                     ),
                 }
             )
+    return sorted(anomalies, key=lambda row: (row["product_id"], row["param_id"]))
+
+
+def _coverage_records(
+    coverage: Mapping[str, Any] | Iterable[Any] | None,
+) -> list[CorpusCoverage]:
+    """Нормализует покрытие к списку ``CorpusCoverage`` (mapping/iterable/None)."""
+    if coverage is None:
+        return []
+    values = coverage.values() if isinstance(coverage, Mapping) else coverage
+    records = [value for value in values if isinstance(value, CorpusCoverage)]
+    return sorted(records, key=lambda record: record.product_id)
+
+
+def _coverage_anomaly(
+    product_id: str, coverage: CorpusCoverage, *, param_id: str = ""
+) -> dict[str, Any]:
+    """Строка аномалии «корпус продукта неполон» (Ф0) — с blocked counts."""
+    blocked = dict(sorted(coverage.blocked.items()))
+    return {
+        "product_id": product_id,
+        "param_id": param_id,
+        "reason": (
+            "Ф0: неполное покрытие корпуса — complete=False, "
+            f"blocked={blocked or '{}'}, "
+            f"observed/expected={coverage.observed_sources}/{coverage.expected_sources}, "
+            f"truncated={coverage.truncated}; ❌ без человеческой аттестации "
+            "(scope_attested_by) не публикуется (I2c)"
+        ),
+        "complete": False,
+        "blocked": blocked,
+        "expected_sources": coverage.expected_sources,
+        "observed_sources": coverage.observed_sources,
+        "truncated": coverage.truncated,
+    }
+
+
+def collect_corpus_coverage_anomalies(
+    cells: Iterable[Any],
+    coverage: Mapping[str, Any] | Iterable[Any] | None = None,
+) -> list[dict[str, Any]]:
+    """Ф0: аномалии неполного покрытия корпуса — per-product, детерминированно.
+
+    Источник — явно переданное покрытие (``CorpusCoverage``), если оно есть. Иначе факт
+    извлекается из самих ячеек: гейт ``❌`` записывает в absence-evidence машинно-читаемый
+    аудит (``corpus_complete=False``/``corpus_blocked``), поэтому неполный корпус виден в
+    отчёте без чтения БД. Аномалия — **наблюдение** (I12): статус ячейки не меняется,
+    ``pending``-кандидат остаётся видимым исходом.
+    """
+    records = _coverage_records(coverage)
+    known_products = {record.product_id for record in records}
+    anomalies = [
+        _coverage_anomaly(record.product_id, record)
+        for record in records
+        if not record.complete
+    ]
+
+    derived: dict[str, dict[str, Any]] = {}
+    for cell in _cell_list(cells):
+        product_id = str(getattr(cell, "product_id", "") or "")
+        if not product_id or product_id in known_products:
+            continue
+        entries = list(getattr(cell, "absence_evidence", None) or [])
+        audit = next(
+            (
+                entry
+                for entry in entries
+                if isinstance(entry, Mapping) and entry.get("corpus_complete") is False
+            ),
+            None,
+        )
+        if audit is None:
+            continue
+        blocked = dict(sorted((audit.get("corpus_blocked") or {}).items()))
+        derived.setdefault(
+            product_id,
+            {
+                "product_id": product_id,
+                "param_id": str(getattr(cell, "param_id", "") or ""),
+                "reason": (
+                    "Ф0: неполное покрытие корпуса — complete=False, "
+                    f"blocked={blocked or '{}'}, "
+                    f"observed/expected={audit.get('corpus_observed_sources')}/"
+                    f"{audit.get('corpus_expected_sources')}, "
+                    f"truncated={audit.get('corpus_truncated')}; "
+                    "❌ без человеческой аттестации не публикуется (I2c)"
+                ),
+                "complete": False,
+                "blocked": blocked,
+                "expected_sources": audit.get("corpus_expected_sources"),
+                "observed_sources": audit.get("corpus_observed_sources"),
+                "truncated": audit.get("corpus_truncated"),
+            },
+        )
+    anomalies.extend(derived[key] for key in sorted(derived))
     return sorted(anomalies, key=lambda row: (row["product_id"], row["param_id"]))
 
 
@@ -1418,6 +1536,8 @@ def write_reports(
     prev_manifest: RunManifest | None = None,
     prev_cells: Iterable[Any] | None = None,
     exhaustions: Mapping[tuple[str, str], Any] | None = None,
+    coverage: Mapping[str, Any] | Iterable[Any] | None = None,
+    store: Any | None = None,
 ) -> Artifacts:
     """Пишет все артефакты прогона в ``{out_dir}/{run_id}/outputs/`` (Ш9, 03 §A.2).
 
@@ -1427,6 +1547,10 @@ def write_reports(
         них пишется заглушка).
     :param exhaustions: карта ``(product_id, param_id) → ProtocolExhaustion`` (§5/S13);
         прокидывается в ``nda_questions`` и используется для сбора аномалий I3.
+    :param coverage: покрытие корпуса (``CorpusCoverage`` mapping/iterable, Ф0). Если не
+        задано и передан ``store`` — читается из БД (``iter_corpus_coverage``). Без обоих
+        факт извлекается из absence-evidence ячеек (гейт ``❌`` пишет аудит покрытия).
+    :param store: опциональный ``StorePort`` — источник per-product покрытия (Ф0).
 
     G4/I11: вызывается :func:`core.pipeline.compute.assert_publishable` (предупреждение);
     при полностью отсутствующем Coverage (``coverage.defined is False`` либо пустой
@@ -1467,11 +1591,26 @@ def write_reports(
         cell_list, truncated_products
     )
 
+    # Ф0: per-product покрытие корпуса. Явный аргумент → чтение из store (если дан) →
+    # извлечение из absence-evidence ячеек (гейт ❌ пишет corpus_complete=False).
+    coverage_source = coverage
+    if coverage_source is None and store is not None:
+        reader = getattr(store, "iter_corpus_coverage", None)
+        if callable(reader):
+            try:
+                coverage_source = list(reader(run_id))
+            except Exception:  # noqa: BLE001 — покрытие информационно, отчёт не роняем
+                coverage_source = None
+    coverage_anomalies = collect_corpus_coverage_anomalies(
+        cell_list, coverage_source
+    )
+
     nda_questions = render_nda_questions(
         cell_list,
         outputs_dir / "nda_questions.csv",
         exhaustions=exhaustions,
         crawl_truncation_anomalies=truncation_anomalies,
+        corpus_coverage_anomalies=coverage_anomalies,
     )
     preliminary = render_preliminary_findings(
         cell_list, outputs_dir / "preliminary_findings.xlsx"
@@ -1489,6 +1628,7 @@ def write_reports(
 
     anomalies = collect_i3_anomalies(cell_list, exhaustions)
     anomalies.extend(truncation_anomalies)
+    anomalies.extend(coverage_anomalies)
 
     return Artifacts(
         battle_card=battle_card,
@@ -1498,4 +1638,5 @@ def write_reports(
         manifest=manifest_path,
         i3_anomalies=anomalies,
         crawl_truncation_anomalies=truncation_anomalies,
+        corpus_coverage_anomalies=coverage_anomalies,
     )

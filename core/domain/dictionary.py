@@ -18,6 +18,7 @@ from core.domain.enums import (
     CrawlStrategy,
     DocumentLevel,
     ExtractionRoute,
+    FailureKind,
     FetchMode,
     Gate,
     RankingPolicy,
@@ -96,6 +97,8 @@ def assert_dictionary_integrity(path: str | Path) -> None:
         "crawl_session_status": {v.value for v in CrawlSessionStatus},
         "crawl_item_status": {v.value for v in CrawlItemStatus},
         "skip_reason": {v.value for v in SkipReason},
+        # Ф0: классы сбоя краула/конвейера — иначе словарь и enum расходятся молча.
+        "failure_kind": {v.value for v in FailureKind},
     }
     for section, expected in checks.items():
         actual = set(data[section])

@@ -7,6 +7,7 @@ from pathlib import Path
 from core.domain import (
     CapabilityPolicy,
     CrawlStrategy,
+    FailureKind,
     Gate,
     RankingPolicy,
     SearchKind,
@@ -44,3 +45,5 @@ def test_new_enums_match_dictionary() -> None:
     assert set(data["stale_reason"]) == {v.value for v in StaleReason}
     assert set(data["crawl_strategy"]) == {v.value for v in CrawlStrategy}
     assert set(data["skip_reason"]) == {v.value for v in SkipReason}
+    # Ф0: классы сбоя краула/конвейера — словарь и enum не могут разойтись молча.
+    assert set(data["failure_kind"]) == {v.value for v in FailureKind}

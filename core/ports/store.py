@@ -19,6 +19,7 @@ from core.domain import (
     Cell,
     CellEvidence,
     CorpusChunk,
+    CorpusCoverage,
     CorpusDoc,
     CrawlItemStatus,
     CrawlSession,
@@ -199,6 +200,29 @@ class StorePort(Protocol):
         Не задевает счётчики/метаданные сеанса — безопасно для провенанса, вычисленного
         по элементам после финализации.
         """
+        ...
+
+    # -- покрытие корпуса (Ф0: гейт ❌) ----------------------------------- #
+    def save_corpus_coverage(self, run_id: str, coverage: CorpusCoverage) -> None:
+        """Идемпотентный upsert покрытия корпуса по PK ``(run_id, product_id)``.
+
+        Покрытие — производный факт от персистентных элементов краула и записей об
+        усечении; повторная запись того же продукта перекрывает прежнюю.
+        """
+        ...
+
+    def read_corpus_coverage(
+        self, run_id: str, product_id: str
+    ) -> CorpusCoverage | None:
+        """Читает покрытие продукта; ``None``, если записи нет (legacy/без краула).
+
+        ``None`` означает «покрытие неизвестно», а не «полное»: вызывающий обязан
+        сохранить прежнее поведение, а не выдумывать ``complete=True``.
+        """
+        ...
+
+    def iter_corpus_coverage(self, run_id: str) -> Iterator[CorpusCoverage]:
+        """Итерирует покрытие прогона; детерминированный порядок ``product_id``."""
         ...
 
     # -- чтение ---------------------------------------------------------- #

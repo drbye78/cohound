@@ -92,6 +92,7 @@ def run(args: argparse.Namespace) -> int:
         manifest=manifest,
         out_dir=out_dir,
         run_id=run_id,
+        store=store,
     )
     partial = _manifest_partial(manifest)
     if partial:

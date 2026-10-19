@@ -28,6 +28,7 @@ from core.domain.models import (
     BaselineRow,
     Cell,
     CellEvidence,
+    CorpusCoverage,
     ProtocolExhaustion,
     Satellite,
     UpstreamRef,
@@ -190,6 +191,41 @@ def check_cell(cell: Cell) -> list[Violation]:
                     )
 
     return violations
+
+
+def check_absence_coverage(
+    cell: Cell, coverage: CorpusCoverage | None
+) -> list[Violation]:
+    """Ф0/§2.3: ``❌`` при неполном покрытии корпуса требует человеческой аттестации.
+
+    Дыра, которую закрывает проверка: заблокированный источник даёт тонкий корпус →
+    оценщик может выдать ABSENT → ``❌`` публикуется как доказательство отсутствия.
+    Для ``absence_rule=explicit`` правило отсутствия не требует ``source_scope``, поэтому
+    единственный барьер — человеческая аттестация (``scope_attested_by``).
+
+    Возвращает нарушение ``I2c`` для ``evaluated ❌`` при ``coverage.complete is False``
+    без ``scope_attested_by``. Прочие правила отсутствия (``parameter_reference``/
+    ``distribution_absence``/``registry_absence``) уже требуют ``exhaustive`` (I2b) и здесь
+    не дублируются. ``coverage=None`` — записи покрытия нет (legacy/без краула): проверка
+    неприменима, поведение прежнее.
+    """
+    if coverage is None or coverage.complete:
+        return []
+    if cell.state is not CellState.EVALUATED or cell.status is not Status.ABSENT:
+        return []
+    if cell.absence_rule is not AbsenceRuleType.EXPLICIT:
+        return []
+    attested = any(bool(entry.get("scope_attested_by")) for entry in cell.absence_evidence)
+    if attested:
+        return []
+    return [
+        _violation(
+            "I2c",
+            "I2c: ❌ при неполном покрытии корпуса требует scope_attested_by "
+            "(человеческой аттестации); иначе это не доказательство отсутствия",
+            "absence_evidence",
+        )
+    ]
 
 
 def check_evidence(ev: CellEvidence, cell: Cell | None = None) -> list[Violation]:

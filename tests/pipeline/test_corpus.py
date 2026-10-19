@@ -26,6 +26,7 @@ from core.domain import (
     CatalogRow,
     Cohort,
     CohortEntry,
+    CorpusDoc,
     CrawlItemStatus,
     CrawlRunConfig,
     CrawlSessionItem,
@@ -43,6 +44,7 @@ from core.pipeline.corpus import (
     _derive_index_build_id,
     _work_set_idempotency_key,
     build_corpus,
+    derive_corpus_coverage,
 )
 from core.pipeline.crawl_session import default_session_id
 from core.ports.crawl_executor import (
@@ -701,6 +703,143 @@ def test_store_persistence_round_trip(tmp_path: Path) -> None:
             assert port_chunk is not None
             assert port_chunk.content_hash == chunk["content_hash"]
             assert port_chunk.content_hash
+    finally:
+        store.close()
+
+
+class _AbortCrawl(BaseException):
+    """Жёсткое прерывание прогона (аналог OOM/SIGKILL): ``Exception``-изоляция его не ловит."""
+
+
+class _AbortOnUrlCrawler(_Crawler):
+    """Краулер, «убивающий» прогон на выбранном URL (после коммита предыдущего)."""
+
+    def __init__(self, pages: dict[str, bytes], abort_url: str) -> None:
+        super().__init__(pages)
+        self.abort_url = abort_url
+
+    def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:
+        if url == self.abort_url:
+            raise _AbortCrawl(url)
+        return super().fetch(url, plan)
+
+
+class _FlakyDocStore(SqliteStore):
+    """Store, отказывающий в ``upsert_corpus_doc`` для выбранных ``doc_id``."""
+
+    def __init__(self, fail_doc_ids: set[str]) -> None:
+        super().__init__(":memory:")
+        self.fail_doc_ids = set(fail_doc_ids)
+        self.doc_attempts: list[str] = []
+
+    def upsert_corpus_doc(self, doc: CorpusDoc) -> None:
+        self.doc_attempts.append(doc.doc_id)
+        if doc.doc_id in self.fail_doc_ids:
+            raise RuntimeError("store unavailable")
+        super().upsert_corpus_doc(doc)
+
+
+def test_docs_persisted_mid_product_survive_abort(tmp_path: Path) -> None:
+    """Жёсткое прерывание посреди продукта не теряет уже закоммиченные ``corpus_docs``.
+
+    Первый seed-root продукта коммитится и персистится сразу; на втором краулер
+    «убивает» прогон. Строка первого документа обязана уже быть в БД вместе с полным
+    retention-провенансом — иначе resume после OOM повторно извлекал бы весь продукт.
+    """
+    store = SqliteStore(":memory:")
+    payload = b"committed before abort"
+    crawler = _AbortOnUrlCrawler({URL_P1_A: payload}, abort_url=URL_P1_B)
+    try:
+        with pytest.raises(_AbortCrawl):
+            _build(
+                tmp_path,
+                pages={},
+                urls={"p1": [URL_P1_A, URL_P1_B]},
+                store=store,
+                crawler=crawler,
+            )
+
+        rows = list(store.conn.execute("SELECT * FROM corpus_docs"))
+        assert len(rows) == 1
+        row = rows[0]
+        expected_id = f"p1:{content_hash(payload)}"
+        assert row["doc_id"] == expected_id
+        assert row["product_id"] == "p1"
+        assert row["url"] == URL_P1_A
+        assert row["fetched_at"] == TS
+        assert row["content_hash"] == content_hash(payload)
+        assert row["extractor_version"] == "extractor-1"
+        assert row["render_mode"] == "http"
+        assert row["lang"] == "en"
+        raw_path = Path(row["raw_path"])
+        assert raw_path.is_file()
+        assert raw_path.read_bytes() == payload
+        # Второй корень не обработан — прерывание действительно посреди продукта.
+        assert [url for url, _ in crawler.calls] == [URL_P1_A]
+    finally:
+        store.close()
+
+
+def test_resume_upsert_is_idempotent(tmp_path: Path) -> None:
+    """Повторный коммит того же документа (resume) даёт ровно одну строку ``corpus_docs``."""
+    store = SqliteStore(":memory:")
+    _make_run(store)
+    payload = b"same bytes"
+    doc_id = f"p1:{content_hash(payload)}"
+    try:
+        first = _build(
+            tmp_path,
+            pages={URL_P1_A: payload},
+            urls={"p1": [URL_P1_A]},
+            store=store,
+            run_id=RUN_ID,
+        )
+        assert _build_of(first).chunk_count == 1
+
+        # Resume из retained raw: краулер не должен вызываться вовсе (``_BombCrawler``).
+        second = _build(
+            tmp_path,
+            pages={URL_P1_A: payload},
+            urls={"p1": [URL_P1_A]},
+            store=store,
+            run_id=RUN_ID,
+            crawler=_BombCrawler({URL_P1_A: payload}),
+        )
+        assert _build_of(second).chunk_count == 1
+
+        rows = list(
+            store.conn.execute(
+                "SELECT doc_id, raw_path FROM corpus_docs WHERE doc_id = ?", (doc_id,)
+            )
+        )
+        assert len(rows) == 1
+        assert Path(rows[0]["raw_path"]).read_bytes() == payload
+    finally:
+        store.close()
+
+
+def test_upsert_failure_is_isolated_and_others_persist(tmp_path: Path) -> None:
+    """Сбой ``upsert_corpus_doc`` одного документа → ``errors``; остальные записаны."""
+    bad = b"bad doc"
+    good = b"good doc"
+    bad_id = f"p1:{content_hash(bad)}"
+    good_id = f"p1:{content_hash(good)}"
+    store = _FlakyDocStore(fail_doc_ids={bad_id})
+    try:
+        result = _build(
+            tmp_path,
+            pages={URL_P1_A: bad, URL_P1_B: good},
+            urls={"p1": [URL_P1_A, URL_P1_B]},
+            store=store,
+        )
+
+        assert any(
+            "upsert_corpus_doc" in err and bad_id in err for err in result.errors
+        )
+        rows = list(store.conn.execute("SELECT doc_id FROM corpus_docs"))
+        assert [row["doc_id"] for row in rows] == [good_id]
+        # Каждый документ прошёл через upsert ровно один раз: финального дубля-дампа нет.
+        assert store.doc_attempts == [bad_id, good_id]
     finally:
         store.close()
 
@@ -3847,6 +3986,101 @@ def test_split_polls_until_terminal(tmp_path: Path) -> None:
         # Раунд 1: pending → пауза → completed. Раунд 2: уже терминально (без паузы).
         assert executor.status_calls == ["pending", "completed", "completed"]
         assert slept == [0.5]
+    finally:
+        store.close()
+
+
+# ---------------------------------------------------------------------------
+# Ф0: покрытие корпуса продукта
+# ---------------------------------------------------------------------------
+
+
+def _session_item(
+    url: str,
+    status: CrawlItemStatus,
+    *,
+    error_kind: str | None = None,
+) -> CrawlSessionItem:
+    """Элемент сеанса для чистого теста деривации покрытия."""
+    return CrawlSessionItem(
+        session_id="crawl:run",
+        product_id="p1",
+        url=url,
+        status=status,
+        error_kind=error_kind,
+    )
+
+
+def test_derive_corpus_coverage_counts_blocked_sources() -> None:
+    """Ф0: failed-исходы считаются по каноническому ``error_kind``, fetched — observed."""
+    items = [
+        _session_item("https://a.test/1", CrawlItemStatus.FETCHED),
+        _session_item("https://a.test/2", CrawlItemStatus.FETCHED),
+        _session_item("https://a.test/3", CrawlItemStatus.FETCHED),
+        _session_item(
+            "https://a.test/4",
+            CrawlItemStatus.FAILED,
+            error_kind=FailureKind.ROBOTS_DISALLOW.value,
+        ),
+        _session_item(
+            "https://a.test/5",
+            CrawlItemStatus.FAILED,
+            error_kind=FailureKind.ROBOTS_DISALLOW.value,
+        ),
+        _session_item("https://a.test/6", CrawlItemStatus.CANCELLED),
+    ]
+    coverage = derive_corpus_coverage(
+        product_id="p1",
+        items=items,
+        truncated=False,
+        computed_at="2026-01-01T00:00:00+00:00",
+    )
+
+    assert coverage.complete is False
+    assert coverage.expected_sources == 6
+    assert coverage.observed_sources == 3
+    assert coverage.blocked == {"robots_disallow": 2}
+    assert coverage.truncated is False
+
+
+def test_truncation_forces_incomplete_even_without_failures() -> None:
+    """Ф0: политическое усечение делает корпус неполным при нуле сбоев."""
+    items = [
+        _session_item("https://a.test/1", CrawlItemStatus.FETCHED),
+        _session_item("https://a.test/2", CrawlItemStatus.FETCHED),
+    ]
+    coverage = derive_corpus_coverage(
+        product_id="p1",
+        items=items,
+        truncated=True,
+        computed_at="2026-01-01T00:00:00+00:00",
+    )
+
+    assert coverage.blocked == {}
+    assert coverage.observed_sources == coverage.expected_sources == 2
+    assert coverage.truncated is True
+    assert coverage.complete is False
+
+
+def test_build_corpus_persists_product_coverage(tmp_path: Path) -> None:
+    """Ф0: фаза корпуса персистит покрытие по персистентным элементам сеанса."""
+    store = SqliteStore(":memory:")
+    try:
+        _make_run(store)
+        result = _build(
+            tmp_path,
+            pages={URL_P1_A: b"page one"},
+            urls={"p1": [URL_P1_A]},
+            store=store,
+            run_id=RUN_ID,
+        )
+        assert result.status == "ok"
+        coverage = store.read_corpus_coverage(RUN_ID, "p1")
+        assert coverage is not None
+        assert coverage.complete is True
+        assert coverage.expected_sources == coverage.observed_sources == 1
+        assert coverage.blocked == {}
+        assert coverage.truncated is False
     finally:
         store.close()
 
