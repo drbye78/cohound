@@ -14,9 +14,12 @@ P7 (полнота корпуса): добавлены пины на бюдже�
 на per-site ``sitemap`` (включая ловушку матчинга ``sbertech.ru``) и на блок ``crawl:``
 в эмитируемом ``run.yaml`` (дрейф «файл правили руками, генератор — нет»).
 
-F1/F10 (I17): host-корни мульти-продуктовых сайтов (``sbertech.ru``, ``gaz-is.ru``) не
-discover'ят (``max_depth == 0``), обход — на path-ключе продукта; sitemap снят с
-path-ключей, где он почти no-op (``platformv.sbertech.ru``, ``tantorlabs.ru/products/dbms``).
+F1/F10 (I17): host-корни мульти-продуктовых сайтов (``sbertech.ru``, ``gaz-is.ru``,
+``wiki.astralinux.ru``) не discover'ят (``max_depth == 0``) и не объявляют host-wide
+sitemap; обход — на path-ключе продукта. Sitemap снят с path-ключей, где он почти no-op
+(``platformv.sbertech.ru``, ``tantorlabs.ru/products/dbms``). Инвариант закреплён
+отдельным тестом ``test_i17_multi_product_host_root_keys_never_discover`` (и на on-disk
+конфиге, и на выходе генератора), чтобы регрессия не вернулась молча.
 """
 
 from __future__ import annotations
@@ -41,6 +44,10 @@ ON_DISK_PROFILES = ROOT / "packages" / "ru-pg-dbms" / "domain_profiles.yaml"
 ON_DISK_RUN = ROOT / "packages" / "ru-pg-dbms" / "run.yaml"
 CORPUS_URLS = ROOT / "packages" / "ru-pg-dbms" / "sources" / "corpus_urls.yaml"
 
+#: Инвариант I17: host-корни мульти-продуктовых сайтов не discover'ят (max_depth 0)
+#: и не объявляют host-wide sitemap. Обход живёт на path-ключе продукта.
+MULTI_PRODUCT_HOST_ROOTS = ("sbertech.ru", "gaz-is.ru", "wiki.astralinux.ru")
+
 #: Допустимые поля профиля (строгая схема ``DomainProfile``; ``extra="forbid"``).
 PROFILE_FIELDS = {
     "fetch",
@@ -62,7 +69,7 @@ PROFILE_FIELDS = {
 RUN_CRAWL_MAX_DEPTH = 8
 RUN_CRAWL_MAX_DOCUMENTS = 300
 RUN_CRAWL_MAX_WORKERS = 2
-RUN_CRAWL_EXTRACT_WORKERS = 2
+RUN_CRAWL_EXTRACT_WORKERS = 1
 RUN_CRAWL_EXCLUDE_PATHS = [
     "/blog/*",
     "/news/*",
@@ -185,7 +192,7 @@ def test_run_crawl_axes_accepted_by_strict_loader() -> None:
     assert crawl.max_documents == RUN_CRAWL_MAX_DOCUMENTS
     assert crawl.max_workers == RUN_CRAWL_MAX_WORKERS
     assert crawl.extract_workers == RUN_CRAWL_EXTRACT_WORKERS
-    assert crawl.document_level is DocumentLevel.FULL
+    assert crawl.document_level is DocumentLevel.LAYOUT_TABLES
     assert list(crawl.exclude_paths or []) == RUN_CRAWL_EXCLUDE_PATHS
     assert list(crawl.exclude_documents or []) == RUN_CRAWL_EXCLUDE_DOCUMENTS
 
@@ -193,27 +200,29 @@ def test_run_crawl_axes_accepted_by_strict_loader() -> None:
 @pytest.mark.parametrize(
     ("url", "max_depth", "max_documents"),
     [
-        # seed-корень портала /docs без sitemap — бюджет и есть ограничитель.
-        ("https://postgrespro.ru/docs/16/", 8, 500),
-        # 23 URL, плоско.
+        # seed-корень портала /docs без sitemap — бюджет-потолок для крупного docs-портала.
+        ("https://postgrespro.ru/docs/16/", 8, 800),
+        # 23 URL, плоско — 60 покрывает с запасом.
         ("https://pangolin.sbertech.ru/", 2, 60),
         # Host-root мульти-продуктового сайта: discovery запрещён (I17) — только корень.
         ("https://www.gaz-is.ru/", 0, 10),
         # Продуктовый путь jatoba (реальная раскладка сайта — /produkty/...) — обход уместен.
         ("https://www.gaz-is.ru/produkty/inform-sistemy/subd-jatoba/", 8, 200),
-        # path-ключ приоритетнее host-ключа (sitemap только здесь).
-        ("https://sbertech.ru/documents/platform-v-pangolin-se", 2, 400),
+        # path-ключ приоритетнее host-ключа (sitemap только здесь); в scope seed'а ~22 URL
+        # pangolin (502 чужих документа отсекает scope-фильтр), 60 — запас.
+        ("https://sbertech.ru/documents/platform-v-pangolin-se", 2, 60),
         # host-ключ: без sitemap и без discovery (иначе BFS тянет 89 продуктов, I17).
         ("https://sbertech.ru/", 0, 10),
         # seed — глубокий путь, 8 уровней запаса.
         ("https://platformv.sbertech.ru/products/pangolin", 8, 300),
-        # path-ключ внутри sitemap-хоста.
+        # path-ключ внутри sitemap-хоста; весь хост — 283 URL.
         ("https://tantorlabs.ru/products/dbms/", 8, 200),
-        # host-ключ: 3 уровня on-host, off-host фиды не берём.
-        ("https://tantorlabs.ru/", 3, 200),
+        # host-ключ: 3 уровня on-host, 283 URL ⇒ 300 с запасом.
+        ("https://tantorlabs.ru/", 3, 300),
+        # 2 URL (1 PDF) ⇒ 50 покрывает сайт.
         ("https://jatoba.ru/", 2, 50),
-        # sitemap 404 → глубина как ориентир.
-        ("https://docs.tantorlabs.ru/", 8, 300),
+        # sitemap 404, крупный docs-хост ⇒ 800 — потолок против усечения.
+        ("https://docs.tantorlabs.ru/", 8, 800),
         # Host-root общего справочного центра Astra — не продуктовый корень (I17).
         ("https://wiki.astralinux.ru/", 0, 10),
         # Тантор-контент — Confluence-пространство TANDOCS (стабильный префикс /tandocs).
@@ -234,7 +243,7 @@ def test_resolve_crawl_limits_per_site(url: str, max_depth: int, max_documents: 
     # Прочие оси наследуются из run-слоя (site-слой их не переопределяет).
     assert limits.max_workers == RUN_CRAWL_MAX_WORKERS
     assert limits.extract_workers == RUN_CRAWL_EXTRACT_WORKERS
-    assert limits.document_level is DocumentLevel.FULL
+    assert limits.document_level is DocumentLevel.LAYOUT_TABLES
     assert list(limits.exclude_paths) == RUN_CRAWL_EXCLUDE_PATHS
     assert list(limits.exclude_documents) == RUN_CRAWL_EXCLUDE_DOCUMENTS
 
@@ -336,7 +345,35 @@ def test_sitemap_declared_only_on_most_specific_sbertech_key() -> None:
     assert path_profile is not None
     assert path_profile.sitemap == "https://sbertech.ru/sitemap.xml"
     assert path_profile.max_depth == 2
-    assert path_profile.max_documents == 400
+    assert path_profile.max_documents == 60
+
+
+@pytest.mark.parametrize("host", MULTI_PRODUCT_HOST_ROOTS)
+def test_i17_multi_product_host_root_keys_never_discover(host: str) -> None:
+    """Инвариант I17: host-корень мульти-продуктового сайта не обходит и без sitemap.
+
+    Регрессия возвращалась дважды: сначала через host-wide sitemap, затем через BFS
+    (``sbertech.ru`` при ``max_depth: 2`` доходил до ``/documents/{slug}/{version}`` —
+    501 URL на 89 продуктов). Тест держит инвариант одновременно на on-disk конфиге и
+    на выходе генератора, поэтому ни ручная правка, ни дрейф генератора не пройдут молча.
+    """
+    module = _load_generator()
+    generated = {
+        key: DomainProfile.model_validate(raw)
+        for key, raw in module.build_domain_profiles().items()
+    }
+    on_disk = load_domain_profiles(ON_DISK_PROFILES)
+
+    for source, profiles in (("generator", generated), ("on-disk", on_disk)):
+        assert host in profiles, f"{source}: host-ключ {host} пропал"
+        profile = profiles[host]
+        assert profile.max_depth == 0, (
+            f"{source}: host-корень {host} не должен discover'ить (I17): "
+            f"max_depth={profile.max_depth}"
+        )
+        assert profile.sitemap is None, (
+            f"{source}: host-wide sitemap на {host} затянет соседние продукты (I17)"
+        )
 
 
 def test_noop_path_sitemaps_dropped_host_sitemaps_kept() -> None:

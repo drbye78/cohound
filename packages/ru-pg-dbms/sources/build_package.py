@@ -854,6 +854,14 @@ def build_domain_profiles() -> dict[str, dict[str, object]]:
     ``tantorlabs.ru/products/dbms`` — 3 из 58) и лишь порождает запись об отказе на каждом
     прогоне, поэтому sitemap объявлен на host-ключах, а не на этих path-ключах.
 
+    **Бюджеты — по измеренному размеру, а не «круглым» числом.** Где sitemap даёт точный
+    размер, ``max_documents`` покрывает его с запасом (``tantorlabs.ru`` — 283 URL ⇒ 300;
+    ``sbertech.ru/documents`` — в scope seed'а ~22 URL pangolin ⇒ 60). Где сайт крошечный,
+    бюджет не раздувается (``jatoba.ru`` — 2 URL ⇒ 50, ``pangolin.sbertech.ru`` — 23 URL
+    ⇒ 60). Где размер не измерен (sitemap 404/500), бюджет — явный потолок, а не заявка
+    на полноту (``postgrespro.ru`` и ``docs.tantorlabs.ru`` — 800; ``gaz-is.ru`` product —
+    200). Host-корни при ``max_depth: 0`` получают 10: обходится только сам корень.
+
     Набор ключей совпадает с эталонным ``packages/ru-pg-dbms/domain_profiles.yaml``
     (повторный прогон генератора идемпотентен и не затирает домены).
 
@@ -865,10 +873,11 @@ def build_domain_profiles() -> dict[str, dict[str, object]]:
             "fetch": "http",
             "extract": "auto",
             "max_depth": 8,
-            "max_documents": 300,
+            "max_documents": 800,
         },
         # Host-root seed (https://www.gaz-is.ru/) — корень компании, а не продукта:
         # любой обход с depth > 0 затянет в партицию jatoba чужие продукты (I17).
+        # При depth 0 обходится только сам корень ⇒ бюджет 10 (как у прочих host-корней).
         "gaz-is.ru": {
             "fetch": "http",
             "extract": "auto",
@@ -879,12 +888,14 @@ def build_domain_profiles() -> dict[str, dict[str, object]]:
         # перечисляет /produkty/inform-sistemy/subd-jotoba, он 302 → .../subd-jatoba).
         # Прежний seed /products/jatoba/ отдавал 404 и исправлен в паспорте jatoba
         # (corpus_urls.yaml регенерирован). Внутри поддерева обход уместен.
+        # Замер 2026-10: с лендинга продукта в scope ведут 2 URL; 200 — потолок с запасом.
         "gaz-is.ru/produkty/inform-sistemy/subd-jatoba": {
             "fetch": "http",
             "extract": "auto",
             "max_depth": 8,
             "max_documents": 200,
         },
+        # 2 URL, из них 1 PDF; sitemap даёт depth-0 seeds, max глубина пути — 1.
         "jatoba.ru": {
             "fetch": "http",
             "extract": "auto",
@@ -892,6 +903,7 @@ def build_domain_profiles() -> dict[str, dict[str, object]]:
             "max_documents": 50,
             "sitemap": "https://jatoba.ru/sitemap.xml",
         },
+        # 23 URL, плоско — depth 1 + один хоп на документ; 60 покрывает 23 с запасом.
         "pangolin.sbertech.ru": {
             "fetch": "browser",
             "extract": "auto",
@@ -910,11 +922,13 @@ def build_domain_profiles() -> dict[str, dict[str, object]]:
             # Sitemap намеренно НЕ задан: seed — глубокий путь внутри host-wide sitemap
             # (801 <loc>, в scope 1) ⇒ почти no-op плюс запись об отказе на каждом прогоне.
         },
+        # Sitemap 404 (advertised) ⇒ размер не измерен; 800 — потолок для крупного
+        # docs-портала (несколько версий документации), а не заявка на полноту.
         "postgrespro.ru": {
             "fetch": "http",
             "extract": "auto",
             "max_depth": 8,
-            "max_documents": 500,
+            "max_documents": 800,
         },
         # Sitemap намеренно НЕ на host-ключе (см. ловушку матчинга в докстринге):
         # host-wide <loc> затянул бы другие продукты в партицию якоря (I17).
@@ -927,20 +941,24 @@ def build_domain_profiles() -> dict[str, dict[str, object]]:
             "max_depth": 0,
             "max_documents": 10,
         },
+        # Path-scope: из 748 <loc> host-wide sitemap 502 — /documents (501 документ + индекс)
+        # на 89 продуктов; фильтр scope (дефект B) оставляет 22 URL pangolin ⇒ 60 с запасом.
+        # Глубина 2: sitemap даёт subordinate seeds на depth 0, +1 хоп; depth 4 — no-op.
         "sbertech.ru/documents": {
             "fetch": "browser",
             "extract": "auto",
             "strategy": "honest",
             "max_depth": 2,
-            "max_documents": 400,
+            "max_documents": 60,
             "sitemap": "https://sbertech.ru/sitemap.xml",
         },
+        # 283 URL (sitemap-индекс: 58 <loc> + дочерние фиды), 3 уровня on-host; 300 — запас.
         "tantorlabs.ru": {
             "fetch": "browser",
             "extract": "auto",
             "strategy": "honest",
             "max_depth": 3,
-            "max_documents": 200,
+            "max_documents": 300,
             "sitemap": "https://tantorlabs.ru/sitemap.xml",
         },
         "tantorlabs.ru/products/dbms": {
@@ -951,7 +969,8 @@ def build_domain_profiles() -> dict[str, dict[str, object]]:
             "max_documents": 200,
             # Sitemap намеренно НЕ задан: path-scoped seed внутри host-wide sitemap
             # (58 <loc>, в scope 3) ⇒ почти no-op плюс запись об отказе на каждом прогоне.
-            # Host-ключ tantorlabs.ru свой sitemap сохраняет.
+            # Host-ключ tantorlabs.ru свой sitemap сохраняет. 200 — потолок продукта
+            # (весь хост — 283 URL), 800 размером не подтверждён.
         },
         # Host-root seed (https://wiki.astralinux.ru/) — корень общего справочного центра
         # Astra Linux, а не продукта: discovery с depth > 0 затянет в партицию tantor чужие
@@ -1257,8 +1276,8 @@ def main() -> int:
             "max_depth": 8,
             "max_documents": 300,
             "max_workers": 2,
-            "extract_workers": 2,
-            "document_level": "full",
+            "extract_workers": 1,
+            "document_level": "layout_tables",
             "exclude_paths": [
                 "/blog/*",
                 "/news/*",

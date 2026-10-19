@@ -22,15 +22,19 @@
 # продуктов (I17). Поэтому host-ключи мульти-продуктовых сайтов объявляются с max_depth 0
 # (только сама страница корня), а обход живёт на path-ключе продукта.
 docs.tantorlabs.ru:
-  # sitemap 404 → глубина как единственный ориентир.
+  # sitemap 404 (host 301 → tantorlabs.ru/docs/, sitemap → 404) → глубина как единственный
+  # ориентир. Это крупный docs-хост: лендинг /docs/ ссылается на 6 doc-деревьев (tdb,
+  # perseydb, tp, xdata, pipelinedb, patroni), поэтому 300 был заведомым усечением.
+  # 800 — потолок против усечения, а не заявленная полнота: размер не измерен.
   extract: auto
   fetch: http
   max_depth: 8
-  max_documents: 300
+  max_documents: 800
 gaz-is.ru:
   # Host-root seed (https://www.gaz-is.ru/) — корень компании, а не продукта: любой обход
   # с depth > 0 затянет в партицию jatoba чужие продукты (I17). Продуктовые страницы
-  # jatoba — на отдельном path-ключе ниже.
+  # jatoba — на отдельном path-ключе ниже. При depth 0 обходится только сам корень,
+  # поэтому бюджет 10 (как у остальных host-корней), а не 100.
   extract: auto
   fetch: http
   max_depth: 0
@@ -40,23 +44,28 @@ gaz-is.ru/produkty/inform-sistemy/subd-jatoba:
   # /produkty/inform-sistemy/subd-jotoba (старый слаг), он 302 → .../subd-jatoba.
   # Прежний seed /products/jatoba/ отдавал 404 и исправлен в паспорте jatoba
   # (corpus_urls.yaml регенерирован). Внутри поддерева обход уместен.
+  # Замер 2026-10: с лендинга продукта в scope ведут 2 URL (сам путь и .html-вариант),
+  # остальные ~168 ссылок — общесайтовое меню других продуктов. 200 — потолок с запасом
+  # на документы, а не заявленная полнота; 800 размером сайта не подтверждён.
   extract: auto
   fetch: http
   max_depth: 8
   max_documents: 200
 jatoba.ru:
-  # 2 URL, из них 1 PDF — бюджет заведомо покрывает сайт.
+  # 2 URL, из них 1 PDF — бюджет 50 заведомо покрывает сайт. Глубина 2: sitemap даёт
+  # depth-0 seeds, максимальная глубина пути на сайте — 1.
   extract: auto
   fetch: http
   max_depth: 2
   max_documents: 50
   sitemap: https://jatoba.ru/sitemap.xml
 pangolin.sbertech.ru:
+  # 23 URL, плоско — depth 1 + один хоп на документ. 60 покрывает 23 с запасом;
+  # 600/8 размером сайта не подтверждены.
   extract: auto
   fetch: browser
   max_depth: 2
   max_documents: 60
-  # 23 URL, плоско — depth 1 + один хоп на документ.
   sitemap: https://pangolin.sbertech.ru/sitemap.xml
   strategy: honest
   wait_for: () => document.body && document.body.innerText.length > 200
@@ -70,11 +79,13 @@ platformv.sbertech.ru:
   max_documents: 300
   strategy: honest
 postgrespro.ru:
-  # Портал /docs без sitemap (advertised → 404): бюджет и есть ограничитель.
+  # Портал /docs без sitemap (advertised → 404): размер не измерен, бюджет — потолок,
+  # а не заявленная полнота. 800 — потому что docs-портал крупный (несколько версий
+  # документации); живой прогон дошёл до 114 страниц и не был усечён бюджетом.
   extract: auto
   fetch: http
   max_depth: 8
-  max_documents: 500
+  max_documents: 800
 sbertech.ru:
   # Sitemap НАМЕРЕННО отсутствует на host-ключе. _sitemap_url_for(seed) резолвит самый
   # специфичный профиль, но для seed-корня https://sbertech.ru/ матчится именно этот ключ:
@@ -86,32 +97,40 @@ sbertech.ru:
   # на 89 продуктов, из которых pangolin только 22. Это та же утечка I17, что и через
   # sitemap, но BFS-путём (Frontier.in_scope матчит и поддомены). Документы pangolin
   # покрыты seed'ом /documents/platform-v-pangolin-se/ (path-ключ ниже).
+  # При depth 0 обходится только сам корень — бюджет 10, а не 100.
   extract: auto
   fetch: browser
   max_depth: 0
   max_documents: 10
   strategy: honest
 sbertech.ru/documents:
-  # Path-scope: 502 документа из 748 URL sitemap лежат в /documents/{slug}/{version},
-  # остальные <loc> отсекаются фильтром scope (дефект B).
+  # Path-scope: host-wide sitemap содержит 748 <loc>, из них 502 — /documents (501
+  # /documents/{slug}/{version} + индекс) на 89 продуктов. Фильтр scope (дефект B) оставляет
+  # только <loc> поддерева seed'а /documents/platform-v-pangolin-se/ — 22 URL pangolin;
+  # бюджет 60 покрывает их с запасом. 800 относился бы к 502 чужим документам, которых в
+  # этой партиции быть не должно (I17).
+  # Глубина 2 достаточна: sitemap даёт документы subordinate seeds на depth 0, +1 хоп;
+  # depth 4 покрытия не добавляет.
   extract: auto
   fetch: browser
   max_depth: 2
-  max_documents: 400
+  max_documents: 60
   sitemap: https://sbertech.ru/sitemap.xml
   strategy: honest
 tantorlabs.ru:
-  # 283 URL, 3 уровня on-host; sitemap — индекс фидов, off-host habr не берём.
+  # 283 URL (sitemap-индекс: 58 <loc> + дочерние фиды), 3 уровня on-host; sitemap —
+  # индекс фидов, off-host habr не берём. 300 покрывает 283 с запасом.
   extract: auto
   fetch: browser
   max_depth: 3
-  max_documents: 200
+  max_documents: 300
   sitemap: https://tantorlabs.ru/sitemap.xml
   strategy: honest
 tantorlabs.ru/products/dbms:
   # Seed — глубокий путь внутри sitemap-хоста ⇒ нужен запас глубины.
   # Sitemap намеренно не задан: path-scoped seed внутри host-wide sitemap (58 <loc>,
   # в scope 3) ⇒ почти no-op; host-ключ tantorlabs.ru свой sitemap сохраняет.
+  # 200 — потолок продукта; 800 не подтверждён (весь хост — 283 URL).
   extract: auto
   fetch: browser
   max_depth: 8
