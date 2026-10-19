@@ -26,6 +26,7 @@ from core.domain import (
     Citation,
     Cohort,
     CohortEntry,
+    CorpusCoverage,
     EvidenceType,
     Focus,
     InheritanceMode,
@@ -113,6 +114,18 @@ def _cfg() -> RunConfig:
 def store():
     with SqliteStore(":memory:") as s:
         s.create_run(RUN_ID, _cfg())
+        # MVP-1/O3: продукт плана без строки покрытия — аномалия; тесты прецедента
+        # проверяют оценку по корпусу, поэтому покрытие объявляется полным.
+        s.save_corpus_coverage(
+            RUN_ID,
+            CorpusCoverage(
+                product_id="p1",
+                complete=True,
+                expected_sources=1,
+                observed_sources=1,
+                computed_at="2026-01-01T00:00:00+00:00",
+            ),
+        )
         yield s
 
 

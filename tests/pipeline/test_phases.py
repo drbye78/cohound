@@ -662,6 +662,19 @@ def test_evaluate_phase_uses_retrieval_and_never_search() -> None:
         search=_BombSearch(),  # I18: не должен быть вызван
     )
     store = _store()
+    # MVP-1/O3: продукт плана обязан иметь строку покрытия (иначе — аномалия).
+    from core.domain import CorpusCoverage
+
+    store.save_corpus_coverage(
+        RUN_ID,
+        CorpusCoverage(
+            product_id="p1",
+            complete=True,
+            expected_sources=1,
+            observed_sources=1,
+            computed_at="2026-01-01T00:00:00+00:00",
+        ),
+    )
     result = evaluate_phase(
         plan=plan, ports=ports, store=store, run_id=RUN_ID, profile="R0", cutoff_k=3
     )

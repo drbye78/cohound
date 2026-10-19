@@ -517,7 +517,7 @@ def test_apply_writes_cohort_run_profiles_and_artifact(tmp_path: Path) -> None:
 
     profiles = load_domain_profiles(pkg / "domain_profiles.yaml")
     assert "acme.test" in profiles
-    artifact = pkg / "sources" / "add_product" / "2026-06-01.json"
+    artifact = pkg / "sources" / "add_product" / f"2026-06-01-{plan.product_id}.json"
     assert artifact.is_file()
     assert str(artifact) in result["written_files"]
 
@@ -587,7 +587,7 @@ def test_plan_only_writes_nothing(tmp_path: Path) -> None:
 def test_generator_drift_warning(tmp_path: Path) -> None:
     """``sources/build_package.py`` → warning, но план строится."""
     pkg = valid_package(tmp_path)
-    (pkg / "sources").mkdir()
+    (pkg / "sources").mkdir(exist_ok=True)
     (pkg / "sources" / "build_package.py").write_text("# generator\n", encoding="utf-8")
     plan = _plan(pkg, crawler=_crawler(START), ports=_ports())
     assert any("generator_drift" in warning for warning in plan.warnings)
@@ -600,3 +600,161 @@ def _snapshot(pkg: Path) -> dict[str, bytes]:
         for path in sorted(pkg.rglob("*"))
         if path.is_file()
     }
+
+
+# ---------------------------------------------------------------------------
+# Seed-план (09 §2.1/§7, MVP-1)
+# ---------------------------------------------------------------------------
+
+
+def test_plan_seeds_from_all_sites_and_hint(tmp_path: Path) -> None:
+    """Seed-план = resolved_url + все сайты; ``--url`` не единственный seed."""
+    pkg = valid_package(tmp_path)
+    plan = _plan(pkg, url=START, search=_serp(DOCS), crawler=_crawler(START, DOCS))
+
+    by_url = {seed["normalized_url"]: seed for seed in plan.seeds}
+    assert set(by_url) == {"https://acme.test/", "https://acme-docs.test/"}
+    assert by_url["https://acme.test/"]["role"] == "primary"
+    assert by_url["https://acme.test/"]["source"] == "add_product"
+    assert by_url["https://acme-docs.test/"]["role"] == "docs"
+    assert by_url["https://acme-docs.test/"]["source"] == "discovery"
+    assert by_url["https://acme.test/"]["profile_key"] == "acme.test"
+    assert by_url["https://acme-docs.test/"]["profile_key"] == "acme-docs.test"
+    assert plan.onboarding_state.value == "ready"
+
+
+def test_plan_seeds_single_valid_seed_warns(tmp_path: Path) -> None:
+    """Discovery ничего не нашёл → один seed + warning ``single_seed``."""
+    pkg = valid_package(tmp_path)
+    plan = _plan(pkg, url=START, search=None, crawler=_crawler(START))
+    assert [seed["normalized_url"] for seed in plan.seeds] == ["https://acme.test/"]
+    assert any(warning.startswith("single_seed") for warning in plan.warnings)
+
+
+def test_apply_writes_seeds_and_migrates_legacy(tmp_path: Path) -> None:
+    """Apply: seeds.yaml создаётся (legacy мигрируется) и содержит seed продукта."""
+    pkg = valid_package(tmp_path)
+    (pkg / "sources").mkdir(exist_ok=True)
+    (pkg / "sources" / "seeds.yaml").unlink()  # миграционный путь: файла ещё нет
+    (pkg / "sources" / "corpus_urls.yaml").write_text(
+        "legacy:\n- https://legacy.test/\n", encoding="utf-8"
+    )
+    plan = _plan(pkg, crawler=_crawler(START), ports=_ports())
+    result = apply_add_product(pkg, plan, actor="tester")
+
+    seeds = yaml.safe_load((pkg / "sources" / "seeds.yaml").read_text(encoding="utf-8"))
+    assert seeds["schema"] == "seeds/1"
+    assert seeds["products"]["legacy"]["state"] == "ready"
+    assert seeds["products"][plan.product_id]["state"] == "ready"
+    assert seeds["products"][plan.product_id]["seeds"][0]["source"] == "add_product"
+    assert result["ok"] is True
+    assert result["onboarding_state"] == "ready"
+
+
+def test_apply_does_not_overwrite_existing_seeds(tmp_path: Path) -> None:
+    """Существующий seeds.yaml не мигрируется повторно и не затирается."""
+    pkg = valid_package(tmp_path)
+    sources = pkg / "sources"
+    sources.mkdir(exist_ok=True)
+    (sources / "seeds.yaml").write_text(
+        "schema: seeds/1\n"
+        "products:\n"
+        "  kept:\n"
+        "    state: ready\n"
+        "    seeds:\n"
+        "      - url: https://kept.test/\n"
+        "        normalized_url: https://kept.test/\n"
+        "        role: primary\n"
+        "        source: operator\n"
+        "        profile_key: kept.test\n"
+        "        added_at: '2026-01-01'\n"
+        "        added_by: author\n"
+        "        enabled: true\n"
+        "        state: enabled\n",
+        encoding="utf-8",
+    )
+    plan = _plan(pkg, crawler=_crawler(START), ports=_ports())
+    apply_add_product(pkg, plan, actor="tester")
+
+    seeds = yaml.safe_load((sources / "seeds.yaml").read_text(encoding="utf-8"))
+    assert seeds["products"]["kept"]["seeds"][0]["url"] == "https://kept.test/"
+    assert plan.product_id in seeds["products"]
+
+
+def test_apply_writes_profiles_before_seeds_before_cohort(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Порядок записи: domain_profiles → seeds → package bump → cohort."""
+    from core.pipeline import package_add_product as module
+
+    pkg = valid_package(tmp_path)
+    plan = _plan(pkg, crawler=_crawler(START), ports=_ports())
+    calls: list[str] = []
+
+    original_profiles = module.write_domain_profiles_with_new_keys
+    original_ensure = module.ensure_seeds_file
+    original_bump = module.bump_version
+    original_apply = module.apply_candidate
+
+    monkeypatch.setattr(
+        module,
+        "write_domain_profiles_with_new_keys",
+        lambda *a, **k: (calls.append("profiles"), original_profiles(*a, **k))[1],
+    )
+    monkeypatch.setattr(
+        module,
+        "ensure_seeds_file",
+        lambda *a, **k: (calls.append("seeds"), original_ensure(*a, **k))[1],
+    )
+    monkeypatch.setattr(
+        module,
+        "bump_version",
+        lambda *a, **k: (calls.append("bump"), original_bump(*a, **k))[1],
+    )
+    monkeypatch.setattr(
+        module,
+        "apply_candidate",
+        lambda *a, **k: (calls.append("cohort"), original_apply(*a, **k))[1],
+    )
+
+    apply_add_product(pkg, plan, actor="tester")
+    assert calls == ["profiles", "seeds", "bump", "cohort"]
+
+
+def test_apply_zero_seeds_writes_pending_and_cohort(tmp_path: Path) -> None:
+    """Ноль валидных seed'ов → когорта + ``pending_seeds``/``seeds: []`` (09 §2.2)."""
+    pkg = valid_package(tmp_path)
+    plan = _plan(pkg, crawler=_crawler(START), ports=_ports())
+    plan.seeds = []
+    plan.onboarding_state = plan.onboarding_state.PENDING_SEEDS
+    plan.onboarding_missing = ["no_seeds"]
+
+    result = apply_add_product(pkg, plan, actor="tester")
+
+    assert result["ok"] is False
+    assert result["onboarding_state"] == "pending_seeds"
+    # needs_human = scout-замечания плана + onboarding-причина (не затираются).
+    assert "no_seeds" in result["needs_human"]
+    assert result["onboarding_missing"] == ["no_seeds"]
+    cohort = yaml.safe_load((pkg / "cohort.yaml").read_text(encoding="utf-8"))
+    assert any(entry["product_id"] == plan.product_id for entry in cohort["entries"])
+    seeds = yaml.safe_load((pkg / "sources" / "seeds.yaml").read_text(encoding="utf-8"))
+    assert seeds["products"][plan.product_id] == {
+        "state": "pending_seeds",
+        "seeds": [],
+    }
+    artifact = json.loads(
+        (pkg / "sources" / "add_product" / f"2026-06-01-{plan.product_id}.json").read_text(encoding="utf-8")
+    )
+    assert artifact["onboarding"] == {"state": "pending_seeds", "missing": ["no_seeds"]}
+
+
+def test_apply_unbound_seed_writes_nothing(tmp_path: Path) -> None:
+    """Seed без профиля — preflight отказывает до записи (09 §2.1 «Атомарность»)."""
+    pkg = valid_package(tmp_path)
+    plan = _plan(pkg, crawler=_crawler(START), ports=_ports())
+    plan.seeds = [{**plan.seeds[0], "profile_key": "missing.key"}]
+    before = _snapshot(pkg)
+    with pytest.raises(AddProductError):
+        apply_add_product(pkg, plan, actor="tester")
+    assert _snapshot(pkg) == before

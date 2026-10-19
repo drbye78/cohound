@@ -1289,6 +1289,7 @@ class SqliteStore:
             },
             truncated=bool(row["truncated"]),
             computed_at=row["computed_at"],
+            reason=(row["reason"] if "reason" in row.keys() else None),
         )
 
     def save_corpus_coverage(self, run_id: str, coverage: CorpusCoverage) -> None:
@@ -1316,8 +1317,8 @@ class SqliteStore:
                 "INSERT INTO corpus_coverage"
                 " (run_id, product_id, complete, expected_sources, observed_sources,"
                 "  blocked_json, unreadable_origins_json, partial_blocks_json,"
-                "  truncated, computed_at)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                "  truncated, computed_at, reason)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
                 " ON CONFLICT(run_id, product_id) DO UPDATE SET"
                 "  complete = excluded.complete,"
                 "  expected_sources = excluded.expected_sources,"
@@ -1326,7 +1327,8 @@ class SqliteStore:
                 "  unreadable_origins_json = excluded.unreadable_origins_json,"
                 "  partial_blocks_json = excluded.partial_blocks_json,"
                 "  truncated = excluded.truncated,"
-                "  computed_at = excluded.computed_at",
+                "  computed_at = excluded.computed_at,"
+                "  reason = excluded.reason",
                 (
                     run_id,
                     coverage.product_id,
@@ -1338,7 +1340,24 @@ class SqliteStore:
                     partial_blocks_json,
                     int(coverage.truncated),
                     coverage.computed_at,
+                    coverage.reason,
                 ),
+            )
+
+    def record_cell_failure(
+        self, run_id: str, product_id: str, param_id: str, failure_kind: str
+    ) -> None:
+        """Узкий UPDATE класса сбоя ячейки (``cells.failure_kind``).
+
+        Доменная ``Cell`` не несёт ``failure_kind``; колонка заполняется отдельным
+        контуром (как ``prompt_hash``/``model_id``). Используется zero-source/anomaly
+        путями оценки (O2/O3): ``failed``-ячейка обязана назвать класс сбоя.
+        """
+        with self.conn:
+            self.conn.execute(
+                "UPDATE cells SET failure_kind = ?"
+                " WHERE run_id = ? AND product_id = ? AND param_id = ?",
+                (failure_kind, run_id, product_id, param_id),
             )
 
     def read_corpus_coverage(

@@ -37,6 +37,7 @@ preliminary → ``preliminary``-кандидат c ``status=None`` (**I13**).
 
 from __future__ import annotations
 
+import datetime as _dt
 import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -357,17 +358,35 @@ def _coverage_for(
     store: StorePort | None,
     run_id: str,
     product_id: str,
+    *,
+    planned: bool = False,
 ) -> CorpusCoverage | None:
-    """Покрытие продукта: явный аргумент либо чтение из store (``None`` — неизвестно)."""
+    """Покрытие продукта: явный аргумент либо чтение из store.
+
+    Для продукта **плана** отсутствие строки — аномалия (O3), а не «покрытие
+    неизвестно»: возвращается synthetic zero-source строка с
+    ``reason=coverage_missing``, которая запрещает ``❌`` и даёт failed-ячейки.
+    """
     if coverage is not None:
         return coverage
     reader = getattr(store, "read_corpus_coverage", None)
-    if not callable(reader):
-        return None
-    try:
-        return reader(run_id, product_id)
-    except Exception:  # noqa: BLE001 — чтение покрытия не должно ронять оценку
-        return None
+    if callable(reader):
+        try:
+            found = reader(run_id, product_id)
+        except Exception:  # noqa: BLE001 — чтение покрытия не должно ронять оценку
+            found = None
+        if found is not None:
+            return found
+    if planned:
+        return CorpusCoverage(
+            product_id=product_id,
+            complete=False,
+            expected_sources=0,
+            observed_sources=0,
+            computed_at=_dt.datetime.now(_dt.timezone.utc).isoformat(),
+            reason=FailureKind.COVERAGE_MISSING.value,
+        )
+    return None
 
 
 def _record_corpus_coverage(
@@ -474,6 +493,26 @@ def _unresolved_cell(
         retrieval_profile=retrieval_profile,
         retrieval_params_json=retrieval_params_json,
     )
+
+
+def _record_cell_failure(
+    store: StorePort | None, cell: Cell, failure_kind: str
+) -> None:
+    """Фиксирует класс сбоя ``failed``-ячейки (узкий UPDATE, аддитивно).
+
+    Store-двойники без метода пропускаются: доменная модель класса не несёт, и
+    отсутствие колонки не должно ломать оценку (контракт duck-typed, как у
+    :func:`_record_cell_provenance`).
+    """
+    if store is None:
+        return
+    recorder = getattr(store, "record_cell_failure", None)
+    if not callable(recorder):
+        return
+    try:
+        recorder(cell.run_id, cell.product_id, cell.param_id, failure_kind)
+    except Exception:  # noqa: BLE001 — провенанс сбоя аддитивен
+        return
 
 
 def _record_cell_provenance(
@@ -1017,8 +1056,44 @@ def evaluate_phase(
         chunks_by_param: dict[str, Sequence[ChunkLike]] = {}
         retrievals_by_param: dict[str, RetrievalResult] = {}
         # Ф0: покрытие корпуса продукта читается один раз (на главном потоке) и
-        # прокидывается в ячейки; отсутствие записи — прежнее поведение (coverage=None).
-        coverage = _coverage_for(None, store, run_id, product_id)
+        # прокидывается в ячейки. Продукт плана без строки покрытия — аномалия (O3).
+        coverage = _coverage_for(None, store, run_id, product_id, planned=True)
+        if coverage is not None and coverage.expected_sources == 0:
+            # O2/O3: ноль источников — failed-ячейки (I4), не «тихий ok» и не ❌.
+            kind = (
+                FailureKind.NO_SOURCES.value
+                if coverage.reason == "no_seeds"
+                else (coverage.reason or FailureKind.NO_SOURCES.value)
+            )
+            provenance = (
+                None,
+                resolved_profile.value
+                if isinstance(resolved_profile, RetrievalProfile)
+                else resolved_profile,
+                None,
+            )
+            for param in plan.params:
+                # P6/O5: ячейка высокого источника (реестр/наследование) не затирается
+                # failed-ячейкой даже при нулевом корпусе — она остаётся в отчёте.
+                protected = protected_by_param.get(param.param_id)
+                if protected is not None:
+                    cells.append(protected)
+                    continue
+                failed = _unresolved_cell(
+                    state=CellState.FAILED,
+                    param=param,
+                    product_id=product_id,
+                    run_id=run_id,
+                    provenance=provenance,
+                )
+                _persist(store, failed, None)
+                _record_cell_failure(store, failed, kind)
+                cells.append(failed)
+            errors.append(
+                f"{product_id}: {kind}: expected_sources=0 "
+                f"({coverage.reason or 'no coverage'}) — оценка невозможна"
+            )
+            continue
         for param in plan.params:
             try:
                 result = retrieve_for_cell(

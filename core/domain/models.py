@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import datetime as _dt
 from typing import Any
+from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -31,14 +32,21 @@ from core.domain.enums import (
     Importance,
     InheritanceMode,
     LLMScenario,
+    OnboardingState,
     Origin,
     ParamType,
+    ProductMode,
+    ProductScope,
     RankingPolicy,
+    RefreshPolicy,
     Relationship,
     RunMode,
     SatelliteState,
     SearchKind,
     SearchPhase,
+    SeedRole,
+    SeedSource,
+    SeedState,
     SourceKind,
     SourceScope,
     StaleReason,
@@ -1166,6 +1174,9 @@ class CorpusCoverage(BaseModel):
     partial_blocks: dict[str, dict[str, int]] = Field(default_factory=dict)
     truncated: bool = False
     computed_at: str
+    #: Машинная причина неполноты/отсутствия наблюдения (``no_seeds``, ``coverage_missing``).
+    #: Аддитивное поле MVP-1: строка zero-source обязана назвать причину явно (O2/O3).
+    reason: str | None = None
 
     @property
     def blocking_failures(self) -> dict[str, int]:
@@ -1245,5 +1256,189 @@ class CorpusCoverage(BaseModel):
                 "corpus_coverage: complete=True требует отсутствия усечения и "
                 "нечитаемых origin'ов"
             )
+        if self.complete and self.expected_sources == 0:
+            raise ValueError(
+                "corpus_coverage: complete=True требует expected_sources > 0 "
+                "(zero-source — failed, а не пустой ok; O2)"
+            )
         return self
 
+
+
+# ---------------------------------------------------------------------------
+# Онбординг продукта (09 §3.2, MVP-1)
+# ---------------------------------------------------------------------------
+
+
+def _validate_seed_url(value: str, *, field: str) -> str:
+    """Проверяет seed-URL: только http(s), есть хост, нет fragment/учётных данных.
+
+    SSRF-политика (``core.util.security.validate_url``) применяется слоем ``config``;
+    домен проверяет только форму URL, чтобы оставаться чистым (L0).
+    """
+    text = str(value or "").strip()
+    if not text:
+        raise ValueError(f"seed.{field}: пустой URL")
+    parsed = urlsplit(text)
+    if parsed.scheme.lower() not in ("http", "https"):
+        raise ValueError(f"seed.{field}: схема только http/https, получено {parsed.scheme!r}")
+    if not parsed.hostname:
+        raise ValueError(f"seed.{field}: URL без hostname")
+    if parsed.username or parsed.password:
+        raise ValueError(f"seed.{field}: учётные данные в URL запрещены")
+    # ``url`` — авторский вход и может нести fragment; ``normalized_url`` — уже
+    # канонический вид, fragment в нём означал бы, что нормализация не выполнена.
+    if field == "normalized_url" and parsed.fragment:
+        raise ValueError(f"seed.{field}: fragment запрещён (нормализуйте URL)")
+    return text
+
+
+class SeedEntry(BaseModel):
+    """Авторский seed продукта (09 §7.1): URL + роль + провенанс + привязка к профилю.
+
+    ``normalized_url`` — канонический вид по §7.2 (lowercase host, без default port и
+    fragment, path case/trailing slash сохранены). Дедуп/``seed_id`` считаются по нему.
+    """
+
+    model_config = _BASE
+
+    url: str
+    normalized_url: str
+    role: SeedRole
+    source: SeedSource
+    source_ref: str | None = None
+    profile_key: str | None = None
+    added_at: _dt.date
+    added_by: str
+    enabled: bool = True
+    last_verified_at: _dt.date | None = None
+    state: SeedState = SeedState.ENABLED
+
+    @field_validator("url")
+    @classmethod
+    def _check_url(cls, value: str) -> str:
+        return _validate_seed_url(value, field="url")
+
+    @field_validator("normalized_url")
+    @classmethod
+    def _check_normalized_url(cls, value: str) -> str:
+        return _validate_seed_url(value, field="normalized_url")
+
+    @field_validator("added_by")
+    @classmethod
+    def _check_added_by(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("seed.added_by: автор записи обязателен")
+        return value
+
+    @field_validator("profile_key")
+    @classmethod
+    def _check_profile_key(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        text = value.strip()
+        if not text:
+            raise ValueError("seed.profile_key: пустой ключ недопустим (None = не привязан)")
+        return text
+
+    @model_validator(mode="after")
+    def _check_state(self) -> SeedEntry:
+        """``enabled`` и ``state`` не противоречат друг другу (disabled/invalid — не активны)."""
+        if self.enabled != (self.state is SeedState.ENABLED):
+            raise ValueError(
+                "seed: enabled=True соответствует только state=enabled; "
+                "disabled/invalid обязаны иметь enabled=false"
+            )
+        return self
+
+    @property
+    def is_enabled(self) -> bool:
+        """Seed участвует в корпусе (``enabled`` и ``state=enabled``)."""
+        return self.enabled and self.state is SeedState.ENABLED
+
+
+class ProductSeeds(BaseModel):
+    """Seed-набор одного продукта в ``sources/seeds.yaml`` (09 §7.1)."""
+
+    model_config = _BASE
+
+    state: OnboardingState
+    seeds: list[SeedEntry] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _check_ready_has_seed(self) -> ProductSeeds:
+        """``ready`` без активного seed'а — противоречие O1 (должно быть ``pending_seeds``)."""
+        if self.state is OnboardingState.READY and not any(
+            seed.is_enabled for seed in self.seeds
+        ):
+            raise ValueError(
+                "product_seeds: state=ready требует хотя бы один enabled seed "
+                "(иначе pending_seeds)"
+            )
+        return self
+
+    def enabled_for(self) -> list[SeedEntry]:
+        """Активные seed'ы продукта (порядок сохранён)."""
+        return [seed for seed in self.seeds if seed.is_enabled]
+
+
+class SeedsConfig(BaseModel):
+    """Корневой документ ``sources/seeds.yaml`` (schema ``seeds/1``)."""
+
+    model_config = ConfigDict(
+        extra="forbid", str_strip_whitespace=True, populate_by_name=True
+    )
+
+    schema_: str = Field(default="seeds/1", alias="schema")
+    products: dict[str, ProductSeeds] = Field(default_factory=dict)
+
+    @field_validator("schema_")
+    @classmethod
+    def _check_schema(cls, value: str) -> str:
+        """Схема — ``seeds/<n>``; неизвестная версия не парсится молча."""
+        if not str(value).startswith("seeds/"):
+            raise ValueError(f"seeds.schema: ожидалось seeds/<n>, получено {value!r}")
+        return value
+
+    def enabled_for(self, product_id: str) -> list[SeedEntry]:
+        """Активные seed'ы продукта (пусто, если продукта/записей нет)."""
+        product = self.products.get(product_id)
+        return product.enabled_for() if product is not None else []
+
+    def all_for(self, product_id: str) -> list[SeedEntry]:
+        """Все seed'ы продукта, включая disabled/invalid (порядок сохранён)."""
+        product = self.products.get(product_id)
+        return list(product.seeds) if product is not None else []
+
+
+class ProductPlan(BaseModel):
+    """Минимальный план продукта для onboarding-префлайта и dry-run (MVP-1).
+
+    Поля state-контура (``last_completed_run_id`` и т.п.) намеренно не добавлены:
+    durable ``state.db`` появится следующим шагом (09 §16.2 п.2).
+    """
+
+    model_config = _BASE
+
+    product_id: str
+    mode: ProductMode = ProductMode.NEW
+    onboarding_state: OnboardingState
+    seed_count: int = Field(default=0, ge=0)
+    refresh_policy: RefreshPolicy = RefreshPolicy.REVALIDATE
+    scope: ProductScope = ProductScope.FULL
+    reasons: list[str] = Field(default_factory=list)
+
+
+class ProductPlanSet(BaseModel):
+    """Набор планов продуктов + список заблокированных (09 §5.3, MVP-1)."""
+
+    model_config = _BASE
+
+    products: list[ProductPlan] = Field(default_factory=list)
+    blocked: list[str] = Field(default_factory=list)
+
+    def plan_for(self, product_id: str) -> ProductPlan | None:
+        """План продукта или ``None``, если продукта нет в наборе."""
+        return next(
+            (plan for plan in self.products if plan.product_id == product_id), None
+        )

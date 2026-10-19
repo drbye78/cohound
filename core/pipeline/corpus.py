@@ -358,18 +358,37 @@ def _persist_corpus_coverage(
     session_id: str,
     truncated_products: set[str],
     computed_at: str,
+    *,
+    products: Iterable[str] | None = None,
 ) -> None:
-    """Вычисляет и персистит покрытие каждого продукта сеанса (Ф0, идемпотентно)."""
+    """Вычисляет и персистит покрытие **каждого** продукта плана (Ф0, O3).
+
+    Продукт без элементов сеанса (нулевой seed-набор / preflight обойдён) получает
+    строку ``expected_sources=0, complete=False, reason=no_seeds`` — отсутствие
+    покрытия не должно читаться как «неизвестно» и не должно давать тихий ``ok``.
+    """
     by_product: dict[str, list[CrawlSessionItem]] = {}
     for item in store.iter_crawl_session_items(session_id):
         by_product.setdefault(item.product_id, []).append(item)
-    for product_id in sorted(by_product):
-        coverage = derive_corpus_coverage(
-            product_id=product_id,
-            items=by_product[product_id],
-            truncated=product_id in truncated_products,
-            computed_at=computed_at,
-        )
+    planned = {str(product_id) for product_id in (products or ())}
+    for product_id in sorted(planned | set(by_product)):
+        items = by_product.get(product_id, [])
+        if not items:
+            coverage = CorpusCoverage(
+                product_id=product_id,
+                complete=False,
+                expected_sources=0,
+                observed_sources=0,
+                computed_at=computed_at,
+                reason="no_seeds",
+            )
+        else:
+            coverage = derive_corpus_coverage(
+                product_id=product_id,
+                items=items,
+                truncated=product_id in truncated_products,
+                computed_at=computed_at,
+            )
         store.save_corpus_coverage(run_id, coverage)
 
 
@@ -1331,7 +1350,11 @@ def build_corpus(
             url_map[str(pid)] = sorted({str(u) for u in (values or [])})
 
     declared = sorted({str(p) for p in (getattr(plan, "products", None) or [])})
-    products = declared if declared else sorted(url_map)
+    # Объём корпуса = продукты **с эффективными seed'ами**, а не весь план: при
+    # ``--only-product``/``--only-failed`` ``urls`` уже сужен фильтром, и запись
+    # zero-source покрытия для продуктов вне области прогона была бы ложной (09 §6.2).
+    # Пустой ``urls`` (не задан) → весь план, как прежде.
+    products = sorted(url_map) if url_map else declared
 
     package = _resolve_package_id(plan, package_id)
     snapshot = _resolve_snapshot_date(plan, snapshot_date)
@@ -3814,6 +3837,7 @@ def build_corpus(
                 session,
                 truncated_products,
                 _now_iso(),
+                products=products,
             )
         except Exception as exc:  # noqa: BLE001 — наблюдаемость важнее персистенции
             errors.append(

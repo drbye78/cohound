@@ -12,7 +12,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = "3.8.0"
+SCHEMA_VERSION = "3.9.0"
 
 DDL = """
 PRAGMA journal_mode = WAL;
@@ -297,6 +297,7 @@ CREATE TABLE IF NOT EXISTS crawl_session_items (
 -- Производно от персистентных ``crawl_session_items`` + записей об усечении; гейтит
 -- публикацию ``❌`` (I2c). Аддитивная таблица, идемпотентная через CREATE TABLE IF NOT EXISTS.
 -- v3.8.0: ``unreadable_origins_json``/``partial_blocks_json`` — origin-уровневый порог.
+-- v3.9.0: ``reason`` — причина неполноты/zero-source покрытия (09 §11.3).
 CREATE TABLE IF NOT EXISTS corpus_coverage (
     run_id            TEXT NOT NULL,
     product_id        TEXT NOT NULL,
@@ -308,6 +309,7 @@ CREATE TABLE IF NOT EXISTS corpus_coverage (
     partial_blocks_json     TEXT NOT NULL DEFAULT '{}',  -- {"origin": {"error_kind": count}}
     truncated         INTEGER NOT NULL DEFAULT 0,
     computed_at       TEXT NOT NULL,
+    reason            TEXT,
     PRIMARY KEY (run_id, product_id)
 );
 
@@ -451,6 +453,8 @@ def connect(db_path: str | Path = ":memory:") -> sqlite3.Connection:
         {
             "unreadable_origins_json": "TEXT NOT NULL DEFAULT '[]'",
             "partial_blocks_json": "TEXT NOT NULL DEFAULT '{}'",
+            # MVP-1 (09 §11.3): причина zero-source/аномалии покрытия.
+            "reason": "TEXT",
         },
     )
     # v3.1.0 — удаление legacy per-URL таблицы попыток (полностью замещена сеансом краула,

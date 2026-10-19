@@ -36,6 +36,18 @@ from core.config.deploy import (
     is_split,
     load_deploy_config,
 )
+from core.config.seeds import (
+    CORPUS_URLS_RELPATH,
+    SEEDS_RELPATH,
+    SEEDS_SCHEMA,
+    ensure_seeds_file,
+    load_seeds,
+    merge_seeds,
+    normalize_seed_url,
+    resolve_profile_key,
+    save_seeds,
+    seed_id,
+)
 from core.config.passports import (
     PassportLoadError,
     load_passport,
@@ -76,6 +88,17 @@ __all__ = [
     # domain_profiles.yaml (D.2)
     "DomainProfile",
     "load_domain_profiles",
+    # sources/seeds.yaml (09 §7, MVP-1)
+    "SEEDS_SCHEMA",
+    "SEEDS_RELPATH",
+    "CORPUS_URLS_RELPATH",
+    "ensure_seeds_file",
+    "load_seeds",
+    "save_seeds",
+    "merge_seeds",
+    "normalize_seed_url",
+    "resolve_profile_key",
+    "seed_id",
     # crawl_sources.yaml (Lane A: source-routing)
     "CrawlSource",
     "CrawlSourcesConfig",

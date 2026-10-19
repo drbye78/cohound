@@ -58,6 +58,8 @@ def valid_package(
     for item in fixtures.iterdir():
         if item.is_file():
             shutil.copy(item, package / item.name)
+        elif item.is_dir() and not item.name.startswith("__"):
+            shutil.copytree(item, package / item.name)
     if registries:
         registry_dir = package / "registries"
         registry_dir.mkdir()

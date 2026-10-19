@@ -44,9 +44,13 @@ from core.pipeline import (
 )
 from core.pipeline.gates import gate_g1, gate_g2, gate_g3, gate_g4
 from core.ports.vector_index import RetrievedChunk
+from tests.fakes.crawl_probe import page
 from tests.fakes.ports import (
+    FakeChunker,
+    FakeCrawler,
     FakeEmbedder,
     FakeEvaluator,
+    FakeExtractor,
     FakeIndexBuilder,
     FakeLexicalIndex,
     FakeVectorIndex,
@@ -278,7 +282,11 @@ def test_cmd_run_registers_real_phases_and_blocks_at_g1(
     assert captured["plan"].run_id == "g1-blocked"
     # Паспорта подключены (--passports-dir, дефолт passports), но каталога в cwd нет →
     # {}; URL не заданы (--urls) → {}: фазы Ш4/Ш5 легитимно no-op. doc_domains не фетчатся.
-    assert captured["urls"] == {}
+    # MVP-1: без --urls эффективный набор — seeds.yaml фикстуры (p1/p2).
+    assert captured["urls"] == {
+        "p1": ["https://p1.test/"],
+        "p2": ["https://p2.test/"],
+    }
     assert captured["passports"] == {}
     # Не дошли до compute/report — гейт остановил раньше.
     assert {item["phase"] for item in payload["results"]}.isdisjoint({"compute", "report"})
@@ -317,7 +325,11 @@ def test_cmd_run_full_local_writes_manifest_with_real_compute_report(
             status=Status.ABSENT, justification="нет в срезе", evidence=[]
         )
     )
-    ports = Ports(evaluator=evaluator, lexical_index=FakeLexicalIndex())
+    ports = Ports(
+        evaluator=evaluator,
+        lexical_index=FakeLexicalIndex(),
+        **_offline_crawl_kwargs(),
+    )
 
     def factory(**kwargs: Any) -> dict:
         # Фазам нужен фиксированный профиль K (I16/I20); urls/паспорта остаются пустыми.
@@ -362,6 +374,17 @@ def test_cmd_run_wires_package_registry_specs_end_to_end(
 
     from core.cli import context as context_mod
     from core.cli import wiring as wiring_mod
+
+    # MVP-1: seeds.yaml фикстуры делает корпус непустым; сеть запрещена — подменяем
+    # только краул/экстракцию, сохраняя реальную реестровую проводку composition root.
+    original_build_adapters = context_mod.build_adapters
+
+    def _offline_adapters(**kwargs: Any) -> Any:
+        from dataclasses import replace
+
+        return replace(original_build_adapters(**kwargs), **_offline_crawl_kwargs())
+
+    monkeypatch.setattr(context_mod, "build_adapters", _offline_adapters)
 
     monkeypatch.setattr(
         wiring_mod._RegistryHttpClient,
@@ -439,12 +462,29 @@ def _finalize_gates(db: Path, run_id: str) -> None:
             gate_fn(store, run_id, actor="cli-test")
 
 
+def _offline_crawl_kwargs() -> dict[str, Any]:
+    """Офлайн-краул фикстурных seed'ов: полный корпус без сети (I19)."""
+    pages = {
+        url: page(
+            url,
+            content=b"<html><body><p>fixture documentation text</p></body></html>",
+        )
+        for url in ("https://p1.test/", "https://p2.test/")
+    }
+    return {
+        "crawler": FakeCrawler(pages),
+        "extractor": FakeExtractor(),
+        "chunker": FakeChunker(),
+    }
+
+
 def _absent_evaluator_ports() -> Ports:
     return Ports(
         evaluator=FakeEvaluator(
             default=LLMCellOutput(status=Status.ABSENT, justification="нет в срезе", evidence=[])
         ),
         lexical_index=FakeLexicalIndex(),
+        **_offline_crawl_kwargs(),
     )
 
 
@@ -473,6 +513,7 @@ def _retrieval_ports() -> Ports:
         vector_index=FakeVectorIndex(docs=[chunk]),
         embedder=FakeEmbedder(),
         index_builder=FakeIndexBuilder(),
+        **_offline_crawl_kwargs(),
     )
 
 

@@ -1,0 +1,16 @@
+# E2E-фикстура seed-набора (09 §7.1): сеть не используется, прогон стоит на g1.
+schema: seeds/1
+products:
+  p1:
+    state: ready
+    seeds:
+      - url: https://p1.test/
+        normalized_url: https://p1.test/
+        role: primary
+        source: migration
+        source_ref: sources/corpus_urls.yaml
+        profile_key: p1.test
+        added_at: '2026-06-01'
+        added_by: fixture
+        enabled: true
+        state: enabled

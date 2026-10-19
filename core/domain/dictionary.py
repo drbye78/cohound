@@ -21,8 +21,15 @@ from core.domain.enums import (
     FailureKind,
     FetchMode,
     Gate,
+    OnboardingState,
+    ProductMode,
+    ProductScope,
     RankingPolicy,
+    RefreshPolicy,
     SearchKind,
+    SeedRole,
+    SeedSource,
+    SeedState,
     SkipReason,
     StaleReason,
     Status,
@@ -73,6 +80,14 @@ def assert_dictionary_integrity(path: str | Path) -> None:
         "crawl_item_status",
         # P2a: машинная причина пропуска фазы (PhaseStatus="skipped").
         "skip_reason",
+        # MVP-1 (09 §3.1): онбординг продукта и seed-набор.
+        "seed_role",
+        "seed_source",
+        "seed_state",
+        "onboarding_state",
+        "product_mode",
+        "refresh_policy",
+        "product_scope",
     ]
     missing = [k for k in required if k not in data]
     if missing:
@@ -97,6 +112,14 @@ def assert_dictionary_integrity(path: str | Path) -> None:
         "crawl_session_status": {v.value for v in CrawlSessionStatus},
         "crawl_item_status": {v.value for v in CrawlItemStatus},
         "skip_reason": {v.value for v in SkipReason},
+        # MVP-1 (09 §3.1): онбординг продукта и seed-набор.
+        "seed_role": {v.value for v in SeedRole},
+        "seed_source": {v.value for v in SeedSource},
+        "seed_state": {v.value for v in SeedState},
+        "onboarding_state": {v.value for v in OnboardingState},
+        "product_mode": {v.value for v in ProductMode},
+        "refresh_policy": {v.value for v in RefreshPolicy},
+        "product_scope": {v.value for v in ProductScope},
         # Ф0: классы сбоя краула/конвейера — иначе словарь и enum расходятся молча.
         "failure_kind": {v.value for v in FailureKind},
     }

@@ -1,0 +1,29 @@
+# Тестовая фикстура seed-набора (09 §7.1). Домены вымышленные, нейтральные.
+schema: seeds/1
+products:
+  p1:
+    state: ready
+    seeds:
+      - url: https://p1.test/
+        normalized_url: https://p1.test/
+        role: primary
+        source: migration
+        source_ref: sources/corpus_urls.yaml
+        profile_key: p1.test
+        added_at: '2026-06-01'
+        added_by: fixture
+        enabled: true
+        state: enabled
+  p2:
+    state: ready
+    seeds:
+      - url: https://p2.test/
+        normalized_url: https://p2.test/
+        role: primary
+        source: migration
+        source_ref: sources/corpus_urls.yaml
+        profile_key: p2.test
+        added_at: '2026-06-01'
+        added_by: fixture
+        enabled: true
+        state: enabled

@@ -1,3 +1,9 @@
 case_x:
   fetch: http
   extract: html
+p1.test:
+  fetch: http
+  extract: html
+p2.test:
+  fetch: http
+  extract: html

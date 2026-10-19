@@ -30,13 +30,32 @@ from urllib.parse import urlsplit
 import yaml
 
 from core.config.domain_profiles import load_domain_profiles
-from core.domain.enums import CrawlStrategy, ExtractionRoute, FetchMode
+from core.config.seeds import (
+    SEEDS_RELPATH,
+    ensure_seeds_file,
+    merge_seeds,
+    normalize_seed_url,
+    resolve_profile_key,
+    save_seeds,
+    validate_seed_url,
+)
+from core.domain.enums import (
+    CrawlStrategy,
+    ExtractionRoute,
+    FetchMode,
+    OnboardingState,
+    SeedRole,
+    SeedSource,
+    SeedState,
+)
+from core.domain.models import SeedEntry
 from core.pipeline.crawl_probe import (
     ProbeSource,
     _dump_profile,
     render_profiles_with_verdicts,
 )
 from core.pipeline.crawl_probe_driver import ProbePorts, run_probe
+from core.pipeline.package_admin import bump_version
 from core.pipeline.package_candidates import Candidate, apply_candidate
 from core.pipeline.package_io import atomic_write_text, load_artifacts
 from core.pipeline.scout_common import dedupe, url_allowed
@@ -178,6 +197,10 @@ class AddProductPlan:
     cohort_entry: dict[str, Any] = field(default_factory=dict)
     selection_reason: str | None = None
     product_info: dict[str, Any] = field(default_factory=dict)
+    #: Seed-план (09 §2.1 ``plan_seeds``): URL/role/source/profile_key без записи.
+    seeds: list[dict[str, Any]] = field(default_factory=list)
+    onboarding_state: OnboardingState = OnboardingState.READY
+    onboarding_missing: list[str] = field(default_factory=list)
     needs_human: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     fetched: list[dict[str, Any]] = field(default_factory=list)
@@ -204,6 +227,9 @@ class AddProductPlan:
             "cohort_entry": dict(self.cohort_entry),
             "selection_reason": self.selection_reason,
             "product_info": dict(self.product_info),
+            "seeds": [dict(seed) for seed in self.seeds],
+            "onboarding_state": self.onboarding_state.value,
+            "onboarding_missing": list(self.onboarding_missing),
             "needs_human": list(self.needs_human),
             "warnings": list(self.warnings),
             "fetched": list(self.fetched),
@@ -728,8 +754,131 @@ def _derive_sites(
 
 
 # ---------------------------------------------------------------------------
-# Sitemap-зонд (bounded, robots-honoured)
+# Seed-план (09 §2.1 ``plan_seeds``)
 # ---------------------------------------------------------------------------
+
+
+def _site_role(site: DiscoveredSite) -> SeedRole:
+    """Роль сайта: docs-подобный → ``docs``; корпоративный root → ``satellite``.
+
+    Явного поля роли в :class:`DiscoveredSite` нет; роль выводится детерминированно из
+    ключа/пути (данные, не догадка о продукте).
+    """
+    key = site.key.lower()
+    host, _, path = key.partition("/")
+    docs_tokens = ("docs", "doc", "documentation", "wiki", "help", "support", "repo")
+    host_tokens = [token for token in re.split(r"[.\-_]", host) if token]
+    if any(token in host_tokens for token in docs_tokens) or any(
+        segment in {"docs", "doc", "documentation"} for segment in path.split("/") if segment
+    ):
+        return SeedRole.DOCS
+    if site.is_root:
+        # Корпоративный host-root: seed допустим только потому, что профиль такого
+        # ключа несёт ``max_depth: 0`` (09 §7.3.4); роль фиксирует эту границу явно.
+        return SeedRole.HOST_ROOT
+    return SeedRole.PRIMARY
+
+
+def _safe_normalize(url: str) -> str | None:
+    """Нормализует URL для сравнения; невалидный — ``None`` (без исключения)."""
+    try:
+        return normalize_seed_url(url)
+    except ValueError:
+        return None
+
+
+def _site_seed_url(site: DiscoveredSite, resolved_url: str | None) -> str:
+    """URL seed'а для сайта: ``resolved_url``, если он в этом сайте, иначе самый короткий.
+
+    ``resolved_url`` может быть невалидным (SERP/оператор): нормализация здесь не должна
+    ронять план — тогда используется URL самого сайта, а невалидность уже отмечена
+    warning'ом в :func:`_plan_seeds`.
+    """
+    urls = sorted({str(url) for url in site.urls if str(url).strip()})
+    if resolved_url:
+        try:
+            normalized = normalize_seed_url(resolved_url)
+        except ValueError:
+            normalized = None
+        if normalized is not None and any(
+            _safe_normalize(url) == normalized for url in urls
+        ):
+            return normalized
+    if not urls:
+        return resolved_url or ""
+    return min(urls, key=lambda url: (len(urlsplit(url).path or "/"), len(url), url))
+
+
+def _plan_seeds(
+    *,
+    product_id: str,
+    resolved_url: str,
+    sites: Sequence[DiscoveredSite],
+    profiles: Mapping[str, Mapping[str, Any]],
+    warnings: list[str],
+    needs_human: list[str],
+) -> list[dict[str, Any]]:
+    """Формирует seed-план из **всех** сайтов + ``resolved_url`` (09 §2.1/§7.6).
+
+    ``--url`` — не единственный источник: каждый обнаруженный сайт даёт seed; resolved
+    URL помечается ``source=add_product`` и ``role=primary`` (если не покрыт сайтом —
+    добавляется отдельной записью). Дубликаты по нормализованному URL схлопываются.
+    Невалидные URL пропускаются с warning ``seed_invalid``.
+    """
+    planned: dict[str, dict[str, Any]] = {}
+    resolved_norm: str | None = None
+    try:
+        resolved_norm = validate_seed_url(resolved_url, warnings=warnings)
+    except ValueError as exc:
+        warnings.append(f"seed_invalid: {resolved_url}: {exc}")
+
+    for site in sites:
+        url = _site_seed_url(site, resolved_url)
+        if not url:
+            continue
+        try:
+            normalized = validate_seed_url(url, warnings=warnings)
+        except ValueError as exc:
+            warnings.append(f"seed_invalid: {url}: {exc}")
+            continue
+        source = (
+            SeedSource.ADD_PRODUCT
+            if resolved_norm is not None and normalized == resolved_norm
+            else SeedSource.DISCOVERY
+        )
+        role = SeedRole.PRIMARY if source is SeedSource.ADD_PRODUCT else _site_role(site)
+        planned.setdefault(
+            normalized,
+            {
+                "url": url,
+                "normalized_url": normalized,
+                "role": role.value,
+                "source": source.value,
+                "profile_key": site.key,
+            },
+        )
+
+    if resolved_norm is not None and resolved_norm not in planned:
+        key = resolve_profile_key(resolved_norm, profiles) or next(
+            (site.key for site in sites if _host(resolved_norm) == site.key.split("/", 1)[0]),
+            None,
+        )
+        planned[resolved_norm] = {
+            "url": resolved_url,
+            "normalized_url": resolved_norm,
+            "role": SeedRole.PRIMARY.value,
+            "source": SeedSource.ADD_PRODUCT.value,
+            "profile_key": key,
+        }
+
+    if len(planned) == 1:
+        warnings.append("single_seed: обнаружен только один валидный seed")
+    if not planned:
+        needs_human.append("no_seeds")
+    return list(planned.values())
+
+
+
 
 
 def _fetch_page(ports: ProbePorts, url: str) -> Any | None:
@@ -1154,6 +1303,21 @@ def plan_add_product(
             'sources/build_package.py, иначе tests/packages/test_build_package.py упадёт"'
         )
 
+    # 7. ``plan_seeds``: resolved_url + все обнаруженные сайты (09 §2.1). ``--url`` —
+    #    подсказка идентичности, а не единственный seed.
+    seeds = _plan_seeds(
+        product_id=product_id,
+        resolved_url=resolved_url,
+        sites=sites,
+        profiles=profiles,
+        warnings=warnings,
+        needs_human=needs_human,
+    )
+    onboarding_state = (
+        OnboardingState.READY if seeds else OnboardingState.PENDING_SEEDS
+    )
+    onboarding_missing = [] if seeds else ["no_seeds"]
+
     return AddProductPlan(
         product_name=name,
         product_id=product_id,
@@ -1167,6 +1331,9 @@ def plan_add_product(
         cohort_entry=cohort_entry,
         selection_reason=selection_reason,
         product_info=product_info,
+        seeds=seeds,
+        onboarding_state=onboarding_state,
+        onboarding_missing=onboarding_missing,
         needs_human=dedupe(needs_human),
         warnings=dedupe(warnings),
         fetched=list(getattr(report, "fetched", []) or []),
@@ -1235,9 +1402,15 @@ def apply_add_product(
     passports_dir: str | Path | None = None,
     today: _dt.date | str | None = None,
 ) -> dict[str, Any]:
-    """Применяет план: когорта → ``domain_profiles.yaml`` → паспорт → review-артефакт.
+    """Применяет план в порядке 09 §2.1: профили → seeds → package bump → когорта.
 
-    :raises AddProductError: нет ``actor``/``selection_reason`` или invalid профили.
+    Preflight (валидация seed-плана и profile-binding против **планируемых** профилей)
+    выполняется до первой записи. При нуле валидных seed'ов продукт всё равно попадает
+    в когорту, а ``sources/seeds.yaml`` получает ``state: pending_seeds``/``seeds: []``:
+    следующий ``run`` обязан заблокироваться, а не «тихо» измерить пустой корпус.
+
+    :raises AddProductError: нет ``actor``/``selection_reason``, seed не привязан к
+        профилю, invalid профили (запись не начинается).
     """
     if not actor or not str(actor).strip():
         raise AddProductError("--apply требует --actor (человек, изменяющий пакет)")
@@ -1251,14 +1424,88 @@ def apply_add_product(
     written: list[str] = []
     cohort_result: dict[str, Any] = {"changed": False, "noop": False}
 
-    # 1. Когорта (update_cohort также синхронизирует run.yaml products/anchor).
     artifacts = load_artifacts(pkg)
-    existing = (
+    planned_profiles = set(artifacts.domain_profiles or {}) | set(plan.profiles)
+    # Preflight profile-binding — против планируемых ключей, до записи.
+    for seed in plan.seeds:
+        key = seed.get("profile_key")
+        if not key or key not in planned_profiles:
+            raise AddProductError(
+                f"seed {seed.get('normalized_url') or seed.get('url')!r} не привязан "
+                f"к профилю домена ({key!r}); запись отменена",
+                code="usage",
+            )
+
+    # 1. domain_profiles.yaml: существующие — измеренные оси, новые — полные блоки.
+    profiles_path = pkg / "domain_profiles.yaml"
+    profiles_changed, new_keys = write_domain_profiles_with_new_keys(
+        profiles_path, plan.verdicts, plan.profiles
+    )
+    if profiles_changed:
+        written.append(str(profiles_path))
+    try:
+        load_domain_profiles(profiles_path)
+    except ValueError as exc:
+        raise AddProductError(
+            f"domain_profiles.yaml невалиден после записи: {exc}", code="error"
+        ) from exc
+
+    # 2. sources/seeds.yaml: миграция legacy (если файла нет) + merge без затирания.
+    seeds_path = pkg / SEEDS_RELPATH
+    seeds_config = ensure_seeds_file(pkg, actor, today=snapshot)
+    # Артефакт именуется с product_id (два продукта в один день не затирают ревью).
+    artifact_ref = f"sources/add_product/{snapshot.isoformat()}-{plan.product_id}.json"
+    entries = [
+        SeedEntry(
+            url=str(seed["url"]),
+            normalized_url=str(seed["normalized_url"]),
+            role=SeedRole(str(seed["role"])),
+            source=SeedSource(str(seed["source"])),
+            source_ref=artifact_ref,
+            profile_key=str(seed["profile_key"]) if seed.get("profile_key") else None,
+            added_at=snapshot,
+            added_by=actor,
+            enabled=True,
+            state=SeedState.ENABLED,
+        )
+        for seed in plan.seeds
+    ]
+    merged = merge_seeds(seeds_config, plan.product_id, entries)
+    appended = len(merged.products[plan.product_id].seeds) > len(
+        seeds_config.products.get(plan.product_id).seeds
+        if seeds_config.products.get(plan.product_id) is not None
+        else []
+    )
+    save_seeds(seeds_path, merged)
+    written.append(str(seeds_path))
+    onboarding_state = merged.products[plan.product_id].state
+    merged_rows = merged.products[plan.product_id].seeds
+    # ``onboarding_missing``/``needs_human`` — из **смерженного** состояния, а не из
+    # плана: повторное добавление продукта с уже записанными seed'ами не должно
+    # рапортовать ``no_seeds`` (план мог быть построен без них).
+    if onboarding_state is OnboardingState.READY:
+        onboarding_missing: list[str] = []
+    elif merged_rows:
+        onboarding_missing = ["profile_unbound"]
+    else:
+        onboarding_missing = ["no_seeds"]
+
+    # 3. package.yaml bump — до когорты: если bump упал, продукт ещё не виден run'у.
+    #    Без фактического изменения пакета bump не делается: noop re-add не должен
+    #    двигать ``package_version`` (иначе каждый прогон ``add-product`` — новый
+    #    ``execution_change`` без изменения содержания).
+    existing_ids = (
         {entry.product_id for entry in artifacts.cohort.entries}
         if artifacts.cohort is not None
         else set()
     )
-    if plan.product_id in existing:
+    package_changed = profiles_changed or appended or plan.product_id not in existing_ids
+    if package_changed:
+        bump = bump_version(pkg, level="minor", actor=actor)
+        written.extend(str(path) for path in bump.written)
+
+    # 4. Когорта (update_cohort также синхронизирует run.yaml products/anchor).
+    if plan.product_id in existing_ids:
         cohort_result["noop"] = True
     else:
         result = apply_candidate(
@@ -1281,21 +1528,7 @@ def apply_add_product(
         }
         written.extend(str(path) for path in result.written)
 
-    # 2. domain_profiles.yaml: существующие — измеренные оси, новые — полные блоки.
-    profiles_path = pkg / "domain_profiles.yaml"
-    profiles_changed, new_keys = write_domain_profiles_with_new_keys(
-        profiles_path, plan.verdicts, plan.profiles
-    )
-    if profiles_changed:
-        written.append(str(profiles_path))
-    try:
-        load_domain_profiles(profiles_path)
-    except ValueError as exc:
-        raise AddProductError(
-            f"domain_profiles.yaml невалиден после записи: {exc}", code="error"
-        ) from exc
-
-    # 3. Черновик паспорта (опционально).
+    # 5. Черновик паспорта (опционально).
     if write_passport:
         if passports_dir is None:
             raise AddProductError("--passport требует каталог паспортов")
@@ -1306,10 +1539,18 @@ def apply_add_product(
         )
         written.extend([str(yaml_path), str(sidecar_path)])
 
-    # 4. Review-артефакт (всегда при apply).
-    artifact_path = pkg / "sources" / "add_product" / f"{snapshot.isoformat()}.json"
+    # 6. Review-артефакт (всегда при apply) — seed_plan + onboarding. Имя включает
+    #    ``product_id``: два продукта в один день не должны затирать ревью-артефакт
+    #    друг друга.
+    artifact_name = f"{snapshot.isoformat()}-{plan.product_id}.json"
+    artifact_path = pkg / "sources" / "add_product" / artifact_name
     artifact = {
         **plan.as_dict(),
+        "seed_plan": [dict(seed) for seed in plan.seeds],
+        "onboarding": {
+            "state": onboarding_state.value,
+            "missing": list(onboarding_missing),
+        },
         "apply": {
             "actor": actor,
             "cohort": cohort_result,
@@ -1325,13 +1566,18 @@ def apply_add_product(
     )
     written.append(str(artifact_path))
 
+    ready = onboarding_state is OnboardingState.READY
     return {
-        "ok": True,
+        "ok": ready,
         "actor": actor,
         "product_id": plan.product_id,
+        "onboarding_state": onboarding_state.value,
+        "onboarding_missing": list(onboarding_missing),
+        "needs_human": dedupe([*plan.needs_human, *onboarding_missing]),
         "cohort": cohort_result,
         "profiles_changed": profiles_changed,
         "new_profile_keys": new_keys,
+        "seeds": [dict(seed) for seed in plan.seeds],
         "written_files": written,
         "artifact_path": str(artifact_path),
     }

@@ -679,7 +679,7 @@ def _crawl_session_dict_mirror() -> None:
 def _db_smoke() -> None:
     conn = connect(":memory:")
     ver = conn.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()
-    _assert(ver is not None and ver["value"] == "3.8.0")
+    _assert(ver is not None and ver["value"] == "3.9.0")
 
     tables = {r["name"] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     for t in ("products", "runs", "llm_scenarios", "corpus_docs", "corpus_chunks",
@@ -740,7 +740,7 @@ def _db_smoke() -> None:
     cov_cols = {r["name"] for r in conn.execute("PRAGMA table_info(corpus_coverage)")}
     _assert({"run_id", "product_id", "complete", "expected_sources", "observed_sources",
              "blocked_json", "unreadable_origins_json", "partial_blocks_json",
-             "truncated", "computed_at"} <= cov_cols)
+             "truncated", "computed_at", "reason"} <= cov_cols)
     cov_pk = [r["name"] for r in conn.execute("PRAGMA table_info(corpus_coverage)")
               if r["pk"]]
     _assert(cov_pk == ["run_id", "product_id"])

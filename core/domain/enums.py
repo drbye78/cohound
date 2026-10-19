@@ -81,6 +81,12 @@ class FailureKind(StrEnum):
     #: Post-fetch эвристика «бинарный артефакт — не документ»: содержимое не является
     #: ни документным форматом, ни текстом/HTML. Терминальный класс (без повторов).
     UNSUPPORTED_BINARY = "unsupported_binary"
+    #: Продукт не имеет ни одного источника (seed'ов): corpus/evaluate не могут
+    #: утверждать что-либо о продукте. Это провал измерения, не ``❌`` (I4).
+    NO_SOURCES = "no_sources"
+    #: Для продукта плана отсутствует строка ``corpus_coverage`` — аномалия
+    #: провенанса, а не «покрытие неизвестно» (O3).
+    COVERAGE_MISSING = "coverage_missing"
 
 
 #: Классы сбоев, которые делают корпус продукта **неполным по построению** (I2c, Ф0).
@@ -401,3 +407,73 @@ class CrawlItemStatus(StrEnum):
     FETCHED = "fetched"
     FAILED = "failed"
     CANCELLED = "cancelled"
+
+
+class SeedRole(StrEnum):
+    """Роль seed'а в корпусе продукта (09 §7).
+
+    ``primary`` — основной сайт/раздел продукта; ``docs`` — документационный сайт;
+    ``satellite`` — сателлитный сайт продукта (не корпоративный корень);
+    ``host_root`` — корпоративный host-корень, который сам по себе не является
+    продуктовым корпусом (I17: глубина такого корня ограничена профилем, а в seed-план
+    он не попадает — это probe-кандидат, не источник корпуса).
+    """
+
+    PRIMARY = "primary"
+    DOCS = "docs"
+    SATELLITE = "satellite"
+    HOST_ROOT = "host_root"
+
+
+class SeedSource(StrEnum):
+    """Происхождение seed'а — провенанс авторской записи (09 §7.1)."""
+
+    ADD_PRODUCT = "add_product"
+    DISCOVERY = "discovery"
+    MIGRATION = "migration"
+    OPERATOR = "operator"
+
+
+class SeedState(StrEnum):
+    """Операционное состояние seed'а (09 §3.1)."""
+
+    ENABLED = "enabled"
+    DISABLED = "disabled"
+    INVALID = "invalid"
+
+
+class OnboardingState(StrEnum):
+    """Готовность продукта к измерению (09 §3.1, O1)."""
+
+    READY = "ready"
+    PENDING_SEEDS = "pending_seeds"
+    BLOCKED = "blocked"
+    RETIRED = "retired"
+
+
+class ProductMode(StrEnum):
+    """Режим обработки продукта в прогоне (09 §3.1/§5).
+
+    В MVP-1 durable state отсутствует, поэтому фактически используется ``new``;
+    значения ``full``/``incremental`` зарезервированы под следующие шаги.
+    """
+
+    NEW = "new"
+    FULL = "full"
+    INCREMENTAL = "incremental"
+
+
+class RefreshPolicy(StrEnum):
+    """Политика обновления корпуса (09 §2.4/§3.1)."""
+
+    AUTO = "auto"
+    REVALIDATE = "revalidate"
+    REFRESH = "refresh"
+    OFFLINE = "offline"
+
+
+class ProductScope(StrEnum):
+    """Объём прогона по продукту (09 §6.2)."""
+
+    FULL = "full"
+    PRODUCT_ONLY = "product_only"

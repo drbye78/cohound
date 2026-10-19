@@ -31,7 +31,7 @@ from core.cli.errors import (
 from core.cli.output import concise, emit_error, print_json
 from core.cli.wiring import _llm_configured
 from core.config.deploy import load_deploy_config
-from core.domain.enums import FetchMode
+from core.domain.enums import FetchMode, OnboardingState
 from core.ports.types import FetchPlan
 from core.pipeline.crawl_probe import (
     ProbeReason,
@@ -2002,14 +2002,17 @@ def cmd_package_add_product(args: argparse.Namespace) -> int:
 
     payload: dict[str, Any] = {
         **plan.as_dict(),
-        "ok": True,
+        "ok": plan.onboarding_state is OnboardingState.READY,
         "dry_run": not writing,
         "applied": applied is not None,
         "package": str(pkg_dir),
+        "written_files": [],
     }
     if applied is not None:
         payload.update(applied)
     _emit(args, payload, _print_add_product_lines(payload, plan))
+    if not payload.get("ok", True):
+        return EXIT_BLOCKED
     return EXIT_OK
 
 
@@ -2032,6 +2035,22 @@ def _print_add_product_lines(payload: dict[str, Any], plan: Any) -> list[str]:
         )
     for item in payload.get("needs_human", []):
         lines.append(f"needs_human: {item}")
+    seeds = payload.get("seeds") or []
+    lines.append(f"seeds: {len(seeds)}")
+    for seed in seeds:
+        lines.append(
+            f"  {seed.get('role')}: {seed.get('normalized_url') or seed.get('url')} "
+            f"[{seed.get('source')}] profile={seed.get('profile_key')}"
+        )
+    if payload.get("onboarding_state"):
+        lines.append(f"onboarding: {payload['onboarding_state']}")
+    if not payload.get("ok", True):
+        product_id = payload.get("product_id")
+        action = "добавлен" if payload.get("applied") else "будет добавлен"
+        lines.append(
+            f"продукт '{product_id}' {action}, но не готов: нет валидных seed'ов; "
+            "следующий run будет заблокирован"
+        )
     for item in payload.get("warnings", []):
         lines.append(f"warning: {item}")
     if payload.get("applied"):

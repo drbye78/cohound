@@ -45,7 +45,7 @@ from core.cli.wiring import (
     run_db_path,
 )
 from core.config.deploy import is_split, load_deploy_config
-from core.domain import CrawlItemStatus, CrawlSessionStatus
+from core.domain import CrawlItemStatus, CrawlSessionStatus, ProductScope
 from core.pipeline import GATE_PHASES, PHASES
 from core.pipeline.crawl_session import (
     default_session_id,
@@ -55,6 +55,7 @@ from core.pipeline.crawl_session import (
 from core.pipeline.lint import lint_run_inputs
 from core.pipeline.normalize import load_inputs
 from core.pipeline.observability import instrument_phases, write_run_metrics
+from core.pipeline.onboarding import preflight
 from core.pipeline.plan import derive_run_id
 from core.pipeline.phases import resolve_measured_retrieval
 from core.pipeline.report import Artifacts
@@ -63,6 +64,53 @@ from core.pipeline.runner import PhaseFn, _gate_phase
 
 #: Phase 4: хук сна цикла ``--follow`` (тесты инжектят no-op через monkeypatch).
 _SLEEP: Callable[[float], None] = time.sleep
+
+
+def _onboarding_in_scope(until: str | None) -> bool:
+    """Попадает ли фаза ``onboarding`` (между ``plan`` и ``g1``) в запрошенный диапазон.
+
+    ``--until plan`` останавливает прогон **до** онбординга, поэтому seed-префлайт не
+    запускается (иначе он блокировал бы прогон, который не собирается краулить).
+    """
+    if until is None:
+        return True
+    return PHASES.index(until) >= PHASES.index("g1")
+
+
+def _blocked_payload(
+    run_id: str,
+    db_path: Path,
+    onboarding: Any,
+    *,
+    warnings: list[str],
+) -> dict[str, Any]:
+    """Payload остановки onboarding: продукт + причина, без corpus/cells."""
+    missing = {plan.product_id: list(plan.reasons) for plan in onboarding.plans}
+    return {
+        "ok": False,
+        "run_id": run_id,
+        "db": str(db_path),
+        "status": "blocked",
+        "stopped_at": "onboarding",
+        "reason": "product_not_ready",
+        "blocked": list(onboarding.blocked),
+        "onboarding_missing": {
+            product_id: reasons
+            for product_id, reasons in missing.items()
+            if reasons
+        },
+        "products": [
+            plan.model_dump(mode="json") for plan in onboarding.plans
+        ],
+        "errors": [
+            f"product_not_ready: {product_id} "
+            f"({', '.join(onboarding.reasons_for(product_id))}); next run blocked"
+            for product_id in onboarding.blocked
+        ],
+        "results": [],
+        "resumed_skipped": [],
+        "warnings": list(warnings),
+    }
 
 
 def run(args: argparse.Namespace) -> int:
@@ -81,13 +129,60 @@ def run(args: argparse.Namespace) -> int:
     report = lint_run_inputs(inputs)
     run_id = args.run_id or derive_run_id(inputs)
     db_path = Path(args.db) if args.db is not None else run_db_path(args.runs_dir, run_id)
+    # План строится ОДИН раз здесь и переиспользуется фазами/префлайтом: повторный
+    # ``plan()`` дал бы иной ``run_id``/двойной линт (см. core/pipeline/phases.py).
+    run_plan = _resolve_plan(args, inputs, run_id)
     # Валидация per-URL режимов рендера (Ш5) — до dry-run, чтобы ошибка входа была
     # видна и в сухом прогоне (I19: никакого молчаливого фетча/подмены).
     render_modes = _load_render_modes(getattr(args, "render_modes", None))
 
+    # MVP-1: onboarding-префлайт (O1). ``--urls`` — полная замена пакетного seed-набора;
+    # иначе seeds.yaml[product] > corpus_urls.yaml[product] (legacy fallback + warning).
+    onboarding = None
+    operator_urls: dict[str, list[str]] | None = None
+    if getattr(args, "urls", None) is not None:
+        operator_urls = _load_corpus_urls(args.urls)
+    if _onboarding_in_scope(args.until):
+        # ``--only-product`` сужает префлайт: заблокированный продукт **вне** области
+        # прогона не должен останавливать частичный прогон (09 §6.2/§13.6). Полный
+        # прогон по-прежнему блокируется любым неготовым продуктом когорты.
+        scope = (
+            ProductScope.PRODUCT_ONLY
+            if getattr(args, "only_product", None) is not None
+            else ProductScope.FULL
+        )
+        preflight_products = (
+            [str(args.only_product)]
+            if scope is ProductScope.PRODUCT_ONLY
+            else run_plan.products
+        )
+        onboarding = preflight(
+            args.package,
+            preflight_products,
+            profiles=getattr(inputs, "domain_profiles", None) or {},
+            urls_override=operator_urls,
+            scope=scope,
+        )
+    onboarding_warnings = list(onboarding.warnings) if onboarding is not None else []
+
     if args.dry_run:
         if not report.ready:
             raise LintFailure([*report.blocking, *report.incomplete], report.warnings)
+        if onboarding is not None and onboarding.blocked:
+            payload = _blocked_payload(
+                run_id,
+                db_path,
+                onboarding,
+                warnings=[*report.warnings, *onboarding_warnings],
+            )
+            payload["dry_run"] = True
+            payload["until"] = args.until
+            payload["phases"] = _phases_until(args.until)
+            if args.json:
+                _print_json(payload)
+            else:
+                _print_run_dry(payload)
+            return EXIT_BLOCKED
         payload = {
             "ok": True,
             "dry_run": True,
@@ -96,8 +191,16 @@ def run(args: argparse.Namespace) -> int:
             "until": args.until,
             "phases": _phases_until(args.until),
             "render_modes": {url: mode.value for url, mode in render_modes.items()},
-            "warnings": list(report.warnings),
+            "warnings": [*report.warnings, *onboarding_warnings],
         }
+        if onboarding is not None:
+            payload["products"] = [
+                plan.model_dump(mode="json") for plan in onboarding.plans
+            ]
+            payload["blocked"] = list(onboarding.blocked)
+            payload["seeds"] = {
+                plan.product_id: plan.seed_count for plan in onboarding.plans
+            }
         if args.json:
             _print_json(payload)
         else:
@@ -106,6 +209,29 @@ def run(args: argparse.Namespace) -> int:
 
     if not report.ready:
         raise LintFailure([*report.blocking, *report.incomplete], report.warnings)
+
+    # Заблокированный продукт: пишем снимок входов (прогон виден), но не собираем
+    # корпус/ячейки. ``onboarding`` — человеческая предпосылка, а не сбой кода.
+    if onboarding is not None and onboarding.blocked:
+        blocked_store = build_store(db_path, profile=args.profile)
+        try:
+            _ensure_run(blocked_store, run_id, inputs)
+            _snapshot_run_inputs(
+                args, run_id, inputs=inputs, run_plan=run_plan, store=blocked_store
+            )
+        finally:
+            blocked_store.close()
+        payload = _blocked_payload(
+            run_id,
+            db_path,
+            onboarding,
+            warnings=[*report.warnings, *onboarding_warnings],
+        )
+        if args.json:
+            _print_json(payload)
+        else:
+            _print_run_report(payload)
+        return EXIT_BLOCKED
 
     # E1/A3 (R7/§13): не-понижающий персист измеренной фиксации ретривала **и её
     # усыновление**. Резолвим персистентную фиксацию ДО сборки фаз: обычный повторный
@@ -147,11 +273,6 @@ def run(args: argparse.Namespace) -> int:
             )
     deploy_fields = manifest_deploy_fields(deploy_config)
 
-    # План строится ОДИН раз здесь и переиспользуется фазами: повторный ``plan()`` внутри
-    # фазы дал бы иной ``run_id``/двойной линт (см. core/pipeline/phases.py). ``run_id``
-    # переиспользуется тот же, что выведен выше, — второго derive нет.
-    run_plan = _resolve_plan(args, inputs, run_id)
-
     # Phase 4: ``--from-scratch`` не строит R7-кэш (cache=None) — живой ре-фетч; URL-фильтры
     # (``--only-failed``/``--only-product``) читают durable-сеанс до сборки фаз, чтобы
     # исполнитель и локальный путь видели один work-set.
@@ -168,7 +289,10 @@ def run(args: argparse.Namespace) -> int:
     interval = float(getattr(args, "interval", 1.0) or 0.0)
     session_id = default_session_id(run_id)
     filter_notes: list[str] = []
-    corpus_urls = _load_corpus_urls(getattr(args, "urls", None))
+    if onboarding is not None:
+        corpus_urls = dict(onboarding.effective_urls)
+    else:
+        corpus_urls = _load_corpus_urls(getattr(args, "urls", None))
     if only_failed or only_product is not None:
         filter_store = build_store(db_path, profile=args.profile)
         try:
@@ -349,6 +473,8 @@ def run(args: argparse.Namespace) -> int:
         payload["follow"] = True
     if filter_notes:
         payload["filter_notes"] = list(filter_notes)
+    if onboarding_warnings:
+        payload["warnings"] = list(onboarding_warnings)
     if instrumentation_errors:
         payload["instrumentation_errors"] = instrumentation_errors
     if deploy_fields:

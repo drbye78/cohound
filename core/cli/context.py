@@ -1579,6 +1579,15 @@ def _print_run_dry(payload: dict[str, Any]) -> None:
     ]
     for warning in payload.get("warnings", ()):
         lines.append(f"warning: {warning}")
+    for plan in payload.get("products", ()):  # MVP-1: mode/blocked в dry-run
+        reasons = ", ".join(plan.get("reasons") or ())
+        lines.append(
+            f"product {plan.get('product_id')}: mode={plan.get('mode')} "
+            f"onboarding={plan.get('onboarding_state')} seeds={plan.get('seed_count')}"
+            + (f" reasons={reasons}" if reasons else "")
+        )
+    if payload.get("blocked"):
+        lines.append(f"blocked: {', '.join(payload['blocked'])}")
     sys.stdout.write("\n".join(lines) + "\n")
 
 
@@ -1600,9 +1609,21 @@ def _print_run_report(payload: dict[str, Any]) -> None:
             lines.append(f"  error: {error}")
     if payload["resumed_skipped"]:
         lines.append(f"resumed (ok, пропущены): {', '.join(payload['resumed_skipped'])}")
+    if payload.get("blocked"):
+        for error in payload.get("errors", ()):
+            lines.append(f"error: {error}")
+        lines.append(
+            "добавьте seed: hound package seeds add --package <DIR> "
+            "--product <ID> --url <URL> --actor <вы>"
+        )
     if payload.get("crawl_truncation_warning"):
         lines.append(f"warning: {payload['crawl_truncation_warning']}")
-    if payload["stopped_at"] is not None:
+    if payload["stopped_at"] == "onboarding":
+        lines.append(
+            "примечание: прогон остановлен до краула — продукт не готов (нет активных "
+            "seed'ов); это не гейт G1–G4, запись gate-решения не поможет"
+        )
+    elif payload["stopped_at"] is not None:
         lines.append(
             "примечание: гейт требует явного человеческого решения (03 §E.2); "
             "продолжите после записи решения: hound gate --db <db> --gate <G1..G4> --actor <вы>"

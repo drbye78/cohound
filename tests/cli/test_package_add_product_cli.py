@@ -150,8 +150,12 @@ def test_apply_writes_cohort_run_profiles_and_artifact(capsys, tmp_path: Path) -
     assert payload["product_id"] in run["products"]
     profiles = yaml.safe_load((pkg / "domain_profiles.yaml").read_text(encoding="utf-8"))
     assert "acme.test" in profiles
-    artifact = pkg / "sources" / "add_product" / f"{_dt.date.today().isoformat()}.json"
+    artifact = pkg / "sources" / "add_product" / (
+        f"{_dt.date.today().isoformat()}-{payload['product_id']}.json"
+    )
     assert artifact.is_file()
+    # MVP-1: add-product не пишет операционный state.db.
+    assert not (tmp_path / "state").exists()
 
 
 def test_apply_without_actor_is_usage_and_writes_nothing(capsys, tmp_path: Path) -> None:
@@ -215,3 +219,59 @@ def test_search_failure_reason_reaches_warning_with_url(
         "SERP недоступен" in warning and "429" in warning
         for warning in payload.get("warnings", [])
     )
+
+
+def test_zero_seeds_apply_writes_pending_and_exits_blocked(
+    capsys, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Ноль валидных seed'ов: cohort + ``pending_seeds``, ``EXIT_BLOCKED`` (09 §2.2)."""
+    from core.cli.main import EXIT_BLOCKED
+    from core.cli.package import commands as package_commands
+    from core.domain.enums import OnboardingState
+
+    original = package_commands.plan_add_product
+
+    def _no_seeds(*args, **kwargs):
+        plan = original(*args, **kwargs)
+        plan.seeds = []
+        plan.onboarding_state = OnboardingState.PENDING_SEEDS
+        plan.onboarding_missing = ["no_seeds"]
+        return plan
+
+    monkeypatch.setattr(package_commands, "plan_add_product", _no_seeds)
+
+    pkg = valid_package(tmp_path)
+    code, payload = _run(
+        capsys,
+        _argv(pkg, "--url", START, "--apply", "--actor", "tester", "--reason", "аналог"),
+        search=_serp(),
+    )
+
+    assert code == EXIT_BLOCKED
+    assert payload["ok"] is False
+    assert payload["onboarding_state"] == "pending_seeds"
+    assert payload["onboarding_missing"] == ["no_seeds"]
+    assert "no_seeds" in payload["needs_human"]
+    cohort = yaml.safe_load((pkg / "cohort.yaml").read_text(encoding="utf-8"))
+    assert any(entry["product_id"] == payload["product_id"] for entry in cohort["entries"])
+    seeds = yaml.safe_load((pkg / "sources" / "seeds.yaml").read_text(encoding="utf-8"))
+    assert seeds["products"][payload["product_id"]] == {
+        "state": "pending_seeds",
+        "seeds": [],
+    }
+
+
+def test_dry_run_reports_seeds_and_empty_written_files(capsys, tmp_path: Path) -> None:
+    """Dry-run JSON несёт seeds/onboarding_state/onboarding_missing и пустой written_files."""
+    pkg = valid_package(tmp_path)
+    code, payload = _run(capsys, _argv(pkg, "--url", START), search=_serp(RELATED))
+
+    assert code == EXIT_OK
+    assert payload["dry_run"] is True
+    assert payload["written_files"] == []
+    assert payload["onboarding_state"] == "ready"
+    assert payload["onboarding_missing"] == []
+    assert {seed["normalized_url"] for seed in payload["seeds"]} == {
+        START,
+        RELATED,
+    }

@@ -105,6 +105,10 @@ failure_kind:
   # потолок ответа crawl.max_response_bytes и бинарный не-документ (post-fetch sniff).
   - payload_too_large
   - unsupported_binary
+  # MVP-1 (09 §6.4/§11.3): у продукта нет источников / отсутствует строка покрытия.
+  # Это провал измерения (failed-ячейки), а не ❌ и не блокирующий класс корпуса.
+  - no_sources
+  - coverage_missing
 
 # §4.1. cell_state — жизненный цикл ячейки.
 # evaluated+status → разрешённая; failed → status=null (I4), в знаменателе Coverage (I5).
@@ -365,3 +369,38 @@ rule_r2:
     - id: r2_default
       when: {}
       cap: parameter_rule
+
+# 09 §3.1/§7. Онбординг продукта и seed-набор (MVP-1).
+# Операционные перечисления авторского/прогонного контура — добавление без бампа
+# методологической версии словаря (§13: класс энума — по семантике, не по файлу).
+seed_role:
+  - primary
+  - docs
+  - satellite
+  - host_root
+seed_source:
+  - add_product
+  - discovery
+  - migration
+  - operator
+seed_state:
+  - enabled
+  - disabled
+  - invalid
+onboarding_state:
+  - ready
+  - pending_seeds
+  - blocked
+  - retired
+product_mode:
+  - new
+  - full
+  - incremental
+refresh_policy:
+  - auto
+  - revalidate
+  - refresh
+  - offline
+product_scope:
+  - full
+  - product_only
