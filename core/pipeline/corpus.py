@@ -104,6 +104,7 @@ from core.config.crawl_sources import CrawlSourcesConfig
 from core.config.deploy import CrawlConfig
 from core.config.domain_profiles import DomainProfile
 from core.domain import (
+    BLOCKING_FAILURE_KINDS,
     CorpusChunk,
     CorpusCoverage,
     CorpusDoc,
@@ -249,30 +250,40 @@ def derive_corpus_coverage(
     Детерминированно: ``expected_sources`` — число элементов, ``observed_sources`` —
     дошедшие до ``FETCHED``, ``blocked`` — счётчики ``FAILED`` по ``error_kind`` (аудит).
 
-    **Порог неполноты — по origin'у, а не по продукту.** Origin (``netloc`` URL)
-    считается **нечитаемым**, только если из него не получено ни одного ``FETCHED``
-    элемента и при этом был хотя бы один недочёт (любой не-``FETCHED`` исход, кроме
-    ``not_found``). Причина: «корпус неполон» обязано означать «мы ничего не узнали о
-    сайте», а не «на сайте были отдельные отказы». Продукт-уровневое правило
-    (``observed == expected``) на реальных прогонах помечало неполными **все** продукты
-    из-за faceted/транзакционных URL и 404-х, после чего каждый ``❌`` становился
-    review-кандидатом и гейт терял смысл. Правило бинарное (``observed == 0``) и
-    объяснимо одним предложением; числовой порог доли намеренно не вводится.
+    **Порог неполноты — два независимых условия.**
 
-    ``not_found`` (HTTP 404/410) — **разрешённое наблюдение**: origin ответил, что
-    ресурса нет; такой исход остаётся в ``blocked`` (аудит), но не делает origin
-    нечитаемым и не влияет на ``complete``.
+    1. *Нечитаемый origin.* Origin (``netloc`` URL) считается **нечитаемым**, только
+       если из него не получено ни одного ``FETCHED`` элемента и при этом был хотя бы
+       один недочёт (любой не-``FETCHED`` исход, кроме ``not_found``). Полностью тёмный
+       сайт не может доказать отсутствие никогда.
+    2. *In-scope блокирующий сбой.* Любой ``FAILED`` элемент с ``error_kind`` из
+       :data:`core.domain.enums.BLOCKING_FAILURE_KINDS` (``robots_disallow``,
+       ``parser_failed``, ``extraction_timeout``, ``attempts_exhausted``,
+       ``dlp_blocked``, ``quarantined``) делает покрытие неполным **по построению**,
+       даже если origin в целом читаем: часть материала продукта осталась ненаблюдённой,
+       и ``❌`` на таком корпусе не является доказательством отсутствия. Причина
+       блокировки видна в ``blocked``/``partial_blocks`` и в производном
+       :attr:`CorpusCoverage.blocking_failures`.
 
-    ``partial_blocks`` фиксирует не-``not_found`` сбои каждого origin'а, поэтому
-    частично отказавший, но читаемый сайт виден человеку в отчёте, не будучи фатальным.
+    ``complete = (not truncated) and (not unreadable_origins) and (no blocking failure)``.
 
-    **Известное ограничение (принятый компромисс).** Origin, читаемый в целом, но с
-    отказанной *документационной* подсекцией (не транзакционной), считается полным.
-    Альтернатива (любая блокировка ⇒ неполнота) помечала все три измеренных продукта и
-    превращала каждый ``❌`` в review-пункт — сигнал уничтожался. Митигация —
-    ``partial_blocks`` в отчёте: человек видит частичные отказы и может аттестовать
-    (``scope_attested_by``) либо пере-краулить. Гарантия сохраняется в важную сторону:
-    полностью закрытый сайт (0 ``FETCHED``) не может доказать отсутствие никогда.
+    Явно **не** блокируют ``complete``:
+
+    * ``not_found`` (HTTP 404/410) — разрешённое наблюдение отсутствия: origin ответил,
+      что ресурса нет; остаётся в ``blocked`` как аудит;
+    * ``source_unavailable`` — транзиентная недоступность читаемого origin'а; полностью
+      тёмный origin по-прежнему ловится условием (1);
+    * ``redirect_out_of_scope`` — уход за границу охвата по определению;
+    * сбои конвейера оценки (``search_failed``/``evaluation_failed``/
+      ``validation_failed``) — не наблюдения корпуса.
+
+    ``partial_blocks`` фиксирует не-``not_found`` сбои каждого origin'а: человек видит
+    частичные отказы, но они больше не «тихие» — блокирующий класс означает неполноту.
+
+    **Человеческий escape hatch.** ``scope_attested_by`` остаётся единственным способом
+    опубликовать ``❌`` на неполном корпусе: человек осознанно принимает риск, что
+    ненаблюдённая часть сайта могла бы содержать параметр. Машинный ``❌`` в этом случае
+    понижается до ``pending``-кандидата (I2c/I6/I7).
     """
     expected = 0
     observed = 0
@@ -306,9 +317,11 @@ def derive_corpus_coverage(
     unreadable_origins = sorted(
         origin for origin in losses_by_origin if fetched_by_origin.get(origin, 0) == 0
     )
+    blocking_values = {kind.value for kind in BLOCKING_FAILURE_KINDS}
+    blocking_failures = any(kind in blocking_values for kind in blocked)
     return CorpusCoverage(
         product_id=product_id,
-        complete=(not truncated) and not unreadable_origins,
+        complete=(not truncated) and not unreadable_origins and not blocking_failures,
         expected_sources=expected,
         observed_sources=observed,
         blocked=dict(sorted(blocked.items())),

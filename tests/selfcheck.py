@@ -1018,9 +1018,14 @@ def _corpus_coverage_invariant() -> None:
     полном покрытии. Плюс модель ``CorpusCoverage`` не даёт объявить усечённый корпус
     полным.
     """
-    from core.domain.enums import AbsenceRuleType, CellState, Status
+    from core.domain.enums import (
+        AbsenceRuleType,
+        CellState,
+        CrawlItemStatus,
+        Status,
+    )
     from core.domain.invariants import check_absence_coverage
-    from core.domain.models import Cell, CorpusCoverage
+    from core.domain.models import Cell, CorpusCoverage, CrawlSessionItem
 
     incomplete = CorpusCoverage(
         product_id="p",
@@ -1086,18 +1091,61 @@ def _corpus_coverage_invariant() -> None:
     else:
         raise AssertionError("CorpusCoverage: truncated=True несовместим с complete=True")
 
-    # Ф0/3.8.0: частичные блокировки читаемого origin'а не делают корпус неполным
-    # (origin-уровневый порог); complete=True с непустым blocked допустим.
-    CorpusCoverage(
+    # Ф0/2.2.0: блокирующий in-scope сбой делает покрытие неполным даже на читаемом
+    # origin'е; ``blocking_failures`` — производное представление для отчёта.
+    from core.pipeline.corpus import derive_corpus_coverage
+
+    incomplete_blocking = derive_corpus_coverage(
         product_id="p",
-        complete=True,
-        expected_sources=5,
-        observed_sources=5,
-        blocked={"robots_disallow": 2},
-        partial_blocks={"a.example": {"robots_disallow": 2}},
+        items=[
+            CrawlSessionItem(
+                session_id="crawl:r",
+                product_id="p",
+                url="https://a.example/1",
+                status=CrawlItemStatus.FETCHED,
+            ),
+            CrawlSessionItem(
+                session_id="crawl:r",
+                product_id="p",
+                url="https://a.example/2",
+                status=CrawlItemStatus.FAILED,
+                error_kind="robots_disallow",
+            ),
+        ],
         truncated=False,
         computed_at="2026-01-01T00:00:00+00:00",
     )
+    if incomplete_blocking.complete is not False:
+        raise AssertionError("Ф0: robots_disallow на читаемом origin'е обязан давать complete=False")
+    if incomplete_blocking.blocking_failures != {"robots_disallow": 1}:
+        raise AssertionError("Ф0: blocking_failures обязан называть класс и счётчик")
+    if incomplete_blocking.unreadable_origins:
+        raise AssertionError("Ф0: читаемый origin не должен попадать в unreadable_origins")
+
+    nonblocking = derive_corpus_coverage(
+        product_id="p",
+        items=[
+            CrawlSessionItem(
+                session_id="crawl:r",
+                product_id="p",
+                url="https://a.example/1",
+                status=CrawlItemStatus.FETCHED,
+            ),
+            CrawlSessionItem(
+                session_id="crawl:r",
+                product_id="p",
+                url="https://a.example/2",
+                status=CrawlItemStatus.FAILED,
+                error_kind="source_unavailable",
+            ),
+        ],
+        truncated=False,
+        computed_at="2026-01-01T00:00:00+00:00",
+    )
+    if nonblocking.complete is not True:
+        raise AssertionError("Ф0: source_unavailable на читаемом origin'е не блокирует")
+    if nonblocking.blocking_failures:
+        raise AssertionError("Ф0: неблокирующий класс не должен попадать в blocking_failures")
 
 
 def _domain_derived() -> None:

@@ -77,6 +77,33 @@ class FailureKind(StrEnum):
     EXTRACTION_TIMEOUT = "extraction_timeout"
 
 
+#: Классы сбоев, которые делают корпус продукта **неполным по построению** (I2c, Ф0).
+#:
+#: Блокирующим считается отказ, из-за которого часть in-scope материала продукта не
+#: наблюдалась и не могла быть прочитана: robots-запрет, сбой парсера, таймаут
+#: извлечения, исчерпание попыток, DLP-блокировка и карантин. Наличие такого сбоя
+#: означает, что ``❌`` нельзя публиковать машинно, пока человек не аттестует охват
+#: (``scope_attested_by``).
+#:
+#: Явно **не** блокирующие:
+#: * ``not_found`` — разрешённое наблюдение отсутствия (origin ответил определённо);
+#: * ``source_unavailable`` — транзиентная недоступность; полностью тёмный origin
+#:   ловится отдельным правилом нечитаемого origin'а;
+#: * ``redirect_out_of_scope`` — уход за границу охвата по определению;
+#: * ``search_failed``/``evaluation_failed``/``validation_failed`` — сбои конвейера
+#:   оценки, а не наблюдения корпуса.
+BLOCKING_FAILURE_KINDS: frozenset[FailureKind] = frozenset(
+    {
+        FailureKind.ROBOTS_DISALLOW,
+        FailureKind.PARSER_FAILED,
+        FailureKind.EXTRACTION_TIMEOUT,
+        FailureKind.ATTEMPTS_EXHAUSTED,
+        FailureKind.DLP_BLOCKED,
+        FailureKind.QUARANTINED,
+    }
+)
+
+
 class CellState(StrEnum):
     PENDING = "pending"
     PRELIMINARY = "preliminary"

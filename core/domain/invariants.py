@@ -219,12 +219,14 @@ def check_absence_coverage(
     if attested:
         return []
     unreadable = list(coverage.unreadable_origins)
+    blocking = dict(coverage.blocking_failures)
     return [
         _violation(
             "I2c",
             "I2c: ❌ при неполном покрытии корпуса требует scope_attested_by "
             "(человеческой аттестации); иначе это не доказательство отсутствия "
-            f"(нечитаемые origin'ы: {unreadable or '[]'})",
+            f"(блокирующие сбои: {blocking or '{}'}, "
+            f"нечитаемые origin'ы: {unreadable or '[]'})",
             "absence_evidence",
         )
     ]

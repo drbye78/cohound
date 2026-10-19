@@ -397,14 +397,16 @@ def _record_corpus_coverage(
             "source_scope": SourceScope.UNKNOWN.value,
             "scope_attested_by": attested_by,
             "note": (
-                "Ф0: неполное покрытие корпуса — нечитаемые origin'ы: "
-                f"{list(coverage.unreadable_origins) or '[]'}; "
+                "Ф0: неполное покрытие корпуса — блокирующие сбои: "
+                f"{coverage.blocking_failures or '{}'}; "
+                f"нечитаемые origin'ы: {list(coverage.unreadable_origins) or '[]'}; "
                 "❌ допустим только с человеческой аттестацией"
             ),
             "corpus_complete": False,
             "corpus_expected_sources": coverage.expected_sources,
             "corpus_observed_sources": coverage.observed_sources,
             "corpus_blocked": dict(sorted(coverage.blocked.items())),
+            "corpus_blocking_failures": dict(coverage.blocking_failures),
             "corpus_unreadable_origins": list(coverage.unreadable_origins),
             "corpus_partial_blocks": {
                 origin: dict(sorted(counts.items()))

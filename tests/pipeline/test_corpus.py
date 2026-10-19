@@ -22,6 +22,7 @@ from core.adapters.index_npy import NpyIndexBuilder
 from core.config.crawl_sources import CrawlSource, CrawlSourcesConfig
 from core.config.domain_profiles import DomainProfile
 from core.domain import (
+    BLOCKING_FAILURE_KINDS,
     AnchorRelation,
     CatalogRow,
     Cohort,
@@ -4173,8 +4174,8 @@ def _session_item(
 def test_derive_corpus_coverage_counts_blocked_sources() -> None:
     """Ф0: failed-исходы считаются по каноническому ``error_kind``, fetched — observed.
 
-    Порог неполноты origin-уровневый: у ``a.test`` есть ``FETCHED``-страницы, поэтому
-    частичные отказы (robots) не делают покрытие неполным — они видны в ``partial_blocks``.
+    С версии методологии 2.2.0 частичный ``robots_disallow`` на читаемом origin'е —
+    **блокирующий** in-scope сбой: корпус неполон, хотя ``unreadable_origins`` пуст.
     """
     items = [
         _session_item("https://a.test/1", CrawlItemStatus.FETCHED),
@@ -4199,11 +4200,12 @@ def test_derive_corpus_coverage_counts_blocked_sources() -> None:
         computed_at="2026-01-01T00:00:00+00:00",
     )
 
-    assert coverage.complete is True
+    assert coverage.complete is False
     assert coverage.unreadable_origins == []
     assert coverage.expected_sources == 6
     assert coverage.observed_sources == 3
     assert coverage.blocked == {"robots_disallow": 2}
+    assert coverage.blocking_failures == {"robots_disallow": 2}
     assert coverage.partial_blocks == {"a.test": {"robots_disallow": 2}}
     assert coverage.truncated is False
 
@@ -4227,12 +4229,16 @@ def test_truncation_forces_incomplete_even_without_failures() -> None:
     assert coverage.complete is False
 
 
-def test_partially_blocked_origin_stays_complete() -> None:
-    """Ф0: частичные отказы читаемого origin'а не делают корпус неполным.
+def test_partially_blocked_origin_is_incomplete() -> None:
+    """Ф0: блокирующий сбой на читаемом origin'е делает корпус неполным (2.2.0).
 
-    Измеренный случай (faceted-URL): origin отдал 60 документов, 50 URL отказаны
-    ``robots_disallow`` и 1 — ``source_unavailable``; второй origin прочитан целиком.
-    Прежнее продуктовое правило объявляло такой корпус неполным и делало гейт инертным.
+    Измеренный случай (pangolin): origin отдал 60 документов, 50 URL отказаны
+    ``robots_disallow``; второй origin прочитан целиком. Под новой методологией
+    ненаблюдённые 50 in-scope URL — причина неполноты, а не «тихий» аудит.
+    ``source_unavailable`` при этом остаётся неблокирующим.
+
+    Под правилом 2.2.0 неполны все три измеренных продукта ru-pg-dbms: jatoba —
+    2 ``parser_failed``, pangolin — 50 ``robots_disallow``, postgrespro — тёмный origin.
     """
     items = [
         _session_item(f"https://docs.example/{i}", CrawlItemStatus.FETCHED)
@@ -4265,14 +4271,111 @@ def test_partially_blocked_origin_stays_complete() -> None:
         computed_at="2026-01-01T00:00:00+00:00",
     )
 
-    assert coverage.complete is True
+    assert coverage.complete is False
     assert coverage.unreadable_origins == []
     assert coverage.expected_sources == 113
     assert coverage.observed_sources == 62
     assert coverage.blocked == {"robots_disallow": 50, "source_unavailable": 1}
+    assert coverage.blocking_failures == {"robots_disallow": 50}
     assert coverage.partial_blocks == {
         "docs.example": {"robots_disallow": 50, "source_unavailable": 1}
     }
+
+
+def test_blocking_failure_kinds_are_canonical() -> None:
+    """Ф0: набор блокирующих классов фиксирован и не включает разрешённые наблюдения."""
+    assert {kind.value for kind in BLOCKING_FAILURE_KINDS} == {
+        "robots_disallow",
+        "parser_failed",
+        "extraction_timeout",
+        "attempts_exhausted",
+        "dlp_blocked",
+        "quarantined",
+    }
+    assert FailureKind.NOT_FOUND not in BLOCKING_FAILURE_KINDS
+    assert FailureKind.SOURCE_UNAVAILABLE not in BLOCKING_FAILURE_KINDS
+    assert FailureKind.REDIRECT_OUT_OF_SCOPE not in BLOCKING_FAILURE_KINDS
+    assert FailureKind.EVALUATION_FAILED not in BLOCKING_FAILURE_KINDS
+    assert FailureKind.VALIDATION_FAILED not in BLOCKING_FAILURE_KINDS
+    assert FailureKind.SEARCH_FAILED not in BLOCKING_FAILURE_KINDS
+
+
+def test_parser_failure_makes_corpus_incomplete() -> None:
+    """Ф0: ``parser_failed`` — блокирующий in-scope сбой, даже при читаемом origin'е."""
+    items = [
+        _session_item(f"https://docs.example/{i}", CrawlItemStatus.FETCHED)
+        for i in range(10)
+    ]
+    items.append(
+        _session_item(
+            "https://docs.example/broken.pdf",
+            CrawlItemStatus.FAILED,
+            error_kind=FailureKind.PARSER_FAILED.value,
+        )
+    )
+
+    coverage = derive_corpus_coverage(
+        product_id="p1",
+        items=items,
+        truncated=False,
+        computed_at="2026-01-01T00:00:00+00:00",
+    )
+
+    assert coverage.complete is False
+    assert coverage.unreadable_origins == []
+    assert coverage.blocking_failures == {"parser_failed": 1}
+
+
+def test_source_unavailable_on_readable_origin_stays_complete() -> None:
+    """Ф0: ``source_unavailable`` транзиентен и не блокирует читаемый origin."""
+    items = [
+        _session_item("https://docs.example/1", CrawlItemStatus.FETCHED),
+        _session_item(
+            "https://docs.example/flaky",
+            CrawlItemStatus.FAILED,
+            error_kind=FailureKind.SOURCE_UNAVAILABLE.value,
+        ),
+    ]
+
+    coverage = derive_corpus_coverage(
+        product_id="p1",
+        items=items,
+        truncated=False,
+        computed_at="2026-01-01T00:00:00+00:00",
+    )
+
+    assert coverage.complete is True
+    assert coverage.unreadable_origins == []
+    assert coverage.blocked == {"source_unavailable": 1}
+    assert coverage.blocking_failures == {}
+
+
+def test_wholly_dark_origin_from_source_unavailable_is_incomplete() -> None:
+    """Ф0: полностью тёмный origin ловится правилом нечитаемости, а не классом сбоя."""
+    items = [
+        _session_item("https://docs.example/1", CrawlItemStatus.FETCHED),
+        _session_item(
+            "https://dark.example/a",
+            CrawlItemStatus.FAILED,
+            error_kind=FailureKind.SOURCE_UNAVAILABLE.value,
+        ),
+        _session_item(
+            "https://dark.example/b",
+            CrawlItemStatus.FAILED,
+            error_kind=FailureKind.SOURCE_UNAVAILABLE.value,
+        ),
+    ]
+
+    coverage = derive_corpus_coverage(
+        product_id="p1",
+        items=items,
+        truncated=False,
+        computed_at="2026-01-01T00:00:00+00:00",
+    )
+
+    assert coverage.complete is False
+    assert coverage.unreadable_origins == ["dark.example"]
+    assert coverage.blocking_failures == {}
 
 
 def test_fully_closed_origin_makes_corpus_incomplete() -> None:

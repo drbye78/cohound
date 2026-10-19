@@ -943,11 +943,13 @@ def test_corpus_coverage_anomaly_is_visible_in_csv_and_artifacts(
     assert anomalies[0]["product_id"] == PRODUCT_A
     assert anomalies[0]["complete"] is False
     assert anomalies[0]["blocked"] == {"robots_disallow": 4}
+    assert anomalies[0]["blocking_failures"] == {"robots_disallow": 4}
     assert anomalies[0]["unreadable_origins"] == ["closed.example"]
     assert anomalies[0]["partial_blocks"] == {
         "closed.example": {"robots_disallow": 4}
     }
     assert "closed.example" in anomalies[0]["reason"]
+    assert "robots_disallow=4" in anomalies[0]["reason"]
 
     artifacts = write_reports(
         bundle=bundle,
@@ -994,6 +996,7 @@ def test_corpus_coverage_anomaly_derived_from_pending_cell_without_store(
     anomalies = collect_corpus_coverage_anomalies([pending])
     assert len(anomalies) == 1
     assert anomalies[0]["blocked"] == {"robots_disallow": 3}
+    assert anomalies[0]["blocking_failures"] == {"robots_disallow": 3}
     assert anomalies[0]["expected_sources"] == 5
     assert anomalies[0]["observed_sources"] == 2
 

@@ -320,6 +320,8 @@ def test_incomplete_corpus_absence_becomes_pending_candidate() -> None:
         if entry.get("corpus_complete") is False
     ]
     assert audit and audit[0]["corpus_blocked"] == {"robots_disallow": 4}
+    assert audit[0]["corpus_blocking_failures"] == {"robots_disallow": 4}
+    assert "robots_disallow" in audit[0]["note"]
     assert audit[0]["corpus_observed_sources"] == 2
 
 
@@ -346,7 +348,6 @@ def test_incomplete_corpus_with_human_attestation_keeps_absent_and_records_count
     ]
     assert audit and audit[0]["corpus_blocked"] == {"robots_disallow": 4}
     assert audit[0]["scope_attested_by"] == "human-reviewer"
-
 
 def _unreadable_origin_coverage() -> CorpusCoverage:
     """Покрытие с полностью закрытым origin'ом (origin-уровневый порог Ф0)."""
@@ -429,6 +430,22 @@ def test_complete_corpus_absence_is_byte_identical_to_previous_behaviour() -> No
     assert with_coverage.cell == baseline.cell
     assert with_coverage.validation == baseline.validation
     assert with_coverage.prompt_hash == baseline.prompt_hash
+
+
+def test_nonblocking_source_unavailable_does_not_gate_absent() -> None:
+    """Ф0/2.2.0: ``source_unavailable`` на читаемом origin'е не блокирует публикацию ❌."""
+    data = _data()
+    coverage = _coverage(complete=True, blocked={"source_unavailable": 1})
+
+    outcome = _evaluate(
+        data,
+        _ScriptedEvaluator([_absent_output()]),
+        coverage=coverage,
+    )
+
+    assert outcome.cell.state is CellState.EVALUATED
+    assert outcome.cell.status is Status.ABSENT
+    assert outcome.cell.review_reason is None
 
 
 def test_gate_reads_coverage_from_store_when_not_passed() -> None:

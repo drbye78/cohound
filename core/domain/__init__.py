@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from core.domain.dictionary import assert_dictionary_integrity, load_dictionary
 from core.domain.enums import (
+    BLOCKING_FAILURE_KINDS,
     AbsenceRuleType,
     AdapterKind,
     AnchorRelation,
@@ -126,6 +127,7 @@ __all__ = [
     "AdapterKind",
     "AnchorRelation",
     "Archetype",
+    "BLOCKING_FAILURE_KINDS",
     "Cap",
     "CapabilityPolicy",
     "CellState",

@@ -12,6 +12,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from core.domain.enums import (
+    BLOCKING_FAILURE_KINDS,
     AbsenceRuleType,
     AdapterKind,
     AnchorRelation,
@@ -51,6 +52,11 @@ _BASE = ConfigDict(extra="forbid", str_strip_whitespace=True)
 #: (``crawl_session_items.error_kind`` и ``corpus_coverage.blocked``).
 _KNOWN_FAILURE_KINDS: frozenset[str] = frozenset(kind.value for kind in FailureKind)
 
+#: Строковые значения блокирующих классов — для :attr:`CorpusCoverage.blocking_failures`.
+_BLOCKING_FAILURE_VALUES: frozenset[str] = frozenset(
+    kind.value for kind in BLOCKING_FAILURE_KINDS
+)
+
 #: Неизменяемый конфиг для value-объектов, кладущихся в хешируемые frozen-контейнеры
 #: (``FetchPlan``): ``frozen=True`` делает модель хешируемой (value-семантика), а
 #: ``allow_inf_nan=False`` запрещает ``inf``/``nan`` в числовых полях.
@@ -64,9 +70,12 @@ _FROZEN = ConfigDict(
 #: Версия методологии (§13): версионная граница **семантики** правил (словарь статусов,
 #: scoring-политика, absence/evidence-модель, определения Coverage/Comparability). В отличие
 #: от ``execution_versions`` (commodity-слой: модель/когорта/индекс), смена методологии
-#: требует пере-аннотации golden. Пин-значение проекта (регламент v2.1); попадает в
+#: требует пере-аннотации golden. Пин-значение проекта; попадает в
 #: ``RunConfig.methodology_version`` → ``RunManifest.methodology_version``.
-METHODOLOGY_VERSION = "2.1.0"
+#:
+#: 2.2.0 — in-scope блокирующие сбои корпуса делают покрытие неполным (I2c, Ф0):
+#: ``BLOCKING_FAILURE_KINDS``, а не только «origin с нулём FETCHED».
+METHODOLOGY_VERSION = "2.2.0"
 
 
 # ---------------------------------------------------------------------------
@@ -1115,14 +1124,15 @@ class CorpusCoverage(BaseModel):
     источников продукта нечитаема (robots/сеть/парсер/усечение).
 
     :param product_id: продукт-партиция.
-    :param complete: ``False``, если краул усечён политикой либо хотя бы один **origin**
+    :param complete: ``False``, если краул усечён политикой, хотя бы один **origin**
         нечитаем (из него не получено ни одного ``FETCHED``-элемента и был хотя бы один
-        недочёт, кроме ``not_found``). Частичные блокировки читаемого origin не делают
-        покрытие неполным (см. :func:`core.pipeline.corpus.derive_corpus_coverage`).
+        недочёт, кроме ``not_found``), либо есть ``FAILED``-элемент с ``error_kind`` из
+        :data:`core.domain.enums.BLOCKING_FAILURE_KINDS` (см.
+        :func:`core.pipeline.corpus.derive_corpus_coverage`).
     :param expected_sources: всего элементов сеанса по продукту.
     :param observed_sources: элементов, дошедших до ``FETCHED``.
     :param blocked: ``error_kind → count`` по ``FAILED``-элементам (канонические классы;
-        аудит, не влияет на ``complete``).
+        аудит и объяснение причины неполноты через :attr:`blocking_failures`).
     :param unreadable_origins: origin'ы (``netloc``), от которых не получено ничего
         (отсортировано, детерминированно).
     :param partial_blocks: ``origin → {error_kind: count}`` — не-``not_found`` сбои по
@@ -1142,6 +1152,21 @@ class CorpusCoverage(BaseModel):
     partial_blocks: dict[str, dict[str, int]] = Field(default_factory=dict)
     truncated: bool = False
     computed_at: str
+
+    @property
+    def blocking_failures(self) -> dict[str, int]:
+        """Блокирующие сбои корпуса: ``error_kind → count`` (отсортировано).
+
+        Производное от :attr:`blocked` представление для отчёта/аудита: читатель видит
+        ``robots_disallow=50``, а не только ``complete=False``. Схема хранения не
+        меняется — это вычисляемое свойство, а не колонка. Пустой словарь означает, что
+        неполнота (если она есть) вызвана усечением или нечитаемым origin'ом.
+        """
+        return {
+            kind: int(count)
+            for kind, count in sorted(self.blocked.items())
+            if kind in _BLOCKING_FAILURE_VALUES
+        }
 
     @field_validator("blocked")
     @classmethod

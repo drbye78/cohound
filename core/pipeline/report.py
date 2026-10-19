@@ -46,7 +46,13 @@ from typing import TYPE_CHECKING, Any
 
 import yaml
 
-from core.domain.enums import CellState, RankingPolicy, SourceScope, Status
+from core.domain.enums import (
+    BLOCKING_FAILURE_KINDS,
+    CellState,
+    RankingPolicy,
+    SourceScope,
+    Status,
+)
 from core.domain.invariants import check_unknown_exhaustion
 from core.domain.models import (
     CatalogRow,
@@ -66,6 +72,12 @@ from core.pipeline.compute import (
 from core.pipeline.crawl_frontier import resolve_crawl_limits
 from core.pipeline.evaluate import CORPUS_INCOMPLETE_REVIEW_REASON
 from core.util.hashing import short_hash
+
+#: Строковые значения блокирующих классов — для разбора legacy-аудита в ячейке,
+#: где нет явного ``corpus_blocking_failures``.
+_BLOCKING_FAILURE_VALUES: frozenset[str] = frozenset(
+    kind.value for kind in BLOCKING_FAILURE_KINDS
+)
 
 if TYPE_CHECKING:  # только для аннотаций: без рантайм-связности слоёв
     from core.pipeline.normalize import RunInputs
@@ -1260,11 +1272,16 @@ def _coverage_anomaly(
 ) -> dict[str, Any]:
     """Строка аномалии «корпус продукта неполон» (Ф0).
 
-    Главный действенный факт — **какие origin'ы нечитаемы** (``unreadable_origins``):
-    именно они не позволяют публиковать ``❌``. Частичные блокировки читаемых origin'ов
-    перечисляются отдельно и «тише» (``partial_blocks``) — это аудит, а не причина.
+    Главные действенные факты — **блокирующие сбои** (``blocking_failures``: класс →
+    счётчик) и **нечитаемые origin'ы** (``unreadable_origins``): именно они не позволяют
+    публиковать ``❌``. Читатель видит ``robots_disallow=50``, а не только
+    ``complete=False``. Частичные блокировки перечисляются отдельно (``partial_blocks``).
     """
     blocked = dict(sorted(coverage.blocked.items()))
+    blocking = dict(coverage.blocking_failures)
+    blocking_text = (
+        ", ".join(f"{kind}={count}" for kind, count in blocking.items()) or "{}"
+    )
     unreadable = list(coverage.unreadable_origins)
     partial = {
         origin: dict(sorted(counts.items()))
@@ -1275,6 +1292,7 @@ def _coverage_anomaly(
         "param_id": param_id,
         "reason": (
             "Ф0: неполное покрытие корпуса — complete=False, "
+            f"блокирующие сбои: {blocking_text}, "
             f"нечитаемые origin'ы: {unreadable or '[]'}, "
             f"blocked={blocked or '{}'}, "
             f"observed/expected={coverage.observed_sources}/{coverage.expected_sources}, "
@@ -1284,6 +1302,7 @@ def _coverage_anomaly(
         ),
         "complete": False,
         "blocked": blocked,
+        "blocking_failures": blocking,
         "unreadable_origins": unreadable,
         "partial_blocks": partial,
         "expected_sources": coverage.expected_sources,
@@ -1329,7 +1348,18 @@ def collect_corpus_coverage_anomalies(
         if audit is None:
             continue
         blocked = dict(sorted((audit.get("corpus_blocked") or {}).items()))
+        raw_blocking = audit.get("corpus_blocking_failures") or {
+            kind: count
+            for kind, count in blocked.items()
+            if kind in _BLOCKING_FAILURE_VALUES
+        }
+        blocking = {
+            kind: int(count) for kind, count in sorted(raw_blocking.items())
+        }
         unreadable = list(audit.get("corpus_unreadable_origins") or [])
+        blocking_text = (
+            ", ".join(f"{kind}={count}" for kind, count in blocking.items()) or "{}"
+        )
         partial = {
             str(origin): dict(sorted((counts or {}).items()))
             for origin, counts in sorted(
@@ -1343,6 +1373,7 @@ def collect_corpus_coverage_anomalies(
                 "param_id": str(getattr(cell, "param_id", "") or ""),
                 "reason": (
                     "Ф0: неполное покрытие корпуса — complete=False, "
+                    f"блокирующие сбои: {blocking_text}, "
                     f"нечитаемые origin'ы: {unreadable or '[]'}, "
                     f"blocked={blocked or '{}'}, "
                     f"observed/expected={audit.get('corpus_observed_sources')}/"
@@ -1353,6 +1384,7 @@ def collect_corpus_coverage_anomalies(
                 ),
                 "complete": False,
                 "blocked": blocked,
+                "blocking_failures": blocking,
                 "unreadable_origins": unreadable,
                 "partial_blocks": partial,
                 "expected_sources": audit.get("corpus_expected_sources"),
