@@ -441,6 +441,14 @@ class RunConfig(BaseModel):
     focus: Focus = Field(default_factory=Focus)
     languages: list[str] = Field(default_factory=list)
     snapshot_date: _dt.date
+    #: 09 §2.4/§6.2: идентификатор цикла прогона (ISO-дата/ISO-неделя). ``None`` —
+    #: эффективный цикл выводится из ``snapshot_date`` (run identity, MVP-2b).
+    cycle_id: str | None = None
+    #: 09 §12.2: авторская ссылка на состав когорты (например, ``cohort-...-r2``).
+    #: Входит в ``cohort_digest``; отображаемое имя/причина выбора — нет.
+    cohort_ref: str | None = None
+    #: 09 §2.4: политика наблюдения корпуса по умолчанию; ``--refresh`` её перекрывает.
+    refresh_policy: RefreshPolicy | None = None
     mode: RunMode
     ranking_policy: RankingPolicy = RankingPolicy.CAPABILITY_RANKED
     #: §7.4: активный LLM-слот (``cheap``/``flagship``) из ``run.yaml``. ``None`` →

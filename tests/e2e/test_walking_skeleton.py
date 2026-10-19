@@ -30,17 +30,19 @@ from typing import Any, cast
 import yaml
 
 from core.cli.wiring import build_store
+from core.config.seeds import load_seeds
 from core.domain import CellState, CorpusChunk, LLMCellOutput, LLMEvidence, Status
 from core.pipeline.corpus import _content_token, _derive_index_build_id
 from core.pipeline.gates import gate_g1, gate_g2, gate_g3, gate_g4
 from core.pipeline.lint import lint_run_inputs
 from core.pipeline.normalize import RunInputs, load_inputs
 from core.pipeline.phases import build_phases
-from core.pipeline.plan import RunPlan, plan
+from core.pipeline.plan import RunPlan
 from core.pipeline.runner import PhaseFn, Ports, Runner
 from core.ports.types import RawPage
 from core.ports.vector_index import RetrievedChunk
 from core.util.hashing import content_hash
+from tests.helpers.packages import plan_with_identity
 from tests.fakes.ports import (
     FIXED_TS,
     FakeChunker,
@@ -81,7 +83,8 @@ def _load() -> tuple[RunInputs, RunPlan]:
     """Нормализует входы фикстуры: ``load_inputs → lint → plan`` (§4.5)."""
     inputs = load_inputs(RUN_YAML, FIXTURES)
     lint_run_inputs(inputs).raise_if_blocking()
-    return inputs, plan(inputs)
+    seeds = load_seeds(FIXTURES / "sources" / "seeds.yaml")
+    return inputs, plan_with_identity(inputs, seeds=seeds)
 
 
 def _expected_build_id(inputs: RunInputs, run_plan: RunPlan) -> str:

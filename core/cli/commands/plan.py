@@ -8,15 +8,18 @@
 
 from __future__ import annotations
 
-from typing import Any
-
 import argparse
+import datetime as _dt
+from typing import Any
 
 from core.cli.context import _add_common, _plan_payload, _print_json, _print_plan
 from core.cli.errors import EXIT_OK, LintFailure
+from core.pipeline.digests import cohort_digest, seeds_digest
 from core.pipeline.lint import lint_run_inputs
 from core.pipeline.normalize import load_inputs
+from core.pipeline.onboarding import load_effective_seeds
 from core.pipeline.plan import plan as build_plan
+from core.pipeline.run_identity import build_execution_contract, resolve_cycle_id
 
 
 def run(args: argparse.Namespace) -> int:
@@ -31,7 +34,36 @@ def run(args: argparse.Namespace) -> int:
     if not report.ready:
         raise LintFailure([*report.blocking, *report.incomplete], report.warnings)
 
-    result = build_plan(inputs, run_id=args.run_id)
+    if args.run_id is not None:
+        result = build_plan(inputs, run_id=args.run_id)
+    else:
+        # Та же идентичность, что у ``run`` с дефолтами (без --update/--refresh):
+        # иначе ``plan`` показывал бы иной run_id, чем реальный прогон.
+        profiles = getattr(inputs, "domain_profiles", None) or {}
+        seed_config, _ = load_effective_seeds(
+            args.package, inputs.run.products, profiles=profiles
+        )
+        cohort = cohort_digest(
+            inputs.cohort,
+            case_id=inputs.run.case_id,
+            cohort_ref=getattr(inputs.run, "cohort_ref", None),
+        )
+        seeds = seeds_digest(seed_config)
+        contract = build_execution_contract(
+            inputs, cohort_digest=cohort, seeds_digest=seeds
+        )
+        result = build_plan(
+            inputs,
+            cycle_id=resolve_cycle_id(
+                cli_cycle_id=None,
+                run_config=inputs.run,
+                update=False,
+                today=_dt.date.today(),
+            ),
+            cohort_digest=cohort,
+            seeds_digest=seeds,
+            execution_contract_digest=contract,
+        )
     payload = _plan_payload(result)
     payload["dry_run"] = bool(args.dry_run)
     if args.json:

@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import datetime as _dt
+import json
 import sqlite3
 from collections.abc import Sequence
 from pathlib import Path
@@ -80,6 +81,8 @@ _LINEAGE_COLUMNS = (
     "started_at",
     "completed_at",
     "error",
+    "products_json",
+    "refresh_policy",
 )
 
 
@@ -309,12 +312,44 @@ class SqliteStateStore:
 
     # -- lineage ----------------------------------------------------------- #
     def record_run_lineage(self, row: RunLineageRow) -> None:
-        values = [getattr(row, name) for name in _LINEAGE_COLUMNS]
+        values = []
+        for name in _LINEAGE_COLUMNS:
+            if name == "products_json":
+                # NULL = «состав неизвестен»; [] = прогон без продуктов (разные факты).
+                values.append(
+                    None
+                    if row.products is None
+                    else json.dumps(row.products, ensure_ascii=False)
+                )
+            else:
+                values.append(getattr(row, name))
         with self._conn:
             self._conn.execute(
                 _upsert_sql("run_lineage", "run_id", _LINEAGE_COLUMNS),
                 (row.run_id, *values),
             )
+
+    @staticmethod
+    def _lineage_row(row: sqlite3.Row) -> RunLineageRow:
+        """Строка SQLite → :class:`RunLineageRow` (``products_json`` разбирается)."""
+        raw_products = row["products_json"]
+        products = None if raw_products is None else list(json.loads(raw_products))
+        return RunLineageRow(
+            run_id=row["run_id"],
+            package_id=row["package_id"],
+            cycle_id=row["cycle_id"],
+            previous_run_id=row["previous_run_id"],
+            cohort_digest=row["cohort_digest"],
+            seeds_digest=row["seeds_digest"],
+            execution_contract_digest=row["execution_contract_digest"],
+            change_class=row["change_class"],
+            status=row["status"],
+            started_at=row["started_at"],
+            completed_at=row["completed_at"],
+            error=row["error"],
+            products=products,
+            refresh_policy=row["refresh_policy"],
+        )
 
     def previous_run(self, package_id: str) -> str | None:
         """``run_id`` последнего прогона пакета по ``started_at`` (тай-брейк — ``run_id``)."""
@@ -324,3 +359,19 @@ class SqliteStateStore:
             (package_id,),
         ).fetchone()
         return str(row["run_id"]) if row is not None else None
+
+    def get_run_lineage(self, run_id: str) -> RunLineageRow | None:
+        """Строка lineage по ``run_id`` (``None`` — прогона нет в истории)."""
+        row = self._conn.execute(
+            "SELECT * FROM run_lineage WHERE run_id = ?", (run_id,)
+        ).fetchone()
+        return self._lineage_row(row) if row is not None else None
+
+    def previous_lineage(self, package_id: str) -> RunLineageRow | None:
+        """Последняя строка lineage пакета (``None`` — истории нет)."""
+        row = self._conn.execute(
+            "SELECT * FROM run_lineage WHERE package_id = ? "
+            "ORDER BY started_at DESC, run_id DESC LIMIT 1",
+            (package_id,),
+        ).fetchone()
+        return self._lineage_row(row) if row is not None else None

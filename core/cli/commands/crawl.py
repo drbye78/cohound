@@ -59,16 +59,23 @@ from core.cli.errors import (
 )
 from core.cli.wiring import build_store
 from core.config.deploy import load_deploy_config
-from core.domain import CrawlItemStatus, CrawlSessionStatus
+from core.domain import CrawlItemStatus, CrawlSessionStatus, RefreshPolicy
 from core.pipeline import PHASES
 from core.pipeline.crawl_session import (
     default_session_id,
     read_provenance,
     truncation_summary,
 )
+from core.pipeline.digests import cohort_digest, seeds_digest
 from core.pipeline.lint import lint_run_inputs
 from core.pipeline.normalize import load_inputs
+from core.pipeline.onboarding import load_effective_seeds
 from core.pipeline.plan import derive_run_id
+from core.pipeline.run_identity import (
+    build_execution_contract,
+    resolve_cycle_id,
+    resolve_run_scope,
+)
 from core.pipeline.runner import RunContext
 
 __all__ = [
@@ -241,7 +248,53 @@ def _execute_crawl(
     if not report.ready:
         raise LintFailure([*report.blocking, *report.incomplete], report.warnings)
 
-    run_id = args.run_id or derive_run_id(inputs)
+    # Идентичность прогона — та же формула, что у ``run`` (09 §6.2): иначе crawl
+    # адресовал бы другой ``run_id``/сеанс. ``--cycle-id`` здесь единственный
+    # identity-флаг; refresh/scope берутся из общих флагов и дефолтов.
+    try:
+        run_scope = resolve_run_scope(
+            only_failed=bool(getattr(args, "only_failed", False)),
+            only_product=getattr(args, "only_product", None),
+        )
+        cycle_id = resolve_cycle_id(
+            cli_cycle_id=getattr(args, "cycle_id", None),
+            run_config=inputs.run,
+            update=False,
+            today=_dt.date.today(),
+        )
+    except ValueError as exc:
+        raise CliError(str(exc), code="usage", exit_code=EXIT_USAGE) from exc
+    profiles = getattr(inputs, "domain_profiles", None) or {}
+    operator_urls = (
+        _load_corpus_urls(args.urls) if getattr(args, "urls", None) is not None else None
+    )
+    seed_config, _ = load_effective_seeds(
+        args.package,
+        inputs.run.products,
+        profiles=profiles,
+        urls_override=operator_urls,
+    )
+    cohort_d = cohort_digest(
+        inputs.cohort,
+        case_id=inputs.run.case_id,
+        cohort_ref=getattr(inputs.run, "cohort_ref", None),
+    )
+    seeds_d = seeds_digest(seed_config)
+    contract_d = build_execution_contract(
+        inputs, cohort_digest=cohort_d, seeds_digest=seeds_d
+    )
+    run_id = args.run_id or derive_run_id(
+        inputs,
+        cycle_id=cycle_id,
+        cohort_digest=cohort_d,
+        seeds_digest=seeds_d,
+        execution_contract_digest=contract_d,
+        run_scope=run_scope,
+        refresh_policy=RefreshPolicy.AUTO.value,
+    )
+    # ``_resolve_db_path`` требует явный ``--run-id`` при ``--runs-dir``; выведенный
+    # идентификатор фиксируем в args, чтобы crawl адресовал тот же прогон, что run.
+    args.run_id = run_id
     _set_runs_dir(args)
     db_path = _crawl_db_path(args)
     render_modes = _load_render_modes(getattr(args, "render_modes", None))
@@ -595,6 +648,13 @@ def _add_run_target_flags(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--run-yaml", required=True, help="путь к run.yaml (§4.5)")
     parser.add_argument("--package", required=True, help="каталог пакета категории")
     parser.add_argument("--run-id", default=None, help="переопределить детерминированный run_id")
+    parser.add_argument(
+        "--cycle-id",
+        dest="cycle_id",
+        default=None,
+        help="идентификатор цикла (как у run: run.yaml:cycle_id > snapshot_date); "
+        "нужен для совпадения run_id с run",
+    )
     parser.add_argument(
         "--runs-dir",
         default=None,

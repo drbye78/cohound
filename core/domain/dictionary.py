@@ -13,6 +13,7 @@ import yaml
 
 from core.domain.enums import (
     CapabilityPolicy,
+    ChangeClass,
     CrawlItemStatus,
     CrawlSessionStatus,
     CrawlStrategy,
@@ -26,6 +27,7 @@ from core.domain.enums import (
     ProductScope,
     RankingPolicy,
     RefreshPolicy,
+    RunScope,
     SearchKind,
     SeedRole,
     SeedSource,
@@ -88,6 +90,9 @@ def assert_dictionary_integrity(path: str | Path) -> None:
         "product_mode",
         "refresh_policy",
         "product_scope",
+        # MVP-2b (09 §3.1/§12.1): идентичность прогона и класс изменения.
+        "change_class",
+        "run_scope",
     ]
     missing = [k for k in required if k not in data]
     if missing:
@@ -120,6 +125,9 @@ def assert_dictionary_integrity(path: str | Path) -> None:
         "product_mode": {v.value for v in ProductMode},
         "refresh_policy": {v.value for v in RefreshPolicy},
         "product_scope": {v.value for v in ProductScope},
+        # MVP-2b (09 §3.1/§12.1): идентичность прогона и класс изменения.
+        "change_class": {v.value for v in ChangeClass},
+        "run_scope": {v.value for v in RunScope},
         # Ф0: классы сбоя краула/конвейера — иначе словарь и enum расходятся молча.
         "failure_kind": {v.value for v in FailureKind},
     }

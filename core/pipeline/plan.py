@@ -69,11 +69,27 @@ class RunPlan:
     warnings: list[str] = field(default_factory=list)
 
 
-def derive_run_id(inputs: RunInputs) -> str:
-    """Детерминированный ``run_id`` от значимых полей входов (no random/UUID).
+def derive_run_id(
+    inputs: RunInputs,
+    *,
+    cycle_id: str,
+    cohort_digest: str,
+    seeds_digest: str,
+    execution_contract_digest: str,
+    run_scope: str = "full",
+    refresh_policy: str = "auto",
+) -> str:
+    """Детерминированный ``run_id`` от значимых полей измерения (09 §6.2).
 
-    Один и тот же пакет + ``run.yaml`` дают один и тот же идентификатор, что
-    обеспечивает воспроизводимость и resume (§13).
+    Материал (порядок фиксирован, разделитель — unit separator)::
+
+        case_id, package, anchor, cycle_id, cohort_digest, seeds_digest,
+        execution_contract_digest, run_scope, refresh_policy,
+        sorted focus.modules, sorted focus.params
+
+    ``snapshot_date`` и ``sorted(products)`` **не** входят: цикл задаёт ``cycle_id``, а
+    состав когорты уже зафиксирован ``cohort_digest``. Все дайджесты и ``cycle_id``
+    обязательны — молчаливого fallback на «старую» формулу нет.
     """
     run = inputs.run
     material = "\x1f".join(
@@ -81,8 +97,12 @@ def derive_run_id(inputs: RunInputs) -> str:
             run.case_id,
             run.package,
             run.anchor,
-            str(run.snapshot_date),
-            ",".join(sorted(run.products)),
+            cycle_id,
+            cohort_digest,
+            seeds_digest,
+            execution_contract_digest,
+            run_scope,
+            refresh_policy,
             ",".join(sorted(run.focus.modules)),
             ",".join(sorted(run.focus.params)),
         )
@@ -170,12 +190,27 @@ def _renormalize(
     return weights
 
 
-def plan(inputs: RunInputs, run_id: str | None = None) -> RunPlan:
+def plan(
+    inputs: RunInputs,
+    run_id: str | None = None,
+    *,
+    cycle_id: str | None = None,
+    cohort_digest: str | None = None,
+    seeds_digest: str | None = None,
+    execution_contract_digest: str | None = None,
+    run_scope: str = "full",
+    refresh_policy: str = "auto",
+) -> RunPlan:
     """Строит :class:`RunPlan` из нормализованных входов (§4.5/§1.6).
 
     Детерминирован: сортировка модулей/параметров/продуктов/ролей/golden и
     перенормировка без зависимости от порядка словарей. Предупреждения плана
     объединены с lint-warnings входов (план **не** блокирует — это делает линтер).
+
+    ``run_id`` обычно передаёт composition root (уже выведенный из
+    :func:`derive_run_id`). Если он не задан, ``cycle_id`` и все три дайджеста
+    обязательны: ``plan`` выводит идентификатор той же формулой. Молчаливой подмены
+    старым материалом нет — отсутствие аргументов поднимает :class:`ValueError`.
     """
     declared = _declared_weights(inputs.package)
     modules, warnings = _selected_modules(inputs.run, declared)
@@ -204,8 +239,34 @@ def plan(inputs: RunInputs, run_id: str | None = None) -> RunPlan:
 
     warnings.extend(lint_run_inputs(inputs).warnings)
 
+    if run_id is None:
+        missing = [
+            name
+            for name, value in (
+                ("cycle_id", cycle_id),
+                ("cohort_digest", cohort_digest),
+                ("seeds_digest", seeds_digest),
+                ("execution_contract_digest", execution_contract_digest),
+            )
+            if value is None
+        ]
+        if missing:
+            raise ValueError(
+                f"plan: для вывода run_id нужны аргументы {missing} "
+                "(либо передайте run_id явно)"
+            )
+        run_id = derive_run_id(
+            inputs,
+            cycle_id=cycle_id,
+            cohort_digest=cohort_digest,
+            seeds_digest=seeds_digest,
+            execution_contract_digest=execution_contract_digest,
+            run_scope=run_scope,
+            refresh_policy=refresh_policy,
+        )
+
     return RunPlan(
-        run_id=run_id if run_id is not None else derive_run_id(inputs),
+        run_id=run_id,
         products=sorted(inputs.run.products),
         anchor=inputs.run.anchor,
         modules=modules,

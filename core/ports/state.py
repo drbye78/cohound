@@ -100,7 +100,12 @@ class SeedRow:
 
 @dataclass(frozen=True)
 class RunLineageRow:
-    """Строка ``run_lineage``: провенанс прогона в цепочке циклов (§12.3)."""
+    """Строка ``run_lineage``: провенанс прогона в цепочке циклов (§12.3).
+
+    ``products`` — состав когорты прогона (``products_json``). ``None`` — состав
+    неизвестен (legacy-строка без колонки), пустой список — прогон без продуктов.
+    ``refresh_policy`` — политика наблюдения, с которой запускался прогон.
+    """
 
     run_id: str
     package_id: str
@@ -114,6 +119,8 @@ class RunLineageRow:
     previous_run_id: str | None = None
     completed_at: str | None = None
     error: str | None = None
+    products: list[str] | None = None
+    refresh_policy: str | None = None
 
 
 @runtime_checkable
@@ -163,4 +170,12 @@ class ProductStatePort(Protocol):
 
     def previous_run(self, package_id: str) -> str | None:
         """``run_id`` последнего известного прогона пакета (``None`` — истории нет)."""
+        ...
+
+    def get_run_lineage(self, run_id: str) -> RunLineageRow | None:
+        """Строка lineage по ``run_id`` или ``None`` (например, ``--since-run``)."""
+        ...
+
+    def previous_lineage(self, package_id: str) -> RunLineageRow | None:
+        """Последняя строка lineage пакета (``None`` — истории нет)."""
         ...

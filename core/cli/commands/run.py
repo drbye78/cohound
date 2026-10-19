@@ -38,7 +38,14 @@ from core.cli.context import (
     _session_snapshot,
     _snapshot_run_inputs,
 )
-from core.cli.errors import EXIT_BLOCKED, EXIT_ERROR, EXIT_OK, CliError, LintFailure
+from core.cli.errors import (
+    EXIT_BLOCKED,
+    EXIT_ERROR,
+    EXIT_OK,
+    EXIT_USAGE,
+    CliError,
+    LintFailure,
+)
 from core.cli.wiring import (
     SPLIT_PROFILE,
     WiringError,
@@ -48,7 +55,13 @@ from core.cli.wiring import (
     run_db_path,
 )
 from core.config.deploy import is_split, load_deploy_config
-from core.domain import CrawlItemStatus, CrawlSessionStatus, ProductScope
+from core.domain import (
+    CrawlItemStatus,
+    CrawlSessionStatus,
+    ProductScope,
+    RefreshPolicy,
+    RunScope,
+)
 from core.pipeline import GATE_PHASES, PHASES
 from core.pipeline.crawl_session import (
     default_session_id,
@@ -58,11 +71,20 @@ from core.pipeline.crawl_session import (
 from core.pipeline.lint import lint_run_inputs
 from core.pipeline.normalize import load_inputs
 from core.pipeline.observability import instrument_phases, write_run_metrics
-from core.pipeline.onboarding import effective_seeds, preflight
+from core.pipeline.digests import cohort_digest, seeds_digest
+from core.pipeline.onboarding import effective_seeds, load_effective_seeds, preflight
 from core.pipeline.phases import resolve_measured_retrieval
 from core.pipeline.plan import derive_run_id
 from core.pipeline.report import Artifacts
 from core.pipeline.retrieve import RetrievalProfile
+from core.pipeline.run_identity import (
+    RunIdentity,
+    build_execution_contract,
+    build_run_identity,
+    resolve_cycle_id,
+    resolve_refresh_policy,
+    resolve_run_scope,
+)
 from core.pipeline.runner import PhaseFn, _gate_phase
 from core.pipeline.state_sync import record_run_outcome, sync_product_state
 
@@ -84,6 +106,21 @@ def _onboarding_in_scope(until: str | None) -> bool:
     if until is None:
         return True
     return PHASES.index(until) >= PHASES.index("g1")
+
+
+def _identity_payload(identity: RunIdentity) -> dict[str, Any]:
+    """Поля идентичности прогона для ``--json``/``--dry-run`` (09 §2.4/§12.3)."""
+    return {
+        "cycle_id": identity.cycle_id,
+        "previous_run_id": identity.previous_run_id,
+        "change_class": identity.change_class.value,
+        "golden_required": identity.golden_required,
+        "run_scope": identity.run_scope,
+        "refresh_policy": identity.refresh_policy.value,
+        "cohort_digest": identity.cohort_digest,
+        "seeds_digest": identity.seeds_digest,
+        "execution_contract_digest": identity.execution_contract_digest,
+    }
 
 
 def _blocked_payload(
@@ -141,13 +178,122 @@ def run(args: argparse.Namespace) -> int:
     """
     inputs = load_inputs(args.run_yaml, args.package)
     report = lint_run_inputs(inputs)
-    run_id = args.run_id or derive_run_id(inputs)
+    package_id = Path(args.package).name
     # Момент старта прогона — для lineage state-контура (09 §4.2 ``run_lineage``).
     started_at = _utc_now()
-    # ``cycle_id`` на этом срезе — дата снимка прогона (``run.yaml: snapshot_date``);
-    # отдельного CLI-флага цикла нет (run identity — следующий срез).
-    cycle_id = inputs.run.snapshot_date.isoformat()
-    package_id = Path(args.package).name
+
+    # --- Идентичность прогона (09 §2.4/§6.2/§12.3) ------------------------- #
+    # Объём/политика проверяются до любых записей: неоднозначный work-set — ошибка
+    # использования, а не молчаливый приоритет флага.
+    try:
+        run_scope = resolve_run_scope(
+            only_failed=bool(getattr(args, "only_failed", False)),
+            only_product=getattr(args, "only_product", None),
+        )
+        refresh_policy = resolve_refresh_policy(
+            cli=getattr(args, "refresh", None), run_config=inputs.run
+        )
+    except ValueError as exc:
+        raise CliError(str(exc), code="usage", exit_code=EXIT_USAGE) from exc
+    if bool(getattr(args, "update", False)) and run_scope == RunScope.ONLY_FAILED.value:
+        raise CliError(
+            "--update несовместим с --only-failed (09 §6.2)",
+            code="usage",
+            exit_code=EXIT_USAGE,
+        )
+
+    # Предыдущий lineage читается ДО вывода run_id (нужен предыдущий cycle_id для
+    # проверки --update) и ДО записи текущей строки (иначе она сослалась бы на себя).
+    # ``create=False``: dry-run/ошибочный вызов не создаёт state.db.
+    state_store: Any = _open_state_store(args, create=False)
+    previous_lineage = (
+        state_store.previous_lineage(package_id) if state_store is not None else None
+    )
+    try:
+        cycle_id = resolve_cycle_id(
+            cli_cycle_id=getattr(args, "cycle_id", None),
+            run_config=inputs.run,
+            update=bool(getattr(args, "update", False)),
+            today=_dt.date.today(),
+            previous_cycle_id=(
+                previous_lineage.cycle_id if previous_lineage is not None else None
+            ),
+        )
+    except ValueError as exc:
+        raise CliError(str(exc), code="usage", exit_code=EXIT_USAGE) from exc
+
+    profiles = getattr(inputs, "domain_profiles", None) or {}
+    operator_urls: dict[str, list[str]] | None = None
+    if getattr(args, "urls", None) is not None:
+        operator_urls = _load_corpus_urls(args.urls)
+    # Эффективный seed-набор нужен уже для run_id (seeds_digest), поэтому читается до
+    # префлайта. Preflight перечитывает его же (идемпотентно, без записи).
+    seed_config, _ = load_effective_seeds(
+        args.package,
+        inputs.run.products,
+        profiles=profiles,
+        urls_override=operator_urls,
+    )
+    cohort_d = cohort_digest(
+        inputs.cohort,
+        case_id=inputs.run.case_id,
+        cohort_ref=getattr(inputs.run, "cohort_ref", None),
+    )
+    seeds_d = seeds_digest(seed_config)
+    contract_d = build_execution_contract(
+        inputs,
+        cohort_digest=cohort_d,
+        seeds_digest=seeds_d,
+        retrieval_profile=getattr(args, "retrieval_profile", None),
+        cutoff_K=getattr(args, "cutoff_k", None),
+    )
+    run_id = args.run_id or derive_run_id(
+        inputs,
+        cycle_id=cycle_id,
+        cohort_digest=cohort_d,
+        seeds_digest=seeds_d,
+        execution_contract_digest=contract_d,
+        run_scope=run_scope,
+        refresh_policy=refresh_policy.value,
+    )
+
+    previous_run_id = getattr(args, "since_run", None)
+    previous = None
+    if previous_run_id is not None:
+        previous = (
+            state_store.get_run_lineage(previous_run_id)
+            if state_store is not None
+            else None
+        )
+        if previous is None:
+            raise CliError(
+                f"--since-run: прогон '{previous_run_id}' не найден в state.db",
+                code="usage",
+                exit_code=EXIT_USAGE,
+            )
+    else:
+        previous = previous_lineage
+        previous_run_id = previous.run_id if previous is not None else None
+    # Resume текущего прогона — не «предыдущий»: carry-forward не выполняется (§12.3).
+    if previous_run_id == run_id:
+        previous_run_id = None
+        previous = None
+    identity = build_run_identity(
+        run_id=run_id,
+        cycle_id=cycle_id,
+        previous_run_id=previous_run_id,
+        previous_products=previous.products if previous is not None else None,
+        previous_execution_contract_digest=(
+            previous.execution_contract_digest if previous is not None else None
+        ),
+        cohort_digest=cohort_d,
+        seeds_digest=seeds_d,
+        execution_contract_digest=contract_d,
+        run_scope=run_scope,
+        refresh_policy=refresh_policy,
+        current_products=inputs.run.products,
+    )
+
     db_path = Path(args.db) if args.db is not None else run_db_path(args.runs_dir, run_id)
     # План строится ОДИН раз здесь и переиспользуется фазами/префлайтом: повторный
     # ``plan()`` дал бы иной ``run_id``/двойной линт (см. core/pipeline/phases.py).
@@ -156,19 +302,13 @@ def run(args: argparse.Namespace) -> int:
     # видна и в сухом прогоне (I19: никакого молчаливого фетча/подмены).
     render_modes = _load_render_modes(getattr(args, "render_modes", None))
 
-    # Durable per-product состояние (09 §4.1): открывается только когда пакет —
-    # реальный каталог. ``--dry-run`` — только чтение (отсутствующий ``state.db``
-    # не создаётся); реальный прогон открывает/создаёт state после проверки
-    # блокировки онбординга (заблокированный прогон state не создаёт).
-    state_store: Any = None
+    # Durable per-product состояние (09 §4.1): ``create=False`` выше — только чтение;
+    # реальный прогон открывает/создаёт state после проверки блокировки онбординга
+    # (заблокированный прогон state не создаёт).
     try:
         # MVP-1: onboarding-префлайт (O1). ``--urls`` — полная замена пакетного seed-набора;
         # иначе seeds.yaml[product] > corpus_urls.yaml[product] (legacy fallback + warning).
         onboarding = None
-        operator_urls: dict[str, list[str]] | None = None
-        if getattr(args, "urls", None) is not None:
-            operator_urls = _load_corpus_urls(args.urls)
-        profiles = getattr(inputs, "domain_profiles", None) or {}
         # ``--only-product`` сужает префлайт: заблокированный продукт **вне** области
         # прогона не должен останавливать частичный прогон (09 §6.2/§13.6). Полный
         # прогон по-прежнему блокируется любым неготовым продуктом когорты.
@@ -183,10 +323,6 @@ def run(args: argparse.Namespace) -> int:
             else run_plan.products
         )
         if _onboarding_in_scope(args.until):
-            if args.dry_run:
-                # Сухой прогон — только чтение: отсутствующий ``state.db`` не создаётся,
-                # поэтому без файла режим продукта остаётся ``new`` (state=None).
-                state_store = _open_state_store(args, create=False)
             onboarding = preflight(
                 args.package,
                 preflight_products,
@@ -207,6 +343,7 @@ def run(args: argparse.Namespace) -> int:
                     onboarding,
                     warnings=[*report.warnings, *onboarding_warnings],
                 )
+                payload.update(_identity_payload(identity))
                 payload["dry_run"] = True
                 payload["until"] = args.until
                 payload["phases"] = _phases_until(args.until)
@@ -224,6 +361,7 @@ def run(args: argparse.Namespace) -> int:
                 "phases": _phases_until(args.until),
                 "render_modes": {url: mode.value for url, mode in render_modes.items()},
                 "warnings": [*report.warnings, *onboarding_warnings],
+                **_identity_payload(identity),
             }
             if onboarding is not None:
                 payload["products"] = [
@@ -259,6 +397,7 @@ def run(args: argparse.Namespace) -> int:
                 onboarding,
                 warnings=[*report.warnings, *onboarding_warnings],
             )
+            payload.update(_identity_payload(identity))
             if args.json:
                 _print_json(payload)
             else:
@@ -464,12 +603,9 @@ def run(args: argparse.Namespace) -> int:
             # а не смена кода возврата прогона.
             if state_store is not None and onboarding is not None:
                 try:
-                    # Предыдущий прогон пакета — читается ДО записи текущей строки
-                    # lineage. Resume того же ``run_id`` — не «предыдущий прогон»
-                    # (иначе строка ссылалась бы на саму себя).
-                    previous_run_id = state_store.previous_run(package_id)
-                    if previous_run_id == run_id:
-                        previous_run_id = None
+                    # Идентичность выведена ДО исполнения фаз (previous_run_id — до
+                    # записи текущей строки lineage, иначе она сослалась бы на себя).
+                    # В lineage идут реальные cycle_id/дайджесты/класс изменения.
                     record_run_outcome(
                         state_store,
                         run_id=run_id,
@@ -481,8 +617,12 @@ def run(args: argparse.Namespace) -> int:
                         started_at=started_at,
                         completed_at=_utc_now(),
                         previous_run_id=previous_run_id,
-                        change_class="none",
+                        cohort_digest=cohort_d,
+                        seeds_digest=seeds_d,
+                        execution_contract_digest=contract_d,
+                        change_class=identity.change_class.value,
                         scope=scope.value,
+                        refresh_policy=refresh_policy.value,
                         evaluate_ok=any(
                             result.phase == "evaluate" and result.status == "ok"
                             for result in run_report.results
@@ -628,6 +768,31 @@ def configure(sub: Any) -> None:
     p_run.add_argument("--run-yaml", required=True, help="путь к run.yaml (§4.5)")
     p_run.add_argument("--package", required=True, help="каталог пакета категории")
     p_run.add_argument("--run-id", default=None, help="переопределить детерминированный run_id")
+    p_run.add_argument(
+        "--update",
+        action="store_true",
+        help="явно начать новый цикл: требует cycle_id, отличного от предыдущего (09 §2.4)",
+    )
+    p_run.add_argument(
+        "--cycle-id",
+        dest="cycle_id",
+        default=None,
+        help="идентификатор цикла (ISO-дата/ISO-неделя); без --update — "
+        "run.yaml:cycle_id > run.yaml:snapshot_date",
+    )
+    p_run.add_argument(
+        "--since-run",
+        dest="since_run",
+        default=None,
+        help="явный predecessor для carry-forward/lineage (по умолчанию — последний "
+        "прогон пакета из state.db)",
+    )
+    p_run.add_argument(
+        "--refresh",
+        choices=[policy.value for policy in RefreshPolicy],
+        default=None,
+        help="политика обновления корпуса: auto|revalidate|refresh|offline (дефолт auto)",
+    )
     p_run.add_argument(
         "--runs-dir",
         default=None,

@@ -2651,7 +2651,7 @@ def _build_phases_gate() -> None:
         str(_here(tests_root=True) / "fixtures" / "e2e" / "run.yaml"),
         str(_here(tests_root=True) / "fixtures" / "e2e"),
     )
-    run_plan = plan(inputs)
+    run_plan = plan(inputs, run_id="selfcheck-plan")
     phases = build_phases(inputs=inputs, plan=run_plan, ports=Ports())
     if set(phases) != expected:
         raise AssertionError(f"build_phases вернул не тот набор фаз: {set(phases) ^ expected}")
@@ -2670,7 +2670,7 @@ def _walking_skeleton() -> None:
 
     fixture_dir = _here(tests_root=True) / "fixtures" / "e2e"
     inputs = load_inputs(str(fixture_dir / "run.yaml"), str(fixture_dir))
-    run_plan = plan(inputs)
+    run_plan = plan(inputs, run_id="selfcheck-skeleton")
 
     store = build_store(":memory:")
     try:

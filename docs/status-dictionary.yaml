@@ -404,3 +404,21 @@ refresh_policy:
 product_scope:
   - full
   - product_only
+
+# 09 §3.1/§12.1. Идентичность прогона (MVP-2b): класс изменения между прогонами.
+# Операционное перечисление: описывает провенанс измерения, не семантику правил;
+# добавление — без бампа методологической версии словаря (§13).
+change_class:
+  - none
+  - content_change
+  - cohort_expansion
+  - cohort_reduction
+  - execution_change
+  - methodology_change
+
+# 09 §3.1/§6.2. Объём прогона: полный / только сбойные / один продукт.
+# Одиночный продукт кодируется в run_id как product:<id>; здесь — категория.
+run_scope:
+  - full
+  - only_failed
+  - product_only

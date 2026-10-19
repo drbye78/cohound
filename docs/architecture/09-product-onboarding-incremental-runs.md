@@ -1,19 +1,24 @@
 # 09. Онбординг продукта и инкрементальные прогоны обновления
 
-> **Статус:** **MVP-1 и MVP-2a реализованы.** MVP-1 (§16.1, этап 1): `sources/seeds.yaml`,
-> onboarding-префлайт, zero-source coverage. MVP-2a (часть этапа 2): durable
-> `state/{package_id}/state.db` (§4.1/§4.2), `ProductStatePort`/`SqliteStateStore`,
+> **Статус:** **MVP-1, MVP-2a и MVP-2b реализованы.** MVP-1 (§16.1, этап 1):
+> `sources/seeds.yaml`, onboarding-префлайт, zero-source coverage. MVP-2a (часть этапа 2):
+> durable `state/{package_id}/state.db` (§4.1/§4.2), `ProductStatePort`/`SqliteStateStore`,
 > `resolve_product_modes` (new/full/incremental), синхронизация seed-набора и проводка в
-> `run`. Не реализовано: run identity (`derive_run_id` без products, `cycle_id`/`--update`),
-> incremental corpus, per-product partitions/composition, carry-forward (этапы 2b–5) —
-> design-only. Документ описывает целевую архитектуру сценария «`add-product` → следующий
-> прогон обновления». Он не меняет регламент `cohound-spec-v2.md`; там, где дизайн
-> затрагивает семантику §13/§4.4, это явно помечено как **решение человека**
-> (см. §12.6 и §17).
+> `run`. MVP-2b (run identity): `derive_run_id` без состава продуктов
+> (§6.2: `cycle_id` + `cohort_digest` + `seeds_digest` + `execution_contract_digest` +
+> `run_scope` + `refresh_policy` + focus), `--update`/`--cycle-id`/`--since-run`,
+> `change_class`/`golden_required` по предыдущему lineage. Не реализовано: incremental
+> corpus, per-product partitions/composition, carry-forward (этапы 3–5) — design-only.
+> Документ описывает целевую архитектуру сценария «`add-product` → следующий прогон
+> обновления». Он не меняет регламент `cohound-spec-v2.md`; там, где дизайн затрагивает
+> семантику §13/§4.4, это явно помечено как **решение человека** (см. §12.6 и §17).
 >
-> **Отклонения реализованного среза от целевого дизайна** (осознанные, до этапов 2b–5):
-> `run_id` пока по-прежнему включает состав продуктов (`derive_run_id` не менялся) —
-> поэтому добавление продукта создаёт новый прогон, а `state.db` переживает его;
+> **Отклонения реализованного среза от целевого дизайна** (осознанные, до этапов 3–5):
+> `execution_contract_digest` пока собирается из честно доступных значений run-слоя
+> (methodology/package/cohort/seeds/retrieval); версии краула, чанкера, экстрактора,
+> эмбеддера, лексики, реестров, deploy-профиля и seam-схемы хешируются как `null` до
+> соответствующих срезов; семантика `hound diff` (`EXECUTION_FIELDS`) и классификация
+> `content_change` **не** менялись — это отдельное, ещё не принятое изменение методологии;
 > `CorpusCoverage.complete` требует `expected_sources > 0`, а не `observed_sources > 0`
 > (methodology-решение, §6.5/§19 — отложено); review-артефакт именуется
 > `sources/add_product/{date}-{product_id}.json` и ведёт append-only историю `apply`

@@ -20,7 +20,9 @@ from pathlib import Path
 __all__ = ["STATE_SCHEMA_VERSION", "STATE_DDL", "connect_state", "state_db_path"]
 
 #: Версия схемы ``state.db`` (пишется в ``schema_meta.schema_version``).
-STATE_SCHEMA_VERSION = "1"
+#: 2 — аддитивно: ``run_lineage.products_json`` (состав когорты прогона) и
+#: ``run_lineage.refresh_policy`` (политика наблюдения).
+STATE_SCHEMA_VERSION = "2"
 
 #: DDL §4.2. Идемпотентен: ``CREATE ... IF NOT EXISTS`` на всех объектах.
 STATE_DDL = """
@@ -197,7 +199,9 @@ CREATE TABLE IF NOT EXISTS run_lineage (
     status            TEXT NOT NULL,            -- running|complete|partial|failed|aborted
     started_at        TEXT NOT NULL,
     completed_at      TEXT,
-    error             TEXT
+    error             TEXT,
+    products_json     TEXT,                     -- JSON-массив product_id (NULL = неизвестно)
+    refresh_policy    TEXT                      -- auto|revalidate|refresh|offline
 );
 
 -- 9. Реестр иммутабельных индексных партиций и композиций.
@@ -247,18 +251,42 @@ CREATE INDEX IF NOT EXISTS idx_partition_product ON index_partition(package_id, 
 """
 
 
+#: Аддитивные колонки, появившиеся после первой версии схемы (``{table: {column: type}}``).
+#: ``CREATE TABLE IF NOT EXISTS`` не добавляет колонки в уже существующую таблицу,
+#: поэтому при открытии старой БД они досоздаются через ``ALTER TABLE``.
+_ADDITIVE_COLUMNS: dict[str, dict[str, str]] = {
+    "run_lineage": {
+        "products_json": "TEXT",
+        "refresh_policy": "TEXT",
+    }
+}
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Досоздаёт аддитивные колонки в существующих таблицах (идемпотентно)."""
+    for table, columns in _ADDITIVE_COLUMNS.items():
+        existing = {
+            row["name"] for row in conn.execute(f"PRAGMA table_info({table})")
+        }
+        for column, sql_type in columns.items():
+            if column not in existing:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {sql_type}")
+
+
 def connect_state(db_path: str | Path = ":memory:") -> sqlite3.Connection:
     """Открывает ``state.db`` и применяет идемпотентную схему §4.2.
 
     ``row_factory = sqlite3.Row`` — доступ к колонкам по имени (как в
     :func:`core.store.sqlite.connect`). Схема применяется на каждом открытии
     (``IF NOT EXISTS`` — no-op для существующих объектов), версия схемы пишется в
-    ``schema_meta``. Отдельного helper'а аддитивных миграций нет: схема этого среза
-    совпадает с §4.2 (колонок сверх документа нет).
+    ``schema_meta``. Аддитивные колонки, появившиеся после v1, досоздаются
+    :func:`_migrate` (``ALTER TABLE ... ADD COLUMN``), поэтому старая БД открывается
+    без потери данных.
     """
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
     conn.executescript(STATE_DDL)
+    _migrate(conn)
     conn.execute(
         "INSERT OR REPLACE INTO schema_meta(key, value) VALUES ('schema_version', ?)",
         (STATE_SCHEMA_VERSION,),

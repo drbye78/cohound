@@ -479,3 +479,34 @@ class ProductScope(StrEnum):
 
     FULL = "full"
     PRODUCT_ONLY = "product_only"
+
+
+class ChangeClass(StrEnum):
+    """Класс изменения между прогонами (09 §3.1/§12.1).
+
+    ``none`` — значимых изменений нет; ``content_change`` — изменился только состав
+    документов при том же execution contract; ``cohort_expansion``/``cohort_reduction`` —
+    продукт добавлен/удалён из когорты; ``execution_change`` — изменились условия
+    измерения (версии/модели/ретривал/краул/seed-набор); ``methodology_change`` —
+    изменилась семантика правил. Класс определяется :mod:`core.pipeline.run_identity`.
+    """
+
+    NONE = "none"
+    CONTENT_CHANGE = "content_change"
+    COHORT_EXPANSION = "cohort_expansion"
+    COHORT_REDUCTION = "cohort_reduction"
+    EXECUTION_CHANGE = "execution_change"
+    METHODOLOGY_CHANGE = "methodology_change"
+
+
+class RunScope(StrEnum):
+    """Объём прогона (09 §3.1/§6.2): полный, только сбойные, один продукт.
+
+    В материале ``run_id`` одиночный продукт кодируется как ``product:<id>``
+    (:func:`core.pipeline.run_identity.resolve_run_scope`), поэтому значение
+    ``PRODUCT_ONLY`` — категория, а не готовый префикс.
+    """
+
+    FULL = "full"
+    ONLY_FAILED = "only_failed"
+    PRODUCT_ONLY = "product_only"

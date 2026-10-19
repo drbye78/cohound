@@ -200,6 +200,7 @@ def record_run_outcome(
     execution_contract_digest: str | None = None,
     change_class: str = "none",
     scope: str = ProductScope.FULL.value,
+    refresh_policy: str = "auto",
     evaluate_ok: bool = False,
 ) -> None:
     """Фиксирует итог прогона в durable state: снимки, рубежи, lineage (09 §4.4/§5.1).
@@ -225,9 +226,12 @@ def record_run_outcome(
     :param evaluate_ok: фаза ``evaluate`` завершилась ``ok`` (иначе eval не состоялся).
     :param scope: ``full``|``product_only`` (§6.2/§13.6); ``product_only`` не двигает
         ``last_completed_run_id`` — baseline остаётся от полного прогона.
+    :param refresh_policy: политика наблюдения прогона (``auto``|…); пишется в lineage.
+    :param change_class: класс изменения относительно предыдущего прогона (§12.1).
     """
     stats = _cell_stats(store, run_id)
-    for product_id in sorted({str(pid) for pid in products}):
+    product_ids = sorted({str(pid) for pid in products})
+    for product_id in product_ids:
         coverage = store.read_corpus_coverage(run_id, product_id)
         coverage_digest = _coverage_digest(coverage)
         cells_total, cells_resolved = stats.get(product_id, (0, 0))
@@ -286,8 +290,8 @@ def record_run_outcome(
             package_id=package_id,
             cycle_id=cycle_id,
             previous_run_id=previous_run_id,
-            # NOT NULL-колонки: пустая строка = «дайджест не вычислялся в этом срезе»
-            # (run identity/дайджесты — отдельный срез), а не выдуманное значение.
+            # NOT NULL-колонки: пустая строка остаётся только для вызовов без
+            # дайджестов (старые тесты/ручные записи), а не выдуманным значением.
             cohort_digest=cohort_digest or "",
             seeds_digest=seeds_digest or "",
             execution_contract_digest=execution_contract_digest or "",
@@ -295,5 +299,7 @@ def record_run_outcome(
             status=_LINEAGE_STATUS.get(status, "partial"),
             started_at=started_at,
             completed_at=completed_at,
+            products=product_ids,
+            refresh_policy=refresh_policy,
         )
     )

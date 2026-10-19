@@ -30,10 +30,42 @@ __all__ = [
     "REGISTRY_FIXTURES",
     "RUN_YAML_NAME",
     "capturing_factory",
+    "plan_with_identity",
     "run_argv",
     "valid_package",
     "write_text",
 ]
+
+
+def plan_with_identity(inputs: Any, *, seeds: Any = None) -> Any:
+    """Строит ``RunPlan`` с полной идентичностью прогона (MVP-2b).
+
+    ``plan(inputs)`` без ``run_id`` требует ``cycle_id`` и дайджесты; тесты e2e
+    передают фактический seed-набор фикстуры (``seeds``), чтобы идентификатор был
+    производной реальных входов, а не константой.
+    """
+    from core.domain.models import SeedsConfig
+    from core.pipeline.digests import cohort_digest, seeds_digest
+    from core.pipeline.plan import plan
+    from core.pipeline.run_identity import build_execution_contract
+
+    config = seeds if seeds is not None else SeedsConfig()
+    cohort = cohort_digest(
+        inputs.cohort,
+        case_id=inputs.run.case_id,
+        cohort_ref=getattr(inputs.run, "cohort_ref", None),
+    )
+    seeds_d = seeds_digest(config)
+    contract = build_execution_contract(
+        inputs, cohort_digest=cohort, seeds_digest=seeds_d
+    )
+    return plan(
+        inputs,
+        cycle_id=inputs.run.snapshot_date.isoformat(),
+        cohort_digest=cohort,
+        seeds_digest=seeds_d,
+        execution_contract_digest=contract,
+    )
 
 
 def valid_package(

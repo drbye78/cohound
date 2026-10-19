@@ -121,8 +121,33 @@ def test_cross_check_reports_anchor_mismatch() -> None:
 # ---------------------------------------------------------------------------
 
 
+def _plan(inputs: RunInputs, **kwargs: object):
+    """``plan`` с полной идентичностью прогона (MVP-2b): без неё run_id не выводится."""
+    from core.config.seeds import load_seeds
+    from core.pipeline.digests import cohort_digest, seeds_digest
+    from core.pipeline.run_identity import build_execution_contract
+
+    cohort = cohort_digest(
+        inputs.cohort,
+        case_id=inputs.run.case_id,
+        cohort_ref=inputs.run.cohort_ref,
+    )
+    seeds = seeds_digest(load_seeds(FIXTURES / "sources" / "seeds.yaml"))
+    contract = build_execution_contract(
+        inputs, cohort_digest=cohort, seeds_digest=seeds
+    )
+    return plan(
+        inputs,
+        cycle_id=inputs.run.snapshot_date.isoformat(),
+        cohort_digest=cohort,
+        seeds_digest=seeds,
+        execution_contract_digest=contract,
+        **kwargs,
+    )
+
+
 def test_plan_happy_fields() -> None:
-    result = plan(_clean())
+    result = _plan(_clean())
     assert result.run_id.startswith("case_x-")
     assert result.products == ["p1", "p2"]
     assert result.anchor == "p1"
@@ -143,7 +168,7 @@ def test_plan_explicit_run_id() -> None:
 
 
 def test_plan_focus_by_module() -> None:
-    result = plan(_with_focus(modules=["mod_b"], params=[]))
+    result = _plan(_with_focus(modules=["mod_b"], params=[]))
     assert result.modules == ["mod_b"]
     assert [row.param_id for row in result.params] == ["param_b"]
     assert result.module_weights == {"mod_b": 40.0}
@@ -152,7 +177,7 @@ def test_plan_focus_by_module() -> None:
 
 
 def test_plan_focus_by_param_keeps_all_modules() -> None:
-    result = plan(_with_focus(modules=[], params=["param_b"]))
+    result = _plan(_with_focus(modules=[], params=["param_b"]))
     assert result.modules == ["mod_a", "mod_b"]
     assert [row.param_id for row in result.params] == ["param_b"]
     assert result.module_weights == {"mod_a": 60.0, "mod_b": 40.0}
@@ -161,7 +186,7 @@ def test_plan_focus_by_param_keeps_all_modules() -> None:
 
 
 def test_plan_unknown_focus_module_warns() -> None:
-    result = plan(_with_focus(modules=["mod_x"], params=[]))
+    result = _plan(_with_focus(modules=["mod_x"], params=[]))
     assert result.modules == ["mod_x"]
     assert any("mod_x" in warning for warning in result.warnings)
 
@@ -172,7 +197,7 @@ def test_plan_unknown_focus_module_warns() -> None:
 
 
 def test_renormalization_sums_to_one_over_applicable() -> None:
-    result = plan(_with_focus(modules=[], params=[]))
+    result = _plan(_with_focus(modules=[], params=[]))
     assert set(result.renormalized_weights) == {"mod_a", "mod_b"}
     assert result.renormalized_weights["mod_a"] == pytest.approx(0.6)
     assert result.renormalized_weights["mod_b"] == pytest.approx(0.4)
@@ -180,15 +205,15 @@ def test_renormalization_sums_to_one_over_applicable() -> None:
 
 
 def test_plan_is_deterministic() -> None:
-    first = plan(_clean())
-    second = plan(_clean())
+    first = _plan(_clean())
+    second = _plan(_clean())
     assert first == second
     assert first.run_id == second.run_id
     # Порядок не зависит от порядка входа: reversed-когорта даёт тот же план.
     inputs = _clean()
     reversed_products = list(reversed(inputs.run.products))
     run = inputs.run.model_copy(update={"products": reversed_products})
-    assert plan(replace(inputs, run=run)).products == first.products
+    assert _plan(replace(inputs, run=run)).products == first.products
 
 
 # ---------------------------------------------------------------------------
@@ -198,7 +223,7 @@ def test_plan_is_deterministic() -> None:
 
 def test_load_plan_blocks_without_attestation() -> None:
     with pytest.raises(ValueError, match="I2b"):
-        load_plan(str(RUN_YAML), str(FIXTURES))
+        load_plan(str(RUN_YAML), str(FIXTURES), run_id="load-plan")
 
 
 def test_load_plan_succeeds_with_attestation(tmp_path: Path) -> None:
@@ -207,6 +232,8 @@ def test_load_plan_succeeds_with_attestation(tmp_path: Path) -> None:
     (tmp_path / "scope_attestation.yaml").write_text(
         "procedure: ручная аттестация полноты источника\n", encoding="utf-8"
     )
-    result = load_plan(str(RUN_YAML), str(tmp_path))
+    # run_id — производная входов (та же формула, что у plan); проверяем префикс.
+    derived = _plan(_clean()).run_id
+    result = load_plan(str(RUN_YAML), str(tmp_path), run_id=derived)
     assert result.run_id.startswith("case_x-")
     assert [row.param_id for row in result.params] == ["param_a"]
