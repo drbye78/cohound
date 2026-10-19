@@ -20,6 +20,8 @@ from __future__ import annotations
 
 import base64
 import json
+from datetime import datetime, timedelta, timezone
+from email.utils import format_datetime
 from pathlib import Path
 from typing import Any
 
@@ -27,6 +29,7 @@ import pytest
 
 import core.adapters.search_yandex as module
 from core.adapters.search_yandex import (
+    BASE_RETRY_DELAY,
     DEFAULT_ASYNC_SEARCH_PATH,
     DEFAULT_BASE_URL,
     DEFAULT_MAX_WAIT,
@@ -35,6 +38,8 @@ from core.adapters.search_yandex import (
     DEFAULT_SEARCH_MODE,
     DEFAULT_SEARCH_PATH,
     ENV_SEARCH_MODE,
+    MAX_RETRY_ATTEMPTS,
+    MAX_RETRY_DELAY,
     SearchAdapterUnavailable,
     SearchError,
     YandexSearchAdapter,
@@ -476,5 +481,234 @@ def test_missing_dependency_raises_unavailable(monkeypatch: pytest.MonkeyPatch) 
 # ---------------------------------------------------------------------------
 # Нейтральность модуля (§1.3)
 # ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# Retry/backoff реального HTTP (429/5xx/TransportError)
+# ---------------------------------------------------------------------------
+
+
+class _FakeTransportError(Exception):
+    """Аналог ``httpx.TransportError`` для фейкового модуля."""
+
+
+class _FakeResponse:
+    """Минимальный ответ: статус, тело, заголовки (как у ``httpx.Response``)."""
+
+    def __init__(
+        self,
+        status_code: int,
+        content: bytes = b"",
+        headers: dict[str, str] | None = None,
+    ) -> None:
+        self.status_code = status_code
+        self.content = content
+        self.headers = headers or {}
+
+
+class _FakeHttpx:
+    """Фейковый ``httpx``: очереди POST/GET-ответов, без сети."""
+
+    TransportError = _FakeTransportError
+
+    def __init__(
+        self,
+        *,
+        post: list[Any] | None = None,
+        get: list[Any] | None = None,
+    ) -> None:
+        self._post_queue = list(post or [])
+        self._get_queue = list(get or [])
+        self.post_calls: list[str] = []
+        self.get_calls: list[str] = []
+
+    @staticmethod
+    def _next(queue: list[Any]) -> Any:
+        if not queue:
+            raise AssertionError("фейковый httpx: очередь ответов исчерпана")
+        item = queue.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+    def post(self, url: str, **_kwargs: Any) -> Any:
+        self.post_calls.append(url)
+        return self._next(self._post_queue)
+
+    def get(self, url: str, **_kwargs: Any) -> Any:
+        self.get_calls.append(url)
+        return self._next(self._get_queue)
+
+
+def _install_fake_httpx(monkeypatch: pytest.MonkeyPatch, fake: _FakeHttpx) -> None:
+    """Подменяет ленивый импорт ``httpx`` фейком (сеть не используется)."""
+    monkeypatch.setattr(
+        YandexSearchAdapter, "_import_http", staticmethod(lambda: fake)
+    )
+
+
+def _json_results() -> bytes:
+    return json.dumps({"results": _RECORDS}).encode("utf-8")
+
+
+def test_post_retries_429_and_succeeds(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake = _FakeHttpx(post=[_FakeResponse(429), _FakeResponse(200, _json_results())])
+    _install_fake_httpx(monkeypatch, fake)
+    sleeps: list[float] = []
+    adapter = YandexSearchAdapter(search_mode="sync", sleep=sleeps.append)
+
+    results = adapter.search(SearchQuery(text="neutral query"))
+
+    assert [r.url for r in results] == [URL_A, URL_B, URL_C]
+    assert len(fake.post_calls) == 2
+    assert len(sleeps) == 1
+    assert BASE_RETRY_DELAY <= sleeps[0] <= BASE_RETRY_DELAY * 1.5
+
+
+def test_retry_after_seconds_respected(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake = _FakeHttpx(
+        post=[
+            _FakeResponse(429, headers={"Retry-After": "7"}),
+            _FakeResponse(200, _json_results()),
+        ]
+    )
+    _install_fake_httpx(monkeypatch, fake)
+    sleeps: list[float] = []
+    adapter = YandexSearchAdapter(search_mode="sync", sleep=sleeps.append)
+
+    adapter.search(SearchQuery(text="neutral query"))
+
+    assert sleeps == [7.0]
+    assert len(fake.post_calls) == 2
+
+
+def test_retry_after_http_date_respected(monkeypatch: pytest.MonkeyPatch) -> None:
+    when = datetime.now(timezone.utc) + timedelta(seconds=30)
+    retry_after = format_datetime(when, usegmt=True)
+    fake = _FakeHttpx(
+        post=[
+            _FakeResponse(429, headers={"Retry-After": retry_after}),
+            _FakeResponse(200, _json_results()),
+        ]
+    )
+    _install_fake_httpx(monkeypatch, fake)
+    sleeps: list[float] = []
+    adapter = YandexSearchAdapter(search_mode="sync", sleep=sleeps.append)
+
+    adapter.search(SearchQuery(text="neutral query"))
+
+    assert len(sleeps) == 1
+    assert 25.0 <= sleeps[0] <= 31.0
+
+
+def test_retry_after_capped_at_max_delay(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake = _FakeHttpx(
+        post=[
+            _FakeResponse(429, headers={"Retry-After": "3600"}),
+            _FakeResponse(200, _json_results()),
+        ]
+    )
+    _install_fake_httpx(monkeypatch, fake)
+    sleeps: list[float] = []
+    adapter = YandexSearchAdapter(search_mode="sync", sleep=sleeps.append)
+
+    adapter.search(SearchQuery(text="neutral query"))
+
+    assert sleeps == [MAX_RETRY_DELAY]
+
+
+def test_403_not_retried(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake = _FakeHttpx(post=[_FakeResponse(403)])
+    _install_fake_httpx(monkeypatch, fake)
+    sleeps: list[float] = []
+    adapter = YandexSearchAdapter(search_mode="sync", sleep=sleeps.append)
+
+    with pytest.raises(SearchError) as err:
+        adapter.search(SearchQuery(text="neutral query"))
+
+    message = str(err.value)
+    assert "403" in message
+    assert "1" in message
+    assert len(fake.post_calls) == 1
+    assert sleeps == []
+
+
+def test_retry_exhaustion_reports_status_and_attempts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = _FakeHttpx(
+        post=[_FakeResponse(503) for _ in range(MAX_RETRY_ATTEMPTS)]
+    )
+    _install_fake_httpx(monkeypatch, fake)
+    sleeps: list[float] = []
+    adapter = YandexSearchAdapter(search_mode="sync", sleep=sleeps.append)
+
+    with pytest.raises(SearchError) as err:
+        adapter.search(SearchQuery(text="neutral query"))
+
+    message = str(err.value)
+    assert "503" in message
+    assert str(MAX_RETRY_ATTEMPTS) in message
+    assert len(fake.post_calls) == MAX_RETRY_ATTEMPTS
+    assert len(sleeps) == MAX_RETRY_ATTEMPTS - 1
+
+
+def test_backoff_delays_grow(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake = _FakeHttpx(
+        post=[_FakeResponse(500) for _ in range(MAX_RETRY_ATTEMPTS)]
+    )
+    _install_fake_httpx(monkeypatch, fake)
+    sleeps: list[float] = []
+    adapter = YandexSearchAdapter(search_mode="sync", sleep=sleeps.append)
+
+    with pytest.raises(SearchError):
+        adapter.search(SearchQuery(text="neutral query"))
+
+    assert len(sleeps) == MAX_RETRY_ATTEMPTS - 1
+    assert all(later > earlier for earlier, later in zip(sleeps, sleeps[1:]))
+    assert max(sleeps) <= MAX_RETRY_DELAY
+
+
+def test_transport_error_retried_then_succeeds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = _FakeHttpx(
+        post=[_FakeTransportError("connection reset"), _FakeResponse(200, _json_results())]
+    )
+    _install_fake_httpx(monkeypatch, fake)
+    sleeps: list[float] = []
+    adapter = YandexSearchAdapter(search_mode="sync", sleep=sleeps.append)
+
+    results = adapter.search(SearchQuery(text="neutral query"))
+
+    assert [r.url for r in results] == [URL_A, URL_B, URL_C]
+    assert len(fake.post_calls) == 2
+    assert len(sleeps) == 1
+
+
+def test_poll_retries_429_then_done(monkeypatch: pytest.MonkeyPatch) -> None:
+    done = json.dumps(
+        {"done": True, "response": {"rawData": _xml_two_docs()}}
+    ).encode("utf-8")
+    fake = _FakeHttpx(
+        get=[
+            _FakeResponse(429, headers={"Retry-After": "2"}),
+            _FakeResponse(200, done),
+        ]
+    )
+    _install_fake_httpx(monkeypatch, fake)
+    sleeps: list[float] = []
+
+    def _post(url: str, body: dict[str, Any]) -> bytes:
+        return json.dumps({"done": False, "id": "op-retry"}).encode("utf-8")
+
+    adapter = YandexSearchAdapter(http_post=_post, sleep=sleeps.append)
+
+    results = adapter.search(SearchQuery(text="neutral query"))
+
+    assert [r.url for r in results] == [URL_A, URL_B]
+    assert len(fake.get_calls) == 2
+    assert fake.get_calls[0] == f"{DEFAULT_OPERATION_BASE_URL}/operations/op-retry"
+    assert sleeps == [2.0]
 
 

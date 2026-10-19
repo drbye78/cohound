@@ -57,10 +57,12 @@ import base64
 import importlib.util
 import json
 import os
+import random
 import time
 import xml.etree.ElementTree as ET
 from collections.abc import Callable, Mapping
 from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from typing import Any
 
 from core.ports.search import SearchQuery, SearchResult
@@ -83,6 +85,10 @@ __all__ = [
     "DEFAULT_POLL_INTERVAL",
     "DEFAULT_MAX_WAIT",
     "DEFAULT_TIMEOUT",
+    "MAX_RETRY_ATTEMPTS",
+    "BASE_RETRY_DELAY",
+    "MAX_RETRY_DELAY",
+    "RETRYABLE_STATUSES",
     "ENV_API_KEY",
     "ENV_FOLDER_ID",
     "ENV_SEARCH_MODE",
@@ -104,6 +110,15 @@ DEFAULT_POLL_INTERVAL = 30.0
 DEFAULT_MAX_WAIT = 1800.0
 #: Таймаут HTTP-запроса, с.
 DEFAULT_TIMEOUT = 30.0
+
+#: Максимальное число попыток реального HTTP-вызова (включая первую).
+MAX_RETRY_ATTEMPTS = 5
+#: Базовая задержка exponential backoff, с.
+BASE_RETRY_DELAY = 1.0
+#: Потолок задержки повтора, с (включая ``Retry-After``).
+MAX_RETRY_DELAY = 60.0
+#: Статусы, при которых реальный HTTP-вызов повторяется.
+RETRYABLE_STATUSES = frozenset({429, 500, 502, 503, 504})
 
 #: Допустимые режимы поиска и режим по умолчанию.
 SEARCH_MODES = ("async", "sync")
@@ -495,17 +510,20 @@ class YandexSearchAdapter:
         return self._post_real(url, payload)
 
     def _post_real(self, url: str, payload: dict[str, Any]) -> bytes:
-        """Реальный POST веб-поиска v2; отсутствие зависимости → ``SearchAdapterUnavailable``."""
+        """Реальный POST веб-поиска v2; отсутствие зависимости → ``SearchAdapterUnavailable``.
+
+        Повторяет только транспортные сбои и ``RETRYABLE_STATUSES`` (429/5xx), уважая
+        ``Retry-After``; иначе — exponential backoff с jitter (см. ``_request_with_retry``).
+        """
         httpx = self._import_http()
         headers = {"Content-Type": "application/json"}
         if self.api_key:
             headers["Authorization"] = f"Api-Key {self.api_key}"
-        try:
-            response = httpx.post(url, json=payload, headers=headers, timeout=self.timeout)
-            response.raise_for_status()
-            return response.content
-        except Exception as exc:  # noqa: BLE001 - унификация ошибок адаптера
-            raise SearchError(f"HTTP-поиск не удался: {exc}") from exc
+
+        def _request() -> Any:
+            return httpx.post(url, json=payload, headers=headers, timeout=self.timeout)
+
+        return self._request_with_retry(httpx, _request, "HTTP-поиск")
 
     def _poll(self, url: str) -> bytes:
         """GET статуса операции: внедрённый шов ``http_poll`` или реальный ``httpx``."""
@@ -514,17 +532,124 @@ class YandexSearchAdapter:
         return self._poll_real(url)
 
     def _poll_real(self, url: str) -> bytes:
-        """Реальный GET операции; отсутствие зависимости → ``SearchAdapterUnavailable``."""
+        """Реальный GET операции; отсутствие зависимости → ``SearchAdapterUnavailable``.
+
+        Retry/backoff — тот же, что и у POST (429/5xx/``TransportError``).
+        """
         httpx = self._import_http()
         headers: dict[str, str] = {}
         if self.api_key:
             headers["Authorization"] = f"Api-Key {self.api_key}"
+
+        def _request() -> Any:
+            return httpx.get(url, headers=headers, timeout=self.timeout)
+
+        return self._request_with_retry(httpx, _request, "опрос async-операции")
+
+    def _request_with_retry(
+        self,
+        httpx: Any,
+        request: Callable[[], Any],
+        label: str,
+    ) -> bytes:
+        """Выполняет HTTP-запрос с bounded retry/backoff.
+
+        Повторяются только ``httpx.TransportError`` и статусы ``RETRYABLE_STATUSES``.
+        Прочие 4xx (400/401/403/404/422 и т.п.) не ретраятся. Задержка — ``Retry-After``
+        (секунды или HTTP-date), иначе exponential backoff с jitter; потолок —
+        ``MAX_RETRY_DELAY``, попыток не больше ``MAX_RETRY_ATTEMPTS``. Ожидание идёт
+        через внедрённую ``sleep``. В сообщение об ошибке попадают только статус/число
+        попыток — заголовки и ключи не логируются.
+        """
+        transport_error = getattr(httpx, "TransportError", ())
+        attempt = 0
+        while True:
+            attempt += 1
+            try:
+                response = request()
+            except transport_error as exc:  # type: ignore[misc]
+                if attempt < MAX_RETRY_ATTEMPTS:
+                    self._sleep(self._retry_delay(attempt, None))
+                    continue
+                raise SearchError(
+                    f"{label} не удался после {attempt} попыток: {type(exc).__name__}"
+                ) from exc
+            except Exception as exc:  # noqa: BLE001 - унификация ошибок адаптера
+                raise SearchError(
+                    f"{label} не удался: {type(exc).__name__}"
+                ) from exc
+
+            status = getattr(response, "status_code", None)
+            if (
+                isinstance(status, int)
+                and status in RETRYABLE_STATUSES
+                and attempt < MAX_RETRY_ATTEMPTS
+            ):
+                self._sleep(
+                    self._retry_delay(attempt, self._retry_after_header(response))
+                )
+                continue
+            if isinstance(status, int) and status >= 400:
+                raise SearchError(
+                    f"{label} не удался: HTTP {status} после {attempt} попыток"
+                )
+            return bytes(response.content)
+
+    @staticmethod
+    def _retry_after_header(response: Any) -> str | None:
+        """Достаёт ``Retry-After`` из заголовков ответа (регистронезависимо)."""
+        headers = getattr(response, "headers", None)
+        if headers is None:
+            return None
+        getter = getattr(headers, "get", None)
+        if callable(getter):
+            for name in ("Retry-After", "retry-after"):
+                value = getter(name)
+                if value is not None:
+                    return str(value)
+            return None
+        if isinstance(headers, Mapping):
+            for key, value in headers.items():
+                if str(key).lower() == "retry-after":
+                    return str(value)
+        return None
+
+    @staticmethod
+    def _parse_retry_after(value: str | None) -> float | None:
+        """Разбирает ``Retry-After``: целые секунды или HTTP-date → секунды ожидания."""
+        if value is None:
+            return None
+        text = str(value).strip()
+        if not text:
+            return None
         try:
-            response = httpx.get(url, headers=headers, timeout=self.timeout)
-            response.raise_for_status()
-            return response.content
-        except Exception as exc:  # noqa: BLE001 - унификация ошибок адаптера
-            raise SearchError(f"опрос async-операции не удался: {exc}") from exc
+            return max(0.0, float(int(text)))
+        except ValueError:
+            pass
+        try:
+            when = parsedate_to_datetime(text)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if when is None:
+            return None
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=timezone.utc)
+        delay = (when - datetime.now(timezone.utc)).total_seconds()
+        return max(0.0, delay)
+
+    def _retry_delay(self, attempt: int, retry_after: str | None) -> float:
+        """Задержка перед повтором: ``Retry-After`` либо exponential backoff с jitter.
+
+        ``attempt`` — номер только что завершившейся попытки (1-based). Jitter —
+        аддитивный (до +50% базовой задержки), поэтому диапазоны последовательных
+        задержек не пересекаются и растут. Потолок — ``MAX_RETRY_DELAY``.
+        """
+        parsed = self._parse_retry_after(retry_after)
+        if parsed is not None:
+            return min(MAX_RETRY_DELAY, parsed)
+        base = BASE_RETRY_DELAY * (2 ** (attempt - 1))
+        jittered = base * (1.0 + random.uniform(0.0, 0.5))
+        return min(MAX_RETRY_DELAY, jittered)
 
     def _fetch_live(self, url: str) -> RawPage:
         """Живой фетч: внедрённый шов или реальный ``httpx`` (без кэша)."""
