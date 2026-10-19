@@ -22,11 +22,13 @@ from core.domain.enums import (
     FailureKind,
     FetchMode,
     Gate,
+    IncrementalKind,
     OnboardingState,
     ProductMode,
     ProductScope,
     RankingPolicy,
     RefreshPolicy,
+    ReuseKind,
     RunScope,
     SearchKind,
     SeedRole,
@@ -93,6 +95,9 @@ def assert_dictionary_integrity(path: str | Path) -> None:
         # MVP-2b (09 §3.1/§12.1): идентичность прогона и класс изменения.
         "change_class",
         "run_scope",
+        # MVP-3a (09 §6.3/§9): инкрементальный work-set и переиспользование.
+        "incremental_kind",
+        "reuse_kind",
     ]
     missing = [k for k in required if k not in data]
     if missing:
@@ -128,6 +133,9 @@ def assert_dictionary_integrity(path: str | Path) -> None:
         # MVP-2b (09 §3.1/§12.1): идентичность прогона и класс изменения.
         "change_class": {v.value for v in ChangeClass},
         "run_scope": {v.value for v in RunScope},
+        # MVP-3a (09 §6.3/§9): инкрементальный work-set и переиспользование.
+        "incremental_kind": {v.value for v in IncrementalKind},
+        "reuse_kind": {v.value for v in ReuseKind},
         # Ф0: классы сбоя краула/конвейера — иначе словарь и enum расходятся молча.
         "failure_kind": {v.value for v in FailureKind},
     }

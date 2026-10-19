@@ -22,7 +22,15 @@ from pathlib import Path
 from core.config.seeds import seed_id
 from core.domain.enums import OnboardingState, SeedRole, SeedSource, SeedState
 from core.domain.models import SeedEntry
-from core.ports.state import ProductStateRow, RunLineageRow, SeedRow, SnapshotRow
+from core.ports.state import (
+    ChunkRow,
+    DocumentVersionRow,
+    ProductStateRow,
+    RunLineageRow,
+    SeedRow,
+    SnapshotRow,
+    UrlStateRow,
+)
 from core.store.state_sqlite import connect_state
 
 __all__ = ["SqliteStateStore"]
@@ -85,6 +93,54 @@ _LINEAGE_COLUMNS = (
     "refresh_policy",
 )
 
+#: Колонки ``url_state`` в порядке записи (кроме составного ключа
+#: ``(product_id, normalized_url)``).
+_URL_STATE_COLUMNS = (
+    "url",
+    "doc_version_id",
+    "etag",
+    "last_modified",
+    "last_http_status",
+    "last_checked_at",
+    "last_changed_at",
+    "next_check_at",
+    "consecutive_failures",
+    "last_error_kind",
+    "reuse_kind",
+    "seed_id",
+)
+
+#: Колонки ``document_version`` в порядке записи (кроме ``doc_version_id`` — он ключ).
+_DOCUMENT_VERSION_COLUMNS = (
+    "doc_id",
+    "product_id",
+    "url",
+    "content_hash",
+    "extractor_version",
+    "level",
+    "raw_path",
+    "chunker_version",
+    "chunk_ids_digest",
+    "first_seen_run_id",
+    "last_seen_run_id",
+    "first_seen_at",
+    "last_seen_at",
+    "status",
+)
+
+#: Колонки ``chunk_meta`` в порядке записи (``chunk_id`` — ключ, идёт первым).
+_CHUNK_COLUMNS = (
+    "chunk_id",
+    "doc_version_id",
+    "product_id",
+    "chunk_no",
+    "content_hash",
+    "chunker_version",
+    "heading_path",
+    "context_prefix",
+    "lang",
+)
+
 
 def _now() -> str:
     """Текущее время в ISO-8601 (UTC, ``Z``) — как в остальных TEXT-колонках."""
@@ -96,14 +152,21 @@ def _now() -> str:
     )
 
 
-def _upsert_sql(table: str, key: str, columns: Sequence[str]) -> str:
-    """Строит ``INSERT ... ON CONFLICT(key) DO UPDATE`` для полного набора колонок."""
-    names = ", ".join((key, *columns))
-    placeholders = ", ".join("?" for _ in range(len(columns) + 1))
+def _upsert_sql(
+    table: str, key: str | Sequence[str], columns: Sequence[str]
+) -> str:
+    """Строит ``INSERT ... ON CONFLICT(key) DO UPDATE`` для полного набора колонок.
+
+    ``key`` — одна колонка или составной ключ (например, ``url_state``:
+    ``(product_id, normalized_url)``).
+    """
+    keys = (key,) if isinstance(key, str) else tuple(key)
+    names = ", ".join((*keys, *columns))
+    placeholders = ", ".join("?" for _ in range(len(keys) + len(columns)))
     updates = ", ".join(f"{name} = excluded.{name}" for name in columns)
     return (
         f"INSERT INTO {table} ({names}) VALUES ({placeholders}) "
-        f"ON CONFLICT({key}) DO UPDATE SET {updates}"
+        f"ON CONFLICT({', '.join(keys)}) DO UPDATE SET {updates}"
     )
 
 
@@ -309,6 +372,226 @@ class SqliteStateStore:
             )
             for row in rows
         ]
+
+    # -- URL/document/chunk (MVP-3a, 09 §4.2/§6.3) ------------------------- #
+    @staticmethod
+    def _url_state_row(row: sqlite3.Row) -> UrlStateRow:
+        """Строка SQLite → :class:`UrlStateRow`."""
+        return UrlStateRow(
+            product_id=row["product_id"],
+            url=row["url"],
+            normalized_url=row["normalized_url"],
+            doc_version_id=row["doc_version_id"],
+            etag=row["etag"],
+            last_modified=row["last_modified"],
+            last_http_status=row["last_http_status"],
+            last_checked_at=row["last_checked_at"],
+            last_changed_at=row["last_changed_at"],
+            next_check_at=row["next_check_at"],
+            consecutive_failures=row["consecutive_failures"],
+            last_error_kind=row["last_error_kind"],
+            reuse_kind=row["reuse_kind"],
+            seed_id=row["seed_id"],
+        )
+
+    def get_url_state(
+        self, product_id: str, normalized_url: str
+    ) -> UrlStateRow | None:
+        row = self._conn.execute(
+            "SELECT * FROM url_state WHERE product_id = ? AND normalized_url = ?",
+            (product_id, normalized_url),
+        ).fetchone()
+        return self._url_state_row(row) if row is not None else None
+
+    def iter_url_state(self, product_id: str) -> list[UrlStateRow]:
+        rows = self._conn.execute(
+            "SELECT * FROM url_state WHERE product_id = ? ORDER BY normalized_url",
+            (product_id,),
+        ).fetchall()
+        return [self._url_state_row(row) for row in rows]
+
+    def upsert_url_state(self, row: UrlStateRow) -> None:
+        values = [getattr(row, name) for name in _URL_STATE_COLUMNS]
+        with self._conn:
+            self._conn.execute(
+                _upsert_sql(
+                    "url_state",
+                    ("product_id", "normalized_url"),
+                    _URL_STATE_COLUMNS,
+                ),
+                (row.product_id, row.normalized_url, *values),
+            )
+
+    @staticmethod
+    def _document_version_row(row: sqlite3.Row) -> DocumentVersionRow:
+        """Строка SQLite → :class:`DocumentVersionRow`."""
+        return DocumentVersionRow(
+            doc_version_id=row["doc_version_id"],
+            doc_id=row["doc_id"],
+            product_id=row["product_id"],
+            url=row["url"],
+            content_hash=row["content_hash"],
+            extractor_version=row["extractor_version"],
+            level=row["level"],
+            raw_path=row["raw_path"],
+            chunker_version=row["chunker_version"],
+            chunk_ids_digest=row["chunk_ids_digest"],
+            first_seen_run_id=row["first_seen_run_id"],
+            last_seen_run_id=row["last_seen_run_id"],
+            first_seen_at=row["first_seen_at"],
+            last_seen_at=row["last_seen_at"],
+            status=row["status"],
+        )
+
+    def get_document_version(self, doc_version_id: str) -> DocumentVersionRow | None:
+        row = self._conn.execute(
+            "SELECT * FROM document_version WHERE doc_version_id = ?",
+            (doc_version_id,),
+        ).fetchone()
+        return self._document_version_row(row) if row is not None else None
+
+    def find_document_version(
+        self,
+        product_id: str,
+        *,
+        content_hash: str,
+        extractor_version: str,
+        level: str,
+    ) -> DocumentVersionRow | None:
+        row = self._conn.execute(
+            "SELECT * FROM document_version WHERE product_id = ? AND content_hash = ? "
+            "AND extractor_version = ? AND level = ?",
+            (product_id, content_hash, extractor_version, level),
+        ).fetchone()
+        return self._document_version_row(row) if row is not None else None
+
+    def upsert_document_version(self, row: DocumentVersionRow) -> None:
+        """Upsert версии документа.
+
+        ``doc_version_id`` — детерминированная функция ключа
+        ``(product_id, content_hash, extractor_version, level)``, поэтому конфликт по PK
+        и по UNIQUE-ограничению §4.2 указывает на одну и ту же логическую строку.
+        Расхождение (вызывающий передал чужой ``doc_version_id`` для существующего
+        ключа) — ошибка вызывающего и проявится как ``IntegrityError``, а не как
+        молчаливое раздвоение версии.
+        """
+        values = [getattr(row, name) for name in _DOCUMENT_VERSION_COLUMNS]
+        with self._conn:
+            self._conn.execute(
+                _upsert_sql(
+                    "document_version", "doc_version_id", _DOCUMENT_VERSION_COLUMNS
+                ),
+                (row.doc_version_id, *values),
+            )
+
+    def iter_document_versions(
+        self, product_id: str, *, status: str = "active"
+    ) -> list[DocumentVersionRow]:
+        rows = self._conn.execute(
+            "SELECT * FROM document_version WHERE product_id = ? AND status = ? "
+            "ORDER BY doc_version_id",
+            (product_id, status),
+        ).fetchall()
+        return [self._document_version_row(row) for row in rows]
+
+    def put_chunk_text(
+        self, content_hash: str, text: str, lang: str | None = None
+    ) -> None:
+        """Текст иммутабелен по ``content_hash``: обновляется только ``lang``.
+
+        ``content_hash`` — hash чистого текста (I19); перезапись текста под тем же
+        хешем означала бы расхождение evidence с адресацией, поэтому запрещена.
+        """
+        with self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO chunk_store (content_hash, text, lang) VALUES (?, ?, ?)
+                ON CONFLICT(content_hash) DO UPDATE SET
+                    lang = COALESCE(excluded.lang, chunk_store.lang)
+                """,
+                (content_hash, text, lang),
+            )
+
+    def get_chunk_text(self, content_hash: str) -> str | None:
+        row = self._conn.execute(
+            "SELECT text FROM chunk_store WHERE content_hash = ?", (content_hash,)
+        ).fetchone()
+        return str(row["text"]) if row is not None else None
+
+    def replace_doc_chunks(
+        self, doc_version_id: str, chunks: Sequence[ChunkRow]
+    ) -> None:
+        """Атомарная замена chunk-set документа (delete + insert в одной транзакции).
+
+        Старые ``chunk_meta`` удаляются, новые вставляются; при ошибке вставки
+        (например, FK на отсутствующий ``chunk_store``) транзакция откатывается и
+        прежний набор остаётся. После вставки удаляются **осиротевшие** тексты из
+        ``chunk_store``: только те ``content_hash``, которые были у этого документа и
+        больше ни одним ``chunk_meta`` не referenced. Тексты, разделяемые другими
+        документами, сохраняются; тексты, не относившиеся к этому документу, не
+        трогаются вовсе.
+        """
+        old_hashes = {
+            row["content_hash"]
+            for row in self._conn.execute(
+                "SELECT content_hash FROM chunk_meta WHERE doc_version_id = ?",
+                (doc_version_id,),
+            )
+        }
+        mismatched = [
+            chunk.chunk_id
+            for chunk in chunks
+            if chunk.doc_version_id != doc_version_id
+        ]
+        if mismatched:
+            # Иначе delete затронул бы один документ, а insert — другой.
+            raise ValueError(
+                "replace_doc_chunks: чанки принадлежат другому документу: "
+                + ", ".join(sorted(mismatched))
+            )
+        new_hashes = {chunk.content_hash for chunk in chunks}
+        with self._conn:
+            self._conn.execute(
+                "DELETE FROM chunk_meta WHERE doc_version_id = ?", (doc_version_id,)
+            )
+            self._conn.executemany(
+                f"INSERT INTO chunk_meta ({', '.join(_CHUNK_COLUMNS)}) "
+                f"VALUES ({', '.join('?' for _ in _CHUNK_COLUMNS)})",
+                [
+                    tuple(getattr(chunk, name) for name in _CHUNK_COLUMNS)
+                    for chunk in chunks
+                ],
+            )
+            for content_hash in sorted(old_hashes - new_hashes):
+                self._conn.execute(
+                    "DELETE FROM chunk_store WHERE content_hash = ? AND NOT EXISTS ("
+                    "SELECT 1 FROM chunk_meta WHERE chunk_meta.content_hash = "
+                    "chunk_store.content_hash)",
+                    (content_hash,),
+                )
+
+    @staticmethod
+    def _chunk_row(row: sqlite3.Row) -> ChunkRow:
+        """Строка SQLite → :class:`ChunkRow`."""
+        return ChunkRow(
+            chunk_id=row["chunk_id"],
+            doc_version_id=row["doc_version_id"],
+            product_id=row["product_id"],
+            chunk_no=row["chunk_no"],
+            content_hash=row["content_hash"],
+            chunker_version=row["chunker_version"],
+            heading_path=row["heading_path"],
+            context_prefix=row["context_prefix"],
+            lang=row["lang"],
+        )
+
+    def iter_doc_chunks(self, doc_version_id: str) -> list[ChunkRow]:
+        rows = self._conn.execute(
+            "SELECT * FROM chunk_meta WHERE doc_version_id = ? "
+            "ORDER BY chunk_no, chunk_id",
+            (doc_version_id,),
+        ).fetchall()
+        return [self._chunk_row(row) for row in rows]
 
     # -- lineage ----------------------------------------------------------- #
     def record_run_lineage(self, row: RunLineageRow) -> None:

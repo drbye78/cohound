@@ -22,7 +22,11 @@ __all__ = ["STATE_SCHEMA_VERSION", "STATE_DDL", "connect_state", "state_db_path"
 #: Версия схемы ``state.db`` (пишется в ``schema_meta.schema_version``).
 #: 2 — аддитивно: ``run_lineage.products_json`` (состав когорты прогона) и
 #: ``run_lineage.refresh_policy`` (политика наблюдения).
-STATE_SCHEMA_VERSION = "2"
+#: 3 — durable-субстрат инкрементального корпуса (09 §4.2/§6.3): ``url_state``,
+#: ``document_version``, ``chunk_store``, ``chunk_meta`` объявлены рабочими таблицами
+#: (колонки уже были в DDL с v1), добавлены поддерживающие индексы
+#: ``idx_url_state_product``/``idx_chunk_meta_doc``; миграция лечит дрейф колонок.
+STATE_SCHEMA_VERSION = "3"
 
 #: DDL §4.2. Идемпотентен: ``CREATE ... IF NOT EXISTS`` на всех объектах.
 STATE_DDL = """
@@ -254,20 +258,83 @@ CREATE INDEX IF NOT EXISTS idx_partition_product ON index_partition(package_id, 
 #: Аддитивные колонки, появившиеся после первой версии схемы (``{table: {column: type}}``).
 #: ``CREATE TABLE IF NOT EXISTS`` не добавляет колонки в уже существующую таблицу,
 #: поэтому при открытии старой БД они досоздаются через ``ALTER TABLE``.
+#:
+#: Для v3 перечислены **все** неключевые колонки durable-субстрата: в штатной v2-БД они
+#: уже есть (DDL §4.2 не менялся), поэтому миграция — no-op; но если историческая БД
+#: дрейфанула (таблица создана вручную/ранним прототипом), недостающие колонки
+#: досоздаются без потери строк. ``NOT NULL``-колонки получают безопасный DEFAULT,
+#: потому что ``ALTER TABLE ADD COLUMN`` иначе не применим к непустой таблице.
 _ADDITIVE_COLUMNS: dict[str, dict[str, str]] = {
     "run_lineage": {
         "products_json": "TEXT",
         "refresh_policy": "TEXT",
-    }
+    },
+    "url_state": {
+        "doc_version_id": "TEXT",
+        "etag": "TEXT",
+        "last_modified": "TEXT",
+        "last_http_status": "INTEGER",
+        "last_checked_at": "TEXT",
+        "last_changed_at": "TEXT",
+        "next_check_at": "TEXT",
+        "consecutive_failures": "INTEGER NOT NULL DEFAULT 0",
+        "last_error_kind": "TEXT",
+        "reuse_kind": "TEXT",
+        "seed_id": "TEXT",
+    },
+    "document_version": {
+        "doc_id": "TEXT NOT NULL DEFAULT ''",
+        "product_id": "TEXT NOT NULL DEFAULT ''",
+        "url": "TEXT NOT NULL DEFAULT ''",
+        "content_hash": "TEXT NOT NULL DEFAULT ''",
+        "extractor_version": "TEXT NOT NULL DEFAULT ''",
+        "level": "TEXT NOT NULL DEFAULT ''",
+        "raw_path": "TEXT",
+        "chunker_version": "TEXT",
+        "chunk_ids_digest": "TEXT",
+        "first_seen_run_id": "TEXT NOT NULL DEFAULT ''",
+        "last_seen_run_id": "TEXT NOT NULL DEFAULT ''",
+        "first_seen_at": "TEXT NOT NULL DEFAULT ''",
+        "last_seen_at": "TEXT NOT NULL DEFAULT ''",
+        "status": "TEXT NOT NULL DEFAULT 'active'",
+    },
+    "chunk_store": {
+        "text": "TEXT NOT NULL DEFAULT ''",
+        "lang": "TEXT",
+    },
+    "chunk_meta": {
+        "doc_version_id": "TEXT NOT NULL DEFAULT ''",
+        "product_id": "TEXT NOT NULL DEFAULT ''",
+        "chunk_no": "INTEGER NOT NULL DEFAULT 0",
+        "content_hash": "TEXT NOT NULL DEFAULT ''",
+        "chunker_version": "TEXT NOT NULL DEFAULT ''",
+        "heading_path": "TEXT",
+        "context_prefix": "TEXT",
+        "lang": "TEXT",
+    },
 }
+
+#: Индексы, появившиеся в v3. Выполняются **после** :func:`_migrate`, чтобы не
+#: ссылаться на колонку, которую дрейфующая старая таблица ещё не получила.
+_POST_MIGRATION_DDL = """
+CREATE INDEX IF NOT EXISTS idx_url_state_product ON url_state(product_id);
+CREATE INDEX IF NOT EXISTS idx_chunk_meta_doc ON chunk_meta(doc_version_id, chunk_no);
+"""
 
 
 def _migrate(conn: sqlite3.Connection) -> None:
-    """Досоздаёт аддитивные колонки в существующих таблицах (идемпотентно)."""
+    """Досоздаёт аддитивные колонки в существующих таблицах (идемпотентно).
+
+    ``PRAGMA table_info`` даёт фактический набор колонок; отсутствующие добавляются
+    ``ALTER TABLE ... ADD COLUMN`` с объявленным типом/DEFAULT. Повторный вызов — no-op.
+    """
     for table, columns in _ADDITIVE_COLUMNS.items():
         existing = {
             row["name"] for row in conn.execute(f"PRAGMA table_info({table})")
         }
+        if not existing:
+            # Таблицы нет — её создаст STATE_DDL; добавлять колонки некуда.
+            continue
         for column, sql_type in columns.items():
             if column not in existing:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {sql_type}")
@@ -280,13 +347,14 @@ def connect_state(db_path: str | Path = ":memory:") -> sqlite3.Connection:
     :func:`core.store.sqlite.connect`). Схема применяется на каждом открытии
     (``IF NOT EXISTS`` — no-op для существующих объектов), версия схемы пишется в
     ``schema_meta``. Аддитивные колонки, появившиеся после v1, досоздаются
-    :func:`_migrate` (``ALTER TABLE ... ADD COLUMN``), поэтому старая БД открывается
-    без потери данных.
+    :func:`_migrate` (``ALTER TABLE ... ADD COLUMN``), а индексы v3 — после миграции,
+    поэтому старая БД открывается без потери данных.
     """
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
     conn.executescript(STATE_DDL)
     _migrate(conn)
+    conn.executescript(_POST_MIGRATION_DDL)
     conn.execute(
         "INSERT OR REPLACE INTO schema_meta(key, value) VALUES ('schema_version', ?)",
         (STATE_SCHEMA_VERSION,),

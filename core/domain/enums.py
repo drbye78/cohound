@@ -481,6 +481,43 @@ class ProductScope(StrEnum):
     PRODUCT_ONLY = "product_only"
 
 
+class IncrementalKind(StrEnum):
+    """Тип элемента work-set инкрементального корпуса (09 §6.3).
+
+    * ``fetch`` — безусловный GET (seed-корень или новый URL из discovery-diff);
+    * ``revalidate`` — известный URL: условный GET (``If-None-Match``/
+      ``If-Modified-Since``), валидаторы могут отсутствовать;
+    * ``reuse`` — сеть не трогается, используется уже сохранённая версия документа
+      (политика ``offline``).
+
+    Операционное перечисление (commodity-слой, A2): его смена — не методологическая
+    граница. Источник истины — ``docs/status-dictionary.yaml``.
+    """
+
+    FETCH = "fetch"
+    REVALIDATE = "revalidate"
+    REUSE = "reuse"
+
+
+class ReuseKind(StrEnum):
+    """Классификация переиспользования URL/документа (09 §6.3/§9).
+
+    * ``live`` — контент получен из сети и отличается от прежнего (или прежнего нет);
+    * ``revalidated`` — 304 либо 200 с тем же ``content_hash``: ``document_version``
+      переиспользуется без повторной экстракции/чанкования/эмбеддинга;
+    * ``reused`` — сеть не трогалась (offline/reuse-элемент work-set);
+    * ``stale`` — условный GET пропущен по потолку ревалидации; ``❌`` такую ячейку
+      поддерживать не может (§6.3).
+
+    Операционное перечисление: источник истины — ``docs/status-dictionary.yaml``.
+    """
+
+    LIVE = "live"
+    REVALIDATED = "revalidated"
+    REUSED = "reused"
+    STALE = "stale"
+
+
 class ChangeClass(StrEnum):
     """Класс изменения между прогонами (09 §3.1/§12.1).
 

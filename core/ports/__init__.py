@@ -35,11 +35,14 @@ from core.ports.poller import PollPort
 from core.ports.registry import RegistryFetcherPort, RegistryFact
 from core.ports.search import SearchAdapterPort, SearchQuery, SearchResult
 from core.ports.state import (
+    ChunkRow,
+    DocumentVersionRow,
     ProductStatePort,
     ProductStateRow,
     RunLineageRow,
     SeedRow,
     SnapshotRow,
+    UrlStateRow,
 )
 from core.ports.store import RunIndexRef, StorePort
 from core.ports.types import (
@@ -87,6 +90,9 @@ __all__ = [
     "RunLineageRow",
     "SeedRow",
     "SnapshotRow",
+    "ChunkRow",
+    "DocumentVersionRow",
+    "UrlStateRow",
     "StorePort",
     "RunIndexRef",
     "Chunk",
