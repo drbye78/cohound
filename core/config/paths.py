@@ -2,7 +2,7 @@
 
 Модуль отделяет **операционные** каталоги (``packages/``, ``passports/``, ``runs/``,
 ``index_store/``, ``corpus_raw/``, ``cache/``, ``extract_cache/``, ``eval_cache/``,
-``reports/``) от кода: оператор может задать свои пути через ``config/paths.yaml``, env-переменные
+``reports/``, ``state/``) от кода: оператор может задать свои пути через ``config/paths.yaml``, env-переменные
 ``COHOUND_*_DIR`` и CLI-флаги, не редактируя исходники. Единый корень ``COHOUND_HOME``
 позволяет унести весь рабочий каталог в произвольное место, оставив относительные
 дефолты для CWD.
@@ -48,6 +48,7 @@ __all__ = [
     "ENV_EXTRACT_CACHE_DIR",
     "ENV_EVAL_CACHE_DIR",
     "ENV_REPORTS_DIR",
+    "ENV_STATE_DIR",
     # Модель и API
     "PathsConfig",
     "HARNESS_FIELDS",
@@ -74,6 +75,8 @@ ENV_CACHE_DIR = "COHOUND_CACHE_DIR"
 ENV_EXTRACT_CACHE_DIR = "COHOUND_EXTRACT_CACHE_DIR"
 ENV_EVAL_CACHE_DIR = "COHOUND_EVAL_CACHE_DIR"
 ENV_REPORTS_DIR = "COHOUND_REPORTS_DIR"
+#: Durable per-product состояние (``state/{package_id}/state.db``, 09 §4.1).
+ENV_STATE_DIR = "COHOUND_STATE_DIR"
 
 #: Канонический путь ``paths.yaml`` относительно CWD (раскладка A.1).
 DEFAULT_PATHS_FILE: Path = Path("config/paths.yaml")
@@ -89,6 +92,7 @@ HARNESS_FIELDS: tuple[str, ...] = (
     "extract_cache",
     "eval_cache",
     "reports",
+    "state",
 )
 
 #: Соответствие поля раскладки → env-переменная (``COHOUND_<FIELD>_DIR``).
@@ -102,6 +106,7 @@ ENV_BY_FIELD: dict[str, str] = {
     "extract_cache": ENV_EXTRACT_CACHE_DIR,
     "eval_cache": ENV_EVAL_CACHE_DIR,
     "reports": ENV_REPORTS_DIR,
+    "state": ENV_STATE_DIR,
 }
 
 #: Спец-ключ документа ``paths.yaml``: корень раскладки (не поле :class:`PathsConfig`).
@@ -139,6 +144,10 @@ class PathsConfig(BaseModel):
     #: Отдельно от ``extract_cache``/``cache``: иной жизненный цикл и бюджет.
     eval_cache: Path = Path("eval_cache")
     reports: Path = Path("reports")
+    #: Durable per-product состояние онбординга/инкрементальных прогонов (09 §4.1):
+    #: ``state/{package_id}/state.db``. Вне ``packages/`` (авторские данные) и вне
+    #: ``runs/{run_id}/`` (переживает прогоны).
+    state: Path = Path("state")
 
 
 # ---------------------------------------------------------------------------

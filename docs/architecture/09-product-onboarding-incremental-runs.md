@@ -1,18 +1,26 @@
 # 09. Онбординг продукта и инкрементальные прогоны обновления
 
-> **Статус:** **MVP-1 реализован** (§16.1, этап 1: `sources/seeds.yaml`, onboarding-префлайт,
-> zero-source coverage); этапы 2–5 (run identity + `state.db`, incremental corpus,
-> per-product partitions/composition, carry-forward) — design-only. Документ описывает
-> целевую архитектуру сценария «`add-product` → следующий прогон обновления». Он не меняет
-> регламент `cohound-spec-v2.md`; там, где дизайн затрагивает семантику §13/§4.4, это явно
-> помечено как **решение человека** (см. §12.6 и §17).
+> **Статус:** **MVP-1 и MVP-2a реализованы.** MVP-1 (§16.1, этап 1): `sources/seeds.yaml`,
+> onboarding-префлайт, zero-source coverage. MVP-2a (часть этапа 2): durable
+> `state/{package_id}/state.db` (§4.1/§4.2), `ProductStatePort`/`SqliteStateStore`,
+> `resolve_product_modes` (new/full/incremental), синхронизация seed-набора и проводка в
+> `run`. Не реализовано: run identity (`derive_run_id` без products, `cycle_id`/`--update`),
+> incremental corpus, per-product partitions/composition, carry-forward (этапы 2b–5) —
+> design-only. Документ описывает целевую архитектуру сценария «`add-product` → следующий
+> прогон обновления». Он не меняет регламент `cohound-spec-v2.md`; там, где дизайн
+> затрагивает семантику §13/§4.4, это явно помечено как **решение человека**
+> (см. §12.6 и §17).
 >
-> **Отклонения MVP-1 от целевого дизайна** (осознанные, до этапа 2):
-> `ProductMode` всегда `new` (durable `state.db` ещё нет); `CorpusCoverage.complete`
-> требует `expected_sources > 0`, а не `observed_sources > 0` (methodology-решение,
-> §6.5/§19 — отложено); review-артефакт именуется `sources/add_product/{date}-{product_id}.json`
-> (два продукта в один день не затирают друг друга); `package_version` бампается только при
-> фактическом изменении пакета (noop re-add версию не двигает).
+> **Отклонения реализованного среза от целевого дизайна** (осознанные, до этапов 2b–5):
+> `run_id` пока по-прежнему включает состав продуктов (`derive_run_id` не менялся) —
+> поэтому добавление продукта создаёт новый прогон, а `state.db` переживает его;
+> `CorpusCoverage.complete` требует `expected_sources > 0`, а не `observed_sources > 0`
+> (methodology-решение, §6.5/§19 — отложено); review-артефакт именуется
+> `sources/add_product/{date}-{product_id}.json` и ведёт append-only историю `apply`
+> (два продукта в один день не затирают друг друга, повторный apply не теряет аудит);
+> `package_version` бампается только при фактическом изменении пакета (noop re-add версию
+> не двигает); порт durable-состояния лежит в `core/ports/state.py` (не `product_state.py`);
+> `previous_run` возвращает последний прогон пакета без параметра `before`.
 >
 > **Рамки:** `core/` остаётся категорийно-нейтральным; вся предметная специфика — данные
 > пакета (`packages/{case_id}/`). Слои: `pipeline ↛ adapters/store/cli`; `index_store/`

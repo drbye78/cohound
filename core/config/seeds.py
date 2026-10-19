@@ -17,8 +17,6 @@
 from __future__ import annotations
 
 import datetime as _dt
-import os
-import tempfile
 from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any
@@ -28,6 +26,7 @@ import yaml
 
 from core.domain.enums import OnboardingState, SeedRole, SeedSource, SeedState
 from core.domain.models import ProductSeeds, SeedEntry, SeedsConfig
+from core.util.atomic_write import atomic_write_text as write_atomic_text
 from core.util.hashing import short_hash
 from core.util.security import validate_url
 
@@ -40,6 +39,7 @@ __all__ = [
     "load_seeds",
     "merge_seeds",
     "normalize_seed_url",
+    "render_seeds",
     "resolve_profile_key",
     "save_seeds",
     "seed_id",
@@ -166,29 +166,26 @@ def _read_yaml(path: Path) -> Any:
 
 
 def _atomic_write_text(path: Path, text: str) -> None:
-    """Атомарная запись (temp в том же каталоге + ``os.replace``)."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(
-        dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp"
-    )
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
-            handle.write(text)
-        os.replace(tmp_name, path)
-    except BaseException:
-        try:
-            os.unlink(tmp_name)
-        except OSError:
-            pass
-        raise
+    """Атомарная запись с сохранением режима (см. :mod:`core.util.atomic_write`)."""
+    write_atomic_text(path, text)
 
 
 def load_seeds(path: str | Path) -> SeedsConfig:
     """Загружает ``sources/seeds.yaml``; отсутствующий файл → пустой конфиг.
 
-    :raises ValueError: файл не читается/не является mapping/не проходит схему.
+    ``path`` — **файл**, не каталог пакета: переданный каталог раньше молча давал
+    пустой конфиг (``is_file()`` ложно), и вызывающий не видел ошибки. Теперь каталог —
+    :class:`ValueError` с подсказкой про ``SEEDS_RELPATH``.
+
+    :raises ValueError: передан каталог; файл не читается/не является mapping/не
+        проходит схему.
     """
     target = Path(path)
+    if target.is_dir():
+        raise ValueError(
+            f"{target}: ожидался файл seed-набора, получен каталог "
+            f"(передайте {SEEDS_RELPATH})"
+        )
     if not target.is_file():
         return SeedsConfig(products={})
     data = _read_yaml(target)
@@ -205,17 +202,25 @@ def load_seeds(path: str | Path) -> SeedsConfig:
         raise ValueError(f"{target}: некорректный seed-набор: {exc}") from exc
 
 
-def save_seeds(path: str | Path, config: SeedsConfig) -> Path:
-    """Атомарно пишет ``sources/seeds.yaml`` (стабильный порядок продуктов)."""
-    target = Path(path)
+def render_seeds(config: SeedsConfig) -> str:
+    """Канонический YAML seed-набора (стабильный порядок продуктов).
+
+    Отделено от записи, чтобы вызывающий мог сравнить байты и не перезаписывать файл,
+    содержимое которого не изменилось (no-op apply не должен «трогать» артефакт).
+    """
     data = config.model_dump(mode="json", by_alias=True, exclude_none=True)
     data["schema"] = SEEDS_SCHEMA
     products = data.get("products") or {}
     data["products"] = {key: products[key] for key in sorted(products)}
-    text = yaml.safe_dump(
+    return yaml.safe_dump(
         data, allow_unicode=True, sort_keys=False, default_flow_style=False
     )
-    _atomic_write_text(target, text)
+
+
+def save_seeds(path: str | Path, config: SeedsConfig) -> Path:
+    """Атомарно пишет ``sources/seeds.yaml`` (стабильный порядок продуктов)."""
+    target = Path(path)
+    _atomic_write_text(target, render_seeds(config))
     return target
 
 

@@ -11,6 +11,10 @@
 > ``sources/corpus_urls.yaml[product]`` (legacy fallback с warning) > ``[]``.
 
 MVP-1 не читает и не пишет durable ``state.db``: режим продукта всегда ``new``.
+MVP-2a добавляет :func:`resolve_product_modes`: при переданном ``ProductStatePort``
+режим продукта выводится из durable-рубежей (``last_corpus_run_id``/
+``last_evaluated_run_id``) и последнего **полного** снимка (09 §5.1–§5.3). Без порта
+(``state=None``) поведение прежнее: все готовые продукты — ``new``.
 Модуль категорийно нейтрален (§1.3).
 """
 
@@ -46,12 +50,14 @@ from core.domain.models import (
     SeedEntry,
     SeedsConfig,
 )
+from core.ports.state import ProductStatePort, ProductStateRow
 
 __all__ = [
     "OnboardingPreflight",
     "effective_seeds",
     "load_effective_seeds",
     "preflight",
+    "resolve_product_modes",
 ]
 
 #: Причина блокировки: у продукта нет активных seed'ов.
@@ -71,6 +77,9 @@ class OnboardingPreflight:
     :param effective_urls: ``product_id → [normalized_url, ...]`` для фазы corpus.
     :param warnings: машинные предупреждения (legacy fallback, operator override).
     :param seeds: эффективный ``SeedsConfig`` (authoring-источник, не state).
+    :param cycle_id: идентификатор цикла прогона (run identity — отдельный срез).
+    :param previous_run_id: предыдущий прогон пакета (lineage §12.3).
+    :param change_class: класс изменения (``methodology_change``/``execution_change``).
     """
 
     plans: list[ProductPlan] = field(default_factory=list)
@@ -78,11 +87,20 @@ class OnboardingPreflight:
     effective_urls: dict[str, list[str]] = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
     seeds: SeedsConfig = field(default_factory=SeedsConfig)
+    cycle_id: str | None = None
+    previous_run_id: str | None = None
+    change_class: str | None = None
 
     @property
     def plan_set(self) -> ProductPlanSet:
         """Доменный набор планов для отчёта/dry-run."""
-        return ProductPlanSet(products=list(self.plans), blocked=list(self.blocked))
+        return ProductPlanSet(
+            products=list(self.plans),
+            blocked=list(self.blocked),
+            cycle_id=self.cycle_id,
+            previous_run_id=self.previous_run_id,
+            change_class=self.change_class,
+        )
 
     @property
     def ready(self) -> bool:
@@ -256,36 +274,67 @@ def _reasons_for(
     return list(dict.fromkeys(reasons))
 
 
-def preflight(
-    package_dir: str | Path,
+def _mode_for(
+    state: ProductStatePort | None,
+    product_id: str,
+    row: ProductStateRow | None,
+) -> ProductMode:
+    """Режим продукта по durable-состоянию (09 §5.1/§5.3).
+
+    * нет строки state или ``last_corpus_run_id is None`` → ``new``;
+    * ``re_added_at`` выставлен (вернули после ``retired``) → ``new``;
+    * ``last_evaluated_run_id is None`` (corpus был, eval — нет) → ``full``;
+    * последний **полный** снимок отсутствует или не ``complete`` → ``full``;
+    * иначе → ``incremental``.
+
+    ``state is None`` (durable-состояния нет) — поведение MVP-1: всегда ``new``.
+    """
+    if state is None or row is None or row.last_corpus_run_id is None:
+        return ProductMode.NEW
+    if row.re_added_at is not None:
+        return ProductMode.NEW
+    if row.last_evaluated_run_id is None:
+        return ProductMode.FULL
+    snapshot = state.last_snapshot(product_id, scope=ProductScope.FULL.value)
+    if snapshot is None or snapshot.status != "complete":
+        return ProductMode.FULL
+    return ProductMode.INCREMENTAL
+
+
+def resolve_product_modes(
     products: Iterable[str],
+    seeds: SeedsConfig,
     *,
     profiles: Mapping[str, Any] | None = None,
-    urls_override: Mapping[str, list[str]] | None = None,
-    today: _dt.date | None = None,
+    cycle_id: str | None = None,
+    previous_run_id: str | None = None,
+    change_class: str | None = None,
     scope: ProductScope = ProductScope.FULL,
+    state: ProductStatePort | None = None,
 ) -> OnboardingPreflight:
-    """Строит ``ProductPlanSet`` и блокирует неготовые продукты (O1).
+    """Резолвит режим каждого продукта когорты (09 §5.3).
 
-    В MVP-1 режим продукта всегда ``new`` (durable state отсутствует). Продукт без
-    активного seed'а или с несвязанным профилем попадает в ``blocked`` с причинами
-    ``no_seeds``/``profile_unbound``/``seed_invalid``.
+    Готовность (блокировка) определяется **авторским** seed-набором ``seeds``, а не
+    state-строкой: отсутствие строки state — нормальный первый прогон продукта и не
+    даёт ``no_seeds``. Режим же выводится из durable-рубежей (:func:`_mode_for`).
+
+    :param products: ``product_id`` когорты (детерминированно сортируются).
+    :param seeds: эффективный ``SeedsConfig`` (``sources/seeds.yaml``/fallback).
+    :param profiles: доменные профили для привязки seed'ов.
+    :param cycle_id: идентификатор цикла (run identity — отдельный срез).
+    :param previous_run_id: предыдущий прогон пакета (lineage).
+    :param change_class: класс изменения (``methodology_change``/``execution_change``).
+    :param scope: ``full``|``product_only`` (09 §6.2/§13.6).
+    :param state: durable-состояние продукта; ``None`` — все готовые продукты ``new``.
     """
     product_ids = sorted({str(pid) for pid in products})
-    config, warnings = load_effective_seeds(
-        package_dir,
-        product_ids,
-        profiles=profiles,
-        urls_override=urls_override,
-        today=today,
-    )
     plans: list[ProductPlan] = []
     blocked: list[str] = []
     effective_urls: dict[str, list[str]] = {}
     for product_id in product_ids:
-        product = config.products.get(product_id)
+        product = seeds.products.get(product_id)
         reasons = _reasons_for(product_id, product, profiles)
-        rows = effective_seeds(config, product_id, profiles=profiles) if product else []
+        rows = effective_seeds(seeds, product_id, profiles=profiles)
         if reasons:
             plans.append(
                 ProductPlan(
@@ -307,15 +356,30 @@ def preflight(
             blocked.append(product_id)
             effective_urls[product_id] = []
             continue
+        state_row = state.get_product_state(product_id) if state is not None else None
+        mode = _mode_for(state, product_id, state_row)
         plans.append(
             ProductPlan(
                 product_id=product_id,
-                mode=ProductMode.NEW,
+                mode=mode,
                 onboarding_state=OnboardingState.READY,
                 seed_count=len(rows),
-                refresh_policy=RefreshPolicy.REFRESH,
+                refresh_policy=(
+                    RefreshPolicy.REVALIDATE
+                    if mode is ProductMode.INCREMENTAL
+                    else RefreshPolicy.REFRESH
+                ),
                 scope=scope,
                 reasons=[],
+                last_completed_run_id=(
+                    state_row.last_completed_run_id if state_row is not None else None
+                ),
+                last_corpus_run_id=(
+                    state_row.last_corpus_run_id if state_row is not None else None
+                ),
+                last_evaluated_run_id=(
+                    state_row.last_evaluated_run_id if state_row is not None else None
+                ),
             )
         )
         effective_urls[product_id] = [seed.normalized_url for seed in rows]
@@ -323,6 +387,53 @@ def preflight(
         plans=plans,
         blocked=blocked,
         effective_urls=effective_urls,
-        warnings=warnings,
-        seeds=config,
+        seeds=seeds,
+        cycle_id=cycle_id,
+        previous_run_id=previous_run_id,
+        change_class=change_class,
     )
+
+
+def preflight(
+    package_dir: str | Path,
+    products: Iterable[str],
+    *,
+    profiles: Mapping[str, Any] | None = None,
+    urls_override: Mapping[str, list[str]] | None = None,
+    today: _dt.date | None = None,
+    scope: ProductScope = ProductScope.FULL,
+    state: ProductStatePort | None = None,
+    cycle_id: str | None = None,
+    previous_run_id: str | None = None,
+    change_class: str | None = None,
+) -> OnboardingPreflight:
+    """Строит ``ProductPlanSet`` и блокирует неготовые продукты (O1).
+
+    Продукт без активного seed'а или с несвязанным профилем попадает в ``blocked`` с
+    причинами ``no_seeds``/``profile_unbound``/``seed_invalid``. Режим продукта
+    резолвится :func:`resolve_product_modes` по переданному ``state`` (без него — ``new``).
+
+    Синхронизация авторских seed'ов в ``state.seed_set`` — обязанность composition root
+    (:meth:`ProductStatePort.reconcile_seed_set`), а не префлайта: файл — источник истины,
+    таблица — операционный кэш.
+    """
+    product_ids = sorted({str(pid) for pid in products})
+    config, warnings = load_effective_seeds(
+        package_dir,
+        product_ids,
+        profiles=profiles,
+        urls_override=urls_override,
+        today=today,
+    )
+    result = resolve_product_modes(
+        product_ids,
+        config,
+        profiles=profiles,
+        cycle_id=cycle_id,
+        previous_run_id=previous_run_id,
+        change_class=change_class,
+        scope=scope,
+        state=state,
+    )
+    result.warnings = warnings
+    return result

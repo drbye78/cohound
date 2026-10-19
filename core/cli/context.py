@@ -124,6 +124,7 @@ __all__ = [
     "_resolve_plan",
     "_resolve_ports",
     "_resolve_phases",
+    "_open_state_store",
     "_load_passports_dir",
     "_load_corpus_urls",
     "_load_render_modes",
@@ -188,6 +189,37 @@ def _resolve_paths(args: argparse.Namespace) -> Any:
     from core.config.paths import resolve_paths
 
     return resolve_paths()
+
+
+def _open_state_store(args: argparse.Namespace, *, create: bool = False) -> Any:
+    """Открывает durable per-product состояние пакета (``state/{package_id}/state.db``).
+
+    Раскладка — ``args.paths.state`` (composition root уже резолвит ``COHOUND_STATE_DIR``/
+    ``COHOUND_HOME``/``paths.yaml``); без ``args.paths`` (прямой вызов хендлера в тестах) —
+    :func:`core.config.paths.resolve_paths`. ``package_id`` — имя каталога пакета.
+
+    ``create=False`` (``--dry-run``) — **только чтение**: отсутствующий ``state.db`` →
+    ``None``, каталоги не создаются. ``create=True`` (реальный прогон) — каталог
+    ``state/{package_id}/`` создаётся при необходимости.
+
+    ``None`` также возвращается, если ``--package`` не является реальным каталогом:
+    состояние привязано к пакету, а не к произвольной строке.
+    """
+    from core.store.state_sqlite import state_db_path
+    from core.store.state_store import SqliteStateStore
+
+    package = getattr(args, "package", None)
+    if not package or not Path(package).is_dir():
+        return None
+    paths = getattr(args, "paths", None)
+    if paths is None:
+        paths = _resolve_paths(args)
+    db_path = state_db_path(paths.state, Path(package).name)
+    if not create and not db_path.exists():
+        return None
+    if create:
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+    return SqliteStateStore(db_path)
 
 
 def _read_cycle(args: argparse.Namespace, run_id: str) -> tuple[Any, list[Any]]:

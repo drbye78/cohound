@@ -81,6 +81,23 @@ def test_atomic_write_text_is_deterministic(tmp_path: Path) -> None:
     assert not list(tmp_path.glob(".*.tmp")), "временные файлы не должны оставаться"
 
 
+def test_atomic_write_text_new_file_is_group_readable(tmp_path: Path) -> None:
+    """Новый файл — 0o644 (не 0o600 от ``mkstemp``): пакет читает другой пользователь."""
+    path = tmp_path / "out.yaml"
+    atomic_write_text(path, "a: 1\n")
+    assert path.stat().st_mode & 0o777 == 0o644
+
+
+def test_atomic_write_text_preserves_existing_mode(tmp_path: Path) -> None:
+    """Существующий файл сохраняет свой режим: авторский выбор не перетирается."""
+    path = tmp_path / "out.yaml"
+    path.write_text("a: 1\n", encoding="utf-8")
+    path.chmod(0o640)
+    atomic_write_text(path, "a: 2\n")
+    assert path.stat().st_mode & 0o777 == 0o640
+    assert path.read_text(encoding="utf-8") == "a: 2\n"
+
+
 def test_atomic_write_csv_uses_lf_and_creates_parent(tmp_path: Path) -> None:
     path = tmp_path / "nested" / "out.csv"
     atomic_write_csv(path, ["a", "b"], [["1", "2"], ["3", None]])

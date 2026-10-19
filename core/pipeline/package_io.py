@@ -30,9 +30,7 @@ import csv
 import datetime as _dt
 import io
 import json
-import os
 import re
-import tempfile
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -67,6 +65,7 @@ from core.domain.models import (
 )
 from core.pipeline.lint import LintReport, lint_run_inputs
 from core.pipeline.normalize import RunInputs, cross_check, load_scope_attestation
+from core.util.atomic_write import atomic_write_text as _atomic_write_text
 from core.util.text_utils import normalize_cyrillic
 
 __all__ = [
@@ -300,22 +299,12 @@ def atomic_write_text(path: str | Path, text: str) -> Path:
     """Атомарно пишет ``text`` в ``path`` (temp в том же каталоге + ``os.replace``).
 
     При любой ошибке временный файл удаляется, а целевой не меняется. Родительский
-    каталог создаётся при необходимости.
+    каталог создаётся при необходимости. Режим доступа сохраняется у существующего
+    файла и ``0o644`` у нового (:func:`core.util.atomic_write.atomic_write_text`):
+    ``mkstemp`` даёт ``0o600``, и без явного ``chmod`` артефакты пакета становились
+    нечитаемыми для группы (shared/DMZ-развёртывание).
     """
-    target = Path(path)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(dir=str(target.parent), prefix=f".{target.name}.", suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
-            handle.write(text)
-        os.replace(tmp_name, target)
-    except BaseException:
-        try:
-            os.unlink(tmp_name)
-        except OSError:
-            pass
-        raise
-    return target
+    return _atomic_write_text(path, text)
 
 
 def atomic_write_csv(path: str | Path, header: Sequence[str], rows: Iterable[Sequence[Any]]) -> Path:

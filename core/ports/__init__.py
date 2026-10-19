@@ -34,6 +34,13 @@ from core.ports.llm import EvaluatorPort, LLMRequest, LLMResponse, TokenUsage
 from core.ports.poller import PollPort
 from core.ports.registry import RegistryFetcherPort, RegistryFact
 from core.ports.search import SearchAdapterPort, SearchQuery, SearchResult
+from core.ports.state import (
+    ProductStatePort,
+    ProductStateRow,
+    RunLineageRow,
+    SeedRow,
+    SnapshotRow,
+)
 from core.ports.store import RunIndexRef, StorePort
 from core.ports.types import (
     Chunk,
@@ -75,6 +82,11 @@ __all__ = [
     "SearchAdapterPort",
     "SearchQuery",
     "SearchResult",
+    "ProductStatePort",
+    "ProductStateRow",
+    "RunLineageRow",
+    "SeedRow",
+    "SnapshotRow",
     "StorePort",
     "RunIndexRef",
     "Chunk",

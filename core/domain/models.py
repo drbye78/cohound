@@ -1412,10 +1412,11 @@ class SeedsConfig(BaseModel):
 
 
 class ProductPlan(BaseModel):
-    """Минимальный план продукта для onboarding-префлайта и dry-run (MVP-1).
+    """План продукта для onboarding-префлайта и dry-run (09 §5.3).
 
-    Поля state-контура (``last_completed_run_id`` и т.п.) намеренно не добавлены:
-    durable ``state.db`` появится следующим шагом (09 §16.2 п.2).
+    Поля ``last_*_run_id`` — рубежи durable-состояния продукта (09 §5.1): последний
+    прогон, где собран корпус / прошла eval-фаза / разрешены все ячейки. ``None`` —
+    рубеж не достигнут (или state-строки ещё нет), что и определяет режим продукта.
     """
 
     model_config = _BASE
@@ -1427,15 +1428,27 @@ class ProductPlan(BaseModel):
     refresh_policy: RefreshPolicy = RefreshPolicy.REVALIDATE
     scope: ProductScope = ProductScope.FULL
     reasons: list[str] = Field(default_factory=list)
+    #: Последний прогон, где все ячейки разрешены (evaluated/reviewed/N/A).
+    last_completed_run_id: str | None = None
+    #: Последний прогон, где собран корпус (eval мог не состояться).
+    last_corpus_run_id: str | None = None
+    #: Последний прогон, где прошла eval-фаза (pending-ячейки допустимы).
+    last_evaluated_run_id: str | None = None
 
 
 class ProductPlanSet(BaseModel):
-    """Набор планов продуктов + список заблокированных (09 §5.3, MVP-1)."""
+    """Набор планов продуктов + список заблокированных (09 §5.3)."""
 
     model_config = _BASE
 
     products: list[ProductPlan] = Field(default_factory=list)
     blocked: list[str] = Field(default_factory=list)
+    #: Идентификатор цикла прогона (run identity — отдельный срез; ``None`` — не задан).
+    cycle_id: str | None = None
+    #: Предыдущий прогон пакета (lineage §12.3).
+    previous_run_id: str | None = None
+    #: Класс изменения (``methodology_change``/``execution_change``, §13).
+    change_class: str | None = None
 
     def plan_for(self, product_id: str) -> ProductPlan | None:
         """План продукта или ``None``, если продукта нет в наборе."""

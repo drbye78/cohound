@@ -29,6 +29,7 @@ from core.config.paths import (
     ENV_PATHS_FILE,
     ENV_REPORTS_DIR,
     ENV_RUNS_DIR,
+    ENV_STATE_DIR,
     HARNESS_FIELDS,
     PathsConfig,
     load_paths_file,
@@ -73,7 +74,7 @@ def test_defaults_without_env_or_file(tmp_path: Path) -> None:
 def test_defaults_field_names() -> None:
     assert set(HARNESS_FIELDS) == {
         "packages", "passports", "runs", "index_store",
-        "corpus_raw", "cache", "extract_cache", "eval_cache", "reports",
+        "corpus_raw", "cache", "extract_cache", "eval_cache", "reports", "state",
     }
     assert set(ENV_BY_FIELD) == set(HARNESS_FIELDS)
 
@@ -188,6 +189,42 @@ def test_absolute_env_kept_under_home(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Durable per-product state (09 §4.1)
+# ---------------------------------------------------------------------------
+
+
+def test_state_default(tmp_path: Path) -> None:
+    """Поле ``state`` — относительный дефолт ``state`` (раскладка 09 §4.1)."""
+    config = resolve_paths(env={}, file=_absent(tmp_path))
+    assert config.state == Path("state")
+    assert not config.state.is_absolute()
+    assert ENV_BY_FIELD["state"] == ENV_STATE_DIR == "COHOUND_STATE_DIR"
+
+
+def test_state_env_override(tmp_path: Path) -> None:
+    config = resolve_paths(
+        env={ENV_STATE_DIR: "/var/lib/cohound/state"}, file=_absent(tmp_path)
+    )
+    assert config.state == Path("/var/lib/cohound/state")
+
+
+def test_state_explicit_override_wins_over_env(tmp_path: Path) -> None:
+    config = resolve_paths(
+        explicit={"state": "/explicit/state"},
+        env={ENV_STATE_DIR: "/env/state"},
+        file=_absent(tmp_path),
+    )
+    assert config.state == Path("/explicit/state")
+
+
+def test_state_relative_under_home(tmp_path: Path) -> None:
+    config = resolve_paths(
+        env={}, file=_absent(tmp_path), home=tmp_path / "home"
+    )
+    assert config.state == tmp_path / "home" / "state"
+
+
+# ---------------------------------------------------------------------------
 # Файл: разрешение и негативные случаи
 # ---------------------------------------------------------------------------
 
@@ -201,6 +238,7 @@ _ENV_FIELDS = (
     ENV_EXTRACT_CACHE_DIR,
     ENV_EVAL_CACHE_DIR,
     ENV_REPORTS_DIR,
+    ENV_STATE_DIR,
 )
 
 

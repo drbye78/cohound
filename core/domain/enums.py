@@ -454,8 +454,10 @@ class OnboardingState(StrEnum):
 class ProductMode(StrEnum):
     """Режим обработки продукта в прогоне (09 §3.1/§5).
 
-    В MVP-1 durable state отсутствует, поэтому фактически используется ``new``;
-    значения ``full``/``incremental`` зарезервированы под следующие шаги.
+    ``new`` — первый прогон продукта (нет ``last_corpus_run_id``/state-строки или
+    re-add после ``retired``); ``full`` — corpus был, но baseline неполон (eval не
+    состоялся/снимок не ``complete``); ``incremental`` — есть полный baseline, работаем
+    от него (revalidate + reuse + carry-forward). Без durable-состояния — всегда ``new``.
     """
 
     NEW = "new"

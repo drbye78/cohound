@@ -28,6 +28,7 @@ from core.pipeline.package_add_product import (
     AddProductError,
     DiscoveredSite,
     _derive_sites,
+    _site_seed_url,
     _profile_for_verdict,
     _sitemap_budget,
     apply_add_product,
@@ -758,3 +759,58 @@ def test_apply_unbound_seed_writes_nothing(tmp_path: Path) -> None:
     with pytest.raises(AddProductError):
         apply_add_product(pkg, plan, actor="tester")
     assert _snapshot(pkg) == before
+
+
+def test_reapply_keeps_apply_history_and_does_not_rewrite_seeds(tmp_path: Path) -> None:
+    """Повторный apply: ``apply`` — append-only, неизменный seeds.yaml не перезаписан."""
+    pkg = valid_package(tmp_path)
+    plan = _plan(pkg, crawler=_crawler(START), ports=_ports())
+    first = apply_add_product(pkg, plan, actor="tester")
+    artifact = pkg / "sources" / "add_product" / f"2026-06-01-{plan.product_id}.json"
+    first_bytes = artifact.read_bytes()
+    seeds_path = pkg / "sources" / "seeds.yaml"
+    seeds_bytes = seeds_path.read_bytes()
+
+    second = apply_add_product(pkg, plan, actor="tester")
+
+    assert second["cohort"]["noop"] is True
+    assert str(seeds_path) not in second["written_files"], "no-op не переписывает seeds"
+    assert seeds_path.read_bytes() == seeds_bytes
+    assert first_bytes != artifact.read_bytes(), "новый apply обязан быть записан"
+    history = json.loads(artifact.read_text(encoding="utf-8"))["apply"]
+    assert isinstance(history, list) and len(history) == 2
+    assert [entry["actor"] for entry in history] == ["tester", "tester"]
+    assert first["artifact_path"] == second["artifact_path"]
+
+
+def test_host_root_seed_is_origin_not_deep_foreign_page() -> None:
+    """Host-root seed — origin: глубокая страница чужого продукта не становится seed'ом.
+
+    Регрессия живого apply QHB: корпоративный корень `web.quantom.info` (профиль
+    `max_depth: 0`) получал seed `.../products/qhb-sert/docs/` — страницу **другого**
+    продукта, то есть I17-риск и нулевое покрытие собственных страниц.
+    """
+    site = DiscoveredSite(
+        key="web.quantom.info",
+        urls=[
+            "https://web.quantom.info/products/qhb-sert/docs/",
+            "https://web.quantom.info/",
+        ],
+        reason="host root",
+        is_root=True,
+    )
+    assert _site_seed_url(site, None) == "https://web.quantom.info/"
+
+
+def test_dedicated_host_seed_prefers_product_page() -> None:
+    """Выделенный продуктовый хост (`is_root=False`) — обычный выбор URL, не origin."""
+    site = DiscoveredSite(
+        key="ftdata.ru",
+        urls=["https://ftdata.ru/", "https://ftdata.ru/products/ftdata/"],
+        reason="dedicated",
+        is_root=False,
+    )
+    assert _site_seed_url(site, None) == "https://ftdata.ru/"
+    assert _site_seed_url(site, "https://ftdata.ru/products/ftdata/") == (
+        "https://ftdata.ru/products/ftdata/"
+    )

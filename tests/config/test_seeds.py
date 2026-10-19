@@ -303,3 +303,16 @@ def test_migrated_file_loads_with_domain_profiles(tmp_path: Path) -> None:
     ensure_seeds_file(pkg, "migrator")
     load_domain_profiles(pkg / "domain_profiles.yaml")  # не бросает
     assert load_seeds(pkg / SEEDS_RELPATH).enabled_for("p1")
+
+
+def test_load_seeds_rejects_directory_instead_of_empty_config(tmp_path: Path) -> None:
+    """Каталог вместо файла — ошибка: молчаливый пустой набор скрывал бы ошибку вызова."""
+    with pytest.raises(ValueError, match="каталог"):
+        load_seeds(tmp_path)
+
+
+def test_save_seeds_keeps_file_group_readable(tmp_path: Path) -> None:
+    """``seeds.yaml`` пишется как 0o644: артефакт пакета, не секрет."""
+    path = tmp_path / SEEDS_RELPATH
+    save_seeds(path, SeedsConfig(products={}))
+    assert path.stat().st_mode & 0o777 == 0o644

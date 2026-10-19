@@ -35,6 +35,7 @@ from core.config.seeds import (
     ensure_seeds_file,
     merge_seeds,
     normalize_seed_url,
+    render_seeds,
     resolve_profile_key,
     save_seeds,
     validate_seed_url,
@@ -795,6 +796,16 @@ def _site_seed_url(site: DiscoveredSite, resolved_url: str | None) -> str:
     warning'ом в :func:`_plan_seeds`.
     """
     urls = sorted({str(url) for url in site.urls if str(url).strip()})
+    if site.is_root and urls:
+        # Корпоративный host-root — это **origin**, а не произвольная глубокая страница
+        # (первый по длине path мог оказаться чужим продуктом: `.../products/qhb-sert/`).
+        # Профиль такого ключа несёт ``max_depth: 0``, поэтому seed = корень хоста.
+        parts = urlsplit(urls[0])
+        if parts.scheme and parts.hostname:
+            origin = f"{parts.scheme}://{parts.hostname}"
+            if parts.port and parts.port not in (80, 443):
+                origin = f"{origin}:{parts.port}"
+            return f"{origin}/"
     if resolved_url:
         try:
             normalized = normalize_seed_url(resolved_url)
@@ -1476,8 +1487,15 @@ def apply_add_product(
         if seeds_config.products.get(plan.product_id) is not None
         else []
     )
-    save_seeds(seeds_path, merged)
-    written.append(str(seeds_path))
+    # No-op apply не перезаписывает seeds.yaml: байт-идентичный файл не должен попадать
+    # в ``written_files`` (иначе аудит показывает «изменение», которого не было).
+    seeds_text = render_seeds(merged)
+    seeds_changed = not seeds_path.is_file() or seeds_path.read_text(
+        encoding="utf-8"
+    ) != seeds_text
+    if seeds_changed:
+        save_seeds(seeds_path, merged)
+        written.append(str(seeds_path))
     onboarding_state = merged.products[plan.product_id].state
     merged_rows = merged.products[plan.product_id].seeds
     # ``onboarding_missing``/``needs_human`` — из **смерженного** состояния, а не из
@@ -1544,6 +1562,30 @@ def apply_add_product(
     #    друг друга.
     artifact_name = f"{snapshot.isoformat()}-{plan.product_id}.json"
     artifact_path = pkg / "sources" / "add_product" / artifact_name
+    # ``apply`` — append-only история: повторный apply того же продукта не затирает
+    # запись о первом (аудит онбординга), а дописывает новый элемент.
+    history: list[dict[str, Any]] = []
+    if artifact_path.is_file():
+        try:
+            previous = json.loads(artifact_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            previous = {}
+        prior_apply = previous.get("apply")
+        if isinstance(prior_apply, list):
+            history.extend(prior_apply)
+        elif isinstance(prior_apply, dict):
+            history.append(prior_apply)
+    history.append(
+        {
+            "actor": actor,
+            "cohort": cohort_result,
+            "profiles_changed": profiles_changed,
+            "new_profile_keys": new_keys,
+            "passport_written": bool(write_passport),
+            "written_files": list(written),
+            "applied_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+        }
+    )
     artifact = {
         **plan.as_dict(),
         "seed_plan": [dict(seed) for seed in plan.seeds],
@@ -1551,14 +1593,7 @@ def apply_add_product(
             "state": onboarding_state.value,
             "missing": list(onboarding_missing),
         },
-        "apply": {
-            "actor": actor,
-            "cohort": cohort_result,
-            "profiles_changed": profiles_changed,
-            "new_profile_keys": new_keys,
-            "passport_written": bool(write_passport),
-            "written_files": list(written),
-        },
+        "apply": history,
     }
     atomic_write_text(
         artifact_path,

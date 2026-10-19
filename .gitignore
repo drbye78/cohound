@@ -29,6 +29,9 @@ cache/
 eval_cache/
 extract_cache/
 
+# Durable per-product состояние онбординга (09 §4.1) — операционное, не версионируется
+state/
+
 # Секреты окружения (шаблон без значений — .env.example, коммитится)
 .env
 
