@@ -13,8 +13,14 @@ from pathlib import Path
 import pytest
 
 from core.config.crawl_sources import CrawlSource, CrawlSourcesConfig
-from core.config.run_config import load_catalog
-from core.domain.models import CatalogRow, ModuleDef, PackageManifest
+from core.config.run_config import load_catalog, load_run_config
+from core.domain.models import (
+    CatalogRow,
+    CrawlRunConfig,
+    ModuleDef,
+    PackageManifest,
+    RunConfig,
+)
 from core.domain.enums import (
     Archetype,
     CrawlStrategy,
@@ -37,6 +43,7 @@ from core.pipeline.package_io import (
     list_artifacts,
     load_artifacts,
     matches,
+    patch_run_projection,
     prospective_lint,
     save_artifact,
     scan_packages,
@@ -128,6 +135,96 @@ def test_save_and_reload_round_trip(tmp_path: Path) -> None:
     assert reloaded.catalog == sorted(source.catalog, key=lambda r: r.param_id)
     assert reloaded.golden == sorted(
         source.golden, key=lambda r: (r.product_id, r.param_id, r.tier.value, r.case_class)
+    )
+
+
+def test_save_run_omits_none_and_keeps_explicit_crawl_axes(tmp_path: Path) -> None:
+    """Полная запись run.yaml: null-поля не эмитятся, явные оси crawl сохраняются."""
+    source = load_artifacts(TEMPLATE).run
+    assert source is not None
+    run = source.model_copy(
+        update={"llm_slot": None, "crawl": CrawlRunConfig(max_response_bytes=123, max_depth=2)}
+    )
+
+    path = save_artifact(tmp_path, "run", run)
+    text = path.read_text(encoding="utf-8")
+
+    assert "max_response_bytes: 123" in text
+    assert "max_response_bytes: null" not in text
+    assert "llm_slot" not in text
+    assert load_run_config(path).crawl == CrawlRunConfig(max_response_bytes=123, max_depth=2)
+
+
+#: run.yaml с комментариями и операционной секцией crawl (стиль живого пакета).
+_RUN_WITH_COMMENTS = (
+    "# run: комментарий верхнего уровня\n"
+    "case_id: demo\n"
+    "anchor: alpha          # якорь когорты\n"
+    "cohort: cohort_demo\n"
+    "products:\n"
+    "  - alpha\n"
+    "  - beta\n"
+    "package: demo\n"
+    "snapshot_date: '2026-01-01'\n"
+    "mode: strict\n"
+    "crawl:\n"
+    "  # операционная секция\n"
+    "  max_depth: 3\n"
+)
+
+
+def test_patch_run_projection_preserves_comments_and_is_idempotent(tmp_path: Path) -> None:
+    """Точечный патч меняет только anchor/products и идемпотентен."""
+    run = RunConfig.model_validate(
+        {
+            "case_id": "demo",
+            "anchor": "beta",
+            "cohort": "cohort_demo",
+            "products": ["beta", "gamma"],
+            "package": "demo",
+            "snapshot_date": "2026-01-01",
+            "mode": "strict",
+        }
+    )
+
+    once = patch_run_projection(_RUN_WITH_COMMENTS, run)
+    twice = patch_run_projection(once, run)
+    assert once == twice, "патч обязан быть идемпотентным"
+
+    assert "# run: комментарий верхнего уровня" in once
+    assert "# якорь когорты" in once
+    assert "# операционная секция" in once
+    assert "anchor: beta          # якорь когорты" in once
+    assert "products:\n  - beta\n  - gamma\n" in once
+    assert "- alpha" not in once
+    assert once.endswith("  # операционная секция\n  max_depth: 3\n")
+
+    path = tmp_path / "run.yaml"
+    path.write_text(once, encoding="utf-8")
+    loaded = load_run_config(path)
+    assert loaded.anchor == "beta"
+    assert loaded.products == ["beta", "gamma"]
+    assert loaded.crawl is not None and loaded.crawl.max_depth == 3
+
+
+def test_patch_run_projection_appends_missing_products_block() -> None:
+    """Если ``products:`` нет — блок добавляется в конец, остальной текст не тронут."""
+    run = RunConfig.model_validate(
+        {
+            "case_id": "demo",
+            "anchor": "beta",
+            "cohort": "cohort_demo",
+            "products": ["beta", "gamma"],
+            "package": "demo",
+            "snapshot_date": "2026-01-01",
+            "mode": "strict",
+        }
+    )
+
+    patched = patch_run_projection("case_id: demo\nanchor: alpha\npackage: demo\n", run)
+
+    assert patched == (
+        "case_id: demo\nanchor: beta\npackage: demo\nproducts:\n- beta\n- gamma\n"
     )
 
 

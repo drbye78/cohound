@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 
+from core.config.run_config import load_run_config
 from core.pipeline import package_admin as pa
 from core.pipeline import package_candidates as pc
 from core.pipeline.package_candidates import (
@@ -451,6 +452,64 @@ def test_cohort_update_warns_and_syncs_run(tmp_path: Path) -> None:
     assert "run" in result.changed
     assert any("§13" in warning for warning in result.warnings)
     assert load_artifacts(package).run.products == ["product_anchor", "product_new"]
+
+
+def test_cohort_update_preserves_run_comments_and_omits_null_axes(tmp_path: Path) -> None:
+    """Синхронизация run.yaml — точечная: комментарии живы, null-поля не появляются.
+
+    Регрессия живого ``package add-product --apply``: полная перезапись через
+    ``_mapping_to_yaml`` теряла 27 строк комментариев и добавляла
+    ``crawl.max_response_bytes: null``, ломая пин генератора пакета.
+    """
+    package = _make(tmp_path)
+    run_path = package / "run.yaml"
+    run_path.write_text(
+        "# run: комментарий верхнего уровня\n"
+        "case_id: case_x\n"
+        "anchor: product_anchor      # якорь когорты\n"
+        "cohort: cohort_case_x\n"
+        "products:\n"
+        "  - product_anchor\n"
+        "package: case_x\n"
+        "snapshot_date: '1970-01-01'\n"
+        "mode: strict\n"
+        "crawl:\n"
+        "  # операционные дефолты (execution)\n"
+        "  strategy: honest\n"
+        "  max_depth: 3\n",
+        encoding="utf-8",
+    )
+    entries = [
+        {
+            "product_id": "product_new",
+            "role_overlap": 1.0,
+            "selection_reason": "a",
+            "anchor_relation": "anchor",
+        },
+        {
+            "product_id": "product_anchor",
+            "role_overlap": 0.5,
+            "selection_reason": "b",
+            "anchor_relation": "analog",
+        },
+    ]
+
+    result = pa.update_cohort(package, {"entries": entries}, actor="t")
+    assert "run" in result.changed
+
+    text = run_path.read_text(encoding="utf-8")
+    assert "# run: комментарий верхнего уровня" in text
+    assert "# якорь когорты" in text
+    assert "# операционные дефолты (execution)" in text
+    assert "max_response_bytes" not in text, "null-поля run.yaml не эмитятся"
+    assert "llm_slot" not in text
+    assert "  - product_new" in text
+
+    cfg = load_run_config(run_path)
+    assert cfg.anchor == "product_new"
+    assert cfg.products == ["product_new", "product_anchor"]
+    assert cfg.crawl is not None
+    assert cfg.crawl.max_depth == 3
 
 
 def test_cohort_update_immutable_field_refuses(tmp_path: Path) -> None:

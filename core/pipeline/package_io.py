@@ -83,6 +83,7 @@ __all__ = [
     "list_artifacts",
     "get_artifact",
     "save_artifact",
+    "patch_run_projection",
     "delete_artifact",
     "build_run_inputs",
     "prospective_lint",
@@ -337,8 +338,99 @@ def _dump_yaml(data: Any) -> str:
 
 
 def _mapping_to_yaml(data: Any) -> str:
-    """YAML-строка для доменной модели (JSON-режим ``model_dump`` — сериализуемые типы)."""
+    """YAML-строка для доменной модели (JSON-режим ``model_dump`` — сериализуемые типы).
+
+    ``None``-поля **сохраняются** (это значимо для ``cohort.yaml``: ``selection_reason:
+    null`` — «ещё не заполнено» по A3). Для ``run.yaml`` полная запись идёт отдельно с
+    ``exclude_none=True`` (:func:`save_artifact`): там ``None`` — просто отсутствие
+    операционной настройки, и эмиссия ``max_response_bytes: null``/``llm_slot: null``
+    создаёт дрейф относительно генераторов пакета.
+    """
     return _dump_yaml(data.model_dump(mode="json", exclude_none=False))
+
+
+# ---------------------------------------------------------------------------
+# Точечная проекция run.yaml (anchor/products) с сохранением комментариев
+# ---------------------------------------------------------------------------
+
+#: Строка ``anchor:`` верхнего уровня (значение и необязательный комментарий).
+_ANCHOR_LINE_RE = re.compile(
+    r"^(?P<key>anchor:)(?P<gap>[ \t]*)(?P<value>.*?)(?P<comment>[ \t]+#.*)?$"
+)
+#: Строка ``products:`` верхнего уровня (значение может быть inline-списком).
+_PRODUCTS_LINE_RE = re.compile(r"^(?P<key>products:)(?P<rest>.*)$")
+#: Элемент блочного YAML-списка (``- ...`` с произвольным отступом).
+_LIST_ITEM_RE = re.compile(r"^(?P<indent>[ \t]*)-(?:[ \t].*)?$")
+
+
+def _yaml_scalar(value: str) -> str:
+    """YAML-представление скаляра для вставки в строку (без переводов строк)."""
+    dumped = yaml.safe_dump(value, allow_unicode=True, default_flow_style=True)
+    for line in dumped.splitlines():
+        if line.strip() and line.strip() not in ("---", "..."):
+            return line.strip()
+    return str(value)  # pragma: no cover — safe_dump всегда даёт строку
+
+
+def _products_block(products: Sequence[str], indent: str) -> list[str]:
+    """Строки блока ``products:`` (сохраняет отступ существующих элементов)."""
+    if not products:
+        return ["products: []"]
+    return ["products:", *(f"{indent}- {_yaml_scalar(product)}" for product in products)]
+
+
+def patch_run_projection(raw: str, run: RunConfig) -> str:
+    """Точечно обновляет ``anchor``/``products`` в тексте ``run.yaml``.
+
+    Заменяет только значение ``anchor:`` и блок ``products:`` (строки ``- ...`` сразу
+    после ключа), сохраняя весь остальной текст: порядок ключей, отступы, комментарии и
+    стиль переводов строк. Если ``products:`` отсутствует — блок добавляется в конец.
+    Функция идемпотентна: повторное применение к уже пропатченному тексту не меняет байты.
+
+    Применять её безопасно только тогда, когда единственные различия старого и нового
+    ``RunConfig`` — ``anchor``/``products`` (проверка — в
+    :func:`core.pipeline.package_admin._finalize`). Иначе нужна полная запись.
+    """
+    newline = "\r\n" if "\r\n" in raw else "\n"
+    trailing = raw.endswith(("\n", "\r"))
+    lines = raw.splitlines()
+
+    # anchor: заменить значение, сохранив пробел после двоеточия и хвостовой комментарий.
+    anchor_value = _yaml_scalar(run.anchor)
+    for index, line in enumerate(lines):
+        match = _ANCHOR_LINE_RE.match(line)
+        if match is None:
+            continue
+        gap = match.group("gap") or " "
+        comment = match.group("comment") or ""
+        lines[index] = f"{match.group('key')}{gap}{anchor_value}{comment}"
+        break
+    else:
+        lines.append(f"anchor: {anchor_value}")
+
+    # products: заменить ключ и непосредственно следующие за ним элементы списка.
+    indent = ""
+    for index, line in enumerate(lines):
+        match = _PRODUCTS_LINE_RE.match(line)
+        if match is None:
+            continue
+        end = index + 1
+        while end < len(lines):
+            item = _LIST_ITEM_RE.match(lines[end])
+            if item is None:
+                break
+            if not indent:
+                indent = item.group("indent")
+            end += 1
+        lines[index:end] = _products_block(run.products, indent)
+        break
+    else:
+        lines.extend(_products_block(run.products, indent))
+
+    patched = newline.join(lines)
+    if trailing:
+        patched += newline
+    return patched
 
 
 # ---------------------------------------------------------------------------
@@ -629,7 +721,12 @@ def save_artifact(package_dir: str | Path, name: str, data: Any) -> Path:
     if name == "run":
         if not isinstance(data, RunConfig):
             raise ValueError("run: ожидался RunConfig")
-        return atomic_write_text(path, _mapping_to_yaml(data))
+        # ``None`` в run.yaml — отсутствие операционной настройки, а не значимое
+        # «не заполнено» (в отличие от cohort.yaml). Эмиссия null-полей создаёт дрейф
+        # относительно генераторов пакетов (например ``crawl.max_response_bytes``).
+        return atomic_write_text(
+            path, _dump_yaml(data.model_dump(mode="json", exclude_none=True))
+        )
     if name == "domain_profiles":
         if not isinstance(data, dict):
             raise ValueError("domain_profiles: ожидался dict")

@@ -28,6 +28,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from core.config.run_config import load_run_config
 from core.domain.enums import (
     AbsenceRuleType,
     AnchorRelation,
@@ -52,12 +53,14 @@ from core.pipeline.package_io import (
     PackageArtifacts,
     append_apply_log,
     assert_no_new_blocking,
+    atomic_write_text,
     build_run_inputs,
     delete_artifact,
     get_artifact,
     list_artifacts,
     load_artifacts,
     matches,
+    patch_run_projection,
     prospective_lint,
     save_artifact,
     validate_case_id,
@@ -214,6 +217,40 @@ def _rebuild_manifest(manifest: PackageManifest, **updates: Any) -> PackageManif
     return PackageManifest.model_validate({**manifest.model_dump(mode="python"), **updates})
 
 
+#: Поля ``run.yaml``, которые операция когорты меняет проекционно (без полной перезаписи).
+_RUN_PROJECTION_FIELDS = frozenset({"anchor", "products"})
+
+
+def _only_run_projection_changed(current: RunConfig, updated: RunConfig) -> bool:
+    """True, если ``current`` и ``updated`` различаются только ``anchor``/``products``.
+
+    Такая правка безопасна как точечный текстовый патч: остальные строки ``run.yaml``
+    (включая комментарии и операционные оси ``crawl``) остаются байт-в-байт.
+    """
+    return current.model_dump(exclude=_RUN_PROJECTION_FIELDS) == updated.model_dump(
+        exclude=_RUN_PROJECTION_FIELDS
+    )
+
+
+def _write_run_artifact(package_dir: str | Path, run: RunConfig) -> Path:
+    """Пишет ``run.yaml``: точечная проекция ``anchor``/``products`` или полная запись.
+
+    Если файл уже есть и меняются только ``anchor``/``products`` — патчится текст
+    (:func:`patch_run_projection`), поэтому комментарии и порядок ключей сохраняются.
+    Иначе (или если текущий файл не читается) — обычная детерминированная запись
+    (``exclude_none=True``, null-поля не эмитятся).
+    """
+    raw, path = get_artifact(package_dir, "run", raw=True)
+    if isinstance(raw, str):
+        try:
+            current = load_run_config(path)
+        except (ValueError, OSError):
+            current = None
+        if current is not None and _only_run_projection_changed(current, run):
+            return atomic_write_text(path, patch_run_projection(raw, run))
+    return save_artifact(package_dir, "run", run)
+
+
 def _finalize(
     package_dir: str | Path,
     artifacts: PackageArtifacts,
@@ -248,6 +285,9 @@ def _finalize(
         for name in changed:
             data = _artifact_data(artifacts, name)
             if data is None:
+                continue
+            if name == "run" and isinstance(data, RunConfig):
+                written.append(_write_run_artifact(package_dir, data))
                 continue
             written.append(save_artifact(package_dir, name, data))
         for name in removed:
