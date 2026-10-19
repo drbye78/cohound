@@ -60,6 +60,9 @@ class DomainProfile(BaseModel):
     # P4: per-site override отдельной оси CPU-параллелизма экстракции (высший приоритет
     # цепочки app < run < site). ``None`` = не задано на этом слое (наследуется run/app).
     extract_workers: int | None = Field(default=None, ge=1)
+    # P4/OOM: per-site override рециклинга воркеров локальной экстракции (высший приоритет
+    # цепочки app < run < site). ``None`` = не задано на этом слое (наследуется run/app).
+    extract_max_tasks_per_child: int | None = Field(default=None, ge=1)
     max_depth: int | None = Field(default=None, ge=0)
     max_documents: int | None = Field(default=None, gt=0)
     exclude_paths: list[str] | None = None

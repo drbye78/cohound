@@ -1251,7 +1251,11 @@ def _extract_worker_init(
 
 
 def _local_extract_pool_factory(
-    max_workers: int, level: DocumentLevel = DocumentLevel.FULL
+    max_workers: int,
+    level: DocumentLevel = DocumentLevel.FULL,
+    *,
+    max_tasks_per_child: int | None = None,
+    extractor_factory: Callable[[DocumentLevel], ExtractorPort] = build_worker_extractor,
 ) -> Any:
     """``ProcessPoolExecutor`` (forkserver) для локальной экстракции (P4/P5/§7).
 
@@ -1259,6 +1263,14 @@ def _local_extract_pool_factory(
     загружен в ядре при docling-экстракции) — безопасно; инициализатор строит экстрактор
     **нужного уровня** на воркер (``level`` — свойство корня, P5). Прецедент процессов —
     edge-планировщик (``core/edge/scheduler.py``).
+
+    ``max_tasks_per_child`` (P4/OOM): после N заданий воркер штатно завершается, executor
+    поднимает новый процесс и **повторно** зовёт ``initializer`` — экстрактор строится
+    заново (``set_worker_extractor``), поэтому рабочий набор тяжёлого конвертера не
+    накапливается. ``None`` — прежний долгоживущий воркер (байт-в-байт).
+
+    ``extractor_factory`` — точка подмены для тестов рециклинга (по умолчанию — реальная
+    фабрика composition root; никакого docling в тестах рециклинга не требуется).
     """
     import multiprocessing
     from concurrent.futures import ProcessPoolExecutor
@@ -1267,7 +1279,8 @@ def _local_extract_pool_factory(
         max_workers=max_workers,
         mp_context=multiprocessing.get_context("forkserver"),
         initializer=_extract_worker_init,
-        initargs=(build_worker_extractor, level),
+        initargs=(extractor_factory, level),
+        max_tasks_per_child=max_tasks_per_child,
     )
 
 
@@ -1275,6 +1288,7 @@ def build_extraction_pool(
     profile: str,
     *,
     extractor: ExtractorPort | None = None,
+    max_tasks_per_child: int | None = None,
 ) -> ExtractionPool | None:
     """Собирает исполнитель экстракции по профилю развёртывания (P4/§7).
 
@@ -1285,15 +1299,38 @@ def build_extraction_pool(
       ``extractor`` (``RemoteExtractor`` I/O-bound); шов (``/v1/*``) не меняется.
     * иначе/без экстрактора — ``None`` (фаза отработает ось ``extract_workers`` inline).
 
-    Сам пул создаётся **лениво** в ``build_corpus`` (per seed-root, только при ``W>1``):
-    ``None``/``1`` на оси ⇒ ``pool_factory`` не вызывается вовсе (поведение байт-в-байт).
+    ``max_tasks_per_child`` (P4/OOM) захватывается замыканием локальной фабрики как
+    дефолт исполнения: pipeline резолвит ось per seed-root и, если она задана, передаёт
+    значение аргументом (site > run > app). Ось действует только для ``local``: под
+    ``split`` рециклинг не поддерживается (``supports_worker_recycling=False``).
+
+    Сам пул создаётся **лениво** в ``build_corpus`` (per seed-root, только при ``W>1``
+    либо при заданном ``max_tasks_per_child``): ``None``/``1`` без оси ⇒ ``pool_factory``
+    не вызывается вовсе (поведение байт-в-байт).
     """
     from core.pipeline.corpus import _extract_worker, _run_extract
 
     if profile == LOCAL_PROFILE:
+        default_recycle = max_tasks_per_child
+
+        def _local_factory(
+            n: int,
+            level: DocumentLevel = DocumentLevel.FULL,
+            *,
+            max_tasks_per_child: int | None = None,
+        ) -> Any:
+            # Per-root значение побеждает run-дефолт, захваченный замыканием.
+            recycle = (
+                default_recycle if max_tasks_per_child is None else max_tasks_per_child
+            )
+            return _local_extract_pool_factory(
+                n, level, max_tasks_per_child=recycle
+            )
+
         return ExtractionPool(
-            pool_factory=_local_extract_pool_factory,
+            pool_factory=_local_factory,
             worker=_extract_worker,
+            supports_worker_recycling=True,
         )
     if profile == SPLIT_PROFILE and extractor is not None:
         def _remote_worker(request: Any) -> Any:
@@ -1303,8 +1340,9 @@ def build_extraction_pool(
         # экстракцию исполняет edge своим конфигом. Уровень принимается и игнорируется, чтобы
         # подпись фабрики совпадала с локальной.
         return ExtractionPool(
-            pool_factory=lambda n, level=DocumentLevel.FULL: _thread_pool(n),
+            pool_factory=lambda n, level=DocumentLevel.FULL, **_: _thread_pool(n),
             worker=_remote_worker,
+            supports_worker_recycling=False,
         )
     return None
 

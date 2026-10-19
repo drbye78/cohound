@@ -393,6 +393,114 @@ def test_extract_workers_default_is_byte_identical(tmp_path: Path) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# (1b) Рециклинг воркеров (OOM): ось включает пул при W=1; None — прежнее поведение
+# --------------------------------------------------------------------------- #
+
+
+def test_extract_max_tasks_per_child_none_keeps_inline(tmp_path: Path) -> None:
+    """Ось не задана ⇒ даже recycling-пул не создаётся при ``extract_workers=1``."""
+    pages = _site_dup()
+    created: list[_FakePool] = []
+    pool = ExtractionPool(
+        pool_factory=_recording_factory(created),
+        worker=_reconstruct_worker,
+        supports_worker_recycling=True,
+    )
+    _build(
+        tmp_path,
+        pages=pages,
+        crawl_defaults=CrawlRunConfig(max_depth=1, extract_workers=1),
+        extraction_pool=pool,
+    )
+    assert created == []
+
+
+def test_extract_max_tasks_per_child_w1_uses_pool(tmp_path: Path) -> None:
+    """P4/OOM: ``N`` задан ⇒ пул даже при W=1, окно 1, ``N`` доходит до фабрики."""
+    pages = _site_dup()
+    baseline = _build(tmp_path / "base", pages=pages, crawl_defaults=BFS1)
+
+    created: list[_FakePool] = []
+
+    def factory(n: int, level: Any = None, *, max_tasks_per_child: int | None = None):
+        fake = _FakePool(n)
+        fake.max_tasks_per_child = max_tasks_per_child
+        created.append(fake)
+        return fake
+
+    pool = ExtractionPool(
+        pool_factory=factory,
+        worker=_reconstruct_worker,
+        supports_worker_recycling=True,
+    )
+    recycled = _build(
+        tmp_path / "recycle",
+        pages=pages,
+        crawl_defaults=CrawlRunConfig(
+            max_depth=1, extract_workers=1, extract_max_tasks_per_child=3
+        ),
+        extraction_pool=pool,
+    )
+
+    assert len(created) == 1
+    assert created[0].size == 1
+    assert created[0].max_tasks_per_child == 3
+    # Корпус идентичен inline-эталону: рециклинг меняет только ресурсы, не вывод.
+    assert _build_of(recycled).index_build_id == _build_of(baseline).index_build_id
+    assert recycled.errors == []
+
+
+def test_extract_max_tasks_per_child_with_w2(tmp_path: Path) -> None:
+    """``N`` вместе с ``W>1``: окно = W, счётчик рециклинга едет в фабрику."""
+    pages = _site_dup()
+    created: list[_FakePool] = []
+
+    def factory(n: int, level: Any = None, *, max_tasks_per_child: int | None = None):
+        fake = _FakePool(n)
+        fake.max_tasks_per_child = max_tasks_per_child
+        created.append(fake)
+        return fake
+
+    pool = ExtractionPool(
+        pool_factory=factory,
+        worker=_reconstruct_worker,
+        supports_worker_recycling=True,
+    )
+    _build(
+        tmp_path,
+        pages=pages,
+        crawl_defaults=CrawlRunConfig(
+            max_depth=1, extract_workers=2, extract_max_tasks_per_child=7
+        ),
+        extraction_pool=pool,
+    )
+    assert len(created) == 1
+    assert created[0].size == 2
+    assert created[0].max_tasks_per_child == 7
+
+
+def test_extract_max_tasks_per_child_not_supported_is_visible(tmp_path: Path) -> None:
+    """``split``-пул (без рециклинга): ось не молчит — запись в ``errors`` + inline."""
+    pages = _site_dup()
+    created: list[_FakePool] = []
+    pool = ExtractionPool(
+        pool_factory=_recording_factory(created),
+        worker=_reconstruct_worker,
+        supports_worker_recycling=False,
+    )
+    result = _build(
+        tmp_path,
+        pages=pages,
+        crawl_defaults=CrawlRunConfig(
+            max_depth=1, extract_workers=1, extract_max_tasks_per_child=5
+        ),
+        extraction_pool=pool,
+    )
+    assert created == []
+    assert any("extract_max_tasks_per_child" in e and "local" in e for e in result.errors)
+
+
+# --------------------------------------------------------------------------- #
 # (2) Паритет sequential ‖ pool (+ mutation-check: FIFO-доводка несущая)
 # --------------------------------------------------------------------------- #
 
@@ -861,6 +969,74 @@ def test_extract_workers_resolved_through_chain() -> None:
     inputs2 = SimpleNamespace(run=cfg2, package=None)
     changed = build_manifest(inputs=inputs2, plan=plan, created_at="2026-01-01T00:00:00Z")  # type: ignore[arg-type]
     assert changed.crawl_extract_workers == 4
+    assert changed.crawl_config_digest != base.crawl_config_digest
+
+
+# --------------------------------------------------------------------------- #
+# (10b) Ось рециклинга: цепочка app < run < site, дайджест/манифест, ge=1
+# --------------------------------------------------------------------------- #
+
+
+def test_extract_max_tasks_per_child_resolved_through_chain() -> None:
+    app = CrawlConfig(extract_max_tasks_per_child=10)
+    run = CrawlRunConfig(extract_max_tasks_per_child=20)
+    site = DomainProfile(extract_max_tasks_per_child=30)
+
+    # site > run > app.
+    limits = resolve_crawl_limits(
+        "https://example.com/x", app=app, run=run, profiles={"example.com": site}
+    )
+    assert limits.extract_max_tasks_per_child == 30
+    limits = resolve_crawl_limits("https://example.com/x", app=app, run=run, profiles={})
+    assert limits.extract_max_tasks_per_child == 20
+    limits = resolve_crawl_limits("https://example.com/x", app=app, run=None, profiles={})
+    assert limits.extract_max_tasks_per_child == 10
+    # Не задано нигде → None (поведение неизменно).
+    assert (
+        resolve_crawl_limits(
+            "https://example.com/x", app=CrawlConfig(), run=None, profiles={}
+        ).extract_max_tasks_per_child
+        is None
+    )
+
+    # Валидация: ``ge=1`` на всех трёх слоях.
+    for factory in (
+        lambda: CrawlConfig(extract_max_tasks_per_child=0),
+        lambda: CrawlRunConfig(extract_max_tasks_per_child=0),
+        lambda: DomainProfile(extract_max_tasks_per_child=0),
+    ):
+        with pytest.raises(ValueError):
+            factory()
+
+    # Манифест/дайджест: смена оси — граница ``execution_change`` (§13).
+    from types import SimpleNamespace
+
+    from core.pipeline.report import EXECUTION_FIELDS, build_manifest
+
+    assert "crawl_extract_max_tasks_per_child" in EXECUTION_FIELDS
+    cfg = RunConfig(
+        case_id="case-1",
+        anchor="p1",
+        cohort="cohort-1",
+        products=["p1"],
+        package="pkg",
+        snapshot_date=_dt.date(2026, 1, 1),
+        mode=RunMode.STRICT,
+    )
+    inputs = SimpleNamespace(run=cfg, package=None)
+    plan = SimpleNamespace(run_id="run-x", anchor="p1", modules=[], cohort_ref="cohort-1")
+    base = build_manifest(inputs=inputs, plan=plan, created_at="2026-01-01T00:00:00Z")  # type: ignore[arg-type]
+    assert base.crawl_extract_max_tasks_per_child is None
+
+    cfg2 = cfg.model_copy(
+        update={"crawl": CrawlRunConfig(extract_max_tasks_per_child=25)}
+    )
+    changed = build_manifest(
+        inputs=SimpleNamespace(run=cfg2, package=None),
+        plan=plan,
+        created_at="2026-01-01T00:00:00Z",  # type: ignore[arg-type]
+    )
+    assert changed.crawl_extract_max_tasks_per_child == 25
     assert changed.crawl_config_digest != base.crawl_config_digest
 
 

@@ -1277,6 +1277,7 @@ def main() -> int:
             "max_documents": 300,
             "max_workers": 2,
             "extract_workers": 1,
+            "extract_max_tasks_per_child": 25,
             "document_level": "layout_tables",
             "exclude_paths": [
                 "/blog/*",

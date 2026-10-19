@@ -353,6 +353,10 @@ class CrawlConfig(BaseModel):
     # смешивается с ``max_workers`` (осью сетевого fetch-пула). Резолв — та же цепочка
     # app < run < site. Память: ``W × ~2 GiB`` на процесс docling (см. 03 §D.5).
     extract_workers: int | None = Field(default=None, ge=1)
+    # P4/OOM: application-дефолт рециклинга воркер-процессов локальной экстракции
+    # (``ProcessPoolExecutor(max_tasks_per_child=N)``). ``None`` — ось не задана
+    # (поведение байт-в-байт). Резолв — та же цепочка app < run < site.
+    extract_max_tasks_per_child: int | None = Field(default=None, ge=1)
     max_depth: int = Field(default=0, ge=0)
     max_documents: int | None = Field(default=None, gt=0)
     exclude_paths: list[str] | None = None

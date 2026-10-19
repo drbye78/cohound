@@ -1398,6 +1398,13 @@ def _resolve_phases(
         deploy_profile = deploy_fields["deploy_profile"]
         edge_schema_version = deploy_fields["edge_schema_version"]
         edge_capabilities = deploy_fields["edge_capabilities"]
+    # P4/OOM: run-дефолт рециклинга воркеров экстракции захватывается фабрикой пула;
+    # per-site значение резолвится в pipeline (site > run > app) и передаётся аргументом.
+    run_extract_max_tasks = getattr(
+        getattr(getattr(inputs, "run", None), "crawl", None),
+        "extract_max_tasks_per_child",
+        None,
+    )
     kwargs: dict[str, Any] = {
         "inputs": inputs,
         "plan": plan,
@@ -1439,6 +1446,7 @@ def _resolve_phases(
         "extraction_pool": build_extraction_pool(
             deploy_config.profile if deploy_config is not None else LOCAL_PROFILE,
             extractor=getattr(ports, "extractor", None),
+            max_tasks_per_child=run_extract_max_tasks,
         ),
         # Ф1.2: межпрогонный кэш экстракции. Каталог — resolved ``paths.extract_cache``
         # (``COHOUND_EXTRACT_CACHE_DIR`` / ``COHOUND_HOME`` / ``paths.yaml``).

@@ -21,6 +21,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -1051,3 +1052,82 @@ def test_build_extraction_pool_split_thread_pool(tmp_path: Path) -> None:
         assert doc.content_hash == content_hash(b"<html>hi</html>")
     finally:
         executor.shutdown()
+
+
+# ---------------------------------------------------------------------------
+# P4/OOM: рециклинг воркеров локального пула (max_tasks_per_child)
+# ---------------------------------------------------------------------------
+
+
+class _PidExtractor:
+    """Крошечный fake-экстрактор: ``text`` = PID воркер-процесса (без docling)."""
+
+    version = "pid-extractor-1"
+
+    def extract(self, page: Any, route: Any = None) -> Any:
+        from core.ports.types import ExtractedDoc
+        from core.util.hashing import content_hash
+
+        return ExtractedDoc(
+            text=str(os.getpid()),
+            content_hash=content_hash(page.content),
+            extractor_version=self.version,
+            page_count=1,
+        )
+
+
+def _pid_extractor_factory(level: Any) -> _PidExtractor:
+    """Module-level фабрика инициализатора (picklable by reference для forkserver)."""
+    return _PidExtractor()
+
+
+def test_local_extract_pool_recycles_worker_and_reinits_extractor(
+    tmp_path: Path,
+) -> None:
+    """P4/OOM: после N заданий PID воркера меняется, экстрактор строится заново.
+
+    Свежий процесс получает ``initializer`` (``_extract_worker_init`` →
+    ``set_worker_extractor``); если бы инициализатор не отработал, ``_extract_worker``
+    вернул бы ``error`` вместо текста. Docling не импортируется: фабрика подменена
+    крошечным fake-экстрактором.
+    """
+    from core.domain.enums import DocumentLevel
+    from core.pipeline.corpus import _ExtractRequest, _extract_worker
+    from core.ports.types import ExtractionRoute
+    from core.cli.wiring import _local_extract_pool_factory
+
+    raw = tmp_path / "page.bin"
+    raw.write_bytes(b"<html>recycle</html>")
+    request = _ExtractRequest(
+        raw_path=str(raw),
+        url="https://x.test/a",
+        fetched_at="2026-01-01T00:00:00+00:00",
+        fetch_mode=FetchMode.HTTP,
+        lang="en",
+        status_code=200,
+        content_type="text/html",
+        engine="http",
+        route=ExtractionRoute.HTML,
+        level=DocumentLevel.FULL,
+    )
+
+    executor = _local_extract_pool_factory(
+        1,
+        DocumentLevel.FULL,
+        max_tasks_per_child=3,
+        extractor_factory=_pid_extractor_factory,
+    )
+    try:
+        docs = [
+            executor.submit(_extract_worker, request).result(timeout=60)
+            for _ in range(4)
+        ]
+    finally:
+        executor.shutdown(wait=True)
+
+    assert all(not doc.error for doc in docs), [doc.error for doc in docs]
+    pids = [int(doc.text) for doc in docs]
+    # Один воркер, рециклинг после 3 заданий: A,A,A,B.
+    assert pids[0] == pids[1] == pids[2]
+    assert pids[3] != pids[2]
+    assert len(set(pids)) == 2

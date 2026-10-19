@@ -383,10 +383,14 @@ class ExtractionPool:
         ``document_level`` под ``split`` не действует — R-S).
     :param worker: рабочая функция ``_ExtractRequest → ExtractedDoc``. Для процессов —
         module-level (picklable by reference); для потоков допустим bound/closure.
+    :param supports_worker_recycling: профиль умеет рециклинг воркеров по счётчику заданий
+        (``ProcessPoolExecutor(max_tasks_per_child=N)``). ``False`` (``split``/потоки) —
+        ось ``extract_max_tasks_per_child`` не действует (не тихо: запись в ``errors``).
     """
 
     pool_factory: Callable[..., Executor]
     worker: Callable[[_ExtractRequest], ExtractedDoc]
+    supports_worker_recycling: bool = False
 
 
 #: P4: глобальный экстрактор воркер-процесса. Устанавливается инициализатором пула
@@ -1186,6 +1190,9 @@ def build_corpus(
         (не более ``W`` экстракций «в полёте»), доводка строго FIFO. ``None`` при заданной
         оси ``>1`` — явная запись в ``errors`` + inline-fallback (не тихо). Воркер получает
         только :class:`_ExtractRequest` (примитивы + ``raw_path``); байты не пиклятся (I19).
+        OOM-ось ``crawl.extract_max_tasks_per_child=N`` (только процессный пул) включает пул
+        и при ``extract_workers == 1`` и пересоздаёт воркер после N заданий
+        (``max_tasks_per_child``); ``None`` — прежнее поведение.
     :param extractor_factory: P5 — фабрика per-level экстрактора ``Callable[[DocumentLevel],
         ExtractorPort]``, переданная ссылкой из composition root (слой-матрица: pipeline не
         импортирует адаптеры). Применяется к **inline**-пути (``extract_workers`` None/``1``):
@@ -2457,16 +2464,47 @@ def build_corpus(
 
             # P4: окно экстракции — **per seed-root**, лениво. ``None``/``1`` ⇒ пул не
             # создаётся (экстракция inline, байт-в-байт). ``W`` всегда конечный ``int ≥ 2``.
-            extract_window = (
+            extract_workers_axis = (
                 int(limits.extract_workers)
                 if limits.extract_workers is not None and int(limits.extract_workers) > 1
                 else None
             )
-            if extract_window is not None and extraction_pool is None:
+            # P4/OOM: рециклинг воркеров (``crawl.extract_max_tasks_per_child``). Ось имеет
+            # смысл только для процессного пула (local): при её наличии экстракция идёт
+            # пулом даже при ``extract_workers == 1``, окно — 1 (родитель не копит pending),
+            # а воркер пересоздаётся после N заданий, освобождая рабочий набор конвертера.
+            recycle_tasks = limits.extract_max_tasks_per_child
+            can_recycle = bool(
+                recycle_tasks is not None
+                and extraction_pool is not None
+                and extraction_pool.supports_worker_recycling
+            )
+            extract_window = (
+                extract_workers_axis
+                if extract_workers_axis is not None
+                else (1 if can_recycle else None)
+            )
+            if extract_workers_axis is not None and extraction_pool is None:
                 # Ось задана, но пул не сконфигурирован — не тихо: явная запись + inline.
                 errors.append(
                     f"{pid}/{root_url}: crawl.extract_workers={extract_window} задан, "
                     "но пул экстракции не сконфигурирован — экстракция inline"
+                )
+            if recycle_tasks is not None and extraction_pool is None:
+                errors.append(
+                    f"{pid}/{root_url}: crawl.extract_max_tasks_per_child="
+                    f"{recycle_tasks} задан, но пул экстракции не сконфигурирован — "
+                    "экстракция inline"
+                )
+            elif (
+                recycle_tasks is not None
+                and not extraction_pool.supports_worker_recycling  # type: ignore[union-attr]
+            ):
+                # ``split`` (потоковый пул) не пересоздаёт воркеров — не молчим.
+                errors.append(
+                    f"{pid}/{root_url}: crawl.extract_max_tasks_per_child="
+                    f"{recycle_tasks} поддерживается только процессным пулом (local) — "
+                    "ось игнорируется"
                 )
             #: Исполнять ли экстракцию в пуле (снимается inline-fallback'ом при отказе).
             defer_extract = extract_window is not None and extraction_pool is not None
@@ -2793,9 +2831,20 @@ def build_corpus(
                 page, raw_path, fetch_plan, freshly_fetched = outcome
                 if extract_executor is None:
                     try:
-                        extract_executor = extraction_pool.pool_factory(  # type: ignore[union-attr]
-                            extract_window, level
-                        )
+                        if (
+                            recycle_tasks is not None
+                            and extraction_pool.supports_worker_recycling  # type: ignore[union-attr]
+                        ):
+                            # P4/OOM: счётчик заданий на процесс — воркер пересоздаётся
+                            # (initializer `_extract_worker_init` строит экстрактор заново).
+                            extract_executor = extraction_pool.pool_factory(  # type: ignore[union-attr]
+                                extract_window, level, max_tasks_per_child=recycle_tasks
+                            )
+                        else:
+                            # Ось не задана — прежний вызов (поведение байт-в-байт).
+                            extract_executor = extraction_pool.pool_factory(  # type: ignore[union-attr]
+                                extract_window, level
+                            )
                     except Exception as exc:  # noqa: BLE001 — изоляция по контракту фазы
                         errors.append(
                             f"{pid_arg}/{url_arg}: extract pool: "

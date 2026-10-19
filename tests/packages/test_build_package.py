@@ -70,6 +70,7 @@ RUN_CRAWL_MAX_DEPTH = 8
 RUN_CRAWL_MAX_DOCUMENTS = 300
 RUN_CRAWL_MAX_WORKERS = 2
 RUN_CRAWL_EXTRACT_WORKERS = 1
+RUN_CRAWL_EXTRACT_MAX_TASKS_PER_CHILD = 25
 RUN_CRAWL_EXCLUDE_PATHS = [
     "/blog/*",
     "/news/*",
@@ -192,6 +193,9 @@ def test_run_crawl_axes_accepted_by_strict_loader() -> None:
     assert crawl.max_documents == RUN_CRAWL_MAX_DOCUMENTS
     assert crawl.max_workers == RUN_CRAWL_MAX_WORKERS
     assert crawl.extract_workers == RUN_CRAWL_EXTRACT_WORKERS
+    assert (
+        crawl.extract_max_tasks_per_child == RUN_CRAWL_EXTRACT_MAX_TASKS_PER_CHILD
+    )
     assert crawl.document_level is DocumentLevel.LAYOUT_TABLES
     assert list(crawl.exclude_paths or []) == RUN_CRAWL_EXCLUDE_PATHS
     assert list(crawl.exclude_documents or []) == RUN_CRAWL_EXCLUDE_DOCUMENTS

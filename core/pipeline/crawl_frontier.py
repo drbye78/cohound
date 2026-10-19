@@ -68,6 +68,9 @@ class CrawlLimits:
 
     max_workers: int | None = None
     extract_workers: int | None = None
+    #: P4/OOM: рециклинг воркер-процессов локальной экстракции (``None`` — ось не задана).
+    #: Значение резолвится той же цепочкой app < run < site, что и ``extract_workers``.
+    extract_max_tasks_per_child: int | None = None
     max_depth: int = 0
     max_documents: int | None = None
     exclude_paths: tuple[str, ...] = ()
@@ -78,8 +81,13 @@ class CrawlLimits:
     document_level: DocumentLevel = DocumentLevel.FULL
 
     def as_dict(self) -> dict[str, object]:
-        """Канонический словарь для провенанса/манифеста (сортированно-стабильно)."""
-        return {
+        """Канонический словарь для провенанса/манифеста (сортированно-стабильно).
+
+        Новая ось рециклинга включается **только когда задана**: ``None`` не добавляет
+        ключ, поэтому дайджест ``crawl_config_digest`` прогонов без этой оси не меняется
+        (обратная совместимость §13).
+        """
+        payload: dict[str, object] = {
             "max_workers": self.max_workers,
             "extract_workers": self.extract_workers,
             "max_depth": self.max_depth,
@@ -88,6 +96,9 @@ class CrawlLimits:
             "exclude_documents": list(self.exclude_documents),
             "document_level": self.document_level.value,
         }
+        if self.extract_max_tasks_per_child is not None:
+            payload["extract_max_tasks_per_child"] = self.extract_max_tasks_per_child
+        return payload
 
 
 def _pick(app: object, run: object, site: object) -> object:
@@ -121,6 +132,9 @@ def resolve_crawl_limits(
     run_extract_workers = (
         getattr(run, "extract_workers", None) if run is not None else None
     )
+    run_extract_max_tasks = (
+        getattr(run, "extract_max_tasks_per_child", None) if run is not None else None
+    )
     run_max_depth = run.max_depth if run is not None else None
     run_max_documents = run.max_documents if run is not None else None
     run_exclude_paths = run.exclude_paths if run is not None else None
@@ -134,6 +148,11 @@ def resolve_crawl_limits(
         getattr(app, "extract_workers", None),
         run_extract_workers,
         site_attr("extract_workers"),
+    )
+    extract_max_tasks = _pick(
+        getattr(app, "extract_max_tasks_per_child", None),
+        run_extract_max_tasks,
+        site_attr("extract_max_tasks_per_child"),
     )
     max_depth = _pick(app.max_depth, run_max_depth, site_attr("max_depth"))
     max_documents = _pick(
@@ -155,6 +174,11 @@ def resolve_crawl_limits(
         max_workers=None if max_workers is None else int(max_workers),  # type: ignore[arg-type]
         extract_workers=(
             None if extract_workers is None else int(extract_workers)  # type: ignore[arg-type]
+        ),
+        extract_max_tasks_per_child=(
+            None
+            if extract_max_tasks is None
+            else int(extract_max_tasks)  # type: ignore[arg-type]
         ),
         max_depth=0 if max_depth is None else int(max_depth),  # type: ignore[arg-type]
         max_documents=(

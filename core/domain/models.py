@@ -366,6 +366,13 @@ class CrawlRunConfig(BaseModel):
     # P4: отдельная ось CPU-параллелизма экстракции (пул процессов/потоков). ``None``/``1``
     # = поведение байт-в-байт (inline); не смешивается с ``max_workers`` (сетевой fetch-пул).
     extract_workers: int | None = Field(default=None, ge=1)
+    # P4/OOM: рециклинг воркер-процессов локальной экстракции
+    # (``ProcessPoolExecutor(max_tasks_per_child=N)``). ``None`` — ось не задана: при
+    # ``extract_workers > 1`` пул живёт без рециклинга, при ``None``/``1`` экстракция
+    # inline (поведение байт-в-байт). ``N ≥ 1`` — экстракция идёт пулом даже при
+    # ``extract_workers == 1``, а воркер пересоздаётся после N заданий: рабочий набор
+    # тяжёлого конвертера (docling) не накапливается в долгоживущем процессе.
+    extract_max_tasks_per_child: int | None = Field(default=None, ge=1)
     max_depth: int | None = Field(default=None, ge=0)
     max_documents: int | None = Field(default=None, gt=0)
     exclude_paths: list[str] | None = None
@@ -879,6 +886,10 @@ class RunManifest(BaseModel):
     #: от ``crawl_max_workers`` (сетевой fetch-пул); её смена — та же граница класса
     #: ``execution_change`` (§13). ``None`` — ось не задана (поведение неизменно).
     crawl_extract_workers: int | None = None
+    #: P4/OOM/§13: рециклинг воркеров локальной экстракции
+    #: (``crawl.extract_max_tasks_per_child``). Та же граница класса ``execution_change``
+    #: (§13): меняет условия измерения. ``None`` — ось не задана (манифесты не меняются).
+    crawl_extract_max_tasks_per_child: int | None = None
     #: P5/§13: уровень извлечения документных форматов (``crawl.document_level``). Его смена —
     #: та же граница класса ``execution_change``. ``None`` — не разрешён явно (в дайджесте
     #: всё равно зафиксирован эффективный ``full`` по app-дефолту).
