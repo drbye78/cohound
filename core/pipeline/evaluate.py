@@ -43,6 +43,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from core.domain import (
+    EVAL_SCHEMA_VERSION,
     AbsenceRuleType,
     CatalogRow,
     Cell,
@@ -56,6 +57,11 @@ from core.domain import (
     Status,
 )
 from core.domain.anchors import SourceResolver
+from core.pipeline.eval_cache import (
+    EVAL_CACHE_FORMAT,
+    EvalVerdictCache,
+    build_eval_key,
+)
 from core.pipeline.precedence import (
     PRECEDENCE_REVIEW_REASON,
     collect_protected_cells,
@@ -75,6 +81,7 @@ from core.ports.lexical_index import LexicalIndexPort
 from core.ports.llm import EvaluatorPort, LLMRequest, LLMResponse
 from core.ports.store import StorePort
 from core.ports.vector_index import RetrievedChunk, VectorIndexPort
+from core.util.hashing import content_hash
 
 __all__ = [
     "CORPUS_INCOMPLETE_REVIEW_REASON",
@@ -467,12 +474,43 @@ def _unresolved_cell(
     )
 
 
+def _record_cell_provenance(
+    store: StorePort | None,
+    cell: Cell,
+    *,
+    prompt_hash: str | None,
+    model_id: str | None,
+) -> None:
+    """Дописывает провенанс промпта/модели в ``cells``, если store это умеет.
+
+    ``_CELL_COLUMNS`` намеренно не расширяются: доменная ``Cell`` не несёт
+    ``prompt_hash``/``model_id``, и менять набор колонок для всех писателей значило бы
+    менять их контракт. Вместо этого — узкий UPDATE **после** успешного upsert.
+    Тестовые двойники без метода пропускаются: провенанс аддитивен и не должен ломать
+    совместимость duck-typed store.
+    """
+    if prompt_hash is None and model_id is None:
+        return
+    writer = getattr(store, "set_cell_provenance", None)
+    if not callable(writer):
+        return
+    writer(
+        cell.run_id,
+        cell.product_id,
+        cell.param_id,
+        prompt_hash=prompt_hash,
+        model_id=model_id,
+    )
+
+
 def _persist(
     store: StorePort | None,
     cell: Cell,
     validation: ValidationResult | None,
     *,
     protected: Cell | None = None,
+    prompt_hash: str | None = None,
+    model_id: str | None = None,
 ) -> None:
     """Пишет ячейку и её evidence в store (идемпотентный upsert по PK/evidence_id, S8).
 
@@ -481,6 +519,10 @@ def _persist(
     высокую ячейку без записи; расхождение сохраняется как ``pending``-кандидат ревью,
     несущий провенанс высокого источника. Evidence обоих контуров пишется всегда —
     строки ``cell_evidence`` детерминированы и переживают upsert ячейки.
+
+    ``prompt_hash``/``model_id`` — аддитивный провенанс ячейки (колонки ``cells`` существуют,
+    но доменная модель их не несёт). Пишутся только для реально сохранённой ячейки, поэтому
+    при ``kept_high`` чужой провенанс не затирается.
     """
     if store is None:
         return
@@ -497,6 +539,9 @@ def _persist(
         to_save = None if result.kept_high else result.cell
     if to_save is not None:
         store.save_cell(to_save)
+        _record_cell_provenance(
+            store, to_save, prompt_hash=prompt_hash, model_id=model_id
+        )
     if validation is not None and validation.resolved_evidence:
         store.add_evidence_batch(validation.resolved_evidence)
 
@@ -519,6 +564,8 @@ def evaluate_cell(
     protected: Cell | None = None,
     coverage: CorpusCoverage | None = None,
     scope_attested_by: str | None = None,
+    extra_instructions: str = "",
+    eval_cache: EvalVerdictCache | None = None,
 ) -> EvaluationOutcome:
     """Оценивает одну ячейку Ш6 и возвращает :class:`EvaluationOutcome` (§5/§7.1).
 
@@ -540,6 +587,12 @@ def evaluate_cell(
         (``read_corpus_coverage``) либо, если записи нет, сохранить прежнее поведение.
     :param scope_attested_by: человеческая аттестация охвата для ``❌`` (Ф0). Не
         подставляется автоматически: это решение человека, переданное вызывающим.
+    :param extra_instructions: дополнительный текст промпта (в ``prompt_hash`` §5 не
+        входит, но входит в текст и потому в ключ кэша вердиктов).
+    :param eval_cache: межпрогонный кэш сырых вердиктов (:class:`EvalVerdictCache`).
+        ``None`` ⇒ кэш выключен (поведение байт-в-байт прежнее). Хит отдаёт
+        ``LLMCellOutput`` и проходит **весь** существующий эшелон заново; кэшируется
+        только успешно провалидированный живой ответ.
 
     Повтор переиздаёт тот же запрос — для детерминированного оценщика это ограниченный
     no-op, полезный только для транзиентных ошибок адаптера; см. докстринг модуля.
@@ -553,6 +606,7 @@ def evaluate_cell(
         product_id=product_id,
         chunks=chunks,
         satellites=satellites,
+        extra_instructions=extra_instructions,
     )
 
     request = LLMRequest(
@@ -564,29 +618,39 @@ def evaluate_cell(
         temperature=getattr(evaluator, "temperature", None),
     )
 
+    # Ключ кэша вердиктов: **отрендеренный** текст промпта + конфигурация оценщика.
+    # ``prompt_hash`` (§5) входит ради аудита, но не является ключом: он не покрывает
+    # product/title/satellites/extra_instructions/текст чанков. ``run_id``/``build_id``/
+    # ``retrieval_profile``/``cutoff_k``/``strict``/coverage/resolver намеренно вне ключа:
+    # они либо уже отражены в тексте (какие чанки попали), либо пере-исполняются на хите.
+    eval_echo: dict[str, Any] | None = None
+    eval_key: str | None = None
+    if eval_cache is not None:
+        eval_echo = {
+            "format": EVAL_CACHE_FORMAT,
+            "schema": EVAL_SCHEMA_VERSION,
+            "template": compiled.template_version,
+            "prompt_sha256": content_hash(compiled.text),
+            "prompt_hash": compiled.prompt_hash,
+            "model_id": request.model_id,
+            "model_version": request.model_version,
+            "seed": request.seed,
+            "temperature": request.temperature,
+            "decoder": getattr(evaluator, "decoder", "none"),
+            "endpoint_kind": getattr(evaluator, "endpoint_kind", ""),
+        }
+        eval_key = build_eval_key(eval_echo)
+
     provenance = _provenance(retrievals)
 
     last_response: LLMResponse | None = None
     last_validation: ValidationResult | None = None
     last_kind: str | None = None
+    cache_hit = False
 
-    for _ in range(max_retries + 1):
-        try:
-            response = evaluator.complete(request)
-        except Exception as exc:  # noqa: BLE001 — изоляция адаптера, маппинг в failure_kind
-            last_response = None
-            last_validation = None
-            last_kind = FailureKind.EVALUATION_FAILED.value
-            last_validation = ValidationResult(
-                ok=False,
-                failure_kind=last_kind,
-                notes=[f"оценщик недоступен: {type(exc).__name__}: {exc}"],
-                resolved_evidence=[],
-            )
-            continue
-
-        last_response = response
-        last_validation = validate_output(
+    def _validate(response: LLMResponse) -> ValidationResult:
+        """Единый эшелон §10 для живого ответа и для кэшированного вердикта."""
+        return validate_output(
             output=response.output,
             chunks=chunks_by_id,
             product_id=product_id,
@@ -596,10 +660,55 @@ def evaluate_cell(
             strict=strict,
             min_retrieval_score=min_retrieval_score,
         )
-        if last_validation.ok:
-            last_kind = None
-            break
-        last_kind = FailureKind.VALIDATION_FAILED.value
+
+    # Хит — дополнительная попытка **до** цикла повторов: он не тратит бюджет
+    # ``max_retries``. Если кэшированный выход не проходит валидацию (например, сменился
+    # resolver), он не публикуется и управление уходит в живой вызов.
+    if eval_cache is not None and eval_key is not None and eval_echo is not None:
+        cached = eval_cache.get(eval_key, echo=eval_echo)
+        if cached is not None:
+            cached_response = LLMResponse(
+                output=cached,
+                raw=cached.model_dump_json(),
+                prompt_hash=compiled.prompt_hash,
+                decoder=str(eval_echo.get("decoder") or "none"),
+            )
+            cached_validation = _validate(cached_response)
+            if cached_validation.ok:
+                last_response = cached_response
+                last_validation = cached_validation
+                last_kind = None
+                cache_hit = True
+
+    if not cache_hit:
+        for _ in range(max_retries + 1):
+            try:
+                response = evaluator.complete(request)
+            except Exception as exc:  # noqa: BLE001 — изоляция адаптера, маппинг в failure_kind
+                last_response = None
+                last_validation = None
+                last_kind = FailureKind.EVALUATION_FAILED.value
+                last_validation = ValidationResult(
+                    ok=False,
+                    failure_kind=last_kind,
+                    notes=[f"оценщик недоступен: {type(exc).__name__}: {exc}"],
+                    resolved_evidence=[],
+                )
+                continue
+
+            last_response = response
+            last_validation = _validate(response)
+            if last_validation.ok:
+                last_kind = None
+                # Только живой, успешно провалидированный ответ становится вердиктом.
+                if (
+                    eval_cache is not None
+                    and eval_key is not None
+                    and eval_echo is not None
+                ):
+                    eval_cache.put(eval_key, response.output, echo=eval_echo)
+                break
+            last_kind = FailureKind.VALIDATION_FAILED.value
 
     assert last_validation is not None  # цикл выполняет ≥1 попытку
 
@@ -626,6 +735,7 @@ def evaluate_cell(
                     store=store,
                     raw=last_response.raw,
                     protected=protected,
+                    model_id=request.model_id,
                 )
 
             # Ф0/I2c: неполный корпус не доказывает отсутствие. Машинный ``❌`` при
@@ -651,7 +761,14 @@ def evaluate_cell(
                             "review_reason": CORPUS_INCOMPLETE_REVIEW_REASON,
                         }
                     )
-                    _persist(store, pending, last_validation, protected=protected)
+                    _persist(
+                        store,
+                        pending,
+                        last_validation,
+                        protected=protected,
+                        prompt_hash=compiled.prompt_hash,
+                        model_id=request.model_id,
+                    )
                     return EvaluationOutcome(
                         cell=pending,
                         prompt_hash=compiled.prompt_hash,
@@ -675,7 +792,14 @@ def evaluate_cell(
             run_id=run_id,
             provenance=provenance,
         )
-        _persist(store, cell, last_validation, protected=protected)
+        _persist(
+            store,
+            cell,
+            last_validation,
+            protected=protected,
+            prompt_hash=compiled.prompt_hash,
+            model_id=request.model_id,
+        )
         return EvaluationOutcome(
             cell=cell,
             prompt_hash=compiled.prompt_hash,
@@ -698,6 +822,7 @@ def evaluate_cell(
         store=store,
         raw=last_response.raw if last_response is not None else None,
         protected=protected,
+        model_id=request.model_id,
     )
 
 
@@ -715,13 +840,15 @@ def _unresolved_outcome(
     store: StorePort | None,
     raw: str | None,
     protected: Cell | None = None,
+    model_id: str | None = None,
 ) -> EvaluationOutcome:
     """Собирает исход несостоявшейся валидации: ``failed`` (I4) либо preliminary (I13).
 
     В strict ячейка получает ``state=failed`` и ``failure_kind``. В preliminary ячейка
     остаётся кандидатом (``state=preliminary``), ``status=None``, ``failure_kind=None``;
     причина — в ``validation.notes``. Дополнительные ``notes`` (например, I2b) вливаются
-    в ``validation.notes`` без потери исходных.
+    в ``validation.notes`` без потери исходных. ``prompt_hash``/``model_id`` пишутся в
+    ``cells`` узким UPDATE (провенанс виден и у несостоявшейся ячейки).
     """
     merged = list(validation.notes)
     for note in notes:
@@ -741,7 +868,14 @@ def _unresolved_outcome(
         run_id=run_id,
         provenance=provenance,
     )
-    _persist(store, cell, None, protected=protected)
+    _persist(
+        store,
+        cell,
+        None,
+        protected=protected,
+        prompt_hash=prompt_hash,
+        model_id=model_id,
+    )
     return EvaluationOutcome(
         cell=cell,
         prompt_hash=prompt_hash,
@@ -769,6 +903,8 @@ def evaluate_batch(
     protected_by_param: Mapping[str, Cell] | None = None,
     coverage: CorpusCoverage | None = None,
     scope_attested_by: str | None = None,
+    extra_instructions: str = "",
+    eval_cache: EvalVerdictCache | None = None,
 ) -> tuple[list[EvaluationOutcome], list[str]]:
     """Прогоняет :func:`evaluate_cell` по параметрам с изоляцией сбоев (§A.1).
 
@@ -792,6 +928,8 @@ def evaluate_batch(
             protected=(protected_by_param or {}).get(param.param_id),
             coverage=coverage,
             scope_attested_by=scope_attested_by,
+            extra_instructions=extra_instructions,
+            eval_cache=eval_cache,
         )
 
     return run_isolated(params, _one)
@@ -809,6 +947,7 @@ def evaluate_phase(
     cutoff_k: int | None = None,
     strict: bool = True,
     scope_attested_by: str | None = None,
+    eval_cache: EvalVerdictCache | None = None,
 ) -> PhaseResult:
     """Фаза оценки Ш6 на уровне конвейера: продукты × параметры → ретривал → оценщик.
 
@@ -837,6 +976,9 @@ def evaluate_phase(
     :param strict: strict (failed при исчерпании) vs preliminary (кандидат).
     :param scope_attested_by: человеческая аттестация охвата для ``❌`` (Ф0); передаётся
         вызывающим из решения гейта/ревью, никогда не выводится автоматически.
+    :param eval_cache: межпрогонный кэш сырых вердиктов оценщика; ``None`` ⇒ выключен
+        (поведение байт-в-байт). Хит проходит все пост-шаги (валидация, Ф0, прецедент)
+        заново — кэшируется только ``LLMCellOutput``, не ``Cell``.
 
     При ``ports.evaluator is None`` фаза сразу ``failed``: без оценщика Ш6 не имеет смысла,
     а молчаливый ``ok`` скрыл бы неполноту карты.
@@ -909,6 +1051,7 @@ def evaluate_phase(
             protected_by_param=protected_by_param,
             coverage=coverage,
             scope_attested_by=scope_attested_by,
+            eval_cache=eval_cache,
         )
         cells.extend(outcome.cell for outcome in outcomes)
         errors.extend(batch_errors)

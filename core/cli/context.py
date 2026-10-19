@@ -69,6 +69,7 @@ from core.domain.enums import (
 from core.domain.models import CatalogRow, Cohort
 from core.pipeline import PHASES, Ports, RunReport, build_phases
 from core.pipeline.extract_cache import ExtractionCache
+from core.pipeline.eval_cache import EvalVerdictCache
 from core.pipeline.normalize import RunInputs, load_inputs
 from core.pipeline.plan import RunPlan, plan as build_plan
 from core.pipeline.review import ReviewItem
@@ -1446,6 +1447,13 @@ def _resolve_phases(
         # байтов (I19), поэтому кэш не может подсунуть неверифицированный контент.
         "extract_cache": ExtractionCache(
             str(paths.extract_cache) if paths is not None else "extract_cache"
+        ),
+        # Ф3: межпрогонный кэш вердиктов оценщика. Каталог — resolved ``paths.eval_cache``
+        # (``COHOUND_EVAL_CACHE_DIR`` / ``COHOUND_HOME`` / ``paths.yaml``); дефолт совпадает
+        # с :class:`PathsConfig`. Ключ — отрендеренный промпт + конфигурация оценщика,
+        # поэтому смена сателлитов/заголовка/чанков/модели не даёт ложных хитов.
+        "eval_cache": EvalVerdictCache(
+            str(paths.eval_cache) if paths is not None else "eval_cache"
         ),
         # P5: фабрика per-level экстрактора для inline-пути. Под ``split`` ось
         # ``document_level`` не действует (R-S: edge строит конвертеры сам) — ``None``.

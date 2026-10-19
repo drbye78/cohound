@@ -1,8 +1,8 @@
 """coHound — резолвер раскладки операционных каталогов (``config/paths.yaml``, 03 §A.1).
 
 Модуль отделяет **операционные** каталоги (``packages/``, ``passports/``, ``runs/``,
-``index_store/``, ``corpus_raw/``, ``cache/``, ``extract_cache/``, ``reports/``) от кода:
-оператор может задать свои пути через ``config/paths.yaml``, env-переменные
+``index_store/``, ``corpus_raw/``, ``cache/``, ``extract_cache/``, ``eval_cache/``,
+``reports/``) от кода: оператор может задать свои пути через ``config/paths.yaml``, env-переменные
 ``COHOUND_*_DIR`` и CLI-флаги, не редактируя исходники. Единый корень ``COHOUND_HOME``
 позволяет унести весь рабочий каталог в произвольное место, оставив относительные
 дефолты для CWD.
@@ -46,6 +46,7 @@ __all__ = [
     "ENV_CORPUS_RAW_DIR",
     "ENV_CACHE_DIR",
     "ENV_EXTRACT_CACHE_DIR",
+    "ENV_EVAL_CACHE_DIR",
     "ENV_REPORTS_DIR",
     # Модель и API
     "PathsConfig",
@@ -71,6 +72,7 @@ ENV_INDEX_STORE_DIR = "COHOUND_INDEX_STORE_DIR"
 ENV_CORPUS_RAW_DIR = "COHOUND_CORPUS_RAW_DIR"
 ENV_CACHE_DIR = "COHOUND_CACHE_DIR"
 ENV_EXTRACT_CACHE_DIR = "COHOUND_EXTRACT_CACHE_DIR"
+ENV_EVAL_CACHE_DIR = "COHOUND_EVAL_CACHE_DIR"
 ENV_REPORTS_DIR = "COHOUND_REPORTS_DIR"
 
 #: Канонический путь ``paths.yaml`` относительно CWD (раскладка A.1).
@@ -85,6 +87,7 @@ HARNESS_FIELDS: tuple[str, ...] = (
     "corpus_raw",
     "cache",
     "extract_cache",
+    "eval_cache",
     "reports",
 )
 
@@ -97,6 +100,7 @@ ENV_BY_FIELD: dict[str, str] = {
     "corpus_raw": ENV_CORPUS_RAW_DIR,
     "cache": ENV_CACHE_DIR,
     "extract_cache": ENV_EXTRACT_CACHE_DIR,
+    "eval_cache": ENV_EVAL_CACHE_DIR,
     "reports": ENV_REPORTS_DIR,
 }
 
@@ -130,6 +134,10 @@ class PathsConfig(BaseModel):
     #: результаты извлечения документов. Отдельно от ``cache`` (SERP/HTTP), т.к. это не
     #: сетевой кэш и у него свой жизненный цикл/бюджет.
     extract_cache: Path = Path("extract_cache")
+    #: Межпрогонный кэш вердиктов оценщика (``core/pipeline/eval_cache.py``):
+    #: сырые ``LLMCellOutput`` под ключом отрендеренного промпта + конфигурации модели.
+    #: Отдельно от ``extract_cache``/``cache``: иной жизненный цикл и бюджет.
+    eval_cache: Path = Path("eval_cache")
     reports: Path = Path("reports")
 
 

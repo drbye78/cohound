@@ -400,6 +400,30 @@ class SqliteStore:
                 self._cell_row(cell),
             )
 
+    def set_cell_provenance(
+        self,
+        run_id: str,
+        product_id: str,
+        param_id: str,
+        *,
+        prompt_hash: str | None = None,
+        model_id: str | None = None,
+    ) -> None:
+        """Узкий UPDATE провенанса уже сохранённой ячейки (R7/§13).
+
+        Колонки ``cells.prompt_hash``/``cells.model_id`` существуют в схеме §4.4, но
+        доменная ``Cell`` их не несёт, поэтому ``save_cell`` их не пишет. Этот метод
+        дописывает провенанс **после** успешного upsert, не расширяя ``_CELL_COLUMNS``
+        для всех писателей. ``None`` не затирает существующее значение (``COALESCE``).
+        """
+        with self.conn:
+            self.conn.execute(
+                "UPDATE cells SET prompt_hash = COALESCE(?, prompt_hash), "
+                "model_id = COALESCE(?, model_id) "
+                "WHERE run_id = ? AND product_id = ? AND param_id = ?",
+                (prompt_hash, model_id, run_id, product_id, param_id),
+            )
+
     def save_cells_batch(self, cells: list[Cell], chunk_size: int = DEFAULT_BATCH_SIZE) -> None:
         """Пишет ячейки пачками: одна транзакция на ``chunk_size`` (по умолчанию 200).
 

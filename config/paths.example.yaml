@@ -21,6 +21,7 @@
 # corpus_raw: corpus_raw        # retention сырых байтов страниц (content-addressed)
 # cache: cache                  # глобальный content-addressed кэш (cache/serp, cache/http)
 # extract_cache: extract_cache  # межпрогонный кэш экстракции (content-addressed, переживает runs/)
+# eval_cache: eval_cache        # межпрогонный кэш вердиктов оценщика (промпт+модель как ключ)
 # reports: reports              # публикуемые артефакты вне runs/ (опционально)
 #
 # NB: реестровые спецификации — package-scoped (packages/{case_id}/registries/*.yaml),

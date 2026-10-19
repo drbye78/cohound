@@ -20,6 +20,7 @@ from core.config.paths import (
     ENV_BY_FIELD,
     ENV_CACHE_DIR,
     ENV_CORPUS_RAW_DIR,
+    ENV_EVAL_CACHE_DIR,
     ENV_EXTRACT_CACHE_DIR,
     ENV_HOME,
     ENV_INDEX_STORE_DIR,
@@ -72,7 +73,7 @@ def test_defaults_without_env_or_file(tmp_path: Path) -> None:
 def test_defaults_field_names() -> None:
     assert set(HARNESS_FIELDS) == {
         "packages", "passports", "runs", "index_store",
-        "corpus_raw", "cache", "extract_cache", "reports",
+        "corpus_raw", "cache", "extract_cache", "eval_cache", "reports",
     }
     assert set(ENV_BY_FIELD) == set(HARNESS_FIELDS)
 
@@ -198,6 +199,7 @@ _ENV_FIELDS = (
     ENV_CORPUS_RAW_DIR,
     ENV_CACHE_DIR,
     ENV_EXTRACT_CACHE_DIR,
+    ENV_EVAL_CACHE_DIR,
     ENV_REPORTS_DIR,
 )
 

@@ -57,6 +57,7 @@ from core.config.domain_profiles import DomainProfile
 from core.pipeline.compute import compute, scope_universe
 from core.pipeline.corpus import ExtractionPool, build_corpus
 from core.pipeline.extract_cache import ExtractionCache
+from core.pipeline.eval_cache import EvalVerdictCache
 from core.pipeline.crawl_session import default_session_id
 from core.pipeline.crawl_sources import crawl_sources_digest
 from core.pipeline.discovery import discover
@@ -380,6 +381,7 @@ def build_phases(
     extraction_pool: ExtractionPool | None = None,
     extractor_factory: Callable[[DocumentLevel], ExtractorPort] | None = None,
     extract_cache: ExtractionCache | None = None,
+    eval_cache: EvalVerdictCache | None = None,
     satellites: Sequence[Satellite] = (),
     resolver: SourceResolver | None = None,
     strict: bool = True,
@@ -437,6 +439,9 @@ def build_phases(
     :param extract_cache: Ф1.2 — межпрогонный кэш экстракции (:class:`ExtractionCache`),
         протягивается в Ш5. ``None`` ⇒ кэш выключен (поведение байт-в-байт). Ключ —
         хеш ретенированных байтов (I19), поэтому хит не подменяет контент.
+    :param eval_cache: Ф3 — межпрогонный кэш вердиктов оценщика (:class:`EvalVerdictCache`),
+        протягивается в Ш6. ``None`` ⇒ кэш выключен (поведение байт-в-байт). Кэшируется
+        сырой ``LLMCellOutput``; валидация/Ф0/прецедент исполняются на каждом прогоне.
 
     Каждое замыкание детерминировано и не импортирует адаптеры; единственный
     межфазовый канал — замыкание ``holder`` (см. docstring модуля).
@@ -604,6 +609,7 @@ def build_phases(
             profile=retrieval_profile,
             cutoff_k=cutoff_k,
             strict=strict,
+            eval_cache=eval_cache,
         )
 
     # -- Ш7: ревью (advisory-очередь, ничего не решает за человека) ---------- #
