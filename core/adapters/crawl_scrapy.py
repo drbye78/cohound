@@ -50,8 +50,11 @@ Twisted-реактор и не требуют браузеров. Если ``fet
 (детерминированные юнит-тесты без Twisted/сети).
 
 **Ошибки.** Сбой фетча поднимает ``CrawlError`` (pipeline изолирует по документу и
-отображает на ``source_unavailable``). Отклонённый SSRF-валидацией URL поднимает
-``CrawlUrlError`` (подкласс и ``CrawlError``, и ``ValueError``).
+отображает на ``source_unavailable``). Определённый ответ «ресурса нет» (HTTP 404/410)
+поднимает ``CrawlNotFound`` — подкласс ``CrawlError`` с ``failure_kind="not_found"``:
+pipeline делает такой исход терминальным (без повторов) и не считает origin нечитаемым.
+Отклонённый SSRF-валидацией URL поднимает ``CrawlUrlError`` (подкласс и ``CrawlError``,
+и ``ValueError``).
 
 Нейтрален (§1.3): в модуле нет названий продуктов/вендоров; профили — данные.
 """
@@ -68,6 +71,7 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from typing import Any, Protocol, cast, runtime_checkable
 
+from core.domain.enums import FailureKind
 from core.ports.types import FetchMode, FetchPlan, RawPage
 from core.util.cache import ContentAddressedCache, http_key
 from core.util.security import validate_url
@@ -76,9 +80,15 @@ __all__ = [
     "CrawlError",
     "CrawlUrlError",
     "CrawlRefused",
+    "CrawlNotFound",
+    "NOT_FOUND_STATUSES",
     "DEFAULT_SCRAPY_SETTINGS",
     "ScrapyCrawler",
 ]
+
+#: HTTP-статусы определённого ответа «ресурса нет» (404/410). Классификация общая для
+#: всех транспортов, видящих статус ответа: HTTP, Scrapy и hybrid-путь браузера.
+NOT_FOUND_STATUSES: frozenset[int] = frozenset({404, 410})
 
 # Внедряемый фетчер: callable ``(url, plan) -> RawPage``. Объект с методом
 # ``fetch(url, plan)`` также принимается (см. ``PageFetcher``).
@@ -157,6 +167,33 @@ class CrawlRefused(CrawlError):
         self.refusal_reason = refusal_reason
 
 
+class CrawlNotFound(CrawlError):
+    """Источник **определённо** ответил, что ресурса нет (HTTP 404/410).
+
+    Это не недоступность источника: origin прочитан, и ответ окончателен. Поэтому
+    ``failure_kind`` несёт ``FailureKind.NOT_FOUND``: pipeline пишет его в
+    ``crawl_session_items.error_kind``, считает исход терминальным (без повторов) и
+    **не** делает origin нечитаемым (``derive_corpus_coverage`` уже игнорирует
+    ``not_found``). ``failed`` при этом остаётся классом сбоя, а не статусом (I4).
+
+    Отдельно от :class:`CrawlRefused` намеренно: отказ — соблюдение политики
+    (``robots.txt``), а здесь — ответ сервера об отсутствии ресурса. Смешивать их
+    значило бы потерять различие «мы не пошли» / «нам ответили».
+
+    Форма повторяет ``CrawlRefused``: машинный код — атрибут экземпляра, который
+    pipeline читает через ``getattr`` (``corpus._commit_local``).
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        failure_kind: str = FailureKind.NOT_FOUND.value,
+    ) -> None:
+        super().__init__(message)
+        self.failure_kind = failure_kind
+
+
 @runtime_checkable
 class PageFetcher(Protocol):
     """Минимальный контракт внедряемого фетчера (альтернатива callable)."""
@@ -198,7 +235,8 @@ class _CrawlSpec:
 
     ``headers`` — заголовки запроса (условные ``If-None-Match``/``If-Modified-Since``);
     ``cached`` — байты текущей кэш-записи, нужные для тела ответа ``304`` (сам ``304``
-    представления не несёт); ``error`` — сбой, который нельзя поднять из callback паука.
+    представления не несёт); ``error`` — сбой, который нельзя поднять из callback паука;
+    ``error_kind`` — машинный класс сбоя (``FailureKind``), если ответ определён (404/410).
     """
 
     url: str
@@ -208,11 +246,29 @@ class _CrawlSpec:
     headers: dict[str, str] = field(default_factory=dict)
     cached: bytes | None = None
     error: str | None = None
+    error_kind: str | None = None
 
 
 # Активные ``CrawlerRunner``: держим ссылку, пока краул не завершён (иначе движок
 # может быть собран GC до закрытия паука).
 _ACTIVE_RUNNERS: set[Any] = set()
+
+
+def _scrapy_failure_status(failure: Any) -> int | None:
+    """HTTP-статус из Twisted ``Failure`` (``HttpError.response.status``), если он есть.
+
+    Scrapy по умолчанию фильтрует не-2xx ответы ``HttpErrorMiddleware`` и зовёт
+    ``errback``; статус лежит в ``failure.value.response.status``. Шов терпим к
+    произвольным объектам (юнит-тесты без Scrapy) и не выдумывает статус при его
+    отсутствии — тогда классификация остаётся общей (``source_unavailable``).
+    """
+    value = getattr(failure, "value", failure)
+    response = getattr(value, "response", None)
+    status = getattr(response, "status", None)
+    try:
+        return int(status) if status is not None else None
+    except (TypeError, ValueError):
+        return None
 
 
 def _raw_page_from_scrapy_response(spec: _CrawlSpec, response: Any) -> RawPage | None:
@@ -221,6 +277,11 @@ def _raw_page_from_scrapy_response(spec: _CrawlSpec, response: Any) -> RawPage |
     ``304`` не несёт представления: тело берётся **только** из ``spec.cached``
     (байты текущей кэш-записи). Их отсутствие — неконсистентный условный запрос:
     фиксируем ``spec.error`` и возвращаем ``None`` (пустую страницу не фабрикуем).
+
+    ``404``/``410`` — определённый ответ «ресурса нет»: фиксируем ``spec.error_kind =
+    not_found`` и возвращаем ``None``. Путь достижим, если ``handle_httpstatus_list``
+    пропустил статус в callback; обычный путь классифицирует тот же статус в errback
+    (:func:`_scrapy_failure_status`), поэтому правило одно на оба входа.
     """
     raw_type = response.headers.get(b"Content-Type", b"")
     content_type = raw_type.decode("latin-1") if raw_type else None
@@ -228,7 +289,12 @@ def _raw_page_from_scrapy_response(spec: _CrawlSpec, response: Any) -> RawPage |
     raw_modified = response.headers.get(b"Last-Modified", b"")
     etag = raw_etag.decode("latin-1") if raw_etag else None
     last_modified = raw_modified.decode("latin-1") if raw_modified else None
-    not_modified = int(response.status) == 304
+    status = int(response.status)
+    if status in NOT_FOUND_STATUSES:
+        spec.error_kind = FailureKind.NOT_FOUND.value
+        spec.error = f"HTTP {status} для {spec.url!r}: ресурс отсутствует"
+        return None
+    not_modified = status == 304
     if not_modified:
         if spec.cached is None:
             spec.error = (
@@ -313,6 +379,7 @@ def _default_crawl(settings: Mapping[str, Any], spec: _CrawlSpec) -> Any:
             yield Request(
                 spec.url,
                 callback=self._collect,
+                errback=self._failed,
                 dont_filter=True,
                 meta=meta,
                 headers=spec.headers or None,
@@ -322,6 +389,21 @@ def _default_crawl(settings: Mapping[str, Any], spec: _CrawlSpec) -> Any:
             page = _raw_page_from_scrapy_response(spec, response)
             if page is not None:
                 spec.collected.append(page)
+
+        def _failed(self, failure) -> None:  # noqa: ANN001 - Twisted Failure
+            """Классифицирует сбой запроса: 404/410 — ``not_found``, иначе общий сбой.
+
+            Без errback'а Scrapy только логировала ошибку, и ``_fetch_with_scrapy``
+            сообщал «контент не получен» — определённый ответ об отсутствии терялся.
+            """
+            status = _scrapy_failure_status(failure)
+            if status in NOT_FOUND_STATUSES:
+                spec.error_kind = FailureKind.NOT_FOUND.value
+                spec.error = f"HTTP {status} для {spec.url!r}: ресурс отсутствует"
+                return
+            spec.error = (
+                f"Scrapy-краул {spec.url!r} не удался: {_failure_value(failure)}"
+            )
 
     runner = CrawlerRunner(dict(settings))
     deferred = runner.crawl(_SingleRequestSpider)
@@ -688,6 +770,8 @@ class ScrapyCrawler:
         self._worker_instance().submit(settings, spec, fut, timeout_s)
 
         if spec.error:
+            if spec.error_kind == FailureKind.NOT_FOUND.value:
+                raise CrawlNotFound(spec.error, failure_kind=spec.error_kind)
             raise CrawlError(spec.error)
         if not spec.collected:
             raise CrawlError(f"Scrapy не вернул контент для {url!r}")

@@ -42,7 +42,8 @@ callable ``(url) -> bytes``. Если он задан, реальный ``httpx`
 
 **Ошибки.** Единый тип ``CrawlError`` (переиспользован из ``crawl_scrapy``), чтобы
 pipeline ловил один класс для всех краулеров; отсутствие ``httpx`` наследует
-``CrawlUnavailable(CrawlError)``. Отказ SSRF — ``CrawlUrlError``.
+``CrawlUnavailable(CrawlError)``. Отказ SSRF — ``CrawlUrlError``. Ответ ``404``/``410`` —
+``CrawlNotFound`` (``failure_kind="not_found"``): ресурса нет, а не источник недоступен.
 
 Нейтрален (§1.3): в модуле нет названий продуктов/вендоров/предметных терминов.
 """
@@ -55,7 +56,13 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Any
 
-from core.adapters.crawl_scrapy import CrawlError, CrawlRefused, CrawlUrlError
+from core.adapters.crawl_scrapy import (
+    NOT_FOUND_STATUSES,
+    CrawlError,
+    CrawlNotFound,
+    CrawlRefused,
+    CrawlUrlError,
+)
 from core.ports.types import FetchMode, FetchPlan, RawPage
 from core.util.cache import ContentAddressedCache, http_key
 from core.util.robots import RobotsGate
@@ -256,6 +263,14 @@ class HttpCrawler:
             )
             if int(response.status_code) == 304:
                 return self._page_not_modified(url, response)
+            # 404/410 — определённый ответ «ресурса нет», а не недоступность источника.
+            # Классифицируем ДО ``raise_for_status``: иначе статус схлопнулся бы в
+            # бесцветный ``CrawlError`` и pipeline записал бы ``source_unavailable``.
+            status = int(response.status_code)
+            if status in NOT_FOUND_STATUSES:
+                raise CrawlNotFound(
+                    f"HTTP {status} для {url!r}: ресурс отсутствует",
+                )
             response.raise_for_status()
         except CrawlError:
             raise

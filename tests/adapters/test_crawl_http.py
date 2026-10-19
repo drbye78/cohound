@@ -16,7 +16,8 @@ from typing import Any
 import pytest
 
 from core.adapters.crawl_http import CrawlUnavailable, HttpCrawler
-from core.adapters.crawl_scrapy import CrawlError, CrawlUrlError
+from core.adapters.crawl_scrapy import CrawlError, CrawlNotFound, CrawlUrlError
+from core.domain.enums import FailureKind
 from core.ports.crawler import CrawlerPort
 from core.ports.types import FetchPlan, FetchMode, RawPage
 from core.util.cache import ContentAddressedCache, http_key
@@ -526,6 +527,70 @@ def test_meta_fallback_304_without_cached_bytes_is_explicit_error(
         crawler.fetch(URL)
 
     assert fake.calls[0][1]["If-None-Match"] == '"v1"'
+
+
+# ---------------------------------------------------------------------------
+# 404/410 — определённый ответ «ресурса нет» (not_found), не недоступность
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("status", [404, 410])
+def test_not_found_status_maps_to_typed_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, status: int
+) -> None:
+    """404/410 классифицируются до ``raise_for_status`` и не пишутся в кэш."""
+    cache = ContentAddressedCache(tmp_path)
+    crawler, fake = _crawler_with_httpx(
+        monkeypatch,
+        [_FakeResponse(url=URL, content=b"missing", status_code=status)],
+        cache,
+    )
+
+    with pytest.raises(CrawlNotFound) as excinfo:
+        crawler.fetch(URL)
+
+    assert excinfo.value.failure_kind == FailureKind.NOT_FOUND.value
+    assert excinfo.value.failure_kind == "not_found"
+    # Один запрос: определённый ответ не повторяется транспортом.
+    assert len(fake.calls) == 1
+    # Ответ «нет ресурса» — не представление: в кэш ничего не пишется.
+    assert cache.get_bytes("http", http_key(URL)) is None
+
+
+def test_server_error_stays_generic_source_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """500 — по-прежнему общий ``CrawlError`` (pipeline → ``source_unavailable``)."""
+    crawler, fake = _crawler_with_httpx(
+        monkeypatch,
+        [_FakeResponse(url=URL, content=b"boom", status_code=500)],
+        ContentAddressedCache(tmp_path),
+    )
+
+    with pytest.raises(CrawlError) as excinfo:
+        crawler.fetch(URL)
+
+    assert not isinstance(excinfo.value, CrawlNotFound)
+    assert getattr(excinfo.value, "failure_kind", None) is None
+    assert len(fake.calls) == 1
+
+
+def test_forbidden_is_unchanged_generic_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """403 не классифицируется как ``not_found`` (прежний путь не меняется)."""
+    crawler, fake = _crawler_with_httpx(
+        monkeypatch,
+        [_FakeResponse(url=URL, content=b"denied", status_code=403)],
+        ContentAddressedCache(tmp_path),
+    )
+
+    with pytest.raises(CrawlError) as excinfo:
+        crawler.fetch(URL)
+
+    assert not isinstance(excinfo.value, CrawlNotFound)
+    assert getattr(excinfo.value, "failure_kind", None) is None
+    assert len(fake.calls) == 1
 
 
 

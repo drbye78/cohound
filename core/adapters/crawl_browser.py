@@ -71,8 +71,10 @@ Playwright при ``launch``/``launch_persistent_context`` добавляет ``
 повторно валидируется (приватный/metadata-хост в редиректе → ``CrawlUrlError``).
 
 **Ошибки.** ``CrawlError`` — базовая (переиспользована из ``crawl_scrapy``); ``CrawlUrlError``
-— отказ SSRF; ``CrawlUnavailable`` (локально, как в ``crawl_http``) — нет ``playwright``/
-``httpx`` или не поднялись браузерные бинари.
+— отказ SSRF; ``CrawlNotFound`` — определённый ответ ``404``/``410`` (``not_found``; hybrid
+классифицирует, honest — нет, статус в рендере не наблюдаем); ``CrawlUnavailable``
+(локально, как в ``crawl_http``) — нет ``playwright``/``httpx`` или не поднялись
+браузерные бинари.
 
 Нейтрален (§1.3): нет названий продуктов/вендоров/предметных терминов.
 """
@@ -89,7 +91,13 @@ from datetime import datetime, timezone
 from typing import Any, Protocol
 from urllib.parse import urljoin, urlsplit
 
-from core.adapters.crawl_scrapy import CrawlError, CrawlRefused, CrawlUrlError
+from core.adapters.crawl_scrapy import (
+    NOT_FOUND_STATUSES,
+    CrawlError,
+    CrawlNotFound,
+    CrawlRefused,
+    CrawlUrlError,
+)
 from core.domain.enums import CrawlStrategy
 from core.domain.models import RateLimitSpec
 from core.ports.types import FetchMode, FetchPlan, RawPage
@@ -528,6 +536,11 @@ class BrowserCrawler:
         if plan.strategy is CrawlStrategy.HYBRID:
             try:
                 return self._fetch_hybrid(url, plan)
+            except CrawlNotFound:
+                # Определённый ответ «ресурса нет» — терминальный исход, а не сбой
+                # транспорта: fallback на honest-рендер превратил бы 404 в контент
+                # (статус в рендере не наблюдаем), потеряв класс ``not_found``.
+                raise
             except CrawlError:
                 # Fallback: сбой транспорта hybrid → живой honest-рендер.
                 return self._fetch_honest(url, plan)
@@ -560,6 +573,11 @@ class BrowserCrawler:
         в навигацию не добавляются (их некуда применить: это не лёгкий GET), а мета кэша
         здесь не читается — honest-путь кэш не использует. Такие страницы всегда
         пере-фетчиваются целиком; фабриковать валидаторы или ``304`` запрещено.
+
+        **HTTP-статус здесь не наблюдаем.** Честный рендер не видит код ответа, поэтому
+        классифицировать ``404``/``410`` как ``not_found`` в этом пути **нельзя**:
+        рендер 404-страницы остаётся обычной страницей (не гадаем). Классификация
+        доступна только транспортам, читающим статус, — HTTP, Scrapy и hybrid-путь.
         """
         session = self._open_session()
         try:
@@ -625,6 +643,13 @@ class BrowserCrawler:
                 # ``httpx`` не поднимает на 304 (follow_redirects=False): статус читаем
                 # напрямую. Тело ``304`` не несёт представления — берём байты из кэша.
                 return self._page_not_modified(url, cached, meta, resp_headers)
+            if status in NOT_FOUND_STATUSES:
+                # Определённый ответ «ресурса нет»: повтор с ре-прогревом бессмыслен
+                # (ответ не транзиентный), а браузерный рендер 404-страницы не должен
+                # выдаваться за контент. Классификация — как у HTTP/Scrapy.
+                raise CrawlNotFound(
+                    f"hybrid HTTP {status} для {url!r}: ресурс отсутствует",
+                )
             if 200 <= status < 300 and not _looks_like_interstitial(body, rendered):
                 # Валидаторы hybrid-GET доступны в ``resp_headers`` (в отличие от honest).
                 etag = resp_headers.get("ETag") or resp_headers.get("etag")

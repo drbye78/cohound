@@ -17,11 +17,14 @@ import pytest
 
 from core.adapters.crawl_scrapy import (
     CrawlError,
+    CrawlNotFound,
     CrawlUrlError,
     ScrapyCrawler,
     _CrawlSpec,
     _raw_page_from_scrapy_response,
+    _scrapy_failure_status,
 )
+from core.domain.enums import FailureKind
 from core.ports.crawler import CrawlerPort
 from core.ports.types import FetchMode, FetchPlan, RawPage
 from core.util.cache import ContentAddressedCache, http_key
@@ -522,3 +525,75 @@ def test_scrapy_cache_hit_with_meta_but_without_validators_served_from_cache(
 
     assert fetcher.calls == []  # валидаторов нет нигде → прежний кэш-шорткат
     assert page.content == b"cached-representation"
+
+
+# ---------------------------------------------------------------------------
+# 404/410 — определённый ответ «ресурса нет» (not_found), не недоступность
+# ---------------------------------------------------------------------------
+
+
+class _FakeFailure:
+    """Мини-дублёр Twisted ``Failure`` с ``value.response.status``."""
+
+    def __init__(self, value: object) -> None:
+        self.value = value
+
+
+class _FakeHttpError(Exception):
+    """Дублёр ``scrapy.spidermiddlewares.httperror.HttpError``."""
+
+    def __init__(self, status: int) -> None:
+        super().__init__(f"HTTP {status}")
+        self.response = type("_Resp", (), {"status": status})()
+
+
+@pytest.mark.parametrize("status", [404, 410])
+def test_scrapy_response_404_410_maps_to_not_found(status: int) -> None:
+    """Callback-путь (``handle_httpstatus_list``): 404/410 не становятся контентом."""
+    spec = _CrawlSpec(url=URL, fetch=FetchMode.HTTP, wait_for=None)
+
+    page = _raw_page_from_scrapy_response(
+        spec, _FakeScrapyResponse(body=b"missing", status=status)
+    )
+
+    assert page is None
+    assert spec.error_kind == FailureKind.NOT_FOUND.value
+    assert spec.error is not None and str(status) in spec.error
+
+
+@pytest.mark.parametrize("status", [404, 410])
+def test_scrapy_worker_404_410_raises_crawl_not_found(status: int) -> None:
+    """Путь ``fetch → _fetch_with_scrapy``: 404/410 → ``CrawlNotFound``, не контент."""
+    worker = _FakeWorker(_FakeScrapyResponse(body=b"missing", status=status))
+    crawler = ScrapyCrawler(worker=worker)
+
+    with pytest.raises(CrawlNotFound) as excinfo:
+        crawler.fetch(URL)
+
+    assert excinfo.value.failure_kind == FailureKind.NOT_FOUND.value
+    assert _spec_of(worker).error_kind == FailureKind.NOT_FOUND.value
+
+
+def _spec_of(worker: _FakeWorker) -> _CrawlSpec:
+    """Единственный ``_CrawlSpec``, поданный фейковому воркеру."""
+    assert len(worker.specs) == 1
+    return worker.specs[0]
+
+
+def test_scrapy_other_statuses_keep_generic_failure() -> None:
+    """403/500 не классифицируются как ``not_found`` (прежнее поведение)."""
+    for status in (403, 500):
+        spec = _CrawlSpec(url=URL, fetch=FetchMode.HTTP, wait_for=None)
+        page = _raw_page_from_scrapy_response(
+            spec, _FakeScrapyResponse(body=b"body", status=status)
+        )
+        assert page is not None
+        assert spec.error_kind is None
+
+
+def test_scrapy_failure_status_extraction() -> None:
+    """Статус берётся из ``failure.value.response.status``; без него — ``None``."""
+    assert _scrapy_failure_status(_FakeFailure(_FakeHttpError(404))) == 404
+    assert _scrapy_failure_status(_FakeFailure(_FakeHttpError(410))) == 410
+    assert _scrapy_failure_status(_FakeFailure(_FakeHttpError(500))) == 500
+    assert _scrapy_failure_status(_FakeFailure(RuntimeError("network"))) is None

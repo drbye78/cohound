@@ -22,8 +22,8 @@ from core.adapters.crawl_browser import (
     BrowserCrawler,
     CrawlUnavailable,
 )
-from core.adapters.crawl_scrapy import CrawlError, CrawlUrlError
-from core.domain.enums import CrawlStrategy
+from core.adapters.crawl_scrapy import CrawlError, CrawlNotFound, CrawlUrlError
+from core.domain.enums import CrawlStrategy, FailureKind
 from core.domain.models import RateLimitSpec
 from core.ports.crawler import CrawlerPort
 from core.ports.types import FetchMode, FetchPlan, RawPage
@@ -876,3 +876,53 @@ def test_crawler_real_backend_uses_launch_flags(fake_chromium: _FakeChromium) ->
     kwargs = fake_chromium.persistent_calls[0]
     assert kwargs["args"] == ["--disable-blink-features=AutomationControlled"]
     assert kwargs["ignore_default_args"] == ["--enable-automation"]
+
+
+# ---------------------------------------------------------------------------
+# 404/410 — определённый ответ «ресурса нет» (not_found)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("status", [404, 410])
+def test_hybrid_404_410_raises_not_found_without_retry_or_fallback(status: int) -> None:
+    """Hybrid классифицирует 404/410: один GET, без повторов и без honest-fallback.
+
+    До правки 404 попадал в ветку «challenge/не-2xx» → ``HYBRID_MAX_ATTEMPTS``
+    повторов с ре-прогревом, а затем отдавался браузерный рендер 404-страницы как
+    контент. Теперь ответ терминален и класс сохраняется.
+    """
+    backend = FakeBackend(content=b"<html>not found</html>")
+    getter = RecordingHttpGet(responses=[(status, b"missing", {})])
+    crawler = BrowserCrawler(backend=backend, http_get=getter)
+
+    with pytest.raises(CrawlNotFound) as excinfo:
+        crawler.fetch(URL, _plan(CrawlStrategy.HYBRID))
+
+    assert excinfo.value.failure_kind == FailureKind.NOT_FOUND.value
+    # Определённый ответ не повторяется: ровно один лёгкий GET (и один прогрев).
+    assert len(getter.calls) == 1
+    assert len(backend.sessions) == 1
+
+
+def test_hybrid_500_still_returns_render_after_bounded_retries() -> None:
+    """500 — прежний путь (challenge/не-2xx): bounded retry и возврат рендера."""
+    backend = FakeBackend(content=b"<html>rendered</html>")
+    getter = RecordingHttpGet(responses=[(500, b"boom", {})])
+    crawler = BrowserCrawler(backend=backend, http_get=getter)
+
+    page = crawler.fetch(URL, _plan(CrawlStrategy.HYBRID))
+
+    assert page.fetch_mode is FetchMode.BROWSER
+    assert len(getter.calls) == HYBRID_MAX_ATTEMPTS
+
+
+def test_honest_render_cannot_observe_http_status() -> None:
+    """Honest не видит HTTP-статус: 404 классифицировать нельзя (не гадаем)."""
+    backend = FakeBackend(content=b"<html>whatever</html>")
+    crawler = BrowserCrawler(backend=backend)
+
+    page = crawler.fetch(URL, _plan(CrawlStrategy.HONEST))
+
+    assert isinstance(page, RawPage)
+    assert page.status_code is None  # статус ответа не наблюдаем в рендере
+    assert page.fetch_mode is FetchMode.BROWSER
