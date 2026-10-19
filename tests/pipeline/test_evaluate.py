@@ -348,6 +348,72 @@ def test_incomplete_corpus_with_human_attestation_keeps_absent_and_records_count
     assert audit[0]["scope_attested_by"] == "human-reviewer"
 
 
+def _unreadable_origin_coverage() -> CorpusCoverage:
+    """Покрытие с полностью закрытым origin'ом (origin-уровневый порог Ф0)."""
+    return CorpusCoverage(
+        product_id="p1",
+        complete=False,
+        expected_sources=2,
+        observed_sources=1,
+        blocked={"robots_disallow": 1},
+        unreadable_origins=["closed.example"],
+        partial_blocks={"closed.example": {"robots_disallow": 1}},
+        truncated=False,
+        computed_at="2026-01-01T00:00:00+00:00",
+    )
+
+
+def test_incomplete_corpus_pending_names_unreadable_origin() -> None:
+    """Ф0: pending-кандидат называет закрытый origin, а не только счётчик блокировок."""
+    data = _data()
+    store = _RecordingStore()
+
+    outcome = _evaluate(
+        data,
+        _ScriptedEvaluator([_absent_output()]),
+        store=store,
+        coverage=_unreadable_origin_coverage(),
+    )
+
+    assert outcome.cell.state is CellState.PENDING
+    assert outcome.cell.review_reason == "corpus_incomplete_absence"
+    audit = [
+        entry
+        for entry in outcome.cell.absence_evidence
+        if entry.get("corpus_complete") is False
+    ]
+    assert audit
+    assert audit[0]["corpus_unreadable_origins"] == ["closed.example"]
+    assert "closed.example" in audit[0]["note"]
+    assert audit[0]["corpus_partial_blocks"] == {
+        "closed.example": {"robots_disallow": 1}
+    }
+
+
+def test_unreadable_origin_with_human_attestation_keeps_absent() -> None:
+    """Ф0/I2c: человек аттестовал — ``❌`` остаётся, origin виден в evidence."""
+    data = _data()
+
+    outcome = _evaluate(
+        data,
+        _ScriptedEvaluator([_absent_output()]),
+        coverage=_unreadable_origin_coverage(),
+        scope_attested_by="human-reviewer",
+    )
+
+    assert outcome.cell.state is CellState.EVALUATED
+    assert outcome.cell.status is Status.ABSENT
+    assert outcome.cell.review_reason is None
+    audit = [
+        entry
+        for entry in outcome.cell.absence_evidence
+        if entry.get("corpus_complete") is False
+    ]
+    assert audit
+    assert audit[0]["corpus_unreadable_origins"] == ["closed.example"]
+    assert audit[0]["scope_attested_by"] == "human-reviewer"
+
+
 def test_complete_corpus_absence_is_byte_identical_to_previous_behaviour() -> None:
     """Ф0: полное покрытие не меняет ячейку — сравнение с исходом без coverage."""
     data = _data()

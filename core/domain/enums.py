@@ -63,6 +63,10 @@ class FailureKind(StrEnum):
     VALIDATION_FAILED = "validation_failed"
     PARSER_FAILED = "parser_failed"
     # Наблюдаемые исходы краула (write-site'ы — ``core/pipeline/corpus.py``).
+    #: HTTP 404/410 — **успешное наблюдение отсутствия**, а не недоступность источника:
+    #: origin ответил определённо, что ресурса нет. Не делает origin нечитаемым и не
+    #: участвует в гейте покрытия (Ф0/I2c); остаётся в аудите ``blocked``.
+    NOT_FOUND = "not_found"
     ROBOTS_DISALLOW = "robots_disallow"
     ATTEMPTS_EXHAUSTED = "attempts_exhausted"
     REDIRECT_OUT_OF_SCOPE = "redirect_out_of_scope"

@@ -246,25 +246,76 @@ def derive_corpus_coverage(
     """Строит :class:`CorpusCoverage` продукта из персистентных элементов сеанса (Ф0).
 
     Детерминированно: ``expected_sources`` — число элементов, ``observed_sources`` —
-    дошедшие до ``FETCHED``, ``blocked`` — счётчики ``FAILED`` по ``error_kind``.
-    ``complete`` ложно при любом усечении, блокировке или потере (failed/cancelled/
-    pending/running): нечитаемый источник не позволяет доказать отсутствие.
+    дошедшие до ``FETCHED``, ``blocked`` — счётчики ``FAILED`` по ``error_kind`` (аудит).
+
+    **Порог неполноты — по origin'у, а не по продукту.** Origin (``netloc`` URL)
+    считается **нечитаемым**, только если из него не получено ни одного ``FETCHED``
+    элемента и при этом был хотя бы один недочёт (любой не-``FETCHED`` исход, кроме
+    ``not_found``). Причина: «корпус неполон» обязано означать «мы ничего не узнали о
+    сайте», а не «на сайте были отдельные отказы». Продукт-уровневое правило
+    (``observed == expected``) на реальных прогонах помечало неполными **все** продукты
+    из-за faceted/транзакционных URL и 404-х, после чего каждый ``❌`` становился
+    review-кандидатом и гейт терял смысл. Правило бинарное (``observed == 0``) и
+    объяснимо одним предложением; числовой порог доли намеренно не вводится.
+
+    ``not_found`` (HTTP 404/410) — **разрешённое наблюдение**: origin ответил, что
+    ресурса нет; такой исход остаётся в ``blocked`` (аудит), но не делает origin
+    нечитаемым и не влияет на ``complete``.
+
+    ``partial_blocks`` фиксирует не-``not_found`` сбои каждого origin'а, поэтому
+    частично отказавший, но читаемый сайт виден человеку в отчёте, не будучи фатальным.
+
+    **Известное ограничение (принятый компромисс).** Origin, читаемый в целом, но с
+    отказанной *документационной* подсекцией (не транзакционной), считается полным.
+    Альтернатива (любая блокировка ⇒ неполнота) помечала все три измеренных продукта и
+    превращала каждый ``❌`` в review-пункт — сигнал уничтожался. Митигация —
+    ``partial_blocks`` в отчёте: человек видит частичные отказы и может аттестовать
+    (``scope_attested_by``) либо пере-краулить. Гарантия сохраняется в важную сторону:
+    полностью закрытый сайт (0 ``FETCHED``) не может доказать отсутствие никогда.
     """
     expected = 0
     observed = 0
     blocked: dict[str, int] = {}
+    fetched_by_origin: dict[str, int] = {}
+    #: origin → число «недостач» (не-FETCHED исходов, кроме ``not_found``).
+    losses_by_origin: dict[str, int] = {}
+    partial_blocks: dict[str, dict[str, int]] = {}
     for item in items:
         expected += 1
+        origin = (
+            (urlsplit(item.url).netloc or "").lower()
+            or item.url.strip().lower()
+            or "unknown"
+        )
         if item.status is CrawlItemStatus.FETCHED:
             observed += 1
-        elif item.status is CrawlItemStatus.FAILED and item.error_kind:
-            blocked[item.error_kind] = blocked.get(item.error_kind, 0) + 1
+            fetched_by_origin[origin] = fetched_by_origin.get(origin, 0) + 1
+            continue
+        kind = item.error_kind if item.status is CrawlItemStatus.FAILED else None
+        if kind:
+            blocked[kind] = blocked.get(kind, 0) + 1
+        if kind == FailureKind.NOT_FOUND.value:
+            # Разрешённое наблюдение отсутствия: не потеря и не блокировка покрытия.
+            continue
+        losses_by_origin[origin] = losses_by_origin.get(origin, 0) + 1
+        if kind:
+            counts = partial_blocks.setdefault(origin, {})
+            counts[kind] = counts.get(kind, 0) + 1
+
+    unreadable_origins = sorted(
+        origin for origin in losses_by_origin if fetched_by_origin.get(origin, 0) == 0
+    )
     return CorpusCoverage(
         product_id=product_id,
-        complete=(not truncated) and observed == expected and not blocked,
+        complete=(not truncated) and not unreadable_origins,
         expected_sources=expected,
         observed_sources=observed,
         blocked=dict(sorted(blocked.items())),
+        unreadable_origins=unreadable_origins,
+        partial_blocks={
+            origin: dict(sorted(partial_blocks[origin].items()))
+            for origin in sorted(partial_blocks)
+        },
         truncated=truncated,
         computed_at=computed_at,
     )

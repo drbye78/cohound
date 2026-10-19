@@ -12,7 +12,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = "3.7.0"
+SCHEMA_VERSION = "3.8.0"
 
 DDL = """
 PRAGMA journal_mode = WAL;
@@ -293,9 +293,10 @@ CREATE TABLE IF NOT EXISTS crawl_session_items (
     FOREIGN KEY (session_id) REFERENCES crawl_sessions(session_id)
 );
 
--- Ф0 (schema 3.7.0): покрытие корпуса продукта по исходам краула — первоклассный факт.
+-- Ф0 (schema 3.8.0): покрытие корпуса продукта по исходам краула — первоклассный факт.
 -- Производно от персистентных ``crawl_session_items`` + записей об усечении; гейтит
 -- публикацию ``❌`` (I2c). Аддитивная таблица, идемпотентная через CREATE TABLE IF NOT EXISTS.
+-- v3.8.0: ``unreadable_origins_json``/``partial_blocks_json`` — origin-уровневый порог.
 CREATE TABLE IF NOT EXISTS corpus_coverage (
     run_id            TEXT NOT NULL,
     product_id        TEXT NOT NULL,
@@ -303,6 +304,8 @@ CREATE TABLE IF NOT EXISTS corpus_coverage (
     expected_sources  INTEGER NOT NULL DEFAULT 0,
     observed_sources  INTEGER NOT NULL DEFAULT 0,
     blocked_json      TEXT NOT NULL DEFAULT '{}',   -- {"error_kind": count}
+    unreadable_origins_json TEXT NOT NULL DEFAULT '[]',  -- ["origin", ...]
+    partial_blocks_json     TEXT NOT NULL DEFAULT '{}',  -- {"origin": {"error_kind": count}}
     truncated         INTEGER NOT NULL DEFAULT 0,
     computed_at       TEXT NOT NULL,
     PRIMARY KEY (run_id, product_id)
@@ -440,6 +443,16 @@ def connect(db_path: str | Path = ":memory:") -> sqlite3.Connection:
     _ensure_columns(conn, "crawl_session_items", {"depth": "INTEGER"})
     # DDL-миграция v3.7.0 (Ф0): ``corpus_coverage`` создаётся ``CREATE TABLE IF NOT EXISTS``
     # в DDL — новые таблицы не требуют ALTER; вызов идемпотентен на любой БД.
+    # DDL-миграция v3.8.0 (Ф0, origin-уровневый порог): additive-колонки покрытия корпуса;
+    # старые БД получают пустые значения (``[]``/``{}``) — нечитаемых origin'ов не знали.
+    _ensure_columns(
+        conn,
+        "corpus_coverage",
+        {
+            "unreadable_origins_json": "TEXT NOT NULL DEFAULT '[]'",
+            "partial_blocks_json": "TEXT NOT NULL DEFAULT '{}'",
+        },
+    )
     # v3.1.0 — удаление legacy per-URL таблицы попыток (полностью замещена сеансом краула,
     # back-compat не требуется): DDL-таблицы/индексов и их миграции больше нет.
     conn.execute(

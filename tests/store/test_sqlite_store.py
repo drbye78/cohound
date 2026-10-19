@@ -91,11 +91,64 @@ def _cell(param_id: str, **overrides: object) -> Cell:
 # --------------------------------------------------------------------------- #
 
 
+def test_corpus_coverage_additive_migration_adds_origin_columns(
+    tmp_path: Path,
+) -> None:
+    """Ф0/3.8.0: старая ``corpus_coverage`` без origin-колонок мигрирует аддитивно."""
+    path = tmp_path / "legacy.db"
+    legacy = sqlite3.connect(path)
+    legacy.execute(
+        "CREATE TABLE corpus_coverage ("
+        " run_id TEXT NOT NULL, product_id TEXT NOT NULL, complete INTEGER NOT NULL,"
+        " expected_sources INTEGER NOT NULL DEFAULT 0,"
+        " observed_sources INTEGER NOT NULL DEFAULT 0,"
+        " blocked_json TEXT NOT NULL DEFAULT '{}',"
+        " truncated INTEGER NOT NULL DEFAULT 0, computed_at TEXT NOT NULL,"
+        " PRIMARY KEY (run_id, product_id))"
+    )
+    legacy.commit()
+    legacy.close()
+
+    store = SqliteStore(path)
+    try:
+        cols = {
+            r["name"]
+            for r in store.conn.execute("PRAGMA table_info(corpus_coverage)")
+        }
+        assert {"unreadable_origins_json", "partial_blocks_json"} <= cols
+
+        store.create_run(RUN_ID, _cfg())
+        coverage = CorpusCoverage(
+            product_id="p1",
+            complete=True,
+            expected_sources=2,
+            observed_sources=2,
+            computed_at="2026-01-01T00:00:00+00:00",
+        )
+        store.save_corpus_coverage(RUN_ID, coverage)
+        assert store.read_corpus_coverage(RUN_ID, "p1") == coverage
+    finally:
+        store.close()
+
+
+def test_corpus_coverage_model_rejects_complete_with_unreadable_origin() -> None:
+    """Ф0: ``complete=True`` при нечитаемом origin'е — противоречие модели."""
+    with pytest.raises(ValueError):
+        CorpusCoverage(
+            product_id="p1",
+            complete=True,
+            expected_sources=2,
+            observed_sources=1,
+            unreadable_origins=["closed.example"],
+            computed_at="2026-01-01T00:00:00+00:00",
+        )
+
+
 def test_schema_opens(store: SqliteStore) -> None:
     ver = store.conn.execute(
         "SELECT value FROM schema_meta WHERE key = 'schema_version'"
     ).fetchone()
-    assert ver["value"] == "3.7.0"
+    assert ver["value"] == "3.8.0"
     tables = {
         r["name"] for r in store.conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
     }
@@ -1035,6 +1088,11 @@ def test_corpus_coverage_round_trip_and_idempotent_upsert(
         expected_sources=7,
         observed_sources=4,
         blocked={"robots_disallow": 3},
+        unreadable_origins=["closed.example"],
+        partial_blocks={
+            "closed.example": {"robots_disallow": 1},
+            "docs.example": {"parser_failed": 2, "source_unavailable": 1},
+        },
         truncated=False,
         computed_at="2026-01-01T00:00:00+00:00",
     )
@@ -1044,7 +1102,10 @@ def test_corpus_coverage_round_trip_and_idempotent_upsert(
 
     # Идемпотентный upsert: та же пара (run_id, product_id) перекрывается.
     updated = coverage.model_copy(
-        update={"blocked": {"robots_disallow": 2, "parser_failed": 1}}
+        update={
+            "blocked": {"robots_disallow": 2, "parser_failed": 1},
+            "partial_blocks": {"docs.example": {"parser_failed": 1}},
+        }
     )
     store.save_corpus_coverage(RUN_ID, updated)
     assert store.read_corpus_coverage(RUN_ID, "p1") == updated
@@ -1058,6 +1119,8 @@ def test_corpus_coverage_round_trip_and_idempotent_upsert(
                 "expected_sources": 1,
                 "observed_sources": 1,
                 "blocked": {},
+                "unreadable_origins": [],
+                "partial_blocks": {},
             }
         ),
     )

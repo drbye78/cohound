@@ -1096,11 +1096,18 @@ class CorpusCoverage(BaseModel):
     источников продукта нечитаема (robots/сеть/парсер/усечение).
 
     :param product_id: продукт-партиция.
-    :param complete: ``False``, если хотя бы один вклад-источник нечитаем (failed/
-        cancelled/pending) либо краул усечён политикой.
+    :param complete: ``False``, если краул усечён политикой либо хотя бы один **origin**
+        нечитаем (из него не получено ни одного ``FETCHED``-элемента и был хотя бы один
+        недочёт, кроме ``not_found``). Частичные блокировки читаемого origin не делают
+        покрытие неполным (см. :func:`core.pipeline.corpus.derive_corpus_coverage`).
     :param expected_sources: всего элементов сеанса по продукту.
     :param observed_sources: элементов, дошедших до ``FETCHED``.
-    :param blocked: ``error_kind → count`` по ``FAILED``-элементам (канонические классы).
+    :param blocked: ``error_kind → count`` по ``FAILED``-элементам (канонические классы;
+        аудит, не влияет на ``complete``).
+    :param unreadable_origins: origin'ы (``netloc``), от которых не получено ничего
+        (отсортировано, детерминированно).
+    :param partial_blocks: ``origin → {error_kind: count}`` — не-``not_found`` сбои по
+        каждому origin (аудит частичных отказов; ключи отсортированы).
     :param truncated: продукт попал в ``truncated_products`` сеанса.
     :param computed_at: момент вычисления (ISO-8601); детерминизм обеспечивает вызывающий.
     """
@@ -1112,6 +1119,8 @@ class CorpusCoverage(BaseModel):
     expected_sources: int = 0
     observed_sources: int = 0
     blocked: dict[str, int] = Field(default_factory=dict)
+    unreadable_origins: list[str] = Field(default_factory=list)
+    partial_blocks: dict[str, dict[str, int]] = Field(default_factory=dict)
     truncated: bool = False
     computed_at: str
 
@@ -1130,23 +1139,53 @@ class CorpusCoverage(BaseModel):
             raise ValueError("corpus_coverage.blocked: счётчики не могут быть отрицательными")
         return {key: int(value[key]) for key in sorted(value)}
 
+    @field_validator("unreadable_origins")
+    @classmethod
+    def _validate_unreadable_origins(cls, value: list[str]) -> list[str]:
+        """Origin'ы — непустые строки; дедуп и сортировка (детерминизм)."""
+        origins = {str(origin).strip().lower() for origin in value}
+        if "" in origins:
+            raise ValueError("corpus_coverage.unreadable_origins: пустой origin")
+        return sorted(origins)
+
+    @field_validator("partial_blocks")
+    @classmethod
+    def _validate_partial_blocks(
+        cls, value: dict[str, dict[str, int]]
+    ) -> dict[str, dict[str, int]]:
+        """``partial_blocks`` — канонические ``FailureKind``, неотрицательные счётчики."""
+        known = _KNOWN_FAILURE_KINDS
+        canonical: dict[str, dict[str, int]] = {}
+        for origin in sorted(value):
+            counts = value[origin] or {}
+            unknown = sorted(set(counts) - known)
+            if unknown:
+                raise ValueError(
+                    f"corpus_coverage.partial_blocks[{origin!r}]: неизвестные error_kind "
+                    f"{unknown}; допустимо: {', '.join(sorted(known))}"
+                )
+            if any(int(count) < 0 for count in counts.values()):
+                raise ValueError(
+                    "corpus_coverage.partial_blocks: счётчики не могут быть отрицательными"
+                )
+            canonical[str(origin).strip().lower()] = {
+                key: int(counts[key]) for key in sorted(counts)
+            }
+        return canonical
+
     @model_validator(mode="after")
     def _check_consistency(self) -> CorpusCoverage:
-        """``complete=True`` несовместимо с усечением/блокировками/потерями."""
+        """``complete=True`` несовместимо с усечением и нечитаемыми origin'ами."""
         if self.expected_sources < 0 or self.observed_sources < 0:
             raise ValueError("corpus_coverage: счётчики не могут быть отрицательными")
         if self.observed_sources > self.expected_sources:
             raise ValueError(
                 "corpus_coverage: observed_sources не может превышать expected_sources"
             )
-        if self.complete and (
-            self.truncated
-            or self.blocked
-            or self.observed_sources != self.expected_sources
-        ):
+        if self.complete and (self.truncated or self.unreadable_origins):
             raise ValueError(
-                "corpus_coverage: complete=True требует отсутствия усечения, "
-                "блокировок и потерь (observed == expected)"
+                "corpus_coverage: complete=True требует отсутствия усечения и "
+                "нечитаемых origin'ов"
             )
         return self
 

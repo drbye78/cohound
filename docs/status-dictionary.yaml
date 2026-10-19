@@ -89,6 +89,9 @@ source_scope:
 failure_kind:
   - search_failed
   - source_unavailable
+  # not_found — HTTP 404/410: успешное наблюдение отсутствия ресурса, не недоступность
+  # источника; не делает origin нечитаемым и не влияет на complete (Ф0/I2c).
+  - not_found
   - evaluation_failed
   - validation_failed
   - parser_failed

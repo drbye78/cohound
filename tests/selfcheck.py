@@ -679,7 +679,7 @@ def _crawl_session_dict_mirror() -> None:
 def _db_smoke() -> None:
     conn = connect(":memory:")
     ver = conn.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()
-    _assert(ver is not None and ver["value"] == "3.7.0")
+    _assert(ver is not None and ver["value"] == "3.8.0")
 
     tables = {r["name"] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     for t in ("products", "runs", "llm_scenarios", "corpus_docs", "corpus_chunks",
@@ -735,10 +735,12 @@ def _db_smoke() -> None:
     item_pk = [r["name"] for r in conn.execute("PRAGMA table_info(crawl_session_items)")
                if r["pk"]]
     _assert(item_pk == ["session_id", "product_id", "url"])
-    # Ф0 (schema 3.7.0): покрытие корпуса продукта — PK (run_id, product_id).
+    # Ф0 (schema 3.8.0): покрытие корпуса продукта — PK (run_id, product_id);
+    # v3.8.0 добавила origin-уровневые колонки (нечитаемые origin'ы/частичные блокировки).
     cov_cols = {r["name"] for r in conn.execute("PRAGMA table_info(corpus_coverage)")}
     _assert({"run_id", "product_id", "complete", "expected_sources", "observed_sources",
-             "blocked_json", "truncated", "computed_at"} <= cov_cols)
+             "blocked_json", "unreadable_origins_json", "partial_blocks_json",
+             "truncated", "computed_at"} <= cov_cols)
     cov_pk = [r["name"] for r in conn.execute("PRAGMA table_info(corpus_coverage)")
               if r["pk"]]
     _assert(cov_pk == ["run_id", "product_id"])
@@ -1026,6 +1028,8 @@ def _corpus_coverage_invariant() -> None:
         expected_sources=5,
         observed_sources=2,
         blocked={"robots_disallow": 3},
+        unreadable_origins=["closed.example"],
+        partial_blocks={"closed.example": {"robots_disallow": 3}},
         truncated=False,
         computed_at="2026-01-01T00:00:00+00:00",
     )
@@ -1038,9 +1042,12 @@ def _corpus_coverage_invariant() -> None:
         absence_rule=AbsenceRuleType.EXPLICIT,
         absence_evidence=[{"source_scope": "unknown", "scope_attested_by": None}],
     )
-    codes = {v.code for v in check_absence_coverage(machine_absent, incomplete)}
+    violations = check_absence_coverage(machine_absent, incomplete)
+    codes = {v.code for v in violations}
     if "I2c" not in codes:
         raise AssertionError("I2c: ❌ при неполном корпусе без аттестации не пойман")
+    if not any("closed.example" in v.message for v in violations):
+        raise AssertionError("I2c: сообщение обязано называть нечитаемый origin")
 
     attested = machine_absent.model_copy(
         update={
@@ -1057,6 +1064,8 @@ def _corpus_coverage_invariant() -> None:
             "complete": True,
             "observed_sources": 5,
             "blocked": {},
+            "unreadable_origins": [],
+            "partial_blocks": {},
         }
     )
     if check_absence_coverage(machine_absent, complete):
@@ -1076,6 +1085,19 @@ def _corpus_coverage_invariant() -> None:
         pass
     else:
         raise AssertionError("CorpusCoverage: truncated=True несовместим с complete=True")
+
+    # Ф0/3.8.0: частичные блокировки читаемого origin'а не делают корпус неполным
+    # (origin-уровневый порог); complete=True с непустым blocked допустим.
+    CorpusCoverage(
+        product_id="p",
+        complete=True,
+        expected_sources=5,
+        observed_sources=5,
+        blocked={"robots_disallow": 2},
+        partial_blocks={"a.example": {"robots_disallow": 2}},
+        truncated=False,
+        computed_at="2026-01-01T00:00:00+00:00",
+    )
 
 
 def _domain_derived() -> None:

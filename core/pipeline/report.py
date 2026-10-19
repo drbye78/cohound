@@ -1252,20 +1252,34 @@ def _coverage_records(
 def _coverage_anomaly(
     product_id: str, coverage: CorpusCoverage, *, param_id: str = ""
 ) -> dict[str, Any]:
-    """Строка аномалии «корпус продукта неполон» (Ф0) — с blocked counts."""
+    """Строка аномалии «корпус продукта неполон» (Ф0).
+
+    Главный действенный факт — **какие origin'ы нечитаемы** (``unreadable_origins``):
+    именно они не позволяют публиковать ``❌``. Частичные блокировки читаемых origin'ов
+    перечисляются отдельно и «тише» (``partial_blocks``) — это аудит, а не причина.
+    """
     blocked = dict(sorted(coverage.blocked.items()))
+    unreadable = list(coverage.unreadable_origins)
+    partial = {
+        origin: dict(sorted(counts.items()))
+        for origin, counts in sorted(coverage.partial_blocks.items())
+    }
     return {
         "product_id": product_id,
         "param_id": param_id,
         "reason": (
             "Ф0: неполное покрытие корпуса — complete=False, "
+            f"нечитаемые origin'ы: {unreadable or '[]'}, "
             f"blocked={blocked or '{}'}, "
             f"observed/expected={coverage.observed_sources}/{coverage.expected_sources}, "
-            f"truncated={coverage.truncated}; ❌ без человеческой аттестации "
-            "(scope_attested_by) не публикуется (I2c)"
+            f"truncated={coverage.truncated}; "
+            f"частичные блокировки (аудит): {partial or '{}'}; "
+            "❌ без человеческой аттестации (scope_attested_by) не публикуется (I2c)"
         ),
         "complete": False,
         "blocked": blocked,
+        "unreadable_origins": unreadable,
+        "partial_blocks": partial,
         "expected_sources": coverage.expected_sources,
         "observed_sources": coverage.observed_sources,
         "truncated": coverage.truncated,
@@ -1309,6 +1323,13 @@ def collect_corpus_coverage_anomalies(
         if audit is None:
             continue
         blocked = dict(sorted((audit.get("corpus_blocked") or {}).items()))
+        unreadable = list(audit.get("corpus_unreadable_origins") or [])
+        partial = {
+            str(origin): dict(sorted((counts or {}).items()))
+            for origin, counts in sorted(
+                (audit.get("corpus_partial_blocks") or {}).items()
+            )
+        }
         derived.setdefault(
             product_id,
             {
@@ -1316,14 +1337,18 @@ def collect_corpus_coverage_anomalies(
                 "param_id": str(getattr(cell, "param_id", "") or ""),
                 "reason": (
                     "Ф0: неполное покрытие корпуса — complete=False, "
+                    f"нечитаемые origin'ы: {unreadable or '[]'}, "
                     f"blocked={blocked or '{}'}, "
                     f"observed/expected={audit.get('corpus_observed_sources')}/"
                     f"{audit.get('corpus_expected_sources')}, "
                     f"truncated={audit.get('corpus_truncated')}; "
+                    f"частичные блокировки (аудит): {partial or '{}'}; "
                     "❌ без человеческой аттестации не публикуется (I2c)"
                 ),
                 "complete": False,
                 "blocked": blocked,
+                "unreadable_origins": unreadable,
+                "partial_blocks": partial,
                 "expected_sources": audit.get("corpus_expected_sources"),
                 "observed_sources": audit.get("corpus_observed_sources"),
                 "truncated": audit.get("corpus_truncated"),

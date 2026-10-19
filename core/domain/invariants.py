@@ -218,11 +218,13 @@ def check_absence_coverage(
     attested = any(bool(entry.get("scope_attested_by")) for entry in cell.absence_evidence)
     if attested:
         return []
+    unreadable = list(coverage.unreadable_origins)
     return [
         _violation(
             "I2c",
             "I2c: ❌ при неполном покрытии корпуса требует scope_attested_by "
-            "(человеческой аттестации); иначе это не доказательство отсутствия",
+            "(человеческой аттестации); иначе это не доказательство отсутствия "
+            f"(нечитаемые origin'ы: {unreadable or '[]'})",
             "absence_evidence",
         )
     ]

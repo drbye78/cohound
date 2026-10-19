@@ -4012,7 +4012,11 @@ def _session_item(
 
 
 def test_derive_corpus_coverage_counts_blocked_sources() -> None:
-    """Ф0: failed-исходы считаются по каноническому ``error_kind``, fetched — observed."""
+    """Ф0: failed-исходы считаются по каноническому ``error_kind``, fetched — observed.
+
+    Порог неполноты origin-уровневый: у ``a.test`` есть ``FETCHED``-страницы, поэтому
+    частичные отказы (robots) не делают покрытие неполным — они видны в ``partial_blocks``.
+    """
     items = [
         _session_item("https://a.test/1", CrawlItemStatus.FETCHED),
         _session_item("https://a.test/2", CrawlItemStatus.FETCHED),
@@ -4036,10 +4040,12 @@ def test_derive_corpus_coverage_counts_blocked_sources() -> None:
         computed_at="2026-01-01T00:00:00+00:00",
     )
 
-    assert coverage.complete is False
+    assert coverage.complete is True
+    assert coverage.unreadable_origins == []
     assert coverage.expected_sources == 6
     assert coverage.observed_sources == 3
     assert coverage.blocked == {"robots_disallow": 2}
+    assert coverage.partial_blocks == {"a.test": {"robots_disallow": 2}}
     assert coverage.truncated is False
 
 
@@ -4060,6 +4066,174 @@ def test_truncation_forces_incomplete_even_without_failures() -> None:
     assert coverage.observed_sources == coverage.expected_sources == 2
     assert coverage.truncated is True
     assert coverage.complete is False
+
+
+def test_partially_blocked_origin_stays_complete() -> None:
+    """Ф0: частичные отказы читаемого origin'а не делают корпус неполным.
+
+    Измеренный случай (faceted-URL): origin отдал 60 документов, 50 URL отказаны
+    ``robots_disallow`` и 1 — ``source_unavailable``; второй origin прочитан целиком.
+    Прежнее продуктовое правило объявляло такой корпус неполным и делало гейт инертным.
+    """
+    items = [
+        _session_item(f"https://docs.example/{i}", CrawlItemStatus.FETCHED)
+        for i in range(60)
+    ]
+    items += [
+        _session_item(
+            f"https://docs.example/q{i}?facet=1",
+            CrawlItemStatus.FAILED,
+            error_kind=FailureKind.ROBOTS_DISALLOW.value,
+        )
+        for i in range(50)
+    ]
+    items.append(
+        _session_item(
+            "https://docs.example/gone",
+            CrawlItemStatus.FAILED,
+            error_kind=FailureKind.SOURCE_UNAVAILABLE.value,
+        )
+    )
+    items += [
+        _session_item("https://portal.example/a", CrawlItemStatus.FETCHED),
+        _session_item("https://portal.example/b", CrawlItemStatus.FETCHED),
+    ]
+
+    coverage = derive_corpus_coverage(
+        product_id="p1",
+        items=items,
+        truncated=False,
+        computed_at="2026-01-01T00:00:00+00:00",
+    )
+
+    assert coverage.complete is True
+    assert coverage.unreadable_origins == []
+    assert coverage.expected_sources == 113
+    assert coverage.observed_sources == 62
+    assert coverage.blocked == {"robots_disallow": 50, "source_unavailable": 1}
+    assert coverage.partial_blocks == {
+        "docs.example": {"robots_disallow": 50, "source_unavailable": 1}
+    }
+
+
+def test_fully_closed_origin_makes_corpus_incomplete() -> None:
+    """Ф0: origin с нулём ``FETCHED`` нечитаем; отказы других origin'ов сюда не входят.
+
+    Измеренный случай: основной origin частично отказал (404/robots), но читаем;
+    отдельный origin отказал целиком — именно он блокирует ``❌``.
+    """
+    items = [
+        _session_item(f"https://docs.example/{i}", CrawlItemStatus.FETCHED)
+        for i in range(84)
+    ]
+    items += [
+        _session_item(
+            f"https://docs.example/gone/{i}",
+            CrawlItemStatus.FAILED,
+            error_kind=FailureKind.SOURCE_UNAVAILABLE.value,
+        )
+        for i in range(21)
+    ]
+    items += [
+        _session_item(
+            f"https://docs.example/account/{i}",
+            CrawlItemStatus.FAILED,
+            error_kind=FailureKind.ROBOTS_DISALLOW.value,
+        )
+        for i in range(9)
+    ]
+    items += [
+        _session_item(f"https://edu.example/{i}", CrawlItemStatus.FETCHED)
+        for i in range(95)
+    ]
+    items.append(
+        _session_item(
+            "https://closed.example/",
+            CrawlItemStatus.FAILED,
+            error_kind=FailureKind.ROBOTS_DISALLOW.value,
+        )
+    )
+
+    coverage = derive_corpus_coverage(
+        product_id="p1",
+        items=items,
+        truncated=False,
+        computed_at="2026-01-01T00:00:00+00:00",
+    )
+
+    assert coverage.complete is False
+    assert coverage.unreadable_origins == ["closed.example"]
+    assert coverage.expected_sources == 210
+    assert coverage.observed_sources == 179
+    assert coverage.partial_blocks == {
+        "closed.example": {"robots_disallow": 1},
+        "docs.example": {"robots_disallow": 9, "source_unavailable": 21},
+    }
+
+
+def test_not_found_only_origin_is_readable() -> None:
+    """Ф0: 404/410 — разрешённое наблюдение отсутствия, а не нечитаемость origin'а."""
+    items = [
+        _session_item("https://a.example/1", CrawlItemStatus.FETCHED),
+        _session_item("https://a.example/2", CrawlItemStatus.FETCHED),
+        _session_item(
+            "https://a.example/gone-1",
+            CrawlItemStatus.FAILED,
+            error_kind=FailureKind.NOT_FOUND.value,
+        ),
+        _session_item(
+            "https://gone.example/x",
+            CrawlItemStatus.FAILED,
+            error_kind=FailureKind.NOT_FOUND.value,
+        ),
+        _session_item(
+            "https://gone.example/y",
+            CrawlItemStatus.FAILED,
+            error_kind=FailureKind.NOT_FOUND.value,
+        ),
+    ]
+
+    coverage = derive_corpus_coverage(
+        product_id="p1",
+        items=items,
+        truncated=False,
+        computed_at="2026-01-01T00:00:00+00:00",
+    )
+
+    assert coverage.complete is True
+    assert coverage.unreadable_origins == []
+    assert coverage.blocked == {"not_found": 3}
+    assert coverage.partial_blocks == {}
+
+
+def test_derive_corpus_coverage_is_deterministic() -> None:
+    """Ф0: порядок элементов не влияет на вывод — байт-идентичный JSON."""
+    items = [
+        _session_item("https://b.example/1", CrawlItemStatus.FETCHED),
+        _session_item(
+            "https://a.example/1",
+            CrawlItemStatus.FAILED,
+            error_kind=FailureKind.ROBOTS_DISALLOW.value,
+        ),
+        _session_item(
+            "https://b.example/2",
+            CrawlItemStatus.FAILED,
+            error_kind=FailureKind.SOURCE_UNAVAILABLE.value,
+        ),
+    ]
+    first = derive_corpus_coverage(
+        product_id="p1",
+        items=items,
+        truncated=False,
+        computed_at="2026-01-01T00:00:00+00:00",
+    )
+    second = derive_corpus_coverage(
+        product_id="p1",
+        items=list(reversed(items)),
+        truncated=False,
+        computed_at="2026-01-01T00:00:00+00:00",
+    )
+    assert first.model_dump_json() == second.model_dump_json()
 
 
 def test_build_corpus_persists_product_coverage(tmp_path: Path) -> None:

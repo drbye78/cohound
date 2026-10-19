@@ -932,6 +932,8 @@ def test_corpus_coverage_anomaly_is_visible_in_csv_and_artifacts(
         expected_sources=10,
         observed_sources=6,
         blocked={"robots_disallow": 4},
+        unreadable_origins=["closed.example"],
+        partial_blocks={"closed.example": {"robots_disallow": 4}},
         truncated=False,
         computed_at="2026-01-01T00:00:00+00:00",
     )
@@ -941,6 +943,11 @@ def test_corpus_coverage_anomaly_is_visible_in_csv_and_artifacts(
     assert anomalies[0]["product_id"] == PRODUCT_A
     assert anomalies[0]["complete"] is False
     assert anomalies[0]["blocked"] == {"robots_disallow": 4}
+    assert anomalies[0]["unreadable_origins"] == ["closed.example"]
+    assert anomalies[0]["partial_blocks"] == {
+        "closed.example": {"robots_disallow": 4}
+    }
+    assert "closed.example" in anomalies[0]["reason"]
 
     artifacts = write_reports(
         bundle=bundle,

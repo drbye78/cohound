@@ -1248,12 +1248,21 @@ class SqliteStore:
         """Восстанавливает ``CorpusCoverage`` из строки ``corpus_coverage``."""
         raw = _parse_json_text(row["blocked_json"])
         blocked = raw if isinstance(raw, dict) else {}
+        raw_origins = _parse_json_text(row["unreadable_origins_json"])
+        unreadable_origins = raw_origins if isinstance(raw_origins, list) else []
+        raw_partial = _parse_json_text(row["partial_blocks_json"])
+        partial_blocks = raw_partial if isinstance(raw_partial, dict) else {}
         return CorpusCoverage(
             product_id=row["product_id"],
             complete=bool(row["complete"]),
             expected_sources=int(row["expected_sources"] or 0),
             observed_sources=int(row["observed_sources"] or 0),
             blocked={str(k): int(v) for k, v in blocked.items()},
+            unreadable_origins=[str(origin) for origin in unreadable_origins],
+            partial_blocks={
+                str(origin): {str(kind): int(count) for kind, count in (counts or {}).items()}
+                for origin, counts in partial_blocks.items()
+            },
             truncated=bool(row["truncated"]),
             computed_at=row["computed_at"],
         )
@@ -1265,17 +1274,33 @@ class SqliteStore:
             ensure_ascii=False,
             sort_keys=True,
         )
+        unreadable_origins_json = json.dumps(
+            sorted(coverage.unreadable_origins),
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        partial_blocks_json = json.dumps(
+            {
+                origin: dict(sorted(coverage.partial_blocks[origin].items()))
+                for origin in sorted(coverage.partial_blocks)
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
         with self.conn:
             self.conn.execute(
                 "INSERT INTO corpus_coverage"
                 " (run_id, product_id, complete, expected_sources, observed_sources,"
-                "  blocked_json, truncated, computed_at)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+                "  blocked_json, unreadable_origins_json, partial_blocks_json,"
+                "  truncated, computed_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
                 " ON CONFLICT(run_id, product_id) DO UPDATE SET"
                 "  complete = excluded.complete,"
                 "  expected_sources = excluded.expected_sources,"
                 "  observed_sources = excluded.observed_sources,"
                 "  blocked_json = excluded.blocked_json,"
+                "  unreadable_origins_json = excluded.unreadable_origins_json,"
+                "  partial_blocks_json = excluded.partial_blocks_json,"
                 "  truncated = excluded.truncated,"
                 "  computed_at = excluded.computed_at",
                 (
@@ -1285,6 +1310,8 @@ class SqliteStore:
                     coverage.expected_sources,
                     coverage.observed_sources,
                     blocked_json,
+                    unreadable_origins_json,
+                    partial_blocks_json,
                     int(coverage.truncated),
                     coverage.computed_at,
                 ),
