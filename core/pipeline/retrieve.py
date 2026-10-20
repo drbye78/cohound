@@ -14,6 +14,11 @@
 ``build_id`` — provenance единицы доказательства (R15/S4/S5).
 
 Tie-break детерминирован по ``chunk_id`` (R7). Модуль категорийно нейтрален (§1.3).
+
+``RetrievalResult.build_id`` — сборка, к которой привязаны данные: у R1/R2 —
+``vector_index.build_id`` (композиция, 09 §8.4), у R0 — ``lexical_index.build_id``
+(заполняется засевом). ``engine_version`` в провенанс не попадает: это версия
+движка, а не сборки.
 """
 
 from __future__ import annotations
@@ -65,6 +70,16 @@ def _as_profile(profile: RetrievalProfile | str) -> RetrievalProfile:
         return RetrievalProfile(str(profile).upper())
     except ValueError as exc:
         raise ValueError(f"неизвестный профиль ретривала: {profile!r} (ожидается R0|R1|R2)") from exc
+
+
+def _index_build_id(index: object) -> str:
+    """Сборка, к которой привязан порт: его ``build_id`` (пусто — «неизвестно»).
+
+    Не подменяется ``engine_version``: версия движка — свойство реализации, а не
+    данных; записывать её в ``runs.index_build_id`` ячейки нельзя (S5/R15).
+    """
+    value = getattr(index, "build_id", "")
+    return value if isinstance(value, str) else ""
 
 
 def rrf_fuse_chunks(
@@ -154,7 +169,10 @@ def retrieve(
         chunks = list(
             lexical_index.search(query_text, products, top_k=cutoff_k, lang=lang)
         )
-        build_id = getattr(lexical_index, "engine_version", "")
+        # Провенанс R0 — сборка (composition_id), а не ``engine_version``: движок
+        # описывает реализацию BM25, а не данные. Источник тот же, что у dense-плеча:
+        # атрибут ``build_id`` порта (``TantivyLexicalIndex`` заполняет его при засеве).
+        build_id = _index_build_id(lexical_index)
     elif resolved is RetrievalProfile.R1:
         assert vector_index is not None
         chunks = list(

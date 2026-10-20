@@ -20,6 +20,7 @@ from core.adapters.lexical_tantivy import tantivy_available
 from core.adapters.vector_npy import NpyVectorIndex
 from core.cli.wiring import build_adapters, build_vector_index, seed_lexical_index
 from core.domain import CorpusChunk, CorpusDoc
+from core.pipeline.composition import CompositionView, write_composition
 from core.pipeline.experiments import run_retrieval_experiment
 from core.pipeline.retrieve import RetrievalProfile
 from core.ports.vector_index import VectorQuery
@@ -51,8 +52,12 @@ def _write_build(root: Path) -> None:
     )
 
 
-def _store_with_chunks() -> SqliteStore:
-    """Store с персистентными чанками сборки (``corpus_chunks`` + ``corpus_docs`` FK)."""
+def _store_with_chunks(build_by_product: dict[str, str] | None = None) -> SqliteStore:
+    """Store с персистентными чанками сборки (``corpus_chunks`` + ``corpus_docs`` FK).
+
+    ``build_by_product`` — id сборки/партиции на продукт (по умолчанию единый ``BUILD``).
+    """
+    builds = build_by_product or {}
     store = SqliteStore(":memory:")
     for pid in dict.fromkeys(pid for _, pid in TEXTS.values()):
         store.upsert_corpus_doc(
@@ -72,7 +77,7 @@ def _store_with_chunks() -> SqliteStore:
                 text=text,
                 heading_path="H",
                 content_hash=f"hash-{cid}",
-                build_id=BUILD,
+                build_id=builds.get(pid, BUILD),
             )
             for cid, (text, pid) in TEXTS.items()
         ]
@@ -98,6 +103,7 @@ def test_build_vector_index_reads_persisted_build(tmp_path: Path) -> None:
         )
     assert isinstance(index, NpyVectorIndex)
     assert index.build_id == BUILD
+    assert index.composition_id == BUILD  # legacy-view: одна сборка = одна композиция
     assert index.dim == 2
 
 
@@ -169,6 +175,91 @@ def test_vector_index_absent_when_build_ambiguous(tmp_path: Path) -> None:
         index_root=tmp_path, package=PKG, chunk_lookup=lambda _cid: None, build_id=BUILD
     )
     assert isinstance(explicit, NpyVectorIndex)
+
+
+# ---------------------------------------------------------------------------
+# Композиция партиций (09 §8.2/§8.4)
+# ---------------------------------------------------------------------------
+
+COMPOSITION_ID = "cb_composed"
+PARTITION_A = "pb_alpha"
+PARTITION_B = "pb_beta"
+
+
+def _write_composed_layout(root: Path) -> CompositionView:
+    """Партиции с per-product id + манифест композиции (shim: id композиции ≠ партиции)."""
+    index_format.write_partition(
+        root, PKG, PARTITION_A, PRODUCT_A,
+        [[1.0, 0.0], [0.0, 1.0]], ["a0", "a1"], {"dim": 2},
+    )
+    index_format.write_partition(
+        root, PKG, PARTITION_B, PRODUCT_B,
+        [[1.0, 0.0]], ["b0"], {"dim": 2},
+    )
+    view = CompositionView(
+        composition_id=COMPOSITION_ID,
+        members={PRODUCT_A: PARTITION_A, PRODUCT_B: PARTITION_B},
+    )
+    write_composition(root, PKG, view, created_at="2026-10-20T00:00:00Z")
+    return view
+
+
+@requires_numpy
+def test_vector_index_uses_composition_file_when_present(tmp_path: Path) -> None:
+    _write_composed_layout(tmp_path)
+    with _store_with_chunks({PRODUCT_A: PARTITION_A, PRODUCT_B: PARTITION_B}) as store:
+        index = build_vector_index(
+            index_root=tmp_path,
+            package=PKG,
+            chunk_lookup=store.get_chunk,
+            build_id=COMPOSITION_ID,
+        )
+        assert isinstance(index, NpyVectorIndex)
+        assert index.build_id == COMPOSITION_ID
+        assert index.composition_id == COMPOSITION_ID
+        hits_a = index.search(
+            VectorQuery(product_ids=[PRODUCT_A], top_k=5, vector=[1.0, 0.0])
+        )
+        hits_b = index.search(
+            VectorQuery(product_ids=[PRODUCT_B], top_k=5, vector=[1.0, 0.0])
+        )
+    assert [h.chunk_id for h in hits_a] == ["a0", "a1"]
+    assert [h.chunk_id for h in hits_b] == ["b0"]
+    # Провенанс — партиция продукта, не id композиции (09 §8.4).
+    assert {h.build_id for h in hits_a} == {PARTITION_A}
+    assert {h.build_id for h in hits_b} == {PARTITION_B}
+
+
+@requires_tantivy
+def test_seed_lexical_index_uses_composition_file(tmp_path: Path) -> None:
+    _write_composed_layout(tmp_path)
+    with _store_with_chunks({PRODUCT_A: PARTITION_A, PRODUCT_B: PARTITION_B}) as store:
+        index = seed_lexical_index(
+            index_root=tmp_path,
+            package=PKG,
+            store=store,
+            build_id=COMPOSITION_ID,
+        )
+        assert index is not None
+        assert index.build_id == COMPOSITION_ID
+        hits = index.search("alpha", [PRODUCT_A], top_k=5)
+    assert [h.chunk_id for h in hits] == ["a0"]
+
+
+@requires_numpy
+def test_compositions_dir_does_not_make_build_ambiguous(tmp_path: Path) -> None:
+    """Служебный ``_compositions`` — не сборка: единственная сборка остаётся разрешимой."""
+    _write_build(tmp_path)
+    compositions = index_format.compositions_dir(tmp_path, PKG)
+    compositions.mkdir(parents=True)
+    (compositions / "cb_other.json").write_text("{}", encoding="utf-8")
+    assert index_format.list_build_ids(tmp_path, PKG) == [BUILD]
+    with _store_with_chunks() as store:
+        index = build_vector_index(
+            index_root=tmp_path, package=PKG, chunk_lookup=store.get_chunk
+        )
+    assert isinstance(index, NpyVectorIndex)
+    assert index.build_id == BUILD
 
 
 # ---------------------------------------------------------------------------

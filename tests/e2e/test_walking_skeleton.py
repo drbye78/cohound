@@ -134,7 +134,7 @@ def _build_ports(build_id: str) -> Ports:
                 score=1.0,
             )
         ],
-        engine_version=build_id,
+        build_id=build_id,
     )
     evaluator = FakeEvaluator(
         default=LLMCellOutput(

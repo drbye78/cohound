@@ -16,6 +16,7 @@ import pytest
 
 from core.adapters import index_format, vector_npy
 from core.adapters.vector_npy import NpyVectorIndex, VectorIndexUnavailable, numpy_available
+from core.pipeline.composition import CompositionView
 from core.ports.types import Chunk
 from core.ports.vector_index import VectorIndexPort, VectorQuery
 
@@ -219,3 +220,83 @@ def test_missing_numpy_guard(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
     assert index.available is False
     with pytest.raises(VectorIndexUnavailable):
         index.search(VectorQuery(product_ids=[PRODUCT_A], top_k=5, vector=[1.0, 0.0, 0.0]))
+
+
+# ---------------------------------------------------------------------------
+# Композиция партиций (09 §8.4): view=
+# ---------------------------------------------------------------------------
+
+
+def _write_partition(root: Path, partition_id: str, product_id: str, chunk_ids) -> None:
+    index_format.write_partition(
+        root,
+        PACKAGE,
+        partition_id,
+        product_id,
+        [[1.0, 0.0, 0.0] for _ in chunk_ids],
+        list(chunk_ids),
+        {"dim": 3, "embed_model_id": "test-model"},
+    )
+
+
+def _two_partition_view() -> CompositionView:
+    return CompositionView(
+        composition_id="cb_composite",
+        members={PRODUCT_A: "pb_alpha", PRODUCT_B: "pb_beta"},
+    )
+
+
+def test_view_reads_per_product_partitions_and_carries_partition_build(tmp_path: Path) -> None:
+    _write_partition(tmp_path, "pb_alpha", PRODUCT_A, ["a"])
+    _write_partition(tmp_path, "pb_beta", PRODUCT_B, ["b"])
+    view = _two_partition_view()
+    index = NpyVectorIndex(
+        tmp_path, PACKAGE, None, 3, _lookup(["a", "b"]), view=view
+    )
+
+    assert index.build_id == "cb_composite"  # контракт порта: id композиции
+    assert index.composition_id == "cb_composite"
+
+    hits = index.search(
+        VectorQuery(product_ids=[PRODUCT_A, PRODUCT_B], top_k=5, vector=[1.0, 0.0, 0.0])
+    )
+    by_product = {hit.product_id: hit for hit in hits}
+    assert by_product[PRODUCT_A].build_id == "pb_alpha"
+    assert by_product[PRODUCT_B].build_id == "pb_beta"
+
+
+def test_view_shard_ids_only_for_members(tmp_path: Path) -> None:
+    view = _two_partition_view()
+    index = NpyVectorIndex(tmp_path, PACKAGE, None, 3, _lookup([]), view=view)
+    assert index.shard_ids(PRODUCT_A) == [PRODUCT_A]
+    assert index.shard_ids("stranger") == []
+
+
+def test_view_search_of_non_member_raises(tmp_path: Path) -> None:
+    _write_partition(tmp_path, "pb_alpha", PRODUCT_A, ["a"])
+    index = NpyVectorIndex(
+        tmp_path, PACKAGE, None, 3, _lookup(["a"]), view=_two_partition_view()
+    )
+    with pytest.raises(KeyError, match="stranger"):
+        index.search(VectorQuery(product_ids=["stranger"], top_k=5, vector=[1.0, 0.0, 0.0]))
+
+
+def test_view_build_id_must_match_composition(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="composition_id"):
+        NpyVectorIndex(
+            tmp_path,
+            PACKAGE,
+            "other-build",
+            3,
+            _lookup(["a"]),
+            view=_two_partition_view(),
+        )
+
+
+def test_without_view_behaviour_is_unchanged(tmp_path: Path) -> None:
+    _write(tmp_path, PRODUCT_A, [[1.0, 0.0, 0.0]], ["a"])
+    index = NpyVectorIndex(tmp_path, PACKAGE, BUILD, 3, _lookup(["a"]))
+    assert index.build_id == BUILD
+    assert index.composition_id is None
+    hit = index.search(VectorQuery(product_ids=[PRODUCT_A], top_k=1, vector=[1.0, 0.0, 0.0]))[0]
+    assert hit.build_id == BUILD  # прежний единый build_id, не partition id

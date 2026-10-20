@@ -485,6 +485,7 @@ class _FakeLexical:
     """BM25-фейк: скриптованные хиты по тексту запроса; фильтрует партиции (I17)."""
 
     engine_version = "lex-fake-1"
+    build_id = "build-lex"
 
     def __init__(self, mapping: dict[str, list[RetrievedChunk]]) -> None:
         self.mapping = mapping
@@ -530,7 +531,7 @@ def test_retrieve_for_cell_composes_queries_dedups_and_truncates() -> None:
     # Дедуп по chunk_id: c1 из q1/q3 (лучший 0.9), c2 из q1/q2 (лучший 0.8), c3 0.4.
     assert [c.chunk_id for c in result.chunks] == ["c1", "c2", "c3"]
     assert result.profile == "R0"
-    assert result.build_id == "lex-fake-1"
+    assert result.build_id == "build-lex"  # сборка, не engine_version (§5/R15)
     assert result.cutoff_K == 3
     # Каждый запрос пошёл с продукт-скоупом и тем же top_k (I16/I17).
     assert [c[0] for c in lexical.calls] == queries

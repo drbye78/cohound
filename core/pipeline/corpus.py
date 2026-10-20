@@ -4606,6 +4606,9 @@ def build_corpus(
 
             entry = IndexManifestEntry(
                 index_build_id=index_build_id,
+                # MVP-4 шаг 1 (shim, 09 §8.1): одна верхнеуровневая сборка = одна
+                # продукт-партиция; формула id не меняется, pb := index_build_id.
+                partition_build_id=index_build_id,
                 product_id=product_id,
                 package_id=package,
                 partition_key=f"{index_build_id}:{product_id}",

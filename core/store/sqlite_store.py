@@ -900,13 +900,15 @@ class SqliteStore:
         with self.conn:
             self.conn.execute(
                 "INSERT OR REPLACE INTO index_manifest"
-                " (index_build_id, product_id, package_id, partition_key, snapshot_date,"
+                " (index_build_id, partition_build_id, product_id, package_id,"
+                "  partition_key, snapshot_date,"
                 "  chunker_version, extractor_version, embed_model_id, embed_dim,"
                 "  lexical_engine_version, vector_store, content_digest, store_path,"
                 "  created_at, stats_json)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     entry.index_build_id,
+                    entry.partition_build_id,
                     entry.product_id,
                     entry.package_id,
                     entry.partition_key,
@@ -1498,6 +1500,7 @@ class SqliteStore:
         ):
             yield IndexManifestEntry(
                 index_build_id=row["index_build_id"],
+                partition_build_id=row["partition_build_id"],
                 product_id=row["product_id"],
                 package_id=row["package_id"],
                 partition_key=row["partition_key"],

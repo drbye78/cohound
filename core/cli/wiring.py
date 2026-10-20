@@ -29,7 +29,7 @@ import importlib.util
 import json
 import os
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -95,6 +95,11 @@ from core.config.crawl_sources import CrawlSourcesConfig
 from core.domain.enums import DocumentLevel
 from core.domain.models import CrawlRunConfig
 from core.pipeline import Ports, Runner
+from core.pipeline.composition import (
+    CompositionView,
+    legacy_view,
+    read_composition,
+)
 from core.pipeline.corpus import ExtractionPool
 from core.pipeline.runner import PHASES, Clock, PhaseFn
 from core.ports.crawler import CrawlerPort
@@ -111,7 +116,6 @@ from core.ports.store import StorePort
 from core.ports.types import Chunk, ExtractedDoc, ExtractionRoute, FetchMode, RawPage
 from core.ports.types import FetchPlan
 from core.ports.vector_index import VectorIndexPort
-from core.store.backup import list_builds
 from core.store.sqlite_store import SqliteStore
 from core.util.cache import ContentAddressedCache
 from core.util.document_formats import document_content_type, document_suffix
@@ -230,21 +234,43 @@ def build_lite_embedder() -> LiteEmbedder:
 def _single_persisted_build(index_root: str | Path, package: str | None) -> str | None:
     """Единственная зафиксированная сборка пакета или ``None`` (детерминированно).
 
-    Переиспользует существующий перечислитель сборок ``backup.list_builds`` (единый
-    носитель раскладки ``index_store/{package}/{build}/``). При **неоднозначности**
-    (>1 сборки) возвращает ``None``: выбор произвольной сборки сломал бы воспроизводимость
-    (A3/§13) — вызывающий обязан передать явный ``build_id`` (из манифеста прогона).
+    Переиспользует перечислитель сборок ``index_format.list_build_ids`` (единый носитель
+    раскладки ``index_store/{package}/{build}/``; служебный ``_compositions`` исключён
+    там же). При **неоднозначности** (>1 сборки) возвращает ``None``: выбор произвольной
+    сборки сломал бы воспроизводимость (A3/§13) — вызывающий обязан передать явный
+    ``build_id`` (из манифеста прогона).
     """
     if not package:
         return None
-    builds = list_builds(index_root, package)
-    return builds[0][0] if len(builds) == 1 else None
+    builds = index_format.list_build_ids(index_root, package)
+    return builds[0] if len(builds) == 1 else None
 
 
-def _build_dim(index_root: str | Path, package: str, build_id: str) -> int | None:
-    """Размерность вектора из манифеста первой продукт-партиции сборки (или ``None``)."""
-    for product_id in index_format.list_partitions(index_root, package, build_id):
-        dim = index_format.read_manifest(index_root, package, build_id, product_id).get("dim")
+def _composition_view(
+    index_root: str | Path, package: str, build_id: str
+) -> CompositionView:
+    """Вид композиции для сборки: манифест ``_compositions/{build_id}.json`` или shim.
+
+    MVP-4 шаг 1: ``composition_id`` ищется по имени верхнеуровневой сборки (одна
+    сборка = одна композиция). Нет манифеста → :func:`legacy_view` (прежняя раскладка,
+    ``pb := index_build_id``). Срез деривации id заменит этот поиск.
+    """
+    stored = read_composition(index_root, package, build_id)
+    if stored is not None:
+        return stored
+    return legacy_view(
+        build_id, index_format.list_partitions(index_root, package, build_id)
+    )
+
+
+def _build_dim(
+    index_root: str | Path, package: str, view: CompositionView
+) -> int | None:
+    """Размерность вектора из манифеста первой продукт-партиции композиции (или ``None``)."""
+    for product_id in view.product_ids():
+        dim = index_format.read_manifest(
+            index_root, package, view.build_id_for(product_id), product_id
+        ).get("dim")
         if isinstance(dim, int) and dim > 0:
             return dim
     return None
@@ -274,10 +300,11 @@ def build_vector_index(
     resolved = build_id or _single_persisted_build(index_root, package)
     if resolved is None:
         return None
-    dim = _build_dim(index_root, package, resolved)
+    view = _composition_view(index_root, package, resolved)
+    dim = _build_dim(index_root, package, view)
     if dim is None:
         return None
-    return NpyVectorIndex(index_root, package, resolved, dim, chunk_lookup)
+    return NpyVectorIndex(index_root, package, resolved, dim, chunk_lookup, view=view)
 
 
 def seed_lexical_index(
@@ -292,23 +319,28 @@ def seed_lexical_index(
     Лексическое плечо симметрично dense: ``TantivyLexicalIndex`` сам по себе непригоден
     (пустой индекс отвергает поиск), поэтому порт строится/засевается только при наличии
     ``tantivy``, ``store`` и разрешённой сборки. Чанки берутся продукт-партициями из
-    ``store.iter_chunks(build_id, product_id=…)`` (``product_id`` известен из раскладки
-    ``index_format.list_partitions``), поэтому поиск остаётся продукт-скоупед (I17).
-    Иначе — ``None`` (явное отсутствие; эксперимент пропускает R0/R2, N3).
+    ``store.iter_chunks(partition_build_id, product_id=…)`` (``partition_build_id`` —
+    из вида композиции, 09 §8.4), поэтому поиск остаётся продукт-скоупед (I17).
+    ``index.build_id`` — ``composition_id`` (провенанс R0/R2). Иначе — ``None``
+    (явное отсутствие; эксперимент пропускает R0/R2, N3).
     """
     if not tantivy_available() or not package or store is None:
         return None
     resolved = build_id or _single_persisted_build(index_root, package)
     if resolved is None:
         return None
+    view = _composition_view(index_root, package, resolved)
     records: list[LexicalChunk] = []
-    for product_id in index_format.list_partitions(index_root, package, resolved):
-        for chunk in store.iter_chunks(resolved, product_id=product_id):
-            records.append(_lexical_record(chunk, product_id, resolved))
+    for product_id in view.product_ids():
+        # Чанки читаются из партиции продукта; id индекса — композиция (09 §8.4).
+        for chunk in store.iter_chunks(
+            view.build_id_for(product_id), product_id=product_id
+        ):
+            records.append(_lexical_record(chunk, product_id, view.composition_id))
     if not records:
         return None
     index = TantivyLexicalIndex()
-    index.index(records, build_id=resolved)
+    index.index(records, build_id=view.composition_id)
     return index
 
 
@@ -340,6 +372,9 @@ class ExperimentTarget:
     build_id: str
     product_ids: tuple[str, ...] = ()
     embed_model_id: str | None = None
+    #: ``product_id → partition_build_id`` (09 §8.1). Пусто — раскладка legacy:
+    #: все продукты читаются из ``build_id``.
+    partition_by_product: Mapping[str, str] = field(default_factory=dict)
 
 
 class EmbedderBuildMismatch(WiringError):
@@ -368,14 +403,20 @@ def assert_embedder_matches_build(query_model_id: str, build_model_id: str) -> N
 
 
 def _build_embed_model_id(
-    index_root: str | Path, package: str, build_id: str, product_ids: tuple[str, ...]
+    index_root: str | Path,
+    package: str,
+    view: CompositionView,
+    product_ids: tuple[str, ...],
 ) -> str | None:
-    """``embed_model_id`` из ``manifest.json`` первой продукт-партиции сборки (или ``None``).
+    """``embed_model_id`` из ``manifest.json`` первой продукт-партиции композиции (или ``None``).
 
-    On-disk манифест — авторитетный источник того, чем **физически** собраны векторы.
+    On-disk манифест — авторитетный источник того, чем **физически** собраны векторы;
+    партиция продукта читается по его ``partition_build_id`` (09 §8.4).
     """
     for product_id in product_ids:
-        manifest = index_format.read_manifest(index_root, package, build_id, product_id)
+        manifest = index_format.read_manifest(
+            index_root, package, view.build_id_for(product_id), product_id
+        )
         model_id = manifest.get("embed_model_id")
         if isinstance(model_id, str) and model_id:
             return model_id
@@ -388,8 +429,9 @@ def resolve_experiment_target(
     """Разрешает зафиксированную сборку прогона из БД (P4b, нейтрально).
 
     Источники (без сканирования каталогов, A1): ``runs.index_build_id`` даёт сборку;
-    ``index_manifest`` этой сборки — пакет раскладки, продукт-партиции и (фолбэк)
-    ``embed_model_id``; ``runs.package_id`` — фолбэк пакета, если запись
+    ``index_manifest`` этой сборки — пакет раскладки, продукт-партиции,
+    ``partition_build_id`` каждой партиции (09 §8.1; legacy-NULL → ``index_build_id``)
+    и (фолбэк) ``embed_model_id``; ``runs.package_id`` — фолбэк пакета, если запись
     ``index_manifest`` пакета не несёт. ``embed_model_id`` предпочитается из on-disk
     ``manifest.json`` партиции (авторитетный on-disk источник, §13).
 
@@ -407,10 +449,25 @@ def resolve_experiment_target(
     )
     if not package:
         return None
-    product_ids = tuple(sorted({entry.product_id for entry in entries})) or tuple(
-        index_format.list_partitions(index_root, package, build_id)
-    )
-    embed_model_id = _build_embed_model_id(index_root, package, build_id, product_ids)
+    stored_view = read_composition(index_root, package, build_id)
+    product_ids = tuple(sorted({entry.product_id for entry in entries}))
+    if not product_ids:
+        product_ids = tuple(
+            stored_view.product_ids()
+            if stored_view is not None
+            else index_format.list_partitions(index_root, package, build_id)
+        )
+    view = stored_view or legacy_view(build_id, product_ids)
+    # 09 §8.1: partition_build_id — из манифеста; legacy-строка (NULL) падает обратно
+    # на index_build_id (MVP-4 шаг 1: pb := index_build_id). Продукт без строки
+    # манифеста разрешается видом композиции.
+    partition_by_product: dict[str, str] = {
+        entry.product_id: entry.partition_build_id or entry.index_build_id
+        for entry in entries
+    }
+    for product_id in product_ids:
+        partition_by_product.setdefault(product_id, view.build_id_for(product_id))
+    embed_model_id = _build_embed_model_id(index_root, package, view, product_ids)
     if embed_model_id is None:
         embed_model_id = next(
             (entry.embed_model_id for entry in entries if entry.embed_model_id), None
@@ -420,6 +477,7 @@ def resolve_experiment_target(
         build_id=build_id,
         product_ids=product_ids,
         embed_model_id=embed_model_id,
+        partition_by_product=partition_by_product,
     )
 
 

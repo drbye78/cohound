@@ -122,7 +122,8 @@ CREATE TABLE IF NOT EXISTS corpus_chunks (
 -- K1: пакетная сборка (index_build_id, иммутабельна) × продукт-партиция (I17).
 -- Один index_build_id даёт N партиций → составной PK.
 CREATE TABLE IF NOT EXISTS index_manifest (
-    index_build_id  TEXT NOT NULL,                       -- пакетная сборка (иммутабельная)
+    index_build_id  TEXT NOT NULL,                       -- композиция когорты (09 §8.1)
+    partition_build_id TEXT,                             -- сборка продукт-партиции (09 §8.2)
     product_id      TEXT NOT NULL,                       -- продукт-партиция (I17)
     package_id      TEXT,
     partition_key   TEXT,                                -- (index_build_id, product_id)
@@ -422,6 +423,10 @@ def connect(db_path: str | Path = ":memory:") -> sqlite3.Connection:
         "index_manifest",
         {"extractor_version": "TEXT", "content_digest": "TEXT"},
     )
+    # DDL-миграция MVP-4 шаг 1 (09 §8.1–§8.2): additive ``partition_build_id`` —
+    # сборка продукт-партиции. Старые строки получают NULL (тогда читатель падает
+    # обратно на ``index_build_id``); формула ``index_build_id`` не меняется.
+    _ensure_columns(conn, "index_manifest", {"partition_build_id": "TEXT"})
     # DDL-миграция v3.4 (P1): деплой-провенанс манифеста (07 §7) и порог ранжирования
     # (§6/B-1) — реальные колонки. Back-compat не требуется: forward-compat хелпер чтения
     # удалён, старая БД получает колонки, значения остаются NULL до записи манифеста.

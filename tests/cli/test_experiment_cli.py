@@ -29,7 +29,12 @@ import pytest
 from core.adapters import index_format
 from core.adapters.embed_model2vec import LiteEmbedder
 from core.cli.main import EXIT_ERROR, EXIT_OK, EXIT_USAGE, main
-from core.cli.wiring import build_adapters, assert_embedder_matches_build, EmbedderBuildMismatch
+from core.cli.wiring import (
+    EmbedderBuildMismatch,
+    assert_embedder_matches_build,
+    build_adapters,
+    resolve_experiment_target,
+)
 from core.domain import CorpusChunk, CorpusDoc, IndexManifestEntry
 from core.domain.enums import RankingPolicy, RunMode
 from core.domain.models import Focus, RunConfig
@@ -158,6 +163,30 @@ def _ports(index_root: Path, store: SqliteStore, *, embedder: LiteEmbedder | Non
 # ---------------------------------------------------------------------------
 # Успешное измерение + артефакт фиксации
 # ---------------------------------------------------------------------------
+
+
+def test_resolve_target_exposes_partition_by_product(tmp_path: Path) -> None:
+    """09 §8.1: цель эксперимента несёт ``partition_build_id``; legacy-NULL → build_id."""
+    db = tmp_path / "runs" / "run-1" / "cohound.db"
+    _store(db, "run-1")
+    with SqliteStore(db) as store:
+        legacy = resolve_experiment_target(
+            store, "run-1", index_root=tmp_path / "index_store"
+        )
+        assert legacy is not None
+        assert legacy.partition_by_product == {PRODUCT: BUILD}
+
+        store.conn.execute(
+            "UPDATE index_manifest SET partition_build_id = ?"
+            " WHERE index_build_id = ? AND product_id = ?",
+            ("pb_alpha", BUILD, PRODUCT),
+        )
+        store.conn.commit()
+        explicit = resolve_experiment_target(
+            store, "run-1", index_root=tmp_path / "index_store"
+        )
+    assert explicit is not None
+    assert explicit.partition_by_product == {PRODUCT: "pb_alpha"}
 
 
 def test_experiment_measures_and_persists_provenance(

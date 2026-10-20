@@ -8,6 +8,7 @@ Transitional-импорт типов — см. ``ports/types.py``/``ports/llm.py
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
 
@@ -43,6 +44,23 @@ class RetrievalResult:
     profile: str = ""
     cutoff_K: int = 0
     build_id: str = ""
+
+
+@runtime_checkable
+class CompositionViewPort(Protocol):
+    """Структурный контракт вида композиции партиций (09 §8.4).
+
+    Конкретная реализация — :class:`core.pipeline.composition.CompositionView`.
+    Порт живёт в ``ports``, чтобы ``adapters`` не импортировали ``pipeline``
+    (матрица зависимостей 01 §1). Адаптеру нужны только эти три члена.
+    """
+
+    composition_id: str
+    members: Mapping[str, str]
+
+    def build_id_for(self, product_id: str) -> str: ...
+
+    def product_ids(self) -> list[str]: ...
 
 
 @runtime_checkable

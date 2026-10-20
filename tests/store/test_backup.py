@@ -230,6 +230,23 @@ def test_gc_keep_and_protect_respected(tmp_path: Path) -> None:
         assert (tmp_path / "pkg" / build_id).is_dir()
 
 
+def test_compositions_dir_is_not_a_build_and_survives_gc(tmp_path: Path) -> None:
+    """09 §8.2/§8.6: ``_compositions`` не сборка — не листается и не удаляется GC."""
+    _seed_six_builds(tmp_path)
+    compositions = tmp_path / "pkg" / "_compositions"
+    compositions.mkdir()
+    manifest = compositions / "cb_x.json"
+    manifest.write_text("{}", encoding="utf-8")
+
+    assert "_compositions" not in [b[0] for b in list_builds(tmp_path, "pkg")]
+    deleted = gc_index_builds(tmp_path, "pkg", keep=1, dry_run=False)
+
+    assert "_compositions" not in deleted
+    assert manifest.is_file()
+    # keep=1 оставляет ровно новейшую сборку; остальные — удалены.
+    assert [b[0] for b in list_builds(tmp_path, "pkg")] == ["b6"]
+
+
 def test_gc_keep_lt_1_refused(tmp_path: Path) -> None:
     _seed_six_builds(tmp_path)
     with pytest.raises(ValueError):

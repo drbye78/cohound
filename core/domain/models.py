@@ -1030,6 +1030,9 @@ class IndexManifestEntry(BaseModel):
     model_config = _BASE
 
     index_build_id: str
+    #: Сборка продукт-партиции (09 §8.1). ``None`` у legacy-строк: читатель падает
+    #: обратно на ``index_build_id`` (MVP-4 шаг 1: ``pb := index_build_id``).
+    partition_build_id: str | None = None
     product_id: str
     package_id: str | None = None
     partition_key: str | None = None

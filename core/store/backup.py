@@ -27,6 +27,8 @@ import zipfile
 from collections.abc import Iterable
 from pathlib import Path, PurePosixPath
 
+from core.util.index_layout import COMPOSITIONS_DIR
+
 __all__ = ["backup_run", "restore_run", "list_builds", "gc_index_builds"]
 
 #: Имя файла операционной БД прогона (§A.2).
@@ -232,13 +234,15 @@ def list_builds(index_root: str | Path, package: str) -> list[tuple[str, int, fl
         число продуктов-партиций внутри сборки; ``mtime`` — время модификации
         каталога сборки (для выбора новейших в GC). Если пакет отсутствует —
         пустой список.
+
+    Служебный ``_compositions`` (09 §8.2) — не сборка и в список не попадает.
     """
     package_dir = Path(index_root) / package
     if not package_dir.is_dir():
         return []
     builds: list[tuple[str, int, float]] = []
     for build_dir in package_dir.iterdir():
-        if not build_dir.is_dir():
+        if not build_dir.is_dir() or build_dir.name == COMPOSITIONS_DIR:
             continue
         n_partitions = sum(1 for child in build_dir.iterdir() if child.is_dir())
         builds.append((build_dir.name, n_partitions, build_dir.stat().st_mtime))
@@ -259,7 +263,13 @@ def gc_index_builds(
     Политика (§13): удаляются все сборки, кроме ``keep`` новейших (по
     ``(mtime, build_id)``) и явно защищённых ``protect`` (например, на которые
     ссылаются свежие ``run_manifest``). Иммутабельные сборки не трогаются
-    произвольно — удаление требует явного ``dry_run=False``.
+    произвольно — удаление требует явного ``dry_run=False``. Служебный
+    ``_compositions`` (09 §8.2) не сборка и не удаляется.
+
+    **Ограничение шага 1 (09 §8.6).** Пока ``partition_build_id`` не стал
+    per-product, keep-политика считает верхнеуровневые каталоги. Перед переходом на
+    per-product id нужен reference-aware GC: удалять только партиции, не входящие ни
+    в одну композицию, на которую ссылается ``runs.index_build_id``.
 
     :param keep: сколько новейших сборок сохранять; обязан быть ``>= 1``.
     :param protect: build_id, защищённые от удаления (дополнительно к ``keep``).
@@ -283,6 +293,8 @@ def gc_index_builds(
     package_dir = Path(index_root) / package
     deleted: list[str] = []
     for build_id in to_delete:
+        if build_id == COMPOSITIONS_DIR:  # страховка: служебный каталог не сборка
+            continue
         target = package_dir / build_id
         if target.is_dir():
             shutil.rmtree(target)

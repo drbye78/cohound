@@ -31,6 +31,7 @@ def _chunk(cid: str, product: str = "p1", score: float = 1.0, build: str = "b1")
 
 class _FakeLexical:
     engine_version = "fake-bm25-1"
+    build_id = "build-lex-1"
 
     def __init__(self, hits: list[RetrievedChunk]) -> None:
         self._hits = hits
@@ -85,7 +86,42 @@ def test_r0_uses_lexical_only() -> None:
     )
     assert result.profile == "R0"
     assert [c.chunk_id for c in result.chunks] == ["c1", "c2"]
-    assert result.build_id == "fake-bm25-1"
+    assert result.build_id == "build-lex-1"
+
+
+def test_r0_build_id_is_build_not_engine_version() -> None:
+    """Регрессия: R0-провенанс — сборка, а не ``engine_version`` движка (§5/R15)."""
+    lex = _FakeLexical([_chunk("c1")])
+    result = retrieve(
+        query_text="q",
+        query_vector=None,
+        product_ids=["p1"],
+        profile=RetrievalProfile.R0,
+        cutoff_k=5,
+        lexical_index=lex,
+    )
+    assert result.build_id == lex.build_id
+    assert result.build_id != lex.engine_version
+
+
+def test_r0_without_build_id_attribute_yields_empty_provenance() -> None:
+    """Порт без ``build_id`` — честное «неизвестно», не подмена версией движка."""
+
+    class _NoBuild:
+        engine_version = "engine-only"
+
+        def search(self, query, product_ids, top_k, lang=None):  # noqa: ANN001
+            return []
+
+    result = retrieve(
+        query_text="q",
+        query_vector=None,
+        product_ids=["p1"],
+        profile="R0",
+        cutoff_k=5,
+        lexical_index=_NoBuild(),
+    )
+    assert result.build_id == ""
 
 
 def test_r1_requires_vector() -> None:

@@ -21,9 +21,17 @@
 > переиспользуются **с пересчётом `content_hash(text)`** (I19) и без вызова чанкера;
 > пишутся `url_state`/`document_version`/`chunk_store`/`chunk_meta`; снимок получает
 > `docs_total`/`docs_new`/`docs_reused` из doc-set. `state is None` — байт-идентично
-> прежнему. Не реализовано: `offline`-reuse (честная ошибка + деградация до
-> `revalidate`), расписание `next_check_at`/потолок ревалидации, per-product
-> partitions/composition, carry-forward (этапы 4–5) — design-only.
+> прежнему. MVP-4 шаг 1 (композиции, поведение сохранено): `core/pipeline/composition.py`
+> (`CompositionView`, `derive_composition_id`, `legacy_view`, immutable
+> `_compositions/{id}.json`), аддитивный `index_manifest.partition_build_id` (в этом шаге
+> `pb := index_build_id` — shim), ретривал и lexical seeding идут через вид композиции
+> (`RetrievedChunk.build_id` = партиция, `index.build_id` = композиция), `_compositions/`
+> исключён из `list_partitions`/`list_builds`/GC. Формула `index_build_id` **не менялась**.
+> Попутно исправлен провенанс R0: `build_id` ячейки больше не `engine_version`. Не
+> реализовано: смена формулы на `pb_`/`cb_` + переиспользование партиции (шаг 2, ждёт
+> решений владельца по §13:672/`catalog_version`/`golden-full`), `offline`-reuse (честная
+> ошибка + деградация до `revalidate`), расписание `next_check_at`/потолок ревалидации,
+> reference-aware GC, carry-forward (этап 5) — design-only.
 > Документ описывает целевую архитектуру сценария «`add-product` → следующий прогон
 > обновления». Он не меняет регламент `cohound-spec-v2.md`; там, где дизайн затрагивает
 > семантику §13/§4.4, это явно помечено как **решение человека** (см. §12.6 и §17).

@@ -12,6 +12,11 @@
 **Продукт-скоупед (I17).** Перебираются **только** партиции ``query.product_ids``;
 оценка продукта не видит чужие партиции. Пустой список даёт пустой результат.
 
+**Композиция (09 §8.4).** При ``view`` (``CompositionViewPort``) каждый продукт читается
+из своей ``partition_build_id``, а ``RetrievedChunk.build_id`` несёт id этой партиции;
+``self.build_id``/``self.composition_id`` — id композиции (провенанс сборки). Без ``view``
+поведение прежнее: один ``build_id`` на все продукты.
+
 **Провенанс (R15).** ``index_format`` хранит лишь векторы и ``chunk_ids``, а
 ``RetrievedChunk`` требует ``text``/``heading_path``/``content_hash``. Поэтому адаптер
 принимает **резолвер метаданных чанка** (``chunk_lookup``): ``Mapping[str, Chunk]`` либо
@@ -38,7 +43,11 @@ from typing import Any
 
 from core.adapters.index_format import read_partition
 from core.ports.types import Chunk
-from core.ports.vector_index import RetrievedChunk, VectorQuery
+from core.ports.vector_index import (
+    CompositionViewPort,
+    RetrievedChunk,
+    VectorQuery,
+)
 
 __all__ = [
     "VectorIndexUnavailable",
@@ -64,30 +73,51 @@ class NpyVectorIndex:
 
     :param index_root: корень ``index_store/``.
     :param package: пакет категории (``packages/{case_id}`` — ядро не знает имён).
-    :param build_id: идентификатор иммутабельной сборки (K1/K2).
+    :param build_id: идентификатор иммутабельной сборки (K1/K2). При заданном ``view``
+        обязан совпадать с ``view.composition_id`` либо быть ``None``.
     :param dim: размерность вектора (из эмбеддера/манифеста; часть версии, §13).
     :param chunk_lookup: резолвер метаданных чанка (``Mapping``/callable), предоставляется
         корпусом/store. Без него ``RetrievedChunk`` не собрать (нужны text/heading/hash).
+    :param view: вид композиции партиций (09 §8.4, ``core.pipeline.composition``).
+        ``None`` — прежняя раскладка: один ``build_id`` на все продукты (поведение
+        байт-идентично до-композиционному).
 
     Атрибуты ``build_id``/``dim`` — контракт порта, доступны сразу после конструирования.
+    При ``view`` ``build_id`` — это ``composition_id`` (провенанс сборки), а каждая
+    продукт-партиция читается по своему ``partition_build_id``.
     """
 
     def __init__(
         self,
         index_root: str | Path,
         package: str,
-        build_id: str,
+        build_id: str | None,
         dim: int,
         chunk_lookup: ChunkLookup,
+        *,
+        view: CompositionViewPort | None = None,
     ) -> None:
         if dim <= 0:
             raise ValueError(f"dim обязан быть положительным, получено {dim!r}")
-        if not build_id:
-            raise ValueError("build_id обязан быть непустым")
+        if view is not None:
+            if not view.composition_id:
+                raise ValueError("view.composition_id обязан быть непустым")
+            if build_id is not None and build_id != view.composition_id:
+                raise ValueError(
+                    f"build_id {build_id!r} не совпадает с composition_id "
+                    f"{view.composition_id!r}: двусмысленный провенанс сборки"
+                )
+            resolved_build_id = view.composition_id
+        else:
+            if not build_id:
+                raise ValueError("build_id обязан быть непустым")
+            resolved_build_id = build_id
         self.index_root = Path(index_root)
         self.package = package
-        self.build_id = build_id
+        self.build_id = resolved_build_id
+        self.composition_id = view.composition_id if view is not None else None
         self.dim = dim
+        self._view = view
         self._lookup = _normalize_lookup(chunk_lookup)
 
     @property
@@ -100,9 +130,12 @@ class NpyVectorIndex:
     def shard_ids(self, product_id: str) -> list[str]:
         """Идентификатор(ы) партиции продукта.
 
-        Текущая раскладка — одна партиция на ``product_id`` (сателлиты индексируются
-        в партицию продукта-владельца), поэтому отображение 1:1.
+        Раскладка — одна партиция на ``product_id`` (сателлиты индексируются в партицию
+        продукта-владельца), поэтому отображение 1:1. При ``view`` продукт вне композиции
+        не имеет партиций: пустой список, а не чужая/несуществующая сборка.
         """
+        if self._view is not None and product_id not in self._view.members:
+            return []
         return [product_id]
 
     def search(self, q: VectorQuery) -> list[RetrievedChunk]:
@@ -122,10 +155,17 @@ class NpyVectorIndex:
         np = _require_numpy()
         query_vector = _unit_vector(np, q.vector, self.dim)
 
-        scored: list[tuple[float, str, str, Chunk]] = []
+        scored: list[tuple[float, str, str, Chunk, str]] = []
         for product_id in dict.fromkeys(q.product_ids):
+            # При ``view`` — своя партиция продукта; без view — прежний единый build_id
+            # (байт-идентичный до-композиционный путь).
+            partition_build_id = (
+                self.build_id
+                if self._view is None
+                else self._view.build_id_for(product_id)
+            )
             partition = read_partition(
-                self.index_root, self.package, self.build_id, product_id
+                self.index_root, self.package, partition_build_id, product_id
             )
             matrix = np.asarray(partition.vectors, dtype=np.float32)
             if matrix.ndim != 2 or matrix.shape[1] != self.dim:
@@ -143,7 +183,7 @@ class NpyVectorIndex:
                 meta = self._lookup(chunk_id)
                 if meta is None:
                     continue
-                scored.append((float(score), chunk_id, product_id, meta))
+                scored.append((float(score), chunk_id, product_id, meta, partition_build_id))
 
         scored.sort(key=lambda item: (-item[0], item[1]))
         return [
@@ -153,10 +193,10 @@ class NpyVectorIndex:
                 text=meta.text,
                 content_hash=meta.content_hash,
                 heading_path=meta.heading_path,
-                build_id=self.build_id,
+                build_id=partition_build_id,
                 score=score,
             )
-            for score, chunk_id, product_id, meta in scored[: q.top_k]
+            for score, chunk_id, product_id, meta, partition_build_id in scored[: q.top_k]
         ]
 
 

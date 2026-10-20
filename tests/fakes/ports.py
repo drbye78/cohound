@@ -312,9 +312,12 @@ class FakeLexicalIndex:
         self,
         docs: Sequence[RetrievedChunk] | None = None,
         engine_version: str = "fake-bm25-1",
+        build_id: str | None = None,
     ) -> None:
         self.docs = list(docs or [])
         self.engine_version = engine_version
+        #: Сборка/композиция, к которой привязан индекс (провенанс R0, §5/R15).
+        self.build_id = build_id
         self.calls: list[tuple[str, list[str], int]] = []
 
     def add(self, *chunks: RetrievedChunk) -> None:

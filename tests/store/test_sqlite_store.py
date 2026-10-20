@@ -903,6 +903,62 @@ def test_read_run_index_ref_and_iter_index_manifest(store: SqliteStore) -> None:
     assert list(store.iter_index_manifest("ib_absent")) == []
 
 
+def test_index_manifest_partition_build_id_round_trip(store: SqliteStore) -> None:
+    """09 §8.1: ``partition_build_id`` пишется/читается рядом с ``index_build_id``."""
+    store.save_index_manifest(
+        IndexManifestEntry(
+            index_build_id="cb_x",
+            partition_build_id="pb_p1",
+            product_id="p1",
+        )
+    )
+    entries = list(store.iter_index_manifest("cb_x"))
+    assert len(entries) == 1
+    assert entries[0].partition_build_id == "pb_p1"
+    assert entries[0].index_build_id == "cb_x"
+
+
+def test_index_manifest_legacy_row_has_null_partition_build_id(
+    store: SqliteStore,
+) -> None:
+    """Legacy-строка без ``partition_build_id`` читается: значение ``None``, не выдумка."""
+    store.save_index_manifest(
+        IndexManifestEntry(index_build_id="ib_legacy", product_id="p1")
+    )
+    entry = next(store.iter_index_manifest("ib_legacy"))
+    assert entry.partition_build_id is None
+
+
+def test_connect_migrates_legacy_index_manifest_partition_build_id(
+    tmp_path: Path,
+) -> None:
+    """Старая ``index_manifest`` получает additive-колонку; строки целы (NULL)."""
+    from core.store.sqlite import connect
+
+    db = tmp_path / "legacy_index.db"
+    legacy = sqlite3.connect(db)
+    legacy.execute(
+        "CREATE TABLE index_manifest (index_build_id TEXT NOT NULL, product_id TEXT NOT NULL,"
+        " package_id TEXT, PRIMARY KEY (index_build_id, product_id))"
+    )
+    legacy.execute(
+        "INSERT INTO index_manifest(index_build_id, product_id, package_id)"
+        " VALUES ('ib_old', 'p1', 'pkg-1')"
+    )
+    legacy.commit()
+    legacy.close()
+
+    migrated = connect(db)
+    cols = {r["name"] for r in migrated.execute("PRAGMA table_info(index_manifest)")}
+    assert "partition_build_id" in cols
+    row = migrated.execute(
+        "SELECT index_build_id, partition_build_id FROM index_manifest"
+    ).fetchone()
+    assert row["index_build_id"] == "ib_old"
+    assert row["partition_build_id"] is None
+    migrated.close()
+
+
 def test_crawl_provenance_roundtrip(store: SqliteStore) -> None:
     """§4.4/Phase 2: ``persist_manifest``/``read_manifest`` несут провенанс краула."""
     store.create_run(RUN_ID, _cfg())
