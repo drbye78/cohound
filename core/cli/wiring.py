@@ -342,8 +342,13 @@ def seed_lexical_index(
     ``tantivy``, ``store`` и разрешённой сборки. Чанки берутся продукт-партициями из
     ``store.iter_chunks(partition_build_id, product_id=…)`` (``partition_build_id`` —
     из вида композиции, 09 §8.4), поэтому поиск остаётся продукт-скоупед (I17).
-    ``index.build_id`` — ``composition_id`` (провенанс R0/R2). Иначе — ``None``
-    (явное отсутствие; эксперимент пропускает R0/R2, N3).
+
+    **Два идентификатора (09 §8.1/§8.4).** ``build_id`` записи (``LexicalChunk``) —
+    **партиция** продукта (``view.build_id_for(product_id)``), поэтому
+    ``RetrievedChunk.build_id`` у R0-хита — ``pb_`` (физическая партиция, как и у dense).
+    ``index.build_id`` — **композиция** (``composition_id``), провенанс R0/R2 и
+    ``RetrievalResult.build_id``. Иначе — ``None`` (явное отсутствие; эксперимент
+    пропускает R0/R2, N3).
     """
     if not tantivy_available() or not package or store is None:
         return None
@@ -353,11 +358,12 @@ def seed_lexical_index(
     view = _composition_view(index_root, package, resolved)
     records: list[LexicalChunk] = []
     for product_id in view.product_ids():
-        # Чанки читаются из партиции продукта; id индекса — композиция (09 §8.4).
-        for chunk in store.iter_chunks(
-            view.build_id_for(product_id), product_id=product_id
-        ):
-            records.append(_lexical_record(chunk, product_id, view.composition_id))
+        # Чанки читаются из партиции продукта; id записи — партиция (``pb_``), id
+        # индекса — композиция (``cb_``). Иначе R0-хит нёс бы ``cb_`` в
+        # ``RetrievedChunk.build_id`` и evidence назвал бы композицию партицией.
+        partition_build_id = view.build_id_for(product_id)
+        for chunk in store.iter_chunks(partition_build_id, product_id=product_id):
+            records.append(_lexical_record(chunk, product_id, partition_build_id))
     if not records:
         return None
     index = TantivyLexicalIndex()
@@ -366,7 +372,11 @@ def seed_lexical_index(
 
 
 def _lexical_record(chunk: Chunk, product_id: str, build_id: str) -> LexicalChunk:
-    """``ports.types.Chunk`` + ``product_id`` (из партиции) → запись лексического индекса."""
+    """``ports.types.Chunk`` + ``product_id`` (из партиции) → запись лексического индекса.
+
+    ``build_id`` записи — **партиция** продукта (``pb_``), а не композиция: из него
+    ``TantivyLexicalIndex.search`` собирает ``RetrievedChunk.build_id`` (09 §8.4).
+    """
     return LexicalChunk(
         chunk_id=chunk.chunk_id,
         product_id=product_id,

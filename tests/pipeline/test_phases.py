@@ -444,10 +444,76 @@ def test_corpus_phase_builds_and_captures_index_build_id(tmp_path: Path) -> None
         raw_root=str(tmp_path / "raw"),
     )["corpus"](_context(store, ports))
     assert result.status == "ok"
-    assert len(result.log_entries) == 1
-    build = result.log_entries[0]
+    build = next(
+        entry for entry in result.log_entries if hasattr(entry, "index_build_id")
+    )
     assert build.index_build_id.startswith("cb_")
     assert build.chunk_count == 2
+    # 09 §8.5: рядом со сборкой — видимая строка о партициях (обе собраны, не reuse).
+    reuse_notes = [e for e in result.log_entries if isinstance(e, str)]
+    assert len(reuse_notes) == 1
+    assert "переиспользовано 0, собрано 2" in reuse_notes[0]
+    assert build.index_build_id in reuse_notes[0]
+
+
+def test_corpus_phase_logs_reused_partitions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """09 §8.5: ``partitions_reused`` выводится строкой лога (reused vs built + cid)."""
+    import core.pipeline.phases as phases_mod
+
+    build = SimpleNamespace(
+        index_build_id="cb_reuse_demo",
+        entries=[object(), object(), object()],
+        partitions_reused=2,
+    )
+
+    def _spy(*args: Any, **kwargs: Any) -> PhaseResult:
+        return PhaseResult(status="ok", phase="corpus", log_entries=[build])
+
+    monkeypatch.setattr(phases_mod, "build_corpus", _spy)
+
+    store = _store()
+    try:
+        phases = build_phases(inputs=_inputs(), plan=_plan(), ports=Ports())
+        result = phases["corpus"](_context(store, Ports()))
+    finally:
+        store.close()
+
+    assert result.status == "ok"
+    assert result.errors == []  # переиспользование — не ошибка
+    notes = [entry for entry in result.log_entries if isinstance(entry, str)]
+    assert notes == [
+        (
+            "corpus: партиции — переиспользовано 2, собрано 1 "
+            "(композиция cb_reuse_demo)"
+        )
+    ]
+
+
+def test_corpus_phase_omits_partition_note_without_partitions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Пустая сборка (нет партиций) — строки о reuse нет (нечего рассказывать)."""
+    import core.pipeline.phases as phases_mod
+
+    build = SimpleNamespace(
+        index_build_id="cb_empty", entries=[], partitions_reused=0
+    )
+
+    def _spy(*args: Any, **kwargs: Any) -> PhaseResult:
+        return PhaseResult(status="ok", phase="corpus", log_entries=[build])
+
+    monkeypatch.setattr(phases_mod, "build_corpus", _spy)
+
+    store = _store()
+    try:
+        phases = build_phases(inputs=_inputs(), plan=_plan(), ports=Ports())
+        result = phases["corpus"](_context(store, Ports()))
+    finally:
+        store.close()
+
+    assert [entry for entry in result.log_entries if isinstance(entry, str)] == []
 
 
 def test_corpus_phase_forwards_run_config_crawl(monkeypatch: pytest.MonkeyPatch) -> None:

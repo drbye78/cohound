@@ -244,6 +244,35 @@ def test_seed_lexical_index_uses_composition_file(tmp_path: Path) -> None:
         assert index.build_id == COMPOSITION_ID
         hits = index.search("alpha", [PRODUCT_A], top_k=5)
     assert [h.chunk_id for h in hits] == ["a0"]
+    # Запись несёт партицию продукта, а не id композиции (09 §8.4).
+    assert {h.build_id for h in hits} == {PARTITION_A}
+
+
+@requires_tantivy
+def test_seed_lexical_index_records_carry_their_product_partition(
+    tmp_path: Path,
+) -> None:
+    """Две партиции в одной композиции: каждый R0-хит несёт **свой** ``pb_``.
+
+    Общий ``build_id`` записи прошёл бы на одном продукте случайно; здесь запрос
+    возвращает хиты обоих продуктов, поэтому id композиции или id чужой партиции
+    немедленно ломает соответствие продукт → партиция.
+    """
+    _write_composed_layout(tmp_path)
+    with _store_with_chunks({PRODUCT_A: PARTITION_A, PRODUCT_B: PARTITION_B}) as store:
+        index = seed_lexical_index(
+            index_root=tmp_path,
+            package=PKG,
+            store=store,
+            build_id=COMPOSITION_ID,
+        )
+        assert index is not None
+        assert index.build_id == COMPOSITION_ID
+        hits = index.search("alpha", [PRODUCT_A, PRODUCT_B], top_k=5)
+    by_product = {hit.product_id: hit.build_id for hit in hits}
+    assert by_product == {PRODUCT_A: PARTITION_A, PRODUCT_B: PARTITION_B}
+    assert {hit.chunk_id for hit in hits} == {"a0", "b0"}
+    assert COMPOSITION_ID not in {hit.build_id for hit in hits}
 
 
 @requires_numpy

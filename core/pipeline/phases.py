@@ -258,6 +258,35 @@ def _capture_index_build(holder: dict[str, Any], result: PhaseResult) -> None:
             return
 
 
+def _partition_reuse_note(result: PhaseResult) -> str | None:
+    """Строка лога о партициях корпуса: переиспользовано vs собрано + композиция.
+
+    ``IndexBuild.partitions_reused`` (09 §8.5) считался, но никуда не выводился —
+    оператор не видел выигрыша переиспользования. Строка детерминирована (счётчики из
+    сборки, id композиции — её ``index_build_id``) и **не появляется**, когда партиций
+    нет (нечего рассказывать). Это не ``errors``: переиспользование — норма, не сбой.
+    """
+    build = next(
+        (
+            entry
+            for entry in getattr(result, "log_entries", None) or ()
+            if getattr(entry, "index_build_id", None)
+        ),
+        None,
+    )
+    if build is None:
+        return None
+    entries = list(getattr(build, "entries", None) or ())
+    if not entries:
+        return None
+    reused = int(getattr(build, "partitions_reused", 0) or 0)
+    built = max(0, len(entries) - reused)
+    return (
+        f"corpus: партиции — переиспользовано {reused}, собрано {built} "
+        f"(композиция {build.index_build_id})"
+    )
+
+
 def _discovery_queries(inputs: Any) -> list[str]:
     """Запросы разведки, если их задал composition root (``inputs`` или ``inputs.run``)."""
     for holder in (inputs, getattr(inputs, "run", None)):
@@ -636,6 +665,10 @@ def build_phases(
             refresh_policy=refresh_policy,
         )
         _capture_index_build(holder, result)
+        # 09 §8.5: переиспользование партиций — видимая оператору строка лога (не ошибка).
+        reuse_note = _partition_reuse_note(result)
+        if reuse_note is not None:
+            result.log_entries.append(reuse_note)
         return _as_phase(result, "corpus")
 
     # -- Ш6: оценка (ретривал → оценщик) ------------------------------------ #

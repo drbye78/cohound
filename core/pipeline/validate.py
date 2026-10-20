@@ -131,6 +131,31 @@ def _chunk_build_id(chunk: ChunkLike) -> str | None:
     return getattr(chunk, "build_id", None) or None
 
 
+def _partition_build_id(
+    chunk_build_id: str | None, composition_id: str | None
+) -> str | None:
+    """``partition_build_id`` evidence — **только** физическая партиция (09 §8.1).
+
+    ``RetrievedChunk.build_id`` — партиция (``pb_``), но у legacy-строки
+    ``corpus_chunks.build_id`` может лежать старый ``ib_``/``cb_`` (сборка/композиция).
+    Выдавать композицию за партицию нельзя: evidence назвал бы не тот артефакт, а
+    backfill/новая колонка — вне этой правки. Поэтому:
+
+    * пусто → ``None`` (источник не из персистентного корпуса — не выдумываем);
+    * значение равно ``composition_id`` → ``None``: партиция **никогда** не равна
+      композиции (``pb_`` и ``cb_`` — разные формулы, 09 §8.1), значит это не партиция;
+    * иначе — значение как есть.
+
+    Сравнение с композицией, а не разбор префикса: префикс не несёт семантики
+    (legacy ``ib_`` был и сборкой, и партицией), а равенство id — надёжный признак.
+    """
+    if not chunk_build_id:
+        return None
+    if composition_id is not None and chunk_build_id == composition_id:
+        return None
+    return chunk_build_id
+
+
 def _chunk_score(chunk: ChunkLike) -> float | None:
     """Retrieval-скор чанка (есть только у ``RetrievedChunk``); иначе ``None``."""
     score = getattr(chunk, "score", None)
@@ -184,6 +209,7 @@ def _build_evidence(
     run_id: str,
     source_url: str | None,
     build_id: str | None,
+    composition_id: str | None = None,
 ) -> CellEvidence:
     """Собирает ``CellEvidence`` из подтверждённой цитаты (S8/I19).
 
@@ -191,6 +217,11 @@ def _build_evidence(
     ячейка при том же наборе цитат даёт те же id (идемпотентность resume/повторного Ш6).
     ``content_hash`` берётся из чанка — I19: внешний контент стал evidence только после
     ``corpus_raw → hash → index``. ``source_kind`` — :data:`DEFAULT_SOURCE_KIND`.
+
+    ``partition_build_id`` — физическая партиция чанка-цитаты (``pb_``), **не**
+    композиция: ``composition_id`` (из ``RetrievalResult.build_id``) нужен только чтобы
+    отличить legacy-строку с id сборки/композиции от настоящей партиции и в этом случае
+    оставить ``NULL`` (см. :func:`_partition_build_id`).
     """
     return CellEvidence(
         evidence_id=derived_evidence_id(
@@ -212,8 +243,10 @@ def _build_evidence(
         content_hash=_chunk_hash(chunk),
         index_build_id=build_id,
         # 09 §8.1: физическая партиция чанка-цитаты (``RetrievedChunk.build_id``).
-        # ``None`` — источник не из персистентного корпуса (не выдумываем).
-        partition_build_id=_chunk_build_id(chunk),
+        # Композиция/id сборки в этой колонке — не партиция, поэтому ``NULL``.
+        partition_build_id=_partition_build_id(
+            _chunk_build_id(chunk), composition_id
+        ),
     )
 
 
@@ -227,6 +260,7 @@ def validate_output(
     resolver: SourceResolver | None = None,
     strict: bool = True,
     min_retrieval_score: float | None = None,
+    composition_id: str | None = None,
 ) -> ValidationResult:
     """Механически валидирует выход оценщика и строит evidence (§10, 02 §C.2).
 
@@ -236,6 +270,9 @@ def validate_output(
     :param resolver: детерминированный резолвер ``source_id`` → URL (I10/I15); опционален.
     :param strict: strict-эшелон (``failure_kind`` при провале) vs preliminary-кандидат.
     :param min_retrieval_score: порог retrieval-скора для аномалии §10.4 (заметка, не сбой).
+    :param composition_id: ``RetrievalResult.build_id`` — композиция прогона (09 §8.1).
+        Нужна, чтобы не записать композицию в ``partition_build_id`` legacy-строки:
+        совпадение с ``chunk.build_id`` означает «это не партиция» → ``NULL``.
 
     Возвращает :class:`ValidationResult`. **Никогда не бросает** на невалидных данных:
     провал — это значение (``ok=False``), а не исключение — конвейер продолжает работу
@@ -308,6 +345,7 @@ def validate_output(
                 run_id=run_id,
                 source_url=source_url,
                 build_id=build_id,
+                composition_id=composition_id,
             )
         )
         cited_chunks.append(chunk)

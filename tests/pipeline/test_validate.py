@@ -269,7 +269,9 @@ def test_resolver_hash_mismatch_fails() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _retrieved(data: dict, chunk_id: str, score: float) -> RetrievedChunk:
+def _retrieved(
+    data: dict, chunk_id: str, score: float, build_id: str = "build-1"
+) -> RetrievedChunk:
     src = next(c for c in data["chunks"] if c["chunk_id"] == chunk_id)
     return RetrievedChunk(
         chunk_id=chunk_id,
@@ -277,7 +279,7 @@ def _retrieved(data: dict, chunk_id: str, score: float) -> RetrievedChunk:
         text=src["text"],
         content_hash=src["content_hash"],
         heading_path=src["heading_path"],
-        build_id="build-1",
+        build_id=build_id,
         score=score,
     )
 
@@ -296,6 +298,48 @@ def test_low_retrieval_score_anomaly_note_not_failure() -> None:
     assert result.ok is True  # аномалия не валит ячейку
     assert any("§10.4" in n for n in result.notes)
     assert result.resolved_evidence[0].index_build_id == "build-1"
+
+
+# ---------------------------------------------------------------------------
+# (3b) partition_build_id evidence: партиция, не композиция (09 §8.1)
+# ---------------------------------------------------------------------------
+
+
+def test_evidence_partition_is_chunk_partition_not_composition() -> None:
+    """``RetrievedChunk.build_id`` = ``pb_``, композиция — отдельно → evidence несёт ``pb_``."""
+    data = _data()
+    chunks = {"chunk_a2": _retrieved(data, "chunk_a2", 0.9, build_id="pb_p1")}
+    result = validate_output(
+        output=_output(data, "ok_output"),
+        chunks=chunks,
+        product_id=data["product_id"],
+        param_id=data["param"]["param_id"],
+        run_id=data["run_id"],
+        composition_id="cb_run",
+    )
+    assert result.ok is True
+    assert result.resolved_evidence[0].partition_build_id == "pb_p1"
+
+
+def test_evidence_partition_is_none_for_legacy_composition_build_id() -> None:
+    """Legacy-строка с id композиции в ``chunk.build_id`` → ``NULL``, не композиция.
+
+    Партиция никогда не равна композиции (разные формулы), поэтому равенство —
+    надёжный признак «это не партиция»; backfill и выдумывание запрещены.
+    """
+    data = _data()
+    chunks = {"chunk_a2": _retrieved(data, "chunk_a2", 0.9, build_id="cb_run")}
+    result = validate_output(
+        output=_output(data, "ok_output"),
+        chunks=chunks,
+        product_id=data["product_id"],
+        param_id=data["param"]["param_id"],
+        run_id=data["run_id"],
+        composition_id="cb_run",
+    )
+    assert result.ok is True
+    assert result.resolved_evidence[0].partition_build_id is None
+    assert result.resolved_evidence[0].partition_build_id != "cb_run"
 
 
 def test_single_citation_ok_is_flagged_for_review() -> None:

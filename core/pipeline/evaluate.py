@@ -700,6 +700,10 @@ def evaluate_cell(
             resolver=resolver,
             strict=strict,
             min_retrieval_score=min_retrieval_score,
+            # 09 §8.1: композиция прогона — из провенанса ретривала
+            # (``RetrievalResult.build_id``); нужна, чтобы legacy-чанк с id сборки не
+            # выдал композицию за физическую партицию в evidence.
+            composition_id=provenance[0],
         )
 
     # Хит — дополнительная попытка **до** цикла повторов: он не тратит бюджет
