@@ -4,8 +4,9 @@
 корпуса, wiring прогона) и хранилищем ``state/{package_id}/state.db`` (реализация —
 ``core/store/state_store.py``). Порт описывает поверхность, нужную ``resolve_product_modes``
 и durable-субстрату документов (MVP-3a: ``url_state``/``document_version``/``chunk_store``/
-``chunk_meta``); индексные партиции и cell measurement добавляются следующими срезами по
-мере появления потребителей.
+``chunk_meta``), а также реестру индексных партиций/композиций (MVP-4 шаг 2:
+``index_partition``/``index_composition``, 09 §8.1–§8.2); cell measurement добавляется
+следующими срезами по мере появления потребителей.
 
 Строки — простые dataclass'ы (домен остаётся Pydantic; порт может использовать dataclass).
 Временные метки — ISO-8601 строки (как они лежат в SQLite TEXT). Нейтрален (§1.3).
@@ -23,6 +24,8 @@ from core.domain.models import SeedEntry
 __all__ = [
     "ChunkRow",
     "DocumentVersionRow",
+    "IndexCompositionRow",
+    "IndexPartitionRow",
     "ProductStatePort",
     "ProductStateRow",
     "RunLineageRow",
@@ -179,6 +182,46 @@ class ChunkRow:
 
 
 @dataclass(frozen=True)
+class IndexPartitionRow:
+    """Строка ``index_partition``: иммутабельная продукт-партиция индекса (09 §8.1).
+
+    Ключ — ``(package_id, product_id, partition_build_id)``. ``content_digest`` —
+    отпечаток содержимого партиции (sorted ``(chunk_id, content_hash)``), версии —
+    входы формулы ``pb``. ``last_used_run_id`` — последний прогон, который партицию
+    использовал (наблюдаемость; не влияет на иммутабельность).
+    """
+
+    package_id: str
+    product_id: str
+    partition_build_id: str
+    content_digest: str
+    chunker_version: str
+    embed_model_id: str
+    extractor_version: str
+    lexical_engine_version: str
+    vector_store: str
+    store_path: str
+    chunks: int
+    created_at: str
+    dim: int | None = None
+    last_used_run_id: str | None = None
+
+
+@dataclass(frozen=True)
+class IndexCompositionRow:
+    """Строка ``index_composition``: композиция партиций когорты (09 §8.1/§8.2).
+
+    ``members`` — ``[(product_id, partition_build_id, content_digest)]``; в БД лежит
+    JSON-массив (``members_json``). ``composition_id`` — это ``runs.index_build_id``.
+    """
+
+    composition_id: str
+    package_id: str
+    members: tuple[tuple[str, str, str], ...]
+    created_at: str
+
+
+@dataclass(frozen=True)
 class RunLineageRow:
     """Строка ``run_lineage``: провенанс прогона в цепочке циклов (§12.3).
 
@@ -309,6 +352,28 @@ class ProductStatePort(Protocol):
 
     def iter_doc_chunks(self, doc_version_id: str) -> Iterable[ChunkRow]:
         """Чанки документа в порядке ``chunk_no`` (детерминированно)."""
+        ...
+
+    # -- индексные партиции/композиции (09 §8.1–§8.2) -------------------- #
+    def register_index_partition(self, row: IndexPartitionRow) -> None:
+        """Создаёт/обновляет строку продукт-партиции (идемпотентно по составному ключу).
+
+        Метаданные иммутабельны (``content_digest``/версии/``created_at`` не меняются при
+        повторной регистрации того же ``partition_build_id``); обновляется только
+        ``last_used_run_id``.
+        """
+        ...
+
+    def iter_index_partitions(self, package_id: str) -> Iterable[IndexPartitionRow]:
+        """Все известные продукт-партиции пакета (порядок ``product_id, partition_build_id``)."""
+        ...
+
+    def save_index_composition(self, row: IndexCompositionRow) -> None:
+        """Создаёт/обновляет композицию (идемпотентно по ``composition_id``)."""
+        ...
+
+    def get_index_composition(self, composition_id: str) -> IndexCompositionRow | None:
+        """Композиция по id или ``None`` (неизвестная/устаревшая строка)."""
         ...
 
     # -- lineage --------------------------------------------------------- #

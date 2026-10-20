@@ -27,7 +27,19 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Sequence
 
-from core.util.index_layout import COMPOSITIONS_DIR
+from core.util.index_partition import (
+    CHUNK_IDS_FILE as _CHUNK_IDS,
+    MANIFEST_FILE as _MANIFEST,
+    VECTORS_FILE as _VECTORS,
+    build_root,
+    compositions_dir,
+    is_committed,
+    list_build_ids,
+    list_composition_ids,
+    list_partitions,
+    partition_dir,
+    read_manifest,
+)
 
 __all__ = [
     "PartitionData",
@@ -35,19 +47,13 @@ __all__ = [
     "partition_dir",
     "list_partitions",
     "list_build_ids",
+    "list_composition_ids",
     "compositions_dir",
     "write_partition",
     "read_partition",
     "read_manifest",
     "is_committed",
 ]
-
-_VECTORS = "vectors.fp16.npy"
-_CHUNK_IDS = "chunk_ids.jsonl"
-_MANIFEST = "manifest.json"
-
-#: Служебный каталог композиций (09 §8.2): не сборка и не продукт-партиция.
-_COMPOSITIONS_DIR = COMPOSITIONS_DIR
 
 
 @dataclass(frozen=True)
@@ -58,76 +64,6 @@ class PartitionData:
     vectors: Any            # numpy.ndarray (N, dim) float16
     chunk_ids: list[str]
     manifest: dict[str, Any]
-
-
-def build_root(index_root: str | Path, package: str, build_id: str, product_id: str) -> Path:
-    """Каталог продукт-партиции: ``index_store/{package}/{build}/{product_id}/``."""
-    return Path(index_root) / package / build_id / product_id
-
-
-def partition_dir(
-    index_root: str | Path, package: str, build_id: str, product_id: str
-) -> Path:
-    """Псевдоним :func:`build_root` (явное имя для читателей)."""
-    return build_root(index_root, package, build_id, product_id)
-
-
-def is_committed(
-    index_root: str | Path, package: str, build_id: str, product_id: str
-) -> bool:
-    """Зафиксирована ли партиция: три артефакта на месте и манифест читается.
-
-    Читаемость манифеста — часть «зафиксирована»: битый JSON не должен выглядеть как
-    валидная иммутабельная партиция (иначе guard K2/§13 пропустит перезапись).
-    """
-    root = build_root(index_root, package, build_id, product_id)
-    if not all((root / name).is_file() for name in (_VECTORS, _CHUNK_IDS, _MANIFEST)):
-        return False
-    try:
-        read_manifest(index_root, package, build_id, product_id)
-    except (OSError, ValueError):
-        return False
-    return True
-
-
-def list_partitions(
-    index_root: str | Path, package: str, build_id: str
-) -> list[str]:
-    """Продукт-партиции сборки (имена подкаталогов), отсортированные детерминированно.
-
-    Единый носитель раскладки: читатель индекса не дублирует знание о том, что партиция —
-    это подкаталог ``{product_id}/``. Служебный ``_compositions`` — не партиция (09 §8.2).
-    Пустой список — сборки/пакета нет.
-    """
-    build_dir = Path(index_root) / package / build_id
-    if not build_dir.is_dir():
-        return []
-    return sorted(
-        child.name
-        for child in build_dir.iterdir()
-        if child.is_dir() and child.name != _COMPOSITIONS_DIR
-    )
-
-
-def list_build_ids(index_root: str | Path, package: str) -> list[str]:
-    """Идентификаторы индексных сборок пакета (каталоги верхнего уровня).
-
-    Служебный ``_compositions`` исключён здесь — в одном месте для всех читателей
-    (``wiring``/``backup``), чтобы каталог композиций не выглядел сборкой.
-    """
-    package_dir = Path(index_root) / package
-    if not package_dir.is_dir():
-        return []
-    return sorted(
-        child.name
-        for child in package_dir.iterdir()
-        if child.is_dir() and child.name != _COMPOSITIONS_DIR
-    )
-
-
-def compositions_dir(index_root: str | Path, package: str) -> Path:
-    """Каталог манифестов композиций: ``index_store/{package}/_compositions/``."""
-    return Path(index_root) / package / _COMPOSITIONS_DIR
 
 
 def write_partition(

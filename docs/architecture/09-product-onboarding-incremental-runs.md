@@ -26,12 +26,21 @@
 > `_compositions/{id}.json`), аддитивный `index_manifest.partition_build_id` (в этом шаге
 > `pb := index_build_id` — shim), ретривал и lexical seeding идут через вид композиции
 > (`RetrievedChunk.build_id` = партиция, `index.build_id` = композиция), `_compositions/`
-> исключён из `list_partitions`/`list_builds`/GC. Формула `index_build_id` **не менялась**.
-> Попутно исправлен провенанс R0: `build_id` ячейки больше не `engine_version`. Не
-> реализовано: смена формулы на `pb_`/`cb_` + переиспользование партиции (шаг 2, ждёт
-> решений владельца по §13:672/`catalog_version`/`golden-full`), `offline`-reuse (честная
-> ошибка + деградация до `revalidate`), расписание `next_check_at`/потолок ревалидации,
-> reference-aware GC, carry-forward (этап 5) — design-only.
+> исключён из `list_partitions`/`list_builds`/GC. Попутно исправлен провенанс R0:
+> `build_id` ячейки больше не `engine_version`. **MVP-4 шаг 2 реализован** (решение
+> владельца: `execution_change`, включая §13/`catalog_version`): формулы разделены —
+> `partition_build_id` (`pb_`, per-product, без `params_token`/`snapshot_date`) и
+> `composition_id` (`cb_` = `runs.index_build_id`); партиция переиспользуется с диска
+> **без вызова эмбеддера** (второй, физический контроль по `manifest.json`), композиция
+> пишется после фиксации всех членов; `corpus_chunks.build_id` = `pb`,
+> `index_manifest.index_build_id` = `cid`, `cell_evidence.partition_build_id` —
+> аддитивно; GC стал reference-aware (живая партиция композиции не удаляется по счётчику
+> `keep`); `_single_persisted_build` предпочитает явный id → единственную композицию →
+> единственную legacy-сборку; `catalog_version` добавлен в `EXECUTION_FIELDS` (§13:670):
+> после удаления `params_token` из id это единственный diff-видимый сигнал смены каталога.
+> Не реализовано: прунинг композиций, на которые не ссылается ни один прогон (нужна run
+> DB, вне шага), `offline`-reuse (честная ошибка + деградация до `revalidate`), расписание
+> `next_check_at`/потолок ревалидации, carry-forward (этап 5) — design-only.
 > Документ описывает целевую архитектуру сценария «`add-product` → следующий прогон
 > обновления». Он не меняет регламент `cohound-spec-v2.md`; там, где дизайн затрагивает
 > семантику §13/§4.4, это явно помечено как **решение человека** (см. §12.6 и §17).

@@ -7,7 +7,7 @@
 url ── CrawlerPort.fetch ──▶ RawPage ── retention в corpus_raw/{product_id}/{hash}.bin
     ── ExtractorPort.extract ──▶ ExtractedDoc
     ── dedup(content_hash) ──▶ ChunkerPort.chunk(doc, document_id)
-    ── content_hash(chunk.text) ──▶ CorpusChunk (build_id = index_build_id)
+    ── content_hash(chunk.text) ──▶ CorpusChunk (build_id = partition_build_id)
     ── (опц.) EmbedderPort.embed + IndexBuilderPort.build/commit ──▶ IndexManifestEntry
 ```
 
@@ -37,25 +37,31 @@ traversal-guard), затем тот же блэклист/``max_documents``/``ma
 рекламирует другой host (сигнал чужого сайта/SSRF), ``path`` — тот же host, но путь вне
 префикса корня.
 
-**Иммутабельность.** ``index_build_id`` — **контент-адресуемый** отпечаток батча сборки:
-``short_hash`` от (``_BUILD_ID_SCHEMA`` + пакет/params + ``snapshot_date`` + ``chunker_version``
-+ ``embed_model_id`` + ``extractor_version`` + ``lexical_engine_version`` + ``vector_store`` +
-``content_token``). ``content_token`` — детерминированный (порядко-независимый) отпечаток
-содержимого **всех** продукт-партиций (sorted ``(chunk_id, content_hash)``). Поэтому разные
-корпуса не могут получить один id (same-id/different-content коллизия), а те же входы и то же
-содержимое — один. Любое изменение входов/контента даёт новую сборку; старая не мутируется
-(§B.1/§13, K2). ``retrieval_profile``/``retrieval_cutoff_K``/``retrieval_params_json`` **не**
-входят в id: ретривал-конфиг не меняет чанкинг/векторы.
+**Иммутабельность и два id (09 §8.1).** ``partition_build_id`` (``pb_``) — контент-адресуемый
+отпечаток **одной** продукт-партиции: ``short_hash`` от (``_PARTITION_SCHEMA`` + пакет +
+``product_id`` + ``chunker_version`` + ``embed_model_id`` + ``extractor_version`` +
+``lexical_engine_version`` + ``vector_store`` + ``product_content_token``). ``product_content_token``
+— порядко-независимый отпечаток содержимого партиции (sorted ``(chunk_id, content_hash)``).
+``composition_id`` (``cb_``) — отпечаток состава когорты и версий/дайджестов её партиций
+(:func:`core.pipeline.composition.derive_composition_id`); это ``runs.index_build_id``.
+``params_token`` (каталог/фокус) и ``snapshot_date`` в ``pb`` **не входят**: они не меняют
+чанки/векторы (снимок — провенанс). Поэтому разные корпуса не могут получить один ``pb``
+(same-id/different-content коллизия), а те же входы и то же содержимое — один. Любое изменение
+входов/контента даёт новую сборку; старая не мутируется (§B.1/§13, K2).
+``retrieval_profile``/``retrieval_cutoff_K``/``retrieval_params_json`` **не** входят ни в один
+id: ретривал-конфиг не меняет чанкинг/векторы.
 
 **Два прохода (один вызов, без ре-краула).** Pass A (ingest) по каждому продукту выполняет
 краул → retention (I19) → экстракцию → дедуп(``content_hash``) → чанкинг и копит
 ``_ProductIngest`` в памяти; ``corpus_docs`` персистятся **инкрементально** — сразу при
 коммите каждого документа (retention-провенанс не зависит от сборки), поэтому жёсткое
 убийство теряет максимум документ «в полёте», а не весь продукт; ``build_id`` чанков пока
-``None``. После Pass A финализируется ``index_build_id``
-(по всем чанкам + декларированным входам). Pass B (index) проставляет ``build_id``, строит
-``IndexManifestEntry`` и вызывает ``_embed_and_build``; при успехе персистятся ``corpus_chunks``
-+ ``index_manifest`` («сначала диск, потом БД»). Никакого round/parent-чейнинга.
+``None``. После Pass A выводятся per-product ``partition_build_id`` и ``composition_id``
+(``runs.index_build_id``). Pass B (index) проставляет ``build_id = pb``, строит
+``IndexManifestEntry`` и либо переиспользует уже зафиксированную партицию (ноль эмбеддингов,
+09 §8.5), либо вызывает ``_embed_and_build``; при успехе персистятся ``corpus_chunks`` +
+``index_manifest`` («сначала диск, потом БД»), а после фиксации **всех** членов пишется
+иммутабельная композиция ``_compositions/{cid}.json``. Никакого round/parent-чейнинга.
 
 **Durable-краул (D3/L1a).** При наличии ``store`` и ``run_id`` фаза ведёт **сеанс краула**
 (``crawl_sessions`` + ``crawl_session_items``; ядро-владелец сеанса, §4.4): per-URL элемент
@@ -150,6 +156,11 @@ from core.pipeline.crawl_session import (
     open_session,
     prior_items,
 )
+from core.pipeline.composition import (
+    CompositionView,
+    derive_composition_id,
+    write_composition,
+)
 from core.pipeline.crawl_sources import (
     CrawlTarget,
     crawl_sources_digest,
@@ -181,6 +192,8 @@ from core.ports.poller import PollPort
 from core.ports.state import (
     ChunkRow,
     DocumentVersionRow,
+    IndexCompositionRow,
+    IndexPartitionRow,
     ProductStatePort,
     UrlStateRow,
 )
@@ -194,6 +207,9 @@ from core.ports.types import (
 )
 from core.util.document_formats import document_content_type, document_suffix
 from core.util.hashing import content_hash, short_hash
+from core.util.index_partition import build_root as _partition_root
+from core.util.index_partition import is_committed as _partition_is_committed
+from core.util.index_partition import read_manifest as _read_partition_manifest
 from core.util.html_links import extract_links
 from core.util.rate_limit import RateLimiter
 from core.util.security import validate_url
@@ -203,9 +219,9 @@ __all__ = ["ExtractionPool", "IndexBuild", "build_corpus", "derive_corpus_covera
 #: Разделитель полей material-строки ``index_build_id`` (unit separator — однозначная склейка).
 _FIELD_SEP = "\x1f"
 
-#: Схема формулы ``index_build_id`` (P2): входит в material, поэтому будущая ревизия формулы
-#: всегда даёт новые id (старые сборки не переиспользуются).
-_BUILD_ID_SCHEMA = "corpus-build-2"
+#: Схема формулы ``partition_build_id`` (09 §8.1). Входит в material, поэтому ревизия
+#: формулы всегда даёт новые id: старые партиции не переиспользуются молча.
+_PARTITION_SCHEMA = "partition-1"
 
 #: Phase 3 B2: максимум попыток подачи работ исполнителю при back-pressure
 #: (``accepted=False``). После исчерпания — изолированный ``FAILED`` (``source_unavailable``),
@@ -758,6 +774,9 @@ class IndexBuild:
         экстракцию+нарезку в этом прогоне; ``reused`` — версия переиспользована из
         durable-субстрата (304/тот же ``content_hash``). Пустая карта — legacy-путь
         (``state is None``): счётчики не выдумываются.
+    :param partitions_reused: сколько продукт-партиций переиспользовано с диска без
+        вызова ``embedder.embed`` (09 §8.5). Ноль — ни одна партиция не переиспользована
+        (первый прогон/нет ``index_root``); значение честное, не оценка.
     """
 
     index_build_id: str
@@ -782,6 +801,8 @@ class IndexBuild:
     #: 09 §6.3: счётчики документов по продукту (``total``/``new``/``reused``). Пусто —
     #: durable-субстрата нет (legacy), счётчики не фабрикуются.
     doc_counters: dict[str, dict[str, int]] = field(default_factory=dict)
+    #: 09 §8.5: число продукт-партиций, переиспользованных без эмбеддинга.
+    partitions_reused: int = 0
 
 
 @dataclass
@@ -998,56 +1019,53 @@ def _resolve_snapshot_date(plan: Any, snapshot_date: Any) -> str | None:
     return str(frozen) if frozen is not None else None
 
 
-def _params_token(plan: Any) -> str:
-    """Детерминированный отпечаток выбранного каталога (``param_id`` через запятую)."""
-    rows = getattr(plan, "params", None) or []
-    return ",".join(sorted(str(getattr(row, "param_id", row)) for row in rows))
-
-
-def _derive_index_build_id(
+def _derive_partition_build_id(
     *,
     package_id: str,
-    params_token: str,
-    snapshot_date: str | None,
+    product_id: str,
     chunker_version: str,
     embed_model_id: str,
     extractor_version: str,
     lexical_engine_version: str,
     vector_store: str,
-    content_token: str,
+    product_content_token: str,
 ) -> str:
-    """Детерминированный контент-адресуемый ``index_build_id`` (без random/UUID, §B.1/§13).
+    """Детерминированный ``partition_build_id`` одной продукт-партиции (09 §8.1).
 
-    Точные входы (склеены ``\\x1f``, порядок фиксирован):
+    Входы (склеены ``\\x1f``, порядок фиксирован):
 
-    0. ``_BUILD_ID_SCHEMA`` — версия формулы (P2);
-    1. ``package_id`` — пакет корпуса (производный от ``plan`` либо явный);
-    2. ``params_token`` — отпечаток выбранного каталога (``param_id``);
-    3. ``snapshot_date`` (пустая строка, если нет);
-    4. ``chunker_version``;
-    5. ``embed_model_id`` (пусто, если эмбеддер не подключён — W8);
-    6. ``extractor_version`` — композитная версия экстрактора (см. :func:`_extractor_token`);
-    7. ``lexical_engine_version``;
-    8. ``vector_store``;
-    9. ``content_token`` — отпечаток содержимого батча (см. :func:`_content_token`).
+    0. ``_PARTITION_SCHEMA`` — версия формулы;
+    1. ``package_id``;
+    2. ``product_id`` — партиция продукт-скоупед (I17);
+    3. ``chunker_version``;
+    4. ``embed_model_id`` (пусто, если эмбеддер не подключён);
+    5. ``extractor_version`` — композит версий экстрактора **этого** продукта;
+    6. ``lexical_engine_version``;
+    7. ``vector_store``;
+    8. ``product_content_token`` — отпечаток содержимого партиции.
 
-    ``retrieval_*`` намеренно **не** входят: ретривал-конфиг не меняет чанкинг/векторы.
+    **Чего здесь нет и почему.** ``params_token`` (каталог/фокус) и ``snapshot_date``
+    намеренно исключены: каталог/фокус не меняют чанки/векторы, а снимок — провенанс,
+    не содержимое. Это позволяет переиспользовать партицию при смене фокуса/каталога
+    (09 §8.1). ``retrieval_*`` тоже не входят: ретривал-конфиг не меняет чанкинг/векторы.
+
+    Ревизия формулы (``_PARTITION_SCHEMA``) всегда даёт новые id: старые партиции
+    остаются на диске иммутабельно, но новой композицией не переиспользуются.
     """
     material = _FIELD_SEP.join(
         (
-            _BUILD_ID_SCHEMA,
+            _PARTITION_SCHEMA,
             package_id,
-            params_token,
-            snapshot_date or "",
+            product_id,
             chunker_version,
             embed_model_id,
             extractor_version,
             lexical_engine_version,
             vector_store,
-            content_token,
+            product_content_token,
         )
     )
-    return "ib_" + short_hash(material, 24)
+    return "pb_" + short_hash(material, 24)
 
 
 def _product_content_token(chunks: Sequence[CorpusChunk]) -> str:
@@ -1065,35 +1083,17 @@ def _product_content_token(chunks: Sequence[CorpusChunk]) -> str:
     return short_hash(material, 24)
 
 
-def _content_token(per_product: Mapping[str, Sequence[CorpusChunk]]) -> str:
-    """Батч-отпечаток: product-delimited per-product токены (sorted ``product_id``).
+def _product_extractor_token(docs: Sequence[CorpusDoc]) -> str:
+    """Композитная ``extractor_version`` **одного** продукта (09 §8.1).
 
-    Один ``index_build_id`` описывает **весь** батч продуктов, поэтому отпечаток склеивает
-    отпечатки продукт-партиций в детерминированном порядке продуктов. Пустой батч даёт
-    детерминированный отпечаток пустой строки.
-    """
-    parts = [
-        f"{product_id}{_FIELD_SEP}{_product_content_token(per_product[product_id])}"
-        for product_id in sorted(per_product)
-    ]
-    return short_hash(_FIELD_SEP.join(parts), 24)
-
-
-def _extractor_token(per_product: Mapping[str, Sequence[CorpusDoc]]) -> str:
-    """Композитная ``extractor_version`` из фактически извлечённых документов батча.
-
-    Собираются непустые ``CorpusDoc.extractor_version`` по всем продуктам, дедуплицируются и
-    сортируются (порядко-независимо) и склеиваются через запятую. При единогласии версий даёт
-    одну строку; при расхождении (например, разные extract-маршруты) — детерминированный
-    композит. Документы без версии игнорируются; если версий нет вовсе — пустая строка.
+    Собираются непустые ``CorpusDoc.extractor_version`` документов продукта,
+    дедуплицируются и сортируются (порядко-независимо), склеиваются через запятую.
+    При единогласии версий даёт одну строку; при расхождении (разные extract-маршруты) —
+    детерминированный композит. Документы без версии игнорируются; если версий нет —
+    пустая строка (вызывающий подставляет объявленную версию порта).
     """
     versions = sorted(
-        {
-            doc.extractor_version
-            for docs in per_product.values()
-            for doc in docs
-            if doc.extractor_version
-        }
+        {doc.extractor_version for doc in docs if doc.extractor_version}
     )
     return ",".join(versions)
 
@@ -1145,26 +1145,110 @@ def _persist_chunks_and_manifest(
     chunks: list[CorpusChunk],
     entry: IndexManifestEntry | None,
     errors: list[str],
-) -> None:
+) -> bool:
     """Пишет ``corpus_chunks`` → ``index_manifest`` (порядок: FK ``doc_id``).
 
     Вызывается **только** когда физическая продукт-партиция реально зафиксирована на диске
     («disk first, DB second»): реестр не должен заявлять сборку, которой нет (K2/§13).
     Каждая запись обёрнута в try/except: сбой фиксируется в ``errors`` и не прерывает
     обработку остальных продуктов (контракт изоляции фаз, ``runner.py``).
+
+    :returns: ``True`` — строки записаны (или store отсутствует); ``False`` — хотя бы одна
+        запись не удалась. Композиция пишется только при ``True`` для **всех** членов:
+        иначе она ссылалась бы на партицию, которой нет в реестре прогона.
     """
     if store is None:
-        return
+        return True
+    ok = True
     if chunks:
         try:
             store.add_chunks_batch(chunks)
         except Exception as exc:  # noqa: BLE001
+            ok = False
             errors.append(f"add_chunks_batch: {type(exc).__name__}: {exc}")
     if entry is not None:
         try:
             store.save_index_manifest(entry)
         except Exception as exc:  # noqa: BLE001
+            ok = False
             errors.append(f"save_index_manifest({entry.product_id}): {type(exc).__name__}: {exc}")
+    return ok
+
+
+def _register_composition_state(
+    state: ProductStatePort,
+    *,
+    package_id: str,
+    composition_id: str,
+    entries: Sequence[IndexManifestEntry],
+    created_at: str,
+    run_id: str | None,
+    errors: list[str],
+) -> None:
+    """Регистрирует партиции и композицию в durable-состоянии (09 §8.1–§8.2).
+
+    Вызывается **после** того, как манифест композиции физически записан на диск и все
+    строки ``index_manifest``/``corpus_chunks`` персистентны («сначала диск, потом БД»).
+    Каждая запись изолирована в ``errors`` — сбой реестра не отменяет уже зафиксированную
+    сборку и не роняет фазу (контракт изоляции state-записей).
+    """
+    for entry in entries:
+        if not entry.partition_build_id:
+            continue
+        try:
+            state.register_index_partition(
+                IndexPartitionRow(
+                    package_id=package_id,
+                    product_id=entry.product_id,
+                    partition_build_id=entry.partition_build_id,
+                    content_digest=entry.content_digest or "",
+                    chunker_version=entry.chunker_version or "",
+                    embed_model_id=entry.embed_model_id or "",
+                    extractor_version=entry.extractor_version or "",
+                    lexical_engine_version=entry.lexical_engine_version or "",
+                    vector_store=entry.vector_store or "",
+                    store_path=entry.store_path or "",
+                    chunks=_entry_chunks(entry),
+                    dim=entry.embed_dim,
+                    created_at=created_at,
+                    last_used_run_id=run_id,
+                )
+            )
+        except Exception as exc:  # noqa: BLE001 — изоляция по контракту фазы
+            errors.append(
+                f"register_index_partition({entry.product_id}, "
+                f"{entry.partition_build_id}): {type(exc).__name__}: {exc}"
+            )
+    try:
+        state.save_index_composition(
+            IndexCompositionRow(
+                composition_id=composition_id,
+                package_id=package_id,
+                members=tuple(
+                    (
+                        entry.product_id,
+                        entry.partition_build_id or "",
+                        entry.content_digest or "",
+                    )
+                    for entry in entries
+                ),
+                created_at=created_at,
+            )
+        )
+    except Exception as exc:  # noqa: BLE001 — изоляция по контракту фазы
+        errors.append(
+            f"save_index_composition({composition_id}): {type(exc).__name__}: {exc}"
+        )
+
+
+def _entry_chunks(entry: IndexManifestEntry) -> int:
+    """Число чанков партиции из ``stats_json`` (0 при отсутствии/порче)."""
+    try:
+        payload = json.loads(entry.stats_json or "{}")
+    except (TypeError, json.JSONDecodeError):
+        return 0
+    value = payload.get("chunks") if isinstance(payload, dict) else None
+    return int(value) if isinstance(value, int) else 0
 
 
 def _embed_and_build(
@@ -1176,8 +1260,12 @@ def _embed_and_build(
     package_id: str,
     chunker_version: str,
     embed_model_id: str,
+    extractor_version: str,
+    lexical_engine_version: str,
+    vector_store: str,
+    product_content_token: str,
     snapshot_date: str | None,
-    index_build_id: str,
+    partition_build_id: str,
     errors: list[str],
 ) -> bool:
     """Best-effort эмбеддинг и физическая сборка индекса продукт-партиции (K3, §B.1).
@@ -1210,13 +1298,82 @@ def _embed_and_build(
             embed_model_id=embed_model_id,
             snapshot_date=snapshot_date or "",
             product_id=product_id,
-            extra={"index_build_id": index_build_id},
+            extra={
+                # 09 §8.2: физическая сборка адресуется **партицией**, не композицией.
+                "partition_build_id": partition_build_id,
+                # Контентный отпечаток партиции: сверяется вторым, физическим контролем
+                # переиспользования (09 §8.5); id уже хеширует его, но диск проверяется
+                # отдельно.
+                "content_digest": product_content_token,
+                # Версии производства/формата — для второго, физического контроля
+                # переиспользования (09 §8.5): они уже свернуты в ``pb``, но манифест
+                # на диске проверяется отдельно от id.
+                "extractor_version": extractor_version,
+                "lexical_engine_version": lexical_engine_version,
+                "vector_store": vector_store,
+            },
         )
         index_builder.build(port_chunks, vectors, meta)
         return True
     except Exception as exc:  # noqa: BLE001 — изоляция по контракту фазы
         errors.append(f"{product_id}: index build: {type(exc).__name__}: {exc}")
         return False
+
+
+def _partition_reuse_reason(
+    *,
+    index_root: str | Path | None,
+    package_id: str,
+    partition_build_id: str,
+    product_id: str,
+    product_content_token: str,
+    chunker_version: str,
+    embed_model_id: str,
+    extractor_version: str,
+    lexical_engine_version: str,
+    vector_store: str,
+) -> str | None:
+    """Причина, по которой партицию **нельзя** переиспользовать (``None`` — можно).
+
+    Гейт переиспользования (09 §8.5) — два независимых уровня:
+
+    1. **id-уровень.** ``partition_build_id`` уже хеширует все версии производства и
+       ``product_content_token``; совпал id — совпали входы by construction.
+    2. **физический уровень (эта проверка).** Партиция реально зафиксирована на диске
+       (``is_committed``), а её ``manifest.json`` несёт тот же ``content_digest`` и те же
+       ``chunker_version``/``embed_model_id``/``extractor_version``/
+       ``lexical_engine_version``/``vector_store``. Это защита от коллизии id, порчи и
+       подмены артефакта: id — не доказательство целостности диска.
+
+    Возвращает человекочитаемую причину отказа (для ``errors``) либо ``None``.
+    Отсутствие каталога при первом прогоне — **не** ошибка (возвращается ``None`` только
+    при пригодной партиции; вызывающий отличает «нет каталога» от «каталог неполон»).
+    """
+    if index_root is None:
+        return "index_root не задан"
+    if not _partition_is_committed(
+        index_root, package_id, partition_build_id, product_id
+    ):
+        return "партиция не зафиксирована на диске"
+    manifest = _read_partition_manifest(
+        index_root, package_id, partition_build_id, product_id
+    )
+    expected = {
+        "content_digest": product_content_token,
+        "chunker_version": chunker_version,
+        "embed_model_id": embed_model_id,
+        "extractor_version": extractor_version,
+        "lexical_engine_version": lexical_engine_version,
+        "vector_store": vector_store,
+    }
+    for name, value in expected.items():
+        actual = manifest.get(name)
+        if str(actual if actual is not None else "") != str(value):
+            return (
+                f"манифест партиции расходится по {name}: "
+                f"{actual!r} != {value!r}"
+            )
+    return None
 
 
 # --------------------------------------------------------------------------- #
@@ -1400,6 +1557,7 @@ def build_corpus(
     snapshot_date: Any = None,
     chunker_version: str | None = None,
     raw_root: str | Path = "corpus_raw",
+    index_root: str | Path | None = None,
     embedder: EmbedderPort | None = None,
     index_builder: IndexBuilderPort | None = None,
     domain_profiles: Mapping[str, DomainProfile] | None = None,
@@ -1447,6 +1605,12 @@ def build_corpus(
     :param raw_root: корень retention (``corpus_raw/{product_id}/{raw_hash}.bin``); дефолт
         ``"corpus_raw"`` совпадает с :class:`~core.config.paths.PathsConfig`; composition
         root передаёт resolved ``paths.corpus_raw`` (``03`` §A.1).
+    :param index_root: корень ``index_store/`` для (а) проверки/переиспользования уже
+        зафиксированной продукт-партиции (09 §8.5) и (б) записи иммутабельного манифеста
+        композиции ``_compositions/{composition_id}.json`` (09 §8.2). ``None`` — легаси-путь
+        без чтения/записи индекса: переиспользования нет, композиция не пишется (поведение
+        байт-идентично до-MVP-4). Composition root передаёт resolved ``paths.index_store``
+        (``03`` §A.1), совпадающий с корнем ``IndexBuilderPort``.
     :param embedder: опциональный ``EmbedderPort`` (W8); при наличии — батч-эмбеддинг.
     :param index_builder: опциональный ``IndexBuilderPort`` (W8); при наличии — build/commit.
     :param domain_profiles: типизированные доменные профили (D.2) для резолва ``FetchPlan``,
@@ -4565,62 +4729,89 @@ def build_corpus(
 
     _emit_progress()
 
-    # --- Финализация index_build_id (по батчу: декларированные входы + контент) --- #
-    # extractor_version: композит из фактически извлечённых документов; fallback — объявленная
-    # версия экстрактора-порта (если ExtractedDoc не нёс версии).
-    extractor_version_token = _extractor_token(
-        {ingest.product_id: ingest.docs for ingest in ingests}
-    ) or str(getattr(extractor, "version", "") or "")
-    content_token = _content_token(
-        {ingest.product_id: ingest.chunks for ingest in ingests}
-    )
-    index_build_id = _derive_index_build_id(
-        package_id=package,
-        params_token=_params_token(plan),
-        snapshot_date=snapshot,
-        chunker_version=resolved_chunker_version,
-        embed_model_id=embed_model_id,
-        extractor_version=extractor_version_token,
-        lexical_engine_version=lexical_engine_version,
-        vector_store=vector_store,
-        content_token=content_token,
-    )
+    # --- Планирование партиций и композиции (09 §8.1) ------------------------- #
+    # extractor_version: per-product композит из фактически извлечённых документов;
+    # fallback — объявленная версия экстрактора-порта (если ExtractedDoc не нёс версии).
+    declared_extractor_version = str(getattr(extractor, "version", "") or "")
+    #: ``product_id -> {partition_build_id, content_digest, extractor_version}``.
+    product_plans: dict[str, dict[str, str]] = {}
+    members: dict[str, str] = {}
+    digests: dict[str, str] = {}
+    for ingest in ingests:
+        if not ingest.chunks:
+            continue
+        product_token = _product_content_token(ingest.chunks)
+        extractor_token = (
+            _product_extractor_token(ingest.docs) or declared_extractor_version
+        )
+        partition_build_id = _derive_partition_build_id(
+            package_id=package,
+            product_id=ingest.product_id,
+            chunker_version=resolved_chunker_version,
+            embed_model_id=embed_model_id,
+            extractor_version=extractor_token,
+            lexical_engine_version=lexical_engine_version,
+            vector_store=vector_store,
+            product_content_token=product_token,
+        )
+        product_plans[ingest.product_id] = {
+            "partition_build_id": partition_build_id,
+            "content_digest": product_token,
+            "extractor_version": extractor_token,
+        }
+        members[ingest.product_id] = partition_build_id
+        digests[ingest.product_id] = product_token
 
-    # --- Pass B (index): build_id → manifest → physical build → persist --------- #
+    # ``composition_id`` — единственный ``runs.index_build_id`` (09 §8.1). Он зависит
+    # только от состава когорты и версий/дайджестов партиций; ``params_token``/
+    # ``snapshot_date``/``retrieval_*`` не входят.
+    index_build_id = derive_composition_id(package, members, digests)
+
+    # --- Pass B (index): partition_id → manifest → build/reuse → persist ------- #
     all_docs: list[CorpusDoc] = []
     entries: list[IndexManifestEntry] = []
     chunk_count = 0
+    partitions_reused = 0
+    all_physical_ok = True
 
     for ingest in ingests:
         product_id = ingest.product_id
         product_chunks = ingest.chunks
         entry: IndexManifestEntry | None = None
+        physical_ok = True
 
         if product_chunks:
             chunk_count += len(product_chunks)
-            # build_id и extractor_version чанка — по финализированной сборке (Pass B).
+            plan = product_plans[product_id]
+            partition_build_id = plan["partition_build_id"]
+            product_token = plan["content_digest"]
+            extractor_token = plan["extractor_version"]
+            # build_id и extractor_version чанка — по партиции (Pass B). ``build_id``
+            # чанка = ``pb``: ``iter_chunks(pb, product_id=…)`` остаётся рабочим, а I17
+            # держится структурно (``pb`` хеширует product_id + его content token).
             doc_versions = {doc.doc_id: doc.extractor_version for doc in ingest.docs}
             for chunk in product_chunks:
-                chunk.build_id = index_build_id
+                chunk.build_id = partition_build_id
                 chunk.extractor_version = doc_versions.get(chunk.doc_id)
 
             entry = IndexManifestEntry(
+                # ``index_build_id`` — композиция (``runs.index_build_id``);
+                # ``partition_build_id`` — физическая продукт-партиция (09 §8.1).
                 index_build_id=index_build_id,
-                # MVP-4 шаг 1 (shim, 09 §8.1): одна верхнеуровневая сборка = одна
-                # продукт-партиция; формула id не меняется, pb := index_build_id.
-                partition_build_id=index_build_id,
+                partition_build_id=partition_build_id,
                 product_id=product_id,
                 package_id=package,
                 partition_key=f"{index_build_id}:{product_id}",
                 snapshot_date=snapshot,
                 chunker_version=resolved_chunker_version or None,
-                extractor_version=extractor_version_token or None,
+                extractor_version=extractor_token or None,
                 embed_model_id=embed_model_id or None,
                 embed_dim=getattr(embedder, "dim", None),
                 lexical_engine_version=lexical_engine_version or None,
                 vector_store=vector_store or None,
-                content_digest=_product_content_token(product_chunks),
-                store_path=f"index_store/{package}/{index_build_id}/{product_id}/",
+                content_digest=product_token,
+                # Информационно; builder сам собирает путь из id, который ему передали.
+                store_path=f"index_store/{package}/{partition_build_id}/{product_id}/",
                 created_at=snapshot,
                 stats_json=json.dumps(
                     {
@@ -4633,28 +4824,69 @@ def build_corpus(
             )
             entries.append(entry)
 
+            # 09 §8.5: переиспользование партиции — реальный CPU-win (ноль эмбеддингов).
+            # Гейт: id-уровень (``pb``) + физическая проверка диска/манифеста.
+            if embedder is not None and index_builder is not None:
+                reuse_reason: str | None = "index_root не задан"
+                if index_root is not None:
+                    reuse_reason = _partition_reuse_reason(
+                        index_root=index_root,
+                        package_id=package,
+                        partition_build_id=partition_build_id,
+                        product_id=product_id,
+                        product_content_token=product_token,
+                        chunker_version=resolved_chunker_version,
+                        embed_model_id=embed_model_id,
+                        extractor_version=extractor_token,
+                        lexical_engine_version=lexical_engine_version,
+                        vector_store=vector_store,
+                    )
+                if reuse_reason is None:
+                    partitions_reused += 1
+                else:
+                    # «Нет каталога» — нормальный первый прогон, не ошибка. Существующий,
+                    # но непригодный каталог — видимая причина пересборки (не тихо).
+                    partition_path = (
+                        _partition_root(
+                            index_root, package, partition_build_id, product_id
+                        )
+                        if index_root is not None
+                        else None
+                    )
+                    if partition_path is not None and partition_path.exists():
+                        errors.append(
+                            f"{product_id}: партиция {partition_build_id} не "
+                            f"переиспользована ({reuse_reason}) — пересборка"
+                        )
+                    physical_ok = _embed_and_build(
+                        embedder,
+                        index_builder,
+                        product_id,
+                        product_chunks,
+                        package_id=package,
+                        chunker_version=resolved_chunker_version,
+                        embed_model_id=embed_model_id,
+                        extractor_version=extractor_token,
+                        lexical_engine_version=lexical_engine_version,
+                        vector_store=vector_store,
+                        product_content_token=product_token,
+                        snapshot_date=snapshot,
+                        partition_build_id=partition_build_id,
+                        errors=errors,
+                    )
+
+        all_docs.extend(ingest.docs)
         # «Disk first, DB second»: физическая сборка авторитетна. Пока build не завершился
         # успешно, corpus_chunks/index_manifest не пишутся (K2/§13); entry остаётся в entries
         # для провенанса/log (IndexBuild).
-        physical_ok = True
-        if entry is not None and embedder is not None and index_builder is not None:
-            physical_ok = _embed_and_build(
-                embedder,
-                index_builder,
-                product_id,
-                product_chunks,
-                package_id=package,
-                chunker_version=resolved_chunker_version,
-                embed_model_id=embed_model_id,
-                snapshot_date=snapshot,
-                index_build_id=index_build_id,
-                errors=errors,
-            )
-
-        all_docs.extend(ingest.docs)
         if physical_ok:
-            _persist_chunks_and_manifest(store, product_chunks, entry, errors)
+            persisted_ok = _persist_chunks_and_manifest(
+                store, product_chunks, entry, errors
+            )
+            if not persisted_ok:
+                all_physical_ok = False
         else:
+            all_physical_ok = False
             errors.append(
                 f"{product_id}: физическая сборка индекса не зафиксирована — "
                 "corpus_chunks/index_manifest не записаны (K2/§13); "
@@ -4662,10 +4894,44 @@ def build_corpus(
             )
 
     if entries and embedder is not None and index_builder is not None:
+        commit_ok = True
         try:
             index_builder.commit()
         except Exception as exc:  # noqa: BLE001 — изоляция по контракту фазы
+            commit_ok = False
             errors.append(f"index commit: {type(exc).__name__}: {exc}")
+
+        # 09 §8.2/§8.6: композиция пишется **после** фиксации всех партиций и их
+        # DB-строк. Частичный сбой члена/коммита ⇒ композиции нет (иначе она ссылалась
+        # бы на несуществующую партицию). Иммутабельность: другой состав при том же id —
+        # ``ImmutableCompositionError`` в ``errors``, не падение фазы.
+        if index_root is not None and all_physical_ok and commit_ok:
+            created_at = str(snapshot) if snapshot else _now_iso()
+            try:
+                write_composition(
+                    index_root,
+                    package,
+                    CompositionView(
+                        composition_id=index_build_id, members=members
+                    ),
+                    created_at=created_at,
+                    digests=digests,
+                )
+            except Exception as exc:  # noqa: BLE001 — изоляция по контракту фазы
+                errors.append(
+                    f"composition({index_build_id}): {type(exc).__name__}: {exc}"
+                )
+            else:
+                if state is not None:
+                    _register_composition_state(
+                        state,
+                        package_id=package,
+                        composition_id=index_build_id,
+                        entries=entries,
+                        created_at=created_at,
+                        run_id=run_id,
+                        errors=errors,
+                    )
 
     # L1a: финализация сеанса (``COMPLETED`` без сбоев, иначе ``PARTIAL``) — единственный
     # вызов на фазу. ``finished_at`` фиксирует момент завершения.
@@ -4751,6 +5017,7 @@ def build_corpus(
         truncation=truncation_records,
         document_skips=list(document_skips),
         doc_counters=dict(doc_counters),
+        partitions_reused=partitions_reused,
     )
     # Примечание: индексная сборка «возвращается» в log_entries (PhaseResult — контракт фазы;
     # W8 читает IndexBuild отсюда). Счётчики — в полях IndexBuild; дубликаты — в errors.

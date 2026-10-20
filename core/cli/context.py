@@ -1423,6 +1423,9 @@ def _resolve_phases(
     if passports_dir is None:
         passports_dir = "passports"
     raw_root = str(paths.corpus_raw) if paths is not None else "corpus_raw"
+    # 09 §8.1–§8.5: тот же корень, что у ``IndexBuilderPort`` (composition root), —
+    # переиспользование партиций и запись ``_compositions/*.json``.
+    index_root = str(paths.index_store) if paths is not None else "index_store"
     corpus_urls = (
         dict(urls)
         if urls is not None
@@ -1457,6 +1460,7 @@ def _resolve_phases(
         "passports": _load_passports_dir(passports_dir),
         "out_dir": getattr(args, "runs_dir", None) or "runs",
         "raw_root": raw_root,
+        "index_root": index_root,
         "retrieval_profile": getattr(args, "retrieval_profile", None),
         "cutoff_k": getattr(args, "cutoff_k", None),
         # D2: доменные профили (из domain_profiles.yaml) + явное переопределение

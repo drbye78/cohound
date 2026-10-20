@@ -69,6 +69,7 @@ def _seed_cycle(
     cells: list[tuple[str, str, Status]],
     methodology_version: str = "2.0.0",
     index_build_id: str = "build.1",
+    catalog_version: str = "1.0.0",
 ) -> None:
     """Создаёт прогон с ячейками и версионным контуром (для §13-границы)."""
     db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -81,7 +82,7 @@ def _seed_cycle(
             (
                 methodology_version,
                 "1.0.0",
-                "1.0.0",
+                catalog_version,
                 index_build_id,
                 "R1",
                 10,
@@ -161,6 +162,38 @@ def test_diff_across_boundary_returns_error(
     err = capsys.readouterr().err
     assert "§13" in err
     assert "index_build_id" in err
+
+
+def test_diff_refuses_catalog_change_as_execution_change(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """§13:670: смена ``catalog_version`` — граница ``execution_change``.
+
+    После удаления ``params_token`` из формулы id (09 §8.1) это единственный
+    diff-видимый сигнал смены каталога; без него diff сравнил бы несопоставимые
+    условия измерения молча.
+    """
+    db = tmp_path / "cohound.db"
+    _seed_cycle(
+        db,
+        "run.a",
+        cells=[(PRODUCT_A, PARAM_A, Status.OK)],
+        catalog_version="1.0.0",
+    )
+    _seed_cycle(
+        db,
+        "run.b",
+        cells=[(PRODUCT_A, PARAM_A, Status.OK)],
+        catalog_version="2.0.0",
+    )
+
+    code = main(["diff", "run.a", "run.b", "--db", str(db), "--json"])
+    assert code == EXIT_ERROR
+    payload = json_out(capsys)
+    assert payload["ok"] is False
+    assert payload["error"] == "§13"
+    assert "execution_change" in payload["message"]
+    assert "catalog_version" in payload["message"]
 
 
 def test_diff_across_boundary_json(

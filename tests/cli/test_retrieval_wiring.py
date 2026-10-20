@@ -247,12 +247,10 @@ def test_seed_lexical_index_uses_composition_file(tmp_path: Path) -> None:
 
 
 @requires_numpy
-def test_compositions_dir_does_not_make_build_ambiguous(tmp_path: Path) -> None:
-    """Служебный ``_compositions`` — не сборка: единственная сборка остаётся разрешимой."""
+def test_empty_compositions_dir_keeps_legacy_build_resolvable(tmp_path: Path) -> None:
+    """Пустой служебный ``_compositions`` не делает legacy-сборку неоднозначной."""
     _write_build(tmp_path)
-    compositions = index_format.compositions_dir(tmp_path, PKG)
-    compositions.mkdir(parents=True)
-    (compositions / "cb_other.json").write_text("{}", encoding="utf-8")
+    index_format.compositions_dir(tmp_path, PKG).mkdir(parents=True)
     assert index_format.list_build_ids(tmp_path, PKG) == [BUILD]
     with _store_with_chunks() as store:
         index = build_vector_index(
@@ -260,6 +258,31 @@ def test_compositions_dir_does_not_make_build_ambiguous(tmp_path: Path) -> None:
         )
     assert isinstance(index, NpyVectorIndex)
     assert index.build_id == BUILD
+
+
+@requires_numpy
+def test_single_composition_wins_over_legacy_dirs(tmp_path: Path) -> None:
+    """09 §8.1: N per-product каталогов — норма; единственная композиция разрешает сборку.
+
+    Старое правило «>1 верхнеуровневых каталогов → ``None``» молча выключило бы dense
+    после перехода на per-product партиции.
+    """
+    _write_composed_layout(tmp_path)
+    # Рядом лежит и legacy-сборка: композиция всё равно главнее (у неё явный состав).
+    index_format.write_partition(
+        tmp_path, PKG, "ib_legacy", PRODUCT_A, [[1.0, 0.0]], ["a0"], {"dim": 2}
+    )
+    assert len(index_format.list_build_ids(tmp_path, PKG)) > 1
+    with _store_with_chunks({PRODUCT_A: PARTITION_A, PRODUCT_B: PARTITION_B}) as store:
+        index = build_vector_index(
+            index_root=tmp_path, package=PKG, chunk_lookup=store.get_chunk
+        )
+        assert isinstance(index, NpyVectorIndex)
+        assert index.build_id == COMPOSITION_ID
+        hits = index.search(
+            VectorQuery(product_ids=[PRODUCT_A], top_k=5, vector=[1.0, 0.0])
+        )
+    assert [h.chunk_id for h in hits] == ["a0", "a1"]
 
 
 # ---------------------------------------------------------------------------

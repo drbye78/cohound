@@ -141,6 +141,12 @@ METHODOLOGY_FIELDS: tuple[str, ...] = (
 EXECUTION_FIELDS: tuple[str, ...] = (
     "case_id",
     "cohort_ref",
+    # §13:670: ``catalog_version`` ∈ ``execution_versions``. Раньше смена каталога была
+    # видна в diff только косвенно — через ``params_token`` в ``index_build_id``. После
+    # разделения id (09 §8.1) ``params_token`` из формулы убран, поэтому каталог обязан
+    # быть явной границей ``execution_change``, иначе diff молча сравнил бы несопоставимые
+    # условия измерения.
+    "catalog_version",
     "index_build_id",
     "embed_model_id",
     "chunker_version",

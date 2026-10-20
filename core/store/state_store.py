@@ -25,6 +25,8 @@ from core.domain.models import SeedEntry
 from core.ports.state import (
     ChunkRow,
     DocumentVersionRow,
+    IndexCompositionRow,
+    IndexPartitionRow,
     ProductStateRow,
     RunLineageRow,
     SeedRow,
@@ -592,6 +594,123 @@ class SqliteStateStore:
             (doc_version_id,),
         ).fetchall()
         return [self._chunk_row(row) for row in rows]
+
+    # -- индексные партиции/композиции (09 §8.1–§8.2) --------------------- #
+    def register_index_partition(self, row: IndexPartitionRow) -> None:
+        """Upsert продукт-партиции; метаданные иммутабельны, двигается только ``last_used``.
+
+        ``ON CONFLICT`` обновляет ``last_used_run_id``, но **не** переписывает
+        ``content_digest``/версии/``created_at``: партиция иммутабельна (K2/§13), а строка
+        реестра — её отражение. Если на диске/в БД уже другой digest для того же
+        ``partition_build_id`` — это расхождение id-формулы; хранилище не «исправляет»
+        его молча, а сохраняет первое зафиксированное значение.
+        """
+        self._conn.execute(
+            "INSERT INTO index_partition (package_id, product_id, partition_build_id,"
+            " content_digest, chunker_version, embed_model_id, extractor_version,"
+            " lexical_engine_version, vector_store, store_path, chunks, dim, created_at,"
+            " last_used_run_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            " ON CONFLICT(package_id, product_id, partition_build_id) DO UPDATE SET"
+            " last_used_run_id = excluded.last_used_run_id",
+            (
+                row.package_id,
+                row.product_id,
+                row.partition_build_id,
+                row.content_digest,
+                row.chunker_version,
+                row.embed_model_id,
+                row.extractor_version,
+                row.lexical_engine_version,
+                row.vector_store,
+                row.store_path,
+                row.chunks,
+                row.dim,
+                row.created_at,
+                row.last_used_run_id,
+            ),
+        )
+        self._conn.commit()
+
+    def iter_index_partitions(self, package_id: str) -> list[IndexPartitionRow]:
+        """Все известные партиции пакета (детерминированный порядок)."""
+        rows = self._conn.execute(
+            "SELECT * FROM index_partition WHERE package_id = ?"
+            " ORDER BY product_id, partition_build_id",
+            (package_id,),
+        ).fetchall()
+        return [
+            IndexPartitionRow(
+                package_id=row["package_id"],
+                product_id=row["product_id"],
+                partition_build_id=row["partition_build_id"],
+                content_digest=row["content_digest"],
+                chunker_version=row["chunker_version"],
+                embed_model_id=row["embed_model_id"],
+                extractor_version=row["extractor_version"],
+                lexical_engine_version=row["lexical_engine_version"],
+                vector_store=row["vector_store"],
+                store_path=row["store_path"],
+                chunks=row["chunks"],
+                dim=row["dim"],
+                created_at=row["created_at"],
+                last_used_run_id=row["last_used_run_id"],
+            )
+            for row in rows
+        ]
+
+    def save_index_composition(self, row: IndexCompositionRow) -> None:
+        """Upsert композиции (идемпотентно по ``composition_id``)."""
+        members_json = json.dumps(
+            [
+                {
+                    "product_id": product_id,
+                    "partition_build_id": partition_build_id,
+                    "content_digest": content_digest,
+                }
+                for product_id, partition_build_id, content_digest in row.members
+            ],
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        # Композиция иммутабельна (K2/§13): повтор того же id — no-op, а не перезапись.
+        # Другой состав при том же id отвергает ``write_composition`` до этой записи.
+        self._conn.execute(
+            "INSERT INTO index_composition (composition_id, package_id, members_json,"
+            " created_at) VALUES (?, ?, ?, ?)"
+            " ON CONFLICT(composition_id) DO NOTHING",
+            (row.composition_id, row.package_id, members_json, row.created_at),
+        )
+        self._conn.commit()
+
+    def get_index_composition(
+        self, composition_id: str
+    ) -> IndexCompositionRow | None:
+        """Композиция по id (``None`` — неизвестна)."""
+        row = self._conn.execute(
+            "SELECT * FROM index_composition WHERE composition_id = ?",
+            (composition_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        try:
+            payload = json.loads(row["members_json"])
+        except (TypeError, json.JSONDecodeError):
+            payload = []
+        members = tuple(
+            (
+                str(item.get("product_id", "")),
+                str(item.get("partition_build_id", "")),
+                str(item.get("content_digest", "")),
+            )
+            for item in payload
+            if isinstance(item, dict)
+        )
+        return IndexCompositionRow(
+            composition_id=row["composition_id"],
+            package_id=row["package_id"],
+            members=members,
+            created_at=row["created_at"],
+        )
 
     # -- lineage ----------------------------------------------------------- #
     def record_run_lineage(self, row: RunLineageRow) -> None:

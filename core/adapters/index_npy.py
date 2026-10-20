@@ -15,22 +15,24 @@
 
 **``build_id`` (§13, T8.2 DoD).** Детерминированный, без random/UUID. Приоритет:
 
-1. явный ``meta.extra["index_build_id"]`` — его передаёт Ш5 из
-   ``corpus._derive_index_build_id``, поэтому физическая сборка и ``index_manifest``/
-   ``corpus_chunks.build_id`` несут один и тот же идентификатор;
+1. явный ``meta.extra["partition_build_id"]`` — его передаёт Ш5 из
+   ``corpus._derive_partition_build_id``, поэтому физическая сборка и ``index_manifest``/
+   ``corpus_chunks.build_id`` несут один и тот же идентификатор партиции;
 2. иначе — производный :func:`derive_build_id` от (``package`` + ``chunker_version`` +
-   ``embed_model_id`` + ``snapshot_date`` + упорядоченные ``chunk_id`` + ``content_hash``).
-   Это тот же стиль, что и ``corpus._derive_index_build_id`` (разделитель ``\\x1f``, префикс
-   ``ib_``, ``short_hash(..., 24)``), но дополнительно с содержимым чанков — автономная
-   сборка чувствительна к контенту. Совпадения с corpus-id для тех же входов не требуется:
+   ``embed_model_id`` + упорядоченные ``chunk_id`` + ``content_hash``). ``snapshot_date``
+   намеренно **не** входит (09 §8.1: снимок — провенанс, не содержимое). Это тот же стиль,
+   что и ``corpus._derive_partition_build_id`` (разделитель ``\\x1f``, префикс ``pb_``,
+   ``short_hash(..., 24)``), но дополнительно с содержимым чанков — автономная сборка
+   чувствительна к контенту. Совпадения с corpus-id для тех же входов не требуется:
    corpus всегда передаёт явный id.
 
 **Иммутабельность (§13/K2).** ``index_format.write_partition`` пишет атомарно (staging →
 ``os.replace``), а ``NpyIndexBuilder`` дополнительно отказывает в повторном ``build`` по
 ключу ``(package, build_id, product_id)`` при **другом** содержимом
-(:class:`ImmutableBuildError`). Отпечаток содержимого (``content_digest``) кладётся в
-манифест, поэтому защита действует и между процессами. ``commit()`` фиксирует сборки
-(проверяет наличие артефактов) и ничего не возвращает.
+(:class:`ImmutableBuildError`). Полный отпечаток (``vector_digest``: id/хеши + байты
+``float16``-матрицы) кладётся в манифест, поэтому защита действует и между процессами;
+``content_digest`` — контентный отпечаток партиции из id-формулы (09 §8.1/§8.5).
+``commit()`` фиксирует сборки (проверяет наличие артефактов) и ничего не возвращает.
 
 **Зависимости.** ``numpy`` — необязательный (extra ``retrieval``): модуль импортируется без
 него, а ``build()`` поднимает понятную ``RuntimeError`` при отсутствии. Нейтрален (§1.3).
@@ -49,8 +51,8 @@ from core.util.hashing import content_hash, short_hash
 
 __all__ = ["ImmutableBuildError", "NpyIndexBuilder", "derive_build_id", "numpy_available"]
 
-#: Префикс ``build_id`` (совместим со стилем ``corpus._derive_index_build_id``).
-_BUILD_ID_PREFIX = "ib_"
+#: Префикс ``build_id`` (стиль ``corpus._derive_partition_build_id``: партиция).
+_BUILD_ID_PREFIX = "pb_"
 #: Разделитель полей material-строки (unit separator — однозначная склейка).
 _FIELD_SEP = "\x1f"
 #: Разделитель групп (id чанков ↔ хеши) — исключает коллизии склейки.
@@ -79,7 +81,6 @@ def derive_build_id(
     package: str,
     chunker_version: str,
     embed_model_id: str,
-    snapshot_date: str,
     chunk_ids: Sequence[str],
     content_hashes: Sequence[str],
 ) -> str:
@@ -88,14 +89,14 @@ def derive_build_id(
     Склейка фиксированным разделителем; порядок ``chunk_ids``/``content_hashes`` значим,
     т.к. задаёт отображение «строка ``chunk_ids.jsonl`` ↔ строка матрицы векторов». Группы
     (id ↔ хеши) разделены отдельным символом — это исключает коллизии при склейке.
-    Возвращает ``ib_`` + 24 hex-символа SHA-256.
+    ``snapshot_date`` не входит (09 §8.1: провенанс, не содержимое). Возвращает ``pb_`` +
+    24 hex-символа SHA-256.
     """
     material = _FIELD_SEP.join(
         (
             package,
             chunker_version,
             embed_model_id,
-            snapshot_date or "",
             _FIELD_SEP.join(chunk_ids),
             _FIELD_SEP.join(content_hashes),
         )
@@ -190,9 +191,11 @@ class NpyIndexBuilder:
 
         chunk_ids = [chunk.chunk_id for chunk in chunks]
         content_hashes = [chunk.content_hash for chunk in chunks]
+        # Полный отпечаток (id/хеши + байты float16-матрицы) — защита иммутабельности.
         digest = _content_digest(np, chunk_ids, content_hashes, vectors)
 
-        explicit = (meta.extra or {}).get("index_build_id")
+        extra = dict(meta.extra or {})
+        explicit = extra.get("partition_build_id")
         build_id = (
             str(explicit)
             if explicit
@@ -200,7 +203,6 @@ class NpyIndexBuilder:
                 package,
                 meta.chunker_version,
                 meta.embed_model_id,
-                meta.snapshot_date,
                 chunk_ids,
                 content_hashes,
             )
@@ -216,15 +218,25 @@ class NpyIndexBuilder:
         )
         manifest: dict[str, Any] = {
             "build_id": build_id,
+            "partition_build_id": build_id,
             "package": package,
             "product_id": product_id,
             "embed_model_id": meta.embed_model_id,
             "chunker_version": meta.chunker_version,
+            # 09 §8.1: версии производства/формата — часть второго, физического
+            # контроля переиспользования партиции (§8.5), поэтому лежат в манифесте.
+            "extractor_version": str(extra.get("extractor_version") or ""),
+            "lexical_engine_version": str(extra.get("lexical_engine_version") or ""),
+            "vector_store": str(extra.get("vector_store") or ""),
             "snapshot_date": meta.snapshot_date,
             "dim": dim,
             "stats": {"chunks": len(chunk_ids), "dim": dim},
-            "extra": dict(meta.extra or {}),
-            "content_digest": digest,
+            "extra": extra,
+            # ``content_digest`` — контентный отпечаток партиции из id-формулы
+            # (09 §8.1/§8.5): по нему второй, физический контроль решает о
+            # переиспользовании. Полный отпечаток (включая векторы) — ``vector_digest``.
+            "content_digest": str(extra.get("content_digest") or digest),
+            "vector_digest": digest,
         }
         index_format.write_partition(
             self._index_root, package, build_id, product_id, vectors, chunk_ids, manifest
@@ -237,7 +249,8 @@ class NpyIndexBuilder:
         """Отказывает в мутации зафиксированной сборки другим содержимым (K2/§13).
 
         Проверяет (1) сборки этого инстанса и (2) уже зафиксированную партицию на диске —
-        последнее даёт защиту между процессами (``content_digest`` из манифеста).
+        последнее даёт защиту между процессами (``vector_digest``; legacy-партиции
+        хранят полный отпечаток в ``content_digest``).
         """
         existing = self._content.get(key)
         if existing is not None and existing != digest:
@@ -252,9 +265,12 @@ class NpyIndexBuilder:
             self._index_root, package, build_id, product_id
         ):
             return
-        old_digest = index_format.read_manifest(
+        manifest = index_format.read_manifest(
             self._index_root, package, build_id, product_id
-        ).get("content_digest")
+        )
+        # ``vector_digest`` — полный отпечаток (id/хеши + векторы); legacy-партиции
+        # хранят его в ``content_digest``.
+        old_digest = manifest.get("vector_digest") or manifest.get("content_digest")
         if old_digest != digest:
             raise ImmutableBuildError(
                 f"NpyIndexBuilder: партиция {key!r} уже зафиксирована на диске с другим "

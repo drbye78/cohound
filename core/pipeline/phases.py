@@ -371,6 +371,7 @@ def build_phases(
     passports: Mapping[str, Any] | None = None,
     out_dir: str = "runs",
     raw_root: str = "corpus_raw",
+    index_root: str | None = None,
     snapshot_date: Any = None,
     retrieval_profile: RetrievalProfile | str | None = None,
     cutoff_k: int | None = None,
@@ -415,6 +416,9 @@ def build_phases(
         ``paths.runs`` (``03`` §A.1). Дефолт ``"runs"`` совпадает с :class:`PathsConfig`.
     :param raw_root: корень retention сырых байтов (Ш5); composition root передаёт resolved
         ``paths.corpus_raw``. Дефолт ``"corpus_raw"`` совпадает с :class:`PathsConfig`.
+    :param index_root: корень ``index_store/`` для переиспользования партиций и записи
+        манифеста композиции (09 §8.1–§8.5). ``None`` — легаси-путь без чтения/записи
+        индекса (композиция не пишется, переиспользования нет).
     :param snapshot_date: окно снимка (Ш5); ``None`` → ``plan``/когорта.
     :param retrieval_profile: зафиксированный профиль R0/R1/R2 (I16); ``None`` → дефолт Ш6.
     :param cutoff_k: зафиксированный ``retrieval_cutoff_K`` (I20); ``None`` → дефолт Ш6.
@@ -559,6 +563,7 @@ def build_phases(
             embedder=getattr(ctx.ports, "embedder", None),
             index_builder=getattr(ctx.ports, "index_builder", None),
             raw_root=raw_root,
+            index_root=index_root,
             package_id=_package_id(inputs, plan),
             domain_profiles=domain_profiles or {},
             explicit_fetch=explicit_fetch,

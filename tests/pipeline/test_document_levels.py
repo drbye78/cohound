@@ -510,7 +510,10 @@ def test_level_reaches_worker_request(tmp_path: Path) -> None:
 
 def test_extractor_version_carries_level(tmp_path: Path) -> None:
     from core.adapters.extract_document import DoclingDocumentExtractor
-    from core.pipeline.corpus import _derive_index_build_id, _extractor_token
+    from core.pipeline.corpus import (
+        _derive_partition_build_id,
+        _product_extractor_token,
+    )
 
     # Реальный адаптер: version инстансный и кодирует уровень.
     versions = {
@@ -528,10 +531,10 @@ def test_extractor_version_carries_level(tmp_path: Path) -> None:
         assert token == f"docling-doc-3:{level.value}"
         assert level.value in token
 
-    # _extractor_token различает уровни (композит версий документов батча).
+    # _product_extractor_token различает уровни (композит версий документов продукта).
     def token_for(version: str) -> str:
         docs = [SimpleNamespace(extractor_version=version)]
-        return _extractor_token({"p1": docs})
+        return _product_extractor_token(docs)
 
     assert token_for("docling-doc-3:full") != token_for("docling-doc-3:text")
 
@@ -553,20 +556,19 @@ def test_extractor_version_carries_level(tmp_path: Path) -> None:
     )
     assert _build_of(full).index_build_id != _build_of(text).index_build_id
 
-    # Точечно: _derive_index_build_id чувствителен к extractor_version.
+    # Точечно: _derive_partition_build_id чувствителен к extractor_version.
     common = dict(
         package_id="pkg",
-        params_token="a",
-        snapshot_date="2026-01-01",
+        product_id="p1",
         chunker_version="chunker-1",
         embed_model_id="",
         lexical_engine_version="",
         vector_store="",
-        content_token="ct",
+        product_content_token="ct",
     )
-    assert _derive_index_build_id(
+    assert _derive_partition_build_id(
         extractor_version="docling-doc-3:full", **common
-    ) != _derive_index_build_id(extractor_version="docling-doc-3:text", **common)
+    ) != _derive_partition_build_id(extractor_version="docling-doc-3:text", **common)
 
 
 def test_index_build_id_stable_same_level(tmp_path: Path) -> None:

@@ -247,8 +247,8 @@ class FakeIndexBuilder:
     Контракт ``build_corpus``: ``build(...)`` вызывается **по каждой** продукт-партиции,
     а ``commit()`` — **один раз** в конце (см. ``core/pipeline/corpus.py``). Поэтому
     ``build`` копит записи в ``staged``, а ``commit`` переводит их в ``committed``.
-    ``build`` возвращает ``build_id`` из ``meta.extra["index_build_id"]`` (его задаёт
-    корпус) либо детерминированно выводит из ``IndexMeta``.
+    ``build`` возвращает ``build_id`` из ``meta.extra["partition_build_id"]`` (его
+    задаёт корпус, 09 §8.1) либо детерминированно выводит из ``IndexMeta``.
     """
 
     vector_store = "fake"
@@ -270,7 +270,9 @@ class FakeIndexBuilder:
         meta: IndexMeta,
     ) -> str:
         """Стадирует продукт-партицию и возвращает её ``build_id``."""
-        build_id = str(meta.extra.get("index_build_id") or self._derive_build_id(meta))
+        build_id = str(
+            meta.extra.get("partition_build_id") or self._derive_build_id(meta)
+        )
         self.build_ids[meta.product_id] = build_id
         self.meta_by_product[meta.product_id] = meta
         self.chunks_by_product[meta.product_id] = list(chunks)
@@ -292,11 +294,10 @@ class FakeIndexBuilder:
                 meta.package,
                 meta.chunker_version,
                 meta.embed_model_id,
-                meta.snapshot_date,
                 meta.product_id,
             )
         )
-        return "ib_" + hashlib.sha256(material.encode("utf-8")).hexdigest()[:24]
+        return "pb_" + hashlib.sha256(material.encode("utf-8")).hexdigest()[:24]
 
 
 class FakeLexicalIndex:

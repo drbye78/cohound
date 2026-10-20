@@ -42,7 +42,8 @@ from core.pipeline import RunPlan
 from core.pipeline.corpus import (
     IndexBuild,
     _SUBMIT_MAX_ATTEMPTS,
-    _derive_index_build_id,
+    _derive_partition_build_id,
+    _product_content_token,
     _work_set_idempotency_key,
     build_corpus,
     derive_corpus_coverage,
@@ -448,7 +449,7 @@ def test_chunk_content_hash_from_text_and_build_id(tmp_path: Path) -> None:
         for row in rows:
             assert row["content_hash"] == content_hash(row["text"])
             assert row["content_hash"]  # I19
-            assert row["build_id"] == build.index_build_id
+            assert row["build_id"] == build.entries[0].partition_build_id
             # P2: версия экстрактора чанка персистится (re-extract-провенанс, §3.2).
             assert row["extractor_version"] == "extractor-1"
     finally:
@@ -489,9 +490,11 @@ def test_index_build_id_sensitive_to_declared_inputs(tmp_path: Path) -> None:
     other_chunker = _build_of(
         _build(tmp_path / "b", pages=pages, urls=urls, chunker_version="chunker-2")
     ).index_build_id
+    # 09 §8.1: snapshot_date — провенанс, не содержимое; id композиции не меняется.
     other_snapshot = _build_of(
         _build(tmp_path / "c", pages=pages, urls=urls, snapshot_date="2026-02-01")
     ).index_build_id
+    assert other_snapshot == base
     other_embedder = _build_of(
         _build(tmp_path / "d", pages=pages, urls=urls, embedder=_Embedder(model_id="embed-y"))
     ).index_build_id
@@ -517,27 +520,70 @@ def test_index_build_id_sensitive_to_declared_inputs(tmp_path: Path) -> None:
     ids = {
         base,
         other_chunker,
-        other_snapshot,
         other_embedder,
         other_extractor,
         other_lexical,
         other_vector,
     }
-    assert len(ids) == 7
+    assert len(ids) == 6
 
 
-def test_index_build_id_ignores_retrieval_config() -> None:
-    """P2: ``retrieval_*`` не входят в формулу id (ретривал не меняет чанкинг/векторы)."""
-    params = set(inspect.signature(_derive_index_build_id).parameters)
+def test_partition_build_id_ignores_retrieval_and_provenance() -> None:
+    """09 §8.1: ``retrieval_*``/``params_token``/``snapshot_date`` не входят в ``pb``."""
+    params = set(inspect.signature(_derive_partition_build_id).parameters)
     assert not {name for name in params if name.startswith("retrieval")}
+    assert not {"params_token", "snapshot_date"} & params
     assert {
+        "package_id",
+        "product_id",
         "chunker_version",
         "embed_model_id",
         "extractor_version",
         "lexical_engine_version",
         "vector_store",
-        "content_token",
+        "product_content_token",
     } <= params
+
+
+def test_partition_build_id_deterministic_and_sensitive() -> None:
+    """``pb`` детерминирован, чувствителен к каждому входу и не зависит от провенанса."""
+    base = dict(
+        package_id="pkg",
+        product_id="p1",
+        chunker_version="chunker-1",
+        embed_model_id="embed-1",
+        extractor_version="extractor-1",
+        lexical_engine_version="lex-1",
+        vector_store="npy-fp16",
+        product_content_token="ct",
+    )
+    value = _derive_partition_build_id(**base)
+    assert value.startswith("pb_") and len(value) == len("pb_") + 24
+    assert _derive_partition_build_id(**base) == value
+    variants = [
+        {"package_id": "other"},
+        {"product_id": "p2"},
+        {"chunker_version": "chunker-2"},
+        {"embed_model_id": "embed-2"},
+        {"extractor_version": "extractor-2"},
+        {"lexical_engine_version": "lex-2"},
+        {"vector_store": "other"},
+        {"product_content_token": "ct2"},
+    ]
+    assert {_derive_partition_build_id(**(base | variant)) for variant in variants}.isdisjoint(
+        {value}
+    )
+
+
+def test_product_content_token_order_independent() -> None:
+    """Отпечаток партиции — sorted ``(chunk_id, content_hash)``: порядок не значим."""
+    def _chunk(chunk_id: str, digest: str) -> Any:
+        return type("C", (), {"chunk_id": chunk_id, "content_hash": digest})()
+
+    a = _product_content_token([_chunk("a", "1"), _chunk("b", "2")])
+    b = _product_content_token([_chunk("b", "2"), _chunk("a", "1")])
+    assert a == b
+    assert a != _product_content_token([_chunk("a", "1"), _chunk("b", "3")])
 
 
 # --------------------------------------------------------------------------- #
@@ -553,11 +599,15 @@ def test_one_manifest_entry_per_product(tmp_path: Path) -> None:
     )
     build = _build_of(result)
     assert [e.product_id for e in build.entries] == ["p1", "p2"]
+    # Одна композиция на когорту, но у каждого продукта — своя партиция (09 §8.1).
     assert len({e.index_build_id for e in build.entries}) == 1
+    assert len({e.partition_build_id for e in build.entries}) == 2
     for entry in build.entries:
+        assert entry.index_build_id == build.index_build_id
         assert entry.partition_key == f"{entry.index_build_id}:{entry.product_id}"
         assert entry.store_path == (
-            f"index_store/{entry.package_id}/{entry.index_build_id}/{entry.product_id}/"
+            f"index_store/{entry.package_id}/{entry.partition_build_id}/"
+            f"{entry.product_id}/"
         )
 
 
@@ -952,7 +1002,11 @@ class _ImmutableBuilder:
     def build(self, chunks, vectors, meta):  # noqa: ANN001 — структурная заглушка порта
         chunks = list(chunks)
         signature = tuple((c.chunk_id, c.content_hash) for c in chunks)
-        key = (meta.package, (meta.extra or {}).get("index_build_id", ""), meta.product_id)
+        key = (
+            meta.package,
+            (meta.extra or {}).get("partition_build_id", ""),
+            meta.product_id,
+        )
         previous = self._signatures.get(key)
         if previous is not None and previous != signature:
             raise ImmutableBuildError(
@@ -1017,10 +1071,12 @@ def test_new_content_mints_new_build_leaves_previous_untouched(tmp_path: Path) -
             embedder=_Embedder(),
             index_builder=builder,
         )
-        build_id = _build_of(first).index_build_id
+        build = _build_of(first)
+        build_id = build.index_build_id
+        partition_id = build.entries[0].partition_build_id or ""
         manifest_before = _manifest_row(store, build_id, "p1")
         assert manifest_before is not None
-        assert _chunk_count(store, build_id) == 1
+        assert _chunk_count(store, partition_id) == 1
 
         second = _build(
             tmp_path / "second",
@@ -1030,17 +1086,20 @@ def test_new_content_mints_new_build_leaves_previous_untouched(tmp_path: Path) -
             embedder=_Embedder(),
             index_builder=builder,
         )
-        build_id_2 = _build_of(second).index_build_id
-        # Контент другой ⇒ РАЗНЫЙ id (контент-адресуемость P2).
+        build2 = _build_of(second)
+        build_id_2 = build2.index_build_id
+        partition_id_2 = build2.entries[0].partition_build_id or ""
+        # Контент другой ⇒ РАЗНЫЙ pb и, как следствие, РАЗНЫЙ cid.
+        assert partition_id_2 != partition_id
         assert build_id_2 != build_id
         assert second.errors == []
 
         # Прошлая сборка не изменилась: БД согласована с иммутабельной партицией на диске.
         assert _manifest_row(store, build_id, "p1") == manifest_before
-        assert _chunk_count(store, build_id) == 1
+        assert _chunk_count(store, partition_id) == 1
         # Новая сборка зафиксирована собственной партицией.
         assert _manifest_row(store, build_id_2, "p1") is not None
-        assert _chunk_count(store, build_id_2) == 2
+        assert _chunk_count(store, partition_id_2) == 2
     finally:
         store.close()
 
@@ -1061,8 +1120,9 @@ def test_successful_build_writes_manifest_matching_disk(tmp_path: Path) -> None:
         build = _build_of(result)
         assert result.errors == []
         package_id = build.entries[0].package_id or ""
+        partition_id = build.entries[0].partition_build_id or ""
         partition = index_format.partition_dir(
-            index_root, package_id, build.index_build_id, "p1"
+            index_root, package_id, partition_id, "p1"
         )
         physical = json.loads((partition / "manifest.json").read_text(encoding="utf-8"))
         persisted = _manifest_row(store, build.index_build_id, "p1")
@@ -1074,7 +1134,7 @@ def test_successful_build_writes_manifest_matching_disk(tmp_path: Path) -> None:
             for line in (partition / "chunk_ids.jsonl").read_text(encoding="utf-8").splitlines()
             if line.strip()
         ]
-        assert _chunk_count(store, build.index_build_id) == len(physical_lines)
+        assert _chunk_count(store, partition_id) == len(physical_lines)
     finally:
         store.close()
 
@@ -1098,7 +1158,7 @@ def test_docs_and_chunks_without_index_builder(tmp_path: Path) -> None:
         assert len(docs) == 1
         assert len(chunks) == 1
         assert [m["product_id"] for m in manifest] == ["p1"]
-        assert _chunk_count(store, build.index_build_id) == 1
+        assert _chunk_count(store, build.entries[0].partition_build_id or "") == 1
     finally:
         store.close()
 
@@ -5132,3 +5192,346 @@ def test_state_304_without_known_version_is_visible_not_silent(tmp_path: Path) -
         assert _build_of(result).doc_counters == {
             "p1": {"total": 1, "new": 1, "reused": 0}
         }
+
+
+# --------------------------------------------------------------------------- #
+# MVP-4 шаг 2: переиспользование партиции, композиция, цепочка идентификаторов
+# --------------------------------------------------------------------------- #
+
+
+def _composition_dir(tmp_path: Path, package_id: str) -> Path:
+    return tmp_path / "index_store" / package_id / "_compositions"
+
+
+@requires_numpy
+def test_partition_reuse_calls_embedder_zero_times(tmp_path: Path) -> None:
+    """09 §8.5: неизменённый продукт переиспользует партицию — ноль эмбеддингов."""
+    index_root = tmp_path / "index_store"
+    pages = {URL_P1_A: b"stable page"}
+    urls = {"p1": [URL_P1_A]}
+    store = SqliteStore(":memory:")
+    try:
+        first_embedder = _Embedder()
+        first = _build(
+            tmp_path / "raw1",
+            pages=pages,
+            urls=urls,
+            store=store,
+            index_root=index_root,
+            embedder=first_embedder,
+            index_builder=NpyIndexBuilder(index_root),
+        )
+        first_build = _build_of(first)
+        assert first_embedder.texts == ["stable page"]
+        assert first_build.partitions_reused == 0
+        partition_id = first_build.entries[0].partition_build_id or ""
+        assert partition_id.startswith("pb_")
+
+        second_embedder = _Embedder()
+        second = _build(
+            tmp_path / "raw2",
+            pages=pages,
+            urls=urls,
+            store=store,
+            index_root=index_root,
+            embedder=second_embedder,
+            index_builder=NpyIndexBuilder(index_root),
+        )
+        second_build = _build_of(second)
+        # Ноль вызовов эмбеддера — реальный CPU-win, не «пересобрали, но дёшево».
+        assert second_embedder.texts == []
+        assert second_build.partitions_reused == 1
+        assert second_build.entries[0].partition_build_id == partition_id
+        assert second.errors == []
+
+        rows = list(
+            store.conn.execute("SELECT build_id FROM corpus_chunks ORDER BY chunk_id")
+        )
+        assert rows and {row["build_id"] for row in rows} == {partition_id}
+        # Композиция идемпотентна: тот же состав → тот же cid, файл не перезаписан.
+        assert second_build.index_build_id == first_build.index_build_id
+        assert (_composition_dir(tmp_path, first_build.entries[0].package_id or "")
+                / f"{second_build.index_build_id}.json").is_file()
+    finally:
+        store.close()
+
+
+@requires_numpy
+def test_changed_content_changes_partition_and_reembeds(tmp_path: Path) -> None:
+    """Изменение одного чанка меняет ``pb`` и заставляет эмбеддить снова (09 §8.1)."""
+    index_root = tmp_path / "index_store"
+    store = SqliteStore(":memory:")
+    try:
+        first = _build(
+            tmp_path / "a",
+            pages={URL_P1_A: b"one"},
+            urls={"p1": [URL_P1_A]},
+            store=store,
+            index_root=index_root,
+            embedder=_Embedder(),
+            index_builder=NpyIndexBuilder(index_root),
+        )
+        second_embedder = _Embedder()
+        second = _build(
+            tmp_path / "b",
+            pages={URL_P1_A: b"two"},
+            urls={"p1": [URL_P1_A]},
+            store=store,
+            index_root=index_root,
+            embedder=second_embedder,
+            index_builder=NpyIndexBuilder(index_root),
+        )
+        assert _build_of(first).entries[0].partition_build_id != (
+            _build_of(second).entries[0].partition_build_id
+        )
+        assert second_embedder.texts == ["two"]
+        assert _build_of(second).partitions_reused == 0
+    finally:
+        store.close()
+
+
+def test_reuse_refused_when_manifest_digest_differs(tmp_path: Path) -> None:
+    """Второй, физический контроль: расхождение digest ⇒ пересборка с видимой причиной."""
+    index_root = tmp_path / "index_store"
+    pages = {URL_P1_A: b"page"}
+    urls = {"p1": [URL_P1_A]}
+    first = _build(
+        tmp_path / "a",
+        pages=pages,
+        urls=urls,
+        index_root=index_root,
+        embedder=_Embedder(),
+        index_builder=_IndexBuilder(),
+    )
+    build = _build_of(first)
+    package_id = build.entries[0].package_id or ""
+    partition_id = build.entries[0].partition_build_id or ""
+    # Кладём «зафиксированную» партицию с чужим digest (id при этом тот же).
+    index_format.write_partition(
+        index_root, package_id, partition_id, "p1",
+        [[0.0, 0.1, 0.2]], ["p1:fake:0"],
+        {
+            "dim": 3,
+            "content_digest": "bogus",
+            "chunker_version": "chunker-1",
+            "embed_model_id": "embed-x",
+            "extractor_version": "extractor-1",
+            "lexical_engine_version": "lex-1",
+            "vector_store": "npy",
+        },
+    )
+    embedder = _Embedder()
+    second = _build(
+        tmp_path / "b",
+        pages=pages,
+        urls=urls,
+        index_root=index_root,
+        embedder=embedder,
+        index_builder=_IndexBuilder(),
+    )
+    second_build = _build_of(second)
+    assert second_build.partitions_reused == 0
+    assert embedder.texts == ["page"]
+    assert any("не переиспользована" in err and "content_digest" in err
+               for err in second.errors)
+
+
+def test_reuse_refused_when_manifest_version_differs(tmp_path: Path) -> None:
+    """Версия в манифесте расходится с прогоном ⇒ пересборка с видимой причиной."""
+    index_root = tmp_path / "index_store"
+    pages = {URL_P1_A: b"page"}
+    urls = {"p1": [URL_P1_A]}
+    first = _build(
+        tmp_path / "a",
+        pages=pages,
+        urls=urls,
+        index_root=index_root,
+        embedder=_Embedder(),
+        index_builder=_IndexBuilder(),
+    )
+    build = _build_of(first)
+    package_id = build.entries[0].package_id or ""
+    partition_id = build.entries[0].partition_build_id or ""
+    index_format.write_partition(
+        index_root, package_id, partition_id, "p1",
+        [[0.0, 0.1, 0.2]], ["p1:fake:0"],
+        {
+            "dim": 3,
+            "content_digest": build.entries[0].content_digest,
+            "chunker_version": "chunker-old",
+            "embed_model_id": "embed-x",
+            "extractor_version": "extractor-1",
+            "lexical_engine_version": "lex-1",
+            "vector_store": "npy",
+        },
+    )
+    embedder = _Embedder()
+    second = _build(
+        tmp_path / "b",
+        pages=pages,
+        urls=urls,
+        index_root=index_root,
+        embedder=embedder,
+        index_builder=_IndexBuilder(),
+    )
+    assert _build_of(second).partitions_reused == 0
+    assert embedder.texts == ["page"]
+    assert any(
+        "не переиспользована" in err and "chunker_version" in err
+        for err in second.errors
+    )
+
+
+def test_reuse_refused_when_partition_incomplete(tmp_path: Path) -> None:
+    """Неполный каталог партиции — видимая причина и обычная сборка (09 §8.5)."""
+    index_root = tmp_path / "index_store"
+    pages = {URL_P1_A: b"page"}
+    urls = {"p1": [URL_P1_A]}
+    first = _build(
+        tmp_path / "a",
+        pages=pages,
+        urls=urls,
+        index_root=index_root,
+        embedder=_Embedder(),
+        index_builder=_IndexBuilder(),
+    )
+    build = _build_of(first)
+    package_id = build.entries[0].package_id or ""
+    partition_id = build.entries[0].partition_build_id or ""
+    incomplete = index_root / package_id / partition_id / "p1"
+    incomplete.mkdir(parents=True)
+    (incomplete / "manifest.json").write_text("{}", encoding="utf-8")
+
+    embedder = _Embedder()
+    second = _build(
+        tmp_path / "b",
+        pages=pages,
+        urls=urls,
+        index_root=index_root,
+        embedder=embedder,
+        index_builder=_IndexBuilder(),
+    )
+    assert _build_of(second).partitions_reused == 0
+    assert embedder.texts == ["page"]
+    assert any("не переиспользована" in err for err in second.errors)
+
+
+def test_composition_written_only_after_all_members_committed(tmp_path: Path) -> None:
+    """Частичный сбой члена ⇒ композиции нет; state-реестр тоже не пишется."""
+    index_root = tmp_path / "index_store"
+    store = SqliteStore(":memory:")
+    try:
+        with SqliteStateStore(":memory:") as state:
+            result = _build(
+                tmp_path,
+                pages={URL_P1_A: b"ok-one", URL_P2_A: b"ok-two"},
+                urls={"p1": [URL_P1_A], "p2": [URL_P2_A]},
+                store=store,
+                state=state,
+                index_root=index_root,
+                embedder=_Embedder(),
+                index_builder=_RefusingBuilder(refuse={"p2"}),
+            )
+            build = _build_of(result)
+            package_id = build.entries[0].package_id or ""
+            assert not list(_composition_dir(tmp_path, package_id).glob("*.json"))
+            assert state.get_index_composition(build.index_build_id) is None
+            assert list(state.iter_index_partitions(package_id)) == []
+    finally:
+        store.close()
+
+
+@requires_numpy
+def test_identity_chain_partition_vs_composition(tmp_path: Path) -> None:
+    """Сквозная цепочка id: pb — чанки/партиции/evidence; cid — manifest/cell/runs."""
+    from core.domain import LLMCellOutput, LLMEvidence, Status
+    from core.pipeline.composition import CompositionView
+    from core.pipeline.evaluate import _provenance
+    from core.pipeline.validate import validate_output
+    from core.adapters.vector_npy import NpyVectorIndex
+    from core.ports.vector_index import RetrievedChunk, RetrievalResult
+
+    index_root = tmp_path / "index_store"
+    store = SqliteStore(":memory:")
+    try:
+        with SqliteStateStore(":memory:") as state:
+            result = _build(
+                tmp_path,
+                pages={URL_P1_A: b"identity page"},
+                urls={"p1": [URL_P1_A]},
+                store=store,
+                state=state,
+                index_root=index_root,
+                embedder=_Embedder(),
+                index_builder=NpyIndexBuilder(index_root),
+                run_id=RUN_ID,
+            )
+            build = _build_of(result)
+            cid = build.index_build_id
+            entry = build.entries[0]
+            package_id = entry.package_id or ""
+            pb = entry.partition_build_id or ""
+            assert cid.startswith("cb_") and pb.startswith("pb_")
+
+            # index_manifest: cid + pb; corpus_chunks: pb.
+            row = store.conn.execute(
+                "SELECT index_build_id, partition_build_id FROM index_manifest"
+                " WHERE product_id = 'p1'"
+            ).fetchone()
+            assert row["index_build_id"] == cid
+            assert row["partition_build_id"] == pb
+            chunk = store.conn.execute(
+                "SELECT chunk_id, build_id FROM corpus_chunks WHERE product_id = 'p1'"
+            ).fetchone()
+            assert chunk["build_id"] == pb
+
+            # Dense retrieval: RetrievedChunk.build_id = pb; индекс = cid.
+            view = CompositionView(composition_id=cid, members={"p1": pb})
+            vindex = NpyVectorIndex(
+                index_root, package_id, cid, 3, store.get_chunk, view=view
+            )
+            from core.ports.vector_index import VectorQuery
+
+            hits = vindex.search(
+                VectorQuery(product_ids=["p1"], top_k=5, vector=[0.0, 0.1, 0.2])
+            )
+            assert hits and hits[0].build_id == pb
+
+            # Cell provenance = cid; evidence.partition_build_id = pb.
+            provenance = _provenance(
+                RetrievalResult(
+                    chunks=hits, profile="R1", cutoff_K=10, build_id=cid
+                )
+            )
+            assert provenance[0] == cid
+            validation = validate_output(
+                output=LLMCellOutput(
+                    status=Status.OK,
+                    justification="ok",
+                    evidence=[LLMEvidence(source_id=chunk["chunk_id"], quote="identity page")],
+                ),
+                chunks={chunk["chunk_id"]: hits[0]},
+                product_id="p1",
+                param_id=_plan().params[0].param_id,
+                run_id=RUN_ID,
+                resolver=store,
+            )
+            assert validation.resolved_evidence
+            evidence = validation.resolved_evidence[0]
+            assert evidence.partition_build_id == pb
+            store.add_evidence(evidence)
+            ev_row = store.conn.execute(
+                "SELECT partition_build_id FROM cell_evidence WHERE evidence_id = ?",
+                (evidence.evidence_id,),
+            ).fetchone()
+            assert ev_row["partition_build_id"] == pb
+
+            # State: композиция и партиция зарегистрированы.
+            composition = state.get_index_composition(cid)
+            assert composition is not None
+            assert composition.members == ((entry.product_id, pb, entry.content_digest),)
+            partitions = list(state.iter_index_partitions(package_id))
+            assert [p.partition_build_id for p in partitions] == [pb]
+            assert partitions[0].last_used_run_id == RUN_ID
+    finally:
+        store.close()

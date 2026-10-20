@@ -211,6 +211,9 @@ def _build_evidence(
         citation_quote=quote,
         content_hash=_chunk_hash(chunk),
         index_build_id=build_id,
+        # 09 §8.1: физическая партиция чанка-цитаты (``RetrievedChunk.build_id``).
+        # ``None`` — источник не из персистентного корпуса (не выдумываем).
+        partition_build_id=_chunk_build_id(chunk),
     )
 
 

@@ -110,6 +110,7 @@ _EVIDENCE_COLUMNS = (
     "source_scope",
     "scope_attested_by",
     "index_build_id",
+    "partition_build_id",
     "retrieved_at",
 )
 
@@ -517,6 +518,7 @@ class SqliteStore:
             _as_text(ev.source_scope),
             ev.scope_attested_by,
             ev.index_build_id,
+            ev.partition_build_id,
             ev.retrieved_at,
         )
 

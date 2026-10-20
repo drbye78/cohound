@@ -47,7 +47,8 @@ from core.domain import (
     Status,
 )
 from core.pipeline.compute import compute
-from core.pipeline.corpus import _content_token, _derive_index_build_id
+from core.pipeline.composition import derive_composition_id
+from core.pipeline.corpus import _derive_partition_build_id, _product_content_token
 from core.pipeline.gates import gate_g1, gate_g2, gate_g3, gate_g4
 from core.pipeline.lint import lint_run_inputs
 from core.pipeline.normalize import RunInputs, load_inputs
@@ -135,18 +136,18 @@ PROVENANCE_FIELDS: tuple[str, ...] = (
     "crawl_rate_limit",
 )
 
-#: Базовые входы ``_derive_index_build_id`` для property-проверки чистоты (P2:
-#: контент-адресуемый id; ``retrieval_*`` намеренно не входит в формулу).
+#: Базовые входы ``_derive_partition_build_id`` для property-проверки чистоты (09 §8.1:
+#: контент-адресуемый id; ``params_token``/``snapshot_date``/``retrieval_*`` намеренно
+#: не входят в формулу).
 _BUILD_ID_BASE: dict[str, Any] = {
     "package_id": "e2e",
-    "params_token": "feature.alpha",
-    "snapshot_date": "2026-06-01",
+    "product_id": "p1",
     "chunker_version": "fake-chunker-1",
     "embed_model_id": "fake-embedder-1",
     "extractor_version": "fake-extractor-1",
     "lexical_engine_version": "fake-bm25-1",
     "vector_store": "fake",
-    "content_token": "c0ffee",
+    "product_content_token": "c0ffee",
 }
 
 
@@ -197,12 +198,8 @@ def _load() -> tuple[RunInputs, RunPlan]:
     return inputs, plan_with_identity(inputs, seeds=seeds)
 
 
-def _expected_build_id(inputs: RunInputs, run_plan: RunPlan) -> str:
-    """``index_build_id`` корпуса — через ту же производящую функцию (без дублирования).
-
-    P2: id **контент-адресуемый**; отпечаток содержимого единственной партиции
-    воспроизводится из тех же байтов страницы, что увидит корпус.
-    """
+def _expected_ids(inputs: RunInputs, run_plan: RunPlan) -> tuple[str, str]:
+    """``(composition_id, partition_id)`` корпуса — те же производящие функции (09 §8.1)."""
     chunk = CorpusChunk(
         chunk_id=CHUNK_ID,
         doc_id=f"p1:{DOC_HASH}",
@@ -210,20 +207,24 @@ def _expected_build_id(inputs: RunInputs, run_plan: RunPlan) -> str:
         text=PAGE_TEXT,
         content_hash=content_hash(PAGE_TEXT),
     )
-    return _derive_index_build_id(
+    token = _product_content_token([chunk])
+    partition_id = _derive_partition_build_id(
         package_id=run_plan.run_id,
-        params_token=",".join(sorted(row.param_id for row in run_plan.params)),
-        snapshot_date=str(inputs.run.snapshot_date),
+        product_id="p1",
         chunker_version=FakeChunker.version,
         embed_model_id=FakeEmbedder().model_id,
         extractor_version=FakeExtractor.version,
         lexical_engine_version=FakeIndexBuilder.lexical_engine_version,
         vector_store=FakeIndexBuilder.vector_store,
-        content_token=_content_token({"p1": [chunk]}),
+        product_content_token=token,
     )
+    composition_id = derive_composition_id(
+        run_plan.run_id, {"p1": partition_id}, {"p1": token}
+    )
+    return composition_id, partition_id
 
 
-def _build_ports(build_id: str) -> Ports:
+def _build_ports(composition_id: str, partition_id: str) -> Ports:
     """Собирает порты: фейки внешних систем + лексический индекс, засеянный корпусом.
 
     ``FakeLexicalIndex`` хранит ``RetrievedChunk`` с ровно тем ``chunk_id``/``content_hash``,
@@ -237,11 +238,11 @@ def _build_ports(build_id: str) -> Ports:
                 text=PAGE_TEXT,
                 content_hash=content_hash(PAGE_TEXT),
                 heading_path="",
-                build_id=build_id,
+                build_id=partition_id,
                 score=1.0,
             )
         ],
-        build_id=build_id,
+        build_id=composition_id,
     )
     evaluator = FakeEvaluator(
         default=LLMCellOutput(
@@ -303,13 +304,13 @@ def _run_skeleton(runs_dir: Path) -> SkeletonRun:
     """
     inputs, run_plan = _load()
     run_id = run_plan.run_id
-    build_id = _expected_build_id(inputs, run_plan)
+    composition_id, partition_id = _expected_ids(inputs, run_plan)
 
     store = build_store(":memory:")
     store.create_run(run_id, inputs.run)
     _record_human_gates(store, run_id)
 
-    ports = _build_ports(build_id)
+    ports = _build_ports(composition_id, partition_id)
     phases = _build_phases(inputs, run_plan, ports, store, runs_dir)
     runner = Runner(store, ports=ports, clock=_Clock(), phases=phases)
     report = runner.run(run_id)
@@ -364,7 +365,7 @@ def _run_skeleton(runs_dir: Path) -> SkeletonRun:
 
     return SkeletonRun(
         run_id=run_id,
-        index_build_id=build_id,
+        index_build_id=composition_id,
         report=report,
         manifest=manifest,
         manifest_path=manifest_path,
@@ -566,42 +567,53 @@ def test_crawl_provenance_is_stable_and_sort_keyed(tmp_path: Path) -> None:
 # 5. ``index_build_id`` — чистая функция входов (§B.1/§13)
 # ---------------------------------------------------------------------------
 
-def test_build_id_is_input_determined() -> None:
-    """``_derive_index_build_id`` детерминирован и чувствителен к каждому входу (P2)."""
-    base_id = _derive_index_build_id(**_BUILD_ID_BASE)
-    assert base_id.startswith("ib_")
+def test_partition_build_id_is_input_determined() -> None:
+    """``_derive_partition_build_id`` детерминирован и чувствителен к каждому входу."""
+    base_id = _derive_partition_build_id(**_BUILD_ID_BASE)
+    assert base_id.startswith("pb_")
     # Чистота: повторный вызов с теми же входами → тот же id (без random/UUID).
-    assert _derive_index_build_id(**_BUILD_ID_BASE) == base_id
+    assert _derive_partition_build_id(**_BUILD_ID_BASE) == base_id
 
-    # Изменение любого входа (включая новые P2: extractor/lexical/vector/content) даёт другую
-    # сборку (иммутабельность §B.1/§13).
     variants = [
         {"package_id": "other-package"},
-        {"params_token": "feature.beta"},
+        {"product_id": "p2"},
         {"chunker_version": "fake-chunker-2"},
         {"embed_model_id": "fake-embedder-2"},
-        {"snapshot_date": "2026-07-01"},
         {"extractor_version": "fake-extractor-2"},
         {"lexical_engine_version": "fake-bm25-2"},
         {"vector_store": "other-store"},
-        {"content_token": "deadbeef"},
+        {"product_content_token": "deadbeef"},
     ]
     variant_ids = {
-        _derive_index_build_id(**(_BUILD_ID_BASE | variant)) for variant in variants
+        _derive_partition_build_id(**(_BUILD_ID_BASE | variant)) for variant in variants
     }
     assert base_id not in variant_ids
     assert len(variant_ids) == len(variants)
 
-    # ``None``-снимок эквивалентен пустой строке (документированный контракт функции).
-    none_snapshot = {**_BUILD_ID_BASE, "snapshot_date": None}
-    empty_snapshot = {**_BUILD_ID_BASE, "snapshot_date": ""}
-    assert _derive_index_build_id(**none_snapshot) == _derive_index_build_id(  # type: ignore[arg-type]
-        **empty_snapshot
-    )
 
-    # Отпечаток каталога — точный вход: порядок токенов значим. Каноническую сортировку
-    # выполняет вызывающий (``corpus._params_token``), поэтому здесь проверяется
-    # чувствительность, а не порядко-независимость.
-    assert _derive_index_build_id(
-        **(_BUILD_ID_BASE | {"params_token": "a,b"})
-    ) != _derive_index_build_id(**(_BUILD_ID_BASE | {"params_token": "b,a"}))
+def test_partition_build_id_ignores_catalog_and_snapshot() -> None:
+    """09 §8.1: каталог/фокус и снимок — провенанс, не вход ``pb``."""
+    import inspect
+
+    params = set(inspect.signature(_derive_partition_build_id).parameters)
+    assert not {"params_token", "snapshot_date"} & params
+
+
+def test_composition_id_sensitive_to_membership_and_member_ids() -> None:
+    """``cid`` чувствителен к составу когорты и к ``pb``/дайджесту любого члена."""
+    base = derive_composition_id(
+        "pkg",
+        {"p1": "pb_a", "p2": "pb_b"},
+        {"p1": "d1", "p2": "d2"},
+    )
+    assert base.startswith("cb_")
+    assert derive_composition_id(
+        "pkg", {"p2": "pb_b", "p1": "pb_a"}, {"p2": "d2", "p1": "d1"}
+    ) == base  # порядок членов не значим
+    assert derive_composition_id("pkg", {"p1": "pb_a"}, {"p1": "d1"}) != base
+    assert derive_composition_id(
+        "pkg", {"p1": "pb_a2", "p2": "pb_b"}, {"p1": "d1", "p2": "d2"}
+    ) != base
+    assert derive_composition_id(
+        "pkg", {"p1": "pb_a", "p2": "pb_b"}, {"p1": "d1-changed", "p2": "d2"}
+    ) != base

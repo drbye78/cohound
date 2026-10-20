@@ -231,16 +231,36 @@ def build_lite_embedder() -> LiteEmbedder:
     return LiteEmbedder(**kwargs)
 
 
-def _single_persisted_build(index_root: str | Path, package: str | None) -> str | None:
-    """Единственная зафиксированная сборка пакета или ``None`` (детерминированно).
+def _single_persisted_build(
+    index_root: str | Path,
+    package: str | None,
+    build_id: str | None = None,
+) -> str | None:
+    """Разрешает сборку пакета детерминированно; ``None`` — выбор неоднозначен.
 
-    Переиспользует перечислитель сборок ``index_format.list_build_ids`` (единый носитель
-    раскладки ``index_store/{package}/{build}/``; служебный ``_compositions`` исключён
-    там же). При **неоднозначности** (>1 сборки) возвращает ``None``: выбор произвольной
-    сборки сломал бы воспроизводимость (A3/§13) — вызывающий обязан передать явный
-    ``build_id`` (из манифеста прогона).
+    Правила (09 §8.1–§8.2, после перехода на per-product партиции):
+
+    1. явный ``build_id`` — приоритет (провенанс из манифеста прогона);
+    2. ровно один ``_compositions/*.json`` — его ``composition_id`` (это
+       ``runs.index_build_id``);
+    3. композиций нет, но ровно один legacy-каталог сборки — он (раскладка до
+       композиций: ``index_store/{package}/{build}/{product_id}/``);
+    4. иначе — ``None``.
+
+    «Несколько композиций и нет явного id» — **настоящая** неоднозначность: выбор
+    произвольной сломал бы воспроизводимость (A3/§13), поэтому ``None``, а не догадка.
+    Прежнее правило «>1 верхнеуровневых каталогов → ``None``» больше не годится: при
+    per-product партициях несколько каталогов — нормальный случай, и dense-плечо
+    молча исчезло бы.
     """
     if not package:
+        return None
+    if build_id:
+        return build_id
+    compositions = index_format.list_composition_ids(index_root, package)
+    if len(compositions) == 1:
+        return compositions[0]
+    if compositions:
         return None
     builds = index_format.list_build_ids(index_root, package)
     return builds[0] if len(builds) == 1 else None
@@ -249,11 +269,12 @@ def _single_persisted_build(index_root: str | Path, package: str | None) -> str 
 def _composition_view(
     index_root: str | Path, package: str, build_id: str
 ) -> CompositionView:
-    """Вид композиции для сборки: манифест ``_compositions/{build_id}.json`` или shim.
+    """Вид композиции: манифест ``_compositions/{composition_id}.json`` или legacy-view.
 
-    MVP-4 шаг 1: ``composition_id`` ищется по имени верхнеуровневой сборки (одна
-    сборка = одна композиция). Нет манифеста → :func:`legacy_view` (прежняя раскладка,
-    ``pb := index_build_id``). Срез деривации id заменит этот поиск.
+    ``build_id`` здесь — уже разрешённый id (явный ``runs.index_build_id`` либо
+    единственная композиция/legacy-сборка, см. :func:`_single_persisted_build`). Есть
+    манифест → читаем его; нет (сборка до появления композиций) → :func:`legacy_view`
+    (``pb := index_build_id``).
     """
     stored = read_composition(index_root, package, build_id)
     if stored is not None:
@@ -297,7 +318,7 @@ def build_vector_index(
     """
     if not numpy_available() or not package or chunk_lookup is None:
         return None
-    resolved = build_id or _single_persisted_build(index_root, package)
+    resolved = _single_persisted_build(index_root, package, build_id)
     if resolved is None:
         return None
     view = _composition_view(index_root, package, resolved)
@@ -326,7 +347,7 @@ def seed_lexical_index(
     """
     if not tantivy_available() or not package or store is None:
         return None
-    resolved = build_id or _single_persisted_build(index_root, package)
+    resolved = _single_persisted_build(index_root, package, build_id)
     if resolved is None:
         return None
     view = _composition_view(index_root, package, resolved)

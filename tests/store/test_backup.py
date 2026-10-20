@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import datetime as _dt
+import json
 import os
 import sqlite3
 import zipfile
@@ -209,42 +210,96 @@ def _seed_six_builds(tmp_path: Path) -> None:
         _make_build(tmp_path, "pkg", f"b{i}", partitions=1, mtime=float(i))
 
 
+def _write_composition(
+    index_root: Path, package: str, composition_id: str, partitions: list[str]
+) -> Path:
+    """Пишет манифест композиции, ссылающийся на заданные ``partition_build_id``."""
+    directory = index_root / package / "_compositions"
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / f"{composition_id}.json"
+    path.write_text(
+        json.dumps(
+            {
+                "schema": "composition/1",
+                "composition_id": composition_id,
+                "package": package,
+                "created_at": "2026-10-20T00:00:00Z",
+                "members": [
+                    {
+                        "product_id": f"p{i}",
+                        "partition_build_id": partition,
+                        "content_digest": f"d{i}",
+                    }
+                    for i, partition in enumerate(partitions)
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
 def test_gc_dry_run_default_does_not_delete(tmp_path: Path) -> None:
     _seed_six_builds(tmp_path)
 
+    # Reference-aware: композиций нет ⇒ ни одна партиция не защищена ссылкой.
     would_delete = gc_index_builds(tmp_path, "pkg", keep=2)
 
-    assert would_delete == ["b1", "b2", "b3", "b4"]
-    for build_id in ("b1", "b2", "b3", "b4"):
+    assert would_delete == ["b1", "b2", "b3", "b4", "b5", "b6"]
+    for build_id in ("b1", "b2", "b3", "b4", "b5", "b6"):
         assert (tmp_path / "pkg" / build_id).is_dir()
 
 
-def test_gc_keep_and_protect_respected(tmp_path: Path) -> None:
+def test_gc_protect_respected(tmp_path: Path) -> None:
     _seed_six_builds(tmp_path)
 
-    # Новейшие 2 (b6, b5) плюс защищённая b1 → удаляются b2/b3/b4.
     result = gc_index_builds(tmp_path, "pkg", keep=2, protect={"b1"})
 
-    assert result == ["b2", "b3", "b4"]
-    for build_id in ("b1", "b5", "b6"):
-        assert (tmp_path / "pkg" / build_id).is_dir()
+    assert result == ["b2", "b3", "b4", "b5", "b6"]
+    assert (tmp_path / "pkg" / "b1").is_dir()
 
 
 def test_compositions_dir_is_not_a_build_and_survives_gc(tmp_path: Path) -> None:
     """09 §8.2/§8.6: ``_compositions`` не сборка — не листается и не удаляется GC."""
     _seed_six_builds(tmp_path)
-    compositions = tmp_path / "pkg" / "_compositions"
-    compositions.mkdir()
-    manifest = compositions / "cb_x.json"
-    manifest.write_text("{}", encoding="utf-8")
+    manifest = _write_composition(tmp_path, "pkg", "cb_x", ["b6"])
 
     assert "_compositions" not in [b[0] for b in list_builds(tmp_path, "pkg")]
     deleted = gc_index_builds(tmp_path, "pkg", keep=1, dry_run=False)
 
     assert "_compositions" not in deleted
     assert manifest.is_file()
-    # keep=1 оставляет ровно новейшую сборку; остальные — удалены.
+    # Ссылка композиции удерживает b6; остальные не упомянуты — удалены.
     assert [b[0] for b in list_builds(tmp_path, "pkg")] == ["b6"]
+
+
+def test_gc_referenced_live_partition_survives_old_keep_count(tmp_path: Path) -> None:
+    """09 §8.6: живая партиция композиции не удаляется счётчиком ``keep``.
+
+    ``b1`` — самая старая сборка, которую старая keep-политика удалила бы при ``keep=1``.
+    Но на неё ссылается композиция ⇒ она обязана выжить.
+    """
+    _seed_six_builds(tmp_path)
+    _write_composition(tmp_path, "pkg", "cb_live", ["b1"])
+
+    deleted = gc_index_builds(tmp_path, "pkg", keep=1, dry_run=False)
+
+    assert "b1" not in deleted
+    assert (tmp_path / "pkg" / "b1").is_dir()
+    assert [b[0] for b in list_builds(tmp_path, "pkg")] == ["b1"]
+
+
+def test_gc_unreadable_composition_refuses_to_delete(tmp_path: Path) -> None:
+    """Битый манифест ⇒ ссылки неизвестны ⇒ GC отказывается (не удаляет живое)."""
+    _seed_six_builds(tmp_path)
+    directory = tmp_path / "pkg" / "_compositions"
+    directory.mkdir()
+    (directory / "cb_bad.json").write_text("{not json", encoding="utf-8")
+
+    with pytest.raises(ValueError):
+        gc_index_builds(tmp_path, "pkg", dry_run=False)
+    for build_id in ("b1", "b2", "b3", "b4", "b5", "b6"):
+        assert (tmp_path / "pkg" / build_id).is_dir()
 
 
 def test_gc_keep_lt_1_refused(tmp_path: Path) -> None:
@@ -255,13 +310,17 @@ def test_gc_keep_lt_1_refused(tmp_path: Path) -> None:
         gc_index_builds(tmp_path, "pkg", keep=-1, dry_run=False)
 
 
-def test_gc_real_deletes_only_unprotected_old(tmp_path: Path) -> None:
+def test_gc_real_deletes_only_unreferenced(tmp_path: Path) -> None:
     _seed_six_builds(tmp_path)
+    _write_composition(tmp_path, "pkg", "cb_keep", ["b5"])
 
-    deleted = gc_index_builds(tmp_path, "pkg", keep=2, protect={"b1"}, dry_run=False)
+    deleted = gc_index_builds(
+        tmp_path, "pkg", keep=2, protect={"b1"}, dry_run=False
+    )
 
-    assert deleted == ["b2", "b3", "b4"]
-    for build_id in ("b2", "b3", "b4"):
+    # b1 защищён явно, b5 удерживается композицией; остальные — мусор.
+    assert deleted == ["b2", "b3", "b4", "b6"]
+    for build_id in ("b2", "b3", "b4", "b6"):
         assert not (tmp_path / "pkg" / build_id).exists()
-    for build_id in ("b1", "b5", "b6"):
+    for build_id in ("b1", "b5"):
         assert (tmp_path / "pkg" / build_id).is_dir()

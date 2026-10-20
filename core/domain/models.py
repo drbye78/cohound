@@ -540,6 +540,9 @@ class CellEvidence(BaseModel):
     source_scope: SourceScope | None = None
     scope_attested_by: str | None = None
     index_build_id: str | None = None
+    #: 09 §8.1: партиция, из которой пришёл чанк-цитата. ``None`` — неизвестно
+    #: (исторические строки/не корпусный источник); аддитивно, без backfill.
+    partition_build_id: str | None = None
     retrieved_at: str | None = None
 
     @model_validator(mode="after")

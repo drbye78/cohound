@@ -1738,18 +1738,18 @@ def _index_roundtrip() -> None:
         meta = IndexMeta(
             package="pk", chunker_version="v1", embed_model_id="m",
             snapshot_date="2026-01-01", product_id="p1",
-            extra={"index_build_id": "ib_sc"},
+            extra={"partition_build_id": "pb_sc"},
         )
         bid = builder.build(chunks, [[1.0, 0.0], [0.0, 1.0]], meta)
         builder.commit()
-        if bid != "ib_sc" or not index_format.is_committed(tmp, "pk", "ib_sc", "p1"):
+        if bid != "pb_sc" or not index_format.is_committed(tmp, "pk", "pb_sc", "p1"):
             raise AssertionError("сборка .npy-партиции не зафиксирована")
-        if index_format.list_partitions(tmp, "pk", "ib_sc") != ["p1"]:
+        if index_format.list_partitions(tmp, "pk", "pb_sc") != ["p1"]:
             raise AssertionError("list_partitions обязан вернуть продукт-партиции сборки")
 
         lookup = {c.chunk_id: c for c in chunks}
         vindex = NpyVectorIndex(
-            index_root=tmp, package="pk", build_id="ib_sc", dim=2, chunk_lookup=lookup
+            index_root=tmp, package="pk", build_id="pb_sc", dim=2, chunk_lookup=lookup
         )
         if not isinstance(vindex, VectorIndexPort):
             raise AssertionError("NpyVectorIndex обязан реализовывать VectorIndexPort")
@@ -2092,7 +2092,8 @@ def _run_metrics() -> None:
 
 
 def _backup_gc() -> None:
-    """Бэкап/GC: безопасный dry-run по умолчанию + refuse при keep<1 (§13)."""
+    """Бэкап/GC: reference-aware dry-run + refuse при keep<1 (09 §8.6/§13)."""
+    import json as _json
     import pathlib as _pl
     import tempfile as _tf
 
@@ -2104,9 +2105,33 @@ def _backup_gc() -> None:
                 (_pl.Path(td) / "pkg" / build / prod).mkdir(parents=True)
         if len(list_builds(td, "pkg")) != 3:
             raise AssertionError("list_builds сломан")
+        # 09 §8.6: reference-aware GC — партиция, на которую ссылается композиция,
+        # не удаляется даже при ``keep=1`` (старая keep-политика удалила бы её).
+        comp_dir = _pl.Path(td) / "pkg" / "_compositions"
+        comp_dir.mkdir(parents=True)
+        (comp_dir / "cb_live.json").write_text(
+            _json.dumps(
+                {
+                    "schema": "composition/1",
+                    "composition_id": "cb_live",
+                    "package": "pkg",
+                    "created_at": "2026-10-20T00:00:00Z",
+                    "members": [
+                        {
+                            "product_id": "p1",
+                            "partition_build_id": "ib_1",
+                            "content_digest": "d1",
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
         dry = gc_index_builds(td, "pkg", keep=1)
         if not dry:
             raise AssertionError("dry-run обязан вернуть кандидатов на удаление")
+        if "ib_1" in dry:
+            raise AssertionError("живая партиция композиции не подлежит GC")
         if not all((_pl.Path(td) / "pkg" / b).is_dir() for b in ("ib_1", "ib_2", "ib_3")):
             raise AssertionError("dry-run не имеет права удалять сборки")
         try:
@@ -2610,8 +2635,13 @@ def _serp_loop() -> None:
             effort=SearchEffort(budget), budget=budget, round_no=1, parent_build_id=base,
             package="pkg", clock=lambda: "2026-01-01T00:00:00Z",
         )
-        if rnd.build.index_build_id == base or not rnd.build.index_build_id.startswith("ib_"):
-            raise AssertionError("раунд обязан породить новую сборку (K2)")
+        if rnd.build.index_build_id == base or not rnd.build.index_build_id.startswith("cb_"):
+            raise AssertionError("раунд обязан породить новую композицию (K2)")
+        if not all(
+            (entry.partition_build_id or "").startswith("pb_")
+            for entry in rnd.build.entries
+        ):
+            raise AssertionError("раунд обязан породить per-product pb_-партиции")
         invalidated = invalidate_affected(store, run_id, base, rnd.build.index_build_id)
         if not invalidated or any(c.stale_reason is not StaleReason.NEW_BUILD for c in invalidated):
             raise AssertionError("K2: затронутые ячейки обязаны помечаться stale_reason=new_build")

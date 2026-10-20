@@ -407,7 +407,7 @@ def test_corpus_phase_builds_and_captures_index_build_id(tmp_path: Path) -> None
     assert result.status == "ok"
     assert len(result.log_entries) == 1
     build = result.log_entries[0]
-    assert build.index_build_id.startswith("ib_")
+    assert build.index_build_id.startswith("cb_")
     assert build.chunk_count == 2
 
 
@@ -747,7 +747,7 @@ def test_full_phase_chain_writes_report_artifacts(tmp_path: Path) -> None:
     manifest = yaml.safe_load(artifacts.manifest.read_text(encoding="utf-8"))
     assert manifest["run_id"] == RUN_ID
     # index_build_id захвачен из фазы corpus (единственный межфазовый канал — замыкание).
-    assert str(manifest["index_build_id"]).startswith("ib_")
+    assert str(manifest["index_build_id"]).startswith("cb_")
 
 
 def test_report_phase_without_compute_fails() -> None:

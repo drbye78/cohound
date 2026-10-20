@@ -32,7 +32,8 @@ import yaml
 from core.cli.wiring import build_store
 from core.config.seeds import load_seeds
 from core.domain import CellState, CorpusChunk, LLMCellOutput, LLMEvidence, Status
-from core.pipeline.corpus import _content_token, _derive_index_build_id
+from core.pipeline.composition import derive_composition_id
+from core.pipeline.corpus import _derive_partition_build_id, _product_content_token
 from core.pipeline.gates import gate_g1, gate_g2, gate_g3, gate_g4
 from core.pipeline.lint import lint_run_inputs
 from core.pipeline.normalize import RunInputs, load_inputs
@@ -87,13 +88,13 @@ def _load() -> tuple[RunInputs, RunPlan]:
     return inputs, plan_with_identity(inputs, seeds=seeds)
 
 
-def _expected_build_id(inputs: RunInputs, run_plan: RunPlan) -> str:
-    """``index_build_id`` корпуса — через ту же производящую функцию (без дублирования).
+def _expected_ids(inputs: RunInputs, run_plan: RunPlan) -> tuple[str, str]:
+    """``(composition_id, partition_id)`` корпуса — те же производящие функции (09 §8.1).
 
-    P2: id **контент-адресуемый**, поэтому тест воспроизводит отпечаток содержимого
-    единственной продукт-партиции из тех же байтов страницы, что увидит корпус
-    (``content_hash`` чанка — от чистого текста, I19). Пакет корпуса: у ``PackageManifest``
-    нет ``package_id``, поэтому ``phases._package_id`` вернёт ``plan.run_id``.
+    ``cid`` — это ``runs.index_build_id`` (провенанс ячейки/лексического индекса);
+    ``pb`` — физическая партиция и ``corpus_chunks.build_id`` (провенанс чанка).
+    Пакет корпуса: у ``PackageManifest`` нет ``package_id``, поэтому
+    ``phases._package_id`` вернёт ``plan.run_id``.
     """
     chunk = CorpusChunk(
         chunk_id=CHUNK_ID,
@@ -102,20 +103,24 @@ def _expected_build_id(inputs: RunInputs, run_plan: RunPlan) -> str:
         text=PAGE_TEXT,
         content_hash=content_hash(PAGE_TEXT),
     )
-    return _derive_index_build_id(
+    token = _product_content_token([chunk])
+    partition_id = _derive_partition_build_id(
         package_id=run_plan.run_id,
-        params_token=",".join(sorted(row.param_id for row in run_plan.params)),
-        snapshot_date=str(inputs.run.snapshot_date),
+        product_id="p1",
         chunker_version=FakeChunker.version,
         embed_model_id=FakeEmbedder().model_id,
         extractor_version=FakeExtractor.version,
         lexical_engine_version=FakeIndexBuilder.lexical_engine_version,
         vector_store=FakeIndexBuilder.vector_store,
-        content_token=_content_token({"p1": [chunk]}),
+        product_content_token=token,
     )
+    composition_id = derive_composition_id(
+        run_plan.run_id, {"p1": partition_id}, {"p1": token}
+    )
+    return composition_id, partition_id
 
 
-def _build_ports(build_id: str) -> Ports:
+def _build_ports(composition_id: str, partition_id: str) -> Ports:
     """Собирает порты: фейки внешних систем + лексический индекс, засеянный корпусом.
 
     ``FakeLexicalIndex`` хранит ``RetrievedChunk`` с ровно тем ``chunk_id``/``content_hash``,
@@ -130,11 +135,11 @@ def _build_ports(build_id: str) -> Ports:
                 text=PAGE_TEXT,
                 content_hash=content_hash(PAGE_TEXT),
                 heading_path="",
-                build_id=build_id,
+                build_id=partition_id,
                 score=1.0,
             )
         ],
-        build_id=build_id,
+        build_id=composition_id,
     )
     evaluator = FakeEvaluator(
         default=LLMCellOutput(
@@ -196,7 +201,7 @@ def test_walking_skeleton_end_to_end(tmp_path: Path) -> None:
     """Ш1–Ш9 проходят целиком: одна корпусная ячейка + артефакты, оба отчёта честны."""
     inputs, run_plan = _load()
     run_id = run_plan.run_id
-    build_id = _expected_build_id(inputs, run_plan)
+    composition_id, partition_id = _expected_ids(inputs, run_plan)
 
     store = build_store(":memory:")
     store.create_run(run_id, inputs.run)
@@ -204,7 +209,7 @@ def test_walking_skeleton_end_to_end(tmp_path: Path) -> None:
     # Аудит-след: ровно четыре человеческих решения (S9).
     assert len(list(store.iter_gate_decisions(run_id))) == 4
 
-    ports = _build_ports(build_id)
+    ports = _build_ports(composition_id, partition_id)
     phases = _build_phases(inputs, run_plan, ports, store, tmp_path)
     runner = Runner(store, ports=ports, clock=_Clock(), phases=phases)
 
@@ -249,7 +254,8 @@ def test_walking_skeleton_end_to_end(tmp_path: Path) -> None:
     # I19: цитируемый чанк существует ИМЕННО в корпусной сборке, его хеш совпадает,
     # а сырые байты сохранены до экстракции.
     assert resolved.build_id is not None
-    assert resolved.build_id == manifest["index_build_id"]
+    # Чанк живёт в физической партиции; ``runs.index_build_id`` — композиция (09 §8.1).
+    assert resolved.build_id == partition_id
     assert resolved.content_hash == content_hash(PAGE_TEXT)
     chunks = list(store.iter_chunks(resolved.build_id))
     assert any(chunk.chunk_id == evidence.source_id for chunk in chunks)
@@ -261,7 +267,9 @@ def test_walking_skeleton_end_to_end(tmp_path: Path) -> None:
     # Провенанс ретривала лёг и на ячейку (R7/S5).
     assert persisted[0].retrieval_profile == "R0"
     assert "cutoff_K" in (persisted[0].retrieval_params_json or "")
-    assert persisted[0].index_build_id == manifest["index_build_id"]
+    assert persisted[0].index_build_id == manifest["index_build_id"] == composition_id
+    ref = store.read_run_index_ref(run_id)
+    assert ref is not None and ref.index_build_id == composition_id
     lexical = cast(FakeLexicalIndex, ports.lexical_index)
     assert lexical.calls  # ретривал действительно вызывался
     assert all(call[1] == ["p1"] for call in lexical.calls)
@@ -284,13 +292,13 @@ def test_walking_skeleton_blocks_without_g1(tmp_path: Path) -> None:
     """Без решения G1 ``Runner`` останавливается ``blocked`` и не доходит до Ш8/Ш9."""
     inputs, run_plan = _load()
     run_id = run_plan.run_id
-    build_id = _expected_build_id(inputs, run_plan)
+    composition_id, partition_id = _expected_ids(inputs, run_plan)
 
     store = build_store(":memory:")
     store.create_run(run_id, inputs.run)
     # Гейты НЕ записаны: g1 обязан остановить прогон (S9 — гейт не проходится сам).
 
-    ports = _build_ports(build_id)
+    ports = _build_ports(composition_id, partition_id)
     phases = _build_phases(inputs, run_plan, ports, store, tmp_path)
     runner = Runner(store, ports=ports, clock=_Clock(), phases=phases)
 

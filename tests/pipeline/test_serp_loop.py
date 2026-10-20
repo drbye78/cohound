@@ -174,7 +174,7 @@ def test_one_round_creates_new_build(store: SqliteStore) -> None:
 
     assert rnd.round_no == 1
     assert rnd.build.index_build_id != BASE_BUILD
-    assert rnd.build.index_build_id.startswith("ib_")
+    assert rnd.build.index_build_id.startswith("cb_")
     assert len(adapter.calls) == 1
     assert rnd.search_calls == 1
     assert [c.url for c in rnd.candidates] == [URL_A, URL_B]
@@ -422,7 +422,7 @@ def test_builder_may_return_foreign_id_but_round_renormalizes(store: SqliteStore
         builder=_builder,
     )
     assert rnd.build.index_build_id != "ib_builder_derived"
-    assert rnd.build.index_build_id.startswith("ib_")
+    assert rnd.build.index_build_id.startswith("cb_")
     assert rnd.build.entries[0].index_build_id == rnd.build.index_build_id
 
 
@@ -445,8 +445,21 @@ def test_derive_round_build_id_chain_and_sensitivity() -> None:
     c = derive_round_build_id(BASE_BUILD, 1, "pkg", "p1\x1e1\x1eOTHER")
     assert a != b  # цепочка
     assert a != c  # чувствительность к кандидатам
-    assert a.startswith("ib_") and len(a) == len("ib_") + 24
+    assert a.startswith("cb_") and len(a) == len("cb_") + 24
     assert derive_round_build_id(BASE_BUILD, 1, "pkg", "p1\x1e1\x1eurl") == a  # детерминизм
+
+
+def test_derive_round_partition_id_is_new_per_round_and_product() -> None:
+    """09 §8.1: раунд даёт per-product ``pb_``; новый раунд — новые партиции (K2)."""
+    from core.pipeline.serp_loop import derive_round_partition_id
+
+    p1_r1 = derive_round_partition_id(BASE_BUILD, 1, "pkg", "tok", "p1")
+    p1_r1_again = derive_round_partition_id(BASE_BUILD, 1, "pkg", "tok", "p1")
+    p2_r1 = derive_round_partition_id(BASE_BUILD, 1, "pkg", "tok", "p2")
+    p1_r2 = derive_round_partition_id(BASE_BUILD, 2, "pkg", "tok", "p1")
+    assert p1_r1.startswith("pb_") and len(p1_r1) == len("pb_") + 24
+    assert p1_r1 == p1_r1_again
+    assert len({p1_r1, p2_r1, p1_r2}) == 3
 
 
 def test_loop_is_deterministic(store: SqliteStore) -> None:

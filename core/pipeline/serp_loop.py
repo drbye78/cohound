@@ -75,6 +75,7 @@ __all__ = [
     "RoundBuilder",
     "default_round_builder",
     "derive_round_build_id",
+    "derive_round_partition_id",
     "assert_build_id_new",
     "run_serp_round",
     "invalidate_affected",
@@ -138,6 +139,9 @@ class RoundBuildContext:
     package: str
     snapshot_date: str | None
     candidates_by_product: Mapping[str, list[SearchResult]]
+    #: Сборка предыдущего раунда (``None`` для R1) — вход деривации per-product
+    #: ``partition_build_id``. Не влияет на ``new_build_id`` (он уже выведен).
+    parent_build_id: str | None = None
 
 
 #: Seam построения сборки раунда (обёртка ``build_corpus`` или прямая ``IndexBuild``).
@@ -244,12 +248,14 @@ def derive_round_build_id(
     package: str,
     candidates_token: str,
 ) -> str:
-    """Детерминированный ``index_build_id`` раунда (без random/UUID, §13).
+    """Детерминированный ``composition_id`` раунда (``cb_``, без random/UUID, §13).
 
-    Входы (склейка ``\\x1f``, порядок фиксирован): ``parent_build_id`` (пусто для R1),
-    ``round_no``, ``package``, отпечаток кандидатов. Поскольку ``parent_build_id`` —
-    сборка предыдущего раунда, идентификаторы образуют различающуюся цепочку
-    ``R1 → R2 → …``: повторный раунд не переиспользует прошлую сборку (K2).
+    Это ``runs.index_build_id`` раунда (09 §8.1): композиция per-product партиций,
+    а не id одной физической сборки. Входы (склейка ``\\x1f``, порядок фиксирован):
+    ``parent_build_id`` (пусто для R1), ``round_no``, ``package``, отпечаток кандидатов.
+    Поскольку ``parent_build_id`` — композиция предыдущего раунда, идентификаторы
+    образуют различающуюся цепочку ``R1 → R2 → …``: повторный раунд не переиспользует
+    прошлую сборку (K2).
     """
     material = _FIELD_SEP.join(
         (
@@ -259,7 +265,33 @@ def derive_round_build_id(
             candidates_token,
         )
     )
-    return "ib_" + short_hash(material, 24)
+    return "cb_" + short_hash(material, 24)
+
+
+def derive_round_partition_id(
+    parent_build_id: str | None,
+    round_no: int,
+    package: str,
+    candidates_token: str,
+    product_id: str,
+) -> str:
+    """Детерминированный ``partition_build_id`` продукта в раунде (``pb_``, 09 §8.1).
+
+    Раунд порождает **новые** партиции (append-only, K2): вход включает композицию
+    родителя и номер раунда, поэтому повтор раунда не даёт тот же ``pb``. Продукт
+    входит в material, поэтому партиции продуктов различимы даже при одинаковом
+    наборе кандидатов.
+    """
+    material = _FIELD_SEP.join(
+        (
+            parent_build_id or "",
+            str(int(round_no)),
+            str(package),
+            candidates_token,
+            str(product_id),
+        )
+    )
+    return "pb_" + short_hash(material, 24)
 
 
 def assert_build_id_new(
@@ -293,19 +325,28 @@ def default_round_builder(ctx: RoundBuildContext) -> IndexBuild:
     ``builder`` композиции (обёртка ``build_corpus``/``IndexBuilderPort``).
     """
     entries: list[IndexManifestEntry] = []
+    candidates_token = _candidates_token(ctx.candidates_by_product)
     for product_id in sorted(ctx.candidates_by_product):
         results = ctx.candidates_by_product[product_id]
         if not results:
             continue
+        partition_build_id = derive_round_partition_id(
+            ctx.parent_build_id,
+            ctx.round_no,
+            ctx.package,
+            candidates_token,
+            product_id,
+        )
         entries.append(
             IndexManifestEntry(
                 index_build_id=ctx.new_build_id,
+                partition_build_id=partition_build_id,
                 product_id=product_id,
                 package_id=ctx.package,
                 partition_key=f"{ctx.new_build_id}:{product_id}",
                 snapshot_date=ctx.snapshot_date,
                 store_path=(
-                    f"index_store/{ctx.package}/{ctx.new_build_id}/{product_id}/"
+                    f"index_store/{ctx.package}/{partition_build_id}/{product_id}/"
                 ),
                 created_at=ctx.snapshot_date,
                 stats_json=json.dumps(
@@ -336,8 +377,15 @@ def _normalize_build(build: IndexBuild, new_build_id: str, package: str) -> Inde
             update={
                 "index_build_id": new_build_id,
                 "partition_key": f"{new_build_id}:{entry.product_id}",
+                # Физическая партиция адресуется ``pb``, а не композицией. ``builder``
+                # мог вернуть per-product ``pb`` (``build_corpus``/default); если нет —
+                # legacy-строка падает обратно на собственный id (не выдумываем новый).
+                "partition_build_id": entry.partition_build_id
+                or entry.index_build_id,
                 "store_path": (
-                    f"index_store/{package}/{new_build_id}/{entry.product_id}/"
+                    f"index_store/{package}/"
+                    f"{entry.partition_build_id or entry.index_build_id}/"
+                    f"{entry.product_id}/"
                 ),
             }
         )
@@ -463,6 +511,7 @@ def run_serp_round(
         package=package,
         snapshot_date=snapshot_date,
         candidates_by_product=candidates_by_product,
+        parent_build_id=parent_build_id,
     )
     build = _normalize_build(_call_builder(build_fn, ctx), new_build_id, package)
     if build.index_build_id != new_build_id:

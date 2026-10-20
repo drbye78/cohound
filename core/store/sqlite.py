@@ -182,6 +182,7 @@ CREATE TABLE IF NOT EXISTS cell_evidence (
     source_scope      TEXT,                             -- absence-evidence (§4.2)
     scope_attested_by TEXT,                             -- человек для param_ref/distribution
     index_build_id    TEXT,                             -- привязка evidence к сборке (R7)
+    partition_build_id TEXT,                            -- партиция чанка-evidence (09 §8.1)
     retrieved_at      TEXT
 );
 
@@ -427,6 +428,10 @@ def connect(db_path: str | Path = ":memory:") -> sqlite3.Connection:
     # сборка продукт-партиции. Старые строки получают NULL (тогда читатель падает
     # обратно на ``index_build_id``); формула ``index_build_id`` не меняется.
     _ensure_columns(conn, "index_manifest", {"partition_build_id": "TEXT"})
+    # DDL-миграция MVP-4 шаг 2 (09 §8.1): additive ``partition_build_id`` у evidence —
+    # из какого физического чанка-партиции пришла цитата. NULL — неизвестно; backfill
+    # не выполняется (исторические строки остаются как есть).
+    _ensure_columns(conn, "cell_evidence", {"partition_build_id": "TEXT"})
     # DDL-миграция v3.4 (P1): деплой-провенанс манифеста (07 §7) и порог ранжирования
     # (§6/B-1) — реальные колонки. Back-compat не требуется: forward-compat хелпер чтения
     # удалён, старая БД получает колонки, значения остаются NULL до записи манифеста.

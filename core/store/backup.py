@@ -9,9 +9,9 @@
    можно получить рассогласование WAL/SHM (§A.2, §R7). Секреты в архив не
    попадают (см. :data:`_SECRET_NAMES`/:data:`_SECRET_SUFFIXES`).
 2. **GC индексных сборок** (``index_store/{package}/{build}/{product_id}/``).
-   Старые сборки не удаляются «как попало» (§13): политика хранит ``keep``
-   новейших сборок плюс явно защищённые ``protect`` (например, сборки, на
-   которые ссылаются свежие манифесты прогонов). Удаление — только при явном
+   Старые сборки не удаляются «как попало» (§13): reference-aware политика удаляет
+   только партиции, **не входящие ни в одну** композицию ``_compositions/*.json``,
+   плюс явно защищённые ``protect`` (09 §8.6). Удаление — только при явном
    ``dry_run=False``; по умолчанию функция лишь сообщает, что *было бы* удалено.
 
 Нейтрален (§1.3), только stdlib: ``sqlite3``/``zipfile``/``shutil``/``pathlib``/``os``.
@@ -19,6 +19,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import sqlite3
@@ -250,6 +251,43 @@ def list_builds(index_root: str | Path, package: str) -> list[tuple[str, int, fl
     return builds
 
 
+def _referenced_partitions(index_root: str | Path, package: str) -> set[str]:
+    """Партиции, на которые ссылается **хоть одна** композиция пакета (09 §8.6).
+
+    Источник — ``_compositions/*.json``: каждый member несёт ``partition_build_id``.
+    Битый/нечитаемый манифест делает множество ссылок **неизвестным**; в этом случае
+    поднимается :class:`ValueError` — GC не имеет права удалять «возможно живую»
+    партицию из-за повреждённого файла. Композиции, на которые не ссылается ни один
+    прогон, здесь не прунятся (это требует run DB и вне области шага, см. docstring
+    :func:`gc_index_builds`).
+    """
+    directory = Path(index_root) / package / COMPOSITIONS_DIR
+    if not directory.is_dir():
+        return set()
+    referenced: set[str] = set()
+    for path in sorted(directory.glob("*.json")):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValueError(
+                f"GC: композиция {path} не читается ({exc}); ссылки неизвестны — "
+                "удаление запрещено"
+            ) from exc
+        members = payload.get("members") if isinstance(payload, dict) else None
+        if not isinstance(members, list):
+            raise ValueError(
+                f"GC: композиция {path} без списка members; ссылки неизвестны — "
+                "удаление запрещено"
+            )
+        for item in members:
+            if not isinstance(item, dict):
+                continue
+            partition_build_id = item.get("partition_build_id")
+            if isinstance(partition_build_id, str) and partition_build_id:
+                referenced.add(partition_build_id)
+    return referenced
+
+
 def gc_index_builds(
     index_root: str | Path,
     package: str,
@@ -258,34 +296,37 @@ def gc_index_builds(
     protect: Iterable[str] = (),
     dry_run: bool = True,
 ) -> list[str]:
-    """Собирает мусор среди индексных сборок, сохраняя новейшие и защищённые.
+    """Собирает мусор среди индексных сборок **по ссылкам композиций** (09 §8.6).
 
-    Политика (§13): удаляются все сборки, кроме ``keep`` новейших (по
-    ``(mtime, build_id)``) и явно защищённых ``protect`` (например, на которые
-    ссылаются свежие ``run_manifest``). Иммутабельные сборки не трогаются
-    произвольно — удаление требует явного ``dry_run=False``. Служебный
-    ``_compositions`` (09 §8.2) не сборка и не удаляется.
+    Политика (09 §8.6): удаляются только верхнеуровневые каталоги, **не входящие ни в
+    одну** композицию пакета, плюс явно защищённые ``protect``. Это reference-aware GC:
+    после перехода на per-product ``partition_build_id`` (09 §8.1) счётчик «оставить N
+    новейших» удалял бы живые партиции, на которые ссылается ``runs.index_build_id``.
 
-    **Ограничение шага 1 (09 §8.6).** Пока ``partition_build_id`` не стал
-    per-product, keep-политика считает верхнеуровневые каталоги. Перед переходом на
-    per-product id нужен reference-aware GC: удалять только партиции, не входящие ни
-    в одну композицию, на которую ссылается ``runs.index_build_id``.
+    ``keep`` сохранён ради обратной совместимости API и валидации ``keep >= 1``, но в
+    удалении **не участвует**: количество — не критерий жизни партиции.
 
-    :param keep: сколько новейших сборок сохранять; обязан быть ``>= 1``.
-    :param protect: build_id, защищённые от удаления (дополнительно к ``keep``).
-    :param dry_run: ``True`` (по умолчанию, безопасно) — только вернуть список
-        кандидатов, ничего не удаляя; ``False`` — реально удалить.
+    **Композиции не прунятся.** ``_compositions/*.json`` — не сборка и никогда не
+    удаляется здесь. Композиция, на которую не ссылается ни один прогон, может остаться
+    (файл крошечный); её прунинг требует run DB (какие ``runs.index_build_id`` живы) и
+    вынесен за рамки этого шага.
+
+    Удаление — только при явном ``dry_run=False``; по умолчанию функция лишь сообщает,
+    что *было бы* удалено.
+
+    :param keep: совместимость API; обязан быть ``>= 1`` (иначе ``ValueError``).
+    :param protect: build_id/partition_build_id, защищённые от удаления дополнительно.
+    :param dry_run: ``True`` (по умолчанию, безопасно) — только вернуть кандидатов.
     :returns: отсортированный список удалённых (или подлежащих удалению) build_id.
-    :raises ValueError: если ``keep < 1``.
+    :raises ValueError: если ``keep < 1`` или манифест композиции нечитаем.
     """
     if keep < 1:
         raise ValueError("keep обязан быть >= 1")
 
     builds = list_builds(index_root, package)
-    protected = set(protect)
-    newest = sorted(builds, key=lambda item: (item[2], item[0]), reverse=True)
-    survivors = protected | {item[0] for item in newest[:keep]}
-    to_delete = sorted(item[0] for item in builds if item[0] not in survivors)
+    referenced = _referenced_partitions(index_root, package)
+    protected = set(protect) | referenced
+    to_delete = sorted(item[0] for item in builds if item[0] not in protected)
 
     if dry_run:
         return to_delete

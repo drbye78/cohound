@@ -5,11 +5,12 @@
 * ``partition_build_id`` (``pb_...``) — сборка одной продукт-партиции;
 * ``composition_id`` (``cb_...``) — композиция партиций когорты; это ``runs.index_build_id``.
 
-**MVP-4 шаг 1 (shim).** Формулы id пока не меняются: ``partition_build_id :=
-index_build_id``, а :func:`legacy_view` читает прежнюю раскладку
-``index_store/{package}/{build}/{product}/`` как одну композицию. Срез деривации id
-(§8.1) заменит shim; до него :func:`legacy_view` — единственный путь для сборок,
-созданных до появления композиций.
+**MVP-4 шаг 2.** Формулы разделены: ``partition_build_id`` выводит
+:func:`core.pipeline.corpus._derive_partition_build_id` (per-product, без
+``params_token``/``snapshot_date``), а ``composition_id`` — :func:`derive_composition_id`.
+:func:`legacy_view` остаётся только для чтения раскладки, созданной **до** композиций
+(``index_store/{package}/{build}/{product}/`` как одна композиция); новые сборки его не
+используют.
 
 Слой ``pipeline``: модуль импортирует только ``util`` и stdlib, не ``adapters``.
 Нейтрален (§1.3).
@@ -122,9 +123,8 @@ def legacy_view(build_id: str, product_ids: Sequence[str]) -> CompositionView:
     """Shim прежней раскладки: один верхнеуровневый каталог = одна композиция.
 
     ``partition_build_id := build_id`` для каждого продукта, ``composition_id := build_id``.
-    Так читаются сборки, созданные до появления композиций (и текущий MVP-4 шаг 1:
-    формулы id ещё не разделены). Shim удаляется, когда срез деривации
-    ``partition_build_id``/``composition_id`` (§8.1) войдёт в строй.
+    Так читаются сборки, созданные **до** появления композиций. Новые сборки всегда несут
+    ``_compositions/{composition_id}.json`` и в этот путь не попадают.
     """
     return CompositionView(
         composition_id=build_id,
