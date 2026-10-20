@@ -174,22 +174,36 @@ class SqliteStore:
 | `prompt_hash` (per cell) | cells | воспроизводимость ячейки |
 | `stale_reason` (per cell) | cells | инвалидация при смене сборки/prompt-шаблона |
 
-**Разделение версий (§13/B-7, v2.1).** Межцикловый diff классифицирует причины изменения
-манифеста по **классам полей**: `methodology_change` — смена major `methodology_version` либо поля
-`METHODOLOGY_FIELDS` (`scoring_policy_version`, `status_dict_version`, `capability_policy`,
-`unknown_policy`, `partial_score`); `execution_change` — расхождение поля `EXECUTION_FIELDS`
-(`case_id`, `cohort_ref`, `index_build_id`, `embed_model_id`, `chunker_version`, `extractor_version`,
-`lexical_engine_version`, `vector_store`, `retrieval_profile`, `retrieval_cutoff_K`,
-`retrieval_params_json`, `llm_scenarios`, `crawl_strategy`, `crawl_rate_limit`,
-`crawl_max_workers`, `crawl_max_depth`, `crawl_max_documents`, `crawl_exclude_paths`,
-`crawl_exclude_documents`, `crawl_config_digest`). Последние восемь —
-операционные оси краула (`run.yaml:crawl`, commodity-слой A2):
-их смена — `execution_change`, не `methodology_change` (Backlog B, D1/D2).
+**Разделение версий (§13/B-7, v2.1; уточнено методологией 2.3.0).** Межцикловый diff
+классифицирует причины изменения манифеста по **классам полей**: `methodology_change` — смена
+`methodology_version` (любой, не только major) либо поля `METHODOLOGY_FIELDS`
+(`scoring_policy_version`, `status_dict_version`, `capability_policy`,
+`unknown_policy`, `partial_score`); `execution_change` — расхождение
+**`execution_contract_digest`** (отпечаток условий измерения, `core/pipeline/digests.py`).
+`EXECUTION_FIELDS` (`case_id`, `cohort_ref`, `catalog_version`, `index_build_id`, `embed_model_id`,
+`chunker_version`, `extractor_version`, `lexical_engine_version`, `vector_store`,
+`retrieval_profile`, `retrieval_cutoff_K`, `retrieval_params_json`, `llm_scenarios`,
+`crawl_strategy`, `crawl_rate_limit`, `crawl_max_workers`, `crawl_max_depth`,
+`crawl_max_documents`, `crawl_exclude_paths`, `crawl_exclude_documents`,
+`crawl_config_digest`, `registry_spec_digest`) остаётся перечнем полей для **legacy-пар**
+(у одного из манифестов контракта нет) и для аудита «что именно исполнялось»; контракт —
+его подмножество **без контент-производных** id (`index_build_id`), потому что контент
+меняется каждый цикл и условием измерения не является. Последние —
+операционные оси краула (`run.yaml:crawl`, commodity-слой A2): их смена — `execution_change`,
+не `methodology_change` (Backlog B, D1/D2).
 `crawl_config_digest` (N6) — стабильный хеш **разрешённой** конфигурации контроля краула
 (цепочка app < run < per-site, по каждому site-key + `__default__`): ловит смену на
 **app-/per-site-слое**, которую индивидуальные `crawl_max_*` (только run-слой) не видят.
-`DIFF_BOUNDARY_FIELDS` сохранён алиасом
-`EXECUTION_FIELDS` (обратная совместимость). Дифф отказывает при обеих классах причин (§13).
+`DIFF_BOUNDARY_FIELDS` сохранён алиасом `EXECUTION_FIELDS` (обратная совместимость).
+
+**`content_change` (методология 2.3.0).** `index_build_id`/`composition_id` — следствие
+контента, а не условие измерения, поэтому в контракт не входит: при равных контрактах его
+расхождение — **разрешённый** diff класса `content_change` с баннером и per-product
+doc-delta (`new`/`reused`/`removed`). Иначе каждый недельный update запрещал бы ровно тот
+diff, ради которого делается инкрементальность. Смена состава когорты остаётся запрещающей
+и помечается отдельно (`cohort_expansion`/`cohort_reduction`). Legacy-пары, у которых
+контракта нет, сравниваются по перечню `EXECUTION_FIELDS` как раньше — прошлые прогоны не
+становятся задним числом сравнимыми. Дифф отказывает при обеих классах причин (§13).
 
 ### C.2. Версионные границы (bump + golden-full)
 

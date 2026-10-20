@@ -712,6 +712,10 @@ def _db_smoke() -> None:
     # E2 (schema 3.5.0): дайджест package-scoped спецификаций реестров — граница
     # ``execution_change`` (§13); персистится, иначе ``hound diff`` её не видит (D1).
     _assert("registry_spec_digest" in runs_cols)
+    # 09 §12.5 (methodology 2.3.0): отпечаток условий измерения — носитель границы
+    # ``hound diff`` (сравнивается контракт, а не ``index_build_id``); без колонки
+    # недельный (инкрементальный) diff отказывал бы всегда.
+    _assert("execution_contract_digest" in runs_cols)
     inputs_cols = {r["name"] for r in conn.execute("PRAGMA table_info(run_inputs)")}
     _assert({"run_id", "snapshot_version", "payload_json", "payload_sha256",
              "created_at"} <= inputs_cols)
@@ -1986,13 +1990,17 @@ def _report_gates() -> None:
         except PublishBlockedError:
             pass
 
-        def _manifest(index_build_id: str, crawl_strategy=None):
+        def _manifest(index_build_id: str, crawl_strategy=None,
+                      execution_contract_digest=None,
+                      methodology_version="2.0.0"):
             return RunManifest(
                 run_id="r1", case_id="c", created_at="2026-01-01", mode=RunMode.STRICT,
-                methodology_version="2.0.0", package_version="1", catalog_version="1",
+                methodology_version=methodology_version, package_version="1",
+                catalog_version="1",
                 status_dict_version="1", scoring_policy_version="1", anchor_product_id="p1",
                 index_build_id=index_build_id, retrieval_profile="R1", retrieval_cutoff_K=20,
                 retrieval_params_json="{}", crawl_strategy=crawl_strategy,
+                execution_contract_digest=execution_contract_digest,
             )
 
         try:
@@ -2016,6 +2024,60 @@ def _report_gates() -> None:
         ) or not any("crawl_strategy" in r for r in crawl_reasons):
             raise AssertionError(
                 f"§13/Backlog B: ожидался execution_change по crawl_strategy, получено {crawl_reasons}"
+            )
+
+        # 09 §12.5: сравниваются условия измерения (execution contract), а не
+        # ``index_build_id``: та же контрактная пара с разной композицией — разрешённый
+        # diff с баннером ``content_change`` и per-product doc-delta.
+        contract_prev = _manifest("ib_a", execution_contract_digest="ec_1")
+        contract_curr = _manifest("ib_b", execution_contract_digest="ec_1")
+        if diff_boundary_violations(contract_prev, contract_curr):
+            raise AssertionError("09 §12.5: смена композиции при том же контракте — не граница")
+        render_diff(
+            contract_prev, contract_curr, [], [], f"{td}/diff_content.md",
+            doc_delta={"p1": {"new": 1, "reused": 2, "removed": 0}},
+        )
+        content_text = Path(f"{td}/diff_content.md").read_text(encoding="utf-8")
+        if "content_change" not in content_text or "| p1 | 1 | 2 | 0 |" not in content_text:
+            raise AssertionError("09 §12.5: ожидался баннер content_change + doc-delta")
+
+        # Расхождение контракта — одна причина ``execution_change`` по дайджесту.
+        contract_reasons = diff_boundary_violations(
+            _manifest("ib_a", execution_contract_digest="ec_1"),
+            _manifest("ib_a", execution_contract_digest="ec_2"),
+        )
+        if contract_reasons != [
+            "execution_change: execution_contract_digest: ec_1 → ec_2"
+        ]:
+            raise AssertionError(
+                f"09 §12.5: ожидалась причина по контракту, получено {contract_reasons}"
+            )
+
+        # §13: смена methodology_version (minor/patch) — methodology_change, не
+        # «изменились условия измерения»; общая строка контракта не дублируется.
+        minor_version_reasons = diff_boundary_violations(
+            _manifest("ib_a", execution_contract_digest="ec_1"),
+            _manifest("ib_a", execution_contract_digest="ec_2",
+                      methodology_version="2.3.0"),
+        )
+        if minor_version_reasons != [
+            "methodology_change: methodology_version: 2.0.0 → 2.3.0"
+        ]:
+            raise AssertionError(
+                "§13: ожидалась methodology_change по methodology_version, "
+                f"получено {minor_version_reasons}"
+            )
+
+        # Состав когорты различим: расширение называется ``cohort_expansion``.
+        cohort_reasons = diff_boundary_violations(
+            _manifest("ib_a", execution_contract_digest="ec_1"),
+            _manifest("ib_a", execution_contract_digest="ec_2"),
+            prev_products=["p1"],
+            curr_products=["p1", "p2"],
+        )
+        if cohort_reasons != ["execution_change: cohort_expansion: p2"]:
+            raise AssertionError(
+                f"09 §12.5: ожидался cohort_expansion, получено {cohort_reasons}"
             )
 
         # §5/I3 (v2.1): strict-❓ без полного протокола → аномалия (статус не меняется).

@@ -224,19 +224,22 @@ def _open_state_store(args: argparse.Namespace, *, create: bool = False) -> Any:
     return SqliteStateStore(db_path)
 
 
-def _read_cycle(args: argparse.Namespace, run_id: str) -> tuple[Any, list[Any]]:
-    """Читает цикл прогона: ``(манифест, ячейки)`` для ``diff``.
+def _read_cycle(args: argparse.Namespace, run_id: str) -> tuple[Any, list[Any], list[Any]]:
+    """Читает цикл прогона: ``(манифест, ячейки, документы корпуса)`` для ``diff``.
 
     ``--db`` (общая БД) приоритетнее ``--runs-dir``; иначе БД резолвится
-    :func:`core.cli.wiring.run_db_path`.
+    :func:`core.cli.wiring.run_db_path`. Документы (``iter_corpus_docs``) нужны для
+    per-product doc-delta ``content_change`` (09 §12.5).
     """
     db_path = args.db if args.db is not None else run_db_path(args.runs_dir, run_id)
     manifest: Any = None
     cells: list[Any] = []
+    docs: list[Any] = []
     with build_store(db_path, profile=args.profile) as store:
         manifest = store.read_manifest(run_id)
         cells = list(store.iter_cells(run_id))
-    return manifest, cells
+        docs = list(store.iter_corpus_docs(run_id))
+    return manifest, cells, docs
 
 
 def _infer_run_id(store: Any) -> str:
@@ -1414,6 +1417,7 @@ def _resolve_phases(
     state: Any = None,
     product_modes: Mapping[str, str] | None = None,
     refresh_policy: str = "auto",
+    execution_contract_digest: str | None = None,
 ) -> dict[str, PhaseFn]:
     """Собирает реестр не-гейтовых фаз (``phases_factory`` — тестовый шов).
 
@@ -1450,6 +1454,9 @@ def _resolve_phases(
         субстрат корпуса выключен (dry-run/``crawl`` без состояния).
     :param product_modes: ``product_id → mode`` из onboarding-плана; ``None`` → все ``new``.
     :param refresh_policy: политика наблюдения прогона (значение ``RefreshPolicy``).
+    :param execution_contract_digest: готовый ``execution_contract_digest`` прогона
+        (09 §12.5), вычисленный composition root до исполнения фаз; протягивается в
+        манифест Ш9 без пересчёта (``None`` — неизвестен, значение не выдумывается).
     """
     passports_dir = getattr(args, "passports_dir", None)
     if passports_dir is None and paths is not None:
@@ -1521,6 +1528,8 @@ def _resolve_phases(
         "state": state,
         "product_modes": product_modes,
         "refresh_policy": refresh_policy,
+        # 09 §12.5: готовый отпечаток условий измерения → манифест Ш9 (без пересчёта).
+        "execution_contract_digest": execution_contract_digest,
         "crawl_app": deploy_config.crawl if deploy_config is not None else None,
         # P4: исполнитель параллельной экстракции по профилю зон (local — процессы,
         # split — потоки поверх RemoteExtractor). Ось ``crawl.extract_workers`` решается

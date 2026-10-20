@@ -235,6 +235,18 @@ class StorePort(Protocol):
         """Итерирует покрытие прогона; детерминированный порядок ``product_id``."""
         ...
 
+    def iter_corpus_docs(self, run_id: str) -> Iterator[CorpusDoc]:
+        """Итерирует документы корпуса прогона (детерминированно: ``product_id, doc_id``).
+
+        Read-only источник per-product doc-delta для ``hound diff`` (09 §12.5): наборы
+        ``content_hash`` по продуктам обоих циклов. Схема не меняется. В штатной
+        раскладке БД принадлежит одному прогону; в общей ``--db`` таблица
+        ``corpus_docs`` — объединение корпусов (ограничение раскладки, не подмена).
+
+        :raises ValueError: прогона ``run_id`` нет в этой БД.
+        """
+        ...
+
     # -- чтение ---------------------------------------------------------- #
     def iter_cells(self, run_id: str, state: str | None = None) -> Iterator[Cell]: ...
 

@@ -679,6 +679,9 @@ def run(args: argparse.Namespace) -> int:
                     else None
                 ),
                 refresh_policy=refresh_policy.value,
+                # 09 §12.5: тот же дайджест, что ушёл в ``run_id``/lineage (``contract_d``),
+                # — манифест/``runs`` не пересчитывают его из другого набора значений.
+                execution_contract_digest=contract_d,
             )
             # 09 §8.1/§8.4: порты ретривала строятся до корпуса, где composition id
             # ещё неизвестен. После успешного корпуса перепривязываем их к его

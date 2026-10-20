@@ -1083,6 +1083,93 @@ def test_registry_spec_digest_roundtrip(store: SqliteStore) -> None:
     assert store.read_manifest(RUN_ID).registry_spec_digest == "digest-e2"
 
 
+def test_execution_contract_digest_roundtrip(store: SqliteStore) -> None:
+    """09 §12.5: контракт условий измерения персистится и читается обратно.
+
+    Без персистенции ``hound diff`` всегда видел бы ``None`` (legacy) и отказывал бы
+    на любой новой композиции — ровно дефект, который закрывает эта граница.
+    """
+    store.create_run(RUN_ID, _cfg())
+    # Новый прогон до записи манифеста → NULL → ``None`` (не фабрикуется).
+    assert store.read_manifest(RUN_ID).execution_contract_digest is None
+
+    manifest = RunManifest(
+        run_id=RUN_ID,
+        case_id="case-1",
+        created_at="2026-01-01T00:00:00Z",
+        mode=RunMode.STRICT,
+        methodology_version="2.3.0",
+        package_version="pkg-1",
+        catalog_version="cat-1",
+        status_dict_version="sd-1",
+        scoring_policy_version="sp-1",
+        anchor_product_id="p1",
+        execution_contract_digest="ec_roundtrip",
+    )
+    store.persist_manifest(RUN_ID, manifest)
+    assert store.read_manifest(RUN_ID).execution_contract_digest == "ec_roundtrip"
+
+
+def test_iter_corpus_docs_returns_run_docs(store: SqliteStore) -> None:
+    """Read-only аксессор doc-delta: документы прогона, детерминированный порядок."""
+    store.create_run(RUN_ID, _cfg())
+    store.upsert_corpus_doc(
+        CorpusDoc(
+            doc_id="p2:h2", product_id="p2", url="https://example.test/2",
+            content_hash="h2",
+        )
+    )
+    store.upsert_corpus_doc(
+        CorpusDoc(
+            doc_id="p1:h1", product_id="p1", url="https://example.test/1",
+            content_hash="h1",
+        )
+    )
+    docs = list(store.iter_corpus_docs(RUN_ID))
+    assert [(doc.product_id, doc.content_hash) for doc in docs] == [
+        ("p1", "h1"),
+        ("p2", "h2"),
+    ]
+
+    with pytest.raises(ValueError):
+        list(store.iter_corpus_docs("unknown-run"))
+
+
+def test_connect_migrates_legacy_runs_without_execution_contract_digest(
+    tmp_path: Path,
+) -> None:
+    """09 §12.5: старая ``runs`` без колонки мигрирует; строки целы, значение NULL."""
+    from core.store.sqlite import connect
+
+    db = tmp_path / "legacy_contract.db"
+    legacy = sqlite3.connect(db)
+    legacy.execute(
+        "CREATE TABLE runs (run_id TEXT PRIMARY KEY, created_at TEXT NOT NULL,"
+        " mode TEXT, case_id TEXT, anchor_product_id TEXT, index_build_id TEXT)"
+    )
+    legacy.execute(
+        "INSERT INTO runs(run_id, created_at, mode, case_id, anchor_product_id,"
+        " index_build_id) VALUES ('r1','now','strict','c','p','ib_1')"
+    )
+    legacy.commit()
+    legacy.close()
+
+    migrated = connect(db)
+    cols = {r["name"] for r in migrated.execute("PRAGMA table_info(runs)")}
+    assert "execution_contract_digest" in cols
+    row = migrated.execute(
+        "SELECT run_id, index_build_id, execution_contract_digest FROM runs"
+    ).fetchone()
+    assert row["run_id"] == "r1"
+    assert row["index_build_id"] == "ib_1"
+    assert row["execution_contract_digest"] is None
+    migrated.close()
+
+    again = connect(db)
+    assert {r["name"] for r in again.execute("PRAGMA table_info(runs)")} == cols
+    again.close()
+
+
 def test_connect_migrates_legacy_runs_without_registry_spec_digest(tmp_path: Path) -> None:
     """D1/E2: старая ``runs`` без ``registry_spec_digest`` мигрирует; строки/значения целы."""
     from core.store.sqlite import connect

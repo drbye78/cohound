@@ -63,6 +63,7 @@ CREATE TABLE IF NOT EXISTS runs (
     crawl_rate_limit      TEXT,                        -- §13/Backlog B: канон. форма rate_limit (execution_change)
     crawl_config_digest   TEXT,                        -- §13/N6: дайджест разрешённой конфигурации контроля краула (execution_change)
     registry_spec_digest  TEXT,                        -- §13/E2: дайджест package-scoped спецификаций реестров (execution_change)
+    execution_contract_digest TEXT,                    -- §13/09 §12.5: отпечаток условий измерения (methodology_change boundary)
     ranking_epsilon       REAL,                        -- §6/B-1: порог неразличимости ранжирования
     deploy_profile        TEXT,                        -- 07 §7: профиль доверенных зон (R7)
     edge_schema_version   TEXT,                        -- 07 §7: версия контракта шва /v1/* (execution-class)
@@ -413,6 +414,12 @@ def connect(db_path: str | Path = ":memory:") -> sqlite3.Connection:
     # ``execution_change`` (§13); additive, старые БД получают колонку (без неё ``hound diff``
     # не видел смену спецификации реестра).
     _ensure_columns(conn, "runs", {"registry_spec_digest": "TEXT"})
+    # DDL-миграция (09 §12.5, methodology 2.3.0): отпечаток условий измерения
+    # (``execution_contract_digest``) — носитель границы класса ``methodology_change``:
+    # ``hound diff`` сравнивает контракт, а не ``index_build_id``, поэтому без колонки
+    # недельный (инкрементальный) diff всегда отказывал бы. Аддитивно и идемпотентно;
+    # старые строки получают NULL — legacy-прогон, дайджест не фабрикуется.
+    _ensure_columns(conn, "runs", {"execution_contract_digest": "TEXT"})
     # DDL-миграция v3.6 (P6): аннотация причины pending-ячейки (конфликт источников vs
     # условное наследование). Аддитивно и идемпотентно; это не статус и не перечисление.
     _ensure_columns(conn, "cells", {"review_reason": "TEXT"})

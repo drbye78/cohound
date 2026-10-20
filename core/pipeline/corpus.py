@@ -470,7 +470,7 @@ def derive_corpus_coverage(
     Детерминированно: ``expected_sources`` — число элементов, ``observed_sources`` —
     дошедшие до ``FETCHED``, ``blocked`` — счётчики ``FAILED`` по ``error_kind`` (аудит).
 
-    **Порог неполноты — два независимых условия.**
+    **Порог неполноты — три независимых условия.**
 
     1. *Нечитаемый origin.* Origin (``netloc`` URL) считается **нечитаемым**, только
        если из него не получено ни одного ``FETCHED`` элемента и при этом был хотя бы
@@ -484,13 +484,21 @@ def derive_corpus_coverage(
        и ``❌`` на таком корпусе не является доказательством отсутствия. Причина
        блокировки видна в ``blocked``/``partial_blocks`` и в производном
        :attr:`CorpusCoverage.blocking_failures`.
+    3. *Ни одного наблюдения.* ``observed_sources == 0`` при ``expected_sources > 0``
+       делает покрытие неполным **по построению**: корпус, в котором не прочитано ни
+       одного документа, не может доказывать отсутствие. ``not_found`` на каждом URL —
+       наблюдение отсутствия *этих URL*, а не доказательство, что у продукта нет
+       возможности; полностью ``pending``/``running`` сеанс — отсутствие наблюдения
+       вовсе. ``reason`` при этом остаётся ``None``: неполноту объясняют
+       ``expected_sources``/``observed_sources``/``blocked``/``unreadable_origins``.
 
-    ``complete = (not truncated) and (not unreadable_origins) and (no blocking failure)``.
+    ``complete = (not truncated) and (not unreadable_origins) and (no blocking failure) and (observed_sources > 0)``.
 
     Явно **не** блокируют ``complete``:
 
     * ``not_found`` (HTTP 404/410) — разрешённое наблюдение отсутствия: origin ответил,
-      что ресурса нет; остаётся в ``blocked`` как аудит;
+      что ресурса нет; остаётся в ``blocked`` как аудит. Сам по себе класс не блокирует,
+      но корпус, где **все** URL вернули ``not_found``, неполон по условию (3);
     * ``source_unavailable`` — транзиентная недоступность читаемого origin'а; полностью
       тёмный origin по-прежнему ловится условием (1);
     * ``redirect_out_of_scope`` — уход за границу охвата по определению;
@@ -541,7 +549,10 @@ def derive_corpus_coverage(
     blocking_failures = any(kind in blocking_values for kind in blocked)
     return CorpusCoverage(
         product_id=product_id,
-        complete=(not truncated) and not unreadable_origins and not blocking_failures,
+        complete=(not truncated)
+        and not unreadable_origins
+        and not blocking_failures
+        and observed > 0,
         expected_sources=expected,
         observed_sources=observed,
         blocked=dict(sorted(blocked.items())),
@@ -569,6 +580,9 @@ def _persist_corpus_coverage(
     Продукт без элементов сеанса (нулевой seed-набор / preflight обойдён) получает
     строку ``expected_sources=0, complete=False, reason=no_seeds`` — отсутствие
     покрытия не должно читаться как «неизвестно» и не должно давать тихий ``ok``.
+    Продукт с элементами, но без единого ``FETCHED`` (все ``not_found``/``pending``),
+    получает ``complete=False`` из :func:`derive_corpus_coverage` с ``reason=None``:
+    неполноту объясняют счётчики, а не новая причина.
     """
     by_product: dict[str, list[CrawlSessionItem]] = {}
     for item in store.iter_crawl_session_items(session_id):

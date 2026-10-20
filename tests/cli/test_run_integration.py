@@ -424,6 +424,14 @@ def test_cmd_run_wires_package_registry_specs_end_to_end(
     assert main(argv) == EXIT_OK
     loaded = yaml.safe_load((runs_dir / run_id / "run_manifest.yaml").read_text("utf-8"))
     assert loaded["registry_spec_digest"]
+    # 09 §12.5: контракт условий измерения доезжает из composition root (тот же, что у
+    # ``run_id``/lineage) до манифеста и строки ``runs`` — не пересчитывается в Ш9.
+    assert loaded["execution_contract_digest"]
+    with build_store(db) as store:
+        assert (
+            store.read_manifest(run_id).execution_contract_digest
+            == loaded["execution_contract_digest"]
+        )
 
 
 # ---------------------------------------------------------------------------

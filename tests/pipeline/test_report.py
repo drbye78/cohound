@@ -36,6 +36,7 @@ import yaml
 from core.domain import REQUIRED_EXHAUSTION_CONTOURS
 from core.domain.enums import (
     CellState,
+    ChangeClass,
     CrawlStrategy,
     EndpointKind,
     LLMScenario,
@@ -82,6 +83,7 @@ from core.pipeline.report import (
     render_diff,
     render_nda_questions,
     render_preliminary_findings,
+    resolve_diff_change_class,
     write_reports,
     write_run_manifest,
 )
@@ -327,6 +329,42 @@ def test_build_manifest_carries_provenance_and_epsilon(tmp_path: Path) -> None:
     )
     assert override.ranking_epsilon == 0.0
     assert override.settings_provenance == {"ranking_epsilon": {"source": "default"}}
+
+
+def test_build_manifest_carries_execution_contract_digest() -> None:
+    """09 §12.5: готовый контракт идёт в манифест как есть; без него — ``None``."""
+    run = SimpleNamespace(
+        case_id="case-1",
+        mode=RunMode.STRICT,
+        methodology_version="2.3.0",
+        cohort="cohort.yaml",
+        ranking_policy=RankingPolicy.CAPABILITY_RANKED,
+    )
+    inputs = SimpleNamespace(run=run, package=None)
+    plan = SimpleNamespace(
+        run_id="run-contract",
+        anchor=PRODUCT_A,
+        modules=[],
+        methodology_version="2.3.0",
+        catalog_version="1.0.0",
+        cohort_ref="cohort.yaml",
+    )
+
+    manifest = build_manifest(
+        inputs=inputs,  # type: ignore[arg-type]
+        plan=plan,  # type: ignore[arg-type]
+        created_at="2026-01-01T00:00:00Z",
+        execution_contract_digest="ec_123",
+    )
+    assert manifest.execution_contract_digest == "ec_123"
+
+    # Не передан → ``None`` (не пустая строка и не фабрикация).
+    default = build_manifest(
+        inputs=inputs,  # type: ignore[arg-type]
+        plan=plan,  # type: ignore[arg-type]
+        created_at="2026-01-01T00:00:00Z",
+    )
+    assert default.execution_contract_digest is None
 
 
 def test_run_config_methodology_version_default_and_flow() -> None:
@@ -1160,6 +1198,170 @@ def test_diff_guard_marks_execution_change_on_registry_spec_digest(tmp_path: Pat
     message = str(excinfo.value)
     assert "execution_change" in message
     assert "registry_spec_digest" in message
+    assert not (tmp_path / "diff.md").exists()
+
+
+def test_diff_boundary_compares_contract_not_index_build_id() -> None:
+    """09 §12.5: при наличии контракта ``index_build_id`` — **не** граница.
+
+    Новая композиция при тех же условиях измерения (недельный инкремент) — разрешённый
+    diff; сравнивается ``execution_contract_digest``.
+    """
+    prev = _manifest(index_build_id="build.1", execution_contract_digest="ec_1")
+    curr = _manifest(index_build_id="build.2", execution_contract_digest="ec_1")
+    assert diff_boundary_violations(prev, curr) == []
+
+
+def test_diff_boundary_contract_mismatch_is_single_reason() -> None:
+    """Расхождение контракта — одна причина (без построчного дубля ``EXECUTION_FIELDS``)."""
+    prev = _manifest(execution_contract_digest="ec_1", retrieval_cutoff_K=10)
+    curr = _manifest(execution_contract_digest="ec_2", retrieval_cutoff_K=25)
+    reasons = diff_boundary_violations(prev, curr)
+    assert reasons == ["execution_change: execution_contract_digest: ec_1 → ec_2"]
+
+
+def test_diff_boundary_names_cohort_change_instead_of_contract_mismatch() -> None:
+    """Состав когорты различим: ``cohort_expansion``/``cohort_reduction`` вместо контракта."""
+    prev = _manifest(execution_contract_digest="ec_1")
+    curr = _manifest(execution_contract_digest="ec_2")
+
+    grown = diff_boundary_violations(prev, curr, prev_products=["p1"], curr_products=["p1", "p2"])
+    assert grown == ["execution_change: cohort_expansion: p2"]
+
+    shrunk = diff_boundary_violations(prev, curr, prev_products=["p1", "p2"], curr_products=["p1"])
+    assert shrunk == ["execution_change: cohort_reduction: p2"]
+
+    # Состав неизвестен — набор не выдумывается, причина остаётся общей.
+    assert diff_boundary_violations(prev, curr) == [
+        "execution_change: execution_contract_digest: ec_1 → ec_2"
+    ]
+
+
+def test_diff_boundary_legacy_pair_keeps_index_build_id_boundary() -> None:
+    """Legacy-пара (дайджест ``None``) — прежнее поведение, включая ``index_build_id``."""
+    prev = _manifest(index_build_id="build.1")
+    curr = _manifest(index_build_id="build.2")
+    reasons = diff_boundary_violations(prev, curr)
+    assert reasons
+    assert all(r.startswith("execution_change:") for r in reasons)
+    assert any("index_build_id" in r for r in reasons)
+
+
+def test_resolve_diff_change_class_content_change() -> None:
+    """``content_change`` — класс **времени diff** (контракт тот же, композиция новая)."""
+    prev = _manifest(index_build_id="build.1", execution_contract_digest="ec_1")
+    curr = _manifest(index_build_id="build.2", execution_contract_digest="ec_1")
+    assert resolve_diff_change_class(prev, curr) is ChangeClass.CONTENT_CHANGE
+
+    same = _manifest(index_build_id="build.1", execution_contract_digest="ec_1")
+    assert resolve_diff_change_class(prev, same) is ChangeClass.NONE
+
+    # ``None`` с одной стороны — тоже изменение контента (композиция неизвестна).
+    assert (
+        resolve_diff_change_class(_manifest(execution_contract_digest="ec_1"), curr)
+        is ChangeClass.CONTENT_CHANGE
+    )
+
+
+def test_resolve_diff_change_class_execution_and_cohort() -> None:
+    """Контракт различается → ``execution_change``; известный состав — ``cohort_*``."""
+    prev = _manifest(execution_contract_digest="ec_1")
+    curr = _manifest(execution_contract_digest="ec_2")
+    assert resolve_diff_change_class(prev, curr) is ChangeClass.EXECUTION_CHANGE
+    assert (
+        resolve_diff_change_class(prev, curr, prev_products=["p1"], curr_products=["p1", "p2"])
+        is ChangeClass.COHORT_EXPANSION
+    )
+    assert (
+        resolve_diff_change_class(prev, curr, prev_products=["p1", "p2"], curr_products=["p1"])
+        is ChangeClass.COHORT_REDUCTION
+    )
+
+
+def test_resolve_diff_change_class_legacy_never_claims_content_change() -> None:
+    """Legacy-пара: ``content_change`` недоказуем — расхождение полей даёт ``execution_change``."""
+    prev = _manifest(index_build_id="build.1")
+    curr = _manifest(index_build_id="build.2")
+    assert resolve_diff_change_class(prev, curr) is ChangeClass.EXECUTION_CHANGE
+    assert resolve_diff_change_class(prev, prev) is ChangeClass.NONE
+
+
+def test_render_diff_content_change_banner_and_delta(tmp_path: Path) -> None:
+    """Баннер ``content_change`` + per-product doc-delta (сортировка по продукту)."""
+    prev = _manifest(run_id="run-prev", index_build_id="build.1", execution_contract_digest="ec_1")
+    curr = _manifest(index_build_id="build.2", execution_contract_digest="ec_1")
+    path = render_diff(
+        prev,
+        curr,
+        [],
+        [],
+        tmp_path / "diff.md",
+        doc_delta={
+            "p2": {"new": 0, "reused": 4, "removed": 2},
+            "p1": {"new": 3, "reused": 1, "removed": 0},
+        },
+    )
+    text = path.read_text(encoding="utf-8")
+    assert "content_change" in text
+    assert "| product | new | reused | removed |" in text
+    # Детерминированно: p1 раньше p2.
+    assert text.index("| p1 |") < text.index("| p2 |")
+    assert "| p1 | 3 | 1 | 0 |" in text
+    assert "| p2 | 0 | 4 | 2 |" in text
+
+
+def test_render_diff_no_content_change_banner_when_index_unchanged(tmp_path: Path) -> None:
+    """Одинаковые контракт и композиция → баннера ``content_change`` нет."""
+    prev = _manifest(run_id="run-prev", execution_contract_digest="ec_1")
+    curr = _manifest(execution_contract_digest="ec_1")
+    path = render_diff(prev, curr, [], [], tmp_path / "diff.md")
+    text = path.read_text(encoding="utf-8")
+    assert "content_change" not in text
+    assert "| product | new | reused | removed |" not in text
+
+
+def test_diff_minor_methodology_bump_is_methodology_change(tmp_path: Path) -> None:
+    """§13: смена ``methodology_version`` (minor/patch) — ``methodology_change``, не execution.
+
+    ``methodology_version`` входит в ``EXECUTION_CONTRACT_FIELDS``, поэтому без явной
+    классификации 2.2.0 → 2.3.0 читалось бы как «изменились условия измерения». Причина
+    обязана называть версию и **не** содержать общую строку контракта.
+    """
+    prev = _manifest(methodology_version="2.2.0", execution_contract_digest="ec_1")
+    curr = _manifest(methodology_version="2.3.0", execution_contract_digest="ec_1")
+    with pytest.raises(CrossCycleDiffError) as excinfo:
+        render_diff(prev, curr, [], [], tmp_path / "diff.md")
+    message = str(excinfo.value)
+    reason = message.split("— ", 1)[-1]
+    assert reason.startswith("methodology_change: methodology_version:")
+    assert "2.2.0 → 2.3.0" in reason
+    assert "execution_contract_digest" not in message
+    assert not (tmp_path / "diff.md").exists()
+
+
+def test_diff_minor_methodology_bump_suppresses_generic_contract_line() -> None:
+    """Контракт тоже различается (version входит в него) — общая строка не дублируется."""
+    prev = _manifest(methodology_version="2.2.0", execution_contract_digest="ec_1")
+    curr = _manifest(methodology_version="2.3.0", execution_contract_digest="ec_2")
+    assert diff_boundary_violations(prev, curr) == [
+        "methodology_change: methodology_version: 2.2.0 → 2.3.0"
+    ]
+
+
+def test_resolve_diff_change_class_minor_methodology_bump() -> None:
+    """Классификатор diff повторяет приоритет границы: версия раньше контракта."""
+    prev = _manifest(methodology_version="2.2.0", execution_contract_digest="ec_1")
+    curr = _manifest(methodology_version="2.3.0", execution_contract_digest="ec_2")
+    assert resolve_diff_change_class(prev, curr) is ChangeClass.METHODOLOGY_CHANGE
+
+
+def test_diff_guard_methodology_major_with_contracts(tmp_path: Path) -> None:
+    """Major ``methodology_version`` остаётся ``methodology_change`` и при контрактах."""
+    prev = _manifest(methodology_version="2.0.0", execution_contract_digest="ec_1")
+    curr = _manifest(methodology_version="3.0.0", execution_contract_digest="ec_2")
+    with pytest.raises(CrossCycleDiffError) as excinfo:
+        render_diff(prev, curr, [], [], tmp_path / "diff.md")
+    assert "methodology_change" in str(excinfo.value)
     assert not (tmp_path / "diff.md").exists()
 
 

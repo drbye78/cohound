@@ -25,9 +25,12 @@
 * **I13** — ``preliminary`` не попадает в battle card/NDA; идёт только в
   ``preliminary_findings`` с маркером «не публикация».
 * **§13** — межцикловый ``diff`` запрещён при смене major ``methodology_version``,
-  методологического класса (:data:`METHODOLOGY_FIELDS`) либо исполнительного класса
-  (:data:`EXECUTION_FIELDS`); контракт — **отказ** (:class:`CrossCycleDiffError`).
+  методологического класса (:data:`METHODOLOGY_FIELDS`) либо расхождении **условий
+  измерения** (``execution_contract_digest``; для legacy-пары без дайджеста —
+  :data:`EXECUTION_FIELDS`); контракт — **отказ** (:class:`CrossCycleDiffError`).
   Причины маркируются классом: ``methodology_change`` / ``execution_change``.
+  Новая композиция при неизменном контракте — разрешённый diff класса
+  ``content_change`` (баннер + per-product doc-delta), а не граница (09 §12.5).
 
 Модуль категорийно нейтрален (§1.3), детерминирован (сортировка продуктов/параметров).
 ``openpyxl`` — опциональная зависимость: при её отсутствии XLSX-артефакты
@@ -49,6 +52,7 @@ import yaml
 from core.domain.enums import (
     BLOCKING_FAILURE_KINDS,
     CellState,
+    ChangeClass,
     RankingPolicy,
     SourceScope,
     Status,
@@ -94,6 +98,8 @@ __all__ = [
     "METHODOLOGY_FIELDS",
     "EXECUTION_FIELDS",
     "DIFF_BOUNDARY_FIELDS",
+    "diff_boundary_violations",
+    "resolve_diff_change_class",
     "build_manifest",
     "write_run_manifest",
     "render_battle_card",
@@ -138,6 +144,12 @@ METHODOLOGY_FIELDS: tuple[str, ...] = (
 #: §13/B-7 (v2.1): поля **исполнительного** класса (что именно исполнялось). Их смена —
 #: версионная граница, но не методологическая несовместимость; маркируется причиной
 #: ``execution_change``.
+#:
+#: 09 §12.5: для пары прогонов, у которых **есть** ``execution_contract_digest``, эти поля
+#: построчно **не** сравниваются — контракт уже свёртка тех же значений, а перебор
+#: продублировал бы одну причину многими строками (и делал бы ``index_build_id`` границей,
+#: запрещая каждый недельный инкремент). Кортеж остаётся границей **legacy-пары** (дайджест
+#: ``None`` хотя бы с одной стороны): старые сравнения не легализуются ретроактивно.
 EXECUTION_FIELDS: tuple[str, ...] = (
     "case_id",
     "cohort_ref",
@@ -533,6 +545,7 @@ def build_manifest(
     domain_profiles: Mapping[str, Any] | None = None,
     crawl_app: Any = None,
     registry_spec_digest: str | None = None,
+    execution_contract_digest: str | None = None,
 ) -> RunManifest:
     """Собирает полностью заполненный :class:`RunManifest` (R7/§13) фазы Ш9.
 
@@ -561,6 +574,11 @@ def build_manifest(
     * §13/E2 — ``registry_spec_digest`` (дайджест загруженных package-scoped спецификаций
       реестров) передаётся вызывающим; при отсутствии реестров — ``None``. Это **граница**
       ``execution_change`` (смена спеки меняет выходные R-ячейки).
+    * §13 / 09 §12.5 — ``execution_contract_digest`` передаётся вызывающим **готовым**
+      (значение, уже вычисленное composition root для ``run_id``/lineage); здесь оно не
+      пересчитывается из другого набора значений и не подменяется пустой строкой.
+      ``None`` — дайджест неизвестен (legacy/вызов без идентичности): манифест честно
+      молчит, а ``hound diff`` применяет прежнее сравнение ``EXECUTION_FIELDS``.
 
     Деплой-провенанс (``deploy_profile``/``edge_schema_version``) заполняется только если
     соответствующие поля есть в текущей схеме :class:`RunManifest` (defensive: иначе
@@ -840,6 +858,8 @@ def build_manifest(
         # E2/§13: дайджест package-scoped спецификаций реестров (``None`` — нет реестров;
         # поле аддитивно, нетронутые манифесты без реестров не меняются по значению).
         registry_spec_digest=registry_spec_digest,
+        # 09 §12.5: готовый отпечаток условий измерения (не пересчитывается здесь).
+        execution_contract_digest=execution_contract_digest,
         snapshot_date=snapshot_date,
         **extra,
     )
@@ -1482,28 +1502,143 @@ def _boundary_value(manifest: RunManifest, name: str) -> Any:
     return getattr(manifest, name)
 
 
-def diff_boundary_violations(prev: RunManifest, curr: RunManifest) -> list[str]:
+def _product_set(products: Iterable[Any] | None) -> set[str] | None:
+    """Нормализует набор продуктов для сравнения состава когорты.
+
+    ``None`` — «состав неизвестен» (данных нет); пустой вход — тоже ``None``: пустой
+    набор не доказывает пустую когорту, и выдумывать его нельзя (A3).
+    """
+    if products is None:
+        return None
+    normalized = {str(product) for product in products}
+    return normalized or None
+
+
+def _cohort_change_class(
+    prev_products: Iterable[Any] | None, curr_products: Iterable[Any] | None
+) -> ChangeClass | None:
+    """Класс изменения состава когорты (``cohort_expansion``/``cohort_reduction``).
+
+    ``None`` — состав неизвестен хотя бы с одной стороны либо наборы совпадают.
+    """
+    previous = _product_set(prev_products)
+    current = _product_set(curr_products)
+    if previous is None or current is None:
+        return None
+    if current - previous:
+        return ChangeClass.COHORT_EXPANSION
+    if previous - current:
+        return ChangeClass.COHORT_REDUCTION
+    return None
+
+
+def _cohort_change_reasons(
+    prev_products: Iterable[Any] | None, curr_products: Iterable[Any] | None
+) -> list[str]:
+    """Причины границы для изменения состава когорты (детерминированный порядок)."""
+    previous = _product_set(prev_products)
+    current = _product_set(curr_products)
+    if previous is None or current is None:
+        return []
+    reasons: list[str] = []
+    added = sorted(current - previous)
+    removed = sorted(previous - current)
+    if added:
+        reasons.append("execution_change: cohort_expansion: " + ", ".join(added))
+    if removed:
+        reasons.append("execution_change: cohort_reduction: " + ", ".join(removed))
+    return reasons
+
+
+def diff_boundary_violations(
+    prev: RunManifest,
+    curr: RunManifest,
+    *,
+    prev_products: Iterable[Any] | None = None,
+    curr_products: Iterable[Any] | None = None,
+) -> list[str]:
     """Версионные границы §13, запрещающие межцикловый diff (список причин).
 
     §13/B-7 (v2.1): причина помечается классом изменения:
 
-    * ``methodology_change`` — смена major ``methodology_version`` либо поля
-      :data:`METHODOLOGY_FIELDS` (методологическая несовместимость расчёта);
-    * ``execution_change`` — расхождение поля :data:`EXECUTION_FIELDS` (что именно
-      исполнялось: когорта/индексная сборка/версии моделей/ретривал-профиль и т.п.).
+    * ``methodology_change`` — смена ``methodology_version`` (major — отдельной строкой;
+      minor/patch — строкой ``methodology_version``), поля :data:`METHODOLOGY_FIELDS`
+      (методологическая несовместимость расчёта);
+    * ``execution_change`` — расхождение условий измерения.
+
+    **Порядок классификации (09 §12.5).** ``methodology_version`` входит в
+    :data:`~core.pipeline.digests.EXECUTION_CONTRACT_FIELDS`, поэтому без явной
+    классификации смена правил читалась бы как «изменились условия измерения». При
+    расхождении контракта причины проверяются по порядку и на каждую причину — одна
+    строка: major ``methodology_version`` → любое иное различие ``methodology_version``
+    (minor/patch: §13 требует ``golden-full`` и пере-аннотацию golden, а не только при
+    major) → поля :data:`METHODOLOGY_FIELDS` → состав когорты → и лишь затем общий
+    ``execution_contract_digest``. Общая строка контракта **не** эмитится, если более
+    конкретная причина уже объясняет расхождение.
+
+    **Сравнение условий измерения (09 §12.5).** Если оба манифеста несут
+    ``execution_contract_digest`` (не ``None``), сравнивается **контракт**, а
+    :data:`EXECUTION_FIELDS` не перебираются: дайджест — свёртка тех же полей, и
+    построчный перебор продублировал бы одну причину многими строками. В частности
+    ``index_build_id`` перестаёт быть границей: новая композиция при неизменных условиях
+    измерения — разрешённый diff (``content_change``, 09 §12.1). Состав когорты при этом
+    остаётся различимым: если известны наборы ``product_id`` и они различаются, причина
+    называется ``cohort_expansion``/``cohort_reduction`` **вместо** общего
+    ``execution_change: execution_contract_digest`` (``cohort_digest`` свёрнут в
+    контракт, иначе расширение читалось бы как рядовая смена условий).
+
+    Если **хотя бы один** дайджест ``None`` (legacy-пара) — поведение прежнее:
+    перебираются :data:`METHODOLOGY_FIELDS` и :data:`EXECUTION_FIELDS`, включая
+    ``index_build_id``; проверка minor/patch ``methodology_version`` не вводится
+    ретроактивно (условия измерения legacy-пары недоказуемы).
+
+    :param prev_products/curr_products: наборы ``product_id`` циклов (из ячеек/корпуса
+        вызывающего). ``None``/пусто — состав неизвестен: набор не выдумывается, причина
+        остаётся общей.
     """
     violations: list[str] = []
-    if _major(prev.methodology_version) != _major(curr.methodology_version):
+    major_changed = _major(prev.methodology_version) != _major(curr.methodology_version)
+    if major_changed:
         violations.append(
             "methodology_change: methodology_version major: "
             f"{prev.methodology_version} → {curr.methodology_version}"
         )
+    has_contract = (
+        prev.execution_contract_digest is not None
+        and curr.execution_contract_digest is not None
+    )
+    # §13: смена methodology_version — версионная граница сама по себе (golden-full +
+    # пере-аннотация golden), а не «изменились условия измерения». Major уже назван
+    # выше, поэтому здесь — любое иное различие (minor/patch).
+    version_changed = has_contract and prev.methodology_version != curr.methodology_version
+    if version_changed and not major_changed:
+        violations.append(
+            "methodology_change: methodology_version: "
+            f"{prev.methodology_version} → {curr.methodology_version}"
+        )
+    methodology_field_changed = False
     for name in METHODOLOGY_FIELDS:
         if getattr(prev, name) != getattr(curr, name):
+            methodology_field_changed = True
             violations.append(
                 f"methodology_change: {name}: "
                 f"{getattr(prev, name)!r} → {getattr(curr, name)!r}"
             )
+    if has_contract:
+        if prev.execution_contract_digest != curr.execution_contract_digest:
+            cohort_reasons = _cohort_change_reasons(prev_products, curr_products)
+            if cohort_reasons:
+                violations.extend(cohort_reasons)
+            elif not (
+                major_changed or version_changed or methodology_field_changed
+            ):
+                violations.append(
+                    "execution_change: execution_contract_digest: "
+                    f"{prev.execution_contract_digest} → "
+                    f"{curr.execution_contract_digest}"
+                )
+        return violations
+    # Legacy-пара: дайджеста нет — прежнее построчное сравнение (байт-в-байт).
     for name in EXECUTION_FIELDS:
         if _boundary_value(prev, name) != _boundary_value(curr, name):
             violations.append(
@@ -1511,6 +1646,61 @@ def diff_boundary_violations(prev: RunManifest, curr: RunManifest) -> list[str]:
                 f"{getattr(prev, name)!r} → {getattr(curr, name)!r}"
             )
     return violations
+
+
+def resolve_diff_change_class(
+    prev: RunManifest,
+    curr: RunManifest,
+    *,
+    prev_products: Iterable[Any] | None = None,
+    curr_products: Iterable[Any] | None = None,
+) -> ChangeClass:
+    """Класс изменения пары прогонов **на момент diff** (09 §12.1/§12.5).
+
+    Разрешение возможно только когда существуют оба прогона:
+
+    * major ``methodology_version`` различается → ``methodology_change``;
+    * контракты различаются, а ``methodology_version`` отличается (minor/patch) →
+      ``methodology_change``: это смена правил, а не условий измерения (§13; см.
+      :func:`diff_boundary_violations`);
+    * контракты различаются и наборы продуктов известны и различаются →
+      ``cohort_expansion``/``cohort_reduction``;
+    * контракты различаются → ``execution_change``;
+    * контракты совпадают, а ``index_build_id`` различается (в т.ч. ``None`` с одной
+      стороны) → ``content_change``;
+    * legacy-пара (дайджест ``None`` хотя бы с одной стороны) → прежняя семантика:
+      расхождение :data:`EXECUTION_FIELDS` (включая ``index_build_id``) —
+      ``execution_change``, иначе ``none``. ``content_change`` для legacy **не**
+      заявляется: недоказуемо, что изменился только контент.
+
+    **Почему не в** :func:`core.pipeline.run_identity.classify_change`.
+    ``classify_change`` исполняется **до** корпуса: ``index_build_id`` ещё не существует,
+    поэтому ``content_change`` там не выводится и выводиться не должен. Это класс
+    **времени diff** — не «исправлять» асимметрию добавлением index id в run identity
+    (иначе класс зависел бы от ещё не собранного корпуса и врал бы в lineage).
+    """
+    if _major(prev.methodology_version) != _major(curr.methodology_version):
+        return ChangeClass.METHODOLOGY_CHANGE
+    if (
+        prev.execution_contract_digest is not None
+        and curr.execution_contract_digest is not None
+    ):
+        # §13: methodology_version входит в контракт, но его смена — смена правил;
+        # классифицируется до общего расхождения контракта (как в границе diff).
+        if prev.methodology_version != curr.methodology_version:
+            return ChangeClass.METHODOLOGY_CHANGE
+        if prev.execution_contract_digest != curr.execution_contract_digest:
+            return (
+                _cohort_change_class(prev_products, curr_products)
+                or ChangeClass.EXECUTION_CHANGE
+            )
+        if prev.index_build_id != curr.index_build_id:
+            return ChangeClass.CONTENT_CHANGE
+        return ChangeClass.NONE
+    for name in EXECUTION_FIELDS:
+        if _boundary_value(prev, name) != _boundary_value(curr, name):
+            return ChangeClass.EXECUTION_CHANGE
+    return ChangeClass.NONE
 
 
 def _changed_rows(prev_cells: Iterable[Any], curr_cells: Iterable[Any]) -> list[dict[str, Any]]:
@@ -1539,26 +1729,77 @@ def _changed_rows(prev_cells: Iterable[Any], curr_cells: Iterable[Any]) -> list[
     return rows
 
 
+def _doc_delta_rows(
+    doc_delta: Mapping[str, Mapping[str, int]] | None,
+) -> list[str]:
+    """Строки markdown-таблицы per-product doc-delta (детерминированно, по продукту)."""
+    if not doc_delta:
+        return []
+    lines = [
+        "",
+        "| product | new | reused | removed |",
+        "|---|---|---|---|",
+    ]
+    for product in sorted(doc_delta):
+        counts = doc_delta[product] or {}
+        lines.append(
+            "| {product} | {new} | {reused} | {removed} |".format(
+                product=product,
+                new=int(counts.get("new", 0)),
+                reused=int(counts.get("reused", 0)),
+                removed=int(counts.get("removed", 0)),
+            )
+        )
+    return lines
+
+
 def render_diff(
     prev_manifest: RunManifest,
     curr_manifest: RunManifest,
     prev_cells: Iterable[Any],
     curr_cells: Iterable[Any],
     out_path: str | Path,
+    *,
+    doc_delta: Mapping[str, Mapping[str, int]] | None = None,
+    prev_products: Iterable[Any] | None = None,
+    curr_products: Iterable[Any] | None = None,
 ) -> Path:
     """Пишет ``diff.md`` — изменённые статусы + evidence_id (§9).
 
-    Контракт §13: при смене major ``methodology_version``/поля :data:`METHODOLOGY_FIELDS`
-    (класс ``methodology_change``) либо поля :data:`EXECUTION_FIELDS` (класс
-    ``execution_change``) diff **отказывается** — :raises CrossCycleDiffError. Иначе
-    пишется markdown-таблица изменений.
+    Контракт §13 (09 §12.5): сравниваются **условия измерения**
+    (``execution_contract_digest``), а не ``index_build_id``. При смене major
+    ``methodology_version``/поля :data:`METHODOLOGY_FIELDS` (класс
+    ``methodology_change``) либо расхождении контракта (класс ``execution_change``;
+    для legacy-пары без дайджеста — :data:`EXECUTION_FIELDS`) diff **отказывается** —
+    :raises CrossCycleDiffError. Иначе пишется markdown-таблица изменений.
+
+    Если контракты совпадают, а ``index_build_id`` различается, diff **разрешён**
+    (``content_change``): ``diff.md`` несёт баннер ``content_change`` и, при переданном
+    ``doc_delta``, per-product таблицу ``new``/``reused``/``removed``. При отсутствии
+    изменения контента баннер не пишется — diff не заявляет изменение, которого не было.
+
+    :param doc_delta: ``product_id → {"new": n, "reused": n, "removed": n}`` — считается
+        вызывающим по ``corpus_docs`` обоих прогонов (здесь нет доступа к БД).
+    :param prev_products/curr_products: наборы продуктов циклов — нужны, чтобы отличить
+        изменение состава когорты от прочей смены контракта (09 §12.5).
     """
-    violations = diff_boundary_violations(prev_manifest, curr_manifest)
+    violations = diff_boundary_violations(
+        prev_manifest,
+        curr_manifest,
+        prev_products=prev_products,
+        curr_products=curr_products,
+    )
     if violations:
         raise CrossCycleDiffError(
             "§13: межцикловый diff запрещён — " + "; ".join(violations)
         )
 
+    change_class = resolve_diff_change_class(
+        prev_manifest,
+        curr_manifest,
+        prev_products=prev_products,
+        curr_products=curr_products,
+    )
     rows = _changed_rows(prev_cells, curr_cells)
     lines = [
         f"# diff: {prev_manifest.run_id} → {curr_manifest.run_id}",
@@ -1567,10 +1808,26 @@ def render_diff(
         f"- package_version: {prev_manifest.package_version} → {curr_manifest.package_version}",
         f"- catalog_version: {prev_manifest.catalog_version} → {curr_manifest.catalog_version}",
         f"- index_build_id: {prev_manifest.index_build_id} → {curr_manifest.index_build_id}",
-        "",
-        "| product | param | prev_status | curr_status | prev_evidence_id | curr_evidence_id |",
-        "|---|---|---|---|---|---|",
+        f"- execution_contract_digest: {prev_manifest.execution_contract_digest} → "
+        f"{curr_manifest.execution_contract_digest}",
     ]
+    if change_class is ChangeClass.CONTENT_CHANGE:
+        lines.extend(
+            [
+                "",
+                "> **content_change**: изменился только состав/контент документов "
+                "(execution contract совпадает) — diff разрешён; "
+                "условия измерения сопоставимы.",
+            ]
+        )
+        lines.extend(_doc_delta_rows(doc_delta))
+    lines.extend(
+        [
+            "",
+            "| product | param | prev_status | curr_status | prev_evidence_id | curr_evidence_id |",
+            "|---|---|---|---|---|---|",
+        ]
+    )
     for row in rows:
         lines.append(
             "| {product_id} | {param_id} | {prev_status} | {curr_status} | "

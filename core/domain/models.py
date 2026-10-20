@@ -83,7 +83,15 @@ _FROZEN = ConfigDict(
 #:
 #: 2.2.0 — in-scope блокирующие сбои корпуса делают покрытие неполным (I2c, Ф0):
 #: ``BLOCKING_FAILURE_KINDS``, а не только «origin с нулём FETCHED».
-METHODOLOGY_VERSION = "2.2.0"
+#: 2.3.0 — два правила: (1) ``CorpusCoverage.complete`` требует
+#: ``observed_sources > 0``: корпус без единого наблюдения не доказывает отсутствие
+#: (иначе продукт, у которого все URL ответили ``not_found``, публиковал ``complete=True``
+#: и мог выдать ``❌``); (2) Comparability/``hound diff`` сравнивает
+#: ``execution_contract_digest`` (условия измерения), а не ``index_build_id``: смена
+#: контента при неизменном контракте — разрешённый diff класса ``content_change`` с
+#: баннером и doc-delta. Оба — ``methodology_change``: ``golden-full`` + пере-аннотация
+#: golden (§13, 09 §12.5).
+METHODOLOGY_VERSION = "2.3.0"
 
 #: P0/OOM: дефолтный потолок одного HTTP-ответа/retained-файла — 20 MiB. Операционная
 #: ось исполнения (``crawl.max_response_bytes``), не методология; адаптеры используют
@@ -955,6 +963,15 @@ class RunManifest(BaseModel):
     #: ``None`` — реестры не сконфигурированы (пакеты без реестров не меняются: поле
     #: аддитивно/опционально).
     registry_spec_digest: str | None = None
+    #: §13 / 09 §12.5: отпечаток **условий измерения** (``execution_contract_digest``,
+    #: :func:`core.pipeline.digests.execution_contract_digest`) — то, что делает два цикла
+    #: сравнимыми. ``hound diff`` сравнивает его вместо ``index_build_id``: новая
+    #: композиция при тех же условиях измерения — разрешённый diff с баннером
+    #: ``content_change``. Это граница класса ``methodology_change`` (меняет определение
+    #: Comparability, §12.5). ``None`` — legacy-прогон: дайджест не вычислялся и
+    #: **не фабрикуется**; для пары с ``None`` действует прежнее сравнение
+    #: :data:`~core.pipeline.report.EXECUTION_FIELDS`.
+    execution_contract_digest: str | None = None
 
 
 class Violation(BaseModel):
@@ -1162,8 +1179,11 @@ class CorpusCoverage(BaseModel):
     :param product_id: продукт-партиция.
     :param complete: ``False``, если краул усечён политикой, хотя бы один **origin**
         нечитаем (из него не получено ни одного ``FETCHED``-элемента и был хотя бы один
-        недочёт, кроме ``not_found``), либо есть ``FAILED``-элемент с ``error_kind`` из
-        :data:`core.domain.enums.BLOCKING_FAILURE_KINDS` (см.
+        недочёт, кроме ``not_found``), есть ``FAILED``-элемент с ``error_kind`` из
+        :data:`core.domain.enums.BLOCKING_FAILURE_KINDS`, **либо не прочитано ни одного
+        элемента** (``observed_sources == 0`` при ``expected_sources > 0``): корпус без
+        единого наблюдения не может доказывать отсутствие, а ``not_found`` на всех URL —
+        наблюдение отсутствия этих URL, не продукта (см.
         :func:`core.pipeline.corpus.derive_corpus_coverage`).
     :param expected_sources: всего элементов сеанса по продукту.
     :param observed_sources: элементов, дошедших до ``FETCHED``.

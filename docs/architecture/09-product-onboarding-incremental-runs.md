@@ -49,15 +49,19 @@
 > `execution_contract_digest` пока собирается из честно доступных значений run-слоя
 > (methodology/package/cohort/seeds/retrieval); версии краула, чанкера, экстрактора,
 > эмбеддера, лексики, реестров, deploy-профиля и seam-схемы хешируются как `null` до
-> соответствующих срезов; семантика `hound diff` (`EXECUTION_FIELDS`) и классификация
-> `content_change` **не** менялись — это отдельное, ещё не принятое изменение методологии;
-> `CorpusCoverage.complete` требует `expected_sources > 0`, а не `observed_sources > 0`
-> (methodology-решение, §6.5/§19 — отложено); review-артефакт именуется
+> соответствующих срезов; review-артефакт именуется
 > `sources/add_product/{date}-{product_id}.json` и ведёт append-only историю `apply`
 > (два продукта в один день не затирают друг друга, повторный apply не теряет аудит);
 > `package_version` бампается только при фактическом изменении пакета (noop re-add версию
 > не двигает); порт durable-состояния лежит в `core/ports/state.py` (не `product_state.py`);
 > `previous_run` возвращает последний прогон пакета без параметра `before`.
+>
+> **Закрыто методологией 2.3.0** (было отклонением, стало правилом): `hound diff`
+> сравнивает `execution_contract_digest`, а не `index_build_id` — смена контента при
+> неизменном контракте разрешена как `content_change` с баннером и per-product
+> doc-delta (§12.5); `CorpusCoverage.complete` требует `observed_sources > 0`, а не
+> `expected_sources > 0` (§3.3/O2). Оба — `methodology_change`: `METHODOLOGY_VERSION`
+> 2.2.0 → 2.3.0, `golden-full` + одна пере-аннотация golden.
 >
 > **Рамки:** `core/` остаётся категорийно-нейтральным; вся предметная специфика — данные
 > пакета (`packages/{case_id}/`). Слои: `pipeline ↛ adapters/store/cli`; `index_store/`
@@ -383,7 +387,7 @@ corpus-снимка, а не «отсутствует в прошлом `run.yam
 | ID | Инвариант | Где обеспечивается |
 |---|---|---|
 | **O1** | Каждый продукт когорты имеет ≥ 1 `enabled` seed **или** `onboarding_state=pending_seeds`; `run` с `pending_seeds` блокируется | `onboarding` фаза + `lint` |
-| **O2** | Продукт с `mode in (new, full)` не может завершить corpus с `expected_sources = 0`; это `failed`, не пустой `ok` | `build_corpus` |
+| **O2** | Продукт с `mode in (new, full)` не может завершить corpus с `expected_sources = 0`; это `failed`, не пустой `ok`. Сильнее: `complete` требует `observed_sources > 0` — корпус без единого наблюдения не доказывает отсутствия (2.3.0) | `build_corpus` |
 | **O3** | Для каждого продукта плана в прогоне существует строка `corpus_coverage`; отсутствие — аномалия, не «неизвестно» | `corpus` + `evaluate` |
 | **O4** | `doc_version_id` детерминирован от `(product_id, content_hash, extractor_version, level)`; `chunk_id` — от `(product_id, doc_version_id, chunker_version, chunk_no)` | `corpus` |
 | **O5** | Любая evidence-строка несёт `doc_version_id`, и этот документ входит в doc-set продукта текущего прогона (I19/I17) | `evaluate`/`carry_forward` |
@@ -1529,9 +1533,12 @@ ALTER TABLE corpus_coverage ADD COLUMN doc_set_digest TEXT;
   `revalidated` (все наблюдения — 304/same-hash), `stale` (offline/reuse без сети).
 - `complete` — не truncated, нет unreadable origins, нет blocking failures,
   `expected_sources > 0` **и** `observed_sources > 0` (есть хотя бы один читаемый документ).
-  Продукт, у которого все seed'ы вернули 404/410, — `failed` (`no_readable_sources`),
-  а не `complete`: отсутствие нельзя доказывать по исчезнувшему сайту без человеческой
-  аттестации. Это усиливает определение §4.4, а не ослабляет его.
+  Продукт, у которого все seed'ы вернули 404/410, — `complete=False`: отсутствие нельзя
+  доказывать по исчезнувшему сайту без человеческой аттестации. Это усиливает определение
+  §4.4, а не ослабляет его. `reason` при этом остаётся `null` (причина видна по счётчикам
+  и `blocked`), поэтому ячейки получают `failure_kind=coverage_missing`, а не отдельный
+  класс: введение нового значения `failure_kind` — самостоятельная методологическая
+  граница (словарь статусов), в 2.3.0 её нет.
 
 **Ключевое различие:** `reused` в coverage — это **переиспользование контента**, а не
 «не наблюдали». Все reused-URL были реально опрошены (304) в режиме `revalidate`.
@@ -1637,34 +1644,40 @@ O7: `❌` публикуется только если:
 
 ### 12.5. Межцикловый diff
 
-Текущий `diff_boundary_violations` (`report.py:1479-1507`) сравнивает `EXECUTION_FIELDS`,
-включая `index_build_id`. Если оставить это как есть, **любое** изменение контента
-(а значит, и каждый недельный update) блокирует diff. Это противоречит смыслу
-инкрементального обновления.
+`diff_boundary_violations` (`report.py`) сравнивал `EXECUTION_FIELDS`, включая
+`index_build_id`. Любое изменение контента (а значит, и каждый недельный update) блокировало
+diff — инкрементальность была полезна только для стоимости, не для сравнения.
 
-**Рекомендуемое решение (требует решения человека, §12.6):**
+**Реализовано (методология 2.3.0).**
 
-- Ввести `execution_contract_digest` — отпечаток **условий измерения**, без контента:
+- `execution_contract_digest` — отпечаток **условий измерения**, без контента:
   `methodology_version`, `scoring_policy_version`, `status_dict_version`,
   `catalog_version`, `package_version`, `cohort_digest`, `seeds_digest`,
   `llm_scenarios`, `retrieval_profile`, `cutoff_K`, `retrieval_params_json`,
   `chunker_version`, `extractor_version`, `embed_model_id`, `lexical_engine_version`,
   `vector_store`, `crawl_strategy`, `crawl_rate_limit`, `crawl_config_digest`,
-  `registry_spec_digest`, `deploy_profile`, `edge_schema_version`.
+  `registry_spec_digest`, `deploy_profile`, `edge_schema_version`
+  (`core/pipeline/digests.py:EXECUTION_CONTRACT_FIELDS`). Переносится в `runs`
+  (аддитивная колонка) и в `RunManifest`, чтобы `hound diff` читал его из БД прогона,
+  а не пересчитывал из другого набора значений.
 - `hound diff` сравнивает `execution_contract_digest`, а не `index_build_id`.
 - `content_change` (изменение композиции при том же contract) — **разрешённый** diff с
-  явным баннером и per-product doc-delta (`new/reused/removed`).
-- `cohort_expansion`/`cohort_reduction` входят в contract → diff запрещён, `golden-full`.
+  явным баннером и per-product doc-delta (`new/reused/removed` по `content_hash`).
+- `cohort_expansion`/`cohort_reduction` входят в contract → diff запрещён, `golden-full`;
+  помечаются **отдельно** от родового расхождения контракта (иначе расширение когорты
+  читалось бы как обычный `execution_change`).
+- Legacy-пары (у одного из манифестов контракта нет) сохраняют прежнее поведение —
+  сравнение по перечню полей, включая `index_build_id`. Прошлые прогоны не становятся
+  задним числом сравнимыми.
 
 Это меняет определение Comparability → **`methodology_version` bump + пере-аннотация
-golden**. Альтернатива — оставить `index_build_id` границей и считать, что недельные
-прогоны не diff'ятся; тогда инкрементальность полезна только для стоимости, не для
-сравнения.
+golden**.
 
 > **Решение владельца (19.10): принято.** Вводим `execution_contract_digest` и
 > `content_change`; `hound diff` сравнивает contract, изменение контента — разрешённый
 > diff с баннером и doc-delta. Это `methodology_change`: `METHODOLOGY_VERSION` bump +
-> `golden-full` + пере-аннотация golden.
+> `golden-full` + пере-аннотация golden. **Реализовано в 2.3.0** (`METHODOLOGY_VERSION`
+> = `2.3.0`).
 
 ### 12.6. Открытые решения человека
 
@@ -2132,10 +2145,10 @@ index_store/{package}/
 
 ## 18. Открытые вопросы / риски для решения человека
 
-1. **Comparability/diff.** Вводить ли `execution_contract_digest` и класс
-   `content_change` (рекомендуется), чтобы недельный update мог diff'иться, или
-   сохранить `index_build_id` границей §13 (тогда diff блокируется при любом изменении
-   контента)? Первое — `methodology_version` bump + пере-аннотация golden.
+1. **Comparability/diff.** ~~Вводить ли `execution_contract_digest` и класс
+   `content_change`…~~ **Решено и реализовано (2.3.0):** `hound diff` сравнивает
+   `execution_contract_digest`, `content_change` — разрешённый diff с баннером и doc-delta
+   (§12.5).
 2. **`❌` на reused-корпусе.** Требовать ли live-revalidation (304) в текущем цикле
    (рекомендуется, не меняет семантику §4.4) или разрешать `❌` на `stale` с аттестацией
    (смена absence-семантики → `methodology_version`)?

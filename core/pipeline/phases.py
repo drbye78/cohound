@@ -462,6 +462,7 @@ def build_phases(
     state: Any = None,
     product_modes: Mapping[str, str] | None = None,
     refresh_policy: str = "auto",
+    execution_contract_digest: str | None = None,
 ) -> dict[str, PhaseFn]:
     """Возвращает реестр ``{phase_name: PhaseFn}`` для не-гейтовых фаз конвейера.
 
@@ -518,6 +519,10 @@ def build_phases(
         onboarding-плана; ``None`` ⇒ все продукты трактуются как ``new``.
     :param refresh_policy: политика наблюдения прогона (``auto``|``revalidate``|
         ``refresh``|``offline``) — влияет на условный GET и переиспользование в Ш5.
+    :param execution_contract_digest: готовый отпечаток условий измерения (09 §12.5),
+        вычисленный composition root для ``run_id``/lineage. Протягивается в манифест Ш9
+        без пересчёта; ``None`` — неизвестен (legacy/вызов без идентичности), тогда
+        ``hound diff`` применяет прежнее сравнение ``EXECUTION_FIELDS``.
 
     Каждое замыкание детерминировано и не импортирует адаптеры; единственный
     межфазовый канал — замыкание ``holder`` (см. docstring модуля).
@@ -795,6 +800,9 @@ def build_phases(
             # аудируемости (R7). Composition root кладёт его на ``Ports``; здесь лишь
             # прокидывается в манифест (``None`` — реестры не сконфигурированы).
             registry_spec_digest=getattr(ctx.ports, "registry_spec_digest", None),
+            # 09 §12.5: готовый отпечаток условий измерения (не пересчитывается здесь) —
+            # носитель границы ``hound diff``; ``None`` не подменяется пустой строкой.
+            execution_contract_digest=execution_contract_digest,
         )
         # R7/§13: финальный манифест — самостоятельная запись воспроизведения,
         # поэтому персистится в операционную БД прогона (версии/индекс/провенанс).

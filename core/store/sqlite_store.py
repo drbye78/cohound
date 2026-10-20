@@ -781,7 +781,9 @@ class SqliteStore:
         (операционные оси краула — границы ``execution_change``, §13/Backlog B),
         ``crawl_config_digest`` (§13/N6) и ``registry_spec_digest`` (§13/E2 — дайджест
         package-scoped спецификаций реестров), а также
-        деплой-провенанс ``deploy_profile``/``edge_schema_version``/``edge_capabilities_json``
+        ``execution_contract_digest`` (09 §12.5 — отпечаток условий измерения, по которому
+        ``hound diff`` решает сравнимость циклов), деплой-провенанс
+        ``deploy_profile``/``edge_schema_version``/``edge_capabilities_json``
         (07 §7; execution-class, не методологическая версия). ``UPDATE`` по существующей
         строке прогона: манифест — самостоятельная запись воспроизведения, а не источник
         создания прогона (его создаёт :meth:`create_run`).
@@ -800,6 +802,7 @@ class SqliteStore:
                 " crawl_provenance_json = ?,"
                 " crawl_strategy = ?, crawl_rate_limit = ?,"
                 " crawl_config_digest = ?, registry_spec_digest = ?,"
+                " execution_contract_digest = ?,"
                 " deploy_profile = ?, edge_schema_version = ?, edge_capabilities_json = ?"
                 " WHERE run_id = ?",
                 (
@@ -828,6 +831,7 @@ class SqliteStore:
                     manifest.crawl_rate_limit,
                     manifest.crawl_config_digest,
                     manifest.registry_spec_digest,
+                    manifest.execution_contract_digest,
                     manifest.deploy_profile,
                     manifest.edge_schema_version,
                     json.dumps(
@@ -1396,6 +1400,42 @@ class SqliteStore:
         ):
             yield self._row_to_corpus_coverage(row)
 
+    def iter_corpus_docs(self, run_id: str) -> Iterator[CorpusDoc]:
+        """Итерирует документы корпуса прогона (детерминированно: ``product_id, doc_id``).
+
+        Нужен ``hound diff`` для per-product doc-delta (``new``/``reused``/``removed``,
+        09 §12.5): наборы ``content_hash`` по продуктам обоих прогонов. Метод **только
+        читает** и схему не меняет.
+
+        Область: ``corpus_docs`` не несёт ``run_id`` — в штатной раскладке БД принадлежит
+        одному прогону (§4.4), поэтому выборка и есть корпус прогона. В общей ``--db``
+        (оба цикла в одной БД) таблица — объединение корпусов, и delta вырождается в
+        ``reused``; это ограничение раскладки, а не подмена данных. ``run_id``
+        проверяется на присутствие в БД (иначе :class:`ValueError`): метод не выдаёт
+        документы чужого/несуществующего прогона.
+
+        :raises ValueError: строки прогона ``run_id`` нет в этой БД.
+        """
+        row = self.conn.execute(
+            "SELECT 1 FROM runs WHERE run_id = ?", (run_id,)
+        ).fetchone()
+        if row is None:
+            raise ValueError(f"прогон не найден: {run_id!r}")
+        for doc in self.conn.execute(
+            "SELECT * FROM corpus_docs ORDER BY product_id, doc_id"
+        ):
+            yield CorpusDoc(
+                doc_id=doc["doc_id"],
+                product_id=doc["product_id"],
+                url=doc["url"],
+                fetched_at=doc["fetched_at"],
+                content_hash=doc["content_hash"],
+                raw_path=doc["raw_path"],
+                extractor_version=doc["extractor_version"],
+                render_mode=doc["render_mode"],
+                lang=doc["lang"],
+            )
+
     def read_manifest(self, run_id: str) -> RunManifest:
         """Собирает ``RunManifest`` из строки ``runs`` (+ ``llm_scenarios``).
 
@@ -1479,6 +1519,9 @@ class SqliteStore:
             crawl_config_digest=row["crawl_config_digest"],
             # §13/E2: дайджест package-scoped спецификаций реестров (граница ``execution_change``).
             registry_spec_digest=row["registry_spec_digest"],
+            # 09 §12.5: отпечаток условий измерения (граница ``methodology_change``).
+            # NULL → ``None`` (legacy-прогон; дайджест не фабрикуется).
+            execution_contract_digest=row["execution_contract_digest"],
             llm_scenarios=scenarios,
             snapshot_date=row["snapshot_date"],
             deploy_profile=row["deploy_profile"],

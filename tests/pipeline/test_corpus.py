@@ -1320,8 +1320,13 @@ def test_not_found_is_terminal_and_not_retried_on_resume(tmp_path: Path) -> None
         store.close()
 
 
-def test_single_url_origin_not_found_is_complete(tmp_path: Path) -> None:
-    """404 на единственном URL origin'а: origin прочитан, покрытие полное."""
+def test_single_url_origin_not_found_is_incomplete(tmp_path: Path) -> None:
+    """404 на единственном URL: наблюдений ноль — отсутствие не доказуемо (2.3.0).
+
+    ``not_found`` — наблюдение отсутствия конкретного URL, а не доказательство, что
+    у продукта нет возможности. Корпус без единого ``FETCHED`` неполон; ``reason``
+    остаётся ``None`` (объясняют счётчики и ``blocked``).
+    """
     store = SqliteStore(":memory:")
     _make_run(store)
     try:
@@ -1331,18 +1336,26 @@ def test_single_url_origin_not_found_is_complete(tmp_path: Path) -> None:
         )
         coverage = store.read_corpus_coverage(RUN_ID, "p1")
         assert coverage is not None
-        assert coverage.complete is True
+        assert coverage.complete is False
         assert coverage.unreadable_origins == []
         assert coverage.partial_blocks == {}
         assert coverage.blocked == {FailureKind.NOT_FOUND.value: 1}
         assert coverage.expected_sources == 1
         assert coverage.observed_sources == 0
+        assert coverage.reason is None
     finally:
         store.close()
 
 
-def test_all_not_found_origin_is_complete_and_absence_provable(tmp_path: Path) -> None:
-    """Origin, где всё 404: сайт ответил — отсутствие доказуемо, complete=True."""
+def test_all_not_found_origin_is_not_complete_and_absence_not_provable(
+    tmp_path: Path,
+) -> None:
+    """Origin, где всё 404: ноль наблюдений — ``complete=False``, ❌ не доказуем.
+
+    Сайт ответил «ресурса нет» на каждый URL, но ни одного документа не прочитано:
+    отсутствие параметра на исчезнувшем сайте нельзя публиковать как машинный ``❌``
+    без человеческой аттестации (2.3.0).
+    """
     store = SqliteStore(":memory:")
     _make_run(store)
     gone = ["https://gone.test/a", "https://gone.test/b"]
@@ -1353,12 +1366,13 @@ def test_all_not_found_origin_is_complete_and_absence_provable(tmp_path: Path) -
         )
         coverage = store.read_corpus_coverage(RUN_ID, "p1")
         assert coverage is not None
-        assert coverage.complete is True
+        assert coverage.complete is False
         assert coverage.unreadable_origins == []
         assert coverage.partial_blocks == {}
         assert coverage.blocked == {FailureKind.NOT_FOUND.value: 2}
         assert coverage.expected_sources == 2
         assert coverage.observed_sources == 0
+        assert coverage.reason is None
     finally:
         store.close()
 
@@ -4528,6 +4542,53 @@ def test_not_found_only_origin_is_readable() -> None:
     assert coverage.unreadable_origins == []
     assert coverage.blocked == {"not_found": 3}
     assert coverage.partial_blocks == {}
+
+
+def test_one_fetched_plus_not_found_stays_complete() -> None:
+    """2.3.0: одного ``FETCHED`` достаточно — новое условие не пере-срабатывает."""
+    items = [
+        _session_item("https://a.example/1", CrawlItemStatus.FETCHED),
+        _session_item(
+            "https://gone.example/x",
+            CrawlItemStatus.FAILED,
+            error_kind=FailureKind.NOT_FOUND.value,
+        ),
+    ]
+
+    coverage = derive_corpus_coverage(
+        product_id="p1",
+        items=items,
+        truncated=False,
+        computed_at="2026-01-01T00:00:00+00:00",
+    )
+
+    assert coverage.complete is True
+    assert coverage.expected_sources == 2
+    assert coverage.observed_sources == 1
+    assert coverage.unreadable_origins == []
+    assert coverage.blocked == {"not_found": 1}
+    assert coverage.reason is None
+
+
+def test_all_pending_items_are_incomplete() -> None:
+    """2.3.0: сеанс без терминальных исходов — ноль наблюдений, ``complete=False``."""
+    items = [
+        _session_item("https://a.example/1", CrawlItemStatus.PENDING),
+        _session_item("https://a.example/2", CrawlItemStatus.RUNNING),
+    ]
+
+    coverage = derive_corpus_coverage(
+        product_id="p1",
+        items=items,
+        truncated=False,
+        computed_at="2026-01-01T00:00:00+00:00",
+    )
+
+    assert coverage.complete is False
+    assert coverage.expected_sources == 2
+    assert coverage.observed_sources == 0
+    assert coverage.blocked == {}
+    assert coverage.reason is None
 
 
 def test_derive_corpus_coverage_is_deterministic() -> None:
