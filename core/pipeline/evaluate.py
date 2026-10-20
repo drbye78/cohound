@@ -290,6 +290,8 @@ def _absence_dict(ev) -> dict:  # noqa: ANN001 - CellEvidence, без импор
         "source_kind": ev.source_kind.value,
         "source_scope": ev.source_scope.value if ev.source_scope else None,
         "scope_attested_by": ev.scope_attested_by,
+        # R7/09 §8.1: та же привязка, что у ``cell_evidence`` — композиция прогона.
+        "index_build_id": ev.index_build_id,
     }
 
 
@@ -298,6 +300,7 @@ def _build_absence_evidence(
     validation: ValidationResult,
     *,
     scope_attested_by: str | None = None,
+    composition_id: str | None = None,
 ) -> tuple[list[dict], str | None]:
     """Строит ``absence_evidence`` для ``❌`` и проверяет I2b.
 
@@ -312,6 +315,10 @@ def _build_absence_evidence(
     ``scope_attested_by`` — явная человеческая аттестация, переданная вызывающим
     (composition root / решение гейта). Она проставляется на синтетическую запись, чтобы
     Ф0-гейт мог отличить принятый человеком риск от машинного ``❌`` при неполном корпусе.
+
+    ``composition_id`` — композиция прогона (``RetrievalResult.build_id``). Синтетическая
+    запись не имеет чанка, но привязана к сборке **прогона**, а не к партиции, поэтому
+    несёт ``index_build_id=composition_id`` (R7/09 §8.1).
     """
     absences = [_absence_dict(ev) for ev in validation.resolved_evidence]
     if not absences:
@@ -321,6 +328,7 @@ def _build_absence_evidence(
                 "source_id": None,
                 "source_scope": SourceScope.UNKNOWN.value,
                 "scope_attested_by": scope_attested_by,
+                "index_build_id": composition_id,
                 "note": "явное отсутствие по переданному срезу фрагментов",
             }
         )
@@ -763,7 +771,10 @@ def evaluate_cell(
         absence_evidence: list[dict] = []
         if out.status is Status.ABSENT:
             absence_evidence, absence_error = _build_absence_evidence(
-                param, last_validation, scope_attested_by=scope_attested_by
+                param,
+                last_validation,
+                scope_attested_by=scope_attested_by,
+                composition_id=provenance[0],
             )
             if absence_error is not None:
                 # Механически недоказуемое ❌ → не публикуем: failed (strict) / кандидат.

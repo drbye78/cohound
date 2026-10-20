@@ -218,6 +218,11 @@ def _build_evidence(
     ``content_hash`` берётся из чанка — I19: внешний контент стал evidence только после
     ``corpus_raw → hash → index``. ``source_kind`` — :data:`DEFAULT_SOURCE_KIND`.
 
+    ``index_build_id`` — **композиция** прогона (``cb_``), если она известна: evidence
+    привязан к сборке прогона (R7), а не к физической партиции. ``build_id`` — то, что
+    знает резолвер (у ``RetrievedChunk`` это ``pb_``), поэтому без ``composition_id``
+    (legacy/unit-пути) значение остаётся прежним: у старых прогонов там лежал id сборки.
+
     ``partition_build_id`` — физическая партиция чанка-цитаты (``pb_``), **не**
     композиция: ``composition_id`` (из ``RetrievalResult.build_id``) нужен только чтобы
     отличить legacy-строку с id сборки/композиции от настоящей партиции и в этом случае
@@ -241,7 +246,9 @@ def _build_evidence(
         source_url=source_url,
         citation_quote=quote,
         content_hash=_chunk_hash(chunk),
-        index_build_id=build_id,
+        # R7/09 §8.1: evidence называет композицию; партиция — в ``partition_build_id``.
+        # Без композиции (legacy/unit-путь) остаётся то, что знает резолвер/чанк.
+        index_build_id=composition_id or build_id,
         # 09 §8.1: физическая партиция чанка-цитаты (``RetrievedChunk.build_id``).
         # Композиция/id сборки в этой колонке — не партиция, поэтому ``NULL``.
         partition_build_id=_partition_build_id(
@@ -271,7 +278,9 @@ def validate_output(
     :param strict: strict-эшелон (``failure_kind`` при провале) vs preliminary-кандидат.
     :param min_retrieval_score: порог retrieval-скора для аномалии §10.4 (заметка, не сбой).
     :param composition_id: ``RetrievalResult.build_id`` — композиция прогона (09 §8.1).
-        Нужна, чтобы не записать композицию в ``partition_build_id`` legacy-строки:
+        Пишется в ``CellEvidence.index_build_id`` (R7: evidence привязан к сборке
+        прогона); без неё остаётся id резолвера/чанка (legacy/unit-путь). Нужна и
+        чтобы не записать композицию в ``partition_build_id`` legacy-строки:
         совпадение с ``chunk.build_id`` означает «это не партиция» → ``NULL``.
 
     Возвращает :class:`ValidationResult`. **Никогда не бросает** на невалидных данных:

@@ -300,6 +300,21 @@ def _coverage(*, complete: bool, blocked: dict[str, int] | None = None) -> Corpu
     )
 
 
+def test_absence_evidence_record_carries_run_composition() -> None:
+    """Синтетическая absence-запись (без чанка) привязана к композиции прогона (R7)."""
+    data = _data()
+    evaluator = _ScriptedEvaluator([_absent_output()])
+    retrievals = RetrievalResult(
+        chunks=[], profile="R2", cutoff_K=5, build_id="cb_run"
+    )
+    outcome = _evaluate(data, evaluator, retrievals=retrievals)
+
+    assert outcome.cell.status is Status.ABSENT
+    synthetic = outcome.cell.absence_evidence[0]
+    assert synthetic["source_id"] is None
+    assert synthetic["index_build_id"] == "cb_run"
+
+
 def test_incomplete_corpus_absence_becomes_pending_candidate() -> None:
     """Ф0: заблокированный источник + ABSENT → pending, а не ❌ (I2c)."""
     data = _data()

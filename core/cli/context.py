@@ -1594,6 +1594,12 @@ def _run_report_payload(run_id: str, report: RunReport, db_path: Path) -> dict[s
     resume (:attr:`RunReport.skipped`); это **не** ``PhaseStatus.skipped`` (тот виден как
     ``results[].status == "skipped"``). Ключ назван однозначно, чтобы два ``skipped`` не
     сливались в одном payload.
+
+    **Заметки фазы.** ``results[].notes`` — строковые записи ``PhaseResult.log_entries``
+    в исходном порядке: человекочитаемый канал «что фаза сделала предполётом» (напр.
+    ``corpus: партиции — переиспользовано N, собрано M``). Нестроковые записи
+    (``IndexBuild``/``Artifacts`` и пр.) — данные, а не заметки, и в payload не попадают.
+    Это не ``errors`` и не меняет ``status``.
     """
     return {
         "ok": report.ok,
@@ -1622,6 +1628,7 @@ def _run_report_payload(run_id: str, report: RunReport, db_path: Path) -> dict[s
                 ),
                 "pending": list(item.pending),
                 "errors": list(item.errors),
+                "notes": [entry for entry in item.log_entries if isinstance(entry, str)],
             }
             for item in report.results
         ],
@@ -1689,6 +1696,9 @@ def _print_run_report(payload: dict[str, Any]) -> None:
             lines.append(f"  pending: {note}")
         for error in item["errors"]:
             lines.append(f"  error: {error}")
+        # Человекочитаемые заметки фазы («что сделано предполётом»); не errors.
+        for note in item.get("notes", ()):
+            lines.append(f"  note: {note}")
     if payload["resumed_skipped"]:
         lines.append(f"resumed (ok, пропущены): {', '.join(payload['resumed_skipped'])}")
     if payload.get("blocked"):

@@ -5497,7 +5497,7 @@ def test_identity_chain_partition_vs_composition(tmp_path: Path) -> None:
             )
             assert hits and hits[0].build_id == pb
 
-            # Cell provenance = cid; evidence.partition_build_id = pb.
+            # Cell provenance = cid; evidence.index_build_id = cid, partition = pb.
             provenance = _provenance(
                 RetrievalResult(
                     chunks=hits, profile="R1", cutoff_K=10, build_id=cid
@@ -5515,15 +5515,19 @@ def test_identity_chain_partition_vs_composition(tmp_path: Path) -> None:
                 param_id=_plan().params[0].param_id,
                 run_id=RUN_ID,
                 resolver=store,
+                composition_id=provenance[0],
             )
             assert validation.resolved_evidence
             evidence = validation.resolved_evidence[0]
+            assert evidence.index_build_id == cid
             assert evidence.partition_build_id == pb
             store.add_evidence(evidence)
             ev_row = store.conn.execute(
-                "SELECT partition_build_id FROM cell_evidence WHERE evidence_id = ?",
+                "SELECT index_build_id, partition_build_id FROM cell_evidence"
+                " WHERE evidence_id = ?",
                 (evidence.evidence_id,),
             ).fetchone()
+            assert ev_row["index_build_id"] == cid
             assert ev_row["partition_build_id"] == pb
 
             # State: композиция и партиция зарегистрированы.

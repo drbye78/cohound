@@ -342,6 +342,67 @@ def test_evidence_partition_is_none_for_legacy_composition_build_id() -> None:
     assert result.resolved_evidence[0].partition_build_id != "cb_run"
 
 
+def test_evidence_index_build_id_is_composition_not_partition() -> None:
+    """R7/09 §8.1: ``index_build_id`` evidence — композиция, партиция — отдельно.
+
+    ``RetrievedChunk.build_id`` несёт ``pb_`` (физическая партиция), но evidence
+    привязан к сборке **прогона**: в ``index_build_id`` пишется композиция ``cb_``.
+    """
+    data = _data()
+    chunks = {"chunk_a2": _retrieved(data, "chunk_a2", 0.9, build_id="pb_p1")}
+    result = validate_output(
+        output=_output(data, "ok_output"),
+        chunks=chunks,
+        product_id=data["product_id"],
+        param_id=data["param"]["param_id"],
+        run_id=data["run_id"],
+        composition_id="cb_run",
+    )
+    assert result.ok is True
+    ev = result.resolved_evidence[0]
+    assert ev.index_build_id == "cb_run"
+    assert ev.partition_build_id == "pb_p1"
+
+
+def test_evidence_index_build_id_falls_back_without_composition() -> None:
+    """Без композиции (legacy/unit-путь) ``index_build_id`` = значение резолвера/чанка."""
+    data = _data()
+    chunks = {"chunk_a2": _retrieved(data, "chunk_a2", 0.9, build_id="pb_p1")}
+    result = validate_output(
+        output=_output(data, "ok_output"),
+        chunks=chunks,
+        product_id=data["product_id"],
+        param_id=data["param"]["param_id"],
+        run_id=data["run_id"],
+    )
+    assert result.ok is True
+    ev = result.resolved_evidence[0]
+    assert ev.index_build_id == "pb_p1"
+
+
+def test_absence_evidence_carries_composition() -> None:
+    """``❌``-evidence тоже привязан к композиции прогона, не к партиции (R7)."""
+    data = _data()
+    chunks = {"chunk_a2": _retrieved(data, "chunk_a2", 0.9, build_id="pb_p1")}
+    output = LLMCellOutput(
+        status=Status.ABSENT,
+        justification="Свойство не подтверждено переданным срезом.",
+        evidence=[LLMEvidence(source_id="chunk_a2", quote="Свойство Альфа")],
+    )
+    result = validate_output(
+        output=output,
+        chunks=chunks,
+        product_id=data["product_id"],
+        param_id=data["param"]["param_id"],
+        run_id=data["run_id"],
+        composition_id="cb_run",
+    )
+    assert result.ok is True
+    ev = result.resolved_evidence[0]
+    assert ev.index_build_id == "cb_run"
+    assert ev.partition_build_id == "pb_p1"
+
+
 def test_single_citation_ok_is_flagged_for_review() -> None:
     data = _data()
     result = validate_output(

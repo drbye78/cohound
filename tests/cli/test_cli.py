@@ -324,7 +324,14 @@ def test_run_report_payload_carries_skip_reason_and_pending(tmp_path: Path) -> N
             status="skipped", phase="discovery", skip_reason=SkipReason.NO_QUERIES
         ),
         PhaseResult(
-            status="ok", phase="review", pending=["review: 1 ячеек ожидают решения"]
+            status="ok",
+            phase="review",
+            pending=["review: 1 ячеек ожидают решения"],
+            log_entries=[
+                "corpus: партиции — переиспользовано 3, собрано 1 (композиция cb_run)",
+                object(),  # не заметка (IndexBuild/Artifacts и пр.)
+                "retrieval: dense-индекс не пересобран (партиции переиспользованы)",
+            ],
         ),
     ]
     payload = _run_report_payload("r1", report, tmp_path / "cohound.db")
@@ -332,14 +339,54 @@ def test_run_report_payload_carries_skip_reason_and_pending(tmp_path: Path) -> N
     discovery, review = payload["results"]
     assert discovery["skip_reason"] == "no_queries"
     assert discovery["pending"] == []
+    assert discovery["notes"] == []
     assert review["skip_reason"] is None
     assert review["pending"] == ["review: 1 ячеек ожидают решения"]
+    # Заметки — только строковые ``log_entries`` в исходном порядке, не errors.
+    assert review["notes"] == [
+        "corpus: партиции — переиспользовано 3, собрано 1 (композиция cb_run)",
+        "retrieval: dense-индекс не пересобран (партиции переиспользованы)",
+    ]
+    assert review["errors"] == []
     assert payload["skip_summary"] == [
         {"phase": "discovery", "skip_reason": "no_queries"}
     ]
     # N6: resume-список однозначен; старого двусмысленного ключа нет.
     assert payload["resumed_skipped"] == ["normalize"]
     assert "skipped" not in payload
+
+
+def test_print_run_report_prints_phase_notes(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """``_print_run_report`` выводит ``  note: …`` и молчит, когда заметок нет."""
+    from core.cli.context import _print_run_report
+
+    payload = {
+        "run_id": "r1",
+        "db": "cohound.db",
+        "status": "ok",
+        "stopped_at": None,
+        "resumed_skipped": [],
+        "results": [
+            {
+                "phase": "corpus",
+                "status": "ok",
+                "pending": [],
+                "errors": [],
+                "notes": ["corpus: партиции — переиспользовано 3, собрано 1"],
+            }
+        ],
+    }
+    _print_run_report(payload)
+    out = capsys.readouterr().out
+    assert "phase corpus: ok" in out
+    assert "  note: corpus: партиции — переиспользовано 3, собрано 1" in out
+
+    payload["results"][0]["notes"] = []
+    _print_run_report(payload)
+    out = capsys.readouterr().out
+    assert "note:" not in out
 
 
 def test_run_stops_at_gate_blocked(
