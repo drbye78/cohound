@@ -367,3 +367,54 @@ def test_doc_set_digest_ignores_non_active_and_mutable_metadata() -> None:
     assert doc_set_digest([_doc(doc_version_id="dv_a", content_hash="hx")]) != (
         doc_set_digest([active])
     )
+
+
+# --------------------------------------------------------------------------- #
+# Ключ состояния: планировщик и seed-нормализация не расходятся (09 §6.3/§7.2)
+# --------------------------------------------------------------------------- #
+
+#: Матрица нормализации: (вход, ожидаемый ключ). Схема/host — регистр, default port,
+#: fragment, query, trailing slash, path case.
+_NORMALIZATION_MATRIX = [
+    ("HTTPS://Docs.Test/p1/index", "https://docs.test/p1/index"),
+    ("https://docs.test:443/p1/index", "https://docs.test/p1/index"),
+    ("http://docs.test:80/a", "http://docs.test/a"),
+    ("http://docs.test:8080/a", "http://docs.test:8080/a"),
+    ("https://docs.test/p1/index#frag", "https://docs.test/p1/index"),
+    ("https://docs.test/p1/index?q=1", "https://docs.test/p1/index?q=1"),
+    ("https://docs.test/p1/index/", "https://docs.test/p1/index/"),
+    ("https://docs.test/P1/Index", "https://docs.test/P1/Index"),
+    ("https://docs.test", "https://docs.test/"),
+    ("  https://docs.test/a  ", "https://docs.test/a"),
+    ("https://[::1]:8443/a", "https://[::1]:8443/a"),
+]
+
+
+@pytest.mark.parametrize(("raw", "expected"), _NORMALIZATION_MATRIX)
+def test_state_key_normalization_agrees_with_planner(raw: str, expected: str) -> None:
+    """``normalize_seed_url`` (ключ ``url_state``) == ``incremental._normalize_url``.
+
+    Два независимых определения канонического URL (§7.2) не должны расходиться: иначе
+    строка ``url_state``, записанная corpus-фазой, не нашлась бы планировщиком.
+    """
+    from core.config.seeds import normalize_seed_url
+    from core.pipeline.incremental import _normalize_url
+
+    assert normalize_seed_url(raw) == expected
+    assert _normalize_url(raw) == expected
+
+
+@pytest.mark.parametrize(
+    "raw",
+    ["", "docs.test/a", "ftp://docs.test/a", "https://user:pw@docs.test/a"],
+)
+def test_state_key_normalization_rejects_same_inputs(raw: str) -> None:
+    """Обе реализации отвергают один и тот же недопустимый вход (одинаковая политика)."""
+    from core.config.seeds import normalize_seed_url
+    from core.pipeline.incremental import _normalize_url
+
+    with pytest.raises(ValueError):
+        normalize_seed_url(raw)
+    with pytest.raises(ValueError):
+        _normalize_url(raw)
+

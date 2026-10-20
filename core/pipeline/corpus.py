@@ -83,6 +83,27 @@ traversal-guard), затем тот же блэклист/``max_documents``/``ma
 подключает W8 (composition root). При их наличии фаза вызывает ``embed``/``build``/``commit``
 best-effort (сбой изолируется).
 
+**Инкрементальный субстрат (09 §6.3/§9, MVP-3b).** При переданном ``state``
+(:class:`~core.ports.state.ProductStatePort`) фаза дополнительно ведёт durable-состояние
+URL/документов/чанков:
+
+* ``url_state`` читается/пишется **для каждого продукта** независимо от режима — субстрат
+  наполняется уже на первом прогоне; режим ``incremental`` дополнительно расширяет work-set
+  известными URL (``plan_incremental``) — новым/полным продуктам BFS/sitemap остаётся
+  прежним;
+* политика ``auto``/``revalidate`` добавляет валидаторы условного GET
+  (``If-None-Match``/``If-Modified-Since``) в ``FetchPlan`` (локальный путь) и
+  ``CrawlWorkItem`` (исполнитель), поэтому ``304`` не тратит трафик;
+* ответ ``304`` или ``200`` с прежним ``content_hash`` переиспользует
+  ``document_version`` и её chunk-set из ``chunk_store`` без вызова экстрактора/чанкера;
+  каждый переиспользованный чанк проверяется по I19 (``content_hash(text) == row.content_hash``),
+  при любом расхождении — обычная экстракция + нарезка и видимая запись в ``errors``;
+* все сбои state-записи изолируются в ``errors`` (контракт :func:`_persist_docs`): фаза не
+  падает и не меняет код возврата.
+
+``state is None`` — прежнее поведение байт-в-байт (никаких чтений/записей субстрата,
+пустой ``IndexBuild.doc_counters``, тот же ``index_build_id``).
+
 Нейтрален (§1.3): нет названий продуктов/вендоров/предметных терминов.
 """
 
@@ -104,6 +125,7 @@ from urllib.parse import urlsplit
 from core.config.crawl_sources import CrawlSourcesConfig
 from core.config.deploy import CrawlConfig
 from core.config.domain_profiles import DomainProfile
+from core.config.seeds import normalize_seed_url
 from core.domain import (
     BLOCKING_FAILURE_KINDS,
     CorpusChunk,
@@ -115,7 +137,11 @@ from core.domain import (
     CrawlStrategy,
     DocumentLevel,
     FailureKind,
+    IncrementalKind,
     IndexManifestEntry,
+    ProductMode,
+    RefreshPolicy,
+    ReuseKind,
 )
 from core.pipeline.crawl_frontier import Frontier, resolve_crawl_limits
 from core.pipeline.crawl_session import (
@@ -131,6 +157,13 @@ from core.pipeline.crawl_sources import (
 )
 from core.pipeline.extract_cache import ExtractionCache
 from core.pipeline.fetch_plan import _host_matches, select_domain_profile
+from core.pipeline.incremental import (
+    IncrementalItem,
+    chunk_row_id,
+    classify_reuse,
+    doc_version_id,
+    plan_incremental,
+)
 from core.pipeline.runner import PhaseResult
 from core.util.document_formats import unsupported_binary_reason
 from core.ports.chunker import ChunkerPort
@@ -145,6 +178,12 @@ from core.ports.embedder import EmbedderPort
 from core.ports.extractor import ExtractorPort
 from core.ports.index_builder import IndexBuilderPort, IndexMeta
 from core.ports.poller import PollPort
+from core.ports.state import (
+    ChunkRow,
+    DocumentVersionRow,
+    ProductStatePort,
+    UrlStateRow,
+)
 from core.ports.types import Chunk as PortChunk
 from core.ports.types import (
     ExtractedDoc,
@@ -228,6 +267,154 @@ _CLEAR = object()
 
 #: P0: размер порции потокового хеширования retained-байтов (resume).
 _RESUME_READ_CHUNK = 1024 * 1024
+
+#: Статус активной версии документа (``document_version.status``, 09 §4.2).
+_DOC_ACTIVE = "active"
+#: Статус вытесненной версии: документ больше не наблюдается по URL (``404``/``410``, 09 §6.3).
+_DOC_SUPERSEDED = "superseded"
+
+
+@dataclass(frozen=True)
+class _ReusedChunk:
+    """Переиспользованный чанк документа: текст уже верифицирован по I19.
+
+    ``content_hash`` — hash **чистого текста** из ``chunk_store``; он сверен с
+    ``chunk_meta.content_hash`` при загрузке (:func:`_load_reused_chunks`), поэтому
+    неверифицированный текст сюда не попадает.
+    """
+
+    chunk_no: int
+    text: str
+    content_hash: str
+    heading_path: str
+    context_prefix: str
+
+
+@dataclass(frozen=True)
+class _DocReuse:
+    """Готовая к переиспользованию версия документа + её проверенный chunk-set.
+
+    :param doc_version: строка ``document_version`` (``active``), чей контент совпал.
+    :param chunks: чанки в порядке ``chunk_no``; непусты (пустой набор → не reuse).
+    """
+
+    doc_version: DocumentVersionRow
+    chunks: tuple[_ReusedChunk, ...]
+
+
+def _state_url_key(url: str) -> str | None:
+    """Ключ ``url_state`` для URL: канонизация §7.2 (:func:`normalize_seed_url`).
+
+    Единственный источник истины нормализации URL — ``core.config.seeds``: и seed-набор,
+    и планировщик (``incremental._normalize_url``), и этот ключ обязаны совпадать, иначе
+    строка состояния не нашлась бы по только что наблюдённому URL.
+
+    :returns: нормализованный URL либо ``None`` (URL не нормализуется — состояние по нему
+        не ведётся; вызывающий решает, писать ли видимую ошибку).
+    """
+    try:
+        return normalize_seed_url(str(url or ""))
+    except ValueError:
+        return None
+
+
+def _as_refresh_policy(value: str) -> RefreshPolicy:
+    """Приводит строку политики наблюдения к :class:`RefreshPolicy` (дефолт ``auto``)."""
+    try:
+        return RefreshPolicy(value)
+    except ValueError:
+        return RefreshPolicy.AUTO
+
+
+def _as_product_mode(value: str | None) -> ProductMode:
+    """Режим продукта по строке плана онбординга; отсутствие/неизвестное — ``new``.
+
+    ``new`` — честный дефолт: продукт без записи в ``product_modes`` ведёт себя как
+    первый прогон (полный BFS), а не как инкрементальный.
+    """
+    if value is None:
+        return ProductMode.NEW
+    try:
+        return ProductMode(value)
+    except ValueError:
+        return ProductMode.NEW
+
+
+def _load_reused_chunks(
+    state: ProductStatePort,
+    doc_version: DocumentVersionRow,
+    *,
+    chunker_version: str,
+    where: str,
+    errors: list[str],
+) -> tuple[_ReusedChunk, ...] | None:
+    """Читает и **верифицирует** chunk-set версии документа из durable-субстрата (I19).
+
+    Переиспользовать можно только текст, который доказуемо тот же, что был проиндексирован:
+    для каждого ``chunk_meta`` берётся ``chunk_store.text`` по ``content_hash`` и
+    пересчитывается ``content_hash(text)``. Любое расхождение (нет текста, хеш не сошёлся,
+    пустой набор) — отказ от переиспользования с видимой записью в ``errors``: вызывающий
+    идёт обычным путём экстракции/нарезки. Молчаливая подмена текста запрещена.
+
+    ``chunker_version`` обязан совпасть с версией прогона: иначе границы чанков другой
+    версии чанкера молча смешались бы с текущей сборкой (durable ``chunk_meta`` различает
+    версии, ``document_version`` — нет).
+
+    :returns: верифицированные чанки в порядке ``chunk_no`` либо ``None`` (не переиспользуем).
+    """
+    doc_version_id_ = doc_version.doc_version_id
+    if doc_version.chunker_version and doc_version.chunker_version != chunker_version:
+        errors.append(
+            f"{where}: reuse: версия чанкера {doc_version.chunker_version!r} != "
+            f"{chunker_version!r} — повторная нарезка"
+        )
+        return None
+    try:
+        rows = list(state.iter_doc_chunks(doc_version_id_))
+    except Exception as exc:  # noqa: BLE001 — изоляция state-чтения
+        errors.append(
+            f"{where}: reuse: iter_doc_chunks({doc_version_id_}): "
+            f"{type(exc).__name__}: {exc} — повторная нарезка"
+        )
+        return None
+    if not rows:
+        errors.append(
+            f"{where}: reuse: пустой chunk-set {doc_version_id_!r} — повторная нарезка"
+        )
+        return None
+    reused: list[_ReusedChunk] = []
+    for row in rows:
+        try:
+            text = state.get_chunk_text(row.content_hash)
+        except Exception as exc:  # noqa: BLE001 — изоляция state-чтения
+            errors.append(
+                f"{where}: reuse: get_chunk_text({row.content_hash}): "
+                f"{type(exc).__name__}: {exc} — повторная нарезка"
+            )
+            return None
+        if text is None:
+            errors.append(
+                f"{where}: reuse: текст чанка {row.chunk_id!r} не сохранён "
+                "(chunk_store) — повторная нарезка"
+            )
+            return None
+        if content_hash(text) != row.content_hash:
+            errors.append(
+                f"{where}: reuse: I19: текст чанка {row.chunk_id!r} не совпадает с "
+                "content_hash — повторная нарезка (неверифицированный текст не "
+                "переиспользуется)"
+            )
+            return None
+        reused.append(
+            _ReusedChunk(
+                chunk_no=int(row.chunk_no),
+                text=text,
+                content_hash=row.content_hash,
+                heading_path=row.heading_path or "",
+                context_prefix=row.context_prefix or "",
+            )
+        )
+    return tuple(reused)
 
 
 @dataclass(frozen=True)
@@ -566,6 +753,11 @@ class IndexBuild:
         экстракцию). Поле сохранено для обратной совместимости наблюдаемости.
     :param crawl_failed: L1a: терминально сбойные элементы (``FAILED``; ``CANCELLED`` —
         если у модели нет отдельного поля — складывается сюда только для счётчика).
+    :param doc_counters: честные счётчики документов по продукту (09 §6.3):
+        ``{"total": n, "new": n, "reused": n}``. ``new`` — документ прошёл
+        экстракцию+нарезку в этом прогоне; ``reused`` — версия переиспользована из
+        durable-субстрата (304/тот же ``content_hash``). Пустая карта — legacy-путь
+        (``state is None``): счётчики не выдумываются.
     """
 
     index_build_id: str
@@ -587,6 +779,9 @@ class IndexBuild:
     #: ``{product_id, url, reason: url_suffix|content_type, level}``. Питает канал
     #: усечения/аномалии (``source_scope: exhaustive`` поверх «прореженного» продукта).
     document_skips: list[dict[str, Any]] = field(default_factory=list)
+    #: 09 §6.3: счётчики документов по продукту (``total``/``new``/``reused``). Пусто —
+    #: durable-субстрата нет (legacy), счётчики не фабрикуются.
+    doc_counters: dict[str, dict[str, int]] = field(default_factory=dict)
 
 
 @dataclass
@@ -1141,7 +1336,12 @@ def _terminal_not_found(item: CrawlSessionItem | None) -> bool:
 
 
 def _resume_page(
-    item: CrawlSessionItem, url: str, content: bytes, path: Path, fetch_plan: FetchPlan
+    item: CrawlSessionItem,
+    url: str,
+    content: bytes,
+    path: Path,
+    fetch_plan: FetchPlan,
+    validators: tuple[str | None, str | None] | None = None,
 ) -> RawPage:
     """Реконструирует ``RawPage`` из retained-байтов и элемента сеанса (без сети, D3).
 
@@ -1149,6 +1349,12 @@ def _resume_page(
     из записи (если распознаётся, иначе ``fetch_plan.fetch``). ``content_type``/``lang``/
     ``status_code`` — из провенанса записи (``lang`` персистится, иначе свежий и
     возобновлённый прогоны расходились бы по ``corpus_docs.lang``/``corpus_chunks.lang``).
+
+    **Валидаторы (09 §6.3).** ``CrawlSessionItem`` не хранит ``ETag``/``Last-Modified``
+    (колонок нет — сеанс трекает краул, а не условную валидацию), поэтому валидаторы
+    приходят аргументом из ``url_state`` (durable-источник) и переносятся в ``RawPage``,
+    чтобы запись состояния после resume не потеряла их. ``not_modified`` всегда ``False``:
+    resume перечитывает retained-байты, серверного подтверждения ``304`` не было.
     """
     fetched_at = item.last_attempt
     if not fetched_at:
@@ -1164,6 +1370,7 @@ def _resume_page(
             fetch_mode = FetchMode(item.fetch_mode)
         except ValueError:
             fetch_mode = fetch_plan.fetch
+    etag, last_modified = validators if validators is not None else (None, None)
     return RawPage(
         url=url,
         content=content,
@@ -1172,6 +1379,8 @@ def _resume_page(
         lang=item.lang,
         status_code=item.http_status,
         content_type=item.content_type,
+        etag=etag,
+        last_modified=last_modified,
     )
 
 
@@ -1215,6 +1424,9 @@ def build_corpus(
     max_attempts: int | None = None,
     progress: Callable[[dict[str, int]], None] | None = None,
     crawl_app: CrawlConfig | None = None,
+    state: ProductStatePort | None = None,
+    product_modes: Mapping[str, str] | None = None,
+    refresh_policy: str = "auto",
 ) -> PhaseResult:
     """Ш5: собирает корпус из ``plan × urls`` и возвращает ``PhaseResult``.
 
@@ -1335,6 +1547,22 @@ def build_corpus(
         ``exclude_paths``/``exclude_documents`` (:func:`core.pipeline.crawl_frontier.resolve_crawl_limits`).
         ``None`` → дефолт :class:`CrawlConfig` (``max_depth=0``, без лимитов/блэклистов —
         поведение неизменно).
+    :param state: durable per-product состояние (``ProductStatePort``, 09 §4.1/§4.2).
+        ``None`` → прежнее поведение **байт-в-байт**: субстрат не читается и не пишется,
+        ``IndexBuild.doc_counters`` пуст, ``index_build_id`` тот же. При наличии — состояние
+        URL/документов/чанков читается и пишется для **каждого** продукта независимо от
+        режима (субстрат наполняется на первом прогоне), а политика наблюдения добавляет
+        валидаторы условного GET и переиспользование документов.
+    :param product_modes: ``product_id → "new"|"full"|"incremental"`` (значения
+        :class:`~core.domain.enums.ProductMode`). Отсутствующий продукт трактуется как
+        ``new``. ``incremental`` расширяет work-set известными URL
+        (:func:`core.pipeline.incremental.plan_incremental`), ``new``/``full`` сохраняют
+        прежнюю развёртку BFS/sitemap. Игнорируется при ``state is None``.
+    :param refresh_policy: политика наблюдения (значение :class:`RefreshPolicy`):
+        ``auto``/``revalidate`` — условный GET с валидаторами; ``refresh`` — безусловный
+        GET (валидаторы не отправляются); ``offline`` — известные URL без сети, но
+        переиспользование ``reuse`` в этом срезе **не реализовано** (видимая ошибка на
+        продукт, элемент обрабатывается как ``revalidate``).
 
     Возвращает ``PhaseResult`` со ``status='ok'`` (даже при изолированных ошибках),
     ``cells=[]`` (Ш5 не производит ячеек) и ``log_entries=[IndexBuild]`` (сборка + счётчики).
@@ -1373,6 +1601,13 @@ def build_corpus(
     #: P5: видимые пропуски документов уровнем ``off`` (никогда не тихо) — агрегат по всем
     #: корням/продуктам прогона; кладётся в ``IndexBuild.document_skips``.
     document_skips: list[dict[str, Any]] = []
+    #: 09 §6.3: честные счётчики документов по продукту (``total``/``new``/``reused``).
+    #: Заполняются только при наличии durable-субстрата (``state``), иначе карта пуста.
+    doc_counters: dict[str, dict[str, int]] = {}
+
+    # 09 §6.3/§9 (MVP-3b): политика наблюдения и режимы продуктов. ``state is None`` —
+    # legacy-путь: все три аргумента игнорируются целиком (поведение байт-в-байт).
+    policy = _as_refresh_policy(refresh_policy)
 
     # D4: дефолты оси стратегии/задержек из run.yaml ``crawl`` (профиль домена их переопределяет).
     crawl_strategy_default = (
@@ -1431,7 +1666,368 @@ def build_corpus(
     #: **не мутировать** замороженный ``CrawlTarget``.
     applied_engines: dict[tuple[str, str], str | None] = {}
 
+    # ------------------------------------------------------------------ #
+    # 09 §6.3/§9: durable-состояние URL/документов/чанков (MVP-3b)
+    # ------------------------------------------------------------------ #
+    #: Валидаторы условного GET из инкрементального work-set:
+    #: ``(product_id, normalized_url) → (If-None-Match, If-Modified-Since)``.
+    planned_validators: dict[tuple[str, str], tuple[str | None, str | None]] = {}
+
+    def _validators(pid: str, url: str) -> tuple[str | None, str | None]:
+        """Валидаторы условного GET для URL (09 §6.3): ``(etag, last_modified)``.
+
+        Источник — ``url_state`` (durable), а не сеанс краула: валидаторы переживают
+        прогоны. Отправляются только при политике ``auto``/``revalidate``: ``refresh``
+        обязан получить свежий ответ (безусловный GET), ``offline`` сеть не трогает.
+        Плановые значения (из ``plan_incremental``) приоритетнее повторного чтения строки —
+        это тот же источник, прочитанный один раз на продукт.
+
+        Сбой чтения состояния изолируется в ``errors``: отсутствие валидатора деградирует
+        запрос до безусловного GET (безопасно), а не роняет фазу.
+        """
+        if state is None or policy in (RefreshPolicy.REFRESH, RefreshPolicy.OFFLINE):
+            return None, None
+        key = _state_url_key(url)
+        if key is None:
+            return None, None
+        planned = planned_validators.get((pid, key))
+        if planned is not None:
+            return planned
+        try:
+            row = state.get_url_state(pid, key)
+        except Exception as exc:  # noqa: BLE001 — изоляция state-чтения
+            errors.append(
+                f"state: get_url_state({pid}/{key}): {type(exc).__name__}: {exc}"
+            )
+            return None, None
+        if row is None:
+            return None, None
+        return row.etag, row.last_modified
+
+    def _count_doc(pid: str, *, reused: bool) -> None:
+        """Считает принятый документ прогона (``total``/``new``/``reused``, 09 §6.3).
+
+        Считается **документ**, а не URL: повтор/алиас (дедуп ``seen_docs``) не создаёт
+        записи в корпусе и сюда не попадает.
+        """
+        if state is None:
+            return
+        bucket = doc_counters.setdefault(pid, {"total": 0, "new": 0, "reused": 0})
+        bucket["total"] += 1
+        bucket["reused" if reused else "new"] += 1
+
+    def _find_doc_version(
+        pid: str, doc_hash: str, extractor_token: str, level_text: str
+    ) -> DocumentVersionRow | None:
+        """Версия документа по ключу §4.2 (``content_hash``+``extractor_version``+``level``)."""
+        if state is None:
+            return None
+        try:
+            return state.find_document_version(
+                pid,
+                content_hash=doc_hash,
+                extractor_version=extractor_token,
+                level=level_text,
+            )
+        except Exception as exc:  # noqa: BLE001 — изоляция state-чтения
+            errors.append(
+                f"state: find_document_version({pid}/{doc_hash}): "
+                f"{type(exc).__name__}: {exc}"
+            )
+            return None
+
+    def _reuse_plan(
+        pid: str, url: str, doc_version: DocumentVersionRow | None
+    ) -> _DocReuse | None:
+        """Проверенный chunk-set версии документа либо ``None`` (не переиспользуем)."""
+        if state is None or doc_version is None:
+            return None
+        if doc_version.status != _DOC_ACTIVE:
+            return None
+        chunks = _load_reused_chunks(
+            state,
+            doc_version,
+            chunker_version=resolved_chunker_version,
+            where=f"{pid}/{url}",
+            errors=errors,
+        )
+        if chunks is None:
+            return None
+        return _DocReuse(doc_version=doc_version, chunks=chunks)
+
+    def _reuse_not_modified(pid: str, url: str) -> _DocReuse | None:
+        """Переиспользование по ``304`` — **до** экстракции (её вызов не нужен).
+
+        ``content_hash`` документа известен из ``url_state.doc_version_id``: сервер
+        подтвердил, что представление не изменилось. Нет версии/чанков — ``None``
+        (вызывающий идёт обычным путём экстракции).
+        """
+        if state is None:
+            return None
+        key = _state_url_key(url)
+        if key is None:
+            return None
+        try:
+            prior = state.get_url_state(pid, key)
+            prior_doc = (
+                state.get_document_version(prior.doc_version_id)
+                if prior is not None and prior.doc_version_id
+                else None
+            )
+        except Exception as exc:  # noqa: BLE001 — изоляция state-чтения
+            errors.append(
+                f"{pid}/{url}: state: reuse(304): {type(exc).__name__}: {exc}"
+            )
+            return None
+        if classify_reuse(
+            prior=prior, prior_doc=prior_doc, not_modified=True, content_hash=None
+        ) is not ReuseKind.REVALIDATED:
+            return None
+        return _reuse_plan(pid, url, prior_doc)
+
+    def _reuse_for_page(pid: str, url: str, page: RawPage) -> _DocReuse | None:
+        """Переиспользование по ``304`` с видимой записью, если версии нет.
+
+        ``304`` без известной версии (или с отвергнутым chunk-set) — не повод молчать:
+        сервер подтвердил «не изменилось», а переиспользовать нечего, поэтому прогон
+        идёт обычной экстракцией, а факт фиксируется в ``errors``. Конкретная причина
+        отказа уже записана :func:`_reuse_not_modified` — дублирующая запись не нужна.
+        """
+        if not page.not_modified:
+            return None
+        before = len(errors)
+        reuse = _reuse_not_modified(pid, url)
+        if reuse is None and len(errors) == before:
+            errors.append(
+                f"{pid}/{url}: 304 без переиспользуемой версии документа — "
+                "обычная экстракция"
+            )
+        return reuse
+
+    def _reuse_same_hash(
+        pid: str, url: str, doc_hash: str, extractor_token: str, level_text: str
+    ) -> _DocReuse | None:
+        """Переиспользование при ``200`` с прежним ``content_hash`` (после экстракции)."""
+        if state is None:
+            return None
+        key = _state_url_key(url)
+        if key is None:
+            return None
+        try:
+            prior = state.get_url_state(pid, key)
+        except Exception as exc:  # noqa: BLE001 — изоляция state-чтения
+            errors.append(
+                f"{pid}/{url}: state: get_url_state: {type(exc).__name__}: {exc}"
+            )
+            return None
+        prior_doc = _find_doc_version(pid, doc_hash, extractor_token, level_text)
+        if classify_reuse(
+            prior=prior, prior_doc=prior_doc, not_modified=False, content_hash=doc_hash
+        ) is not ReuseKind.REVALIDATED:
+            return None
+        return _reuse_plan(pid, url, prior_doc)
+
+    def _supersede_document(pid: str, url: str, dv_id: str | None) -> None:
+        """Помечает прежнюю версию ``superseded`` (09 §6.3: ``404``/``410`` по URL)."""
+        if state is None or not dv_id:
+            return
+        try:
+            row = state.get_document_version(dv_id)
+            if row is None or row.status != _DOC_ACTIVE:
+                return
+            state.upsert_document_version(replace(row, status=_DOC_SUPERSEDED))
+        except Exception as exc:  # noqa: BLE001 — изоляция state-записи
+            errors.append(
+                f"{pid}/{url}: state: supersede({dv_id}): "
+                f"{type(exc).__name__}: {exc}"
+            )
+
+    def _record_url_state(
+        pid: str,
+        url: str,
+        status: CrawlItemStatus,
+        fields: Mapping[str, Any],
+        extra: Mapping[str, Any] | None,
+    ) -> None:
+        """Пишет ``url_state`` по исходу одного URL (09 §6.3).
+
+        Вызывается из :func:`_mark` — единственной воронки терминальных исходов, поэтому
+        покрывает **каждый** URL независимо от режима продукта (субстрат наполняется уже
+        на первом прогоне). Правила:
+
+        * ``FETCHED`` + новый/изменившийся документ → новый ``doc_version_id``,
+          ``reuse_kind=live``, счётчик сбоев сброшен;
+        * ``FETCHED`` + ``304``/тот же ``content_hash`` → ``doc_version_id`` сохраняется,
+          ``reuse_kind=revalidated``;
+        * ``not_found`` → ``doc_version_id=NULL``, ``last_error_kind=not_found``, прежняя
+          версия документа — ``superseded``;
+        * прочие сбои (``robots_disallow``/``parser_failed``/``extraction_timeout``/
+          ``attempts_exhausted``/…) → ``last_error_kind``, ``consecutive_failures += 1``,
+          прежняя версия сохраняется.
+
+        ``FETCHED`` без ``raw_path`` (каталог/sitemap — не контент, I19) в состояние не
+        попадает: иначе следующий инкрементальный план принял бы их за документы.
+        Любой сбой записи изолируется в ``errors`` (никогда не роняет фазу).
+        """
+        if state is None:
+            return
+        if status is CrawlItemStatus.FETCHED and not fields.get("raw_path"):
+            return
+        key = _state_url_key(url)
+        if key is None:
+            errors.append(
+                f"{pid}/{url}: state: URL не нормализуется — url_state не записан"
+            )
+            return
+        try:
+            prior = state.get_url_state(pid, key)
+            base = (
+                prior
+                if prior is not None
+                else UrlStateRow(product_id=pid, url=url, normalized_url=key)
+            )
+            now = _now_iso()
+            current: dict[str, Any] = {
+                "doc_version_id": base.doc_version_id,
+                "reuse_kind": base.reuse_kind,
+                "etag": base.etag,
+                "last_modified": base.last_modified,
+                "last_http_status": base.last_http_status,
+                "last_changed_at": base.last_changed_at,
+            }
+            # Не-``None`` значения исхода перекрывают прежние (COALESCE-семантика):
+            # сервер, переставший отдавать ETag, не обязан стирать валидатор.
+            for name, value in (extra or {}).items():
+                if value is not None:
+                    current[name] = value
+            failures = base.consecutive_failures
+            error_kind = base.last_error_kind
+            if status is CrawlItemStatus.FETCHED:
+                failures = 0
+                error_kind = None
+            else:
+                error_kind = _canonical_failure_kind(fields.get("error_kind"))
+                if error_kind == FailureKind.NOT_FOUND.value:
+                    _supersede_document(pid, url, base.doc_version_id)
+                    current["doc_version_id"] = None
+                else:
+                    failures += 1
+            state.upsert_url_state(
+                UrlStateRow(
+                    product_id=pid,
+                    url=url,
+                    normalized_url=key,
+                    doc_version_id=current["doc_version_id"],
+                    etag=current["etag"],
+                    last_modified=current["last_modified"],
+                    last_http_status=current["last_http_status"],
+                    last_checked_at=now,
+                    last_changed_at=current["last_changed_at"],
+                    next_check_at=base.next_check_at,
+                    consecutive_failures=failures,
+                    last_error_kind=error_kind,
+                    reuse_kind=current["reuse_kind"],
+                    seed_id=base.seed_id,
+                )
+            )
+        except Exception as exc:  # noqa: BLE001 — изоляция state-записи
+            errors.append(
+                f"state: url_state({pid}/{url}): {type(exc).__name__}: {exc}"
+            )
+
+    def _write_document_state(
+        pid: str,
+        url: str,
+        page: RawPage,
+        *,
+        dv_id: str,
+        doc_hash: str,
+        extractor_token: str,
+        level_text: str,
+        raw_path: Path,
+        chunks: Sequence[tuple[int, str, str, str]],
+    ) -> None:
+        """Пишет версию документа и её chunk-set в durable-субстрат (09 §4.2/§9).
+
+        Порядок — по FK: ``document_version`` → ``chunk_store`` → ``chunk_meta``.
+        ``chunk_meta`` адресуется durable-ключом :func:`chunk_row_id` (не run-level
+        ``chunk_id``) и различает версию чанкера. ``chunk_store``-ключ — hash **фактически
+        записываемого текста** (I19): испорченная строка под старым хешем не «заражает»
+        новую запись.
+
+        ``first_seen_*`` существующей версии не затирается: иначе повторное наблюдение
+        того же документа выглядело бы как новый (``docs_new``/``docs_reused`` в
+        :func:`core.pipeline.state_sync.record_run_outcome`).
+
+        :param chunks: ``(chunk_no, text, heading_path, context_prefix)`` принятых чанков.
+        """
+        if state is None:
+            return
+        try:
+            now = _now_iso()
+            existing = state.get_document_version(dv_id)
+            run_token = str(run_id or "")
+            rows: list[tuple[ChunkRow, str]] = []
+            for chunk_no, text, heading_path, context_prefix in chunks:
+                row = ChunkRow(
+                    chunk_id=chunk_row_id(dv_id, resolved_chunker_version, chunk_no),
+                    doc_version_id=dv_id,
+                    product_id=pid,
+                    chunk_no=chunk_no,
+                    content_hash=content_hash(text),
+                    chunker_version=resolved_chunker_version,
+                    heading_path=heading_path or None,
+                    context_prefix=context_prefix or None,
+                    lang=page.lang,
+                )
+                rows.append((row, text))
+            digest = short_hash(
+                _FIELD_SEP.join(sorted(row.chunk_id for row, _text in rows)), 24
+            )
+            state.upsert_document_version(
+                DocumentVersionRow(
+                    doc_version_id=dv_id,
+                    doc_id=f"{pid}:{doc_hash}",
+                    product_id=pid,
+                    url=page.url,
+                    content_hash=doc_hash,
+                    extractor_version=extractor_token,
+                    level=level_text,
+                    raw_path=str(raw_path),
+                    chunker_version=resolved_chunker_version,
+                    chunk_ids_digest=digest,
+                    first_seen_run_id=(
+                        existing.first_seen_run_id if existing is not None else run_token
+                    ),
+                    last_seen_run_id=run_token,
+                    first_seen_at=(
+                        existing.first_seen_at if existing is not None else now
+                    ),
+                    last_seen_at=now,
+                    status=_DOC_ACTIVE,
+                )
+            )
+            for row, text in rows:
+                state.put_chunk_text(row.content_hash, text, lang=page.lang)
+            state.replace_doc_chunks(dv_id, [row for row, _text in rows])
+        except Exception as exc:  # noqa: BLE001 — изоляция state-записи
+            errors.append(
+                f"state: document_version({pid}/{url}): {type(exc).__name__}: {exc}"
+            )
+
     def _mark(pid: str, u: str, status: CrawlItemStatus, **fields: Any) -> None:
+        """Помечает исход URL: сеанс краула (L1a) + durable ``url_state`` (09 §6.3).
+
+        Сеанс — прежнее поведение (:func:`_mark_session`); ``url_state`` пишется при
+        наличии ``state`` для **каждого** исхода URL. ``state_fields`` — поля исхода
+        документа (``doc_version_id``/``reuse_kind``/валидаторы/``http_status``), которые
+        нельзя пронести через ``CrawlSessionItem`` (у него нет таких колонок).
+        """
+        state_fields = fields.pop("state_fields", None)
+        _mark_session(pid, u, status, **fields)
+        _record_url_state(pid, u, status, fields, state_fields)
+
+    def _mark_session(pid: str, u: str, status: CrawlItemStatus, **fields: Any) -> None:
         """Помечает исход URL и (при активном сеансе) персистит элемент краула (L1a).
 
         Пишет **полную** строку ``crawl_session_items``: поля предыдущего элемента
@@ -1604,6 +2200,8 @@ def build_corpus(
                 ingest,
                 seen_docs,
                 seen_chunk_ids,
+                extractor_obj,
+                level,
                 extract_error=f"{type(exc).__name__}: {exc}",
             )
             return
@@ -1617,6 +2215,8 @@ def build_corpus(
             ingest,
             seen_docs,
             seen_chunk_ids,
+            extractor_obj,
+            level,
         )
 
     def _finish_one(
@@ -1629,8 +2229,11 @@ def build_corpus(
         ingest: _ProductIngest,
         seen_docs: dict[str, str],
         seen_chunk_ids: set[str],
+        extractor_obj: ExtractorPort,
+        level: DocumentLevel,
         *,
         extract_error: str | None = None,
+        reuse: _DocReuse | None = None,
     ) -> None:
         """Доводка одного URL после экстракции: дедуп → нарезка → ``_mark`` (главный поток).
 
@@ -1638,51 +2241,96 @@ def build_corpus(
         экстракции приходит либо из inline-вызова, либо из ``future.result()`` пула. Сырые
         байты уже сохранены (``raw_path``); шаги изолируют ошибки в ``errors`` и фиксируют
         терминальный статус элемента сеанса через ``_mark`` (FIFO на главном потоке).
+
+        **Переиспользование (09 §6.3/§9).** ``reuse`` — готовая версия документа (путь
+        ``304``, экстракция не вызывалась); ``None`` — обычная экстракция. При ``200`` с
+        прежним ``content_hash`` версия ищется здесь же (:func:`_reuse_same_hash`): чанкер
+        не вызывается, chunk-set берётся из ``chunk_store`` после проверки I19
+        (:func:`_load_reused_chunks`). Run-level ``chunk_id`` остаётся прежним
+        (:func:`_chunk_id`) — идентификаторы индекса не меняются.
         """
         nonlocal duplicate_count
-        # 3. Экстракция (грациозная деградация адаптера через .error).
-        if extract_error is not None:
-            errors.append(f"{product_id}/{url}: extract: {extract_error}")
-            _mark(
-                product_id,
-                url,
-                CrawlItemStatus.FAILED,
-                error_kind=FailureKind.PARSER_FAILED.value,
-                error=extract_error,
-                raw_path=str(raw_path),
-            )
-            return
-        if extracted is None or getattr(extracted, "error", None):
-            reason = getattr(extracted, "error", None) or "пустой ExtractedDoc"
-            errors.append(f"{product_id}/{url}: extract: {reason}")
-            _mark(
-                product_id,
-                url,
-                CrawlItemStatus.FAILED,
-                error_kind=FailureKind.PARSER_FAILED.value,
-                error=reason,
-                raw_path=str(raw_path),
-            )
-            return
+        if reuse is not None and extracted is not None and getattr(extracted, "error", None):
+            # Экстрактор текущего прогона сообщил сбой: переиспользование скрыло бы его,
+            # а сбой парсера — это сигнал о конвейере, а не повод «взять старое».
+            reuse = None
+        extractor_token = str(getattr(extractor_obj, "version", "") or "")
+        level_text = _as_text(level)
+        doc_extractor_version = extractor_token or None
 
-        doc_hash = str(getattr(extracted, "content_hash", "") or "")
-        if not doc_hash:
-            errors.append(f"I19: {product_id}/{url}: ExtractedDoc без content_hash — отклонён")
-            _mark(
-                product_id,
-                url,
-                CrawlItemStatus.FAILED,
-                error_kind=FailureKind.PARSER_FAILED.value,
-                error="ExtractedDoc без content_hash",
-                raw_path=str(raw_path),
+        # 3. Экстракция (грациозная деградация адаптера через .error).
+        if reuse is None:
+            if extract_error is not None:
+                errors.append(f"{product_id}/{url}: extract: {extract_error}")
+                _mark(
+                    product_id,
+                    url,
+                    CrawlItemStatus.FAILED,
+                    error_kind=FailureKind.PARSER_FAILED.value,
+                    error=extract_error,
+                    raw_path=str(raw_path),
+                )
+                return
+            if extracted is None or getattr(extracted, "error", None):
+                reason = getattr(extracted, "error", None) or "пустой ExtractedDoc"
+                errors.append(f"{product_id}/{url}: extract: {reason}")
+                _mark(
+                    product_id,
+                    url,
+                    CrawlItemStatus.FAILED,
+                    error_kind=FailureKind.PARSER_FAILED.value,
+                    error=reason,
+                    raw_path=str(raw_path),
+                )
+                return
+
+            doc_hash = str(getattr(extracted, "content_hash", "") or "")
+            if not doc_hash:
+                errors.append(
+                    f"I19: {product_id}/{url}: ExtractedDoc без content_hash — отклонён"
+                )
+                _mark(
+                    product_id,
+                    url,
+                    CrawlItemStatus.FAILED,
+                    error_kind=FailureKind.PARSER_FAILED.value,
+                    error="ExtractedDoc без content_hash",
+                    raw_path=str(raw_path),
+                )
+                return
+            doc_extractor_version = getattr(extracted, "extractor_version", None)
+            extractor_token = str(doc_extractor_version or "") or extractor_token
+        else:
+            doc_hash = reuse.doc_version.content_hash
+            doc_extractor_version = reuse.doc_version.extractor_version or None
+            extractor_token = (
+                reuse.doc_version.extractor_version or extractor_token
             )
-            return
+            level_text = reuse.doc_version.level or level_text
 
         # 4. Дедуп по content_hash (в пределах продукта).
         if doc_hash in seen_docs:
             duplicate_count += 1
             # Байты сохранены и контент уже проиндексирован близнецом в этой партиции.
-            _mark(product_id, url, CrawlItemStatus.FETCHED, raw_path=str(raw_path))
+            # Алиас получает ту же версию документа (если она уже записана), чтобы
+            # следующий инкрементальный план знал, что контент URL уже в корпусе.
+            found = _find_doc_version(
+                product_id, doc_hash, extractor_token, level_text
+            )
+            _mark(
+                product_id,
+                url,
+                CrawlItemStatus.FETCHED,
+                raw_path=str(raw_path),
+                state_fields={
+                    "doc_version_id": (
+                        found.doc_version_id if found is not None else None
+                    ),
+                    "etag": page.etag,
+                    "last_modified": page.last_modified,
+                    "last_http_status": page.status_code,
+                },
+            )
             return
         seen_docs[doc_hash] = url
 
@@ -1694,7 +2342,7 @@ def build_corpus(
             fetched_at=page.fetched_at,
             content_hash=doc_hash,
             raw_path=str(raw_path),
-            extractor_version=getattr(extracted, "extractor_version", None),
+            extractor_version=doc_extractor_version,
             render_mode=_as_text(page.fetch_mode),
             lang=page.lang,
         )
@@ -1707,18 +2355,49 @@ def build_corpus(
         # продукт. ``_persist_docs`` изолирует сбой записи в ``errors`` — краул продолжается.
         _persist_docs(store, [doc], errors)
 
-        # 5. Чанкер.
-        try:
-            chunks = chunker.chunk(extracted, document_id)
-        except Exception as exc:  # noqa: BLE001
-            # Сбой нарезки — не отказ источника/парсера: raw сохранён (FETCHED),
-            # повторный resume сможет ре-извлечь без ре-фетча.
-            errors.append(f"{product_id}/{url}: chunk: {type(exc).__name__}: {exc}")
-            return
+        # 5. Переиспользование версии (200 с прежним content_hash) либо чанкер.
+        active_reuse = reuse
+        if active_reuse is None:
+            active_reuse = _reuse_same_hash(
+                product_id, url, doc_hash, extractor_token, level_text
+            )
+        #: ``(chunk_no, text, heading_path, context_prefix, provided_hash)`` — общая форма
+        #: для чанкера и переиспользованного набора (I19-проверки ниже одинаковы).
+        candidates: list[tuple[int, str, str, str, str]] = []
+        if active_reuse is not None:
+            candidates = [
+                (
+                    chunk.chunk_no,
+                    chunk.text,
+                    chunk.heading_path,
+                    chunk.context_prefix,
+                    chunk.content_hash,
+                )
+                for chunk in active_reuse.chunks
+            ]
+        else:
+            try:
+                chunks = chunker.chunk(extracted, document_id)
+            except Exception as exc:  # noqa: BLE001
+                # Сбой нарезки — не отказ источника/парсера: raw сохранён (FETCHED),
+                # повторный resume сможет ре-извлечь без ре-фетча.
+                errors.append(f"{product_id}/{url}: chunk: {type(exc).__name__}: {exc}")
+                return
+            candidates = [
+                (
+                    int(getattr(chunk, "chunk_no", 0)),
+                    getattr(chunk, "text", "") or "",
+                    getattr(chunk, "heading_path", "") or "",
+                    getattr(chunk, "context_prefix", "") or "",
+                    str(getattr(chunk, "content_hash", "") or "").strip(),
+                )
+                for chunk in sorted(
+                    chunks or [], key=lambda c: getattr(c, "chunk_no", 0)
+                )
+            ]
 
-        for chunk in sorted(chunks or [], key=lambda c: getattr(c, "chunk_no", 0)):
-            provided_hash = str(getattr(chunk, "content_hash", "") or "").strip()
-            text = getattr(chunk, "text", "") or ""
+        accepted: list[tuple[int, str, str, str]] = []
+        for chunk_no, text, heading_path, context_prefix, provided_hash in candidates:
             # I19: у каждого индексируемого чанка обязан быть непустой hash.
             if not provided_hash:
                 errors.append(f"I19: {document_id}: чанк без content_hash отклонён")
@@ -1727,7 +2406,6 @@ def build_corpus(
                 errors.append(f"I19: {document_id}: чанк с пустым текстом отклонён")
                 continue
 
-            chunk_no = int(getattr(chunk, "chunk_no", 0))
             cid = _chunk_id(product_id, doc_hash, chunk_no)
             if cid in seen_chunk_ids:
                 errors.append(f"{document_id}: дублирующийся chunk_id {cid!r} отклонён")
@@ -1740,11 +2418,11 @@ def build_corpus(
                     doc_id=document_id,
                     product_id=product_id,
                     url=page.url,
-                    heading_path=getattr(chunk, "heading_path", "") or "",
+                    heading_path=heading_path,
                     lang=page.lang,
                     chunk_no=chunk_no,
                     text=text,
-                    context_prefix=getattr(chunk, "context_prefix", "") or "",
+                    context_prefix=context_prefix,
                     # Авторитетный хеш — от чистого текста (I19/§10).
                     content_hash=content_hash(text),
                     # build_id проставляется в Pass B после фиксации id сборки.
@@ -1753,10 +2431,44 @@ def build_corpus(
                     embedded_at=None,
                 )
             )
+            accepted.append((chunk_no, text, heading_path, context_prefix))
+
+        # 09 §6.3/§9: версия документа + chunk-set в durable-субстрате. Идентификатор
+        # выводится детерминированно (ключ §4.2), поэтому он известен и при сбое записи —
+        # ``url_state`` всё равно сошлётся на правильную версию.
+        dv_id = doc_version_id(product_id, doc_hash, extractor_token, level_text)
+        _write_document_state(
+            product_id,
+            url,
+            page,
+            dv_id=dv_id,
+            doc_hash=doc_hash,
+            extractor_token=extractor_token,
+            level_text=level_text,
+            raw_path=raw_path,
+            chunks=accepted,
+        )
+        reused = active_reuse is not None
+        _count_doc(product_id, reused=reused)
 
         # L1a: документ успешно добыт и нарезан → элемент сеанса терминален ``FETCHED``
         # (сеанс трекает краул: сырые байты сохранены = «ready» для материализации).
-        _mark(product_id, url, CrawlItemStatus.FETCHED, raw_path=str(raw_path))
+        _mark(
+            product_id,
+            url,
+            CrawlItemStatus.FETCHED,
+            raw_path=str(raw_path),
+            state_fields={
+                "doc_version_id": dv_id,
+                "reuse_kind": (
+                    ReuseKind.REVALIDATED.value if reused else ReuseKind.LIVE.value
+                ),
+                "etag": page.etag,
+                "last_modified": page.last_modified,
+                "last_http_status": page.status_code,
+                "last_changed_at": None if reused else _now_iso(),
+            },
+        )
 
     def _submit_collect(work: list[CrawlWorkItem]) -> dict[tuple[str, str], CrawlResultItem]:
         """Phase 3.3/5.3: подача набора работ исполнителю → ожидание → сбор результатов.
@@ -1880,8 +2592,14 @@ def build_corpus(
         A2b/§6(b): ``robots`` — egress-политика, вычисленная ядром на **корень**; edge
         строит краулеры «голыми», поэтому флаг обязан ехать с работы (иначе split-discovery
         не применяет robots и расходится с local по контенту).
+
+        ``if_none_match``/``if_modified_since`` (09 §6.3) — валидаторы условного GET из
+        ``url_state``: edge отправляет ``304`` тем же контрактом, что и локальный путь, и
+        обязан получить их в работе (иначе split-профиль не экономит трафик). ``None`` —
+        прежний безусловный GET (байт-идентичное поведение).
         """
         plan_i = target.plan
+        if_none_match, if_modified_since = _validators(pid, url)
         return CrawlWorkItem(
             product_id=pid,
             url=url,
@@ -1894,6 +2612,8 @@ def build_corpus(
             lang=None,
             rate_limit=plan_i.rate_limit,
             robots=robots,
+            if_none_match=if_none_match,
+            if_modified_since=if_modified_since,
         )
 
     # --- Pass A (ingest): crawl → retention → extract → dedup → chunk ---------- #
@@ -2206,14 +2926,21 @@ def build_corpus(
     ) -> _LocalFetch:
         """D4 pre-fetch (главный поток): resume/browser-guard/решение о пейсинге.
 
-        **Чистая** фаза: не пишет ни в ``errors``, ни в сеанс, ни в ``applied_engines``.
-        Все мутации отложены в :func:`_commit_local` (FIFO-порядок коммита) — это позволяет
+        **Чистая** фаза: не пишет ни в сеанс, ни в ``applied_engines``. Единственное
+        исключение — сбой чтения ``url_state`` (09 §6.3) фиксируется в ``errors``: он
+        деградирует запрос до безусловного GET, а не роняет фазу. Все прочие мутации
+        отложены в :func:`_commit_local` (FIFO-порядок коммита) — это позволяет
         исполнять саму сеть в пуле, а исходы коммитить детерминированно на главном потоке.
         Активный краулер выбирается по ``wtarget.engine`` (fallback — ``crawler``).
 
         A2b/§6(b): ``robots`` проставляется в ``plan.robots`` (``dataclasses.replace``) —
         адаптер применяет ``robots.txt``-гейт только при ``self._robots is not None and
         plan.robots``; без discovery/принуждения флаг False (никаких лишних ``robots.txt``).
+
+        **Условный GET (09 §6.3).** При политике ``auto``/``revalidate`` валидаторы из
+        ``url_state`` переносятся в ``FetchPlan`` (``dataclasses.replace`` — план не
+        мутируется): ``304`` экономит трафик, а трафик-нейтральный ``None`` сохраняет
+        прежний безусловный GET байт-в-байт.
         """
         fetch_plan = (
             wtarget.plan
@@ -2222,6 +2949,14 @@ def build_corpus(
         )
         # P0: per-site/run потолок ответа едет на плане (адаптер применяет его к стриму).
         fetch_plan = replace(fetch_plan, max_response_bytes=max_response_bytes)
+        # 09 §6.3: валидаторы условного GET (только auto/revalidate; refresh — безусловный).
+        if_none_match, if_modified_since = _validators(pid, wu)
+        if if_none_match is not None or if_modified_since is not None:
+            fetch_plan = replace(
+                fetch_plan,
+                if_none_match=if_none_match,
+                if_modified_since=if_modified_since,
+            )
         prior_item = items.get((pid, wu))
         resume_source = (
             _resume_source(prior_item, max_bytes=max_response_bytes)
@@ -2394,7 +3129,11 @@ def build_corpus(
         if desc.resume is not None:
             assert desc.prior_item is not None  # resume возможен только при наличии элемента
             content, raw_path = desc.resume
-            page = _resume_page(desc.prior_item, wu, content, raw_path, fetch_plan)
+            # 09 §6.3: валидаторы сеанс не хранит — они приходят из ``url_state`` (durable),
+            # чтобы запись состояния после resume не потеряла условную валидацию.
+            page = _resume_page(
+                desc.prior_item, wu, content, raw_path, fetch_plan, _validators(pid, wu)
+            )
             # Счётчик отражает статус возобновляемого элемента (FETCHED — retryable,
             # FAILED — re-extract), а не ``pending``: он уже персистится в сеансе, и при
             # последующем сбое chunker'а URL будет посчитан как ``fetched``, а не потерян.
@@ -2574,6 +3313,104 @@ def build_corpus(
     truncated_products: set[str] = set()
     pages_fetched_total = 0
 
+    def _record_root_outcome(
+        product_id: str,
+        root_url: str,
+        frontier: Frontier,
+        sitemap_skips: Sequence[Mapping[str, Any]],
+    ) -> None:
+        """Провенанс одного seed-root после drain: усечение/пропуски (D1/G, P5, D3/F10).
+
+        Общий шаг авторских корней и известных URL инкрементального work-set: порядок
+        записей и их содержимое не зависят от того, откуда пришёл корень.
+        """
+        nonlocal pages_fetched_total
+        pages_fetched_total += frontier.fetched
+        if frontier.truncated:
+            truncated_products.add(product_id)
+        # P5: пропуск документов «прореживает» корпус продукта по построению — он
+        # питает тот же канал аномалии, что и усечение (защита от false ❌ I2/I2b:
+        # `source_scope: exhaustive` поверх «прореженного» продукта — аномалия
+        # для человека). Причина — не ``max_*``, а ``document_level=off``.
+        if frontier.skipped_documents:
+            truncated_products.add(product_id)
+        record: dict[str, Any] = {
+            "product_id": product_id,
+            "root": root_url,
+            "pages_fetched": frontier.fetched,
+            "truncated": frontier.truncated,
+            "truncated_reason": frontier.truncated_reason,
+            "limits": frontier.limits.as_dict(),
+            "skipped_blacklisted": list(frontier.skipped_blacklisted),
+            # P5: видимые пропуски документов (``url_suffix``/``content_type``).
+            "skipped_documents": [dict(rec) for rec in frontier.skipped_documents],
+        }
+        # D3/F10: отказы scope у ``<loc>`` sitemap — провенанс, не ``errors``.
+        # Ключ появляется только при наличии отказов: без sitemap запись байт-в-байт
+        # прежняя. Классы ``host``/``path`` раздельны (F6).
+        if sitemap_skips:
+            record["skipped_out_of_scope"] = [dict(skip) for skip in sitemap_skips]
+        truncation_records.append(record)
+
+    def _plan_incremental_items(
+        product_id: str, roots: Sequence[str]
+    ) -> list[IncrementalItem]:
+        """Дополнительный work-set инкрементального продукта (09 §6.3, MVP-3b).
+
+        Возвращает только **не**-авторские элементы: авторские корни обрабатывает прежний
+        путь (каталоги/sitemap), а планировщик лишь подтверждает их ``fetch``. Порядок —
+        планировщика (``url_state`` отсортирован по ``normalized_url``).
+
+        ``exclude_urls`` не передаётся: набор исключений резолвится per-root
+        (``resolve_crawl_limits``: ``app < run < site``), поэтому дешёвого продуктового
+        набора нет; ``Frontier`` всё равно применяет блэклист к каждому seed и оставляет
+        видимую запись, а не тихий пропуск.
+
+        ``reuse`` (политика ``offline``) в этом срезе **не реализован**: элемент честно
+        деградирует до ``revalidate`` с одной видимой ошибкой на продукт — молчаливая
+        смена политики запрещена. ``new``/``full`` план не расширяют (прежний BFS/sitemap).
+        """
+        if state is None:
+            return []
+        if (
+            _as_product_mode((product_modes or {}).get(product_id))
+            is not ProductMode.INCREMENTAL
+        ):
+            return []
+        try:
+            planned = plan_incremental(
+                product_id=product_id,
+                roots=list(roots),
+                state=state,
+                policy=policy,
+                exclude_urls=(),
+            )
+        except Exception as exc:  # noqa: BLE001 — изоляция планировщика
+            errors.append(
+                f"{product_id}: plan_incremental: {type(exc).__name__}: {exc} — "
+                "работа только по авторским корням"
+            )
+            return []
+        author = {_state_url_key(url) for url in roots}
+        extra: list[IncrementalItem] = []
+        reuse_reported = False
+        for item in planned:
+            if item.root_url is not None and item.normalized_url in author:
+                continue  # авторский корень — прежний путь (каталог/sitemap)
+            if item.kind is IncrementalKind.REUSE:
+                if not reuse_reported:
+                    errors.append(f"offline reuse не реализован в corpus: {product_id}")
+                    reuse_reported = True
+                item = replace(item, kind=IncrementalKind.REVALIDATE)
+            if item.kind is IncrementalKind.REVALIDATE:
+                # Валидаторы едут и в локальный ``FetchPlan``, и в ``CrawlWorkItem``.
+                planned_validators[(product_id, item.normalized_url)] = (
+                    item.etag,
+                    item.last_modified,
+                )
+            extra.append(item)
+        return extra
+
     for product_id in products:
         ingest = _ProductIngest(product_id=product_id)
         # I17: дедуп в пределах продукт-партиции (см. docstring модуля).
@@ -2583,6 +3420,10 @@ def build_corpus(
         #: претендент побеждает). URL, лежащий в scope нескольких корней, не должен
         #: расходовать ``max_documents`` каждого из них — иначе бюджет исчерпывается досрочно.
         resume_counted: set[str] = set()
+        #: 09 §6.3: известные URL продукта (``revalidate``) — после авторских корней.
+        incremental_items = _plan_incremental_items(
+            product_id, url_map.get(product_id, [])
+        )
 
         def _drain_root(
             pid: str,
@@ -2847,19 +3688,42 @@ def build_corpus(
                     _emit_progress()
                     return
                 if extracted is _INLINE:
-                    _ingest_one(
-                        pid,
-                        work_url,
-                        page,
-                        fetch_plan,
-                        raw_path,
-                        ingest,
-                        seen_docs,
-                        seen_chunk_ids,
-                        root_extractor,
-                        level,
-                    )
+                    # 09 §6.3/§9: ``304`` переиспользует версию документа **до**
+                    # экстракции (экстрактор/чанкер не вызываются). Неудача reuse
+                    # (нет версии/чанков, I19-расхождение) — видимая запись уже сделана,
+                    # дальше обычный путь экстракции.
+                    reuse = _reuse_for_page(pid, work_url, page)
+                    if reuse is not None:
+                        _finish_one(
+                            pid,
+                            work_url,
+                            page,
+                            fetch_plan,
+                            raw_path,
+                            None,
+                            ingest,
+                            seen_docs,
+                            seen_chunk_ids,
+                            root_extractor,
+                            level,
+                            reuse=reuse,
+                        )
+                    else:
+                        _ingest_one(
+                            pid,
+                            work_url,
+                            page,
+                            fetch_plan,
+                            raw_path,
+                            ingest,
+                            seen_docs,
+                            seen_chunk_ids,
+                            root_extractor,
+                            level,
+                        )
                 else:
+                    # 09 §6.3: пул уже извлёк документ (экстракция не отменяется — она
+                    # оплачена), но при ``304`` нарезка переиспользуется: чанкер не зовётся.
                     _finish_one(
                         pid,
                         work_url,
@@ -2870,7 +3734,14 @@ def build_corpus(
                         ingest,
                         seen_docs,
                         seen_chunk_ids,
+                        root_extractor,
+                        level,
                         extract_error=extract_error,
+                        reuse=(
+                            _reuse_for_page(pid, work_url, page)
+                            if extract_error is None
+                            else None
+                        ),
                     )
                 _emit_progress()
                 # D1: извлечение in-site ссылок и следующий уровень BFS. При max_depth=0
@@ -3432,6 +4303,13 @@ def build_corpus(
                                 status_code=result.http_status,
                                 content_type=result.content_type,
                                 engine=result.engine,
+                                # 09 §6.3: валидаторы ответа и признак 304 переносятся в
+                                # ``RawPage`` (раньше молча терялись — реальный дефект):
+                                # без них ``url_state`` не сохранит ETag/Last-Modified, а
+                                # ``304`` не распознается как переиспользование.
+                                etag=result.etag,
+                                last_modified=result.last_modified,
+                                not_modified=result.not_modified,
                             )
                             outcome = _commit_local(desc, page=page)
                             _commit_or_defer(entry.pid, entry.wu, entry.depth, outcome)
@@ -3654,34 +4532,29 @@ def build_corpus(
                 frontier, sitemap_skips = _drain_root(
                     product_id, root_url, root_target, sitemap_seeds=sitemap_seeds
                 )
-                pages_fetched_total += frontier.fetched
-                if frontier.truncated:
-                    truncated_products.add(product_id)
-                # P5: пропуск документов «прореживает» корпус продукта по построению — он
-                # питает тот же канал аномалии, что и усечение (защита от false ❌ I2/I2b:
-                # `source_scope: exhaustive` поверх «прореженного» продукта — аномалия
-                # для человека). Причина — не ``max_*``, а ``document_level=off``.
-                if frontier.skipped_documents:
-                    truncated_products.add(product_id)
-                record: dict[str, Any] = {
-                    "product_id": product_id,
-                    "root": root_url,
-                    "pages_fetched": frontier.fetched,
-                    "truncated": frontier.truncated,
-                    "truncated_reason": frontier.truncated_reason,
-                    "limits": frontier.limits.as_dict(),
-                    "skipped_blacklisted": list(frontier.skipped_blacklisted),
-                    # P5: видимые пропуски документов (``url_suffix``/``content_type``).
-                    "skipped_documents": [dict(rec) for rec in frontier.skipped_documents],
-                }
-                # D3/F10: отказы scope у ``<loc>`` sitemap — провенанс, не ``errors``.
-                # Ключ появляется только при наличии отказов: без sitemap запись байт-в-байт
-                # прежняя. Классы ``host``/``path`` раздельны (F6).
-                if sitemap_skips:
-                    record["skipped_out_of_scope"] = [
-                        dict(skip) for skip in sitemap_skips
-                    ]
-                truncation_records.append(record)
+                _record_root_outcome(
+                    product_id, root_url, frontier, sitemap_skips
+                )
+
+        # 09 §6.3 (MVP-3b): известные URL инкрементального продукта — depth-0 seeds, ровно
+        # как авторские корни: те же scope/блэклист/лимиты/robots/пейсинг. BFS не
+        # переписывается — новые ссылки по-прежнему добавляет ``frontier.offer`` из
+        # добытых страниц, поэтому корпус может расти.
+        for item in incremental_items:
+            target = resolve_crawl_target(
+                product_id,
+                item.url,
+                sources=crawl_sources or CrawlSourcesConfig(),
+                profiles=domain_profiles or {},
+                explicit=explicit_fetch,
+                run_default_strategy=crawl_strategy_default,
+                run_default_rate_limit=crawl_rate_default,
+            )
+            targets[(product_id, item.url)] = target
+            frontier, sitemap_skips = _drain_root(
+                product_id, item.url, target, sitemap_seeds=False
+            )
+            _record_root_outcome(product_id, item.url, frontier, sitemap_skips)
 
         # Retention-провенанс не зависит от индексной сборки и уже персистенчен
         # инкрементально: единственная точка ``ingest.docs.append`` — ``_finish_one``,
@@ -3874,6 +4747,7 @@ def build_corpus(
         truncated=bool(truncated_products),
         truncation=truncation_records,
         document_skips=list(document_skips),
+        doc_counters=dict(doc_counters),
     )
     # Примечание: индексная сборка «возвращается» в log_entries (PhaseResult — контракт фазы;
     # W8 читает IndexBuild отсюда). Счётчики — в полях IndexBuild; дубликаты — в errors.

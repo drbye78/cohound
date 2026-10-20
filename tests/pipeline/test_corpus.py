@@ -64,7 +64,9 @@ from core.ports.types import (
     FetchPlan,
     RawPage,
 )
+from core.ports.state import UrlStateRow
 from core.store.sqlite_store import SqliteStore
+from core.store.state_store import SqliteStateStore
 from core.util.feed import FeedEntry
 from core.util.hashing import content_hash
 from core.util.rate_limit import RateLimiter
@@ -4580,3 +4582,553 @@ def test_extract_cache_none_preserves_byte_identical_behaviour(
 
 
 
+
+
+# --------------------------------------------------------------------------- #
+# MVP-3b: durable-субстрат (09 §6.3/§9) — url_state/document_version/chunk_store
+# --------------------------------------------------------------------------- #
+
+STATE_ETAG = 'W/"v1"'
+STATE_LAST_MODIFIED = "Wed, 21 Oct 2026 07:28:00 GMT"
+
+
+class _StatefulCrawler(_Crawler):
+    """Краулер с условным GET: журналирует валидаторы и умеет отвечать ``304``.
+
+    ``not_modified`` — множество URL, на которые сервер отвечает ``304`` **только** при
+    совпавшем ``If-None-Match`` (иначе — обычные байты). ``etag``/``last_modified``
+    отдаются в ``RawPage``: без них ``url_state`` нечем заполнить.
+    """
+
+    def __init__(
+        self,
+        pages: dict[str, bytes],
+        *,
+        not_modified: set[str] | None = None,
+        etag: str | None = STATE_ETAG,
+        last_modified: str | None = STATE_LAST_MODIFIED,
+    ) -> None:
+        super().__init__(pages)
+        self.not_modified = set(not_modified or ())
+        self.etag = etag
+        self.last_modified = last_modified
+
+    def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:
+        self.calls.append((url, plan))
+        confirmed = (
+            url in self.not_modified
+            and self.etag is not None
+            and plan.if_none_match == self.etag
+        )
+        return RawPage(
+            url=url,
+            content=self.pages[url],
+            fetched_at=TS,
+            fetch_mode=plan.fetch,
+            lang="en",
+            status_code=304 if confirmed else 200,
+            etag=self.etag,
+            last_modified=self.last_modified,
+            not_modified=confirmed,
+        )
+
+
+class _CountingChunker(_Chunker):
+    """Чанкер со счётчиком вызовов: переиспользование обязано его не вызывать."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.calls = 0
+
+    def chunk(self, doc: ExtractedDoc, document_id: str) -> list[Chunk]:
+        self.calls += 1
+        return super().chunk(doc, document_id)
+
+
+def _validators_sent(crawler: _Crawler, url: str) -> tuple[str | None, str | None]:
+    """Валидаторы из ``FetchPlan`` последнего фетча URL (``(etag, last_modified)``)."""
+    plans = [plan for u, plan in crawler.calls if u == url]
+    assert plans, f"{url} не фетчился"
+    return plans[-1].if_none_match, plans[-1].if_modified_since
+
+
+def _state_run(
+    root: Path,
+    state: SqliteStateStore,
+    *,
+    pages: dict[str, bytes],
+    urls: dict[str, list[str]],
+    crawler: _Crawler | None = None,
+    extractor: _Extractor | None = None,
+    chunker: _Chunker | None = None,
+    mode: str = "incremental",
+    **kwargs,
+):
+    """Прогон корпуса с durable-субстратом и явным режимом продукта."""
+    modes = {pid: mode for pid in urls}
+    return _build(
+        root,
+        pages=pages,
+        urls=urls,
+        crawler=crawler,
+        extractor=extractor,
+        chunker=chunker,
+        state=state,
+        product_modes=modes,
+        **kwargs,
+    )
+
+
+def test_state_first_run_fills_substrate_and_counts_new_docs(tmp_path: Path) -> None:
+    """Первый прогон с ``state``: url_state/document_version/chunk_store/chunk_meta + new."""
+    with SqliteStateStore(":memory:") as state:
+        crawler = _StatefulCrawler({URL_P1_A: b"page one"})
+        result = _state_run(
+            tmp_path,
+            state,
+            pages={URL_P1_A: b"page one"},
+            urls={"p1": [URL_P1_A]},
+            crawler=crawler,
+        )
+        build = _build_of(result)
+        assert result.errors == []
+        assert build.doc_counters == {"p1": {"total": 1, "new": 1, "reused": 0}}
+
+        row = state.get_url_state("p1", URL_P1_A)
+        assert row is not None
+        assert row.doc_version_id
+        assert row.etag == STATE_ETAG
+        assert row.last_modified == STATE_LAST_MODIFIED
+        assert row.reuse_kind == "live"
+        assert row.last_http_status == 200
+        assert row.consecutive_failures == 0
+
+        version = state.get_document_version(row.doc_version_id)
+        assert version is not None
+        assert version.status == "active"
+        assert version.first_seen_run_id == ""  # без run_id прогона токен пуст
+        assert version.chunker_version == "chunker-1"
+        assert version.chunk_ids_digest
+        assert version.extractor_version == "extractor-1"
+
+        chunks = state.iter_doc_chunks(version.doc_version_id)
+        assert len(chunks) == 1
+        text = state.get_chunk_text(chunks[0].content_hash)
+        assert text == "page one"
+        assert chunks[0].content_hash == content_hash(text)
+        # Run-level ``chunk_id`` не смешивается с durable-ключом chunk_meta.
+        assert chunks[0].chunk_id != f"p1:{content_hash(b'page one')}:0"
+
+
+def test_state_revalidated_304_reuses_document_without_extract(tmp_path: Path) -> None:
+    """304: валидаторы уехали в FetchPlan, экстрактор/чанкер не вызваны, chunk_id те же."""
+    with SqliteStateStore(":memory:") as state:
+        first = _state_run(
+            tmp_path / "r1",
+            state,
+            pages={URL_P1_A: b"page one"},
+            urls={"p1": [URL_P1_A]},
+            crawler=_StatefulCrawler({URL_P1_A: b"page one"}),
+        )
+        build1 = _build_of(first)
+        first_ids = sorted(
+            row["chunk_id"]
+            for row in state.conn.execute(
+                "SELECT chunk_id FROM chunk_meta ORDER BY chunk_id"
+            )
+        )
+        first_version = state.get_url_state("p1", URL_P1_A).doc_version_id
+
+        crawler2 = _StatefulCrawler(
+            {URL_P1_A: b"page one"}, not_modified={URL_P1_A}
+        )
+        extractor2 = _Extractor()
+        chunker2 = _CountingChunker()
+        # Отдельный прогон (свой store/run_id): resume прошлого сеанса не должен
+        # маскировать живой условный GET — проверяем именно путь ревалидации.
+        run_store = SqliteStore(":memory:")
+        try:
+            _make_run(run_store, "run-2")
+            second = _state_run(
+                tmp_path / "r2",
+                state,
+                pages={URL_P1_A: b"page one"},
+                urls={"p1": [URL_P1_A]},
+                crawler=crawler2,
+                extractor=extractor2,
+                chunker=chunker2,
+                store=run_store,
+                run_id="run-2",
+            )
+            coverage = run_store.read_corpus_coverage("run-2", "p1")
+        finally:
+            run_store.close()
+        build2 = _build_of(second)
+
+        assert _validators_sent(crawler2, URL_P1_A) == (
+            STATE_ETAG,
+            STATE_LAST_MODIFIED,
+        )
+        assert extractor2.calls == 0, "304 не должен вызывать экстрактор"
+        assert chunker2.calls == 0, "304 не должен вызывать чанкер"
+        # Идентификаторы индекса не меняются: тот же контент — та же сборка.
+        assert build2.index_build_id == build1.index_build_id
+        second_ids = sorted(
+            row["chunk_id"]
+            for row in state.conn.execute(
+                "SELECT chunk_id FROM chunk_meta ORDER BY chunk_id"
+            )
+        )
+        assert second_ids == first_ids
+        assert build2.chunk_count == build1.chunk_count == 1
+
+        assert build2.doc_counters == {"p1": {"total": 1, "new": 0, "reused": 1}}
+        row = state.get_url_state("p1", URL_P1_A)
+        assert row.doc_version_id == first_version
+        assert row.reuse_kind == "revalidated"
+        assert row.last_http_status == 304
+        # 304 — наблюдение, а не пропуск: покрытие то же (expected/observed = 1/1).
+        assert coverage is not None
+        assert coverage.expected_sources == 1
+        assert coverage.observed_sources == 1
+        assert coverage.complete is True
+
+
+def test_state_changed_content_creates_new_version_and_keeps_old_active(
+    tmp_path: Path,
+) -> None:
+    """200 с другим ``content_hash`` ⇒ новая версия; прежняя остаётся ``active``."""
+    with SqliteStateStore(":memory:") as state:
+        _state_run(
+            tmp_path / "r1",
+            state,
+            pages={URL_P1_A: b"page one"},
+            urls={"p1": [URL_P1_A]},
+            crawler=_StatefulCrawler({URL_P1_A: b"page one"}),
+        )
+        old_version = state.get_url_state("p1", URL_P1_A).doc_version_id
+
+        extractor2 = _Extractor()
+        second = _state_run(
+            tmp_path / "r2",
+            state,
+            pages={URL_P1_A: b"page two"},
+            urls={"p1": [URL_P1_A]},
+            crawler=_StatefulCrawler({URL_P1_A: b"page two"}),
+            extractor=extractor2,
+        )
+        build2 = _build_of(second)
+        new_version = state.get_url_state("p1", URL_P1_A).doc_version_id
+
+        assert new_version != old_version
+        assert extractor2.calls == 1
+        assert build2.doc_counters == {"p1": {"total": 1, "new": 1, "reused": 0}}
+        # Superseded — только на 404; при изменении контента обе версии активны.
+        assert state.get_document_version(old_version).status == "active"
+        assert state.get_document_version(new_version).status == "active"
+
+
+def test_state_refresh_policy_sends_no_validators(tmp_path: Path) -> None:
+    """Политика ``refresh`` — безусловный GET: валидаторы не отправляются."""
+    with SqliteStateStore(":memory:") as state:
+        _state_run(
+            tmp_path / "r1",
+            state,
+            pages={URL_P1_A: b"page one"},
+            urls={"p1": [URL_P1_A]},
+            crawler=_StatefulCrawler({URL_P1_A: b"page one"}),
+        )
+        crawler2 = _StatefulCrawler(
+            {URL_P1_A: b"page one"}, not_modified={URL_P1_A}
+        )
+        extractor2 = _Extractor()
+        _state_run(
+            tmp_path / "r2",
+            state,
+            pages={URL_P1_A: b"page one"},
+            urls={"p1": [URL_P1_A]},
+            crawler=crawler2,
+            extractor=extractor2,
+            refresh_policy="refresh",
+        )
+        assert _validators_sent(crawler2, URL_P1_A) == (None, None)
+        assert extractor2.calls == 1, "refresh обязан получить и разобрать свежий ответ"
+
+
+def test_state_not_found_clears_url_version_and_supersedes_document(
+    tmp_path: Path,
+) -> None:
+    """404: ``url_state.doc_version_id`` очищен, прежняя версия — ``superseded``."""
+    with SqliteStateStore(":memory:") as state:
+        _state_run(
+            tmp_path / "r1",
+            state,
+            pages={URL_P1_A: b"page one"},
+            urls={"p1": [URL_P1_A]},
+            crawler=_StatefulCrawler({URL_P1_A: b"page one"}),
+        )
+        old_version = state.get_url_state("p1", URL_P1_A).doc_version_id
+
+        result = _state_run(
+            tmp_path / "r2",
+            state,
+            pages={},
+            urls={"p1": [URL_P1_A]},
+            crawler=_NotFoundCrawler(),
+        )
+        row = state.get_url_state("p1", URL_P1_A)
+        assert row is not None
+        assert row.doc_version_id is None
+        assert row.last_error_kind == "not_found"
+        assert row.reuse_kind == "live"
+        assert state.get_document_version(old_version).status == "superseded"
+        assert any("404" in err or "not_found" in err for err in result.errors)
+
+
+def test_state_corrupt_chunk_text_falls_back_with_visible_error(
+    tmp_path: Path,
+) -> None:
+    """Испорченный ``chunk_store`` не переиспользуется: fallback + видимая ошибка (I19)."""
+    with SqliteStateStore(":memory:") as state:
+        _state_run(
+            tmp_path / "r1",
+            state,
+            pages={URL_P1_A: b"page one"},
+            urls={"p1": [URL_P1_A]},
+            crawler=_StatefulCrawler({URL_P1_A: b"page one"}),
+        )
+        with state.conn:
+            state.conn.execute("UPDATE chunk_store SET text = ?", ("tampered",))
+
+        crawler2 = _StatefulCrawler(
+            {URL_P1_A: b"page one"}, not_modified={URL_P1_A}
+        )
+        extractor2 = _Extractor()
+        chunker2 = _CountingChunker()
+        run_store = SqliteStore(":memory:")
+        try:
+            second = _state_run(
+                tmp_path / "r2",
+                state,
+                pages={URL_P1_A: b"page one"},
+                urls={"p1": [URL_P1_A]},
+                crawler=crawler2,
+                extractor=extractor2,
+                chunker=chunker2,
+                store=run_store,
+            )
+            # Корпус собран из свежих байтов, а не из испорченной строки.
+            texts = [
+                row["text"]
+                for row in run_store.conn.execute("SELECT text FROM corpus_chunks")
+            ]
+            assert texts == ["page one"]
+        finally:
+            run_store.close()
+        build2 = _build_of(second)
+
+        assert extractor2.calls == 1, "неверифицированный текст не переиспользуется"
+        assert chunker2.calls == 1
+        assert any("I19" in err and "reuse" in err for err in second.errors)
+        assert build2.doc_counters == {"p1": {"total": 1, "new": 1, "reused": 0}}
+        # ``chunk_store`` иммутабелен по ``content_hash`` (порт не даёт перезаписи текста),
+        # поэтому испорченная строка остаётся ядовитой навсегда — но и **никогда** не
+        # используется: каждый следующий прогон снова отвергает её по I19 и пере-нарезает.
+        still_bad = [
+            state.get_chunk_text(row["content_hash"])
+            for row in state.conn.execute("SELECT content_hash FROM chunk_meta")
+        ]
+        assert still_bad and all(text == "tampered" for text in still_bad)
+
+
+def test_state_none_is_byte_identical_and_writes_nothing(tmp_path: Path) -> None:
+    """``state=None``: тот же ``index_build_id``/chunk_id, ноль записей в субстрат."""
+    pages = {URL_P1_A: b"page one"}
+    urls = {"p1": [URL_P1_A]}
+
+    plain = _build_of(_build(tmp_path / "a", pages=pages, urls=urls))
+    with SqliteStateStore(":memory:") as state:
+        # Режим/политика при ``state=None`` игнорируются целиком.
+        result = _build(
+            tmp_path / "b",
+            pages=pages,
+            urls=urls,
+            state=None,
+            product_modes={"p1": "incremental"},
+            refresh_policy="revalidate",
+        )
+        build = _build_of(result)
+        assert build.index_build_id == plain.index_build_id
+        assert build.chunk_count == plain.chunk_count
+        assert build.doc_counters == {}
+        assert list(state.iter_url_state("p1")) == []
+        assert list(state.iter_document_versions("p1")) == []
+        assert state.conn.execute("SELECT COUNT(*) AS n FROM chunk_store").fetchone()[
+            "n"
+        ] == 0
+
+
+def test_state_executor_preserves_validators_and_304(tmp_path: Path) -> None:
+    """Исполнитель: ``etag``/``last_modified``/``not_modified`` доходят до ядра."""
+    with SqliteStateStore(":memory:") as state:
+        executor = _FakeExecutor(
+            pages={URL_P1_A: b"page one"},
+            extra_items=[
+                CrawlResultItem(
+                    product_id="p1",
+                    url=URL_P1_A,
+                    status="fetched",
+                    engine="http",
+                    raw_bytes=b"page one",
+                    http_status=200,
+                    etag=STATE_ETAG,
+                    last_modified=STATE_LAST_MODIFIED,
+                )
+            ],
+        )
+        first = _build(
+            tmp_path / "r1",
+            pages={},
+            urls={"p1": [URL_P1_A]},
+            executor=executor,
+            state=state,
+            product_modes={"p1": "incremental"},
+        )
+        assert first.status == "ok"
+        row = state.get_url_state("p1", URL_P1_A)
+        assert row is not None and row.doc_version_id
+        assert row.etag == STATE_ETAG
+        assert row.last_modified == STATE_LAST_MODIFIED
+        version = state.get_document_version(row.doc_version_id)
+
+        extractor2 = _Extractor()
+        chunker2 = _CountingChunker()
+        second_executor = _FakeExecutor(
+            pages={URL_P1_A: b"page one"},
+            extra_items=[
+                CrawlResultItem(
+                    product_id="p1",
+                    url=URL_P1_A,
+                    status="fetched",
+                    engine="http",
+                    raw_bytes=b"page one",
+                    http_status=304,
+                    etag=STATE_ETAG,
+                    last_modified=STATE_LAST_MODIFIED,
+                    not_modified=True,
+                )
+            ],
+        )
+        second = _build(
+            tmp_path / "r2",
+            pages={},
+            urls={"p1": [URL_P1_A]},
+            executor=second_executor,
+            extractor=extractor2,
+            chunker=chunker2,
+            state=state,
+            product_modes={"p1": "incremental"},
+        )
+        build2 = _build_of(second)
+        # Работа несла валидаторы (иначе edge не смог бы ответить 304).
+        sent = second_executor.submits[-1][0]
+        assert sent.if_none_match == STATE_ETAG
+        assert sent.if_modified_since == STATE_LAST_MODIFIED
+        assert extractor2.calls == 0
+        assert chunker2.calls == 0
+        assert build2.doc_counters == {"p1": {"total": 1, "new": 0, "reused": 1}}
+        assert state.get_url_state("p1", URL_P1_A).doc_version_id == version.doc_version_id
+
+
+def test_state_offline_reports_explicit_error_and_still_crawls(tmp_path: Path) -> None:
+    """``offline``: reuse не реализован — видимая ошибка на продукт, известный URL краулится."""
+    with SqliteStateStore(":memory:") as state:
+        state.upsert_url_state(
+            UrlStateRow(
+                product_id="p1",
+                url=URL_P1_B,
+                normalized_url=URL_P1_B,
+                doc_version_id="dv_known",
+                etag=STATE_ETAG,
+            )
+        )
+        crawler = _StatefulCrawler(
+            {URL_P1_A: b"page one", URL_P1_B: b"page two"}
+        )
+        result = _state_run(
+            tmp_path,
+            state,
+            pages={},
+            urls={"p1": [URL_P1_A]},
+            crawler=crawler,
+            refresh_policy="offline",
+        )
+        assert "offline reuse не реализован в corpus: p1" in result.errors
+        # Элемент обработан как revalidate: сеть тронута, а не молча пропущена.
+        assert [u for u, _plan in crawler.calls] == [URL_P1_A, URL_P1_B]
+        assert _validators_sent(crawler, URL_P1_B) == (None, None)
+
+
+def test_state_incremental_grows_corpus_via_existing_bfs(tmp_path: Path) -> None:
+    """Инкрементальный план не отменяет BFS: новые ссылки со страницы по-прежнему добываются."""
+    root = "https://docs.test/p1/"
+    linked_url = "https://docs.test/p1/new"
+    with SqliteStateStore(":memory:") as state:
+        _state_run(
+            tmp_path / "r1",
+            state,
+            pages={root: b"page one"},
+            urls={"p1": [root]},
+            crawler=_StatefulCrawler({root: b"page one"}),
+        )
+        linked = (
+            b'<html><body><a href="https://docs.test/p1/new">new</a></body></html>'
+        )
+        crawler2 = _StatefulCrawler({root: linked, linked_url: b"fresh page"})
+        second = _state_run(
+            tmp_path / "r2",
+            state,
+            pages={},
+            urls={"p1": [root]},
+            crawler=crawler2,
+            crawl_defaults=CrawlRunConfig(max_depth=1),
+        )
+        assert linked_url in [u for u, _p in crawler2.calls]
+        build2 = _build_of(second)
+        assert build2.doc_counters["p1"]["total"] == 2
+        assert state.get_url_state("p1", linked_url) is not None
+
+
+def test_state_304_without_known_version_is_visible_not_silent(tmp_path: Path) -> None:
+    """``304`` без известной версии: обычная экстракция + видимая запись (не тихо)."""
+    with SqliteStateStore(":memory:") as state:
+        # Валидатор известен, а версии документа в субстрате нет (например, вытеснена):
+        # сервер подтверждает «не изменилось», переиспользовать нечего.
+        state.upsert_url_state(
+            UrlStateRow(
+                product_id="p1",
+                url=URL_P1_A,
+                normalized_url=URL_P1_A,
+                doc_version_id="dv_missing",
+                etag=STATE_ETAG,
+            )
+        )
+        crawler = _StatefulCrawler(
+            {URL_P1_A: b"page one"}, not_modified={URL_P1_A}
+        )
+        extractor = _Extractor()
+        result = _state_run(
+            tmp_path,
+            state,
+            pages={},
+            urls={"p1": [URL_P1_A]},
+            crawler=crawler,
+            extractor=extractor,
+        )
+        # Отправлен ровно тот валидатор, что известен состоянию (Last-Modified не задан).
+        assert _validators_sent(crawler, URL_P1_A) == (STATE_ETAG, None)
+        assert extractor.calls == 1, "переиспользовать нечего — обычная экстракция"
+        assert any("304 без переиспользуемой версии" in err for err in result.errors)
+        assert _build_of(result).doc_counters == {
+            "p1": {"total": 1, "new": 1, "reused": 0}
+        }

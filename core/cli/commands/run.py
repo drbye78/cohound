@@ -537,6 +537,16 @@ def run(args: argparse.Namespace) -> int:
                 if follow
                 else None
             ),
+            # 09 §6.3 (MVP-3b): уже открытый state пакета (``None`` — например, dry-run
+            # сюда не доходит), режимы продуктов из onboarding-плана и политика наблюдения.
+            # Dry-run не создаёт ``state/``: фазы строятся только после его выхода.
+            state=state_store,
+            product_modes=(
+                {plan.product_id: plan.mode.value for plan in onboarding.plans}
+                if onboarding is not None
+                else None
+            ),
+            refresh_policy=refresh_policy.value,
         )
         # Наблюдаемость (W12/T12.1, 04 §B.1/§B.2): оборачиваем фазы логом+таймингом.
         # Гейты — дефолтные замыкания Runner; оборачиваем и их, чтобы §B.1-лог покрывал

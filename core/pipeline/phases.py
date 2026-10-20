@@ -396,6 +396,9 @@ def build_phases(
     exclude_documents: Sequence[str] | None = None,
     crawl_app: CrawlConfig | None = None,
     document_level: DocumentLevel | None = None,
+    state: Any = None,
+    product_modes: Mapping[str, str] | None = None,
+    refresh_policy: str = "auto",
 ) -> dict[str, PhaseFn]:
     """Возвращает реестр ``{phase_name: PhaseFn}`` для не-гейтовых фаз конвейера.
 
@@ -442,6 +445,13 @@ def build_phases(
     :param eval_cache: Ф3 — межпрогонный кэш вердиктов оценщика (:class:`EvalVerdictCache`),
         протягивается в Ш6. ``None`` ⇒ кэш выключен (поведение байт-в-байт). Кэшируется
         сырой ``LLMCellOutput``; валидация/Ф0/прецедент исполняются на каждом прогоне.
+    :param state: durable per-product состояние (:class:`~core.ports.state.ProductStatePort`,
+        09 §4.1) — протягивается в Ш5 (``build_corpus``). ``None`` ⇒ инкрементальный
+        субстрат выключен, поведение корпуса байт-в-байт прежнее.
+    :param product_modes: ``product_id → mode`` (``new``|``full``|``incremental``) из
+        onboarding-плана; ``None`` ⇒ все продукты трактуются как ``new``.
+    :param refresh_policy: политика наблюдения прогона (``auto``|``revalidate``|
+        ``refresh``|``offline``) — влияет на условный GET и переиспользование в Ш5.
 
     Каждое замыкание детерминировано и не импортирует адаптеры; единственный
     межфазовый канал — замыкание ``holder`` (см. docstring модуля).
@@ -581,6 +591,11 @@ def build_phases(
             # Phase 4: потолок попыток (--max-attempts) и колбэк прогресса (--follow).
             max_attempts=max_attempts,
             progress=progress,
+            # 09 §6.3 (MVP-3b): durable-субстрат, режимы продуктов и политика наблюдения.
+            # ``state is None`` ⇒ прежнее поведение корпуса байт-в-байт.
+            state=state,
+            product_modes=product_modes,
+            refresh_policy=refresh_policy,
         )
         _capture_index_build(holder, result)
         return _as_phase(result, "corpus")

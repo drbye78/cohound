@@ -1,14 +1,29 @@
 # 09. Онбординг продукта и инкрементальные прогоны обновления
 
-> **Статус:** **MVP-1, MVP-2a и MVP-2b реализованы.** MVP-1 (§16.1, этап 1):
+> **Статус:** **MVP-1, MVP-2a, MVP-2b и MVP-3a реализованы.** MVP-1 (§16.1, этап 1):
 > `sources/seeds.yaml`, onboarding-префлайт, zero-source coverage. MVP-2a (часть этапа 2):
 > durable `state/{package_id}/state.db` (§4.1/§4.2), `ProductStatePort`/`SqliteStateStore`,
 > `resolve_product_modes` (new/full/incremental), синхронизация seed-набора и проводка в
 > `run`. MVP-2b (run identity): `derive_run_id` без состава продуктов
 > (§6.2: `cycle_id` + `cohort_digest` + `seeds_digest` + `execution_contract_digest` +
 > `run_scope` + `refresh_policy` + focus), `--update`/`--cycle-id`/`--since-run`,
-> `change_class`/`golden_required` по предыдущему lineage. Не реализовано: incremental
-> corpus, per-product partitions/composition, carry-forward (этапы 3–5) — design-only.
+> `change_class`/`golden_required` по предыдущему lineage. MVP-3a (durable-субстрат
+> инкрементального корпуса, схема `state.db` **3**): `url_state`/`document_version`/
+> `chunk_store`/`chunk_meta` доступны через порт (§4.2), `replace_doc_chunks` атомарен и
+> удаляет только осиротевшие тексты, миграция лечит дрейф аддитивных колонок;
+> `core/pipeline/incremental.py` — `plan_incremental` (§6.3), `classify_reuse`,
+> `doc_version_id`/`chunk_row_id`/`doc_set_digest`. MVP-3b (интеграция в корпус):
+> `build_corpus` принимает `state`/`product_modes`/`refresh_policy`; условный GET
+> (`If-None-Match`/`If-Modified-Since` из `url_state`) на локальном и executor-путях
+> (валидаторы `etag`/`last_modified`/`not_modified` больше не теряются на шве);
+> `incremental`-продукт получает known-URL из `plan_incremental` как depth-0 seeds поверх
+> прежнего BFS; при `revalidated` (304 или тот же `content_hash`) doc-версия и chunk-set
+> переиспользуются **с пересчётом `content_hash(text)`** (I19) и без вызова чанкера;
+> пишутся `url_state`/`document_version`/`chunk_store`/`chunk_meta`; снимок получает
+> `docs_total`/`docs_new`/`docs_reused` из doc-set. `state is None` — байт-идентично
+> прежнему. Не реализовано: `offline`-reuse (честная ошибка + деградация до
+> `revalidate`), расписание `next_check_at`/потолок ревалидации, per-product
+> partitions/composition, carry-forward (этапы 4–5) — design-only.
 > Документ описывает целевую архитектуру сценария «`add-product` → следующий прогон
 > обновления». Он не меняет регламент `cohound-spec-v2.md`; там, где дизайн затрагивает
 > семантику §13/§4.4, это явно помечено как **решение человека** (см. §12.6 и §17).

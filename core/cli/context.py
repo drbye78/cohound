@@ -1377,6 +1377,9 @@ def _resolve_phases(
     exclude_paths: Sequence[str] | None = None,
     exclude_documents: Sequence[str] | None = None,
     document_level: DocumentLevel | None = None,
+    state: Any = None,
+    product_modes: Mapping[str, str] | None = None,
+    refresh_policy: str = "auto",
 ) -> dict[str, PhaseFn]:
     """Собирает реестр не-гейтовых фаз (``phases_factory`` — тестовый шов).
 
@@ -1409,6 +1412,10 @@ def _resolve_phases(
     :param max_attempts: Phase 4 — потолок попыток корпуса (``--max-attempts``); ``None`` →
         без потолка (протягивается в :func:`build_phases`/``build_corpus``).
     :param progress: Phase 4 — колбэк снимка прогресса сеанса (``--follow``); ``None`` → без.
+    :param state: открытый ``ProductStatePort`` пакета (09 §4.1); ``None`` → инкрементальный
+        субстрат корпуса выключен (dry-run/``crawl`` без состояния).
+    :param product_modes: ``product_id → mode`` из onboarding-плана; ``None`` → все ``new``.
+    :param refresh_policy: политика наблюдения прогона (значение ``RefreshPolicy``).
     """
     passports_dir = getattr(args, "passports_dir", None)
     if passports_dir is None and paths is not None:
@@ -1471,6 +1478,11 @@ def _resolve_phases(
         "exclude_documents": list(exclude_documents) if exclude_documents else None,
         # P5: CLI-уточнение run-слоя уровня извлечения документов (--document-level).
         "document_level": document_level,
+        # 09 §6.3 (MVP-3b): durable-субстрат пакета, режимы продуктов и политика наблюдения
+        # → build_corpus. ``state=None`` (dry-run/``crawl``) — поведение байт-в-байт.
+        "state": state,
+        "product_modes": product_modes,
+        "refresh_policy": refresh_policy,
         "crawl_app": deploy_config.crawl if deploy_config is not None else None,
         # P4: исполнитель параллельной экстракции по профилю зон (local — процессы,
         # split — потоки поверх RemoteExtractor). Ось ``crawl.extract_workers`` решается

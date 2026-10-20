@@ -40,6 +40,7 @@ from core.pipeline.state_sync import (
     record_run_outcome,
     sync_product_state,
 )
+from core.ports.state import DocumentVersionRow
 from core.store.sqlite_store import SqliteStore
 from core.store.state_store import SqliteStateStore
 
@@ -540,3 +541,76 @@ def test_coverage_digest_is_stable_string() -> None:
     digest = _coverage_digest(_coverage())
     assert isinstance(digest, str)
     assert len(digest) == 24
+
+
+# ---------------------------------------------------------------------------
+# record_run_outcome: счётчики документов из durable doc-set (09 §6.3)
+# ---------------------------------------------------------------------------
+
+
+def _doc_version(
+    dv_id: str,
+    *,
+    content_hash: str,
+    first_seen_run_id: str,
+    last_seen_run_id: str,
+    status: str = "active",
+) -> DocumentVersionRow:
+    """Строка ``document_version`` для проверки счётчиков (ключ §4.2 — уникален)."""
+    return DocumentVersionRow(
+        doc_version_id=dv_id,
+        doc_id=f"p1:{content_hash}",
+        product_id="p1",
+        url=f"https://p1.test/{content_hash}",
+        content_hash=content_hash,
+        extractor_version="ext-1",
+        level="full",
+        first_seen_run_id=first_seen_run_id,
+        last_seen_run_id=last_seen_run_id,
+        first_seen_at=STARTED,
+        last_seen_at=COMPLETED,
+        status=status,
+    )
+
+
+def test_snapshot_doc_counters_from_durable_doc_set(
+    state: SqliteStateStore, run_store: SqliteStore
+) -> None:
+    """``docs_total`` — размер active doc-set; new/reused — по run-рубежам версии."""
+    state.upsert_document_version(
+        _doc_version("dv_new", content_hash="h-new", first_seen_run_id=RUN_ID,
+                     last_seen_run_id=RUN_ID)
+    )
+    state.upsert_document_version(
+        _doc_version("dv_reused", content_hash="h-old", first_seen_run_id="run-0",
+                     last_seen_run_id=RUN_ID)
+    )
+    # Не наблюдался этим прогоном — в doc-set входит, в new/reused нет.
+    state.upsert_document_version(
+        _doc_version("dv_idle", content_hash="h-idle", first_seen_run_id="run-0",
+                     last_seen_run_id="run-0")
+    )
+    # Вытесненная версия — вне doc-set (§4.2: только ``active``).
+    state.upsert_document_version(
+        _doc_version("dv_gone", content_hash="h-gone", first_seen_run_id=RUN_ID,
+                     last_seen_run_id=RUN_ID, status="superseded")
+    )
+    run_store.save_corpus_coverage(RUN_ID, _coverage())
+    _run_state(state, run_store)
+
+    snap = state.last_snapshot("p1")
+    assert snap is not None
+    assert (snap.docs_total, snap.docs_new, snap.docs_reused) == (3, 1, 1)
+    # Счётчик покрытия — другой смысл (наблюдённые источники), он не подменяется.
+    assert _coverage().observed_sources == 2
+
+
+def test_snapshot_doc_counters_legacy_without_substrate(
+    state: SqliteStateStore, run_store: SqliteStore
+) -> None:
+    """Без doc-set счётчики не фабрикуются: ``docs_total = observed_sources``, new/reused = 0."""
+    run_store.save_corpus_coverage(RUN_ID, _coverage())
+    _run_state(state, run_store)
+    snap = state.last_snapshot("p1")
+    assert snap is not None
+    assert (snap.docs_total, snap.docs_new, snap.docs_reused) == (2, 0, 0)

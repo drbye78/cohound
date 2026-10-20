@@ -15,9 +15,12 @@
   и пишет ``run_lineage``.
 
 Границы честности: счётчики и статусы выводятся только из того, что реально лежит в БД
-прогона (``corpus_coverage`` + ячейки). Чего в этом срезе нет — не выдумывается: carry-forward
-отсутствует (``cells_carried = 0``), ``docs_new``/``docs_reused``/``partition_build_id`` не
-заполняются, ``snapshot_digest`` продукта не трогается.
+прогона (``corpus_coverage`` + ячейки) и в durable doc-set продукта. Чего в этом срезе
+нет — не выдумывается: carry-forward отсутствует (``cells_carried = 0``),
+``partition_build_id`` не заполняется, ``snapshot_digest`` продукта не трогается.
+``docs_total``/``docs_new``/``docs_reused`` берутся из ``document_version`` (MVP-3b,
+09 §6.3); без durable-субстрата остаётся прежнее ``docs_total = observed_sources`` и
+нулевые ``docs_new``/``docs_reused`` — два разных смысла не смешиваются.
 
 Слой ``pipeline``: зависимости — ``domain``/``ports``/``util`` (store-порт приходит
 аргументом, адаптеры не импортируются). Нейтрален к предметной категории (§1.3).
@@ -183,6 +186,41 @@ def _snapshot_status(coverage: CorpusCoverage | None) -> str:
     return SNAPSHOT_COMPLETE if coverage.complete else SNAPSHOT_PARTIAL
 
 
+def _doc_counters(
+    state: ProductStatePort,
+    product_id: str,
+    *,
+    run_id: str,
+    coverage: CorpusCoverage | None,
+) -> tuple[int, int, int]:
+    """``(docs_total, docs_new, docs_reused)`` снимка продукта (09 §6.3/§9).
+
+    При наличии durable-субстрата (у продукта есть ``active`` версии документов)
+    ``docs_total`` — размер doc-set (число ``active`` версий), ``docs_new`` — версии,
+    впервые увиденные этим прогоном (``first_seen_run_id == run_id``), ``docs_reused`` —
+    увиденные этим прогоном, но известные раньше (``last_seen_run_id == run_id`` и
+    ``first_seen_run_id != run_id``). Это **документы**, а не URL: перепечатка/алиас
+    версии не создаёт.
+
+    Без субстрата (версий нет) счётчики не выдумываются: ``docs_total`` — прежнее
+    ``coverage.observed_sources``, ``docs_new``/``docs_reused`` — нули. Разница честная:
+    ``observed_sources`` считает наблюдённые источники краула, doc-set — версии документов.
+    """
+    try:
+        versions = list(state.iter_document_versions(product_id, status="active"))
+    except Exception:  # noqa: BLE001 — отсутствие субстрата не должно ломать снимок
+        versions = []
+    if not versions:
+        return (coverage.observed_sources if coverage is not None else 0, 0, 0)
+    docs_new = sum(1 for row in versions if row.first_seen_run_id == run_id)
+    docs_reused = sum(
+        1
+        for row in versions
+        if row.last_seen_run_id == run_id and row.first_seen_run_id != run_id
+    )
+    return (len(versions), docs_new, docs_reused)
+
+
 def record_run_outcome(
     state: ProductStatePort,
     *,
@@ -209,9 +247,12 @@ def record_run_outcome(
 
     * ``product_snapshot`` — ``status`` = ``complete`` при ``coverage.complete``,
       ``partial`` при наличии покрытия, ``failed`` без покрытия; ``coverage_digest`` —
-      :func:`_coverage_digest`; ``docs_total`` — ``coverage.observed_sources``; счётчики
+      :func:`_coverage_digest`; ``docs_total``/``docs_new``/``docs_reused`` — из durable
+      doc-set продукта (:func:`_doc_counters`): размер ``active``-набора и разбивка по
+      ``first_seen_run_id``/``last_seen_run_id``; без субстрата — прежнее
+      ``docs_total = coverage.observed_sources`` и нули (не фабрикуются). Счётчики
       ячеек — из durable-ячеек прогона; ``cells_carried = 0`` (carry-forward не
-      реализован), ``docs_new``/``docs_reused``/``partition_build_id`` не выдумываются;
+      реализован), ``partition_build_id`` не выдумывается;
     * ``last_corpus_run_id`` — при наличии строки покрытия;
     * ``last_evaluated_run_id`` — если фаза оценки прошла (``evaluate_ok``) и покрытие есть;
     * ``last_completed_run_id``/``last_completed_cycle_id`` — только для ``scope=full``,
@@ -234,6 +275,9 @@ def record_run_outcome(
     for product_id in product_ids:
         coverage = store.read_corpus_coverage(run_id, product_id)
         coverage_digest = _coverage_digest(coverage)
+        docs_total, docs_new, docs_reused = _doc_counters(
+            state, product_id, run_id=run_id, coverage=coverage
+        )
         cells_total, cells_resolved = stats.get(product_id, (0, 0))
         cells_pending = cells_total - cells_resolved
         baseline_complete = bool(
@@ -253,7 +297,9 @@ def record_run_outcome(
                 scope=scope,
                 coverage_complete=bool(coverage is not None and coverage.complete),
                 coverage_digest=coverage_digest,
-                docs_total=coverage.observed_sources if coverage is not None else 0,
+                docs_total=docs_total,
+                docs_reused=docs_reused,
+                docs_new=docs_new,
                 cells_total=cells_total,
                 cells_measured=cells_resolved,
                 cells_pending=cells_pending,
