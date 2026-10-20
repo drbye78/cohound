@@ -115,6 +115,7 @@ from core.pipeline.package_scout import (
     scout_package,
     write_scout_artifacts,
 )
+from core.store.backup import gc_index_compositions
 
 
 __all__ = [
@@ -166,6 +167,7 @@ __all__ = [
     "cmd_package_scout",
     "cmd_package_crawl_probe",
     "cmd_package_add_product",
+    "cmd_package_index_gc",
     "_invoke",
     "_emit",
     "_op_payload",
@@ -2058,6 +2060,112 @@ def _print_add_product_lines(payload: dict[str, Any], plan: Any) -> list[str]:
         for path in payload.get("written_files", []):
             lines.append(f"  {path}")
     return lines
+
+
+def _resolve_runs_dir(args: argparse.Namespace) -> str:
+    """Резолвит каталог прогонов: явный ``--runs-dir`` > resolved ``paths.runs`` > ``runs``.
+
+    Тот же приоритет, что у ``run``/``diff`` (``03`` §A.1); ``hound package`` не входит в
+    ``_RUNS_DIR_COMMANDS``, поэтому дефолт подставляется здесь, а не в composition root.
+    """
+    explicit = getattr(args, "runs_dir", None)
+    if explicit:
+        return str(explicit)
+    paths = getattr(args, "paths", None)
+    return str(paths.runs) if paths is not None else "runs"
+
+
+def _resolve_index_root(args: argparse.Namespace) -> str:
+    """Корень индексного хранилища: resolved ``paths.index_store`` либо ``index_store``."""
+    paths = getattr(args, "paths", None)
+    return str(paths.index_store) if paths is not None else "index_store"
+
+
+def _package_identity(pkg_dir: Path, artifacts: Any) -> str:
+    """Идентичность пакета для ``index_store/{package}/`` (09 §8.2).
+
+    Порядок: ``run.yaml:package`` (та же величина, что ``runs.package_id``) >
+    ``package.yaml:case_id`` > имя каталога. Дублирует порядок
+    :func:`core.pipeline.phases.resolve_package_id` без импорта pipeline-фазы.
+    """
+    run = getattr(artifacts, "run", None)
+    package = getattr(run, "package", None)
+    if package:
+        return str(package)
+    manifest = getattr(artifacts, "manifest", None)
+    case_id = getattr(manifest, "case_id", None)
+    if case_id:
+        return str(case_id)
+    return pkg_dir.name
+
+
+def cmd_package_index_gc(args: argparse.Namespace) -> int:
+    """``hound package index-gc`` — прунинг композиций по run DB (09 §8.6).
+
+    Живое множество — ``runs.index_build_id`` по **всем** run DB каталога ``--runs-dir``
+    (фильтр по ``runs.package_id``; ``NULL``-пакет консервативно защищает любой пакет).
+    Без ``--apply`` — только отчёт (``applied: false``), ничего не удаляется. ``--apply``
+    требует ``--actor`` (человеческий шлюз, как у ``add-product``/``apply``).
+
+    **Рабочая последовательность** (09 §8.6): (1) удалить устаревшие ``runs/{run_id}/`` —
+    run DB и есть единственная заявка на композицию; (2) эта команда с ``--apply``;
+    (3) при желании — ``gc_index_builds`` для партиций, ставших недостижимыми. Отказ при
+    нуле run DB — именно то, что делает шаг (1)→(2) безопасным (опорожнённый каталог не
+    читается как «удалить всё»). Ретенция прогонов — вне области: команда ``runs/`` не
+    удаляет и не переписывает.
+
+    Партиции не трогаются: ``partitions_pruned`` пуст — их собирает отдельный
+    ``gc_index_builds``. Реестр ``state.db.index_composition`` — durable-лог, не зеркало
+    диска, и здесь не изменяется.
+    """
+    if getattr(args, "apply", False) and not getattr(args, "actor", None):
+        raise CliError(
+            "--apply требует --actor (человек, удаляющий композиции)",
+            code="usage",
+            exit_code=EXIT_USAGE,
+        )
+    pkg_dir = Path(args.package)
+    if not pkg_dir.is_dir():
+        return _not_found(args, "package", args.package)
+
+    artifacts = _invoke(lambda: load_artifacts(pkg_dir))
+    package_id = _package_identity(pkg_dir, artifacts)
+    runs_dir = _resolve_runs_dir(args)
+    index_root = _resolve_index_root(args)
+    dry_run = not bool(getattr(args, "apply", False))
+
+    try:
+        result = gc_index_compositions(
+            index_root, package_id, runs_dir, dry_run=dry_run
+        )
+    except ValueError as exc:
+        # Живое множество недоказуемо/манифест битый: отказ, а не частичный прунинг.
+        raise CliError(str(exc), code="state", exit_code=EXIT_USAGE) from exc
+
+    payload: dict[str, Any] = {
+        "ok": True,
+        "package": package_id,
+        "applied": not dry_run,
+        "pruned": list(result.pruned),
+        "kept": list(result.kept),
+        "live": list(result.live),
+        # Партиции — отдельная операция (`gc_index_builds`); здесь их не считаем.
+        "partitions_pruned": [],
+    }
+    lines = [
+        f"package: {package_id}",
+        f"runs_dir: {runs_dir}",
+        f"applied: {'yes' if not dry_run else 'no'}",
+    ]
+    for composition_id in result.pruned:
+        lines.append(f"pruned: {composition_id}")
+    lines.append(
+        f"summary: pruned={len(result.pruned)} kept={len(result.kept)} "
+        f"live={len(result.live)}"
+    )
+    lines.append("partitions_pruned: 0 (не в этом срезе)")
+    _emit(args, payload, lines)
+    return EXIT_OK
 
 
 def cmd_package(args: argparse.Namespace) -> int:

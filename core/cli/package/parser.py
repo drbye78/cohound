@@ -60,6 +60,7 @@ from core.cli.package.commands import (
     cmd_package_scout,
     cmd_package_crawl_probe,
     cmd_package_add_product,
+    cmd_package_index_gc,
     cmd_package,
 )
 
@@ -694,5 +695,40 @@ def add_package_parser(subparsers: Any) -> None:
     p_add.add_argument("--limit", type=int, default=10, help="лимит результатов SERP на запрос")
     p_add.add_argument("--max-pages", type=int, default=5, help="потолок фетчей разведки")
     p_add.set_defaults(handler=cmd_package_add_product)
+
+    # index-gc (прунинг композиций по run DB; dry-run по умолчанию) ---------- #
+    p_gc = pkg.add_parser(
+        "index-gc",
+        help="прунинг композиций, на которые не ссылается ни один прогон "
+        "(dry-run; --apply требует --actor)",
+        description=(
+            "Живое множество — runs.index_build_id по всем run DB каталога --runs-dir. "
+            "Рабочая последовательность: (1) удалить устаревшие runs/{run_id}/ "
+            "(run DB — единственная заявка на композицию); (2) index-gc --apply --actor; "
+            "(3) при желании — gc_index_builds для осиротевших партиций. Отказ при нуле "
+            "run DB делает шаг (1)→(2) безопасным. Ретенция прогонов — вне области: "
+            "команда runs/ не удаляет."
+        ),
+    )
+    p_gc.add_argument(
+        "--package",
+        required=True,
+        help="пакет: путь или case_id (резолвится в каталоге пакетов)",
+    )
+    p_gc.add_argument(
+        "--runs-dir",
+        default=None,
+        help="каталог прогонов с run DB (дефолт — resolved paths.runs, иначе runs)",
+    )
+    p_gc.add_argument(
+        "--apply",
+        action="store_true",
+        help="удалить неиспользуемые композиции (требует --actor); без него — dry-run",
+    )
+    p_gc.add_argument(
+        "--actor", default=None, help="человек, выполняющий удаление (обязателен с --apply)"
+    )
+    p_gc.add_argument("--json", action="store_true", help="машинночитаемый вывод (JSON)")
+    p_gc.set_defaults(handler=cmd_package_index_gc)
 
     p_package.set_defaults(handler=cmd_package, _package_parser=p_package)

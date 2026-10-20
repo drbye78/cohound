@@ -13,6 +13,10 @@
    только партиции, **не входящие ни в одну** композицию ``_compositions/*.json``,
    плюс явно защищённые ``protect`` (09 §8.6). Удаление — только при явном
    ``dry_run=False``; по умолчанию функция лишь сообщает, что *было бы* удалено.
+3. **GC композиций** (``index_store/{package}/_compositions/*.json``). Композиция жива,
+   пока ``runs.index_build_id`` хотя бы одного прогона пакета её называет; остальные
+   прунятся :func:`gc_index_compositions` (нужны run DB). Партиции при этом не трогаются —
+   их собирает отдельный :func:`gc_index_builds`.
 
 Нейтрален (§1.3), только stdlib: ``sqlite3``/``zipfile``/``shutil``/``pathlib``/``os``.
 """
@@ -26,11 +30,19 @@ import sqlite3
 import tempfile
 import zipfile
 from collections.abc import Iterable
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 from core.util.index_layout import COMPOSITIONS_DIR
 
-__all__ = ["backup_run", "restore_run", "list_builds", "gc_index_builds"]
+__all__ = [
+    "CompositionGcResult",
+    "backup_run",
+    "restore_run",
+    "list_builds",
+    "gc_index_builds",
+    "gc_index_compositions",
+]
 
 #: Имя файла операционной БД прогона (§A.2).
 _DB_NAME = "cohound.db"
@@ -306,10 +318,10 @@ def gc_index_builds(
     ``keep`` сохранён ради обратной совместимости API и валидации ``keep >= 1``, но в
     удалении **не участвует**: количество — не критерий жизни партиции.
 
-    **Композиции не прунятся.** ``_compositions/*.json`` — не сборка и никогда не
-    удаляется здесь. Композиция, на которую не ссылается ни один прогон, может остаться
-    (файл крошечный); её прунинг требует run DB (какие ``runs.index_build_id`` живы) и
-    вынесен за рамки этого шага.
+    **Композиции здесь не прунятся.** ``_compositions/*.json`` — не сборка и никогда не
+    удаляется этой функцией. Прунинг композиций, на которые не ссылается ни один прогон, —
+    отдельная операция :func:`gc_index_compositions` (нужны run DB). Две операции не
+    сцеплены: оператор может чистить композиции, не трогая индексные данные, и наоборот.
 
     Удаление — только при явном ``dry_run=False``; по умолчанию функция лишь сообщает,
     что *было бы* удалено.
@@ -341,3 +353,237 @@ def gc_index_builds(
             shutil.rmtree(target)
         deleted.append(build_id)
     return deleted
+
+
+@dataclass(frozen=True)
+class CompositionGcResult:
+    """Итог :func:`gc_index_compositions`: что удалено, что живо и на чём основан вывод.
+
+    ``live`` — множество ``composition_id``, названных живыми прогонами пакета (плюс
+    прогонами с неизвестным пакетом — консервативно). ``kept`` — композиции на диске,
+    попавшие в живое множество; ``pruned`` — остальные (удалённые либо кандидаты при
+    ``dry_run``). Списки отсортированы лексикографически.
+    """
+
+    pruned: tuple[str, ...]
+    kept: tuple[str, ...]
+    live: tuple[str, ...]
+    dry_run: bool
+
+    def as_dict(self) -> dict[str, object]:
+        """JSON-представление результата (для CLI)."""
+        return {
+            "pruned": list(self.pruned),
+            "kept": list(self.kept),
+            "live": list(self.live),
+            "dry_run": self.dry_run,
+        }
+
+
+def _read_run_references(db_path: Path) -> list[tuple[str, str | None, str | None]]:
+    """Читает ``(run_id, package_id, index_build_id)`` из run DB **read-only**.
+
+    ``mode=ro`` — GC не имеет права мигрировать схему или писать в чужой прогон.
+
+    :raises ValueError: файл не открывается, это не SQLite либо нет таблицы ``runs``.
+    """
+    try:
+        conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
+    except sqlite3.Error as exc:
+        raise ValueError(
+            f"GC композиций: run DB {db_path} не открывается ({exc}); "
+            "ссылки неизвестны — удаление запрещено"
+        ) from exc
+    try:
+        rows = conn.execute(
+            "SELECT run_id, package_id, index_build_id FROM runs"
+        ).fetchall()
+    except sqlite3.Error as exc:
+        raise ValueError(
+            f"GC композиций: run DB {db_path}: таблица runs не читается ({exc}); "
+            "ссылки неизвестны — удаление запрещено"
+        ) from exc
+    finally:
+        conn.close()
+    return [
+        (
+            str(row[0]),
+            None if row[1] in (None, "") else str(row[1]),
+            None if row[2] in (None, "") else str(row[2]),
+        )
+        for row in rows
+    ]
+
+
+def _assert_reference_exists(
+    index_root: str | Path, package: str, composition_id: str, db_path: Path, run_id: str
+) -> None:
+    """Проверяет, что артефакт, названный ``runs.index_build_id``, есть на диске.
+
+    Артефакт — манифест композиции либо (для раскладки **до** композиций) верхнеуровневый
+    каталог сборки с тем же id. Отсутствие обоих — реальная несогласованность: прогон
+    ссылается на несуществующий индекс. GC не имеет права молча прунить остальные
+    композиции, пока такая ссылка не объяснена оператором.
+
+    :raises ValueError: названного артефакта нет.
+    """
+    manifest = Path(index_root) / package / COMPOSITIONS_DIR / f"{composition_id}.json"
+    legacy_build = Path(index_root) / package / composition_id
+    if manifest.is_file() or legacy_build.is_dir():
+        return
+    raise ValueError(
+        f"GC композиций: прогон {run_id!r} ({db_path}) ссылается на "
+        f"{composition_id!r}, но ни манифеста {manifest}, ни legacy-сборки "
+        f"{legacy_build} нет; состояние несогласовано — удаление запрещено"
+    )
+
+
+def _live_compositions(
+    index_root: str | Path, package: str, runs_dir: str | Path
+) -> set[str]:
+    """Живое множество ``composition_id`` по всем run DB каталога ``runs_dir``.
+
+    Правила (09 §8.6):
+
+    * источник — ``runs.index_build_id`` в **каждой** ``runs/{run_id}/cohound.db``;
+    * ``NULL``/пустой ``index_build_id`` — не ссылка (прогон не дошёл до корпуса) и не
+      «неизвестность»: строка просто пропускается;
+    * ``runs.package_id`` фильтрует ссылки: композиция принадлежит
+      ``index_store/{package}/_compositions/``, поэтому считается только прогон того же
+      пакета; ``package_id = NULL`` (legacy) — консервативно считается ссылкой для
+      **любого** пакета («мог быть этот»);
+    * для прогонов целевого пакета проверяется наличие названного артефакта на диске
+      (:func:`_assert_reference_exists`); для ``NULL``-пакета проверка не делается —
+      иначе legacy-прогон чужого пакета блокировал бы GC во всех пакетах.
+
+    Отказ (``ValueError``), когда ссылки **недоказуемы**: ``runs_dir`` отсутствует/не
+    каталог; не найдено ни одной run DB (пустое живое множество означало бы «удалить всё»);
+    DB не читается/не имеет таблицы ``runs``; ссылка пакета висит в воздухе.
+    """
+    directory = Path(runs_dir)
+    if not directory.is_dir():
+        raise ValueError(
+            f"GC композиций: каталог прогонов {directory} отсутствует или не каталог; "
+            "живое множество недоказуемо — удаление запрещено"
+        )
+    db_paths = sorted(
+        path for path in directory.glob("*/cohound.db") if path.is_file()
+    )
+    if not db_paths:
+        raise ValueError(
+            f"GC композиций: в {directory} нет ни одной run DB; пустое живое множество "
+            "означало бы «удалить всё» — удаление запрещено"
+        )
+
+    live: set[str] = set()
+    for db_path in db_paths:
+        for run_id, run_package, index_build_id in _read_run_references(db_path):
+            if not index_build_id:
+                continue  # NULL — не ссылка (прогон не дошёл до корпуса)
+            if run_package is not None and run_package != package:
+                continue  # чужая композиция: своя раскладка, свой GC
+            live.add(index_build_id)
+            if run_package is not None:
+                _assert_reference_exists(
+                    index_root, package, index_build_id, db_path, run_id
+                )
+    return live
+
+
+def _read_composition_id(path: Path) -> str:
+    """Читает ``composition_id`` из манифеста и сверяет его с именем файла.
+
+    :raises ValueError: файл не читается/не JSON-объект, id отсутствует либо не совпадает
+        с именем файла — ссылки неизвестны, удалять нельзя.
+    """
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(
+            f"GC композиций: {path} не читается ({exc}); ссылки неизвестны — "
+            "удаление запрещено"
+        ) from exc
+    if not isinstance(payload, dict):
+        raise ValueError(
+            f"GC композиций: {path} — не JSON-объект; ссылки неизвестны — "
+            "удаление запрещено"
+        )
+    composition_id = payload.get("composition_id")
+    if not isinstance(composition_id, str) or not composition_id:
+        raise ValueError(
+            f"GC композиций: {path} без composition_id; ссылки неизвестны — "
+            "удаление запрещено"
+        )
+    if composition_id != path.stem:
+        raise ValueError(
+            f"GC композиций: {path}: composition_id {composition_id!r} не совпадает "
+            f"с именем файла {path.stem!r}; удаление запрещено"
+        )
+    return composition_id
+
+
+def gc_index_compositions(
+    index_root: str | Path,
+    package: str,
+    runs_dir: str | Path,
+    *,
+    dry_run: bool = True,
+) -> CompositionGcResult:
+    """Прунит композиции, на которые **не ссылается ни один прогон** (09 §8.6).
+
+    Композиция жива тогда и только тогда, когда её ``composition_id`` назван
+    ``runs.index_build_id`` хотя бы одного прогона пакета (см.
+    :func:`_live_compositions`). Это единственная безопасная семантика: без run DB
+    «неиспользуемая» композиция неотличима от живой.
+
+    Удаляются только ``*.json`` **непосредственно** в
+    ``index_store/{package}/_compositions/``, отсортированно и пофайлово. Партиции **не
+    трогаются**: после удаления композиции её партиции могут стать недостижимыми, но их
+    собирает отдельный явный вызов :func:`gc_index_builds` — операции намеренно не
+    сцеплены (оператор должен уметь чистить композиции, не трогая индексные данные, и
+    наоборот).
+
+    Реестр ``state.db.index_composition`` **не трогается**: это durable-лог того, что
+    существовало (и ``last_used_run_id``), а не зеркало диска. Не «исправлять» его
+    удалением строк.
+
+    **Рабочая последовательность** (09 §8.6). Run DB — единственная заявка на композицию,
+    поэтому штатный порядок такой: (1) оператор удаляет устаревшие ``runs/{run_id}/``;
+    (2) вызывается эта функция (``dry_run=False``) — прунятся композиции, чья заявка ушла
+    вместе с прогоном; (3) при желании — :func:`gc_index_builds` для партиций, ставших
+    недостижимыми. Отказ при нуле run DB — именно то, что делает переход (1)→(2)
+    безопасным: опорожнённый ``runs_dir`` не читается как «удалить все композиции».
+    Ретенция прогонов — **вне** области функции: она читает ``runs_dir`` и никогда его не
+    удаляет/не переписывает. Флага «оставить N новейших» нет: второй критерий создал бы
+    конкурирующий авторитет заявки.
+
+    Удаление — только при явном ``dry_run=False``; по умолчанию функция лишь сообщает,
+    что *было бы* удалено.
+
+    :returns: :class:`CompositionGcResult` (``pruned``/``kept``/``live``/``dry_run``).
+    :raises ValueError: живое множество недоказуемо (нет ``runs_dir``/run DB, DB не
+        читается, ссылка пакета висит в воздухе) либо манифест композиции не разбирается.
+    """
+    live = _live_compositions(index_root, package, runs_dir)
+    directory = Path(index_root) / package / COMPOSITIONS_DIR
+    on_disk: list[tuple[str, Path]] = []
+    if directory.is_dir():
+        for path in sorted(directory.glob("*.json")):
+            if not path.is_file():
+                continue
+            on_disk.append((_read_composition_id(path), path))
+
+    kept = tuple(sorted(cid for cid, _path in on_disk if cid in live))
+    to_prune = [(cid, path) for cid, path in on_disk if cid not in live]
+    pruned = tuple(sorted(cid for cid, _path in to_prune))
+
+    if not dry_run:
+        for _cid, path in to_prune:
+            path.unlink()
+
+    return CompositionGcResult(
+        pruned=pruned,
+        kept=kept,
+        live=tuple(sorted(live)),
+        dry_run=dry_run,
+    )

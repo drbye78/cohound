@@ -38,8 +38,9 @@
 > `keep`); `_single_persisted_build` предпочитает явный id → единственную композицию →
 > единственную legacy-сборку; `catalog_version` добавлен в `EXECUTION_FIELDS` (§13:670):
 > после удаления `params_token` из id это единственный diff-видимый сигнал смены каталога.
-> Не реализовано: прунинг композиций, на которые не ссылается ни один прогон (нужна run
-> DB, вне шага), `offline`-reuse (честная ошибка + деградация до `revalidate`), расписание
+> Прунинг неиспользуемых композиций реализован: `gc_index_compositions` + `hound package
+> index-gc` (живое множество — `runs.index_build_id` по run DB; §8.6). Не реализовано:
+> `offline`-reuse (честная ошибка + деградация до `revalidate`), расписание
 > `next_check_at`/потолок ревалидации, carry-forward (этап 5) — design-only.
 > Документ описывает целевую архитектуру сценария «`add-product` → следующий прогон
 > обновления». Он не меняет регламент `cohound-spec-v2.md`; там, где дизайн затрагивает
@@ -690,7 +691,7 @@ CREATE INDEX idx_partition_product ON index_partition(package_id, product_id);
 | `corpus_raw/{product}/{sha256}` | retention по `crawl.retention_days`/бюджету; при вытеснении `document_version.raw_path = NULL`, `status = evicted` |
 | `document_version`, `chunk_store`, `chunk_meta` | бессрочно (метаданные и текст — субстрат evidence; I19) |
 | `product_snapshot`, `cell_measurement`, `run_lineage` | бессрочно (история измерений) |
-| `index_partition` / `index_store` | иммутабельно; GC только по явной команде `hound package state gc --older-than` с проверкой, что партиция не входит ни в одну композицию, на которую ссылается `runs.index_build_id` |
+| `index_partition` / `index_store` | иммутабельно; GC только явным вызовом `gc_index_builds` (проверяет, что сборка не входит ни в одну композицию пакета) и `gc_index_compositions` (§8.6) |
 | `eval_cache`/`extract_cache`/`cache/http` | существующие бюджеты/eviction |
 
 Если raw вытеснен, а документ нужен для carry-forward: evidence переносится только если
@@ -1326,9 +1327,30 @@ class CompositionView:
 ### 8.6. Иммутабельность и GC
 
 - Партиция и композиция — только создание; правка на месте запрещена (K2/§13).
-- GC: `hound package state gc --older-than 90d` удаляет партиции, не входящие ни в одну
-  композицию, на которую ссылается `runs.index_build_id`; перед удалением — проверка
-  `index_composition`/`runs`.
+- **Партиции**: `gc_index_builds` (`core/store/backup.py`) удаляет сборки, не входящие ни в
+  одну композицию пакета; вызывается явно из кода (портируемой CLI-поверхности у него пока
+  нет — `hound package index-gc` чистит только композиции).
+- **Композиции**: `hound package index-gc --package DIR [--runs-dir runs] [--apply --actor]`
+  (`gc_index_compositions`). Живое множество — `runs.index_build_id` по **всем** run DB
+  каталога (`runs.package_id` фильтрует; `NULL`-пакет консервативно защищает любой пакет;
+  `NULL`-id — не ссылка). Отказ (`ValueError`/`code=state`) при недоказуемости: нет
+  `runs_dir`/ни одной run DB, DB не читается, ссылка пакета висит в воздухе, манифест не
+  разбирается. По умолчанию dry-run; удаление — `--apply --actor`.
+- Операции **не сцеплены**: удаление композиции не трогает партиции (их соберёт отдельный
+  `gc_index_builds`), и наоборот. Реестр `state.db.index_composition` — durable-лог
+  существовавшего (и `last_used_run_id`), **не** зеркало диска; GC его не чистит.
+- **Рабочая последовательность** (владелец: все прогоны, кроме новейшего, расходуемы —
+  дрейф Capability делает старые прогоны нерелевантными):
+  1. удалить устаревшие каталоги `runs/{run_id}/` — run DB и есть **единственная** заявка
+     на композицию;
+  2. `hound package index-gc --package <DIR> [--runs-dir runs] --apply --actor <NAME>` —
+     прунятся композиции, чья заявка исчезла вместе с прогоном;
+  3. при желании — `gc_index_builds` для партиций, ставших недостижимыми после шага 2.
+  Отказ при нуле run DB — именно то, что делает переход (1)→(2) безопасным: опорожнённый
+  каталог прогонов не читается как «удалить все композиции». Ретенция прогонов — **вне**
+  области этой функции: GC композиций не удаляет `runs/`, он лишь читает его.
+  Отдельного флага `--keep-latest`/`--ignore-runs-before` нет: у артефакта один источник
+  заявки (run DB), второй критерий создал бы конкурирующий авторитет.
 
 ---
 
