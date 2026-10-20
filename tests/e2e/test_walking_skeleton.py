@@ -94,7 +94,8 @@ def _expected_ids(inputs: RunInputs, run_plan: RunPlan) -> tuple[str, str]:
     ``cid`` — это ``runs.index_build_id`` (провенанс ячейки/лексического индекса);
     ``pb`` — физическая партиция и ``corpus_chunks.build_id`` (провенанс чанка).
     Пакет корпуса: у ``PackageManifest`` нет ``package_id``, поэтому
-    ``phases._package_id`` вернёт ``plan.run_id``.
+    ``phases._package_id`` берёт ``run.package`` (``run.yaml:package``) — идентичность
+    пакета, а не ``run_id`` (иначе партиции были бы run-scoped, 09 §8.2).
     """
     chunk = CorpusChunk(
         chunk_id=CHUNK_ID,
@@ -104,8 +105,9 @@ def _expected_ids(inputs: RunInputs, run_plan: RunPlan) -> tuple[str, str]:
         content_hash=content_hash(PAGE_TEXT),
     )
     token = _product_content_token([chunk])
+    package_id = inputs.run.package
     partition_id = _derive_partition_build_id(
-        package_id=run_plan.run_id,
+        package_id=package_id,
         product_id="p1",
         chunker_version=FakeChunker.version,
         embed_model_id=FakeEmbedder().model_id,
@@ -115,7 +117,7 @@ def _expected_ids(inputs: RunInputs, run_plan: RunPlan) -> tuple[str, str]:
         product_content_token=token,
     )
     composition_id = derive_composition_id(
-        run_plan.run_id, {"p1": partition_id}, {"p1": token}
+        package_id, {"p1": partition_id}, {"p1": token}
     )
     return composition_id, partition_id
 

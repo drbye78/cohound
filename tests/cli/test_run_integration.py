@@ -26,6 +26,8 @@ import pytest
 import yaml
 
 from core.adapters.extract_html import HtmlExtractor
+from core.adapters.index_npy import NpyIndexBuilder, numpy_available
+from core.adapters.lexical_tantivy import tantivy_available
 from core.cli.main import EXIT_BLOCKED, EXIT_ERROR, EXIT_OK, main
 from core.cli.wiring import (
     LOCAL_PROFILE,
@@ -682,3 +684,137 @@ def test_cmd_run_explicit_cutoff_wins_over_measured(tmp_path: Path) -> None:
     } == {25}
     assert manifest.retrieval_profile == "R2"
     assert manifest.retrieval_cutoff_K == 25
+
+# ---------------------------------------------------------------------------
+# MVP-4: ретривал привязан к композиции **этого** корпуса (09 §8.1/§8.4)
+# ---------------------------------------------------------------------------
+
+requires_retrieval = pytest.mark.skipif(
+    not (numpy_available() and tantivy_available()),
+    reason="numpy/tantivy не установлены (extra retrieval)",
+)
+
+
+@requires_retrieval
+def test_cmd_run_binds_retrieval_to_corpus_composition_and_reuses_partition(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``run`` поднимает лексический/dense индексы по composition id корпуса.
+
+    Проверяется вся проводка, которой не хватало в живом прогоне: ``_resolve_ports``
+    получает ``store``/``package``/``chunk_lookup``, пост-корпусная обёртка пишет
+    ``runs.index_build_id`` **до** фазы отчёта и перепривязывает порты к композиции
+    этого прогона. Второй прогон по тем же байтам переиспользует партицию: тот же
+    ``partition_build_id``, ``partitions_reused == 1`` и ноль вызовов эмбеддера.
+    """
+    monkeypatch.chdir(tmp_path)
+    package = valid_package(tmp_path)
+    db = tmp_path / "cohound.db"
+    runs_dir = tmp_path / "runs"
+    index_root = tmp_path / "index_store"
+    embedders: list[FakeEmbedder] = []
+    offline = _offline_crawl_kwargs()
+
+    from core.cli import context as context_mod
+
+    def _offline_adapters(**kwargs: Any) -> Ports:
+        """Офлайн-краул + реальные индексы; эмбеддер — детерминированная заглушка."""
+        embedder = FakeEmbedder()
+        embedders.append(embedder)
+        return Ports(
+            evaluator=kwargs.get("evaluator"),
+            crawler=offline["crawler"],
+            extractor=offline["extractor"],
+            chunker=offline["chunker"],
+            embedder=embedder,
+            index_builder=NpyIndexBuilder(
+                index_root=kwargs.get("index_root", index_root),
+                package=kwargs.get("package"),
+            ),
+        )
+
+    monkeypatch.setattr(context_mod, "build_adapters", _offline_adapters)
+    monkeypatch.setattr(
+        context_mod,
+        "build_evaluator_llm",
+        lambda **_: FakeEvaluator(
+            default=LLMCellOutput(
+                status=Status.ABSENT, justification="нет в срезе", evidence=[]
+            )
+        ),
+    )
+
+    corpus_results: list[Any] = []
+    report_ids: list[str | None] = []
+    bound_ports: list[Ports] = []
+
+    def factory(**kwargs: Any) -> dict:
+        bound_ports.append(kwargs["ports"])
+        phases = build_phases(**kwargs)
+        corpus_fn = phases["corpus"]
+        report_fn = phases["report"]
+
+        def corpus_wrapped(ctx: Any) -> Any:
+            result = corpus_fn(ctx)
+            corpus_results.append(result)
+            return result
+
+        def report_wrapped(ctx: Any) -> Any:
+            # Снимок ``runs.index_build_id`` именно в момент входа в отчёт: доказывает,
+            # что пост-корпусная перепривязка сработала раньше Ш9.
+            ref = ctx.store.read_run_index_ref(ctx.run_id)
+            report_ids.append(ref.index_build_id if ref is not None else None)
+            return report_fn(ctx)
+
+        phases["corpus"] = corpus_wrapped
+        phases["report"] = report_wrapped
+        return phases
+
+    def run_once(run_id: str) -> None:
+        argv = run_argv(
+            package,
+            run_id=run_id,
+            db=db,
+            runs_dir=runs_dir,
+            extra=["--only-product", "p1"],
+        )
+        assert main([*argv, "--until", "plan"]) == EXIT_OK
+        _finalize_gates(db, run_id)
+        assert main(argv, phases_factory=factory) == EXIT_OK
+
+    run_once("bind-a")
+    first = corpus_results[-1].log_entries[0]
+    assert first.partitions_reused == 0
+    assert first.entries, "корпус обязан собрать продукт-партицию"
+    partition_a = first.entries[0].partition_build_id
+    composition_a = first.index_build_id
+    assert composition_a.startswith("cb_")
+    assert partition_a and partition_a.startswith("pb_")
+    assert report_ids[-1] == composition_a, "index_build_id должен быть записан до отчёта"
+
+    run_once("bind-b")
+    second = corpus_results[-1].log_entries[0]
+    # Переиспользование — предпосылка MVP-4: тот же пакет (``run.package``), те же байты.
+    assert second.partitions_reused == 1
+    assert second.entries[0].partition_build_id == partition_a
+    assert second.index_build_id == composition_a
+    assert embedders[-1].calls == [], "переиспользованная партиция не эмбеддится"
+    # Порты ретривала перепривязаны к композиции **этого** прогона (не к «единственной
+    # на диске»): иначе evaluate не поднял бы R0/dense вовсе.
+    bound = bound_ports[-1]
+    assert bound.lexical_index is not None
+    assert bound.lexical_index.build_id == composition_a
+    assert bound.vector_index is not None
+    assert bound.vector_index.build_id == composition_a
+
+    with build_store(db) as store:
+        ref = store.read_run_index_ref("bind-b")
+        cells = list(store.iter_cells("bind-b"))
+    assert ref is not None and ref.index_build_id == composition_a
+    assert cells, "evaluate должен записать ячейки: лексический индекс поднят"
+    # R0-провенанс ячейки — composition id этого прогона (регрессия R0-фикса 6a2c3d5).
+    # ``--only-product`` сужает корпус, но план по-прежнему несёт p2: его ячейка честно
+    # ``failed`` без ретривала (provenance ``None``), поэтому сверяем оценённый продукт.
+    evaluated = [cell for cell in cells if cell.product_id == "p1"]
+    assert evaluated
+    assert {cell.index_build_id for cell in evaluated} == {composition_a}

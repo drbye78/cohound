@@ -858,6 +858,23 @@ def test_persist_manifest_roundtrip(store: SqliteStore) -> None:
     }
 
 
+def test_set_run_index_build_id_round_trip_and_idempotent(store: SqliteStore) -> None:
+    """Пост-корпусная запись composition id: round-trip, идемпотентность, no-op."""
+    store.create_run(RUN_ID, _cfg())
+    assert store.read_run_index_ref(RUN_ID).index_build_id is None
+
+    store.set_run_index_build_id(RUN_ID, "cb_first")
+    assert store.read_run_index_ref(RUN_ID).index_build_id == "cb_first"
+
+    # Повторная запись того же значения — no-op (идемпотентность).
+    store.set_run_index_build_id(RUN_ID, "cb_first")
+    assert store.read_run_index_ref(RUN_ID).index_build_id == "cb_first"
+
+    # Неизвестный прогон — no-op без исключения (строку создаёт create_run).
+    store.set_run_index_build_id("run-absent", "cb_other")
+    assert store.read_run_index_ref("run-absent") is None
+
+
 def test_read_run_index_ref_and_iter_index_manifest(store: SqliteStore) -> None:
     """P4b: сборка разрешается из ``runs``/``index_manifest`` без сканирования каталогов."""
     store.create_run(RUN_ID, _cfg())

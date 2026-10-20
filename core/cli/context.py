@@ -71,10 +71,12 @@ from core.pipeline import PHASES, Ports, RunReport, build_phases
 from core.pipeline.extract_cache import ExtractionCache
 from core.pipeline.eval_cache import EvalVerdictCache
 from core.pipeline.normalize import RunInputs, load_inputs
+from core.pipeline.phases import resolve_package_id
 from core.pipeline.plan import RunPlan, plan as build_plan
 from core.pipeline.review import ReviewItem
 from core.pipeline.runner import PhaseFn
 from core.ports.gateway import ContentGateway
+from core.ports.store import StorePort
 from core.ports.types import FetchMode
 from core.util.cache import ContentAddressedCache
 from core.util.rate_limit import RateLimiter
@@ -991,6 +993,8 @@ def _resolve_ports(
     *,
     inputs: RunInputs | None = None,
     no_cache: bool = False,
+    store: StorePort | None = None,
+    run_id: str | None = None,
 ) -> Ports:
     """Собирает порты профиля (``ports`` — тестовый шов; иначе :func:`build_adapters`).
 
@@ -1015,6 +1019,17 @@ def _resolve_ports(
     прежнее (оценщик не поднимается). Профиль ``split`` получает ``evaluator`` как
     сегодня (remote-порты его не используют).
 
+    **Ретривал (P4a, I17).** ``package`` разрешается :func:`resolve_package_id`
+    (``run.package`` — идентичность пакета, а не ``run_id``), а открытый ``store``
+    протягивается в :func:`build_adapters` как источник чанков (``seed_lexical_index``)
+    и резолвер метаданных (``chunk_lookup=store.get_chunk``). Без ``store`` оба плеча
+    остаются ``None`` (явное отсутствие, N3), и Ш6 не сможет исполнять R0.
+
+    **Resume.** Если ``run_id`` известен и в ``runs`` уже записан ``index_build_id``,
+    он передаётся билдерам как явная сборка: на resume фаза корпуса короткозамкнута,
+    и пост-корпусная перепривязка не выполняется — без этого сборка была бы «угадана»
+    или неоднозначна.
+
     **Реестры (E2).** Package-scoped спецификации (``packages/{case_id}/registries/*.yaml``,
     объявленные в ``package.yaml: registries``) загружаются здесь (:func:`_load_registry_specs`)
     и передаются в :func:`build_adapters`, который собирает mapping ``Ports.registry_fetchers``
@@ -1022,6 +1037,9 @@ def _resolve_ports(
     несобираемый реестр — понятная ошибка CLI (не молчаливая частичная проводка).
 
     :param no_cache: Phase 4 — не строить/не передавать R7-кэш (``--from-scratch``).
+    :param store: открытое хранилище прогона (то же, что получит ``Runner``); ``None`` —
+        ретривал не собирается (поведение прежнее).
+    :param run_id: прогон для чтения ``runs.index_build_id`` (resume); ``None`` — не читаем.
     """
     injected = getattr(args, "ports", None)
     if injected is not None:
@@ -1052,6 +1070,16 @@ def _resolve_ports(
     # (``local``: GenericRegistryFetcher; ``split``: RemoteRegistry) + дайджест в манифест.
     # Объявленный несобираемый реестр — явная ошибка (не молчаливая частичная проводка).
     registry_specs = _load_registry_specs(args, inputs)
+    package = resolve_package_id(inputs) if inputs is not None else None
+    # Resume: composition id уже записан пост-корпусной перепривязкой в предыдущем
+    # процессе. Чтение провенанса не роняет сборку портов (неизвестный прогон → ``None``).
+    index_build_id: str | None = None
+    if store is not None and run_id:
+        try:
+            ref = store.read_run_index_ref(run_id)
+        except Exception:  # noqa: BLE001 — провенанс не роняет сборку портов
+            ref = None
+        index_build_id = getattr(ref, "index_build_id", None)
     return build_adapters(
         profile=args.profile,
         deploy=deploy_config,
@@ -1060,6 +1088,7 @@ def _resolve_ports(
         evaluator=evaluator,
         registry_specs=registry_specs,
         index_root=index_root,
+        package=package,
         cache=cache,
         domain_profiles=(inputs.domain_profiles if inputs is not None else None),
         # Lane A/L3a: слои источников краула (crawl_sources.yaml) — wiring решает по их
@@ -1073,6 +1102,11 @@ def _resolve_ports(
             else None
         ),
         cli_max_depth=getattr(args, "max_depth", None),
+        # P4a/I17: store — источник персистентных чанков для лексического индекса и
+        # резолвер метаданных для dense-плеча. Без него оба билдера возвращают ``None``.
+        store=store,
+        chunk_lookup=store.get_chunk if store is not None else None,
+        index_build_id=index_build_id,
     )
 
 

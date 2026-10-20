@@ -106,6 +106,16 @@ class StorePort(Protocol):
         """
         ...
 
+    def set_run_index_build_id(self, run_id: str, index_build_id: str) -> None:
+        """Записывает ``runs.index_build_id`` сразу после фазы корпуса (идемпотентно).
+
+        Composition id известен уже на выходе Ш5, а ``persist_manifest`` пишет весь
+        манифест только в Ш9 — слишком поздно для resume и для пост-корпусной привязки
+        ретривала. Повторная запись того же значения — no-op; неизвестный ``run_id`` —
+        no-op (строку прогона создаёт ``create_run``, а не этот метод).
+        """
+        ...
+
     def save_plan_inputs(
         self, run_id: str, *, payload: Mapping[str, Any], payload_sha256: str
     ) -> None:

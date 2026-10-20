@@ -199,7 +199,11 @@ def _load() -> tuple[RunInputs, RunPlan]:
 
 
 def _expected_ids(inputs: RunInputs, run_plan: RunPlan) -> tuple[str, str]:
-    """``(composition_id, partition_id)`` корпуса — те же производящие функции (09 §8.1)."""
+    """``(composition_id, partition_id)`` корпуса — те же производящие функции (09 §8.1).
+
+    Пакет — ``run.package`` (``phases._package_id``), а не ``run_id``: иначе партиции
+    были бы run-scoped и не переиспользовались между прогонами (09 §8.2).
+    """
     chunk = CorpusChunk(
         chunk_id=CHUNK_ID,
         doc_id=f"p1:{DOC_HASH}",
@@ -208,8 +212,9 @@ def _expected_ids(inputs: RunInputs, run_plan: RunPlan) -> tuple[str, str]:
         content_hash=content_hash(PAGE_TEXT),
     )
     token = _product_content_token([chunk])
+    package_id = inputs.run.package
     partition_id = _derive_partition_build_id(
-        package_id=run_plan.run_id,
+        package_id=package_id,
         product_id="p1",
         chunker_version=FakeChunker.version,
         embed_model_id=FakeEmbedder().model_id,
@@ -219,7 +224,7 @@ def _expected_ids(inputs: RunInputs, run_plan: RunPlan) -> tuple[str, str]:
         product_content_token=token,
     )
     composition_id = derive_composition_id(
-        run_plan.run_id, {"p1": partition_id}, {"p1": token}
+        package_id, {"p1": partition_id}, {"p1": token}
     )
     return composition_id, partition_id
 

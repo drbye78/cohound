@@ -210,10 +210,43 @@ def _as_phase(result: Any, phase: str) -> PhaseResult:
     return result
 
 
-def _package_id(inputs: Any, plan: Any) -> str:
-    """Пакет корпуса: ``inputs.package.package_id`` (если появится) либо ``plan.run_id``."""
+def resolve_package_id(inputs: Any, plan: Any = None) -> str:
+    """Идентичность пакета для ``index_store/{package}/`` и ``partition_build_id`` (09 §8.2).
+
+    Порядок разрешения:
+
+    1. ``inputs.package.package_id`` — если модель когда-нибудь его получит;
+    2. ``inputs.run.package`` — ``run.yaml:package`` (например, ``ru-pg-dbms``): это
+       **настоящая** идентичность пакета и та же величина, что уже персистится в
+       ``runs.package_id``;
+    3. ``plan.cohort.case_id`` — идентификатор кейса, если прогон собран без ``run``;
+    4. ``plan.run_id`` — последний резерв (прямой вызов фазы без пакета).
+
+    У :class:`~core.domain.models.PackageManifest` поля ``package_id`` сегодня **нет**
+    (``case_id`` — идентификатор кейса, а не каталога пакета), поэтому основным источником
+    служит ``run.package``. ``run_id`` в качестве пакета делает партиции run-scoped и
+    запрещает переиспользование между прогонами по построению, поэтому он не должен
+    выбираться, пока известно имя пакета.
+    """
     package = getattr(inputs, "package", None)
-    return str(getattr(package, "package_id", None) or getattr(plan, "run_id", "") or "")
+    explicit = getattr(package, "package_id", None)
+    if explicit:
+        return str(explicit)
+    run_package = getattr(getattr(inputs, "run", None), "package", None)
+    if run_package:
+        return str(run_package)
+    cohort = getattr(plan, "cohort", None) if plan is not None else None
+    case_id = getattr(cohort, "case_id", None)
+    if case_id:
+        return str(case_id)
+    if plan is None:
+        return ""
+    return str(getattr(plan, "run_id", "") or "")
+
+
+def _package_id(inputs: Any, plan: Any) -> str:
+    """Пакет корпуса: общий порядок :func:`resolve_package_id` (для фаз и CLI)."""
+    return resolve_package_id(inputs, plan)
 
 
 def _capture_index_build(holder: dict[str, Any], result: PhaseResult) -> None:
@@ -698,11 +731,21 @@ def build_phases(
                 phase="report",
                 errors=["compute-бандл отсутствует: фаза compute не выполнена"],
             )
+        # Resume: фаза корпуса короткозамкнута персистентным ``ok``, поэтому ``holder``
+        # пуст. Берём composition id из ``runs`` (его пишет пост-корпусная перепривязка
+        # composition root сразу после Ш5): иначе ``persist_manifest`` обнулил бы провенанс.
+        index_build_id = holder.get("index_build_id")
+        if index_build_id is None:
+            try:
+                ref = ctx.store.read_run_index_ref(plan.run_id)
+            except Exception:  # noqa: BLE001 — провенанс не роняет отчёт
+                ref = None
+            index_build_id = getattr(ref, "index_build_id", None)
         manifest = build_manifest(
             inputs=inputs,
             plan=plan,
             bundle=bundle,
-            index_build_id=holder.get("index_build_id"),
+            index_build_id=index_build_id,
             created_at=_created_at(ctx),
             deploy_profile=deploy_profile,
             edge_schema_version=edge_schema_version,

@@ -990,9 +990,13 @@ def _work_set_idempotency_key(work: Sequence[CrawlWorkItem]) -> str:
 def _resolve_package_id(plan: Any, package_id: str | None) -> str:
     """Идентификатор пакета корпуса для ``index_build_id``/``index_manifest``.
 
-    Приоритет: явный ``package_id`` → ``plan.package`` → ``plan.case_id`` →
-    ``plan.cohort.case_id`` → ``plan.run_id`` (forward-compat: ``RunPlan`` сегодня несёт
-    ``run_id``/``cohort``, список пакетов — нет).
+    Приоритет: явный ``package_id`` (его резолвит composition root/``phases.resolve_package_id``:
+    основная идентичность — ``run.yaml:package``, а не ``run_id``) → ``plan.package`` →
+    ``plan.case_id`` → ``plan.cohort.case_id`` → ``plan.run_id``.
+
+    ``run_id`` — только последний резерв (прямой вызов ``build_corpus`` без пакета): он
+    делает партиции run-scoped и исключает переиспользование между прогонами (09 §8.2),
+    поэтому не выбирается, пока известно имя пакета.
     """
     if package_id:
         return str(package_id)

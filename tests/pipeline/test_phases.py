@@ -64,7 +64,7 @@ from core.config.crawl_sources import CrawlSource, CrawlSourcesConfig
 from core.pipeline.compute import compute
 from core.pipeline.evaluate import evaluate_phase
 from core.pipeline.normalize import RunInputs
-from core.pipeline.phases import IMPLEMENTED_PHASES, build_phases
+from core.pipeline.phases import IMPLEMENTED_PHASES, _package_id, build_phases
 from core.pipeline.plan import RunPlan
 from core.pipeline.report import build_manifest
 from core.pipeline.runner import (
@@ -238,6 +238,45 @@ def _store() -> SqliteStore:
     store = SqliteStore(":memory:")
     store.create_run(RUN_ID, _run_config())
     return store
+
+
+# --- идентичность пакета (09 §8.2) ------------------------------------------
+
+
+def test_package_id_uses_run_package_not_run_id() -> None:
+    """У ``PackageManifest`` нет ``package_id`` ⇒ пакет берётся из ``run.package``.
+
+    ``run_id`` в качестве пакета сделал бы партиции run-scoped и запретил
+    переиспользование между прогонами (09 §8.2).
+    """
+    inputs = SimpleNamespace(package=_package(), run=_run_config())
+    assert _package_id(inputs, _plan()) == "pkg-1"
+    assert _package_id(inputs, _plan()) != _plan().run_id
+
+
+def test_package_id_resolution_order() -> None:
+    """Порядок: ``package.package_id`` → ``run.package`` → ``cohort.case_id`` → ``run_id``."""
+    explicit = SimpleNamespace(
+        package=SimpleNamespace(package_id="pkg-explicit"),
+        run=_run_config(),
+    )
+    assert _package_id(explicit, _plan()) == "pkg-explicit"
+
+    run_package = SimpleNamespace(
+        package=_package(), run=_run_config(package="pkg-run")
+    )
+    assert _package_id(run_package, _plan()) == "pkg-run"
+
+    # ``run.package`` нет (прямой вызов без нормализованного run) → ``cohort.case_id``.
+    no_run_package = SimpleNamespace(
+        package=_package(), run=SimpleNamespace(package=None)
+    )
+    assert _package_id(no_run_package, _plan()) == CASE_ID
+
+    # Нет ни пакета, ни когорты → последний резерв ``plan.run_id``.
+    no_cohort_plan = SimpleNamespace(run_id="run-only", cohort=None)
+    assert _package_id(SimpleNamespace(package=None, run=None), no_cohort_plan) == "run-only"
+
 
 
 # --- порты-заглушки ---------------------------------------------------------

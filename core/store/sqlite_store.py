@@ -839,6 +839,20 @@ class SqliteStore:
                 ),
             )
 
+    def set_run_index_build_id(self, run_id: str, index_build_id: str) -> None:
+        """Записывает ``runs.index_build_id`` сразу после фазы корпуса (идемпотентно).
+
+        Composition id известен уже на выходе Ш5, а :meth:`persist_manifest` пишет весь
+        манифест только в Ш9 — слишком поздно для resume и для пост-корпусной привязки
+        ретривала. Повторная запись того же значения — no-op; неизвестный ``run_id`` —
+        no-op (строку прогона создаёт :meth:`create_run`, а не этот метод).
+        """
+        with self.conn:
+            self.conn.execute(
+                "UPDATE runs SET index_build_id = ? WHERE run_id = ?",
+                (index_build_id, run_id),
+            )
+
     def upsert_corpus_doc(self, doc: CorpusDoc) -> None:
         """Upsert строки ``corpus_docs`` (raw retention + provenance экстракции, §3.2)."""
         with self.conn:

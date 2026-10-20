@@ -15,6 +15,8 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from core.adapters.index_npy import numpy_available
+from core.adapters.lexical_tantivy import tantivy_available
 from core.cli.context import (
     _add_common,
     _add_phase4_flags,
@@ -51,8 +53,10 @@ from core.cli.wiring import (
     WiringError,
     build_runner,
     build_store,
+    build_vector_index,
     manifest_deploy_fields,
     run_db_path,
+    seed_lexical_index,
 )
 from core.config.deploy import is_split, load_deploy_config
 from core.domain import (
@@ -62,7 +66,7 @@ from core.domain import (
     RefreshPolicy,
     RunScope,
 )
-from core.pipeline import GATE_PHASES, PHASES
+from core.pipeline import GATE_PHASES, PHASES, Ports
 from core.pipeline.crawl_session import (
     default_session_id,
     read_provenance,
@@ -73,7 +77,7 @@ from core.pipeline.normalize import load_inputs
 from core.pipeline.observability import instrument_phases, write_run_metrics
 from core.pipeline.digests import cohort_digest, seeds_digest
 from core.pipeline.onboarding import effective_seeds, load_effective_seeds, preflight
-from core.pipeline.phases import resolve_measured_retrieval
+from core.pipeline.phases import resolve_measured_retrieval, resolve_package_id
 from core.pipeline.plan import derive_run_id
 from core.pipeline.report import Artifacts
 from core.pipeline.retrieve import RetrievalProfile
@@ -85,7 +89,7 @@ from core.pipeline.run_identity import (
     resolve_refresh_policy,
     resolve_run_scope,
 )
-from core.pipeline.runner import PhaseFn, _gate_phase
+from core.pipeline.runner import PhaseFn, PhaseResult, RunContext, _gate_phase
 from core.pipeline.state_sync import record_run_outcome, sync_product_state
 
 #: Phase 4: хук сна цикла ``--follow`` (тесты инжектят no-op через monkeypatch).
@@ -157,6 +161,125 @@ def _blocked_payload(
         "resumed_skipped": [],
         "warnings": list(warnings),
     }
+
+
+def _lexical_rebuild_reason(store: Any) -> str:
+    """Почему лексический индекс не собрался (видимая причина, а не тихая дыра)."""
+    if store is None:
+        return "store не открыт"
+    if not tantivy_available():
+        return "tantivy недоступен"
+    return "в композиции нет чанков"
+
+
+def _vector_rebuild_reason() -> str:
+    """Почему dense-индекс не собрался (видимая причина, а не тихая дыра)."""
+    if not numpy_available():
+        return "numpy недоступен"
+    return "нет манифеста/размерности сборки"
+
+
+def _rebind_retrieval_after_corpus(
+    fn: PhaseFn,
+    *,
+    ports: Ports,
+    store: Any,
+    index_root: str,
+    package: str,
+    run_id: str,
+    profile: str,
+) -> PhaseFn:
+    """Оборачивает фазу ``corpus``: привязывает ретривал к **её** композиции (09 §8.1/§8.4).
+
+    Порты строятся до корпуса, когда ``index_build_id`` ещё неизвестен:
+    ``_single_persisted_build`` либо не находит сборки, либо выбирает устаревшую/чужую
+    композицию. После ``ok``-корпуса composition id известен (``IndexBuild.index_build_id``),
+    поэтому обёртка:
+
+    1. сразу персистит его в ``runs.index_build_id`` (до фазы отчёта; переживает resume);
+    2. пересобирает лексический/dense-индексы **по этому id** и присваивает их в тот же
+       ``Ports``, который увидит фаза ``evaluate``.
+
+    Сбой фазы не перепривязывает ничего: прежние порты остаются, а ``evaluate`` честно
+    сообщает свою ошибку. ``None`` от билдера — легитимное отсутствие предпосылки (нет
+    ``tantivy``/``numpy`` или пустая композиция), но не молчаливое: причина попадает в
+    ``errors``/``log_entries`` фазы. ``split`` не собирает локальные порты ретривала —
+    composition id всё равно персистится, перепривязки нет.
+    """
+
+    def wrapped(ctx: RunContext) -> PhaseResult:
+        result = fn(ctx)
+        if result.status != "ok":
+            # Неуспешный корпус не даёт валидной композиции: не трогаем порты и провенанс.
+            return result
+        build = next(
+            (
+                entry
+                for entry in getattr(result, "log_entries", None) or ()
+                if getattr(entry, "index_build_id", None)
+            ),
+            None,
+        )
+        composition_id = getattr(build, "index_build_id", None)
+        if not composition_id:
+            result.errors.append(
+                "retrieval: корпус не вернул composition id — "
+                "порты ретривала не перепривязаны"
+            )
+            return result
+        try:
+            store.set_run_index_build_id(run_id, composition_id)
+        except Exception as exc:  # noqa: BLE001 — провенанс не роняет прогон
+            result.errors.append(
+                f"retrieval: set_run_index_build_id({composition_id}): "
+                f"{type(exc).__name__}: {_concise(exc)}"
+            )
+        if profile == SPLIT_PROFILE:
+            # В split локальные индексные порты не собираются (веб/индекс — вне ядра);
+            # composition id уже персистирован, перепривязывать нечего.
+            result.log_entries.append(
+                "retrieval: split — локальные порты ретривала не собираются "
+                f"(composition {composition_id})"
+            )
+            return result
+        lexical = None
+        vector = None
+        try:
+            lexical = seed_lexical_index(
+                index_root=index_root,
+                package=package,
+                store=store,
+                build_id=composition_id,
+            )
+            vector = build_vector_index(
+                index_root=index_root,
+                package=package,
+                chunk_lookup=store.get_chunk,
+                build_id=composition_id,
+            )
+        except Exception as exc:  # noqa: BLE001 — перепривязка не роняет успешный корпус
+            # Сбой пересборки — видимая диагностика, а не смена статуса Ш5: корпус уже
+            # зафиксирован на диске, прежние порты остаются, evaluate сообщит своё.
+            result.errors.append(
+                f"retrieval: перепривязка к композиции {composition_id} не удалась: "
+                f"{type(exc).__name__}: {_concise(exc)}"
+            )
+            return result
+        if lexical is None:
+            result.errors.append(
+                "retrieval: лексический индекс не пересобран для композиции "
+                f"{composition_id}: {_lexical_rebuild_reason(store)}"
+            )
+        if vector is None:
+            result.log_entries.append(
+                "retrieval: dense-индекс не пересобран для композиции "
+                f"{composition_id}: {_vector_rebuild_reason()}"
+            )
+        ports.lexical_index = lexical
+        ports.vector_index = vector
+        return result
+
+    return wrapped
 
 
 def run(args: argparse.Namespace) -> int:
@@ -501,72 +624,104 @@ def run(args: argparse.Namespace) -> int:
             corpus_urls = dict(onboarding.effective_urls)
         else:
             corpus_urls = _load_corpus_urls(getattr(args, "urls", None))
-        if only_failed or only_product is not None:
-            filter_store = build_store(db_path, profile=args.profile)
-            try:
+        # Одно соединение на прогон (R7): фильтрация URL, сборка портов (``store``/
+        # ``chunk_lookup`` для лексического/dense плеча), Runner и пост-корпусная
+        # перепривязка ретривала работают на этом объекте. Открываем **до**
+        # ``_resolve_ports``: без ``store``/``chunk_lookup`` оба билдера ретривала
+        # возвращают ``None``, и Ш6 падает на каждой ячейке.
+        store = build_store(db_path, profile=args.profile)
+        ports: Ports | None = None
+        try:
+            if only_failed or only_product is not None:
                 corpus_urls, filter_notes = _filter_corpus_urls(
                     corpus_urls,
-                    store=filter_store,
+                    store=store,
                     session_id=session_id,
                     only_failed=only_failed,
                     only_product=only_product,
                 )
-            finally:
-                filter_store.close()
 
-        ports = _resolve_ports(
-            args, deploy_config, inputs=inputs, no_cache=from_scratch
-        )
-        phases = _resolve_phases(
-            args,
-            inputs=inputs,
-            plan=run_plan,
-            ports=ports,
-            deploy_config=deploy_config,
-            paths=getattr(args, "paths", None),
-            render_modes=render_modes,
-            urls=corpus_urls,
-            max_attempts=max_attempts,
-            max_depth=max_depth,
-            max_documents=max_documents,
-            exclude_paths=exclude_paths,
-            exclude_documents=exclude_documents,
-            document_level=document_level,
-            progress=(
-                _progress_callback(session_id=session_id, json_mode=bool(args.json))
-                if follow
-                else None
-            ),
-            # 09 §6.3 (MVP-3b): уже открытый state пакета (``None`` — например, dry-run
-            # сюда не доходит), режимы продуктов из onboarding-плана и политика наблюдения.
-            # Dry-run не создаёт ``state/``: фазы строятся только после его выхода.
-            state=state_store,
-            product_modes=(
-                {plan.product_id: plan.mode.value for plan in onboarding.plans}
-                if onboarding is not None
-                else None
-            ),
-            refresh_policy=refresh_policy.value,
-        )
-        # Наблюдаемость (W12/T12.1, 04 §B.1/§B.2): оборачиваем фазы логом+таймингом.
-        # Гейты — дефолтные замыкания Runner; оборачиваем и их, чтобы §B.1-лог покрывал
-        # точку остановки (g1 без человеческого решения тоже оставляет logs/g1.jsonl).
-        clock = getattr(args, "clock", None)
-        instrumentable: dict[str, PhaseFn] = dict(phases)
-        for gate_name, gate in GATE_PHASES.items():
-            instrumentable.setdefault(gate_name, _gate_phase(gate_name, gate))
-        instrumentation = instrument_phases(
-            instrumentable,
-            run_id=run_id,
-            logs_root=args.runs_dir,
-            clock=clock,
-        )
+            ports = _resolve_ports(
+                args,
+                deploy_config,
+                inputs=inputs,
+                no_cache=from_scratch,
+                store=store,
+                run_id=run_id,
+            )
+            phases = _resolve_phases(
+                args,
+                inputs=inputs,
+                plan=run_plan,
+                ports=ports,
+                deploy_config=deploy_config,
+                paths=getattr(args, "paths", None),
+                render_modes=render_modes,
+                urls=corpus_urls,
+                max_attempts=max_attempts,
+                max_depth=max_depth,
+                max_documents=max_documents,
+                exclude_paths=exclude_paths,
+                exclude_documents=exclude_documents,
+                document_level=document_level,
+                progress=(
+                    _progress_callback(session_id=session_id, json_mode=bool(args.json))
+                    if follow
+                    else None
+                ),
+                # 09 §6.3 (MVP-3b): уже открытый state пакета (``None`` — например, dry-run
+                # сюда не доходит), режимы продуктов из onboarding-плана и политика наблюдения.
+                # Dry-run не создаёт ``state/``: фазы строятся только после его выхода.
+                state=state_store,
+                product_modes=(
+                    {plan.product_id: plan.mode.value for plan in onboarding.plans}
+                    if onboarding is not None
+                    else None
+                ),
+                refresh_policy=refresh_policy.value,
+            )
+            # 09 §8.1/§8.4: порты ретривала строятся до корпуса, где composition id
+            # ещё неизвестен. После успешного корпуса перепривязываем их к его
+            # композиции и сразу фиксируем ``runs.index_build_id`` (до фазы отчёта,
+            # переживает resume). Инъецированные ``ports`` (тестовый шов) не трогаем:
+            # ручной DI приоритетнее автосборки.
+            if getattr(args, "ports", None) is None and "corpus" in phases:
+                phases["corpus"] = _rebind_retrieval_after_corpus(
+                    phases["corpus"],
+                    ports=ports,
+                    store=store,
+                    index_root=(
+                        str(args.paths.index_store)
+                        if getattr(args, "paths", None) is not None
+                        else "index_store"
+                    ),
+                    package=resolve_package_id(inputs),
+                    run_id=run_id,
+                    profile=args.profile,
+                )
+            # Наблюдаемость (W12/T12.1, 04 §B.1/§B.2): оборачиваем фазы логом+таймингом.
+            # Гейты — дефолтные замыкания Runner; оборачиваем и их, чтобы §B.1-лог покрывал
+            # точку остановки (g1 без человеческого решения тоже оставляет logs/g1.jsonl).
+            clock = getattr(args, "clock", None)
+            instrumentable: dict[str, PhaseFn] = dict(phases)
+            for gate_name, gate in GATE_PHASES.items():
+                instrumentable.setdefault(gate_name, _gate_phase(gate_name, gate))
+            instrumentation = instrument_phases(
+                instrumentable,
+                run_id=run_id,
+                logs_root=args.runs_dir,
+                clock=clock,
+            )
+
+        except BaseException:
+            # Сборка портов/фаз не должна утекать соединением: закрываем и пробрасываем.
+            store.close()
+            raise
 
         instrumentation_errors: list[str] = []
         final_status: str | None = None
         crawl_counts: dict[str, int] = {}
         truncation: dict[str, Any] = {}
-        store = build_store(db_path, profile=args.profile)
         try:
             _ensure_run(store, run_id, inputs)
             # 03 §A.2 / P1: снимок входов прогона (иммутабельная копия run.yaml +
@@ -696,8 +851,8 @@ def run(args: argparse.Namespace) -> int:
             # Best-effort остановка краулера: только если он есть и умеет ``close`` (после
             # разделения реактора — ScrapyCrawler; у HttpCrawler/None ``close`` нет). Проверка
             # существования делает вызов безопасным для обоих краулеров.
-            close = getattr(ports, "crawler", None)
-            close = getattr(close, "close", None)
+            crawler = getattr(ports, "crawler", None) if ports is not None else None
+            close = getattr(crawler, "close", None)
             if callable(close):
                 close()
 
