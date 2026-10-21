@@ -304,6 +304,9 @@ class HttpCrawler:
         """
         httpx = self._import_http()
         cap = self._cap_for(plan)
+        # Наблюдаемость: статус ответа, если транспорт успел его увидеть (см. CrawlError).
+        # Заполняется сразу после входа в потоковый ответ; None — ответа не было.
+        observed_status: int | None = None
         try:
             with httpx.stream(
                 "GET",
@@ -318,11 +321,23 @@ class HttpCrawler:
                 # Классифицируем ДО ``raise_for_status``: иначе статус схлопнулся бы в
                 # бесцветный ``CrawlError`` и pipeline записал бы ``source_unavailable``.
                 status = int(response.status_code)
+                observed_status = status
                 if status in NOT_FOUND_STATUSES:
                     raise CrawlNotFound(
                         f"HTTP {status} для {url!r}: ресурс отсутствует",
+                        http_status=status,
                     )
-                response.raise_for_status()
+                try:
+                    response.raise_for_status()
+                except CrawlError:
+                    raise
+                except Exception as exc:  # noqa: BLE001 - статус известен, класс общий
+                    # 403/429/503 и прочие не-2xx: класс отказа прежний
+                    # (``source_unavailable``), но статус теперь виден оператору.
+                    raise CrawlError(
+                        f"HTTP-фетч {url!r} не удался: {exc}",
+                        http_status=status,
+                    ) from exc
                 # P6: класс ответа известен только здесь (заголовки получены): страница —
                 # прежний in-memory потолок, допущенный артефакт — staging-файл.
                 staging_dir = self._staging_path(
@@ -365,7 +380,10 @@ class HttpCrawler:
         except CrawlError:
             raise
         except Exception as exc:  # noqa: BLE001 - унификация ошибок адаптера
-            raise CrawlError(f"HTTP-фетч {url!r} не удался: {exc}") from exc
+            raise CrawlError(
+                f"HTTP-фетч {url!r} не удался: {exc}",
+                http_status=observed_status,
+            ) from exc
 
     def _staging_path(
         self, plan: FetchPlan, *, url: str, content_type: str | None = None

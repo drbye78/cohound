@@ -649,6 +649,7 @@ class BrowserCrawler:
                 # выдаваться за контент. Классификация — как у HTTP/Scrapy.
                 raise CrawlNotFound(
                     f"hybrid HTTP {status} для {url!r}: ресурс отсутствует",
+                    http_status=status,
                 )
             if 200 <= status < 300 and not _looks_like_interstitial(body, rendered):
                 # Валидаторы hybrid-GET доступны в ``resp_headers`` (в отличие от honest).
@@ -697,7 +698,10 @@ class BrowserCrawler:
             )
         raise CrawlError(
             f"hybrid: честный рендер не дал байтов после {HYBRID_MAX_ATTEMPTS} попыток "
-            f"(status={last_status})"
+            f"(status={last_status})",
+            # Наблюдаемость: последний статус hybrid-GET известен (429/503/403 …).
+            # Honest-путь (чистый рендер) статуса не наблюдает — там он остаётся ``None``.
+            http_status=last_status,
         )
 
     def _warm(

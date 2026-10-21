@@ -144,7 +144,20 @@ _WAIT_FOR_TIMEOUT_MS = 15000
 
 
 class CrawlError(Exception):
-    """Базовая ошибка краулера. Pipeline отображает её на ``source_unavailable``."""
+    """Базовая ошибка краулера. Pipeline отображает её на ``source_unavailable``.
+
+    ``http_status`` — **наблюдаемость**, а не классификация: фактический HTTP-статус
+    ответа, если транспорт успел его увидеть (429/403/503/404 …). Он протаскивается
+    до ``crawl_session_items.http_status``, чтобы оператор различал транзиентный
+    rate-limit/недоступность (повтор осмыслен) и политический запрет (повтор
+    бессмысленен). Класс отказа (``failure_kind``/``refusal_reason``) от статуса
+    **не зависит** — таксономия ``FailureKind`` этим полем не расширяется.
+    ``None`` — статус неизвестен (сетевой сбой до ответа, SSRF-отказ и т.п.).
+    """
+
+    def __init__(self, message: str = "", *, http_status: int | None = None) -> None:
+        super().__init__(message)
+        self.http_status = http_status
 
 
 class CrawlUrlError(CrawlError, ValueError):
@@ -165,8 +178,14 @@ class CrawlRefused(CrawlError):
     намеренно: отказ — не «источник упал», а соблюдение политики.
     """
 
-    def __init__(self, message: str, *, refusal_reason: str = "robots_disallow") -> None:
-        super().__init__(message)
+    def __init__(
+        self,
+        message: str,
+        *,
+        refusal_reason: str = "robots_disallow",
+        http_status: int | None = None,
+    ) -> None:
+        super().__init__(message, http_status=http_status)
         self.refusal_reason = refusal_reason
 
 
@@ -192,8 +211,9 @@ class CrawlNotFound(CrawlError):
         message: str,
         *,
         failure_kind: str = FailureKind.NOT_FOUND.value,
+        http_status: int | None = None,
     ) -> None:
-        super().__init__(message)
+        super().__init__(message, http_status=http_status)
         self.failure_kind = failure_kind
 
 
@@ -210,8 +230,9 @@ class CrawlPayloadTooLarge(CrawlError):
         message: str,
         *,
         failure_kind: str = FailureKind.PAYLOAD_TOO_LARGE.value,
+        http_status: int | None = None,
     ) -> None:
-        super().__init__(message)
+        super().__init__(message, http_status=http_status)
         self.failure_kind = failure_kind
 
 
@@ -257,7 +278,9 @@ class _CrawlSpec:
     ``headers`` — заголовки запроса (условные ``If-None-Match``/``If-Modified-Since``);
     ``cached`` — байты текущей кэш-записи, нужные для тела ответа ``304`` (сам ``304``
     представления не несёт); ``error`` — сбой, который нельзя поднять из callback паука;
-    ``error_kind`` — машинный класс сбоя (``FailureKind``), если ответ определён (404/410).
+    ``error_kind`` — машинный класс сбоя (``FailureKind``), если ответ определён (404/410);
+    ``http_status`` — фактический статус ответа, если он наблюдался (наблюдаемость:
+    переносится в исключение и далее в ``crawl_session_items.http_status``).
     """
 
     url: str
@@ -268,6 +291,7 @@ class _CrawlSpec:
     cached: bytes | None = None
     error: str | None = None
     error_kind: str | None = None
+    http_status: int | None = None
 
 
 # Активные ``CrawlerRunner``: держим ссылку, пока краул не завершён (иначе движок
@@ -292,6 +316,35 @@ def _scrapy_failure_status(failure: Any) -> int | None:
         return None
 
 
+def _record_failure(spec: _CrawlSpec, failure: Any) -> None:
+    """Классифицирует сбой запроса в ``spec``: 404/410 — ``not_found``, иначе общий сбой.
+
+    Без errback'а Scrapy только логировала ошибку, и ``_fetch_with_scrapy`` сообщал
+    «контент не получен» — определённый ответ об отсутствии терялся.
+
+    ``spec.http_status`` фиксируется всегда, когда статус наблюдался: 429/403/503
+    остаются общим классом (``source_unavailable``), но перестают быть неразличимы
+    (наблюдаемость, не таксономия — см. :class:`CrawlError`).
+    """
+    status = _scrapy_failure_status(failure)
+    if status is not None:
+        # Наблюдаемость: статус доезжает до элемента сеанса даже когда класс
+        # отказа остаётся общим (``source_unavailable``).
+        spec.http_status = status
+    if status in NOT_FOUND_STATUSES:
+        spec.error_kind = FailureKind.NOT_FOUND.value
+        spec.error = f"HTTP {status} для {spec.url!r}: ресурс отсутствует"
+        return
+    if _is_oversize_failure(failure):
+        spec.error_kind = FailureKind.PAYLOAD_TOO_LARGE.value
+        spec.error = (
+            f"Scrapy-краул {spec.url!r}: ответ превысил "
+            f"DOWNLOAD_MAXSIZE ({_failure_value(failure)})"
+        )
+        return
+    spec.error = f"Scrapy-краул {spec.url!r} не удался: {_failure_value(failure)}"
+
+
 def _raw_page_from_scrapy_response(spec: _CrawlSpec, response: Any) -> RawPage | None:
     """Собирает ``RawPage`` из ответа Scrapy (валидаторы — ``bytes`` → ``latin-1``).
 
@@ -303,6 +356,9 @@ def _raw_page_from_scrapy_response(spec: _CrawlSpec, response: Any) -> RawPage |
     not_found`` и возвращаем ``None``. Путь достижим, если ``handle_httpstatus_list``
     пропустил статус в callback; обычный путь классифицирует тот же статус в errback
     (:func:`_scrapy_failure_status`), поэтому правило одно на оба входа.
+
+    ``spec.http_status`` фиксируется всегда, когда статус есть: это наблюдение, а не
+    классификация (см. :class:`CrawlError`).
     """
     raw_type = response.headers.get(b"Content-Type", b"")
     content_type = raw_type.decode("latin-1") if raw_type else None
@@ -311,6 +367,7 @@ def _raw_page_from_scrapy_response(spec: _CrawlSpec, response: Any) -> RawPage |
     etag = raw_etag.decode("latin-1") if raw_etag else None
     last_modified = raw_modified.decode("latin-1") if raw_modified else None
     status = int(response.status)
+    spec.http_status = status
     if status in NOT_FOUND_STATUSES:
         spec.error_kind = FailureKind.NOT_FOUND.value
         spec.error = f"HTTP {status} для {spec.url!r}: ресурс отсутствует"
@@ -412,26 +469,8 @@ def _default_crawl(settings: Mapping[str, Any], spec: _CrawlSpec) -> Any:
                 spec.collected.append(page)
 
         def _failed(self, failure) -> None:  # noqa: ANN001 - Twisted Failure
-            """Классифицирует сбой запроса: 404/410 — ``not_found``, иначе общий сбой.
-
-            Без errback'а Scrapy только логировала ошибку, и ``_fetch_with_scrapy``
-            сообщал «контент не получен» — определённый ответ об отсутствии терялся.
-            """
-            status = _scrapy_failure_status(failure)
-            if status in NOT_FOUND_STATUSES:
-                spec.error_kind = FailureKind.NOT_FOUND.value
-                spec.error = f"HTTP {status} для {spec.url!r}: ресурс отсутствует"
-                return
-            if _is_oversize_failure(failure):
-                spec.error_kind = FailureKind.PAYLOAD_TOO_LARGE.value
-                spec.error = (
-                    f"Scrapy-краул {spec.url!r}: ответ превысил "
-                    f"DOWNLOAD_MAXSIZE ({_failure_value(failure)})"
-                )
-                return
-            spec.error = (
-                f"Scrapy-краул {spec.url!r} не удался: {_failure_value(failure)}"
-            )
+            """Errback паука: делегирует :func:`_record_failure` (класс + статус)."""
+            _record_failure(spec, failure)
 
     runner = CrawlerRunner(dict(settings))
     deferred = runner.crawl(_SingleRequestSpider)
@@ -843,12 +882,18 @@ class ScrapyCrawler:
 
         if spec.error:
             if spec.error_kind == FailureKind.NOT_FOUND.value:
-                raise CrawlNotFound(spec.error, failure_kind=spec.error_kind)
+                raise CrawlNotFound(
+                    spec.error,
+                    failure_kind=spec.error_kind,
+                    http_status=spec.http_status,
+                )
             if spec.error_kind == FailureKind.PAYLOAD_TOO_LARGE.value:
                 raise CrawlPayloadTooLarge(
-                    spec.error, failure_kind=spec.error_kind
+                    spec.error,
+                    failure_kind=spec.error_kind,
+                    http_status=spec.http_status,
                 )
-            raise CrawlError(spec.error)
+            raise CrawlError(spec.error, http_status=spec.http_status)
         if not spec.collected:
             raise CrawlError(f"Scrapy не вернул контент для {url!r}")
         return spec.collected[0]

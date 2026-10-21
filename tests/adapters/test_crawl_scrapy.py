@@ -22,6 +22,7 @@ from core.adapters.crawl_scrapy import (
     ScrapyCrawler,
     _CrawlSpec,
     _raw_page_from_scrapy_response,
+    _record_failure,
     _scrapy_failure_status,
 )
 from core.domain.enums import FailureKind
@@ -572,6 +573,8 @@ def test_scrapy_worker_404_410_raises_crawl_not_found(status: int) -> None:
 
     assert excinfo.value.failure_kind == FailureKind.NOT_FOUND.value
     assert _spec_of(worker).error_kind == FailureKind.NOT_FOUND.value
+    # Наблюдаемость: статус определённого ответа не теряется (404/410).
+    assert excinfo.value.http_status == status
 
 
 def _spec_of(worker: _FakeWorker) -> _CrawlSpec:
@@ -597,6 +600,65 @@ def test_scrapy_failure_status_extraction() -> None:
     assert _scrapy_failure_status(_FakeFailure(_FakeHttpError(410))) == 410
     assert _scrapy_failure_status(_FakeFailure(_FakeHttpError(500))) == 500
     assert _scrapy_failure_status(_FakeFailure(RuntimeError("network"))) is None
+
+
+# ---------------------------------------------------------------------------
+# Наблюдаемость статуса: 429/403/503 не меняют класс, но становятся различимы
+# ---------------------------------------------------------------------------
+
+
+class _FailingWorker:
+    """Шов воркера: воспроизводит errback-путь (``_record_failure``) без Scrapy."""
+
+    def __init__(self, failure: object) -> None:
+        self.failure = failure
+        self.specs: list[_CrawlSpec] = []
+        self.closed = False
+
+    def submit(self, settings, spec: _CrawlSpec, fut, timeout_s) -> None:  # noqa: ANN001
+        self.specs.append(spec)
+        _record_failure(spec, self.failure)
+        fut.set_result(True)
+
+    def close(self) -> None:
+        self.closed = True
+
+
+@pytest.mark.parametrize("status", [429, 503, 403])
+def test_scrapy_worker_non_2xx_keeps_kind_but_records_http_status(status: int) -> None:
+    """429/503/403 — прежний класс ``source_unavailable`` + видимый ``http_status``."""
+    worker = _FailingWorker(_FakeFailure(_FakeHttpError(status)))
+    crawler = ScrapyCrawler(worker=worker)
+
+    with pytest.raises(CrawlError) as excinfo:
+        crawler.fetch(URL)
+
+    assert not isinstance(excinfo.value, CrawlNotFound)
+    # Таксономия не расширена: класс отказа прежний (source_unavailable на pipeline).
+    assert getattr(excinfo.value, "failure_kind", None) is None
+    # Наблюдаемость: статус доехал до исключения и до spec.
+    assert excinfo.value.http_status == status
+    assert _spec_of(worker).http_status == status
+    assert _spec_of(worker).error_kind is None
+
+
+def test_scrapy_success_observes_http_status_in_spec() -> None:
+    """Успешный путь не изменился: статус ``200`` наблюдается (и в ``RawPage``)."""
+    spec = _CrawlSpec(url=URL, fetch=FetchMode.HTTP, wait_for=None)
+
+    page = _raw_page_from_scrapy_response(
+        spec, _FakeScrapyResponse(body=b"ok", status=200)
+    )
+
+    assert page is not None and page.status_code == 200
+    assert spec.http_status == 200
+    assert spec.error is None
+
+
+def test_crawl_error_without_status_stays_none() -> None:
+    """Обратная совместимость: без статуса — ``None`` (не выдумываем)."""
+    assert CrawlError("boom").http_status is None
+    assert CrawlNotFound("gone").http_status is None
 
 
 # ---------------------------------------------------------------------------

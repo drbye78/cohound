@@ -287,6 +287,34 @@ def _partition_reuse_note(result: PhaseResult) -> str | None:
     )
 
 
+def _duplicate_notes(result: PhaseResult) -> list[str]:
+    """Строки лога о дедупе по ``content_hash``: по одной на продукт с ненулевым счётом.
+
+    ``IndexBuild.duplicates``/``duplicate_count`` считались, но никуда не выводились —
+    цепочка «N версий-алиасов → 1 документ» была невидима оператору. Дедуп **легитимен**
+    (I17: партиция продукта), поэтому это note, а не ``errors``; строка появляется
+    только при ``>0`` (нулевой дедуп не засоряет отчёт). Порядок — по ``product_id``
+    (детерминизм вывода).
+    """
+    build = next(
+        (
+            entry
+            for entry in getattr(result, "log_entries", None) or ()
+            if getattr(entry, "index_build_id", None)
+        ),
+        None,
+    )
+    if build is None:
+        return []
+    duplicates = getattr(build, "duplicates", None) or {}
+    return [
+        f"corpus: {product_id}: {int(count)} документов схлопнуто по content_hash "
+        "(алиасы версий)"
+        for product_id, count in sorted(duplicates.items())
+        if int(count) > 0
+    ]
+
+
 def _discovery_queries(inputs: Any) -> list[str]:
     """Запросы разведки, если их задал composition root (``inputs`` или ``inputs.run``)."""
     for holder in (inputs, getattr(inputs, "run", None)):
@@ -674,6 +702,8 @@ def build_phases(
         reuse_note = _partition_reuse_note(result)
         if reuse_note is not None:
             result.log_entries.append(reuse_note)
+        # Наблюдаемость дедупа: строка на продукт (только при ненулевом схлопывании).
+        result.log_entries.extend(_duplicate_notes(result))
         return _as_phase(result, "corpus")
 
     # -- Ш6: оценка (ретривал → оценщик) ------------------------------------ #

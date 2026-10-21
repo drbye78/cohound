@@ -516,6 +516,69 @@ def test_corpus_phase_omits_partition_note_without_partitions(
     assert [entry for entry in result.log_entries if isinstance(entry, str)] == []
 
 
+def test_corpus_phase_notes_duplicates_per_product(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Дедуп виден оператору: строка на продукт, только при ``>0`` (``results[].notes``)."""
+    import core.pipeline.phases as phases_mod
+
+    build = SimpleNamespace(
+        index_build_id="cb_dup_demo",
+        entries=[],  # без партиций reuse-строки нет — проверяем только дедуп
+        partitions_reused=0,
+        duplicates={"p1": 25, "p2": 0},
+        duplicate_count=25,
+    )
+
+    def _spy(*args: Any, **kwargs: Any) -> PhaseResult:
+        return PhaseResult(status="ok", phase="corpus", log_entries=[build])
+
+    monkeypatch.setattr(phases_mod, "build_corpus", _spy)
+
+    store = _store()
+    try:
+        phases = build_phases(inputs=_inputs(), plan=_plan(), ports=Ports())
+        result = phases["corpus"](_context(store, Ports()))
+    finally:
+        store.close()
+
+    assert result.status == "ok"
+    assert result.errors == []  # дедуп — не ошибка
+    notes = [entry for entry in result.log_entries if isinstance(entry, str)]
+    assert notes == [
+        "corpus: p1: 25 документов схлопнуто по content_hash (алиасы версий)"
+    ]
+
+
+def test_corpus_phase_omits_duplicate_note_when_zero(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Нулевой дедуп не засоряет отчёт: строки нет."""
+    import core.pipeline.phases as phases_mod
+
+    build = SimpleNamespace(
+        index_build_id="cb_dup_zero",
+        entries=[],
+        partitions_reused=0,
+        duplicates={},
+        duplicate_count=0,
+    )
+
+    def _spy(*args: Any, **kwargs: Any) -> PhaseResult:
+        return PhaseResult(status="ok", phase="corpus", log_entries=[build])
+
+    monkeypatch.setattr(phases_mod, "build_corpus", _spy)
+
+    store = _store()
+    try:
+        phases = build_phases(inputs=_inputs(), plan=_plan(), ports=Ports())
+        result = phases["corpus"](_context(store, Ports()))
+    finally:
+        store.close()
+
+    assert [entry for entry in result.log_entries if isinstance(entry, str)] == []
+
+
 def test_corpus_phase_forwards_run_config_crawl(monkeypatch: pytest.MonkeyPatch) -> None:
     """``RunConfig.crawl`` (run.yaml ``crawl:``) доезжает до ``build_corpus`` (P2-3).
 

@@ -577,6 +577,8 @@ def test_not_found_status_maps_to_typed_failure(
 
     assert excinfo.value.failure_kind == FailureKind.NOT_FOUND.value
     assert excinfo.value.failure_kind == "not_found"
+    # Наблюдаемость: определённый ответ несёт и статус.
+    assert excinfo.value.http_status == status
     # Один запрос: определённый ответ не повторяется транспортом.
     assert len(fake.calls) == 1
     # Ответ «нет ресурса» — не представление: в кэш ничего не пишется.
@@ -616,6 +618,8 @@ def test_forbidden_is_unchanged_generic_failure(
 
     assert not isinstance(excinfo.value, CrawlNotFound)
     assert getattr(excinfo.value, "failure_kind", None) is None
+    # Наблюдаемость: политический отказ виден как 403 (класс отказа — прежний).
+    assert excinfo.value.http_status == 403
     assert len(fake.calls) == 1
 
 

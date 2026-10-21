@@ -944,6 +944,14 @@ class IndexBuild:
         экстракцию+нарезку в этом прогоне; ``reused`` — версия переиспользована из
         durable-субстрата (304/тот же ``content_hash``). Пустая карта — legacy-путь
         (``state is None``): счётчики не выдумываются.
+    :param duplicates: **наблюдаемость** дедупа по ``content_hash`` внутри продукта:
+        ``{"product_id": n}`` — сколько документов схлопнулось (алиасы/перепечатки).
+        Это не ошибка и не смена статуса: дедуп легитимен (I17 — партиция продукта),
+        но должен быть виден, иначе цепочка «25 версий-алиасов → 1 документ» теряется
+        молча. Пустая карта — схлопываний не было.
+    :param duplicate_count: сумма ``duplicates`` (аддитивный счётчик для операторских
+        сводок). **Не входит** в ``index_build_id``: это наблюдение, а не состав
+        композиции (пин — ``tests/pipeline/test_corpus.py``).
     :param partitions_reused: сколько продукт-партиций переиспользовано с диска без
         вызова ``embedder.embed`` (09 §8.5). Ноль — ни одна партиция не переиспользована
         (первый прогон/нет ``index_root``); значение честное, не оценка.
@@ -986,6 +994,13 @@ class IndexBuild:
     #: 09 §6.3: счётчики документов по продукту (``total``/``new``/``reused``). Пусто —
     #: durable-субстрата нет (legacy), счётчики не фабрикуются.
     doc_counters: dict[str, dict[str, int]] = field(default_factory=dict)
+    #: Наблюдаемость дедупа по ``content_hash`` **внутри продукта**: ``{"product_id": n}``
+    #: — сколько документов схлопнулось. Не ошибка и не статус: дедуп легитимен (I17),
+    #: но должен быть виден (иначе алиасы версий исчезают молча).
+    duplicates: dict[str, int] = field(default_factory=dict)
+    #: Сумма ``duplicates``. Аддитивное поле наблюдаемости; в ``index_build_id`` **не**
+    #: входит (композиция зависит только от состава когорты и дайджестов партиций).
+    duplicate_count: int = 0
     #: 09 §8.5: число продукт-партиций, переиспользованных без эмбеддинга.
     partitions_reused: int = 0
 
@@ -2089,7 +2104,10 @@ def _build_corpus(
     vector_store = str(getattr(index_builder, "vector_store", "") or "")
 
     errors: list[str] = []
-    duplicate_count = 0
+    #: Наблюдаемость дедупа по ``content_hash`` внутри продукта: ``{"product_id": n}``.
+    #: Считается по продукту (``seen_docs`` — per-product), поэтому и карта продуктовая;
+    #: суммарный ``duplicate_count`` — сумма. Дедуп легитимен, но не должен быть невидим.
+    duplicates: dict[str, int] = {}
     raw_root_path = Path(raw_root)
     #: P5: видимые пропуски документов уровнем ``off`` (никогда не тихо) — агрегат по всем
     #: корням/продуктам прогона; кладётся в ``IndexBuild.document_skips``.
@@ -2766,7 +2784,6 @@ def _build_corpus(
         ``extract_failure_kind`` — класс отказа извлечения: ``None`` ⇒ ``parser_failed``
         (прежнее отображение), таймаут задания пула приходит как ``extraction_timeout``.
         """
-        nonlocal duplicate_count
         if reuse is not None and extracted is not None and getattr(extracted, "error", None):
             # Экстрактор текущего прогона сообщил сбой: переиспользование скрыло бы его,
             # а сбой парсера — это сигнал о конвейере, а не повод «взять старое».
@@ -2829,7 +2846,10 @@ def _build_corpus(
 
         # 4. Дедуп по content_hash (в пределах продукта).
         if doc_hash in seen_docs:
-            duplicate_count += 1
+            # Наблюдаемость: сколько документов схлопнулось по продукту. Класс исхода
+            # не меняется (алиас получает ``FETCHED`` и версию близнеца) — это счётчик,
+            # а не ошибка.
+            duplicates[product_id] = duplicates.get(product_id, 0) + 1
             # Байты сохранены и контент уже проиндексирован близнецом в этой партиции.
             # Алиас получает ту же версию документа (если она уже записана), чтобы
             # следующий инкрементальный план знал, что контент URL уже в корпусе.
@@ -3807,6 +3827,11 @@ def _build_corpus(
                 or FailureKind.SOURCE_UNAVAILABLE.value
             )
             errors.append(f"{pid}/{wu}: crawl: {reason}")
+            # Наблюдаемость (не классификация): фактический HTTP-статус, если адаптер его
+            # видел (429/403/503/404 …). ``error_kind`` остаётся прежним — таксономия
+            # ``FailureKind`` этим срезом не меняется; статус лишь делает отказ различимым
+            # (транзиентный rate-limit vs политический запрет). Нет статуса — ``None``,
+            # не выдумываем (carry-forward в ``_mark_session`` не перекрывает прежнее).
             _mark(
                 pid,
                 wu,
@@ -3814,6 +3839,7 @@ def _build_corpus(
                 error_kind=error_kind,
                 error=reason,
                 depth=desc.depth,
+                http_status=getattr(exc, "http_status", None),
             )
             return None
         if page is None:
@@ -5282,6 +5308,9 @@ def _build_corpus(
                             if result.error or result.raw_bytes is None:
                                 reason = result.error or "executor: пустой raw_bytes"
                                 errors.append(f"{entry.pid}/{entry.wu}: executor: {reason}")
+                                # Наблюдаемость (тот же дефект, что и на локальном пути):
+                                # шов уже несёт ``http_status`` отказа — не теряем его.
+                                # Класс отказа не меняется (``source_unavailable``).
                                 _mark(
                                     entry.pid,
                                     entry.wu,
@@ -5289,6 +5318,7 @@ def _build_corpus(
                                     error_kind=FailureKind.SOURCE_UNAVAILABLE.value,
                                     error=reason,
                                     depth=entry.depth,
+                                    http_status=result.http_status,
                                 )
                                 _emit_progress()
                                 continue
@@ -6061,10 +6091,15 @@ def _build_corpus(
         document_skips=list(document_skips),
         revalidation_orphans=dict(revalidation_orphans),
         doc_counters=dict(doc_counters),
+        duplicates=dict(duplicates),
+        duplicate_count=sum(duplicates.values()),
         partitions_reused=partitions_reused,
     )
     # Примечание: индексная сборка «возвращается» в log_entries (PhaseResult — контракт фазы;
-    # W8 читает IndexBuild отсюда). Счётчики — в полях IndexBuild; дубликаты — в errors.
+    # W8 читает IndexBuild отсюда). Счётчики — в полях IndexBuild (``doc_counters``,
+    # ``duplicates``/``duplicate_count``); операторская строка о дедупе — note фазы
+    # (``phases._duplicate_notes`` → ``results[].notes``), не ``errors``: схлопывание
+    # одинакового контента легитимно.
     log_entries: list[Any] = [build]
     if revalidation_orphan_total:
         # Наблюдение, не ошибка и не смена статуса (I12): авторский scope разошёлся с
