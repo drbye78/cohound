@@ -69,7 +69,10 @@ PROFILE_FIELDS = {
 RUN_CRAWL_MAX_DEPTH = 8
 RUN_CRAWL_MAX_DOCUMENTS = 300
 RUN_CRAWL_MAX_WORKERS = 2
-RUN_CRAWL_EXTRACT_WORKERS = 1
+#: Пул экстракции пересмотрен после замера `queue_max_size=1` (−49 % RSS: 4174 → 2126 MB
+#: на 665-стр. документе при идентичном markdown) ⇒ 2 воркера помещаются в бюджет хоста.
+#: Пин держит значение синхронным с `run.yaml` и генератором (иначе дрейф, P7).
+RUN_CRAWL_EXTRACT_WORKERS = 2
 RUN_CRAWL_EXTRACT_MAX_TASKS_PER_CHILD = 25
 RUN_CRAWL_EXCLUDE_PATHS = [
     "/blog/*",

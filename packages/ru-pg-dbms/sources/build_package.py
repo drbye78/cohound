@@ -1276,7 +1276,10 @@ def main() -> int:
             "max_depth": 8,
             "max_documents": 300,
             "max_workers": 2,
-            "extract_workers": 1,
+            # Замер 2026-10 (после `PDF_QUEUE_MAX_SIZE = 1`): 2 воркера помещаются в 6.9 GiB
+            # при `layout_tables` (2×2126 MB + baseline родителя). Держать в синхроне с
+            # `run.yaml` — иначе `generator_drift` (P7).
+            "extract_workers": 2,
             "extract_max_tasks_per_child": 25,
             "document_level": "layout_tables",
             "exclude_paths": [
