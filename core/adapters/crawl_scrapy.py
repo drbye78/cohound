@@ -20,7 +20,10 @@ I19; 02 §B.1). Ответственность адаптера (01 §3.2, ``por
   ``ETag``/``Last-Modified`` успешного ответа сохраняются в ``RawPage`` **и** в
   сайдкар (без записи сайдкара цикл условных запросов не мог бы начаться). Ответ
   ``304`` возвращает **закэшированные** байты с ``not_modified=True``; без кэша это
-  явная ошибка.
+  явная ошибка. Чтобы ``304`` вообще доходил до callback, ``304`` добавлен в
+  ``HTTPERROR_ALLOWED_CODES`` (иначе ``HttpErrorMiddleware`` поднимает ``HttpError``
+  на любой не-2xx, и ветка «байты из кэша» недостижима). Остальные не-2xx (404/410
+  и прочие) по-прежнему уходят в errback — их классификация не меняется.
 
 **Один реактор на процесс.** Twisted-реактор одноразовый (``ReactorNotRestartable``),
 поэтому ``CrawlerProcess.start()`` на каждый URL недопустим (``hound run`` делает
@@ -317,7 +320,8 @@ def _scrapy_failure_status(failure: Any) -> int | None:
 
 
 def _record_failure(spec: _CrawlSpec, failure: Any) -> None:
-    """Классифицирует сбой запроса в ``spec``: 404/410 — ``not_found``, иначе общий сбой.
+    """Классифицирует сбой запроса в ``spec``: robots-запрет → ``robots_disallow``,
+    404/410 → ``not_found``, oversize → ``payload_too_large``, иначе общий сбой.
 
     Без errback'а Scrapy только логировала ошибку, и ``_fetch_with_scrapy`` сообщал
     «контент не получен» — определённый ответ об отсутствии терялся.
@@ -331,6 +335,15 @@ def _record_failure(spec: _CrawlSpec, failure: Any) -> None:
         # Наблюдаемость: статус доезжает до элемента сеанса даже когда класс
         # отказа остаётся общим (``source_unavailable``).
         spec.http_status = status
+    if _is_robots_refusal(failure):
+        # ``robots_disallow`` входит в ``BLOCKING_FAILURE_KINDS``, а
+        # ``source_unavailable`` — нет. Записанный как недоступность robots-запрет
+        # понижает блокировку: ``corpus_coverage.complete`` может стать True, пока
+        # целый origin закрыт robots.txt (измерено на живом прогоне: 134 URL, из них
+        # 104 на одном хосте). Отказ — соблюдение политики, а не сбой источника.
+        spec.error_kind = FailureKind.ROBOTS_DISALLOW.value
+        spec.error = f"Scrapy-краул {spec.url!r}: robots.txt запрещает обход"
+        return
     if status in NOT_FOUND_STATUSES:
         spec.error_kind = FailureKind.NOT_FOUND.value
         spec.error = f"HTTP {status} для {spec.url!r}: ресурс отсутствует"
@@ -351,6 +364,10 @@ def _raw_page_from_scrapy_response(spec: _CrawlSpec, response: Any) -> RawPage |
     ``304`` не несёт представления: тело берётся **только** из ``spec.cached``
     (байты текущей кэш-записи). Их отсутствие — неконсистентный условный запрос:
     фиксируем ``spec.error`` и возвращаем ``None`` (пустую страницу не фабрикуем).
+    Это **не** недоступность источника, и сообщение обязано это показывать: сервер
+    ответил корректно, а нечем закрыть ``304``. Отдельного ``FailureKind`` для такого
+    рассинхрона в словаре нет, поэтому различитель — явный текст ошибки плюс
+    наблюдаемый ``http_status = 304`` в записи элемента.
 
     ``404``/``410`` — определённый ответ «ресурса нет»: фиксируем ``spec.error_kind =
     not_found`` и возвращаем ``None``. Путь достижим, если ``handle_httpstatus_list``
@@ -375,8 +392,12 @@ def _raw_page_from_scrapy_response(spec: _CrawlSpec, response: Any) -> RawPage |
     not_modified = status == 304
     if not_modified:
         if spec.cached is None:
+            # Сервер подтвердил неизменность, но тела взять негде: это рассинхрон
+            # условного запроса с кэшем, а не сбой источника. Пустую страницу не
+            # фабрикуем (иначе документ «успешно» станет пустым).
             spec.error = (
-                f"Scrapy 304 для {spec.url!r}, но в кэше нет байтов представления"
+                f"Scrapy 304 для {spec.url!r}: сервер подтвердил неизменность, "
+                f"но в кэше нет байтов представления (не сбой источника)"
             )
             return None
         content = spec.cached
@@ -499,6 +520,33 @@ def _failure_value(failure: Any) -> BaseException:
     return value if isinstance(value, BaseException) else cast(BaseException, failure)
 
 
+#: Точное сообщение, с которым ``RobotsTxtMiddleware`` отказывает в обходе.
+_ROBOTS_REFUSAL_MESSAGE = "Forbidden by robots.txt"
+
+
+def _is_robots_refusal(failure: Any) -> bool:
+    """Отказал ли **robots.txt** (а не сломался транспорт).
+
+    Scrapy поднимает ``scrapy.exceptions.IgnoreRequest("Forbidden by robots.txt")``
+    из ``RobotsTxtMiddleware.process_request_2``. Сигнал распознаётся по **типу и
+    точному сообщению**, а не по подстроке: ``IgnoreRequest`` — базовый класс для
+    других отказов middleware (дубликаты, offsite), а ``HttpError`` (не-2xx) вообще
+    наследует ``IgnoreRequest``. Широкий предикат превратил бы в ``robots_disallow``
+    любой отфильтрованный запрос.
+
+    Импорт Scrapy ленивый: модуль импортируется и без него (см. шапку). Если Scrapy
+    нет, отказать в robots-классификации безопаснее, чем угадывать.
+    """
+    try:
+        from scrapy.exceptions import IgnoreRequest  # type: ignore[import-not-found]
+    except ImportError:
+        return False
+    value = _failure_value(failure)
+    if not isinstance(value, IgnoreRequest):
+        return False
+    return str(value).strip() == _ROBOTS_REFUSAL_MESSAGE
+
+
 def _is_oversize_failure(failure: Any) -> bool:
     """Похоже ли исключение на превышение ``DOWNLOAD_MAXSIZE`` (Scrapy/Twisted).
 
@@ -506,6 +554,12 @@ def _is_oversize_failure(failure: Any) -> bool:
     ``StopDownload``/``PotentialDataLoss``), поэтому класс и сообщение проверяются
     терпимо; этого достаточно, чтобы отобразить исход в ``payload_too_large``, а не в
     бесцветный ``source_unavailable``.
+
+    Фактическая формулировка загрузчика (``get_maxsize_msg``) —
+    ``"Expected to receive N bytes which is larger than download max size (M) in
+    request …"``: ни одно из прежних терпимых совпадений её не ловит. Тип здесь не
+    годится как единственный признак: ``DownloadCancelledError`` поднимается и на
+    обычную отмену загрузки, без всякого потолка размера.
     """
     value = _failure_value(failure)
     name = type(value).__name__.lower()
@@ -515,6 +569,7 @@ def _is_oversize_failure(failure: Any) -> bool:
         or "stopdownload" in name
         or "maxsize" in message
         or "maximum size" in message
+        or "larger than download max size" in message
         or "downloaded more than" in message
         or "too large" in message
     )
@@ -881,6 +936,15 @@ class ScrapyCrawler:
         self._worker_instance().submit(settings, spec, fut, timeout_s)
 
         if spec.error:
+            if spec.error_kind == FailureKind.ROBOTS_DISALLOW.value:
+                # Отказ по политике, а не сбой транспорта: ``CrawlRefused`` несёт
+                # ``refusal_reason``, по которому pipeline пишет ``robots_disallow``
+                # (блокирующий класс, I2c/Ф0) и не расширяет frontier.
+                raise CrawlRefused(
+                    spec.error,
+                    refusal_reason=spec.error_kind,
+                    http_status=spec.http_status,
+                )
             if spec.error_kind == FailureKind.NOT_FOUND.value:
                 raise CrawlNotFound(
                     spec.error,
@@ -931,6 +995,13 @@ class ScrapyCrawler:
         ``DOWNLOAD_MAXSIZE`` берётся из оси ``crawl.max_response_bytes`` (per-plan поверх
         дефолта адаптера 20 MiB); ``DOWNLOAD_WARNSIZE`` не выше потолка. Явные
         ``scrapy_settings`` оператора по-прежнему побеждают (обратная совместимость).
+
+        ``304`` добавляется в ``HTTPERROR_ALLOWED_CODES`` **после** переопределений
+        оператора: без этого ``HttpErrorMiddleware`` поднимает ``HttpError`` на
+        не-2xx, ``304`` уходит в errback и ветка «байты из кэша» недостижима (на живом
+        прогоне так потерялись 240 активных документов). Разрешён ровно ``304`` —
+        404/410 и прочие не-2xx обязаны остаться на errback-пути с прежней
+        классификацией.
         """
         settings = dict(DEFAULT_SCRAPY_SETTINGS)
         cap = self._cap_for(plan)
@@ -939,4 +1010,16 @@ class ScrapyCrawler:
         if plan.fetch is FetchMode.BROWSER:
             settings.update(_PLAYWRIGHT_SETTINGS)
         settings.update(self._scrapy_settings)
+        allowed = settings.get("HTTPERROR_ALLOWED_CODES") or []
+        if isinstance(allowed, (str, int)):
+            allowed = str(allowed).split(",")
+        statuses: list[int] = []
+        for item in allowed:
+            try:
+                statuses.append(int(item))
+            except (TypeError, ValueError):
+                continue  # нечисловой код статуса всё равно не совпадёт
+        if 304 not in statuses:
+            statuses.append(304)
+        settings["HTTPERROR_ALLOWED_CODES"] = statuses
         return settings

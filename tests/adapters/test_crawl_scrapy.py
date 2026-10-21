@@ -18,6 +18,8 @@ import pytest
 from core.adapters.crawl_scrapy import (
     CrawlError,
     CrawlNotFound,
+    CrawlPayloadTooLarge,
+    CrawlRefused,
     CrawlUrlError,
     ScrapyCrawler,
     _CrawlSpec,
@@ -286,11 +288,15 @@ class _FakeScrapyResponse:
         body: bytes = b"fresh-body",
         status: int = 200,
         headers: dict[bytes, bytes] | None = None,
+        meta: dict[str, object] | None = None,
     ) -> None:
         self.url = url
         self.body = body
         self.status = status
         self.headers = dict(headers or {})
+        # Настоящий ``Response`` всегда несёт ``meta``: его читает
+        # ``HttpErrorMiddleware``, решая, пропускать ли не-2xx к callback.
+        self.meta = dict(meta or {})
 
 
 def test_scrapy_collect_captures_validators_from_bytes_headers() -> None:
@@ -695,3 +701,172 @@ def test_oversize_failure_is_classified() -> None:
 
     assert _is_oversize_failure(_Failure(FileSizeError("downloaded more than 100")))
     assert not _is_oversize_failure(_Failure(RuntimeError("network down")))
+
+
+def test_real_download_maxsize_message_is_classified_as_oversize() -> None:
+    """Фактическая формулировка загрузчика Scrapy ловится (проверено на 2.19.0).
+
+    ``get_maxsize_msg`` даёт ``"Expected to receive N bytes which is larger than
+    download max size (M) in request …"`` — ни ``"maxsize"``, ни ``"maximum size"``,
+    ни ``"too large"`` в ней нет, поэтому прежний предикат возвращал ``False`` и
+    ``payload_too_large`` деградировал до ``source_unavailable``.
+    """
+    from core.adapters.crawl_scrapy import _is_oversize_failure
+
+    class _Failure:
+        def __init__(self, value: BaseException) -> None:
+            self.value = value
+
+    expected = (
+        "Expected to receive 125727643 bytes which is larger than download "
+        "max size (20971520) in request <GET https://example.com/big.zip>."
+    )
+    received = (
+        "Received 22000000 bytes which is larger than download max size "
+        "(20971520) in request <GET https://example.com/big.zip>."
+    )
+    assert _is_oversize_failure(_Failure(RuntimeError(expected)))
+    assert _is_oversize_failure(_Failure(RuntimeError(received)))
+    # «warn size» — предупреждение, а не отмена загрузки: не наш класс.
+    assert not _is_oversize_failure(
+        _Failure(RuntimeError(expected.replace("download max size", "download warn size")))
+    )
+
+
+def test_oversize_failure_raises_payload_too_large() -> None:
+    """Путь ``fetch``: oversize → ``CrawlPayloadTooLarge``, а не бесцветный сбой."""
+    message = (
+        "Expected to receive 125727643 bytes which is larger than download "
+        "max size (20971520) in request <GET https://example.com/big.zip>."
+    )
+    worker = _FailingWorker(_FakeFailure(RuntimeError(message)))
+    crawler = ScrapyCrawler(worker=worker)
+
+    with pytest.raises(CrawlPayloadTooLarge) as excinfo:
+        crawler.fetch(URL)
+
+    assert excinfo.value.failure_kind == FailureKind.PAYLOAD_TOO_LARGE.value
+    assert _spec_of(worker).error_kind == FailureKind.PAYLOAD_TOO_LARGE.value
+
+
+# ---------------------------------------------------------------------------
+# robots.txt: отказ по политике, а не недоступность источника (D1/§10)
+# ---------------------------------------------------------------------------
+
+_ROBOTS_MSG = "Forbidden by robots.txt"
+
+
+def _scrapy_ignore_request(message: str) -> BaseException:
+    """Реальный ``IgnoreRequest`` Scrapy (предикат проверяет именно тип)."""
+    exceptions = pytest.importorskip("scrapy.exceptions")
+    return exceptions.IgnoreRequest(message)
+
+
+def test_robots_refusal_is_classified_as_robots_disallow() -> None:
+    """``Forbidden by robots.txt`` → ``robots_disallow`` (блокирующий класс, I2c).
+
+    Раньше отказ уходил в ``source_unavailable``, который **не** блокирующий:
+    ``corpus_coverage.complete`` мог стать ``True`` при целиком закрытом robots.txt
+    origin (измерено: 134 URL, 104 из них на одном хосте).
+    """
+    worker = _FailingWorker(_FakeFailure(_scrapy_ignore_request(_ROBOTS_MSG)))
+    crawler = ScrapyCrawler(worker=worker)
+
+    with pytest.raises(CrawlRefused) as excinfo:
+        crawler.fetch(URL)
+
+    assert excinfo.value.refusal_reason == FailureKind.ROBOTS_DISALLOW.value
+    assert _spec_of(worker).error_kind == FailureKind.ROBOTS_DISALLOW.value
+    # Отказ — не наблюдение HTTP-статуса: сервер по этому URL не опрашивался.
+    assert excinfo.value.http_status is None
+
+
+def test_other_ignore_request_stays_generic_failure() -> None:
+    """Прочие ``IgnoreRequest`` (дубликаты, offsite) — не robots-запрет."""
+    worker = _FailingWorker(_FakeFailure(_scrapy_ignore_request("Filtered offsite request")))
+    crawler = ScrapyCrawler(worker=worker)
+
+    with pytest.raises(CrawlError) as excinfo:
+        crawler.fetch(URL)
+
+    assert not isinstance(excinfo.value, CrawlRefused)
+    assert _spec_of(worker).error_kind is None
+
+
+def test_http_error_is_not_mistaken_for_robots_refusal() -> None:
+    """``HttpError`` наследует ``IgnoreRequest`` — различает точное сообщение."""
+    from core.adapters.crawl_scrapy import _is_robots_refusal
+
+    httperror = pytest.importorskip("scrapy.spidermiddlewares.httperror")
+
+    class _Failure:
+        def __init__(self, value: BaseException) -> None:
+            self.value = value
+
+    response = type("_Resp", (), {"status": 403})()
+    assert not _is_robots_refusal(_Failure(httperror.HttpError(response)))
+    assert _is_robots_refusal(_Failure(_scrapy_ignore_request(_ROBOTS_MSG)))
+
+
+# ---------------------------------------------------------------------------
+# 304: достижимость ветки «байты из кэша» через HttpErrorMiddleware
+# ---------------------------------------------------------------------------
+
+
+def test_settings_allow_304_and_keep_other_codes_on_errback() -> None:
+    """``304`` разрешён к callback; 404/410 остаются на errback-пути."""
+    crawler = ScrapyCrawler(fetcher=_page)
+    settings = crawler._build_settings(FetchPlan())
+
+    allowed = settings["HTTPERROR_ALLOWED_CODES"]
+    assert 304 in allowed
+    assert 404 not in allowed and 410 not in allowed
+
+
+def test_settings_preserve_operator_allowed_codes() -> None:
+    """Переопределения оператора не теряются: ``304`` добавляется к ним."""
+    crawler = ScrapyCrawler(
+        fetcher=_page, scrapy_settings={"HTTPERROR_ALLOWED_CODES": "404,410"}
+    )
+    settings = crawler._build_settings(FetchPlan())
+
+    assert sorted(settings["HTTPERROR_ALLOWED_CODES"]) == [304, 404, 410]
+
+
+def test_settings_do_not_duplicate_304() -> None:
+    """Идемпотентность: повторный ``304`` от оператора не дублируется."""
+    crawler = ScrapyCrawler(
+        fetcher=_page, scrapy_settings={"HTTPERROR_ALLOWED_CODES": [304]}
+    )
+    settings = crawler._build_settings(FetchPlan())
+
+    assert settings["HTTPERROR_ALLOWED_CODES"] == [304]
+
+
+def test_http_error_middleware_passes_304_with_our_settings() -> None:
+    """Проверка на **настоящем** middleware: без этого правка была бы декларацией.
+
+    ``HttpErrorMiddleware`` поднимает ``HttpError`` на любой не-2xx, поэтому до
+    правки ``304`` до callback не доходил и ветка «байты из кэша» была недостижима
+    (на живом прогоне так потерялись 240 известных активных документов).
+    """
+    httperror = pytest.importorskip("scrapy.spidermiddlewares.httperror")
+    scrapy_settings = pytest.importorskip("scrapy.settings")
+
+    crawler = ScrapyCrawler(fetcher=_page)
+    middleware = httperror.HttpErrorMiddleware(
+        scrapy_settings.Settings(crawler._build_settings(FetchPlan()))
+    )
+    middleware.crawler = type(
+        "C", (), {"spider": type("S", (), {})()}
+    )()
+
+    def _response(status: int) -> object:
+        return type("_Resp", (), {"status": status, "meta": {}})()
+
+    assert middleware.process_spider_input(_response(304)) is None  # дошёл до callback
+    assert middleware.process_spider_input(_response(200)) is None
+    with pytest.raises(httperror.HttpError):
+        middleware.process_spider_input(_response(403))
+    with pytest.raises(httperror.HttpError):
+        middleware.process_spider_input(_response(404))
