@@ -74,6 +74,7 @@ from core.pipeline.compute import (
     publish_warnings,
 )
 from core.pipeline.crawl_frontier import resolve_crawl_limits
+from core.pipeline.digests import EXECUTION_CONTRACT_FIELDS
 from core.pipeline.evaluate import CORPUS_INCOMPLETE_REVIEW_REASON
 from core.util.hashing import short_hash
 
@@ -1502,6 +1503,49 @@ def _boundary_value(manifest: RunManifest, name: str) -> Any:
     return getattr(manifest, name)
 
 
+#: Поля контракта, которые манифест хранит под **другим** именем атрибута. Это не второй
+#: механизм сравнения, а разрешение имени: значение то же (``cutoff_K`` прогона
+#: персистится как ``runs.retrieval_cutoff_K`` и читается в ``RunManifest``).
+_CONTRACT_FIELD_ATTRS: dict[str, str] = {"cutoff_K": "retrieval_cutoff_K"}
+
+
+def _contract_field_attr(name: str) -> str:
+    """Имя атрибута ``RunManifest``, несущего поле контракта (``cutoff_K`` → ``retrieval_cutoff_K``)."""
+    return _CONTRACT_FIELD_ATTRS.get(name, name)
+
+
+def _contract_field_diagnostics(
+    prev: RunManifest, curr: RunManifest
+) -> tuple[list[str], list[str]]:
+    """Детализация расхождения контракта: различающиеся и недоступные поля.
+
+    Возвращает пару ``(различающиеся, отсутствующие)``; порядок обоих списков —
+    порядок :data:`~core.pipeline.digests.EXECUTION_CONTRACT_FIELDS` (детерминизм
+    вывода). Поле считается **доступным**, только если атрибут есть на манифесте с
+    обеих сторон: ``cohort_digest``/``seeds_digest`` свёрнуты в контракт, но на
+    ``RunManifest`` их нет (там лишь ``cohort_ref``), поэтому их различие по манифесту
+    не восстановимо — и выдумывать его нельзя (A3).
+
+    Сравнение значений — через :func:`_boundary_value` (та же нормализация
+    ``llm_scenarios``, что и в legacy-ветке).
+    """
+    changed: list[str] = []
+    missing: list[str] = []
+    for name in EXECUTION_CONTRACT_FIELDS:
+        attr = _contract_field_attr(name)
+        if not (hasattr(prev, attr) and hasattr(curr, attr)):
+            missing.append(name)
+            continue
+        before = _boundary_value(prev, attr)
+        after = _boundary_value(curr, attr)
+        if before != after:
+            changed.append(
+                f"execution_change: execution_contract_digest: {name}: "
+                f"{before!r} → {after!r}"
+            )
+    return changed, missing
+
+
 def _product_set(products: Iterable[Any] | None) -> set[str] | None:
     """Нормализует набор продуктов для сравнения состава когорты.
 
@@ -1587,6 +1631,17 @@ def diff_boundary_violations(
     ``execution_change: execution_contract_digest`` (``cohort_digest`` свёрнут в
     контракт, иначе расширение читалось бы как рядовая смена условий).
 
+    **Диагностика расхождения контракта.** Дайджест — непрозрачная свёртка, поэтому
+    вслед за строкой с дайджестами перечисляются **различающиеся поля**
+    :data:`~core.pipeline.digests.EXECUTION_CONTRACT_FIELDS`, доступные на
+    ``RunManifest`` (в порядке кортежа): ``execution_change: execution_contract_digest:
+    {field}: prev → curr``. Тот же префикс — класс и парсинг причин не меняются.
+    Если ни одно доступное поле не различается, а дайджесты разные, эмитится строка о
+    **пределе диагностики** с перечнем отсутствующих на манифесте полей
+    (``cohort_digest``/``seeds_digest``): причина не выдумывается (A3). Детализация —
+    только reporting: :func:`resolve_diff_change_class` и
+    :func:`core.pipeline.run_identity.classify_change` не затрагиваются.
+
     Если **хотя бы один** дайджест ``None`` (legacy-пара) — поведение прежнее:
     перебираются :data:`METHODOLOGY_FIELDS` и :data:`EXECUTION_FIELDS`, включая
     ``index_build_id``; проверка minor/patch ``methodology_version`` не вводится
@@ -1637,6 +1692,20 @@ def diff_boundary_violations(
                     f"{prev.execution_contract_digest} → "
                     f"{curr.execution_contract_digest}"
                 )
+                # Строка дайджеста — граница (её смотрят тесты/операторы); ниже —
+                # детализация «что именно изменилось», восстановимая из манифеста.
+                changed_fields, missing_fields = _contract_field_diagnostics(prev, curr)
+                if changed_fields:
+                    violations.extend(changed_fields)
+                else:
+                    # Ни одно доступное поле не различается, а дайджесты разные:
+                    # причину не выдумываем — называем предел диагностики (A3).
+                    violations.append(
+                        "execution_change: execution_contract_digest: различающееся "
+                        "поле не восстановимо из манифеста ("
+                        + "/".join(missing_fields)
+                        + " либо иная ось)"
+                    )
         return violations
     # Legacy-пара: дайджеста нет — прежнее построчное сравнение (байт-в-байт).
     for name in EXECUTION_FIELDS:

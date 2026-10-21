@@ -1212,12 +1212,99 @@ def test_diff_boundary_compares_contract_not_index_build_id() -> None:
     assert diff_boundary_violations(prev, curr) == []
 
 
-def test_diff_boundary_contract_mismatch_is_single_reason() -> None:
-    """Расхождение контракта — одна причина (без построчного дубля ``EXECUTION_FIELDS``)."""
+def test_diff_boundary_contract_mismatch_names_contract_field() -> None:
+    """Расхождение контракта: строка дайджеста + имя различающегося поля.
+
+    Дайджест — непрозрачная свёртка; оператор обязан видеть **что** изменилось
+    (``chunker_version``), не разбирая хеш. Строка с дайджестами сохраняется как граница.
+    """
+    prev = _manifest(execution_contract_digest="ec_1", chunker_version="chunker.1")
+    curr = _manifest(execution_contract_digest="ec_2", chunker_version="chunker.2")
+    reasons = diff_boundary_violations(prev, curr)
+    assert reasons[0] == "execution_change: execution_contract_digest: ec_1 → ec_2"
+    assert reasons[1:] == [
+        "execution_change: execution_contract_digest: chunker_version: "
+        "'chunker.1' → 'chunker.2'"
+    ]
+    # Класс изменения не меняется: детализация — reporting-only.
+    assert resolve_diff_change_class(prev, curr) is ChangeClass.EXECUTION_CHANGE
+
+
+def test_diff_boundary_contract_mismatch_names_fields_in_contract_order() -> None:
+    """Несколько различающихся полей — все названы в порядке ``EXECUTION_CONTRACT_FIELDS``.
+
+    Пара выбрана так, чтобы порядок контракта **отличался** от алфавитного:
+    ``llm_scenarios`` идёт в кортеже раньше ``chunker_version``.
+    """
+    prev = _manifest(
+        execution_contract_digest="ec_1",
+        chunker_version="chunker.1",
+        llm_scenarios=[
+            ScenarioBinding(
+                run_id=RUN_ID,
+                scenario=LLMScenario.EVALUATOR,
+                model_id="model.a",
+                endpoint_kind=EndpointKind.SELF_HOST,
+                temperature=0.0,
+            )
+        ],
+    )
+    curr = _manifest(
+        execution_contract_digest="ec_2",
+        chunker_version="chunker.2",
+        llm_scenarios=[
+            ScenarioBinding(
+                run_id=RUN_ID,
+                scenario=LLMScenario.EVALUATOR,
+                model_id="model.a",
+                endpoint_kind=EndpointKind.SELF_HOST,
+                temperature=0.7,
+            )
+        ],
+    )
+    reasons = diff_boundary_violations(prev, curr)
+    assert reasons[0] == "execution_change: execution_contract_digest: ec_1 → ec_2"
+    details = reasons[1:]
+    assert len(details) == 2
+    assert "llm_scenarios" in details[0]
+    assert "chunker_version" in details[1]
+    assert resolve_diff_change_class(prev, curr) is ChangeClass.EXECUTION_CHANGE
+
+
+def test_diff_boundary_contract_mismatch_states_diagnostic_limit() -> None:
+    """Дайджесты разные, доступные поля совпадают → предел диагностики, без выдумки имён.
+
+    ``cohort_digest``/``seeds_digest`` входят в контракт, но на ``RunManifest`` их нет
+    (только ``cohort_ref``): причина не восстановима и **не** выдумывается (A3).
+    """
+    prev = _manifest(execution_contract_digest="ec_1")
+    curr = _manifest(execution_contract_digest="ec_2")
+    reasons = diff_boundary_violations(prev, curr)
+    assert reasons == [
+        "execution_change: execution_contract_digest: ec_1 → ec_2",
+        "execution_change: execution_contract_digest: различающееся поле не "
+        "восстановимо из манифеста (cohort_digest/seeds_digest либо иная ось)",
+    ]
+    assert not any("chunker_version" in reason for reason in reasons)
+    assert not any("embed_model_id" in reason for reason in reasons)
+    assert resolve_diff_change_class(prev, curr) is ChangeClass.EXECUTION_CHANGE
+
+
+def test_diff_boundary_contract_mismatch_names_contract_field_without_manifest_row_dump() -> None:
+    """Поле контракта названо и при ином имени на манифесте, без дампа ``EXECUTION_FIELDS``.
+
+    ``retrieval_cutoff_K`` — манифестное имя ``cutoff_K``: детализация называет поле
+    **контракта**, а legacy-строка ``execution_change: retrieval_cutoff_K`` не дублируется.
+    """
     prev = _manifest(execution_contract_digest="ec_1", retrieval_cutoff_K=10)
     curr = _manifest(execution_contract_digest="ec_2", retrieval_cutoff_K=25)
     reasons = diff_boundary_violations(prev, curr)
-    assert reasons == ["execution_change: execution_contract_digest: ec_1 → ec_2"]
+    assert reasons == [
+        "execution_change: execution_contract_digest: ec_1 → ec_2",
+        "execution_change: execution_contract_digest: cutoff_K: 10 → 25",
+    ]
+    assert not any(reason.startswith("execution_change: retrieval_cutoff_K:") for reason in reasons)
+    assert resolve_diff_change_class(prev, curr) is ChangeClass.EXECUTION_CHANGE
 
 
 def test_diff_boundary_names_cohort_change_instead_of_contract_mismatch() -> None:
@@ -1231,9 +1318,11 @@ def test_diff_boundary_names_cohort_change_instead_of_contract_mismatch() -> Non
     shrunk = diff_boundary_violations(prev, curr, prev_products=["p1", "p2"], curr_products=["p1"])
     assert shrunk == ["execution_change: cohort_reduction: p2"]
 
-    # Состав неизвестен — набор не выдумывается, причина остаётся общей.
+    # Состав неизвестен — набор не выдумывается, причина остаётся общей (с детализацией).
     assert diff_boundary_violations(prev, curr) == [
-        "execution_change: execution_contract_digest: ec_1 → ec_2"
+        "execution_change: execution_contract_digest: ec_1 → ec_2",
+        "execution_change: execution_contract_digest: различающееся поле не "
+        "восстановимо из манифеста (cohort_digest/seeds_digest либо иная ось)",
     ]
 
 
@@ -1245,6 +1334,15 @@ def test_diff_boundary_legacy_pair_keeps_index_build_id_boundary() -> None:
     assert reasons
     assert all(r.startswith("execution_change:") for r in reasons)
     assert any("index_build_id" in r for r in reasons)
+
+
+def test_diff_boundary_legacy_pair_keeps_row_by_row_output() -> None:
+    """Legacy-ветка не задета: построчное сравнение ``EXECUTION_FIELDS`` байт-в-байт."""
+    prev = _manifest(chunker_version="chunker.1", embed_model_id="embed.1")
+    curr = _manifest(chunker_version="chunker.2", embed_model_id="embed.1")
+    assert diff_boundary_violations(prev, curr) == [
+        "execution_change: chunker_version: 'chunker.1' → 'chunker.2'"
+    ]
 
 
 def test_resolve_diff_change_class_content_change() -> None:
