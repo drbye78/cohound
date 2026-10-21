@@ -47,3 +47,6 @@ htmlcov/
 
 # Deepwork session state (git-local)
 .slim/deepwork/
+
+# Локальный артефакт CodeGraphContext MCP (автогенерация, не зависимость проекта)
+.cgcignore
