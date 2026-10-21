@@ -68,6 +68,10 @@ class DomainProfile(BaseModel):
     max_response_bytes: int | None = Field(default=None, gt=0)
     max_depth: int | None = Field(default=None, ge=0)
     max_documents: int | None = Field(default=None, gt=0)
+    # P-rev: per-site слой операторского потолка ревалидации известных URL на продукт.
+    # ``None`` = не задано на этом слое (наследуется run/app). Ось применяется **к продукту**
+    # целиком (все корни + orphan-бакеты), а не к отдельному корню.
+    revalidate_max_documents: int | None = Field(default=None, ge=1)
     exclude_paths: list[str] | None = None
     exclude_documents: list[str] | None = None
     # P5: per-site слой уровня извлечения документных форматов (высший приоритет цепочки

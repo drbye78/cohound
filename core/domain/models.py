@@ -410,6 +410,11 @@ class CrawlRunConfig(BaseModel):
     max_response_bytes: int | None = Field(default=None, gt=0)
     max_depth: int | None = Field(default=None, ge=0)
     max_documents: int | None = Field(default=None, gt=0)
+    #: Ops «не ограничивать, а измерять»: максимум известных URL ревалидации **на продукт**
+    #: за цикл. ``None`` — ось не задана (все известные URL; поведение байт-в-байт).
+    #: Заданное значение откладывает хвост с ``stale`` в ``url_state`` и видимым
+    #: продуктовым усечением ``revalidate_max_documents``; смена — ``execution_change``.
+    revalidate_max_documents: int | None = Field(default=None, ge=1)
     exclude_paths: list[str] | None = None
     exclude_documents: list[str] | None = None
     # P5: run-слой уровня извлечения документных форматов (``run.yaml:crawl.document_level``).

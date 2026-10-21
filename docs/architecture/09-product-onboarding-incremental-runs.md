@@ -16,9 +16,11 @@
 > `build_corpus` принимает `state`/`product_modes`/`refresh_policy`; условный GET
 > (`If-None-Match`/`If-Modified-Since` из `url_state`) на локальном и executor-путях
 > (валидаторы `etag`/`last_modified`/`not_modified` больше не теряются на шве);
-> `incremental`-продукт получает known-URL из `plan_incremental` как depth-0 seeds поверх
-> прежнего BFS; при `revalidated` (304 или тот же `content_hash`) doc-версия и chunk-set
-> переиспользуются **с пересчётом `content_hash(text)`** (I19) и без вызова чанкера;
+> `incremental`-продукт получает known-URL из `plan_incremental`; `corpus` группирует их
+> по авторским корням и дренирует как depth-0 **листья** внутри frontier владельца (после
+> seed, до BFS), **вне** `max_documents`; при `revalidated` (304 или тот же `content_hash`)
+> doc-версия и chunk-set переиспользуются **с пересчётом `content_hash(text)`** (I19) и
+> без вызова чанкера;
 > пишутся `url_state`/`document_version`/`chunk_store`/`chunk_meta`; снимок получает
 > `docs_total`/`docs_new`/`docs_reused` из doc-set. `state is None` — байт-идентично
 > прежнему. MVP-4 шаг 1 (композиции, поведение сохранено): `core/pipeline/composition.py`
@@ -41,7 +43,8 @@
 > Прунинг неиспользуемых композиций реализован: `gc_index_compositions` + `hound package
 > index-gc` (живое множество — `runs.index_build_id` по run DB; §8.6). Не реализовано:
 > `offline`-reuse (честная ошибка + деградация до `revalidate`), расписание
-> `next_check_at`/потолок ревалидации, carry-forward (этап 5) — design-only.
+> `next_check_at`, carry-forward (этап 5) — design-only. Операторский потолок
+> ревалидации `crawl.revalidate_max_documents` **реализован** как default-off ось (§8.7).
 > Документ описывает целевую архитектуру сценария «`add-product` → следующий прогон
 > обновления». Он не меняет регламент `cohound-spec-v2.md`; там, где дизайн затрагивает
 > семантику §13/§4.4, это явно помечено как **решение человека** (см. §12.6 и §17).
@@ -993,11 +996,10 @@ def plan_incremental(product, roots, state, policy):
     # 1. Seeds всегда в работе (условный GET).
     for seed in roots:
         work.append(CrawlWorkItem(product, seed.url, depth=0, root=seed))
-    # 2. Известные URL: revalidate, если не истёк next_check_at.
+    # 2. Известные URL: revalidate (next_check_at в этом срезе не читается;
+    #    расписание — следующий срез).
     for u in state.iter_url_state(product):
         if policy == "offline":
-            work.append(Reuse(u)); continue
-        if u.next_check_at and now < u.next_check_at and u.doc_version_id:
             work.append(Reuse(u)); continue
         work.append(Revalidate(u, etag=u.etag, last_modified=u.last_modified))
     # 3. Discovery: sitemap/feed diff (не полный BFS) — новые URL.
@@ -1030,13 +1032,62 @@ def classify(prior: UrlState | None, page: RawPage, extracted: ExtractedDoc) -> 
   в coverage — `not_found` (разрешённое наблюдение отсутствия, как сейчас).
 - `robots/timeout/parser` → `FAILED`, coverage `blocked`; `❌` demoted.
 
+**Владение known-URL: scope-инференс, листья, бюджет.**
+
+- **Группировка по scope-инференсу, без хранимого владельца.** `plan_incremental` отдаёт
+  известные URL без владельца; `corpus` каждый цикл раскладывает их по авторским корням
+  через `Frontier.in_scope` (`_group_revalidation_items`). Побеждает **самый специфичный**
+  `root_path_prefix` (длина пути), при равенстве — авторский порядок. Постоянной
+  `owner`-колонки нет намеренно: она бы протухала при смене seed-набора и стала бы вторым
+  источником истины. Инференс воспроизводит исторического владельца для всех строк,
+  записанных pipeline, потому что `Frontier.discover` никогда не ставил в очередь URL вне
+  scope корня; каждый известный URL попадает ровно в один корень (или в orphan-бакет).
+- **Дренаж внутри frontier владельца, после seed и до BFS.** Known-URL ставятся
+  `Frontier.add_revalidate_seed` на глубину 0 **после** авторского seed и **до** BFS.
+  Порядок несёт две гарантии: enqueue до BFS позволяет `_seen` схлопнуть известный URL,
+  переоткрытый ссылкой (иначе безусловный второй GET теряет 304-экономию); а листовая
+  семантика (`_commit_outcome` не зовёт `frontier.offer` для `is_revalidation`) не даёт
+  ранее глубокой странице заново расширить discovery и сдвинуть coverage/стоимость.
+- **`max_documents` — только discovery, не ревалидация.** `add_revalidate_seed` не
+  проверяет `has_capacity`; `_commit_outcome` вызывает `note_fetched` только для
+  `freshly_fetched and not is_revalidation`, а ревалидационный fetch учитывает отдельно
+  в `Frontier.revalidation_fetched`; `_inflight_fresh` ревалидацию исключает. Потолок
+  означает «документы, которые обход этого корня **добавляет**», а не повторную проверку
+  уже установленных документов. 304 идёт через resume-path
+  (`_reuse_for_page`/`_finish_one`) и не считается новым fetch; изменённый 200
+  ревалидации — тоже не «добыча» для `max_documents`. Следствие: ровно **одна**
+  `truncation_record` на каждый дренируемый авторский корень (не на URL) и отсутствие
+  бюджетного голодания у корпусов больше потолка.
+- **Resume-скан не заряжает ревалидацию в бюджет.** В `_drain_root` скан durable-элементов
+  пропускает `revalidation_url_set` (все известные URL, включая отложенные cap'ом) до
+  `_resume_source`. Иначе resumed-сессия зарядила бы их в `max_documents`, seed вернул бы
+  `truncated`, а продукт ложно сообщил бы `complete=False` — свойство `B2`/`F13`,
+  поднятое на уровень корня.
+- **Orphans — наблюдение, не усечение.** Известные URL вне scope **всех** авторских
+  корней (корень удалён, path-key сужен) дренируются в одном synthetic-бакете на
+  `(product, origin)`: те же depth-0 листья, только ревалидация. Они видны в
+  `IndexBuild.revalidation_orphans` и одной заметке фазы («author-scope drift»), но
+  **никогда** не создают `truncation_record`, а сам orphan-факт не пишется в `errors`:
+  synthetic-причина не должна демотировать `❌` без вины авторского корня, а I12 —
+  статус не меняется. Группа known-URL, привязанная к авторскому **каталогу**
+  (feed/channel), который сам не дренируется (он разворачивается в другие корни), тоже
+  не теряется: она пишется в `revalidation_orphans` под отличимым ключом
+  `"{product_id}:catalog:{catalog_url}"` с `"via": "catalog"` и счётчиками
+  `selected`/`fetched`/`deferred`/`skipped`.
+  Вывод корня из авторского scope — отдельная явная операция, не побочный эффект
+  группировки.
+
 **Фильтры work-set.** К known-URL применяются текущие `exclude_paths`/`exclude_documents`
-и `max_documents` (per seed-root): исключённый URL не входит в `expected_sources`, а не
-считается «потерянным». Для очень больших продуктов — опциональный
-`crawl.revalidate_max_documents` (потолок числа условных GET на продукт за цикл);
-при достижении потолка остальные URL помечаются `reuse_kind=stale` и **не** могут
-поддерживать `❌` (coverage `freshness=stale`), пока не будут ревалидированы в следующем
-цикле.
+и scope-проверка. Без потолка ревалидации решение принимает сам `Frontier`: неисполнимый
+URL виден в `skipped_blacklisted`/`skipped_documents`. При заданном
+`crawl.revalidate_max_documents` те же неисполнимые URL отсекаются **до** сортировки и
+учёта слота (§8.7): иначе блэклист или pre-fetch-пропуск документа навсегда занимал бы
+голову oldest-first очереди, не обновляя `last_checked_at`, и потолок каждый цикл тратил
+бы слот на URL, который drain всё равно отвергнет. `max_documents` к ревалидации **не**
+применяется (см. выше). URL вне scope не отбрасывается молча, а становится
+orphan-бакетом. Операторский потолок числа условных GET —
+`crawl.revalidate_max_documents` (§8.7), default-off; отдельной coverage-freshness оси он
+не вводит и crawl-потолки не подменяет.
 
 **Гарантия «новый продукт не потерялся».** `onboarding` уже проверил seed'ы; `corpus`
 дополнительно (O2) не возвращает `ok` продукту с `expected_sources = 0`. `evaluate` (O3)
@@ -1352,6 +1403,78 @@ class CompositionView:
   Отдельного флага `--keep-latest`/`--ignore-runs-before` нет: у артефакта один источник
   заявки (run DB), второй критерий создал бы конкурирующий авторитет.
 
+### 8.7. Операторский потолок ревалидации (`crawl.revalidate_max_documents`)
+
+**Ось, а не политика.** Потолок отсутствует по умолчанию: владелец исходит из правила
+«не ограничивать, а измерять», поэтому это инструмент оператора для контроля стоимости
+условных GET, а не дефолтное поведение. Без оси ревалидируются **все** известные URL,
+`url_state` не получает `stale`-записей, новая причина усечения не появляется, а
+`CrawlLimits.as_dict()` не добавляет ключ — `crawl_config_digest` и дайджест-граница
+прогонов без оси не меняются.
+
+**Per product, не per root.** Потолок задаётся один раз на продукт и применяется ко всем
+его авторским корням и orphan-бакетам **вместе**; это не независимый лимит каждого корня.
+Резолв — обычная цепочка `app < run < site` (`core/pipeline/crawl_frontier.py`,
+`CrawlLimits.revalidate_max_documents`). Поскольку резолвер URL-скоуперирован, а у
+продукта нет собственного URL, site-слой выбирается по первому авторскому корню; это
+единственная точка, где «per product» требует представителя, и она не превращает потолок
+в per-root.
+
+**Отбор при срабатывании.** Сначала известные URL проходят **eligibility-фильтр** по
+resolved-лимитам владельца (авторский root-key для root-группы, origin для orphan-бакета):
+`is_blacklisted(url, limits)` и pre-fetch-пропуск документа при
+`document_level is DocumentLevel.OFF` (тот же `document_suffix`, что использует сам
+drain). Только исполнимые URL сортируются по `last_checked_at` (**NULLs first**), затем по
+`normalized_url`; первые N ревалидируются, хвост откладывается. Такой oldest-first
+ротирует автоматически: отложенные сохраняют старый `last_checked_at` и на следующем цикле
+идут первыми. Стабильное «первые N» навсегда заморило бы хвост. Отложенные URL не
+ставятся в очередь и помечаются `reuse_kind=stale` в `url_state` — это durable-сигнал
+следующему циклу, а не тихий пропуск. Неисполнимые URL не откладываются и не получают
+`stale`: они учитываются как `skipped`, поэтому не занимают слот потолка и не могут
+заморозить ротацию. Инвариант учёта на продукт:
+`selected + deferred + skipped == len(known)`; каждый известный URL попадает ровно в одну
+из трёх категорий.
+
+**Транспорт.** Отбор не ломает непрерывность ревалидационного блока в голове frontier
+(author seed → revalidation → sitemap extras → BFS). Обе ветки транспорта (executor и
+pool) впускают в волну этот блок **плюс** discovery-room, но не больше `wave_items`
+(executor) / `max_workers` (pool): чисто ревалидационная волна при исчерпанном
+`max_documents` не вырождается в волну размера `remaining` (executor при 64 — до 32
+ревалидационных URL, pool — до половины `max_workers`). Предохранитель
+`_EXECUTOR_MAX_WAVES_PER_ROOT` — BFS-guard и не расходуется волнами, в которых не было
+ни одного discovery-элемента.
+
+**Видимость.** У каждого корня, у которого были известные URL, в `truncation_record`
+появляется аддитивный `revalidation: {"selected": N, "fetched": M}`; при срабатывании
+потолка там же и у orphan-бакета появляется `"deferred": K`, а при наличии неисполнимых
+URL — `"skipped": S`. `selected` — отобранные/enqueued URL, `fetched` — фактически
+добытые (не 304/reuse), поэтому ранняя остановка не выдаёт `selected` за ревалидацию.
+`pages_fetched` остаётся **discovery-only**; ревалидационный трафик виден отдельно в
+`revalidation.fetched`, в провенансе сеанса (`revalidation_fetched`) и в
+`truncation_summary`, а текстовая сводка печатает оба числа. Продукт помечается
+`truncated=True` с `truncated_reason="revalidate_max_documents"` через существующий канал
+усечения. Новой coverage/freshness-оси это не вводит: `coverage.complete` меняется только
+по уже существующему правилу `truncated` (как у crawl-потолков), а `measured`/`pending`/
+absence-правила не трогаются. Честность потолка выражена усечением и счётчиками, а не
+подменой покрытия.
+
+**Precedence.** В `truncation_summary` crawl-потолки (`max_documents`/`max_depth`/
+`round_budget`) ранжируются **раньше** `revalidate_max_documents`: если корень усечён
+crawl-потолком, сводка сообщает его причину, а потолок ревалидации остаётся вторичным.
+
+**Split.** Профиль `split` не исполняет локальную политику отбора: если потолку есть что
+ограничивать (есть incremental-items и их больше N), `corpus` пишет явную запись в
+`errors` и ось игнорирует (ревалидируются все известные URL), а не делает вид, что потолок
+применён. При пустом/достаточно малом work-set ошибки нет: ограничивать нечего.
+
+**Остаточный разрыв `stale` (2.4.0).** В цикле срабатывания демотирование `❌` несёт
+`truncated=True`: продукт неполон, поэтому `❌` не публикуется по существующему правилу.
+Отложенный URL, который так и не ротировался (например, стал неисполнимым или никогда не
+обновлял `last_checked_at`), сам по себе **не** является freshness-гейтом; отсутствие
+отдельной проверки «`❌` не может опираться на stale-строку» — известный разрыв.
+Потребление `reuse_kind=stale` в absence-решении относится к 2.4.0
+(`measurement_origin`) и в этой версии не реализуется; словарь статусов не меняется.
+
 ---
 
 ## 9. Reuse matrix
@@ -1662,6 +1785,13 @@ O7: `❌` публикуется только если:
 - **`cohort_ref`** — новое значение при изменении состава когорты (например,
   `cohort-ru-pg-dbms-2026-10-19-r2`); `execution_change` + `golden-full`.
 - **`cycle_id`** — каждый update-цикл; не версия, а идентификатор.
+- **Семантика группировки/листьев ревалидации и потолок `revalidate_max_documents`** —
+  `execution_change`, а не `methodology_change`: без bump'а `methodology_version`, без
+  изменения `EXECUTION_FIELDS` и без bump'а схем partition/composition id.
+  `execution_contract_digest` пока не видит
+  семантику группировки/листьев, а для потолка — только его resolved-значение
+  (`crawl_config_digest` хеширует resolved limits), поэтому границу следует называть
+  свежим `cycle_id`, не изобретая новый механизм.
 - **`index_build_id`/`composition_id`** — вычисляемый; не «bump», а следствие.
 
 ### 12.5. Межцикловый diff

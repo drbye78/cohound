@@ -20,6 +20,7 @@ from core.adapters import index_format
 from core.adapters.feed_poller import LocalFeedPoller
 from core.adapters.index_npy import NpyIndexBuilder
 from core.config.crawl_sources import CrawlSource, CrawlSourcesConfig
+from core.config.deploy import CrawlConfig
 from core.config.domain_profiles import DomainProfile
 from core.domain import (
     BLOCKING_FAILURE_KINDS,
@@ -30,6 +31,7 @@ from core.domain import (
     CorpusDoc,
     CrawlItemStatus,
     CrawlRunConfig,
+    DocumentLevel,
     CrawlSessionItem,
     CrawlSessionStatus,
     CrawlStrategy,
@@ -48,7 +50,8 @@ from core.pipeline.corpus import (
     build_corpus,
     derive_corpus_coverage,
 )
-from core.pipeline.crawl_session import default_session_id
+from core.pipeline.crawl_frontier import CrawlLimits
+from core.pipeline.crawl_session import default_session_id, truncation_summary
 from core.pipeline.extract_cache import ExtractionCache
 from core.ports.crawl_executor import (
     CrawlBatch,
@@ -5598,5 +5601,761 @@ def test_identity_chain_partition_vs_composition(tmp_path: Path) -> None:
             partitions = list(state.iter_index_partitions(package_id))
             assert [p.partition_build_id for p in partitions] == [pb]
             assert partitions[0].last_used_run_id == RUN_ID
+    finally:
+        store.close()
+
+
+# --------------------------------------------------------------------------- #
+# 09 §6.3: группировка ревалидации известных URL по авторским корням
+# --------------------------------------------------------------------------- #
+
+RG_HOST_ROOT = "https://corp.test/"
+RG_PATH_ROOT = "https://corp.test/docs/"
+RG_BLOG_A = "https://corp.test/blog/a"
+RG_BLOG_B = "https://corp.test/blog/b"
+RG_DOCS_A = "https://corp.test/docs/a"
+RG_DOCS_B = "https://corp.test/docs/b"
+RG_DOCS_C = "https://corp.test/docs/c"
+
+
+def _seed_known_urls(state: SqliteStateStore, urls: list[str]) -> None:
+    """Кладёт известные URL продукта p1 в ``url_state`` (без версии документа)."""
+    for url in urls:
+        state.upsert_url_state(
+            UrlStateRow(product_id="p1", url=url, normalized_url=url)
+        )
+
+
+def _rg_pages(*urls: str, body: bytes = b"text") -> dict[str, bytes]:
+    return {url: body for url in urls}
+
+
+def test_revalidation_groups_by_most_specific_authored_root(tmp_path: Path) -> None:
+    """Два корня (host + path key): 5 известных URL → по одной записи усечения на корень.
+
+    Самый специфичный ``root_path_prefix`` побеждает: ``/docs/*`` не должны попасть в
+    host-корень. Проверяем по порядку фетчей (дренаж авторских корней — авторский порядок).
+    """
+    known = [RG_BLOG_A, RG_BLOG_B, RG_DOCS_A, RG_DOCS_B, RG_DOCS_C]
+    with SqliteStateStore(":memory:") as state:
+        _seed_known_urls(state, known)
+        pages = _rg_pages(
+            RG_HOST_ROOT, RG_PATH_ROOT, *known, body=b"text without links"
+        )
+        crawler = _StatefulCrawler(pages)
+        result = _state_run(
+            tmp_path,
+            state,
+            pages=pages,
+            urls={"p1": [RG_HOST_ROOT, RG_PATH_ROOT]},
+            crawler=crawler,
+        )
+        build = _build_of(result)
+        assert len(build.truncation) == 2
+        assert {record["root"] for record in build.truncation} == {
+            RG_HOST_ROOT,
+            RG_PATH_ROOT,
+        }
+        assert not ({record["root"] for record in build.truncation} & set(known))
+        calls = [url for url, _plan in crawler.calls]
+        assert calls.count(RG_DOCS_A) == 1
+        assert calls.count(RG_DOCS_B) == 1
+        assert calls.count(RG_DOCS_C) == 1
+        # path-key URL дренируется вместе с path-корнем, а не с host-корнем.
+        path_root_at = calls.index(RG_PATH_ROOT)
+        assert all(calls.index(url) > path_root_at for url in (RG_DOCS_A, RG_DOCS_B, RG_DOCS_C))
+        host_root_at = calls.index(RG_HOST_ROOT)
+        assert all(host_root_at < calls.index(url) < path_root_at for url in (RG_BLOG_A, RG_BLOG_B))
+        assert build.truncated is False
+
+
+def test_revalidation_does_not_charge_max_documents(tmp_path: Path) -> None:
+    """``max_documents`` — потолок discovery: 30 известных URL не усекают продукт."""
+    known = [f"https://corp.test/k/{i}" for i in range(30)]
+    with SqliteStateStore(":memory:") as state:
+        _seed_known_urls(state, known)
+        pages = _rg_pages(RG_HOST_ROOT, *known, body=b"text")
+        crawler = _StatefulCrawler(pages)
+        result = _state_run(
+            tmp_path,
+            state,
+            pages=pages,
+            urls={"p1": [RG_HOST_ROOT]},
+            crawler=crawler,
+            crawl_defaults=CrawlRunConfig(max_documents=5),
+        )
+        build = _build_of(result)
+        record = build.truncation[0]
+        assert record["truncated"] is False
+        assert build.truncated is False
+        # pages_fetched — только документы, которые добавил обход (авторский seed).
+        assert record["pages_fetched"] == 1
+        assert record["limits"]["max_documents"] == 5
+        assert {url for url, _p in crawler.calls} == {RG_HOST_ROOT, *known}
+
+
+def test_revalidated_page_is_leaf_and_does_not_expand_discovery(
+    tmp_path: Path,
+) -> None:
+    """Ревалидированная страница — depth-0 лист: её ссылки не расширяют BFS."""
+    known = "https://corp.test/known"
+    links = [f"https://corp.test/from-known/{i}" for i in range(3)]
+    html = (
+        "<html><body>"
+        + "".join(f'<a href="{url}">x</a>' for url in links)
+        + "</body></html>"
+    ).encode()
+    with SqliteStateStore(":memory:") as state:
+        _seed_known_urls(state, [known])
+        pages = {
+            RG_HOST_ROOT: b"root without links",
+            known: html,
+            **{url: b"should not be fetched" for url in links},
+        }
+        crawler = _StatefulCrawler(pages)
+        store = SqliteStore(":memory:")
+        _make_run(store)
+        try:
+            result = _state_run(
+                tmp_path,
+                state,
+                pages=pages,
+                urls={"p1": [RG_HOST_ROOT]},
+                crawler=crawler,
+                store=store,
+                run_id=RUN_ID,
+                crawl_defaults=CrawlRunConfig(max_depth=1),
+            )
+            calls = {url for url, _p in crawler.calls}
+            assert calls == {RG_HOST_ROOT, known}
+            assert not calls & set(links)
+            assert len(_items(store)) == 2, "лист не добавил ни одного элемента сеанса"
+            assert _build_of(result).revalidation_orphans == {}
+        finally:
+            store.close()
+
+
+def test_revalidation_orphans_are_observation_only(tmp_path: Path) -> None:
+    """Известный URL вне всех авторских корней: один origin-бакет, без truncation/errors."""
+    orphan = "https://other.test/legacy/page"
+    with SqliteStateStore(":memory:") as state:
+        _seed_known_urls(state, [orphan])
+        pages = _rg_pages(RG_PATH_ROOT, orphan, body=b"orphan page")
+        crawler = _StatefulCrawler(pages)
+        result = _state_run(
+            tmp_path,
+            state,
+            pages=pages,
+            urls={"p1": [RG_PATH_ROOT]},
+            crawler=crawler,
+        )
+        build = _build_of(result)
+        assert build.revalidation_orphans == {
+            "p1:https://other.test": {"selected": 1, "fetched": 1}
+        }
+        # Никакой synthetic-записи усечения: запись ровно одна — авторский корень.
+        assert len(build.truncation) == 1
+        assert build.truncation[0]["root"] == RG_PATH_ROOT
+        assert build.truncated is False
+        assert orphan in {url for url, _p in crawler.calls}
+        assert "https://other.test" not in {url for url, _p in crawler.calls}
+        assert not any("orphan" in err for err in result.errors)
+        notes = [entry for entry in result.log_entries if isinstance(entry, str)]
+        assert any("author-scope drift" in note for note in notes)
+
+
+def test_revalidation_groups_survive_resume_without_truncation(
+    tmp_path: Path,
+) -> None:
+    """Повторный прогон того же сеанса: те же 2 записи, ``truncated`` не поднимается."""
+    known = [RG_BLOG_A, RG_BLOG_B, RG_DOCS_A, RG_DOCS_B, RG_DOCS_C]
+    with SqliteStateStore(":memory:") as state:
+        _seed_known_urls(state, known)
+        store = SqliteStore(":memory:")
+        _make_run(store)
+        pages = _rg_pages(RG_HOST_ROOT, RG_PATH_ROOT, *known, body=b"resume text")
+        try:
+            first = _state_run(
+                tmp_path / "r1",
+                state,
+                pages=pages,
+                urls={"p1": [RG_HOST_ROOT, RG_PATH_ROOT]},
+                crawler=_StatefulCrawler(pages),
+                store=store,
+                run_id=RUN_ID,
+            )
+            second = _state_run(
+                tmp_path / "r2",
+                state,
+                pages=pages,
+                urls={"p1": [RG_HOST_ROOT, RG_PATH_ROOT]},
+                crawler=_StatefulCrawler(pages),
+                store=store,
+                run_id=RUN_ID,
+            )
+            for result in (first, second):
+                build = _build_of(result)
+                assert len(build.truncation) == 2
+                assert {record["root"] for record in build.truncation} == {
+                    RG_HOST_ROOT,
+                    RG_PATH_ROOT,
+                }
+                assert build.truncated is False
+            session = store.get_crawl_session(SESSION_ID)
+            assert session is not None and session.status is CrawlSessionStatus.COMPLETED
+        finally:
+            store.close()
+
+
+def test_blacklisted_root_still_revalidates_known_urls(tmp_path: Path) -> None:
+    """Заблокированный seed не теряет группу: известные URL ревалидируются и видны."""
+    root = "https://corp.test/docs/start"
+    known = [f"{root}/page1", f"{root}/page2"]
+    with SqliteStateStore(":memory:") as state:
+        _seed_known_urls(state, known)
+        pages = _rg_pages(*known, body=b"revalidated")
+        crawler = _StatefulCrawler(pages)
+        result = _state_run(
+            tmp_path,
+            state,
+            pages=pages,
+            urls={"p1": [root]},
+            crawler=crawler,
+            crawl_defaults=CrawlRunConfig(exclude_paths=["/docs/start"]),
+        )
+        build = _build_of(result)
+        record = build.truncation[0]
+        assert record["root"] == root
+        assert record["skipped_blacklisted"] == [root]
+        assert build.truncated is False
+        assert [url for url, _p in crawler.calls] == known
+        assert any("seed зачёркнут блэклистом" in err for err in result.errors)
+
+
+def test_state_none_keeps_previous_truncation_shape(tmp_path: Path) -> None:
+    """``state is None``: прежняя форма — запись на авторский корень, без orphan-ключа."""
+    pages = _rg_pages(RG_HOST_ROOT, RG_PATH_ROOT, body=b"legacy")
+    result = _build(
+        tmp_path,
+        pages=pages,
+        urls={"p1": [RG_HOST_ROOT, RG_PATH_ROOT]},
+    )
+    build = _build_of(result)
+    assert len(build.truncation) == 2
+    assert {record["root"] for record in build.truncation} == {
+        RG_HOST_ROOT,
+        RG_PATH_ROOT,
+    }
+    assert build.revalidation_orphans == {}
+    assert not [entry for entry in result.log_entries if isinstance(entry, str)]
+
+
+# --------------------------------------------------------------------------- #
+# Ops-потолок ревалидации (crawl.revalidate_max_documents): default-off, видимый defer
+# --------------------------------------------------------------------------- #
+
+
+def _revalidation_counts(build: IndexBuild) -> tuple[int, int]:
+    """Суммы ``selected``/``deferred`` по корневым записям и orphan-бакетам.
+
+    Продуктовый потолок обязан считаться по продукту целиком — поэтому суммы
+    проверяются вместе, а не по каждой записи отдельно.
+    """
+    selected = deferred = 0
+    for record in build.truncation:
+        info = record.get("revalidation") or {}
+        selected += int(info.get("selected", 0))
+        deferred += int(info.get("deferred", 0))
+    for info in build.revalidation_orphans.values():
+        selected += int(info.get("selected", 0))
+        deferred += int(info.get("deferred", 0))
+    return selected, deferred
+
+
+def _revalidation_accounting(build: IndexBuild) -> tuple[int, int, int]:
+    """``(selected, deferred, skipped)`` по корневым записям и orphan-бакетам."""
+    selected = deferred = skipped = 0
+    for record in build.truncation:
+        info = record.get("revalidation") or {}
+        selected += int(info.get("selected", 0))
+        deferred += int(info.get("deferred", 0))
+        skipped += int(info.get("skipped", 0))
+    for info in build.revalidation_orphans.values():
+        selected += int(info.get("selected", 0))
+        deferred += int(info.get("deferred", 0))
+        skipped += int(info.get("skipped", 0))
+    return selected, deferred, skipped
+
+
+def test_revalidate_cap_axis_absent_is_default_off(tmp_path: Path) -> None:
+    """Ось не задана: все известные URL ревалидируются, ``stale`` не пишется.
+
+    ``CrawlLimits.as_dict()`` не добавляет ключ, поэтому дайджест прогонов без оси
+    байт-идентичен прежнему (проверяем форму напрямую).
+    """
+    assert "revalidate_max_documents" not in CrawlLimits().as_dict()
+    assert CrawlLimits(revalidate_max_documents=2).as_dict()[
+        "revalidate_max_documents"
+    ] == 2
+    known = [RG_BLOG_A, RG_BLOG_B, RG_DOCS_A, RG_DOCS_B, RG_DOCS_C]
+    with SqliteStateStore(":memory:") as state:
+        _seed_known_urls(state, known)
+        pages = _rg_pages(RG_HOST_ROOT, *known, body=b"text")
+        crawler = _StatefulCrawler(pages)
+        result = _state_run(
+            tmp_path,
+            state,
+            pages=pages,
+            urls={"p1": [RG_HOST_ROOT]},
+            crawler=crawler,
+            crawl_defaults=CrawlRunConfig(),
+        )
+        build = _build_of(result)
+        assert {url for url, _plan in crawler.calls} == {RG_HOST_ROOT, *known}
+        assert build.truncated is False
+        assert build.truncation[0]["revalidation"] == {
+            "selected": len(known),
+            "fetched": len(known),
+        }
+        assert "deferred" not in build.truncation[0]["revalidation"]
+        assert all(
+            state.get_url_state("p1", url).reuse_kind != "stale" for url in known
+        )
+
+
+def test_revalidate_cap_defers_tail_with_stale_and_visible_truncation(
+    tmp_path: Path,
+) -> None:
+    """``revalidate_max_documents=2`` из 5: 2 ревалидированы, 3 отложены и ``stale``."""
+    known = [RG_BLOG_A, RG_BLOG_B, RG_DOCS_A, RG_DOCS_B, RG_DOCS_C]
+    with SqliteStateStore(":memory:") as state:
+        _seed_known_urls(state, known)
+        pages = _rg_pages(RG_HOST_ROOT, *known, body=b"text")
+        crawler = _StatefulCrawler(pages)
+        result = _state_run(
+            tmp_path,
+            state,
+            pages=pages,
+            urls={"p1": [RG_HOST_ROOT]},
+            crawler=crawler,
+            crawl_defaults=CrawlRunConfig(revalidate_max_documents=2),
+        )
+        build = _build_of(result)
+        fetched_known = {url for url, _plan in crawler.calls if url in known}
+        assert fetched_known == {RG_BLOG_A, RG_BLOG_B}
+        assert state.get_url_state("p1", RG_DOCS_A).reuse_kind == "stale"
+        assert state.get_url_state("p1", RG_DOCS_B).reuse_kind == "stale"
+        assert state.get_url_state("p1", RG_DOCS_C).reuse_kind == "stale"
+        assert build.truncated is True
+        assert build.truncation[0]["truncated"] is True
+        assert build.truncation[0]["truncated_reason"] == "revalidate_max_documents"
+        assert build.truncation[0]["revalidation"] == {
+            "selected": 2,
+            "fetched": 2,
+            "deferred": 3,
+        }
+        assert _revalidation_counts(build) == (2, 3)
+        summary = truncation_summary({"effective_limits": {"roots": build.truncation}})
+        assert summary["truncated_reason"] == "revalidate_max_documents"
+
+
+def test_revalidate_cap_rotates_oldest_first(tmp_path: Path) -> None:
+    """Второй прогон выбирает другой пары: отложенные (старые) идут первыми."""
+    known = [RG_BLOG_A, RG_BLOG_B, RG_DOCS_A, RG_DOCS_B, RG_DOCS_C]
+    with SqliteStateStore(":memory:") as state:
+        _seed_known_urls(state, known)
+        pages = _rg_pages(RG_HOST_ROOT, *known, body=b"text")
+        first = _state_run(
+            tmp_path / "r1",
+            state,
+            pages=pages,
+            urls={"p1": [RG_HOST_ROOT]},
+            crawler=_StatefulCrawler(pages),
+            crawl_defaults=CrawlRunConfig(revalidate_max_documents=2),
+        )
+        assert _build_of(first).truncation[0]["revalidation"] == {
+            "selected": 2,
+            "fetched": 2,
+            "deferred": 3,
+        }
+        second_crawler = _StatefulCrawler(pages)
+        second = _state_run(
+            tmp_path / "r2",
+            state,
+            pages=pages,
+            urls={"p1": [RG_HOST_ROOT]},
+            crawler=second_crawler,
+            crawl_defaults=CrawlRunConfig(revalidate_max_documents=2),
+        )
+        fetched_known = {
+            url for url, _plan in second_crawler.calls if url in known
+        }
+        # Первые два (blog/a, blog/b) теперь имеют свежий last_checked_at; хвост — старый.
+        assert fetched_known == {RG_DOCS_A, RG_DOCS_B}
+        assert state.get_url_state("p1", RG_BLOG_A).reuse_kind == "stale"
+        assert state.get_url_state("p1", RG_BLOG_B).reuse_kind == "stale"
+        assert state.get_url_state("p1", RG_DOCS_C).reuse_kind == "stale"
+        assert _revalidation_counts(_build_of(second)) == (2, 3)
+
+
+def test_revalidate_cap_precedence_keeps_crawl_ceiling_reason(tmp_path: Path) -> None:
+    """``max_documents`` и capped-ревалидация: ``truncation_summary`` сообщает crawl-потолок."""
+    known = [RG_BLOG_A, RG_BLOG_B, RG_DOCS_A, RG_DOCS_B, RG_DOCS_C]
+    discoverable = "https://corp.test/new"
+    with SqliteStateStore(":memory:") as state:
+        _seed_known_urls(state, known)
+        pages = {
+            RG_HOST_ROOT: (
+                f'<a href="{discoverable}">new</a>'.encode()
+            ),
+            discoverable: b"new",
+            **{url: b"text" for url in known},
+        }
+        result = _state_run(
+            tmp_path,
+            state,
+            pages=pages,
+            urls={"p1": [RG_HOST_ROOT]},
+            crawler=_StatefulCrawler(pages),
+            crawl_defaults=CrawlRunConfig(
+                max_depth=1,
+                max_documents=1,
+                revalidate_max_documents=2,
+            ),
+        )
+        build = _build_of(result)
+        record = build.truncation[0]
+        assert record["truncated_reason"] == "max_documents"
+        assert record["revalidation"]["selected"] == 2
+        assert record["revalidation"]["deferred"] == 3
+        summary = truncation_summary({"effective_limits": {"roots": build.truncation}})
+        assert summary["truncated_reason"] == "max_documents"
+
+
+def test_revalidate_cap_is_product_wide_across_roots_and_orphans(
+    tmp_path: Path,
+) -> None:
+    """Cap делит N между корнями и orphan-бакетами; deferred виден в обеих записях."""
+    orphan_a = "https://other.test/legacy/a"
+    orphan_b = "https://other.test/legacy/b"
+    known = [
+        RG_BLOG_A,
+        RG_BLOG_B,
+        RG_DOCS_A,
+        RG_DOCS_B,
+        RG_DOCS_C,
+        orphan_a,
+        orphan_b,
+    ]
+    with SqliteStateStore(":memory:") as state:
+        _seed_known_urls(state, known)
+        pages = _rg_pages(
+            RG_HOST_ROOT, RG_PATH_ROOT, *known, body=b"text"
+        )
+        result = _state_run(
+            tmp_path,
+            state,
+            pages=pages,
+            urls={"p1": [RG_HOST_ROOT, RG_PATH_ROOT]},
+            crawler=_StatefulCrawler(pages),
+            crawl_defaults=CrawlRunConfig(revalidate_max_documents=3),
+        )
+        build = _build_of(result)
+        by_root = {record["root"]: record for record in build.truncation}
+        assert by_root[RG_HOST_ROOT]["revalidation"] == {
+            "selected": 2,
+            "fetched": 2,
+            "deferred": 0,
+        }
+        assert by_root[RG_PATH_ROOT]["revalidation"] == {
+            "selected": 1,
+            "fetched": 1,
+            "deferred": 2,
+        }
+        assert build.revalidation_orphans == {
+            "p1:https://other.test": {
+                "selected": 0,
+                "fetched": 0,
+                "deferred": 2,
+            }
+        }
+        assert _revalidation_counts(build) == (3, 4)
+        assert build.truncated is True
+
+
+def test_revalidate_cap_split_transport_is_visibly_unsupported(
+    tmp_path: Path,
+) -> None:
+    """``split`` не исполняет локальную политику отбора — ось явно игнорируется."""
+    known = [RG_BLOG_A, RG_BLOG_B, RG_DOCS_A]
+    with SqliteStateStore(":memory:") as state:
+        _seed_known_urls(state, known)
+        store = SqliteStore(":memory:")
+        _make_run(store)
+        try:
+            executor = _FakeExecutor(
+                pages=_rg_pages(RG_HOST_ROOT, *known, body=b"text")
+            )
+            result = _run_executor_build(
+                tmp_path,
+                store,
+                executor,
+                urls={"p1": [RG_HOST_ROOT]},
+                state=state,
+                product_modes={"p1": "incremental"},
+                crawl_defaults=CrawlRunConfig(revalidate_max_documents=1),
+            )
+            assert any(
+                "revalidate_max_documents" in error and "split" in error
+                for error in result.errors
+            )
+            submitted = {work.url for wave in executor.submits for work in wave}
+            assert set(known) <= submitted
+            build = _build_of(result)
+            assert build.truncated is False
+            assert all(
+                state.get_url_state("p1", url).reuse_kind != "stale" for url in known
+            )
+            assert all(
+                "deferred" not in (record.get("revalidation") or {})
+                for record in build.truncation
+            )
+        finally:
+            store.close()
+
+
+def test_revalidate_cap_prefilters_ineligible_and_rotates(tmp_path: Path) -> None:
+    """M1: блэклист/pre-fetch-пропуск не занимают слот потолка навсегда.
+
+    ``cap=1``, два неисполнимых известных URL (``exclude_paths`` и ``.pdf`` при
+    ``document_level=off``) и два исполнимых: каждый цикл обязан ревалидировать
+    **другой** исполнимый URL, а ``selected+deferred+skipped == len(known)``.
+    """
+    pdf = "https://corp.test/blog/scan.pdf"
+    known = [RG_BLOG_A, pdf, RG_DOCS_A, RG_DOCS_B]
+    with SqliteStateStore(":memory:") as state:
+        _seed_known_urls(state, known)
+        pages = _rg_pages(RG_HOST_ROOT, *known, body=b"text")
+        defaults = CrawlRunConfig(
+            exclude_paths=["/blog/a"],
+            document_level=DocumentLevel.OFF,
+            revalidate_max_documents=1,
+        )
+        first_crawler = _StatefulCrawler(pages)
+        first = _state_run(
+            tmp_path / "r1",
+            state,
+            pages=pages,
+            urls={"p1": [RG_HOST_ROOT]},
+            crawler=first_crawler,
+            crawl_defaults=defaults,
+        )
+        first_build = _build_of(first)
+        first_fetched = {url for url, _plan in first_crawler.calls if url in known}
+        assert first_fetched == {RG_DOCS_A}
+        assert first_build.truncation[0]["revalidation"] == {
+            "selected": 1,
+            "fetched": 1,
+            "deferred": 1,
+            "skipped": 2,
+        }
+        assert _revalidation_accounting(first_build) == (1, 1, 2)
+        assert state.get_url_state("p1", RG_DOCS_B).reuse_kind == "stale"
+
+        second_crawler = _StatefulCrawler(pages)
+        second = _state_run(
+            tmp_path / "r2",
+            state,
+            pages=pages,
+            urls={"p1": [RG_HOST_ROOT]},
+            crawler=second_crawler,
+            crawl_defaults=defaults,
+        )
+        second_build = _build_of(second)
+        second_fetched = {url for url, _plan in second_crawler.calls if url in known}
+        assert second_fetched == {RG_DOCS_B}
+        assert _revalidation_accounting(second_build) == (1, 1, 2)
+
+
+def test_executor_revalidation_waves_do_not_trip_breaker(tmp_path: Path) -> None:
+    """M2: 1005 известных URL, ``max_documents=2`` — все отправлены, без round_budget."""
+    known = [f"https://corp.test/known/{i:04d}" for i in range(1005)]
+    with SqliteStateStore(":memory:") as state:
+        _seed_known_urls(state, known)
+        store = SqliteStore(":memory:")
+        _make_run(store)
+        try:
+            pages = {RG_HOST_ROOT: b"root", **{url: b"text" for url in known}}
+            executor = _FakeExecutor(pages=pages)
+            result = _run_executor_build(
+                tmp_path,
+                store,
+                executor,
+                urls={"p1": [RG_HOST_ROOT]},
+                state=state,
+                product_modes={"p1": "incremental"},
+                crawl_defaults=CrawlRunConfig(max_documents=2),
+                executor_wave_items=64,
+            )
+            submitted = [work.url for wave in executor.submits for work in wave]
+            assert set(known) <= set(submitted)
+            assert all(len(wave) <= 64 for wave in executor.submits)
+            assert not any("предохранитель" in error for error in result.errors)
+            build = _build_of(result)
+            assert all(
+                record.get("truncated_reason") != "round_budget"
+                for record in build.truncation
+            )
+        finally:
+            store.close()
+
+
+def test_revalidate_cap_leftover_catalog_bucket_is_visible(tmp_path: Path) -> None:
+    """S2: группа известных URL под каталогом — видимый бакет ``via: catalog``."""
+    known = [f"{FEED_URL}/legacy/a", f"{FEED_URL}/legacy/b"]
+    with SqliteStateStore(":memory:") as state:
+        _seed_known_urls(state, known)
+        store = SqliteStore(":memory:")
+        _make_run(store)
+        try:
+            pages = {ENTRY_1: b"entry", **{url: b"text" for url in known}}
+            result = _state_run(
+                tmp_path,
+                state,
+                pages=pages,
+                urls={"p1": [FEED_URL]},
+                crawler=_StatefulCrawler(pages),
+                store=store,
+                run_id=RUN_ID,
+                crawl_sources=_feed_sources(),
+                pollers={"feed": _FakePoller([FeedEntry(url=ENTRY_1)])},
+                crawl_defaults=CrawlRunConfig(revalidate_max_documents=1),
+            )
+            build = _build_of(result)
+            info = build.revalidation_orphans[f"p1:catalog:{FEED_URL}"]
+            assert info == {
+                "selected": 1,
+                "fetched": 1,
+                "deferred": 1,
+                "via": "catalog",
+            }
+            assert _revalidation_accounting(build) == (1, 1, 0)
+        finally:
+            store.close()
+
+
+def test_revalidation_orphans_one_bucket_per_origin(tmp_path: Path) -> None:
+    """M1/S2: вне scope — ровно один synthetic-бакет на ``(product, origin)``."""
+    known = [
+        "https://other.test/a",
+        "https://other.test/b",
+        "https://third.test/a",
+    ]
+    with SqliteStateStore(":memory:") as state:
+        _seed_known_urls(state, known)
+        pages = _rg_pages(RG_HOST_ROOT, *known, body=b"text")
+        result = _state_run(
+            tmp_path,
+            state,
+            pages=pages,
+            urls={"p1": [RG_HOST_ROOT]},
+            crawler=_StatefulCrawler(pages),
+        )
+        build = _build_of(result)
+        assert set(build.revalidation_orphans) == {
+            "p1:https://other.test",
+            "p1:https://third.test",
+        }
+        assert build.revalidation_orphans["p1:https://other.test"] == {
+            "selected": 2,
+            "fetched": 2,
+        }
+        assert build.revalidation_orphans["p1:https://third.test"] == {
+            "selected": 1,
+            "fetched": 1,
+        }
+
+
+def test_revalidate_cap_state_read_failure_is_visible_and_ignored(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """M1: сбой ``iter_url_state`` в cap — явная ошибка, ось игнорируется целиком."""
+    known = [RG_BLOG_A, RG_DOCS_A]
+    with SqliteStateStore(":memory:") as state:
+        _seed_known_urls(state, known)
+        original = state.iter_url_state
+        calls = 0
+
+        def _maybe_raise(product_id: str):  # noqa: ANN202 — тестовая обёртка
+            nonlocal calls
+            calls += 1
+            if calls > 1:
+                raise RuntimeError("state unavailable")
+            return original(product_id)
+
+        monkeypatch.setattr(state, "iter_url_state", _maybe_raise)
+        pages = _rg_pages(RG_HOST_ROOT, *known, body=b"text")
+        crawler = _StatefulCrawler(pages)
+        result = _state_run(
+            tmp_path,
+            state,
+            pages=pages,
+            urls={"p1": [RG_HOST_ROOT]},
+            crawler=crawler,
+            crawl_defaults=CrawlRunConfig(revalidate_max_documents=1),
+        )
+        fetched = {url for url, _plan in crawler.calls if url in known}
+        assert fetched == set(known)
+        errors = [
+            error for error in result.errors if "state.iter_url_state" in error
+        ]
+        assert len(errors) == 1
+        build = _build_of(result)
+        assert build.truncation[0]["revalidation"] == {
+            "selected": 2,
+            "fetched": 2,
+        }
+        assert all(
+            state.get_url_state("p1", url).reuse_kind != "stale" for url in known
+        )
+
+
+def test_revalidation_fetched_is_not_pages_fetched(tmp_path: Path) -> None:
+    """S1: ``pages_fetched`` остаётся discovery-only, ревалидация — в ``fetched``."""
+    known = [RG_BLOG_A, RG_BLOG_B, RG_DOCS_A]
+    with SqliteStateStore(":memory:") as state:
+        _seed_known_urls(state, known)
+        pages = _rg_pages(RG_HOST_ROOT, *known, body=b"text")
+        result = _state_run(
+            tmp_path,
+            state,
+            pages=pages,
+            urls={"p1": [RG_HOST_ROOT]},
+            crawler=_StatefulCrawler(pages),
+        )
+        record = _build_of(result).truncation[0]
+        assert record["pages_fetched"] == 1
+        assert record["revalidation"] == {"selected": 3, "fetched": 3}
+
+
+def test_revalidate_cap_split_no_false_error_without_cappable_items(
+    tmp_path: Path,
+) -> None:
+    """S3: split-ошибка не возникает, если потолку нечего ограничивать."""
+    store = SqliteStore(":memory:")
+    _make_run(store)
+    try:
+        executor = _FakeExecutor(pages={RG_HOST_ROOT: b"text"})
+        result = _run_executor_build(
+            tmp_path,
+            store,
+            executor,
+            urls={"p1": [RG_HOST_ROOT]},
+            crawl_defaults=CrawlRunConfig(revalidate_max_documents=1),
+        )
+        assert not any(
+            "revalidate_max_documents" in error and "split" in error
+            for error in result.errors
+        )
     finally:
         store.close()

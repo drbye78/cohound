@@ -365,6 +365,11 @@ class CrawlConfig(BaseModel):
     max_response_bytes: int = Field(default=DEFAULT_MAX_RESPONSE_BYTES, gt=0)
     max_depth: int = Field(default=0, ge=0)
     max_documents: int | None = Field(default=None, gt=0)
+    #: Операторский потолок ревалидации известных URL **на продукт** за цикл
+    #: (``crawl.revalidate_max_documents``). ``None`` — ось не задана: ревалидируются
+    #: все известные URL (поведение байт-в-байт). Задание оси — видимое отложенное
+    #: усечение (``revalidate_max_documents``) + ``stale`` в ``url_state``, не тихий дроп.
+    revalidate_max_documents: int | None = Field(default=None, ge=1)
     exclude_paths: list[str] | None = None
     exclude_documents: list[str] | None = None
     # P5: уровень извлечения документных форматов (PDF/Office). Дефолт ``full`` =

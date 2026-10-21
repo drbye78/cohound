@@ -149,7 +149,12 @@ from core.domain import (
     RefreshPolicy,
     ReuseKind,
 )
-from core.pipeline.crawl_frontier import Frontier, resolve_crawl_limits
+from core.pipeline.crawl_frontier import (
+    CrawlLimits,
+    Frontier,
+    is_blacklisted,
+    resolve_crawl_limits,
+)
 from core.pipeline.crawl_session import (
     default_session_id,
     finalize_session,
@@ -791,6 +796,14 @@ class IndexBuild:
     :param partitions_reused: сколько продукт-партиций переиспользовано с диска без
         вызова ``embedder.embed`` (09 §8.5). Ноль — ни одна партиция не переиспользована
         (первый прогон/нет ``index_root``); значение честное, не оценка.
+    :param revalidation_orphans: наблюдение (не ``errors``, не смена статуса I12):
+        известные URL инкрементального продукта, не попадающие ни в один авторский корень.
+        Ключ ``product_id:origin`` → ``{"selected": N, "fetched": M}``; один synthetic-бакет
+        на (продукт, origin). При операторском потолке ``revalidate_max_documents``
+        добавляются ``"deferred": K`` (отложенные) и ``"skipped": S`` (неисполнимые);
+        leftover-группа каталога пишется под ``product_id:catalog:{url}`` с
+        ``"via": "catalog"``. Бакеты **не** пишутся в ``truncation`` — иначе синтетическая
+        причина демотировала бы ``❌`` без вины авторского корня.
     """
 
     index_build_id: str
@@ -806,12 +819,19 @@ class IndexBuild:
     #: записи — ``truncation``. Политико-усечённый корпус не «полон» (см. статус сеанса).
     truncated: bool = False
     #: D1/G: детализация усечения по ``(product, seed-root)``: эффективные лимиты, число
-    #: добытых страниц, причина (``max_documents``/``max_depth``), зачёркнутые блэклистом URL.
+    #: добытых страниц, причина (``max_documents``/``max_depth``/``round_budget``, а для
+    #: операторского потолка ревалидации — ``revalidate_max_documents``), зачёркнутые
+    #: блэклистом URL и аддитивный ``revalidation``-счётчик.
     truncation: list[dict[str, Any]] = field(default_factory=list)
     #: P5: видимые пропуски документов уровнем ``off`` (решение **никогда** не тихо):
     #: ``{product_id, url, reason: url_suffix|content_type, level}``. Питает канал
     #: усечения/аномалии (``source_scope: exhaustive`` поверх «прореженного» продукта).
     document_skips: list[dict[str, Any]] = field(default_factory=list)
+    #: 09 §6.3: известные URL вне scope всех авторских корней (author-scope drift):
+    #: ``"product_id:origin"`` → ``{"selected": N, "fetched": M}`` (+ ``deferred``/
+    #: ``skipped`` при потолке). Каталоговый leftover — ``product_id:catalog:{url}`` с
+    #: ``"via": "catalog"``. Наблюдение, не усечение и не ошибка.
+    revalidation_orphans: dict[str, dict[str, Any]] = field(default_factory=dict)
     #: 09 §6.3: счётчики документов по продукту (``total``/``new``/``reused``). Пусто —
     #: durable-субстрата нет (legacy), счётчики не фабрикуются.
     doc_counters: dict[str, dict[str, int]] = field(default_factory=dict)
@@ -947,6 +967,16 @@ def _looks_like_html(page: RawPage) -> bool:
         return "html" in content_type or "xml" in content_type
     head = page.content.lstrip()[:256].lower()
     return head.startswith(b"<html") or head.startswith(b"<!doctype") or b"<a " in head
+
+
+def _url_origin(url: str) -> str:
+    """Origin URL (``scheme://host[:port]``) — ключ orphan-бакета ревалидации.
+
+    ``url_state`` не хранит seed-происхождение; для известного URL вне scope всех
+    авторских корней единственная устойчивая группировка — origin (продукт + origin).
+    """
+    parts = urlsplit(url)
+    return f"{(parts.scheme or '').lower()}://{parts.netloc.lower()}"
 
 
 def _sitemap_skip_class(loc: str, root_url: str) -> str:
@@ -1783,6 +1813,9 @@ def build_corpus(
     #: P5: видимые пропуски документов уровнем ``off`` (никогда не тихо) — агрегат по всем
     #: корням/продуктам прогона; кладётся в ``IndexBuild.document_skips``.
     document_skips: list[dict[str, Any]] = []
+    #: 09 §6.3: известные URL вне scope авторских корней — наблюдение по (продукт, origin).
+    revalidation_orphans: dict[str, dict[str, Any]] = {}
+    revalidation_orphan_total = 0
     #: 09 §6.3: честные счётчики документов по продукту (``total``/``new``/``reused``).
     #: Заполняются только при наличии durable-субстрата (``state``), иначе карта пуста.
     doc_counters: dict[str, dict[str, int]] = {}
@@ -3494,20 +3527,31 @@ def build_corpus(
     truncation_records: list[dict[str, Any]] = []
     truncated_products: set[str] = set()
     pages_fetched_total = 0
+    #: S1: фактически добытые ревалидационные страницы (discovery-счётчик отдельно).
+    revalidation_fetched_total = 0
 
     def _record_root_outcome(
         product_id: str,
         root_url: str,
         frontier: Frontier,
         sitemap_skips: Sequence[Mapping[str, Any]],
+        *,
+        revalidation: Mapping[str, Any] | None = None,
     ) -> None:
         """Провенанс одного seed-root после drain: усечение/пропуски (D1/G, P5, D3/F10).
 
         Общий шаг авторских корней и известных URL инкрементального work-set: порядок
         записей и их содержимое не зависят от того, откуда пришёл корень.
+
+        ``revalidation`` — аддитивная наблюдаемость ревалидации **в любом режиме**:
+        ``{"selected": N, "fetched": M}`` (enqueued и фактически добытые) и, если
+        операторский потолок отложил/отсёк URL, ``"deferred": K``/``"skipped": S``.
+        ``None`` — у корня не было известных URL: ключ не появляется, payload
+        ``state is None`` байт-в-байт прежний.
         """
-        nonlocal pages_fetched_total
+        nonlocal pages_fetched_total, revalidation_fetched_total
         pages_fetched_total += frontier.fetched
+        revalidation_fetched_total += frontier.revalidation_fetched
         if frontier.truncated:
             truncated_products.add(product_id)
         # P5: пропуск документов «прореживает» корпус продукта по построению — он
@@ -3532,6 +3576,8 @@ def build_corpus(
         # прежняя. Классы ``host``/``path`` раздельны (F6).
         if sitemap_skips:
             record["skipped_out_of_scope"] = [dict(skip) for skip in sitemap_skips]
+        if revalidation is not None:
+            record["revalidation"] = dict(revalidation)
         truncation_records.append(record)
 
     def _plan_incremental_items(
@@ -3593,6 +3639,215 @@ def build_corpus(
             extra.append(item)
         return extra
 
+    def _group_revalidation_items(
+        roots: Sequence[str], items: Sequence[IncrementalItem]
+    ) -> tuple[dict[str, list[str]], dict[str, list[str]]]:
+        """Группирует известные URL по авторским корням (scope inference, каждый прогон).
+
+        ``url_state.seed_id`` вне этого среза: происхождение считается заново по
+        ``Frontier.in_scope``. Побеждает **самый специфичный** ``root_path_prefix``
+        (длина пути), при равенстве — авторский порядок. URL вне scope всех корней —
+        orphan (``origin -> urls``): один synthetic-бакет на origin, ревалидация без
+        записи усечения.
+        """
+        scopes = [(root, Frontier(root, CrawlLimits())) for root in roots]
+        groups: dict[str, list[str]] = {root: [] for root in roots}
+        orphans: dict[str, list[str]] = {}
+        for item in items:
+            best_root: str | None = None
+            best_len = -1
+            for root, probe in scopes:
+                if not probe.in_scope(item.url):
+                    continue
+                if len(probe.path_prefix) > best_len:
+                    best_root = root
+                    best_len = len(probe.path_prefix)
+            if best_root is None:
+                orphans.setdefault(_url_origin(item.url), []).append(item.url)
+            else:
+                groups[best_root].append(item.url)
+        return groups, orphans
+
+    def _resolve_product_revalidate_cap(roots: Sequence[str]) -> int | None:
+        """Разрешает ось ``crawl.revalidate_max_documents`` **на продукт**.
+
+        Ось живёт в :class:`CrawlLimits` и резолвится тем же
+        :func:`resolve_crawl_limits` (app < run < site), что и остальные оси, но
+        применяется к продукту целиком, а не к отдельному корню. У ``resolve_crawl_limits``
+        вход — URL (per-site слой), а у продукта URL-идентичности нет: представителем
+        продукта служит первый авторский корень (стабильный author/sorted порядок). Это
+        единственное место, где «per product» требует такого представителя; при нескольких
+        per-site значениях для одного продукта действует значение первого корня.
+        """
+        if not roots:
+            return None
+        return resolve_crawl_limits(
+            roots[0],
+            app=crawl_app or CrawlConfig(),
+            run=crawl_defaults,
+            profiles=domain_profiles or {},
+        ).revalidate_max_documents
+
+    def _apply_revalidation_cap(
+        product_id: str,
+        groups: Mapping[str, Sequence[str]],
+        orphans: Mapping[str, Sequence[str]],
+        items: Sequence[IncrementalItem],
+        cap: int,
+    ) -> tuple[
+        dict[str, list[str]],
+        dict[str, list[str]],
+        dict[str, int],
+        dict[str, int],
+        dict[str, int],
+        dict[str, int],
+        int,
+        int,
+        bool,
+    ]:
+        """Отбирает ``cap`` **исполнимых** известных URL продукта.
+
+        Сначала — eligibility-фильтр по resolved-лимитам владельца (root key для
+        root-группы, origin для orphan-бакета): ``exclude_paths``/``exclude_documents``
+        и pre-fetch-пропуск документа при ``document_level=off``. Иначе неисполнимый URL
+        навсегда занимал бы голову NULLs-first/oldest-first очереди: drain отверг бы его
+        без обновления ``url_state``, и потолок тратил бы слот на него каждый цикл.
+
+        Затем — порядок ``last_checked_at`` **NULLs first**, ``normalized_url``. Стабильное
+        «первые N» навсегда бы заморило хвост; «сначала старые» ротирует автоматически:
+        отложенные сохраняют старый ``last_checked_at`` и на следующем цикле оказываются
+        первыми. Отложенные получают ``reuse_kind=stale`` в ``url_state``; неисполнимые
+        не откладываются, а попадают в ``skipped``.
+
+        Возвращает ``(selected_groups, selected_orphans, deferred_by_root,
+        deferred_by_origin, skipped_by_root, skipped_by_origin, deferred_total,
+        skipped_total, cap_fired)``. Инвариант учёта:
+        ``selected + deferred + skipped == len(known)`` по продукту.
+        Сбой чтения состояния — явная ошибка и ось игнорируется целиком.
+        """
+        flat_groups = {key: list(urls) for key, urls in groups.items()}
+        flat_orphans = {key: list(urls) for key, urls in orphans.items()}
+        try:
+            rows = {
+                row.normalized_url: row
+                for row in state.iter_url_state(product_id)  # type: ignore[union-attr]
+            }
+        except Exception as exc:  # noqa: BLE001 — изоляция state-чтения
+            errors.append(
+                f"{product_id}: revalidate_max_documents: state.iter_url_state: "
+                f"{type(exc).__name__}: {exc} — ось игнорируется (все известные URL)"
+            )
+            return flat_groups, flat_orphans, {}, {}, {}, {}, 0, 0, False
+
+        normalized = {item.url: item.normalized_url for item in items}
+
+        def _normalized(url: str) -> str:
+            key = normalized.get(url) or _state_url_key(url)
+            return key or url
+
+        limits_cache: dict[str, CrawlLimits] = {}
+
+        def _limits_for(owner: str) -> CrawlLimits:
+            limits = limits_cache.get(owner)
+            if limits is None:
+                limits = resolve_crawl_limits(
+                    owner,
+                    app=crawl_app or CrawlConfig(),
+                    run=crawl_defaults,
+                    profiles=domain_profiles or {},
+                )
+                limits_cache[owner] = limits
+            return limits
+
+        def _ineligible(url: str, owner: str) -> bool:
+            limits = _limits_for(owner)
+            if is_blacklisted(url, limits):
+                return True
+            return (
+                limits.document_level is DocumentLevel.OFF
+                and document_suffix(url) is not None
+            )
+
+        entries: list[tuple[str, str, str]] = [
+            (url, "root", key)
+            for key, urls in flat_groups.items()
+            for url in urls
+        ] + [
+            (url, "orphan", key)
+            for key, urls in flat_orphans.items()
+            for url in urls
+        ]
+
+        skipped_by_root = {key: 0 for key in flat_groups}
+        skipped_by_origin = {key: 0 for key in flat_orphans}
+        eligible: list[tuple[str, str, str]] = []
+        for entry in entries:
+            url, kind, owner = entry
+            if not _ineligible(url, owner):
+                eligible.append(entry)
+                continue
+            target = skipped_by_root if kind == "root" else skipped_by_origin
+            target[owner] += 1
+
+        def _order(entry: tuple[str, str, str]) -> tuple[bool, str, str, str]:
+            url = entry[0]
+            key = _normalized(url)
+            row = rows.get(key)
+            checked = row.last_checked_at if row is not None else None
+            # ``False`` (NULL) сортируется раньше ``True`` — NULLs first.
+            return (checked is not None, checked or "", key, url)
+
+        ordered = sorted(eligible, key=_order)
+        selected = ordered[:cap]
+        deferred = ordered[cap:]
+        selected_urls = {url for url, _kind, _key in selected}
+        deferred_urls = {url for url, _kind, _key in deferred}
+
+        selected_groups = {
+            key: [url for url in urls if url in selected_urls]
+            for key, urls in flat_groups.items()
+        }
+        selected_orphans = {
+            key: [url for url in urls if url in selected_urls]
+            for key, urls in flat_orphans.items()
+        }
+        deferred_by_root = {
+            key: sum(1 for url in urls if url in deferred_urls)
+            for key, urls in flat_groups.items()
+        }
+        deferred_by_origin = {
+            key: sum(1 for url in urls if url in deferred_urls)
+            for key, urls in flat_orphans.items()
+        }
+
+        # ``stale`` — durable-сигнал следующему циклу: отложенный URL просрочен, а не
+        # «не существует». Значение enum берём из домена; нового перечисления не вводим.
+        for url, _kind, _key in deferred:
+            key = _normalized(url)
+            row = rows.get(key)
+            if row is None or row.reuse_kind == ReuseKind.STALE.value:
+                continue
+            try:
+                state.upsert_url_state(  # type: ignore[union-attr]
+                    replace(row, reuse_kind=ReuseKind.STALE.value)
+                )
+            except Exception as exc:  # noqa: BLE001 — изоляция state-записи
+                errors.append(
+                    f"state: url_state({product_id}/{key}): stale: "
+                    f"{type(exc).__name__}: {exc}"
+                )
+        return (
+            selected_groups,
+            selected_orphans,
+            deferred_by_root,
+            deferred_by_origin,
+            skipped_by_root,
+            skipped_by_origin,
+            len(deferred),
+            sum(skipped_by_root.values()) + sum(skipped_by_origin.values()),
+            bool(deferred),
+        )
+
     for product_id in products:
         ingest = _ProductIngest(product_id=product_id)
         # I17: дедуп в пределах продукт-партиции (см. docstring модуля).
@@ -3602,10 +3857,82 @@ def build_corpus(
         #: претендент побеждает). URL, лежащий в scope нескольких корней, не должен
         #: расходовать ``max_documents`` каждого из них — иначе бюджет исчерпывается досрочно.
         resume_counted: set[str] = set()
+        product_roots = url_map.get(product_id, [])
         #: 09 §6.3: известные URL продукта (``revalidate``) — после авторских корней.
-        incremental_items = _plan_incremental_items(
-            product_id, url_map.get(product_id, [])
+        incremental_items = _plan_incremental_items(product_id, product_roots)
+        #: 09 §6.3: группировка **всех** известных URL по авторским корням (scope
+        #: inference) до применения операторского потолка. ``state is None``/
+        #: не-incremental ⇒ пусто: grouping — no-op (байт-в-байт).
+        if incremental_items:
+            all_revalidation_groups, all_orphan_buckets = (
+                _group_revalidation_items(product_roots, incremental_items)
+            )
+        else:
+            all_revalidation_groups, all_orphan_buckets = {}, {}
+
+        #: Ops-ось «не ограничивать, а измерять» (default-off): потолок ревалидации
+        #: **на продукт**. Отсутствие оси — все известные URL, без записи ``stale`` и
+        #: без усечения; задание — видимый defer хвоста. ``split`` — transport, который
+        #: не исполняет локальную политику отбора: не притворяемся, что ось применена.
+        revalidate_cap = _resolve_product_revalidate_cap(product_roots)
+        cap_applies = bool(
+            revalidate_cap is not None
+            and incremental_items
+            and len(incremental_items) > revalidate_cap
         )
+        # S3: split-ошибка — только когда потолку действительно есть что ограничивать.
+        if cap_applies and executor is not None:
+            errors.append(
+                f"{product_id}: crawl.revalidate_max_documents={revalidate_cap} "
+                "поддерживается только локальным краулом (local) — ось игнорируется "
+                "(split)"
+            )
+            revalidate_cap = None
+            cap_applies = False
+        if cap_applies:
+            (
+                revalidation_groups,
+                orphan_buckets,
+                deferred_by_root,
+                deferred_by_origin,
+                skipped_by_root,
+                skipped_by_origin,
+                revalidation_deferred_total,
+                revalidation_skipped_total,
+                revalidation_cap_fired,
+            ) = _apply_revalidation_cap(
+                product_id,
+                all_revalidation_groups,
+                all_orphan_buckets,
+                incremental_items,
+                int(revalidate_cap),  # type: ignore[arg-type]
+            )
+        else:
+            revalidation_groups = {
+                key: list(urls) for key, urls in all_revalidation_groups.items()
+            }
+            orphan_buckets = {
+                key: list(urls) for key, urls in all_orphan_buckets.items()
+            }
+            deferred_by_root = {}
+            deferred_by_origin = {}
+            skipped_by_root = {}
+            skipped_by_origin = {}
+            revalidation_deferred_total = 0
+            revalidation_skipped_total = 0
+            revalidation_cap_fired = False
+        #: **Все** известные URL продукта (включая отложенные cap'ом) — вне resume-
+        #: бюджета ``max_documents`` (B2/F13): отложенный URL не фетчится в этом цикле,
+        #: но и не должен заряжать discovery-бюджет при resume. Скан resume ниже
+        #: исключает их до подсчёта.
+        revalidation_url_set = {
+            url
+            for urls in (
+                *all_revalidation_groups.values(),
+                *all_orphan_buckets.values(),
+            )
+            for url in urls
+        }
 
         def _drain_root(
             pid: str,
@@ -3613,6 +3940,8 @@ def build_corpus(
             root_target: Any,
             *,
             sitemap_seeds: bool = False,
+            revalidate: Sequence[str] = (),
+            seed: bool = True,
         ) -> tuple[Frontier, list[dict[str, Any]]]:
             """D1/D3: BFS-drain одного seed-root (scope/блэклист/лимиты/глубина).
 
@@ -3620,6 +3949,12 @@ def build_corpus(
             — развернуть per-site sitemap корня в дополнительные depth-0 seeds (D3); они
             **подчинены** scope корня (``frontier.in_scope``), проходят тот же блэклист/
             бюджет ``max_documents``, что и seed оператора.
+            ``revalidate`` — известные URL этого корня (scope inference): ставятся
+            **после** авторского seed и **до** BFS отдельным путём
+            (:meth:`Frontier.add_revalidate_seed`), поэтому не расходуют ``max_documents``,
+            не расширяют BFS (листья) и дедуплицируются ``_seen`` с переоткрытием ссылкой.
+            ``seed=False`` — synthetic-бакет (orphan): авторского seed нет, только
+            ревалидация; усечение такого бакета не пишется вызывающим.
             Ставка в очередь гейтится scope (host+path-граница) и блэклистом; ``max_documents``
             — жёсткий стоп (не исключение): останавливает постановку/обход этого корня.
             Возвращает frontier с провенансом усечения (``fetched``/``truncated``/
@@ -3770,6 +4105,11 @@ def build_corpus(
             for (ipid, iurl), item in items.items():
                 if ipid != pid or iurl in resume_counted:
                     continue
+                # Известные URL ревалидации — вне бюджета discovery: иначе resumed
+                # сессия заряжала бы ими ``max_documents``, seed стал бы ``truncated``
+                # и продукт ложно ``complete=False`` (регрессия B2/F13 уровнем выше).
+                if iurl in revalidation_url_set:
+                    continue
                 if not frontier.in_scope(iurl):
                     continue
                 counted = _resume_source(
@@ -3781,18 +4121,30 @@ def build_corpus(
                 consumed += 1
                 resume_counted.add(iurl)
             frontier.note_consumed(consumed)
-            seed_status = frontier.add_seed(root_url)
-            if seed_status == "blacklisted":
+            seed_status = frontier.add_seed(root_url) if seed else "synthetic"
+            seed_blacklisted = seed_status == "blacklisted"
+            seed_truncated = seed_status == "truncated"
+            if seed_blacklisted:
                 errors.append(
                     f"{pid}/{root_url}: seed зачёркнут блэклистом "
                     "(exclude_paths/exclude_documents) — не enqueued"
                 )
-                _emit_progress()
-                return frontier, list(sitemap.skipped)
-            if seed_status == "truncated":
+            if seed_truncated:
                 errors.append(
                     f"{pid}/{root_url}: seed не поставлен — достигнут max_documents"
                 )
+
+            # 09 §6.3: известные URL — depth-0 листья **после** авторского seed и **до**
+            # BFS. Enqueue до BFS позволяет ``frontier._seen`` схлопнуть известный URL,
+            # переоткрытый ссылкой (иначе безусловный второй GET — потеря 304-экономии).
+            # Путь вне бюджета discovery (``add_revalidate_seed``): ревалидация не является
+            # «документом, который добавляет обход». Ранние возвраты ниже не должны
+            # терять группу: blacklisted/truncated корень всё равно ревалидирует известные URL.
+            revalidation_queued = 0
+            for known in revalidate:
+                if frontier.add_revalidate_seed(known) == "queued":
+                    revalidation_queued += 1
+            if (seed_blacklisted or seed_truncated) and revalidation_queued == 0:
                 _emit_progress()
                 return frontier, list(sitemap.skipped)
 
@@ -3806,7 +4158,7 @@ def build_corpus(
             # (``queued``/``dup`` — loc уже у этого корня). Отказ блэклистом/бюджетом не
             # расходует loc: другой корень того же продукта ещё вправе его взять. Инвариант
             # «один loc — не более одного фетча на продукт» держится именно этой пометкой.
-            for extra in extra_seeds:
+            for extra in (() if (seed_blacklisted or seed_truncated) else extra_seeds):
                 extra_status = frontier.add_seed(extra)
                 if extra_status in ("queued", "dup"):
                     sitemap_seed_used.add((pid, extra))
@@ -3857,8 +4209,17 @@ def build_corpus(
                 if outcome is None:
                     return  # отказ/сбой — frontier от него не расширяется
                 page, raw_path, fetch_plan, freshly_fetched = outcome
+                # 09 §6.3: ревалидация известного URL — depth-0 лист и **вне** бюджета
+                # discovery. ``pages_fetched``/``truncated`` продолжают означать ровно
+                # «документы, которые добавил обход этого корня».
+                is_revalidation = frontier.is_revalidation(work_url)
                 if freshly_fetched:
-                    frontier.note_fetched()
+                    if is_revalidation:
+                        # S1: ревалидационный трафик не смешивается с discovery-счётчиком
+                        # ``fetched``/``pages_fetched``, но обязан быть видимым.
+                        frontier.revalidation_fetched += 1
+                    else:
+                        frontier.note_fetched()
                 # P5: post-fetch-пропуск документа при ``off`` (тип узнан только по Content-Type;
                 # фетч был ⇒ страница уже учтена в ``max_documents``, элемент сеанса — FETCHED
                 # из retention; ``FAILED`` не ставим — skip ≠ сбой, §2/§11.3). Байты ретейнены.
@@ -3928,7 +4289,13 @@ def build_corpus(
                 _emit_progress()
                 # D1: извлечение in-site ссылок и следующий уровень BFS. При max_depth=0
                 # извлечение не выполняется вовсе (байт-в-байт прежнее поведение).
-                if limits.max_depth > 0 and _looks_like_html(page):
+                # 09 §6.3: ревалидация — лист; её ссылки не расширяют discovery (иначе
+                # глубокая страница, пере-добытая на depth 0, меняла бы coverage/стоимость).
+                if (
+                    not is_revalidation
+                    and limits.max_depth > 0
+                    and _looks_like_html(page)
+                ):
                     frontier.offer(extract_links(page.content, page.url), depth)
 
             def _make_extract_request(
@@ -3955,8 +4322,17 @@ def build_corpus(
                 )
 
             def _inflight_fresh() -> int:
-                """Свеже-добытые страницы «в полёте» (учёт ёмкости с окном, P4/§3)."""
-                return sum(1 for item in pending if item.freshly_fetched)
+                """Свеже-добытые страницы «в полёте» (учёт ёмкости с окном, P4/§3).
+
+                Ревалидация исключена: она не расходует ``max_documents`` и не должна
+                отнимать ёмкость у discovery через in-flight окно.
+                """
+                return sum(
+                    1
+                    for item in pending
+                    if item.freshly_fetched
+                    and not frontier.is_revalidation(item.url)
+                )
 
             def _has_fetch_capacity() -> bool:
                 """Ёмкость корня с учётом in-flight: ``max_documents − fetched − inflight``."""
@@ -4263,8 +4639,12 @@ def build_corpus(
                         # D3: seeds sitemap ставятся пачкой; ``max_documents`` обязан
                         # ограничивать и их (не только обнаруженные ссылки). Без лимита —
                         # всегда есть ёмкость. Проверка — в голове цикла на главном потоке.
-                        frontier.mark_truncated("max_documents")
-                        break
+                        # 09 §6.3: ревалидация известных URL бюджет не расходует; если
+                        # голова очереди — такая группа, дренаж продолжается (бюджет
+                        # исчерпан только для discovery).
+                        if not frontier.next_is_revalidation():
+                            frontier.mark_truncated("max_documents")
+                            break
                     if executor is not None:
                         # --- P3-A2: executor-волна (раунд). Один раунд = один submit; --- #
                         # раунды строго последовательны (набор работы N+1 зависит от ссылок N).
@@ -4280,7 +4660,6 @@ def build_corpus(
                             )
                             _emit_progress()
                             break
-                        waves += 1
                         remaining = (
                             None
                             if limits.max_documents is None
@@ -4288,19 +4667,36 @@ def build_corpus(
                             - frontier.fetched
                             - _inflight_fresh()
                         )
-                        wave_size = (
-                            wave_items if remaining is None else min(wave_items, remaining)
+                        # M2: всегда впускаем непрерывный revalidation-блок **плюс**
+                        # discovery-room. Иначе при 0 < remaining < wave_items волна
+                        # берёт лишь remaining свободных URL, fetched не растёт, и
+                        # предохранитель раундов срабатывает на хвосте ревалидации.
+                        reval_n = min(
+                            frontier.revalidation_head_count(wave_items),
+                            wave_items // 2,
                         )
-                        wave_size = min(int(wave_size), len(frontier))
+                        room = (
+                            wave_items
+                            if remaining is None
+                            else min(wave_items, max(0, remaining))
+                        )
+                        wave_size = min(
+                            len(frontier),
+                            wave_items,
+                            max(reval_n, reval_n + room),
+                        )
                         if wave_size <= 0:
                             break
                         entries: list[_WaveEntry] = []
                         work: list[CrawlWorkItem] = []
+                        wave_has_discovery = False
                         for _ in range(wave_size):
                             node = frontier.next()
                             if node is None:
                                 break
                             work_url, depth = node
+                            if not frontier.is_revalidation(work_url):
+                                wave_has_discovery = True
                             if frontier.blacklisted(work_url):
                                 # D1/H: блэклист применяется и перед фетчем.
                                 entries.append(
@@ -4495,6 +4891,10 @@ def build_corpus(
                             )
                             outcome = _commit_local(desc, page=page)
                             _commit_or_defer(entry.pid, entry.wu, entry.depth, outcome)
+                        # M2: предохранитель — BFS-guard, поэтому чисто
+                        # ревалидационная волна его не расходует.
+                        if wave_has_discovery:
+                            waves += 1
                         continue
                     if pool is None:
                         # --- Последовательный путь (max_workers None/1): как прежде. --- #
@@ -4502,6 +4902,14 @@ def build_corpus(
                         if node is None:
                             break
                         work_url, depth = node
+                        # 09 §6.3: бюджет discovery исчерпан, а из очереди пришёл не
+                        # ревалидационный лист — останавливаем обход (ревалидация
+                        # обрабатывается отдельно и бюджет не расходует).
+                        if not _has_fetch_capacity() and not frontier.is_revalidation(
+                            work_url
+                        ):
+                            frontier.mark_truncated("max_documents")
+                            break
                         # D1/H: блэклист применяется и перед фетчем (в дополнение к постановке).
                         if frontier.blacklisted(work_url):
                             errors.append(
@@ -4562,10 +4970,22 @@ def build_corpus(
                         - frontier.fetched
                         - _inflight_fresh()
                     )
-                    wave_size = (
-                        max_workers if remaining is None else min(max_workers, remaining)
+                    # M2: та же формула, что в executor-ветке: непрерывный
+                    # revalidation-блок + discovery-room, без роста batch.
+                    reval_n = min(
+                        frontier.revalidation_head_count(max_workers),
+                        int(max_workers) // 2,
                     )
-                    wave_size = min(int(wave_size), len(frontier))
+                    room = (
+                        int(max_workers)
+                        if remaining is None
+                        else min(int(max_workers), max(0, remaining))
+                    )
+                    wave_size = min(
+                        len(frontier),
+                        int(max_workers),
+                        max(reval_n, reval_n + room),
+                    )
                     if wave_size <= 0:
                         break
                     entries: list[_WaveEntry] = []
@@ -4633,6 +5053,8 @@ def build_corpus(
         # до drain (общий блок построения корней); транспорт выбирается по ``executor is None``.
         # Порядок expand → seed → drain на корень совпадает с локальным и является порядком
         # ingest (interleaving-трюк ``work_by_product`` больше не нужен).
+        #: Корни, реально дренированные в этом продукте (для leftover-групп каталогов).
+        drained_roots: set[str] = set()
         for url in url_map.get(product_id, []):
             prior_item = items.get((product_id, url))
 
@@ -4710,34 +5132,166 @@ def build_corpus(
 
             # D1: BFS-frontier по каждому seed-root (``max_depth=0`` → только seeds,
             # поведение неизменно). Провенанс усечения копится для сеанса/``IndexBuild``.
+            # 09 §6.3: известные URL этого корня — в его же дренаж (после seed, до BFS),
+            # а не отдельными frontier'ами: одна запись усечения на корень, один бюджет.
             for root_url, root_target, sitemap_seeds in roots:
+                drained_roots.add(root_url)
+                known_urls = revalidation_groups.get(root_url, ())
                 frontier, sitemap_skips = _drain_root(
-                    product_id, root_url, root_target, sitemap_seeds=sitemap_seeds
+                    product_id,
+                    root_url,
+                    root_target,
+                    sitemap_seeds=sitemap_seeds,
+                    revalidate=known_urls,
                 )
+                #: Наблюдаемость в любом режиме: ключ есть ровно у корня, который имел
+                #: известные URL (даже если cap отложил все — ``selected=0``). У корня
+                #: без известных URL ключа нет: ``state is None`` остаётся байт-в-байт.
+                revalidation_info: dict[str, Any] | None = None
+                if all_revalidation_groups.get(root_url):
+                    revalidation_info = {
+                        "selected": sum(
+                            1 for url in known_urls if frontier.is_revalidation(url)
+                        ),
+                        # S1: фактическая ревалидация, не «выбрано»; discovery-счётчик
+                        # ``pages_fetched`` не смешивается с этим полем.
+                        "fetched": frontier.revalidation_fetched,
+                    }
+                    if revalidation_cap_fired:
+                        revalidation_info["deferred"] = deferred_by_root.get(
+                            root_url, 0
+                        )
+                    if skipped_by_root.get(root_url):
+                        revalidation_info["skipped"] = skipped_by_root[root_url]
                 _record_root_outcome(
-                    product_id, root_url, frontier, sitemap_skips
+                    product_id,
+                    root_url,
+                    frontier,
+                    sitemap_skips,
+                    revalidation=revalidation_info,
                 )
 
-        # 09 §6.3 (MVP-3b): известные URL инкрементального продукта — depth-0 seeds, ровно
-        # как авторские корни: те же scope/блэклист/лимиты/robots/пейсинг. BFS не
-        # переписывается — новые ссылки по-прежнему добавляет ``frontier.offer`` из
-        # добытых страниц, поэтому корпус может расти.
-        for item in incremental_items:
-            target = resolve_crawl_target(
-                product_id,
-                item.url,
-                sources=crawl_sources or CrawlSourcesConfig(),
-                profiles=domain_profiles or {},
-                explicit=explicit_fetch,
-                run_default_strategy=crawl_strategy_default,
-                run_default_rate_limit=crawl_rate_default,
-            )
-            targets[(product_id, item.url)] = target
-            frontier, sitemap_skips = _drain_root(
-                product_id, item.url, target, sitemap_seeds=False
-            )
-            _record_root_outcome(product_id, item.url, frontier, sitemap_skips)
+        # Каталог (feed/channel) разворачивается в **другие** корни, поэтому группа,
+        # привязанная к авторскому URL каталога, может не совпасть ни с одним drain'ом.
+        # Не теряем ревалидацию: синтетический бакет без seed (без записи усечения).
+        for group_root, known_urls in revalidation_groups.items():
+            pre_cap_urls = all_revalidation_groups.get(group_root) or ()
+            if group_root in drained_roots or not pre_cap_urls:
+                continue
+            frontier: Frontier | None = None
+            if known_urls:
+                frontier, _skips = _drain_root(
+                    product_id,
+                    group_root,
+                    None,
+                    sitemap_seeds=False,
+                    revalidate=known_urls,
+                    seed=False,
+                )
+            # S2: leftover-группа каталога — тоже видимый бакет, а не потерянный frontier.
+            info: dict[str, Any] = {
+                "selected": (
+                    sum(1 for url in known_urls if frontier.is_revalidation(url))
+                    if frontier is not None
+                    else 0
+                ),
+                "fetched": frontier.revalidation_fetched if frontier is not None else 0,
+                "via": "catalog",
+            }
+            if revalidation_cap_fired:
+                info["deferred"] = deferred_by_root.get(group_root, 0)
+            if skipped_by_root.get(group_root):
+                info["skipped"] = skipped_by_root[group_root]
+            if frontier is not None and frontier.skipped_blacklisted:
+                info["skipped_blacklisted"] = list(frontier.skipped_blacklisted)
+            revalidation_orphans[f"{product_id}:catalog:{group_root}"] = info
+            if frontier is not None:
+                revalidation_fetched_total += frontier.revalidation_fetched
 
+        # 09 §6.3: известные URL вне scope **всех** авторских корней (author-scope
+        # drift: корень удалён/ключ пути сужен). Один synthetic-бакет на (продукт,
+        # origin): depth-0 листья, только ревалидация. В ``truncation`` **не** пишется
+        # (иначе synthetic-причина демотировала бы ``❌`` без вины корня); наблюдение —
+        # ``IndexBuild.revalidation_orphans`` + заметка фазы. I12: статус не меняется.
+        for origin, all_known_urls in all_orphan_buckets.items():
+            selected_urls = orphan_buckets.get(origin, ())
+            frontier: Frontier | None = None
+            if selected_urls:
+                frontier, _skips = _drain_root(
+                    product_id,
+                    origin,
+                    None,
+                    sitemap_seeds=False,
+                    revalidate=selected_urls,
+                    seed=False,
+                )
+            info: dict[str, Any] = {
+                "selected": (
+                    sum(1 for url in selected_urls if frontier.is_revalidation(url))
+                    if frontier is not None
+                    else 0
+                ),
+                "fetched": frontier.revalidation_fetched if frontier is not None else 0,
+            }
+            if revalidation_cap_fired:
+                # Отложенные orphan-URL — не «потеряны»: их число видно рядом с selected.
+                info["deferred"] = deferred_by_origin.get(origin, 0)
+            if skipped_by_origin.get(origin):
+                info["skipped"] = skipped_by_origin[origin]
+            if frontier is not None and frontier.skipped_blacklisted:
+                info["skipped_blacklisted"] = list(frontier.skipped_blacklisted)
+            revalidation_orphans[f"{product_id}:{origin}"] = info
+            revalidation_orphan_total += len(all_known_urls)
+            if frontier is not None:
+                revalidation_fetched_total += frontier.revalidation_fetched
+            # Targets известных URL резолвятся лениво в ``_drain_root``
+            # (``_resolve_target``) — предварительная резолюция не нужна.
+
+        # Ops-потолок ревалидации — **продуктовое** усечение через существующий канал
+        # (``truncated`` + ``truncated_reason``), без новой coverage/freshness-оси.
+        # Precedence: crawl-потолки (``max_documents``/``max_depth``/…) не перекрываются —
+        # причина ревалидации ставится только если ни одна запись продукта уже не
+        # усечена. Сама причина живёт в первой записи корня (product-level факт), а
+        # аддитивный ``revalidation``-счётчик остаётся на каждом корне.
+        if revalidation_deferred_total > 0:
+            truncated_products.add(product_id)
+            product_records = [
+                record
+                for record in truncation_records
+                if record.get("product_id") == product_id
+            ]
+            already_crawl_truncated = any(
+                record.get("truncated")
+                and record.get("truncated_reason") != "revalidate_max_documents"
+                for record in product_records
+            )
+            if not already_crawl_truncated:
+                if product_records:
+                    target = next(
+                        (
+                            record
+                            for record in product_records
+                            if (record.get("revalidation") or {}).get("deferred")
+                        ),
+                        product_records[0],
+                    )
+                    target["truncated"] = True
+                    target["truncated_reason"] = "revalidate_max_documents"
+                else:
+                    # Нет ни одного авторского корня (только orphan-бакеты) — иначе
+                    # продуктовый факт потерял бы канал причины в ``truncation_summary``.
+                    truncation_records.append(
+                        {
+                            "product_id": product_id,
+                            "root": None,
+                            "pages_fetched": 0,
+                            "truncated": True,
+                            "truncated_reason": "revalidate_max_documents",
+                            "limits": {},
+                            "skipped_blacklisted": [],
+                            "skipped_documents": [],
+                        }
+                    )
         # Retention-провенанс не зависит от индексной сборки и уже персистенчен
         # инкрементально: единственная точка ``ingest.docs.append`` — ``_finish_one``,
         # где ``_persist_docs`` вызывается сразу после коммита документа. Финального
@@ -4982,6 +5536,7 @@ def build_corpus(
                 truncated=bool(truncated_products),
                 effective_limits={"roots": truncation_records},
                 pages_fetched=pages_fetched_total,
+                revalidation_fetched=revalidation_fetched_total,
                 truncated_products=sorted(truncated_products),
             )
         except Exception as exc:  # noqa: BLE001 — наблюдаемость важнее персистенции
@@ -5034,9 +5589,20 @@ def build_corpus(
         truncated=bool(truncated_products),
         truncation=truncation_records,
         document_skips=list(document_skips),
+        revalidation_orphans=dict(revalidation_orphans),
         doc_counters=dict(doc_counters),
         partitions_reused=partitions_reused,
     )
     # Примечание: индексная сборка «возвращается» в log_entries (PhaseResult — контракт фазы;
     # W8 читает IndexBuild отсюда). Счётчики — в полях IndexBuild; дубликаты — в errors.
-    return PhaseResult(status="ok", phase="corpus", cells=[], log_entries=[build], errors=errors)
+    log_entries: list[Any] = [build]
+    if revalidation_orphan_total:
+        # Наблюдение, не ошибка и не смена статуса (I12): авторский scope разошёлся с
+        # тем, что реально накопилось в ``url_state``.
+        log_entries.append(
+            f"corpus: {revalidation_orphan_total} known URLs are outside every authored "
+            "root — author-scope drift (revalidated as orphans; observation only)"
+        )
+    return PhaseResult(
+        status="ok", phase="corpus", cells=[], log_entries=log_entries, errors=errors
+    )
