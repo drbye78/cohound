@@ -42,7 +42,8 @@
 > после удаления `params_token` из id это единственный diff-видимый сигнал смены каталога.
 > Прунинг неиспользуемых композиций реализован: `gc_index_compositions` + `hound package
 > index-gc` (живое множество — `runs.index_build_id` по run DB; §8.6). Не реализовано:
-> `offline`-reuse (честная ошибка + деградация до `revalidate`), расписание
+> `offline`-reuse (**не реализован**: планировщик деградирует до `revalidate` с видимой
+> ошибкой на продукт — молчаливая смена политики запрещена, §2.4), расписание
 > `next_check_at`, carry-forward (этап 5) — design-only. Операторский потолок
 > ревалидации `crawl.revalidate_max_documents` **реализован** как default-off ось (§8.7).
 > Документ описывает целевую архитектуру сценария «`add-product` → следующий прогон
@@ -280,7 +281,12 @@ hound run --run-yaml packages/{case}/run.yaml --package packages/{case}
   - `revalidate`: условный GET по сохранённым `ETag`/`Last-Modified`; 304 или тот же
     `content_hash` → переиспользование документа;
   - `refresh`: безусловный GET, content-hash дедуп сохраняется;
-  - `offline`: без сети, только retained raw; `freshness = stale`, `❌` запрещён (см. §11.4).
+  - `offline` — **целевое поведение, в текущей реализации не реализовано**: без сети,
+    только retained raw; `freshness = stale`, `❌` запрещён (см. §11.2). As-built:
+    планировщик (`_plan_incremental_items`, `core/pipeline/corpus.py`) при `offline`
+    честно деградирует до `revalidate` — то есть **ходит в сеть** — и оставляет одну
+    видимую ошибку на продукт (`offline reuse не реализован в corpus: {product_id}`);
+    молчаливая смена политики запрещена.
 - **`--only-failed`** — теперь **межпрогонный**: читает `run_product`/`url_state`
   последнего прогона (или `--since-run`) и повторяет продукты/URL со статусом
   `failed|partial`. В отличие от текущей реализации (`context.py:1118-1136`), не ограничен

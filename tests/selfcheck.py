@@ -433,6 +433,12 @@ def main() -> int:
     section("Оси контроля краула (D1/D2)")
     check("crawl_control: precedence/scope/блэклист/усечение", lambda: _crawl_control_axes())
 
+    section("Артефакты-контейнеры (P6)")
+    check(
+        "archives: резолв осей/дайджест-нейтральность/классификатор",
+        lambda: _crawl_archive_axes(),
+    )
+
     print(f"\n{CHECKS - len(FAILURES)}/{CHECKS} проверок пройдено")
     if FAILURES:
         print("\nПровалы:")
@@ -3341,6 +3347,134 @@ def _crawl_control_axes() -> None:
     assert extract_links(
         b'<a href="/p#f">x</a><a href="mailto:a@b">m</a>', "https://H:443/dir/"
     ) == ["https://h/p"]
+
+
+def _crawl_archive_axes() -> None:
+    """P6: артефакты-контейнеры — резолв осей, дайджест-нейтральность, классификатор.
+
+    Инварианты: цепочка ``app < run < site`` для осей допуска/границ спуска; дефолт app
+    (все форматы, 256 MiB артефакт, 64 MiB член, ``full``) действует, но **не** попадает
+    в ``as_dict`` — иначе дайджест прогонов без осей перестаёт быть байт-идентичным (§13);
+    неизвестный формат — ``ValueError``; OOXML (ZIP + ``[Content_Types].xml``) — документ,
+    а не контейнер; общий бинарный ``application/octet-stream`` контейнер не доказывает;
+    ``archive_descent`` зеркалируется ``docs/status-dictionary.yaml``.
+    """
+    from core.config.deploy import CrawlConfig
+    from core.config.domain_profiles import DomainProfile
+    from core.domain.dictionary import load_dictionary
+    from core.domain.enums import ArchiveDescent
+    from core.domain.models import (
+        DEFAULT_ARCHIVE_MAX_MEMBER_BYTES,
+        DEFAULT_MAX_ARTIFACT_BYTES,
+        CrawlRunConfig,
+    )
+    from core.pipeline.crawl_frontier import resolve_crawl_limits
+    from core.util.document_formats import (
+        SUPPORTED_ARCHIVE_FORMATS,
+        classify_archive_bytes,
+        is_attachment_content_type,
+        is_attachment_url,
+        normalize_attachment_formats,
+    )
+
+    app = CrawlConfig()
+    base = resolve_crawl_limits("https://h/a", app=app)
+    # Дефолт app-слоя: все форматы, потолки, полный спуск.
+    _assert(base.attachment_formats == SUPPORTED_ARCHIVE_FORMATS)
+    _assert(base.attachment_formats == ("zip", "7z", "rar"))
+    _assert(base.max_artifact_bytes == DEFAULT_MAX_ARTIFACT_BYTES == 268435456)
+    _assert(base.archive_max_member_bytes == DEFAULT_ARCHIVE_MAX_MEMBER_BYTES == 67108864)
+    _assert(base.archive_max_uncompressed_bytes == 268435456)
+    _assert(base.archive_max_members is None)
+    _assert(base.archive_descent is ArchiveDescent.FULL)
+
+    # Дайджест-нейтральность: не заданные оси не появляются в as_dict.
+    new_keys = {
+        "attachment_formats",
+        "max_artifact_bytes",
+        "archive_max_member_bytes",
+        "archive_max_uncompressed_bytes",
+        "archive_max_members",
+        "archive_descent",
+    }
+    _assert(not (new_keys & set(base.as_dict())))
+    _assert(not (new_keys & set(CrawlConfig().model_fields_set)))
+
+    # run-переопределение + site приоритетнее run (по каждой оси).
+    run = CrawlRunConfig(
+        attachment_formats=["ZIP", ".7z"],
+        max_artifact_bytes=1024,
+        archive_max_member_bytes=512,
+        archive_max_uncompressed_bytes=2048,
+        archive_max_members=7,
+        archive_descent=ArchiveDescent.PLAN,
+    )
+    limits = resolve_crawl_limits("https://h/a", app=app, run=run)
+    _assert(limits.attachment_formats == ("zip", "7z"))
+    _assert(limits.max_artifact_bytes == 1024)
+    _assert(limits.archive_max_member_bytes == 512)
+    _assert(limits.archive_max_uncompressed_bytes == 2048)
+    _assert(limits.archive_max_members == 7)
+    _assert(limits.archive_descent is ArchiveDescent.PLAN)
+    _assert(new_keys <= set(limits.as_dict()))
+    _assert(limits.as_dict()["attachment_formats"] == ["zip", "7z"])
+    _assert(limits.as_dict()["archive_descent"] == "plan")
+
+    site = resolve_crawl_limits(
+        "https://h/a",
+        app=app,
+        run=run,
+        profiles={
+            "h": DomainProfile(
+                max_artifact_bytes=4096,
+                attachment_formats=["rar"],
+                archive_descent=ArchiveDescent.FULL,
+            )
+        },
+    )
+    _assert(site.max_artifact_bytes == 4096)  # site побеждает run
+    _assert(site.attachment_formats == ("rar",))
+    _assert(site.archive_descent is ArchiveDescent.FULL)
+    _assert(site.archive_max_members == 7)  # незаданное на site — наследует run
+
+    # Нормализация набора форматов.
+    _assert(normalize_attachment_formats(None) == SUPPORTED_ARCHIVE_FORMATS)
+    _assert(normalize_attachment_formats(["ZIP", ".7z", "zip"]) == ("zip", "7z"))
+    _assert(normalize_attachment_formats([]) == ())
+    for bad in (["tar"], ["zip", "gz"], [""]):
+        try:
+            normalize_attachment_formats(bad)
+            raise AssertionError(f"формат {bad!r} обязан отвергаться")
+        except ValueError:
+            pass
+
+    # Классификатор магии: OOXML — документ, не контейнер.
+    _assert(classify_archive_bytes(b"PK\x03\x04rest") == "zip")
+    _assert(classify_archive_bytes(b"PK\x03\x04[Content_Types].xml") is None)
+    _assert(classify_archive_bytes(b"7z\xbc\xaf\x27\x1c") == "7z")
+    _assert(classify_archive_bytes(b"Rar!\x1a\x07\x00") == "rar")  # RAR4
+    _assert(classify_archive_bytes(b"Rar!\x1a\x07\x01\x00") == "rar")  # RAR5
+    _assert(classify_archive_bytes(b"PK\x05\x06") == "zip")  # пустой zip
+    for other in (b"%PDF-1.7", b"\x1f\x8b\x08", b""):
+        _assert(classify_archive_bytes(other) is None)
+
+    # Позитивная вселенная допуска: незaявленный контейнер — обычный бинарный артефакт.
+    for url in ("https://h/x.ova", "https://h/x.iso", "https://h/x.gz", "https://h/x.tar"):
+        _assert(not is_attachment_url(url, ("zip", "7z", "rar")))
+    for url in ("https://h/x.zip", "https://h/x.7z", "https://h/x.rar", "https://h/x.RAR"):
+        _assert(is_attachment_url(url, ("zip", "7z", "rar")))
+    _assert(not is_attachment_url("https://h/x.zip", ()))  # набор не заявлен
+    _assert(not is_attachment_content_type("application/octet-stream", ("zip", "7z", "rar")))
+    _assert(is_attachment_content_type("application/zip; charset=binary", ("zip",)))
+
+    # Зеркало словаря (источник истины перечислений).
+    data = load_dictionary(ROOT / "docs" / "status-dictionary.yaml")
+    if set(data.get("archive_descent", [])) != {v.value for v in ArchiveDescent}:
+        raise AssertionError(
+            "словарь.archive_descent рассинхронизирован: "
+            f"словарь={sorted(data.get('archive_descent', []))}, "
+            f"схема={sorted(v.value for v in ArchiveDescent)}"
+        )
 
 
 def _crawl_probe() -> None:
