@@ -12,6 +12,7 @@ from typing import Any
 import yaml
 
 from core.domain.enums import (
+    ArchiveDescent,
     CapabilityPolicy,
     ChangeClass,
     CrawlItemStatus,
@@ -79,6 +80,8 @@ def assert_dictionary_integrity(path: str | Path) -> None:
         "crawl_strategy",
         # P5: уровень извлечения документных форматов (crawl.document_level).
         "document_level",
+        # P6: глубина спуска в контейнеры (crawl.archive_descent).
+        "archive_descent",
         # Lane B: жизненный цикл сеанса краула и per-URL статус его элемента.
         "crawl_session_status",
         "crawl_item_status",
@@ -119,6 +122,7 @@ def assert_dictionary_integrity(path: str | Path) -> None:
         "extraction_route": {v.value for v in ExtractionRoute},
         "crawl_strategy": {v.value for v in CrawlStrategy},
         "document_level": {v.value for v in DocumentLevel},
+        "archive_descent": {v.value for v in ArchiveDescent},
         "crawl_session_status": {v.value for v in CrawlSessionStatus},
         "crawl_item_status": {v.value for v in CrawlItemStatus},
         "skip_reason": {v.value for v in SkipReason},

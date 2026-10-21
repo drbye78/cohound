@@ -32,8 +32,15 @@ from typing import Any
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
-from core.domain.enums import CrawlStrategy, DocumentLevel, ExtractionRoute, FetchMode
+from core.domain.enums import (
+    ArchiveDescent,
+    CrawlStrategy,
+    DocumentLevel,
+    ExtractionRoute,
+    FetchMode,
+)
 from core.domain.models import RateLimitSpec
+from core.util.document_formats import normalize_attachment_formats
 
 __all__ = ["DomainProfile", "load_domain_profiles"]
 
@@ -66,7 +73,16 @@ class DomainProfile(BaseModel):
     # P0/OOM: per-site потолок одного ответа/retained-файла (байты; высший приоритет
     # цепочки app < run < site). ``None`` = не задано на этом слое.
     max_response_bytes: int | None = Field(default=None, gt=0)
+    # P6: per-site слой допуска контейнеров (класс «артефакт») и границ спуска. ``None``
+    # = не задано на этом слое (наследуется run/app). Резолв — та же цепочка app < run < site.
+    max_artifact_bytes: int | None = Field(default=None, gt=0)
+    attachment_formats: list[str] | None = None
+    archive_max_member_bytes: int | None = Field(default=None, gt=0)
+    archive_max_uncompressed_bytes: int | None = Field(default=None, gt=0)
+    archive_max_members: int | None = Field(default=None, gt=0)
+    archive_descent: ArchiveDescent | None = None
     max_depth: int | None = Field(default=None, ge=0)
+
     max_documents: int | None = Field(default=None, gt=0)
     # P-rev: per-site слой операторского потолка ревалидации известных URL на продукт.
     # ``None`` = не задано на этом слое (наследуется run/app). Ось применяется **к продукту**
@@ -97,6 +113,17 @@ class DomainProfile(BaseModel):
                     "ожидались непустые строки-glob"
                 )
         return value
+
+    @field_validator("attachment_formats")
+    @classmethod
+    def _check_attachment_formats(cls, value: list[str] | None) -> list[str] | None:
+        """Нормализует per-site набор контейнеров (нижний регистр, без точек)."""
+        if value is None:
+            return None
+        try:
+            return list(normalize_attachment_formats(value))
+        except ValueError as exc:
+            raise ValueError(f"domain_profiles.attachment_formats: {exc}") from exc
 
     @field_validator("sitemap")
     @classmethod

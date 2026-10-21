@@ -158,6 +158,28 @@ index+sources и есть единственная декларативная о
 | `unstructured` | 0.27.x | Apache-2.0 ✅ | **d** | `<3.14` + 24+ зависимостей + телеметрия on-by-default; OSS-таблицы слабые (0.426 vs 0.866) |
 | `html2text` | 2025.4.x | **GPL-3.0** ✅ | **d** | GPL несовместим с permissive-курсом; закрывается `markdownify` |
 
+**Контейнеры-артефакты (P6, спуск в zip/7z/rar).** Слой допуска/retention (стриминг в
+staging-файл, класс-aware потолки) реализован **без** этих пакетов — `zipfile` stdlib и
+магия байтов. Пакеты ниже — заявка на следующий слой (extra `extract-archives`), ни один
+модуль их пока не импортирует; базовый extra `extract` не меняется.
+
+| Пакет | Версия | Лицензия | Вердикт | Обоснование |
+|---|---|---|---|---|
+| `zipfile` (stdlib) | 3.14 | PSF ✅ | **a** | ZIP-члены без внешних бинарей; **ZipCrypto read-only** (запись AES — `pyzipper`), **bomb-guard нет** — границы задаёт ось `archive_max_*` (член/суммарный распакованный объём/число членов), не библиотека |
+| `py7zr` | 1.1.4+ | **LGPL-2.1-or-later** ✅ | **b** (extra `extract-archives`) | 7z (LZMA2/BCJ) на чистом Python. LGPL — **явное исключение**, см. ниже |
+| `rarfile` | 4.5+ | ISC ✅ | **b** (extra `extract-archives`) | RAR4/RAR5-разбор; **сжатые** члены требуют внешней утилиты (`bsdtar`/`unrar`/`7z`). `unrar` (проприетарный) в образ **не тащим**: отсутствие утилиты = видимый `attachment_skip(extractor_unavailable)`, не тихий пустой текст |
+| `pyzipper` | 0.4.0+ | MIT ✅ | **b** (extra `extract-archives`) | Только AES-zip (WinZip AE-1/AE-2); обычный zip закрывает stdlib. **Пин `>=0.4.0`** — CVE-2026-44722 в ранних версиях |
+
+⚠️ **LGPL-исключение (`py7zr`) — единственное в проекте.** Политика: LGPL-код
+**не копируется** в репозиторий (перенос кода запрещён), используется только как
+**unmodified wheel** из индекса; пакет вынесен в отдельный extra `extract-archives`,
+не входит в базовый `extract`/runtime-набор; за портом `ContainerPort` он **swap-able**
+(альтернатива — внешний `7z`-бинарь за тем же портом, без смены методологии). Это
+commodity-слой (A2): замена читателя контейнеров не меняет измерение. Прочие LGPL/GPL
+пакеты по-прежнему **d** (см. §3); `patool`/`pyth`/`pyunpack` — **d** (GPL-3 и/или
+неподдерживаемые: тонкие обёртки над бинарями, ломают воспроизводимость и
+контроль границ распаковки).
+
 ⚠️ **docling offline:** веса нужны **только PDF-контуру** (Office — без ML-моделей). Штатный
 офлайн-механизм — pipeline `artifacts_path` / env `DOCLING_ARTIFACTS_PATH`, заполняемый
 `docling-tools models download` (или `download_models()`); `HF_HUB_OFFLINE=1` — валидный, но
@@ -324,11 +346,13 @@ robots.txt-запрос оставлять на дефолтном HTTP-handler 
 
 **Опционально (`b`):** `faiss-cpu`/`usearch` (ANN при росте), `model2vec` (лёгкая эмбеддинг-ветка),
 `markitdown`/`pypdf`/`pdfplumber` (fallback-экстракция), `selectolax`/`bs4`/`markdownify`,
-`bge-reranker-v2-m3` (reranker), `rich`/`typer`, `orjson`/`tqdm`, `xlsxwriter`, `hishel`.
+`bge-reranker-v2-m3` (reranker), `rich`/`typer`, `orjson`/`tqdm`, `xlsxwriter`, `hishel`,
+`py7zr`/`rarfile`/`pyzipper` (спуск в контейнеры, extra `extract-archives`; `py7zr` — LGPL-исключение §2.4).
 
 **Не брать (`d`):** LangChain, LlamaIndex, все hosted-парсеры, `unstructured`, `PyMuPDF`,
 `html2text`, `bleach`, `chromadb`, `whoosh`, `pylucene`, `jsonformer`, TGI, `pandas`,
-`Unidecode`/`python-slugify`, `FlagEmbedding` (для инференса).
+`Unidecode`/`python-slugify`, `FlagEmbedding` (для инференса), `patool`/`pyth`/`pyunpack`
+(GPL-3 и/или мёртвые обёртки над внешними бинарями).
 
 ---
 

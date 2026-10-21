@@ -116,8 +116,11 @@ URL/документов/чанков:
 from __future__ import annotations
 
 import datetime as _dt
+import errno
 import hashlib
 import json
+import os
+import shutil
 import time
 from collections import deque
 from collections.abc import Callable, Iterable, Mapping, Sequence
@@ -181,7 +184,6 @@ from core.pipeline.incremental import (
     plan_incremental,
 )
 from core.pipeline.runner import PhaseResult
-from core.util.document_formats import unsupported_binary_reason
 from core.ports.chunker import ChunkerPort
 from core.ports.crawl_executor import (
     ACTIVE_JOB_STATUSES,
@@ -210,7 +212,15 @@ from core.ports.types import (
     FetchPlan,
     RawPage,
 )
-from core.util.document_formats import document_content_type, document_suffix
+from core.util.document_formats import (
+    BINARY_SNIFF_BYTES,
+    classify_archive_bytes,
+    document_content_type,
+    document_suffix,
+    is_attachment_content_type,
+    is_attachment_url,
+    unsupported_binary_reason,
+)
 from core.util.hashing import content_hash, short_hash
 from core.util.index_partition import build_root as _partition_root
 from core.util.index_partition import is_committed as _partition_is_committed
@@ -227,6 +237,10 @@ _FIELD_SEP = "\x1f"
 #: Схема формулы ``partition_build_id`` (09 §8.1). Входит в material, поэтому ревизия
 #: формулы всегда даёт новые id: старые партиции не переиспользуются молча.
 _PARTITION_SCHEMA = "partition-1"
+
+#: P6: подкаталог ``raw_root`` для staging-файлов допущенных артефактов. Тот же ФС, что
+#: и ``corpus_raw``, поэтому публикация — ``os.replace`` (переезд, не копия).
+_STAGING_DIRNAME = "_staging"
 
 #: Phase 3 B2: максимум попыток подачи работ исполнителю при back-pressure
 #: (``accepted=False``). После исчерпания — изолированный ``FAILED`` (``source_unavailable``),
@@ -881,7 +895,7 @@ class _LocalFetch:
     active: Any
     engine_value: str | None
     prior_item: CrawlSessionItem | None
-    resume: tuple[bytes, Path] | None
+    resume: _RetainedRaw | None
     browser_blocked: bool
     poolable: bool
     host: str
@@ -890,6 +904,10 @@ class _LocalFetch:
     terminal: bool = False
     #: P0: retained raw отклонён по размеру/бинарности — терминальный исход без экстракции.
     reject: _RetainedReject | None = None
+    #: P6: класс-aware потолок артефакта-контейнера и заявленный набор форматов (нужны
+    #: пост-фазе для допуска/размера; ``None``/пусто — наследовать поведение страницы).
+    max_artifact_bytes: int | None = None
+    attachment_formats: tuple[str, ...] | None = None
 
 
 @dataclass
@@ -1429,24 +1447,90 @@ def _partition_reuse_reason(
 # --------------------------------------------------------------------------- #
 
 
+@dataclass(frozen=True)
+class _RetainedRaw:
+    """Retained-файл, пригодный для resume (D3) без обязательного чтения в RAM.
+
+    ``data is None`` — файл **не** буферизован (допущенный артефакт-контейнер): байты
+    читает только тот, кому они реально нужны (спуск/экстрактор), а path остаётся
+    источником истины I19. ``head`` — первые :data:`BINARY_SNIFF_BYTES` байт (post-fetch
+    классификация без чтения файла); у буферизованных страниц ``head is None``.
+    """
+
+    path: Path
+    content_hash: str
+    size: int
+    head: bytes | None = None
+    data: bytes | None = None
+
+
+def _hash_file(path: Path) -> str:
+    """SHA-256 файла потоково (1 MiB): файл не читается целиком ради хеша."""
+    hasher = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(_RESUME_READ_CHUNK), b""):
+            hasher.update(chunk)
+    return hasher.hexdigest()
+
+
+def _publish_staged(staged: Path, target: Path) -> None:
+    """Публикует staging-файл как retained: ``os.replace`` (переезд, не копия).
+
+    Staging-каталог создаётся ядром под ``raw_root``, поэтому штатно файлы на одном ФС и
+    ``os.replace`` атомарен. Если адаптер всё же дал файл с другого ФС (``EXDEV``) —
+    потоковая копия ядром (``shutil.copyfile``: sendfile/``copy_file_range``, без чтения
+    тела в RAM) и удаление staging: байты не теряются, но и RAM не растёт.
+    """
+    try:
+        os.replace(staged, target)
+        return
+    except OSError as exc:
+        if exc.errno != errno.EXDEV:
+            raise
+    shutil.copyfile(staged, target)
+    staged.unlink(missing_ok=True)
+
+
+def _is_attachment(
+    url: str | None,
+    content_type: str | None,
+    attachment_formats: Sequence[str] | None,
+) -> bool:
+    """Класс «артефакт-контейнер» по URL-суффиксу либо ``Content-Type`` (P6).
+
+    ``attachment_formats=None`` — дефолт всех поддерживаемых форматов (так резолвится
+    конфиг); пустой набор — контейнеров не заявлено, класс не определяется.
+    """
+    if is_attachment_url(url or "", attachment_formats):
+        return True
+    return is_attachment_content_type(content_type, attachment_formats)
+
+
 def _resume_source(
     item: CrawlSessionItem | None,
     *,
     max_bytes: int | None = None,
-) -> tuple[bytes, Path] | _RetainedReject | None:
-    """Возвращает retained-байты для resume, если элемент сеанса позволяет НЕ фетчить (D3).
+    artifact_max_bytes: int | None = None,
+    attachment_formats: Sequence[str] | None = None,
+) -> _RetainedRaw | _RetainedReject | None:
+    """Возвращает retained-источник для resume, если элемент сеанса позволяет НЕ фетчить (D3).
 
     Пригодны элементы ``FETCHED`` (сырые байты уже сохранены) и ``FAILED`` с сохранённым
     ``raw_path`` (re-extract из тех же байтов без сети). ``PENDING``/``RUNNING``/отсутствие
     записи, отсутствие ``raw_path`` или файла на диске → ``None`` (обычный путь фетча).
 
-    **P0/OOM.** Размер проверяется по ``stat`` **до** чтения: retained-файл больше
-    ``max_bytes`` → :class:`_RetainedReject` ``payload_too_large`` (терминально, без
-    экстракции) — это защищает от poison, уже лежащего на диске. Хеш считается
-    **потоково** (1 MiB): файл не читается целиком ради ``read_bytes``. Бинарный
-    не-документ (post-fetch эвристика) → ``_RetainedReject`` ``unsupported_binary``.
+    **P0/P6: потолок по классу.** Размер проверяется по ``stat`` **до** чтения. Класс
+    определяется по метаданным записи (URL-суффикс/``Content-Type``, заявленный набор
+    ``attachment_formats``): допущенный артефакт-контейнер ограничен
+    ``artifact_max_bytes``, страница — ``max_bytes``. Так retained-артефакт в 125 MB
+    резюмится, а страница того же размера по-прежнему терминально отвергается
+    ``payload_too_large``.
 
-    **Верификация (D3).** Если в записи задан ``content_hash``, а хеш прочитанных байтов
+    **Память.** Страницы (≤ ``max_bytes``) буферизуются как прежде — путь байт-в-байт
+    прежний. Артефакт **не** буферизуется: возвращается :class:`_RetainedRaw` с путём,
+    потоковым хешем и первыми 8 KiB (``head``) — файл целиком в RAM не попадает.
+
+    **Верификация (D3).** Если в записи задан ``content_hash``, а потоковый хеш файла
     не совпадает, файл считается непригодным (повреждён/подменён) → ``None``: резюм не
     должен молча давать другой ``index_build_id`` и самопротиворечивую аудит-строку.
     I19: retained raw — источник; экстракция детерминирована.
@@ -1460,41 +1544,54 @@ def _resume_source(
     path = Path(item.raw_path)
     if not path.is_file():
         return None
+    artifact = _is_attachment(item.url, item.content_type, attachment_formats)
+    cap = artifact_max_bytes if artifact and artifact_max_bytes is not None else max_bytes
     try:
         size = path.stat().st_size
     except OSError:
         return None
-    if max_bytes is not None and size > max_bytes:
+    if cap is not None and size > cap:
         return _RetainedReject(
             FailureKind.PAYLOAD_TOO_LARGE,
-            f"retained {size} байт > лимита {max_bytes} (payload_too_large)",
+            f"retained {size} байт > лимита {cap} (payload_too_large)",
             path,
         )
     hasher = hashlib.sha256()
-    buffer = bytearray()
+    head = bytearray()
+    buffer: bytearray | None = None if artifact else bytearray()
+    read = 0
     try:
         with path.open("rb") as handle:
             while True:
                 chunk = handle.read(_RESUME_READ_CHUNK)
                 if not chunk:
                     break
-                if max_bytes is not None and len(buffer) + len(chunk) > max_bytes:
+                read += len(chunk)
+                if cap is not None and read > cap:
                     # Файл вырос после stat: режем до буферизации остатка.
                     return _RetainedReject(
                         FailureKind.PAYLOAD_TOO_LARGE,
-                        f"retained превысил лимит {max_bytes} при чтении "
+                        f"retained превысил лимит {cap} при чтении "
                         "(payload_too_large)",
                         path,
                     )
                 hasher.update(chunk)
-                buffer.extend(chunk)
+                if len(head) < BINARY_SNIFF_BYTES:
+                    head.extend(chunk[: BINARY_SNIFF_BYTES - len(head)])
+                if buffer is not None:
+                    buffer.extend(chunk)
     except OSError:
         return None
-    data = bytes(buffer)
-    if item.content_hash and hasher.hexdigest() != item.content_hash:
+    digest = hasher.hexdigest()
+    if item.content_hash and digest != item.content_hash:
         return None
+    snapshot = bytes(head)
+    buffered = None if buffer is None else bytes(buffer)
     binary_reason = unsupported_binary_reason(
-        data, url=item.url, content_type=item.content_type
+        buffered if buffered is not None else snapshot,
+        url=item.url,
+        content_type=item.content_type,
+        attachment_formats=attachment_formats,
     )
     if binary_reason is not None:
         return _RetainedReject(
@@ -1502,7 +1599,13 @@ def _resume_source(
             f"retained: {binary_reason}",
             path,
         )
-    return data, path
+    return _RetainedRaw(
+        path=path,
+        content_hash=digest,
+        size=read,
+        head=None if buffered is not None else snapshot,
+        data=buffered,
+    )
 
 
 #: Терминальные классы: повторный фетч/экстракция не дадут нового знания (P0/I4).
@@ -1543,12 +1646,16 @@ def _terminal_not_found(item: CrawlSessionItem | None) -> bool:
 def _resume_page(
     item: CrawlSessionItem,
     url: str,
-    content: bytes,
-    path: Path,
+    retained: _RetainedRaw,
     fetch_plan: FetchPlan,
     validators: tuple[str | None, str | None] | None = None,
 ) -> RawPage:
-    """Реконструирует ``RawPage`` из retained-байтов и элемента сеанса (без сети, D3).
+    """Реконструирует ``RawPage`` из retained-источника и элемента сеанса (без сети, D3).
+
+    ``retained.data is not None`` — обычная страница: ``content`` — буферизованные байты
+    (байт-в-байт прежнее поведение). ``data is None`` — артефакт-контейнер: ``content``
+    пуст, ``staged_path`` указывает на retained-файл, ``head`` — первые 8 KiB; файл в RAM
+    не читается.
 
     ``fetched_at`` — из ``last_attempt`` записи, иначе mtime файла (UTC). ``fetch_mode`` —
     из записи (если распознаётся, иначе ``fetch_plan.fetch``). ``content_type``/``lang``/
@@ -1565,7 +1672,7 @@ def _resume_page(
     if not fetched_at:
         try:
             fetched_at = _dt.datetime.fromtimestamp(
-                path.stat().st_mtime, tz=_dt.timezone.utc
+                retained.path.stat().st_mtime, tz=_dt.timezone.utc
             ).isoformat()
         except OSError:
             fetched_at = ""
@@ -1576,9 +1683,10 @@ def _resume_page(
         except ValueError:
             fetch_mode = fetch_plan.fetch
     etag, last_modified = validators if validators is not None else (None, None)
+    buffered = retained.data is not None
     return RawPage(
         url=url,
-        content=content,
+        content=retained.data or b"",
         fetched_at=fetched_at or "",
         fetch_mode=fetch_mode,
         lang=item.lang,
@@ -1586,6 +1694,8 @@ def _resume_page(
         content_type=item.content_type,
         etag=etag,
         last_modified=last_modified,
+        staged_path=None if buffered else str(retained.path),
+        head=None if buffered else retained.head,
     )
 
 
@@ -2327,13 +2437,29 @@ def build_corpus(
         недоступность источника по этому URL: строка помечается ``FAILED``
         (``source_unavailable``), чтобы очередь/счётчики были правдивы; возвращается ``None``.
         Общий шаг локального и executor путей (без дублирования).
+
+        **Файловый staging (P6).** ``page.staged_path`` — тело уже лежит файлом у
+        адаптера: хеш считается **потоково** по файлу (I19: адаптерному хешу не доверяем —
+        его и нет), публикация — :func:`_publish_staged` (переезд в том же ФС без копии и
+        без чтения в RAM). ``staged_path is None`` — прежний путь ``write_bytes``
+        байт-в-байт.
         """
-        raw_hash = content_hash(page.content)
+        staged = Path(page.staged_path) if page.staged_path else None
+        raw_path: Path | None = None
         try:
+            raw_hash = _hash_file(staged) if staged is not None else content_hash(page.content)
             raw_path = raw_root_path / product_id / f"{raw_hash}.bin"
             raw_path.parent.mkdir(parents=True, exist_ok=True)
-            raw_path.write_bytes(page.content)
+            if staged is not None:
+                _publish_staged(staged, raw_path)
+            else:
+                raw_path.write_bytes(page.content)
         except Exception as exc:  # noqa: BLE001
+            if staged is not None:
+                try:
+                    staged.unlink(missing_ok=True)
+                except OSError:
+                    pass
             reason = f"{type(exc).__name__}: {exc}"
             errors.append(f"{product_id}/{url}: retention: {reason}")
             # L1a: сбой сохранения байтов = недоступность источника по этому URL;
@@ -2387,10 +2513,11 @@ def build_corpus(
         """
         try:
             level_text = _as_text(level)
-            # I19: ключ — хеш тех же байтов, что retention положил в ``raw_path``
-            # (``page.content``). Хит принимается лишь при совпадении ключа конверта
-            # с этими байтами, поэтому кэш не может подсунуть неверифицированный текст.
-            cache_key = content_hash(page.content)
+            # I19: ключ — хеш тех же байтов, что retention положил в ``raw_path``.
+            # ``raw_path.stem`` и есть этот хеш (``_retain`` называет файл ``{hash}.bin``),
+            # поэтому для страницы ключ байт-идентичен ``content_hash(page.content)``, а для
+            # staging-артефакта (``page.content`` пуст) ключ не вырождается в хеш пустоты.
+            cache_key = raw_path.stem
             extracted = (
                 None
                 if extract_cache is None
@@ -3138,6 +3265,8 @@ def build_corpus(
         enforce_redirect_scope: bool = False,
         robots: bool = False,
         max_response_bytes: int,
+        artifact_max_bytes: int | None = None,
+        attachment_formats: Sequence[str] | None = None,
     ) -> _LocalFetch:
         """D4 pre-fetch (главный поток): resume/browser-guard/решение о пейсинге.
 
@@ -3164,6 +3293,19 @@ def build_corpus(
         )
         # P0: per-site/run потолок ответа едет на плане (адаптер применяет его к стриму).
         fetch_plan = replace(fetch_plan, max_response_bytes=max_response_bytes)
+        # P6: допуск артефакта-контейнера. Страница остаётся под ``max_response_bytes``;
+        # артефакт класса «контейнер» (суффикс/``Content-Type``) вправе уйти в staging-файл
+        # под ``raw_root`` и ограничен ``max_artifact_bytes``. Класс решает адаптер по
+        # заявленному набору: незаявленный контейнер получает прежний ``payload_too_large``.
+        if artifact_max_bytes is not None:
+            fetch_plan = replace(
+                fetch_plan,
+                staging_dir=str(raw_root_path / _STAGING_DIRNAME),
+                max_stream_bytes=int(artifact_max_bytes),
+                attachment_formats=(
+                    None if attachment_formats is None else tuple(attachment_formats)
+                ),
+            )
         # 09 §6.3: валидаторы условного GET (только auto/revalidate; refresh — безусловный).
         if_none_match, if_modified_since = _validators(pid, wu)
         if if_none_match is not None or if_modified_since is not None:
@@ -3174,7 +3316,12 @@ def build_corpus(
             )
         prior_item = items.get((pid, wu))
         resume_source = (
-            _resume_source(prior_item, max_bytes=max_response_bytes)
+            _resume_source(
+                prior_item,
+                max_bytes=max_response_bytes,
+                artifact_max_bytes=artifact_max_bytes,
+                attachment_formats=attachment_formats,
+            )
             if prior_item is not None
             else None
         )
@@ -3183,7 +3330,7 @@ def build_corpus(
             if isinstance(resume_source, _RetainedReject)
             else None
         )
-        resume = resume_source if isinstance(resume_source, tuple) else None
+        resume = resume_source if isinstance(resume_source, _RetainedRaw) else None
         # Терминальный класс (not_found/payload_too_large/unsupported_binary): живой
         # фетч не нужен и вреден (см. helper).
         terminal = _terminal_failure_kind(prior_item) is not None
@@ -3230,6 +3377,10 @@ def build_corpus(
             enforce_redirect_scope=enforce_redirect_scope,
             terminal=terminal,
             reject=reject,
+            max_artifact_bytes=artifact_max_bytes,
+            attachment_formats=(
+                None if attachment_formats is None else tuple(attachment_formats)
+            ),
         )
 
     def _local_fetch(desc: _LocalFetch) -> RawPage:
@@ -3343,12 +3494,16 @@ def build_corpus(
 
         if desc.resume is not None:
             assert desc.prior_item is not None  # resume возможен только при наличии элемента
-            content, raw_path = desc.resume
+            retained = desc.resume
             # 09 §6.3: валидаторы сеанс не хранит — они приходят из ``url_state`` (durable),
             # чтобы запись состояния после resume не потеряла условную валидацию.
             page = _resume_page(
-                desc.prior_item, wu, content, raw_path, fetch_plan, _validators(pid, wu)
+                desc.prior_item, wu, retained, fetch_plan, _validators(pid, wu)
             )
+            # Байты уже ретейнены (``retained.path`` — источник истины I19): повторной
+            # публикации/копии нет. Артефакт-контейнер в RAM не читался — ``content`` пуст,
+            # ``page.staged_path`` указывает на retained-файл.
+            raw_path = retained.path
             # Счётчик отражает статус возобновляемого элемента (FETCHED — retryable,
             # FAILED — re-extract), а не ``pending``: он уже персистится в сеансе, и при
             # последующем сбое chunker'а URL будет посчитан как ``fetched``, а не потерян.
@@ -3457,9 +3612,10 @@ def build_corpus(
             )
             return None
         binary_reason = unsupported_binary_reason(
-            page.content,
+            page.content or page.head or b"",
             url=page.url or wu,
             content_type=page.content_type,
+            attachment_formats=desc.attachment_formats,
         )
         if binary_reason is not None:
             reason = f"unsupported_binary: {binary_reason}"
@@ -3492,6 +3648,8 @@ def build_corpus(
         enforce_redirect_scope: bool = False,
         robots: bool = False,
         max_response_bytes: int,
+        artifact_max_bytes: int | None = None,
+        attachment_formats: Sequence[str] | None = None,
     ) -> tuple[RawPage, Path, FetchPlan, bool] | None:
         """Локальный per-URL путь (последовательный): pre-fetch → fetch → post-fetch (D4).
 
@@ -3509,6 +3667,8 @@ def build_corpus(
             enforce_redirect_scope=enforce_redirect_scope,
             robots=robots,
             max_response_bytes=max_response_bytes,
+            artifact_max_bytes=artifact_max_bytes,
+            attachment_formats=attachment_formats,
         )
         if (
             desc.resume is not None
@@ -4113,9 +4273,12 @@ def build_corpus(
                 if not frontier.in_scope(iurl):
                     continue
                 counted = _resume_source(
-                    item, max_bytes=limits.max_response_bytes
+                    item,
+                    max_bytes=limits.max_response_bytes,
+                    artifact_max_bytes=limits.max_artifact_bytes,
+                    attachment_formats=limits.attachment_formats,
                 )
-                if not isinstance(counted, tuple):
+                if not isinstance(counted, _RetainedRaw):
                     # Нет пригодного resume (oversize/binary/несовпадение) — не бюджет.
                     continue
                 consumed += 1
@@ -4228,6 +4391,29 @@ def build_corpus(
                     and document_content_type(page.content_type) is not None
                 ):
                     _record_document_skip(work_url, "content_type")
+                    _emit_progress()
+                    return
+                # P6: допущенный артефакт-контейнер ретейнён, но спуск в контейнеры —
+                # следующий слой (``ContainerPort``/``corpus_members``). Экстрактор на
+                # пустом ``content`` (staging) дал бы ложный ``parser_failed``: контейнер —
+                # не документ. Поэтому исход — видимый skip: элемент остаётся ``FETCHED``
+                # (байты — evidence I19), причина — в ``errors``. Класс определяется
+                # **байтами** (``classify_archive_bytes``: OOXML — документ, не контейнер)
+                # и заявленным набором осей; до спуска ни один байт контейнера не читается
+                # в RAM сверх головы (``head``/первые 8 KiB).
+                if (
+                    _is_attachment(
+                        page.url or work_url,
+                        page.content_type,
+                        fetch_plan.attachment_formats,
+                    )
+                    and classify_archive_bytes(page.content or page.head or b"")
+                    is not None
+                ):
+                    errors.append(
+                        f"{pid}/{work_url}: attachment_skip: контейнер ретейнён, "
+                        "спуск не исполняется (текущий слой)"
+                    )
                     _emit_progress()
                     return
                 if extracted is _INLINE:
@@ -4741,6 +4927,8 @@ def build_corpus(
                                 _resume_source(
                                     prior_item,
                                     max_bytes=limits.max_response_bytes,
+                                    artifact_max_bytes=limits.max_artifact_bytes,
+                                    attachment_formats=limits.attachment_formats,
                                 )
                                 if prior_item is not None
                                 else None
@@ -4752,7 +4940,7 @@ def build_corpus(
                             )
                             resume = (
                                 resume_source
-                                if isinstance(resume_source, tuple)
+                                if isinstance(resume_source, _RetainedRaw)
                                 else None
                             )
                             # Дескриптор коммита строится вручную (не ``_local_prefetch``):
@@ -4955,6 +5143,8 @@ def build_corpus(
                             enforce_redirect_scope=limits.max_depth > 0,
                             robots=robots_enabled,
                             max_response_bytes=limits.max_response_bytes,
+                            artifact_max_bytes=limits.max_artifact_bytes,
+                            attachment_formats=limits.attachment_formats,
                         )
                         _commit_or_defer(pid, work_url, depth, outcome)
                         continue
@@ -5026,6 +5216,8 @@ def build_corpus(
                             enforce_redirect_scope=limits.max_depth > 0,
                             robots=robots_enabled,
                             max_response_bytes=limits.max_response_bytes,
+                            artifact_max_bytes=limits.max_artifact_bytes,
+                            attachment_formats=limits.attachment_formats,
                         )
                         # D2/e: browser-элементы НИКОГДА не пулятся (``BrowserCrawler`` водит
                         # единственную ``_page`` без лока) — идут inline на главном потоке;

@@ -30,8 +30,17 @@ from typing import Any
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from core.domain.enums import DocumentLevel
-from core.domain.models import DEFAULT_MAX_RESPONSE_BYTES
+from core.domain.enums import ArchiveDescent, DocumentLevel
+from core.domain.models import (
+    DEFAULT_ARCHIVE_MAX_MEMBER_BYTES,
+    DEFAULT_ARCHIVE_MAX_UNCOMPRESSED_BYTES,
+    DEFAULT_MAX_ARTIFACT_BYTES,
+    DEFAULT_MAX_RESPONSE_BYTES,
+)
+from core.util.document_formats import (
+    SUPPORTED_ARCHIVE_FORMATS,
+    normalize_attachment_formats,
+)
 
 __all__ = [
     "TLSConfig",
@@ -363,7 +372,25 @@ class CrawlConfig(BaseModel):
     # ``EdgeConfig`` не меняется. Ось операционная (``execution_change``), резолв —
     # app < run < site. Превышение — терминальный ``payload_too_large`` (без retention).
     max_response_bytes: int = Field(default=DEFAULT_MAX_RESPONSE_BYTES, gt=0)
+    # P6/P0: потолок **потокового** допущенного артефакта (контейнер zip/7z/rar),
+    # байты. Страница остаётся под ``max_response_bytes`` (in-memory потолок): артефакт
+    # свыше него уходит в staging-файл, а не в RAM. Дефолт 256 MiB покрывает измеренный
+    # корпусный контейнер (125.7 MB). Ось операционная (``execution_change``, §13).
+    max_artifact_bytes: int = Field(default=DEFAULT_MAX_ARTIFACT_BYTES, gt=0)
+    # P6: заявленные форматы-контейнеры (класс «артефакт»). Незaявленный суффикс
+    # (``.ova``/``.iso``/``.gz``/``.tar``) остаётся обычным бинарным артефактом. Сужение
+    # набора (например только ``["zip"]``) — допустимая операционная правка.
+    attachment_formats: tuple[str, ...] = SUPPORTED_ARCHIVE_FORMATS
+    # P6: границы спуска в контейнер (исполняет следующий слой). Значения нужны уже
+    # сейчас: они входят в провенанс/дайджест и определяют допуск артефакта.
+    archive_max_member_bytes: int = Field(default=DEFAULT_ARCHIVE_MAX_MEMBER_BYTES, gt=0)
+    archive_max_uncompressed_bytes: int = Field(
+        default=DEFAULT_ARCHIVE_MAX_UNCOMPRESSED_BYTES, gt=0
+    )
+    archive_max_members: int | None = Field(default=None, gt=0)
+    archive_descent: ArchiveDescent = ArchiveDescent.FULL
     max_depth: int = Field(default=0, ge=0)
+
     max_documents: int | None = Field(default=None, gt=0)
     #: Операторский потолок ревалидации известных URL **на продукт** за цикл
     #: (``crawl.revalidate_max_documents``). ``None`` — ось не задана: ревалидируются
@@ -396,6 +423,24 @@ class CrawlConfig(BaseModel):
                     "crawl.exclude_paths/exclude_documents: ожидались непустые строки-glob"
                 )
         return value
+
+    @field_validator("attachment_formats", mode="before")
+    @classmethod
+    def _check_attachment_formats(cls, value: object) -> tuple[str, ...]:
+        """Нормализует заявленный набор контейнеров (нижний регистр, без точек).
+
+        Канонизация и проверка против поддерживаемых форматов — в нейтральном
+        :func:`core.util.document_formats.normalize_attachment_formats`: конфиг не должен
+        молча обещать формат, для которого нет читателя.
+        """
+        if value is None:
+            return SUPPORTED_ARCHIVE_FORMATS
+        if isinstance(value, str):
+            value = [value]
+        try:
+            return normalize_attachment_formats(value)  # type: ignore[arg-type]
+        except ValueError as exc:
+            raise ValueError(f"crawl.attachment_formats: {exc}") from exc
 
 
 class LLMSlotConfig(BaseModel):

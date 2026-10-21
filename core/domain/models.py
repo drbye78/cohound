@@ -18,6 +18,7 @@ from core.domain.enums import (
     AdapterKind,
     AnchorRelation,
     Archetype,
+    ArchiveDescent,
     CellState,
     CrawlItemStatus,
     CrawlSessionStatus,
@@ -53,6 +54,8 @@ from core.domain.enums import (
     Status,
     TerminationReason,
 )
+
+from core.util.document_formats import normalize_attachment_formats
 
 _BASE = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
@@ -98,6 +101,20 @@ METHODOLOGY_VERSION = "2.3.0"
 #: его как собственный дефолт, чтобы probe/прочие call-site без ``CrawlLimits``
 #: получали тот же предел.
 DEFAULT_MAX_RESPONSE_BYTES = 20_971_520
+
+#: P6: дефолтный **потоковый** потолок допущенного артефакта-контейнера — 256 MiB.
+#: Покрывает измеренный корпусный контейнер (125 727 643 B) с запасом; страница при этом
+#: остаётся под ``DEFAULT_MAX_RESPONSE_BYTES`` (in-memory потолок).
+DEFAULT_MAX_ARTIFACT_BYTES = 268_435_456
+
+#: P6: дефолтный потолок **одного члена** контейнера — 64 MiB (измеренный максимум
+#: 25.1 MB). Потолки спуска — операционные оси исполнения (``execution_change``).
+DEFAULT_ARCHIVE_MAX_MEMBER_BYTES = 67_108_864
+
+#: P6: дефолтный потолок суммарного распакованного объёма контейнера — 256 MiB
+#: (измерено 139 661 173 B).
+DEFAULT_ARCHIVE_MAX_UNCOMPRESSED_BYTES = 268_435_456
+
 
 
 # ---------------------------------------------------------------------------
@@ -408,7 +425,19 @@ class CrawlRunConfig(BaseModel):
     # не задано на этом слое (наследуется app-дефолт 20 MiB). Резолв — та же цепочка
     # app < run < site; смена — ``execution_change`` (§13), не methodology.
     max_response_bytes: int | None = Field(default=None, gt=0)
+    # P6/P0: run-слой потокового потолка допущенного артефакта-контейнера (байты).
+    # ``None`` — не задано на этом слое (наследуется app-дефолт 256 MiB).
+    max_artifact_bytes: int | None = Field(default=None, gt=0)
+    # P6: заявленные форматы-контейнеры (``zip``/``7z``/``rar``). ``None`` — наследовать
+    # app-слой; сужение (напр. ``["zip"]``) допустимо.
+    attachment_formats: list[str] | None = None
+    # P6: границы спуска в контейнер (для следующего слоя; входят в провенанс).
+    archive_max_member_bytes: int | None = Field(default=None, gt=0)
+    archive_max_uncompressed_bytes: int | None = Field(default=None, gt=0)
+    archive_max_members: int | None = Field(default=None, gt=0)
+    archive_descent: ArchiveDescent | None = None
     max_depth: int | None = Field(default=None, ge=0)
+
     max_documents: int | None = Field(default=None, gt=0)
     #: Ops «не ограничивать, а измерять»: максимум известных URL ревалидации **на продукт**
     #: за цикл. ``None`` — ось не задана (все известные URL; поведение байт-в-байт).
@@ -434,6 +463,17 @@ class CrawlRunConfig(BaseModel):
                     "crawl.exclude_paths/exclude_documents: ожидались непустые строки-glob"
                 )
         return value
+
+    @field_validator("attachment_formats")
+    @classmethod
+    def _check_attachment_formats(cls, value: list[str] | None) -> list[str] | None:
+        """Нормализует run-набор контейнеров (нижний регистр, без точек)."""
+        if value is None:
+            return None
+        try:
+            return list(normalize_attachment_formats(value))
+        except ValueError as exc:
+            raise ValueError(f"crawl.attachment_formats: {exc}") from exc
 
 
 class RunConfig(BaseModel):

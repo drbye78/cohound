@@ -79,6 +79,21 @@ safety = [
     "defusedxml>=0.7,<0.8",
 ]
 
+# Спуск в контейнеры-артефакты (zip/7z/rar) — следующий слой после допуска/retention.
+# Extra — заявка: ни один модуль пока не импортирует эти пакеты (базовый `extract` не
+# меняется). Лицензии/заменяемость — docs/architecture/05-dependency-stack.md.
+#   * py7zr — LGPL-2.1-or-later: исключение зафиксировано (unmodified wheel, отдельный
+#     extra, swap-able; копирование кода в репозиторий запрещено);
+#   * rarfile — ISC; сжатые члены требуют внешнего bsdtar/unrar/7z (в образ не тащим:
+#     отсутствие утилиты — видимый attachment_skip(extractor_unavailable));
+#   * pyzipper — MIT; нужен только для AES-zip; pin >=0.4.0 (CVE-2026-44722);
+#   * zipfile (stdlib) — ZipCrypto read-only, bomb-guard нет (границы — archive_* оси).
+extract-archives = [
+    "py7zr>=1.1.4",
+    "rarfile>=4.5",
+    "pyzipper>=0.4.0",
+]
+
 # Надёжность и наблюдаемость (retry §7, структурные логи манифеста).
 ops = [
     "tenacity>=9.2,<10",
