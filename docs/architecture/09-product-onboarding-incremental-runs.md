@@ -1327,9 +1327,14 @@ class CompositionView:
 ### 8.6. Иммутабельность и GC
 
 - Партиция и композиция — только создание; правка на месте запрещена (K2/§13).
-- **Партиции**: `gc_index_builds` (`core/store/backup.py`) удаляет сборки, не входящие ни в
-  одну композицию пакета; вызывается явно из кода (портируемой CLI-поверхности у него пока
-  нет — `hound package index-gc` чистит только композиции).
+- **Партиции**: `hound package builds-gc --package DIR [--runs-dir runs] [--protect ID ...]
+  [--apply --actor]` (`gc_index_builds`, `core/store/backup.py`) удаляет сборки, не входящие
+  ни в одну композицию пакета. Живое множество считается существующим `_live_compositions`
+  по **всем** run DB каталога (`runs.index_build_id`, read-only); legacy-сборка (раскладка
+  до композиций), названная прогоном, но не имеющая манифеста `_compositions/{id}.json`,
+  добавляется в `protect` и выживает. Отказ (`ValueError`/`code=state`) при недоказуемости
+  ссылок: нет `runs_dir`/ни одной run DB, DB не читается/без `runs`, ссылка пакета висит в
+  воздухе, манифест не разбирается. По умолчанию dry-run; удаление — `--apply --actor`.
 - **Композиции**: `hound package index-gc --package DIR [--runs-dir runs] [--apply --actor]`
   (`gc_index_compositions`). Живое множество — `runs.index_build_id` по **всем** run DB
   каталога (`runs.package_id` фильтрует; `NULL`-пакет консервативно защищает любой пакет;
@@ -1337,7 +1342,7 @@ class CompositionView:
   `runs_dir`/ни одной run DB, DB не читается, ссылка пакета висит в воздухе, манифест не
   разбирается. По умолчанию dry-run; удаление — `--apply --actor`.
 - Операции **не сцеплены**: удаление композиции не трогает партиции (их соберёт отдельный
-  `gc_index_builds`), и наоборот. Реестр `state.db.index_composition` — durable-лог
+  `hound package builds-gc`), и наоборот. Реестр `state.db.index_composition` — durable-лог
   существовавшего (и `last_used_run_id`), **не** зеркало диска; GC его не чистит.
 - **Рабочая последовательность** (владелец: все прогоны, кроме новейшего, расходуемы —
   дрейф Capability делает старые прогоны нерелевантными):
@@ -1345,7 +1350,9 @@ class CompositionView:
      на композицию;
   2. `hound package index-gc --package <DIR> [--runs-dir runs] --apply --actor <NAME>` —
      прунятся композиции, чья заявка исчезла вместе с прогоном;
-  3. при желании — `gc_index_builds` для партиций, ставших недостижимыми после шага 2.
+  3. при желании — `hound package builds-gc --package <DIR> [--runs-dir runs]
+     [--protect ID ...] --apply --actor <NAME>` для партиций, ставших недостижимыми после
+     шага 2.
   Отказ при нуле run DB — именно то, что делает переход (1)→(2) безопасным: опорожнённый
   каталог прогонов не читается как «удалить все композиции». Ретенция прогонов — **вне**
   области этой функции: GC композиций не удаляет `runs/`, он лишь читает его.

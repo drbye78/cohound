@@ -61,6 +61,7 @@ from core.cli.package.commands import (
     cmd_package_crawl_probe,
     cmd_package_add_product,
     cmd_package_index_gc,
+    cmd_package_builds_gc,
     cmd_package,
 )
 
@@ -730,5 +731,48 @@ def add_package_parser(subparsers: Any) -> None:
     )
     p_gc.add_argument("--json", action="store_true", help="машинночитаемый вывод (JSON)")
     p_gc.set_defaults(handler=cmd_package_index_gc)
+
+    # builds-gc (прунинг индексных сборок по ссылкам композиций; dry-run по умолчанию) -- #
+    p_bgc = pkg.add_parser(
+        "builds-gc",
+        help="прунинг индексных сборок, не входящих ни в одну композицию "
+        "(dry-run; --apply требует --actor)",
+        description=(
+            "gc_index_builds удаляет верхнеуровневые сборки index_store/{package}/, не "
+            "входящие ни в одну композицию пакета. Живое множество — runs.index_build_id "
+            "по всем run DB каталога --runs-dir: legacy-сборка без манифеста композиции "
+            "защищается как живой артефакт. Отказ (code=state) при недоказуемости ссылок: "
+            "нет runs_dir/ни одной run DB, DB не читается, ссылка пакета висит в воздухе, "
+            "манифест не разбирается. Композиции не трогаются — их прунит index-gc; "
+            "операции не сцеплены. По умолчанию dry-run."
+        ),
+    )
+    p_bgc.add_argument(
+        "--package",
+        required=True,
+        help="каталог пакета (идентичность: run.yaml:package > package.yaml:case_id > имя)",
+    )
+    p_bgc.add_argument(
+        "--runs-dir",
+        default=None,
+        help="каталог прогонов с run DB (дефолт — resolved paths.runs, иначе runs)",
+    )
+    p_bgc.add_argument(
+        "--protect",
+        action="append",
+        default=[],
+        metavar="ID",
+        help="build_id, защищённый от удаления (можно повторять)",
+    )
+    p_bgc.add_argument(
+        "--apply",
+        action="store_true",
+        help="удалить неиспользуемые сборки (требует --actor); без него — dry-run",
+    )
+    p_bgc.add_argument(
+        "--actor", default=None, help="человек, выполняющий удаление (обязателен с --apply)"
+    )
+    p_bgc.add_argument("--json", action="store_true", help="машинночитаемый вывод (JSON)")
+    p_bgc.set_defaults(handler=cmd_package_builds_gc)
 
     p_package.set_defaults(handler=cmd_package, _package_parser=p_package)

@@ -115,7 +115,11 @@ from core.pipeline.package_scout import (
     scout_package,
     write_scout_artifacts,
 )
-from core.store.backup import gc_index_compositions
+from core.store.backup import (
+    _live_compositions,
+    gc_index_builds,
+    gc_index_compositions,
+)
 
 
 __all__ = [
@@ -168,6 +172,7 @@ __all__ = [
     "cmd_package_crawl_probe",
     "cmd_package_add_product",
     "cmd_package_index_gc",
+    "cmd_package_builds_gc",
     "_invoke",
     "_emit",
     "_op_payload",
@@ -2164,6 +2169,84 @@ def cmd_package_index_gc(args: argparse.Namespace) -> int:
         f"live={len(result.live)}"
     )
     lines.append("partitions_pruned: 0 (не в этом срезе)")
+    _emit(args, payload, lines)
+    return EXIT_OK
+
+
+def cmd_package_builds_gc(args: argparse.Namespace) -> int:
+    """``hound package builds-gc`` — прунинг индексных сборок по ссылкам (09 §8.6).
+
+    ``gc_index_builds`` удаляет верхнеуровневые каталоги ``index_store/{package}/{id}/``,
+    не входящие ни в одну композицию пакета. Композиции здесь **не** прунятся — это
+    отдельная :func:`cmd_package_index_gc`; операции намеренно не сцеплены.
+
+    **Защита от run DB.** Живое множество ``composition_id`` вычисляется существующей
+    :func:`_live_compositions` по **всем** run DB каталога ``--runs-dir``. Legacy-сборка
+    (раскладка ``index_store/{package}/ib_*/`` до композиций) названа ``runs.index_build_id``,
+    но не является членом композиции, поэтому одной композиционной защиты недостаточно:
+    ``gc_index_builds`` удалил бы живой артефакт. Каждый живой id **без** манифеста
+    ``_compositions/{id}.json`` (то есть имя каталога сборки) добавляется в ``protect``.
+
+    **Отказ (``code=state``, ``EXIT_USAGE``, ничего не удаляется)** — та же rule одного
+    авторитета, что у ``index-gc``: без run DB нельзя отличить legacy-живую сборку от
+    мусора. :func:`_live_compositions` отказывает при отсутствии ``runs_dir``/ни одной run
+    DB, нечитаемой DB/отсутствии ``runs``, висящей ссылке пакета и неразбираемом манифесте.
+
+    ``--apply`` требует ``--actor`` (человеческий шлюз); без ``--apply`` — dry-run.
+    """
+    if getattr(args, "apply", False) and not getattr(args, "actor", None):
+        raise CliError(
+            "--apply требует --actor (человек, удаляющий индексные сборки)",
+            code="usage",
+            exit_code=EXIT_USAGE,
+        )
+    pkg_dir = Path(args.package)
+    if not pkg_dir.is_dir():
+        return _not_found(args, "package", args.package)
+
+    artifacts = _invoke(lambda: load_artifacts(pkg_dir))
+    package_id = _package_identity(pkg_dir, artifacts)
+    runs_dir = _resolve_runs_dir(args)
+    index_root = _resolve_index_root(args)
+    dry_run = not bool(getattr(args, "apply", False))
+
+    try:
+        live = _live_compositions(index_root, package_id, runs_dir)
+        protect = set(getattr(args, "protect", None) or ())
+        manifest_dir = Path(index_root) / package_id / "_compositions"
+        for live_id in live:
+            # Живой id без манифеста — имя каталога сборки (legacy-раскладка): он
+            # не член композиции, поэтому защищается только явным protect.
+            if not (manifest_dir / f"{live_id}.json").is_file():
+                protect.add(live_id)
+        pruned = gc_index_builds(
+            index_root, package_id, protect=protect, dry_run=dry_run
+        )
+    except ValueError as exc:
+        # Недоказуемые ссылки/битый манифест: отказ, а не частичный прунинг.
+        raise CliError(str(exc), code="state", exit_code=EXIT_USAGE) from exc
+
+    protected = sorted(protect)
+    payload: dict[str, Any] = {
+        "ok": True,
+        "package": package_id,
+        "applied": not dry_run,
+        "pruned": list(pruned),
+        "protected": protected,
+        "live": sorted(live),
+    }
+    lines = [
+        f"package: {package_id}",
+        f"runs_dir: {runs_dir}",
+        f"index_root: {index_root}",
+        f"applied: {'yes' if not dry_run else 'no'}",
+    ]
+    for build_id in pruned:
+        lines.append(f"pruned: {build_id}")
+    lines.append(f"summary: pruned={len(pruned)} protected={len(protected)}")
+    lines.append(
+        "compositions: untouched (pruned only by `hound package index-gc`)"
+    )
     _emit(args, payload, lines)
     return EXIT_OK
 
