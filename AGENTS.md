@@ -99,10 +99,14 @@ bash scripts/ci.sh
 uv pip install -e '.[dev]'           # или воспроизводимо из лока: uv sync --frozen --extra dev
 python3 -m pytest -q
 
-# Параллельный прогон (pytest-xdist в extra dev) — ~2x быстрее последовательного;
-# ровно так же поступает scripts/ci.sh, если модуль xdist доступен:
-python3 -m pytest -q -n auto --dist worksteal                  # полный набор
-python3 -m pytest -q -n auto --dist worksteal -m "not slow"    # быстрое подмножество
+# Параллельный прогон (pytest-xdist в extra dev) — быстрее последовательного, но число
+# воркеров ограничено ПАМЯТЬЮ, а не ядрами: `-n auto` берёт nproc и на хосте с 7 GiB
+# упирается в OOM/ресурсные флаки (наблюдалось `test_edge_launcher[forkserver]`, в
+# изоляции проходит). scripts/ci.sh по умолчанию берёт `min(4, nproc)`;
+# `COHOUND_CI_WORKERS=N` переопределяет, `COHOUND_CI_WORKERS=auto` возвращает `-n auto`
+# (осмысленно только при запасе RAM; замер: ~0.6 GiB RSS на воркер).
+python3 -m pytest -q -n 4 --dist worksteal                     # полный набор
+python3 -m pytest -q -n 4 --dist worksteal -m "not slow"       # быстрое подмножество
 
 # Грепп-нейтральность ядра (§1.3) — предметных терминов в core/ быть не должно
 grep -rniE "postgres|pangolin|sber|сбер|copywala|платформа" core/

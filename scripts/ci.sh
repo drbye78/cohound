@@ -25,8 +25,24 @@ echo "== pytest + coverage ядра (порог в pyproject.toml) =="
 export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 NUMEXPR_NUM_THREADS=1
 jobs=()
 if "$py" -c "import xdist" >/dev/null 2>&1; then
-  jobs=(-n auto --dist worksteal)
-  echo "   pytest-xdist доступен → параллельный прогон (-n auto --dist worksteal)"
+  # Число воркеров xdist ограничено **памятью**, а не ядрами: `-n auto` берёт `nproc`
+  # (12 на дефолтном хосте), и прогон упирается в OOM/ресурсные флаки раньше, чем в CPU.
+  # Замер: 4 воркера ≈ 0.6 GiB RSS каждый, полный набор 3496 тестов за ~74 s; при
+  # `-n auto` на 6.9 GiB наблюдалась флака `test_edge_launcher[forkserver]` (в изоляции
+  # проходит). `COHOUND_CI_WORKERS=N` — переопределение; `COHOUND_CI_WORKERS=auto` —
+  # вернуть прежнее поведение (осмысленно только на машине с запасом RAM).
+  workers="${COHOUND_CI_WORKERS:-}"
+  if [ -z "$workers" ]; then
+    cores="$("$py" -c 'import os; print(os.cpu_count() or 1)')"
+    if [ "$cores" -gt 4 ]; then workers=4; else workers="$cores"; fi
+  fi
+  if [ "$workers" = "auto" ]; then
+    jobs=(-n auto --dist worksteal)
+    echo "   pytest-xdist: COHOUND_CI_WORKERS=auto → -n auto (нужен запас RAM)"
+  else
+    jobs=(-n "$workers" --dist worksteal)
+    echo "   pytest-xdist: $workers воркер(ов) (-n $workers --dist worksteal)"
+  fi
 else
   echo "   pytest-xdist не установлен → последовательный прогон"
 fi
