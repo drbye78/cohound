@@ -1,8 +1,9 @@
 # Трасса краула — `jatoba`
 
 Прогон `ru-pg-dbms-e957c5e8fe49`, продукт `jatoba` (когорта `ru-pg-dbms`).
-Срез: **2026-10-21T20:40Z**. Источник: `runs/ru-pg-dbms-e957c5e8fe49/cohound.db`,
-`state/ru-pg-dbms/state.db`.
+Срез: **2026-10-21T20:40Z**. Источник (замороженная копия, см. README §«Где лежат
+данные»): `runs/_snapshots/ru-pg-dbms-e957c5e8fe49/cohound.db`,
+`runs/_snapshots/ru-pg-dbms-e957c5e8fe49/state-at-freeze.db`.
 
 Итог одной строкой: обход **закончился исчерпанием фронта** — не бюджетом и не
 глубиной. Документация продукта в корпус не попала, и причины этого лежат **вне**

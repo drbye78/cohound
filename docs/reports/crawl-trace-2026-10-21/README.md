@@ -20,11 +20,29 @@
 
 ## Источник данных
 
-Всё восстановлено из двух баз, без обращения к сети:
+Всё восстановлено из двух баз, без обращения к сети. Обе — **замороженные копии**:
+канонические пути прогона (`runs/ru-pg-dbms-e957c5e8fe49/`, `state/ru-pg-dbms/`) будут
+переиспользованы следующим прогоном, поэтому протоколы ссылаются на снимок.
 
-- `runs/ru-pg-dbms-e957c5e8fe49/cohound.db` — `crawl_sessions`, `crawl_session_items`,
-  `corpus_docs`;
-- `state/ru-pg-dbms/state.db` — `url_state` (валидаторы, `reuse_kind`, `doc_version_id`).
+- `runs/_snapshots/ru-pg-dbms-e957c5e8fe49/cohound.db` — `crawl_sessions`,
+  `crawl_session_items`, `corpus_docs`;
+- `runs/_snapshots/ru-pg-dbms-e957c5e8fe49/state-at-freeze.db` — `url_state`
+  (валидаторы, `reuse_kind`, `doc_version_id`), `document_version`, `seed_set`.
+
+### Где лежат данные
+
+Снимок снят `cp -a` в момент, когда прогон уже был мёртв (хост перезагружен
+2026-10-21T20:22Z), и проверен `pragma integrity_check` = `ok`:
+
+| файл | строк |
+|---|---|
+| `cohound.db` | `crawl_session_items` 1646, `corpus_docs` 697 |
+| `state-at-freeze.db` | `url_state` 1645, `document_version` 939 |
+
+`runs/` целиком в `.gitignore` — снимок **не** коммитится, он воспроизводим только
+пока существует на диске. Числа в протоколах самодостаточны: каждая таблица/сводка
+несёт свои значения, поэтому читатель без доступа к базам может проверить
+арифметику по тексту (все итоги сходятся точно — см. «Общий срез»).
 
 Ретенция сырых байтов (`corpus_raw/`) использована для пересчёта «текст страницы =
 текст существующего документа»: текст извлекался тем же `trafilatura` на дефолтных
