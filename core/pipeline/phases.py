@@ -835,6 +835,25 @@ def build_phases(
             ):
                 update["retrieval_params_json"] = fixation["retrieval_params_json"]
             manifest = manifest.model_copy(update=update)
+        # §13/A3: провенанс **замеренной** ручки экстрактора (``queue_max_size``). Ручка не
+        # входит ни в ``extractor_version``, ни в ``EXECUTION_CONTRACT_FIELDS`` (это не
+        # граница контракта), но её значение обязано быть видно в манифесте — иначе замер
+        # (−44% peak RSS при идентичном markdown) невоспроизводим. Запись аддитивна: один
+        # ключ в существующем канале ``settings_provenance`` (схема манифеста не меняется).
+        # Значение — карта по уровням извлечения, а не скаляр по «разрешённому» уровню: так
+        # запись не зависит от того, заполнен ли ``crawl_document_level`` (legacy/частичный
+        # манифест), и прямо документирует, что у ``text`` ручки нет (``None``).
+        # Экстрактор без такой ручки (HTML-only) — записи нет (A3: значения не выдумываем).
+        extract_options = getattr(
+            getattr(ctx.ports, "extractor", None), "options_provenance", None
+        )
+        if isinstance(extract_options, Mapping) and extract_options:
+            provenance = dict(manifest.settings_provenance or {})
+            provenance["document_extract.queue_max_size"] = {
+                "source": "measured",
+                "by_level": dict(extract_options),
+            }
+            manifest = manifest.model_copy(update={"settings_provenance": provenance})
         ctx.store.persist_manifest(plan.run_id, manifest)
         # I3/§5: протоколы исчерпания идут в nda_questions и в сбор аномалий.
         exhaustions = {

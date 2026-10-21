@@ -13,8 +13,9 @@
 
 * ``full`` (**дефолт**) — сегодняшнее эффективное поведение: layout Heron + таблицы
   TableFormer ``ACCURATE`` + ``do_cell_matching=True`` + авто-OCR (``OcrAutoOptions``),
-  ``images_scale=1.0``; энричменты выключены. Это **байт-в-байт** опции дефолтного
-  ``DocumentConverter()`` (ранее адаптер строил его без опций).
+  ``images_scale=1.0``; энричменты выключены. Это дефолты ``DocumentConverter()``, кроме
+  замеренной ручки памяти ``queue_max_size=1`` (см. :meth:`DoclingDocumentExtractor._pdf_options`:
+  −44% peak RSS при байт-в-байт идентичном markdown).
 * ``layout_tables`` — layout + ``TableFormer FAST`` + cell-matching, **OCR выключен**.
 * ``layout`` — только layout-модель (без таблиц, без OCR).
 * ``text`` — моделе-независимый ``NativePdfPipeline`` (текст + координаты; без reading
@@ -169,9 +170,54 @@ _LEVEL_DOCUMENT_TIMEOUT_S: dict[DocumentLevel, float | None] = {
     DocumentLevel.FULL: None,
 }
 
+#: ``queue_max_size`` PDF-пайплайнов docling (``StandardPdfPipeline``) — **замеренная**
+#: ручка памяти, а не дефолт библиотеки (дефолт 2.135 — 100 страниц в полёте).
+#: См. :meth:`DoclingDocumentExtractor._pdf_options`: −44% peak RSS при идентичном
+#: markdown; ``execution_change``, ``extractor_version`` не меняется (кэш экстракции
+#: остаётся валидным).
+PDF_QUEUE_MAX_SIZE = 1
+
+#: Эффективное значение замеренной ручки по уровням PDF-пайплайна: ``None`` — ручки у
+#: пайплайна уровня нет (``text`` — ``NativePdfPipelineOptions``, другой механизм).
+_PDF_QUEUE_MAX_SIZE_BY_LEVEL: dict[str, int | None] = {
+    DocumentLevel.LAYOUT.value: PDF_QUEUE_MAX_SIZE,
+    DocumentLevel.LAYOUT_TABLES.value: PDF_QUEUE_MAX_SIZE,
+    DocumentLevel.FULL.value: PDF_QUEUE_MAX_SIZE,
+    DocumentLevel.TEXT.value: None,
+}
+
+
+def pdf_queue_provenance() -> dict[str, int | None]:
+    """``queue_max_size`` по уровням извлечения — для провенанса манифеста (R7/§13).
+
+    Ручка **не** входит в ``extractor_version`` и не является границей
+    ``EXECUTION_CONTRACT_FIELDS``, но её значение обязано быть видно в манифесте: без него
+    замер (и его −44% RSS) невоспроизводим. ``None`` — у уровня ручки нет (``text``).
+    """
+    return dict(_PDF_QUEUE_MAX_SIZE_BY_LEVEL)
+
 
 def _sha256(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _page_count(result: object) -> int | None:
+    """Число страниц **документа**, а не число конвертированных страниц.
+
+    ``len(result.pages)`` — это страницы, попавшие в результат: сегодня это весь документ,
+    но при любом будущем ``page_range`` (частичная конвертация) счётчик стал бы ложным
+    (например, 1 вместо 665), и ``page_count`` перестал бы описывать документ. Docling
+    хранит полный счётчик в ``result.input.page_count`` (``InputDocument``), поэтому
+    берём его. Fallback — ``len(result.pages)``: у ``InputDocument`` поле имеет дефолт
+    ``0`` (и в старых версиях/для не-PDF бэкендов может быть незаполненным), а ``0``
+    страниц у успешно извлечённого документа — заведомо неверный счётчик.
+    """
+    input_doc = getattr(result, "input", None)
+    total = getattr(input_doc, "page_count", None)
+    if isinstance(total, int) and not isinstance(total, bool) and total > 0:
+        return total
+    pages = getattr(result, "pages", None)
+    return len(pages) if pages is not None else None
 
 
 class DoclingDocumentExtractor:
@@ -205,6 +251,16 @@ class DoclingDocumentExtractor:
         return self._level
 
     @property
+    def options_provenance(self) -> dict[str, int | None]:
+        """Замеренные ручки извлечения по уровням — провенанс манифеста (R7/§13).
+
+        Сейчас это ``queue_max_size`` (:data:`PDF_QUEUE_MAX_SIZE`): значение обязано быть
+        видно в манифесте прогона, иначе замер невоспроизводим. Не входит в
+        ``extractor_version``, поэтому кэш экстракции от него не зависит.
+        """
+        return pdf_queue_provenance()
+
+    @property
     def available(self) -> bool:
         return _DOCLING_AVAILABLE and DocumentConverter is not None
 
@@ -217,6 +273,25 @@ class DoclingDocumentExtractor:
 
         Возвращает ``PipelineOptions`` (уровни ``layout``/``layout_tables``/``full``) либо
         объект нативного пайплайна (``text``). ``off`` сюда не доходит штатно.
+
+        **``queue_max_size=1`` (замер, не предвидение).** Главный драйвер памяти
+        ``StandardPdfPipeline`` — не «весь PDF», а число страниц **в полёте**: продюсер плюс
+        шесть очередей по ``queue_max_size`` (дефолт docling 2.135 — **100**). Замер уровня
+        ``layout_tables``: синтетика 68 стр. — 3160 MB peak RSS при дефолте против
+        **1775 MB** при ``queue_max_size=1`` (**−44%**), время на страницу 1.72 → 1.60 s.
+        Реальный PDF 665 стр. (A/B на одном документе): дефолт — 4174 MB / 1.46 s/стр.,
+        ``queue_max_size=1`` — **2126 MB** (**−49%**) / **1.30 s/стр.** (не медленнее).
+        Markdown при этом **байт-в-байт тот же**: md5 совпал и на 81-, и на 665-стр.
+        документах; статус docling — ``SUCCESS``, страниц 665/665 (частичных нет).
+
+        Класс изменения — ``execution_change`` (§13), **не** ``methodology_change``:
+        ``extractor_version`` (``docling-doc-3:<level>``) не включает эту ручку и не меняется,
+        поэтому записи ``extract_cache/`` остаются валидными (замер не инвалидирует
+        извлечённый корпус). ``golden-full`` не требуется.
+
+        Ветка ``text`` (``NativePdfPipelineOptions``) намеренно **без** этой ручки: у
+        нативного пайплайна другой механизм и своя память (899 MB), поля ``queue_max_size``
+        у него нет вовсе.
         """
         timeout = (
             self._document_timeout
@@ -230,6 +305,7 @@ class DoclingDocumentExtractor:
                 do_table_structure=False,
                 do_ocr=False,
                 document_timeout=timeout,
+                queue_max_size=PDF_QUEUE_MAX_SIZE,
             )
         if self._level is DocumentLevel.LAYOUT_TABLES:
             return PdfPipelineOptions(
@@ -239,9 +315,13 @@ class DoclingDocumentExtractor:
                 ),
                 do_ocr=False,
                 document_timeout=timeout,
+                queue_max_size=PDF_QUEUE_MAX_SIZE,
             )
-        # ``full`` — байт-в-байт дефолты docling (OCR включён, таблицы ACCURATE).
-        return PdfPipelineOptions(document_timeout=timeout)
+        # ``full`` — байт-в-байт дефолты docling (OCR включён, таблицы ACCURATE), кроме
+        # ``queue_max_size`` (см. docstring: замер −44% RSS, markdown идентичен).
+        return PdfPipelineOptions(
+            document_timeout=timeout, queue_max_size=PDF_QUEUE_MAX_SIZE
+        )
 
     def _build_converter(self, *, pdf: bool = True):  # noqa: ANN202 - тип docling необязателен
         """Собирает ``DocumentConverter`` с per-level PDF-опциями (Office — дефолт docling).
@@ -332,7 +412,7 @@ class DoclingDocumentExtractor:
             if status != "SUCCESS":
                 return self._error(f"docling: статус конвертации {status}")
             text = result.document.export_to_markdown()
-            pages = len(result.pages) if hasattr(result, "pages") else None
+            pages = _page_count(result)
             return ExtractedDoc(
                 text=text,
                 content_hash=_sha256(text),

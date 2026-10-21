@@ -1308,6 +1308,18 @@ class _LocalExtractor:
             return self._documents.extract_bytes(page.content, filename)
         return self._html.extract(page, route)
 
+    @property
+    def options_provenance(self) -> dict[str, int | None]:
+        """Провенанс замеренных ручек документной экстракции (R7/§13).
+
+        Делегирует документному адаптеру: HTML-путь таких ручек не имеет, поэтому без
+        docling — ``{}`` (значения не выдумываются, A3). Ключ — уровень извлечения,
+        значение — ``queue_max_size`` (``None`` — у уровня ручки нет).
+        """
+        if self._documents is None:
+            return {}
+        return dict(getattr(self._documents, "options_provenance", {}) or {})
+
 
 # --------------------------------------------------------------------------- #
 # P4: пул экстракции (composition root) — модульные (picklable) воркер/инициализатор

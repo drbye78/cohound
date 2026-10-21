@@ -513,7 +513,10 @@ class RunConfig(BaseModel):
     # агрегата); ``None`` → 0.0. Идёт в манифест с provenance (A3).
     ranking_epsilon: float | None = None
     #: A3 (v2.1): провенанс настроек ``{setting: {"source": "default"|"measured",
-    #: "experiment_id"?: str}}``. Строки настроек (не enum ядра) — словарь не трогаем.
+    #: "experiment_id"?: str, "value"?: Any, "by_level"?: {str: Any}}}``. Строки настроек
+    #: (не enum ядра) — словарь не трогаем. ``value``/``by_level`` — зафиксированное
+    #: значение измеренной ручки: скаляр (ручка одна) либо карта по уровням/осям, когда
+    #: ручка зависит от разрешённой оси (напр. ``document_extract.queue_max_size``).
     settings_provenance: dict[str, dict[str, Any]] = Field(default_factory=dict)
     #: Секция ``crawl`` (D4): дефолты оси стратегии и диапазона задержек. Отсутствие
     #: секции (``None``) → поведение краула не меняется (обратная совместимость).
@@ -945,7 +948,9 @@ class RunManifest(BaseModel):
     #: §6/B-1 (v2.1): порог неразличимости ранжирования (доля диапазона агрегата, дефолт 0).
     ranking_epsilon: float = 0.0
     #: A3 (v2.1): провенанс настроек ``{setting: {"source": "default"|"measured",
-    #: "experiment_id"?: str}}``; фиксирует, что тюнится измерением, а не предвидением.
+    #: "experiment_id"?: str, "value"?: Any, "by_level"?: {str: Any}}}``; фиксирует, что
+    #: тюнится измерением, а не предвидением. ``value``/``by_level`` — зафиксированное
+    #: значение измеренной ручки (скаляр либо карта по уровням/осям).
     settings_provenance: dict[str, dict[str, Any]] = Field(default_factory=dict)
     # Маршрутизация моделей (I21)
     llm_scenarios: list[ScenarioBinding] = Field(default_factory=list)

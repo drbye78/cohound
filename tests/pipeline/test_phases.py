@@ -870,7 +870,9 @@ def test_report_phase_without_compute_fails() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _run_chain_to_report(tmp_path: Path, **phase_kwargs: Any) -> dict[str, Any]:
+def _run_chain_to_report(
+    tmp_path: Path, *, extractor: Any = None, **phase_kwargs: Any
+) -> dict[str, Any]:
     """Прогоняет registry→…→report на фейках и возвращает ``run_manifest.yaml`` как dict."""
     inputs = _inputs()
     plan = _plan()
@@ -891,7 +893,7 @@ def _run_chain_to_report(tmp_path: Path, **phase_kwargs: Any) -> dict[str, Any]:
         lexical_index=_chunks_index(),
         registry_fetchers={"reg_x": FakeRegistryFetcher(registry_id="reg_x", run_id=RUN_ID)},
         crawler=FakeCrawler(pages=pages),
-        extractor=FakeExtractor(),
+        extractor=FakeExtractor() if extractor is None else extractor,
         chunker=FakeChunker(),
         embedder=FakeEmbedder(),
         index_builder=FakeIndexBuilder(),
@@ -971,6 +973,33 @@ def test_build_phases_forwards_explicit_retrieval_provenance(tmp_path: Path) -> 
         "profile": "R1",
         "cutoff_K": 25,
     }
+
+
+class _QueueAwareExtractor(FakeExtractor):
+    """Фейк с провенансом замеренной ручки (как ``DoclingDocumentExtractor``)."""
+
+    @property
+    def options_provenance(self) -> dict[str, int | None]:
+        return {"full": 1, "layout": 1, "layout_tables": 1, "text": None}
+
+
+def test_manifest_records_extract_queue_max_size_provenance(tmp_path: Path) -> None:
+    """Замеренная ручка ``queue_max_size`` видна в манифесте (иначе замер невоспроизводим).
+
+    Ручка не входит ни в ``extractor_version``, ни в ``EXECUTION_CONTRACT_FIELDS`` — это не
+    граница контракта; провенанс пишется аддитивно в существующий ``settings_provenance``.
+    Значение — карта по уровням, поэтому запись не зависит от разрешённого уровня прогона.
+    """
+    manifest = _run_chain_to_report(tmp_path, extractor=_QueueAwareExtractor())
+    entry = manifest["settings_provenance"]["document_extract.queue_max_size"]
+    assert entry["source"] == "measured"
+    assert entry["by_level"] == {"full": 1, "layout": 1, "layout_tables": 1, "text": None}
+
+
+def test_manifest_omits_extract_provenance_without_knob(tmp_path: Path) -> None:
+    """Экстрактор без такой ручки (HTML-only/иной адаптер) — записи нет (A3)."""
+    manifest = _run_chain_to_report(tmp_path)
+    assert "document_extract.queue_max_size" not in (manifest["settings_provenance"] or {})
 
 
 # ---------------------------------------------------------------------------
