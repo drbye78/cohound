@@ -55,8 +55,10 @@ crawl:
   document_level: layout_tables
   # Маркетинговый шум вне технического корпуса (glob по пути URL).
   exclude_paths: ['/blog/*', '/news/*', '/events/*', '/cases/*', '/mediacenter/*']
-  # Недокументные/архивные расширения — не ингестятся (glob по basename URL).
-  exclude_documents: ['*.zip', '*.rar', '*.7z', '*.gz', '*.tar', '*.tgz', '*.exe', '*.msi', '*.dmg',
+  # Недокументные расширения — не ингестятся (glob по basename URL). Контейнеры с
+  # читателем (zip/7z/rar) здесь НЕ перечислены: их допуск — позитивная вселенная
+  # crawl.attachment_formats (дефолт app-слоя), судьбу решает классификатор, а не basename.
+  exclude_documents: ['*.gz', '*.tar', '*.tgz', '*.exe', '*.msi', '*.dmg',
                       '*.iso', '*.ova', '*.vmdk', '*.qcow2', '*.mp4', '*.avi', '*.css', '*.js',
                       '*.png', '*.jpg', '*.jpeg', '*.gif', '*.svg', '*.webp', '*.ico', '*.woff',
                       '*.woff2', '*.ttf']
