@@ -79,7 +79,7 @@ RUN_CRAWL_EXCLUDE_PATHS = [
     "/mediacenter/*",
 ]
 RUN_CRAWL_EXCLUDE_DOCUMENTS = [
-    "*.zip", "*.rar", "*.7z", "*.gz", "*.tar", "*.tgz", "*.exe", "*.msi", "*.dmg",
+    "*.gz", "*.tar", "*.tgz", "*.exe", "*.msi", "*.dmg",
     "*.iso", "*.ova", "*.vmdk", "*.qcow2", "*.mp4", "*.avi", "*.css", "*.js",
     "*.png", "*.jpg", "*.jpeg", "*.gif", "*.svg", "*.webp", "*.ico", "*.woff",
     "*.woff2", "*.ttf",
