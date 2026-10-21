@@ -1284,7 +1284,10 @@ def _derive_partition_build_id(
     3. ``chunker_version``;
     4. ``embed_model_id`` (пусто, если эмбеддер не подключён);
     5. ``extractor_version`` — композит версий экстрактора **этого** продукта;
-    6. ``lexical_engine_version``;
+    6. ``lexical_engine_version`` — фактический лексический движок прогона
+       (``tantivy-<ver>``; пусто — лексического плеча нет). Берётся у сборщика,
+       которого настраивает composition root (``wiring``), а не у ``getattr``-дефолта:
+       иначе ``pb`` не различал бы движки (§13:676);
     7. ``vector_store``;
     8. ``product_content_token`` — отпечаток содержимого партиции.
 
@@ -2100,6 +2103,13 @@ def _build_corpus(
         else str(getattr(chunker, "version", "") or "")
     )
     embed_model_id = str(getattr(embedder, "model_id", "") or "")
+    # Провенанс движков берётся у **сборщика**: composition root передаёт в
+    # ``NpyIndexBuilder`` фактический лексический движок прогона (``tantivy-<ver>``,
+    # §13:676). Пустая строка здесь — не «неизвестная версия», а «лексического плеча
+    # в прогоне нет» (без tantivy R0/R2 пропускаются, ``experiments`` → ``skipped``)
+    # либо инъектированный duck-typed сборщик без атрибута (тесты/DI). Hard-fail на
+    # пустом значении сломал бы легитимную dense-only сборку (N3), поэтому это не
+    # ошибка прогона; ``getattr`` оставлен именно для duck-typed случая.
     lexical_engine_version = str(getattr(index_builder, "lexical_engine_version", "") or "")
     vector_store = str(getattr(index_builder, "vector_store", "") or "")
 

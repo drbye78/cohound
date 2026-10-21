@@ -1322,6 +1322,13 @@ products:
 `product_content_token` — существующий `_product_content_token`
 (`corpus.py:839-851`): sorted `(chunk_id, content_hash)`.
 
+**`lexical_engine_version` теперь фактически заполняется.** Composition root
+(`core/cli/wiring.py`) передаёт в `NpyIndexBuilder` версию реально используемого
+лексического движка (`tantivy-<ver>`; пусто — лексического плеча в прогоне нет,
+R0/R2 пропускаются). До исправления поле читалось у сборщика, у которого такого
+атрибута не было, и всегда было пустым — `pb` не различал tantivy и in-process BM25
+(дефект провенанса, исправлен).
+
 **Что убирается из `partition_build_id`:** `params_token` и `snapshot_date`.
 Каталог/фокус не меняют чанки/векторы; `snapshot_date` — провенанс, не содержимое.
 Это позволяет переиспользовать партицию при смене фокуса/каталога. (Текущий

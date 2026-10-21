@@ -126,14 +126,28 @@ class NpyIndexBuilder:
     """``IndexBuilderPort``: пишет ``.npy``-шарды и ``chunk_ids``/``manifest`` по партициям.
 
     ``vector_store`` — метка физического хранилища для ``index_manifest`` (``npy-fp16``).
+    ``lexical_engine_version`` — версия лексического движка, которым будет обслужен
+    ретривал этой сборки (``tantivy-<ver>``; пусто — лексического плеча нет). Оба
+    атрибута — часть контракта сборки: они входят в ``partition_build_id`` (§13:676)
+    и в манифест партиции, по которому идёт второй, физический контроль
+    переиспользования (09 §8.5). ``pipeline`` читает их у сборщика, поэтому значение
+    должно быть фактическим, а не дефолтным.
     """
 
     vector_store = "npy-fp16"
 
     def __init__(
-        self, index_root: str | Path = "index_store", package: str | None = None
+        self,
+        index_root: str | Path = "index_store",
+        package: str | None = None,
+        *,
+        lexical_engine_version: str = "",
     ) -> None:
         """``index_root`` — корень ``index_store``; ``package`` — пакет по умолчанию.
+
+        ``lexical_engine_version`` — фактический лексический движок прогона (его
+        передаёт composition root; см. ``core.cli.wiring``). Пустая строка означает
+        «лексического движка нет», а не «версия неизвестна» (§13:676).
 
         Пакет разрешается как ``meta.package`` (авторитетно для конкретного вызова) и лишь
         при его пустоте — конструкторный ``package``. Дефолт ``"index_store"`` совпадает с
@@ -142,6 +156,7 @@ class NpyIndexBuilder:
         """
         self._index_root = Path(index_root)
         self._package = package
+        self.lexical_engine_version = str(lexical_engine_version or "")
         #: ``(package, build_id, product_id) -> content_digest`` (защита иммутабельности).
         self._content: dict[tuple[str, str, str], str] = {}
         self._pending: set[tuple[str, str, str]] = set()
@@ -226,7 +241,12 @@ class NpyIndexBuilder:
             # 09 §8.1: версии производства/формата — часть второго, физического
             # контроля переиспользования партиции (§8.5), поэтому лежат в манифесте.
             "extractor_version": str(extra.get("extractor_version") or ""),
-            "lexical_engine_version": str(extra.get("lexical_engine_version") or ""),
+            # Явный провенанс от вызывающего (Ш5 передаёт его из ``pb``-входов)
+            # приоритетен; иначе — честная метка самого сборщика, чтобы манифест
+            # не разошёлся с версией, объявленной при конструировании.
+            "lexical_engine_version": str(
+                extra.get("lexical_engine_version") or self.lexical_engine_version
+            ),
             "vector_store": str(extra.get("vector_store") or ""),
             "snapshot_date": meta.snapshot_date,
             "dim": dim,

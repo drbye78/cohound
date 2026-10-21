@@ -442,3 +442,27 @@ def test_run_experiment_executes_hybrid_arm_with_wired_ports(tmp_path: Path) -> 
         )
     assert set(report.by_profile) == {"R2"}
     assert report.by_profile["R2"].recall_at_k == pytest.approx(1.0)
+
+
+def test_build_adapters_publishes_actual_lexical_engine(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Composition root передаёт сборщику фактический движок (§13:676, дефект ``pb``).
+
+    ``tantivy`` есть → ``tantivy-<ver>``; нет → пустая строка (лексического плеча нет,
+    R0/R2 пропускаются), а не «неизвестная версия» и не дефолт ``NpyIndexBuilder``.
+    """
+    if not numpy_available():
+        pytest.skip("numpy не установлен (extra retrieval)")
+    from core.cli import wiring
+
+    monkeypatch.setattr(wiring, "tantivy_available", lambda: True)
+    monkeypatch.setattr(wiring, "tantivy_engine_version", lambda: "tantivy-0.26.2")
+    with_tantivy = build_adapters(profile="local", index_root=tmp_path, package=PKG)
+    assert with_tantivy.index_builder is not None
+    assert with_tantivy.index_builder.lexical_engine_version == "tantivy-0.26.2"
+
+    monkeypatch.setattr(wiring, "tantivy_available", lambda: False)
+    without_tantivy = build_adapters(profile="local", index_root=tmp_path, package=PKG)
+    assert without_tantivy.index_builder is not None
+    assert without_tantivy.index_builder.lexical_engine_version == ""

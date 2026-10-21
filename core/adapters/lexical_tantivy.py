@@ -62,6 +62,7 @@ __all__ = [
     "LexicalChunk",
     "TantivyLexicalIndex",
     "tantivy_available",
+    "tantivy_engine_version",
 ]
 
 #: Имена полей схемы (держатся в одном месте).
@@ -91,6 +92,25 @@ _REQUIRED_FIELDS = ("chunk_id", "product_id", "text")
 def tantivy_available() -> bool:
     """Установлен ли ``tantivy`` (проверка без импорта тяжёлого движка)."""
     return importlib.util.find_spec("tantivy") is not None
+
+
+def tantivy_engine_version() -> str:
+    """Версия нативного движка (``tantivy-<ver>``) для провенанса сборки (§13:676).
+
+    Значение входит в ``partition_build_id`` и в манифест партиции, поэтому оно
+    непусто и стабильно в любом состоянии: ``"tantivy-unavailable"`` — зависимость
+    не установлена, ``"tantivy-unknown"`` — установлена, но версия не распознана.
+    Читается без конструирования индекса (никаких временных каталогов).
+    """
+    if not tantivy_available():
+        return "tantivy-unavailable"
+    import tantivy
+
+    raw = str(getattr(tantivy, "__version__", ""))
+    # ``__version__`` вида "tantivy v0.26.2, index_format v7" → "0.26.2".
+    token = next((p for p in raw.replace(",", " ").split() if any(ch.isdigit() for ch in p)), "")
+    version = token.lstrip("vV")
+    return f"tantivy-{version}" if version else "tantivy-unknown"
 
 
 class LexicalIndexUnavailable(RuntimeError):
@@ -188,15 +208,7 @@ class TantivyLexicalIndex:
     @property
     def engine_version(self) -> str:
         """Версия нативного движка (для манифеста/провенанса, §13)."""
-        if not tantivy_available():
-            return "tantivy-unavailable"
-        import tantivy
-
-        raw = str(getattr(tantivy, "__version__", ""))
-        # ``__version__`` вида "tantivy v0.26.2, index_format v7" → "0.26.2".
-        token = next((p for p in raw.replace(",", " ").split() if any(ch.isdigit() for ch in p)), "")
-        version = token.lstrip("vV")
-        return f"tantivy-{version}" if version else "tantivy-unknown"
+        return tantivy_engine_version()
 
     # -- build ---------------------------------------------------------- #
 
