@@ -359,7 +359,13 @@ def _execute_crawl(
         notes.extend(filter_notes)
 
         run_plan = _resolve_plan(args, inputs, run_id)
-        ports = _resolve_ports(args, deploy_config, inputs=inputs, no_cache=no_cache)
+        ports = _resolve_ports(
+            args,
+            deploy_config,
+            inputs=inputs,
+            no_cache=no_cache,
+            run_id=run_id,
+        )
         progress = (
             _progress_callback(session_id=session_id, json_mode=json_mode)
             if follow

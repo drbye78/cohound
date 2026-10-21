@@ -22,6 +22,11 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+#: Тесты не должны зависеть от операторского ``./.env``: CLI загружает dotenv на входе
+#: (03 §D.6), и файл разработчика иначе менял бы поведение ``main()``-тестов. Тесты,
+#: которым нужна автозагрузка, снимают этот opt-out через ``monkeypatch.delenv``.
+os.environ.setdefault("COHOUND_NO_DOTENV", "1")
+
 #: Env-переменные каталогов межпрогонных кэшей (см. ``core/config/paths.py``).
 _CACHE_ENV = ("COHOUND_EXTRACT_CACHE_DIR", "COHOUND_EVAL_CACHE_DIR")
 

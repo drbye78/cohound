@@ -21,6 +21,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 from pathlib import Path
 from types import SimpleNamespace
@@ -61,6 +62,7 @@ from core.domain.models import CrawlRunConfig
 from core.pipeline import Ports
 from core.pipeline.normalize import RunInputs
 from core.util.cache import ContentAddressedCache
+from core.util.logging import PhaseLogger
 from tests.helpers.packages import run_argv, valid_package
 from tests.helpers.scout import clear_env
 
@@ -482,6 +484,29 @@ def test_resolve_ports_injected_short_circuits(
     assert _resolve_ports(
         argparse.Namespace(ports=injected), deploy_config=None
     ) is injected
+
+
+def test_resolve_ports_engine_log_targets_runs_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Лог движка идёт в ``--runs-dir`` прогона, как и логи фаз (регрессия корня)."""
+    captured: dict[str, Any] = {}
+
+    def fake_build_adapters(**kwargs: Any) -> Any:
+        captured.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(context_mod, "build_adapters", fake_build_adapters)
+    args = _ports_args(PathsConfig(runs=tmp_path / "resolved-runs"))
+    args.runs_dir = str(tmp_path / "explicit-runs")
+
+    _resolve_ports(args, deploy_config=None, run_id="run-engine")
+
+    engine_log = captured["engine_log"]
+    assert isinstance(engine_log, PhaseLogger)
+    assert engine_log.path == (
+        tmp_path / "explicit-runs" / "run-engine" / "logs" / "wiring.jsonl"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1131,3 +1156,100 @@ def test_local_extract_pool_recycles_worker_and_reinits_extractor(
     assert pids[0] == pids[1] == pids[2]
     assert pids[3] != pids[2]
     assert len(set(pids)) == 2
+
+
+# ---------------------------------------------------------------------------
+# Наблюдаемость выбора движка (03 §D.6): строка «движок + источник решения»
+# ---------------------------------------------------------------------------
+
+
+def _engine_events(tmp_path: Path, run_id: str) -> list[dict[str, Any]]:
+    """Читает события ``logs/wiring.jsonl`` прогона (JSON-lines)."""
+    path = tmp_path / run_id / "logs" / "wiring.jsonl"
+    assert path.is_file(), f"нет лога выбора движка: {path}"
+    return [
+        json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()
+    ]
+
+
+def test_engine_log_reports_env_selected_engine(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Env-выбор виден: движок и источник ``env:COHOUND_SCOUT_CRAWLER`` в строке лога."""
+    monkeypatch.setenv(ENV_SCOUT_CRAWLER, "scrapy")
+    logger = PhaseLogger("run-env", "wiring", tmp_path)
+
+    build_scout_crawler(deploy=DeployConfig(profile="local"), engine_log=logger)
+
+    events = _engine_events(tmp_path, "run-env")
+    assert len(events) == 1
+    event = events[0]
+    assert event["level"] == "INFO"
+    assert event["ctx"]["event"] == "engine_selection"
+    assert event["ctx"]["engine"] == "scrapy"
+    assert event["ctx"]["sources"] == [f"env:{ENV_SCOUT_CRAWLER}=scrapy"]
+    assert "scrapy" in event["message"]
+    assert ENV_SCOUT_CRAWLER in event["message"]
+
+
+def test_engine_log_reports_profile_pinned_browser(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``fetch: browser`` в профиле объясняет, почему в карте есть browser-движок."""
+    monkeypatch.delenv(ENV_SCOUT_CRAWLER, raising=False)
+    logger = PhaseLogger("run-profile", "wiring", tmp_path)
+
+    build_scout_crawlers(
+        deploy=DeployConfig(profile="local"),
+        domain_profiles=_browser_profiles(),
+        engine_log=logger,
+    )
+
+    events = _engine_events(tmp_path, "run-profile")
+    by_engine = {event["ctx"]["engine"]: event for event in events}
+    browser_event = by_engine["browser"]
+    assert "browser" in browser_event["message"]
+    assert "profile.fetch" in browser_event["message"]
+    assert "spa.example.com" in browser_event["ctx"]["scope"]
+    # Незапрофилированные сайты идут дефолтом (env не задан).
+    assert by_engine["http"]["ctx"]["sources"] == ["default"]
+    assert "default" in by_engine["http"]["message"]
+
+
+def test_engine_log_reports_crawl_sources_engine(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``crawl_sources.engine`` — видимый источник с адресом слоя."""
+    monkeypatch.delenv(ENV_SCOUT_CRAWLER, raising=False)
+    logger = PhaseLogger("run-sources", "wiring", tmp_path)
+    cfg = CrawlSourcesConfig(
+        products={"p1": CrawlSource(engine="scrapy")},
+    )
+
+    build_scout_crawlers(
+        deploy=DeployConfig(profile="local"), crawl_sources=cfg, engine_log=logger
+    )
+
+    events = _engine_events(tmp_path, "run-sources")
+    scrapy_event = next(
+        event for event in events if event["ctx"]["engine"] == "scrapy"
+    )
+    assert scrapy_event["ctx"]["sources"] == ["crawl_sources.engine"]
+    assert "crawl_sources.engine" in scrapy_event["message"]
+    assert "products[p1]" in scrapy_event["message"]
+
+
+def test_engine_log_reports_default_fallback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Env не задан → движок ``http`` с источником ``default`` (а не «молча»)."""
+    monkeypatch.delenv(ENV_SCOUT_CRAWLER, raising=False)
+    logger = PhaseLogger("run-default", "wiring", tmp_path)
+
+    build_scout_crawler(deploy=DeployConfig(profile="local"), engine_log=logger)
+
+    event = _engine_events(tmp_path, "run-default")[0]
+    assert event["ctx"]["engine"] == "http"
+    assert event["ctx"]["sources"] == ["default"]
+    assert "http" in event["message"]
+    assert "default" in event["message"]

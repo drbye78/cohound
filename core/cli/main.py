@@ -13,6 +13,8 @@
 
 from __future__ import annotations
 
+import os
+import sys
 from collections.abc import Sequence
 from typing import Any
 
@@ -63,6 +65,7 @@ from core.cli.wiring import (
     _llm_configured,
     _search_adapter_configured,
 )
+from core.config.dotenv import apply_dotenv, dotenv_disabled, resolve_env_file
 from core.pipeline import Ports
 from core.pipeline.runner import Clock
 from core.ports.crawler import CrawlerPort
@@ -173,6 +176,13 @@ def main(
         parser.print_help()
         return EXIT_USAGE
 
+    # ``.env`` загружается ТОЛЬКО на входе CLI (не в библиотечном коде): env-конфигурация
+    # должна быть видна резолву раскладки/портов ниже. Уже заданные переменные процесса
+    # не переопределяются; отсутствующий ``./.env`` — не ошибка (03 §D.6).
+    env_error = _apply_env_file(args)
+    if env_error is not None:
+        return env_error
+
     # Composition root — единственная точка разрешения раскладки (03 §A.1): резолвим
     # эффективные каталоги (env/paths.yaml/дефолты) и подставляем их как дефолты
     # argparse-флагов, если оператор флаг не задал. Приоритет: CLI-флаг > env > файл >
@@ -216,6 +226,41 @@ def main(
     except Exception as exc:  # noqa: BLE001 — консолидированный ненулевой выход
         _emit_error(args, _FALLBACK_CODE, f"{type(exc).__name__}: {exc}")
         return EXIT_ERROR
+
+
+def _apply_env_file(args: Any) -> int | None:
+    """Загружает dotenv-файл в окружение процесса до резолва конфигурации (03 §D.6).
+
+    Приоритет источника файла: ``--env-file`` → ``COHOUND_ENV_FILE`` → ``./.env``.
+    Загружается только существующий файл; отсутствие дефолтного ``./.env`` — не ошибка.
+    Явный ``--env-file`` без файла — ошибка входа (``EXIT_USAGE``), значение
+    ``COHOUND_ENV_FILE`` без файла — видимая диагностика без остановки.
+
+    Правила вывода: в ``--json``-режиме ничего не печатается (машинный контракт не
+    засоряется); иначе диагностики (некорректные строки/пропавший env-файл) идут в
+    ``stderr`` как ``env-file: <path>: <диагностика>``. Успешная загрузка молчит.
+
+    :returns: код выхода при фатальной ошибке явного флага, иначе ``None``.
+    """
+    environ = os.environ
+    if dotenv_disabled(environ):
+        return None
+    path, origin = resolve_env_file(getattr(args, "env_file", None), environ)
+    json_mode = bool(getattr(args, "json", False))
+    if not path.is_file():
+        if origin == "flag":
+            _emit_error(args, "env-file", f"файл не найден: {path}")
+            return EXIT_USAGE
+        if origin == "env" and not json_mode:
+            sys.stderr.write(
+                f"env-file: {path}: файл не найден (COHOUND_ENV_FILE)\n"
+            )
+        return None
+    result = apply_dotenv(path, environ)
+    if result.diagnostics and not json_mode:
+        for diagnostic in result.diagnostics:
+            sys.stderr.write(f"env-file: {path}: {diagnostic}\n")
+    return None
 
 
 def _system_exit_code(exc: SystemExit) -> int:
