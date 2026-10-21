@@ -218,17 +218,17 @@ def test_execution_contract_is_stable_and_short() -> None:
 
 def test_execution_contract_includes_none_explicitly() -> None:
     values = _contract_values()
-    values["embed_model_id"] = None
+    values["chunker_version"] = None
     with_none = execution_contract_digest(values)
 
     other = _contract_values()
-    other["embed_model_id"] = "some-model"
+    other["chunker_version"] = "some-model"
     assert with_none != execution_contract_digest(other)
 
     # Пропущенный ключ — ошибка, а не «то же самое, что None»: иначе отсутствие
     # поля и явный null дали бы коллизию.
     missing = dict(values)
-    del missing["embed_model_id"]
+    del missing["chunker_version"]
     with pytest.raises(ValueError, match="отсутствуют поля"):
         execution_contract_digest(missing)
 

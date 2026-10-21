@@ -26,6 +26,7 @@ from __future__ import annotations
 import datetime as _dt
 from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import Any, Protocol
 
 from core.domain.enums import ChangeClass, RefreshPolicy, RunScope
 from core.domain.models import RunConfig
@@ -33,6 +34,7 @@ from core.pipeline.digests import execution_contract_digest
 from core.pipeline.normalize import RunInputs
 
 __all__ = [
+    "DeclaredAxesLike",
     "RunIdentity",
     "build_execution_contract",
     "build_run_identity",
@@ -42,6 +44,30 @@ __all__ = [
     "resolve_refresh_policy",
     "resolve_run_scope",
 ]
+
+
+class DeclaredAxesLike(Protocol):
+    """Структурный тип объявленных осей исполнения (§13).
+
+    ``pipeline`` **не** импортирует ``cli`` (слои): конкретный носитель —
+    :class:`core.cli.execution_axes.DeclaredExecutionAxes` (composition root). Здесь
+    описан только контракт доступа: девять объявленных осей, без наблюдаемых величин.
+    """
+
+    crawl_strategy: str | None
+    crawl_rate_limit: str | None
+    crawl_config_digest: str | None
+    registry_spec_digest: str | None
+    deploy_profile: str | None
+    edge_schema_version: str | None
+    chunker_version: str | None
+    llm_scenarios: tuple[dict[str, Any], ...]
+    extractor_stack: str
+
+
+def _declared(declared: DeclaredAxesLike | None, name: str) -> Any:
+    """Значение объявленной оси (``None`` — оси не переданы: legacy/чистый вызов)."""
+    return getattr(declared, name, None) if declared is not None else None
 
 
 @dataclass(frozen=True)
@@ -133,6 +159,7 @@ def build_execution_contract(
     *,
     cohort_digest: str,
     seeds_digest: str,
+    declared: DeclaredAxesLike | None = None,
     retrieval_profile: str | None = None,
     cutoff_K: int | None = None,
     retrieval_params_json: str | None = None,
@@ -142,19 +169,28 @@ def build_execution_contract(
 ) -> str:
     """Собирает execution contract из честно доступных значений и хеширует его.
 
-    Сегодня **заполняются**: ``methodology_version`` (``run.yaml``), ``package_version``
-    (``package.yaml``), ``cohort_digest``, ``seeds_digest``, ``retrieval_profile``/
-    ``cutoff_K``/``retrieval_params_json`` (если передал composition root). Версии
-    ``status_dict_version``/``scoring_policy_version``/``catalog_version`` принимаются
-    аргументами, но в этом срезе composition root их не передаёт — ``None``.
+    **Декларированный слой** (``declared``) заполняется composition root
+    (:func:`core.cli.execution_axes.resolve_declared_axes`): оси краула, дайджесты
+    контроля краула/реестров, деплой-профиль, версия seam-схемы, версия чанкера,
+    таблица сценариев LLM и стек извлечения. Это «функция входа»: значения вычислимы
+    из ``args``/``run.yaml``/файлов пакета/``deploy.yaml``/констант кода **до** сборки
+    портов, поэтому два хоста с одинаковыми входами дают один ``run_id`` (R7 §11.7).
 
-    Сегодня **``None``** (проводка — следующие срезы): ``llm_scenarios``,
-    ``chunker_version``, ``extractor_version``, ``embed_model_id``,
-    ``lexical_engine_version``, ``vector_store``, ``crawl_strategy``,
-    ``crawl_rate_limit``, ``crawl_config_digest``, ``registry_spec_digest``,
-    ``deploy_profile``, ``edge_schema_version``. Это осознанная неполнота: хешировать
-    только run-слой краула, не зная app/site-дефолтов, значило бы соврать о контракте.
-    ``None`` — часть контракта (см. :func:`core.pipeline.digests.execution_contract_digest`).
+    **Наблюдаемые величины портов/диска** (``extractor_version``/``embed_model_id``/
+    ``lexical_engine_version``/``vector_store``) в контракт **не** входят (методология
+    2.4.0, §13): они остаются провенансом манифеста/``pb``, но не блокируют diff —
+    их нельзя объявить на входе, а хеширование сделало бы ``run_id``
+    хост-зависимым. Вместо ``extractor_version`` объявлен ``extractor_stack``.
+
+    Прочие поля: ``methodology_version`` (``run.yaml``), ``package_version``
+    (``package.yaml``), ``cohort_digest``, ``seeds_digest``, ретривал-профиль/K/params
+    (передаёт composition root после нормализации args). ``status_dict_version`` —
+    из словаря статусов; ``scoring_policy_version``/``catalog_version`` принимаются
+    аргументами, но честного источника в этом срезе нет — ``None`` (значение не
+    выдумывается, A3). ``None`` — часть контракта (см.
+    :func:`core.pipeline.digests.execution_contract_digest`).
+
+    Функция **чистая**: не читает БД/файлы, все значения приходят аргументами.
     """
     values = {
         "methodology_version": inputs.run.methodology_version,
@@ -164,21 +200,18 @@ def build_execution_contract(
         "package_version": inputs.package.package_version,
         "cohort_digest": cohort_digest,
         "seeds_digest": seeds_digest,
-        "llm_scenarios": None,
+        "llm_scenarios": _declared(declared, "llm_scenarios"),
         "retrieval_profile": retrieval_profile,
         "cutoff_K": cutoff_K,
         "retrieval_params_json": retrieval_params_json,
-        "chunker_version": None,
-        "extractor_version": None,
-        "embed_model_id": None,
-        "lexical_engine_version": None,
-        "vector_store": None,
-        "crawl_strategy": None,
-        "crawl_rate_limit": None,
-        "crawl_config_digest": None,
-        "registry_spec_digest": None,
-        "deploy_profile": None,
-        "edge_schema_version": None,
+        "chunker_version": _declared(declared, "chunker_version"),
+        "extractor_stack": _declared(declared, "extractor_stack"),
+        "crawl_strategy": _declared(declared, "crawl_strategy"),
+        "crawl_rate_limit": _declared(declared, "crawl_rate_limit"),
+        "crawl_config_digest": _declared(declared, "crawl_config_digest"),
+        "registry_spec_digest": _declared(declared, "registry_spec_digest"),
+        "deploy_profile": _declared(declared, "deploy_profile"),
+        "edge_schema_version": _declared(declared, "edge_schema_version"),
     }
     return execution_contract_digest(values)
 

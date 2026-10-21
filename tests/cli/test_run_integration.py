@@ -337,6 +337,11 @@ def test_cmd_run_full_local_writes_manifest_with_real_compute_report(
         # Фазам нужен фиксированный профиль K (I16/I20); urls/паспорта остаются пустыми.
         kwargs["retrieval_profile"] = "R0"
         kwargs["cutoff_k"] = 3
+        # Тест утверждает, что **реальная** фаза evaluate вызвала оценщик. Межпрогонный
+        # кэш вердиктов (Ф3) в сессии pytest общий: другой прогон с тем же промптом/
+        # конфигурацией даёт хит, и вызов не происходит (ложный «не вызван»). Здесь кэш
+        # выключается — проверяется исполнение, а не переиспользование.
+        kwargs["eval_cache"] = None
         return build_phases(**kwargs)
 
     code = main(argv, ports=ports, phases_factory=factory)
@@ -544,6 +549,70 @@ def test_cmd_run_plain_rerun_preserves_measured_profile(tmp_path: Path) -> None:
     assert loaded["retrieval_profile"] == "R2"
     assert loaded["retrieval_cutoff_K"] == 7
     assert loaded["settings_provenance"]["retrieval_profile"]["source"] == "measured"
+
+
+def test_cmd_run_rerun_contract_carries_adopted_retrieval(tmp_path: Path) -> None:
+    """Регресс (§13, 2.4.0): контракт на resume несёт усыновлённый ``R2``, а не ``None``.
+
+    Прежний порядок вычислял контракт до усыновления измеренной фиксации: манифест и
+    ячейки несли ``R2``, а контракт — ``None`` (ложная граница diff). Теперь контракт
+    пересчитывается после нормализации args, но ``run_id`` остаётся идентичностью
+    создания прогона (иначе resume не нашёл бы свою строку).
+    """
+    from types import SimpleNamespace
+
+    from core.cli.execution_axes import (
+        declared_status_dict_version,
+        resolve_declared_axes,
+    )
+    from core.config.deploy import load_deploy_config
+    from core.pipeline.digests import cohort_digest, seeds_digest
+    from core.pipeline.normalize import load_inputs
+    from core.pipeline.onboarding import load_effective_seeds
+    from core.pipeline.run_identity import build_execution_contract
+
+    package = valid_package(tmp_path)
+    db = tmp_path / "cohound.db"
+    runs_dir = tmp_path / "runs"
+    run_id = "measured-contract"
+    argv = run_argv(package, run_id=run_id, db=db, runs_dir=runs_dir)
+    assert main([*argv, "--until", "plan"]) == EXIT_OK
+    _seed_measured_retrieval(db, run_id, profile="R2", cutoff=7)
+    _finalize_gates(db, run_id)
+
+    assert main(argv, ports=_retrieval_ports()) == EXIT_OK
+
+    with build_store(db) as store:
+        manifest = store.read_manifest(run_id)
+
+    inputs = load_inputs(package / "run.yaml", package)
+    declared = resolve_declared_axes(
+        args=SimpleNamespace(package=str(package), llm_slot=None),
+        inputs=inputs,
+        deploy=load_deploy_config(None),
+    )
+    seeds, _ = load_effective_seeds(
+        package, inputs.run.products, profiles=inputs.domain_profiles or {}
+    )
+    common = {
+        "cohort_digest": cohort_digest(
+            inputs.cohort,
+            case_id=inputs.run.case_id,
+            cohort_ref=getattr(inputs.run, "cohort_ref", None),
+        ),
+        "seeds_digest": seeds_digest(seeds),
+        "declared": declared,
+        "status_dict_version": declared_status_dict_version(),
+    }
+    adopted = build_execution_contract(
+        inputs, retrieval_profile="R2", cutoff_K=7, **common
+    )
+    unadopted = build_execution_contract(
+        inputs, retrieval_profile=None, cutoff_K=None, **common
+    )
+    assert manifest.retrieval_profile == "R2"
+    assert manifest.execution_contract_digest == adopted
+    assert manifest.execution_contract_digest != unadopted
 
 
 def test_cmd_run_accepts_explicit_profile_equal_to_measured(tmp_path: Path) -> None:

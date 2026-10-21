@@ -336,7 +336,7 @@ def test_build_manifest_carries_execution_contract_digest() -> None:
     run = SimpleNamespace(
         case_id="case-1",
         mode=RunMode.STRICT,
-        methodology_version="2.3.0",
+        methodology_version="2.4.0",
         cohort="cohort.yaml",
         ranking_policy=RankingPolicy.CAPABILITY_RANKED,
     )
@@ -345,7 +345,7 @@ def test_build_manifest_carries_execution_contract_digest() -> None:
         run_id="run-contract",
         anchor=PRODUCT_A,
         modules=[],
-        methodology_version="2.3.0",
+        methodology_version="2.4.0",
         catalog_version="1.0.0",
         cohort_ref="cohort.yaml",
     )
@@ -1274,8 +1274,9 @@ def test_diff_boundary_contract_mismatch_names_fields_in_contract_order() -> Non
 def test_diff_boundary_contract_mismatch_states_diagnostic_limit() -> None:
     """Дайджесты разные, доступные поля совпадают → предел диагностики, без выдумки имён.
 
-    ``cohort_digest``/``seeds_digest`` входят в контракт, но на ``RunManifest`` их нет
-    (только ``cohort_ref``): причина не восстановима и **не** выдумывается (A3).
+    ``cohort_digest``/``seeds_digest``/``extractor_stack`` входят в контракт, но на
+    ``RunManifest`` их нет (только ``cohort_ref``; стека извлечения манифест не несёт):
+    причина не восстановима и **не** выдумывается (A3).
     """
     prev = _manifest(execution_contract_digest="ec_1")
     curr = _manifest(execution_contract_digest="ec_2")
@@ -1283,7 +1284,7 @@ def test_diff_boundary_contract_mismatch_states_diagnostic_limit() -> None:
     assert reasons == [
         "execution_change: execution_contract_digest: ec_1 → ec_2",
         "execution_change: execution_contract_digest: различающееся поле не "
-        "восстановимо из манифеста (cohort_digest/seeds_digest либо иная ось)",
+        "восстановимо из манифеста (cohort_digest/seeds_digest/extractor_stack либо иная ось)",
     ]
     assert not any("chunker_version" in reason for reason in reasons)
     assert not any("embed_model_id" in reason for reason in reasons)
@@ -1322,7 +1323,7 @@ def test_diff_boundary_names_cohort_change_instead_of_contract_mismatch() -> Non
     assert diff_boundary_violations(prev, curr) == [
         "execution_change: execution_contract_digest: ec_1 → ec_2",
         "execution_change: execution_contract_digest: различающееся поле не "
-        "восстановимо из манифеста (cohort_digest/seeds_digest либо иная ось)",
+        "восстановимо из манифеста (cohort_digest/seeds_digest/extractor_stack либо иная ось)",
     ]
 
 
@@ -1422,17 +1423,17 @@ def test_diff_minor_methodology_bump_is_methodology_change(tmp_path: Path) -> No
     """§13: смена ``methodology_version`` (minor/patch) — ``methodology_change``, не execution.
 
     ``methodology_version`` входит в ``EXECUTION_CONTRACT_FIELDS``, поэтому без явной
-    классификации 2.2.0 → 2.3.0 читалось бы как «изменились условия измерения». Причина
+    классификации 2.2.0 → 2.4.0 читалось бы как «изменились условия измерения». Причина
     обязана называть версию и **не** содержать общую строку контракта.
     """
     prev = _manifest(methodology_version="2.2.0", execution_contract_digest="ec_1")
-    curr = _manifest(methodology_version="2.3.0", execution_contract_digest="ec_1")
+    curr = _manifest(methodology_version="2.4.0", execution_contract_digest="ec_1")
     with pytest.raises(CrossCycleDiffError) as excinfo:
         render_diff(prev, curr, [], [], tmp_path / "diff.md")
     message = str(excinfo.value)
     reason = message.split("— ", 1)[-1]
     assert reason.startswith("methodology_change: methodology_version:")
-    assert "2.2.0 → 2.3.0" in reason
+    assert "2.2.0 → 2.4.0" in reason
     assert "execution_contract_digest" not in message
     assert not (tmp_path / "diff.md").exists()
 
@@ -1440,16 +1441,16 @@ def test_diff_minor_methodology_bump_is_methodology_change(tmp_path: Path) -> No
 def test_diff_minor_methodology_bump_suppresses_generic_contract_line() -> None:
     """Контракт тоже различается (version входит в него) — общая строка не дублируется."""
     prev = _manifest(methodology_version="2.2.0", execution_contract_digest="ec_1")
-    curr = _manifest(methodology_version="2.3.0", execution_contract_digest="ec_2")
+    curr = _manifest(methodology_version="2.4.0", execution_contract_digest="ec_2")
     assert diff_boundary_violations(prev, curr) == [
-        "methodology_change: methodology_version: 2.2.0 → 2.3.0"
+        "methodology_change: methodology_version: 2.2.0 → 2.4.0"
     ]
 
 
 def test_resolve_diff_change_class_minor_methodology_bump() -> None:
     """Классификатор diff повторяет приоритет границы: версия раньше контракта."""
     prev = _manifest(methodology_version="2.2.0", execution_contract_digest="ec_1")
-    curr = _manifest(methodology_version="2.3.0", execution_contract_digest="ec_2")
+    curr = _manifest(methodology_version="2.4.0", execution_contract_digest="ec_2")
     assert resolve_diff_change_class(prev, curr) is ChangeClass.METHODOLOGY_CHANGE
 
 

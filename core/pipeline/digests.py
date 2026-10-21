@@ -15,8 +15,17 @@
   пропущенный ключ — ошибка, а не «то же самое, что ``None``».
 
 Граница этого среза: дайджесты только **вычисляются**. Семантика ``hound diff``
-(``EXECUTION_FIELDS``/``index_build_id``) и классификация ``content_change`` — отдельное,
-ещё не принятое изменение методологии, здесь не реализуется.
+(``EXECUTION_FIELDS``/``index_build_id``) живёт в :mod:`core.pipeline.report`.
+
+**Доктрина ``None`` (методология 2.4.0, §13).** В контракт входят только
+**объявленные** оси — «функция входа» (``args``/``run.yaml``/файлы пакета/``deploy.yaml``/
+константы кода), вычислимая до сборки портов. Наблюдаемые величины портов/диска
+(``extractor_version``, ``embed_model_id``, ``lexical_engine_version``,
+``vector_store``) остаются провенансом манифеста и ``pb``, но **не** входят в контракт:
+их хеширование сделало бы ``run_id`` зависимым от установленных wheel'ов и диска
+(два хоста с одним ``run.yaml`` — разные прогоны, R7 §11.7). Следствие названо прямо:
+их смена **не блокирует** межцикловый diff, а видна через ``pb``/``index_build_id`` и
+попадает в разрешённый класс ``content_change``.
 
 Нейтрален к предметной категории (§1.3).
 """
@@ -38,8 +47,16 @@ __all__ = [
     "seeds_digest",
 ]
 
-#: Поля execution contract (§12.5). Порядок — документационный; хеш канонический
-#: (``sort_keys=True``), поэтому порядок входа на результат не влияет.
+#: Поля execution contract (§12.5, методология 2.4.0). Порядок — документационный; хеш
+#: канонический (``sort_keys=True``), поэтому порядок входа на результат не влияет.
+#:
+#: Наблюдаемые величины портов/диска (``extractor_version``, ``embed_model_id``,
+#: ``lexical_engine_version``, ``vector_store``) здесь **отсутствуют** осознанно: они не
+#: выводятся из входа (per-product композит корпуса/диск/wheel'ы), остаются провенансом
+#: манифеста и ``partition_build_id``, но не блокируют межцикловый diff. Их смена видна
+#: через ``pb``/``index_build_id`` и попадает в разрешённый класс ``content_change``.
+#: Вместо ``extractor_version`` объявлен ``extractor_stack`` (константы стека извлечения
+#: + версия библиотеки docling).
 EXECUTION_CONTRACT_FIELDS: tuple[str, ...] = (
     "methodology_version",
     "scoring_policy_version",
@@ -53,10 +70,7 @@ EXECUTION_CONTRACT_FIELDS: tuple[str, ...] = (
     "cutoff_K",
     "retrieval_params_json",
     "chunker_version",
-    "extractor_version",
-    "embed_model_id",
-    "lexical_engine_version",
-    "vector_store",
+    "extractor_stack",
     "crawl_strategy",
     "crawl_rate_limit",
     "crawl_config_digest",

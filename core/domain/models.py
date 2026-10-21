@@ -94,7 +94,15 @@ _FROZEN = ConfigDict(
 #: контента при неизменном контракте — разрешённый diff класса ``content_change`` с
 #: баннером и doc-delta. Оба — ``methodology_change``: ``golden-full`` + пере-аннотация
 #: golden (§13, 09 §12.5).
-METHODOLOGY_VERSION = "2.3.0"
+#: 2.4.0 — определение Comparability: ``execution_contract_digest`` = отпечаток
+#: **декларированных** осей (функция входа), а наблюдаемые величины портов/диска
+#: (``extractor_version``/``embed_model_id``/``lexical_engine_version``/``vector_store``)
+#: из него исключены: они не выводятся из входа и делали бы ``run_id`` хост-зависимым
+#: (R7 §11.7). Вместо ``extractor_version`` объявлен ``extractor_stack`` (константы стека
+#: извлечения + версия библиотеки docling). Принятое ограничение названо прямо: смена
+#: этих четырёх величин **не блокирует** межцикловый diff, а видна через
+#: ``pb``/``index_build_id`` и попадает в разрешённый класс ``content_change`` (§13, §14).
+METHODOLOGY_VERSION = "2.4.0"
 
 #: P0/OOM: дефолтный потолок одного HTTP-ответа/retained-файла — 20 MiB. Операционная
 #: ось исполнения (``crawl.max_response_bytes``), не методология; адаптеры используют

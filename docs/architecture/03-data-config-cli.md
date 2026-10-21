@@ -178,9 +178,11 @@ class SqliteStore:
 `NpyIndexBuilder` версию реально используемого лексического движка (`tantivy-<ver>`; пусто —
 лексического плеча в прогоне нет, R0/R2 пропускаются), и она входит в `partition_build_id`
 (§13:676) и в `index_manifest`. Ранее поле всегда было пустым (дефект провенанса: читалось у
-сборщика, у которого атрибута не было), поэтому `pb` не различал лексические движки.
+сборщика, у которого атрибута не было), поэтому `pb` не различал лексические движки. В
+контракт `execution_contract_digest` эта величина **не** входит (методология 2.4.0): она
+наблюдаемая, её смена видна через `pb`/`index_build_id`, а не через границу diff.
 
-**Разделение версий (§13/B-7, v2.1; уточнено методологией 2.3.0).** Межцикловый diff
+**Разделение версий (§13/B-7, v2.1; уточнено методологией 2.3.0 и 2.4.0).** Межцикловый diff
 классифицирует причины изменения манифеста по **классам полей**: `methodology_change` — смена
 `methodology_version` (любой, не только major) либо поля `METHODOLOGY_FIELDS`
 (`scoring_policy_version`, `status_dict_version`, `capability_policy`,
@@ -202,6 +204,22 @@ class SqliteStore:
 **app-/per-site-слое**, которую индивидуальные `crawl_max_*` (только run-слой) не видят.
 `DIFF_BOUNDARY_FIELDS` сохранён алиасом `EXECUTION_FIELDS` (обратная совместимость).
 
+**Состав контракта (методология 2.4.0).** `execution_contract_digest` = отпечаток
+**декларированных** осей (`core/cli/execution_axes.py`): `methodology_version`,
+`scoring_policy_version`, `status_dict_version`, `catalog_version`, `package_version`,
+`cohort_digest`, `seeds_digest`, `llm_scenarios`, ретривал-профиль/`cutoff_K`/
+`retrieval_params_json`, `chunker_version`, `extractor_stack`, оси краула
+(`crawl_strategy`/`crawl_rate_limit`/`crawl_config_digest`), `registry_spec_digest`,
+`deploy_profile`, `edge_schema_version`. Наблюдаемые величины
+(`extractor_version`/`embed_model_id`/`lexical_engine_version`/`vector_store`) **в
+контракт не входят**: они не выводятся из входа (per-product композит корпуса, диск,
+wheel'ы), поэтому хеширование сделало бы `run_id` хост-зависимым (R7 §11.7). Вместо
+`extractor_version` объявлен `extractor_stack` (стек извлечения + версия библиотеки
+docling). **Принятое ограничение, названное прямо:** смена этих четырёх величин **не
+блокирует** межцикловый diff — она видна только через `pb`/`index_build_id` и попадает в
+разрешённый класс `content_change`. Альтернатива (контракт = `hash(declared)` + отдельная
+блокирующая именованная строка для наблюдаемых) — в §14 регламента с триггером возврата.
+
 **`content_change` (методология 2.3.0).** `index_build_id`/`composition_id` — следствие
 контента, а не условие измерения, поэтому в контракт не входит: при равных контрактах его
 расхождение — **разрешённый** diff класса `content_change` с баннером и per-product
@@ -217,7 +235,10 @@ diff, ради которого делается инкрементальнос�
 - Смена когорты после G1 → новый цикл (межцикловый diff запрещён).
 - Смена `rule`/`absence_rule` параметра → bump `catalog_version` + golden.
 - Смена контента/входов сборки (`chunker`/`embedder`/`extractor`/`lexical`/`vector_store`/
-  `snapshot_date`) → новая контент-адресуемая `index_build_id` + golden-full.
+  `snapshot_date`) → новая контент-адресуемая `index_build_id` + golden-full. Смена
+  `embedder`/`extractor`/`lexical`/`vector_store` — **не** граница diff (2.4.0): наблюдаемые
+  величины не входят в контракт, diff проходит как `content_change`; `chunker_version` и
+  `extractor_stack` — входят и блокируют.
 - Смена `retrieval_profile`/K и fusion-параметров (`rrf_k`, `retrieval_params_json`) →
   retrieval-golden и `execution_change` в diff, но **не** меняет `index_build_id`:
   ретривал-конфиг не влияет на чанкинг/векторы (P2).

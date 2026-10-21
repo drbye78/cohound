@@ -1098,7 +1098,7 @@ def test_execution_contract_digest_roundtrip(store: SqliteStore) -> None:
         case_id="case-1",
         created_at="2026-01-01T00:00:00Z",
         mode=RunMode.STRICT,
-        methodology_version="2.3.0",
+        methodology_version="2.4.0",
         package_version="pkg-1",
         catalog_version="cat-1",
         status_dict_version="sd-1",

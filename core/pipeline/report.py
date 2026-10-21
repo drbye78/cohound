@@ -65,6 +65,7 @@ from core.domain.models import (
     CrawlProvenance,
     ProtocolExhaustion,
     RunManifest,
+    ScenarioBinding,
     canonical_rate_limit,
 )
 from core.domain.scoring import evidence_coverage
@@ -101,6 +102,7 @@ __all__ = [
     "DIFF_BOUNDARY_FIELDS",
     "diff_boundary_violations",
     "resolve_diff_change_class",
+    "crawl_control_digest",
     "build_manifest",
     "write_run_manifest",
     "render_battle_card",
@@ -495,7 +497,7 @@ def _document_level_value(value: Any) -> str | None:
     return str(getattr(value, "value", value))
 
 
-def _crawl_control_digest(
+def crawl_control_digest(
     *,
     run_crawl: Any,
     app: Any,
@@ -508,6 +510,10 @@ def _crawl_control_digest(
     ``__default__`` (app<run без per-site). Канонизируется ``json.dumps(sort_keys=True)``
     и хешируется :func:`short_hash`. Смена осей на **любом** слое меняет дайджест → манифест
     помечает ``execution_change`` (§13), не ``methodology_change``.
+
+    Публичная функция (не только внутренняя деталь манифеста): composition root
+    (:mod:`core.cli.execution_axes`) вызывает её для **декларированной** оси контракта.
+    Одна формула — два потребителя (контракт и манифест), иначе они разошлись бы.
     """
     from core.config.deploy import CrawlConfig
 
@@ -547,6 +553,8 @@ def build_manifest(
     crawl_app: Any = None,
     registry_spec_digest: str | None = None,
     execution_contract_digest: str | None = None,
+    axes: Any = None,
+    declared_status_dict_version: str | None = None,
 ) -> RunManifest:
     """Собирает полностью заполненный :class:`RunManifest` (R7/§13) фазы Ш9.
 
@@ -580,6 +588,15 @@ def build_manifest(
       пересчитывается из другого набора значений и не подменяется пустой строкой.
       ``None`` — дайджест неизвестен (legacy/вызов без идентичности): манифест честно
       молчит, а ``hound diff`` применяет прежнее сравнение ``EXECUTION_FIELDS``.
+    * §13 (методология 2.4.0) — ``axes`` (:class:`core.cli.execution_axes.DeclaredExecutionAxes`):
+      **декларированные** оси исполнения из того же резолвера, что у контракта
+      (``crawl_strategy``/``crawl_rate_limit``/``crawl_config_digest``/
+      ``registry_spec_digest``/``deploy_profile``/``edge_schema_version``/
+      ``chunker_version``/``llm_scenarios``). Это буквально «источник значений тот же,
+      что у манифеста»: второй формулы нет. Наблюдаемые величины (``extractor_version``/
+      ``embed_model_id``/``lexical_engine_version``/``vector_store``) по-прежнему
+      приходят из ``run``/``inputs`` (их пишет фаза отчёта из корпуса/диска) и в контракт
+      не входят. ``axes=None`` — legacy/модульный вызов: прежние цепочки ``_first_present``.
 
     Деплой-провенанс (``deploy_profile``/``edge_schema_version``) заполняется только если
     соответствующие поля есть в текущей схеме :class:`RunManifest` (defensive: иначе
@@ -612,6 +629,7 @@ def build_manifest(
     status_dict_version = _first_present(
         getattr(run, "status_dict_version", None),
         getattr(inputs, "status_dict_version", None),
+        declared_status_dict_version,
     ) or "0.0.0"
     scoring_policy_version = _first_present(
         getattr(run, "scoring_policy_version", None),
@@ -673,13 +691,20 @@ def build_manifest(
         )
     )
 
-    llm_scenarios = list(
-        _first_present(
-            getattr(inputs, "llm_scenarios", None),
-            getattr(plan, "llm_scenarios", None),
-            getattr(run, "llm_scenarios", None),
+    llm_scenarios = (
+        [
+            ScenarioBinding(run_id=str(getattr(plan, "run_id", "")), **dict(row))
+            for row in (getattr(axes, "llm_scenarios", ()) or ())
+        ]
+        if axes is not None
+        else list(
+            _first_present(
+                getattr(inputs, "llm_scenarios", None),
+                getattr(plan, "llm_scenarios", None),
+                getattr(run, "llm_scenarios", None),
+            )
+            or []
         )
-        or []
     )
 
     partial_score_raw = _first_present(
@@ -759,7 +784,15 @@ def build_manifest(
             crawl_document_level = crawl_app.document_level.value
 
     # N6/§13: дайджест **разрешённой** конфигурации контроля краула (app < run < per-site).
-    crawl_config_digest = _crawl_control_digest(
+    # Декларированные оси (``axes``) — тот же резолвер, что у контракта: composition root
+    # разрешает их один раз (:func:`core.cli.execution_axes.resolve_declared_axes`), здесь
+    # второй формулы нет. ``axes=None`` — legacy/модульный вызов (значения из run/app).
+    if axes is not None:
+        crawl_strategy = getattr(axes, "crawl_strategy", crawl_strategy)
+        crawl_rate_limit = getattr(axes, "crawl_rate_limit", crawl_rate_limit)
+    crawl_config_digest = (
+        getattr(axes, "crawl_config_digest", None) if axes is not None else None
+    ) or crawl_control_digest(
         run_crawl=crawl_cfg,
         app=crawl_app,
         profiles=domain_profiles,
@@ -767,14 +800,18 @@ def build_manifest(
 
     extra: dict[str, Any] = {}
     manifest_fields = getattr(RunManifest, "model_fields", {})
+    # §13: деплой-провенанс — из декларированных осей (тот же резолвер, что у контракта);
+    # ``axes=None`` — прежняя цепочка аргумент → inputs → run (модульные тесты/legacy).
     if "deploy_profile" in manifest_fields:
         extra["deploy_profile"] = _first_present(
+            getattr(axes, "deploy_profile", None) if axes is not None else None,
             deploy_profile,
             getattr(inputs, "deploy_profile", None),
             getattr(run, "deploy_profile", None),
         )
     if "edge_schema_version" in manifest_fields:
         extra["edge_schema_version"] = _first_present(
+            getattr(axes, "edge_schema_version", None) if axes is not None else None,
             edge_schema_version,
             getattr(inputs, "edge_schema_version", None),
             getattr(run, "edge_schema_version", None),
@@ -805,9 +842,13 @@ def build_manifest(
             getattr(run, "embed_model_id", None),
             getattr(inputs, "embed_model_id", None),
         ),
-        chunker_version=_first_present(
-            getattr(run, "chunker_version", None),
-            getattr(inputs, "chunker_version", None),
+        chunker_version=(
+            getattr(axes, "chunker_version", None)
+            if axes is not None
+            else _first_present(
+                getattr(run, "chunker_version", None),
+                getattr(inputs, "chunker_version", None),
+            )
         ),
         extractor_version=_first_present(
             getattr(run, "extractor_version", None),
@@ -858,7 +899,11 @@ def build_manifest(
         crawl_config_digest=crawl_config_digest,
         # E2/§13: дайджест package-scoped спецификаций реестров (``None`` — нет реестров;
         # поле аддитивно, нетронутые манифесты без реестров не меняются по значению).
-        registry_spec_digest=registry_spec_digest,
+        registry_spec_digest=(
+            getattr(axes, "registry_spec_digest", None)
+            if axes is not None
+            else registry_spec_digest
+        ),
         # 09 §12.5: готовый отпечаток условий измерения (не пересчитывается здесь).
         execution_contract_digest=execution_contract_digest,
         snapshot_date=snapshot_date,
