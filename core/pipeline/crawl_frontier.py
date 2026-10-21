@@ -78,6 +78,12 @@ class CrawlLimits:
     max_response_bytes_explicit: bool = False
     max_depth: int = 0
     max_documents: int | None = None
+    #: Операторская ось «не ограничивать, а измерять»: максимум известных URL
+    #: ревалидации **на продукт** за цикл. ``None`` — ось не задана (ревалидируются
+    #: все известные URL; поведение байт-в-байт). Заданное значение откладывает хвост,
+    #: помечает его ``stale`` в ``url_state`` и поднимает видимое усечение продукта
+    #: (``revalidate_max_documents``), а не молча пропускает.
+    revalidate_max_documents: int | None = None
     exclude_paths: tuple[str, ...] = ()
     exclude_documents: tuple[str, ...] = ()
     #: P5: уровень извлечения документных форматов (ось ``crawl.document_level``). Дефолт
@@ -88,9 +94,10 @@ class CrawlLimits:
     def as_dict(self) -> dict[str, object]:
         """Канонический словарь для провенанса/манифеста (сортированно-стабильно).
 
-        Новая ось рециклинга включается **только когда задана**: ``None`` не добавляет
-        ключ, поэтому дайджест ``crawl_config_digest`` прогонов без этой оси не меняется
-        (обратная совместимость §13).
+        Опциональные оси (рециклинг воркеров, потолок ревалидации) включаются **только
+        когда заданы**: ``None`` не добавляет ключ, поэтому дайджест
+        ``crawl_config_digest`` прогонов без этих осей не меняется (обратная
+        совместимость §13).
         """
         payload: dict[str, object] = {
             "max_workers": self.max_workers,
@@ -103,6 +110,10 @@ class CrawlLimits:
         }
         if self.extract_max_tasks_per_child is not None:
             payload["extract_max_tasks_per_child"] = self.extract_max_tasks_per_child
+        # Та же обратная совместимость: ключ появляется только при явно заданной оси,
+        # поэтому дайджест прогонов без неё не меняется, а при задании — честно меняется.
+        if self.revalidate_max_documents is not None:
+            payload["revalidate_max_documents"] = self.revalidate_max_documents
         if self.max_response_bytes_explicit:
             payload["max_response_bytes"] = self.max_response_bytes
         return payload
@@ -147,6 +158,9 @@ def resolve_crawl_limits(
     )
     run_max_depth = run.max_depth if run is not None else None
     run_max_documents = run.max_documents if run is not None else None
+    run_revalidate_max_documents = (
+        getattr(run, "revalidate_max_documents", None) if run is not None else None
+    )
     run_exclude_paths = run.exclude_paths if run is not None else None
     run_exclude_documents = run.exclude_documents if run is not None else None
     run_document_level = (
@@ -180,6 +194,11 @@ def resolve_crawl_limits(
     max_documents = _pick(
         app.max_documents, run_max_documents, site_attr("max_documents")
     )
+    revalidate_max_documents = _pick(
+        getattr(app, "revalidate_max_documents", None),
+        run_revalidate_max_documents,
+        site_attr("revalidate_max_documents"),
+    )
     exclude_paths = _pick(
         app.exclude_paths, run_exclude_paths, site_attr("exclude_paths")
     )
@@ -211,6 +230,11 @@ def resolve_crawl_limits(
         max_depth=0 if max_depth is None else int(max_depth),  # type: ignore[arg-type]
         max_documents=(
             None if max_documents is None else int(max_documents)  # type: ignore[arg-type]
+        ),
+        revalidate_max_documents=(
+            None
+            if revalidate_max_documents is None
+            else int(revalidate_max_documents)  # type: ignore[arg-type]
         ),
         exclude_paths=tuple(exclude_paths or ()),  # type: ignore[arg-type]
         exclude_documents=tuple(exclude_documents or ()),  # type: ignore[arg-type]
@@ -303,7 +327,13 @@ class Frontier:
         self.limits = limits
         self._queue: deque[tuple[str, int]] = deque()
         self._seen: set[str] = set()
+        #: Известные URL ревалидации (depth-0 листья): поставлены отдельным путём,
+        #: не расходуют ``max_documents`` и не расширяют BFS исходящими ссылками.
+        self._revalidation: set[str] = set()
         self.fetched = 0
+        #: Фактически добытые ревалидационные страницы (не 304/reuse): отдельный
+        #: счётчик, потому что ``fetched``/``pages_fetched`` остаются discovery-only.
+        self.revalidation_fetched = 0
         self.truncated = False
         self.truncated_reason: str | None = None
         #: Seeds/ссылки, отброшенные блэклистом (наблюдаемость: «не молчаливый дроп»).
@@ -393,6 +423,53 @@ class Frontier:
         self._queue.append((url, 0))
         return "queued"
 
+    def add_revalidate_seed(self, url: str) -> str:
+        """Ставит известный URL ревалидации (depth-0 лист) **вне** бюджета discovery.
+
+        Отдельный путь от :meth:`add_seed` намеренно: ``max_documents`` — потолок
+        **документов, которые добавляет обход** (discovery), а не повторной проверки
+        известной страницы. Иначе продукт с N известными URL исчерпывал бы бюджет и
+        ложно рапортовал ``truncated``/``complete=False`` на каждом цикле.
+
+        Семантика, которую путь **сохраняет**:
+
+        * scope корня проверяется (URL вне scope — забота вызывающего: orphan-бакет),
+          SSRF-валидация — внутри :meth:`in_scope`;
+        * блэклист — с видимой записью ``skipped_blacklisted`` (не тихий дроп);
+        * дедуп ``_seen`` — известный URL, переоткрытый ссылкой из BFS, не получает
+          второй GET (304-экономия).
+
+        Возвращает ``"queued"`` | ``"blacklisted"`` | ``"out_of_scope"`` | ``"dup"``.
+        """
+        if url in self._seen:
+            return "dup"
+        if not self.in_scope(url):
+            return "out_of_scope"
+        if self.blacklisted(url):
+            self.skipped_blacklisted.append(url)
+            return "blacklisted"
+        self._seen.add(url)
+        self._revalidation.add(url)
+        self._queue.append((url, 0))
+        return "queued"
+
+    def is_revalidation(self, url: str) -> bool:
+        """Поставлен ли ``url`` путём ревалидации (лист, не расходует бюджет)."""
+        return url in self._revalidation
+
+    def next_is_revalidation(self) -> bool:
+        """Голова очереди — URL ревалидации (проверка бюджета discovery в цикле)."""
+        return bool(self._queue) and self._queue[0][0] in self._revalidation
+
+    def revalidation_head_count(self, limit: int) -> int:
+        """Сколько подряд URL ревалидации в голове очереди (не более ``limit``)."""
+        count = 0
+        for url, _depth in self._queue:
+            if url not in self._revalidation or count >= limit:
+                break
+            count += 1
+        return count
+
     def discover(self, url: str, depth: int) -> bool:
         """Ставит обнаруженный URL глубины ``depth`` при прохождении scope/блэклиста/ёмкости."""
         if url in self._seen:
@@ -448,6 +525,7 @@ class Frontier:
         clone = Frontier(self.root_url, limits)
         clone._seen = set(self._seen)
         clone._queue = deque(self._queue)
+        clone._revalidation = set(self._revalidation)
         clone.fetched = self.fetched
         clone.skipped_blacklisted = list(self.skipped_blacklisted)
         clone.skipped_documents = [dict(rec) for rec in self.skipped_documents]

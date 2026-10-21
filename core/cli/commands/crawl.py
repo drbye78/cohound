@@ -435,7 +435,8 @@ def _execute_crawl(
         warning = (
             "краул усечён политикой (max_documents/max_depth): корпус неполон; "
             f"продукты={truncation.get('truncated_products')}; "
-            f"страниц={truncation.get('pages_fetched')}"
+            f"страниц={truncation.get('pages_fetched')}; "
+            f"ревалидация={truncation.get('revalidation_fetched')}"
         )
         payload.setdefault("notes", []).append(warning)
     if args.json:

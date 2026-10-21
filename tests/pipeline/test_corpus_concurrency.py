@@ -43,7 +43,9 @@ from core.ports.types import (
     FetchPlan,
     RawPage,
 )
+from core.ports.state import UrlStateRow
 from core.store.sqlite_store import SqliteStore
+from core.store.state_store import SqliteStateStore
 from core.util.hashing import content_hash
 
 RUN_ID = "run-concurrency"
@@ -452,3 +454,45 @@ def test_resume_items_bypass_pool(tmp_path: Path) -> None:
         assert all(p.submitted == 0 for p in created)
     finally:
         store.close()
+
+
+def test_pool_transport_revalidates_all_known_urls_in_bounded_batches(
+    tmp_path: Path,
+) -> None:
+    """M2: pool-ветка — все известные URL ревалидируются, batch ≤ ``max_workers``.
+
+    ``max_documents=1`` оставляет нулевой discovery-room; новая формула обязана
+    впускать непрерывный revalidation-блок (не более половины волны), а не по одному
+    URL. Иначе цикл делает ``N`` волн, хотя ни один URL не теряется.
+    """
+    known = [f"https://docs.test/known/{i}" for i in range(8)]
+    with SqliteStateStore(":memory:") as state:
+        for url in known:
+            state.upsert_url_state(
+                UrlStateRow(product_id="p1", url=url, normalized_url=url)
+            )
+        pages = {ROOT: b"root", **{url: b"text" for url in known}}
+        created: list[_RecordingPool] = []
+        crawler = _Crawler(pages)
+        result = _build(
+            tmp_path,
+            pages=pages,
+            crawler=crawler,
+            state=state,
+            product_modes={"p1": "incremental"},
+            pool_factory=_recording_factory(created),
+            crawl_defaults=CrawlRunConfig(max_workers=4, max_documents=1),
+        )
+        build = _build_of(result)
+        assert result.errors == []
+        assert set(known) <= set(crawler.calls)
+        assert len(created) == 1
+        pool = created[0]
+        # Все 8 известных + корневой seed; за один batch — не более max_workers,
+        # а при нулевом remaining — не более половины (reval_n = max_workers // 2).
+        assert pool.submitted == len(known) + 1
+        assert pool.max_active <= 2
+        assert build.truncation[0]["revalidation"] == {
+            "selected": len(known),
+            "fetched": len(known),
+        }

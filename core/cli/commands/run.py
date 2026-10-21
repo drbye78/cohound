@@ -901,7 +901,8 @@ def run(args: argparse.Namespace) -> int:
             warning = (
                 "краул усечён политикой (max_documents/max_depth): корпус неполон; "
                 f"продукты={truncation.get('truncated_products')}; "
-                f"страниц={truncation.get('pages_fetched')}"
+                f"страниц={truncation.get('pages_fetched')}; "
+                f"ревалидация={truncation.get('revalidation_fetched')}"
             )
             payload["crawl_truncation_warning"] = warning
         if args.json:

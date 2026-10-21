@@ -103,6 +103,7 @@ def finalize_session(
     truncated: bool = False,
     effective_limits: Mapping[str, Any] | None = None,
     pages_fetched: int | None = None,
+    revalidation_fetched: int | None = None,
     truncated_products: Sequence[str] | None = None,
 ) -> CrawlSessionStatus:
     """Финализирует сеанс: ``COMPLETED`` (нет сбоев) либо ``PARTIAL`` (есть failed/cancelled).
@@ -118,7 +119,8 @@ def finalize_session(
 
     Phase 2: в ``CrawlSession.provenance_json`` пишется компактный JSON-провенанс
     ``{engines, kinds, crawl_sources_digest, status, truncated, effective_limits,
-    pages_fetched}``. Персистенция — через :meth:`StorePort.set_crawl_session_provenance`
+    pages_fetched, revalidation_fetched}``. Персистенция — через
+    :meth:`StorePort.set_crawl_session_provenance`
     (targeted ``UPDATE``).
     """
     counts = store.crawl_session_counts(session_id)
@@ -140,6 +142,8 @@ def finalize_session(
         "truncated": bool(truncated),
         "effective_limits": dict(effective_limits or {}),
         "pages_fetched": pages_fetched,
+        # S1: ревалидационный трафик виден отдельно; ``pages_fetched`` остаётся discovery.
+        "revalidation_fetched": revalidation_fetched,
         # D1/G: продукты, чей краул усечён (для аномалии exhaustive-absence в отчёте).
         "truncated_products": sorted({str(p) for p in (truncated_products or []) if p}),
     }
@@ -185,17 +189,35 @@ def truncation_summary(provenance: Mapping[str, Any] | None) -> dict[str, Any]:
     """Сводка политического усечения для payload/метрик (N4).
 
     Форма — стабильная: ``truncated``/``truncated_reason``/``truncated_products``/
-    ``pages_fetched``/``effective_limits``. ``truncated_reason`` — первая причина
-    (``max_documents``/``max_depth``) среди записей ``effective_limits.roots``. Отсутствие
-    провенанса → нейтральный «не усечён» (не выдумываем усечение).
+    ``pages_fetched``/``revalidation_fetched``/``effective_limits``.
+    ``truncated_reason`` — первая crawl-причина
+    (``max_documents``/``max_depth``/``round_budget``) среди записей
+    ``effective_limits.roots``. Отсутствие провенанса → нейтральный «не усечён» (не
+    выдумываем усечение).
+
+    09 §6.3: ревалидация известных URL сама по себе **не** расходует ``max_documents``
+    и не расширяет BFS. Операторский потолок ``revalidate_max_documents`` — отдельная,
+    видимая причина усечения продукта, но **precedence**: crawl-потолки
+    (``max_documents``/``max_depth``/``round_budget``) ранжируются раньше неё. Поэтому
+    выбираем первую не-revalidation причину; только если crawl-усечения нет — сообщаем
+    ``revalidate_max_documents``. Это сохраняет прежний порядок crawl-причин.
     """
     prov = provenance or {}
     roots = (prov.get("effective_limits") or {}).get("roots") or []
     reason: str | None = None
+    revalidation_reason: str | None = None
     for record in roots:
-        if isinstance(record, Mapping) and record.get("truncated"):
-            reason = record.get("truncated_reason")
-            break
+        if not (isinstance(record, Mapping) and record.get("truncated")):
+            continue
+        candidate = record.get("truncated_reason")
+        if candidate == "revalidate_max_documents":
+            if revalidation_reason is None:
+                revalidation_reason = candidate
+            continue
+        reason = candidate
+        break
+    if reason is None:
+        reason = revalidation_reason
     return {
         "truncated": bool(prov.get("truncated")),
         "truncated_reason": reason,
@@ -203,5 +225,6 @@ def truncation_summary(provenance: Mapping[str, Any] | None) -> dict[str, Any]:
             {str(p) for p in (prov.get("truncated_products") or [])}
         ),
         "pages_fetched": prov.get("pages_fetched"),
+        "revalidation_fetched": prov.get("revalidation_fetched"),
         "effective_limits": dict(prov.get("effective_limits") or {}),
     }
