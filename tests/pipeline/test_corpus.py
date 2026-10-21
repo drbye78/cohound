@@ -229,6 +229,51 @@ class _RefusedCrawler(_Crawler):
         raise _RefusedError(f"robots.txt запрещает краул {url!r}")
 
 
+class _StatusError(RuntimeError):
+    """Общий сбой с наблюдаемым HTTP-статусом (duck-typed контракт ``CrawlError``).
+
+    Тест pipeline не импортирует адаптеры: ``corpus`` читает ``http_status`` через
+    ``getattr`` — как ``failure_kind``/``refusal_reason``. Класс отказа не задан ⇒
+    pipeline остаётся на ``source_unavailable`` (таксономия не меняется).
+    """
+
+    def __init__(self, message: str, *, http_status: int) -> None:
+        super().__init__(message)
+        self.http_status = http_status
+
+
+class _StatusCrawler(_Crawler):
+    """Краулер, поднимающий общий сбой с заданным статусом (429/503/403)."""
+
+    def __init__(self, status: int) -> None:
+        super().__init__({})
+        self.status = status
+
+    def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:
+        self.calls.append((url, plan))
+        raise _StatusError(f"HTTP {self.status}: {url}", http_status=self.status)
+
+
+class _NotFoundStatusError(_StatusError):
+    """``not_found`` (404) **и** наблюдаемый статус: терминальность не теряется."""
+
+    failure_kind = FailureKind.NOT_FOUND.value
+
+    def __init__(self, message: str, *, http_status: int = 404) -> None:
+        super().__init__(message, http_status=http_status)
+
+
+class _NotFoundStatusCrawler(_Crawler):
+    """Краулер, поднимающий ``not_found`` с HTTP-статусом."""
+
+    def __init__(self) -> None:
+        super().__init__({})
+
+    def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:
+        self.calls.append((url, plan))
+        raise _NotFoundStatusError(f"HTTP 404: {url}")
+
+
 class _Extractor:
     """Экстрактор: текст — декодированные байты; ``error_urls`` → грациозная ошибка."""
 
@@ -389,6 +434,46 @@ def test_dedup_same_content_two_urls_indexed_once(tmp_path: Path) -> None:
     assert len(build.docs) == 1
     assert build.chunk_count == 1
     assert {e.product_id for e in build.entries} == {"p1"}
+    # Наблюдаемость: схлопывание посчитано и видно (раньше терялось молча).
+    assert build.duplicates == {"p1": 1}
+    assert build.duplicate_count == 1
+
+
+def test_dedup_counter_is_product_scoped(tmp_path: Path) -> None:
+    """Счётчик дедупа — по продукту: идентичный текст у p1/p2 не считается дублем."""
+    result = _build(
+        tmp_path,
+        pages={URL_P1_A: b"shared", URL_P2_A: b"shared"},
+        urls={"p1": [URL_P1_A], "p2": [URL_P2_A]},
+    )
+    build = _build_of(result)
+    assert len(build.docs) == 2
+    assert build.duplicates == {}
+    assert build.duplicate_count == 0
+
+
+def test_index_build_id_ignores_duplicate_count(tmp_path: Path) -> None:
+    """Пин: ``duplicate_count`` — наблюдемость, не состав композиции (§B.1).
+
+    Два прогона дают **один** ``index_build_id``, хотя у одного есть дубль
+    (``duplicate_count == 1``), а у другого нет: id считается по
+    ``members``/``digests`` партиций (``derive_composition_id``), а дедуп — аддитивное
+    поле ``IndexBuild``.
+    """
+    single = _build_of(
+        _build(tmp_path / "a", pages={URL_P1_A: b"same text"}, urls={"p1": [URL_P1_A]})
+    )
+    with_dup = _build_of(
+        _build(
+            tmp_path / "b",
+            pages={URL_P1_A: b"same text", URL_P1_B: b"same text"},
+            urls={"p1": [URL_P1_A, URL_P1_B]},
+        )
+    )
+
+    assert with_dup.duplicate_count == 1
+    assert single.duplicate_count == 0
+    assert with_dup.index_build_id == single.index_build_id
 
 
 def test_dedup_is_product_scoped(tmp_path: Path) -> None:
@@ -402,6 +487,30 @@ def test_dedup_is_product_scoped(tmp_path: Path) -> None:
     assert build.chunk_count == 2
     assert {d.product_id for d in build.docs} == {"p1", "p2"}
     assert {e.product_id for e in build.entries} == {"p1", "p2"}
+
+
+def test_dedup_alias_gets_twin_doc_version_and_is_counted(tmp_path: Path) -> None:
+    """Алиас получает ту же doc-версию, что близнец (как раньше), и попадает в счётчик."""
+    with SqliteStateStore(":memory:") as state:
+        crawler = _StatefulCrawler({URL_P1_A: b"alias text", URL_P1_B: b"alias text"})
+        result = _state_run(
+            tmp_path,
+            state,
+            pages={URL_P1_A: b"alias text", URL_P1_B: b"alias text"},
+            urls={"p1": [URL_P1_A, URL_P1_B]},
+            crawler=crawler,
+        )
+        build = _build_of(result)
+        assert len(build.docs) == 1
+        assert build.duplicates == {"p1": 1}
+        assert build.duplicate_count == 1
+
+        first = state.get_url_state("p1", URL_P1_A)
+        alias = state.get_url_state("p1", URL_P1_B)
+        assert first is not None and alias is not None
+        assert first.doc_version_id
+        # Алиас не создаёт вторую версию: он указывает на версию близнеца.
+        assert alias.doc_version_id == first.doc_version_id
 
 
 # --------------------------------------------------------------------------- #
@@ -1267,12 +1376,67 @@ def test_crawl_failure_records_failed_source_unavailable(tmp_path: Path) -> None
         row = next(iter(_items(store)))
         assert row.status is CrawlItemStatus.FAILED
         assert row.error_kind == FailureKind.SOURCE_UNAVAILABLE.value
+        # Статуса не было (исключение без ``http_status``) — не выдумываем.
+        assert row.http_status is None
         assert row.error
         assert any("crawl" in err for err in result.errors)
         assert _build_of(result).crawl_failed == 1
         # Есть сбойный элемент → сеанс ``PARTIAL``.
         session = store.get_crawl_session(SESSION_ID)
         assert session is not None and session.status is CrawlSessionStatus.PARTIAL
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize("status", [429, 503, 403])
+def test_crawl_failure_keeps_error_kind_but_records_http_status(
+    tmp_path: Path, status: int
+) -> None:
+    """Наблюдаемость статуса: 429/503/403 различимы, класс отказа — прежний.
+
+    Таксономия ``FailureKind`` этим не расширяется: 429 не становится отдельным
+    классом (это была бы смена блокирующих видов и гейта полноты). Смысл — видимость:
+    транзиентный rate-limit/недоступность (повтор осмыслен) vs политический запрет
+    (повтор бессмысленен).
+    """
+    store = SqliteStore(":memory:")
+    _make_run(store)
+    try:
+        result = _build(
+            tmp_path, pages={}, urls={"p1": [URL_P1_A]},
+            crawler=_StatusCrawler(status), store=store, run_id=RUN_ID,
+        )
+        row = next(iter(_items(store)))
+        assert row.status is CrawlItemStatus.FAILED
+        assert row.error_kind == FailureKind.SOURCE_UNAVAILABLE.value
+        assert row.http_status == status
+        assert _build_of(result).crawl_failed == 1
+    finally:
+        store.close()
+
+
+def test_not_found_keeps_terminality_and_records_http_status(tmp_path: Path) -> None:
+    """404: ``not_found`` остаётся терминальным, статус не теряется."""
+    store = SqliteStore(":memory:")
+    _make_run(store)
+    crawler = _NotFoundStatusCrawler()
+    try:
+        _build(
+            tmp_path, pages={}, urls={"p1": [URL_P1_A]},
+            crawler=crawler, store=store, run_id=RUN_ID,
+        )
+        row = next(iter(_items(store)))
+        assert row.status is CrawlItemStatus.FAILED
+        assert row.error_kind == FailureKind.NOT_FOUND.value
+        assert row.http_status == 404
+        assert row.attempts == 1  # терминальность не изменилась
+
+        # Resume без потолка: определённый ответ по-прежнему не повторяется.
+        _build(
+            tmp_path, pages={}, urls={"p1": [URL_P1_A]},
+            crawler=crawler, store=store, run_id=RUN_ID,
+        )
+        assert len(crawler.calls) == 1
     finally:
         store.close()
 
@@ -2078,6 +2242,7 @@ class _FakeExecutor:
         errors: dict[str, str] | None = None,
         engines: dict[str, str] | None = None,
         statuses: list[str] | None = None,
+        http_statuses: dict[str, int] | None = None,
         collect_error: str | None = None,
         extra_items: list[CrawlResultItem] | None = None,
         accept_sequence: list[bool] | None = None,
@@ -2087,6 +2252,7 @@ class _FakeExecutor:
         self.pages = dict(pages or {})
         self.errors = dict(errors or {})
         self.engines = dict(engines or {})
+        self.http_statuses = dict(http_statuses or {})
         self.final_url = dict(final_url or {})
         self.statuses = list(statuses or ["completed"])
         self.collect_error = collect_error
@@ -2159,6 +2325,7 @@ class _FakeExecutor:
                 engine=engine,
                 kind=work.kind,
                 error=self.errors[work.url],
+                http_status=self.http_statuses.get(work.url),
             )
         content = self.pages.get(work.url, b"")
         return CrawlResultItem(
@@ -2331,10 +2498,40 @@ def test_executor_failure_marks_source_unavailable_and_partial(tmp_path: Path) -
         item = next(iter(_items(store)))
         assert item.status is CrawlItemStatus.FAILED
         assert item.error_kind == FailureKind.SOURCE_UNAVAILABLE.value
+        assert item.http_status is None  # шов статуса не дал — не выдумываем
         assert any("http_503" in err for err in result.errors)
         assert _build_of(result).crawl_failed == 1
         session = store.get_crawl_session(SESSION_ID)
         assert session is not None and session.status is CrawlSessionStatus.PARTIAL
+    finally:
+        store.close()
+
+
+def test_executor_failure_carries_http_status(tmp_path: Path) -> None:
+    """Split-путь: ``http_status`` из результата шва не теряется на записи элемента."""
+    store = SqliteStore(":memory:")
+    _make_run(store)
+    executor = _FakeExecutor(
+        pages={},
+        errors={URL_P1_A: "rate limited"},
+        http_statuses={URL_P1_A: 429},
+    )
+    try:
+        _build(
+            tmp_path,
+            pages={},
+            urls={"p1": [URL_P1_A]},
+            executor=executor,
+            executor_poll_interval=0.0,
+            executor_sleep=lambda _s: None,
+            store=store,
+            run_id=RUN_ID,
+        )
+        item = next(iter(_items(store)))
+        assert item.status is CrawlItemStatus.FAILED
+        # Класс отказа прежний, но 429 теперь виден оператору.
+        assert item.error_kind == FailureKind.SOURCE_UNAVAILABLE.value
+        assert item.http_status == 429
     finally:
         store.close()
 
