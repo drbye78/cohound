@@ -79,6 +79,7 @@ from core.ports.gateway import ContentGateway
 from core.ports.store import StorePort
 from core.ports.types import FetchMode
 from core.util.cache import ContentAddressedCache
+from core.util.logging import PhaseLogger
 from core.util.rate_limit import RateLimiter
 
 # -- Типовые швы (тестовые инъекции) --------------------------------------- #
@@ -1083,6 +1084,18 @@ def _resolve_ports(
         except Exception:  # noqa: BLE001 — провенанс не роняет сборку портов
             ref = None
         index_build_id = getattr(ref, "index_build_id", None)
+    # Наблюдаемость выбора движка краула (03 §D.6): при известном прогоне строки идут в
+    # `runs/{run_id}/logs/wiring.jsonl` — в тот же корень, что и логи фаз (`--runs-dir`
+    # оператора приоритетнее resolved-раскладки). Движок — commodity-слой (A2) и не входит
+    # в execution_contract_digest, поэтому без лога подмена движка не оставляет следа.
+    logs_root = getattr(args, "runs_dir", None)
+    if logs_root is None and paths is not None:
+        logs_root = paths.runs
+    engine_log = (
+        PhaseLogger(run_id, "wiring", logs_root)
+        if run_id and logs_root is not None
+        else None
+    )
     return build_adapters(
         profile=args.profile,
         deploy=deploy_config,
@@ -1110,6 +1123,7 @@ def _resolve_ports(
         store=store,
         chunk_lookup=store.get_chunk if store is not None else None,
         index_build_id=index_build_id,
+        engine_log=engine_log,
     )
 
 
@@ -1744,7 +1758,7 @@ def _print_run_report(payload: dict[str, Any]) -> None:
 
 
 def _add_common(parser: argparse.ArgumentParser) -> None:
-    """Общие флаги команд: ``--json`` и ``--profile``."""
+    """Общие флаги команд: ``--json``, ``--profile``, ``--env-file``."""
     parser.add_argument(
         "--json", action="store_true", help="машинночитаемый вывод (JSON) в stdout"
     )
@@ -1753,6 +1767,15 @@ def _add_common(parser: argparse.ArgumentParser) -> None:
         choices=SUPPORTED_PROFILES,
         default=LOCAL_PROFILE,
         help="профиль развёртывания (07): local (дефолт) | split (DMZ, требует config/deploy.yaml)",
+    )
+    parser.add_argument(
+        "--env-file",
+        dest="env_file",
+        default=None,
+        metavar="PATH",
+        help="dotenv-файл, загружаемый в окружение до исполнения команды "
+        "(приоритет: --env-file > COHOUND_ENV_FILE > ./.env; уже заданные переменные "
+        "не переопределяются; COHOUND_NO_DOTENV=1 отключает загрузку; 03 §D.6)",
     )
 
 

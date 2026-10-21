@@ -121,6 +121,7 @@ from core.store.sqlite_store import SqliteStore
 from core.util.cache import ContentAddressedCache
 from core.util.document_formats import document_content_type, document_suffix
 from core.util.hashing import short_hash
+from core.util.logging import PhaseLogger
 from core.util.robots import RobotsGate
 from core.util.sitemap import MAX_SITEMAP_ENTRIES
 
@@ -1000,6 +1001,120 @@ def _robots_gate(http_crawler: CrawlerPort, *, user_agent: str | None) -> Robots
     return RobotsGate(fetch, user_agent=user_agent or "*")
 
 
+#: Ярлык источника «движок задан слоем ``crawl_sources.yaml``» (наблюдаемость §D.6).
+_ENGINE_SOURCE_CRAWL_SOURCES = "crawl_sources.engine"
+#: Ярлык источника «движок выведен из ``fetch: browser`` доменного профиля».
+_ENGINE_SOURCE_PROFILE = "profile.fetch"
+#: Ярлык источника «дефолтный движок (env не задан)».
+_ENGINE_SOURCE_DEFAULT = "default"
+
+
+def _declared_engine_uses(
+    domain_profiles: Mapping[str, DomainProfile] | None,
+    crawl_sources: CrawlSourcesConfig | None,
+) -> dict[str, dict[str, Any]]:
+    """Источники, **запросившие** каждый движок (только для лога, не для выбора).
+
+    Зеркало правила выбора активного краулера в pipeline/edge (``wtarget.engine`` →
+    ``fetch: browser`` → env/дефолт), но здесь ничего не решается: функция собирает
+    объяснение «почему движок попал в карту». Возвращает ``engine → {sources, details}``,
+    где ``sources`` — ярлыки слоёв, ``details`` — адреса слоя (продукт/хост/дефолт).
+
+    Env/дефолт сюда **не** входят: их добавляет вызывающая фабрика, потому что именно она
+    различает «оператор задал env» и «применился дефолт».
+    """
+    uses: dict[str, dict[str, Any]] = {}
+
+    def note(engine: str | None, source: str, detail: str | None) -> None:
+        name = (engine or "").strip().lower()
+        if not name:
+            return
+        entry = uses.setdefault(name, {"sources": [], "details": {}})
+        if source not in entry["sources"]:
+            entry["sources"].append(source)
+        if detail:
+            labels = entry["details"].setdefault(source, [])
+            if detail not in labels:
+                labels.append(detail)
+
+    if crawl_sources is not None:
+        note(crawl_sources.defaults.engine, _ENGINE_SOURCE_CRAWL_SOURCES, "defaults")
+        for product_id in sorted(crawl_sources.products):
+            note(
+                crawl_sources.products[product_id].engine,
+                _ENGINE_SOURCE_CRAWL_SOURCES,
+                f"products[{product_id}]",
+            )
+        for product_id in sorted(crawl_sources.sites):
+            for host in sorted(crawl_sources.sites[product_id]):
+                note(
+                    crawl_sources.sites[product_id][host].engine,
+                    _ENGINE_SOURCE_CRAWL_SOURCES,
+                    f"sites[{product_id}][{host}]",
+                )
+    for host in sorted(domain_profiles or {}):
+        if domain_profiles[host].fetch is FetchMode.BROWSER:
+            note("browser", _ENGINE_SOURCE_PROFILE, host)
+    return uses
+
+
+def _engine_report_entry(uses: dict[str, dict[str, Any]], engine: str) -> dict[str, Any]:
+    """Возвращает (создавая при необходимости) запись отчёта для движка."""
+    return uses.setdefault(
+        engine, {"sources": [], "details": {}, "built": True, "unavailable": None}
+    )
+
+
+def _format_engine_sources(entry: Mapping[str, Any]) -> str:
+    """Форматирует источники решения для строки лога (без секретов)."""
+    parts: list[str] = []
+    details = entry.get("details") or {}
+    for source in entry.get("sources") or ():
+        labels = list(details.get(source) or ())
+        if not labels:
+            parts.append(str(source))
+            continue
+        shown = labels[:5]
+        suffix = f", …+{len(labels) - len(shown)}" if len(labels) > len(shown) else ""
+        parts.append(f"{source}[{', '.join(shown)}{suffix}]")
+    return ", ".join(parts) or _ENGINE_SOURCE_DEFAULT
+
+
+def _log_engine_selection(
+    engine_log: PhaseLogger | None,
+    uses: Mapping[str, Mapping[str, Any]],
+) -> None:
+    """Пишет одну строку на движок: эффективный движок и **почему** он выбран (§D.6).
+
+    Движок — commodity-слой (A2) и не входит в ``execution_contract_digest``; без этой
+    строки подмена ``scrapy`` → ``http`` не оставляет следа в прогоне. ``PhaseLogger`` —
+    существующий хелпер ``runs/{run_id}/logs/{phase}.jsonl`` (``core.util.logging``);
+    строки идут в ``logs/wiring.jsonl`` при сборке портов.
+    """
+    if engine_log is None:
+        return
+    for engine in sorted(uses):
+        entry = uses[engine]
+        message = (
+            f"движок краула: {engine} (источник: {_format_engine_sources(entry)})"
+        )
+        ctx: dict[str, Any] = {
+            "event": "engine_selection",
+            "engine": engine,
+            "sources": list(entry.get("sources") or ()),
+            "scope": [
+                label
+                for labels in (entry.get("details") or {}).values()
+                for label in labels
+            ],
+        }
+        if entry.get("built", True):
+            engine_log.info(message, **ctx)
+        else:
+            reason = entry.get("unavailable") or "нет доступного адаптера"
+            engine_log.warn(f"{message}; движок НЕ собран: {reason}", **ctx)
+
+
 def build_scout_crawler(
     *,
     deploy: DeployConfig | None = None,
@@ -1007,6 +1122,7 @@ def build_scout_crawler(
     domain_profiles: Mapping[str, DomainProfile] | None = None,
     run_crawl: CrawlRunConfig | None = None,
     cli_max_depth: int | None = None,
+    engine_log: PhaseLogger | None = None,
 ) -> CrawlerPort:
     """Собирает краулер для ``passport-scout`` (дефолт — лёгкий, A1/MVP).
 
@@ -1052,12 +1168,27 @@ def build_scout_crawler(
     :param run_crawl: ``crawl``-секция ``run.yaml`` (run-слой) — участвует в автодетекте
         discovery для robots (N1).
     :param cli_max_depth: ``--max-depth`` оператора — участвует в автодетекте discovery (N1).
+    :param engine_log: лог наблюдаемости движка (``03`` §D.6); ``None`` → не пишем
+        (тесты/вызовы без прогона). Одна строка: эффективный движок и источник решения.
     :raises WiringError: неизвестное значение ``COHOUND_SCOUT_CRAWLER``.
     """
     raw = os.environ.get(ENV_SCOUT_CRAWLER)
     name = (raw if raw is not None else DEFAULT_SCOUT_CRAWLER).strip().lower()
     if not name:
         name = DEFAULT_SCOUT_CRAWLER
+    if name not in SUPPORTED_SCOUT_CRAWLERS:
+        raise WiringError(
+            f"{ENV_SCOUT_CRAWLER}: неизвестный краулер {name!r}; "
+            f"поддерживаются: {', '.join(SUPPORTED_SCOUT_CRAWLERS)}"
+        )
+    env_value = (raw or "").strip().lower()
+    source = (
+        f"env:{ENV_SCOUT_CRAWLER}={env_value}" if env_value else _ENGINE_SOURCE_DEFAULT
+    )
+    _log_engine_selection(
+        engine_log,
+        {name: {"sources": [source], "details": {}, "built": True}},
+    )
     if name == "http":
         config = deploy if deploy is not None else load_deploy_config(None)
         robots = _crawler_robots(
@@ -1086,10 +1217,6 @@ def build_scout_crawler(
         return BrowserCrawler(
             **_browser_crawler_kwargs(config), cache=cache, robots=robots
         )
-    raise WiringError(
-        f"{ENV_SCOUT_CRAWLER}: неизвестный краулер {name!r}; "
-        f"поддерживаются: {', '.join(SUPPORTED_SCOUT_CRAWLERS)}"
-    )
 
 
 def _crawler_robots(
@@ -1158,6 +1285,7 @@ def build_scout_crawlers(
     crawl_sources: CrawlSourcesConfig | None = None,
     run_crawl: CrawlRunConfig | None = None,
     cli_max_depth: int | None = None,
+    engine_log: PhaseLogger | None = None,
 ) -> dict[str, CrawlerPort]:
     """Собирает карту ``engine → CrawlerPort`` для per-engine выбора краулера (L3a).
 
@@ -1182,6 +1310,8 @@ def build_scout_crawlers(
     :param run_crawl: ``crawl``-секция ``run.yaml`` (run-слой) — участвует в автодетекте
         discovery для robots (N1).
     :param cli_max_depth: ``--max-depth`` оператора — участвует в автодетекте discovery (N1).
+    :param engine_log: лог наблюдаемости (``03`` §D.6): одна строка на движок с источником
+        решения (``profile.fetch``/``crawl_sources.engine``/env/дефолт); ``None`` → не пишем.
     """
     config = deploy if deploy is not None else load_deploy_config(None)
     referenced = _referenced_crawl_engines(domain_profiles, crawl_sources)
@@ -1192,7 +1322,18 @@ def build_scout_crawlers(
         domain_profiles=domain_profiles,
         cache=cache,
     )
+    # Отчёт наблюдаемости: источники, запросившие движки (не влияет на сборку).
+    uses = _declared_engine_uses(domain_profiles, crawl_sources)
+    env_value = (os.environ.get(ENV_SCOUT_CRAWLER) or "").strip().lower()
+    default_engine = env_value or DEFAULT_SCOUT_CRAWLER
+    default_source = (
+        f"env:{ENV_SCOUT_CRAWLER}={env_value}" if env_value else _ENGINE_SOURCE_DEFAULT
+    )
+    default_entry = _engine_report_entry(uses, default_engine)
+    if default_source not in default_entry["sources"]:
+        default_entry["sources"].insert(0, default_source)
 
+    build_errors: dict[str, str] = {}
     crawlers: dict[str, CrawlerPort] = {
         "http": HttpCrawler(
             **_http_crawler_kwargs(config), cache=cache, robots=robots
@@ -1203,15 +1344,20 @@ def build_scout_crawlers(
             crawlers["scrapy"] = ScrapyCrawler(
                 cache=cache, max_response_bytes=config.crawl.max_response_bytes
             )
-        except (WiringError, ImportError, CrawlError):
-            pass
+        except (WiringError, ImportError, CrawlError) as exc:
+            build_errors["scrapy"] = f"{type(exc).__name__}: {exc}"
     if "browser" in referenced:
         try:
             crawlers["browser"] = BrowserCrawler(
                 **_browser_crawler_kwargs(config), cache=cache, robots=robots
             )
-        except (WiringError, ImportError, CrawlError):
-            pass
+        except (WiringError, ImportError, CrawlError) as exc:
+            build_errors["browser"] = f"{type(exc).__name__}: {exc}"
+    for engine, entry in uses.items():
+        entry["built"] = engine in crawlers
+        if not entry["built"]:
+            entry["unavailable"] = build_errors.get(engine) or "нет доступного адаптера"
+    _log_engine_selection(engine_log, uses)
     return crawlers
 
 
@@ -1704,6 +1850,7 @@ def build_adapters(
     embedder: EmbedderPort | None = None,
     run_crawl: CrawlRunConfig | None = None,
     cli_max_depth: int | None = None,
+    engine_log: PhaseLogger | None = None,
 ) -> Ports:
     """Собирает порты внешних систем по профилю развёртывания (``03`` §E.3).
 
@@ -1747,6 +1894,8 @@ def build_adapters(
         discovery при включении принуждения ``robots.txt`` (N1).
     :param cli_max_depth: ``--max-depth`` оператора — также участвует в автодетекте
         discovery (N1).
+    :param engine_log: лог наблюдаемости выбора движка краула (``03`` §D.6); ``None`` →
+        строки не пишутся (тесты/вызовы без прогона).
     :param crawl_sources: слои источников краула (``crawl_sources.yaml``, Lane A); их
         поля ``engine`` определяют, какие per-engine краулеры строит
         :func:`build_scout_crawlers` (ленивая сборка тяжёлых адаптеров).
@@ -1788,6 +1937,7 @@ def build_adapters(
             crawl_sources=crawl_sources,
             run_crawl=run_crawl,
             cli_max_depth=cli_max_depth,
+            engine_log=engine_log,
         )
         # Phase 5.1: поллеры фидов/каналов (``kind → PollPort``) строятся из того же
         # локального краулера (фетч ленты — транспортом краула); без краулера (нет
