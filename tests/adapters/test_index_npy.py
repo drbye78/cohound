@@ -305,6 +305,37 @@ def test_manifest_extra_is_persisted(tmp_path: Path) -> None:
     assert manifest["extra"]["round"] == "R1-serp"
 
 
+@requires_numpy
+def test_lexical_engine_version_published_and_in_manifest(tmp_path: Path) -> None:
+    """``lexical_engine_version`` — часть контракта сборки: атрибут + манифест (§13:676)."""
+    builder = NpyIndexBuilder(tmp_path, lexical_engine_version="tantivy-0.26.2")
+    assert builder.lexical_engine_version == "tantivy-0.26.2"
+    bid = builder.build(_chunks(), _vectors(), _meta())
+    manifest = index_format.read_manifest(tmp_path, PKG, bid, "p1")
+    assert manifest["lexical_engine_version"] == "tantivy-0.26.2"
+
+
+@requires_numpy
+def test_explicit_provenance_wins_over_builder_engine(tmp_path: Path) -> None:
+    """Явный ``meta.extra`` (входы ``pb`` от Ш5) приоритетнее метки сборщика."""
+    builder = NpyIndexBuilder(tmp_path, lexical_engine_version="bm25-py-1")
+    bid = builder.build(
+        _chunks(),
+        _vectors(),
+        _meta(extra={"lexical_engine_version": "tantivy-0.26.2"}),
+    )
+    manifest = index_format.read_manifest(tmp_path, PKG, bid, "p1")
+    assert manifest["lexical_engine_version"] == "tantivy-0.26.2"
+
+
+def test_builder_satisfies_port_and_vector_store_unchanged(tmp_path: Path) -> None:
+    """Регресс: ``vector_store`` — прежний ``npy-fp16``; порт реализован структурно."""
+    builder = NpyIndexBuilder(tmp_path, lexical_engine_version="tantivy-0.26.2")
+    assert builder.vector_store == "npy-fp16"
+    assert builder.lexical_engine_version == "tantivy-0.26.2"
+    assert isinstance(builder, IndexBuilderPort)
+
+
 # --------------------------------------------------------------------------- #
 # Пакет: приоритет meta над конструктором
 # --------------------------------------------------------------------------- #

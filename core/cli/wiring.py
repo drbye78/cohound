@@ -48,6 +48,7 @@ from core.adapters.lexical_tantivy import (
     LexicalChunk,
     TantivyLexicalIndex,
     tantivy_available,
+    tantivy_engine_version,
 )
 from core.adapters.vector_npy import ChunkLookup, NpyVectorIndex
 from core.adapters.llm_discovery import (
@@ -326,6 +327,20 @@ def build_vector_index(
     if dim is None:
         return None
     return NpyVectorIndex(index_root, package, resolved, dim, chunk_lookup, view=view)
+
+
+def _lexical_engine_version() -> str:
+    """Фактический лексический движок прогона — для ``pb``/манифеста партиции (§13:676).
+
+    Лексическое плечо R0/R2 в прогоне обслуживает только ``TantivyLexicalIndex``
+    (:func:`seed_lexical_index`); in-pipeline BM25 (``adapters.lexical_bm25``) —
+    baseline/test double и в ретривал прогона не попадает. Без ``tantivy``
+    :func:`seed_lexical_index` возвращает ``None``, и ``experiments`` помечает R0/R2
+    как ``skipped`` («нет lexical_index»), поэтому честное значение — **пустая
+    строка**: «движка нет», а не «версия неизвестна». Заполненное значение — версия
+    движка, которая реально засеет лексический индекс этой сборки.
+    """
+    return tantivy_engine_version() if tantivy_available() else ""
 
 
 def seed_lexical_index(
@@ -1518,7 +1533,14 @@ def _build_local_ports(
     # Тяжёлые опциональные адаптеры: только при выполненной availability-предикате.
     resolved_embedder = embedder if embedder is not None else _resolve_embedder()
     index_builder = (
-        NpyIndexBuilder(index_root=index_root, package=package)
+        NpyIndexBuilder(
+            index_root=index_root,
+            package=package,
+            # §13:676/09 §8.5 — версия лексического движка входит в ``pb`` и в
+            # манифест партиции; передаём фактический движок этого прогона, а не
+            # дефолт (иначе две сборки с разными движками неотличимы по id).
+            lexical_engine_version=_lexical_engine_version(),
+        )
         if numpy_available()
         else None
     )

@@ -687,6 +687,68 @@ def test_partition_build_id_deterministic_and_sensitive() -> None:
     )
 
 
+def test_partition_build_id_distinguishes_lexical_engines() -> None:
+    """§13:676: ``pb`` различает лексические движки (tantivy vs in-process BM25).
+
+    Регресс дефекта: ``lexical_engine_version`` читался у сборщика, у которого такого
+    атрибута не было, поэтому поле всегда было пустым и две сборки с разными движками
+    получали одинаковый ``pb``.
+    """
+    base = dict(
+        package_id="pkg",
+        product_id="p1",
+        chunker_version="chunker-1",
+        embed_model_id="embed-1",
+        extractor_version="extractor-1",
+        vector_store="npy-fp16",
+        product_content_token="ct",
+    )
+    tantivy = _derive_partition_build_id(**base, lexical_engine_version="tantivy-0.26.2")
+    bm25 = _derive_partition_build_id(**base, lexical_engine_version="bm25-py-1")
+    empty = _derive_partition_build_id(**base, lexical_engine_version="")
+
+    assert len({tantivy, bm25, empty}) == 3
+    # Детерминизм: те же входы и тот же движок → тот же id.
+    assert tantivy == _derive_partition_build_id(
+        **base, lexical_engine_version="tantivy-0.26.2"
+    )
+
+
+@requires_numpy
+def test_partition_build_id_uses_actual_builder_engine(tmp_path: Path) -> None:
+    """Фактический движок сборщика входит и в ``pb``, и в манифест партиции (§13:676)."""
+    index_root = tmp_path / "index_store"
+    result = _build(
+        tmp_path / "raw",
+        pages={URL_P1_A: b"engine-provenance"},
+        urls={"p1": [URL_P1_A]},
+        store=None,
+        index_root=index_root,
+        embedder=_Embedder(),
+        index_builder=NpyIndexBuilder(index_root, lexical_engine_version="tantivy-0.26.2"),
+    )
+    assert result.errors == []
+    entry = _build_of(result).entries[0]
+    assert entry.lexical_engine_version == "tantivy-0.26.2"
+
+    # ``pb`` посчитан с фактическим движком, а не с пустой строкой.
+    assert entry.partition_build_id == _derive_partition_build_id(
+        package_id=entry.package_id or "",
+        product_id="p1",
+        chunker_version=entry.chunker_version or "",
+        embed_model_id=entry.embed_model_id or "",
+        extractor_version=entry.extractor_version or "",
+        lexical_engine_version="tantivy-0.26.2",
+        vector_store=entry.vector_store or "",
+        product_content_token=entry.content_digest or "",
+    )
+
+    manifest = index_format.read_manifest(
+        index_root, entry.package_id or "", entry.partition_build_id or "", "p1"
+    )
+    assert manifest["lexical_engine_version"] == "tantivy-0.26.2"
+
+
 def test_product_content_token_order_independent() -> None:
     """Отпечаток партиции — sorted ``(chunk_id, content_hash)``: порядок не значим."""
     def _chunk(chunk_id: str, digest: str) -> Any:
