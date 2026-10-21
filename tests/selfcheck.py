@@ -2058,7 +2058,7 @@ def _report_gates() -> None:
         expected_contract_reasons = [
             "execution_change: execution_contract_digest: ec_1 → ec_2",
             "execution_change: execution_contract_digest: различающееся поле не "
-            "восстановимо из манифеста (cohort_digest/seeds_digest либо иная ось)",
+            "восстановимо из манифеста (cohort_digest/seeds_digest/extractor_stack либо иная ось)",
         ]
         if contract_reasons != expected_contract_reasons:
             raise AssertionError(
@@ -2070,10 +2070,10 @@ def _report_gates() -> None:
         minor_version_reasons = diff_boundary_violations(
             _manifest("ib_a", execution_contract_digest="ec_1"),
             _manifest("ib_a", execution_contract_digest="ec_2",
-                      methodology_version="2.3.0"),
+                      methodology_version="2.4.0"),
         )
         if minor_version_reasons != [
-            "methodology_change: methodology_version: 2.0.0 → 2.3.0"
+            "methodology_change: methodology_version: 2.0.0 → 2.4.0"
         ]:
             raise AssertionError(
                 "§13: ожидалась methodology_change по methodology_version, "

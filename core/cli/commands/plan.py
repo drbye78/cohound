@@ -12,8 +12,19 @@ import argparse
 import datetime as _dt
 from typing import Any
 
-from core.cli.context import _add_common, _plan_payload, _print_json, _print_plan
-from core.cli.errors import EXIT_OK, LintFailure
+from core.cli.context import (
+    _add_common,
+    _add_llm_slot_flag,
+    _plan_payload,
+    _print_json,
+    _print_plan,
+)
+from core.cli.errors import EXIT_OK, EXIT_USAGE, CliError, LintFailure
+from core.cli.execution_axes import (
+    declared_status_dict_version,
+    resolve_declared_axes,
+)
+from core.config.deploy import load_deploy_config
 from core.pipeline.digests import cohort_digest, seeds_digest
 from core.pipeline.lint import lint_run_inputs
 from core.pipeline.normalize import load_inputs
@@ -49,8 +60,22 @@ def run(args: argparse.Namespace) -> int:
             cohort_ref=getattr(inputs.run, "cohort_ref", None),
         )
         seeds = seeds_digest(seed_config)
+        # §13 (2.4.0): декларированные оси — тот же резолвер и тот же deploy-конфиг, что
+        # у ``run``/``crawl``. Иначе ``plan`` показывал бы иной ``run_id``, чем реальный
+        # прогон: контракт перестал быть функцией только ``run.yaml``.
+        deploy_config = load_deploy_config(None)
+        try:
+            declared = resolve_declared_axes(
+                args=args, inputs=inputs, deploy=deploy_config
+            )
+        except ValueError as exc:
+            raise CliError(str(exc), code="usage", exit_code=EXIT_USAGE) from exc
         contract = build_execution_contract(
-            inputs, cohort_digest=cohort, seeds_digest=seeds
+            inputs,
+            cohort_digest=cohort,
+            seeds_digest=seeds,
+            declared=declared,
+            status_dict_version=declared_status_dict_version(),
         )
         result = build_plan(
             inputs,
@@ -87,4 +112,5 @@ def configure(sub: Any) -> None:
         help="линт + план без записи (состояние W5: запись черновика — W10/T10.4)",
     )
     _add_common(p_plan)
+    _add_llm_slot_flag(p_plan)
     p_plan.set_defaults(handler=run)

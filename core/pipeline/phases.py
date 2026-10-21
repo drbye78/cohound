@@ -491,6 +491,8 @@ def build_phases(
     product_modes: Mapping[str, str] | None = None,
     refresh_policy: str = "auto",
     execution_contract_digest: str | None = None,
+    axes: Any = None,
+    declared_status_dict_version: str | None = None,
 ) -> dict[str, PhaseFn]:
     """Возвращает реестр ``{phase_name: PhaseFn}`` для не-гейтовых фаз конвейера.
 
@@ -551,6 +553,14 @@ def build_phases(
         вычисленный composition root для ``run_id``/lineage. Протягивается в манифест Ш9
         без пересчёта; ``None`` — неизвестен (legacy/вызов без идентичности), тогда
         ``hound diff`` применяет прежнее сравнение ``EXECUTION_FIELDS``.
+    :param axes: декларированные оси исполнения
+        (:class:`core.cli.execution_axes.DeclaredExecutionAxes`) — один резолвер с
+        контрактом; из них манифест Ш9 берёт deploy-профиль/версию seam-схемы/чанкер/
+        оси краула/реестры/``llm_scenarios``. ``None`` — legacy/модульный вызов (прежние
+        цепочки ``_first_present``). Типизируется структурно (``Any``): ``pipeline`` не
+        импортирует ``cli``.
+    :param declared_status_dict_version: версия словаря статусов (декларированная ось);
+        используется манифестом, только если ``run``/``inputs`` её не несут.
 
     Каждое замыкание детерминировано и не импортирует адаптеры; единственный
     межфазовый канал — замыкание ``holder`` (см. docstring модуля).
@@ -833,6 +843,9 @@ def build_phases(
             # 09 §12.5: готовый отпечаток условий измерения (не пересчитывается здесь) —
             # носитель границы ``hound diff``; ``None`` не подменяется пустой строкой.
             execution_contract_digest=execution_contract_digest,
+            # §13 (2.4.0): декларированные оси — тот же резолвер, что у контракта.
+            axes=axes,
+            declared_status_dict_version=declared_status_dict_version,
         )
         # R7/§13: финальный манифест — самостоятельная запись воспроизведения,
         # поэтому персистится в операционную БД прогона (версии/индекс/провенанс).

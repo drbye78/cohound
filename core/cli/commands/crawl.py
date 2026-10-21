@@ -34,6 +34,7 @@ from typing import Any, Callable
 
 from core.cli.context import (
     _add_common,
+    _add_llm_slot_flag,
     _add_phase4_flags,
     _ensure_run,
     _filter_corpus_urls,
@@ -56,6 +57,10 @@ from core.cli.errors import (
     EXIT_USAGE,
     CliError,
     LintFailure,
+)
+from core.cli.execution_axes import (
+    declared_status_dict_version,
+    resolve_declared_axes,
 )
 from core.cli.wiring import build_store
 from core.config.deploy import load_deploy_config
@@ -280,8 +285,20 @@ def _execute_crawl(
         cohort_ref=getattr(inputs.run, "cohort_ref", None),
     )
     seeds_d = seeds_digest(seed_config)
+    # §13 (2.4.0): декларированные оси — тот же резолвер и deploy-конфиг, что у ``run``
+    # (иначе crawl адресовал бы другой ``run_id``/сеанс).
+    deploy_config = load_deploy_config(None)
+    try:
+        declared = resolve_declared_axes(args=args, inputs=inputs, deploy=deploy_config)
+    except ValueError as exc:
+        raise CliError(str(exc), code="usage", exit_code=EXIT_USAGE) from exc
+    status_dict_version = declared_status_dict_version()
     contract_d = build_execution_contract(
-        inputs, cohort_digest=cohort_d, seeds_digest=seeds_d
+        inputs,
+        cohort_digest=cohort_d,
+        seeds_digest=seeds_d,
+        declared=declared,
+        status_dict_version=status_dict_version,
     )
     run_id = args.run_id or derive_run_id(
         inputs,
@@ -298,7 +315,6 @@ def _execute_crawl(
     _set_runs_dir(args)
     db_path = _crawl_db_path(args)
     render_modes = _load_render_modes(getattr(args, "render_modes", None))
-    deploy_config = load_deploy_config(None)
 
     session_id = default_session_id(run_id)
     until = getattr(args, "until", None) or "corpus"
@@ -365,6 +381,9 @@ def _execute_crawl(
             exclude_documents=exclude_documents,
             document_level=document_level,
             progress=progress,
+            # §13 (2.4.0): те же декларированные оси, что у контракта.
+            axes=declared,
+            declared_status_dict_version=status_dict_version,
         )
         if clear_first:
             store.clear_crawl_session(session_id)
@@ -704,6 +723,7 @@ def configure(sub: Any) -> None:
     )
     _add_phase4_flags(p_run)
     _add_common(p_run)
+    _add_llm_slot_flag(p_run)
     p_run.set_defaults(handler=run)
 
     p_status = crawl.add_parser("status", help="статус сеанса и счётчики (read-only)")
@@ -724,6 +744,7 @@ def configure(sub: Any) -> None:
     _add_source_flags(p_resume)
     _add_phase4_flags(p_resume)
     _add_common(p_resume)
+    _add_llm_slot_flag(p_resume)
     p_resume.set_defaults(handler=resume)
 
     p_restart = crawl.add_parser("restart", help="очистить сеанс и запустить заново")
@@ -731,6 +752,7 @@ def configure(sub: Any) -> None:
     _add_source_flags(p_restart)
     _add_phase4_flags(p_restart)
     _add_common(p_restart)
+    _add_llm_slot_flag(p_restart)
     p_restart.set_defaults(handler=restart)
 
     p_cancel = crawl.add_parser("cancel", help="перевести сеанс в терминальный cancelled")

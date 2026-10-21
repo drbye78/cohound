@@ -59,7 +59,7 @@ from core.config import (
     load_passports,
     passport_urls,
 )
-from core.config.deploy import DeployConfig
+from core.config.deploy import LLM_SLOTS, DeployConfig
 from core.domain.enums import (
     CrawlItemStatus,
     CrawlSessionStatus,
@@ -1418,6 +1418,8 @@ def _resolve_phases(
     product_modes: Mapping[str, str] | None = None,
     refresh_policy: str = "auto",
     execution_contract_digest: str | None = None,
+    axes: Any = None,
+    declared_status_dict_version: str | None = None,
 ) -> dict[str, PhaseFn]:
     """Собирает реестр не-гейтовых фаз (``phases_factory`` — тестовый шов).
 
@@ -1457,6 +1459,11 @@ def _resolve_phases(
     :param execution_contract_digest: готовый ``execution_contract_digest`` прогона
         (09 §12.5), вычисленный composition root до исполнения фаз; протягивается в
         манифест Ш9 без пересчёта (``None`` — неизвестен, значение не выдумывается).
+    :param axes: декларированные оси исполнения (см.
+        :func:`core.cli.execution_axes.resolve_declared_axes`) — тот же резолвер, что у
+        контракта; из них манифест берёт deploy-профиль/чанкер/оси краула/реестры/
+        ``llm_scenarios``. ``None`` — legacy/модульный вызов.
+    :param declared_status_dict_version: версия словаря статусов (декларированная ось).
     """
     passports_dir = getattr(args, "passports_dir", None)
     if passports_dir is None and paths is not None:
@@ -1530,6 +1537,10 @@ def _resolve_phases(
         "refresh_policy": refresh_policy,
         # 09 §12.5: готовый отпечаток условий измерения → манифест Ш9 (без пересчёта).
         "execution_contract_digest": execution_contract_digest,
+        # §13 (2.4.0): декларированные оси исполнения — один резолвер с контрактом
+        # (deploy-профиль/чанкер/оси краула/реестры/llm_scenarios).
+        "axes": axes,
+        "declared_status_dict_version": declared_status_dict_version,
         "crawl_app": deploy_config.crawl if deploy_config is not None else None,
         # P4: исполнитель параллельной экстракции по профилю зон (local — процессы,
         # split — потоки поверх RemoteExtractor). Ось ``crawl.extract_workers`` решается
@@ -1787,6 +1798,22 @@ def _non_negative_int(raw: str) -> int:
             f"значение обязано быть неотрицательным, получено {raw!r}"
         )
     return value
+
+
+def _add_llm_slot_flag(parser: argparse.ArgumentParser) -> None:
+    """Флаг ``--llm-slot`` для входов, считающих identity (§7.4/I21, §13).
+
+    Ось ``llm_scenarios`` — декларированный вход контракта, поэтому ``plan``/``crawl``
+    обязаны уметь получить то же переопределение, что ``run``: иначе ``hound plan``
+    показал бы иной ``run_id``, чем прогон с ``--llm-slot``.
+    """
+    parser.add_argument(
+        "--llm-slot",
+        dest="llm_slot",
+        choices=list(LLM_SLOTS),
+        default=None,
+        help="активный LLM-слот оценщика (override COHOUND_LLM_SLOT/deploy.llm.slot)",
+    )
 
 
 def _add_phase4_flags(parser: argparse.ArgumentParser) -> None:

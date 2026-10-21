@@ -48,6 +48,10 @@ from core.cli.errors import (
     CliError,
     LintFailure,
 )
+from core.cli.execution_axes import (
+    declared_status_dict_version,
+    resolve_declared_axes,
+)
 from core.cli.wiring import (
     SPLIT_PROFILE,
     WiringError,
@@ -363,12 +367,25 @@ def run(args: argparse.Namespace) -> int:
         cohort_ref=getattr(inputs.run, "cohort_ref", None),
     )
     seeds_d = seeds_digest(seed_config)
+    # R7 (07 §7) + §13 (методология 2.4.0): деплой-конфиг и **декларированные** оси нужны
+    # ДО контракта — они входят в него (deploy-профиль, версия seam-схемы, оси краула,
+    # стек извлечения). Один резолвер на контракт и манифест: второй формулы нет.
+    deploy_config = load_deploy_config(None)
+    try:
+        declared = resolve_declared_axes(
+            args=args, inputs=inputs, deploy=deploy_config
+        )
+    except ValueError as exc:
+        raise CliError(str(exc), code="usage", exit_code=EXIT_USAGE) from exc
+    status_dict_version = declared_status_dict_version()
     contract_d = build_execution_contract(
         inputs,
         cohort_digest=cohort_d,
         seeds_digest=seeds_d,
+        declared=declared,
         retrieval_profile=getattr(args, "retrieval_profile", None),
         cutoff_K=getattr(args, "cutoff_k", None),
+        status_dict_version=status_dict_version,
     )
     run_id = args.run_id or derive_run_id(
         inputs,
@@ -379,6 +396,39 @@ def run(args: argparse.Namespace) -> int:
         run_scope=run_scope,
         refresh_policy=refresh_policy.value,
     )
+    db_path = Path(args.db) if args.db is not None else run_db_path(args.runs_dir, run_id)
+
+    # E1/A3 (R7/§13): измеренная фиксация ретривала усыновляется в аргументы **до**
+    # финального контракта. Прежний порядок (контракт раньше усыновления) давал на resume
+    # контракт с ``None`` при манифесте/ячейках с измеренным ``R2`` — ложную границу §13.
+    # Явный CLI-профиль/``--cutoff-k`` приоритетнее фиксации; явный **противоречащий**
+    # профиль отвергается (A3: изменить измеренное можно только пере-измерением).
+    explicit_profile = getattr(args, "retrieval_profile", None)
+    explicit_cutoff = getattr(args, "cutoff_k", None)
+    if db_path.exists():
+        with build_store(db_path, profile=args.profile) as check_store:
+            try:
+                fixation = resolve_measured_retrieval(
+                    check_store, run_id, explicit_profile
+                )
+            except ValueError as exc:
+                raise CliError(str(exc), code="§13", exit_code=EXIT_ERROR) from exc
+        if fixation is not None and explicit_profile is None:
+            args.retrieval_profile = fixation["retrieval_profile"]
+            if explicit_cutoff is None and fixation["retrieval_cutoff_K"] is not None:
+                args.cutoff_k = fixation["retrieval_cutoff_K"]
+            # Контракт пересчитывается с усыновлёнными значениями. ``run_id`` остаётся
+            # идентичностью **создания** прогона: иначе resume после измерения не нашёл бы
+            # свою строку в БД (адресация идёт по выведенному до усыновления id).
+            contract_d = build_execution_contract(
+                inputs,
+                cohort_digest=cohort_d,
+                seeds_digest=seeds_d,
+                declared=declared,
+                retrieval_profile=args.retrieval_profile,
+                cutoff_K=args.cutoff_k,
+                status_dict_version=status_dict_version,
+            )
 
     previous_run_id = getattr(args, "since_run", None)
     previous = None
@@ -417,7 +467,6 @@ def run(args: argparse.Namespace) -> int:
         current_products=inputs.run.products,
     )
 
-    db_path = Path(args.db) if args.db is not None else run_db_path(args.runs_dir, run_id)
     # План строится ОДИН раз здесь и переиспользуется фазами/префлайтом: повторный
     # ``plan()`` дал бы иной ``run_id``/двойной линт (см. core/pipeline/phases.py).
     run_plan = _resolve_plan(args, inputs, run_id)
@@ -564,38 +613,13 @@ def run(args: argparse.Namespace) -> int:
                     f"state: sync_product_state: {type(exc).__name__}: {_concise(exc)}"
                 )
 
-        # E1/A3 (R7/§13): не-понижающий персист измеренной фиксации ретривала **и её
-        # усыновление**. Резолвим персистентную фиксацию ДО сборки фаз: обычный повторный
-        # прогон должен **усыновить** измеренные значения (профиль + K) в аргументы, чтобы
-        # оценка и ячейки несли ту же настройку, что и манифест. Прежнее поведение
-        # (переклеить только манифест) давало ЛОЖНУЮ запись: ячейки R0, манифест measured R2 —
-        # это ломало §13-diff и сравнение golden-выреза I20. Явный CLI-профиль/``--cutoff-k``
-        # приоритетнее фиксации и не переопределяется молча; явный **противоречащий** профиль
-        # отвергается (A3: изменить измеренное можно только пере-измерением).
-        explicit_profile = getattr(args, "retrieval_profile", None)
-        explicit_cutoff = getattr(args, "cutoff_k", None)
-        if db_path.exists():
-            with build_store(db_path, profile=args.profile) as check_store:
-                try:
-                    fixation = resolve_measured_retrieval(
-                        check_store, run_id, explicit_profile
-                    )
-                except ValueError as exc:
-                    raise CliError(str(exc), code="§13", exit_code=EXIT_ERROR) from exc
-            if fixation is not None and explicit_profile is None:
-                args.retrieval_profile = fixation["retrieval_profile"]
-                if explicit_cutoff is None and fixation["retrieval_cutoff_K"] is not None:
-                    args.cutoff_k = fixation["retrieval_cutoff_K"]
-
-        # R7 (07 §7): деплой-провенанс манифеста прогона. Конфиг загружается всегда:
-        # секция ``crawl`` (03 §D.5/D.6) — операционная политика HTTP-краулинга корпуса и в
-        # профиле ``local``; для ``split`` дополнительно валидируется шов. Сам деплой-провенанс
-        # манифеста течёт через ``_resolve_phases(deploy_config=…)`` → фазу Ш9 (run_manifest.yaml
-        # и строка ``runs``); здесь те же поля кладутся в отчёт прогона (``deploy``) для
-        # наблюдаемости CLI. Версии edge-компонентов (``/v1/capabilities``) cmd_run не собирает —
-        # пусто, если не известны (значения не выдумываются).
+        # R7 (07 §7): деплой-провенанс манифеста прогона. Конфиг уже загружен выше (он
+        # нужен контракту — declared-оси); здесь только split-валидация шва и поля отчёта.
+        # Сам деплой-провенанс манифеста течёт через ``_resolve_phases(deploy_config=…)`` →
+        # фазу Ш9 (run_manifest.yaml и строка ``runs``); здесь те же поля кладутся в отчёт
+        # прогона (``deploy``) для наблюдаемости CLI. Версии edge-компонентов
+        # (``/v1/capabilities``) cmd_run не собирает — пусто, если не известны.
         deploy_fields: dict[str, Any] = {}
-        deploy_config = load_deploy_config(None)
         if args.profile == SPLIT_PROFILE:
             if not is_split(deploy_config):
                 raise WiringError(
@@ -682,6 +706,9 @@ def run(args: argparse.Namespace) -> int:
                 # 09 §12.5: тот же дайджест, что ушёл в ``run_id``/lineage (``contract_d``),
                 # — манифест/``runs`` не пересчитывают его из другого набора значений.
                 execution_contract_digest=contract_d,
+                # §13 (2.4.0): те же декларированные оси, что у контракта, — один резолвер.
+                axes=declared,
+                declared_status_dict_version=status_dict_version,
             )
             # 09 §8.1/§8.4: порты ретривала строятся до корпуса, где composition id
             # ещё неизвестен. После успешного корпуса перепривязываем их к его
