@@ -2047,14 +2047,20 @@ def _report_gates() -> None:
         if "content_change" not in content_text or "| p1 | 1 | 2 | 0 |" not in content_text:
             raise AssertionError("09 §12.5: ожидался баннер content_change + doc-delta")
 
-        # Расхождение контракта — одна причина ``execution_change`` по дайджесту.
+        # Расхождение контракта — причина ``execution_change`` по дайджесту + честная
+        # детализация: доступные на манифесте поля совпадают, а ``cohort_digest``/
+        # ``seeds_digest`` на ``RunManifest`` отсутствуют — предел диагностики назван,
+        # причина не выдумывается (09 §12.5).
         contract_reasons = diff_boundary_violations(
             _manifest("ib_a", execution_contract_digest="ec_1"),
             _manifest("ib_a", execution_contract_digest="ec_2"),
         )
-        if contract_reasons != [
-            "execution_change: execution_contract_digest: ec_1 → ec_2"
-        ]:
+        expected_contract_reasons = [
+            "execution_change: execution_contract_digest: ec_1 → ec_2",
+            "execution_change: execution_contract_digest: различающееся поле не "
+            "восстановимо из манифеста (cohort_digest/seeds_digest либо иная ось)",
+        ]
+        if contract_reasons != expected_contract_reasons:
             raise AssertionError(
                 f"09 §12.5: ожидалась причина по контракту, получено {contract_reasons}"
             )
