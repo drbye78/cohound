@@ -25,6 +25,7 @@ from __future__ import annotations
 import dataclasses
 import datetime as _dt
 import json
+import threading
 from concurrent.futures.process import BrokenProcessPool
 from pathlib import Path
 from typing import Any
@@ -47,12 +48,14 @@ from core.pipeline import RunPlan
 from core.pipeline.corpus import (
     _EXTRACT_MAX_POOL_REBUILDS,
     _ExtractRequest,
+    _extract_cache_key,
     ExtractionPool,
     IndexBuild,
     build_corpus,
 )
 from core.pipeline.crawl_frontier import resolve_crawl_limits
 from core.pipeline.crawl_session import default_session_id
+from core.pipeline.extract_cache import ExtractionCache
 from core.ports.types import Chunk, ExtractedDoc, ExtractionRoute, FetchPlan, RawPage
 from core.store.sqlite_store import SqliteStore
 from core.util.hashing import content_hash
@@ -211,12 +214,21 @@ class _FakeFuture:
         self._fn = fn
         self._request = request
         self._done = False
+        self._cancelled = False
         self._value: Any = None
         self._error: BaseException | None = None
 
+    def cancel(self) -> bool:
+        """C1: инвалидация одного future (не пула)."""
+        if self._done:
+            return False
+        self._cancelled = True
+        return True
+
     def result(self, timeout: float | None = None) -> Any:
         pool = self._pool
-        if pool._hang and not self._done:
+        hangs = pool._hang or self._request.url in pool._hang_urls
+        if hangs and not self._done:
             raise TimeoutError()
         pool._result_calls += 1
         if pool._crash_on is not None and pool._result_calls == pool._crash_on:
@@ -239,10 +251,16 @@ class _FakePool:
     """Записывающий исполнитель: порядок submit/result, границы in-flight, отказы."""
 
     def __init__(
-        self, size: int, *, hang: bool = False, crash_on: int | None = None
+        self,
+        size: int,
+        *,
+        hang: bool = False,
+        hang_urls: tuple[str, ...] = (),
+        crash_on: int | None = None,
     ) -> None:
         self.size = size
         self._hang = hang
+        self._hang_urls = set(hang_urls)
         self._crash_on = crash_on
         self._open = 0
         self._result_calls = 0
@@ -289,6 +307,7 @@ def _build(
     crawl_defaults: CrawlRunConfig | None = None,
     extraction_pool: ExtractionPool | None = None,
     extract_task_timeout_s: float | None = None,
+    extract_cache: ExtractionCache | None = None,
     extractor: Any = None,
 ):
     return build_corpus(
@@ -303,6 +322,7 @@ def _build(
         crawl_defaults=crawl_defaults,
         extraction_pool=extraction_pool,
         extract_task_timeout_s=extract_task_timeout_s,
+        extract_cache=extract_cache,
     )
 
 
@@ -816,11 +836,17 @@ def test_extract_worker_crash_reaps_and_degrades(tmp_path: Path) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# (7) Таймаут зависшего воркера: FAILED + terminate_workers + продолжение
+# (7) Таймаут зависшего артефакта: per-artifact FAILED, пул НЕ убивается (C1)
 # --------------------------------------------------------------------------- #
 
 
-def test_extract_timeout_marks_failed_and_terminates(tmp_path: Path) -> None:
+def test_extract_timeout_marks_failed_per_artifact(tmp_path: Path) -> None:
+    """C1: таймаут помечает **один** артефакт (``extraction_timeout``), пул жив.
+
+    Прежнее поведение (reap всего пула по таймауту одного задания) теряло результаты
+    всех остальных документов корня. Теперь ``future.cancel()`` инвалидирует только
+    это задание, пул продолжает работу, а прогон — нет.
+    """
     store = SqliteStore(":memory:")
     try:
         _make_run(store)
@@ -840,11 +866,98 @@ def test_extract_timeout_marks_failed_and_terminates(tmp_path: Path) -> None:
         )
         item = _session_items(store)[("p1", ROOT)]
         assert item.status is CrawlItemStatus.FAILED
-        assert item.error_kind == "parser_failed"
+        # C1: класс таймаута отличим от прочих parser-сбоев (словарь уже его знает).
+        assert item.error_kind == "extraction_timeout"
         assert "timeout" in (item.error or "")
-        assert created[0].terminate_calls >= 1  # reap зависшего пула
+        # Пул не reap'ится и не пересобирается из-за одного зависшего артефакта.
+        assert created[0].terminate_calls == 0
+        assert len(created) == 1
         assert result.status == "ok"  # прогон продолжается, не падает
         assert store.get_crawl_session(SESSION_ID).status.value == "partial"
+    finally:
+        store.close()
+
+
+def test_extract_timeout_keeps_other_documents_of_root(tmp_path: Path) -> None:
+    """C1: зависший документ не блокирует публикацию чанков остальных документов корня."""
+    store = SqliteStore(":memory:")
+    try:
+        _make_run(store)
+        pages = {
+            ROOT: b'<html><a href="/slow">s</a><a href="/ok1">1</a><a href="/ok2">2</a></html>',
+            "https://docs.test/slow": b"<html>slow</html>",
+            "https://docs.test/ok1": b"<html>ok-one</html>",
+            "https://docs.test/ok2": b"<html>ok-two</html>",
+        }
+        created: list[_FakePool] = []
+        pool = ExtractionPool(
+            pool_factory=_recording_factory(
+                created, hang_urls=("https://docs.test/slow",)
+            ),
+            worker=_reconstruct_worker,
+        )
+        result = _build(
+            tmp_path,
+            pages=pages,
+            store=store,
+            run_id=RUN_ID,
+            crawl_defaults=CrawlRunConfig(max_depth=1, extract_workers=2),
+            extraction_pool=pool,
+            extract_task_timeout_s=0.01,
+        )
+        build = _build_of(result)
+        items = _session_items(store)
+        # Зависший артефакт — единственный терминальный отказ класса таймаута.
+        assert items[("p1", "https://docs.test/slow")].error_kind == "extraction_timeout"
+        failed = [i for i in items.values() if i.status is CrawlItemStatus.FAILED]
+        assert [i.url for i in failed] == ["https://docs.test/slow"]
+        # Остальные документы дошли до чанков (включая корень и две ссылки).
+        urls = {doc.url for doc in build.docs}
+        assert "https://docs.test/slow" not in urls
+        assert {
+            ROOT,
+            "https://docs.test/ok1",
+            "https://docs.test/ok2",
+        } <= urls
+        # Пул не пересобран: были завершения между таймаутами.
+        assert len(created) == 1
+        assert created[0].terminate_calls == 0
+    finally:
+        store.close()
+
+
+def test_extract_dead_pool_rebuilt_after_two_timeouts(tmp_path: Path) -> None:
+    """C1: пересборка — только когда пул не дал **ни одного** завершения за ``2 × timeout``."""
+    store = SqliteStore(":memory:")
+    try:
+        _make_run(store)
+        pages = {
+            ROOT: (
+                "<html>"
+                + "".join(f'<a href="/p{i}">p</a>' for i in range(8))
+                + "</html>"
+            ).encode()
+        }
+        for i in range(8):
+            pages[f"https://docs.test/p{i}"] = f"<html>page {i}</html>".encode()
+        created: list[_FakePool] = []
+        pool = ExtractionPool(
+            pool_factory=_recording_factory(created, hang=True),
+            worker=_reconstruct_worker,
+        )
+        _build(
+            tmp_path,
+            pages=pages,
+            store=store,
+            run_id=RUN_ID,
+            crawl_defaults=CrawlRunConfig(max_depth=1, extract_workers=2),
+            extraction_pool=pool,
+            extract_task_timeout_s=0.01,
+        )
+        # Два таймаута подряд без завершений ⇒ reap + пересборка (bounded, не бесконечно).
+        assert len(created) >= 2
+        assert created[0].terminate_calls >= 1
+        assert len(created) <= _EXTRACT_MAX_POOL_REBUILDS + 1
     finally:
         store.close()
 
@@ -1250,3 +1363,218 @@ def test_extract_pool_rebuild_exhaustion_is_terminal_no_inline(tmp_path: Path) -
         )
     finally:
         store.close()
+
+
+# --------------------------------------------------------------------------- #
+# (12) C1/L1: пул — фазовый (один на прогон), а не per seed-root
+# --------------------------------------------------------------------------- #
+
+
+def test_extract_pool_is_phase_scoped_for_two_roots(tmp_path: Path) -> None:
+    """C1: два корня прогона переиспользуют **один** пул; shutdown — ровно один раз."""
+    root_a, root_b = "https://docs.test/a", "https://docs.test/b"
+    created: list[_FakePool] = []
+    pool = ExtractionPool(
+        pool_factory=_recording_factory(created), worker=_reconstruct_worker
+    )
+    result = _build(
+        tmp_path,
+        pages={
+            root_a: b"<html>root-a</html>",
+            root_b: b"<html>root-b</html>",
+        },
+        urls={"p1": [root_a, root_b]},
+        crawl_defaults=CrawlRunConfig(extract_workers=2),
+        extraction_pool=pool,
+    )
+    # Один пул на прогон (не на корень): фабрика вызвана ровно один раз, и оба корня
+    # действительно сдали в него задания — воркеры/веса переиспользованы.
+    assert len(created) == 1
+    assert {r.url for r in created[0].submitted_requests} == {root_a, root_b}
+    # Единственный shutdown — в finally фазы, с wait/cancel_futures.
+    assert created[0].shutdown_calls == 1
+    assert created[0].shutdown_wait is True
+    assert created[0].shutdown_cancel_futures is True
+    assert {doc.url for doc in _build_of(result).docs} == {root_a, root_b}
+
+
+def test_extract_pool_shutdown_once_for_two_products(tmp_path: Path) -> None:
+    """C1: пул переиспользуется и между продуктами той же фазы."""
+    created: list[_FakePool] = []
+    pool = ExtractionPool(
+        pool_factory=_recording_factory(created), worker=_reconstruct_worker
+    )
+    plan = dataclasses.replace(_plan(), products=["p1", "p2"])
+    result = build_corpus(
+        plan,
+        _Crawler(
+            {
+                "https://docs.test/p1": b"<html>one</html>",
+                "https://docs.test/p2": b"<html>two</html>",
+            }
+        ),
+        _Extractor(),
+        _Chunker(),
+        None,
+        urls={
+            "p1": ["https://docs.test/p1"],
+            "p2": ["https://docs.test/p2"],
+        },
+        raw_root=tmp_path,
+        crawl_defaults=CrawlRunConfig(extract_workers=2),
+        extraction_pool=pool,
+    )
+    assert len(created) == 1
+    assert created[0].shutdown_calls == 1
+    assert {doc.product_id for doc in _build_of(result).docs} == {"p1", "p2"}
+
+
+# --------------------------------------------------------------------------- #
+# (13) C1: пул не блокирует фетч следующего корня
+# --------------------------------------------------------------------------- #
+
+
+class _GateFuture:
+    """Future, ждущий управляемого события (без sleep-гонок): таймаут — реальный."""
+
+    def __init__(self, pool: "_GatePool", fn: Any, request: _ExtractRequest) -> None:
+        self._pool = pool
+        self._fn = fn
+        self._request = request
+
+    def cancel(self) -> bool:
+        return False
+
+    def result(self, timeout: float | None = None) -> Any:
+        if not self._pool.gate.wait(timeout):
+            raise TimeoutError()
+        value = self._fn(self._request)
+        self._pool.log.append(("extract", self._request.url))
+        return value
+
+
+class _GatePool:
+    """Пул, чьи задания разрешаются только событием ``gate`` (ставится фетчем корня B)."""
+
+    def __init__(self, gate: threading.Event, log: list[tuple[str, str]]) -> None:
+        self.gate = gate
+        self.log = log
+        self.submitted_requests: list[_ExtractRequest] = []
+        self.shutdown_calls = 0
+
+    def submit(self, fn: Any, request: _ExtractRequest) -> _GateFuture:
+        self.submitted_requests.append(request)
+        self.log.append(("submit", request.url))
+        return _GateFuture(self, fn, request)
+
+    def shutdown(self, wait: bool = True, cancel_futures: bool = False) -> None:
+        self.shutdown_calls += 1
+
+
+class _SignallingCrawler(_Crawler):
+    """Краулер, который «разрешает» экстракцию корня A при фетче корня B."""
+
+    def __init__(
+        self,
+        pages: dict[str, bytes],
+        *,
+        gate: threading.Event,
+        log: list[tuple[str, str]],
+        signal_url: str,
+    ) -> None:
+        super().__init__(pages)
+        self._gate = gate
+        self._log = log
+        self._signal_url = signal_url
+
+    def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:
+        page = super().fetch(url, plan)
+        self._log.append(("fetch", url))
+        if url == self._signal_url:
+            self._gate.set()
+        return page
+
+
+def test_extract_pool_does_not_block_next_root_fetch(tmp_path: Path) -> None:
+    """C1: пока корень A экстрагирует, корень B уже фетчит.
+
+    Корень A откладывает свой экстракционный хвост (``max_depth=0`` — BFS от него не
+    зависит), поэтому ``_drain_root(B)`` начинается до завершения экстракции A. Фетч B
+    разрешает задание A (событие), после чего хвост доводится фазовой очередью.
+    """
+    root_a, root_b = "https://docs.test/a", "https://docs.test/b"
+    gate = threading.Event()
+    log: list[tuple[str, str]] = []
+    pool = ExtractionPool(
+        pool_factory=lambda n, level=None, **_: _GatePool(gate, log),
+        worker=_reconstruct_worker,
+    )
+    result = build_corpus(
+        _plan(),
+        _SignallingCrawler(
+            {root_a: b"<html>root-a</html>", root_b: b"<html>root-b</html>"},
+            gate=gate,
+            log=log,
+            signal_url=root_b,
+        ),
+        _Extractor(),
+        _Chunker(),
+        None,
+        urls={"p1": [root_a, root_b]},
+        raw_root=tmp_path,
+        crawl_defaults=CrawlRunConfig(extract_workers=2),
+        extraction_pool=pool,
+        extract_task_timeout_s=3.0,
+    )
+    assert ("fetch", root_b) in log and ("extract", root_a) in log
+    # Фетч корня B — до завершения экстракции корня A (главное утверждение C1).
+    assert log.index(("fetch", root_b)) < log.index(("extract", root_a))
+    # Оба документа всё равно дошли до корпуса (хвост доведён, не потерян).
+    assert {doc.url for doc in _build_of(result).docs} == {root_a, root_b}
+
+
+# --------------------------------------------------------------------------- #
+# (14) C1/L4: проба кэша экстракции в родителе — до submit
+# --------------------------------------------------------------------------- #
+
+
+def test_extract_cache_key_parent_equals_worker(tmp_path: Path) -> None:
+    """C1/L4: ключ родителя (``raw_path.stem``) == ключ воркера (хеш байтов файла)."""
+    data = b"<html>key</html>"
+    path = tmp_path / f"{content_hash(data)}.bin"  # раскладка retention
+    path.write_bytes(data)
+    assert _extract_cache_key(path) == content_hash(path.read_bytes())
+
+
+def test_parent_extract_cache_hit_skips_submit(tmp_path: Path) -> None:
+    """C1/L4: готовый кэш-хит не сабмитится в пул и даёт тот же текст/сборку."""
+    cache = ExtractionCache(tmp_path / "extract_cache")
+    pages = {ROOT: b"<html>cached-doc</html>"}
+    # Прогон 1: inline — наполняет кэш (ключ = хеш ретенированных байтов).
+    first = _build(
+        tmp_path / "first",
+        pages=pages,
+        crawl_defaults=CrawlRunConfig(extract_workers=1),
+        extract_cache=cache,
+    )
+    created: list[_FakePool] = []
+    pool = ExtractionPool(
+        pool_factory=_recording_factory(created), worker=_reconstruct_worker
+    )
+    second = _build(
+        tmp_path / "second",
+        pages=pages,
+        crawl_defaults=CrawlRunConfig(extract_workers=2),
+        extraction_pool=pool,
+        extract_cache=cache,
+    )
+    # L4: хит распознан в родителе — ни одного submit и даже пул не создан
+    # (слот воркера/инициализатор не оплачены).
+    assert created == []
+    first_build, second_build = _build_of(first), _build_of(second)
+    assert second_build.index_build_id == first_build.index_build_id
+    assert [doc.content_hash for doc in second_build.docs] == [
+        doc.content_hash for doc in first_build.docs
+    ]
+    # Текст тот же (кэш вернул ровно извлечённый ``ExtractedDoc``).
+    assert [doc.url for doc in second_build.docs] == [doc.url for doc in first_build.docs]

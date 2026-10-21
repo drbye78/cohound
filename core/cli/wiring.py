@@ -1337,7 +1337,8 @@ def _extract_worker_init(
     """Инициализатор воркер-процесса пула экстракции (P4/P5/§7): ставит его экстрактор.
 
     ``extractor_factory`` — module-level (picklable by reference); ``level`` — уровень корня
-    (пул per-seed-root, P5). Глобал экстрактора живёт в ``core.pipeline.corpus`` (общий
+    (C1: пул — фазовый, ключ ``(уровень, окно)``, P5). Глобал экстрактора живёт в
+    ``core.pipeline.corpus`` (общий
     воркер :func:`core.pipeline.corpus._extract_worker`); фабрика передаётся и туда —
     защитный lazy-путь, если задание принесёт иной уровень.
     """
@@ -1400,9 +1401,9 @@ def build_extraction_pool(
     значение аргументом (site > run > app). Ось действует только для ``local``: под
     ``split`` рециклинг не поддерживается (``supports_worker_recycling=False``).
 
-    Сам пул создаётся **лениво** в ``build_corpus`` (per seed-root, только при ``W>1``
-    либо при заданном ``max_tasks_per_child``): ``None``/``1`` без оси ⇒ ``pool_factory``
-    не вызывается вовсе (поведение байт-в-байт).
+    Сам пул создаётся **лениво** в ``build_corpus`` (C1: один на прогон, ключ
+    ``(уровень, окно)``, только при ``W>1`` либо при заданном ``max_tasks_per_child``):
+    ``None``/``1`` без оси ⇒ ``pool_factory`` не вызывается вовсе (поведение байт-в-байт).
     """
     from core.pipeline.corpus import _extract_worker, _run_extract
 

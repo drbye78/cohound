@@ -283,15 +283,21 @@ _EXECUTOR_WAVE_ITEMS = 64
 #: остановка). У локального пути аналога нет (остаточное расхождение R3).
 _EXECUTOR_MAX_WAVES_PER_ROOT = 1000
 
-#: P4: предохранитель от зависшего воркера экстракции — потолок ожидания ``future.result``
-#: (НЕ SLA: заведомо щедрый дефолт; конфигурируется аддитивным kwarg ``extract_task_timeout_s``
-#: зеркально ``executor_sleep``). По таймауту пул reap'ится (``terminate_workers``) и остаток
-#: корня идёт inline — никогда не тихо.
+#: P4/C1: предохранитель от зависшего задания экстракции — потолок ожидания
+#: ``future.result`` **одного артефакта** (НЕ SLA: заведомо щедрый дефолт; конфигурируется
+#: аддитивным kwarg ``extract_task_timeout_s``). По таймауту терминально помечается ровно
+#: этот артефакт (``extraction_timeout``), пул продолжает работу; пересборка — только если
+#: пул не дал ни одного завершения за ``2 × timeout`` (см. :class:`_ExtractPools`).
 _EXTRACT_TASK_TIMEOUT_S = 1800.0
 
-#: P4: ограниченное число пересборок мёртвого пула экстракции (краш/OOM/таймаут). После
-#: исчерпания — inline-fallback остатка корня с явной записью в ``errors`` (без авто-ретрая).
+#: P4/C1: ограниченное число пересборок мёртвого пула экстракции (краш/OOM/двойной таймаут
+#: без единого завершения). После исчерпания — остаток прогона терминально ``FAILED`` с явной
+#: записью в ``errors`` (без авто-ретрая и без inline-экстракции в родителе).
 _EXTRACT_MAX_POOL_REBUILDS = 2
+
+#: C1: сколько подряд идущих таймаутов **без единого завершения** считаются мёртвым пулом
+#: (каждый таймаут — полное окно ожидания ``timeout``, поэтому два подряд = ``2 × timeout``).
+_EXTRACT_DEAD_POOL_TIMEOUTS = 2
 
 #: P4: сентинел «экстракция не была отложена» для :func:`build_corpus`-интернала
 #: ``_commit_outcome`` (inline-путь вызывает ``_ingest_one``; пул передаёт готовый результат).
@@ -647,8 +653,8 @@ class _ExtractRequest:
     engine: str | None
     route: ExtractionRoute
     #: P5: уровень извлечения документных форматов (``crawl.document_level``). Едет в payload
-    #: для самодостаточности задания и корректности под будущие режимы; по построению пул —
-    #: per-seed-root (один уровень на пул), поэтому воркер кэширует конвертер по уровню.
+    #: для самодостаточности задания и корректности под будущие режимы; C1: пул — фазовый,
+    #: ключ ``(уровень, окно)``, поэтому воркер кэширует конвертер по уровню.
     level: DocumentLevel = DocumentLevel.FULL
     #: Ф1.2: корень и бюджет межпрогонного кэша экстракции. Едут **примитивами** — сам
     #: объект кэша не пиклится (payload остаётся picklable by construction); воркер
@@ -662,7 +668,8 @@ class ExtractionPool:
     """P4: инъекция исполнителя экстракции из composition root (A1, ``pipeline ↛ adapters``).
 
     :param pool_factory: фабрика ``(int, DocumentLevel) → Executor`` (размер =
-        ``limits.extract_workers``; уровень — per-seed-root, P5); ``local`` —
+        ``limits.extract_workers``; уровень — свойство корня, C1: пул — фазовый по ключу
+        ``(уровень, окно)``); ``local`` —
         ``ProcessPoolExecutor`` (forkserver, инициализатор строит экстрактор нужного уровня
         на воркер), ``split`` — ``ThreadPoolExecutor`` (``RemoteExtractor`` I/O-bound; ось
         ``document_level`` под ``split`` не действует — R-S).
@@ -706,11 +713,11 @@ def set_worker_extractor(
 
 
 def _worker_extractor_for(level: DocumentLevel) -> ExtractorPort | None:
-    """Экстрактор воркера для ``level`` (кэш размера 1; per-root пул — P5).
+    """Экстрактор воркера для ``level`` (кэш размера 1; C1: пул — фазовый по уровню).
 
     Если инициализированный экстрактор подходит (уровень совпал или универсален) — он и
     используется. Иначе (защитный путь) строится фабрикой и кэшируется. Кэш по построению
-    размера 1 не является рабочим (пул per seed-root).
+    размера 1 не является рабочим: инициализатор пула строит экстрактор нужного уровня.
     """
     if _WORKER_EXTRACTOR is not None and (
         _WORKER_EXTRACTOR_LEVEL is None or _WORKER_EXTRACTOR_LEVEL == level
@@ -724,11 +731,26 @@ def _worker_extractor_for(level: DocumentLevel) -> ExtractorPort | None:
     return _WORKER_EXTRACTOR
 
 
+def _extract_cache_key(raw_path: str | Path) -> str:
+    """Ключ кэша экстракции для retained-файла: ``{content_hash}.bin`` → хеш байтов.
+
+    ``_retain`` называет retained-файл ``{sha256(bytes)}.bin``, поэтому ``stem`` — ровно
+    ``content_hash`` тех байтов, которые прочитает воркер. Родительская проба (C1/L4) и
+    проба воркера (:func:`_run_extract`) обязаны давать один ключ: это контракт раскладки
+    retention (I19), а не случайное совпадение.
+    """
+    return Path(raw_path).stem
+
+
 def _run_extract(extractor: ExtractorPort, request: _ExtractRequest) -> ExtractedDoc:
     """Перечитывает retained-байты (I19) и вызывает ``extractor.extract`` на том же ``RawPage``.
 
     Общий шаг модульного воркер-процесса (:func:`_extract_worker`) и потокового воркера
     (``split``): источник байтов — retained-файл, а не буфер родителя (I19).
+
+    Ключ кэша считается из **фактически прочитанных** байтов (``content_hash(content)``) и
+    совпадает с родительским :func:`_extract_cache_key` (``raw_path.stem``) — I19 требует
+    верификации от байтов, а не от имени файла.
     """
     content = Path(request.raw_path).read_bytes()
     page = RawPage(
@@ -784,6 +806,121 @@ def _extract_worker(request: _ExtractRequest) -> ExtractedDoc:
             error="extraction worker без экстрактора для уровня",
         )
     return _run_extract(extractor, request)
+
+
+@dataclass
+class _ExtractPoolSlot:
+    """Состояние одного ключа фазового пула экстракции (C1/L1)."""
+
+    executor: Executor | None = None
+    #: Число выполненных пересборок (bounded :data:`_EXTRACT_MAX_POOL_REBUILDS`).
+    rebuilds: int = 0
+    #: Пул исчерпал пересборки: остаток прогона по ключу — терминальный отказ, без inline.
+    abandoned: bool = False
+    #: Подряд идущие таймауты без единого завершения: ``2`` = ``2 × timeout`` без результата.
+    stalled_timeouts: int = 0
+
+
+class _ExtractPools:
+    """C1/L1: фазовый реестр пулов экстракции — один пул на прогон, а не на seed-root.
+
+    Ключ — ``(DocumentLevel, window)``: уровень документной экстракции и окно (число
+    заданий «в полёте»). Пул переиспользуется **всеми** корнями и продуктами фазы, поэтому
+    forkserver и загрузка весов конвертера платятся один раз, а не на каждый корень.
+    ``shutdown(wait=True, cancel_futures=True)`` выполняется ровно один раз — в ``finally``
+    фазы (:func:`build_corpus`), а не на корень.
+
+    Реестр также несёт фазовое состояние отказов **на ключ**: счётчик пересборок и признак
+    «исчерпал пересборки». Исчерпание не воскресает на следующем корне того же ключа
+    (иначе бюджет пересборок обходился бы числом корней).
+
+    Таймауты (:meth:`note_timeout`) считаются подряд идущими, пока пул не завершил ни одного
+    задания: каждое ожидание длится ``timeout``, поэтому ``2`` подряд = ``2 × timeout`` без
+    единого завершения — только тогда пул считается мёртвым и пересобирается (bounded).
+    Одиночный зависший артефакт убивает только себя (``extraction_timeout``), не пул.
+    """
+
+    def __init__(self, *, max_rebuilds: int = _EXTRACT_MAX_POOL_REBUILDS) -> None:
+        self._max_rebuilds = max_rebuilds
+        self._slots: dict[tuple[DocumentLevel, int], _ExtractPoolSlot] = {}
+
+    def slot(self, key: tuple[DocumentLevel, int]) -> _ExtractPoolSlot:
+        """Состояние ключа (создаётся лениво; I/O нет)."""
+        slot = self._slots.get(key)
+        if slot is None:
+            slot = _ExtractPoolSlot()
+            self._slots[key] = slot
+        return slot
+
+    def executor(
+        self, key: tuple[DocumentLevel, int], factory: Callable[[], Executor]
+    ) -> Executor:
+        """Пул ключа, создаваемый ``factory`` при первом обращении (лениво)."""
+        slot = self.slot(key)
+        if slot.executor is None:
+            slot.executor = factory()
+        return slot.executor
+
+    def note_completion(self, key: tuple[DocumentLevel, int]) -> None:
+        """Задание завершилось (любым исходом): пул жив, серия таймаутов сброшена."""
+        self.slot(key).stalled_timeouts = 0
+
+    def note_timeout(self, key: tuple[DocumentLevel, int]) -> bool:
+        """Учесть таймаут артефакта; ``True`` — пул мёртв (``2 × timeout`` без завершений)."""
+        slot = self.slot(key)
+        slot.stalled_timeouts += 1
+        return slot.stalled_timeouts >= _EXTRACT_DEAD_POOL_TIMEOUTS
+
+    def terminate(self, key: tuple[DocumentLevel, int]) -> None:
+        """Reaping зависших воркеров (``terminate_workers``, Python 3.14; best-effort)."""
+        executor = self.slot(key).executor
+        terminate = getattr(executor, "terminate_workers", None)
+        if terminate is None:
+            return
+        try:
+            terminate()
+        except Exception:  # noqa: BLE001 — reaping best-effort
+            pass
+
+    def discard(self, key: tuple[DocumentLevel, int]) -> None:
+        """Закрывает пул ключа синхронно и отменяет запланированное (P0/OOM)."""
+        slot = self.slot(key)
+        executor = slot.executor
+        slot.executor = None
+        if executor is None:
+            return
+        try:
+            # P0/OOM: дождаться реального завершения воркеров и отменить запланированное.
+            # ``wait=False`` оставлял бы старые процессы живыми поверх следующего корня
+            # (двойной рабочий набор → OOM).
+            executor.shutdown(wait=True, cancel_futures=True)
+        except TypeError:  # фейки/старые исполнители без cancel_futures
+            try:
+                executor.shutdown(wait=True)
+            except Exception:  # noqa: BLE001 — reaping best-effort
+                pass
+        except Exception:  # noqa: BLE001 — reaping best-effort
+            pass
+
+    def rebuild(self, key: tuple[DocumentLevel, int]) -> bool:
+        """Discard + bounded rebuild; ``False`` — пересборки исчерпаны (ключ abandon'ен)."""
+        self.discard(key)
+        slot = self.slot(key)
+        slot.stalled_timeouts = 0
+        if slot.rebuilds >= self._max_rebuilds:
+            slot.abandoned = True
+            return False
+        slot.rebuilds += 1
+        return True
+
+    def abandoned(self, key: tuple[DocumentLevel, int]) -> bool:
+        """Исчерпал ли ключ пересборки (остаток прогона — терминальный отказ)."""
+        return self.slot(key).abandoned
+
+    def shutdown(self) -> None:
+        """Единственная точка ``shutdown(wait=True, cancel_futures=True)`` фазы."""
+        for key in list(self._slots):
+            self.discard(key)
 
 
 @dataclass
@@ -930,12 +1067,32 @@ class _WaveEntry:
 
 
 @dataclass
+class _RootDrain:
+    """C1: хвост экстракции одного seed-root в **фазовой** очереди доводки.
+
+    Пул и FIFO-очередь экстракции живут в области фазы (:func:`build_corpus`), поэтому
+    задание может быть доведено уже после возврата своего корня. ``pending`` — число
+    недоведённых заданий корня; ``finalize`` — замыкание вызывающего, которое считает
+    провенанс корня (``revalidation``/``truncation``) **после** доводки хвоста; оно
+    вызывается ровно один раз (:func:`_finalize_ready_roots`), в порядке корней.
+    """
+
+    pending: int = 0
+    finalize: Callable[[], None] | None = None
+    finalized: bool = False
+
+
+@dataclass
 class _PendingExtract:
     """P4: отложенная экстракция (главный поток, FIFO-очередь доводки).
 
     Несёт всё, что нужно финишу: реконструированный ``RawPage``, ``raw_path`` (перечитывается
     воркером, I19), ``fetch_plan`` (ось ``extract``), флаг свежести (для ``note_fetched`` и
     учёта ёмкости с in-flight) и ``future`` пула. Мутаций состояния сеанса/корпуса здесь нет.
+
+    C1: очередь — **фазовая**, поэтому задание несёт ``root`` (свой корень: фильтр ёмкости,
+    учёт хвоста) и ``commit`` — замыкание ``_commit_outcome`` именно своего корня. Это
+    позволяет доводить хвост корня A во время фетча корня B без потери провенанса.
     """
 
     pid: str
@@ -946,6 +1103,12 @@ class _PendingExtract:
     fetch_plan: FetchPlan
     freshly_fetched: bool
     future: Any
+    #: C1: корень задания (хвост/финализация провенанса).
+    root: _RootDrain
+    #: C1: доводка исхода — ``(extracted, extract_error, failure_kind) → None``.
+    commit: Callable[[Any, str | None, FailureKind | None], None]
+    #: C1: ключ фазового пула ``(level, window)`` — учёт завершений/таймаутов и пересборка.
+    pool_key: tuple[DocumentLevel, int]
 
 
 @dataclass(frozen=True)
@@ -1704,7 +1867,7 @@ def _resume_page(
 # --------------------------------------------------------------------------- #
 
 
-def build_corpus(
+def _build_corpus(
     plan: Any,
     crawler: CrawlerPort,
     extractor: ExtractorPort,
@@ -1743,6 +1906,7 @@ def build_corpus(
     state: ProductStatePort | None = None,
     product_modes: Mapping[str, str] | None = None,
     refresh_policy: str = "auto",
+    pools: _ExtractPools,
 ) -> PhaseResult:
     """Ш5: собирает корпус из ``plan × urls`` и возвращает ``PhaseResult``.
 
@@ -1832,10 +1996,13 @@ def build_corpus(
     :param extraction_pool: P4 — инъекция исполнителя **экстракции** (:class:`ExtractionPool`:
         фабрика пула + рабочий вызов). Отдельная ось ``CrawlLimits.extract_workers``
         (``app < run < site``): ``None``/``1`` ⇒ пул не создаётся и экстракция inline
-        (поведение байт-в-байт). Пул — per seed-root, лениво, с ``shutdown``; окно ``W``
-        (не более ``W`` экстракций «в полёте»), доводка строго FIFO. ``None`` при заданной
-        оси ``>1`` — явная запись в ``errors`` + inline-fallback (не тихо). Воркер получает
-        только :class:`_ExtractRequest` (примитивы + ``raw_path``); байты не пиклятся (I19).
+        (поведение байт-в-байт). C1/L1: пул — **фазовый** (один на прогон, ключ
+        ``(DocumentLevel, window)``), лениво создаётся при первом задании и переиспользуется
+        всеми корнями/продуктами; ``shutdown(wait=True, cancel_futures=True)`` — один раз в
+        ``finally`` фазы (:func:`build_corpus`), не на корень. Окно ``W`` (не более ``W``
+        экстракций «в полёте»), доводка строго FIFO. ``None`` при заданной оси ``>1`` —
+        явная запись в ``errors`` + inline-fallback (не тихо). Воркер получает только
+        :class:`_ExtractRequest` (примитивы + ``raw_path``); байты не пиклятся (I19).
         OOM-ось ``crawl.extract_max_tasks_per_child=N`` (только процессный пул) включает пул
         и при ``extract_workers == 1`` и пересоздаёт воркер после N заданий
         (``max_tasks_per_child``); ``None`` — прежнее поведение.
@@ -1849,11 +2016,15 @@ def build_corpus(
     :param extract_cache: Ф1.2 — межпрогонный кэш экстракции (:class:`ExtractionCache`).
         ``None`` → кэш выключен, поведение байт-в-байт прежнее. Ключ — хеш **ретенированных**
         байтов (I19), поэтому хит не может подсунуть неверифицированный контент: хеш
-        пересчитывается из тех же байтов, которые прочитал бы экстрактор.
-    :param extract_task_timeout_s: P4 — потолок ожидания ``future.result`` одного задания
-        экстракции (guard от зависшего воркера, не SLA). ``None`` →
-        :data:`_EXTRACT_TASK_TIMEOUT_S`. По таймауту пул reap'ится, in-flight → ``FAILED``,
-        пул пересобирается (bounded) либо inline-fallback; авто-ретрая нет.
+        пересчитывается из тех же байтов, которые прочитал бы экстрактор. C1/L4: на пулевом
+        пути проба выполняется **в родителе** до submit (хит не занимает слот воркера и не
+        оплачивает инициализатор); проба в воркере остаётся защитой, ключ у них один.
+    :param extract_task_timeout_s: P4/C1 — потолок ожидания ``future.result`` **одного**
+        задания экстракции (guard от зависшего артефакта, не SLA). ``None`` →
+        :data:`_EXTRACT_TASK_TIMEOUT_S`. По таймауту терминально помечается только это
+        задание (``extraction_timeout``), пул продолжает работу; пересборка — только если
+        пул не дал ни одного завершения за ``2 × timeout`` (bounded, затем терминальный
+        отказ); авто-ретрая нет.
     :param max_attempts: Phase 4 — потолок попыток по ``(product_id, url)``. URL с уже
         сохранённым ``CrawlSessionItem.attempts >= max_attempts`` **не** фетчится и **не**
         подаётся исполнителю: он помечается терминальным ``FAILED`` с ``error_kind =
@@ -2575,6 +2746,7 @@ def build_corpus(
         level: DocumentLevel,
         *,
         extract_error: str | None = None,
+        extract_failure_kind: FailureKind | None = None,
         reuse: _DocReuse | None = None,
     ) -> None:
         """Доводка одного URL после экстракции: дедуп → нарезка → ``_mark`` (главный поток).
@@ -2590,6 +2762,9 @@ def build_corpus(
         не вызывается, chunk-set берётся из ``chunk_store`` после проверки I19
         (:func:`_load_reused_chunks`). Run-level ``chunk_id`` остаётся прежним
         (:func:`_chunk_id`) — идентификаторы индекса не меняются.
+
+        ``extract_failure_kind`` — класс отказа извлечения: ``None`` ⇒ ``parser_failed``
+        (прежнее отображение), таймаут задания пула приходит как ``extraction_timeout``.
         """
         nonlocal duplicate_count
         if reuse is not None and extracted is not None and getattr(extracted, "error", None):
@@ -2608,7 +2783,9 @@ def build_corpus(
                     product_id,
                     url,
                     CrawlItemStatus.FAILED,
-                    error_kind=FailureKind.PARSER_FAILED.value,
+                    error_kind=(
+                        extract_failure_kind or FailureKind.PARSER_FAILED
+                    ).value,
                     error=extract_error,
                     raw_path=str(raw_path),
                 )
@@ -2982,6 +3159,92 @@ def build_corpus(
             pass
 
     _emit_progress()
+
+    # --- C1/L1: фазовый пул и FIFO-очередь экстракции ------------------------- #
+    # Пул создаётся лениво на ключ ``(level, window)`` и живёт до ``finally`` фазы
+    # (обёртка :func:`build_corpus`), а не на seed-root. Очередь доводки — тоже фазовая:
+    # хвост корня, не способный расширить свой frontier, доводится во время фетча
+    # следующего корня, а не блокирует его.
+    extract_pending: deque[_PendingExtract] = deque()
+    #: Корни с недоведённым хвостом — в порядке дренажа (порядок провенанса сохраняется).
+    extract_finalizers: deque[_RootDrain] = deque()
+
+    def _finalize_ready_roots() -> None:
+        """Вызывает финализаторы корней, чьи хвосты доведены, — строго в порядке корней."""
+        while extract_finalizers and extract_finalizers[0].pending == 0:
+            drain = extract_finalizers.popleft()
+            finalize = drain.finalize
+            if finalize is not None and not drain.finalized:
+                drain.finalized = True
+                finalize()
+
+    def _recover_extract_pool(
+        pool_key: tuple[DocumentLevel, int], label: str
+    ) -> None:
+        """Отравленный пул: discard + bounded rebuild; исчерпание — терминальный отказ.
+
+        Повторное использование мёртвого пула запрещено; авто-ретрая нет. Inline после
+        исчерпания не включается: на memory-constrained хосте docling в родителе — худший
+        режим, а тихая деградация скрыла бы дефект.
+        """
+        if pools.rebuild(pool_key):
+            return
+        errors.append(
+            f"{label}: пул экстракции {pool_key[0].value}/W={pool_key[1]} исчерпал "
+            f"пересборки ({_EXTRACT_MAX_POOL_REBUILDS}) — остаток прогона терминально "
+            "FAILED (parser_failed), без inline-экстракции"
+        )
+
+    def _abort_extract_pending(reason: str) -> None:
+        """Помечает все in-flight задания (все корни) ``FAILED`` — пул мёртв.
+
+        Хвосты уже отложенных корней тоже принадлежат этому пулу, поэтому отказ получают
+        все: исход видим, а не потерян вместе с пересборкой.
+        """
+        while extract_pending:
+            item = extract_pending.popleft()
+            item.commit(None, reason, None)
+            item.root.pending -= 1
+        _finalize_ready_roots()
+
+    def _finish_extract(item: _PendingExtract) -> None:
+        """Доводит oldest задание фазовой очереди: ``future.result`` → доводка корня (FIFO).
+
+        P4/C1: ``BrokenProcessPool`` — воркер умер (краш/OOM): все in-flight → ``FAILED``,
+        пул discard+rebuild (bounded) либо терминальный отказ. Таймаут — **per-artifact**:
+        терминально помечается только это задание (``extraction_timeout``), пул продолжает
+        работу; пересборка — только если пул не дал ни одного завершения за ``2 × timeout``
+        (:meth:`_ExtractPools.note_timeout`).
+        """
+        try:
+            extracted = item.future.result(timeout=_extract_timeout)
+        except TimeoutError:
+            # C1: зависший артефакт инвалидируется точечно; пул (и его здоровые воркеры)
+            # продолжает работу. ``cancel`` на уже исполняемом future — no-op.
+            cancel = getattr(item.future, "cancel", None)
+            if cancel is not None:
+                try:
+                    cancel()
+                except Exception:  # noqa: BLE001 — инвалидация best-effort
+                    pass
+            item.commit(None, "extraction timeout", FailureKind.EXTRACTION_TIMEOUT)
+            if pools.note_timeout(item.pool_key):
+                # ``2 × timeout`` без единого завершения: пул мёртв — reap + bounded rebuild.
+                pools.terminate(item.pool_key)
+                _abort_extract_pending("extraction pool terminated after timeout")
+                _recover_extract_pool(item.pool_key, f"{item.pid}/{item.url}")
+        except BrokenProcessPool:
+            item.commit(None, "extraction worker died", None)
+            _abort_extract_pending("extraction worker died")
+            _recover_extract_pool(item.pool_key, f"{item.pid}/{item.url}")
+        except Exception as exc:  # noqa: BLE001 — изоляция по контракту фазы
+            item.commit(None, f"{type(exc).__name__}: {exc}", None)
+        else:
+            pools.note_completion(item.pool_key)
+            item.commit(extracted, None, None)
+        finally:
+            item.root.pending -= 1
+            _finalize_ready_roots()
 
     def _expand_directory(pid: str, url: str, target: Any) -> list[str] | None:
         """Phase 5.2: разворачивает источник-каталог (``feed``/``channel``) в список ссылок.
@@ -4102,7 +4365,8 @@ def build_corpus(
             sitemap_seeds: bool = False,
             revalidate: Sequence[str] = (),
             seed: bool = True,
-        ) -> tuple[Frontier, list[dict[str, Any]]]:
+            defer_tail: bool = True,
+        ) -> tuple[Frontier, list[dict[str, Any]], _RootDrain]:
             """D1/D3: BFS-drain одного seed-root (scope/блэклист/лимиты/глубина).
 
             Seeds — глубина 0; ссылка со страницы глубины ``d`` → ``d+1``. ``sitemap_seeds``
@@ -4118,8 +4382,10 @@ def build_corpus(
             Ставка в очередь гейтится scope (host+path-граница) и блэклистом; ``max_documents``
             — жёсткий стоп (не исключение): останавливает постановку/обход этого корня.
             Возвращает frontier с провенансом усечения (``fetched``/``truncated``/
-            ``truncated_reason``) и агрегированный провенанс отказов scope у ``<loc>``
-            (пусто без sitemap/без отказов).
+            ``truncated_reason``), агрегированный провенанс отказов scope у ``<loc>``
+            (пусто без sitemap/без отказов) и :class:`_RootDrain` — хвост экстракции корня
+            в фазовой очереди (C1). ``defer_tail=False`` (synthetic-бакеты ревалидации,
+            вызывающий читает счётчики frontier сразу) — хвост доводится здесь же.
             """
             limits = resolve_crawl_limits(
                 root_url,
@@ -4139,16 +4405,17 @@ def build_corpus(
                 else _SitemapSeeds()
             )
             extra_seeds = sitemap.fresh
-            # P5: уровень извлечения документов — свойство корня (per seed-root; один конвертер
-            # на пул). ``full`` переиспользует переданный экстрактор (дефолт — без лишней
-            # загрузки весов); иной уровень строится фабрикой, если она передана.
+            # P5: уровень извлечения документов — свойство корня (C1: ключ фазового пула
+            # включает уровень — один конвертер на ключ). ``full`` переиспользует переданный
+            # экстрактор (дефолт — без лишней загрузки весов); иной уровень строится фабрикой,
+            # если она передана.
             level = limits.document_level
             root_extractor: ExtractorPort = extractor
             # ``full`` сюда не попадает: переданный экстрактор и есть уровень ``full``,
             # поэтому «понижение до переданного» для него невозможно. Отказ OCR на
             # ``full`` приходит из адаптера на построении конвертера и становится
             # ``parser_failed`` (видимая запись ``errors`` через ``_finish_one``/
-            # ``_finish_pending``), а не тихой подменой уровня.
+            # ``_finish_extract``), а не тихой подменой уровня.
             if level is not DocumentLevel.FULL and extractor_factory is not None:
                 try:
                     root_extractor = extractor_factory(level)
@@ -4186,8 +4453,9 @@ def build_corpus(
                 _record_document_skip(work_url, "url_suffix")
                 return True
 
-            # P4: окно экстракции — **per seed-root**, лениво. ``None``/``1`` ⇒ пул не
-            # создаётся (экстракция inline, байт-в-байт). ``W`` всегда конечный ``int ≥ 2``.
+            # P4/C1: окно экстракции резолвится **на корень** (лимиты корня), а **пул** —
+            # фазовый: ключ ``(level, window)`` в реестре фазы (C1/L1). ``None``/``1`` ⇒ пул
+            # не создаётся (экстракция inline, байт-в-байт). ``W`` всегда конечный ``int ≥ 2``.
             extract_workers_axis = (
                 int(limits.extract_workers)
                 if limits.extract_workers is not None and int(limits.extract_workers) > 1
@@ -4230,14 +4498,16 @@ def build_corpus(
                     f"{recycle_tasks} поддерживается только процессным пулом (local) — "
                     "ось игнорируется"
                 )
+            #: C1: ключ фазового пула — уровень документа + окно экстракции. Пул один на
+            #: прогон и переиспользуется всеми корнями/продуктами (forkserver и веса
+            #: конвертера платятся один раз); ``shutdown`` — один раз в ``finally`` фазы.
+            pool_key: tuple[DocumentLevel, int] | None = (
+                (level, extract_window) if extract_window is not None else None
+            )
             #: Исполнять ли экстракцию в пуле (снимается inline-fallback'ом при отказе).
             defer_extract = extract_window is not None and extraction_pool is not None
-            #: P0/OOM: пул исчерпал пересборки — остаток корня терминально FAILED, без
-            #: inline-экстракции (на memory-constrained хосте inline — худший fallback).
-            pool_abandoned = False
-            extract_executor: Executor | None = None
-            extract_rebuilds = 0
-            pending: deque[_PendingExtract] = deque()
+            #: C1: хвост этого корня в фазовой очереди доводки (счётчик + финализатор).
+            root_drain = _RootDrain()
             # A2b/§6(b)/§10: egress-политика robots — **условна от discovery** и
             # вычисляется ядром **на корень** (edge строит краулеры «голыми»). Явный
             # ``crawl.robots`` (app-слой) переопределяет автодетект; иначе robots включён
@@ -4309,7 +4579,7 @@ def build_corpus(
                     revalidation_queued += 1
             if (seed_blacklisted or seed_truncated) and revalidation_queued == 0:
                 _emit_progress()
-                return frontier, list(sitemap.skipped)
+                return frontier, list(sitemap.skipped), root_drain
 
             # D3: дополнительные depth-0 seeds (``<loc>`` sitemap) — под тем же блэклистом и
             # бюджетом, что и seed оператора (``add_seed`` возвращает статус). Scope-фильтр
@@ -4359,6 +4629,7 @@ def build_corpus(
                 *,
                 extracted: Any = _INLINE,
                 extract_error: str | None = None,
+                extract_failure_kind: FailureKind | None = None,
             ) -> None:
                 """Общий пост-ингест дренажа: retention-счётчик, доводка, BFS-расширение.
 
@@ -4466,6 +4737,7 @@ def build_corpus(
                         root_extractor,
                         level,
                         extract_error=extract_error,
+                        extract_failure_kind=extract_failure_kind,
                         reuse=(
                             _reuse_for_page(pid, work_url, page)
                             if extract_error is None
@@ -4508,15 +4780,17 @@ def build_corpus(
                 )
 
             def _inflight_fresh() -> int:
-                """Свеже-добытые страницы «в полёте» (учёт ёмкости с окном, P4/§3).
+                """Свеже-добытые страницы **этого корня** «в полёте» (ёмкость с окном, P4/§3).
 
-                Ревалидация исключена: она не расходует ``max_documents`` и не должна
-                отнимать ёмкость у discovery через in-flight окно.
+                Очередь экстракции — фазовая (C1), поэтому фильтр по ``item.root``: хвосты
+                других корней не отнимают ёмкость у этого. Ревалидация исключена: она не
+                расходует ``max_documents`` и не должна отнимать ёмкость у discovery.
                 """
                 return sum(
                     1
-                    for item in pending
-                    if item.freshly_fetched
+                    for item in extract_pending
+                    if item.root is root_drain
+                    and item.freshly_fetched
                     and not frontier.is_revalidation(item.url)
                 )
 
@@ -4526,130 +4800,57 @@ def build_corpus(
                     return True
                 return limits.max_documents - frontier.fetched - _inflight_fresh() > 0
 
-            def _discard_extract_executor() -> None:
-                nonlocal extract_executor
-                executor_obj = extract_executor
-                if executor_obj is None:
-                    return
-                try:
-                    # P0/OOM: дождаться реального завершения воркеров и отменить
-                    # запланированное. ``wait=False`` оставлял старые docling-процессы
-                    # живыми поверх следующего корня (двойной рабочий набор → OOM).
-                    executor_obj.shutdown(wait=True, cancel_futures=True)
-                except TypeError:  # фейки/старые исполнители без cancel_futures
-                    try:
-                        executor_obj.shutdown(wait=True)
-                    except Exception:  # noqa: BLE001 — reaping best-effort
-                        pass
-                except Exception:  # noqa: BLE001 — reaping best-effort
-                    pass
-                extract_executor = None
+            def _tail_may_extend_frontier() -> bool:
+                """Может ли хвост **этого** корня расширить его frontier (BFS-ссылки)?
 
-            def _recover_extract_pool() -> None:
-                """Отравленный пул: discard + bounded rebuild либо inline-fallback (§4).
-
-                Повторное использование мёртвого пула запрещено; авто-ретрая нет.
+                ``_commit_outcome`` предлагает исходящие ссылки только для не-ревалидационной
+                HTML-страницы при ``max_depth > 0``. Если ни одно задание хвоста этого не
+                может, доводка безопасна после возврата корня: BFS от её момента не зависит,
+                а фетч следующего корня не ждёт экстракции (C1). Иначе хвост доводится здесь
+                же — прежний порядок байт-в-байт.
                 """
-                nonlocal extract_rebuilds, defer_extract, pool_abandoned
-                _discard_extract_executor()
-                if extract_rebuilds < _EXTRACT_MAX_POOL_REBUILDS:
-                    extract_rebuilds += 1
-                else:
-                    # Inline после исчерпания пересборок — худший режим на constrained
-                    # хосте (docling в родителе). Остаток корня доводится терминальным
-                    # FAILED, без повторной экстракции; ошибка видима.
-                    pool_abandoned = True
-                    errors.append(
-                        f"{pid}/{root_url}: пул экстракции исчерпал пересборки "
-                        f"({_EXTRACT_MAX_POOL_REBUILDS}) — остаток корня терминально "
-                        "FAILED (parser_failed), без inline-экстракции"
-                    )
-
-            def _fail_extract(item: _PendingExtract, reason: str) -> None:
-                """Явный терминальный ``FAILED parser_failed`` через ``_commit_outcome``.
-
-                Страница уже ретейнена (``raw_path`` записан в submit-фазе), поэтому свежая
-                считается в бюджете ``max_documents`` (``note_fetched``) — как в inline-пути
-                (там ``note_fetched`` вызывается до экстракции). Иначе после отказов пул мог бы
-                добрать замены сверх потолка.
-
-                P4/§11.6: отказ доводится **единственным** упорядоченным путём —
-                ``_commit_outcome`` с ``extracted=None``/``extract_error=reason`` (тот же
-                ``note_fetched`` + дедуп/чанкер + ``_mark`` + ``errors`` + ``offer`` исходящих
-                ссылок + ``_emit_progress``), а не изолированной ветвью. Иначе краш/таймаут
-                терял бы BFS-выходы упавшей страницы (inline-путь их всегда предлагает), а
-                ``note_fetched`` вызывался бы в обход ``_commit_outcome`` (§12.5).
-                """
-                _commit_outcome(
-                    item.pid,
-                    item.url,
-                    item.depth,
-                    (item.page, item.raw_path, item.fetch_plan, item.freshly_fetched),
-                    extracted=None,
-                    extract_error=reason,
-                )
-
-            def _abort_inflight(reason: str) -> None:
-                """Помечает все in-flight (кроме уже снятого текущего) ``FAILED``."""
-                while pending:
-                    _fail_extract(pending.popleft(), reason)
-
-            def _terminate_extract_executor() -> None:
-                """Reaping зависшего пула (``terminate_workers`` доступен в Python 3.14)."""
-                executor_obj = extract_executor
-                if executor_obj is None:
-                    return
-                terminate = getattr(executor_obj, "terminate_workers", None)
-                if terminate is not None:
-                    try:
-                        terminate()
-                    except Exception:  # noqa: BLE001 — reaping best-effort
-                        pass
-
-            def _finish_pending(item: _PendingExtract) -> None:
-                """Доводит oldest pending: ``future.result`` → ``_commit_outcome`` (FIFO).
-
-                P4/§4: ``BrokenProcessPool`` — воркер умер (краш/OOM): все in-flight →
-                ``FAILED``, пул discard+rebuild (bounded) либо inline-fallback. Таймаут —
-                reap пула + то же. Никакого авто-ретрая.
-                """
-                try:
-                    extracted = item.future.result(timeout=_extract_timeout)
-                except TimeoutError:
-                    _terminate_extract_executor()
-                    _fail_extract(item, "extraction timeout")
-                    _abort_inflight("extraction pool terminated after timeout")
-                    _recover_extract_pool()
-                    return
-                except BrokenProcessPool:
-                    _fail_extract(item, "extraction worker died")
-                    _abort_inflight("extraction worker died")
-                    _recover_extract_pool()
-                    return
-                except Exception as exc:  # noqa: BLE001 — изоляция по контракту фазы
-                    _commit_outcome(
-                        item.pid,
-                        item.url,
-                        item.depth,
-                        (item.page, item.raw_path, item.fetch_plan, item.freshly_fetched),
-                        extracted=None,
-                        extract_error=f"{type(exc).__name__}: {exc}",
-                    )
-                    return
-                _commit_outcome(
-                    item.pid,
-                    item.url,
-                    item.depth,
-                    (item.page, item.raw_path, item.fetch_plan, item.freshly_fetched),
-                    extracted=extracted,
-                )
+                if limits.max_depth <= 0:
+                    return False
+                for item in extract_pending:
+                    if item.root is not root_drain:
+                        continue
+                    if frontier.is_revalidation(item.url):
+                        continue
+                    if _looks_like_html(item.page):
+                        return True
+                return False
 
             def _drain_for_window() -> None:
                 """Доводит oldest, пока окно полно или ёмкость исчерпана (с in-flight)."""
-                while pending and (
-                    len(pending) >= extract_window or not _has_fetch_capacity()
+                while extract_pending and (
+                    len(extract_pending) >= extract_window or not _has_fetch_capacity()
                 ):
-                    _finish_pending(pending.popleft())
+                    _finish_extract(extract_pending.popleft())
+
+            def _make_commit(
+                pid_arg: str,
+                url_arg: str,
+                depth_arg: int | None,
+                outcome: tuple[RawPage, Path, FetchPlan, bool],
+            ) -> Callable[[Any, str | None, FailureKind | None], None]:
+                """Замыкание доводки исхода своего корня (C1: очередь доводки — фазовая)."""
+
+                def _commit(
+                    extracted: Any,
+                    extract_error: str | None,
+                    failure_kind: FailureKind | None,
+                ) -> None:
+                    _commit_outcome(
+                        pid_arg,
+                        url_arg,
+                        depth_arg,
+                        outcome,
+                        extracted=extracted,
+                        extract_error=extract_error,
+                        extract_failure_kind=failure_kind,
+                    )
+
+                return _commit
 
             def _commit_or_defer(
                 pid_arg: str,
@@ -4657,15 +4858,35 @@ def build_corpus(
                 depth_arg: int | None,
                 outcome: tuple[RawPage, Path, FetchPlan, bool] | None,
             ) -> None:
-                """P4 submit/finish-шов: пул активен ⇒ отложить экстракцию в FIFO-очередь.
+                """P4 submit/finish-шов: пул активен ⇒ отложить экстракцию в фазовую очередь.
 
                 Иначе — немедленный :func:`_commit_outcome` (inline, байт-в-байт). Отправка
                 идёт с главного потока в порядке узлов (FIFO); окно не превышается инлайн-дренажем.
+
+                C1/L4: проба ``extract_cache`` — **в родителе**, до submit. Хит идёт путём
+                «готовый текст» (тот же ``_finish_one``, что у результата пула), не занимая
+                слот воркера и не оплачивая инициализатор. Проба в воркере остаётся защитой;
+                ключ родителя и воркера — один и тот же хеш ретенированных байтов.
                 """
-                nonlocal extract_executor, defer_extract
+                nonlocal defer_extract
                 if outcome is None:
                     return
-                if pool_abandoned:
+                page, raw_path, fetch_plan, freshly_fetched = outcome
+                if defer_extract and extract_cache is not None:
+                    # C1/L4: проба — в родителе, до submit и до проверки исчерпания пула:
+                    # готовый текст не требует экстракции вовсе. Ключ — ``raw_path.stem``
+                    # (тот же хеш, что воркер считает из прочитанных байтов).
+                    cached = extract_cache.get(
+                        _extract_cache_key(raw_path),
+                        str(getattr(root_extractor, "version", "") or ""),
+                        _as_text(level),
+                    )
+                    if cached is not None:
+                        _commit_outcome(
+                            pid_arg, url_arg, depth_arg, outcome, extracted=cached
+                        )
+                        return
+                if pool_key is not None and pools.abandoned(pool_key):
                     # Пул исчерпал пересборки: никакой inline-экстракции. Страница
                     # ретейнена, но исход терминален и видим (parser_failed).
                     _commit_outcome(
@@ -4683,33 +4904,35 @@ def build_corpus(
                 if not defer_extract:
                     _commit_outcome(pid_arg, url_arg, depth_arg, outcome)
                     return
-                page, raw_path, fetch_plan, freshly_fetched = outcome
-                if extract_executor is None:
-                    try:
-                        if (
-                            recycle_tasks is not None
-                            and extraction_pool.supports_worker_recycling  # type: ignore[union-attr]
-                        ):
-                            # P4/OOM: счётчик заданий на процесс — воркер пересоздаётся
-                            # (initializer `_extract_worker_init` строит экстрактор заново).
-                            extract_executor = extraction_pool.pool_factory(  # type: ignore[union-attr]
-                                extract_window, level, max_tasks_per_child=recycle_tasks
-                            )
-                        else:
-                            # Ось не задана — прежний вызов (поведение байт-в-байт).
-                            extract_executor = extraction_pool.pool_factory(  # type: ignore[union-attr]
-                                extract_window, level
-                            )
-                    except Exception as exc:  # noqa: BLE001 — изоляция по контракту фазы
-                        errors.append(
-                            f"{pid_arg}/{url_arg}: extract pool: "
-                            f"{type(exc).__name__}: {exc} — inline"
+
+                def _new_pool() -> Executor:
+                    if (
+                        recycle_tasks is not None
+                        and extraction_pool.supports_worker_recycling  # type: ignore[union-attr]
+                    ):
+                        # P4/OOM: счётчик заданий на процесс — воркер пересоздаётся
+                        # (initializer `_extract_worker_init` строит экстрактор заново).
+                        return extraction_pool.pool_factory(  # type: ignore[union-attr]
+                            extract_window, level, max_tasks_per_child=recycle_tasks
                         )
-                        defer_extract = False
-                        _commit_outcome(pid_arg, url_arg, depth_arg, outcome)
-                        return
+                    # Ось не задана — прежний вызов (поведение байт-в-байт).
+                    return extraction_pool.pool_factory(  # type: ignore[union-attr]
+                        extract_window, level
+                    )
+
+                assert pool_key is not None  # defer_extract ⇒ окно и ключ заданы
                 try:
-                    future = extract_executor.submit(
+                    executor = pools.executor(pool_key, _new_pool)
+                except Exception as exc:  # noqa: BLE001 — изоляция по контракту фазы
+                    errors.append(
+                        f"{pid_arg}/{url_arg}: extract pool: "
+                        f"{type(exc).__name__}: {exc} — inline"
+                    )
+                    defer_extract = False
+                    _commit_outcome(pid_arg, url_arg, depth_arg, outcome)
+                    return
+                try:
+                    future = executor.submit(
                         extraction_pool.worker,  # type: ignore[union-attr]
                         _make_extract_request(page, raw_path, fetch_plan),
                     )
@@ -4720,21 +4943,25 @@ def build_corpus(
                     )
                     _commit_outcome(pid_arg, url_arg, depth_arg, outcome)
                     return
-                pending.append(
+                root_drain.pending += 1
+                extract_pending.append(
                     _PendingExtract(
-                        pid_arg,
-                        url_arg,
-                        depth_arg,
-                        page,
-                        raw_path,
-                        fetch_plan,
-                        freshly_fetched,
-                        future,
+                        pid=pid_arg,
+                        url=url_arg,
+                        depth=depth_arg,
+                        page=page,
+                        raw_path=raw_path,
+                        fetch_plan=fetch_plan,
+                        freshly_fetched=freshly_fetched,
+                        future=future,
+                        root=root_drain,
+                        commit=_make_commit(pid_arg, url_arg, depth_arg, outcome),
+                        pool_key=pool_key,
                     )
                 )
                 # Окно: не более ``W`` экстракций «в полёте» (доводка FIFO).
-                while len(pending) >= extract_window:
-                    _finish_pending(pending.popleft())
+                while len(extract_pending) >= extract_window:
+                    _finish_extract(extract_pending.popleft())
 
             def _commit_wave(entries: list[_WaveEntry]) -> None:
                 """Коммитит исходы волны на главном потоке в FIFO-порядке отправки (D4).
@@ -4814,14 +5041,21 @@ def build_corpus(
                 while True:
                     # P4: доводим окно экстракции (окно полно и/или ёмкость исчерпана с
                     # учётом in-flight) до постановки/выхода — иначе пере-удержание.
-                    if pending:
+                    # C1: окно — фазовой очереди (пул общий), поэтому нужен лишь при
+                    # активном пуле этого корня.
+                    if extract_pending and extract_window is not None:
                         _drain_for_window()
-                    if pending and len(frontier) == 0:
+                    if root_drain.pending and len(frontier) == 0:
                         # Очередь корня пуста, но доводка in-flight может добавить ссылки
                         # (``offer``/BFS на finish) — доводим всё, прежде чем счесть исчерпание.
-                        while pending:
-                            _finish_pending(pending.popleft())
-                    if not _has_fetch_capacity() and not pending:
+                        # C1: если хвост BFS расширить не может, он откладывается на фазу —
+                        # фетч следующего корня не ждёт экстракции.
+                        if _tail_may_extend_frontier():
+                            while root_drain.pending:
+                                _finish_extract(extract_pending.popleft())
+                        else:
+                            break
+                    if not _has_fetch_capacity() and not root_drain.pending:
                         # D3: seeds sitemap ставятся пачкой; ``max_documents`` обязан
                         # ограничивать и их (не только обнаруженные ссылки). Без лимита —
                         # всегда есть ёмкость. Проверка — в голове цикла на главном потоке.
@@ -5232,14 +5466,21 @@ def build_corpus(
                             )
                         )
                     _commit_wave(entries)
-                # P4: pending обязан доводиться до конца корня (весь дренаж, FIFO).
-                while pending:
-                    _finish_pending(pending.popleft())
+                # P4/C1: хвост корня доводится здесь, только если он **может** расширить
+                # frontier (BFS-ссылки). Иначе он остаётся в фазовой очереди: пул общий,
+                # и фетч следующего корня не ждёт экстракции (провенанс корня посчитает
+                # финализатор — после доводки хвоста).
+                if root_drain.pending and (
+                    not defer_tail or _tail_may_extend_frontier()
+                ):
+                    while root_drain.pending:
+                        _finish_extract(extract_pending.popleft())
             finally:
+                # C1: пул экстракции — фазовый (``shutdown`` в ``finally`` фазы), здесь
+                # закрывается только локальный пул фетча этого корня.
                 if pool is not None:
                     pool.shutdown(wait=True)
-                _discard_extract_executor()
-            return frontier, list(sitemap.skipped)
+            return frontier, list(sitemap.skipped), root_drain
 
         # P3-A2: **однопутевой** product-цикл. Развёртка каталогов/sitemap делается один раз
         # до drain (общий блок построения корней); транспорт выбирается по ``executor is None``.
@@ -5329,39 +5570,64 @@ def build_corpus(
             for root_url, root_target, sitemap_seeds in roots:
                 drained_roots.add(root_url)
                 known_urls = revalidation_groups.get(root_url, ())
-                frontier, sitemap_skips = _drain_root(
+                frontier, sitemap_skips, root_drain = _drain_root(
                     product_id,
                     root_url,
                     root_target,
                     sitemap_seeds=sitemap_seeds,
                     revalidate=known_urls,
                 )
-                #: Наблюдаемость в любом режиме: ключ есть ровно у корня, который имел
-                #: известные URL (даже если cap отложил все — ``selected=0``). У корня
-                #: без известных URL ключа нет: ``state is None`` остаётся байт-в-байт.
-                revalidation_info: dict[str, Any] | None = None
-                if all_revalidation_groups.get(root_url):
-                    revalidation_info = {
-                        "selected": sum(
-                            1 for url in known_urls if frontier.is_revalidation(url)
-                        ),
-                        # S1: фактическая ревалидация, не «выбрано»; discovery-счётчик
-                        # ``pages_fetched`` не смешивается с этим полем.
-                        "fetched": frontier.revalidation_fetched,
-                    }
-                    if revalidation_cap_fired:
-                        revalidation_info["deferred"] = deferred_by_root.get(
-                            root_url, 0
-                        )
-                    if skipped_by_root.get(root_url):
-                        revalidation_info["skipped"] = skipped_by_root[root_url]
-                _record_root_outcome(
-                    product_id,
-                    root_url,
-                    frontier,
-                    sitemap_skips,
-                    revalidation=revalidation_info,
-                )
+
+                def _finalize_root(
+                    _pid: str = product_id,
+                    _root_url: str = root_url,
+                    _frontier: Frontier = frontier,
+                    _sitemap_skips: list[dict[str, Any]] = sitemap_skips,
+                    _known_urls: Sequence[str] = known_urls,
+                ) -> None:
+                    """Провенанс корня после доводки его экстракционного хвоста (C1).
+
+                    Счётчики frontier (``fetched``/``revalidation_fetched``/усечение)
+                    меняются доводкой отложенных заданий, поэтому запись откладывается
+                    до момента, когда хвост корня доведён (:func:`_finalize_ready_roots`).
+                    Порядок записей — порядок корней (FIFO финализаторов).
+                    """
+                    #: Наблюдаемость в любом режиме: ключ есть ровно у корня, который имел
+                    #: известные URL (даже если cap отложил все — ``selected=0``). У корня
+                    #: без известных URL ключа нет: ``state is None`` остаётся байт-в-байт.
+                    revalidation_info: dict[str, Any] | None = None
+                    if all_revalidation_groups.get(_root_url):
+                        revalidation_info = {
+                            "selected": sum(
+                                1
+                                for url in _known_urls
+                                if _frontier.is_revalidation(url)
+                            ),
+                            # S1: фактическая ревалидация, не «выбрано»; discovery-счётчик
+                            # ``pages_fetched`` не смешивается с этим полем.
+                            "fetched": _frontier.revalidation_fetched,
+                        }
+                        if revalidation_cap_fired:
+                            revalidation_info["deferred"] = deferred_by_root.get(
+                                _root_url, 0
+                            )
+                        if skipped_by_root.get(_root_url):
+                            revalidation_info["skipped"] = skipped_by_root[_root_url]
+                    _record_root_outcome(
+                        _pid,
+                        _root_url,
+                        _frontier,
+                        _sitemap_skips,
+                        revalidation=revalidation_info,
+                    )
+
+                if root_drain.pending:
+                    # C1: хвост отложен в фазовую очередь — провенанс посчитается, когда
+                    # он будет доведён (фетч следующего корня уже не ждёт экстракции).
+                    root_drain.finalize = _finalize_root
+                    extract_finalizers.append(root_drain)
+                else:
+                    _finalize_root()
 
         # Каталог (feed/channel) разворачивается в **другие** корни, поэтому группа,
         # привязанная к авторскому URL каталога, может не совпасть ни с одним drain'ом.
@@ -5372,13 +5638,16 @@ def build_corpus(
                 continue
             frontier: Frontier | None = None
             if known_urls:
-                frontier, _skips = _drain_root(
+                # C1: synthetic-бакет — вызывающий читает счётчики frontier сразу,
+                # поэтому хвост доводится здесь же (``defer_tail=False``).
+                frontier, _skips, _drain = _drain_root(
                     product_id,
                     group_root,
                     None,
                     sitemap_seeds=False,
                     revalidate=known_urls,
                     seed=False,
+                    defer_tail=False,
                 )
             # S2: leftover-группа каталога — тоже видимый бакет, а не потерянный frontier.
             info: dict[str, Any] = {
@@ -5409,13 +5678,15 @@ def build_corpus(
             selected_urls = orphan_buckets.get(origin, ())
             frontier: Frontier | None = None
             if selected_urls:
-                frontier, _skips = _drain_root(
+                # C1: synthetic-бакет — хвост доводится здесь же (``defer_tail=False``).
+                frontier, _skips, _drain = _drain_root(
                     product_id,
                     origin,
                     None,
                     sitemap_seeds=False,
                     revalidate=selected_urls,
                     seed=False,
+                    defer_tail=False,
                 )
             info: dict[str, Any] = {
                 "selected": (
@@ -5438,6 +5709,13 @@ def build_corpus(
                 revalidation_fetched_total += frontier.revalidation_fetched
             # Targets известных URL резолвятся лениво в ``_drain_root``
             # (``_resolve_target``) — предварительная резолюция не нужна.
+
+        # C1: хвосты экстракции продукта обязаны быть доведены до расчёта провенанса
+        # (``truncation_records``/``pages_fetched_total``/финализаторы корней). Пул —
+        # фазовый, поэтому здесь же доводятся хвосты всех корней продукта (FIFO).
+        while extract_pending:
+            _finish_extract(extract_pending.popleft())
+        _finalize_ready_roots()
 
         # Ops-потолок ревалидации — **продуктовое** усечение через существующий канал
         # (``truncated`` + ``truncated_reason``), без новой coverage/freshness-оси.
@@ -5798,3 +6076,20 @@ def build_corpus(
     return PhaseResult(
         status="ok", phase="corpus", cells=[], log_entries=log_entries, errors=errors
     )
+
+
+def build_corpus(*args: Any, **kwargs: Any) -> PhaseResult:
+    """Ш5 (публичная точка фазы): ``_build_corpus`` + жизненный цикл фазовых пулов.
+
+    C1/L1: пул экстракции — **один на прогон** (ключ ``(DocumentLevel, window)`` в
+    :class:`_ExtractPools`), поэтому ``shutdown(wait=True, cancel_futures=True)``
+    выполняется ровно один раз — здесь, в ``finally`` фазы, а не на каждый seed-root.
+    Это единственное отличие обёртки от :func:`_build_corpus`; аргументы и поведение
+    фазы — прежние (см. docstring :func:`_build_corpus`).
+    """
+    pools = _ExtractPools(max_rebuilds=_EXTRACT_MAX_POOL_REBUILDS)
+    try:
+        return _build_corpus(*args, pools=pools, **kwargs)
+    finally:
+        pools.shutdown()
+
