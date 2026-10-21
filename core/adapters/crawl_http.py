@@ -51,9 +51,12 @@ pipeline ловил один класс для всех краулеров; от
 from __future__ import annotations
 
 import importlib.util
+import os
+import tempfile
 from collections.abc import Callable
 from dataclasses import replace
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from core.adapters.crawl_scrapy import (
@@ -67,6 +70,11 @@ from core.adapters.crawl_scrapy import (
 )
 from core.ports.types import FetchMode, FetchPlan, RawPage
 from core.util.cache import ContentAddressedCache, http_key
+from core.util.document_formats import (
+    BINARY_SNIFF_BYTES,
+    is_attachment_content_type,
+    is_attachment_url,
+)
 from core.util.robots import RobotsGate
 from core.util.security import validate_url
 
@@ -227,7 +235,10 @@ class HttpCrawler:
                 return self._page_from_cache(url, cached, meta)
 
         page = self._fetch_live(url, effective_plan)
-        if self._cache is not None and not page.not_modified:
+        # P6: staging-артефакт в память не читался — ``page.content`` пуст, и запись его
+        # в кэш отравила бы ключ пустым телом. Источник истины для такого ответа —
+        # retention (``corpus_raw``, I19), а не URL-кэш.
+        if self._cache is not None and not page.not_modified and page.staged_path is None:
             self._cache.put_bytes("http", key, page.content)
             self._cache.put_meta(
                 "http",
@@ -280,8 +291,16 @@ class HttpCrawler:
         """Потоковый GET; ``304`` — не ошибка, а подтверждение кэша (см. ниже).
 
         Тело **не** буферизуется целиком до проверки: ``Content-Length`` проверяется до
-        чтения, а поток обрывается сразу при превышении ``max_response_bytes``. Так
-        многогигабайтный артефакт (OVA/образ) не попадает ни в память, ни в retention.
+        чтения, а поток обрывается сразу при превышении потолка. Потолки два:
+
+        * ``max_response_bytes`` — **in-memory** потолок страницы. Свыше него тело уходит
+          в staging-файл **только** если план допускает артефакт (``staging_dir`` +
+          ``max_stream_bytes``), иначе — ``payload_too_large`` (прежнее поведение);
+        * ``max_stream_bytes`` — потоковый потолок допущенного артефакта; выше него —
+          ``payload_too_large`` с удалением staging-файла.
+
+        Память при staging ограничена одним чанком транспорта: файл пишется по мере
+        чтения, ``content`` остаётся пустым, ``head`` — первые 8 KiB.
         """
         httpx = self._import_http()
         cap = self._cap_for(plan)
@@ -304,30 +323,155 @@ class HttpCrawler:
                         f"HTTP {status} для {url!r}: ресурс отсутствует",
                     )
                 response.raise_for_status()
+                # P6: класс ответа известен только здесь (заголовки получены): страница —
+                # прежний in-memory потолок, допущенный артефакт — staging-файл.
+                staging_dir = self._staging_path(
+                    plan, url=url, content_type=response.headers.get("Content-Type")
+                )
+                ceiling = (
+                    cap
+                    if staging_dir is None
+                    else max(cap, int(plan.max_stream_bytes or 0))
+                )
                 declared = response.headers.get("Content-Length")
+                declared_size: int | None = None
                 if declared is not None:
                     try:
                         declared_size = int(declared)
                     except (TypeError, ValueError):
                         declared_size = None
-                    if declared_size is not None and declared_size > cap:
+                    if declared_size is not None and declared_size > ceiling:
                         raise CrawlPayloadTooLarge(
                             f"ответ {url!r}: Content-Length {declared_size} байт "
-                            f"> лимита {cap} (payload_too_large)"
+                            f"> лимита {ceiling} (payload_too_large)"
                         )
-                buffer = bytearray()
-                for chunk in response.iter_bytes():
-                    if len(buffer) + len(chunk) > cap:
-                        raise CrawlPayloadTooLarge(
-                            f"ответ {url!r}: тело превысило лимит {cap} байт "
-                            "(payload_too_large)"
-                        )
-                    buffer.extend(chunk)
-                return self._page_from_response(response, bytes(buffer))
+                content, staged_path, head = self._read_stream(
+                    url,
+                    response,
+                    plan,
+                    cap,
+                    staging_dir,
+                    # Известный размер свыше in-memory потолка — сразу в файл: не
+                    # буферизуем ``cap`` байт ради последующей записи их на диск.
+                    stage_first=(
+                        staging_dir is not None
+                        and declared_size is not None
+                        and declared_size > cap
+                    ),
+                )
+                return self._page_from_response(
+                    response, content, staged_path=staged_path, head=head
+                )
         except CrawlError:
             raise
         except Exception as exc:  # noqa: BLE001 - унификация ошибок адаптера
             raise CrawlError(f"HTTP-фетч {url!r} не удался: {exc}") from exc
+
+    def _staging_path(
+        self, plan: FetchPlan, *, url: str, content_type: str | None = None
+    ) -> Path | None:
+        """Каталог staging, если план допускает файловый приём **артефакта**, иначе ``None``.
+
+        Оба поля плана обязательны: ``staging_dir`` без ``max_stream_bytes`` не даёт
+        потолка, а значит не даёт и права писать файл. Класс ответа — «артефакт-контейнер»
+        (URL-суффикс либо ``Content-Type`` из заявленного набора): страница свыше
+        ``max_response_bytes`` по-прежнему получает ``payload_too_large`` байт-в-байт.
+        """
+        if plan.staging_dir is None or plan.max_stream_bytes is None:
+            return None
+        if not (
+            is_attachment_url(url, plan.attachment_formats)
+            or is_attachment_content_type(content_type, plan.attachment_formats)
+        ):
+            return None
+        return Path(plan.staging_dir)
+
+    def _read_stream(
+        self,
+        url: str,
+        response: Any,
+        plan: FetchPlan,
+        cap: int,
+        staging_dir: Path | None,
+        *,
+        stage_first: bool = False,
+    ) -> tuple[bytes, str | None, bytes | None]:
+        """Читает поток в память **или** в staging-файл (переключение на лету).
+
+        Возвращает ``(content, staged_path, head)``: при staging ``content == b""``,
+        ``staged_path`` — файл, ``head`` — первые 8 KiB (сниф без чтения файла). При
+        обычном пути ``staged_path``/``head`` — ``None`` (байт-в-байт прежнее поведение).
+        Неизвестный ``Content-Length`` переключает на файл по факту превышения ``cap``;
+        известный размер свыше ``cap`` (``stage_first``) — сразу в файл, без буферизации
+        ``cap`` байт.
+        """
+        limit = (
+            int(plan.max_stream_bytes)
+            if staging_dir is not None and plan.max_stream_bytes is not None
+            else None
+        )
+        buffer = bytearray()
+        head = bytearray()
+        staged_path: str | None = None
+        handle: Any = None
+        total = 0
+        try:
+            if stage_first:
+                assert staging_dir is not None
+                staged_path, handle = self._open_stage(staging_dir)
+            for chunk in response.iter_bytes():
+                total += len(chunk)
+                if len(head) < BINARY_SNIFF_BYTES:
+                    head.extend(chunk[: BINARY_SNIFF_BYTES - len(head)])
+                if staged_path is None and total <= cap:
+                    buffer.extend(chunk)
+                    continue
+                if staged_path is None:
+                    # Переключение на файл: потолок памяти уже превышен, но артефакт
+                    # вправе быть больше страницы.
+                    if staging_dir is None or limit is None:
+                        raise CrawlPayloadTooLarge(
+                            f"ответ {url!r}: тело превысило лимит {cap} байт "
+                            "(payload_too_large)"
+                        )
+                    if total > limit:
+                        raise CrawlPayloadTooLarge(
+                            f"ответ {url!r}: тело превысило лимит артефакта {limit} "
+                            "байт (payload_too_large)"
+                        )
+                    staged_path, handle = self._open_stage(staging_dir)
+                    handle.write(buffer)
+                    buffer = bytearray()
+                elif limit is not None and total > limit:
+                    raise CrawlPayloadTooLarge(
+                        f"ответ {url!r}: тело превысило лимит артефакта {limit} "
+                        "байт (payload_too_large)"
+                    )
+                handle.write(chunk)
+        except BaseException:
+            if handle is not None:
+                handle.close()
+            if staged_path is not None:
+                try:
+                    Path(staged_path).unlink(missing_ok=True)
+                except OSError:
+                    pass
+            raise
+        else:
+            if handle is not None:
+                handle.close()
+        if staged_path is not None:
+            return b"", staged_path, bytes(head)
+        return bytes(buffer), None, None
+
+    @staticmethod
+    def _open_stage(staging_dir: Path) -> tuple[str, Any]:
+        """Создаёт staging-файл в каталоге вызывающего (``mkstemp`` — без гонок имён)."""
+        staging_dir.mkdir(parents=True, exist_ok=True)
+        fd, name = tempfile.mkstemp(
+            dir=str(staging_dir), prefix="stage-", suffix=".part"
+        )
+        return name, os.fdopen(fd, "wb")
 
     def _headers(self, plan: FetchPlan | None = None) -> dict[str, str]:
         """Заголовки запроса: ``Accept``/``Accept-Language``, ``User-Agent`` и валидаторы.
@@ -349,12 +493,19 @@ class HttpCrawler:
         return headers
 
     @staticmethod
-    def _page_from_response(response: Any, content: bytes | None = None) -> RawPage:
+    def _page_from_response(
+        response: Any,
+        content: bytes | None = None,
+        *,
+        staged_path: str | None = None,
+        head: bytes | None = None,
+    ) -> RawPage:
         """Отображает объект ответа ``httpx`` в ``RawPage`` (финальный URL, статус, тип).
 
         ``content`` — уже прочитанное потоковое тело; ``None`` (прямой вызов/тест) —
         ``response.content``. Заголовки ``ETag``/``Last-Modified`` сохраняются как
-        валидаторы для следующего условного запроса.
+        валидаторы для следующего условного запроса. ``staged_path``/``head`` — файловый
+        приём артефакта (P6): при заданном ``staged_path`` тело в память не попадает.
         """
         raw_type = response.headers.get("Content-Type")
         etag = response.headers.get("ETag")
@@ -369,6 +520,8 @@ class HttpCrawler:
             content_type=raw_type or None,
             etag=etag or None,
             last_modified=last_modified or None,
+            staged_path=staged_path,
+            head=head,
         )
 
     def _page_not_modified(self, url: str, response: Any) -> RawPage:

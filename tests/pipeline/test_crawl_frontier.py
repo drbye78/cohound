@@ -255,3 +255,97 @@ def test_max_response_bytes_rejects_non_positive() -> None:
         CrawlRunConfig(max_response_bytes=0)
     with pytest.raises(ValidationError):
         DomainProfile(max_response_bytes=0)
+
+
+# --------------------------------------------------------------------------- #
+# P6: оси допуска контейнеров и границ спуска
+# --------------------------------------------------------------------------- #
+
+
+def test_artifact_axes_defaults_are_digest_neutral() -> None:
+    """Дефолты app не делают дайджест другим: ключей нет без явного значения (§13)."""
+    limits = resolve_crawl_limits(URL, app=APP)
+    assert limits.max_artifact_bytes == 268_435_456
+    assert limits.attachment_formats == ("zip", "7z", "rar")
+    assert limits.archive_max_member_bytes == 67_108_864
+    assert limits.archive_max_uncompressed_bytes == 268_435_456
+    assert limits.archive_max_members is None
+    payload = limits.as_dict()
+    for key in (
+        "max_artifact_bytes",
+        "attachment_formats",
+        "archive_max_member_bytes",
+        "archive_max_uncompressed_bytes",
+        "archive_max_members",
+        "archive_descent",
+    ):
+        assert key not in payload
+
+
+def test_artifact_axes_explicit_enter_as_dict() -> None:
+    limits = resolve_crawl_limits(
+        URL,
+        app=CrawlConfig(),
+        run=CrawlRunConfig(
+            max_artifact_bytes=1_000_000,
+            attachment_formats=["zip"],
+            archive_max_member_bytes=2_000_000,
+            archive_max_uncompressed_bytes=3_000_000,
+            archive_max_members=7,
+            archive_descent="plan",
+        ),
+    )
+    payload = limits.as_dict()
+    assert payload["max_artifact_bytes"] == 1_000_000
+    assert payload["attachment_formats"] == ["zip"]
+    assert payload["archive_max_member_bytes"] == 2_000_000
+    assert payload["archive_max_uncompressed_bytes"] == 3_000_000
+    assert payload["archive_max_members"] == 7
+    assert payload["archive_descent"] == "plan"
+
+
+def test_artifact_axes_precedence_app_run_site() -> None:
+    app = CrawlConfig(max_artifact_bytes=1000, attachment_formats=["zip"])
+    run = CrawlRunConfig(max_artifact_bytes=2000, attachment_formats=["7z"])
+    site = DomainProfile(max_artifact_bytes=3000, attachment_formats=["rar"])
+    assert (
+        resolve_crawl_limits(URL, app=app, run=run, profiles={"example.com": site})
+        .max_artifact_bytes
+        == 3000
+    )
+    assert (
+        resolve_crawl_limits(URL, app=app, run=run, profiles={}).max_artifact_bytes
+        == 2000
+    )
+    assert (
+        resolve_crawl_limits(URL, app=app, run=None, profiles={}).max_artifact_bytes
+        == 1000
+    )
+    assert (
+        resolve_crawl_limits(URL, app=app, run=run, profiles={"example.com": site})
+        .attachment_formats
+        == ("rar",)
+    )
+    assert (
+        resolve_crawl_limits(URL, app=app, run=run, profiles={}).attachment_formats
+        == ("7z",)
+    )
+
+
+def test_attachment_formats_normalized_and_validated() -> None:
+    assert CrawlConfig(attachment_formats=[".ZIP", "Zip"]).attachment_formats == ("zip",)
+    assert CrawlRunConfig(attachment_formats=["7z"]).attachment_formats == ["7z"]
+    assert DomainProfile(attachment_formats=["RAR"]).attachment_formats == ["rar"]
+    with pytest.raises(ValidationError):
+        CrawlConfig(attachment_formats=["gz"])
+    with pytest.raises(ValidationError):
+        CrawlRunConfig(attachment_formats=["ova"])
+    with pytest.raises(ValidationError):
+        DomainProfile(attachment_formats=["iso"])
+
+
+def test_archive_descent_enum_validation() -> None:
+    assert CrawlConfig().archive_descent.value == "full"
+    assert CrawlRunConfig(archive_descent="plan").archive_descent.value == "plan"
+    with pytest.raises(ValidationError):
+        CrawlRunConfig(archive_descent="deep")

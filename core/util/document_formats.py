@@ -12,20 +12,35 @@
 
 Поддерживаемые форматы совпадают с реестром экстрактора документов
 (``core.adapters.extract_document.SUPPORTED_FORMATS``): PDF и Office Open XML.
+
+**Контейнеры (архивы) — отдельный класс допуска (P6).** ``zip``/``7z``/``rar`` — не
+документы, а **артефакты-контейнеры**, из которых спуск достаёт документы-члены. Заявленный
+набор приходит из конфига (``crawl.attachment_formats``, дефолт ``("zip", "7z", "rar")``):
+незaявленный контейнер (``.ova``/``.iso``/``.gz``/``.tar``) остаётся обычным бинарным
+артефактом и отсекается как прежде. OOXML (``.docx``/``.pptx``/``.xlsx``) — это тоже ZIP,
+но **документ**, а не контейнер: различаем по маркеру ``[Content_Types].xml``.
 """
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from pathlib import PurePosixPath
 from urllib.parse import unquote, urlsplit
 
 __all__ = [
+    "ATTACHMENT_CONTENT_TYPES",
+    "ATTACHMENT_SUFFIXES",
     "BINARY_SNIFF_BYTES",
     "DOCUMENT_CONTENT_TYPES",
     "DOCUMENT_SUFFIXES",
+    "SUPPORTED_ARCHIVE_FORMATS",
+    "classify_archive_bytes",
     "document_content_type",
     "document_suffix",
+    "is_attachment_content_type",
+    "is_attachment_url",
     "is_textual_content_type",
+    "normalize_attachment_formats",
     "unsupported_binary_reason",
 ]
 
@@ -64,6 +79,38 @@ DOCUMENT_CONTENT_TYPES: dict[str, str] = {
     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ".xlsx",
 }
 
+#: Форматы контейнеров, для которых у coHound есть читатель (дефолт оси
+#: ``crawl.attachment_formats``). Порядок — канонический (для ``as_dict``/дайджеста).
+SUPPORTED_ARCHIVE_FORMATS: tuple[str, ...] = ("zip", "7z", "rar")
+
+#: Суффиксы контейнеров — объединение всех поддерживаемых форматов. Допуск по URL
+#: **всегда** сужается заявленным набором (:func:`is_attachment_url`); константа нужна
+#: только как дефолт «все поддерживаемые».
+ATTACHMENT_SUFFIXES: tuple[str, ...] = tuple(f".{fmt}" for fmt in SUPPORTED_ARCHIVE_FORMATS)
+
+#: MIME-тип → формат контейнера. ``application/octet-stream`` намеренно отсутствует:
+#: общий бинарный тип не доказывает контейнер (тогда класс решает магия байтов).
+ATTACHMENT_CONTENT_TYPES: dict[str, str] = {
+    "application/zip": "zip",
+    "application/x-zip": "zip",
+    "application/x-zip-compressed": "zip",
+    "application/x-7z-compressed": "7z",
+    "application/x-7z": "7z",
+    "application/x-rar": "rar",
+    "application/x-rar-compressed": "rar",
+    "application/vnd.rar": "rar",
+}
+
+#: Магия контейнеров: первый префикс — основной, остальные — варианты (пустой ZIP и RAR5).
+_ARCHIVE_MAGIC: dict[str, tuple[bytes, ...]] = {
+    "zip": (b"PK\x03\x04", b"PK\x05\x06"),
+    "7z": (b"7z\xbc\xaf\x27\x1c",),
+    "rar": (b"Rar!\x1a\x07",),
+}
+
+#: Маркер OOXML внутри ZIP: наличие означает документ, а не контейнер.
+_OOXML_MARKER = b"[Content_Types].xml"
+
 
 def document_suffix(url_or_name: str) -> str | None:
     """Документный суффикс из basename URL/имени файла или ``None`` (pre-fetch-детект).
@@ -93,6 +140,95 @@ def _mime(content_type: str | None) -> str:
     if not content_type:
         return ""
     return content_type.split(";", 1)[0].strip().lower()
+
+
+# --------------------------------------------------------------------------- #
+# Контейнеры (архивы): класс допуска «артефакт» (P6)
+# --------------------------------------------------------------------------- #
+
+
+def normalize_attachment_formats(
+    formats: Iterable[str] | None = None,
+) -> tuple[str, ...]:
+    """Канонический набор заявленных форматов-контейнеров (нижний регистр, без точек).
+
+    ``None`` → все поддерживаемые (:data:`SUPPORTED_ARCHIVE_FORMATS`). Пустой набор
+    допустим (контейнеры не заявлены — артефактов нет). Неподдерживаемый формат —
+    ``ValueError``: конфиг не должен молча обещать несуществующий читатель.
+    """
+    if formats is None:
+        return SUPPORTED_ARCHIVE_FORMATS
+    normalized: list[str] = []
+    for raw in formats:
+        value = str(raw).strip().lower().lstrip(".")
+        if not value:
+            raise ValueError("attachment_formats: пустой формат контейнера")
+        if value not in SUPPORTED_ARCHIVE_FORMATS:
+            raise ValueError(
+                f"attachment_formats: неподдерживаемый формат «{raw}»; "
+                f"ожидается один из {list(SUPPORTED_ARCHIVE_FORMATS)}"
+            )
+        if value not in normalized:
+            normalized.append(value)
+    return tuple(normalized)
+
+
+def is_attachment_url(
+    url: str, formats: Iterable[str] | None = None
+) -> bool:
+    """Контейнер ли ``url`` по суффиксу basename (pre-fetch-детект).
+
+    Учитывается **только** заявленный набор ``formats`` (:func:`normalize_attachment_formats`):
+    ``.ova``/``.iso``/``.gz``/``.tar`` при дефолтном наборе — не артефакты.
+    """
+    declared = normalize_attachment_formats(formats)
+    if not declared:
+        return False
+    path = urlsplit(url).path or url
+    suffix = PurePosixPath(unquote(path)).suffix.lower()
+    return bool(suffix) and suffix.lstrip(".") in declared
+
+
+def is_attachment_content_type(
+    content_type: str | None, formats: Iterable[str] | None = None
+) -> bool:
+    """Контейнер ли ответ по ``Content-Type`` (post-fetch-детект; суффикс-less URL).
+
+    Общий бинарный тип (``application/octet-stream``) контейнером **не** считается:
+    его класс решает магия байтов. Не заявленный формат → ``False``.
+    """
+    declared = normalize_attachment_formats(formats)
+    fmt = ATTACHMENT_CONTENT_TYPES.get(_mime(content_type))
+    return fmt is not None and fmt in declared
+
+
+def _container_magic(head: bytes) -> str | None:
+    """Формат контейнера по магии первых байт (``zip``/``7z``/``rar``) либо ``None``."""
+    for fmt, magics in _ARCHIVE_MAGIC.items():
+        if any(head.startswith(magic) for magic in magics):
+            return fmt
+    return None
+
+
+def classify_archive_bytes(head: bytes) -> str | None:
+    """Формат контейнера по голове байтов: ``"zip"``/``"7z"``/``"rar"`` либо ``None``.
+
+    ZIP-магия (``PK\\x03\\x04``/``PK\\x05\\x06``) **и** отсутствие маркера OOXML
+    ``[Content_Types].xml``: OOXML — документ (его разбирает экстрактор), а не контейнер
+    для спуска. ``7z``/RAR4/RAR5 определяются по собственной магии (OOXML-маркер к ним
+    неприменим). Прочие форматы (tar/OVA/ISO/gzip) → ``None``: они не контейнеры допуска.
+
+    Смотрится **только** голова (:data:`BINARY_SNIFF_BYTES`): вызывающему можно передать
+    и целое тело — поиск маркера не пойдёт по членам контейнера (иначе zip с docx-членом
+    ложно считался бы документом).
+    """
+    head = head[:BINARY_SNIFF_BYTES]
+    fmt = _container_magic(head[:8])
+    if fmt is None:
+        return None
+    if fmt == "zip" and _OOXML_MARKER in head:
+        return None
+    return fmt
 
 
 def is_textual_content_type(content_type: str | None) -> bool:
@@ -140,14 +276,19 @@ def unsupported_binary_reason(
     *,
     url: str | None = None,
     content_type: str | None = None,
+    attachment_formats: Iterable[str] | None = None,
 ) -> str | None:
     """Причина «бинарный артефакт — не документ» либо ``None`` (payload разрешён).
 
-    Порядок (осознанный, чтобы OVA/архивы не доходили до экстрактора):
+    Порядок (осознанный, чтобы OVA/образы не доходили до экстрактора):
 
     1. **Документный allowlist** (суффикс/MIME из этого модуля) — разрешаем: магию
        конкретного формата решает экстрактор;
     2. **Магия** ``%PDF-``/ZIP — разрешаем (суффикс-less ``document.pdf``);
+    2b. **Магия заявленного контейнера** (``zip``/``7z``/``rar`` из
+       ``attachment_formats``) — разрешаем: это допущенный артефакт, а не бинарный мусор
+       (решение о спуске принимает pipeline). Незаявленный контейнер сюда не попадает и
+       отсекается ниже как бинарный;
     3. **NUL в первых 8 KiB** — бинарный артефакт (даже при ``text/plain``);
     4. **text/* / xhtml / json / xml / HTML-sniff** — разрешаем (если NUL не найден);
     5. иначе — UTF-8 + control-ratio; провал любого признака → бинарный.
@@ -163,6 +304,9 @@ def unsupported_binary_reason(
         return None
     head = content[:BINARY_SNIFF_BYTES]
     if _pdf_magic(head) or _zip_magic(content):
+        return None
+    declared = normalize_attachment_formats(attachment_formats)
+    if declared and _container_magic(head[:8]) in declared:
         return None
     if b"\x00" in head:
         return "binary payload: NUL в первых 8192 байт"

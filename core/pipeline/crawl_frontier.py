@@ -39,9 +39,19 @@ from urllib.parse import unquote, urlsplit
 
 from core.config.deploy import CrawlConfig
 from core.config.domain_profiles import DomainProfile
-from core.domain.enums import DocumentLevel
-from core.domain.models import DEFAULT_MAX_RESPONSE_BYTES, CrawlRunConfig
+from core.domain.enums import ArchiveDescent, DocumentLevel
+from core.domain.models import (
+    DEFAULT_ARCHIVE_MAX_MEMBER_BYTES,
+    DEFAULT_ARCHIVE_MAX_UNCOMPRESSED_BYTES,
+    DEFAULT_MAX_ARTIFACT_BYTES,
+    DEFAULT_MAX_RESPONSE_BYTES,
+    CrawlRunConfig,
+)
 from core.pipeline.fetch_plan import _host_matches, select_domain_profile
+from core.util.document_formats import (
+    SUPPORTED_ARCHIVE_FORMATS,
+    normalize_attachment_formats,
+)
 from core.util.security import validate_url
 
 __all__ = [
@@ -76,6 +86,23 @@ class CrawlLimits:
     #: одном из слоёв (только тогда ключ попадает в ``as_dict``/дайджест).
     max_response_bytes: int = DEFAULT_MAX_RESPONSE_BYTES
     max_response_bytes_explicit: bool = False
+    #: P6: потоковый потолок допущенного артефакта-контейнера (байты). Страница остаётся
+    #: под ``max_response_bytes``; артефакт свыше него уходит в staging-файл, а не в RAM.
+    max_artifact_bytes: int = DEFAULT_MAX_ARTIFACT_BYTES
+    max_artifact_bytes_explicit: bool = False
+    #: P6: заявленные форматы-контейнеры (класс «артефакт»). Дефолт — все поддерживаемые;
+    #: сужение набора делает незaявленный контейнер обычным бинарным артефактом.
+    attachment_formats: tuple[str, ...] = SUPPORTED_ARCHIVE_FORMATS
+    attachment_formats_explicit: bool = False
+    #: P6: границы спуска в контейнер (провенанс/дайджест; исполняет следующий слой).
+    archive_max_member_bytes: int = DEFAULT_ARCHIVE_MAX_MEMBER_BYTES
+    archive_max_member_bytes_explicit: bool = False
+    archive_max_uncompressed_bytes: int = DEFAULT_ARCHIVE_MAX_UNCOMPRESSED_BYTES
+    archive_max_uncompressed_bytes_explicit: bool = False
+    archive_max_members: int | None = None
+    archive_max_members_explicit: bool = False
+    archive_descent: ArchiveDescent = ArchiveDescent.FULL
+    archive_descent_explicit: bool = False
     max_depth: int = 0
     max_documents: int | None = None
     exclude_paths: tuple[str, ...] = ()
@@ -105,6 +132,21 @@ class CrawlLimits:
             payload["extract_max_tasks_per_child"] = self.extract_max_tasks_per_child
         if self.max_response_bytes_explicit:
             payload["max_response_bytes"] = self.max_response_bytes
+        # P6: новые оси — только когда заданы (дефолт не меняет дайджест старых прогонов).
+        if self.max_artifact_bytes_explicit:
+            payload["max_artifact_bytes"] = self.max_artifact_bytes
+        if self.attachment_formats_explicit:
+            payload["attachment_formats"] = list(self.attachment_formats)
+        if self.archive_max_member_bytes_explicit:
+            payload["archive_max_member_bytes"] = self.archive_max_member_bytes
+        if self.archive_max_uncompressed_bytes_explicit:
+            payload["archive_max_uncompressed_bytes"] = (
+                self.archive_max_uncompressed_bytes
+            )
+        if self.archive_max_members_explicit and self.archive_max_members is not None:
+            payload["archive_max_members"] = self.archive_max_members
+        if self.archive_descent_explicit:
+            payload["archive_descent"] = self.archive_descent.value
         return payload
 
 
@@ -115,6 +157,25 @@ def _pick(app: object, run: object, site: object) -> object:
     if run is not None:
         return run
     return app
+
+
+def _app_explicit(app: object, name: str) -> bool:
+    """Задана ли ось **явно** в app-слое (Pydantic ``model_fields_set``).
+
+    Дефолт app не должен делать дайджест другим (байт-идентичность старых прогонов §13).
+    """
+    return name in getattr(app, "model_fields_set", set())
+
+
+def _axis_explicit(
+    app: object, name: str, run_value: object, site_value: object
+) -> bool:
+    """«Явно задано» для оси: site/run-слой не ``None`` либо app-поле передано явно."""
+    return bool(
+        site_value is not None
+        or run_value is not None
+        or _app_explicit(app, name)
+    )
 
 
 def resolve_crawl_limits(
@@ -151,6 +212,27 @@ def resolve_crawl_limits(
     run_exclude_documents = run.exclude_documents if run is not None else None
     run_document_level = (
         getattr(run, "document_level", None) if run is not None else None
+    )
+    # P6: оси допуска контейнеров и границ спуска (та же цепочка app < run < site).
+    run_max_artifact_bytes = (
+        getattr(run, "max_artifact_bytes", None) if run is not None else None
+    )
+    run_attachment_formats = (
+        getattr(run, "attachment_formats", None) if run is not None else None
+    )
+    run_archive_max_member_bytes = (
+        getattr(run, "archive_max_member_bytes", None) if run is not None else None
+    )
+    run_archive_max_uncompressed_bytes = (
+        getattr(run, "archive_max_uncompressed_bytes", None)
+        if run is not None
+        else None
+    )
+    run_archive_max_members = (
+        getattr(run, "archive_max_members", None) if run is not None else None
+    )
+    run_archive_descent = (
+        getattr(run, "archive_descent", None) if run is not None else None
     )
 
     max_workers = _pick(app.max_workers, run_max_workers, site_attr("max_workers"))
@@ -191,6 +273,43 @@ def resolve_crawl_limits(
         run_document_level,
         site_attr("document_level"),
     )
+    # P6: контейнеры. ``None`` на site/run — «наследовать»; app-дефолт всегда есть.
+    app_max_artifact_bytes = getattr(app, "max_artifact_bytes", None)
+    site_max_artifact_bytes = site_attr("max_artifact_bytes")
+    max_artifact_bytes = _pick(
+        app_max_artifact_bytes, run_max_artifact_bytes, site_max_artifact_bytes
+    )
+    app_attachment_formats = getattr(app, "attachment_formats", None)
+    site_attachment_formats = site_attr("attachment_formats")
+    attachment_formats = _pick(
+        app_attachment_formats, run_attachment_formats, site_attachment_formats
+    )
+    app_archive_max_member_bytes = getattr(app, "archive_max_member_bytes", None)
+    site_archive_max_member_bytes = site_attr("archive_max_member_bytes")
+    archive_max_member_bytes = _pick(
+        app_archive_max_member_bytes,
+        run_archive_max_member_bytes,
+        site_archive_max_member_bytes,
+    )
+    app_archive_max_uncompressed_bytes = getattr(
+        app, "archive_max_uncompressed_bytes", None
+    )
+    site_archive_max_uncompressed_bytes = site_attr("archive_max_uncompressed_bytes")
+    archive_max_uncompressed_bytes = _pick(
+        app_archive_max_uncompressed_bytes,
+        run_archive_max_uncompressed_bytes,
+        site_archive_max_uncompressed_bytes,
+    )
+    app_archive_max_members = getattr(app, "archive_max_members", None)
+    site_archive_max_members = site_attr("archive_max_members")
+    archive_max_members = _pick(
+        app_archive_max_members, run_archive_max_members, site_archive_max_members
+    )
+    app_archive_descent = getattr(app, "archive_descent", None)
+    site_archive_descent = site_attr("archive_descent")
+    archive_descent = _pick(
+        app_archive_descent, run_archive_descent, site_archive_descent
+    )
 
     return CrawlLimits(
         max_workers=None if max_workers is None else int(max_workers),  # type: ignore[arg-type]
@@ -208,6 +327,57 @@ def resolve_crawl_limits(
             else int(max_response_bytes)  # type: ignore[arg-type]
         ),
         max_response_bytes_explicit=max_response_bytes_explicit,
+        max_artifact_bytes=(
+            DEFAULT_MAX_ARTIFACT_BYTES
+            if max_artifact_bytes is None
+            else int(max_artifact_bytes)  # type: ignore[arg-type]
+        ),
+        max_artifact_bytes_explicit=_axis_explicit(
+            app, "max_artifact_bytes", run_max_artifact_bytes, site_max_artifact_bytes
+        ),
+        attachment_formats=normalize_attachment_formats(
+            attachment_formats  # type: ignore[arg-type]
+        ),
+        attachment_formats_explicit=_axis_explicit(
+            app,
+            "attachment_formats",
+            run_attachment_formats,
+            site_attachment_formats,
+        ),
+        archive_max_member_bytes=(
+            DEFAULT_ARCHIVE_MAX_MEMBER_BYTES
+            if archive_max_member_bytes is None
+            else int(archive_max_member_bytes)  # type: ignore[arg-type]
+        ),
+        archive_max_member_bytes_explicit=_axis_explicit(
+            app,
+            "archive_max_member_bytes",
+            run_archive_max_member_bytes,
+            site_archive_max_member_bytes,
+        ),
+        archive_max_uncompressed_bytes=(
+            DEFAULT_ARCHIVE_MAX_UNCOMPRESSED_BYTES
+            if archive_max_uncompressed_bytes is None
+            else int(archive_max_uncompressed_bytes)  # type: ignore[arg-type]
+        ),
+        archive_max_uncompressed_bytes_explicit=_axis_explicit(
+            app,
+            "archive_max_uncompressed_bytes",
+            run_archive_max_uncompressed_bytes,
+            site_archive_max_uncompressed_bytes,
+        ),
+        archive_max_members=(
+            None if archive_max_members is None else int(archive_max_members)  # type: ignore[arg-type]
+        ),
+        archive_max_members_explicit=_axis_explicit(
+            app, "archive_max_members", run_archive_max_members, site_archive_max_members
+        ),
+        archive_descent=ArchiveDescent(
+            ArchiveDescent.FULL if archive_descent is None else archive_descent
+        ),
+        archive_descent_explicit=_axis_explicit(
+            app, "archive_descent", run_archive_descent, site_archive_descent
+        ),
         max_depth=0 if max_depth is None else int(max_depth),  # type: ignore[arg-type]
         max_documents=(
             None if max_documents is None else int(max_documents)  # type: ignore[arg-type]
