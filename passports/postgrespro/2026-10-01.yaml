@@ -12,9 +12,17 @@ edition_assessed: "Enterprise / Certified"
 version: "Postgres Pro Enterprise 18.4.1 (2026); Standard 18.4.1 (18.06.2026)"
 jurisdiction: RU
 doc_domains:
-  - "postgrespro.ru"
-  - "postgrespro.ru/products/postgrespro/enterprise"
+  # Порядок — **авторский** и значимый: seed-корни дренятся в этом порядке, а не в
+  # лексикографическом (execution_change §13). Docs-корень первым: это высшая ценность для
+  # карты возможностей продукта, а корень, который идёт последним, может не выполниться
+  # (живой прогон 22.10: портал 800 страниц шёл первым и docs не начался вовсе).
   - "postgrespro.ru/docs"
+  - "postgrespro.ru/products/postgrespro/enterprise"
+  - "postgrespro.ru"
+  # Учебные материалы (курсы/раздатки) — вспомогательный контент, поэтому последним и со
+  # своим профилем-потолком. Объявлен явно: до 22.10 он попадал в партицию только как
+  # «любой поддомен» postgrespro.ru и съедал бюджет корня (664 элемента).
+  - "edu.postgrespro.ru"
 satellites:
   # Установлен: pg_probackup перечислен в функциях/стеке; роль backup (имя инструмента).
   - role: backup

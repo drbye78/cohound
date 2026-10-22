@@ -117,7 +117,14 @@ def test_frontier_scope_host_and_path_boundary() -> None:
     assert frontier.in_scope("https://h/documents/x") is True
     assert frontier.in_scope("https://h/documents") is True
     assert frontier.in_scope("https://h/documents-archive") is False
-    assert frontier.in_scope("https://sub.h/documents/x") is True  # поддомен
+    # C (execution_change): поддомен больше **не** в scope по одному факту поддоменности —
+    # только если объявлен оператором (`scope_hosts`). Прежний пин (поддомен всегда in
+    # scope) снят намеренно: именно он позволял `edu.postgrespro.ru` съесть бюджет
+    # `postgrespro.ru`.
+    assert frontier.in_scope("https://sub.h/documents/x") is False
+    declared = Frontier("https://h/documents", limits, scope_hosts=["sub.h"])
+    assert declared.in_scope("https://sub.h/documents/x") is True
+    assert declared.in_scope("https://other.h/documents/x") is False
     assert frontier.in_scope("https://other/documents/x") is False
     assert frontier.in_scope("mailto:x@y") is False
     assert frontier.in_scope("https://h/documents#frag") is True
@@ -178,6 +185,107 @@ def test_frontier_rejects_encoded_dot_dot_traversal() -> None:
     assert decoded_scope_path("/documents/a%20b") == "/documents/a b"
     assert decoded_scope_path("/documents/%2e%2e/x") is None
 
+
+# --------------------------------------------------------------------------- #
+# (C) scope = объявленные хосты (execution_change §13): поддомен ≠ автоматически in scope
+# --------------------------------------------------------------------------- #
+
+def test_frontier_undeclared_subdomain_is_out_of_scope_and_counted() -> None:
+    """C: необъявленный поддомен вне scope корня, отказ **видим** (счётчик по хостам).
+
+    Живой прогон 22.10: ``postgrespro.ru`` израсходовал 800-страничный бюджет на
+    ``edu.postgrespro.ru``, которого оператор не объявлял. Теперь такой URL отвергается,
+    а число отвергнутых поддоменов по хостам попадает в провенанс корня.
+    """
+    frontier = Frontier("https://example.org/", CrawlLimits(max_depth=3))
+    assert frontier.in_scope("https://edu.example.org/a.html") is False
+    assert frontier.discover("https://edu.example.org/a.html", 1) is False
+    # Дедуп по URL: повторное предложение того же URL счётчик не удваивает.
+    assert frontier.discover("https://edu.example.org/a.html", 1) is False
+    assert frontier.discover("https://edu.example.org/b.html", 1) is False
+    assert frontier.discover("https://career.example.org/c.html", 1) is False
+    assert frontier.out_of_scope_subdomains == {
+        "edu.example.org": 2,
+        "career.example.org": 1,
+    }
+    assert frontier.out_of_scope_subdomain_examples["edu.example.org"] == [
+        "https://edu.example.org/a.html",
+        "https://edu.example.org/b.html",
+    ]
+    # Корневой хост и его ``www.``-вариант — не поддомены, в счётчик не попадают.
+    assert frontier.discover("https://example.org/ok", 1) is True
+    assert frontier.discover("https://www.example.org/ok", 1) is True
+    assert "example.org" not in frontier.out_of_scope_subdomains
+    assert "www.example.org" not in frontier.out_of_scope_subdomains
+    # Принятые элементы с «чужого» хоста видны отдельно (здесь — только www-вариант,
+    # который нормализуется к хосту корня и потому не считается чужим).
+    assert frontier.accepted_foreign_hosts == {}
+
+def test_frontier_declared_subdomain_in_scope_and_counted_as_foreign_host() -> None:
+    """C: объявленный поддомен (профиль/корень) в scope; его элементы считаются отдельно."""
+    frontier = Frontier(
+        "https://example.org/",
+        CrawlLimits(max_depth=3),
+        scope_hosts=["docs.example.org"],
+    )
+    assert frontier.in_scope("https://docs.example.org/guide") is True
+    assert frontier.discover("https://docs.example.org/guide", 1) is True
+    assert frontier.accepted_foreign_hosts == {"docs.example.org": 1}
+    # Объявлен только ``docs`` — прочие поддомены по-прежнему вне scope.
+    assert frontier.in_scope("https://edu.example.org/a.html") is False
+
+def test_frontier_www_equivalence_is_preserved_both_ways() -> None:
+    """``www.`` эквивалентен базовому хосту с обеих сторон (jatoba.ru / www.gaz-is.ru)."""
+    bare_root = Frontier("https://jatoba.ru/", CrawlLimits(max_depth=2))
+    assert bare_root.in_scope("https://jatoba.ru/") is True
+    assert bare_root.in_scope("https://www.jatoba.ru/about") is True
+
+    www_root = Frontier("https://www.gaz-is.ru/", CrawlLimits(max_depth=2))
+    assert www_root.in_scope("https://gaz-is.ru/about") is True
+    assert www_root.in_scope("https://www.gaz-is.ru/about") is True
+    # Другой поддомен того же вендора — всё равно вне scope (объявлен только базовый хост).
+    assert www_root.in_scope("https://shop.gaz-is.ru/about") is False
+
+    # ``www.`` в самом объявлении хоста нормализуется (объявлен ``www.docs.example.org``).
+    declared = Frontier(
+        "https://example.org/",
+        CrawlLimits(max_depth=2),
+        scope_hosts=["www.docs.example.org"],
+    )
+    assert declared.in_scope("https://docs.example.org/x") is True
+
+def test_frontier_terminal_artifact_still_honours_declared_host_scope() -> None:
+    """``terminal_artifact=True`` обходит path-prefix, но **не** host scope (C)."""
+    limits = CrawlLimits(max_depth=3)
+    frontier = Frontier("https://example.org/docs", limits)
+    # Артефакт вне path-prefix на своём хосте — допущен (P6b).
+    assert frontier.in_scope("https://example.org/files/report.pdf") is False
+    assert frontier.in_scope(
+        "https://example.org/files/report.pdf", terminal_artifact=True
+    ) is True
+    # Артефакт на необъявленном поддомене — вне scope даже как терминальный артефакт.
+    assert frontier.in_scope(
+        "https://edu.example.org/files/report.pdf", terminal_artifact=True
+    ) is False
+    declared = Frontier(
+        "https://example.org/docs", limits, scope_hosts=["files.example.org"]
+    )
+    assert declared.in_scope(
+        "https://files.example.org/report.pdf", terminal_artifact=True
+    ) is True
+
+def test_frontier_with_limits_keeps_scope_and_counters() -> None:
+    """Клон frontier не теряет scope-хосты и счётчики поддоменов (D4-seam)."""
+    frontier = Frontier(
+        "https://example.org/", CrawlLimits(max_depth=3), scope_hosts=["docs.example.org"]
+    )
+    frontier.discover("https://edu.example.org/a.html", 1)
+    frontier.discover("https://docs.example.org/a.html", 1)
+    clone = frontier.with_limits(CrawlLimits(max_depth=1))
+    assert clone.in_scope("https://docs.example.org/b.html") is True
+    assert clone.in_scope("https://edu.example.org/b.html") is False
+    assert clone.out_of_scope_subdomains == {"edu.example.org": 1}
+    assert clone.accepted_foreign_hosts == {"docs.example.org": 1}
 
 # --------------------------------------------------------------------------- #
 # (N5) блэклист: tolerance ведущего слэша; document-basename caveat

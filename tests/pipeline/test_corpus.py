@@ -3865,7 +3865,9 @@ def test_executor_top_level_max_attempts_exhausted_not_submitted(tmp_path: Path)
 def test_executor_root_order_matches_local(tmp_path: Path) -> None:
     """P3-A2: корни дренируются в порядке ``url_map`` — ingest-порядок = локальный.
 
-    URL сортируются лексикографически; ``zzz.test`` идёт после ``feed.test``, поэтому
+    ``url_map`` теперь хранит **авторский** порядок (execution_change §13: ``sorted()``
+    снят — корень, идущий последним, мог не выполниться вовсе). Здесь URL уже переданы в
+    нужном порядке (top → feed → zzz), поэтому ``zzz.test`` идёт после ``feed.test``, и
     записи каталога обязаны встать МЕЖДУ top-level URL (в месте каталога). Однопутевой
     product-цикл делает это по построению — трюк с interleaving больше не нужен.
     """
@@ -4181,13 +4183,15 @@ def test_sitemap_multi_root_resume_budget_counts_shared_url_once(tmp_path: Path)
         )
         assert {i.url for i in _items(store)} >= {HOST_SCOPE_ROOT, SHARED_DURABLE}
 
-        # Второй прогон: host-корень идёт первым (сортировка URL) и забирает оба durable-URL;
-        # вложенному корню бюджет не заряжается повторно.
+        # Второй прогон: host-корень идёт первым и забирает оба durable-URL; вложенному
+        # корню бюджет не заряжается повторно. Порядок теперь **авторский**
+        # (execution_change §13: `sorted()` снят), поэтому он объявлен в списке явно —
+        # раньше его давала лексикографическая сортировка, и пин молча зависел от неё.
         crawler = _Crawler({PATH_SCOPE_ROOT: b"path seed"})
         result = _build(
             tmp_path,
             pages={},
-            urls={"p1": [PATH_SCOPE_ROOT, HOST_SCOPE_ROOT]},
+            urls={"p1": [HOST_SCOPE_ROOT, PATH_SCOPE_ROOT]},
             crawler=crawler,
             domain_profiles={
                 "docs.test": DomainProfile(max_documents=5),
@@ -6834,5 +6838,220 @@ def test_revalidate_cap_split_no_false_error_without_cappable_items(
             "revalidate_max_documents" in error and "split" in error
             for error in result.errors
         )
+    finally:
+        store.close()
+
+# --------------------------------------------------------------------------- #
+# C/порядок (execution_change §13): авторский порядок корней + scope объявленных хостов
+# --------------------------------------------------------------------------- #
+
+def test_root_order_preserves_authored_order_not_lexicographic(tmp_path: Path) -> None:
+    """Корни дренятся в **авторском** порядке, а не в лексикографическом.
+
+    Живой прогон 22.10: ``sorted()`` ставил ``https://postgrespro.ru/`` (800-страничный
+    портал) перед ``https://postgrespro.ru/docs/`` — портал съел бюджет продукта, docs-корень
+    не начался, прогон умер. Правило: корень, который идёт последним, может не выполниться.
+    Здесь ``docs`` (valuable) лексикографически **после** ``portal`` (big) — и именно он
+    обязан дренироваться первым, если так объявлено; обратный порядок тоже соблюдается
+    (значит, сортировки нет).
+    """
+    big = "https://corp.test/portal/"
+    valuable = "https://corp.test/docs/"
+    pages = {
+        big: b'<a href="/portal/a">a</a>',
+        "https://corp.test/portal/a": b"portal page",
+        valuable: b'<a href="/docs/x">x</a>',
+        "https://corp.test/docs/x": b"docs page",
+    }
+    profiles = {"corp.test": DomainProfile(max_depth=2)}
+
+    crawler = _Crawler(pages)
+    result = _build(
+        tmp_path,
+        pages=pages,
+        urls={"p1": [valuable, big]},
+        crawler=crawler,
+        domain_profiles=profiles,
+    )
+    assert result.errors == []
+    build = _build_of(result)
+    assert [rec["root"] for rec in build.truncation] == [valuable, big]
+    records = {rec["root"]: rec for rec in build.truncation}
+    # Второй корень всё равно дренируется (авторский порядок не «съедает» его).
+    assert records[valuable]["pages_fetched"] == 2
+    assert records[big]["pages_fetched"] == 2
+    # Первый фетч прогона — seed ценного корня (docs), а не портала.
+    assert [url for url, _plan in crawler.calls][0] == valuable
+
+    # Обратный авторский порядок соблюдается так же — это не сортировка.
+    reversed_crawler = _Crawler(pages)
+    reversed_result = _build(
+        tmp_path,
+        pages=pages,
+        urls={"p1": [big, valuable]},
+        crawler=reversed_crawler,
+        domain_profiles=profiles,
+    )
+    assert [rec["root"] for rec in _build_of(reversed_result).truncation] == [
+        big,
+        valuable,
+    ]
+    assert [url for url, _plan in reversed_crawler.calls][0] == big
+
+def test_undeclared_subdomain_rejected_and_counted_in_root_provenance(
+    tmp_path: Path,
+) -> None:
+    """C (A: ничего не теряется молча): отвергнутый поддомен виден числом в провенансе.
+
+    ``edu.corp.test`` не объявлен ни профилем, ни корнем ⇒ его страницы не входят в
+    партицию, а запись корня несёт ``out_of_scope_subdomains`` (счётчик по хостам +
+    ограниченные примеры) — следующий прогон отвечает «сколько дали поддомены» числом.
+    """
+    root = "https://corp.test/"
+    edu = "https://edu.corp.test/lesson.html"
+    pages = {
+        root: b'<a href="https://edu.corp.test/lesson.html">l</a><a href="/own">o</a>',
+        "https://corp.test/own": b"own page",
+        edu: b"training material",
+    }
+    result = _build(
+        tmp_path,
+        pages=pages,
+        urls={"p1": [root]},
+        crawler=_Crawler(pages),
+        domain_profiles={"corp.test": DomainProfile(max_depth=2)},
+    )
+    assert result.errors == []
+    build = _build_of(result)
+    assert {doc.url for doc in build.docs} == {root, "https://corp.test/own"}
+    record = build.truncation[0]
+    assert record["root"] == root
+    assert record["pages_fetched"] == 2
+    assert record["out_of_scope_subdomains"] == {
+        "count": 1,
+        "by_host": {"edu.corp.test": 1},
+        "examples": {"edu.corp.test": [edu]},
+    }
+    # Поддомен не «дал» ничего: принятых «чужих» хостов нет.
+    assert "accepted_foreign_hosts" not in record
+
+def test_declared_subdomain_with_own_root_is_not_drained_under_parent(
+    tmp_path: Path,
+) -> None:
+    """Прежнее поведение действительно снято: объявленный поддомен — свой корень, свой бюджет.
+
+    ``edu.corp.test`` объявлен и профилем, и собственным корнем. Корень-предок
+    (``corp.test``) его страницы **не** добывает: иначе у «своего» корня нет собственного
+    бюджета (ровно дефект ``postgrespro.ru`` → ``edu.postgrespro.ru``). Страница добыта
+    ровно один раз — под своим корнем.
+    """
+    parent = "https://corp.test/"
+    edu = "https://edu.corp.test/"
+    lesson = "https://edu.corp.test/lesson.html"
+    pages = {
+        parent: b'<a href="https://edu.corp.test/lesson.html">l</a><a href="/own">o</a>',
+        "https://corp.test/own": b"own page",
+        edu: b'<a href="/lesson.html">l</a>',
+        lesson: b"training material",
+    }
+    crawler = _Crawler(pages)
+    result = _build(
+        tmp_path,
+        pages=pages,
+        urls={"p1": [parent, edu]},
+        crawler=crawler,
+        domain_profiles={
+            "corp.test": DomainProfile(max_depth=2),
+            "edu.corp.test": DomainProfile(max_depth=2),
+        },
+    )
+    assert result.errors == []
+    build = _build_of(result)
+    records = {rec["root"]: rec for rec in build.truncation}
+    # Предок: seed + /own; страница edu — вне scope и **видима** как отвергнутый поддомен.
+    assert records[parent]["pages_fetched"] == 2
+    assert records[parent]["out_of_scope_subdomains"]["by_host"] == {"edu.corp.test": 1}
+    # Свой корень edu дренирует свои страницы под своим бюджетом.
+    assert records[edu]["pages_fetched"] == 2
+    assert "out_of_scope_subdomains" not in records[edu]
+    assert [url for url, _plan in crawler.calls].count(lesson) == 1
+
+def test_declared_subdomain_without_own_root_is_crawled_and_counted_as_foreign(
+    tmp_path: Path,
+) -> None:
+    """Объявленный профилем поддомен (без своего корня) в scope и виден как «чужой хост»."""
+    root = "https://corp.test/"
+    guide = "https://docs.corp.test/guide"
+    pages = {
+        root: b'<a href="https://docs.corp.test/guide">g</a>',
+        guide: b"guide",
+    }
+    result = _build(
+        tmp_path,
+        pages=pages,
+        urls={"p1": [root]},
+        crawler=_Crawler(pages),
+        domain_profiles={
+            "corp.test": DomainProfile(max_depth=2),
+            "docs.corp.test": DomainProfile(max_depth=2),
+        },
+    )
+    assert result.errors == []
+    build = _build_of(result)
+    assert {doc.url for doc in build.docs} == {root, guide}
+    record = build.truncation[0]
+    assert record["accepted_foreign_hosts"] == {"docs.corp.test": 1}
+    assert "out_of_scope_subdomains" not in record
+
+def test_scope_observation_persisted_incrementally_to_session_provenance(
+    tmp_path: Path,
+) -> None:
+    """Провенанс корня пишется в ``crawl_sessions.provenance_json`` **по корню**.
+
+    Упавший живой прогон 22.10 оставил ``provenance_json = {}``: провенанс писался только
+    в ``finalize_session``. Теперь запись корня персистится сразу (``partial: true``,
+    ``status: running``), поэтому посмертный разбор видит счётчики поддоменов; финализация
+    позже перезаписывает канал полным набором корней.
+    """
+    root = "https://corp.test/"
+    edu = "https://edu.corp.test/lesson.html"
+    pages = {root: b'<a href="https://edu.corp.test/lesson.html">l</a>'}
+    store = SqliteStore(":memory:")
+    _make_run(store)
+    payloads: list[str] = []
+    original = store.set_crawl_session_provenance
+
+    def _spy(session_id: str, payload: str) -> None:
+        payloads.append(payload)
+        original(session_id, payload)
+
+    store.set_crawl_session_provenance = _spy  # type: ignore[method-assign]
+    try:
+        result = _build(
+            tmp_path,
+            pages=pages,
+            urls={"p1": [root]},
+            crawler=_Crawler(pages),
+            domain_profiles={"corp.test": DomainProfile(max_depth=2)},
+            store=store,
+            run_id=RUN_ID,
+        )
+        assert result.errors == []
+        partials = [
+            json.loads(payload)
+            for payload in payloads
+            if json.loads(payload).get("partial") is True
+        ]
+        assert partials, "провенанс корня обязан писаться до финализации"
+        roots = partials[-1]["effective_limits"]["roots"]
+        assert roots[0]["root"] == root
+        assert roots[0]["out_of_scope_subdomains"]["by_host"] == {"edu.corp.test": 1}
+        assert partials[-1]["status"] == "running"
+        # Финальный провенанс — полный (finalize перезаписывает канал).
+        final = json.loads(store.get_crawl_session(SESSION_ID).provenance_json or "{}")
+        assert final.get("partial") is None
+        assert final["status"] in {"completed", "partial"}
+        assert final["effective_limits"]["roots"][0]["root"] == root
+        assert edu not in {item.url for item in _items(store)}
     finally:
         store.close()

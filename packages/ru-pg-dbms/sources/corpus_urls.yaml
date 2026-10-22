@@ -3,6 +3,13 @@
 # (core.config.passport_urls). Это лишь КАНДИДАТЫ-источники контента: они не являются
 # evidence до corpus_raw → hash → index (I19). Homepage-домены → базовые URL '/'.
 # Регенерация: python -c "...passport_urls..." (см. docs/architecture/03 §D.6 runbook).
+#
+# ПОРЯДОК ЗНАЧИМ (execution_change §13): корни дренятся в авторском порядке, а не в
+# лексикографическом, и каждый корень — свой бюджет `max_documents`. Первым идёт то, что
+# нужнее всего карте возможностей (docs), последним — вспомогательное и объёмное
+# (учебные материалы, корпоративные порталы): корень, который идёт последним, — корень,
+# который может не выполниться. Порядок выводится из `doc_domains` паспорта, поэтому
+# правка порядка — правка паспорта, а не этого файла.
 jatoba:
 - https://jatoba.ru/
 - https://www.gaz-is.ru/
@@ -13,9 +20,13 @@ pangolin:
 - https://sbertech.ru/
 - https://sbertech.ru/documents/platform-v-pangolin-se/
 postgrespro:
-- https://postgrespro.ru/
-- https://postgrespro.ru/products/postgrespro/enterprise/
+# docs — первым (высшая ценность); учебные материалы edu — последними и со своим
+# потолком в domain_profiles.yaml (раньше edu затягивался как «любой поддомен» и съел
+# 664 элемента бюджета корня postgrespro.ru, а docs-корень не начался вовсе).
 - https://postgrespro.ru/docs/
+- https://postgrespro.ru/products/postgrespro/enterprise/
+- https://postgrespro.ru/
+- https://edu.postgrespro.ru/
 tantor:
 - https://tantorlabs.ru/
 - https://tantorlabs.ru/products/dbms/

@@ -420,3 +420,63 @@ def test_noop_path_sitemaps_dropped_host_sitemaps_kept() -> None:
 
 if __name__ == "__main__":  # pragma: no cover - локальный запуск
     raise SystemExit(pytest.main([__file__, "-q"]))
+
+def test_postgrespro_seed_order_is_authored_docs_first_edu_last() -> None:
+    """Порядок seed-корней postgrespro — **авторский** (execution_change §13).
+
+    Корни дренятся в этом порядке, и каждый — свой бюджет. ``docs`` первым (высшая
+    ценность для карты возможностей), ``edu`` последним (вспомогательные учебные
+    материалы, 664 измеренных элемента). Пин ловит и ре-сортировку файла, и расхождение
+    с деривацией паспорта: ``sorted()`` снова поставил бы ``postgrespro.ru/`` (портал)
+    перед ``postgrespro.ru/docs/`` — ровно дефект живого прогона 22.10.
+    """
+    from core.config.passports import load_passports, passport_urls
+
+    seeds = yaml.safe_load(CORPUS_URLS.read_text(encoding="utf-8"))
+    assert seeds["postgrespro"] == [
+        "https://postgrespro.ru/docs/",
+        "https://postgrespro.ru/products/postgrespro/enterprise/",
+        "https://postgrespro.ru/",
+        "https://edu.postgrespro.ru/",
+    ]
+    assert seeds["postgrespro"] != sorted(seeds["postgrespro"]), (
+        "пин: порядок авторский — sorted() поставил бы портал перед docs"
+    )
+    derived = {
+        pid: passport_urls(passport)
+        for pid, passport in load_passports(ROOT / "passports").items()
+    }
+    assert seeds == derived, "corpus_urls.yaml обязан совпадать с деривацией из паспортов"
+
+def test_edu_subdomain_is_declared_root_with_own_capped_profile() -> None:
+    """``edu.postgrespro.ru`` — объявленный корень и профиль со **своим** потолком (B/C).
+
+    До 22.10 хост не был объявлен нигде: он попадал в партицию как «любой поддомен»
+    ``postgrespro.ru`` и наследовал его профиль (``max_documents: 800``), израсходовав
+    664 элемента бюджета корня. Теперь у него свой корень (``corpus_urls.yaml``) и свой
+    потолок — 700: выше измеренных 664 (потолок ниже объявил бы весь продукт
+    ``truncated`` из-за вспомогательного хоста) и ниже унаследованных 800 (это бюджет
+    портала, не заявка на размер edu).
+    """
+    from core.config.passports import load_passports, passport_urls
+
+    seeds = yaml.safe_load(CORPUS_URLS.read_text(encoding="utf-8"))
+    assert "https://edu.postgrespro.ru/" in seeds["postgrespro"]
+    assert "https://edu.postgrespro.ru/" in passport_urls(
+        load_passports(ROOT / "passports")["postgrespro"]
+    ), "edu обязан быть в doc_domains паспорта (иначе регенерация его потеряет)"
+
+    profiles = load_domain_profiles(ON_DISK_PROFILES)
+    edu = profiles["edu.postgrespro.ru"]
+    assert edu.fetch is FetchMode.HTTP
+    assert edu.max_depth == 8
+    assert edu.max_documents == 700
+    assert edu.max_documents != profiles["postgrespro.ru"].max_documents, (
+        "потолок edu обязан быть собственным, а не унаследованным от postgrespro.ru"
+    )
+    # Профиль резолвится на учебной странице (без ключа edu наследовался бы профиль предка).
+    selected = select_domain_profile(
+        "https://edu.postgrespro.ru/dba2_06_mvcc_autovacuum.html", profiles
+    )
+    assert selected is not None
+    assert selected.max_documents == 700

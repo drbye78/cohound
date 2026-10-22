@@ -60,7 +60,14 @@ def _split_key(raw_key: str) -> tuple[str, str]:
 
 
 def _host_matches(url_host: str, host_key: str) -> bool:
-    """URL-хост равен ключу или является его поддоменом (``a.example.com`` → ``example.com``)."""
+    """URL-хост равен ключу или является его поддоменом (``a.example.com`` → ``example.com``).
+
+    Семантика **профиля домена** (наследование осей ``fetch``/``extract``/лимитов от
+    родительского ключа), а не scope краула: поддомен наследует *оси* профиля, но не право
+    тратить бюджет чужого seed-корня. Scope обхода — отдельный предикат
+    (:meth:`core.pipeline.crawl_frontier.Frontier.host_in_scope`: только **объявленные**
+    хосты, ``www.`` эквивалентен базе; ``execution_change`` §13).
+    """
     return url_host == host_key or url_host.endswith("." + host_key)
 
 

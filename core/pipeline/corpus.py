@@ -37,6 +37,20 @@ traversal-guard), затем тот же блэклист/``max_documents``/``ma
 рекламирует другой host (сигнал чужого сайта/SSRF), ``path`` — тот же host, но путь вне
 префикса корня.
 
+**Порядок корней и scope — операторские, не лексикографические (C, ``execution_change``
+§13).** Корни продукта дренируются в **авторском** порядке (``corpus_urls.yaml``/
+``seeds.yaml``, дедуп — первое вхождение), а не в ``sorted()``: живой прогон показал цену
+лексикографического порядка — корень корпоративного портала (800 страниц, ~2 часа)
+отсортировался перед корнем документации продукта, съел бюджет продукта и не дал
+docs-корню (высшая ценность для карты возможностей) ни одного своего элемента; прогон
+умер, docs так и не начался. Правило: **корень, который идёт последним, — корень, который
+может не выполниться**. Scope корня — объявленные хосты: необъявленный поддомен хоста
+корня вне scope (``Frontier.host_in_scope``), а отвергнутые поддомены и принятые «чужие»
+хосты считаются в провенансе корня
+(``truncation_records[*].out_of_scope_subdomains``/``accepted_foreign_hosts``). Меняются
+условия измерения (``crawl_config_digest``/``seeds_digest``/``run_id``), но не правила
+методологии: ``METHODOLOGY_VERSION`` не меняется.
+
 **Иммутабельность и два id (09 §8.1).** ``partition_build_id`` (``pb_``) — контент-адресуемый
 отпечаток **одной** продукт-партиции: ``short_hash`` от (``_PARTITION_SCHEMA`` + пакет +
 ``product_id`` + ``chunker_version`` + ``embed_model_id`` + ``extractor_version`` +
@@ -161,6 +175,7 @@ from core.pipeline.crawl_frontier import (
     CrawlLimits,
     Frontier,
     is_blacklisted,
+    normalize_scope_host,
     resolve_crawl_limits,
 )
 from core.pipeline.archive_descent import (
@@ -1256,6 +1271,23 @@ class _SitemapSeeds:
 # Детерминированные выводы (версии/идентификаторы)
 # --------------------------------------------------------------------------- #
 
+
+def _ordered_unique(values: Iterable[Any]) -> list[str]:
+    """Дедуп с сохранением **авторского** порядка (первое вхождение побеждает).
+
+    Порядок seed-корней — операторский (``corpus_urls.yaml``/``seeds.yaml``), а не
+    лексикографический: корень, который идёт последним, может не выполниться вовсе
+    (execution_change §13, см. :func:`_build_corpus`).
+    """
+    seen: set[str] = set()
+    out: list[str] = []
+    for value in values or ():
+        url = str(value)
+        if url in seen:
+            continue
+        seen.add(url)
+        out.append(url)
+    return out
 
 def _as_text(value: Any) -> Any:
     """Приводит enum-значение (``StrEnum``) к строке ``.value``; прочее — как есть."""
@@ -2391,7 +2423,39 @@ def _build_corpus(
     url_map: dict[str, list[str]] = {}
     if urls:
         for pid, values in urls.items():
-            url_map[str(pid)] = sorted({str(u) for u in (values or [])})
+            # C/порядок (execution_change §13): **авторский** порядок корней, не
+            # лексикографический. `sorted()` ставил `https://host/` перед
+            # `https://host/docs/`, и живой прогон 22.10 показал цену: 800-страничный
+            # корпоративный портал отработал 2 часа, а docs-корень (высшая ценность для
+            # карты возможностей) не дренировался вовсе — упавший прогон не дошёл до него.
+            # Дедуп — первое вхождение (стабильно для повторной генерации/паспортов).
+            url_map[str(pid)] = _ordered_unique(values or [])
+
+    # C (execution_change): scope корня = **объявленные** хосты. Объявленные — ключи
+    # `domain_profiles.yaml` (пакет) и все seed-корни прогона; хост, объявленный
+    # собственным корнем продукта, из «поддомен-допуска» этого продукта исключается:
+    # у него свой корень и свой бюджет (иначе учебный поддомен продолжал бы тратить
+    # бюджет корня-предка, хотя объявлен отдельным корнем).
+    scope_hosts_by_product: dict[str, frozenset[str]] = {}
+    if url_map:
+        all_root_hosts = {
+            normalize_scope_host(urlsplit(str(url)).hostname or "")
+            for product_urls in url_map.values()
+            for url in product_urls
+        }
+        declared_profile_hosts = {
+            normalize_scope_host(str(key).split("/", 1)[0])
+            for key in (domain_profiles or {})
+        }
+        declared_hosts = (all_root_hosts | declared_profile_hosts) - {""}
+        for product_id, product_urls in url_map.items():
+            own_hosts = {
+                normalize_scope_host(urlsplit(str(url)).hostname or "")
+                for url in product_urls
+            }
+            scope_hosts_by_product[product_id] = frozenset(
+                declared_hosts - own_hosts
+            )
 
     declared = sorted({str(p) for p in (getattr(plan, "products", None) or [])})
     # Объём корпуса = продукты **с эффективными seed'ами**, а не весь план: при
@@ -4342,6 +4406,39 @@ def _build_corpus(
     #: S1: фактически добытые ревалидационные страницы (discovery-счётчик отдельно).
     revalidation_fetched_total = 0
 
+    def _persist_partial_crawl_provenance() -> None:
+        """Пишет наблюдение scope/усечения в ``crawl_sessions.provenance_json`` **по корню**.
+
+        Почему не только в ``finalize_session``: живой прогон 22.10 умер через ~3 часа, и
+        ``provenance_json`` остался ``{}`` — вся картина поддоменов (кто сколько забрал)
+        пропала вместе с процессом, хотя именно она объясняла дефект. Поэтому провенанс
+        корня персистится сразу после его drain, а не в конце фазы: упавший прогон всё
+        равно отвечает числом «сколько дали поддомены».
+
+        Форма совместима с финализацией (``effective_limits.roots`` — тот же канал, что
+        читает :func:`core.pipeline.crawl_session.truncation_summary`);
+        ``finalize_session`` позже перезаписывает его **полным** набором корней.
+        ``partial: true``/``status: "running"`` помечают незавершённый сеанс, чтобы
+        частичный провенанс не выглядел финальным.
+        """
+        if store is None or session is None:
+            return
+        try:
+            store.set_crawl_session_provenance(
+                session,
+                json.dumps(
+                    {
+                        "partial": True,
+                        "status": "running",
+                        "effective_limits": {"roots": truncation_records},
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ),
+            )
+        except Exception as exc:  # noqa: BLE001 — наблюдаемость не валит фазу
+            errors.append(f"crawl_provenance(partial): {type(exc).__name__}: {exc}")
+
     def _record_root_outcome(
         product_id: str,
         root_url: str,
@@ -4391,6 +4488,29 @@ def _build_corpus(
                 "count": frontier.artifacts_outside_prefix_count,
                 "examples": list(frontier.artifacts_outside_prefix),
             }
+        # C (execution_change): видимость поддоменов. ``out_of_scope_subdomains`` —
+        # отвергнутые поддомены хоста корня (объявленных хостов не хватило): точный
+        # счётчик по хостам + ограниченные примеры. ``accepted_foreign_hosts`` — сколько
+        # принятых элементов корня пришло **не** с его собственного хоста (объявленный
+        # поддомен, у которого нет своего корня). Вместе они отвечают числом на вопрос
+        # «сколько дали поддомены» — и в живом прогоне, и в посмертном разборе.
+        # Ключи появляются только при наличии данных: запись корня без поддоменов
+        # остаётся байт-в-байт прежней.
+        if frontier.out_of_scope_subdomains:
+            record["out_of_scope_subdomains"] = {
+                "count": sum(frontier.out_of_scope_subdomains.values()),
+                "by_host": dict(sorted(frontier.out_of_scope_subdomains.items())),
+                "examples": {
+                    host: list(urls)
+                    for host, urls in sorted(
+                        frontier.out_of_scope_subdomain_examples.items()
+                    )
+                },
+            }
+        if frontier.accepted_foreign_hosts:
+            record["accepted_foreign_hosts"] = dict(
+                sorted(frontier.accepted_foreign_hosts.items())
+            )
         # D3/F10: отказы scope у ``<loc>`` sitemap — провенанс, не ``errors``.
         # Ключ появляется только при наличии отказов: без sitemap запись байт-в-байт
         # прежняя. Классы ``host``/``path`` раздельны (F6).
@@ -4399,6 +4519,9 @@ def _build_corpus(
         if revalidation is not None:
             record["revalidation"] = dict(revalidation)
         truncation_records.append(record)
+        # Наблюдаемость не должна умирать вместе с процессом: провенанс корня
+        # персистится сразу (см. ``_persist_partial_crawl_provenance``).
+        _persist_partial_crawl_provenance()
 
     def _plan_incremental_items(
         product_id: str, roots: Sequence[str]
@@ -4460,7 +4583,7 @@ def _build_corpus(
         return extra
 
     def _group_revalidation_items(
-        roots: Sequence[str], items: Sequence[IncrementalItem]
+        product_id: str, roots: Sequence[str], items: Sequence[IncrementalItem]
     ) -> tuple[dict[str, list[str]], dict[str, list[str]]]:
         """Группирует известные URL по авторским корням (scope inference, каждый прогон).
 
@@ -4469,8 +4592,16 @@ def _build_corpus(
         (длина пути), при равенстве — авторский порядок. URL вне scope всех корней —
         orphan (``origin -> urls``): один synthetic-бакет на origin, ревалидация без
         записи усечения.
+
+        Scope-предикат — тот же, что у дренажа (C: объявленные хосты), поэтому известный
+        URL необъявленного поддомена не приписывается чужому корню: он становится orphan
+        и **виден** в ``revalidation_orphans``, а не молча добывается под чужим бюджетом.
         """
-        scopes = [(root, Frontier(root, CrawlLimits())) for root in roots]
+        product_scope_hosts = scope_hosts_by_product.get(product_id, frozenset())
+        scopes = [
+            (root, Frontier(root, CrawlLimits(), scope_hosts=product_scope_hosts))
+            for root in roots
+        ]
         groups: dict[str, list[str]] = {root: [] for root in roots}
         orphans: dict[str, list[str]] = {}
         for item in items:
@@ -4724,7 +4855,9 @@ def _build_corpus(
         #: не-incremental ⇒ пусто: grouping — no-op (байт-в-байт).
         if incremental_items:
             all_revalidation_groups, all_orphan_buckets = (
-                _group_revalidation_items(product_roots, incremental_items)
+                _group_revalidation_items(
+                    product_id, product_roots, incremental_items
+                )
             )
         else:
             all_revalidation_groups, all_orphan_buckets = {}, {}
@@ -4815,8 +4948,9 @@ def _build_corpus(
             не расширяют BFS (листья) и дедуплицируются ``_seen`` с переоткрытием ссылкой.
             ``seed=False`` — synthetic-бакет (orphan): авторского seed нет, только
             ревалидация; усечение такого бакета не пишется вызывающим.
-            Ставка в очередь гейтится scope (host+path-граница) и блэклистом; ``max_documents``
-            — жёсткий стоп (не исключение): останавливает постановку/обход этого корня.
+            Ставка в очередь гейтится scope (объявленный host + path-граница, C) и
+            блэклистом; ``max_documents`` — жёсткий стоп (не исключение): останавливает
+            постановку/обход этого корня.
             Возвращает frontier с провенансом усечения (``fetched``/``truncated``/
             ``truncated_reason``), агрегированный провенанс отказов scope у ``<loc>``
             (пусто без sitemap/без отказов) и :class:`_RootDrain` — хвост экстракции корня
@@ -4830,7 +4964,9 @@ def _build_corpus(
                 run=crawl_defaults,
                 profiles=domain_profiles or {},
             )
-            frontier = Frontier(root_url, limits)
+            frontier = Frontier(
+                root_url, limits, scope_hosts=scope_hosts_by_product.get(pid, frozenset())
+            )
             # D3/дефект B (I17): ``<loc>`` sitemap — кандидаты **этого** корня; scope-фильтр
             # применяется до дедупа ``(pid, loc)``. Дедуп-пометка — не здесь, а по факту
             # приёма в очередь (F12, см. цикл ``extra_seeds`` ниже). Без sitemap

@@ -12,11 +12,28 @@
 своим путём и **не** добавляются в ``crawl_sources.yaml``.
 
 **Scope — per seed-root, не «SSRF-чек прошёл».** Обнаруженный URL ставится в очередь, только
-если (1) :func:`core.util.security.validate_url` его принимает, (2) host совпадает с host
-корня через ``_host_matches`` (поддомены включены; общий с ``fetch_plan``), (3) путь укладывается
-в path-prefix корня по **границе сегмента** (``/documents`` матчит ``/documents`` и
-``/documents/x``, но **не** ``/documents-archive``; правило из ``fetch_plan``), (4) URL не
-зачёркнут блэклистом. SSRF-проверка **одна** не является проверкой scope.
+если (1) :func:`core.util.security.validate_url` его принимает, (2) host **объявлен** для
+этого корня (см. ниже), (3) путь укладывается в path-prefix корня по **границе сегмента**
+(``/documents`` матчит ``/documents`` и ``/documents/x``, но **не** ``/documents-archive``;
+правило из ``fetch_plan``), (4) URL не зачёркнут блэклистом. SSRF-проверка **одна** не
+является проверкой scope.
+
+**Scope = объявленные хосты, не «любой поддомен» (C, ``execution_change`` §13).** До 22.10
+host-scope корня включал **любой** поддомен его хоста (``_host_matches`` — семантика
+*профилей*, а не краула). Живой прогон показал цену: корень корпоративного портала
+(``max_documents: 800``) израсходовал бюджет на учебный поддомен — раздатки курсов, которых
+оператор не объявлял нигде, — и корень документации продукта (собственный seed, 13 страниц)
+не получил ни одного своего элемента: прогон до него не дошёл. Теперь поддомен допускается,
+только если он **объявлен** (``scope_hosts``: ключ ``domain_profiles.yaml`` или seed-корень
+продукта) — и не отдан собственному корню (хост другого корня продукта исключается
+вызывающим из ``scope_hosts``, иначе у «своего» корня нет собственного бюджета). ``www.``
+эквивалентен базовому хосту с обеих сторон (``example.org`` ≡ ``www.example.org``).
+Отказ **видим**: :attr:`Frontier.out_of_scope_subdomains`
+считает отвергнутые поддомены по хостам (точный счётчик + ограниченные примеры), а
+:attr:`Frontier.accepted_foreign_hosts` — принятые элементы с чужого (объявленного) хоста:
+следующий прогон отвечает числом на вопрос «сколько дали поддомены». ``METHODOLOGY_VERSION``
+при этом **не** меняется: изменились условия измерения (``crawl_config_digest``/
+``seeds_digest``/``run_id``), а не правила методологии.
 
 **Терминальный артефакт — исключение из (3), не из (1)/(2)/(4) (P6b).** Документ
 (``pdf``/``docx``/``pptx``/``xlsx``) и заявленный контейнер (``zip``/``7z``/``rar``) **не
@@ -42,7 +59,7 @@ case-sensitive); ``exclude_documents`` — glob по **basename** (послед�
 from __future__ import annotations
 
 from collections import deque
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from fnmatch import fnmatchcase
 from urllib.parse import unquote, urlsplit
@@ -58,7 +75,7 @@ from core.domain.models import (
     DEFAULT_MAX_RESPONSE_BYTES,
     CrawlRunConfig,
 )
-from core.pipeline.fetch_plan import _host_matches, select_domain_profile
+from core.pipeline.fetch_plan import select_domain_profile
 from core.util.document_formats import (
     SUPPORTED_ARCHIVE_FORMATS,
     is_terminal_artifact_url,
@@ -75,6 +92,7 @@ __all__ = [
     "blacklist_match",
     "decoded_scope_path",
     "is_blacklisted",
+    "normalize_scope_host",
     "resolve_crawl_limits",
     "root_path_prefix",
 ]
@@ -88,6 +106,21 @@ SCOPE_OUT = "out_of_scope"
 
 #: Потолок **примеров** обхода path-prefix в провенансе (счётчик — точный).
 ARTIFACT_BYPASS_EXAMPLES_MAX = 10
+
+#: Потолок примеров отвергнутых поддоменов **на хост** в провенансе (счётчик — точный).
+SUBDOMAIN_REJECT_EXAMPLES_MAX = 3
+
+
+def normalize_scope_host(host: str) -> str:
+    """Нормализация хоста для сравнения scope: нижний регистр, без хвостовой точки,
+    ``www.`` эквивалентен базовому хосту (``www.example.org`` ≡ ``example.org``).
+
+    Эквивалентность ``www.`` — не косметика: оператор объявляет ``example.org``, а ссылки
+    сайта ведут на ``www.example.org`` (и наоборот: корень ``www.example.org`` при ключе
+    профиля ``example.org``). Без нормализации обе стороны теряли бы половину сайта.
+    """
+    text = (host or "").strip().lower().rstrip(".")
+    return text[4:] if text.startswith("www.") else text
 
 
 @dataclass(frozen=True)
@@ -555,12 +588,30 @@ class Frontier:
     провенанса (D1/G — «честность усечения»).
     """
 
-    def __init__(self, root_url: str, limits: CrawlLimits) -> None:
+    def __init__(
+        self,
+        root_url: str,
+        limits: CrawlLimits,
+        *,
+        scope_hosts: Iterable[str] | None = None,
+    ) -> None:
         self.root_url = root_url
         parsed = urlsplit(root_url)
         self.root_host = (parsed.hostname or "").lower()
         self.path_prefix = root_path_prefix(root_url)
         self.limits = limits
+        #: C (execution_change): **объявленные** хосты, которые дополнительно к host
+        #: корня допускаются в scope (поддомены из ``domain_profiles.yaml``/seed-корней).
+        #: Пусто ⇒ scope строго на host корня: поддомен, которого оператор не объявлял,
+        #: больше не затягивается (учебный поддомен из корня корпоративного портала).
+        #: Хосты, объявленные собственным seed-корнем продукта, вызывающий сюда **не**
+        #: передаёт — у такого хоста свой корень и свой бюджет (иначе бюджет корня-
+        #: предка снова тратится на чужой хост).
+        self.scope_hosts = frozenset(
+            host
+            for host in (normalize_scope_host(raw) for raw in (scope_hosts or ()))
+            if host
+        )
         self._queue: deque[tuple[str, int]] = deque()
         self._seen: set[str] = set()
         #: Известные URL ревалидации (depth-0 листья): поставлены отдельным путём,
@@ -583,18 +634,53 @@ class Frontier:
         #: по content-type). Записи ``{"url", "reason"}`` (`url_suffix`/`content_type`) —
         #: решение обязано быть видимым (никогда не тихо), и питать канал усечения/аномалии.
         self.skipped_documents: list[dict[str, str]] = []
+        #: C (execution_change): отвергнутые поддомены корня — точный счётчик по хостам
+        #: (``{"edu.example.org": 664}``) и ограниченные примеры URL. Отказ виден:
+        #: «сколько дали поддомены» — число, а не догадка (A: ничего не теряется молча).
+        self.out_of_scope_subdomains: dict[str, int] = {}
+        self.out_of_scope_subdomain_examples: dict[str, list[str]] = {}
+        self._subdomain_reject_seen: set[str] = set()
+        #: Принятые элементы с хоста, отличного от хоста корня (объявленный поддомен):
+        #: сколько бюджета корня ушло «не на свой хост» — видно по корню.
+        self.accepted_foreign_hosts: dict[str, int] = {}
 
     # -- scope -------------------------------------------------------------- #
 
+    def host_in_scope(self, host: str) -> bool:
+        """Допущен ли ``host`` в scope корня (C: объявленные хосты, ``www.`` эквивалентен).
+
+        Предикат (псевдокод)::
+
+            h = normalize(host); r = normalize(root_host)
+            return h == r or (h.endswith("." + r) and h in scope_hosts)
+
+        * host корня — всегда (в т.ч. ``www.``-вариант: ``example.org`` ≡ ``www.example.org``);
+        * поддомен корня — только если объявлен оператором (``scope_hosts``);
+        * чужой host и необъявленный поддомен — вне scope.
+
+        Отличие от :func:`core.pipeline.fetch_plan._host_matches` намеренное: там семантика
+        **профиля** (поддомен наследует оси родительского ключа — это верно и нужно), здесь —
+        семантика **краула** (наследование осей ≠ право тратить бюджет корня).
+        """
+        norm = normalize_scope_host(host)
+        root = normalize_scope_host(self.root_host)
+        if not norm or not root:
+            return False
+        if norm == root:
+            return True
+        if not norm.endswith("." + root):
+            return False
+        return norm in self.scope_hosts
+
     def in_scope(self, url: str, *, terminal_artifact: bool = False) -> bool:
-        """Проходит ли ``url`` scope корня (SSRF + host + path-prefix по границе сегмента).
+        """Проходит ли ``url`` scope корня (SSRF + объявленный host + path-prefix по границе).
 
         ``terminal_artifact=True`` — path-prefix **не применяется** (P6b: документ или
         заявленный контейнер не продолжает навигацию, поэтому «раздел» к нему не относится).
         Флаг при этом **не** универсальный пропуск: URL обязан действительно принадлежать
-        классу (:meth:`is_terminal_artifact`), иначе — ``False``. Host scope, SSRF-валидация и
-        traversal-guard остаются обязательными: обход path-prefix не должен становиться
-        выходом из scope.
+        классу (:meth:`is_terminal_artifact`), иначе — ``False``. Host scope (C: только
+        объявленные хосты), SSRF-валидация и traversal-guard остаются обязательными: обход
+        path-prefix не должен становиться выходом из scope.
 
         Путь перед сравнением percent-декодируется, а ``..``-сегменты отвергаются (N2):
         иначе ``%2e%2e`` обошёл бы префикс — в том числе при ``terminal_artifact=True``.
@@ -605,7 +691,7 @@ class Frontier:
             return False
         parsed = urlsplit(url)
         host = (parsed.hostname or "").lower()
-        if not host or not _host_matches(host, self.root_host):
+        if not host or not self.host_in_scope(host):
             return False
         decoded = decoded_scope_path(parsed.path or "/")
         if decoded is None:
@@ -635,7 +721,42 @@ class Frontier:
             return SCOPE_IN
         if self.in_scope(url, terminal_artifact=True):
             return SCOPE_ARTIFACT_OUTSIDE_PREFIX
+        self.note_out_of_scope_subdomain(url)
         return SCOPE_OUT
+
+    def note_out_of_scope_subdomain(self, url: str) -> None:
+        """Учесть отвергнутый **поддомен** хоста корня (C: отказ не молчаливый).
+
+        Считается только поддомен (``x.root``; сам host корня и ``www.``-вариант — не
+        поддомен), точным счётчиком по хостам + ограниченными примерами на хост
+        (:data:`SUBDOMAIN_REJECT_EXAMPLES_MAX`). Дедуп по URL: один и тот же отвергнутый
+        URL предлагается со многих страниц, а «сколько дали поддомены» — вопрос про URL,
+        не про число упоминаний. Запись попадает в провенанс корня
+        (``out_of_scope_subdomains``).
+        """
+        host = normalize_scope_host(urlsplit(url).hostname or "")
+        root = normalize_scope_host(self.root_host)
+        if not host or not root or host == root or not host.endswith("." + root):
+            return
+        if url in self._subdomain_reject_seen:
+            return
+        self._subdomain_reject_seen.add(url)
+        self.out_of_scope_subdomains[host] = self.out_of_scope_subdomains.get(host, 0) + 1
+        examples = self.out_of_scope_subdomain_examples.setdefault(host, [])
+        if len(examples) < SUBDOMAIN_REJECT_EXAMPLES_MAX:
+            examples.append(url)
+
+    def note_host_accept(self, url: str) -> None:
+        """Учесть принятый элемент с хоста, отличного от хоста корня (C).
+
+        «Сколько бюджета корня ушло на объявленный поддомен» — число рядом с бюджетом
+        корня. Вызывается только по факту постановки в очередь (не при отказе).
+        """
+        host = normalize_scope_host(urlsplit(url).hostname or "")
+        root = normalize_scope_host(self.root_host)
+        if not host or host == root:
+            return
+        self.accepted_foreign_hosts[host] = self.accepted_foreign_hosts.get(host, 0) + 1
 
     def note_artifact_bypass(self, url: str) -> None:
         """Записать видимый обход path-prefix терминальным артефактом (P6b).
@@ -708,6 +829,7 @@ class Frontier:
             return "truncated"
         self._seen.add(url)
         self._queue.append((url, 0))
+        self.note_host_accept(url)
         return "queued"
 
     def add_revalidate_seed(self, url: str) -> str:
@@ -745,6 +867,7 @@ class Frontier:
         self._seen.add(url)
         self._revalidation.add(url)
         self._queue.append((url, 0))
+        self.note_host_accept(url)
         return "queued"
 
     def is_revalidation(self, url: str) -> bool:
@@ -789,6 +912,7 @@ class Frontier:
             self.note_artifact_bypass(url)
         self._seen.add(url)
         self._queue.append((url, depth))
+        self.note_host_accept(url)
         return True
 
     def offer(self, links: Sequence[str], parent_depth: int) -> None:
@@ -828,7 +952,7 @@ class Frontier:
 
     def with_limits(self, limits: CrawlLimits) -> Frontier:
         """Копия frontier с урезанными лимитами (seam для D4/D3 без мутации)."""
-        clone = Frontier(self.root_url, limits)
+        clone = Frontier(self.root_url, limits, scope_hosts=self.scope_hosts)
         clone._seen = set(self._seen)
         clone._queue = deque(self._queue)
         clone._revalidation = set(self._revalidation)
@@ -838,6 +962,13 @@ class Frontier:
         clone.artifacts_outside_prefix_count = self.artifacts_outside_prefix_count
         clone.artifacts_outside_prefix = list(self.artifacts_outside_prefix)
         clone._bypass_seen = set(self._bypass_seen)
+        clone.out_of_scope_subdomains = dict(self.out_of_scope_subdomains)
+        clone.out_of_scope_subdomain_examples = {
+            host: list(urls)
+            for host, urls in self.out_of_scope_subdomain_examples.items()
+        }
+        clone._subdomain_reject_seen = set(self._subdomain_reject_seen)
+        clone.accepted_foreign_hosts = dict(self.accepted_foreign_hosts)
         return clone
 
     # -- внутреннее --------------------------------------------------------- #

@@ -23,6 +23,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
+from core.config.domain_profiles import DomainProfile
 from core.domain import (
     AnchorRelation,
     CatalogRow,
@@ -272,6 +273,16 @@ def _multi_host_pages(n: int = 4, body: str = "page") -> dict[str, bytes]:
         pages[f"https://h{i}.docs.test/{i}"] = f"<html>{body}-{i}</html>".encode()
     return pages
 
+def _declared_multi_host_profiles(n: int = 4) -> dict[str, DomainProfile]:
+    """Объявляет мульти-хостовые поддомены фикстуры (C, ``execution_change`` §13).
+
+    Scope корня — **объявленные** хосты: необъявленный поддомен в scope не входит, поэтому
+    «волна независимых URL» на разных хостах обязана эти хосты объявить (ключ
+    ``domain_profiles.yaml`` и есть объявление). Пустой ``DomainProfile()`` лимитов корня не
+    меняет: они резолвятся по URL корня, а не по обнаруженному URL.
+    """
+    return {f"h{i}.docs.test": DomainProfile() for i in range(n)}
+
 
 # --------------------------------------------------------------------------- #
 # (1) Дефолт неизменен: None/1 ⇒ пул не создаётся, выводы идентичны
@@ -285,10 +296,16 @@ def test_default_and_single_worker_are_identical_and_create_no_pool(
     created: list[_RecordingPool] = []
     factory = _recording_factory(created)
 
-    default = _build(tmp_path / "default", pages=pages, pool_factory=factory)
+    default = _build(
+        tmp_path / "default",
+        pages=pages,
+        domain_profiles=_declared_multi_host_profiles(),
+        pool_factory=factory,
+    )
     one = _build(
         tmp_path / "one",
         pages=pages,
+        domain_profiles=_declared_multi_host_profiles(),
         crawl_defaults=CrawlRunConfig(max_workers=1),
         pool_factory=factory,
     )
@@ -315,6 +332,7 @@ def test_bounded_concurrency_never_exceeds_max_workers(tmp_path: Path) -> None:
         tmp_path,
         pages=pages,
         crawler=crawler,
+        domain_profiles=_declared_multi_host_profiles(4),
         pool_factory=_recording_factory(created),
         crawl_defaults=CrawlRunConfig(max_depth=1, max_workers=3),
     )
@@ -350,6 +368,7 @@ def test_two_k4_runs_are_deterministic_including_dedup_winner(tmp_path: Path) ->
         return _build(
             tmp_path / sub,
             pages=pages,
+            domain_profiles=_declared_multi_host_profiles(4),
             crawl_defaults=CrawlRunConfig(max_depth=1, max_workers=4),
         )
 
@@ -375,6 +394,7 @@ def test_max_documents_respected_under_concurrency(tmp_path: Path) -> None:
     result = _build(
         tmp_path,
         pages=pages,
+        domain_profiles=_declared_multi_host_profiles(6),
         pool_factory=_recording_factory(created),
         crawl_defaults=CrawlRunConfig(max_depth=1, max_workers=3, max_documents=2),
     )
@@ -404,6 +424,7 @@ def test_browser_items_are_not_pooled(tmp_path: Path) -> None:
         tmp_path,
         pages=pages,
         crawler=crawler,
+        domain_profiles=_declared_multi_host_profiles(3),
         explicit_fetch=explicit,
         pool_factory=_recording_factory(created),
         crawl_defaults=CrawlRunConfig(max_depth=1, max_workers=3),

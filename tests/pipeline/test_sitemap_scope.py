@@ -267,7 +267,8 @@ def test_loc_blacklisted_at_root_a_still_offered_to_root_b(tmp_path: Path) -> No
     Блэклист резолвится по **корню** (``resolve_crawl_limits(root_url)``), поэтому вложенные
     корни могут иметь разные ``exclude_paths``: loc не выходит из scope, но у A он зачёркнут,
     у B — нет. Раньше ``(pid, loc)`` помечался сразу после scope-чека, и B его уже не получал
-    (F12). Корни обходятся в лексикографическом порядке URL, поэтому A — внешний ``/p1``.
+    (F12). Порядок корней — **авторский** (``execution_change`` §13: ``sorted()`` снят),
+    поэтому «A — внешний ``/p1``» объявлен списком явно, а не выводится из лексикографики.
     """
     poller = _locs(LOC_SHARED)
     crawler = _Crawler({ROOT_INNER: b"a", ROOT_OUTER: b"b", LOC_SHARED: b"loc"})
@@ -278,7 +279,7 @@ def test_loc_blacklisted_at_root_a_still_offered_to_root_b(tmp_path: Path) -> No
     result = _build(
         tmp_path,
         pages={},
-        urls={"p1": [ROOT_INNER, ROOT_OUTER]},
+        urls={"p1": [ROOT_OUTER, ROOT_INNER]},
         crawler=crawler,
         domain_profiles=profiles,
         pollers={"sitemap": poller},
@@ -324,13 +325,14 @@ def test_loc_budget_rejected_root_a_still_offered_to_root_b(tmp_path: Path) -> N
         )
         assert {i.url for i in _items(store)} >= {ROOT_INNER, LOC_SHARED}
 
-        # Второй прогон: host-корень A (идёт первым) уже без бюджета; B — вложенный /p1/a.
+        # Второй прогон: host-корень A идёт первым (авторский порядок) и уже без бюджета;
+        # B — вложенный /p1/a.
         crawler = _Crawler({ROOT_INNER: b"inner", extra_loc: b"extra"})
         poller = _locs(LOC_SHARED, extra_loc)
         result = _build(
             tmp_path,
             pages={},
-            urls={"p1": [ROOT_INNER, ROOT_HOST]},
+            urls={"p1": [ROOT_HOST, ROOT_INNER]},
             crawler=crawler,
             domain_profiles={
                 HOST: DomainProfile(sitemap=SITEMAP_URL, max_documents=1),
