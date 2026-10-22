@@ -333,9 +333,11 @@ registry_fetchers: edge             # список портов, исполня�
 extractor_zone: edge                # edge | core | separate
 llm:                                # модели корпоративного облака ([OI]-совместимый API)
   slot: cheap                       # активный слот по умолчанию (cheap | flagship)
-  cheap:    {model_id: "deepseek-v4.1-flash:cxbc"}   # дефолт обоих слотов
-  flagship: {model_id: "deepseek-v4.1-flash:cxbc"}
+  cheap:    {model_id: "deepseek-v4.1-flash:purple"}   # провизорно: финальный выбор — измерение
+  flagship: {model_id: "deepseek-v4.1-flash:purple"}   # (hound experiment evaluator-benchmark, A3)
   # выбор слота: --llm-slot > env COHOUND_LLM_SLOT > run.yaml: llm_slot > deploy.llm.slot > cheap
+  # модель оценщика: --llm-model > deploy.llm.<slot>.model_id (env COHOUND_LLM_MODEL — только
+  # для LLM-разведки: идентичность оценщика входит в execution_contract_digest, 03 §D.6)
   # api_key: env COHOUND_LLM_API_KEY; endpoint — [OI]-совместимый API внутри корп. периметра
 search:
   budget: { ru: 5, en: 5 }          # симметрия I16

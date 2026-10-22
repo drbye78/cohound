@@ -2758,7 +2758,10 @@ resume'ит тот же `run_id`.
 
 Модель объявляется осями в форме `DeclaredExecutionAxes.llm_scenarios`: `model_id`,
 `model_version`, `endpoint_kind`, `decoder`, `web_tool: false` (I18 — структурно: у
-`EvaluatorPort` нет инструментов), плюс наблюдаемые `seed`/`temperature` порта.
+`EvaluatorPort` нет инструментов), плюс наблюдаемые `seed`/`temperature` порта. Источник
+`model_id` — объявленный вход (`--llm-model` > `deploy.llm.<slot>.model_id`), а не env
+`COHOUND_LLM_MODEL`: последняя действует только на LLM-разведку, чей выход — кандидаты
+(G2), а не evidence (§7.4/I21, `03` §D.6).
 
 ### 20.2. Метрики и их определения
 

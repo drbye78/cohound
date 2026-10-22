@@ -15,6 +15,7 @@ import pytest
 
 from core.adapters.llm_discovery import DiscoveryLLM
 from core.cli.main import EXIT_OK, EXIT_USAGE, main
+from core.cli.wiring import DEFAULT_LLM_MODEL
 from core.ports.types import FetchMode, FetchPlan, RawPage
 from tests.fakes.ports import FakeExtractor
 from tests.helpers.output import json_out
@@ -73,7 +74,7 @@ def test_wiring_defaults_and_env_configuration(
 
     llm = build_discovery_llm()
     assert llm.base_url == ""
-    assert llm.model_id == "deepseek-v4.1-flash:cxbc"
+    assert llm.model_id == DEFAULT_LLM_MODEL
     assert llm.decoder == "json_object"
     assert llm.api_key is None
 

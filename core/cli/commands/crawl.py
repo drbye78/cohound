@@ -34,6 +34,7 @@ from typing import Any, Callable
 
 from core.cli.context import (
     _add_common,
+    _add_llm_model_flag,
     _add_llm_slot_flag,
     _add_phase4_flags,
     _ensure_run,
@@ -64,7 +65,7 @@ from core.cli.execution_axes import (
     declared_status_dict_version,
     resolve_declared_axes,
 )
-from core.cli.wiring import build_store
+from core.cli.wiring import build_store, llm_env_notices
 from core.config.deploy import load_deploy_config
 from core.domain import CrawlItemStatus, CrawlSessionStatus, RefreshPolicy
 from core.pipeline import PHASES
@@ -339,6 +340,16 @@ def _execute_crawl(
     notes: list[str] = []
     if from_scratch:
         notes.append("from-scratch: R7-кэш обойдён (cache=None) — живой ре-фетч")
+    # §7.4/I21: env COHOUND_LLM_MODEL/_DECODER оценщиком не читаются, а endpoint из env
+    # вообще вне execution contract — оба расхождения видны в payload, а не молча
+    # (эти переменные живут в runbook'ах операторов).
+    notes.extend(
+        llm_env_notices(
+            deploy_llm=getattr(deploy_config, "llm", None),
+            slot=getattr(args, "llm_slot", None),
+            run_slot=getattr(getattr(inputs, "run", None), "llm_slot", None),
+        )
+    )
 
     store = build_store(db_path, profile=args.profile)
     ports: Any = None
@@ -744,6 +755,7 @@ def configure(sub: Any) -> None:
     _add_phase4_flags(p_run)
     _add_common(p_run)
     _add_llm_slot_flag(p_run)
+    _add_llm_model_flag(p_run)
     p_run.set_defaults(handler=run)
 
     p_status = crawl.add_parser("status", help="статус сеанса и счётчики (read-only)")
@@ -765,6 +777,7 @@ def configure(sub: Any) -> None:
     _add_phase4_flags(p_resume)
     _add_common(p_resume)
     _add_llm_slot_flag(p_resume)
+    _add_llm_model_flag(p_resume)
     p_resume.set_defaults(handler=resume)
 
     p_restart = crawl.add_parser("restart", help="очистить сеанс и запустить заново")
@@ -773,6 +786,7 @@ def configure(sub: Any) -> None:
     _add_phase4_flags(p_restart)
     _add_common(p_restart)
     _add_llm_slot_flag(p_restart)
+    _add_llm_model_flag(p_restart)
     p_restart.set_defaults(handler=restart)
 
     p_cancel = crawl.add_parser("cancel", help="перевести сеанс в терминальный cancelled")

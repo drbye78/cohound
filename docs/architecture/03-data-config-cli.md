@@ -705,10 +705,10 @@ edge** (composition root Z1, `07` §4/§7); ядро ходит за канди�
 |---|---|---|---|---|
 | `COHOUND_LLM_BASE_URL` | базовый URL [OI]-совместимого LLM-API корпоративного облака | опц. | — (обязателен: внутренний endpoint) | `wiring.build_discovery_llm` (LLM-разведка `passport-scout`, Ш2) |
 | `COHOUND_LLM_API_KEY` | ключ LLM-разведки | **обязателен для вызова** | — (обязателен для вызова) | `wiring.build_discovery_llm` |
-| `COHOUND_LLM_SLOT` | активный LLM-слот: `cheap`\|`flagship` (см. `deploy.yaml.llm`) | опц. | `cheap` | `wiring` (выбор модели) |
-| `COHOUND_LLM_MODEL` | `model_id` LLM-разведки (переопределяет активный слот) | опц. | `deepseek-v4.1-flash:cxbc` | `wiring.build_discovery_llm` |
-| `COHOUND_LLM_DECODER` | механизм декодирования (`none`/`json_object`/`json_schema`) | опц. | `json_object` | `wiring.build_discovery_llm` |
-| `COHOUND_LLM_TIMEOUT` | таймаут LLM-запроса, с (>0) | опц. | `120.0` | `wiring.build_discovery_llm` |
+| `COHOUND_LLM_SLOT` | активный LLM-слот: `cheap`\|`flagship` (см. `deploy.yaml.llm`) | опц. | `cheap` | `wiring` (выбор слота — и оценщиком, и разведкой) |
+| `COHOUND_LLM_MODEL` | `model_id` **LLM-разведки** (переопределяет активный слот) | опц. | `deepseek-v4.1-flash:purple` (провизионно) | **только** `wiring.build_discovery_llm`; оценщик её **не читает** (модель оценщика — `deploy.llm.<slot>.model_id` или `--llm-model`) |
+| `COHOUND_LLM_DECODER` | механизм декодирования (`none`/`json_object`/`json_schema`) | опц. | `json_object` | **только** `wiring.build_discovery_llm`; оценщик берёт `decoder` из слота |
+| `COHOUND_LLM_TIMEOUT` | таймаут LLM-запроса, с (>0) | опц. | `120.0` | `wiring.build_discovery_llm`/`build_evaluator_llm` (операционный параметр хоста) |
 | `COHOUND_LLM_MAX_TOKENS` | максимум токенов ответа (>0) | опц. | `4096` | `wiring.build_discovery_llm` |
 | `COHOUND_SCOUT_CRAWLER` | краулер `passport-scout`: `http`\|`scrapy`\|`browser` | опц. | `http` | `wiring.build_scout_crawler` |
 | `COHOUND_NO_REEXEC` | отключить автоперезапуск `hound.py` в проектной `.venv` | опц. | — | `hound.py` |
@@ -724,12 +724,28 @@ edge** (composition root Z1, `07` §4/§7); ядро ходит за канди�
   (`api_key`, `folder_id`) адаптер считается недоступным, и кандидаты **не
   выдумываются** (I19) — команда возвращает `EXIT_ERROR` с явным сообщением.
 - Флаги CLI переопределяют env: `passport-scout --llm-base-url/--llm-model/--llm-decoder`,
-  `discover --search-adapter`.
+  `discover --search-adapter`. Для **оценщика** переопределение модели — `--llm-model`
+  (`run`/`plan`/`crawl run|resume|restart`): env `COHOUND_LLM_MODEL`/`COHOUND_LLM_DECODER`
+  на него не действуют (см. ниже).
+- **Идентичность модели оценщика — объявленный вход, не env (§7.4/I21).** `model_id`/
+  `decoder` оценщика резолвятся `--llm-model` > `deploy.llm.<slot>` > дефолт модуля;
+  `base_url`/`api_key`/`timeout` — операционные и читаются из env как раньше. Причина —
+  `llm_scenarios` входят в `execution_contract_digest` (→ `run_id`): манифест обязан
+  называть ту модель, которая работала, а env — свойство хоста, не прогона. Активный слот
+  без объявленного `model_id` — **ошибка** (`llm`, `EXIT_USAGE`), а не тихий дефолт.
+  Флаг питает **и** runtime-оценщик, **и** `llm_scenarios` — контракт и рантайм не могут
+  разойтись. Если `COHOUND_LLM_MODEL`/`COHOUND_LLM_DECODER` заданы, прогон сообщает об их
+  игнорировании (`warnings` payload + `logs/wiring.jsonl`, событие `llm_env_note`).
+  Endpoint из env (`COHOUND_LLM_BASE_URL`) оставляет `llm_scenarios` пустой (env не входит
+  в `run_id`) — и это тоже видно в payload/`wiring.jsonl` как «оценщик вне execution
+  contract». Асимметрия с LLM-разведкой намеренная: её выход — кандидаты/гипотезы (G2),
+  а не evidence.
 - **Две слотовые модели (`deploy.yaml.llm`).** Секция `llm:` в `config/deploy.yaml` задаёт два
   именованных слота — `cheap` и `flagship`; **оба по умолчанию** указывают на
-  `deepseek-v4.1-flash:cxbc`. Активный слот выбирается детерминированно по приоритету:
-  `--llm-slot` > env `COHOUND_LLM_SLOT` > `run.yaml: llm_slot` > `deploy.llm.slot` > `cheap`.
-  `api_key` берётся из env (`COHOUND_LLM_API_KEY`); endpoint — [OI]-совместимый
+  `deepseek-v4.1-flash:purple` (провизионные данные: финальный выбор даёт
+  `hound experiment evaluator-benchmark`). Активный слот выбирается детерминированно по
+  приоритету: `--llm-slot` > env `COHOUND_LLM_SLOT` > `run.yaml: llm_slot` > `deploy.llm.slot`
+  > `cheap`. `api_key` берётся из env (`COHOUND_LLM_API_KEY`); endpoint — [OI]-совместимый
   API корпоративного облака. Форма секции — `07` §7.
 
 **Автозагрузка `.env` (composition root, `core/config/dotenv.py`).** CLI загружает
@@ -756,6 +772,13 @@ dotenv-файл **на входе** (`core/cli/main.py`, после разбор
   `env:COHOUND_SCOUT_CRAWLER=<value>`, `crawl_sources.engine[...]`, `profile.fetch[hosts]`
   или `default`. Запрошенный, но несобранный движок (нет зависимости/ошибка конфигурации)
   виден как WARN с причиной — тихая подмена движка больше не возможна.
+- **Видимость env-расхождений LLM.** Идентичность модели оценщика — объявленный вход
+  (`deploy.llm.<slot>.model_id` / `--llm-model`), поэтому `COHOUND_LLM_MODEL`/
+  `COHOUND_LLM_DECODER` в прогоне не действуют. Чтобы смена env не меняла поведение молча,
+  `_resolve_ports` пишет по WARN-строке на каждое расхождение в `logs/wiring.jsonl`
+  (событие `llm_env_note`), а команда (`run`/`plan`/`crawl`) дублирует их в `warnings`/
+  `notes` payload. Отдельная строка — «endpoint из env»: оценщик поднят, но `llm_scenarios`
+  пуста, то есть модель оценщика **вне** execution contract (`run_id` её не описывает).
 
 **Runbook живого прогона корпуса.** Минимальный операторский запуск (профиль `local`,
 in-process, без Правки кода):

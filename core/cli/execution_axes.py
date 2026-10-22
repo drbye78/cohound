@@ -51,14 +51,12 @@ from typing import Any
 
 from core.adapters.chunker_family import composite_chunker_version
 from core.adapters.extract_html import HtmlExtractor
-from core.adapters.llm_local import (
-    DEFAULT_DECODER as EVALUATOR_DEFAULT_DECODER,
-)
-from core.adapters.llm_local import (
-    DEFAULT_MODEL_ID as EVALUATOR_DEFAULT_MODEL_ID,
-)
 from core.cli.context import _load_registry_specs
-from core.cli.wiring import manifest_deploy_fields, registry_specs_digest
+from core.cli.wiring import (
+    manifest_deploy_fields,
+    registry_specs_digest,
+    resolve_evaluator_model_identity,
+)
 from core.config.deploy import DeployConfig, resolve_llm_slot
 from core.domain.dictionary import load_dictionary
 from core.domain.models import canonical_rate_limit
@@ -162,15 +160,28 @@ def _resolve_llm_scenarios(
 ) -> tuple[dict[str, Any], ...]:
     """Детерминированная таблица ``scenario → модель`` (§7.4/I21) из объявленных входов.
 
-    Источник — ``deploy.llm`` (слоты) + ``--llm-slot``/``run.yaml:llm_slot``; env-ключи
-    ``COHOUND_LLM_*`` **не** читаются: это операционная среда хоста, а не декларированный
-    вход прогона (иначе два хоста с одним ``run.yaml`` получили бы разный ``run_id``).
+    Источник — ``deploy.llm`` (слоты) + ``--llm-slot``/``run.yaml:llm_slot`` +
+    ``--llm-model``; env-ключи ``COHOUND_LLM_*`` **не** читаются: это операционная среда
+    хоста, а не декларированный вход прогона (иначе два хоста с одним ``run.yaml`` получили
+    бы разный ``run_id``).
+
+    Идентичность модели резолвится **той же** функцией, что и runtime-оценщик
+    (:func:`core.cli.wiring.resolve_evaluator_model_identity`): аргумент ``--llm-model`` >
+    поле слота > дефолт ``decoder``. Двух формул нет — иначе контракт и рантайм разошлись бы
+    (именно этот разрыв и был измерен: манифест называл модель, которая не работала).
 
     Сценарий ``evaluator`` объявляется, только если слот **активен** — задан ``base_url``
     (условие активности зеркалит ``build_evaluator_llm``): пустой слот означает, что
     оценщик не поднимается, и выдумывать маршрут нельзя. Остальные сценарии
     (``search_adapter``/``discovery``/``concept_scout``) в ``deploy.llm`` слотов не имеют
     и здесь не объявляются — пустая таблица честнее выдуманной.
+
+    Endpoint из env (``COHOUND_LLM_BASE_URL``) сюда не входит по построению: он не
+    декларирован, поэтому таблица остаётся пустой, а факт «оценщик поднят из env вне
+    контракта» сообщает :func:`core.cli.wiring.llm_env_notices`.
+
+    :raises core.cli.errors.CliError: слот активен, но модель не объявлена ни слотом,
+        ни ``--llm-model`` (тихий дефолт запрещён — это была бы ложная провенанс-запись).
     """
     llm = getattr(deploy, "llm", None)
     explicit = getattr(args, "llm_slot", None)
@@ -181,14 +192,19 @@ def _resolve_llm_scenarios(
     base_url = getattr(config, "base_url", None)
     if not (base_url and str(base_url).strip()):
         return ()
+    model_id, decoder = resolve_evaluator_model_identity(
+        slot_config=config,
+        slot_name=slot,
+        model_id=getattr(args, "llm_model", None),
+    )
     row = {
         "scenario": "evaluator",
-        "model_id": getattr(config, "model_id", None) or EVALUATOR_DEFAULT_MODEL_ID,
+        "model_id": model_id,
         "model_version": getattr(config, "model_version", None) or None,
         "endpoint_kind": "api",
         # I18: оценщик без веб-тула — структурная гарантия, а не настройка.
         "web_tool": False,
-        "decoder": getattr(config, "decoder", None) or EVALUATOR_DEFAULT_DECODER,
+        "decoder": decoder,
     }
     return (row,)
 
@@ -205,12 +221,14 @@ def resolve_declared_axes(
     (спецификации реестров — только YAML), не собирает адаптеры и не трогает диск
     прогона. Один и тот же вызов — источник и контракта, и манифеста.
 
-    :param args: разобранные аргументы CLI (нужны ``--package`` и ``--llm-slot``).
+    :param args: разобранные аргументы CLI (нужны ``--package``, ``--llm-slot`` и
+        ``--llm-model``).
     :param inputs: нормализованные входы прогона (``run``/``package``/профили домена).
     :param deploy: resolved ``DeployConfig``; ``None`` — безопасный дефолт ``local``
         (значения не выдумываются сверх дефолтов конфига).
     :raises ValueError: неизвестное имя LLM-слота (``--llm-slot``/``run.yaml``).
-    :raises core.cli.errors.CliError: объявленный реестр пакета отсутствует/невалиден.
+    :raises core.cli.errors.CliError: объявленный реестр пакета отсутствует/невалиден; либо
+        LLM-слот активен, а модель оценщика не объявлена ни слотом, ни ``--llm-model``.
     """
     config = deploy if deploy is not None else DeployConfig(profile="local")
     run = getattr(inputs, "run", None)

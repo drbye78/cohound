@@ -49,6 +49,7 @@ from core.cli.wiring import (
     build_gateway,
     build_store,
     build_worker_extractor,
+    llm_env_notices,
     manifest_deploy_fields,
     run_db_path,
 )
@@ -170,6 +171,8 @@ __all__ = [
     "_print_gate",
     "_print_passport_scout",
     "_add_common",
+    "_add_llm_slot_flag",
+    "_add_llm_model_flag",
     "_positive_int",
     # Константы и приватные алиасы
     "_PROMOTE_STATUSES",
@@ -1114,6 +1117,9 @@ def _resolve_ports(
             deploy_llm=deploy_config.llm,
             slot=getattr(args, "llm_slot", None),
             run_slot=getattr(getattr(inputs, "run", None), "llm_slot", None),
+            # §7.4/I21: модель оценщика — объявленный вход. ``--llm-model`` питает и runtime,
+            # и ``llm_scenarios`` (execution_axes) — один вход, две проекции, без расхождения.
+            model_id=getattr(args, "llm_model", None),
         )
         if deploy_config is not None
         else None
@@ -1144,6 +1150,16 @@ def _resolve_ports(
         if run_id and logs_root is not None
         else None
     )
+    # §7.4/I21: идентичность оценщика — объявленный вход, а env-настройки модели/endpoint —
+    # нет. Расхождение не должно быть молчаливым (эти переменные живут в runbook'ах):
+    # пишем по строке на каждое расхождение в тот же ``wiring.jsonl``, что и выбор движка.
+    if engine_log is not None and deploy_config is not None:
+        for notice in llm_env_notices(
+            deploy_llm=deploy_config.llm,
+            slot=getattr(args, "llm_slot", None),
+            run_slot=getattr(getattr(inputs, "run", None), "llm_slot", None),
+        ):
+            engine_log.warn(notice, event="llm_env_note")
     return build_adapters(
         profile=args.profile,
         deploy=deploy_config,
@@ -1926,6 +1942,31 @@ def _add_llm_slot_flag(parser: argparse.ArgumentParser) -> None:
         choices=list(LLM_SLOTS),
         default=None,
         help="активный LLM-слот оценщика (override COHOUND_LLM_SLOT/deploy.llm.slot)",
+    )
+
+
+def _add_llm_model_flag(parser: argparse.ArgumentParser) -> None:
+    """Флаг ``--llm-model`` для входов, считающих identity (§7.4/I21, §13).
+
+    Модель оценщика — **объявленный** вход: она входит в ``llm_scenarios``, а значит в
+    ``execution_contract_digest`` и ``run_id``. Env ``COHOUND_LLM_MODEL`` для оценщика не
+    читается (это настройка LLM-разведки), поэтому единственный способ переопределить
+    модель слота без правки ``deploy.yaml`` — этот флаг. Он питает **и** runtime-оценщик
+    (``_resolve_ports`` → ``build_evaluator_llm``), **и** ``_resolve_llm_scenarios``: один
+    вход, две проекции — контракт и рантайм не могут разойтись.
+
+    ``plan``/``crawl`` получают флаг наравне с ``run`` по той же причине, что и
+    ``--llm-slot``: они считают тот же ``run_id``, и иначе показали бы иную идентичность.
+    """
+    parser.add_argument(
+        "--llm-model",
+        dest="llm_model",
+        default=None,
+        metavar="MODEL_ID",
+        help=(
+            "model_id оценщика (override deploy.llm.<slot>.model_id); входит в run_id. "
+            "Env COHOUND_LLM_MODEL оценщиком не читается (только LLM-разведка)"
+        ),
     )
 
 

@@ -653,11 +653,75 @@ def test_llm_section_parsed(tmp_path: Path) -> None:
 
 
 def test_canonical_llm_both_slots_same_default_model() -> None:
-    """Оба слота канонического ``config/deploy.yaml`` по умолчанию — одна модель."""
+    """Оба слота канонического ``config/deploy.yaml`` по умолчанию — одна модель.
+
+    Значение **провизионное** (идентификатор, используемый сегодня), а не измеренное:
+    финальный выбор даёт ``hound experiment evaluator-benchmark``. Пин держит оба слота
+    согласованными, чтобы прогон не зависел от того, какой слот активен.
+    """
     cfg = load_deploy_config(None)
     assert cfg.llm.slot == DEFAULT_LLM_SLOT
     assert cfg.llm.cheap.model_id == DEFAULT_LLM_MODEL_ID
     assert cfg.llm.flagship.model_id == DEFAULT_LLM_MODEL_ID
+    assert cfg.llm.cheap.model_id == "deepseek-v4.1-flash:purple"
+
+
+def test_default_model_constants_track_deploy_config() -> None:
+    """Пин против дрейфа идентификатора: конфиг — источник, константы обязаны совпадать.
+
+    Идентификатор модели живёт в трёх местах кода (конфиг-дефолт, fallback адаптера
+    оценщика, fallback LLM-разведки). Правка одного места без остальных давала ровно тот
+    дефект, ради которого введена эта граница: манифест/докстринг называют одну модель,
+    работает другая. Тест не «проверяет авторитетность спеки» — он вынуждает править все
+    три значения вместе с `config/deploy.yaml`.
+    """
+    from core.adapters.llm_local import DEFAULT_MODEL_ID as EVALUATOR_ADAPTER_FALLBACK
+    from core.cli.wiring import DEFAULT_LLM_MODEL as DISCOVERY_FALLBACK
+
+    cfg = load_deploy_config(None)
+    canonical = cfg.llm.cheap.model_id
+
+    assert canonical == cfg.llm.flagship.model_id  # оба слота — одна модель
+    assert DEFAULT_LLM_MODEL_ID == canonical  # конфиг-дефолт
+    assert EVALUATOR_ADAPTER_FALLBACK == canonical  # fallback прямой конструкции
+    assert DISCOVERY_FALLBACK == canonical  # последний фолбэк разведки
+
+
+def test_canonical_llm_slots_inactive_so_model_id_is_not_in_run_id() -> None:
+    """Пустой ``base_url`` → ``llm_scenarios`` пуста: смена провизионной модели не меняет run_id.
+
+    Это и есть причина, по которой правка ``model_id`` в ``config/deploy.yaml`` безопасна
+    для идентичности: неактивный слот не объявляет сценарий ``evaluator``, а значит
+    ``execution_contract_digest`` (→ ``run_id``) от модели не зависит. Проверяется
+    вычислением, а не утверждением: старый и новый идентификатор дают одинаковый ``()``.
+    """
+    from types import SimpleNamespace
+
+    from core.cli.execution_axes import _resolve_llm_scenarios
+
+    canonical = load_deploy_config(None)
+    assert canonical.llm.cheap.base_url == ""
+    assert canonical.llm.flagship.base_url == ""
+
+    args = SimpleNamespace(llm_slot=None, llm_model=None)
+    inputs = SimpleNamespace(run=None)
+
+    old = DeployConfig(
+        llm=LLMDeployConfig(
+            cheap=LLMSlotConfig(model_id="deepseek-v4.1-flash:cxbc"),
+            flagship=LLMSlotConfig(model_id="deepseek-v4.1-flash:cxbc"),
+        )
+    )
+    new = DeployConfig(
+        llm=LLMDeployConfig(
+            cheap=LLMSlotConfig(model_id="deepseek-v4.1-flash:purple"),
+            flagship=LLMSlotConfig(model_id="deepseek-v4.1-flash:purple"),
+        )
+    )
+
+    assert _resolve_llm_scenarios(args=args, inputs=inputs, deploy=canonical) == ()
+    assert _resolve_llm_scenarios(args=args, inputs=inputs, deploy=old) == ()
+    assert _resolve_llm_scenarios(args=args, inputs=inputs, deploy=new) == ()
 
 
 def test_resolve_llm_slot_precedence() -> None:

@@ -63,7 +63,6 @@ from core.adapters.llm_discovery import (
 )
 from core.adapters.llm_local import (
     DEFAULT_DECODER as EVALUATOR_DEFAULT_DECODER,
-    DEFAULT_MODEL_ID as EVALUATOR_DEFAULT_MODEL_ID,
     DEFAULT_TIMEOUT as EVALUATOR_DEFAULT_TIMEOUT,
     GenerateFn as EvaluatorGenerateFn,
     LocalEvaluator,
@@ -85,6 +84,7 @@ from core.adapters.remote_registry import RemoteRegistry
 from core.adapters.remote_search import RemoteSearch
 from core.adapters.search_glm import GlmSearchAdapter
 from core.adapters.search_yandex import YandexSearchAdapter
+from core.cli.errors import EXIT_USAGE, CliError
 from core.config.deploy import (
     DeployConfig,
     LLMDeployConfig,
@@ -146,6 +146,7 @@ __all__ = [
     "ENV_EMBED_LITE_MODEL",
     "ENV_EMBED_LITE_REVISION",
     "ENV_EMBED_LITE_PATH",
+    "EVALUATOR_ENV_IGNORED",
     "PHASES",
     "WiringError",
     "run_db_path",
@@ -154,6 +155,8 @@ __all__ = [
     "build_search_adapter",
     "build_discovery_llm",
     "build_evaluator_llm",
+    "resolve_evaluator_model_identity",
+    "llm_env_notices",
     "build_lite_embedder",
     "build_vector_index",
     "seed_lexical_index",
@@ -208,8 +211,11 @@ ENV_LLM_SLOT = "COHOUND_LLM_SLOT"
 #: оператор обязан явно задать внутренний [OI]-совместимый API корпоративного периметра
 #: (внешние хосты не используются).
 DEFAULT_LLM_BASE_URL = ""
-#: Дефолтная модель LLM-разведки (env-фолбэк; данные, не предметная категория).
-DEFAULT_LLM_MODEL = "deepseek-v4.1-flash:cxbc"
+#: Дефолтная модель LLM-разведки — **последний** фолбэк (env ``COHOUND_LLM_MODEL`` >
+#: поле слота > это значение). Модель разведки операционна (её выход — кандидаты/гипотезы
+#: G2, не evidence), поэтому здесь допустим и env-фолбэк. Значение держится равным
+#: ``config/deploy.yaml:llm.<slot>.model_id`` (пин в ``tests/config/test_deploy.py``).
+DEFAULT_LLM_MODEL = "deepseek-v4.1-flash:purple"
 
 #: Env-переопределения лёгкого оффлайн-эмбеддера (P4a; данные, не предметная категория):
 #: HF-идентификатор модели, пин ревизии (sha/тег → входит в ``embed_model_id`` как ``repo@sha``,
@@ -771,6 +777,123 @@ def _resolve_llm_slot_and_config(
     return resolved, config
 
 
+#: Env-переменные, которые **не** участвуют в идентичности модели оценщика (§7.4/I21).
+#: Они действуют только на LLM-разведку (:func:`build_discovery_llm`): оценщик берёт
+#: ``model_id``/``decoder`` из объявленного входа — слота ``deploy.llm`` или ``--llm-model``.
+EVALUATOR_ENV_IGNORED: tuple[str, ...] = (ENV_LLM_MODEL, ENV_LLM_DECODER)
+
+#: Объявленный источник для каждой игнорируемой env-переменной (текст предупреждения).
+_EVALUATOR_ENV_DECLARED_SOURCE: dict[str, str] = {
+    ENV_LLM_MODEL: (
+        "модель оценщика — объявленный вход (deploy.llm.{slot}.model_id или --llm-model)"
+    ),
+    ENV_LLM_DECODER: (
+        "decoder оценщика — объявленный вход (deploy.llm.{slot}.decoder)"
+    ),
+}
+
+
+def resolve_evaluator_model_identity(
+    *,
+    slot_config: LLMSlotConfig | None,
+    slot_name: str | None = None,
+    model_id: str | None = None,
+    decoder: str | None = None,
+) -> tuple[str, str]:
+    """Резолвит идентичность модели оценщика: ``(model_id, decoder)`` (§7.4/I21).
+
+    Приоритет — **только объявленные** входы: явный аргумент (CLI ``--llm-model``) > поле
+    активного слота ``deploy.llm.<slot>`` > дефолт модуля (``decoder``). Env
+    ``COHOUND_LLM_MODEL``/``COHOUND_LLM_DECODER`` здесь **не читается**: идентичность модели
+    входит в ``execution_contract_digest`` (``llm_scenarios`` → ``run_id``), поэтому она
+    обязана быть функцией объявленных входов, а не окружения хоста (иначе манифест называл
+    бы модель, которая не работала). Endpoint/ключ/таймаут — операционные и берутся из env
+    как раньше (:func:`build_evaluator_llm`).
+
+    **Никакого угадывания.** При активном endpoint отсутствие ``model_id`` и в аргументе, и
+    в слоте — явная ошибка, а не молчаливый дефолт: дефолтная модель, которой оператор не
+    объявлял, — та же ложная провенанс-запись, только тише.
+
+    :param slot_config: конфиг активного слота (``None`` — слотов нет).
+    :param slot_name: имя активного слота (для текста ошибки/предупреждений).
+    :param model_id: явно объявленная модель (CLI ``--llm-model``).
+    :param decoder: явно объявленный механизм декодирования (сейчас — только benchmark).
+    :raises CliError: endpoint активен, но модель не объявлена ни аргументом, ни слотом.
+    """
+    slot_model = (getattr(slot_config, "model_id", None) or "").strip()
+    slot_decoder = (getattr(slot_config, "decoder", None) or "").strip()
+    declared_model = (model_id or "").strip()
+    resolved_model = declared_model or slot_model
+    if not resolved_model:
+        raise CliError(
+            "модель оценщика не объявлена: endpoint задан, но model_id отсутствует и в "
+            f"слоте deploy.llm.{slot_name or '<slot>'}.model_id, и в --llm-model. "
+            f"{ENV_LLM_MODEL} для оценщика не читается: идентичность модели — объявленный "
+            "вход (I21/§7.4). Укажите model_id в deploy.yaml или передайте --llm-model",
+            code="llm",
+            exit_code=EXIT_USAGE,
+        )
+    resolved_decoder = (decoder or "").strip() or slot_decoder or EVALUATOR_DEFAULT_DECODER
+    return resolved_model, resolved_decoder
+
+
+def llm_env_notices(
+    *,
+    deploy_llm: LLMDeployConfig | None = None,
+    slot: str | None = None,
+    run_slot: str | None = None,
+) -> tuple[str, ...]:
+    """Видимые предупреждения о расхождении env-настроек LLM с объявленными осями (§7.4/I21).
+
+    Оценщик поднимается **частично** из окружения: endpoint/ключ/таймаут — операционные
+    данные хоста (env), а модель — объявленный вход. Отсюда два класса расхождений, которые
+    нельзя проглатывать (эти переменные живут в runbook'ах операторов):
+
+    * ``COHOUND_LLM_MODEL``/``COHOUND_LLM_DECODER`` заданы, но оценщиком **не читаются**
+      (действуют только на LLM-разведку) — иначе смена env молча меняла бы поведение;
+    * endpoint пришёл из env ``COHOUND_LLM_BASE_URL`` — оценщик работает вне
+      ``execution_contract_digest`` (``llm_scenarios`` пуста либо объявляет другой endpoint),
+      и это должно быть сказано, а не подразумеваться.
+
+    Функция чистая (читает env и конфиг, ничего не пишет): её вызывают composition root для
+    ``wiring.jsonl`` и команда — для payload прогона. Одно и то же сообщение на один вызов —
+    «один раз», а не на каждую фазу.
+
+    :param deploy_llm: секция ``llm`` deploy-конфига (слоты); ``None`` — нет слотов.
+    :param slot: явный слот (``--llm-slot``); ``None`` → env/run.yaml/deploy-слот.
+    :param run_slot: слот из ``run.yaml: llm_slot`` (§4.5).
+    """
+    resolved_slot, slot_config = _resolve_llm_slot_and_config(deploy_llm, slot, run_slot)
+    notices: list[str] = []
+    for env_name in EVALUATOR_ENV_IGNORED:
+        env_value = (os.environ.get(env_name) or "").strip()
+        if not env_value:
+            continue
+        declared_source = _EVALUATOR_ENV_DECLARED_SOURCE[env_name].format(
+            slot=resolved_slot
+        )
+        notices.append(
+            f"{env_name}={env_value} игнорируется оценщиком: {declared_source}; "
+            "env-значение действует только на LLM-разведку"
+        )
+    env_base = (os.environ.get(ENV_LLM_BASE_URL) or "").strip()
+    if env_base:
+        slot_base = (getattr(slot_config, "base_url", None) or "").strip()
+        if not slot_base:
+            notices.append(
+                f"оценщик поднят на endpoint из env {ENV_LLM_BASE_URL}: слот "
+                f"{resolved_slot} неактивен (base_url пуст), поэтому llm_scenarios пуста — "
+                "модель оценщика вне execution contract (run_id её не описывает)"
+            )
+        else:
+            notices.append(
+                f"endpoint оценщика взят из env {ENV_LLM_BASE_URL} и переопределяет слот "
+                f"{resolved_slot} (объявленный base_url={slot_base}): прогон идёт не на "
+                "объявленном endpoint"
+            )
+    return tuple(notices)
+
+
 def build_discovery_llm(
     *,
     base_url: str | None = None,
@@ -792,6 +915,15 @@ def build_discovery_llm(
     ``COHOUND_LLM_API_KEY`` (внешних фолбэков нет). Пустые ``base_url``/``model_id``
     допустимы: готовность проверяет вызывающий (``cmd_passport_scout``) и выдаёт
     понятную ошибку ``llm`` (:data:`EXIT_USAGE`), а не падает.
+
+    **Асимметрия с оценщиком — намеренная (§7.4, I21).** Здесь env
+    ``COHOUND_LLM_MODEL``/``COHOUND_LLM_DECODER`` по-прежнему переопределяют слот: выход
+    разведки — кандидаты/гипотезы (G2, human-ревью), а не evidence, поэтому модель здесь —
+    операционная настройка, а не условие измерения. У оценщика (Ш6) идентичность модели —
+    **объявленный** вход: ``llm_scenarios`` входят в ``execution_contract_digest``, поэтому
+    env там не читается (:func:`build_evaluator_llm`). Это не недосмотр: смешивать
+    «кандидатов» и «доказательства» в одну политику значило бы позволить окружению
+    переписывать провенанс вердиктов.
 
     :param slot: явный активный слот (``--llm-slot``); ``None`` → env/deploy-слот.
     :param deploy_llm: секция ``llm`` deploy-конфига (слоты моделей); ``None`` — нет.
@@ -875,8 +1007,20 @@ def build_evaluator_llm(
     Оценщик (I18, без веб-тула) конструируется :class:`~core.adapters.llm_local.LocalEvaluator`
     из **активного слота** (``slot`` (CLI) > ``COHOUND_LLM_SLOT`` (env) > ``run_slot``
     (``run.yaml: llm_slot``) > ``deploy_llm.slot`` > ``cheap``, см.
-    :func:`_resolve_llm_slot_and_config`). Приоритет полей: явные аргументы > env
-    ``COHOUND_LLM_*`` > поля слота > дефолты модуля ``adapters.llm_local``.
+    :func:`_resolve_llm_slot_and_config`).
+
+    **Идентичность модели — объявленный вход, не env (§7.4/I21).** ``model_id``/``decoder``
+    резолвятся :func:`resolve_evaluator_model_identity`: явный аргумент (``--llm-model``) >
+    поле слота > дефолт модуля. Env ``COHOUND_LLM_MODEL``/``COHOUND_LLM_DECODER`` здесь
+    **не читаются** (они действуют только на LLM-разведку, :func:`build_discovery_llm`):
+    ``llm_scenarios`` входят в ``execution_contract_digest``, и манифест обязан называть ту
+    модель, которая действительно работала. Модель не объявлена ни флагом, ни слотом при
+    активном endpoint — явная ошибка (:class:`~core.cli.errors.CliError`, код ``llm``), а не
+    тихий дефолт. О факте игнорирования env сообщает :func:`llm_env_notices`.
+
+    **Операционные поля — из env, как раньше.** ``base_url``/``api_key``/``timeout`` —
+    данные хоста (endpoint/секрет/лимит), а не условие измерения: приоритет явный аргумент >
+    env > слот > дефолт.
 
     **Условие активности.** Если у выбранного слота (и env/аргументов) пустой ``base_url``
     — возвращается ``None``: оценщик не поднимается, поведение прогона прежнее (сценарий
@@ -887,17 +1031,17 @@ def build_evaluator_llm(
     :param slot: явный активный слот (``--llm-slot``); ``None`` → env/run.yaml/deploy-слот.
     :param deploy_llm: секция ``llm`` deploy-конфига; ``None`` — нет слотов.
     :param run_slot: слот из ``run.yaml: llm_slot`` (§4.5); ниже env, выше ``deploy_llm.slot``.
+    :param model_id: явно объявленная модель (CLI ``--llm-model``) — побеждает поле слота.
     :param generate: тестовый/оффлайн-шов ``(prompt, schema) -> str`` (без сети).
     :param seed: seed сэмплирования; ``None`` — дефолт адаптера (``0``). Benchmark оценщика
         передаёт ``0`` явно: детерминизм — условие измерения (A3), а не настройка.
     :param temperature: температура; ``None`` — дефолт адаптера (``0.0``, greedy).
     :raises ValueError: неизвестный слот (``--llm-slot``/``COHOUND_LLM_SLOT``/``run.yaml``).
+    :raises CliError: endpoint активен, но модель не объявлена (ни слот, ни ``--llm-model``).
     """
     _resolved_slot, slot_config = _resolve_llm_slot_and_config(deploy_llm, slot, run_slot)
     slot_base = slot_config.base_url if slot_config is not None else None
-    slot_model = slot_config.model_id if slot_config is not None else None
     slot_version = slot_config.model_version if slot_config is not None else None
-    slot_decoder = slot_config.decoder if slot_config is not None else None
     slot_timeout = (
         slot_config.timeout_s
         if slot_config is not None and slot_config.timeout_s is not None
@@ -917,20 +1061,15 @@ def build_evaluator_llm(
         if api_key is not None
         else os.environ.get(ENV_LLM_API_KEY)
     )
-    resolved_model = (
-        model_id
-        if model_id is not None
-        else os.environ.get(ENV_LLM_MODEL)
-        or slot_model
-        or EVALUATOR_DEFAULT_MODEL_ID
+    # §7.4/I21: модель/decoder — объявленный вход (аргумент > слот > дефолт), env не читается.
+    resolved_model, resolved_decoder = resolve_evaluator_model_identity(
+        slot_config=slot_config,
+        slot_name=_resolved_slot,
+        model_id=model_id,
+        decoder=decoder,
     )
     resolved_version = (
         model_version if model_version is not None else slot_version
-    )
-    resolved_decoder = (
-        decoder
-        if decoder is not None
-        else os.environ.get(ENV_LLM_DECODER) or slot_decoder or EVALUATOR_DEFAULT_DECODER
     )
     resolved_timeout = (
         timeout
@@ -939,9 +1078,9 @@ def build_evaluator_llm(
     )
     return LocalEvaluator(
         generate=generate,
-        model_id=resolved_model or EVALUATOR_DEFAULT_MODEL_ID,
+        model_id=resolved_model,
         model_version=resolved_version or "",
-        decoder=resolved_decoder or EVALUATOR_DEFAULT_DECODER,
+        decoder=resolved_decoder,
         base_url=str(resolved_base).strip(),
         api_key=(resolved_key or None),
         timeout=resolved_timeout,

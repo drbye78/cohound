@@ -70,8 +70,13 @@ __all__ = [
     "CHAT_COMPLETIONS_PATH",
 ]
 
-#: Оценщик по умолчанию (§7.4, MVP): модель из корпоративного облака. Переопределяется ``model_id``.
-DEFAULT_MODEL_ID = "deepseek-v4.1-flash:cxbc"
+#: Модель оценщика по умолчанию — **только fallback прямой конструкции** (§7.4).
+#: Не авторитет: composition root всегда передаёт объявленную модель
+#: (``--llm-model`` > ``deploy.llm.<slot>.model_id``), а при её отсутствии
+#: ``build_evaluator_llm`` отказывает (``llm``/``EXIT_USAGE``), не подставляя это значение.
+#: Значение держится равным ``config/deploy.yaml:llm.<slot>.model_id`` (пин в
+#: ``tests/config/test_deploy.py``): источник истины — конфиг, а не константа адаптера.
+DEFAULT_MODEL_ID = "deepseek-v4.1-flash:purple"
 #: Профиль зоны (07): API корпоративного облака (OI-совместимый), не self-host инсталляция.
 DEFAULT_ENDPOINT_KIND = "api"
 #: Механизм constrained decoding по умолчанию: без навязанной грамматики.

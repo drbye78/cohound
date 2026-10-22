@@ -382,7 +382,10 @@ def _env_group() -> CheckGroup:
     builder.add(
         "llm_model",
         lambda: (OK, "задан") if _env_set(ENV_LLM_MODEL) else (WARN, "не задан → дефолт"),
-        hint="пусто → DEFAULT_LLM_MODEL; переопределяется --llm-model",
+        hint=(
+            "LLM-разведка: пусто → DEFAULT_LLM_MODEL, переопределяется --llm-model. "
+            "Оценщик env не читает: модель — deploy.llm.<slot>.model_id или --llm-model"
+        ),
     )
     for name, env in (
         ("llm_decoder", ENV_LLM_DECODER),

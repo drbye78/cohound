@@ -51,22 +51,27 @@ search:
   # by_language: { ru: yandex, en: glm }
 
 # --- LLM (commodity/execution-слой; 07 §7 / 03 D.5) --------------------------
-# Две именованные слоты моделей; активная выбирается в рантайме. Оба слота по умолчанию
-# указывают на одну модель `deepseek-v4.1-flash:cxbc`. base_url пустой → слот не
-# сконфигурирован (оценщик не поднимается; поведение прежнее). Модели обслуживаются
-# OI-совместимым API корпоративного облака (не self-host). Ключ — из env.
+# Две именованные слоты моделей; активная выбирается в рантайме. Оба слота указывают на
+# одну модель `deepseek-v4.1-flash:purple` — это ПРОВИЗОРНЫЕ данные (идентификатор, который
+# используется сегодня), а не решение: финальный выбор модели оценщика даёт измерение
+# `hound experiment evaluator-benchmark` (A3). Смена model_id слота — версионная граница
+# `execution_versions` (execution_change, §13): меняется run_id, methodology_version — нет.
+# base_url пустой → слот не активен (оценщик не поднимается; llm_scenarios пуста).
+# Модели обслуживаются OI-совместимым API корпоративного облака (не self-host). Ключ — из env.
+# Env COHOUND_LLM_MODEL/_DECODER оценщиком НЕ читаются (только LLM-разведка): модель оценщика —
+# объявленный вход (этот слот или --llm-model), см. 03 §D.6.
 llm:
   slot: cheap                 # активный slot: cheap | flagship (--llm-slot / COHOUND_LLM_SLOT переопределяют)
   cheap:
     base_url: ""              # OI-совместимый endpoint корпоративного облака (.../v1)
-    model_id: "deepseek-v4.1-flash:cxbc"
+    model_id: "deepseek-v4.1-flash:purple"
     model_version: ""
     decoder: json_object      # none | json_object | json_schema
     timeout_s: 120
     max_tokens: 4096
   flagship:
     base_url: ""
-    model_id: "deepseek-v4.1-flash:cxbc"
+    model_id: "deepseek-v4.1-flash:purple"
     model_version: ""
     decoder: json_object
     timeout_s: 120

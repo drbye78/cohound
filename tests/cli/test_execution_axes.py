@@ -33,12 +33,14 @@ import core.cli.wiring as wiring_mod
 from core.adapters.chunker_markdown import MarkdownChunker
 from core.adapters.chunker_text import TextChunker
 from core.cli import execution_axes
+from core.cli.errors import CliError
 from core.cli.execution_axes import (
     DeclaredExecutionAxes,
     declared_status_dict_version,
     resolve_declared_axes,
 )
 from core.cli.main import EXIT_ERROR, EXIT_OK, main
+from core.cli.wiring import ENV_LLM_DECODER, ENV_LLM_MODEL
 from core.config.deploy import (
     CrawlConfig,
     DeployConfig,
@@ -84,8 +86,10 @@ def _inputs(package: Path) -> Any:
     return load_inputs(package / "run.yaml", package)
 
 
-def _args(package: Path, *, llm_slot: str | None = None) -> SimpleNamespace:
-    return SimpleNamespace(package=str(package), llm_slot=llm_slot)
+def _args(
+    package: Path, *, llm_slot: str | None = None, llm_model: str | None = None
+) -> SimpleNamespace:
+    return SimpleNamespace(package=str(package), llm_slot=llm_slot, llm_model=llm_model)
 
 
 def _resolve(
@@ -275,6 +279,46 @@ def test_llm_scenarios_are_deterministic_rows(tmp_path: Path) -> None:
         },
     )
     assert "run_id" not in rows[0]
+
+
+def test_llm_scenarios_use_declared_model_from_flag(tmp_path: Path) -> None:
+    """``--llm-model`` — объявленная модель оценщика: побеждает слот в ``llm_scenarios``."""
+    package = _package(tmp_path)
+    deploy = DeployConfig(
+        llm=LLMDeployConfig(
+            cheap=LLMSlotConfig(
+                base_url="https://llm.test/v1",
+                model_id="slot-model",
+                decoder="json_object",
+            )
+        )
+    )
+
+    without_flag = _resolve(package, deploy=deploy).llm_scenarios
+    with_flag = _resolve(
+        package, deploy=deploy, args=_args(package, llm_model="flag-model")
+    ).llm_scenarios
+
+    assert without_flag[0]["model_id"] == "slot-model"
+    assert with_flag[0]["model_id"] == "flag-model"
+    # Декодер объявлен слотом — флаг модели его не трогает.
+    assert with_flag[0]["decoder"] == "json_object"
+
+
+def test_llm_scenarios_active_slot_without_declared_model_is_error(
+    tmp_path: Path,
+) -> None:
+    """Активный слот без объявленной модели — ошибка, а не тихий дефолт (ложный провенанс)."""
+    package = _package(tmp_path)
+    deploy = DeployConfig(
+        llm=LLMDeployConfig(cheap=LLMSlotConfig(base_url="https://llm.test/v1"))
+    )
+
+    with pytest.raises(CliError) as excinfo:
+        _resolve(package, deploy=deploy)
+
+    assert excinfo.value.code == "llm"
+    assert "--llm-model" in str(excinfo.value)
 
 
 def test_docling_version_uses_installed_distribution() -> None:
@@ -502,6 +546,76 @@ def test_llm_slot_flag_is_part_of_declared_axes_parity(
     # Слот — часть контракта: другой слот → другой run_id.
     assert main(["run", *_common(package), "--llm-slot", "cheap", "--dry-run"]) == EXIT_OK
     assert _payload(capsys)["run_id"] != run_id
+
+
+def test_llm_model_flag_is_part_of_declared_axes_parity(
+    tmp_path: Path, home: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """``--llm-model`` — та же декларированная ось у всех трёх входов (§7.4/I21).
+
+    Флаг питает и runtime-оценщик, и ``llm_scenarios``; ``plan``/``crawl`` считают тот же
+    ``run_id``, что ``run`` — иначе identity-preview расходился бы с прогоном.
+    """
+    import yaml
+
+    (tmp_path / "config").mkdir()
+    (tmp_path / "config" / "deploy.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "profile": "local",
+                "llm": {
+                    "slot": "cheap",
+                    "cheap": {
+                        "base_url": "https://llm.test/v1",
+                        "model_id": "slot-model",
+                        "decoder": "json_object",
+                    },
+                },
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    package = valid_package(tmp_path)
+    common = [*_common(package), "--llm-model", "flag-model"]
+
+    assert main(["plan", *common]) == EXIT_OK
+    plan_id = _payload(capsys)["run_id"]
+    assert main(["crawl", "run", *common, "--until", "plan"]) == EXIT_OK
+    crawl_id = _payload(capsys)["run_id"]
+    assert main(["run", *common, "--dry-run"]) == EXIT_OK
+    run_id = _payload(capsys)["run_id"]
+    assert plan_id == crawl_id == run_id
+
+    # Модель — часть контракта: слот без флага → другой run_id.
+    assert main(["run", *_common(package), "--dry-run"]) == EXIT_OK
+    assert _payload(capsys)["run_id"] != run_id
+
+
+def test_env_model_ignored_notice_is_visible_once_in_run_payload(
+    tmp_path: Path,
+    home: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Env model/decoder не читаются оценщиком — предупреждение видно в payload, один раз."""
+    monkeypatch.setenv(ENV_LLM_MODEL, "from-env")
+    monkeypatch.setenv(ENV_LLM_DECODER, "none")
+    package = valid_package(tmp_path)
+
+    assert main(["run", *_common(package), "--dry-run"]) == EXIT_OK
+
+    payload = _payload(capsys)
+    warnings = payload.get("warnings", [])
+    model_notes = [note for note in warnings if ENV_LLM_MODEL in note]
+    decoder_notes = [note for note in warnings if ENV_LLM_DECODER in note]
+    assert len(model_notes) == 1
+    assert len(decoder_notes) == 1
+    assert "--llm-model" in model_notes[0]
+    # Env не входит в контракт: смена env-модели не меняет run_id (env не в дайджесте).
+    monkeypatch.setenv(ENV_LLM_MODEL, "another-env-model")
+    assert main(["run", *_common(package), "--dry-run"]) == EXIT_OK
+    assert _payload(capsys)["run_id"] == payload["run_id"]
 
 
 def test_all_three_entrypoints_call_declared_axes_resolver(

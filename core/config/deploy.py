@@ -81,7 +81,11 @@ LLM_SLOTS: tuple[str, ...] = ("cheap", "flagship")
 #: Безопасный дефолт активного слота (лёгкая модель).
 DEFAULT_LLM_SLOT = "cheap"
 #: Дефолтный ``model_id`` слотов (данные; обе слоты по умолчанию на одну модель).
-DEFAULT_LLM_MODEL_ID = "deepseek-v4.1-flash:cxbc"
+#: Значение **провизионное**: это идентификатор, реально используемый сегодня, а не
+#: результат измерения. Финальный выбор модели оценщика даёт
+#: ``hound experiment evaluator-benchmark`` (A3); смена — граница ``execution_versions``
+#: (``execution_change``, §13), а не ``methodology_version``.
+DEFAULT_LLM_MODEL_ID = "deepseek-v4.1-flash:purple"
 
 # Путь по умолчанию относительно рабочего каталога (раскладка A.1).
 DEFAULT_DEPLOY_PATH: Path = Path("config/deploy.yaml")

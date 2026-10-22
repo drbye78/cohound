@@ -14,6 +14,7 @@ from typing import Any
 
 from core.cli.context import (
     _add_common,
+    _add_llm_model_flag,
     _add_llm_slot_flag,
     _plan_payload,
     _print_json,
@@ -24,6 +25,7 @@ from core.cli.execution_axes import (
     declared_status_dict_version,
     resolve_declared_axes,
 )
+from core.cli.wiring import llm_env_notices
 from core.config.deploy import load_deploy_config
 from core.pipeline.digests import cohort_digest, seeds_digest
 from core.pipeline.lint import lint_run_inputs
@@ -45,6 +47,7 @@ def run(args: argparse.Namespace) -> int:
     if not report.ready:
         raise LintFailure([*report.blocking, *report.incomplete], report.warnings)
 
+    llm_notices: list[str] = []
     if args.run_id is not None:
         result = build_plan(inputs, run_id=args.run_id)
     else:
@@ -64,6 +67,15 @@ def run(args: argparse.Namespace) -> int:
         # у ``run``/``crawl``. Иначе ``plan`` показывал бы иной ``run_id``, чем реальный
         # прогон: контракт перестал быть функцией только ``run.yaml``.
         deploy_config = load_deploy_config(None)
+        # §7.4/I21: env-настройки модели оценщика не читаются — предупреждение видно в
+        # payload ``plan`` (identity-preview), а не только в логе прогона.
+        llm_notices = list(
+            llm_env_notices(
+                deploy_llm=getattr(deploy_config, "llm", None),
+                slot=getattr(args, "llm_slot", None),
+                run_slot=getattr(getattr(inputs, "run", None), "llm_slot", None),
+            )
+        )
         try:
             declared = resolve_declared_axes(
                 args=args, inputs=inputs, deploy=deploy_config
@@ -91,6 +103,8 @@ def run(args: argparse.Namespace) -> int:
         )
     payload = _plan_payload(result)
     payload["dry_run"] = bool(args.dry_run)
+    if llm_notices:
+        payload["warnings"] = list(llm_notices)
     if args.json:
         _print_json({"ok": True, **payload})
     else:
@@ -113,4 +127,5 @@ def configure(sub: Any) -> None:
     )
     _add_common(p_plan)
     _add_llm_slot_flag(p_plan)
+    _add_llm_model_flag(p_plan)
     p_plan.set_defaults(handler=run)
