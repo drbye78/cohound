@@ -21,7 +21,7 @@
 Проект **не greenfield с нуля**: фундамент, домен, хранилище, конвейер Ш1–Ш9, корпус, ретривал,
 оценщик, детерминированные волны, DMZ-шов, планировщик краула и подсистема авторства пакета
 **реализованы**. Ниже — карта «артефакт → где живёт сегодня». Пост-хок-фазы P1–P4b (самодостаточность
-прогона, словарь фаз, целостность авторства/линт, фиксация ретривала) уже влиты; см. §5.
+прогона, словарь фаз, целостность авторства/линт, харнесс фиксации ретривала) уже влиты; см. §5.
 
 | Артефакт | Состояние | Роль в плане |
 |---|---|---|
@@ -43,6 +43,18 @@
 и **доменная работа** (кейсы 2–5, golden-full, baseline §11.5), а не отсутствующие подсистемы.
 Полный статус — §4/§5.
 
+> ⚠️ **Главный факт о зрелости: до `report` не дошёл ни один прогон.** Самая дальняя durable-фаза
+> в `runs/*/cohound.db` (`runs.phase_state`) — `evaluate`, и достиг её единственный прогон
+> (`live-inc-f`: 9 документов, 386 чанков, 476 ячеек, 163 evidence), у которого при этом
+> **ноль** строк в `llm_scenarios` — то есть живого оценщика в прогоне не было ни разу.
+> Ни один прогон не имеет durable-состояния `review`, `g3`, `compute`, `g4` или `report`.
+> Каталог `outputs/` существует ровно у одного прогона и содержит только `diff.md`
+> — ни `battle_card`, ни `nda_questions` не эмитились ни разу. Следствие по A3: **до первого
+> полного прогона все методологические числа — гипотезы, а не измерения**, и версия системы
+> по существу «0.1.0». Всё, что ниже помечено ✅, означает «код приземлён и покрыт тестами»,
+> а не «проверено на реальных данных».
+> DoD первого полного прогона — §4 (M0.5).
+
 *Категорийная нейтральность `core/` проверяется грепп-тестом и матрицей слоёв в selfcheck на каждом коммите.*
 
 ---
@@ -56,7 +68,7 @@
 
 | # | Свойство | Проверяемый критерий |
 |---|---|---|
-| P1 | **Воспроизводима** | `hound run` дважды на идентичных входах+кэше → ≥95% совпадений `status` (R7); всё влияющее — в `run_manifest.yaml`; плановые входы в `run_inputs` (самодостаточность прогона) |
+| P1 | **Воспроизводима** | `hound run` дважды на идентичных входах+кэше → ≥95% совпадений `status` (R7); всё влияющее — в манифесте прогона (строка БД, `report` выгружает `run_manifest.yaml`); плановые входы в `run_inputs` (самодостаточность прогона) |
 | P2 | **Аудируема** | у каждой ячейки прослеживается `evidence → source_id → source_url → content_hash → build_id`; промпт сохранён по hash |
 | P3 | **Инвариантна** | I1–I23 — это код (Pydantic + SQL-триггеры + чистые функции), а не комментарии; нарушение ловится тестом/триггером |
 | P4 | **Восстанавливаема** | прерывание прогона не теряет прогресс (resume); ошибка одного продукта/документа не роняет остальные; сеанс краула durable (`crawl_sessions`) |
@@ -113,6 +125,9 @@
 → [G4] → report` реализован с возобновляемым состоянием и артефактами. «Продакшн» для первого
 пользователя (один аналитик) достигается на M1–M2; масштаб на 5 кейсов — на M3.
 
+⚠️ «Реализован» здесь означает: фазы существуют, соединяются и проходят на тестах с фейками;
+**ни один прогон не прошёл эту цепочку целиком на реальных данных** (§0, DoD M0.5).
+
 ### 2.3. Порядок работ (историческая карта зависимостей)
 
 ```mermaid
@@ -142,6 +157,14 @@ flowchart LR
 L7-инспектируемый JSON, публикуемые схемы, атрибуция запросов, отсутствие пиннинга сертификатов,
 блокирующего TLS-инспекцию. *Аттестация конкретных корпоративных средств — вне рамок этой работы.*
 
+⚠️ **Паритета `local` и `split` по корпусу нет.** «Один и тот же прогон» сегодня не проходит под
+`split` эквивалентно: (1) члены контейнеров не извлекаются — `RemoteExtractor.supports_source_path
+= False` даёт видимый пропуск `extract_unavailable`; (2) сырьё пересекает шов только
+inline-base64 в странице `collect` (бюджет 8 MiB/страница, клиент отвергает страницу > 50 MiB) —
+staging крупных артефактов отсутствует; (3) ось `crawl.document_level` под `split` не действует
+(конвертеры строит edge). Поэтому `split` — **функционально уже `local`** по артефактам и
+контейнерам; это известное ограничение MVP, а не достигнутый паритет.
+
 ---
 
 ## 3. Рабочие потоки (workstreams): статус
@@ -154,8 +177,8 @@ L7-инспектируемый JSON, публикуемые схемы, атр�
 | **W4** | Конвейер и гейты | `core/pipeline/{runner,phases,gates,observability,metrics,idempotency}.py` | ✅ done |
 | **W5** | Конфиг и CLI | `core/config/run_config.py`, `core/pipeline/{normalize,lint,plan}.py`, `core/cli/` | ✅ done |
 | **W6** | Детерм. волны | `core/adapters/registry_generic.py`, `core/pipeline/{registry,inheritance}.py`, package-scoped `registries/` | ✅ done (спецификации — package-scoped, P3) |
-| **W7** | Корпус | `core/ports/{crawler,extractor,chunker}.py` + `crawl_*`/`extract_*`, `core/pipeline/{corpus,fetch_plan,crawl_session,crawl_sources}.py`, `core/util/{cache,sanitize,feed,rate_limit}.py` | ✅ done (+ source routing, Phase 5) |
-| **W8** | Ретривал и индекс | `core/adapters/{embed_local,embed_model2vec,index_npy,index_format,vector_npy,lexical_tantivy,lexical_bm25}.py`, `core/pipeline/{retrieve,experiments,extraction_eval}.py` | ✅ код done; ✅ **реальная фиксация выполнена** (2026-10, `runs/ru-pg-dbms-fixation`, K=3, профиль R1, bge-m3) — на **авторском** golden из 18 пар и малом корпусе (34 чанка) |
+| **W7** | Корпус | `core/ports/{crawler,extractor,chunker,container}.py` + `crawl_*`/`extract_*`/`chunker_*`, `core/pipeline/{corpus,fetch_plan,crawl_frontier,crawl_session,crawl_sources,archive_descent,artifact_probe}.py`, `core/util/{cache,sanitize,feed,rate_limit,memory}.py` | ✅ done по коду (+ source routing, контейнеры, текстовые форматы) — **но под `split` паритета по артефактам/контейнерам нет** (§2.3) |
+| **W8** | Ретривал и индекс | `core/adapters/{embed_local,embed_model2vec,index_npy,index_format,vector_npy,lexical_tantivy,lexical_bm25}.py`, `core/pipeline/{retrieve,experiments,extraction_eval,evaluator_benchmark}.py` | ✅ код done; ⏳ **измерение не воспроизведено**: харнесс (`hound experiment retrieval`) есть, артефактов замера (KS-sweep + `index_build_id`) в дереве нет — профиль/K остаются `default` |
 | **W9** | Оценщик | `core/ports/llm.py`, `core/adapters/llm_local.py`, `core/pipeline/{prompt,evaluate,validate}.py` | ✅ код done; ⏳ живой прогон оценщика не выполнялся; T9.6 снят (§5.W9) |
 | **W10** | Расчёт и отчёты | `core/pipeline/{compute,report}.py`, `run_manifest.yaml` | ✅ done |
 | **W11** | Search-адаптер | `core/adapters/{search_yandex,search_glm}.py`, `core/pipeline/{serp_loop,search_log,discovery}.py` | ✅ код done; ⏳ живой SERP-раунд в прогоне кейса не выполнялся |
@@ -179,18 +202,40 @@ L7-инспектируемый JSON, публикуемые схемы, атр�
 покрыт `tests/e2e/test_walking_skeleton.py`. `hound resolve`/`hound plan` + линт блокируют
 некорректные пакеты; детерминированная мини-карта строится.
 
-⏳ **Открытый блокер M0:** тест docling на 3–5 реальных мануалах РФ-вендоров (PDF + Office) не
-выполнен — в репозитории нет PDF/Office-фикстур и приёмочного теста экстракции
-(`cohound-spec-v2.md` §3.2/§15, `05-dependency-stack.md` §7). Поэтому M0 не закрыт целиком:
-каркас и детерминированные волны готовы, PDF-контур — нет.
+⏳ **Открытый блокер M0:** приёмочного теста экстракции нет — в репозитории нет PDF/Office-фикстур
+(`find tests -name '*.pdf'` пусто), поэтому docling-путь не проверяется в CI
+(`cohound-spec-v2.md` §3.2/§15, `05-dependency-stack.md` §7). Блокер именно **отсутствие фикстур и
+приёмки**, а не отсутствие контура: docling работает на реальных данных — `corpus_docs.extractor_version`
+в живых прогонах показывает `docling-doc-3:layout_tables` для сотен документов наряду с
+`trafilatura-html-2` и `text-plain-1`. Поэтому M0 не закрыт целиком: каркас и детерминированные
+волны готовы, воспроизводимой приёмки экстракции нет.
+
+### M0.5 — Первый полный прогон до `report` — ⛔ не достигнут (прогонов: 0)
+
+**DoD.** Один прогон кейса 1 на реальных данных проходит все 15 фаз
+(`normalize … report`), пишет `outputs/` (и выгружает `run_manifest.yaml`), и его отчёт
+разбирается без необъяснённых аномалий. Гейты G1/G2 проходятся человеком (per-run), G3/G4 —
+решением извне или явным `waived`.
+
+**Факт.** Такого прогона не было **ни одного**: самая дальняя durable-фаза — `evaluate`
+(единственный прогон, `live-inc-f`), и он же имеет **ноль** строк в `llm_scenarios`, то есть
+`evaluate` прошёл без живого оценщика. Ни один прогон не дошёл до `review`/`compute`/`report`.
+До закрытия M0.5 все числа методологии (Coverage, Capability, κ, пороги golden) — гипотезы (§0).
+Это гейт **перед** любым разговором о M2/M3: приёмку нельзя провести на системе, которая ни
+разу не дошла до отчёта.
 
 ### M1 — Конвейер (strict-карта кейса 1 + preliminary + профиль `split`) — 🟡 код готов, прогон не завершён
 
 - ✅ W7 (корпус), W8 (ретривал/индекс), W9 (оценщик), W10 (расчёт/отчёты), **W13 (DMZ/шов)** — код.
 - ✅ Оба профиля развёртывания (`local`/`split`) поддержаны; шов публикует `/v1/*`-схемы (07 §8).
-- ⏳ **Не выполнено:** живой прогон оценщика против внутреннего [OI]-endpoint. ✅ Фиксация ретривала
-  (R0/R1/R2+K) **выполнена** на реальном индексе — см. §5.W8 и §12; ограничения: авторский golden
-  (18 пар), малый корпус (34 чанка), из-за чего `recall@10` насыщается и зафиксирован K=3.
+  ⚠️ «Поддержаны» ≠ «эквивалентны»: под `split` члены контейнеров не извлекаются
+  (`extract_unavailable`), крупный артефакт не пересекает шов (только inline-base64 ≤ 8 MiB на
+  страницу `collect`), `crawl.document_level` не действует. `split` — функционально уже `local`
+  по артефактам и контейнерам (§2.3).
+- ⏳ **Не выполнено:** первый полный прогон до `report` (M0.5) — ни одного; живой прогон оценщика
+  против внутреннего [OI]-endpoint. ⏳ Фиксация ретривала (R0/R1/R2+K) **не воспроизведена**:
+  харнесс `hound experiment retrieval` есть, артефактов замера (KS-sweep + `index_build_id`) в
+  дереве нет — см. §5.W8 и §12.
 
 ### M2 — Приёмка кейса 1 — 🟡 частично (код-инструменты готовы, приёмка не проведена)
 
@@ -236,7 +281,11 @@ L7-инспектируемый JSON, публикуемые схемы, атр�
 
 ### W3 — Store — ✅ done
 
-- `core/store/sqlite.py` — DDL §4.4 + триггеры I4/I6/I7/I13/I18, `SCHEMA_VERSION = 3.5.0`.
+- `core/store/sqlite.py` — DDL §4.4 + триггеры I4/I6/I7/I13/I18, `SCHEMA_VERSION = "3.11.0"`
+  (19 таблиц, включая `schema_meta`).
+- `core/store/state_sqlite.py` — durable per-product состояние (`state/{package_id}/state.db`,
+  `STATE_SCHEMA_VERSION = "4"`): lineage, `previous_run_id`, `profile_attestation`. Источник
+  `--since-run`/класса изменения (09 §4.1).
 - `core/store/sqlite_store.py` — реализация `StorePort`/`GateStore`; батчевые транзакции, WAL.
 - `core/store/backup.py` — backup/restore прогона + GC иммутабельных индексных сборок (T12.2).
 - `run_inputs` — снимок плановых входов (самодостаточность `runs/{run_id}`, P1).
@@ -246,6 +295,21 @@ L7-инспектируемый JSON, публикуемые схемы, атр�
 - `core/pipeline/runner.py` — фазы, `PhaseResult`, resume; `core/pipeline/phases.py` — сборка фаз
   Ш1–Ш9; `gates.py` G1–G4 (только через `gate_decisions`); `observability.py`/`metrics.py`;
   `idempotency.py` (`evidence_id`, `stale_reason`, upsert).
+- **Гейты как точки интеграции** (решение владельца 2026-10-23, срез `48c6627`; реестр ADR —
+  `04` §E). G1/G2 — **внутренняя аттестация** содержимого профиля пакета-якоря (когорта, роли,
+  объём, паспорта) и матрицы роль×продукт. Рабочий путь сегодня один — **per-run строка
+  `gate_decisions`** (аудит-след и override). Второй путь, durable-аттестация профиля
+  (`profile_attestation` в `state/{package_id}/state.db`), **объявлен и проверяется** гейтом
+  (`make_profile_gate` подключён в CLI), но **производителя в прогоне нет** — строку пишут
+  только тесты; это design-only, а не работающий механизм. G3/G4 — **не внутренние решения**:
+  coHound не решает ревью/публикацию, а получает решение и записывает его; на блоке пишется
+  `runs/{run_id}/gates/{gate}-request.json` (детерминированный предмет + `subject_digest`,
+  `core/pipeline/gate_subject.py`). `gate_decisions` несёт `subject_digest`, `source`
+  (`internal|external`), `external_ref`, `verdict` (`approved|rejected`); устаревшее одобрение
+  (предмет изменился) гейт не проходит. `run.yaml: gates.{g3,g4}: external|waived` (дефолт
+  `external`): `waived` → фаза `skipped` с `skip_reason=gate_delegated_external`, waiver-строка
+  и `gate_waivers` в манифесте — невидимый waiver запрещён. Политика гейтов — процесс, не условие
+  измерения: в `EXECUTION_CONTRACT_FIELDS` её нет.
 - **Словарь фаз (P2a/P2b):** `PhaseResult(status: ok|skipped|blocked|failed, …)`; `skipped` несёт
   машинную `skip_reason` (`SkipReason`, зеркало `docs/status-dictionary.yaml`) и `pending` (advisory,
   I6/I7 не затронуты). Прогон продолжают только `blocked`/`failed`; **echo-заглушка удалена** —
@@ -274,20 +338,57 @@ L7-инспектируемый JSON, публикуемые схемы, атр�
   шаблоны — `docs/templates/registries/`. Секретные заголовки — через `headers_env`
   (значение из env, не из файла). Операционный knob `paths.registries`/`COHOUND_REGISTRIES_DIR` удалён.
 
-### W7 — Корпус — ✅ done
+### W7 — Корпус — ✅ done по коду; ⚠️ под `split` — с расхождениями
 
-- Порты: `core/ports/{crawler,extractor,chunker}.py`. Адаптеры: `crawl_scrapy.py` (robots=obey —
-  **Scrapy-путь**), `crawl_http.py`, `crawl_browser.py` (прямой Playwright/CDP, honest/hybrid),
-  `extract_html.py` (trafilatura), `extract_document.py` (docling PDF+Office), `chunker_markdown.py`.
+- Порты: `core/ports/{crawler,extractor,chunker,container}.py`. Адаптеры: `crawl_scrapy.py`
+  (robots=obey — **Scrapy-путь**), `crawl_http.py`, `crawl_browser.py` (прямой Playwright/CDP,
+  honest/hybrid), `extract_html.py` (trafilatura), `extract_document.py` (docling PDF+Office),
+  `extract_text.py` (plain text/markdown), `extract_epub.py` (stdlib OCF), `chunker_markdown.py`,
+  `chunker_text.py` (абзацы), `chunker_family.py` (диспетчер по семейству документов;
+  композитная версия чанкера — `md-heading-2+text-para-1`, `composite_chunker_version`).
 - `core/pipeline/corpus.py` (raw retention → extract → dedup(hash) → chunk → `index_manifest`, I19),
-  `fetch_plan.py` (резолв `fetch × extract × strategy`), `core/util/{cache,sanitize,feed,rate_limit}.py`.
+  `fetch_plan.py` (резолв `fetch × extract × strategy`), `crawl_frontier.py` (scope объявленных
+  хостов: `out_of_scope_subdomains`/`accepted_foreign_hosts` — отказ видим),
+  `core/util/{cache,sanitize,feed,rate_limit,document_formats,document_probe}.py`.
+- **Контейнеры и архивы (as-built; таблицы добавлены в схеме 3.10.0).** `core/ports/container.py`
+  (порт чтения контейнера), `core/pipeline/archive_descent.py` (спуск), `artifact_probe.py`
+  (допуск артефакта до скачивания), `core/util/container_policy.py` (бюджеты и прогноз), адаптеры
+  `container_{zip,7z,rar,any}.py`. Таблицы `corpus_members` (PK `(archive_content_hash,
+  member_path)`; байты членов отдельно не ретейнятся — член ре-выводится из архива) и
+  `archive_observations` (прогноз **до** извлечения + исход; запись есть для каждого контейнера,
+  включая пустой и нечитаемый). Ось `CrawlLimits.archive_descent` (`plan|full`) плюс
+  `archive_max_*` (один контейнер) и кумулятивный `archive_max_total_uncompressed_bytes`
+  (дефолт 1 GiB, `execution_change`). Потолка **глубины** нет: конечность дают цикл по хешу
+  содержимого (`archive_cycle`) и бюджет корня (`archive_budget_exhausted` — видимая запись).
+  Требуется читатель контейнера: `zip` — stdlib, `7z`/`rar` — extra **`extract-archives`**
+  (`py7zr`/`rarfile`; сжатые члены `rar` требуют внешнего `bsdtar`/`unrar`/`7z`, AES-zip —
+  `pyzipper`). Без бэкенда контейнер **не разворачивается видимо** (`available() = False`,
+  `backend_unavailable` / `container_reader_unavailable`), а не «тихо пусто». Члены извлекаются
+  в фазовом пуле
+  (`ExtractionPool`) с окном `extract_window` и строгой FIFO-доводкой (порядок вставки входит в
+  `_content_digest` сборки).
+- **Память экстракции (`core/util/memory.py`).** `release_free_arenas()` / `malloc_trim(0)`
+  возвращает ОС свободные арены glibc после документа; без этого RSS воркера растёт храповиком
+  до OOM (замеры — в докстринге модуля: 1679 → 1084 MB, 1480 → 1122 MB). Это **операционный
+  рычаг**, не условие измерения: не входит в `EXECUTION_CONTRACT_FIELDS`, `run_id` не меняет.
 - **Source routing (Phase 5):** `core/pipeline/crawl_sources.py` + `core/config/crawl_sources.py`
-  (`crawl_sources.yaml`), директорные источники `feed`/`channel` разворачиваются через `PollPort`
-  (`core/ports/poller.py`, `core/adapters/feed_poller.py`; split — op шва `crawl/poll`).
+  (`crawl_sources.yaml`), директорные источники `feed`/`channel`/`sitemap` разворачиваются через
+  `PollPort` (`core/ports/poller.py`, `core/adapters/feed_poller.py`; split — op шва `crawl/poll`).
 - **Сеанс краула:** `core/pipeline/crawl_session.py` + `crawl_sessions`/`crawl_session_items` —
   durable-очередь/resume без сетевого ре-фетча; CLI `hound crawl {run,status,list,resume,restart,cancel}`.
+- **Наблюдаемость продукта (as-built).** Структурные события фазы `corpus`: `product_start` (до
+  первого корня, с `roots`/`seeds_declared`; нужен живьём и в `results[].notes` **не**
+  дублируется), `product_end` (после доводки хвостов, с `roots`/`seeds_enqueued`/`seeds_declared`/
+  `session_items`/`fetched`/`failed`/`elapsed_seconds`/`reason`; пишется и при нулевом выходе),
+  `product_skipped` (единственный след продукта плана, вообще не попавшего в цикл:
+  `--only-product`/`--only-failed`/пустой seed-набор). В `results[].notes` (`--json` прогона)
+  попадают строки `product_end`/`product_skipped` — именно они отличают «продукт съел весь
+  бюджет» от «продукт почти ничего не дал»; живой прогресс — `--follow`: он печатает
+  `crawl_progress` (агрегат сеанса) и `crawl_product` (границы продукта — агрегат не отличает
+  «ещё в очереди» от «потерян»), опрашивая сеанс до терминального статуса. «Не начат» ≠
+  «потерян» различимо по `product_skipped`.
 
-### W8 — Ретривал и индекс — ✅ код done; ⏳ измерение не прогонялось
+### W8 — Ретривал и индекс — ✅ код done; ⏳ замер не воспроизведён (артефактов нет)
 
 - Порты: `embedder`/`index_builder`/`vector_index`/`lexical_index`. Адаптеры: `embed_local.py`
   (bge-m3, extra `embed`), **`embed_model2vec.py`** (лёгкий офлайн-путь, extra `embed-lite` без torch;
@@ -299,14 +400,20 @@ L7-инспектируемый JSON, публикуемые схемы, атр�
   из персистентной сборки; команда **`hound experiment retrieval`** прогоняет R0/R1/R2 и персистит
   измеренные `retrieval_profile`/`retrieval_cutoff_K`/`embed_model_id`/`rrf_k` как `settings_provenance`
   со `source: measured` — **и только профиль, и только при полном сравнении** (иначе `source: default`).
-- ✅ **Фиксация выполнена (2026-10)** на прогоне `runs/ru-pg-dbms-fixation` (сборка
-  `ib_89238aaa1352987d3539956b`, эмбеддер `BAAI/bge-m3`): зафиксированы профиль **R1** и **K=3**
-  (`settings_provenance.retrieval_profile.source = measured`; `retrieval_cutoff_K`/`rrf_k`/
-  `embed_model_id` — `default`, т.к. это входы, а не измерение). K=3 выбран по K-свипу
-  (`runs/ru-pg-dbms-fixation/retrieval_ksweep.txt`): при K=10 `recall@10` насыщается у всех профилей
-  и выбор решается тай-брейком, при K≤3 профили различаются (R1 recall 1.000 vs R0 0.944).
-- ⏳ **Осталось:** заменить авторский golden (18 пар) на полноценный retrieval-golden кейса;
-  живой прогон оценщика; вендорного снапшота модели в репозитории нет (снапшот лежит вне репо).
+- ⏳ **Фиксация не воспроизведена; артефакты отсутствуют.** Процедура определена и харнесс
+  существует: `hound experiment retrieval` прогоняет R0/R1/R2 на retrieval-golden и персистит
+  измеренные значения со `source: measured` только при полном сравнении. Однако **замер не
+  приложен к дереву**: каталога прогона и индексной сборки, на которых он якобы выполнен, в
+  дереве нет (и быть не может — `runs/` и `index_store/` в `.gitignore`), KS-sweep-файла тоже
+  нет. Правило проекта (`docs/reports/measurements/README.md`, после аудита документации
+  2026-10-23): архитектурный документ не ссылается на `runs/*` как на доказательство; поэтому
+  здесь фиксируется не результат, а **состояние**: профиль ретривала и `retrieval_cutoff_K`
+  остаются `source: default` (K из конфигурации прогона), пока замер не положен в
+  `docs/reports/measurements/` с командой, параметрами и выводом.
+- ⏳ **Осталось:** выполнить замер (R0/R1/R2 + K-свип) и приложить его артефакт в
+  `docs/reports/measurements/`; заменить авторский golden (18 пар) на полноценный
+  retrieval-golden кейса; живой прогон оценщика; вендорного снапшота модели в репозитории нет
+  (снапшот лежит вне репо).
 
 ### W9 — Оценщик — ✅ код done; ⏳ живой прогон не выполнялся
 
@@ -319,13 +426,17 @@ L7-инспектируемый JSON, публикуемые схемы, атр�
   GGUF-инференс дублировал бы адаптер вне принятой архитектуры. Реестр стека (`05`) всё ещё несёт
   строку `llama-cpp-python` как «опц. CPU-инференс» — это **не** часть конвейера; см. §5.13 (реестр).
 - ⏳ **Осталось:** живой прогон оценщика против внутреннего endpoint (требует доступного
-  `COHOUND_LLM_BASE_URL`/`COHOUND_LLM_API_KEY`).
+  `COHOUND_LLM_BASE_URL`/`COHOUND_LLM_API_KEY`). Харнесс выбора модели **есть**:
+  `hound experiment evaluator-benchmark` (`core/pipeline/evaluator_benchmark.py`) измеряет
+  валидность JSON, согласие с golden (κ), abstention, `fabricated_support`, bootstrap-CI и
+  детерминизм при фиксированном всем прочем; `model_id` берётся только из флага. Ждёт прогона.
 
 ### W10 — Расчёт и отчёты — ✅ done
 
 - `core/pipeline/compute.py` → `core/domain/scoring.py`; `requested` vs `computed` ranking (K6).
 - `core/pipeline/report.py` — `battle_card.xlsx`/`preliminary_findings.xlsx`/`nda_questions.csv`/`diff.md`
-  (в `runs/{run_id}/outputs/`), `run_manifest.yaml` (все версии/модели/build/профиль+K/бюджет, R7).
+  (в `runs/{run_id}/outputs/`), `run_manifest.yaml` (все версии/модели/build/профиль+K/бюджет, R7;
+  манифест хранится строкой БД, `report` выгружает YAML отдельно).
 - CLI `run/review/report/golden/sensitivity/diff/promote` + `gate` (S9) реализованы.
 
 ### W11 — Search-адаптер и SERP-петля — ✅ код done; ⏳ живой раунд не выполнялся
@@ -378,19 +489,39 @@ P5), но строка помечена здесь как неактуальна
 
 - **Source routing краула** (`crawl_sources` + `crawl_sources.yaml`). `core/config/crawl_sources.py`
   (загрузка/валидация `CrawlSourcesConfig`, слои defaults/products/sites), `core/pipeline/crawl_sources.py`
-  (`resolve_crawl_target`, `crawl_sources_digest`). Директорные источники `feed`/`channel`
+  (`resolve_crawl_target`, `crawl_sources_digest`). Директорные источники `feed`/`channel`/`sitemap`
   разворачиваются в записи через `PollPort`; документ каталога не ретейнится (I19).
   См. `02 §B.1`, `03 §D.2.1`.
+- **Scope краула — только объявленные хосты.** Предикат `Frontier.host_in_scope`
+  (`core/pipeline/crawl_frontier.py`): URL ставится в очередь, если проходит SSRF-валидацию,
+  принадлежит объявленному хосту (хост корня; поддомен — только если объявлен seed-корнем
+  продукта или ключом `domain_profiles.yaml`; `www.` эквивалентен), укладывается в path-prefix
+  корня по границе сегмента и не в блэклисте. Отказ **видим**: `out_of_scope_subdomains`
+  (счётчик по хостам + примеры) и `accepted_foreign_hosts` (сколько бюджета корня ушло на
+  объявленный чужой хост). Это **другая** семантика, чем `fetch_plan._host_matches`: там
+  поддомен наследует оси профиля (`fetch`/`extract`/лимиты) — наследование осей ≠ право
+  тратить бюджет чужого корня. Терминальный артефакт (документ/контейнер) — исключение только
+  из path-prefix: SSRF/host-scope/блэклист остаются обязательными.
 - **`serp_loop` / `search_log`.** `core/pipeline/serp_loop.py` (append-only раунды сборок, K2) и
   `core/pipeline/search_log.py` (бюджет, `kind=external`, `termination_reason`, I23). `search_log` —
   единственное место логирования поисковых вызовов (§4.4).
-- **Авторство пакета** (`package_*`). `core/pipeline/package_io.py` (чтение/запись артефактов),
-  `package_admin.py` (CRUD модулей/ролей/параметров/baselines/cohort/scope, перенормировка,
-  `validate_package`), `package_discovery.py`/`package_candidates.py` (план и применение кандидатов),
-  `package_scout.py` (веб-заземлённая разведка пакета), `passport_scout.py` (черновик паспорта),
-  `scout_common.py` (общие хелперы). CLI-фасад — `core/cli/package/*` (`hound package {module|role|param|
-  baseline|scope|golden|run|artifact} {get|list|show}`, `scout`, `validate`). Выход — кандидаты/
-  черновики (`needs_human=True`), не evidence (I18/I19/A3).
+- **Авторство пакета** (`package_*` и смежные). `core/pipeline/package_io.py` (чтение/запись
+  артефактов), `package_admin.py` (CRUD модулей/ролей/параметров/baselines/cohort/scope,
+  перенормировка, `validate_package`), `package_discovery.py`/`package_candidates.py` (план и
+  применение кандидатов), `package_scout.py` (веб-заземлённая разведка пакета),
+  `package_add_product.py` (добавление продукта в когорту: SERP+scout+ключи доменов, plan-only
+  с `--apply`), `passport_scout.py` (черновик паспорта), `scout_common.py` (общие хелперы),
+  `crawl_probe.py`/`crawl_probe_driver.py` (**`hound package crawl-probe`** — автоподбор осей
+  краула по измерению, proposal, `--write` правит файл). Смежные подсистемы инкрементальности и
+  идентичности: `onboarding.py` (вход в прогон из seeds), `incremental.py` (план дообхода),
+  `state_sync.py` (синхронизация durable-состояния продукта), `composition.py` (композиция
+  индексных сборок), `digests.py` (дайджесты идентичности), `run_identity.py`; кэши —
+  `eval_cache.py` (вердикты оценщика) и `extract_cache.py` (результаты экстракции).
+  CLI-фасад — `core/cli/package/*`, **25 подкоманд** `hound package` (`new`, `show`, `validate`,
+  `list`, `set-archetype`, `bump-version`, `module`, `role`, `param`, `infer-archetype`,
+  `compose-baselines`, `baseline`, `cohort`, `scope`, `golden`, `run`, `artifact`, `suggest`,
+  `candidates`, `apply`, `scout`, `crawl-probe`, `add-product`, `index-gc`, `builds-gc`).
+  Выход авторских команд — кандидаты/черновики (`needs_human=True`), не evidence (I18/I19/A3).
 - **`edge/scheduler`.** `core/edge/scheduler.py` (`EdgeScheduler`) + `edge/crawler_factory.py`/
   `edge/poller.py` — durable-очередь краула/опроса за швом (§W13, Phase 3/5).
 - **`config/{paths,domain_profiles,passports,crawl_sources}`.** `core/config/paths.py` (раскладка
@@ -406,7 +537,16 @@ P5), но строка помечена здесь как неактуальна
   байты не пиклятся), «в полёте» ≤ `W` экстракций, доводка FIFO, `note_fetched` остаётся в
   `_commit_outcome`. Дефолт `None`/`1` ⇒ inline, байт-в-байт. Класс версий — `execution_change`
   (дайджест/поле; `golden-full` из-за контента не требуется — измерена байт-идентичность
-  docling между процессами). Память ≈ `W × 2 GiB` (`03` §D.5).
+  docling между процессами).
+  **Память (замер, не оценка).** «Пол» docling-воркера ≈ **1.1 GB** резидентных после
+  `malloc_trim` (`core/util/memory.py`: 1679 → 1084 MB, 1480 → 1122 MB), плюс веса и страница
+  в полёте. Воркер, которому PDF **не** достался, docling не платит вовсе: замеренный
+  `import core.cli.wiring` — **77 MB** вместо 426 MB (ленивый импорт docling), это и есть
+  его «пол» без данных в полёте. Цифра «≈110 MB на HTML-воркер» — **оценка** (77 MB импорта
+  + служебное сверху), отдельным замером не подтверждена. Формула `W × 2 GiB` из
+  `03` §D.5 — **плановая оценка**, а не замер: она осталась в проектном документе как
+  консервативный расчёт, фактические числа — из замеров выше (`extract_workers: 2` в
+  `packages/ru-pg-dbms/run.yaml`).
 - **Уровни извлечения документов (P5, as-built).** Ось `crawl.document_level`
   (`off`|`text`|`layout`|`layout_tables`|`full`; app < run < site, per seed-root,
   `CrawlLimits.document_level`, манифест-поле `crawl_document_level`, `crawl_config_digest`)
@@ -416,29 +556,46 @@ P5), но строка помечена здесь как неактуальна
   суффиксу / post-fetch по `Content-Type`; видимые `document_skips` + канал аномалии усечения;
   сессионный статус не перезаписывается, skip ≠ `FAILED`). Уровень входит в
   `extractor_version` (`docling-doc-3:<level>`) ⇒ `index_build_id` (сборки иммутабельны).
-  Класс — `execution_change`; дефолт контент не меняет. Байт-идентичность якоря
+  Класс — `execution_change`: `crawl_document_level` входит и в `EXECUTION_FIELDS`
+  (`core/pipeline/report.py`), и в `CrawlLimits.as_dict()` → `crawl_config_digest`; дефолт
+  контент не меняет. Байт-идентичность якоря
   (`tests/pipeline/test_document_levels.py::test_docling_explicit_full_equals_bare_default`,
   `full` ≡ bare `DocumentConverter()`) **реализована**, но её прогон — **офлайн/gated**
   (opt-in по `COHOUND_RUN_DOCLING_LEVELS=1`, в обычном CI не выполняется);
   churn `index_build_id`/дайджеста при дефолте — принят (R1). Пул — свойство корня
   (`pool_factory(W, level)`); память = `W × footprint(level)`. Под `split` ось **не** действует
   (R-S: edge строит конвертеры сам). Новых зависимостей нет.
+- **Текстовые форматы и EPUB (as-built).** `core/adapters/extract_text.py` (plain text/markdown,
+  все расширенные варианты) и `extract_epub.py` (stdlib OCF) — **первый класс** наравне с HTML,
+  не docling: свой читатель и свой чанкер. Диспетчер семейств — `core/adapters/chunker_family.py`
+  (выбор `chunker_markdown` ‖ `chunker_text` по семейству документа); композитная версия чанкера
+  — `md-heading-2+text-para-1` (`composite_chunker_version`), то есть смена семейства входит в
+  наблюдаемый `chunker_version` и меняет `index_build_id`, а не `methodology_version`.
+- **`hound experiment evaluator-benchmark`.** `core/pipeline/evaluator_benchmark.py` +
+  `core/cli/commands/experiment.py`: измерение моделей оценщика при **фиксированном прочем**
+  (одна сборка, один `prompt_hash`, `seed=0`/`temperature=0`), метрики — валидность JSON, κ с
+  golden, abstention, `fabricated_support`, bootstrap-CI и доля недетерминированных ячеек.
+  Харнесс есть; живого прогона нет (§8, риск «оценщик не достигает порогов»).
+- **Память экстракции** — `core/util/memory.py` (см. §5.W7): операционный рычаг, вне
+  `EXECUTION_CONTRACT_FIELDS`.
 
 ### Сводка статуса (вместо дневных оценок)
 
 | Поток | Статус | Незакрытое |
 |---|---|---|
 | W1–W6 | ✅ done | — |
-| W7 | ✅ done | — |
-| W8 | ✅ код | полный retrieval-golden кейса (сейчас — авторский, 18 пар, малый корпус); вендорный снапшот эмбеддера |
-| W9 | ✅ код | живой прогон оценщика (внутренний endpoint) |
+| W7 | ✅ done по коду | паритет `split` по артефактам/контейнерам; приёмка docling (M0) |
+| W8 | ✅ код | замер R0/R1/R2+K не воспроизведён (артефактов нет); полный retrieval-golden кейса (сейчас — авторский, 18 пар, малый корпус); вендорный снапшот эмбеддера |
+| W9 | ✅ код | живой прогон оценщика (внутренний endpoint); benchmark ждёт прогона |
 | W10 | ✅ done | — |
 | W11 | ✅ код | живой SERP-раунд в прогоне кейса |
 | W12 | 🟡 partial | golden-full, §11.5-baseline, кейсы 2–5 |
-| W13 | ✅ done | — |
+| W13 | ✅ done | паритет `split` с `local` (см. §2.3) |
 | Подсистемы §5.1 | ✅ done | — |
 
 **Вывод:** код — не самое дорогое; основная стоимость — калибровка методологии и авторство категорий.
+И первое, что нужно сделать, — **довести один прогон до `report`** (M0.5): пока этого не было,
+все статусы «✅» означают «код есть и покрыт тестами», а не «проверено на данных».
 
 ---
 
@@ -471,7 +628,7 @@ golden-full, adversarial как приёмочный прогон) — **хар�
 
 | Окружение | Содержимое | Где |
 |---|---|---|
-| **cli-light** | ядро + `retrieval`(numpy/tantivy) + `crawl` + `extract` + `safety` + `ops` | везде, py3.14 |
+| **cli-light** | ядро + `retrieval`(numpy/tantivy) + `crawl` + `extract` + `safety` + `ops` (+ `extract-archives`, если нужен спуск в контейнеры) | везде, py3.14 |
 | **pdf** | `docling-slim[standard]` (+torch/torchvision, CPU-ядра) | отдельно (PDF-layout) |
 | **index** | `sentence-transformers` (+torch) — bge-m3; либо `embed-lite` (model2vec, без torch) | отдельно |
 | **edge** | те же `crawl`+`extract` extras (веб-адаптеры) | DMZ/Z1 (профиль `split`, 07) |
@@ -481,13 +638,26 @@ golden-full, adversarial как приёмочный прогон) — **хар�
 `run_manifest.yaml` (§13, R7). Офлайн-бандл docling-весов (V4). Браузерные бинари — зеркало
 (`PLAYWRIGHT_DOWNLOAD_HOST`). `HF_HUB_OFFLINE=1` в контуре.
 
+> **Про `uv sync --frozen`.** `uv.lock` синхронен с `pyproject.toml` (`uv lock --check` проходит),
+> поэтому `uv sync --frozen --extra …` — воспроизводимый путь. Рабочая установка для прогона кейса
+> (фазы `corpus`/`evaluate`): `uv pip install -e '.[dev,retrieval,crawl,extract]'` плюс
+> `extract-archives`, если нужен спуск в архивы. Состав extras проверяется командой `hound doctor`.
+
 **Установка (extras из `pyproject.toml`).** Базлайн — Python 3.14; воспроизводимость — `uv.lock`
-(`uv sync --frozen --extra <name>`). Тяжёлые контуры (`pdf`/`index`) — в изолированных venv/образах,
-ядро их не тянет (P7/A1).
+(`uv sync --frozen --extra <name>`; `uv lock --check` проходит). Тяжёлые контуры (`pdf`/`index`) —
+в изолированных venv/образах, ядро их не тянет (P7/A1). Полный список extras:
+`retrieval`, `crawl`, `extract`, **`extract-archives`**, `extract-pdf`, `safety`, `ops`, `embed`,
+`embed-lite`, `ann`, `fallback`, `dev`.
 
 ```bash
-# cli-light — рабочее окружение: ядро + retrieval + crawl + extract(office/html) + safety + ops
+# cli-light — рабочее окружение: ядро + retrieval + crawl + extract(office/html/text/epub) + safety + ops
 uv sync --frozen --extra retrieval --extra crawl --extra extract --extra safety --extra ops
+
+# контейнеры/архивы: zip читается stdlib; 7z/rar — extra extract-archives
+# (py7zr/rarfile; сжатые члены rar требуют внешнего bsdtar/unrar/7z, AES-zip — pyzipper).
+# Без бэкенда контейнер не разворачивается видимо: backend_unavailable /
+# container_reader_unavailable, а не «тихо пусто».
+uv sync --frozen --extra extract --extra extract-archives
 
 # edge (DMZ/Z1) — только веб-экстракторы (профиль split, 07)
 uv sync --frozen --extra crawl --extra extract
@@ -515,8 +685,11 @@ uv sync --frozen --extra dev
 
 | Риск | Вероятн. | Влияние | Мера | Триггер пересмотра |
 |---|---|---|---|---|
-| Качество экстракции PDF-таблиц (фич-матрицы) | ср. | высокое | тест на реальных мануалах (блокер M0); extraction-golden; fallback markitdown/pdfplumber | расхождение таблиц > допустимого |
-| Оценщик не достигает golden-порогов | ср. | высокое | лёгкий класс → флагман (DeepSeek/GLM), отложено §14 | R6/R12 ниже порога |
+| **Первый полный прогон не выполнен** (прогонов до `report`: 0) | выс. | критич. | DoD M0.5 (§4): довести один прогон кейса 1 до `report` до любой работы по M2/M3; до этого все методологические числа — гипотезы | прогон дошёл до `report` |
+| Качество экстракции PDF-таблиц (фич-матрицы) | ср. | высокое | тест на реальных мануалах (блокер M0 — нет фикстур/приёмки); extraction-golden; fallback markitdown/pdfplumber | расхождение таблиц > допустимого |
+| Оценщик не достигает golden-порогов | ср. | высокое | **харнесс измерения есть**: `hound experiment evaluator-benchmark` (валидность, κ, `fabricated_support`, CI, детерминизм); ждёт прогона. По его результату — смена слота `cheap → flagship` (граница `execution_change`, §13) | R6/R12 ниже порога |
+| Стоимость `evaluate` — длинный полюс (≈149k LLM-вызовов по замеру) | выс. | высокое | батчинг вызовов, кэш вердиктов (`eval_cache.py`), бюджет прогона; измерять до масштабирования на 5 кейсов | прогон `evaluate` не укладывается в окно |
+| RAM-стена per-product Pass B (продукты строго последовательны) | ср. | высокое | per-product Pass B с коммитом чанков в конце; держать `extract_workers` по фактическому «полу» воркера (§5.1), `malloc_trim` | OOM/своп на реальном корпусе |
 | Стоимость авторства категорий | выс. | высокое | доменный аналитик 0.3–0.5 FTE; шаблоны пакетов | >4 нед на пакет |
 | Python 3.14-совместимость тяжёлых колёс | низк. | среднее | V2 закрыт; изоляция окружений | отсутствие cp314-колёс |
 | bus-factor scrapy-playwright | низк. | среднее | изоляция за портом `crawler`; прямой playwright как fallback | плагин застрял/архив |
@@ -526,6 +699,7 @@ uv sync --frozen --extra dev
 | Дрейф контрактов портов | ср. | среднее | contract-tests + импорт-граф CI | расхождение адаптер/порт |
 | Компрометация DMZ (edge) | ср. | высокое | edge считается подозрительным: ядро валидирует вход (схема/лимиты/re-hash/санитайзинг); секреты эгрессии только в edge; L7-allowlist | аномалия на шве; инъекция из edge |
 | Шов ломает `local`-опыт | низк. | среднее | профиль `local` — дефолт без шва; `split` — опция | overhead в `local` |
+| Расхождение `split` и `local` по корпусу | выс. | высокое | известно и видимо: члены контейнеров — `extract_unavailable`, артефакт >8 MiB не проходит `collect`, `document_level` не действует; staging крупных артефактов — roadmap (08) | прогон кейса под `split` даёт другой корпус |
 | Несовместимость шва с корп. IDP/DLP/IDS | ср. | высокое | L7-JSON, публикуемые схемы, TLS без пиннинга, OIDC/mTLS-идентичность, SIEM-аудит (07 §8). *Аттестация у заказчика — вне рамок этой работы* | средство не инспектирует/ломает шов |
 
 ---
@@ -541,6 +715,10 @@ uv sync --frozen --extra dev
 - **CLI:** команды из §3.1 (актуальный список — `docs/03 §E.1`/код `core/cli/`); `--dry-run`/`--json`;
   ошибки с кодом инварианта.
 - **Docs:** правка контракта/инварианта — правка `00`–`06` в том же коммите.
+- **Первый полный прогон (M0.5, сквозной DoD):** один прогон кейса 1 на реальных данных проходит
+  все 15 фаз до `report`, пишет `outputs/` и манифест, и отчёт разбирается без необъяснённых
+  аномалий. **Не выполнено: прогонов до `report` — 0.** Пока это не так, «готово» ниже означает
+  «код есть и покрыт тестами».
 
 ---
 
@@ -563,8 +741,14 @@ uv sync --frozen --extra dev
 7. **Детерминизм инференса** (T9.2) — ✅ `core/adapters/llm_local.py` (seed/greedy; constrained
    decoding — забота [OI]-серверa).
 8. **Процедура/владелец `scope_attested_by`** для `exhaustive`-absence (W9) — ✅ механизм —
-   `scope_attestation.yaml` + линт-правило `absence-attestation` + носитель `gate_decisions`;
-   *содержательное* владение (кто и на каком основании) — доменный процесс, вне кода.
+   `scope_attestation.yaml` + линт-правило `absence-attestation`;
+   ⚠️ **производителя в прогоне нет**: `evaluate_phase(scope_attested_by=…)` принимает
+   значение, но никто его не передаёт, и в `gate_decisions` такого поля нет (`subject_digest`
+   полоса гейтов добавила, `scope_attested_by` — нет). То есть путь «человек аттестует →
+   значение попадает в absence-evidence» пока **design-only**: до появления писателя
+   `exhaustive`-absence для `parameter_reference`/`distribution_absence` в прогоне недостижим,
+   а I2c будет требовать аттестации, которую некому проставить. *Содержательное* владение
+   (кто и на каком основании) — доменный процесс, вне кода.
 
 **Вне рамок работы:** аттестация шва против конкретных корпоративных IDP/DLP/IDS (какой IDP, какой
 DLP, набор IDS-правил) — design-требования зафиксированы в `07` §8, но проверка соответствия
@@ -599,6 +783,30 @@ DLP, набор IDS-правил) — design-требования зафикси
   перенесён в `02`/`03`. Считать зафиксированным здесь как известное остаточное, а не закрытое.
 - **M2/M3:** приёмочные прогоны (golden-full, adversarial, §11.5-baseline) и авторство кейсов 2–5
   не выполнены; §4 помечает M2 как 🟡, M3 как ⛔ — это факт, а не план.
-- **Измерения:** ✅ фиксация R0/R1/R2+K **выполнена** (2026-10, `runs/ru-pg-dbms-fixation`; K=3, R1) —
-  но на **авторском** golden из 18 пар и малом корпусе (34 чанка), поэтому результат индикативен, а
-  не приёмочен; полноценный retrieval-golden кейса и живой прогон оценщика/SERP остаются открытыми.
+- **Измерения:** ⏳ фиксация R0/R1/R2+K **не воспроизведена, артефакты отсутствуют** — харнесс
+  `hound experiment retrieval` есть, но ни KS-sweep, ни `index_build_id` замера в дереве нет
+  (`runs/`/`index_store/` в `.gitignore`). Правило проекта: доказательство замера кладётся в
+  `docs/reports/measurements/` с командой и параметрами; до этого профиль/K — `source: default`.
+  Полноценный retrieval-golden кейса и живой прогон оценщика/SERP остаются открытыми.
+
+---
+
+## 13. Что дальше — порядок работ
+
+Порядок не косметический: каждый следующий пункт дешевле предыдущего только после того, как
+предыдущий дал измерение (A3).
+
+1. **Первый сквозной прогон до `report` (M0.5).** Ни одного такого прогона не было (§0, §4).
+   Пока его нет, методология не проверена ни на одном реальном отчёте, и любая калибровка —
+   предвидение. Это гейт перед всем остальным.
+2. **Стоимость `evaluate` — длинный полюс.** По замеру — ~149k LLM-вызовов на прогон кейса.
+   Прежде чем масштабировать на 5 кейсов: батчинг вызовов, кэш вердиктов (`eval_cache.py`),
+   бюджет, и только затем — вопрос о слоте модели (`evaluator-benchmark`).
+3. **Per-product Pass B и RAM-стена.** Продукты обрабатываются строго последовательно
+   (`products = sorted(url_map)`), а «пол» docling-воркера ≈ 1.1 GB после trim. Это второй
+   по стоимости ресурс; его рычаги — окно пула, `extract_workers`, `malloc_trim` — исчерпываются
+   раньше, чем помогает «больше железа».
+4. **Fleet control plane.** Горизонтальное масштабирование edge (общая очередь/leases/object
+   storage, cluster scheduler) имеет смысл **после** того, как один узел измерен и упирается
+   именно в кластерные ограничения. План и фазы — `08`; там же staging артефактов, без которого
+   `split` не может нести крупный PDF/архив.
