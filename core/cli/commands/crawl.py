@@ -42,6 +42,7 @@ from core.cli.context import (
     _load_corpus_urls,
     _load_render_modes,
     _phases_until,
+    _persist_llm_scenarios,
     _print_json,
     _progress_callback,
     _resolve_db_path,
@@ -347,6 +348,10 @@ def _execute_crawl(
     truncation: dict[str, Any] = {}
     try:
         _ensure_run(store, run_id, inputs)
+        # I21/§7.4: объявленный маршрут «сценарий → модель» — durable-факт строки прогона.
+        # Crawl-прогон создаёт ту же строку, что и ``run``: манифест не должен показывать
+        # контракт с моделью, у которой нет записи в ``llm_scenarios``.
+        notes.extend(_persist_llm_scenarios(store, run_id, declared))
         # Phase 4: фильтр URL по durable-сеансу — ДО резолва фаз, чтобы исполнитель
         # (work-set выводится из ``urls``) и локальный путь видели один набор.
         corpus_urls, filter_notes = _filter_corpus_urls(

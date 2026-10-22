@@ -64,9 +64,11 @@ from core.domain.enums import (
     CrawlItemStatus,
     CrawlSessionStatus,
     DocumentLevel,
+    EndpointKind,
+    LLMScenario,
     Status,
 )
-from core.domain.models import CatalogRow, Cohort
+from core.domain.models import CatalogRow, Cohort, ScenarioBinding
 from core.pipeline import PHASES, Ports, RunReport, build_phases
 from core.pipeline.extract_cache import ExtractionCache
 from core.pipeline.eval_cache import EvalVerdictCache
@@ -150,6 +152,7 @@ __all__ = [
     "_short_json",
     "_phases_until",
     "_ensure_run",
+    "_persist_llm_scenarios",
     "_plan_payload",
     "_run_report_payload",
     "_plan_inputs_payload",
@@ -948,6 +951,51 @@ def _ensure_run(store: Any, run_id: str, inputs: RunInputs) -> None:
     ).fetchone()
     if row is None:
         store.create_run(run_id, inputs.run)
+
+def _persist_llm_scenarios(store: Any, run_id: str, declared: Any) -> list[str]:
+    """Пишет объявленную таблицу ``scenario → модель`` (I21) в строку прогона (§7.4).
+
+    Источник — **только** :attr:`DeclaredExecutionAxes.llm_scenarios`, то есть ровно те
+    строки, что уже вошли в ``execution_contract_digest``. Второй формулы нет: контракт
+    и таблица ``llm_scenarios`` не могут разойтись, а ``--llm-slot``/``run.yaml:llm_slot``
+    остаются единственным входом (env ``COHOUND_LLM_*`` по-прежнему не читается — иначе
+    два хоста с одним ``run.yaml`` получили бы разный маршрут).
+
+    Строка ``llm_scenarios`` — это durable-факт для ``hound report``/``hound diff``:
+    без неё смена модели под сценарий (§13, граница класса ``execution_versions``)
+    видна только по дайджесту контракта, но не по имени модели.
+
+    Сбой записи **не роняет прогон** (как и снимок входов): возвращается текст ошибки
+    для ``instrumentation_errors``. Upsert идемпотентен, поэтому повторный ``run``
+    (resume) переписывает те же строки.
+
+    :returns: список ошибок инструментирования (пустой — запись удалась).
+    """
+    rows = getattr(declared, "llm_scenarios", ()) or ()
+    if not rows:
+        # Пустая таблица — честное «маршрут не объявлен»: слот неактивен, оценщик не
+        # поднимается. Выдумывать строку нельзя (зеркалит ``_resolve_llm_scenarios``).
+        return []
+    try:
+        bindings = [
+            ScenarioBinding(
+                run_id=run_id,
+                scenario=LLMScenario(row["scenario"]),
+                model_id=row["model_id"],
+                model_version=row.get("model_version") or None,
+                endpoint_kind=EndpointKind(row.get("endpoint_kind") or EndpointKind.API),
+                web_tool=bool(row.get("web_tool", False)),
+                decoder=row.get("decoder") or None,
+                seed=row.get("seed"),
+                temperature=row.get("temperature"),
+                constrained_decoding=row.get("constrained_decoding"),
+            )
+            for row in rows
+        ]
+        store.save_llm_scenarios(bindings)
+    except Exception as exc:  # noqa: BLE001 — durable-факт не роняет прогон
+        return [f"llm_scenarios: {type(exc).__name__}: {_concise(exc)}"]
+    return []
 
 
 def _resolve_plan(

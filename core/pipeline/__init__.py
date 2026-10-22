@@ -80,6 +80,19 @@ from core.pipeline.evaluate import (
     retrieve_for_cell,
     run_queries_for_cell,
 )
+from core.pipeline.evaluator_benchmark import (
+    BENCHMARK_CONTRACT,
+    BenchmarkContractError,
+    BenchmarkPreconditionError,
+    BenchmarkReport,
+    CellCase,
+    CellMeasurement,
+    ModelMetrics,
+    ModelUnderTest,
+    PreparedCases,
+    prepare_cases,
+    run_benchmark,
+)
 from core.pipeline.validate import (
     ValidationFailureKind,
     ValidationResult,
@@ -373,6 +386,18 @@ __all__ = [
     "ValidationResult",
     "ValidationFailureKind",
     "validate_output",
+    # evaluator benchmark (A3, Ш6) — измерение моделей оценщика
+    "BENCHMARK_CONTRACT",
+    "BenchmarkContractError",
+    "BenchmarkPreconditionError",
+    "BenchmarkReport",
+    "CellCase",
+    "CellMeasurement",
+    "ModelMetrics",
+    "ModelUnderTest",
+    "PreparedCases",
+    "prepare_cases",
+    "run_benchmark",
     # report (T10.2), §9 — G4/I11
     "Artifacts",
     "PublishBlockedError",

@@ -18,6 +18,7 @@ import sys
 from collections.abc import Sequence
 from typing import Any
 
+from core.adapters.llm_local import GenerateFn as EvaluatorGenerateFn
 from core.adapters.remote_gateway import TransportFn
 from core.cli.commands.deploy import run as cmd_deploy_check
 from core.cli.commands.diff import run as cmd_diff
@@ -108,6 +109,7 @@ def main(
     crawler: CrawlerPort | None = None,
     extractor: Any = None,
     crawl_probe_ports: Any = None,
+    evaluator_generate: EvaluatorGenerateFn | None = None,
 ) -> int:
     """Точка входа CLI. Возвращает код выхода (``0`` — успех).
 
@@ -135,6 +137,8 @@ def main(
     :param extractor: инъекция ``ExtractorPort`` для ``passport-scout`` (тесты без сети).
     :param crawl_probe_ports: инъекция :class:`~core.pipeline.crawl_probe_driver.ProbePorts`
         для ``package crawl-probe`` (тесты без сети).
+    :param evaluator_generate: оффлайн-шов генерации оценщика ``(prompt, schema) -> str``
+        для ``experiment evaluator-benchmark`` (тесты без сети/endpoint'а).
     """
     parser = build_parser()
     try:
@@ -171,6 +175,8 @@ def main(
     args.extractor = extractor
     # ``package crawl-probe``: инъекция HTTP/браузер-краулеров и робот-политики (тесты без сети).
     args.crawl_probe_ports = crawl_probe_ports
+    # ``experiment evaluator-benchmark``: оффлайн-шов оценщика (тесты без сети).
+    args.evaluator_generate = evaluator_generate
 
     if getattr(args, "command", None) is None:
         parser.print_help()

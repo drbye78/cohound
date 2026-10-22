@@ -28,6 +28,7 @@ from core.cli.context import (
     _load_render_modes,
     _open_state_store,
     _phases_until,
+    _persist_llm_scenarios,
     _positive_int,
     _print_json,
     _print_run_dry,
@@ -556,10 +557,14 @@ def run(args: argparse.Namespace) -> int:
         # корпус/ячейки. ``onboarding`` — человеческая предпосылка, а не сбой кода.
         if onboarding is not None and onboarding.blocked:
             blocked_store = build_store(db_path, profile=args.profile)
+            scenario_errors: list[str] = []
             try:
                 _ensure_run(blocked_store, run_id, inputs)
                 _snapshot_run_inputs(
                     args, run_id, inputs=inputs, run_plan=run_plan, store=blocked_store
+                )
+                scenario_errors = _persist_llm_scenarios(
+                    blocked_store, run_id, declared
                 )
             finally:
                 blocked_store.close()
@@ -567,7 +572,7 @@ def run(args: argparse.Namespace) -> int:
                 run_id,
                 db_path,
                 onboarding,
-                warnings=[*report.warnings, *onboarding_warnings],
+                warnings=[*report.warnings, *onboarding_warnings, *scenario_errors],
             )
             payload.update(_identity_payload(identity))
             if args.json:
@@ -754,6 +759,12 @@ def run(args: argparse.Namespace) -> int:
         truncation: dict[str, Any] = {}
         try:
             _ensure_run(store, run_id, inputs)
+            # I21/§7.4: объявленная таблица ``scenario → модель`` пишется в строку прогона
+            # сразу после её создания — иначе смена модели под сценарий видна только по
+            # дайджесту контракта, но не по имени модели (``hound report``/``hound diff``).
+            instrumentation_errors.extend(
+                _persist_llm_scenarios(store, run_id, declared)
+            )
             # 03 §A.2 / P1: снимок входов прогона (иммутабельная копия run.yaml +
             # производный plan_inputs.json) и источник истины — таблица ``run_inputs`` в БД
             # (каталог/веса/когорта). Пишется ДО исполнения фаз, чтобы последующие команды

@@ -867,6 +867,8 @@ def build_evaluator_llm(
     decoder: str | None = None,
     timeout: float | None = None,
     run_slot: str | None = None,
+    seed: int | None = None,
+    temperature: float | None = None,
 ) -> EvaluatorPort | None:
     """Собирает runtime-оценщик из активного LLM-слота; ``None`` — слот не сконфигурирован.
 
@@ -886,6 +888,9 @@ def build_evaluator_llm(
     :param deploy_llm: секция ``llm`` deploy-конфига; ``None`` — нет слотов.
     :param run_slot: слот из ``run.yaml: llm_slot`` (§4.5); ниже env, выше ``deploy_llm.slot``.
     :param generate: тестовый/оффлайн-шов ``(prompt, schema) -> str`` (без сети).
+    :param seed: seed сэмплирования; ``None`` — дефолт адаптера (``0``). Benchmark оценщика
+        передаёт ``0`` явно: детерминизм — условие измерения (A3), а не настройка.
+    :param temperature: температура; ``None`` — дефолт адаптера (``0.0``, greedy).
     :raises ValueError: неизвестный слот (``--llm-slot``/``COHOUND_LLM_SLOT``/``run.yaml``).
     """
     _resolved_slot, slot_config = _resolve_llm_slot_and_config(deploy_llm, slot, run_slot)
@@ -940,6 +945,8 @@ def build_evaluator_llm(
         base_url=str(resolved_base).strip(),
         api_key=(resolved_key or None),
         timeout=resolved_timeout,
+        seed=0 if seed is None else seed,
+        temperature=0.0 if temperature is None else temperature,
     )
 
 
