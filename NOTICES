@@ -1,0 +1,63 @@
+# NOTICES — скопированный сторонний код и лицензии
+
+Этот файл — реестр кода, **скопированного** в репозиторий из внешних проектов.
+Правило (AGENTS.md, «Конвенции кода»): скопированный код переносится копированием, а не
+зависимостью, и сохраняет лицензию/copyright в шапке файла. Код без явной лицензии не
+копируется.
+
+Зависимости, устанавливаемые как пакеты, здесь не перечисляются — их реестр и вердикты
+(`a` — принято, `b` — заявка, `r` — отклонено) ведутся в
+`docs/architecture/05-dependency-stack.md`.
+
+## Проект gag5 — MIT License, Copyright (c) 2024
+
+Файлы адаптированы (не скопированы дословно): удалены ветки, специфичные для предметной
+области исходного проекта, добавлена типизация, API упрощён. Каждый файл несёт шапку
+«Происхождение: адаптировано из проекта gag5 … MIT License, Copyright (c) 2024» с
+перечнем изменений.
+
+| файл в coHound | источник в gag5 | что изменено |
+|---|---|---|
+| `core/util/security.py` | `core/security.py` | удалена функция под графовую БД (Cypher); добавлена типизация; сохранена категорийная нейтральность (§1.3) |
+| `core/util/text_utils.py` | `core/text_utils.py` | нейтрализация под §1.3; удалены доменные/LLM-специфичные ветки; API упрощён |
+| `core/util/fusion.py` | `retrieval/fusion.py` | убраны доменные веса (graph/code/docs); ключ дедупликации вынесен в параметр (`chunk_id`); добавлена типизация |
+| `core/adapters/chunker_markdown.py` | `ingestion/structural_chunker.py` | сохранён `heading_path`; добавлено fence-aware распознавание заголовков (`md-heading-2`); вынесено в `ChunkerPort` |
+| `core/adapters/extract_document.py` | `documents/parse.py` | оставлен путь `DocumentConverter.export_to_markdown()`; расширен на Office-форматы; добавлена ось `document_level`; ленивый импорт docling |
+
+### Текст лицензии MIT (как в исходном проекте)
+
+```
+MIT License
+
+Copyright (c) 2024 gag5
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
+## Как добавить запись
+
+1. Убедиться, что у источника есть явная лицензия, допускающая копирование.
+2. Сохранить в шапке файла: проект, путь источника, лицензию, copyright и перечень
+   изменений.
+3. Добавить строку в таблицу выше.
+4. Если лицензия не MIT (например, LGPL у `py7zr`) — записать отдельным разделом с
+   указанием обязательств.
+
+Файла без записи здесь быть не должно: `AGENTS.md` ссылается на этот реестр как на
+единственное место, где видно происхождение скопированного кода.

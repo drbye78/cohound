@@ -24,15 +24,6 @@
           "type": "string",
           "minLength": 1
         }
-      },
-      "SchemaVersion": {
-        "name": "X-Schema-Version",
-        "in": "header",
-        "required": true,
-        "description": "Версия контракта шва; несовпадение — версионная граница §13.",
-        "schema": {
-          "const": "1"
-        }
       }
     },
     "schemas": {
@@ -118,9 +109,6 @@
         "parameters": [
           {
             "$ref": "#/components/parameters/RequestId"
-          },
-          {
-            "$ref": "#/components/parameters/SchemaVersion"
           }
         ],
         "requestBody": {
@@ -215,9 +203,6 @@
         "parameters": [
           {
             "$ref": "#/components/parameters/RequestId"
-          },
-          {
-            "$ref": "#/components/parameters/SchemaVersion"
           }
         ],
         "requestBody": {
@@ -312,9 +297,6 @@
         "parameters": [
           {
             "$ref": "#/components/parameters/RequestId"
-          },
-          {
-            "$ref": "#/components/parameters/SchemaVersion"
           }
         ],
         "requestBody": {
@@ -409,9 +391,6 @@
         "parameters": [
           {
             "$ref": "#/components/parameters/RequestId"
-          },
-          {
-            "$ref": "#/components/parameters/SchemaVersion"
           }
         ],
         "requestBody": {
@@ -506,9 +485,6 @@
         "parameters": [
           {
             "$ref": "#/components/parameters/RequestId"
-          },
-          {
-            "$ref": "#/components/parameters/SchemaVersion"
           }
         ],
         "requestBody": {
@@ -603,9 +579,6 @@
         "parameters": [
           {
             "$ref": "#/components/parameters/RequestId"
-          },
-          {
-            "$ref": "#/components/parameters/SchemaVersion"
           }
         ],
         "requestBody": {
@@ -700,9 +673,6 @@
         "parameters": [
           {
             "$ref": "#/components/parameters/RequestId"
-          },
-          {
-            "$ref": "#/components/parameters/SchemaVersion"
           }
         ],
         "requestBody": {
@@ -797,9 +767,6 @@
         "parameters": [
           {
             "$ref": "#/components/parameters/RequestId"
-          },
-          {
-            "$ref": "#/components/parameters/SchemaVersion"
           }
         ],
         "requestBody": {
@@ -894,9 +861,6 @@
         "parameters": [
           {
             "$ref": "#/components/parameters/RequestId"
-          },
-          {
-            "$ref": "#/components/parameters/SchemaVersion"
           }
         ],
         "responses": {
@@ -970,9 +934,6 @@
         "parameters": [
           {
             "$ref": "#/components/parameters/RequestId"
-          },
-          {
-            "$ref": "#/components/parameters/SchemaVersion"
           }
         ],
         "responses": {
