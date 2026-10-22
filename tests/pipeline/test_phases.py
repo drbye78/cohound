@@ -450,7 +450,11 @@ def test_corpus_phase_builds_and_captures_index_build_id(tmp_path: Path) -> None
     assert build.index_build_id.startswith("cb_")
     assert build.chunk_count == 2
     # 09 §8.5: рядом со сборкой — видимая строка о партициях (обе собраны, не reuse).
-    reuse_notes = [e for e in result.log_entries if isinstance(e, str)]
+    # Строк в фазе несколько (по одной на продукт — границы продукта, см. _product_notes),
+    # поэтому пин — по содержанию: строка о партициях ровно одна и называет композицию.
+    reuse_notes = [
+        e for e in result.log_entries if isinstance(e, str) and "переиспользовано" in e
+    ]
     assert len(reuse_notes) == 1
     assert "переиспользовано 0, собрано 2" in reuse_notes[0]
     assert build.index_build_id in reuse_notes[0]

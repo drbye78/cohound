@@ -6717,7 +6717,17 @@ def _build_corpus(
     #: только ``str``, и без строки продукт-скоуп остался бы в поле, которое никто не читает
     #: (``log_entries`` не сериализуется ни в один файл). Строка — одна на продукт, поэтому
     #: заметки растут линейно по продуктам, а не по URL.
-    log_entries: list[Any] = [build, *product_events, *_product_notes(product_events)]
+    #:
+    #: Строки появляются **только при активном сеансе**: границы продукта — утверждение о
+    #: durable-сеансе (``session_items``/``fetched``/``failed``), а без сеанса счётчиков не
+    #: существует и заметка была бы выдуманной. Это же условие держит инвариант «``state is
+    #: None`` — прежняя форма фазы» (``test_state_none_keeps_previous_truncation_shape``):
+    #: прямой вызов без стора не приобретает новых строк.
+    log_entries: list[Any] = [
+        build,
+        *product_events,
+        *(_product_notes(product_events) if session is not None else []),
+    ]
     # B3: провенанс спуска доступен из результата фазы (и из run DB — таблицы
     # ``archive_observations``/``corpus_members``). Запись есть даже при нулевом выходе.
     for observation in archive_observations:
