@@ -869,11 +869,14 @@ def build_domain_profiles() -> dict[str, dict[str, object]]:
     модели, чтобы дрейф схемы (старые ``render``/``index``) не вернулся.
     """
     return {
+        # Sitemap 404 (advertised) ⇒ размер не измерен. Замер 22.10: добыто **ровно 800**
+        # документов при потолке 800 — это усечение, а не полнота; 2000 снимает его с
+        # запасом (потолок против бесконечного обхода, не заявка на размер сайта).
         "docs.tantorlabs.ru": {
             "fetch": "http",
             "extract": "auto",
             "max_depth": 8,
-            "max_documents": 800,
+            "max_documents": 2000,
         },
         # Host-root seed (https://www.gaz-is.ru/) — корень компании, а не продукта:
         # любой обход с depth > 0 затянет в партицию jatoba чужие продукты (I17).
@@ -903,14 +906,17 @@ def build_domain_profiles() -> dict[str, dict[str, object]]:
             "max_documents": 50,
             "sitemap": "https://jatoba.ru/sitemap.xml",
         },
-        # 23 URL, плоско — depth 1 + один хоп на документ; 60 покрывает 23 с запасом.
+        # Замер 22.10: 111 URL обнаружено при site-потолке 60 документов — потолок
+        # резал корпус (54 документа из 111). Прежняя оценка «23 URL» была получена до
+        # того, как sitemap и BFS стали видеть вложенные разделы. 600 — потолок против
+        # усечения, не заявка на полноту; глубина 8 — как у прочих продуктовых путей.
         "pangolin.sbertech.ru": {
             "fetch": "browser",
             "extract": "auto",
             "strategy": "honest",
             "wait_for": "() => document.body && document.body.innerText.length > 200",
-            "max_depth": 2,
-            "max_documents": 60,
+            "max_depth": 8,
+            "max_documents": 600,
             "sitemap": "https://pangolin.sbertech.ru/sitemap.xml",
         },
         "platformv.sbertech.ru": {
@@ -942,14 +948,16 @@ def build_domain_profiles() -> dict[str, dict[str, object]]:
             "max_documents": 10,
         },
         # Path-scope: из 748 <loc> host-wide sitemap 502 — /documents (501 документ + индекс)
-        # на 89 продуктов; фильтр scope (дефект B) оставляет 22 URL pangolin ⇒ 60 с запасом.
-        # Глубина 2: sitemap даёт subordinate seeds на depth 0, +1 хоп; depth 4 — no-op.
+        # на 89 продуктов; фильтр scope оставляет только pangolin. Замер 22.10: 27 URL,
+        # 50 отказов robots_disallow — потолок 60 не связывал, но корпус недобирался
+        # робот-политикой, а не бюджетом. 600 — потолок, глубина 4: sitemap даёт
+        # subordinate seeds на depth 0, дальше хватает двух хопов (глубже — no-op).
         "sbertech.ru/documents": {
             "fetch": "browser",
             "extract": "auto",
             "strategy": "honest",
-            "max_depth": 2,
-            "max_documents": 60,
+            "max_depth": 4,
+            "max_documents": 600,
             "sitemap": "https://sbertech.ru/sitemap.xml",
         },
         # 283 URL (sitemap-индекс: 58 <loc> + дочерние фиды), 3 уровня on-host; 300 — запас.
@@ -1272,10 +1280,15 @@ def main() -> int:
         # генерация молча обнулит бюджеты обхода — дрейф, P7).
         "crawl": {
             "strategy": "honest",
-            "rate_limit": {"min_s": 1.0, "max_s": 3.0},
+            "rate_limit": {"min_s": 1.0, "max_s": 5.0},
             "max_depth": 8,
-            "max_documents": 300,
-            "max_workers": 2,
+            # Потолок документов на (продукт, seed-root). 300 был тесен: живой прогон
+            # 22.10 добыл 1042 документа на postgrespro и 800 на docs.tantorlabs.ru
+            # (ровно в потолок — то есть усечение), а pangolin.sbertech.ru упёрся в
+            # site-потолок 60 при 111 обнаруженных URL. Потолок — против бесконечного
+            # обхода, а не заявка на полноту.
+            "max_documents": 600,
+            "max_workers": 3,
             # Потолок ТЕРМИНАЛЬНОГО АРТЕФАКТА (250 MiB) — не страничный потолок:
             # `max_response_bytes` остаётся дефолтным 20 MiB. Применяется к pdf/docx/
             # pptx/xlsx и к zip/7z/rar; тело пишется в staging-файл, не в RAM.

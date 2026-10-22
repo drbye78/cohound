@@ -67,8 +67,8 @@ PROFILE_FIELDS = {
 
 #: P7 gate §3: бюджеты ``run.yaml:crawl`` (run-слой, execution-дефолты).
 RUN_CRAWL_MAX_DEPTH = 8
-RUN_CRAWL_MAX_DOCUMENTS = 300
-RUN_CRAWL_MAX_WORKERS = 2
+RUN_CRAWL_MAX_DOCUMENTS = 600
+RUN_CRAWL_MAX_WORKERS = 3
 #: Пул экстракции пересмотрен после замера `queue_max_size=1` (−49 % RSS: 4174 → 2126 MB
 #: на 665-стр. документе при идентичном markdown) ⇒ 2 воркера помещаются в бюджет хоста.
 #: Пин держит значение синхронным с `run.yaml` и генератором (иначе дрейф, P7).
@@ -192,7 +192,7 @@ def test_run_crawl_axes_accepted_by_strict_loader() -> None:
     assert crawl is not None, "run.yaml обязан нести секцию crawl"
 
     assert crawl.strategy is CrawlStrategy.HONEST
-    assert crawl.rate_limit == RateLimitSpec(min_s=1.0, max_s=3.0)
+    assert crawl.rate_limit == RateLimitSpec(min_s=1.0, max_s=5.0)
     assert crawl.max_depth == RUN_CRAWL_MAX_DEPTH
     assert crawl.max_documents == RUN_CRAWL_MAX_DOCUMENTS
     assert crawl.max_workers == RUN_CRAWL_MAX_WORKERS
@@ -211,14 +211,14 @@ def test_run_crawl_axes_accepted_by_strict_loader() -> None:
         # seed-корень портала /docs без sitemap — бюджет-потолок для крупного docs-портала.
         ("https://postgrespro.ru/docs/16/", 8, 800),
         # 23 URL, плоско — 60 покрывает с запасом.
-        ("https://pangolin.sbertech.ru/", 2, 60),
+        ("https://pangolin.sbertech.ru/", 8, 600),
         # Host-root мульти-продуктового сайта: discovery запрещён (I17) — только корень.
         ("https://www.gaz-is.ru/", 0, 10),
         # Продуктовый путь jatoba (реальная раскладка сайта — /produkty/...) — обход уместен.
         ("https://www.gaz-is.ru/produkty/inform-sistemy/subd-jatoba/", 8, 200),
         # path-ключ приоритетнее host-ключа (sitemap только здесь); в scope seed'а ~22 URL
         # pangolin (502 чужих документа отсекает scope-фильтр), 60 — запас.
-        ("https://sbertech.ru/documents/platform-v-pangolin-se", 2, 60),
+        ("https://sbertech.ru/documents/platform-v-pangolin-se", 4, 600),
         # host-ключ: без sitemap и без discovery (иначе BFS тянет 89 продуктов, I17).
         ("https://sbertech.ru/", 0, 10),
         # seed — глубокий путь, 8 уровней запаса.
@@ -230,7 +230,7 @@ def test_run_crawl_axes_accepted_by_strict_loader() -> None:
         # 2 URL (1 PDF) ⇒ 50 покрывает сайт.
         ("https://jatoba.ru/", 2, 50),
         # sitemap 404, крупный docs-хост ⇒ 800 — потолок против усечения.
-        ("https://docs.tantorlabs.ru/", 8, 800),
+        ("https://docs.tantorlabs.ru/", 8, 2000),
         # Host-root общего справочного центра Astra — не продуктовый корень (I17).
         ("https://wiki.astralinux.ru/", 0, 10),
         # Тантор-контент — Confluence-пространство TANDOCS (стабильный префикс /tandocs).
@@ -352,8 +352,8 @@ def test_sitemap_declared_only_on_most_specific_sbertech_key() -> None:
     path_profile = select_domain_profile("https://sbertech.ru/documents/anything", profiles)
     assert path_profile is not None
     assert path_profile.sitemap == "https://sbertech.ru/sitemap.xml"
-    assert path_profile.max_depth == 2
-    assert path_profile.max_documents == 60
+    assert path_profile.max_depth == 4
+    assert path_profile.max_documents == 600
 
 
 @pytest.mark.parametrize("host", MULTI_PRODUCT_HOST_ROOTS)
