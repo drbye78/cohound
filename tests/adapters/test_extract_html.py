@@ -195,3 +195,71 @@ def test_fixture_is_sanitized_before_extraction() -> None:
     assert doc.error is None
 
 
+
+# ---------------------------------------------------------------------------
+# Страница с пустым content и source_path (retained-файл, I19)
+# ---------------------------------------------------------------------------
+
+def test_source_path_is_read_when_content_is_empty(tmp_path: Path) -> None:
+    """``content`` пуст, ``source_path`` задан — HTML читается из retained-файла.
+
+    Документный путь читает файл сам (``extract_path``); HTML-экстрактор работает по
+    байтам, поэтому дочитывает файл здесь — результат обязан совпасть с тем, как если
+    бы те же байты пришли в ``content``.
+    """
+    data = "<h1>Заголовок</h1><p>Текст статьи.</p>".encode()
+    path = tmp_path / f"{content_hash(data)}.bin"
+    path.write_bytes(data)
+    fn, calls = _capturing("# Заголовок\n\nТекст статьи.")
+
+    by_content = HtmlExtractor(extract_fn=fn).extract(_page(data))
+    by_path = HtmlExtractor(extract_fn=fn).extract(
+        RawPage(
+            url="https://docs.example.test/article",
+            content=b"",
+            fetched_at="2026-10-08T00:00:00Z",
+            content_type="text/html; charset=utf-8",
+            source_path=str(path),
+        )
+    )
+
+    assert by_path.error is None
+    assert by_path.text == by_content.text
+    assert by_path.content_hash == by_content.content_hash
+    # Оба вызова получили один и тот же (санитизированный) HTML.
+    assert len(calls) == 2 and calls[0] == calls[1]
+
+def test_missing_source_path_degrades_to_error(tmp_path: Path) -> None:
+    """Пропавший retained-файл — ``error``, а не исключение (грациозная деградация)."""
+    fn, calls = _capturing("# не дойдёт")
+
+    doc = HtmlExtractor(extract_fn=fn).extract(
+        RawPage(
+            url="https://docs.example.test/article",
+            content=b"",
+            fetched_at="2026-10-08T00:00:00Z",
+            content_type="text/html",
+            source_path=str(tmp_path / "gone.bin"),
+        )
+    )
+
+    assert doc.error is not None
+    assert doc.text == ""
+    assert calls == []
+
+def test_content_wins_over_source_path() -> None:
+    """Оба поля заданы — используется ``content`` (поле аддитивное, приоритет прежний)."""
+    fn, calls = _capturing("# из content")
+
+    doc = HtmlExtractor(extract_fn=fn).extract(
+        RawPage(
+            url="https://docs.example.test/article",
+            content="<p>из content</p>".encode(),
+            fetched_at="2026-10-08T00:00:00Z",
+            content_type="text/html; charset=utf-8",
+            source_path="/nonexistent/never-read.bin",
+        )
+    )
+
+    assert doc.error is None
+    assert len(calls) == 1

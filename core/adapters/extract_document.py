@@ -49,6 +49,8 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
+import shutil
 import tempfile
 from pathlib import Path
 
@@ -199,6 +201,34 @@ def pdf_queue_provenance() -> dict[str, int | None]:
 
 def _sha256(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+def _stage_by_reference(source: Path, target: Path) -> None:
+    """Кладёт ``target`` с нужным суффиксом, **не копируя тело** документа.
+
+    docling выводит формат из суффикса пути, а retained-файл называется
+    ``{sha256}.bin`` (I19), поэтому конвертеру нужен путь с настоящим расширением.
+    Порядок попыток — от самой дешёвой к самой дорогой:
+
+    1. ``os.link`` — жёсткая ссылка: те же inode/байты, ноль места, ноль копирования.
+       Работает, когда ``tmp`` и ``corpus_raw`` на одной ФС (частый случай);
+    2. ``os.symlink`` — если ``tmp`` на другой ФС (``EXDEV``): байты тоже не копируются,
+       docling открывает файл по ссылке;
+    3. ``shutil.copyfile`` — последний резерв (ФС без ссылок): одна копия на диске,
+       но не в RAM (``copyfile`` не поднимает тело в память).
+
+    Файл-цель живёт только на время конвертации (временный каталог вызывающего).
+    """
+    try:
+        os.link(source, target)
+        return
+    except OSError:
+        pass
+    try:
+        os.symlink(source.resolve(), target)
+        return
+    except OSError:
+        pass
+    shutil.copyfile(source, target)
 
 
 def _page_count(result: object) -> int | None:
@@ -384,8 +414,75 @@ class DoclingDocumentExtractor:
         Исключение: ``full`` без рабочего OCR-движка — :class:`OcrEngineUnavailableError`
         (ошибка конфигурации, а не грациозная деградация). Фаза переводит её в
         ``parser_failed``; текст без OCR никогда не помечается уровнем ``full``.
+
+        Байты пишутся во временный файл (docling читает путь). Если байты уже лежат
+        retained-файлом, дешевле :meth:`extract_path`: он не копирует тело.
         """
         suffix = Path(filename).suffix.lower() or ".pdf"
+        error = self._precheck(suffix)
+        if error is not None:
+            return error
+        # Сборка конвертера — вне ``try``: ``OcrEngineUnavailableError`` обязан дойти до
+        # фазы как ошибка конфигурации, а не превратиться в ``docling: ...``.
+        converter = self._converter or self._build_converter(pdf=suffix == ".pdf")
+        self._converter = converter
+        tmp_path: str | None = None
+        try:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+                tmp.write(content)
+                tmp_path = tmp.name
+            return self._convert(converter, tmp_path)
+        except Exception as exc:  # noqa: BLE001 - грациозная деградация на уровне адаптера
+            return self._error(f"docling: {exc}")
+        finally:
+            if tmp_path is not None:
+                Path(tmp_path).unlink(missing_ok=True)
+
+    def extract_path(
+        self, path: str | Path, *, filename_hint: str | None = None
+    ) -> ExtractedDoc:
+        """Извлекает markdown из retained-файла, **не поднимая тело в RAM**.
+
+        ``filename_hint`` задаёт формат (расширение): retained-файл называется
+        ``{sha256}.bin`` (I19), а docling выводит формат из суффикса пути, поэтому
+        файл подставляется конвертеру по ссылке с правильным суффиксом
+        (:func:`_stage_by_reference`: hard link → symlink → копия). Ни один из
+        первых двух вариантов не копирует байты, так что документ на сотни МБ не
+        проходит через RSS воркера и не удваивается на диске.
+
+        Семантика извлечения та же, что у :meth:`extract_bytes`: тот же уровень
+        (``document_level``), та же OCR-проверка, те же строки ошибок, тот же
+        ``ExtractedDoc`` и тот же ``version``.
+        """
+        source = Path(path)
+        suffix = (
+            Path(filename_hint).suffix.lower()
+            if filename_hint
+            else source.suffix.lower()
+        ) or ".pdf"
+        error = self._precheck(suffix)
+        if error is not None:
+            return error
+        if not source.is_file():
+            # Видимая ошибка, а не падение: файл мог исчезнуть между retention и извлечением.
+            return self._error(f"retained-файл не найден: {source}")
+        converter = self._converter or self._build_converter(pdf=suffix == ".pdf")
+        self._converter = converter
+        try:
+            with tempfile.TemporaryDirectory(prefix="cohound-extract-") as staging:
+                staged = Path(staging) / f"document{suffix}"
+                _stage_by_reference(source, staged)
+                return self._convert(converter, str(staged))
+        except Exception as exc:  # noqa: BLE001 - грациозная деградация на уровне адаптера
+            return self._error(f"docling: {exc}")
+
+    def _precheck(self, suffix: str) -> ExtractedDoc | None:
+        """Общие проверки обоих входов; ``None`` — можно конвертировать.
+
+        Формат, уровень ``off``, наличие docling и OCR-проверка для ``full`` PDF —
+        ровно те же и в том же порядке, что были в ``extract_bytes``: входы
+        (байты/путь) не меняют семантику извлечения.
+        """
         if suffix not in SUPPORTED_FORMATS:
             return self._error(f"формат не поддерживается: {suffix}")
         if self._level is DocumentLevel.OFF:
@@ -394,20 +491,21 @@ class DoclingDocumentExtractor:
             return self._error("document_level=off: документы не извлекаются")
         if not self.available:
             return self._error("docling не установлен")
-
         # ``full`` обещает OCR именно для PDF; офисный документ OCR не использует, поэтому
         # проверка выполняется только на PDF-пути (окружение ``extract`` без OCR остаётся
         # рабочим). Ошибка — до конвертации: никакой текст без OCR не помечается ``full``.
         if suffix == ".pdf" and self._level is DocumentLevel.FULL:
             self._require_working_ocr(self._pdf_options())
-        converter = self._converter or self._build_converter(pdf=suffix == ".pdf")
-        self._converter = converter
-        tmp_path: str | None = None
+        return None
+
+    def _convert(self, converter: object, path: str) -> ExtractedDoc:
+        """Общий хвост обоих входов: ``convert`` → markdown → ``ExtractedDoc``.
+
+        Любой сбой конвертации — грациозная деградация ``docling: <причина>`` (прежняя
+        строка ошибки), а не исключение.
+        """
         try:
-            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-                tmp.write(content)
-                tmp_path = tmp.name
-            result = converter.convert(tmp_path)
+            result = converter.convert(path)
             status = getattr(result.status, "name", str(result.status))
             if status != "SUCCESS":
                 return self._error(f"docling: статус конвертации {status}")
@@ -421,9 +519,6 @@ class DoclingDocumentExtractor:
             )
         except Exception as exc:  # noqa: BLE001 - грациозная деградация на уровне адаптера
             return self._error(f"docling: {exc}")
-        finally:
-            if tmp_path is not None:
-                Path(tmp_path).unlink(missing_ok=True)
 
     def _error(self, message: str) -> ExtractedDoc:
         return ExtractedDoc(

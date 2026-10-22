@@ -7,7 +7,10 @@ re-extract без ре-фетча (A/B экстракторов, retention). С�
 Контракт: ``extract(page, route)`` принимает ``RawPage`` и маршрут извлечения
 (``ExtractionRoute``: авто по формату | принудительный HTML | документ). Маршрут резолвится
 в pipeline в составе ``FetchPlan``. Реализация ``adapters/extract_document.py`` имеет
-``extract_bytes(content, filename)`` — обёртка приводит в composition root. Нейтрален (§1.3).
+``extract_bytes(content, filename)`` и ``extract_path(path, filename_hint=...)`` — обёртка
+приводит в composition root. ``page.source_path`` (аддитивное поле ``RawPage``) позволяет
+реализации читать retained-файл вместо ``content``: байты документа не обязаны проходить
+через RAM вызывающего. Нейтрален (§1.3).
 """
 
 from __future__ import annotations

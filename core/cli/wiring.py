@@ -1427,6 +1427,18 @@ def _detect_document_filename(page: RawPage) -> str | None:
     return f"document{suffix}" if suffix is not None else None
 
 
+def _extract_document(
+    documents: DoclingDocumentExtractor, page: RawPage, filename: str
+) -> ExtractedDoc:
+    """Документ по пути retained-файла, иначе по байтам страницы (D2/I19).
+
+    ``page.source_path`` задан — тело читает адаптер (``extract_path``), в RAM
+    вызывающего его нет; иначе — прежний ``extract_bytes(page.content, filename)``.
+    """
+    if page.source_path:
+        return documents.extract_path(page.source_path, filename_hint=filename)
+    return documents.extract_bytes(page.content, filename)
+
 class _LocalExtractor:
     """Композит локальной экстракции: документы (docling) поверх HTML (trafilatura).
 
@@ -1456,17 +1468,23 @@ class _LocalExtractor:
     def extract(
         self, page: RawPage, route: ExtractionRoute = ExtractionRoute.AUTO
     ) -> ExtractedDoc:
-        """``RawPage`` → ``ExtractedDoc`` по маршруту ``route`` (D2)."""
+        """``RawPage`` → ``ExtractedDoc`` по маршруту ``route`` (D2).
+
+        Документный путь: если страница несёт ``source_path`` (retained-файл, I19),
+        извлечение идёт по пути (``extract_path``) — тело не копируется в RAM и не
+        пишется во второй временный файл; иначе — прежний ``extract_bytes``.
+        """
         if route is ExtractionRoute.HTML:
             return self._html.extract(page, route)
-        if self._documents is None:
+        documents = self._documents
+        if documents is None:
             return self._html.extract(page, route)
         if route is ExtractionRoute.DOCUMENT:
             filename = _detect_document_filename(page)
-            return self._documents.extract_bytes(page.content, filename or "document.pdf")
+            return _extract_document(documents, page, filename or "document.pdf")
         filename = _detect_document_filename(page)
         if filename is not None:
-            return self._documents.extract_bytes(page.content, filename)
+            return _extract_document(documents, page, filename)
         return self._html.extract(page, route)
 
     @property
