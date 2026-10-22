@@ -417,3 +417,90 @@ def test_stage_by_reference_falls_back_link_symlink_copy(
     assert not target.is_symlink()
     assert target.stat().st_ino != source.stat().st_ino
     assert target.read_bytes() == b"body"
+
+
+# --------------------------------------------------------------------------- #
+# Ленивый импорт docling: импорт адаптера не тянет torch/transformers
+# --------------------------------------------------------------------------- #
+
+#: Дочерний процесс: импорт адаптера **не должен** импортировать docling (403 MB RSS).
+#: Проверка в отдельном процессе — единственный способ увидеть «до» импорта: в этом
+#: процессе docling уже мог быть импортирован другими тестами файла.
+_LAZY_IMPORT_SCRIPT = """
+import importlib.util, json, sys
+import core.adapters.extract_document as m
+from core.adapters.extract_document import DoclingDocumentExtractor
+print(json.dumps({
+    "flag": m._DOCLING_AVAILABLE,
+    "converter": m.DocumentConverter,
+    "pipelines": m.PdfPipelineOptions,
+    "available": DoclingDocumentExtractor().available,
+    "has_docling": importlib.util.find_spec("docling") is not None,
+    "docling_loaded": "docling" in sys.modules,
+    "torch_loaded": "torch" in sys.modules,
+}))
+"""
+
+
+def test_importing_adapter_does_not_import_docling() -> None:
+    """Импорт адаптера и ``available`` — без docling: 86% корпуса идёт HTML-путём.
+
+    Замер 22.10: ``import core.adapters.extract_document`` стоил 403 MB RSS на воркер
+    (torch + transformers), а 1038 из 1203 документов — HTML. Поэтому символы
+    разрешаются при первом извлечении (:func:`_resolve_docling`), а не при импорте.
+    ``available`` обязан отвечать **без** импорта (его спрашивает инициализатор воркера
+    пула в ``build_worker_extractor``), иначе ленивость не даёт ничего.
+    """
+    import json
+    import os
+    import subprocess
+    import sys
+
+    root = Path(__file__).resolve().parents[2]
+    env = dict(os.environ)
+    env.setdefault("PYTHONPATH", str(root))
+    proc = subprocess.run(
+        [sys.executable, "-c", _LAZY_IMPORT_SCRIPT],
+        cwd=str(root),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+    assert proc.returncode == 0, proc.stderr
+    seen = json.loads(proc.stdout.strip().splitlines()[-1])
+
+    assert seen["docling_loaded"] is False, "импорт адаптера подтянул docling"
+    assert seen["torch_loaded"] is False, "импорт адаптера подтянул torch"
+    # Символы ещё не разрешены — ленивый импорт не состоялся.
+    assert seen["flag"] is None
+    assert seen["converter"] is None
+    assert seen["pipelines"] is None
+    # Ответ «есть ли чем извлекать» при этом правдив (пакет установлен / не установлен).
+    assert seen["available"] is seen["has_docling"]
+
+
+def test_resolve_docling_uses_injected_symbols_without_importing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Инъекция символа (контракт ``monkeypatch``) отменяет импорт, а не дополняет его.
+
+    Тесты файла подменяют ``DocumentConverter``/``InputFormat``/… фейками; резолвер
+    обязан уважать подстановку (шаг 1) и **не** импортировать docling. Проверяется
+    отсутствием побочных эффектов: остальные символы остаются ``None``, а
+    ``_DOCLING_AVAILABLE`` не переписывается (иначе после ``monkeypatch``-откатa модуль
+    остался бы «разрешённым» и следующий тест увидел бы ``available=False``).
+    """
+    for name in extract_document._DOCLING_SYMBOLS:
+        monkeypatch.setattr(extract_document, name, None)
+    monkeypatch.setattr(extract_document, "DocumentConverter", _FakeConverter)
+    monkeypatch.setattr(extract_document, "_DOCLING_AVAILABLE", None)
+
+    assert extract_document._resolve_docling() is True
+
+    assert extract_document.DocumentConverter is _FakeConverter
+    # Импорта не было: остальные символы не заполнились.
+    assert extract_document.PdfPipelineOptions is None
+    assert extract_document.InputFormat is None
+    # Флаг не переписан инъекцией.
+    assert extract_document._DOCLING_AVAILABLE is None

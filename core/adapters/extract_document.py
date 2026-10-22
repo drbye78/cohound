@@ -43,52 +43,170 @@ Copyright (c) 2024). Реализация написана заново (чис�
 
 Зависимость ``docling`` — необязательная и тяжёлая; импортируется лениво. Для офисных
 форматов достаточно лёгкого extras ``docling-slim[format-office]`` (без torch).
+
+**Ленивый импорт docling (замер 22.10).** ``docling`` тянет torch + transformers:
+``import core.adapters.extract_document`` стоил **403 MB RSS** на процесс, а ``import
+core.cli.wiring`` — **426 MB**. При этом в реальном прогоне 1038 из 1203 документов —
+HTML (86%), и docling им не нужен вовсе: пул воркеров платил 403 MB за конвейер,
+который 86% работы не использует. Поэтому символы docling разрешаются **при первом
+фактическом извлечении** (:func:`_resolve_docling`), а импорт адаптера стоит ~38 MB
+(``import core.cli.wiring`` — 77 MB вместо 426 MB; ``core.edge.__main__`` — 60 MB
+вместо 410 MB). После разрешения поведение, текст и ``extractor_version`` — байт-в-байт
+прежние.
 """
 
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import logging
 import os
 import shutil
 import tempfile
 from pathlib import Path
+from typing import Any
 
 from core.domain.enums import DocumentLevel
 from core.ports.types import ExtractedDoc
 from core.util.document_formats import DOCUMENT_SUFFIXES
 
-try:  # тяжёлая необязательная зависимость
-    import docling  # noqa: F401  # type: ignore[import-not-found]
+#: docling-символы как модульные атрибуты (публичная поверхность адаптера).
+#:
+#: ``None`` — «ещё не разрешено» (импорт при первом извлечении, :func:`_resolve_docling`);
+#: непустое значение — «разрешено»: либо импортом, либо **инъекцией** (тесты подменяют
+#: имена через ``monkeypatch.setattr``). Имена обязаны оставаться настоящими атрибутами
+#: модуля: ``monkeypatch.setattr(extract_document, "DocumentConverter", fake)`` иначе
+#: сломался бы, а module-level ``__getattr__`` вернул бы фейк лишь однажды.
+_DOCLING_AVAILABLE: bool | None = None
 
+#: Есть ли пакет ``docling`` в окружении (``find_spec``, без импорта). ``None`` — не смотрели.
+_DOCLING_PRESENT: bool | None = None
+
+DocumentConverter: Any = None
+InputFormat: Any = None
+PdfFormatOption: Any = None
+NativePdfFormatOption: Any = None
+PdfPipelineOptions: Any = None
+NativePdfPipelineOptions: Any = None
+TableStructureOptions: Any = None
+TableFormerMode: Any = None
+OcrAutoOptions: Any = None
+
+#: Имена, которые :func:`_resolve_docling` заполняет из docling. Порядок не важен.
+_DOCLING_SYMBOLS: tuple[str, ...] = (
+    "DocumentConverter",
+    "InputFormat",
+    "PdfFormatOption",
+    "NativePdfFormatOption",
+    "PdfPipelineOptions",
+    "NativePdfPipelineOptions",
+    "TableStructureOptions",
+    "TableFormerMode",
+    "OcrAutoOptions",
+)
+
+
+def _resolve_docling() -> bool:
+    """Разрешает docling-символы лениво; ``True`` — docling доступен.
+
+    Порядок проверок важен — он и есть контракт с тестами
+    (``tests/adapters/test_extract_document.py`` подменяет ``DocumentConverter``,
+    ``InputFormat``, ``PdfFormatOption`` и ``_DOCLING_AVAILABLE``):
+
+    1. **Инъекция.** Любое из имён :data:`_DOCLING_SYMBOLS` уже не ``None`` в
+       ``globals()`` — импорта **нет**, используется подставленное значение. Проверка
+       не имеет побочных эффектов (не пишет ``_DOCLING_AVAILABLE``): иначе после
+       ``monkeypatch``-отката флага в модуле осталось бы «разрешено», и следующий тест
+       увидел бы ``available=False`` при рабочем docling.
+    2. **Уже решено.** ``_DOCLING_AVAILABLE`` не ``None`` (импорт состоялся или его
+       результат подставлен явно) — повторного импорта нет.
+    3. **Импорт** (единственное место, знающее путь к docling). ``ImportError`` →
+       ``_DOCLING_AVAILABLE = False``, символы остаются ``None``; :attr:`available`
+       тогда ``False``, а извлечение отдаёт честную ошибку «docling не установлен».
+    """
+    global _DOCLING_AVAILABLE
+
+    module_globals = globals()
+    if any(module_globals[name] is not None for name in _DOCLING_SYMBOLS):
+        return True
+    if _DOCLING_AVAILABLE is not None:
+        return _DOCLING_AVAILABLE
+
+    try:  # тяжёлая необязательная зависимость: torch/transformers внутри
+        import docling  # noqa: F401  # type: ignore[import-not-found]
+        from docling.datamodel.base_models import (  # type: ignore[import-not-found]
+            InputFormat as _InputFormat,
+        )
+        from docling.datamodel.pipeline_options import (  # type: ignore[import-not-found]
+            NativePdfPipelineOptions as _NativePdfPipelineOptions,
+        )
+        from docling.datamodel.pipeline_options import (  # type: ignore[import-not-found]
+            OcrAutoOptions as _OcrAutoOptions,
+        )
+        from docling.datamodel.pipeline_options import (  # type: ignore[import-not-found]
+            PdfPipelineOptions as _PdfPipelineOptions,
+        )
+        from docling.datamodel.pipeline_options import (  # type: ignore[import-not-found]
+            TableFormerMode as _TableFormerMode,
+        )
+        from docling.datamodel.pipeline_options import (  # type: ignore[import-not-found]
+            TableStructureOptions as _TableStructureOptions,
+        )
+        from docling.document_converter import (  # type: ignore[import-not-found]
+            DocumentConverter as _DocumentConverter,
+        )
+        from docling.document_converter import (  # type: ignore[import-not-found]
+            NativePdfFormatOption as _NativePdfFormatOption,
+        )
+        from docling.document_converter import (  # type: ignore[import-not-found]
+            PdfFormatOption as _PdfFormatOption,
+        )
+    except ImportError:  # pragma: no cover - зависит от окружения
+        _DOCLING_AVAILABLE = False
+        return False
+
+    module_globals.update(
+        {
+            "DocumentConverter": _DocumentConverter,
+            "InputFormat": _InputFormat,
+            "PdfFormatOption": _PdfFormatOption,
+            "NativePdfFormatOption": _NativePdfFormatOption,
+            "PdfPipelineOptions": _PdfPipelineOptions,
+            "NativePdfPipelineOptions": _NativePdfPipelineOptions,
+            "TableStructureOptions": _TableStructureOptions,
+            "TableFormerMode": _TableFormerMode,
+            "OcrAutoOptions": _OcrAutoOptions,
+        }
+    )
     _DOCLING_AVAILABLE = True
-except ImportError:  # pragma: no cover - зависит от окружения
-    _DOCLING_AVAILABLE = False
+    return True
 
-try:
-    from docling.datamodel.base_models import InputFormat  # type: ignore[import-not-found]
-    from docling.datamodel.pipeline_options import (  # type: ignore[import-not-found]
-        NativePdfPipelineOptions,
-        OcrAutoOptions,
-        PdfPipelineOptions,
-        TableFormerMode,
-        TableStructureOptions,
-    )
-    from docling.document_converter import (  # type: ignore[import-not-found]
-        DocumentConverter,
-        NativePdfFormatOption,
-        PdfFormatOption,
-    )
-except ImportError:  # pragma: no cover
-    DocumentConverter = None  # type: ignore[assignment,misc]
-    InputFormat = None  # type: ignore[assignment,misc]
-    PdfFormatOption = None  # type: ignore[assignment,misc]
-    NativePdfFormatOption = None  # type: ignore[assignment,misc]
-    PdfPipelineOptions = None  # type: ignore[assignment,misc]
-    NativePdfPipelineOptions = None  # type: ignore[assignment,misc]
-    TableStructureOptions = None  # type: ignore[assignment,misc]
-    TableFormerMode = None  # type: ignore[assignment,misc]
-    OcrAutoOptions = None  # type: ignore[assignment,misc]
+
+def _docling_present() -> bool:
+    """Установлен ли ``docling`` — проверка **без импорта** (``find_spec``, torch не грузится).
+
+    Зачем отдельная проба. ``available`` спрашивают **до** работы — на старте каждого
+    воркера пула (``core.cli.wiring.build_worker_extractor``) и в
+    ``build_extractor``, — чтобы решить, включать ли документный экстрактор (это же
+    решение входит в композитную строку ``version``). Импорт там стоил бы 403 MB на
+    воркер, который 86% корпуса обрабатывает HTML-путём, то есть ровно то, что эта
+    ленивость убирает.
+
+    Найденный, но сломанный docling (несовместимые extras) ловится при **первом
+    извлечении**: :func:`_resolve_docling` вернёт ``False``, :meth:`_precheck` отдаст
+    прежнюю честную ошибку «docling не установлен», а :attr:`available` после этого
+    сойдётся к ``False`` (см. свойство) — решение «включать ли docling» самокорректируется
+    по факту, а не по догадке.
+    """
+    global _DOCLING_PRESENT
+
+    if _DOCLING_PRESENT is None:
+        try:
+            _DOCLING_PRESENT = importlib.util.find_spec("docling") is not None
+        except (ImportError, ValueError):  # pragma: no cover - сломанный __spec__
+            _DOCLING_PRESENT = False
+    return _DOCLING_PRESENT
+
 
 # §3.2: расширяемый реестр поддерживаемых форматов (единый источник — нейтральный
 # ``core.util.document_formats``, чтобы pipeline мог детектировать документы, не импортируя
@@ -296,7 +414,16 @@ class DoclingDocumentExtractor:
 
     @property
     def available(self) -> bool:
-        return _DOCLING_AVAILABLE and DocumentConverter is not None
+        """docling пригоден — проверка **без импорта** (цена ответа не 403 MB).
+
+        Пока фактического разрешения не было — «пакет установлен» (:func:`_docling_present`);
+        после первого извлечения — уже измеренный результат (:func:`_resolve_docling`),
+        чтобы найденный, но сломанный docling не считался доступным до конца процесса.
+        Спрашивается на старте воркера пула, поэтому импорт здесь недопустим.
+        """
+        if _DOCLING_AVAILABLE is not None:
+            return _DOCLING_AVAILABLE and DocumentConverter is not None
+        return _docling_present()
 
     @staticmethod
     def supports(filename: str) -> bool:
@@ -327,6 +454,9 @@ class DoclingDocumentExtractor:
         нативного пайплайна другой механизм и своя память (899 MB), поля ``queue_max_size``
         у него нет вовсе.
         """
+        # Символы docling разрешаются здесь же: до этого вызова они могли быть ``None``
+        # (ленивый импорт). Повторный вызов — no-op (см. :func:`_resolve_docling`).
+        _resolve_docling()
         timeout = (
             self._document_timeout
             if self._document_timeout is not None
@@ -367,6 +497,7 @@ class DoclingDocumentExtractor:
         а не тихое извлечение без OCR. Уровни ``layout``/``layout_tables``/``text`` OCR
         выключают осознанно — проверка для них не выполняется.
         """
+        _resolve_docling()
         if self._level is DocumentLevel.OFF:
             return DocumentConverter()
         pdf_options = self._pdf_options()
@@ -493,7 +624,11 @@ class DoclingDocumentExtractor:
             # ``off`` — решение pipeline пропустить документ, а не задача адаптера; прямой
             # вызов честно ошибается (никогда не пустой текст «молча»).
             return self._error("document_level=off: документы не извлекаются")
-        if not self.available:
+        # Ленивый импорт docling: ``available`` отвечает по ``find_spec`` (без импорта),
+        # фактическое разрешение символов — здесь, на первом реальном документе. Строка
+        # ошибки прежняя: «пакет есть, но не импортируется» и «пакета нет» для вызывающего
+        # неразличимы — извлекать нечем в обоих случаях.
+        if not _resolve_docling():
             return self._error("docling не установлен")
         # ``full`` обещает OCR именно для PDF; офисный документ OCR не использует, поэтому
         # проверка выполняется только на PDF-пути (окружение ``extract`` без OCR остаётся
