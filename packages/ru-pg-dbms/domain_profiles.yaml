@@ -64,8 +64,8 @@ pangolin.sbertech.ru:
   # 600/8 размером сайта не подтверждены.
   extract: auto
   fetch: browser
-  max_depth: 2
-  max_documents: 60
+  max_depth: 8
+  max_documents: 600
   sitemap: https://pangolin.sbertech.ru/sitemap.xml
   strategy: honest
   wait_for: () => document.body && document.body.innerText.length > 200
@@ -113,8 +113,8 @@ sbertech.ru/documents:
   # depth 4 покрытия не добавляет.
   extract: auto
   fetch: browser
-  max_depth: 2
-  max_documents: 60
+  max_depth: 4
+  max_documents: 600
   sitemap: https://sbertech.ru/sitemap.xml
   strategy: honest
 tantorlabs.ru:

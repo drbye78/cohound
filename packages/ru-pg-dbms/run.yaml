@@ -22,15 +22,15 @@ snapshot_date: '2026-10-01'
 crawl:
   # Операционные (execution) дефолты краула; не методология (§13).
   strategy: honest          # для browser-доменов; HTTP-домены нормализуются в auto
-  rate_limit: {min_s: 1.0, max_s: 3.0}   # politeness-пейсинг (corpus), per-host
+  rate_limit: {min_s: 1.0, max_s: 5.0}   # politeness-пейсинг (corpus), per-host
   # Потолок глубины (сегментов пути) от seed-root. Глубина — не ограничитель полноты:
   # где есть sitemap, хватает 2–3 (sitemap сам даёт depth-0 seeds), 8 — где его нет.
   max_depth: 8
   # Дефолтный потолок документов на (продукт, seed-root). Per-site профиль может его
   # переопределить (site > run): у крупных сайтов бюджет выше, у крошечных — ниже.
-  max_documents: 300
+  max_documents: 600
   # Сетевой пул воркеров; browser-фетч всё равно inline (не параллелится).
-  max_workers: 2
+  max_workers: 3
   # Пул экстракции. Замер 2026-10, **пересмотрен после замера `queue_max_size`**:
   # пики worker'а при дефолтном queue_max_size=100 были text 1191 MiB, layout 3074,
   # layout_tables 3327, full 3911–4296 (на 68-стр. синтетике), и живой прогон
