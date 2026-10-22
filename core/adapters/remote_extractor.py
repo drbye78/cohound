@@ -36,6 +36,11 @@ __all__ = ["RemoteExtractor"]
 class RemoteExtractor:
     """``ExtractorPort`` через DMZ-шов. Drop-in для реального экстрактора (07 §4)."""
 
+    #: B3: шов извлекает **по URL** (edge сам фетчит), локальные байты он не принимает.
+    #: Спуск в контейнеры видит это как ``extract_unavailable`` — видимый пропуск члена,
+    #: а не тихую подмену: фетчить синтетический ``{archive}!/{member}`` нельзя.
+    supports_source_path = False
+
     def __init__(self, gateway: ContentGateway, *, version: str = "remote-extractor-1") -> None:
         self._gateway = gateway
         self.version = version

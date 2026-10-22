@@ -22,12 +22,16 @@ from typing import Any
 
 from core.domain import (
     AbsenceRuleType,
+    ArchiveDescent,
+    ArchiveDescentStatus,
+    ArchiveObservation,
     Cell,
     CellEvidence,
     CellState,
     CorpusChunk,
     CorpusCoverage,
     CorpusDoc,
+    CorpusMember,
     CrawlItemStatus,
     CrawlProvenance,
     CrawlSession,
@@ -1434,6 +1438,179 @@ class SqliteStore:
                 extractor_version=doc["extractor_version"],
                 render_mode=doc["render_mode"],
                 lang=doc["lang"],
+            )
+
+    # -- спуск в контейнеры (B3) ------------------------------------------- #
+    def save_archive_observation(self, observation: ArchiveObservation) -> None:
+        """Идемпотентный upsert наблюдения спуска по PK ``observation_id`` (B3).
+
+        Прогноз и исход — JSON-блоки: их форма принадлежит политике спуска
+        (``container_policy.archive_forecast`` + ``archive_descent``), а схема БД хранит
+        их как есть, чтобы новая деталь прогноза не требовала миграции.
+        """
+        forecast_json = json.dumps(
+            dict(observation.forecast or {}), ensure_ascii=False, sort_keys=True
+        )
+        outcome_json = json.dumps(
+            dict(observation.outcome or {}), ensure_ascii=False, sort_keys=True
+        )
+        with self.conn:
+            self.conn.execute(
+                "INSERT INTO archive_observations"
+                " (observation_id, run_id, product_id, root_url, archive_url,"
+                "  archive_content_hash, archive_path, depth, descent, status,"
+                "  forecast_json, outcome_json, reason, created_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                " ON CONFLICT(observation_id) DO UPDATE SET"
+                "  run_id = excluded.run_id,"
+                "  product_id = excluded.product_id,"
+                "  root_url = excluded.root_url,"
+                "  archive_url = excluded.archive_url,"
+                "  archive_content_hash = excluded.archive_content_hash,"
+                "  archive_path = excluded.archive_path,"
+                "  depth = excluded.depth,"
+                "  descent = excluded.descent,"
+                "  status = excluded.status,"
+                "  forecast_json = excluded.forecast_json,"
+                "  outcome_json = excluded.outcome_json,"
+                "  reason = excluded.reason,"
+                "  created_at = excluded.created_at",
+                (
+                    observation.observation_id,
+                    observation.run_id,
+                    observation.product_id,
+                    observation.root_url,
+                    observation.archive_url,
+                    observation.archive_content_hash,
+                    observation.archive_path,
+                    int(observation.depth),
+                    str(observation.descent),
+                    str(observation.status),
+                    forecast_json,
+                    outcome_json,
+                    observation.reason,
+                    observation.created_at,
+                ),
+            )
+
+    def iter_archive_observations(self, run_id: str) -> Iterator[ArchiveObservation]:
+        """Наблюдения спуска прогона (порядок: ``product_id, depth, archive_url``)."""
+        for row in self.conn.execute(
+            "SELECT * FROM archive_observations WHERE run_id = ?"
+            " ORDER BY product_id, depth, archive_url, observation_id",
+            (run_id,),
+        ):
+            yield self._archive_observation_from_row(row)
+
+    @staticmethod
+    def _archive_observation_from_row(row: sqlite3.Row) -> ArchiveObservation:
+        """Строка ``archive_observations`` → доменная модель (JSON-блоки разбираются)."""
+        return ArchiveObservation(
+            observation_id=row["observation_id"],
+            run_id=row["run_id"],
+            product_id=row["product_id"],
+            root_url=row["root_url"],
+            archive_url=row["archive_url"],
+            archive_content_hash=row["archive_content_hash"],
+            archive_path=row["archive_path"],
+            depth=int(row["depth"] or 0),
+            descent=ArchiveDescent(row["descent"]),
+            status=ArchiveDescentStatus(row["status"]),
+            forecast=json.loads(row["forecast_json"] or "{}"),
+            outcome=json.loads(row["outcome_json"] or "{}"),
+            reason=row["reason"],
+            created_at=row["created_at"],
+        )
+
+    def save_corpus_members(self, members: Iterable[CorpusMember]) -> None:
+        """Upsert членов контейнеров по PK ``(archive_content_hash, member_path)`` (B3).
+
+        Одна транзакция на пачку: повторный спуск того же архива **не** дублирует строки
+        (идентичность пары — решение §6.7), а обновляет исход (``doc_id``/``skip_reason``).
+        """
+        rows = [
+            (
+                member.archive_content_hash,
+                member.member_path,
+                member.product_id,
+                member.run_id,
+                member.root_url,
+                member.archive_url,
+                member.archive_path,
+                member.member_url,
+                member.member_format,
+                member.declared_size,
+                member.extracted_content_hash,
+                member.doc_id,
+                member.skip_reason,
+                int(member.depth),
+                member.created_at,
+            )
+            for member in members
+        ]
+        if not rows:
+            return
+        with self.conn:
+            self.conn.executemany(
+                "INSERT INTO corpus_members"
+                " (archive_content_hash, member_path, product_id, run_id, root_url,"
+                "  archive_url, archive_path, member_url, member_format, declared_size,"
+                "  extracted_content_hash, doc_id, skip_reason, depth, created_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                " ON CONFLICT(archive_content_hash, member_path) DO UPDATE SET"
+                "  product_id = excluded.product_id,"
+                "  run_id = excluded.run_id,"
+                "  root_url = excluded.root_url,"
+                "  archive_url = excluded.archive_url,"
+                "  archive_path = excluded.archive_path,"
+                "  member_url = excluded.member_url,"
+                "  member_format = excluded.member_format,"
+                "  declared_size = excluded.declared_size,"
+                "  extracted_content_hash = excluded.extracted_content_hash,"
+                "  doc_id = excluded.doc_id,"
+                "  skip_reason = excluded.skip_reason,"
+                "  depth = excluded.depth,"
+                "  created_at = excluded.created_at",
+                rows,
+            )
+
+    def iter_corpus_members(
+        self,
+        *,
+        archive_content_hash: str | None = None,
+        product_id: str | None = None,
+    ) -> Iterator[CorpusMember]:
+        """Члены контейнеров (порядок: ``archive_content_hash, member_path``)."""
+        clauses: list[str] = []
+        params: list[Any] = []
+        if archive_content_hash is not None:
+            clauses.append("archive_content_hash = ?")
+            params.append(archive_content_hash)
+        if product_id is not None:
+            clauses.append("product_id = ?")
+            params.append(product_id)
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        for row in self.conn.execute(
+            "SELECT * FROM corpus_members"
+            f"{where} ORDER BY archive_content_hash, member_path",
+            tuple(params),
+        ):
+            yield CorpusMember(
+                archive_content_hash=row["archive_content_hash"],
+                member_path=row["member_path"],
+                product_id=row["product_id"],
+                run_id=row["run_id"],
+                root_url=row["root_url"],
+                archive_url=row["archive_url"],
+                archive_path=row["archive_path"],
+                member_url=row["member_url"],
+                member_format=row["member_format"],
+                declared_size=row["declared_size"],
+                extracted_content_hash=row["extracted_content_hash"],
+                doc_id=row["doc_id"],
+                skip_reason=row["skip_reason"],
+                depth=int(row["depth"] or 0),
+                created_at=row["created_at"],
             )
 
     def read_manifest(self, run_id: str) -> RunManifest:

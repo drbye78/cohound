@@ -291,6 +291,14 @@ archive_descent:
   - plan
   - full
 
+# B3. Исход спуска в один контейнер (archive_observations.status): спуск пишет запись
+# всегда — и когда что-то достал, и когда не достал ничего. Операционное перечисление.
+archive_descent_status:
+  - planned
+  - descended
+  - unreadable
+  - budget_exhausted
+
 # hound package crawl-probe: наблюдаемые значения зонда осей краула по ключам
 # domain_profiles.yaml. Операционное перечисление — без бампа версии словаря.
 # source — приоритет источника URL (первый хит на ключ); status — исход зонда;

@@ -445,6 +445,12 @@ def main() -> int:
         lambda: _crawl_terminal_artifact(),
     )
 
+    section("Спуск в контейнеры (B3)")
+    check(
+        "archive_descent: прогноз/члены/цикл/бюджет/plan/unreadable",
+        lambda: _archive_descent_checks(),
+    )
+
     print(f"\n{CHECKS - len(FAILURES)}/{CHECKS} проверок пройдено")
     if FAILURES:
         print("\nПровалы:")
@@ -691,13 +697,15 @@ def _crawl_session_dict_mirror() -> None:
 def _db_smoke() -> None:
     conn = connect(":memory:")
     ver = conn.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()
-    _assert(ver is not None and ver["value"] == "3.9.0")
+    _assert(ver is not None and ver["value"] == "3.10.0")
 
     tables = {r["name"] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     for t in ("products", "runs", "llm_scenarios", "corpus_docs", "corpus_chunks",
               "index_manifest", "cells", "cell_evidence", "search_log",
               "search_exhaustion", "registry_facts", "run_inputs",
-              "crawl_sessions", "crawl_session_items", "corpus_coverage"):
+              "crawl_sessions", "crawl_session_items", "corpus_coverage",
+              # B3: спуск в контейнеры — члены (производный вид архива) и наблюдения.
+              "corpus_members", "archive_observations"):
         _assert(t in tables)
 
     # P2 (schema 2.2.0): build-id witness — extractor_version у чанка; extractor_version/
@@ -3282,6 +3290,144 @@ def _cli_run_self_contained() -> None:
             store.close()
 
 
+def _archive_descent_checks() -> None:
+    """B3: спуск в контейнеры — прогноз до извлечения, члены, цикл, бюджет, ``plan``.
+
+    Проверяется на **настоящем** zip (``zipfile``): листинг по индексу, прогноз **до**
+    чтения тел членов, ингест членов через инъекцию, png — видимый пропуск с причиной,
+    ``plan`` — ноль членов, битый архив — ``unreadable`` (не исключение), повтор архива —
+    ``archive_cycle`` (конечность без потолка глубины), кумулятивный бюджет —
+    ``budget_exhausted`` (видимая остановка). ``page_count`` PDF — по шапке файла.
+    """
+    import io
+    import tempfile
+    import zipfile
+    from pathlib import Path
+
+    from core.adapters.container_any import container_for
+    from core.domain.enums import ArchiveDescent, ArchiveDescentStatus
+    from core.domain.models import ArchiveObservation, CorpusMember
+    from core.pipeline.archive_descent import (
+        ArchiveDescentWalker,
+        DescentBudget,
+        MemberOutcome,
+    )
+    from core.pipeline.artifact_probe import probe_artifact
+    from core.util.document_probe import pdf_page_count
+
+    def _zip(files: dict[str, bytes]) -> bytes:
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+            for name, data in files.items():
+                archive.writestr(name, data)
+        return buffer.getvalue()
+
+    def _pdf(pages: int) -> bytes:
+        return b"".join(
+            [b"%PDF-1.7\n", b"1 0 obj\n<< /Type /Pages /Count %d >>\nendobj\n" % pages]
+            + [
+                b"%d 0 obj\n<< /Type /Page >>\nendobj\n" % (index + 2)
+                for index in range(pages)
+            ]
+        )
+
+    def _run(payload: bytes, *, descent: ArchiveDescent = ArchiveDescent.FULL,
+             budget: DescentBudget | None = None):
+        observations: list[ArchiveObservation] = []
+        members: list[CorpusMember] = []
+        errors: list[str] = []
+        ingested: list[str] = []
+
+        def _ingest(task) -> MemberOutcome:
+            ingested.append(task.member_path)
+            return MemberOutcome(doc_id=f"doc:{task.member_path}",
+                                 content_hash="h" * 64)
+
+        walker = ArchiveDescentWalker(
+            product_id="p",
+            root_url="https://h/bundle.zip",
+            descent=descent,
+            budget=budget or DescentBudget(max_member_bytes=1024 * 1024),
+            container_for=container_for,
+            ingest_member=_ingest,
+            observations=observations,
+            members=members,
+            errors=errors,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "archive.bin"
+            path.write_bytes(payload)
+            observation = walker.descend(
+                archive_path=path,
+                archive_url="https://h/bundle.zip",
+                archive_content_hash="a" * 64,
+            )
+        return observation, observations, members, errors, ingested
+
+    archive = _zip(
+        {
+            "docs/manual.pdf": _pdf(3),
+            "notes/readme.md": b"# hello\n",
+            "img/logo.png": b"\x89PNG\r\n\x1a\n" + bytes(8),
+        }
+    )
+    with tempfile.TemporaryDirectory() as directory:
+        path = Path(directory) / "archive.zip"
+        path.write_bytes(archive)
+        _assert(pdf_page_count(path) is None)  # не PDF — счётчика нет
+        probe = probe_artifact(path, product_id="p", url="https://h/bundle.zip",
+                               container_for=container_for)
+        _assert(probe.is_container and probe.artifact.format == "zip")
+        _assert(probe.container is not None and probe.container["members_total"] == 3)
+        pdf_path = Path(directory) / "doc.pdf"
+        pdf_path.write_bytes(_pdf(3))
+        _assert(pdf_page_count(pdf_path) == 3)
+
+    observation, observations, members, errors, ingested = _run(archive)
+    _assert(observation.status is ArchiveDescentStatus.DESCENDED)
+    # Прогноз — до извлечения: 3 записи, 2 приняты, png пропущен с причиной.
+    _assert(observation.forecast["members_total"] == 3)
+    _assert(observation.forecast["members_accepted"] == 2)
+    _assert(observation.forecast["formats"] == {".md": 1, ".pdf": 1})
+    _assert(observation.outcome["skipped"]["not_ingestible_format"]["examples"]
+            == ["img/logo.png"])
+    _assert(sorted(ingested) == ["docs/manual.pdf", "notes/readme.md"])
+    _assert(len(members) == 2 and all(row.doc_id for row in members))
+    _assert(not errors)
+
+    # plan: листинг и прогноз есть, членов нет.
+    planned, _obs, planned_members, _errors, planned_ingested = _run(
+        archive, descent=ArchiveDescent.PLAN
+    )
+    _assert(planned.status is ArchiveDescentStatus.PLANNED)
+    _assert(planned.forecast["members_accepted"] == 2)
+    _assert(planned_members == [] and planned_ingested == [])
+
+    # Битый архив — видимый unreadable, не исключение.
+    broken, _obs, _members, broken_errors, _ingested = _run(b"PK\x03\x04" + bytes(64))
+    _assert(broken.status is ArchiveDescentStatus.UNREADABLE)
+    _assert(broken.reason and broken_errors)
+
+    # Цикл: тот же вложенный архив дважды — второй раз не разворачивается.
+    inner = _zip({"x.md": b"x"})
+    looped, loop_observations, _members, _errors, loop_ingested = _run(
+        _zip({"a/inner.zip": inner, "b/inner.zip": inner})
+    )
+    _assert(looped.outcome["cycle_stops"] == 1)
+    _assert(loop_ingested == ["x.md"])  # спуск внутрь исполнен ровно один раз
+    _assert([item.depth for item in loop_observations].count(1) == 1)
+
+    # Кумулятивный бюджет корня: остановка видима, а не «молча закончилось».
+    budgeted, _obs, _members, budget_errors, _ingested = _run(
+        _zip({"a.txt": b"A" * 1024, "b.txt": b"B" * 1024}),
+        budget=DescentBudget(max_member_bytes=1024 * 1024,
+                             max_total_uncompressed_bytes=1024),
+    )
+    _assert(budgeted.status is ArchiveDescentStatus.BUDGET_EXHAUSTED)
+    _assert(budgeted.outcome["stopped_reason"] == "archive_budget_exhausted")
+    _assert(any("archive_budget_exhausted" in error for error in budget_errors))
+
+
 def _lexical_profiles() -> None:
     """Лексический индекс: двойной профиль (stemmed + raw/ngram) и конформность порту."""
     from core.adapters.lexical_tantivy import _PROFILES, TantivyLexicalIndex
@@ -3399,6 +3545,8 @@ def _crawl_archive_axes() -> None:
     _assert(base.archive_max_uncompressed_bytes == 268435456)
     _assert(base.archive_max_members is None)
     _assert(base.archive_descent is ArchiveDescent.FULL)
+    # B3: кумулятивный потолок корня спуска (все уровни вложенности) — 1 GiB.
+    _assert(base.archive_max_total_uncompressed_bytes == 1073741824)
 
     # Дайджест-нейтральность: не заданные оси не появляются в as_dict.
     new_keys = {
@@ -3407,6 +3555,7 @@ def _crawl_archive_axes() -> None:
         "archive_max_member_bytes",
         "archive_max_uncompressed_bytes",
         "archive_max_members",
+        "archive_max_total_uncompressed_bytes",
         "archive_descent",
     }
     _assert(not (new_keys & set(base.as_dict())))
@@ -3419,6 +3568,7 @@ def _crawl_archive_axes() -> None:
         archive_max_member_bytes=512,
         archive_max_uncompressed_bytes=2048,
         archive_max_members=7,
+        archive_max_total_uncompressed_bytes=4096,
         archive_descent=ArchiveDescent.PLAN,
     )
     limits = resolve_crawl_limits("https://h/a", app=app, run=run)
@@ -3427,10 +3577,12 @@ def _crawl_archive_axes() -> None:
     _assert(limits.archive_max_member_bytes == 512)
     _assert(limits.archive_max_uncompressed_bytes == 2048)
     _assert(limits.archive_max_members == 7)
+    _assert(limits.archive_max_total_uncompressed_bytes == 4096)
     _assert(limits.archive_descent is ArchiveDescent.PLAN)
     _assert(new_keys <= set(limits.as_dict()))
     _assert(limits.as_dict()["attachment_formats"] == ["zip", "7z"])
     _assert(limits.as_dict()["archive_descent"] == "plan")
+    _assert(limits.as_dict()["archive_max_total_uncompressed_bytes"] == 4096)
 
     site = resolve_crawl_limits(
         "https://h/a",

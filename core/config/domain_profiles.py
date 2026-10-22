@@ -80,6 +80,9 @@ class DomainProfile(BaseModel):
     archive_max_member_bytes: int | None = Field(default=None, gt=0)
     archive_max_uncompressed_bytes: int | None = Field(default=None, gt=0)
     archive_max_members: int | None = Field(default=None, gt=0)
+    # B3: кумулятивный потолок распакованного объёма на **корень спуска** (байты).
+    # ``None`` = не задано на этом слое (наследуется run/app).
+    archive_max_total_uncompressed_bytes: int | None = Field(default=None, gt=0)
     archive_descent: ArchiveDescent | None = None
     max_depth: int | None = Field(default=None, ge=0)
 

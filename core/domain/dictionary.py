@@ -13,6 +13,7 @@ import yaml
 
 from core.domain.enums import (
     ArchiveDescent,
+    ArchiveDescentStatus,
     CapabilityPolicy,
     ChangeClass,
     CrawlItemStatus,
@@ -82,6 +83,8 @@ def assert_dictionary_integrity(path: str | Path) -> None:
         "document_level",
         # P6: глубина спуска в контейнеры (crawl.archive_descent).
         "archive_descent",
+        # B3: исход спуска в один контейнер (archive_observations.status).
+        "archive_descent_status",
         # Lane B: жизненный цикл сеанса краула и per-URL статус его элемента.
         "crawl_session_status",
         "crawl_item_status",
@@ -123,6 +126,7 @@ def assert_dictionary_integrity(path: str | Path) -> None:
         "crawl_strategy": {v.value for v in CrawlStrategy},
         "document_level": {v.value for v in DocumentLevel},
         "archive_descent": {v.value for v in ArchiveDescent},
+        "archive_descent_status": {v.value for v in ArchiveDescentStatus},
         "crawl_session_status": {v.value for v in CrawlSessionStatus},
         "crawl_item_status": {v.value for v in CrawlItemStatus},
         "skip_reason": {v.value for v in SkipReason},

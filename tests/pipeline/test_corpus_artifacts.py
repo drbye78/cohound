@@ -18,6 +18,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from core.adapters.container_any import container_for
 from core.domain import (
     AnchorRelation,
     CatalogRow,
@@ -252,6 +253,8 @@ def _build(
         raw_root=tmp_path,
         run_id=RUN_ID,
         crawl_defaults=crawl_defaults,
+        # B3: спуск в контейнеры исполняется в фазе; читатель инъектируется (как в wiring).
+        container_for=container_for,
     )
 
 
@@ -288,7 +291,10 @@ def test_staged_artifact_is_retained_byte_identical_without_extraction(
         )
 
         item = _items(store)[ZIP_URL]
-        assert item.status is CrawlItemStatus.FETCHED
+        # B3: спуск **исполняется** (это больше не ``attachment_skip``), но этот
+        # синтетический zip — не архив: индекс нечитаем, исход видимый и блокирующий.
+        assert item.status is CrawlItemStatus.FAILED
+        assert item.error_kind == FailureKind.PARSER_FAILED.value
         # Хеш — потоковый SHA-256 тех же байтов, что лежат в corpus_raw (I19).
         assert item.content_hash == crawler.digest
         assert item.raw_path is not None
@@ -299,16 +305,16 @@ def test_staged_artifact_is_retained_byte_identical_without_extraction(
         assert content_hash(raw.read_bytes()) == crawler.digest
         # Staging-файл переехал (os.replace), а не скопирован: каталог пуст.
         assert not any(staging.iterdir())
-        # Контейнер — не документ: экстрактор не звался, спуск — следующий слой.
+        # Контейнер — не документ: экстрактор не звался; спуск дал видимый unreadable.
         assert extractor.calls == 0
         assert _build_of(result).docs == []
-        assert any("attachment_skip" in e for e in result.errors)
+        assert any("archive_unreadable" in e for e in result.errors)
     finally:
         store.close()
 
 
 def test_small_buffered_container_is_skipped_not_parsed(tmp_path: Path) -> None:
-    """Маленький zip (≤ потолка страницы) — тот же класс: skip по байтам, не парсинг."""
+    """Маленький zip (≤ потолка страницы) — тот же класс: спуск, не парсинг документа."""
     body = ZIP_MAGIC + b"\x14\x00\x00\x00" + bytes(1024)
     crawler = _BufferedCrawler({ZIP_URL: body}, {ZIP_URL: "application/zip"})
     extractor = _Extractor()
@@ -320,10 +326,12 @@ def test_small_buffered_container_is_skipped_not_parsed(tmp_path: Path) -> None:
         )
 
         item = _items(store)[ZIP_URL]
-        assert item.status is CrawlItemStatus.FETCHED
+        # Индекс этого «zip» нечитаем → спуск честно отказывает, а не парсит мусор.
+        assert item.status is CrawlItemStatus.FAILED
+        assert item.error_kind == FailureKind.PARSER_FAILED.value
         assert item.content_hash == content_hash(body)
         assert extractor.calls == 0
-        assert any("attachment_skip" in e for e in result.errors)
+        assert any("archive_unreadable" in e for e in result.errors)
     finally:
         store.close()
 
@@ -345,7 +353,7 @@ def test_ooxml_zip_is_a_document_not_a_container(tmp_path: Path) -> None:
 
         assert extractor.calls == 1
         assert len(_build_of(result).docs) == 1
-        assert not any("attachment_skip" in e for e in result.errors)
+        assert not any("archive_unreadable" in e for e in result.errors)
     finally:
         store.close()
 
@@ -366,10 +374,11 @@ def _retain_large_artifact(tmp_path: Path) -> tuple[SqliteStore, str]:
         tmp_path, crawler=crawler, urls=[ZIP_URL], store=store, extractor=extractor
     )
     item = _items(store)[ZIP_URL]
-    assert item.status is CrawlItemStatus.FETCHED
+    assert item.status is CrawlItemStatus.FAILED
+    assert item.error_kind == FailureKind.PARSER_FAILED.value
     assert item.content_hash == crawler.digest
     assert extractor.calls == 0
-    assert any("attachment_skip" in e for e in result.errors)
+    assert any("archive_unreadable" in e for e in result.errors)
     return store, crawler.digest
 
 
@@ -389,7 +398,10 @@ def test_retained_artifact_resumes_without_fetch(tmp_path: Path) -> None:
         assert crawler.calls == []
         resumed = _items(store)[ZIP_URL]
         # Артефакт вправе быть больше in-memory потолка страницы: класс-aware resume.
-        assert resumed.status is CrawlItemStatus.FETCHED
+        # Спуск (B3) снова исполняется из retained-байтов и честно сообщает unreadable:
+        # синтетический «zip» индексом не является, но это НЕ payload_too_large.
+        assert resumed.status is CrawlItemStatus.FAILED
+        assert resumed.error_kind == FailureKind.PARSER_FAILED.value
         assert resumed.content_hash == digest
         assert resumed.raw_path == str(raw)
         assert raw.is_file()
@@ -548,7 +560,7 @@ def test_staged_pdf_is_retained_and_extracted(tmp_path: Path) -> None:
         assert extractor.sizes == [0]
         assert len(_build_of(result).docs) == 1
         assert not any("payload_too_large" in e for e in result.errors)
-        assert not any("attachment_skip" in e for e in result.errors)
+        assert not any("archive_unreadable" in e for e in result.errors)
     finally:
         store.close()
 
@@ -676,8 +688,9 @@ def test_buffered_artifact_is_not_cut_by_page_ceiling(tmp_path: Path) -> None:
         )
 
         items = _items(store)
-        # Артефакт в памяти принят: потолок — artifact-класс, а не страничный.
-        assert items[ZIP_URL].status is CrawlItemStatus.FETCHED
+        # Артефакт в памяти принят: потолок — artifact-класс, а не страничный. Спуск (B3)
+        # на синтетическом «zip» даёт видимый unreadable — но это не усечение байтов.
+        assert items[ZIP_URL].raw_path is not None
         assert items[ZIP_URL].content_hash == content_hash(big)
         assert not any(
             "payload_too_large" in e and ZIP_URL in e for e in result.errors

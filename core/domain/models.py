@@ -19,6 +19,7 @@ from core.domain.enums import (
     AnchorRelation,
     Archetype,
     ArchiveDescent,
+    ArchiveDescentStatus,
     CellState,
     CrawlItemStatus,
     CrawlSessionStatus,
@@ -122,6 +123,13 @@ DEFAULT_ARCHIVE_MAX_MEMBER_BYTES = 67_108_864
 #: P6: дефолтный потолок суммарного распакованного объёма контейнера — 256 MiB
 #: (измерено 139 661 173 B).
 DEFAULT_ARCHIVE_MAX_UNCOMPRESSED_BYTES = 268_435_456
+
+#: B3: дефолтный **кумулятивный** потолок распакованного объёма на один корень спуска —
+#: 1 GiB. Оси ``archive_max_*`` ограничивают **один** контейнер; без потолка на корень
+#: архив из 10 000 вложенных архивов исчерпывал бы CPU/диск, хотя каждый контейнер по
+#: отдельности «в бюджете». Спуск без ограничения глубины обязан оставаться конечным.
+#: Ось операционная (``execution_change``, §13), а не методологическая.
+DEFAULT_ARCHIVE_MAX_TOTAL_UNCOMPRESSED_BYTES = 1_073_741_824
 
 
 
@@ -443,6 +451,9 @@ class CrawlRunConfig(BaseModel):
     archive_max_member_bytes: int | None = Field(default=None, gt=0)
     archive_max_uncompressed_bytes: int | None = Field(default=None, gt=0)
     archive_max_members: int | None = Field(default=None, gt=0)
+    #: B3: кумулятивный потолок распакованного объёма **на корень спуска** (байты).
+    #: ``None`` — наследовать app-слой. Ось операционная (``execution_change``, §13).
+    archive_max_total_uncompressed_bytes: int | None = Field(default=None, gt=0)
     archive_descent: ArchiveDescent | None = None
     max_depth: int | None = Field(default=None, ge=0)
 
@@ -1070,6 +1081,73 @@ class CorpusDoc(BaseModel):
     extractor_version: str | None = None
     render_mode: str | None = None
     lang: str | None = None
+
+
+class CorpusMember(BaseModel):
+    """Строка ``corpus_members`` (B3): член контейнера — **производный** вид архива.
+
+    Идентичность — ``(archive_content_hash, member_path)`` (§6.7): байты члена отдельно
+    не ретейнятся (архив — сырьё, I19), член ре-выводится из ретейленного архива тем же
+    ``open_member``. ``member_path`` — **нормализованный** путь
+    (:func:`core.util.container_policy.normalize_member_path`), ``archive_path`` — путь
+    ретейленного архива, ``doc_id`` — документ корпуса, если член ингестнут.
+
+    ``skip_reason`` заполнен ⟺ член **не** ингестнут (``doc_id is None``): видимый пропуск
+    с причиной вместо тихого исчезновения. ``extracted_content_hash`` — хеш извлечённого
+    текста (тот же, что у ``CorpusDoc``), а не байтов члена.
+    """
+
+    model_config = _BASE
+
+    archive_content_hash: str
+    member_path: str
+    product_id: str
+    run_id: str | None = None
+    #: Корень спуска (URL, которым архив был допущен в корпус).
+    root_url: str | None = None
+    archive_url: str | None = None
+    archive_path: str | None = None
+    #: Синтетический URL члена (``{archive_url}!/{member_path}``) — адрес провенанса.
+    member_url: str | None = None
+    member_format: str | None = None
+    declared_size: int | None = None
+    extracted_content_hash: str | None = None
+    doc_id: str | None = None
+    skip_reason: str | None = None
+    depth: int = 0
+    created_at: str | None = None
+
+
+class ArchiveObservation(BaseModel):
+    """Строка ``archive_observations`` (B3): спуск в контейнер — прогноз и исход.
+
+    Запись существует для **каждого** контейнера, включая пустой и нечитаемый: «спуск
+    ничего не дал» — факт, который обязан быть так же виден, как «спуск дал десять
+    документов». ``forecast`` фиксируется **до** извлечения членов
+    (:func:`core.util.container_policy.archive_forecast`) и переживает отказ посреди
+    спуска; ``outcome`` — что реально произошло (ингестнуто/пропущено по причинам,
+    сработавший бюджет, остановка по циклу).
+
+    ``observation_id`` — детерминированный отпечаток (прогон + продукт + корень + архив +
+    глубина): повторный спуск того же архива не плодит строки.
+    """
+
+    model_config = _BASE
+
+    observation_id: str
+    run_id: str | None = None
+    product_id: str
+    root_url: str
+    archive_url: str
+    archive_content_hash: str
+    archive_path: str | None = None
+    depth: int = 0
+    descent: ArchiveDescent = ArchiveDescent.FULL
+    status: ArchiveDescentStatus
+    forecast: dict[str, Any] = Field(default_factory=dict)
+    outcome: dict[str, Any] = Field(default_factory=dict)
+    reason: str | None = None
+    created_at: str | None = None
 
 
 class CorpusChunk(BaseModel):

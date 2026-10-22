@@ -34,6 +34,7 @@ from pathlib import Path
 from typing import Any
 
 from core.adapters.chunker_family import FamilyChunker
+from core.adapters.container_any import container_for
 from core.adapters.crawl_browser import BrowserCrawler
 from core.adapters.crawl_http import HttpCrawler
 from core.adapters.crawl_scrapy import CrawlError, ScrapyCrawler
@@ -1472,6 +1473,10 @@ class _LocalExtractor:
     бросает исключений на уровне извлечения.
     """
 
+    #: B3: композит читает локальные байты (``page.source_path`` → ``extract_path``),
+    #: поэтому пригоден для членов контейнеров (спуск идёт в ядре и в ``split``).
+    supports_source_path = True
+
     def __init__(
         self,
         html: ExtractorPort,
@@ -1800,6 +1805,10 @@ def _build_local_ports(
         crawlers=crawlers,
         # Phase 5.1: карта ``kind → PollPort`` для опроса фидов/каналов в Ш5.
         pollers=pollers,
+        # B3: спуск в контейнеры — читатель по голове файла (stdlib zip / py7zr / rarfile).
+        # Это не веб-эгресс: листинг и стриминг членов читают **локальный** ретейленный
+        # файл, поэтому и в ``split`` спуск исполняется в ядре (архив живёт в corpus_raw).
+        container=container_for,
         search=None,
         vector_index=resolved_vector_index,
     )
@@ -2092,6 +2101,11 @@ def build_adapters(
                 adapter_kind=(config.search.adapter or "remote"),
                 provider="edge",
             ),
+            # B3: спуск в контейнеры остаётся в ядре и в ``split``: байты архива лежат на
+            # стороне ядра (``corpus_raw``), а читатель — локальный (листинг/стриминг
+            # файла, не веб-эгресс). Извлечение членов в DMZ швом не покрыто (``/v1/fetch``
+            # работает по URL) — такой член получает видимый пропуск ``extract_unavailable``.
+            container=container_for,
             extractor=RemoteExtractor(content_gateway),
             registry=RemoteRegistry(content_gateway, registry_id=registry_id),
             registry_fetchers=split_registry_fetchers or None,

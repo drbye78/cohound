@@ -50,6 +50,7 @@ from typing import Any, Literal, Protocol, runtime_checkable
 
 from core.domain import Cell, Gate, SkipReason
 from core.ports.chunker import ChunkerPort
+from core.ports.container import ContainerPort
 from core.ports.crawl_executor import CrawlExecutorPort
 from core.ports.crawler import CrawlerPort
 from core.ports.embedder import EmbedderPort
@@ -202,6 +203,10 @@ class Ports:
     pollers: Mapping[str, PollPort] | None = None
     extractor: ExtractorPort | None = None
     chunker: ChunkerPort | None = None
+    #: B3: инъекция читателя контейнеров — ``Callable[[path], ContainerPort | None]``
+    #: (composition root передаёт ``core.adapters.container_any.container_for``). Фаза
+    #: корпуса не импортирует адаптеры: читатель — такой же внешний порт, как краулер.
+    container: Callable[[Any], ContainerPort | None] | None = None
     registry: RegistryFetcherPort | None = None
     registry_fetchers: Mapping[str, RegistryFetcherPort] | None = None
     registry_spec_digest: str | None = None

@@ -33,6 +33,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from core.domain.enums import ArchiveDescent, DocumentLevel
 from core.domain.models import (
     DEFAULT_ARCHIVE_MAX_MEMBER_BYTES,
+    DEFAULT_ARCHIVE_MAX_TOTAL_UNCOMPRESSED_BYTES,
     DEFAULT_ARCHIVE_MAX_UNCOMPRESSED_BYTES,
     DEFAULT_MAX_ARTIFACT_BYTES,
     DEFAULT_MAX_RESPONSE_BYTES,
@@ -388,6 +389,13 @@ class CrawlConfig(BaseModel):
         default=DEFAULT_ARCHIVE_MAX_UNCOMPRESSED_BYTES, gt=0
     )
     archive_max_members: int | None = Field(default=None, gt=0)
+    # B3: кумулятивный потолок распакованного объёма на **корень спуска** (все уровни
+    # вложенности), байты. Спуск без потолка глубины обязан оставаться конечным: оси
+    # ``archive_max_*`` ограничивают один контейнер, эта — весь корень. Операционная ось
+    # (``execution_change``, §13).
+    archive_max_total_uncompressed_bytes: int = Field(
+        default=DEFAULT_ARCHIVE_MAX_TOTAL_UNCOMPRESSED_BYTES, gt=0
+    )
     archive_descent: ArchiveDescent = ArchiveDescent.FULL
     max_depth: int = Field(default=0, ge=0)
 

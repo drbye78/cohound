@@ -261,6 +261,10 @@ class DoclingDocumentExtractor:
     #: Классовый дефолт = уровень ``full`` (совпадает с ``DoclingDocumentExtractor().version``).
     version = "docling-doc-3:full"
 
+    #: B3: адаптер извлекает документ по **пути** к локальному файлу (``page.source_path``),
+    #: поэтому пригоден для членов контейнеров: спуск отдаёт временный файл, а не буфер.
+    supports_source_path = True
+
     def __init__(
         self,
         level: DocumentLevel = DocumentLevel.FULL,

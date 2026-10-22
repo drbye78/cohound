@@ -346,6 +346,31 @@ class ArchiveDescent(StrEnum):
     FULL = "full"
 
 
+class ArchiveDescentStatus(StrEnum):
+    """Исход спуска в **один** контейнер (строка ``archive_observations``, B3).
+
+    Запись пишется **всегда** — и когда спуск что-то достал, и когда не достал ничего:
+    «контейнер без членов» обязан быть так же виден, как «контейнер с десятью».
+
+    * ``planned`` — ``archive_descent=plan``: состав прочитан по индексу, члены не
+      извлекались (листинг + прогноз — весь результат);
+    * ``descended`` — спуск исполнен (``full``): прогноз записан, члены обработаны
+      (сколько ингестнуто/пропущено — в ``outcome``);
+    * ``unreadable`` — индекс контейнера не прочитан (битый файл, нет бэкенда, читатель
+      не подключён): видимый пропуск, а не «пустой контейнер»;
+    * ``budget_exhausted`` — кумулятивный бюджет корня спуска исчерпан: спуск остановлен
+      **видимо** (``outcome.stopped_reason``), а не «молча закончился».
+
+    Операционное перечисление (commodity-слой, A2). Источник истины —
+    ``docs/status-dictionary.yaml`` (секция ``archive_descent_status``).
+    """
+
+    PLANNED = "planned"
+    DESCENDED = "descended"
+    UNREADABLE = "unreadable"
+    BUDGET_EXHAUSTED = "budget_exhausted"
+
+
 class CrawlStrategy(StrEnum):
     """Ось стратегии краула: **как** используется браузер **при browser-capable адаптере**.
 

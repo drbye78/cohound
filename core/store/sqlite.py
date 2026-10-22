@@ -12,7 +12,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = "3.9.0"
+SCHEMA_VERSION = "3.10.0"
 
 DDL = """
 PRAGMA journal_mode = WAL;
@@ -316,8 +316,56 @@ CREATE TABLE IF NOT EXISTS corpus_coverage (
     PRIMARY KEY (run_id, product_id)
 );
 
-CREATE INDEX IF NOT EXISTS idx_cells_run_state  ON cells(run_id, state);
-CREATE INDEX IF NOT EXISTS idx_chunks_product   ON corpus_chunks(product_id);
+-- B3 (schema 3.10.0): члены контейнеров — **производный** вид ретейленного архива (§6.7).
+-- Байты членов отдельно не хранятся: архив — сырьё (I19), член ре-выводится из него тем
+-- же ``open_member`` по ``archive_path``. Идентичность — ``(archive_content_hash,
+-- member_path)``; ``member_path`` нормализован (container_policy.normalize_member_path).
+-- ``skip_reason`` заполнен ⟺ член не ингестнут (``doc_id`` NULL) — видимый пропуск.
+CREATE TABLE IF NOT EXISTS corpus_members (
+    archive_content_hash  TEXT NOT NULL,
+    member_path           TEXT NOT NULL,
+    product_id            TEXT NOT NULL,
+    run_id                TEXT,
+    root_url              TEXT,                       -- корень спуска
+    archive_url           TEXT,
+    archive_path          TEXT,                       -- ретейленный архив (corpus_raw)
+    member_url            TEXT,                       -- {archive_url}!/{member_path}
+    member_format         TEXT,                       -- суффикс без точки / формат архива
+    declared_size         INTEGER,                    -- заявленный размер из индекса
+    extracted_content_hash TEXT,                      -- хеш извлечённого текста (не байтов)
+    doc_id                TEXT,                       -- corpus_docs.doc_id, если ингестнут
+    skip_reason           TEXT,                       -- причина, если не ингестнут
+    depth                 INTEGER NOT NULL DEFAULT 0, -- уровень вложенности (0 — корень)
+    created_at            TEXT,
+    PRIMARY KEY (archive_content_hash, member_path)
+);
+
+CREATE INDEX IF NOT EXISTS idx_corpus_members_product ON corpus_members(product_id);
+CREATE INDEX IF NOT EXISTS idx_corpus_members_doc     ON corpus_members(doc_id);
+
+-- B3 (schema 3.10.0): наблюдения спуска — прогноз (до извлечения) + исход.
+-- Запись существует для **каждого** контейнера, включая пустой и нечитаемый: «спуск
+-- ничего не дал» обязан быть так же виден, как «спуск дал десять документов».
+CREATE TABLE IF NOT EXISTS archive_observations (
+    observation_id        TEXT PRIMARY KEY,           -- детерминированный (run|product|root|hash|depth)
+    run_id                TEXT,
+    product_id            TEXT NOT NULL,
+    root_url              TEXT NOT NULL,
+    archive_url           TEXT NOT NULL,
+    archive_content_hash  TEXT NOT NULL,
+    archive_path          TEXT,
+    depth                 INTEGER NOT NULL DEFAULT 0,
+    descent               TEXT NOT NULL,              -- plan|full
+    status                TEXT NOT NULL,              -- ArchiveDescentStatus
+    forecast_json         TEXT NOT NULL DEFAULT '{}',
+    outcome_json          TEXT NOT NULL DEFAULT '{}',
+    reason                TEXT,
+    created_at            TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_archive_observations_run ON archive_observations(run_id);
+
+CREATE INDEX IF NOT EXISTS idx_cells_run_state  ON cells(run_id, state);CREATE INDEX IF NOT EXISTS idx_chunks_product   ON corpus_chunks(product_id);
 CREATE INDEX IF NOT EXISTS idx_chunks_build     ON corpus_chunks(build_id);
 CREATE INDEX IF NOT EXISTS idx_log_run_phase    ON search_log(run_id, phase);
 CREATE INDEX IF NOT EXISTS idx_evidence_run_cell ON cell_evidence(run_id, product_id, param_id);

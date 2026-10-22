@@ -137,9 +137,12 @@ from core.config.domain_profiles import DomainProfile
 from core.config.seeds import normalize_seed_url
 from core.domain import (
     BLOCKING_FAILURE_KINDS,
+    ArchiveDescentStatus,
+    ArchiveObservation,
     CorpusChunk,
     CorpusCoverage,
     CorpusDoc,
+    CorpusMember,
     CrawlItemStatus,
     CrawlRunConfig,
     CrawlSessionItem,
@@ -160,6 +163,15 @@ from core.pipeline.crawl_frontier import (
     is_blacklisted,
     resolve_crawl_limits,
 )
+from core.pipeline.archive_descent import (
+    ArchiveDescentWalker,
+    DescentBudget,
+    MemberOutcome,
+    MemberTask,
+    SKIP_EXTRACT_FAILED,
+    SKIP_EXTRACT_UNAVAILABLE,
+)
+from core.pipeline.artifact_probe import probe_artifact
 from core.pipeline.crawl_session import (
     default_session_id,
     finalize_session,
@@ -187,6 +199,7 @@ from core.pipeline.incremental import (
 )
 from core.pipeline.runner import PhaseResult
 from core.ports.chunker import ChunkerPort
+from core.ports.container import ContainerPort
 from core.ports.crawl_executor import (
     ACTIVE_JOB_STATUSES,
     CrawlExecutorPort,
@@ -216,11 +229,9 @@ from core.ports.types import (
 )
 from core.util.document_formats import (
     BINARY_SNIFF_BYTES,
-    classify_archive_bytes,
+    DOCUMENT_SUFFIXES,
     document_content_type,
     document_suffix,
-    is_attachment_content_type,
-    is_attachment_url,
     is_terminal_artifact,
     unsupported_binary_reason,
 )
@@ -1706,25 +1717,6 @@ def _publish_staged(staged: Path, target: Path) -> None:
     staged.unlink(missing_ok=True)
 
 
-def _is_attachment(
-    url: str | None,
-    content_type: str | None,
-    attachment_formats: Sequence[str] | None,
-) -> bool:
-    """Класс «артефакт-**контейнер**» по URL-суффиксу либо ``Content-Type`` (P6).
-
-    Это **контейнерная** половина класса (``zip``/``7z``/``rar``): решение о спуске в
-    члены. Документ (``pdf``/``docx``/``pptx``/``xlsx``) сюда **не** входит — его судьбу
-    решает экстрактор, а не спуск. Для допуска/потолков см. :func:`_is_terminal_artifact`.
-
-    ``attachment_formats=None`` — дефолт всех поддерживаемых форматов (так резолвится
-    конфиг); пустой набор — контейнеров не заявлено, класс не определяется.
-    """
-    if is_attachment_url(url or "", attachment_formats):
-        return True
-    return is_attachment_content_type(content_type, attachment_formats)
-
-
 def _is_terminal_artifact(
     url: str | None,
     content_type: str | None,
@@ -1940,6 +1932,183 @@ def _resume_page(
 # --------------------------------------------------------------------------- #
 
 
+#: Маршрут извлечения члена по суффиксу: документы — ``document``, разметка — ``auto``
+#: (``auto`` сам роутит HTML/markdown; ``html`` намеренно не форсируется — A1).
+_DOCUMENT_SUFFIX_SET: frozenset[str] = frozenset(DOCUMENT_SUFFIXES)
+
+#: ``Content-Type`` члена по суффиксу — для экстрактора и провенанса (данные, не эвристика).
+_MEMBER_CONTENT_TYPES: dict[str, str] = {
+    ".pdf": "application/pdf",
+    ".docx": (
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    ),
+    ".pptx": (
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+    ),
+    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ".md": "text/markdown",
+    ".markdown": "text/markdown",
+    ".txt": "text/plain",
+    ".html": "text/html",
+    ".htm": "text/html",
+}
+
+
+def _member_route(suffix: str) -> ExtractionRoute:
+    """Маршрут извлечения члена по **его собственному** суффиксу (не по суффиксу архива)."""
+    return (
+        ExtractionRoute.DOCUMENT
+        if suffix.lower() in _DOCUMENT_SUFFIX_SET
+        else ExtractionRoute.AUTO
+    )
+
+
+def _ingest_member_doc(
+    task: MemberTask,
+    *,
+    extractor: ExtractorPort,
+    chunker: ChunkerPort,
+    ingest: _ProductIngest,
+    seen_docs: dict[str, str],
+    seen_chunk_ids: set[str],
+    errors: list[str],
+    store: Any,
+    level: DocumentLevel,
+    fetched_at: str,
+    lang: str | None,
+    artifact_probes: list[dict[str, Any]],
+) -> MemberOutcome:
+    """Член контейнера → документ корпуса (``CorpusDoc`` + чанки) или видимый пропуск.
+
+    **Байты члена не ретейнятся** (§6.7): ``task.temp_path`` — временный файл, который
+    спуск удаляет сразу после возврата. ``CorpusDoc.raw_path`` поэтому указывает на
+    **архив** (сырьё I19), а не на член: член ре-выводится из архива тем же
+    ``open_member``. ``CorpusDoc.url`` — синтетический ``{archive_url}!/{member_path}``.
+
+    **Маршрут** — по суффиксу самого члена (pdf → ``document``, md/html → ``auto``), а не
+    по маршруту архива: у контейнера маршрута извлечения нет.
+
+    **``split``.** Экстрактор шва (``RemoteExtractor``) работает по URL и локальные байты
+    не принимает. Такой член не извлекается **молча**: возвращается видимый пропуск
+    ``extract_unavailable`` с причиной (капитуляция явная, не тихая).
+
+    Дедуп — по ``content_hash`` в пределах продукта (I17), как у страниц: повтор
+    перепечатки внутри архива не индексируется дважды, но член остаётся в
+    ``corpus_members`` со ссылкой на уже существующий ``doc_id``.
+    """
+    if not getattr(extractor, "supports_source_path", False):
+        return MemberOutcome(
+            skip_reason=SKIP_EXTRACT_UNAVAILABLE,
+            detail=(
+                "экстрактор не принимает локальные байты (split: DMZ-путь по URL) — "
+                "член контейнера не извлечён; нужен шов извлечения по источнику"
+            ),
+        )
+    suffix = task.suffix.lower()
+    # Зонд члена — та же классификация, что у артефакта верхнего уровня (класс/формат/
+    # размер/``page_count`` PDF): «сколько страниц в PDF-члене» видно без извлечения.
+    artifact_probes.append(
+        probe_artifact(
+            task.temp_path,
+            product_id=task.product_id,
+            url=task.member_url,
+            content_type=_MEMBER_CONTENT_TYPES.get(suffix),
+            container_for=None,
+        ).as_dict()
+    )
+    page = RawPage(
+        url=task.member_url,
+        content=b"",
+        fetched_at=fetched_at,
+        fetch_mode=FetchMode.HTTP,
+        content_type=_MEMBER_CONTENT_TYPES.get(suffix),
+        lang=lang,
+        source_path=task.temp_path,
+    )
+    try:
+        extracted = extractor.extract(page, _member_route(suffix))
+    except Exception as exc:  # noqa: BLE001 — отказ члена изолируется (контракт фазы)
+        return MemberOutcome(
+            skip_reason=SKIP_EXTRACT_FAILED,
+            detail=f"{type(exc).__name__}: {exc}",
+        )
+    if extracted is None or getattr(extracted, "error", None):
+        return MemberOutcome(
+            skip_reason=SKIP_EXTRACT_FAILED,
+            detail=str(getattr(extracted, "error", None) or "пустой ExtractedDoc"),
+        )
+    doc_hash = str(getattr(extracted, "content_hash", "") or "")
+    if not doc_hash:
+        return MemberOutcome(
+            skip_reason=SKIP_EXTRACT_FAILED,
+            detail="I19: ExtractedDoc без content_hash — отклонён",
+        )
+    document_id = f"{task.product_id}:{doc_hash}"
+    if doc_hash in seen_docs:
+        # Тот же текст уже в партиции: член остаётся в corpus_members, но нового
+        # документа/чанков не появляется (I17: повтор перепечатки не индексируется).
+        return MemberOutcome(doc_id=document_id, content_hash=doc_hash)
+    seen_docs[doc_hash] = task.member_url
+
+    doc = CorpusDoc(
+        doc_id=document_id,
+        product_id=task.product_id,
+        url=task.member_url,
+        fetched_at=fetched_at,
+        content_hash=doc_hash,
+        # Архив — сырьё (I19); байты члена отдельно не ретейнятся (§6.7).
+        raw_path=task.archive_path,
+        extractor_version=str(getattr(extracted, "extractor_version", None) or "") or None,
+        render_mode=_as_text(FetchMode.HTTP),
+        lang=lang,
+    )
+    ingest.docs.append(doc)
+    _persist_docs(store, [doc], errors)
+
+    try:
+        chunks = chunker.chunk(extracted, document_id)
+    except Exception as exc:  # noqa: BLE001 — сбой нарезки не отменяет документ
+        errors.append(
+            f"{task.product_id}/{task.member_url}: chunk: {type(exc).__name__}: {exc}"
+        )
+        return MemberOutcome(doc_id=document_id, content_hash=doc_hash)
+
+    for chunk in sorted(chunks or [], key=lambda c: getattr(c, "chunk_no", 0)):
+        chunk_no = int(getattr(chunk, "chunk_no", 0))
+        text = getattr(chunk, "text", "") or ""
+        provided_hash = str(getattr(chunk, "content_hash", "") or "").strip()
+        # I19: у каждого индексируемого чанка обязан быть непустой hash (как у страниц).
+        if not provided_hash:
+            errors.append(f"I19: {document_id}: чанк без content_hash отклонён")
+            continue
+        if not text.strip():
+            errors.append(f"I19: {document_id}: чанк с пустым текстом отклонён")
+            continue
+        cid = _chunk_id(task.product_id, doc_hash, chunk_no)
+        if cid in seen_chunk_ids:
+            errors.append(f"{document_id}: дублирующийся chunk_id {cid!r} отклонён")
+            continue
+        seen_chunk_ids.add(cid)
+        ingest.chunks.append(
+            CorpusChunk(
+                chunk_id=cid,
+                doc_id=document_id,
+                product_id=task.product_id,
+                url=task.member_url,
+                heading_path=getattr(chunk, "heading_path", "") or "",
+                lang=lang,
+                chunk_no=chunk_no,
+                text=text,
+                context_prefix=getattr(chunk, "context_prefix", "") or "",
+                content_hash=content_hash(text),
+                build_id=None,
+                embed_model_id=None,
+                embedded_at=None,
+            )
+        )
+    return MemberOutcome(doc_id=document_id, content_hash=doc_hash)
+
+
 def _build_corpus(
     plan: Any,
     crawler: CrawlerPort,
@@ -1979,6 +2148,7 @@ def _build_corpus(
     state: ProductStatePort | None = None,
     product_modes: Mapping[str, str] | None = None,
     refresh_policy: str = "auto",
+    container_for: Callable[[str | Path], ContainerPort | None] | None = None,
     pools: _ExtractPools,
 ) -> PhaseResult:
     """Ш5: собирает корпус из ``plan × urls`` и возвращает ``PhaseResult``.
@@ -2129,6 +2299,12 @@ def _build_corpus(
         GET (валидаторы не отправляются); ``offline`` — известные URL без сети, но
         переиспользование ``reuse`` в этом срезе **не реализовано** (видимая ошибка на
         продукт, элемент обрабатывается как ``revalidate``).
+    :param container_for: B3 — инъекция читателя контейнеров
+        (``Callable[[path], ContainerPort | None]``; composition root передаёт
+        ``core.adapters.container_any.container_for``). ``None`` → спуск не исполняется, но
+        **видимо**: каждый допущенный контейнер получает запись ``archive_observations``
+        со статусом ``unreadable`` и причиной ``container_reader_unavailable`` (тихий
+        пропуск запрещён).
 
     Возвращает ``PhaseResult`` со ``status='ok'`` (даже при изолированных ошибках),
     ``cells=[]`` (Ш5 не производит ячеек) и ``log_entries=[IndexBuild]`` (сборка + счётчики).
@@ -4404,6 +4580,13 @@ def _build_corpus(
             bool(deferred),
         )
 
+    #: B3: наблюдения спуска (прогноз + исход) и члены контейнеров — провенанс фазы.
+    #: Накапливаются здесь и персистятся в конце (``archive_observations``/``corpus_members``).
+    archive_observations: list[ArchiveObservation] = []
+    corpus_member_rows: list[CorpusMember] = []
+    #: B3: зонд артефактов (класс/формат/размер/``page_count``/листинг) — до экстракции.
+    artifact_probes: list[dict[str, Any]] = []
+
     for product_id in products:
         ingest = _ProductIngest(product_id=product_id)
         # I17: дедуп в пределах продукт-партиции (см. docstring модуля).
@@ -4758,6 +4941,79 @@ def _build_corpus(
                     targets[(pid, url)] = target
                 return target
 
+            def _descend_container(
+                pid: str,
+                work_url: str,
+                page: RawPage,
+                raw_path: Path,
+            ) -> None:
+                """B3: спуск в ретейнённый контейнер (``plan`` — только листинг и прогноз).
+
+                Байты архива уже в ``corpus_raw`` (I19); спуск читает **индекс** и стримит
+                принятых членов по одному во временный файл. Каждый контейнер получает
+                запись ``archive_observations`` — и пустой тоже: «спуск ничего не дал» не
+                имеет права быть тише, чем «спуск дал десять документов».
+
+                **Нечитаемый контейнер — блокирующий класс покрытия.** Если индекс не
+                прочитан (битый файл, нет бэкенда, читатель не подключён), содержимое
+                осталось ненаблюдённым, поэтому элемент помечается ``FAILED`` с
+                существующим классом ``parser_failed`` (новый ``failure_kind`` не вводится,
+                §2.3): ``❌`` на таком корпусе не был бы доказательством отсутствия.
+                ``raw_path`` сохраняется — следующий прогон повторит спуск из тех же байтов.
+                """
+                archive_url = page.url or work_url
+                #: Идентичность архива — хеш ретейненных байтов; ``_retain`` называет файл
+                #: ``{sha256}.bin``, поэтому ``stem`` и есть этот хеш (I19).
+                archive_hash = raw_path.stem
+                walker = ArchiveDescentWalker(
+                    product_id=pid,
+                    root_url=archive_url,
+                    descent=limits.archive_descent,
+                    budget=DescentBudget(
+                        max_member_bytes=limits.archive_max_member_bytes,
+                        max_uncompressed_bytes=limits.archive_max_uncompressed_bytes,
+                        max_members=limits.archive_max_members,
+                        max_total_uncompressed_bytes=(
+                            limits.archive_max_total_uncompressed_bytes
+                        ),
+                    ),
+                    container_for=container_for,
+                    ingest_member=lambda task: _ingest_member_doc(
+                        task,
+                        extractor=root_extractor,
+                        chunker=chunker,
+                        ingest=ingest,
+                        seen_docs=seen_docs,
+                        seen_chunk_ids=seen_chunk_ids,
+                        errors=errors,
+                        store=store,
+                        level=level,
+                        fetched_at=page.fetched_at,
+                        lang=page.lang,
+                        artifact_probes=artifact_probes,
+                    ),
+                    observations=archive_observations,
+                    members=corpus_member_rows,
+                    errors=errors,
+                    run_id=run_id,
+                    created_at=_now_iso(),
+                )
+                observation = walker.descend(
+                    archive_path=raw_path,
+                    archive_url=archive_url,
+                    archive_content_hash=archive_hash,
+                )
+                if observation.status is ArchiveDescentStatus.UNREADABLE:
+                    reason = f"archive_unreadable: {observation.reason}"
+                    _mark(
+                        pid,
+                        work_url,
+                        CrawlItemStatus.FAILED,
+                        error_kind=FailureKind.PARSER_FAILED.value,
+                        error=reason,
+                        raw_path=str(raw_path),
+                    )
+
             def _commit_outcome(
                 pid: str,
                 work_url: str,
@@ -4801,29 +5057,29 @@ def _build_corpus(
                     _record_document_skip(work_url, "content_type")
                     _emit_progress()
                     return
-                # P6: допущенный артефакт-контейнер ретейнён, но спуск в контейнеры —
-                # следующий слой (``ContainerPort``/``corpus_members``). Экстрактор на
-                # пустом ``content`` (staging) дал бы ложный ``parser_failed``: контейнер —
-                # не документ. Поэтому исход — видимый skip: элемент остаётся ``FETCHED``
-                # (байты — evidence I19), причина — в ``errors``. Класс определяется
-                # **байтами** (``classify_archive_bytes``: OOXML — документ, не контейнер)
-                # и заявленным набором осей; до спуска ни один байт контейнера не читается
-                # в RAM сверх головы (``head``/первые 8 KiB).
-                if (
-                    _is_attachment(
-                        page.url or work_url,
-                        page.content_type,
-                        fetch_plan.attachment_formats,
-                    )
-                    and classify_archive_bytes(page.content or page.head or b"")
-                    is not None
+                # B3: допущенный терминальный артефакт (документ **или** контейнер) проходит
+                # **зонд** до экстракции: класс/формат/размер по байтам, ``page_count`` PDF
+                # по структуре файла, листинг контейнера — по индексу (central directory).
+                # Зонд — классификация, а не извлечение: тела членов он не читает.
+                if _is_terminal_artifact(
+                    page.url or work_url,
+                    page.content_type,
+                    fetch_plan.attachment_formats,
                 ):
-                    errors.append(
-                        f"{pid}/{work_url}: attachment_skip: контейнер ретейнён, "
-                        "спуск не исполняется (текущий слой)"
+                    probe = probe_artifact(
+                        raw_path,
+                        product_id=pid,
+                        url=page.url or work_url,
+                        content_type=page.content_type,
+                        container_for=container_for,
                     )
-                    _emit_progress()
-                    return
+                    artifact_probes.append(probe.as_dict())
+                    if probe.is_container:
+                        # Контейнер — не документ: вместо экстракции исполняется спуск
+                        # (``archive_descent=plan`` — только листинг и прогноз).
+                        _descend_container(pid, work_url, page, raw_path)
+                        _emit_progress()
+                        return
                 if extracted is _INLINE:
                     # 09 §6.3/§9: ``304`` переиспользует версию документа **до**
                     # экстракции (экстрактор/чанкер не вызываются). Неудача reuse
@@ -6200,6 +6456,22 @@ def _build_corpus(
         except Exception as exc:  # noqa: BLE001 — наблюдаемость важнее персистенции
             errors.append(f"crawl_session_counts: {type(exc).__name__}: {exc}")
 
+    # --- B3: персистенция спуска в контейнеры (прогноз/исход + члены) ---------- #
+    # Наблюдение пишется **для каждого** контейнера, включая пустой/нечитаемый; члены —
+    # по идентичности ``(archive_content_hash, member_path)``, поэтому повторный спуск
+    # того же архива не дублирует строки. Сбой записи изолируется в ``errors`` (контракт
+    # фазы): провенанс важнее, но падение фазы — хуже.
+    if store is not None and run_id is not None and archive_observations:
+        try:
+            for observation in archive_observations:
+                store.save_archive_observation(observation)
+        except Exception as exc:  # noqa: BLE001 — изоляция персистенции
+            errors.append(f"archive_observations: {type(exc).__name__}: {exc}")
+        try:
+            store.save_corpus_members(corpus_member_rows)
+        except Exception as exc:  # noqa: BLE001 — изоляция персистенции
+            errors.append(f"corpus_members: {type(exc).__name__}: {exc}")
+
     build = IndexBuild(
         index_build_id=index_build_id,
         entries=entries,
@@ -6224,6 +6496,26 @@ def _build_corpus(
     # (``phases._duplicate_notes`` → ``results[].notes``), не ``errors``: схлопывание
     # одинакового контента легитимно.
     log_entries: list[Any] = [build]
+    # B3: провенанс спуска доступен из результата фазы (и из run DB — таблицы
+    # ``archive_observations``/``corpus_members``). Запись есть даже при нулевом выходе.
+    for observation in archive_observations:
+        log_entries.append(observation.model_dump(mode="json"))
+        log_entries.append(
+            "archive: "
+            f"{observation.archive_url} (depth={observation.depth}): "
+            f"{observation.status.value}, "
+            f"members={observation.outcome.get('members_accepted', 0)}/"
+            f"{observation.outcome.get('members_total', 0)}, "
+            f"ingested={observation.outcome.get('members_ingested', 0)}, "
+            f"skipped={observation.outcome.get('members_skipped', 0)}"
+            + (
+                f", stopped={observation.outcome['stopped_reason']}"
+                if observation.outcome.get("stopped_reason")
+                else ""
+            )
+        )
+    # B3: зонд артефактов (класс/формат/размер/``page_count``/листинг) — до экстракции.
+    log_entries.extend(artifact_probes)
     if revalidation_orphan_total:
         # Наблюдение, не ошибка и не смена статуса (I12): авторский scope разошёлся с
         # тем, что реально накопилось в ``url_state``.

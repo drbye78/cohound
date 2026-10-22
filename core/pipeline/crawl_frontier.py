@@ -52,6 +52,7 @@ from core.config.domain_profiles import DomainProfile
 from core.domain.enums import ArchiveDescent, DocumentLevel
 from core.domain.models import (
     DEFAULT_ARCHIVE_MAX_MEMBER_BYTES,
+    DEFAULT_ARCHIVE_MAX_TOTAL_UNCOMPRESSED_BYTES,
     DEFAULT_ARCHIVE_MAX_UNCOMPRESSED_BYTES,
     DEFAULT_MAX_ARTIFACT_BYTES,
     DEFAULT_MAX_RESPONSE_BYTES,
@@ -125,6 +126,14 @@ class CrawlLimits:
     archive_max_uncompressed_bytes_explicit: bool = False
     archive_max_members: int | None = None
     archive_max_members_explicit: bool = False
+    #: B3: кумулятивный потолок распакованного объёма **на корень спуска** (байты). Оси
+    #: ``archive_max_*`` ограничивают один контейнер; без кумулятивной оси архив из 10 000
+    #: вложенных архивов «в бюджете» каждый исчерпал бы CPU/диск. Ось операционная
+    #: (``execution_change``, §13).
+    archive_max_total_uncompressed_bytes: int = (
+        DEFAULT_ARCHIVE_MAX_TOTAL_UNCOMPRESSED_BYTES
+    )
+    archive_max_total_uncompressed_bytes_explicit: bool = False
     archive_descent: ArchiveDescent = ArchiveDescent.FULL
     archive_descent_explicit: bool = False
     max_depth: int = 0
@@ -180,6 +189,10 @@ class CrawlLimits:
             )
         if self.archive_max_members_explicit and self.archive_max_members is not None:
             payload["archive_max_members"] = self.archive_max_members
+        if self.archive_max_total_uncompressed_bytes_explicit:
+            payload["archive_max_total_uncompressed_bytes"] = (
+                self.archive_max_total_uncompressed_bytes
+            )
         if self.archive_descent_explicit:
             payload["archive_descent"] = self.archive_descent.value
         return payload
@@ -269,6 +282,13 @@ def resolve_crawl_limits(
     run_archive_max_members = (
         getattr(run, "archive_max_members", None) if run is not None else None
     )
+    # B3: кумулятивный бюджет **корня** спуска (все уровни вложенности). Отдельная ось,
+    # потому что оси ``archive_max_*`` ограничивают один контейнер.
+    run_archive_max_total_uncompressed_bytes = (
+        getattr(run, "archive_max_total_uncompressed_bytes", None)
+        if run is not None
+        else None
+    )
     run_archive_descent = (
         getattr(run, "archive_descent", None) if run is not None else None
     )
@@ -348,6 +368,17 @@ def resolve_crawl_limits(
     archive_max_members = _pick(
         app_archive_max_members, run_archive_max_members, site_archive_max_members
     )
+    app_archive_max_total_uncompressed_bytes = getattr(
+        app, "archive_max_total_uncompressed_bytes", None
+    )
+    site_archive_max_total_uncompressed_bytes = site_attr(
+        "archive_max_total_uncompressed_bytes"
+    )
+    archive_max_total_uncompressed_bytes = _pick(
+        app_archive_max_total_uncompressed_bytes,
+        run_archive_max_total_uncompressed_bytes,
+        site_archive_max_total_uncompressed_bytes,
+    )
     app_archive_descent = getattr(app, "archive_descent", None)
     site_archive_descent = site_attr("archive_descent")
     archive_descent = _pick(
@@ -414,6 +445,17 @@ def resolve_crawl_limits(
         ),
         archive_max_members_explicit=_axis_explicit(
             app, "archive_max_members", run_archive_max_members, site_archive_max_members
+        ),
+        archive_max_total_uncompressed_bytes=(
+            DEFAULT_ARCHIVE_MAX_TOTAL_UNCOMPRESSED_BYTES
+            if archive_max_total_uncompressed_bytes is None
+            else int(archive_max_total_uncompressed_bytes)  # type: ignore[arg-type]
+        ),
+        archive_max_total_uncompressed_bytes_explicit=_axis_explicit(
+            app,
+            "archive_max_total_uncompressed_bytes",
+            run_archive_max_total_uncompressed_bytes,
+            site_archive_max_total_uncompressed_bytes,
         ),
         archive_descent=ArchiveDescent(
             ArchiveDescent.FULL if archive_descent is None else archive_descent

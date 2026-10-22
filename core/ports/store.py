@@ -16,11 +16,13 @@ from dataclasses import dataclass
 from typing import Any, Iterable, Iterator, Protocol, runtime_checkable
 
 from core.domain import (
+    ArchiveObservation,
     Cell,
     CellEvidence,
     CorpusChunk,
     CorpusCoverage,
     CorpusDoc,
+    CorpusMember,
     CrawlItemStatus,
     CrawlSession,
     CrawlSessionItem,
@@ -233,6 +235,36 @@ class StorePort(Protocol):
 
     def iter_corpus_coverage(self, run_id: str) -> Iterator[CorpusCoverage]:
         """Итерирует покрытие прогона; детерминированный порядок ``product_id``."""
+        ...
+
+    # -- спуск в контейнеры (B3: прогноз/исход + члены) -------------------- #
+    def save_archive_observation(self, observation: ArchiveObservation) -> None:
+        """Идемпотентный upsert наблюдения спуска по PK ``observation_id``.
+
+        Запись существует для **каждого** контейнера (включая пустой и нечитаемый):
+        повторный спуск того же архива перекрывает прежнюю строку, а не плодит новую.
+        """
+        ...
+
+    def iter_archive_observations(self, run_id: str) -> Iterator[ArchiveObservation]:
+        """Итерирует наблюдения спуска прогона (детерминированно: ``product_id, depth, archive_url``)."""
+        ...
+
+    def save_corpus_members(self, members: Iterable[CorpusMember]) -> None:
+        """Upsert членов контейнеров по PK ``(archive_content_hash, member_path)``.
+
+        Идентичность — пара (§6.7): повторный спуск того же архива **не** дублирует
+        строки. Батчевая запись в одной транзакции.
+        """
+        ...
+
+    def iter_corpus_members(
+        self,
+        *,
+        archive_content_hash: str | None = None,
+        product_id: str | None = None,
+    ) -> Iterator[CorpusMember]:
+        """Итерирует членов контейнеров; фильтры опциональны, порядок детерминирован."""
         ...
 
     def iter_corpus_docs(self, run_id: str) -> Iterator[CorpusDoc]:

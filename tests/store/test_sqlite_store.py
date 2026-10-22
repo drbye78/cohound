@@ -148,7 +148,7 @@ def test_schema_opens(store: SqliteStore) -> None:
     ver = store.conn.execute(
         "SELECT value FROM schema_meta WHERE key = 'schema_version'"
     ).fetchone()
-    assert ver["value"] == "3.9.0"
+    assert ver["value"] == "3.10.0"
     tables = {
         r["name"] for r in store.conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
     }
@@ -169,6 +169,9 @@ def test_schema_opens(store: SqliteStore) -> None:
         "crawl_sessions",
         "crawl_session_items",
         "corpus_coverage",
+        # B3 (schema 3.10.0): спуск в контейнеры — члены (производный вид) и наблюдения.
+        "corpus_members",
+        "archive_observations",
     ):
         assert t in tables
     # L1b (schema 3.1.0): legacy crawl_attempts удалена (замещена сеансом краула).

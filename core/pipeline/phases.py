@@ -706,6 +706,9 @@ def build_phases(
             state=state,
             product_modes=product_modes,
             refresh_policy=refresh_policy,
+            # B3: спуск в контейнеры — читатель инъектируется composition root'ом
+            # (``container_any.container_for``); ``None`` → спуск не исполняется, но видимо.
+            container_for=getattr(ctx.ports, "container", None),
         )
         _capture_index_build(holder, result)
         # 09 §8.5: переиспользование партиций — видимая оператору строка лога (не ошибка).
