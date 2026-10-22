@@ -205,6 +205,77 @@ def test_plan_human_output(
     assert "dry-run: yes" in out
 
 
+def _write_deploy_profile(directory: Path, profile: str) -> None:
+    """Кладёт ``config/deploy.yaml`` в ``directory`` (канонический путь от CWD)."""
+    config_dir = directory / "config"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "deploy.yaml").write_text(
+        f"profile: {profile}\nedge:\n  base_url: https://edge.example:8443\n",
+        encoding="utf-8",
+    )
+
+
+def test_plan_warns_split_hardened_in_json_and_human(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """D-8: ``split-hardened`` виден предупреждением и в ``--json``, и человеку.
+
+    Иначе профиль, обещающий хардненинг, молча принимался бы как обычный ``split``.
+    """
+    from core.config.deploy import SPLIT_HARDENED_WARNING
+
+    package = valid_package(tmp_path)
+    _write_deploy_profile(tmp_path, "split-hardened")
+    monkeypatch.chdir(tmp_path)
+
+    argv = [
+        "plan",
+        "--run-yaml",
+        str(package / RUN_YAML_NAME),
+        "--package",
+        str(package),
+        "--dry-run",
+    ]
+    code = main([*argv, "--json"])
+    assert code == EXIT_OK
+    assert json_out(capsys)["warnings"] == [SPLIT_HARDENED_WARNING]
+
+    code = main(argv)
+    assert code == EXIT_OK
+    assert f"warning: {SPLIT_HARDENED_WARNING}" in capsys.readouterr().out
+
+
+def test_plan_plain_split_has_no_profile_warning(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``split`` ничего не обещает сверх себя — предупреждения о профиле нет."""
+    from core.config.deploy import SPLIT_HARDENED_WARNING
+
+    package = valid_package(tmp_path)
+    _write_deploy_profile(tmp_path, "split")
+    monkeypatch.chdir(tmp_path)
+
+    code = main(
+        [
+            "plan",
+            "--run-yaml",
+            str(package / RUN_YAML_NAME),
+            "--package",
+            str(package),
+            "--dry-run",
+            "--json",
+        ]
+    )
+    assert code == EXIT_OK
+    # Прочие предупреждения (env-расхождения LLM) не относятся к профилю — проверяем
+    # именно отсутствие предупреждения о ``split-hardened``.
+    assert SPLIT_HARDENED_WARNING not in json_out(capsys).get("warnings", [])
+
+
 def test_plan_blocking_lint_prints_rule_code(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -273,6 +344,39 @@ def test_run_dry_run_does_not_write(
     assert payload["dry_run"] is True
     assert "normalize" in payload["phases"]
     assert not db.exists()
+
+
+def test_run_dry_run_warns_split_hardened_in_json_and_human(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """D-8: предупреждение о ``split-hardened`` видно и в ``--json``, и человеку."""
+    from core.config.deploy import SPLIT_HARDENED_WARNING
+
+    package = valid_package(tmp_path)
+    _write_deploy_profile(tmp_path, "split-hardened")
+    monkeypatch.chdir(tmp_path)
+    argv = [
+        "run",
+        "--run-yaml",
+        str(package / RUN_YAML_NAME),
+        "--package",
+        str(package),
+        "--db",
+        str(tmp_path / "unused.db"),
+        "--profile",
+        SPLIT_PROFILE,
+        "--dry-run",
+    ]
+
+    code = main([*argv, "--json"])
+    assert code == EXIT_OK
+    assert SPLIT_HARDENED_WARNING in json_out(capsys)["warnings"]
+
+    code = main(argv)
+    assert code == EXIT_OK
+    assert f"warning: {SPLIT_HARDENED_WARNING}" in capsys.readouterr().out
 
 
 def test_run_resume_skips_completed_phases(

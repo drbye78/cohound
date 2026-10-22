@@ -183,6 +183,13 @@ class CrawlLimits:
     #: ``full`` = сегодняшнее эффективное поведение. Резолвится той же цепочкой app < run <
     #: site; per seed-root (один корень = один уровень).
     document_level: DocumentLevel = DocumentLevel.FULL
+    #: D1/§10: **эффективная** egress-политика ``robots.txt`` для корня (включена/выключена).
+    #: Это условие измерения, а не рычаг пропускной способности: гейт ``robots.txt`` решает,
+    #: какие документы вообще допускаются в корпус, поэтому он входит в ``as_dict()``
+    #: **всегда**. Резолвится цепочкой app < run < site (сегодня поле несёт только app-слой
+    #: ``deploy.yaml:crawl.robots``); ``None`` на всех слоях = автодетект — robots включён
+    #: ровно при обходе ссылок (``max_depth > 0``) или наличии per-site ``sitemap``.
+    robots: bool = False
 
     def as_dict(self) -> dict[str, object]:
         """Канонический словарь для провенанса/манифеста (сортированно-стабильно).
@@ -191,6 +198,13 @@ class CrawlLimits:
         когда заданы**: ``None`` не добавляет ключ, поэтому дайджест
         ``crawl_config_digest`` прогонов без этих осей не меняется (обратная
         совместимость §13).
+
+        ``robots`` — исключение: он попадает в словарь **всегда**, как ``max_depth``,
+        потому что его дефолт — реальное поведение, а не отсутствующая ось. Гейт
+        ``robots.txt`` меняет **состав корпуса** (какие документы вообще допущены), то
+        есть является условием измерения; прогон с robots и прогон без него обязаны
+        иметь разный ``crawl_config_digest``, иначе один ``run_id`` описывал бы два
+        разных корпуса (I19/§15).
         """
         payload: dict[str, object] = {
             "max_workers": self.max_workers,
@@ -200,6 +214,7 @@ class CrawlLimits:
             "exclude_paths": list(self.exclude_paths),
             "exclude_documents": list(self.exclude_documents),
             "document_level": self.document_level.value,
+            "robots": self.robots,
         }
         if self.extract_max_tasks_per_child is not None:
             payload["extract_max_tasks_per_child"] = self.extract_max_tasks_per_child
@@ -350,6 +365,23 @@ def resolve_crawl_limits(
         or "max_response_bytes" in getattr(app, "model_fields_set", set())
     )
     max_depth = _pick(app.max_depth, run_max_depth, site_attr("max_depth"))
+    effective_max_depth = 0 if max_depth is None else int(max_depth)  # type: ignore[arg-type]
+    # D1/§10: egress-политика ``robots.txt``. Поле несёт только app-слой
+    # (``deploy.yaml:crawl.robots``), поэтому цепочка app < run < site сводится к app;
+    # ``getattr`` с дефолтом оставляет место для будущих слоёв без второй формулы.
+    # ``None`` = автодетект — то же правило, что исполняет корпус (``max_depth > 0`` или
+    # per-site ``sitemap``), чтобы поведение и ``crawl_config_digest`` не разошлись.
+    explicit_robots = _pick(
+        getattr(app, "robots", None),
+        getattr(run, "robots", None) if run is not None else None,
+        getattr(profile, "robots", None) if profile is not None else None,
+    )
+    site_sitemap = getattr(profile, "sitemap", None) if profile is not None else None
+    robots = (
+        bool(explicit_robots)
+        if explicit_robots is not None
+        else (effective_max_depth > 0 or bool(site_sitemap))
+    )
     max_documents = _pick(
         app.max_documents, run_max_documents, site_attr("max_documents")
     )
@@ -496,7 +528,8 @@ def resolve_crawl_limits(
         archive_descent_explicit=_axis_explicit(
             app, "archive_descent", run_archive_descent, site_archive_descent
         ),
-        max_depth=0 if max_depth is None else int(max_depth),  # type: ignore[arg-type]
+        max_depth=effective_max_depth,
+        robots=robots,
         max_documents=(
             None if max_documents is None else int(max_documents)  # type: ignore[arg-type]
         ),

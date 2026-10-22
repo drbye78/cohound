@@ -168,7 +168,7 @@ def transliterate(text: str) -> str:
 
     Нужна для стабильных slug-идентификаторов из русских имён (``product_id`` и т.п.):
     ``"Квант-Гибрид"`` → ``"Kvant-Gibrid"``. Латиница и прочие символы не меняются,
-    поэтому смешанные строки (``"Postgres Квант"``) безопасны.
+    поэтому смешанные строки (``"Alpha Квант"``) безопасны.
     """
     return str(text or "").translate(_TRANSLITERATION_TABLE)
 

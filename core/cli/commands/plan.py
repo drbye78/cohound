@@ -26,7 +26,7 @@ from core.cli.execution_axes import (
     resolve_declared_axes,
 )
 from core.cli.wiring import llm_env_notices
-from core.config.deploy import load_deploy_config
+from core.config.deploy import load_deploy_config, profile_notices
 from core.pipeline.digests import cohort_digest, seeds_digest
 from core.pipeline.lint import lint_run_inputs
 from core.pipeline.normalize import load_inputs
@@ -47,7 +47,11 @@ def run(args: argparse.Namespace) -> int:
     if not report.ready:
         raise LintFailure([*report.blocking, *report.incomplete], report.warnings)
 
-    llm_notices: list[str] = []
+    # D-8: профиль развёртывания резолвится и для явного ``--run-id``: предупреждение о
+    # ``split-hardened`` (принимается, но ничего не добавляет сверх ``split``) должно быть
+    # видно всегда, когда этот профиль активен, а не только при выводе ``run_id``.
+    deploy_config = load_deploy_config(None)
+    notices: list[str] = list(profile_notices(deploy_config))
     if args.run_id is not None:
         result = build_plan(inputs, run_id=args.run_id)
     else:
@@ -66,10 +70,9 @@ def run(args: argparse.Namespace) -> int:
         # §13 (2.4.0): декларированные оси — тот же резолвер и тот же deploy-конфиг, что
         # у ``run``/``crawl``. Иначе ``plan`` показывал бы иной ``run_id``, чем реальный
         # прогон: контракт перестал быть функцией только ``run.yaml``.
-        deploy_config = load_deploy_config(None)
         # §7.4/I21: env-настройки модели оценщика не читаются — предупреждение видно в
         # payload ``plan`` (identity-preview), а не только в логе прогона.
-        llm_notices = list(
+        notices.extend(
             llm_env_notices(
                 deploy_llm=getattr(deploy_config, "llm", None),
                 slot=getattr(args, "llm_slot", None),
@@ -103,8 +106,8 @@ def run(args: argparse.Namespace) -> int:
         )
     payload = _plan_payload(result)
     payload["dry_run"] = bool(args.dry_run)
-    if llm_notices:
-        payload["warnings"] = list(llm_notices)
+    if notices:
+        payload["warnings"] = list(notices)
     if args.json:
         _print_json({"ok": True, **payload})
     else:

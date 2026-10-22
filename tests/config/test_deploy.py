@@ -24,8 +24,10 @@ from core.config.deploy import (
     LLMDeployConfig,
     LLMSlotConfig,
     SearchDeployConfig,
+    SPLIT_HARDENED_WARNING,
     is_split,
     load_deploy_config,
+    profile_notices,
     resolve_llm_slot,
     resolve_search_provider,
 )
@@ -46,6 +48,17 @@ def _write(tmp_path: Path, text: str) -> Path:
 def _dump(data: dict[str, Any]) -> str:
     """Сериализует словарь в YAML (UTF-8, без экранирования кириллицы)."""
     return yaml.safe_dump(data, allow_unicode=True)
+
+
+def _profile_config(directory: Path, profile: str) -> Path:
+    """Пишет ``deploy.yaml`` с заданным профилем (и ``edge.base_url`` для split-ветки)."""
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / "deploy.yaml"
+    path.write_text(
+        f"profile: {profile}\nedge:\n  base_url: https://edge.example:8443\n",
+        encoding="utf-8",
+    )
+    return path
 
 
 # ---------------------------------------------------------------------------
@@ -99,6 +112,32 @@ def test_split_hardened_counts_as_split(tmp_path: Path) -> None:
     cfg = load_deploy_config(path)
     assert cfg.profile == "split-hardened"
     assert is_split(cfg) is True
+
+
+def test_split_hardened_warns_it_adds_nothing_over_split(tmp_path: Path) -> None:
+    """D-8: значение принимается, но громко предупреждает, что хардненинга нет.
+
+    Принятие без предупреждения было бы ложным утверждением о безопасности: Z2 PARSE,
+    egress-прокси и TLS-инспекция не реализованы — поведение идентично ``split``.
+    """
+    hardened = load_deploy_config(_profile_config(tmp_path / "h", "split-hardened"))
+    split = load_deploy_config(_profile_config(tmp_path / "s", "split"))
+    assert profile_notices(hardened) == (SPLIT_HARDENED_WARNING,)
+    assert profile_notices(split) == ()
+    # Текст обязан называть и «ничего не добавляет», и отсутствующие механизмы.
+    assert "ничего не добавляет" in SPLIT_HARDENED_WARNING
+    for mechanism in ("Z2 PARSE", "egress-прокси", "TLS-инспекция"):
+        assert mechanism in SPLIT_HARDENED_WARNING
+
+
+def test_split_hardened_behaviour_is_identical_to_split(tmp_path: Path) -> None:
+    """Алиас, а не другой профиль: различие только в имени (иначе предупреждение лгало бы)."""
+    hardened = load_deploy_config(_profile_config(tmp_path / "h", "split-hardened"))
+    split = load_deploy_config(_profile_config(tmp_path / "s", "split"))
+    assert is_split(hardened) is is_split(split) is True
+    assert hardened.edge == split.edge
+    assert hardened.crawl == split.crawl
+    assert hardened.extractor_zone == split.extractor_zone
 
 
 def test_oidc_auth_mapping_parsed(tmp_path: Path) -> None:

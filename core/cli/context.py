@@ -61,7 +61,7 @@ from core.config import (
     passport_content_digests,
     passport_urls,
 )
-from core.config.deploy import LLM_SLOTS, DeployConfig
+from core.config.deploy import LLM_SLOTS, DeployConfig, profile_notices
 from core.domain.enums import (
     CrawlItemStatus,
     CrawlSessionStatus,
@@ -959,6 +959,8 @@ def _emit_deploy_check(args: argparse.Namespace, payload: dict[str, Any]) -> Non
         lines.append(f"note: {payload['note']}")
     for issue in payload.get("issues", ()):
         lines.append(f"issue: {issue}")
+    for warning in payload.get("warnings", ()):
+        lines.append(f"warning: {warning}")
     lines.append(f"ok: {'yes' if payload['ok'] else 'no'}")
     sys.stdout.write("\n".join(lines) + "\n")
 
@@ -1380,6 +1382,10 @@ def _resolve_ports(
             run_slot=getattr(getattr(inputs, "run", None), "llm_slot", None),
         ):
             engine_log.warn(notice, event="llm_env_note")
+        # D-8: профиль ``split-hardened`` ничего не добавляет сверх ``split`` — пишем в
+        # тот же журнал, чтобы «хардненинг» не остался только в имени профиля.
+        for notice in profile_notices(deploy_config):
+            engine_log.warn(notice, event="deploy_profile_note")
     return build_adapters(
         profile=args.profile,
         deploy=deploy_config,
@@ -2057,6 +2063,10 @@ def _print_run_report(payload: dict[str, Any]) -> None:
             lines.append(f"  note: {note}")
     if payload["resumed_skipped"]:
         lines.append(f"resumed (ok, пропущены): {', '.join(payload['resumed_skipped'])}")
+    # Предупреждения (env-расхождения LLM, профиль ``split-hardened``) — видимы и в
+    # человеческом выводе, не только в ``--json``.
+    for warning in payload.get("warnings", ()):
+        lines.append(f"warning: {warning}")
     if payload.get("blocked"):
         for error in payload.get("errors", ()):
             lines.append(f"error: {error}")

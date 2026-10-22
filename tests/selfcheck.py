@@ -3619,7 +3619,7 @@ def _crawl_archive_axes() -> None:
     """P6: артефакты-контейнеры — резолв осей, дайджест-нейтральность, классификатор.
 
     Инварианты: цепочка ``app < run < site`` для осей допуска/границ спуска; дефолт app
-    (все форматы, 256 MiB артефакт, 64 MiB член, ``full``) действует, но **не** попадает
+    (все форматы, 250 MiB артефакт, 64 MiB член, ``full``) действует, но **не** попадает
     в ``as_dict`` — иначе дайджест прогонов без осей перестаёт быть байт-идентичным (§13);
     неизвестный формат — ``ValueError``; OOXML (ZIP + ``[Content_Types].xml``) — документ,
     а не контейнер; общий бинарный ``application/octet-stream`` контейнер не доказывает;
@@ -3648,7 +3648,7 @@ def _crawl_archive_axes() -> None:
     # Дефолт app-слоя: все форматы, потолки, полный спуск.
     _assert(base.attachment_formats == SUPPORTED_ARCHIVE_FORMATS)
     _assert(base.attachment_formats == ("zip", "7z", "rar"))
-    _assert(base.max_artifact_bytes == DEFAULT_MAX_ARTIFACT_BYTES == 268435456)
+    _assert(base.max_artifact_bytes == DEFAULT_MAX_ARTIFACT_BYTES == 262144000)
     _assert(base.archive_max_member_bytes == DEFAULT_ARCHIVE_MAX_MEMBER_BYTES == 67108864)
     _assert(base.archive_max_uncompressed_bytes == 268435456)
     _assert(base.archive_max_members is None)

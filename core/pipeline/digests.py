@@ -6,9 +6,12 @@
 * :func:`cohort_digest` — состав когорты (продукт, отношение к якорю, пересечение ролей),
   ``case_id``, ``frozen_at`` и ``cohort_ref``. Авторский текст (``selection_reason``) и
   отображаемые имена **не** входят: они не меняют измерение (§12.2).
-* :func:`seeds_digest` — эффективный seed-набор: ``(product_id, normalized_url, role,
-  profile_key, enabled)``. Порядок входа не важен (сортировка), пустой набор — стабильный
-  дайджест пустого множества, а не пустая строка.
+* :func:`seeds_digest` — эффективный seed-набор: ``(product_id, order, normalized_url,
+  role, profile_key, enabled)``, где ``order`` — авторская позиция корня **внутри
+  продукта**. Порядок корней — часть идентичности (краул порядко-чувствителен: корень,
+  идущий последним, может не выполниться вовсе, см. ``_ordered_unique``), а порядок
+  **продуктов** в файле канонизируется сортировкой. Пустой набор — стабильный дайджест
+  пустого множества, а не пустая строка.
 * :func:`execution_contract_digest` — отпечаток **условий измерения** по списку §12.5.
   Значения приходят аргументом (mapping): функция не читает ни БД, ни файловую систему.
   ``None`` — часть контракта (отсутствие значения фиксируется как ``null``), поэтому
@@ -122,10 +125,19 @@ def cohort_digest(
 def seeds_digest(seeds: SeedsConfig) -> str:
     """Дайджест эффективного seed-набора (09 §12.2), 24 hex-символа.
 
-    Материал: отсортированный список ``(product_id, normalized_url, role, profile_key,
-    enabled)`` по всем продуктам и seed'ам (включая ``enabled=false`` — отключение seed'а
-    меняет корпус и coverage). Порядок записей в файле и ``source``/``source_ref``/
-    ``added_*`` **не** входят: это провенанс авторской записи, а не измерение.
+    Материал: список ``(product_id, order, normalized_url, role, profile_key, enabled)``
+    по всем продуктам и seed'ам (включая ``enabled=false`` — отключение seed'а меняет
+    корпус и coverage), отсортированный по ``(product_id, order)``. ``source``/
+    ``source_ref``/``added_*`` **не** входят: это провенанс авторской записи, а не
+    измерение.
+
+    **Порядок корней внутри продукта входит в идентичность** (``order`` — авторская
+    позиция в ``seeds.yaml``). Краул порядко-чувствителен: бюджет ``max_documents``
+    расходуется в порядке обхода, поэтому корень, идущий последним, может не выполниться
+    вовсе (``_ordered_unique``). Если бы дайджест сортировал только по URL, перестановка
+    корней давала бы тот же ``run_id`` при другом корпусе — дыра в воспроизводимости
+    (§15, I19). Порядок **продуктов** в файле, наоборот, канонизируется сортировкой по
+    ``product_id``: продукт-цикл идёт в отсортированном порядке и от записи не зависит.
 
     Пустой набор даёт стабильный дайджест пустого множества (``{"products": []}``),
     а не пустую строку.
@@ -133,23 +145,17 @@ def seeds_digest(seeds: SeedsConfig) -> str:
     rows = [
         {
             "product_id": product_id,
+            # Позиция корня **внутри продукта** (авторский порядок ``seeds.yaml``).
+            "order": order,
             "normalized_url": seed.normalized_url,
             "role": seed.role.value,
             "profile_key": seed.profile_key,
             "enabled": seed.enabled,
         }
         for product_id, product in seeds.products.items()
-        for seed in product.seeds
+        for order, seed in enumerate(product.seeds)
     ]
-    rows.sort(
-        key=lambda row: (
-            row["product_id"],
-            row["normalized_url"],
-            row["role"],
-            row["profile_key"] or "",
-            row["enabled"],
-        )
-    )
+    rows.sort(key=lambda row: (row["product_id"], row["order"]))
     return short_hash(_canonical({"products": rows}), _DIGEST_LEN)
 
 

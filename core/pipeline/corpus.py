@@ -5176,16 +5176,13 @@ def _build_corpus(
             #: C1: хвост этого корня в фазовой очереди доводки (счётчик + финализатор).
             root_drain = _RootDrain()
             # A2b/§6(b)/§10: egress-политика robots — **условна от discovery** и
-            # вычисляется ядром **на корень** (edge строит краулеры «голыми»). Явный
-            # ``crawl.robots`` (app-слой) переопределяет автодетект; иначе robots включён
-            # ровно при обходе ссылок (``max_depth > 0``) или наличии sitemap у сайта корня.
+            # вычисляется ядром **на корень** (edge строит краулеры «голыми»). Значение
+            # резолвится **одной** формулой в :func:`resolve_crawl_limits` (app-слой
+            # ``crawl.robots`` переопределяет автодетект; иначе robots включён ровно при
+            # обходе ссылок ``max_depth > 0`` или наличии sitemap у сайта корня) и там же
+            # входит в ``crawl_config_digest``: поведение и идентичность не расходятся.
             # Без discovery — ``False`` (никаких лишних fetch ``robots.txt``, байт-в-байт).
-            if crawl_app is not None and crawl_app.robots is not None:
-                robots_enabled = bool(crawl_app.robots)
-            else:
-                robots_enabled = (
-                    limits.max_depth > 0 or _sitemap_url_for(root_url) is not None
-                )
+            robots_enabled = limits.robots
             # B2 (resume-бюджет): уже израсходованные страницы этого корня считаются из
             # durable-элементов сеанса (status FETCHED/FAILED с реально доступным retained
             # raw), чей URL в scope корня. Иначе повторный прогон того же session_id начал

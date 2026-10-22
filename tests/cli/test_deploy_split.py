@@ -43,7 +43,11 @@ from core.cli.wiring import (
     build_gateway,
     manifest_deploy_fields,
 )
-from core.config.deploy import DeployConfig, load_deploy_config
+from core.config.deploy import (
+    DeployConfig,
+    SPLIT_HARDENED_WARNING,
+    load_deploy_config,
+)
 from core.edge.seam_schema import SEAM_SCHEMA_VERSION, validate_envelope, validate_payload
 from core.pipeline import Ports
 from core.ports.search import SearchQuery
@@ -379,6 +383,37 @@ def test_deploy_check_local_profile_is_ok(
     assert payload["ok"] is True
     assert payload["split"] is False
     assert payload["profile"] == "local"
+
+
+def test_deploy_check_split_hardened_warns_json_and_human(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """D-8: ``split-hardened`` предупреждает и в ``--json``, и в человеческом выводе."""
+    cfg = write_text(
+        tmp_path, "deploy.yaml", _SPLIT_YAML.replace("profile: split", "profile: split-hardened")
+    )
+
+    code = main(["deploy-check", "--deploy", str(cfg), "--json"], deploy_transport=_edge_transport)
+    assert code == EXIT_OK
+    payload = json_out(capsys)
+    assert payload["profile"] == "split-hardened"
+    assert payload["warnings"] == [SPLIT_HARDENED_WARNING]
+
+    code = main(["deploy-check", "--deploy", str(cfg)], deploy_transport=_edge_transport)
+    assert code == EXIT_OK
+    out = capsys.readouterr().out
+    assert f"warning: {SPLIT_HARDENED_WARNING}" in out
+
+
+def test_deploy_check_plain_split_has_no_profile_warning(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """``split`` ничего не обещает сверх себя — предупреждения нет."""
+    cfg = write_text(tmp_path, "deploy.yaml", _SPLIT_YAML)
+
+    code = main(["deploy-check", "--deploy", str(cfg), "--json"], deploy_transport=_edge_transport)
+    assert code == EXIT_OK
+    assert json_out(capsys)["warnings"] == []
 
 
 def test_deploy_check_unreachable_is_nonzero(

@@ -66,7 +66,7 @@ from core.cli.execution_axes import (
     resolve_declared_axes,
 )
 from core.cli.wiring import build_store, llm_env_notices
-from core.config.deploy import load_deploy_config
+from core.config.deploy import load_deploy_config, profile_notices
 from core.domain import CrawlItemStatus, CrawlSessionStatus, RefreshPolicy
 from core.pipeline import PHASES
 from core.pipeline.crawl_session import (
@@ -350,6 +350,9 @@ def _execute_crawl(
             run_slot=getattr(getattr(inputs, "run", None), "llm_slot", None),
         )
     )
+    # D-8: профиль ``split-hardened`` принимается, но ничего не добавляет сверх ``split`` —
+    # это видимое предупреждение, а не молчаливое обещание хардненинга.
+    notes.extend(profile_notices(deploy_config))
 
     store = build_store(db_path, profile=args.profile)
     ports: Any = None

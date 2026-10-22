@@ -67,7 +67,7 @@ from core.cli.wiring import (
     run_db_path,
     seed_lexical_index,
 )
-from core.config.deploy import is_split, load_deploy_config
+from core.config.deploy import is_split, load_deploy_config, profile_notices
 from core.domain import (
     CrawlItemStatus,
     CrawlSessionStatus,
@@ -387,13 +387,16 @@ def run(args: argparse.Namespace) -> int:
     # §7.4/I21: env COHOUND_LLM_MODEL/_DECODER оценщиком не читаются, а endpoint из env
     # вообще вне execution contract. Оба расхождения — видимые (payload + logs/wiring.jsonl),
     # не молчаливые: эти переменные живут в runbook'ах операторов.
-    llm_notices = list(
-        llm_env_notices(
+    # D-8: профиль ``split-hardened`` тоже даёт видимое предупреждение — он принимается,
+    # но ничего не добавляет сверх ``split`` (ложный «хардненинг» молчать не должен).
+    config_notices = [
+        *llm_env_notices(
             deploy_llm=getattr(deploy_config, "llm", None),
             slot=getattr(args, "llm_slot", None),
             run_slot=getattr(getattr(inputs, "run", None), "llm_slot", None),
-        )
-    )
+        ),
+        *profile_notices(deploy_config),
+    ]
     status_dict_version = declared_status_dict_version()
     contract_d = build_execution_contract(
         inputs,
@@ -530,7 +533,7 @@ def run(args: argparse.Namespace) -> int:
                     run_id,
                     db_path,
                     onboarding,
-                    warnings=[*report.warnings, *onboarding_warnings, *llm_notices],
+                    warnings=[*report.warnings, *onboarding_warnings, *config_notices],
                 )
                 payload.update(_identity_payload(identity))
                 payload["dry_run"] = True
@@ -549,7 +552,7 @@ def run(args: argparse.Namespace) -> int:
                 "until": args.until,
                 "phases": _phases_until(args.until),
                 "render_modes": {url: mode.value for url, mode in render_modes.items()},
-                "warnings": [*report.warnings, *onboarding_warnings, *llm_notices],
+                "warnings": [*report.warnings, *onboarding_warnings, *config_notices],
                 **_identity_payload(identity),
             }
             if onboarding is not None:
@@ -588,7 +591,7 @@ def run(args: argparse.Namespace) -> int:
                 run_id,
                 db_path,
                 onboarding,
-                warnings=[*report.warnings, *onboarding_warnings, *scenario_errors, *llm_notices],
+                warnings=[*report.warnings, *onboarding_warnings, *scenario_errors, *config_notices],
             )
             payload.update(_identity_payload(identity))
             if args.json:
@@ -963,8 +966,8 @@ def run(args: argparse.Namespace) -> int:
             payload["follow"] = True
         if filter_notes:
             payload["filter_notes"] = list(filter_notes)
-        if onboarding_warnings or llm_notices:
-            payload["warnings"] = list([*onboarding_warnings, *llm_notices])
+        if onboarding_warnings or config_notices:
+            payload["warnings"] = list([*onboarding_warnings, *config_notices])
         if instrumentation_errors:
             payload["instrumentation_errors"] = instrumentation_errors
         if deploy_fields:

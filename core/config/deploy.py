@@ -57,6 +57,8 @@ __all__ = [
     "DeployConfig",
     "load_deploy_config",
     "is_split",
+    "profile_notices",
+    "SPLIT_HARDENED_WARNING",
     "resolve_search_provider",
     "resolve_llm_slot",
     "LLM_SLOTS",
@@ -66,6 +68,8 @@ __all__ = [
 
 # Канонические допустимые значения (ЗЕРКАЛО 07 §7 / 03 D.5). Не выносим в доменные
 # enum'ы: это конфигурация развёртывания, а не доменная методология.
+# D-8: ``split-hardened`` принимается ради совместимости конфига, но поведения не
+# добавляет (эквивалент ``split``); видимое предупреждение — :func:`profile_notices`.
 PROFILES: tuple[str, ...] = ("local", "split", "split-hardened")
 SPLIT_PROFILES: frozenset[str] = frozenset({"split", "split-hardened"})
 AUTH_KINDS: tuple[str, ...] = ("mtls", "oidc")
@@ -379,8 +383,9 @@ class CrawlConfig(BaseModel):
     max_response_bytes: int = Field(default=DEFAULT_MAX_RESPONSE_BYTES, gt=0)
     # P6/P0: потолок **потокового** допущенного артефакта (контейнер zip/7z/rar),
     # байты. Страница остаётся под ``max_response_bytes`` (in-memory потолок): артефакт
-    # свыше него уходит в staging-файл, а не в RAM. Дефолт 256 MiB покрывает измеренный
-    # корпусный контейнер (125.7 MB). Ось операционная (``execution_change``, §13).
+    # свыше него уходит в staging-файл, а не в RAM. Дефолт 250 MiB — объявленный
+    # владельцем потолок; он покрывает измеренный корпусный контейнер (125.7 MB).
+    # Ось операционная (``execution_change``, §13).
     max_artifact_bytes: int = Field(default=DEFAULT_MAX_ARTIFACT_BYTES, gt=0)
     # P6: заявленные форматы-контейнеры (класс «артефакт»). Незaявленный суффикс
     # (``.ova``/``.iso``/``.gz``/``.tar``) остаётся обычным бинарным артефактом. Сужение
@@ -572,6 +577,29 @@ def load_deploy_config(path: str | Path | None = None) -> DeployConfig:
 def is_split(config: DeployConfig) -> bool:
     """``True`` для профилей ``split`` и ``split-hardened`` (зоны данных разделены)."""
     return config.profile in SPLIT_PROFILES
+
+
+#: D-8: ``split-hardened`` **принимается** (совместимость конфига), но ничего не добавляет
+#: сверх ``split``: нет ни Z2 PARSE, ни egress-прокси, ни TLS-инспекции. Молчаливое
+#: принятие такого имени — ложное утверждение о безопасности, поэтому профиль обязан
+#: громко предупреждать (payload, лог wiring, ``deploy-check``).
+SPLIT_HARDENED_WARNING = (
+    "profile «split-hardened» принят, но ничего не добавляет сверх «split»: Z2 PARSE, "
+    "egress-прокси и TLS-инспекция не реализованы — зоны данных разделены ровно так же, "
+    "как в «split». Хардненинга нет: используйте «split» (07 §7)"
+)
+
+
+def profile_notices(config: DeployConfig) -> tuple[str, ...]:
+    """Видимые предупреждения о выбранном профиле развёртывания (D-8, 07 §7).
+
+    Единственное сегодня — ``split-hardened``: имя обещает хардненинг, которого нет.
+    Функция чистая (читает только конфиг), поэтому её зовут и composition root
+    (payload/``wiring.jsonl``), и ``deploy-check`` — одна формулировка, один источник.
+    """
+    if config.profile == "split-hardened":
+        return (SPLIT_HARDENED_WARNING,)
+    return ()
 
 
 # ---------------------------------------------------------------------------

@@ -18,7 +18,7 @@ from core.cli.context import (
     _seam_diagnostics,
 )
 from core.cli.errors import EXIT_ERROR, EXIT_OK
-from core.config.deploy import is_split, load_deploy_config
+from core.config.deploy import is_split, load_deploy_config, profile_notices
 
 
 def run(args: argparse.Namespace) -> int:
@@ -41,6 +41,10 @@ def run(args: argparse.Namespace) -> int:
     :returns: :data:`EXIT_OK` при достижимом и валидном шве; :data:`EXIT_ERROR` иначе.
     """
     config = load_deploy_config(args.deploy)
+    # D-8: ``split-hardened`` принимается, но ничего не добавляет сверх ``split`` (нет
+    # Z2 PARSE, egress-прокси, TLS-инспекции). Предупреждение видно в отчёте (человеку и
+    # в ``--json``), а не только в имени профиля.
+    warnings = list(profile_notices(config))
     if not is_split(config):
         _emit_deploy_check(
             args,
@@ -49,6 +53,7 @@ def run(args: argparse.Namespace) -> int:
                 "split": False,
                 "profile": config.profile,
                 "note": "профиль local: DMZ-шов не используется (07 §6); диагностика не требуется",
+                "warnings": warnings,
             },
         )
         return EXIT_OK
@@ -59,6 +64,7 @@ def run(args: argparse.Namespace) -> int:
         config, transport=transport, factory=factory
     )
     report = _seam_diagnostics(config, gateway, raw_envelopes)
+    report["warnings"] = warnings
     _emit_deploy_check(args, report)
     return EXIT_OK if report["ok"] else EXIT_ERROR
 

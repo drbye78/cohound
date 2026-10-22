@@ -1,7 +1,7 @@
 """Регрессия приёма архивов (срез A): блэклист пакета не режет допущенные контейнеры.
 
 Субстрат приёма уже в ядре (оси ``crawl.attachment_formats`` {zip,7z,rar},
-``crawl.max_artifact_bytes`` 256 MiB, потоковый staging, ``classify_archive_bytes``), но
+``crawl.max_artifact_bytes`` 250 MiB, потоковый staging, ``classify_archive_bytes``), но
 **данные** пакета резали архивы до постановки в очередь: ``exclude_documents`` содержал
 ``*.zip``/``*.rar``/``*.7z``. Измеренный контейнер
 ``https://jatoba.ru/download/documentationJatoba18_4.zip`` (125 727 643 B, 47 PDF-членов,

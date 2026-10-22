@@ -37,6 +37,56 @@ def test_defaults_are_zero_depth_no_limits() -> None:
     assert limits.max_documents is None
     assert limits.exclude_paths == () and limits.exclude_documents == ()
 
+# --------------------------------------------------------------------------- #
+# (g2) robots: условие измерения, а не рычаг пропускной способности (D-5)
+# --------------------------------------------------------------------------- #
+
+def test_robots_is_unconditional_in_as_dict() -> None:
+    """``robots`` входит в дайджест **всегда** (как ``max_depth``), даже при дефолте.
+
+    Гейт ``robots.txt`` меняет состав корпуса, поэтому прогон с ним и без него обязан
+    иметь разный ``crawl_config_digest``: иначе один ``run_id`` описывал бы два корпуса.
+    """
+    payload = resolve_crawl_limits(URL, app=APP).as_dict()
+    assert "robots" in payload
+    assert payload["robots"] is False
+    assert CrawlLimits().as_dict()["robots"] is False
+    assert CrawlLimits(robots=True).as_dict()["robots"] is True
+
+def test_robots_explicit_app_layer_wins_over_autodetect() -> None:
+    """Явный ``crawl.robots`` переопределяет автодетект (в т.ч. выключает его)."""
+    off_with_depth = resolve_crawl_limits(
+        URL, app=CrawlConfig(robots=False), run=CrawlRunConfig(max_depth=3)
+    )
+    assert off_with_depth.max_depth == 3
+    assert off_with_depth.robots is False
+    on_without_depth = resolve_crawl_limits(URL, app=CrawlConfig(robots=True))
+    assert on_without_depth.max_depth == 0
+    assert on_without_depth.robots is True
+
+def test_robots_autodetect_mirrors_discovery() -> None:
+    """``None`` = автодетект: обход ссылок либо per-site ``sitemap`` включают robots."""
+    assert resolve_crawl_limits(URL, app=APP).robots is False
+    assert (
+        resolve_crawl_limits(URL, app=APP, run=CrawlRunConfig(max_depth=1)).robots is True
+    )
+    sitemap_profiles = {"example.com": DomainProfile(sitemap="https://example.com/s.xml")}
+    assert (
+        resolve_crawl_limits(URL, app=APP, profiles=sitemap_profiles).robots is True
+    )
+
+def test_robots_changes_crawl_digest() -> None:
+    """Смена ``robots`` меняет ``crawl_config_digest`` (execution_change, §13)."""
+    from core.pipeline.report import crawl_control_digest
+
+    off = crawl_control_digest(
+        run_crawl=None, app=CrawlConfig(robots=False), profiles=None
+    )
+    on = crawl_control_digest(
+        run_crawl=None, app=CrawlConfig(robots=True), profiles=None
+    )
+    assert off != on
+
 
 def test_run_layer_overrides_app() -> None:
     run = CrawlRunConfig(
@@ -373,7 +423,7 @@ def test_max_response_bytes_rejects_non_positive() -> None:
 def test_artifact_axes_defaults_are_digest_neutral() -> None:
     """Дефолты app не делают дайджест другим: ключей нет без явного значения (§13)."""
     limits = resolve_crawl_limits(URL, app=APP)
-    assert limits.max_artifact_bytes == 268_435_456
+    assert limits.max_artifact_bytes == 262_144_000
     assert limits.attachment_formats == ("zip", "7z", "rar")
     assert limits.archive_max_member_bytes == 67_108_864
     assert limits.archive_max_uncompressed_bytes == 268_435_456

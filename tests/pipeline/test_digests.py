@@ -154,7 +154,21 @@ def test_cohort_digest_is_sensitive_to_case_id_and_cohort_ref() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_seeds_digest_is_stable_and_ignores_order() -> None:
+def test_seeds_digest_is_order_sensitive_within_product() -> None:
+    """Порядок корней **внутри продукта** — часть идентичности (§15, I19, D-7).
+
+    Краул порядко-чувствителен: бюджет ``max_documents`` расходуется в порядке обхода,
+    поэтому корень, идущий последним, может не выполниться вовсе (``_ordered_unique``).
+    Перестановка двух корней одного продукта даёт **другой** корпус — значит и другой
+    ``run_id``; сортировка только по URL скрывала бы это.
+    """
+    root_a = _seed(product_id="p1", url="https://p1.test/")
+    root_b = _seed(product_id="p1", url="https://p1.test/docs", role=SeedRole.DOCS)
+    assert seeds_digest(_seeds(root_a, root_b)) != seeds_digest(_seeds(root_b, root_a))
+
+
+def test_seeds_digest_is_stable_and_canonicalizes_product_order() -> None:
+    """Порядок **продуктов** в файле канонизируется: продукт-цикл отсортирован."""
     seed_a = _seed(product_id="p1", url="https://p1.test/")
     seed_b = _seed(product_id="p2", url="https://p2.test/", role=SeedRole.DOCS)
     first = seeds_digest(_seeds(seed_a, seed_b))
