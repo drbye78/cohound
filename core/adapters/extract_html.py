@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable
+from pathlib import Path
 
 from core.ports.types import ExtractedDoc, ExtractionRoute, RawPage
 from core.util.hashing import content_hash
@@ -49,15 +50,25 @@ def _charset_from_content_type(content_type: str | None) -> str | None:
 
 
 def _decode_page(page: RawPage) -> str:
-    """Декодирует байты страницы: charset из content-type, иначе UTF-8 replace."""
+    """Декодирует байты страницы: charset из content-type, иначе UTF-8 replace.
+
+    Байты берутся из ``page.content``; если их там нет, а задан ``page.source_path``
+    (страница несёт только путь к retained-файлу, I19) — файл дочитывается здесь.
+    HTML-экстрактор работает по байтам, поэтому это единственное место, где
+    retained-файл поднимается в RAM: документный путь читает docling сам
+    (``DoclingDocumentExtractor.extract_path``), а HTML-страницы на порядки меньше.
+    """
+    content = page.content
+    if not content and page.source_path:
+        content = Path(page.source_path).read_bytes()
     charset = _charset_from_content_type(page.content_type)
     if charset:
         try:
-            text = page.content.decode(charset, errors="replace")
+            text = content.decode(charset, errors="replace")
         except (LookupError, UnicodeError):
-            text = page.content.decode("utf-8", errors="replace")
+            text = content.decode("utf-8", errors="replace")
     else:
-        text = page.content.decode("utf-8", errors="replace")
+        text = content.decode("utf-8", errors="replace")
     # Снимаем возможный UTF-8 BOM, оставшийся от исходного потока.
     return text.removeprefix("\ufeff")
 

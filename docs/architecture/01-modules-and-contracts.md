@@ -303,6 +303,12 @@ per-host диапазон `rate_limit`. Резолвится в pipeline (`pipel
 определяется расширением `filename`, а не полем `structure`. Порт-контракт `extract(page: RawPage)`
 остаётся целевым (Page несёт `url`+`bytes`; формат выводится из `url`/content-type). Адаптер
 приводится к порту тонкой обёрткой при реализации Ш5; `content_hash` считает адаптер (§10/I19).
+**Путь вместо байтов (I19, execution_change).** Адаптер также предоставляет
+`extract_path(path, filename_hint=...)`: извлечение по retained-файлу (`corpus_raw/{sha256}.bin`)
+без копии тела в RAM — файл подставляется конвертеру по жёсткой ссылке/симлинку с нужным
+суффиксом (копия — последний резерв). Страница несёт аддитивное поле `RawPage.source_path`;
+`None` — прежнее поведение (байты в `content`). Ключ `extract_cache` остаётся хешем
+retained-байтов (потоковое чтение 1 MiB), поэтому I19 не ослаблен.
 `SUPPORTED_FORMATS` (pdf/docx/pptx/xlsx) — единственный реестр форматов; HTML — отдельный
 `extract_html.py` (trafilatura). Поддержка Office опирается на `docling-slim[format-office]` без torch.
 

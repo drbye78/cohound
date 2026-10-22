@@ -639,7 +639,8 @@ class _ExtractRequest:
     """P4: payload одного задания экстракции — **только примитивы** (picklable by construction).
 
     Байты страницы **не** передаются: retention (I19) уже положил их в ``raw_path``; воркер
-    перечитывает ровно эти байты и реконструирует тот же ``RawPage`` перед ``extractor.extract``.
+    перечитывает этот файл **потоково** (только для хеша кэша) и реконструирует ``RawPage``
+    с ``source_path`` и пустым ``content`` — тело документа не поднимается в RAM воркера.
     ``route`` — ось извлечения, ``fetch_mode`` — ось получения (обе — ``StrEnum``-примитивы).
     """
 
@@ -748,14 +749,24 @@ def _run_extract(extractor: ExtractorPort, request: _ExtractRequest) -> Extracte
     Общий шаг модульного воркер-процесса (:func:`_extract_worker`) и потокового воркера
     (``split``): источник байтов — retained-файл, а не буфер родителя (I19).
 
-    Ключ кэша считается из **фактически прочитанных** байтов (``content_hash(content)``) и
+    **Байты не поднимаются в RAM.** Retained-файл читается потоково (1 MiB) только ради
+    ключа кэша; сам ``RawPage`` несёт ``source_path`` и пустой ``content`` — документ
+    (десятки/сотни МБ) не копируется в RSS воркера лишь для того, чтобы адаптер записал
+    его во временный файл и прочитал обратно. Экстрактор, который не умеет читать путь,
+    работает по ``content`` как прежде (поле аддитивное, дефолт ``None``).
+
+    Ключ кэша считается из **фактически прочитанных** байтов (потоковый ``sha256`` файла) и
     совпадает с родительским :func:`_extract_cache_key` (``raw_path.stem``) — I19 требует
-    верификации от байтов, а не от имени файла.
+    верификации от байтов, а не от имени файла. Потоковый хеш даёт ровно тот же ключ:
+    это хеш тех же байтов файла.
     """
-    content = Path(request.raw_path).read_bytes()
+    # I19: верификация от содержимого файла, а не от его имени; чтение — потоковое,
+    # поэтому размер документа не влияет на RSS воркера.
+    key = _hash_file(Path(request.raw_path))
     page = RawPage(
         url=request.url,
-        content=content,
+        content=b"",
+        source_path=str(request.raw_path),
         fetched_at=request.fetched_at,
         fetch_mode=request.fetch_mode,
         lang=request.lang,
@@ -763,12 +774,11 @@ def _run_extract(extractor: ExtractorPort, request: _ExtractRequest) -> Extracte
         content_type=request.content_type,
         engine=request.engine,
     )
-    # Ф1.2: кэш экстракции. Ключ — хеш байтов, **только что прочитанных из retained-файла**
-    # (I19): хит принимается лишь при совпадении ключа конверта с этими байтами, поэтому
-    # кэш не может подсунуть неверифицированный контент. Пропускается ровно вызов
-    # экстрактора — чтение и хеширование retained-байтов остаются.
+    # Ф1.2: кэш экстракции. Ключ — хеш байтов retained-файла (I19): хит принимается лишь
+    # при совпадении ключа конверта с этими байтами, поэтому кэш не может подсунуть
+    # неверифицированный контент. Пропускается ровно вызов экстрактора — хеширование
+    # retained-байтов остаётся.
     level_text = _as_text(request.level)
-    key = content_hash(content)
     cache = (
         ExtractionCache(request.cache_root, max_bytes=request.cache_max_bytes)
         if request.cache_root

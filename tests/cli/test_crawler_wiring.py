@@ -1031,8 +1031,9 @@ def test_build_extraction_pool_split_thread_pool(tmp_path: Path) -> None:
     """P4/§7: ``split`` — потоковый пул поверх переданного ``RemoteExtractor`` (шов не нужен).
 
     ``build_corpus`` получает ``ExtractionPool`` с реальным ``ThreadPoolExecutor``; ``worker``
-    реконструирует ``RawPage`` из retained-файла (I19) и зовёт переданный экстрактор. Фейк
-    детерминирован — seam/gateway не задействован.
+    реконструирует ``RawPage`` из retained-файла (I19) — страница несёт ``source_path``, а
+    не байты: тело документа в RAM воркера не поднимается. Фейк детерминирован — seam/gateway
+    не задействован.
     """
     from concurrent.futures import ThreadPoolExecutor
 
@@ -1047,9 +1048,11 @@ def test_build_extraction_pool_split_thread_pool(tmp_path: Path) -> None:
         def extract(
             self, page: RawPage, route: ExtractionRoute = ExtractionRoute.AUTO
         ) -> ExtractedDoc:
+            # Контракт порта: байты — либо в content, либо по source_path (retained-файл).
+            data = page.content or Path(page.source_path or "").read_bytes()
             return ExtractedDoc(
-                text=page.content.decode("utf-8", errors="replace"),
-                content_hash=content_hash(page.content),
+                text=data.decode("utf-8", errors="replace"),
+                content_hash=content_hash(data),
                 extractor_version=self.version,
                 page_count=1,
             )

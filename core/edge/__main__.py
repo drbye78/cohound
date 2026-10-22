@@ -95,6 +95,19 @@ def _detect_document_filename(page: RawPage) -> str | None:
     return f"document{suffix}" if suffix is not None else None
 
 
+def _extract_document(
+    documents: DoclingDocumentExtractor, page: RawPage, filename: str
+) -> Any:
+    """Документ по пути retained-файла, иначе по байтам страницы (07 §3/I19).
+
+    ``page.source_path`` задан — тело читает адаптер (``extract_path``), в RAM
+    вызывающего его нет; иначе — прежний ``extract_bytes(page.content, filename)``.
+    """
+    if page.source_path:
+        return documents.extract_path(page.source_path, filename_hint=filename)
+    return documents.extract_bytes(page.content, filename)
+
+
 class _EdgeExtractor:
     """Композит edge-экстракции: документы (docling) поверх HTML (trafilatura).
 
@@ -127,15 +140,21 @@ class _EdgeExtractor:
     def extract(
         self, page: RawPage, route: ExtractionRoute = ExtractionRoute.AUTO
     ) -> Any:
-        """``RawPage`` → ``ExtractedDoc`` по ``route`` (грациозная деградация)."""
+        """``RawPage`` → ``ExtractedDoc`` по ``route`` (грациозная деградация).
+
+        Документный путь: при заданном ``source_path`` (retained-файл, I19) извлечение
+        идёт по пути (``extract_path``) — тело не копируется в RAM; иначе — прежний
+        ``extract_bytes`` по байтам страницы.
+        """
         if route is ExtractionRoute.HTML or self._documents is None:
             return self._html.extract(page, route)
+        documents = self._documents
         if route is ExtractionRoute.DOCUMENT:
             filename = _detect_document_filename(page) or "document.pdf"
-            return self._documents.extract_bytes(page.content, filename)
+            return _extract_document(documents, page, filename)
         filename = _detect_document_filename(page)
         if filename is not None:
-            return self._documents.extract_bytes(page.content, filename)
+            return _extract_document(documents, page, filename)
         return self._html.extract(page, route)
 
 

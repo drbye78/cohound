@@ -11,6 +11,8 @@ Docling подменяется фейками: тест не грузит мод
 
 from __future__ import annotations
 
+import errno
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -24,6 +26,7 @@ from core.adapters.extract_document import (
     _probe_ocr_engine,
 )
 from core.domain.enums import DocumentLevel
+from core.util.hashing import content_hash
 
 
 class _FakeConverter:
@@ -252,3 +255,165 @@ def test_extract_bytes_uses_document_page_count(monkeypatch: pytest.MonkeyPatch)
 
     assert doc.error is None
     assert doc.page_count == 665
+
+
+# --------------------------------------------------------------------------- #
+# Путь к retained-файлу: ``extract_path`` без копии тела vs ``extract_bytes``
+# --------------------------------------------------------------------------- #
+
+class _PathReadingConverter:
+    """Фейк-конвертер: читает файл по пути и строит markdown из его байтов.
+
+    Оба входа (байты/путь) проверяются на **одних и тех же** байтах: если путь подставлен
+    неверно или тело скопировано с потерей, markdown разойдётся. Заодно фиксируются
+    свойства подставленного файла — суффикс, симлинк/жёсткая ссылка, inode.
+    """
+
+    def __init__(self) -> None:
+        self.seen: list[dict[str, object]] = []
+
+    def convert(self, path: str) -> object:
+        staged = Path(path)
+        data = staged.read_bytes()
+        self.seen.append(
+            {
+                "path": staged,
+                "suffix": staged.suffix,
+                "is_symlink": staged.is_symlink(),
+                "inode": staged.stat().st_ino,
+                "data": data,
+            }
+        )
+        markdown = f"# документ\n\n{len(data)} байт: {data[:16].decode('utf-8', 'replace')}"
+        return SimpleNamespace(
+            status=SimpleNamespace(name="SUCCESS"),
+            document=SimpleNamespace(export_to_markdown=lambda: markdown),
+            pages=[object()],
+            input=SimpleNamespace(page_count=7),
+        )
+
+def test_extract_path_matches_extract_bytes_byte_for_byte(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """``extract_path`` даёт **тот же** markdown, что ``extract_bytes`` на тех же байтах."""
+    _patch_docling(monkeypatch)
+    monkeypatch.setattr(extract_document, "_DOCLING_AVAILABLE", True)
+    data = b"PK\x03\x04office-document-bytes"
+    source = tmp_path / f"{content_hash(data)}.bin"  # раскладка retention (I19)
+    source.write_bytes(data)
+
+    extractor = DoclingDocumentExtractor(DocumentLevel.LAYOUT_TABLES)
+    converter = _PathReadingConverter()
+    extractor._converter = converter
+
+    by_bytes = extractor.extract_bytes(data, "spec.docx")
+    by_path = extractor.extract_path(source, filename_hint="spec.docx")
+
+    assert by_bytes.error is None and by_path.error is None
+    assert by_path.text == by_bytes.text
+    assert by_path.text.encode("utf-8") == by_bytes.text.encode("utf-8")
+    assert by_path.content_hash == by_bytes.content_hash
+    assert by_path.page_count == by_bytes.page_count == 7
+    assert by_path.extractor_version == by_bytes.extractor_version
+    assert by_path.extractor_version == "docling-doc-3:layout_tables"
+    # Оба пути отдали конвертеру одни и те же байты.
+    assert [entry["data"] for entry in converter.seen] == [data, data]
+
+def test_extract_path_stages_by_reference_with_right_suffix(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Формат — из ``filename_hint`` (retained-файл ``.bin``), тело — по ссылке, не копией."""
+    _patch_docling(monkeypatch)
+    monkeypatch.setattr(extract_document, "_DOCLING_AVAILABLE", True)
+    data = b"%PDF-1.7 retained-body"
+    source = tmp_path / f"{content_hash(data)}.bin"
+    source.write_bytes(data)
+
+    extractor = DoclingDocumentExtractor(DocumentLevel.LAYOUT_TABLES)
+    converter = _PathReadingConverter()
+    extractor._converter = converter
+
+    doc = extractor.extract_path(source, filename_hint="report.pdf")
+
+    assert doc.error is None
+    staged = converter.seen[0]
+    assert staged["suffix"] == ".pdf"
+    if staged["is_symlink"]:
+        # tmp и corpus_raw на разных ФС — симлинк: байты всё равно не копировались.
+        assert staged["path"].resolve() == source.resolve()
+    else:
+        # Жёсткая ссылка: тот же inode, ноль скопированных байт.
+        assert staged["inode"] == source.stat().st_ino
+    # Временный каталог убран: ссылка (и копия, если была) не остаётся на диске.
+    assert not staged["path"].exists()
+
+def test_extract_path_without_hint_rejects_bin(tmp_path: Path) -> None:
+    """Без ``filename_hint`` retained-файл ``.bin`` — честная ошибка формата, не догадка."""
+    source = tmp_path / "abc.bin"
+    source.write_bytes(b"%PDF-1.7")
+
+    doc = DoclingDocumentExtractor(DocumentLevel.LAYOUT_TABLES).extract_path(source)
+
+    assert doc.error == "формат не поддерживается: .bin"
+    assert doc.text == ""
+
+def test_extract_path_missing_file_is_graceful(tmp_path: Path) -> None:
+    """Пропавший retained-файл — ``ExtractedDoc.error``, а не исключение."""
+    missing = tmp_path / "gone.bin"
+
+    doc = DoclingDocumentExtractor(DocumentLevel.LAYOUT_TABLES).extract_path(
+        missing, filename_hint="spec.docx"
+    )
+
+    assert doc.error == f"retained-файл не найден: {missing}"
+    assert doc.text == ""
+    assert doc.extractor_version == "docling-doc-3:layout_tables"
+
+def test_extract_path_full_pdf_keeps_ocr_guard(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Та же OCR-проверка, что у ``extract_bytes``: ``full`` без движка — отказ, не текст."""
+    _patch_docling(monkeypatch)
+    monkeypatch.setattr(extract_document, "_probe_ocr_engine", lambda pdf_options: None)
+    source = tmp_path / "scan.bin"
+    source.write_bytes(b"%PDF-1.7")
+
+    with pytest.raises(OcrEngineUnavailableError, match="full"):
+        DoclingDocumentExtractor(DocumentLevel.FULL).extract_path(
+            source, filename_hint="scan.pdf"
+        )
+
+def test_stage_by_reference_falls_back_link_symlink_copy(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Цепочка подстановки: hard link → symlink → копия (порядок зафиксирован)."""
+    source = tmp_path / "src.bin"
+    source.write_bytes(b"body")
+    target = tmp_path / "out" / "document.docx"
+    target.parent.mkdir()
+
+    # 1. Штатный путь: жёсткая ссылка (байты не копируются).
+    extract_document._stage_by_reference(source, target)
+    assert not target.is_symlink()
+    assert target.stat().st_ino == source.stat().st_ino
+    target.unlink()
+
+    # 2. Разные ФС (EXDEV) → симлинк: тоже без копирования байтов.
+    def _no_hardlink(*args: object, **kwargs: object) -> None:
+        raise OSError(errno.EXDEV, "cross-device link")
+
+    monkeypatch.setattr(extract_document.os, "link", _no_hardlink)
+    extract_document._stage_by_reference(source, target)
+    assert target.is_symlink()
+    assert target.read_bytes() == b"body"
+    target.unlink()
+
+    # 3. ФС без ссылок → потоковая копия (последний резерв).
+    def _no_symlink(*args: object, **kwargs: object) -> None:
+        raise OSError(errno.EPERM, "symlink not permitted")
+
+    monkeypatch.setattr(extract_document.os, "symlink", _no_symlink)
+    extract_document._stage_by_reference(source, target)
+    assert not target.is_symlink()
+    assert target.stat().st_ino != source.stat().st_ino
+    assert target.read_bytes() == b"body"
