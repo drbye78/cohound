@@ -19,6 +19,12 @@
 незaявленный контейнер (``.ova``/``.iso``/``.gz``/``.tar``) остаётся обычным бинарным
 артефактом и отсекается как прежде. OOXML (``.docx``/``.pptx``/``.xlsx``) — это тоже ZIP,
 но **документ**, а не контейнер: различаем по маркеру ``[Content_Types].xml``.
+
+**Терминальный артефакт — надкласс допуска (P6b).** Контейнер **и** документ — оба
+**терминальны**: их байты не продолжают навигацию (документ — лист для экстрактора,
+контейнер — вход для спуска). Поэтому у них общий допуск: файловый приём под потолком
+``crawl.max_artifact_bytes`` и обход path-prefix scope (host/SSRF/блэклист — по-прежнему
+обязательны). Единый предикат — :func:`is_terminal_artifact`.
 """
 
 from __future__ import annotations
@@ -39,6 +45,9 @@ __all__ = [
     "document_suffix",
     "is_attachment_content_type",
     "is_attachment_url",
+    "is_terminal_artifact",
+    "is_terminal_artifact_content_type",
+    "is_terminal_artifact_url",
     "is_textual_content_type",
     "normalize_attachment_formats",
     "unsupported_binary_reason",
@@ -200,6 +209,64 @@ def is_attachment_content_type(
     declared = normalize_attachment_formats(formats)
     fmt = ATTACHMENT_CONTENT_TYPES.get(_mime(content_type))
     return fmt is not None and fmt in declared
+
+
+# --------------------------------------------------------------------------- #
+# Терминальный артефакт: контейнер (P6) ИЛИ документ — общий класс допуска (P6b)
+# --------------------------------------------------------------------------- #
+
+
+def is_terminal_artifact_url(
+    url: str, formats: Iterable[str] | None = None
+) -> bool:
+    """Терминальный артефакт ли ``url`` по суффиксу basename (pre-fetch-детект).
+
+    «Терминальный» = ответ **не продолжает навигацию**: документ (``pdf``/``docx``/
+    ``pptx``/``xlsx`` — лист для экстрактора) либо контейнер из заявленного набора
+    (``zip``/``7z``/``rar`` — вход для спуска). Поэтому path-prefix scope к такому URL
+    **не применяется** (он не «страница раздела»); host scope и SSRF-валидация
+    применяются **всегда**.
+
+    ``.rtf`` намеренно **не** входит в набор: у реестра экстрактора
+    (``SUPPORTED_FORMATS`` = pdf/docx/pptx/xlsx) нет читателя RTF, поэтому допуск дал бы
+    блокирующий ``parser_failed`` и мог бы заблокировать ``corpus_coverage.complete``.
+    RTF ждёт своей полосы (``striprtf``), а не «заодно с документами».
+    """
+    return bool(document_suffix(url)) or is_attachment_url(url, formats)
+
+
+def is_terminal_artifact_content_type(
+    content_type: str | None, formats: Iterable[str] | None = None
+) -> bool:
+    """Терминальный артефакт ли ответ по ``Content-Type`` (post-fetch-детект).
+
+    Тот же класс, что :func:`is_terminal_artifact_url`, но для суффикс-less URL
+    (``/download?id=7``): документный MIME либо MIME заявленного контейнера. Общий
+    бинарный тип (``application/octet-stream``) классом не является — его решает магия
+    байтов.
+    """
+    return document_content_type(content_type) is not None or is_attachment_content_type(
+        content_type, formats
+    )
+
+
+def is_terminal_artifact(
+    url: str | None = None,
+    content_type: str | None = None,
+    attachment_formats: Iterable[str] | None = None,
+) -> bool:
+    """Единый предикат класса «терминальный артефакт» (суффикс **или** ``Content-Type``).
+
+    «Терминальный» = ответ **не продолжает навигацию** (документ или контейнер), поэтому
+    path-prefix scope к нему не применяется; host scope и SSRF-валидация — всегда.
+    Контейнерная часть сужается заявленным ``attachment_formats``; документная — нет
+    (документный allowlist совпадает с реестром экстрактора и от конфига не зависит).
+
+    ``.rtf`` не допускается (см. :func:`is_terminal_artifact_url`): экстрактора нет.
+    """
+    if url is not None and is_terminal_artifact_url(url, attachment_formats):
+        return True
+    return is_terminal_artifact_content_type(content_type, attachment_formats)
 
 
 def _container_magic(head: bytes) -> str | None:

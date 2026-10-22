@@ -18,7 +18,12 @@
   ``sources/build_package.py`` — иначе повторная генерация молча вернёт дрейф;
 * ось ``attachment_formats`` в ``run.yaml`` **не** прописывается: app-дефолт уже равен
   всем поддерживаемым форматам, а явное значение сделало бы ось explicit и изменило
-  ``CrawlLimits.as_dict()``/дайджест.
+  ``CrawlLimits.as_dict()``/дайджест;
+* ось ``max_artifact_bytes`` в ``run.yaml`` **прописана явно** (250 MiB): это потолок
+  **артефакта** (pdf/docx/pptx/xlsx и zip/7z/rar), а не страницы — он сознательно отделён
+  от 20 MiB ``max_response_bytes``. Значение — измеренная граница исполнения
+  (`execution_change`, §13), а не методология; при 20 MiB все отказы
+  ``payload_too_large`` были контейнерами.
 
 Смысловая (сквозная) проверка идёт через реальные ``resolve_crawl_limits`` /
 ``is_blacklisted`` на загруженном ``run.yaml`` пакета — не на выдуманных константах.
@@ -148,6 +153,8 @@ def test_generator_emits_same_exclude_documents_list(
     on_disk_globs = list(_on_disk_crawl()["exclude_documents"])
 
     assert emitted_globs == on_disk_globs
+    # Та же ось допуска артефактов — в генераторе и на диске (иначе регенерация её срежет).
+    assert emitted["crawl"]["max_artifact_bytes"] == _on_disk_crawl()["max_artifact_bytes"]
     # Тот же инвариант на выходе генератора — регрессия читается по имени списка.
     assert not (set(emitted_globs) & ADMITTED_CONTAINER_GLOBS)
     assert RETAINED_BLACKLIST_GLOBS <= set(emitted_globs)
@@ -160,12 +167,14 @@ def test_measured_zip_is_not_blacklisted_while_image_stays_excluded() -> None:
         "измеренный контейнер 125 727 643 B обязан дойти до очереди: его режет только "
         "отсутствие читателя, а не basename"
     )
-    # Потолок артефакта — app-дефолт 256 MiB, заданный в ядре; в run.yaml ось не нужна.
-    assert zip_limits.max_artifact_bytes == CrawlConfig().max_artifact_bytes
+    # Потолок артефакта задан явно в run.yaml: 250 MiB > измеренных 125 727 643 B.
+    # Это ось **артефакта**, а не страницы (`max_response_bytes` остаётся 20 MiB).
+    assert zip_limits.max_artifact_bytes == 262_144_000
     assert zip_limits.max_artifact_bytes > MEASURED_ARCHIVE_BYTES
+    assert zip_limits.max_artifact_bytes_explicit is True
+    assert zip_limits.max_response_bytes == 20_971_520
     assert zip_limits.attachment_formats == SUPPORTED_ARCHIVE_FORMATS
     assert zip_limits.attachment_formats_explicit is False
-    assert zip_limits.max_artifact_bytes_explicit is False
 
     image_limits = _limits(IMAGE_URL)
     assert is_blacklisted(IMAGE_URL, image_limits) is True, (

@@ -153,6 +153,8 @@ from core.domain import (
     ReuseKind,
 )
 from core.pipeline.crawl_frontier import (
+    SCOPE_ARTIFACT_OUTSIDE_PREFIX,
+    SCOPE_OUT,
     CrawlLimits,
     Frontier,
     is_blacklisted,
@@ -219,6 +221,7 @@ from core.util.document_formats import (
     document_suffix,
     is_attachment_content_type,
     is_attachment_url,
+    is_terminal_artifact,
     unsupported_binary_reason,
 )
 from core.util.hashing import content_hash, short_hash
@@ -740,6 +743,28 @@ def _extract_cache_key(raw_path: str | Path) -> str:
     retention (I19), а не случайное совпадение.
     """
     return Path(raw_path).stem
+
+
+def _page_with_retained_bytes(page: RawPage, raw_path: Path) -> RawPage:
+    """``RawPage`` с байтами retained-файла — только когда тело пришло staging-путём.
+
+    Документ (``pdf``/office), допущенный как терминальный артефакт (P6b), приезжает с
+    пустым ``content`` и файлом на диске: тело не буферизуется, чтобы не держать 100 MiB в
+    RAM. Экстрактор же работает от байтов, поэтому inline-путь (без пула экстракции)
+    перечитывает **тот же** retained-файл — ровно так, как это уже делает воркер пула
+    (:func:`_run_extract`, I19: источник байтов — retained-файл, не буфер адаптера).
+
+    Страница (``content`` непуст) возвращается как есть — путь байт-в-байт прежний.
+    Отсутствующий/нечитаемый файл — тоже ``page`` без изменений: ошибку честно поднимет
+    экстрактор, а не этот хелпер.
+    """
+    if page.content:
+        return page
+    try:
+        content = Path(raw_path).read_bytes()
+    except OSError:
+        return page
+    return replace(page, content=content)
 
 
 def _run_extract(extractor: ExtractorPort, request: _ExtractRequest) -> ExtractedDoc:
@@ -1677,7 +1702,11 @@ def _is_attachment(
     content_type: str | None,
     attachment_formats: Sequence[str] | None,
 ) -> bool:
-    """Класс «артефакт-контейнер» по URL-суффиксу либо ``Content-Type`` (P6).
+    """Класс «артефакт-**контейнер**» по URL-суффиксу либо ``Content-Type`` (P6).
+
+    Это **контейнерная** половина класса (``zip``/``7z``/``rar``): решение о спуске в
+    члены. Документ (``pdf``/``docx``/``pptx``/``xlsx``) сюда **не** входит — его судьбу
+    решает экстрактор, а не спуск. Для допуска/потолков см. :func:`_is_terminal_artifact`.
 
     ``attachment_formats=None`` — дефолт всех поддерживаемых форматов (так резолвится
     конфиг); пустой набор — контейнеров не заявлено, класс не определяется.
@@ -1685,6 +1714,22 @@ def _is_attachment(
     if is_attachment_url(url or "", attachment_formats):
         return True
     return is_attachment_content_type(content_type, attachment_formats)
+
+
+def _is_terminal_artifact(
+    url: str | None,
+    content_type: str | None,
+    attachment_formats: Sequence[str] | None,
+) -> bool:
+    """Класс «терминальный артефакт» — контейнер **или** документ (P6b).
+
+    Единый класс допуска/потолка: такой ответ не продолжает навигацию, поэтому вправе
+    быть больше страничного ``max_response_bytes`` и удерживаться под
+    ``max_artifact_bytes`` (``pdf``/``docx``/``pptx``/``xlsx`` и ``zip``/``7z``/``rar``).
+    Документная часть от ``attachment_formats`` не зависит (совпадает с реестром
+    экстрактора); ``.rtf`` не допускается — читателя нет.
+    """
+    return is_terminal_artifact(url or None, content_type, attachment_formats)
 
 
 def _resume_source(
@@ -1700,11 +1745,12 @@ def _resume_source(
     ``raw_path`` (re-extract из тех же байтов без сети). ``PENDING``/``RUNNING``/отсутствие
     записи, отсутствие ``raw_path`` или файла на диске → ``None`` (обычный путь фетча).
 
-    **P0/P6: потолок по классу.** Размер проверяется по ``stat`` **до** чтения. Класс
+    **P0/P6b: потолок по классу.** Размер проверяется по ``stat`` **до** чтения. Класс
     определяется по метаданным записи (URL-суффикс/``Content-Type``, заявленный набор
-    ``attachment_formats``): допущенный артефакт-контейнер ограничен
-    ``artifact_max_bytes``, страница — ``max_bytes``. Так retained-артефакт в 125 MB
-    резюмится, а страница того же размера по-прежнему терминально отвергается
+    ``attachment_formats``): допущенный **терминальный артефакт** — документ
+    (``pdf``/``docx``/``pptx``/``xlsx``) **или** контейнер (``zip``/``7z``/``rar``) —
+    ограничен ``artifact_max_bytes``, страница — ``max_bytes``. Так retained-PDF/артефакт в
+    125 MB резюмится, а страница того же размера по-прежнему терминально отвергается
     ``payload_too_large``.
 
     **Память.** Страницы (≤ ``max_bytes``) буферизуются как прежде — путь байт-в-байт
@@ -1725,7 +1771,7 @@ def _resume_source(
     path = Path(item.raw_path)
     if not path.is_file():
         return None
-    artifact = _is_attachment(item.url, item.content_type, attachment_formats)
+    artifact = _is_terminal_artifact(item.url, item.content_type, attachment_formats)
     cap = artifact_max_bytes if artifact and artifact_max_bytes is not None else max_bytes
     try:
         size = path.stat().st_size
@@ -2725,7 +2771,9 @@ def _build_corpus(
                 )
             )
             if extracted is None:
-                extracted = extractor_obj.extract(page, fetch_plan.extract)
+                extracted = extractor_obj.extract(
+                    _page_with_retained_bytes(page, raw_path), fetch_plan.extract
+                )
                 if extract_cache is not None:
                     extract_cache.put(
                         extracted, level=level_text, content_hash=cache_key
@@ -3494,10 +3542,15 @@ def _build_corpus(
         их к каждому корню — двойной фетч/бюджет, поэтому свежие seeds отдаются один раз.
 
         ``<loc>`` — **подчинённые** seeds корня, а не задающие scope: loc проходит тот же
-        ``frontier.in_scope`` (host + path-граница + traversal-guard), что и обнаруженная
-        ссылка. Scope-чек исполняется **до** пометки ``(pid, loc)`` использованным, поэтому
-        loc, отвергнутый этим корнем, остаётся доступным другому корню продукта. Кэш опроса
-        sitemap (``(pid, sitemap_url)``) остаётся нефильтрованным.
+        scope-допуск (host + path-граница + traversal-guard), что и обнаруженная ссылка,
+        **кроме** классового исключения терминального артефакта (P6b): ``<loc>`` на
+        ``.pdf``/``.docx``/``.pptx``/``.xlsx`` или заявленный контейнер вне path-prefix
+        **ставится в очередь**, а не считается ``_SITEMAP_SKIP_PATH`` (host scope, SSRF и
+        traversal-guard сохраняются; обход видим через
+        :meth:`Frontier.note_artifact_bypass`). Scope-чек исполняется **до** пометки
+        ``(pid, loc)`` использованным, поэтому loc, отвергнутый этим корнем, остаётся
+        доступным другому корню продукта. Кэш опроса sitemap (``(pid, sitemap_url)``)
+        остаётся нефильтрованным.
 
         Пометка ``(pid, loc)`` **не** делается здесь (F12): loc может быть отвергнут уже
         после scope — блэклистом профиля корня (``exclude_paths``/``exclude_documents``) или
@@ -3515,9 +3568,17 @@ def _build_corpus(
         fresh: list[str] = []
         rejected: dict[str, list[str]] = {_SITEMAP_SKIP_HOST: [], _SITEMAP_SKIP_PATH: []}
         for loc in _expand_sitemap(pid, seed_url):
-            if not frontier.in_scope(loc):
+            admission = frontier.scope_admission(loc)
+            if admission == SCOPE_OUT:
                 rejected[_sitemap_skip_class(loc, frontier.root_url)].append(loc)
                 continue
+            if admission == SCOPE_ARTIFACT_OUTSIDE_PREFIX and not frontier.blacklisted(
+                loc
+            ):
+                # P6b: терминальный артефакт вне path-prefix — enqueued, но обход обязан
+                # быть видимым. Блэклист решается позже (``add_seed``, F12); здесь только
+                # не пишем в провенанс то, что заведомо будет отброшено.
+                frontier.note_artifact_bypass(loc)
             key = (pid, loc)
             if key in sitemap_seed_used:
                 continue
@@ -4030,6 +4091,14 @@ def _build_corpus(
             # P5: видимые пропуски документов (``url_suffix``/``content_type``).
             "skipped_documents": [dict(rec) for rec in frontier.skipped_documents],
         }
+        # P6b: обход path-prefix терминальными артефактами (документ/заявленный контейнер
+        # вне префикса корня) — счётчик + ограниченные примеры. Ключ появляется только при
+        # наличии обхода: запись корня без артефактов остаётся байт-в-байт прежней.
+        if frontier.artifacts_outside_prefix_count:
+            record["artifacts_outside_prefix"] = {
+                "count": frontier.artifacts_outside_prefix_count,
+                "examples": list(frontier.artifacts_outside_prefix),
+            }
         # D3/F10: отказы scope у ``<loc>`` sitemap — провенанс, не ``errors``.
         # Ключ появляется только при наличии отказов: без sitemap запись байт-в-байт
         # прежняя. Классы ``host``/``path`` раздельны (F6).
@@ -4576,7 +4645,11 @@ def _build_corpus(
                 # и продукт ложно ``complete=False`` (регрессия B2/F13 уровнем выше).
                 if iurl in revalidation_url_set:
                     continue
-                if not frontier.in_scope(iurl):
+                if frontier.scope_admission(iurl) == SCOPE_OUT:
+                    # P6b: терминальный артефакт вне path-prefix этим корнем тоже
+                    # допускается, поэтому его resumed-элемент обязан заряжать бюджет —
+                    # иначе повторный прогон тихо добывал бы лишнюю страницу сверх
+                    # ``max_documents``.
                     continue
                 counted = _resume_source(
                     item,
@@ -5705,6 +5778,12 @@ def _build_corpus(
                 info["skipped"] = skipped_by_root[group_root]
             if frontier is not None and frontier.skipped_blacklisted:
                 info["skipped_blacklisted"] = list(frontier.skipped_blacklisted)
+            if frontier is not None and frontier.artifacts_outside_prefix_count:
+                # P6b: видимость обхода path-prefix — рядом с ``skipped_blacklisted``.
+                info["artifacts_outside_prefix"] = {
+                    "count": frontier.artifacts_outside_prefix_count,
+                    "examples": list(frontier.artifacts_outside_prefix),
+                }
             revalidation_orphans[f"{product_id}:catalog:{group_root}"] = info
             if frontier is not None:
                 revalidation_fetched_total += frontier.revalidation_fetched
@@ -5743,6 +5822,12 @@ def _build_corpus(
                 info["skipped"] = skipped_by_origin[origin]
             if frontier is not None and frontier.skipped_blacklisted:
                 info["skipped_blacklisted"] = list(frontier.skipped_blacklisted)
+            if frontier is not None and frontier.artifacts_outside_prefix_count:
+                # P6b: видимость обхода path-prefix — рядом с ``skipped_blacklisted``.
+                info["artifacts_outside_prefix"] = {
+                    "count": frontier.artifacts_outside_prefix_count,
+                    "examples": list(frontier.artifacts_outside_prefix),
+                }
             revalidation_orphans[f"{product_id}:{origin}"] = info
             revalidation_orphan_total += len(all_known_urls)
             if frontier is not None:

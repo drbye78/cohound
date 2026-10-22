@@ -6,8 +6,9 @@ staging (никакого файла, тот же ``content``/``content_hash``);
 попадает в RAM целиком — тело пишется в staging-файл, ``content`` пуст, ``head`` — первые
 8 KiB, URL-кэш не отравляется пустым телом; (3) переключение на файл при неизвестном
 ``Content-Length``; (4) потолки: страница свыше ``max_response_bytes`` по-прежнему
-``payload_too_large``, артефакт свыше ``max_stream_bytes`` — тоже, staging-файл удалён.
-Данные нейтральны (§1.3).
+``payload_too_large``, артефакт свыше ``max_stream_bytes`` — тоже, staging-файл удалён;
+(5) P6b: документ (``pdf``/office) — тоже терминальный артефакт (файл, не RAM), а страница
+и ``.rtf`` — нет. Данные нейтральны (§1.3).
 """
 
 from __future__ import annotations
@@ -381,3 +382,143 @@ def test_declared_formats_do_not_admit_undeclared_container(
             "https://example.com/files/bundle.7z",
             _staging_plan(tmp_path, cap=20 * MIB, ceiling=256 * MIB),
         )
+
+
+# ---------------------------------------------------------------------------
+# (6) P6b: документ — тоже терминальный артефакт (pdf/office, не только контейнер)
+# ---------------------------------------------------------------------------
+
+
+PDF_URL = "https://example.com/files/manual.pdf"
+DOCX_URL = "https://example.com/files/spec.docx"
+RTF_URL = "https://example.com/files/memo.rtf"
+PDF_MAGIC = b"%PDF-1.7\n"
+
+
+def test_pdf_over_page_cap_streams_to_staging_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """40 MiB PDF (> страничных 20 MiB, < 250 MiB) идёт в файл, а не в RAM.
+
+    План заявляет **только контейнер** ``zip``: документная половина класса от
+    ``attachment_formats`` не зависит (совпадает с реестром экстрактора), поэтому PDF
+    допускается и без «контейнерного» разрешения.
+    """
+    total = 40 * MIB
+    crawler, _fake = _crawler(
+        monkeypatch,
+        _StreamResponse(
+            url=PDF_URL,
+            total=total,
+            chunk_size=MIB,
+            content_type="application/pdf",
+            content_length=total,
+            magic=PDF_MAGIC,
+        ),
+    )
+
+    tracemalloc.start()
+    try:
+        page = crawler.fetch(PDF_URL, _staging_plan(tmp_path, cap=20 * MIB, ceiling=250 * MIB))
+        _current, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    assert page.content == b""
+    assert page.staged_path is not None
+    staged = Path(page.staged_path)
+    assert staged.is_file() and staged.stat().st_size == total
+    assert page.head is not None and page.head.startswith(PDF_MAGIC)
+    # Тело целиком в RAM не попадало (пик куда ниже страничного потолка).
+    assert peak < 16 * MIB
+
+
+def test_office_document_streams_by_suffix_without_content_type(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``.docx`` с неинформативным ``Content-Type`` — класс по суффиксу, файл на диске."""
+    total = 25 * MIB
+    crawler, _fake = _crawler(
+        monkeypatch,
+        _StreamResponse(
+            url=DOCX_URL,
+            total=total,
+            chunk_size=MIB,
+            content_type="application/octet-stream",
+            content_length=total,
+            magic=ZIP_MAGIC,
+        ),
+    )
+
+    page = crawler.fetch(DOCX_URL, _staging_plan(tmp_path, cap=20 * MIB, ceiling=250 * MIB))
+
+    assert page.content == b""
+    assert page.staged_path is not None
+    assert Path(page.staged_path).stat().st_size == total
+
+
+def test_html_page_over_cap_is_still_payload_too_large(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Страница не получает артефактный потолок: HTML сверх 20 MiB — прежний отказ."""
+    total = 30 * MIB
+    crawler, _fake = _crawler(
+        monkeypatch,
+        _StreamResponse(
+            url=PAGE_URL,
+            total=total,
+            chunk_size=MIB,
+            content_type="text/html; charset=utf-8",
+            content_length=total,
+        ),
+    )
+
+    with pytest.raises(CrawlPayloadTooLarge):
+        crawler.fetch(PAGE_URL, _staging_plan(tmp_path, cap=20 * MIB, ceiling=250 * MIB))
+
+    stage = tmp_path / "stage"
+    assert not stage.exists() or not any(stage.iterdir())
+
+
+def test_rtf_is_not_admitted_as_terminal_artifact(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """RTF ждёт ``striprtf``: читателя в реестре нет, допуск дал бы ``parser_failed``."""
+    total = 30 * MIB
+    crawler, _fake = _crawler(
+        monkeypatch,
+        _StreamResponse(
+            url=RTF_URL,
+            total=total,
+            chunk_size=MIB,
+            content_type="application/rtf",
+            content_length=total,
+        ),
+    )
+
+    with pytest.raises(CrawlPayloadTooLarge):
+        crawler.fetch(RTF_URL, _staging_plan(tmp_path, cap=20 * MIB, ceiling=250 * MIB))
+
+
+def test_pdf_over_artifact_ceiling_is_rejected_and_file_removed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Потолок артефакта применяется и к документам: 30 MiB > 16 MiB — отказ, файла нет."""
+    total = 30 * MIB
+    crawler, _fake = _crawler(
+        monkeypatch,
+        _StreamResponse(
+            url=PDF_URL,
+            total=total,
+            chunk_size=MIB,
+            content_type="application/pdf",
+            content_length=total,
+            magic=PDF_MAGIC,
+        ),
+    )
+
+    with pytest.raises(CrawlPayloadTooLarge):
+        crawler.fetch(PDF_URL, _staging_plan(tmp_path, cap=20 * MIB, ceiling=16 * MIB))
+
+    stage = tmp_path / "stage"
+    assert not stage.exists() or not any(stage.iterdir())

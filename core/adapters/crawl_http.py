@@ -72,8 +72,7 @@ from core.ports.types import FetchMode, FetchPlan, RawPage
 from core.util.cache import ContentAddressedCache, http_key
 from core.util.document_formats import (
     BINARY_SNIFF_BYTES,
-    is_attachment_content_type,
-    is_attachment_url,
+    is_terminal_artifact,
 )
 from core.util.robots import RobotsGate
 from core.util.security import validate_url
@@ -294,8 +293,9 @@ class HttpCrawler:
         чтения, а поток обрывается сразу при превышении потолка. Потолки два:
 
         * ``max_response_bytes`` — **in-memory** потолок страницы. Свыше него тело уходит
-          в staging-файл **только** если план допускает артефакт (``staging_dir`` +
-          ``max_stream_bytes``), иначе — ``payload_too_large`` (прежнее поведение);
+          в staging-файл **только** если план допускает терминальный артефакт
+          (``staging_dir`` + ``max_stream_bytes`` и класс «документ или заявленный
+          контейнер»), иначе — ``payload_too_large`` (прежнее поведение);
         * ``max_stream_bytes`` — потоковый потолок допущенного артефакта; выше него —
           ``payload_too_large`` с удалением staging-файла.
 
@@ -388,18 +388,19 @@ class HttpCrawler:
     def _staging_path(
         self, plan: FetchPlan, *, url: str, content_type: str | None = None
     ) -> Path | None:
-        """Каталог staging, если план допускает файловый приём **артефакта**, иначе ``None``.
+        """Каталог staging, если план допускает файловый приём **терминального артефакта**.
 
         Оба поля плана обязательны: ``staging_dir`` без ``max_stream_bytes`` не даёт
-        потолка, а значит не даёт и права писать файл. Класс ответа — «артефакт-контейнер»
-        (URL-суффикс либо ``Content-Type`` из заявленного набора): страница свыше
-        ``max_response_bytes`` по-прежнему получает ``payload_too_large`` байт-в-байт.
+        потолка, а значит не даёт и права писать файл. Класс — «терминальный артефакт»
+        (:func:`core.util.document_formats.is_terminal_artifact`): документ
+        (``pdf``/``docx``/``pptx``/``xlsx``) **или** заявленный контейнер (URL-суффикс либо
+        ``Content-Type``). Страница (HTML) свыше ``max_response_bytes`` по-прежнему получает
+        ``payload_too_large`` байт-в-байт: её байты продолжают навигацию и в файл не идут.
         """
         if plan.staging_dir is None or plan.max_stream_bytes is None:
             return None
-        if not (
-            is_attachment_url(url, plan.attachment_formats)
-            or is_attachment_content_type(content_type, plan.attachment_formats)
+        if not is_terminal_artifact(
+            url, content_type, plan.attachment_formats
         ):
             return None
         return Path(plan.staging_dir)

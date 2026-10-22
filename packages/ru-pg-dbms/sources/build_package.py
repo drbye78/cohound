@@ -1276,6 +1276,11 @@ def main() -> int:
             "max_depth": 8,
             "max_documents": 300,
             "max_workers": 2,
+            # Потолок ТЕРМИНАЛЬНОГО АРТЕФАКТА (250 MiB) — не страничный потолок:
+            # `max_response_bytes` остаётся дефолтным 20 MiB. Применяется к pdf/docx/
+            # pptx/xlsx и к zip/7z/rar; тело пишется в staging-файл, не в RAM.
+            # Держать в синхроне с `run.yaml` — иначе `generator_drift` (P7).
+            "max_artifact_bytes": 262_144_000,
             # Замер 2026-10 (после `PDF_QUEUE_MAX_SIZE = 1`): 2 воркера помещаются в 6.9 GiB
             # при `layout_tables` (2×2126 MB + baseline родителя). Держать в синхроне с
             # `run.yaml` — иначе `generator_drift` (P7).

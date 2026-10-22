@@ -474,3 +474,156 @@ def test_declared_artifact_with_garbage_bytes_is_unsupported_binary(
         assert any("unsupported_binary" in e for e in result.errors)
     finally:
         store.close()
+
+
+# ---------------------------------------------------------------------------
+# (4) P6b: документ — тоже терминальный артефакт (потолок допуска и resume)
+# ---------------------------------------------------------------------------
+
+PDF_URL = "https://docs.test/files/manual.pdf"
+PDF_MAGIC = b"%PDF-1.7\n"
+
+
+class _DocumentExtractor:
+    """Экстрактор-заглушка: не материализует текст из десятков MiB (тест — про допуск)."""
+
+    version = "extractor-1"
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.sizes: list[int] = []
+
+    def extract(
+        self, page: RawPage, route: ExtractionRoute = ExtractionRoute.AUTO
+    ) -> ExtractedDoc:
+        self.calls += 1
+        self.sizes.append(len(page.content))
+        return ExtractedDoc(
+            text="document text",
+            content_hash=content_hash(b"document text"),
+            extractor_version=self.version,
+            page_count=1,
+        )
+
+
+def test_staged_pdf_is_retained_and_extracted(tmp_path: Path) -> None:
+    """25 MiB PDF (> страничных 20 MiB) ретейнится и **извлекается**, а не падает."""
+    staging = tmp_path / "incoming"
+    crawler = _StagingCrawler(
+        PDF_URL,
+        total=25 * MIB,
+        staging_dir=staging,
+        content_type="application/pdf",
+        magic=PDF_MAGIC,
+    )
+    extractor = _DocumentExtractor()
+    store = SqliteStore(":memory:")
+    try:
+        _make_run(store)
+        result = _build(
+            tmp_path, crawler=crawler, urls=[PDF_URL], store=store, extractor=extractor
+        )
+
+        item = _items(store)[PDF_URL]
+        assert item.status is CrawlItemStatus.FETCHED
+        assert item.content_hash == crawler.digest
+        raw = Path(item.raw_path)
+        assert raw.stat().st_size == 25 * MIB
+        # Staging переехал, документ извлечён (не «контейнерный» skip).
+        assert not any(staging.iterdir())
+        assert extractor.calls == 1
+        # Экстрактор увидел **байты retained-файла** (I19), а не пустой staging-буфер.
+        assert extractor.sizes == [25 * MIB]
+        assert len(_build_of(result).docs) == 1
+        assert not any("payload_too_large" in e for e in result.errors)
+        assert not any("attachment_skip" in e for e in result.errors)
+    finally:
+        store.close()
+
+
+def test_retained_pdf_resumes_under_artifact_ceiling(tmp_path: Path) -> None:
+    """Класс-aware resume: retained PDF 25 MiB резюмится, а не режется страничным потолком."""
+    staging = tmp_path / "incoming"
+    first = _StagingCrawler(
+        PDF_URL,
+        total=25 * MIB,
+        staging_dir=staging,
+        content_type="application/pdf",
+        magic=PDF_MAGIC,
+    )
+    store = SqliteStore(":memory:")
+    try:
+        _make_run(store)
+        _build(
+            tmp_path,
+            crawler=first,
+            urls=[PDF_URL],
+            store=store,
+            extractor=_DocumentExtractor(),
+        )
+        item = _items(store)[PDF_URL]
+        assert item.status is CrawlItemStatus.FETCHED
+        raw = Path(item.raw_path)
+        assert raw.stat().st_size == 25 * MIB
+
+        extractor = _DocumentExtractor()
+        result = _build(
+            tmp_path,
+            crawler=_ExplodingCrawler(),
+            urls=[PDF_URL],
+            store=store,
+            extractor=extractor,
+        )
+
+        resumed = _items(store)[PDF_URL]
+        assert resumed.status is CrawlItemStatus.FETCHED
+        assert resumed.content_hash == item.content_hash
+        assert resumed.raw_path == str(raw)
+        assert not any("payload_too_large" in e for e in result.errors)
+        # Документ переизвлечён из retained-байтов (resume не теряет содержимое).
+        assert extractor.calls == 1
+        assert extractor.sizes == [25 * MIB]
+    finally:
+        store.close()
+
+
+def test_artifact_outside_path_prefix_is_visible_in_provenance(tmp_path: Path) -> None:
+    """Обход path-prefix артефактом: PDF вне ``/docs`` добыт, обход виден в провенансе."""
+    root = "https://docs.test/docs/index.html"
+    body = (
+        b"<html><body>"
+        b'<a href="/files/manual.pdf">pdf</a>'
+        b'<a href="/files/page.html">html</a>'
+        b"</body></html>"
+    )
+    pdf_body = PDF_MAGIC + bytes(512)
+    crawler = _BufferedCrawler(
+        {root: body, PDF_URL: pdf_body},
+        {root: "text/html", PDF_URL: "application/pdf"},
+    )
+    store = SqliteStore(":memory:")
+    try:
+        _make_run(store)
+        result = _build(
+            tmp_path,
+            crawler=crawler,
+            urls=[root],
+            store=store,
+            crawl_defaults=CrawlRunConfig(max_depth=1),
+        )
+
+        # Артефакт вне префикса добыт; HTML вне префикса — нет (прежнее поведение).
+        assert PDF_URL in crawler.calls
+        assert "https://docs.test/files/page.html" not in crawler.calls
+
+        record = _build_of(result).truncation[0]
+        assert record["root"] == root
+        assert record["artifacts_outside_prefix"] == {
+            "count": 1,
+            "examples": [PDF_URL],
+        }
+        # Обход — не усечение и не ошибка: молчаливым он быть не должен, но и
+        # ``truncated`` он не поднимает (полнота корня не страдает).
+        assert record["truncated"] is False
+    finally:
+        store.close()

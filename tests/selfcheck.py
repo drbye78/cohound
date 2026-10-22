@@ -439,6 +439,12 @@ def main() -> int:
         lambda: _crawl_archive_axes(),
     )
 
+    section("Терминальный артефакт (P6b)")
+    check(
+        "terminal_artifact: класс документа/контейнера + обход path-prefix",
+        lambda: _crawl_terminal_artifact(),
+    )
+
     print(f"\n{CHECKS - len(FAILURES)}/{CHECKS} проверок пройдено")
     if FAILURES:
         print("\nПровалы:")
@@ -3481,6 +3487,65 @@ def _crawl_archive_axes() -> None:
             f"словарь={sorted(data.get('archive_descent', []))}, "
             f"схема={sorted(v.value for v in ArchiveDescent)}"
         )
+
+
+def _crawl_terminal_artifact() -> None:
+    """P6b: класс «терминальный артефакт» — предикат и обход path-prefix.
+
+    Инварианты: документ (pdf/docx/pptx/xlsx) и заявленный контейнер — один класс допуска;
+    незаявленный контейнер и ``.rtf`` (нет читателя) — нет; обход path-prefix действует
+    **только** для класса, host/SSRF/traversal/блэклист сохраняются, а сам обход виден в
+    счётчике ``artifacts_outside_prefix`` (тихий обход — дефект).
+    """
+    from core.pipeline.crawl_frontier import (
+        SCOPE_ARTIFACT_OUTSIDE_PREFIX,
+        SCOPE_IN,
+        SCOPE_OUT,
+        CrawlLimits,
+        Frontier,
+    )
+    from core.util.document_formats import (
+        is_terminal_artifact,
+        is_terminal_artifact_content_type,
+        is_terminal_artifact_url,
+    )
+
+    # Документная половина класса (совпадает с реестром экстрактора).
+    for url in ("https://h/a.pdf", "https://h/a.DOCX", "https://h/a.pptx", "https://h/a.xlsx"):
+        _assert(is_terminal_artifact_url(url))
+        _assert(is_terminal_artifact(url))
+    # Контейнерная половина сужается заявленным набором.
+    _assert(is_terminal_artifact_url("https://h/a.zip"))
+    _assert(not is_terminal_artifact_url("https://h/a.7z", ("zip",)))
+    _assert(not is_terminal_artifact_url("https://h/a.zip", ()))
+    # Не-артефакты: страница, незаявленный контейнер, RTF (читателя нет).
+    for url in ("https://h/a.html", "https://h/a.ova", "https://h/a.iso", "https://h/a.rtf"):
+        _assert(not is_terminal_artifact_url(url))
+    # Content-Type (суффикс-less URL).
+    _assert(is_terminal_artifact("https://h/download?id=7", "application/pdf"))
+    _assert(is_terminal_artifact_content_type("application/zip; charset=binary"))
+    _assert(not is_terminal_artifact_content_type("application/octet-stream"))
+    _assert(not is_terminal_artifact_content_type("application/rtf"))
+
+    # Обход path-prefix: только класс, только на своём host, блэклист побеждает.
+    frontier = Frontier("https://h/documents", CrawlLimits(max_depth=3))
+    pdf = "https://h/files/report.pdf"
+    _assert(frontier.scope_admission(pdf) == SCOPE_ARTIFACT_OUTSIDE_PREFIX)
+    _assert(frontier.scope_admission("https://h/documents/x") == SCOPE_IN)
+    _assert(frontier.scope_admission("https://h/files/x.html") == SCOPE_OUT)
+    _assert(frontier.scope_admission("https://other/files/x.pdf") == SCOPE_OUT)
+    _assert(frontier.scope_admission("https://h/documents/%2e%2e/x.pdf") == SCOPE_OUT)
+    _assert(frontier.discover(pdf, 1) is True)
+    _assert(frontier.artifacts_outside_prefix_count == 1)
+    _assert(frontier.artifacts_outside_prefix == [pdf])
+    blocked = Frontier(
+        "https://h/documents", CrawlLimits(max_depth=3, exclude_documents=["*.pdf"])
+    )
+    _assert(blocked.discover(pdf, 1) is False)
+    _assert(blocked.artifacts_outside_prefix_count == 0)  # обхода не было — не пишем
+    _assert(blocked.skipped_blacklisted == [pdf])
+    # Чужой host не отменяется флагом класса (обход не становится выходом из scope).
+    _assert(not frontier.in_scope("https://other/files/x.pdf", terminal_artifact=True))
 
 
 def _crawl_probe() -> None:

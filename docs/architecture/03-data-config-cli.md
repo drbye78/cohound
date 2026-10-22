@@ -593,6 +593,13 @@ crawl:                         # операционная политика HTTP-
                                # layout_tables|full; дефолт full = сегодняшнее поведение)
   max_depth: 0                 # >=0: 0 = только seeds (BFS идёт и под executor/split — A2/R2)
   max_documents: null          # опц. (>0): потолок добытых страниц на (продукт, seed-root)
+  # P6/P6b: два РАЗНЫХ потолка. max_response_bytes — RAM-потолок СТРАНИЦЫ (дефолт 20 MiB;
+  # HTML сверх него → payload_too_large). max_artifact_bytes — потоковый потолок
+  # ТЕРМИНАЛЬНОГО АРТЕФАКТА (документ pdf/docx/pptx/xlsx И контейнер zip/7z/rar): тело
+  # пишется в staging-файл, не в RAM. Оси независимы; путать их — ошибка конфигурации.
+  max_response_bytes: null     # опц.: in-memory потолок страницы (дефолт 20 MiB)
+  max_artifact_bytes: null     # опц.: потолок артефакта (дефолт 256 MiB)
+  attachment_formats: null     # P6: позитивная вселенная контейнеров (дефолт zip/7z/rar)
   exclude_paths: []            # glob блэклиста по пути URL (fnmatchcase; ведущий "/" опционален)
   exclude_documents: []        # glob блэклиста по basename URL, напр. ["*.pdf"]
   robots: null                 # N1: null=auto (robots при discovery); true/false — явно
@@ -609,6 +616,28 @@ crawl:                         # операционная политика HTTP-
 переопределяет операционные параметры лёгкого `HttpCrawler` (`user_agent`/`timeout_s`/
 `follow_redirects`); при `None`/отсутствии поля берётся дефолт адаптера — обратная
 совместимость профиля `local` без файла.
+
+**Терминальный артефакт и два потолка (P6/P6b).** Класс ответа определяется не «размером», а
+поведением навигации: **страница** продолжает обход (её RAM-потолок —
+`crawl.max_response_bytes`, дефолт 20 MiB; сверх — `payload_too_large`), а **терминальный
+артефакт** — нет. Терминальный артефакт = документ (`pdf`/`docx`/`pptx`/`xlsx` — лист для
+экстрактора) **или** контейнер (`zip`/`7z`/`rar` из `crawl.attachment_formats` — вход для
+спуска); определяется URL-суффиксом либо `Content-Type`
+(`core/util/document_formats.is_terminal_artifact`). Он вправе быть больше страничного
+потолка: тело пишется потоком в staging-файл (не в RAM) и ограничено
+`crawl.max_artifact_bytes` (дефолт 256 MiB). Потолки **независимы**: повышать
+`max_response_bytes` «чтобы прошли PDF» — ошибка (это поднимет и RAM-потолок страниц).
+`.rtf` намеренно не допускается: у реестра экстрактора нет читателя RTF, допуск дал бы
+блокирующий `parser_failed`.
+
+**Обход path-prefix артефактом (P6b).** Артефакт не продолжает навигацию, поэтому
+path-prefix seed-root к нему не применяется: `/docs/` может ссылаться на
+`/files/report.pdf`, и такой URL ставится в очередь (BFS-ссылки, известные URL ревалидации
+и sitemap `<loc>`), а не отбрасывается как «вне раздела». **Host scope, SSRF-валидация,
+`..`-traversal-guard и robots — без изменений**; блэклист оператора
+(`exclude_paths`/`exclude_documents`) побеждает всегда. Обход видим: счётчик + ограниченные
+примеры (`artifacts_outside_prefix`) попадают в провенанс корня рядом с
+`skipped_blacklisted`/`skipped_documents` — молчаливый обход был бы дефектом.
 
 **`extract_workers` (P4, runbook памяти).** Параллельная экстракция документов:
 `local` — пул процессов (`ProcessPoolExecutor`/forkserver, docling-экстрактор строится на
@@ -753,6 +782,10 @@ hound run \
 Что появится на диске (раскладка A.1/A.2):
 
 - `corpus_raw/{product_id}/{hash}.bin` — retention сырых байтов (пишется до экстракции, I19);
+- `corpus_raw/_staging/` — staging-файлы терминальных артефактов до публикации переездом
+  (`os.replace`); файл живёт только на время фетча и не является evidence сам по себе.
+  Потолки: страница — `crawl.max_response_bytes` (20 MiB, RAM), артефакт —
+  `crawl.max_artifact_bytes` (256 MiB, диск); см. §D.5;
 - `index_store/{package}/{build_id}/{product_id}/` — иммутабельная индексная сборка
   (chunks + `index_manifest`; при подключённых эмбеддере/билдере — `.npy`-шарды);
 - `runs/{run_id}/cohound.db` — чанки/документы/манифест индекса прогона;
