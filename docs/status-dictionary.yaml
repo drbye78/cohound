@@ -1,9 +1,29 @@
 # coHound — словарь статусов и перечислений
-# Источник истины по §4.1 регламента cohound-spec-v2.md (v2.1).
+# Источник истины по §4.1 регламента cohound-spec-v2.md.
 # Версия словаря: 2.2.0
 # Каталоги (package/catalog) версионируются отдельно; этот файл — их зависимость.
-# NB: счётчик методологический (§13, METHODOLOGY_FIELDS). Операционные перечисления
-# (напр. crawl_session_status/crawl_item_status) добавляются БЕЗ бампа этой версии.
+#
+# КЛАССИФИКАЦИЯ СЕКЦИЙ (§13 регламента: класс энума — по семантике, не по файлу-носителю).
+# Методологические (смена = версионная граница methodology_version): statuses,
+# capability_scoring/partial_score, absence_rule_type, source_scope, evidence_type,
+# satellite/rule_r2, comparability, run_mode, cell_state.
+# Операционные (добавление значений НЕ требует бампа status_dictionary_version):
+# crawl_*, archive_*, document_*, fetch_mode, extraction_route, seed_*, onboarding_state,
+# product_mode, refresh_policy, product_scope, incremental_kind, reuse_kind, change_class,
+# run_scope, skip_reason, stale_reason, search_phase, termination_reason, adapter_kind,
+# endpoint_kind, llm_scenario, gate/gate_source/gate_verdict/gate_policy, golden_tier, cap,
+# importance, param_type, archetype, anchor_relation, crawl_probe_*.
+# Класс конкретной секции, где он неочевиден, помечен комментарием рядом с ней.
+#
+# ПРАВИЛО: операционные перечисления (напр. crawl_session_status/crawl_item_status,
+# gate_source/gate_verdict/gate_policy) добавляются БЕЗ бампа этой версии.
+# ПОБОЧНЫЙ ЭФФЕКТ, названный явно: status_dictionary_version — литерал в этом файле, а не
+# content-addressed отпечаток содержимого. Значит, добавление операционного значения не
+# меняет status_dict_version, а он входит в METHODOLOGY_FIELDS и в
+# EXECUTION_CONTRACT_FIELDS. Это осознанно: иначе правка процедуры (напр. политики гейтов)
+# меняла бы методологический отпечаток и рвала бы межцикловый diff. Цена: операционные
+# значения не видны в контракте — их провенанс несут сами строки прогона
+# (gate_decisions, crawl_sessions, …), а не версия словаря.
 
 status_dictionary_version: "2.2.0"
 
@@ -218,6 +238,10 @@ unknown_policy:
 # §8. Гейты (S3). Решения персистентны в gate_decisions (S9).
 # G1/G2 — внутренняя аттестация (человек в coHound, привязка к профильному дайджесту);
 # G3/G4 — точки интеграции: решение приходит извне, coHound его записывает и уважает.
+# ОПЕРАЦИОННОЕ перечисление (процесс, а не условие измерения): добавление значений не
+# требует бампа версии словаря (§13). Переработка G3/G4 в точки интеграции
+# methodology_version не меняет — это подтверждено владельцем. `gate` не является полем
+# манифеста, поэтому в METHODOLOGY_FIELDS его нет; провенанс несут строки gate_decisions.
 gate:
   - G1
   - G2
@@ -305,6 +329,17 @@ document_level:
   - layout
   - layout_tables
   - full
+
+# §4.1/§5. Семейство документа — выбор чанкера (``ExtractedDoc.family`` →
+# ``chunker_family``): markdown → чанкер с ``heading_path``, text → абзацный,
+# epub → читатель stdlib-OCF + текстовый чанкер. Де-факто перечисление: в коде это
+# ``str | None`` с константами ``FAMILY_*`` (``core/util/document_formats.py``), а не
+# StrEnum; секция объявлена как единственный источник значений. Валидатор её пока
+# не сверяет — см. §4.1 регламента и §14 (перевод в StrEnum).
+document_family:
+  - markdown
+  - text
+  - epub
 
 # P6. Глубина спуска в контейнеры (crawl.archive_descent): zip/7z/rar — артефакты,
 # из которых достаются документы-члены. ``full`` — спуск исполняется (дефолт);
@@ -409,6 +444,24 @@ rule_r2:
     - id: r2_default
       when: {}
       cap: parameter_rule
+
+# §4.1/Р-2. Потолок зачёта (значения ``rule_r2[].cap``) — перечисление ``Cap``.
+# ``none`` — зачёт не даётся; ``ok`` — без потолка; ``partial`` — потолок ⚠️;
+# ``parameter_rule`` — по ``rule`` параметра каталога. Валидатор секцию пока не
+# сверяет (значения используются inline в ``rule_r2``) — см. §4.1/§14 регламента.
+cap:
+  - none
+  - partial
+  - ok
+  - parameter_rule
+
+# §4.2/§11.1. Тир golden-набора (``GoldenTier``, ``golden.csv``): ``fast`` — PR-страта,
+# ``full`` — полный набор (смена модели/правил/каталога, релиз). Перечисление объявлено
+# в домене, но секции в словаре не имело — теперь имеет. Валидатор секцию пока не
+# сверяет (§4.1/§14 регламента).
+golden_tier:
+  - fast
+  - full
 
 # 09 §3.1/§7. Онбординг продукта и seed-набор (MVP-1).
 # Операционные перечисления авторского/прогонного контура — добавление без бампа

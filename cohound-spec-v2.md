@@ -34,7 +34,11 @@ coHound не является: нагрузочным бенчмарком · з
 
 ### 1.3. Категорийная нейтральность
 
-Ядро (`core/`) не содержит терминологии предметных категорий; вся специфика — пакет категории (данные). CI-грепп-тест. Переносимость — приёмочное требование MVP (§11.4): пять кейсов **портфеля** дают **первичное эмпирическое подтверждение** гипотезы нейтральности (формулировка сознательно не «доказательство»).
+Правило: **ядро (`core/`) не несёт знания о конкретном продукте** — ни терминологии предметных категорий, ни вендорских имён, ни предметных констант; вся специфика — пакет категории (данные).
+
+**Что проверяется автоматически, а что держится правилом.** Гейт — грепп-тест по трём слоям: `core/domain`, `core/ports`, `core/pipeline` (`tests/selfcheck.py::_neutrality`, тот же набор в `scripts/ci.sh`), предикат — `postgres|pangolin|sber|сбер|copywala|платформа` (регистронезависимо). Остальные слои (`adapters/`, `store/`, `util/`, `config/`, `cli/`, `edge/`) держит **правило, а не гейт**: широкий `grep` по всему `core/` — подсказка, его срабатывание разбирается глазами, и от него гейт не зависит. Причина сужения названа прямо: пример-транслитерация в докстринге утилиты — не знание о продукте, а гейт, который срабатывает на безобидном, приучает его игнорировать. Сужение гейта **не ослабляет** правило: знание о конкретном продукте в ядре остаётся дефектом в любом слое, и правка `core/` при онбординге кейса — блокировка кейса (§11.4).
+
+Переносимость — приёмочное требование MVP (§11.4): пять кейсов **портфеля** дают **первичное эмпирическое подтверждение** гипотезы нейтральности (формулировка сознательно не «доказательство»).
 
 ### 1.4. Режимы прогона
 
@@ -69,7 +73,7 @@ coHound не является: нагрузочным бенчмарком · з
 **Когорта** — фиксированный на цикл перечень продуктов (якорь + 6–10 аналогов), формируемый по декларируемым правилам и **замораживаемый на гейте G1**:
 
 1. отбор идёт из одного функционального класса (перекрытие якорных ролей ≥ порога, зафиксированного в пакете);
-2. приоритет продуктам с публичной документацией. **Продукт с 0 публичных документов по умолчанию исключается ещё на G1** (его колонка вырождается в ❓/N/A). Если такое выясняется в ходе прогона — продукт остаётся в когорте с правилом: все его ячейки → ❓ (не ❌ — I22), Coverage считается по его universe (все неразрешены), **Capability для него не публикуется** (I11/G4, §6), а в battle_card строка помечается «не измерено (0 публичных документов)» и **исключается из ранжирования**;
+2. приоритет продуктам с публичной документацией. **Продукт с 0 публичных документов по умолчанию исключается ещё на G1** (его колонка вырождается в ❓/N/A). Если такое выясняется в ходе прогона — продукт остаётся в когорте с правилом: все его ячейки → ❓ (не ❌ — ноль наблюдений делает покрытие неполным по **I2c**, а `no_sources` — провал измерения, не отрицание), Coverage считается по его universe (все неразрешены), **Capability для него не публикуется** (I11/G4, §6), а в battle_card строка помечается «не измерено (0 публичных документов)» и **исключается из ранжирования**;
 3. в когорту включается базлайн-участник, если он существует (архетипы A/B);
 4. состав, обоснование включения/исключения и связи с якорем записываются в `packages/{case_id}/cohort.yaml` (`product_id`, `role_overlap`, `selection_reason`, `anchor_relation`);
 5. смена состава когорты после G1 = новый цикл (межцикловый diff запрещён, §13).
@@ -90,7 +94,7 @@ coHound не является: нагрузочным бенчмарком · з
 | ❓ | после исчерпания предписанного протокола недостаточно доказательств |
 | N/A | архитектурно неприменим; только человек |
 
-**Главный инвариант: отсутствие evidence никогда само по себе не является evidence отсутствия.**
+**Главный принцип: отсутствие evidence никогда само по себе не является evidence отсутствия.** Формализуется не одним инвариантом, а связкой I2/I2b/I2c/I3/I4/I22 (§2.3): `❌` требует absence-evidence, `❓` — исчерпанного протокола, `failed` — никогда не статус, а претензия на наличие — непустой цитаты.
 
 ### 2.2. Принципы
 
@@ -113,7 +117,12 @@ I1   evaluated + ✅/⚠️   → evidence ≥ 1
 I2   evaluated + ❌      → absence-evidence по absence_rule параметра
 I2b  evaluated + ❌, absence_rule ∈ {parameter_reference, distribution_absence}
                          → на absence-evidence source_scope: exhaustive И scope_attested_by ≠ null
-                           (registry_absence — exhaustive по построению; explicit — source_scope не требуется)
+                           (registry_absence — exhaustive по построению: source_scope: exhaustive
+                           записывается и проверяется, scope_attested_by не требуется;
+                           explicit — source_scope не требуется)
+I2c  evaluated + ❌, absence_rule = explicit, покрытие корпуса НЕПОЛНО
+                         → требует scope_attested_by (человеческой аттестации охвата) в absence-evidence;
+                           без неё машинный ❌ не публикуется: ячейка понижается до pending-кандидата (I6/I7)
 I3   ❓ (strict)         → протокол исчерпан (full) ИЛИ reviewed_by ≠ null
 I3b  ❓ (preliminary)    → допустим при protocol: partial
 I4   failed              → status = null
@@ -134,9 +143,16 @@ I18  оценщик (§7, Ш6)    → не вызывает внешний по�
 I19  внешний контент     → становится evidence только после corpus_raw → extract → chunk → content_hash → index
 I20  golden cut-off      → равен pipeline-параметру retrieval_cutoff_K
 I21  маршрутизация модели→ детерминирована фазой; таблица scenario→{model_id, version} в манифесте
-I22  отсутствие evidence → никогда не evidence отсутствия (главный инвариант, формализован)
+I22  direct evidence      → непустой citation_quote (manual — исключение:
+                            ручное evidence есть носитель человеческой аттестации)
 I23  поисковый бюджет    → фиксирован и залогирован для каждого продукта
 ```
+
+**I22 — что именно формализовано.** `direct`-evidence обязано нести непустую `citation_quote`: «отсутствие цитаты — не доказательство наличия». Исключение — `source_kind: manual` (ручное evidence — носитель человеческой аттестации, а не машинной цитаты). Гейт здесь **только доменный** (`check_evidence`): колонка `cell_evidence.citation_quote` объявлена без `CHECK`, SQL-триггера на I22 нет — это стоит знать, потому что I1/I2b/I2c/I4/I6/I7/I13/I18 продублированы в БД, а I22 нет.
+
+Принцип «отсутствие доказательства не есть доказательство отсутствия» обеспечивается связкой **I2** (`❌` требует absence-evidence), **I3** (`❓` требует исчерпания протокола), **I4** (`failed` никогда не статус) и **I22** (претензия на наличие требует цитаты); сам по себе I22 — правило цитатной дисциплины, а не отрицание.
+
+**Объём I2c (неполнота покрытия корпуса).** Покрытие продукта неполно, если выполнено **любое** из четырёх независимых условий: (1) краул усечён; (2) хотя бы один origin нечитаем (ноль `FETCHED` при наличии недочёта, кроме `not_found`); (3) есть `FAILED`-элемент блокирующего класса (`robots_disallow`, `parser_failed`, `extraction_timeout`, `attempts_exhausted`, `dlp_blocked`, `quarantined`); (4) `observed_sources = 0`. Не блокируют `not_found`, `source_unavailable`, `redirect_out_of_scope`, `payload_too_large`/`unsupported_binary` (осознанные границы исполнения) и сбои конвейера оценки. I2c применяется к `absence_rule: explicit` — у него единственный барьер против тонкого корпуса это человеческая аттестация; `parameter_reference`/`distribution_absence` уже закрыты I2b, а `registry_absence` публикует `❌` и на неполном корпусе **осознанно** (реестр — авторитетная энумерация, §4.2). Детали условий и счётчики — §4.2.
 
 ### 2.4. Четыре опоры данных
 
@@ -155,9 +171,11 @@ CLI-ядро (`resolve · plan · run · diff · sensitivity · golden · report
 > CLI-поверхность шире: помимо ядра — команды авторского и операционного контура (`package` с
 > подкомандами, `passport-scout`, `doctor`), а также операционные команды `crawl` (durable-сеансы
 > краула) и `experiment retrieval` (фиксация ретривал-профиля/K измерением, A3). `gate` —
-> единственная точка записи человеческих
-> решений G1–G4 (`gate_decisions`, S9; §4.2); принятие решения о N/A (I6/I7) или аттестации
-> `source_scope` без неё невозможно. Актуальный список и семантика — в
+> единственная точка записи **решений гейтов** G1–G4 (`gate_decisions`, S9; §8): для G1/G2 —
+> внутренняя аттестация профиля пакета-якоря, для G3/G4 — **запись** вердикта внешней системы
+> (`source`, `external_ref`, `verdict`). `gate` пишет решения гейтов, а не статусы ячеек:
+> аттестация `source_scope` per instance проходит именно через неё, а назначение N/A (I6/I7)
+> отдельной команды пока не имеет (см. §14, «Отложено»). Актуальный список и семантика — в
 > `docs/architecture/03-data-config-cli.md` §E.1 и в коде (`core/cli/`); при расхождении верен код.
 
 **Разделение ролей поиска (ключевое):** поиск в системе существует только как **источник входного контента** (Ш5: краул + SERP), который нормализуется, хэшируется и индексируется. Оценщик (§7, Ш6) **не имеет** доступа к внешнему поиску (I18). Подробности — §7.
@@ -174,7 +192,7 @@ CLI-ядро (`resolve · plan · run · diff · sensitivity · golden · report
 | Эмбеддинги | локально (инференс в контуре — без внешней эгрессии): **BGE-M3 — основной кандидат** (приоритет RU, EN хорошо; 8192 контекста, dense; MIT; **доступна во внутреннем корпоративном периметре**); multilingual-e5-large — альтернатива; подтверждение на R9/R10. Лёгкий офлайн-путь (extra `embed-lite`, без `torch`): `model2vec`-адаптер (`adapters/embed_model2vec.py`, дефолт `minishlab/potion-multilingual-128M`, dim=256) — для контуров без GPU/torch; `embed_model_id` (включая ревизию снапшота) входит в `index_build_id`/манифест как граница `execution_versions` (§13) | **RU — абсолютный приоритет, EN тоже сильный** (целевой корпус RU-вендоров + международные ID/термины); данные не покидают периметр; NC-лицензии исключены |
 | Краулинг | Scrapy + scrapy-playwright (per-domain рендер-профили); **robots.txt = obey** (при встраивании Scrapy как библиотеки флаг `ROBOTSTXT_OBEY` выставить явно — дефолт False). **V5 (2026-10-08):** scrapy-playwright — зрелый де-факто стандарт (org `scrapy-plugins`, BSD-3, py3.14); **smoke-тест пройден** на Scrapy 2.19 / playwright 1.63 (chromium + firefox) → жёсткий пин подтверждён. `curl_cffi` — первый ярус для антибот-доменов без JS. **Второй путь (прямой, без Scrapy):** `BrowserCrawler` на Playwright/CDP — `honest` (реальный JS-рендер) и `hybrid` (прогрев браузером → лёгкий HTTP с cookie-мостом, fallback на `honest`); ось стратегии ортогональна `fetch` (`CrawlStrategy`, §10) | production-фреймворки; качество извлечения кормит цитатную валидацию; этическая норма §10 |
 | Экстракция | trafilatura (HTML) · docling (PDF + Office: DOCX/PPTX/XLSX, фич-матрицы → markdown); PyMuPDF исключён (AGPL); лицензии и транзитивные зависимости (pypdfium2, OCR-модели) верифицированы (M0) | docling выбран осознанно: нативно парсит Office Open XML (бэкенды python-docx/python-pptx/openpyxl). Не офисные форматы тянут torch; поэтому Office ставится лёгким `docling-slim[format-office]` (**без torch**), PDF layout — `docling-slim[standard]` (torch) в отдельном окружении. Полный пакет `docling` = `docling-slim[standard]` и для Office избыточен. `rtree` нужен **только PDF-контуру** (spatial/reading-order), не для Office и не для импорта `DocumentConverter`. Риск потери табличной структуры фич-матриц; тест на 3–5 реальных мануалах РФ-вендоров (PDF + Office) — **блокер M0**, не M1 (§15) |
-| **LLM-оценщик** | **модели через [OI]-совместимый API _внутри корпоративного периметра_** (не своё железо и не self-host-инсталляция; vLLM/SGLang — возможный backend облака, но не наша зависимость). Контур замкнут: **внешние LLM-хосты и внешние ключи не используются**; endpoint задаётся явно (`config/deploy.yaml: llm.<slot>.base_url`, внутренняя сеть). `endpoint_kind: api` по умолчанию. **Два слота модели** (`cheap` / `flagship`); дефолт модели — `config/deploy.yaml: llm.<slot>.model_id` (**единственный** источник, §7.4), env `COHOUND_LLM_MODEL`/`COHOUND_LLM_DECODER` оценщик **не читает** (модель — объявленный вход, I21); активный слот — на этапе эксплуатации (CLI/`env` > `run.yaml` > `deploy.llm.slot`). **Constraint-декодирование** через API (`json_schema`/`json_object`) + greedy/seed. **Без веб-тула.** Авторизация — `COHOUND_LLM_API_KEY` (единственный источник). Финал модели — измерением на golden (A3) | корпус не покидает периметр (внутренний endpoint); запрет поиска структурный (порт без `tools`, I18); API-сервис пинит веса/движок → R7; гарантии провайдера no-train + retention + аудит (§10) |
+| **LLM-оценщик** | **модели через [OI]-совместимый API _внутри корпоративного периметра_** (не своё железо и не self-host-инсталляция; vLLM/SGLang — возможный backend облака, но не наша зависимость). Контур замкнут: **внешние LLM-хосты и внешние ключи не используются**; endpoint по умолчанию берётся из слота (`config/deploy.yaml: llm.<slot>.base_url`, внутренняя сеть), но это **операционная** настройка: `COHOUND_LLM_BASE_URL`/`COHOUND_LLM_API_KEY`/таймаут из окружения имеют приоритет над слотом (аргументы > env > слот), а расхождение видно как `llm_env_notices`. Идентичность модели — наоборот, **объявленный вход**: `--llm-model` > `deploy.llm.<slot>.model_id`, env `COHOUND_LLM_MODEL`/`COHOUND_LLM_DECODER` оценщик **не читает** (I21), при необъявленной модели — отказ, а не дефолт. `endpoint_kind: api` по умолчанию. **Два слота модели** (`cheap` / `flagship`); дефолт модели — `config/deploy.yaml: llm.<slot>.model_id` (**единственный** источник, §7.4); активный слот выбирается на этапе эксплуатации: CLI `--llm-slot` > env `COHOUND_LLM_SLOT` > `run.yaml: llm_slot` > `deploy.llm.slot` > `cheap`. **Constraint-декодирование** через API (`json_schema`/`json_object`) + greedy/seed. **Без веб-тула.** Авторизация — `COHOUND_LLM_API_KEY` (единственный источник). Финал модели — измерением на golden (A3) | корпус не покидает периметр (внутренний endpoint); запрет поиска структурный (порт без `tools`, I18); API-сервис пинит веса/движок → R7; гарантии провайдера no-train + retention + аудит (§10) |
 | **Search-адаптер** | **Yandex Search API (РФ) — дефолт**, режим **`async` по умолчанию** (`sync` — опция). Ныне под Yandex AI Studio (v2 + XML-совместимый v1; есть generative-response на YandexGPT). Прежнее имя «Yandex GPT Web Search Tool» — **не подтверждено/не существует, снято**. Альтернатива — GLM Web Search API (`POST api.z.ai/api/paas/v4/web_search`, верифицирован). Commodity-слой, вне evidence-модели | даёт цитаты-кандидаты (`url_citation`/`link`), которые обязаны пройти corpus_raw → hash → index (I19) |
 | **Санитайзинг контента** | nh3 (Rust/ammonia) · defusedxml; **bleach исключён (EOL с 2026-06)**. Чистка структуры (script/hidden), **без изменения текстовых узлов** — иначе ломается проверка «цитата — подстрока» (§10) | защита от prompt-injection; сохраняет инвариант цитатной валидации |
 | **Надёжность / логи** | tenacity (retry ≤2 → failed) · structlog (структурные JSON-логи для манифеста) | воспроизводимость R7 и §7 |
@@ -209,7 +227,15 @@ repo/
 
 ### 4.1. Словари и перечисления
 
-`docs/status-dictionary.yaml`: статусы (§2.1) · `source_kind` (registry|inheritance|distribution|documentation|web|manual) · `evidence_type` (direct|derived) · `absence_rule_type` (explicit|parameter_reference|distribution_absence|registry_absence) · `source_scope` (**exhaustive|partial|unknown** — свойство экземпляра источника, поле evidence) · `failure_kind` (search_failed|source_unavailable|evaluation_failed|validation_failed|parser_failed) · `cell_state` (pending|preliminary|evaluated|failed|reviewed) · `run_mode` · `ranking_policy` (capability_ranked|coverage_fallback|unranked) · `gate` (G1|G2|G3|G4) · `capability_policy` (resolved-only-v1) · `unknown_policy` (excluded|unknown_as_zero) · `fetch_mode` (**http|browser**) · `extraction_route` (**auto|html|document**) · `crawl_strategy` (**auto|honest|hybrid** — ось стратегии краула, §3.2) · `fetch_status` (**pending|fetched|done|failed**). `unexpected` — **run-level ошибка без ячейки** (системное исключение), в `failure_kind` не входит (S7): `failure_kind` описывает только сбой ячейки.
+**Источник истины — `docs/status-dictionary.yaml`.** Направление зеркала: **словарь первичен, схемы в коде — его зеркало** (§2.4); регламент перечисляет только методологически несущие значения и на словарь ссылается. В словаре 54 перечисления-списка плюс структурированные разделы (`statuses`, `capability_scoring`, `partial_score`, `absence_rule_type`, `satellite`, `importance_labels`, `rule_r2`). Полный дублирующий перечень в регламенте неизбежно стареет (что уже случилось дважды — `failure_kind` и `fetch_status`), поэтому остальные перечисления (`seed_role`/`seed_source`/`seed_state`, `onboarding_state`, `product_mode`, `refresh_policy`, `product_scope`, `incremental_kind`, `reuse_kind`, `change_class`, `run_scope`, `crawl_session_status`, `crawl_item_status`, `crawl_probe_*`, `skip_reason`, `golden_tier`) — операционные и читаются из словаря.
+
+Несущие: статусы (§2.1) · `source_kind` (registry|inheritance|distribution|documentation|web|manual) · `evidence_type` (direct|derived) · `absence_rule_type` (explicit|parameter_reference|distribution_absence|registry_absence) · `source_scope` (**exhaustive|partial|unknown** — свойство экземпляра источника, поле evidence) · `cell_state` (pending|preliminary|evaluated|failed|reviewed) · `run_mode` (strict|preliminary) · `ranking_policy` (capability_ranked|coverage_fallback|unranked) · `capability_policy` (resolved-only-v1) · `unknown_policy` (excluded|unknown_as_zero) · `partial_score` · `gate` (G1|G2|G3|G4) · `gate_source` (internal|external) · `gate_verdict` (approved|rejected) · `gate_policy` (external|waived) · `comparability` (HIGH|MEDIUM|LOW|INSUFFICIENT|cross-cycle) · `stale_reason` · `termination_reason`.
+
+`failure_kind` (16 значений, §4.4/§7.1): исходные классы конвейера — `search_failed`, `source_unavailable`, `evaluation_failed`, `validation_failed`, `parser_failed`; наблюдаемые исходы краула — `not_found` (разрешённое наблюдение отсутствия, не недоступность), `robots_disallow`, `attempts_exhausted`, `redirect_out_of_scope`, `payload_too_large` (потолок `max_response_bytes`/`max_artifact_bytes`), `unsupported_binary` (бинарный артефакт — не документ), `extraction_timeout`, `no_sources` (у продукта нет ни одного seed'а), `coverage_missing` (нет строки покрытия — аномалия провенанса); зарезервированы под DLP/quarantine-контур — `dlp_blocked`, `quarantined` (write-site'ов пока нет, но значения обязаны быть известны заранее). Блокирующий класс (делает корпус неполным по I2c) — `robots_disallow`, `parser_failed`, `extraction_timeout`, `attempts_exhausted`, `dlp_blocked`, `quarantined`.
+
+`unexpected` как значения **нет**: run-level ошибка без ячейки (системное исключение) живёт в `PhaseResult.errors` агрегата прогона, а `failure_kind` описывает только сбой ячейки/элемента краула (S7).
+
+**Зеркало проверяется частично — честно.** `assert_dictionary_integrity` (`core/domain/dictionary.py`) проверяет: наличие 40 обязательных секций; `statuses` — **односторонне** (каждый `symbol` ∈ `Status`; обратного включения нет); `absence_rule_type.default` ∈ `values`; и двустороннее равенство множеств для 30 секций (`ranking_policy`, `capability_policy`, `unknown_policy`, `gate`, `gate_source`, `gate_verdict`, `gate_policy`, `search_kind`, `stale_reason`, `fetch_mode`, `extraction_route`, `crawl_strategy`, `document_level`, `archive_descent`, `archive_descent_status`, `crawl_session_status`, `crawl_item_status`, `skip_reason`, `seed_*`, `onboarding_state`, `product_mode`, `refresh_policy`, `product_scope`, `change_class`, `run_scope`, `incremental_kind`, `reuse_kind`, `failure_kind`). **Не** проверяются 19 секций, у которых есть `StrEnum` (`source_kind`, `evidence_type`, `source_scope`, `cell_state`, `run_mode`, `satellite_state`, `inheritance_mode`, `param_type`, `importance`, `archetype`, `anchor_relation`, `llm_scenario`, `endpoint_kind`, `adapter_kind`, `search_phase`, `termination_reason`, `comparability`, `cap`, `golden_tier`) и 4 секции `crawl_probe_*` (их энумы живут вне `core/domain/enums.py`, в `core/pipeline/crawl_probe.py`); вложенные `satellite.*` и `absence_rule_type.values` также не сверяются с энумами. `document_family` объявлена секцией без `StrEnum` в домене (в коде — константы `FAMILY_*`). Сейчас все они совпадают — но это **совпадение, а не гарантия**: первая же правка `cell_state`/`source_scope` пройдёт молча. Расширение проверки — задача кода (§14).
 
 **Оси сателлита:**
 
@@ -240,11 +266,11 @@ evidence_state:  verified | claimed
 
 **Гносеология absence-правил (согласовано с I2/I2b):** исчерпанность источника — свойство экземпляра, не типа правила, кроме registry:
 
-- `registry_absence` — **exhaustive по построению** (реестр — авторитетная энумерация); отсутствие записи = валидное негативное свидетельство, механически; `scope_attested_by` не требуется;
+- `registry_absence` — **exhaustive по построению** (реестр — авторитетная энумерация); отсутствие записи = валидное негативное свидетельство, механически; `source_scope: exhaustive` **записывается** в absence-evidence и проверяется (I2b), `scope_attested_by` не требуется;
 - `explicit` — явное отрицание вендора; **`source_scope` не требуется** (само отрицание и есть evidence);
 - `parameter_reference` / `distribution_absence` — требуют на absence-evidence `source_scope: exhaustive` **и** `scope_attested_by ≠ null` (человек подтверждает: действительно ли справочник полный, документирует ли вендор весь состав); иначе — понижение до ❓.
 
-**In-scope блокирующие сбои корпуса (методология 2.2.0, I2c).** Покрытие корпуса продукта неполно, если краул усечён, если хотя бы один origin нечитаем (ноль `FETCHED` при наличии недочёта, кроме `not_found`), **или** если есть `FAILED`-элемент с блокирующим классом: `robots_disallow`, `parser_failed`, `extraction_timeout`, `attempts_exhausted`, `dlp_blocked`, `quarantined`. Блокирующий сбой на читаемом origin'е — это ненаблюдённая часть in-scope материала, поэтому машинный `❌` на таком корпусе запрещён: он понижается до `pending`-кандидата (I6/I7). Не блокируют `not_found` (разрешённое наблюдение отсутствия), `source_unavailable` (транзиентная недоступность; полностью тёмный origin ловится правилом нечитаемости), `redirect_out_of_scope` (вне охвата по определению) и сбои конвейера оценки.
+**In-scope блокирующие сбои корпуса (методология 2.2.0, I2c).** Покрытие корпуса продукта неполно, если краул усечён, если хотя бы один origin нечитаем (ноль `FETCHED` при наличии недочёта, кроме `not_found`), **или** если есть `FAILED`-элемент с блокирующим классом: `robots_disallow`, `parser_failed`, `extraction_timeout`, `attempts_exhausted`, `dlp_blocked`, `quarantined`. Блокирующий сбой на читаемом origin'е — это ненаблюдённая часть in-scope материала, поэтому машинный `❌` на таком корпусе запрещён: он понижается до `pending`-кандидата (I6/I7). Не блокируют `not_found` (разрешённое наблюдение отсутствия), `source_unavailable` (транзиентная недоступность; полностью тёмный origin ловится правилом нечитаемости), `redirect_out_of_scope` (вне охвата по определению), `payload_too_large`/`unsupported_binary` (осознанные границы исполнения: материал есть, но по политике не читается) и сбои конвейера оценки. **Область применения — `absence_rule: explicit`** (см. ниже): `parameter_reference`/`distribution_absence` закрывает I2b, а `registry_absence` публикует `❌` и на неполном корпусе — осознанно.
 
 **Ноль наблюдений — неполнота (методология 2.3.0, I2c).** Четвёртое, независимое условие: покрытие неполно, если `observed_sources = 0`. Три предыдущих условия говорят о *частично* ненаблюдённом материале; это — о **полностью** ненаблюдённом. Корпус, из которого не дошед до `FETCHED` ни один элемент, не доказывает отсутствия ничего: `not_found` на всех URL — наблюдение отсутствия **этих** URL, а не отсутствия возможности у продукта, а `pending`/`running` — вообще отсутствие наблюдения. Без этого условия продукт, у которого умерли все seed'ы «разрешённым» образом, публиковал `complete=True` и мог выдать `❌` — ложное отсутствие. `expected_sources = 0` (нет seed'ов) уже даёт `complete=False, reason=no_seeds`; новое условие закрывает второй, «непустой» случай и не меняет `reason` (он остаётся `null`, причина видна по счётчикам и `blocked`).
 
@@ -254,7 +280,7 @@ evidence_state:  verified | claimed
 
 **Сила отсутствия и аттестация (B-4).** Не всякое ❌ эпистемически равно, и это фиксируется явно:
 - **Порядок силы:** `registry_absence` (механическая энумерация авторитетного реестра) **>** `explicit` (явное отрицание вендора) **>** `parameter_reference` ≈ `distribution_absence` (обе опираются на человеческую аттестацию полноты справочника). Порядок публикуется в легенде отчёта; `❌` в battle_card сопровождается пометкой **«подтверждённое отсутствие ≠ гарантия отсутствия»** и указанием силы.
-- **Аттестация — это человеческое решение, а не поле без владельца.** Владелец — **эксперт-автор кейса** (пакетный эксперт, не исполнитель конвейера): он объявляет процедуру полноты справочников в `packages/{case_id}/scope_attestation.yaml`, а конкретный носитель полноты per instance признаёт записью `gate_decisions` (S9): `actor`, `decided_at`, `notes` (какой справочник/источник и на каком основании признан полным — release notes / admin guide / reference на `snapshot_date`). Линтер блокирует прогон, если `parameter_reference`/`distribution_absence` объявлены без действующей процедуры (§4.2, «Линтер»). Тем самым процедура и владелец аттестации замыкаются на уже существующий носитель аудита; отдельного поля-строки без аудит-следа недостаточно.
+- **Аттестация — это человеческое решение, а не поле без владельца.** Владелец — **эксперт-автор кейса** (пакетный эксперт, не исполнитель конвейера): он объявляет процедуру полноты справочников в `packages/{case_id}/scope_attestation.yaml`, а конкретный носитель полноты per instance признаёт записью `gate_decisions` (S9): `actor`, `decided_at`, `notes` (какой справочник/источник и на каком основании признан полным — release notes / admin guide / reference на `snapshot_date`). Линтер блокирует прогон, если `parameter_reference`/`distribution_absence` объявлены без действующей процедуры (§4.2, «Линтер»). Тем самым процедура и владелец аттестации замыкаются на уже существующий носитель аудита; отдельного поля-строки без аудит-следа недостаточно. **Не реализовано:** канал «решение гейта → `scope_attested_by` в ячейке» отсутствует — `evaluate_phase` принимает `scope_attested_by`, но ни одна фаза его не передаёт, и `gate_decisions` такого поля не имеет. Требование регламента остаётся; исполнение — предмет отдельной полосы (§5, §14).
 - Остаточный риск (редкость исчерпанных источников, недокументируемость слабых зон) остаётся признанным; числовая мера этого риска — не вводится (качественная аннотация).
 
 **baselines.csv:** `(baseline_id, param_id, min_version, inheritance_mode, note)`; режимы `direct` (дефолт для ядровых: upstream ≥ min_version + отсутствие явного исключения) · `conditional` (расширения/дистрибутивные: ревью/кандидат) · `blocked` (upstream-факт не используется). Отсутствие строки = кросс-линейный параметр (архетип B): только корпус. **Наследование переносит возможность проверить применимость upstream-факта, но не является автоматическим доказательством наличия функции в downstream-продукте.**
@@ -306,6 +332,8 @@ snapshot_date: 2026-06-01
 
 ### 4.4. Операционная БД (SQLite + index_store)
 
+DDL **версионирован и мигрируется**: `SCHEMA_VERSION = "3.11.0"` (`core/store/sqlite.py`), идемпотентные аддитивные миграции (`_ensure_columns`, новые таблицы через `CREATE TABLE IF NOT EXISTS`); версия пишется в `schema_meta`. Durable per-product состояние (`state/{package_id}/state.db`) версионируется отдельно (`STATE_SCHEMA_VERSION = "4"`). Схема не «заморожена»: добавление таблицы/колонки — аддитивная миграция, а не новая БД. Ниже — предметные таблицы; полный DDL — код.
+
 ```sql
 products(product_id PK, canonical_name, vendor, jurisdiction, first_seen, last_seen);
 
@@ -319,6 +347,9 @@ runs(run_id PK, created_at, mode, case_id, anchor_product_id, cohort_ref, focus_
      settings_provenance_json,                                    -- A3 (v2.1): {param: {source: default|measured, experiment_id?}}
      crawl_provenance_json,                                       -- провенанс краула (сеансы/движки/дайджест источников)
      crawl_strategy, crawl_rate_limit,                            -- операционные оси краула (§13, execution_change)
+     crawl_config_digest,                                         -- §13: дайджест разрешённой конфигурации краула (execution_change)
+     registry_spec_digest,                                        -- §13: дайджест загруженных спецификаций реестров (execution_change)
+     execution_contract_digest,                                   -- §13: отпечаток декларированных условий измерения (граница diff)
      ranking_epsilon,                                             -- §6/B-1: порог неразличимости ранжирования
      deploy_profile, edge_schema_version, edge_capabilities_json, -- 07 §7: деплой-провенанс манифеста (R7)
      state);
@@ -335,7 +366,8 @@ corpus_chunks(chunk_id PK, doc_id, product_id, url, heading_path, lang,
               extractor_version, embed_model_id, embedded_at);
 -- index_manifest: пакетная сборка (build_id, иммутабельна) × продукт-партиция.
 -- PK — составной (index_build_id, product_id): один build_id даёт N партиций (K1).
-index_manifest(index_build_id, product_id, package_id, partition_key,
+-- partition_build_id (pb_) — сборка одной партиции (§13, 09 §8.1); index_build_id — композиция когорты (cb_).
+index_manifest(index_build_id, partition_build_id, product_id, package_id, partition_key,
                snapshot_date, chunker_version, embed_model_id, embed_dim,
                extractor_version, lexical_engine_version, vector_store,
                content_digest, store_path, created_at, stats_json,       -- content_digest: отпечаток контента партиции (I19)
@@ -346,16 +378,23 @@ cells(run_id, product_id, param_id, state,
       validation_notes, failure_kind, model_id, llm_scenario, prompt_hash,
       index_build_id, retrieval_profile, retrieval_params_json,      -- provenance ячейки (R7/§13)
       stale_reason,                                                   -- инвалидация (смена сборки/prompt)
+      review_reason,                                                  -- аннотация причины pending (не статус, не N/A)
       primary_evidence_id, reviewed_by, updated_at,
       PRIMARY KEY (run_id, product_id, param_id));
 
 cell_evidence(evidence_id PK, run_id, product_id, param_id,
       source_kind, evidence_type, source_id, source_url,
       citation_quote, content_hash, source_scope, scope_attested_by,   -- absence-evidence
-      index_build_id, retrieved_at);
+      index_build_id, partition_build_id, retrieved_at);               -- партиция чанка-evidence (09 §8.1)
 -- evidence_id детерминирован: H(run_id, product_id, param_id, source_id, source_kind, seq) — идемпотентность при resume (S8).
 
-gate_decisions(decision_id PK, run_id, gate, target, actor, decided_at, notes);  -- S9: человеческие решения G1–G4 (I6/I7)
+-- S9: решения гейтов G1–G4. Предмет решения привязан дайджестом (устаревшее одобрение не проходит, §8);
+-- source/verdict/external_ref — интеграция: внешняя система присылает решение, coHound его записывает.
+gate_decisions(decision_id PK, run_id, gate, target, actor, decided_at, notes,
+               subject_digest,               -- отпечаток предмета ('' — legacy-решение без привязки)
+               source,                       -- internal|external (gate_source)
+               external_ref,                 -- ссылка на решающую систему / waiver:<...>
+               verdict);                     -- approved|rejected (gate_verdict)
 
 search_log(log_id PK, run_id, phase, kind, provider, adapter_kind, language, query,
            results_count, selected, lexical_score, dense_score, fused_rank,
@@ -386,13 +425,78 @@ crawl_session_items(session_id, product_id, url, status, attempts, engine, kind,
 --   (source_unavailable — сбой краула; parser_failed — сбой экстракции);
 --   content_hash — хеш сырых байтов (basename raw_path). Resume: status = fetched
 --   с retained raw → ре-экстракция без сетевого ре-фетча (I19); иначе — фетч.
+--   depth — уровень вложенности (0 — seed), в т.ч. для членов контейнеров.
+
+-- Ф0: покрытие корпуса продукта — первоклассный факт, гейт I2c. Производно от персистентных
+-- crawl_session_items + записей об усечении; читается гейтом ❌ и отчётом.
+corpus_coverage(run_id, product_id, complete, expected_sources, observed_sources,
+                blocked_json,               -- {"error_kind": count}
+                unreadable_origins_json,    -- ["origin", ...] — origin без единого FETCHED
+                partial_blocks_json,        -- {"origin": {"error_kind": count}}
+                truncated, computed_at, reason,
+                PRIMARY KEY (run_id, product_id));
+-- complete = (not truncated) and (no unreadable_origins) and (no blocking failure) and (observed_sources > 0).
+
+-- B3: члены контейнеров — производный вид ретейленного архива. Байты членов отдельно не хранятся:
+-- архив — сырьё (I19), член ре-выводится из него тем же open_member по archive_path.
+-- Идентичность — (archive_content_hash, member_path); skip_reason заполнен ⟺ член не ингестнут (doc_id null).
+corpus_members(archive_content_hash, member_path, product_id, run_id, root_url, archive_url,
+               archive_path, member_url,          -- {archive_url}!/{member_path}
+               member_format, declared_size, extracted_content_hash,
+               doc_id,                            -- corpus_docs.doc_id, если ингестнут
+               skip_reason, depth, created_at,
+               PRIMARY KEY (archive_content_hash, member_path));
+
+-- B3: наблюдения спуска в контейнеры — прогноз (до извлечения) + исход. Запись есть для КАЖДОГО
+-- контейнера, включая пустой и нечитаемый: «спуск ничего не дал» виден так же, как «дал десять документов».
+archive_observations(observation_id PK, run_id, product_id, root_url, archive_url,
+                     archive_content_hash, archive_path, depth,
+                     descent,        -- plan|full (archive_descent)
+                     status,         -- planned|descended|unreadable|budget_exhausted (archive_descent_status)
+                     forecast_json, outcome_json, reason, created_at);
 ```
 
 Валидация цитат — по чистому `text` чанка (`context_prefix` не входит). `content_hash` заполняется с первого дня. `search_log` — **единственное место** логирования любых поисковых вызовов, включая tool-based (§7, I23); поле `kind` разделяет внутренний ретривал (`retrieval`) и внешние поисковые запросы (`external`). **Сеанс краула** (`crawl_sessions` + `crawl_session_items`) ведёт durable-аудит/очередь/resume краула отдельно от поискового лога: `search_log` описывает поисковые запросы, сеанс — пер-URL жизненный цикл фетча/экстракции (durable-носитель resume; сбой краула — данные, не падение фазы). **Плановые входы прогона** (`catalog`/`module_weights`/`cohort`) персистятся в `run_inputs` — это источник истины самодостаточности `runs/{run_id}`; `plan_inputs.json` — производный экспорт того же снимка, ни одна пост-хок команда не читает его как авторитет.
 
 ### 4.5. Конфигурация прогона (run.yaml)
 
-`case_id · anchor · cohort · products · package · focus{modules, params} · languages · snapshot_date · mode · ranking_policy · crawl{strategy, rate_limit} · llm_slot`. Фокус меняет scope и перенормировку весов, не методологию. Роли scope = объединение `role_binding` выбранных модулей. Секция `crawl` — **операционные (execution) дефолты**, не методология: ось `strategy` (`CrawlStrategy`: `auto|honest|hybrid` — *как* используется браузер при browser-capable адаптере) и per-host диапазон задержек `rate_limit` (`RateLimitSpec`, `uniform(min_s, max_s)`). При отсутствии секции поведение неизменно (`auto`, без пейсинга) — обратная совместимость; резолв профайла — `pipeline/fetch_plan.py` (дефолт прогона → доменный профиль → явный `--render-modes`), инвариант нормализации `strategy != auto ⇒ fetch == browser`. `llm_slot` (`cheap`/`flagship` | null) — опциональный дефолт выбора слота модели-оценщика для прогона (переопределяется CLI/`env`, §7.4); сам слот-каталог живёт в `deploy.yaml` (§3.2/07 §7), а не в методологическом конфиге. **Согласованность (S11):** `products` обязан совпадать с множеством `product_id` из `cohort.yaml` (один канонический источник состава — когорта; `products` — её проекция, проверяется линтером); `anchor ∈ products`; ровно один `anchor_relation: anchor` в когорте.
+`case_id · anchor · cohort · products · package · methodology_version · focus{modules, params} · languages · snapshot_date · cycle_id · cohort_ref · refresh_policy · mode · ranking_policy · ranking_epsilon · settings_provenance · llm_slot · crawl{…} · gates{g3, g4}`. Фокус меняет scope и перенормировку весов, не методологию. Роли scope = объединение `role_binding` выбранных модулей.
+
+**`methodology_version`** — версия правил (дефолт — константа ядра); `cycle_id` — идентификатор цикла (ISO-дата/неделя; `null` → выводится из `snapshot_date`); `cohort_ref` — авторская ссылка на состав когорты (входит в `cohort_digest`, отображаемое имя — нет); `refresh_policy` — политика наблюдения корпуса по умолчанию (перекрывается `--refresh`); `ranking_epsilon` — порог неразличимости ранжирования (§6/B-1, доля диапазона агрегата, `null` → 0.0); `settings_provenance` — провенанс тюнящихся ручек (`{setting: {source: default|measured, experiment_id?, value?/by_level?}}`, A3/§0). Эти шесть полей — прямые носители §0/A3 и §6/B-1: без них регламент не сходится с конфигом.
+
+**Секция `crawl` — операционные (execution) дефолты, не методология.** Она разрешается трёхуровневой цепочкой `deploy.yaml: crawl` (app) < `run.yaml: crawl` (run) < `domain_profiles.yaml` (per-site, по ключу) и имеет **19 осей** (`CrawlRunConfig`):
+
+| # | ось | в `crawl_config_digest` |
+|---|---|---|
+| 1 | `strategy` (`CrawlStrategy`: `auto\|honest\|hybrid` — *как* используется браузер) | вне дайджеста: входит в контракт отдельным полем `crawl_strategy` |
+| 2 | `rate_limit` (`RateLimitSpec`, `uniform(min_s, max_s)`) | вне дайджеста: отдельное поле `crawl_rate_limit` (каноническая форма) |
+| 3 | `max_workers` (сетевой fetch-пул) | всегда |
+| 4 | `extract_workers` (CPU-параллелизм экстракции) | всегда |
+| 5 | `extract_max_tasks_per_child` (рециклинг воркеров экстракции) | только если задана |
+| 6 | `max_response_bytes` (потолок страницы/retained-файла, дефолт 20 MiB) | только если задана явно |
+| 7 | `max_artifact_bytes` (потоковый потолок артефакта-контейнера, дефолт 250 MiB) | только если задана явно |
+| 8 | `attachment_formats` (`zip\|7z\|rar`; сужение набора) | только если задана явно |
+| 9 | `archive_max_member_bytes` (потолок одного члена контейнера) | только если задана явно |
+| 10 | `archive_max_uncompressed_bytes` (потолок распаковки одного контейнера) | только если задана явно |
+| 11 | `archive_max_members` (число членов одного контейнера) | только если задана явно |
+| 12 | `archive_max_total_uncompressed_bytes` (кумулятивный бюджет **корня** спуска) | только если задана явно |
+| 13 | `archive_descent` (`plan\|full` — планировать или исполнять спуск) | только если задана явно |
+| 14 | `max_depth` (глубина обхода ссылок; `0` — только seeds) | всегда |
+| 15 | `max_documents` (потолок документов; `null` — без лимита) | всегда |
+| 16 | `revalidate_max_documents` (потолок ревалидации известных URL на продукт) | только если задана |
+| 17 | `exclude_paths` (glob-блэклист путей) | всегда |
+| 18 | `exclude_documents` (glob-блэклист документов) | всегда |
+| 19 | `document_level` (`off\|text\|layout\|layout_tables\|full` — уровень извлечения документных форматов) | всегда |
+
+**«Всегда» vs «только если задана»** — не косметика, а обратная совместимость: ключ «только если задана» не появляется в `CrawlLimits.as_dict()`, пока ось не задана ни на одном слое, поэтому `crawl_config_digest` прогонов без неё не меняется. Исключение — `robots`: эффективная egress-политика `robots.txt` входит в дайджест **всегда**, как `max_depth`, потому что её дефолт — реальное поведение (включена при обходе ссылок или per-site `sitemap`); ось объявлена на app-слое (`deploy.yaml:crawl.robots`), поэтому в таблицу 19 осей `CrawlRunConfig` не входит, но в `CrawlLimits.as_dict()` присутствует постоянно. Гейт `robots.txt` меняет **состав** корпуса: прогон с robots и прогон без него обязаны иметь разный `crawl_config_digest`, иначе один `run_id` описывал бы два разных корпуса (I19). При отсутствии секции поведение неизменно (`auto`, без пейсинга) — обратная совместимость.
+
+Резолв профайла рендера — `pipeline/fetch_plan.py` (дефолт прогона → доменный профиль → явный `--render-modes`), инвариант нормализации `strategy != auto ⇒ fetch == browser`. Все оси `crawl` — **`execution_change`** (§13), не `methodology_change`.
+
+`llm_slot` (`cheap`/`flagship` | null) — опциональный дефолт выбора слота модели-оценщика для прогона (переопределяется CLI/`env`, §7.4); сам слот-каталог живёт в `deploy.yaml` (§3.2/07 §7), а не в методологическом конфиге.
+
+`gates.{g3,g4}` (`GatePolicy`: `external` — дефолт, `waived`) — политика **делегирования** гейтов (§8). Это процесс, а не условие измерения: в `EXECUTION_CONTRACT_FIELDS` политика **не входит** (иначе смена процедуры меняла бы `run_id` и рвала межцикловый diff), но факт делегирования виден в манифесте (`gate_waivers`).
+
+**Согласованность (S11):** `products` обязан совпадать с множеством `product_id` из `cohort.yaml` (один канонический источник состава — когорта; `products` — её проекция, проверяется линтером); `anchor ∈ products`; ровно один `anchor_relation: anchor` в когорте.
 
 ---
 
@@ -404,8 +508,9 @@ crawl_session_items(session_id, product_id, url, status, attempts, engine, kind,
 Ш3  Реестровая волна (без LLM) → R-ячейки
 Ш4  Волна наследования: по baselines.csv при совпадении upstream;
     direct → статус · conditional → ревью/кандидат · blocked → пропуск (без LLM)
-Ш5  Корпус: краул (доменные профили: fetch × extract × strategy) / SERP → экстракция → дедуп → чанкер
-    → tantivy + батч-эмбеддинги → .npy-продукт-партиции → index_manifest
+Ш5  Корпус: краул (доменные профили: fetch × extract × strategy) / SERP → экстракция (HTML ·
+    plain text/markdown · EPUB · docling PDF/Office · спуск в контейнеры) → дедуп → чанкер по
+    семейству → tantivy + батч-эмбеддинги → .npy-продукт-партиции → index_manifest
     (весь внешний контент здесь получает source_id и content_hash — I19)
 Ш6  Оценка per (продукт × параметр), оценщик БЕЗ внешнего поиска (I18):
       запросы = {title + concept_terms RU/EN} (≤3)
@@ -420,7 +525,15 @@ crawl_session_items(session_id, product_id, url, status, attempts, engine, kind,
 Ш9  Отчёты: battle_card · preliminary_findings · nda_questions · diff · manifest
 ```
 
-**Контракт фазы (реализация).** Каждая фаза возвращает `PhaseResult(status: ok|skipped|blocked|failed, …)`. `skipped` — предпосылка отсутствует (работа не выполнялась, не сбой), несёт машинную причину `skip_reason`; прогон продолжают только `blocked`/`failed`, прогон на `skipped` не останавливается. Пропуск фазы **не меняет статусы ячеек** и не отменяет I6/I7; Ш7 присоединяет очередь ревью как **advisory**-`pending` и ничего не решает за человека. Незарегистрированная фаза даёт `failed` (не фиктивный `ok`). Полный контракт — `docs/architecture/01-modules-and-contracts.md`.
+**Отображение на реализацию: 15 фаз, гейты — отдельные фазы.** `PHASES` (`core/pipeline/runner.py`) = `normalize, lint, plan, g1, discovery, g2, registry, inheritance, corpus, evaluate, review, g3, compute, g4, report`. Ш1 → `normalize`+`lint`+`plan`, Ш2 → `discovery`, Ш3 → `registry`, Ш4 → `inheritance`, Ш5 → `corpus`, Ш6 → `evaluate`, Ш7 → `review`, Ш8 → `compute`, Ш9 → `report`; `g1`/`g2` стоят после `plan`/`discovery`, `g3` — между `review` и `compute`, `g4` — между `compute` и `report`. Гейт, не проходимый автоматически, — отдельная фаза: прогон останавливается на ней, а не «внутри» соседней.
+
+**Форматы и контейнеры в Ш5 (первый класс, не приложение).** HTML — основной источник, но **plain text и markdown** (включая расширенные варианты), **EPUB** и **PDF/Office** — равноправные входы; выбор обработчика — по семейству документа (`ExtractedDoc.family` → `chunker_family`): `markdown` → чанкер с `heading_path`, `text` → абзацный чанкер, `epub` → читатель stdlib-OCF и текстовый чанкер; PDF и Office (docx/pptx/xlsx) идут через docling с осью `crawl.document_level` (`off|text|layout|layout_tables|full`). Заявленные **контейнеры** (`zip`/`7z`/`rar`, ось `crawl.attachment_formats`) — отдельный класс допуска: содержимое не ретейнится как документ, оно **спускается** (см. §10), а члены становятся документами корпуса (`corpus_members`) с собственными `content_hash` и `source_id` (I19). Архив при этом остаётся сырьём в `corpus_raw`.
+
+**Два прохода Ш5 в одном вызове (без ре-краула).** Pass A (ingest) по каждому продукту: краул → retention → извлечение → дедуп → чанкинг. После Pass A выводятся per-product `partition_build_id` и `composition_id` (= `runs.index_build_id`); Pass B (index) проставляет чанкам `build_id = pb`, строит/переиспользует физическую сборку и пишет `index_manifest`. Именно поэтому `index_build_id` фиксируется после ингеста и до физической сборки (§13): иначе «тот же id — другой контент» был бы возможен. Чанки персистятся в Pass B (после всех продуктов), а не инкрементально по ходу — durability чанков по продуктам не заявляется.
+
+**Контракт фазы (реализация).** Каждая фаза возвращает `PhaseResult(status: ok|skipped|blocked|failed, …)`. `skipped` — предпосылка отсутствует (работа не выполнялась, не сбой), несёт машинную причину `skip_reason`; **останавливают прогон только `blocked` и `failed`** (гейт без решения и ошибка), прогон на `skipped` продолжается. Пропуск фазы **не меняет статусы ячеек** и не отменяет I6/I7; Ш7 присоединяет очередь ревью как **advisory**-`pending` и ничего не решает за человека. Незарегистрированная фаза даёт `failed` (не фиктивный `ok`). Полный контракт — `docs/architecture/01-modules-and-contracts.md`.
+
+**Статус «не реализовано» (честно).** Два элемента, описанных в этом разделе, **не имеют производителя в `hound run`** и на сегодня — субстрат, а не работающий контур: (1) **SERP-раунды** (K2 ниже) — `run_serp_round`/`run_serp_loop`/`invalidate_affected` реализованы и покрыты тестами, но ни одна фаза их не вызывает, `SearchPhase.SERP` не излучается; (2) **протокол исчерпания** — `save_exhaustion` есть в хранилище, но ни одна фаза его не пишет, поэтому strict-`❓` систематически попадает в `nda_questions` как аномалия I3 (статус при этом **не меняется**, I12). То же — per-instance `scope_attested_by`: `evaluate_phase` его принимает, но канал от CLI/`gate_decisions` до фазы не проложен. Регламент оставляет требования в силе; расхождение с исполнением — предмет отдельной полосы работ (§14).
 
 **SERP-раунды и иммутабельность корпуса (K2).** Иммутабельность индексной сборки относится к
 *содержимому* продукт-партиции, а не к числу раундов. Корпус append-only и версионируется по
@@ -455,7 +568,7 @@ Coverage = Σ w(resolved{✅,⚠️,❌}) / Σ w(universe)
 universe = applicable{✅,⚠️,❌,❓} ∪ failed ∪ pending ∪ отсутствующие-в-прогоне ячейки scope
 ```
 
-N/A вне знаменателя (человеческое решение о неприменимости); **`preliminary`-ячейка также вне знаменателя** (I13: preliminary исключена из всех расчётов, включая Coverage). **`pending`/неоценённая/отсутствующая ячейка входит в знаменатель как неразрешённая** — иначе неполный прогон завышает покрытие. Публикуется `completed = (evaluated ∪ failed) / universe` отдельно. **Вырожденный случай:** `universe = 0` → Coverage = `UNDEFINED` (не `0.0`; `0.0` читалось бы как «ничего не покрыто»), и Capability не публикуется (I11/G4). **Семантика: полнота прохождения заданного протокола по всей вселенной scope, а не вероятность истинности результата.** `failed` присутствует в знаменателе как неразрешённое измерение (I5), поэтому сбои не завышают покрытие. Дополнительно публикуется `failure_rate = failed / (evaluated ∪ failed)` — диагностика надёжности конвейера.
+N/A вне знаменателя (человеческое решение о неприменимости); **`preliminary`-ячейка также вне знаменателя** (I13: preliminary исключена из всех расчётов, включая Coverage). **`pending`/неоценённая/отсутствующая ячейка входит в знаменатель как неразрешённая** — иначе неполный прогон завышает покрытие. Публикуется `completed = (evaluated ∪ reviewed ∪ failed) / universe` отдельно (`reviewed` — измеренное состояние наравне с `evaluated`; `_MEASURED_STATES`). **Вырожденный случай:** `universe = 0` → Coverage = `UNDEFINED` (не `0.0`; `0.0` читалось бы как «ничего не покрыто»), и Capability не публикуется (I11/G4). **Семантика: полнота прохождения заданного протокола по всей вселенной scope, а не вероятность истинности результата.** `failed` присутствует в знаменателе как неразрешённое измерение (I5), поэтому сбои не завышают покрытие. Дополнительно публикуется `failure_rate = failed / (evaluated ∪ failed)` (счётчики ячеек, не веса; `evaluated` включает `reviewed`) — диагностика надёжности конвейера.
 
 **Comparability — кросс-продуктовая аннотация.** Comparability утверждается, только если выполнены **alignment-условия** когорты:
 
@@ -467,7 +580,7 @@ N/A вне знаменателя (человеческое решение о н
 
 При выполнении условий Comparability = f(min Coverage по продуктам): HIGH ≥90 · MEDIUM 75–89.9 · LOW 50–74.9 · INSUFFICIENT <50. При невыполнении любого условия Comparability помечается `cross-cycle` и понижается на один уровень, с явной причиной; **`INSUFFICIENT` — пол понижения (не понижается ниже)**. Пороги provisional, калибруются после кейса 1. **Открытость документации продукта** публикуется как **качественная аннотация** (не численная метрика, не влияет на уровни Comparability) — фактор риска documentation gaming (§12); переход в числовую метрику — отдельное калибруемое решение (§14).
 
-Формула модуля: `Σ importance × score / Σ importance (resolved)`; итог — перенормировка весов модулей на применимые. Политика в манифесте: `capability_policy: resolved-only-v1 · unknown_policy: excluded · partial_score: 0.5`.
+Формула модуля: `Σ w × score / Σ w (resolved)`, где `w` — вес параметра: per-param override → вес модуля → важность каталога (`Кр`=4 · `Вж`=3 · `Баз`=2 · `Опц`=1; числовые веса важности — **provisional**, калибруются после кейса 1); итог — перенормировка весов модулей на применимые (у неприменимого модуля `applicable_weight = 0`, а его Coverage публикуется как `0.0`). Политика в манифесте: `capability_policy: resolved-only-v1 · unknown_policy: excluded · partial_score: 0.5`.
 
 **Sensitivity analysis** (обязательный пост-хок отчёт, `hound sensitivity`) — пересчёт агрегатов по трём осям (перезапусков не требуется — статусы сохранены):
 - коэффициент ⚠️ ∈ {0.25, 0.5, 0.75};
@@ -537,9 +650,25 @@ Discovery (Ш2) может использовать search-enabled модель;
 
 ## 8. Человеко-машинные интерфейсы
 
-**G1** — план прогона (продукты, когорта, фокус→модули→роли, перенормировка, объём). **G2** — матрица ролей × продуктов, подтверждение relationship; паспорта фиксируются на цикл. **G3** — strict-ревью (⚠️/❌/❓/failed/Кр/аномалии) и preliminary-рабочий стол (`promote · set-status · fix-evidence · reject`), пакетные операции обязательны. **G4** — публикация: только strict, только с Coverage. Бюджеты времени G2/G3 фиксируются после первого полного кейса.
+**Два типа гейтов, один механизм.** Гейт **никогда не проходится автоматически**: оркестратор не «одобряет» его сам, а регистрирует решение.
 
-**Решения гейтов персистентны (S9).** Каждое человеческое решение G1–G4 пишется в `gate_decisions(decision_id, run_id, gate, target, actor, decided_at, notes)` — это носитель `reviewed_by` и аудит-след (кто подтвердил N/A, кто одобрил relationship на G2). Гейт не считается пройденным без строки в `gate_decisions`.
+**G1 — внутренняя аттестация профиля.** Предмет — план прогона: продукты, когорта, фокус→модули→роли, перенормировка, объём; человек утверждает **содержимое профиля пакета-якоря** (профиль квази-константен: 2–5 правок в год при еженедельных прогонах). **G2 — внутренняя аттестация матрицы** ролей × продуктов и подтверждения relationship; паспорта фиксируются на цикл.
+
+**G3 — точка интеграции: strict-ревью.** coHound **не ревьюит**: он экспортирует предмет решения — `runs/{run_id}/gates/G3-request.json` (очередь ревью: ⚠️/❌/❓/failed/Кр/аномалии + preliminary-рабочий стол) — и **записывает** полученный вердикт. Операции рабочего стола по регламенту — `promote · set-status · fix-evidence · reject`, пакетные операции обязательны; **фактическая CLI-поверхность сегодня уже**: `hound review` (очередь, read-only) и `hound promote` (`--status` из {✅,⚠️,❌,❓}, `--validated-only`, пакетно по очереди/`--param`). `set-status`/`fix-evidence`/`reject` как отдельные команды не реализованы — требование остаётся, реализация отложена (§14). **G4 — точка интеграции: публикация.** Предмет — Coverage/Capability и артефакты; публикуется только strict и только с Coverage. **Внешняя система решает, coHound фиксирует**; собственных «кнопок одобрения» у конвейера нет.
+
+**Файл запроса детерминирован.** `gates/{gate}-request.json` — канонический JSON без меток времени: один и тот же прогон в одном состоянии даёт побайтно тот же файл, а `subject_digest` в нём — ровно тот, который обязано нести совпадающее решение. Перезапись идемпотентна.
+
+**Решения гейтов персистентны (S9).** Решение пишется в `gate_decisions(decision_id, run_id, gate, target, actor, decided_at, notes, subject_digest, source, external_ref, verdict)` — это носитель `reviewed_by` и аудит-след. Гейт не считается пройденным без строки в `gate_decisions`. Дополнительно у G1/G2 объявлен второй путь — durable-аттестация профиля (`profile_attestation` в `state/{package_id}/state.db`), проверяемая гейтом; **производителя в прогоне у неё нет** (design-only), поэтому рабочий путь сегодня один — per-run строка `gate_decisions`, и она **приоритетна** (аудит-след и override).
+
+**Решение привязано к предмету.** `subject_digest` — отпечаток того, о чём решали (профиль для G1/G2, очередь ревью для G3, Coverage/Capability/артефакты для G4). Поэтому **устаревшее одобрение гейт не проходит**: изменился предмет — решение не действует, и сообщение называет изменившийся компонент (при отсутствии предыдущего запроса — перечисляет текущие компоненты). Решение **без** привязки (`subject_digest` пуст, legacy/явный override) проходит без сверки — это осознанная обратная совместимость.
+
+**Вердикт обязателен.** `verdict: approved|rejected`. Явный **отказ блокирует** гейт собственным сообщением («отклонён внешней системой (ref): notes»), а отказ, относящийся к устаревшему предмету, помечается отдельно («отклонение относится к устаревшему состоянию предмета; … повторное ревью может быть обосновано»). Молчание внешней системы не выдаётся **ни за отказ, ни за одобрение**: без решения прогон стоит на гейте.
+
+**Кто решил — записывается.** `source: internal|external` (`gate_source`). Для `source: external` обязательны `external_ref` (ссылка на решающую систему) и `notes` (почему): решение без причины и без ссылки — не аудит-след. `hound gate` требует `--subject-digest` (по умолчанию берётся из request-файла; при его отсутствии — отказ).
+
+**Политика делегирования (`run.yaml: gates.{g3,g4}`).** `external` (дефолт) — гейт ждёт решение с совпадающим `subject_digest`. `waived` — решение делегировано процессу вне coHound целиком: фаза получает `skipped` с `skip_reason=gate_delegated_external`, в `gate_decisions` пишется waiver-строка (`external_ref: waiver:…`), а в манифесте прогона появляется `gate_waivers`. **Невидимый waiver запрещён**; политика — **процесс, а не условие измерения**, поэтому в `EXECUTION_CONTRACT_FIELDS` её нет (иначе смена процедуры меняла бы `run_id` и рвала межцикловый diff).
+
+Бюджеты времени G2/G3 фиксируются после первого полного кейса. Назначение N/A (I6/I7) и per-instance аттестация `source_scope` (I2b/I2c) идут **через решение гейта**, а не через статус ячейки: `hound gate` пишет решения, `cells` не трогает; `hound promote --status` принимает только {✅,⚠️,❌,❓} — пути назначения N/A в CLI сегодня нет (см. §14).
 
 ---
 
@@ -551,7 +680,9 @@ Discovery (Ш2) может использовать search-enabled модель;
 | `preliminary_findings.xlsx` | Кандидаты: preliminary_status, validation_notes, чанки; маркировка «не публикация» | аналитик |
 | `nda_questions.csv` | Все ❓: продукт, параметр, исчерпанные контуры | аналитик/вендор |
 | `diff.md` | Изменённые статусы + evidence_id; запрещён через major | аналитик |
-| `run_manifest.yaml` | Все версии, mode+ослабления, `llm_scenarios`, модели, index_build, retrieval_profile+cutoff_K, корпус+extractor_version, SERP-бюджет, scoring-политика, **`provenance: default|measured` для каждого тюнящегося параметра (A3)** | воспроизводимость |
+| `run_manifest.yaml` | Все версии (`methodology_version`, `scoring_policy_version`, `status_dict_version`, `package_version`, `catalog_version`), `mode`, `llm_scenarios` (модель/слот/decoder/seed), `index_build_id`+`embed_model_id`+`chunker_version`+`extractor_version`+`lexical_engine_version`+`vector_store`, `retrieval_profile`+`retrieval_cutoff_K`+`retrieval_params_json`, `search_effort_budget_json` (SERP-бюджет), scoring-политика (`capability_policy`/`unknown_policy`/`partial_score`), `requested_ranking`/`computed_ranking`/`ranking_epsilon`, `settings_provenance` (**`provenance: default\|measured` для тюнящихся параметров — A3**), `crawl_provenance`+`crawl_strategy`+`crawl_rate_limit`+`crawl_config_digest`, `registry_spec_digest`, `execution_contract_digest`, `deploy_profile`/`edge_schema_version`/`edge_capabilities`, `gate_policies`/`gate_waivers` | воспроизводимость |
+
+**Где живёт манифест и что в нём проверено.** Источник истины — строка БД прогона (читается `read_manifest`); `runs/{run_id}/run_manifest.yaml` — выгрузка (`report`). Поле `settings_provenance` существует и заполняется измерением (`hound experiment retrieval`; фаза `report` добавляет измеренную ручку экстрактора `document_extract.queue_max_size` по уровням). **Честно:** валидатора «каждый тюнящийся параметр имеет `provenance`» нет — требование §0/операционализации A3 остаётся нормой, а не машинным гейтом; сейчас отсутствие записи означает «не измерялось», и это видно по пустому словарю, а не по ошибке.
 
 ---
 
@@ -566,6 +697,17 @@ policy validation (absence+source_scope, границы зачёта) → ано
 ```
 
 Adversarial-корпус — регрессионный gate («0 известных инъекций»), не заявление о безопасности. Краулинг — **только публичные сайты**: robots.txt/лимиты/ToS — дефолты (**robots-энфорсмент — свойство Scrapy-пути**; прямой/браузерный путь обслуживает его на egress-слое, 07 §5); honest/hybrid-рендер штатного JS-challenge публичной страницы — исполнение механизма страницы, а не обход барьера доступа; обход CAPTCHA, платных/авторизационных барьеров и закрытых разделов запрещён (ручной drop-in — штатный escape hatch); юрчек-лист до M1.
+
+**Границы исполнения (владельческие решения — часть методологии, а не настройка).** Это предикаты о том, *какой материал считается наблюдаемым*, поэтому они названы здесь, а не только в коде:
+
+1. **Потолок артефакта.** Страница ограничена `max_response_bytes` (дефолт **20 MiB**, in-memory); допущенный артефакт-контейнер — отдельным **потоковым** потолком `max_artifact_bytes`, дефолт **250 MiB** (262 144 000 B) — объявленный владельцем потолок хранения, а не размер буфера, поэтому он не степень двойки. Артефакт свыше потолка страницы уходит в staging-файл, а не в RAM. Превышение — терминальный класс `payload_too_large` (тот же URL упрётся в тот же потолок), не повторяемая ошибка.
+2. **Терминальный артефакт скачивается независимо от path-prefix seed'а.** Документ или контейнер (PDF, архив, офисный файл) на **своём** хосте допускается, даже если его путь не лежит под объявленным префиксом корня: он не продолжает навигацию, но является материалом продукта. SSRF-валидация, host-scope и блэклист остаются обязательными. Обход **видим**: точный счётчик `artifacts_outside_prefix` (с ограниченным списком примеров) в провенансе корня — «скачали мимо префикса» не должно быть тихим.
+3. **Потолка глубины вложенности архивов нет.** Искусственного предела владелец не вводит; конечность дают два независимых механизма: (а) **цикл по хешу содержимого** — архив, чьи байты совпали с уже пройденным в этом корне, повторно не разворачивается (`archive_cycle`; именно это делает конечным «архив, содержащий копию себя»); (б) **кумулятивный бюджет распакованного объёма на корень спуска** (`archive_max_total_uncompressed_bytes`) — оси `archive_max_*` ограничивают **один** контейнер, поэтому без кумулятивной оси 10 000 вложенных архивов, каждый «в бюджете», исчерпали бы CPU/диск. Исчерпание бюджета — **видимая** запись `archive_budget_exhausted`, а не тихое завершение. Байты членов не ретейнятся: архив — сырьё (I19), член ре-выводится из него по `archive_path`.
+4. **Форматы первого класса.** HTML — основной источник, но **plain text/markdown** (все расширенные варианты) и **EPUB** равноправны с HTML: свои читатели и свой чанкер, не docling. PDF и Office (docx/pptx/xlsx) — через docling с осью `crawl.document_level` (`off|text|layout|layout_tables|full`). Контейнеры `zip`/`7z`/`rar` — отдельный класс допуска (`crawl.attachment_formats`); их отсутствие в наборе делает контейнер обычным бинарным артефактом.
+5. **Осознанные не-блокирующие исходы.** `payload_too_large` и `unsupported_binary` (содержимое не является ни документным форматом, ни текстом/HTML) — не сбой наблюдения, а граница политики: материал присутствует, но по объявленному правилу не читается (как `exclude_documents`). Поэтому они **не** делают покрытие неполным по I2c, но и не выдают себя за наблюдение отсутствия.
+6. **Scope — только объявленные хосты.** Поддомен попадает в очередь только если объявлен (seed-корень продукта или ключ `domain_profiles.yaml`); `www.` эквивалентен базовому хосту с обеих сторон. Отказ видим (`out_of_scope_subdomains` — счётчик по хостам + примеры; `accepted_foreign_hosts` — сколько бюджета корня ушло на объявленный чужой хост). SSRF-проверка — **не** проверка scope: это разные предикаты.
+
+Все шесть границ — оси **исполнения** (`execution_change`, §13), а не методологии: их смена меняет корпус и `run_id`, но не правила измерения.
 
 **Контур данных (замкнут на периметр).** Эмбеддинги — локально (BGE-M3 доступна во внутреннем корпоративном периметре); оценщик — **модели через [OI]-совместимый API _внутри корпоративного периметра_** (внутренняя сеть; **внешние LLM-хосты и внешние ключи не используются**); корпус и чанки **не покидают периметр**. Обязательные условия LLM-провайдера (контракт/ИБ): **no-train** (не обучается на входных данных), **retention-лимит** (ограниченное хранение) и **аудит** запросов. Search-адаптер — РФ-контур (поисковые запросы — отдельный логируемый канал эгрессии; к ним применяется то же правило равного бюджета). 152-ФЗ. Юрисдикционная симметрия.
 
@@ -669,18 +811,22 @@ Preliminary-метрики: yield · расхождение кандидат/str
 
 **Два класса версий (B-7).**
 
-**`methodology_version` — семантика правил** (изменение = версионная граница, инвалидирует межцикловый diff, требует `golden-full` + пере-аннотации golden): `status_dictionary_version` · `scoring_policy_version` (включая `partial_score`, `unknown_policy`) · отсутствие-правила/сателлитная модель/evidence-модель · определения Coverage/Comparability/sensitivity. Slug иммутабельны; deprecated + replaced_by. **Оговорка (уточнение):** не всякий `*_version`/энум в `docs/status-dictionary.yaml` образует методологическую границу — словарь есть носитель **и** методологических, **и** операционных (execution) перечислений; класс конкретного энума определяется его **семантикой**, а не файлом-носителем (напр. `crawl_strategy` и `crawl.rate_limit` — исполнение/commodity, не методология; см. `execution_versions` ниже).
+**`methodology_version` — семантика правил** (изменение = версионная граница, инвалидирует межцикловый diff, требует `golden-full` + пере-аннотации golden): `status_dictionary_version` · `scoring_policy_version` (включая `partial_score`, `unknown_policy`) · `capability_policy` · отсутствие-правила/сателлитная модель/evidence-модель · определения Coverage/Comparability/sensitivity. Пять методологических полей манифеста (`METHODOLOGY_FIELDS`: `scoring_policy_version`, `status_dict_version`, `capability_policy`, `unknown_policy`, `partial_score`) — ровно тот набор, смена которого помечается причиной `methodology_change`. Slug иммутабельны; deprecated + replaced_by. **Оговорка (уточнение):** не всякий `*_version`/энум в `docs/status-dictionary.yaml` образует методологическую границу — словарь есть носитель **и** методологических, **и** операционных (execution) перечислений; класс конкретного энума определяется его **семантикой**, а не файлом-носителем (напр. `crawl_strategy` и `crawl.rate_limit` — исполнение/commodity, не методология; см. `execution_versions` ниже).
 
-**`execution_versions` — условия измерения** (commodity-слой; смена не меняет правила, но делает сборки/ячейки несопоставимыми численно — тоже блокирует diff, но с иной причиной): `package_version` · `catalog_version` · индексный контур `index_build_id`, `embed_model_id`, `chunker_version`, `extractor_version`, `lexical_engine_version`, `retrieval_profile`, `retrieval_cutoff_K`, `retrieval_params_json` (fusion-параметры, включая `rrf_k`) · **ось стратегии краула `crawl_strategy` и `crawl.rate_limit`** (операционные оси краула; смена — `execution_change`, не `methodology_change`) · модель под сценарий (I21) · когорта. Сборки иммутабельны; смена любого из них = новая сборка + retrieval-golden (S1). `methodology_version` — источник: `run.yaml` (поле `RunConfig`), дефолт — константа ядра; она входит в манифест и в границу diff (major). **Версии экстрактора/эмбеддера/лексического движка/векторного хранилища — наблюдаемые величины манифеста и `pb`, а не входы контракта** (методология 2.4.0): они не выводятся из входа — `extractor_version` собирается per-product в фазе корпуса, `embed_model_id` читается с диска собранной сборки, лексический движок и векторное хранилище зависят от установленных wheel'ов. Хеширование их в контракте сделало бы `run_id` хост-зависимым (два хоста с одинаковым `run.yaml` — разные прогоны), ломая R7 §11.7; поэтому в контракт входит объявленный `extractor_stack` (константы стека извлечения + версия библиотеки docling).
+**`execution_versions` — условия измерения** (commodity-слой; смена не меняет правила, но делает сборки/ячейки несопоставимыми численно — тоже блокирует diff, но с иной причиной): `package_version` · `catalog_version` · индексный контур `index_build_id`, `embed_model_id`, `chunker_version`, `extractor_version`, `lexical_engine_version`, `retrieval_profile`, `retrieval_cutoff_K`, `retrieval_params_json` (fusion-параметры, включая `rrf_k`) · **оси краула** (см. ниже) · модель под сценарий (I21) · когорта. Сборки иммутабельны; смена любого из них = новая сборка + retrieval-golden (S1). `methodology_version` — источник: `run.yaml` (поле `RunConfig`), дефолт — константа ядра; она входит в манифест и в границу diff (major). **Версии экстрактора/эмбеддера/лексического движка/векторного хранилища — наблюдаемые величины манифеста и `pb`, а не входы контракта** (методология 2.4.0): они не выводятся из входа — `extractor_version` собирается per-product в фазе корпуса, `embed_model_id` читается с диска собранной сборки, лексический движок и векторное хранилище зависят от установленных wheel'ов. Хеширование их в контракте сделало бы `run_id` хост-зависимым (два хоста с одинаковым `run.yaml` — разные прогоны), ломая R7 §11.7; поэтому в контракт входит объявленный `extractor_stack` (константы стека извлечения + версия библиотеки docling).
+
+**Оси краула — `execution_change`, и вот где именно они входят в идентичность.** Контракт (`EXECUTION_CONTRACT_FIELDS`) содержит три поля краула: `crawl_strategy`, `crawl_rate_limit` (каноническая форма `uniform(min=…,max=…)`) и `crawl_config_digest` — дайджест **разрешённой** конфигурации контроля краула (цепочка app `deploy.yaml:crawl` < run `run.yaml:crawl` < per-site `domain_profiles.yaml`, по одному «входу на каждый site key» плюс `__default__`). Через `crawl_config_digest` в идентичность входят **все** оси контроля — `max_workers`, `extract_workers`, `extract_max_tasks_per_child`, `max_response_bytes`, `max_artifact_bytes`, `attachment_formats`, `archive_max_*`, `archive_max_total_uncompressed_bytes`, `archive_descent`, `max_depth`, `max_documents`, `revalidate_max_documents`, `exclude_paths`, `exclude_documents`, `document_level` и **`robots`** (эффективная egress-политика `robots.txt` — условие измерения: она меняет состав корпуса, поэтому входит в дайджест всегда, как `max_depth`). Оси, не заданные ни на одном слое, в дайджест не попадают (обратная совместимость старых прогонов). Итог: смена любой оси краула даёт новый `crawl_config_digest` → новый `execution_contract_digest` → новый `run_id`; правка оси «на месте» невозможна — иначе два разных корпуса оказались бы одним измерением. **Политика гейтов (`run.yaml:gates`) в контракт не входит** — это процесс, а не условие измерения (§8).
 
 **`index_build_id` — два идентификатора (09 §8.1).** Идентификатор индексной сборки — не произвольное подмножество `execution_versions`, а **вычисляемый из декларированных входов сборки + отпечатка контента**. Их два:
 
 * **`partition_build_id`** (`pb_`) — иммутабельная сборка **одной** продукт-партиции: `package_id` · `product_id` · `chunker_version` · `embed_model_id` · `extractor_version` · `lexical_engine_version` · `vector_store` · `product_content_token` (детерминированный отпечаток `(chunk_id, content_hash)` этой партиции). **`params_token` (каталог/фокус) и `snapshot_date` в него не входят**: каталог/фокус не меняют чанки/векторы, а снимок — провенанс, не содержимое. Поэтому партиция переиспользуется при смене фокуса/каталога;
-* **`composition_id`** (`cb_`) — композиция партиций когорты: отпечаток `package_id` и sorted `(product_id, partition_build_id, content_digest)`. Это и есть `runs.index_build_id`; он фиксируется **после ингеста и до физической сборки** (двухпроходный Ш5, §5), что исключает коллизию «тот же id — другой контент».
+* **`composition_id`** (`cb_`) — композиция партиций когорты: отпечаток `package_id` и sorted `(product_id, partition_build_id, content_digest)`. Это и есть `runs.index_build_id`; он фиксируется **после ингеста и до физической сборки** (два прохода Ш5 в одном вызове: Pass A ingest → `pb`/`cb`, Pass B index; §5), что исключает коллизию «тот же id — другой контент».
 
 **`retrieval_profile`/`retrieval_cutoff_K`/`retrieval_params_json` не входят ни в один id** (ретривал-конфигурация не меняет чанкинг/векторы): они остаются run-level провенансом и пер-ячейкой, но по-прежнему блокируют diff как `execution_change`. Схема формулы версионируется (`_PARTITION_SCHEMA`), поэтому ревизия формулы всегда порождает новые id. Смена формулы — версионная граница класса `execution_change` (не `methodology_change`).
 
-**Diff-совместимость:** `hound diff` запрещает межцикловый diff, когда несопоставимы **условия измерения**, а не когда изменился контент. Сравнивается `execution_contract_digest` — отпечаток **декларированных** условий измерения (`methodology_version`, `scoring_policy_version`, `status_dict_version`, `catalog_version`, `package_version`, `cohort_digest`, `seeds_digest`, `llm_scenarios`, ретривал-профиль/`cutoff_K`/`retrieval_params_json`, версия чанкера, объявленный стек извлечения `extractor_stack`, оси краула, `registry_spec_digest`, deploy-профиль, версия seam-схемы). Наблюдаемые величины (`extractor_version`, `embed_model_id`, `lexical_engine_version`, `vector_store`) в контракт **не входят** (см. `execution_versions` выше). Причина запрета помечается классом: `methodology_change` (правила иные — сравнение семантически неверно) vs `execution_change` (условия измерения иные — сравнение численно несопоставимо). Major `methodology_version` запрещает межцикловые diff.
+**Diff-совместимость:** `hound diff` запрещает межцикловый diff, когда несопоставимы **условия измерения**, а не когда изменился контент. Сравнивается `execution_contract_digest` — отпечаток **декларированных** условий измерения, ровно 19 полей: `methodology_version`, `scoring_policy_version`, `status_dict_version`, `catalog_version`, `package_version`, `cohort_digest`, `seeds_digest`, `llm_scenarios`, `retrieval_profile`, `cutoff_K`, `retrieval_params_json`, `chunker_version`, `extractor_stack`, `crawl_strategy`, `crawl_rate_limit`, `crawl_config_digest`, `registry_spec_digest`, `deploy_profile`, `edge_schema_version`. Пропущенное поле — ошибка вычисления, а не «то же, что `null`»; лишнее поле — тоже ошибка (контракт не расширяется молча). Наблюдаемые величины (`extractor_version`, `embed_model_id`, `lexical_engine_version`, `vector_store`) в контракт **не входят** (см. `execution_versions` выше). Причина запрета помечается классом: `methodology_change` (правила иные — сравнение семантически неверно) vs `execution_change` (условия измерения иные — сравнение численно несопоставимо). Major `methodology_version` запрещает межцикловые diff. Для legacy-пар (хотя бы у одного манифеста контракта нет) поля сравниваются построчно по перечню исполнения — включая `index_build_id`; старые прогоны не становятся сравнимыми задним числом.
+
+**Классификация `crawl.document_level` — `execution_change`.** Ось входит в `CrawlLimits.as_dict()` **безусловно** (дефолт `full` присутствует всегда, как `max_depth`), поэтому её смена меняет `crawl_config_digest` → `execution_contract_digest` → **новый `run_id`**; это и есть определение `execution_change` (§13). Вторичный эффект — уровень кодируется в наблюдаемой версии экстрактора (`docling-doc-3:<level>`) и потому влечёт новую индексную сборку (`pb`/`index_build_id`), — но идентичность прогона к этому моменту уже разошлась, так что класс остаётся `execution_change`, а не `content_change`. `methodology_version` при этом **не меняется**: правила измерения не затронуты.
 
 **Принятое ограничение (методология 2.4.0).** Поскольку наблюдаемые версии экстрактора/эмбеддера/лексики/векторного хранилища исключены из контракта, их смена **не блокирует** межцикловый diff: она видна только через `pb`/`index_build_id` и попадает в **разрешённый** класс `content_change` (баннер + doc-delta). Это осознанный размен: блокировать diff величиной, которую нельзя объявить на входе, значило бы либо фабриковать значение, либо сделать `run_id` хост-зависимым. Альтернатива (контракт = hash(declared) + отдельная **блокирующая** именованная строка для наблюдаемых) зарегистрирована в §14 с триггером возврата.
 
@@ -697,7 +843,7 @@ Preliminary-метрики: yield · расхождение кандидат/str
 
 | Механизм | Триггер возврата |
 |---|---|
-| **Флагман-класс оценщика** (слот `flagship`: DeepSeek-V4.1-Flash ~614 GB / GLM-5.3-Flash ~306 GiB FP8 в облаке) | слот `cheap` (дефолт обоих — DeepSeek-V4.1-Flash) не достигает golden-порогов R6/R12 на измеримой задаче; расценки GPU-класса в корп. облаке приемлемы |
+| **Флагман-класс оценщика** (слот `flagship`: модель крупного класса в облаке периметра; идентификатор — **только** `config/deploy.yaml: llm.flagship.model_id`, §7.4) | слот `cheap` (дефолт обоих слотов — значение `llm.<slot>.model_id` в `deploy.yaml`, §7.4) не достигает golden-порогов R6/R12 на измеримой задаче; расценки GPU-класса в корп. облаке приемлемы |
 | **Yandex on-prem (Stackland) / вендорский LLM-контур** | своя эксплуатация GPU-кластера дешевле/быстрее, чем внутренний API периметра; либо требование ИБ изолировать LLM-контур |
 | **Huawei Ascend-путь** | подтверждённая доступность/цена Ascend 950PR в РФ и готовность конвертации весов (ModelSlim/CANN) |
 | **Search-enabled LLM как замена/дополнение SERP-адаптера** | измеренное превосходство по полноте/стоимости на retrieval-golden при сохранении симметрии и provenance (I19) |
@@ -714,6 +860,12 @@ Preliminary-метрики: yield · расхождение кандидат/str
 | Категории 6+ | стабильность 5 кейсов; онбординг — §11.4 |
 | Парсинг исходного кода (code-chunker) | кейс, где upstream-факт (архетипы A/B) доказуем только по исходникам; отдельный `ChunkerPort`-адаптер, без графа |
 | Граф знаний / GraphRAG (vector+graph) | потребность в кросс-продуктовых связях, не выражаемых `baselines.csv`/сателлитами; в текущем дизайне не требуется (A1/A2) |
+| **Производители evidence-механизмов** (§5, «Статус "не реализовано"»): запись `search_exhaustion` в Ш5/Ш6; канал per-instance `scope_attested_by` от решения гейта до `evaluate_phase`; вызов SERP-раундов из фаз | первый полный прогон до `report`: без них каждый strict-`❓` уходит аномалией I3, а `❌` при `explicit` достижим только через `registry_absence` |
+| **Путь назначения N/A** (I6/I7) в CLI: `hound promote --status` принимает {✅,⚠️,❌,❓}; отдельной команды нет, а триггер БД N/A запрещает автоматически | первое N/A-решение на кейсе 1: R4 тривиален, пока N/A недостижим |
+| **Отдельные операции цикла кандидата** `set-status` / `fix-evidence` / `reject` (§1.4, §8) | объём ручных правок на кейсе 1 покажет, что `promote` + ревью-очереди недостаточно |
+| **Расширение проверки зеркала словаря** до полного покрытия секций (§4.1): `source_kind`, `evidence_type`, `source_scope`, `cell_state`, `run_mode`, `satellite.*`, `satellite_state`, `inheritance_mode`, `param_type`, `importance`, `archetype`, `anchor_relation`, `llm_scenario`, `endpoint_kind`, `adapter_kind`, `search_phase`, `termination_reason`, `comparability`; плюс двусторонняя сверка `statuses`/`absence_rule_type.values`; `crawl_probe_*` — либо перенести энумы в `core/domain/enums.py`, либо объявить операционными вне проверки | первая правка `cell_state`/`source_scope`: сегодня она пройдёт молча |
+| **`ExtractedDoc.family` как `StrEnum`** (§4.1, §5): секция `document_family` в словаре уже объявлена, но в коде это по-прежнему `str \| None` с константами `FAMILY_MARKDOWN/TEXT/EPUB`, влияющими на выбор чанкера (а значит — на `pb`), и валидатор секцию не сверяет | первая правка набора семейств: расхождение чанкера и словаря станет невидимым |
+| **Сверка `golden_tier` и `cap`** (§4.1): секции в словаре есть (добавлены), но `assert_dictionary_integrity` их не проверяет — как и 17 других секций с `StrEnum` | первая правка тиров golden или потолков Р-2 |
 
 ---
 
@@ -724,7 +876,7 @@ Preliminary-метрики: yield · расхождение кандидат/str
 (каталог, `cohort.yaml`, `domain_profiles.yaml`, JS-домены) — **данные**, не открытые вопросы: их
 механизм определён (§4.2/§4.3, D2 `fetch: browser` + `wait_for`).
 
-- **Финал модели-оценщика** (слоты `cheap`/`flagship`): дефолт задан в `config/deploy.yaml: llm.<slot>.model_id` (единственный источник; §7.4), его текущее значение — **провизионные данные**, а не решение; подтверждается/меняется **измерением** по R6/R9/R10/R12 (`hound experiment evaluator-benchmark`); бюджет токенов и доступные ручки детерминизма у API-сервиса. Лицензии кандидатов **верифицированы** (DeepSeek-V4.1-Flash/GLM-5.3-Flash/GLM-4.5-Air/GigaChat3.5-432B-A28B — MIT; Qwen3.8-27B — Apache-2.0). Контур и юрстатус **закрыты** (внутренний периметр, no-train + retention + аудит; §3.2/§10). Возврат к флагману — по триггеру §14.
+- **Финал модели-оценщика** (слоты `cheap`/`flagship`): дефолт задан в `config/deploy.yaml: llm.<slot>.model_id` (единственный источник; §7.4), его текущее значение — **провизионные данные**, а не решение; регламент идентификатор не называет (§7.4: иначе провизионное значение становится «нормой» и расходится с конфигом при следующем измерении). Выбор подтверждается/меняется **измерением** по R6/R9/R10/R12 (`hound experiment evaluator-benchmark --runs-dir … --run-id … --golden … --model …`); бюджет токенов и доступные ручки детерминизма у API-сервиса. Лицензии кандидатов **верифицированы** (MIT / Apache-2.0 — реестр `docs/architecture/05-dependency-stack.md`); идентификаторы кандидатов — там же, не в регламенте. Контур и юрстатус **закрыты** (внутренний периметр, no-train + retention + аудит; §3.2/§10). Возврат к флагману — по триггеру §14.
 - **PDF-контур:** тест docling на 3–5 реальных мануалах РФ-вендоров, PDF + Office (**блокер M0**); риск потери табличной структуры фич-матриц; офлайн-бандл весов и аудит лицензий (§3.2, `05-dependency-stack.md` §7).
 - **Профили tantivy (RU/EN/identifier)** — тюнинг на retrieval-golden per кейс (§11.2); механика (нативный ru-стеммер) закрыта V1 (`05` §V1).
 - **Search-адаптер** (дефолт **выбран**: Yandex Search API, `async`; §3.2): сверка цитат-кандидатов (I19), бюджет/snapshot-протокол, `adapter_kind` при необходимости.
