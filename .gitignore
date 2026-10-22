@@ -50,3 +50,6 @@ htmlcov/
 
 # Локальный артефакт CodeGraphContext MCP (автогенерация, не зависимость проекта)
 .cgcignore
+
+# Намеренно untracked (решение владельца): план эволюции краула не коммитится.
+docs/architecture/08-crawl-platform-evolution-plan.md
