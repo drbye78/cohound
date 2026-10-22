@@ -12,4 +12,5 @@ __all__ = [
     "sanitize",
     "logging",
     "rate_limit",
+    "memory",
 ]

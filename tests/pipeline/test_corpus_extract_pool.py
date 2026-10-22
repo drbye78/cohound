@@ -56,7 +56,14 @@ from core.pipeline.corpus import (
 from core.pipeline.crawl_frontier import resolve_crawl_limits
 from core.pipeline.crawl_session import default_session_id
 from core.pipeline.extract_cache import ExtractionCache
-from core.ports.types import Chunk, ExtractedDoc, ExtractionRoute, FetchPlan, RawPage
+from core.ports.types import (
+    Chunk,
+    ExtractedDoc,
+    ExtractionRoute,
+    FetchMode,
+    FetchPlan,
+    RawPage,
+)
 from core.store.sqlite_store import SqliteStore
 from core.util.hashing import content_hash
 
@@ -1578,3 +1585,169 @@ def test_parent_extract_cache_hit_skips_submit(tmp_path: Path) -> None:
     ]
     # Текст тот же (кэш вернул ровно извлечённый ``ExtractedDoc``).
     assert [doc.url for doc in second_build.docs] == [doc.url for doc in first_build.docs]
+
+
+# --------------------------------------------------------------------------- #
+# (15) Операционный рычаг памяти: trim арен в воркере после каждого документа
+# --------------------------------------------------------------------------- #
+
+
+def _worker_request(raw: Path) -> _ExtractRequest:
+    """Payload одного задания для прямого вызова ``_extract_worker``."""
+    return _ExtractRequest(
+        raw_path=str(raw),
+        url="https://docs.test/trim",
+        fetched_at=TS,
+        fetch_mode=FetchMode.HTTP,
+        lang="en",
+        status_code=200,
+        content_type="text/html",
+        engine="http",
+        route=ExtractionRoute.HTML,
+    )
+
+
+class _PathExtractor:
+    """Экстрактор воркера: читает retained-файл по ``source_path`` (как docling).
+
+    ``_Extractor`` читает ``page.content``, а воркер передаёт путь и пустое тело (I19) —
+    для этого пути нужен экстрактор, умеющий открыть файл.
+    """
+
+    version = "extractor-1"
+
+    def extract(
+        self, page: RawPage, route: ExtractionRoute = ExtractionRoute.AUTO
+    ) -> ExtractedDoc:
+        data = (
+            Path(page.source_path).read_bytes()
+            if page.source_path
+            else page.content
+        )
+        return ExtractedDoc(
+            text=data.decode("utf-8", errors="replace"),
+            content_hash=content_hash(data),
+            extractor_version=self.version,
+            page_count=1,
+        )
+
+
+def _install_worker_extractor(extractor: Any) -> None:
+    """Ставит экстрактор воркера (как это делает ``initializer`` пула)."""
+    from core.domain.enums import DocumentLevel
+    from core.pipeline.corpus import set_worker_extractor
+
+    set_worker_extractor(extractor, level=DocumentLevel.FULL)
+
+
+def test_extract_worker_trims_arenas_once_per_document(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Trim вызывается **ровно один раз на документ** и до возврата результата.
+
+    Счётчик — подмена ``core.util.memory.release_free_arenas``: проверяется не эффект
+    ``malloc_trim`` (он платформенный), а факт и кратность вызова в воркере.
+    """
+    from core.pipeline.corpus import _extract_worker, set_worker_extractor
+    from core.util import memory
+
+    calls: list[int] = []
+    monkeypatch.setattr(
+        memory, "release_free_arenas", lambda: (calls.append(1), True)[1]
+    )
+
+    raw = tmp_path / "doc.bin"
+    raw.write_bytes(b"<html>trim-me</html>")
+    request = _worker_request(raw)
+    try:
+        _install_worker_extractor(_PathExtractor())
+        docs = [_extract_worker(request) for _ in range(3)]
+    finally:
+        set_worker_extractor(None)
+
+    assert [doc.text for doc in docs] == ["<html>trim-me</html>"] * 3
+    assert len(calls) == 3  # один trim на документ, не больше и не меньше
+
+
+def test_extract_worker_trim_failure_does_not_fail_task(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Падающий хук памяти не ломает извлечение: документ возвращается как обычно."""
+    from core.pipeline.corpus import _extract_worker, set_worker_extractor
+    from core.util import memory
+
+    def _boom() -> bool:
+        raise RuntimeError("malloc_trim недоступен")
+
+    monkeypatch.setattr(memory, "release_free_arenas", _boom)
+
+    raw = tmp_path / "doc.bin"
+    raw.write_bytes(b"<html>still-here</html>")
+    try:
+        _install_worker_extractor(_PathExtractor())
+        doc = _extract_worker(_worker_request(raw))
+    finally:
+        set_worker_extractor(None)
+
+    assert doc.error is None
+    assert doc.text == "<html>still-here</html>"
+    assert doc.content_hash == content_hash(b"<html>still-here</html>")
+
+
+def test_extract_worker_trims_even_when_extraction_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Отказ экстрактора: trim всё равно происходит, исключение идёт дальше как прежде."""
+    from core.pipeline.corpus import _extract_worker, set_worker_extractor
+    from core.util import memory
+
+    calls: list[int] = []
+    monkeypatch.setattr(
+        memory, "release_free_arenas", lambda: (calls.append(1), True)[1]
+    )
+
+    raw = tmp_path / "doc.bin"
+    raw.write_bytes(b"<html>boom</html>")
+    try:
+        _install_worker_extractor(_RaisingExtractor())
+        with pytest.raises(RuntimeError):
+            _extract_worker(_worker_request(raw))
+    finally:
+        set_worker_extractor(None)
+
+    assert len(calls) == 1
+
+
+def test_corpus_phase_reports_arena_trim_visibility(tmp_path: Path) -> None:
+    """Рычаг виден оператору: одна строка фазы с числом документов через пул.
+
+    Строка появляется только когда воркеры пула реально довели документы (иначе о
+    рычаге нечего рассказывать) и не является ``errors``: ужатие heap — норма.
+    """
+    created: list[_FakePool] = []
+    pool = ExtractionPool(
+        pool_factory=_recording_factory(created), worker=_reconstruct_worker
+    )
+    result = _build(
+        tmp_path,
+        pages={ROOT: b"<html>visible-trim</html>"},
+        crawl_defaults=CrawlRunConfig(extract_workers=2),
+        extraction_pool=pool,
+    )
+
+    notes = [entry for entry in result.log_entries if isinstance(entry, str)]
+    trim_notes = [note for note in notes if "malloc_trim" in note]
+    assert len(trim_notes) == 1
+    assert "документов через пул: 1" in trim_notes[0]
+    assert result.errors == []
+
+
+def test_corpus_phase_has_no_trim_note_without_pool(tmp_path: Path) -> None:
+    """Inline-экстракция (ось не задана): строки о trim нет — воркер не исполнялся."""
+    result = _build(tmp_path, pages={ROOT: b"<html>inline</html>"})
+
+    assert not [
+        entry
+        for entry in result.log_entries
+        if isinstance(entry, str) and "malloc_trim" in entry
+    ]

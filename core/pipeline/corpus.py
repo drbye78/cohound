@@ -242,6 +242,7 @@ from core.ports.types import (
     FetchPlan,
     RawPage,
 )
+from core.util import memory as _memory
 from core.util.document_formats import (
     BINARY_SNIFF_BYTES,
     DOCUMENT_SUFFIXES,
@@ -910,11 +911,38 @@ def _run_extract(extractor: ExtractorPort, request: _ExtractRequest) -> Extracte
     return extracted
 
 
+def _trim_worker_arenas() -> bool:
+    """Отдаёт ОС свободные арены glibc после документа (операционный рычаг памяти).
+
+    Зовётся **в воркер-процессе** (:func:`_extract_worker`) после того, как результат
+    извлечения получен, и **до** возврата payload родителю: родитель получает документ,
+    когда heap воркера уже ужат. Адаптер об этом не знает — память процесса не его дело.
+
+    Замер (22.10, ``layout_tables``, один процесс): после 81-стр. PDF RSS 1679 → 1084 MB
+    (≈600 MB ОС), второй trim позже 1406 → 1240 MB; без trim 4 мелких PDF поднимали
+    процесс с 1679 до 2052 MB (арены, а не объективная потребность). Подробности —
+    :mod:`core.util.memory`.
+
+    **Никогда не поднимает.** Гигиена памяти не вправе ломать извлечение: сбой хука —
+    ``False`` и запись документа, а не отказ задания.
+    """
+    try:
+        return bool(_memory.release_free_arenas())
+    except Exception:  # noqa: BLE001 — наблюдаемость/память не ломают экстракцию
+        return False
+
+
 def _extract_worker(request: _ExtractRequest) -> ExtractedDoc:
     """Module-level воркер экстракции для процессов (picklable by reference, P4/§7).
 
     Использует экстрактор, построенный инициализатором в этом процессе; ``store``/``session``
     воркеру недоступны by construction (payload — только примитивы).
+
+    После каждого документа (и до возврата результата родителю) свободные арены glibc
+    возвращаются ОС — ``malloc_trim(0)``, :func:`_trim_worker_arenas`. Без этого RSS
+    воркера растёт храповиком: ``max_tasks_per_child`` рециклинг лишь откладывает OOM,
+    а не отменяет его. Рычаг **операционный**: результат байт-в-байт тот же, ``run_id``
+    не меняется, ``execution_change`` не нужен (§13).
     """
     if _WORKER_EXTRACTOR is None:  # pragma: no cover — защита от неверной сборки
         return ExtractedDoc(
@@ -931,7 +959,12 @@ def _extract_worker(request: _ExtractRequest) -> ExtractedDoc:
             extractor_version="",
             error="extraction worker без экстрактора для уровня",
         )
-    return _run_extract(extractor, request)
+    # ``finally``: арены возвращаются и на честном отказе извлечения (исключение
+    # поднимается дальше как прежде — пул сам решает судьбу задания).
+    try:
+        return _run_extract(extractor, request)
+    finally:
+        _trim_worker_arenas()
 
 
 @dataclass
@@ -969,6 +1002,12 @@ class _ExtractPools:
     def __init__(self, *, max_rebuilds: int = _EXTRACT_MAX_POOL_REBUILDS) -> None:
         self._max_rebuilds = max_rebuilds
         self._slots: dict[tuple[DocumentLevel, int], _ExtractPoolSlot] = {}
+        #: Наблюдаемость операционного рычага памяти: сколько заданий воркеры пула
+        #: довели до результата. В воркере на каждое такое задание приходится ровно один
+        #: ``malloc_trim(0)`` (:func:`_extract_worker`), поэтому счётчик фазы — честная
+        #: нижняя граница числа trim-вызовов, видимая оператору (обратного канала из
+        #: дочернего процесса нет).
+        self.completed = 0
 
     def slot(self, key: tuple[DocumentLevel, int]) -> _ExtractPoolSlot:
         """Состояние ключа (создаётся лениво; I/O нет)."""
@@ -990,6 +1029,7 @@ class _ExtractPools:
     def note_completion(self, key: tuple[DocumentLevel, int]) -> None:
         """Задание завершилось (любым исходом): пул жив, серия таймаутов сброшена."""
         self.slot(key).stalled_timeouts = 0
+        self.completed += 1
 
     def note_timeout(self, key: tuple[DocumentLevel, int]) -> bool:
         """Учесть таймаут артефакта; ``True`` — пул мёртв (``2 × timeout`` без завершений)."""
@@ -6890,6 +6930,16 @@ def _build_corpus(
         log_entries.append(
             f"corpus: {revalidation_orphan_total} known URLs are outside every authored "
             "root — author-scope drift (revalidated as orphans; observation only)"
+        )
+    if pools.completed:
+        # Операционный рычаг памяти виден оператору (не «магия»): воркер-процесс после
+        # каждого документа возвращает ОС свободные арены glibc (``malloc_trim(0)``,
+        # ``core/util/memory.py``). Один trim на доведённое задание, поэтому счётчик фазы
+        # — это и число trim-вызовов в воркерах. Не ``errors``: ужатие heap — норма,
+        # не сбой; ``run_id``/контракт от рычага не зависят.
+        log_entries.append(
+            "corpus: экстракция — trim арен (malloc_trim) в воркере после каждого "
+            f"документа; документов через пул: {pools.completed}"
         )
     return PhaseResult(
         status="ok",

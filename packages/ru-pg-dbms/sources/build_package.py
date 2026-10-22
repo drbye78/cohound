@@ -1309,8 +1309,10 @@ def main() -> int:
             # Держать в синхроне с `run.yaml` — иначе `generator_drift` (P7).
             "max_artifact_bytes": 262_144_000,
             # Замер 2026-10 (после `PDF_QUEUE_MAX_SIZE = 1`): 2 воркера помещаются в 6.9 GiB
-            # при `layout_tables` (2×2126 MB + baseline родителя). Держать в синхроне с
-            # `run.yaml` — иначе `generator_drift` (P7).
+            # при `layout_tables` (2×2126 MB + baseline родителя). Плюс воркер после каждого
+            # документа отдаёт ОС свободные арены glibc (`malloc_trim`: замер 1679 → 1084 MB),
+            # поэтому пол резидента ≈1.1 GB на воркер, а не «накопленное». Держать в синхроне
+            # с `run.yaml` — иначе `generator_drift` (P7).
             "extract_workers": 2,
             "extract_max_tasks_per_child": 25,
             "document_level": "layout_tables",
