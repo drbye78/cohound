@@ -38,13 +38,14 @@ from dataclasses import dataclass
 from pathlib import PurePosixPath
 from typing import Protocol
 
-from core.util.document_formats import DOCUMENT_SUFFIXES
+from core.util.document_formats import DOCUMENT_SUFFIXES, TEXTUAL_SUFFIXES
 
 __all__ = [
     "AXIS_MAX_MEMBERS",
     "AXIS_MAX_MEMBER_BYTES",
     "AXIS_MAX_UNCOMPRESSED",
     "CAPACITY_REASONS",
+    "DESCENT_HTML_SUFFIXES",
     "DESCENT_TEXT_SUFFIXES",
     "FORECAST_EXAMPLES_MAX",
     "INGEST_SUFFIXES",
@@ -70,9 +71,15 @@ AXIS_MAX_MEMBER_BYTES = "archive_max_member_bytes"
 AXIS_MAX_UNCOMPRESSED = "archive_max_uncompressed_bytes"
 AXIS_MAX_MEMBERS = "archive_max_members"
 
+#: HTML-цели спуска: разметка, которую штатно разбирает HTML-экстрактор (trafilatura).
+DESCENT_HTML_SUFFIXES: tuple[str, ...] = (".html", ".htm")
+
 #: Текстовые цели спуска сверх документного реестра: спуск достаёт из контейнера не
-#: только PDF/Office, но и разметку, которую экстрактор HTML/markdown разбирает штатно.
-DESCENT_TEXT_SUFFIXES: tuple[str, ...] = (".md", ".markdown", ".txt", ".html", ".htm")
+#: только PDF/Office, но и текстовые форматы первого класса. Текстуальная часть берётся
+#: из **реестра** (:data:`core.util.document_formats.TEXTUAL_SUFFIXES`), а не второй
+#: копией списка: у каждого текстового формата есть читатель, и расхождение наборов
+#: означало бы «спуск вытащил член, который экстрактор не знает» (или наоборот).
+DESCENT_TEXT_SUFFIXES: tuple[str, ...] = TEXTUAL_SUFFIXES + DESCENT_HTML_SUFFIXES
 
 #: Полный набор суффиксов, которые спуск превращает в документы корпуса.
 #: Документная часть **не** дублируется: она берётся из реестра форматов.

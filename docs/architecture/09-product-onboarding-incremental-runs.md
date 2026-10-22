@@ -1313,6 +1313,83 @@ RAM), поэтому адаптер извлекает **один** член в�
 `нет внешней утилиты (bsdtar/unrar/7z)`). Тихая подмена пустым листингом запрещена:
 «не умею читать» и «внутри пусто» — разные факты.
 
+### 6.8. Текстовые форматы и EPUB: читатель, маршрут, чанкер (as-built, 22.10)
+
+**Измеренный дефект, который это закрывает.** В прогоне 22.10 `parser_failed` — самая
+крупная блокирующая корзина (76), и 73 отказа — дефект маршрутизации, не сайта: 72 × `.txt`
+(файлы целы, 874–35 005 Б, валидный UTF-8) и 1 × `.rtf` уходили в HTML-путь, trafilatura
+возвращала `None` на не-HTML, и документ умирал в `parser_failed`. Поскольку
+`PARSER_FAILED` входит в `BLOCKING_FAILURE_KINDS`, `corpus_coverage.complete` не мог стать
+`True` **по построению**, а `❌` — не публиковаться. Ещё 47 × `.epub` стояли в очереди и
+провалились бы так же.
+
+**Класс форматов.** Plain text и markdown — **первый класс наравне с HTML и PDF** (решение
+владельца), EPUB — отдельный читатель. Реестр один:
+`core/util/document_formats.py` — `MARKDOWN_SUFFIXES` (`.md`, `.markdown`, `.mdown`,
+`.mkd`), `PLAIN_TEXT_SUFFIXES` (`.txt`, `.text`, `.log`, `.sql`, `.rst`), `TEXTUAL_SUFFIXES`
+(объединение), `textual_family(url, content_type) -> "markdown" | "text" | None`,
+`is_epub(url, content_type)`. Приоритет сигналов: суффикс раньше `Content-Type`, а суффикс
+документа (`.pdf`/`.docx`/…) и `.epub` **сильнее** текстового `Content-Type` —
+`report.pdf`, отданный как `text/plain`, остаётся документом. `.epub` **не** входит в
+`DOCUMENT_SUFFIXES` (этот реестр — вход docling) и не стал терминальным артефактом:
+допуск краула не менялся.
+
+| Семейство / формат | Сигнал | Читатель | Чанкер |
+|---|---|---|---|
+| HTML (страница) | остальное (по умолчанию) | `HtmlExtractor` (trafilatura) | `MarkdownChunker` |
+| markdown | `.md`/`.markdown`/`.mdown`/`.mkd`, `text/markdown`, `text/x-markdown`, `application/x-markdown` | `TextExtractor` (`text-plain-1`) | `MarkdownChunker` (`md-heading-2`) |
+| plain text | `.txt`/`.text`/`.log`/`.sql`/`.rst`, `text/plain` | `TextExtractor` (`text-plain-1`) | `TextChunker` (`text-para-1`) |
+| документ | `.pdf`/`.docx`/`.pptx`/`.xlsx` + MIME | `DoclingDocumentExtractor` | `MarkdownChunker` |
+| EPUB | `.epub`, `application/epub+zip` | `EpubExtractor` (`epub-1`) | `MarkdownChunker` |
+
+**Маршрут в композите** (`core/cli/wiring._LocalExtractor`, `core/edge/__main__._EdgeExtractor`):
+явный `HTML` → явный `DOCUMENT` → текстовое семейство (суффикс, затем `Content-Type`) →
+EPUB → документный суффикс/тип → HTML. Новое значение `ExtractionRoute` **не** вводилось:
+маршрут — производная формата страницы, а не операторская ось; добавление значения
+затронуло бы `docs/status-dictionary.yaml` и всех потребителей оси, ничего не добавив к
+поведению. Композит строится **всегда** (в том числе при `document_level=off` и без
+docling): текстовый и EPUB-пути от docling не зависят, а возврат «голого» `HtmlExtractor`
+вернул бы `.txt`/`.epub` в trafilatura.
+
+**Текстовый читатель** (`core/adapters/extract_text.py`, `text-plain-1`) не интерпретирует
+разметку: charset из `Content-Type` (fallback UTF-8 `errors="replace"`), снятие BOM,
+CRLF/CR → LF, удаление NUL/управляющих символов (таб сохраняется), нейтрализация каркаса
+промпт-инъекций, схлопывание >2 пустых строк до одной. Пустой/пробельный результат —
+видимая ошибка `"текст пуст"`, а не пустой успех. `page_count=None`.
+
+**EPUB через контейнерный субстрат** (`core/adapters/extract_epub.py`, `epub-1`; stdlib
+`zipfile` + `xml.etree`, без новых зависимостей): `META-INF/container.xml` → rootfile
+`full-path` → OPF → `manifest` (id → href, media-type) → `spine` (упорядоченные idref).
+Главы склеиваются **в порядке spine** (порядок чтения; `manifest` — инвентарь ресурсов),
+каждая — через тот же HTML-экстрактор (собственный HTML-ридер не дублируется), с
+заголовком `## <title>` (иначе — имя файла), чтобы `heading_path` был осмысленным.
+`href` разрешается относительно каталога OPF и percent-декодируется; выход за пространство
+имён архива отвергается (`normalize_member_path` → `None`). Потолки — оси
+`archive_max_member_bytes` и суммарный `archive_max_uncompressed_bytes` через
+`container_policy.bounded_iter` (бюджет общий на документ). Отсутствующая/нечитаемая глава
+остаётся **видимой заметкой** на своём месте в порядке чтения, а не тихим пропуском; нет
+`container.xml`/OPF/spine или архив не ZIP — видимая ошибка, не исключение. Байты читателя
+не пишутся в `corpus_raw` отдельно: ретейленится исходный `.epub` (I19).
+
+**Чанкеры.** Абзацный чанкер `core/adapters/chunker_text.py` (`text-para-1`): блоки по
+пустым строкам, слияние до `chunk_size`, блок, который помещается, не режется, блок сверх
+`chunk_size` режется по границам предложений (`. ! ? ;` и `…`), и только «бесконечное»
+предложение — жёстко (по возможности по пробелу). `heading_path=""` всегда,
+`context_prefix` — первое предложение первого абзаца чанка (≤200 символов). Диспетчер —
+`core/adapters/chunker_family.FamilyChunker` по `ExtractedDoc.family` (аддитивное поле
+порта: `"markdown"`/`"text"`/`"epub"`; `None` = markdown-совместимое семейство, так ведут
+себя HTML и docling).
+
+**Контрактная граница.** `chunker_version` — поле `EXECUTION_CONTRACT_FIELDS`, поэтому с
+двумя чанкерами оно стало **композитом** `"md-heading-2+text-para-1"`
+(`chunker_family.composite_chunker_version`, тот же источник у декларации и у собранного
+порта). Это версионная граница класса `execution_versions` (`execution_change`, §13):
+меняется `run_id`, `METHODOLOGY_VERSION` — нет.
+
+**Чего нет (осознанно).** `.rtf` остаётся без читателя: допуск дал бы блокирующий
+`parser_failed` и мог бы заблокировать `corpus_coverage.complete`. Решение владельца —
+полоса `striprtf` отдельно, не «заодно с текстом».
+
 ---
 
 ## 7. Seeds

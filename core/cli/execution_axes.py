@@ -30,6 +30,14 @@
 поэтому туда она не добавляется (это инвалидировало бы кэш и переизвлекало корпус);
 она едет только в ``extractor_stack``.
 
+``chunker_version`` — **композит** правил нарезки, а не версия одного чанкера: у plain text
+свой абзацный чанкер, у markdown/HTML/EPUB — заголовочный, поэтому значение —
+``"md-heading-2+text-para-1"`` (:func:`core.adapters.chunker_family.composite_chunker_version`).
+Формула одна на декларацию и на собранный порт: разойдись они — ``execution_contract_digest``
+описывал бы не ту нарезку, которой получен корпус (R7 §11.7). Смена строки — версионная
+граница класса ``execution_versions`` (``execution_change``, §13): меняется ``run_id``,
+``methodology_version`` — нет.
+
 Нейтрален к предметной категории (§1.3).
 """
 
@@ -41,7 +49,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from core.adapters.chunker_markdown import MarkdownChunker
+from core.adapters.chunker_family import composite_chunker_version
 from core.adapters.extract_html import HtmlExtractor
 from core.adapters.llm_local import (
     DEFAULT_DECODER as EVALUATOR_DEFAULT_DECODER,
@@ -221,7 +229,11 @@ def resolve_declared_axes(
         registry_spec_digest=registry_specs_digest(_load_registry_specs(args, inputs)),
         deploy_profile=deploy_fields["deploy_profile"],
         edge_schema_version=deploy_fields["edge_schema_version"],
-        chunker_version=MarkdownChunker.version,
+        # Композит правил нарезки (markdown + plain text), а не версия одного чанкера:
+        # с появлением текстового чанкера набор чанков определяется парой правил.
+        # Смена строки — версионная граница ``execution_versions`` (§13), меняет ``run_id``;
+        # ``METHODOLOGY_VERSION`` не затрагивается.
+        chunker_version=composite_chunker_version(),
         llm_scenarios=_resolve_llm_scenarios(args=args, inputs=inputs, deploy=config),
         extractor_stack=extractor_stack_version(),
     )

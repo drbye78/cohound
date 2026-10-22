@@ -8,12 +8,19 @@
 ``extract`` (auto|html|document): edge выполняет fetch+extract+sanitize и возвращает
 ``text: {content, hash, extractor_version}``. Ядро **пересчитывает**
 ``content_hash`` очищенного текста (I19), не доверяя edge (07 §5).
+
+**Семейство формата.** Публикуемый payload шва не несёт ``ExtractedDoc.family``
+(расширять контракт ради поля чанкера не требуется): прокси выводит его тем же реестром,
+которым руководствовался edge — ``textual_family(page.url, page.content_type)``. Правило
+одно, поэтому решение о чанкере в ``split`` совпадает с ``local``; EPUB/HTML/docling
+остаются ``None`` (markdown-совместимое семейство).
 Нейтрален (§1.3).
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import replace
 
 from core.adapters.remote_gateway import (
     RemoteContentError,
@@ -21,6 +28,7 @@ from core.adapters.remote_gateway import (
 )
 from core.ports.gateway import ContentGateway
 from core.ports.types import ExtractedDoc, ExtractionRoute, FetchMode, RawPage
+from core.util.document_formats import textual_family
 
 __all__ = ["RemoteExtractor"]
 
@@ -58,4 +66,8 @@ class RemoteExtractor:
         response = self._gateway.call("fetch", payload)
         if not isinstance(response, Mapping):
             raise RemoteContentError("fetch(extract): payload ответа edge не отображение")
-        return extracted_doc_from_response(response, version=self.version)
+        doc = extracted_doc_from_response(response, version=self.version)
+        family = textual_family(page.url, page.content_type)
+        if family is None or doc.error is not None:
+            return doc
+        return replace(doc, family=family)

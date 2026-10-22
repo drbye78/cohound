@@ -30,6 +30,8 @@ import core.cli.commands.crawl as crawl_mod
 import core.cli.commands.plan as plan_mod
 import core.cli.commands.run as run_mod
 import core.cli.wiring as wiring_mod
+from core.adapters.chunker_markdown import MarkdownChunker
+from core.adapters.chunker_text import TextChunker
 from core.cli import execution_axes
 from core.cli.execution_axes import (
     DeclaredExecutionAxes,
@@ -128,6 +130,21 @@ def test_declared_axes_are_deterministic(tmp_path: Path) -> None:
     }
 
 
+def test_chunker_version_is_a_composite_of_both_chunkers(tmp_path: Path) -> None:
+    """``chunker_version`` — композит правил нарезки (markdown + plain text), не одна версия.
+
+    С появлением абзацного чанкера набор чанков определяется парой правил; строка
+    стабильна и содержит обе версии. Это ``execution_change`` (§13): меняется ``run_id``,
+    ``methodology_version`` — нет.
+    """
+    declared = _resolve(_package(tmp_path))
+
+    assert declared.chunker_version == f"{MarkdownChunker.version}+{TextChunker.version}"
+    assert declared.chunker_version == "md-heading-2+text-para-1"
+    assert MarkdownChunker.version in declared.chunker_version
+    assert TextChunker.version in declared.chunker_version
+
+
 def _with_run_crawl(inputs: Any, crawl: CrawlRunConfig) -> Any:
     return dataclasses.replace(
         inputs, run=inputs.run.model_copy(update={"crawl": crawl})
@@ -196,7 +213,7 @@ def test_each_axis_changes_exactly_its_component(
     elif field == "edge_schema_version":
         monkeypatch.setattr(wiring_mod, "DEFAULT_SCHEMA_VERSION", "9.9.9")
     elif field == "chunker_version":
-        monkeypatch.setattr(execution_axes.MarkdownChunker, "version", "md-test-9")
+        monkeypatch.setattr(MarkdownChunker, "version", "md-test-9")
     elif field == "llm_scenarios":
         mutated_deploy = DeployConfig(
             llm=LLMDeployConfig(

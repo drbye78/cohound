@@ -13,6 +13,20 @@
 Поддерживаемые форматы совпадают с реестром экстрактора документов
 (``core.adapters.extract_document.SUPPORTED_FORMATS``): PDF и Office Open XML.
 
+**Текстовые форматы — первый класс наравне с HTML и PDF.** Plain text и markdown
+(со всеми расширенными вариантами) не «документ для docling» и не «страница для
+trafilatura»: у них собственный читатель (:mod:`core.adapters.extract_text`) и
+собственный чанкер (:mod:`core.adapters.chunker_text`). Реестр —
+:data:`MARKDOWN_SUFFIXES`/:data:`PLAIN_TEXT_SUFFIXES`/:data:`TEXTUAL_SUFFIXES` плюс
+предикаты :func:`textual_suffix`/:func:`textual_content_type`/:func:`textual_family`.
+Семейство (``"markdown"``/``"text"``) — то, по чему вызывающий выбирает чанкер.
+
+**EPUB — отдельный читатель, а не текстовый формат.** ``.epub`` — ZIP-контейнер с
+XHTML-главами: его разбирает :mod:`core.adapters.extract_epub` (stdlib ``zipfile`` +
+``xml.etree``), а не docling и не текстовый путь. Поэтому ``.epub`` **не** входит в
+:data:`DOCUMENT_SUFFIXES` (этот реестр — вход docling); предикат —
+:func:`is_epub`.
+
 **Контейнеры (архивы) — отдельный класс допуска (P6).** ``zip``/``7z``/``rar`` — не
 документы, а **артефакты-контейнеры**, из которых спуск достаёт документы-члены. Заявленный
 набор приходит из конфига (``crawl.attachment_formats``, дефолт ``("zip", "7z", "rar")``):
@@ -39,17 +53,30 @@ __all__ = [
     "BINARY_SNIFF_BYTES",
     "DOCUMENT_CONTENT_TYPES",
     "DOCUMENT_SUFFIXES",
+    "EPUB_CONTENT_TYPES",
+    "EPUB_SUFFIX",
+    "FAMILY_EPUB",
+    "FAMILY_MARKDOWN",
+    "FAMILY_TEXT",
+    "MARKDOWN_SUFFIXES",
+    "PLAIN_TEXT_SUFFIXES",
     "SUPPORTED_ARCHIVE_FORMATS",
+    "TEXTUAL_CONTENT_TYPES",
+    "TEXTUAL_SUFFIXES",
     "classify_archive_bytes",
     "document_content_type",
     "document_suffix",
     "is_attachment_content_type",
     "is_attachment_url",
+    "is_epub",
     "is_terminal_artifact",
     "is_terminal_artifact_content_type",
     "is_terminal_artifact_url",
     "is_textual_content_type",
     "normalize_attachment_formats",
+    "textual_content_type",
+    "textual_family",
+    "textual_suffix",
     "unsupported_binary_reason",
 ]
 
@@ -75,6 +102,51 @@ _TEXT_CONTENT_TYPES: frozenset[str] = frozenset(
 
 #: Расширения документных форматов, поддерживаемых экстрактором (нижний регистр).
 DOCUMENT_SUFFIXES: tuple[str, ...] = (".pdf", ".docx", ".pptx", ".xlsx")
+
+#: Суффиксы markdown-разметки (нижний регистр). Отдельная группа нужна не для допуска
+#: (допуск текста общий), а для выбора чанкера: разметка режется по заголовкам
+#: (:class:`core.adapters.chunker_markdown.MarkdownChunker`).
+MARKDOWN_SUFFIXES: tuple[str, ...] = (".md", ".markdown", ".mdown", ".mkd")
+
+#: Суффиксы plain text (нижний регистр) — текст **без** разметки, режется по абзацам
+#: (:class:`core.adapters.chunker_text.TextChunker`). ``.log`` и ``.sql`` здесь
+#: намеренно: это plain text документация (журналы, скрипты, примеры запросов), а не
+#: бинарь — наблюдаемый корпус отдаёт их как ``text/plain``, и до этого реестра они
+#: падали в ``parser_failed`` через trafilatura (21.10). ``.rst`` — тот же класс
+#: (reStructuredText читается как обычный текст; заголовки разметки остаются текстом).
+PLAIN_TEXT_SUFFIXES: tuple[str, ...] = (".txt", ".text", ".log", ".sql", ".rst")
+
+#: Все текстовые суффиксы — объединение семейств (порядок канонический: markdown, text).
+TEXTUAL_SUFFIXES: tuple[str, ...] = MARKDOWN_SUFFIXES + PLAIN_TEXT_SUFFIXES
+
+#: Имена семейств форматов (не enum: это метки для выбора чанкера, а не доменная ось —
+#: доменных перечислений здесь нет, §1.3/§4.1).
+FAMILY_MARKDOWN = "markdown"
+FAMILY_TEXT = "text"
+FAMILY_EPUB = "epub"
+
+#: MIME-тип → семейство текстового формата. ``text/plain`` — plain text; markdown
+#: приходит тремя историческими типами (``text/markdown`` — RFC 7763,
+#: ``text/x-markdown`` — распространённый legacy, ``application/x-markdown`` — встречается
+#: на статических хостингах). ``text/html`` здесь **нет**: HTML — страница (trafilatura),
+#: а не текстовый артефакт.
+TEXTUAL_CONTENT_TYPES: dict[str, str] = {
+    "text/plain": FAMILY_TEXT,
+    "text/markdown": FAMILY_MARKDOWN,
+    "text/x-markdown": FAMILY_MARKDOWN,
+    "application/x-markdown": FAMILY_MARKDOWN,
+}
+
+#: Суффикс EPUB (нижний регистр). EPUB — **не** текстовый формат и **не** документ
+#: docling: это ZIP-контейнер с XHTML-главами, у него отдельный читатель
+#: (:mod:`core.adapters.extract_epub`).
+EPUB_SUFFIX = ".epub"
+
+#: MIME-тип → суффикс EPUB. ``application/epub+zip`` — единственный зарегистрированный
+#: тип (RFC 4839/OCF); ``application/octet-stream`` сюда не входит — его класс решает
+#: магия байтов, а не догадка.
+EPUB_CONTENT_TYPES: dict[str, str] = {"application/epub+zip": EPUB_SUFFIX}
+
 
 #: MIME-тип → документный суффикс. Только типы, реально поддерживаемые экстрактором:
 #: PDF и Office Open XML (docx/pptx/xlsx). Прочие (напр. старый бинарный MS Office,
@@ -149,6 +221,81 @@ def _mime(content_type: str | None) -> str:
     if not content_type:
         return ""
     return content_type.split(";", 1)[0].strip().lower()
+
+
+def _path_suffix(url_or_name: str) -> str:
+    """Суффикс basename URL/имени файла в нижнем регистре (``""`` — суффикса нет).
+
+    Путь percent-декодируется и очищается от query/fragment — то же правило, что у
+    :func:`document_suffix` (одна формула на все суффиксные предикаты реестра).
+    """
+    path = urlsplit(url_or_name).path or url_or_name
+    return PurePosixPath(unquote(path)).suffix.lower()
+
+
+# --------------------------------------------------------------------------- #
+# Текстовые форматы (plain text/markdown) — первый класс наравне с HTML и PDF
+# --------------------------------------------------------------------------- #
+
+
+def textual_suffix(url_or_name: str) -> str | None:
+    """Суффикс текстового формата из basename URL/имени файла либо ``None``.
+
+    Возвращается сам суффикс (``".md"``/``".txt"``/…): по нему видно, **какое**
+    расширение сработало, а семейство даёт :func:`textual_family`. Не-текстовый
+    суффикс и URL без суффикса → ``None`` (тип узнаётся по ``Content-Type``).
+    """
+    suffix = _path_suffix(url_or_name)
+    return suffix if suffix in TEXTUAL_SUFFIXES else None
+
+
+def textual_content_type(content_type: str | None) -> str | None:
+    """Семейство текстового формата по ``Content-Type`` либо ``None``.
+
+    У MIME нет расширения, поэтому возвращается **семейство** (``"markdown"``/
+    ``"text"``) — ровно то, что нужно вызывающему для выбора чанкера. Параметры
+    ``;charset=...`` отбрасываются, регистр приводится к нижнему.
+    """
+    return TEXTUAL_CONTENT_TYPES.get(_mime(content_type))
+
+
+def textual_family(
+    url_or_name: str | None = None, content_type: str | None = None
+) -> str | None:
+    """Семейство текстового формата: ``"markdown"``, ``"text"`` либо ``None``.
+
+    Приоритет — **суффикс раньше MIME** (pre-fetch-сигнал конкретнее заголовка), и
+    суффикс документа/EPUB сильнее текстового ``Content-Type``: ``report.pdf``,
+    отданный как ``text/plain``, остаётся документом — иначе docling не увидел бы PDF,
+    а текстовый читатель выдал бы бинарь за прозу. Остальные расхождения решает
+    ``Content-Type`` (суффикс-less download-эндпоинты).
+    """
+    if url_or_name:
+        suffix = _path_suffix(url_or_name)
+        if suffix in MARKDOWN_SUFFIXES:
+            return FAMILY_MARKDOWN
+        if suffix in PLAIN_TEXT_SUFFIXES:
+            return FAMILY_TEXT
+        if suffix in DOCUMENT_SUFFIXES or suffix == EPUB_SUFFIX:
+            return None
+    return textual_content_type(content_type)
+
+
+def is_epub(url_or_name: str | None = None, content_type: str | None = None) -> bool:
+    """EPUB ли ответ по суффиксу **или** ``Content-Type`` (без магии байтов).
+
+    Суффикс документа сильнее EPUB-MIME (``report.pdf`` как ``application/epub+zip`` —
+    всё ещё PDF): класс формата не должен переворачиваться заголовком. Магия байтов
+    здесь не проверяется — это работа читателя (:mod:`core.adapters.extract_epub`),
+    который честно деградирует видимой ошибкой на не-EPUB.
+    """
+    if url_or_name:
+        suffix = _path_suffix(url_or_name)
+        if suffix in DOCUMENT_SUFFIXES:
+            return False
+        if suffix == EPUB_SUFFIX:
+            return True
+    return _mime(content_type) in EPUB_CONTENT_TYPES
 
 
 # --------------------------------------------------------------------------- #

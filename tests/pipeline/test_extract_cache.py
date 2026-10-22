@@ -98,6 +98,36 @@ def test_round_trip_accepts_document_level_enum(tmp_path: Path) -> None:
     assert cache.get(RAW_A, "ext-1", "full") == doc
 
 
+def test_round_trip_preserves_format_family(tmp_path: Path) -> None:
+    """Семейство формата переживает кэш: иначе текст на хите резался бы как markdown."""
+    cache = ExtractionCache(tmp_path / "cache")
+    doc = ExtractedDoc(
+        text="plain text body",
+        content_hash=content_hash("plain text body"),
+        extractor_version="text-plain-1",
+        page_count=None,
+        family="text",
+    )
+
+    cache.put(doc, level="full", content_hash=RAW_A)
+    restored = cache.get(RAW_A, "text-plain-1", "full")
+
+    assert restored is not None
+    assert restored.family == "text"
+    assert restored == doc
+
+
+def test_legacy_envelope_without_family_reads_as_markdown_compatible(tmp_path: Path) -> None:
+    """Старый конверт (без ``family``) — markdown-совместимое семейство, не порча."""
+    cache = ExtractionCache(tmp_path / "cache")
+    _write_envelope(_entry(tmp_path / "cache", RAW_A))
+
+    restored = cache.get(RAW_A, "ext-1", "full")
+
+    assert restored is not None
+    assert restored.family is None
+
+
 def test_round_trip_keeps_text_hash_separate_from_key(tmp_path: Path) -> None:
     """Ключ (хеш сырья) и ``doc_content_hash`` (хеш текста) — разные величины."""
     cache = ExtractionCache(tmp_path / "cache")

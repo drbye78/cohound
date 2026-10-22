@@ -148,6 +148,12 @@ class ExtractedDoc:
 
     ``error`` — грациозная деградация адаптера: сбой извлечения возвращает пустой ``text``
     и заполненный ``error``, а не исключение (см. ``adapters/extract_document.py``).
+
+    ``family`` — **семейство формата** извлечённого текста (``"markdown"``/``"text"``/
+    ``"epub"``, константы ``core.util.document_formats``) — вход выбора чанкера в
+    composition root: markdown/HTML/EPUB режутся по заголовкам, plain text — по абзацам.
+    ``None`` (дефолт) означает «markdown-совместимое семейство»: так ведут себя HTML и
+    docling (оба отдают markdown), поэтому существующие пути байт-в-байт неизменны.
     """
 
     text: str
@@ -155,6 +161,7 @@ class ExtractedDoc:
     extractor_version: str
     page_count: int | None = None
     error: str | None = None
+    family: str | None = None
 
 
 @dataclass(frozen=True)

@@ -11,9 +11,11 @@
   (``EdgeRuntimeConfig.workers``, положительное число слотов), каждая сборка под guard:
   недоступность зависимости не валит узел, движок просто опускается. Активный движок
   выбирается по оси ``fetch`` запроса (:class:`_EngineCrawler`);
-* **экстрактор** — композит HTML (trafilatura) поверх документов (docling) по маршруту
-  ``ExtractionRoute`` (edge — веб-зона, документы — часть её контента);
-* **чанкер** — ``MarkdownChunkerPort`` (строится как часть корня; нарезка в MVP остаётся
+* **экстрактор** — композит текстовых форматов (plain text/markdown), EPUB, HTML
+  (trafilatura) и документов (docling) по маршруту ``ExtractionRoute`` (edge — веб-зона,
+  документы — часть её контента);
+* **чанкер** — :class:`core.adapters.chunker_family.FamilyChunker` (семейство ``text`` →
+  абзацный чанкер, иначе markdown; строится как часть корня; нарезка в MVP остаётся
   в ядре — I19, шов отдаёт сырые байты/текст);
 * **планировщик** — :class:`core.edge.scheduler.EdgeScheduler` (Phase 3.2/3.4a):
   ``http`` исполняется in-process (потоки), ``scrapy``/``browser`` — в отдельных
@@ -47,12 +49,14 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import Any
 
-from core.adapters.chunker_markdown import MarkdownChunkerPort
+from core.adapters.chunker_family import FamilyChunker
 from core.adapters.crawl_browser import BrowserCrawler
 from core.adapters.crawl_http import HttpCrawler
 from core.adapters.crawl_scrapy import CrawlError, ScrapyCrawler
 from core.adapters.extract_document import DoclingDocumentExtractor
+from core.adapters.extract_epub import EpubExtractor
 from core.adapters.extract_html import HtmlExtractor
+from core.adapters.extract_text import TextExtractor
 from core.edge.audit import AuditSink, FileAuditSink
 from core.edge.auth import Authenticator, MTLSAuthenticator, OIDCAuthenticator
 from core.edge.config import EdgeRuntimeConfig, load_edge_runtime_config
@@ -64,7 +68,12 @@ from core.ports.chunker import ChunkerPort
 from core.ports.crawler import CrawlerPort
 from core.ports.extractor import ExtractorPort
 from core.ports.types import ExtractionRoute, FetchMode, FetchPlan, RawPage
-from core.util.document_formats import document_content_type, document_suffix
+from core.util.document_formats import (
+    document_content_type,
+    document_suffix,
+    is_epub,
+    textual_family,
+)
 
 __all__ = ["main", "crawler_factory"]
 
@@ -109,11 +118,14 @@ def _extract_document(
 
 
 class _EdgeExtractor:
-    """Композит edge-экстракции: документы (docling) поверх HTML (trafilatura).
+    """Композит edge-экстракции: текстовые форматы, EPUB, документы (docling), HTML.
 
     Реализует ``ExtractorPort`` структурно. Маршрут ``ExtractionRoute``: ``HTML`` —
     принудительно HTML; ``DOCUMENT`` — принудительно docling; ``AUTO`` — авто-детект
-    формата (URL/content-type). Отсутствие docling деградирует к чистому HTML.
+    формата (URL/content-type) тем же реестром, что и в ядре
+    (:mod:`core.util.document_formats`): текстовое семейство → текстовый читатель, EPUB →
+    EPUB-читатель, документный суффикс/тип → docling, иначе HTML. Отсутствие docling
+    деградирует только документный путь — текст/EPUB/HTML остаются рабочими.
     """
 
     def __init__(self) -> None:
@@ -121,6 +133,8 @@ class _EdgeExtractor:
         self._documents = DoclingDocumentExtractor()
         if not self._documents.available:
             self._documents = None  # type: ignore[assignment]
+        self._text = TextExtractor()
+        self._epub = EpubExtractor(html=self._html)
         self.version = (
             self._html.version
             if self._documents is None
@@ -142,18 +156,26 @@ class _EdgeExtractor:
     ) -> Any:
         """``RawPage`` → ``ExtractedDoc`` по ``route`` (грациозная деградация).
 
-        Документный путь: при заданном ``source_path`` (retained-файл, I19) извлечение
-        идёт по пути (``extract_path``) — тело не копируется в RAM; иначе — прежний
-        ``extract_bytes`` по байтам страницы.
+        Порядок веток тот же, что в ядре (``core.cli.wiring._LocalExtractor``): явный
+        ``HTML`` → явный ``DOCUMENT`` → текстовое семейство → EPUB → документный
+        суффикс/тип → HTML. Документный путь: при заданном ``source_path`` (retained-файл,
+        I19) извлечение идёт по пути (``extract_path``) — тело не копируется в RAM; иначе —
+        прежний ``extract_bytes`` по байтам страницы.
         """
-        if route is ExtractionRoute.HTML or self._documents is None:
+        if route is ExtractionRoute.HTML:
             return self._html.extract(page, route)
         documents = self._documents
         if route is ExtractionRoute.DOCUMENT:
+            if documents is None:
+                return self._html.extract(page, route)
             filename = _detect_document_filename(page) or "document.pdf"
             return _extract_document(documents, page, filename)
+        if textual_family(page.url, page.content_type) is not None:
+            return self._text.extract(page, route)
+        if is_epub(page.url, page.content_type):
+            return self._epub.extract(page, route)
         filename = _detect_document_filename(page)
-        if filename is not None:
+        if filename is not None and documents is not None:
             return _extract_document(documents, page, filename)
         return self._html.extract(page, route)
 
@@ -238,7 +260,7 @@ def _build_gateway(
     crawlers = _build_crawlers(config)
     dispatcher = _EngineCrawler(crawlers)
     extractor: ExtractorPort = _EdgeExtractor()
-    chunker: ChunkerPort = MarkdownChunkerPort()
+    chunker: ChunkerPort = FamilyChunker()
     gateway = EdgeGateway(
         dispatcher,
         extractor,

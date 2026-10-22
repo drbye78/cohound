@@ -14,7 +14,9 @@
 оставляет либо старый, либо новый конверт, но не половину.
 
 **Конверт** (JSON, UTF-8) несёт ``format`` (версия формата), ``content_hash`` (ключ — хеш
-ретенированных байтов), ``extractor_version``, ``level``, ``text``, ``page_count`` и
+ретенированных байтов), ``extractor_version``, ``level``, ``text``, ``page_count``,
+``family`` (семейство формата — вход выбора чанкера; поле аддитивное, в старых конвертах
+отсутствует и читается как ``None`` = markdown-совместимое семейство) и
 ``doc_content_hash`` — хеш **извлечённого текста** (поле ``ExtractedDoc.content_hash``).
 Два хеша различны по смыслу и оба обязательны: ключ адресует сырьё, ``doc_content_hash``
 восстанавливает ровно тот ``ExtractedDoc``, который вернул экстрактор (по нему pipeline
@@ -181,6 +183,14 @@ class ExtractionCache:
         text = envelope.get("text")
         doc_hash = envelope.get("doc_content_hash")
         page_count = envelope.get("page_count")
+        # ``family`` — аддитивное поле: конверты до появления текстового чанкера его не
+        # несут (и это корректно — тогда текстовые форматы вообще не кэшировались, они
+        # падали в ``parser_failed``), поэтому ``None`` = markdown-совместимое семейство.
+        family = envelope.get("family")
+        if family is not None and not isinstance(family, str):
+            self._corrupt += 1
+            self._misses += 1
+            return None
         if not isinstance(text, str) or not text.strip():
             self._corrupt += 1
             self._misses += 1
@@ -205,6 +215,7 @@ class ExtractionCache:
             extractor_version=expected_version,
             page_count=page_count,
             error=None,
+            family=family,
         )
 
     # ------------------------------------------------------------------ #
@@ -261,6 +272,7 @@ class ExtractionCache:
             "level": _as_text(level),
             "text": text,
             "page_count": page_count,
+            "family": getattr(doc, "family", None),
             "doc_content_hash": doc_hash,
         }
         # Детерминированные байты: одинаковый вход → одинаковый файл (полезно для diff/аудита).

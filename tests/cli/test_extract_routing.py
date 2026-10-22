@@ -13,6 +13,7 @@ from __future__ import annotations
 from core.cli.wiring import _LocalExtractor
 from core.ports.types import ExtractedDoc, ExtractionRoute, RawPage
 
+
 class _FakeHtml:
     version = "html-1"
 
@@ -132,3 +133,197 @@ def test_version_composition_is_unchanged() -> None:
     assert composite.version == "html-1+doc-1"
     # Провенанс без ручек у фейка — пустой словарь (значения не выдумываются, A3).
     assert composite.options_provenance == {}
+
+
+# ---------------------------------------------------------------------------
+# Текстовые форматы и EPUB: третий и четвёртый маршруты композита
+# ---------------------------------------------------------------------------
+
+
+class _FakeText:
+    version = "text-1"
+
+    def __init__(self) -> None:
+        self.calls: list[RawPage] = []
+
+    def extract(
+        self, page: RawPage, route: ExtractionRoute = ExtractionRoute.AUTO
+    ) -> ExtractedDoc:
+        self.calls.append(page)
+        return ExtractedDoc(
+            text="text", content_hash="t", extractor_version=self.version, family="text"
+        )
+
+
+class _FakeEpub:
+    version = "epub-1"
+
+    def __init__(self) -> None:
+        self.calls: list[RawPage] = []
+
+    def extract(
+        self, page: RawPage, route: ExtractionRoute = ExtractionRoute.AUTO
+    ) -> ExtractedDoc:
+        self.calls.append(page)
+        return ExtractedDoc(
+            text="epub", content_hash="e", extractor_version=self.version, family="epub"
+        )
+
+
+def _composite_with_text() -> tuple[_LocalExtractor, _FakeHtml, _FakeDocuments, _FakeText, _FakeEpub]:
+    html = _FakeHtml()
+    documents = _FakeDocuments()
+    text = _FakeText()
+    epub = _FakeEpub()
+    composite = _LocalExtractor(
+        html, documents, text=text, epub=epub  # type: ignore[arg-type]
+    )
+    return composite, html, documents, text, epub
+
+
+def test_txt_url_reaches_text_reader_and_never_trafilatura() -> None:
+    """Регресс на 72 × ``.txt`` в ``parser_failed`` (22.10): текст не идёт в HTML-путь."""
+    composite, html, documents, text, epub = _composite_with_text()
+
+    doc = composite.extract(
+        _page(
+            url="https://edu.example.test/files/dba1_03_install_lab.txt",
+            content=b"lab instructions",
+            content_type="text/plain; charset=utf-8",
+        )
+    )
+
+    assert doc.text == "text"
+    assert len(text.calls) == 1
+    assert html.calls == []
+    assert documents.byte_calls == [] and documents.path_calls == []
+    assert epub.calls == []
+
+
+def test_txt_without_docling_still_reaches_text_reader() -> None:
+    """Без docling композит остаётся композитом: текст не откатывается в HTML."""
+    html = _FakeHtml()
+    composite = _LocalExtractor(html, None)  # type: ignore[arg-type]
+
+    doc = composite.extract(
+        _page(url="https://x.test/notes.txt", content=b"plain", content_type="text/plain")
+    )
+
+    assert html.calls == []
+    assert doc.text == "plain"
+    assert doc.family == "text"
+
+
+def test_textual_content_type_routes_suffixless_url() -> None:
+    composite, html, _, text, _ = _composite_with_text()
+
+    composite.extract(
+        _page(url="https://x.test/download?id=7", content=b"x", content_type="text/plain")
+    )
+
+    assert len(text.calls) == 1
+    assert html.calls == []
+
+
+def test_markdown_url_reaches_text_reader_with_markdown_family() -> None:
+    """``.md`` читается текстовым читателем и помечается семейством ``markdown``.
+
+    Семейство — вход выбора чанкера: разметку режет ``MarkdownChunker``, а не абзацный.
+    """
+    html = _FakeHtml()
+    composite = _LocalExtractor(html, None)  # type: ignore[arg-type]
+
+    doc = composite.extract(
+        _page(url="https://x.test/guide.md", content=b"# Title", content_type="text/markdown")
+    )
+
+    assert html.calls == []
+    assert doc.text == "# Title"
+    assert doc.family == "markdown"
+
+
+def test_epub_url_reaches_epub_reader() -> None:
+    composite, html, documents, text, epub = _composite_with_text()
+
+    doc = composite.extract(
+        _page(
+            url="https://repo.example.test/books/guide.epub",
+            content=b"PK\x03\x04",
+            content_type="application/epub+zip",
+        )
+    )
+
+    assert doc.text == "epub"
+    assert len(epub.calls) == 1
+    assert text.calls == [] and html.calls == []
+    assert documents.byte_calls == [] and documents.path_calls == []
+
+
+def test_epub_by_content_type_routes_suffixless_url() -> None:
+    composite, _, _, _, epub = _composite_with_text()
+
+    composite.extract(
+        _page(url="https://x.test/download/9", content=b"PK", content_type="application/epub+zip")
+    )
+
+    assert len(epub.calls) == 1
+
+
+def test_suffixless_pdf_still_routes_to_documents() -> None:
+    composite, html, documents, text, epub = _composite_with_text()
+
+    composite.extract(
+        _page(url="https://x.test/download?id=7", content=b"%PDF-1.7", content_type="application/pdf")
+    )
+
+    assert documents.byte_calls == [(b"%PDF-1.7", "document.pdf")]
+    assert text.calls == [] and epub.calls == [] and html.calls == []
+
+
+def test_document_suffix_beats_textual_content_type() -> None:
+    """``report.pdf`` как ``text/plain`` — документ, а не текст (реестр решает)."""
+    composite, _html, documents, text, epub = _composite_with_text()
+
+    composite.extract(
+        _page(
+            url="https://x.test/files/report.pdf",
+            content=b"%PDF-1.7",
+            content_type="text/plain",
+        )
+    )
+
+    assert documents.byte_calls == [(b"%PDF-1.7", "document.pdf")]
+    assert text.calls == [] and epub.calls == []
+
+
+def test_explicit_html_route_beats_textual_detection() -> None:
+    composite, html, _, text, _ = _composite_with_text()
+
+    composite.extract(
+        _page(url="https://x.test/notes.txt", content=b"plain"), ExtractionRoute.HTML
+    )
+
+    assert len(html.calls) == 1
+    assert text.calls == []
+
+
+def test_explicit_document_route_beats_textual_detection() -> None:
+    composite, html, documents, text, _ = _composite_with_text()
+
+    composite.extract(
+        _page(url="https://x.test/notes.txt", content=b"plain"), ExtractionRoute.DOCUMENT
+    )
+
+    assert documents.byte_calls == [(b"plain", "document.pdf")]
+    assert text.calls == [] and html.calls == []
+
+
+def test_html_page_still_goes_to_trafilatura() -> None:
+    composite, html, _documents, text, epub = _composite_with_text()
+
+    composite.extract(
+        _page(url="https://x.test/article", content=b"<html>x</html>", content_type="text/html")
+    )
+
+    assert len(html.calls) == 1
+    assert text.calls == [] and epub.calls == []

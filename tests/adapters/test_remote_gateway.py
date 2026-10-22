@@ -560,6 +560,45 @@ def test_remote_extractor_returns_doc_and_rehashes() -> None:
     assert extractor.version
 
 
+def test_remote_extractor_derives_format_family_from_page() -> None:
+    """``split``: семейство формата выводится тем же реестром, что и на edge.
+
+    Публикуемый payload шва ``family`` не несёт — без вывода текстовый документ в
+    ``split`` резался бы markdown-чанкером (расхождение с ``local``).
+    """
+    text = "plain text body"
+
+    def respond(op: str, payload: Mapping[str, Any]) -> Any:
+        return {
+            "text": {
+                "content": text,
+                "hash": content_hash(text),
+                "extractor_version": "text-plain-1",
+            }
+        }
+
+    extractor = RemoteExtractor(_gw(respond))
+    page = RawPage(
+        url="https://doc.test/files/lab.txt",
+        content=b"raw",
+        fetched_at="T",
+        content_type="text/plain; charset=utf-8",
+    )
+
+    assert extractor.extract(page).family == "text"
+
+
+def test_remote_extractor_leaves_html_family_as_markdown_compatible() -> None:
+    def respond(op: str, payload: Mapping[str, Any]) -> Any:
+        return {"text": {"content": "# md", "extractor_version": "trafilatura-html-2"}}
+
+    page = RawPage(
+        url="https://doc.test/article", content=b"raw", fetched_at="T", content_type="text/html"
+    )
+
+    assert RemoteExtractor(_gw(respond)).extract(page).family is None
+
+
 def test_remote_extractor_rejects_hash_mismatch() -> None:
     def respond(op: str, payload: Mapping[str, Any]) -> Any:
         return {

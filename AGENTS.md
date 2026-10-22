@@ -50,10 +50,12 @@ core/                         # ядро: категорийно-НЕЙТРАЛ�
   edge/                       # composition root Z1/DMZ — веб-адаптеры за швом (07): server.py, auth.py,
                               #   audit.py, seam_schema.py, scheduler.py (очередь краула), config.py
                               #   (EdgeRuntimeConfig), __main__.py (launcher: python -m core.edge serve)
-  adapters/                   # chunker_markdown (heading_path), extract_document (docling: pdf+office),
-                              #   extract_html, lexical_{bm25,tantivy}, index_npy/index_format, vector_npy,
-                              #   embed_{local,model2vec}, llm_{local,discovery}, search_*, crawl_*,
-                              #   feed_poller, remote_* — см. NOTICES
+  adapters/                   # chunker_markdown (heading_path) / chunker_text (абзацы) /
+                              #   chunker_family (диспетчер по семейству), extract_document
+                              #   (docling: pdf+office), extract_html, extract_text (plain text/md),
+                              #   extract_epub (stdlib OCF), lexical_{bm25,tantivy}, index_npy/index_format,
+                              #   vector_npy, embed_{local,model2vec}, llm_{local,discovery}, search_*,
+                              #   crawl_*, feed_poller, remote_* — см. NOTICES
   util/                       # text_utils (RU/EN), security (SSRF/slug), sanitize, fusion (RRF),
                               #   retrieval_eval, agreement (Cohen's κ §11.5), feed (feed/channel-парсер),
                               #   rate_limit, cache, ids/hashing/logging — см. NOTICES

@@ -35,7 +35,7 @@ from core.util.container_policy import (
     normalize_member_path,
     plan_members,
 )
-from core.util.document_formats import DOCUMENT_SUFFIXES
+from core.util.document_formats import DOCUMENT_SUFFIXES, TEXTUAL_SUFFIXES
 
 
 def _member(
@@ -136,8 +136,12 @@ def test_normalize_is_idempotent() -> None:
 
 
 def test_ingest_suffixes_come_from_registry() -> None:
-    """Документная часть набора — ровно реестр форматов (без второй копии)."""
+    """Документная и текстовая части набора — из реестров (без второй копии)."""
     for suffix in DOCUMENT_SUFFIXES:
+        assert suffix in INGEST_SUFFIXES
+    # Текстовые форматы первого класса: у каждого есть читатель, значит спуск вправе их
+    # доставать (иначе «вытащили член, которого экстрактор не знает»).
+    for suffix in TEXTUAL_SUFFIXES:
         assert suffix in INGEST_SUFFIXES
 
 

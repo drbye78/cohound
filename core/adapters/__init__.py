@@ -1,14 +1,18 @@
 """coHound — адаптеры (реализации портов; commodity-слой за интерфейсами)."""
 
 __all__ = [
+    "chunker_family",
     "chunker_markdown",
+    "chunker_text",
     "crawl_browser",
     "crawl_http",
     "crawl_scrapy",
     "embed_local",
     "embed_model2vec",
     "extract_document",
+    "extract_epub",
     "extract_html",
+    "extract_text",
     "index_format",
     "index_npy",
     "lexical_bm25",

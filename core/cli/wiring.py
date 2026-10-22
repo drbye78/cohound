@@ -33,14 +33,16 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from core.adapters.chunker_markdown import MarkdownChunkerPort
+from core.adapters.chunker_family import FamilyChunker
 from core.adapters.crawl_browser import BrowserCrawler
 from core.adapters.crawl_http import HttpCrawler
 from core.adapters.crawl_scrapy import CrawlError, ScrapyCrawler
 from core.adapters.embed_local import LocalEmbedder
 from core.adapters.embed_model2vec import LiteEmbedder, model2vec_available
 from core.adapters.extract_document import DoclingDocumentExtractor
+from core.adapters.extract_epub import EpubExtractor
 from core.adapters.extract_html import HtmlExtractor
+from core.adapters.extract_text import TextExtractor
 from core.adapters.feed_poller import LocalFeedPoller, RemoteFeedPoller
 from core.adapters.index_npy import NpyIndexBuilder, numpy_available
 from core.adapters import index_format
@@ -119,7 +121,12 @@ from core.ports.types import FetchPlan
 from core.ports.vector_index import VectorIndexPort
 from core.store.sqlite_store import SqliteStore
 from core.util.cache import ContentAddressedCache
-from core.util.document_formats import document_content_type, document_suffix
+from core.util.document_formats import (
+    document_content_type,
+    document_suffix,
+    is_epub,
+    textual_family,
+)
 from core.util.hashing import short_hash
 from core.util.logging import PhaseLogger
 from core.util.robots import RobotsGate
@@ -1440,25 +1447,53 @@ def _extract_document(
     return documents.extract_bytes(page.content, filename)
 
 class _LocalExtractor:
-    """Композит локальной экстракции: документы (docling) поверх HTML (trafilatura).
+    """Композит локальной экстракции: текстовые форматы, EPUB, документы (docling), HTML.
 
-    Реализует ``ExtractorPort`` структурно. Маршрут ``ExtractionRoute`` (D2):
+    Реализует ``ExtractorPort`` структурно. Маршрут ``ExtractionRoute`` (D2) — явный
+    приоритет, затем авто-детект формата (единый реестр
+    :mod:`core.util.document_formats`):
 
-    * ``HTML`` — принудительно :class:`HtmlExtractor` (trafilatura);
-    * ``DOCUMENT`` — принудительно :class:`DoclingDocumentExtractor` (docling);
-    * ``AUTO`` — авто-детект формата (URL/content-type): документ → docling, иначе HTML.
+    1. ``HTML`` — принудительно :class:`HtmlExtractor` (trafilatura);
+    2. ``DOCUMENT`` — принудительно :class:`DoclingDocumentExtractor` (docling);
+    3. ``AUTO``: текстовое семейство (суффикс, затем ``Content-Type``) →
+       :class:`TextExtractor` (plain text/markdown — **без** trafilatura);
+    4. EPUB (суффикс ``.epub``/``application/epub+zip``) → :class:`EpubExtractor`
+       (stdlib-читатель OCF, главы — через тот же HTML-экстрактор);
+    5. документный суффикс/тип → docling;
+    6. иначе — HTML.
 
-    Оба адаптера деградируют грациозно (``ExtractedDoc.error``), поэтому композит не
+    Порядок 3/4 перед 5 осознан: текстовые суффиксы и ``.epub`` не входят в реестр
+    docling (``DOCUMENT_SUFFIXES``), но их сигнал должен проверяться **до** фолбэка в
+    HTML — именно этот фолбэк убивал ``.txt`` в ``parser_failed`` (22.10: 72 файла).
+    Суффикс документа сильнее текстового ``Content-Type`` (``report.pdf`` как
+    ``text/plain`` остаётся PDF) — правило реестра, не композита.
+
+    Все адаптеры деградируют грациозно (``ExtractedDoc.error``), поэтому композит не
     бросает исключений на уровне извлечения.
     """
 
     def __init__(
-        self, html: ExtractorPort, documents: DoclingDocumentExtractor | None
+        self,
+        html: ExtractorPort,
+        documents: DoclingDocumentExtractor | None,
+        *,
+        text: ExtractorPort | None = None,
+        epub: ExtractorPort | None = None,
     ) -> None:
+        """``text``/``epub`` — точки подмены (тесты/AB); по умолчанию реальные читатели.
+
+        EPUB по умолчанию переиспользует **тот же** HTML-экстрактор: главы книги чистит
+        trafilatura, второй HTML-путь не создаётся.
+        """
         self._html = html
         self._documents = documents
+        self._text = text if text is not None else TextExtractor()
+        self._epub = epub if epub is not None else EpubExtractor(html=html)
         html_version = str(getattr(self._html, "version", "") or "")
         # Версия экстрактора: HTML-версия, дополненная документной при наличии docling.
+        # Текстовый/EPUB-читатели сюда **не** добавлены: они видны в per-document
+        # ``extractor_version`` (``text-plain-1``/``epub-1``) и в провенансе продукта,
+        # а композитная строка остаётся байт-в-байт прежней (наблюдаемая ось, §13).
         self.version = (
             html_version
             if documents is None
@@ -1477,13 +1512,18 @@ class _LocalExtractor:
         if route is ExtractionRoute.HTML:
             return self._html.extract(page, route)
         documents = self._documents
-        if documents is None:
-            return self._html.extract(page, route)
         if route is ExtractionRoute.DOCUMENT:
+            if documents is None:
+                return self._html.extract(page, route)
             filename = _detect_document_filename(page)
             return _extract_document(documents, page, filename or "document.pdf")
+        family = textual_family(page.url, page.content_type)
+        if family is not None:
+            return self._text.extract(page, route)
+        if is_epub(page.url, page.content_type):
+            return self._epub.extract(page, route)
         filename = _detect_document_filename(page)
-        if filename is not None:
+        if filename is not None and documents is not None:
             return _extract_document(documents, page, filename)
         return self._html.extract(page, route)
 
@@ -1508,17 +1548,25 @@ class _LocalExtractor:
 def build_worker_extractor(level: DocumentLevel = DocumentLevel.FULL) -> ExtractorPort:
     """Строит экстрактор **внутри** воркер-процесса (P4/P5; picklable by reference, §7).
 
-    Один экстрактор (HTML + документы при наличии docling) на воркер — амортизирует
-    загрузку весов между заданиями. Объекты не пересекают границу процессов: фабрика
-    передаётся инициализатору ссылкой, вызов происходит в ребёнке. ``level`` (P5) задаёт
-    уровень документной экстракции; ``off`` → docling **не** строится вовсе (документы
-    пропускаются pipeline'ом, HTML обычен).
+    Один экстрактор (HTML + текстовые форматы + EPUB + документы при наличии docling) на
+    воркер — амортизирует загрузку весов между заданиями. Объекты не пересекают границу
+    процессов: фабрика передаётся инициализатору ссылкой, вызов происходит в ребёнке.
+    ``level`` (P5) задаёт уровень документной экстракции; ``off`` → docling **не**
+    строится вовсе (документы пропускаются pipeline'ом, HTML обычен).
+
+    Композит строится **всегда** (даже без docling и при ``off``): текстовый и EPUB-пути
+    не зависят от docling, и возврат «голого» ``HtmlExtractor`` вернул бы ``.txt``/``.epub``
+    в trafilatura — ровно тот дефект, из-за которого они умирали в ``parser_failed``.
+    ``version``/поведение HTML при этом не меняются: ``_LocalExtractor(html, None).version``
+    равен версии HTML-адаптера.
     """
     html = HtmlExtractor()
-    if level is DocumentLevel.OFF:
-        return html
-    documents = DoclingDocumentExtractor(level=level)
-    return _LocalExtractor(html, documents) if documents.available else html
+    documents = (
+        None if level is DocumentLevel.OFF else DoclingDocumentExtractor(level=level)
+    )
+    if documents is not None and not documents.available:
+        documents = None
+    return _LocalExtractor(html, documents)
 
 
 def _extract_worker_init(
@@ -1688,10 +1736,11 @@ def _build_local_ports(
     """
     html = HtmlExtractor()
     documents = DoclingDocumentExtractor()
-    # Без docling ``extractor`` — ровно ``HtmlExtractor``; при наличии docling
-    # документные форматы (pdf/docx/pptx/xlsx) уходят в него через композит.
-    extractor: ExtractorPort = (
-        _LocalExtractor(html, documents) if documents.available else html
+    # Композит строится всегда: без docling текстовые форматы и EPUB всё равно имеют
+    # своих читателей, а документные суффиксы уходят в HTML-путь (как раньше —
+    # ``_LocalExtractor(html, None)``).
+    extractor: ExtractorPort = _LocalExtractor(
+        html, documents if documents.available else None
     )
 
     # Тяжёлые опциональные адаптеры: только при выполненной availability-предикате.
@@ -1736,7 +1785,7 @@ def _build_local_ports(
         # спецификаций + дайджест спецификаций (провенанс манифеста, §13).
         registry_fetchers=registry_fetchers,
         registry_spec_digest=registry_spec_digest,
-        chunker=MarkdownChunkerPort(),
+        chunker=FamilyChunker(),
         extractor=extractor,
         embedder=resolved_embedder,
         index_builder=index_builder,

@@ -158,6 +158,14 @@ index+sources и есть единственная декларативная о
 | `unstructured` | 0.27.x | Apache-2.0 ✅ | **d** | `<3.14` + 24+ зависимостей + телеметрия on-by-default; OSS-таблицы слабые (0.426 vs 0.866) |
 | `html2text` | 2025.4.x | **GPL-3.0** ✅ | **d** | GPL несовместим с permissive-курсом; закрывается `markdownify` |
 
+**Текстовые форматы и EPUB — без новых зависимостей (22.10).** Plain text/markdown и
+EPUB не добавляют в стек ни одного пакета: текст читается stdlib-декодированием и
+нормализацией (`core/adapters/extract_text.py`), EPUB — stdlib `zipfile` + `xml.etree`
+через уже принятый субстрат контейнеров (`core/adapters/extract_epub.py`,
+`core/adapters/container_zip.py`, `core/util/container_policy.py`). `markitdown` (b) для
+EPUB **не** используется (лишний слой конвертации поверх того же ZIP); LlamaIndex/LangChain
+остаются **d** (§3.1) — EPUB-разбор не повод их подключать.
+
 **Контейнеры-артефакты (P6, спуск в zip/7z/rar).** Слой допуска/retention (стриминг в
 staging-файл, класс-aware потолки) реализован **без** этих пакетов — `zipfile` stdlib и
 магия байтов. Пакеты ниже — заявка на следующий слой (extra `extract-archives`), ни один
