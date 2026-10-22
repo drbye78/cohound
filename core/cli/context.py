@@ -58,6 +58,7 @@ from core.config import (
     load_golden,
     load_package_manifest,
     load_passports,
+    passport_content_digests,
     passport_urls,
 )
 from core.config.deploy import LLM_SLOTS, DeployConfig
@@ -66,6 +67,7 @@ from core.domain.enums import (
     CrawlSessionStatus,
     DocumentLevel,
     EndpointKind,
+    Gate,
     LLMScenario,
     Status,
 )
@@ -76,8 +78,20 @@ from core.pipeline.eval_cache import EvalVerdictCache
 from core.pipeline.normalize import RunInputs, load_inputs
 from core.pipeline.phases import resolve_package_id
 from core.pipeline.plan import RunPlan, plan as build_plan
-from core.pipeline.review import ReviewItem
-from core.pipeline.runner import PhaseFn
+from core.pipeline.compute import bundle_for_run
+from core.pipeline.gate_subject import (
+    GateSubject,
+    publication_subject,
+    review_subject,
+)
+from core.pipeline.profile_attestation import (
+    ProfileGateResult,
+    make_profile_gate,
+    material_digest,
+    profile_material,
+)
+from core.pipeline.review import ReviewItem, review_queue
+from core.pipeline.runner import GateRuntime, PhaseFn
 from core.ports.gateway import ContentGateway
 from core.ports.store import StorePort
 from core.ports.types import FetchMode
@@ -128,6 +142,10 @@ __all__ = [
     # DI-хелперы и машинерия команд
     "_resolve_paths",
     "_resolve_plan",
+    "_resolve_passports_dir",
+    "_profile_material_for_run",
+    "_profile_gate_resolver",
+    "_gate_runtime",
     "_resolve_ports",
     "_resolve_phases",
     "_open_state_store",
@@ -418,13 +436,13 @@ def _print_discover(payload: dict[str, Any]) -> None:
 
 
 def _print_review(payload: dict[str, Any]) -> None:
-    """Человекочитаемый вывод ``review``: очередь ревью (Ш7/G3)."""
+    """Человекочитаемый вывод ``review``: очередь ревью (Ш7; ревью — внешний контур, гейта G3 нет)."""
     lines = [
         f"run_id: {payload['run_id']}",
         f"queue: {payload['count']} item(s)",
     ]
     if not payload["items"]:
-        lines.append("queue empty: нет ячеек, требующих ревью (preliminary/❓, Ш7/G3)")
+        lines.append("queue empty: нет ячеек, требующих ревью (preliminary/❓, Ш7)")
     for item in payload["items"]:
         status = item["status"] if item["status"] is not None else "—"
         lines.append(
@@ -435,21 +453,38 @@ def _print_review(payload: dict[str, Any]) -> None:
 
 
 def _print_gate(payload: dict[str, Any]) -> None:
-    """Человекочитаемый вывод ``gate``: записанное человеческое решение (S9/I6/I7)."""
+    """Человекочитаемый вывод ``gate``: записанное решение гейта (S9/I6/I7).
+
+    Вывод различает вердикт: ``approved`` продолжает прогон, ``rejected`` его **не**
+    продолжает. Печать «гейт пройден» на отказе была бы ложью, из-за которой оператор
+    ждал бы продолжения прогона, которого не будет.
+    """
+    verdict = payload.get("verdict", "approved")
     lines = [
         f"run_id: {payload['run_id']}",
         f"gate: {payload['gate']}",
         f"actor: {payload['actor']}",
+        f"source: {payload.get('source', 'internal')}",
+        f"verdict: {verdict}",
+        f"subject_digest: {payload.get('subject_digest')}",
         f"decided_at: {payload['decided_at']}",
         f"decision_id: {payload['decision_id']}",
     ]
+    if payload.get("external_ref") is not None:
+        lines.append(f"external_ref: {payload['external_ref']}")
     if payload.get("target") is not None:
         lines.append(f"target: {payload['target']}")
     if payload.get("notes") is not None:
         lines.append(f"notes: {payload['notes']}")
-    lines.append(
-        f"решение записано: гейт {payload['gate']} пройден (продолжите hound run)"
-    )
+    if verdict == "rejected":
+        lines.append(
+            f"решение записано: гейт {payload['gate']} ОТКЛОНЁН — прогон останется "
+            "blocked до решения по текущему предмету"
+        )
+    else:
+        lines.append(
+            f"решение записано: гейт {payload['gate']} пройден (продолжите hound run)"
+        )
     sys.stdout.write("\n".join(lines) + "\n")
 
 
@@ -1013,6 +1048,191 @@ def _resolve_plan(
     if factory is not None:
         return factory(inputs, run_id=run_id)
     return build_plan(inputs, run_id=run_id)
+
+
+def _resolve_passports_dir(args: argparse.Namespace, paths: Any = None) -> str:
+    """Каталог паспортов: ``--passports-dir`` > resolved ``paths.passports`` > ``passports``.
+
+    Единственная формула для всех потребителей (фазы Ш4/Ш5 и дайджест профиля G1/G2):
+    второй формулы быть не должно, иначе аттестация профиля считалась бы по другому
+    набору паспортов, чем тот, что читают фазы.
+    """
+    passports_dir = getattr(args, "passports_dir", None)
+    if passports_dir is None and paths is not None:
+        passports_dir = str(paths.passports)
+    if passports_dir is None:
+        passports_dir = "passports"
+    return str(passports_dir)
+
+
+def _profile_material_for_run(
+    args: argparse.Namespace,
+    inputs: RunInputs,
+    plan: RunPlan,
+    *,
+    cohort_digest: str,
+    seeds_digest: str,
+) -> dict[str, Any]:
+    """Материал дайджеста профиля пакета-якоря для текущего прогона.
+
+    Единственная точка сборки материала в composition root: и аттестация (``hound profile
+    attest``, отдельная полоса), и проверка гейта обязаны видеть **один** набор
+    компонентов, иначе аттестованное и проверяемое разойдутся.
+
+    Паспорта читаются здесь же (:func:`core.config.passports.passport_content_digest` по
+    каждому продукту плана): «паспорта фиксируются на цикл», поэтому их правка меняет
+    профиль. Отсутствие паспорта у продукта — наблюдаемое ``None``, а не пропуск
+    компонента: появление паспорта обязано требовать пере-аттестации.
+    """
+    paths = getattr(args, "paths", None)
+    if paths is None:
+        try:
+            paths = _resolve_paths(args)
+        except Exception:  # noqa: BLE001 — раскладка опциональна, дефолт ниже
+            paths = None
+    passports_dir = _resolve_passports_dir(args, paths)
+    return profile_material(
+        case_id=inputs.run.case_id,
+        package_id=resolve_package_id(inputs),
+        anchor=inputs.run.anchor,
+        cohort_digest=cohort_digest,
+        products=plan.products,
+        focus_modules=plan.modules,
+        focus_params=inputs.run.focus.params,
+        seeds_digest=seeds_digest,
+        roles=plan.roles,
+        passports=passport_content_digests(plan.products, passports_dir),
+    )
+
+
+def _profile_gate_resolver(
+    args: argparse.Namespace,
+    inputs: RunInputs,
+    plan: RunPlan,
+    *,
+    cohort_digest: str,
+    seeds_digest: str,
+    state: Any,
+) -> Callable[[Gate], ProfileGateResult] | None:
+    """Резолвер гейтов G1/G2 по аттестации **профиля** пакета-якоря (или ``None``).
+
+    Профиль квази-константен (правки 2–5 раз в год при еженедельных прогонах), поэтому
+    человек аттестует его содержимое один раз, а прогоны с тем же содержимым не требуют
+    повторного решения. Материал собирает :func:`_profile_material_for_run`.
+
+    :param state: открытый ``ProductStatePort`` пакета (``state.db``). ``None`` — аттестации
+        недоступны (``--dry-run``/``--until plan`` или пакет не каталог): резолвер не
+        строится, и гейт ведёт себя как раньше — только ``gate_decisions``. Молчаливой
+        подмены «аттестация есть» нет.
+    :returns: замыкание ``Gate → ProfileGateResult`` для
+        :func:`core.pipeline.runner._gate_phase`.
+    """
+    if state is None:
+        return None
+    material = _profile_material_for_run(
+        args, inputs, plan, cohort_digest=cohort_digest, seeds_digest=seeds_digest
+    )
+    return make_profile_gate(state, material)
+
+
+def _gate_subject_resolver(
+    args: argparse.Namespace,
+    inputs: RunInputs,
+    plan: RunPlan,
+    *,
+    cohort_digest: str,
+    seeds_digest: str,
+    store: StorePort,
+    runs_dir: str,
+) -> Callable[[Gate], GateSubject | None]:
+    """Резолвер **предмета решения** для всех четырёх гейтов (S9, точки интеграции).
+
+    Предмет — то, о чём спрашивают решение; его отпечаток (``subject_digest``) обязан
+    вернуться в решении, иначе гейт не пройден. Единый резолвер на все гейты — чтобы
+    «что утверждали» и «что проверяем» собирались одной формулой:
+
+    * ``G1``/``G2`` — материал профиля пакета-якоря (тот же, что у аттестации профиля):
+      per-run решение и аттестация профиля говорят об **одном** предмете;
+    * ``G3`` — очередь ревью (Ш7): внешний ревьюер утверждает конкретный её состав;
+    * ``G4`` — Coverage/Capability/Comparability/ранжирование и содержимое публикуемых
+      артефактов: внешняя система утверждает публикацию именно этого.
+
+    Резолвер **ленивый**: предмет считается в момент фазы-гейта, а не при сборке
+    конвейера (``compute`` для G4 читает ячейки, которых до Ш6/Ш8 ещё нет).
+    """
+    outputs_dir = Path(runs_dir) / plan.run_id / "outputs"
+
+    def _resolve(gate: Gate) -> GateSubject | None:
+        if gate in (Gate.G1, Gate.G2):
+            material = _profile_material_for_run(
+                args,
+                inputs,
+                plan,
+                cohort_digest=cohort_digest,
+                seeds_digest=seeds_digest,
+            )
+            return GateSubject(
+                gate=gate,
+                digest=material_digest(material),
+                material=material,
+                export={"profile": material},
+            )
+        if gate is Gate.G3:
+            items = review_queue(store, plan.run_id)
+            return review_subject(items, run_id=plan.run_id)
+        if gate is Gate.G4:
+            bundle = bundle_for_run(
+                store, run_id=plan.run_id, plan=plan, inputs=inputs
+            )
+            return publication_subject(
+                bundle,
+                run_id=plan.run_id,
+                cells=store.iter_cells(plan.run_id),
+                outputs_dir=outputs_dir,
+            )
+        return None
+
+    return _resolve
+
+
+def _gate_runtime(
+    args: argparse.Namespace,
+    inputs: RunInputs,
+    plan: RunPlan,
+    *,
+    cohort_digest: str,
+    seeds_digest: str,
+    state: Any,
+    store: StorePort,
+) -> GateRuntime:
+    """Собирает :class:`~core.pipeline.runner.GateRuntime` для фаз-гейтов.
+
+    Один объект на прогон: предмет решения (все гейты), аттестация профиля (G1/G2),
+    политика из ``run.yaml:gates`` (``waived`` — только G3/G4), каталог прогонов для
+    запроса на решение (``runs/{run_id}/gates/{gate}-request.json``).
+    """
+    runs_dir = str(getattr(args, "runs_dir", None) or "runs")
+    return GateRuntime(
+        subject=_gate_subject_resolver(
+            args,
+            inputs,
+            plan,
+            cohort_digest=cohort_digest,
+            seeds_digest=seeds_digest,
+            store=store,
+            runs_dir=runs_dir,
+        ),
+        profile_gate=_profile_gate_resolver(
+            args,
+            inputs,
+            plan,
+            cohort_digest=cohort_digest,
+            seeds_digest=seeds_digest,
+            state=state,
+        ),
+        policies=dict(getattr(inputs.run, "gates", None) or {}),
+        runs_dir=runs_dir,
+    )
 
 
 def _load_registry_specs(
@@ -1583,11 +1803,7 @@ def _resolve_phases(
         ``llm_scenarios``. ``None`` — legacy/модульный вызов.
     :param declared_status_dict_version: версия словаря статусов (декларированная ось).
     """
-    passports_dir = getattr(args, "passports_dir", None)
-    if passports_dir is None and paths is not None:
-        passports_dir = str(paths.passports)
-    if passports_dir is None:
-        passports_dir = "passports"
+    passports_dir = _resolve_passports_dir(args, paths)
     raw_root = str(paths.corpus_raw) if paths is not None else "corpus_raw"
     # 09 §8.1–§8.5: тот же корень, что у ``IndexBuilderPort`` (composition root), —
     # переиспользование партиций и запись ``_compositions/*.json``.
@@ -1853,12 +2069,12 @@ def _print_run_report(payload: dict[str, Any]) -> None:
     if payload["stopped_at"] == "onboarding":
         lines.append(
             "примечание: прогон остановлен до краула — продукт не готов (нет активных "
-            "seed'ов); это не гейт G1–G4, запись gate-решения не поможет"
+            "seed'ов); это не гейт G1/G2, запись gate-решения не поможет"
         )
     elif payload["stopped_at"] is not None:
         lines.append(
             "примечание: гейт требует явного человеческого решения (03 §E.2); "
-            "продолжите после записи решения: hound gate --db <db> --gate <G1..G4> --actor <вы>"
+            "продолжите после записи решения: hound gate --db <db> --gate <G1|G2> --actor <вы>"
         )
     sys.stdout.write("\n".join(lines) + "\n")
 

@@ -4,8 +4,14 @@
 плагинируем (``dict[str, PhaseFn]``): composition root подставляет реальные реализации
 (:func:`~core.pipeline.phases.build_phases`). Фаза **без зарегистрированной реализации** —
 ошибка: ``Runner`` вернёт ``failed`` («не зарегистрирована»), а не выдаст фиктивную удачу
-(echo-заглушка удалена). Гейты G1–G4 останавливают прогон, пока нет человеческого решения
-в ``gate_decisions`` (S9, I6/I7).
+(echo-заглушка удалена). Гейты останавливают прогон, пока нет решения, привязанного к
+текущему предмету (``gate_decisions``, S9/I6/I7). Для G1/G2 это либо per-run решение, либо
+действующая аттестация профиля пакета-якоря (``profile_attestation`` в ``state.db``); для
+G3/G4 — решение **внешней** системы (``source='external'``), которое coHound записывает, а
+не принимает: на блоке он экспортирует предмет в ``runs/{run_id}/gates/{gate}-request.json``.
+Отказ внешней системы (``verdict='rejected'``) блокирует гейт так же явно, как отсутствие
+решения. Политика ``run.yaml:gates`` (``waived``) снимает ожидание, но **записывает** факт
+делегирования (waiver-строка + ``gate_waivers`` в манифесте).
 
 **Статусы фаз.** ``ok`` — отработала и незакрытого не осталось; ``skipped`` — предпосылка
 отсутствовала, работы не было (**не** сбой, прогон **не** останавливает); ``blocked`` —
@@ -46,9 +52,18 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Literal, Protocol, runtime_checkable
 
-from core.domain import Cell, Gate, SkipReason
+from core.domain import (
+    Cell,
+    Gate,
+    GateDecision,
+    GatePolicy,
+    GateSource,
+    GateVerdict,
+    SkipReason,
+)
 from core.ports.chunker import ChunkerPort
 from core.ports.container import ContainerPort
 from core.ports.crawl_executor import CrawlExecutorPort
@@ -63,7 +78,15 @@ from core.ports.registry import RegistryFetcherPort
 from core.ports.search import SearchAdapterPort
 from core.ports.store import StorePort
 from core.ports.vector_index import VectorIndexPort
-from core.pipeline.gates import is_gate_passed
+from core.pipeline.gate_subject import (
+    GateSubject,
+    SubjectResolver,
+    describe_subject_diff,
+    read_gate_request_subject,
+    write_gate_request,
+)
+from core.pipeline.gates import WAIVER_REF_PREFIX, evaluate_gate, record_decision
+from core.pipeline.profile_attestation import ProfileGateResult
 
 __all__ = [
     "Runner",
@@ -87,6 +110,12 @@ __all__ = [
 PhaseStatus = Literal["ok", "skipped", "blocked", "failed"]
 
 #: Порядок фаз конвейера (02 §A.3). Гейты идут отдельными фазами и останавливают прогон.
+#:
+#: ``g1``/``g2`` — внутренняя аттестация (профиль пакета-якоря, матрица роль×продукт);
+#: ``g3``/``g4`` — точки интеграции: strict-ревью и утверждение публикации выполняются
+#: внешними системами, а coHound экспортирует предмет решения и записывает ответ.
+#: Фаза ``review`` — экспортная поверхность очереди ревью (advisory), она же источник
+#: ``export`` для G3.
 PHASES: tuple[str, ...] = (
     "normalize",
     "lint",
@@ -276,20 +305,276 @@ class RunReport:
         return [cell for result in self.results for cell in result.cells]
 
 
-def _gate_phase(phase: str, gate: Gate) -> PhaseFn:
-    """Фаза-гейт: ``ok`` если человек оставил решение в ``gate_decisions``, иначе ``blocked``.
+@dataclass(frozen=True)
+class GateRuntime:
+    """Внешние зависимости фазы-гейта: то, чего нет в :class:`RunContext`.
 
-    Гейт **не** проходится сам: без строки решения прогон останавливается и ждёт CLI (W5).
+    :param subject: резолвер предмета решения ``Gate → GateSubject | None``. ``None`` —
+        отпечаток предмета не вычисляется, и гейт сверяет решения без привязки
+        (legacy-поведение; так работают вызовы из тестов/selfcheck).
+    :param profile_gate: резолвер аттестации профиля (второй путь G1/G2, см.
+        :func:`core.pipeline.profile_attestation.make_profile_gate`).
+    :param policies: политика гейтов из ``run.yaml:gates`` (``{g3: external|waived}``).
+        Действует только для делегируемых гейтов G3/G4; отсутствие ключа — ``external``.
+    :param runs_dir: корень прогонов — куда писать запрос на решение
+        (``runs/{run_id}/gates/{gate}-request.json``) и откуда читать предыдущий предмет
+        для диагностики устаревшего решения.
+    :param clock: часы для waiver-строки (тестируемость); ``None`` — системное UTC.
+    """
+
+    subject: SubjectResolver | None = None
+    profile_gate: Callable[[Gate], ProfileGateResult] | None = None
+    policies: Mapping[str, GatePolicy] = field(default_factory=dict)
+    runs_dir: str | Path | None = None
+    clock: Any = None
+
+
+#: Гейты, которые можно делегировать внешнему процессу (``run.yaml:gates``).
+_DELEGABLE_GATES: frozenset[Gate] = frozenset({Gate.G3, Gate.G4})
+
+
+def _gate_policy(runtime: GateRuntime | None, gate: Gate) -> GatePolicy:
+    """Политика гейта: ``waived`` только для G3/G4 и только если так записано в ``run.yaml``."""
+    if runtime is None or gate not in _DELEGABLE_GATES:
+        return GatePolicy.EXTERNAL
+    raw = runtime.policies.get(gate.value) or runtime.policies.get(gate.value.lower())
+    if raw is None:
+        return GatePolicy.EXTERNAL
+    return raw if isinstance(raw, GatePolicy) else GatePolicy(raw)
+
+
+def _resolve_gate_subject(
+    runtime: GateRuntime | None, gate: Gate
+) -> GateSubject | None:
+    """Предмет решения гейта (``None`` — резолвера нет либо он не смог его построить)."""
+    if runtime is None or runtime.subject is None:
+        return None
+    return runtime.subject(gate)
+
+
+def _previous_subject(
+    runtime: GateRuntime | None, run_id: str, gate: Gate
+) -> dict[str, Any] | None:
+    """Материал предмета из последнего запроса на решение (``None`` — запроса нет).
+
+    Именно запрос — запись того состояния, о котором спрашивали внешнюю систему: по нему
+    объясняется, **что** изменилось с момента решения. Файла нет (решение записано
+    out-of-band) — расхождение объясняется без перечисления компонентов, честно.
+    """
+    if runtime is None or runtime.runs_dir is None:
+        return None
+    return read_gate_request_subject(runtime.runs_dir, run_id, gate)
+
+
+def _write_gate_request(
+    runtime: GateRuntime | None,
+    run_id: str,
+    subject: GateSubject | None,
+) -> Path | None:
+    """Пишет запрос на решение, если есть куда и есть о чём (иначе ``None``)."""
+    if subject is None or runtime is None or runtime.runs_dir is None:
+        return None
+    return write_gate_request(runtime.runs_dir, run_id, subject)
+
+
+def _request_hint(gate: Gate, subject: GateSubject | None, path: Path | None) -> str:
+    """Действенная подсказка: где запрос и какой командой ответить."""
+    if subject is None:
+        return (
+            " Предмет решения не вычислен (нет контекста резолвера) — запрос на решение "
+            "не записан; гейт принимает решение без привязки к предмету."
+        )
+    where = f" Запрос на решение: {path}." if path is not None else ""
+    return (
+        f"{where} Ответ: hound gate --gate {gate.value} --actor <кто> "
+        f"--subject-digest {subject.digest} [--source external --external-ref <id>] "
+        "--verdict approved|rejected --notes <почему>."
+    )
+
+
+def _stale_detail(
+    runtime: GateRuntime | None,
+    run_id: str,
+    gate: Gate,
+    subject: GateSubject | None,
+) -> str:
+    """Чем текущий предмет отличается от того, по которому принимали решение."""
+    if subject is None:
+        return "изменения предмета не перечислены: текущий предмет не вычислен"
+    previous = _previous_subject(runtime, run_id, gate)
+    if previous is None:
+        return (
+            "предыдущий предмет не сохранён (файла запроса нет), поэтому изменения не "
+            "перечислены; текущие компоненты: "
+            + ", ".join(sorted(subject.material))
+        )
+    changes = describe_subject_diff(previous, subject.material)
+    if not changes:
+        return "материал предмета совпадает; расхождение отпечатков — иного происхождения"
+    return "изменения — " + "; ".join(changes)
+
+
+def _rejected_message(gate: Gate, decision: GateDecision | None) -> str:
+    """Явный отказ: кто отказал и почему (не «решения нет»)."""
+    ref = (decision.external_ref if decision is not None else None) or (
+        decision.actor if decision is not None else "?"
+    )
+    notes = (decision.notes if decision is not None else None) or "причина не указана"
+    return f"гейт {gate.value} отклонён внешней системой ({ref}): {notes}"
+
+
+def _rejected_stale_message(
+    gate: Gate,
+    decision: GateDecision | None,
+    detail: str,
+) -> str:
+    """Отказ относится к устаревшему состоянию: повторное ревью может быть обосновано."""
+    ref = (decision.external_ref if decision is not None else None) or (
+        decision.actor if decision is not None else "?"
+    )
+    return (
+        f"гейт {gate.value}: отклонение внешней системы ({ref}) относится к устаревшему "
+        f"состоянию предмета; {detail}. Повторное ревью текущего состояния может быть "
+        "обосновано."
+    )
+
+
+def _waiver_row(
+    ctx: RunContext, gate: Gate, runtime: GateRuntime | None
+) -> GateDecision:
+    """Идемпотентно записывает waiver-строку (факт делегирования гейта наружу).
+
+    Делегирование **не** прячется: строка в ``gate_decisions`` (``source='external'``,
+    ``external_ref='waiver:...'``, ``verdict='approved'``) и запись в манифесте
+    (``gate_waivers``) — единственное доказательство того, что прогон прошёл гейт **без**
+    внутрисистемного одобрения. Повторный вызов строку не дублирует.
+    """
+    ref = f"{WAIVER_REF_PREFIX}run.yaml:gates.{gate.value.lower()}"
+    for decision in ctx.store.iter_gate_decisions(ctx.run_id):
+        if decision.gate is gate and decision.external_ref == ref:
+            return decision
+    notes = (
+        f"гейт {gate.value} делегирован внешнему процессу "
+        f"(run.yaml:gates.{gate.value.lower()}=waived): внутрисистемного одобрения нет"
+    )
+    return record_decision(
+        ctx.store,
+        ctx.run_id,
+        gate,
+        actor="external-process",
+        target="waiver",
+        notes=notes,
+        clock=runtime.clock if runtime is not None else None,
+        subject_digest=None,
+        source=GateSource.EXTERNAL,
+        external_ref=ref,
+        verdict=GateVerdict.APPROVED,
+    )
+
+
+def _gate_phase(
+    phase: str,
+    gate: Gate,
+    runtime: GateRuntime | None = None,
+) -> PhaseFn:
+    """Фаза-гейт: ``ok`` если гейт пройден, иначе ``blocked`` (или ``skipped`` при waiver).
+
+    Гейт **не** проходится сам. Пути прохождения, в порядке приоритета:
+
+    1. **Waiver** (только G3/G4) — ``run.yaml:gates.<gate>=waived``: решение делегировано
+       внешнему процессу целиком. Фаза возвращает ``skipped`` с причиной
+       ``gate_delegated_external`` и **записывает** waiver-строку: делегирование видно.
+    2. **Per-run решение** — строка в ``gate_decisions`` (S9), **привязанная к текущему
+       предмету** (``subject_digest``) и с вердиктом ``approved``. Устаревшее одобрение
+       (предмет изменился) гейт не проходит — иначе одобрение действовало бы вечно.
+    3. **Аттестация профиля** (только G1/G2) — ``profile_gate``: человек аттестовал
+       содержимое профиля пакета-якоря, и текущий профиль совпадает с аттестованным.
+       Профиль квази-константен (2–5 правок в год при еженедельных прогонах), поэтому
+       повторное решение на каждый прогон не требуется.
+
+    **Отказ блокирует так же явно, как отсутствие решения, но другим сообщением.**
+    ``verdict='rejected'`` по текущему предмету → «отклонён внешней системой (ref): notes»;
+    отказ по устаревшему предмету → сообщение говорит, что отказ относится к прошлому
+    состоянию и повторное ревью может быть обосновано. Молчание внешней системы не
+    превращается в отказ и не выдаётся за одобрение.
+
+    **На блоке пишется запрос на решение** — ``runs/{run_id}/gates/{gate}-request.json``
+    (детерминированный, без меток времени): внешняя система получает предмет и
+    ``subject_digest``, который обязан вернуть в решении.
+
+    :param runtime: зависимости сверх :class:`RunContext`. ``None`` — поведение прежнее
+        (решения без привязки, без экспорта); так вызывают тесты и selfcheck.
     """
 
     def _fn(ctx: RunContext) -> PhaseResult:
-        if is_gate_passed(ctx.store, ctx.run_id, gate):
+        policy = _gate_policy(runtime, gate)
+        subject = _resolve_gate_subject(runtime, gate)
+        if policy is GatePolicy.WAIVED:
+            _waiver_row(ctx, gate, runtime)
+            return PhaseResult(
+                status="skipped",
+                phase=phase,
+                skip_reason=SkipReason.GATE_DELEGATED_EXTERNAL,
+                log_entries=[
+                    f"гейт {gate.value} делегирован внешнему процессу "
+                    f"(run.yaml:gates.{gate.value.lower()}=waived): "
+                    "внутрисистемного одобрения нет"
+                ],
+            )
+
+        digest = subject.digest if subject is not None else None
+        check = evaluate_gate(ctx.store, ctx.run_id, gate, digest)
+        if check.status == "passed":
             return PhaseResult(status="ok", phase=phase)
+        if check.status == "rejected":
+            # Явный отказ: сначала отказ, потом всё остальное — отказ не перекрывается
+            # аттестацией профиля и не выдаётся за «решения нет».
+            return PhaseResult(
+                status="blocked",
+                phase=phase,
+                errors=[_rejected_message(gate, check.decision)],
+            )
+        if gate in (Gate.G1, Gate.G2) and runtime is not None and runtime.profile_gate:
+            verdict = runtime.profile_gate(gate)
+            if verdict.passed:
+                return PhaseResult(status="ok", phase=phase)
+            if verdict.detail and check.status == "missing":
+                path = _write_gate_request(runtime, ctx.run_id, subject)
+                return PhaseResult(
+                    status="blocked",
+                    phase=phase,
+                    errors=[verdict.detail + _request_hint(gate, subject, path)],
+                )
+        if check.status == "rejected_stale":
+            detail = _stale_detail(runtime, ctx.run_id, gate, subject)
+            path = _write_gate_request(runtime, ctx.run_id, subject)
+            return PhaseResult(
+                status="blocked",
+                phase=phase,
+                errors=[
+                    _rejected_stale_message(gate, check.previous, detail)
+                    + _request_hint(gate, subject, path)
+                ],
+            )
+        if check.status == "stale":
+            detail = _stale_detail(runtime, ctx.run_id, gate, subject)
+            path = _write_gate_request(runtime, ctx.run_id, subject)
+            return PhaseResult(
+                status="blocked",
+                phase=phase,
+                errors=[
+                    f"гейт {gate.value} не пройден: решение относится к устаревшему "
+                    f"состоянию предмета; {detail}."
+                    + _request_hint(gate, subject, path)
+                ],
+            )
+        path = _write_gate_request(runtime, ctx.run_id, subject)
         return PhaseResult(
             status="blocked",
             phase=phase,
             errors=[
-                f"гейт {gate.value} не пройден: нет строки в gate_decisions (S9)"
+                f"гейт {gate.value} не пройден: нет строки в gate_decisions (S9)."
+                + _request_hint(gate, subject, path)
             ],
         )
 

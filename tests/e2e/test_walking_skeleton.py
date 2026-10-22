@@ -16,7 +16,7 @@
   его ``content_hash`` совпадает с хешем цитируемого текста, а сырые байты сохранены
   в ``corpus_raw/``.
 
-**Гейты — только человек (S9/I6/I7).** G1–G4 пишутся в ``gate_decisions`` явным
+**Гейты — только человек (S9/I6/I7).** G1/G2 пишутся в ``gate_decisions`` явным
 синтетическим актором (``e2e-smoke``). Это тест **играет человека**, а не
 автоматизация гейта: без соответствующей строки ``Runner`` обязан остановиться
 (см. негативный тест ``test_walking_skeleton_blocks_without_g1``).
@@ -39,7 +39,7 @@ from core.pipeline.lint import lint_run_inputs
 from core.pipeline.normalize import RunInputs, load_inputs
 from core.pipeline.phases import build_phases
 from core.pipeline.plan import RunPlan
-from core.pipeline.runner import PhaseFn, Ports, Runner
+from core.pipeline.runner import GATE_PHASES, PhaseFn, Ports, Runner
 from core.ports.types import RawPage
 from core.ports.vector_index import RetrievedChunk
 from core.util.hashing import content_hash
@@ -188,7 +188,12 @@ def _build_phases(
 
 
 def _record_human_gates(store: Any, run_id: str) -> None:
-    """Записывает решения G1–G4 явным актором — тест играет человека (S9/I6/I7)."""
+    """Записывает решения G1–G4 явным актором — тест играет человека (S9/I6/I7).
+
+    Для G3/G4 это решения **без привязки к предмету** (legacy-путь): скелет проверяет
+    конвейер, а привязка/вердикты внешних решений покрыты отдельными тестами
+    (``tests/pipeline/test_gate_integration.py``).
+    """
     clock = _Clock()
     for gate in (gate_g1, gate_g2, gate_g3, gate_g4):
         gate(store, run_id, actor=ACTOR, notes="walking skeleton", clock=clock)
@@ -208,8 +213,9 @@ def test_walking_skeleton_end_to_end(tmp_path: Path) -> None:
     store = build_store(":memory:")
     store.create_run(run_id, inputs.run)
     _record_human_gates(store, run_id)
-    # Аудит-след: ровно четыре человеческих решения (S9).
-    assert len(list(store.iter_gate_decisions(run_id))) == 4
+    # Аудит-след: ровно одно решение на гейт — G1/G2 (внутренние) и G3/G4 (точки
+    # интеграции: здесь решение подано напрямую, без внешней системы).
+    assert len(list(store.iter_gate_decisions(run_id))) == len(GATE_PHASES) == 4
 
     ports = _build_ports(composition_id, partition_id)
     phases = _build_phases(inputs, run_plan, ports, store, tmp_path)

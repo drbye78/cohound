@@ -18,8 +18,8 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
-from core.domain.enums import OnboardingState, SeedRole, SeedSource, SeedState
-from core.domain.models import SeedEntry
+from core.domain.enums import Gate, OnboardingState, SeedRole, SeedSource, SeedState
+from core.domain.models import ProfileAttestationRow, SeedEntry
 
 __all__ = [
     "ChunkRow",
@@ -391,4 +391,59 @@ class ProductStatePort(Protocol):
 
     def previous_lineage(self, package_id: str) -> RunLineageRow | None:
         """Последняя строка lineage пакета (``None`` — истории нет)."""
+        ...
+
+    # -- аттестация профиля пакета-якоря (G1/G2) ------------------------- #
+    def save_profile_attestation(self, row: ProfileAttestationRow) -> None:
+        """Создаёт/обновляет аттестацию профиля (идемпотентно по ``attestation_id``).
+
+        Идемпотентность — по детерминированному ``attestation_id`` (см.
+        :func:`core.pipeline.profile_attestation.profile_attestation_id`): повторная
+        подача того же решения перезаписывает ту же строку, а не плодит дубли.
+        **Отзыв необратим повторной записью**: уже проставленный ``superseded_at``
+        сохраняется (аттестация не «воскресает» молча).
+        """
+        ...
+
+    def find_profile_attestation(
+        self,
+        case_id: str,
+        package_id: str,
+        anchor: str,
+        gate: Gate,
+        profile_digest: str,
+    ) -> ProfileAttestationRow | None:
+        """Аттестация точного дайджеста профиля (``None`` — не аттестован).
+
+        Строка возвращается **независимо** от ``superseded_at``: решение о том, считать
+        ли отозванную аттестацию действующей, принимает вызывающий (гейт-резолвер).
+        При нескольких строках одного дайджеста возвращается последняя по ``attested_at``.
+        """
+        ...
+
+    def iter_profile_attestations(
+        self,
+        *,
+        case_id: str,
+        package_id: str,
+        anchor: str,
+        gate: Gate,
+        include_superseded: bool = False,
+    ) -> Iterable[ProfileAttestationRow]:
+        """Аттестации профиля для ``(case_id, package_id, anchor, gate)``.
+
+        Порядок — ``attested_at``, ``attestation_id`` (детерминированно). По умолчанию
+        отозванные (``superseded_at IS NOT NULL``) не возвращаются: действующая
+        аттестация — только неотозванная.
+        """
+        ...
+
+    def supersede_profile_attestation(
+        self, attestation_id: str, *, superseded_at: str
+    ) -> None:
+        """Отзывает аттестацию (проставляет ``superseded_at``); идемпотентно.
+
+        Строка не удаляется: аудит-след решений человека сохраняется. Повторный отзыв
+        не переписывает уже проставленную метку.
+        """
         ...

@@ -20,8 +20,8 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from core.config.seeds import seed_id
-from core.domain.enums import OnboardingState, SeedRole, SeedSource, SeedState
-from core.domain.models import SeedEntry
+from core.domain.enums import Gate, OnboardingState, SeedRole, SeedSource, SeedState
+from core.domain.models import ProfileAttestationRow, SeedEntry
 from core.ports.state import (
     ChunkRow,
     DocumentVersionRow,
@@ -141,6 +141,38 @@ _CHUNK_COLUMNS = (
     "heading_path",
     "context_prefix",
     "lang",
+)
+
+#: Колонки ``profile_attestation`` в порядке записи (кроме ``attestation_id`` — он ключ).
+#: ``digest_material`` в БД — JSON-текст (сериализуется в :meth:`_save_profile_attestation`).
+_PROFILE_ATTESTATION_COLUMNS = (
+    "case_id",
+    "package_id",
+    "anchor",
+    "gate",
+    "profile_digest",
+    "digest_material",
+    "attested_by",
+    "attested_at",
+    "superseded_at",
+    "notes",
+)
+
+#: Upsert аттестации профиля. Отличие от :func:`_upsert_sql`: ``superseded_at`` не
+#: затирается повторной подачей — отозванная аттестация не «воскресает» молча
+#: (COALESCE берёт уже проставленную метку, если она есть).
+_PROFILE_ATTESTATION_UPSERT = (
+    f"INSERT INTO profile_attestation (attestation_id, "
+    f"{', '.join(_PROFILE_ATTESTATION_COLUMNS)}) "
+    f"VALUES ({', '.join('?' for _ in range(len(_PROFILE_ATTESTATION_COLUMNS) + 1))}) "
+    "ON CONFLICT(attestation_id) DO UPDATE SET "
+    + ", ".join(
+        f"{name} = excluded.{name}"
+        for name in _PROFILE_ATTESTATION_COLUMNS
+        if name != "superseded_at"
+    )
+    + ", superseded_at = COALESCE(profile_attestation.superseded_at,"
+    " excluded.superseded_at)"
 )
 
 
@@ -777,3 +809,94 @@ class SqliteStateStore:
             (package_id,),
         ).fetchone()
         return self._lineage_row(row) if row is not None else None
+
+    # -- аттестация профиля пакета-якоря (G1/G2, state v4) ---------------- #
+    def save_profile_attestation(self, row: ProfileAttestationRow) -> None:
+        """Upsert аттестации профиля (идемпотентно по ``attestation_id``).
+
+        ``superseded_at`` повторной подачей не затирается: отзыв аттестации необратим
+        записью (только новой аттестацией с другим ``attestation_id``).
+        """
+        values: list[object] = []
+        for name in _PROFILE_ATTESTATION_COLUMNS:
+            value = getattr(row, name)
+            if name == "digest_material":
+                value = json.dumps(value, ensure_ascii=False, sort_keys=True)
+            elif isinstance(value, Gate):
+                value = value.value
+            values.append(value)
+        with self._conn:
+            self._conn.execute(
+                _PROFILE_ATTESTATION_UPSERT, (row.attestation_id, *values)
+            )
+
+    @staticmethod
+    def _profile_attestation_row(row: sqlite3.Row) -> ProfileAttestationRow:
+        """Строка SQLite → :class:`ProfileAttestationRow` (``digest_material`` — JSON)."""
+        try:
+            material = json.loads(row["digest_material"])
+        except (TypeError, json.JSONDecodeError):
+            material = {}
+        return ProfileAttestationRow(
+            attestation_id=row["attestation_id"],
+            case_id=row["case_id"],
+            package_id=row["package_id"],
+            anchor=row["anchor"],
+            gate=Gate(row["gate"]),
+            profile_digest=row["profile_digest"],
+            digest_material=material,
+            attested_by=row["attested_by"],
+            attested_at=row["attested_at"],
+            superseded_at=row["superseded_at"],
+            notes=row["notes"],
+        )
+
+    def find_profile_attestation(
+        self,
+        case_id: str,
+        package_id: str,
+        anchor: str,
+        gate: Gate,
+        profile_digest: str,
+    ) -> ProfileAttestationRow | None:
+        """Аттестация точного дайджеста (включая отозванные — решает вызывающий)."""
+        row = self._conn.execute(
+            "SELECT * FROM profile_attestation WHERE case_id = ? AND package_id = ?"
+            " AND anchor = ? AND gate = ? AND profile_digest = ?"
+            " ORDER BY attested_at DESC, attestation_id DESC LIMIT 1",
+            (case_id, package_id, anchor, Gate(gate).value, profile_digest),
+        ).fetchone()
+        return self._profile_attestation_row(row) if row is not None else None
+
+    def iter_profile_attestations(
+        self,
+        *,
+        case_id: str,
+        package_id: str,
+        anchor: str,
+        gate: Gate,
+        include_superseded: bool = False,
+    ) -> list[ProfileAttestationRow]:
+        """Аттестации профиля для ``(case_id, package_id, anchor, gate)``."""
+        sql = (
+            "SELECT * FROM profile_attestation WHERE case_id = ? AND package_id = ?"
+            " AND anchor = ? AND gate = ?"
+        )
+        params: list[object] = [case_id, package_id, anchor, Gate(gate).value]
+        if not include_superseded:
+            sql += " AND superseded_at IS NULL"
+        sql += " ORDER BY attested_at, attestation_id"
+        return [
+            self._profile_attestation_row(row) for row in self._conn.execute(sql, params)
+        ]
+
+    def supersede_profile_attestation(
+        self, attestation_id: str, *, superseded_at: str
+    ) -> None:
+        """Отзывает аттестацию (идемпотентно: проставляет ``superseded_at`` один раз)."""
+        with self._conn:
+            self._conn.execute(
+                "UPDATE profile_attestation SET superseded_at = ?"
+                " WHERE attestation_id = ? AND superseded_at IS NULL",
+                (superseded_at, attestation_id),
+            )

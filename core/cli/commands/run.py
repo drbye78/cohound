@@ -35,6 +35,7 @@ from core.cli.context import (
     _print_run_dry,
     _print_run_report,
     _product_callback,
+    _gate_runtime,
     _progress_callback,
     _resolve_phases,
     _resolve_plan,
@@ -294,8 +295,10 @@ def run(args: argparse.Namespace) -> int:
     """``run``: собрать прогон и провести ``Runner`` по реальным фазам Ш1–Ш9.
 
     Composition root строит план и реестр фаз (:func:`build_phases`) и связывает их с
-    портами профиля (:func:`_resolve_ports`). Гейты G1–G4 намеренно **не** автоматизируются
-    (I6/I7): без строки в ``gate_decisions`` прогон останавливается ``blocked`` на ``g1``.
+    портами профиля (:func:`_resolve_ports`). Гейты намеренно **не** автоматизируются
+    (I6/I7): без решения в ``gate_decisions`` (G1/G2 — внутренняя аттестация, G3/G4 —
+    ответ внешней системы) прогон останавливается ``blocked`` на соответствующей фазе, а
+    для G3/G4 пишет запрос на решение в ``runs/{run_id}/gates/``.
     Resume honour'ится: строка прогона **не пересоздаётся**, если она уже есть, поэтому
     durable-карта фаз в ``runs.state`` сохраняется между процессами (``02`` §A.1).
 
@@ -757,10 +760,27 @@ def run(args: argparse.Namespace) -> int:
             # Наблюдаемость (W12/T12.1, 04 §B.1/§B.2): оборачиваем фазы логом+таймингом.
             # Гейты — дефолтные замыкания Runner; оборачиваем и их, чтобы §B.1-лог покрывал
             # точку остановки (g1 без человеческого решения тоже оставляет logs/g1.jsonl).
+            # Резолвер аттестации профиля строится здесь же: ``state_store`` — тот же
+            # ``state.db`` пакета, что видит инкрементальный корпус. ``None`` (dry-run/
+            # ``--until plan``) → гейт проверяет только ``gate_decisions``, как раньше.
             clock = getattr(args, "clock", None)
+            # Единый runtime гейтов: предмет решения (G1/G2 — профиль, G3 — очередь
+            # ревью, G4 — публикуемое содержимое), аттестация профиля, политика
+            # ``run.yaml:gates`` и каталог прогонов для запроса на решение.
+            gate_runtime = _gate_runtime(
+                args,
+                inputs,
+                run_plan,
+                cohort_digest=cohort_d,
+                seeds_digest=seeds_d,
+                state=state_store,
+                store=store,
+            )
             instrumentable: dict[str, PhaseFn] = dict(phases)
             for gate_name, gate in GATE_PHASES.items():
-                instrumentable.setdefault(gate_name, _gate_phase(gate_name, gate))
+                instrumentable.setdefault(
+                    gate_name, _gate_phase(gate_name, gate, gate_runtime)
+                )
             instrumentation = instrument_phases(
                 instrumentable,
                 run_id=run_id,

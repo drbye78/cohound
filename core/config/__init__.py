@@ -52,6 +52,8 @@ from core.config.passports import (
     PassportLoadError,
     load_passport,
     load_passports,
+    passport_content_digest,
+    passport_content_digests,
     passport_urls,
 )
 from core.config.paths import (
@@ -114,6 +116,8 @@ __all__ = [
     "load_passport",
     "load_passports",
     "passport_urls",
+    "passport_content_digest",
+    "passport_content_digests",
     "PassportLoadError",
     # paths.yaml — раскладка операционных каталогов (03 §A.1)
     "PathsConfig",

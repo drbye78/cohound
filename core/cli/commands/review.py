@@ -1,4 +1,4 @@
-"""``review``: очередь ревью — preliminary-контур + ``❓``-кандидаты (Ш7/G3).
+"""``review``: очередь ревью — preliminary-контур + ``❓``-кандидаты (Ш7; предмет G3).
 
 Вынесено из ``core.cli.main`` (P1-A). Модуль экспортирует :func:`configure`
 (регистрация аргументов подкоманды) и :func:`run` (тело команды).
@@ -27,7 +27,7 @@ from core.pipeline.review import ReviewItem
 
 
 def run(args: argparse.Namespace) -> int:
-    """``review``: очередь ревью — preliminary-контур + ``❓``-кандидаты (Ш7/G3, ``03`` §D.6).
+    """``review``: очередь ревью — preliminary-контур + ``❓``-кандидаты (Ш7, ``03`` §D.6).
 
     Резолвит хранилище как ``sensitivity`` (``--db`` приоритетнее ``--runs-dir`` +
     ``--run-id``; ``run_id`` выводится, если в БД ровно один прогон) и печатает
@@ -60,7 +60,8 @@ def run(args: argparse.Namespace) -> int:
 def configure(sub: Any) -> None:
     """Регистрирует подкоманду ``review``."""
     p_review = sub.add_parser(
-        "review", help="очередь ревью: preliminary-контур + ❓-кандидаты (Ш7/G3)"
+        "review",
+        help="очередь ревью: preliminary-контур + ❓-кандидаты (Ш7; предмет G3)",
     )
     review_source = p_review.add_mutually_exclusive_group(required=True)
     review_source.add_argument("--db", default=None, help="путь к cohound.db прогона")

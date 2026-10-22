@@ -697,7 +697,7 @@ def _crawl_session_dict_mirror() -> None:
 def _db_smoke() -> None:
     conn = connect(":memory:")
     ver = conn.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()
-    _assert(ver is not None and ver["value"] == "3.10.0")
+    _assert(ver is not None and ver["value"] == "3.11.0")
 
     tables = {r["name"] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     for t in ("products", "runs", "llm_scenarios", "corpus_docs", "corpus_chunks",
@@ -1346,13 +1346,54 @@ def _store_resolver_i19() -> None:
 
 
 def _pipeline_gates_resume() -> None:
-    """Гейт не пройден без gate_decisions (S9); durable resume через runs.state (P4)."""
+    """Гейт не пройден без gate_decisions (S9); durable resume через runs.state (P4).
+
+    Плюс инвариант сокращённого набора гейтов (G1/G2) и второй путь прохождения —
+    аттестация профиля пакета-якоря (``profile_attestation`` в ``state.db``): профиль
+    квази-константен, поэтому еженедельные прогоны не требуют повторного решения.
+    """
     import datetime as _dt
 
     from core.domain import Gate, RunConfig, RunMode
+    from core.domain.models import ProfileAttestationRow
     from core.pipeline.gates import is_gate_passed, record_decision
-    from core.pipeline.runner import GATE_PHASES, PHASES, PhaseResult, Runner
+    from core.pipeline.runner import GateRuntime
+    from core.pipeline.profile_attestation import (
+        make_profile_gate,
+        material_digest,
+        profile_attestation_id,
+        profile_material,
+    )
+    from core.pipeline.runner import (
+        GATE_PHASES,
+        PHASES,
+        PhaseResult,
+        Ports,
+        RunContext,
+        Runner,
+        _gate_phase,
+    )
     from core.store.sqlite_store import SqliteStore
+    from core.store.state_store import SqliteStateStore
+
+    # Гейтов четыре: G1/G2 — внутренняя аттестация, G3/G4 — точки интеграции
+    # (решение принимает внешняя система, coHound записывает ответ).
+    if set(GATE_PHASES) != {"g1", "g2", "g3", "g4"}:
+        raise AssertionError(
+            f"GATE_PHASES обязан быть g1/g2/g3/g4, получено {sorted(GATE_PHASES)}"
+        )
+    if [gate.value for gate in Gate] != ["G1", "G2", "G3", "G4"]:
+        raise AssertionError("доменный набор гейтов обязан быть G1–G4")
+    if not (
+        PHASES.index("review") < PHASES.index("g3") < PHASES.index("compute")
+        < PHASES.index("g4") < PHASES.index("report")
+    ):
+        raise AssertionError(
+            "порядок фаз: review < g3 < compute < g4 < report"
+        )
+    for kept in ("review", "compute", "report"):
+        if kept not in PHASES:
+            raise AssertionError(f"фаза {kept} обязана остаться в PHASES")
 
     def _ok_phases() -> dict:
         """Не-гейтовые фазы-успехи: изолируют поведение гейта/resume (реестр по умолчанию — гейты)."""
@@ -1392,6 +1433,73 @@ def _pipeline_gates_resume() -> None:
         record_decision(store, "r1", Gate.G1, actor="human", target="plan")
         if not is_gate_passed(store, "r1", Gate.G1):
             raise AssertionError("гейт обязан пройтись после строки gate_decisions")
+
+        # --- Второй путь: аттестация профиля пакета-якоря (G1/G2) ---------- #
+        material = profile_material(
+            case_id="c",
+            package_id="pk",
+            anchor="p1",
+            cohort_digest="cd",
+            products=["p1", "p2"],
+            focus_modules=["mod_a"],
+            focus_params=[],
+            seeds_digest="sd",
+            roles=["role_r1"],
+            passports={"p1": "pp1", "p2": None},
+        )
+        digest = material_digest(material)
+        with SqliteStateStore(":memory:") as state:
+            ctx = RunContext(run_id="r1", store=store, ports=Ports())
+            # Без аттестации — blocked, и сообщение называет команду аттестации.
+            blocked = _gate_phase("g2", Gate.G2, GateRuntime(profile_gate=make_profile_gate(state, material)))(ctx)
+            if blocked.status != "blocked":
+                raise AssertionError("без аттестации профиля гейт обязан быть blocked")
+            if not any("hound profile attest" in err for err in blocked.errors):
+                raise AssertionError("блок обязан называть команду аттестации профиля")
+            # Действующая аттестация — ok без строки gate_decisions.
+            state.save_profile_attestation(
+                ProfileAttestationRow(
+                    attestation_id=profile_attestation_id(
+                        case_id="c",
+                        package_id="pk",
+                        anchor="p1",
+                        gate=Gate.G2,
+                        profile_digest=digest,
+                        attested_by="human",
+                    ),
+                    case_id="c",
+                    package_id="pk",
+                    anchor="p1",
+                    gate=Gate.G2,
+                    profile_digest=digest,
+                    digest_material=material,
+                    attested_by="human",
+                    attested_at="2026-01-01T00:00:00Z",
+                )
+            )
+            passed = _gate_phase("g2", Gate.G2, GateRuntime(profile_gate=make_profile_gate(state, material)))(ctx)
+            if passed.status != "ok":
+                raise AssertionError("действующая аттестация профиля обязана пройти гейт")
+            if list(store.iter_gate_decisions("r1")) and is_gate_passed(store, "r1", Gate.G2):
+                raise AssertionError("g2 не должен был проходить по строке gate_decisions")
+            # Изменённый профиль — blocked, и ошибка называет изменившийся компонент.
+            changed = profile_material(
+                case_id="c",
+                package_id="pk",
+                anchor="p1",
+                cohort_digest="cd_changed",
+                products=["p1", "p2"],
+                focus_modules=["mod_a"],
+                focus_params=[],
+                seeds_digest="sd",
+                roles=["role_r1"],
+                passports={"p1": "pp1", "p2": None},
+            )
+            stale = _gate_phase("g2", Gate.G2, GateRuntime(profile_gate=make_profile_gate(state, changed)))(ctx)
+            if stale.status != "blocked":
+                raise AssertionError("изменённый профиль обязан блокировать гейт")
+            if not any("cohort_digest" in err for err in stale.errors):
+                raise AssertionError("блок обязан называть изменившийся компонент cohort_digest")
 
 
 def _cli_plan_lint() -> None:

@@ -294,6 +294,129 @@ def test_cmd_run_registers_real_phases_and_blocks_at_g1(
     assert {item["phase"] for item in payload["results"]}.isdisjoint({"compute", "report"})
 
 
+def test_cmd_run_passes_gates_by_profile_attestation_without_per_run_rows(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """G1/G2 проходятся **аттестацией профиля**, без единой строки ``gate_decisions``.
+
+    Профиль квази-константен (правки 2–5 раз в год при еженедельных прогонах): человек
+    аттестует его содержимое один раз, и последующие прогоны не требуют повторного
+    решения. Тест проверяет именно проводку composition root: материал дайджеста
+    собирается из **тех же** входов, что видит прогон (когорта/план/seeds/паспорта).
+    """
+    import argparse
+
+    from core.cli.context import _profile_material_for_run
+    from core.config.paths import resolve_paths
+    from core.domain import Gate
+    from core.domain.models import ProfileAttestationRow
+    from core.pipeline.digests import cohort_digest, seeds_digest
+    from core.pipeline.normalize import load_inputs
+    from core.pipeline.onboarding import load_effective_seeds
+    from core.pipeline.plan import plan as build_plan
+    from core.pipeline.profile_attestation import (
+        material_digest,
+        profile_attestation_id,
+    )
+    from core.store.state_sqlite import state_db_path
+    from core.store.state_store import SqliteStateStore
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("COHOUND_HOME", str(tmp_path / "home"))
+    package = valid_package(tmp_path)
+    db = tmp_path / "cohound.db"
+    runs_dir = tmp_path / "runs"
+    run_id = "attest-e2e"
+    argv = run_argv(package, run_id=run_id, db=db, runs_dir=runs_dir)
+
+    # Предполёт: строка прогона + normalize/lint/plan; g1 без аттестации → blocked
+    # (реальный прогон открывает/создаёт ``state.db`` пакета).
+    assert main([*argv, "--until", "g1"]) == EXIT_BLOCKED
+    capsys.readouterr()
+
+    # Материал профиля — тем же composition-хелпером, что и у прогона.
+    inputs = load_inputs(str(package / "run.yaml"), str(package))
+    run_plan = build_plan(inputs, run_id=run_id)
+    cohort_d = cohort_digest(
+        inputs.cohort,
+        case_id=inputs.run.case_id,
+        cohort_ref=getattr(inputs.run, "cohort_ref", None),
+    )
+    seed_config, _ = load_effective_seeds(
+        str(package),
+        inputs.run.products,
+        profiles=getattr(inputs, "domain_profiles", None) or {},
+    )
+    seeds_d = seeds_digest(seed_config)
+    args = argparse.Namespace(
+        package=str(package), paths=None, passports_dir=None
+    )
+    material = _profile_material_for_run(
+        args, inputs, run_plan, cohort_digest=cohort_d, seeds_digest=seeds_d
+    )
+    digest = material_digest(material)
+    assert material["cohort_digest"] == cohort_d
+    assert material["seeds_digest"] == seeds_d
+    assert material["products"] == sorted(inputs.run.products)
+
+    paths = resolve_paths()
+    state_path = state_db_path(paths.state, Path(package).name)
+    assert state_path.exists()
+    with SqliteStateStore(state_path) as state:
+        for gate in (Gate.G1, Gate.G2):
+            state.save_profile_attestation(
+                ProfileAttestationRow(
+                    attestation_id=profile_attestation_id(
+                        case_id=str(material["case_id"]),
+                        package_id=str(material["package_id"]),
+                        anchor=str(material["anchor"]),
+                        gate=gate,
+                        profile_digest=digest,
+                        attested_by="cli-test",
+                    ),
+                    case_id=str(material["case_id"]),
+                    package_id=str(material["package_id"]),
+                    anchor=str(material["anchor"]),
+                    gate=gate,
+                    profile_digest=digest,
+                    digest_material=material,
+                    attested_by="cli-test",
+                    attested_at="2026-10-01T00:00:00Z",
+                )
+            )
+
+    # g1 и g2 проходятся без per-run решений: прогон идёт дальше по фазам.
+    assert main([*argv, "--until", "g2"]) == EXIT_OK
+    with build_store(db) as store:
+        assert list(store.iter_gate_decisions(run_id)) == []
+
+    # Отзыв аттестации G1 → **новый** прогон того же профиля снова стоит на g1, и
+    # сообщение называет, что аттестации нет и какой командой её создать.
+    with SqliteStateStore(state_path) as state:
+        state.supersede_profile_attestation(
+            profile_attestation_id(
+                case_id=str(material["case_id"]),
+                package_id=str(material["package_id"]),
+                anchor=str(material["anchor"]),
+                gate=Gate.G1,
+                profile_digest=digest,
+                attested_by="cli-test",
+            ),
+            superseded_at="2026-10-02T00:00:00Z",
+        )
+    stale_argv = run_argv(
+        package, run_id="attest-e2e-2", db=db, runs_dir=runs_dir
+    )
+    assert main([*stale_argv, "--until", "g1"]) == EXIT_BLOCKED
+    payload = json_out(capsys)
+    assert payload["stopped_at"] == "g1"
+    message = json.dumps(payload, ensure_ascii=False)
+    assert "нет аттестации профиля" in message
+    assert "hound profile attest" in message
+
+
 # ---------------------------------------------------------------------------
 # run: сквозной local-прогон (реальные compute/report, манифест)
 # ---------------------------------------------------------------------------
@@ -359,6 +482,147 @@ def test_cmd_run_full_local_writes_manifest_with_real_compute_report(
     assert loaded["deploy_profile"] == LOCAL_PROFILE
     assert loaded["edge_schema_version"] == SEAM_SCHEMA_VERSION
     assert loaded["edge_capabilities"] == {}
+
+
+def test_cmd_run_g3_g4_are_external_integration_points(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """G3/G4 — точки интеграции: блок → запрос наружу → внешнее решение (одобрение/отказ).
+
+    Проверяется вся проводка: фаза-гейт пишет ``runs/{run_id}/gates/{gate}-request.json``,
+    ``hound gate --source external`` возвращает отпечаток предмета из запроса, отказ
+    блокирует прогон с явным сообщением, одобрение — продолжает.
+    """
+    package = valid_package(tmp_path)
+    runs_dir = tmp_path / "runs"
+    run_id = "g3-g4-integration"
+    # Штатная раскладка: БД внутри каталога прогона — тогда `hound gate --db` находит
+    # файл запроса рядом с БД без дополнительных флагов.
+    db = runs_dir / run_id / "cohound.db"
+    argv = run_argv(package, run_id=run_id, db=db, runs_dir=runs_dir)
+
+    assert main([*argv, "--until", "plan"]) == EXIT_OK
+    with build_store(db) as store:
+        # G1/G2 — внутренняя аттестация: человек подтверждает профиль и матрицу.
+        gate_g1(store, run_id, actor="cli-test")
+        gate_g2(store, run_id, actor="cli-test")
+
+    ports = Ports(
+        evaluator=FakeEvaluator(
+            default=LLMCellOutput(
+                status=Status.ABSENT, justification="нет в срезе", evidence=[]
+            )
+        ),
+        lexical_index=FakeLexicalIndex(),
+        **_offline_crawl_kwargs(),
+    )
+
+    def factory(**kwargs: Any) -> dict:
+        kwargs["retrieval_profile"] = "R0"
+        kwargs["cutoff_k"] = 3
+        kwargs["eval_cache"] = None
+        return build_phases(**kwargs)
+
+    # 1) Первый прогон останавливается на G3 и экспортирует предмет решения наружу.
+    assert main(argv, ports=ports, phases_factory=factory) == EXIT_BLOCKED
+    g3_request = runs_dir / run_id / "gates" / "G3-request.json"
+    assert g3_request.is_file()
+    g3_digest = json.loads(g3_request.read_text(encoding="utf-8"))["subject_digest"]
+    assert g3_digest
+
+    # 2) Внешняя система одобряет ровно этот предмет (отпечаток берётся из запроса).
+    assert (
+        main(
+            [
+                "gate",
+                "--db",
+                str(db),
+                "--run-id",
+                run_id,
+                "--gate",
+                "G3",
+                "--actor",
+                "review-system",
+                "--source",
+                "external",
+                "--external-ref",
+                "REV-1",
+                "--notes",
+                "ревью пройдено",
+            ]
+        )
+        == EXIT_OK
+    )
+
+    # 3) Прогон идёт дальше и останавливается уже на G4 (утверждение публикации).
+    assert main(argv, ports=ports, phases_factory=factory) == EXIT_BLOCKED
+    g4_request = runs_dir / run_id / "gates" / "G4-request.json"
+    assert g4_request.is_file()
+    g4_digest = json.loads(g4_request.read_text(encoding="utf-8"))["subject_digest"]
+
+    # 4) Отказ внешней системы блокирует прогон и назван явно (не «решения нет»).
+    assert (
+        main(
+            [
+                "gate",
+                "--db",
+                str(db),
+                "--run-id",
+                run_id,
+                "--gate",
+                "G4",
+                "--actor",
+                "publish-system",
+                "--source",
+                "external",
+                "--external-ref",
+                "PUB-7",
+                "--notes",
+                "нет подтверждённого покрытия",
+                "--verdict",
+                "rejected",
+            ]
+        )
+        == EXIT_OK
+    )
+    capsys.readouterr()
+    assert main(argv, ports=ports, phases_factory=factory) == EXIT_BLOCKED
+    output = capsys.readouterr().out
+    assert "отклонён внешней системой" in output
+    assert "PUB-7" in output
+
+    # 5) Одобрение того же предмета (тем же отпечатком) продолжает прогон до отчёта.
+    assert (
+        main(
+            [
+                "gate",
+                "--db",
+                str(db),
+                "--run-id",
+                run_id,
+                "--gate",
+                "G4",
+                "--actor",
+                "publish-system",
+                "--source",
+                "external",
+                "--external-ref",
+                "PUB-8",
+                "--notes",
+                "публикация согласована",
+                "--subject-digest",
+                g4_digest,
+            ]
+        )
+        == EXIT_OK
+    )
+    assert main(argv, ports=ports, phases_factory=factory) == EXIT_OK
+    loaded = yaml.safe_load(
+        (runs_dir / run_id / "run_manifest.yaml").read_text(encoding="utf-8")
+    )
+    # Гейты не делегированы: политика пуста, waiver-строк нет — прогон с одобрением.
+    assert loaded.get("gate_policies", {}) == {}
+    assert loaded.get("gate_waivers", []) == []
 
 
 def test_cmd_run_wires_package_registry_specs_end_to_end(
