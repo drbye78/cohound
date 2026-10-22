@@ -349,3 +349,139 @@ def test_archive_descent_enum_validation() -> None:
     assert CrawlRunConfig(archive_descent="plan").archive_descent.value == "plan"
     with pytest.raises(ValidationError):
         CrawlRunConfig(archive_descent="deep")
+
+
+# --------------------------------------------------------------------------- #
+# P6b: терминальный артефакт — обход path-prefix (host/SSRF/блэклист сохраняются)
+# --------------------------------------------------------------------------- #
+
+DOC_ROOT = "https://docs.test/documents"
+OUTSIDE_PDF = "https://docs.test/files/report.pdf"
+OUTSIDE_ZIP = "https://docs.test/files/bundle.zip"
+
+
+def test_artifact_outside_path_prefix_is_admitted_and_recorded() -> None:
+    """Документ вне префикса — enqueued (он не продолжает навигацию), обход видим."""
+    frontier = Frontier(DOC_ROOT, CrawlLimits(max_depth=3))
+    assert frontier.in_scope(OUTSIDE_PDF) is False
+
+    assert frontier.discover(OUTSIDE_PDF, 1) is True
+    assert frontier.next() == (OUTSIDE_PDF, 1)
+    assert frontier.artifacts_outside_prefix_count == 1
+    assert frontier.artifacts_outside_prefix == [OUTSIDE_PDF]
+    # Заявленный контейнер — тот же класс.
+    assert frontier.discover(OUTSIDE_ZIP, 1) is True
+    assert frontier.artifacts_outside_prefix_count == 2
+
+
+def test_artifact_on_foreign_host_is_rejected() -> None:
+    """Host scope не отменяется обходом: чужой host — вне scope без записи обхода."""
+    frontier = Frontier(DOC_ROOT, CrawlLimits(max_depth=3))
+    assert frontier.discover("https://other.test/files/report.pdf", 1) is False
+    assert frontier.artifacts_outside_prefix_count == 0
+
+
+def test_artifact_traversal_is_still_rejected() -> None:
+    """``..``-traversal не становится обходом scope даже для артефакта (N2)."""
+    frontier = Frontier(DOC_ROOT, CrawlLimits(max_depth=3))
+    assert (
+        frontier.discover("https://docs.test/documents/../private/report.pdf", 1)
+        is False
+    )
+    assert (
+        frontier.discover("https://docs.test/documents/%2e%2e/private/report.pdf", 1)
+        is False
+    )
+    assert frontier.artifacts_outside_prefix_count == 0
+
+
+def test_blacklisted_artifact_still_rejected_and_not_counted_as_bypass() -> None:
+    """Блэклист оператора побеждает обход: URL виден как blacklisted, обхода не было."""
+    limits = CrawlLimits(max_depth=3, exclude_documents=["*.pdf"])
+    frontier = Frontier(DOC_ROOT, limits)
+
+    assert frontier.discover(OUTSIDE_PDF, 1) is False
+    assert frontier.skipped_blacklisted == [OUTSIDE_PDF]
+    assert frontier.artifacts_outside_prefix_count == 0
+
+
+def test_blacklisted_path_wins_over_artifact_bypass() -> None:
+    limits = CrawlLimits(max_depth=3, exclude_paths=["/files/*"])
+    frontier = Frontier(DOC_ROOT, limits)
+    assert frontier.discover(OUTSIDE_PDF, 1) is False
+    assert frontier.skipped_blacklisted == [OUTSIDE_PDF]
+    assert frontier.artifacts_outside_prefix_count == 0
+
+
+def test_html_outside_path_prefix_is_still_rejected() -> None:
+    """Обход — свойство класса, а не «любой URL вне префикса»."""
+    frontier = Frontier(DOC_ROOT, CrawlLimits(max_depth=3))
+    assert frontier.discover("https://docs.test/files/page.html", 1) is False
+    assert frontier.discover("https://docs.test/files/disk.ova", 1) is False
+    assert frontier.artifacts_outside_prefix_count == 0
+    assert frontier.next() is None
+
+
+def test_in_scope_terminal_artifact_skips_path_prefix_only() -> None:
+    frontier = Frontier(DOC_ROOT, CrawlLimits(max_depth=3))
+    assert frontier.in_scope(OUTSIDE_PDF, terminal_artifact=True) is True
+    # Host scope и traversal-guard действуют и с флагом.
+    assert frontier.in_scope("https://other.test/x.pdf", terminal_artifact=True) is False
+    assert (
+        frontier.in_scope(
+            "https://docs.test/documents/%2e%2e/x.pdf", terminal_artifact=True
+        )
+        is False
+    )
+    # Не-артефакт внутри префикса — прежний in-scope.
+    assert frontier.in_scope("https://docs.test/documents/x.html") is True
+    # Флаг не универсальный пропуск: страница вне префикса не проходит и с ним.
+    assert frontier.in_scope("https://docs.test/files/x.html", terminal_artifact=True) is False
+
+
+def test_scope_admission_three_outcomes() -> None:
+    from core.pipeline.crawl_frontier import (
+        SCOPE_ARTIFACT_OUTSIDE_PREFIX,
+        SCOPE_IN,
+        SCOPE_OUT,
+    )
+
+    frontier = Frontier(DOC_ROOT, CrawlLimits(max_depth=3))
+    assert frontier.scope_admission("https://docs.test/documents/a") == SCOPE_IN
+    assert frontier.scope_admission(OUTSIDE_PDF) == SCOPE_ARTIFACT_OUTSIDE_PREFIX
+    assert frontier.scope_admission("https://docs.test/files/a.html") == SCOPE_OUT
+    assert frontier.scope_admission("https://other.test/files/a.pdf") == SCOPE_OUT
+    # admission ничего не пишет: запись обхода — обязанность принявшего в очередь.
+    assert frontier.artifacts_outside_prefix_count == 0
+
+
+def test_revalidate_seed_admits_known_artifact_outside_prefix() -> None:
+    """Известный URL-артефакт (url_state) вне префикса ревалидируется, а не отбрасывается."""
+    frontier = Frontier(DOC_ROOT, CrawlLimits(max_depth=3))
+    assert frontier.add_revalidate_seed(OUTSIDE_PDF) == "queued"
+    assert frontier.next() == (OUTSIDE_PDF, 0)
+    assert frontier.artifacts_outside_prefix_count == 1
+    # Не-артефакт вне префикса — прежний orphan-путь вызывающего.
+    assert frontier.add_revalidate_seed("https://docs.test/files/a.html") == "out_of_scope"
+
+
+def test_bypass_examples_are_bounded_but_count_is_exact() -> None:
+    from core.pipeline.crawl_frontier import ARTIFACT_BYPASS_EXAMPLES_MAX
+
+    frontier = Frontier(DOC_ROOT, CrawlLimits(max_depth=3))
+    urls = [f"https://docs.test/files/doc-{i}.pdf" for i in range(25)]
+    for url in urls:
+        assert frontier.discover(url, 1) is True
+
+    assert frontier.artifacts_outside_prefix_count == 25
+    assert len(frontier.artifacts_outside_prefix) == ARTIFACT_BYPASS_EXAMPLES_MAX
+    assert frontier.artifacts_outside_prefix == urls[:ARTIFACT_BYPASS_EXAMPLES_MAX]
+
+
+def test_bypass_survives_with_limits_clone() -> None:
+    frontier = Frontier(DOC_ROOT, CrawlLimits(max_depth=3))
+    assert frontier.discover(OUTSIDE_PDF, 1) is True
+
+    clone = frontier.with_limits(CrawlLimits(max_depth=1))
+    assert clone.artifacts_outside_prefix_count == 1
+    assert clone.artifacts_outside_prefix == [OUTSIDE_PDF]

@@ -221,7 +221,8 @@ class CrawlNotFound(CrawlError):
 
 
 class CrawlPayloadTooLarge(CrawlError):
-    """Ответ превысил потолок ``max_response_bytes`` (P0/OOM).
+    """Ответ превысил свой потолок: страничный ``max_response_bytes`` либо
+    потоковый ``max_stream_bytes`` терминального артефакта (P0/OOM, P6).
 
     Несёт ``failure_kind = payload_too_large``: pipeline помечает элемент терминальным
     ``FAILED``, **не** ретейнит байты и не запускает экстракцию. Это осознанная граница
@@ -990,11 +991,22 @@ class ScrapyCrawler:
             worker.close()
 
     def _build_settings(self, plan: FetchPlan) -> dict[str, Any]:
-        """Итоговые настройки Scrapy: дефолты → axis cap → playwright → overrides.
+        """Итоговые настройки Scrapy: дефолты → потолок загрузки → playwright → overrides.
 
-        ``DOWNLOAD_MAXSIZE`` берётся из оси ``crawl.max_response_bytes`` (per-plan поверх
-        дефолта адаптера 20 MiB); ``DOWNLOAD_WARNSIZE`` не выше потолка. Явные
-        ``scrapy_settings`` оператора по-прежнему побеждают (обратная совместимость).
+        **Потолок загрузки — по классу плана, а не один.** Scrapy режет ответ
+        ``DOWNLOAD_MAXSIZE`` **до** того, как тело дойдёт до приёмника, поэтому потолок
+        обязан покрывать оба класса:
+
+        * план **допускает артефакты** (``staging_dir`` + ``max_stream_bytes``) →
+          ``DOWNLOAD_MAXSIZE = max(max_response_bytes, max_stream_bytes)``: иначе
+          ``zip``/``pdf``/office убивался бы страничным потолком (20 MiB) и файловый приём
+          был бы недостижим (наблюдалось: все ``payload_too_large`` — контейнеры);
+        * иначе → ``max_response_bytes`` (per-plan поверх дефолта адаптера 20 MiB).
+
+        ``max`` — потому что ``DOWNLOAD_MAXSIZE`` общий для всех запросов краулера:
+        меньший ``max_stream_bytes`` не должен понижать страничный потолок.
+        ``DOWNLOAD_WARNSIZE`` не выше потолка. Явные ``scrapy_settings`` оператора
+        по-прежнему побеждают (обратная совместимость).
 
         ``304`` добавляется в ``HTTPERROR_ALLOWED_CODES`` **после** переопределений
         оператора: без этого ``HttpErrorMiddleware`` поднимает ``HttpError`` на
@@ -1005,6 +1017,8 @@ class ScrapyCrawler:
         """
         settings = dict(DEFAULT_SCRAPY_SETTINGS)
         cap = self._cap_for(plan)
+        if plan.staging_dir is not None and plan.max_stream_bytes is not None:
+            cap = max(cap, int(plan.max_stream_bytes))
         settings["DOWNLOAD_MAXSIZE"] = cap
         settings["DOWNLOAD_WARNSIZE"] = min(cap, 33_554_432)
         if plan.fetch is FetchMode.BROWSER:

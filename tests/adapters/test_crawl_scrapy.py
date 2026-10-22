@@ -689,6 +689,68 @@ def test_axis_overrides_download_maxsize_and_warnsize() -> None:
     assert settings["DOWNLOAD_WARNSIZE"] <= 4096
 
 
+# ---------------------------------------------------------------------------
+# P6b: план, допускающий артефакты, поднимает DOWNLOAD_MAXSIZE до artifact-потолка
+# ---------------------------------------------------------------------------
+
+_MIB = 1024 * 1024
+_ARTIFACT_CEILING = 250 * _MIB
+
+
+def _artifact_plan(**kwargs: object) -> FetchPlan:
+    """План, допускающий терминальные артефакты (staging + потоковый потолок)."""
+    payload: dict[str, object] = {
+        "max_response_bytes": 20 * _MIB,
+        "staging_dir": "/tmp/cohound-stage",
+        "max_stream_bytes": _ARTIFACT_CEILING,
+        "attachment_formats": ("zip",),
+    }
+    payload.update(kwargs)
+    return FetchPlan(**payload)  # type: ignore[arg-type]
+
+
+def test_artifact_plan_raises_download_maxsize_to_stream_ceiling() -> None:
+    """Иначе Scrapy убил бы zip/pdf на 20 MiB до достижимости файлового приёма."""
+    crawler = ScrapyCrawler(fetcher=_page)
+    settings = crawler._build_settings(_artifact_plan())
+
+    assert settings["DOWNLOAD_MAXSIZE"] == _ARTIFACT_CEILING
+    # WARNSIZE остаётся прежним потолком предупреждений, не выше самого cap.
+    assert settings["DOWNLOAD_WARNSIZE"] == 33_554_432
+
+
+def test_page_only_plan_keeps_page_ceiling() -> None:
+    """Без допуска артефактов (нет staging/stream) потолок — страничный."""
+    crawler = ScrapyCrawler(fetcher=_page)
+    assert crawler._build_settings(FetchPlan(max_response_bytes=20 * _MIB))[
+        "DOWNLOAD_MAXSIZE"
+    ] == 20 * _MIB
+    # staging без потокового потолка не даёт права на больший ответ.
+    assert crawler._build_settings(
+        FetchPlan(max_response_bytes=20 * _MIB, staging_dir="/tmp/cohound-stage")
+    )["DOWNLOAD_MAXSIZE"] == 20 * _MIB
+    assert crawler._build_settings(
+        FetchPlan(max_response_bytes=20 * _MIB, max_stream_bytes=_ARTIFACT_CEILING)
+    )["DOWNLOAD_MAXSIZE"] == 20 * _MIB
+
+
+def test_stream_ceiling_below_page_cap_does_not_lower_page_ceiling() -> None:
+    """``DOWNLOAD_MAXSIZE`` общий для запросов: меньший artifact-потолок не режет страницы."""
+    crawler = ScrapyCrawler(fetcher=_page)
+    settings = crawler._build_settings(
+        _artifact_plan(max_stream_bytes=4096)
+    )
+    assert settings["DOWNLOAD_MAXSIZE"] == 20 * _MIB
+
+
+def test_operator_override_still_wins_over_stream_ceiling() -> None:
+    crawler = ScrapyCrawler(
+        fetcher=_page, scrapy_settings={"DOWNLOAD_MAXSIZE": 12345}
+    )
+    settings = crawler._build_settings(_artifact_plan())
+    assert settings["DOWNLOAD_MAXSIZE"] == 12345
+
+
 def test_oversize_failure_is_classified() -> None:
     from core.adapters.crawl_scrapy import _is_oversize_failure
 

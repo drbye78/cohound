@@ -18,6 +18,16 @@
 ``/documents/x``, но **не** ``/documents-archive``; правило из ``fetch_plan``), (4) URL не
 зачёркнут блэклистом. SSRF-проверка **одна** не является проверкой scope.
 
+**Терминальный артефакт — исключение из (3), не из (1)/(2)/(4) (P6b).** Документ
+(``pdf``/``docx``/``pptx``/``xlsx``) и заявленный контейнер (``zip``/``7z``/``rar``) **не
+продолжают навигацию**, поэтому path-prefix к ним не применяется: ``/docs/`` может ссылаться
+на ``/files/report.pdf``, и это не «выход из раздела». Host scope, SSRF-валидация и
+``..``-traversal-guard остаются обязательными, блэклист оператора
+(``exclude_paths``/``exclude_documents``) побеждает всегда. Обход **видим**: он считается и
+даёт ограниченный список примеров (``artifacts_outside_prefix``), которые попадают в
+провенанс фазы рядом с ``skipped_blacklisted``/``skipped_documents`` — молчаливый обход был бы
+дефектом.
+
 **Блэклисты (D1/D2).** ``exclude_paths`` — glob по **пути** URL (``fnmatchcase``,
 case-sensitive); ``exclude_documents`` — glob по **basename** (последний сегмент пути, напр.
 ``*.pdf``). Никаких regex/подстрок: предсказуемо и ReDoS-безопасно. Оба применяются **и при
@@ -50,6 +60,7 @@ from core.domain.models import (
 from core.pipeline.fetch_plan import _host_matches, select_domain_profile
 from core.util.document_formats import (
     SUPPORTED_ARCHIVE_FORMATS,
+    is_terminal_artifact_url,
     normalize_attachment_formats,
 )
 from core.util.security import validate_url
@@ -57,12 +68,25 @@ from core.util.security import validate_url
 __all__ = [
     "CrawlLimits",
     "Frontier",
+    "SCOPE_ARTIFACT_OUTSIDE_PREFIX",
+    "SCOPE_IN",
+    "SCOPE_OUT",
     "blacklist_match",
     "decoded_scope_path",
     "is_blacklisted",
     "resolve_crawl_limits",
     "root_path_prefix",
 ]
+
+#: Исходы scope-допуска (:meth:`Frontier.scope_admission`): URL в scope корня.
+SCOPE_IN = "in_scope"
+#: Исход: терминальный артефакт вне path-prefix, но на своём host — допущен (P6b).
+SCOPE_ARTIFACT_OUTSIDE_PREFIX = "artifact_outside_prefix"
+#: Исход: вне scope (чужой host / SSRF / traversal / не-артефакт вне префикса).
+SCOPE_OUT = "out_of_scope"
+
+#: Потолок **примеров** обхода path-prefix в провенансе (счётчик — точный).
+ARTIFACT_BYPASS_EXAMPLES_MAX = 10
 
 
 @dataclass(frozen=True)
@@ -508,6 +532,11 @@ class Frontier:
         self.truncated_reason: str | None = None
         #: Seeds/ссылки, отброшенные блэклистом (наблюдаемость: «не молчаливый дроп»).
         self.skipped_blacklisted: list[str] = []
+        #: P6b: терминальные артефакты, допущенные **вне** path-prefix корня (точный счётчик
+        #: + ограниченные примеры). Обход обязан быть видимым в провенансе фазы.
+        self.artifacts_outside_prefix_count = 0
+        self.artifacts_outside_prefix: list[str] = []
+        self._bypass_seen: set[str] = set()
         #: P5: документы, пропущенные уровнем ``off`` (pre-fetch по суффиксу / post-fetch
         #: по content-type). Записи ``{"url", "reason"}`` (`url_suffix`/`content_type`) —
         #: решение обязано быть видимым (никогда не тихо), и питать канал усечения/аномалии.
@@ -515,11 +544,18 @@ class Frontier:
 
     # -- scope -------------------------------------------------------------- #
 
-    def in_scope(self, url: str) -> bool:
+    def in_scope(self, url: str, *, terminal_artifact: bool = False) -> bool:
         """Проходит ли ``url`` scope корня (SSRF + host + path-prefix по границе сегмента).
 
+        ``terminal_artifact=True`` — path-prefix **не применяется** (P6b: документ или
+        заявленный контейнер не продолжает навигацию, поэтому «раздел» к нему не относится).
+        Флаг при этом **не** универсальный пропуск: URL обязан действительно принадлежать
+        классу (:meth:`is_terminal_artifact`), иначе — ``False``. Host scope, SSRF-валидация и
+        traversal-guard остаются обязательными: обход path-prefix не должен становиться
+        выходом из scope.
+
         Путь перед сравнением percent-декодируется, а ``..``-сегменты отвергаются (N2):
-        иначе ``%2e%2e`` обошёл бы префикс.
+        иначе ``%2e%2e`` обошёл бы префикс — в том числе при ``terminal_artifact=True``.
         """
         try:
             validate_url(url)
@@ -532,7 +568,46 @@ class Frontier:
         decoded = decoded_scope_path(parsed.path or "/")
         if decoded is None:
             return False
+        if terminal_artifact:
+            return self.is_terminal_artifact(url)
         return _path_within(decoded, self.path_prefix)
+
+    def is_terminal_artifact(self, url: str) -> bool:
+        """Класс «терминальный артефакт» по URL-суффиксу (pre-fetch; P6b).
+
+        Документ (``pdf``/``docx``/``pptx``/``xlsx``) либо контейнер из заявленного набора
+        ``attachment_formats``. Пост-фетч класс по ``Content-Type`` здесь не нужен: URL к
+        этому моменту уже в очереди.
+        """
+        return is_terminal_artifact_url(url, self.limits.attachment_formats)
+
+    def scope_admission(self, url: str) -> str:
+        """Исход scope-допуска: ``SCOPE_IN`` | ``SCOPE_ARTIFACT_OUTSIDE_PREFIX`` | ``SCOPE_OUT``.
+
+        Единственная точка решения «в scope / терминальный артефакт вне префикса / вне
+        scope». Обход **не** записывается здесь: вызывающий фиксирует его
+        :meth:`note_artifact_bypass` только когда URL действительно принят в очередь —
+        иначе провенанс объявлял бы обход, которого не было (блэклист/бюджет/глубина).
+        """
+        if self.in_scope(url):
+            return SCOPE_IN
+        if self.in_scope(url, terminal_artifact=True):
+            return SCOPE_ARTIFACT_OUTSIDE_PREFIX
+        return SCOPE_OUT
+
+    def note_artifact_bypass(self, url: str) -> None:
+        """Записать видимый обход path-prefix терминальным артефактом (P6b).
+
+        Счётчик точный и дедуплицированный по URL; примеры ограничены
+        (:data:`ARTIFACT_BYPASS_EXAMPLES_MAX`) — сотни PDF одного раздела не должны топить
+        провенанс. Запись попадает в ``artifacts_outside_prefix`` провенанса фазы.
+        """
+        if url in self._bypass_seen:
+            return
+        self._bypass_seen.add(url)
+        self.artifacts_outside_prefix_count += 1
+        if len(self.artifacts_outside_prefix) < ARTIFACT_BYPASS_EXAMPLES_MAX:
+            self.artifacts_outside_prefix.append(url)
 
     def blacklisted(self, url: str) -> bool:
         """Блэклист (путь + basename) — см. :func:`blacklist_match`."""
@@ -605,6 +680,10 @@ class Frontier:
 
         * scope корня проверяется (URL вне scope — забота вызывающего: orphan-бакет),
           SSRF-валидация — внутри :meth:`in_scope`;
+        * терминальный артефакт (документ/заявленный контейнер) известного URL вне
+          path-prefix **допускается** (P6b: он не продолжает навигацию); host scope и
+          SSRF обязательны, блэклист побеждает, обход видим
+          (:meth:`note_artifact_bypass`);
         * блэклист — с видимой записью ``skipped_blacklisted`` (не тихий дроп);
         * дедуп ``_seen`` — известный URL, переоткрытый ссылкой из BFS, не получает
           второй GET (304-экономия).
@@ -613,11 +692,14 @@ class Frontier:
         """
         if url in self._seen:
             return "dup"
-        if not self.in_scope(url):
+        admission = self.scope_admission(url)
+        if admission == SCOPE_OUT:
             return "out_of_scope"
         if self.blacklisted(url):
             self.skipped_blacklisted.append(url)
             return "blacklisted"
+        if admission == SCOPE_ARTIFACT_OUTSIDE_PREFIX:
+            self.note_artifact_bypass(url)
         self._seen.add(url)
         self._revalidation.add(url)
         self._queue.append((url, 0))
@@ -641,12 +723,19 @@ class Frontier:
         return count
 
     def discover(self, url: str, depth: int) -> bool:
-        """Ставит обнаруженный URL глубины ``depth`` при прохождении scope/блэклиста/ёмкости."""
+        """Ставит обнаруженный URL глубины ``depth`` при прохождении scope/блэклиста/ёмкости.
+
+        Терминальный артефакт (документ/заявленный контейнер) вне path-prefix корня
+        **допускается** (P6b), но host scope, SSRF-валидация, traversal-guard и блэклист
+        оператора действуют как прежде — блэклист побеждает. Обход фиксируется
+        (:meth:`note_artifact_bypass`) только по факту постановки в очередь.
+        """
         if url in self._seen:
             return False
         if depth > self.limits.max_depth:
             return False
-        if not self.in_scope(url):
+        admission = self.scope_admission(url)
+        if admission == SCOPE_OUT:
             return False
         if self.blacklisted(url):
             self.skipped_blacklisted.append(url)
@@ -654,6 +743,8 @@ class Frontier:
         if not self.has_capacity:
             self._mark_truncated("max_documents")
             return False
+        if admission == SCOPE_ARTIFACT_OUTSIDE_PREFIX:
+            self.note_artifact_bypass(url)
         self._seen.add(url)
         self._queue.append((url, depth))
         return True
@@ -669,7 +760,10 @@ class Frontier:
         """
         if parent_depth >= self.limits.max_depth:
             for url in links:
-                if self.in_scope(url) and not self.blacklisted(url):
+                if (
+                    self.scope_admission(url) != SCOPE_OUT
+                    and not self.blacklisted(url)
+                ):
                     self._mark_truncated("max_depth")
                     break
             return
@@ -699,6 +793,9 @@ class Frontier:
         clone.fetched = self.fetched
         clone.skipped_blacklisted = list(self.skipped_blacklisted)
         clone.skipped_documents = [dict(rec) for rec in self.skipped_documents]
+        clone.artifacts_outside_prefix_count = self.artifacts_outside_prefix_count
+        clone.artifacts_outside_prefix = list(self.artifacts_outside_prefix)
+        clone._bypass_seen = set(self._bypass_seen)
         return clone
 
     # -- внутреннее --------------------------------------------------------- #
