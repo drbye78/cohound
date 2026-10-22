@@ -29,6 +29,17 @@
 идентичность ``(archive_content_hash, normalized_member_path)`` и путь архива, по которому
 член ре-выводится тем же ``open_member``.
 
+**Упреждение с упорядоченной доводкой (``defer_member``/``window``).** Извлечение члена —
+дорогая часть (конвертер документов), поэтому вызывающий вправе отдать его пулу: спуск
+стримит вперёд до ``window`` членов, ``submit``-ит извлечение всех и **доводит их строго в
+порядке обхода** (FIFO). Порядок здесь не косметика: ``_content_digest`` сборки склеивает
+чанки в порядке вставки, а ``partition_build_id`` от порядка не зависит — коммит в порядке
+завершения дал бы тот же build id при другом digest (``ImmutableBuildError``). Поэтому любая
+запись в видимые списки (``errors``, ``members``, ``skipped``) **сначала доводит окно**, а
+вложенный спуск начинается только на пустом окне: порядок наблюдаемых артефактов остаётся
+порядком обхода при любом ``window``. Временный файл живёт до доводки своего члена
+(воркер читает его из другого процесса) и удаляется сразу после неё.
+
 Нейтрален (§1.3).
 """
 
@@ -36,6 +47,7 @@ from __future__ import annotations
 
 import hashlib
 import tempfile
+from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -60,6 +72,7 @@ __all__ = [
     "DESCENT_SUFFIXES",
     "DescentBudget",
     "ArchiveDescentWalker",
+    "MemberDeferral",
     "MemberOutcome",
     "MemberTask",
     "SKIP_BUDGET",
@@ -152,6 +165,32 @@ class MemberOutcome:
     content_hash: str | None = None
 
 
+@dataclass(frozen=True)
+class MemberDeferral:
+    """Отложенное извлечение члена: ``submit`` в пул + FIFO-доводка ``resolve``.
+
+    ``submit`` возвращает непрозрачный handle **или** готовый :class:`MemberOutcome`
+    (немедленная капитуляция: экстрактор не принимает локальные байты, пул исчерпан).
+    ``resolve(handle, task)`` обязан вернуть исход и **не бросать**: отказ извлечения —
+    это ``MemberOutcome`` с ``skip_reason``, а не исключение (иначе спуск потерял бы
+    строку члена и счётчик).
+    """
+
+    submit: Callable[[MemberTask], Any]
+    resolve: Callable[[Any, MemberTask], MemberOutcome]
+
+
+@dataclass
+class _PendingMember:
+    """Член в окне упреждения: поток уже выполнен, доводка может быть отложена."""
+
+    task: MemberTask
+    #: Готовый исход (``None`` — исход даст ``MemberDeferral.resolve``).
+    outcome: MemberOutcome | None = None
+    #: Непрозрачный handle пула (``None`` — исход уже известен).
+    handle: Any = None
+
+
 def member_url(archive_url: str, member_path: str) -> str:
     """Адрес члена как URL провенанса: ``{archive_url}!/{member_path}``.
 
@@ -198,6 +237,8 @@ class ArchiveDescentWalker:
         errors: list[str],
         run_id: str | None = None,
         created_at: str | None = None,
+        defer_member: MemberDeferral | None = None,
+        window: int = 1,
     ) -> None:
         self.product_id = product_id
         self.root_url = root_url
@@ -210,6 +251,13 @@ class ArchiveDescentWalker:
         self.errors = errors
         self.run_id = run_id
         self.created_at = created_at
+        #: Отложенный ингест (пул экстракции). ``None`` — inline, окно не используется.
+        self._defer_member = defer_member
+        #: Пул отказал на ``submit``: спуск деградирует до inline (как страница — видимо,
+        #: одной записью в ``errors``), чтобы отказ фабрики пула не потерял членов.
+        self._defer_broken = False
+        #: Глубина упреждения: сколько членов стримится вперёд до доводки oldest.
+        self._window = max(1, int(window))
         #: Хеши архивов, уже пройденных в этом корне (цикл по содержимому).
         self._seen: set[str] = set()
         #: Кумулятивно прочитанные байты членов по всему корню.
@@ -440,11 +488,88 @@ class ArchiveDescentWalker:
         skipped: list[tuple[str, str]] = []
         stopped_reason: str | None = None
 
+        # -- окно упреждения: стрим вперёд, доводка строго FIFO ------------------ #
+        # ``window`` — сколько членов стримится вперёд до доводки самого старого. Это
+        # **пропускная способность**, не семантика: любой ``window`` даёт те же
+        # документы/чанки/``errors``/строки в том же порядке обхода (см. модульный
+        # docstring). ``window=1`` — тождественно прежнему inline-пути байт-в-байт.
+        window = self._window if self._defer_member is not None else 1
+        pending: deque[_PendingMember] = deque()
+
+        def _settle(item: _PendingMember) -> None:
+            """Доводит один член: исход → счётчики/``errors``/строка (порядок обхода).
+
+            Временный файл удаляется **здесь**, а не после ``submit``: воркер читает его
+            из другого процесса (байты члена не ретейнятся, §6.7).
+            """
+            nonlocal ingested, failed
+            task = item.task
+            outcome = item.outcome
+            if outcome is None:
+                # ``handle`` есть только у отложенного ингеста (``_defer_member`` задан).
+                deferral = self._defer_member
+                assert deferral is not None
+                try:
+                    # Контракт ``resolve`` — вернуть исход, не бросать; защита ниже нужна
+                    # лишь чтобы отказ одного члена не потерял его строку и счётчик.
+                    outcome = deferral.resolve(item.handle, task)
+                except Exception as exc:  # noqa: BLE001 — отказ члена не роняет спуск
+                    outcome = MemberOutcome(
+                        skip_reason=SKIP_EXTRACT_FAILED,
+                        detail=f"{type(exc).__name__}: {exc}",
+                    )
+            Path(task.temp_path).unlink(missing_ok=True)
+            if outcome.doc_id is not None:
+                ingested += 1
+            else:
+                failed += 1
+                reason = outcome.skip_reason or SKIP_EXTRACT_FAILED
+                skipped.append((task.member_path, reason))
+                detail = f": {outcome.detail}" if outcome.detail else ""
+                self.errors.append(f"{self.product_id}/{task.member_url}: {reason}{detail}")
+            self.members.append(
+                self._member_row(
+                    archive_url=task.archive_url,
+                    archive_content_hash=task.archive_content_hash,
+                    archive_path=Path(task.archive_path),
+                    member_path=task.member_path,
+                    member_url_value=task.member_url,
+                    suffix=task.suffix,
+                    declared_size=task.declared_size,
+                    content_hash=(
+                        outcome.content_hash if outcome.doc_id is not None else None
+                    ),
+                    doc_id=outcome.doc_id,
+                    skip_reason=(
+                        None
+                        if outcome.doc_id is not None
+                        else (outcome.skip_reason or SKIP_EXTRACT_FAILED)
+                    ),
+                    depth=task.depth,
+                )
+            )
+
+        def _flush() -> None:
+            """Доводит **всё** окно в порядке обхода.
+
+            Зовётся перед любой записью в видимые списки (``errors``/``members``/
+            ``skipped``) и перед вложенным спуском: только так порядок этих артефактов
+            остаётся порядком обхода при ``window > 1``.
+            """
+            while pending:
+                _settle(pending.popleft())
+
+        def _keep_window() -> None:
+            """Держит окно не шире ``window``: доводит самого старого (FIFO)."""
+            while len(pending) >= window:
+                _settle(pending.popleft())
+
         for member in plan.accepted:
             normalized = normalize_member_path(member.path) or member.path
             suffix = PurePosixPath(normalized).suffix.lower()
             remaining = self._remaining_total()
             if remaining is not None and remaining <= 0:
+                _flush()
                 stopped_reason = SKIP_BUDGET
                 skipped.append((normalized, SKIP_BUDGET))
                 self.errors.append(
@@ -467,6 +592,7 @@ class ArchiveDescentWalker:
                         hasher.update(chunk)
                         written += len(chunk)
             except MemberTooLarge:
+                _flush()
                 temp_path.unlink(missing_ok=True)
                 if remaining is not None and member_limit == remaining:
                     stopped_reason = SKIP_BUDGET
@@ -484,6 +610,7 @@ class ArchiveDescentWalker:
                     )
                 continue
             except Exception as exc:  # noqa: BLE001 — отказ чтения члена изолируется
+                _flush()
                 temp_path.unlink(missing_ok=True)
                 skipped.append((normalized, SKIP_READ_FAILED))
                 self.errors.append(
@@ -498,6 +625,9 @@ class ArchiveDescentWalker:
 
             if suffix in {f".{fmt}" for fmt in SUPPORTED_ARCHIVE_FORMATS}:
                 # Вложенный архив: спуск без потолка глубины, конечность — цикл + бюджет.
+                # Окно доводится **до** записи строки и рекурсии: члены вложенного архива
+                # коммитятся после всех предшествующих соседей, как при inline-пути.
+                _flush()
                 if member_hash in self._seen:
                     cycle_stops += 1
                     skipped.append((normalized, SKIP_CYCLE))
@@ -543,63 +673,63 @@ class ArchiveDescentWalker:
                 temp_path.unlink(missing_ok=True)
                 continue
 
-            try:
-                outcome = self._ingest_member(
-                    MemberTask(
-                        product_id=self.product_id,
-                        root_url=self.root_url,
-                        archive_url=archive_url,
-                        archive_content_hash=archive_content_hash,
-                        archive_path=str(archive_path),
-                        member_path=normalized,
-                        member_url=url,
-                        temp_path=str(temp_path),
-                        suffix=suffix,
-                        declared_size=member.size,
-                        content_hash=member_hash,
-                        depth=depth,
-                    )
-                )
-            except Exception as exc:  # noqa: BLE001 — отказ члена не роняет спуск
-                outcome = MemberOutcome(
-                    skip_reason=SKIP_EXTRACT_FAILED,
-                    detail=f"{type(exc).__name__}: {exc}",
-                )
-            finally:
-                temp_path.unlink(missing_ok=True)
-
-            if outcome.doc_id is not None:
-                ingested += 1
-            else:
-                failed += 1
-                reason = outcome.skip_reason or SKIP_EXTRACT_FAILED
-                skipped.append((normalized, reason))
-                detail = f": {outcome.detail}" if outcome.detail else ""
-                self.errors.append(
-                    f"{self.product_id}/{url}: {reason}{detail}"
-                )
-            self.members.append(
-                self._member_row(
-                    archive_url=archive_url,
-                    archive_content_hash=archive_content_hash,
-                    archive_path=archive_path,
-                    member_path=normalized,
-                    member_url_value=url,
-                    suffix=suffix,
-                    declared_size=member.size,
-                    content_hash=(
-                        outcome.content_hash if outcome.doc_id is not None else None
-                    ),
-                    doc_id=outcome.doc_id,
-                    skip_reason=(
-                        None
-                        if outcome.doc_id is not None
-                        else (outcome.skip_reason or SKIP_EXTRACT_FAILED)
-                    ),
-                    depth=depth,
-                )
+            task = MemberTask(
+                product_id=self.product_id,
+                root_url=self.root_url,
+                archive_url=archive_url,
+                archive_content_hash=archive_content_hash,
+                archive_path=str(archive_path),
+                member_path=normalized,
+                member_url=url,
+                temp_path=str(temp_path),
+                suffix=suffix,
+                declared_size=member.size,
+                content_hash=member_hash,
+                depth=depth,
             )
+            if self._defer_member is None or self._defer_broken:
+                # Inline-путь (нет пула / пул отказал на submit): исход сразу, окно не
+                # используется — байт-в-байт прежний путь.
+                try:
+                    outcome = self._ingest_member(task)
+                except Exception as exc:  # noqa: BLE001 — отказ члена не роняет спуск
+                    outcome = MemberOutcome(
+                        skip_reason=SKIP_EXTRACT_FAILED,
+                        detail=f"{type(exc).__name__}: {exc}",
+                    )
+                _settle(_PendingMember(task=task, outcome=outcome))
+                continue
+            try:
+                handle = self._defer_member.submit(task)
+            except Exception as exc:  # noqa: BLE001 — submit не роняет спуск
+                # Пул не принял задание (фабрика/исполнитель): как у страницы —
+                # явная запись и inline, а не потеря члена. Запись в ``errors``
+                # идёт после доводки окна, поэтому порядок обхода не ломается.
+                self._defer_broken = True
+                _flush()
+                self.errors.append(
+                    f"{self.product_id}/{url}: extract submit: "
+                    f"{type(exc).__name__}: {exc} — члены контейнера inline"
+                )
+                try:
+                    outcome = self._ingest_member(task)
+                except Exception as inner:  # noqa: BLE001 — отказ члена изолируется
+                    outcome = MemberOutcome(
+                        skip_reason=SKIP_EXTRACT_FAILED,
+                        detail=f"{type(inner).__name__}: {inner}",
+                    )
+                _settle(_PendingMember(task=task, outcome=outcome))
+                continue
+            if isinstance(handle, MemberOutcome):
+                # Немедленная капитуляция (split / пул исчерпан): видимость — в порядке
+                # обхода, поэтому окно доводится до записи этого исхода.
+                _flush()
+                _settle(_PendingMember(task=task, outcome=handle))
+                continue
+            pending.append(_PendingMember(task=task, handle=handle))
+            _keep_window()
 
+        _flush()
         for path, reason in plan.skipped:
             skipped.append((path, reason))
 

@@ -29,11 +29,16 @@ import contextlib
 import datetime as _dt
 import io
 import json
+import tempfile
+import threading
+import time
 import zipfile
+from collections.abc import Iterator
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 from core.adapters.container_any import container_for
+from core.adapters.index_npy import NpyIndexBuilder
 from core.domain import (
     AnchorRelation,
     ArchiveDescent,
@@ -48,7 +53,12 @@ from core.domain import (
     RunMode,
 )
 from core.pipeline import RunPlan
-from core.pipeline.corpus import IndexBuild, build_corpus
+from core.pipeline.corpus import (
+    ExtractionPool,
+    IndexBuild,
+    _ExtractRequest,
+    build_corpus,
+)
 from core.pipeline.crawl_session import default_session_id
 from core.ports.types import Chunk, ExtractedDoc, ExtractionRoute, FetchPlan, RawPage
 from core.store.sqlite_store import SqliteStore
@@ -196,6 +206,10 @@ def _run(
     *,
     crawl_defaults: CrawlRunConfig | None = None,
     extractor: Any = None,
+    extraction_pool: Any = None,
+    index_root: Path | None = None,
+    embedder: Any = None,
+    index_builder: Any = None,
 ) -> Iterator[tuple[SqliteStore, Any, Any]]:
     """Один прогон фазы корпуса над одним архивом; читатель контейнеров — реальный."""
     store = SqliteStore(":memory:")
@@ -215,6 +229,10 @@ def _run(
             run_id=RUN_ID,
             crawl_defaults=crawl_defaults,
             container_for=container_for,
+            extraction_pool=extraction_pool,
+            index_root=index_root,
+            embedder=embedder,
+            index_builder=index_builder,
         )
         yield store, result, fake_extractor
     finally:
@@ -493,3 +511,566 @@ def test_extractor_without_local_bytes_skips_members_visibly(tmp_path: Path) -> 
         rows = _members(store)
         assert len(rows) == 2
         assert all(row.skip_reason == "extract_unavailable" for row in rows)
+
+
+# ---------------------------------------------------------------------------
+# (9+) Пул экстракции: члены извлекаются воркерами, коммит — в порядке обхода
+# ---------------------------------------------------------------------------
+#
+# Почему это отдельный блок. До правки члены контейнера извлекались **в родителе**
+# синхронно: 47 PDF одного zip занимали один поток, а ``extract_workers`` простаивали.
+# Теперь член идёт в тот же фазовый пул, что и страница, с окном упреждения K и
+# доводкой FIFO. Приёмочная планка — **наблюдаемая эквивалентность** inline-пути:
+# порядок документов, порядок чанков, ``errors``, победитель дедупа, строки
+# ``corpus_members``, ``archive_observations`` и порядок зондов. Поэтому ниже каждый
+# тест сравнивает два прогона на одном и том же архиве, а не «смотрит, что что-то есть».
+#
+# Порядок чанков здесь не косметика: ``_content_digest`` (``core/adapters/index_npy``)
+# склеивает ``chunk_ids``/хеши/матрицу **в порядке вставки**, а ``partition_build_id``
+# порядко-независим. Коммит в порядке завершения дал бы тот же build id при другом
+# дайджесте → ``ImmutableBuildError``. Отсюда тест с обратным порядком завершения: он
+# сравнивает ``vector_digest`` манифеста двух прогонов и **доказывает**, что порядок
+# вставки совпал.
+
+
+class _Future:
+    """Future-подобный: задание считается в отдельном потоке (реальный порядок финиша)."""
+
+    def __init__(self) -> None:
+        self._done = threading.Event()
+        self._value: Any = None
+        self._error: BaseException | None = None
+
+    def result(self, timeout: float | None = None) -> Any:
+        if not self._done.wait(timeout):
+            raise TimeoutError()
+        if self._error is not None:
+            raise self._error
+        return self._value
+
+
+class _ThreadPool:
+    """Исполнитель с настоящей асинхронностью: финиш ≠ порядок ``submit``.
+
+    ``delays`` расходуется по одному значению на задание (первое — сам архив): так
+    первый член можно сделать **медленнее** остальных и получить обратный порядок
+    завершения. ``fail_urls`` — задания, падающие в воркере.
+    """
+
+    def __init__(
+        self,
+        size: int,
+        *,
+        delays: tuple[float, ...] = (),
+        fail_urls: tuple[str, ...] = (),
+    ) -> None:
+        self.size = size
+        self._delays = list(delays)
+        self._fail_urls = tuple(fail_urls)
+        self.submitted: list[str] = []
+        self.requests: list[_ExtractRequest] = []
+        self.completed: list[str] = []
+        self.max_inflight = 0
+        self.shutdown_calls = 0
+        self.max_tasks_per_child: int | None = None
+        self._open = 0
+
+    def submit(self, fn: Any, request: _ExtractRequest) -> _Future:
+        self.submitted.append(request.url)
+        self.requests.append(request)
+        delay = self._delays.pop(0) if self._delays else 0.0
+        self._open += 1
+        self.max_inflight = max(self.max_inflight, self._open)
+        future = _Future()
+
+        def _run() -> None:
+            try:
+                if delay:
+                    time.sleep(delay)
+                if request.url in self._fail_urls:
+                    raise RuntimeError("boom")
+                future._value = fn(request)
+            except BaseException as exc:  # noqa: BLE001 — эмуляция отказа воркера
+                future._error = exc
+            finally:
+                self._open -= 1
+                self.completed.append(request.url)
+                future._done.set()
+
+        threading.Thread(target=_run, daemon=True).start()
+        return future
+
+    def shutdown(self, wait: bool = True, cancel_futures: bool = False) -> None:
+        self.shutdown_calls += 1
+
+
+def _file_worker(request: _ExtractRequest) -> ExtractedDoc:
+    """Воркер, эквивалентный :class:`_FileExtractor`: читает файл по ``raw_path`` (I19)."""
+    data = Path(request.raw_path).read_bytes()
+    return ExtractedDoc(
+        text=data.decode("utf-8", errors="replace"),
+        content_hash=content_hash(data),
+        extractor_version="extractor-descent-1",
+    )
+
+
+def _pool_factory(
+    created: list[_ThreadPool], **kw: Any
+) -> Any:
+    def factory(n: int, level: Any = None, max_tasks_per_child: int | None = None) -> Any:
+        pool = _ThreadPool(n, **kw)
+        pool.max_tasks_per_child = max_tasks_per_child
+        created.append(pool)
+        return pool
+
+    return factory
+
+
+def _pool(created: list[_ThreadPool], **kw: Any) -> ExtractionPool:
+    return ExtractionPool(pool_factory=_pool_factory(created, **kw), worker=_file_worker)
+
+
+class _DeterministicEmbedder:
+    """Эмбеддер, зависящий **только от текста**: вектора двух прогонов совпадают.
+
+    Это необходимо тесту с обратным порядком завершения: ``vector_digest`` включает
+    байты матрицы,
+    поэтому эмбеддер с зависимостью от индекса батча сделал бы дайджесты несравнимыми.
+    """
+
+    model_id = "embed-descent"
+    dim = 3
+
+    def embed(self, texts: Any) -> list[list[float]]:
+        out: list[list[float]] = []
+        for text in texts:
+            digest = content_hash(str(text))
+            out.append([int(digest[i : i + 2], 16) / 255.0 for i in (0, 2, 4)])
+        return out
+
+
+def _snapshot(store: SqliteStore, result: Any) -> dict[str, Any]:
+    """Полный наблюдаемый слепок прогона — сравнимый между inline и пулом."""
+    build = _build_of(result)
+    chunk_rows = list(
+        store.conn.execute(
+            "SELECT chunk_id, doc_id, url FROM corpus_chunks ORDER BY rowid"
+        )
+    )
+    return {
+        # Порядок документов = порядок обхода членов (``raw_path`` — имя файла: каталоги
+        # прогонов разные, а идентичность архива — хеш в имени, I19).
+        "docs": [
+            (
+                doc.url,
+                doc.content_hash,
+                Path(doc.raw_path).name,
+                doc.extractor_version,
+                doc.lang,
+            )
+            for doc in build.docs
+        ],
+        # Порядок **вставки** чанков (rowid), а не сортировка по chunk_no.
+        "chunks": [row["chunk_id"] for row in chunk_rows],
+        "chunk_urls": [row["url"] for row in chunk_rows],
+        "index_build_id": build.index_build_id,
+        "chunk_count": build.chunk_count,
+        "entries": [
+            (entry.product_id, entry.partition_build_id, entry.content_digest)
+            for entry in build.entries
+        ],
+        "errors": list(result.errors),
+        "members": [
+            (
+                row.member_path,
+                row.doc_id,
+                row.skip_reason,
+                row.extracted_content_hash,
+                row.declared_size,
+                row.depth,
+                row.member_format,
+            )
+            for row in _members(store)
+        ],
+        "observations": [
+            (
+                item.depth,
+                item.status,
+                item.reason,
+                json.dumps(item.outcome, sort_keys=True),
+                json.dumps(item.forecast, sort_keys=True),
+            )
+            for item in _observations(store)
+        ],
+        "probes": [
+            entry["url"]
+            for entry in result.log_entries
+            if isinstance(entry, dict) and "url" in entry
+        ],
+    }
+
+
+def _rich_archive() -> bytes:
+    """zip с дедупом, разными маршрутами, пропуском по формату и вложенным архивом."""
+    inner = _zip({"nested/one.md": b"nested one", "nested/two.md": b"nested two"})
+    return _zip(
+        {
+            "a/first.pdf": _pdf(2),
+            "b/readme.md": b"# readme\nbody\n",
+            "c/copy.md": b"same bytes",
+            "d/copy.md": b"same bytes",  # дедуп: победитель — первый по порядку обхода
+            "e/logo.png": b"\x89PNG\r\n\x1a\n" + bytes(32),
+            "f/inner.zip": inner,
+            "g/last.txt": b"last",
+        }
+    )
+
+
+def test_pooled_members_are_byte_identical_to_inline(tmp_path: Path) -> None:
+    """Путь пула даёт **тот же** наблюдаемый корпус, что inline-путь (K=2)."""
+    archive = _rich_archive()
+
+    with _run(tmp_path / "inline", archive) as (inline_store, inline_result, extractor):
+        inline = _snapshot(inline_store, inline_result)
+        # Inline-путь: каждый член — свой вызов экстрактора в родителе
+        # (5 документов верхнего уровня + 2 члена вложенного архива; png отсеян планом).
+        assert len(extractor.calls) == 7
+
+    created: list[_ThreadPool] = []
+    with _run(
+        tmp_path / "pooled",
+        archive,
+        crawl_defaults=CrawlRunConfig(extract_workers=2),
+        extraction_pool=_pool(created),
+    ) as (pooled_store, pooled_result, _extractor):
+        pooled = _snapshot(pooled_store, pooled_result)
+
+    # Ровно один пул на ключ (C1), и члены в него действительно попадали.
+    assert len(created) == 1
+    member_urls = [url for url in created[0].submitted if "!/" in url]
+    assert len(member_urls) == 7, "все члены-документы обязаны уйти в пул"
+
+    for key in (
+        "docs",
+        "chunks",
+        "chunk_urls",
+        "index_build_id",
+        "chunk_count",
+        "entries",
+        "errors",
+        "members",
+        "observations",
+        "probes",
+    ):
+        assert pooled[key] == inline[key], f"расхождение наблюдаемого артефакта: {key}"
+
+    # Окно не шире ``extract_workers`` (страница архива уже доведена до спуска).
+    assert created[0].max_inflight <= 2
+
+    # Маршрут члена — по **его** суффиксу, а не по суффиксу архива.
+    routes = {
+        request.url.rsplit("!/", 1)[-1]: request.route
+        for request in created[0].requests
+    }
+    assert routes["a/first.pdf"] is ExtractionRoute.DOCUMENT
+    assert routes["b/readme.md"] is ExtractionRoute.AUTO
+
+    # Операторская строка: члены считаются доведёнными заданиями пула (архив + члены).
+    assert any(
+        isinstance(entry, str) and "документов через пул: 8" in entry
+        for entry in pooled_result.log_entries
+    ), pooled_result.log_entries
+
+
+def test_pooled_commit_order_is_walk_order_not_completion_order(
+    tmp_path: Path,
+) -> None:
+    """Порядок вставки чанков — порядок обхода, даже если члены финишируют наоборот.
+
+    Доказательство сильнее сравнения списков: два прогона (inline и пул с **обратным**
+    порядком завершения) собирают партицию настоящим ``NpyIndexBuilder`` в разные
+    ``index_root``. ``partition_build_id`` порядко-независим, а ``vector_digest``
+    манифеста — нет (``_content_digest`` склеивает чанки и матрицу в порядке вставки).
+    Совпадение обоих означает: коммит шёл в порядке обхода. Обратный порядок дал бы тот
+    же build id при другом дайджесте — ровно тот дефект, который запрещён (§13).
+    """
+    archive = _zip(
+        {
+            "m1.md": b"member one",
+            "m2.md": b"member two",
+            "m3.md": b"member three",
+            "m4.md": b"member four",
+        }
+    )
+
+    def _build(root: Path, **kw: Any) -> dict[str, Any]:
+        with _run(
+            root / "raw",
+            archive,
+            index_root=root / "index",
+            embedder=_DeterministicEmbedder(),
+            index_builder=NpyIndexBuilder(root / "index"),
+            **kw,
+        ) as (store, result, _extractor):
+            manifests = sorted((root / "index").rglob("manifest.json"))
+            assert len(manifests) == 1, manifests
+            manifest = json.loads(manifests[0].read_text(encoding="utf-8"))
+            assert not [
+                error for error in result.errors if "ImmutableBuildError" in error
+            ], result.errors
+            return {
+                "docs": [doc.url for doc in _build_of(result).docs],
+                "partition_build_id": manifest["partition_build_id"],
+                "vector_digest": manifest["vector_digest"],
+                "chunks": [
+                    row["chunk_id"]
+                    for row in store.conn.execute(
+                        "SELECT chunk_id FROM corpus_chunks ORDER BY rowid"
+                    )
+                ],
+            }
+
+    inline = _build(tmp_path / "inline")
+
+    created: list[_ThreadPool] = []
+    # Первый член — самый медленный: порядок завершения обратен порядку обхода.
+    pooled = _build(
+        tmp_path / "pooled",
+        crawl_defaults=CrawlRunConfig(extract_workers=2),
+        extraction_pool=_pool(created, delays=(0.0, 0.12, 0.0, 0.0, 0.0)),
+    )
+
+    members = [url for url in created[0].submitted if "!/" in url]
+    finished = [url for url in created[0].completed if "!/" in url]
+    assert finished != members, (
+        "тест бессмыслен без обратного порядка завершения: "
+        f"submit={members}, finish={finished}"
+    )
+    assert finished[0] == members[1], finished
+
+    assert pooled["docs"] == inline["docs"]
+    assert pooled["chunks"] == inline["chunks"]
+    assert pooled["partition_build_id"] == inline["partition_build_id"]
+    assert pooled["vector_digest"] == inline["vector_digest"]
+
+
+def test_pooled_nested_archive_commits_members_in_walk_order(tmp_path: Path) -> None:
+    """Вложенный архив спускается, а его члены коммитятся **после** старших соседей.
+
+    Порядок обхода — детерминированная сортировка нормализованных путей
+    (``plan_members``), поэтому архив назван ``b.zip``: он в середине, и его члены
+    обязаны оказаться между ``a.md`` и ``c.md``, а не в конце.
+    """
+    inner = _zip({"x.md": b"x", "y.md": b"y"})
+    outer = _zip({"a.md": b"a", "b.zip": inner, "c.md": b"c"})
+
+    created: list[_ThreadPool] = []
+    with _run(
+        tmp_path,
+        outer,
+        crawl_defaults=CrawlRunConfig(extract_workers=2),
+        extraction_pool=_pool(created),
+    ) as (store, result, _extractor):
+        urls = [doc.url for doc in _build_of(result).docs]
+        assert urls == [
+            f"{ZIP_URL}!/a.md",
+            f"{ZIP_URL}!/b.zip!/x.md",
+            f"{ZIP_URL}!/b.zip!/y.md",
+            f"{ZIP_URL}!/c.md",
+        ]
+        assert sorted(item.depth for item in _observations(store)) == [0, 1]
+        rows = {row.member_path: row for row in _members(store)}
+        assert rows["b.zip"].skip_reason == "nested_descended"
+        assert rows["a.md"].doc_id is not None
+        assert rows["c.md"].doc_id is not None
+
+
+def test_pooled_member_failure_is_visible_and_siblings_continue(
+    tmp_path: Path,
+) -> None:
+    """Отказ извлечения члена в воркере — видимый пропуск, соседи не страдают."""
+    archive = _zip({"ok1.md": b"one", "bad.md": b"two", "ok2.md": b"three"})
+    created: list[_ThreadPool] = []
+    with _run(
+        tmp_path,
+        archive,
+        crawl_defaults=CrawlRunConfig(extract_workers=2),
+        extraction_pool=_pool(created, fail_urls=(f"{ZIP_URL}!/bad.md",)),
+    ) as (store, result, _extractor):
+        docs = _build_of(result).docs
+        assert [doc.url for doc in docs] == [
+            f"{ZIP_URL}!/ok1.md",
+            f"{ZIP_URL}!/ok2.md",
+        ]
+        rows = {row.member_path: row for row in _members(store)}
+        assert rows["bad.md"].skip_reason == "extract_failed"
+        assert rows["bad.md"].doc_id is None
+        assert rows["ok1.md"].doc_id is not None
+        assert rows["ok2.md"].doc_id is not None
+        root = _observations(store)[0]
+        assert root.outcome["members_failed"] == 1
+        assert root.outcome["members_ingested"] == 2
+        assert any(
+            "extract_failed" in error and "bad.md" in error for error in result.errors
+        ), result.errors
+
+
+def test_pooled_budget_and_cycle_match_inline(tmp_path: Path) -> None:
+    """Бюджет корня и цикл по хешу — потоковые решения, от пула не зависят."""
+    budget_archive = _zip(
+        {"a.txt": b"A" * 1024, "b.txt": b"B" * 1024, "c.txt": b"C" * 1024}
+    )
+    cycle_archive = _zip(
+        {
+            "a/inner.zip": _zip({"x.md": b"cycle content"}),
+            "b/inner.zip": _zip({"x.md": b"cycle content"}),
+        }
+    )
+    for label, archive, base in (
+        (
+            "budget",
+            budget_archive,
+            CrawlRunConfig(archive_max_total_uncompressed_bytes=1024),
+        ),
+        ("cycle", cycle_archive, CrawlRunConfig()),
+    ):
+        with _run(tmp_path / f"{label}-inline", archive, crawl_defaults=base) as (
+            inline_store,
+            inline_result,
+            _e,
+        ):
+            inline = _snapshot(inline_store, inline_result)
+        created: list[_ThreadPool] = []
+        with _run(
+            tmp_path / f"{label}-pooled",
+            archive,
+            crawl_defaults=base.model_copy(update={"extract_workers": 2}),
+            extraction_pool=_pool(created),
+        ) as (pooled_store, pooled_result, _e2):
+            pooled = _snapshot(pooled_store, pooled_result)
+        # Ось ``extract_workers`` без пула даёт собственную запись в ``errors`` (не тихо);
+        # сравниваются наблюдаемые последствия бюджета/цикла, а не эта запись.
+        assert [e for e in pooled["errors"] if "extract_workers" not in e] == [
+            e for e in inline["errors"] if "extract_workers" not in e
+        ], label
+        assert pooled["observations"] == inline["observations"], label
+        assert pooled["docs"] == inline["docs"], label
+        assert pooled["members"] == inline["members"], label
+
+
+def test_pooled_descent_removes_temp_files_on_failure(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    """Временные файлы членов не переживают спуск — и на отказах тоже."""
+    import core.pipeline.archive_descent as descent_module
+
+    archive = _zip({"a.md": b"a", "b.md": b"b"})
+    created_dirs: list[str] = []
+    real_temporary_directory = tempfile.TemporaryDirectory
+
+    def _recording(*args: Any, **kwargs: Any) -> Any:
+        tmpdir = real_temporary_directory(*args, **kwargs)
+        created_dirs.append(tmpdir.name)
+        return tmpdir
+
+    monkeypatch.setattr(descent_module.tempfile, "TemporaryDirectory", _recording)
+
+    created: list[_ThreadPool] = []
+    with _run(
+        tmp_path,
+        archive,
+        crawl_defaults=CrawlRunConfig(extract_workers=2),
+        extraction_pool=_pool(
+            created, fail_urls=(f"{ZIP_URL}!/a.md", f"{ZIP_URL}!/b.md")
+        ),
+    ) as (_store, result, _extractor):
+        assert _build_of(result).docs == []
+
+    assert created_dirs, "спуск обязан был создать временный каталог"
+    assert all(not Path(name).exists() for name in created_dirs), created_dirs
+
+
+def test_pooled_split_capitulation_stays_parent_side(tmp_path: Path) -> None:
+    """``split``: член не уходит в пул вовсе — капитуляция видна и не тратит воркер."""
+    archive = _zip({"a.md": b"a", "b.txt": b"b"})
+    created: list[_ThreadPool] = []
+    with _run(
+        tmp_path,
+        archive,
+        crawl_defaults=CrawlRunConfig(extract_workers=2),
+        extractor=_RemoteLikeExtractor(),
+        extraction_pool=_pool(created),
+    ) as (store, _result, extractor):
+        assert extractor.calls == []  # шов не вызывается на локальных байтах
+        # В пул ушёл только сам архив: члены отклонены **в родителе** до submit.
+        assert [url for url in created[0].submitted if "!/" in url] == []
+        observation = _observations(store)[0]
+        assert observation.outcome["skipped"]["extract_unavailable"]["count"] == 2
+        assert all(row.skip_reason == "extract_unavailable" for row in _members(store))
+
+
+def test_pooled_window_one_matches_inline(tmp_path: Path) -> None:
+    """K=1 (рециклинг воркеров) — тождественно inline-пути байт-в-байт."""
+    archive = _rich_archive()
+    with _run(tmp_path / "inline", archive) as (inline_store, inline_result, _e):
+        inline = _snapshot(inline_store, inline_result)
+
+    created: list[_ThreadPool] = []
+
+    pool = ExtractionPool(
+        pool_factory=_pool_factory(created),
+        worker=_file_worker,
+        supports_worker_recycling=True,
+    )
+    with _run(
+        tmp_path / "pooled",
+        archive,
+        crawl_defaults=CrawlRunConfig(extract_max_tasks_per_child=1),
+        extraction_pool=pool,
+    ) as (pooled_store, pooled_result, _e2):
+        pooled = _snapshot(pooled_store, pooled_result)
+
+    assert created[0].max_tasks_per_child == 1  # ось рециклинга дошла до фабрики
+    assert created[0].max_inflight == 1, "окно K=1: не более одного задания в полёте"
+    for key in ("docs", "chunks", "errors", "members", "observations", "probes"):
+        assert pooled[key] == inline[key], key
+
+
+def test_pooled_submit_failure_falls_back_to_inline(tmp_path: Path) -> None:
+    """Отказ пула на ``submit`` не теряет членов: видимая запись + inline (как страница)."""
+    archive = _zip({"a.md": b"a", "b.md": b"b"})
+
+    class _BrokenPool:
+        def __init__(self, size: int) -> None:
+            self.size = size
+            self.submitted = 0
+
+        def submit(self, fn: Any, request: Any) -> Any:
+            self.submitted += 1
+            raise RuntimeError("factory boom")
+
+        def shutdown(self, wait: bool = True, cancel_futures: bool = False) -> None:
+            pass
+
+    pool = ExtractionPool(
+        pool_factory=lambda n, level=None: _BrokenPool(n), worker=_file_worker
+    )
+    with _run(
+        tmp_path,
+        archive,
+        crawl_defaults=CrawlRunConfig(extract_workers=2),
+        extraction_pool=pool,
+    ) as (store, result, extractor):
+        # Члены всё равно ингестятся — inline, после явной записи о сбое пула.
+        assert [doc.url for doc in _build_of(result).docs] == [
+            f"{ZIP_URL}!/a.md",
+            f"{ZIP_URL}!/b.md",
+        ]
+        assert len(extractor.calls) == 2
+        # Одна запись о деградации спуска (отказ submit самой страницы архива — отдельная,
+        # её пишет страничный путь).
+        member_lines = [
+            error for error in result.errors if "— члены контейнера inline" in error
+        ]
+        assert len(member_lines) == 1, result.errors
+        assert all(row.skip_reason is None for row in _members(store))

@@ -181,6 +181,7 @@ from core.pipeline.crawl_frontier import (
 from core.pipeline.archive_descent import (
     ArchiveDescentWalker,
     DescentBudget,
+    MemberDeferral,
     MemberOutcome,
     MemberTask,
     SKIP_EXTRACT_FAILED,
@@ -2101,6 +2102,56 @@ def _member_route(suffix: str) -> ExtractionRoute:
     )
 
 
+def _member_extract_request(
+    task: MemberTask,
+    *,
+    fetched_at: str,
+    lang: str | None,
+    level: DocumentLevel,
+) -> _ExtractRequest:
+    """B3/P4: payload экстракции члена — только примитивы, байты не передаются (I19).
+
+    Зеркало :func:`_make_extract_request` для страницы: источник байтов — **путь** к
+    временному файлу члена (воркер читает его сам), маршрут — по суффиксу члена,
+    ``content_type`` — по суффиксу (данные, не эвристика). Межпрогонный кэш экстракции
+    членам не передаётся: имена временных файлов (``member-N.bin``) не
+    content-addressed, и кэш не должен зависеть от их нумерации; член при этом всё равно
+    хешируется воркером из фактически прочитанных байтов.
+    """
+    suffix = task.suffix.lower()
+    return _ExtractRequest(
+        raw_path=task.temp_path,
+        url=task.member_url,
+        fetched_at=fetched_at,
+        fetch_mode=FetchMode.HTTP,
+        lang=lang,
+        status_code=None,
+        content_type=_MEMBER_CONTENT_TYPES.get(suffix),
+        engine=None,
+        route=_member_route(suffix),
+        level=level,
+    )
+
+
+def _member_extract_unavailable(extractor: ExtractorPort) -> MemberOutcome | None:
+    """``split``: экстрактор шва работает по URL — локальные байты он не принимает.
+
+    Капитуляция явная, а не тихая: член контейнера не извлечён, причина видна в
+    ``corpus_members.skip_reason``/``errors``. Проверка живёт **в родителе** (у воркера
+    пула нет этого признака — он получает уже готовый payload), поэтому и inline-путь, и
+    пул спрашивают одно и то же место.
+    """
+    if getattr(extractor, "supports_source_path", False):
+        return None
+    return MemberOutcome(
+        skip_reason=SKIP_EXTRACT_UNAVAILABLE,
+        detail=(
+            "экстрактор не принимает локальные байты (split: DMZ-путь по URL) — "
+            "член контейнера не извлечён; нужен шов извлечения по источнику"
+        ),
+    )
+
+
 def _ingest_member_doc(
     task: MemberTask,
     *,
@@ -2115,6 +2166,7 @@ def _ingest_member_doc(
     fetched_at: str,
     lang: str | None,
     artifact_probes: list[dict[str, Any]],
+    extracted: Any = _INLINE,
 ) -> MemberOutcome:
     """Член контейнера → документ корпуса (``CorpusDoc`` + чанки) или видимый пропуск.
 
@@ -2133,15 +2185,15 @@ def _ingest_member_doc(
     Дедуп — по ``content_hash`` в пределах продукта (I17), как у страниц: повтор
     перепечатки внутри архива не индексируется дважды, но член остаётся в
     ``corpus_members`` со ссылкой на уже существующий ``doc_id``.
+
+    ``extracted`` — результат извлечения, если он пришёл из пула (``_INLINE`` ⇒
+    извлекаем здесь, inline-путь байт-в-байт). Родительская часть (зонд, документ,
+    нарезка, дедуп, строки) одна и та же для обоих путей — поэтому «пул vs inline» не
+    может разойтись в наблюдаемых артефактах.
     """
-    if not getattr(extractor, "supports_source_path", False):
-        return MemberOutcome(
-            skip_reason=SKIP_EXTRACT_UNAVAILABLE,
-            detail=(
-                "экстрактор не принимает локальные байты (split: DMZ-путь по URL) — "
-                "член контейнера не извлечён; нужен шов извлечения по источнику"
-            ),
-        )
+    unavailable = _member_extract_unavailable(extractor)
+    if unavailable is not None:
+        return unavailable
     suffix = task.suffix.lower()
     # Зонд члена — та же классификация, что у артефакта верхнего уровня (класс/формат/
     # размер/``page_count`` PDF): «сколько страниц в PDF-члене» видно без извлечения.
@@ -2163,13 +2215,15 @@ def _ingest_member_doc(
         lang=lang,
         source_path=task.temp_path,
     )
-    try:
-        extracted = extractor.extract(page, _member_route(suffix))
-    except Exception as exc:  # noqa: BLE001 — отказ члена изолируется (контракт фазы)
-        return MemberOutcome(
-            skip_reason=SKIP_EXTRACT_FAILED,
-            detail=f"{type(exc).__name__}: {exc}",
-        )
+    if extracted is _INLINE:
+        # Inline-путь (нет пула): извлечение здесь, на главном потоке.
+        try:
+            extracted = extractor.extract(page, _member_route(suffix))
+        except Exception as exc:  # noqa: BLE001 — отказ члена изолируется (контракт фазы)
+            return MemberOutcome(
+                skip_reason=SKIP_EXTRACT_FAILED,
+                detail=f"{type(exc).__name__}: {exc}",
+            )
     if extracted is None or getattr(extracted, "error", None):
         return MemberOutcome(
             skip_reason=SKIP_EXTRACT_FAILED,
@@ -5242,6 +5296,27 @@ def _build_corpus(
                     targets[(pid, url)] = target
                 return target
 
+            def _new_extract_pool() -> Executor:
+                """Фабрика пула ключа ``(level, window)`` — одна на прогон (C1/L1).
+
+                Поднята из ``_commit_or_defer`` в область корня: пул нужен **двум**
+                потребителям — страницам и членам контейнеров (B3/P4). ``pools.executor``
+                кэширует исполнителя по ключу, поэтому тело исполняется один раз.
+                """
+                if (
+                    recycle_tasks is not None
+                    and extraction_pool.supports_worker_recycling  # type: ignore[union-attr]
+                ):
+                    # P4/OOM: счётчик заданий на процесс — воркер пересоздаётся
+                    # (initializer `_extract_worker_init` строит экстрактор заново).
+                    return extraction_pool.pool_factory(  # type: ignore[union-attr]
+                        extract_window, level, max_tasks_per_child=recycle_tasks
+                    )
+                # Ось не задана — прежний вызов (поведение байт-в-байт).
+                return extraction_pool.pool_factory(  # type: ignore[union-attr]
+                    extract_window, level
+                )
+
             def _descend_container(
                 pid: str,
                 work_url: str,
@@ -5266,6 +5341,114 @@ def _build_corpus(
                 #: Идентичность архива — хеш ретейненных байтов; ``_retain`` называет файл
                 #: ``{sha256}.bin``, поэтому ``stem`` и есть этот хеш (I19).
                 archive_hash = raw_path.stem
+
+                # B3/P4: извлечение членов — в **тот же** фазовый пул, что и страницы.
+                # Раньше 47 PDF внутри zip конвертировались в родителе по одному (вся
+                # стоимость спуска на одном потоке, воркеры простаивали). Член дороже
+                # страницы, поэтому окно упреждения = ``extract_window``: новая ось **не**
+                # вводится намеренно — она попала бы в ``CrawlLimits.as_dict()`` →
+                # ``crawl_control_digest`` → ``EXECUTION_CONTRACT_FIELDS`` и форкнула бы
+                # ``run_id`` ради чистого рычага пропускной способности (§13: это не смена
+                # условий измерения).
+                defer_member: MemberDeferral | None = None
+                if defer_extract and extraction_pool is not None and pool_key is not None:
+                    #: Пул этого спуска признан мёртвым (``2 × timeout`` без завершений):
+                    #: остаток членов — видимый пропуск, а не 47 ожиданий по таймауту.
+                    member_pool_dead = False
+
+                    def _submit_member(task: MemberTask) -> Any:
+                        """Submit извлечения члена; ``MemberOutcome`` — немедленный исход.
+
+                        ``split`` проверяется **здесь**, в родителе: у воркера нет признака
+                        ``supports_source_path``, и без этой проверки шов получил бы локальный
+                        путь вместо URL (капитуляция была бы невидимой).
+                        """
+                        nonlocal member_pool_dead
+                        unavailable = _member_extract_unavailable(root_extractor)
+                        if unavailable is not None:
+                            return unavailable
+                        if member_pool_dead:
+                            return MemberOutcome(
+                                skip_reason=SKIP_EXTRACT_FAILED,
+                                detail=(
+                                    "пул экстракции не завершил ни одного задания за "
+                                    f"{_EXTRACT_DEAD_POOL_TIMEOUTS} × таймаут — член не "
+                                    "извлечён (inline после отказа пула запрещён)"
+                                ),
+                            )
+                        if pools.abandoned(pool_key):
+                            # Как у страниц: пул исчерпал пересборки — inline запрещён
+                            # (docling в родителе на memory-constrained хосте = худший режим).
+                            return MemberOutcome(
+                                skip_reason=SKIP_EXTRACT_FAILED,
+                                detail=(
+                                    "extraction pool exhausted after "
+                                    f"{_EXTRACT_MAX_POOL_REBUILDS} rebuilds — inline disabled"
+                                ),
+                            )
+                        executor = pools.executor(pool_key, _new_extract_pool)
+                        return executor.submit(
+                            extraction_pool.worker,
+                            _member_extract_request(
+                                task,
+                                fetched_at=page.fetched_at,
+                                lang=page.lang,
+                                level=level,
+                            ),
+                        )
+
+                    def _resolve_member(handle: Any, task: MemberTask) -> MemberOutcome:
+                        """FIFO-доводка задания члена: future → ``_ingest_member_doc``.
+
+                        Пересборкой мёртвого пула занимается **страничный** путь
+                        (:func:`_finish_extract`): спуск исполняется внутри ``item.commit``,
+                        где ``root.pending`` ещё включает сам архив, и рекурсивная доводка
+                        той же фазовой очереди занизила бы/задвоила счётчики корней.
+                        """
+                        nonlocal member_pool_dead
+                        try:
+                            extracted = handle.result(timeout=_extract_timeout)
+                        except TimeoutError:
+                            member_pool_dead = pools.note_timeout(pool_key)
+                            return MemberOutcome(
+                                skip_reason=SKIP_EXTRACT_FAILED,
+                                detail=f"extraction timeout ({_extract_timeout} s)",
+                            )
+                        except BrokenProcessPool:
+                            member_pool_dead = True
+                            return MemberOutcome(
+                                skip_reason=SKIP_EXTRACT_FAILED,
+                                detail="extraction worker died",
+                            )
+                        except Exception as exc:  # noqa: BLE001 — изоляция по контракту
+                            return MemberOutcome(
+                                skip_reason=SKIP_EXTRACT_FAILED,
+                                detail=f"{type(exc).__name__}: {exc}",
+                            )
+                        # Операционная наблюдаемость: член — такое же доведённое задание
+                        # пула, поэтому он входит в ``pools.completed`` (строка «документов
+                        # через пул» в конце фазы) и в сброс серии таймаутов.
+                        pools.note_completion(pool_key)
+                        return _ingest_member_doc(
+                            task,
+                            extractor=root_extractor,
+                            chunker=chunker,
+                            ingest=ingest,
+                            seen_docs=seen_docs,
+                            seen_chunk_ids=seen_chunk_ids,
+                            errors=errors,
+                            store=store,
+                            level=level,
+                            fetched_at=page.fetched_at,
+                            lang=page.lang,
+                            artifact_probes=artifact_probes,
+                            extracted=extracted,
+                        )
+
+                    defer_member = MemberDeferral(
+                        submit=_submit_member, resolve=_resolve_member
+                    )
+
                 walker = ArchiveDescentWalker(
                     product_id=pid,
                     root_url=archive_url,
@@ -5298,6 +5481,10 @@ def _build_corpus(
                     errors=errors,
                     run_id=run_id,
                     created_at=_now_iso(),
+                    defer_member=defer_member,
+                    #: Окно упреждения = окно экстракции корня (``extract_workers``);
+                    #: без пула окно не используется (inline-путь байт-в-байт).
+                    window=extract_window or 1,
                 )
                 observation = walker.descend(
                     archive_path=raw_path,
@@ -5599,24 +5786,9 @@ def _build_corpus(
                     _commit_outcome(pid_arg, url_arg, depth_arg, outcome)
                     return
 
-                def _new_pool() -> Executor:
-                    if (
-                        recycle_tasks is not None
-                        and extraction_pool.supports_worker_recycling  # type: ignore[union-attr]
-                    ):
-                        # P4/OOM: счётчик заданий на процесс — воркер пересоздаётся
-                        # (initializer `_extract_worker_init` строит экстрактор заново).
-                        return extraction_pool.pool_factory(  # type: ignore[union-attr]
-                            extract_window, level, max_tasks_per_child=recycle_tasks
-                        )
-                    # Ось не задана — прежний вызов (поведение байт-в-байт).
-                    return extraction_pool.pool_factory(  # type: ignore[union-attr]
-                        extract_window, level
-                    )
-
                 assert pool_key is not None  # defer_extract ⇒ окно и ключ заданы
                 try:
-                    executor = pools.executor(pool_key, _new_pool)
+                    executor = pools.executor(pool_key, _new_extract_pool)
                 except Exception as exc:  # noqa: BLE001 — изоляция по контракту фазы
                     errors.append(
                         f"{pid_arg}/{url_arg}: extract pool: "
