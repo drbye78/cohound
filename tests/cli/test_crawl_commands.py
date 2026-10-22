@@ -515,6 +515,58 @@ def test_crawl_follow_emits_ndjson_progress(
     assert records[-1]["session_id"] == "crawl:cr-fo"
 
 
+def test_crawl_follow_emits_product_boundaries_live(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``--follow --json`` печатает живые границы продукта (``crawl_product``).
+
+    Без них агрегат сеанса не отличает «продукт ещё в очереди» от «продукт потерян».
+    """
+    monkeypatch.chdir(tmp_path)
+    package = valid_package(tmp_path)
+    crawler = _RecordingCrawler(_pages())
+    code = main(
+        _run_argv(
+            package, action="run", run_id="cr-fp", db=tmp_path / "cr-fp.db",
+            urls=_urls_file(tmp_path), extra=("--follow", "--interval", "0"),
+        ),
+        ports=_ports(crawler),
+    )
+    assert code == EXIT_OK
+    out = capsys.readouterr().out.strip().splitlines()
+    records = [json.loads(line) for line in out]
+    product_events = [r for r in records if r.get("event") == "crawl_product"]
+    assert [(r["phase"], r["product_id"]) for r in product_events] == [
+        ("start", "p1"),
+        ("end", "p1"),
+        ("start", "p2"),
+        ("end", "p2"),
+    ]
+    assert all(r["session_id"] == "crawl:cr-fp" for r in product_events)
+
+
+def test_crawl_without_follow_emits_no_product_boundaries(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Без ``--follow`` stdout прежний: только финальный payload, без ``crawl_product``."""
+    monkeypatch.chdir(tmp_path)
+    package = valid_package(tmp_path)
+    crawler = _RecordingCrawler(_pages())
+    code = main(
+        _run_argv(
+            package, action="run", run_id="cr-nf2", db=tmp_path / "cr-nf2.db",
+            urls=_urls_file(tmp_path),
+        ),
+        ports=_ports(crawler),
+    )
+    assert code == EXIT_OK
+    out = capsys.readouterr().out
+    assert "crawl_product" not in out
+    assert "crawl_progress" not in out
+    # stdout остаётся одной JSON-документом финального payload.
+    assert json.loads(out.strip())["session_id"] == "crawl:cr-nf2"
+
+
 def test_crawl_partial_session_returns_error_code(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:

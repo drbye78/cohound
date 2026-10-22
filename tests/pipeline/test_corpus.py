@@ -49,6 +49,9 @@ from core.pipeline.corpus import (
     _work_set_idempotency_key,
     build_corpus,
     derive_corpus_coverage,
+    ZERO_SOURCE_ALL_SEEDS_REJECTED,
+    ZERO_SOURCE_NO_SEEDS,
+    ZERO_SOURCE_NO_URLS_ENTRY,
 )
 from core.pipeline.crawl_frontier import CrawlLimits
 from core.pipeline.crawl_session import default_session_id, truncation_summary
@@ -405,6 +408,221 @@ def test_end_to_end_two_products(tmp_path: Path) -> None:
     assert {e.product_id for e in build.entries} == {"p1", "p2"}
     assert len(build.docs) == 2
     assert result.errors == []
+
+
+def _product_events(result) -> list[dict[str, Any]]:  # noqa: ANN001 — PhaseResult
+    """Структурные границы продуктов из ``log_entries`` (start/end/skipped)."""
+    return [
+        entry
+        for entry in result.log_entries
+        if isinstance(entry, dict)
+        and str(entry.get("event", "")).startswith("product_")
+    ]
+
+
+def _event(result, event: str, product_id: str) -> dict[str, Any]:  # noqa: ANN001
+    matches = [
+        entry
+        for entry in _product_events(result)
+        if entry.get("event") == event and entry.get("product_id") == product_id
+    ]
+    assert len(matches) == 1, (event, product_id, matches)
+    return matches[0]
+
+
+def test_per_product_boundaries_cover_every_product_including_zero_source(
+    tmp_path: Path,
+) -> None:
+    """Продукт-цикл виден в ``log_entries``: start до дренажа и end даже без выхода.
+
+    Без границ «продукт ещё в очереди» неотличим от «продукт потерян»: цикл
+    последователен, а дренаж одного продукта может идти часами.
+    """
+    result = _build(
+        tmp_path,
+        pages={URL_P1_A: b"page one"},
+        urls={"p1": [URL_P1_A], "p2": []},
+    )
+    assert result.status == "ok"
+    starts = [
+        entry
+        for entry in _product_events(result)
+        if entry.get("event") == "product_start"
+    ]
+    ends = [
+        entry
+        for entry in _product_events(result)
+        if entry.get("event") == "product_end"
+    ]
+    assert {entry["product_id"] for entry in starts} == {"p1", "p2"}
+    assert {entry["product_id"] for entry in ends} == {"p1", "p2"}
+    # Поля границ: объём работы и исход — даже у продукта с нулевым выходом.
+    p1_end = _event(result, "product_end", "p1")
+    assert p1_end["roots"] == 1 and p1_end["seeds_enqueued"] == 1
+    assert p1_end["session_items"] == 0  # durable-сеанс не включён (store=None)
+    assert p1_end["docs"] == 1
+    assert isinstance(p1_end["elapsed_seconds"], float)
+    p2_end = _event(result, "product_end", "p2")
+    assert p2_end["roots"] == 0 and p2_end["seeds_enqueued"] == 0
+    assert p2_end["session_items"] == 0 and p2_end["docs"] == 0
+
+
+def test_zero_source_empty_seed_list_is_named_in_coverage_and_errors(
+    tmp_path: Path,
+) -> None:
+    """Пустой seed-набор: coverage называет причину, ``errors``/``pending`` — продукт.
+
+    Раньше этот путь был немым: продукт в плане, но без строки сеанса и без единой
+    записи ``errors``.
+    """
+    store = SqliteStore(":memory:")
+    _make_run(store)
+    try:
+        result = _build(
+            tmp_path,
+            pages={URL_P1_A: b"page one"},
+            urls={"p1": [URL_P1_A], "p2": []},
+            store=store,
+            run_id=RUN_ID,
+        )
+        coverage = store.read_corpus_coverage(RUN_ID, "p2")
+    finally:
+        store.close()
+
+    assert coverage is not None
+    assert coverage.expected_sources == 0 and coverage.complete is False
+    assert coverage.reason == ZERO_SOURCE_NO_SEEDS
+    # Единая константа больше не приписывает всем zero-source один и тот же путь.
+    assert coverage.reason != ZERO_SOURCE_ALL_SEEDS_REJECTED
+    assert any("p2" in error and "zero-source" in error for error in result.errors)
+    assert any("p2" in item for item in result.pending)
+    end = _event(result, "product_end", "p2")
+    assert end["reason"] == ZERO_SOURCE_NO_SEEDS
+    assert end["session_items"] == 0 and end["seeds_enqueued"] == 0
+
+
+def test_on_product_callback_fires_live_start_before_any_session_item(
+    tmp_path: Path,
+) -> None:
+    """``on_product`` — **живая** граница: ``start`` раньше любого элемента сеанса.
+
+    ``log_entries`` материализуются в конце фазы, поэтому во время многочасового
+    дренажа они не отвечают на вопрос «продукт потерян или ещё в очереди»; колбэк
+    отвечает. Наблюдение внутри колбэка читает сеанс: на ``start`` продукта ``p2``
+    его элементов ещё нет, на ``end`` — уже есть (или ноль для zero-source).
+    """
+    store = SqliteStore(":memory:")
+    _make_run(store)
+    seen: list[tuple[str, str, int]] = []
+
+    def _on_product(phase: str, product_id: str) -> None:
+        # Снимок durable-сеанса **в момент** события, не после фазы.
+        seen.append((phase, product_id, len(list(store.iter_crawl_session_items(SESSION_ID)))))
+
+    try:
+        result = _build(
+            tmp_path,
+            pages={URL_P1_A: b"page one"},
+            urls={"p1": [URL_P1_A], "p2": []},
+            store=store,
+            run_id=RUN_ID,
+            on_product=_on_product,
+        )
+    finally:
+        store.close()
+
+    starts = [(pid, count) for phase, pid, count in seen if phase == "start"]
+    ends = [(pid, count) for phase, pid, count in seen if phase == "end"]
+    assert [pid for pid, _ in starts] == ["p1", "p2"]
+    assert [pid for pid, _ in ends] == ["p1", "p2"]
+    # p1 start: сеанс пуст; p1 end: элемент p1 уже записан; p2 start: p1-элемент есть,
+    # p2-элемента нет (продукт виден как «начатый», а не «потерянный»).
+    assert starts[0][1] == 0
+    assert ends[0][1] == 1
+    assert starts[1][1] == 1
+    assert ends[1][1] == 1  # zero-source: элементов не появилось
+    assert result.status == "ok"
+
+
+def test_on_product_callback_errors_do_not_break_phase(tmp_path: Path) -> None:
+    """Сбой колбэка наблюдаемости не роняет фазу (как и ``progress``)."""
+    def _boom(phase: str, product_id: str) -> None:
+        raise RuntimeError("observer down")
+
+    result = _build(
+        tmp_path,
+        pages={URL_P1_A: b"page one"},
+        urls={"p1": [URL_P1_A]},
+        on_product=_boom,
+    )
+    assert result.status == "ok"
+    assert not any("observer down" in error for error in result.errors)
+
+
+def test_zero_source_all_seeds_rejected_reason(tmp_path: Path) -> None:
+    """Все seed'ы отклонены блэклистом: причина ``all_seeds_rejected`` + per-seed errors."""
+    store = SqliteStore(":memory:")
+    _make_run(store)
+    try:
+        result = _build(
+            tmp_path,
+            pages={URL_P1_A: b"page one", URL_P2_A: b"page two"},
+            urls={"p1": [URL_P1_A], "p2": [URL_P2_A]},
+            store=store,
+            run_id=RUN_ID,
+            crawl_defaults=CrawlRunConfig(exclude_paths=["/p2/*"]),
+        )
+        coverage = store.read_corpus_coverage(RUN_ID, "p2")
+    finally:
+        store.close()
+
+    assert coverage is not None
+    assert coverage.reason == ZERO_SOURCE_ALL_SEEDS_REJECTED
+    # Per-seed запись остаётся: она называет конкретный URL, coverage — класс причины.
+    assert any("p2/" in error and "блэклистом" in error for error in result.errors)
+    end = _event(result, "product_end", "p2")
+    assert end["seeds_enqueued"] == 0
+    assert end["reason"] == ZERO_SOURCE_ALL_SEEDS_REJECTED
+
+
+def test_product_absent_from_urls_is_named_before_evaluate(tmp_path: Path) -> None:
+    """Продукт плана без записи в ``urls``: ``product_skipped``/``no_urls_entry``.
+
+    Coverage-строка не пишется намеренно (``--only-product`` сужает ``urls``, и
+    zero-source запись вне области прогона была бы ложной), поэтому до Ш6 причина
+    видна только в наблюдаемости фазы корпуса.
+    """
+    result = _build(
+        tmp_path,
+        pages={URL_P1_A: b"page one"},
+        urls={"p1": [URL_P1_A]},
+    )
+    assert result.status == "ok"
+    skipped = _event(result, "product_skipped", "p2")
+    assert skipped["reason"] == ZERO_SOURCE_NO_URLS_ENTRY
+    assert skipped["roots"] == 0 and skipped["seeds_enqueued"] == 0
+    # В цикл такой продукт не попадает — start/end у него нет.
+    assert not [
+        entry
+        for entry in _product_events(result)
+        if entry.get("product_id") == "p2" and entry.get("event") != "product_skipped"
+    ]
+
+
+def test_zero_source_without_urls_mapping_names_no_urls_entry(tmp_path: Path) -> None:
+    """``urls`` не задан вовсе: у продуктов плана нет записи в отображении."""
+    store = SqliteStore(":memory:")
+    _make_run(store)
+    try:
+        result = _build(tmp_path, pages={}, urls={}, store=store, run_id=RUN_ID)
+        coverage = store.read_corpus_coverage(RUN_ID, "p1")
+    finally:
+        store.close()
+
+    assert coverage is not None
+    assert coverage.reason == ZERO_SOURCE_NO_URLS_ENTRY
+    assert any("p1" in error and "zero-source" in error for error in result.errors)
+    assert _event(result, "product_end", "p1")["reason"] == ZERO_SOURCE_NO_URLS_ENTRY
 
 
 def test_retention_file_written(tmp_path: Path) -> None:

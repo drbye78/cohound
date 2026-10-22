@@ -1075,10 +1075,15 @@ def evaluate_phase(
         coverage = _coverage_for(None, store, run_id, product_id, planned=True)
         if coverage is not None and coverage.expected_sources == 0:
             # O2/O3: ноль источников — failed-ячейки (I4), не «тихий ok» и не ❌.
+            # ``coverage_missing`` (нет строки покрытия вовсе) остаётся своим классом:
+            # это аномалия провенанса, а не отсутствие источников. Все zero-source
+            # причины (``no_seeds``/``all_seeds_rejected``/``no_urls_entry``) —
+            # **наблюдательные** и живут в тексте ошибки; класс сбоя один — ``no_sources``,
+            # поэтому словарь классов сбоя (§4.1) не расширяется.
             kind = (
-                FailureKind.NO_SOURCES.value
-                if coverage.reason == "no_seeds"
-                else (coverage.reason or FailureKind.NO_SOURCES.value)
+                FailureKind.COVERAGE_MISSING.value
+                if coverage.reason == FailureKind.COVERAGE_MISSING.value
+                else FailureKind.NO_SOURCES.value
             )
             provenance = (
                 None,

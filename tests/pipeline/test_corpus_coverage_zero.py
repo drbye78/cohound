@@ -30,7 +30,11 @@ from core.domain import (
     RunConfig,
     RunMode,
 )
-from core.pipeline.corpus import _persist_corpus_coverage
+from core.pipeline.corpus import (
+    ZERO_SOURCE_ALL_SEEDS_REJECTED,
+    ZERO_SOURCE_NO_SEEDS,
+    _persist_corpus_coverage,
+)
 from core.pipeline.crawl_session import default_session_id, open_session
 from core.pipeline.evaluate import _coverage_for, evaluate_phase
 from core.pipeline.runner import Ports
@@ -202,3 +206,49 @@ def test_complete_zero_source_coverage_is_rejected() -> None:
             observed_sources=0,
             computed_at="2026-10-19T00:00:00+00:00",
         )
+
+
+def test_persist_coverage_uses_truthful_reason_mapping() -> None:
+    """Явная карта причин: строка покрытия называет **путь**, а не общую константу.
+
+    ``all_seeds_rejected`` — seed'ы были, но все отклонены; ``None`` — исходов нет по
+    причине, которую называют ``errors``/счётчики (причина не выдумывается).
+    """
+    store = _store()
+    session = default_session_id(RUN_ID)
+    open_session(store, session_id=session, run_id=RUN_ID)
+
+    _persist_corpus_coverage(
+        store,
+        RUN_ID,
+        session,
+        set(),
+        "2026-10-19T00:00:00+00:00",
+        products=["p1", "p2"],
+        reasons={"p1": ZERO_SOURCE_ALL_SEEDS_REJECTED, "p2": None},
+    )
+
+    p1 = store.read_corpus_coverage(RUN_ID, "p1")
+    p2 = store.read_corpus_coverage(RUN_ID, "p2")
+    assert p1 is not None and p1.reason == ZERO_SOURCE_ALL_SEEDS_REJECTED
+    # ``None`` — честное «счётчики/errors объясняют», а не подмена на ``no_seeds``.
+    assert p2 is not None and p2.reason is None
+
+
+def test_persist_coverage_without_reason_map_keeps_legacy_no_seeds() -> None:
+    """Прямой вызов без карты причин сохраняет прежнее ``no_seeds`` (совместимость)."""
+    store = _store()
+    session = default_session_id(RUN_ID)
+    open_session(store, session_id=session, run_id=RUN_ID)
+
+    _persist_corpus_coverage(
+        store,
+        RUN_ID,
+        session,
+        set(),
+        "2026-10-19T00:00:00+00:00",
+        products=["p1"],
+    )
+
+    p1 = store.read_corpus_coverage(RUN_ID, "p1")
+    assert p1 is not None and p1.reason == ZERO_SOURCE_NO_SEEDS

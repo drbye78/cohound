@@ -33,6 +33,7 @@ from core.cli.context import (
     _print_json,
     _print_run_dry,
     _print_run_report,
+    _product_callback,
     _progress_callback,
     _resolve_phases,
     _resolve_plan,
@@ -695,6 +696,13 @@ def run(args: argparse.Namespace) -> int:
                 document_level=document_level,
                 progress=(
                     _progress_callback(session_id=session_id, json_mode=bool(args.json))
+                    if follow
+                    else None
+                ),
+                # Phase 4: продукт-скоуп живого прогресса — «продукт начат/завершён»
+                # виден во время многочасового дренажа, а не только в конце фазы.
+                on_product=(
+                    _product_callback(session_id=session_id, json_mode=bool(args.json))
                     if follow
                     else None
                 ),

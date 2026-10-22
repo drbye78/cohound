@@ -1344,7 +1344,9 @@ class CorpusCoverage(BaseModel):
     partial_blocks: dict[str, dict[str, int]] = Field(default_factory=dict)
     truncated: bool = False
     computed_at: str
-    #: Машинная причина неполноты/отсутствия наблюдения (``no_seeds``, ``coverage_missing``).
+    #: Машинная причина неполноты/отсутствия наблюдения (``no_seeds``,
+    #: ``all_seeds_rejected``, ``no_urls_entry``, ``coverage_missing``). Наблюдательное
+    #: поле: класс сбоя ячеек остаётся ``no_sources``, словарь §4.1 не расширяется.
     #: Аддитивное поле MVP-1: строка zero-source обязана назвать причину явно (O2/O3).
     reason: str | None = None
 

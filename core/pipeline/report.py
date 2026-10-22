@@ -1363,6 +1363,9 @@ def _coverage_anomaly(
         origin: dict(sorted(counts.items()))
         for origin, counts in sorted(coverage.partial_blocks.items())
     }
+    # Причина zero-source/аномалии провенанса (наблюдательное поле, не статус):
+    # ``no_seeds``/``all_seeds_rejected``/``no_urls_entry``/``coverage_missing``.
+    reason_note = f"причина: {coverage.reason}; " if coverage.reason else ""
     return {
         "product_id": product_id,
         "param_id": param_id,
@@ -1373,6 +1376,7 @@ def _coverage_anomaly(
             f"blocked={blocked or '{}'}, "
             f"observed/expected={coverage.observed_sources}/{coverage.expected_sources}, "
             f"truncated={coverage.truncated}; "
+            f"{reason_note}"
             f"частичные блокировки (аудит): {partial or '{}'}; "
             "❌ без человеческой аттестации (scope_attested_by) не публикуется (I2c)"
         ),

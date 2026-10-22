@@ -44,6 +44,7 @@ from core.cli.context import (
     _phases_until,
     _persist_llm_scenarios,
     _print_json,
+    _product_callback,
     _progress_callback,
     _resolve_db_path,
     _resolve_plan,
@@ -376,6 +377,13 @@ def _execute_crawl(
             if follow
             else None
         )
+        # Phase 4: продукт-скоуп живого прогресса — «продукт начат/завершён» виден
+        # во время дренажа, а не только в конце фазы (та же ось ``--follow``).
+        on_product = (
+            _product_callback(session_id=session_id, json_mode=json_mode)
+            if follow
+            else None
+        )
         phases = _resolve_phases(
             args,
             inputs=inputs,
@@ -392,6 +400,7 @@ def _execute_crawl(
             exclude_documents=exclude_documents,
             document_level=document_level,
             progress=progress,
+            on_product=on_product,
             # §13 (2.4.0): те же декларированные оси, что у контракта.
             axes=declared,
             declared_status_dict_version=status_dict_version,

@@ -481,6 +481,7 @@ def build_phases(
     edge_capabilities: Mapping[str, Any] | None = None,
     max_attempts: int | None = None,
     progress: Callable[[dict[str, int]], None] | None = None,
+    on_product: Callable[[str, str], None] | None = None,
     max_depth: int | None = None,
     max_documents: int | None = None,
     exclude_paths: Sequence[str] | None = None,
@@ -533,6 +534,10 @@ def build_phases(
         ``None`` → без потолка.
     :param progress: Phase 4 — колбэк снимка прогресса сеанса краула (``--follow``); ошибки
         изолируются в :func:`core.pipeline.corpus.build_corpus`. ``None`` → без прогресса.
+    :param on_product: Phase 4 — колбэк границ продукта ``(phase, product_id)``
+        (``--follow``): ``start`` перед первым дренажом, ``end`` после тела продукта
+        (включая нулевой выход). Ошибки изолируются в
+        :func:`core.pipeline.corpus.build_corpus`. ``None`` → без вывода.
     :param extraction_pool: P4 — исполнитель параллельной экстракции (:class:`ExtractionPool`,
         фабрика пула + воркер от composition root), протягивается в Ш5. Отдельная ось
         ``crawl.extract_workers``; ``None`` ⇒ экстракция inline (поведение байт-в-байт).
@@ -701,6 +706,8 @@ def build_phases(
             # Phase 4: потолок попыток (--max-attempts) и колбэк прогресса (--follow).
             max_attempts=max_attempts,
             progress=progress,
+            # Phase 4: живая граница продукта (--follow) — продукт-скоуп к агрегату сеанса.
+            on_product=on_product,
             # 09 §6.3 (MVP-3b): durable-субстрат, режимы продуктов и политика наблюдения.
             # ``state is None`` ⇒ прежнее поведение корпуса байт-в-байт.
             state=state,

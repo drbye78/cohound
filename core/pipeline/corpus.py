@@ -605,6 +605,63 @@ def derive_corpus_coverage(
     )
 
 
+#: Машинные причины zero-source покрытия (``CorpusCoverage.reason``).
+#:
+#: ``reason`` — **наблюдательное** поле (свободная строка в модели и колонка TEXT в БД),
+#: не перечисление ``docs/status-dictionary.yaml``: расширение значений не меняет смысл
+#: правил покрытия и не является методологической границей (§13). ``failure_kind`` ячеек
+#: остаётся ``no_sources`` (:func:`core.pipeline.evaluate.evaluate_phase`), поэтому
+#: словарь классов сбоя не расширяется.
+ZERO_SOURCE_NO_SEEDS = "no_seeds"
+"""Список seed'ов продукта пуст (ключ ``urls`` есть, значений нет) либо ``urls`` не задан."""
+ZERO_SOURCE_ALL_SEEDS_REJECTED = "all_seeds_rejected"
+"""Seed'ы были, но ни один не поставлен в очередь: блэклист/``max_documents``/пустая
+развёртка источника-каталога. Конкретный URL называет per-seed запись ``errors``."""
+ZERO_SOURCE_NO_URLS_ENTRY = "no_urls_entry"
+"""У продукта плана нет записи в отображении ``urls`` вовсе."""
+
+
+def _product_notes(events: Sequence[Mapping[str, Any]]) -> list[str]:
+    """Строковые заметки фазы по границам продуктов (операторский канал).
+
+    ``log_entries`` фазы **не сериализуется** ни в один файл: CLI превращает в
+    ``results[].notes`` только ``str``-записи. Поэтому структурные dict-события
+    (``product_start``/``product_end``/``product_skipped``) сами по себе оператору
+    невидимы — здесь они дублируются одной строкой на продукт. Это не ``errors``:
+    продукт с бюджетом ``N`` и нулём отказов — норма, а не сбой.
+
+    Строка ``product_end`` называет ровно те величины, которых раньше не было видно
+    (сколько корней/seed'ов/элементов/документов и сколько это заняло), поэтому
+    «продукт съел весь бюджет» и «продукт почти ничего не дал» перестают выглядеть
+    одинаково в отчёте. ``product_skipped`` — единственный след продукта плана, вообще
+    не попавшего в цикл (``--only-product``/``--only-failed``/пустой ``urls``).
+
+    :param events: структурные записи границ продукта (порядок сохраняется).
+    :returns: заметки в порядке событий; ``product_start`` не дублируется (граница
+        «начат» нужна живьём, в отчёте она бесполезна).
+    """
+    notes: list[str] = []
+    for event in events:
+        kind = event.get("event")
+        if kind == "product_skipped":
+            notes.append(
+                f"corpus: продукт {event.get('product_id')} пропущен — нет записи в "
+                "urls (фильтр --only-product/--only-failed или пустой seed-набор)"
+            )
+        elif kind == "product_end":
+            reason = event.get("reason")
+            tail = f", причина {reason}" if reason else ""
+            notes.append(
+                f"corpus: продукт {event.get('product_id')} — "
+                f"корней {event.get('roots')}, seed'ов поставлено "
+                f"{event.get('seeds_enqueued')} из {event.get('seeds_declared')}, "
+                f"элементов {event.get('session_items')} "
+                f"(fetched {event.get('fetched')}, failed {event.get('failed')}), "
+                f"документов {event.get('docs')}, "
+                f"{event.get('elapsed_seconds')} с{tail}"
+            )
+    return notes
+
 def _persist_corpus_coverage(
     store: Any,
     run_id: str,
@@ -613,12 +670,18 @@ def _persist_corpus_coverage(
     computed_at: str,
     *,
     products: Iterable[str] | None = None,
+    reasons: Mapping[str, str | None] | None = None,
 ) -> None:
     """Вычисляет и персистит покрытие **каждого** продукта плана (Ф0, O3).
 
-    Продукт без элементов сеанса (нулевой seed-набор / preflight обойдён) получает
-    строку ``expected_sources=0, complete=False, reason=no_seeds`` — отсутствие
-    покрытия не должно читаться как «неизвестно» и не должно давать тихий ``ok``.
+    Продукт без элементов сеанса (нулевой seed-набор / preflight обойдён / все seed'ы
+    отклонены) получает строку ``expected_sources=0, complete=False`` и **истинную**
+    причину в ``reason`` — отсутствие покрытия не должно читаться как «неизвестно» и не
+    должно давать тихий ``ok``. Значения — :data:`ZERO_SOURCE_NO_SEEDS`,
+    :data:`ZERO_SOURCE_ALL_SEEDS_REJECTED`, :data:`ZERO_SOURCE_NO_URLS_ENTRY`;
+    вызывающий (:func:`_build_corpus`) знает фактический путь, поэтому передаёт карту
+    ``reasons`` (продукт → причина). Без карты (прямой вызов/старые тесты) — прежнее
+    ``no_seeds``: значение по умолчанию не придумывает новую причину.
     Продукт с элементами, но без единого ``FETCHED`` (все ``not_found``/``pending``),
     получает ``complete=False`` из :func:`derive_corpus_coverage` с ``reason=None``:
     неполноту объясняют счётчики, а не новая причина.
@@ -627,6 +690,7 @@ def _persist_corpus_coverage(
     for item in store.iter_crawl_session_items(session_id):
         by_product.setdefault(item.product_id, []).append(item)
     planned = {str(product_id) for product_id in (products or ())}
+    known_reasons = dict(reasons or {})
     for product_id in sorted(planned | set(by_product)):
         items = by_product.get(product_id, [])
         if not items:
@@ -636,7 +700,9 @@ def _persist_corpus_coverage(
                 expected_sources=0,
                 observed_sources=0,
                 computed_at=computed_at,
-                reason="no_seeds",
+                # Ключ, присутствующий со значением ``None``, — честное «причина
+                # счётчиками не названа»; отсутствие ключа — прежний ``no_seeds``.
+                reason=known_reasons.get(product_id, ZERO_SOURCE_NO_SEEDS),
             )
         else:
             coverage = derive_corpus_coverage(
@@ -2144,6 +2210,7 @@ def _build_corpus(
     extract_task_timeout_s: float | None = None,
     max_attempts: int | None = None,
     progress: Callable[[dict[str, int]], None] | None = None,
+    on_product: Callable[[str, str], None] | None = None,
     crawl_app: CrawlConfig | None = None,
     state: ProductStatePort | None = None,
     product_modes: Mapping[str, str] | None = None,
@@ -2277,6 +2344,13 @@ def _build_corpus(
     :param progress: Phase 4 — опциональный колбэк прогресса: вызывается со снимком
         ``crawl_session_counts`` (``{status: count}``) по ходу фазы (для ``--follow``).
         Ошибки колбэка изолируются и не роняют фазу. ``None`` → без прогресс-вывода.
+    :param on_product: Phase 4 — опциональный колбэк **границ продукта**
+        (``("start"|"end", product_id)``): вызывается **живо** по ходу фазы — ``start``
+        перед первым дренажом продукта, ``end`` после его тела (включая нулевой выход).
+        Закрывает разрыв «продукт ещё в очереди vs продукт потерян»: продукт-цикл строго
+        последователен, и дренаж одного продукта может идти часами, а ``log_entries``
+        материализуются только в конце фазы. Ошибки колбэка изолируются и не роняют
+        фазу (наблюдаемость вторична). ``None`` → без вывода (поведение неизменно).
     :param crawl_app: D1/D2 — application-слой осей контроля краула (``deploy.yaml:crawl``,
         :class:`~core.config.deploy.CrawlConfig`): низший приоритет цепочки
         ``app < run < site`` для ``max_workers``/``max_depth``/``max_documents``/
@@ -3418,6 +3492,20 @@ def _build_corpus(
             return
         try:
             progress(dict(store.crawl_session_counts(session)))
+        except Exception:  # noqa: BLE001 — прогресс информационен
+            pass
+
+    def _emit_product(phase: str, product_id: str) -> None:
+        """Живая граница продукта для ``on_product`` (``--follow``).
+
+        В отличие от ``log_entries`` (материализуются в конце фазы), этот канал
+        срабатывает **во время** дренажа: оператор видит, что продукт начат, а не
+        гадает «потерян или ещё в очереди». Ошибки колбэка изолируются.
+        """
+        if on_product is None:
+            return
+        try:
+            on_product(phase, product_id)
         except Exception:  # noqa: BLE001 — прогресс информационен
             pass
 
@@ -4587,7 +4675,25 @@ def _build_corpus(
     #: B3: зонд артефактов (класс/формат/размер/``page_count``/листинг) — до экстракции.
     artifact_probes: list[dict[str, Any]] = []
 
+    #: Границы продукта в наблюдаемости (§B.1, аддитивно к фазовым start/end).
+    #:
+    #: Без них «продукт ещё в очереди» неотличим от «продукт потерян»: продукт-цикл
+    #: строго последователен, и дренаж одного продукта может идти часами. Записи —
+    #: **структурные** (dict) в ``PhaseResult.log_entries``: ``product_start`` до первого
+    #: корня (``roots``/``seeds_declared``) и ``product_end`` после доводки хвостов
+    #: (``roots``/``seeds_enqueued``/``session_items``/``fetched``/``failed``/
+    #: ``elapsed_seconds``/``reason``). ``product_end`` пишется и при нулевом выходе —
+    #: именно этот случай раньше был немым. Одна пара на продукт (не на URL).
+    product_events: list[dict[str, Any]] = []
+    #: Причина zero-source покрытия по продукту (``None`` — причина не названа счётчиками).
+    #: Заполняется на ``product_end`` и передаётся в :func:`_persist_corpus_coverage`.
+    zero_source_reasons: dict[str, str | None] = {}
+    #: Advisory-очередь «что осталось человеку» (``PhaseResult.pending``): zero-source
+    #: продукты видны в конце фазы корпуса — **до** дорогой Ш6, а не только в отчёте.
+    zero_source_pending: list[str] = []
+
     for product_id in products:
+        product_started = time.perf_counter()
         ingest = _ProductIngest(product_id=product_id)
         # I17: дедуп в пределах продукт-партиции (см. docstring модуля).
         seen_docs: dict[str, str] = {}
@@ -4597,6 +4703,20 @@ def _build_corpus(
         #: расходовать ``max_documents`` каждого из них — иначе бюджет исчерпывается досрочно.
         resume_counted: set[str] = set()
         product_roots = url_map.get(product_id, [])
+        #: Граница продукта (start): до первого дренажа — «продукт начат», а не «потерян».
+        product_events.append(
+            {
+                "event": "product_start",
+                "product_id": product_id,
+                "roots": len(product_roots),
+                "seeds_declared": len(product_roots),
+            }
+        )
+        #: Сколько seed'ов фактически поставлено в очередь (авторские + sitemap). Растёт
+        #: в :func:`_drain_root`; нужен для честной причины zero-source.
+        product_seeds_enqueued = 0
+        #: Живая граница продукта: до первого дренажа (продукт может идти часами).
+        _emit_product("start", product_id)
         #: 09 §6.3: известные URL продукта (``revalidate``) — после авторских корней.
         incremental_items = _plan_incremental_items(product_id, product_roots)
         #: 09 §6.3: группировка **всех** известных URL по авторским корням (scope
@@ -4703,6 +4823,7 @@ def _build_corpus(
             в фазовой очереди (C1). ``defer_tail=False`` (synthetic-бакеты ревалидации,
             вызывающий читает счётчики frontier сразу) — хвост доводится здесь же.
             """
+            nonlocal product_seeds_enqueued
             limits = resolve_crawl_limits(
                 root_url,
                 app=crawl_app or CrawlConfig(),
@@ -4875,6 +4996,8 @@ def _build_corpus(
                 resume_counted.add(iurl)
             frontier.note_consumed(consumed)
             seed_status = frontier.add_seed(root_url) if seed else "synthetic"
+            if seed_status == "queued":
+                product_seeds_enqueued += 1
             seed_blacklisted = seed_status == "blacklisted"
             seed_truncated = seed_status == "truncated"
             if seed_blacklisted:
@@ -4915,6 +5038,8 @@ def _build_corpus(
                 extra_status = frontier.add_seed(extra)
                 if extra_status in ("queued", "dup"):
                     sitemap_seed_used.add((pid, extra))
+                    if extra_status == "queued":
+                        product_seeds_enqueued += 1
                 elif extra_status == "blacklisted":
                     errors.append(
                         f"{pid}/{extra}: sitemap-seed зачёркнут блэклистом "
@@ -6171,12 +6296,102 @@ def _build_corpus(
                             "skipped_documents": [],
                         }
                     )
+        #: Граница продукта (end) — **всегда**, включая нулевой выход (раньше этот случай
+        #: был немым). Счётчики — из персистентных элементов сеанса продукта; без сеанса
+        #: (durable-краул выключен) ``session_items``/``fetched``/``failed`` — нули, а
+        #: выход виден по ``docs`` (фактически собранные документы).
+        product_items = (
+            [
+                item
+                for (item_pid, _item_url), item in items.items()
+                if item_pid == product_id
+            ]
+            if session is not None
+            else []
+        )
+        product_fetched = sum(
+            1 for item in product_items if item.status is CrawlItemStatus.FETCHED
+        )
+        product_failed = sum(
+            1
+            for item in product_items
+            if item.status in (CrawlItemStatus.FAILED, CrawlItemStatus.CANCELLED)
+        )
+        product_reason: str | None = None
+        # Zero-source — утверждение о **сеансе**: без сеанса «нет элементов» не значит
+        # «нет источников» (счётчики просто не ведутся), поэтому причина не выдумывается.
+        if session is not None and not product_items:
+            # Истинная причина вместо единой константы ``no_seeds``: пустой seed-набор,
+            # полностью отклонённые seed'ы и отсутствие записи в ``urls`` — разные пути.
+            if product_id not in url_map:
+                product_reason = ZERO_SOURCE_NO_URLS_ENTRY
+            elif not product_roots:
+                product_reason = ZERO_SOURCE_NO_SEEDS
+            elif product_seeds_enqueued == 0:
+                product_reason = ZERO_SOURCE_ALL_SEEDS_REJECTED
+            # Иначе seed'ы поставлены, но исходов нет — причину называют ``errors``
+            # (сбои исполнителя/экстракции); выдумывать четвёртую причину не нужно.
+            zero_source_reasons[product_id] = product_reason
+            zero_source_pending.append(
+                f"{product_id}: корпус без источников "
+                f"({product_reason or 'no session items'}) — добавьте seed'ы "
+                "(hound package seeds add) или проверьте отображение urls; "
+                "оценка отметит все ячейки failed, а не ❌"
+            )
+            # Сегодня zero-source продукт не даёт ни одной записи ``errors`` — путь немой.
+            errors.append(
+                f"{product_id}: zero-source corpus "
+                f"({product_reason or 'no session items'}): "
+                f"roots={len(product_roots)}, "
+                f"seeds_enqueued={product_seeds_enqueued} — ячейки будут failed, не ❌"
+            )
+        product_events.append(
+            {
+                "event": "product_end",
+                "product_id": product_id,
+                "roots": len(drained_roots),
+                "seeds_declared": len(product_roots),
+                "seeds_enqueued": product_seeds_enqueued,
+                "session_items": len(product_items),
+                "fetched": product_fetched,
+                "failed": product_failed,
+                "docs": len(ingest.docs),
+                "elapsed_seconds": round(time.perf_counter() - product_started, 3),
+                "reason": product_reason,
+            }
+        )
+        #: Живая граница продукта: тело завершено — в том числе при нулевом выходе
+        #: (именно этот случай раньше был немым до конца фазы).
+        _emit_product("end", product_id)
         # Retention-провенанс не зависит от индексной сборки и уже персистенчен
         # инкрементально: единственная точка ``ingest.docs.append`` — ``_finish_one``,
         # где ``_persist_docs`` вызывается сразу после коммита документа. Финального
         # «дампа» продукта здесь нет намеренно: он лишь повторно писал бы те же строки
         # (``INSERT OR REPLACE`` по PK) и удваивал бы транзакции без выигрыша в durability.
         ingests.append(ingest)
+
+    # Продукт плана **без записи** в непустом ``urls``: в цикл он не попал (``products``
+    # выводится из ``url_map``), поэтому молча не краулится и получает строку покрытия
+    # только как ``coverage_missing`` в Ш6. Наблюдаемость называет причину здесь, до
+    # оценки. Coverage-строку не пишем намеренно: ``--only-product``/``--only-failed``
+    # сужают ``urls``, и zero-source запись для продукта вне области прогона была бы
+    # ложной (09 §6.2).
+    if url_map:
+        for missing_id in sorted(set(declared) - set(url_map)):
+            product_events.append(
+                {
+                    "event": "product_skipped",
+                    "product_id": missing_id,
+                    "roots": 0,
+                    "seeds_declared": 0,
+                    "seeds_enqueued": 0,
+                    "session_items": 0,
+                    "fetched": 0,
+                    "failed": 0,
+                    "elapsed_seconds": 0.0,
+                    "reason": ZERO_SOURCE_NO_URLS_ENTRY,
+                }
+            )
 
     _emit_progress()
 
@@ -6432,6 +6647,7 @@ def _build_corpus(
                 truncated_products,
                 _now_iso(),
                 products=products,
+                reasons=zero_source_reasons,
             )
         except Exception as exc:  # noqa: BLE001 — наблюдаемость важнее персистенции
             errors.append(
@@ -6495,7 +6711,13 @@ def _build_corpus(
     # ``duplicates``/``duplicate_count``); операторская строка о дедупе — note фазы
     # (``phases._duplicate_notes`` → ``results[].notes``), не ``errors``: схлопывание
     # одинакового контента легитимно.
-    log_entries: list[Any] = [build]
+    #: Границы продуктов (start/end/skipped) идут рядом со сборкой: структурные dict-записи
+    #: контракта фазы (``PhaseResult.log_entries``), одна пара на продукт. Машинный
+    #: потребитель берёт dict, оператор — **строку** ниже: ``results[].notes`` пропускает
+    #: только ``str``, и без строки продукт-скоуп остался бы в поле, которое никто не читает
+    #: (``log_entries`` не сериализуется ни в один файл). Строка — одна на продукт, поэтому
+    #: заметки растут линейно по продуктам, а не по URL.
+    log_entries: list[Any] = [build, *product_events, *_product_notes(product_events)]
     # B3: провенанс спуска доступен из результата фазы (и из run DB — таблицы
     # ``archive_observations``/``corpus_members``). Запись есть даже при нулевом выходе.
     for observation in archive_observations:
@@ -6524,7 +6746,16 @@ def _build_corpus(
             "root — author-scope drift (revalidated as orphans; observation only)"
         )
     return PhaseResult(
-        status="ok", phase="corpus", cells=[], log_entries=log_entries, errors=errors
+        status="ok",
+        phase="corpus",
+        cells=[],
+        log_entries=log_entries,
+        errors=errors,
+        # Advisory (не влияет на status/гейты/resume): zero-source продукты — «что осталось
+        # человеку» уже на выходе Ш5, до дорогой Ш6. Видно в ``hound run`` (``pending:``),
+        # ``--json`` (``results[].pending``) и в ``runs/{run_id}/logs/corpus.jsonl``
+        # (запись конца фазы несёт ``pending``/``pending_items``).
+        pending=zero_source_pending,
     )
 
 

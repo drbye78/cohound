@@ -1377,6 +1377,43 @@ def _progress_callback(
     return _callback
 
 
+def _emit_product_progress(
+    phase: str, product_id: str, *, session_id: str, json_mode: bool
+) -> None:
+    """Phase 4: живая граница продукта (``start``/``end``) в stdout.
+
+    Дополняет ``crawl_progress`` (агрегат сеанса) **продукт-скоупом**: агрегат не
+    отличает «продукт ещё в очереди» от «продукт потерян», а продукт-цикл
+    последователен и один продукт может идти часами. При ``--json`` — NDJSON-строка
+    ``crawl_product``; иначе — одна короткая человекочитаемая строка.
+    """
+    if json_mode:
+        _print_json(
+            {
+                "event": "crawl_product",
+                "session_id": session_id,
+                "phase": phase,
+                "product_id": product_id,
+            }
+        )
+    else:
+        sys.stdout.write(f"crawl product {phase}: {product_id}\n")
+        sys.stdout.flush()
+
+
+def _product_callback(
+    *, session_id: str, json_mode: bool
+) -> Callable[[str, str], None]:
+    """Phase 4: колбэк границ продукта во время ``build_corpus`` (``--follow``)."""
+
+    def _callback(phase: str, product_id: str) -> None:
+        _emit_product_progress(
+            phase, product_id, session_id=session_id, json_mode=json_mode
+        )
+
+    return _callback
+
+
 def _follow_session(
     store: Any,
     session_id: str,
@@ -1471,6 +1508,7 @@ def _resolve_phases(
     urls: Mapping[str, list[str]] | None = None,
     max_attempts: int | None = None,
     progress: Callable[[dict[str, int]], None] | None = None,
+    on_product: Callable[[str, str], None] | None = None,
     max_depth: int | None = None,
     max_documents: int | None = None,
     exclude_paths: Sequence[str] | None = None,
@@ -1514,6 +1552,8 @@ def _resolve_phases(
     :param max_attempts: Phase 4 — потолок попыток корпуса (``--max-attempts``); ``None`` →
         без потолка (протягивается в :func:`build_phases`/``build_corpus``).
     :param progress: Phase 4 — колбэк снимка прогресса сеанса (``--follow``); ``None`` → без.
+    :param on_product: Phase 4 — колбэк границ продукта (``--follow``): ``start``/``end``
+        по продукту **живо**, пока идёт Ш5; ``None`` → без вывода (поведение неизменно).
     :param state: открытый ``ProductStatePort`` пакета (09 §4.1); ``None`` → инкрементальный
         субстрат корпуса выключен (dry-run/``crawl`` без состояния).
     :param product_modes: ``product_id → mode`` из onboarding-плана; ``None`` → все ``new``.
@@ -1584,6 +1624,8 @@ def _resolve_phases(
         # Phase 4: потолок попыток (--max-attempts) и колбэк прогресса (--follow).
         "max_attempts": max_attempts,
         "progress": progress,
+        # Phase 4: живая граница продукта (--follow) — продукт-скоуп к агрегату сеанса.
+        "on_product": on_product,
         # D1/D2: CLI-уточнения run-слоя осей краула (пробрасываются в build_phases →
         # run-слой CrawlRunConfig) и application-слой (deploy.yaml:crawl).
         "max_depth": max_depth,
