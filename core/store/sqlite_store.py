@@ -25,6 +25,7 @@ from core.domain import (
     Cell,
     CellEvidence,
     CellState,
+    CorpusArtifact,
     CorpusChunk,
     CorpusCoverage,
     CorpusDoc,
@@ -35,6 +36,7 @@ from core.domain import (
     CrawlSessionStatus,
     EndpointKind,
     EvidenceType,
+    ExtractionCoverage,
     Gate,
     GateDecision,
     IndexManifestEntry,
@@ -1399,6 +1401,279 @@ class SqliteStore:
             (run_id,),
         ):
             yield self._row_to_corpus_coverage(row)
+
+    # -- замороженный набор артефактов и покрытие экстракции (C2, schema 3.10.0) -- #
+    @staticmethod
+    def _row_to_corpus_artifact(row: sqlite3.Row) -> CorpusArtifact:
+        """Восстанавливает ``CorpusArtifact`` из строки ``corpus_artifacts``."""
+        raw_members = _parse_json_text(row["members_json"])
+        members = raw_members if isinstance(raw_members, list) else []
+        page_count = row["page_count"]
+        member_count = row["member_count"]
+        depth = row["depth"]
+        return CorpusArtifact(
+            run_id=row["run_id"],
+            product_id=row["product_id"],
+            artifact_id=row["artifact_id"],
+            url=row["url"],
+            raw_path=row["raw_path"],
+            content_hash=row["content_hash"],
+            size_bytes=int(row["size_bytes"] or 0),
+            artifact_class=row["artifact_class"],
+            format=row["format"],
+            page_count=None if page_count is None else int(page_count),
+            member_count=None if member_count is None else int(member_count),
+            members=[str(member) for member in members],
+            extraction_required=bool(row["extraction_required"]),
+            level=row["level"],
+            fetch_mode=row["fetch_mode"],
+            content_type=row["content_type"],
+            lang=row["lang"],
+            depth=None if depth is None else int(depth),
+            fetched_at=row["fetched_at"],
+            frozen_at=row["frozen_at"],
+            probed_at=row["probed_at"],
+            probe_note=row["probe_note"],
+        )
+
+    def replace_corpus_artifacts(
+        self, run_id: str, artifacts: Iterable[CorpusArtifact]
+    ) -> None:
+        """Идемпотентно заменяет набор артефактов прогона (одна транзакция).
+
+        Сначала удаляет прежние строки прогона, затем вставляет новый снимок в
+        детерминированном порядке ``product_id, artifact_id``. Пустой набор очищает
+        таблицу прогона: повторный ``crawl`` без допущенных артефактов не оставляет
+        строк от прошлого прогона.
+        """
+        rows = sorted(artifacts, key=lambda item: (item.product_id, item.artifact_id))
+        with self.conn:
+            self.conn.execute(
+                "DELETE FROM corpus_artifacts WHERE run_id = ?", (run_id,)
+            )
+            self.conn.executemany(
+                "INSERT INTO corpus_artifacts"
+                " (run_id, product_id, artifact_id, url, raw_path, content_hash,"
+                "  size_bytes, artifact_class, format, page_count, member_count,"
+                "  members_json, extraction_required, level, fetch_mode, content_type,"
+                "  lang, depth, fetched_at, frozen_at, probed_at, probe_note)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                [
+                    (
+                        artifact.run_id,
+                        artifact.product_id,
+                        artifact.artifact_id,
+                        artifact.url,
+                        artifact.raw_path,
+                        artifact.content_hash,
+                        artifact.size_bytes,
+                        artifact.artifact_class,
+                        artifact.format,
+                        artifact.page_count,
+                        artifact.member_count,
+                        json.dumps(
+                            list(artifact.members),
+                            ensure_ascii=False,
+                            sort_keys=False,
+                        ),
+                        int(artifact.extraction_required),
+                        artifact.level,
+                        artifact.fetch_mode,
+                        artifact.content_type,
+                        artifact.lang,
+                        artifact.depth,
+                        artifact.fetched_at,
+                        artifact.frozen_at,
+                        artifact.probed_at,
+                        artifact.probe_note,
+                    )
+                    for artifact in rows
+                ],
+            )
+
+    def iter_corpus_artifacts(
+        self, run_id: str, *, product_id: str | None = None
+    ) -> Iterator[CorpusArtifact]:
+        """Итерирует замороженные артефакты; порядок ``product_id, artifact_id``."""
+        sql = "SELECT * FROM corpus_artifacts WHERE run_id = ?"
+        params: list[Any] = [run_id]
+        if product_id is not None:
+            sql += " AND product_id = ?"
+            params.append(product_id)
+        sql += " ORDER BY product_id, artifact_id"
+        for row in self.conn.execute(sql, params):
+            yield self._row_to_corpus_artifact(row)
+
+    def update_corpus_artifact_probe(
+        self,
+        run_id: str,
+        product_id: str,
+        artifact_id: str,
+        *,
+        artifact_class: str,
+        format: str | None,
+        page_count: int | None,
+        member_count: int | None,
+        members: Iterable[str] = (),
+        probed_at: str | None,
+        probe_note: str | None = None,
+    ) -> None:
+        """Записывает результат ``probe`` в строку артефакта (экстракции не выполняет)."""
+        with self.conn:
+            self.conn.execute(
+                "UPDATE corpus_artifacts SET"
+                " artifact_class = ?,"
+                " format = ?,"
+                " page_count = ?,"
+                " member_count = ?,"
+                " members_json = ?,"
+                " probed_at = ?,"
+                " probe_note = ?"
+                " WHERE run_id = ? AND product_id = ? AND artifact_id = ?",
+                (
+                    artifact_class,
+                    format,
+                    page_count,
+                    member_count,
+                    json.dumps(list(members), ensure_ascii=False, sort_keys=False),
+                    probed_at,
+                    probe_note,
+                    run_id,
+                    product_id,
+                    artifact_id,
+                ),
+            )
+
+    def set_crawl_session_artifact_set(
+        self,
+        session_id: str,
+        *,
+        digest: str,
+        total: int,
+        bytes_total: int,
+    ) -> None:
+        """Фиксирует ``artifact_set_digest``/счётчики набора в ``crawl_sessions``."""
+        with self.conn:
+            self.conn.execute(
+                "UPDATE crawl_sessions SET"
+                " artifact_set_digest = ?,"
+                " artifacts_total = ?,"
+                " artifacts_bytes = ?"
+                " WHERE session_id = ?",
+                (digest, int(total), int(bytes_total), session_id),
+            )
+
+    def read_crawl_artifact_set(
+        self, session_id: str
+    ) -> tuple[str | None, int, int]:
+        """Возвращает ``(digest, artifacts_total, artifacts_bytes)`` сеанса.
+
+        Сеанс без фиксации (или отсутствующий) даёт ``(None, 0, 0)`` — «набор не
+        заморожен», а не «пустой набор».
+        """
+        row = self.conn.execute(
+            "SELECT artifact_set_digest, artifacts_total, artifacts_bytes"
+            " FROM crawl_sessions WHERE session_id = ?",
+            (session_id,),
+        ).fetchone()
+        if row is None:
+            return (None, 0, 0)
+        return (
+            row["artifact_set_digest"],
+            int(row["artifacts_total"] or 0),
+            int(row["artifacts_bytes"] or 0),
+        )
+
+    def set_run_artifact_set_digest(self, run_id: str, digest: str) -> None:
+        """Записывает ``runs.artifact_set_digest`` (провенанс замороженного набора)."""
+        with self.conn:
+            self.conn.execute(
+                "UPDATE runs SET artifact_set_digest = ? WHERE run_id = ?",
+                (digest, run_id),
+            )
+
+    @staticmethod
+    def _row_to_extraction_coverage(row: sqlite3.Row) -> ExtractionCoverage:
+        """Восстанавливает ``ExtractionCoverage`` из строки ``extraction_coverage``."""
+        raw_blocked = _parse_json_text(row["blocked_json"])
+        blocked = raw_blocked if isinstance(raw_blocked, dict) else {}
+        raw_origins = _parse_json_text(row["unreadable_origins_json"])
+        unreadable_origins = raw_origins if isinstance(raw_origins, list) else []
+        return ExtractionCoverage(
+            product_id=row["product_id"],
+            complete=bool(row["complete"]),
+            expected_artifacts=int(row["expected_artifacts"] or 0),
+            extracted_artifacts=int(row["extracted_artifacts"] or 0),
+            blocked={str(k): int(v) for k, v in blocked.items()},
+            unreadable_origins=[str(origin) for origin in unreadable_origins],
+            artifact_set_digest=row["artifact_set_digest"],
+            computed_at=row["computed_at"],
+            reason=row["reason"],
+        )
+
+    def save_extraction_coverage(
+        self, run_id: str, coverage: ExtractionCoverage
+    ) -> None:
+        """Идемпотентный upsert покрытия экстракции по PK ``(run_id, product_id)``."""
+        blocked_json = json.dumps(
+            dict(sorted(coverage.blocked.items())),
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        unreadable_origins_json = json.dumps(
+            sorted(coverage.unreadable_origins),
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        with self.conn:
+            self.conn.execute(
+                "INSERT INTO extraction_coverage"
+                " (run_id, product_id, complete, expected_artifacts,"
+                "  extracted_artifacts, blocked_json, unreadable_origins_json,"
+                "  artifact_set_digest, computed_at, reason)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                " ON CONFLICT(run_id, product_id) DO UPDATE SET"
+                "  complete = excluded.complete,"
+                "  expected_artifacts = excluded.expected_artifacts,"
+                "  extracted_artifacts = excluded.extracted_artifacts,"
+                "  blocked_json = excluded.blocked_json,"
+                "  unreadable_origins_json = excluded.unreadable_origins_json,"
+                "  artifact_set_digest = excluded.artifact_set_digest,"
+                "  computed_at = excluded.computed_at,"
+                "  reason = excluded.reason",
+                (
+                    run_id,
+                    coverage.product_id,
+                    int(coverage.complete),
+                    coverage.expected_artifacts,
+                    coverage.extracted_artifacts,
+                    blocked_json,
+                    unreadable_origins_json,
+                    coverage.artifact_set_digest,
+                    coverage.computed_at,
+                    coverage.reason,
+                ),
+            )
+
+    def read_extraction_coverage(
+        self, run_id: str, product_id: str
+    ) -> ExtractionCoverage | None:
+        """Читает покрытие экстракции продукта; ``None`` — записи нет (не «полное»)."""
+        row = self.conn.execute(
+            "SELECT * FROM extraction_coverage WHERE run_id = ? AND product_id = ?",
+            (run_id, product_id),
+        ).fetchone()
+        return None if row is None else self._row_to_extraction_coverage(row)
+
+    def iter_extraction_coverage(
+        self, run_id: str
+    ) -> Iterator[ExtractionCoverage]:
+        """Итерирует покрытие экстракции прогона; порядок ``product_id``."""
+        for row in self.conn.execute(
+            "SELECT * FROM extraction_coverage WHERE run_id = ? ORDER BY product_id",
+            (run_id,),
+        ):
+            yield self._row_to_extraction_coverage(row)
 
     def iter_corpus_docs(self, run_id: str) -> Iterator[CorpusDoc]:
         """Итерирует документы корпуса прогона (детерминированно: ``product_id, doc_id``).

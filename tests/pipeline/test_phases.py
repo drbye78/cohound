@@ -69,6 +69,7 @@ from core.pipeline.plan import RunPlan
 from core.pipeline.report import build_manifest
 from core.pipeline.runner import (
     GATE_PHASES,
+    LEGACY_PHASE_ALIASES,
     PHASES,
     PhaseResult,
     Ports,
@@ -326,9 +327,10 @@ def _chunks_index() -> FakeLexicalIndex:
 
 def test_build_phases_implements_non_gate_phases_only() -> None:
     phases = build_phases(inputs=_inputs(), plan=_plan(), ports=Ports())
-    assert set(phases) == set(IMPLEMENTED_PHASES)
+    # C2: ``corpus`` — легаси-ключ (монолит), не фаза: он вне ``PHASES``/``IMPLEMENTED_PHASES``.
+    assert set(phases) - set(LEGACY_PHASE_ALIASES) == set(IMPLEMENTED_PHASES)
     assert set(phases).isdisjoint(GATE_PHASES)  # гейты не переопределяются (S9)
-    assert set(phases) <= set(PHASES)
+    assert set(phases) - set(LEGACY_PHASE_ALIASES) <= set(PHASES)
     assert all(callable(fn) for fn in phases.values())
 
 

@@ -388,14 +388,16 @@ def _execute_crawl(
         if clear_first:
             store.clear_crawl_session(session_id)
             cleared = True
-        if "corpus" in _phases_until(until):
+        if "crawl" in _phases_until(until):
             ctx = RunContext(
                 run_id=run_id,
                 store=store,
                 ports=ports,
                 clock=getattr(args, "clock", None),
             )
-            result = phases["corpus"](ctx)
+            # C2: команда ``hound crawl`` — стадия краула (retention/сеанс/артефакты),
+            # без экстракции/индексации: их исполняет ``hound run`` стадиями extract/index.
+            result = phases["crawl"](ctx)
         else:
             notes.append(f"корпус отсечён --until={until}")
         # Phase 4: ``--follow``/``--watch`` — опрос до терминала (foreground: сеанс уже

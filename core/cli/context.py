@@ -67,7 +67,7 @@ from core.domain.enums import (
     Status,
 )
 from core.domain.models import CatalogRow, Cohort
-from core.pipeline import PHASES, Ports, RunReport, build_phases
+from core.pipeline import LEGACY_PHASE_ALIASES, PHASES, Ports, RunReport, build_phases
 from core.pipeline.extract_cache import ExtractionCache
 from core.pipeline.eval_cache import EvalVerdictCache
 from core.pipeline.normalize import RunInputs, load_inputs
@@ -929,9 +929,15 @@ def _short_json(value: Any) -> str:
 
 
 def _phases_until(until: str | None) -> list[str]:
-    """Список фаз от начала до ``until`` включительно (все — при ``None``)."""
+    """Список фаз от начала до ``until`` включительно (все — при ``None``).
+
+    C2: легаси-имя ``corpus`` расширяется в последнюю свою стадию (``index``), поэтому
+    ``--until corpus`` означает «все три стадии», а не неизвестную фазу.
+    """
     if until is None:
         return list(PHASES)
+    if until in LEGACY_PHASE_ALIASES:
+        until = LEGACY_PHASE_ALIASES[until][-1]
     return list(PHASES[: PHASES.index(until) + 1])
 
 

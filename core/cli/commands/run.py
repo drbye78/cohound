@@ -715,9 +715,17 @@ def run(args: argparse.Namespace) -> int:
             # композиции и сразу фиксируем ``runs.index_build_id`` (до фазы отчёта,
             # переживает resume). Инъецированные ``ports`` (тестовый шов) не трогаем:
             # ручной DI приоритетнее автосборки.
-            if getattr(args, "ports", None) is None and "corpus" in phases:
-                phases["corpus"] = _rebind_retrieval_after_corpus(
-                    phases["corpus"],
+            if getattr(args, "ports", None) is None and "index" in phases:
+                # C2: композиция фиксируется стадией ``index``; легаси-реестр (прямой DI
+                # монолита) сохраняет прежнюю точку ``corpus``.
+                _rebind_target = "index"
+            elif getattr(args, "ports", None) is None and "corpus" in phases:
+                _rebind_target = "corpus"
+            else:
+                _rebind_target = None
+            if _rebind_target is not None:
+                phases[_rebind_target] = _rebind_retrieval_after_corpus(
+                    phases[_rebind_target],
                     ports=ports,
                     store=store,
                     index_root=(

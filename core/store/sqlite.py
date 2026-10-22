@@ -12,7 +12,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = "3.9.0"
+SCHEMA_VERSION = "3.10.0"
 
 DDL = """
 PRAGMA journal_mode = WAL;
@@ -316,6 +316,53 @@ CREATE TABLE IF NOT EXISTS corpus_coverage (
     PRIMARY KEY (run_id, product_id)
 );
 
+-- C2 (schema 3.10.0): замороженный набор артефактов продукта (crawl → extract → index).
+-- Одна строка — один **допущенный** артефакт с ретенированными байтами (I19). Набор
+-- фиксируется фазой ``crawl`` (``crawl_sessions.artifact_set_digest``); экстракция
+-- артефакта разрешена только после фиксации. Аддитивная таблица.
+CREATE TABLE IF NOT EXISTS corpus_artifacts (
+    run_id            TEXT NOT NULL,
+    product_id        TEXT NOT NULL,
+    artifact_id       TEXT NOT NULL,
+    url               TEXT NOT NULL,
+    raw_path          TEXT NOT NULL,
+    content_hash      TEXT NOT NULL,
+    size_bytes        INTEGER NOT NULL DEFAULT 0,
+    artifact_class    TEXT NOT NULL,                 -- page|document|container
+    format            TEXT,                          -- pdf|docx|zip|7z|rar|...
+    page_count        INTEGER,                       -- probe: PDF header (без рендеринга)
+    member_count      INTEGER,                       -- probe: состав контейнера (plan)
+    members_json      TEXT NOT NULL DEFAULT '[]',    -- probe: имена членов (не извлекались)
+    extraction_required INTEGER NOT NULL DEFAULT 1,  -- контейнер при ``plan`` — 0
+    level             TEXT,                          -- DocumentLevel корня
+    fetch_mode        TEXT,
+    content_type      TEXT,
+    lang              TEXT,
+    depth             INTEGER,
+    fetched_at        TEXT,
+    frozen_at         TEXT NOT NULL,
+    probed_at         TEXT,
+    probe_note        TEXT,
+    PRIMARY KEY (run_id, product_id, artifact_id)
+);
+
+-- C2 (schema 3.10.0): покрытие **экстракции** продукта — второй порог гейта ❌.
+-- Зеркалит форму ``corpus_coverage``: краул может быть полным, но нулевая экстракция
+-- не даёт права публиковать отсутствие.
+CREATE TABLE IF NOT EXISTS extraction_coverage (
+    run_id              TEXT NOT NULL,
+    product_id          TEXT NOT NULL,
+    complete            INTEGER NOT NULL,
+    expected_artifacts  INTEGER NOT NULL DEFAULT 0,
+    extracted_artifacts INTEGER NOT NULL DEFAULT 0,
+    blocked_json        TEXT NOT NULL DEFAULT '{}',   -- {"error_kind": count}
+    unreadable_origins_json TEXT NOT NULL DEFAULT '[]',
+    artifact_set_digest TEXT,
+    computed_at         TEXT NOT NULL,
+    reason              TEXT,
+    PRIMARY KEY (run_id, product_id)
+);
+
 CREATE INDEX IF NOT EXISTS idx_cells_run_state  ON cells(run_id, state);
 CREATE INDEX IF NOT EXISTS idx_chunks_product   ON corpus_chunks(product_id);
 CREATE INDEX IF NOT EXISTS idx_chunks_build     ON corpus_chunks(build_id);
@@ -326,6 +373,8 @@ CREATE INDEX IF NOT EXISTS idx_crawl_sessions_run    ON crawl_sessions(run_id, s
 CREATE INDEX IF NOT EXISTS idx_crawl_items_session   ON crawl_session_items(session_id, status);
 CREATE INDEX IF NOT EXISTS idx_crawl_items_product   ON crawl_session_items(session_id, product_id);
 CREATE INDEX IF NOT EXISTS idx_corpus_coverage_run   ON corpus_coverage(run_id);
+CREATE INDEX IF NOT EXISTS idx_corpus_artifacts_run  ON corpus_artifacts(run_id, product_id);
+CREATE INDEX IF NOT EXISTS idx_extraction_coverage_run ON extraction_coverage(run_id);
 
 -- I18: оценщик (evaluator) не может быть зарегистрирован с веб-тулом.
 CREATE TRIGGER IF NOT EXISTS trg_evaluator_no_web_tool
@@ -474,6 +523,20 @@ def connect(db_path: str | Path = ":memory:") -> sqlite3.Connection:
             "reason": "TEXT",
         },
     )
+    # DDL-миграция v3.10.0 (срез C2): набор артефактов и покрытие экстракции — новые
+    # таблицы создаются ``CREATE TABLE IF NOT EXISTS``; additive-колонки пишутся явно,
+    # старые БД получают NULL (набор ещё не заморожен — это видимое состояние, а не
+    # выдуманный «полный» набор).
+    _ensure_columns(
+        conn,
+        "crawl_sessions",
+        {
+            "artifact_set_digest": "TEXT",
+            "artifacts_total": "INTEGER",
+            "artifacts_bytes": "INTEGER",
+        },
+    )
+    _ensure_columns(conn, "runs", {"artifact_set_digest": "TEXT"})
     # v3.1.0 — удаление legacy per-URL таблицы попыток (полностью замещена сеансом краула,
     # back-compat не требуется): DDL-таблицы/индексов и их миграции больше нет.
     conn.execute(

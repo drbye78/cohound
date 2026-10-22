@@ -137,6 +137,8 @@ from core.config.domain_profiles import DomainProfile
 from core.config.seeds import normalize_seed_url
 from core.domain import (
     BLOCKING_FAILURE_KINDS,
+    ArchiveDescent,
+    CorpusArtifact,
     CorpusChunk,
     CorpusCoverage,
     CorpusDoc,
@@ -145,6 +147,7 @@ from core.domain import (
     CrawlSessionItem,
     CrawlStrategy,
     DocumentLevel,
+    ExtractionCoverage,
     FailureKind,
     IncrementalKind,
     IndexManifestEntry,
@@ -183,6 +186,7 @@ from core.pipeline.incremental import (
     doc_version_id,
     plan_incremental,
 )
+from core.pipeline.probe import ProbeResult, probe_artifact
 from core.pipeline.runner import PhaseResult
 from core.ports.chunker import ChunkerPort
 from core.ports.crawl_executor import (
@@ -221,6 +225,7 @@ from core.util.document_formats import (
     is_attachment_url,
     unsupported_binary_reason,
 )
+from core.util.document_probe import detect_format as _detect_artifact_format
 from core.util.hashing import content_hash, short_hash
 from core.util.index_partition import build_root as _partition_root
 from core.util.index_partition import is_committed as _partition_is_committed
@@ -229,7 +234,13 @@ from core.util.html_links import extract_links
 from core.util.rate_limit import RateLimiter
 from core.util.security import validate_url
 
-__all__ = ["ExtractionPool", "IndexBuild", "build_corpus", "derive_corpus_coverage"]
+__all__ = [
+    "CorpusStageBundle",
+    "ExtractionPool",
+    "IndexBuild",
+    "build_corpus",
+    "derive_corpus_coverage",
+]
 
 #: Разделитель полей material-строки ``index_build_id`` (unit separator — однозначная склейка).
 _FIELD_SEP = "\x1f"
@@ -308,6 +319,16 @@ _CLEAR = object()
 
 #: P0: размер порции потокового хеширования retained-байтов (resume).
 _RESUME_READ_CHUNK = 1024 * 1024
+
+#: C2: потолок чтения контейнера/PDF для ``probe`` (имена членов/страницы лежат в конце
+#: файла). Сверх потолка классификация остаётся, состав/число страниц — честный ``None``.
+_PROBE_MAX_SCAN_BYTES = 64 * 1024 * 1024
+
+#: C2: машинная причина неполного покрытия экстракции (аннотация cell-level, не статус).
+EXTRACTION_INCOMPLETE_REASON = "extraction_incomplete"
+
+#: C2: допустимые стадии ``_build_corpus`` (legacy ``all`` = прежняя монолитная фаза).
+_CORPUS_STAGES: tuple[str, ...] = ("crawl", "extract", "index", "all")
 
 #: Статус активной версии документа (``document_version.status``, 09 §4.2).
 _DOC_ACTIVE = "active"
@@ -632,6 +653,100 @@ def _persist_corpus_coverage(
                 computed_at=computed_at,
             )
         store.save_corpus_coverage(run_id, coverage)
+
+
+def _artifact_id(product_id: str, content_hash_value: str) -> str:
+    """Детерминированный id артефакта: ``product:content_hash`` (content-addressed, I19).
+
+    Один и тот же контент под разными URL схлопывается в один артефакт: retention тоже
+    хранит байты один раз (``corpus_raw/{product}/{hash}.bin``), поэтому «набор» —
+    множество уникальных байтов, а не множество URL.
+    """
+    return f"{product_id}:{content_hash_value}"
+
+
+def _artifact_set_digest(artifacts: Iterable[CorpusArtifact]) -> str:
+    """Канонический отпечаток замороженного набора артефактов (порядок независим).
+
+    В материал входят только identity-поля (``product_id``/``artifact_id``/``content_hash``/
+    ``size_bytes``/``artifact_class``): обогащение ``probe`` (страницы/члены/заметка) не
+    меняет отпечаток, иначе повторный probe выглядел бы как другой набор.
+    """
+    material = [
+        {
+            "product_id": artifact.product_id,
+            "artifact_id": artifact.artifact_id,
+            "content_hash": artifact.content_hash,
+            "size_bytes": int(artifact.size_bytes),
+            "artifact_class": artifact.artifact_class,
+        }
+        for artifact in sorted(
+            artifacts, key=lambda item: (item.product_id, item.artifact_id)
+        )
+    ]
+    return content_hash(
+        json.dumps(material, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    )
+
+
+def _derive_extraction_coverage(
+    product_id: str,
+    artifacts: Sequence[CorpusArtifact],
+    outcomes: Mapping[tuple[str, str], tuple[bool, FailureKind | None]],
+    *,
+    frozen_digest: str | None,
+    computed_at: str,
+) -> ExtractionCoverage:
+    """Второй порог гейта ``❌``: полнота **экстракции** замороженного набора продукта.
+
+    В знаменатель входят только ``extraction_required`` артефакты (страницы/документы):
+    контейнеры при ``archive_descent=plan`` не извлекаются по контракту. Zero-artifact
+    продукт не доказывает полноту экстракции (``complete=False``, ``reason=no_artifacts``)
+    — его неполноту объясняет ``corpus_coverage``; гейт стадии такие продукты не валит.
+
+    ``complete=True`` — только при замороженном непустом наборе, отсутствии расхождения
+    отпечатка и отсутствии неудачных извлечений.
+    """
+    required = [artifact for artifact in artifacts if artifact.extraction_required]
+    blocked: dict[str, int] = {}
+    unreadable: set[str] = set()
+    extracted = 0
+    for artifact in required:
+        ok, kind = outcomes.get((product_id, artifact.url), (False, None))
+        if ok:
+            extracted += 1
+            continue
+        failure = kind or FailureKind.PARSER_FAILED
+        blocked[failure.value] = blocked.get(failure.value, 0) + 1
+        origin = _url_origin(artifact.url)
+        if origin:
+            unreadable.add(origin)
+
+    current_digest = _artifact_set_digest(artifacts)
+    reason: str | None = None
+    if frozen_digest is None:
+        reason = "not_frozen"
+    elif not artifacts:
+        reason = "no_artifacts"
+    elif current_digest != frozen_digest:
+        reason = "artifact_set_mismatch"
+
+    return ExtractionCoverage(
+        product_id=product_id,
+        complete=(
+            reason is None
+            and len(required) > 0
+            and extracted == len(required)
+            and not blocked
+        ),
+        expected_artifacts=len(required),
+        extracted_artifacts=extracted,
+        blocked=dict(sorted(blocked.items())),
+        unreadable_origins=sorted(unreadable),
+        artifact_set_digest=frozen_digest,
+        computed_at=computed_at,
+        reason=reason,
+    )
 
 
 @dataclass(frozen=True)
@@ -1017,6 +1132,27 @@ class _ProductIngest:
     product_id: str
     docs: list[CorpusDoc] = field(default_factory=list)
     chunks: list[CorpusChunk] = field(default_factory=list)
+
+
+@dataclass
+class CorpusStageBundle:
+    """C2: in-memory-канал между стадиями ``crawl → extract → index`` (в пределах процесса).
+
+    ``Runner`` не несёт произвольных данных между фазами, поэтому стадии передают друг
+    другу этот бандл через замыкание composition-слоя (``phases.build_phases``). При
+    resume в новом процессе бандла нет — ``index`` пересобирает ingest из артефактов
+    (без сети: retained raw уже на диске), а ``extract`` читает артефакты из store.
+
+    ``artifact_set_digest`` — отпечаток замороженного набора (``crawl``); ``artifacts`` —
+    сам снимок; ``ingests`` — результат Pass A (``extract``); ``extraction_incomplete`` —
+    продукты, чьё покрытие экстракции неполно (для диагностики/гейта).
+    """
+
+    stage: str
+    artifact_set_digest: str | None = None
+    artifacts: tuple[CorpusArtifact, ...] = ()
+    ingests: tuple[_ProductIngest, ...] = ()
+    extraction_incomplete: tuple[str, ...] = ()
 
 
 @dataclass
@@ -1925,6 +2061,9 @@ def _build_corpus(
     product_modes: Mapping[str, str] | None = None,
     refresh_policy: str = "auto",
     pools: _ExtractPools,
+    stage: str = "all",
+    bundle: CorpusStageBundle | None = None,
+    result_sink: dict[str, Any] | None = None,
 ) -> PhaseResult:
     """Ш5: собирает корпус из ``plan × urls`` и возвращает ``PhaseResult``.
 
@@ -2083,6 +2222,17 @@ def _build_corpus(
     if urls is not None and not isinstance(urls, Mapping):
         raise ValueError("urls обязан быть отображением product_id → список URL")
 
+    # C2: стадия. ``all`` — легаси-монолит (``hound crawl``/прямые тесты); три стадии —
+    # новый оркестратор (``crawl → extract → index``). Неизвестная стадия — ошибка сразу:
+    # молчаливая подмена монолитом скрыла бы рассинхрон реестра фаз.
+    stage_value = str(stage or "all").strip().lower()
+    if stage_value not in _CORPUS_STAGES:
+        raise ValueError(
+            f"неизвестная стадия corpus: {stage!r}; допустимо: {_CORPUS_STAGES}"
+        )
+    do_crawl = stage_value in ("crawl", "all")
+    do_extract = stage_value in ("extract", "all")
+
     url_map: dict[str, list[str]] = {}
     if urls:
         for pid, values in urls.items():
@@ -2128,6 +2278,85 @@ def _build_corpus(
     #: 09 §6.3: честные счётчики документов по продукту (``total``/``new``/``reused``).
     #: Заполняются только при наличии durable-субстрата (``state``), иначе карта пуста.
     doc_counters: dict[str, dict[str, int]] = {}
+
+    # ------------------------------------------------------------------ #
+    # C2: замороженный набор артефактов краула (``corpus_artifacts``)
+    # ------------------------------------------------------------------ #
+    #: Набор **допущенных** артефактов прогона (content-addressed, I19). Копится стадией
+    #: ``crawl`` и фиксируется в store до любой экстракции — это и есть «заморозка».
+    crawl_artifacts: list[CorpusArtifact] = []
+    #: Быстрый дедуп по ``artifact_id`` (``product:content_hash``): одинаковый контент под
+    #: разными URL — один артефакт (retention тоже хранит байты один раз).
+    artifact_ids: set[str] = set()
+
+    def _artifact_class(
+        url: str, page: RawPage, fetch_plan: FetchPlan
+    ) -> str:
+        """Класс артефакта по байтам/метаданным (нейтрально: page/document/container)."""
+        content = page.content or page.head or b""
+        if (
+            _is_attachment(url, page.content_type, fetch_plan.attachment_formats)
+            and classify_archive_bytes(content) is not None
+        ):
+            return "container"
+        if document_content_type(page.content_type) is not None:
+            return "document"
+        if content.lstrip()[:1024].startswith(b"%PDF-"):
+            return "document"
+        return "page"
+
+    def _record_artifact(
+        product_id: str,
+        url: str,
+        page: RawPage,
+        raw_path: Path,
+        fetch_plan: FetchPlan,
+        depth: int | None,
+        level_value: DocumentLevel,
+        *,
+        extraction_required: bool | None = None,
+    ) -> CorpusArtifact | None:
+        """Фиксирует допущенный артефакт набора (до/независимо от экстракции).
+
+        ``content_hash`` берётся из имени retained-файла (``_retain`` кладёт
+        ``{sha256}.bin``): пересчёт хеша не нужен, а байты уже верифицированы retention'ом.
+        ``extraction_required`` — участие в покрытии экстракции: контейнеры (спуск в C2 не
+        исполняется) и документы при ``document_level=off`` в знаменатель не входят.
+        """
+        hash_value = raw_path.stem
+        artifact_id = _artifact_id(product_id, hash_value)
+        if artifact_id in artifact_ids:
+            return None
+        cls = _artifact_class(url, page, fetch_plan)
+        if extraction_required is None:
+            extraction_required = cls != "container" and not (
+                cls == "document" and level_value is DocumentLevel.OFF
+            )
+        try:
+            size_bytes = raw_path.stat().st_size
+        except OSError:
+            size_bytes = len(page.content or page.head or b"")
+        artifact = CorpusArtifact(
+            run_id=str(run_id or ""),
+            product_id=product_id,
+            artifact_id=artifact_id,
+            url=url,
+            raw_path=str(raw_path),
+            content_hash=hash_value,
+            size_bytes=max(0, int(size_bytes)),
+            artifact_class=cls,
+            level=_as_text(level_value),
+            fetch_mode=_as_text(page.fetch_mode),
+            content_type=page.content_type,
+            lang=page.lang,
+            depth=depth,
+            fetched_at=page.fetched_at or None,
+            extraction_required=bool(extraction_required),
+            frozen_at=_now_iso(),
+        )
+        artifact_ids.add(artifact_id)
+        crawl_artifacts.append(artifact)
+        return artifact
 
     # 09 §6.3/§9 (MVP-3b): политика наблюдения и режимы продуктов. ``state is None`` —
     # legacy-путь: все три аргумента игнорируются целиком (поведение байт-в-байт).
@@ -4307,7 +4536,7 @@ def _build_corpus(
             bool(deferred),
         )
 
-    for product_id in products:
+    for product_id in (products if do_crawl else ()):
         ingest = _ProductIngest(product_id=product_id)
         # I17: дедуп в пределах продукт-партиции (см. docstring модуля).
         seen_docs: dict[str, str] = {}
@@ -4679,6 +4908,13 @@ def _build_corpus(
                 if outcome is None:
                     return  # отказ/сбой — frontier от него не расширяется
                 page, raw_path, fetch_plan, freshly_fetched = outcome
+                # C2: заморозка набора — **до** любой экстракции (инвариант среза).
+                # Для ``all`` артефакт фиксируется здесь же inline; для ``crawl`` —
+                # единственная запись о допущенном источнике (extract читает store).
+                if do_crawl:
+                    _record_artifact(
+                        pid, work_url, page, raw_path, fetch_plan, depth, level
+                    )
                 # 09 §6.3: ревалидация известного URL — depth-0 лист и **вне** бюджета
                 # discovery. ``pages_fetched``/``truncated`` продолжают означать ровно
                 # «документы, которые добавил обход этого корня».
@@ -4690,6 +4926,17 @@ def _build_corpus(
                         frontier.revalidation_fetched += 1
                     else:
                         frontier.note_fetched()
+                # C2: стадия ``crawl`` не извлекает: discovery (BFS-ссылки) идёт от сырых
+                # HTML-байтов и не зависит от экстракции. Экстракция — отдельная стадия.
+                if not do_extract:
+                    _emit_progress()
+                    if (
+                        not is_revalidation
+                        and limits.max_depth > 0
+                        and _looks_like_html(page)
+                    ):
+                        frontier.offer(extract_links(page.content, page.url), depth)
+                    return
                 # P5: post-fetch-пропуск документа при ``off`` (тип узнан только по Content-Type;
                 # фетч был ⇒ страница уже учтена в ``max_documents``, элемент сеанса — FETCHED
                 # из retention; ``FAILED`` не ставим — skip ≠ сбой, §2/§11.3). Байты ретейнены.
@@ -5811,6 +6058,643 @@ def _build_corpus(
 
     _emit_progress()
 
+    # ------------------------------------------------------------------ #
+    # C2: заморозка набора артефактов → probe → финализация краула
+    # ------------------------------------------------------------------ #
+
+    def _freeze_artifact_set() -> str | None:
+        """Фиксирует набор артефактов (снимок прогона) и его отпечаток в store.
+
+        ``replace_corpus_artifacts`` — единственный писатель таблицы: повторный crawl без
+        допущенных артефактов не оставляет строк прошлого прогона. Отпечаток пишется и в
+        сеанс (``crawl_sessions``), и в ``runs`` — так ``extract`` после cross-process
+        resume доказывает, что извлекает **тот же** замороженный набор. Без ``store``/
+        ``run_id`` фиксация — памяти-only (легаси-путь): durable-инвариант к нему неприменим.
+        """
+        digest = _artifact_set_digest(crawl_artifacts)
+        if store is None or run_id is None:
+            return digest if crawl_artifacts else None
+        try:
+            store.replace_corpus_artifacts(run_id, crawl_artifacts)
+        except Exception as exc:  # noqa: BLE001 — изоляция персистенции
+            errors.append(f"replace_corpus_artifacts: {type(exc).__name__}: {exc}")
+            return None
+        if session is not None:
+            try:
+                store.set_crawl_session_artifact_set(
+                    session,
+                    digest=digest,
+                    total=len(crawl_artifacts),
+                    bytes_total=sum(item.size_bytes for item in crawl_artifacts),
+                )
+            except Exception as exc:  # noqa: BLE001
+                errors.append(
+                    f"crawl_session_artifact_set({session}): "
+                    f"{type(exc).__name__}: {exc}"
+                )
+        try:
+            store.set_run_artifact_set_digest(run_id, digest)
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"run_artifact_set_digest: {type(exc).__name__}: {exc}")
+        return digest
+
+    def _probe_frozen_artifacts() -> None:
+        """Классифицирует артефакты (шаг ``probe``): класс/формат/страницы/состав.
+
+        Ничего не извлекает: PDF-страницы читаются из заголовка, контейнеры — только
+        именами членов (``archive_descent=plan``). Результат — в строке артефакта, чтобы
+        ``extract`` и отчёт видели техническую природу источника без повторного чтения.
+        """
+        for artifact in crawl_artifacts:
+            path = Path(artifact.raw_path)
+            try:
+                with path.open("rb") as handle:
+                    head = handle.read(BINARY_SNIFF_BYTES)
+            except OSError as exc:  # noqa: BLE001 — артефакт без байтов не классифицируем
+                errors.append(f"probe {artifact.artifact_id}: {type(exc).__name__}: {exc}")
+                continue
+
+            def _read_all(p: Path = path) -> bytes:
+                with p.open("rb") as handle:
+                    return handle.read(_PROBE_MAX_SCAN_BYTES + 1)
+
+            try:
+                descent = resolve_crawl_limits(
+                    artifact.url,
+                    app=crawl_app or CrawlConfig(),
+                    run=crawl_defaults,
+                    profiles=domain_profiles or {},
+                ).archive_descent
+            except Exception:  # noqa: BLE001 — ось не разрешилась: консервативный plan
+                descent = ArchiveDescent.PLAN
+            try:
+                probe = probe_artifact(
+                    artifact,
+                    head=head,
+                    read_all=_read_all,
+                    descent=descent,
+                )
+            except Exception as exc:  # noqa: BLE001 — probe не роняет фазу
+                errors.append(f"probe {artifact.artifact_id}: {type(exc).__name__}: {exc}")
+                continue
+            artifact.artifact_class = probe.artifact_class
+            artifact.format = probe.format
+            artifact.page_count = probe.page_count
+            artifact.member_count = probe.member_count
+            artifact.members = list(probe.members)
+            # Контейнер не входит в знаменатель покрытия экстракции; ранее выясненный
+            # пропуск (document_level=off) тоже не воскрешается.
+            artifact.extraction_required = bool(
+                probe.extraction_required and artifact.extraction_required
+            )
+            artifact.probed_at = probe.probed_at
+            artifact.probe_note = probe.note
+            if store is not None and run_id is not None:
+                try:
+                    store.update_corpus_artifact_probe(
+                        run_id,
+                        artifact.product_id,
+                        artifact.artifact_id,
+                        artifact_class=artifact.artifact_class,
+                        format=artifact.format,
+                        page_count=artifact.page_count,
+                        member_count=artifact.member_count,
+                        members=artifact.members,
+                        probed_at=artifact.probed_at,
+                        probe_note=artifact.probe_note,
+                    )
+                except Exception as exc:  # noqa: BLE001 — наблюдаемость важнее персистенции
+                    errors.append(
+                        f"update_corpus_artifact_probe({artifact.artifact_id}): "
+                        f"{type(exc).__name__}: {exc}"
+                    )
+
+    def _finalize_crawl_session() -> None:
+        """Финализирует сеанс краула и пишет ``corpus_coverage`` — **до** экстракции.
+
+        Стадия ``crawl`` обязана закрыть сеанс до ``extract``: иначе экстракция шла бы по
+        набору, чей crawl-исход ещё не зафиксирован, и resume не мог бы отличить
+        «докачано» от «не докачано». Без сеанса (нет ``store``/``run_id``) — no-op.
+        """
+        if session is None:
+            return
+        try:
+            # Phase 2/2.1: провенанс сеанса — движки/виды источников из **персистенных
+            # элементов** (``items.values()``) + дайджест конфигурации источников.
+            engines = sorted({str(i.engine) for i in items.values() if i.engine})
+            kinds = sorted({str(i.kind) for i in items.values() if i.kind})
+            digest = (
+                crawl_sources_digest(crawl_sources)
+                if crawl_sources is not None
+                else None
+            )
+            finalize_session(
+                store,
+                session,
+                finished_at=_now_iso(),
+                engines=engines,
+                kinds=kinds,
+                crawl_sources_digest=digest,
+                truncated=bool(truncated_products),
+                effective_limits={"roots": truncation_records},
+                pages_fetched=pages_fetched_total,
+                revalidation_fetched=revalidation_fetched_total,
+                truncated_products=sorted(truncated_products),
+            )
+        except Exception as exc:  # noqa: BLE001 — наблюдаемость важнее персистенции
+            errors.append(
+                f"finalize_crawl_session({session}): {type(exc).__name__}: {exc}"
+            )
+        try:
+            _persist_corpus_coverage(
+                store,
+                run_id,
+                session,
+                truncated_products,
+                _now_iso(),
+                products=products,
+            )
+        except Exception as exc:  # noqa: BLE001 — наблюдаемость важнее персистенции
+            errors.append(f"corpus_coverage({session}): {type(exc).__name__}: {exc}")
+
+    def _crawl_counts() -> tuple[int, int, int]:
+        """``(pending, fetched, failed)`` из сеанса; без сеанса — нули (наблюдаемость)."""
+        if session is None:
+            return 0, 0, 0
+        try:
+            counts = store.crawl_session_counts(session)
+        except Exception as exc:  # noqa: BLE001 — наблюдаемость важнее персистенции
+            errors.append(f"crawl_session_counts: {type(exc).__name__}: {exc}")
+            return 0, 0, 0
+        pending = counts.get(CrawlItemStatus.PENDING.value, 0) + counts.get(
+            CrawlItemStatus.RUNNING.value, 0
+        )
+        fetched = counts.get(CrawlItemStatus.FETCHED.value, 0)
+        failed = counts.get(CrawlItemStatus.FAILED.value, 0) + counts.get(
+            CrawlItemStatus.CANCELLED.value, 0
+        )
+        return pending, fetched, failed
+
+    def _stage_build(
+        ingests_value: Sequence[_ProductIngest] = (), *, index_id: str = ""
+    ) -> IndexBuild:
+        """``IndexBuild`` для стадии без Pass B (crawl/extract): документы и счётчики."""
+        pending, fetched, failed = _crawl_counts()
+        return IndexBuild(
+            index_build_id=index_id,
+            entries=[],
+            docs=[doc for ingest in ingests_value for doc in ingest.docs],
+            chunk_count=sum(len(ingest.chunks) for ingest in ingests_value),
+            crawl_pending=pending,
+            crawl_fetched=fetched,
+            crawl_done=fetched,
+            crawl_failed=failed,
+            truncated=bool(truncated_products),
+            truncation=list(truncation_records),
+            document_skips=list(document_skips),
+            revalidation_orphans=dict(revalidation_orphans),
+            doc_counters=dict(doc_counters),
+            duplicates=dict(duplicates),
+            duplicate_count=sum(duplicates.values()),
+        )
+
+    frozen_digest: str | None = None
+    if do_crawl:
+        frozen_digest = _freeze_artifact_set()
+        _probe_frozen_artifacts()
+        _finalize_crawl_session()
+
+    if stage_value == "crawl":
+        if result_sink is not None:
+            result_sink["corpus_stage_bundle"] = CorpusStageBundle(
+                stage="crawl",
+                artifact_set_digest=frozen_digest,
+                artifacts=tuple(
+                    sorted(crawl_artifacts, key=lambda a: (a.product_id, a.artifact_id))
+                ),
+            )
+        return PhaseResult(
+            status="ok",
+            phase="crawl",
+            cells=[],
+            log_entries=[_stage_build()],
+            errors=errors,
+        )
+
+    # ------------------------------------------------------------------ #
+    # C2: extract — экстракция **замороженного** набора (store → retained raw)
+    # ------------------------------------------------------------------ #
+
+    stage_extractors: dict[DocumentLevel, ExtractorPort] = {}
+
+    def _extractor_for_level(level_value: DocumentLevel) -> ExtractorPort:
+        """Экстрактор уровня: ``full`` — переданный порт; иной — фабрика (кэш стадии)."""
+        if level_value is DocumentLevel.FULL or extractor_factory is None:
+            return extractor
+        cached = stage_extractors.get(level_value)
+        if cached is None:
+            cached = extractor_factory(level_value)
+            stage_extractors[level_value] = cached
+        return cached
+
+    def _artifact_fetch_plan(artifact: CorpusArtifact) -> FetchPlan:
+        """Разрешает ``FetchPlan`` артефакта (ось ``extract``) без сети."""
+        return resolve_crawl_target(
+            artifact.product_id,
+            artifact.url,
+            sources=crawl_sources or CrawlSourcesConfig(),
+            profiles=domain_profiles or {},
+            explicit=explicit_fetch,
+            run_default_strategy=crawl_strategy_default,
+            run_default_rate_limit=crawl_rate_default,
+        ).plan
+
+    def _artifact_level(artifact: CorpusArtifact) -> DocumentLevel:
+        """Уровень извлечения артефакта, записанный при крауле (fallback ``full``)."""
+        if artifact.level:
+            try:
+                return DocumentLevel(artifact.level)
+            except ValueError:
+                pass
+        return DocumentLevel.FULL
+
+    def _artifact_page(
+        artifact: CorpusArtifact,
+    ) -> tuple[RawPage | None, str | None, FailureKind | None]:
+        """Реконструирует ``RawPage`` из retained raw (I19), без сети.
+
+        Сначала используется сеансовый элемент (``_resume_source`` проверяет хеш/лимиты),
+        затем — прямая проверка файла по зафиксированному ``content_hash``: набор
+        заморожен, поэтому подмена байтов обязана быть видимой, а не «другой экстракцией».
+        """
+        item = items.get((artifact.product_id, artifact.url))
+        retained = _resume_source(item, max_bytes=None, artifact_max_bytes=None)
+        if isinstance(retained, _RetainedReject):
+            return None, retained.reason, retained.kind
+        if retained is not None and retained.data is None:
+            # P6: `_resume_source` не буферизует «артефакт» (staged) — экстракция же
+            # работает по байтам. Читаем файл целиком (как пул-путь `_run_extract`).
+            try:
+                data = Path(artifact.raw_path).read_bytes()
+            except OSError as exc:  # noqa: BLE001
+                return (
+                    None,
+                    f"retained raw не читается: {type(exc).__name__}: {exc}",
+                    FailureKind.SOURCE_UNAVAILABLE,
+                )
+            if content_hash(data) != artifact.content_hash:
+                return (
+                    None,
+                    "retained raw не совпадает с зафиксированным content_hash "
+                    "(набор изменён после заморозки)",
+                    FailureKind.SOURCE_UNAVAILABLE,
+                )
+            retained = _RetainedRaw(
+                path=Path(artifact.raw_path),
+                content_hash=artifact.content_hash,
+                size=len(data),
+                head=None,
+                data=data,
+            )
+        if retained is None:
+            path = Path(artifact.raw_path)
+            if not path.is_file():
+                return (
+                    None,
+                    f"retained raw отсутствует: {artifact.raw_path}",
+                    FailureKind.SOURCE_UNAVAILABLE,
+                )
+            try:
+                data = path.read_bytes()
+            except OSError as exc:  # noqa: BLE001
+                return (
+                    None,
+                    f"retained raw не читается: {type(exc).__name__}: {exc}",
+                    FailureKind.SOURCE_UNAVAILABLE,
+                )
+            if len(data) > _PROBE_MAX_SCAN_BYTES:
+                return (
+                    None,
+                    f"retained raw {len(data)} байт > потолка {_PROBE_MAX_SCAN_BYTES}",
+                    FailureKind.PAYLOAD_TOO_LARGE,
+                )
+            digest = content_hash(data)
+            if digest != artifact.content_hash:
+                return (
+                    None,
+                    "retained raw не совпадает с зафиксированным content_hash "
+                    "(набор изменён после заморозки)",
+                    FailureKind.SOURCE_UNAVAILABLE,
+                )
+            retained = _RetainedRaw(
+                path=path,
+                content_hash=digest,
+                size=len(data),
+                head=None,
+                data=data,
+            )
+        fetch_mode = FetchMode.HTTP
+        if artifact.fetch_mode:
+            try:
+                fetch_mode = FetchMode(artifact.fetch_mode)
+            except ValueError:
+                fetch_mode = FetchMode.HTTP
+        buffered = retained.data is not None
+        return (
+            RawPage(
+                url=artifact.url,
+                content=retained.data or b"",
+                fetched_at=artifact.fetched_at or "",
+                fetch_mode=fetch_mode,
+                lang=artifact.lang,
+                status_code=item.http_status if item is not None else None,
+                content_type=artifact.content_type,
+                engine=item.engine if item is not None else None,
+                staged_path=None if buffered else str(retained.path),
+                head=None if buffered else retained.head,
+            ),
+            None,
+            None,
+        )
+
+    def _persist_extraction_coverages(
+        artifacts: Sequence[CorpusArtifact],
+        grouped: Mapping[str, Sequence[CorpusArtifact]],
+    ) -> list[str]:
+        """Считает/пишет ``extraction_coverage`` и возвращает неполные продукты.
+
+        Исходы — из **персистентных** элементов сеанса (``_finish_one`` пишет
+        FETCHED/FAILED), а не из памяти: resume и inline-путь дают один и тот же факт.
+        Неполнота считается только по ``expected_artifacts > 0``: zero-artifact продукт
+        объясняется ``corpus_coverage``, а не вторым порогом.
+        """
+        try:
+            refreshed = prior_items(store, session) if session is not None else items
+        except Exception as exc:  # noqa: BLE001 — покрытие не должно падать на чтении
+            errors.append(f"iter_crawl_session_items: {type(exc).__name__}: {exc}")
+            refreshed = items
+        outcomes: dict[tuple[str, str], tuple[bool, FailureKind | None]] = {}
+        for (pid, url), item in refreshed.items():
+            if item.status is CrawlItemStatus.FETCHED:
+                outcomes[(pid, url)] = (True, None)
+            elif item.status is CrawlItemStatus.FAILED:
+                try:
+                    kind = FailureKind(item.error_kind) if item.error_kind else None
+                except ValueError:
+                    kind = None
+                outcomes[(pid, url)] = (False, kind)
+
+        computed_at = _now_iso()
+        coverages: list[ExtractionCoverage] = []
+        for pid in sorted(set(grouped) | set(products)):
+            product_artifacts = list(grouped.get(pid, ()))
+            coverage = _derive_extraction_coverage(
+                pid,
+                product_artifacts,
+                outcomes,
+                frozen_digest=_artifact_set_digest(product_artifacts),
+                computed_at=computed_at,
+            )
+            if store is not None and run_id is not None:
+                try:
+                    store.save_extraction_coverage(run_id, coverage)
+                except Exception as exc:  # noqa: BLE001
+                    errors.append(
+                        f"extraction_coverage({pid}): {type(exc).__name__}: {exc}"
+                    )
+            coverages.append(coverage)
+
+        for coverage in coverages:
+            if coverage.expected_artifacts > 0 and not coverage.complete:
+                errors.append(
+                    f"{coverage.product_id}: extraction incomplete: "
+                    f"{coverage.extracted_artifacts}/{coverage.expected_artifacts} "
+                    f"извлечено; blocked={dict(coverage.blocked)}; "
+                    f"reason={coverage.reason or EXTRACTION_INCOMPLETE_REASON}"
+                )
+        return [
+            coverage.product_id
+            for coverage in coverages
+            if coverage.expected_artifacts > 0 and not coverage.complete
+        ]
+
+    def _extract_artifact_set() -> tuple[
+        list[_ProductIngest], list[str], list[str]
+    ]:
+        """Извлекает замороженный набор артефактов; возвращает ``(ingests, incomplete, refusal)``.
+
+        ``refusal`` непуст — набор не заморожен/расходится с отпечатком: экстракция
+        **не начинается** (инвариант «extraction only after artifact set frozen»).
+        ``incomplete`` — продукты, где ``extraction_required`` артефакты извлечены не все:
+        стадия не имеет права вернуть ``ok``. Zero-artifact продукт сюда не входит: его
+        неполноту объясняет ``corpus_coverage``.
+        """
+        if store is None or run_id is None:
+            return (
+                [],
+                [],
+                [
+                    "extraction_refused: durable store/run_id не заданы — "
+                    "замороженный набор артефактов недоказуем"
+                ],
+            )
+        try:
+            artifacts = list(store.iter_corpus_artifacts(run_id))
+        except Exception as exc:  # noqa: BLE001 — чтение набора критично для инварианта
+            return (
+                [],
+                [],
+                [f"extraction_refused: iter_corpus_artifacts: {type(exc).__name__}: {exc}"],
+            )
+        if not artifacts:
+            # Пустой набор — легитимный исход (нет допустимых источников); экстракция не
+            # начинается, но и отказывать не в чем: покрытие объяснит crawl.
+            return [], [], []
+        stored_digest = None
+        stored_total = stored_bytes = 0
+        if session is not None:
+            try:
+                stored_digest, stored_total, stored_bytes = store.read_crawl_artifact_set(
+                    session
+                )
+            except Exception as exc:  # noqa: BLE001
+                return (
+                    [],
+                    [],
+                    [
+                        "extraction_refused: read_crawl_artifact_set: "
+                        f"{type(exc).__name__}: {exc}"
+                    ],
+                )
+        current_digest = _artifact_set_digest(artifacts)
+        current_bytes = sum(item.size_bytes for item in artifacts)
+        if (
+            stored_digest is None
+            or stored_digest != current_digest
+            or stored_total != len(artifacts)
+            or stored_bytes != current_bytes
+        ):
+            reason = (
+                "набор артефактов не заморожен (стадия crawl не зафиксировала отпечаток)"
+                if stored_digest is None
+                else "набор артефактов расходится с замороженным отпечатком"
+            )
+            return (
+                [],
+                [],
+                [
+                    f"extraction_refused: {reason} — экстракция не начинается "
+                    "(инвариант C2: только после заморозки)"
+                ],
+            )
+
+        grouped: dict[str, list[CorpusArtifact]] = {}
+        for artifact in artifacts:
+            grouped.setdefault(artifact.product_id, []).append(artifact)
+
+        extracted: list[_ProductIngest] = []
+        for pid in sorted(grouped):
+            ingest = _ProductIngest(product_id=pid)
+            seen_docs: dict[str, str] = {}
+            seen_chunk_ids: set[str] = set()
+            for artifact in grouped[pid]:
+                if not artifact.extraction_required:
+                    if artifact.artifact_class == "document":
+                        document_skips.append(
+                            {
+                                "product_id": pid,
+                                "url": artifact.url,
+                                "reason": "document_level_off",
+                                "level": artifact.level,
+                            }
+                        )
+                    continue
+                level_value = _artifact_level(artifact)
+                page, error, failure_kind = _artifact_page(artifact)
+                if page is None:
+                    reason = error or "retained raw недоступен"
+                    kind = failure_kind or FailureKind.SOURCE_UNAVAILABLE
+                    errors.append(f"{pid}/{artifact.url}: extract: {reason}")
+                    _mark(
+                        pid,
+                        artifact.url,
+                        CrawlItemStatus.FAILED,
+                        error_kind=kind.value,
+                        error=reason,
+                        raw_path=artifact.raw_path,
+                    )
+                    _emit_progress()
+                    continue
+                _ingest_one(
+                    pid,
+                    artifact.url,
+                    page,
+                    _artifact_fetch_plan(artifact),
+                    Path(artifact.raw_path),
+                    ingest,
+                    seen_docs,
+                    seen_chunk_ids,
+                    _extractor_for_level(level_value),
+                    level_value,
+                )
+                _emit_progress()
+            extracted.append(ingest)
+
+        return (
+            extracted,
+            _persist_extraction_coverages(artifacts, grouped),
+            [],
+        )
+
+    extraction_incomplete: list[str] = []
+    refusal: list[str] = []
+    if stage_value in ("extract", "index"):
+        if stage_value == "index" and bundle is not None and bundle.ingests:
+            # Same-process: ``extract`` уже сделал работу — не повторяем экстракцию.
+            ingests = list(bundle.ingests)
+            extraction_incomplete = list(bundle.extraction_incomplete)
+            frozen_digest = bundle.artifact_set_digest or frozen_digest
+        else:
+            extracted_ingests, extraction_incomplete, refusal = _extract_artifact_set()
+            ingests = extracted_ingests
+            if bundle is not None and bundle.artifact_set_digest:
+                frozen_digest = bundle.artifact_set_digest or frozen_digest
+    elif stage_value == "all" and store is not None and run_id is not None:
+        # Legacy-монолит: экстракция уже произошла inline; второй порог ``❌`` всё равно
+        # обязан быть виден оценщику — пишем покрытие из замороженного набора.
+        try:
+            all_artifacts = list(store.iter_corpus_artifacts(run_id))
+        except Exception as exc:  # noqa: BLE001
+            all_artifacts = []
+            errors.append(f"iter_corpus_artifacts: {type(exc).__name__}: {exc}")
+        grouped_all: dict[str, list[CorpusArtifact]] = {}
+        for artifact in all_artifacts:
+            grouped_all.setdefault(artifact.product_id, []).append(artifact)
+        extraction_incomplete = _persist_extraction_coverages(
+            all_artifacts, grouped_all
+        )
+
+    if refusal:
+        if result_sink is not None:
+            result_sink["corpus_stage_bundle"] = CorpusStageBundle(
+                stage=stage_value,
+                artifact_set_digest=frozen_digest,
+                extraction_incomplete=tuple(extraction_incomplete),
+            )
+        return PhaseResult(
+            status="failed",
+            phase=stage_value,
+            cells=[],
+            log_entries=[_stage_build(ingests)],
+            errors=errors + refusal,
+        )
+
+    if stage_value == "extract":
+        if extraction_incomplete:
+            if result_sink is not None:
+                result_sink["corpus_stage_bundle"] = CorpusStageBundle(
+                    stage="extract",
+                    artifact_set_digest=frozen_digest,
+                    ingests=tuple(ingests),
+                    extraction_incomplete=tuple(extraction_incomplete),
+                )
+            # Гейт стадии: ``extract`` не имеет права вернуть ``ok`` при неполной
+            # экстракции — иначе ``❌`` мог бы опереться на нулевой корпус.
+            return PhaseResult(
+                status="failed",
+                phase="extract",
+                cells=[],
+                log_entries=[_stage_build(ingests)],
+                errors=errors,
+            )
+        if result_sink is not None:
+            result_sink["corpus_stage_bundle"] = CorpusStageBundle(
+                stage="extract",
+                artifact_set_digest=frozen_digest,
+                ingests=tuple(ingests),
+            )
+        return PhaseResult(
+            status="ok",
+            phase="extract",
+            cells=[],
+            log_entries=[_stage_build(ingests)],
+            errors=errors,
+        )
+
+    if stage_value == "index" and extraction_incomplete:
+        # Defence in depth: ``extract`` уже упал бы, но resume мог прийти сюда напрямую.
+        return PhaseResult(
+            status="failed",
+            phase="index",
+            cells=[],
+            log_entries=[_stage_build(ingests)],
+            errors=errors
+            + [
+                f"{pid}: extraction incomplete — индекс не публикуется"
+                for pid in extraction_incomplete
+            ],
+        )
+
     # --- Планирование партиций и композиции (09 §8.1) ------------------------- #
     # extractor_version: per-product композит из фактически извлечённых документов;
     # fallback — объявленная версия экстрактора-порта (если ExtractedDoc не нёс версии).
@@ -6015,77 +6899,10 @@ def _build_corpus(
                         errors=errors,
                     )
 
-    # L1a: финализация сеанса (``COMPLETED`` без сбоев, иначе ``PARTIAL``) — единственный
-    # вызов на фазу. ``finished_at`` фиксирует момент завершения.
-    if session is not None:
-        try:
-            # Phase 2/2.1: провенанс сеанса — движки/виды источников из **персистенных
-            # элементов** (``items.values()``: фактически применённый ``engine`` и ``kind``
-            # элемента) + дайджест конфигурации источников. ``targets`` для агрегата не
-            # годится: там лишь запрошенный движок (может быть ``None``).
-            engines = sorted(
-                {str(i.engine) for i in items.values() if i.engine}
-            )
-            kinds = sorted(
-                {str(i.kind) for i in items.values() if i.kind}
-            )
-            digest = (
-                crawl_sources_digest(crawl_sources)
-                if crawl_sources is not None
-                else None
-            )
-            finalize_session(
-                store,
-                session,
-                finished_at=_now_iso(),
-                engines=engines,
-                kinds=kinds,
-                crawl_sources_digest=digest,
-                # D1/G: политико-усечённый краул не рапортуется ``COMPLETED`` (→ ``PARTIAL``);
-                # эффективные лимиты/число добытых страниц/усечённые продукты — в провенанс.
-                truncated=bool(truncated_products),
-                effective_limits={"roots": truncation_records},
-                pages_fetched=pages_fetched_total,
-                revalidation_fetched=revalidation_fetched_total,
-                truncated_products=sorted(truncated_products),
-            )
-        except Exception as exc:  # noqa: BLE001 — наблюдаемость важнее персистенции
-            errors.append(f"finalize_crawl_session({session}): {type(exc).__name__}: {exc}")
+    # C2: финализация сеанса и ``corpus_coverage`` уже выполнены в конце стадии
+    # ``crawl`` (до экстракции). Здесь — только счётчики для ``IndexBuild``.
+    crawl_pending, crawl_fetched, crawl_failed = _crawl_counts()
 
-        # Ф0: покрытие корпуса продукта — первоклассный факт для гейта ❌ (I2c).
-        # Производно от **персистентных** элементов сеанса и записей об усечении; пишется
-        # после финализации, чтобы провенанс/усечение уже были зафиксированы.
-        try:
-            _persist_corpus_coverage(
-                store,
-                run_id,
-                session,
-                truncated_products,
-                _now_iso(),
-                products=products,
-            )
-        except Exception as exc:  # noqa: BLE001 — наблюдаемость важнее персистенции
-            errors.append(
-                f"corpus_coverage({session}): {type(exc).__name__}: {exc}"
-            )
-
-    # L1a/C2: счётчики durable-краула (наблюдаемость) — целиком из элементов сеанса. Без
-    # сеанса (``store``/``run_id`` не заданы) — нули. ``crawl_done`` — зеркало ``crawl_fetched``
-    # (элемент ``FETCHED`` = «ready»); отдельных ``done``/``cancelled`` у элемента нет, поэтому
-    # ``CANCELLED`` складывается в ``crawl_failed`` только для счётчика.
-    crawl_pending = crawl_fetched = crawl_failed = 0
-    if session is not None:
-        try:
-            counts = store.crawl_session_counts(session)
-            crawl_pending = counts.get(CrawlItemStatus.PENDING.value, 0) + counts.get(
-                CrawlItemStatus.RUNNING.value, 0
-            )
-            crawl_fetched = counts.get(CrawlItemStatus.FETCHED.value, 0)
-            crawl_failed = counts.get(CrawlItemStatus.FAILED.value, 0) + counts.get(
-                CrawlItemStatus.CANCELLED.value, 0
-            )
-        except Exception as exc:  # noqa: BLE001 — наблюдаемость важнее персистенции
-            errors.append(f"crawl_session_counts: {type(exc).__name__}: {exc}")
 
     build = IndexBuild(
         index_build_id=index_build_id,
@@ -6118,8 +6935,22 @@ def _build_corpus(
             f"corpus: {revalidation_orphan_total} known URLs are outside every authored "
             "root — author-scope drift (revalidated as orphans; observation only)"
         )
+    if result_sink is not None:
+        result_sink["corpus_stage_bundle"] = CorpusStageBundle(
+            stage=stage_value,
+            artifact_set_digest=frozen_digest,
+            artifacts=tuple(
+                sorted(crawl_artifacts, key=lambda a: (a.product_id, a.artifact_id))
+            ),
+            ingests=tuple(ingests),
+            extraction_incomplete=tuple(extraction_incomplete),
+        )
     return PhaseResult(
-        status="ok", phase="corpus", cells=[], log_entries=log_entries, errors=errors
+        status="ok",
+        phase=stage_value,
+        cells=[],
+        log_entries=log_entries,
+        errors=errors,
     )
 
 

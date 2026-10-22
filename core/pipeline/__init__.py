@@ -178,6 +178,7 @@ from core.pipeline.registry import (
 )
 from core.pipeline.runner import (
     GATE_PHASES,
+    LEGACY_PHASE_ALIASES,
     PHASES,
     PhaseResult,
     Ports,
@@ -296,6 +297,7 @@ __all__ = [
     "Ports",
     "PhaseResult",
     "PHASES",
+    "LEGACY_PHASE_ALIASES",
     "GATE_PHASES",
     "run_isolated",
     # gates (T4.2)

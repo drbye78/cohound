@@ -397,7 +397,7 @@ def main() -> int:
     check("directory kinds + общие хелперы времени (Ш5)", lambda: _directory_kinds_helpers())
 
     section("Интеграция Ш1–Ш9 (composition root)")
-    check("build_phases: 11 не-гейтовых фаз, гейты не переопределены", lambda: _build_phases_gate())
+    check("build_phases: 13 не-гейтовых фаз, гейты не переопределены", lambda: _build_phases_gate())
     check("walking-skeleton: реальные фазы + гейт g1 блокирует без решения", lambda: _walking_skeleton())
     check("phase-vocabulary: skipped не стопит; незарегистрированная фаза → failed", lambda: _phase_vocabulary())
 
@@ -685,13 +685,14 @@ def _crawl_session_dict_mirror() -> None:
 def _db_smoke() -> None:
     conn = connect(":memory:")
     ver = conn.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()
-    _assert(ver is not None and ver["value"] == "3.9.0")
+    _assert(ver is not None and ver["value"] == "3.10.0")
 
     tables = {r["name"] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     for t in ("products", "runs", "llm_scenarios", "corpus_docs", "corpus_chunks",
               "index_manifest", "cells", "cell_evidence", "search_log",
               "search_exhaustion", "registry_facts", "run_inputs",
-              "crawl_sessions", "crawl_session_items", "corpus_coverage"):
+              "crawl_sessions", "crawl_session_items", "corpus_coverage",
+              "corpus_artifacts", "extraction_coverage"):
         _assert(t in tables)
 
     # P2 (schema 2.2.0): build-id witness — extractor_version у чанка; extractor_version/
@@ -2739,7 +2740,7 @@ def _serp_loop() -> None:
 
 
 def _build_phases_gate() -> None:
-    """Интеграция: ``build_phases`` отдаёт 11 не-гейтовых фаз и НЕ переопределяет гейты."""
+    """Интеграция: ``build_phases`` отдаёт 13 не-гейтовых фаз и НЕ переопределяет гейты."""
     from core.pipeline.phases import IMPLEMENTED_PHASES, build_phases
     from core.pipeline.runner import GATE_PHASES, PHASES, Ports
 
@@ -2757,8 +2758,13 @@ def _build_phases_gate() -> None:
     )
     run_plan = plan(inputs, run_id="selfcheck-plan")
     phases = build_phases(inputs=inputs, plan=run_plan, ports=Ports())
-    if set(phases) != expected:
-        raise AssertionError(f"build_phases вернул не тот набор фаз: {set(phases) ^ expected}")
+    # C2: ``corpus`` — легаси-ключ монолитной Ш5 для прямых вызовов/старых тестов; он
+    # намеренно **не** входит в ``PHASES`` (новая фазовая модель — crawl/extract/index).
+    legacy = {"corpus"}
+    if set(phases) - legacy != expected:
+        raise AssertionError(
+            f"build_phases вернул не тот набор фаз: {(set(phases) - legacy) ^ expected}"
+        )
     if set(phases) & set(GATE_PHASES):
         raise AssertionError("build_phases обязан НЕ переопределять гейты (S9)")
 

@@ -96,7 +96,9 @@ IMPLEMENTED_PHASES: tuple[str, ...] = (
     "discovery",
     "registry",
     "inheritance",
-    "corpus",
+    "crawl",
+    "extract",
+    "index",
     "evaluate",
     "review",
     "compute",
@@ -636,85 +638,107 @@ def build_phases(
         )
 
     # -- Ш5: сборка корпуса и индекса --------------------------------------- #
-    def corpus_phase(ctx: RunContext) -> PhaseResult:
-        """Ш5: retention → extract → chunk → index; I19 обеспечивается ``build_corpus``."""
-        # D1/D2: CLI-флаги (--max-depth/--max-documents/--exclude-*) — операторское уточнение
-        # **run-слоя** (поверх run.yaml): цепочка остаётся трёхуровневой app < run < site.
-        run_crawl: CrawlRunConfig | None = getattr(
-            getattr(inputs, "run", None), "crawl", None
-        )
-        override: dict[str, Any] = {}
-        if max_depth is not None:
-            override["max_depth"] = max_depth
-        if max_documents is not None:
-            override["max_documents"] = max_documents
-        if exclude_paths:
-            override["exclude_paths"] = list(exclude_paths)
-        if exclude_documents:
-            override["exclude_documents"] = list(exclude_documents)
-        if document_level is not None:
-            override["document_level"] = document_level
-        if override:
-            base = run_crawl if run_crawl is not None else CrawlRunConfig()
-            run_crawl = base.model_copy(update=override)
-        result = build_corpus(
-            plan,
-            getattr(ctx.ports, "crawler", None),  # type: ignore[arg-type]
-            getattr(ctx.ports, "extractor", None),  # type: ignore[arg-type]
-            getattr(ctx.ports, "chunker", None),  # type: ignore[arg-type]
-            ctx.store,
-            urls=urls or {},
-            snapshot_date=snapshot_date,
-            embedder=getattr(ctx.ports, "embedder", None),
-            index_builder=getattr(ctx.ports, "index_builder", None),
-            raw_root=raw_root,
-            index_root=index_root,
-            package_id=_package_id(inputs, plan),
-            domain_profiles=domain_profiles or {},
-            explicit_fetch=explicit_fetch,
-            # Lane A/L3a: слои источников краула и карта per-engine краулеров; пейсинг —
-            # единый владелец (RateLimiter), протягивается composition root'ом.
-            crawl_sources=crawl_sources,
-            crawlers=getattr(ctx.ports, "crawlers", None),
-            # Phase 5.2: карта ``kind → PollPort`` для источников-каталогов (feed/channel).
-            pollers=getattr(ctx.ports, "pollers", None),
-            rate_limiter=rate_limiter,
-            # P4: исполнитель экстракции (process-local / thread-split) — аддитивная ось
-            # ``crawl.extract_workers``; ``None`` ⇒ inline (поведение байт-в-байт).
-            extraction_pool=extraction_pool,
-            # P5: фабрика per-level экстрактора для inline-пути (переданная ссылка из
-            # composition root; ``None`` ⇒ уровень на inline-пути не действует, как прежде).
-            extractor_factory=extractor_factory,
-            # Ф1.2: межпрогонный кэш экстракции (content-addressed по ретенированным байтам).
-            # ``None`` ⇒ кэш выключен, поведение байт-в-байт прежнее.
-            extract_cache=extract_cache,
-            # Phase 3.3: исполнитель краула (``split``/edge-планировщик). ``None`` → локальный
-            # per-URL путь (``crawler``/``crawlers``); при наличии — краул через шов.
-            executor=getattr(ctx.ports, "executor", None),
-            # D4 (P2-3): секция ``crawl`` run.yaml → дефолты оси стратегии/лимита для ``FetchPlan``.
-            # ``RunConfig`` доступен как ``inputs.run`` (RunInputs.run), поле ``crawl`` опционально.
-            crawl_defaults=run_crawl,
-            # D1/D2: application-слой осей краула (deploy.yaml:crawl) — низший приоритет.
-            crawl_app=crawl_app,
-            # D3: durable-краул (аудит/очередь/resume) привязан к прогону; store уже есть.
-            run_id=getattr(plan, "run_id", None),
-            # Phase 4: потолок попыток (--max-attempts) и колбэк прогресса (--follow).
-            max_attempts=max_attempts,
-            progress=progress,
-            # 09 §6.3 (MVP-3b): durable-субстрат, режимы продуктов и политика наблюдения.
-            # ``state is None`` ⇒ прежнее поведение корпуса байт-в-байт.
-            state=state,
-            product_modes=product_modes,
-            refresh_policy=refresh_policy,
-        )
-        _capture_index_build(holder, result)
-        # 09 §8.5: переиспользование партиций — видимая оператору строка лога (не ошибка).
-        reuse_note = _partition_reuse_note(result)
-        if reuse_note is not None:
-            result.log_entries.append(reuse_note)
-        # Наблюдаемость дедупа: строка на продукт (только при ненулевом схлопывании).
-        result.log_entries.extend(_duplicate_notes(result))
-        return _as_phase(result, "corpus")
+    def _corpus_stage(stage: str) -> PhaseFn:
+        """C2: фаза одной стадии корпуса (``crawl``/``extract``/``index``/``all``).
+
+        Стадии передают друг другу :class:`CorpusStageBundle` через ``holder`` (in-memory
+        канал в пределах процесса): ``crawl`` кладёт снимок артефактов, ``extract`` —
+        ingested-документы, ``index`` их потребляет. При cross-process resume бандла нет:
+        каждая стадия восстанавливает вход из store (retained raw/артефакты), не повторяя
+        оплаченную работу.
+        """
+
+        def corpus_stage_phase(ctx: RunContext) -> PhaseResult:
+            """Одна стадия Ш5: точная семантика — в :func:`core.pipeline.corpus.build_corpus`."""
+            # D1/D2: CLI-флаги (--max-depth/--max-documents/--exclude-*) — операторское уточнение
+            # **run-слоя** (поверх run.yaml): цепочка остаётся трёхуровневой app < run < site.
+            run_crawl: CrawlRunConfig | None = getattr(
+                getattr(inputs, "run", None), "crawl", None
+            )
+            override: dict[str, Any] = {}
+            if max_depth is not None:
+                override["max_depth"] = max_depth
+            if max_documents is not None:
+                override["max_documents"] = max_documents
+            if exclude_paths:
+                override["exclude_paths"] = list(exclude_paths)
+            if exclude_documents:
+                override["exclude_documents"] = list(exclude_documents)
+            if document_level is not None:
+                override["document_level"] = document_level
+            if override:
+                base = run_crawl if run_crawl is not None else CrawlRunConfig()
+                run_crawl = base.model_copy(update=override)
+            result = build_corpus(
+                plan,
+                getattr(ctx.ports, "crawler", None),  # type: ignore[arg-type]
+                getattr(ctx.ports, "extractor", None),  # type: ignore[arg-type]
+                getattr(ctx.ports, "chunker", None),  # type: ignore[arg-type]
+                ctx.store,
+                urls=urls or {},
+                snapshot_date=snapshot_date,
+                embedder=getattr(ctx.ports, "embedder", None),
+                index_builder=getattr(ctx.ports, "index_builder", None),
+                raw_root=raw_root,
+                index_root=index_root,
+                package_id=_package_id(inputs, plan),
+                domain_profiles=domain_profiles or {},
+                explicit_fetch=explicit_fetch,
+                # Lane A/L3a: слои источников краула и карта per-engine краулеров; пейсинг —
+                # единый владелец (RateLimiter), протягивается composition root'ом.
+                crawl_sources=crawl_sources,
+                crawlers=getattr(ctx.ports, "crawlers", None),
+                # Phase 5.2: карта ``kind → PollPort`` для источников-каталогов (feed/channel).
+                pollers=getattr(ctx.ports, "pollers", None),
+                rate_limiter=rate_limiter,
+                # P4: исполнитель экстракции (process-local / thread-split) — аддитивная ось
+                # ``crawl.extract_workers``; ``None`` ⇒ inline (поведение байт-в-байт).
+                extraction_pool=extraction_pool,
+                # P5: фабрика per-level экстрактора для inline-пути (переданная ссылка из
+                # composition root; ``None`` ⇒ уровень на inline-пути не действует, как прежде).
+                extractor_factory=extractor_factory,
+                # Ф1.2: межпрогонный кэш экстракции (content-addressed по ретенированным байтам).
+                # ``None`` ⇒ кэш выключен, поведение байт-в-байт прежнее.
+                extract_cache=extract_cache,
+                # Phase 3.3: исполнитель краула (``split``/edge-планировщик). ``None`` → локальный
+                # per-URL путь (``crawler``/``crawlers``); при наличии — краул через шов.
+                executor=getattr(ctx.ports, "executor", None),
+                # D4 (P2-3): секция ``crawl`` run.yaml → дефолты оси стратегии/лимита для ``FetchPlan``.
+                # ``RunConfig`` доступен как ``inputs.run`` (RunInputs.run), поле ``crawl`` опционально.
+                crawl_defaults=run_crawl,
+                # D1/D2: application-слой осей краула (deploy.yaml:crawl) — низший приоритет.
+                crawl_app=crawl_app,
+                # D3: durable-краул (аудит/очередь/resume) привязан к прогону; store уже есть.
+                run_id=getattr(plan, "run_id", None),
+                # Phase 4: потолок попыток (--max-attempts) и колбэк прогресса (--follow).
+                max_attempts=max_attempts,
+                progress=progress,
+                # 09 §6.3 (MVP-3b): durable-субстрат, режимы продуктов и политика наблюдения.
+                # ``state is None`` ⇒ прежнее поведение корпуса байт-в-байт.
+                state=state,
+                product_modes=product_modes,
+                refresh_policy=refresh_policy,
+                # C2: стадия и in-memory-канал стадий. ``all`` — легаси-монолит
+                # (``hound crawl``/прямые тесты), три стадии — новый оркестратор.
+                stage=stage,
+                bundle=holder.get("corpus_stage_bundle"),
+                result_sink=holder,
+            )
+            _capture_index_build(holder, result)
+            # 09 §8.5: переиспользование партиций — видимая оператору строка лога (не ошибка).
+            reuse_note = _partition_reuse_note(result)
+            if reuse_note is not None:
+                result.log_entries.append(reuse_note)
+            # Наблюдаемость дедупа: строка на продукт (только при ненулевом схлопывании).
+            result.log_entries.extend(_duplicate_notes(result))
+            # Легаси-ключ ``corpus`` (``stage="all"``) сообщает фазе историческое имя;
+            # три стадии — своё собственное.
+            return _as_phase(result, "corpus" if stage == "all" else stage)
+
+        return corpus_stage_phase
+
+    # Легаси-точка для прямых тестов/`hound crawl`: монолитная семантика Ш5.
+    corpus_phase = _corpus_stage("all")
 
     # -- Ш6: оценка (ретривал → оценщик) ------------------------------------ #
     def evaluate_phase_fn(ctx: RunContext) -> PhaseResult:
@@ -923,6 +947,10 @@ def build_phases(
         "discovery": discovery_phase,
         "registry": registry_phase,
         "inheritance": inheritance_phase,
+        # C2: расщеплённая Ш5; ``corpus`` остаётся легаси-точкой (монолит).
+        "crawl": _corpus_stage("crawl"),
+        "extract": _corpus_stage("extract"),
+        "index": _corpus_stage("index"),
         "corpus": corpus_phase,
         "evaluate": evaluate_phase_fn,
         "review": review_phase,

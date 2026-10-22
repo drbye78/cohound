@@ -1098,6 +1098,156 @@ class CorpusChunk(BaseModel):
     embedded_at: str | None = None
 
 
+#: Допустимые классы замороженного артефакта корпуса (техническая классификация, не
+#: доменный статус): страница, документ, контейнер. Строки-данные проверяются валидатором.
+ARTIFACT_CLASSES: tuple[str, ...] = ("page", "document", "container")
+
+
+class CorpusArtifact(BaseModel):
+    """Строка ``corpus_artifacts`` (schema 3.10.0): замороженный набор артефактов продукта.
+
+    Артефакт — **допущенный** источник с ретенированными байтами (I19): страница, документ
+    или контейнер. Набор фиксируется фазой ``crawl`` (``artifact_set_digest``); экстракция
+    артефакта разрешена только после этой фиксации (инвариант среза C2).
+
+    ``extraction_required`` — участвует ли артефакт в покрытии экстракции: контейнеры при
+    ``ArchiveDescent.PLAN`` только планируются (состав фиксируется, члены не извлекаются),
+    поэтому в знаменатель покрытия экстракции не входят.
+    """
+
+    model_config = _BASE
+
+    run_id: str
+    product_id: str
+    artifact_id: str
+    url: str
+    raw_path: str
+    content_hash: str
+    size_bytes: int = 0
+    artifact_class: str = "page"
+    format: str | None = None
+    page_count: int | None = None
+    member_count: int | None = None
+    #: Состав контейнера, спланированный ``probe`` (только имена, без извлечения).
+    members: list[str] = Field(default_factory=list)
+    #: Участвует ли артефакт в покрытии экстракции (контейнеры при ``plan`` — нет).
+    extraction_required: bool = True
+    level: str | None = None
+    fetch_mode: str | None = None
+    content_type: str | None = None
+    lang: str | None = None
+    depth: int | None = None
+    fetched_at: str | None = None
+    frozen_at: str
+    probed_at: str | None = None
+    probe_note: str | None = None
+
+    @field_validator("artifact_class")
+    @classmethod
+    def _validate_artifact_class(cls, value: str) -> str:
+        """Класс артефакта — из фиксированного технического набора."""
+        if value not in ARTIFACT_CLASSES:
+            raise ValueError(
+                f"artifact_class={value!r} вне набора {ARTIFACT_CLASSES}"
+            )
+        return value
+
+    @field_validator("size_bytes", "member_count", "page_count")
+    @classmethod
+    def _validate_non_negative(cls, value: int | None) -> int | None:
+        """Счётчики/размеры неотрицательны."""
+        if value is not None and int(value) < 0:
+            raise ValueError("corpus_artifacts: счётчик/размер не может быть отрицательным")
+        return None if value is None else int(value)
+
+
+class ExtractionCoverage(BaseModel):
+    """Покрытие **экстракции** продукта (schema 3.10.0, срез C2) — зеркало ``CorpusCoverage``.
+
+    ``corpus_coverage.complete`` производно только от исходов краула, поэтому
+    crawl-полный-но-нулевой-по-экстракции корпус мог бы опубликовать ``❌``. Эта модель
+    фиксирует второй порог: набор артефактов заморожен, и каждый ``extraction_required``
+    артефакт успешно извлечён.
+
+    ``complete=True`` требует: набор заморожен (``artifact_set_digest`` задан), есть хотя бы
+    один ожидаемый артефакт, все ожидаемые извлечены, блокирующих сбоев нет. Zero-artifact
+    продукт в знаменатель не входит (его неполноту объясняет ``corpus_coverage``).
+    """
+
+    model_config = _BASE
+
+    product_id: str
+    complete: bool
+    expected_artifacts: int = 0
+    extracted_artifacts: int = 0
+    #: ``error_kind → count`` по артефактам, чья экстракция не удалась (канонические классы).
+    blocked: dict[str, int] = Field(default_factory=dict)
+    #: origin'ы (``netloc``) с неудачной экстракцией хотя бы одного артефакта.
+    unreadable_origins: list[str] = Field(default_factory=list)
+    artifact_set_digest: str | None = None
+    computed_at: str
+    #: Машинная причина неполноты (``not_frozen``/``no_artifacts``/``artifact_set_mismatch``).
+    reason: str | None = None
+
+    @field_validator("blocked")
+    @classmethod
+    def _validate_blocked(cls, value: dict[str, int]) -> dict[str, int]:
+        """Ключи ``blocked`` — только канонические ``FailureKind``; порядок детерминирован."""
+        unknown = sorted(set(value) - _KNOWN_FAILURE_KINDS)
+        if unknown:
+            raise ValueError(
+                f"extraction_coverage.blocked: неизвестные error_kind {unknown}; "
+                f"допустимо: {', '.join(sorted(_KNOWN_FAILURE_KINDS))}"
+            )
+        if any(int(count) < 0 for count in value.values()):
+            raise ValueError(
+                "extraction_coverage.blocked: счётчики не могут быть отрицательными"
+            )
+        return {key: int(value[key]) for key in sorted(value)}
+
+    @field_validator("unreadable_origins")
+    @classmethod
+    def _validate_origins(cls, value: list[str]) -> list[str]:
+        """Origin'ы — непустые строки; дедуп и сортировка (детерминизм)."""
+        origins = {str(origin).strip().lower() for origin in value}
+        if "" in origins:
+            raise ValueError("extraction_coverage.unreadable_origins: пустой origin")
+        return sorted(origins)
+
+    @model_validator(mode="after")
+    def _check_consistency(self) -> ExtractionCoverage:
+        """Счётчики согласованы; ``complete=True`` требует замороженного непустого набора."""
+        if self.expected_artifacts < 0 or self.extracted_artifacts < 0:
+            raise ValueError(
+                "extraction_coverage: счётчики не могут быть отрицательными"
+            )
+        if self.extracted_artifacts > self.expected_artifacts:
+            raise ValueError(
+                "extraction_coverage: extracted_artifacts не может превышать "
+                "expected_artifacts"
+            )
+        if self.complete:
+            if self.expected_artifacts == 0:
+                raise ValueError(
+                    "extraction_coverage: complete=True требует expected_artifacts > 0 "
+                    "(zero-artifact не доказывает полноту экстракции)"
+                )
+            if self.extracted_artifacts != self.expected_artifacts:
+                raise ValueError(
+                    "extraction_coverage: complete=True требует извлечения всех артефактов"
+                )
+            if self.blocked:
+                raise ValueError(
+                    "extraction_coverage: complete=True несовместимо с блокирующими сбоями"
+                )
+            if not self.artifact_set_digest:
+                raise ValueError(
+                    "extraction_coverage: complete=True требует замороженного набора "
+                    "артефактов (artifact_set_digest)"
+                )
+        return self
+
+
 class IndexManifestEntry(BaseModel):
     """Строка ``index_manifest`` (§4.4, K1): иммутабельная сборка × продукт-партиция (I17).
 

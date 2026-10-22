@@ -50,6 +50,7 @@ from core.domain import (
     Cell,
     CellState,
     CorpusCoverage,
+    ExtractionCoverage,
     FailureKind,
     LLMCellOutput,
     Satellite,
@@ -86,6 +87,7 @@ from core.util.hashing import content_hash
 
 __all__ = [
     "CORPUS_INCOMPLETE_REVIEW_REASON",
+    "EXTRACTION_INCOMPLETE_REVIEW_REASON",
     "DEFAULT_RETRIEVAL_CUTOFF_K",
     "DEFAULT_RETRIEVAL_PROFILE",
     "EvaluationOutcome",
@@ -99,6 +101,10 @@ __all__ = [
 #: Ф0: причина ``pending``-кандидата, когда ``❌`` предложен при неполном корпусе.
 #: Свободнотекстовая аннотация (не статус/не перечисление), как ``precedence_conflict``.
 CORPUS_INCOMPLETE_REVIEW_REASON = "corpus_incomplete_absence"
+
+#: C2: причина ``pending``-кандидата, когда ``❌`` предложен при неполной **экстракции**
+#: замороженного набора артефактов (второй порог гейта ``❌``, ``extraction_coverage``).
+EXTRACTION_INCOMPLETE_REVIEW_REASON = "extraction_incomplete"
 
 #: Максимум запросов на ячейку (S13/I16): title + концепт-термины ru → en.
 MAX_QUERIES = 3
@@ -395,6 +401,58 @@ def _coverage_for(
             reason=FailureKind.COVERAGE_MISSING.value,
         )
     return None
+
+
+def _extraction_coverage_for(
+    store: StorePort | None,
+    run_id: str,
+    product_id: str,
+) -> ExtractionCoverage | None:
+    """C2: покрытие **экстракции** продукта из store (``None`` — строки нет).
+
+    Отсутствие строки не синтезируется в неполноту: старые прогоны (до 3.10.0) и
+    продукты без артефактов не должны получать ложный ``pending``. Ноль ожидаемых
+    артефактов тоже не демотирует ``❌`` — эту неполноту объясняет ``corpus_coverage``.
+    """
+    reader = getattr(store, "read_extraction_coverage", None)
+    if not callable(reader):
+        return None
+    try:
+        return reader(run_id, product_id)
+    except Exception:  # noqa: BLE001 — чтение покрытия не должно ронять оценку
+        return None
+
+
+def _record_extraction_coverage(
+    absence_evidence: list[dict],
+    coverage: ExtractionCoverage,
+) -> None:
+    """C2: дописывает в absence-evidence аудит неполной экстракции (второй порог ``❌``).
+
+    Запись машинно-читаема и остаётся в ячейке: отчёт видит, что ``❌`` недоказуем из-за
+    нулевой/частичной экстракции, не читая БД.
+    """
+    absence_evidence.append(
+        {
+            "evidence_id": None,
+            "source_id": None,
+            "source_scope": SourceScope.UNKNOWN.value,
+            "note": (
+                "C2: неполная экстракция замороженного набора артефактов — "
+                f"извлечено {coverage.extracted_artifacts}/{coverage.expected_artifacts}; "
+                f"блокирующие сбои: {dict(coverage.blocked) or '{}'}; "
+                f"причина: {coverage.reason or 'incomplete'}; "
+                "❌ допустим только с человеческой аттестацией"
+            ),
+            "extraction_complete": False,
+            "extraction_expected_artifacts": coverage.expected_artifacts,
+            "extraction_extracted_artifacts": coverage.extracted_artifacts,
+            "extraction_blocked": dict(sorted(coverage.blocked.items())),
+            "extraction_unreadable_origins": list(coverage.unreadable_origins),
+            "extraction_reason": coverage.reason,
+            "artifact_set_digest": coverage.artifact_set_digest,
+        }
+    )
 
 
 def _record_corpus_coverage(
@@ -794,15 +852,36 @@ def evaluate_cell(
                     model_id=request.model_id,
                 )
 
-            # Ф0/I2c: неполный корпус не доказывает отсутствие. Машинный ``❌`` при
+            # Ф0/I2c: неполный корпус не доказывает отсутствие. C2: второй порог —
+            # неполная экстракция замороженного набора артефактов. Машинный ``❌`` при
             # ``absence_rule=explicit`` без человеческой аттестации понижается до
             # ``pending``-кандидата (I6/I7: решает человек). Прочие absence_rule уже
             # требуют exhaustive/attestation (I2b) — их правила не меняются.
             effective_coverage = _coverage_for(coverage, store, run_id, product_id)
-            if effective_coverage is not None and not effective_coverage.complete:
+            extraction_coverage = _extraction_coverage_for(store, run_id, product_id)
+            corpus_incomplete = (
+                effective_coverage is not None and not effective_coverage.complete
+            )
+            # Zero-artifact продукт не доказывает полноту экстракции (``expected=0``):
+            # его неполноту объясняет corpus_coverage, а не второй порог.
+            extraction_incomplete = bool(
+                extraction_coverage is not None
+                and not extraction_coverage.complete
+                and extraction_coverage.expected_artifacts > 0
+            )
+            if corpus_incomplete or extraction_incomplete:
                 attested = bool(scope_attested_by) or _absence_attested(absence_evidence)
                 if param.absence_rule is AbsenceRuleType.EXPLICIT and not attested:
-                    _record_corpus_coverage(absence_evidence, effective_coverage)
+                    if extraction_incomplete:
+                        _record_extraction_coverage(absence_evidence, extraction_coverage)
+                        reason = EXTRACTION_INCOMPLETE_REVIEW_REASON
+                    else:
+                        _record_corpus_coverage(absence_evidence, effective_coverage)
+                        reason = CORPUS_INCOMPLETE_REVIEW_REASON
+                    if corpus_incomplete and extraction_incomplete:
+                        # Оба порога видны в аудите: приоритет причины — экстракция
+                        # (второй порог), но корпусный факт не теряется.
+                        _record_corpus_coverage(absence_evidence, effective_coverage)
                     pending = _evaluated_cell(
                         out_status=out.status,
                         evidence=out.evidence,
@@ -814,7 +893,7 @@ def evaluate_cell(
                     ).model_copy(
                         update={
                             "state": CellState.PENDING,
-                            "review_reason": CORPUS_INCOMPLETE_REVIEW_REASON,
+                            "review_reason": reason,
                         }
                     )
                     _persist(
@@ -834,11 +913,14 @@ def evaluate_cell(
                     )
                 # Аттестованный человеком ❌ (или иной absence_rule с уже пройденным I2b)
                 # остаётся, но блокировки фиксируются в evidence — принятие риска видно.
-                _record_corpus_coverage(
-                    absence_evidence,
-                    effective_coverage,
-                    attested_by=scope_attested_by,
-                )
+                if corpus_incomplete:
+                    _record_corpus_coverage(
+                        absence_evidence,
+                        effective_coverage,
+                        attested_by=scope_attested_by,
+                    )
+                if extraction_incomplete:
+                    _record_extraction_coverage(absence_evidence, extraction_coverage)
         cell = _evaluated_cell(
             out_status=out.status,
             evidence=out.evidence,

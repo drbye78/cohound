@@ -161,14 +161,14 @@ def test_resume_skips_completed_phases(store: SqliteStore) -> None:
 
 def test_interrupted_run_resumes_without_losing_progress(store: SqliteStore) -> None:
     calls: list[str] = []
-    fail_once = {"corpus": True}
+    fail_once = {"crawl": True}
 
     def make(phase: str):
         def _fn(ctx) -> PhaseResult:
             calls.append(phase)
-            if phase == "corpus" and fail_once["corpus"]:
-                fail_once["corpus"] = False
-                raise RuntimeError("временный сбой корпуса")
+            if phase == "crawl" and fail_once["crawl"]:
+                fail_once["crawl"] = False
+                raise RuntimeError("временный сбой краула")
             return PhaseResult(status="ok", phase=phase)
 
         return _fn
@@ -176,17 +176,17 @@ def test_interrupted_run_resumes_without_losing_progress(store: SqliteStore) -> 
     runner = Runner(store, phases={name: make(name) for name in PHASES})
     first = runner.run(RUN_ID)
     assert first.status == "failed"
-    assert first.stopped_at == "corpus"
+    assert first.stopped_at == "crawl"
     assert runner.state_of(RUN_ID, "normalize") == "ok"
-    assert runner.state_of(RUN_ID, "corpus") == "failed"
+    assert runner.state_of(RUN_ID, "crawl") == "failed"
 
     calls.clear()
     second = runner.resume(RUN_ID)
     assert second.ok
-    # завершённые фазы не перезапускались; corpus и последующие — да
-    assert calls[0] == "corpus"
+    # завершённые фазы не перезапускались; crawl и последующие — да
+    assert calls[0] == "crawl"
     assert "normalize" not in calls
-    assert second.skipped == list(PHASES[: PHASES.index("corpus")])
+    assert second.skipped == list(PHASES[: PHASES.index("crawl")])
 
 
 def test_gate_passes_after_decision_and_run_continues(store: SqliteStore) -> None:
@@ -429,12 +429,12 @@ def test_blocked_status_stops_run(store: SqliteStore) -> None:
     phases: dict[str, object] = _all_ok_phases(calls)
 
     def blocked(ctx) -> PhaseResult:
-        return PhaseResult(status="blocked", phase="corpus")
+        return PhaseResult(status="blocked", phase="extract")
 
-    phases["corpus"] = blocked
+    phases["extract"] = blocked
     report = Runner(store, phases=phases).run(RUN_ID)
 
-    assert report.stopped_at == "corpus"
+    assert report.stopped_at == "extract"
     assert report.status == "blocked"
     assert "evaluate" not in calls and "report" not in calls
 

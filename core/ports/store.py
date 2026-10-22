@@ -18,6 +18,7 @@ from typing import Any, Iterable, Iterator, Protocol, runtime_checkable
 from core.domain import (
     Cell,
     CellEvidence,
+    CorpusArtifact,
     CorpusChunk,
     CorpusCoverage,
     CorpusDoc,
@@ -25,6 +26,7 @@ from core.domain import (
     CrawlSession,
     CrawlSessionItem,
     CrawlSessionStatus,
+    ExtractionCoverage,
     GateDecision,
     IndexManifestEntry,
     ProtocolExhaustion,
@@ -233,6 +235,83 @@ class StorePort(Protocol):
 
     def iter_corpus_coverage(self, run_id: str) -> Iterator[CorpusCoverage]:
         """Итерирует покрытие прогона; детерминированный порядок ``product_id``."""
+        ...
+
+    # -- замороженный набор артефактов и покрытие экстракции (C2) ---------- #
+    def replace_corpus_artifacts(
+        self, run_id: str, artifacts: Iterable[CorpusArtifact]
+    ) -> None:
+        """Идемпотентно заменяет набор артефактов прогона (``crawl`` — единственный писатель).
+
+        Замена, а не дозапись: набор — **снимок** одного crawl-прогона. Пустой набор
+        очищает таблицу прогона (повторный crawl без допущенных артефактов не оставляет
+        строк от прошлого).
+        """
+        ...
+
+    def iter_corpus_artifacts(
+        self, run_id: str, *, product_id: str | None = None
+    ) -> Iterator[CorpusArtifact]:
+        """Итерирует замороженные артефакты; порядок ``product_id, artifact_id``."""
+        ...
+
+    def update_corpus_artifact_probe(
+        self,
+        run_id: str,
+        product_id: str,
+        artifact_id: str,
+        *,
+        artifact_class: str,
+        format: str | None,
+        page_count: int | None,
+        member_count: int | None,
+        members: Iterable[str] = (),
+        probed_at: str | None,
+        probe_note: str | None = None,
+    ) -> None:
+        """Записывает результат ``probe`` (классификация/состав) в строку артефакта.
+
+        Экстракции не выполняет: ``members`` — только имена (``ArchiveDescent=plan``).
+        """
+        ...
+
+    def set_crawl_session_artifact_set(
+        self,
+        session_id: str,
+        *,
+        digest: str,
+        total: int,
+        bytes_total: int,
+    ) -> None:
+        """Фиксирует ``artifact_set_digest``/счётчики набора в ``crawl_sessions``."""
+        ...
+
+    def read_crawl_artifact_set(
+        self, session_id: str
+    ) -> tuple[str | None, int, int]:
+        """Возвращает ``(digest, artifacts_total, artifacts_bytes)`` сеанса."""
+        ...
+
+    def set_run_artifact_set_digest(self, run_id: str, digest: str) -> None:
+        """Записывает ``runs.artifact_set_digest`` (провенанс замороженного набора)."""
+        ...
+
+    def save_extraction_coverage(
+        self, run_id: str, coverage: ExtractionCoverage
+    ) -> None:
+        """Идемпотентный upsert покрытия экстракции по PK ``(run_id, product_id)``."""
+        ...
+
+    def read_extraction_coverage(
+        self, run_id: str, product_id: str
+    ) -> ExtractionCoverage | None:
+        """Читает покрытие экстракции продукта; ``None`` — записи нет (не «полное»)."""
+        ...
+
+    def iter_extraction_coverage(
+        self, run_id: str
+    ) -> Iterator[ExtractionCoverage]:
+        """Итерирует покрытие экстракции прогона; порядок ``product_id``."""
         ...
 
     def iter_corpus_docs(self, run_id: str) -> Iterator[CorpusDoc]:

@@ -74,6 +74,7 @@ __all__ = [
     "PhaseFn",
     "Clock",
     "PHASES",
+    "LEGACY_PHASE_ALIASES",
     "GATE_PHASES",
     "run_isolated",
 ]
@@ -86,6 +87,9 @@ __all__ = [
 PhaseStatus = Literal["ok", "skipped", "blocked", "failed"]
 
 #: Порядок фаз конвейера (02 §A.3). Гейты идут отдельными фазами и останавливают прогон.
+#: C2: монолитная фаза ``corpus`` расщеплена на ``crawl → extract → index``; каждая стадия
+#: durable и возобновляема (retained raw/артефакты в store), поэтому resume не повторяет
+#: оплаченную работу.
 PHASES: tuple[str, ...] = (
     "normalize",
     "lint",
@@ -95,7 +99,9 @@ PHASES: tuple[str, ...] = (
     "g2",
     "registry",
     "inheritance",
-    "corpus",
+    "crawl",
+    "extract",
+    "index",
     "evaluate",
     "review",
     "g3",
@@ -103,6 +109,14 @@ PHASES: tuple[str, ...] = (
     "g4",
     "report",
 )
+
+#: C2: обратная совместимость CLI/resume. Историческое имя ``corpus`` — не фаза, а
+#: **расширение** в три стадии в порядке исполнения: ``hound run --until corpus``
+#: выполняет все стадии, а durable-ledger со старым ``corpus: ok`` читается как три ``ok``
+#: (иначе resume молча перезапустил бы оплаченный краул/экстракцию).
+LEGACY_PHASE_ALIASES: dict[str, tuple[str, ...]] = {
+    "corpus": ("crawl", "extract", "index"),
+}
 
 #: Соответствие «фаза-гейт → доменный гейт» (S9).
 GATE_PHASES: dict[str, Gate] = {
@@ -388,6 +402,22 @@ class Runner:
             ledger.update(dict(getter(run_id)))
         except Exception:  # noqa: BLE001 — resume не должен падать на чтении состояния
             return
+        self._expand_legacy_ledger(ledger)
+
+    @staticmethod
+    def _expand_legacy_ledger(ledger: dict[str, str]) -> None:
+        """C2: старый ledger ``corpus: ok`` → ``crawl``/``extract``/``index`` = ``ok``.
+
+        Расширение аддитивно: явно записанные новые стадии не перетираются (``setdefault``),
+        а старый ключ ``corpus`` остаётся ради читаемости аудита. Иначе cross-process resume
+        молча перезапустил бы оплаченные краул и экстракцию.
+        """
+        for legacy, stages in LEGACY_PHASE_ALIASES.items():
+            state = ledger.get(legacy)
+            if state != "ok":
+                continue
+            for stage in stages:
+                ledger.setdefault(stage, "ok")
 
     # -- прогон ---------------------------------------------------------- #
     def run(self, run_id: str, until: str | None = None) -> RunReport:
@@ -402,9 +432,14 @@ class Runner:
         Короткое замыкание — **только** для персистентного ``ok``; персистентный ``skipped``
         пересчитывается (предпосылка могла измениться между прогонами).
 
-        :param until: последняя выполняемая фаза (включительно); ``None`` — все фазы.
-        :raises ValueError: ``until`` не входит в :data:`PHASES`.
+        :param until: последняя выполняемая фаза (включительно) или легаси-имя
+            (``corpus`` → последняя из ``crawl``/``extract``/``index``); ``None`` — все фазы.
+        :raises ValueError: ``until`` не входит ни в :data:`PHASES`, ни в
+            :data:`LEGACY_PHASE_ALIASES`.
         """
+        if until in LEGACY_PHASE_ALIASES:
+            # C2: легаси-имя контракта CLI расширяется в свои стадии, а не игнорируется.
+            until = LEGACY_PHASE_ALIASES[until][-1]
         if until is not None and until not in PHASES:
             raise ValueError(f"неизвестная фаза until={until!r}")
         end = PHASES.index(until) if until is not None else len(PHASES) - 1
