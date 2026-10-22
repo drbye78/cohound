@@ -629,11 +629,17 @@ class SqliteStore:
 
     # -- gates ----------------------------------------------------------- #
     def save_gate_decision(self, d: GateDecision) -> None:
-        """Upsert человеческого решения гейта G1–G4 (S9, I6/I7).
+        """Upsert решения гейта G1–G4 (S9, I6/I7, точки интеграции).
 
-        Поддерживает доменный ``GateDecision``; для обратной совместимости с transitional
-        порт-структурой (``ts``/``decision``/``payload``) недостающий ``decision_id``
-        выводится детерминированно.
+        Пишет привязку решения к предмету (``subject_digest``), источник
+        (``source``: internal|external), ссылку во внешнюю систему (``external_ref``) и
+        вердикт (``verdict``). ``INSERT OR REPLACE`` по ``decision_id``: повторная подача
+        того же решения идемпотентна, разные решения (другой дайджест/вердикт/актор)
+        сохраняются отдельно — аудит-след не теряется.
+
+        Для обратной совместимости с transitional порт-структурой
+        (``ts``/``decision``/``payload``) недостающий ``decision_id`` выводится
+        детерминированно.
         """
         run_id = d.run_id
         gate = _as_text(d.gate)
@@ -641,34 +647,67 @@ class SqliteStore:
         actor = d.actor
         decided_at = getattr(d, "decided_at", None) or getattr(d, "ts", None)
         notes = getattr(d, "notes", None)
+        subject_digest = getattr(d, "subject_digest", None) or ""
+        source = _as_text(getattr(d, "source", "internal")) or "internal"
+        external_ref = getattr(d, "external_ref", None)
+        verdict = _as_text(getattr(d, "verdict", "approved")) or "approved"
         decision_id = getattr(d, "decision_id", None)
         if not decision_id:
-            raw = f"{run_id}|{gate}|{target}|{actor}|{decided_at}".encode()
+            raw = (
+                f"{run_id}|{gate}|{target}|{actor}|{decided_at}"
+                f"|{subject_digest}|{source}|{external_ref}|{verdict}"
+            ).encode()
             decision_id = "gd_" + hashlib.sha256(raw).hexdigest()[:24]
         with self.conn:
             self.conn.execute(
                 "INSERT OR REPLACE INTO gate_decisions"
-                " (decision_id, run_id, gate, target, actor, decided_at, notes)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (decision_id, run_id, gate, target, actor, decided_at, notes),
+                " (decision_id, run_id, gate, target, actor, decided_at, notes,"
+                " subject_digest, source, external_ref, verdict)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    decision_id,
+                    run_id,
+                    gate,
+                    target,
+                    actor,
+                    decided_at,
+                    notes,
+                    subject_digest,
+                    source,
+                    external_ref,
+                    verdict,
+                ),
             )
 
     def iter_gate_decisions(self, run_id: str) -> Iterator[GateDecision]:
-        """Итерирует решения гейтов прогона как доменные ``GateDecision`` (аудит-след)."""
+        """Итерирует решения гейтов прогона как доменные ``GateDecision`` (аудит-след).
+
+        Неизвестное значение ``gate`` (например, из БД будущей версии) пропускается, а не
+        роняет чтение: аудит-след чужого формата не должен делать прогон неоткрываемым.
+        """
         cursor = self.conn.execute(
-            "SELECT decision_id, run_id, gate, target, actor, decided_at, notes"
+            "SELECT decision_id, run_id, gate, target, actor, decided_at, notes,"
+            " subject_digest, source, external_ref, verdict"
             " FROM gate_decisions WHERE run_id = ? ORDER BY decided_at, decision_id",
             (run_id,),
         )
         for row in cursor:
+            try:
+                gate = Gate(row["gate"])
+            except ValueError:
+                continue
             yield GateDecision(
                 decision_id=row["decision_id"],
                 run_id=row["run_id"],
-                gate=Gate(row["gate"]),
+                gate=gate,
                 target=row["target"],
                 actor=row["actor"],
                 decided_at=row["decided_at"],
                 notes=row["notes"],
+                subject_digest=row["subject_digest"] or None,
+                source=row["source"] or "internal",
+                external_ref=row["external_ref"],
+                verdict=row["verdict"] or "approved",
             )
 
     def iter_exhaustions(self, run_id: str) -> Iterator[ProtocolExhaustion]:

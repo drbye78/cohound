@@ -54,7 +54,7 @@ from core.domain.models import (
 from core.config.crawl_sources import CrawlSourcesConfig
 from core.config.deploy import CrawlConfig
 from core.config.domain_profiles import DomainProfile
-from core.pipeline.compute import compute, scope_universe
+from core.pipeline.compute import bundle_for_run, compute, scope_universe
 from core.pipeline.corpus import ExtractionPool, build_corpus
 from core.pipeline.extract_cache import ExtractionCache
 from core.pipeline.eval_cache import EvalVerdictCache
@@ -66,6 +66,7 @@ from core.pipeline.evaluate import (
     DEFAULT_RETRIEVAL_PROFILE,
     evaluate_phase,
 )
+from core.pipeline.gates import WAIVER_REF_PREFIX
 from core.pipeline.inheritance import inheritance_wave
 from core.pipeline.registry import registry_wave
 from core.pipeline.report import build_manifest, write_reports
@@ -437,7 +438,7 @@ def _review_pending_summary(items: Sequence[Any], *, preview: int = 3) -> str:
     Возвращает **одну** строку вида
     ``review: N ячеек ожидают решения (states=preliminary,reviewed; первые: p1/param_a, …)``.
     Список ключей ограничен ``preview`` (а не всей очередью): ``pending`` — сигнал человеку,
-    а не второй реестр; полная очередь — за командой ``hound review`` (G3).
+    а не второй реестр; полная очередь — за командой ``hound review`` (гейта G3 нет: ревью — внешний контур).
     """
     states = ",".join(sorted({str(item.state.value) for item in items}))
     keys = ", ".join(f"{item.product_id}/{item.param_id}" for item in items[:preview])
@@ -450,6 +451,49 @@ def _review_pending_summary(items: Sequence[Any], *, preview: int = 3) -> str:
 # ---------------------------------------------------------------------------
 # Публичная сборка фаз
 # ---------------------------------------------------------------------------
+
+
+def _phase_done(ctx: RunContext, run_id: str, phase: str) -> bool:
+    """Отработала ли фаза в **этом или прошлом** процессе (durable-состояние ``ok``).
+
+    ``holder`` живёт в памяти одного процесса; после resume он пуст, хотя фаза уже
+    выполнена. Без этой проверки фазы, которым нужен результат прошлого процесса,
+    не могли бы продолжить прогон.
+    """
+    try:
+        states = ctx.store.get_phase_state(run_id) or {}
+    except Exception:  # noqa: BLE001 — чтение состояния не должно ронять отчёт
+        return False
+    return states.get(phase) == "ok"
+
+
+def _gate_provenance(ctx: RunContext, plan: Any, inputs: Any) -> dict[str, Any]:
+    """Политика гейтов и waiver-строки для манифеста (§13: процесс, не измерение).
+
+    ``gate_policies`` — что объявлено в ``run.yaml:gates``; ``gate_waivers`` — какие гейты
+    прошли **без** внутрисистемного одобрения. Второе обязательно: прогон, опубликованный
+    по waiver, не должен выглядеть как прогон с одобрением ревью/публикации. В
+    ``EXECUTION_CONTRACT_FIELDS`` эти поля не входят (иначе смена процедуры меняла бы
+    ``run_id`` и рвала межцикловый diff).
+    """
+    policies = {
+        str(key).lower(): getattr(value, "value", value)
+        for key, value in (
+            getattr(getattr(inputs, "run", None), "gates", None) or {}
+        ).items()
+    }
+    waivers = [
+        {
+            "gate": decision.gate.value,
+            "external_ref": decision.external_ref,
+            "actor": decision.actor,
+            "notes": decision.notes,
+            "decided_at": decision.decided_at,
+        }
+        for decision in ctx.store.iter_gate_decisions(plan.run_id)
+        if (decision.external_ref or "").startswith(WAIVER_REF_PREFIX)
+    ]
+    return {"gate_policies": policies, "gate_waivers": waivers}
 
 
 def build_phases(
@@ -762,14 +806,16 @@ def build_phases(
         :attr:`PhaseResult.pending` — сигналом «что осталось человеку». **Ничего не
         разрешает**: не промоутит, не пишет ``N/A``, не трогает статусы ячеек, не
         превращает ``pending`` в статус (I6/I7: N/A и преодоление ``❓`` — только человеком).
-        G3 уже останавливает прогон до человека (``_gate_phase``), поэтому второго стопа
-        здесь нет; ``pending`` не влияет ни на ``status``, ни на resume, ни на гейты.
+        Фаза ничего не решает и не останавливает прогон: G3 — **точка интеграции**, его
+        решение принимает внешняя система по экспортированной очереди (см.
+        :mod:`core.pipeline.gate_subject`). ``pending`` не влияет ни на ``status``, ни на
+        resume, ни на гейты.
 
         Пустая очередь → ``pending == []`` (честное «нечего решать»). Сбой чтения очереди
         изолируется (ср. изоляцию ``run_isolated``/информационный провенанс Ш9): фаза
         возвращает ``ok`` с самодокументирующей заметкой в ``log_entries``, а не роняет
-        прогон ``failed`` — очередь ревью вторична к прогону, а остановка на человеке и без
-        того обеспечена G3.
+        прогон ``failed`` — очередь ревью вторична к прогону, а остановка на решении и без
+        того обеспечивается гейтами — очередь лишь экспорт.
         """
         try:
             items = review_queue(ctx.store, plan.run_id)
@@ -787,32 +833,26 @@ def build_phases(
     # -- Ш8: расчёт (бандл → holder для report) ----------------------------- #
     def compute_phase(ctx: RunContext) -> PhaseResult:
         """Ш8: считает ``ScoreBundle`` и кладёт его в ``holder`` для фазы отчёта."""
-        catalog = {p.param_id: p for p in plan.params}
-        module_weights = (
-            getattr(plan, "renormalized_weights", None)
-            or getattr(plan, "module_weights", None)
-            or {}
-        )
-        run = getattr(inputs, "run", None)
-        universe = scope_universe(catalog, plan.products)
-        ranking_epsilon = getattr(run, "ranking_epsilon", None) or 0.0
-        bundle = compute(
-            store=ctx.store,
-            run_id=plan.run_id,
-            catalog=catalog,
-            module_weights=module_weights,
-            cohort=getattr(plan, "cohort", None),
-            requested_ranking=getattr(run, "ranking_policy", None),
-            universe=universe,
-            ranking_epsilon=ranking_epsilon,
+        bundle = bundle_for_run(
+            ctx.store, run_id=plan.run_id, plan=plan, inputs=inputs
         )
         holder["bundle"] = bundle
         return PhaseResult(status="ok", phase="compute")
+
 
     # -- Ш9: отчёты (читает holder) ----------------------------------------- #
     def report_phase(ctx: RunContext) -> PhaseResult:
         """Ш9: собирает манифест и артефакты; без бандла — ``failed`` (compute не выполнен)."""
         bundle = holder.get("bundle")
+        if bundle is None and _phase_done(ctx, plan.run_id, "compute"):
+            # Resume: ``compute`` уже отработал в прошлом процессе (durable ``ok``) и
+            # короткозамкнут, поэтому ``holder`` пуст. Расчёт детерминирован по ячейкам —
+            # пересчитываем, иначе прогон, дошедший до G4 в прошлом процессе, не смог бы
+            # завершиться (``report`` падал бы «бандла нет» на каждом resume).
+            bundle = bundle_for_run(
+                ctx.store, run_id=plan.run_id, plan=plan, inputs=inputs
+            )
+            holder["bundle"] = bundle
         if bundle is None:
             return PhaseResult(
                 status="failed",
@@ -857,6 +897,9 @@ def build_phases(
             axes=axes,
             declared_status_dict_version=declared_status_dict_version,
         )
+        # §13/точки интеграции: политика гейтов и waiver-строки — в манифест, чтобы
+        # делегирование гейта наружу было видно в артефакте, а не подразумевалось.
+        manifest = manifest.model_copy(update=_gate_provenance(ctx, plan, inputs))
         # R7/§13: финальный манифест — самостоятельная запись воспроизведения,
         # поэтому персистится в операционную БД прогона (версии/индекс/провенанс).
         # E1/A3: персист **не-понижающий** — измеренная фиксация ретривала не затирается

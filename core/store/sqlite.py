@@ -12,7 +12,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = "3.10.0"
+SCHEMA_VERSION = "3.11.0"
 
 DDL = """
 PRAGMA journal_mode = WAL;
@@ -187,15 +187,24 @@ CREATE TABLE IF NOT EXISTS cell_evidence (
     retrieved_at      TEXT
 );
 
--- S9: персистентные человеческие решения гейтов G1–G4 (носитель reviewed_by, аудит-след).
+-- S9: персистентные решения гейтов G1–G4 (носитель reviewed_by, аудит-след).
+-- `subject_digest` привязывает решение к **предмету**: профилю (G1/G2), очереди ревью
+-- (G3), Coverage/Capability/артефактам (G4). Пустая строка — legacy-решение без
+-- привязки (записано до появления привязки; продолжает проходить гейт).
+-- `source`/`external_ref`/`verdict` — интеграция: внешняя система **присылает**
+-- решение (approved|rejected), `external_ref` — ссылка обратно в неё.
 CREATE TABLE IF NOT EXISTS gate_decisions (
     decision_id       TEXT PRIMARY KEY,
     run_id            TEXT NOT NULL,
     gate              TEXT NOT NULL,                    -- G1|G2|G3|G4
     target            TEXT,                             -- что подтверждено (cohort/cell/...)
-    actor             TEXT NOT NULL,                    -- человек
+    actor             TEXT NOT NULL,                    -- человек/система, принявшая решение
     decided_at        TEXT,
     notes             TEXT,
+    subject_digest    TEXT NOT NULL DEFAULT '',         -- отпечаток предмета решения
+    source            TEXT NOT NULL DEFAULT 'internal', -- internal|external
+    external_ref      TEXT,                             -- id решения во внешней системе
+    verdict           TEXT NOT NULL DEFAULT 'approved', -- approved|rejected
     FOREIGN KEY (run_id) REFERENCES runs(run_id)
 );
 
@@ -524,6 +533,21 @@ def connect(db_path: str | Path = ":memory:") -> sqlite3.Connection:
     )
     # v3.1.0 — удаление legacy per-URL таблицы попыток (полностью замещена сеансом краула,
     # back-compat не требуется): DDL-таблицы/индексов и их миграции больше нет.
+    # DDL-миграция v3.11.0 (G3/G4 как точки интеграции): решение гейта привязывается к
+    # предмету (``subject_digest``), несёт источник (``source``), ссылку во внешнюю
+    # систему (``external_ref``) и вердикт (``verdict``). Аддитивно: старые строки
+    # получают ``''``/``internal``/``approved`` — прежние прогоны продолжают проходить
+    # гейты без пере-аттестации (обратная совместимость).
+    _ensure_columns(
+        conn,
+        "gate_decisions",
+        {
+            "subject_digest": "TEXT NOT NULL DEFAULT ''",
+            "source": "TEXT NOT NULL DEFAULT 'internal'",
+            "external_ref": "TEXT",
+            "verdict": "TEXT NOT NULL DEFAULT 'approved'",
+        },
+    )
     conn.execute(
         "INSERT OR REPLACE INTO schema_meta(key, value) VALUES ('schema_version', ?)",
         (SCHEMA_VERSION,),

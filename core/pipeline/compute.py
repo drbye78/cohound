@@ -67,6 +67,7 @@ from core.ports.store import StorePort
 
 __all__ = [
     "ScoreBundle",
+    "bundle_for_run",
     "compute",
     "per_product_bundle",
     "assert_publishable",
@@ -324,6 +325,42 @@ def compute(
         requested_ranking=requested,
         universe=universe,
         ranking_epsilon=ranking_epsilon,
+    )
+
+
+def bundle_for_run(
+    store: StorePort,
+    *,
+    run_id: str,
+    plan: Any,
+    inputs: Any,
+) -> ScoreBundle:
+    """``ScoreBundle`` прогона по плану и входам — **единственная** формула аргументов.
+
+    Два потребителя обязаны видеть одно и то же: фаза Ш8 (:func:`compute`) и предмет
+    решения G4 (:func:`core.pipeline.gate_subject.publication_subject`). Вторая формула
+    аргументов разошлась бы с первой, и внешняя система утверждала бы не то, что
+    публикуется. Поэтому сборка аргументов живёт здесь, а обе стороны её вызывают.
+
+    :param plan: ``RunPlan`` (``params``/``products``/веса модулей/когорта).
+    :param inputs: ``RunInputs`` (``run`` — политика ранжирования и порог неразличимости).
+    """
+    catalog = {p.param_id: p for p in plan.params}
+    module_weights = (
+        getattr(plan, "renormalized_weights", None)
+        or getattr(plan, "module_weights", None)
+        or {}
+    )
+    run = getattr(inputs, "run", None)
+    return compute(
+        store=store,
+        run_id=run_id,
+        catalog=catalog,
+        module_weights=module_weights,
+        cohort=getattr(plan, "cohort", None),
+        requested_ranking=getattr(run, "ranking_policy", None),
+        universe=scope_universe(catalog, plan.products),
+        ranking_epsilon=getattr(run, "ranking_epsilon", None) or 0.0,
     )
 
 

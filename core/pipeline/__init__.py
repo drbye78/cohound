@@ -2,11 +2,13 @@
 
 Пакет принимает порты как аргументы (ручной DI, A1) и никогда не инстанцирует адаптеры:
 сборка зависимостей — задача composition root (``cli/``, Z0). Здесь живут:
-``runner.py`` (оркестрация фаз + ``PhaseResult``), ``gates.py`` (человеческие решения
-G1–G4, S9), ``idempotency.py`` (детерминированные ключи upsert, S8/R15),
-``normalize.py``/``lint.py``/``plan.py`` (нормализация входов, блокирующий линтер
-и воспроизводимый план прогона — W5/T5.2/T5.4), ``registry.py``/``inheritance.py``
-(детерминированные волны Ш3/Ш4 без LLM — W6/T6.3/T6.4).
+``runner.py`` (оркестрация фаз + ``PhaseResult``), ``gates.py`` (решения гейтов G1–G4, S9),
+``gate_subject.py`` (предмет решения G3/G4 и исходящий запрос внешней системе),
+``profile_attestation.py`` (аттестация профиля пакета-якоря: дайджест,
+диагностика расхождения, резолвер гейта), ``idempotency.py`` (детерминированные ключи
+upsert, S8/R15), ``normalize.py``/``lint.py``/``plan.py`` (нормализация входов,
+блокирующий линтер и воспроизводимый план прогона — W5/T5.2/T5.4),
+``registry.py``/``inheritance.py`` (детерминированные волны Ш3/Ш4 без LLM — W6/T6.3/T6.4).
 
 Нейтрален к предметной категории (§1.3): никаких названий продуктов/вендоров.
 """
@@ -14,6 +16,8 @@ G1–G4, S9), ``idempotency.py`` (детерминированные ключи 
 from __future__ import annotations
 
 from core.pipeline.gates import (
+    GateCheck,
+    evaluate_gate,
     gate_decision_for,
     gate_g1,
     gate_g2,
@@ -21,6 +25,19 @@ from core.pipeline.gates import (
     gate_g4,
     is_gate_passed,
     record_decision,
+)
+from core.pipeline.gate_subject import (
+    DECISION_CONTRACT,
+    PUBLISHED_ARTIFACTS,
+    GateSubject,
+    SubjectResolver,
+    describe_subject_diff,
+    gate_request_payload,
+    publication_subject,
+    read_gate_request_digest,
+    read_gate_request_subject,
+    review_subject,
+    write_gate_request,
 )
 from core.pipeline.idempotency import (
     evidence_id_for,
@@ -189,9 +206,19 @@ from core.pipeline.registry import (
     registry_wave,
     resolve_registry_ids,
 )
+from core.pipeline.profile_attestation import (
+    PROFILE_MATERIAL_KEYS,
+    ProfileGateResult,
+    describe_material_diff,
+    make_profile_gate,
+    profile_attestation_id,
+    profile_digest,
+    profile_material,
+)
 from core.pipeline.runner import (
     GATE_PHASES,
     PHASES,
+    GateRuntime,
     PhaseResult,
     Ports,
     RunContext,
@@ -311,7 +338,7 @@ __all__ = [
     "PHASES",
     "GATE_PHASES",
     "run_isolated",
-    # gates (T4.2)
+    # gates (T4.2) — G1/G2 внутренняя аттестация, G3/G4 точки интеграции
     "record_decision",
     "gate_g1",
     "gate_g2",
@@ -319,6 +346,29 @@ __all__ = [
     "gate_g4",
     "is_gate_passed",
     "gate_decision_for",
+    "evaluate_gate",
+    "GateCheck",
+    "GateRuntime",
+    # предмет решения G3/G4 и исходящий запрос (точки интеграции)
+    "GateSubject",
+    "SubjectResolver",
+    "DECISION_CONTRACT",
+    "PUBLISHED_ARTIFACTS",
+    "review_subject",
+    "publication_subject",
+    "describe_subject_diff",
+    "gate_request_payload",
+    "read_gate_request_digest",
+    "read_gate_request_subject",
+    "write_gate_request",
+    # аттестация профиля пакета-якоря (G1/G2)
+    "PROFILE_MATERIAL_KEYS",
+    "ProfileGateResult",
+    "describe_material_diff",
+    "make_profile_gate",
+    "profile_attestation_id",
+    "profile_digest",
+    "profile_material",
     # idempotency (T4.4)
     "evidence_id_for",
     "mark_stale",

@@ -30,6 +30,9 @@ from core.domain.enums import (
     EvidenceType,
     FailureKind,
     Gate,
+    GatePolicy,
+    GateSource,
+    GateVerdict,
     GoldenTier,
     Importance,
     InheritanceMode,
@@ -540,6 +543,12 @@ class RunConfig(BaseModel):
     #: Секция ``crawl`` (D4): дефолты оси стратегии и диапазона задержек. Отсутствие
     #: секции (``None``) → поведение краула не меняется (обратная совместимость).
     crawl: CrawlRunConfig | None = None
+    #: Секция ``gates`` — политика гейтов G3/G4 для этого прогона
+    #: (``{g3: external|waived, g4: external|waived}``; по умолчанию ``external``).
+    #: Это **управление процессом**, а не условие измерения: в
+    #: ``EXECUTION_CONTRACT_FIELDS`` секция намеренно не входит (§13 — иначе смена
+    #: процедуры меняла бы ``run_id`` и рвала межцикловый diff).
+    gates: dict[str, GatePolicy] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def _check(self) -> RunConfig:
@@ -552,6 +561,15 @@ class RunConfig(BaseModel):
         if self.mode is RunMode.PRELIMINARY and self.ranking_policy is RankingPolicy.CAPABILITY_RANKED:
             # preliminary исключён из расчётов (I13) — ранжировать нечего.
             raise ValueError("preliminary не участвует в Capability-ранжировании (I13)")
+        # Политика гейтов: только делегируемые гейты (G3/G4) и только известные ключи.
+        # G1/G2 — внутренняя аттестация профиля; «делегировать» её молча было бы
+        # способом обойти аттестацию.
+        unknown = sorted(set(self.gates) - {"g3", "g4"})
+        if unknown:
+            raise ValueError(
+                "run.yaml:gates: политика допустима только для ['g3', 'g4'], "
+                f"получено {unknown} (G1/G2 — внутренняя аттестация профиля)"
+            )
         return self
 
 
@@ -818,9 +836,22 @@ class RegistryFact(BaseModel):
 
 
 class GateDecision(BaseModel):
-    """Человеческое решение гейта G1–G4 (S9). Строка ``gate_decisions``.
+    """Решение гейта (S9). Строка ``gate_decisions``.
 
-    Носитель ``reviewed_by`` и аудит-след. Гейт не считается пройденным без строки.
+    Носитель ``reviewed_by`` и аудит-след. Гейт не считается пройденным без решения,
+    **привязанного к текущему предмету**: ``subject_digest`` — отпечаток того, о чём
+    решали (профиль для G1/G2, очередь ревью для G3, Coverage/Capability/артефакты для
+    G4). Раньше любая строка проходила гейт навсегда, независимо от состояния прогона;
+    привязка к дайджесту делает устаревшее одобрение невозможным.
+
+    ``source``/``external_ref``/``verdict`` — интеграционная часть: внешняя система
+    (ревью, публикация) **присылает** решение, а не coHound его принимает. Отказ
+    (``verdict=rejected``) — такая же запись, как одобрение: иначе отказ выражался бы
+    молчанием, неотличимым от «ещё никто не смотрел».
+
+    ``subject_digest is None`` (в БД — пустая строка) — решение **без привязки**:
+    legacy-строки, записанные до появления привязки. Они продолжают проходить гейт
+    (обратная совместимость существующих прогонов), но новый код обязан привязывать.
     """
 
     model_config = _BASE
@@ -832,11 +863,78 @@ class GateDecision(BaseModel):
     actor: str
     decided_at: str | None = None
     notes: str | None = None
+    #: Отпечаток предмета решения; ``None`` — решение без привязки (legacy/явный override).
+    subject_digest: str | None = None
+    #: Кто решил: ``internal`` (человек в coHound) или ``external`` (внешняя система).
+    source: GateSource = GateSource.INTERNAL
+    #: Идентификатор решения во внешней системе — единственная ссылка обратно.
+    external_ref: str | None = None
+    #: Вердикт: ``approved``/``rejected``. Отказ блокирует гейт так же явно, как
+    #: отсутствие решения, но с другим сообщением (кто отказал и почему).
+    verdict: GateVerdict = GateVerdict.APPROVED
 
     @model_validator(mode="after")
     def _check(self) -> GateDecision:
         if not self.actor:
             raise ValueError("решение гейта обязано иметь actor (человека)")
+        if self.source is GateSource.EXTERNAL:
+            if not (self.external_ref or "").strip():
+                raise ValueError(
+                    "внешнее решение обязано нести external_ref (ссылка на решающую систему)"
+                )
+            if not (self.notes or "").strip():
+                raise ValueError(
+                    "внешнее решение обязано нести notes: решение без причины — не аудит-след"
+                )
+        return self
+
+
+class ProfileAttestationRow(BaseModel):
+    """Аттестация **профиля** пакета-якоря для гейта G1/G2 — строка ``profile_attestation``.
+
+    Профиль квази-константен: когорта/роли/объём/паспорта меняются 2–5 раз в год, а
+    прогоны идут еженедельно. Поэтому человек аттестует **содержимое** профиля один раз
+    (``profile_digest``), и последующие прогоны с тем же профилем не требуют повторного
+    решения. Это durable-строка ``state.db`` пакета, а не per-run ``gate_decisions``:
+    аттестация переживает прогоны, но **не** переносится молча на изменённый профиль.
+
+    ``digest_material`` — JSON-компоненты дайджеста (``profile_digest``): по ним
+    вычисляется, что именно изменилось, когда текущий профиль перестал совпадать с
+    аттестованным. ``superseded_at`` — отзыв аттестации (не удаление строки: аудит).
+
+    Имя таблицы намеренно не ``attestation``: та — cell-level ``source_scope``
+    аттестация (I2b, ``scope_attested_by``), другая сущность.
+    """
+
+    model_config = _BASE
+
+    attestation_id: str
+    case_id: str
+    package_id: str
+    anchor: str
+    gate: Gate
+    profile_digest: str
+    digest_material: dict[str, Any]
+    attested_by: str
+    attested_at: str
+    superseded_at: str | None = None
+    notes: str | None = None
+
+    @model_validator(mode="after")
+    def _check(self) -> ProfileAttestationRow:
+        if self.gate not in (Gate.G1, Gate.G2):
+            raise ValueError(
+                f"аттестация профиля относится только к G1/G2, получено {self.gate.value}"
+            )
+        if not self.attested_by:
+            raise ValueError("аттестация профиля обязана иметь attested_by (человека)")
+        if not self.profile_digest:
+            raise ValueError("аттестация профиля обязана иметь profile_digest")
+        if not self.digest_material:
+            raise ValueError(
+                "аттестация профиля обязана нести digest_material: без компонентов "
+                "невозможно назвать изменившееся"
+            )
         return self
 
 
@@ -1041,6 +1139,15 @@ class RunManifest(BaseModel):
     #: **не фабрикуется**; для пары с ``None`` действует прежнее сравнение
     #: :data:`~core.pipeline.report.EXECUTION_FIELDS`.
     execution_contract_digest: str | None = None
+    #: Политика гейтов прогона (``run.yaml:gates``) — **процесс**, не измерение: в
+    #: ``EXECUTION_CONTRACT_FIELDS`` не входит. Видна в манифесте, чтобы делегирование
+    #: гейта наружу было явным фактом прогона, а не подразумеваемым.
+    gate_policies: dict[str, str] = Field(default_factory=dict)
+    #: Делегированные гейты (waiver): ``[{gate, external_ref, actor, notes, decided_at}]``.
+    #: Прогон мог пройти гейт **без** внутрисистемного одобрения ревью/публикации — этот
+    #: список и есть честная запись такого факта в артефакте (невидимый waiver —
+    #: именно та ошибка, которой нельзя допускать).
+    gate_waivers: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class Violation(BaseModel):

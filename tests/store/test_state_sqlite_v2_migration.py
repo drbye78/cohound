@@ -1,7 +1,8 @@
 """Миграция ``state.db`` v2 → v3 (09 §4.2/§4.4): аддитивно, без потери данных.
 
 БД v2 строится **вручную** (не через текущий ``STATE_DDL``), чтобы тест не подгонял
-историю под реализацию. Проверяется: строки сохраняются, версия становится ``"3"``,
+историю под реализацию. Проверяется: строки сохраняются, версия становится текущей
+(``"4"`` после аттестации профиля; ``"3"`` — промежуточная веха среза),
 поддерживающие индексы v3 появляются, дрейф колонок лечится ``ALTER TABLE``, повторное
 открытие идемпотентно.
 """
@@ -179,7 +180,6 @@ def test_v2_db_opens_under_schema_3_without_data_loss(tmp_path: Path) -> None:
                 "SELECT value FROM schema_meta WHERE key = 'schema_version'"
             ).fetchone()["value"]
             == STATE_SCHEMA_VERSION
-            == "3"
         )
         # Строки v2 на месте.
         assert (
@@ -278,7 +278,7 @@ def test_reopen_is_idempotent(tmp_path: Path) -> None:
             second.execute(
                 "SELECT value FROM schema_meta WHERE key = 'schema_version'"
             ).fetchone()["value"]
-            == "3"
+            == STATE_SCHEMA_VERSION
         )
         assert (
             second.execute(

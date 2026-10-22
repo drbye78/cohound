@@ -1,4 +1,4 @@
-"""Тесты CLI-команды ``gate`` — запись человеческого решения гейта G1–G4 (S9/I6/I7).
+"""Тесты CLI-команды ``gate`` — запись человеческого решения гейта G1/G2 (S9/I6/I7).
 
 Покрывают:
 
@@ -83,6 +83,8 @@ def test_gate_approve_g1_via_db(
             "G1",
             "--actor",
             "tester",
+            "--subject-digest",
+            "d_test",
             "--json",
         ]
     )
@@ -96,7 +98,7 @@ def test_gate_approve_g1_via_db(
     assert payload["decided_at"]
 
     with SqliteStore(db) as store:
-        assert is_gate_passed(store, RUN_ID, "G1") is True
+        assert is_gate_passed(store, RUN_ID, "G1", "d_test") is True
         assert gate_decision_for(store, RUN_ID, "G1") is not None
 
 
@@ -117,6 +119,8 @@ def test_gate_approve_via_runs_dir(
             "G2",
             "--actor",
             "tester",
+            "--subject-digest",
+            "d_test",
             "--target",
             "p1/role_a",
             "--json",
@@ -135,7 +139,18 @@ def test_gate_infers_run_id_for_single_run(
     _seed_run(db)
 
     code = main(
-        ["gate", "--db", str(db), "--gate", "G1", "--actor", "tester", "--json"]
+        [
+            "gate",
+            "--db",
+            str(db),
+            "--gate",
+            "G1",
+            "--actor",
+            "tester",
+            "--subject-digest",
+            "d_test",
+            "--json",
+        ]
     )
     assert code == EXIT_OK
     assert json_out(capsys)["run_id"] == RUN_ID
@@ -187,6 +202,8 @@ def test_gate_nonexistent_run_is_usage_error(tmp_path: Path) -> None:
             "G1",
             "--actor",
             "tester",
+            "--subject-digest",
+            "d_test",
         ]
     )
     assert code == EXIT_USAGE
@@ -207,6 +224,8 @@ def test_gate_idempotent_same_decision_id(
         "G1",
         "--actor",
         "tester",
+        "--subject-digest",
+        "d_test",
         "--json",
     ]
 
@@ -238,6 +257,8 @@ def test_gate_human_output(
             "G1",
             "--actor",
             "tester",
+            "--subject-digest",
+            "d_test",
         ]
     )
     assert code == EXIT_OK
@@ -245,3 +266,169 @@ def test_gate_human_output(
     assert "gate: G1" in out
     assert "actor: tester" in out
     assert "решение записано" in out
+
+# ---------------------------------------------------------------------------
+# Точки интеграции G3/G4: источник, внешняя ссылка, вердикт, отпечаток предмета
+# ---------------------------------------------------------------------------
+
+def _gate_argv(db: Path, gate: str = "G3", digest: str = "d_req") -> list[str]:
+    """Базовый argv решения гейта с привязкой к предмету."""
+    return [
+        "gate",
+        "--db",
+        str(db),
+        "--run-id",
+        RUN_ID,
+        "--gate",
+        gate,
+        "--actor",
+        "review-system",
+        "--subject-digest",
+        digest,
+    ]
+
+def test_gate_external_requires_ref_and_notes(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Внешнее решение без ссылки или причины — ``EXIT_USAGE``, а не молчаливая запись."""
+    db = tmp_path / "cohound.db"
+    _seed_run(db)
+
+    code = main([*_gate_argv(db), "--source", "external", "--notes", "ревью"])
+    assert code == EXIT_USAGE
+    assert "external-ref" in capsys.readouterr().err
+
+    code = main([*_gate_argv(db), "--source", "external", "--external-ref", "REV-1"])
+    assert code == EXIT_USAGE
+    assert "--notes" in capsys.readouterr().err
+
+    with SqliteStore(db) as store:
+        assert list(store.iter_gate_decisions(RUN_ID)) == []
+
+def test_gate_external_approval_is_recorded(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Внешнее одобрение записывается с источником, ссылкой и отпечатком предмета."""
+    db = tmp_path / "cohound.db"
+    _seed_run(db)
+
+    code = main(
+        [
+            *_gate_argv(db),
+            "--source",
+            "external",
+            "--external-ref",
+            "REV-17",
+            "--notes",
+            "ревью пройдено",
+            "--json",
+        ]
+    )
+    assert code == EXIT_OK
+    payload = json_out(capsys)
+    assert payload["source"] == "external"
+    assert payload["external_ref"] == "REV-17"
+    assert payload["subject_digest"] == "d_req"
+    assert payload["verdict"] == "approved"
+
+    with SqliteStore(db) as store:
+        assert is_gate_passed(store, RUN_ID, "G3", "d_req") is True
+        # Отпечаток обязателен: решение не проходит другой предмет.
+        assert is_gate_passed(store, RUN_ID, "G3", "d_other") is False
+
+def test_gate_rejected_verdict_is_recorded_and_blocks(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """``--verdict rejected`` — явная запись отказа: гейт не проходит, вывод честен."""
+    db = tmp_path / "cohound.db"
+    _seed_run(db)
+
+    code = main(
+        [
+            *_gate_argv(db),
+            "--source",
+            "external",
+            "--external-ref",
+            "REV-18",
+            "--notes",
+            "две ячейки не подтверждены",
+            "--verdict",
+            "rejected",
+            "--json",
+        ]
+    )
+    assert code == EXIT_OK
+    assert json_out(capsys)["verdict"] == "rejected"
+
+    with SqliteStore(db) as store:
+        assert is_gate_passed(store, RUN_ID, "G3", "d_req") is False
+
+    code = main(
+        [
+            *_gate_argv(db),
+            "--source",
+            "external",
+            "--external-ref",
+            "REV-18",
+            "--notes",
+            "две ячейки не подтверждены",
+            "--verdict",
+            "rejected",
+        ]
+    )
+    assert code == EXIT_OK
+    assert "ОТКЛОНЁН" in capsys.readouterr().out
+
+def test_gate_takes_digest_from_request_file(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Без ``--subject-digest`` отпечаток берётся из ``gates/{gate}-request.json``."""
+    runs_dir = tmp_path / "runs"
+    db = runs_dir / RUN_ID / "cohound.db"
+    _seed_run(db)
+    gates_dir = runs_dir / RUN_ID / "gates"
+    gates_dir.mkdir(parents=True)
+    (gates_dir / "G3-request.json").write_text(
+        '{"run_id": "%s", "gate": "G3", "subject_digest": "d_from_request"}'
+        % RUN_ID,
+        encoding="utf-8",
+    )
+
+    code = main(
+        [
+            "gate",
+            "--runs-dir",
+            str(runs_dir),
+            "--run-id",
+            RUN_ID,
+            "--gate",
+            "G3",
+            "--actor",
+            "review-system",
+            "--source",
+            "external",
+            "--external-ref",
+            "REV-20",
+            "--notes",
+            "по запросу",
+            "--json",
+        ]
+    )
+    assert code == EXIT_OK
+    assert json_out(capsys)["subject_digest"] == "d_from_request"
+
+def test_gate_without_digest_or_request_is_usage_error(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Нет ни ``--subject-digest``, ни файла запроса → ``EXIT_USAGE`` с объяснением."""
+    db = tmp_path / "cohound.db"
+    _seed_run(db)
+
+    code = main(
+        ["gate", "--db", str(db), "--run-id", RUN_ID, "--gate", "G1", "--actor", "h"]
+    )
+    assert code == EXIT_USAGE
+    err = capsys.readouterr().err
+    assert "subject-digest" in err or "G1-request.json" in err
+    with SqliteStore(db) as store:
+        assert list(store.iter_gate_decisions(RUN_ID)) == []

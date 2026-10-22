@@ -26,7 +26,12 @@ __all__ = ["STATE_SCHEMA_VERSION", "STATE_DDL", "connect_state", "state_db_path"
 #: ``document_version``, ``chunk_store``, ``chunk_meta`` объявлены рабочими таблицами
 #: (колонки уже были в DDL с v1), добавлены поддерживающие индексы
 #: ``idx_url_state_product``/``idx_chunk_meta_doc``; миграция лечит дрейф колонок.
-STATE_SCHEMA_VERSION = "3"
+#: 4 — аттестация **профиля** пакета-якоря (``profile_attestation``): человек аттестует
+#: содержимое профиля (дайджест) один раз, последующие прогоны с тем же профилем не
+#: требуют повторного решения G1/G2. Таблица **новая**, поэтому миграция аддитивна и
+#: сводится к ``CREATE TABLE IF NOT EXISTS``: старые БД получают её при открытии, строки
+#: не переносятся и не пересчитываются (отсутствие строк = «профиль не аттестован»).
+STATE_SCHEMA_VERSION = "4"
 
 #: DDL §4.2. Идемпотентен: ``CREATE ... IF NOT EXISTS`` на всех объектах.
 STATE_DDL = """
@@ -247,6 +252,28 @@ CREATE TABLE IF NOT EXISTS attestation (
     superseded_at   TEXT
 );
 
+-- 11. Аттестация профиля пакета-якоря для G1/G2 (v4).
+-- Профиль квази-константен (2–5 правок в год), прогоны — еженедельные: человек
+-- аттестует содержимое профиля (profile_digest) один раз, и прогоны с тем же
+-- профилем не требуют повторного решения. НЕ путать с cell-level ``attestation``
+-- выше (та — source_scope аттестация охвата, I2b).
+CREATE TABLE IF NOT EXISTS profile_attestation (
+    attestation_id  TEXT PRIMARY KEY,
+    case_id         TEXT NOT NULL,
+    package_id      TEXT NOT NULL,
+    anchor          TEXT NOT NULL,
+    gate            TEXT NOT NULL,              -- G1 | G2
+    profile_digest  TEXT NOT NULL,
+    digest_material TEXT NOT NULL,              -- JSON: компоненты дайджеста, для diff при расхождении
+    attested_by     TEXT NOT NULL,
+    attested_at     TEXT NOT NULL,
+    superseded_at   TEXT,
+    notes           TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_profile_attest
+    ON profile_attestation(case_id, package_id, anchor, gate, profile_digest);
+
 CREATE INDEX IF NOT EXISTS idx_seed_product ON seed_set(product_id, state);
 CREATE INDEX IF NOT EXISTS idx_doc_product  ON document_version(product_id, status);
 CREATE INDEX IF NOT EXISTS idx_snapshot_product ON product_snapshot(product_id, created_at);
@@ -348,7 +375,8 @@ def connect_state(db_path: str | Path = ":memory:") -> sqlite3.Connection:
     (``IF NOT EXISTS`` — no-op для существующих объектов), версия схемы пишется в
     ``schema_meta``. Аддитивные колонки, появившиеся после v1, досоздаются
     :func:`_migrate` (``ALTER TABLE ... ADD COLUMN``), а индексы v3 — после миграции,
-    поэтому старая БД открывается без потери данных.
+    поэтому старая БД открывается без потери данных. v4 (``profile_attestation``) —
+    новая таблица, поэтому миграция v3 → v4 целиком покрыта ``IF NOT EXISTS``.
     """
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row

@@ -17,12 +17,18 @@
 Функция не достраивает пути: схема-less домен получает только ``https://`` и завершающий
 ``/``; запись со схемой сохраняется как есть.
 
+**Дайджест паспортов** (:func:`passport_content_digest`) — отпечаток **авторских байтов**
+всех паспортных файлов продукта. Он входит в дайджест профиля пакета-якоря (G1/G2):
+паспорт фиксируется на цикл, поэтому его правка обязана менять профиль.
+
 Нейтрален к предметной категории (§1.3): никаких названий продуктов/вендоров.
 Допустимые зависимости слоя ``config`` — ``domain``/``config``/``util`` (01 §1).
 """
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from pathlib import Path
 from typing import Any
@@ -31,14 +37,20 @@ import yaml
 from pydantic import ValidationError
 
 from core.domain.models import Passport
+from core.util.hashing import short_hash
 
 __all__ = [
     "PassportLoadError",
     "load_passport",
     "load_passports",
     "latest_passport_path",
+    "passport_content_digest",
+    "passport_content_digests",
     "passport_urls",
 ]
+
+#: Длина дайджеста паспорта (как у прочих дайджестов идентичности, §12.2).
+_PASSPORT_DIGEST_LEN = 24
 
 # Имя паспортного файла — строго ISO-дата: ``YYYY-MM-DD.yaml`` (§4.3). Прочие файлы
 # в каталоге продукта игнорируются (не считаются паспортами).
@@ -188,3 +200,50 @@ def passport_urls(passport: Passport) -> list[str]:
         if url not in urls:
             urls.append(url)
     return urls
+
+
+# ---------------------------------------------------------------------------
+# Дайджест авторских байтов паспортов (компонент профиля пакета-якоря, G1/G2)
+# ---------------------------------------------------------------------------
+
+
+def passport_content_digest(
+    product_id: str, passports_dir: str | Path
+) -> str | None:
+    """Дайджест авторских байтов **всех** паспортных файлов продукта (24 hex) или ``None``.
+
+    Учитываются файлы ``YYYY-MM-DD.yaml`` (тот же критерий, что у загрузчика): паспорт
+    фиксируется на цикл, поэтому в отпечаток входит **весь** набор, а не только свежий
+    файл — иначе правка старой даты прошла бы мимо аттестации. Материал — отсортированный
+    по имени список ``(имя файла, sha256 байтов)``; mtime и пути в дайджест не входят
+    (переезд каталога или ``touch`` не меняет профиль).
+
+    ``None`` — у продукта нет паспортных файлов. Это **не** «нет компонента»: отсутствие
+    паспорта — наблюдаемое состояние профиля, и его появление меняет дайджест.
+    """
+    product_dir = Path(passports_dir) / str(product_id)
+    files = sorted(_passport_files(product_dir), key=lambda path: path.name)
+    if not files:
+        return None
+    payload = [
+        {"file": path.name, "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
+        for path in files
+    ]
+    canonical = json.dumps(
+        payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    )
+    return short_hash(canonical, _PASSPORT_DIGEST_LEN)
+
+
+def passport_content_digests(
+    product_ids: list[str] | tuple[str, ...], passports_dir: str | Path
+) -> dict[str, str | None]:
+    """Дайджесты паспортов для набора продуктов: ``{product_id: digest | None}``.
+
+    Ключи — в детерминированном (алфавитном) порядке; продукты без паспорта получают
+    ``None`` (см. :func:`passport_content_digest`).
+    """
+    return {
+        str(product_id): passport_content_digest(product_id, passports_dir)
+        for product_id in sorted({str(item) for item in product_ids})
+    }
