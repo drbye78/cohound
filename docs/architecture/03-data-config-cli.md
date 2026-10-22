@@ -29,12 +29,26 @@ repo/
   packages/{case_id}/
     package.yaml             # §4.2
     catalog.csv              # 11 колонок
+    catalog.lock.csv         # зафиксированные авторские величины каталога (после фиксации)
+    derived_fields.csv       # вычисленные поля каталога (production-экспорт)
     baselines.csv
     cohort.yaml              # §1.6
     golden.csv
     adversarial/
-    domain_profiles.yaml
-    registries/{registry_id}.yaml   # package-scoped generic-конфиг фетчеров (§D.4)
+    domain_profiles.yaml     # оси получения контента + per-site лимиты (§D.2)
+    crawl_sources.yaml       # ОПЦ.: source routing feed/channel/engine (§D.2.1) —
+                             # сейчас нет ни в одном пакете, включая _template
+    run.yaml                 # мандат прогона (§D.1); копия кладётся в runs/{run_id}/
+    scope_attestation.yaml   # процедура аттестации полноты источника (I2b)
+    registries/{registry_id}.yaml   # ОПЦ.: package-scoped конфиг фетчеров (§D.4);
+                             # сейчас нет ни в одном пакете (шаблоны — docs/templates/registries/)
+    sources/                 # авторские входы и операторские артефакты
+      seeds.yaml             # КАНОНИЧЕСКИЙ seed-набор (`schema: seeds/1`, §A.1.1);
+                             # сейчас пакеты ещё на legacy corpus_urls.yaml
+      corpus_urls.yaml       # legacy `{product_id: [url, …]}` (миграционный fallback)
+      render_modes.yaml      # per-URL ось `fetch` (§D.6, runbook)
+      scout/                 # кандидаты разведки пакета (`hound package scout`)
+      crawl_probe/           # предложения `hound package crawl-probe`
   passports/{product_id}/{YYYY-MM-DD}.yaml
   docs/status-dictionary.yaml
   docs/architecture/*.md
@@ -43,9 +57,54 @@ repo/
   corpus_raw/{product_id}/{doc_hash}.bin         # retention сырых байтов
   cache/serp/{query_hash}.json                   # глобальный content-addressed кэш SERP (R7, ADR 0016)
   cache/http/{url_hash}.bin                      # глобальный content-addressed кэш HTTP
+  extract_cache/             # кэш экстракции (ключ: sha256 байтов + extractor_version + level)
+  eval_cache/                # кэш оценщика (Ш6)
+  state/{package_id}/state.db  # durable per-product состояние (url_state/seed_set; таблица
+                               # profile_attestation для G1/G2 — design-only, писателя нет)
   reports/{run_id}/          # (опц.) публикуемые артефакты вне runs/
   tests/
 ```
+
+Операционные каталоги (`packages/`, `passports/`, `runs/`, `index_store/`, `corpus_raw/`,
+`cache/`, `extract_cache/`, `eval_cache/`, `reports/`, `state/`) переопределяются без правки
+кода: `config/paths.yaml` (операторский файл; в репозитории только образец
+`config/paths.example.yaml`), env `COHOUND_<FIELD>_DIR`/`COHOUND_HOME` (см. §D.6) или CLI-флаг;
+приоритет — CLI > env > `paths.yaml` > дефолт (`core/config/paths.py`).
+
+#### A.1.1. Seed-набор и onboarding (блокирует прогон)
+
+Канонический seed-артефакт пакета — **`sources/seeds.yaml`** (`core/config/seeds.py`,
+`schema: seeds/1`): на продукт — записи с `url`/`role`/`profile_key`/`enabled`/`state`.
+Legacy-формат `sources/corpus_urls.yaml` (`{product_id: [url, …]}`) читается как fallback;
+миграция — `ensure_seeds_file` (не перезаписывает существующий файл, переносит legacy-записи
+как `role=primary`, `source=migration`, сохраняя порядок). Сегодня оба пакета ещё живут на
+`corpus_urls.yaml`.
+Приоритет источника корпуса (`load_effective_seeds`, `core/pipeline/onboarding.py`):
+
+1. `--urls FILE` — **полностью заменяет** пакетный набор для всех продуктов (warning
+   `seeds_operator_override`); продукт без записи получает пустой набор и блокируется;
+2. `sources/seeds.yaml[product]`;
+3. `sources/corpus_urls.yaml[product]` (legacy, warning `seeds_legacy_fallback:<id>`).
+
+**Порядок корней значим — и он входит в идентичность.** Корни продукта дедуплицируются с
+сохранением **авторского** порядка (`_ordered_unique`, `core/pipeline/corpus.py`), а не
+сортируются: корень, идущий последним, может не выполниться вовсе (живой прогон 22.10:
+800-страничный портал съел бюджет, docs-корень не дренировался). Поэтому первым ставьте
+корень, который важнее. `seeds_digest` канонизирует записи по `(product_id, order)`
+(`core/pipeline/digests.py`): **перестановка корней внутри продукта меняет `run_id`** —
+иначе один `run_id` описывал бы два разных корпуса. Порядок **продуктов** в файле, наоборот,
+не значим (сортировка по `product_id`).
+
+**Onboarding-префлайт (O1) блокирует прогон** до краула: продукт без активного seed'а или
+с несвязанным профилем попадает в `blocked` с причиной `no_seeds` / `profile_unbound` /
+`seed_invalid` (`onboarding.preflight`, `core/cli/commands/run.py`; прогон
+останавливается на `stopped_at: onboarding`). Заблокированный прогон **виден**: БД прогона и
+снимок входов (`run_inputs`) пишутся — «молча ничего не произошло» не бывает; а вот
+durable-состояние пакета `state/{package_id}/state.db` **не** создаётся (заблокированный
+прогон не открывает запись состояния). `--only-product`
+**сужает** префлайт: заблокированный продукт вне области частичного прогона не
+останавливает его; полный прогон блокируется любым неготовым продуктом когорты.
+Префлайт исполняется между фазами `plan` и `g1` — `--until plan` его **пропускает**.
 
 ### A.2. Пакет прогона `runs/{run_id}/`
 
@@ -53,8 +112,10 @@ repo/
 runs/{run_id}/
   run.yaml                   # вход (копия, иммутабельна)
   run_manifest.yaml          # §9: все версии, модели, index_build, профиль+K, бюджет
+                             # (выгружается фазой report; источник истины — строка манифеста в cohound.db)
   cohound.db                 # SQLite (операционные данные прогона) + WAL
   plan_inputs.json           # производный экспорт снимка плановых входов (источник истины — run_inputs в cohound.db)
+  gates/{gate}-request.json  # G3/G4: детерминированный предмет решения + subject_digest (точка интеграции)
   logs/{phase}.jsonl         # структурированные логи по фазам
   prompts/{prompt_hash}.json # скомпилированные промпты (для аудита/воспроизводимости)
   outputs/
@@ -77,8 +138,8 @@ runs/{run_id}/
 ### B.1. Контракт `ports/store.py` → `store/sqlite.py`
 
 Схема §4.4 перенесена из бывшего `core/db.py` (удалён в T1.3) в `store/sqlite.py`
-(17 таблиц + `schema_meta`, индексы, триггеры I4/I6/I7/I13/I18). Константа `SCHEMA_VERSION`
-= **`3.10.0`** (B3: спуск в контейнеры — `corpus_members`/`archive_observations`; E2: дайджест спецификаций реестров; D3/D4/сеансы/провенанс краула/P1-самодостаточность) — версия **SQLite-схемы**, не регламента; колонки
+(18 предметных таблиц + `schema_meta`, индексы, триггеры I4/I6/I7/I13/I18). Константа `SCHEMA_VERSION`
+= **`3.11.0`** (B3: спуск в контейнеры — `corpus_members`/`archive_observations`; E2: дайджест спецификаций реестров; D3/D4/сеансы/провенанс краула/P1-самодостаточность; gates: `gate_decisions` с предметом решения) — версия **SQLite-схемы**, не регламента; колонки
 `runs.settings_provenance_json` (v2.1/A3), `runs.crawl_provenance_json` (v3.2/Phase 2),
 `runs.crawl_strategy` / `runs.crawl_rate_limit` (v3.3/Backlog B: операционные оси краула,
 границы `execution_change`, §13), `runs.registry_spec_digest` (v3.5/E2: дайджест package-scoped
@@ -174,6 +235,45 @@ class SqliteStore:
 | `prompt_hash` (per cell) | cells | воспроизводимость ячейки |
 | `stale_reason` (per cell) | cells | инвалидация при смене сборки/prompt-шаблона |
 
+#### C.1.1. Что входит в `run_id` (форкает ли прогон идентичность)
+
+`run_id` — детерминированная функция **декларированных** входов
+(`derive_run_id`, `core/pipeline/plan.py`; материал склеивается `\x1f`, результат
+`{case_id}-{short_hash(material, 12)}`). Порядок полей фиксирован:
+
+| Поле материала | Откуда | Что его меняет (CLI) |
+|---|---|---|
+| `case_id` | `run.yaml:case_id` | правка `run.yaml` |
+| `package` | `run.yaml:package` | правка `run.yaml` |
+| `anchor` | `run.yaml:anchor` | правка `run.yaml` (смена якоря — новый прогон) |
+| `cycle_id` | `--cycle-id` > `run.yaml:cycle_id` > `snapshot_date` | `--cycle-id`, `--update` |
+| `cohort_digest` | состав + `cohort_ref` + `frozen_at` когорты (`digests.cohort_digest`) | правка `cohort.yaml`/`cohort_ref` |
+| `seeds_digest` | эффективный seed-набор, включая **порядок** корней внутри продукта (`digests.seeds_digest`) | **`--urls FILE`** (полная замена набора), правка `seeds.yaml`/`corpus_urls.yaml`, перестановка корней |
+| `execution_contract_digest` | отпечаток осей контракта (`digests.execution_contract_digest`, §C.1 выше) | смена любой оси контракта: `--llm-model`, `--llm-slot`, `--retrieval-profile`, `--cutoff-k`, `--document-level`, `--profile`, `run.yaml:crawl.*` |
+| `run_scope` | `full` \| `only_failed` \| `product:<id>` | **`--only-failed`**, **`--only-product ID`** |
+| `refresh_policy` | `auto`\|`revalidate`\|`refresh`\|`offline` | **`--refresh MODE`** |
+| `focus` | `run.yaml:focus` (модули и параметры, отсортированные) | правка `run.yaml:focus` |
+
+Практические следствия, которые оператор обязан знать:
+
+- **`--urls` форкает прогон** (меняется `seeds_digest`), даже если это «тот же» корпус в
+  другом файле: путь файла не входит, а состав записей — входит.
+- **`--refresh` форкает прогон**: `auto` и `revalidate` — разные `run_id` одного цикла.
+- **`--only-product`/`--only-failed` форкают прогон**: частичный прогон — **другой прогон**,
+  а не resume полного (`run_scope`). Догоняющий прогон остатка — отдельный `run_id` со своим
+  манифестом и своей историей; межцикловый `diff` между частичным и полным прогонами
+  некорректен по построению.
+- **URL-фильтр применяется позже вывода `run_id`** (`core/cli/commands/run.py`): `run_id`
+  считается до `_filter_corpus_urls`, поэтому идентичность меняет именно `run_scope`
+  (объявленный объём), а не фактическая фильтрация записей. `--urls` — исключение: он
+  меняет сам вход (`seeds_digest`).
+- `snapshot_date` и `sorted(products)` в материал **не входят**: цикл задан `cycle_id`,
+  состав когорты — `cohort_digest`.
+- Env-переменные в `run_id` не входят вообще (в т.ч. `COHOUND_LLM_*`): два хоста с одним
+  `run.yaml` обязаны получить один `run_id`.
+- `--run-id` переопределяет вывод целиком (аварийный/миграционный путь): ответственность за
+  коллизию идентичностей — на операторе.
+
 **`lexical_engine_version` заполняется фактически.** Composition root передаёт в
 `NpyIndexBuilder` версию реально используемого лексического движка (`tantivy-<ver>`; пусто —
 лексического плеча в прогоне нет, R0/R2 пропускаются), и она входит в `partition_build_id`
@@ -193,7 +293,8 @@ class SqliteStore:
 `retrieval_profile`, `retrieval_cutoff_K`, `retrieval_params_json`, `llm_scenarios`,
 `crawl_strategy`, `crawl_rate_limit`, `crawl_max_workers`, `crawl_max_depth`,
 `crawl_max_documents`, `crawl_exclude_paths`, `crawl_exclude_documents`,
-`crawl_config_digest`, `registry_spec_digest`) остаётся перечнем полей для **legacy-пар**
+`crawl_extract_workers`, `crawl_extract_max_tasks_per_child`, `crawl_max_response_bytes`,
+`crawl_document_level`, `crawl_config_digest`, `registry_spec_digest`) остаётся перечнем полей для **legacy-пар**
 (у одного из манифестов контракта нет) и для аудита «что именно исполнялось»; контракт —
 его подмножество **без контент-производных** id (`index_build_id`), потому что контент
 меняется каждый цикл и условием измерения не является. Последние —
@@ -231,22 +332,30 @@ diff, ради которого делается инкрементальнос�
 
 ### C.2. Версионные границы (bump + golden-full)
 
-- Смена модели под сценарий (I21) → bump `methodology_version`, обязателен `golden-full`.
+- Смена модели под сценарий (I21) → **`execution_change`** (`execution_versions`, §13): меняется
+  `llm_scenarios` ∈ контракта → новый `run_id`; `methodology_version` **не** меняется
+  (`core/config/deploy.py`). Обязателен `golden-full` (условие измерения, AGENTS.md §Git-конвенции).
+  Значение модели — провизионные данные, финальный выбор даёт
+  `hound experiment evaluator-benchmark` (A3).
 - Смена когорты после G1 → новый цикл (межцикловый diff запрещён).
 - Смена `rule`/`absence_rule` параметра → bump `catalog_version` + golden.
-- Смена контента/входов сборки (`chunker`/`embedder`/`extractor`/`lexical`/`vector_store`/
-  `snapshot_date`) → новая контент-адресуемая `index_build_id` + golden-full. Смена
+- Смена контента/входов сборки (`chunker`/`embedder`/`extractor`/`lexical`/
+  `vector_store`/`snapshot_date`) → новая контент-адресуемая `index_build_id` + golden-full. Смена
   `embedder`/`extractor`/`lexical`/`vector_store` — **не** граница diff (2.4.0): наблюдаемые
   величины не входят в контракт, diff проходит как `content_change`; `chunker_version` и
   `extractor_stack` — входят и блокируют.
 - Смена `retrieval_profile`/K и fusion-параметров (`rrf_k`, `retrieval_params_json`) →
   retrieval-golden и `execution_change` в diff, но **не** меняет `index_build_id`:
   ретривал-конфиг не влияет на чанкинг/векторы (P2).
-- Смена операционных осей краула (`crawl.strategy`/`crawl.rate_limit`/`crawl.max_depth`/
-  `crawl.max_documents`/`crawl.exclude_paths`/`crawl.exclude_documents`/`crawl.max_workers`/
-  `crawl.robots`) → `execution_change` в diff (§13, Backlog B/D1/N6), без bump
-  `methodology_version`: commodity-слой exec-условий (A2). Оси ловятся и на app-/per-site-слое
-  через `crawl_config_digest` (N6).
+- Смена операционных осей краула → `execution_change` в diff (§13, Backlog B/D1/N6), без bump
+  `methodology_version`: commodity-слой exec-условий (A2). Классы осей **различаются**:
+
+  | класс | оси | где ловится |
+  |---|---|---|
+  | (а) `CrawlLimits` | `max_workers`, `extract_workers`, `max_depth`, `max_documents`, `exclude_paths`, `exclude_documents`, `document_level`, а также `extract_max_tasks_per_child`, `revalidate_max_documents`, `max_response_bytes`, `max_artifact_bytes`, `attachment_formats`, `archive_max_*`, `archive_descent` (последние — **только когда заданы явно**) | `crawl_config_digest` — по каждому site-key + `__default__`, т.е. **все слои** (app/run/per-site); плюс индивидуальные `crawl_*` поля run-слоя. Класс — `execution_change` |
+  | (б) `crawl.strategy` / `crawl.rate_limit` | только run-слой (`run.yaml:crawl`); per-site `strategy` из `domain_profiles.yaml` идентичность **не** меняет | отдельные поля контракта `crawl_strategy`/`crawl_rate_limit` (`core/cli/execution_axes.py`); класс — `execution_change` |
+  | (в) `crawl.robots` | включение/выключение `robots.txt` — **app-слой** (`deploy.yaml:crawl.robots`; в `run.yaml:crawl` поля нет) | входит в `crawl_config_digest` **всегда** (как `max_depth`), класс — `execution_change` (D-5): гейт `robots.txt` решает, какие документы вообще допущены, т.е. это условие измерения, а не рычаг пропускной способности. Пробел закрыт: до правки D-5 ось меняла поведение, но не входила ни в один дайджест |
+  | (г) `crawl.user_agent`/`timeout_s`/`follow_redirects`/`crawl.browser.*` | ни идентичности, ни `diff` | — (операционные данные транспорта) |
 - Смена prompt-шаблона → новый `prompt_hash`; ячейки с прошлым hash помечаются `stale_reason='prompt_template'`.
 - Смена `index_build_id` → затронутые ячейки помечаются `stale_reason='new_build'`; `stale`-ячейки
   не участвуют в расчёте до переоценки/ревью.
@@ -266,9 +375,14 @@ diff, ради которого делается инкрементальнос�
 case_id: pg-core
 anchor: pangolin
 cohort: cohort-pg-2026q2
+cohort_ref: cohort-pg-2026q2-r2    # опц.: авторская ссылка на состав когорты → входит в cohort_digest
 products: [pangolin, alt1, alt2, ...]
 package: pg-core
-focus: { modules: [storage, backup], params: [pg_backup_pitr] }
+methodology_version: 2.4.0        # опц. (дефолт — пин проекта); входит в контракт, НЕ в run_id-материал напрямую
+cycle_id: 2026-Q2                 # опц.: ISO-дата/ISO-неделя; None → snapshot_date. ВХОДИТ в run_id
+refresh_policy: auto              # опц.: auto|revalidate|refresh|offline; None → auto. ВХОДИТ в run_id
+llm_slot: cheap                   # опц.: cheap|flagship; активный слот оценщика → в llm_scenarios (контракт)
+focus: { modules: [storage, backup], params: [pg_backup_pitr] }   # ВХОДИТ в run_id
 languages: [ru, en]
 snapshot_date: 2026-06-01
 mode: strict
@@ -276,21 +390,33 @@ ranking_policy: capability_ranked
 ranking_epsilon: 0.0            # §6/B-1: порог неразличимости ранжирования (доля диапазона)
 settings_provenance:            # A3: default|measured (+ experiment_id при measured, + skipped)
   partial_score: {source: default}
+gates:                          # опц.: политика G3/G4; процесс, НЕ условие измерения (не в run_id)
+  g3: external                  # external (дефолт) | waived
+  g4: external
 crawl:                          # §3.2/D4: дефолты оси стратегии краула и politeness-пейсинга
   strategy: auto                # auto | honest | hybrid (как используется браузер)
   rate_limit: {min_s: 1.0, max_s: 3.0}   # опц.: uniform(min_s, max_s) между запросами (per-host)
   max_workers: 4                # опц. (>0): D4-пул потоков на сетевой fetch (None/1 = inline)
   extract_workers: null         # опц. (>0): P4-пул экстракции (local — процессы, split —
                                 # потоки; None/1 = inline). Память: W × footprint(level)
+  extract_max_tasks_per_child: null   # опц. (>=1): рециклинг воркер-процессов экстракции
   document_level: full          # опц.: P5-уровень извлечения документов
                                 # (off|text|layout|layout_tables|full; дефолт full)
   max_depth: 2                  # опц. (>=0): глубина BFS-обхода in-site ссылок (0 — только seeds)
   max_documents: 500            # опц. (>0): потолок добытых страниц на (продукт, seed-root)
+  revalidate_max_documents: null      # опц. (>=1): потолок известных URL ревалидации на продукт
   exclude_paths: ["/private/*"] # опц.: glob блэклиста по пути URL (fnmatchcase)
   exclude_documents: ["*.pdf"]  # опц.: glob блэклиста по basename URL
+  # --- спуск в контейнеры (P6/B3) — см. §D.1.1 ---
+  attachment_formats: [zip, 7z, rar]          # опц.: позитивная вселенная контейнеров
+  archive_descent: full                       # опц.: full (спуск исполняется) | plan (только листинг)
+  archive_max_member_bytes: 67108864          # опц.: потолок ОДНОГО члена (64 MiB)
+  archive_max_uncompressed_bytes: 268435456   # опц.: суммарно распакованное ОДНОГО контейнера (256 MiB)
+  archive_max_members: null                   # опц.: число членов контейнера (None — без потолка)
+  archive_max_total_uncompressed_bytes: 1073741824   # опц.: КУМУЛЯТИВНО на корень спуска (1 GiB)
 ```
 
-Загрузчик `config/run_config.py` → `RunConfig` (домен) с валидацией (anchor ∈ products;
+Загрузчик `core/config/run_config.py` → `RunConfig` (домен) с валидацией (anchor ∈ products;
 preliminary не совместим с capability_ranked — I13). `ranking_policy` — **запрошенный** режим
 отображения (K6); вычисленный ранг определяется sensitivity (join `requested × computed = min`,
 02 E.1). `ranking_epsilon` — калибруемый порог неразличимости пар (§6/B-1; `None` → 0.0).
@@ -299,6 +425,39 @@ preliminary не совместим с capability_ranked — I13). `ranking_poli
 (A3). `products` — **проекция** `cohort.yaml` (один канонический источник состава);
 линтер проверяет совпадение множеств `products` и `cohort.product_id` (S11).
 
+**Поля `RunConfig`, влияющие на идентичность.** `cycle_id`/`cohort_ref`/`refresh_policy`/
+`focus`/`llm_slot` — не «косметика»: они входят в материал `run_id` (§C.1.1) прямо
+(`cycle_id`, `refresh_policy`, `focus`, `cohort_digest`) или через контракт (`llm_slot` →
+`llm_scenarios`). `methodology_version` входит в контракт, но `run_id`-материал напрямую не
+содержит: он свёрнут в `execution_contract_digest`. Секция `gates` — **процесс**, не условие
+измерения: `run_id` от неё не зависит (§13).
+
+#### D.1.1. Спуск в контейнеры (`crawl.archive_*`, P6/B3)
+
+Контейнер (`zip`/`7z`/`rar` из `crawl.attachment_formats`) — терминальный артефакт: его
+байты не продолжают навигацию, а служат входом для спуска. Оси резолвятся **той же**
+цепочкой `app < run < site`, что и остальные лимиты, и исполняет их
+`pipeline/archive_descent.py` за портом `ContainerPort`.
+
+| Ось | Дефолт | Что ограничивает |
+|---|---|---|
+| `attachment_formats` | `zip`/`7z`/`rar` | позитивная вселенная: сужение делает незаявленный контейнер обычным бинарным артефактом |
+| `archive_max_member_bytes` | 64 MiB | распакованный размер **одного члена** |
+| `archive_max_uncompressed_bytes` | 256 MiB | суммарно распакованное **одного контейнера** |
+| `archive_max_members` | `None` (без потолка) | число членов одного контейнера |
+| `archive_max_total_uncompressed_bytes` | **1 GiB** | **кумулятивно** на один **корень спуска** (все уровни вложенности) |
+| `archive_descent` | `full` | `full` — члены читаются и ингестятся; `plan` — только листинг по индексу (члены не ингестятся, провенанс усечения виден) |
+
+Потолка **глубины** спуска нет: конечность даёт цикл по хешу содержимого (`archive_cycle`) и
+кумулятивный бюджет корня. Исчерпание бюджета — видимая запись `budget_exhausted`
+(`archive_observations`, поле `outcome.stopped_reason`), а не тихое завершение; нечитаемый
+индекс — `unreadable` с причиной (`backend_unavailable: …`). Запись `archive_observations`
+пишется **всегда** — «контейнер без членов» так же виден, как «контейнер с десятью».
+
+Все оси `archive_*` (кроме `archive_max_members`-дефолта) попадают в `crawl_config_digest`
+**только когда заданы явно**: прогон без них байт-идентичен прежнему (§13, обратная
+совместимость). Класс изменения — `execution_change`.
+
 Секция `crawl` — дефолты **оси стратегии краула** `CrawlStrategy` (`auto`|`honest`|`hybrid`:
 *как* используется браузер при browser-capable адаптере) и per-host диапазона задержек
 `RateLimitSpec` (`uniform(min_s, max_s)`, `min_s <= max_s`). При отсутствии секции поведение
@@ -306,10 +465,13 @@ preliminary не совместим с capability_ranked — I13). `ranking_poli
 профиль домена → явный `--render-modes`).
 
 Секция `crawl` несёт также **оси контроля краула** (`max_workers`/`extract_workers`/
-`max_depth`/`max_documents`/`exclude_paths`/`exclude_documents`/`robots`), разрешаемые
+`extract_max_tasks_per_child`/`max_depth`/`max_documents`/`revalidate_max_documents`/
+`exclude_paths`/`exclude_documents`/`document_level`/`max_response_bytes`/`max_artifact_bytes`/
+`attachment_formats`/`archive_*`), разрешаемые
 **отдельной** цепочкой `deploy.yaml:crawl` (application default) < `run.yaml:crawl`
 (run profile) < `domain_profiles.yaml` (per-site) —
-`pipeline/crawl_frontier.py:resolve_crawl_limits`. Это **не** оси `crawl_sources.yaml` и
+`pipeline/crawl_frontier.py:resolve_crawl_limits`. `crawl.robots` — **только app-слой**
+(`deploy.yaml`): в `run.yaml:crawl` этого поля нет (`extra="forbid"` отвергнет). Это **не** оси `crawl_sources.yaml` и
 **не** `FetchPlan`: отдельный канал, чтобы не сломать приоритет source-routing. Две
 **независимые** оси конкурентности: `max_workers` — пул потоков на **сетевой fetch**
 (локальный путь; «у одной оси не может быть двух смыслов», A2/P3), а `extract_workers`
@@ -337,8 +499,12 @@ basename пути (`*.pdf`); применяются и к seeds, и к обна�
 (OCR включён только на верхнем уровне — distinguishes `full`). Уровень входит в
 `extractor_version` (`docling-doc-3:<level>`) и потому в `index_build_id`: смена уровня
 **не может** молча дать ту же сборку (сборки иммутабельны — новый уровень = новая сборка).
-Класс изменения — `execution_change` (§13), не `methodology_change`; дефолт контент не
-меняет (кроме churn `index_build_id`/`crawl_config_digest`).
+Класс изменения — **`execution_change`** (§13), не `methodology_change`; дефолт контент не
+меняет (кроме churn `index_build_id`/`crawl_config_digest`). Идентичность форкается
+**раньше** контентного следствия: `document_level` входит в `CrawlLimits.as_dict()`
+**безусловно** (дефолт `full` присутствует всегда), поэтому `crawl_config_digest` →
+`execution_contract_digest` → новый `run_id`; новая сборка (`partition_build_id`) —
+вторичный эффект уже разошедшейся идентичности, а не основание класса.
 
 **`off` — режим «игнорировать документы».** Документы **не извлекаются/не индексируются**,
 docling не вызывается:
@@ -425,15 +591,32 @@ basename/path без знания content-type); «полная» экономи
   api.example:           {fetch: browser, extract: auto, strategy: hybrid, rate_limit: {min_s: 1.0, max_s: 3.0}}
   ```
 
-  Матчинг: host (или родительский суффикс) + опциональный префикс пути; приоритет —
+  Матчинг **профиля**: host (или родительский суффикс) + опциональный префикс пути; приоритет —
   длиннейший `path_key`, затем длиннейший `host_key`. Явный `--render-modes` по точному URL
   переопределяет **только** ось `fetch`, оставляя `extract`/`strategy`/`wait_for`/`rate_limit`
   из профиля.
 
+  > ⚠️ **Наследование осей ≠ допуск в обход.** `_host_matches` (`pipeline/fetch_plan.py`)
+  > отвечает на вопрос «какие **оси** применить к URL»: поддомен наследует `fetch`/`extract`/
+  > лимиты родительского ключа — это верно и нужно. **Scope краула — другой предикат**
+  > (`Frontier.host_in_scope`, `pipeline/crawl_frontier.py`): в обход допускаются только
+  > **объявленные** хосты — хост корня (включая `www.`-вариант) и поддомен, объявленный
+  > **самостоятельно** (собственным seed-корнем продукта или ключом `domain_profiles.yaml`).
+  > Необъявленный поддомен **не** получает бюджета корня-предка. Измеренная цена путаницы:
+  > корень, объявивший только родительский хост, отдал 563 элемента из 682 учебному
+  > поддомену, а собственный раздел документации не получил ни одного.
+  >
+  > Отказы **видимы**: `out_of_scope_subdomains` (счётчик по хостам + ограниченные примеры) и
+  > `accepted_foreign_hosts` (сколько бюджета корня ушло на объявленный чужой хост) в
+  > `truncation_records`/провенансе корня. Хост, объявленный ключом `domain_profiles.yaml`,
+  > **становится** scope-хостом (`core/pipeline/corpus.py`): объявление профиля — это и есть
+  > объявление допуска. `www.example.org` ≡ `example.org` в обе стороны.
+
   Профиль домена — **высший** слой цепочки осей контроля краула (D1/D2): per-site
-  `max_workers`/`extract_workers`/`max_depth`/`max_documents`/`exclude_paths`/
-  `exclude_documents`/`document_level` переопределяют run/app-дефолты
-  (`resolve_crawl_limits`). Например,
+  `max_workers`/`extract_workers`/`extract_max_tasks_per_child`/`max_depth`/`max_documents`/
+  `revalidate_max_documents`/`exclude_paths`/`exclude_documents`/`document_level`/
+  `max_response_bytes`/`max_artifact_bytes`/`attachment_formats`/`archive_*` переопределяют
+  run/app-дефолты (`resolve_crawl_limits`). Например,
   `example.org/documents: {fetch: http, max_depth: 1, exclude_documents: ["*.pdf"]}`.
   Схема остаётся строгой (`extra="forbid"`). Per-site `document_level` (P5) — операторский
   escape hatch от «слишком медленного PDF»: `example.org: {document_level: layout}`.
@@ -571,7 +754,7 @@ edge:
   timeout_s: 30
   max_retries: 2
   max_response_bytes: 52428800
-  audit: { sink: "file|syslog", target: "…" }   # SIEM-экспорт
+  audit: { sink: file, target: "…" }   # SIEM-экспорт; sink: file | syslog (одно значение)
 extractor_zone: edge           # edge | core | separate
 search:
   budget: { ru: 5, en: 5 }      # симметрия I16
@@ -589,17 +772,28 @@ crawl:                         # операционная политика HTTP-
   max_workers: 4               # опц. (>0): D4-пул потоков на сетевой fetch (None/1 = inline)
   extract_workers: null        # опц. (>0): P4-пул экстракции (процессы local / потоки split;
                                # None/1 = inline). Память: W × footprint(document_level)
+  extract_max_tasks_per_child: null  # опц. (>=1): рециклинг воркер-процессов экстракции
   document_level: full         # P5: уровень извлечения документов (off|text|layout|
                                # layout_tables|full; дефолт full = сегодняшнее поведение)
   max_depth: 0                 # >=0: 0 = только seeds (BFS идёт и под executor/split — A2/R2)
   max_documents: null          # опц. (>0): потолок добытых страниц на (продукт, seed-root)
+  revalidate_max_documents: null  # опц. (>=1): потолок известных URL ревалидации на продукт
   # P6/P6b: два РАЗНЫХ потолка. max_response_bytes — RAM-потолок СТРАНИЦЫ (дефолт 20 MiB;
   # HTML сверх него → payload_too_large). max_artifact_bytes — потоковый потолок
   # ТЕРМИНАЛЬНОГО АРТЕФАКТА (документ pdf/docx/pptx/xlsx И контейнер zip/7z/rar): тело
   # пишется в staging-файл, не в RAM. Оси независимы; путать их — ошибка конфигурации.
-  max_response_bytes: null     # опц.: in-memory потолок страницы (дефолт 20 MiB)
-  max_artifact_bytes: null     # опц.: потолок артефакта (дефолт 256 MiB)
+  # ВАЖНО: оба — int > 0, `null` НЕ допустим (ValidationError). Ключ просто опускается →
+  # действует дефолт (20 MiB / 250 MiB).
+  # max_response_bytes: 20971520    # опц.: in-memory потолок страницы (дефолт 20 MiB)
+  # max_artifact_bytes: 262144000   # опц.: потоковый потолок артефакта (дефолт 250 MiB)
   attachment_formats: null     # P6: позитивная вселенная контейнеров (дефолт zip/7z/rar)
+  # P6/B3: спуск в контейнеры (§D.1.1). `null` для archive_max_* НЕ допустим — ключ
+  # опускается; `archive_max_members: null` допустим (без потолка числа членов).
+  # archive_max_member_bytes: 67108864              # 64 MiB на ОДИН член
+  # archive_max_uncompressed_bytes: 268435456       # 256 MiB на ОДИН контейнер
+  # archive_max_members: 1000                       # число членов контейнера
+  # archive_max_total_uncompressed_bytes: 1073741824  # 1 GiB КУМУЛЯТИВНО на корень спуска
+  # archive_descent: full                           # full | plan
   exclude_paths: []            # glob блэклиста по пути URL (fnmatchcase; ведущий "/" опционален)
   exclude_documents: []        # glob блэклиста по basename URL, напр. ["*.pdf"]
   robots: null                 # N1: null=auto (robots при discovery); true/false — явно
@@ -625,7 +819,7 @@ crawl:                         # операционная политика HTTP-
 спуска); определяется URL-суффиксом либо `Content-Type`
 (`core/util/document_formats.is_terminal_artifact`). Он вправе быть больше страничного
 потолка: тело пишется потоком в staging-файл (не в RAM) и ограничено
-`crawl.max_artifact_bytes` (дефолт 256 MiB). Потолки **независимы**: повышать
+`crawl.max_artifact_bytes` (дефолт 250 MiB). Потолки **независимы**: повышать
 `max_response_bytes` «чтобы прошли PDF» — ошибка (это поднимет и RAM-потолок страниц).
 `.rtf` намеренно не допускается: у реестра экстрактора нет читателя RTF, допуск дал бы
 блокирующий `parser_failed`.
@@ -633,8 +827,11 @@ crawl:                         # операционная политика HTTP-
 **Обход path-prefix артефактом (P6b).** Артефакт не продолжает навигацию, поэтому
 path-prefix seed-root к нему не применяется: `/docs/` может ссылаться на
 `/files/report.pdf`, и такой URL ставится в очередь (BFS-ссылки, известные URL ревалидации
-и sitemap `<loc>`), а не отбрасывается как «вне раздела». **Host scope, SSRF-валидация,
-`..`-traversal-guard и robots — без изменений**; блэклист оператора
+и sitemap `<loc>`), а не отбрасывается как «вне раздела». **Host scope** здесь не меняется
+и означает ровно одно: в обход допускаются **объявленные** хосты (`Frontier.host_in_scope`,
+определение и ловушку `edu.postgrespro.ru` см. §D.2) — поддомен, объявленный только
+родительским ключом профиля, бюджета корня не получает. SSRF-валидация,
+`..`-traversal-guard и robots — тоже без изменений; блэклист оператора
 (`exclude_paths`/`exclude_documents`) побеждает всегда. Обход видим: счётчик + ограниченные
 примеры (`artifacts_outside_prefix`) попадают в провенанс корня рядом с
 `skipped_blacklisted`/`skipped_documents` — молчаливый обход был бы дефектом.
@@ -682,7 +879,7 @@ config-слой не импортирует `cli.wiring`; валидация п�
 циклов — это **версионная граница**: фиксируется в манифесте/провенансе (§13).
 Режим Yandex Search API — `async` (дефолт; переопределяется env `YANDEX_SEARCH_MODE`).
 
-Загрузчик `config/deploy.py` → `DeployConfig`
+Загрузчик `core/config/deploy.py` → `DeployConfig`
 (домен-нейтрален). `deploy_profile`, версии edge-компонентов (`/v1/capabilities`) и
 `edge_schema_version` пишутся в `run_manifest.yaml` (R7). `edge/` (composition root Z1)
 читает тот же файл для bind-адреса, аутентификации входящих (IDP) и экспорта аудита
@@ -703,8 +900,8 @@ edge** (composition root Z1, `07` §4/§7); ядро ходит за канди�
 
 | Переменная | Назначение | Обязательность | Fallback | Потребитель |
 |---|---|---|---|---|
-| `COHOUND_LLM_BASE_URL` | базовый URL [OI]-совместимого LLM-API корпоративного облака | опц. | — (обязателен: внутренний endpoint) | `wiring.build_discovery_llm` (LLM-разведка `passport-scout`, Ш2) |
-| `COHOUND_LLM_API_KEY` | ключ LLM-разведки | **обязателен для вызова** | — (обязателен для вызова) | `wiring.build_discovery_llm` |
+| `COHOUND_LLM_BASE_URL` | базовый URL [OI]-совместимого LLM-API корпоративного облака | опц. | — (обязателен: внутренний endpoint) | `wiring.build_discovery_llm` (LLM-разведка `passport-scout`, Ш2) **и** `wiring.build_evaluator_llm` (endpoint оценщика; env-значение переопределяет слот и оставляет `llm_scenarios` пустой — см. ниже) |
+| `COHOUND_LLM_API_KEY` | ключ LLM-API (единственный источник; внешних фолбэков нет) | **обязателен для вызова** | — (обязателен для вызова) | `wiring.build_discovery_llm` **и** `build_evaluator_llm` |
 | `COHOUND_LLM_SLOT` | активный LLM-слот: `cheap`\|`flagship` (см. `deploy.yaml.llm`) | опц. | `cheap` | `wiring` (выбор слота — и оценщиком, и разведкой) |
 | `COHOUND_LLM_MODEL` | `model_id` **LLM-разведки** (переопределяет активный слот) | опц. | `deepseek-v4.1-flash:purple` (провизионно) | **только** `wiring.build_discovery_llm`; оценщик её **не читает** (модель оценщика — `deploy.llm.<slot>.model_id` или `--llm-model`) |
 | `COHOUND_LLM_DECODER` | механизм декодирования (`none`/`json_object`/`json_schema`) | опц. | `json_object` | **только** `wiring.build_discovery_llm`; оценщик берёт `decoder` из слота |
@@ -717,6 +914,23 @@ edge** (composition root Z1, `07` §4/§7); ядро ходит за канди�
 | `YANDEX_FOLDER_ID` | folder-id Yandex Cloud | **обязателен для адаптера** | — | `adapters.search_yandex` |
 | `YANDEX_SEARCH_MODE` | режим поиска Yandex: `async` (дефолт) \| `sync` | опц. | `async` | `adapters.search_yandex` |
 | `GLM_SEARCH_API_KEY` | ключ GLM web-search | **обязателен для адаптера** | — | `adapters.search_glm` |
+| `COHOUND_HOME` | единый корень операционной раскладки; относительные пути считаются от него | опц. | CWD | `core/config/paths.py` (все команды) |
+| `COHOUND_PATHS_FILE` | путь к `paths.yaml` | опц. | `config/paths.yaml` (отсутствие файла — дефолты) | `core/config/paths.py` |
+| `COHOUND_PACKAGES_DIR` / `COHOUND_PASSPORTS_DIR` / `COHOUND_RUNS_DIR` / `COHOUND_INDEX_STORE_DIR` / `COHOUND_CORPUS_RAW_DIR` / `COHOUND_CACHE_DIR` / `COHOUND_EXTRACT_CACHE_DIR` / `COHOUND_EVAL_CACHE_DIR` / `COHOUND_REPORTS_DIR` / `COHOUND_STATE_DIR` | переопределение отдельного каталога раскладки (§A.1) | опц. | `paths.yaml`, иначе дефолт модели | `core/config/paths.py`; приоритет CLI > env > `paths.yaml` > дефолт |
+| `COHOUND_EDGE_STATE_DIR` | каталог durable-состояния edge (DMZ) | опц. | `state_dir` из edge-конфига | `edge/config.py` (`EdgeRuntimeConfig`) |
+| `COHOUND_EMBED_LITE_MODEL` / `COHOUND_EMBED_LITE_REVISION` / `COHOUND_EMBED_LITE_PATH` | модель/пин ревизии (sha/тег)/явный локальный каталог снапшота для `embed-lite` | опц. | `minishlab/potion-multilingual-128M`; ревизия не задана ⇒ `model_id` без `@sha`; путь — HF-кэш | `wiring` (сборка `embed_model2vec`); ревизия входит в `embed_model_id` как `repo@sha` |
+| `PLAYWRIGHT_DOWNLOAD_HOST` / `PLAYWRIGHT_BROWSERS_PATH` | зеркало CDN браузеров и каталог их установки (закрытый контур) | опц. | CDN Playwright / штатный кэш | сам `playwright` (внешний механизм; код ядра их **не** читает) |
+| `HF_HOME` / `DOCLING_ARTIFACTS_PATH` / `HF_HUB_OFFLINE` | офлайн-веса docling (V4, `05` §7) | опц. | HF-кэш / — | `docling` (внешний механизм) |
+
+> **`COHOUND_REGISTRIES_DIR` — удалённая ось.** Переменная есть в `.env.example`, но **не
+> читается нигде** в `core/`: раскладка реестров — package-scoped (§D.4, `registries/` внутри
+> пакета). Настраивать её бессмысленно; шаблон `.env.example` подлежит чистке.
+>
+> **Не env-переменные (хотя похожи):** `PLAYWRIGHT_BROWSER_TYPE` и
+> `PLAYWRIGHT_DEFAULT_NAVIGATION_TIMEOUT` — это **настройки Scrapy** (`_PLAYWRIGHT_SETTINGS`
+> в `core/adapters/crawl_scrapy.py`, значения `chromium`/`15000`), а не читаемые из
+> окружения ключи; менять их — правкой адаптера, не переменной. `HF_HOME`/`HF_HUB_OFFLINE`
+> читает `huggingface_hub` (транзитивно, через docling).
 
 Примечания:
 
@@ -727,12 +941,15 @@ edge** (composition root Z1, `07` §4/§7); ядро ходит за канди�
   `discover --search-adapter`. Для **оценщика** переопределение модели — `--llm-model`
   (`run`/`plan`/`crawl run|resume|restart`): env `COHOUND_LLM_MODEL`/`COHOUND_LLM_DECODER`
   на него не действуют (см. ниже).
-- **Идентичность модели оценщика — объявленный вход, не env (§7.4/I21).** `model_id`/
-  `decoder` оценщика резолвятся `--llm-model` > `deploy.llm.<slot>` > дефолт модуля;
+- **Идентичность модели оценщика — объявленный вход, не env (§7.4/I21).** `model_id`
+  оценщика резолвится `--llm-model` > `deploy.llm.<slot>.model_id` > **ошибка** (`CliError`,
+  код `llm`, `EXIT_USAGE`): дефолтной модели **нет** — модель, которую оператор не
+  объявлял, была бы ложной провенанс-записью. Дефолт есть только у `decoder`
+  (`json_object`, `EVALUATOR_DEFAULT_DECODER`).
   `base_url`/`api_key`/`timeout` — операционные и читаются из env как раньше. Причина —
   `llm_scenarios` входят в `execution_contract_digest` (→ `run_id`): манифест обязан
   называть ту модель, которая работала, а env — свойство хоста, не прогона. Активный слот
-  без объявленного `model_id` — **ошибка** (`llm`, `EXIT_USAGE`), а не тихий дефолт.
+  без объявленного `model_id` — **ошибка**, а не тихий дефолт.
   Флаг питает **и** runtime-оценщик, **и** `llm_scenarios` — контракт и рантайм не могут
   разойтись. Если `COHOUND_LLM_MODEL`/`COHOUND_LLM_DECODER` заданы, прогон сообщает об их
   игнорировании (`warnings` payload + `logs/wiring.jsonl`, событие `llm_env_note`).
@@ -740,9 +957,20 @@ edge** (composition root Z1, `07` §4/§7); ядро ходит за канди�
   в `run_id`) — и это тоже видно в payload/`wiring.jsonl` как «оценщик вне execution
   contract». Асимметрия с LLM-разведкой намеренная: её выход — кандидаты/гипотезы (G2),
   а не evidence.
+- **Условие активности слота (то, что оператору нужно знать раньше всего).** Слот активен
+  **тогда и только тогда**, когда у него непустой `base_url`. Пустой `base_url` ⇒
+  `build_evaluator_llm` возвращает `None` (оценщик не поднимается) и `llm_scenarios`
+  остаётся **пустой** ⇒ `execution_contract_digest` от модели не зависит ⇒ **`run_id` не
+  меняется**. Практическое следствие: правка `model_id` в слоте с пустым `base_url`
+  безопасна для идентичности, а та же правка на активном слоте форкает прогон
+  (`execution_change`). Проверяется вычислением: `_resolve_llm_scenarios` возвращает `()`
+  для неактивного слота.
 - **Две слотовые модели (`deploy.yaml.llm`).** Секция `llm:` в `config/deploy.yaml` задаёт два
-  именованных слота — `cheap` и `flagship`; **оба по умолчанию** указывают на
-  `deepseek-v4.1-flash:purple` (провизионные данные: финальный выбор даёт
+  именованных слота — `cheap` и `flagship`. **Обе слоты по умолчанию пусты**
+  (`LLMDeployConfig`: ни `base_url`, ни `model_id` не заданы), т.е. оценщик из коробки
+  **не поднимается**. `deepseek-v4.1-flash:purple` — **провизионный дефолт LLM-разведки**
+  (`wiring.DEFAULT_LLM_MODEL`), а не слотов; он же прописан в `model_id` обоих слотов
+  канонического `config/deploy.yaml` как провизионные данные (финальный выбор даёт
   `hound experiment evaluator-benchmark`). Активный слот выбирается детерминированно по
   приоритету: `--llm-slot` > env `COHOUND_LLM_SLOT` > `run.yaml: llm_slot` > `deploy.llm.slot`
   > `cheap`. `api_key` берётся из env (`COHOUND_LLM_API_KEY`); endpoint — [OI]-совместимый
@@ -788,19 +1016,40 @@ hound run \
   --run-yaml packages/{case_id}/run.yaml \
   --package packages/{case_id} \
   --passports-dir passports \
-  --urls <urls>.json \
+  [--urls <urls>.yaml] \
   --until corpus \
-  [--render-modes <render>.json]
+  [--refresh auto|revalidate|refresh|offline] \
+  [--render-modes <render>.yaml]
 ```
 
-- `<urls>.json` — `{product_id: [url, ...]}` (явный корпусный вход, Ш5; `doc_domains`
-  паспортов молча не фетчатся, I19).
-- `[--render-modes <render>.json]` — `{url: "http"|"browser"}`: явное переопределение оси
+- `<urls>.yaml` — `{product_id: [url, ...]}` (операторский корпусный вход, Ш5). **Не
+  обязателен**: без него корпус берётся из пакетного seed-набора — `sources/seeds.yaml`
+  (канонический) либо legacy `sources/corpus_urls.yaml`; приоритет и значимость порядка
+  корней — §A.1.1. `doc_domains` паспортов молча не фетчатся (I19).
+- `--refresh MODE` — политика наблюдения корпуса (`auto` дефолт, `revalidate` — только
+  известные URL, `refresh` — живой ре-фетч, `offline` — без сети). **Входит в `run_id`**
+  (§C.1.1): смена политики — новый прогон, а не продолжение.
+- `[--render-modes <render>.yaml]` — `{url: "http"|"browser"}`: явное переопределение оси
   `fetch` для SPA/JS-страниц (значение не из `http`/`browser` → `EXIT_USAGE`). **Явное
   переопределение побеждает доменный профиль** по оси `fetch`; `extract`/`strategy`/`wait_for`/
   `rate_limit` при этом берутся из `domain_profiles.yaml` (D.2).
 - `--cutoff-k K` (I20) и `--render-modes` влияют на фазы Ш5/Ш6; `--cutoff-k` имеет смысл
   при прогоне до `evaluate`.
+
+**Фазы (`--until`).** Полный список (совпадает с `--help`):
+`normalize, lint, plan, g1, discovery, g2, registry, inheritance, corpus, evaluate, review,
+g3, compute, g4, report` — 15 фаз. Между `plan` и `g1` исполняется **не-фазовый**
+onboarding-префлайт (seed-набор, §A.1.1): `--until plan` его **пропускает** (прогон,
+который не собирается краулить, не должен блокироваться seed-префлайтом). Гейты: `g1`/`g2` —
+внутренняя аттестация профиля, `g3` — между `review` и `compute`, `g4` — между `compute` и
+`report` (точки интеграции, §E.2).
+
+**Гейты per-run.** Свежий прогон встаёт на `g1` и завершается кодом **3** (`EXIT_BLOCKED`) —
+это не сбой, а остановка на гейте: гейт не проходится автоматически никогда. Решение
+пишется `hound gate --runs-dir runs --run-id {run_id} --gate G1 --actor {кто}
+--target cohort --notes "{почему}"` (§E.2). Строка `gate_decisions` от **прошлого** прогона
+не действует: новый `run_id` требует новых решений. Продолжить с места остановки —
+повторный `run` (resume) или `--until {фаза}`; `--reset` форсирует перезапуск.
 
 Что появится на диске (раскладка A.1/A.2):
 
@@ -808,7 +1057,7 @@ hound run \
 - `corpus_raw/_staging/` — staging-файлы терминальных артефактов до публикации переездом
   (`os.replace`); файл живёт только на время фетча и не является evidence сам по себе.
   Потолки: страница — `crawl.max_response_bytes` (20 MiB, RAM), артефакт —
-  `crawl.max_artifact_bytes` (256 MiB, диск); см. §D.5;
+  `crawl.max_artifact_bytes` (250 MiB, диск); см. §D.5;
 - `index_store/{package}/{build_id}/{product_id}/` — иммутабельная индексная сборка
   (chunks + `index_manifest`; при подключённых эмбеддере/билдере — `.npy`-шарды);
 - `runs/{run_id}/cohound.db` — чанки/документы/манифест индекса прогона;
@@ -826,7 +1075,19 @@ hound run \
   альтернатива `embed` для контуров без GPU/torch; отсутствие модели/зависимости — честный
   `EmbedderUnavailable`, нулевыми векторами не подменяется;
 - `scrapy` + `playwright` (extra `crawl`) — браузерный рендер SPA/JS; `COHOUND_SCOUT_CRAWLER=scrapy`
-  или `=browser` для `passport-scout` (прямой `BrowserCrawler`).
+  или `=browser` для `passport-scout` (прямой `BrowserCrawler`);
+- `numpy` + `tantivy` (extra `retrieval`) — лексический индекс (BM25) и `.npy`-шарды; без
+  него лексическое плечо не поднимается (R0/R2 пропускаются);
+- `nh3` + `defusedxml` (extra `safety`) — санитайзинг внешнего контента (§10); без них
+  недоступны соответствующие шаги очистки;
+- `py7zr` + `rarfile` (extra `extract-archives`) — читатели контейнеров 7z/rar. **Без этого
+  extra спуск в 7z/rar невозможен**: контейнер остаётся нераскрытым с видимой причиной
+  (`container_reader_unavailable` / `backend_unavailable: py7zr не установлен`), а не с
+  тихим «пустым архивом». `zip` работает всегда (stdlib). `pyzipper` (AES-zip) в коде **не
+  подключён**. Установка: `uv pip install -e '.[extract-archives]'`.
+
+Проверка состава extras — `hound doctor` (группы `core`/`retrieval`/`crawl`/`extract`/
+`safety`/`ops`/`embed`/`embed-lite`/`dev`).
 
 ---
 
@@ -843,31 +1104,84 @@ hound run \
 | Команда | Назначение | Пишет |
 |---|---|---|
 | `hound resolve` | нормализация входов + линт | — (отчёт) |
-| `hound plan` | план прогона, когорта | run.yaml (черновик), cohort.yaml |
+| `hound plan` | нормализация входов + линт + план прогона, когорта | — (отчёт в stdout/`--json`; запись черновика `run.yaml`/`cohort.yaml` — roadmap W10, сегодня `--dry-run` не нужен: ничего не пишется) |
 | `hound discover` | Discovery-агент | passports, run |
 | `hound passport-scout` | авто-генерация **черновика** паспорта продукта: краул `--url` (и, при поиске, URL выдачи) → tool-less LLM-разведка (`discovery_llm`) → консервативный черновик. Сателлиты — только `draft`/`not_found`; `relationship_evidence`/`upstream` — лишь при подтверждённом URL и дословной цитате (I10/I15, precision-first). Публикация только при `report.ok`; `--dry-run` не пишет. Кандидаты не выдумываются без LLM-конфигурации | `passports/{product_id}/…yaml` (+ sidecar кандидатов) |
 | `hound package scout` | веб-заземлённая разведка пакета категории: pipeline сам делает SERP+краул+extract, tool-less LLM синтезирует гипотезы → консервативный маппинг → кандидаты (`needs_human=True`; auto-approve нет, I18/I19/A3). Провайдер поиска резолвится из `config/deploy.yaml` (`search.adapter`/`search.by_language` по `--lang`) детерминированно; `--search-adapter` переопределяет (I16/I21/I23) | `packages/{case_id}/sources/scout/{date}.candidates.json` (+ `.provenance.json`, в т.ч. `search_provider`) |
-| `hound package {module\|role\|param\|baseline\|scope\|golden\|run\|artifact} {get\|list\|show}` | read-плоскость управления пакетом: единичные элементы и наборы по критерию поиска (`--search`/`--product`/`--param`), обзор/чтение всех 8 артефактов (`artifact list`/`artifact get [--raw]`), `--json` | — (read-only) |
-| `hound run [--until PHASE]` | конвейер Ш1–Ш9 | БД, артефакты |
+| `hound package {module\|role\|param\|baseline\|cohort\|scope\|golden\|run\|artifact} <действие>` | read/CRUD-плоскость управления пакетом. **Глаголы у подкоманд разные** (см. матрицу ниже); `--json` | — (read-only, кроме `*: add/update/remove/set/clear`) |
+| `hound run [--until PHASE]` | конвейер Ш1–Ш9 (15 фаз) | БД, артефакты |
 | `hound crawl {run\|status\|list\|resume\|restart\|cancel}` | сеансы краула (`local`): durable-запуск фазы корпуса Ш5, статус/счётчики, resume/restart/cancel | `crawl_sessions`, `crawl_session_items` |
 | `hound review` | очередь ревью / preliminary-стол | cells (reviewed) |
 | `hound report` | сборка артефактов | outputs |
-| `hound golden [--tier fast\|full]` | прогон golden | отчёт |
+| `hound golden --golden PATH [--tier fast\|full]` | прогон golden; `--golden` **обязателен** (путь к `golden.csv`) | отчёт |
 | `hound sensitivity` | пост-хок по осям | отчёт |
 | `hound diff <run_a> <run_b>` | межцикловый diff (запрещён через major) | diff.md |
-| `hound promote --validated-only` | preliminary → strict (переаттестация) | cells |
-| `hound gate --gate G1..G4 --actor <вы>` | запись **человеческого решения** гейта G1–G4 (утверждение); гейт проходит фактом строки в `gate_decisions`, отказ — отсутствие строки (S9/I6/I7) | gate_decisions |
+| `hound promote --actor <вы> [--validated-only]` | preliminary → strict (переаттестация); `--actor` **обязателен** (I6/I7) | cells |
+| `hound gate --gate G1..G4 --actor <вы>` | запись решения гейта. G1/G2 — **внутренняя аттестация** профиля; G3/G4 — **точки интеграции** (вердикт приходит извне). `--source internal\|external`, `--verdict approved\|rejected`, `--subject-digest` (по умолчанию — из `runs/{run_id}/gates/{gate}-request.json`), `--external-ref` + `--notes` обязательны при `--source external` (S9/I6/I7) | `gate_decisions` |
 | `hound deploy-check` | диагностика профиля: достижимость DMZ-шва, версии/форматы edge (`/v1/health`, `/v1/capabilities`) + неразрушающий зонд очереди краула (`crawl/status` → строка `crawl`; без подачи задания) | — (отчёт) |
 | `hound experiment retrieval` | прогон R0/R1/R2 на retrieval-golden и фиксация измеренного `retrieval_profile`/`retrieval_cutoff_K`/`embed_model_id`/`rrf_k` как `settings_provenance` со `source: measured` (A3, T8.6, I20). Фиксация — **только профиль**, и **только** при полном сравнении; частичное сравнение/`skipped` → `source: default`. Требует зафиксированную индексную сборку в `runs`; рассинхрон «эмбеддер запроса ↔ сборка» → отказ (§13), отсутствие предпосылки → `skipped` (N3) | `runs.settings_provenance_json`, `runs.retrieval_*` |
+| `hound experiment evaluator-benchmark` | измерение моделей **оценщика** (Ш6) при фиксированных прочих условиях (A3): валидность JSON, Cohen's κ, confusion, abstention, `fabricated_support`, bootstrap CI + проба детерминизма. `--golden` обязателен; `--model` (повторяемый) — **единственный** источник `model_id` (не env); `--llm-slot` — откуда взять `base_url`/`api_key`/`decoder`/`timeout`; `--repeats N` (N≥2 включает пробу); `--limit N` — smoke-подмножество. Персистит `llm_scenarios`; выбор модели — измерение, а не предрешение | `llm_scenarios`, отчёт |
 | `hound doctor [--strict] [--with-selfcheck]` | самодиагностика инсталляции: runtime, зависимости по extras, env/ключи, конфиг, каталоги, CLI-поверхность | — (отчёт) |
 | `hound baseline-agreement --annotations <csv>` | согласие независимых аннотаторов §11.5: Cohen's κ по полному набору меток **и отдельно** по бинарному решению N/A-vs-не-N/A (N/A задаёт знаменатель Coverage, I6/I7), + матрица расхождений и счётчики. Непарные ячейки исключаются и перечисляются; нулевая вариация маргиналов → `undefined` (не выдуманное число). Разметку не создаёт: это ручная работа человека | — (отчёт; артефакт разметки — вход) |
 | `hound package crawl-probe` | **измерение** оптимальных осей краула для каждого ключа `domain_profiles.yaml` (A3): лестница `http` → `browser/hybrid` → `browser/honest`; решение принимает исход **браузерного** яруса (`RawPage.fetch_mode`), а не текст ошибки — оба яруса провалились ⇒ `unresolved` с причиной (транзиентный сбой не выдаётся за `browser`); причина **диагностична**: сбой транспорта (`both_tiers_failed`) отличается от «транспорт дошёл, но экстракция дала 0 символов» (`extraction_empty` — смотреть экстрактор, не краулер; при расхождении ярусов в отчёте обе причины). Пригодность меряется **выходом реального экстрактора**, не размером байт. `wait_for`/`rate_limit` не выдумываются: только подсказка (`needs_confirmation`) и только при `429`. URL — `--urls` > `corpus_docs` (`--corpus-db`) > синтез `https://{host}{path}/` (`confidence: low`). По умолчанию **только предложение**; `--write` (требует `--actor`) правит `domain_profiles.yaml`, сохраняя шапку байт-в-байт и не тронутые блоки дословно, при отсутствии изменений — no-op. Смена осей краула — граница `execution_change` (§13), не `methodology_version` | `packages/{case_id}/sources/crawl_probe/{date}.proposal.yaml` |
 
-**Флаги контроля краула (`hound run`, D1/D2).** В дополнение к `--max-attempts` команда
-принимает оси контроля краула: `--max-depth D` (BFS-обход in-site ссылок; `0` — только seeds,
+**Полный состав `hound package` — 25 подкоманд** (`hound package --help`): `new`, `show`,
+`validate`, `list`, `set-archetype`, `bump-version`, `module`, `role`, `param`,
+`infer-archetype`, `compose-baselines`, `baseline`, `cohort`, `scope`, `golden`, `run`,
+`artifact`, `suggest`, `candidates`, `apply`, `scout`, `crawl-probe`, `add-product`,
+`index-gc`, `builds-gc`.
+
+Матрица «подкоманда → глаголы» (универсальной формулы `{get|list|show}` **нет**):
+
+| Подкоманда | Глаголы |
+|---|---|
+| `module` | `add` · `update` · `remove` · `renormalize` · `list` · `get` |
+| `role` | `add` · `update` · `remove` · `list` · `get` |
+| `param` | `add` · `update` · `remove` · `get` · `list` |
+| `baseline` | `add` · `update` · `remove` · `list` · `get` |
+| `cohort` | `update` · `set` · `show` |
+| `scope` | `set` · `clear` · `show` |
+| `golden` | `list` |
+| `run` | `show` |
+| `artifact` | `list` · `get` |
+
+Подкоманды без глаголов (собственные действия): `new` (из `packages/_template`), `show`
+(сводка), `validate` (линт без записи), `list` (обзор пакетов каталога), `set-archetype`
+(C запрещён при baselines), `bump-version` (semver-инкремент `package_version`),
+`infer-archetype` (эвристика, без записи), `compose-baselines` (черновик наследования, без
+записи), `suggest`/`candidates` (эвристики/план кандидатов — в пакет не пишут), `apply`
+(**применяет** кандидатов; требует `--actor`), `scout`, `crawl-probe`, `add-product`
+(добавить продукт в когорту: SERP+scout+ключи доменов; по умолчанию plan-only, `--apply`
+пишет), `index-gc` (прунинг композиций, на которые не ссылается ни один прогон; dry-run,
+`--apply` требует `--actor`), `builds-gc` (прунинг индексных сборок вне композиций; то же).
+
+> `hound package apply`, `index-gc`, `builds-gc` с `--apply` — **разрушающие** операции над
+> пакетом/индексом: по умолчанию они ничего не пишут и требуют явного `--actor` как
+> носителя ответственности.
+
+**Флаги `hound run`.** Полный набор (`hound run --help`) делится на три класса.
+
+* **Меняют идентичность прогона** (`run_id`, §C.1.1): `--urls FILE` (`seeds_digest`),
+  `--refresh {auto,revalidate,refresh,offline}` (`refresh_policy`), `--only-failed` /
+  `--only-product ID` (`run_scope`), `--cycle-id` / `--update` (`cycle_id`), `--profile
+  {local,split}` (`deploy_profile`), а также
+  `--llm-slot`, `--llm-model`, `--retrieval-profile`, `--cutoff-k`, `--document-level`,
+  `--max-depth`, `--max-documents`, `--exclude-path`, `--exclude-document` (оси контракта).
+  Частичный прогон — **другой прогон**, а не resume полного.
+* **Меняют объём работы, но не идентичность:** `--reset` (форсировать полный перезапуск,
+  обход resume), `--from-scratch` (сброс сеанса + живой ре-фетч в обход R7-кэша),
+  `--max-attempts N` (потолок попыток по URL → терминальный `failed`/`attempts_exhausted`),
+  `--since-run ID` (явный predecessor для carry-forward/lineage; по умолчанию — последний
+  прогон пакета из `state.db`).
+* **Операционные:** `--until PHASE`, `--dry-run`, `--follow`/`--watch` + `--interval S`,
+  `--run-id` (ручное переопределение), `--runs-dir`/`--db`, `--passports-dir`,
+  `--render-modes`, `--env-file`, `--json`.
+
+Оси контроля краула (D1/D2): `--max-depth D` (BFS-обход in-site ссылок; `0` — только seeds,
 дефолт), `--max-documents N` (`>0`; потолок добытых страниц на `(продукт, seed-root)`),
 `--exclude-path GLOB` и `--exclude-document GLOB` (повторяемые glob-блэклисты по пути URL и
-по basename). Флаги уточняют **run-слой** поверх `run.yaml:crawl` (цепочка app < run < site);
+по basename), `--document-level LEVEL`. Флаги уточняют **run-слой** поверх `run.yaml:crawl`
+(цепочка app < run < site);
 усечение (`max_documents`/`max_depth`) фиксируется честно — сеанс краула не рапортуется
 `COMPLETED` (→ `PARTIAL`), а absence `source_scope: exhaustive` поверх усечённого продукта
 даёт аномалию (в `nda_questions.csv` и JSON-payload). При **resume** бюджет `max_documents`
@@ -880,7 +1194,12 @@ hound run \
 неполноте — политическом усечении без сбоев фетча — код возврата `EXIT_OK` с явным
 предупреждением; реальные сбои сохраняют `EXIT_ERROR` (N4).
 
-Подкоманды `hound package …` принимают `--package` как **путь к каталогу пакета**, так и**`case_id`** (резолвится в каталоге пакетов: `--dir`, иначе resolved `paths.packages`);
+У `hound crawl run` — свой набор: `--until` по умолчанию **`corpus`** (если `corpus` отсечён,
+краул не запускается); флаги краула те же (`--reset`/`--from-scratch`/`--only-*`/
+`--max-attempts`/`--max-depth`/`--max-documents`/`--exclude-*`/`--document-level`/`--follow`),
+плюс `--llm-slot`/`--llm-model`.
+
+Подкоманды `hound package …` принимают `--package` как **путь к каталогу пакета**, так и **`case_id`** (резолвится в каталоге пакетов: `--dir`, иначе resolved `paths.packages`);
 несуществующий пакет — честный `EXIT_NOT_FOUND` (команды чтения fail-closed, а не ложный успех).
 `hound package validate` дополнительно fail-closed, когда каталог есть, но `package.yaml`
 отсутствует: `EXIT_BLOCKED` с `blocking: package.yaml отсутствует` (не `EXIT_NOT_FOUND`
@@ -890,11 +1209,14 @@ hound run \
 (при этом `incomplete` **не** блокирует команды авторства, только прогон/валидацию).
 
 `hound doctor` — read-only и по умолчанию **без сети**: проверяет Python/venv, наличие
-зависимостей по группам extras (`find_spec`, без импорта тяжёлых), заданность env/ключей
+зависимостей по группам extras (`find_spec`, без импорта тяжёлых — группы `deps:core`,
+`deps:retrieval`, `deps:crawl`, `deps:extract`, `deps:safety`, `deps:ops`, `deps:embed`,
+`deps:embed-lite`, `deps:dev`), заданность env/ключей
 (значения **не** печатаются), файлы `config/deploy.yaml`/`.env.example`/`packages` и
 package-scoped реестровые спецификации (`package.yaml: registries` → `packages/{case_id}/
 registries/`, при `--package`),
-запись в операционные каталоги (`runs/`/`index_store/`/`corpus_raw/`/`cache/`) и полноту
+запись в операционные каталоги (`runs/`/`index_store/`/`corpus_raw/`/`cache/`), раскладку
+каталогов (`layout.*`) и полноту
 CLI-поверхности. Каждая проверка обёрнута в try/except и даёт запись `ok|warn|fail`;
 секреты эгрессии в профиле `split` живут только в edge (07). `--json` — машинный отчёт
 (детерминированный: `sort_keys=True`); код возврата ненулевой при `fail`, а с `--strict` —
@@ -902,12 +1224,33 @@ CLI-поверхности. Каждая проверка обёрнута в tr
 
 ### E.2. UX-принципы
 
-- **Гейты — явные действия:** `hound run` останавливается на G1–G4 и печатает, что требуется;
-  продолжение — отдельная команда с решением человека. Никаких автоматических «approve».
-- **Запись решения гейта:** решение человека фиксируется `hound gate --gate G1..G4 --actor <вы>`
-  (плюс `--db`/`--runs-dir` + `--run-id`, `--target`, `--notes`; `--json`). Гейт проходит
-  **фактом строки** в `gate_decisions`; «отказ» выражается **отсутствием** строки — прогон
-  остаётся `blocked`. Повторная подача того же решения идемпотентна (та же строка).
+- **Гейты — явные действия, но два разных класса.** `hound run` останавливается на G1–G4 и
+  печатает, что требуется. **G1/G2 — внутренняя аттестация:** человек утверждает содержимое
+  профиля пакета-якоря (когорта/роли/объём/паспорта) и матрицу роль×продукт. Второй путь —
+  durable-аттестация профиля (`profile_attestation` в `state/{package_id}/state.db`) —
+  объявлена и проверяется гейтом, но **производителя в прогоне нет** (design-only: строку
+  пишут только тесты), поэтому как работающий механизм её описывать нельзя. Рабочий путь
+  сегодня один — per-run строка `gate_decisions` (аудит-след и override), и она
+  **приоритетна**. **G3/G4 — точки интеграции:** coHound не решает ревью/публикацию, а
+  **получает** решение. На блоке
+  пишется `runs/{run_id}/gates/{gate}-request.json` — детерминированный предмет +
+  `subject_digest`; вердикт приходит извне и только записывается. Никаких автоматических
+  «approve».
+- **Запись решения гейта:** `hound gate --gate G1..G4 --actor <вы>` (плюс
+  `--db`/`--runs-dir` + `--run-id`, `--source internal|external`, `--verdict approved|rejected`,
+  `--subject-digest`, `--target`, `--notes`; `--json`). `--subject-digest` по умолчанию
+  берётся из `runs/{run_id}/gates/{gate}-request.json`; **если нет ни флага, ни файла —
+  отказ** (`gate_subject`, `EXIT_USAGE`): решение без привязки к предмету проходило бы гейт
+  при любом состоянии прогона. `--source external` требует `--external-ref` и `--notes`.
+  Гейт проходит **фактом строки** в `gate_decisions`; **устаревшее** одобрение (предмет
+  изменился) гейт **не** проходит, и сообщение называет изменившийся компонент. Явный
+  `--verdict rejected` блокирует прогон отдельным сообщением — молчание внешней системы не
+  выдаётся ни за отказ, ни за одобрение. Повторная подача того же решения идемпотентна.
+- **Делегирование G3/G4:** `run.yaml:gates.{g3,g4}: external|waived` (дефолт `external`).
+  `waived` → фаза `skipped` с `skip_reason=gate_delegated_external`, waiver-строка в
+  `gate_decisions` и `gate_waivers` в манифесте. Невидимый waiver запрещён. Политика гейтов —
+  **процесс**, а не условие измерения: в `EXECUTION_CONTRACT_FIELDS` её нет, `run_id` от неё
+  не зависит.
 - **Идемпотентность и resume:** повторный `hound run` продолжает с последней завершённой фазы;
   `--until` даёт пошаговый контроль. В CLI-JSON resume-короткое-замыкание уже завершённых фаз
   сериализуется под ключом `resumed_skipped` — это **отдельно** от `PhaseStatus.skipped` (пропуск

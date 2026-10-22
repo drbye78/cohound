@@ -46,6 +46,14 @@ CLI-ядро (`pydantic`+`pyyaml`+stdlib) ставится везде; инде�
 (`torch`+`torchvision`, CPU-ядра — см. §2.4/§4).
 `requires-python = ">=3.14"` в `pyproject.toml`; CI резолвит на 3.14.
 
+**Воспроизводимость установки (`uv.lock`, проверено 2026-10-23).** `uv lock --check` проходит;
+`extract-archives` **присутствует** в локе (`py7zr` 1.1.4, `rarfile` 4.5, `pyzipper` 0.4.0), поэтому
+`uv sync --frozen --extra extract-archives` разрешается (`--dry-run` проверен). Аудит `a4f67af`
+фиксировал обратное (лок без этих пакетов) — с тех пор лок пересобран. Правило остаётся:
+после правки `pyproject.toml` лок надо пересобрать (`uv lock`), иначе `--frozen` поставит
+устаревший набор; без пере-лока гарантированный путь — `uv pip install -e '.[dev,retrieval,
+crawl,extract]'` (+ `extract-archives`, если нужен спуск в 7z/rar).
+
 **Escape hatch.** Если появится вынужденно старый целевой хост (без возможности поставить 3.14 через
 `uv`/контейнер), понижение базлайна до 3.13/3.12 — точечная правка `requires-python` после проверки
 колёс под понижённую версию; код не должен использовать 3.14-only синтаксис инкрементально
@@ -53,7 +61,10 @@ CLI-ядро (`pydantic`+`pyyaml`+stdlib) ставится везде; инде�
 
 **Находка (docling):** пакет `docling` = ровно `docling-slim[standard]` и тянет
 **torch+torchvision** (~гигабайты). Для Office (DOCX/PPTX/XLSX) это не нужно:
-`docling-slim[format-office]` ставит только python-docx/python-pptx/openpyxl/pylatexenc.
+`docling-slim[format-office]` ставит только python-docx/python-pptx/openpyxl/pylatexenc —
+**но `rtree` в него не входит**, а импорт `DocumentConverter` без `rtree` не проходит
+(цепочка `pipeline→models.factories→base_ocr_model→datamodel.spatial`). Поэтому extra
+`extract` объявляет `rtree` **явно** (§2.4), и это не «PDF-only» зависимость.
 `docling-slim` предоставляет namespace-импорт `docling` (`docling/document_converter.py`) —
 адаптер `extract_document.py` менять не нужно. Разделены extras `extract` (лёгкий) и
 `extract-pdf` (тяжёлый, отдельное окружение).
@@ -83,10 +94,15 @@ index+sources и есть единственная декларативная о
 
 | Пакет | Версия | Лицензия | Вердикт | Зачем |
 |---|---|---|---|---|
-| `pydantic` | 2.13.x | MIT ✅ | **a** | схемы §4.2/4.3/4.5, инварианты, `extra="forbid"` |
+| `pydantic` | 2.14.x (диапазон `>=2.13,<3`; в `uv.lock` — 2.14.0) | MIT ✅ | **a** | схемы §4.2/4.3/4.5, инварианты, `extra="forbid"` |
 | `pyyaml` | 6.0.x | MIT ✅ | **a** | `run.yaml`, `package.yaml`, `cohort.yaml` |
-| `numpy` | 2.5.x | BSD-3 ✅ | **a** | `.npy`-шарды, brute-force cosine |
 | `csv`, `argparse`, `sqlite3`, `json` | stdlib | PSF | **a** | отчёты, CLI, хранилище, сериализация |
+
+> `numpy` **не** входит в ядро: базовые `dependencies` — только `pydantic` + `pyyaml`
+> (`pyproject.toml`). `numpy` живёт в extras `retrieval`/`embed-lite` и импортируется
+> **лениво** (`adapters/index_format.py`, `index_npy.py`, `vector_npy.py`,
+> `embed_model2vec.py`): CLI-ядро ставится и работает без него, `.npy`-шарды и
+> brute-force cosine требуют `retrieval`.
 
 ### 2.2. Ретривал: лексика и вектора
 
@@ -144,15 +160,15 @@ index+sources и есть единственная декларативная о
 | Пакет | Версия | Лицензия | Вердикт | Обоснование |
 |---|---|---|---|---|
 | `trafilatura` | 2.3.x | Apache-2.0 ✅ | **a** | main-content → markdown, заголовки/списки/таблицы |
-| `docling-slim[format-office]` | 2.135.x | MIT ✅ | **a** | DOCX/PPTX/XLSX нативно (python-docx/-pptx/openpyxl), **без torch**. `rtree` для Office **не нужен** (нужен только PDF-пути spatial/reading-order) и импорт `DocumentConverter` без него работает |
+| `docling-slim[format-office]` | 2.135.x | MIT ✅ | **a** | DOCX/PPTX/XLSX нативно (python-docx/-pptx/openpyxl), **без torch**. `rtree` для Office **обязателен**: extra `[format-office]` его не покрывает, а цепочка импорта `DocumentConverter` (`pipeline→models.factories→base_ocr_model→datamodel.spatial`) требует `rtree` — поэтому он объявлен в extra `extract` явно (`pyproject.toml`), и `doctor` держит его в обязательных для `deps:extract` |
 | `docling-slim[standard]` | 2.135.x | MIT ✅ | **a** (отдельное окружение) | PDF layout+tables; **тянет torch+torchvision** (CPU-ядра из индекса `pytorch-cpu`, §1); обязателен для PDF-контура (блокер M0) |
 | `lxml` | 6.1.x | BSD-3 ✅ | **a** (транзитивно) | уже в дереве trafilatura/Scrapy |
 | `openpyxl` | 3.1.x | MIT ✅ | **a** | XLSX-отчёты; Office-бэкенд docling |
 | `python-docx` / `python-pptx` | 1.2.x / 1.0.x | MIT ✅ | **b** (через docling) | отдельно не нужны |
-| `markitdown` (Microsoft) | 0.1.x | MIT ✅ | **b** | fallback экзотики (EPUB/msg/xls); PDF не layout-aware |
-| `pypdf` / `pdfplumber` | 6.19.x / 0.11.x | BSD-3 / MIT ✅ | **b** | лёгкая работа с PDF без layout |
-| `selectolax` / `beautifulsoup4` | 1.0.0 / 4.15.x | MIT ✅ | **b** | fallback-парсинг и извлечение иерархии `h1–h6` под `heading_path` |
-| `readability-lxml` / `markdownify` | 0.9 / 1.2.x | Apache-2.0 / MIT ✅ | **b** | fallback main-content / HTML→MD |
+| `markitdown` (Microsoft) | 0.1.x | MIT ✅ | **b** — extra `fallback`, **не подключён** | fallback экзотики (EPUB/msg/xls); PDF не layout-aware. В коде импортов **ноль**, fallback-путей в адаптерах нет |
+| `pypdf` / `pdfplumber` | 6.19.x / 0.11.x | BSD-3 / MIT ✅ | **b** — extra `fallback`, **не подключён** | лёгкая работа с PDF без layout; сегодня PDF-путь один — docling |
+| `selectolax` / `beautifulsoup4` | 1.0.0 / 4.15.x | MIT ✅ | **b** — extra `fallback`, **не подключён** | заявлены как fallback-парсинг и извлечение `h1–h6` под `heading_path`; иерархию заголовков сегодня даёт свой чанкер (`chunker_markdown`) |
+| `readability-lxml` / `markdownify` | 0.9 / 1.2.x | Apache-2.0 / MIT ✅ | **b** — extra `fallback`, **не подключён** | fallback main-content / HTML→MD; main-content даёт `trafilatura` |
 | `camelot-py` / `tabula-py` | 2.0 / 2.10 | MIT ✅ | **c** | тяжёлые (opencv+pandas / JVM); таблицами занимается docling |
 | `PyMuPDF` | 1.28.x | **AGPL** ✅ | **d** | AGPL исключён (курс проекта) |
 | `unstructured` | 0.27.x | Apache-2.0 ✅ | **d** | `<3.14` + 24+ зависимостей + телеметрия on-by-default; OSS-таблицы слабые (0.426 vs 0.866) |
@@ -166,17 +182,31 @@ EPUB не добавляют в стек ни одного пакета: тек�
 EPUB **не** используется (лишний слой конвертации поверх того же ZIP); LlamaIndex/LangChain
 остаются **d** (§3.1) — EPUB-разбор не повод их подключать.
 
+**Extra `fallback` — объявлен, но не подключён.** `pyproject.toml` содержит extra `fallback`
+(`markitdown`, `pypdf`, `pdfplumber`, `selectolax`, `beautifulsoup4`, `markdownify`), однако
+**ни один** из этих пакетов не импортируется в `core/`/`tests/`, и fallback-путей в
+адаптерах экстракции **нет**: сегодня PDF/Office идёт через docling, HTML — через
+`trafilatura`. Вердикт `b` у этих строк — это **заявка**, а не работающий механизм; если
+fallback не появится, extra подлежит удалению (иначе он обещает то, чего нет).
+
 **Контейнеры-артефакты (P6, спуск в zip/7z/rar).** Слой допуска/retention (стриминг в
 staging-файл, класс-aware потолки) реализован **без** этих пакетов — `zipfile` stdlib и
-магия байтов. Пакеты ниже — заявка на следующий слой (extra `extract-archives`), ни один
-модуль их пока не импортирует; базовый extra `extract` не меняется.
+магия байтов. **Спуск реализован**: порт `core/ports/container.py` (`ContainerPort`),
+адаптеры `core/adapters/container_{zip,7z,rar,any}.py`, исполнение —
+`core/pipeline/archive_descent.py`, сборка — `core/cli/wiring.py` (`container_for`).
+`zip` читается stdlib; `7z`/`rar` — ленивыми импортами из extra `extract-archives`.
+Деградация **честная и видимая**: без пакета `list_members` отдаёт
+`ContainerListing(unreadable="backend_unavailable: py7zr не установлен (extra
+extract-archives)")`, `open_member` — `ContainerUnavailable`, а спуск пишет
+`container_reader_unavailable` — «пустого архива» не бывает. Базовый extra `extract` не
+меняется.
 
 | Пакет | Версия | Лицензия | Вердикт | Обоснование |
 |---|---|---|---|---|
 | `zipfile` (stdlib) | 3.14 | PSF ✅ | **a** | ZIP-члены без внешних бинарей; **ZipCrypto read-only** (запись AES — `pyzipper`), **bomb-guard нет** — границы задаёт ось `archive_max_*` (член/суммарный распакованный объём/число членов), не библиотека |
-| `py7zr` | 1.1.4+ | **LGPL-2.1-or-later** ✅ | **b** (extra `extract-archives`) | 7z (LZMA2/BCJ) на чистом Python. LGPL — **явное исключение**, см. ниже |
-| `rarfile` | 4.5+ | ISC ✅ | **b** (extra `extract-archives`) | RAR4/RAR5-разбор; **сжатые** члены требуют внешней утилиты (`bsdtar`/`unrar`/`7z`). `unrar` (проприетарный) в образ **не тащим**: отсутствие утилиты = видимый `attachment_skip(extractor_unavailable)`, не тихий пустой текст |
-| `pyzipper` | 0.4.0+ | MIT ✅ | **b** (extra `extract-archives`) | Только AES-zip (WinZip AE-1/AE-2); обычный zip закрывает stdlib. **Пин `>=0.4.0`** — CVE-2026-44722 в ранних версиях |
+| `py7zr` | 1.1.4 | **LGPL-2.1-or-later** ✅ | **a** (extra `extract-archives`) | 7z (LZMA2/BCJ) на чистом Python; **реализован** (`container_7z.py`, ленивый импорт). LGPL — **явное исключение**, см. ниже |
+| `rarfile` | 4.5 | ISC ✅ | **a** (extra `extract-archives`) | RAR4/RAR5-разбор; **реализован** (`container_rar.py`). **Сжатые** члены требуют внешней утилиты (`bsdtar`/`unrar`/`7z`). `unrar` (проприетарный) в образ **не тащим**: отсутствие утилиты = видимая причина, не тихий пустой текст |
+| `pyzipper` | 0.4.0 | MIT ✅ | **b** (extra `extract-archives`) | Только AES-zip (WinZip AE-1/AE-2); обычный zip закрывает stdlib. **В коде не подключён** (ноль импортов; `container_zip.py` объясняет, почему stdlib достаточно). Пин `>=0.4.0` — CVE-2026-44722 в ранних версиях |
 
 ⚠️ **LGPL-исключение (`py7zr`) — единственное в проекте.** Политика: LGPL-код
 **не копируется** в репозиторий (перенос кода запрещён), используется только как
@@ -186,7 +216,8 @@ staging-файл, класс-aware потолки) реализован **без
 commodity-слой (A2): замена читателя контейнеров не меняет измерение. Прочие LGPL/GPL
 пакеты по-прежнему **d** (см. §3); `patool`/`pyth`/`pyunpack` — **d** (GPL-3 и/или
 неподдерживаемые: тонкие обёртки над бинарями, ломают воспроизводимость и
-контроль границ распаковки).
+контроль границ распаковки). Установка этого extra и текущее состояние лока — §1
+(«Воспроизводимость установки»).
 
 ⚠️ **docling offline:** веса нужны **только PDF-контуру** (Office — без ML-моделей). Штатный
 офлайн-механизм — pipeline `artifacts_path` / env `DOCLING_ARTIFACTS_PATH`, заполняемый
@@ -231,7 +262,7 @@ commodity-слой (A2): замена читателя контейнеров н
 | `scrapy-playwright` | 0.0.48 | BSD-3 ✅ | **a** (с пином + smoke) | per-request `playwright=True` для JS-доменов. **V5: зрелый де-факто стандарт** (org `scrapy-plugins`, активные PR Zyte 2026, py3.14 поддержан PR #375); ярлык `0.0.x` = конвенция автора (classifier Beta), не заброшенность |
 | `playwright` | 1.63.x | Apache-2.0 ✅ | **a** (пин + smoke) | headless-рендер; **два пути краула:** движок `scrapy-playwright` и **прямой** sync-API `BrowserCrawler` (`adapters/crawl_browser.py`, honest/hybrid, без Scrapy/Twisted; выбор — сменой адаптера за портом `CrawlerPort`, A2). Нужен бинарь `playwright install chromium`; браузеры качаются с CDN — в закрытом контуре зеркало (`PLAYWRIGHT_DOWNLOAD_HOST`), изоляция — `PLAYWRIGHT_BROWSERS_PATH` |
 | `httpx` | 0.28.x | BSD ✅ | **a** | общий HTTP-клиент (search API, tests). **Watch-item (2026-10):** апстрим-активность снизилась; Pydantic ведёт преемник `httpx2` (Scrapy 2.18+ использует его). `httpx` ещё не EOL; миграция — отдельное решение по триггеру (§14). `httpx2` — кандидат в этот реестр |
-| `curl_cffi` | 0.16.x | MIT ✅ | **b** | «дешёвый первый ярус» для антибот-доменов без JS (имитация TLS/JA3); не замена браузеру |
+| `curl_cffi` | 0.16.x | MIT ✅ | **b** — **не подключён** | заявлен в extra `crawl`, но импортов в `core/`/`tests/` **ноль**: «дешёвый первый ярус» для антибот-доменов без JS (имитация TLS/JA3) остаётся заявкой, а не заменой браузеру. Либо подключать, либо убирать из extra |
 | `trafilatura`/`courlan` (fetch) | 2.3.x | Apache-2.0 ✅ | **b** | простой политкорректный fetch |
 | `crawl4ai` | 0.9.x | Apache-2.0 ✅ | **c** | LLM-first, тянет litellm/patchright/stealth — избыточно (A1) |
 | `crawlee-python` | 1.10.x | Apache-2.0 ✅ | **c** | активен, но **нет интеграции со Scrapy** — это замена фреймворка целиком (ломает A2) |
@@ -281,9 +312,9 @@ robots.txt-запрос оставлять на дефолтном HTTP-handler 
 
 | Пакет | Версия | Лицензия | Вердикт | Обоснование |
 |---|---|---|---|---|
-| `tenacity` | 9.2.x | Apache-2.0 ✅ | **a** | ровно под §7 «retry ≤2 → failed» и HTTP-адаптеры |
-| `structlog` | 26.1.x | Apache-2.0 ✅ | **a** | структурные JSON-логи для воспроизводимого прогона |
-| `pytest` | 9.1.x | MIT ✅ | **a** | §11.6 CI (сейчас не установлен) |
+| `tenacity` | 9.2.x | Apache-2.0 ✅ | **b** (заявка) | **ноль импортов** в `core/`/`tests/` (единственное упоминание — список зависимостей `doctor`): ретраи реализованы вручную через `max_attempts`/`attempts_exhausted` (`core/pipeline/corpus.py`). Заявлен «под §7 retry ≤2 → failed», но эту роль сегодня исполняет свой код |
+| `structlog` | 26.1.x | Apache-2.0 ✅ | **a** | структурные JSON-логи для воспроизводимого прогона (**опциональный** backend рендеринга: `HAS_STRUCTLOG` в `core/util/logging.py`; без него — свой JSON-рендерер) |
+| `pytest` | 9.1.x (в `uv.lock` — 9.1.1) | MIT ✅ | **a** | §11.6 CI; входит в extra `dev` (`pyproject.toml`) и в `uv.lock` — установлен в dev-окружении, `scripts/ci.sh` — единая точка входа |
 | `hypothesis` | 6.168.x | MPL-2.0 ✅ | **a** | property-based проверка инвариантов I1–I23 и парсеров |
 | `respx` | 0.23.x | BSD-3 ✅ | **a** | мок `httpx` для LLM/SERP-адаптеров без сети |
 | `pytest-cov` | 7.1.x | MIT ✅ | **b** | покрытие |
@@ -321,6 +352,38 @@ robots.txt-запрос оставлять на дефолтном HTTP-handler 
 для IDP/DLP/IDS-политик — `07` §8.
 
 ---
+
+### 2.10. Скопированный сторонний код (не зависимости)
+
+Реестр выше описывает **пакеты**. Отдельный класс — код, **перенесённый копированием** из
+других проектов (правило `AGENTS.md`: переносить копированием, а не зависимостью; сохранять
+лицензию/copyright в шапке файла; код без явной лицензии не копировать). Его реестр —
+**`NOTICES`** в корне репозитория: файл → проект-источник → лицензия → перечень изменений,
+плюс полный текст лицензии.
+
+Текущее состояние: **пять файлов** адаптированы из проекта **gag5** под **MIT License**
+(Copyright (c) 2024), каждый — с шапкой происхождения:
+
+| файл в coHound | источник в gag5 |
+|---|---|
+| `core/util/security.py` | `core/security.py` |
+| `core/util/text_utils.py` | `core/text_utils.py` |
+| `core/util/fusion.py` | `retrieval/fusion.py` |
+| `core/adapters/chunker_markdown.py` | `ingestion/structural_chunker.py` |
+| `core/adapters/extract_document.py` | `documents/parse.py` (перенесён **не файл**, а идея graceful-degradation и способ вызова `DocumentConverter.export_to_markdown()`) |
+
+**Вторая категория — внутренний источник.** Ещё два файла несут шапку «адаптировано из
+проекта **gtm** (`scripts/kb_poc.py`, собственная разработка)»: `core/util/retrieval_eval.py`
+(метрики hit@K/MRR/recall@K) и `core/adapters/lexical_bm25.py` (baseline BM25). Это не
+сторонний код: лицензионных обязательств перед третьей стороной нет, поэтому в `NOTICES`
+(реестр **внешних** источников) они не входят. Шапка сохранена ради провенанса: видно, что
+код пришёл из PoC, а не написан под coHound.
+
+Правила для новых копий: (1) у источника есть явная лицензия, допускающая копирование;
+(2) шапка файла несёт проект, путь источника, лицензию, copyright и перечень изменений;
+(3) строка добавляется в `NOTICES`; (4) не-MIT лицензия (например LGPL у `py7zr`, §2.4) —
+отдельным разделом с указанием обязательств. **Отличие от LGPL-исключения:** `py7zr`
+используется как **unmodified wheel** из индекса, его код в репозиторий не переносится.
 
 ## 3. Явно отклонённые: оркестраторы и hosted-парсеры
 
@@ -366,25 +429,32 @@ robots.txt-запрос оставлять на дефолтном HTTP-handler 
 
 ## 4. Предлагаемый набор MVP
 
-**Runtime (`a`):** `pydantic` · `pyyaml` · `numpy` · `tantivy` · `trafilatura` ·
-`docling-slim[format-office]` · `Scrapy`+`scrapy-playwright`+`playwright` · `httpx` · `nh3` ·
-`defusedxml` · `openpyxl` · `tenacity` · `structlog` · stdlib (`sqlite3`, `csv`, `argparse`, `json`).
+**Runtime (`a`):** `pydantic` · `pyyaml` · `numpy`+`tantivy` (extra `retrieval`) · `trafilatura` ·
+`docling-slim[format-office]`+`rtree` (extra `extract`) · `Scrapy`+`scrapy-playwright`+`playwright`
+(extra `crawl`) · `httpx` · `nh3`+`defusedxml` (extra `safety`) · `openpyxl` · `structlog` (extra
+`ops`) · stdlib (`sqlite3`, `csv`, `argparse`, `json`).
 Собирается как extras в `pyproject.toml`: `retrieval`, `crawl`, `extract`, `safety`, `ops`.
+Базовые `dependencies` — только `pydantic`+`pyyaml`: CLI-ядро ставится без numpy/tantivy, а
+`.npy`-шарды и лексическое плечо требуют extra `retrieval` (см. §2.1).
 
 **Отдельные окружения (не в CLI-venv):**
 - **PDF layout:** `docling-slim[standard]` (torch+torchvision, CPU-ядра — §1) — extra `extract-pdf`, блокер M0.
 - **Индекс-контур:** `sentence-transformers` (+torch, CPU-ядра — проектно-глобальные `[tool.uv.sources]`, §1) — extra `embed`, изолированный venv/образ.
 - **LLM-инференс:** модели корпоративного облака по [OI]-совместимому API — **вне наших окружений**
   (не ставим и не развёртываем; `vLLM`/`SGLang` — возможный backend облака, §2.3).
+- **Спуск в 7z/rar:** extra `extract-archives` (`py7zr`, `rarfile`, `pyzipper`) — ставится по
+  требованию; без него контейнеры 7z/rar не раскрываются (видимая причина, §2.4).
 - **Опц. CPU-инференс:** ~~`llama-cpp-python` (GGUF) для тестов порта~~ — **снято** (не реализовано;
   вытеснено [OI]-совместимым клиентом внутреннего периметра, см. `06` §5.W9/§5.13).
 
 **Dev (`a`):** `pytest` · `pytest-xdist` · `hypothesis` · `respx` · `pytest-cov`.
 
 **Опционально (`b`):** `faiss-cpu`/`usearch` (ANN при росте), `model2vec` (лёгкая эмбеддинг-ветка),
-`markitdown`/`pypdf`/`pdfplumber` (fallback-экстракция), `selectolax`/`bs4`/`markdownify`,
+`markitdown`/`pypdf`/`pdfplumber` (fallback-экстракция — extra объявлен, **в коде не подключён**,
+§2.4), `selectolax`/`bs4`/`markdownify` (то же), `curl_cffi` (заявлен в `crawl`, импортов ноль),
 `bge-reranker-v2-m3` (reranker), `rich`/`typer`, `orjson`/`tqdm`, `xlsxwriter`, `hishel`,
-`py7zr`/`rarfile`/`pyzipper` (спуск в контейнеры, extra `extract-archives`; `py7zr` — LGPL-исключение §2.4).
+`tenacity` (ретраи пока ручные), `py7zr`/`rarfile`/`pyzipper` (спуск в контейнеры, extra
+`extract-archives`; `py7zr` — LGPL-исключение §2.4; `pyzipper` в коде не подключён).
 
 **Не брать (`d`):** LangChain, LlamaIndex, все hosted-парсеры, `unstructured`, `PyMuPDF`,
 `html2text`, `bleach`, `chromadb`, `whoosh`, `pylucene`, `jsonformer`, TGI, `pandas`,
@@ -395,9 +465,22 @@ robots.txt-запрос оставлять на дефолтном HTTP-handler 
 
 ## 5. Версионные границы (связь с §13)
 
-Смена **эмбеддинг-модели**, **чанкера** или **профиля ретривала** — версионная граница:
-bump `methodology_version`, обязателен `golden-full` (§13). Поэтому `sentence-transformers` и
-`tantivy` пинятся в `run_manifest.yaml` вместе с моделью/стеммером/RRF-параметрами.
+Класс границы определяется **не типом зависимости**, а тем, входит ли величина в
+`execution_contract_digest` / `METHODOLOGY_FIELDS` (методология 2.4.0). Таблица — зеркало
+`03` §C.1/§C.2 и `core/pipeline/digests.py`:
+
+| Что меняется | Класс | Следствие |
+|---|---|---|
+| `embed_model_id`, `lexical_engine_version`, `vector_store`, `extractor_version` | **`content_change`** | наблюдаемые величины: **вне** контракта (не выводятся из входа — per-product композит корпуса, диск, wheel'ы). Новая `index_build_id`, diff **разрешён** с баннером и doc-delta |
+| `chunker_version`, `extractor_stack` | **`execution_change`** | входят в контракт → новый `run_id`, diff блокируется; `methodology_version` **не** меняется |
+| `crawl.document_level` | **`execution_change`** | входит в `CrawlLimits.as_dict()` **безусловно** (дефолт `full`) → `crawl_config_digest` → новый `run_id`. Дополнительно наблюдается в `extractor_version` (`docling-doc-3:<level>`) → новая сборка; но идентичность разошлась раньше, поэтому класс — `execution_change` |
+| `retrieval_profile`, `retrieval_cutoff_K`, `retrieval_params_json` (`rrf_k`/fusion) | **`execution_change`** | входят в контракт; `index_build_id` **не** меняется (ретривал-конфиг не влияет на чанкинг/векторы), обязателен retrieval-golden |
+| `scoring_policy_version`, `status_dict_version`, `capability_policy`, `unknown_policy`, `partial_score` (`METHODOLOGY_FIELDS`) | **`methodology_change`** | bump `methodology_version` + `golden-full` **и пере-аннотация golden** (§13) |
+| модель под сценарий оценщика (`llm_scenarios`) | **`execution_change`** | новый `run_id`; `methodology_version` не меняется (`core/config/deploy.py`) |
+
+Поэтому `sentence-transformers`/`tantivy` пинятся в `run_manifest.yaml` (провенанс: модель,
+стеммер, RRF-параметры), но **сами по себе** версию методологии не двигают: их смена видна
+через `pb`/`index_build_id`. Bump `methodology_version` — только по `METHODOLOGY_FIELDS`.
 
 ---
 
