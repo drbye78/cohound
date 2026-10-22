@@ -9,6 +9,12 @@
 Детальный дизайн: (A) конвейер и гейты, (B) корпус/индекс/ретривал, (C) LLM-контуры,
 (D) реестры и наследование, (E) отчёты. Алгоритмы даны до уровня «достаточно для реализации».
 
+**Граница с `09`.** Этот документ — дизайн подсистем; операционные контракты, выросшие
+после M1, описаны в `09-product-onboarding-incremental-runs.md` и здесь только
+указываются: спуск в контейнеры — `09 §6.7`/§6.7.1, оси допуска артефактов — `09 §6.6`,
+двухуровневая идентичность сборки — `09 §8.1-8.2`, ревалидация — `09 §6.3`/§8.7,
+benchmark оценщика — `09 §20`.
+
 ---
 
 ## A. Конвейер и гейты
@@ -17,22 +23,33 @@
 
 Прогон — идемпотентная последовательность фаз с персистентным состоянием `runs.state`.
 Фаза не начинается, пока предыдущая не завершена. Гейты останавливают и ждут человека.
+`runs.state` — **JSON-карта** `{"phase_state": {phase: "ok"|"blocked"|"failed"}}`
+(`sqlite_store.py`): прохождение гейта в ней **не** хранится (значения вида
+`g1_approved` не существует) — гейт пройден тогда и только тогда, когда в
+`gate_decisions` есть одобрение текущего предмета (A.2).
 
 ```python
 class Runner:
     def __init__(self, store: StorePort, ports: Ports, clock: Clock): ...
     def run(self, run_cfg: RunConfig, until: Phase | None = None) -> RunReport:
-        # фазы: NORMALIZE, LINT, PLAN, DISCOVERY, REGISTRY, INHERITANCE,
-        #       CORPUS, EVALUATE, REVIEW, COMPUTE, REPORT
+        # фазы (15, порядок — `runner.PHASES`): NORMALIZE, LINT, PLAN, G1, DISCOVERY,
+        #       G2, REGISTRY, INHERITANCE, CORPUS, EVALUATE, REVIEW, G3, COMPUTE, G4, REPORT
 ```
 
-**Персистентность состояния.** Каждая фаза пишет `run.phase_state` и частичные результаты.
+Гейты — **отдельные фазы** (`g1`/`g2`/`g3`/`g4`, `GATE_PHASES`), а не пометки на
+соседних: `g1` стоит после `plan`, `g2` — после `discovery`, `g3` — между `review` и
+`compute`, `g4` — между `compute` и `report`. Поэтому «остановился на g1» — это позиция в
+той же последовательности, что и остальные фазы, и resume с неё работает так же.
+
+**Персистентность состояния.** Каждая фаза пишет состояние в `runs.state` (карта
+`phase_state`) и частичные результаты.
 Прерывание не теряет прогресс (важно: краул и эмбеддинги дороги). Повторный запуск продолжает
 с фазы после последней завершённой (resume), если изменились только входы non-pinned.
 
 **Идемпотентность.** Фазы Ш3/Ш4/Ш6 перезаписывают ячейки по ключу `(run_id, product_id, param_id)`
-через upsert; Ш5 — иммутабельная контент-адресуемая сборка (новая `index_build_id` при любом
-изменении входов **или содержимого** батча; P2).
+через upsert; Ш5 — иммутабельная контент-адресуемая сборка (новая `partition_build_id` при
+изменении входов партиции **или её содержимого**, новая `cb_`-композиция при изменении состава
+или дайджеста члена; P2, `09 §8.1`).
 Evidence пишется по **детерминированному** `evidence_id = H(run_id, product_id, param_id,
 source_id, source_kind, seq)` (S8) — resume не порождает дублей.
 
@@ -44,18 +61,60 @@ source_id, source_kind, seq)` (S8) — resume не порождает дубле
 
 ### A.2. Гейты (`pipeline/gates.py`)
 
-| Гейт | Вход | Решение | Хранение |
-|---|---|---|---|
-| G1 | план (когорта, роли, перенормировка, объём) | accept / edit / abort | `runs.state='g1_approved'` + `cohort.yaml` заморожен |
-| G2 | матрица роль×продукт (`relationship_evidence`) | approve / reject per satellite | паспорта `state=approved` |
-| G3 | strict-ревью (⚠️/❌/❓/failed/Кр/аномалии) + preliminary-стол | set-status / promote / fix-evidence / reject | ячейки, `reviewed_by` |
-| G4 | ScoreBundle + Coverage + Comparability | publish / hold | `reports/` |
+**Два типа гейтов, один механизм.**
 
-**GateDecision** — доменный объект: `target` (что подтверждается), `actor` (человек),
-`ts`, `notes`. Гейты **никогда автоматические** (I6/I7, N/A человеком). Оркестратор не «проходит»
-гейт сам — только регистрирует решение, поданное через CLI. Каждое решение записывается в
-**`gate_decisions`** (S9) через `GateStore`; гейт не считается пройденным без строки в
-`gate_decisions` (носитель `reviewed_by`).
+| Гейт | Вход (предмет решения) | Кто решает | Хранение |
+|---|---|---|---|
+| G1 | план (когорта, роли, перенормировка, объём) | **внутренняя аттестация**: человек в coHound | строка `gate_decisions` (рабочий путь) + `profile_attestation` профиля (durable, `state/{package}/state.db`; design-only — нет писателя) |
+| G2 | матрица роль×продукт (`relationship_evidence`) | **внутренняя аттестация**: человек в coHound | строка `gate_decisions` + `Satellite.state=approved` в паспорте |
+| G3 | strict-ревью (⚠️/❌/❓/failed/Кр/аномалии) + preliminary-стол | **точка интеграции**: внешняя система ревью | строка `gate_decisions` (`source=external`) + `reviewed_by` |
+| G4 | ScoreBundle + Coverage + Comparability | **точка интеграции**: внешняя система публикации | строка `gate_decisions` (`source=external`) + `reports/` |
+
+**`GateDecision` — доменный объект** (`domain/models.py`): `decision_id`, `run_id`,
+`gate`, `target` (что подтверждается), `actor` (человек или система), `decided_at`,
+`notes`, и интеграционная часть — `subject_digest` (отпечаток предмета), `source`
+(`internal|external`), `external_ref` (идентификатор решения во внешней системе),
+`verdict` (`approved|rejected`). Вид решения в свободном виде («accept/edit/abort»,
+«publish/hold») отдельным полем **не** выражается — он живёт в `notes`; машиночитаемы
+только `verdict` и привязка к предмету. Гейты **никогда автоматические** (I6/I7, N/A
+человеком). Оркестратор не «проходит» гейт сам — только регистрирует решение, поданное
+через CLI (`hound gate`). Каждое решение записывается в **`gate_decisions`** (S9) через
+`GateStore`; гейт не считается пройденным без строки в `gate_decisions`, **привязанной к
+текущему предмету** (носитель `reviewed_by`).
+
+**Привязка к предмету (`subject_digest`).** Отпечаток того, о чём решали: профиль для
+G1/G2, очередь ревью для G3, Coverage/Capability/артефакты для G4. Устаревшее одобрение
+(предмет изменился) гейт **не** проходит, и сообщение называет изменившийся компонент
+(`describe_subject_diff`); явный `verdict='rejected'` блокирует с отдельным сообщением
+(кто отказал и почему) — молчание внешней системы не выдаётся ни за отказ, ни за
+одобрение. Решения **без** отпечатка (legacy-строки) проходят только при сверке без
+привязки — новый код обязан привязывать.
+
+**G1/G2 — аттестация профиля (объявлена, производителя в прогоне нет).** Профиль
+пакета-якоря квази-константен (2–5 правок в год при еженедельных прогонах), поэтому
+задуман второй путь прохождения: человек аттестует **содержимое** профиля, durable-строка
+живёт в `profile_attestation` (`state/{package}/state.db`, `STATE_SCHEMA_VERSION = "4"`), и
+прогон проходит G1/G2, пока профиль совпадает с аттестованным. Проверка **подключена**
+(`make_profile_gate` → `_profile_gate_resolver` в CLI, `runner._gate_phase` её спрашивает),
+но **писателя в прогоне нет**: строку `profile_attestation` сегодня пишут только тесты, а
+CLI-команды аттестации нет — это отдельная полоса. То есть as-built рабочий путь один —
+per-run строка в `gate_decisions` (аудит-след и override); аттестация профиля —
+design-only, и описывать её как работающий механизм нельзя. Гейт per-run: новый `run_id`
+не наследует решение прошлого прогона.
+
+**G3/G4 — точки интеграции.** coHound не решает ревью и публикацию, а **получает**
+решение и записывает его. На блоке пишется `runs/{run_id}/gates/{gate}-request.json` —
+детерминированный предмет (без меток времени) + `subject_digest`, который внешняя система
+обязана вернуть в решении. `hound gate` берёт `--subject-digest` из request-файла, если он
+не задан явно; `--source external` требует `--external-ref` и `--notes`.
+
+**Делегирование (`run.yaml: gates.{g3,g4}: external|waived`, дефолт `external`).**
+`waived` → фаза `skipped` с `skip_reason=gate_delegated_external`, waiver-строка в
+`gate_decisions` (`source=external`, `external_ref='waiver:…'`) и `gate_waivers` в
+манифесте прогона (манифест — строка `cohound.db`; файл `run_manifest.yaml` выгружает
+`hound report`). Невидимый waiver запрещён; waiver-строки гейт не проходят (это запись
+делегирования, а не одобрение). Политика гейтов — **процесс**, а не условие измерения,
+поэтому в `EXECUTION_CONTRACT_FIELDS` её нет.
 
 ### A.3. Псевдокод прогона
 
@@ -95,14 +154,14 @@ products × doc_domains
   Pass A (ingest):
     → resolve_fetch_plan(url, domain_profiles, explicit)  # pipeline: FetchPlan (fetch/extract/strategy/wait_for/rate_limit)
     → CrawlerPort.fetch(url, plan)             # сырые байты → corpus_raw/{product}/{hash}.bin
-    → ExtractorPort.extract(page, plan.extract)  # auto | html (trafilatura) | document (docling)
+    → ExtractorPort.extract(page, plan.extract)  # auto | html (trafilatura) | text/md | epub | document (docling)
     → dedup(content_hash)                      # повтор перепечаток не индексируется
     → ChunkerPort.chunk(doc)                   # heading_path, context_prefix
     ── corpus_docs персистятся (retention); build_id чанков ещё None
-  финализация index_build_id: декларированные входы + content_token всех партиций
+  финализация partition_build_id на продукт + composition_id по составу (09 §8.1)
   Pass B (index):
     → EmbedderPort.embed(chunks)               # батч, локальная модель
-    → IndexBuilderPort.build(chunks, vectors, meta) -> build_id
+    → IndexBuilderPort.build(chunks, vectors, meta) -> partition_build_id
     → IndexBuilderPort.commit()                # .npy-шарды + tantivy (атомарно)
     → corpus_chunks + index_manifest (одна запись на продукт-партицию)
 ```
@@ -110,11 +169,101 @@ products × doc_domains
 `pipeline` **не работает с файлами индекса напрямую**: за запись `.npy`-шардов и tantivy отвечает
 `IndexBuilderPort`, за эмбеддинги — `EmbedderPort` (K3).
 
-**Путь краула (§3.2).** За `CrawlerPort` стоят два адаптера: `crawl_scrapy.py` (Scrapy+playwright)
-и `crawl_browser.py` (`BrowserCrawler` — прямой Playwright/CDP, honest/hybrid); выбор — сменой
-адаптера (сам порт не меняется). **Единственный владелец politeness-пейсинга — `corpus`**: перед
-каждым **живым** фетчем он вызывает `RateLimiter.wait(host, plan.rate_limit)` (адаптерный
-`rate_limiter` — опц. хук для прямого/DMZ-использования, по умолчанию `None`, двойного сна нет).
+**Путь краула (§3.2).** За `CrawlerPort` стоят **три** адаптера, выбор — сменой адаптера
+(сам порт не меняется):
+
+| адаптер | что | роль |
+|---|---|---|
+| `crawl_http.py` (`HttpCrawler`) | `httpx` + content-addressed кэш, условный GET (`etag`/`last_modified` → `304`) | **дефолт для HTTP-доменов**; `supports_browser = False` — `fetch: browser` честно падает, а не подменяется на HTTP |
+| `crawl_scrapy.py` (`ScrapyCrawler`) | Scrapy + scrapy-playwright | SPA/JS-страницы, honest/hybrid |
+| `crawl_browser.py` (`BrowserCrawler`) | прямой Playwright/CDP | honest/hybrid без Scrapy |
+
+Отдельный путь — **источники-каталоги** (`feed`/`channel`) через `PollPort`
+(`adapters/feed_poller.py`, см. ниже): там `CrawlerPort` добывает только документ каталога,
+а записи разворачиваются в обычные URL. **Единственный владелец politeness-пейсинга —
+`corpus`**: перед каждым **живым** фетчем он вызывает `RateLimiter.wait(host,
+plan.rate_limit)` (адаптерный `rate_limiter` — опц. хук для прямого/DMZ-использования, по
+умолчанию `None`, двойного сна нет).
+
+#### Операционные оси краула
+
+Конкурентность краула — **две независимые оси**, и они не складываются в «число потоков
+прогона»:
+
+| ось (`CrawlLimits`) | что регулирует | где создаётся | масштаб |
+|---|---|---|---|
+| `max_workers` | **сетевой** fetch-пул (`httpx`) | внутри `_drain_root` (`corpus.py:5888-5900`), `None`/`1` ⇒ пула нет | **на seed-root**, не на прогон |
+| `extract_workers` | **экстракция** (CPU: docling/trafilatura) | фазовый пул по ключу `(DocumentLevel, extract_window)` (`corpus.py:5126-5175`) | один на прогон, переиспользуется всеми корнями/продуктами |
+| `extract_max_tasks_per_child` | рециклинг воркер-процесса после N заданий | тот же процессный пул | на воркер |
+| `document_level` | `off` / `text` / `layout` / `layout_tables` / `full` | резолвится **на seed-root** (один корень = один уровень) | на корень |
+| `robots` | эффективная egress-политика `robots.txt` | вычисляется ядром **на корень** (явная ось переопределяет автодетект) | на корень |
+
+Следствия, которые легко проглядеть:
+
+- **Конкурентность per-root, а не per-run.** Сетевой пул создаётся и закрывается внутри
+  дренажа одного корня; два корня не делят пул и не дают `2 × max_workers` одновременно
+  (корни обрабатываются последовательно).
+- **Пул экстракции фазовый**, а не корневой: он один на прогон, поэтому `forkserver` и
+  веса конвертера платятся один раз, а не на каждый корень. Окно упреждения — та же ось
+  `extract_workers`; `None`/`1` ⇒ экстракция inline (байт-в-байт прежний путь).
+- **`extract_max_tasks_per_child` работает только на процессном пуле** (`local`).
+  Потоковый пул `split` воркеров не пересоздаёт — ось игнорируется **видимо** (запись в
+  `errors`), а не тихо. При её наличии экстракция идёт пулом даже при `extract_workers == 1`
+  (окно = 1).
+- **Браузерный фетч в пул не идёт никогда** — он inline на главном потоке (адаптеры с
+  `supports_browser`), поэтому `max_workers` его не параллелит.
+- **`document_level`** применяется только к документным форматам (PDF/Office); HTML не
+  затрагивается ни при каком значении. `off` отсекает суффикс-детектируемые документы до
+  фетча (видимая запись `document_skips`), остальные — по `Content-Type` после фетча.
+
+Оси из таблицы входят в `CrawlLimits.as_dict()` → `crawl_config_digest` →
+`EXECUTION_CONTRACT_FIELDS`, то есть их смена даёт **новый `run_id`**: прогон помнит, каким
+бюджетом и на каком уровне добыт корпус. Исключение — `extract_max_tasks_per_child`: он
+попадает в дайджест только при явном задании (прогон без оси не меняет дайджест; обратная
+совместимость §13). Класс diff-причины у всех этих осей один — **`execution_change`**
+(меняются условия исполнения, правило измерения — нет), но последствия разной глубины:
+
+- оси конкурентности и лимитов (`max_workers`, `extract_workers`,
+  `extract_max_tasks_per_child`, `max_depth`/`max_documents`/`exclude_*`) меняют только
+  бюджет обхода: та же сборка получится из того же корпуса;
+- `robots` (D-5) решает, **какие документы вообще допущены** в корпус, поэтому входит в
+  `crawl_config_digest` всегда (как `max_depth`), а не только когда задан явно;
+- `document_level` тоже входит в дайджест **безусловно** (дефолт `full` присутствует
+  всегда), а дополнительно кодируется в наблюдаемой версии экстрактора
+  (`extract_document.py:393` — `docling-doc-3:{level}`): он меняет извлечённый текст
+  (замер: `layout_tables → text` дал 154 678 → 138 598 символов) и влечёт новую
+  `partition_build_id`. Класс от этого не меняется — идентичность прогона разошлась уже на
+  дайджесте; новая сборка лишь следствие.
+
+Опциональные оси (`extract_max_tasks_per_child`, `revalidate_max_documents`,
+`max_response_bytes`, `archive_*`) включаются в дайджест **только когда заданы явно** —
+это осознанная обратная совместимость: прогон без них не меняет дайджест, а с ними —
+честно меняет.
+
+#### Scope краула: только объявленные хосты
+
+URL ставится в очередь, если он (1) проходит SSRF-валидацию, (2) принадлежит
+**объявленному** хосту, (3) укладывается в path-prefix корня по границе сегмента, (4) не в
+блэклисте. SSRF-проверка — не проверка scope, это разные предикаты.
+
+- `Frontier.host_in_scope` (`crawl_frontier.py:682-706`): хост корня — всегда, `www.`-
+  вариант эквивалентен базовому (`normalize_scope_host`); поддомен — **только если
+  объявлен** (`scope_hosts`: seed-корень продукта или ключ `domain_profiles.yaml`); чужой
+  хост и необъявленный поддомен — вне scope.
+- Отказ **видим**: `out_of_scope_subdomains` (точный счётчик по хостам + ограниченные
+  примеры) и `accepted_foreign_hosts` (сколько бюджета корня ушло на объявленный чужой
+  хост).
+- Хосты, объявленные **собственным** seed-корнем продукта, в `scope_hosts` предка не
+  передаются: у такого хоста свой корень и свой бюджет.
+- Терминальный артефакт (документ/контейнер) — исключение **только** из path-prefix (он не
+  продолжает навигацию); host-scope, SSRF и блэклист остаются обязательными.
+
+> **Не путать два предиката.** `fetch_plan._host_matches` (`fetch_plan.py:62-74`) — это
+> семантика **профиля**: поддомен **наследует оси** родительского ключа
+> (`fetch`/`extract`/лимиты). Это верно и нужно. Но наследование осей **не** даёт права
+> тратить бюджет корня — за это отвечает `host_in_scope`. Слияние двух предикатов в один и
+> есть дефект, из-за которого поддомен без объявления затягивался в обход корня (замер:
+> `edu.postgrespro.ru` — 563 элемента из 682).
 
 **Граница доверенных зон (07).** В профиле `split` шаги `CrawlerPort.fetch` и `ExtractorPort.extract`
 исполняются **в DMZ** (`edge/`), а ядро вызывает их через `ContentGateway` (remote-прокси). Сырые
@@ -130,8 +279,10 @@ index`. Это делает DMZ-шов физической границей **I
 (`crawl_sessions`) и per-URL элементами (`crawl_session_items`, `PK (session_id, product_id, url)`,
 `CrawlItemStatus`): `pending` → `running` → `fetched` (байты сохранены, retention) / `cancelled`;
 сбой краула → `failed`/`source_unavailable`, сбой извлечения → `failed`/`parser_failed` с
-сохранённым `raw_path`. Статус сеанса `CrawlSessionStatus`: `completed` при отсутствии
-failed/cancelled, иначе `partial`. При наличии `store` и `run_id` Ш5 перед фетчем читает
+сохранённым `raw_path`.
+**Статус сеанса `CrawlSessionStatus`** — `created`, `running`, `paused`, `cancelled`,
+`completed`, `partial`, `failed`; терминальные — `completed|partial|cancelled|failed`.
+`completed` — при отсутствии failed/cancelled, иначе `partial`. При наличии `store` и `run_id` Ш5 перед фетчем читает
 durable-элементы сеанса и **не фетчит повторно** URL, у которого уже есть retained-байты:
 `RawPage` реконструируется из `corpus_raw` (I19: raw — источник), затем идёт ре-экстракция;
 recovery-on-open переводит «зависшие» `running` обратно в `pending`. Источник краула (движок/оси)
@@ -161,13 +312,86 @@ recovery-on-open переводит «зависшие» `running` обратн�
 развёртка каталогов исполняется **отдельной волной** с собственным `idempotency_key`: волна 1 —
 top-level URL, затем опрос каталогов, волна 2 — записи (`_run_executor_waves`, `work_by_product`).
 
-**Иммутабельность (контент-адресуемая, P2).** `index_build_id` = hash(schema-версия формулы +
-пакет корпуса + params + `snapshot_date` + `chunker_version` + `embed_model_id` +
-`extractor_version` + `lexical_engine_version` + `vector_store` + content-token). content-token —
-отпечаток содержимого **всех** продукт-партиций (sorted `(chunk_id, content_hash)`), поэтому
-разный контент при тех же декларированных входах даёт разные id (коллизия
-same-id/different-content устранена). Два прохода: ingest → финализация id → index.
-`retrieval_*` в id **не** входят. Любое изменение → новая сборка; старые не удаляются (§13).
+#### Контейнеры: спуск
+
+Заявленный контейнер (`zip`/`7z`/`rar`, ось
+`crawl.attachment_formats`) — не терминальный документ, а источник членов. Спуск живёт в
+`pipeline/archive_descent.py` (`ArchiveDescentWalker`) и `pipeline/artifact_probe.py`
+(классификация артефакта и листинг **по индексу**, без чтения тел); порт —
+`ports/container.py` (`list_members`/`open_member`, стримящий итератор), адаптеры —
+`container_{zip,7z,rar,any}`. Полный контракт — `09 §6.7` и §6.7.1; здесь только то, что
+определяет поведение Ш5:
+
+- **Потолка глубины нет** — конечность дают два независимых механизма: цикл по хешу
+  содержимого (`archive_cycle`: архив, содержащий копию себя, не разворачивается) и
+  **кумулятивный бюджет корня** `archive_max_total_uncompressed_bytes` (сумма фактически
+  прочитанных байтов по всем уровням; исчерпание — видимый
+  `ArchiveDescentStatus.BUDGET_EXHAUSTED`, а не тихое завершение). Оси `archive_max_*`
+  ограничивают **один** контейнер.
+- **Наблюдаемость**: `corpus_members` (PK `(archive_content_hash, member_path)`, исход
+  члена в `doc_id`/`skip_reason`) и `archive_observations` (прогноз **до** извлечения +
+  исход, `stopped_reason`/`cycle_stops`/`bytes_written`). Запись есть для **каждого**
+  контейнера, включая пустой и нечитаемый: «внутри нет ингестируемого» — это наблюдение,
+  а не отсутствие данных.
+- **Члены извлекаются через фазовый пул экстракции**, с окном упреждения
+  `K = extract_window` и **строгой FIFO-доводкой** (`corpus.py:5356-5460`,
+  `ArchiveDescentWalker(defer_member=…, window=…)`). Это не оптимизация порядка, а условие
+  корректности: `_content_digest` сборки склеивает чанки **в порядке вставки**, а
+  `partition_build_id` от порядка **не** зависит. Коммит в порядке завершения дал бы тот же
+  build id при другом digest → `ImmutableBuildError` → молча незаписанные
+  `corpus_chunks`/`index_manifest`. Отсюда правило: любая запись в видимые списки
+  (`errors`, `members`, `skipped`) и любой вложенный спуск начинаются только на пустом
+  окне. При `K = 1` и без пула (`split`, `defer_extract=False`) путь тождествен прежнему
+  inline — наблюдаемые артефакты совпадают байт-в-байт.
+- **Байты членов не ретейнятся**: архив — сырьё (I19), член — производный вид; член
+  стримится в один временный файл и удаляется после доводки, а в БД остаётся идентичность
+  `(archive_content_hash, normalized_member_path)`.
+- **Покрытие — честная граница**: нечитаемый контейнер (индекс не прочитан) помечается
+  `parser_failed` (`complete=False`); читаемый контейнер с нулём ингестнутых членов остаётся
+  `fetched`. Отсутствие читателя — тоже видимый пропуск (`container_reader_unavailable`,
+  `backend_unavailable`), а не «тихо пусто»: `zip` читается stdlib, `7z`/`rar` требуют extra
+  `extract-archives`.
+
+#### Наблюдаемость продукта
+
+Продукт-цикл строго последователен, и один продукт может идти часами, поэтому «продукт ещё
+в очереди» и «продукт потерян» обязаны быть различимы:
+
+- `product_start` — до первого корня (`roots`/`seeds_declared`); `product_end` — после
+  доводки хвостов (`roots`/`seeds_enqueued`/`session_items`/`fetched`/`failed`/`docs`/
+  `elapsed_seconds`/`reason`), пишется **и при нулевом выходе** — именно этот случай раньше
+  был немым; `product_skipped` — продукт плана, вообще не попавший в цикл
+  (`--only-product`/`--only-failed`/пустой seed-набор).
+- `log_entries` фазы никуда не сериализуется, поэтому CLI дублирует границы продуктов
+  **строками** в `results[].notes` (`_product_notes`): сколько корней/seed'ов/элементов/
+  документов и сколько это заняло. Это не `errors`: продукт с бюджетом `N` и нулём отказов —
+  норма.
+- `--follow`/`--watch` печатают живьём: агрегат сеанса (`crawl_progress`) и
+  **продукт-скоуп** (`crawl_product`, событие `crawl_product` в `--json`) — агрегат не
+  отличает «ещё в очереди» от «потерян».
+- **Нулевой источник называет причину**: `corpus_coverage.reason` — `no_seeds`,
+  `all_seeds_rejected` или `no_urls_entry`; продукт получает `expected_sources=0`,
+  `complete=False`, ячейки идут в `failed` (не `❌`), а не тихий `ok`. Такие продукты
+  попадают в `PhaseResult.pending` уже на выходе Ш5 — до дорогой Ш6.
+
+**Иммутабельность: идентичность сборки двухуровневая (P2, `09 §8.1-8.2`).** Один
+`index_build_id` больше не описывает всё: есть **партиция** и **композиция**.
+
+- `partition_build_id` = `"pb_" + short_hash(_PARTITION_SCHEMA, package_id, product_id,
+  chunker_version, embed_model_id, extractor_version, lexical_engine_version, vector_store,
+  product_content_token)` (`_derive_partition_build_id`, `corpus.py:1450-1500`).
+  `product_content_token` — отпечаток содержимого партиции, sorted `(chunk_id,
+  content_hash)`: порядко-независим и чувствителен к любому изменению контента.
+  **`params_token` (каталог/фокус) и `snapshot_date` намеренно исключены** — каталог и фокус
+  не меняют чанки/векторы, а снимок это провенанс, не содержимое. Именно это позволяет
+  **переиспользовать партицию** при смене фокуса/каталога. `retrieval_*` тоже не входят.
+- `index_build_id` = `"cb_" + short_hash(schema, package_id, sorted triples)` —
+  композиция над `(product_id, partition_build_id, content_digest)` (`composition.py:93-119`).
+  Сортировка делает id независимым от порядка членов; `content_digest` входит, поэтому
+  коллизия same-id/different-content закрыта на уровне композиции. `index_build_id` — тот
+  id, который читают ячейки и `hound diff`; «сборка» в отчётах — это он, а не `pb_`.
+- Два прохода: ingest → финализация id → index. Любое изменение входов **или содержимого**
+  → новая сборка; старые не удаляются (§13).
 
 **SERP как вход Ш5.** Результаты search-адаптера (Ш5/SERP-фаза) проходят тот же путь:
 `SearchResult.raw_bytes → corpus_raw → extract → chunk → hash → index`. Это и есть I19:
@@ -176,12 +400,18 @@ same-id/different-content устранена). Два прохода: ingest →
 ### B.2. Индексный контур (продукт-партиции, I17)
 
 ```
-index_store/{package}/{build}/
+index_store/{package}/{partition_build_id}/     # pb_… — одна продукт-партиция
   {product_id}/
     vectors.fp16.npy      # shape (N, dim)
     chunk_ids.jsonl       # строка i ↔ chunk_id
     manifest.json         # embed_model_id, dim, chunker_version, stats
+index_store/{package}/_compositions/{composition_id}.json   # cb_… — манифест композиции
 ```
+
+`{partition_build_id}` в раскладке — партиция продукта, а не прежний единый build id.
+Служебный каталог `_compositions/` (`COMPOSITIONS_DIR`, `util/index_layout.py`) —
+**не сборка**: его нельзя перечислять как build и нельзя удалять GC (иначе пропадут
+манифесты композиций, на которые ссылаются ячейки).
 
 Поиск — brute-force cosine по шардам переданных `product_ids` (продукт + его сателлиты).
 Оценка продукта **не видит** чужие партиции (I17). При росте — триггеры §14 (квантизация, Qdrant).
@@ -310,16 +540,17 @@ llm_scenarios:
 
 **Источник `evaluator.model_id` — объявленный вход, не env (§7.4/I21).** `llm_scenarios` входят в
 `execution_contract_digest` (→ `run_id`), поэтому модель оценщика резолвится только из
-объявленных входов: `--llm-model` > `deploy.llm.<slot>.model_id` > дефолт модуля
-(`decoder` — из слота). Env `COHOUND_LLM_MODEL`/`COHOUND_LLM_DECODER` действуют **только** на
+объявленных входов: `--llm-model` > `deploy.llm.<slot>.model_id` > **ошибка** (`llm`,
+`EXIT_USAGE`); дефолтной модели нет. `decoder` — из аргумента/слота > дефолт модуля
+(`EVALUATOR_DEFAULT_DECODER`): у него дефолт наблюдаем и объявлен, у модели — нет.
+Env `COHOUND_LLM_MODEL`/`COHOUND_LLM_DECODER` действуют **только** на
 LLM-разведку (`build_discovery_llm`): её выход — кандидаты/гипотезы (G2, human-ревью), а не
 evidence, поэтому её модель — операционная настройка. Асимметрия осознанная: смешать
 «кандидатов» и «доказательства» в одну политику значило бы позволить окружению переписывать
 провенанс вердиктов. Операционные поля оценщика (endpoint/ключ/таймаут) по-прежнему берутся из
 env; endpoint из env оставляет `llm_scenarios` пустой (env не входит в `run_id`) и это явно
 сообщается в `logs/wiring.jsonl` + `warnings` payload — «оценщик вне execution contract».
-Активный слот без объявленного `model_id` — ошибка (`llm`, `EXIT_USAGE`), не тихий дефолт:
-молчаливая подстановка модели дала бы ложную провенанс-запись в манифесте.
+Молчаливая подстановка модели дала бы ложную провенанс-запись в манифесте.
 
 ---
 
@@ -409,7 +640,7 @@ package/catalog version, edition/jurisdiction. Нарушено → `cross-cycle
 | `preliminary_findings.xlsx` | `report.py` | кандидаты + validation_notes (маркер «не публикация») |
 | `nda_questions.csv` | `report.py` | все ❓ + `protocol_status` (`complete`/`incomplete`/`unknown`) и `i3_anomaly` (§5/I3) |
 | `diff.md` | `report.py` | изменённые статусы + evidence_id (запрещён через major) |
-| `run_manifest.yaml` | `runner.py` | все версии, модели, index_build, профиль+K, бюджет, scoring-политика, `ranking_epsilon`, `settings_provenance` |
+| `run_manifest.yaml` | фаза `report` (`build_manifest` → строка `runs` через `persist_manifest`); файл `runs/{run_id}/run_manifest.yaml` — из `write_reports` | все версии, модели, `index_build_id`/`partition_build_id`, профиль+K, бюджет, scoring-политика, `ranking_epsilon`, `settings_provenance`, `gate_waivers` |
 
 **Отчётный контур I3 (v2.1, §5).** `report.py` собирает `i3_anomalies` (`collect_i3_anomalies`):
 strict-`❓` без **полного** протокола исчерпания (`corpus`+`serp`+`registry`+`inheritance`). Это
