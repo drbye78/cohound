@@ -3963,7 +3963,26 @@ def _build_corpus(
 
         # P0: границы исполнения ДО retention/экстракции. Сначала размер (OVA/образ
         # должен стать payload_too_large, а не binary-sniff), затем бинарный не-документ.
-        cap = fetch_plan.max_response_bytes
+        #
+        # **Потолок класс-aware (P6b).** Терминальный артефакт (документ или заявленный
+        # контейнер) меряется ``max_artifact_bytes``, страница — ``max_response_bytes``.
+        # Без этого транспорт, поднявший свой потолок до artifact-уровня, всё равно
+        # умирал бы здесь на страничном: живой прогон 22.10 — 125 727 643-байтный zip
+        # приезжал целиком (scrapy не имеет staging-пути) и получал
+        # ``payload_too_large: … > лимита 20971520`` уже после успешной загрузки.
+        artifact = _is_terminal_artifact(
+            page.url or wu, page.content_type, desc.attachment_formats
+        )
+        artifact_cap = (
+            fetch_plan.max_stream_bytes
+            if fetch_plan.max_stream_bytes is not None
+            else desc.max_artifact_bytes
+        )
+        cap = (
+            artifact_cap
+            if artifact and artifact_cap is not None
+            else fetch_plan.max_response_bytes
+        )
         if cap is not None and len(page.content) > cap:
             reason = (
                 f"payload_too_large: {len(page.content)} байт > лимита {cap}"

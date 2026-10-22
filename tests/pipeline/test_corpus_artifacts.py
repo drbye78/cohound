@@ -641,3 +641,49 @@ def test_artifact_outside_path_prefix_is_visible_in_provenance(tmp_path: Path) -
         assert record["truncated"] is False
     finally:
         store.close()
+
+
+def test_buffered_artifact_is_not_cut_by_page_ceiling(tmp_path: Path) -> None:
+    """Артефакт **в памяти** (движок без staging) меряется artifact-потолком, не страничным.
+
+    Регрессия живого прогона 22.10: scrapy не имеет staging-пути и привозит тело целиком.
+    Транспортный потолок уже был поднят до artifact-уровня, но пост-фетч-проверка ядра
+    всё равно сравнивала ``len(page.content)`` с ``max_response_bytes`` — и 125 727 643
+    байтный zip получал ``payload_too_large: … > лимита 20971520`` **после** успешной
+    загрузки. Класс-aware потолок обязан работать независимо от того, приехало тело
+    файлом или буфером: страница остаётся под страничным потолком.
+    """
+    big = ZIP_MAGIC + bytes(3 * MIB)
+    page_url = "https://docs.test/files/page.html"
+    # Страница того же порядка размера: класс решает потолок, а не байты.
+    big_page = b"<html><body>" + b"x" * (3 * MIB) + b"</body></html>"
+    crawler = _BufferedCrawler(
+        {ZIP_URL: big, page_url: big_page},
+        content_types={ZIP_URL: "application/zip", page_url: "text/html"},
+    )
+    store = SqliteStore(":memory:")
+    try:
+        _make_run(store)
+        result = _build(
+            tmp_path,
+            crawler=crawler,
+            urls=[ZIP_URL, page_url],
+            store=store,
+            crawl_defaults=CrawlRunConfig(
+                max_response_bytes=1 * MIB,
+                max_artifact_bytes=8 * MIB,
+            ),
+        )
+
+        items = _items(store)
+        # Артефакт в памяти принят: потолок — artifact-класс, а не страничный.
+        assert items[ZIP_URL].status is CrawlItemStatus.FETCHED
+        assert items[ZIP_URL].content_hash == content_hash(big)
+        assert not any(
+            "payload_too_large" in e and ZIP_URL in e for e in result.errors
+        ), "артефакт не должен упираться в страничный потолок"
+        # Страница того же размера по-прежнему усечена страничным потолком.
+        assert items[page_url].status is CrawlItemStatus.FAILED
+        assert items[page_url].error_kind == FailureKind.PAYLOAD_TOO_LARGE.value
+    finally:
+        store.close()
