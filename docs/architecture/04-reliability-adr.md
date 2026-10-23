@@ -118,6 +118,7 @@ write-site'ов у них пока нет, но словарь обязан их
 | `duration_by_phase` | производительность |
 | `crawl` | durable-сеанс краула: гистограмма `{status: count}` из `crawl_session_counts`; пусто, если сеанса нет |
 | `crawl_truncation` | политическое усечение (N4): `truncated`/`truncated_reason`/`truncated_products`/`pages_fetched`/`revalidation_fetched`/`effective_limits`; пусто, если не усечён |
+| `resources` | F0 (`11` §4): `phases[phase] = {peak_rss_mb, wall_s}` (`VmHWM` и время на конец фазы), `scheduling = {extract_workers, extract_max_tasks_per_child, source}` (`source`: `declared`\|`derived` — окно выведено из бюджета памяти), `chunks_per_doc = {family: {count, p50, p90, max}}`, `documents`/`chunks`, `workers_peak_rss_mb`, `budget` (бюджет, его источник, `MemAvailable`, резерв, пол родителя, `cpu_count`, таблица пиков docling). Пусто — ресурсы не измерялись (нейтрально: «не измеряли» ≠ «ноль»). В `run_id` не входит: это расписание и наблюдение, а не условие измерения |
 
 **Per-product события — не метрики, а заметки.** `product_start`/`product_end`/
 `product_skipped` живут в `PhaseResult.log_entries` фазы корпуса и доходят до оператора

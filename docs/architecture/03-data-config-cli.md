@@ -352,7 +352,8 @@ diff, ради которого делается инкрементальнос�
 
   | класс | оси | где ловится |
   |---|---|---|
-  | (а) `CrawlLimits` | `max_workers`, `extract_workers`, `max_depth`, `max_documents`, `exclude_paths`, `exclude_documents`, `document_level`, а также `extract_max_tasks_per_child`, `revalidate_max_documents`, `max_response_bytes`, `max_artifact_bytes`, `attachment_formats`, `archive_max_*`, `archive_descent` (последние — **только когда заданы явно**) | `crawl_config_digest` — по каждому site-key + `__default__`, т.е. **все слои** (app/run/per-site); плюс индивидуальные `crawl_*` поля run-слоя. Класс — `execution_change` |
+  | (а) `CrawlLimits` | `max_workers`, `max_depth`, `max_documents`, `exclude_paths`, `exclude_documents`, `document_level`, а также `revalidate_max_documents`, `max_response_bytes`, `max_artifact_bytes`, `attachment_formats`, `archive_max_*`, `archive_descent` (последние — **только когда заданы явно**) | `crawl_config_digest` — по каждому site-key + `__default__`, т.е. **все слои** (app/run/per-site); плюс индивидуальные `crawl_*` поля run-слоя. Класс — `execution_change` |
+  | (а′) расписание экстракции: `extract_workers`, `extract_max_tasks_per_child` | **не** входят в контракт (F0, `11` §2.10): параллелизм извлечения не может изменить состав корпуса — документ уже добыт и ретенирован, чанки — детерминированная функция его текста и уровня. В отличие от `max_workers`, конкурентность fetch взаимодействует с усечением `max_documents` и потому **остаётся** осью контракта | наблюдённый факт: `metrics.json.resources.scheduling` (`source`: `declared`\|`derived`). Резолвнутое значение публикуется, но `run_id` не меняет — иначе выведенное из бюджета хоста окно делало бы `run_id` функцией машины |
   | (б) `crawl.strategy` / `crawl.rate_limit` | только run-слой (`run.yaml:crawl`); per-site `strategy` из `domain_profiles.yaml` идентичность **не** меняет | отдельные поля контракта `crawl_strategy`/`crawl_rate_limit` (`core/cli/execution_axes.py`); класс — `execution_change` |
   | (в) `crawl.robots` | включение/выключение `robots.txt` — **app-слой** (`deploy.yaml:crawl.robots`; в `run.yaml:crawl` поля нет) | входит в `crawl_config_digest` **всегда** (как `max_depth`), класс — `execution_change` (D-5): гейт `robots.txt` решает, какие документы вообще допущены, т.е. это условие измерения, а не рычаг пропускной способности. Пробел закрыт: до правки D-5 ось меняла поведение, но не входила ни в один дайджест |
   | (г) `crawl.user_agent`/`timeout_s`/`follow_redirects`/`crawl.browser.*` | ни идентичности, ни `diff` | — (операционные данные транспорта) |
@@ -478,7 +479,10 @@ preliminary не совместим с capability_ranked — I13). `ranking_poli
 (P4) — пул **экстракции** (процессы на `local`, потоки на `split`): «в полёте» не более
 `W` экстракций, доводка строго FIFO; байты страниц через границу процессов не пиклятся —
 воркер перечитывает retained-`raw_path` (I19). Обе оси — `int | None`: `None`/`1` ⇒ пул
-не создаётся, исполнение inline (байт-в-байт сегодняшнее). `max_depth` дефолт `0` (только
+не создаётся, исполнение inline (байт-в-байт сегодняшнее). `extract_workers` не входит в
+`crawl_config_digest` (F0, `11` §2.10): расписание экстракции не меняет состав корпуса, а
+выведенное из бюджета хоста окно сделало бы `run_id` функцией машины; резолвнутое значение
+публикуется в `metrics.json.resources.scheduling`. `max_depth` дефолт `0` (только
 seeds); BFS-обход идёт и локальным путём, и через executor/split (A2/R2, с предохранителем
 раундов `round_budget` под executor). `max_documents=0` отвергается на загрузке (`>0`).
 Блэклисты — glob (`fnmatchcase`, case-sensitive): `exclude_paths` по пути URL (паттерн
@@ -525,14 +529,18 @@ false ❌ I2/I2b), а сеанс не рапортуется `COMPLETED`. `off` 
 Блэклисты (`exclude_documents`) **побеждают** `off` (проверяются раньше и по другому ключу —
 basename/path без знания content-type); «полная» экономия фетча — только блэклист/суффикс.
 
-**Память по уровням.** Пик = `W × footprint(level корня)` (`W` = `extract_workers`), где
-`footprint(full)` ≈ 2.0 GiB/процесс; у `text` ML-весов нет (заметно ниже), у `layout`/
-`layout_tables` — промежуточно (`full` ≈ 2.0 GiB peak, 2.6–7.5 с/стр). Пулы корней
+**Память по уровням.** Пик = `parent_floor + W × peak(level корня)` (`W` = `extract_workers`),
+где замеренные пики — `text` 855 MB, `layout` 1563, `layout_tables` 1953, `full` 3107,
+`parent_floor` ≈ 500 MB (`docs/reports/measurements/2026-10-23-docling-level-peaks.md`,
+константы — `core/pipeline/resources.py`). Если ось `extract_workers` **не объявлена** ни на
+одном слое, окно выводится как `min(floor((бюджет − parent_floor) / peak(level)), cpu_count)`,
+где бюджет — `COHOUND_MEM_BUDGET_MB` либо `MemAvailable − 512 MB`; нулевой результат — отказ
+прогона с названными числами (`EXIT_USAGE`), а не «возьмём один» (F0, `11` §3.3). Пулы корней
 **последовательны** (создаются лениво на корень и `shutdown` в `finally`), поэтому пик —
 **максимум** по корням, а **не** сумма: прогон с site A `full` и site B `off` не складывает
 память. `off`-корень docling не строит вовсе (0). Операторский escape hatch от «слишком
 медленного PDF» — понизить уровень per-site (`domain_profiles.yaml: document_level: layout`),
-взять `off` или уменьшить `extract_workers` — **без правки кода**.
+взять `off` или объявить `extract_workers` — **без правки кода**.
 
 **Развёртывание `split`.** Под `split` документную **экстракцию** исполняет **edge** своим
 конфигом; поэтому уровни **качества** извлечения (`text`/`layout`/`layout_tables`/`full`) в
@@ -907,6 +915,7 @@ edge** (composition root Z1, `07` §4/§7); ядро ходит за канди�
 | `COHOUND_LLM_DECODER` | механизм декодирования (`none`/`json_object`/`json_schema`) | опц. | `json_object` | **только** `wiring.build_discovery_llm`; оценщик берёт `decoder` из слота |
 | `COHOUND_LLM_TIMEOUT` | таймаут LLM-запроса, с (>0) | опц. | `120.0` | `wiring.build_discovery_llm`/`build_evaluator_llm` (операционный параметр хоста) |
 | `COHOUND_LLM_MAX_TOKENS` | максимум токенов ответа (>0) | опц. | `4096` | `wiring.build_discovery_llm` |
+| `COHOUND_MEM_BUDGET_MB` | явный бюджет памяти прогона для экстракции, MB (>0) | опц. | `MemAvailable − 512 MB` | `core/pipeline/resources.resolve_mem_budget_mb` через composition root (`wiring`); из бюджета выводится окно экстракции `floor((бюджет − 500) / пик уровня)`. **Не входит в `run_id`**: число воркеров — расписание, а не условие измерения (11 §2.10) |
 | `COHOUND_SCOUT_CRAWLER` | краулер `passport-scout`: `http`\|`scrapy`\|`browser` | опц. | `http` | `wiring.build_scout_crawler` |
 | `COHOUND_NO_REEXEC` | отключить автоперезапуск `hound.py` в проектной `.venv` | опц. | — | `hound.py` |
 | `COHOUND_REEXEC` | предохранитель от зацикливания перезапуска (ставит `hound.py`) | служебная | — | `hound.py` |
