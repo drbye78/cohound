@@ -43,6 +43,8 @@ B2_KEYS = {
     "duration_by_phase",
     "crawl",
     "crawl_truncation",
+    # F0: блок ресурсов присутствует **всегда** (нейтральный, если не измеряли).
+    "resources",
 }
 
 STAMP = "2026-10-09T00:00:00+00:00"
@@ -371,3 +373,89 @@ def test_observability_does_not_import_adapters_or_edge() -> None:
         name for name in imported if name.startswith(("core.adapters", "core.edge"))
     }
     assert not forbidden, f"observability не должен импортировать {forbidden}"
+
+
+# ---------------------------------------------------------------------------
+# F0: блок ``resources`` в metrics.json
+# ---------------------------------------------------------------------------
+
+def test_write_run_metrics_carries_corpus_resources_observation(
+    tmp_path: Path,
+) -> None:
+    """Наблюдение фазы корпуса доходит до ``metrics.json`` (F0, §4).
+
+    Проводка проверяется на уровне :func:`write_run_metrics` с **явным** ``resources``:
+    CLI собирает блок из трёх источников (пики фаз — наблюдаемость, наблюдение — фаза
+    корпуса, бюджет — composition root), и здесь фиксируется, что все три доезжают до
+    файла без переформулирования. Числа — объявленные, а не выдуманные: ``documents``/
+    ``chunks``/``scheduling.source``/``workers_peak_rss_mb`` обязаны совпасть.
+    """
+    from core.pipeline.resources import ResourcesObservation, build_resources_block
+
+    observation = ResourcesObservation(
+        chunks_per_doc={"html": {"count": 2, "p50": 3.0, "p90": 4.0, "max": 4.0}},
+        documents=2,
+        chunks=7,
+        extract_workers=2,
+        extract_max_tasks_per_child=10,
+        scheduling_source="derived",
+        workers_peak_rss_mb=1953.4,
+    )
+    block = build_resources_block(
+        phase_peaks={"corpus": 1200.0, "evaluate": 1300.25},
+        phase_durations={"corpus": 12.34, "evaluate": 1.0},
+        observation=observation,
+        budget={"mem_budget_mb": 4096, "source": "env"},
+    )
+    path = write_run_metrics(
+        run_id="run_y",
+        out_dir=tmp_path,
+        durations={"corpus": 12.34, "evaluate": 1.0},
+        resources=block,
+    )
+    data = json.loads(path.read_text(encoding="utf-8"))
+    resources = data["resources"]
+    # Пики/длительности фаз — в одном месте, с округлением до 1 знака.
+    assert resources["phases"]["corpus"] == {"peak_rss_mb": 1200.0, "wall_s": 12.3}
+    assert resources["phases"]["evaluate"]["peak_rss_mb"] == 1300.2  # 1300.25 → 1300.2
+    # Наблюдение фазы корпуса — как есть (расписание, чанки, пик воркера).
+    assert resources["scheduling"] == {
+        "extract_workers": 2,
+        "extract_max_tasks_per_child": 10,
+        "source": "derived",
+    }
+    assert resources["chunks_per_doc"] == {
+        "html": {"count": 2, "p50": 3.0, "p90": 4.0, "max": 4.0}
+    }
+    assert resources["documents"] == 2
+    assert resources["chunks"] == 7
+    assert resources["workers_peak_rss_mb"] == 1953.4
+    assert resources["budget"] == {"mem_budget_mb": 4096, "source": "env"}
+
+
+def test_write_run_metrics_resources_neutral_without_observation(
+    tmp_path: Path,
+) -> None:
+    """Без наблюдения фазы корпуса блок нейтрален, а не заполнен нулями (F0).
+
+    Прогон, остановившийся до ``corpus`` (гейт/``--until plan``), не имеет наблюдения:
+    ``documents=0`` и ``chunks=0`` означали бы «измерено: пусто», а ``workers_peak_rss_mb``
+    — «пула не было» (``None``). Разница принципиальна: нули выглядели бы фактом.
+    """
+    from core.pipeline.resources import build_resources_block
+
+    path = write_run_metrics(
+        run_id="run_y",
+        out_dir=tmp_path,
+        resources=build_resources_block(phase_peaks={"g1": 100.0}),
+    )
+    resources = json.loads(path.read_text(encoding="utf-8"))["resources"]
+    assert resources["chunks_per_doc"] == {}
+    assert resources["documents"] == 0
+    assert resources["workers_peak_rss_mb"] is None
+    assert resources["scheduling"] == {
+        "extract_workers": None,
+        "extract_max_tasks_per_child": None,
+        "source": "declared",
+    }
+    assert resources["phases"]["g1"] == {"peak_rss_mb": 100.0, "wall_s": None}

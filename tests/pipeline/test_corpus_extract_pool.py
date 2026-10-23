@@ -992,6 +992,9 @@ def test_extract_request_carries_no_bytes(tmp_path: Path) -> None:
         # кэша: воркер строит свой экземпляр (иначе счётчики были бы копией родителя).
         "cache_root",
         "cache_max_bytes",
+        # F0: каталог стока пика памяти воркера — тоже примитив (строка пути); сам пик в
+        # результат не едет (наблюдаемость не становится частью документа).
+        "rss_dir",
     }
     # Байты не пиклятся: у payload нет поля content/bytes (только путь к retained-файлу).
     assert "content" not in names and "bytes" not in names and "raw_bytes" not in names
@@ -1094,7 +1097,11 @@ def test_extract_workers_resolved_through_chain() -> None:
     inputs2 = SimpleNamespace(run=cfg2, package=None)
     changed = build_manifest(inputs=inputs2, plan=plan, created_at="2026-01-01T00:00:00Z")  # type: ignore[arg-type]
     assert changed.crawl_extract_workers == 4
-    assert changed.crawl_config_digest != base.crawl_config_digest
+    # F0/§2.10: параллелизм извлечения — **расписание**, а не условие измерения. Поэтому
+    # дайджест конфигурации краула от него не меняется (в отличие от ``max_workers``,
+    # конкурентности fetch, которая взаимодействует с усечением ``max_documents``).
+    # Поле манифеста при этом честно называет разрешённое значение.
+    assert changed.crawl_config_digest == base.crawl_config_digest
 
 
 # --------------------------------------------------------------------------- #
@@ -1162,7 +1169,10 @@ def test_extract_max_tasks_per_child_resolved_through_chain() -> None:
         created_at="2026-01-01T00:00:00Z",  # type: ignore[arg-type]
     )
     assert changed.crawl_extract_max_tasks_per_child == 25
-    assert changed.crawl_config_digest != base.crawl_config_digest
+    # F0/§2.10: рециклинг воркеров — тоже расписание экстракции, а не условие измерения,
+    # поэтому дайджест конфигурации краула от него не меняется. Поле манифеста значение
+    # называет; ``hound diff`` по-прежнему видит ось в ``EXECUTION_FIELDS``.
+    assert changed.crawl_config_digest == base.crawl_config_digest
 
 
 # --------------------------------------------------------------------------- #
@@ -1751,3 +1761,127 @@ def test_corpus_phase_has_no_trim_note_without_pool(tmp_path: Path) -> None:
         for entry in result.log_entries
         if isinstance(entry, str) and "malloc_trim" in entry
     ]
+
+# --------------------------------------------------------------------------- #
+# (10c) F0: пик воркера — файл-сток, а не результат документа; наблюдение фазы
+# --------------------------------------------------------------------------- #
+
+def _rss_writing_worker(request: _ExtractRequest) -> ExtractedDoc:
+    """Воркер-процесс: пишет свой пик в сток (``rss_dir``) и извлекает как прежде."""
+    from core.pipeline.corpus import _write_worker_peak_rss
+
+    try:
+        return _reconstruct_worker(request)
+    finally:
+        _write_worker_peak_rss(request.rss_dir)
+
+def test_worker_rss_sink_is_max_over_pid_files(tmp_path: Path) -> None:
+    """F0: сток — файл на ``pid``; максимум берётся по всем файлам (рециклинг воркеров).
+
+    Контракт ``_ExtractRequest → ExtractedDoc`` не меняется: пик не едет в документе,
+    поэтому проверяется сток, а не результат воркера.
+    """
+    from core.pipeline.corpus import _write_worker_peak_rss
+
+    workers = tmp_path / "workers"
+    _write_worker_peak_rss(str(workers))
+    files = sorted(workers.glob("*.rss"))
+    assert len(files) == 1, "воркер пишет ровно один файл — свой pid"
+    own_peak = float(files[0].read_text(encoding="utf-8").strip())
+    assert own_peak > 0
+
+    pool = ExtractionPool(
+        pool_factory=_recording_factory([]),
+        worker=_reconstruct_worker,
+        worker_rss_dir=str(workers),
+    )
+    assert pool.peak_worker_rss_mb() == pytest.approx(own_peak, abs=0.05)
+
+    # Другое поколение воркера (другой pid) «съело» больше — публикуется максимум.
+    (workers / "999999999.rss").write_text("4242.5\n", encoding="utf-8")
+    assert pool.peak_worker_rss_mb() == pytest.approx(4242.5)
+
+    # Битая запись не роняет метрику и не подменяет максимум.
+    (workers / "777777777.rss").write_text("not-a-number\n", encoding="utf-8")
+    assert pool.peak_worker_rss_mb() == pytest.approx(4242.5)
+
+    # Без каталога стока пик не выдумывается (thread-пул/inline/split).
+    no_sink = ExtractionPool(
+        pool_factory=_recording_factory([]), worker=_reconstruct_worker
+    )
+    assert no_sink.peak_worker_rss_mb() is None
+
+def test_corpus_phase_emits_resources_observation(tmp_path: Path) -> None:
+    """F0: фаза публикует чанки на документ, расписание и пик воркера — одним наблюдением."""
+    from core.pipeline.resources import ResourcesObservation
+
+    workers = tmp_path / "workers"
+    created: list[_FakePool] = []
+    pool = ExtractionPool(
+        pool_factory=_recording_factory(created),
+        worker=_rss_writing_worker,
+        worker_rss_dir=str(workers),
+    )
+    pages = {
+        ROOT: b"<html>" + b'<a href="/a">a</a>' + b"</html>",
+        "https://docs.test/a": b"<html>page a</html>",
+    }
+    result = _build(
+        tmp_path,
+        pages=pages,
+        crawl_defaults=CrawlRunConfig(max_depth=1, extract_workers=2),
+        extraction_pool=pool,
+    )
+
+    observations = [
+        entry for entry in result.log_entries if isinstance(entry, ResourcesObservation)
+    ]
+    assert len(observations) == 1, "наблюдение — одно на фазу, не на документ"
+    observation = observations[0]
+    build = _build_of(result)
+    assert observation.documents == len(build.docs)
+    assert observation.chunks == build.chunk_count
+    assert observation.chunks_per_doc["html"]["count"] == len(build.docs)
+    assert observation.extract_workers == 2
+    assert observation.scheduling_source == "declared"
+    # Пик воркера прочитан из стока (число процесса-воркера, не выдумка).
+    assert observation.workers_peak_rss_mb is not None
+    assert observation.workers_peak_rss_mb > 0
+
+def test_corpus_phase_observation_marks_derived_scheduling(tmp_path: Path) -> None:
+    """F0: окно, выведенное из бюджета, видно как ``derived`` (а не как воля оператора)."""
+    from core.domain.enums import DocumentLevel
+    from core.pipeline.resources import DOCLING_PEAK_MB, PARENT_FLOOR_MB, ResourcesObservation
+
+    level = DocumentLevel.TEXT
+    budget = PARENT_FLOOR_MB + 3 * DOCLING_PEAK_MB[level]
+    created: list[_FakePool] = []
+    pool = ExtractionPool(
+        pool_factory=_recording_factory(created), worker=_reconstruct_worker
+    )
+    result = build_corpus(
+        _plan(),
+        _Crawler({ROOT: b"<html>derived</html>"}),
+        _Extractor(),
+        _Chunker(),
+        None,
+        urls={"p1": [ROOT]},
+        raw_root=tmp_path,
+        run_id=RUN_ID,
+        crawl_app=CrawlConfig(document_level=level),
+        extraction_pool=pool,
+        mem_budget_mb=budget,
+        derive_extract_workers=True,
+    )
+
+    observation = next(
+        entry
+        for entry in result.log_entries
+        if isinstance(entry, ResourcesObservation)
+    )
+    assert observation.extract_workers == 3
+    assert observation.scheduling_source == "derived"
+    # Окно ушло в пул (резолв — тот же, что у фазы).
+    assert created and created[0].size == 3
+    # В наблюдаемость не попадает ни ``pid``, ни путь стока: только измеренные факты.
+    assert observation.workers_peak_rss_mb is None  # сток не задан у этого пула

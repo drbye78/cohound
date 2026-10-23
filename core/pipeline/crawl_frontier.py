@@ -76,6 +76,7 @@ from core.domain.models import (
     CrawlRunConfig,
 )
 from core.pipeline.fetch_plan import select_domain_profile
+from core.pipeline.resources import workers_from_budget
 from core.util.document_formats import (
     SUPPORTED_ARCHIVE_FORMATS,
     is_terminal_artifact_url,
@@ -132,10 +133,22 @@ class CrawlLimits:
     провенанс; ``max_workers`` управляет **сетевым** fetch-пулом, ``extract_workers`` (P4) —
     отдельной осью **экстракции** (CPU-параллелизм). Обе оси — ``int | None`` (``None``/``1``
     ⇒ пул не создаётся).
+
+    **Только ``max_workers`` — ось контракта (F0/§2.10).** ``extract_workers``/
+    ``extract_max_tasks_per_child`` резолвятся и публикуются (провенанс, манифест,
+    ``metrics.json.resources.scheduling``), но в :meth:`as_dict` — а значит и в
+    ``crawl_config_digest``/``run_id`` — **не** входят: параллелизм извлечения не может
+    изменить состав корпуса, тогда как конкурентность fetch взаимодействует с усечением
+    ``max_documents``. Иначе выведенное из бюджета хоста число воркеров делало бы ``run_id``
+    функцией машины (см. :meth:`as_dict`).
     """
 
     max_workers: int | None = None
     extract_workers: int | None = None
+    #: F0: ``True`` — ``extract_workers`` выведен из бюджета памяти
+    #: (:func:`core.pipeline.resources.workers_from_budget`), а не объявлен на слое
+    #: app/run/site. Наблюдаемость расписания: в дайджест не входит (это факт хоста).
+    extract_workers_derived: bool = False
     #: P4/OOM: рециклинг воркер-процессов локальной экстракции (``None`` — ось не задана).
     #: Значение резолвится той же цепочкой app < run < site, что и ``extract_workers``.
     extract_max_tasks_per_child: int | None = None
@@ -194,10 +207,28 @@ class CrawlLimits:
     def as_dict(self) -> dict[str, object]:
         """Канонический словарь для провенанса/манифеста (сортированно-стабильно).
 
-        Опциональные оси (рециклинг воркеров, потолок ревалидации) включаются **только
-        когда заданы**: ``None`` не добавляет ключ, поэтому дайджест
-        ``crawl_config_digest`` прогонов без этих осей не меняется (обратная
-        совместимость §13).
+        **Асимметрия осей параллелизма (F0/§2.10).** ``max_workers`` (конкурентность
+        **fetch**) входит в словарь всегда, ``extract_workers``/
+        ``extract_max_tasks_per_child`` (параллелизм **извлечения**) — не входят вовсе.
+        Причина не в удобстве, а в разной связи с составом корпуса:
+
+        * конкурентность fetch взаимодействует с усечением ``max_documents`` — сколько
+          страниц успело попасть в очередь до исчерпания бюджета, зависит от того, в
+          каком порядке и с какой параллельностью шёл обход. Меняя её, можно получить
+          **другой корпус**, то есть другое измерение;
+        * параллелизм извлечения состав корпуса изменить не может: документ уже добыт и
+          ретенирован, чанки — детерминированная функция его текста и уровня. Это
+          расписание, а не условие измерения.
+
+        Поэтому первое — ось контракта (``run_id``/``execution_change``), второе —
+        наблюдённый факт (``metrics.json.resources.scheduling``). Если бы выведенное из
+        бюджета число воркеров входило в дайджест, ``run_id`` стал бы функцией хоста:
+        та же ошибка, что env-модель у оценщика (§7.4) — идентичность прогона перестала
+        бы описывать то, что реально измерялось.
+
+        Опциональные оси (потолок ревалидации, артефакты) включаются **только когда
+        заданы**: ``None`` не добавляет ключ, поэтому дайджест ``crawl_config_digest``
+        прогонов без этих осей не меняется (обратная совместимость §13).
 
         ``robots`` — исключение: он попадает в словарь **всегда**, как ``max_depth``,
         потому что его дефолт — реальное поведение, а не отсутствующая ось. Гейт
@@ -208,7 +239,6 @@ class CrawlLimits:
         """
         payload: dict[str, object] = {
             "max_workers": self.max_workers,
-            "extract_workers": self.extract_workers,
             "max_depth": self.max_depth,
             "max_documents": self.max_documents,
             "exclude_paths": list(self.exclude_paths),
@@ -216,8 +246,6 @@ class CrawlLimits:
             "document_level": self.document_level.value,
             "robots": self.robots,
         }
-        if self.extract_max_tasks_per_child is not None:
-            payload["extract_max_tasks_per_child"] = self.extract_max_tasks_per_child
         # Та же обратная совместимость: ключ появляется только при явно заданной оси,
         # поэтому дайджест прогонов без неё не меняется, а при задании — честно меняется.
         if self.revalidate_max_documents is not None:
@@ -280,12 +308,30 @@ def resolve_crawl_limits(
     app: CrawlConfig,
     run: CrawlRunConfig | None = None,
     profiles: Mapping[str, DomainProfile] | None = None,
+    derive_extract_workers: bool = False,
+    mem_budget_mb: int | None = None,
 ) -> CrawlLimits:
     """Разрешает :class:`CrawlLimits` для ``url`` по цепочке app < run < site.
 
     Per-site слой выбирается лучшим ``host[+path]``-профилем домена
     (:func:`core.pipeline.fetch_plan.select_domain_profile`) — тем же матчингом, что и
     ``FetchPlan``. Для каждого вида проксимального слоя побеждает высший не-``None``.
+
+    **F0: окно экстракции из бюджета памяти.** Если ``extract_workers`` не задан ни на
+    одном слое (app/run/site), ``derive_extract_workers=True`` и бюджет объявлен
+    (``mem_budget_mb``), окно выводится как
+    ``floor((budget − parent_floor) / peak(level))``
+    (:func:`core.pipeline.resources.workers_from_budget`). Условие «экстрактор локальный»
+    проверяет **вызывающий** (под ``split`` воркеры живут на edge и там свой бюджет):
+    сюда приходит уже решённый флаг.
+
+    Бюджет — **явный аргумент**, а не чтение окружения: у чистого пайплайна нет права
+    зависеть от памяти хоста (иначе тесты и ``run_id``-независимость стали бы функцией
+    машины). Composition root резолвит его один раз
+    (:func:`core.pipeline.resources.resolve_mem_budget_mb`) и передаёт дальше.
+
+    Для ``document_level=off`` окно не выводится: документной экстракции нет, а ноль
+    воркеров означал бы «не помещается» — два разных нуля смешивать нельзя.
     """
     profile = select_domain_profile(url, profiles or {})
 
@@ -342,11 +388,38 @@ def resolve_crawl_limits(
     )
 
     max_workers = _pick(app.max_workers, run_max_workers, site_attr("max_workers"))
+    # P5: уровень документной экстракции резолвится **до** окна извлечения: пик памяти —
+    # функция уровня (``resources.DOCLING_PEAK_MB``), поэтому вывести воркеры без уровня
+    # нельзя. Порядок резолва (app < run < site) от перестановки не меняется.
+    document_level = _pick(
+        getattr(app, "document_level", None),
+        run_document_level,
+        site_attr("document_level"),
+    )
+    resolved_level = (
+        document_level
+        if isinstance(document_level, DocumentLevel)
+        else DocumentLevel(document_level)
+        if document_level is not None
+        else DocumentLevel.FULL
+    )
     extract_workers = _pick(
         getattr(app, "extract_workers", None),
         run_extract_workers,
         site_attr("extract_workers"),
     )
+    # F0: окно не объявлено ни на одном слое ⇒ вывести из бюджета памяти (только для
+    # локального экстрактора — флаг ставит вызывающий). ``off`` исключён: воркеров не
+    # требуется, и 0 там означал бы не «не помещается», а «не нужно».
+    extract_workers_derived = False
+    if (
+        extract_workers is None
+        and derive_extract_workers
+        and resolved_level is not DocumentLevel.OFF
+        and mem_budget_mb is not None
+    ):
+        extract_workers = workers_from_budget(resolved_level, mem_budget_mb)
+        extract_workers_derived = True
     extract_max_tasks = _pick(
         getattr(app, "extract_max_tasks_per_child", None),
         run_extract_max_tasks,
@@ -455,6 +528,10 @@ def resolve_crawl_limits(
         extract_workers=(
             None if extract_workers is None else int(extract_workers)  # type: ignore[arg-type]
         ),
+        # F0: ``True`` — окно выведено из бюджета памяти, а не объявлено оператором.
+        # Наблюдаемость расписания (``metrics.json.resources.scheduling``); в дайджест
+        # не входит (см. :meth:`CrawlLimits.as_dict`).
+        extract_workers_derived=extract_workers_derived,
         extract_max_tasks_per_child=(
             None
             if extract_max_tasks is None

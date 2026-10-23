@@ -57,6 +57,7 @@ from core.cli.execution_axes import (
     resolve_declared_axes,
 )
 from core.cli.wiring import (
+    LOCAL_PROFILE,
     SPLIT_PROFILE,
     WiringError,
     build_runner,
@@ -64,12 +65,15 @@ from core.cli.wiring import (
     build_vector_index,
     llm_env_notices,
     manifest_deploy_fields,
+    preflight_extraction_budget,
+    resolve_extraction_budget,
     run_db_path,
     seed_lexical_index,
 )
 from core.config.deploy import is_split, load_deploy_config, profile_notices
 from core.domain import (
     CrawlItemStatus,
+    CrawlRunConfig,
     CrawlSessionStatus,
     ProductScope,
     RefreshPolicy,
@@ -84,6 +88,11 @@ from core.pipeline.crawl_session import (
 from core.pipeline.lint import lint_run_inputs
 from core.pipeline.normalize import load_inputs
 from core.pipeline.observability import instrument_phases, write_run_metrics
+from core.pipeline.resources import (
+    ResourcesObservation,
+    build_resources_block,
+    mem_budget_provenance,
+)
 from core.pipeline.digests import cohort_digest, seeds_digest
 from core.pipeline.onboarding import effective_seeds, load_effective_seeds, preflight
 from core.pipeline.phases import resolve_measured_retrieval, resolve_package_id
@@ -672,6 +681,24 @@ def run(args: argparse.Namespace) -> int:
             corpus_urls = dict(onboarding.effective_urls)
         else:
             corpus_urls = _load_corpus_urls(getattr(args, "urls", None))
+        # F0/§3.3: бюджет памяти и решение «окно экстракции из бюджета» резолвятся
+        # **здесь**, в composition root, один раз на прогон. Пайплайн получит их явными
+        # параметрами (он не читает окружение: иначе расписание стало бы функцией хоста).
+        extraction_profile = (
+            deploy_config.profile if deploy_config is not None else LOCAL_PROFILE
+        )
+        mem_budget_mb, derive_extract_workers = resolve_extraction_budget(
+            extraction_profile,
+            # Тестовый шов (``args.ports``): стек экстракции не тот, чьи пики измерены, —
+            # окно из бюджета не выводится (иначе тесты зависели бы от памяти хоста).
+            injected_ports=getattr(args, "ports", None) is not None,
+        )
+        # F0: провенанс бюджета фиксируется **здесь**, на старте, и едет в метрики как есть.
+        # Иначе блок ``resources.budget`` описывал бы ``MemAvailable`` конца прогона —
+        # другое число, чем то, из которого выведено окно (часы краула меняют его на
+        # гигабайты). Публиковать «бюджет» и «окно из бюджета» из разных мгновений значило
+        # бы соврать провенансом — ту же ошибку, что метка ``env`` у отвергнутого значения.
+        budget_provenance = mem_budget_provenance()
         # Одно соединение на прогон (R7): фильтрация URL, сборка портов (``store``/
         # ``chunk_lookup`` для лексического/dense плеча), Runner и пост-корпусная
         # перепривязка ретривала работают на этом объекте. Открываем **до**
@@ -688,6 +715,39 @@ def run(args: argparse.Namespace) -> int:
                     only_failed=only_failed,
                     only_product=only_product,
                 )
+            # F0/§3.3: preflight бюджета памяти — **до** запуска фаз и до сборки портов.
+            # Это отказ начинать заведомо невозможную конфигурацию (0 воркеров при
+            # выведенном окне), а не потолок на работу: если воркеры помещаются, никакого
+            # лимита не вводится. Явно объявленная ось ``crawl.extract_workers`` сильнее
+            # бюджета — тогда только видимое предупреждение с числами.
+            if "corpus" in _phases_until(args.until):
+                budget_run_crawl = getattr(getattr(inputs, "run", None), "crawl", None)
+                if document_level is not None:
+                    base_crawl = (
+                        budget_run_crawl
+                        if budget_run_crawl is not None
+                        else CrawlRunConfig()
+                    )
+                    budget_run_crawl = base_crawl.model_copy(
+                        update={"document_level": document_level}
+                    )
+                budget_error, budget_warnings = preflight_extraction_budget(
+                    roots=[
+                        root for roots in corpus_urls.values() for root in roots
+                    ],
+                    deploy=deploy_config,
+                    run_crawl=budget_run_crawl,
+                    profiles=inputs.domain_profiles or {},
+                    mem_budget_mb=mem_budget_mb,
+                    derive_extract_workers=derive_extract_workers,
+                )
+                config_notices.extend(budget_warnings)
+                if budget_error is not None:
+                    raise CliError(
+                        budget_error.describe(),
+                        code="memory",
+                        exit_code=EXIT_USAGE,
+                    )
 
             ports = _resolve_ports(
                 args,
@@ -740,6 +800,9 @@ def run(args: argparse.Namespace) -> int:
                 # §13 (2.4.0): те же декларированные оси, что у контракта, — один резолвер.
                 axes=declared,
                 declared_status_dict_version=status_dict_version,
+                # F0: бюджет памяти — тот же, что проверил preflight (один резолв на прогон).
+                mem_budget_mb=mem_budget_mb,
+                derive_extract_workers=derive_extract_workers,
             )
             # 09 §8.1/§8.4: порты ретривала строятся до корпуса, где composition id
             # ещё неизвестен. После успешного корпуса перепривязываем их к его
@@ -902,6 +965,19 @@ def run(args: argparse.Namespace) -> int:
             # Метрики (04 §B.2) пишутся ДО закрытия store (источник ячеек) и независимо от
             # остановки на гейте — отражают реально отработавшие фазы. Сбой наблюдаемости
             # фиксируется, но не подменяет код возврата прогона.
+            # F0: наблюдение фазы корпуса живёт в ``log_entries`` (рядом с ``IndexBuild``);
+            # если фаза не отработала, наблюдения нет — и блок ``resources`` остаётся
+            # нейтральным (``None``/пустые карты), а не выдумывает нули.
+            corpus_observation: ResourcesObservation | None = next(
+                (
+                    entry
+                    for result_item in run_report.results
+                    if result_item.phase == "corpus"
+                    for entry in getattr(result_item, "log_entries", []) or []
+                    if isinstance(entry, ResourcesObservation)
+                ),
+                None,
+            )
             try:
                 # Backlog A: счётчики durable-сеанса краула в метрики. Соглашение об
                 # ``session_id`` живёт на стороне CLI (least coupling): метрики не знают о нём.
@@ -918,6 +994,10 @@ def run(args: argparse.Namespace) -> int:
                     instrumentation_errors.append(
                         f"crawl_counts: {type(exc).__name__}: {_concise(exc)}"
                     )
+                # F0: блок ``resources`` — пики RSS родителя по фазам (наблюдаемость),
+                # наблюдение фазы корпуса (расписание/чанки на документ/пик воркера) и
+                # провенанс бюджета памяти. Блок нейтрален к контракту: ни одно поле не
+                # входит в ``run_id`` — это измерения исполнения, а не условия измерения.
                 write_run_metrics(
                     run_id=run_id,
                     out_dir=args.runs_dir,
@@ -925,6 +1005,12 @@ def run(args: argparse.Namespace) -> int:
                     store=store,
                     crawl_counts=crawl_counts,
                     crawl_truncation=truncation or None,
+                    resources=build_resources_block(
+                        phase_peaks=instrumentation.peak_rss_mb,
+                        phase_durations=instrumentation.durations,
+                        observation=corpus_observation,
+                        budget=budget_provenance,
+                    ),
                 )
             except Exception as exc:  # noqa: BLE001 — наблюдаемость не роняет прогон
                 instrumentation_errors.append(

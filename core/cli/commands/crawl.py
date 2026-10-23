@@ -65,9 +65,20 @@ from core.cli.execution_axes import (
     declared_status_dict_version,
     resolve_declared_axes,
 )
-from core.cli.wiring import build_store, llm_env_notices
+from core.cli.wiring import (
+    LOCAL_PROFILE,
+    build_store,
+    llm_env_notices,
+    preflight_extraction_budget,
+    resolve_extraction_budget,
+)
 from core.config.deploy import load_deploy_config, profile_notices
-from core.domain import CrawlItemStatus, CrawlSessionStatus, RefreshPolicy
+from core.domain import (
+    CrawlItemStatus,
+    CrawlRunConfig,
+    CrawlSessionStatus,
+    RefreshPolicy,
+)
 from core.pipeline import PHASES
 from core.pipeline.crawl_session import (
     default_session_id,
@@ -379,6 +390,39 @@ def _execute_crawl(
         notes.extend(filter_notes)
 
         run_plan = _resolve_plan(args, inputs, run_id)
+        # F0/§3.3: бюджет памяти резолвится в composition root и едет в пайплайн явно
+        # (фаза окружение не читает). Preflight — тот же, что у ``run``: сеанс краула
+        # исполняет ту же Ш5, и заведомо не помещающаяся конфигурация должна отказать
+        # на входе, а не OOM-killer'ом на первом документе.
+        mem_budget_mb, derive_extract_workers = resolve_extraction_budget(
+            deploy_config.profile if deploy_config is not None else LOCAL_PROFILE,
+            injected_ports=getattr(args, "ports", None) is not None,
+        )
+        if "corpus" in _phases_until(until):
+            # CLI-уточнение уровня (``--document-level``) — часть run-слоя, ровно как его
+            # увидит Ш5: preflight обязан проверять **разрешённый** уровень, иначе отказ
+            # и исполнение разошлись бы.
+            budget_run_crawl = getattr(getattr(inputs, "run", None), "crawl", None)
+            if document_level is not None:
+                base_crawl = (
+                    budget_run_crawl if budget_run_crawl is not None else CrawlRunConfig()
+                )
+                budget_run_crawl = base_crawl.model_copy(
+                    update={"document_level": document_level}
+                )
+            budget_error, budget_warnings = preflight_extraction_budget(
+                roots=[root for urls in corpus_urls.values() for root in urls],
+                deploy=deploy_config,
+                run_crawl=budget_run_crawl,
+                profiles=getattr(inputs, "domain_profiles", None) or {},
+                mem_budget_mb=mem_budget_mb,
+                derive_extract_workers=derive_extract_workers,
+            )
+            notes.extend(budget_warnings)
+            if budget_error is not None:
+                raise CliError(
+                    budget_error.describe(), code="memory", exit_code=EXIT_USAGE
+                )
         ports = _resolve_ports(
             args,
             deploy_config,
@@ -418,6 +462,9 @@ def _execute_crawl(
             # §13 (2.4.0): те же декларированные оси, что у контракта.
             axes=declared,
             declared_status_dict_version=status_dict_version,
+            # F0: бюджет/окно экстракции — явные входы Ш5 (тот же резолв, что у preflight).
+            mem_budget_mb=mem_budget_mb,
+            derive_extract_workers=derive_extract_workers,
         )
         if clear_first:
             store.clear_crawl_session(session_id)

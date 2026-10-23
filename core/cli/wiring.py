@@ -28,7 +28,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -87,8 +87,10 @@ from core.adapters.search_yandex import YandexSearchAdapter
 from core.cli.errors import EXIT_USAGE, CliError
 from core.config.deploy import (
     DeployConfig,
+    CrawlConfig,
     LLMDeployConfig,
     LLMSlotConfig,
+    SPLIT_PROFILES,
     is_split,
     load_deploy_config,
     resolve_llm_slot,
@@ -105,6 +107,15 @@ from core.pipeline.composition import (
     read_composition,
 )
 from core.pipeline.corpus import ExtractionPool
+from core.pipeline.crawl_frontier import resolve_crawl_limits
+from core.pipeline.resources import (
+    MEM_BUDGET_ENV,
+    PARENT_FLOOR_MB,
+    MemoryBudgetError,
+    docling_peak_mb,
+    resolve_mem_budget_mb,
+    workers_from_budget,
+)
 from core.pipeline.runner import PHASES, Clock, PhaseFn
 from core.ports.crawler import CrawlerPort
 from core.ports.discovery_llm import DiscoveryLLMPort
@@ -169,6 +180,8 @@ __all__ = [
     "build_adapters",
     "build_runner",
     "build_extraction_pool",
+    "resolve_extraction_budget",
+    "preflight_extraction_budget",
     "manifest_deploy_fields",
     "SearchResolutionError",
     "resolve_and_build_search_adapter",
@@ -1776,6 +1789,7 @@ def build_extraction_pool(
     *,
     extractor: ExtractorPort | None = None,
     max_tasks_per_child: int | None = None,
+    worker_rss_dir: str | Path | None = None,
 ) -> ExtractionPool | None:
     """Собирает исполнитель экстракции по профилю развёртывания (P4/§7).
 
@@ -1794,6 +1808,12 @@ def build_extraction_pool(
     Сам пул создаётся **лениво** в ``build_corpus`` (C1: один на прогон, ключ
     ``(уровень, окно)``, только при ``W>1`` либо при заданном ``max_tasks_per_child``):
     ``None``/``1`` без оси ⇒ ``pool_factory`` не вызывается вовсе (поведение байт-в-байт).
+
+    ``worker_rss_dir`` (F0) — каталог стока пика воркеров
+    (``{runs}/{run_id}/workers``): воркер-процесс после задания пишет туда свой
+    ``ru_maxrss``, родитель читает максимум (:meth:`ExtractionPool.peak_worker_rss_mb`).
+    Для ``split`` остаётся ``None``: воркеры живут на edge, их пик не виден ядру, и
+    выдумывать его нельзя.
     """
     from core.pipeline.corpus import _extract_worker, _run_extract
 
@@ -1818,6 +1838,7 @@ def build_extraction_pool(
             pool_factory=_local_factory,
             worker=_extract_worker,
             supports_worker_recycling=True,
+            worker_rss_dir=worker_rss_dir,
         )
     if profile == SPLIT_PROFILE and extractor is not None:
         def _remote_worker(request: Any) -> Any:
@@ -1826,10 +1847,13 @@ def build_extraction_pool(
         # P5: ось ``document_level`` здесь не действует (R-S): под ``split`` документную
         # экстракцию исполняет edge своим конфигом. Уровень принимается и игнорируется, чтобы
         # подпись фабрики совпадала с локальной.
+        # F0: пик воркера не собирается — воркеры-threads живут в ядре, но их ``ru_maxrss``
+        # это RSS всего процесса, а не воркера; подделывать число нельзя (``None``).
         return ExtractionPool(
             pool_factory=lambda n, level=DocumentLevel.FULL, **_: _thread_pool(n),
             worker=_remote_worker,
             supports_worker_recycling=False,
+            worker_rss_dir=None,
         )
     return None
 
@@ -1839,6 +1863,114 @@ def _thread_pool(max_workers: int) -> Any:
     from concurrent.futures import ThreadPoolExecutor
 
     return ThreadPoolExecutor(max_workers=max_workers)
+
+
+def resolve_extraction_budget(
+    profile: str,
+    *,
+    env: Mapping[str, str] | None = None,
+    available_mb: int | None = None,
+    injected_ports: bool = False,
+) -> tuple[int | None, bool]:
+    """Бюджет памяти прогона и флаг «окно экстракции выводится из бюджета» (F0/§3.3).
+
+    Единственная точка чтения бюджета: ``COHOUND_MEM_BUDGET_MB`` > ``MemAvailable`` минус
+    резерв (:func:`core.pipeline.resources.resolve_mem_budget_mb`). Дальше число едет в
+    пайплайн **явным аргументом** (``mem_budget_mb``) — у чистого пайплайна нет права
+    зависеть от окружения, иначе тесты и расписание стали бы функцией памяти хоста.
+
+    Флаг ``derive_extract_workers`` — про то, кто исполняет экстракцию:
+
+    * локальный экстрактор (процессный пул ``local`` или inline-путь в ядре) — ``True``:
+      воркеры едят память этого хоста, значит их число выводится из его бюджета;
+    * ``split`` — ``False``: воркеры живут на edge, у них собственный бюджет, и число
+      воркеров ядра не должно описывать чужую машину.
+
+    :param injected_ports: порты инъецированы извне (тестовый шов ``args.ports``), то есть
+        работает **не** тот стек экстракции, чьи пики измерены (:data:`DOCLING_PEAK_MB`).
+        Тогда вывод окна выключен: бюджет описывал бы docling, а исполнялся бы другой
+        экстрактор — это было бы предвидение вместо замера (A3). Явно объявленная ось
+        ``crawl.extract_workers`` работает и здесь.
+
+    :returns: ``(budget_mb | None, derive_extract_workers)``.
+    """
+    derive = profile not in SPLIT_PROFILES and not injected_ports
+    return resolve_mem_budget_mb(env=env, available_mb=available_mb), derive
+
+
+def preflight_extraction_budget(
+    *,
+    roots: Iterable[str],
+    deploy: DeployConfig | None,
+    run_crawl: CrawlRunConfig | None,
+    profiles: Mapping[str, DomainProfile],
+    mem_budget_mb: int | None,
+    derive_extract_workers: bool,
+) -> tuple[MemoryBudgetError | None, tuple[str, ...]]:
+    """Preflight §3.3: отказ начинать заведомо невозможную конфигурацию экстракции.
+
+    Число воркеров выводится по объявленному бюджету
+    (``floor((budget − parent_floor) / peak(level))``). **0 — валидный ответ**, и именно
+    здесь он превращается в отказ ``EXIT_USAGE``: прогон, который заведомо не помещается,
+    падает на первом документе (OOM-killer'ом, без трейсбека), а не на входе с числами.
+    Это **не** потолок на работу: если воркеры помещаются, никакого лимита не вводится.
+
+    Резолв — тот же :func:`core.pipeline.crawl_frontier.resolve_crawl_limits`, что и в
+    фазе корпуса (``app < run < site``), поэтому уровень и окно берутся **разрешённые**, а
+    не дефолтные: CLI-уточнение уровня уже лежит в ``run_crawl`` того же вида, что увидит
+    фаза. Отказ срабатывает только когда окно **выведено** (``extract_workers_derived``):
+    явно объявленная ось ``crawl.extract_workers`` на любом слое сильнее бюджета — тогда
+    возвращается предупреждение с числами, а не отказ (воля оператора).
+
+    :returns: ``(error | None, warnings)`` — ``error`` несёт числа
+        (:meth:`MemoryBudgetError.describe`), ``warnings`` — тексты для ``errors``/логов.
+    """
+    error: MemoryBudgetError | None = None
+    warnings: list[str] = []
+    seen: set[tuple[int, str]] = set()
+    for root in roots:
+        try:
+            limits = resolve_crawl_limits(
+                str(root),
+                app=(deploy.crawl if deploy is not None else CrawlConfig()),
+                run=run_crawl,
+                profiles=profiles,
+                derive_extract_workers=derive_extract_workers,
+                mem_budget_mb=mem_budget_mb,
+            )
+        except Exception:  # noqa: BLE001 — резолв осей не место падать в preflight
+            continue
+        level = limits.document_level
+        if level is DocumentLevel.OFF:
+            # Документной экстракции нет — воркеры не нужны; ноль здесь не «не помещается».
+            continue
+        capacity = workers_from_budget(level, mem_budget_mb)
+        if limits.extract_workers_derived:
+            if limits.extract_workers == 0 and error is None:
+                error = MemoryBudgetError(
+                    budget_mb=mem_budget_mb,
+                    level=level,
+                    peak_mb=docling_peak_mb(level),
+                    parent_floor_mb=PARENT_FLOOR_MB,
+                    workers=0,
+                )
+            continue
+        # Ось объявлена явно (app/run/site) — оператор сильнее бюджета, но расхождение
+        # обязано быть видимым: иначе OOM выглядит как дефект прогона, а не как вход.
+        if limits.extract_workers is None:
+            continue
+        key = (int(limits.extract_workers), level.value)
+        if capacity >= int(limits.extract_workers) or key in seen:
+            continue
+        seen.add(key)
+        warnings.append(
+            "crawl.extract_workers: "
+            f"{int(limits.extract_workers)} объявлено явно (app<run<site), но бюджет "
+            f"{mem_budget_mb} MB и число CPU помещают {capacity} для level={level.value} "
+            f"(peak={docling_peak_mb(level)} MB, parent floor={PARENT_FLOOR_MB} MB) — "
+            f"исполнение по воле оператора, бюджет ({MEM_BUDGET_ENV}) не учитывается"
+        )
+    return error, tuple(warnings)
 
 
 

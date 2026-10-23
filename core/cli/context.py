@@ -51,6 +51,7 @@ from core.cli.wiring import (
     build_worker_extractor,
     llm_env_notices,
     manifest_deploy_fields,
+    resolve_extraction_budget,
     run_db_path,
 )
 from core.config import (
@@ -97,6 +98,7 @@ from core.ports.store import StorePort
 from core.ports.types import FetchMode
 from core.util.cache import ContentAddressedCache
 from core.util.logging import PhaseLogger
+from core.util.security import sanitize_filename
 from core.util.rate_limit import RateLimiter
 
 # -- Типовые швы (тестовые инъекции) --------------------------------------- #
@@ -1762,6 +1764,8 @@ def _resolve_phases(
     execution_contract_digest: str | None = None,
     axes: Any = None,
     declared_status_dict_version: str | None = None,
+    mem_budget_mb: int | None = None,
+    derive_extract_workers: bool | None = None,
 ) -> dict[str, PhaseFn]:
     """Собирает реестр не-гейтовых фаз (``phases_factory`` — тестовый шов).
 
@@ -1808,6 +1812,12 @@ def _resolve_phases(
         контракта; из них манифест берёт deploy-профиль/чанкер/оси краула/реестры/
         ``llm_scenarios``. ``None`` — legacy/модульный вызов.
     :param declared_status_dict_version: версия словаря статусов (декларированная ось).
+    :param mem_budget_mb: F0 — бюджет памяти прогона, MB, разрешённый composition root
+        (:func:`core.cli.wiring.resolve_extraction_budget`). Передаётся в Ш5 **явным**
+        параметром: пайплайн окружение не читает. ``None`` — бюджета нет.
+    :param derive_extract_workers: F0 — выводить окно экстракции из бюджета (только для
+        локального экстрактора). ``None`` — не передано: composition root резолвит бюджет
+        и флаг сам по профилю зон (здесь же, один раз на сборку фаз).
     """
     passports_dir = _resolve_passports_dir(args, paths)
     raw_root = str(paths.corpus_raw) if paths is not None else "corpus_raw"
@@ -1828,6 +1838,33 @@ def _resolve_phases(
         deploy_profile = deploy_fields["deploy_profile"]
         edge_schema_version = deploy_fields["edge_schema_version"]
         edge_capabilities = deploy_fields["edge_capabilities"]
+    # F0/§3.3: бюджет памяти резолвится **один раз** в composition root и едет в пайплайн
+    # явным параметром. ``None`` — вызывающий (команда) уже нашёл значения: повторно env
+    # не читаем, иначе два места в одном прогоне могли бы дать разные числа.
+    if derive_extract_workers is None:
+        mem_budget_mb, derive_extract_workers = resolve_extraction_budget(
+            (
+                deploy_config.profile
+                if deploy_config is not None
+                else getattr(args, "profile", LOCAL_PROFILE)
+            ),
+            # Инъецированные порты — тестовый шов: измеренные пики docling описывают не
+            # тот стек, поэтому окно из бюджета не выводится (A3), явная ось — работает.
+            injected_ports=getattr(args, "ports", None) is not None,
+        )
+    # F0: сток пика памяти воркеров — рядом с логами/метриками прогона (та же раскладка,
+    # что у ``metrics.json``: ``{runs}/{run_id}/``). Ядро не собирает пик под ``split``
+    # (там воркеры на edge) — решение принимает ``build_extraction_pool``.
+    run_id_for_paths = getattr(plan, "run_id", None)
+    worker_rss_dir = (
+        str(
+            Path(getattr(args, "runs_dir", None) or "runs")
+            / sanitize_filename(str(run_id_for_paths))
+            / "workers"
+        )
+        if run_id_for_paths
+        else None
+    )
     # P4/OOM: run-дефолт рециклинга воркеров экстракции захватывается фабрикой пула;
     # per-site значение резолвится в pipeline (site > run > app) и передаётся аргументом.
     run_extract_max_tasks = getattr(
@@ -1893,7 +1930,13 @@ def _resolve_phases(
             deploy_config.profile if deploy_config is not None else LOCAL_PROFILE,
             extractor=getattr(ports, "extractor", None),
             max_tasks_per_child=run_extract_max_tasks,
+            # F0: внутри профильной фабрики — ``None`` для ``split`` (пик воркеров edge
+            # ядру не виден), путь стока для локального процессного пула.
+            worker_rss_dir=worker_rss_dir,
         ),
+        # F0: бюджет памяти и решение «окно из бюджета» — явные входы Ш5 (не env).
+        "mem_budget_mb": mem_budget_mb,
+        "derive_extract_workers": bool(derive_extract_workers),
         # Ф1.2: межпрогонный кэш экстракции. Каталог — resolved ``paths.extract_cache``
         # (``COHOUND_EXTRACT_CACHE_DIR`` / ``COHOUND_HOME`` / ``paths.yaml``).
         # ``paths is None`` ⇒ кэш **выключен**, а не «относительно CWD»: у кэша без

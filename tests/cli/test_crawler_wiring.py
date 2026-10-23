@@ -1083,6 +1083,138 @@ def test_build_extraction_pool_split_thread_pool(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# F0: бюджет памяти — резолв в composition root и preflight (§3.3)
+# ---------------------------------------------------------------------------
+
+def test_resolve_extraction_budget_derives_only_for_local() -> None:
+    """F0: окно экстракции выводится из бюджета только там, где экстрактор локальный.
+
+    Под ``split`` воркеры живут на edge со своим бюджетом, поэтому число воркеров ядра
+    не должно описывать чужую машину. Инъецированные порты — тестовый шов: измеренные
+    пики docling описывают не тот стек, поэтому вывод тоже выключен (A3).
+    """
+    from core.cli.wiring import resolve_extraction_budget
+
+    env = {"COHOUND_MEM_BUDGET_MB": "4096"}
+    local_budget, local_derive = resolve_extraction_budget(LOCAL_PROFILE, env=env)
+    assert local_budget == 4096
+    assert local_derive is True
+
+    split_budget, split_derive = resolve_extraction_budget(SPLIT_PROFILE, env=env)
+    assert split_budget == 4096
+    assert split_derive is False
+
+    _, injected_derive = resolve_extraction_budget(
+        LOCAL_PROFILE, env=env, injected_ports=True
+    )
+    assert injected_derive is False
+
+    # Явный бюджет сильнее измерения: ``MemAvailable`` не участвует.
+    declared, _ = resolve_extraction_budget(
+        LOCAL_PROFILE, env=env, available_mb=64
+    )
+    assert declared == 4096
+
+def test_preflight_extraction_budget_refuses_impossible_configuration() -> None:
+    """F0/§3.3: ``full × 2`` на тесном бюджете — отказ **с числами**, а не OOM.
+
+    Отказ — про вход (конфигурация не помещается), поэтому CLI отображает его в
+    ``EXIT_USAGE``. Сообщение обязано называть бюджет, уровень, пик и пол родителя:
+    иначе оператор не может ни понять отказ, ни исправить вход.
+    """
+    from core.cli.wiring import preflight_extraction_budget
+    from core.domain.enums import DocumentLevel
+    from core.pipeline.resources import DOCLING_PEAK_MB, PARENT_FLOOR_MB
+
+    tight = PARENT_FLOOR_MB + DOCLING_PEAK_MB[DocumentLevel.FULL]  # ровно один воркер
+    error, warnings = preflight_extraction_budget(
+        roots=["https://docs.test/root"],
+        deploy=None,
+        run_crawl=None,
+        profiles={},
+        mem_budget_mb=PARENT_FLOOR_MB,  # воркеров не помещается вовсе
+        derive_extract_workers=True,
+    )
+    assert error is not None
+    assert warnings == ()
+    text = error.describe()
+    assert "budget=500 MB" in text and "level=full" in text
+    assert f"level peak={DOCLING_PEAK_MB[DocumentLevel.FULL]} MB" in text
+    assert "workers=0" in text
+    assert "COHOUND_MEM_BUDGET_MB" in text
+
+    # Бюджет, помещающий ровно одного воркера, — не отказ: это «медленнее, но живой».
+    error, _ = preflight_extraction_budget(
+        roots=["https://docs.test/root"],
+        deploy=None,
+        run_crawl=None,
+        profiles={},
+        mem_budget_mb=tight,
+        derive_extract_workers=True,
+    )
+    assert error is None
+
+def test_preflight_does_not_refuse_declared_axis_but_warns() -> None:
+    """F0: явная ось ``extract_workers`` сильнее бюджета — предупреждение, не отказ.
+
+    Иначе оператор, объявивший окно (например, ради прогрева docling), получал бы отказ
+    от измерения, которое должно лишь назвать расхождение. Предупреждение несёт числа:
+    без них «может не поместиться» неотличимо от догадки.
+    """
+    from core.cli.wiring import preflight_extraction_budget
+    from core.config.deploy import CrawlConfig
+    from core.domain.enums import DocumentLevel
+    from core.pipeline.resources import DOCLING_PEAK_MB, PARENT_FLOOR_MB
+
+    level = DocumentLevel.FULL
+    tight = PARENT_FLOOR_MB + DOCLING_PEAK_MB[level]  # помещается один
+    error, warnings = preflight_extraction_budget(
+        roots=["https://docs.test/root"],
+        deploy=None,
+        run_crawl=CrawlRunConfig(extract_workers=3, document_level=level),
+        profiles={},
+        mem_budget_mb=tight,
+        derive_extract_workers=True,
+    )
+    assert error is None, "явная ось не отменяется бюджетом"
+    assert len(warnings) == 1
+    warning = warnings[0]
+    assert "extract_workers" in warning and "3" in warning
+    assert "помещают 1" in warning
+    assert f"{tight} MB" in warning
+
+    # Документной экстракции нет (``off``) — окно не нужно, отказ не выдумывается.
+    error_off, warnings_off = preflight_extraction_budget(
+        roots=["https://docs.test/root"],
+        deploy=None,
+        run_crawl=CrawlRunConfig(document_level=DocumentLevel.OFF),
+        profiles={},
+        mem_budget_mb=PARENT_FLOOR_MB,
+        derive_extract_workers=True,
+    )
+    assert error_off is None and warnings_off == ()
+
+def test_build_extraction_pool_local_supports_worker_peak_rss(tmp_path: Path) -> None:
+    """F0: пик воркера собирает только локальный процессный пул (``split`` — ``None``)."""
+    from core.cli.wiring import build_extraction_pool
+
+    local = build_extraction_pool(
+        LOCAL_PROFILE, worker_rss_dir=str(tmp_path / "workers")
+    )
+    assert local is not None
+    assert local.worker_rss_dir == str(tmp_path / "workers")
+    assert local.peak_worker_rss_mb() is None  # заданий не было — «не измеряли»
+
+    split = build_extraction_pool(
+        SPLIT_PROFILE,
+        # Достаточно непустого экстрактора: проверяется профиль, не вызов экстракции.
+        extractor=object(),  # type: ignore[arg-type]
+        worker_rss_dir=str(tmp_path / "workers"),
+    )
+    assert split is not None
+    assert split.worker_rss_dir is None, "под split воркеры на edge — пик не выдумывается"
+
+# ---------------------------------------------------------------------------
 # P4/OOM: рециклинг воркеров локального пула (max_tasks_per_child)
 # ---------------------------------------------------------------------------
 

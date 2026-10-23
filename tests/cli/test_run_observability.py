@@ -32,6 +32,8 @@ B2_KEYS = {
     "duration_by_phase",
     "crawl",
     "crawl_truncation",
+    # F0: блок ресурсов (§4 F0) — присутствует всегда, даже если нечего измерять.
+    "resources",
 }
 
 
@@ -97,6 +99,20 @@ def test_run_blocked_at_g1_still_writes_phase_logs_and_metrics(tmp_path: Path) -
         "cancelled",
     }
     assert all(value == 0 for value in metrics["crawl"].values())
+
+    # F0: блок ``resources`` собран CLI из трёх источников — пики RSS по фазам
+    # (наблюдаемость), наблюдение фазы корпуса (её не было) и провенанс бюджета памяти.
+    resources = metrics["resources"]
+    assert {"normalize", "lint", "plan", "g1"} <= set(resources["phases"])
+    assert resources["phases"]["plan"]["peak_rss_mb"] is not None
+    assert resources["phases"]["plan"]["wall_s"] is not None
+    assert resources["budget"]["source"] in {"env", "available", "unknown"}
+    assert resources["budget"]["parent_floor_mb"] > 0
+    assert resources["scheduling"]["source"] == "declared"
+    # Корпус не исполнялся: наблюдения нет, и нули не выдумываются.
+    assert resources["documents"] == 0
+    assert resources["chunks"] == 0
+    assert resources["workers_peak_rss_mb"] is None
 
 
 def test_run_dry_run_writes_no_logs_or_metrics(tmp_path: Path) -> None:

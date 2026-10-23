@@ -643,3 +643,121 @@ def test_bypass_survives_with_limits_clone() -> None:
     clone = frontier.with_limits(CrawlLimits(max_depth=1))
     assert clone.artifacts_outside_prefix_count == 1
     assert clone.artifacts_outside_prefix == [OUTSIDE_PDF]
+
+
+# --------------------------------------------------------------------------- #
+# (g3) F0: окно экстракции вне контракта, расписание — из бюджета (§2.10/§3.3)
+# --------------------------------------------------------------------------- #
+
+def test_parallel_extraction_axes_are_not_in_as_dict() -> None:
+    """``extract_workers``/``extract_max_tasks_per_child`` **не** входят в дайджест.
+
+    Параллелизм извлечения не может изменить состав корпуса (документ уже добыт и
+    ретенирован, чанки — функция его текста), поэтому это расписание, а не условие
+    измерения. ``max_workers`` (конкурентность fetch) остаётся: она взаимодействует с
+    усечением ``max_documents`` и правда меняет корпус (F0/§2.10).
+    """
+    limits = resolve_crawl_limits(
+        URL,
+        app=CrawlConfig(max_workers=4),
+        run=CrawlRunConfig(extract_workers=3, extract_max_tasks_per_child=7),
+        derive_extract_workers=True,
+        mem_budget_mb=8192,
+    )
+    payload = limits.as_dict()
+    assert "extract_workers" not in payload
+    assert "extract_max_tasks_per_child" not in payload
+    assert payload["max_workers"] == 4
+    # Значения при этом разрешены и доступны наблюдаемости (провенанс/метрики).
+    assert limits.extract_workers == 3
+    assert limits.extract_max_tasks_per_child == 7
+
+
+def test_extract_workers_axis_does_not_change_crawl_digest() -> None:
+    """Смена окна экстракции не двигает ``crawl_config_digest`` (§2.10).
+
+    Иначе «воркеры из бюджета» сделали бы ``run_id`` функцией хоста: два прогона с
+    одинаковыми входами на разных машинах перестали бы быть одним измерением.
+    """
+    from core.pipeline.report import crawl_control_digest
+
+    def _digest(workers: int | None) -> str | None:
+        return crawl_control_digest(
+            run_crawl=CrawlRunConfig(
+                extract_workers=workers, extract_max_tasks_per_child=workers
+            ),
+            app=APP,
+            profiles=None,
+        )
+
+    assert _digest(1) == _digest(4) == _digest(None)
+
+
+def test_derived_extract_workers_window_comes_from_budget() -> None:
+    """``derive_extract_workers=True`` выводит окно: ``floor((budget − floor)/peak)``.
+
+    ``text`` — пик 855 MB, пол родителя 500 MB: бюджет 2000 MB помещает одного воркера
+    (1500 // 855), 3 000 MB — двух (2500 // 855), 1 000 MB — ноль.
+    """
+    level = CrawlRunConfig(document_level="text")
+    one = resolve_crawl_limits(
+        URL, app=APP, run=level, derive_extract_workers=True, mem_budget_mb=2000
+    )
+    assert (one.extract_workers, one.extract_workers_derived) == (1, True)
+    two = resolve_crawl_limits(
+        URL, app=APP, run=level, derive_extract_workers=True, mem_budget_mb=3000
+    )
+    assert (two.extract_workers, two.extract_workers_derived) == (2, True)
+    none = resolve_crawl_limits(
+        URL, app=APP, run=level, derive_extract_workers=True, mem_budget_mb=1000
+    )
+    # 0 — валидный ответ «не помещается», а не «возьми одного».
+    assert (none.extract_workers, none.extract_workers_derived) == (0, True)
+
+
+def test_declared_extract_workers_wins_over_budget() -> None:
+    """Явная ось на любом слое сильнее бюджета: окно не выводится (``derived=False``)."""
+    explicit = resolve_crawl_limits(
+        URL,
+        app=APP,
+        run=CrawlRunConfig(extract_workers=5),
+        derive_extract_workers=True,
+        mem_budget_mb=1000,
+    )
+    assert (explicit.extract_workers, explicit.extract_workers_derived) == (5, False)
+    # per-site слой той же цепочки: site > run > app.
+    profiles = {"example.com": DomainProfile(extract_workers=2)}
+    site = resolve_crawl_limits(
+        URL,
+        app=APP,
+        run=CrawlRunConfig(extract_workers=5),
+        profiles=profiles,
+        derive_extract_workers=True,
+        mem_budget_mb=1000,
+    )
+    assert (site.extract_workers, site.extract_workers_derived) == (2, False)
+
+
+def test_no_window_derivation_without_flag_or_budget() -> None:
+    """Нет флага вывода или нет бюджета — окно остаётся ``None`` (не выдумывается)."""
+    no_flag = resolve_crawl_limits(URL, app=APP, mem_budget_mb=8192)
+    assert (no_flag.extract_workers, no_flag.extract_workers_derived) == (None, False)
+    no_budget = resolve_crawl_limits(URL, app=APP, derive_extract_workers=True)
+    assert (no_budget.extract_workers, no_budget.extract_workers_derived) == (None, False)
+    # ``derive_extract_workers`` по умолчанию выключен: локальный путь без composition root
+    # не приобретает окна из окружения.
+    default = resolve_crawl_limits(URL, app=APP)
+    assert (default.extract_workers, default.extract_workers_derived) == (None, False)
+
+
+def test_off_level_does_not_derive_extract_workers() -> None:
+    """``document_level=off`` — воркеры не нужны: ноль здесь не «не помещается»."""
+    limits = resolve_crawl_limits(
+        URL,
+        app=APP,
+        run=CrawlRunConfig(document_level="off"),
+        derive_extract_workers=True,
+        mem_budget_mb=1000,
+    )
+    assert limits.document_level.value == "off"
+    assert (limits.extract_workers, limits.extract_workers_derived) == (None, False)

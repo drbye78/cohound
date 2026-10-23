@@ -220,6 +220,7 @@ from core.pipeline.incremental import (
     doc_version_id,
     plan_incremental,
 )
+from core.pipeline.resources import ResourcesObservation, summarize_chunks_per_doc
 from core.pipeline.runner import PhaseResult
 from core.ports.chunker import ChunkerPort
 from core.ports.container import ContainerPort
@@ -766,6 +767,11 @@ class _ExtractRequest:
     #: строит экземпляр из этих полей. ``None`` → кэш в воркере выключен.
     cache_root: str | None = None
     cache_max_bytes: int | None = None
+    #: F0: каталог стока пика памяти воркера (``{runs}/{run_id}/workers``). Воркер пишет
+    #: туда свой ``ru_maxrss``; ``None`` — пик не собирается (thread-пул/inline). Поле
+    #: едет в payload, а не в результат: контракт ``_ExtractRequest → ExtractedDoc``
+    #: остаётся портовым, наблюдаемость не попадает в документ.
+    rss_dir: str | None = None
 
 
 @dataclass(frozen=True)
@@ -783,11 +789,62 @@ class ExtractionPool:
     :param supports_worker_recycling: профиль умеет рециклинг воркеров по счётчику заданий
         (``ProcessPoolExecutor(max_tasks_per_child=N)``). ``False`` (``split``/потоки) —
         ось ``extract_max_tasks_per_child`` не действует (не тихо: запись в ``errors``).
+    :param worker_rss_dir: F0 — каталог стока пика памяти воркеров
+        (``{runs}/{run_id}/workers``). Каждый воркер-процесс после задания пишет туда свой
+        ``ru_maxrss`` (файл на ``pid``), родитель читает максимум
+        (:meth:`peak_worker_rss_mb`). ``None`` — пик не собирается (``split``: воркеры на
+        edge; потоковый пул: ``ru_maxrss`` потока — это RSS процесса, а не воркера).
+
+    **Файл-сток, а не канал.** Пик воркера собирается файлом на ``pid`` в каталоге прогона,
+    а не через ``Manager``/очередь/поле результата:
+
+    * контракт ``_ExtractRequest → ExtractedDoc`` остаётся прежним — документ не обязан
+      нести наблюдаемость, а ``ExtractedDoc`` не получает поля, которого нет у порта;
+    * ``Manager`` поднимает лишний процесс и канал (память ровно там, где её считают), а
+      очередь требует слива после каждого задания — то есть работу на каждом документе;
+    * воркеры **рециклятся** (``extract_max_tasks_per_child``), поэтому файл на ``pid``
+      перезаписывается новым процессом с тем же ``pid``: берётся максимум по всем файлам,
+      то есть по всем поколениям воркеров;
+    * запись атомарна (``tmp`` + ``replace``) — родитель не прочитает половину числа.
+
+    Сток пишется в ``finally`` задания: пик нужен и у задания, упавшего на извлечении
+    (OOM-подобный отказ — ровно тот случай, ради которого метрика и собирается).
     """
 
     pool_factory: Callable[..., Executor]
     worker: Callable[[_ExtractRequest], ExtractedDoc]
     supports_worker_recycling: bool = False
+    worker_rss_dir: str | None = None
+
+    def peak_worker_rss_mb(self) -> float | None:
+        """Максимум ``ru_maxrss`` по воркерам пула, MB; ``None`` — не собирали/не было.
+
+        Читает файлы сточных записей (:attr:`worker_rss_dir`); максимум берётся по **всем**
+        файлам, потому что ``pid`` переиспользуется при рециклинге воркеров, а имя файла —
+        это ``pid`` поколения, а не поколение. Нечитаемый/битый файл пропускается: метрика
+        не выдумывается и не роняет прогон. ``None`` возвращается и при пустом каталоге
+        (пул не создавался либо заданий не было) — «не измеряли» ≠ «ноль».
+        """
+        if not self.worker_rss_dir:
+            return None
+        try:
+            paths = list(Path(self.worker_rss_dir).glob("*.rss"))
+        except OSError:  # pragma: no cover — каталог недоступен
+            return None
+        peak: float | None = None
+        for path in paths:
+            try:
+                value = float(path.read_text(encoding="utf-8").strip())
+            except (OSError, ValueError):  # pragma: no cover — битая запись
+                continue
+            # Неположительный RSS — не факт, а мусор в стоке (отрицательного пика памяти
+            # не бывает). Он отбрасывается ровно как нечитаемая запись: метрика не
+            # выдумывается и не может оказаться отрицательной.
+            if value <= 0:
+                continue
+            if peak is None or value > peak:
+                peak = value
+        return peak
 
 
 #: P4: глобальный экстрактор воркер-процесса. Устанавливается инициализатором пула
@@ -940,6 +997,58 @@ def _trim_worker_arenas() -> bool:
         return False
 
 
+def _worker_peak_rss_mb() -> float | None:
+    """Пик RSS **текущего** процесса, MB (``resource.getrusage``); ``None`` — не прочитать.
+
+    ``ru_maxrss`` на Linux — KiB и **монотонен** в пределах процесса, поэтому значение
+    после задания и есть пик воркера на этот момент (включая память конвертера).
+    Не-POSIX окружение/сбой — ``None``: метрика не выдумывается.
+    """
+    try:
+        import resource
+
+        kib = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    except (ImportError, OSError, ValueError):  # pragma: no cover — не-POSIX
+        return None
+    if kib <= 0:  # pragma: no cover — вырожденное значение
+        return None
+    return round(float(kib) / 1024.0, 1)
+
+
+def _write_worker_peak_rss(directory: str | None) -> None:
+    """Воркер: пишет свой пик RSS в сток ``{directory}/{pid}.rss`` (F0).
+
+    Файл, а не результат документа: контракт ``_ExtractRequest → ExtractedDoc`` не должен
+    нести наблюдаемость, а ``Manager``/очередь стоили бы канал и слив на каждом задании
+    (см. :class:`ExtractionPool`). ``pid`` переиспользуется при рециклинге воркеров,
+    поэтому в файле хранится **максимум**: новое поколение дописывает только большее.
+    Запись атомарна (``tmp`` + ``replace``), чтобы родитель не прочитал половину числа.
+
+    Сбой стока — не ошибка прогона: наблюдаемость вторична к экстракции (как
+    :func:`_trim_worker_arenas`).
+    """
+    if not directory:
+        return
+    peak = _worker_peak_rss_mb()
+    if peak is None:
+        return
+    try:
+        root = Path(directory)
+        root.mkdir(parents=True, exist_ok=True)
+        target = root / f"{os.getpid()}.rss"
+        try:
+            previous = float(target.read_text(encoding="utf-8").strip())
+        except (OSError, ValueError):
+            previous = 0.0
+        if peak <= previous:
+            return
+        temporary = target.with_suffix(f".{os.getpid()}.tmp")
+        temporary.write_text(f"{peak}\n", encoding="utf-8")
+        os.replace(temporary, target)
+    except OSError:  # pragma: no cover — сток недоступен
+        return
+
+
 def _extract_worker(request: _ExtractRequest) -> ExtractedDoc:
     """Module-level воркер экстракции для процессов (picklable by reference, P4/§7).
 
@@ -951,6 +1060,11 @@ def _extract_worker(request: _ExtractRequest) -> ExtractedDoc:
     воркера растёт храповиком: ``max_tasks_per_child`` рециклинг лишь откладывает OOM,
     а не отменяет его. Рычаг **операционный**: результат байт-в-байт тот же, ``run_id``
     не меняется, ``execution_change`` не нужен (§13).
+
+    F0: в том же ``finally`` пик RSS процесса уходит в файл-сток
+    (:func:`_write_worker_peak_rss`) — наблюдаемость памяти воркера без изменения
+    контракта результата. Пишется и на отказе задания: OOM-подобный отказ — главный
+    случай, ради которого метрика собирается.
     """
     if _WORKER_EXTRACTOR is None:  # pragma: no cover — защита от неверной сборки
         return ExtractedDoc(
@@ -973,6 +1087,7 @@ def _extract_worker(request: _ExtractRequest) -> ExtractedDoc:
         return _run_extract(extractor, request)
     finally:
         _trim_worker_arenas()
+        _write_worker_peak_rss(request.rss_dir)
 
 
 @dataclass
@@ -2145,6 +2260,7 @@ def _member_extract_request(
     fetched_at: str,
     lang: str | None,
     level: DocumentLevel,
+    rss_dir: str | None = None,
 ) -> _ExtractRequest:
     """B3/P4: payload экстракции члена — только примитивы, байты не передаются (I19).
 
@@ -2167,6 +2283,7 @@ def _member_extract_request(
         engine=None,
         route=_member_route(suffix),
         level=level,
+        rss_dir=rss_dir,
     )
 
 
@@ -2408,6 +2525,8 @@ def _build_corpus(
     container_for: Callable[[str | Path], ContainerPort | None] | None = None,
     pools: _ExtractPools,
     lifecycle: _PhaseLifecycle | None = None,
+    mem_budget_mb: int | None = None,
+    derive_extract_workers: bool = False,
 ) -> PhaseResult:
     """Ш5: собирает корпус из ``plan × urls`` и возвращает ``PhaseResult``.
 
@@ -2570,9 +2689,20 @@ def _build_corpus(
         **видимо**: каждый допущенный контейнер получает запись ``archive_observations``
         со статусом ``unreadable`` и причиной ``container_reader_unavailable`` (тихий
         пропуск запрещён).
+    :param mem_budget_mb: F0 — бюджет памяти прогона, MB, **явный вход** от composition root
+        (:func:`core.pipeline.resources.resolve_mem_budget_mb`). ``None`` → бюджета нет, окно
+        экстракции из него не выводится. Фаза окружение не читает: иначе тесты и расписание
+        стали бы функцией памяти хоста.
+    :param derive_extract_workers: F0 — выводить окно экстракции из бюджета, когда ось
+        ``crawl.extract_workers`` не объявлена ни на одном слое. ``True`` только для
+        локального экстрактора (процессный пул/inline в ядре); под ``split`` воркеры живут
+        на edge со своим бюджетом, поэтому флаг приходит ``False`` — его решает composition
+        root, а не фаза.
 
     Возвращает ``PhaseResult`` со ``status='ok'`` (даже при изолированных ошибках),
-    ``cells=[]`` (Ш5 не производит ячеек) и ``log_entries=[IndexBuild]`` (сборка + счётчики).
+    ``cells=[]`` (Ш5 не производит ячеек) и ``log_entries=[IndexBuild, ResourcesObservation]``
+    (сборка + счётчики; F0 — наблюдённые ресурсные факты фазы: расписание экстракции,
+    чанки на документ, пик воркеров).
 
     :raises ValueError: если ``urls`` задан, но не является отображением.
     """
@@ -4803,6 +4933,10 @@ def _build_corpus(
             app=crawl_app or CrawlConfig(),
             run=crawl_defaults,
             profiles=domain_profiles or {},
+            # F0: та же проводимость бюджета, что у остальных резолвов фазы (значение
+            # здесь не используется — читается только ``revalidate_max_documents``).
+            derive_extract_workers=derive_extract_workers,
+            mem_budget_mb=mem_budget_mb,
         ).revalidate_max_documents
 
     def _apply_revalidation_cap(
@@ -4872,7 +5006,10 @@ def _build_corpus(
                     app=crawl_app or CrawlConfig(),
                     run=crawl_defaults,
                     profiles=domain_profiles or {},
+                    derive_extract_workers=derive_extract_workers,
+                    mem_budget_mb=mem_budget_mb,
                 )
+                _note_scheduling(limits)
                 limits_cache[owner] = limits
             return limits
 
@@ -5010,6 +5147,49 @@ def _build_corpus(
     #: ``product_id -> True``, если партиция продукта физически зафиксирована
     #: (``build``/переиспользование). Строка ``index_manifest`` пишется только для них.
     physically_ok: dict[str, bool] = {}
+
+    # --- F0: наблюдаемость памяти и расписания (§4 F0) ----------------------- #
+    #: Сток пика памяти воркеров приходит **готовым** от composition root
+    #: (``{runs}/{run_id}/workers/{pid}.rss``): фаза не решает, собирается ли пик —
+    #: ``None`` у thread-пула (``split``) и у пула без прогона. Фаза только доставляет
+    #: путь в payload (:attr:`_ExtractRequest.rss_dir`) и читает максимум в конце.
+    worker_rss_dir: str | None = (
+        extraction_pool.worker_rss_dir if extraction_pool is not None else None
+    )
+    #: ``(url, chunk_count)`` по **каждому** документу сборки — вход распределения чанков
+    #: на документ (:func:`core.pipeline.resources.summarize_chunks_per_doc`). Набирается
+    #: на границе продукта из уже посчитанных ``ingest.docs``/``ingest.chunks``: никаких
+    #: дополнительных SQL-запросов на документ.
+    observed_documents: list[tuple[str, int]] = []
+    #: Наблюдённое расписание экстракции: максимум разрешённого окна по корням, максимум
+    #: рециклинга и признак «окно выведено из бюджета хотя бы на одном корне».
+    observed_extract_workers: int | None = None
+    observed_extract_max_tasks: int | None = None
+    observed_extract_derived = False
+
+    def _note_scheduling(limits: CrawlLimits) -> None:
+        """Запоминает разрешённое окно экстракции корня (F0, наблюдаемость расписания).
+
+        Максимум по корням, а не последнее значение: пул — фазовый по ключу
+        ``(уровень, окно)``, и фактическая ширина параллелизма фазы — самая широкая из
+        использованных. ``derived`` — «хотя бы на одном корне» (§2.10): тогда источник
+        расписания в метриках — бюджет памяти, а не воля оператора.
+        """
+        nonlocal observed_extract_workers, observed_extract_max_tasks
+        nonlocal observed_extract_derived
+        if limits.extract_workers is not None:
+            candidate = int(limits.extract_workers)
+            if observed_extract_workers is None or candidate > observed_extract_workers:
+                observed_extract_workers = candidate
+        if limits.extract_max_tasks_per_child is not None:
+            candidate_tasks = int(limits.extract_max_tasks_per_child)
+            if (
+                observed_extract_max_tasks is None
+                or candidate_tasks > observed_extract_max_tasks
+            ):
+                observed_extract_max_tasks = candidate_tasks
+        if limits.extract_workers_derived:
+            observed_extract_derived = True
 
     for product_id in products:
         product_started = time.perf_counter()
@@ -5151,7 +5331,10 @@ def _build_corpus(
                 app=crawl_app or CrawlConfig(),
                 run=crawl_defaults,
                 profiles=domain_profiles or {},
+                derive_extract_workers=derive_extract_workers,
+                mem_budget_mb=mem_budget_mb,
             )
+            _note_scheduling(limits)
             frontier = Frontier(
                 root_url, limits, scope_hosts=scope_hosts_by_product.get(pid, frozenset())
             )
@@ -5485,6 +5668,7 @@ def _build_corpus(
                                 fetched_at=page.fetched_at,
                                 lang=page.lang,
                                 level=level,
+                                rss_dir=worker_rss_dir,
                             ),
                         )
 
@@ -5749,6 +5933,8 @@ def _build_corpus(
                     cache_max_bytes=(
                         extract_cache.max_bytes if extract_cache is not None else None
                     ),
+                    # F0: сток пика памяти воркера (``None`` — пик не собирается).
+                    rss_dir=worker_rss_dir,
                 )
 
             def _inflight_fresh() -> int:
@@ -6812,6 +6998,18 @@ def _build_corpus(
         # меняет ни один ``pb``; ``composition_id`` по-прежнему выводится после всех
         # продуктов (он зависит от состава когорты).
         product_chunks = ingest.chunks
+        # F0: распределение чанков на документ — из **уже посчитанных** данных продукта
+        # (``ingest.docs``/``ingest.chunks``). Никаких SQL-запросов на документ: чанки и
+        # документы в памяти именно на этой границе, дальше они уходят в персистенцию.
+        product_chunk_counts: dict[str, int] = {}
+        for chunk in product_chunks:
+            product_chunk_counts[chunk.doc_id] = (
+                product_chunk_counts.get(chunk.doc_id, 0) + 1
+            )
+        for doc in ingest.docs:
+            observed_documents.append(
+                (doc.url, product_chunk_counts.get(doc.doc_id, 0))
+            )
         physical_ok = True
         if product_chunks:
             chunk_count += len(product_chunks)
@@ -7243,6 +7441,26 @@ def _build_corpus(
             "corpus: экстракция — trim арен (malloc_trim) в воркере после каждого "
             f"документа; документов через пул: {pools.completed}"
         )
+    # F0: наблюдённые ресурсные факты фазы — расписание экстракции, чанки на документ и
+    # пик воркеров пула (если он собирался). Пики RSS родителя по фазам меряет
+    # наблюдаемость (:mod:`core.pipeline.observability`), здесь их нет по построению.
+    log_entries.append(
+        ResourcesObservation(
+            chunks_per_doc=summarize_chunks_per_doc(observed_documents),
+            documents=len(observed_documents),
+            chunks=chunk_count,
+            extract_workers=observed_extract_workers,
+            extract_max_tasks_per_child=observed_extract_max_tasks,
+            scheduling_source=(
+                "derived" if observed_extract_derived else "declared"
+            ),
+            workers_peak_rss_mb=(
+                extraction_pool.peak_worker_rss_mb()
+                if extraction_pool is not None and worker_rss_dir
+                else None
+            ),
+        )
+    )
     return PhaseResult(
         status="ok",
         phase="corpus",

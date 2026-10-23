@@ -8,7 +8,9 @@
 * ``coverage_aggregate`` — Evidence Coverage (§6);
 * ``search_calls_by_phase`` — расход поискового бюджета (I23);
 * ``llm_calls``/``tokens`` — стоимость (M1/§15);
-* ``duration_by_phase`` — производительность.
+* ``duration_by_phase`` — производительность;
+* ``resources`` — F0: пики RSS по фазам, расписание экстракции, чанки на документ,
+  пик воркера и бюджет памяти (:mod:`core.pipeline.resources`).
 
 Принципы
 --------
@@ -107,6 +109,36 @@ def _normalize_crawl(crawl_counts: Mapping[str, Any] | None) -> dict[str, int]:
     return dict(sorted((str(key), int(value)) for key, value in crawl_counts.items()))
 
 
+def _round_floats(value: Any) -> Any:
+    """Рекурсивно округляет float до 1 знака (без «float-мусора» в метриках).
+
+    Целые, строки и ``None`` возвращаются как есть: округление — про дробные секунды и
+    MB, а не про счётчики. Списки сохраняют порядок (он может быть смыслом), словари
+    сортируются по ключу — детерминизм JSON (§R7).
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, float):
+        return round(value, 1)
+    if isinstance(value, Mapping):
+        return {str(key): _round_floats(value[key]) for key in sorted(value)}
+    if isinstance(value, (list, tuple)):
+        return [_round_floats(item) for item in value]
+    return value
+
+
+def _normalize_resources(resources: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Нормализует блок ``resources`` (F0) к детерминированному JSON-совместимому dict.
+
+    Блок собирается :func:`core.pipeline.resources.build_resources_block`; здесь только
+    гарантия формы: отсортированные ключи и округление до 1 знака. Отсутствие блока —
+    пустой dict (поле присутствует всегда, но нейтрально: «не измеряли» ≠ «ноль»).
+    """
+    if not resources:
+        return {}
+    return _round_floats(resources)
+
+
 def _normalize_crawl_truncation(
     crawl_truncation: Mapping[str, Any] | None,
 ) -> dict[str, Any]:
@@ -161,6 +193,10 @@ class RunMetrics:
     #: N4: сводка политического усечения краула (``truncated``/``truncated_reason``/
     #: ``truncated_products``/``pages_fetched``/``effective_limits``); пусто, если не усечён.
     crawl_truncation: dict[str, Any] = field(default_factory=dict)
+    #: F0: блок ``resources`` — пики RSS по фазам, разрешённое расписание экстракции,
+    #: распределение чанков на документ по семействам, пик воркера и бюджет памяти.
+    #: Пусто — ресурсы не измерялись (поле присутствует всегда, но нейтрально).
+    resources: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         """Плоский JSON-совместимый словарь метрик (для манифеста/логов)."""
@@ -174,6 +210,7 @@ class RunMetrics:
             "duration_by_phase": dict(self.duration_by_phase),
             "crawl": dict(self.crawl),
             "crawl_truncation": dict(self.crawl_truncation),
+            "resources": dict(self.resources),
         }
 
     def to_manifest_json(self) -> str:
@@ -220,6 +257,7 @@ def compute_metrics(
     tokens: Mapping[str, Any] | None = None,
     crawl_counts: Mapping[str, Any] | None = None,
     crawl_truncation: Mapping[str, Any] | None = None,
+    resources: Mapping[str, Any] | None = None,
 ) -> RunMetrics:
     """Собирает :class:`RunMetrics` прогона (04 §B.2, W12/T12.1).
 
@@ -238,6 +276,8 @@ def compute_metrics(
     :param crawl_truncation: сводка политического усечения краула (N4) — источник поля
         ``crawl_truncation`` (:func:`core.pipeline.crawl_session.truncation_summary``).
         ``None`` → пустой dict.
+    :param resources: блок ``resources`` (F0) — источник одноимённого поля
+        (:func:`core.pipeline.resources.build_resources_block`). ``None`` → пустой dict.
     """
     resolved = _resolve_cells(store, run_id, cells)
     if score_bundle is not None:
@@ -256,4 +296,5 @@ def compute_metrics(
         duration_by_phase=_normalize_durations(phase_durations),
         crawl=_normalize_crawl(crawl_counts),
         crawl_truncation=_normalize_crawl_truncation(crawl_truncation),
+        resources=_normalize_resources(resources),
     )

@@ -642,6 +642,8 @@ def build_phases(
     execution_contract_digest: str | None = None,
     axes: Any = None,
     declared_status_dict_version: str | None = None,
+    mem_budget_mb: int | None = None,
+    derive_extract_workers: bool = False,
 ) -> dict[str, PhaseFn]:
     """Возвращает реестр ``{phase_name: PhaseFn}`` для не-гейтовых фаз конвейера.
 
@@ -717,6 +719,14 @@ def build_phases(
         импортирует ``cli``.
     :param declared_status_dict_version: версия словаря статусов (декларированная ось);
         используется манифестом, только если ``run``/``inputs`` её не несут.
+    :param mem_budget_mb: F0 — бюджет памяти прогона, MB, разрешённый composition root
+        (:func:`core.pipeline.resources.resolve_mem_budget_mb`). Протягивается в Ш5 явным
+        параметром: фаза окружение не читает, иначе расписание/тесты стали бы функцией
+        памяти хоста. ``None`` → бюджета нет (окно экстракции из него не выводится).
+    :param derive_extract_workers: F0 — выводить окно экстракции из бюджета, когда ось
+        ``crawl.extract_workers`` не объявлена. ``True`` только для локального экстрактора;
+        под ``split`` — ``False`` (воркеры живут на edge со своим бюджетом). Решает
+        composition root, фаза лишь передаёт флаг в :func:`build_corpus`.
 
     Каждое замыкание детерминировано и не импортирует адаптеры; единственный
     межфазовый канал — замыкание ``holder`` (см. docstring модуля).
@@ -874,6 +884,10 @@ def build_phases(
             # B3: спуск в контейнеры — читатель инъектируется composition root'ом
             # (``container_any.container_for``); ``None`` → спуск не исполняется, но видимо.
             container_for=getattr(ctx.ports, "container", None),
+            # F0: бюджет памяти — **явный** вход composition root (фаза окружение не
+            # читает); ``derive_extract_workers`` решён там же по профилю зон.
+            mem_budget_mb=mem_budget_mb,
+            derive_extract_workers=derive_extract_workers,
         )
         _capture_index_build(holder, result)
         # 09 §8.5: переиспользование партиций — видимая оператору строка лога (не ошибка).

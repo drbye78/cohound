@@ -28,7 +28,9 @@
 Метрики прогона (04 §B.2) собираются :func:`write_run_metrics` в
 ``runs/{run_id}/metrics.json`` — детерминированный JSON (``sort_keys=True``,
 ``ensure_ascii=False``), в том числе при остановке на гейте (метрики отражают то, что
-реально отработало).
+реально отработало). Блок ``resources`` (F0) приходит готовым из
+:func:`core.pipeline.resources.build_resources_block`; здесь же измеряется пик RSS на
+конец каждой фазы (``VmHWM``).
 
 Принципы
 --------
@@ -53,6 +55,7 @@ from pathlib import Path
 from typing import Any
 
 from core.pipeline.metrics import compute_metrics
+from core.pipeline.resources import read_peak_rss_mb
 from core.pipeline.runner import Clock, PhaseFn, PhaseResult, RunContext
 from core.util.logging import PhaseLogger
 from core.util.security import sanitize_filename
@@ -70,10 +73,15 @@ class InstrumentedPhases:
     :param phases: новый словарь ``{phase: PhaseFn}`` — обёртки, делегирующие в оригинал.
     :param durations: карта ``{phase: seconds}`` (``time.perf_counter``), заполняется по мере
         исполнения обёрнутых фаз.
+    :param peak_rss_mb: карта ``{phase: peak MB}`` — ``VmHWM`` процесса на **конец** фазы
+        (F0). ``VmHWM`` кумулятивен, поэтому значение фазы — максимум по всем фазам до неё,
+        а не «сколько съела эта фаза»; дельты из high-water mark не выводятся. Ключ
+        отсутствует, если пик прочитать не удалось (метрика не выдумывается).
     """
 
     phases: dict[str, PhaseFn] = field(default_factory=dict)
     durations: dict[str, float] = field(default_factory=dict)
+    peak_rss_mb: dict[str, float] = field(default_factory=dict)
     _loggers: dict[str, PhaseLogger] = field(default_factory=dict, repr=False)
     _errors: list[str] = field(default_factory=list, repr=False)
 
@@ -103,6 +111,25 @@ def _safe_log(
         )
 
 
+def _note_peak(instrumented: InstrumentedPhases, phase: str) -> None:
+    """Фиксирует пик RSS на конец фазы; сбой чтения — не ошибка прогона (F0).
+
+    ``VmHWM`` кумулятивен: значение на конец фазы — максимум по всем фазам до неё. Это
+    ожидаемое поведение метрики, а не дефект: «сколько процесс занимал к этому моменту»
+    отвечает на вопрос «помещается ли прогон», а «дельта фазы» из high-water mark не
+    выводится вовсе.
+    """
+    try:
+        peak = read_peak_rss_mb()
+    except Exception as exc:  # noqa: BLE001 — наблюдаемость вторична к прогону
+        instrumented._errors.append(
+            f"{phase}: peak_rss: {type(exc).__name__}: {exc}"
+        )
+        return
+    if peak is not None:
+        instrumented.peak_rss_mb[phase] = peak
+
+
 def _instrument_phase(
     phase: str, fn: PhaseFn, instrumented: InstrumentedPhases
 ) -> PhaseFn:
@@ -115,6 +142,7 @@ def _instrument_phase(
             result = fn(ctx)
         except BaseException as exc:  # noqa: BLE001 — пробрасываем, зафиксировав тайминг
             instrumented.durations[phase] = time.perf_counter() - started
+            _note_peak(instrumented, phase)
             _safe_log(
                 instrumented,
                 phase,
@@ -124,6 +152,7 @@ def _instrument_phase(
             )
             raise
         instrumented.durations[phase] = time.perf_counter() - started
+        _note_peak(instrumented, phase)
         # ``skipped`` — легитимное «работы не было» (не аномалия): INFO, как ``ok``.
         # WARN остаётся за ``blocked``/``failed``.
         level = "INFO" if result.status in ("ok", "skipped") else "WARN"
@@ -202,6 +231,7 @@ def write_run_metrics(
     tokens: Mapping[str, Any] | None = None,
     crawl_counts: Mapping[str, Any] | None = None,
     crawl_truncation: Mapping[str, Any] | None = None,
+    resources: Mapping[str, Any] | None = None,
 ) -> Path:
     """Считает :class:`~core.pipeline.metrics.RunMetrics` и пишет ``runs/{run_id}/metrics.json``.
 
@@ -224,6 +254,9 @@ def write_run_metrics(
         ``crawl`` метрик; ``None`` → пустая карта.
     :param crawl_truncation: сводка политического усечения краула (N4) — источник поля
         ``crawl_truncation``; ``None`` → пустой dict (не выдумываем усечение).
+    :param resources: готовый блок ``resources`` (F0) —
+        :func:`core.pipeline.resources.build_resources_block`; ``None`` → пустой dict
+        (поле присутствует всегда, но нейтрально: «не измеряли» ≠ «ноль»).
     :returns: путь записанного ``metrics.json``.
     """
     metrics = compute_metrics(
@@ -237,6 +270,7 @@ def write_run_metrics(
         tokens=tokens,
         crawl_counts=crawl_counts,
         crawl_truncation=crawl_truncation,
+        resources=resources,
     )
     target = Path(out_dir) / sanitize_filename(run_id) / METRICS_FILENAME
     target.parent.mkdir(parents=True, exist_ok=True)
