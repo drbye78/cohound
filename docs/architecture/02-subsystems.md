@@ -160,7 +160,7 @@ products × doc_domains
     ── corpus_docs персистятся (retention); build_id чанков ещё None
   Pass B (index) на границе продукта (09 §8.1):
     → partition_build_id продукта (pb; продукт-скоупед, I17)
-    → EmbedderPort.embed(chunks)               # батч, локальная модель
+    → EmbedderPort.embed(chunks)               # весь продукт одним вызовом (не порциями — 10 §5.2)
     → IndexBuilderPort.build(chunks, vectors, meta) -> partition_build_id
     → corpus_chunks                            # сразу, «сначала диск, потом БД»
   после всех продуктов:
@@ -170,6 +170,11 @@ products × doc_domains
 
 `pipeline` **не работает с файлами индекса напрямую**: за запись `.npy`-шардов и tantivy отвечает
 `IndexBuilderPort`, за эмбеддинги — `EmbedderPort` (K3).
+
+**Память и durability стадий.** Что каждая стадия обязана держать в памяти, что теряется при
+гибели процесса и почему `split` не паритетен по извлечению — `10-extraction-pipeline-architecture.md`
+(§2 — as-built по шагам, §4 — дефекты, §5 — целевая форма). Здесь поток описан как он есть;
+`10` описывает, каким он должен быть.
 
 **Путь краула (§3.2).** За `CrawlerPort` стоят **три** адаптера, выбор — сменой адаптера
 (сам порт не меняется):

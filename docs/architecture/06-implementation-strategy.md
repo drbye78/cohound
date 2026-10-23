@@ -184,6 +184,7 @@ staging крупных артефактов отсутствует; (3) ось `
 | **W11** | Search-адаптер | `core/adapters/{search_yandex,search_glm}.py`, `core/pipeline/{serp_loop,search_log,discovery}.py` | ✅ код done; ⏳ живой SERP-раунд в прогоне кейса не выполнялся |
 | **W12** | Прод-хардненинг | `core/pipeline/{observability,metrics,adversarial,golden}.py`, `core/store/backup.py`, `tests/e2e/` | 🟡 partial: код done; ⏳ golden-full, §11.5-baseline, кейсы 2–5 не выполнены |
 | **W13** | DMZ / шов | `core/ports/gateway.py`, `core/adapters/remote_*.py`, `core/edge/*`, `core/config/deploy.py`, `contracts/seam/*` | ✅ done (+ планировщик краула, Phase 3) |
+| **W14** | Стадийная архитектура извлечения | проект: `10-extraction-pipeline-architecture.md` | ⛔ не начат (проект на ревью; группа A — память/запись, группа B — шов `extract` и lease) |
 
 **Cross-cutting (сквозные, ведутся постоянно):** нейтральность `core/` (§1.3), контур данных (§10),
 воспроизводимость/R7, документация-в-коммите.
@@ -473,6 +474,24 @@ staging крупных артефактов отсутствует; (3) ось `
   `core/ports/crawl_executor.py` + `core/adapters/remote_crawl_executor.py`; ветка `executor` в
   `core/pipeline/corpus.py` (split → шов, local → in-process). Операции `crawl/{submit,status,cancel,collect}`
   + `crawl/poll` — аддитивны (`schema_version` остаётся `"1"`, scope `crawl`).
+
+### W14 — Стадийная архитектура извлечения и пост-извлечения — ⛔ не начат (проект)
+
+- **Проект:** `10-extraction-pipeline-architecture.md`. Разделы §1–§4 — as-built и дефекты;
+  §5 — целевая форма, **не реализовано**.
+- **Зачем:** горизонтальное масштабирование и разные размещения стадий. Сейчас `split` не
+  паритетен по извлечению (пере-фетч, провенанс текста не привязан к ретененному артефакту,
+  члены контейнеров недоступны, ось `document_level` принимается и игнорируется), а память
+  стадий определяется корпусом, а не объявленным окном.
+- **Группа A (нейтрально к `run_id`):** гидртация top-k лексического индекса без зеркала
+  корпуса в RAM; `argpartition` до резолва метаданных в плотном поиске; освобождение
+  `ingest.chunks` после персистенции; `IndexBuild.docs` вне `PhaseResult`; провенанс спуска
+  по контейнеру; число воркеров из замера с публикацией чисел.
+- **Группа B (меняет форму):** общее content-addressed хранилище артефактов, шов
+  `extract/submit|collect` по `content_hash`, ось уровня в запросе извлечения,
+  lease/heartbeat + `interrupted`, `chunk_window`.
+- **Не меняет:** `methodology_version`, `SCHEMA_VERSION`, `STATE_SCHEMA_VERSION`; миграции
+  аддитивны.
 
 ### 5.13. Реестр стека: устаревшая строка `llama-cpp-python`
 
