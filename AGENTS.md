@@ -42,7 +42,8 @@ core/                         # ядро: категорийно-НЕЙТРАЛ�
                               #   crawl_sources.py (source routing), fetch_plan.py, archive_descent.py
                               #   (спуск в контейнеры), artifact_probe.py (допуск артефактов);
                               #   корпус/оценка: corpus.py, extract_cache.py, eval_cache.py, retrieve.py,
-                              #   evaluate.py, prompt.py, review.py, compute.py, report.py;
+                              #   evaluate.py, exhaustion.py (протокол исчерпания I3), prompt.py,
+                              #   review.py, compute.py, report.py;
                               #   эксперименты: experiments.py, evaluator_benchmark.py, golden.py;
                               #   инкрементальность: incremental.py, onboarding.py, state_sync.py,
                               #   run_identity.py, digests.py, composition.py;
@@ -318,9 +319,16 @@ Source routing краула (`crawl_sources.yaml`): директорные ис�
   absence-evidence (`check_absence_coverage`, зеркало в отчёте). Без неё заблокированный
   источник давал бы тонкий корпус, а оценщик — `❌`, опубликованный как доказательство
   отсутствия. `coverage=None` (нет записи покрытия) — проверка неприменима.
+  Подпись живёт в `packages/{case_id}/scope_attestation.yaml:attestations` (**per product**),
+  ставится `hound package scope attest --package … --product … --actor …`; прогон читает её
+  и передаёт в Ш6, использованные подписи видны в манифесте (`scope_attestations`).
+  В `EXECUTION_CONTRACT_FIELDS` не входит: авторизация, не измерение.
 - **I3** strict-`❓` → **полный** протокол исчерпания (`corpus`+`serp`+`registry`+`inheritance`,
   `check_unknown_exhaustion`) **или** `reviewed_by ≠ null`. Неполный протокол — **аномалия** отчёта,
-  не смена статуса (`❓` остаётся `❓`, I12).
+  не смена статуса (`❓` остаётся `❓`, I12). Протокол пишет Ш6 из **наблюдённых** фактов
+  (`core/pipeline/exhaustion.py`), и он называет **только реально исполненные** контуры:
+  «не смог дешёво установить» трактуется как «контур не исполнялся». Поэтому на прогоне без
+  SERP-контура `❓` остаётся аномалией — это верный сигнал, а не дефект, который надо заглушить.
 - **I4** failed → `status = null`, **не статус никогда**.
 - **I5** failed **входит** в знаменатель Coverage. Universe-режим (§6): знаменатель — `Σ w(scope)`
   (`scope_universe` = scope-параметры × продукты когорты), `pending`/отсутствующая ячейка — как

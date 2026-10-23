@@ -740,15 +740,17 @@ uv sync --frozen --extra dev
    `reports/` — не введена (не требуется).
 7. **Детерминизм инференса** (T9.2) — ✅ `core/adapters/llm_local.py` (seed/greedy; constrained
    decoding — забота [OI]-серверa).
-8. **Процедура/владелец `scope_attested_by`** для `exhaustive`-absence (W9) — ✅ механизм —
-   `scope_attestation.yaml` + линт-правило `absence-attestation`;
-   ⚠️ **производителя в прогоне нет**: `evaluate_phase(scope_attested_by=…)` принимает
-   значение, но никто его не передаёт, и в `gate_decisions` такого поля нет (`subject_digest`
-   полоса гейтов добавила, `scope_attested_by` — нет). То есть путь «человек аттестует →
-   значение попадает в absence-evidence» пока **design-only**: до появления писателя
-   `exhaustive`-absence для `parameter_reference`/`distribution_absence` в прогоне недостижим,
-   а I2c будет требовать аттестации, которую некому проставить. *Содержательное* владение
-   (кто и на каком основании) — доменный процесс, вне кода.
+8. **Процедура/владелец `scope_attested_by`** для `exhaustive`-absence (W9) — ✅ реализовано:
+   `scope_attestation.yaml` + линт-правило `absence-attestation`, плюс **канал до Ш6**.
+   Подписи лежат в артефакте пакета (`attestations`: `product_id`/`attested_by`/`attested_at`/
+   `snapshot_date`/`notes`), ставятся `hound package scope attest --package … --product … --actor …`,
+   читаются прогоном и передаются в `evaluate_phase(scope_attested_by=…)` **per product**
+   (покрытие per product, поэтому и подпись per product). Использованные подписи видны в
+   манифесте (`scope_attestations`), то есть опубликованный ❌ прослеживается к человеку.
+   Подпись **не** входит в `EXECUTION_CONTRACT_FIELDS` — это авторизация, не измерение
+   (тот же класс, что `reviewed_by`), иначе смена подписанта рвала бы межцикловый diff.
+   Продукт без подписи ведёт себя ровно как раньше: `❌` при неполном корпусе не публикуется.
+   *Содержательное* владение (кто и на каком основании) — доменный процесс, вне кода.
 
 **Вне рамок работы:** аттестация шва против конкретных корпоративных IDP/DLP/IDS (какой IDP, какой
 DLP, набор IDS-правил) — design-требования зафиксированы в `07` §8, но проверка соответствия

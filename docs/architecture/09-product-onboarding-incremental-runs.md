@@ -149,7 +149,7 @@
 | §8 | as-built | `pb_`/`cb_`, композиции, GC |
 | §9 | реализовано частично | строки «Cell/evidence» описывают design-only перенос |
 | §10 | **design-only** | нет `carry_forward_cells`, `cell_reuse_key`, `measurement_origin` |
-| §11 | реализовано частично | реальные колонки покрытия; `freshness` и всё на нём — **design-only** |
+| §11 | реализовано частично | реальные колонки покрытия; `scope_attested_by` — канал проложен (§11.5); `freshness` и всё на нём — **design-only** |
 | §12.1–§12.2, §12.5 | as-built | `execution_contract_digest`, `content_change` |
 | §12.3 | реализовано частично | lineage — только `state.db.run_lineage` |
 | §13 | реализовано частично | §13.3 (carry-forward) — design-only |
@@ -2626,9 +2626,23 @@ O7: `❌` публикуется только если:
 
 ### 11.5. `scope_attested_by` (as-built; `attestation` — design-only)
 
-- **As-built:** аттестация охвата — `packages/{case}/scope_attestation.yaml` (процедура
-  I2b, `hound package scope set|clear`) плюс per-instance `cell_evidence.scope_attested_by`
-  в run DB. Именно эти носители читает проверка I2b/I2c.
+- **As-built:** аттестация охвата — `packages/{case}/scope_attestation.yaml`: `procedure`
+  (процедура I2b, `hound package scope set|clear`) и `attestations` — **подписи per product**
+  (`product_id`, `attested_by`, `attested_at`, `snapshot_date`, `notes`), ставится
+  `hound package scope attest --package … --product … --actor …`. Плюс per-instance
+  `cell_evidence.scope_attested_by` в run DB. Именно эти носители читает проверка I2b/I2c.
+- **Канал проложен:** прогон читает подписи пакета и передаёт их в Ш6 как
+  `scope_attested_by` **per product** (покрытие per product ⇒ подпись per product).
+  Продукт без подписи ведёт себя ровно как раньше: `❌` при неполном корпусе не публикуется
+  (ячейка остаётся `pending`-кандидатом с `review_reason`).
+- **Почему не `gate_decisions`:** гейт per-run, а профиль/аттестация квази-константны
+  (недельные прогоны; смена когорты/ролевой матрицы — 2–5 раз в год). Переписывать подпись
+  каждый цикл значило бы создать трение, из-за которого её перестанут ставить. Актуальность
+  подписи ограничена `snapshot_date`, а не номером прогона.
+- **Провенанс:** использованные подписи попадают в манифест (`scope_attestations`,
+  `product_id → attested_by`), поэтому опубликованный `❌` прослеживается к человеку.
+  В `EXECUTION_CONTRACT_FIELDS` подпись **не входит** — авторизация, не измерение
+  (тот же класс, что `reviewed_by`): смена подписанта не даёт новый `run_id`.
 - **Design-only:** `state.db.attestation` с `doc_set_digest`/`coverage_digest` — таблица
   есть, **писателя нет** (§4.2), 0 строк в реальных БД. «Переносится только если digest'ы
   совпали; иначе `superseded_at`» — намерение.
