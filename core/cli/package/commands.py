@@ -56,6 +56,7 @@ from core.pipeline.package_admin import (
     add_module,
     add_param,
     add_role,
+    attest_scope,
     bump_version,
     clear_scope_attestation,
     create_package,
@@ -67,6 +68,7 @@ from core.pipeline.package_admin import (
     get_role,
     get_run_config,
     get_scope_attestation,
+    get_scope_attestations,
     list_baselines,
     list_golden,
     list_modules,
@@ -157,6 +159,7 @@ __all__ = [
     "cmd_package_cohort_set",
     "cmd_package_cohort_show",
     "cmd_package_scope_set",
+    "cmd_package_scope_attest",
     "cmd_package_scope_clear",
     "cmd_package_scope_show",
     "cmd_package_golden_list",
@@ -1083,6 +1086,23 @@ def cmd_package_scope_set(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def cmd_package_scope_attest(args: argparse.Namespace) -> int:
+    """``scope attest`` — подписать аттестацию охвата продукта (I2b/I2c)."""
+    result = _invoke(
+        lambda: attest_scope(
+            args.package,
+            args.product,
+            actor=args.actor,
+            notes=args.notes,
+            snapshot_date=args.snapshot_date,
+            attested_at=args.attested_at,
+            dry_run=args.dry_run,
+        )
+    )
+    _emit(args, _op_payload(result), _op_lines(result))
+    return EXIT_OK
+
+
 def cmd_package_scope_clear(args: argparse.Namespace) -> int:
     """``scope clear`` — удалить ``scope_attestation.yaml`` (I2b)."""
     result = _invoke(
@@ -1093,17 +1113,37 @@ def cmd_package_scope_clear(args: argparse.Namespace) -> int:
 
 
 def cmd_package_scope_show(args: argparse.Namespace) -> int:
-    """``scope show`` — процедура аттестации полноты источника (read-only, I2b).
+    """``scope show`` — процедура аттестации и подписи по продуктам (read-only, I2b/I2c).
 
-    Отсутствие процедуры → ``not found`` с :data:`EXIT_NOT_FOUND` (значение не выдумывается).
+    Отсутствие и процедуры, и подписей → ``not found`` с :data:`EXIT_NOT_FOUND`
+    (значение не выдумывается).
     """
     procedure = _invoke(lambda: get_scope_attestation(args.package))
-    if procedure is None:
+    attestations = _invoke(lambda: get_scope_attestations(args.package))
+    if procedure is None and not attestations:
         payload = {"ok": False, "found": False, "package": args.package}
         _emit(args, payload, [f"not found: scope_attestation.yaml отсутствует в {args.package}"])
         return EXIT_NOT_FOUND
-    payload = {"ok": True, "found": True, "procedure": procedure}
-    lines = [f"procedure: {procedure}"]
+    ordered = [attestations[key] for key in sorted(attestations)]
+    payload = {
+        "ok": True,
+        "found": True,
+        "procedure": procedure,
+        "attestations": [
+            item.model_dump(mode="json", exclude_none=True) for item in ordered
+        ],
+    }
+    lines = [f"procedure: {procedure}" if procedure is not None else "procedure: (не задана)"]
+    for item in ordered:
+        lines.append(
+            "  {pid}\t{by}\t{at}\tsnapshot={snapshot}\tnotes={notes}".format(
+                pid=item.product_id,
+                by=item.attested_by,
+                at=item.attested_at or "-",
+                snapshot=item.snapshot_date or "-",
+                notes=item.notes or "-",
+            )
+        )
     _emit(args, payload, lines)
     return EXIT_OK
 

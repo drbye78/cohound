@@ -66,9 +66,16 @@ from core.pipeline.evaluate import (
     DEFAULT_RETRIEVAL_PROFILE,
     evaluate_phase,
 )
+from core.pipeline.exhaustion import ExhaustionFacts, contours_run
 from core.pipeline.gates import WAIVER_REF_PREFIX
 from core.pipeline.inheritance import inheritance_wave
-from core.pipeline.registry import registry_wave
+from core.pipeline.normalize import load_scope_attestations
+from core.pipeline.precedence import collect_protected_cells
+from core.pipeline.registry import (
+    registry_covered_params,
+    registry_wave,
+    resolve_registry_ids,
+)
 from core.pipeline.report import build_manifest, write_reports
 from core.pipeline.retrieve import RetrievalProfile
 from core.pipeline.review import review_queue
@@ -467,6 +474,102 @@ def _phase_done(ctx: RunContext, run_id: str, phase: str) -> bool:
     return states.get(phase) == "ok"
 
 
+def _observed_exhaustion_facts(
+    ctx: RunContext,
+    plan: Any,
+    inputs: Any,
+    passports: Mapping[str, Any] | None,
+) -> ExhaustionFacts:
+    """Наблюдённые факты для I3-протокола (какие контуры **реально** исполнились).
+
+    Принцип: дешёвый факт или «не исполнялся». Занижение честно, завышение фабрикует
+    доказательство исчерпания. Поэтому:
+
+    * ``corpus`` — продукт, у которого **наблюдён** корпус: есть документ корпуса либо
+      строка покрытия с ``observed_sources > 0``. Строка покрытия сама по себе — не факт
+      исполнения: ``coverage_missing``/``no_seeds`` пишутся и для продукта, который не
+      краулили вовсе (``observed_sources == 0``), и объявить по ним «корпус исчерпан»
+      значило бы выдать отсутствие работы за исчерпание;
+    * ``registry`` — волна реестров отработала (durable ``ok``) **и** конфигурация
+      реально опрашивала реестры (фетчеры + покрытые параметры), иначе контура не было;
+    * ``inheritance`` — фаза отработала (durable ``ok``) **и** у продукта есть upstream
+      с совпадающей строкой ``baselines.csv`` (ровно условие, при котором волна Ш4
+      рассматривает продукт);
+    * ``serp`` — **пусто**: производителя SERP-раундов в прогоне нет (``run_serp_loop``
+      не вызывается), поэтому контур честно «не исполнялся»; бюджет/раунды не выдумываются.
+
+    ``yielded`` — дал ли исполненный контур хоть что-то (документы корпуса либо ячейка
+    высокого источника). Неизвестное не подменяется догадкой.
+    """
+    run_id = str(getattr(plan, "run_id", ""))
+    products = [str(product) for product in getattr(plan, "products", []) or []]
+
+    corpus_docs: set[str] = set()
+    try:
+        corpus_docs = {str(doc.product_id) for doc in ctx.store.iter_corpus_docs(run_id)}
+    except Exception:  # noqa: BLE001 — нет прогона/чужой store ⇒ факта нет
+        corpus_docs = set()
+    coverage_products: set[str] = set()
+    try:
+        coverage_products = {
+            str(row.product_id)
+            for row in ctx.store.iter_corpus_coverage(run_id)
+            # Строка покрытия без единого наблюдения — это «не краулили», а не
+            # «корпус исчерпан»: ``coverage_missing``/``no_seeds`` пишутся и для
+            # продукта вне работы. Засчитываем только наблюдённый корпус.
+            if int(getattr(row, "observed_sources", 0) or 0) > 0
+        }
+    except Exception:  # noqa: BLE001 — покрытие информационно, факт не выдумываем
+        coverage_products = set()
+    corpus_products = corpus_docs | coverage_products
+
+    registry_products: set[str] = set()
+    if _phase_done(ctx, run_id, "registry"):
+        fetchers = dict(getattr(ctx.ports, "registry_fetchers", None) or {})
+        if fetchers and registry_covered_params(
+            plan, resolve_registry_ids(plan, fetchers)
+        ):
+            # Волна Ш3 обходит **все** продукты плана при покрытых параметрах.
+            registry_products = set(products)
+
+    inheritance_products: set[str] = set()
+    if _phase_done(ctx, run_id, "inheritance"):
+        baselines = list(getattr(inputs, "baselines", None) or [])
+        for product in products:
+            passport = (passports or {}).get(product)
+            upstream = getattr(passport, "upstream", None)
+            if upstream is None:
+                continue
+            if any(row.baseline_id == upstream.baseline_id for row in baselines):
+                inheritance_products.add(product)
+
+    protected = collect_protected_cells(ctx.store, run_id)
+    protected_products = {owner for owner, _ in protected}
+    yielded = {
+        product: product in corpus_docs or product in protected_products
+        for product in products
+    }
+
+    return ExhaustionFacts(
+        contours_run=contours_run(
+            products,
+            corpus=corpus_products,
+            # SERP-контур не исполнялся: run_serp_loop не вызывается ни одной фазой.
+            serp=(),
+            registry=registry_products,
+            inheritance=inheritance_products,
+        ),
+        rounds_by_product={product: 0 for product in products},
+        budget_by_product={},
+        queries_by_product={},
+        yielded_by_product=yielded,
+        termination_by_product={},
+        exhausted_at=(
+            ctx.clock.now_iso() if getattr(ctx, "clock", None) is not None else None
+        ),
+    )
+
+
 def _gate_provenance(ctx: RunContext, plan: Any, inputs: Any) -> dict[str, Any]:
     """Политика гейтов и waiver-строки для манифеста (§13: процесс, не измерение).
 
@@ -501,6 +604,7 @@ def build_phases(
     inputs: RunInputs,
     plan: RunPlan,
     ports: Ports,
+    package_dir: str | None = None,
     urls: Mapping[str, list[str]] | None = None,
     passports: Mapping[str, Any] | None = None,
     out_dir: str = "runs",
@@ -548,6 +652,9 @@ def build_phases(
     :param inputs: нормализованные входы (``RunInputs``): ``run``/``package``/``baselines``.
     :param plan: детерминированный план прогона (``RunPlan``): ``run_id``/``params``/веса.
     :param ports: внедрённые порты (оценщик, индексы, краулер/экстрактор/чанкер, реестр).
+    :param package_dir: каталог пакета категории — источник per-product подписей
+        ``scope_attestation.yaml:attestations`` (I2b/I2c). ``None`` (модульный вызов) ⇒
+        подписей нет: канал остаётся недостижимым ровно как до этого параметра.
     :param urls: ``product_id → [url]`` для Ш5 (план URL не несёт — тонкий вход).
     :param passports: ``product_id → Passport`` для Ш4 (наследование).
     :param out_dir: базовый каталог отчётов (Ш9); composition root передаёт resolved
@@ -615,6 +722,13 @@ def build_phases(
     межфазовый канал — замыкание ``holder`` (см. docstring модуля).
     """
     holder: dict[str, Any] = {}
+
+    # I2b/I2c: подписи аттестации охвата **per product**. Отсутствие файла → {} (механизм
+    # опционален); невалидный присутствующий файл — ``ValueError`` (не глушим: подпись
+    # авторизует публикацию ❌, молчаливая подмена сделала бы её недоказуемой).
+    scope_attestations = (
+        load_scope_attestations(package_dir) if package_dir else {}
+    )
 
     # -- Ш1–Ш2: предполёт уже выполнен composition root (CLI) ---------------- #
     def normalize_phase(ctx: RunContext) -> PhaseResult:
@@ -794,7 +908,17 @@ def build_phases(
             profile=retrieval_profile,
             cutoff_k=cutoff_k,
             strict=strict,
+            # I2b/I2c: подпись per product (покрытие per product). Продукт без подписи
+            # остаётся недостижимым для ❌ — канал не «упрощает» отрицание.
+            scope_attested_by={
+                product_id: attestation.attested_by
+                for product_id, attestation in scope_attestations.items()
+            },
             eval_cache=eval_cache,
+            # I3/§5: факты других фаз — только наблюдённые (см. helper).
+            exhaustion_facts=_observed_exhaustion_facts(
+                ctx, plan, inputs, passports
+            ),
         )
 
     # -- Ш7: ревью (advisory-очередь, ничего не решает за человека) ---------- #
@@ -896,6 +1020,13 @@ def build_phases(
             # §13 (2.4.0): декларированные оси — тот же резолвер, что у контракта.
             axes=axes,
             declared_status_dict_version=declared_status_dict_version,
+            # I2b/I2c: подписи, которыми прогон авторизовал ❌ (product → actor). Только
+            # продукты плана: подпись продукта вне плана прогоном не использовалась.
+            scope_attestations={
+                product_id: attestation.attested_by
+                for product_id, attestation in scope_attestations.items()
+                if product_id in set(plan.products)
+            },
         )
         # §13/точки интеграции: политика гейтов и waiver-строки — в манифест, чтобы
         # делегирование гейта наружу было видно в артефакте, а не подразумевалось.

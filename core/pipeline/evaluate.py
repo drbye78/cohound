@@ -63,6 +63,7 @@ from core.pipeline.eval_cache import (
     EvalVerdictCache,
     build_eval_key,
 )
+from core.pipeline.exhaustion import ExhaustionFacts, build_protocols
 from core.pipeline.precedence import (
     PRECEDENCE_REVIEW_REASON,
     collect_protected_cells,
@@ -1002,8 +1003,9 @@ def evaluate_phase(
     profile: RetrievalProfile | str | None = None,
     cutoff_k: int | None = None,
     strict: bool = True,
-    scope_attested_by: str | None = None,
+    scope_attested_by: str | Mapping[str, str] | None = None,
     eval_cache: EvalVerdictCache | None = None,
+    exhaustion_facts: ExhaustionFacts | None = None,
 ) -> PhaseResult:
     """Фаза оценки Ш6 на уровне конвейера: продукты × параметры → ретривал → оценщик.
 
@@ -1031,10 +1033,17 @@ def evaluate_phase(
     :param cutoff_k: зафиксированный ``retrieval_cutoff_K``; ``None`` → :data:`DEFAULT_RETRIEVAL_CUTOFF_K`.
     :param strict: strict (failed при исчерпании) vs preliminary (кандидат).
     :param scope_attested_by: человеческая аттестация охвата для ``❌`` (Ф0); передаётся
-        вызывающим из решения гейта/ревью, никогда не выводится автоматически.
+        вызывающим из решения гейта/ревью, никогда не выводится автоматически. Строка —
+        прогон-широкая аттестация (прежняя семантика); mapping ``product_id → actor`` —
+        per-product подпись (покрытие per product), продукт без подписи ведёт себя ровно
+        как раньше (``❌`` недоказуем → ``failed``/кандидат).
     :param eval_cache: межпрогонный кэш сырых вердиктов оценщика; ``None`` ⇒ выключен
         (поведение байт-в-байт). Хит проходит все пост-шаги (валидация, Ф0, прецедент)
         заново — кэшируется только ``LLMCellOutput``, не ``Cell``.
+    :param exhaustion_facts: наблюдённые факты других фаз (какие контуры реально
+        исполнились, раунды/бюджет SERP). ``None`` ⇒ протоколы не пишутся (прежнее
+        поведение модульного вызова). Факты передаёт ``phases`` — Ш6 **не** догадывается,
+        что происходило в других фазах (I3/§5).
 
     При ``ports.evaluator is None`` фаза сразу ``failed``: без оценщика Ш6 не имеет смысла,
     а молчаливый ``ok`` скрыл бы неполноту карты.
@@ -1063,6 +1072,13 @@ def evaluate_phase(
     protected_cells = collect_protected_cells(store, run_id)
 
     for product_id in plan.products:
+        # I2b/I2c: подпись аттестации per product (покрытие per product). Строка —
+        # прежняя прогон-широкая семантика; продукт без подписи — как раньше.
+        attested = (
+            scope_attested_by.get(product_id)
+            if isinstance(scope_attested_by, Mapping)
+            else scope_attested_by
+        )
         protected_by_param = {
             param_id: cell
             for (owner_id, param_id), cell in protected_cells.items()
@@ -1147,10 +1163,27 @@ def evaluate_phase(
             retrievals_by_param=retrievals_by_param,
             protected_by_param=protected_by_param,
             coverage=coverage,
-            scope_attested_by=scope_attested_by,
+            scope_attested_by=attested,
             eval_cache=eval_cache,
         )
         cells.extend(outcome.cell for outcome in outcomes)
         errors.extend(batch_errors)
+
+    # I3/§5: протокол исчерпания для каждого машинного ``❓`` — из **наблюдённых** фактов,
+    # переданных вызывающим. Неполный протокол (например, SERP-контура ещё нет) — верный
+    # сигнал «❓ не обоснован»; отчёт покажет его аномалией, статус не меняется (I12).
+    if exhaustion_facts is not None:
+        for protocol in build_protocols(
+            cells,
+            run_id=run_id,
+            contours_run=exhaustion_facts.contours_run,
+            rounds_by_product=exhaustion_facts.rounds_by_product,
+            budget=exhaustion_facts.budget_by_product,
+            termination_by_product=exhaustion_facts.termination_by_product,
+            queries_by_product=exhaustion_facts.queries_by_product,
+            yielded_by_product=exhaustion_facts.yielded_by_product,
+            exhausted_at=exhaustion_facts.exhausted_at,
+        ):
+            store.save_exhaustion(protocol)
 
     return PhaseResult(status="ok", phase="evaluate", cells=cells, errors=errors)

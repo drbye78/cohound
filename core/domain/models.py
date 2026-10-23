@@ -203,6 +203,49 @@ class PackageManifest(BaseModel):
         return self
 
 
+class ScopeAttestation(BaseModel):
+    """Подпись человека под аттестацией охвата источника для одного продукта (I2b/I2c).
+
+    Артефакт пакета ``scope_attestation.yaml`` держит **процедуру** (строка ``procedure``)
+    и опциональный список ``attestations`` таких подписей. Аттестация **per product**,
+    потому что покрытие корпуса per product: подпись «справочник полон» для одного
+    продукта не делает полным покрытие другого.
+
+    Это тот же класс, что ``reviewed_by``: подпись авторизует заявление из тех же
+    измерений, но не меняет само измерение. Поэтому в ``EXECUTION_CONTRACT_FIELDS``
+    она не входит (как и политика гейтов) — смена подписанта не создаёт новый ``run_id``.
+
+    ``attested_at``/``snapshot_date`` — строки ISO: значение записывается как пришло
+    (дата снимка, к которому относится подпись), а не выводится из прогона.
+    """
+
+    model_config = _BASE
+
+    product_id: str
+    attested_by: str
+    attested_at: str | None = None
+    snapshot_date: str | None = None
+    notes: str | None = None
+
+    @field_validator("attested_at", "snapshot_date", mode="before")
+    @classmethod
+    def _iso_text(cls, value: Any) -> Any:
+        """Принимает YAML-``date``/``datetime`` как ISO-строку (детерминизм байтов)."""
+        if isinstance(value, (_dt.datetime, _dt.date)):
+            return value.isoformat()
+        return value
+
+    @model_validator(mode="after")
+    def _check(self) -> ScopeAttestation:
+        if not self.product_id:
+            raise ValueError("ScopeAttestation: product_id не может быть пустым")
+        if not self.attested_by:
+            raise ValueError(
+                "ScopeAttestation: attested_by обязателен (аттестация — человеческая)"
+            )
+        return self
+
+
 class CohortEntry(BaseModel):
     """cohort.yaml (§1.6).
 
@@ -1151,6 +1194,13 @@ class RunManifest(BaseModel):
     #: список и есть честная запись такого факта в артефакте (невидимый waiver —
     #: именно та ошибка, которой нельзя допускать).
     gate_waivers: list[dict[str, Any]] = Field(default_factory=list)
+    #: I2b/I2c: подписи аттестации охвата источника, **использованные** прогоном
+    #: (``product_id → attested_by``). Тот же класс, что ``reviewed_by``: подпись
+    #: авторизует ``❌`` из тех же измерений, но не меняет измерение. Поэтому в
+    #: ``EXECUTION_CONTRACT_FIELDS`` поле **не входит** (как и ``gate_policies``):
+    #: смена подписанта не создаёт новый ``run_id`` и не рвёт межцикловый diff.
+    #: Видно в манифесте, чтобы опубликованный ``❌`` был прослеживаем к человеку.
+    scope_attestations: dict[str, str] = Field(default_factory=dict)
 
 
 class Violation(BaseModel):

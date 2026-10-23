@@ -433,6 +433,12 @@ def main() -> int:
     section("Оси контроля краула (D1/D2)")
     check("crawl_control: precedence/scope/блэклист/усечение", lambda: _crawl_control_axes())
 
+    section("Производители evidence-механизмов (§5, I3/I2b/I2c)")
+    check(
+        "exhaustion: протокол называет только исполненные контуры (I3)",
+        lambda: _exhaustion_producer(),
+    )
+
     section("Артефакты-контейнеры (P6)")
     check(
         "archives: резолв осей/дайджест-нейтральность/классификатор",
@@ -4044,6 +4050,80 @@ def _crawl_probe() -> None:
                 f"словарь.{section} рассинхронизирован: словарь={sorted(data.get(section, []))}, "
                 f"схема={sorted(expected)}"
             )
+
+
+def _exhaustion_producer() -> None:
+    """I3/§5: производитель протокола называет **только исполненные** контуры.
+
+    Проверяет, что неполный протокол (только ``corpus``) даёт аномалию с перечнем
+    непройденных контуров, полный — не даёт, а ``❓`` с ``reviewed_by`` не аномален
+    (I3-OR). Терминация ``sufficient_evidence`` для ``❓`` запрещена.
+    """
+    from core.domain import REQUIRED_EXHAUSTION_CONTOURS, TerminationReason
+    from core.pipeline.exhaustion import build_protocols, contours_run
+    from core.pipeline.report import collect_i3_anomalies
+
+    cell = Cell(
+        run_id="r1",
+        product_id="p1",
+        param_id="x",
+        state=CellState.EVALUATED,
+        status=Status.UNKNOWN,
+    )
+    partial = build_protocols(
+        [cell], run_id="r1", contours_run=contours_run(["p1"], corpus=["p1"])
+    )
+    if [row.contours for row in partial] != [["corpus"]]:
+        raise AssertionError(
+            f"I3: протокол обязан назвать только исполненный corpus, получено "
+            f"{[row.contours for row in partial]}"
+        )
+    if partial[0].termination_reason is TerminationReason.SUFFICIENT_EVIDENCE:
+        raise AssertionError("I3: ❓ не может иметь sufficient_evidence")
+    partial_map = {(row.product_id, row.param_id): row for row in partial}
+    anomalies = collect_i3_anomalies([cell], partial_map)
+    if len(anomalies) != 1:
+        raise AssertionError(f"I3: ожидалась ровно одна аномалия, получено {anomalies}")
+    for missing in ("serp", "registry", "inheritance"):
+        if missing not in anomalies[0]["reason"]:
+            raise AssertionError(
+                f"I3: аномалия обязана назвать непройденный контур {missing!r}: "
+                f"{anomalies[0]['reason']}"
+            )
+
+    full = build_protocols(
+        [cell],
+        run_id="r1",
+        contours_run=contours_run(
+            ["p1"],
+            corpus=["p1"],
+            serp=["p1"],
+            registry=["p1"],
+            inheritance=["p1"],
+        ),
+    )
+    if sorted(full[0].contours) != sorted(REQUIRED_EXHAUSTION_CONTOURS):
+        raise AssertionError("I3: полный протокол обязан нести все четыре контура")
+    if collect_i3_anomalies(
+        [cell], {(row.product_id, row.param_id): row for row in full}
+    ):
+        raise AssertionError("I3: полный протокол не должен давать аномалию")
+
+    reviewed = cell.model_copy(update={"reviewed_by": "human-1"})
+    if collect_i3_anomalies([reviewed], None):
+        raise AssertionError("I3-OR: ❓ с reviewed_by не аномален (человеческая ветка)")
+
+    try:
+        build_protocols(
+            [cell],
+            run_id="r1",
+            contours_run=contours_run(["p1"], corpus=["p1"]),
+            termination_by_product={"p1": TerminationReason.SUFFICIENT_EVIDENCE},
+        )
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("I3: sufficient_evidence для ❓ обязан отвергаться")
 
 
 if __name__ == "__main__":

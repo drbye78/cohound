@@ -48,6 +48,7 @@ from core.domain.models import (
     PackageManifest,
     RoleDef,
     RunConfig,
+    ScopeAttestation,
 )
 from core.pipeline.package_io import (
     PackageArtifacts,
@@ -65,7 +66,11 @@ from core.pipeline.package_io import (
     save_artifact,
     validate_case_id,
 )
-from core.pipeline.normalize import cross_check, load_scope_attestation
+from core.pipeline.normalize import (
+    cross_check,
+    load_scope_attestation,
+    load_scope_attestations,
+)
 from core.util.security import sanitize_slug
 
 __all__ = [
@@ -102,7 +107,9 @@ __all__ = [
     "update_cohort",
     "get_cohort",
     "get_scope_attestation",
+    "get_scope_attestations",
     "set_scope_attestation",
+    "attest_scope",
     "clear_scope_attestation",
     "list_golden",
     "get_run_config",
@@ -198,6 +205,27 @@ def _load(package_dir: str | Path) -> PackageArtifacts:
     return artifacts
 
 
+def _scope_attestation_payload(artifacts: PackageArtifacts) -> Any:
+    """Данные ``scope_attestation.yaml``: строка процедуры либо словарь с подписями.
+
+    Пока подписей нет — возвращается ровно строка процедуры, чтобы файл оставался
+    байт-в-байт прежним (обратная совместимость). С подписями — канонический словарь
+    ``{procedure?, attestations}``; подписи отсортированы по ``product_id``.
+    """
+    if not artifacts.scope_attestations:
+        return artifacts.scope_attestation
+    payload: dict[str, Any] = {}
+    if artifacts.scope_attestation:
+        payload["procedure"] = artifacts.scope_attestation
+    payload["attestations"] = [
+        attestation.model_dump(mode="json", exclude_none=True)
+        for attestation in sorted(
+            artifacts.scope_attestations, key=lambda item: item.product_id
+        )
+    ]
+    return payload
+
+
 def _artifact_data(artifacts: PackageArtifacts, name: str) -> Any:
     """Данные артефакта по имени для :func:`save_artifact`."""
     return {
@@ -207,7 +235,7 @@ def _artifact_data(artifacts: PackageArtifacts, name: str) -> Any:
         "cohort": artifacts.cohort,
         "golden": artifacts.golden,
         "domain_profiles": artifacts.domain_profiles,
-        "scope_attestation": artifacts.scope_attestation,
+        "scope_attestation": _scope_attestation_payload(artifacts),
         "run": artifacts.run,
     }[name]
 
@@ -1549,6 +1577,97 @@ def get_scope_attestation(package_dir: str | Path) -> str | None:
     присутствующий ``scope_attestation.yaml`` поднимает :class:`ValueError`.
     """
     return load_scope_attestation(package_dir)
+
+
+def get_scope_attestations(package_dir: str | Path) -> dict[str, ScopeAttestation]:
+    """Читает подписи аттестации охвата по продуктам (read-only, I2b/I2c).
+
+    Отсутствие файла/подписей → ``{}`` (механизм опционален). Невалидный
+    присутствующий файл поднимает :class:`ValueError`.
+    """
+    return load_scope_attestations(package_dir)
+
+
+def attest_scope(
+    package_dir: str | Path,
+    product_id: str,
+    *,
+    actor: str,
+    notes: str | None = None,
+    snapshot_date: str | None = None,
+    attested_at: str | None = None,
+    dry_run: bool = False,
+) -> OpResult:
+    """Ставит/обновляет подпись аттестации охвата **одного продукта** (I2b/I2c).
+
+    Подпись per product, потому что покрытие корпуса per product: аттестация одного
+    продукта не делает полным покрытие другого. Запись детерминирована (сортировка по
+    ``product_id``, стабильный порядок ключей) и идемпотентна: повтор с теми же
+    ``actor``/``notes``/``snapshot_date`` сохраняет прежний ``attested_at`` и даёт
+    байт-идентичный файл.
+
+    :param actor: человек, ставящий подпись (пустой запрещён — аттестация человеческая).
+    :param notes: свободная заметка к подписи.
+    :param snapshot_date: дата снимка, к которому относится подпись (ISO-строка).
+    :param attested_at: явная метка времени; ``None`` → текущая UTC (при новой подписи).
+    :param dry_run: показать проспективный результат, не записывая файл.
+    :raises PackageAdminError: пустой ``actor``, неизвестный ``product_id`` (kind=usage),
+        либо новые блокирующие нарушения линта (kind=blocked).
+    """
+    if not actor or not actor.strip():
+        raise PackageAdminError(
+            "attestation требует непустого actor (человек)", kind="usage"
+        )
+    product = (product_id or "").strip()
+    if not product:
+        raise PackageAdminError("product_id не может быть пустым", kind="usage")
+    artifacts = _load(package_dir)
+    known = (
+        {entry.product_id for entry in artifacts.cohort.entries}
+        if artifacts.cohort is not None
+        else set()
+    )
+    if known and product not in known:
+        raise PackageAdminError(
+            f"неизвестный product_id {product!r}: его нет в cohort.yaml", kind="usage"
+        )
+
+    existing = {item.product_id: item for item in artifacts.scope_attestations}
+    current = existing.get(product)
+    note_text = (notes or "").strip() or None
+    snapshot = (snapshot_date or "").strip() or None
+    actor_text = actor.strip()
+    if (
+        current is not None
+        and current.attested_by == actor_text
+        and current.notes == note_text
+        and current.snapshot_date == snapshot
+    ):
+        # Идемпотентность: та же подпись не переписывает ``attested_at``.
+        entry = current
+    else:
+        entry = ScopeAttestation(
+            product_id=product,
+            attested_by=actor_text,
+            attested_at=(attested_at or "").strip() or _now(),
+            snapshot_date=snapshot,
+            notes=note_text,
+        )
+    artifacts.scope_attestations = sorted(
+        [item for item in artifacts.scope_attestations if item.product_id != product]
+        + [entry],
+        key=lambda item: item.product_id,
+    )
+    before = prospective_lint(artifacts)
+    return _finalize(
+        package_dir,
+        artifacts,
+        before,
+        ["scope_attestation"],
+        op="scope-attest",
+        actor=actor,
+        dry_run=dry_run,
+    )
 
 
 def set_scope_attestation(

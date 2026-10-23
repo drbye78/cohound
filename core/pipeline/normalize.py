@@ -40,12 +40,14 @@ from core.domain.models import (
     GoldenRow,
     PackageManifest,
     RunConfig,
+    ScopeAttestation,
 )
 
 __all__ = [
     "RunInputs",
     "load_inputs",
     "load_scope_attestation",
+    "load_scope_attestations",
     "cross_check",
     "SCOPE_ATTESTATION_FILE",
 ]
@@ -106,6 +108,93 @@ def load_scope_attestation(package_dir: str | Path) -> str | None:
         return None
     text = str(raw).strip()
     return text or None
+
+
+def _known_product_ids(package_dir: Path) -> set[str] | None:
+    """Продукты пакета из ``cohort.yaml``; ``None`` — когорты нет (проверять не по чему)."""
+    cohort_path = package_dir / "cohort.yaml"
+    if not cohort_path.is_file():
+        return None
+    try:
+        cohort = load_cohort(cohort_path)
+    except (ValueError, OSError):
+        # Когорта не читается — её разберёт обязательный путь загрузки; здесь не
+        # подменяем ошибку и не выдумываем «продукт известен».
+        return None
+    return {entry.product_id for entry in cohort.entries}
+
+
+def load_scope_attestations(
+    package_dir: str | Path,
+) -> dict[str, ScopeAttestation]:
+    """Читает опциональные подписи аттестации охвата из ``scope_attestation.yaml`` (I2b/I2c).
+
+    Формат (обратная совместимость: ``procedure`` остаётся, ``attestations`` опционален)::
+
+        procedure: "описание процедуры аттестации полноты источника"
+        attestations:
+          - product_id: p1
+            attested_by: analyst
+            attested_at: "2026-01-01T00:00:00+00:00"
+            snapshot_date: "2026-01-01"
+            notes: "сверено со справочником"
+
+    Отсутствие файла или ключа ``attestations`` → ``{}``: механизм опционален, его
+    отсутствие не ошибка (ровно как у ``load_scope_attestation``).
+
+    :raises ValueError: корень не словарь; ``attestations`` не список; элемент не
+        словарь/невалиден; пустой ``attested_by``; дубликат ``product_id``; продукт,
+        которого нет в ``cohort.yaml`` (если когорта читается).
+    """
+    path = Path(package_dir) / SCOPE_ATTESTATION_FILE
+    if not path.exists():
+        return {}
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except OSError as exc:  # noqa: BLE001 — понятная ошибка важнее типа
+        raise ValueError(f"не удалось прочитать {path}: {exc}") from exc
+    except yaml.YAMLError as exc:
+        raise ValueError(f"некорректный YAML в {path}: {exc}") from exc
+    if not isinstance(data, dict):
+        raise ValueError(
+            f"{SCOPE_ATTESTATION_FILE}: ожидался YAML-словарь, "
+            f"получено {type(data).__name__}"
+        )
+    raw = data.get("attestations")
+    if raw is None:
+        return {}
+    if not isinstance(raw, list):
+        raise ValueError(
+            f"{SCOPE_ATTESTATION_FILE}: attestations обязан быть списком, "
+            f"получено {type(raw).__name__}"
+        )
+
+    known = _known_product_ids(Path(package_dir))
+    result: dict[str, ScopeAttestation] = {}
+    for index, item in enumerate(raw):
+        if not isinstance(item, dict):
+            raise ValueError(
+                f"{SCOPE_ATTESTATION_FILE}: attestations[{index}] обязан быть словарём, "
+                f"получено {type(item).__name__}"
+            )
+        try:
+            attestation = ScopeAttestation.model_validate(item)
+        except ValueError as exc:
+            raise ValueError(
+                f"{SCOPE_ATTESTATION_FILE}: attestations[{index}]: {exc}"
+            ) from exc
+        if attestation.product_id in result:
+            raise ValueError(
+                f"{SCOPE_ATTESTATION_FILE}: дубликат product_id "
+                f"{attestation.product_id!r} в attestations"
+            )
+        if known is not None and attestation.product_id not in known:
+            raise ValueError(
+                f"{SCOPE_ATTESTATION_FILE}: неизвестный product_id "
+                f"{attestation.product_id!r} (нет в cohort.yaml)"
+            )
+        result[attestation.product_id] = attestation
+    return result
 
 
 def load_inputs(run_yaml_path: str | Path, package_dir: str | Path) -> RunInputs:

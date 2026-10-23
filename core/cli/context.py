@@ -1839,6 +1839,8 @@ def _resolve_phases(
         "inputs": inputs,
         "plan": plan,
         "ports": ports,
+        # I2b/I2c: каталог пакета — источник per-product подписей scope_attestation.yaml.
+        "package_dir": getattr(args, "package", None),
         "deploy_profile": deploy_profile,
         "edge_schema_version": edge_schema_version,
         "edge_capabilities": edge_capabilities,

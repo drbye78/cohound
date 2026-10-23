@@ -62,9 +62,15 @@ from core.domain.models import (
     ModuleDef,
     PackageManifest,
     RunConfig,
+    ScopeAttestation,
 )
 from core.pipeline.lint import LintReport, lint_run_inputs
-from core.pipeline.normalize import RunInputs, cross_check, load_scope_attestation
+from core.pipeline.normalize import (
+    RunInputs,
+    cross_check,
+    load_scope_attestation,
+    load_scope_attestations,
+)
 from core.util.atomic_write import atomic_write_text as _atomic_write_text
 from core.util.text_utils import normalize_cyrillic
 
@@ -141,6 +147,9 @@ class PackageArtifacts:
     domain_profiles: dict[str, DomainProfile] = field(default_factory=dict)
     crawl_sources: CrawlSourcesConfig = field(default_factory=CrawlSourcesConfig)
     scope_attestation: str | None = None
+    #: Подписи аттестации охвата по продуктам (``scope_attestation.yaml:attestations``).
+    #: Пусто — механизм не использован (опционален, I2b/I2c).
+    scope_attestations: list[ScopeAttestation] = field(default_factory=list)
     run: RunConfig | None = None
 
 
@@ -554,6 +563,12 @@ def load_artifacts(package_dir: str | Path) -> PackageArtifacts:
         artifacts.crawl_sources = load_crawl_sources(crawl_file)
 
     artifacts.scope_attestation = load_scope_attestation(base)
+    artifacts.scope_attestations = [
+        attestation
+        for _, attestation in sorted(
+            load_scope_attestations(base).items(), key=lambda item: item[0]
+        )
+    ]
 
     run_file = base / "run.yaml"
     if run_file.is_file():
@@ -735,9 +750,15 @@ def save_artifact(package_dir: str | Path, name: str, data: Any) -> Path:
             path, _dump_yaml(data.model_dump(mode="json", exclude_none=True))
         )
     if name == "scope_attestation":
-        if not isinstance(data, str):
-            raise ValueError("scope_attestation: ожидалась строка процедуры")
-        return atomic_write_text(path, _dump_yaml({"procedure": data}))
+        # Обратная совместимость: строка — «только процедура» (байты как раньше).
+        if isinstance(data, str):
+            return atomic_write_text(path, _dump_yaml({"procedure": data}))
+        if isinstance(data, dict):
+            return atomic_write_text(path, _dump_yaml(data))
+        raise ValueError(
+            "scope_attestation: ожидалась строка процедуры или словарь "
+            "{procedure, attestations}"
+        )
 
     rows = list(data)
     if name == "catalog":

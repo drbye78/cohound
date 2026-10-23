@@ -555,6 +555,7 @@ def build_manifest(
     execution_contract_digest: str | None = None,
     axes: Any = None,
     declared_status_dict_version: str | None = None,
+    scope_attestations: Mapping[str, str] | None = None,
 ) -> RunManifest:
     """Собирает полностью заполненный :class:`RunManifest` (R7/§13) фазы Ш9.
 
@@ -602,6 +603,11 @@ def build_manifest(
     соответствующие поля есть в текущей схеме :class:`RunManifest` (defensive: иначе
     значения уходят в ``edge_capabilities``), что сохраняет совместимость при разносе
     правок между лейнами.
+
+    * I2b/I2c — ``scope_attestations`` (``product_id → attested_by``): подписи, которыми
+      прогон авторизовал ``❌``. Информационный провенанс того же класса, что
+      ``reviewed_by``: в ``EXECUTION_CONTRACT_FIELDS`` **не входит** (авторизация, не
+      измерение), поэтому смена подписанта не даёт новый ``run_id``.
 
     Функция детерминирована: все встраиваемые JSON-фрагменты сериализуются
     ``sort_keys=True`` (R7/§13), списки нормализуются сортировкой; единственный
@@ -907,6 +913,9 @@ def build_manifest(
         # 09 §12.5: готовый отпечаток условий измерения (не пересчитывается здесь).
         execution_contract_digest=execution_contract_digest,
         snapshot_date=snapshot_date,
+        # I2b/I2c: подписи, которыми прогон авторизовал ❌ (product → actor). В
+        # ``EXECUTION_CONTRACT_FIELDS`` не входят: это авторизация, не измерение.
+        scope_attestations=dict(scope_attestations or {}),
         **extra,
     )
 
@@ -1265,11 +1274,18 @@ def collect_i3_anomalies(
     Возвращает детерминированный (по ``product_id, param_id``) список записей
     ``{"product_id", "param_id", "reason"}``. Это **наблюдения**, не изменение статуса
     ячейки: ``❓`` остаётся ``❓`` (I12 — ❓ никогда не трактуется как ❌).
+
+    I3 — **дизъюнкция**: полный протокол **или** ``reviewed_by ≠ null``. Человеческая
+    подпись уже удовлетворяет I3, поэтому её ``❓`` не аномалия (протокол при этом
+    остаётся фактом и виден в ``nda_questions.csv``).
     """
     exhaustions = exhaustions or {}
     anomalies: list[dict[str, Any]] = []
     for cell in _cell_list(cells):
         if getattr(cell, "status", None) is not Status.UNKNOWN:
+            continue
+        if getattr(cell, "reviewed_by", None):
+            # I3-OR (§2.3): reviewed_by ≠ null — человеческая ветка исчерпания.
             continue
         key = (str(cell.product_id), str(cell.param_id))
         reason = _i3_violations(cell, exhaustions.get(key))
