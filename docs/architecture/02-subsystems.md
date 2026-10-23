@@ -151,19 +151,21 @@ report(run_id)                            # Ш9
 build_corpus(plan, crawler, extractor, chunker, embedder: EmbedderPort,
              index_builder: IndexBuilderPort, store)         # K3
 products × doc_domains
-  Pass A (ingest):
+  Pass A (ingest) по продукту:
     → resolve_fetch_plan(url, domain_profiles, explicit)  # pipeline: FetchPlan (fetch/extract/strategy/wait_for/rate_limit)
     → CrawlerPort.fetch(url, plan)             # сырые байты → corpus_raw/{product}/{hash}.bin
     → ExtractorPort.extract(page, plan.extract)  # auto | html (trafilatura) | text/md | epub | document (docling)
     → dedup(content_hash)                      # повтор перепечаток не индексируется
     → ChunkerPort.chunk(doc)                   # heading_path, context_prefix
     ── corpus_docs персистятся (retention); build_id чанков ещё None
-  финализация partition_build_id на продукт + composition_id по составу (09 §8.1)
-  Pass B (index):
+  Pass B (index) на границе продукта (09 §8.1):
+    → partition_build_id продукта (pb; продукт-скоупед, I17)
     → EmbedderPort.embed(chunks)               # батч, локальная модель
     → IndexBuilderPort.build(chunks, vectors, meta) -> partition_build_id
+    → corpus_chunks                            # сразу, «сначала диск, потом БД»
+  после всех продуктов:
     → IndexBuilderPort.commit()                # .npy-шарды + tantivy (атомарно)
-    → corpus_chunks + index_manifest (одна запись на продукт-партицию)
+    → composition_id + index_manifest (одна запись на продукт-партицию) + композиция на диске
 ```
 
 `pipeline` **не работает с файлами индекса напрямую**: за запись `.npy`-шардов и tantivy отвечает

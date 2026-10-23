@@ -70,11 +70,14 @@ id: ретривал-конфиг не меняет чанкинг/вектор�
 ``_ProductIngest`` в памяти; ``corpus_docs`` персистятся **инкрементально** — сразу при
 коммите каждого документа (retention-провенанс не зависит от сборки), поэтому жёсткое
 убийство теряет максимум документ «в полёте», а не весь продукт; ``build_id`` чанков пока
-``None``. После Pass A выводятся per-product ``partition_build_id`` и ``composition_id``
-(``runs.index_build_id``). Pass B (index) проставляет ``build_id = pb``, строит
-``IndexManifestEntry`` и либо переиспользует уже зафиксированную партицию (ноль эмбеддингов,
-09 §8.5), либо вызывает ``_embed_and_build``; при успехе персистятся ``corpus_chunks`` +
-``index_manifest`` («сначала диск, потом БД»), а после фиксации **всех** членов пишется
+``None``. Pass B (index) идёт **на границе каждого продукта**, сразу после его Pass A:
+выводятся ``partition_build_id`` (входы — только чанки/документы этого продукта, ``pb``
+продукт-скоупед, I17), ``build_id = pb`` проставляется чанкам, партиция либо
+переиспользуется (ноль эмбеддингов, 09 §8.5), либо собирается ``_embed_and_build``; при
+успехе **сразу** персистятся ``corpus_chunks`` («сначала диск, потом БД»). Иначе смерть на
+N-м продукте уничтожала бы посчитанную, но не персистентную работу предыдущих. Только
+после **всех** продуктов (ибо он зависит от состава когорты) выводится ``composition_id``
+(``runs.index_build_id``), пишутся строки ``index_manifest`` (их PK включает композицию) и
 иммутабельная композиция ``_compositions/{cid}.json``. Никакого round/parent-чейнинга.
 
 **Durable-краул (D3/L1a).** При наличии ``store`` и ``run_id`` фаза ведёт **сеанс краула**
@@ -90,10 +93,13 @@ id: ретривал-конфиг не меняет чанкинг/вектор�
 **Порядок «сначала диск, потом БД».** Физическая продукт-партиция авторитетна. Пока
 ``index_builder.build`` не завершился успешно, фаза **не** пишет ``corpus_chunks``/
 ``index_manifest`` в БД: иначе реестр заявлял бы сборку, которой нет (или не совпадает с
-иммутабельной партицией на диске). Если ``build`` отказал (в т.ч. ``ImmutableBuildError``
-при попытке изменить уже зафиксированную сборку, K2/§13), ``corpus_docs`` уже
-персистенчены инкрементально (retention), но ``corpus_chunks``/``index_manifest`` остаются
-неизменными, а
+иммутабельной партицией на диске). Запись разделена по времени: ``corpus_chunks`` — сразу
+на границе продукта (после успешного ``build``/переиспользования его партиции),
+``index_manifest`` — после всех продуктов (PK строки включает ``composition_id``), и только
+для партиций, физически зафиксированных. Если ``build`` отказал (в т.ч.
+``ImmutableBuildError`` при попытке изменить уже зафиксированную сборку, K2/§13),
+``corpus_docs`` уже персистенчены инкрементально (retention), но ``corpus_chunks``/
+``index_manifest`` по этому продукту остаются неизменными, а
 отказ попадает в ``errors`` с указанием, что изменение корпуса требует нового
 ``run_id``/раунда. Это зеркалит порядок в ``serp_loop`` (build → ``save_index_manifest``).
 
@@ -160,6 +166,7 @@ from core.domain import (
     CrawlItemStatus,
     CrawlRunConfig,
     CrawlSessionItem,
+    CrawlSessionStatus,
     CrawlStrategy,
     DocumentLevel,
     FailureKind,
@@ -1176,9 +1183,13 @@ class IndexBuild:
 class _ProductIngest:
     """Промежуточный результат Pass A (ingest) по одному продукту.
 
-    Копит ``docs`` (retention + провенанс экстракции) и ``chunks`` **до** фиксации
-    ``index_build_id``. ``build_id`` чанков остаётся ``None``; ``corpus_chunks``/
-    ``index_manifest`` не пишутся до успешного физического ``build`` (Pass B).
+    Копит ``docs`` (retention + провенанс экстракции) и ``chunks``. ``chunks``
+    персистятся на границе продукта (Pass B, «сначала диск, потом БД»); ``docs`` живут
+    до конца фазы, потому что ``PhaseResult`` их возвращает.
+
+    Граница честности: копление — **память, а не durability**. Персистенция на границе
+    продукта переживает падение, но чанки всех продуктов всё равно остаются в RAM до
+    конца фазы (их держит этот объект), поэтому пик памяти переносом записи не снижается.
     """
 
     product_id: str
@@ -1571,33 +1582,59 @@ def _persist_docs(
             errors.append(f"upsert_corpus_doc({doc.doc_id}): {type(exc).__name__}: {exc}")
 
 
-def _persist_chunks_and_manifest(
+def _persist_chunks(
     store: Any,
     chunks: list[CorpusChunk],
-    entry: IndexManifestEntry | None,
     errors: list[str],
 ) -> bool:
-    """Пишет ``corpus_chunks`` → ``index_manifest`` (порядок: FK ``doc_id``).
+    """Пишет ``corpus_chunks`` **одного** продукта (FK ``doc_id`` — документы уже в БД).
 
-    Вызывается **только** когда физическая продукт-партиция реально зафиксирована на диске
-    («disk first, DB second»): реестр не должен заявлять сборку, которой нет (K2/§13).
-    Каждая запись обёрнута в try/except: сбой фиксируется в ``errors`` и не прерывает
-    обработку остальных продуктов (контракт изоляции фаз, ``runner.py``).
+    Вызывается **только** когда физическая продукт-партиция этого продукта реально
+    зафиксирована на диске («disk first, DB second»): реестр не должен заявлять сборку,
+    которой нет (K2/§13). Вызывается **сразу** на границе продукта, а не после всех
+    продуктов: иначе смерть на N-м продукте уничтожала бы посчитанные, но не
+    персистентные чанки предыдущих.
 
-    :returns: ``True`` — строки записаны (или store отсутствует); ``False`` — хотя бы одна
-        запись не удалась. Композиция пишется только при ``True`` для **всех** членов:
-        иначе она ссылалась бы на партицию, которой нет в реестре прогона.
+    Сбой обёрнут в try/except: фиксируется в ``errors`` и не прерывает обработку
+    остальных продуктов (контракт изоляции фаз, ``runner.py``).
+
+    :returns: ``True`` — строки записаны (или store отсутствует); ``False`` — запись
+        не удалась. Композиция пишется только при ``True`` для **всех** членов: иначе она
+        ссылалась бы на партицию, которой нет в реестре прогона.
+    """
+    if store is None:
+        return True
+    if not chunks:
+        return True
+    try:
+        store.add_chunks_batch(chunks)
+    except Exception as exc:  # noqa: BLE001
+        errors.append(f"add_chunks_batch: {type(exc).__name__}: {exc}")
+        return False
+    return True
+
+
+def _persist_manifest(
+    store: Any,
+    entries: Sequence[IndexManifestEntry],
+    errors: list[str],
+) -> bool:
+    """Пишет ``index_manifest`` — строки продуктов, чьи партиции уже на диске.
+
+    Отдельно от :func:`_persist_chunks`, потому что PK ``index_manifest`` включает
+    ``index_build_id`` (композицию когорты), а она выводится только после **всех**
+    продуктов. Порядок «disk first, DB second» (K2/§13) сохраняется: вызывается после
+    того, как чанки продуктов персистентны и их партиции физически зафиксированы;
+    вызывающий передаёт **только** те записи, для которых ``build``/переиспользование
+    отчитались успехом.
+
+    :returns: ``True`` — строки записаны (или store отсутствует); ``False`` — хотя бы
+        одна запись не удалась (композиция тогда не пишется).
     """
     if store is None:
         return True
     ok = True
-    if chunks:
-        try:
-            store.add_chunks_batch(chunks)
-        except Exception as exc:  # noqa: BLE001
-            ok = False
-            errors.append(f"add_chunks_batch: {type(exc).__name__}: {exc}")
-    if entry is not None:
+    for entry in entries:
         try:
             store.save_index_manifest(entry)
         except Exception as exc:  # noqa: BLE001
@@ -2301,6 +2338,33 @@ def _ingest_member_doc(
     return MemberOutcome(doc_id=document_id, content_hash=doc_hash)
 
 
+@dataclass
+class _PhaseLifecycle:
+    """Адрес durable-сеанса краула для обработчика прерывания в обёртке фазы.
+
+    ``_build_corpus`` открывает сеанс внутри себя, а обработчик прерывания принадлежит
+    обёртке :func:`build_corpus` (там же единственный ``pools.shutdown``). Без этого
+    адреса прерванная фаза оставляла бы сеанс в ``running`` навсегда — ровно дефект
+    «фантомных краулов в полёте» в ``hound crawl status``.
+
+    ``completed`` ставится **только** после штатной финализации сеанса
+    (:func:`core.pipeline.crawl_session.finalize_session`): любое исключение (включая
+    ``KeyboardInterrupt``/``BaseException``) оставляет ``False``, и обёртка закрывает
+    сеанс терминально (:func:`_finalize_interrupted_session`). Обратное тоже важно:
+    исключение **после** успешной финализации не переписывает легитимный
+    ``completed``/``partial`` на статус прерывания.
+
+    Граница честности: ``SIGKILL``/OOM-killer не перехватывается ни одним Python-кодом,
+    поэтому после него сеанс остаётся ``running``; это лечится recovery-on-open
+    (:func:`core.pipeline.crawl_session.open_session`) при следующем запуске, а не
+    обработчиком прерывания.
+    """
+
+    store: Any = None
+    session_id: str | None = None
+    completed: bool = False
+
+
 def _build_corpus(
     plan: Any,
     crawler: CrawlerPort,
@@ -2343,6 +2407,7 @@ def _build_corpus(
     refresh_policy: str = "auto",
     container_for: Callable[[str | Path], ContainerPort | None] | None = None,
     pools: _ExtractPools,
+    lifecycle: _PhaseLifecycle | None = None,
 ) -> PhaseResult:
     """Ш5: собирает корпус из ``plan × urls`` и возвращает ``PhaseResult``.
 
@@ -2632,6 +2697,11 @@ def _build_corpus(
         except Exception as exc:  # noqa: BLE001 — resume best-effort, не роняет фазу
             errors.append(f"open_crawl_session: {type(exc).__name__}: {exc}")
             session = None
+    #: Прерванная фаза обязана закрыть сеанс терминально (см. ``_PhaseLifecycle``):
+    #: адрес сеанса известен только здесь, а ``finally`` — в обёртке :func:`build_corpus`.
+    if lifecycle is not None:
+        lifecycle.store = store
+        lifecycle.session_id = session
 
     # L1a: априорные элементы сеанса (аудит/очередь/resume). Ключ — ``(product_id, url)``:
     # PK ``crawl_session_items`` = ``(session_id, product_id, url)``, поэтому один URL под
@@ -3631,8 +3701,10 @@ def _build_corpus(
         )
 
     # --- Pass A (ingest): crawl → retention → extract → dedup → chunk ---------- #
-    # Векторы/физический индекс и персистенция corpus_chunks/index_manifest не выполняются:
-    # сначала собирается содержимое всего батча, затем финализируется index_build_id.
+    # Векторы/физический индекс и персистенция corpus_chunks здесь не выполняются:
+    # сначала собирается содержимое продукта, затем (на его границе) планируется
+    # партиция и фиксируется Pass B. ``index_build_id`` (композиция когорты) —
+    # единственное, что выводится после **всех** продуктов.
     #
     # Phase 3.3: две ветки исполнения краула — локальная (``crawler``/``crawlers``, прежнее
     # поведение) и через ``executor`` (``split``/edge-планировщик). Общая часть (retention/
@@ -4916,6 +4988,28 @@ def _build_corpus(
     #: Advisory-очередь «что осталось человеку» (``PhaseResult.pending``): zero-source
     #: продукты видны в конце фазы корпуса — **до** дорогой Ш6, а не только в отчёте.
     zero_source_pending: list[str] = []
+
+    # --- Планирование партиций: аккумуляторы на весь прогон (09 §8.1) --------- #
+    #: extractor_version: per-product композит из фактически извлечённых документов;
+    #: fallback — объявленная версия экстрактора-порта (если ExtractedDoc не нёс версии).
+    declared_extractor_version = str(getattr(extractor, "version", "") or "")
+    #: ``product_id -> {partition_build_id, content_digest, extractor_version}``.
+    #: Заполняется **на границе каждого продукта** (Pass B в цикле), потому что входы —
+    #: только чанки/документы этого продукта (``pb`` продукт-скоупед, I17).
+    product_plans: dict[str, dict[str, str]] = {}
+    #: Члены/дайджесты композиции накапливаются по продуктам: ``composition_id`` зависит
+    #: от **всего** состава когорты и выводится после всех продуктов.
+    members: dict[str, str] = {}
+    digests: dict[str, str] = {}
+    #: Pass B-аккумуляторы (провенанс ``IndexBuild``); чанки и партиции фиксируются
+    #: per-product, здесь — только то, что видит вызывающий по завершении фазы.
+    all_docs: list[CorpusDoc] = []
+    chunk_count = 0
+    partitions_reused = 0
+    all_physical_ok = True
+    #: ``product_id -> True``, если партиция продукта физически зафиксирована
+    #: (``build``/переиспользование). Строка ``index_manifest`` пишется только для них.
+    physically_ok: dict[str, bool] = {}
 
     for product_id in products:
         product_started = time.perf_counter()
@@ -6708,95 +6802,40 @@ def _build_corpus(
         #: Живая граница продукта: тело завершено — в том числе при нулевом выходе
         #: (именно этот случай раньше был немым до конца фазы).
         _emit_product("end", product_id)
-        # Retention-провенанс не зависит от индексной сборки и уже персистенчен
-        # инкрементально: единственная точка ``ingest.docs.append`` — ``_finish_one``,
-        # где ``_persist_docs`` вызывается сразу после коммита документа. Финального
-        # «дампа» продукта здесь нет намеренно: он лишь повторно писал бы те же строки
-        # (``INSERT OR REPLACE`` по PK) и удваивал бы транзакции без выигрыша в durability.
-        ingests.append(ingest)
 
-    # Продукт плана **без записи** в непустом ``urls``: в цикл он не попал (``products``
-    # выводится из ``url_map``), поэтому молча не краулится и получает строку покрытия
-    # только как ``coverage_missing`` в Ш6. Наблюдаемость называет причину здесь, до
-    # оценки. Coverage-строку не пишем намеренно: ``--only-product``/``--only-failed``
-    # сужают ``urls``, и zero-source запись для продукта вне области прогона была бы
-    # ложной (09 §6.2).
-    if url_map:
-        for missing_id in sorted(set(declared) - set(url_map)):
-            product_events.append(
-                {
-                    "event": "product_skipped",
-                    "product_id": missing_id,
-                    "roots": 0,
-                    "seeds_declared": 0,
-                    "seeds_enqueued": 0,
-                    "session_items": 0,
-                    "fetched": 0,
-                    "failed": 0,
-                    "elapsed_seconds": 0.0,
-                    "reason": ZERO_SOURCE_NO_URLS_ENTRY,
-                }
-            )
-
-    _emit_progress()
-
-    # --- Планирование партиций и композиции (09 §8.1) ------------------------- #
-    # extractor_version: per-product композит из фактически извлечённых документов;
-    # fallback — объявленная версия экстрактора-порта (если ExtractedDoc не нёс версии).
-    declared_extractor_version = str(getattr(extractor, "version", "") or "")
-    #: ``product_id -> {partition_build_id, content_digest, extractor_version}``.
-    product_plans: dict[str, dict[str, str]] = {}
-    members: dict[str, str] = {}
-    digests: dict[str, str] = {}
-    for ingest in ingests:
-        if not ingest.chunks:
-            continue
-        product_token = _product_content_token(ingest.chunks)
-        extractor_token = (
-            _product_extractor_token(ingest.docs) or declared_extractor_version
-        )
-        partition_build_id = _derive_partition_build_id(
-            package_id=package,
-            product_id=ingest.product_id,
-            chunker_version=resolved_chunker_version,
-            embed_model_id=embed_model_id,
-            extractor_version=extractor_token,
-            lexical_engine_version=lexical_engine_version,
-            vector_store=vector_store,
-            product_content_token=product_token,
-        )
-        product_plans[ingest.product_id] = {
-            "partition_build_id": partition_build_id,
-            "content_digest": product_token,
-            "extractor_version": extractor_token,
-        }
-        members[ingest.product_id] = partition_build_id
-        digests[ingest.product_id] = product_token
-
-    # ``composition_id`` — единственный ``runs.index_build_id`` (09 §8.1). Он зависит
-    # только от состава когорты и версий/дайджестов партиций; ``params_token``/
-    # ``snapshot_date``/``retrieval_*`` не входят.
-    index_build_id = derive_composition_id(package, members, digests)
-
-    # --- Pass B (index): partition_id → manifest → build/reuse → persist ------- #
-    all_docs: list[CorpusDoc] = []
-    entries: list[IndexManifestEntry] = []
-    chunk_count = 0
-    partitions_reused = 0
-    all_physical_ok = True
-
-    for ingest in ingests:
-        product_id = ingest.product_id
+        # --- Pass B (index) **этого** продукта (09 §8.1) ---------------------- #
+        # Партиция планируется, эмбеддится, физически собирается и персистится сразу
+        # после Pass A продукта, а не после всех продуктов. Иначе смерть на N-м
+        # продукте уничтожала готовую работу предыдущих (чанки посчитаны — в БД их
+        # нет). Все входы планирования — ``ingest.chunks``/``ingest.docs`` **только
+        # этого** продукта (``pb`` продукт-скоупед, I17), поэтому перенос в цикл не
+        # меняет ни один ``pb``; ``composition_id`` по-прежнему выводится после всех
+        # продуктов (он зависит от состава когорты).
         product_chunks = ingest.chunks
-        entry: IndexManifestEntry | None = None
         physical_ok = True
-
         if product_chunks:
             chunk_count += len(product_chunks)
-            plan = product_plans[product_id]
-            partition_build_id = plan["partition_build_id"]
-            product_token = plan["content_digest"]
-            extractor_token = plan["extractor_version"]
+            product_token = _product_content_token(product_chunks)
+            extractor_token = (
+                _product_extractor_token(ingest.docs) or declared_extractor_version
+            )
+            partition_build_id = _derive_partition_build_id(
+                package_id=package,
+                product_id=product_id,
+                chunker_version=resolved_chunker_version,
+                embed_model_id=embed_model_id,
+                extractor_version=extractor_token,
+                lexical_engine_version=lexical_engine_version,
+                vector_store=vector_store,
+                product_content_token=product_token,
+            )
+            product_plans[product_id] = {
+                "partition_build_id": partition_build_id,
+                "content_digest": product_token,
+                "extractor_version": extractor_token,
+            }
+            members[product_id] = partition_build_id
+            digests[product_id] = product_token
             # build_id и extractor_version чанка — по партиции (Pass B). ``build_id``
             # чанка = ``pb``: ``iter_chunks(pb, product_id=…)`` остаётся рабочим, а I17
             # держится структурно (``pb`` хеширует product_id + его content token).
@@ -6804,36 +6843,6 @@ def _build_corpus(
             for chunk in product_chunks:
                 chunk.build_id = partition_build_id
                 chunk.extractor_version = doc_versions.get(chunk.doc_id)
-
-            entry = IndexManifestEntry(
-                # ``index_build_id`` — композиция (``runs.index_build_id``);
-                # ``partition_build_id`` — физическая продукт-партиция (09 §8.1).
-                index_build_id=index_build_id,
-                partition_build_id=partition_build_id,
-                product_id=product_id,
-                package_id=package,
-                partition_key=f"{index_build_id}:{product_id}",
-                snapshot_date=snapshot,
-                chunker_version=resolved_chunker_version or None,
-                extractor_version=extractor_token or None,
-                embed_model_id=embed_model_id or None,
-                embed_dim=getattr(embedder, "dim", None),
-                lexical_engine_version=lexical_engine_version or None,
-                vector_store=vector_store or None,
-                content_digest=product_token,
-                # Информационно; builder сам собирает путь из id, который ему передали.
-                store_path=f"index_store/{package}/{partition_build_id}/{product_id}/",
-                created_at=snapshot,
-                stats_json=json.dumps(
-                    {
-                        "chunks": len(product_chunks),
-                        "docs": len({c.doc_id for c in product_chunks}),
-                    },
-                    ensure_ascii=False,
-                    sort_keys=True,
-                ),
-            )
-            entries.append(entry)
 
             # 09 §8.5: переиспользование партиции — реальный CPU-win (ноль эмбеддингов).
             # Гейт: id-уровень (``pb``) + физическая проверка диска/манифеста.
@@ -6886,23 +6895,142 @@ def _build_corpus(
                         errors=errors,
                     )
 
-        all_docs.extend(ingest.docs)
-        # «Disk first, DB second»: физическая сборка авторитетна. Пока build не завершился
-        # успешно, corpus_chunks/index_manifest не пишутся (K2/§13); entry остаётся в entries
-        # для провенанса/log (IndexBuild).
-        if physical_ok:
-            persisted_ok = _persist_chunks_and_manifest(
-                store, product_chunks, entry, errors
-            )
-            if not persisted_ok:
+            # «Disk first, DB second»: физическая сборка авторитетна. Пока build этого
+            # продукта не завершился успешно, ``corpus_chunks`` не пишутся (K2/§13).
+            # ``index_manifest`` пишется позже (его PK включает композицию) — и только
+            # для продуктов с ``physically_ok=True``.
+            if physical_ok:
+                if not _persist_chunks(store, product_chunks, errors):
+                    all_physical_ok = False
+            else:
                 all_physical_ok = False
-        else:
-            all_physical_ok = False
-            errors.append(
-                f"{product_id}: физическая сборка индекса не зафиксирована — "
-                "corpus_chunks/index_manifest не записаны (K2/§13); "
-                "изменение корпуса требует нового run_id/раунда"
+                errors.append(
+                    f"{product_id}: физическая сборка индекса не зафиксирована — "
+                    "corpus_chunks/index_manifest не записаны (K2/§13); "
+                    "изменение корпуса требует нового run_id/раунда"
+                )
+        physically_ok[product_id] = physical_ok
+        all_docs.extend(ingest.docs)
+
+        # Ф0/O3: покрытие продукта пишется на его границе, а не только в конце фазы.
+        # Элементы сеанса продукта **финальны** (продукт-цикл строго последователен),
+        # поэтому строка честна уже здесь: продукт, дошедший до ``product_end``,
+        # сохраняет покрытие, даже если следующий продукт убьёт прогон. Конец фазы
+        # перезаписывает строки (``INSERT OR REPLACE``) и остаётся авторитетным — он же
+        # закрывает продукты, вообще не вошедшие в цикл (zero-source/coverage_missing).
+        if session is not None:
+            try:
+                _persist_corpus_coverage(
+                    store,
+                    run_id,
+                    session,
+                    truncated_products,
+                    _now_iso(),
+                    products=[product_id],
+                    reasons=zero_source_reasons,
+                )
+            except Exception as exc:  # noqa: BLE001 — наблюдаемость важнее персистенции
+                errors.append(
+                    f"corpus_coverage({product_id}): {type(exc).__name__}: {exc}"
+                )
+
+        # Retention-провенанс не зависит от индексной сборки и уже персистенчен
+        # инкрементально: единственная точка ``ingest.docs.append`` — ``_finish_one``,
+        # где ``_persist_docs`` вызывается сразу после коммита документа. Финального
+        # «дампа» продукта здесь нет намеренно: он лишь повторно писал бы те же строки
+        # (``INSERT OR REPLACE`` по PK) и удваивал бы транзакции без выигрыша в durability.
+        ingests.append(ingest)
+
+    # Продукт плана **без записи** в непустом ``urls``: в цикл он не попал (``products``
+    # выводится из ``url_map``), поэтому молча не краулится и получает строку покрытия
+    # только как ``coverage_missing`` в Ш6. Наблюдаемость называет причину здесь, до
+    # оценки. Coverage-строку не пишем намеренно: ``--only-product``/``--only-failed``
+    # сужают ``urls``, и zero-source запись для продукта вне области прогона была бы
+    # ложной (09 §6.2).
+    if url_map:
+        for missing_id in sorted(set(declared) - set(url_map)):
+            product_events.append(
+                {
+                    "event": "product_skipped",
+                    "product_id": missing_id,
+                    "roots": 0,
+                    "seeds_declared": 0,
+                    "seeds_enqueued": 0,
+                    "session_items": 0,
+                    "fetched": 0,
+                    "failed": 0,
+                    "elapsed_seconds": 0.0,
+                    "reason": ZERO_SOURCE_NO_URLS_ENTRY,
+                }
             )
+
+    _emit_progress()
+
+    # --- Манифест и композиция (09 §8.1) ------------------------------------- #
+    # Партиции уже физически зафиксированы, а их чанки персистентны (Pass B шёл в
+    # цикле продуктов). Здесь остаётся только то, что зависит от **всего** состава
+    # когорты: ``composition_id``, строки ``index_manifest`` (их PK включает
+    # композицию) и иммутабельный файл композиции.
+    #
+    # ``composition_id`` — единственный ``runs.index_build_id`` (09 §8.1). Он зависит
+    # только от состава когорты и версий/дайджестов партиций; ``params_token``/
+    # ``snapshot_date``/``retrieval_*`` не входят.
+    index_build_id = derive_composition_id(package, members, digests)
+
+    entries: list[IndexManifestEntry] = []
+    #: Записи, чьи партиции физически зафиксированы: только они идут в реестр прогона.
+    manifest_entries: list[IndexManifestEntry] = []
+    for ingest in ingests:
+        if not ingest.chunks:
+            continue
+        product_id = ingest.product_id
+        product_chunks = ingest.chunks
+        plan = product_plans[product_id]
+        partition_build_id = plan["partition_build_id"]
+        product_token = plan["content_digest"]
+        extractor_token = plan["extractor_version"]
+
+        entry = IndexManifestEntry(
+            # ``index_build_id`` — композиция (``runs.index_build_id``);
+            # ``partition_build_id`` — физическая продукт-партиция (09 §8.1).
+            index_build_id=index_build_id,
+            partition_build_id=partition_build_id,
+            product_id=product_id,
+            package_id=package,
+            partition_key=f"{index_build_id}:{product_id}",
+            snapshot_date=snapshot,
+            chunker_version=resolved_chunker_version or None,
+            extractor_version=extractor_token or None,
+            embed_model_id=embed_model_id or None,
+            embed_dim=getattr(embedder, "dim", None),
+            lexical_engine_version=lexical_engine_version or None,
+            vector_store=vector_store or None,
+            content_digest=product_token,
+            # Информационно; builder сам собирает путь из id, который ему передали.
+            store_path=f"index_store/{package}/{partition_build_id}/{product_id}/",
+            created_at=snapshot,
+            stats_json=json.dumps(
+                {
+                    "chunks": len(product_chunks),
+                    "docs": len({c.doc_id for c in product_chunks}),
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            ),
+        )
+        # ``entry`` остаётся в ``entries`` и при отказе сборки: это провенанс/log
+        # (``IndexBuild``). В реестр (``index_manifest``) идёт только зафиксированная
+        # партиция — «disk first, DB second» (K2/§13).
+        entries.append(entry)
+        if physically_ok.get(product_id, False):
+            manifest_entries.append(entry)
+
+    # Строки манифеста — после того, как композиция известна (PK включает
+    # ``index_build_id``) и партиции уже на диске; чанки персистентны ещё с границы
+    # продукта. Сбой записи снимает композицию (она не должна ссылаться на партицию,
+    # которой нет в реестре прогона).
+    if not _persist_manifest(store, manifest_entries, errors):
+        all_physical_ok = False
 
     if entries and embedder is not None and index_builder is not None:
         commit_ok = True
@@ -6979,7 +7107,12 @@ def _build_corpus(
                 truncated_products=sorted(truncated_products),
             )
         except Exception as exc:  # noqa: BLE001 — наблюдаемость важнее персистенции
-            errors.append(f"finalize_crawl_session({session}): {type(exc).__name__}: {exc}")
+            errors.append(f"finalize_session({session}): {type(exc).__name__}: {exc}")
+        else:
+            # Штатный финал: обёртке больше нечего закрывать (иначе ``finally``
+            # перезаписал бы ``completed``/``partial`` на терминальный сбой).
+            if lifecycle is not None:
+                lifecycle.completed = True
 
         # Ф0: покрытие корпуса продукта — первоклассный факт для гейта ❌ (I2c).
         # Производно от **персистентных** элементов сеанса и записей об усечении; пишется
@@ -7124,18 +7257,80 @@ def _build_corpus(
     )
 
 
+def _finalize_interrupted_session(
+    lifecycle: _PhaseLifecycle, exc: BaseException
+) -> None:
+    """Закрывает сеанс краула терминальным статусом после прерывания фазы.
+
+    **Почему не** :func:`core.pipeline.crawl_session.finalize_session`. Он выводит статус
+    из ``store.crawl_session_counts``: ``completed``, если нет failed/cancelled, иначе
+    ``partial``. Для прерванного прогона оба ответа — утверждения о **теле** краула,
+    которых никто не проверял: убитый на середине прогон обычно имеет ``pending > 0``,
+    и ``partial`` («часть краула добыта» — значение, которым уже помечается политическое
+    усечение и частичный отказ) описал бы его неверно, а при нуле добытого — прямо
+    ложно. Кроме того ``finalize_session`` пишет ``provenance_json`` целиком: он заявил
+    бы нормальную финализацию с ``pages_fetched=None``/``engines=[]``/``truncated=false``,
+    то есть выдумал бы провенанс о прогоне, который не дошёл до конца.
+
+    Поэтому ставится **терминальный статус из словаря**
+    (``docs/status-dictionary.yaml: crawl_session_status``) без записи провенанса:
+
+    * ``KeyboardInterrupt``/``SystemExit`` → ``cancelled`` («снят оператором/системой»);
+    * любое другое исключение (включая OOM-подобное ``MemoryError``) → ``failed``
+      («терминальный сбой сеанса»).
+
+    Нового значения не вводится. Различить «прервано» и «краул упал сам» эти два статуса
+    не могут: отдельное терминальное состояние (например ``interrupted``) потребовало бы
+    строки в ``docs/status-dictionary.yaml`` — это решение владельца методологии, не
+    реализационное. Пока его нет, ``error`` несёт машинно-читаемую причину, а
+    ``hound crawl status`` перестаёт показывать мёртвый краул «в полёте».
+
+    Сбой самой записи не поднимается: обработчик не имеет права подменить исходное
+    исключение (оно и есть причина прерывания).
+    """
+    status = (
+        CrawlSessionStatus.CANCELLED
+        if isinstance(exc, (KeyboardInterrupt, SystemExit))
+        else CrawlSessionStatus.FAILED
+    )
+    try:
+        lifecycle.store.update_crawl_session_status(
+            lifecycle.session_id,
+            status,
+            finished_at=_now_iso(),
+            error=f"phase interrupted: corpus did not complete ({type(exc).__name__})",
+        )
+    except Exception:  # noqa: BLE001 — не маскируем исходное исключение
+        pass
+
+
 def build_corpus(*args: Any, **kwargs: Any) -> PhaseResult:
     """Ш5 (публичная точка фазы): ``_build_corpus`` + жизненный цикл фазовых пулов.
 
     C1/L1: пул экстракции — **один на прогон** (ключ ``(DocumentLevel, window)`` в
     :class:`_ExtractPools`), поэтому ``shutdown(wait=True, cancel_futures=True)``
     выполняется ровно один раз — здесь, в ``finally`` фазы, а не на каждый seed-root.
-    Это единственное отличие обёртки от :func:`_build_corpus`; аргументы и поведение
-    фазы — прежние (см. docstring :func:`_build_corpus`).
+
+    Здесь же закрывается durable-сеанс краула, если фаза **не дошла** до штатного
+    финала: иначе убитый прогон навсегда оставлял бы ``status='running'``, и
+    ``hound crawl status`` показывал бы «в полёте» мёртвый краул. Штатный путь не
+    меняется: сеанс финализирует сама ``_build_corpus`` (``completed``/``partial``),
+    и ``lifecycle.completed`` снимает вмешательство. Это единственные две отличия
+    обёртки от :func:`_build_corpus`; аргументы и поведение фазы — прежние (см.
+    docstring :func:`_build_corpus`).
     """
     pools = _ExtractPools(max_rebuilds=_EXTRACT_MAX_POOL_REBUILDS)
+    lifecycle = _PhaseLifecycle()
     try:
-        return _build_corpus(*args, pools=pools, **kwargs)
+        return _build_corpus(*args, pools=pools, lifecycle=lifecycle, **kwargs)
+    except BaseException as exc:
+        # Прерывание (исключение/``KeyboardInterrupt``/``SystemExit``): исключение
+        # перехватывается только чтобы узнать его тип (см.
+        # :func:`_finalize_interrupted_session`) и сразу переподнимается — фаза не
+        # «проглатывает» сбой.
+        if lifecycle.session_id is not None and not lifecycle.completed:
+            _finalize_interrupted_session(lifecycle, exc)
+        raise
     finally:
         pools.shutdown()
 
