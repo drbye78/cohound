@@ -3458,7 +3458,8 @@ def _archive_descent_checks() -> None:
     чтения тел членов, ингест членов через инъекцию, png — видимый пропуск с причиной,
     ``plan`` — ноль членов, битый архив — ``unreadable`` (не исключение), повтор архива —
     ``archive_cycle`` (конечность без потолка глубины), кумулятивный бюджет —
-    ``budget_exhausted`` (видимая остановка). ``page_count`` PDF — по шапке файла.
+    ``budget_exhausted`` (видимая остановка **и** строка срезанного члена, F1).
+    ``page_count`` PDF — по шапке файла.
     """
     import io
     import tempfile
@@ -3579,7 +3580,7 @@ def _archive_descent_checks() -> None:
     _assert([item.depth for item in loop_observations].count(1) == 1)
 
     # Кумулятивный бюджет корня: остановка видима, а не «молча закончилось».
-    budgeted, _obs, _members, budget_errors, _ingested = _run(
+    budgeted, _obs, budget_members, budget_errors, _ingested = _run(
         _zip({"a.txt": b"A" * 1024, "b.txt": b"B" * 1024}),
         budget=DescentBudget(max_member_bytes=1024 * 1024,
                              max_total_uncompressed_bytes=1024),
@@ -3587,6 +3588,12 @@ def _archive_descent_checks() -> None:
     _assert(budgeted.status is ArchiveDescentStatus.BUDGET_EXHAUSTED)
     _assert(budgeted.outcome["stopped_reason"] == "archive_budget_exhausted")
     _assert(any("archive_budget_exhausted" in error for error in budget_errors))
+    # F1: срезанный бюджетом член даёт **строку** члена (раньше его не было в
+    # ``corpus_members`` вовсе, и срез видели только в ``errors``).
+    cut = {row.member_path: row for row in budget_members}
+    _assert(set(cut) == {"a.txt", "b.txt"})
+    _assert(cut["b.txt"].skip_reason == "archive_budget_exhausted")
+    _assert(cut["b.txt"].doc_id is None and cut["b.txt"].declared_size == 1024)
 
 
 def _lexical_profiles() -> None:

@@ -139,8 +139,10 @@ runs/{run_id}/
 
 Схема §4.4 перенесена из бывшего `core/db.py` (удалён в T1.3) в `store/sqlite.py`
 (18 предметных таблиц + `schema_meta`, индексы, триггеры I4/I6/I7/I13/I18). Константа `SCHEMA_VERSION`
-= **`3.12.0`** (F1: свидетельство живости сеанса краула — `crawl_sessions.owner`/`heartbeat_at`,
-`interrupted` в `crawl_session_status`; B3: спуск в контейнеры — `corpus_members`/`archive_observations`; E2: дайджест спецификаций реестров; D3/D4/сеансы/провенанс краула/P1-самодостаточность; gates: `gate_decisions` с предметом решения) — версия **SQLite-схемы**, не регламента; колонки
+= **`3.13.0`** (F1: свидетельство живости сеанса краула — `crawl_sessions.owner`/`heartbeat_at`,
+`interrupted` в `crawl_session_status`; B3: спуск в контейнеры — `corpus_members`/`archive_observations`
+(PK `(archive_content_hash, member_path, product_id)` с 3.13.0 — провенанс члена не перезаписывается
+другим продуктом); E2: дайджест спецификаций реестров; D3/D4/сеансы/провенанс краула/P1-самодостаточность; gates: `gate_decisions` с предметом решения) — версия **SQLite-схемы**, не регламента; колонки
 `runs.settings_provenance_json` (v2.1/A3), `runs.crawl_provenance_json` (v3.2/Phase 2),
 `runs.crawl_strategy` / `runs.crawl_rate_limit` (v3.3/Backlog B: операционные оси краула,
 границы `execution_change`, §13), `runs.registry_spec_digest` (v3.5/E2: дайджест package-scoped
@@ -158,7 +160,7 @@ additive/idempotent (`ALTER TABLE ... ADD COLUMN`/`CREATE TABLE IF NOT EXISTS` �
 **Гейт версии схемы (v3.12.0, `11` §2.6).** Аддитивность не означает «читать чужую схему можно»:
 `connect()` сверяет `schema_meta.schema_version` **до** DDL и миграций и при несовпадении
 поднимает `SchemaVersionMismatch` (`core/store/sqlite.py`) — CLI печатает
-`schema_version: схема БД несовместима: … код ожидает '3.12.0' …` и возвращает `EXIT_USAGE`,
+`schema_version: схема БД несовместима: … код ожидает '3.13.0' …` и возвращает `EXIT_USAGE`,
 вместо трейсбека или молчаливого апгрейда. Прогон переносится **пересозданием** каталога прогона,
 а не чтением старой БД: аддитивные дельты сделали бы «старую» строку неотличимой от «новой».
 Поэтому `_ensure_columns` теперь страховка от «полусозданной» БД **в пределах** объявленной

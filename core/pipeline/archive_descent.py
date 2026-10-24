@@ -26,8 +26,8 @@
 
 **Байты членов не ретейнятся.** Архив — сырьё (I19), член — производный вид (§6.7):
 член стримится в **один** временный файл и удаляется сразу после обработки; в БД остаётся
-идентичность ``(archive_content_hash, normalized_member_path)`` и путь архива, по которому
-член ре-выводится тем же ``open_member``.
+идентичность ``(archive_content_hash, normalized_member_path, product_id)`` и путь архива,
+по которому член ре-выводится тем же ``open_member``.
 
 **Упреждение с упорядоченной доводкой (``defer_member``/``window``).** Извлечение члена —
 дорогая часть (конвертер документов), поэтому вызывающий вправе отдать его пулу: спуск
@@ -221,6 +221,15 @@ class ArchiveDescentWalker:
 
     Наблюдения (``observations``) и строки членов (``members``) накапливаются в списках
     вызывающего — фаза корпуса персистит их и отдаёт в ``PhaseResult``.
+
+    **Write-through (F1).** Списки — это RAM: жёсткое убийство процесса (SIGKILL/OOM)
+    уносит их целиком. Поэтому вызывающий вправе передать два синка —
+    ``persist_observation``/``persist_member``: они зовутся **сразу** за появлением
+    строки (наблюдение — в :meth:`_record`, член — в :meth:`_emit_member`), и тогда
+    durable-запись отстаёт от спуска максимум на один член. ``None`` — прежнее
+    поведение байт-в-байт (только списки). Синк **обязан не бросать**: изоляция отказа
+    стора — на стороне вызывающего (фаза пишет его в ``errors``), иначе падение
+    персистенции убивало бы спуск.
     """
 
     def __init__(
@@ -239,6 +248,8 @@ class ArchiveDescentWalker:
         created_at: str | None = None,
         defer_member: MemberDeferral | None = None,
         window: int = 1,
+        persist_observation: Callable[[ArchiveObservation], None] | None = None,
+        persist_member: Callable[[CorpusMember], None] | None = None,
     ) -> None:
         self.product_id = product_id
         self.root_url = root_url
@@ -249,6 +260,9 @@ class ArchiveDescentWalker:
         self.observations = observations
         self.members = members
         self.errors = errors
+        #: Write-through провенанса (``None`` — только списки фазы, прежнее поведение).
+        self._persist_observation = persist_observation
+        self._persist_member = persist_member
         self.run_id = run_id
         self.created_at = created_at
         #: Отложенный ингест (пул экстракции). ``None`` — inline, окно не используется.
@@ -359,6 +373,9 @@ class ArchiveDescentWalker:
             created_at=self.created_at,
         )
         self.observations.append(observation)
+        # Write-through (F1): durable-строка появляется сразу, а не в конце фазы.
+        if self._persist_observation is not None:
+            self._persist_observation(observation)
         return observation
 
     def _outcome(
@@ -527,7 +544,7 @@ class ArchiveDescentWalker:
                 skipped.append((task.member_path, reason))
                 detail = f": {outcome.detail}" if outcome.detail else ""
                 self.errors.append(f"{self.product_id}/{task.member_url}: {reason}{detail}")
-            self.members.append(
+            self._emit_member(
                 self._member_row(
                     archive_url=task.archive_url,
                     archive_content_hash=task.archive_content_hash,
@@ -577,6 +594,18 @@ class ArchiveDescentWalker:
                     f"кумулятивный потолок корня {self.budget.max_total_uncompressed_bytes} Б "
                     f"исчерпан на члене {normalized!r} — спуск остановлен"
                 )
+                # Член срезан бюджетом — строка обязана быть: иначе в ``corpus_members``
+                # его нет вовсе, и «почему этого файла нет в корпусе» не отвечает никто.
+                self._emit_skipped_member(
+                    archive_url=archive_url,
+                    archive_content_hash=archive_content_hash,
+                    archive_path=archive_path,
+                    member_path=normalized,
+                    suffix=suffix,
+                    declared_size=member.size,
+                    reason=SKIP_BUDGET,
+                    depth=depth,
+                )
                 continue
             limits = [value for value in (self.budget.max_member_bytes, remaining) if value]
             member_limit = min(limits) if limits else None
@@ -602,11 +631,31 @@ class ArchiveDescentWalker:
                         f"{normalized!r} пробил остаток кумулятивного бюджета корня "
                         f"({remaining} Б) — спуск остановлен"
                     )
+                    self._emit_skipped_member(
+                        archive_url=archive_url,
+                        archive_content_hash=archive_content_hash,
+                        archive_path=archive_path,
+                        member_path=normalized,
+                        suffix=suffix,
+                        declared_size=member.size,
+                        reason=SKIP_BUDGET,
+                        depth=depth,
+                    )
                 else:
                     skipped.append((normalized, SKIP_STREAM_TOO_LARGE))
                     self.errors.append(
                         f"{self.product_id}/{archive_url}: {SKIP_STREAM_TOO_LARGE}: "
                         f"член {normalized!r} больше потолка {member_limit} Б при чтении"
+                    )
+                    self._emit_skipped_member(
+                        archive_url=archive_url,
+                        archive_content_hash=archive_content_hash,
+                        archive_path=archive_path,
+                        member_path=normalized,
+                        suffix=suffix,
+                        declared_size=member.size,
+                        reason=SKIP_STREAM_TOO_LARGE,
+                        depth=depth,
                     )
                 continue
             except Exception as exc:  # noqa: BLE001 — отказ чтения члена изолируется
@@ -631,7 +680,7 @@ class ArchiveDescentWalker:
                 if member_hash in self._seen:
                     cycle_stops += 1
                     skipped.append((normalized, SKIP_CYCLE))
-                    self.members.append(
+                    self._emit_member(
                         self._member_row(
                             archive_url=archive_url,
                             archive_content_hash=archive_content_hash,
@@ -649,7 +698,7 @@ class ArchiveDescentWalker:
                     temp_path.unlink(missing_ok=True)
                     continue
                 self._seen.add(member_hash)
-                self.members.append(
+                self._emit_member(
                     self._member_row(
                         archive_url=archive_url,
                         archive_content_hash=archive_content_hash,
@@ -758,6 +807,53 @@ class ArchiveDescentWalker:
             reason=stopped_reason,
         )
 
+    def _emit_member(self, row: CorpusMember) -> None:
+        """Кладёт строку члена в список фазы и (если задан) сразу пишет её в store.
+
+        Единственная точка появления строки ``corpus_members``: порядок обхода здесь —
+        порядок списка, поэтому write-through не меняет наблюдаемый состав, только
+        durable-момент. Синк не оборачивается в try/except — контракт: он не бросает
+        (изоляция отказа стора — в фазе, ``corpus.py``).
+        """
+        self.members.append(row)
+        if self._persist_member is not None:
+            self._persist_member(row)
+
+    def _emit_skipped_member(
+        self,
+        *,
+        archive_url: str,
+        archive_content_hash: str,
+        archive_path: Path,
+        member_path: str,
+        suffix: str,
+        declared_size: int,
+        reason: str,
+        depth: int,
+    ) -> None:
+        """Строка члена, срезанного **до** извлечения (бюджет/поток) — видимый пропуск.
+
+        ``doc_id``/``content_hash`` — ``None``: ингеста не было, и выдумывать его
+        идентичность нельзя (та же семантика, что у ``archive_cycle``/``nested_descended``).
+        Без этой строки ``archive_budget_exhausted`` жил только в ``errors``, то есть
+        срезанные члены не попадали в ``corpus_members`` вовсе.
+        """
+        self._emit_member(
+            self._member_row(
+                archive_url=archive_url,
+                archive_content_hash=archive_content_hash,
+                archive_path=archive_path,
+                member_path=member_path,
+                member_url_value=member_url(archive_url, member_path),
+                suffix=suffix,
+                declared_size=declared_size,
+                content_hash=None,
+                doc_id=None,
+                skip_reason=reason,
+                depth=depth,
+            )
+        )
+
     def _member_row(
         self,
         *,
@@ -773,7 +869,7 @@ class ArchiveDescentWalker:
         skip_reason: str | None,
         depth: int,
     ) -> CorpusMember:
-        """Строка ``corpus_members``: идентичность пары (архив, нормализованный путь)."""
+        """Строка ``corpus_members``: идентичность (архив, нормализованный путь, продукт)."""
         return CorpusMember(
             archive_content_hash=archive_content_hash,
             member_path=member_path,

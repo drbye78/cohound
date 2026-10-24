@@ -282,7 +282,7 @@ staging крупных артефактов отсутствует; (3) ось `
 
 ### W3 — Store — ✅ done
 
-- `core/store/sqlite.py` — DDL §4.4 + триггеры I4/I6/I7/I13/I18, `SCHEMA_VERSION = "3.12.0"`
+- `core/store/sqlite.py` — DDL §4.4 + триггеры I4/I6/I7/I13/I18, `SCHEMA_VERSION = "3.13.0"`
   (19 таблиц, включая `schema_meta`; гейт версии схемы — файл другой версии отвергается,
   `11` §2.6; свидетельство живости сеанса краула — F1).
 - `core/pipeline/liveness.py` — `owner`/`heartbeat_at`, recovery-on-open (`running` → `interrupted`),
@@ -358,7 +358,8 @@ staging крупных артефактов отсутствует; (3) ось `
   (порт чтения контейнера), `core/pipeline/archive_descent.py` (спуск), `artifact_probe.py`
   (допуск артефакта до скачивания), `core/util/container_policy.py` (бюджеты и прогноз), адаптеры
   `container_{zip,7z,rar,any}.py`. Таблицы `corpus_members` (PK `(archive_content_hash,
-  member_path)`; байты членов отдельно не ретейнятся — член ре-выводится из архива) и
+  member_path, product_id)`; байты членов отдельно не ретейнятся — член ре-выводится из архива;
+  `product_id` в ключе с 3.13.0 — один архив в двух продуктах даёт две строки провенанса) и
   `archive_observations` (прогноз **до** извлечения + исход; запись есть для каждого контейнера,
   включая пустой и нечитаемый). Ось `CrawlLimits.archive_descent` (`plan|full`) плюс
   `archive_max_*` (один контейнер) и кумулятивный `archive_max_total_uncompressed_bytes`

@@ -334,7 +334,7 @@ snapshot_date: 2026-06-01
 
 ### 4.4. Операционная БД (SQLite + index_store)
 
-DDL **версионирован** и **гейтится по версии**: `SCHEMA_VERSION = "3.12.0"` (`core/store/sqlite.py`); версия пишется в `schema_meta`, и файл с другой версией **отвергается** с сообщением (`SchemaVersionMismatch` → `EXIT_USAGE`), а не читается молча — прогон переносится пересозданием каталога прогона (`11` §2.6). Дельты схемы аддитивны (`_ensure_columns`, `CREATE TABLE IF NOT EXISTS`), но обслуживают только «полусозданную» БД в пределах объявленной версии. Durable per-product состояние (`state/{package_id}/state.db`) версионируется отдельно (`STATE_SCHEMA_VERSION = "4"`). Схема не «заморожена»: добавление таблицы/колонки — аддитивная миграция, а не новая БД. Ниже — предметные таблицы; полный DDL — код.
+DDL **версионирован** и **гейтится по версии**: `SCHEMA_VERSION = "3.13.0"` (`core/store/sqlite.py`); версия пишется в `schema_meta`, и файл с другой версией **отвергается** с сообщением (`SchemaVersionMismatch` → `EXIT_USAGE`), а не читается молча — прогон переносится пересозданием каталога прогона (`11` §2.6). Дельты схемы аддитивны (`_ensure_columns`, `CREATE TABLE IF NOT EXISTS`), но обслуживают только «полусозданную» БД в пределах объявленной версии. Durable per-product состояние (`state/{package_id}/state.db`) версионируется отдельно (`STATE_SCHEMA_VERSION = "4"`). Схема не «заморожена»: добавление таблицы/колонки — аддитивная миграция, а не новая БД. Ниже — предметные таблицы; полный DDL — код.
 
 ```sql
 products(product_id PK, canonical_name, vendor, jurisdiction, first_seen, last_seen);
@@ -447,13 +447,15 @@ corpus_coverage(run_id, product_id, complete, expected_sources, observed_sources
 
 -- B3: члены контейнеров — производный вид ретейленного архива. Байты членов отдельно не хранятся:
 -- архив — сырьё (I19), член ре-выводится из него тем же open_member по archive_path.
--- Идентичность — (archive_content_hash, member_path); skip_reason заполнен ⟺ член не ингестнут (doc_id null).
+-- Идентичность — (archive_content_hash, member_path, product_id); run_id в ключе избыточен (БД per-run),
+-- product_id — нужное измерение: один архив в двух продуктах даёт две строки провенанса.
+-- skip_reason заполнен ⟺ член не ингестнут (doc_id null).
 corpus_members(archive_content_hash, member_path, product_id, run_id, root_url, archive_url,
                archive_path, member_url,          -- {archive_url}!/{member_path}
                member_format, declared_size, extracted_content_hash,
                doc_id,                            -- corpus_docs.doc_id, если ингестнут
                skip_reason, depth, created_at,
-               PRIMARY KEY (archive_content_hash, member_path));
+               PRIMARY KEY (archive_content_hash, member_path, product_id));
 
 -- B3: наблюдения спуска в контейнеры — прогноз (до извлечения) + исход. Запись есть для КАЖДОГО
 -- контейнера, включая пустой и нечитаемый: «спуск ничего не дал» виден так же, как «дал десять документов».

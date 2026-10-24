@@ -1728,6 +1728,63 @@ def _persist_docs(
             errors.append(f"upsert_corpus_doc({doc.doc_id}): {type(exc).__name__}: {exc}")
 
 
+def _persist_observation_sync(
+    store: Any,
+    errors: list[str],
+) -> Callable[[ArchiveObservation], None] | None:
+    """Write-through наблюдения спуска: синк для ``ArchiveDescentWalker`` (F1).
+
+    Возвращает ``None``, если стора нет (прежнее поведение спуска: только список фазы).
+    Наблюдение пишется **сразу** за ``_record``, поэтому SIGKILL/OOM посреди контейнера
+    теряет максимум контейнер «в полёте», а не весь спуск: раньше наблюдения копились в
+    памяти до конца фазы. Идемпотентность уже есть — ``observation_id`` детерминирован
+    (``run|product|root|hash|depth``), повторный спуск перекрывает строку, а не плодит её.
+
+    Отказ стора изолируется в ``errors`` (по образцу :func:`_persist_docs`): падение
+    фазы хуже потерянной строки провенанса, но тихая потеря — недопустима.
+    """
+    if store is None:
+        return None
+
+    def _sync(observation: ArchiveObservation) -> None:
+        try:
+            store.save_archive_observation(observation)
+        except Exception as exc:  # noqa: BLE001 — наблюдаемость важнее персистенции
+            errors.append(
+                f"save_archive_observation({observation.observation_id}): "
+                f"{type(exc).__name__}: {exc}"
+            )
+
+    return _sync
+
+
+def _persist_member_sync(
+    store: Any,
+    errors: list[str],
+) -> Callable[[CorpusMember], None] | None:
+    """Write-through строки ``corpus_members``: синк для ``ArchiveDescentWalker`` (F1).
+
+    Строка пишется **после** доводки члена (``_settle``/``_emit_skipped_member``), то есть
+    когда ``doc_id``/``extracted_content_hash`` известны или пропуск назван: раньше строки
+    копились до конца фазы, и жёсткое убийство уносило их все. Идентичность —
+    ``(archive_content_hash, member_path, product_id)``, поэтому повторный спуск делает
+    UPSERT, а не дубль; отсюда же идемпотентность финальной пачки (reconciliation-pass).
+    """
+    if store is None:
+        return None
+
+    def _sync(row: CorpusMember) -> None:
+        try:
+            store.save_corpus_members([row])
+        except Exception as exc:  # noqa: BLE001 — наблюдаемость важнее персистенции
+            errors.append(
+                f"save_corpus_members({row.archive_content_hash}/{row.member_path}): "
+                f"{type(exc).__name__}: {exc}"
+            )
+
+    return _sync
+
+
 def _persist_chunks(
     store: Any,
     chunks: list[CorpusChunk],
@@ -5147,7 +5204,8 @@ def _build_corpus(
         )
 
     #: B3: наблюдения спуска (прогноз + исход) и члены контейнеров — провенанс фазы.
-    #: Накапливаются здесь и персистятся в конце (``archive_observations``/``corpus_members``).
+    #: Списки нужны ``PhaseResult`` и финальному reconciliation-pass; durable-запись идёт
+    #: **write-through** (синки волкера, F1), а не только пачкой в конце фазы.
     archive_observations: list[ArchiveObservation] = []
     corpus_member_rows: list[CorpusMember] = []
     #: B3: зонд артефактов (класс/формат/размер/``page_count``/листинг) — до экстракции.
@@ -5804,6 +5862,11 @@ def _build_corpus(
                     #: Окно упреждения = окно экстракции корня (``extract_workers``);
                     #: без пула окно не используется (inline-путь байт-в-байт).
                     window=extract_window or 1,
+                    #: Write-through (F1): провенанс спуска durable на каждом шаге, а не в
+                    #: конце фазы. Отказ стора изолируется в ``errors`` синком, поэтому
+                    #: спуск продолжается (провенанс важнее, падение фазы — хуже).
+                    persist_observation=_persist_observation_sync(store, errors),
+                    persist_member=_persist_member_sync(store, errors),
                 )
                 observation = walker.descend(
                     archive_path=raw_path,
@@ -7396,11 +7459,16 @@ def _build_corpus(
         except Exception as exc:  # noqa: BLE001 — наблюдаемость важнее персистенции
             errors.append(f"crawl_session_counts: {type(exc).__name__}: {exc}")
 
-    # --- B3: персистенция спуска в контейнеры (прогноз/исход + члены) ---------- #
-    # Наблюдение пишется **для каждого** контейнера, включая пустой/нечитаемый; члены —
-    # по идентичности ``(archive_content_hash, member_path)``, поэтому повторный спуск
-    # того же архива не дублирует строки. Сбой записи изолируется в ``errors`` (контракт
-    # фазы): провенанс важнее, но падение фазы — хуже.
+    # --- B3: reconciliation-pass спуска в контейнеры (прогноз/исход + члены) --- #
+    # **Страховка, а не единственная запись (F1).** Durable-запись уже произошла
+    # write-through'ом: ``persist_observation``/``persist_member`` пишут строку сразу за
+    # её появлением в волкере, поэтому SIGKILL/OOM теряет максимум контейнер (наблюдение)
+    # или член (строка) «в полёте». Здесь — идемпотентный повторный upsert: он добирает
+    # то, что не дошло (отказ стора на горячем пути виден в ``errors`` и лечится здесь),
+    # и дёшев, потому что ключи детерминированы (``observation_id``) либо уже UPSERT
+    # (``corpus_members`` по ``(archive_content_hash, member_path, product_id)``).
+    # Сбой записи изолируется в ``errors`` (контракт фазы): провенанс важнее, но падение
+    # фазы — хуже.
     if store is not None and run_id is not None and archive_observations:
         try:
             for observation in archive_observations:

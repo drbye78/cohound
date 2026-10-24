@@ -1608,10 +1608,14 @@ class SqliteStore:
         )
 
     def save_corpus_members(self, members: Iterable[CorpusMember]) -> None:
-        """Upsert членов контейнеров по PK ``(archive_content_hash, member_path)`` (B3).
+        """Upsert членов контейнеров по PK ``(archive_content_hash, member_path, product_id)``.
 
         Одна транзакция на пачку: повторный спуск того же архива **не** дублирует строки
-        (идентичность пары — решение §6.7), а обновляет исход (``doc_id``/``skip_reason``).
+        (идентичность пары + продукт — решение §6.7), а обновляет исход
+        (``doc_id``/``skip_reason``). ``product_id`` в ключе обязателен: один и тот же
+        архив в двух продуктах одного прогона — две разные строки провенанса, иначе
+        ``run_id``/``root_url``/``doc_id`` одного продукта молча перезаписывались бы
+        чужими. ``run_id`` в ключе избыточен: БД прогона — per-run (``runs/{run_id}/``).
         """
         rows = [
             (
@@ -1642,8 +1646,7 @@ class SqliteStore:
                 "  archive_url, archive_path, member_url, member_format, declared_size,"
                 "  extracted_content_hash, doc_id, skip_reason, depth, created_at)"
                 " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
-                " ON CONFLICT(archive_content_hash, member_path) DO UPDATE SET"
-                "  product_id = excluded.product_id,"
+                " ON CONFLICT(archive_content_hash, member_path, product_id) DO UPDATE SET"
                 "  run_id = excluded.run_id,"
                 "  root_url = excluded.root_url,"
                 "  archive_url = excluded.archive_url,"
@@ -1665,7 +1668,7 @@ class SqliteStore:
         archive_content_hash: str | None = None,
         product_id: str | None = None,
     ) -> Iterator[CorpusMember]:
-        """Члены контейнеров (порядок: ``archive_content_hash, member_path``)."""
+        """Члены контейнеров (порядок: ``archive_content_hash, member_path, product_id``)."""
         clauses: list[str] = []
         params: list[Any] = []
         if archive_content_hash is not None:
@@ -1677,7 +1680,7 @@ class SqliteStore:
         where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
         for row in self.conn.execute(
             "SELECT * FROM corpus_members"
-            f"{where} ORDER BY archive_content_hash, member_path",
+            f"{where} ORDER BY archive_content_hash, member_path, product_id",
             tuple(params),
         ):
             yield CorpusMember(

@@ -353,10 +353,11 @@ IDP/DLP/IDS (07 §8); 0021–0023 — операционный слой посл
 и **разделение классов версий** diff-причин: `methodology_change` (`METHODOLOGY_FIELDS` + major
 `methodology_version`) vs `execution_change` (`EXECUTION_FIELDS`) — §13/B-7. `ranking_epsilon`
 (порог неразличимости) и `settings_provenance` (`default|measured`, A3) добавлены в `RunConfig`/
-`RunManifest`; `SCHEMA_VERSION` SQLite-схемы — **`3.12.0`** (на срезе v2.1 было `3.5.0`;
+`RunManifest`; `SCHEMA_VERSION` SQLite-схемы — **`3.13.0`** (на срезе v2.1 было `3.5.0`;
 дальше аддитивно: 3.10.0 — `corpus_members`/`archive_observations`, 3.11.0 — поля
 `gate_decisions` полосы гейтов, 3.12.0 — `crawl_sessions.owner`/`heartbeat_at` (свидетельство
-живости) и `interrupted` в `crawl_session_status`; с 3.12.0 файл другой версии **отвергается**
+живости) и `interrupted` в `crawl_session_status`, 3.13.0 — PK `corpus_members` включает
+`product_id` (провенанс члена не перезаписывается чужим продуктом); с 3.12.0 файл другой версии **отвергается**
 гейтом `11` §2.6, а не мигрируется молча), `STATE_SCHEMA_VERSION` схемы `state/{package}/state.db` —
 **`"4"`** (v4 добавила `profile_attestation`). Основное из накопленного: E2 —
 `runs.registry_spec_digest`, дайджест package-scoped спецификаций реестров, граница

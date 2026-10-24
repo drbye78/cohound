@@ -1,8 +1,9 @@
 """``corpus_members`` / ``archive_observations``: round-trip и идемпотентность (B3).
 
-Идентичность члена — ``(archive_content_hash, normalized_member_path)`` (§6.7): повторный
-спуск того же архива **не** дублирует строки, а обновляет исход. Наблюдение спуска —
-одно на ``observation_id`` (детерминированный отпечаток прогона/корня/архива/глубины).
+Идентичность члена — ``(archive_content_hash, normalized_member_path, product_id)`` (§6.7,
+схема 3.13.0): повторный спуск того же архива **не** дублирует строки, а обновляет исход,
+а один архив в двух продуктах даёт две строки провенанса. Наблюдение спуска — одно на
+``observation_id`` (детерминированный отпечаток прогона/корня/архива/глубины).
 """
 
 from __future__ import annotations
@@ -64,7 +65,7 @@ def _observation(**overrides: object) -> ArchiveObservation:
 
 def test_schema_version_is_additive_bump() -> None:
     """Новые таблицы аддитивны: ``CREATE TABLE IF NOT EXISTS`` + бамп версии схемы."""
-    assert SCHEMA_VERSION == "3.12.0"
+    assert SCHEMA_VERSION == "3.13.0"
     conn = connect(":memory:")
     try:
         tables = {
@@ -124,6 +125,49 @@ def test_corpus_members_distinguish_paths_and_archives() -> None:
         assert len(
             list(store.iter_corpus_members(archive_content_hash=ARCHIVE_HASH))
         ) == 2
+    finally:
+        store.close()
+
+
+def test_corpus_members_distinguish_products_of_one_archive() -> None:
+    """Один архив + один путь в **двух** продуктах — две строки провенанса (3.13.0).
+
+    До 3.13.0 PK был ``(archive_content_hash, member_path)``: второй продукт перезаписывал
+    ``run_id``/``root_url``/``doc_id`` первого, и провенанс члена врал молча. Повторный
+    upsert того же продукта по-прежнему обновляет строку, а не плодит её.
+    """
+    store = SqliteStore(":memory:")
+    try:
+        store.save_corpus_members(
+            [
+                _member(product_id="p1", doc_id="p1:" + "b" * 64),
+                _member(
+                    product_id="p2",
+                    root_url="https://docs.test/p2/bundle.zip",
+                    doc_id="p2:" + "d" * 64,
+                ),
+            ]
+        )
+        rows = {row.product_id: row for row in store.iter_corpus_members()}
+        assert set(rows) == {"p1", "p2"}
+        assert rows["p1"].doc_id == "p1:" + "b" * 64
+        assert rows["p2"].doc_id == "p2:" + "d" * 64
+        # Провенанс второго продукта не затёрт первым и наоборот.
+        assert rows["p2"].root_url == "https://docs.test/p2/bundle.zip"
+
+        # Повторный upsert **того же** продукта — обновление, а не третья строка.
+        store.save_corpus_members(
+            [_member(product_id="p1", skip_reason="extract_failed", doc_id=None)]
+        )
+        rows = list(store.iter_corpus_members())
+        assert len(rows) == 2
+        p1 = next(row for row in rows if row.product_id == "p1")
+        assert p1.skip_reason == "extract_failed"
+        assert p1.doc_id is None
+        # Фильтр по продукту видит только его строку.
+        assert [row.product_id for row in store.iter_corpus_members(product_id="p2")] == [
+            "p2"
+        ]
     finally:
         store.close()
 

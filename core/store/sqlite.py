@@ -12,7 +12,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = "3.12.0"
+SCHEMA_VERSION = "3.13.0"
 
 #: Код ошибки гейта версии схемы (``03`` §A.2, ``11`` §2.6): старый ``cohound.db`` не читается.
 SCHEMA_VERSION_CODE = "schema_version"
@@ -338,7 +338,11 @@ CREATE TABLE IF NOT EXISTS corpus_coverage (
 -- B3 (schema 3.10.0): члены контейнеров — **производный** вид ретейленного архива (§6.7).
 -- Байты членов отдельно не хранятся: архив — сырьё (I19), член ре-выводится из него тем
 -- же ``open_member`` по ``archive_path``. Идентичность — ``(archive_content_hash,
--- member_path)``; ``member_path`` нормализован (container_policy.normalize_member_path).
+-- member_path, product_id)``; ``member_path`` нормализован
+-- (container_policy.normalize_member_path). ``run_id`` в ключе не нужен: БД и так per-run
+-- (``runs/{run_id}/cohound.db``), а ``product_id`` — **нужное** измерение: один и тот же
+-- архив в двух продуктах одного прогона иначе перезаписывал бы ``run_id``/``root_url``/
+-- ``doc_id`` (провенанс члена врал бы молча; 3.13.0).
 -- ``skip_reason`` заполнен ⟺ член не ингестнут (``doc_id`` NULL) — видимый пропуск.
 CREATE TABLE IF NOT EXISTS corpus_members (
     archive_content_hash  TEXT NOT NULL,
@@ -356,7 +360,7 @@ CREATE TABLE IF NOT EXISTS corpus_members (
     skip_reason           TEXT,                       -- причина, если не ингестнут
     depth                 INTEGER NOT NULL DEFAULT 0, -- уровень вложенности (0 — корень)
     created_at            TEXT,
-    PRIMARY KEY (archive_content_hash, member_path)
+    PRIMARY KEY (archive_content_hash, member_path, product_id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_corpus_members_product ON corpus_members(product_id);

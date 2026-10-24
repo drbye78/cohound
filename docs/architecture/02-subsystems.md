@@ -335,7 +335,7 @@ top-level URL, затем опрос каталогов, волна 2 — зап
   прочитанных байтов по всем уровням; исчерпание — видимый
   `ArchiveDescentStatus.BUDGET_EXHAUSTED`, а не тихое завершение). Оси `archive_max_*`
   ограничивают **один** контейнер.
-- **Наблюдаемость**: `corpus_members` (PK `(archive_content_hash, member_path)`, исход
+- **Наблюдаемость**: `corpus_members` (PK `(archive_content_hash, member_path, product_id)`, исход
   члена в `doc_id`/`skip_reason`) и `archive_observations` (прогноз **до** извлечения +
   исход, `stopped_reason`/`cycle_stops`/`bytes_written`). Запись есть для **каждого**
   контейнера, включая пустой и нечитаемый: «внутри нет ингестируемого» — это наблюдение,

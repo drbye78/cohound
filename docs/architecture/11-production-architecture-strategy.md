@@ -222,12 +222,17 @@ peak=1563 MB, parent floor=500 MB → workers=0`, отказ **до** фаз. Ф
   `skip_reason` и `doc_id=None` (`archive_descent.py:630-660`); сейчас члены, срезанные бюджетом
   (`:571-580`, `:597-604`), не дают строки вообще, и `archive_budget_exhausted` виден только
   в `errors`.
-- **Дефект схемы (открыт, вне этого патча):** PK `corpus_members` =
-  `(archive_content_hash, member_path)` без `run_id`/`product_id` (`core/store/sqlite.py:343-359`).
-  Один и тот же архив в разных продуктах или прогонах перезапишет `run_id`/`root_url` — то есть
-  провенанс члена врёт молча. Идемпотентность повторного спуска этого не покрывает. Нужно решение:
-  либо content-addressed дедупликация с обновляемой провенанс-записью, либо ключ с `run_id`/
-  `product_id` (миграция; колонки уже есть, меняется только PK).
+  **Реализовано (2026-10-24):** синки `persist_observation`/`persist_member` в
+  `ArchiveDescentWalker`, единая точка строки — `_emit_member`/`_emit_skipped_member`;
+  `SKIP_BUDGET`/`SKIP_STREAM_TOO_LARGE` теперь дают строку члена (видимый пропуск); синки
+  подключаются в `corpus.py` (`_persist_observation_sync`/`_persist_member_sync`, отказ стора
+  → `errors`), финальная пачка осталась reconciliation-pass'ом.
+- **Дефект схемы — исправлен (2026-10-24, `SCHEMA_VERSION = 3.13.0`):** PK `corpus_members` =
+  `(archive_content_hash, member_path, product_id)` (`core/store/sqlite.py`). `run_id` в ключе
+  избыточен (БД прогона per-run — `runs/{run_id}/cohound.db`), а `product_id` был недостающим
+  измерением: один и тот же архив в двух продуктах одного прогона перезаписывал
+  `run_id`/`root_url`/`doc_id`, то есть провенанс члена врал молча (с write-through это стало
+  бы заметнее). Миграции нет: старый `cohound.db` отвергается гейтом версии (§2.6).
 - Liveness: `heartbeat_at`/`owner`, `interrupted` в словарь, гейт версии схемы (§2.6).
   **Реализовано (2026-10-24):** `core/pipeline/liveness.py` (порог `SESSION_STALE_AFTER_S` = 600 s,
   интервал `HEARTBEAT_INTERVAL_S` = 60 s), recovery-on-open в `open_session`,

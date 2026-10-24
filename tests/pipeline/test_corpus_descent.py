@@ -37,6 +37,8 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from core.adapters.container_any import container_for
 from core.adapters.index_npy import NpyIndexBuilder
 from core.domain import (
@@ -490,6 +492,16 @@ def test_cumulative_budget_exhaustion_is_visible(tmp_path: Path) -> None:
         assert any(
             "archive_budget_exhausted" in error for error in result.errors
         ), "исчерпание бюджета обязано быть видимым, а не тихим"
+        # F1: срезанный бюджетом член даёт **строку** (раньше его не было в
+        # ``corpus_members`` вовсе, и «почему этого файла нет в корпусе» не отвечал никто).
+        rows = {row.member_path: row for row in _members(store)}
+        assert set(rows) == {"a.txt", "b.txt", "c.txt"}
+        assert rows["a.txt"].doc_id is not None
+        for cut in ("b.txt", "c.txt"):
+            assert rows[cut].skip_reason == "archive_budget_exhausted"
+            assert rows[cut].doc_id is None
+            assert rows[cut].extracted_content_hash is None
+            assert rows[cut].declared_size == 1024
 
 
 # ---------------------------------------------------------------------------
@@ -1074,3 +1086,213 @@ def test_pooled_submit_failure_falls_back_to_inline(tmp_path: Path) -> None:
         ]
         assert len(member_lines) == 1, result.errors
         assert all(row.skip_reason is None for row in _members(store))
+
+
+# ---------------------------------------------------------------------------
+# (10+) Write-through (F1): провенанс спуска durable на каждом шаге
+# ---------------------------------------------------------------------------
+#
+# До правки ``archive_observations``/``corpus_members`` копились в памяти фазы и писались
+# **одной пачкой в конце** (``corpus.py``): SIGKILL/OOM терял весь спуск, хотя документы
+# уже были извлечены. Тот же класс дефекта лечили для документов (``_persist_docs`` пишет
+# строку после каждого документа) — здесь то же лечение: волкер получает два необязательных
+# синка и пишет строку сразу за её появлением. Проверяется наблюдаемое снаружи: содержимое
+# store **после** жёсткого убийства, отсутствие дублей при повторном спуске, устойчивость
+# к отказу стора и совпадение состава/порядка при окне упреждения ``K=2``.
+
+
+def _member_rows_in_insert_order(store: SqliteStore) -> list[tuple[Any, ...]]:
+    """Строки членов в порядке **вставки** (``rowid``): порядок записи = порядок обхода."""
+    return [
+        (
+            row["member_path"],
+            row["doc_id"],
+            row["skip_reason"],
+            row["extracted_content_hash"],
+            row["depth"],
+        )
+        for row in store.conn.execute(
+            "SELECT member_path, doc_id, skip_reason, extracted_content_hash, depth"
+            " FROM corpus_members ORDER BY rowid"
+        )
+    ]
+
+
+def test_kill_mid_descent_keeps_settled_member_rows(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    """Жёсткое убийство посреди спуска оставляет в store доведённые строки, а не ноль.
+
+    Убийство эмулируется ``KeyboardInterrupt`` на третьем члене — это ``BaseException``,
+    то есть ровно тот класс, который изоляция фазы **не** ловит (OOM/прерывание оператора).
+    До write-through в store было бы ноль строк: всё копилось до конца фазы.
+    """
+    import core.pipeline.corpus as corpus_module
+
+    archive = _zip({"a.md": b"a", "b.md": b"b", "c.md": b"c", "d.md": b"d"})
+    real = corpus_module._ingest_member_doc
+    calls: list[str] = []
+
+    def _dying(task: Any, **kwargs: Any) -> Any:
+        calls.append(task.member_path)
+        if len(calls) > 2:
+            raise KeyboardInterrupt("убийство после двух членов")
+        return real(task, **kwargs)
+
+    monkeypatch.setattr(corpus_module, "_ingest_member_doc", _dying)
+
+    store = SqliteStore(":memory:")
+    _make_run(store)
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            build_corpus(
+                _plan(),
+                _BufferedCrawler({ZIP_URL: archive}, {ZIP_URL: "application/zip"}),
+                _FileExtractor(),
+                _Chunker(),
+                store,
+                urls={"p1": [ZIP_URL]},
+                raw_root=tmp_path,
+                run_id=RUN_ID,
+                container_for=container_for,
+            )
+        rows = _members(store)
+        assert calls == ["a.md", "b.md", "c.md"]
+        assert [row.member_path for row in rows] == ["a.md", "b.md"]
+        assert all(row.doc_id is not None for row in rows)
+        # Наблюдение корня не дописано: контейнер был «в полёте» — ровно это и потеряно,
+        # и это видно (нет строки), а не выдаётся за пустой спуск.
+        assert _observations(store) == []
+    finally:
+        store.close()
+
+
+def test_redescent_with_write_through_does_not_duplicate_rows(tmp_path: Path) -> None:
+    """Повторный спуск того же архива не растит ``count(*)``: синк — UPSERT.
+
+    Идемпотентность обеспечена идентичностью строки (``observation_id`` детерминирован,
+    ``corpus_members`` — UPSERT), а не отложенной записью: write-through её не ломает.
+    """
+    from core.pipeline.archive_descent import (
+        ArchiveDescentWalker,
+        DescentBudget,
+        MemberOutcome,
+    )
+
+    archive = _zip({"a.md": b"a", "b.md": b"b", "c.md": b"c"})
+    path = tmp_path / "archive.bin"
+    path.write_bytes(archive)
+    archive_hash = content_hash(archive)
+
+    store = SqliteStore(":memory:")
+    try:
+
+        def _counts() -> tuple[int, int]:
+            members = store.conn.execute(
+                "SELECT COUNT(*) AS n FROM corpus_members"
+            ).fetchone()["n"]
+            observations = store.conn.execute(
+                "SELECT COUNT(*) AS n FROM archive_observations"
+            ).fetchone()["n"]
+            return int(members), int(observations)
+
+        def _descend() -> None:
+            walker = ArchiveDescentWalker(
+                product_id="p1",
+                root_url=ZIP_URL,
+                descent=ArchiveDescent.FULL,
+                budget=DescentBudget(max_member_bytes=1024 * 1024),
+                container_for=container_for,
+                ingest_member=lambda task: MemberOutcome(
+                    doc_id=f"p1:{task.content_hash}", content_hash=task.content_hash
+                ),
+                observations=[],
+                members=[],
+                errors=[],
+                run_id=RUN_ID,
+                persist_observation=store.save_archive_observation,
+                persist_member=lambda row: store.save_corpus_members([row]),
+            )
+            walker.descend(
+                archive_path=path,
+                archive_url=ZIP_URL,
+                archive_content_hash=archive_hash,
+            )
+
+        _descend()
+        first = _counts()
+        assert first == (3, 1)  # три члена + наблюдение корня
+        _descend()
+        assert _counts() == first
+        assert [row.member_path for row in _members(store)] == ["a.md", "b.md", "c.md"]
+    finally:
+        store.close()
+
+
+def test_store_failure_does_not_kill_descent(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    """Отказ стора изолирован в ``errors``: спуск доходит до конца, потеря видима.
+
+    Провенанс важнее потерянной строки, но падение фазы хуже всего: синк пишет ошибку и
+    живёт дальше — как ``_persist_docs``. Финальный reconciliation-pass падает так же
+    видимо, а не тихо.
+    """
+    archive = _zip({"a.md": b"a", "b.md": b"b"})
+
+    def _boom(self: Any, members: Any) -> None:
+        raise RuntimeError("store down")
+
+    monkeypatch.setattr(SqliteStore, "save_corpus_members", _boom)
+
+    with _run(tmp_path, archive) as (store, result, extractor):
+        assert [doc.url for doc in _build_of(result).docs] == [
+            f"{ZIP_URL}!/a.md",
+            f"{ZIP_URL}!/b.md",
+        ]
+        assert len(extractor.calls) == 2
+        assert _members(store) == []
+        per_member = [
+            error for error in result.errors if error.startswith("save_corpus_members(")
+        ]
+        assert len(per_member) == 2, result.errors
+        assert any(
+            error.startswith("corpus_members:") for error in result.errors
+        ), result.errors
+        # Наблюдения spуска пишутся другим синком и отказа не видят.
+        assert len(_observations(store)) == 1
+
+
+def test_write_through_window_matches_inline_order(tmp_path: Path) -> None:
+    """``K=2`` пишет **тот же** состав строк в том же порядке, что inline (write-through).
+
+    Порядок вставки (``rowid``) — доказательство, что синк идёт по обходу, а не по факту
+    завершения воркера: иначе ``corpus_members`` описывал бы другой порядок, чем документы.
+    """
+    archive = _rich_archive()
+
+    with _run(tmp_path / "inline", archive) as (inline_store, _r, _e):
+        inline = _member_rows_in_insert_order(inline_store)
+
+    created: list[_ThreadPool] = []
+    with _run(
+        tmp_path / "pooled",
+        archive,
+        crawl_defaults=CrawlRunConfig(extract_workers=2),
+        extraction_pool=_pool(created),
+    ) as (pooled_store, _r2, _e2):
+        pooled = _member_rows_in_insert_order(pooled_store)
+
+    assert created[0].max_inflight <= 2
+    assert pooled == inline
+    paths = [row[0] for row in pooled]
+    assert paths == [
+        "a/first.pdf",
+        "b/readme.md",
+        "c/copy.md",
+        "d/copy.md",
+        "f/inner.zip",
+        "nested/one.md",
+        "nested/two.md",
+        "g/last.txt",
+    ], paths
