@@ -315,7 +315,10 @@ def test_extract_path_matches_extract_bytes_byte_for_byte(
     assert by_path.content_hash == by_bytes.content_hash
     assert by_path.page_count == by_bytes.page_count == 7
     assert by_path.extractor_version == by_bytes.extractor_version
-    assert by_path.extractor_version == "docling-doc-3:layout_tables"
+    assert by_path.extractor_version == (
+        "docling-doc-3:layout_tables/"
+        f"docling-{extract_document.docling_library_version()}"
+    )
     # Оба пути отдали конвертеру одни и те же байты.
     assert [entry["data"] for entry in converter.seen] == [data, data]
 
@@ -367,7 +370,10 @@ def test_extract_path_missing_file_is_graceful(tmp_path: Path) -> None:
 
     assert doc.error == f"retained-файл не найден: {missing}"
     assert doc.text == ""
-    assert doc.extractor_version == "docling-doc-3:layout_tables"
+    assert doc.extractor_version == (
+        "docling-doc-3:layout_tables/"
+        f"docling-{extract_document.docling_library_version()}"
+    )
 
 def test_extract_path_full_pdf_keeps_ocr_guard(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -504,3 +510,55 @@ def test_resolve_docling_uses_injected_symbols_without_importing(
     assert extract_document.InputFormat is None
     # Флаг не переписан инъекцией.
     assert extract_document._DOCLING_AVAILABLE is None
+
+
+# --------------------------------------------------------------------------- #
+# Д-8: extractor_version называет сборку движка (ключ extract_cache)
+# --------------------------------------------------------------------------- #
+
+
+def test_extractor_version_names_level_and_engine_build() -> None:
+    """``docling-doc-3:<level>/docling-<build>``: уровень и версия библиотеки видны.
+
+    Обе половины обязательны: уровень различает сборки на оси ``document_level``,
+    сборка — версию установленного парсера. Без второй прогон мог бы объявить
+    ``docling-2.140`` и переиспользовать текст ``docling-2.135`` (Д-8).
+    """
+    build = f"docling-{extract_document.docling_library_version()}"
+    for level in (
+        DocumentLevel.OFF,
+        DocumentLevel.TEXT,
+        DocumentLevel.LAYOUT,
+        DocumentLevel.LAYOUT_TABLES,
+        DocumentLevel.FULL,
+    ):
+        version = DoclingDocumentExtractor(level).version
+        assert version == f"docling-doc-3:{level.value}/{build}"
+        assert version.startswith(f"docling-doc-3:{level.value}/")
+        assert version.endswith(f"/{build}")
+
+
+def test_engine_build_reflects_installed_library_version(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Сборка — фактическая версия библиотеки, а не константа в коде."""
+    monkeypatch.setattr(extract_document, "docling_library_version", lambda: "2.140.1")
+
+    assert extract_document.docling_engine_build() == "docling-2.140.1"
+    assert (
+        DoclingDocumentExtractor(DocumentLevel.FULL).version
+        == "docling-doc-3:full/docling-2.140.1"
+    )
+
+
+def test_missing_library_does_not_invent_a_build(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Нет пакета — ``unknown``, а не правдоподобный номер (A3)."""
+    monkeypatch.setattr(extract_document, "_DOCLING_DISTRIBUTIONS", ())
+
+    assert extract_document.docling_library_version() == "unknown"
+    assert (
+        DoclingDocumentExtractor(DocumentLevel.FULL).version
+        == "docling-doc-3:full/docling-unknown"
+    )

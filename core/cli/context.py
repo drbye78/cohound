@@ -1557,18 +1557,21 @@ def _filter_corpus_urls(
 
 
 #: Phase 4: терминальные статусы сеанса краула (дальнейший опрос бесполезен).
+#: F1/Д-6: ``interrupted`` сюда **обязан** входить — иначе ``--follow`` ждал бы вечно
+#: сеанс, который уже никто не исполняет.
 _TERMINAL_SESSION_STATUSES: frozenset[CrawlSessionStatus] = frozenset(
     {
         CrawlSessionStatus.COMPLETED,
         CrawlSessionStatus.PARTIAL,
         CrawlSessionStatus.CANCELLED,
         CrawlSessionStatus.FAILED,
+        CrawlSessionStatus.INTERRUPTED,
     }
 )
 
 
 def _is_terminal_session_status(status: str | None) -> bool:
-    """Phase 4: терминален ли статус сеанса (``completed|partial|cancelled|failed``)."""
+    """Phase 4: терминален ли статус сеанса (``completed|partial|cancelled|failed|interrupted``)."""
     if status is None:
         return True
     try:

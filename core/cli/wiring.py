@@ -31,7 +31,7 @@ import os
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from core.adapters.chunker_family import FamilyChunker
 from core.adapters.container_any import container_for
@@ -1664,6 +1664,57 @@ class _LocalExtractor:
             else f"{html_version}+{documents.version}"
         )
 
+    def _resolve_target(
+        self, page: RawPage, route: ExtractionRoute = ExtractionRoute.AUTO
+    ) -> tuple[str, ExtractorPort, str | None]:
+        """Единственный диспетчер маршрута: ``(вид, адаптер, filename для документа)``.
+
+        **Зачем отдельный метод, а не ветки внутри ``extract``.** Маршрут нужен в двух
+        местах: чтобы извлечь документ и чтобы **заранее** назвать движок, который это
+        сделает (ключ ``extract_cache``). Пока правило жило только внутри ``extract``,
+        вызывающий мог лишь догадываться о движке — и догадывался неверно: брал
+        композитную версию (``trafilatura-html-2+docling-doc-3:full/…``), тогда как
+        документ штампуется версией **своего** адаптера (``trafilatura-html-2`` для
+        страницы, ``docling-doc-3:full/…`` для PDF). Кэш от такого ключа не давал ни
+        одного попадания: он был write-only. Один диспетчер исключает расхождение по
+        построению, а не по дисциплине.
+
+        Порядок ветвей — контракт поведения (``.txt``/``.epub`` проверяются до фолбэка в
+        HTML, см. докстринг класса): перестановка вернула бы ``.txt`` в ``parser_failed``.
+        """
+        if route is ExtractionRoute.HTML:
+            return "html", self._html, None
+        documents = self._documents
+        if route is ExtractionRoute.DOCUMENT:
+            if documents is None:
+                return "html", self._html, None
+            filename = _detect_document_filename(page)
+            return "document", documents, filename or "document.pdf"
+        if textual_family(page.url, page.content_type) is not None:
+            return "text", self._text, None
+        if is_epub(page.url, page.content_type):
+            return "epub", self._epub, None
+        filename = _detect_document_filename(page)
+        if filename is not None and documents is not None:
+            return "document", documents, filename
+        return "html", self._html, None
+
+    def extractor_version_for(
+        self, page: RawPage, route: ExtractionRoute = ExtractionRoute.AUTO
+    ) -> str:
+        """Версия движка, который **будет** обслуживать эту страницу (ключ ``extract_cache``).
+
+        Возвращает ровно ту строку, которую этот адаптер проштампует в
+        ``ExtractedDoc.extractor_version``, — поэтому ключ пробы и ключ записи совпадают,
+        и кэш попадает. Композитная ``.version`` для этого не годится: она описывает
+        набор движков всего композита, а не движок конкретного документа.
+
+        Без docling (``off`` или пакет недоступен) документная ветвь недостижима, поэтому
+        строка всегда принадлежит реально исполняемому адаптеру.
+        """
+        _, adapter, _ = self._resolve_target(page, route)
+        return str(getattr(adapter, "version", "") or "")
+
     def extract(
         self, page: RawPage, route: ExtractionRoute = ExtractionRoute.AUTO
     ) -> ExtractedDoc:
@@ -1672,24 +1723,18 @@ class _LocalExtractor:
         Документный путь: если страница несёт ``source_path`` (retained-файл, I19),
         извлечение идёт по пути (``extract_path``) — тело не копируется в RAM и не
         пишется во второй временный файл; иначе — прежний ``extract_bytes``.
+
+        Диспетчеризация — :meth:`_resolve_target` (единственное место, где живёт правило
+        маршрута), чтобы версия для ключа кэша не могла разойтись с фактическим движком.
         """
-        if route is ExtractionRoute.HTML:
-            return self._html.extract(page, route)
-        documents = self._documents
-        if route is ExtractionRoute.DOCUMENT:
-            if documents is None:
-                return self._html.extract(page, route)
-            filename = _detect_document_filename(page)
-            return _extract_document(documents, page, filename or "document.pdf")
-        family = textual_family(page.url, page.content_type)
-        if family is not None:
-            return self._text.extract(page, route)
-        if is_epub(page.url, page.content_type):
-            return self._epub.extract(page, route)
-        filename = _detect_document_filename(page)
-        if filename is not None and documents is not None:
-            return _extract_document(documents, page, filename)
-        return self._html.extract(page, route)
+        kind, adapter, filename = self._resolve_target(page, route)
+        if kind == "document":
+            # ``adapter`` — документный адаптер по построению ``_resolve_target``; сужение
+            # типа нужно только для читателя-статического анализатора.
+            return _extract_document(
+                cast(DoclingDocumentExtractor, adapter), page, filename or "document.pdf"
+            )
+        return adapter.extract(page, route)
 
     @property
     def options_provenance(self) -> dict[str, int | None]:

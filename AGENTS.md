@@ -212,6 +212,12 @@ python3 -m core.cli experiment evaluator-benchmark --runs-dir runs --run-id {run
 `--reset` — форсировать перезапуск, `--from-scratch` — ещё и живой ре-фетч в обход R7-кэша.
 Отдельный сеанс краула — `hound crawl run|status|list|resume|restart|cancel`
 (`crawl resume` идемпотентен: та же `session_id`, уже `FETCHED`-элементы не пере-фетчатся).
+Свидетельство живости (`crawl_sessions.owner`/`heartbeat_at`, `core/pipeline/liveness.py`):
+протухший `running` при открытии сеанса становится `interrupted` (не `failed`/`cancelled`:
+тело краула не финализировано); `crawl list`/`status` показывают `owner`/`heartbeat_at`/
+`stale_reason`, а `crawl cancel` снимает `running` как `interrupted` с причиной
+`cancelled_by_operator`. `interrupted` обязан оставаться в `_TERMINAL_SESSION_STATUSES`
+(`core/cli/context.py`) — иначе `--follow` ждёт вечно. Это не lease: координации нод нет.
 `--follow` печатает `crawl_progress` (агрегат сеанса) и `crawl_product` (границы продукта:
 агрегат не отличает «ещё в очереди» от «потерян»). «Почему у продукта ноль источников»
 читается в `results[].notes` (`--json` прогона), там же

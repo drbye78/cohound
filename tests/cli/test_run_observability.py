@@ -32,6 +32,8 @@ B2_KEYS = {
     "duration_by_phase",
     "crawl",
     "crawl_truncation",
+    # F1: жизненный цикл сеанса краула (``interrupted`` виден без разбора БД).
+    "crawl_session",
     # F0: блок ресурсов (§4 F0) — присутствует всегда, даже если нечего измерять.
     "resources",
 }

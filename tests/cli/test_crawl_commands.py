@@ -624,3 +624,164 @@ def test_crawl_policy_truncation_with_failures_keeps_error(
         ports=_ports(crawler),
     )
     assert code == EXIT_ERROR
+
+
+# ---------------------------------------------------------------------------
+# F1/Д-6: interrupted, свидетельство живости, видимость в list/status
+# ---------------------------------------------------------------------------
+
+
+def _db_with_session(
+    tmp_path: Path,
+    *,
+    status: Any,
+    owner: str | None = None,
+    heartbeat_at: str | None = None,
+    session_id: str = "crawl:r1",
+) -> Path:
+    """БД с единственным сеансом заданного статуса (без прогона: ``run_id=None``)."""
+    from core.domain import CrawlSession
+    from core.store.sqlite_store import SqliteStore
+
+    db = tmp_path / "manual.db"
+    with SqliteStore(db) as store:
+        store.upsert_crawl_session(
+            CrawlSession(
+                session_id=session_id,
+                run_id=None,
+                profile="local",
+                status=status,
+                created_at=TS,
+                owner=owner,
+                heartbeat_at=heartbeat_at,
+            )
+        )
+    return db
+
+
+def test_crawl_cancel_running_session_is_interrupted(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """F1: снятие ``running``-сеанса — ``interrupted`` (тело краула не финализировано)."""
+    from core.domain import CrawlSessionStatus
+
+    db = _db_with_session(
+        tmp_path,
+        status=CrawlSessionStatus.RUNNING,
+        owner="other-host/4242/777",
+        heartbeat_at="2026-01-01T00:00:00+00:00",
+    )
+
+    code = main(["crawl", "cancel", "--run-id", "r1", "--db", str(db), "--json"])
+
+    assert code == EXIT_OK
+    payload = json_out(capsys)
+    assert payload["status"] == "interrupted"
+    # Причина названа машинно-читаемо: «оператор снял» отличимо от «процесс убит».
+    assert payload["error"].startswith("cancelled_by_operator")
+    assert any("interrupted" in note for note in payload["notes"])
+
+
+def test_crawl_cancel_not_running_session_stays_cancelled(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Сеанс, который не исполняется, снимается как ``cancelled``: тела в полёте нет."""
+    from core.domain import CrawlSessionStatus
+
+    db = _db_with_session(tmp_path, status=CrawlSessionStatus.CREATED)
+
+    assert main(["crawl", "cancel", "--run-id", "r1", "--db", str(db), "--json"]) == EXIT_OK
+    payload = json_out(capsys)
+    assert payload["status"] == "cancelled"
+    assert payload["error"].startswith("cancelled_by_operator")
+
+
+def test_crawl_status_shows_liveness_of_interrupted_session(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """``crawl status`` показывает ``interrupted``, причину и свидетельство живости."""
+    from core.domain import CrawlSessionStatus
+
+    db = _db_with_session(
+        tmp_path,
+        status=CrawlSessionStatus.INTERRUPTED,
+        owner="other-host/4242/777",
+        heartbeat_at="2026-01-01T00:00:00+00:00",
+    )
+
+    assert main(["crawl", "status", "--run-id", "r1", "--db", str(db), "--json"]) == EXIT_OK
+    payload = json_out(capsys)
+    assert payload["status"] == "interrupted"
+    assert payload["owner"] == "other-host/4242/777"
+    assert payload["heartbeat_at"] == "2026-01-01T00:00:00+00:00"
+    # Терминальный сеанс не «протухает»: recovery ему уже не нужен.
+    assert payload["stale_reason"] is None
+
+
+def test_crawl_list_names_stale_running_without_writing(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """``crawl list`` называет протухший ``running``, но **не** лечит его (read-only)."""
+    from core.domain import CrawlSessionStatus
+    from core.store.sqlite_store import SqliteStore
+
+    db = _db_with_session(
+        tmp_path,
+        status=CrawlSessionStatus.RUNNING,
+        owner="other-host/4242/777",
+        heartbeat_at="2020-01-01T00:00:00+00:00",
+    )
+
+    assert main(["crawl", "list", "--run-id", "r1", "--db", str(db), "--json"]) == EXIT_OK
+    payload = json_out(capsys)
+    row = payload["sessions"][0]
+    assert row["status"] == "running"
+    assert row["stale_reason"].startswith("stale_heartbeat")
+
+    # Read-only: статус в БД не изменился (лечит open_session/run, а не list).
+    with SqliteStore(db) as store:
+        session = store.get_crawl_session("crawl:r1")
+        assert session is not None
+        assert session.status is CrawlSessionStatus.RUNNING
+
+
+def test_interrupted_is_terminal_for_follow() -> None:
+    """F1: ``interrupted`` обязан быть терминальным — иначе ``--follow`` ждал бы вечно."""
+    from core.cli.context import _is_terminal_session_status
+
+    assert _is_terminal_session_status("interrupted") is True
+
+
+def test_crawl_run_touches_heartbeat_during_crawl(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F1/Д-6: признак жизни пишется **по ходу** сеанса, а не только при открытии.
+
+    Проверяется проводка: ``Heartbeat.touch`` вызывается из воронок фазы (запись исхода URL,
+    границы шагов дренажа). Сам факт записи по интервалу — предмет
+    ``tests/pipeline/test_liveness.py`` (троттлинг), здесь важна именно связанность: без неё
+    heartbeat остался бы точкой старта, и медленный сеанс выглядел бы мёртвым.
+    """
+    from core.pipeline import liveness
+
+    calls: list[bool] = []
+    original = liveness.Heartbeat.touch
+
+    def spy(self: Any, *, force: bool = False) -> bool:
+        result = original(self, force=force)
+        calls.append(result)
+        return result
+
+    monkeypatch.setattr(liveness.Heartbeat, "touch", spy)
+    monkeypatch.chdir(tmp_path)
+    package = valid_package(tmp_path)
+    code = main(
+        _run_argv(
+            package, action="run", run_id="cr-hb", db=tmp_path / "cr-hb.db",
+            urls=_urls_file(tmp_path),
+        ),
+        ports=_ports(_RecordingCrawler(_pages())),
+    )
+    assert code == EXIT_OK
+    capsys.readouterr()
+    assert calls, "heartbeat не вызывался по ходу краула — сеанс выглядел бы мёртвым"

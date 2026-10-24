@@ -226,3 +226,22 @@ def test_phase_durations_flow_into_metrics() -> None:
     durations = collect_phase_durations(None, {"report": 5.0, "corpus": 1.0})
     metrics = compute_metrics(phase_durations=durations)
     assert metrics.duration_by_phase == {"corpus": 1.0, "report": 5.0}
+
+
+def test_crawl_session_passthrough_and_neutral_empty() -> None:
+    """F1/Д-6: ``interrupted`` и свидетельство живости доезжают до ``metrics.json``.
+
+    Статус не выводится из счётчиков: ``interrupted`` ставит тот, кто знает факт
+    прерывания (recovery-on-open/размотка), поэтому метрика обязана передать его как есть.
+    Без сеанса блок пуст — «сеанса не было» ≠ «статус неизвестен».
+    """
+    payload = {
+        "status": "interrupted",
+        "owner": "host-a/4242/777",
+        "heartbeat_at": "2026-01-01T00:00:00+00:00",
+        "stale_reason": "stale_heartbeat: возраст 3600 s > порога 600 s",
+    }
+    metrics = compute_metrics(crawl_session=payload)
+    assert metrics.crawl_session == payload
+    assert json.loads(metrics.to_manifest_json())["crawl_session"] == payload
+    assert compute_metrics().crawl_session == {}

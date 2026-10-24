@@ -5,20 +5,22 @@
 и финализирует сеанс, поэтому команда только резолвит прогон/порты/фазы (как ``run``) и
 вызывает фазу корпуса Ш5 — логика краула здесь **не** дублируется.
 
-Живого worker'а в foreground-профиле ``local`` нет: ``cancel`` переводит сеанс в
-терминальный ``cancelled`` (намерение оператора), а не прерывает работающий процесс.
+Живого worker'а в foreground-профиле ``local`` нет: ``cancel`` терминально снимает сеанс,
+а не прерывает работающий процесс. ``running``-сеанс при этом получает ``interrupted``
+(тело краула не финализировано никем), а не ``cancelled`` — см. :func:`cancel`.
 
 Семантика подкоманд:
 
 * ``run``     — запустить сеанс краула (фаза корпуса); ``--reset`` очищает сеанс до старта.
 * ``status``  — сеанс и счётчики (``--per-url`` — построчно). Сеанса нет → ``EXIT_OK`` с
   ``status: null`` (пустой, но валидный машинночитаемый ответ).
-* ``list``    — перечислить сеансы в БД прогона.
+* ``list``    — перечислить сеансы в БД прогона (со свидетельством живости, F1).
 * ``resume``  — продолжить прерванный сеанс: та же ``session_id``, уже ``FETCHED``-элементы
   не пере-фетчатся (recovery-on-open + retained raw); идемпотентно.
 * ``restart`` — очистить сеанс и запустить заново; ``--from-scratch`` документирует обход
   R7-кэша (Phase 4 — флаг принимается, но кэш пока **не** обходится).
-* ``cancel``  — перевести сеанс в ``cancelled`` (best-effort; foreground без worker'а).
+* ``cancel``  — терминально снять сеанс: ``running`` → ``interrupted`` (best-effort;
+  foreground без worker'а), неисполнявшийся → ``cancelled``.
 
 Нейтрален к предметной категории (§1.3): никаких названий продуктов/вендоров.
 """
@@ -87,6 +89,7 @@ from core.pipeline.crawl_session import (
 )
 from core.pipeline.digests import cohort_digest, seeds_digest
 from core.pipeline.lint import lint_run_inputs
+from core.pipeline.liveness import interrupt_session, stale_reason
 from core.pipeline.normalize import load_inputs
 from core.pipeline.onboarding import load_effective_seeds
 from core.pipeline.plan import derive_run_id
@@ -196,7 +199,12 @@ def _item_row(item: Any) -> dict[str, Any]:
 
 
 def _session_fields(session: Any) -> dict[str, Any]:
-    """Поля жизненного цикла сеанса для payload (``None`` при отсутствии сеанса)."""
+    """Поля жизненного цикла сеанса для payload (``None`` при отсутствии сеанса).
+
+    F1: ``owner``/``heartbeat_at`` — свидетельство живости, ``stale_reason`` — почему
+    ``running``-сеанс считается прерванным (``None`` — сеанс живой или уже терминален).
+    Оператору эти поля нужны, чтобы отличать «ещё работает» от «умер и ждёт recovery».
+    """
     if session is None:
         return {
             "status": None,
@@ -205,6 +213,9 @@ def _session_fields(session: Any) -> dict[str, Any]:
             "finished_at": None,
             "total": 0,
             "error": None,
+            "owner": None,
+            "heartbeat_at": None,
+            "stale_reason": None,
         }
     return {
         "status": session.status.value,
@@ -213,6 +224,9 @@ def _session_fields(session: Any) -> dict[str, Any]:
         "finished_at": session.finished_at,
         "total": session.total,
         "error": session.error,
+        "owner": getattr(session, "owner", None),
+        "heartbeat_at": getattr(session, "heartbeat_at", None),
+        "stale_reason": stale_reason(session),
     }
 
 
@@ -549,9 +563,12 @@ def _execute_crawl(
     # ``source_unavailable``) → :data:`EXIT_ERROR`; полный краул/без сеанса → :data:`EXIT_OK`.
     # N4: PARTIAL исключительно из-за политического усечения (сбоев фетча нет) — честно
     # завершённый ограниченный краул: exit success + предупреждение, не ошибка.
+    # F1: ``interrupted`` — прогон прерван без размотки (сеанс снят/убит), тело краула не
+    # финализировано: это не успех, как и ``partial``/``failed``.
     if final_status in (
         CrawlSessionStatus.PARTIAL.value,
         CrawlSessionStatus.FAILED.value,
+        CrawlSessionStatus.INTERRUPTED.value,
     ):
         if truncation_only and final_status == CrawlSessionStatus.PARTIAL.value:
             return EXIT_OK
@@ -628,6 +645,16 @@ def status(args: argparse.Namespace) -> int:
                 f"total: {session.total}",
                 "counts: " + ", ".join(f"{key}={counts[key]}" for key in sorted(counts)),
             ]
+            # F1: свидетельство живости — видно, что ``running`` живой, а не фантом.
+            if payload.get("heartbeat_at") or payload.get("owner"):
+                lines.append(
+                    f"liveness: owner={payload.get('owner') or '—'}"
+                    f" heartbeat_at={payload.get('heartbeat_at') or '—'}"
+                )
+            if payload.get("stale_reason"):
+                lines.append(f"stale: {payload['stale_reason']}")
+            if payload.get("error"):
+                lines.append(f"error: {payload['error']}")
             for row in payload.get("items", ()):
                 lines.append(f"  {row['product_id']} {row['status']} {row['url']}")
             sys.stdout.write("\n".join(lines) + "\n")
@@ -635,15 +662,35 @@ def status(args: argparse.Namespace) -> int:
 
 
 def list_sessions(args: argparse.Namespace) -> int:
-    """``crawl list``: перечислить сеансы в БД прогона (read-only)."""
+    """``crawl list``: перечислить сеансы в БД прогона (read-only).
+
+    F1: строка несёт свидетельство живости (``owner``/``heartbeat_at``) и ``stale_reason``,
+    поэтому ``running``-фантом отличим от живого сеанса без отдельной команды. Recovery
+    здесь **не** выполняется: ``list`` читает, а не лечит (лечит ``open_session``/``run``).
+    """
     db_path = _crawl_db_path(args)
     with build_store(db_path, profile=args.profile) as store:
-        rows = store.conn.execute(
-            "SELECT session_id, run_id, profile, status, created_at, started_at,"
-            " finished_at, total, pending, running, fetched, failed, cancelled"
-            " FROM crawl_sessions ORDER BY session_id"
-        ).fetchall()
-        sessions = [{key: row[key] for key in row.keys()} for row in rows]
+        sessions = [
+            {
+                "session_id": session.session_id,
+                "run_id": session.run_id,
+                "profile": session.profile,
+                "status": session.status.value,
+                "created_at": session.created_at,
+                "started_at": session.started_at,
+                "finished_at": session.finished_at,
+                "total": session.total,
+                "pending": session.pending,
+                "running": session.running,
+                "fetched": session.fetched,
+                "failed": session.failed,
+                "cancelled": session.cancelled,
+                "owner": session.owner,
+                "heartbeat_at": session.heartbeat_at,
+                "stale_reason": stale_reason(session),
+            }
+            for session in store.iter_crawl_sessions()
+        ]
         if args.json:
             _print_json(
                 {
@@ -656,8 +703,11 @@ def list_sessions(args: argparse.Namespace) -> int:
         else:
             lines = [f"db: {db_path}", f"sessions: {len(sessions)}"]
             for session in sessions:
+                suffix = ""
+                if session["stale_reason"]:
+                    suffix = f" stale({session['stale_reason'].split(':', 1)[0]})"
                 lines.append(
-                    f"  {session['session_id']} [{session['status']}] "
+                    f"  {session['session_id']} [{session['status']}]{suffix} "
                     f"total={session['total']} fetched={session['fetched']} "
                     f"failed={session['failed']}"
                 )
@@ -666,7 +716,16 @@ def list_sessions(args: argparse.Namespace) -> int:
 
 
 def cancel(args: argparse.Namespace) -> int:
-    """``crawl cancel``: перевести сеанс в ``cancelled`` (best-effort, foreground без worker'а).
+    """``crawl cancel``: терминально снять сеанс (best-effort, foreground без worker'а).
+
+    F1: ``running``-сеанс переводится в ``interrupted``, а не в ``cancelled``. Причина —
+    честность: в профиле ``local`` живого worker'а нет, снимать нечего, и тело краула
+    **не финализируется** никем. ``cancelled`` означало бы «краул снят и это проверено» —
+    заявление, которого никто не делал; ``interrupted`` означает ровно «прервано, тело не
+    финализировано» (``10`` §5.6). Причина всё равно названа: ``error`` начинается с
+    ``cancelled_by_operator``, поэтому «оператор снял» отличимо от «процесс убит».
+    Сеанс, который не исполняется (``created``/``paused``/терминальный), получает
+    ``cancelled``: тела в полёте нет, решение оператора применяется напрямую.
 
     Отсутствие сеанса → ``EXIT_NOT_FOUND`` с понятным сообщением (отменять нечего).
     """
@@ -674,7 +733,8 @@ def cancel(args: argparse.Namespace) -> int:
     run_id, session_id = _session_id_for(args)
     store = build_store(db_path, profile=args.profile)
     try:
-        if store.get_crawl_session(session_id) is None:
+        existing = store.get_crawl_session(session_id)
+        if existing is None:
             if args.json:
                 _print_json(
                     {
@@ -691,18 +751,28 @@ def cancel(args: argparse.Namespace) -> int:
                     f"session_id: {session_id}\n(сеанс не найден — отменять нечего)\n"
                 )
             return EXIT_NOT_FOUND
-        store.update_crawl_session_status(
-            session_id, CrawlSessionStatus.CANCELLED, finished_at=_now_iso()
-        )
+        reason = f"cancelled_by_operator: снят командой crawl cancel (owner={existing.owner or '—'})"
+        if existing.status is CrawlSessionStatus.RUNNING:
+            interrupt_session(store, session_id, reason=reason, at=_now_iso())
+            note = (
+                "local: живого worker'а нет — тело краула не финализировано, "
+                "статус переведён в interrupted (cancelled_by_operator)"
+            )
+        else:
+            store.update_crawl_session_status(
+                session_id,
+                CrawlSessionStatus.CANCELLED,
+                finished_at=_now_iso(),
+                error=reason,
+            )
+            note = "local: сеанс не исполнялся — статус переведён в cancelled"
         session = store.get_crawl_session(session_id)
         payload = {
             "ok": True,
             "run_id": run_id,
             "session_id": session_id,
             "db": str(db_path),
-            "notes": [
-                "local: живого worker'а нет — статус переведён в cancelled (намерение оператора)"
-            ],
+            "notes": [note],
             **_session_fields(session),
         }
         if args.json:
@@ -839,7 +909,7 @@ def configure(sub: Any) -> None:
     _add_llm_model_flag(p_restart)
     p_restart.set_defaults(handler=restart)
 
-    p_cancel = crawl.add_parser("cancel", help="перевести сеанс в терминальный cancelled")
+    p_cancel = crawl.add_parser("cancel", help="терминально снять сеанс (interrupted|cancelled)")
     _add_session_target_flags(p_cancel, require_run_id=True)
     _add_common(p_cancel)
     p_cancel.set_defaults(handler=cancel)

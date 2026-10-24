@@ -72,6 +72,7 @@ from core.pipeline.runner import Clock
 from core.ports.crawler import CrawlerPort
 from core.ports.discovery_llm import DiscoveryLLMPort
 from core.ports.search import SearchAdapterPort
+from core.store.sqlite import SCHEMA_VERSION_CODE, SchemaVersionMismatch
 
 __all__ = [
     "EXIT_OK",
@@ -222,6 +223,12 @@ def main(
     except WiringError as exc:
         # Профиль/сборка: это конфигурационная ошибка (split до W13).
         _emit_error(args, "profile", _concise(exc))
+        return EXIT_USAGE
+    except SchemaVersionMismatch as exc:
+        # Гейт версии схемы (`11` §2.6): старый cohound.db отвергается **сообщением**, а не
+        # трейсбеком и не молчаливым чтением. Код возврата — ошибка входа: лечится
+        # оператором (новый каталог прогона), а не повтором той же команды.
+        _emit_error(args, SCHEMA_VERSION_CODE, _concise(exc))
         return EXIT_USAGE
     except ValueError as exc:  # включает pydantic.ValidationError (I-инварианты домена)
         _emit_error(args, extract_code(str(exc)), _concise(exc))

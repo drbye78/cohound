@@ -8,8 +8,17 @@
 **P5 — уровень извлечения.** Качество PDF-экстракции задаётся осью
 ``crawl.document_level`` (:class:`~core.domain.enums.DocumentLevel`), а не «случайным»
 дефолтом пустого ``DocumentConverter()``. Уровень входит в ``version`` экстрактора
-(``docling-doc-3:<level>``) и тем самым — в ``index_build_id`` иммутабельной сборки (§13):
-смена уровня не может молча дать ту же сборку.
+(``docling-doc-3:<level>/docling-<build>``) и тем самым — в ``index_build_id``
+иммутабельной сборки (§13): смена уровня не может молча дать ту же сборку.
+
+**Сборка движка в версии экстрактора (Д-8).** ``<build>`` — версия установленной
+библиотеки ``docling``, полученная :func:`docling_engine_build` (единственный источник;
+``execution_axes.extractor_stack_version`` берёт то же число тем же вызовом). Без неё
+ключ ``extract_cache`` (``(content_hash, extractor_version, level)``) не отличал бы
+текст, произведённый другой сборкой парсера, и прогон объявлял бы один движок, а
+переиспользовал текст другого. Цена — после апгрейда docling внутри диапазона
+``>=2.135,<3`` кэш один раз промахивается, а ``pb``/``corpus_docs.extractor_version``
+меняются: они описывают **фактически прочитанный** текст, а не предполагаемый движок.
 
 * ``full`` (**дефолт**) — сегодняшнее эффективное поведение: layout Heron + таблицы
   TableFormer ``ACCURATE`` + ``do_cell_matching=True`` + авто-OCR (``OcrAutoOptions``),
@@ -58,6 +67,7 @@ HTML (86%), и docling им не нужен вовсе: пул воркеров 
 from __future__ import annotations
 
 import hashlib
+import importlib.metadata
 import importlib.util
 import logging
 import os
@@ -104,6 +114,65 @@ _DOCLING_SYMBOLS: tuple[str, ...] = (
     "TableFormerMode",
     "OcrAutoOptions",
 )
+
+#: Семейство docling-адаптера (без per-level суффикса ``:level``). **Единственное**
+#: объявление: ``core.cli.execution_axes`` берёт его отсюда (импорт адаптера уже есть в
+#: composition root через ``wiring``, поэтому второй копии строки не нужно — копия
+#: разошлась бы с реальностью молча). Уровень извлечения — отдельная операционная ось
+#: ``crawl.document_level``, уже входящая в ``crawl_config_digest``.
+DOCLING_ADAPTER_FAMILY = "docling-doc-3"
+
+#: Префикс «сборки движка» в идентификаторах версии. Один на ``extractor_version``
+#: (ключ ``extract_cache``/``pb``) и на ``extractor_stack`` (``run_id``).
+_DOCLING_BUILD_PREFIX = "docling-"
+
+#: Имена дистрибутивов, под которыми ставится одна и та же библиотека: полный ``docling``
+#: (с torch) и лёгкий ``docling-slim`` (тот же код без torch; 05-dependency-stack).
+_DOCLING_DISTRIBUTIONS: tuple[str, ...] = ("docling", "docling-slim")
+
+
+def docling_library_version() -> str:
+    """Версия установленной библиотеки ``docling`` — **единственный** источник (Д-8).
+
+    Читаются метаданные дистрибутива (``importlib.metadata``), а не ``import docling``:
+    импорт тянет torch/модели и недопустим ни на старте прогона, ни в воркере ради
+    строки версии. Проверяются оба имени дистрибутива — на slim-установке версия иначе
+    молча терялась бы. Отсутствие пакета — честный ``"unknown"``: версия не выдумывается
+    (A3), и значение попадает в версию экстрактора как есть, а не подменяется
+    правдоподобным дефолтом.
+    """
+    for dist in _DOCLING_DISTRIBUTIONS:
+        try:
+            return importlib.metadata.version(dist)
+        except importlib.metadata.PackageNotFoundError:
+            continue
+        except Exception:  # noqa: BLE001 — метаданные не роняют резолв версии
+            continue
+    return "unknown"
+
+
+def docling_engine_build() -> str:
+    """Сборка движка: ``docling-<version установленной библиотеки>`` (Д-8).
+
+    Единственная формулировка «сборки»: и ``extractor_version`` (ключ ``extract_cache``
+    и слагаемое ``pb``), и ``extractor_stack`` (слагаемое ``run_id``) собираются из этого
+    вызова. Две независимые формулы разошлись бы — а расхождение как раз и означает
+    «``run_id`` называет движок, которого не было».
+    """
+    return f"{_DOCLING_BUILD_PREFIX}{docling_library_version()}"
+
+
+def docling_extractor_version(level: DocumentLevel | str) -> str:
+    """``extractor_version`` документа: ``docling-doc-3:<level>/docling-<build>``.
+
+    Пример: ``docling-doc-3:full/docling-2.135.0``. Уровень кодирует ось
+    ``crawl.document_level`` (P5), сборка — фактически установленную библиотеку. Оба
+    слагаемых входят в ключ ``extract_cache``: после апгрейда docling старый текст
+    получается только под **старым** ключом и потому не находится.
+    """
+    return (
+        f"{DOCLING_ADAPTER_FAMILY}:{DocumentLevel(level).value}/{docling_engine_build()}"
+    )
 
 
 def _resolve_docling() -> bool:
@@ -372,12 +441,16 @@ class DoclingDocumentExtractor:
     """Документ (PDF/DOCX/PPTX/XLSX) → markdown через docling. Реализация ``ExtractorPort``.
 
     ``level`` задаёт уровень извлечения PDF (P5). ``version`` — инстансный и кодирует
-    уровень (``docling-doc-3:<level>``), чтобы смена уровня была видна в ``index_build_id``.
-    Классовый ``version`` — дефолт ``full`` (обратная совместимость по атрибуту).
+    уровень и сборку движка (``docling-doc-3:<level>/docling-<build>``,
+    :func:`docling_extractor_version`), чтобы смена уровня или апгрейд docling была видна
+    и в ``index_build_id``, и в ключе ``extract_cache``. Классовый ``version`` — дефолт
+    ``full`` (обратная совместимость по атрибуту).
     """
 
-    #: Классовый дефолт = уровень ``full`` (совпадает с ``DoclingDocumentExtractor().version``).
-    version = "docling-doc-3:full"
+    #: Классовый дефолт = уровень ``full``, вычисленный при импорте
+    #: (совпадает с ``DoclingDocumentExtractor().version``). Инстанс считает версию заново:
+    #: тест, подменивший сборку движка, обязан увидеть новый ключ, а не импортный.
+    version = docling_extractor_version(DocumentLevel.FULL)
 
     #: B3: адаптер извлекает документ по **пути** к локальному файлу (``page.source_path``),
     #: поэтому пригоден для членов контейнеров: спуск отдаёт временный файл, а не буфер.
@@ -390,7 +463,7 @@ class DoclingDocumentExtractor:
         document_timeout: float | None = None,
     ) -> None:
         self._level = DocumentLevel(level)
-        self.version = f"docling-doc-3:{self._level.value}"
+        self.version = docling_extractor_version(self._level)
         # §6: явный таймаут оператора приоритетен; иначе — щедрый per-level дефолт.
         self._document_timeout = document_timeout
         self._converter = None
@@ -446,9 +519,9 @@ class DoclingDocumentExtractor:
         документах; статус docling — ``SUCCESS``, страниц 665/665 (частичных нет).
 
         Класс изменения — ``execution_change`` (§13), **не** ``methodology_change``:
-        ``extractor_version`` (``docling-doc-3:<level>``) не включает эту ручку и не меняется,
-        поэтому записи ``extract_cache/`` остаются валидными (замер не инвалидирует
-        извлечённый корпус). ``golden-full`` не требуется.
+        ``extractor_version`` (``docling-doc-3:<level>/docling-<build>``) не включает эту
+        ручку и от замера не меняется, поэтому записи ``extract_cache/`` остаются
+        валидными (замер не инвалидирует извлечённый корпус). ``golden-full`` не требуется.
 
         Ветка ``text`` (``NativePdfPipelineOptions``) намеренно **без** этой ручки: у
         нативного пайплайна другой механизм и своя память (899 MB), поля ``queue_max_size``

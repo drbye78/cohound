@@ -158,6 +158,26 @@ class StorePort(Protocol):
         """Возвращает сеанс краула или ``None``, если он неизвестен."""
         ...
 
+    def iter_crawl_sessions(
+        self, *, status: CrawlSessionStatus | None = None
+    ) -> Iterator[CrawlSession]:
+        """Итерирует сеансы краула (порядок ``session_id``); фильтр по статусу опционален.
+
+        Нужен recovery-on-open: протухшие ``running``-сеансы ищутся по всей БД прогона,
+        а не только среди открываемого (:mod:`core.pipeline.liveness`).
+        """
+        ...
+
+    def touch_crawl_session_heartbeat(
+        self, session_id: str, *, at: str, owner: str | None = None
+    ) -> None:
+        """Отмечает свидетельство живости сеанса (``heartbeat_at``, опц. ``owner``).
+
+        Targeted ``UPDATE``: статус/счётчики/провенанс не меняются. ``owner=None``
+        сохраняет прежнего владельца — смена владельца объявляется явно.
+        """
+        ...
+
     def update_crawl_session_status(
         self,
         session_id: str,

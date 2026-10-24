@@ -449,11 +449,18 @@ class CrawlSessionStatus(StrEnum):
     ``CREATED`` — сеанс объявлен, работа не начата; ``RUNNING`` — исполняется; ``PAUSED`` —
     приостановлен (возобновим); ``CANCELLED`` — снят оператором/системой; ``COMPLETED`` — все
     элементы успешно добыты; ``PARTIAL`` — часть элементов упала, но тело краула добыто;
-    ``FAILED`` — терминальный сбой сеанса. Терминальные: ``completed|partial|cancelled|failed``.
+    ``INTERRUPTED`` — исполнение прервано **без** размотки (SIGKILL/OOM, снятие сеанса
+    оператором в foreground-профиле), тело краула не финализировано; ``FAILED`` — терминальный
+    сбой сеанса. Терминальные:
+    ``completed|partial|cancelled|failed|interrupted``.
 
     ``partial`` закрывает гэп «упавшие URL прячутся за ``ok``»: успешно добытый, но неполный
-    краул не выдаётся за полный. Статус относится к операционной сущности сеанса, а не к
-    доменной ячейке (не путать с ``CellState``). Per-URL статус несёт :class:`CrawlItemStatus`.
+    краул не выдаётся за полный. ``interrupted`` отличает «прервано» от «упало» (``failed``)
+    и от «усечено» (``partial``): SIGKILL/OOM Python перехватить не может, поэтому факт
+    прерывания устанавливает recovery-on-open по свидетельству живости
+    (``heartbeat_at``/``owner``), а не угадывается. Статус относится к операционной сущности
+    сеанса, а не к доменной ячейке (не путать с ``CellState``). Per-URL статус несёт
+    :class:`CrawlItemStatus`.
     """
 
     CREATED = "created"
@@ -462,6 +469,7 @@ class CrawlSessionStatus(StrEnum):
     CANCELLED = "cancelled"
     COMPLETED = "completed"
     PARTIAL = "partial"
+    INTERRUPTED = "interrupted"
     FAILED = "failed"
 
 

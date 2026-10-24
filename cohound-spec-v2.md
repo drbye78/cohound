@@ -334,7 +334,7 @@ snapshot_date: 2026-06-01
 
 ### 4.4. Операционная БД (SQLite + index_store)
 
-DDL **версионирован и мигрируется**: `SCHEMA_VERSION = "3.11.0"` (`core/store/sqlite.py`), идемпотентные аддитивные миграции (`_ensure_columns`, новые таблицы через `CREATE TABLE IF NOT EXISTS`); версия пишется в `schema_meta`. Durable per-product состояние (`state/{package_id}/state.db`) версионируется отдельно (`STATE_SCHEMA_VERSION = "4"`). Схема не «заморожена»: добавление таблицы/колонки — аддитивная миграция, а не новая БД. Ниже — предметные таблицы; полный DDL — код.
+DDL **версионирован** и **гейтится по версии**: `SCHEMA_VERSION = "3.12.0"` (`core/store/sqlite.py`); версия пишется в `schema_meta`, и файл с другой версией **отвергается** с сообщением (`SchemaVersionMismatch` → `EXIT_USAGE`), а не читается молча — прогон переносится пересозданием каталога прогона (`11` §2.6). Дельты схемы аддитивны (`_ensure_columns`, `CREATE TABLE IF NOT EXISTS`), но обслуживают только «полусозданную» БД в пределах объявленной версии. Durable per-product состояние (`state/{package_id}/state.db`) версионируется отдельно (`STATE_SCHEMA_VERSION = "4"`). Схема не «заморожена»: добавление таблицы/колонки — аддитивная миграция, а не новая БД. Ниже — предметные таблицы; полный DDL — код.
 
 ```sql
 products(product_id PK, canonical_name, vendor, jurisdiction, first_seen, last_seen);
@@ -417,8 +417,14 @@ run_inputs(run_id PK, snapshot_version, payload_json, payload_sha256, created_at
 -- НЕ search_log (тот — единственное место логирования поисковых вызовов, §7/I23).
 crawl_sessions(session_id, run_id, profile, status, created_at, started_at, finished_at,
                total, pending, running, fetched, failed, cancelled, error, options_json,
-               provenance_json, PRIMARY KEY (session_id));
--- status: created|running|paused|cancelled|completed|partial|failed (crawl_session_status)
+               provenance_json, owner, heartbeat_at, PRIMARY KEY (session_id));
+-- status: created|running|paused|cancelled|completed|partial|interrupted|failed
+--   (crawl_session_status). interrupted — исполнение прервано без размотки (SIGKILL/OOM,
+--   снятие оператором в foreground-профиле): тело краула не финализировано, provenance_json
+--   не пишется, причина — в error; partial остаётся за усечением, failed — за наблюдаемым сбоем.
+-- owner/heartbeat_at — свидетельство живости (не блокировка и не lease: SQLite локальный
+--   одно-писательный файл). Живой owner на этом хосте сильнее heartbeat; иначе протухший
+--   running (порог 600 s) переводится recovery-on-open в interrupted (core/pipeline/liveness.py).
 crawl_session_items(session_id, product_id, url, status, attempts, engine, kind, fetch_mode,
                     extract_route, strategy, http_status, content_type, lang, content_hash,
                     raw_path, error_kind, error, first_seen, last_attempt,

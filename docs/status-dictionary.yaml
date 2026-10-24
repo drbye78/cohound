@@ -383,6 +383,12 @@ crawl_probe_reason:
   - fetch_budget_exhausted
 
 # Сеанс краула: жизненный цикл (crawl_sessions).
+# Операционное перечисление (не методологическое): добавление значения не двигает
+# status_dictionary_version и не требует golden-full (§13, правило в шапке файла).
+# interrupted — исполнение прервано без размотки (SIGKILL/OOM; снятие оператором в
+# foreground-профиле local): тело краула не финализировано, provenance_json не пишется,
+# причина — в error. partial остаётся за политическим усечением, failed — за сбоем,
+# который конвейер наблюдал сам.
 crawl_session_status:
   - created
   - running
@@ -390,6 +396,7 @@ crawl_session_status:
   - cancelled
   - completed
   - partial
+  - interrupted
   - failed
 
 # Элемент сеанса краула: per-URL статус (crawl_session_items).

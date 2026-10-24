@@ -109,6 +109,20 @@ def _normalize_crawl(crawl_counts: Mapping[str, Any] | None) -> dict[str, int]:
     return dict(sorted((str(key), int(value)) for key, value in crawl_counts.items()))
 
 
+def _normalize_crawl_session(
+    crawl_session: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Нормализует блок жизненного цикла сеанса краула к детерминированному dict (F1).
+
+    Отсутствие блока → ``{}`` (поле присутствует всегда, но нейтрально: durable-краул мог
+    быть выключен). Значения не пересчитываются — метрика не выводит статус из счётчиков:
+    ``interrupted`` ставит тот, кто знает факт прерывания, а не арифметика.
+    """
+    if not crawl_session:
+        return {}
+    return _round_floats(dict(crawl_session))
+
+
 def _round_floats(value: Any) -> Any:
     """Рекурсивно округляет float до 1 знака (без «float-мусора» в метриках).
 
@@ -193,6 +207,10 @@ class RunMetrics:
     #: N4: сводка политического усечения краула (``truncated``/``truncated_reason``/
     #: ``truncated_products``/``pages_fetched``/``effective_limits``); пусто, если не усечён.
     crawl_truncation: dict[str, Any] = field(default_factory=dict)
+    #: F1/Д-6: жизненный цикл сеанса краула (``status``/``owner``/``heartbeat_at``/
+    #: ``stale_reason``) — чтобы ``interrupted`` был виден в ``metrics.json`` без разбора БД.
+    #: Пусто — сеанса не было (durable-краул выключен); поле присутствует всегда.
+    crawl_session: dict[str, Any] = field(default_factory=dict)
     #: F0: блок ``resources`` — пики RSS по фазам, разрешённое расписание экстракции,
     #: распределение чанков на документ по семействам, пик воркера и бюджет памяти.
     #: Пусто — ресурсы не измерялись (поле присутствует всегда, но нейтрально).
@@ -210,6 +228,7 @@ class RunMetrics:
             "duration_by_phase": dict(self.duration_by_phase),
             "crawl": dict(self.crawl),
             "crawl_truncation": dict(self.crawl_truncation),
+            "crawl_session": dict(self.crawl_session),
             "resources": dict(self.resources),
         }
 
@@ -257,6 +276,7 @@ def compute_metrics(
     tokens: Mapping[str, Any] | None = None,
     crawl_counts: Mapping[str, Any] | None = None,
     crawl_truncation: Mapping[str, Any] | None = None,
+    crawl_session: Mapping[str, Any] | None = None,
     resources: Mapping[str, Any] | None = None,
 ) -> RunMetrics:
     """Собирает :class:`RunMetrics` прогона (04 §B.2, W12/T12.1).
@@ -276,6 +296,9 @@ def compute_metrics(
     :param crawl_truncation: сводка политического усечения краула (N4) — источник поля
         ``crawl_truncation`` (:func:`core.pipeline.crawl_session.truncation_summary``).
         ``None`` → пустой dict.
+    :param crawl_session: жизненный цикл сеанса краула (F1/Д-6) — источник поля
+        ``crawl_session`` (``status``/``owner``/``heartbeat_at``/``stale_reason``).
+        Вызывающий читает сеанс у стора; ``None`` → пустой dict («сеанса не было»).
     :param resources: блок ``resources`` (F0) — источник одноимённого поля
         (:func:`core.pipeline.resources.build_resources_block`). ``None`` → пустой dict.
     """
@@ -296,5 +319,6 @@ def compute_metrics(
         duration_by_phase=_normalize_durations(phase_durations),
         crawl=_normalize_crawl(crawl_counts),
         crawl_truncation=_normalize_crawl_truncation(crawl_truncation),
+        crawl_session=_normalize_crawl_session(crawl_session),
         resources=_normalize_resources(resources),
     )

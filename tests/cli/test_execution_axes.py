@@ -30,8 +30,10 @@ import core.cli.commands.crawl as crawl_mod
 import core.cli.commands.plan as plan_mod
 import core.cli.commands.run as run_mod
 import core.cli.wiring as wiring_mod
+from core.adapters import extract_document
 from core.adapters.chunker_markdown import MarkdownChunker
 from core.adapters.chunker_text import TextChunker
+from core.adapters.extract_document import DoclingDocumentExtractor
 from core.cli import execution_axes
 from core.cli.errors import CliError
 from core.cli.execution_axes import (
@@ -48,9 +50,12 @@ from core.config.deploy import (
     LLMDeployConfig,
     LLMSlotConfig,
 )
-from core.domain.enums import CrawlStrategy
+from core.domain.enums import CrawlStrategy, DocumentLevel
 from core.domain.models import CrawlRunConfig, RateLimitSpec
-from core.pipeline.digests import EXECUTION_CONTRACT_FIELDS
+from core.pipeline.digests import (
+    EXECUTION_CONTRACT_FIELDS,
+    execution_contract_digest,
+)
 from core.pipeline.normalize import load_inputs
 from core.pipeline.plan import plan as build_plan
 from core.pipeline.report import build_manifest
@@ -228,7 +233,7 @@ def test_each_axis_changes_exactly_its_component(
         )
     elif field == "extractor_stack":
         monkeypatch.setattr(
-            execution_axes, "_docling_library_version", lambda: "9.9.9"
+            extract_document, "docling_library_version", lambda: "9.9.9"
         )
 
     mutated = _resolve(
@@ -322,7 +327,11 @@ def test_llm_scenarios_active_slot_without_declared_model_is_error(
 
 
 def test_docling_version_uses_installed_distribution() -> None:
-    """Версия библиотеки читается из метаданных дистрибутива (``docling``/``docling-slim``)."""
+    """Версия библиотеки читается из метаданных дистрибутива (``docling``/``docling-slim``).
+
+    Единственный источник — ``core.adapters.extract_document.docling_library_version``;
+    ``extractor_stack`` берёт из него то же значение (Д-8).
+    """
     from importlib.metadata import PackageNotFoundError, version
 
     expected: list[str] = []
@@ -331,7 +340,9 @@ def test_docling_version_uses_installed_distribution() -> None:
             expected.append(version(dist))
         except PackageNotFoundError:
             continue
-    assert execution_axes._docling_library_version() in (expected or ["unknown"])
+    library = extract_document.docling_library_version()
+    assert library in (expected or ["unknown"])
+    assert execution_axes.extractor_stack_version().endswith(f"/docling-{library}")
 
 
 def test_status_dict_version_comes_from_dictionary() -> None:
@@ -418,6 +429,48 @@ def test_contract_ignores_observed_manifest_values(tmp_path: Path) -> None:
     )
     assert observed_manifest.execution_contract_digest == first
     assert _contract(package, declared) == first
+
+
+def test_extractor_stack_and_extractor_version_share_the_engine_build(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Д-8: ``run_id``-стек и ключ ``extract_cache`` называют **одну** сборку движка.
+
+    ``extractor_stack`` (объявленная ось контракта) и ``extractor_version`` документа
+    (ключ ``extract_cache``/слагаемое ``pb``) собираются из одного вызова
+    :func:`core.adapters.extract_document.docling_engine_build`. Тест подменяет версию
+    библиотеки и проверяет оба конца: разойдись формулы — прогон объявил бы движок,
+    которого не было.
+    """
+    monkeypatch.setattr(extract_document, "docling_library_version", lambda: "9.9.9")
+
+    stack = execution_axes.extractor_stack_version()
+    version = DoclingDocumentExtractor(DocumentLevel.FULL).version
+
+    assert stack.endswith("/docling-9.9.9")
+    assert version == "docling-doc-3:full/docling-9.9.9"
+    # Одна и та же строка сборки в обоих идентификаторах.
+    assert stack.rsplit("/", 1)[1] == version.rsplit("/", 1)[1]
+
+
+def test_engine_build_does_not_enter_execution_contract() -> None:
+    """Сборка в ключе кэша — не контракт: ``run_id`` от неё не зависит (Д-8).
+
+    ``extractor_version`` остаётся наблюдаемой величиной; в контракт входит только
+    ``extractor_stack``. Поэтому расширение ключа ``extract_cache`` сборкой не двигает
+    ``run_id`` — иначе одна и та же правка «чинит кэш» и ломает межцикловый diff.
+    """
+    assert "extractor_version" not in EXECUTION_CONTRACT_FIELDS
+    assert "extractor_stack" in EXECUTION_CONTRACT_FIELDS
+
+    values = dict.fromkeys(EXECUTION_CONTRACT_FIELDS, None)
+    digest = execution_contract_digest(values)
+    # Поле ключа кэша не расширяет контракт: оно не «необязательное», его там нет.
+    with pytest.raises(ValueError):
+        execution_contract_digest(
+            {**values, "extractor_version": "docling-doc-3:full/docling-9.9.9"}
+        )
+    assert digest == execution_contract_digest(values)
 
 
 def test_build_manifest_takes_declared_axes(tmp_path: Path) -> None:

@@ -231,6 +231,7 @@ def write_run_metrics(
     tokens: Mapping[str, Any] | None = None,
     crawl_counts: Mapping[str, Any] | None = None,
     crawl_truncation: Mapping[str, Any] | None = None,
+    crawl_session: Mapping[str, Any] | None = None,
     resources: Mapping[str, Any] | None = None,
 ) -> Path:
     """Считает :class:`~core.pipeline.metrics.RunMetrics` и пишет ``runs/{run_id}/metrics.json``.
@@ -254,6 +255,9 @@ def write_run_metrics(
         ``crawl`` метрик; ``None`` → пустая карта.
     :param crawl_truncation: сводка политического усечения краула (N4) — источник поля
         ``crawl_truncation``; ``None`` → пустой dict (не выдумываем усечение).
+    :param crawl_session: жизненный цикл сеанса краула (F1/Д-6) — источник поля
+        ``crawl_session`` (``status``/``owner``/``heartbeat_at``/``stale_reason``);
+        ``None`` → пустой dict.
     :param resources: готовый блок ``resources`` (F0) —
         :func:`core.pipeline.resources.build_resources_block`; ``None`` → пустой dict
         (поле присутствует всегда, но нейтрально: «не измеряли» ≠ «ноль»).
@@ -270,6 +274,7 @@ def write_run_metrics(
         tokens=tokens,
         crawl_counts=crawl_counts,
         crawl_truncation=crawl_truncation,
+        crawl_session=crawl_session,
         resources=resources,
     )
     target = Path(out_dir) / sanitize_filename(run_id) / METRICS_FILENAME

@@ -184,8 +184,12 @@ class _Embedder:
 @pytest.mark.parametrize(
     ("abort", "expected_status", "expected_error_fragment"),
     [
-        (lambda url: _AbortCrawl(url), CrawlSessionStatus.FAILED, "_AbortCrawl"),
-        (lambda _url: KeyboardInterrupt(), CrawlSessionStatus.CANCELLED, "KeyboardInterrupt"),
+        (lambda url: _AbortCrawl(url), CrawlSessionStatus.INTERRUPTED, "_AbortCrawl"),
+        (
+            lambda _url: KeyboardInterrupt(),
+            CrawlSessionStatus.INTERRUPTED,
+            "KeyboardInterrupt",
+        ),
     ],
     ids=["exception", "keyboard_interrupt"],
 )
@@ -254,9 +258,11 @@ def test_death_at_second_product_keeps_first_product_work(
         assert store.read_corpus_coverage(RUN_ID, "p3") is None
 
         # 6. Сеанс краула закрыт терминально: убитый прогон виден как убитый, а не
-        #    как «в полёте» (иначе ``hound crawl status`` врёт). Статус — из словаря
-        #    (``failed`` — сбой, ``cancelled`` — снят оператором/системой), не новое
-        #    значение; причина названа в ``error``.
+        #    как «в полёте» (иначе ``hound crawl status`` врёт). Статус — из словаря:
+        #    ``interrupted`` («исполнение прервано, тело не финализировано»), а не
+        #    ``failed`` (сбой, который конвейер наблюдал) и не ``cancelled`` (снят
+        #    оператором). Причина названа в ``error`` — тип исключения различает
+        #    «оператор снял» и «фаза упала».
         session = store.get_crawl_session(SESSION_ID)
         assert session is not None
         assert session.status is expected_status

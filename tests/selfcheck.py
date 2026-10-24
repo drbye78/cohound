@@ -18,7 +18,12 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from core.store.sqlite import DDL, SCHEMA_VERSION, connect  # noqa: E402
+from core.store.sqlite import (  # noqa: E402
+    DDL,
+    SCHEMA_VERSION,
+    SchemaVersionMismatch,
+    connect,
+)
 from core.domain import (  # noqa: E402
     AbsenceRuleType,
     AnchorRelation,
@@ -244,6 +249,10 @@ def main() -> int:
 
     section("DDL SQLite §4.4 + триггеры инвариантов")
     check("создание схемы в памяти", lambda: _db_smoke())
+    check(
+        "гейт версии схемы: старая БД отвергается сообщением (11 §2.6)",
+        lambda: _schema_version_gate(),
+    )
 
     section("CellEvidence / derived-evidence (K5, S5, S8, I19)")
     check(
@@ -700,10 +709,46 @@ def _crawl_session_dict_mirror() -> None:
         raise AssertionError("crawl_item_status рассинхронизирован со схемой")
 
 
+def _schema_version_gate() -> None:
+    """`11` §2.6: файл другой версии схемы отвергается сообщением, а не читается молча.
+
+    Сверяется не только факт отказа, но и содержание: сообщение обязано назвать найденную
+    и ожидаемую версию — иначе оператор не знает, что удалять.
+    """
+    import sqlite3
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "cohound.db"
+        legacy = sqlite3.connect(str(path))
+        try:
+            legacy.executescript(
+                "CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);"
+                "INSERT INTO schema_meta (key, value)"
+                " VALUES ('schema_version', '3.11.0');"
+            )
+            legacy.commit()
+        finally:
+            legacy.close()
+        try:
+            connect(path)
+        except SchemaVersionMismatch as exc:
+            text = str(exc)
+            if exc.code != "schema_version":
+                raise AssertionError("код гейта версии обязан быть 'schema_version'") from exc
+            for needle in ("3.11.0", SCHEMA_VERSION, "schema_version"):
+                if needle not in text:
+                    raise AssertionError(
+                        f"сообщение гейта версии не называет {needle!r}: {text}"
+                    ) from exc
+        else:
+            raise AssertionError("старая схема принята молча — гейт версии не работает")
+
+
 def _db_smoke() -> None:
     conn = connect(":memory:")
     ver = conn.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()
-    _assert(ver is not None and ver["value"] == "3.11.0")
+    _assert(ver is not None and ver["value"] == SCHEMA_VERSION)
 
     tables = {r["name"] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     for t in ("products", "runs", "llm_scenarios", "corpus_docs", "corpus_chunks",
@@ -754,6 +799,8 @@ def _db_smoke() -> None:
     _assert({"session_id", "run_id", "profile", "status", "created_at", "started_at",
              "finished_at", "total", "pending", "running", "fetched", "failed",
              "cancelled", "options_json", "provenance_json"} <= sess_cols)
+    # F1 (schema 3.12.0): свидетельство живости сеанса — НЕ блокировка и НЕ lease (`10` §Д-6, К-4).
+    _assert({"owner", "heartbeat_at"} <= sess_cols)
     sess_pk = [r["name"] for r in conn.execute("PRAGMA table_info(crawl_sessions)")
                if r["pk"]]
     _assert(sess_pk == ["session_id"])

@@ -13,6 +13,10 @@ import json
 import os
 from pathlib import Path
 
+import pytest
+
+from core.adapters import extract_document
+from core.adapters.extract_document import DoclingDocumentExtractor
 from core.domain import DocumentLevel
 from core.pipeline.extract_cache import ENVELOPE_FORMAT, ExtractionCache
 from core.ports.types import ExtractedDoc
@@ -432,3 +436,81 @@ def test_stats_snapshot_has_stable_keys(tmp_path: Path) -> None:
         "invalid_key",
     }
     assert all(isinstance(value, int) for value in stats.values())
+
+
+# ---------------------------------------------------------------------------
+# Д-8: сборка движка входит в ключ — кэш не может отдать текст другого движка
+# ---------------------------------------------------------------------------
+
+
+def test_same_engine_build_hits(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Одна и та же сборка движка — хит (кэш продолжает работать)."""
+    monkeypatch.setattr(extract_document, "docling_library_version", lambda: "2.135.0")
+    cache = ExtractionCache(tmp_path / "cache")
+    extractor = DoclingDocumentExtractor(DocumentLevel.FULL)
+    doc = ExtractedDoc(
+        text="текст старого парсера",
+        content_hash=content_hash("текст старого парсера"),
+        extractor_version=extractor.version,
+        page_count=3,
+    )
+    assert doc.extractor_version == "docling-doc-3:full/docling-2.135.0"
+
+    cache.put(doc, level=DocumentLevel.FULL, content_hash=RAW_A)
+    assert cache.get(RAW_A, extractor.version, DocumentLevel.FULL) == doc
+    assert cache.stats()["hits"] == 1
+
+
+def test_engine_build_change_is_a_miss(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Апгрейд docling внутри диапазона — **промах**, а не старый текст (Д-8).
+
+    Сборка входит в ``extractor_version``, а тот — в ключ ``extract_cache``: запись,
+    произведённая прежним движком, под новым ключом не находится. Иначе прогон
+    объявлял бы новый движок (``extractor_stack`` изменился ⇒ новый ``run_id``), а текст
+    брал у старого.
+    """
+    monkeypatch.setattr(extract_document, "docling_library_version", lambda: "2.135.0")
+    cache = ExtractionCache(tmp_path / "cache")
+    old = DoclingDocumentExtractor(DocumentLevel.FULL)
+    cache.put(
+        ExtractedDoc(
+            text="старый текст",
+            content_hash=content_hash("старый текст"),
+            extractor_version=old.version,
+            page_count=1,
+        ),
+        level=DocumentLevel.FULL,
+        content_hash=RAW_A,
+    )
+
+    monkeypatch.setattr(extract_document, "docling_library_version", lambda: "2.140.0")
+    upgraded = DoclingDocumentExtractor(DocumentLevel.FULL)
+    assert upgraded.version != old.version
+
+    assert cache.get(RAW_A, upgraded.version, DocumentLevel.FULL) is None
+    assert cache.stats()["hits"] == 0
+    assert cache.stats()["misses"] == 1
+
+
+def test_pre_build_key_envelope_is_not_served(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Запись с ключом «без сборки» не обслуживается новым ключом (совместимость не нужна).
+
+    Старые конверты (``docling-doc-3:<level>``) просто не находятся: чтение по новому
+    ключу — промах, и документ переизвлекается. Это однократная цена, а не ошибка.
+    """
+    monkeypatch.setattr(extract_document, "docling_library_version", lambda: "2.135.0")
+    cache = ExtractionCache(tmp_path / "cache")
+    _write_envelope(
+        _entry(cache.root, RAW_A),
+        extractor_version="docling-doc-3:full",
+        level="full",
+    )
+
+    upgraded = DoclingDocumentExtractor(DocumentLevel.FULL)
+    assert upgraded.version == "docling-doc-3:full/docling-2.135.0"
+    assert cache.get(RAW_A, upgraded.version, "full") is None
+    assert cache.stats()["misses"] == 1

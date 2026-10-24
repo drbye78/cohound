@@ -85,6 +85,7 @@ from core.pipeline.crawl_session import (
     read_provenance,
     truncation_summary,
 )
+from core.pipeline.liveness import stale_reason
 from core.pipeline.lint import lint_run_inputs
 from core.pipeline.normalize import load_inputs
 from core.pipeline.observability import instrument_phases, write_run_metrics
@@ -863,6 +864,7 @@ def run(args: argparse.Namespace) -> int:
         final_status: str | None = None
         crawl_counts: dict[str, int] = {}
         truncation: dict[str, Any] = {}
+        crawl_session_lifecycle: dict[str, Any] = {}
         try:
             _ensure_run(store, run_id, inputs)
             # I21/§7.4: объявленная таблица ``scenario → модель`` пишется в строку прогона
@@ -990,6 +992,19 @@ def run(args: argparse.Namespace) -> int:
                         if session is not None
                         else {}
                     )
+                    # F1/Д-6: жизненный цикл сеанса — в ``metrics.json`` (``interrupted``
+                    # должен быть виден без разбора БД). ``stale_reason`` — чистая функция
+                    # свидетельства живости, ничего не пишет.
+                    crawl_session_lifecycle = (
+                        {
+                            "status": session.status.value,
+                            "owner": session.owner,
+                            "heartbeat_at": session.heartbeat_at,
+                            "stale_reason": stale_reason(session),
+                        }
+                        if session is not None
+                        else {}
+                    )
                 except Exception as exc:  # noqa: BLE001 — метрики best-effort
                     instrumentation_errors.append(
                         f"crawl_counts: {type(exc).__name__}: {_concise(exc)}"
@@ -1005,6 +1020,7 @@ def run(args: argparse.Namespace) -> int:
                     store=store,
                     crawl_counts=crawl_counts,
                     crawl_truncation=truncation or None,
+                    crawl_session=crawl_session_lifecycle or None,
                     resources=build_resources_block(
                         phase_peaks=instrumentation.peak_rss_mb,
                         phase_durations=instrumentation.durations,
@@ -1080,9 +1096,11 @@ def run(args: argparse.Namespace) -> int:
             # Phase 4: полный краул (или его отсутствие) → EXIT_OK; ``partial``/``failed`` сеанс
             # (исчерпание попыток, back-pressure, source_unavailable) → EXIT_ERROR. N4: PARTIAL
             # только из-за политического усечения (сбоев фетча нет) — EXIT_OK с предупреждением.
+            # F1: ``interrupted`` (сеанс снят/убит, тело краула не финализировано) — не успех.
             if final_status in (
                 CrawlSessionStatus.PARTIAL.value,
                 CrawlSessionStatus.FAILED.value,
+                CrawlSessionStatus.INTERRUPTED.value,
             ):
                 if truncation_only and final_status == CrawlSessionStatus.PARTIAL.value:
                     return EXIT_OK

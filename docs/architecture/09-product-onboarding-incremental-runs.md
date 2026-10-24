@@ -907,7 +907,7 @@ CREATE INDEX idx_partition_product ON index_partition(package_id, product_id);
 > `runs` **нет**, таблицы `run_product` **нет** (см. §14.1 — это design). Lineage живёт
 > только в `state.db.run_lineage` (§12.3), и `RunManifest` этих полей тоже не несёт.
 
-Фактическое содержимое run DB (`SCHEMA_VERSION = "3.11.0"`), 19 таблиц включая
+Фактическое содержимое run DB (`SCHEMA_VERSION = "3.12.0"`), 19 таблиц включая
 `schema_meta` (18 предметных):
 
 - `runs` — идентичность прогона и провенанс: `run_id`, `case_id`, `anchor_product_id`,
@@ -2551,8 +2551,8 @@ def carry_forward_cells(product_id, coverage, plan, state, store, run_id, prev_r
 
 ### 11.1. Поля `corpus_coverage` — реализовано (реальный состав)
 
-Фактическая таблица (`core/store/sqlite.py`, `SCHEMA_VERSION = "3.11.0"`; аддитивные
-колонки добавляются миграцией `_ensure_columns`):
+Фактическая таблица (`core/store/sqlite.py`, `SCHEMA_VERSION = "3.12.0"`; миграция старой БД
+запрещена гейтом версии — файл другой версии отвергается, `11` §2.6):
 
 ```sql
 -- как есть, без выдуманных ALTER'ов:
@@ -2906,7 +2906,7 @@ golden**.
 
 > **Статус раздела: design-only.** ALTER'ов, перечисленных в §14.1, **нет** в коде. Не
 > писать SQL против этих колонок. Фактическая схема run DB — 19 таблиц
-> (`SCHEMA_VERSION = "3.11.0"`), фактическая схема `state.db` — 15 таблиц
+> (`SCHEMA_VERSION = "3.12.0"`), фактическая схема `state.db` — 15 таблиц
 > (`STATE_SCHEMA_VERSION = "4"`); реальные колонки — §4.2/§4.3. Порты, описанные в §14.3,
 > тоже частично разошлись с `core/ports/state.py` (см. примечания там).
 

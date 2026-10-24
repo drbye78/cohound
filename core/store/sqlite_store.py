@@ -1008,11 +1008,16 @@ class SqliteStore:
         "error",
         "options_json",
         "provenance_json",
+        "owner",
+        "heartbeat_at",
     )
 
     #: Метаданные сеанса, обновляемые при ``ON CONFLICT`` (B2): счётчики прогресса
     #: (``total/pending/running/fetched/failed/cancelled``) сюда **не** входят — их
     #: единственные владельцы ``upsert_crawl_session_item``/``recover_crawl_session``.
+    #: ``owner``/``heartbeat_at`` тоже исключены: stale-модель (без владельца) затирала бы
+    #: свидетельство живости; их единственный владелец —
+    #: :meth:`touch_crawl_session_heartbeat`.
     _CRAWL_SESSION_METADATA_COLUMNS = (
         "run_id",
         "profile",
@@ -1069,6 +1074,8 @@ class SqliteStore:
             error=row["error"],
             options_json=row["options_json"],
             provenance_json=row["provenance_json"],
+            owner=row["owner"],
+            heartbeat_at=row["heartbeat_at"],
         )
 
     @staticmethod
@@ -1129,6 +1136,8 @@ class SqliteStore:
             session.error,
             session.options_json,
             session.provenance_json,
+            session.owner,
+            session.heartbeat_at,
         )
         with self.conn:
             self.conn.execute(
@@ -1291,6 +1300,43 @@ class SqliteStore:
         ):
             counts[row["status"]] = int(row["n"])
         return counts
+
+    def iter_crawl_sessions(
+        self, *, status: CrawlSessionStatus | None = None
+    ) -> Iterator[CrawlSession]:
+        """Итерирует сеансы краула (порядок ``session_id``); фильтр по статусу опционален.
+
+        Источник recovery-on-open (``core.pipeline.liveness``): нужен именно перебор
+        ``running``-сеансов БД, а не только открываемого. Read-only.
+        """
+        sql = "SELECT * FROM crawl_sessions"
+        params: list[Any] = []
+        if status is not None:
+            sql += " WHERE status = ?"
+            params.append(CrawlSessionStatus(_as_text(status)).value)
+        sql += " ORDER BY session_id"
+        for row in self.conn.execute(sql, params):
+            yield self._row_to_crawl_session(row)
+
+    def touch_crawl_session_heartbeat(
+        self,
+        session_id: str,
+        *,
+        at: str,
+        owner: str | None = None,
+    ) -> None:
+        """Обновляет свидетельство живости сеанса (``heartbeat_at``, опц. ``owner``).
+
+        Targeted ``UPDATE``: статус, счётчики и провенанс не задеваются — иначе «признак
+        жизни» менял бы данные измерения. ``owner=None`` сохраняет прежнего владельца
+        (``COALESCE``) — смена владельца должна быть объявлена явно.
+        """
+        with self.conn:
+            self.conn.execute(
+                "UPDATE crawl_sessions SET heartbeat_at = ?, owner = COALESCE(?, owner)"
+                " WHERE session_id = ?",
+                (at, owner, session_id),
+            )
 
     def recover_crawl_session(self, session_id: str) -> int:
         """Recovery-on-open: ``running`` → ``pending`` + пересчёт счётчиков (одна транзакция).

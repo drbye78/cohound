@@ -1403,6 +1403,13 @@ class CrawlSession(BaseModel):
     options_json: str | None = None
     #: Движки/источники сеанса (заполняется в фазе провенанса).
     provenance_json: str | None = None
+    #: F1: свидетельство живости — кто исполняет сеанс (``host/pid/старт процесса``,
+    #: ``core.pipeline.liveness.current_owner``). Это **не** блокировка: конфликт двух
+    #: владельцев виден, а не разрешается автоматически (`10` §Д-6, К-4).
+    owner: str | None = None
+    #: F1: когда владелец последний раз подавал признаки жизни (ISO-8601 UTC). Протухший
+    #: ``running`` распознаёт recovery-on-open и переводит в ``interrupted``.
+    heartbeat_at: str | None = None
 
 
 class CrawlSessionItem(BaseModel):

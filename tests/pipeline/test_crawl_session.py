@@ -7,11 +7,13 @@
 from __future__ import annotations
 
 import datetime as _dt
+import os
 
 import pytest
 
 from core.domain import (
     CrawlItemStatus,
+    CrawlSession,
     CrawlSessionItem,
     CrawlSessionStatus,
     Focus,
@@ -199,6 +201,69 @@ def test_prior_items_keyed_by_product_and_url() -> None:
         assert set(mapping) == {("p1", "https://docs.test/shared"), ("p2", "https://docs.test/shared")}
         assert mapping[("p1", "https://docs.test/shared")].status is CrawlItemStatus.FETCHED
         assert mapping[("p2", "https://docs.test/shared")].status is CrawlItemStatus.FAILED
+
+
+def test_open_session_records_liveness() -> None:
+    """F1: открытие сеанса оставляет свидетельство живости (``owner`` + ``heartbeat_at``)."""
+    with _store_with_run() as store:
+        session = open_session(store, session_id=SESSION_ID, run_id=RUN_ID)
+        assert session.owner  # host/pid/старт процесса
+        assert session.heartbeat_at
+        # Владелец — этот процесс: pid в метке совпадает.
+        assert session.owner.split("/")[1] == str(os.getpid())
+
+
+def test_open_session_recovers_stale_running_session_of_previous_attempt() -> None:
+    """F1/Д-6: recovery-on-open переводит протухший ``running`` прошлой попытки в ``interrupted``.
+
+    Это и есть лечение «фантомных краулов в полёте»: SIGKILL/OOM не оставляет размотки,
+    поэтому мёртвый сеанс распознаётся по свидетельству живости при следующей попытке.
+    """
+    other = "crawl:previous-attempt"
+    with _store_with_run() as store:
+        store.upsert_crawl_session(
+            CrawlSession(
+                session_id=other,
+                run_id=RUN_ID,
+                profile="local",
+                status=CrawlSessionStatus.RUNNING,
+                created_at="2026-01-01T00:00:00+00:00",
+                owner="other-host/4242/777",
+                heartbeat_at="2020-01-01T00:00:00+00:00",
+            )
+        )
+
+        open_session(store, session_id=SESSION_ID, run_id=RUN_ID)
+
+        stale = store.get_crawl_session(other)
+        assert stale is not None
+        assert stale.status is CrawlSessionStatus.INTERRUPTED
+        assert stale.error is not None and stale.error.startswith("stale_heartbeat")
+        # Свой только что открытый сеанс остаётся ``running``.
+        mine = store.get_crawl_session(SESSION_ID)
+        assert mine is not None and mine.status is CrawlSessionStatus.RUNNING
+
+
+def test_open_session_does_not_touch_fresh_running_session_of_previous_attempt() -> None:
+    """Свежий ``running`` чужой попытки не трогается: он может исполняться прямо сейчас."""
+    other = "crawl:live-attempt"
+    with _store_with_run() as store:
+        store.upsert_crawl_session(
+            CrawlSession(
+                session_id=other,
+                run_id=RUN_ID,
+                profile="local",
+                status=CrawlSessionStatus.RUNNING,
+                created_at="2026-01-01T00:00:00+00:00",
+                owner="other-host/4242/777",
+                heartbeat_at=_dt.datetime.now(_dt.timezone.utc).isoformat(),
+            )
+        )
+
+        open_session(store, session_id=SESSION_ID, run_id=RUN_ID)
+
+        live = store.get_crawl_session(other)
+        assert live is not None and live.status is CrawlSessionStatus.RUNNING
 
 
 def test_open_session_only_touches_items() -> None:

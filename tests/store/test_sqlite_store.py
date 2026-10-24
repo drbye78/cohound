@@ -49,6 +49,7 @@ from core.domain import (
 )
 from core.ports.store import RunIndexRef
 from core.ports.types import Chunk
+from core.store.sqlite import SCHEMA_VERSION
 from core.store.sqlite_store import SqliteStore
 
 RUN_ID = "run-1"
@@ -148,7 +149,7 @@ def test_schema_opens(store: SqliteStore) -> None:
     ver = store.conn.execute(
         "SELECT value FROM schema_meta WHERE key = 'schema_version'"
     ).fetchone()
-    assert ver["value"] == "3.11.0"
+    assert ver["value"] == SCHEMA_VERSION
     tables = {
         r["name"] for r in store.conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
     }

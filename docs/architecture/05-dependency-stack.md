@@ -248,9 +248,9 @@ commodity-слой (A2): замена читателя контейнеров н
 `_EXTRACT_TASK_TIMEOUT_S = 1800` (866 с на 665 стр.).
 
 Класс изменения — **`execution_change`** (§13), не `methodology_change`: `extractor_version`
-(`docling-doc-3:<level>`) **не включает** эту ручку и не меняется, поэтому записи
-`extract_cache/` (ключ — `(sha256 байтов, extractor_version, level)`) **остаются валидными**,
-`golden-full` не требуется. Значение ручки публикуется в `settings_provenance` манифеста
+(`docling-doc-3:<level>/docling-<build>`) **не включает** эту ручку и от замера не меняется,
+поэтому записи `extract_cache/` (ключ — `(sha256 байтов, extractor_version, level)`)
+**остаются валидными**, `golden-full` не требуется. Значение ручки публикуется в `settings_provenance` манифеста
 (`document_extract.queue_max_size`, `source: measured`) — провенанс замера, не граница
 контракта (`EXECUTION_CONTRACT_FIELDS` её не содержит).
 
@@ -473,7 +473,7 @@ robots.txt-запрос оставлять на дефолтном HTTP-handler 
 |---|---|---|
 | `embed_model_id`, `lexical_engine_version`, `vector_store`, `extractor_version` | **`content_change`** | наблюдаемые величины: **вне** контракта (не выводятся из входа — per-product композит корпуса, диск, wheel'ы). Новая `index_build_id`, diff **разрешён** с баннером и doc-delta |
 | `chunker_version`, `extractor_stack` | **`execution_change`** | входят в контракт → новый `run_id`, diff блокируется; `methodology_version` **не** меняется |
-| `crawl.document_level` | **`execution_change`** | входит в `CrawlLimits.as_dict()` **безусловно** (дефолт `full`) → `crawl_config_digest` → новый `run_id`. Дополнительно наблюдается в `extractor_version` (`docling-doc-3:<level>`) → новая сборка; но идентичность разошлась раньше, поэтому класс — `execution_change` |
+| `crawl.document_level` | **`execution_change`** | входит в `CrawlLimits.as_dict()` **безусловно** (дефолт `full`) → `crawl_config_digest` → новый `run_id`. Дополнительно наблюдается в `extractor_version` (`docling-doc-3:<level>/docling-<build>`) → новая сборка; но идентичность разошлась раньше, поэтому класс — `execution_change` |
 | `retrieval_profile`, `retrieval_cutoff_K`, `retrieval_params_json` (`rrf_k`/fusion) | **`execution_change`** | входят в контракт; `index_build_id` **не** меняется (ретривал-конфиг не влияет на чанкинг/векторы), обязателен retrieval-golden |
 | `scoring_policy_version`, `status_dict_version`, `capability_policy`, `unknown_policy`, `partial_score` (`METHODOLOGY_FIELDS`) | **`methodology_change`** | bump `methodology_version` + `golden-full` **и пере-аннотация golden** (§13) |
 | модель под сценарий оценщика (`llm_scenarios`) | **`execution_change`** | новый `run_id`; `methodology_version` не меняется (`core/config/deploy.py`) |
@@ -481,6 +481,19 @@ robots.txt-запрос оставлять на дефолтном HTTP-handler 
 Поэтому `sentence-transformers`/`tantivy` пинятся в `run_manifest.yaml` (провенанс: модель,
 стеммер, RRF-параметры), но **сами по себе** версию методологии не двигают: их смена видна
 через `pb`/`index_build_id`. Bump `methodology_version` — только по `METHODOLOGY_FIELDS`.
+
+**Апгрейд `docling` внутри диапазона `>=2.135,<3` — что происходит с `extract_cache`.** Пин
+задан диапазоном, поэтому минорное обновление проходит без правки кода; `extractor_version`
+документа — `docling-doc-3:<level>/docling-<build>`, где `<build>` — версия установленной
+библиотеки (единственный источник — `docling_engine_build()` в
+`core/adapters/extract_document.py`). Отсюда: (1) `extractor_stack` (в контракте) меняется ⇒
+новый `run_id` — прогон честно объявляет новый движок; (2) та же сборка входит в ключ
+`extract_cache` (`(content_hash, extractor_version, level)`) ⇒ записи прежнего движка **не
+находятся**, документы переизвлекаются один раз; (3) `pb`/`corpus_docs.extractor_version`
+описывают **фактически прочитанный** текст, а не объявленный движок. Это не дефект, а цена
+честного провенанса: переиспользовать текст, произведённый другим парсером, значит выдать
+`run_id`, который называет движок, которого не было (Д-8, `10` §5.8). Обратная совместимость
+старых конвертов (ключ без сборки) намеренно не поддерживается — они просто не находятся.
 
 ---
 

@@ -23,12 +23,20 @@
   ``run_id``, сломав воспроизводимость (R7 §11.7) и запретив diff по причине, которую
   нельзя объявить на входе (методология 2.4.0, §13).
 
-``extractor_stack`` — новое **объявленное** поле контракта: константы стека извлечения
+``extractor_stack`` — **объявленное** поле контракта: константы стека извлечения
 (HTML-адаптер + семейство docling-адаптера + фактическая версия установленной
-библиотеки ``docling``). Версия библиотеки сегодня не видна нигде: ``docling-doc-3:<level>``
-в ``DoclingDocumentExtractor.version`` — ключ ``extract_cache`` и ``partition_build_id``,
-поэтому туда она не добавляется (это инвалидировало бы кэш и переизвлекало корпус);
-она едет только в ``extractor_stack``.
+библиотеки ``docling``). Сборка движка (``docling-<version>``) берётся из
+:func:`core.adapters.extract_document.docling_engine_build` — **того же** вызова, из
+которого строится ``extractor_version`` документа (``docling-doc-3:<level>/docling-<build>``,
+ключ ``extract_cache`` и слагаемое ``pb``). Две независимые формулы разошлись бы, и
+``run_id`` объявлял бы движок, которого не было (Д-8, §2.5). ``extractor_version`` при
+этом остаётся наблюдаемой величиной и в контракт не входит: в ``run_id`` едет только
+объявленный стек, поэтому добавление сборки в ключ кэша ``run_id`` не меняет.
+
+``DOCLING_ADAPTER_FAMILY`` — реэкспорт из адаптера, чтобы у строки семейства был **один**
+источник (``__all__`` сохраняет прежнюю публичную поверхность модуля). Уровень извлечения —
+отдельная операционная ось ``crawl.document_level``, уже входящая в
+``crawl_config_digest``; дублировать его в стеке значило бы считать одну ось дважды.
 
 ``chunker_version`` — **композит** правил нарезки, а не версия одного чанкера: у plain text
 свой абзацный чанкер, у markdown/HTML/EPUB — заголовочный, поэтому значение —
@@ -44,12 +52,15 @@
 from __future__ import annotations
 
 import argparse
-import importlib.metadata
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from core.adapters.chunker_family import composite_chunker_version
+from core.adapters.extract_document import (
+    DOCLING_ADAPTER_FAMILY,
+    docling_engine_build,
+)
 from core.adapters.extract_html import HtmlExtractor
 from core.cli.context import _load_registry_specs
 from core.cli.wiring import (
@@ -70,13 +81,6 @@ __all__ = [
     "extractor_stack_version",
     "resolve_declared_axes",
 ]
-
-#: Семейство docling-адаптера (без per-level суффикса ``:level``). Уровень извлечения —
-#: отдельная операционная ось ``crawl.document_level``, уже входящая в
-#: ``crawl_config_digest``; дублировать его в стеке значило бы считать одну ось дважды.
-#: Значение зеркалит ``DoclingDocumentExtractor.version`` (``extract_document.py``);
-#: адаптер намеренно не импортируется: он тянет тяжёлую необязательную ``docling``.
-DOCLING_ADAPTER_FAMILY = "docling-doc-3"
 
 #: Путь словаря статусов относительно корня репозитория (источник ``status_dict_version``).
 _STATUS_DICTIONARY_PATH = (
@@ -106,32 +110,16 @@ class DeclaredExecutionAxes:
     extractor_stack: str
 
 
-def _docling_library_version() -> str:
-    """Версия установленной библиотеки ``docling`` без тяжёлого импорта.
-
-    ``importlib.metadata`` читает метаданные дистрибутива: ``import docling`` тянул бы
-    torch/модели и был бы недопустим на старте прогона. Библиотека ставится под двумя
-    именами дистрибутива: полный ``docling`` и лёгкий ``docling-slim`` (тот же код без
-    torch; 05-dependency-stack) — проверяются оба, иначе на slim-установке версия молча
-    терялась бы. Отсутствие пакета — честный ``"unknown"`` (значение не выдумывается, A3).
-    """
-    for dist in ("docling", "docling-slim"):
-        try:
-            return importlib.metadata.version(dist)
-        except importlib.metadata.PackageNotFoundError:
-            continue
-        except Exception:  # noqa: BLE001 — метаданные не роняют резолв осей
-            continue
-    return "unknown"
-
-
 def extractor_stack_version() -> str:
-    """Декларированный стек извлечения: ``<html>+<docling-family>/docling-<version>``.
+    """Декларированный стек извлечения: ``<html>+<docling-family>/<build>``.
 
     Пример: ``trafilatura-html-2+docling-doc-3/docling-2.135.0`` (при отсутствии
-    библиотеки — ``.../docling-unknown``).
+    библиотеки — ``.../docling-unknown``). ``<build>`` — **тот же** вызов
+    (:func:`core.adapters.extract_document.docling_engine_build`), что даёт сборку в
+    ``extractor_version`` документа, поэтому стек и ключ ``extract_cache`` называют одну
+    и ту же версию библиотеки (Д-8).
     """
-    return f"{HtmlExtractor.version}+{DOCLING_ADAPTER_FAMILY}/docling-{_docling_library_version()}"
+    return f"{HtmlExtractor.version}+{DOCLING_ADAPTER_FAMILY}/{docling_engine_build()}"
 
 
 def declared_status_dict_version() -> str | None:

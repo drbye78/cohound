@@ -136,6 +136,50 @@ def test_version_composition_is_unchanged() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Версия для ключа extract_cache = версия фактического движка (Д-8, побочный дефект)
+# ---------------------------------------------------------------------------
+
+def test_extractor_version_for_document_is_document_version() -> None:
+    """Документный маршрут: ключ кэша — версия docling, а не композитная строка.
+
+    Пока ключ пробы брался из ``composite.version`` (``html-1+doc-1``), а запись шла с
+    ``ExtractedDoc.extractor_version`` (``doc-1``), ключи не совпадали **никогда**: кэш
+    был write-only. Совпадение обязано следовать из одного диспетчера маршрута, а не из
+    дисциплины вызывающего.
+    """
+    composite, html, documents = _composite()
+    page = _page()
+
+    assert composite.extractor_version_for(page, ExtractionRoute.AUTO) == "doc-1"
+    assert composite.extractor_version_for(page, ExtractionRoute.DOCUMENT) == "doc-1"
+    assert composite.version == "html-1+doc-1", "композитная версия остаётся провенансом"
+    assert html.calls == []
+
+
+def test_extractor_version_for_matches_stamped_version() -> None:
+    """Ключ пробы равен штампу результата — на каждом маршруте, а не только на документном."""
+    composite, _, _ = _composite()
+    cases = [
+        (_page(url="https://e.test/x", content_type="text/html"), ExtractionRoute.AUTO),
+        (_page(url="https://e.test/x.css", content_type="text/css"), ExtractionRoute.HTML),
+        (_page(url="https://e.test/a.md", content_type=None), ExtractionRoute.AUTO),
+        (_page(), ExtractionRoute.AUTO),
+    ]
+    for page, route in cases:
+        predicted = composite.extractor_version_for(page, route)
+        stamped = composite.extract(page, route).extractor_version
+        assert predicted == stamped, (page.url, route)
+
+
+def test_extractor_version_for_without_docling_falls_back_to_html() -> None:
+    """Без docling документный URL обслуживает HTML-путь — и ключ обязан это отражать."""
+    composite = _LocalExtractor(_FakeHtml(), None)  # type: ignore[arg-type]
+
+    assert composite.extractor_version_for(_page()) == "html-1"
+    assert composite.extract(_page()).extractor_version == "html-1"
+
+
+# ---------------------------------------------------------------------------
 # Текстовые форматы и EPUB: третий и четвёртый маршруты композита
 # ---------------------------------------------------------------------------
 

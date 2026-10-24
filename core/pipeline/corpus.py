@@ -220,6 +220,7 @@ from core.pipeline.incremental import (
     doc_version_id,
     plan_incremental,
 )
+from core.pipeline.liveness import Heartbeat
 from core.pipeline.resources import ResourcesObservation, summarize_chunks_per_doc
 from core.pipeline.runner import PhaseResult
 from core.ports.chunker import ChunkerPort
@@ -925,6 +926,32 @@ def _page_with_source_path(page: RawPage, raw_path: Path) -> RawPage:
     return replace(page, source_path=str(raw_path))
 
 
+def _cache_extractor_version(
+    extractor: ExtractorPort, page: RawPage, route: ExtractionRoute
+) -> str:
+    """Версия движка для ключа ``extract_cache`` — **фактического** движка страницы.
+
+    Кэш пишется с ``ExtractedDoc.extractor_version`` (его штампует сам адаптер: страница —
+    ``trafilatura-html-2``, PDF — ``docling-doc-3:full/docling-<build>``), поэтому проба
+    обязана спрашивать ту же величину. Композитная ``.version`` для этого не годится: она
+    описывает набор движков композита (``trafilatura-html-2+docling-doc-3:…``) и не
+    совпадает со штампом **ни одного** документа — кэш от такого ключа не давал попаданий
+    вовсе (write-only).
+
+    Композит отвечает через :meth:`core.cli.wiring._LocalExtractor.extractor_version_for`:
+    маршрут резолвится там же, где исполняется извлечение, поэтому ключ пробы и ключ записи
+    не могут разойтись. Экстрактор без такого метода (простые адаптеры, тестовые фейки,
+    ``RemoteExtractor``) штампует ровно ``.version`` — правило то же, диспетчера нет.
+
+    Ошибка резолвера **не** глушится: тихий откат на композитную версию вернул бы ровно тот
+    дефект, ради которого этот помощник существует (кэш, который никогда не попадает).
+    """
+    resolver = getattr(extractor, "extractor_version_for", None)
+    if callable(resolver):
+        return str(resolver(page, route) or "")
+    return str(getattr(extractor, "version", "") or "")
+
+
 def _run_extract(extractor: ExtractorPort, request: _ExtractRequest) -> ExtractedDoc:
     """Перечитывает retained-байты (I19) и вызывает ``extractor.extract`` на том же ``RawPage``.
 
@@ -967,7 +994,11 @@ def _run_extract(extractor: ExtractorPort, request: _ExtractRequest) -> Extracte
         else None
     )
     if cache is not None:
-        cached = cache.get(key, getattr(extractor, "version", ""), level_text)
+        # Ключ — версия того движка, который обслужит **эту** страницу (штамп адаптера),
+        # иначе проба не совпадёт с записью и кэш останется write-only.
+        cached = cache.get(
+            key, _cache_extractor_version(extractor, page, request.route), level_text
+        )
         if cached is not None:
             return cached
     extracted = extractor.extract(page, request.route)
@@ -2833,6 +2864,11 @@ def _build_corpus(
         lifecycle.store = store
         lifecycle.session_id = session
 
+    #: F1/Д-6: признак жизни сеанса (``heartbeat_at``/``owner``) — точечно, с троттлингом
+    #: (:class:`core.pipeline.liveness.Heartbeat`). Без сеанса объект пуст, вызовы — no-op,
+    #: поэтому воронки не обрастают ветками «а если durable-краул выключен».
+    heartbeat = Heartbeat(store, session)
+
     # L1a: априорные элементы сеанса (аудит/очередь/resume). Ключ — ``(product_id, url)``:
     # PK ``crawl_session_items`` = ``(session_id, product_id, url)``, поэтому один URL под
     # разными продуктами имеет независимые записи (I17/§4.4: партиция и её retained raw
@@ -3278,6 +3314,8 @@ def _build_corpus(
             item = CrawlSessionItem(**record)
             store.upsert_crawl_session_item(item)
             items[key] = item
+            # F1/Д-6: каждая запись исхода URL — честный признак жизни процесса.
+            heartbeat.touch()
         except Exception as exc:  # noqa: BLE001 — наблюдаемость важнее персистенции
             errors.append(
                 f"{pid}/{u}: crawl_session_item {_as_text(status)}: "
@@ -3380,17 +3418,18 @@ def _build_corpus(
             # поэтому для страницы ключ байт-идентичен ``content_hash(page.content)``, а для
             # staging-артефакта (``page.content`` пуст) ключ не вырождается в хеш пустоты.
             cache_key = raw_path.stem
+            probe_page = _page_with_source_path(page, raw_path)
             extracted = (
                 None
                 if extract_cache is None
                 else extract_cache.get(
-                    cache_key, getattr(extractor_obj, "version", ""), level_text
+                    cache_key,
+                    _cache_extractor_version(extractor_obj, probe_page, fetch_plan.extract),
+                    level_text,
                 )
             )
             if extracted is None:
-                extracted = extractor_obj.extract(
-                    _page_with_source_path(page, raw_path), fetch_plan.extract
-                )
+                extracted = extractor_obj.extract(probe_page, fetch_plan.extract)
                 if extract_cache is not None:
                     extract_cache.put(
                         extracted, level=level_text, content_hash=cache_key
@@ -3847,7 +3886,12 @@ def _build_corpus(
 
         Читает ``crawl_session_counts`` (единственный владелец — стор); ошибки колбэка/
         чтения изолируются (наблюдаемость не роняет фазу). Без активного сеанса — no-op.
+
+        F1/Д-6: здесь же — признак жизни сеанса (``heartbeat.touch``). Точка выбрана
+        намеренно: она стоит на каждой границе шага дренажа (фетч/экстракция/расширение
+        frontier), поэтому её покрытие не зависит от того, включён ли ``--follow``.
         """
+        heartbeat.touch()
         if progress is None or session is None:
             return
         try:
@@ -6036,7 +6080,11 @@ def _build_corpus(
                     # (тот же хеш, что воркер считает из прочитанных байтов).
                     cached = extract_cache.get(
                         _extract_cache_key(raw_path),
-                        str(getattr(root_extractor, "version", "") or ""),
+                        _cache_extractor_version(
+                            root_extractor,
+                            _page_with_source_path(page, raw_path),
+                            fetch_plan.extract,
+                        ),
                         _as_text(level),
                     )
                     if cached is not None:
@@ -7491,30 +7539,21 @@ def _finalize_interrupted_session(
     то есть выдумал бы провенанс о прогоне, который не дошёл до конца.
 
     Поэтому ставится **терминальный статус из словаря**
-    (``docs/status-dictionary.yaml: crawl_session_status``) без записи провенанса:
-
-    * ``KeyboardInterrupt``/``SystemExit`` → ``cancelled`` («снят оператором/системой»);
-    * любое другое исключение (включая OOM-подобное ``MemoryError``) → ``failed``
-      («терминальный сбой сеанса»).
-
-    Нового значения не вводится. Различить «прервано» и «краул упал сам» эти два статуса
-    не могут: отдельное терминальное состояние (например ``interrupted``) потребовало бы
-    строки в ``docs/status-dictionary.yaml`` — это решение владельца методологии, не
-    реализационное. Пока его нет, ``error`` несёт машинно-читаемую причину, а
-    ``hound crawl status`` перестаёт показывать мёртвый краул «в полёте».
+    (``docs/status-dictionary.yaml: crawl_session_status``) без записи провенанса —
+    ``interrupted``: «исполнение прервано, тело краула не финализировано». Это ровно тот
+    случай, для которого значение введено (``10`` §8.2): факт прерывания известен
+    обработчику размотки, а ``partial`` занят усечением и ``failed`` — заявлением о сбое,
+    которого конвейер не наблюдал. Различить «оператор снял» и «фаза упала» статус не
+    обязан — причина остаётся в ``error`` (тип исключения), а ``cancel`` оператора
+    оставляет свой след в ``error``.
 
     Сбой самой записи не поднимается: обработчик не имеет права подменить исходное
     исключение (оно и есть причина прерывания).
     """
-    status = (
-        CrawlSessionStatus.CANCELLED
-        if isinstance(exc, (KeyboardInterrupt, SystemExit))
-        else CrawlSessionStatus.FAILED
-    )
     try:
         lifecycle.store.update_crawl_session_status(
             lifecycle.session_id,
-            status,
+            CrawlSessionStatus.INTERRUPTED,
             finished_at=_now_iso(),
             error=f"phase interrupted: corpus did not complete ({type(exc).__name__})",
         )

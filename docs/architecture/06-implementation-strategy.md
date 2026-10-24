@@ -282,8 +282,11 @@ staging крупных артефактов отсутствует; (3) ось `
 
 ### W3 — Store — ✅ done
 
-- `core/store/sqlite.py` — DDL §4.4 + триггеры I4/I6/I7/I13/I18, `SCHEMA_VERSION = "3.11.0"`
-  (19 таблиц, включая `schema_meta`).
+- `core/store/sqlite.py` — DDL §4.4 + триггеры I4/I6/I7/I13/I18, `SCHEMA_VERSION = "3.12.0"`
+  (19 таблиц, включая `schema_meta`; гейт версии схемы — файл другой версии отвергается,
+  `11` §2.6; свидетельство живости сеанса краула — F1).
+- `core/pipeline/liveness.py` — `owner`/`heartbeat_at`, recovery-on-open (`running` → `interrupted`),
+  `Heartbeat` (F1/Д-6).
 - `core/store/state_sqlite.py` — durable per-product состояние (`state/{package_id}/state.db`,
   `STATE_SCHEMA_VERSION = "4"`): lineage, `previous_run_id`, `profile_attestation`. Источник
   `--since-run`/класса изменения (09 §4.1).

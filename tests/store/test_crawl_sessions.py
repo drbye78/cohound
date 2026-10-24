@@ -341,6 +341,49 @@ def test_upsert_session_does_not_reset_progress_counters(store: SqliteStore) -> 
 # --------------------------------------------------------------------------- #
 
 
+def test_liveness_columns_round_trip(store: SqliteStore) -> None:
+    """F1: ``owner``/``heartbeat_at`` — реальные колонки, читаются моделью без потерь."""
+    store.upsert_crawl_session(
+        _session(
+            status=CrawlSessionStatus.RUNNING,
+            owner="host-a/4242/777",
+            heartbeat_at="2026-01-01T00:00:30+00:00",
+        )
+    )
+    session = store.get_crawl_session("s1")
+    assert session is not None
+    assert session.owner == "host-a/4242/777"
+    assert session.heartbeat_at == "2026-01-01T00:00:30+00:00"
+
+
+def test_upsert_session_does_not_wipe_liveness(store: SqliteStore) -> None:
+    """Stale-модель (без владельца) не затирает свидетельство живости (владелец — ``touch``)."""
+    store.upsert_crawl_session(
+        _session(
+            status=CrawlSessionStatus.RUNNING,
+            owner="host-a/4242/777",
+            heartbeat_at="t1",
+        )
+    )
+    # Повторный upsert моделью без owner/heartbeat — как это делает stale-снимок.
+    store.upsert_crawl_session(_session(status=CrawlSessionStatus.RUNNING))
+    session = store.get_crawl_session("s1")
+    assert session is not None
+    assert (session.owner, session.heartbeat_at) == ("host-a/4242/777", "t1")
+
+
+def test_iter_crawl_sessions_filters_by_status(store: SqliteStore) -> None:
+    store.upsert_crawl_session(_session())
+    store.upsert_crawl_session(_session(session_id="s2", status=CrawlSessionStatus.RUNNING))
+    store.upsert_crawl_session(_session(session_id="s3", status=CrawlSessionStatus.INTERRUPTED))
+
+    assert [s.session_id for s in store.iter_crawl_sessions()] == ["s1", "s2", "s3"]
+    assert [s.session_id for s in store.iter_crawl_sessions(status=CrawlSessionStatus.RUNNING)] == [
+        "s2"
+    ]
+    assert list(store.iter_crawl_sessions(status=CrawlSessionStatus.PAUSED)) == []
+
+
 def test_recover_crawl_session_running_to_pending(store: SqliteStore) -> None:
     store.upsert_crawl_session(_session(status=CrawlSessionStatus.RUNNING))
     store.upsert_crawl_session_item(_item("https://docs.test/p1/a", CrawlItemStatus.RUNNING))

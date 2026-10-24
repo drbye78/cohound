@@ -27,6 +27,7 @@ from core.domain import (
     CrawlSessionItem,
     CrawlSessionStatus,
 )
+from core.pipeline.liveness import current_owner, recover_interrupted_sessions
 
 __all__ = [
     "default_session_id",
@@ -60,18 +61,25 @@ def open_session(
 ) -> CrawlSession:
     """Get-or-create сеанса + recovery-on-open + переход в ``RUNNING``.
 
-    Если сеанса нет — создаётся ``CrawlSession`` в статусе ``CREATED``. Затем вызывается
+    Если сеанса нет — создаётся ``CrawlSession`` в статусе ``CREATED``. Сначала вызывается
+    recovery-on-open (:func:`core.pipeline.liveness.recover_interrupted_sessions`): сеансы,
+    оставшиеся в ``running`` от убитого процесса (SIGKILL/OOM — такую развязку Python не
+    перехватывает), получают ``interrupted`` с причиной. Затем
     ``store.recover_crawl_session``: элементы, застрявшие в ``running`` от прерванного
     процесса, возвращаются в ``pending``, счётчики пересчитываются.
 
     Далее сеанс переводится в ``RUNNING`` с ``started_at`` = текущее UTC-время
-    (:meth:`StorePort.update_crawl_session_status`): открытие сеанса означает начало его
-    исполнения. Это применимо и к терминальному сеансу (``completed``/``partial``/
-    ``cancelled``/``failed``), переоткрываемому для resume — resume есть **новый запуск** того
-    же сеанса, поэтому он снова ``RUNNING``, а ``update_crawl_session_status`` сбрасывает
-    ``finished_at``/``error`` (C3), снимая признаки прежнего завершения. Возвращает актуальный
-    (после восстановления и перехода) сеанс.
+    (:meth:`StorePort.update_crawl_session_status`) и получает свидетельство живости
+    (``owner`` + ``heartbeat_at``): открытие сеанса означает начало его исполнения.
+    Это применимо и к терминальному сеансу (``completed``/``partial``/``cancelled``/
+    ``failed``/``interrupted``), переоткрываемому для resume — resume есть **новый запуск**
+    того же сеанса, поэтому он снова ``RUNNING``, а ``update_crawl_session_status``
+    сбрасывает ``finished_at``/``error`` (C3), снимая признаки прежнего завершения.
+    Возвращает актуальный (после восстановления и перехода) сеанс.
     """
+    # F1/Д-6: recovery-on-open **до** открытия своего сеанса — иначе протухший ``running``
+    # прошлой попытки остался бы фантомом навсегда.
+    recover_interrupted_sessions(store)
     if store.get_crawl_session(session_id) is None:
         store.upsert_crawl_session(
             CrawlSession(
@@ -83,9 +91,11 @@ def open_session(
             )
         )
     store.recover_crawl_session(session_id)
+    now = _now_iso()
     store.update_crawl_session_status(
-        session_id, CrawlSessionStatus.RUNNING, started_at=_now_iso()
+        session_id, CrawlSessionStatus.RUNNING, started_at=now
     )
+    store.touch_crawl_session_heartbeat(session_id, at=now, owner=current_owner())
     session = store.get_crawl_session(session_id)
     if session is None:  # pragma: no cover — защита от рассинхрона store
         raise RuntimeError(f"сеанс краула не открылся: {session_id!r}")

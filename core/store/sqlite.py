@@ -12,7 +12,10 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = "3.11.0"
+SCHEMA_VERSION = "3.12.0"
+
+#: Код ошибки гейта версии схемы (``03`` §A.2, ``11`` §2.6): старый ``cohound.db`` не читается.
+SCHEMA_VERSION_CODE = "schema_version"
 
 DDL = """
 PRAGMA journal_mode = WAL;
@@ -264,7 +267,7 @@ CREATE TABLE IF NOT EXISTS crawl_sessions (
     session_id    TEXT PRIMARY KEY,
     run_id        TEXT,                    -- soft-link на прогон; NULL = standalone-сеанс
     profile       TEXT NOT NULL,
-    status        TEXT NOT NULL,           -- created|running|paused|cancelled|completed|partial|failed
+    status        TEXT NOT NULL,           -- created|running|paused|cancelled|completed|partial|interrupted|failed
     created_at    TEXT NOT NULL,
     started_at    TEXT,
     finished_at   TEXT,
@@ -277,6 +280,13 @@ CREATE TABLE IF NOT EXISTS crawl_sessions (
     error         TEXT,
     options_json  TEXT,
     provenance_json TEXT,
+    -- F1 (schema 3.12.0): свидетельство живости, а **не** распределённая блокировка (`10` §Д-6,
+    -- К-4). ``owner`` — кто исполняет сеанс (host/pid/старт процесса), ``heartbeat_at`` — когда
+    -- этот процесс последний раз подавал признаки жизни. SIGKILL/OOM не перехватываются, поэтому
+    -- мёртвый сеанс распознаёт recovery-on-open (``core/pipeline/liveness.py``) и переводит его
+    -- в ``interrupted``. Обе колонки — операционный провенанс, в ``run_id`` не входят.
+    owner         TEXT,
+    heartbeat_at  TEXT,
     FOREIGN KEY (run_id) REFERENCES runs(run_id)
 );
 
@@ -440,6 +450,10 @@ def _ensure_columns(
     ``CREATE TABLE IF NOT EXISTS`` не меняет существующую таблицу, поэтому дельты схемы
     добавляются явными ``ALTER TABLE ... ADD COLUMN``. Повторный вызов (в т.ч. на уже
     мигрированной БД) — no-op (проверка через ``PRAGMA table_info``).
+
+    С гейтом версии (:func:`connect`) это **не** путь чтения старой БД: файл другой версии
+    отвергается до миграций (``11`` §2.6), поэтому ``_ensure_columns`` обслуживает только
+    «полусозданную» БД в пределах объявленной версии — страховка, а не молчаливая миграция.
     """
     existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
     for name, ddl_type in columns.items():
@@ -447,10 +461,65 @@ def _ensure_columns(
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {ddl_type}")
 
 
+class SchemaVersionMismatch(RuntimeError):
+    """Файл ``cohound.db`` объявляет другую версию схемы, чем ожидает код.
+
+    Гейт версии (``11`` §2.6): прогон — durable-артефакт, но **не** переносится между
+    версиями схемы. Читать старую БД молча нельзя: аддитивные дельты сделали бы «старую»
+    строку неотличимой от «новой», а прогон объявлял бы условия измерения, которых не
+    применял. Поэтому несовпадение — отказ с внятным сообщением, а не тихий апгрейд.
+
+    ``code`` — код правила для ``CODE: message`` в CLI; сама строка сообщения кода не
+    повторяет (иначе получилось бы ``schema_version: schema_version: …``).
+    """
+
+    #: Код ошибки (совпадает с :data:`SCHEMA_VERSION_CODE`).
+    code = SCHEMA_VERSION_CODE
+
+
+def _declared_schema_version(conn: sqlite3.Connection) -> str | None:
+    """Версия схемы, уже записанная в файле (``None`` — БД пустая/новая).
+
+    Читается **до** ``DDL``/миграций: гейт обязан увидеть исходное состояние файла, а не
+    результат ``CREATE TABLE IF NOT EXISTS``.
+    """
+    row = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'schema_meta'"
+    ).fetchone()
+    if row is None:
+        return None
+    row = conn.execute(
+        "SELECT value FROM schema_meta WHERE key = 'schema_version'"
+    ).fetchone()
+    if row is None:
+        return None
+    return str(row["value"])
+
+
+def _reject_foreign_schema(db_path: str | Path, found: str | None) -> None:
+    """Гейт версии схемы: несовпадение — отказ с сообщением о действии оператора."""
+    if found is None or found == SCHEMA_VERSION:
+        return
+    raise SchemaVersionMismatch(
+        f"схема БД несовместима: файл {str(db_path)!r} объявляет "
+        f"schema_version={found!r}, а код ожидает {SCHEMA_VERSION!r} (11 §2.6). "
+        "Молчаливое чтение чужой схемы запрещено: прогон переносится только пересозданием — "
+        "запустите прогон в новом каталоге (новый run_id) или удалите устаревший cohound.db."
+    )
+
+
 def connect(db_path: str | Path = ":memory:") -> sqlite3.Connection:
-    """Открывает БД и применяет схему (+ идемпотентные DDL-миграции v2.1–v3.6)."""
+    """Открывает БД и применяет схему (+ идемпотентные DDL-миграции v2.1–v3.6).
+
+    :raises SchemaVersionMismatch: файл объявляет другую ``schema_version`` (гейт §2.6).
+    """
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
+    try:
+        _reject_foreign_schema(db_path, _declared_schema_version(conn))
+    except SchemaVersionMismatch:
+        conn.close()
+        raise
     conn.executescript(DDL)
     # DDL-миграция v2.1 (A3): старая БД без settings_provenance_json получает колонку.
     # CREATE TABLE IF NOT EXISTS не меняет существующую таблицу — добавляем явно.
@@ -513,6 +582,9 @@ def connect(db_path: str | Path = ":memory:") -> sqlite3.Connection:
     # `CREATE TABLE IF NOT EXISTS` в DDL — ALTER не нужен (новые таблицы), вызов
     # идемпотентен на любой БД. Гэп forward-compat закрывается `_ensure_columns` при
     # появлении additive-колонок в будущем.
+    # v3.12.0 (F1/Д-6): `crawl_sessions.owner`/`heartbeat_at` объявлены прямо в DDL — ALTER не
+    # нужен, потому что файл с прежней версией схемы до миграций **не доходит** (гейт версии
+    # выше, `11` §2.6). Это осознанная цена: старые прогоны не становятся частично читаемыми.
     # DDL-миграция v3.5 (D1): глубина URL в BFS-frontier seed-root — additive-колонка
     # `crawl_session_items.depth`; старые БД получают NULL (глубина неизвестна, resume
     # best-effort). Значение доменного класса — execution/операционный провенанс (не §13).

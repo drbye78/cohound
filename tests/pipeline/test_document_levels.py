@@ -161,9 +161,11 @@ def _is_document(content: bytes, content_type: str | None) -> bool:
 class _LevelExtractor:
     """Композиция HTML+документ: ``version`` несёт уровень (как реальный ``_LocalExtractor``).
 
-    Для документного контента ``extractor_version = "docling-doc-3:<level>"`` и текст зависит
-    от уровня (симуляция «разного текста на уровнях»); HTML — ``trafilatura-html-2`` (не
-    затронут осью).
+    Для документного контента фейк кодирует **только уровень**
+    (``docling-doc-3:<level>``); сборку движка (Д-8) он не симулирует — этот тест
+    проверяет ось ``document_level``, а не версию библиотеки. Текст зависит от уровня
+    (симуляция «разного текста на уровнях»); HTML — ``trafilatura-html-2`` (не затронут
+    осью).
     """
 
     def __init__(self, level: DocumentLevel) -> None:
@@ -509,7 +511,10 @@ def test_level_reaches_worker_request(tmp_path: Path) -> None:
 
 
 def test_extractor_version_carries_level(tmp_path: Path) -> None:
-    from core.adapters.extract_document import DoclingDocumentExtractor
+    from core.adapters.extract_document import (
+        DoclingDocumentExtractor,
+        docling_extractor_version,
+    )
     from core.pipeline.corpus import (
         _derive_partition_build_id,
         _product_extractor_token,
@@ -528,7 +533,9 @@ def test_extractor_version_carries_level(tmp_path: Path) -> None:
     }
     assert len(set(versions.values())) == 5
     for level, token in versions.items():
-        assert token == f"docling-doc-3:{level.value}"
+        # Уровень и сборка движка (Д-8): обе половины в ключе extract_cache.
+        assert token == docling_extractor_version(level)
+        assert token.startswith(f"docling-doc-3:{level.value}/")
         assert level.value in token
 
     # _product_extractor_token различает уровни (композит версий документов продукта).
@@ -935,6 +942,6 @@ def test_docling_full_has_working_ocr_engine() -> None:
 
     doc = extractor.extract_bytes(_scanned_pdf_bytes(), "scan.pdf")
     assert doc.error is None, doc.error
-    assert doc.extractor_version == "docling-doc-3:full"
+    assert doc.extractor_version == extractor.version
     assert "SCANNED" in doc.text.upper(), doc.text
     assert "12345" in doc.text, doc.text

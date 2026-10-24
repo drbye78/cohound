@@ -118,6 +118,7 @@ write-site'ов у них пока нет, но словарь обязан их
 | `duration_by_phase` | производительность |
 | `crawl` | durable-сеанс краула: гистограмма `{status: count}` из `crawl_session_counts`; пусто, если сеанса нет |
 | `crawl_truncation` | политическое усечение (N4): `truncated`/`truncated_reason`/`truncated_products`/`pages_fetched`/`revalidation_fetched`/`effective_limits`; пусто, если не усечён |
+| `crawl_session` | жизненный цикл сеанса краула (F1/Д-6): `status`/`owner`/`heartbeat_at`/`stale_reason`; пусто, если сеанса не было. `interrupted` виден здесь без разбора БД |
 | `resources` | F0 (`11` §4): `phases[phase] = {peak_rss_mb, wall_s}` (`VmHWM` и время на конец фазы), `scheduling = {extract_workers, extract_max_tasks_per_child, source}` (`source`: `declared`\|`derived` — окно выведено из бюджета памяти), `chunks_per_doc = {family: {count, p50, p90, max}}`, `documents`/`chunks`, `workers_peak_rss_mb`, `budget` (бюджет, его источник, `MemAvailable`, резерв, пол родителя, `cpu_count`, таблица пиков docling). Пусто — ресурсы не измерялись (нейтрально: «не измеряли» ≠ «ноль»). В `run_id` не входит: это расписание и наблюдение, а не условие измерения |
 
 **Per-product события — не метрики, а заметки.** `product_start`/`product_end`/
@@ -352,9 +353,11 @@ IDP/DLP/IDS (07 §8); 0021–0023 — операционный слой посл
 и **разделение классов версий** diff-причин: `methodology_change` (`METHODOLOGY_FIELDS` + major
 `methodology_version`) vs `execution_change` (`EXECUTION_FIELDS`) — §13/B-7. `ranking_epsilon`
 (порог неразличимости) и `settings_provenance` (`default|measured`, A3) добавлены в `RunConfig`/
-`RunManifest`; `SCHEMA_VERSION` SQLite-схемы — **`3.11.0`** (на срезе v2.1 было `3.5.0`;
+`RunManifest`; `SCHEMA_VERSION` SQLite-схемы — **`3.12.0`** (на срезе v2.1 было `3.5.0`;
 дальше аддитивно: 3.10.0 — `corpus_members`/`archive_observations`, 3.11.0 — поля
-`gate_decisions` полосы гейтов), `STATE_SCHEMA_VERSION` схемы `state/{package}/state.db` —
+`gate_decisions` полосы гейтов, 3.12.0 — `crawl_sessions.owner`/`heartbeat_at` (свидетельство
+живости) и `interrupted` в `crawl_session_status`; с 3.12.0 файл другой версии **отвергается**
+гейтом `11` §2.6, а не мигрируется молча), `STATE_SCHEMA_VERSION` схемы `state/{package}/state.db` —
 **`"4"`** (v4 добавила `profile_attestation`). Основное из накопленного: E2 —
 `runs.registry_spec_digest`, дайджест package-scoped спецификаций реестров, граница
 `execution_change` §13; P1 — `run_inputs` как источник истины входов плана +
