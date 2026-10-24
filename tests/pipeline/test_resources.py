@@ -44,10 +44,12 @@ from core.pipeline.resources import (
     workers_from_budget,
 )
 
-#: Замеренные пики docling на один документ (MB), ``2026-10-23-docling-level-peaks.md``.
+#: Замеренные пики docling на один документ (MB): пер-уровневые —
+#: ``2026-10-23-docling-level-peaks.md``, ``layout_tables`` —
+#: ``2026-10-24-docling-peaks-real-corpus.md`` (максимум по реальному корпусу, 2763 стр.).
 PEAK_TEXT = 855
 PEAK_LAYOUT = 1563
-PEAK_LAYOUT_TABLES = 1953
+PEAK_LAYOUT_TABLES = 3679
 PEAK_FULL = 3107
 
 #: Бюджет хоста 6.9 GiB, округлённый вниз до MB (тот же замер).
@@ -138,11 +140,18 @@ def test_workers_from_budget_off_level_is_zero() -> None:
 
 
 def test_workers_from_budget_matches_measured_host() -> None:
-    """Хост 6.9 GiB: числа следуют из замера, а не из предвидения (§3.3)."""
-    assert workers_from_budget(DocumentLevel.LAYOUT_TABLES, HOST_BUDGET_MB, cpu_cap=8) == 3
+    """Хост 6.9 GiB: числа следуют из замера реального корпуса, а не из предвидения (§3.3).
+
+    ``layout_tables`` — 3679 MB (2763-страничный документ корпуса), поэтому даже при
+    бюджете 6500 MB помещается **один** воркер: 500 + 2 × 3679 = 7858 MB. Это не
+    «осторожность», а арифметика: прежняя константа 1953 MB давала здесь 3 воркера и
+    была бы OOM-kill'ом на первом же большом PDF.
+    """
+    assert workers_from_budget(DocumentLevel.LAYOUT_TABLES, HOST_BUDGET_MB, cpu_cap=8) == 1
     assert workers_from_budget(DocumentLevel.FULL, HOST_BUDGET_MB, cpu_cap=8) == 1
-    # 0.5 + 1.95 GB — «гарантированно помещающийся baseline» F1 (`11` §4).
-    assert workers_from_budget(DocumentLevel.LAYOUT_TABLES, 2500, cpu_cap=8) == 1
+    # Один воркер помещается ровно с полом родителя: 500 + 3679 = 4179 MB.
+    assert workers_from_budget(DocumentLevel.LAYOUT_TABLES, 4179, cpu_cap=8) == 1
+    assert workers_from_budget(DocumentLevel.LAYOUT_TABLES, 4178, cpu_cap=8) == 0
 
 
 # --------------------------------------------------------------------------- #
@@ -474,12 +483,20 @@ def _rusage_mb() -> float:
 def test_read_peak_rss_mb_falls_back_to_getrusage(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Нет ``/proc/self/status`` — читается ``ru_maxrss`` того же процесса."""
+    """Нет ``/proc/self/status`` — читается ``ru_maxrss`` того же процесса.
+
+    ``ru_maxrss`` монотонен и растёт от собственных аллокаций теста, поэтому сравнивать
+    его с более поздним чтением нельзя (окно «между двумя чтениями» — не константа):
+    берётся снимок **до** вызова и проверяется, что фолбэк вернул значение внутри
+    ``[до, после]``.
+    """
+    before = _rusage_mb()
     _fake_proc(monkeypatch, None)
     value = read_peak_rss_mb()
     assert value is not None
     assert value > 0
-    assert value == pytest.approx(_rusage_mb(), abs=0.2)
+    assert before <= value + 0.2
+    assert value <= _rusage_mb() + 0.2
 
 
 def test_read_peak_rss_mb_garbage_status_falls_back(

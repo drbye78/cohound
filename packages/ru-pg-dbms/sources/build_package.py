@@ -1308,12 +1308,11 @@ def main() -> int:
             # pptx/xlsx и к zip/7z/rar; тело пишется в staging-файл, не в RAM.
             # Держать в синхроне с `run.yaml` — иначе `generator_drift` (P7).
             "max_artifact_bytes": 262_144_000,
-            # Замер 2026-10 (после `PDF_QUEUE_MAX_SIZE = 1`): 2 воркера помещаются в 6.9 GiB
-            # при `layout_tables` (2×2126 MB + baseline родителя). Плюс воркер после каждого
-            # документа отдаёт ОС свободные арены glibc (`malloc_trim`: замер 1679 → 1084 MB),
-            # поэтому пол резидента ≈1.1 GB на воркер, а не «накопленное». Держать в синхроне
-            # с `run.yaml` — иначе `generator_drift` (P7).
-            "extract_workers": 2,
+            # `extract_workers` здесь **не объявляется**: число выводит формула из бюджета
+            # памяти (`workers_from_budget`, F0/Д-7). Замер 2026-10-24 на реальном корпусе
+            # (`2026-10-24-docling-peaks-real-corpus.md`): пик `layout_tables` — 3679 MB на
+            # 2763-страничном документе, поэтому на 6.9 GiB помещается один воркер, а
+            # объявленная ось превратила бы preflight-отказ в предупреждение.
             "extract_max_tasks_per_child": 25,
             "document_level": "layout_tables",
             "exclude_paths": [

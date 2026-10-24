@@ -553,7 +553,7 @@ false ❌ I2/I2b), а сеанс не рапортуется `COMPLETED`. `off` 
 basename/path без знания content-type); «полная» экономия фетча — только блэклист/суффикс.
 
 **Память по уровням.** Пик = `parent_floor + W × peak(level корня)` (`W` = `extract_workers`),
-где замеренные пики — `text` 855 MB, `layout` 1563, `layout_tables` 1953, `full` 3107,
+где замеренные пики — `text` 855 MB, `layout` 1563, `layout_tables` **3679**, `full` 3107,
 `parent_floor` ≈ 500 MB (`docs/reports/measurements/2026-10-23-docling-level-peaks.md`,
 константы — `core/pipeline/resources.py`). Если ось `extract_workers` **не объявлена** ни на
 одном слое, окно выводится как `min(floor((бюджет − parent_floor) / peak(level)), cpu_count)`,
@@ -876,7 +876,7 @@ path-prefix seed-root к нему не применяется: `/docs/` може
 коммита = порядок отправки). `None`/`1` ⇒ пул не создаётся, экстракция inline.
 **Окно выводится из замера, а не назначается вручную** (F0/Д-7, `11` §3.3): при оси,
 не объявленной ни на одном слое, `W = min(floor((бюджет − parent_floor) / peak(level)),
-cpu_count)` — `peak` замерен по уровням (`text` 855 MB, `layout` 1563, `layout_tables` 1953,
+cpu_count)` — `peak` замерен по уровням (`text` 855 MB, `layout` 1563, `layout_tables` 3679,
 `full` 3107), `parent_floor` ≈ 500 MB, бюджет — `COHOUND_MEM_BUDGET_MB` либо
 `MemAvailable − 512 MB` (`core/pipeline/resources.py`). Потолок по CPU обязателен: память
 отвечает «сколько поместится», но не «сколько успеет», и без него хост с запасом RAM получил

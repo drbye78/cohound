@@ -72,7 +72,10 @@ RUN_CRAWL_MAX_WORKERS = 3
 #: Пул экстракции пересмотрен после замера `queue_max_size=1` (−49 % RSS: 4174 → 2126 MB
 #: на 665-стр. документе при идентичном markdown) ⇒ 2 воркера помещаются в бюджет хоста.
 #: Пин держит значение синхронным с `run.yaml` и генератором (иначе дрейф, P7).
-RUN_CRAWL_EXTRACT_WORKERS = 2
+#: Ось ``crawl.extract_workers`` в пакете **не объявлена**: число выводит формула из
+#: бюджета памяти (F0/Д-7, ``workers_from_budget``). Иначе объявленная ось сильнее
+#: бюджета и превращает preflight-отказ в предупреждение.
+RUN_CRAWL_EXTRACT_WORKERS = None
 RUN_CRAWL_EXTRACT_MAX_TASKS_PER_CHILD = 25
 RUN_CRAWL_EXCLUDE_PATHS = [
     "/blog/*",
@@ -196,7 +199,9 @@ def test_run_crawl_axes_accepted_by_strict_loader() -> None:
     assert crawl.max_depth == RUN_CRAWL_MAX_DEPTH
     assert crawl.max_documents == RUN_CRAWL_MAX_DOCUMENTS
     assert crawl.max_workers == RUN_CRAWL_MAX_WORKERS
-    assert crawl.extract_workers == RUN_CRAWL_EXTRACT_WORKERS
+    # Ось не объявлена намеренно: значение выводится из бюджета, а не назначается
+    # вручную — объявленная ось была бы сильнее формулы.
+    assert crawl.extract_workers is RUN_CRAWL_EXTRACT_WORKERS
     assert (
         crawl.extract_max_tasks_per_child == RUN_CRAWL_EXTRACT_MAX_TASKS_PER_CHILD
     )
@@ -250,7 +255,7 @@ def test_resolve_crawl_limits_per_site(url: str, max_depth: int, max_documents: 
     assert limits.max_documents == max_documents
     # Прочие оси наследуются из run-слоя (site-слой их не переопределяет).
     assert limits.max_workers == RUN_CRAWL_MAX_WORKERS
-    assert limits.extract_workers == RUN_CRAWL_EXTRACT_WORKERS
+    assert limits.extract_workers is RUN_CRAWL_EXTRACT_WORKERS
     assert limits.document_level is DocumentLevel.LAYOUT_TABLES
     assert list(limits.exclude_paths) == RUN_CRAWL_EXCLUDE_PATHS
     assert list(limits.exclude_documents) == RUN_CRAWL_EXCLUDE_DOCUMENTS
