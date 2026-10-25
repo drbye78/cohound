@@ -69,6 +69,7 @@ from core.domain.models import (
     canonical_rate_limit,
 )
 from core.domain.scoring import evidence_coverage
+from core.pipeline.artifacts_gap import write_artifacts_gap
 from core.pipeline.compute import (
     ScoreBundle,
     assert_publishable,
@@ -240,6 +241,10 @@ class Artifacts:
     i3_anomalies: list[dict[str, Any]] = field(default_factory=list)
     crawl_truncation_anomalies: list[dict[str, Any]] = field(default_factory=list)
     corpus_coverage_anomalies: list[dict[str, Any]] = field(default_factory=list)
+    #: ``outputs/artifacts_gap.yaml`` — per-URL список недоступных артефактов и заготовка
+    #: входа следующего прогона (13-manual-artifacts §4). ``None`` — файл не записан
+    #: (сбой выгрузки); форма отчёта от этого не зависит.
+    artifacts_gap: Path | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -2045,6 +2050,12 @@ def write_reports(
         факт извлекается из absence-evidence ячеек (гейт ``❌`` пишет аудит покрытия).
     :param store: опциональный ``StorePort`` — источник per-product покрытия (Ф0).
 
+    Пишет также ``outputs/artifacts_gap.yaml`` (13-manual-artifacts §4): per-URL список
+    недоступных артефактов и заготовку входа следующего прогона. Генератор — тот же,
+    что у фазы ``corpus`` (:func:`core.pipeline.artifacts_gap.write_artifacts_gap`), и
+    источник тот же (``crawl_session_items``); файл не measurement, его сбой отчёт не
+    роняет (``Artifacts.artifacts_gap is None``).
+
     G4/I11: вызывается :func:`core.pipeline.compute.assert_publishable` (предупреждение);
     при полностью отсутствующем Coverage (``coverage.defined is False`` либо пустой
     знаменатель) battle card **не эмитится** (``Artifacts.battle_card is None``).
@@ -2123,6 +2134,14 @@ def write_reports(
     anomalies.extend(truncation_anomalies)
     anomalies.extend(coverage_anomalies)
 
+    # 13-manual-artifacts §4: тот же генератор, что у фазы ``corpus`` (один код — две
+    # точки вызова), поэтому повторная выгрузка отчёта обновляет файл, а формы двух
+    # выходов не расходятся. Best-effort: файл — не measurement, его сбой не роняет Ш9.
+    try:
+        artifacts_gap = write_artifacts_gap(store, run_id=run_id, out_dir=out_dir).path
+    except Exception:  # noqa: BLE001 — отчёт вторичен к фазе
+        artifacts_gap = None
+
     return Artifacts(
         battle_card=battle_card,
         preliminary_findings=preliminary,
@@ -2132,4 +2151,5 @@ def write_reports(
         i3_anomalies=anomalies,
         crawl_truncation_anomalies=truncation_anomalies,
         corpus_coverage_anomalies=coverage_anomalies,
+        artifacts_gap=artifacts_gap,
     )

@@ -342,6 +342,9 @@ def _artifacts_payload(artifacts: Any) -> dict[str, Any]:
         "nda_questions": _path(artifacts.nda_questions),
         "diff": _path(artifacts.diff),
         "manifest": _path(artifacts.manifest),
+        # 13-manual-artifacts §4: заполняемый вход следующего прогона — в ``--json``
+        # payload, чтобы оператор видел путь, не угадывая раскладку ``outputs/``.
+        "artifacts_gap": _path(getattr(artifacts, "artifacts_gap", None)),
         "i3_anomalies": list(getattr(artifacts, "i3_anomalies", None) or []),
         "crawl_truncation_anomalies": list(
             getattr(artifacts, "crawl_truncation_anomalies", None) or []

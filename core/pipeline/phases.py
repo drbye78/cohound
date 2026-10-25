@@ -845,6 +845,11 @@ def build_phases(
             embedder=getattr(ctx.ports, "embedder", None),
             index_builder=getattr(ctx.ports, "index_builder", None),
             raw_root=raw_root,
+            # 13-manual-artifacts §4: отчёт о недоступных артефактах пишется на границе
+            # фазы в ``{out_dir}/{run_id}/outputs/`` — оператор, остановившийся на
+            # ``--until corpus``, видит пробел до дорогой Ш6. Тот же resolved
+            # ``paths.runs``, что у Ш9: один генератор, два вызова.
+            out_dir=out_dir,
             index_root=index_root,
             package_id=_package_id(inputs, plan),
             domain_profiles=domain_profiles or {},

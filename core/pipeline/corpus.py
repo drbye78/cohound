@@ -196,6 +196,7 @@ from core.pipeline.archive_descent import (
     SKIP_EXTRACT_UNAVAILABLE,
 )
 from core.pipeline.artifact_probe import probe_artifact
+from core.pipeline.artifacts_gap import write_artifacts_gap
 from core.pipeline.crawl_session import (
     default_session_id,
     finalize_session,
@@ -2810,6 +2811,7 @@ def _build_corpus(
     snapshot_date: Any = None,
     chunker_version: str | None = None,
     raw_root: str | Path = "corpus_raw",
+    out_dir: str | Path | None = None,
     index_root: str | Path | None = None,
     embedder: EmbedderPort | None = None,
     index_builder: IndexBuilderPort | None = None,
@@ -2864,6 +2866,11 @@ def _build_corpus(
     :param raw_root: корень retention (``corpus_raw/{product_id}/{raw_hash}.bin``); дефолт
         ``"corpus_raw"`` совпадает с :class:`~core.config.paths.PathsConfig`; composition
         root передаёт resolved ``paths.corpus_raw`` (``03`` §A.1).
+    :param out_dir: корень прогонов для отчёта ``artifacts_gap.yaml``
+        (``{out_dir}/{run_id}/outputs/``, 13-manual-artifacts §4). ``None`` — отчёт не
+        пишется: у прямого вызова модуля нет определённого каталога прогонов, а
+        CWD-дефолт сделал бы артефакт общим для всех вызовов процесса (та же причина,
+        что у выключенных кэшей). Composition root передаёт resolved ``paths.runs``.
     :param index_root: корень ``index_store/`` для (а) проверки/переиспользования уже
         зафиксированной продукт-партиции (09 §8.5) и (б) записи иммутабельного манифеста
         композиции ``_compositions/{composition_id}.json`` (09 §8.2). ``None`` — легаси-путь
@@ -7638,6 +7645,26 @@ def _build_corpus(
                 f"corpus_coverage({session}): {type(exc).__name__}: {exc}"
             )
 
+    # §4 (13-manual-artifacts): список **недоступных** артефактов — заполняемый вход
+    # следующего прогона, а не справка. Ставится здесь, на границе фазы: оператор
+    # останавливается на ``--until corpus`` и обязан увидеть пробел до дорогой Ш6, а не
+    # после ``report`` (до него ещё ``evaluate``). Источник — персистентные элементы
+    # сеанса, поэтому повтор (фаза ``report``) даёт тот же файл.
+    #
+    # Best-effort: отчёт вторичен к фазе, его сбой уходит в ``errors`` (видимо), но не
+    # роняет фазу — как и сбой покрытия выше. ``out_dir is None`` — прямой вызов модуля
+    # без определённого каталога прогонов: писать некуда, артефакт не создаётся.
+    gap_line: str | None = None
+    if out_dir is not None and store is not None and run_id is not None:
+        try:
+            gap_report = write_artifacts_gap(
+                store, run_id=run_id, out_dir=out_dir, session_id=session
+            )
+        except Exception as exc:  # noqa: BLE001 — отчёт не роняет фазу
+            errors.append(f"artifacts_gap: {type(exc).__name__}: {exc}")
+        else:
+            gap_line = f"corpus: {gap_report.human_line()}"
+
     # Дальше — пост-краульная работа фазы (манифест, композиция). Терминальный статус
     # сеанса выше уже зафиксирован и от неё не зависит.
     _emit_progress()
@@ -7826,6 +7853,9 @@ def _build_corpus(
         build,
         *product_events,
         *(_product_notes(product_events) if session is not None else []),
+        # 13-manual-artifacts §4: «N документов недоступно: …» — одной строкой, чтобы
+        # оператор узнал о пробеле из вывода фазы, а не из чтения файла.
+        *([gap_line] if gap_line else []),
         *embed_notes,
     ]
     # B3: провенанс спуска доступен из результата фазы (и из run DB — таблицы
