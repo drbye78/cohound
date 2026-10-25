@@ -114,6 +114,7 @@ from core.pipeline.resources import (
     PARENT_FLOOR_MB,
     MemoryBudgetError,
     docling_peak_mb,
+    pdf_peak_mb,
     resolve_mem_budget_mb,
     workers_from_budget,
 )
@@ -2080,16 +2081,19 @@ def preflight_extraction_budget(
         except Exception:  # noqa: BLE001 — резолв осей не место падать в preflight
             continue
         level = limits.document_level
-        if level is DocumentLevel.OFF:
+        pdf_pipeline = limits.pdf_pipeline
+        if level is DocumentLevel.OFF and pdf_pipeline is not PdfPipeline.TEXT_LAYER:
             # Документной экстракции нет — воркеры не нужны; ноль здесь не «не помещается».
             continue
-        capacity = workers_from_budget(level, mem_budget_mb)
+        capacity = workers_from_budget(
+            level, mem_budget_mb, pdf_pipeline=pdf_pipeline
+        )
         if limits.extract_workers_derived:
             if limits.extract_workers == 0 and error is None:
                 error = MemoryBudgetError(
                     budget_mb=mem_budget_mb,
                     level=level,
-                    peak_mb=docling_peak_mb(level),
+                    peak_mb=pdf_peak_mb(level, pdf_pipeline),
                     parent_floor_mb=PARENT_FLOOR_MB,
                     workers=0,
                 )
@@ -2106,7 +2110,8 @@ def preflight_extraction_budget(
             "crawl.extract_workers: "
             f"{int(limits.extract_workers)} объявлено явно (app<run<site), но бюджет "
             f"{mem_budget_mb} MB и число CPU помещают {capacity} для level={level.value} "
-            f"(peak={docling_peak_mb(level)} MB, parent floor={PARENT_FLOOR_MB} MB) — "
+            f"(peak={pdf_peak_mb(level, pdf_pipeline)} MB, "
+            f"parent floor={PARENT_FLOOR_MB} MB) — "
             f"исполнение по воле оператора, бюджет ({MEM_BUDGET_ENV}) не учитывается"
         )
     return error, tuple(warnings)

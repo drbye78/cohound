@@ -41,7 +41,7 @@ try:  # pragma: no cover - на Windows модуля нет; обещание «
 except ImportError:  # pragma: no cover
     _resource = None
 
-from core.domain.enums import DocumentLevel
+from core.domain.enums import DocumentLevel, PdfPipeline
 from core.util.document_formats import (
     document_suffix,
     is_epub,
@@ -59,12 +59,14 @@ __all__ = [
     "MEM_BUDGET_ENV",
     "MEM_RESERVE_MB",
     "PARENT_FLOOR_MB",
+    "PDFIUM_TEXT_PEAK_MB",
     "MemoryBudgetError",
     "ResourcesObservation",
     "build_resources_block",
     "cpu_parallelism_cap",
     "document_family",
     "docling_peak_mb",
+    "pdf_peak_mb",
     "mem_budget_provenance",
     "read_available_mb",
     "read_peak_rss_mb",
@@ -98,6 +100,23 @@ DOCLING_PEAK_MB: dict[DocumentLevel, int] = {
     DocumentLevel.LAYOUT_TABLES: 3679,
     DocumentLevel.FULL: 3107,
 }
+
+#: Пик конвейера ``text_layer`` (текстовый слой pdfium, без моделей), MB — **замер**, а не
+#: доля от docling'а.
+#:
+#: Источник: весь PDF-корпус пакета-якоря (240 документов, 15 929 страниц, 20.9 млн
+#: символов) одним процессом через ``PdfiumDocumentExtractor`` — пик процесса
+#: **134 MB**, 26.8 s на корпус, ошибок 0. Из этих 134 MB сам pdfium и интерпретатор —
+#: 38 MB (замер до чтения первого документа), остальное приходится на крупнейший
+#: документ (6.5 млн символов, 2763 страницы). Замер и разбор —
+#: ``docs/reports/measurements/2026-10-25-pdf-backend-alternatives.md``.
+#:
+#: Почему не «пик docling для ``text``» (855 MB): это был бы замер **другого** стека.
+#: Окно воркеров — функция фактического пика (F0), и подстановка чужого числа дала бы
+#: один воркер там, где помещается восемь, то есть превратила бы выигрыш оси в его
+#: отсутствие. Направление ошибки здесь то же, что у :data:`DOCLING_PEAK_MB`: в таблице
+#: стоит максимум наблюдённого.
+PDFIUM_TEXT_PEAK_MB = 134
 
 #: Базовый RSS родителя (ядро + импорты + краул), MB — «пол», который занимает процесс
 #: **до** воркеров экстракции. Источник: замер того же дерева (``05-dependency-stack.md``,
@@ -247,6 +266,24 @@ def docling_peak_mb(level: DocumentLevel) -> int | None:
     """Пик docling на один документ для уровня, MB; ``None`` для ``off`` (извлечения нет)."""
     return DOCLING_PEAK_MB.get(level)
 
+def pdf_peak_mb(
+    level: DocumentLevel,
+    pdf_pipeline: PdfPipeline = PdfPipeline.STRUCTURED,
+) -> int | None:
+    """Пик **фактического** PDF-конвейера на один документ, MB.
+
+    ``text_layer`` не имеет уровней и не грузит моделей: его пик —
+    :data:`PDFIUM_TEXT_PEAK_MB`, измеренный на всём PDF-корпусе. Брать для него пик
+    docling'а значило бы вывести окно по чужому стеку (и получить один воркер там, где
+    помещается восемь) — то есть заменить замер предвидением, ради устранения которого
+    F0 и существует.
+
+    ``None`` — извлечения нет (``level=off`` у ``structured``).
+    """
+    if pdf_pipeline is PdfPipeline.TEXT_LAYER:
+        return PDFIUM_TEXT_PEAK_MB
+    return DOCLING_PEAK_MB.get(level)
+
 
 def _accepted_env_budget(env: Mapping[str, str]) -> int | None:
     """Явный бюджет из ``COHOUND_MEM_BUDGET_MB``, если он **принят** (иначе ``None``).
@@ -365,6 +402,7 @@ def workers_from_budget(
     budget_mb: int | None,
     *,
     cpu_cap: int | None = None,
+    pdf_pipeline: PdfPipeline = PdfPipeline.STRUCTURED,
 ) -> int:
     """Сколько воркеров экстракции имеет смысл запускать в бюджете (``>= 0``).
 
@@ -381,10 +419,13 @@ def workers_from_budget(
     :param cpu_cap: явный потолок по CPU; ``None`` — взять факт хоста
         (:func:`cpu_parallelism_cap`). Явное значение нужно тестам арифметики: иначе
         ожидаемое число зависело бы от машины, на которой их запустили.
+    :param pdf_pipeline: фактический механизм извлечения PDF (P7). ``text_layer`` даёт
+        пик :data:`PDFIUM_TEXT_PEAK_MB` вместо пика docling'а: окно обязано считаться по
+        тому стеку, который реально будет запущен (:func:`pdf_peak_mb`).
     """
     if budget_mb is None:
         return 0
-    peak = docling_peak_mb(level)
+    peak = pdf_peak_mb(level, pdf_pipeline)
     if peak is None or peak <= 0:
         return 0
     room = int(budget_mb) - PARENT_FLOOR_MB

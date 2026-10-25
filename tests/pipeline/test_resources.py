@@ -26,7 +26,7 @@ from typing import Any
 
 import pytest
 
-from core.domain.enums import DocumentLevel
+from core.domain.enums import DocumentLevel, PdfPipeline
 from core.pipeline import resources
 from core.pipeline.resources import (
     MEM_BUDGET_ENV,
@@ -137,6 +137,69 @@ def test_workers_from_budget_off_level_is_zero() -> None:
     """``off`` — документной экстракции нет; 0 здесь не значит «не помещается»."""
     assert workers_from_budget(DocumentLevel.OFF, HOST_BUDGET_MB) == 0
     assert resources.docling_peak_mb(DocumentLevel.OFF) is None
+
+
+def test_pdf_peak_mb_text_layer_is_the_measured_pdfium_peak() -> None:
+    """``text_layer`` — пик **своего** стека (134 MB), а не пик docling'а.
+
+    Источник — замер на всём PDF-корпусе ``corpus_raw/postgrespro`` (240 документов,
+    15 929 страниц, 20.9 млн символов): пик процесса 134 MB. Подстановка пика docling
+    (855 MB для ``text``) дала бы один воркер там, где помещается восемь, то есть
+    превратила бы выигрыш оси в его отсутствие.
+    """
+    peak = resources.pdf_peak_mb(DocumentLevel.LAYOUT_TABLES, PdfPipeline.TEXT_LAYER)
+    assert peak == 134
+    assert peak == resources.PDFIUM_TEXT_PEAK_MB
+    # уровень к ``text_layer`` не применяется: у механизма нет ступеней
+    assert (
+        resources.pdf_peak_mb(DocumentLevel.FULL, PdfPipeline.TEXT_LAYER)
+        == resources.pdf_peak_mb(DocumentLevel.TEXT, PdfPipeline.TEXT_LAYER)
+    )
+
+
+def test_pdf_peak_mb_structured_keeps_docling_table() -> None:
+    """``structured`` — прежняя таблица docling'а, значение по умолчанию не изменилось."""
+    assert (
+        resources.pdf_peak_mb(DocumentLevel.LAYOUT_TABLES) == resources.DOCLING_PEAK_MB[
+            DocumentLevel.LAYOUT_TABLES
+        ]
+    )
+    assert resources.pdf_peak_mb(DocumentLevel.OFF) is None
+
+
+def test_workers_from_budget_text_layer_uses_own_peak() -> None:
+    """Окно ``text_layer`` выводится по его пику: 8 воркеров там, где docling берёт 1.
+
+    При бюджете 5128 MB и ``layout_tables``: docling `floor((5128−500)/3679)` = 1,
+    ``text_layer`` `floor(4628/134)` = 34, ограничено CPU (8). Это не «щедрость»: 8 × 134 MB
+    = 1072 MB против 4179 MB у одного docling-воркера.
+    """
+    budget = 5128
+    assert (
+        workers_from_budget(DocumentLevel.LAYOUT_TABLES, budget, cpu_cap=8) == 1
+    )
+    assert (
+        workers_from_budget(
+            DocumentLevel.LAYOUT_TABLES,
+            budget,
+            cpu_cap=8,
+            pdf_pipeline=PdfPipeline.TEXT_LAYER,
+        )
+        == 8
+    )
+
+
+def test_workers_from_budget_text_layer_zero_below_floor() -> None:
+    """Пик мал, но пол родителя всё равно не обходится: ниже него — 0, а не 1."""
+    assert (
+        workers_from_budget(
+            DocumentLevel.TEXT,
+            resources.PARENT_FLOOR_MB + resources.PDFIUM_TEXT_PEAK_MB - 1,
+            cpu_cap=8,
+            pdf_pipeline=PdfPipeline.TEXT_LAYER,
+        )
+        == 0
+    )
 
 
 def test_workers_from_budget_matches_measured_host() -> None:
