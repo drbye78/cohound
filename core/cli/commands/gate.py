@@ -41,7 +41,7 @@ from core.cli.context import (
     _print_json,
     _resolve_db_path,
 )
-from core.cli.errors import EXIT_OK, EXIT_USAGE, CliError
+from core.cli.errors import EXIT_BLOCKED, EXIT_OK, EXIT_USAGE, CliError
 from core.cli.wiring import build_store
 from core.domain import Gate, GateSource, GateVerdict
 from core.pipeline import read_gate_request_digest, record_decision
@@ -175,7 +175,10 @@ def run(args: argparse.Namespace) -> int:
         _print_json(payload)
     else:
         _print_gate(payload)
-    return EXIT_OK
+    # Отказ — не «успешно записано», а блокировка прогона: скрипт, автоматизирующий гейты,
+    # обязан увидеть её тем же кодом, каким `run` сообщает об остановке на гейте (§4.7).
+    # Сама запись состоялась в обоих случаях — это не ошибка вызова.
+    return EXIT_BLOCKED if verdict is GateVerdict.REJECTED else EXIT_OK
 
 
 def configure(sub: Any) -> None:

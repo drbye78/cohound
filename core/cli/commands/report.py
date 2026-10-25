@@ -53,7 +53,7 @@ def run(args: argparse.Namespace) -> int:
     bundle = None
     catalog: dict[str, Any] = {}
     cells: list[Any] = []
-    with build_store(db_path, profile=args.profile) as store:
+    with build_store(db_path, profile=args.profile, read_only=True) as store:
         if run_id is None:
             run_id = _infer_run_id(store)
         manifest = store.read_manifest(run_id)

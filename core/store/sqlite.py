@@ -512,8 +512,74 @@ def _reject_foreign_schema(db_path: str | Path, found: str | None) -> None:
     )
 
 
+class StoreNotInitialized(FileNotFoundError):
+    """Read-only открытие: файла БД нет.
+
+    Читатель не создаёт БД: пустая схема неотличима от прогона, который ничего не нашёл
+    (§4.7 ``12-cli-architecture-review.md``). CLI отображает это в ``EXIT_NOT_FOUND`` (4),
+    а не в «ошибку вызова».
+
+    ``code`` — код правила для ``CODE: message`` в CLI.
+    """
+
+    #: Код ошибки для ``CODE: message``.
+    code = "not_found"
+
+
+def connect_read_only(db_path: str | Path = ":memory:") -> sqlite3.Connection:
+    """Открывает **существующую** БД только на чтение: без каталога, DDL и миграций.
+
+    Отличие от :func:`connect`: тот создаёт файл, каталог и применяет ``DDL`` — поэтому
+    ``hound review --db /tmp/ghost/x.db`` оставлял на диске полноценную схему на 233 472
+    байта и «прогон, который ничего не нашёл» становился неотличим от опечатки в пути.
+    Здесь файл только открывается.
+
+    **WAL и ``mode=ro``.** Прогон живёт в ``journal_mode=WAL``, то есть рядом с
+    ``cohound.db`` лежат ``-wal`` и ``-shm``. Read-only соединение с WAL-БД читает
+    **закоммиченные** данные живого писателя
+    (``tests/store/test_read_only_connect.py::test_read_only_sees_live_writer_wal``): SQLite
+    подключается к уже существующему ``-shm``, поэтому блокировок на запись не требует.
+    Одна оговорка, которую нельзя обойти настройкой: если ``-shm`` нет (писатель
+    завершился, оставив ``-wal``), SQLite **создаёт** ``-shm`` при первом открытии —
+    значит, каталог прогона должен быть доступен на запись. Это восстановление
+    WAL-индекса, а не мутация прогона: ``cohound.db`` и его данные не меняются. Если
+    каталог read-only, SQLite вернёт ошибку открытия — она видима, а не проглочена.
+
+    Гейт версии схемы сохраняется: файл чужой версии отвергается
+    :class:`SchemaVersionMismatch` до любого чтения данных (``11`` §2.6).
+
+    :param db_path: путь к существующему файлу БД либо ``":memory:"`` (последний
+        создаётся в памяти процессом — на диске ничего не появляется).
+    :raises StoreNotInitialized: файла нет (читатель его не создаёт).
+    :raises SchemaVersionMismatch: файл объявляет другую ``schema_version``.
+    """
+    if str(db_path) == ":memory:":
+        # Файла нет и не будет: закрытая схема в памяти не создаёт артефакта на диске.
+        return connect(db_path)
+    path = Path(db_path)
+    if not path.exists():
+        raise StoreNotInitialized(
+            f"БД прогона не найдена: {path} — read-only команда файл не создаёт "
+            "(проверьте run_id/--runs-dir/--db)"
+        )
+    conn = sqlite3.connect(f"file:{path.absolute().as_posix()}?mode=ro", uri=True)
+    conn.row_factory = sqlite3.Row
+    try:
+        # ``busy_timeout`` — не запись, а ожидание чужой блокировки: живой писатель держит
+        # WAL недолго, и без таймаута читатель получал бы мгновенный ``database is locked``.
+        conn.execute("PRAGMA busy_timeout = 5000")
+        _reject_foreign_schema(path, _declared_schema_version(conn))
+    except BaseException:
+        conn.close()
+        raise
+    return conn
+
+
 def connect(db_path: str | Path = ":memory:") -> sqlite3.Connection:
     """Открывает БД и применяет схему (+ идемпотентные DDL-миграции v2.1–v3.6).
+
+    Создаёт файл и схему (каталог — забота вызывающего): это путь **писателя**. Читателю нужен
+    :func:`connect_read_only` — иначе опечатка в пути оставит на диске пустую БД.
 
     :raises SchemaVersionMismatch: файл объявляет другую ``schema_version`` (гейт §2.6).
     """

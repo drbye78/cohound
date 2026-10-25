@@ -25,11 +25,17 @@ from core.cli.commands import (
     resolve,
     review,
     run,
+    runs,
     sensitivity,
+    status,
 )
 
-#: Порядок подкоманд в CLI (совпадает с историческим ``build_parser`` 1:1).
+#: Порядок подкоманд в CLI: ``runs``/``status`` — вход (обнаружить прогон и понять, что
+#: дальше), затем исторический порядок ``build_parser`` 1:1. Новые команды вставляются
+#: осознанно: наблюдаемый ``hound --help`` — часть интерфейса.
 COMMANDS = (
+    runs,
+    status,
     resolve,
     plan,
     run,

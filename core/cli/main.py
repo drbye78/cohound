@@ -32,7 +32,9 @@ from core.cli.commands.report import run as cmd_report
 from core.cli.commands.resolve import run as cmd_resolve
 from core.cli.commands.review import run as cmd_review
 from core.cli.commands.run import run as cmd_run
+from core.cli.commands.runs import run as cmd_runs
 from core.cli.commands.sensitivity import run as cmd_sensitivity
+from core.cli.commands.status import run as cmd_status
 from core.cli.context import *  # noqa: F401,F403 — реэкспорт исторической поверхности main
 from core.cli.context import (
     PLAN_INPUTS_FILENAME,
@@ -72,7 +74,11 @@ from core.pipeline.runner import Clock
 from core.ports.crawler import CrawlerPort
 from core.ports.discovery_llm import DiscoveryLLMPort
 from core.ports.search import SearchAdapterPort
-from core.store.sqlite import SCHEMA_VERSION_CODE, SchemaVersionMismatch
+from core.store.sqlite import (
+    SCHEMA_VERSION_CODE,
+    SchemaVersionMismatch,
+    StoreNotInitialized,
+)
 
 __all__ = [
     "EXIT_OK",
@@ -88,7 +94,9 @@ __all__ = [
 
 #: Команды, чей ``--runs-dir`` — операционный дефолт раскладки (03 §A.1): при отсутствии
 #: флага подставляется resolved ``paths.runs`` (composition root — единственная точка).
-_RUNS_DIR_COMMANDS: frozenset[str] = frozenset({"run", "diff"})
+#: ``runs``/``status`` входят сюда же: список прогонов и состояние прогона адресуются тем
+#: же каталогом, что и ``run``, иначе читатель смотрел бы не туда, куда писал писатель.
+_RUNS_DIR_COMMANDS: frozenset[str] = frozenset({"run", "diff", "runs", "status"})
 #: Команды, чей ``--passports-dir`` — операционный дефолт раскладки: без флага —
 #: resolved ``paths.passports``. ``discover`` сюда не входит: его ``--passports-dir`` —
 #: opt-in seed-источник запросов (I19), а не каталог-дефолт.
@@ -230,6 +238,11 @@ def main(
         # оператором (новый каталог прогона), а не повтором той же команды.
         _emit_error(args, SCHEMA_VERSION_CODE, _concise(exc))
         return EXIT_USAGE
+    except StoreNotInitialized as exc:
+        # Read-only команда на несуществующем прогоне: «не найден» (4), а не «неправильно
+        # вызвал» (2) — скрипт обязан отличать «прогон ещё не создан» от опечатки (§2.4).
+        _emit_error(args, getattr(exc, "code", "not_found"), _concise(exc))
+        return EXIT_NOT_FOUND
     except ValueError as exc:  # включает pydantic.ValidationError (I-инварианты домена)
         _emit_error(args, extract_code(str(exc)), _concise(exc))
         return EXIT_USAGE

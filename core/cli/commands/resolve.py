@@ -28,7 +28,7 @@ def run(args: argparse.Namespace) -> int:
     """
     resolved = None
     url = None
-    with build_store(args.db, profile=args.profile) as store:
+    with build_store(args.db, profile=args.profile, read_only=True) as store:
         resolved = store.resolve(args.source_id)
         url = store.resolve_source_url(args.source_id)
 

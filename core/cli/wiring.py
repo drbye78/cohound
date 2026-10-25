@@ -564,7 +564,10 @@ def run_db_path(runs_dir: str | Path, run_id: str) -> Path:
 
 
 def build_store(
-    db_path: str | Path = ":memory:", *, profile: str = LOCAL_PROFILE
+    db_path: str | Path = ":memory:",
+    *,
+    profile: str = LOCAL_PROFILE,
+    read_only: bool = False,
 ) -> SqliteStore:
     """Собирает операционное хранилище прогона.
 
@@ -572,12 +575,20 @@ def build_store(
     поэтому выбор профиля на хранилище не влияет — разделяются лишь веб-адаптеры
     (:func:`build_adapters`). Каталог БД создаётся при необходимости.
 
+    ``read_only=True`` — путь **читателя** (§4.7 ``12-cli-architecture-review.md``):
+    каталог и файл не создаются, ``DDL``/миграции не применяются, запись отвергается
+    SQLite. Отсутствующий файл → :class:`~core.store.sqlite.StoreNotInitialized`
+    (CLI: ``EXIT_NOT_FOUND``), а не «создали пустую БД». Гейт версии схемы сохраняется.
+
     :param db_path: файл БД или ``":memory:"``.
     :param profile: профиль развёртывания (проверяется на известность).
+    :param read_only: открыть существующую БД только на чтение (без создания).
     :raises WiringError: неизвестный профиль.
     """
     if profile not in SUPPORTED_PROFILES:
         raise WiringError(f"неизвестный профиль развёртывания: {profile!r}")
+    if read_only:
+        return SqliteStore(db_path, read_only=True)
     if str(db_path) != ":memory:":
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
     return SqliteStore(db_path)

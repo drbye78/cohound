@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import datetime as _dt
 import json
 from pathlib import Path
 from typing import Any
@@ -133,8 +134,12 @@ def test_crawl_no_subcommand_is_usage_error() -> None:
 def test_crawl_status_empty_session_returns_null(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Нет сеанса → ``EXIT_OK`` c ``status: null`` (пустой, но валидный ответ)."""
+    """Нет сеанса в существующей БД → ``EXIT_OK`` c ``status: null`` (валидный ответ)."""
+    from core.store.sqlite_store import SqliteStore
+
     db = tmp_path / "empty.db"
+    with SqliteStore(db):
+        pass  # схема создана писателем; сеанса нет
     code = main(
         ["crawl", "status", "--run-id", "r1", "--db", str(db), "--json"]
     )
@@ -146,8 +151,26 @@ def test_crawl_status_empty_session_returns_null(
     assert payload["counts"] == {}
 
 
+def test_crawl_status_missing_db_is_not_found(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Отсутствующая БД — ``EXIT_NOT_FOUND``: читатель её не создаёт (§4.7 разбора CLI)."""
+    db = tmp_path / "ghost" / "empty.db"
+
+    code = main(["crawl", "status", "--run-id", "r1", "--db", str(db)])
+
+    assert code == EXIT_NOT_FOUND
+    assert not db.exists()
+    assert "not_found" in capsys.readouterr().err
+
+
 def test_crawl_list_empty_db(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """Существующая БД без сеансов → пустой список (``EXIT_OK``)."""
+    from core.store.sqlite_store import SqliteStore
+
     db = tmp_path / "empty.db"
+    with SqliteStore(db):
+        pass
     code = main(["crawl", "list", "--run-id", "r1", "--db", str(db), "--json"])
     assert code == EXIT_OK
     payload = json_out(capsys)
@@ -732,7 +755,7 @@ def test_crawl_list_names_stale_running_without_writing(
         heartbeat_at="2020-01-01T00:00:00+00:00",
     )
 
-    assert main(["crawl", "list", "--run-id", "r1", "--db", str(db), "--json"]) == EXIT_OK
+    assert main(["crawl", "list", "--db", str(db), "--json"]) == EXIT_OK
     payload = json_out(capsys)
     row = payload["sessions"][0]
     assert row["status"] == "running"
@@ -743,6 +766,61 @@ def test_crawl_list_names_stale_running_without_writing(
         session = store.get_crawl_session("crawl:r1")
         assert session is not None
         assert session.status is CrawlSessionStatus.RUNNING
+
+
+def test_crawl_list_filters_by_run_id(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """``crawl list --run-id`` фильтрует, а не молча ничего не делает (§4.7 разбора CLI).
+
+    Аргумент, который принят и проигнорирован, хуже отсутствующего: оператор уверен, что
+    отфильтровал. Здесь два сеанса разных прогонов в одной БД — видно и фильтр, и его
+    отсутствие.
+    """
+    from core.domain import CrawlSession, CrawlSessionStatus
+    from core.domain.enums import RankingPolicy, RunMode
+    from core.domain.models import Focus, RunConfig
+    from core.store.sqlite_store import SqliteStore
+
+    db = tmp_path / "sessions.db"
+    cfg = RunConfig(
+        case_id="case_x",
+        anchor="p1",
+        cohort="cohort_case_x",
+        products=["p1"],
+        package="case_x",
+        focus=Focus(modules=["mod_a"], params=[]),
+        languages=["en"],
+        snapshot_date=_dt.date(2026, 6, 1),
+        mode=RunMode.STRICT,
+        ranking_policy=RankingPolicy.CAPABILITY_RANKED,
+    )
+    with SqliteStore(db) as store:
+        for run_id in ("r1", "r2"):
+            store.create_run(run_id, cfg)
+            store.upsert_crawl_session(
+                CrawlSession(
+                    session_id=f"crawl:{run_id}",
+                    run_id=run_id,
+                    profile="local",
+                    status=CrawlSessionStatus.CREATED,
+                    created_at=TS,
+                )
+            )
+
+    assert main(["crawl", "list", "--run-id", "r1", "--db", str(db), "--json"]) == EXIT_OK
+    payload = json_out(capsys)
+    assert payload["run_id"] == "r1"
+    assert [row["session_id"] for row in payload["sessions"]] == ["crawl:r1"]
+
+    # Без фильтра видны оба: фильтр действительно фильтрует, а не подменяет выборку.
+    assert main(["crawl", "list", "--db", str(db), "--json"]) == EXIT_OK
+    payload = json_out(capsys)
+    assert payload["run_id"] is None
+    assert [row["session_id"] for row in payload["sessions"]] == [
+        "crawl:r1",
+        "crawl:r2",
+    ]
 
 
 def test_interrupted_is_terminal_for_follow() -> None:

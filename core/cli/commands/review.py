@@ -38,7 +38,7 @@ def run(args: argparse.Namespace) -> int:
     db_path = _resolve_db_path(args)
     run_id = args.run_id
     items: list[ReviewItem] = []
-    with build_store(db_path, profile=args.profile) as store:
+    with build_store(db_path, profile=args.profile, read_only=True) as store:
         if run_id is None:
             run_id = _infer_run_id(store)
         store.read_manifest(run_id)  # валидация: прогон существует

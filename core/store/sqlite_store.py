@@ -59,7 +59,7 @@ from core.domain import (
 )
 from core.ports.store import RunIndexRef
 from core.ports.types import Chunk
-from core.store.sqlite import connect
+from core.store.sqlite import connect, connect_read_only
 from core.util.ids import parse_source_id
 
 #: Размер пачки по умолчанию для батчевых записей (§B.2, T3.1).
@@ -216,11 +216,18 @@ class SqliteStore:
     """Реализация ``StorePort``/``GateStore`` поверх SQLite-схемы прогона (§4.4).
 
     :param db_path: путь к файлу БД или ``":memory:"`` (дефолт).
+    :param read_only: открыть существующую БД **только на чтение**
+        (:func:`core.store.sqlite.connect_read_only`): файл/каталог не создаются, ``DDL``
+        и миграции не применяются, запись падает ошибкой SQLite. Гейт версии схемы
+        действует как обычно.
     """
 
-    def __init__(self, db_path: str | Path = ":memory:") -> None:
+    def __init__(self, db_path: str | Path = ":memory:", *, read_only: bool = False) -> None:
         self.db_path = db_path
-        self.conn: sqlite3.Connection = connect(db_path)
+        self.read_only = read_only
+        self.conn: sqlite3.Connection = (
+            connect_read_only(db_path) if read_only else connect(db_path)
+        )
 
     # -- lifecycle ------------------------------------------------------- #
     def close(self) -> None:
@@ -1302,18 +1309,31 @@ class SqliteStore:
         return counts
 
     def iter_crawl_sessions(
-        self, *, status: CrawlSessionStatus | None = None
+        self,
+        *,
+        status: CrawlSessionStatus | None = None,
+        run_id: str | None = None,
     ) -> Iterator[CrawlSession]:
-        """Итерирует сеансы краула (порядок ``session_id``); фильтр по статусу опционален.
+        """Итерирует сеансы краула (порядок ``session_id``); фильтры опциональны.
+
+        ``run_id`` — фильтр по soft-ссылке на прогон (``hound crawl list --run-id``):
+        аргумент, который «принят и молча не применён», хуже отсутствующего — оператор
+        уверен, что отфильтровал (``12-cli-architecture-review.md`` §4.7).
 
         Источник recovery-on-open (``core.pipeline.liveness``): нужен именно перебор
         ``running``-сеансов БД, а не только открываемого. Read-only.
         """
-        sql = "SELECT * FROM crawl_sessions"
+        clauses: list[str] = []
         params: list[Any] = []
         if status is not None:
-            sql += " WHERE status = ?"
+            clauses.append("status = ?")
             params.append(CrawlSessionStatus(_as_text(status)).value)
+        if run_id is not None:
+            clauses.append("run_id = ?")
+            params.append(str(run_id))
+        sql = "SELECT * FROM crawl_sessions"
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
         sql += " ORDER BY session_id"
         for row in self.conn.execute(sql, params):
             yield self._row_to_crawl_session(row)

@@ -1176,7 +1176,9 @@ onboarding-префлайт (seed-набор, §A.1.1): `--until plan` его **
 
 | Команда | Назначение | Пишет |
 |---|---|---|
-| `hound resolve` | нормализация входов + линт | — (отчёт) |
+| `hound runs [--runs-dir DIR]` | список прогонов каталога: `run_id`, пакет, дата, последняя фаза, состояние, счётчики. БД читается **только на чтение** (каталог/файл не создаются); БД чужой `schema_version` пропускается с видимой пометкой `skipped`; пустой/отсутствующий каталог → пустой список (`EXIT_OK`) | — (только чтение) |
+| `hound status <run_id> [--runs-dir DIR]` | где прогон и что дальше: последняя исполненная фаза, гейт остановки и записанное решение (кто/почему), счётчики ячеек/корпуса и **готовая следующая команда** (`hound gate …` / `hound run …` / `hound report …`). Отсутствующий прогон → `EXIT_NOT_FOUND` (4) | — (только чтение) |
+| `hound resolve <source_id> --db PATH` | резолв `source_id` → URL по БД прогона (I10/I15), без сети | — (только чтение БД) |
 | `hound plan` | нормализация входов + линт + план прогона, когорта | — (отчёт в stdout/`--json`; запись черновика `run.yaml`/`cohort.yaml` — roadmap W10, сегодня `--dry-run` не нужен: ничего не пишется) |
 | `hound discover` | Discovery-агент | passports, run |
 | `hound passport-scout` | авто-генерация **черновика** паспорта продукта: краул `--url` (и, при поиске, URL выдачи) → tool-less LLM-разведка (`discovery_llm`) → консервативный черновик. Сателлиты — только `draft`/`not_found`; `relationship_evidence`/`upstream` — лишь при подтверждённом URL и дословной цитате (I10/I15, precision-first). Публикация только при `report.ok`; `--dry-run` не пишет. Кандидаты не выдумываются без LLM-конфигурации | `passports/{product_id}/…yaml` (+ sidecar кандидатов) |
@@ -1184,7 +1186,7 @@ onboarding-префлайт (seed-набор, §A.1.1): `--until plan` его **
 | `hound package {module\|role\|param\|baseline\|cohort\|scope\|golden\|run\|artifact} <действие>` | read/CRUD-плоскость управления пакетом. **Глаголы у подкоманд разные** (см. матрицу ниже); `--json` | — (read-only, кроме `*: add/update/remove/set/clear`) |
 | `hound run [--until PHASE]` | конвейер Ш1–Ш9 (15 фаз) | БД, артефакты |
 | `hound crawl {run\|status\|list\|resume\|restart\|cancel}` | сеансы краула (`local`): durable-запуск фазы корпуса Ш5, статус/счётчики, resume/restart/cancel | `crawl_sessions`, `crawl_session_items` |
-| `hound review` | очередь ревью / preliminary-стол | cells (reviewed) |
+| `hound review` | очередь ревью / preliminary-стол: `preliminary`-контур + `❓`-кандидаты (Ш7) — **только печать**, ячейки не меняет | — (только чтение БД) |
 | `hound report` | сборка артефактов | outputs |
 | `hound golden --golden PATH [--tier fast\|full]` | прогон golden; `--golden` **обязателен** (путь к `golden.csv`) | отчёт |
 | `hound sensitivity` | пост-хок по осям | отчёт |
@@ -1193,7 +1195,7 @@ onboarding-префлайт (seed-набор, §A.1.1): `--until plan` его **
 | `hound gate --gate G1..G4 --actor <вы>` | запись решения гейта. G1/G2 — **внутренняя аттестация** профиля; G3/G4 — **точки интеграции** (вердикт приходит извне). `--source internal\|external`, `--verdict approved\|rejected`, `--subject-digest` (по умолчанию — из `runs/{run_id}/gates/{gate}-request.json`), `--external-ref` + `--notes` обязательны при `--source external` (S9/I6/I7) | `gate_decisions` |
 | `hound deploy-check` | диагностика профиля: достижимость DMZ-шва, версии/форматы edge (`/v1/health`, `/v1/capabilities`) + неразрушающий зонд очереди краула (`crawl/status` → строка `crawl`; без подачи задания) | — (отчёт) |
 | `hound experiment retrieval` | прогон R0/R1/R2 на retrieval-golden и фиксация измеренного `retrieval_profile`/`retrieval_cutoff_K`/`embed_model_id`/`rrf_k` как `settings_provenance` со `source: measured` (A3, T8.6, I20). Фиксация — **только профиль**, и **только** при полном сравнении; частичное сравнение/`skipped` → `source: default`. Требует зафиксированную индексную сборку в `runs`; рассинхрон «эмбеддер запроса ↔ сборка» → отказ (§13), отсутствие предпосылки → `skipped` (N3) | `runs.settings_provenance_json`, `runs.retrieval_*` |
-| `hound experiment evaluator-benchmark` | измерение моделей **оценщика** (Ш6) при фиксированных прочих условиях (A3): валидность JSON, Cohen's κ, confusion, abstention, `fabricated_support`, bootstrap CI + проба детерминизма. `--golden` обязателен; `--model` (повторяемый) — **единственный** источник `model_id` (не env); `--llm-slot` — откуда взять `base_url`/`api_key`/`decoder`/`timeout`; `--repeats N` (N≥2 включает пробу); `--limit N` — smoke-подмножество. Персистит `llm_scenarios`; выбор модели — измерение, а не предрешение | `llm_scenarios`, отчёт |
+| `hound experiment evaluator-benchmark` | измерение моделей **оценщика** (Ш6) при фиксированных прочих условиях (A3): валидность JSON, Cohen's κ, confusion, abstention, `fabricated_support`, bootstrap CI + проба детерминизма. `--golden` обязателен; `--model` (повторяемый) — **единственный** источник `model_id` (не env); `--llm-slot` — откуда взять `base_url`/`api_key`/`decoder`/`timeout`; `--repeats N` (N≥2 включает пробу); `--limit N` — smoke-подмножество. Пишет **только JSON-артефакт** отчёта (БД не меняет: `persist_manifest` есть лишь в ветке `retrieval`); выбор модели — измерение, а не предрешение | JSON-артефакт (`{runs}/{run_id}/benchmark/evaluator-<ts>.json`), отчёт |
 | `hound doctor [--strict] [--with-selfcheck]` | самодиагностика инсталляции: runtime, зависимости по extras, env/ключи, конфиг, каталоги, CLI-поверхность | — (отчёт) |
 | `hound baseline-agreement --annotations <csv>` | согласие независимых аннотаторов §11.5: Cohen's κ по полному набору меток **и отдельно** по бинарному решению N/A-vs-не-N/A (N/A задаёт знаменатель Coverage, I6/I7), + матрица расхождений и счётчики. Непарные ячейки исключаются и перечисляются; нулевая вариация маргиналов → `undefined` (не выдуманное число). Разметку не создаёт: это ручная работа человека | — (отчёт; артефакт разметки — вход) |
 | `hound package crawl-probe` | **измерение** оптимальных осей краула для каждого ключа `domain_profiles.yaml` (A3): лестница `http` → `browser/hybrid` → `browser/honest`; решение принимает исход **браузерного** яруса (`RawPage.fetch_mode`), а не текст ошибки — оба яруса провалились ⇒ `unresolved` с причиной (транзиентный сбой не выдаётся за `browser`); причина **диагностична**: сбой транспорта (`both_tiers_failed`) отличается от «транспорт дошёл, но экстракция дала 0 символов» (`extraction_empty` — смотреть экстрактор, не краулер; при расхождении ярусов в отчёте обе причины). Пригодность меряется **выходом реального экстрактора**, не размером байт. `wait_for`/`rate_limit` не выдумываются: только подсказка (`needs_confirmation`) и только при `429`. URL — `--urls` > `corpus_docs` (`--corpus-db`) > синтез `https://{host}{path}/` (`confidence: low`). По умолчанию **только предложение**; `--write` (требует `--actor`) правит `domain_profiles.yaml`, сохраняя шапку байт-в-байт и не тронутые блоки дословно, при отсутствии изменений — no-op. Смена осей краула — граница `execution_change` (§13), не `methodology_version` | `packages/{case_id}/sources/crawl_probe/{date}.proposal.yaml` |
@@ -1318,7 +1320,9 @@ CLI-поверхности. Каждая проверка обёрнута в tr
   Гейт проходит **фактом строки** в `gate_decisions`; **устаревшее** одобрение (предмет
   изменился) гейт **не** проходит, и сообщение называет изменившийся компонент. Явный
   `--verdict rejected` блокирует прогон отдельным сообщением — молчание внешней системы не
-  выдаётся ни за отказ, ни за одобрение. Повторная подача того же решения идемпотентна.
+  выдаётся ни за отказ, ни за одобрение. **Код возврата отказа — `EXIT_BLOCKED` (3)**, как у
+  `run` на блокировке (запись решения состоялась, но это не успех). Повторная подача того же
+  решения идемпотентна.
 - **Делегирование G3/G4:** `run.yaml:gates.{g3,g4}: external|waived` (дефолт `external`).
   `waived` → фаза `skipped` с `skip_reason=gate_delegated_external`, waiver-строка в
   `gate_decisions` и `gate_waivers` в манифесте. Невидимый waiver запрещён. Политика гейтов —
@@ -1329,6 +1333,13 @@ CLI-поверхности. Каждая проверка обёрнута в tr
   сериализуется под ключом `resumed_skipped` — это **отдельно** от `PhaseStatus.skipped` (пропуск
   из-за отсутствия предпосылки, §5); прогон останавливают только `blocked`/`failed`.
 - **Сухой прогон:** `--dry-run` показывает план/бюджеты без исполнения.
+- **Чтение не создаёт состояния.** Команды, которые только читают (`resolve`, `review`,
+  `sensitivity`, `golden`, `report`, `diff`, `crawl status|list`, `runs`, `status`),
+  открывают БД через `file:…?mode=ro` (`core.store.sqlite.connect_read_only`): каталог,
+  файл и схема не создаются, живой прогон читается через WAL без миграции. Нет файла БД →
+  `EXIT_NOT_FOUND` (4), а не «создали пустую»; `hound status` тем же кодом отвечает на
+  отсутствующий прогон («прогон ещё не создан» отличимо от опечатки); чужой
+  `schema_version` по-прежнему `EXIT_USAGE` (гейт `11` §2.6).
 - **Машинночитаемый вывод:** `--json` для CI и интеграций.
 - **Понятные ошибки с кодом инварианта:** например `I2b: parameter_reference требует exhaustive
   и scope_attested_by (param=..., product=...)` — ссылка на регламент.

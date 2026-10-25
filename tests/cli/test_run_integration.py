@@ -583,7 +583,8 @@ def test_cmd_run_g3_g4_are_external_integration_points(
                 "rejected",
             ]
         )
-        == EXIT_OK
+        # Отказ записан и блокирует прогон: код возврата — EXIT_BLOCKED (3), как у `run`.
+        == EXIT_BLOCKED
     )
     capsys.readouterr()
     assert main(argv, ports=ports, phases_factory=factory) == EXIT_BLOCKED

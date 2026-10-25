@@ -263,7 +263,7 @@ def _read_cycle(args: argparse.Namespace, run_id: str) -> tuple[Any, list[Any], 
     manifest: Any = None
     cells: list[Any] = []
     docs: list[Any] = []
-    with build_store(db_path, profile=args.profile) as store:
+    with build_store(db_path, profile=args.profile, read_only=True) as store:
         manifest = store.read_manifest(run_id)
         cells = list(store.iter_cells(run_id))
         docs = list(store.iter_corpus_docs(run_id))
@@ -481,8 +481,8 @@ def _print_gate(payload: dict[str, Any]) -> None:
         lines.append(f"notes: {payload['notes']}")
     if verdict == "rejected":
         lines.append(
-            f"решение записано: гейт {payload['gate']} ОТКЛОНЁН — прогон останется "
-            "blocked до решения по текущему предмету"
+            f"решение записано: гейт {payload['gate']} ОТКЛОНЁН ({payload['actor']}) — "
+            "прогон заблокирован отказом до нового решения по текущему предмету"
         )
     else:
         lines.append(

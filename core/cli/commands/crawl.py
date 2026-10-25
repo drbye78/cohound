@@ -620,7 +620,7 @@ def status(args: argparse.Namespace) -> int:
     db_path = _crawl_db_path(args)
     run_id, session_id = _session_id_for(args)
     per_url = bool(getattr(args, "per_url", False))
-    with build_store(db_path, profile=args.profile) as store:
+    with build_store(db_path, profile=args.profile, read_only=True) as store:
         session = store.get_crawl_session(session_id)
         counts = store.crawl_session_counts(session_id) if session is not None else {}
         items = (
@@ -673,7 +673,8 @@ def list_sessions(args: argparse.Namespace) -> int:
     здесь **не** выполняется: ``list`` читает, а не лечит (лечит ``open_session``/``run``).
     """
     db_path = _crawl_db_path(args)
-    with build_store(db_path, profile=args.profile) as store:
+    run_filter = getattr(args, "run_id", None)
+    with build_store(db_path, profile=args.profile, read_only=True) as store:
         sessions = [
             {
                 "session_id": session.session_id,
@@ -693,19 +694,23 @@ def list_sessions(args: argparse.Namespace) -> int:
                 "heartbeat_at": session.heartbeat_at,
                 "stale_reason": stale_reason(session),
             }
-            for session in store.iter_crawl_sessions()
+            for session in store.iter_crawl_sessions(run_id=run_filter)
         ]
         if args.json:
             _print_json(
                 {
                     "ok": True,
                     "db": str(db_path),
+                    "run_id": run_filter,
                     "count": len(sessions),
                     "sessions": sessions,
                 }
             )
         else:
-            lines = [f"db: {db_path}", f"sessions: {len(sessions)}"]
+            lines = [f"db: {db_path}"]
+            if run_filter is not None:
+                lines.append(f"run_id: {run_filter}")
+            lines.append(f"sessions: {len(sessions)}")
             for session in sessions:
                 suffix = ""
                 if session["stale_reason"]:

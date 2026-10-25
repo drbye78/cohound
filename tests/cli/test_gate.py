@@ -20,7 +20,7 @@ from pathlib import Path
 
 import pytest
 
-from core.cli.main import EXIT_OK, EXIT_USAGE, main
+from core.cli.main import EXIT_BLOCKED, EXIT_OK, EXIT_USAGE, main
 from core.domain.enums import RankingPolicy, RunMode
 from core.domain.models import Focus, RunConfig
 from core.pipeline.gates import gate_decision_for, is_gate_passed
@@ -339,7 +339,12 @@ def test_gate_external_approval_is_recorded(
 def test_gate_rejected_verdict_is_recorded_and_blocks(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """``--verdict rejected`` — явная запись отказа: гейт не проходит, вывод честен."""
+    """``--verdict rejected`` — явная запись отказа: гейт не проходит, вывод честен.
+
+    Код возврата — ``EXIT_BLOCKED`` (3), а не ``EXIT_OK``: прогон заблокирован отказом, и
+    скрипт, автоматизирующий гейты, обязан увидеть это тем же кодом, каким ``run``
+    сообщает об остановке на гейте (``12-cli-architecture-review.md`` §4.7).
+    """
     db = tmp_path / "cohound.db"
     _seed_run(db)
 
@@ -357,7 +362,7 @@ def test_gate_rejected_verdict_is_recorded_and_blocks(
             "--json",
         ]
     )
-    assert code == EXIT_OK
+    assert code == EXIT_BLOCKED
     assert json_out(capsys)["verdict"] == "rejected"
 
     with SqliteStore(db) as store:
@@ -376,8 +381,12 @@ def test_gate_rejected_verdict_is_recorded_and_blocks(
             "rejected",
         ]
     )
-    assert code == EXIT_OK
-    assert "ОТКЛОНЁН" in capsys.readouterr().out
+    assert code == EXIT_BLOCKED
+    text = capsys.readouterr().out
+    assert "ОТКЛОНЁН" in text
+    # Отказ называет, кем он принят, и что прогон заблокирован (а не «записано, всё хорошо»).
+    assert "review-system" in text
+    assert "заблокирован" in text
 
 def test_gate_takes_digest_from_request_file(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
