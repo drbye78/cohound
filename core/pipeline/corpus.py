@@ -109,6 +109,16 @@ N-м продукте уничтожала бы посчитанную, но н�
 подключает W8 (composition root). При их наличии фаза вызывает ``embed``/``build``/``commit``
 best-effort (сбой изолируется).
 
+**Кэш векторов (опция).** ``embed_cache`` — межпрогонный кэш **почанковых** векторов
+(:mod:`core.pipeline.embed_cache`), ключ — ``(content_hash текста чанка, embed_model_id)``.
+Он существует потому, что переиспользование индекса возможно только целой продукт-партицией:
+смена ``extractor_version``/``chunker_version`` или добавление документа даёт новый ``pb`` и
+пересчитывает эмбеддинг всего продукта, хотя текст большинства чанков не изменился. Кэш не
+входит ни в ``pb``, ни в манифест партиции: он меняет **стоимость** сборки, а не условия
+измерения (A3). Наблюдаемость — ``embed_cached``/``embed_hit_ratio_pct`` в прогрессе и
+«из кэша N (X%)» в итоговой строке продукта: без числа «сколько сэкономил кэш» фича
+недоказуема. ``embed_cache is None`` — прежнее поведение байт-в-байт.
+
 **Инкрементальный субстрат (09 §6.3/§9, MVP-3b).** При переданном ``state``
 (:class:`~core.ports.state.ProductStatePort`) фаза дополнительно ведёт durable-состояние
 URL/документов/чанков:
@@ -139,6 +149,7 @@ import datetime as _dt
 import errno
 import hashlib
 import json
+import operator
 import os
 import shutil
 import time
@@ -213,6 +224,7 @@ from core.pipeline.crawl_sources import (
     crawl_sources_digest,
     resolve_crawl_target,
 )
+from core.pipeline.embed_cache import EmbedCache
 from core.pipeline.extract_cache import ExtractionCache
 from core.pipeline.fetch_plan import _host_matches, select_domain_profile
 from core.pipeline.incremental import (
@@ -1983,6 +1995,40 @@ def _entry_chunks(entry: IndexManifestEntry) -> int:
 
 
 @dataclass
+class _EmbedCensus:
+    """Счётчики работы эмбеддинга одного продукта: из кэша vs посчитано сейчас.
+
+    Живёт в ``build_corpus`` (per продукт), наполняется :func:`_embed_batched` и
+    читается наблюдаемостью (:func:`_make_embed_reporter`, итоговая строка продукта).
+    Разделение принципиально для доказательности кэша: «сколько чанков эмбеддилось» и
+    «сколько взято готовым» — разные величины, и только их пара отвечает на вопрос
+    «сколько сэкономил кэш».
+
+    ``processed = cached + embedded`` — сколько чанков продукта уже обслужено (это и есть
+    прогресс ``embed_chunks``). ``hit_ratio_pct`` — целые проценты: наблюдаемость печатает
+    целые, а не дробь, которую нечем сверить.
+    """
+
+    #: Чанки, вектор которых взят из кэша (эмбеддер не вызывался).
+    cached: int = 0
+    #: Чанки, вектор которых посчитан в этом прогоне (промахи кэша).
+    embedded: int = 0
+
+    @property
+    def processed(self) -> int:
+        """Сколько чанков уже обслужено (хиты + свежие)."""
+        return self.cached + self.embedded
+
+    @property
+    def hit_ratio_pct(self) -> int:
+        """Доля попаданий в процентах (0, если работы ещё не было)."""
+        total = self.processed
+        if total <= 0:
+            return 0
+        return int(round(100.0 * self.cached / total))
+
+
+@dataclass
 class _EmbedThroughput:
     """Наблюдаемый темп батчевого эмбеддинга: EMA по батчам одного продукта.
 
@@ -2035,7 +2081,12 @@ class _EmbedThroughput:
 
 
 def format_embed_progress(
-    done: int, total: int, rate: float | None, eta_s: int | None
+    done: int,
+    total: int,
+    rate: float | None,
+    eta_s: int | None,
+    *,
+    cached: int | None = None,
 ) -> str:
     """Человекочитаемая строка эмбеддинга: ``N/M чанков, X чанк/с, осталось ~Y мин``.
 
@@ -2043,8 +2094,15 @@ def format_embed_progress(
     на завершённом продукте — шум, а не факт. Темп печатается с двумя знаками: при 1173 мс на
     чанк это 0.85 чанк/с, и округление до целого скрыло бы разницу между моделями и длинами
     текста — то есть ровно то, ради чего число публикуется.
+
+    :param cached: сколько из ``done`` чанков взято из кэша векторов; ``None`` — кэша нет
+        (строка остаётся прежней, байт-в-байт). При заданном числе публикуется и доля:
+        без неё «сколько сэкономил кэш» не читается из строки.
     """
     parts = [f"{done}/{total} чанков"]
+    if cached is not None:
+        share = int(round(100.0 * cached / done)) if done > 0 else 0
+        parts.append(f"из кэша {cached} ({share}%)")
     if rate is not None and rate > 0:
         parts.append(f"{rate:.2f} чанк/с")
     if eta_s is not None and done < total:
@@ -2061,6 +2119,7 @@ def _make_embed_reporter(
     store: Any,
     session: str | None,
     throughput: _EmbedThroughput,
+    census: _EmbedCensus | None = None,
 ) -> Callable[[int, int, float], None]:
     """Колбэк границы батча эмбеддинга: признак жизни + прогресс с темпом и остатком.
 
@@ -2075,7 +2134,17 @@ def _make_embed_reporter(
     одновременно. Все значения — целые (контракт ``progress``): ``embed_chunks``/``embed_chunks_total``
     — «сколько из скольких», ``embed_elapsed_s`` — прошедшее время эмбеддинга,
     ``embed_chunks_per_min`` — фактический темп прогона, ``embed_eta_s`` — оценка остатка.
-    Человекочитаемая форма той же величины — :func:`format_embed_progress`.
+    При подключённом кэше векторов (:class:`~core.pipeline.embed_cache.EmbedCache`) к ним
+    добавляются ``embed_cached`` — сколько чанков взято готовыми — и
+    ``embed_hit_ratio_pct`` — их доля. Человекочитаемая форма тех же величин —
+    :func:`format_embed_progress`.
+
+    **``embed_chunks`` — обработанные чанки, ``embed_chunks_per_min`` — темп эмбеддинга.**
+    Прогресс обязан считать хиты (иначе «из кэша 3000 из 3000» выглядело бы как стоящий на
+    нуле продукт), а темп — только фактически посчитанные: это та же величина, что публикуют
+    замеры пропускной способности, и она сравнивается между прогонами и моделями (A3). Оценка
+    остатка берётся из неё и потому при большой доле хитов слегка завышена — в безопасную
+    сторону («работает дольше, чем окажется»), а не в сторону мнимого зависания.
 
     Ошибки чтения стора/колбэка изолируются: прогресс информационен и не роняет фазу
     (наблюдаемость не измерение).
@@ -2087,7 +2156,9 @@ def _make_embed_reporter(
         heartbeat.touch()
         # Наблюдение темпа — даже без колбэка: накопленный темп публикуется в итоговой
         # строке фазы (ценой «сколько это заняло»), а не только в живом прогрессе.
-        rate = throughput.observe(done, elapsed)
+        # Без кэша (``census is None``) обработанные чанки и есть эмбеддированные.
+        embedded = done if census is None else census.embedded
+        rate = throughput.observe(embedded, elapsed)
         eta = throughput.eta_seconds(done, total)
         if progress is None:
             return
@@ -2099,6 +2170,9 @@ def _make_embed_reporter(
         counts["embed_chunks"] = done
         counts["embed_chunks_total"] = total
         counts["embed_elapsed_s"] = int(elapsed)
+        if census is not None:
+            counts["embed_cached"] = census.cached
+            counts["embed_hit_ratio_pct"] = census.hit_ratio_pct
         if rate is not None and rate > 0:
             counts["embed_chunks_per_min"] = int(round(rate * 60.0))
         if eta is not None:
@@ -2117,6 +2191,9 @@ def _embed_batched(
     *,
     on_batch: Callable[[int, int, float], None] | None = None,
     batch_size: int = EMBED_BATCH_CHUNKS,
+    cache: EmbedCache | None = None,
+    embed_model_id: str = "",
+    census: _EmbedCensus | None = None,
 ) -> list[list[float]]:
     """Эмбеддинг чанков внешними батчами; порядок входа = порядок выхода (детерминизм, A3).
 
@@ -2127,13 +2204,78 @@ def _embed_batched(
     Возвращается полный список векторов: партицию собирает ``IndexBuilderPort.build(chunks,
     vectors, meta)`` целиком, поэтому пик «все векторы» задан контрактом порта, а не циклом.
     Батч лишь ограничивает **второй** материализуемый список (тексты) и даёт наблюдение.
+
+    **Кэш векторов (опция).** При ``cache`` каждый чанк батча сначала спрашивается у кэша
+    по ключу ``(content_hash текста, embed_model_id)``; эмбеддер получает только промахи,
+    свежие векторы сразу записываются в кэш, а хиты подставляются в **свои** позиции. Поэтому
+    порядок входа = порядок выхода и при смешанном батче (инвариант держится структурой:
+    слоты батча индексируются позицией чанка, а не порядком ответа эмбеддера). ``cache=None``
+    — прежнее поведение байт-в-байт: один вызов ``embed`` на весь батч.
+
+    Кэш — оптимизация, а потому его сбой не должен стоить прогона: ``get``/``put`` устроены
+    как промах/no-op на любой порче файла. Ошибка самого эмбеддера по-прежнему пробрасывается
+    (её изолирует вызывающий): тихо подставить нули значило бы выдать выдуманный вектор за
+    измеренный.
+
+    :param embed_model_id: идентификатор модели — часть ключа кэша. Берётся у объявленного
+        входа прогона (``EmbedderPort.model_id``), а не выдумывается здесь: кэш обязан
+        смешивать векторы только одной модели.
+    :param census: счётчики per продукт (хиты/посчитанные); ``None`` — не считать.
     """
     total = len(chunks)
     vectors: list[list[float]] = []
     started = time.monotonic()
+    # Размерность — часть проверки хитов: вектор другой размерности несовместим с моделью.
+    # ``operator.index`` принимает и numpy-целые, иначе проверка молча выключилась бы.
+    try:
+        declared_dim = operator.index(getattr(embedder, "dim", None))
+    except (TypeError, ValueError):
+        declared_dim = 0
+    expected_dim = declared_dim if declared_dim > 0 else None
     for start in range(0, total, batch_size):
         batch = chunks[start : start + batch_size]
-        vectors.extend(embedder.embed([c.text for c in batch]))
+        if cache is None:
+            vectors.extend(embedder.embed([c.text for c in batch]))
+            if census is not None:
+                census.embedded += len(batch)
+        else:
+            slots: list[list[float] | None] = [None] * len(batch)
+            pending: list[int] = []
+            cached_now = 0
+            for position, chunk in enumerate(batch):
+                hit = cache.get(
+                    chunk.content_hash or "", embed_model_id, dim=expected_dim
+                )
+                if hit is None:
+                    pending.append(position)
+                    continue
+                slots[position] = hit
+                cached_now += 1
+            if pending:
+                fresh = embedder.embed([batch[i].text for i in pending])
+                if len(fresh) != len(pending):
+                    raise ValueError(
+                        "эмбеддер вернул "
+                        f"{len(fresh)} векторов на {len(pending)} чанков"
+                    )
+                for offset, position in enumerate(pending):
+                    vector = fresh[offset]
+                    slots[position] = vector
+                    # Пишем ровно то, что вернула модель: квантизация в fp16 — забота
+                    # кэша, и она тождественна той, что делает сборщик индекса.
+                    cache.put(
+                        batch[position].content_hash or "",
+                        embed_model_id,
+                        vector,
+                        dim=expected_dim,
+                    )
+            if census is not None:
+                census.cached += cached_now
+                census.embedded += len(pending)
+            for value in slots:
+                if value is None:  # pragma: no cover — позиция заполняется всегда
+                    raise ValueError("батч эмбеддинга оставил чанк без вектора")
+                vectors.append(value)
         if on_batch is not None:
             on_batch(start + len(batch), total, time.monotonic() - started)
     return vectors
@@ -2156,6 +2298,8 @@ def _embed_and_build(
     partition_build_id: str,
     errors: list[str],
     on_batch: Callable[[int, int, float], None] | None = None,
+    cache: EmbedCache | None = None,
+    census: _EmbedCensus | None = None,
 ) -> bool:
     """Best-effort эмбеддинг и физическая сборка индекса продукт-партиции (K3, §B.1).
 
@@ -2169,6 +2313,10 @@ def _embed_and_build(
     кратность внешнего батча внутреннему держит результат побитово равным одному вызову
     (детерминизм, A3).
 
+    :param cache: кэш векторов (:class:`~core.pipeline.embed_cache.EmbedCache`); ``None`` —
+        без кэша, поведение прежнее. Кэш не меняет ни ``pb``, ни манифест партиции: он
+        сокращает **стоимость** эмбеддинга, а не условия измерения.
+    :param census: счётчики «из кэша / посчитано» этого продукта (наполняется эмбеддингом).
     :param on_batch: ``(done, total, elapsed_s)`` — граница батча; ``None`` — без наблюдения
         (юнит-путь). Ошибка колбэка не должна выдавать себя за сбой сборки: наблюдение
         изолируется вызывающим.
@@ -2190,7 +2338,14 @@ def _embed_and_build(
             )
             for c in chunks
         ]
-        vectors = _embed_batched(embedder, chunks, on_batch=on_batch)
+        vectors = _embed_batched(
+            embedder,
+            chunks,
+            on_batch=on_batch,
+            cache=cache,
+            embed_model_id=embed_model_id,
+            census=census,
+        )
         meta = IndexMeta(
             package=package_id,
             chunker_version=chunker_version,
@@ -2833,6 +2988,7 @@ def _build_corpus(
     extraction_pool: ExtractionPool | None = None,
     extractor_factory: Callable[[DocumentLevel, PdfPipeline], ExtractorPort] | None = None,
     extract_cache: ExtractionCache | None = None,
+    embed_cache: EmbedCache | None = None,
     extract_task_timeout_s: float | None = None,
     max_attempts: int | None = None,
     progress: Callable[[dict[str, int]], None] | None = None,
@@ -2964,6 +3120,13 @@ def _build_corpus(
         пересчитывается из тех же байтов, которые прочитал бы экстрактор. C1/L4: на пулевом
         пути проба выполняется **в родителе** до submit (хит не занимает слот воркера и не
         оплачивает инициализатор); проба в воркере остаётся защитой, ключ у них один.
+    :param embed_cache: межпрогонный кэш **векторов** (:class:`~core.pipeline.embed_cache.EmbedCache`).
+        ``None`` → кэша нет, поведение байт-в-байт прежнее. Ключ — ``(content_hash текста
+        чанка, embed_model_id)``, поэтому кэш переиспользует вектор там, где текст совпал, и
+        не зависит от ``extractor_version``/``chunker_version``: смена механизма извлечения
+        или добавление документа пересчитывает только реально изменившийся текст, а не всю
+        продукт-партицию. ``pb``/манифест партиции от кэша **не** меняются: кэш сокращает
+        стоимость эмбеддинга, а не условия измерения (A3).
     :param extract_task_timeout_s: P4/C1 — потолок ожидания ``future.result`` **одного**
         задания экстракции (guard от зависшего артефакта, не SLA). ``None`` →
         :data:`_EXTRACT_TASK_TIMEOUT_S`. По таймауту терминально помечается только это
@@ -7515,6 +7678,9 @@ def _build_corpus(
                     # нет дренажа, а значит и нет прежних точек жизни. Темп измеряется
                     # здесь, чтобы «сколько осталось» следовало из факта прогона.
                     throughput = _EmbedThroughput()
+                    # Счётчики кэша — только при подключённом кэше: без него публиковать
+                    # «из кэша 0» значило бы заявлять механизм, которого нет.
+                    census = _EmbedCensus() if embed_cache is not None else None
                     physical_ok = _embed_and_build(
                         embedder,
                         index_builder,
@@ -7536,13 +7702,21 @@ def _build_corpus(
                             store=store,
                             session=session,
                             throughput=throughput,
+                            census=census,
                         ),
+                        cache=embed_cache,
+                        census=census,
                     )
-                    # Пропускная способность — опубликованное число, а не впечатление:
-                    # оператор видит, во что обошёлся эмбеддинг продукта, и может сверить
-                    # его с прошлым прогоном/другой моделью (A3).
+                    # Пропускная способность и доля кэша — опубликованные числа, а не
+                    # впечатление: оператор видит, во что обошёлся эмбеддинг продукта,
+                    # сколько чанков пришло готовыми и может сверить темп с прошлым
+                    # прогоном/другой моделью (A3).
                     embed_line = format_embed_progress(
-                        len(product_chunks), len(product_chunks), throughput.rate, 0
+                        len(product_chunks),
+                        len(product_chunks),
+                        throughput.rate,
+                        0,
+                        cached=None if census is None else census.cached,
                     )
                     embed_notes.append(
                         f"corpus: эмбеддинг {product_id}: {embed_line} "

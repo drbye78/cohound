@@ -76,6 +76,7 @@ from core.domain.enums import (
 from core.domain.models import CatalogRow, Cohort, ScenarioBinding
 from core.pipeline import PHASES, Ports, RunReport, build_phases
 from core.pipeline.extract_cache import ExtractionCache
+from core.pipeline.embed_cache import EmbedCache
 from core.pipeline.eval_cache import EvalVerdictCache
 from core.pipeline.normalize import RunInputs, load_inputs
 from core.pipeline.phases import resolve_package_id
@@ -1969,6 +1970,18 @@ def _resolve_phases(
         # ложных хитов.
         "eval_cache": (
             EvalVerdictCache(str(paths.eval_cache)) if paths is not None else None
+        ),
+        # Кэш **векторов** эмбеддинга (``core/pipeline/embed_cache.py``). Каталог — resolved
+        # ``paths.embed_cache`` (``COHOUND_EMBED_CACHE_DIR`` / ``COHOUND_HOME`` / ``paths.yaml``);
+        # ``paths is None`` ⇒ выключен, по той же причине, что у кэшей выше.
+        #
+        # Ключ — ``(content_hash ТЕКСТА чанка, embed_model_id)``, без ``extractor_version`` и
+        # ``chunker_version``: вектор есть функция текста и модели. Именно поэтому смена
+        # ``pdf_pipeline``/экстрактора не пересчитывает векторы неизменённого текста — до этой
+        # правки переиспользование было возможно только целой партицией (``pb`` включает
+        # ``extractor_version``), и один новый документ стоил полного пересчёта продукта.
+        "embed_cache": (
+            EmbedCache(str(paths.embed_cache)) if paths is not None else None
         ),
         # P5: фабрика per-level экстрактора для inline-пути. Под ``split`` ось
         # ``document_level`` не действует (R-S: edge строит конвертеры сам) — ``None``.

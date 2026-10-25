@@ -22,6 +22,7 @@
 # cache: cache                  # глобальный content-addressed кэш (cache/serp, cache/http)
 # extract_cache: extract_cache  # межпрогонный кэш экстракции (content-addressed, переживает runs/)
 # eval_cache: eval_cache        # межпрогонный кэш вердиктов оценщика (промпт+модель как ключ)
+# embed_cache: embed_cache      # кэш векторов эмбеддинга: ключ — (content_hash текста чанка, модель)
 # reports: reports              # публикуемые артефакты вне runs/ (опционально)
 # state: state                  # durable per-product состояние: state/{package_id}/state.db (09 §4.1)
 #

@@ -57,6 +57,7 @@ from core.config.deploy import CrawlConfig
 from core.config.domain_profiles import DomainProfile
 from core.pipeline.compute import bundle_for_run, compute, scope_universe
 from core.pipeline.corpus import ExtractionPool, build_corpus
+from core.pipeline.embed_cache import EmbedCache
 from core.pipeline.extract_cache import ExtractionCache
 from core.pipeline.eval_cache import EvalVerdictCache
 from core.pipeline.crawl_session import default_session_id
@@ -621,6 +622,7 @@ def build_phases(
     extraction_pool: ExtractionPool | None = None,
     extractor_factory: Callable[[DocumentLevel, PdfPipeline], ExtractorPort] | None = None,
     extract_cache: ExtractionCache | None = None,
+    embed_cache: EmbedCache | None = None,
     eval_cache: EvalVerdictCache | None = None,
     satellites: Sequence[Satellite] = (),
     resolver: SourceResolver | None = None,
@@ -699,6 +701,11 @@ def build_phases(
     :param extract_cache: Ф1.2 — межпрогонный кэш экстракции (:class:`ExtractionCache`),
         протягивается в Ш5. ``None`` ⇒ кэш выключен (поведение байт-в-байт). Ключ —
         хеш ретенированных байтов (I19), поэтому хит не подменяет контент.
+    :param embed_cache: межпрогонный кэш **векторов** эмбеддинга (:class:`EmbedCache`),
+        протягивается в Ш5. ``None`` ⇒ кэш выключен (поведение байт-в-байт). Ключ —
+        ``(content_hash текста чанка, embed_model_id)``: вектор переиспользуется там, где
+        текст совпал, независимо от экстрактора/чанкера, поэтому смена механизма извлечения
+        пересчитывает только изменившийся текст. ``pb``/манифест партиции кэш не меняет.
     :param eval_cache: Ф3 — межпрогонный кэш вердиктов оценщика (:class:`EvalVerdictCache`),
         протягивается в Ш6. ``None`` ⇒ кэш выключен (поведение байт-в-байт). Кэшируется
         сырой ``LLMCellOutput``; валидация/Ф0/прецедент исполняются на каждом прогоне.
@@ -870,6 +877,9 @@ def build_phases(
             # Ф1.2: межпрогонный кэш экстракции (content-addressed по ретенированным байтам).
             # ``None`` ⇒ кэш выключен, поведение байт-в-байт прежнее.
             extract_cache=extract_cache,
+            # Кэш **векторов** эмбеддинга (почанково, ключ ``(content_hash текста,
+            # embed_model_id)``). ``None`` ⇒ кэш выключен, поведение байт-в-байт прежнее.
+            embed_cache=embed_cache,
             # Phase 3.3: исполнитель краула (``split``/edge-планировщик). ``None`` → локальный
             # per-URL путь (``crawler``/``crawlers``); при наличии — краул через шов.
             executor=getattr(ctx.ports, "executor", None),

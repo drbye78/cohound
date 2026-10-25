@@ -59,6 +59,8 @@ repo/
   cache/http/{url_hash}.bin                      # глобальный content-addressed кэш HTTP
   extract_cache/             # кэш экстракции (ключ: sha256 байтов + extractor_version + level)
   eval_cache/                # кэш оценщика (Ш6)
+  embed_cache/{model}/{h2}/{content_hash}.vec  # кэш векторов эмбеддинга (Ш5): ключ —
+                             # (content_hash ТЕКСТА чанка, embed_model_id), fp16 (2 байта/ось)
   state/{package_id}/state.db  # durable per-product состояние (url_state/seed_set; таблица
                                # profile_attestation для G1/G2 — design-only, писателя нет)
   reports/{run_id}/          # (опц.) публикуемые артефакты вне runs/
@@ -66,7 +68,8 @@ repo/
 ```
 
 Операционные каталоги (`packages/`, `passports/`, `runs/`, `index_store/`, `corpus_raw/`,
-`cache/`, `extract_cache/`, `eval_cache/`, `reports/`, `state/`) переопределяются без правки
+`cache/`, `extract_cache/`, `eval_cache/`, `embed_cache/`, `reports/`, `state/`) переопределяются
+без правки
 кода: `config/paths.yaml` (операторский файл; в репозитории только образец
 `config/paths.example.yaml`), env `COHOUND_<FIELD>_DIR`/`COHOUND_HOME` (см. §D.6) или CLI-флаг;
 приоритет — CLI > env > `paths.yaml` > дефолт (`core/config/paths.py`).

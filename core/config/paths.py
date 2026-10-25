@@ -2,7 +2,8 @@
 
 Модуль отделяет **операционные** каталоги (``packages/``, ``passports/``, ``runs/``,
 ``index_store/``, ``corpus_raw/``, ``cache/``, ``extract_cache/``, ``eval_cache/``,
-``reports/``, ``state/``) от кода: оператор может задать свои пути через ``config/paths.yaml``, env-переменные
+``embed_cache/``, ``reports/``, ``state/``) от кода: оператор может задать свои пути через
+``config/paths.yaml``, env-переменные
 ``COHOUND_*_DIR`` и CLI-флаги, не редактируя исходники. Единый корень ``COHOUND_HOME``
 позволяет унести весь рабочий каталог в произвольное место, оставив относительные
 дефолты для CWD.
@@ -47,6 +48,7 @@ __all__ = [
     "ENV_CACHE_DIR",
     "ENV_EXTRACT_CACHE_DIR",
     "ENV_EVAL_CACHE_DIR",
+    "ENV_EMBED_CACHE_DIR",
     "ENV_REPORTS_DIR",
     "ENV_STATE_DIR",
     # Модель и API
@@ -74,6 +76,8 @@ ENV_CORPUS_RAW_DIR = "COHOUND_CORPUS_RAW_DIR"
 ENV_CACHE_DIR = "COHOUND_CACHE_DIR"
 ENV_EXTRACT_CACHE_DIR = "COHOUND_EXTRACT_CACHE_DIR"
 ENV_EVAL_CACHE_DIR = "COHOUND_EVAL_CACHE_DIR"
+#: Межпрогонный кэш векторов эмбеддинга (``core/pipeline/embed_cache.py``).
+ENV_EMBED_CACHE_DIR = "COHOUND_EMBED_CACHE_DIR"
 ENV_REPORTS_DIR = "COHOUND_REPORTS_DIR"
 #: Durable per-product состояние (``state/{package_id}/state.db``, 09 §4.1).
 ENV_STATE_DIR = "COHOUND_STATE_DIR"
@@ -91,6 +95,7 @@ HARNESS_FIELDS: tuple[str, ...] = (
     "cache",
     "extract_cache",
     "eval_cache",
+    "embed_cache",
     "reports",
     "state",
 )
@@ -105,6 +110,7 @@ ENV_BY_FIELD: dict[str, str] = {
     "cache": ENV_CACHE_DIR,
     "extract_cache": ENV_EXTRACT_CACHE_DIR,
     "eval_cache": ENV_EVAL_CACHE_DIR,
+    "embed_cache": ENV_EMBED_CACHE_DIR,
     "reports": ENV_REPORTS_DIR,
     "state": ENV_STATE_DIR,
 }
@@ -143,6 +149,11 @@ class PathsConfig(BaseModel):
     #: сырые ``LLMCellOutput`` под ключом отрендеренного промпта + конфигурации модели.
     #: Отдельно от ``extract_cache``/``cache``: иной жизненный цикл и бюджет.
     eval_cache: Path = Path("eval_cache")
+    #: Межпрогонный кэш **векторов** эмбеддинга (``core/pipeline/embed_cache.py``):
+    #: контент-адресуемые векторы под ключом ``(content_hash текста чанка, embed_model_id)``.
+    #: Отдельно от ``extract_cache``/``cache``: свой жизненный цикл, свой бюджет и своя
+    #: единица (чанк, а не документ/URL).
+    embed_cache: Path = Path("embed_cache")
     reports: Path = Path("reports")
     #: Durable per-product состояние онбординга/инкрементальных прогонов (09 §4.1):
     #: ``state/{package_id}/state.db``. Вне ``packages/`` (авторские данные) и вне
