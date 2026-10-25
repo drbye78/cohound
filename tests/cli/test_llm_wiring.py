@@ -467,6 +467,30 @@ def test_llm_env_notices_quiet_when_env_unset(monkeypatch: pytest.MonkeyPatch) -
     assert llm_env_notices(deploy_llm=_slots()) == ()
 
 
+def test_llm_env_notices_quiet_when_env_endpoint_equals_declared(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """env-значение того же endpoint'а — не «расхождение», а тот же адрес.
+
+    Сравнение идёт по канонической базе (``normalize_api_base``): хвост ``/v1`` в env —
+    обычная запись того же адреса. Предупреждение о подмене endpoint'а, которое горит
+    всегда, обесценивает себя: оператор перестаёт отличать настоящую подмену.
+    """
+    _clear(monkeypatch)
+    monkeypatch.setenv(ENV_LLM_BASE_URL, "https://llm.test/v1")
+    deploy = LLMDeployConfig(
+        cheap=LLMSlotConfig(base_url="https://llm.test", model_id="m-cheap")
+    )
+
+    assert llm_env_notices(deploy_llm=deploy) == ()
+
+    # А другой хост — по-прежнему подмена, и она названа.
+    monkeypatch.setenv(ENV_LLM_BASE_URL, "https://other.test/v1")
+    notices = llm_env_notices(deploy_llm=deploy)
+    assert len(notices) == 1
+    assert "переопределяет слот" in notices[0]
+
+
 def test_resolve_ports_writes_env_notice_to_wiring_log(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

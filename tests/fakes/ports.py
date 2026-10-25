@@ -104,6 +104,16 @@ class FakeEvaluator:
             usage=TokenUsage(),
         )
 
+    def usage_summary(self) -> dict[str, Any]:
+        """Расход как у ``LocalEvaluator``: счётчик вызовов, токены неизвестны.
+
+        Метод **не** часть ``EvaluatorPort`` (§7: порт не описывает стоимость). Он есть
+        здесь, потому что ``metrics.json`` читает его duck-typing'ом: фейк обязан вести
+        себя как настоящий адаптер в том, что прогон публикует, иначе тест прогона
+        проверял бы ветку «расхода нет» вместо проводки стоимости.
+        """
+        return {"calls": len(self.calls), "tokens": {}}
+
 
 class FakeSearchAdapter:
     """Внешний поиск: URL+байты (I19), без превращения в evidence."""

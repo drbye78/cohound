@@ -269,6 +269,55 @@ def test_real_path_parses_response_and_usage() -> None:
     assert resp.usage == TokenUsage(prompt_tokens=120, completion_tokens=40)
 
 
+def test_usage_summary_counts_calls_and_tokens() -> None:
+    """``usage_summary`` — источник ``llm_calls``/``tokens`` в ``metrics.json`` (§15).
+
+    Считается то, что сервер вернул, а не оценка: два вызова по 120/40 токенов дают
+    2 вызова и 240/80 токенов. Именно это число публикует прогон, поэтому метрика
+    стоимости проверяется на уровне адаптера, а не по факту «поле есть».
+    """
+    with respx.mock(assert_all_called=False) as mock:
+        mock.post(ENDPOINT).mock(return_value=httpx.Response(200, json=_http_body()))
+        ev = LocalEvaluator(base_url="http://localhost:8000")
+        assert ev.usage_summary() == {"calls": 0, "tokens": {}}  # до вызовов — не выдумка
+        ev.complete(_req())
+        ev.complete(_req())
+        # Хвост ``/v1`` в base_url — тот же endpoint, а не второй путь.
+        assert ev.usage_summary() == {
+            "calls": 2,
+            "tokens": {"prompt": 240, "completion": 80},
+        }
+
+
+def test_usage_summary_tokens_empty_when_provider_reports_none() -> None:
+    """Нет ``usage`` в ответе → ``tokens`` пустая карта, а не измеренные нули."""
+
+    def generate(prompt: str, schema: type) -> str:
+        return _valid_json()
+
+    ev = LocalEvaluator(generate=generate, base_url="http://localhost:8000")
+    ev.complete(_req())
+    assert ev.usage_summary() == {"calls": 1, "tokens": {}}
+
+
+def test_base_url_with_v1_tail_is_same_endpoint() -> None:
+    """``base_url`` с хвостом ``/v1`` не порождает ``/v1/v1/chat/completions``.
+
+    Операторы копируют адрес привычного вида ``https://host/v1`` в env; без нормализации
+    склейка с ``CHAT_COMPLETIONS_PATH`` давала двойной префикс. Провайдер это терпит, но
+    сравнение с объявленным endpoint'ом (``llm_env_notices``) тогда горит всегда, а
+    предупреждение, которое горит всегда, перестают читать.
+    """
+    with respx.mock(assert_all_called=True) as mock:
+        route = mock.post(ENDPOINT).mock(return_value=httpx.Response(200, json=_http_body()))
+        ev = LocalEvaluator(base_url="http://localhost:8000/v1/")
+        ev.complete(_req())
+
+    assert route.called
+    # Атрибут — провенанс того, что объявлено оператором; нормализация живёт на склейке.
+    assert ev.base_url == "http://localhost:8000/v1"
+
+
 def test_real_path_payload_has_no_web_tools() -> None:
     captured: dict[str, Any] = {}
 

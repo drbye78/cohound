@@ -230,8 +230,15 @@ def test_run_refuses_unfittable_budget_before_phases(
     output = captured.out + captured.err
     assert f"budget={UNFITTABLE_BUDGET} MB" in output
     assert f"level peak={DOCLING_PEAK_MB[DocumentLevel.FULL]} MB" in output
-    # Ни одна фаза не исполнялась: логов фаз нет (отказ случился до сборки фаз).
-    assert not (runs_dir / "f0-budget-refused" / "logs").exists()
+    # Ни одна фаза не исполнялась: журналов фаз (``logs/{phase}.jsonl``) нет — отказ
+    # случился до сборки фаз. Каталог ``logs/`` при этом существует намеренно: отказ
+    # тоже обязан оставить улику, поэтому ``console.log`` ставится до проверки бюджета
+    # (иначе причина отказа жила бы только в консоли, которую никто не сохранит).
+    logs = runs_dir / "f0-budget-refused" / "logs"
+    assert not list(logs.glob("*.jsonl")), "журнал фазы при отказе по бюджету"
+    console = logs / "console.log"
+    assert console.exists(), "отказ по бюджету не оставил улики в console.log"
+    assert f"budget={UNFITTABLE_BUDGET} MB" in console.read_text(encoding="utf-8")
 
 
 def test_run_proceeds_when_extract_workers_is_declared(

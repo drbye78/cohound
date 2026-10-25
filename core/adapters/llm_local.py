@@ -68,6 +68,7 @@ __all__ = [
     "DEFAULT_BASE_URL",
     "DEFAULT_TIMEOUT",
     "CHAT_COMPLETIONS_PATH",
+    "normalize_api_base",
 ]
 
 #: Модель оценщика по умолчанию — **только fallback прямой конструкции** (§7.4).
@@ -88,8 +89,27 @@ DEFAULT_DECODER = "none"
 DEFAULT_BASE_URL = "http://localhost:8000"
 #: Таймаут HTTP-запроса, с.
 DEFAULT_TIMEOUT = 120.0
-#: Openai-совместимый путь генерации.
+#: Openai-совместимый путь генерации (дописывается к канонической базе).
 CHAT_COMPLETIONS_PATH = "/v1/chat/completions"
+
+
+def normalize_api_base(base_url: str) -> str:
+    """Каноническая база OI-совместимого API: без хвоста ``/v1`` и без ``/`` на конце.
+
+    Хвост ``/v1`` — самый частый способ записать тот же endpoint: операторы копируют его
+    из ``COHOUND_LLM_BASE_URL`` привычного вида ``https://host/v1``. Без нормализации
+    такой адрес склеивался в ``/v1/v1/chat/completions`` (провайдер терпит, но это
+    терпимость, а не контракт), и — важнее — сравнение объявленного endpoint'а с
+    env-значением в :func:`core.cli.wiring.llm_env_notices` давало ложное «прогон идёт не
+    на объявленном endpoint»: предупреждение, которое горит всегда, перестают читать.
+
+    Функция нужна **одна**: по ней сравниваются объявленный и env-endpoint, и по ней же
+    собирается URL запроса. Иначе оценка «тот же endpoint» и фактический адрес разъезжаются.
+    """
+    base = base_url.rstrip("/")
+    if base.endswith("/v1"):
+        base = base[: -len("/v1")].rstrip("/")
+    return base
 
 #: Внедряемая функция генерации: (промпт, схема ответа) → сырой JSON-строкой.
 GenerateFn = Callable[[str, type], str]
@@ -160,10 +180,42 @@ class LocalEvaluator:
         self.decoder = decoder
         self.seed = seed
         self.temperature = temperature
+        # Хранится **как объявлено** (провенанс: эту строку задал оператор), а
+        # нормализуется при склейке URL — там, где она становится адресом запроса.
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.timeout = timeout
         self._generate = generate
+        # Счётчики стоимости (§15/M1): заполняются в :meth:`complete`. Нужны потому, что
+        # ``metrics.json`` обязан называть цену прогона, а факт вызова и расход токенов
+        # известны **только** здесь: выше по стеку ячейка несёт ``model_id``, но не
+        # ``usage``. Ноль в этих счётчиках означает «вызовов не было», а не «не считали».
+        self._calls = 0
+        self._prompt_tokens = 0
+        self._completion_tokens = 0
+
+    # ------------------------------------------------------------------
+    # Наблюдаемость стоимости
+    # ------------------------------------------------------------------
+
+    def usage_summary(self) -> dict[str, Any]:
+        """Расход оценщика за время жизни адаптера: ``{"calls", "tokens"}``.
+
+        ``tokens`` — ``{"prompt", "completion"}`` либо пустая карта, если провайдер не
+        вернул ``usage`` (шов ``generate``, часть серверов): «неизвестно» не выдаётся за
+        измеренный ноль, поэтому пустая карта, а не нули. ``calls`` считается всегда —
+        сам факт вызова известен независимо от того, что ответил сервер.
+
+        Числа не входят ни в ``execution_contract_digest``, ни в ``pb``: это измерение
+        исполнения (стоимость), а не условие измерения (A3/§13).
+        """
+        tokens: dict[str, int] = {}
+        if self._prompt_tokens or self._completion_tokens:
+            tokens = {
+                "prompt": self._prompt_tokens,
+                "completion": self._completion_tokens,
+            }
+        return {"calls": self._calls, "tokens": tokens}
 
     # ------------------------------------------------------------------
     # Контракт порта
@@ -185,10 +237,16 @@ class LocalEvaluator:
         seed = req.seed if req.seed is not None else self.seed
         temperature = req.temperature if req.temperature is not None else self.temperature
         usage = TokenUsage()
+        # Счётчик вызовов растёт **до** запроса: провалившийся вызов тоже стоил времени
+        # (а часто и токенов — HTTP-ошибка после отправки). Токены прибавляются после
+        # ответа: их знает только сервер.
+        self._calls += 1
         if self._generate is not None:
             raw = self._generate(req.prompt, req.response_schema)
         else:
             raw, usage = self._http_complete(req, seed=seed, temperature=temperature)
+        self._prompt_tokens += usage.prompt_tokens
+        self._completion_tokens += usage.completion_tokens
         raw = raw if isinstance(raw, str) else str(raw)
         output = self._parse(req.response_schema, raw)
         return LLMResponse(
@@ -255,7 +313,7 @@ class LocalEvaluator:
         # I18: tools/web_search в запрос НЕ добавляются — здесь их нет по построению.
         try:
             response = httpx.post(
-                f"{self.base_url}{CHAT_COMPLETIONS_PATH}",
+                f"{normalize_api_base(self.base_url)}{CHAT_COMPLETIONS_PATH}",
                 json=payload,
                 headers=headers,
                 timeout=self.timeout,

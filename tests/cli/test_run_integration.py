@@ -474,6 +474,12 @@ def test_cmd_run_full_local_writes_manifest_with_real_compute_report(
     assert manifest_path.exists()
     assert evaluator.calls, "реальная фаза evaluate должна вызвать оценщик"
 
+    # Стоимость (M1/§15) берётся у адаптера оценщика, а не выдумывается: до этого
+    # ``metrics.json`` писал ``llm_calls: 0`` при живых вызовах, и метрика стоимости
+    # молча лгала. Проверяется равенство фактическому числу вызовов.
+    metrics = yaml.safe_load((runs_dir / run_id / "metrics.json").read_text(encoding="utf-8"))
+    assert metrics["llm_calls"] == len(evaluator.calls)
+
     loaded = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
     assert loaded["run_id"] == run_id
     # R7/07 §7 (P1): деплой-провенанс манифеста реально заполнен (профиль local).

@@ -67,6 +67,7 @@ from core.adapters.llm_local import (
     DEFAULT_TIMEOUT as EVALUATOR_DEFAULT_TIMEOUT,
     GenerateFn as EvaluatorGenerateFn,
     LocalEvaluator,
+    normalize_api_base,
 )
 from core.adapters.remote_crawl_executor import EdgeCrawlExecutor
 from core.adapters.remote_crawler import RemoteCrawler
@@ -912,7 +913,11 @@ def llm_env_notices(
                 f"{resolved_slot} неактивен (base_url пуст), поэтому llm_scenarios пуста — "
                 "модель оценщика вне execution contract (run_id её не описывает)"
             )
-        else:
+        elif normalize_api_base(env_base) != normalize_api_base(slot_base):
+            # Сравниваются канонические базы (``normalize_api_base``): хвост ``/v1`` —
+            # тот же endpoint, и объявлять расхождение там, где его нет, значит приучать
+            # не читать предупреждения. Молчание здесь — утверждение «endpoint тот же»,
+            # а оно проверяемое: обе базы приведены одной функцией.
             notices.append(
                 f"endpoint оценщика взят из env {ENV_LLM_BASE_URL} и переопределяет слот "
                 f"{resolved_slot} (объявленный base_url={slot_base}): прогон идёт не на "

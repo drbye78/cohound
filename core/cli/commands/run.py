@@ -1120,6 +1120,15 @@ def run(args: argparse.Namespace) -> int:
                 # наблюдение фазы корпуса (расписание/чанки на документ/пик воркера) и
                 # провенанс бюджета памяти. Блок нейтрален к контракту: ни одно поле не
                 # входит в ``run_id`` — это измерения исполнения, а не условия измерения.
+                # Стоимость (M1/§15): расход считает **адаптер оценщика** — выше по стеку
+                # ячеек ``usage`` уже нет, а ``metrics.json`` до этого писал ``llm_calls: 0``
+                # при ~117 живых вызовах, то есть метрика стоимости молча лгала.
+                # Отсутствие метода — не ошибка (шов/иной адаптер): тогда нули означают
+                # «расход неизвестен», а не «вызовов не было».
+                evaluator_usage = getattr(
+                    getattr(ports, "evaluator", None), "usage_summary", None
+                )
+                usage = evaluator_usage() if callable(evaluator_usage) else {}
                 write_run_metrics(
                     run_id=run_id,
                     out_dir=args.runs_dir,
@@ -1128,6 +1137,8 @@ def run(args: argparse.Namespace) -> int:
                     crawl_counts=crawl_counts,
                     crawl_truncation=truncation or None,
                     crawl_session=crawl_session_lifecycle or None,
+                    llm_calls=int(usage.get("calls", 0) or 0),
+                    tokens=usage.get("tokens") or None,
                     resources=build_resources_block(
                         phase_peaks=instrumentation.peak_rss_mb,
                         phase_durations=instrumentation.durations,

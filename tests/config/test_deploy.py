@@ -726,21 +726,17 @@ def test_default_model_constants_track_deploy_config() -> None:
     assert DISCOVERY_FALLBACK == canonical  # последний фолбэк разведки
 
 
-def test_canonical_llm_slots_inactive_so_model_id_is_not_in_run_id() -> None:
-    """Пустой ``base_url`` → ``llm_scenarios`` пуста: смена провизионной модели не меняет run_id.
+def test_llm_scenarios_empty_when_slot_inactive_so_model_id_is_not_in_run_id() -> None:
+    """Пустой ``base_url`` → ``llm_scenarios`` пуста: неактивный слот не объявляет модель.
 
-    Это и есть причина, по которой правка ``model_id`` в ``config/deploy.yaml`` безопасна
-    для идентичности: неактивный слот не объявляет сценарий ``evaluator``, а значит
-    ``execution_contract_digest`` (→ ``run_id``) от модели не зависит. Проверяется
-    вычислением, а не утверждением: старый и новый идентификатор дают одинаковый ``()``.
+    Это условие активности, а не свойство канонического конфига: слот без endpoint'а
+    оценщика не поднимает, поэтому выдумывать маршрут нельзя, и смена провизионного
+    ``model_id`` такого слота на идентичность прогона не влияет. Проверяется вычислением:
+    две разные модели дают одинаковый ``()``.
     """
     from types import SimpleNamespace
 
     from core.cli.execution_axes import _resolve_llm_scenarios
-
-    canonical = load_deploy_config(None)
-    assert canonical.llm.cheap.base_url == ""
-    assert canonical.llm.flagship.base_url == ""
 
     args = SimpleNamespace(llm_slot=None, llm_model=None)
     inputs = SimpleNamespace(run=None)
@@ -758,9 +754,43 @@ def test_canonical_llm_slots_inactive_so_model_id_is_not_in_run_id() -> None:
         )
     )
 
-    assert _resolve_llm_scenarios(args=args, inputs=inputs, deploy=canonical) == ()
     assert _resolve_llm_scenarios(args=args, inputs=inputs, deploy=old) == ()
     assert _resolve_llm_scenarios(args=args, inputs=inputs, deploy=new) == ()
+
+
+def test_canonical_llm_slot_declares_evaluator_so_model_id_is_in_run_id() -> None:
+    """Объявленный ``base_url`` → модель оценщика **входит** в идентичность прогона.
+
+    Обратная сторона предыдущего теста и причина, по которой канонический конфиг обязан
+    объявлять endpoint: ``llm_scenarios`` входит в ``execution_contract_digest`` (→
+    ``run_id``). Пока слот ссылался на endpoint только из env, прогон вызывал модель,
+    которой в ``run_id`` не было, — вердикты нельзя было воспроизвести по идентификатору
+    прогона. Теперь объявленная смена модели меняет контракт, а не проходит молча.
+    """
+    from types import SimpleNamespace
+
+    from core.cli.execution_axes import _resolve_llm_scenarios
+
+    args = SimpleNamespace(llm_slot=None, llm_model=None)
+    inputs = SimpleNamespace(run=None)
+
+    canonical = load_deploy_config(None)
+    assert canonical.llm.cheap.base_url, "канонический слот cheap обязан объявлять endpoint"
+    scenarios = _resolve_llm_scenarios(args=args, inputs=inputs, deploy=canonical)
+    assert len(scenarios) == 1
+    assert scenarios[0]["scenario"] == "evaluator"
+    assert scenarios[0]["model_id"] == canonical.llm.cheap.model_id
+
+    swapped = DeployConfig(
+        llm=LLMDeployConfig(
+            cheap=LLMSlotConfig(
+                base_url=canonical.llm.cheap.base_url,
+                model_id="deepseek-v4.1-flash:cxbc",
+                decoder=canonical.llm.cheap.decoder,
+            )
+        )
+    )
+    assert _resolve_llm_scenarios(args=args, inputs=inputs, deploy=swapped) != scenarios
 
 
 def test_resolve_llm_slot_precedence() -> None:
