@@ -54,7 +54,13 @@ from core.ports.types import (
     ProductRef,
     RawPage,
 )
-from core.ports.vector_index import RetrievedChunk, RetrievalResult, VectorIndexPort, VectorQuery
+from core.ports.vector_index import (
+    RetrievedChunk,
+    RetrievalResult,
+    VectorIndexPort,
+    VectorQuery,
+    batched_search,
+)
 
 __all__ = [
     "ChunkerPort",
@@ -105,5 +111,6 @@ __all__ = [
     "RetrievedChunk",
     "RetrievalResult",
     "VectorIndexPort",
+    "batched_search",
     "VectorQuery",
 ]

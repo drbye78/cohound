@@ -364,6 +364,9 @@ class FakeVectorIndex:
         self.docs = list(docs or [])
         self.build_id = build_id
         self.dim = dim
+        # Размеры зафиксированных батч-вызовов: тесты проверяют, что запросы продукта
+        # приходят одним вызовом порта, а не поштучно.
+        self.many_calls: list[int] = []
         self._vectors: dict[str, list[float]] = {
             doc.chunk_id: _hash_vector(doc.chunk_id, dim) for doc in self.docs
         }
@@ -380,6 +383,13 @@ class FakeVectorIndex:
             hits.append(replace(doc, score=score))
         hits.sort(key=lambda c: (-c.score, c.chunk_id))
         return hits[: q.top_k]
+
+    def search_many(
+        self, queries: Sequence[VectorQuery]
+    ) -> list[list[RetrievedChunk]]:
+        """Батч-поиск равен поштучному: in-memory индексу нечего читать пачкой."""
+        self.many_calls.append(len(queries))
+        return [self.search(q) for q in queries]
 
     def shard_ids(self, product_id: str) -> list[str]:
         """Идентификаторы чанков партиции (детерминированная заглушка шардов)."""

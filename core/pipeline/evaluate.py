@@ -82,19 +82,28 @@ from core.ports.embedder import EmbedderPort
 from core.ports.lexical_index import LexicalIndexPort
 from core.ports.llm import EvaluatorPort, LLMRequest, LLMResponse
 from core.ports.store import StorePort
-from core.ports.vector_index import RetrievedChunk, VectorIndexPort
+from core.ports.vector_index import (
+    RetrievedChunk,
+    VectorIndexPort,
+    VectorQuery,
+    batched_search,
+)
 from core.util.hashing import content_hash
 
 __all__ = [
     "CORPUS_INCOMPLETE_REVIEW_REASON",
+    "DEFAULT_QUERY_EMBED_BATCH",
     "DEFAULT_RETRIEVAL_CUTOFF_K",
     "DEFAULT_RETRIEVAL_PROFILE",
     "EvaluationOutcome",
     "evaluate_batch",
     "evaluate_cell",
     "evaluate_phase",
+    "precompute_dense_hits",
+    "precompute_query_vectors",
     "retrieve_for_cell",
     "run_queries_for_cell",
+    "unique_queries",
 ]
 
 #: Ф0: причина ``pending``-кандидата, когда ``❌`` предложен при неполном корпусе.
@@ -111,6 +120,14 @@ DEFAULT_RETRIEVAL_PROFILE: RetrievalProfile = RetrievalProfile.R0
 #: Дефолтный ``retrieval_cutoff_K`` фазы оценки, если оркестратор его не задал (I20).
 #: В проде K фиксируется в ``RunConfig``/манифесте; здесь — нейтральный baseline.
 DEFAULT_RETRIEVAL_CUTOFF_K: int = 10
+
+#: Размер батча эмбеддинга запросов (тексты запросов, не чанки корпуса).
+#:
+#: Число — измеренное, а не «круглое»: на локальном эмбеддере один текст стоит 192 мс,
+#: три — 98.7 мс на текст, батч ×32 — 54.1 мс на текст (doc 14 §5). Дальше 32 выигрыш
+#: упирается в цену самого текста, а риск частичного ответа растёт (внешний эмбеддер
+#: начнёт резать батч сам — оговорка 4 там же). Параметр, а не константа поведения.
+DEFAULT_QUERY_EMBED_BATCH: int = 32
 
 #: Дефолтный ``model_id``, если оценщик не объявил свой (данные, не решение LLM, I21).
 _UNSPECIFIED_MODEL_ID = "unspecified"
@@ -172,7 +189,11 @@ def _query_vector(
     query_vectors: Mapping[str, Sequence[float]] | None,
     embedder: EmbedderPort | None,
 ) -> list[float] | None:
-    """Вектор запроса для dense-плеча: из карты либо через ``embedder`` (иначе ``None``)."""
+    """Вектор запроса для dense-плеча: из карты либо через ``embedder`` (иначе ``None``).
+
+    В фазе оценки карта заполнена пре-компьютом (:func:`precompute_query_vectors`),
+    поэтому ``embedder`` здесь — путь **вне** фазы: одиночный вызов на текст.
+    """
     if query_vectors is not None and query in query_vectors:
         return list(query_vectors[query])
     if embedder is not None:
@@ -181,6 +202,120 @@ def _query_vector(
             raise ValueError("embedder вернул пустой список векторов")
         return list(vectors[0])
     return None
+
+
+def unique_queries(
+    params: Sequence[CatalogRow], *, max_queries: int = MAX_QUERIES
+) -> list[str]:
+    """Уникальные тексты запросов пакета в детерминированном порядке первого появления.
+
+    ``render_queries`` даёт ≤3 запроса на параметр, и тексты **повторяются**: у когорты
+    один и тот же запрос эмбеддится по разу на продукт, а векторы посчитаны бы 900 000
+    раз вместо ≤600 на пакет (doc 14 §5, оговорка 2). Порядок первого появления —
+    чтобы батч был воспроизводим (A3/R7).
+    """
+    ordered: dict[str, None] = {}
+    for param in params:
+        for query in run_queries_for_cell(param, max_queries=max_queries):
+            ordered.setdefault(query, None)
+    return list(ordered)
+
+
+def precompute_query_vectors(
+    params: Sequence[CatalogRow],
+    *,
+    profile: RetrievalProfile | str,
+    embedder: EmbedderPort | None,
+    memo: dict[str, list[float]] | None = None,
+    batch_size: int = DEFAULT_QUERY_EMBED_BATCH,
+    max_queries: int = MAX_QUERIES,
+) -> dict[str, list[float]] | None:
+    """Векторы всех уникальных запросов пакета — **до** цикла оценки, батчами.
+
+    Зачем до цикла: ``_query_vector`` без карты зовёт ``embedder.embed([query])`` — по
+    одному тексту на запрос и внутри оценки. При внешнем эмбеддере это 900 000 HTTP
+    round-trip на прогон (doc 14 §5: 192 мс одиночный против 54 мс батчем ×32), а
+    главное — оценщик перестаёт быть офлайн-чистым по построению: он не ходит за
+    векторами вовсе, векторы приходят объявленным входом.
+
+    Мемоизация по тексту — ``memo``: карта ``text → vector`` живёт в пределах прогона,
+    поэтому второй вызов на том же пакете (или второй продукт когорты) не эмбеддит
+    ничего. Порядок первого появления текстов сохраняется: состав батчей детерминирован.
+
+    :param profile: профиль ретривала; для ``R0`` (только лексика) векторы не нужны —
+        возвращается ``None``, и фаза не трогает эмбеддер.
+    :param embedder: ``None`` — пре-компьют невозможен: возвращается ``None``, дальше
+        работает прежний путь (и его ошибки видны в ячейках, как раньше).
+    :param batch_size: размер батча ``embed`` (замер: 54.1 мс на 32 текста против 192 мс
+        на один — doc 14 §5).
+    :param memo: карта-накопитель ``text → vector``; пополняется и переиспользуется.
+    :raises ValueError: если эмбеддер вернул не столько векторов, сколько текстов.
+    """
+    if _as_profile(profile) is RetrievalProfile.R0 or embedder is None:
+        return None
+    store = memo if memo is not None else {}
+    texts = unique_queries(params, max_queries=max_queries)
+    missing = [text for text in texts if text not in store]
+    if batch_size < 1:
+        raise ValueError(f"batch_size обязан быть ≥ 1, получено {batch_size!r}")
+    for start in range(0, len(missing), batch_size):
+        batch = missing[start : start + batch_size]
+        vectors = embedder.embed(batch)
+        if len(vectors) != len(batch):
+            raise ValueError(
+                f"эмбеддер вернул {len(vectors)} векторов на {len(batch)} запросов"
+            )
+        for text, vector in zip(batch, vectors):
+            store[text] = list(vector)
+    return {text: store[text] for text in texts}
+
+
+def precompute_dense_hits(
+    params: Sequence[CatalogRow],
+    *,
+    product_ids: Sequence[str],
+    profile: RetrievalProfile | str,
+    cutoff_k: int,
+    vector_index: VectorIndexPort | None,
+    query_vectors: Mapping[str, Sequence[float]] | None,
+    max_queries: int = MAX_QUERIES,
+) -> dict[str, list[RetrievedChunk]] | None:
+    """Dense-плечо для **всех** запросов пакета в продукте — одним батч-вызовом порта.
+
+    Это п.3 doc 14 §6: 600 отдельных ``search`` — это 600 чтений партиции и 600
+    BLAS-вызовов, тогда как батч читает матрицу один раз (замер: 88 мс против 2 695 мс).
+    ``pipeline`` при этом не знает ни про файлы, ни про формат: он зовёт
+    :func:`core.ports.vector_index.batched_search` по порту (I17: ``product_ids`` —
+    те же, что у поштучного пути).
+
+    :param product_ids: партиции запроса (продукт и, если вызывающий их добавил,
+        сателлиты — I17).
+    :param vector_index: ``None`` — батчить нечего, возвращается ``None`` (прежний путь).
+    :param query_vectors: векторы запросов; запрос без вектора остаётся поштучному пути
+        (``None`` вместо подставленного нуля: выдуманный вектор — не измерение).
+    :returns: карта ``query → hits``; ``None`` — батч неприменим.
+    """
+    if vector_index is None or query_vectors is None:
+        return None
+    if _as_profile(profile) is RetrievalProfile.R0:
+        return None
+    queries: list[str] = []
+    requests: list[VectorQuery] = []
+    for text in unique_queries(params, max_queries=max_queries):
+        vector = query_vectors.get(text)
+        if vector is None:
+            continue
+        queries.append(text)
+        # Запрос формируется ровно так же, как поштучный путь (``retrieve``):
+        # ``VectorQuery`` без ``text``. Иначе батч спрашивал бы порт о другом запросе,
+        # и «батч = поштучно» перестало бы быть проверяемым свойством.
+        requests.append(
+            VectorQuery(product_ids=list(product_ids), top_k=cutoff_k, vector=list(vector))
+        )
+    if not requests:
+        return None
+    hits = batched_search(vector_index, requests)
+    return {text: list(batch) for text, batch in zip(queries, hits)}
 
 
 def retrieve_for_cell(
@@ -194,6 +329,7 @@ def retrieve_for_cell(
     vector_index: VectorIndexPort | None = None,
     embedder: EmbedderPort | None = None,
     query_vectors: Mapping[str, Sequence[float]] | None = None,
+    dense_by_query: Mapping[str, Sequence[RetrievedChunk]] | None = None,
     rrf_k: int = DEFAULT_RRF_K,
     lang: str | None = None,
     max_queries: int = MAX_QUERIES,
@@ -209,6 +345,11 @@ def retrieve_for_cell(
     привязан срез ретривала (S5/R15). Для R1/R2 нужен dense-вектор: он берётся из
     ``query_vectors`` по тексту запроса либо вычисляется ``embedder``'ом; иначе
     :func:`retrieve` возбуждает ``ValueError``.
+
+    :param dense_by_query: готовые dense-результаты по тексту запроса
+        (:func:`precompute_dense_hits`). ``None`` — прежний путь: поиск идёт поштучно.
+        Готовый результат используется только для своего запроса, поэтому склейка
+        запросов ячейки (union/dedup/срез) остаётся здесь же и не меняется.
     """
     resolved_profile = _as_profile(profile)
     products = list(product_ids) if product_ids is not None else [product_id]
@@ -218,8 +359,10 @@ def retrieve_for_cell(
     build_id = ""
     for query in queries:
         vector = None
+        dense_hits = None if dense_by_query is None else dense_by_query.get(query)
         if resolved_profile in (RetrievalProfile.R1, RetrievalProfile.R2):
-            vector = _query_vector(query, query_vectors, embedder)
+            if dense_hits is None:
+                vector = _query_vector(query, query_vectors, embedder)
         result = retrieve(
             query_text=query,
             query_vector=vector,
@@ -228,6 +371,7 @@ def retrieve_for_cell(
             cutoff_k=cutoff_k,
             lexical_index=lexical_index,
             vector_index=vector_index,
+            dense_hits=dense_hits,
             rrf_k=rrf_k,
             lang=lang,
         )
@@ -1011,8 +1155,14 @@ def evaluate_phase(
 
     Композиция ровно того порядка, который фиксируют инварианты:
 
-    1. для каждой пары ``(product, param)`` вызывается :func:`retrieve_for_cell` с
-       **единым** профилем и ``cutoff_k`` (I16: симметрия; I20: один K на цикл);
+    0. векторы всех уникальных запросов пакета считаются **до** цикла оценки, батчами
+       (:func:`precompute_query_vectors`) и передаются в ячейки через ``query_vectors``:
+       ретривал-композер не зовёт эмбеддер, поэтому оценщик не ходит за векторами
+       (офлайн-чистота, §5 doc 14) и один и тот же текст не эмбеддится на каждый продукт;
+    1. для пары ``(product, param)`` вызывается :func:`retrieve_for_cell` с **единым**
+       профилем и ``cutoff_k`` (I16: симметрия; I20: один K на цикл); dense-плечо всех
+       запросов продукта считается **одним** батч-вызовом порта
+       (:func:`precompute_dense_hits` → ``batched_search``), а не 600 отдельными поисками;
     2. полученный продукт-скоупед срез передаётся в :func:`evaluate_batch`
        (I17: evidence — только чанки продукта/его сателлитов);
     3. оценщик работает только по переданным чанкам (I18): здесь нет ни ``search``,
@@ -1065,6 +1215,25 @@ def evaluate_phase(
 
     cells: list[Cell] = []
     errors: list[str] = []
+
+    # Запросы пакета одинаковы для всех продуктов когорты, поэтому векторы считаются
+    # **один раз до цикла оценки**: батчами и по уникальному тексту. Оценщик за
+    # векторами не ходит вовсе (офлайн-чистота §5 doc 14), а повторный текст не
+    # эмбеддится на каждый продукт (мемоизация в пределах прогона).
+    query_memo: dict[str, list[float]] = {}
+    try:
+        query_vectors = precompute_query_vectors(
+            plan.params,
+            profile=resolved_profile,
+            embedder=getattr(ports, "embedder", None),
+            memo=query_memo,
+        )
+    except Exception as exc:  # noqa: BLE001 — сбой виден в errors, а не притворяется успехом
+        errors.append(
+            f"query_vectors: {type(exc).__name__}: {exc} — векторы запросов "
+            "считаются поштучно внутри ячеек (прежний путь)"
+        )
+        query_vectors = None
 
     # Ш6 работает поверх более высоких источников (§2.2 п.7/п.8, 02 §D.3). Порядок фаз
     # заморожен (registry → inheritance → corpus → evaluate), поэтому карта стабильна.
@@ -1130,6 +1299,25 @@ def evaluate_phase(
                 f"({coverage.reason or 'no coverage'}) — оценка невозможна"
             )
             continue
+        # Dense-плечо всех запросов продукта — одним батч-вызовом порта: партиция
+        # читается и умножается один раз, а не на каждый из 600 запросов. Сбой батча
+        # не выдаётся за успех и не подменяется «пусто»: он виден в ``errors``, а поиск
+        # повторяется поштучно в ячейке — то есть отказ не тише, чем до правки.
+        try:
+            dense_by_query = precompute_dense_hits(
+                plan.params,
+                product_ids=[product_id],
+                profile=resolved_profile,
+                cutoff_k=resolved_cutoff,
+                vector_index=getattr(ports, "vector_index", None),
+                query_vectors=query_vectors,
+            )
+        except Exception as exc:  # noqa: BLE001 — батч не удался: идём поштучно, но видимо
+            errors.append(
+                f"{product_id}: dense batch: {type(exc).__name__}: {exc} — "
+                "поиск пошёл поштучно"
+            )
+            dense_by_query = None
         for param in plan.params:
             try:
                 result = retrieve_for_cell(
@@ -1140,6 +1328,8 @@ def evaluate_phase(
                     lexical_index=getattr(ports, "lexical_index", None),
                     vector_index=getattr(ports, "vector_index", None),
                     embedder=getattr(ports, "embedder", None),
+                    query_vectors=query_vectors,
+                    dense_by_query=dense_by_query,
                 )
             except Exception as exc:  # noqa: BLE001 — изоляция по контракту фазы
                 errors.append(

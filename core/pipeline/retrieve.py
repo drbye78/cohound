@@ -136,21 +136,29 @@ def retrieve(
     cutoff_k: int,
     lexical_index: LexicalIndexPort | None = None,
     vector_index: VectorIndexPort | None = None,
+    dense_hits: Sequence[RetrievedChunk] | None = None,
     rrf_k: int = DEFAULT_RRF_K,
     lang: str | None = None,
 ) -> RetrievalResult:
     """Единая точка гибридного ретривала по зафиксированному профилю (I16/I17/I20).
 
     :param query_text: текст запроса (для BM25).
-    :param query_vector: вектор запроса (для dense); ``None`` недопустим для R1/R2.
+    :param query_vector: вектор запроса (для dense); ``None`` недопустим для R1/R2,
+        если dense-плечо не передано готовым (см. ``dense_hits``).
     :param product_ids: продукт-партиции запроса (I17) — ретривал не выходит за них.
     :param profile: ``R0`` | ``R1`` | ``R2``.
     :param cutoff_k: ``retrieval_cutoff_K`` — сколько чанков вернуть (I20).
     :param lexical_index / vector_index: инъецированные порты (ручной DI, A1).
+    :param dense_hits: готовые результаты dense-плеча для **этого** запроса —
+        продукт-скоупед top-K, посчитанные батчем (:func:`core.ports.vector_index.batched_search`).
+        ``None`` — прежний путь: :func:`retrieve` сам зовёт ``vector_index.search``.
+        Батч-путь не меняет семантику: те же ``cutoff_k`` и те же партиции ``product_ids``,
+        просто чтение партиции и BLAS делятся между запросами одного продукта.
     :param rrf_k: RRF-константа (часть ``retrieval_params_json``, S1).
     :param lang: язык запроса (плечо BM25).
 
-    :raises ValueError: неизвестный профиль; отсутствует нужный порт; для R1/R2 нет вектора.
+    :raises ValueError: неизвестный профиль; отсутствует нужный порт; для R1/R2 нет ни
+        вектора, ни готового dense-плеча.
     """
     resolved = _as_profile(profile)
     products = list(product_ids)
@@ -161,7 +169,7 @@ def retrieve(
     if resolved in (RetrievalProfile.R1, RetrievalProfile.R2):
         if vector_index is None:
             raise ValueError(f"профиль {resolved.value} требует vector_index")
-        if query_vector is None:
+        if query_vector is None and dense_hits is None:
             raise ValueError(f"профиль {resolved.value} требует query_vector (dense-плечо)")
 
     if resolved is RetrievalProfile.R0:
@@ -176,7 +184,9 @@ def retrieve(
     elif resolved is RetrievalProfile.R1:
         assert vector_index is not None
         chunks = list(
-            vector_index.search(
+            dense_hits
+            if dense_hits is not None
+            else vector_index.search(
                 VectorQuery(product_ids=products, top_k=cutoff_k, vector=list(query_vector or []))
             )
         )
@@ -184,10 +194,14 @@ def retrieve(
     else:  # R2 — RRF-гибрид обеих плеч.
         assert lexical_index is not None and vector_index is not None
         lexical_hits = lexical_index.search(query_text, products, top_k=cutoff_k, lang=lang)
-        dense_hits = vector_index.search(
-            VectorQuery(product_ids=products, top_k=cutoff_k, vector=list(query_vector or []))
+        dense_leg = (
+            list(dense_hits)
+            if dense_hits is not None
+            else vector_index.search(
+                VectorQuery(product_ids=products, top_k=cutoff_k, vector=list(query_vector or []))
+            )
         )
-        chunks = rrf_fuse_chunks(lexical_hits, dense_hits, rrf_k=rrf_k, top_k=cutoff_k)
+        chunks = rrf_fuse_chunks(lexical_hits, dense_leg, rrf_k=rrf_k, top_k=cutoff_k)
         build_id = vector_index.build_id
 
     # Детерминированный порядок + обрезка до K (I20). tie-break по chunk_id (R7).

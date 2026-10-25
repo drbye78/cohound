@@ -15,6 +15,11 @@
 
 Существующая сборка **не мутируется** (K2/§13): запись идёт в staging-каталог и
 фиксируется атомарным ``os.replace``. Нейтрален (§1.3).
+
+**Чтение — через ``mmap``.** ``read_partition`` отображает ``vectors.fp16.npy`` в память
+(``mmap_mode="r"``), а не читает его в кучу на каждый вызов; формат на диске остаётся
+``float16``. Конверсия в ``float32`` для скалярного произведения — забота читателя
+(``vector_npy``), и она делается **один раз на партицию**, а не на каждый запрос.
 """
 
 from __future__ import annotations
@@ -124,10 +129,26 @@ def read_manifest(
 
 
 def read_partition(
-    index_root: str | Path, package: str, build_id: str, product_id: str
+    index_root: str | Path,
+    package: str,
+    build_id: str,
+    product_id: str,
+    *,
+    mmap: bool = True,
 ) -> PartitionData:
     """Читает продукт-партицию (векторы + chunk_ids + манифест).
 
+    **Векторы — через ``mmap`` по умолчанию.** ``np.load`` без ``mmap_mode`` читает
+    ``vectors.fp16.npy`` целиком в кучу на **каждый** вызов: для партиции 11 400 × 1024
+    это 23.3 MB чтения и новая аллокация на каждый поиск. При ``mmap=True`` файл
+    отображается в память, страницы приходят по обращению, а сам массив остаётся
+    ``float16`` (формат на диске не меняется). Сборки иммутабельны (K2/§13), поэтому
+    отображение не может «сдвинуться» под читателем; удаление файла на Linux отображение
+    не ломает (inode жив, пока маппинг открыт).
+
+    :param mmap: ``False`` — прежний путь (полное чтение в память). ``True`` — mmap с
+        откатом на полное чтение, если ``numpy``/формат его не поддерживают: отсутствие
+        возможности ускорить чтение не является поводом падать.
     :raises FileNotFoundError: если партиция не зафиксирована.
     """
     import numpy as np
@@ -137,7 +158,7 @@ def read_partition(
     chunk_ids_path = root / _CHUNK_IDS
     if not vectors_path.is_file() or not chunk_ids_path.is_file():
         raise FileNotFoundError(f"партиция не зафиксирована: {root}")
-    vectors = np.load(vectors_path)
+    vectors = _load_vectors(np, vectors_path, mmap=mmap)
     chunk_ids = [
         json.loads(line)["chunk_id"]
         for line in chunk_ids_path.read_text(encoding="utf-8").splitlines()
@@ -149,3 +170,13 @@ def read_partition(
         chunk_ids=chunk_ids,
         manifest=read_manifest(index_root, package, build_id, product_id),
     )
+
+
+def _load_vectors(np: Any, path: Path, *, mmap: bool) -> Any:
+    """``np.load`` с ``mmap_mode="r"`` и откатом на полное чтение (старый ``numpy``)."""
+    if mmap:
+        try:
+            return np.load(path, mmap_mode="r")
+        except (TypeError, ValueError):  # pragma: no cover - старый numpy/несовместимый файл
+            pass
+    return np.load(path)
