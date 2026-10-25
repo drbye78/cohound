@@ -1236,7 +1236,7 @@ class _PidExtractor:
         )
 
 
-def _pid_extractor_factory(level: Any) -> _PidExtractor:
+def _pid_extractor_factory(level: Any, pdf_pipeline: Any = None) -> _PidExtractor:
     """Module-level фабрика инициализатора (picklable by reference для forkserver)."""
     return _PidExtractor()
 

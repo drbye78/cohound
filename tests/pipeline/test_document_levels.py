@@ -193,7 +193,9 @@ class _LevelExtractor:
         )
 
 
-def _level_factory(level: DocumentLevel) -> _LevelExtractor:
+def _level_factory(
+    level: DocumentLevel, pdf_pipeline: Any = None
+) -> _LevelExtractor:
     return _LevelExtractor(level)
 
 
@@ -479,7 +481,7 @@ def test_off_leaves_html_unaffected(tmp_path: Path) -> None:
 def test_level_reaches_worker_request(tmp_path: Path) -> None:
     sink: list[_ExtractRequest] = []
 
-    def factory(n: int, level: DocumentLevel) -> _FakePool:
+    def factory(n: int, level: DocumentLevel, pdf_pipeline: Any = None) -> _FakePool:
         return _FakePool(n, level, sink)
 
     pool = ExtractionPool(pool_factory=factory, worker=_level_worker)

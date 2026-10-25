@@ -38,6 +38,7 @@ from core.domain.enums import (
     DocumentLevel,
     ExtractionRoute,
     FetchMode,
+    PdfPipeline,
 )
 from core.domain.models import RateLimitSpec
 from core.util.document_formats import normalize_attachment_formats
@@ -97,6 +98,11 @@ class DomainProfile(BaseModel):
     # app < run < site). ``None`` = не задано на этом слое (наследуется run/app). Это
     # операторский escape hatch от «слишком медленного PDF» — без правки кода.
     document_level: DocumentLevel | None = None
+    # P7: per-site слой механизма извлечения PDF (высший приоритет цепочки app < run <
+    # site). ``None`` = не задано на этом слое (наследуется run/app). Ось нужна именно
+    # здесь: «тяжёлый» сайт с сотнями PDF — типичный повод переключить корень на
+    # текстовый слой без правки пакета.
+    pdf_pipeline: PdfPipeline | None = None
     # D3: per-site URL публичного ``sitemap.xml`` (опц.). ``None`` = не задан (поведение
     # неизменно). ``<loc>`` sitemap становятся **дополнительными** depth-0 seeds (не заменяют
     # seed-URL оператора); сам sitemap — не страница (не ретейнится/не ингестится, I19).

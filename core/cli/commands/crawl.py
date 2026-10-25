@@ -315,6 +315,8 @@ def _execute_crawl(
     seeds_d = seeds_digest(seed_config)
     # §13 (2.4.0): декларированные оси — тот же резолвер и deploy-конфиг, что у ``run``
     # (иначе crawl адресовал бы другой ``run_id``/сеанс).
+    # P5/P7: операторские оси краула (``--document-level``/``--pdf-pipeline``) входят в
+    # дайджест через ``resolve_declared_axes`` — они меняют текст корпуса, значит ``run_id``.
     deploy_config = load_deploy_config(None)
     try:
         declared = resolve_declared_axes(args=args, inputs=inputs, deploy=deploy_config)
@@ -355,6 +357,7 @@ def _execute_crawl(
     exclude_paths = getattr(args, "exclude_paths", None)
     exclude_documents = getattr(args, "exclude_documents", None)
     document_level = getattr(args, "document_level", None)
+    pdf_pipeline = getattr(args, "pdf_pipeline", None)
     follow = bool(getattr(args, "follow", False))
     interval = float(getattr(args, "interval", 1.0) or 0.0)
     # Phase 4: ``--from-scratch`` обходит R7-кэш (cache=None — единственный способ) и по
@@ -471,6 +474,7 @@ def _execute_crawl(
             exclude_paths=exclude_paths,
             exclude_documents=exclude_documents,
             document_level=document_level,
+            pdf_pipeline=pdf_pipeline,
             progress=progress,
             on_product=on_product,
             # §13 (2.4.0): те же декларированные оси, что у контракта.

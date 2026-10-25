@@ -40,6 +40,7 @@ from core.domain.enums import (
     OnboardingState,
     Origin,
     ParamType,
+    PdfPipeline,
     ProductMode,
     ProductScope,
     RankingPolicy,
@@ -518,6 +519,12 @@ class CrawlRunConfig(BaseModel):
     # ``None`` = не задано на этом слое (наследуется app-дефолт ``full``). Резолв —
     # :func:`core.pipeline.crawl_frontier.resolve_crawl_limits`.
     document_level: DocumentLevel | None = None
+    # P7: run-слой **механизма** извлечения PDF (``run.yaml:crawl.pdf_pipeline``).
+    # ``None`` = не задано на этом слое: резолв берёт app-дефолт ``structured``
+    # (сегодняшнее поведение). Не ``structured`` по умолчанию — иначе дефолт run-слоя
+    # перекрывал бы app/site-слои в цепочке ``_pick`` (site > run > app) и объявленный
+    # ``deploy.yaml:crawl.pdf_pipeline`` молча не действовал бы.
+    pdf_pipeline: PdfPipeline | None = None
 
     @field_validator("exclude_paths", "exclude_documents")
     @classmethod

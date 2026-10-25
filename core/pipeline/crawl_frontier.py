@@ -66,7 +66,7 @@ from urllib.parse import unquote, urlsplit
 
 from core.config.deploy import CrawlConfig
 from core.config.domain_profiles import DomainProfile
-from core.domain.enums import ArchiveDescent, DocumentLevel
+from core.domain.enums import ArchiveDescent, DocumentLevel, PdfPipeline
 from core.domain.models import (
     DEFAULT_ARCHIVE_MAX_MEMBER_BYTES,
     DEFAULT_ARCHIVE_MAX_TOTAL_UNCOMPRESSED_BYTES,
@@ -196,6 +196,12 @@ class CrawlLimits:
     #: ``full`` = сегодняшнее эффективное поведение. Резолвится той же цепочкой app < run <
     #: site; per seed-root (один корень = один уровень).
     document_level: DocumentLevel = DocumentLevel.FULL
+    #: P7: механизм извлечения PDF (ось ``crawl.pdf_pipeline``). Дефолт ``structured`` =
+    #: сегодняшнее поведение (docling: layout + таблицы + OCR). ``text_layer`` — только
+    #: текстовый слой без моделей. Резолвится той же цепочкой app < run < site; ось
+    #: входит в ``as_dict()`` **всегда**: механизм определяет текст документа, то есть
+    #: состав корпуса (``execution_change``, §13), а не расписание.
+    pdf_pipeline: PdfPipeline = PdfPipeline.STRUCTURED
     #: D1/§10: **эффективная** egress-политика ``robots.txt`` для корня (включена/выключена).
     #: Это условие измерения, а не рычаг пропускной способности: гейт ``robots.txt`` решает,
     #: какие документы вообще допускаются в корпус, поэтому он входит в ``as_dict()``
@@ -244,6 +250,7 @@ class CrawlLimits:
             "exclude_paths": list(self.exclude_paths),
             "exclude_documents": list(self.exclude_documents),
             "document_level": self.document_level.value,
+            "pdf_pipeline": self.pdf_pipeline.value,
             "robots": self.robots,
         }
         # Та же обратная совместимость: ключ появляется только при явно заданной оси,
@@ -332,6 +339,13 @@ def resolve_crawl_limits(
 
     Для ``document_level=off`` окно не выводится: документной экстракции нет, а ноль
     воркеров означал бы «не помещается» — два разных нуля смешивать нельзя.
+
+    **P7: ``pdf_pipeline`` и окно извлечения.** Пики памяти в
+    :mod:`core.pipeline.resources` измерены для docling (``structured``); для
+    ``text_layer`` измерения ещё нет, поэтому окно выводится по **структурным** пикам —
+    консервативно (воркеров меньше, чем поместилось бы), но без выдуманного числа.
+    Это видимое ограничение, а не потолок: оператор может объявить
+    ``crawl.extract_workers`` явно.
     """
     profile = select_domain_profile(url, profiles or {})
 
@@ -473,6 +487,15 @@ def resolve_crawl_limits(
         getattr(app, "document_level", None),
         run_document_level,
         site_attr("document_level"),
+    )
+    # P7: механизм извлечения PDF — та же цепочка app < run < site (site > run > app).
+    run_pdf_pipeline = (
+        getattr(run, "pdf_pipeline", None) if run is not None else None
+    )
+    pdf_pipeline = _pick(
+        getattr(app, "pdf_pipeline", None),
+        run_pdf_pipeline,
+        site_attr("pdf_pipeline"),
     )
     # P6: контейнеры. ``None`` на site/run — «наследовать»; app-дефолт всегда есть.
     app_max_artifact_bytes = getattr(app, "max_artifact_bytes", None)
@@ -619,6 +642,9 @@ def resolve_crawl_limits(
         exclude_documents=tuple(exclude_documents or ()),  # type: ignore[arg-type]
         document_level=DocumentLevel(
             DocumentLevel.FULL if document_level is None else document_level
+        ),
+        pdf_pipeline=PdfPipeline(
+            PdfPipeline.STRUCTURED if pdf_pipeline is None else pdf_pipeline
         ),
     )
 

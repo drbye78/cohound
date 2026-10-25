@@ -111,7 +111,7 @@ DEPENDENCY_GROUPS: tuple[tuple[str, bool, tuple[str, ...]], ...] = (
     ("deps:core", True, ("pydantic", "yaml")),
     ("deps:retrieval", False, ("numpy", "tantivy")),
     ("deps:crawl", False, ("scrapy", "playwright")),
-    ("deps:extract", False, ("trafilatura", "docling", "openpyxl", "rtree")),
+    ("deps:extract", False, ("trafilatura", "docling", "openpyxl", "rtree", "pypdfium2")),
     ("deps:safety", False, ("nh3", "defusedxml")),
     ("deps:ops", False, ("tenacity", "structlog")),
     ("deps:embed", False, ("sentence_transformers",)),

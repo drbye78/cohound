@@ -10,7 +10,9 @@ retained-файлу (I19), документный путь извлечения 
 
 from __future__ import annotations
 
-from core.cli.wiring import _LocalExtractor
+import pytest
+
+from core.cli.wiring import WiringError, _LocalExtractor
 from core.ports.types import ExtractedDoc, ExtractionRoute, RawPage
 
 
@@ -371,3 +373,187 @@ def test_html_page_still_goes_to_trafilatura() -> None:
 
     assert len(html.calls) == 1
     assert text.calls == [] and epub.calls == []
+
+
+# ---------------------------------------------------------------------------
+# P7: ось crawl.pdf_pipeline — PDF обслуживает выбранный механизм
+# ---------------------------------------------------------------------------
+
+
+class _FakePdf(_FakeDocuments):
+    """Фейк второго PDF-механизма (``text_layer``): свой штамп версии и свой текст."""
+
+    version = "pdfx-1"
+
+    def extract_bytes(self, content: bytes, filename: str = "document.pdf") -> ExtractedDoc:
+        self.byte_calls.append((content, filename))
+        return ExtractedDoc(text="textlayer", content_hash="t", extractor_version=self.version)
+
+    def extract_path(
+        self, path: str, *, filename_hint: str | None = None
+    ) -> ExtractedDoc:
+        self.path_calls.append((path, filename_hint))
+        return ExtractedDoc(text="textlayer", content_hash="t", extractor_version=self.version)
+
+
+def _composite_with_pdf(
+    *, pdf_required: bool = True
+) -> tuple[_LocalExtractor, _FakeHtml, _FakeDocuments, _FakePdf]:
+    html = _FakeHtml()
+    documents = _FakeDocuments()
+    pdf = _FakePdf()
+    composite = _LocalExtractor(
+        html,
+        documents,
+        pdf=pdf,  # type: ignore[arg-type]
+        pdf_required=pdf_required,
+    )
+    return composite, html, documents, pdf
+
+
+def test_text_layer_routes_pdf_to_pdf_backend() -> None:
+    """``text_layer``: PDF уходит в свой механизм, docling не трогается вовсе."""
+    composite, html, documents, pdf = _composite_with_pdf()
+
+    doc = composite.extract(_page(url="https://x.test/files/spec.pdf"))
+
+    assert doc.text == "textlayer"
+    assert len(pdf.byte_calls) == 1
+    assert documents.byte_calls == [] and documents.path_calls == []
+    assert html.calls == []
+
+
+def test_text_layer_reads_retained_path_not_bytes() -> None:
+    """I19: retained-файл читает адаптер (``extract_path``), тело не копируется в RAM."""
+    composite, _, documents, pdf = _composite_with_pdf()
+
+    composite.extract(_page(source_path="/data/corpus_raw/p1/abc.bin"))
+
+    assert pdf.path_calls == [("/data/corpus_raw/p1/abc.bin", "document.pdf")]
+    assert pdf.byte_calls == []
+    assert documents.path_calls == []
+
+
+def test_text_layer_keeps_office_in_docling() -> None:
+    """Механизм ``text_layer`` говорит только про PDF: Office остаётся docling'у."""
+    composite, _, documents, pdf = _composite_with_pdf()
+
+    composite.extract(
+        _page(
+            url="https://x.test/files/report.docx",
+            content_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            content=b"PK\x03\x04",
+        )
+    )
+
+    assert documents.byte_calls == [(b"PK\x03\x04", "document.docx")]
+    assert pdf.byte_calls == [] and pdf.path_calls == []
+
+
+def test_structured_pdf_goes_to_docling() -> None:
+    """``structured`` (pdf не передан) — прежний docling, байт-в-байт."""
+    composite, _, documents = _composite()
+
+    composite.extract(_page())
+
+    assert documents.byte_calls == [(b"", "document.pdf")]
+
+
+def test_document_route_picks_pdf_backend_without_suffix() -> None:
+    """Принудительный документный маршрут без суффикса — ``document.pdf``: механизм PDF."""
+    composite, html, documents, pdf = _composite_with_pdf()
+
+    composite.extract(
+        _page(url="https://x.test/download?id=7", content_type=None, content=b"%PDF-1.7"),
+        ExtractionRoute.DOCUMENT,
+    )
+
+    assert pdf.byte_calls == [(b"%PDF-1.7", "document.pdf")]
+    assert documents.byte_calls == [] and html.calls == []
+
+
+def test_version_for_follows_selected_pdf_backend() -> None:
+    """Ключ ``extract_cache`` — версия фактического механизма (не композита)."""
+    composite, _, documents, _ = _composite_with_pdf()
+
+    assert composite.extractor_version_for(_page()) == "pdfx-1"
+    assert composite.extractor_version_for(
+        _page(
+            url="https://x.test/files/report.docx", content_type="application/msword"
+        )
+    ) == "doc-1"
+    # Композит называет оба движка — это провенанс, а не ключ кэша.
+    assert composite.version == "html-1+doc-1+pdfx-1"
+    assert documents.byte_calls == []
+
+
+def test_required_pdf_backend_missing_is_visible_not_silent_html() -> None:
+    """Явно выбранный механизм без адаптера — отказ, а не тихий переход в HTML."""
+    composite = _LocalExtractor(_FakeHtml(), None, pdf_required=True)  # type: ignore[arg-type]
+
+    with pytest.raises(WiringError):
+        composite.extract(_page())
+    with pytest.raises(WiringError):
+        composite.extractor_version_for(_page())
+
+
+def test_docling_fallback_without_axis_is_unchanged() -> None:
+    """Без оси (``pdf_required=False``) отсутствие docling по-прежнему уводит в HTML."""
+    composite = _LocalExtractor(_FakeHtml(), None)  # type: ignore[arg-type]
+
+    assert composite.extract(_page()).extractor_version == "html-1"
+
+
+# ---------------------------------------------------------------------------
+# P7: сборка воркер-экстрактора по оси
+# ---------------------------------------------------------------------------
+
+
+def test_worker_extractor_selects_pdfium_for_text_layer(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``build_worker_extractor(..., text_layer)``: PDF — pdfium, версия — фактическая."""
+    from core.adapters import extract_pdf_text
+    from core.cli.wiring import build_worker_extractor
+    from core.domain.enums import DocumentLevel, PdfPipeline
+
+    if not extract_pdf_text.pdfium_installed():
+        pytest.skip("pypdfium2 не установлен")
+
+    composite = build_worker_extractor(DocumentLevel.FULL, PdfPipeline.TEXT_LAYER)
+
+    assert composite.extractor_version_for(_page()) == "pdfium-text-1"
+    assert composite.version.endswith("+pdfium-text-1")
+    # Дефолтная сборка — прежний docling (проверка в тестах версии композита).
+    assert build_worker_extractor().extractor_version_for(_page()) != "pdfium-text-1"
+
+
+def test_worker_extractor_fails_visibly_without_pdfium(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Явно выбранный ``text_layer`` без ``pypdfium2`` — ``WiringError`` (EXIT_USAGE)."""
+    from core.adapters import extract_pdf_text
+    from core.cli.wiring import build_worker_extractor
+    from core.domain.enums import DocumentLevel, PdfPipeline
+
+    monkeypatch.setattr(extract_pdf_text, "pdfium_installed", lambda: False)
+
+    with pytest.raises(WiringError, match="pypdfium2"):
+        build_worker_extractor(DocumentLevel.FULL, PdfPipeline.TEXT_LAYER)
+
+
+def test_build_adapters_honours_explicit_pdf_pipeline() -> None:
+    """Порты видят тот же механизм, что и Ш5: иначе диагностика мерила бы другой движок."""
+    from core.adapters import extract_pdf_text
+    from core.cli.wiring import build_adapters
+    from core.domain.enums import PdfPipeline
+
+    if not extract_pdf_text.pdfium_installed():
+        pytest.skip("pypdfium2 не установлен")
+
+    ports = build_adapters(profile="local", pdf_pipeline=PdfPipeline.TEXT_LAYER)
+
+    assert ports.extractor is not None
+    assert ports.extractor.extractor_version_for(_page()) == "pdfium-text-1"
+    # Без явной оси — прежний docling (дефолт ``structured``).
+    default = build_adapters(profile="local")
+    assert default.extractor is not None
+    assert default.extractor.extractor_version_for(_page()) != "pdfium-text-1"

@@ -629,7 +629,13 @@ def _file_worker(request: _ExtractRequest) -> ExtractedDoc:
 def _pool_factory(
     created: list[_ThreadPool], **kw: Any
 ) -> Any:
-    def factory(n: int, level: Any = None, max_tasks_per_child: int | None = None) -> Any:
+    def factory(
+        n: int,
+        level: Any = None,
+        *,
+        pdf_pipeline: Any = None,
+        max_tasks_per_child: int | None = None,
+    ) -> Any:
         pool = _ThreadPool(n, **kw)
         pool.max_tasks_per_child = max_tasks_per_child
         created.append(pool)
@@ -1065,7 +1071,7 @@ def test_pooled_submit_failure_falls_back_to_inline(tmp_path: Path) -> None:
             pass
 
     pool = ExtractionPool(
-        pool_factory=lambda n, level=None: _BrokenPool(n), worker=_file_worker
+        pool_factory=lambda n, level=None, **_: _BrokenPool(n), worker=_file_worker
     )
     with _run(
         tmp_path,

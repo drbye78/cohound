@@ -60,6 +60,7 @@ __all__ = [
     "FAMILY_TEXT",
     "MARKDOWN_SUFFIXES",
     "PLAIN_TEXT_SUFFIXES",
+    "PDF_SUFFIX",
     "SUPPORTED_ARCHIVE_FORMATS",
     "TEXTUAL_CONTENT_TYPES",
     "TEXTUAL_SUFFIXES",
@@ -100,8 +101,12 @@ _TEXT_CONTENT_TYPES: frozenset[str] = frozenset(
     }
 )
 
+#: Суффикс PDF — единственное объявление: по нему выбирается PDF-механизм
+#: (``crawl.pdf_pipeline``) и определяется конвейер ``structured``/``text_layer``.
+PDF_SUFFIX = ".pdf"
+
 #: Расширения документных форматов, поддерживаемых экстрактором (нижний регистр).
-DOCUMENT_SUFFIXES: tuple[str, ...] = (".pdf", ".docx", ".pptx", ".xlsx")
+DOCUMENT_SUFFIXES: tuple[str, ...] = (PDF_SUFFIX, ".docx", ".pptx", ".xlsx")
 
 #: Суффиксы markdown-разметки (нижний регистр). Отдельная группа нужна не для допуска
 #: (допуск текста общий), а для выбора чанкера: разметка режется по заголовкам

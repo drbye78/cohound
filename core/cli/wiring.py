@@ -31,7 +31,7 @@ import os
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 from core.adapters.chunker_family import FamilyChunker
 from core.adapters.container_any import container_for
@@ -41,6 +41,7 @@ from core.adapters.crawl_scrapy import CrawlError, ScrapyCrawler
 from core.adapters.embed_local import LocalEmbedder
 from core.adapters.embed_model2vec import LiteEmbedder, model2vec_available
 from core.adapters.extract_document import DoclingDocumentExtractor
+from core.adapters.extract_pdf_text import PdfiumDocumentExtractor
 from core.adapters.extract_epub import EpubExtractor
 from core.adapters.extract_html import HtmlExtractor
 from core.adapters.extract_text import TextExtractor
@@ -98,7 +99,7 @@ from core.config.deploy import (
 )
 from core.config.domain_profiles import DomainProfile
 from core.config.crawl_sources import CrawlSourcesConfig
-from core.domain.enums import DocumentLevel
+from core.domain.enums import DocumentLevel, PdfPipeline
 from core.domain.models import CrawlRunConfig
 from core.pipeline import Ports, Runner
 from core.pipeline.composition import (
@@ -134,6 +135,7 @@ from core.ports.vector_index import VectorIndexPort
 from core.store.sqlite_store import SqliteStore
 from core.util.cache import ContentAddressedCache
 from core.util.document_formats import (
+    PDF_SUFFIX,
     document_content_type,
     document_suffix,
     is_epub,
@@ -1595,12 +1597,16 @@ def _detect_document_filename(page: RawPage) -> str | None:
 
 
 def _extract_document(
-    documents: DoclingDocumentExtractor, page: RawPage, filename: str
+    documents: ExtractorPort, page: RawPage, filename: str
 ) -> ExtractedDoc:
     """Документ по пути retained-файла, иначе по байтам страницы (D2/I19).
 
     ``page.source_path`` задан — тело читает адаптер (``extract_path``), в RAM
     вызывающего его нет; иначе — прежний ``extract_bytes(page.content, filename)``.
+
+    ``documents`` — документный адаптер (docling или PDF-механизм ``text_layer``): правило
+    одно для обоих, потому что порт у них общий (``extract_path``/``extract_bytes``), а
+    различие механизмов живёт в версии и в тексте, а не в обёртке.
     """
     if page.source_path:
         return documents.extract_path(page.source_path, filename_hint=filename)
@@ -1643,26 +1649,63 @@ class _LocalExtractor:
         *,
         text: ExtractorPort | None = None,
         epub: ExtractorPort | None = None,
+        pdf: ExtractorPort | None = None,
+        pdf_required: bool = False,
     ) -> None:
-        """``text``/``epub`` — точки подмены (тесты/AB); по умолчанию реальные читатели.
+        """``text``/``epub``/``pdf`` — точки подмены (тесты/AB); по умолчанию реальные читатели.
 
         EPUB по умолчанию переиспользует **тот же** HTML-экстрактор: главы книги чистит
         trafilatura, второй HTML-путь не создаётся.
+
+        ``pdf`` — PDF-механизм (P7): ``None`` — наследовать ``documents`` (дефолт
+        ``structured``: PDF идёт в docling, поведение байт-в-байт прежнее). Отдельный
+        адаптер (``text_layer``) перехватывает **только** PDF-суффикс, оставляя
+        docling'у Office.
+
+        ``pdf_required`` — PDF-механизм выбран явно оператором (``pdf_pipeline``): его
+        недоступность больше не «фолбэк в HTML» (тихий переход на другой движок с тем же
+        провенансом), а видимый отказ :class:`WiringError`. Дефолт ``False`` — доклинговый
+        фолбэк без установленного docling сохраняется как сегодня.
         """
         self._html = html
         self._documents = documents
         self._text = text if text is not None else TextExtractor()
         self._epub = epub if epub is not None else EpubExtractor(html=html)
+        self._pdf = pdf if pdf is not None else documents
+        self._pdf_required = pdf_required
         html_version = str(getattr(self._html, "version", "") or "")
-        # Версия экстрактора: HTML-версия, дополненная документной при наличии docling.
-        # Текстовый/EPUB-читатели сюда **не** добавлены: они видны в per-document
-        # ``extractor_version`` (``text-plain-1``/``epub-1``) и в провенансе продукта,
-        # а композитная строка остаётся байт-в-байт прежней (наблюдаемая ось, §13).
-        self.version = (
-            html_version
-            if documents is None
-            else f"{html_version}+{documents.version}"
-        )
+        # Версия экстрактора: HTML-версия, дополненная документной при наличии docling и
+        # PDF-механизмом (P7), если он — отдельный адаптер. Текстовый/EPUB-читатели сюда
+        # **не** добавлены: они видны в per-document ``extractor_version``
+        # (``text-plain-1``/``epub-1``) и в провенансе продукта.
+        parts = [html_version]
+        if documents is not None:
+            parts.append(str(getattr(documents, "version", "")))
+        if pdf is not None and pdf is not documents:
+            parts.append(str(getattr(pdf, "version", "")))
+        self.version = "+".join(part for part in parts if part)
+
+    def _document_backend(
+        self, filename: str | None
+    ) -> ExtractorPort | None:
+        """Механизм для документного файла: PDF → выбранный ``pdf_pipeline``, иначе docling.
+
+        ``None`` — обслуживать нечем (docling не установлен и PDF-механизм не выбран):
+        вызывающий уходит в прежний HTML-путь. Для явно выбранного PDF-механизма
+        (``pdf_required``) такой исход — :class:`WiringError`, а не фолбэк: иначе прогон
+        объявил бы ``pdf_pipeline``, а извлекал другим движком.
+        """
+        if filename is not None and Path(filename).suffix.lower() == PDF_SUFFIX:
+            if self._pdf is not None:
+                return self._pdf
+            if self._pdf_required:
+                raise WiringError(
+                    "crawl.pdf_pipeline выбран явно, но PDF-механизм не собран "
+                    "(нет доступного адаптера): тихий переход на другой движок "
+                    "сломал бы провенанс extractor_version"
+                )
+            return None
+        return self._documents
 
     def _resolve_target(
         self, page: RawPage, route: ExtractionRoute = ExtractionRoute.AUTO
@@ -1679,24 +1722,33 @@ class _LocalExtractor:
         одного попадания: он был write-only. Один диспетчер исключает расхождение по
         построению, а не по дисциплине.
 
+        **P7: PDF — отдельный механизм.** Внутри документной ветви PDF-суффикс уходит в
+        выбранный ``pdf_pipeline`` (:meth:`_document_backend`), остальное — в docling.
+        Поэтому версия для ключа ``extract_cache`` — версия реально работающего
+        адаптера (``pdfium-text-1`` либо ``docling-doc-3:<level>/…``), а не композита.
+
         Порядок ветвей — контракт поведения (``.txt``/``.epub`` проверяются до фолбэка в
         HTML, см. докстринг класса): перестановка вернула бы ``.txt`` в ``parser_failed``.
         """
         if route is ExtractionRoute.HTML:
             return "html", self._html, None
-        documents = self._documents
         if route is ExtractionRoute.DOCUMENT:
-            if documents is None:
-                return "html", self._html, None
             filename = _detect_document_filename(page)
-            return "document", documents, filename or "document.pdf"
+            # Бессуффиксный принудительный документ — прежде ``document.pdf``; тем же
+            # именем решается и механизм, иначе PDF-механизм не увидел бы свой вход.
+            backend = self._document_backend(filename or "document.pdf")
+            if backend is None:
+                return "html", self._html, None
+            return "document", backend, filename or "document.pdf"
         if textual_family(page.url, page.content_type) is not None:
             return "text", self._text, None
         if is_epub(page.url, page.content_type):
             return "epub", self._epub, None
         filename = _detect_document_filename(page)
-        if filename is not None and documents is not None:
-            return "document", documents, filename
+        if filename is not None:
+            backend = self._document_backend(filename)
+            if backend is not None:
+                return "document", backend, filename
         return "html", self._html, None
 
     def extractor_version_for(
@@ -1729,11 +1781,10 @@ class _LocalExtractor:
         """
         kind, adapter, filename = self._resolve_target(page, route)
         if kind == "document":
-            # ``adapter`` — документный адаптер по построению ``_resolve_target``; сужение
-            # типа нужно только для читателя-статического анализатора.
-            return _extract_document(
-                cast(DoclingDocumentExtractor, adapter), page, filename or "document.pdf"
-            )
+            # ``adapter`` — документный адаптер по построению ``_resolve_target``: docling
+            # (уровень/Office) либо PDF-механизм ``text_layer``. Оба обслуживаются одной
+            # обёрткой — протокол ``extract_path``/``extract_bytes`` у них общий.
+            return _extract_document(adapter, page, filename or "document.pdf")
         return adapter.extract(page, route)
 
     @property
@@ -1754,14 +1805,25 @@ class _LocalExtractor:
 # --------------------------------------------------------------------------- #
 
 
-def build_worker_extractor(level: DocumentLevel = DocumentLevel.FULL) -> ExtractorPort:
-    """Строит экстрактор **внутри** воркер-процесса (P4/P5; picklable by reference, §7).
+def build_worker_extractor(
+    level: DocumentLevel = DocumentLevel.FULL,
+    pdf_pipeline: PdfPipeline = PdfPipeline.STRUCTURED,
+) -> ExtractorPort:
+    """Строит экстрактор **внутри** воркер-процесса (P4/P5/P7; picklable by reference, §7).
 
     Один экстрактор (HTML + текстовые форматы + EPUB + документы при наличии docling) на
     воркер — амортизирует загрузку весов между заданиями. Объекты не пересекают границу
     процессов: фабрика передаётся инициализатору ссылкой, вызов происходит в ребёнке.
     ``level`` (P5) задаёт уровень документной экстракции; ``off`` → docling **не**
     строится вовсе (документы пропускаются pipeline'ом, HTML обычен).
+
+    **P7: ``pdf_pipeline``.** ``structured`` (дефолт) — прежнее поведение байт-в-байт:
+    PDF обслуживает docling того же уровня. ``text_layer`` — PDF уходит в
+    :class:`~core.adapters.extract_pdf_text.PdfiumDocumentExtractor`, а docling остаётся
+    **только для Office** (docx/pptx/xlsx этот механизм не читает; уровень Office —
+    прежний, ``pdf_pipeline`` его не касается). Отсутствие ``pypdfium2`` при явно
+    выбранном ``text_layer`` — :class:`WiringError` (EXIT_USAGE), а не тихая подмена
+    механизма: провенанс объявил бы одно, извлёк другое.
 
     Композит строится **всегда** (даже без docling и при ``off``): текстовый и EPUB-пути
     не зависят от docling, и возврат «голого» ``HtmlExtractor`` вернул бы ``.txt``/``.epub``
@@ -1770,44 +1832,71 @@ def build_worker_extractor(level: DocumentLevel = DocumentLevel.FULL) -> Extract
     равен версии HTML-адаптера.
     """
     html = HtmlExtractor()
-    documents = (
-        None if level is DocumentLevel.OFF else DoclingDocumentExtractor(level=level)
+    pipeline = PdfPipeline(pdf_pipeline)
+    pdf: ExtractorPort | None = None
+    documents: DoclingDocumentExtractor | None = None
+    if level is not DocumentLevel.OFF:
+        candidate = DoclingDocumentExtractor(level=level)
+        documents = candidate if candidate.available else None
+        if pipeline is PdfPipeline.TEXT_LAYER:
+            text_layer = PdfiumDocumentExtractor()
+            if not text_layer.available:
+                raise WiringError(
+                    "crawl.pdf_pipeline=text_layer требует pypdfium2: установите extras "
+                    "'extract' (`uv pip install -e '.[extract]'`) либо объявите "
+                    "pdf_pipeline=structured. Тихая подмена механизма запрещена — "
+                    "extractor_version описал бы движок, которого не было"
+                )
+            pdf = text_layer
+        else:
+            pdf = documents
+    return _LocalExtractor(
+        html,
+        documents,
+        pdf=pdf,
+        pdf_required=pipeline is PdfPipeline.TEXT_LAYER,
     )
-    if documents is not None and not documents.available:
-        documents = None
-    return _LocalExtractor(html, documents)
 
 
 def _extract_worker_init(
-    extractor_factory: Callable[[DocumentLevel], ExtractorPort],
+    extractor_factory: Callable[[DocumentLevel, PdfPipeline], ExtractorPort],
     level: DocumentLevel,
+    pdf_pipeline: PdfPipeline = PdfPipeline.STRUCTURED,
 ) -> None:
-    """Инициализатор воркер-процесса пула экстракции (P4/P5/§7): ставит его экстрактор.
+    """Инициализатор воркер-процесса пула экстракции (P4/P5/P7/§7): ставит его экстрактор.
 
-    ``extractor_factory`` — module-level (picklable by reference); ``level`` — уровень корня
-    (C1: пул — фазовый, ключ ``(уровень, окно)``, P5). Глобал экстрактора живёт в
-    ``core.pipeline.corpus`` (общий
-    воркер :func:`core.pipeline.corpus._extract_worker`); фабрика передаётся и туда —
-    защитный lazy-путь, если задание принесёт иной уровень.
+    ``extractor_factory`` — module-level (picklable by reference); ``level`` — уровень корня,
+    ``pdf_pipeline`` — механизм PDF (C1: пул — фазовый, ключ ``(уровень, механизм, окно)``).
+    Глобал экстрактора живёт в ``core.pipeline.corpus`` (общий воркер
+    :func:`core.pipeline.corpus._extract_worker`); фабрика передаётся и туда — защитный
+    lazy-путь, если задание принесёт иную пару (уровень, механизм).
     """
     from core.pipeline.corpus import set_worker_extractor
 
-    set_worker_extractor(extractor_factory(level), level=level, factory=extractor_factory)
+    set_worker_extractor(
+        extractor_factory(level, pdf_pipeline),
+        level=level,
+        factory=extractor_factory,
+        pdf_pipeline=pdf_pipeline,
+    )
 
 
 def _local_extract_pool_factory(
     max_workers: int,
     level: DocumentLevel = DocumentLevel.FULL,
+    pdf_pipeline: PdfPipeline = PdfPipeline.STRUCTURED,
     *,
     max_tasks_per_child: int | None = None,
-    extractor_factory: Callable[[DocumentLevel], ExtractorPort] = build_worker_extractor,
+    extractor_factory: Callable[
+        [DocumentLevel, PdfPipeline], ExtractorPort
+    ] = build_worker_extractor,
 ) -> Any:
-    """``ProcessPoolExecutor`` (forkserver) для локальной экстракции (P4/P5/§7).
+    """``ProcessPoolExecutor`` (forkserver) для локальной экстракции (P4/P5/P7/§7).
 
     ``forkserver`` (дефолт Python 3.14 на Linux) не форкает прогретый родитель (torch уже
     загружен в ядре при docling-экстракции) — безопасно; инициализатор строит экстрактор
-    **нужного уровня** на воркер (``level`` — свойство корня, P5). Прецедент процессов —
-    edge-планировщик (``core/edge/scheduler.py``).
+    **нужного уровня и механизма** на воркер (``level``/``pdf_pipeline`` — свойства корня,
+    P5/P7). Прецедент процессов — edge-планировщик (``core/edge/scheduler.py``).
 
     ``max_tasks_per_child`` (P4/OOM): после N заданий воркер штатно завершается, executor
     поднимает новый процесс и **повторно** зовёт ``initializer`` — экстрактор строится
@@ -1824,7 +1913,7 @@ def _local_extract_pool_factory(
         max_workers=max_workers,
         mp_context=multiprocessing.get_context("forkserver"),
         initializer=_extract_worker_init,
-        initargs=(extractor_factory, level),
+        initargs=(extractor_factory, level, pdf_pipeline),
         max_tasks_per_child=max_tasks_per_child,
     )
 
@@ -1868,6 +1957,7 @@ def build_extraction_pool(
         def _local_factory(
             n: int,
             level: DocumentLevel = DocumentLevel.FULL,
+            pdf_pipeline: PdfPipeline = PdfPipeline.STRUCTURED,
             *,
             max_tasks_per_child: int | None = None,
         ) -> Any:
@@ -1876,7 +1966,7 @@ def build_extraction_pool(
                 default_recycle if max_tasks_per_child is None else max_tasks_per_child
             )
             return _local_extract_pool_factory(
-                n, level, max_tasks_per_child=recycle
+                n, level, pdf_pipeline, max_tasks_per_child=recycle
             )
 
         return ExtractionPool(
@@ -1890,12 +1980,16 @@ def build_extraction_pool(
             return _run_extract(extractor, request)
 
         # P5: ось ``document_level`` здесь не действует (R-S): под ``split`` документную
-        # экстракцию исполняет edge своим конфигом. Уровень принимается и игнорируется, чтобы
-        # подпись фабрики совпадала с локальной.
+        # экстракцию исполняет edge своим конфигом. То же — ``pdf_pipeline`` (P7). Обе оси
+        # принимаются и игнорируются, чтобы подпись фабрики совпадала с локальной.
         # F0: пик воркера не собирается — воркеры-threads живут в ядре, но их ``ru_maxrss``
         # это RSS всего процесса, а не воркера; подделывать число нельзя (``None``).
+        def _thread_factory(n: int, *_: Any, **__: Any) -> Any:
+            """Подпись локальной фабрики: оси корня (уровень/механизм) приняты и не действуют."""
+            return _thread_pool(n)
+
         return ExtractionPool(
-            pool_factory=lambda n, level=DocumentLevel.FULL, **_: _thread_pool(n),
+            pool_factory=_thread_factory,
             worker=_remote_worker,
             supports_worker_recycling=False,
             worker_rss_dir=None,
@@ -2036,6 +2130,7 @@ def _build_local_ports(
     embedder: EmbedderPort | None = None,
     vector_index: VectorIndexPort | None = None,
     lexical_index: LexicalIndexPort | None = None,
+    pdf_pipeline: PdfPipeline = PdfPipeline.STRUCTURED,
 ) -> Ports:
     """Собирает in-process порты профиля ``local`` (без сети/тяжёлых зависимостей).
 
@@ -2061,14 +2156,37 @@ def _build_local_ports(
     ``index_build_id``). Отсутствие предпосылки — явный ``None`` (N3): эксперимент фиксирует
     это как ``skipped``, а не как молчаливую дыру или выдуманный индекс. Явно
     инъецированные порты имеют приоритет (ручной DI, A1).
+
+    **PDF-механизм (P7).** ``pdf_pipeline`` выбирает адаптер PDF в композите:
+    ``structured`` (дефолт) — прежний docling, ``text_layer`` — читатель текстового слоя.
+    Недоступный явно выбранный механизм — :class:`WiringError` (EXIT_USAGE до прогона), а
+    не фолбэк: ``extractor_version`` обязан описывать движок, который реально работал.
     """
     html = HtmlExtractor()
     documents = DoclingDocumentExtractor()
+    # P7: PDF-механизм — часть композита, а не «настройка внутри docling». ``structured``
+    # (дефолт) — тот же docling: поведение и ``version`` байт-в-байт прежние.
+    pdf_adapter: ExtractorPort | None = None
+    if PdfPipeline(pdf_pipeline) is PdfPipeline.TEXT_LAYER:
+        text_layer = PdfiumDocumentExtractor()
+        if not text_layer.available:
+            raise WiringError(
+                "crawl.pdf_pipeline=text_layer требует pypdfium2: установите extras "
+                "'extract' (`uv pip install -e '.[extract]'`) либо объявите "
+                "pdf_pipeline=structured. Тихая подмена механизма запрещена — "
+                "extractor_version описал бы движок, которого не было"
+            )
+        pdf_adapter = text_layer
+    elif documents.available:
+        pdf_adapter = documents
     # Композит строится всегда: без docling текстовые форматы и EPUB всё равно имеют
     # своих читателей, а документные суффиксы уходят в HTML-путь (как раньше —
     # ``_LocalExtractor(html, None)``).
     extractor: ExtractorPort = _LocalExtractor(
-        html, documents if documents.available else None
+        html,
+        documents if documents.available else None,
+        pdf=pdf_adapter,
+        pdf_required=PdfPipeline(pdf_pipeline) is PdfPipeline.TEXT_LAYER,
     )
 
     # Тяжёлые опциональные адаптеры: только при выполненной availability-предикате.
@@ -2249,6 +2367,7 @@ def build_adapters(
     embedder: EmbedderPort | None = None,
     run_crawl: CrawlRunConfig | None = None,
     cli_max_depth: int | None = None,
+    pdf_pipeline: PdfPipeline | None = None,
     engine_log: PhaseLogger | None = None,
 ) -> Ports:
     """Собирает порты внешних систем по профилю развёртывания (``03`` §E.3).
@@ -2293,6 +2412,11 @@ def build_adapters(
         discovery при включении принуждения ``robots.txt`` (N1).
     :param cli_max_depth: ``--max-depth`` оператора — также участвует в автодетекте
         discovery (N1).
+    :param pdf_pipeline: явный механизм PDF (операторский ``--pdf-pipeline``); ``None`` —
+        резолв цепочкой app < run < site. Явное значение сильнее цепочки: ось объявляет
+        механизм этого прогона, и пробный экстрактор портов обязан мерить тот же движок,
+        что и корпус (тихая подмена механизма запрещена). Под ``split`` ось не действует:
+        экстрактор — remote, конвертеры строит edge (R-S).
     :param engine_log: лог наблюдаемости выбора движка краула (``03`` §D.6); ``None`` →
         строки не пишутся (тесты/вызовы без прогона).
     :param crawl_sources: слои источников краула (``crawl_sources.yaml``, Lane A); их
@@ -2362,6 +2486,19 @@ def build_adapters(
             resolved_specs,
             registry_http_get if registry_http_get is not None else _RegistryHttpClient(),
         )
+        # P7: PDF-механизм — та же цепочка app < run < site, что у остальных осей краула
+        # (site-слой здесь недоступен: порты собираются до per-root резолва; корневой
+        # механизм досоздаётся фабрикой в ``build_corpus``). Явный ``pdf_pipeline``
+        # (операторский ``--pdf-pipeline``) сильнее цепочки: он объявляет механизм этого
+        # прогона и обязан действовать и на пробном экстракторе, а не только в Ш5 —
+        # иначе диагностика мерила бы другой движок, чем корпус.
+        if pdf_pipeline is None:
+            pdf_pipeline = resolve_crawl_limits(
+                "",
+                app=(deploy.crawl if deploy is not None else CrawlConfig()),
+                run=run_crawl,
+                profiles=None,
+            ).pdf_pipeline
         return _build_local_ports(
             evaluator=evaluator,
             registry=registry,
@@ -2378,6 +2515,7 @@ def build_adapters(
             vector_index=vector_index,
             lexical_index=lexical_index,
             embedder=embedder,
+            pdf_pipeline=pdf_pipeline,
         )
     if profile == SPLIT_PROFILE:
         config = deploy if deploy is not None else load_deploy_config(None)

@@ -52,6 +52,10 @@ extract = [
     "docling-slim[format-office]>=2.135,<3",
     "rtree>=1.3,<2",
     "openpyxl>=3.1,<4",
+    # Механизм `text_layer` (crawl.pdf_pipeline): текстовый слой PDF без моделей.
+    # Колесо pdfium без torch/transformers — поэтому живёт в лёгком extra, а не в
+    # `extract-pdf`; нужен только когда ось выбрана явно (дефолт — docling).
+    "pypdfium2>=5.14,<6",
 ]
 
 # Экстракция PDF с layout-моделями (таблицы фич-матриц) — тяжёлая: подтягивает torch.

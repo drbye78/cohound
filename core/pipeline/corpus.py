@@ -172,6 +172,7 @@ from core.domain import (
     FailureKind,
     IncrementalKind,
     IndexManifestEntry,
+    PdfPipeline,
     ProductMode,
     RefreshPolicy,
     ReuseKind,
@@ -740,6 +741,13 @@ def _persist_corpus_coverage(
         store.save_corpus_coverage(run_id, coverage)
 
 
+#: Ключ фазового пула экстракции (C1/P7): ``(уровень документов, механизм PDF, окно)``.
+#: Обе оси — свойства корня и определяют, каким движком будет извлечён документ, поэтому
+#: ключ обязан их различать: переиспользовать пул другого механизма значило бы извлечь
+#: текст не тем движком, чем объявлено (провенанс ``extractor_version``).
+_ExtractPoolKey = tuple[DocumentLevel, PdfPipeline, int]
+
+
 @dataclass(frozen=True)
 class _ExtractRequest:
     """P4: payload одного задания экстракции — **только примитивы** (picklable by construction).
@@ -761,8 +769,12 @@ class _ExtractRequest:
     route: ExtractionRoute
     #: P5: уровень извлечения документных форматов (``crawl.document_level``). Едет в payload
     #: для самодостаточности задания и корректности под будущие режимы; C1: пул — фазовый,
-    #: ключ ``(уровень, окно)``, поэтому воркер кэширует конвертер по уровню.
+    #: ключ ``(уровень, механизм PDF, окно)``, поэтому воркер кэширует конвертер по ключу.
     level: DocumentLevel = DocumentLevel.FULL
+    #: P7: механизм извлечения PDF (``crawl.pdf_pipeline``). Едет в payload по той же
+    #: причине, что и уровень: воркер обязан обслужить задание **своим** механизмом, а не
+    #: тем, что случайно построил инициализатор другого пула.
+    pdf_pipeline: PdfPipeline = PdfPipeline.STRUCTURED
     #: Ф1.2: корень и бюджет межпрогонного кэша экстракции. Едут **примитивами** — сам
     #: объект кэша не пиклится (payload остаётся picklable by construction); воркер
     #: строит экземпляр из этих полей. ``None`` → кэш в воркере выключен.
@@ -779,12 +791,12 @@ class _ExtractRequest:
 class ExtractionPool:
     """P4: инъекция исполнителя экстракции из composition root (A1, ``pipeline ↛ adapters``).
 
-    :param pool_factory: фабрика ``(int, DocumentLevel) → Executor`` (размер =
-        ``limits.extract_workers``; уровень — свойство корня, C1: пул — фазовый по ключу
-        ``(уровень, окно)``); ``local`` —
+    :param pool_factory: фабрика ``(int, DocumentLevel, *, PdfPipeline) → Executor``
+        (размер = ``limits.extract_workers``; уровень и механизм PDF — свойства корня, C1:
+        пул — фазовый по ключу ``(уровень, механизм, окно)``); ``local`` —
         ``ProcessPoolExecutor`` (forkserver, инициализатор строит экстрактор нужного уровня
-        на воркер), ``split`` — ``ThreadPoolExecutor`` (``RemoteExtractor`` I/O-bound; ось
-        ``document_level`` под ``split`` не действует — R-S).
+        и механизма на воркер), ``split`` — ``ThreadPoolExecutor`` (``RemoteExtractor``
+        I/O-bound; оси ``document_level``/``pdf_pipeline`` под ``split`` не действуют — R-S).
     :param worker: рабочая функция ``_ExtractRequest → ExtractedDoc``. Для процессов —
         module-level (picklable by reference); для потоков допустим bound/closure.
     :param supports_worker_recycling: профиль умеет рециклинг воркеров по счётчику заданий
@@ -853,42 +865,59 @@ class ExtractionPool:
 _WORKER_EXTRACTOR: ExtractorPort | None = None
 #: P5: уровень глобального экстрактора воркера (``None`` — «подходит для любого», split).
 _WORKER_EXTRACTOR_LEVEL: DocumentLevel | None = None
-#: P5: фабрика per-level экстрактора в воркере (защитный lazy-путь, если уровень задания
-#: не совпал с инициализированным). Передаётся ссылкой из composition root.
-_WORKER_EXTRACTOR_FACTORY: Callable[[DocumentLevel], ExtractorPort] | None = None
+#: P7: механизм извлечения PDF глобального экстрактора воркера (``None`` — «любой», split).
+_WORKER_EXTRACTOR_PIPELINE: PdfPipeline | None = None
+#: P5/P7: фабрика экстрактора ``(level, pdf_pipeline)`` в воркере (защитный lazy-путь, если
+#: пара задания не совпала с инициализированной). Передаётся ссылкой из composition root.
+_WORKER_EXTRACTOR_FACTORY: (
+    Callable[[DocumentLevel, PdfPipeline], ExtractorPort] | None
+) = None
 
 
 def set_worker_extractor(
     extractor: ExtractorPort | None,
     *,
     level: DocumentLevel | None = None,
-    factory: Callable[[DocumentLevel], ExtractorPort] | None = None,
+    factory: Callable[[DocumentLevel, PdfPipeline], ExtractorPort] | None = None,
+    pdf_pipeline: PdfPipeline | None = None,
 ) -> None:
-    """Устанавливает экстрактор воркер-процесса (зовётся ``initializer`` пула, P4/P5).
+    """Устанавливает экстрактор воркер-процесса (зовётся ``initializer`` пула, P4/P5/P7).
 
-    ``level`` — уровень установленного экстрактора (``None`` — универсальный, напр. split);
-    ``factory`` — фабрика per-level, если задание принесло иной уровень (защитный путь).
+    ``level``/``pdf_pipeline`` — оси установленного экстрактора (``None`` — универсальный,
+    напр. split); ``factory`` — фабрика ``(level, pdf_pipeline)``, если задание принесло
+    иную пару (защитный путь).
     """
-    global _WORKER_EXTRACTOR, _WORKER_EXTRACTOR_LEVEL, _WORKER_EXTRACTOR_FACTORY
+    global _WORKER_EXTRACTOR, _WORKER_EXTRACTOR_LEVEL, _WORKER_EXTRACTOR_PIPELINE
+    global _WORKER_EXTRACTOR_FACTORY
     _WORKER_EXTRACTOR = extractor
     _WORKER_EXTRACTOR_LEVEL = level
+    _WORKER_EXTRACTOR_PIPELINE = pdf_pipeline
     _WORKER_EXTRACTOR_FACTORY = factory
 
 
-def _worker_extractor_for(level: DocumentLevel) -> ExtractorPort | None:
-    """Экстрактор воркера для ``level`` (кэш размера 1; C1: пул — фазовый по уровню).
+def _worker_extractor_for(
+    level: DocumentLevel, pdf_pipeline: PdfPipeline = PdfPipeline.STRUCTURED
+) -> ExtractorPort | None:
+    """Экстрактор воркера для пары ``(level, pdf_pipeline)`` (кэш размера 1; C1).
 
-    Если инициализированный экстрактор подходит (уровень совпал или универсален) — он и
-    используется. Иначе (защитный путь) строится фабрикой и кэшируется. Кэш по построению
-    размера 1 не является рабочим: инициализатор пула строит экстрактор нужного уровня.
+    Если инициализированный экстрактор подходит (обе оси совпали или универсальны) — он и
+    используется. Иначе (защитный путь) строится фабрикой и кэшируется: пара «другой
+    механизм PDF» — не та же самая настройка, и обслуживать её чужой экстрактор значило бы
+    извлечь текст не тем движком, чем объявлено.
     """
     if _WORKER_EXTRACTOR is not None and (
         _WORKER_EXTRACTOR_LEVEL is None or _WORKER_EXTRACTOR_LEVEL == level
+    ) and (
+        _WORKER_EXTRACTOR_PIPELINE is None
+        or _WORKER_EXTRACTOR_PIPELINE == pdf_pipeline
     ):
         return _WORKER_EXTRACTOR
     if _WORKER_EXTRACTOR_FACTORY is not None:
         set_worker_extractor(
-            _WORKER_EXTRACTOR_FACTORY(level), level=level, factory=_WORKER_EXTRACTOR_FACTORY
+            _WORKER_EXTRACTOR_FACTORY(level, pdf_pipeline),
+            level=level,
+            factory=_WORKER_EXTRACTOR_FACTORY,
+            pdf_pipeline=pdf_pipeline,
         )
         return _WORKER_EXTRACTOR
     return _WORKER_EXTRACTOR
@@ -1104,13 +1133,13 @@ def _extract_worker(request: _ExtractRequest) -> ExtractedDoc:
             extractor_version="",
             error="extraction worker без экстрактора (initializer не отработал)",
         )
-    extractor = _worker_extractor_for(request.level)
+    extractor = _worker_extractor_for(request.level, request.pdf_pipeline)
     if extractor is None:  # pragma: no cover — защита от неверной сборки
         return ExtractedDoc(
             text="",
             content_hash="",
             extractor_version="",
-            error="extraction worker без экстрактора для уровня",
+            error="extraction worker без экстрактора для уровня/механизма",
         )
     # ``finally``: арены возвращаются и на честном отказе извлечения (исключение
     # поднимается дальше как прежде — пул сам решает судьбу задания).
@@ -1155,7 +1184,7 @@ class _ExtractPools:
 
     def __init__(self, *, max_rebuilds: int = _EXTRACT_MAX_POOL_REBUILDS) -> None:
         self._max_rebuilds = max_rebuilds
-        self._slots: dict[tuple[DocumentLevel, int], _ExtractPoolSlot] = {}
+        self._slots: dict[_ExtractPoolKey, _ExtractPoolSlot] = {}
         #: Наблюдаемость операционного рычага памяти: сколько заданий воркеры пула
         #: довели до результата. В воркере на каждое такое задание приходится ровно один
         #: ``malloc_trim(0)`` (:func:`_extract_worker`), поэтому счётчик фазы — честная
@@ -1163,7 +1192,7 @@ class _ExtractPools:
         #: дочернего процесса нет).
         self.completed = 0
 
-    def slot(self, key: tuple[DocumentLevel, int]) -> _ExtractPoolSlot:
+    def slot(self, key: _ExtractPoolKey) -> _ExtractPoolSlot:
         """Состояние ключа (создаётся лениво; I/O нет)."""
         slot = self._slots.get(key)
         if slot is None:
@@ -1172,7 +1201,7 @@ class _ExtractPools:
         return slot
 
     def executor(
-        self, key: tuple[DocumentLevel, int], factory: Callable[[], Executor]
+        self, key: _ExtractPoolKey, factory: Callable[[], Executor]
     ) -> Executor:
         """Пул ключа, создаваемый ``factory`` при первом обращении (лениво)."""
         slot = self.slot(key)
@@ -1180,18 +1209,18 @@ class _ExtractPools:
             slot.executor = factory()
         return slot.executor
 
-    def note_completion(self, key: tuple[DocumentLevel, int]) -> None:
+    def note_completion(self, key: _ExtractPoolKey) -> None:
         """Задание завершилось (любым исходом): пул жив, серия таймаутов сброшена."""
         self.slot(key).stalled_timeouts = 0
         self.completed += 1
 
-    def note_timeout(self, key: tuple[DocumentLevel, int]) -> bool:
+    def note_timeout(self, key: _ExtractPoolKey) -> bool:
         """Учесть таймаут артефакта; ``True`` — пул мёртв (``2 × timeout`` без завершений)."""
         slot = self.slot(key)
         slot.stalled_timeouts += 1
         return slot.stalled_timeouts >= _EXTRACT_DEAD_POOL_TIMEOUTS
 
-    def terminate(self, key: tuple[DocumentLevel, int]) -> None:
+    def terminate(self, key: _ExtractPoolKey) -> None:
         """Reaping зависших воркеров (``terminate_workers``, Python 3.14; best-effort)."""
         executor = self.slot(key).executor
         terminate = getattr(executor, "terminate_workers", None)
@@ -1202,7 +1231,7 @@ class _ExtractPools:
         except Exception:  # noqa: BLE001 — reaping best-effort
             pass
 
-    def discard(self, key: tuple[DocumentLevel, int]) -> None:
+    def discard(self, key: _ExtractPoolKey) -> None:
         """Закрывает пул ключа синхронно и отменяет запланированное (P0/OOM)."""
         slot = self.slot(key)
         executor = slot.executor
@@ -1222,7 +1251,7 @@ class _ExtractPools:
         except Exception:  # noqa: BLE001 — reaping best-effort
             pass
 
-    def rebuild(self, key: tuple[DocumentLevel, int]) -> bool:
+    def rebuild(self, key: _ExtractPoolKey) -> bool:
         """Discard + bounded rebuild; ``False`` — пересборки исчерпаны (ключ abandon'ен)."""
         self.discard(key)
         slot = self.slot(key)
@@ -1233,7 +1262,7 @@ class _ExtractPools:
         slot.rebuilds += 1
         return True
 
-    def abandoned(self, key: tuple[DocumentLevel, int]) -> bool:
+    def abandoned(self, key: _ExtractPoolKey) -> bool:
         """Исчерпал ли ключ пересборки (остаток прогона — терминальный отказ)."""
         return self.slot(key).abandoned
 
@@ -1447,7 +1476,7 @@ class _PendingExtract:
     #: C1: доводка исхода — ``(extracted, extract_error, failure_kind) → None``.
     commit: Callable[[Any, str | None, FailureKind | None], None]
     #: C1: ключ фазового пула ``(level, window)`` — учёт завершений/таймаутов и пересборка.
-    pool_key: tuple[DocumentLevel, int]
+    pool_key: _ExtractPoolKey
 
 
 @dataclass(frozen=True)
@@ -2348,6 +2377,7 @@ def _member_extract_request(
     fetched_at: str,
     lang: str | None,
     level: DocumentLevel,
+    pdf_pipeline: PdfPipeline = PdfPipeline.STRUCTURED,
     rss_dir: str | None = None,
 ) -> _ExtractRequest:
     """B3/P4: payload экстракции члена — только примитивы, байты не передаются (I19).
@@ -2371,6 +2401,7 @@ def _member_extract_request(
         engine=None,
         route=_member_route(suffix),
         level=level,
+        pdf_pipeline=pdf_pipeline,
         rss_dir=rss_dir,
     )
 
@@ -2600,7 +2631,7 @@ def _build_corpus(
     executor_wave_items: int | None = None,
     pool_factory: Callable[[int], Executor] | None = None,
     extraction_pool: ExtractionPool | None = None,
-    extractor_factory: Callable[[DocumentLevel], ExtractorPort] | None = None,
+    extractor_factory: Callable[[DocumentLevel, PdfPipeline], ExtractorPort] | None = None,
     extract_cache: ExtractionCache | None = None,
     extract_task_timeout_s: float | None = None,
     max_attempts: int | None = None,
@@ -2714,13 +2745,14 @@ def _build_corpus(
         OOM-ось ``crawl.extract_max_tasks_per_child=N`` (только процессный пул) включает пул
         и при ``extract_workers == 1`` и пересоздаёт воркер после N заданий
         (``max_tasks_per_child``); ``None`` — прежнее поведение.
-    :param extractor_factory: P5 — фабрика per-level экстрактора ``Callable[[DocumentLevel],
-        ExtractorPort]``, переданная ссылкой из composition root (слой-матрица: pipeline не
-        импортирует адаптеры). Применяется к **inline**-пути (``extract_workers`` None/``1``):
-        для уровня корня, отличного от ``full``, строится экстрактор этого уровня; ``full``
+    :param extractor_factory: P5/P7 — фабрика экстрактора
+        ``Callable[[DocumentLevel, PdfPipeline], ExtractorPort]``, переданная ссылкой из
+        composition root (слой-матрица: pipeline не импортирует адаптеры). Применяется к
+        **inline**-пути (``extract_workers`` None/``1``): для пары, отличной от
+        ``(full, structured)``, строится экстрактор этой пары; ``(full, structured)``
         переиспользует переданный ``extractor`` (дефолт — без лишней загрузки весов docling).
-        ``None`` → уровень на inline-пути не действует (поведение как прежде; пул-путь всё
-        равно получает уровень через ``extraction_pool.pool_factory``).
+        ``None`` → оси на inline-пути не действуют (поведение как прежде; пул-путь всё
+        равно получает их через ``extraction_pool.pool_factory``).
     :param extract_cache: Ф1.2 — межпрогонный кэш экстракции (:class:`ExtractionCache`).
         ``None`` → кэш выключен, поведение байт-в-байт прежнее. Ключ — хеш **ретенированных**
         байтов (I19), поэтому хит не может подсунуть неверифицированный контент: хеш
@@ -3991,7 +4023,7 @@ def _build_corpus(
                 finalize()
 
     def _recover_extract_pool(
-        pool_key: tuple[DocumentLevel, int], label: str
+        pool_key: _ExtractPoolKey, label: str
     ) -> None:
         """Отравленный пул: discard + bounded rebuild; исчерпание — терминальный отказ.
 
@@ -4002,7 +4034,8 @@ def _build_corpus(
         if pools.rebuild(pool_key):
             return
         errors.append(
-            f"{label}: пул экстракции {pool_key[0].value}/W={pool_key[1]} исчерпал "
+            f"{label}: пул экстракции {pool_key[0].value}/{pool_key[1].value}"
+            f"/W={pool_key[2]} исчерпал "
             f"пересборки ({_EXTRACT_MAX_POOL_REBUILDS}) — остаток прогона терминально "
             "FAILED (parser_failed), без inline-экстракции"
         )
@@ -5456,20 +5489,25 @@ def _build_corpus(
             # экстрактор (дефолт — без лишней загрузки весов); иной уровень строится фабрикой,
             # если она передана.
             level = limits.document_level
+            # P7: механизм PDF — тоже свойство корня (ключ пула включает и его).
+            pdf_pipeline = limits.pdf_pipeline
             root_extractor: ExtractorPort = extractor
-            # ``full`` сюда не попадает: переданный экстрактор и есть уровень ``full``,
-            # поэтому «понижение до переданного» для него невозможно. Отказ OCR на
+            # Композит по умолчанию — ``full`` + ``structured``; переданный экстрактор и есть
+            # эта пара, поэтому для неё «понижение до переданного» невозможно. Отказ OCR на
             # ``full`` приходит из адаптера на построении конвертера и становится
             # ``parser_failed`` (видимая запись ``errors`` через ``_finish_one``/
             # ``_finish_extract``), а не тихой подменой уровня.
-            if level is not DocumentLevel.FULL and extractor_factory is not None:
+            if extractor_factory is not None and (
+                level is not DocumentLevel.FULL
+                or pdf_pipeline is not PdfPipeline.STRUCTURED
+            ):
                 try:
-                    root_extractor = extractor_factory(level)
+                    root_extractor = extractor_factory(level, pdf_pipeline)
                 except Exception as exc:  # noqa: BLE001 — изоляция по контракту фазы
                     errors.append(
-                        f"{pid}/{root_url}: extractor_factory({level.value}): "
-                        f"{type(exc).__name__}: {exc} — уровень понижен до переданного "
-                        "экстрактора"
+                        f"{pid}/{root_url}: extractor_factory({level.value}, "
+                        f"{pdf_pipeline.value}): {type(exc).__name__}: {exc} — "
+                        "понижен до переданного экстрактора"
                     )
                     root_extractor = extractor
 
@@ -5544,11 +5582,14 @@ def _build_corpus(
                     f"{recycle_tasks} поддерживается только процессным пулом (local) — "
                     "ось игнорируется"
                 )
-            #: C1: ключ фазового пула — уровень документа + окно экстракции. Пул один на
-            #: прогон и переиспользуется всеми корнями/продуктами (forkserver и веса
-            #: конвертера платятся один раз); ``shutdown`` — один раз в ``finally`` фазы.
-            pool_key: tuple[DocumentLevel, int] | None = (
-                (level, extract_window) if extract_window is not None else None
+            #: C1/P7: ключ фазового пула — уровень документа + механизм PDF + окно
+            #: экстракции. Пул один на прогон и переиспользуется всеми корнями/продуктами
+            #: с тем же ключом (forkserver и веса конвертера платятся один раз);
+            #: ``shutdown`` — один раз в ``finally`` фазы.
+            pool_key: _ExtractPoolKey | None = (
+                (level, pdf_pipeline, extract_window)
+                if extract_window is not None
+                else None
             )
             #: Исполнять ли экстракцию в пуле (снимается inline-fallback'ом при отказе).
             defer_extract = extract_window is not None and extraction_pool is not None
@@ -5686,11 +5727,12 @@ def _build_corpus(
                     # P4/OOM: счётчик заданий на процесс — воркер пересоздаётся
                     # (initializer `_extract_worker_init` строит экстрактор заново).
                     return extraction_pool.pool_factory(  # type: ignore[union-attr]
-                        extract_window, level, max_tasks_per_child=recycle_tasks
+                        extract_window, level, pdf_pipeline=pdf_pipeline,
+                        max_tasks_per_child=recycle_tasks,
                     )
-                # Ось не задана — прежний вызов (поведение байт-в-байт).
+                # Счётчик рециклинга не задан — вызов без него (остальное то же).
                 return extraction_pool.pool_factory(  # type: ignore[union-attr]
-                    extract_window, level
+                    extract_window, level, pdf_pipeline=pdf_pipeline
                 )
 
             def _descend_container(
@@ -5770,6 +5812,7 @@ def _build_corpus(
                                 fetched_at=page.fetched_at,
                                 lang=page.lang,
                                 level=level,
+                                pdf_pipeline=pdf_pipeline,
                                 rss_dir=worker_rss_dir,
                             ),
                         )
@@ -6034,6 +6077,7 @@ def _build_corpus(
                     engine=page.engine,
                     route=fetch_plan.extract,
                     level=level,
+                    pdf_pipeline=pdf_pipeline,
                     cache_root=(
                         str(extract_cache.root) if extract_cache is not None else None
                     ),

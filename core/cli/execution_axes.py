@@ -197,6 +197,30 @@ def _resolve_llm_scenarios(
     return (row,)
 
 
+def _crawl_axis_overrides(args: argparse.Namespace) -> dict[str, Any]:
+    """Операторские оси краула из CLI (``--document-level``/``--pdf-pipeline``).
+
+    Это **объявление** прогона, а не уточнение исполнения: обе оси меняют текст документа
+    (уровень docling / механизм PDF), значит корпус и ``run_id`` (§13). Слой применяется
+    к разрешённой конфигурации (поверх app < run < site) в
+    :func:`core.pipeline.report.crawl_control_digest`; здесь — только чтение флагов.
+
+    Отдельный шаг вместо подстановки в ``inputs.run.crawl``: синтез секции ``crawl``
+    объявил бы за оператора и остальные оси (``strategy`` имеет непустой дефолт), и
+    ``--pdf-pipeline structured`` — эффективно no-op — дал бы другой ``run_id``.
+
+    ``{}`` — оси не заданы (поведение и ``run_id`` неизменны).
+    """
+    overrides: dict[str, Any] = {}
+    document_level = getattr(args, "document_level", None)
+    if document_level is not None:
+        overrides["document_level"] = getattr(document_level, "value", document_level)
+    pdf_pipeline = getattr(args, "pdf_pipeline", None)
+    if pdf_pipeline is not None:
+        overrides["pdf_pipeline"] = getattr(pdf_pipeline, "value", pdf_pipeline)
+    return overrides
+
+
 def resolve_declared_axes(
     *,
     args: argparse.Namespace,
@@ -221,6 +245,7 @@ def resolve_declared_axes(
     config = deploy if deploy is not None else DeployConfig(profile="local")
     run = getattr(inputs, "run", None)
     run_crawl = getattr(run, "crawl", None)
+    axis_overrides = _crawl_axis_overrides(args)
     deploy_fields = manifest_deploy_fields(config)
     return DeclaredExecutionAxes(
         crawl_strategy=_crawl_strategy(run_crawl),
@@ -231,6 +256,9 @@ def resolve_declared_axes(
             run_crawl=run_crawl,
             app=config.crawl,
             profiles=getattr(inputs, "domain_profiles", None),
+            # P5/P7: операторские оси краула применяются поверх разрешённой цепочки —
+            # флаг CLI объявляет этот прогон (меняет текст документа ⇒ ``run_id``).
+            overrides=axis_overrides,
         ),
         registry_spec_digest=registry_specs_digest(_load_registry_specs(args, inputs)),
         deploy_profile=deploy_fields["deploy_profile"],

@@ -70,6 +70,7 @@ from core.domain.enums import (
     EndpointKind,
     Gate,
     LLMScenario,
+    PdfPipeline,
     Status,
 )
 from core.domain.models import CatalogRow, Cohort, ScenarioBinding
@@ -1410,6 +1411,9 @@ def _resolve_ports(
             else None
         ),
         cli_max_depth=getattr(args, "max_depth", None),
+        # P7: механизм PDF — объявленная ось прогона; порты (пробный экстрактор,
+        # диагностика) обязаны видеть тот же, что и Ш5 (``--pdf-pipeline``).
+        pdf_pipeline=getattr(args, "pdf_pipeline", None),
         # P4a/I17: store — источник персистентных чанков для лексического индекса и
         # резолвер метаданных для dense-плеча. Без него оба билдера возвращают ``None``.
         store=store,
@@ -1761,6 +1765,7 @@ def _resolve_phases(
     exclude_paths: Sequence[str] | None = None,
     exclude_documents: Sequence[str] | None = None,
     document_level: DocumentLevel | None = None,
+    pdf_pipeline: PdfPipeline | None = None,
     state: Any = None,
     product_modes: Mapping[str, str] | None = None,
     refresh_policy: str = "auto",
@@ -1914,6 +1919,8 @@ def _resolve_phases(
         "exclude_documents": list(exclude_documents) if exclude_documents else None,
         # P5: CLI-уточнение run-слоя уровня извлечения документов (--document-level).
         "document_level": document_level,
+        # P7: CLI-уточнение run-слоя механизма извлечения PDF (--pdf-pipeline).
+        "pdf_pipeline": pdf_pipeline,
         # 09 §6.3 (MVP-3b): durable-субстрат пакета, режимы продуктов и политика наблюдения
         # → build_corpus. ``state=None`` (dry-run/``crawl``) — поведение байт-в-байт.
         "state": state,
@@ -2187,6 +2194,19 @@ def _document_level(raw: str) -> DocumentLevel:
         ) from exc
 
 
+def _pdf_pipeline(raw: str) -> PdfPipeline:
+    """``argparse``-тип оси ``--pdf-pipeline`` (P7): значение enum ``PdfPipeline``.
+
+    :raises argparse.ArgumentTypeError: значение вне ``structured|text_layer``.
+    """
+    try:
+        return PdfPipeline(raw)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            f"ожидался один из structured|text_layer, получено {raw!r}"
+        ) from exc
+
+
 def _non_negative_int(raw: str) -> int:
     """``argparse``-тип: целое ``>= 0`` (для ``--max-depth``; 0 — только seeds, D1).
 
@@ -2321,6 +2341,19 @@ def _add_phase4_flags(parser: argparse.ArgumentParser) -> None:
         help=(
             "уровень извлечения документов: off|text|layout|layout_tables|full "
             "(дефолт full = сегодняшнее поведение)"
+        ),
+    )
+    # P7: механизм извлечения PDF (run-слой поверх run.yaml). ``document_level`` действует
+    # только при ``structured``: у текстового слоя уровней нет.
+    parser.add_argument(
+        "--pdf-pipeline",
+        dest="pdf_pipeline",
+        type=_pdf_pipeline,
+        default=None,
+        metavar="PIPELINE",
+        help=(
+            "механизм извлечения PDF: structured|text_layer "
+            "(дефолт structured = docling: layout/таблицы/OCR)"
         ),
     )
     parser.add_argument(

@@ -43,6 +43,7 @@ from core.domain.enums import (
     CrawlItemStatus,
     CrawlSessionStatus,
     DocumentLevel,
+    PdfPipeline,
     SkipReason,
 )
 from core.domain.models import (
@@ -618,7 +619,7 @@ def build_phases(
     crawl_sources: CrawlSourcesConfig | None = None,
     rate_limiter: RateLimiter | None = None,
     extraction_pool: ExtractionPool | None = None,
-    extractor_factory: Callable[[DocumentLevel], ExtractorPort] | None = None,
+    extractor_factory: Callable[[DocumentLevel, PdfPipeline], ExtractorPort] | None = None,
     extract_cache: ExtractionCache | None = None,
     eval_cache: EvalVerdictCache | None = None,
     satellites: Sequence[Satellite] = (),
@@ -636,6 +637,7 @@ def build_phases(
     exclude_documents: Sequence[str] | None = None,
     crawl_app: CrawlConfig | None = None,
     document_level: DocumentLevel | None = None,
+    pdf_pipeline: PdfPipeline | None = None,
     state: Any = None,
     product_modes: Mapping[str, str] | None = None,
     refresh_policy: str = "auto",
@@ -827,6 +829,8 @@ def build_phases(
             override["exclude_documents"] = list(exclude_documents)
         if document_level is not None:
             override["document_level"] = document_level
+        if pdf_pipeline is not None:
+            override["pdf_pipeline"] = pdf_pipeline
         if override:
             base = run_crawl if run_crawl is not None else CrawlRunConfig()
             run_crawl = base.model_copy(update=override)
@@ -1024,6 +1028,9 @@ def build_phases(
             # манифест, чтобы смена осей на app/per-site слое тоже давала execution_change.
             domain_profiles=domain_profiles,
             crawl_app=crawl_app,
+            # P5: операторский ``--document-level`` — в провенанс манифеста, а не только в
+            # дайджест: манифест обязан называть уровень, которым реально извлекали.
+            operator_document_level=document_level,
             # E2/§13: дайджест загруженных package-scoped спецификаций реестров — провенанс
             # аудируемости (R7). Composition root кладёт его на ``Ports``; здесь лишь
             # прокидывается в манифест (``None`` — реестры не сконфигурированы).

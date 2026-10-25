@@ -645,6 +645,73 @@ def test_llm_model_flag_is_part_of_declared_axes_parity(
     assert _payload(capsys)["run_id"] != run_id
 
 
+def test_pdf_pipeline_flag_is_part_of_execution_contract(
+    tmp_path: Path, home: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """``--pdf-pipeline`` — ось механизма извлечения, а не уточнение исполнения (§13).
+
+    Механизм определяет текст документа, значит корпус: прогон с ``text_layer`` — другое
+    измерение. Поэтому флаг обязан попадать в ``crawl_config_digest`` → ``run_id`` (иначе
+    два разных корпуса жили бы под одним идентификатором), а ``run`` и ``crawl`` —
+    считать его одинаково. Дефолт без флага — прежний (``structured``/docling).
+    """
+    package = valid_package(tmp_path)
+    common = _common(package)
+
+    assert main(["run", *common, "--dry-run"]) == EXIT_OK
+    default_id = _payload(capsys)["run_id"]
+
+    assert main(["run", *common, "--dry-run", "--pdf-pipeline", "structured"]) == EXIT_OK
+    structured_id = _payload(capsys)["run_id"]
+    assert structured_id == default_id
+
+    assert main(["run", *common, "--dry-run", "--pdf-pipeline", "text_layer"]) == EXIT_OK
+    text_layer_id = _payload(capsys)["run_id"]
+    assert text_layer_id != default_id
+
+    # Паритет: ``crawl`` адресует тот же прогон, что ``run``.
+    assert (
+        main(
+            [
+                "crawl",
+                "run",
+                *common,
+                "--until",
+                "plan",
+                "--pdf-pipeline",
+                "text_layer",
+            ]
+        )
+        == EXIT_OK
+    )
+    assert _payload(capsys)["run_id"] == text_layer_id
+
+
+def test_document_level_flag_is_part_of_execution_contract(
+    tmp_path: Path, home: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """``--document-level`` — тот же класс оси: уровень меняет текст, значит ``run_id``.
+
+    Регресс на подмену: значения флагов применялись только при сборке фаз, поэтому
+    ``run_id`` объявлял один уровень извлечения, а измерялся другой.
+    """
+    package = valid_package(tmp_path)
+    common = _common(package)
+
+    assert main(["run", *common, "--dry-run"]) == EXIT_OK
+    default_id = _payload(capsys)["run_id"]
+
+    assert main(["run", *common, "--dry-run", "--document-level", "text"]) == EXIT_OK
+    text_id = _payload(capsys)["run_id"]
+    assert text_id != default_id
+
+    assert (
+        main(["crawl", "run", *common, "--until", "plan", "--document-level", "text"])
+        == EXIT_OK
+    )
+    assert _payload(capsys)["run_id"] == text_id
+
+
 def test_env_model_ignored_notice_is_visible_once_in_run_payload(
     tmp_path: Path,
     home: Path,

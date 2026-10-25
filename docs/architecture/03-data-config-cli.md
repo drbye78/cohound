@@ -552,6 +552,23 @@ false ❌ I2/I2b), а сеанс не рапортуется `COMPLETED`. `off` 
 Блэклисты (`exclude_documents`) **побеждают** `off` (проверяются раньше и по другому ключу —
 basename/path без знания content-type); «полная» экономия фетча — только блэклист/суффикс.
 
+**`pdf_pipeline` (P7) — механизм извлечения PDF.** Ось `crawl.pdf_pipeline`
+(`structured` — дефолт, `text_layer`) объявляет **механизм**, а не библиотеку, и едет той же
+цепочкой `app < run < site`; операторский вход — `--pdf-pipeline`
+(`run`, `crawl run|resume|restart`), он применяется **поверх** разрешённой цепочки и потому
+входит в `crawl_config_digest` → `run_id` (**`execution_change`**, §13): другой механизм —
+другой текст документа, то есть другой корпус. `structured` = сегодняшнее поведение
+(docling, лестница `document_level` действует); `text_layer` — только текстовый слой pdfium
+(`core/adapters/extract_pdf_text.py`): без чтения порядка, таблиц и OCR, поэтому **уровней у
+него нет** и `document_level` к нему не применяется (объявлять несуществующий уровень =
+ложный провенанс). Механизм входит в наблюдаемый `extractor_version`
+(`pdfium-text-1`) → новая индексная сборка. Явно выбранный `text_layer` без `pypdfium2`
+(extra `extract`) — `EXIT_USAGE`, а **не** тихий переход на docling. Замер на retained-корпусе
+(246 PDF, 16 073 страницы): открылись все 246, извлечение — 0.03–0.06 s на документ
+(6–12 страниц); **183** страницы (**1.14 %**) без текстового слоя дают видимый отказ
+`no_text_layer`, а не пустой документ. Под `split` ось не действует: экстрактор — remote,
+конвертеры строит edge (R-S).
+
 **Память по уровням.** Пик = `parent_floor + W × peak(level корня)` (`W` = `extract_workers`),
 где замеренные пики — `text` 855 MB, `layout` 1563, `layout_tables` **3679**, `full` 3107,
 `parent_floor` ≈ 500 MB (`docs/reports/measurements/2026-10-23-docling-level-peaks.md`,
@@ -563,7 +580,9 @@ basename/path без знания content-type); «полная» экономи
 **максимум** по корням, а **не** сумма: прогон с site A `full` и site B `off` не складывает
 память. `off`-корень docling не строит вовсе (0). Операторский escape hatch от «слишком
 медленного PDF» — понизить уровень per-site (`domain_profiles.yaml: document_level: layout`),
-взять `off` или объявить `extract_workers` — **без правки кода**.
+взять `off` или объявить `extract_workers` — **без правки кода**. Для `text_layer` пик **не
+замерен**: окно считается по пикам уровней docling (консервативно) — подставлять догадку
+вместо замера нельзя (A3), а `document_level` у механизма нет.
 
 **Развёртывание `split`.** Под `split` документную **экстракцию** исполняет **edge** своим
 конфигом; поэтому уровни **качества** извлечения (`text`/`layout`/`layout_tables`/`full`) в

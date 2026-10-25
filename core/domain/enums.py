@@ -381,6 +381,32 @@ class DocumentLevel(StrEnum):
     FULL = "full"
 
 
+class PdfPipeline(StrEnum):
+    """P7: **механизм** извлечения PDF (ось ``crawl.pdf_pipeline``).
+
+    Ось называет механизм, а не библиотеку: конкретная реализация и её сборка
+    записываются в ``extractor_version`` документа (``docling-doc-3:full/docling-<build>``
+    либо ``pdfium-text-1``). Поэтому замена библиотеки **внутри** того же механизма видна
+    в провенансе и в ключе ``extract_cache`` (``(content_hash, extractor_version,
+    level)``), но не меняет смысл оси: прогон остаётся «тем же механизмом».
+
+    * ``structured`` — документный конвейер **со структурой**: layout-модели,
+      реконструкция таблиц, OCR. Сегодня это docling; ось ``crawl.document_level``
+      действует именно здесь.
+    * ``text_layer`` — только **текстовый слой** PDF, без моделей: страницы читаются
+      штатным парсером файла, порядок — документный, таблицы/сканы не восстанавливаются.
+      Уровня у этого механизма нет (выдумывать ``text_layer``-лестницу нечего), поэтому
+      ``crawl.document_level`` на него не действует.
+
+    Операционное перечисление (commodity-слой, A2): его смена — граница класса
+    ``execution_change`` (§13), не ``methodology_change``. Источник истины —
+    ``docs/status-dictionary.yaml`` (секция ``pdf_pipeline``).
+    """
+
+    STRUCTURED = "structured"
+    TEXT_LAYER = "text_layer"
+
+
 class ArchiveDescent(StrEnum):
     """P6: глубина спуска в **контейнеры** (ось ``crawl.archive_descent``).
 

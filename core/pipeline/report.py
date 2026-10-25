@@ -497,11 +497,17 @@ def _document_level_value(value: Any) -> str | None:
     return str(getattr(value, "value", value))
 
 
+def _axis_value(value: Any) -> Any:
+    """Значение оси в канонической форме: ``StrEnum`` → строка (дайджест — это JSON)."""
+    return getattr(value, "value", value)
+
+
 def crawl_control_digest(
     *,
     run_crawl: Any,
     app: Any,
     profiles: Mapping[str, Any] | None,
+    overrides: Mapping[str, Any] | None = None,
 ) -> str | None:
     """Стабильный дайджест **разрешённой** конфигурации контроля краула (N6/§13).
 
@@ -514,23 +520,36 @@ def crawl_control_digest(
     Публичная функция (не только внутренняя деталь манифеста): composition root
     (:mod:`core.cli.execution_axes`) вызывает её для **декларированной** оси контракта.
     Одна формула — два потребителя (контракт и манифест), иначе они разошлись бы.
+
+    :param overrides: операторский слой (``--document-level``/``--pdf-pipeline``): значения
+        применяются к **разрешённому** словарю, то есть поверх app < run < per-site.
+        Причина — флаг оператора есть объявление этого прогона, а не «уточнение
+        исполнения»: ось меняет текст документа, значит корпус. Применение **здесь**, а не
+        синтезом секции ``crawl`` в ``inputs.run``, сохраняет честность остальных осей:
+        иначе ``run.yaml`` без секции ``crawl`` объявил бы ``strategy=auto``, которого в нём
+        нет, и ``--pdf-pipeline structured`` (эффективно no-op) дал бы другой ``run_id``.
+        ``None`` — оператор ось не задавал (поведение байт-в-байт).
     """
     from core.config.deploy import CrawlConfig
 
     app_config = app if isinstance(app, CrawlConfig) else CrawlConfig()
-    payload: dict[str, Any] = {
-        "__default__": resolve_crawl_limits(
-            "", app=app_config, run=run_crawl, profiles={}
-        ).as_dict()
-    }
+    operator = {key: _axis_value(value) for key, value in (overrides or {}).items()}
+
+    def _resolved(url: str, sites: Mapping[str, Any]) -> dict[str, Any]:
+        payload = dict(
+            resolve_crawl_limits(url, app=app_config, run=run_crawl, profiles=sites).as_dict()
+        )
+        payload.update(operator)
+        return payload
+
+    payload: dict[str, Any] = {"__default__": _resolved("", {})}
     site_profiles = dict(profiles or {})
     for key in sorted(site_profiles):
         url = str(key) if "://" in str(key) else f"https://{key}"
-        payload[str(key)] = resolve_crawl_limits(
-            url, app=app_config, run=run_crawl, profiles=site_profiles
-        ).as_dict()
+        payload[str(key)] = _resolved(url, site_profiles)
     material = json.dumps(payload, sort_keys=True, ensure_ascii=False)
     return short_hash(material, 24)
+
 
 
 def build_manifest(
@@ -551,6 +570,7 @@ def build_manifest(
     crawl_provenance: CrawlProvenance | Mapping[str, Any] | None = None,
     domain_profiles: Mapping[str, Any] | None = None,
     crawl_app: Any = None,
+    operator_document_level: str | None = None,
     registry_spec_digest: str | None = None,
     execution_contract_digest: str | None = None,
     axes: Any = None,
@@ -598,6 +618,10 @@ def build_manifest(
       ``embed_model_id``/``lexical_engine_version``/``vector_store``) по-прежнему
       приходят из ``run``/``inputs`` (их пишет фаза отчёта из корпуса/диска) и в контракт
       не входят. ``axes=None`` — legacy/модульный вызов: прежние цепочки ``_first_present``.
+    * P5/P7 — ``operator_document_level`` (``--document-level``): операторская ступень
+      сильнее run/app-слоя, поэтому ``crawl_document_level`` манифеста называет именно её.
+      Без этого провенанс расходился бы с ``crawl_config_digest`` (манифест: ``full``,
+      дайджест: ``text``) — «одно значение в отпечатке, другое в публикации».
 
     Деплой-провенанс (``deploy_profile``/``edge_schema_version``) заполняется только если
     соответствующие поля есть в текущей схеме :class:`RunManifest` (defensive: иначе
@@ -751,11 +775,11 @@ def build_manifest(
     crawl_extract_workers: int | None = None
     crawl_extract_max_tasks_per_child: int | None = None
     crawl_max_response_bytes: int | None = None
-    crawl_document_level: str | None = None
     crawl_max_depth: int | None = None
     crawl_max_documents: int | None = None
     crawl_exclude_paths: list[str] = []
     crawl_exclude_documents: list[str] = []
+    crawl_document_level: str | None = None
     if crawl_cfg is not None:
         strategy_value = getattr(crawl_cfg, "strategy", None)
         crawl_strategy = (
@@ -779,10 +803,15 @@ def build_manifest(
         crawl_document_level = _document_level_value(
             getattr(crawl_cfg, "document_level", None)
         )
-    # P5: если run-слой не задал уровень явно — фиксируем **эффективный дефолт** app-слоя
-    # (``CrawlConfig.document_level``, дефолт ``full``), чтобы манифест не молчал об оси.
-    # ``crawl_app`` может быть не передан (модульные теста/исторические вызовы) — тогда
-    # ``None`` (значение не выдумываем: A3).
+    # P5: операторский уровень (``--document-level``) — самая сильная ступень цепочки: он
+    # применён к разрешённой конфигурации и уже вошёл в ``crawl_config_digest``, поэтому
+    # манифест обязан называть именно его (иначе манифест: ``full``, дайджест: ``text``).
+    if operator_document_level is not None:
+        crawl_document_level = _document_level_value(operator_document_level)
+    # P5: если уровень не задан ни оператором, ни run-слоем — фиксируем **эффективный
+    # дефолт** app-слоя (``CrawlConfig.document_level``, дефолт ``full``), чтобы манифест не
+    # молчал об оси. ``crawl_app`` может быть не передан (модульные теста/исторические
+    # вызовы) — тогда ``None`` (значение не выдумываем: A3).
     if crawl_document_level is None:
         from core.config.deploy import CrawlConfig
 

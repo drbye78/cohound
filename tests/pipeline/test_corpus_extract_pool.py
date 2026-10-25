@@ -296,7 +296,7 @@ class _FakePool:
 
 def _recording_factory(created: list[_FakePool], **kw: Any):
     # P5: фабрика получает (размер, уровень) — уровень здесь несущественен (фейк).
-    def factory(n: int, level: Any = None) -> _FakePool:
+    def factory(n: int, level: Any = None, pdf_pipeline: Any = None) -> _FakePool:
         pool = _FakePool(n, **kw)
         created.append(pool)
         return pool
@@ -454,7 +454,13 @@ def test_extract_max_tasks_per_child_w1_uses_pool(tmp_path: Path) -> None:
 
     created: list[_FakePool] = []
 
-    def factory(n: int, level: Any = None, *, max_tasks_per_child: int | None = None):
+    def factory(
+        n: int,
+        level: Any = None,
+        pdf_pipeline: Any = None,
+        *,
+        max_tasks_per_child: int | None = None,
+    ):
         fake = _FakePool(n)
         fake.max_tasks_per_child = max_tasks_per_child
         created.append(fake)
@@ -487,7 +493,13 @@ def test_extract_max_tasks_per_child_with_w2(tmp_path: Path) -> None:
     pages = _site_dup()
     created: list[_FakePool] = []
 
-    def factory(n: int, level: Any = None, *, max_tasks_per_child: int | None = None):
+    def factory(
+        n: int,
+        level: Any = None,
+        pdf_pipeline: Any = None,
+        *,
+        max_tasks_per_child: int | None = None,
+    ):
         fake = _FakePool(n)
         fake.max_tasks_per_child = max_tasks_per_child
         created.append(fake)
@@ -763,7 +775,7 @@ def test_extract_failure_keeps_out_links_like_inline(tmp_path: Path) -> None:
         # (c) пул, воркер умер (``BrokenProcessPool`` на root) — регресс-путь ``_fail_extract``.
         created: list[_FakePool] = []
 
-        def crash_factory(n: int, level: Any = None) -> _FakePool:
+        def crash_factory(n: int, level: Any = None, pdf_pipeline: Any = None) -> _FakePool:
             # 1-й пул: падает на 1-м ``result()``; 2-й (rebuild): рабочий.
             fake = _FakePool(n, crash_on=1 if not created else None)
             created.append(fake)
@@ -810,7 +822,7 @@ def test_extract_worker_crash_reaps_and_degrades(tmp_path: Path) -> None:
         pages = _site_dup()
         created: list[_FakePool] = []
 
-        def factory(n: int, level: Any = None) -> _FakePool:
+        def factory(n: int, level: Any = None, pdf_pipeline: Any = None) -> _FakePool:
             # 1-й пул: падает на 2-м ``result()``; 2-й (rebuild): рабочий.
             crash_on = 2 if not created else None
             fake = _FakePool(n, crash_on=crash_on)
@@ -988,6 +1000,8 @@ def test_extract_request_carries_no_bytes(tmp_path: Path) -> None:
         "route",
         # P5: уровень извлечения (аддитивное поле payload; примитив StrEnum).
         "level",
+        # P7: механизм извлечения PDF (аддитивное поле payload; примитив StrEnum).
+        "pdf_pipeline",
         # Ф1.2: корень и бюджет межпрогонного кэша экстракции — примитивы, не объект
         # кэша: воркер строит свой экземпляр (иначе счётчики были бы копией родителя).
         "cache_root",
@@ -1338,7 +1352,7 @@ def test_extract_pool_rebuild_exhaustion_is_terminal_no_inline(tmp_path: Path) -
         _make_run(store)
         created: list[_FakePool] = []
 
-        def always_crash(n: int, level: Any = None) -> _FakePool:
+        def always_crash(n: int, level: Any = None, pdf_pipeline: Any = None) -> _FakePool:
             fake = _FakePool(n, crash_on=1)
             created.append(fake)
             return fake

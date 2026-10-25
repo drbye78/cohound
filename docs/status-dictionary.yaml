@@ -330,6 +330,18 @@ document_level:
   - layout_tables
   - full
 
+# P7. Механизм извлечения PDF (crawl.pdf_pipeline): ось объявляет **механизм**, а не
+# библиотеку — конкретная реализация и её сборка записываются в `extractor_version`
+# (`docling-doc-3:<level>/docling-<build>` либо `pdfium-text-1`), поэтому смена библиотеки
+# внутри механизма видна в провенансе и ключе `extract_cache`, но не меняет смысл оси.
+# Операционное перечисление (commodity-слой, A2) — добавление без бампа версии словаря.
+# Значения: structured — документный конвейер со структурой (layout-модели, таблицы, OCR;
+# сегодня docling; только здесь действует `document_level`); text_layer — только текстовый
+# слой PDF, без моделей. Дефолт — structured (сегодняшнее поведение).
+pdf_pipeline:
+  - structured
+  - text_layer
+
 # §4.1/§5. Семейство документа — выбор чанкера (``ExtractedDoc.family`` →
 # ``chunker_family``): markdown → чанкер с ``heading_path``, text → абзацный,
 # epub → читатель stdlib-OCF + текстовый чанкер. Де-факто перечисление: в коде это

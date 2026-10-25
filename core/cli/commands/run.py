@@ -387,6 +387,8 @@ def run(args: argparse.Namespace) -> int:
     # R7 (07 §7) + §13 (методология 2.4.0): деплой-конфиг и **декларированные** оси нужны
     # ДО контракта — они входят в него (deploy-профиль, версия seam-схемы, оси краула,
     # стек извлечения). Один резолвер на контракт и манифест: второй формулы нет.
+    # P5/P7: операторские оси краула поднимаются в run-слой **до** контракта: они меняют
+    # механизм извлечения, то есть текст корпуса, и обязаны попасть в ``run_id``.
     deploy_config = load_deploy_config(None)
     try:
         declared = resolve_declared_axes(
@@ -674,6 +676,7 @@ def run(args: argparse.Namespace) -> int:
         exclude_paths = getattr(args, "exclude_paths", None)
         exclude_documents = getattr(args, "exclude_documents", None)
         document_level = getattr(args, "document_level", None)
+        pdf_pipeline = getattr(args, "pdf_pipeline", None)
         follow = bool(getattr(args, "follow", False))
         interval = float(getattr(args, "interval", 1.0) or 0.0)
         session_id = default_session_id(run_id)
@@ -773,6 +776,7 @@ def run(args: argparse.Namespace) -> int:
                 exclude_paths=exclude_paths,
                 exclude_documents=exclude_documents,
                 document_level=document_level,
+                pdf_pipeline=pdf_pipeline,
                 progress=(
                     _progress_callback(session_id=session_id, json_mode=bool(args.json))
                     if follow

@@ -30,7 +30,7 @@ from typing import Any
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from core.domain.enums import ArchiveDescent, DocumentLevel
+from core.domain.enums import ArchiveDescent, DocumentLevel, PdfPipeline
 from core.domain.models import (
     DEFAULT_ARCHIVE_MAX_MEMBER_BYTES,
     DEFAULT_ARCHIVE_MAX_TOTAL_UNCOMPRESSED_BYTES,
@@ -422,6 +422,13 @@ class CrawlConfig(BaseModel):
     # та же цепочка app < run < site (:func:`core.pipeline.crawl_frontier.resolve_crawl_limits`),
     # per seed-root. ``off`` — документы не извлекаются (видимые ``document_skips``).
     document_level: DocumentLevel = DocumentLevel.FULL
+    # P7: механизм извлечения PDF (``crawl.pdf_pipeline``). Это условие измерения состава
+    # текста, а не удобство: ``structured`` (дефолт = сегодняшнее поведение) гоняет
+    # layout-модели/таблицы/OCR через docling, ``text_layer`` читает только текстовый
+    # слой. Разный механизм — разный текст документа, поэтому ось входит в
+    # ``crawl_config_digest`` и меняет ``run_id`` (``execution_change``, §13).
+    # ``crawl.document_level`` действует только при ``structured``.
+    pdf_pipeline: PdfPipeline = PdfPipeline.STRUCTURED
     # D1/§10 (N1): явное включение/выключение принуждения ``robots.txt`` в адаптерах
     # (egress-слой). ``None`` = auto: robots включается ровно тогда, когда включён обход
     # (любой эффективный ``max_depth > 0`` или сконфигурированный per-site ``sitemap``),

@@ -38,6 +38,7 @@ from core.domain.enums import (
     CellState,
     ChangeClass,
     CrawlStrategy,
+    DocumentLevel,
     EndpointKind,
     LLMScenario,
     RankingPolicy,
@@ -416,6 +417,44 @@ def test_build_manifest_carries_crawl_axes_from_run_config() -> None:
     assert manifest.crawl_rate_limit == canonical_rate_limit(
         RateLimitSpec(min_s=0.5, max_s=2.0)
     )
+
+
+def test_build_manifest_operator_document_level_wins() -> None:
+    """P5: операторский ``--document-level`` виднее run/app — манифест называет его.
+
+    Иначе провенанс расходился бы с ``crawl_config_digest``: манифест сказал бы уровень
+    run/``app``-слоя, а извлекали бы другим (``full`` в публикации, ``text`` в отпечатке).
+    """
+    cfg = RunConfig(
+        case_id="case-1",
+        anchor=PRODUCT_A,
+        cohort="cohort-1",
+        products=[PRODUCT_A],
+        package="pkg",
+        snapshot_date=_dt.date(2026, 1, 1),
+        mode=RunMode.STRICT,
+        crawl=CrawlRunConfig(document_level=DocumentLevel.LAYOUT),
+    )
+    inputs = SimpleNamespace(run=cfg, package=None)
+    plan = SimpleNamespace(
+        run_id="run-level", anchor=PRODUCT_A, modules=[], cohort_ref="cohort-1"
+    )
+
+    # Без оператора — уровень run-слоя.
+    base = build_manifest(
+        inputs=inputs, plan=plan, created_at="2026-01-01T00:00:00Z"  # type: ignore[arg-type]
+    )
+    assert base.crawl_document_level == "layout"
+
+    # Оператор сильнее run/app-слоя (``CrawlConfig`` здесь — app-дефолт ``full``).
+    operator = build_manifest(
+        inputs=inputs,  # type: ignore[arg-type]
+        plan=plan,  # type: ignore[arg-type]
+        created_at="2026-01-01T00:00:00Z",
+        crawl_app=CrawlConfig(document_level=DocumentLevel.FULL),
+        operator_document_level="text",
+    )
+    assert operator.crawl_document_level == "text"
 
 
 def test_build_manifest_crawl_axes_none_without_section() -> None:
