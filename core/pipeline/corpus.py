@@ -350,6 +350,36 @@ _CLEAR = object()
 #: P0: размер порции потокового хеширования retained-байтов (resume).
 _RESUME_READ_CHUNK = 1024 * 1024
 
+#: Наблюдаемость эмбеддинга: число чанков в одном батче **на уровне фазы**
+#: (Pass B, :func:`_embed_and_build`).
+#:
+#: Почему внешний батч, если :meth:`EmbedderPort.embed` режет вход сам: внутренняя нарезка
+#: адаптера — его деталь, и между её батчами у фазы нет точки наблюдения. Один вызов на весь
+#: продукт — это участок без признака жизни: 2026-10-25 прогон простоял 24 минуты на 505 % CPU
+#: с неподвижным heartbeat, и «работает» было неотличимо от «повесился». Внешний батч даёт
+#: границу, на которой фаза пишет heartbeat и счётчик прогресса.
+#:
+#: Величина — компромисс двух ограничений:
+#:
+#: * **Наблюдаемость.** Дефолтный ``chunk_size`` — 1500 символов; замер этого хоста
+#:   (``docs/reports/measurements/2026-10-25-run-stall-embedding.md``) — 1173 мс/чанк. 64 чанка
+#:   = окно ~75 с между точками жизни. Порог stale сеанса — 600 с, то есть запас восьмикратный,
+#:   и оператор с ``--follow`` видит движение раз в батч, а не «никогда».
+#: * **Память.** Тексты батча материализуются по мере обхода (список ссылок на
+#:   ``chunk.text`` не строится на весь продукт), векторы батча добавляются к накопителю.
+#:   Накопитель векторов всё равно полон: партиция собирается одним вызовом
+#:   ``IndexBuilderPort.build(chunks, vectors, meta)``, который требует все векторы сразу —
+#:   это контракт порта, а не выбор корпуса (пик памяти ограничивается там, не здесь).
+#:
+#: Кратность 32 (внутренний батч ``LocalEmbedder``) держит нарезку совпадающей с внутренней,
+#: поэтому результат побитово тот же, что у одного вызова (детерминизм, A3).
+EMBED_BATCH_CHUNKS = 64
+
+#: Наблюдаемость эмбеддинга: вес нового замера в экспоненциальном сглаживании темпа эмбеддинга
+#: (:class:`_EmbedThroughput`). 0.3 — темп реагирует на смену длины чанков за 3–4 батча, но
+#: не скачет от одного медленного батча (первый батч включает ленивую загрузку модели).
+_EMBED_RATE_ALPHA = 0.3
+
 #: Статус активной версии документа (``document_version.status``, 09 §4.2).
 _DOC_ACTIVE = "active"
 #: Статус вытесненной версии: документ больше не наблюдается по URL (``404``/``410``, 09 §6.3).
@@ -1951,6 +1981,163 @@ def _entry_chunks(entry: IndexManifestEntry) -> int:
     return int(value) if isinstance(value, int) else 0
 
 
+@dataclass
+class _EmbedThroughput:
+    """Наблюдаемый темп батчевого эмбеддинга: EMA по батчам одного продукта.
+
+    **Почему измерение, а не константа (A3).** Цена чанка зависит от длины текста, модели и
+    CPU: замер этого хоста даёт 374 мс на 500 символов, 1173 мс на 1500 и 1916 мс на 3000.
+    Предсказывать её константой значило бы объявить то, что измеряется; поэтому остаток
+    оценивается по фактическому темпу **текущего** прогона.
+
+    Сглаживание (``alpha`` = :data:`_EMBED_RATE_ALPHA`) нужно, чтобы первый батч — с ленивой
+    загрузкой модели — не определял оценку на весь продукт, а один медленный батч не дёргал
+    её на порядок.
+    """
+
+    #: Вес нового замера (0 < alpha ≤ 1).
+    alpha: float = _EMBED_RATE_ALPHA
+    #: Сглаженный темп, чанков/с (``None`` — замеров ещё не было).
+    rate: float | None = None
+    #: Сколько чанков уже эмбеддировано (по последнему замеру).
+    done: int = 0
+    #: Прошедшее время эмбеддинга на последнем замере, с.
+    elapsed: float = 0.0
+
+    def observe(self, done: int, elapsed: float) -> float | None:
+        """Учитывает границу батча и возвращает сглаженный темп (чанков/с).
+
+        Замер без прироста (нулевой интервал/повтор того же счётчика) темпа не меняет:
+        делить на него нельзя, а подставлять ноль значило бы объявить остановку.
+        """
+        delta_n = done - self.done
+        delta_t = elapsed - self.elapsed
+        self.done = done
+        self.elapsed = elapsed
+        if delta_n <= 0 or delta_t <= 0:
+            return self.rate
+        sample = delta_n / delta_t
+        self.rate = (
+            sample
+            if self.rate is None
+            else self.alpha * sample + (1.0 - self.alpha) * self.rate
+        )
+        return self.rate
+
+    def eta_seconds(self, done: int, total: int) -> int | None:
+        """Оценка остатка, с (``None`` — темпа ещё нет; ``0`` — работа закончена)."""
+        if done >= total:
+            return 0
+        if self.rate is None or self.rate <= 0:
+            return None
+        return int(round((total - done) / self.rate))
+
+
+def format_embed_progress(
+    done: int, total: int, rate: float | None, eta_s: int | None
+) -> str:
+    """Человекочитаемая строка эмбеддинга: ``N/M чанков, X чанк/с, осталось ~Y мин``.
+
+    Остаток печатается только пока работа не закончена (``done < total``): «осталось ~0 мин»
+    на завершённом продукте — шум, а не факт. Темп печатается с двумя знаками: при 1173 мс на
+    чанк это 0.85 чанк/с, и округление до целого скрыло бы разницу между моделями и длинами
+    текста — то есть ровно то, ради чего число публикуется.
+    """
+    parts = [f"{done}/{total} чанков"]
+    if rate is not None and rate > 0:
+        parts.append(f"{rate:.2f} чанк/с")
+    if eta_s is not None and done < total:
+        # Минуты — операторская единица для «десятков минут/часов»; меньше минуты честнее
+        # назвать минутой, чем нулём.
+        parts.append(f"осталось ~{max(1, round(eta_s / 60.0))} мин")
+    return ", ".join(parts)
+
+
+def _make_embed_reporter(
+    *,
+    heartbeat: Heartbeat,
+    progress: Callable[[dict[str, int]], None] | None,
+    store: Any,
+    session: str | None,
+    throughput: _EmbedThroughput,
+) -> Callable[[int, int, float], None]:
+    """Колбэк границы батча эмбеддинга: признак жизни + прогресс с темпом и остатком.
+
+    Эмбеддинг идёт **после** дренажа продукта, где :func:`_emit_progress` уже не вызывается.
+    До правки единственный вызов ``embed`` на весь продукт не оставлял в этом участке ни
+    одной точки жизни: сеанс 2026-10-25 оставался ``running`` с heartbeat, замершим 1280 с,
+    при 505 % CPU — работа выглядела как мёртвый сеанс.
+
+    Каналы — существующие (``heartbeat`` и ``progress`` ``--follow``), новых не вводится.
+    Ключи ``embed_*`` **дополняют** агрегат сеанса (``pending``/``fetched``/…), а не заменяют
+    его: на границе эмбеддинга краул уже финализирован, и оба факта должны быть видны
+    одновременно. Все значения — целые (контракт ``progress``): ``embed_chunks``/``embed_chunks_total``
+    — «сколько из скольких», ``embed_elapsed_s`` — прошедшее время эмбеддинга,
+    ``embed_chunks_per_min`` — фактический темп прогона, ``embed_eta_s`` — оценка остатка.
+    Человекочитаемая форма той же величины — :func:`format_embed_progress`.
+
+    Ошибки чтения стора/колбэка изолируются: прогресс информационен и не роняет фазу
+    (наблюдаемость не измерение).
+    """
+    counts: dict[str, int] = {}
+
+    def _report(done: int, total: int, elapsed: float) -> None:
+        # Точка жизни — до любых ранних выходов: она не зависит от того, включён ли --follow.
+        heartbeat.touch()
+        # Наблюдение темпа — даже без колбэка: накопленный темп публикуется в итоговой
+        # строке фазы (ценой «сколько это заняло»), а не только в живом прогрессе.
+        rate = throughput.observe(done, elapsed)
+        eta = throughput.eta_seconds(done, total)
+        if progress is None:
+            return
+        if session is not None:
+            try:
+                counts.update(dict(store.crawl_session_counts(session)))
+            except Exception:  # noqa: BLE001 — прогресс информационен
+                pass
+        counts["embed_chunks"] = done
+        counts["embed_chunks_total"] = total
+        counts["embed_elapsed_s"] = int(elapsed)
+        if rate is not None and rate > 0:
+            counts["embed_chunks_per_min"] = int(round(rate * 60.0))
+        if eta is not None:
+            counts["embed_eta_s"] = int(eta)
+        try:
+            progress(dict(counts))
+        except Exception:  # noqa: BLE001 — прогресс информационен
+            pass
+
+    return _report
+
+
+def _embed_batched(
+    embedder: EmbedderPort,
+    chunks: Sequence[CorpusChunk],
+    *,
+    on_batch: Callable[[int, int, float], None] | None = None,
+    batch_size: int = EMBED_BATCH_CHUNKS,
+) -> list[list[float]]:
+    """Эмбеддинг чанков внешними батчами; порядок входа = порядок выхода (детерминизм, A3).
+
+    Один батч — один вызов ``embed`` и одна точка наблюдения (:data:`EMBED_BATCH_CHUNKS`).
+    Тексты собираются **по батчу**, а не списком на весь продукт: ``[c.text for c in chunks]``
+    держал рядом с полным накопителем векторов ещё и полный список текстов.
+
+    Возвращается полный список векторов: партицию собирает ``IndexBuilderPort.build(chunks,
+    vectors, meta)`` целиком, поэтому пик «все векторы» задан контрактом порта, а не циклом.
+    Батч лишь ограничивает **второй** материализуемый список (тексты) и даёт наблюдение.
+    """
+    total = len(chunks)
+    vectors: list[list[float]] = []
+    started = time.monotonic()
+    for start in range(0, total, batch_size):
+        batch = chunks[start : start + batch_size]
+        vectors.extend(embedder.embed([c.text for c in batch]))
+        if on_batch is not None:
+            on_batch(start + len(batch), total, time.monotonic() - started)
+    return vectors
+
+
 def _embed_and_build(
     embedder: EmbedderPort,
     index_builder: IndexBuilderPort,
@@ -1967,12 +2154,23 @@ def _embed_and_build(
     snapshot_date: str | None,
     partition_build_id: str,
     errors: list[str],
+    on_batch: Callable[[int, int, float], None] | None = None,
 ) -> bool:
     """Best-effort эмбеддинг и физическая сборка индекса продукт-партиции (K3, §B.1).
 
     ``pipeline`` не работает с файлами индекса напрямую: за ``.npy``-шарды/tantivy отвечает
     ``IndexBuilderPort``. Сбой изолируется в ``errors``.
 
+    **Эмбеддинг — внешними батчами** (:data:`EMBED_BATCH_CHUNKS`), а не одним вызовом на весь
+    продукт: между батчами фаза получает точку наблюдения (``on_batch`` → heartbeat +
+    прогресс). Тексты батча материализуются по мере обхода; накопитель векторов полон по
+    контракту ``IndexBuilderPort.build``. Порядок векторов совпадает с порядком чанков, а
+    кратность внешнего батча внутреннему держит результат побитово равным одному вызову
+    (детерминизм, A3).
+
+    :param on_batch: ``(done, total, elapsed_s)`` — граница батча; ``None`` — без наблюдения
+        (юнит-путь). Ошибка колбэка не должна выдавать себя за сбой сборки: наблюдение
+        изолируется вызывающим.
     :returns: ``True`` — если ``index_builder.build`` вернулся без исключения (партиция
         физически зафиксирована); ``False`` — при **любом** исключении (в т.ч.
         ``ImmutableBuildError`` при попытке изменить уже зафиксированную сборку, K2/§13).
@@ -1991,7 +2189,7 @@ def _embed_and_build(
             )
             for c in chunks
         ]
-        vectors = embedder.embed([c.text for c in chunks])
+        vectors = _embed_batched(embedder, chunks, on_batch=on_batch)
         meta = IndexMeta(
             package=package_id,
             chunker_version=chunker_version,
@@ -5254,6 +5452,11 @@ def _build_corpus(
     #: ``elapsed_seconds``/``reason``). ``product_end`` пишется и при нулевом выходе —
     #: именно этот случай раньше был немым. Одна пара на продукт (не на URL).
     product_events: list[dict[str, Any]] = []
+
+    #: Наблюдаемость эмбеддинга: измеренная пропускная способность — по строке на продукт
+    #: (``N/M чанков, X чанк/с``). Это наблюдение о **цене** работы, а не о её составе:
+    #: в ``run_id`` не входит (не измерение карты, A3), но оператор его видит.
+    embed_notes: list[str] = []
     #: Причина zero-source покрытия по продукту (``None`` — причина не названа счётчиками).
     #: Заполняется на ``product_end`` и передаётся в :func:`_persist_corpus_coverage`.
     zero_source_reasons: dict[str, str | None] = {}
@@ -5282,6 +5485,68 @@ def _build_corpus(
     #: ``product_id -> True``, если партиция продукта физически зафиксирована
     #: (``build``/переиспользование). Строка ``index_manifest`` пишется только для них.
     physically_ok: dict[str, bool] = {}
+
+    #: Наблюдаемость: сеанс краула закрыт (финализация — одна на фазу, см. ``_finalize_crawl_session``).
+    session_finalized = False
+
+    def _finalize_crawl_session() -> None:
+        """L1a: финализация сеанса (``COMPLETED`` без сбоев, иначе ``PARTIAL``).
+
+        **Граница — краул, а не фаза.** Сеанс закрывается, когда дренированы все продукты
+        (последний ``product_end``), а не когда закончилась фаза корпуса: эмбеддинг и сборка
+        индекса — работа фазы, к сеансу краула отношения не имеющая. Пока
+        ``finalize_session`` стоял после Pass B, сеанс висел ``running`` всё время
+        эмбеддинга и ``stale_reason`` (heartbeat, порог 600 с) называл ложную причину у
+        живого прогона: 2026-10-25 после ``crawl product end`` сеанс «протух» на 1280 с при
+        505 % CPU.
+
+        Инвариант :class:`_PhaseLifecycle` сохранён: ``completed`` ставится **только** после
+        штатной финализации. Исключение до неё оставляет ``False``, и обёртка закрывает
+        сеанс терминально (:func:`_finalize_interrupted_session`); исключение после неё
+        (эмбеддинг/сборка/композиция) легитимный ``completed``/``partial`` не переписывает.
+        """
+        nonlocal session_finalized
+        if session is None or session_finalized:
+            return
+        session_finalized = True
+        try:
+            # Phase 2/2.1: провенанс сеанса — движки/виды источников из **персистенных
+            # элементов** (``items.values()``: фактически применённый ``engine`` и ``kind``
+            # элемента) + дайджест конфигурации источников. ``targets`` для агрегата не
+            # годится: там лишь запрошенный движок (может быть ``None``).
+            engines = sorted(
+                {str(i.engine) for i in items.values() if i.engine}
+            )
+            kinds = sorted(
+                {str(i.kind) for i in items.values() if i.kind}
+            )
+            digest = (
+                crawl_sources_digest(crawl_sources)
+                if crawl_sources is not None
+                else None
+            )
+            finalize_session(
+                store,
+                session,
+                finished_at=_now_iso(),
+                engines=engines,
+                kinds=kinds,
+                crawl_sources_digest=digest,
+                # D1/G: политико-усечённый краул не рапортуется ``COMPLETED`` (→ ``PARTIAL``);
+                # эффективные лимиты/число добытых страниц/усечённые продукты — в провенанс.
+                truncated=bool(truncated_products),
+                effective_limits={"roots": truncation_records},
+                pages_fetched=pages_fetched_total,
+                revalidation_fetched=revalidation_fetched_total,
+                truncated_products=sorted(truncated_products),
+            )
+        except Exception as exc:  # noqa: BLE001 — наблюдаемость важнее персистенции
+            errors.append(f"finalize_session({session}): {type(exc).__name__}: {exc}")
+        else:
+            # Штатный финал: обёртке больше нечего закрывать (иначе ``finally``
+            # перезаписал бы ``completed``/``partial`` на терминальный сбой).
+            if lifecycle is not None:
+                lifecycle.completed = True
 
     # --- F0: наблюдаемость памяти и расписания (§4 F0) ----------------------- #
     #: Сток пика памяти воркеров приходит **готовым** от composition root
@@ -7144,6 +7409,14 @@ def _build_corpus(
         #: (именно этот случай раньше был немым до конца фазы).
         _emit_product("end", product_id)
 
+        # Наблюдаемость: последний продукт — конец **краула**. Сеанс закрывается здесь,
+        # до Pass B этого продукта: эмбеддинг/сборка индекса — работа фазы, и терминальный
+        # статус краула не должен от неё зависеть (иначе ``stale_reason`` врёт). Продукты идут
+        # строго последовательно (Pass A каждого предшествует его Pass B), поэтому дренаж
+        # всех продуктов закончен ровно на границе последнего.
+        if product_id == products[-1]:
+            _finalize_crawl_session()
+
         # --- Pass B (index) **этого** продукта (09 §8.1) ---------------------- #
         # Партиция планируется, эмбеддится, физически собирается и персистится сразу
         # после Pass A продукта, а не после всех продуктов. Иначе смерть на N-м
@@ -7231,6 +7504,10 @@ def _build_corpus(
                             f"{product_id}: партиция {partition_build_id} не "
                             f"переиспользована ({reuse_reason}) — пересборка"
                         )
+                    # Наблюдаемость: эмбеддинг продукта — единственный участок фазы, где
+                    # нет дренажа, а значит и нет прежних точек жизни. Темп измеряется
+                    # здесь, чтобы «сколько осталось» следовало из факта прогона.
+                    throughput = _EmbedThroughput()
                     physical_ok = _embed_and_build(
                         embedder,
                         index_builder,
@@ -7246,6 +7523,23 @@ def _build_corpus(
                         snapshot_date=snapshot,
                         partition_build_id=partition_build_id,
                         errors=errors,
+                        on_batch=_make_embed_reporter(
+                            heartbeat=heartbeat,
+                            progress=progress,
+                            store=store,
+                            session=session,
+                            throughput=throughput,
+                        ),
+                    )
+                    # Пропускная способность — опубликованное число, а не впечатление:
+                    # оператор видит, во что обошёлся эмбеддинг продукта, и может сверить
+                    # его с прошлым прогоном/другой моделью (A3).
+                    embed_line = format_embed_progress(
+                        len(product_chunks), len(product_chunks), throughput.rate, 0
+                    )
+                    embed_notes.append(
+                        f"corpus: эмбеддинг {product_id}: {embed_line} "
+                        f"за {throughput.elapsed:.0f} s"
                     )
 
             # «Disk first, DB second»: физическая сборка авторитетна. Пока build этого
@@ -7317,6 +7611,35 @@ def _build_corpus(
                 }
             )
 
+    # Наблюдаемость: сеанс краула уже закрыт на границе краула — на ``product_end`` последнего
+    # продукта (``_finalize_crawl_session`` идемпотентен). Здесь вызов нужен только для
+    # пустого ``products``: фазы без продуктов, где дренажа нет вовсе. Пост-краульная
+    # работа (манифест, композиция) ниже на терминальный статус уже не влияет.
+    _finalize_crawl_session()
+
+    # Ф0: покрытие корпуса продукта — первоклассный факт для гейта ❌ (I2c).
+    # Производно от **персистентных** элементов сеанса и записей об усечении; пишется
+    # после финализации, чтобы провенанс/усечение уже были зафиксированы. Это факт о
+    # корпусе, а не о статусе сеанса, поэтому остаётся на границе фазы (пишется поверх
+    # per-product строк и закрывает продукты, вообще не вошедшие в цикл).
+    if session is not None:
+        try:
+            _persist_corpus_coverage(
+                store,
+                run_id,
+                session,
+                truncated_products,
+                _now_iso(),
+                products=products,
+                reasons=zero_source_reasons,
+            )
+        except Exception as exc:  # noqa: BLE001 — наблюдаемость важнее персистенции
+            errors.append(
+                f"corpus_coverage({session}): {type(exc).__name__}: {exc}"
+            )
+
+    # Дальше — пост-краульная работа фазы (манифест, композиция). Терминальный статус
+    # сеанса выше уже зафиксирован и от неё не зависит.
     _emit_progress()
 
     # --- Манифест и композиция (09 §8.1) ------------------------------------- #
@@ -7425,66 +7748,6 @@ def _build_corpus(
                         errors=errors,
                     )
 
-    # L1a: финализация сеанса (``COMPLETED`` без сбоев, иначе ``PARTIAL``) — единственный
-    # вызов на фазу. ``finished_at`` фиксирует момент завершения.
-    if session is not None:
-        try:
-            # Phase 2/2.1: провенанс сеанса — движки/виды источников из **персистенных
-            # элементов** (``items.values()``: фактически применённый ``engine`` и ``kind``
-            # элемента) + дайджест конфигурации источников. ``targets`` для агрегата не
-            # годится: там лишь запрошенный движок (может быть ``None``).
-            engines = sorted(
-                {str(i.engine) for i in items.values() if i.engine}
-            )
-            kinds = sorted(
-                {str(i.kind) for i in items.values() if i.kind}
-            )
-            digest = (
-                crawl_sources_digest(crawl_sources)
-                if crawl_sources is not None
-                else None
-            )
-            finalize_session(
-                store,
-                session,
-                finished_at=_now_iso(),
-                engines=engines,
-                kinds=kinds,
-                crawl_sources_digest=digest,
-                # D1/G: политико-усечённый краул не рапортуется ``COMPLETED`` (→ ``PARTIAL``);
-                # эффективные лимиты/число добытых страниц/усечённые продукты — в провенанс.
-                truncated=bool(truncated_products),
-                effective_limits={"roots": truncation_records},
-                pages_fetched=pages_fetched_total,
-                revalidation_fetched=revalidation_fetched_total,
-                truncated_products=sorted(truncated_products),
-            )
-        except Exception as exc:  # noqa: BLE001 — наблюдаемость важнее персистенции
-            errors.append(f"finalize_session({session}): {type(exc).__name__}: {exc}")
-        else:
-            # Штатный финал: обёртке больше нечего закрывать (иначе ``finally``
-            # перезаписал бы ``completed``/``partial`` на терминальный сбой).
-            if lifecycle is not None:
-                lifecycle.completed = True
-
-        # Ф0: покрытие корпуса продукта — первоклассный факт для гейта ❌ (I2c).
-        # Производно от **персистентных** элементов сеанса и записей об усечении; пишется
-        # после финализации, чтобы провенанс/усечение уже были зафиксированы.
-        try:
-            _persist_corpus_coverage(
-                store,
-                run_id,
-                session,
-                truncated_products,
-                _now_iso(),
-                products=products,
-                reasons=zero_source_reasons,
-            )
-        except Exception as exc:  # noqa: BLE001 — наблюдаемость важнее персистенции
-            errors.append(
-                f"corpus_coverage({session}): {type(exc).__name__}: {exc}"
-            )
-
     # L1a/C2: счётчики durable-краула (наблюдаемость) — целиком из элементов сеанса. Без
     # сеанса (``store``/``run_id`` не заданы) — нули. ``crawl_done`` — зеркало ``crawl_fetched``
     # (элемент ``FETCHED`` = «ready»); отдельных ``done``/``cancelled`` у элемента нет, поэтому
@@ -7563,6 +7826,7 @@ def _build_corpus(
         build,
         *product_events,
         *(_product_notes(product_events) if session is not None else []),
+        *embed_notes,
     ]
     # B3: провенанс спуска доступен из результата фазы (и из run DB — таблицы
     # ``archive_observations``/``corpus_members``). Запись есть даже при нулевом выходе.
