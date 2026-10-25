@@ -63,7 +63,13 @@ search:
 llm:
   slot: cheap                 # активный slot: cheap | flagship (--llm-slot / COHOUND_LLM_SLOT переопределяют)
   cheap:
-    base_url: ""              # OI-совместимый endpoint корпоративного облака (.../v1)
+    # Endpoint объявлен здесь, а НЕ только в env: llm_scenarios входит в
+    # execution_contract_digest → run_id (§7.4, I21). Пустой base_url при непустом
+    # env-значении даёт прогон, где оценщик работает, а run_id этого не описывает —
+    # вердикты не воспроизводимы. Значение — внешний OI-совместимый API dev-среды
+    # (замер моделей на одном endpoint, Д-36); в корпоративном периметре здесь
+    # внутренний адрес. Секрет (api_key) остаётся в env: COHOUND_LLM_API_KEY.
+    base_url: "https://plusvibeapi.ru"
     model_id: "deepseek-v4.1-flash:purple"
     model_version: ""
     decoder: json_object      # none | json_object | json_schema

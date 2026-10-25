@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import argparse
 import datetime as _dt
+import os
+import sys
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -301,6 +303,102 @@ def _rebind_retrieval_after_corpus(
     return wrapped
 
 
+class _ConsoleTee:
+    """Поток, дублирующий запись в несколько приёмников (консоль прогона → файл).
+
+    Нужен, чтобы убитый прогон оставлял улику. Без него выключение хоста, OOM-killer или
+    ``SIGKILL`` неотличимы от зависания: в ``logs/`` остаются только пофазные ``jsonl``,
+    а вопрос «на чём он стоял» решается реконструкцией по косвенным записям.
+
+    Вторичный приёмник **не** ломает вывод: консоль первична, лог — наблюдаемость.
+    Ошибка записи в файл (диск кончился, права) не должна ни падать, ни менять
+    поведение прогона, поэтому глушится здесь, а не у вызывающего.
+
+    ``__getattr__`` делегирует **первичному** потоку: ``tqdm``/``docling`` спрашивают
+    ``isatty``/``fileno``/``encoding`` у ``stderr``, и отвечать за них должен терминал,
+    а не файл — иначе прогресс-бар перестал бы определять терминал и вывод изменился бы.
+    """
+
+    __slots__ = ("_streams",)
+
+    def __init__(self, *streams: Any) -> None:
+        self._streams = streams
+
+    def write(self, data: str) -> int:
+        for stream in self._streams:
+            try:
+                stream.write(data)
+            except Exception:  # noqa: BLE001 — вторичный приёмник не ломает вывод
+                pass
+        return len(data)
+
+    def flush(self) -> None:
+        for stream in self._streams:
+            try:
+                stream.flush()
+            except Exception:  # noqa: BLE001 — см. write
+                pass
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._streams[0], name)
+
+
+def _install_console_log(db_path: Path) -> tuple[Any, Any, Any] | None:
+    """Дублирует stdout/stderr прогона в ``runs/{run_id}/logs/console.log``.
+
+    Файл открывается в режиме дозаписи и **построчно** (``buffering=1``): построчная
+    запись переживает падение процесса, а буферизованная — нет, а «последняя строка»
+    как раз и есть ответ на вопрос «где он был».
+
+    :returns: маркер для :func:`_restore_console` либо ``None`` — лог не включён
+        (каталог недоступен для записи). Отсутствие лога не является ошибкой прогона.
+    """
+    path = db_path.parent / "logs" / "console.log"
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        handle = path.open("a", encoding="utf-8", errors="replace", buffering=1)
+        handle.write(f"\n=== запуск {_utc_now()} (pid={os.getpid()}) ===\n")
+    except OSError:
+        return None
+    out, err = sys.stdout, sys.stderr
+    sys.stdout = _ConsoleTee(out, handle)
+    sys.stderr = _ConsoleTee(err, handle)
+    return (out, err, handle)
+
+
+def _restore_console(marker: tuple[Any, Any, Any] | None) -> None:
+    """Возвращает исходные потоки и закрывает файл (вызывается из ``finally``)."""
+    if marker is None:
+        return
+    out, err, handle = marker
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.flush()
+        except Exception:  # noqa: BLE001 — восстановление не вправе падать
+            pass
+    sys.stdout, sys.stderr = out, err
+    try:
+        handle.close()
+    except OSError:  # pragma: no cover — закрытие уже закрытого
+        pass
+
+
+def _append_console(marker: tuple[Any, Any, Any] | None, text: str) -> None:
+    """Дописывает строку **только** в файл: консоль её напечатает вызывающий.
+
+    Нужна отдельной функцией, потому что отказ уходит в ``core/cli/main.py``: он печатает
+    сообщение **после** того, как :func:`run` вернул управление. Без этой записи причина
+    отказа не попала бы в файл — а именно её и читают, когда прогон не оставил другой
+    улики. Печать через ``print`` дала бы дубль в консоли, поэтому пишем прямо в дескриптор.
+    """
+    if marker is None:
+        return
+    try:
+        marker[2].write(text.rstrip("\n") + "\n")
+    except Exception:  # noqa: BLE001 — см. _ConsoleTee.write
+        pass
+
+
 def run(args: argparse.Namespace) -> int:
     """``run``: собрать прогон и провести ``Runner`` по реальным фазам Ш1–Ш9.
 
@@ -505,6 +603,11 @@ def run(args: argparse.Namespace) -> int:
     # Валидация per-URL режимов рендера (Ш5) — до dry-run, чтобы ошибка входа была
     # видна и в сухом прогоне (I19: никакого молчаливого фетча/подмены).
     render_modes = _load_render_modes(getattr(args, "render_modes", None))
+
+    # Консоль прогона дублируется в ``runs/{run_id}/logs/console.log`` (см.
+    # :func:`_install_console_log`). ``--dry-run`` ничего не пишет по контракту, поэтому
+    # лог для него не открывается. Маркер снимается в ``finally`` ниже.
+    console = None if args.dry_run else _install_console_log(db_path)
 
     # Durable per-product состояние (09 §4.1): ``create=False`` выше — только чтение;
     # реальный прогон открывает/создаёт state после проверки блокировки онбординга
@@ -1113,7 +1216,13 @@ def run(args: argparse.Namespace) -> int:
         if run_report.status == "blocked":
             return EXIT_BLOCKED
         return EXIT_ERROR
+    except BaseException as exc:
+        # Отказ печатает main.py — уже после возврата управления. Дублируем в файл, иначе
+        # «почему не пошло» не будет в логе прогона (Ctrl-C тоже здесь).
+        _append_console(console, f"error: {type(exc).__name__}: {exc}")
+        raise
     finally:
+        _restore_console(console)
         if state_store is not None:
             state_store.close()
 
