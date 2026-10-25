@@ -581,6 +581,7 @@ def build_manifest(
     axes: Any = None,
     declared_status_dict_version: str | None = None,
     scope_attestations: Mapping[str, str] | None = None,
+    observed_versions: Mapping[str, Any] | None = None,
 ) -> RunManifest:
     """Собирает полностью заполненный :class:`RunManifest` (R7/§13) фазы Ш9.
 
@@ -637,6 +638,15 @@ def build_manifest(
       прогон авторизовал ``❌``. Информационный провенанс того же класса, что
       ``reviewed_by``: в ``EXECUTION_CONTRACT_FIELDS`` **не входит** (авторизация, не
       измерение), поэтому смена подписанта не даёт новый ``run_id``.
+    * ``observed_versions`` — наблюдаемые величины сборки (``embed_model_id``/
+      ``extractor_version``/``lexical_engine_version``/``vector_store``/``chunker_version``),
+      которые фаза отчёта читает из **durable-манифеста индексной сборки**, когда живой
+      ``holder`` пуст (resume: ``corpus`` короткозамкнут персистентным ``ok``). Без этого
+      манифест завершённого прогона публиковал ``embed_model_id: null`` при 9398 векторах,
+      построенных bge-m3, — то есть молчал о приборе, которым сделано измерение.
+      Источник именно манифест сборки, а не текущие порты: он описывает ту сборку, на
+      которой реально считался прогон, а порты в новом процессе могут быть другими.
+      Приоритет ниже ``run``/``inputs``: живое наблюдение, если оно есть, точнее.
 
     Функция детерминирована: все встраиваемые JSON-фрагменты сериализуются
     ``sort_keys=True`` (R7/§13), списки нормализуются сортировкой; единственный
@@ -881,6 +891,7 @@ def build_manifest(
         embed_model_id=_first_present(
             getattr(run, "embed_model_id", None),
             getattr(inputs, "embed_model_id", None),
+            (observed_versions or {}).get("embed_model_id"),
         ),
         chunker_version=(
             getattr(axes, "chunker_version", None)
@@ -888,19 +899,23 @@ def build_manifest(
             else _first_present(
                 getattr(run, "chunker_version", None),
                 getattr(inputs, "chunker_version", None),
+                (observed_versions or {}).get("chunker_version"),
             )
         ),
         extractor_version=_first_present(
             getattr(run, "extractor_version", None),
             getattr(inputs, "extractor_version", None),
+            (observed_versions or {}).get("extractor_version"),
         ),
         lexical_engine_version=_first_present(
             getattr(run, "lexical_engine_version", None),
             getattr(inputs, "lexical_engine_version", None),
+            (observed_versions or {}).get("lexical_engine_version"),
         ),
         vector_store=_first_present(
             getattr(run, "vector_store", None),
             getattr(inputs, "vector_store", None),
+            (observed_versions or {}).get("vector_store"),
         ),
         retrieval_profile=retrieval_profile,
         retrieval_cutoff_K=retrieval_cutoff_K,

@@ -357,6 +357,46 @@ def _session_provenance_json(session: Any) -> dict[str, Any]:
     return parsed if isinstance(parsed, dict) else {}
 
 
+def _observed_index_versions(store: Any, index_build_id: str | None) -> dict[str, Any]:
+    """Наблюдаемые версии сборки из durable-манифеста ``index_manifest`` (провенанс Ш9).
+
+    Нужны, когда живой ``holder`` пуст: на resume фаза ``corpus`` короткозамкнута
+    персистентным ``ok``, поэтому версии прибора (эмбеддер, экстрактор, лексический движок,
+    векторное хранилище) в процессе отчёта неизвестны. Пока их неоткуда было взять, манифест
+    завершённого прогона публиковал ``embed_model_id: null`` при 9398 векторах, построенных
+    bge-m3, — то есть молчал о приборе, которым сделано измерение (а провенанс прибора —
+    это то, по чему решается, сравнима ли карта с прошлой).
+
+    Источник — **манифест той сборки**, а не текущие порты: сборка описывает прогон,
+    порты описывают окружение повторного запуска (после смены эмбеддера они другие).
+
+    Партиции одной сборки обязаны сходиться в версиях; расхождение — сигнал дефекта, но
+    провенанс не роняет отчёт: берётся значение первой партиции в детерминированном
+    порядке (``iter_index_manifest`` сортирует по ``product_id``).
+    """
+    empty: dict[str, Any] = {}
+    if not index_build_id:
+        return empty
+    try:
+        partitions = list(store.iter_index_manifest(str(index_build_id)))
+    except Exception:  # noqa: BLE001 — провенанс информационен, отчёт не роняем
+        return empty
+    if not partitions:
+        return empty
+    first = partitions[0]
+    return {
+        key: value
+        for key, value in (
+            ("embed_model_id", getattr(first, "embed_model_id", None)),
+            ("extractor_version", getattr(first, "extractor_version", None)),
+            ("lexical_engine_version", getattr(first, "lexical_engine_version", None)),
+            ("vector_store", getattr(first, "vector_store", None)),
+            ("chunker_version", getattr(first, "chunker_version", None)),
+        )
+        if value
+    }
+
+
 def _crawl_provenance(store: Any, inputs: Any, run_id: str) -> CrawlProvenance:
     """Собирает :class:`CrawlProvenance` из сеанса краула прогона (§4.4, Phase 2).
 
@@ -1031,6 +1071,13 @@ def build_phases(
             plan=plan,
             bundle=bundle,
             index_build_id=index_build_id,
+            # Наблюдаемые величины прибора берутся из durable-манифеста той сборки, на
+            # которой считался прогон: ``holder`` пуст на resume (``corpus`` уже ``ok``),
+            # а ``runs.embed_model_id`` заполняется только этим же манифестом — иначе
+            # получался круг «null потому что null». Порты нового процесса для этого
+            # непригодны: они описывают окружение повторного запуска, а не ту сборку,
+            # на которой строились вердикты.
+            observed_versions=_observed_index_versions(ctx.store, index_build_id),
             created_at=_created_at(ctx),
             deploy_profile=deploy_profile,
             edge_schema_version=edge_schema_version,

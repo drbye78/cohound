@@ -718,3 +718,47 @@ def test_sensitivity_passes_ranking_epsilon_through() -> None:
     cells = [_cell("a", "p1", Status.OK), _cell("b", "p1", Status.ABSENT)]
     report = sensitivity(cells, params, {}, ranking_epsilon=0.25)
     assert report.ranking_epsilon == 0.25
+
+
+def test_coverage_universe_order_invariant_bitwise() -> None:
+    """Coverage не зависит от порядка обхода вселенной — **побитово**, не «примерно».
+
+    Вселенная приходит множеством (``scope_universe``), а порядок обхода ``set`` зависит
+    от хеш-сида процесса. Сложение float неассоциативно, поэтому одна и та же вселенная
+    давала ``211.88000000000096`` в одном процессе и ``211.8800000000009`` в другом.
+    Следствие наблюдалось на живом прогоне: ``subject_digest`` гейта G4 менялся между
+    прогонами, и уже принятое решение отвергалось как «устаревшее» — гейт становился
+    непроходимым на resume, хотя ничего не изменилось.
+
+    Веса подобраны так, чтобы расхождение порядка **действительно** проявлялось
+    (проверяется в тесте же): если бы суммирование было ассоциативным, тест ничего не
+    доказывал.
+    """
+    weights = {
+        "p0": 0.055651, "p1": 0.851299, "p2": 0.293817, "p3": 0.151370,
+        "p4": 0.125436, "p5": 0.312312, "p6": 0.809804, "p7": 0.187112,
+        "p8": 0.579968, "p9": 0.636135, "p10": 0.374950, "p11": 0.546790,
+        "p12": 0.071533, "p13": 0.068409, "p14": 0.211840, "p15": 0.676792,
+        "p16": 0.429040,
+    }
+    params = {param_id: _param(param_id) for param_id in weights}
+    pairs = [("a", param_id) for param_id in weights]
+
+    # Предусловие теста: на этих весах порядок сложения float виден.
+    forward = 0.0
+    for weight in weights.values():
+        forward += weight
+    backward = 0.0
+    for weight in reversed(list(weights.values())):
+        backward += weight
+    assert forward != backward, "веса ассоциативны — тест не проверял бы инвариантность"
+
+    straight = evidence_coverage([], params, weights, universe=pairs)
+    reverse = evidence_coverage([], params, weights, universe=list(reversed(pairs)))
+    shuffled = evidence_coverage(
+        [], params, weights, universe=sorted(pairs, key=lambda pair: pair[1][::-1])
+    )
+
+    assert straight.denominator == reverse.denominator == shuffled.denominator
+    assert straight.numerator == reverse.numerator == shuffled.numerator
+    assert straight.completed == reverse.completed == shuffled.completed

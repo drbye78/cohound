@@ -377,7 +377,13 @@ def evidence_coverage(
     universe_weight = 0.0
     completed = 0.0
     n_used = 0
-    for product_id, param_id in universe:
+    # Порядок обхода **сортирован**, а не «как пришло». Вселенная приходит множеством
+    # (``scope_universe``), а сложение float неассоциативно: порядок обхода set зависит
+    # от хеш-сида процесса, поэтому одна и та же вселенная давала ``211.88000000000096``
+    # в одном процессе и ``211.8800000000009`` в другом. Следствие было не косметическим:
+    # ``subject_digest`` гейта G4 менялся между прогонами, и уже принятое решение
+    # отвергалось как «устаревшее» — гейт становился непроходимым на resume.
+    for product_id, param_id in sorted(universe):
         w = _param_weight(param_id, params, weights)
         cell = by_key.get((product_id, param_id))
         if cell is None:

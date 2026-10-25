@@ -1658,3 +1658,58 @@ def test_max_response_bytes_is_execution_axis_and_changes_digest() -> None:
         v.startswith("execution_change: crawl_max_response_bytes")
         for v in diff_boundary_violations(base, changed)
     )
+
+
+def test_build_manifest_uses_observed_versions_from_index_build() -> None:
+    """Resume: наблюдаемые версии прибора берутся из манифеста сборки, а не теряются.
+
+    Манифест — запись воспроизведения. Пока версии приходили только из ``run``/``inputs``,
+    прогон, дошедший до отчёта в другом процессе (``corpus`` короткозамкнут персистентным
+    ``ok``), публиковал ``embed_model_id: null`` при 9398 векторах, построенных bge-m3:
+    отчёт молчал о приборе, которым сделано измерение.
+    """
+    run = SimpleNamespace(
+        case_id="case-1",
+        mode=RunMode.STRICT,
+        methodology_version="2.4.0",
+        cohort="cohort.yaml",
+        ranking_policy=RankingPolicy.CAPABILITY_RANKED,
+    )
+    inputs = SimpleNamespace(run=run, package=None)
+    plan = SimpleNamespace(
+        run_id="run-observed",
+        anchor=PRODUCT_A,
+        modules=[],
+        methodology_version="2.4.0",
+        catalog_version="1.0.0",
+        cohort_ref="cohort.yaml",
+    )
+
+    bare = build_manifest(inputs=inputs, plan=plan, created_at="2026-01-01T00:00:00Z")
+    assert bare.embed_model_id is None
+
+    observed = build_manifest(
+        inputs=inputs,
+        plan=plan,
+        created_at="2026-01-01T00:00:00Z",
+        observed_versions={
+            "embed_model_id": "BAAI/bge-m3",
+            "extractor_version": "docling-doc-3:layout_tables/docling-2.135.0",
+            "lexical_engine_version": "tantivy-0.26.2",
+            "vector_store": "npy-fp16",
+        },
+    )
+    assert observed.embed_model_id == "BAAI/bge-m3"
+    assert observed.extractor_version.startswith("docling-doc-3:layout_tables")
+    assert observed.lexical_engine_version == "tantivy-0.26.2"
+    assert observed.vector_store == "npy-fp16"
+
+    # Живое наблюдение приоритетнее: ``run`` описывает то, что реально работало в процессе.
+    run.embed_model_id = "observed-live-model"
+    live = build_manifest(
+        inputs=inputs,
+        plan=plan,
+        created_at="2026-01-01T00:00:00Z",
+        observed_versions={"embed_model_id": "BAAI/bge-m3"},
+    )
+    assert live.embed_model_id == "observed-live-model"

@@ -1463,3 +1463,65 @@ def test_phases_module_does_not_import_adapters_or_edge() -> None:
         if module.startswith(("core.adapters", "core.edge"))
     ]
     assert forbidden == [], f"phases.py импортирует запрещённые слои: {forbidden}"
+
+
+class _FakeIndexStore:
+    """Минимальный StorePort-дублёр для чтения манифеста индексной сборки."""
+
+    def __init__(self, entries: list[Any] | None = None, *, boom: bool = False) -> None:
+        self._entries = entries or []
+        self._boom = boom
+        self.asked: list[str] = []
+
+    def iter_index_manifest(self, index_build_id: str) -> Any:
+        self.asked.append(index_build_id)
+        if self._boom:
+            raise RuntimeError("БД недоступна")
+        return iter(self._entries)
+
+
+def test_observed_index_versions_reads_build_manifest() -> None:
+    """Версии прибора для манифеста берутся из durable-манифеста сборки (Ш9 на resume).
+
+    На resume фаза ``corpus`` короткозамкнута персистентным ``ok``, живой ``holder`` пуст,
+    и без этого чтения манифест завершённого прогона публиковал ``embed_model_id: null``
+    при 9398 векторах, построенных bge-m3. Источник — манифест той сборки, на которой
+    считался прогон, а не текущие порты: порты описывают окружение повторного запуска.
+    """
+    from core.pipeline.phases import _observed_index_versions
+
+    entry = SimpleNamespace(
+        embed_model_id="BAAI/bge-m3",
+        extractor_version="docling-doc-3:layout_tables/docling-2.135.0",
+        lexical_engine_version="tantivy-0.26.2",
+        vector_store="npy-fp16",
+        chunker_version="md-heading-2+text-para-1",
+        product_id="p1",
+    )
+    store = _FakeIndexStore([entry])
+
+    versions = _observed_index_versions(store, "cb_abc")
+
+    assert store.asked == ["cb_abc"]
+    assert versions["embed_model_id"] == "BAAI/bge-m3"
+    assert versions["vector_store"] == "npy-fp16"
+    assert versions["lexical_engine_version"] == "tantivy-0.26.2"
+    # Пустые значения не попадают в карту: манифест не должен получать «известное пустое».
+    empty_entry = SimpleNamespace(
+        embed_model_id=None,
+        extractor_version="",
+        lexical_engine_version=None,
+        vector_store=None,
+        chunker_version=None,
+        product_id="p2",
+    )
+    assert _observed_index_versions(_FakeIndexStore([empty_entry]), "cb_abc") == {}
+
+
+def test_observed_index_versions_degrades_silently() -> None:
+    """Нет сборки/БД недоступна → пустая карта: провенанс не роняет отчёт."""
+    from core.pipeline.phases import _observed_index_versions
+
+    assert _observed_index_versions(_FakeIndexStore([]), "cb_abc") == {}
+    assert _observed_index_versions(_FakeIndexStore([]), None) == {}
+    assert _observed_index_versions(_FakeIndexStore(boom=True), "cb_abc") == {}

@@ -82,6 +82,7 @@ from core.domain import (
     RunScope,
 )
 from core.pipeline import GATE_PHASES, PHASES, Ports
+from core.pipeline.compute import bundle_for_run
 from core.pipeline.crawl_session import (
     default_session_id,
     read_provenance,
@@ -1129,11 +1130,27 @@ def run(args: argparse.Namespace) -> int:
                     getattr(ports, "evaluator", None), "usage_summary", None
                 )
                 usage = evaluator_usage() if callable(evaluator_usage) else {}
+                # Coverage/Capability — из **той же** формулы, что у фазы ``compute`` и
+                # предмета G4 (``bundle_for_run``), а не пересчёт «своими руками»: без бандла
+                # ``compute_metrics`` публиковал ``coverage_aggregate: 0.0`` при реальных
+                # 0.208, то есть не «нет данных», а **неверное число** в машинном отчёте.
+                # Сбой расчёта не роняет наблюдаемость: поле остаётся пустым дефолтом, и это
+                # видно в ``instrumentation_errors``.
+                try:
+                    score_bundle = bundle_for_run(
+                        store, run_id=run_id, plan=run_plan, inputs=inputs
+                    )
+                except Exception as exc:  # noqa: BLE001 — метрики не роняют прогон
+                    score_bundle = None
+                    instrumentation_errors.append(
+                        f"score_bundle: {type(exc).__name__}: {_concise(exc)}"
+                    )
                 write_run_metrics(
                     run_id=run_id,
                     out_dir=args.runs_dir,
                     durations=instrumentation.durations,
                     store=store,
+                    score_bundle=score_bundle,
                     crawl_counts=crawl_counts,
                     crawl_truncation=truncation or None,
                     crawl_session=crawl_session_lifecycle or None,
