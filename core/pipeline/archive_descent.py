@@ -666,6 +666,20 @@ class ArchiveDescentWalker:
                     f"{self.product_id}/{archive_url}: {SKIP_READ_FAILED}: "
                     f"член {normalized!r}: {type(exc).__name__}: {exc}"
                 )
+                # Строка члена обязательна: без неё «член не прочитан» и «члена не было»
+                # выглядят в ``corpus_members`` одинаково, и вопрос «почему этого файла
+                # нет в корпусе» не отвечает никто (та же семантика, что у бюджетных
+                # причин). ``errors`` уже записан выше: отказ эмита не уносит собранное.
+                self._emit_skipped_member(
+                    archive_url=archive_url,
+                    archive_content_hash=archive_content_hash,
+                    archive_path=archive_path,
+                    member_path=normalized,
+                    suffix=suffix,
+                    declared_size=member.size,
+                    reason=SKIP_READ_FAILED,
+                    depth=depth,
+                )
                 continue
             self._total += written
             bytes_written += written
@@ -831,12 +845,13 @@ class ArchiveDescentWalker:
         reason: str,
         depth: int,
     ) -> None:
-        """Строка члена, срезанного **до** извлечения (бюджет/поток) — видимый пропуск.
+        """Строка члена, который не дошёл до извлечения (бюджет/поток/чтение) — видимый пропуск.
 
         ``doc_id``/``content_hash`` — ``None``: ингеста не было, и выдумывать его
         идентичность нельзя (та же семантика, что у ``archive_cycle``/``nested_descended``).
         Без этой строки ``archive_budget_exhausted`` жил только в ``errors``, то есть
-        срезанные члены не попадали в ``corpus_members`` вовсе.
+        срезанные члены не попадали в ``corpus_members`` вовсе; тот же разрыв был у
+        ``member_read_failed`` («член не прочитан» выглядел как «члена не было»).
         """
         self._emit_member(
             self._member_row(

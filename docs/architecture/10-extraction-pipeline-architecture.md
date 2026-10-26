@@ -72,7 +72,7 @@ R5 — не эстетика. `run_id` — утверждение «вот пр�
 |---|---|---|---|---|
 | fetch | URL | `RawPage` | ≤ `extract_window` страниц | теряется окно |
 | retention | bytes / `staged_path` | `corpus_raw/{product}/{hash}.bin`, `corpus_docs` | — | максимум документ «в полёте» |
-| extract | путь к retained-байтам | `ExtractedDoc.text` (+ `extract_cache`) | окно воркеров × пик документа | теряется окно |
+| extract | путь к retained-байтам | `ExtractedDoc.text` + `partial`/`partial_reason` (+ `extract_cache`): частично прочитанный документ — документ, а не сбой, но до `corpus_docs` признак частичности пока не доходит | окно воркеров × пик документа | теряется окно |
 | chunk | text | — | **весь продукт** (`_ProductIngest.chunks`) | продукт целиком |
 | Pass B (embed → сборка) | чанки продукта | партиция на диске, `corpus_chunks` | продукт (тексты + векторы) | продукт; партиция может остаться |
 | манифест/композиция | все партиции | `index_manifest`, `_compositions/{cb}.json` | **все продукты** (`ingests`) | реестр; восстанавливается без пересчёта |

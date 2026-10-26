@@ -55,6 +55,7 @@ from core.domain import (
     RunMode,
 )
 from core.pipeline import RunPlan
+from core.pipeline.archive_descent import SKIP_READ_FAILED, SKIP_STREAM_TOO_LARGE
 from core.pipeline.corpus import (
     ExtractionPool,
     IndexBuild,
@@ -212,8 +213,14 @@ def _run(
     index_root: Path | None = None,
     embedder: Any = None,
     index_builder: Any = None,
+    container_reader: Any = None,
 ) -> Iterator[tuple[SqliteStore, Any, Any]]:
-    """Один прогон фазы корпуса над одним архивом; читатель контейнеров — реальный."""
+    """Один прогон фазы корпуса над одним архивом; читатель контейнеров — реальный.
+
+    ``container_reader`` — фабрика читателя контейнеров (``path → ContainerPort``):
+    по умолчанию настоящий ``container_any.container_for``, в тестах отказов чтения —
+    обёртка над ним (индекс правдив, тело члена ведёт себя заданно).
+    """
     store = SqliteStore(":memory:")
     _make_run(store)
     fake_extractor = extractor if extractor is not None else _FileExtractor()
@@ -230,7 +237,7 @@ def _run(
             raw_root=tmp_path,
             run_id=RUN_ID,
             crawl_defaults=crawl_defaults,
-            container_for=container_for,
+            container_for=container_reader or container_for,
             extraction_pool=extraction_pool,
             index_root=index_root,
             embedder=embedder,
@@ -523,6 +530,136 @@ def test_extractor_without_local_bytes_skips_members_visibly(tmp_path: Path) -> 
         rows = _members(store)
         assert len(rows) == 2
         assert all(row.skip_reason == "extract_unavailable" for row in rows)
+
+
+# ---------------------------------------------------------------------------
+# (8b) Отказ чтения члена: строка ``corpus_members`` обязательна
+# ---------------------------------------------------------------------------
+#
+# Дефект: ветка ``except Exception`` вокруг чтения тела члена писала причину в ``errors`` и
+# в ``skipped``, но **не** вызывала ``_emit_skipped_member`` — соседние причины
+# (``archive_budget_exhausted``, ``member_stream_too_large``) вызывали. Следствие: в
+# ``corpus_members`` непрочитанного члена не было вовсе, и «член не прочитан» выглядело
+# ровно как «члена не было». Для архива вендора (47 членов одного zip) это существенно.
+#
+# Читатель здесь — обёртка над настоящим: индекс берётся из central directory (прогноз и
+# состав правдивы), а тело указанного члена ведёт себя заданно. Так проверяется именно
+# ветка отказа, а не поведение ``zipfile``.
+
+
+class _ReadFailingReader:
+    """Обёртка над читателем контейнера: индекс правдив, чтение члена бросает."""
+
+    def __init__(self, inner: Any, broken: set[str]) -> None:
+        self._inner = inner
+        self._broken = set(broken)
+        self.version = getattr(inner, "version", "wrapped-1")
+
+    def available(self) -> bool:
+        return self._inner.available()
+
+    def list_members(self, path: str) -> Any:
+        return self._inner.list_members(path)
+
+    def open_member(self, path: str, member_path: str) -> Iterator[bytes]:
+        if member_path in self._broken:
+            # Отказ на первом шаге стрима: тело члена недоступно (битый член/нет бэкенда).
+            raise zipfile.BadZipFile(f"повреждённый член: {member_path}")
+        yield from self._inner.open_member(path, member_path)
+
+
+class _OverlongReader:
+    """Обёртка над читателем: тело указанного члена **длиннее** заявленного в индексе.
+
+    Так выглядит zip с ложной шапкой (заявленный размер меньше фактического): список
+    принимает член по индексу, а поток пробивает потолок — второй гейт bomb-guard.
+    """
+
+    def __init__(self, inner: Any, overlong: set[str], *, padding: int = 4096) -> None:
+        self._inner = inner
+        self._overlong = set(overlong)
+        self._padding = padding
+        self.version = getattr(inner, "version", "wrapped-1")
+
+    def available(self) -> bool:
+        return self._inner.available()
+
+    def list_members(self, path: str) -> Any:
+        return self._inner.list_members(path)
+
+    def open_member(self, path: str, member_path: str) -> Iterator[bytes]:
+        if member_path in self._overlong:
+            yield b"x" * self._padding
+            return
+        yield from self._inner.open_member(path, member_path)
+
+
+def test_member_read_failure_writes_visible_row(tmp_path: Path) -> None:
+    """Не прочитанный член — строка ``corpus_members`` с причиной, а не пустое место."""
+    archive = _zip({"a.md": b"# a\n", "b.md": b"# b\n", "c.md": b"# c\n"})
+
+    def _reader(path: str) -> Any:
+        inner = container_for(path)
+        return None if inner is None else _ReadFailingReader(inner, {"b.md"})
+
+    with _run(tmp_path, archive, container_reader=_reader) as (store, result, extractor):
+        rows = {row.member_path: row for row in _members(store)}
+        assert set(rows) == {"a.md", "b.md", "c.md"}, (
+            "непрочитанный член обязан иметь строку: иначе он неотличим от отсутствующего"
+        )
+        assert rows["b.md"].skip_reason == SKIP_READ_FAILED
+        assert rows["b.md"].doc_id is None
+        assert rows["b.md"].extracted_content_hash is None
+        assert rows["b.md"].declared_size == 4
+        # Соседи не задеты: отказ одного члена изолирован.
+        assert rows["a.md"].doc_id is not None
+        assert rows["c.md"].doc_id is not None
+        assert sorted(doc.url for doc in _build_of(result).docs) == [
+            f"{ZIP_URL}!/a.md",
+            f"{ZIP_URL}!/c.md",
+        ]
+        # Причина видна и в ошибках фазы (прежний путь), и в исходе спуска.
+        assert any(SKIP_READ_FAILED in error for error in result.errors), result.errors
+        observation = _observations(store)[0]
+        assert observation.outcome["skipped"][SKIP_READ_FAILED]["count"] == 1
+
+
+def test_member_read_failure_keeps_other_errors(tmp_path: Path) -> None:
+    """Отказ записи строки не съедает уже собранные ``errors`` (порядок: причина → строка)."""
+    archive = _zip({"a.md": b"# a\n", "b.md": b"# b\n"})
+
+    def _reader(path: str) -> Any:
+        inner = container_for(path)
+        return None if inner is None else _ReadFailingReader(inner, {"a.md", "b.md"})
+
+    with _run(tmp_path, archive, container_reader=_reader) as (store, result, _extractor):
+        rows = _members(store)
+        assert [row.skip_reason for row in rows] == [SKIP_READ_FAILED, SKIP_READ_FAILED]
+        # Две ошибки чтения — и обе на месте: причина пишется до эмита строки.
+        assert sum(SKIP_READ_FAILED in error for error in result.errors) == 2
+
+
+def test_stream_over_ceiling_keeps_row(tmp_path: Path) -> None:
+    """``member_stream_too_large`` продолжает писать строку (соседняя причина не сломана)."""
+    archive = _zip({"big.txt": b"B" * 10, "small.md": b"ok"})
+
+    def _reader(path: str) -> Any:
+        inner = container_for(path)
+        return None if inner is None else _OverlongReader(inner, {"big.txt"})
+
+    with _run(
+        tmp_path,
+        archive,
+        crawl_defaults=CrawlRunConfig(archive_max_member_bytes=1024),
+        container_reader=_reader,
+    ) as (store, result, _extractor):
+        rows = {row.member_path: row for row in _members(store)}
+        assert rows["big.txt"].skip_reason == SKIP_STREAM_TOO_LARGE
+        assert rows["big.txt"].doc_id is None
+        assert rows["big.txt"].declared_size == 10
+        assert rows["small.md"].doc_id is not None
+        assert any(SKIP_STREAM_TOO_LARGE in error for error in result.errors)
+
 
 
 # ---------------------------------------------------------------------------

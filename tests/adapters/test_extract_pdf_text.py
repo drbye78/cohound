@@ -311,6 +311,103 @@ def test_broken_pdf_degrades_to_error(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Отказ одной страницы не уносит документ (симметрия с docling PARTIAL_SUCCESS)
+# ---------------------------------------------------------------------------
+
+
+class _FailingPdf:
+    """``PdfDocument``-фейк: ``None`` вместо текста означает «страница не читается»."""
+
+    def __init__(self, pages: list[str | None]) -> None:
+        self._pages = pages
+
+    def __len__(self) -> int:
+        return len(self._pages)
+
+    def __getitem__(self, index: int) -> _FakePage:
+        text = self._pages[index]
+        if text is None:
+            raise RuntimeError(f"страница {index + 1} не читается")
+        return _FakePage(text)
+
+    def close(self) -> None:
+        return None
+
+
+class _FailingPdfium:
+    PdfiumError = RuntimeError
+
+    def __init__(self, pages: list[str | None]) -> None:
+        self._pages = pages
+
+    def PdfDocument(self, path: str) -> _FailingPdf:  # noqa: N802 — имя API pdfium
+        return _FailingPdf(self._pages)
+
+
+def test_unreadable_page_keeps_document_partial(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Битая страница не уничтожает прочитанные: документ есть, частичность видна."""
+    monkeypatch.setitem(
+        sys.modules, "pypdfium2", _FailingPdfium(["первая", None, "третья"])
+    )
+    path = _write(tmp_path, "vendor.pdf", ["ignored"])
+
+    doc = PdfiumDocumentExtractor().extract_path(path, filename_hint="vendor.pdf")
+
+    assert doc.error is None, "прочитанные страницы — документ, а не сбой"
+    assert doc.text.split("\n\n") == ["первая", "третья"]
+    assert doc.partial is True
+    assert "не прочитано 1 из 3" in doc.partial_reason
+    assert "2" in doc.partial_reason  # номер страницы, который не прочитался
+    assert doc.page_count == 3
+    assert doc.family == FAMILY_TEXT
+
+
+def test_all_pages_unreadable_is_error_not_partial(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Ни одной прочитанной страницы — отказ; частичного успеха без текста не бывает."""
+    monkeypatch.setitem(sys.modules, "pypdfium2", _FailingPdfium([None, None]))
+    path = _write(tmp_path, "vendor.pdf", ["ignored"])
+
+    doc = PdfiumDocumentExtractor().extract_path(path, filename_hint="vendor.pdf")
+
+    assert doc.text == ""
+    assert doc.error is not None and doc.error.startswith("pdfium:")
+    assert "не прочитано 2 из 2" in doc.error
+    assert doc.partial is False
+
+
+def test_unreadable_page_is_not_reported_as_no_text_layer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """«Страница не прочиталась» и «текстового слоя нет» — разные факты, разные причины."""
+    monkeypatch.setitem(sys.modules, "pypdfium2", _FailingPdfium([None, ""]))
+    path = _write(tmp_path, "vendor.pdf", ["ignored"])
+
+    doc = PdfiumDocumentExtractor().extract_path(path, filename_hint="vendor.pdf")
+
+    assert doc.error != "no_text_layer"
+    assert doc.error is not None and "не прочитано" in doc.error
+
+
+def test_page_separator_survives_partial_join(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Склейка прочитанных страниц — прежняя (пустая строка = граница абзаца чанкера)."""
+    monkeypatch.setitem(
+        sys.modules, "pypdfium2", _FailingPdfium(["первый\r\nабзац", None, "третий"])
+    )
+    path = _write(tmp_path, "vendor.pdf", ["ignored"])
+
+    doc = PdfiumDocumentExtractor().extract_path(path, filename_hint="vendor.pdf")
+
+    assert "\r" not in doc.text
+    assert doc.text == "первый\nабзац\n\nтретий"
+
+
+# ---------------------------------------------------------------------------
 # Ленивый импорт
 # ---------------------------------------------------------------------------
 

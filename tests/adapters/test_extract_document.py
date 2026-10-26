@@ -562,3 +562,226 @@ def test_missing_library_does_not_invent_a_build(
         DoclingDocumentExtractor(DocumentLevel.FULL).version
         == "docling-doc-3:full/docling-unknown"
     )
+
+
+# --------------------------------------------------------------------------- #
+# PARTIAL_SUCCESS: прочитанная часть не выбрасывается, а частичность — видна
+# --------------------------------------------------------------------------- #
+#
+# Дефект (живой случай, ``docs/reports/crawl-trace-2026-10-21``): адаптер считал любой
+# статус кроме ``SUCCESS`` ошибкой, а docling при ``PARTIAL_SUCCESS`` отдаёт текст
+# сконвертированных страниц. Документ исчезал из корпуса целиком, и ячейка получала
+# «материала нет» при существующем доказательстве. Обратная ошибка — принять пустой
+# частичный результат за документ — здесь тоже закрыта: без текста это провал.
+
+
+class _StatusConvertResult:
+    """``ConversionResult`` с явным статусом: markdown, страницы и счётчик документа."""
+
+    def __init__(
+        self,
+        *,
+        status: str,
+        markdown: str,
+        total_pages: int | None,
+        converted_pages: int,
+    ) -> None:
+        self.status = SimpleNamespace(name=status)
+        self.document = SimpleNamespace(export_to_markdown=lambda: markdown)
+        self.pages = [object() for _ in range(converted_pages)]
+        self.input = None if total_pages is None else SimpleNamespace(page_count=total_pages)
+
+
+class _RaisingConverter:
+    """Конвертер-фейк: конвертация бросает (провенанс грациозной деградации)."""
+
+    def convert(self, path: str) -> object:  # noqa: ARG002 - путь не важен
+        raise RuntimeError("движок упал")
+
+
+def _extract_bytes_with(
+    monkeypatch: pytest.MonkeyPatch, result: object, level: DocumentLevel
+) -> object:
+    """``extract_bytes`` на подставленном результате конвертации (без docling)."""
+    _patch_docling(monkeypatch)
+    monkeypatch.setattr(extract_document, "_DOCLING_AVAILABLE", True)
+    extractor = DoclingDocumentExtractor(level)
+    extractor._converter = _ConvertOnlyConverter(result)
+    return extractor.extract_bytes(b"%PDF-1.7", "doc.pdf")
+
+
+def test_partial_success_keeps_text_and_marks_partiality(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``PARTIAL_SUCCESS`` с текстом — документ с признаком частичности, **не** ``error``."""
+    result = _StatusConvertResult(
+        status="PARTIAL_SUCCESS",
+        markdown="# часть документа\n\ntext",
+        total_pages=665,
+        converted_pages=3,
+    )
+
+    doc = _extract_bytes_with(monkeypatch, result, DocumentLevel.LAYOUT_TABLES)
+
+    assert doc.error is None, "прочитанная часть документа не может быть ошибкой"
+    assert doc.text == "# часть документа\n\ntext"
+    assert doc.partial is True
+    assert doc.page_count == 665
+    assert doc.content_hash == content_hash(doc.text)
+
+
+def test_partial_success_reason_names_status_pages_and_level(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Причина частичности читается человеком: статус, объём и **обещанный уровень**.
+
+    ``layout``/``layout_tables``/``full`` обещают структуру целого документа: их частичный
+    результат не вправе читаться как «full», не будучи им.
+    """
+    result = _StatusConvertResult(
+        status="PARTIAL_SUCCESS",
+        markdown="часть",
+        total_pages=665,
+        converted_pages=3,
+    )
+
+    for level in (DocumentLevel.LAYOUT, DocumentLevel.LAYOUT_TABLES, DocumentLevel.FULL):
+        extractor = DoclingDocumentExtractor(level)
+        doc = extractor._partial(result, "PARTIAL_SUCCESS")  # noqa: SLF001 - прямой вызов
+
+        assert doc.partial is True
+        assert doc.error is None
+        assert "PARTIAL_SUCCESS" in doc.partial_reason
+        assert "3" in doc.partial_reason and "665" in doc.partial_reason
+        assert level.value in doc.partial_reason
+        # Структурный уровень: обещание структуры названо, чтобы «часть» не читалась как «full».
+        assert "структура" in doc.partial_reason
+        # Версия остаётся провенансом движка/оси уровня — объём работы в неё не подмешиваем.
+        assert doc.extractor_version == extractor.version
+
+
+def test_partial_reason_does_not_promise_structure_for_text_level() -> None:
+    """``text`` структуры не обещает: причина частичности не приписывает её уровню."""
+    result = _StatusConvertResult(
+        status="PARTIAL_SUCCESS",
+        markdown="часть",
+        total_pages=10,
+        converted_pages=4,
+    )
+
+    doc = DoclingDocumentExtractor(DocumentLevel.TEXT)._partial(  # noqa: SLF001
+        result, "PARTIAL_SUCCESS"
+    )
+
+    assert doc.partial is True
+    assert "структура" not in doc.partial_reason
+    assert "уровень text" in doc.partial_reason
+    assert "4" in doc.partial_reason and "10" in doc.partial_reason
+
+
+def test_partial_success_without_text_is_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Частичного успеха без текста не бывает: пустой результат — прежний ``_error``."""
+    result = _StatusConvertResult(
+        status="PARTIAL_SUCCESS",
+        markdown="   \n\t ",
+        total_pages=665,
+        converted_pages=3,
+    )
+
+    doc = _extract_bytes_with(monkeypatch, result, DocumentLevel.LAYOUT_TABLES)
+
+    assert doc.error is not None
+    assert "PARTIAL_SUCCESS" in doc.error
+    assert doc.text == ""
+    assert doc.partial is False
+    assert doc.partial_reason is None
+
+
+def test_failure_status_keeps_previous_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``FAILURE`` — прежняя строка ошибки (регрессии нет)."""
+    result = _StatusConvertResult(
+        status="FAILURE",
+        markdown="# не должно попасть в корпус",
+        total_pages=10,
+        converted_pages=10,
+    )
+
+    doc = _extract_bytes_with(monkeypatch, result, DocumentLevel.LAYOUT_TABLES)
+
+    assert doc.error == "docling: статус конвертации FAILURE"
+    assert doc.text == ""
+    assert doc.partial is False
+
+
+def test_converter_exception_keeps_previous_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Исключение конвертера — ``docling: <причина>``, как прежде."""
+    _patch_docling(monkeypatch)
+    monkeypatch.setattr(extract_document, "_DOCLING_AVAILABLE", True)
+    extractor = DoclingDocumentExtractor(DocumentLevel.LAYOUT_TABLES)
+    extractor._converter = _RaisingConverter()
+
+    doc = extractor.extract_bytes(b"%PDF-1.7", "doc.pdf")
+
+    assert doc.error == "docling: движок упал"
+    assert doc.text == ""
+    assert doc.partial is False
+
+
+def test_success_status_stays_non_partial(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``SUCCESS`` — прежний документ: ``partial=False``, причина не заполнена."""
+    result = _StatusConvertResult(
+        status="SUCCESS",
+        markdown="# полный",
+        total_pages=7,
+        converted_pages=7,
+    )
+
+    doc = _extract_bytes_with(monkeypatch, result, DocumentLevel.LAYOUT_TABLES)
+
+    assert doc.error is None
+    assert doc.partial is False
+    assert doc.partial_reason is None
+    assert doc.page_count == 7
+
+
+def test_converted_page_count_is_result_pages_not_document_size() -> None:
+    """Объём работы (``len(result.pages)``) и размер документа — разные числа."""
+    result = _StatusConvertResult(
+        status="PARTIAL_SUCCESS",
+        markdown="x",
+        total_pages=665,
+        converted_pages=3,
+    )
+
+    assert extract_document._converted_page_count(result) == 3
+    assert _page_count(result) == 665
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"text": "", "partial": True},
+        {"text": "   ", "partial": True, "partial_reason": "причина"},
+        {"text": "текст", "partial": True, "error": "сбой"},
+        {"text": "текст", "partial": False, "partial_reason": "причина"},
+    ],
+)
+def test_extracted_doc_partiality_invariant(kwargs: dict[str, object]) -> None:
+    """``ExtractedDoc`` не даёт собрать ложный провенанс частичности.
+
+    Четыре невозможных состояния: частичность без текста, частичность с пустым текстом,
+    частичность вместе со сбоем и причина частичности без самой частичности.
+    """
+    from core.ports.types import ExtractedDoc
+
+    with pytest.raises(ValueError):
+        ExtractedDoc(
+            content_hash=content_hash(""),
+            extractor_version="v1",
+            **kwargs,  # type: ignore[arg-type]
+        )
+

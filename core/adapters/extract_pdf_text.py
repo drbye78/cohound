@@ -30,6 +30,14 @@
 (``error="no_text_layer"``), который фаза переводит в видимую запись, а не тихий ноль в
 корпусе.
 
+**Отказ одной страницы не уносит документ (симметрия с ``PARTIAL_SUCCESS``).** Читатель
+изолирует страницу: исключение pdfium на странице N не отменяет страницы 1…N−1.
+Прочитанный текст остаётся документом, но помечается ``partial=True`` с причиной «страниц
+не прочитано N из M» — иначе битая страница в 665-страничном вендорском PDF уничтожала бы
+662 прочитанные. Полный отказ (текста нет ни на одной странице) — по-прежнему ``error``:
+частичного успеха без текста не бывает. Отказ на уровне файла (``PdfDocument``) не
+изолируется — он и есть «документ не читается».
+
 **Ленивый импорт.** ``pypdfium2`` — лёгкий (колесо с pdfium, без torch), но импортируется
 всё равно **внутри** методов, как docling: ``importlib.util.find_spec`` для
 :attr:`PdfiumDocumentExtractor.available` достаточно, а импорт на уровне модуля привязывал
@@ -200,25 +208,41 @@ class PdfiumDocumentExtractor:
         import pypdfium2 as pdfium  # локально: см. докстринг модуля
 
         pdf = pdfium.PdfDocument(path)
+        pages: list[str] = []
+        failed: list[int] = []
         try:
-            pages: list[str] = []
-            for index in range(len(pdf)):
-                page = pdf[index]
-                try:
-                    textpage = page.get_textpage()
-                    try:
-                        pages.append(textpage.get_text_range())
-                    finally:
-                        textpage.close()
-                finally:
-                    page.close()
             page_count = len(pdf)
+            for index in range(page_count):
+                try:
+                    page = pdf[index]
+                    try:
+                        textpage = page.get_textpage()
+                        try:
+                            pages.append(textpage.get_text_range())
+                        finally:
+                            textpage.close()
+                    finally:
+                        page.close()
+                except Exception:  # noqa: BLE001 — страница изолирована, документ живёт
+                    # Одна битая страница не должна уносить весь документ: до правки
+                    # исключение pdfium на любой странице отдавало пустой ``ExtractedDoc``
+                    # с ``error``, то есть прочитанные страницы терялись целиком. Страницы
+                    # без текстового слоя сюда не попадают — у них текст пустой, а не отказ.
+                    failed.append(index + 1)
         finally:
             pdf.close()
         text = _PAGE_SEPARATOR.join(
             strip_control_characters(chunk).strip() for chunk in pages
         ).strip()
         if not text:
+            if failed:
+                # Страницы не прочитались и текста нет вовсе: это отказ, а не «пустой
+                # документ» — причина называет объём отказа, а не маскируется под
+                # ``no_text_layer`` (другой факт: страницы читались, но текста в них нет).
+                return self._error(
+                    f"pdfium: страниц не прочитано {len(failed)} из {page_count} "
+                    f"({_page_list(failed)}), текстового слоя нет"
+                )
             # Страницы без текстового слоя — 183 из 16 073 (1.14% корпуса): молчаливый
             # пустой документ
             # сделал бы их неотличимыми от «прочитали и ничего не нашли».
@@ -229,6 +253,22 @@ class PdfiumDocumentExtractor:
                 page_count=page_count,
                 error="no_text_layer",
                 family=FAMILY_TEXT,
+            )
+        if failed:
+            # Частичный результат — документ, а не отказ (симметрия с docling
+            # ``PARTIAL_SUCCESS``): текст прочитанных страниц обязан попасть в корпус, но
+            # частичность видна, чтобы «прочитано 3 из 665» не выдавалось за полный документ.
+            return ExtractedDoc(
+                text=text,
+                content_hash=_sha256(text),
+                extractor_version=self.version,
+                page_count=page_count,
+                family=FAMILY_TEXT,
+                partial=True,
+                partial_reason=(
+                    f"pdfium: страниц не прочитано {len(failed)} из {page_count} "
+                    f"({_page_list(failed)}); текст прочитанных страниц"
+                ),
             )
         return ExtractedDoc(
             text=text,
@@ -252,3 +292,15 @@ class PdfiumDocumentExtractor:
 def _sha256(text: str) -> str:
     """``content_hash`` документа — sha256 текста (как в соседних адаптерах)."""
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _page_list(failed: list[int], limit: int = 5) -> str:
+    """Номера непрочитанных страниц для причины частичности (первые ``limit``).
+
+    Список ограничен: причина — человекочитаемая строка в провенансе, а не дамп 662
+    номеров; полный счётчик рядом («N из M») отвечает на вопрос об объёме.
+    """
+    shown = ", ".join(str(number) for number in failed[:limit])
+    if len(failed) > limit:
+        shown = f"{shown}, …"
+    return shown

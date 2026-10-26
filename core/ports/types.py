@@ -154,6 +154,19 @@ class ExtractedDoc:
     composition root: markdown/HTML/EPUB режутся по заголовкам, plain text — по абзацам.
     ``None`` (дефолт) означает «markdown-совместимое семейство»: так ведут себя HTML и
     docling (оба отдают markdown), поэтому существующие пути байт-в-байт неизменны.
+
+    **Частичность (``partial``/``partial_reason``).** Документ прочитан **не целиком**, но
+    прочитанное — настоящий текст: docling вернул ``PARTIAL_SUCCESS`` (часть страниц не
+    сконвертирована), pdfium не прочитал часть страниц. Это **не** ``error``: текст есть и
+    обязан попасть в корпус — иначе доказательство, которое было прочитано, исчезает, а
+    ячейка получает «материала нет». Но и не полный успех: ``partial`` — видимый факт
+    провенанса, а не тихая подмена (уровень ``full``/``layout*``, обещавший структуру
+    целого документа, при частичном результате ею не является — это читается в
+    ``partial_reason``).
+
+    Инвариант (проверяется :meth:`__post_init__`): ``partial=True`` требует непустого
+    ``text`` и ``error is None`` — «частичный успех» без текста есть провал, а не успех;
+    ``partial_reason`` без ``partial`` — ложная провенанс-запись.
     """
 
     text: str
@@ -162,6 +175,35 @@ class ExtractedDoc:
     page_count: int | None = None
     error: str | None = None
     family: str | None = None
+    #: Документ прочитан частично (часть страниц/членов не сконвертирована), текст — реален.
+    partial: bool = False
+    #: Почему частично: статус движка + сколько страниц получено + уровень, который обещался.
+    partial_reason: str | None = None
+
+    def __post_init__(self) -> None:
+        """Держит инвариант частичности: она не бывает пустой и не бывает без текста.
+
+        Проверка здесь, а не в адаптере, потому что ``ExtractedDoc`` пересекает шов и кэш:
+        «частичный» документ без текста и «полный» документ с причиной частичности —
+        одинаково ложные провенанс-записи, независимо от того, кто их собрал.
+        """
+        if not self.partial:
+            if self.partial_reason is not None:
+                raise ValueError(
+                    "ExtractedDoc: partial_reason задан при partial=False — "
+                    "причина частичности без самой частичности"
+                )
+            return
+        if self.error is not None:
+            raise ValueError(
+                "ExtractedDoc: partial=True вместе с error — частичный успех и сбой "
+                "одновременно несовместимы"
+            )
+        if not self.text.strip():
+            raise ValueError(
+                "ExtractedDoc: partial=True с пустым text — частичного успеха без текста "
+                "не бывает (это провал, error)"
+            )
 
 
 @dataclass(frozen=True)

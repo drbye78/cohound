@@ -130,6 +130,27 @@ _DOCLING_BUILD_PREFIX = "docling-"
 #: (с torch) и лёгкий ``docling-slim`` (тот же код без torch; 05-dependency-stack).
 _DOCLING_DISTRIBUTIONS: tuple[str, ...] = ("docling", "docling-slim")
 
+#: Имя статуса docling «сконвертирована только часть документа». Сравнивается по имени, а
+#: не по объекту ``ConversionStatus``: адаптер не импортирует docling на уровне модуля
+#: (ленивый импорт), а повторы этого перечисления в собственный enum были бы дублем
+#: семантики чужой библиотеки.
+#:
+#: Почему это отдельная ветка, а не «всё, что не SUCCESS». ``PARTIAL_SUCCESS`` несёт
+#: **готовый текст** части страниц (типичный живой случай: 665-страничный PDF, где OCR
+#: падает на части страниц, или документ, не уложившийся в ``document_timeout``). Отбросив
+#: его целиком, адаптер терял прочитанное: документ исчезал из корпуса, а ячейка получала
+#: «материала нет» при существующем доказательстве. ``FAILURE``/``SKIPPED``/пустой текст —
+#: по-прежнему ``_error`` (текста нет, частичного успеха без текста не бывает).
+PARTIAL_SUCCESS_STATUS = "PARTIAL_SUCCESS"
+
+#: Уровни, которые обещают **структуру целого** документа (layout-модель/таблицы/OCR).
+#: Уровень ``text`` (``NativePdfPipeline``) структуры не обещает: там частичность означает
+#: только «часть страниц не прочитана», и утверждать иное значило бы приписать уровню
+#: обещание, которого он не давал.
+_STRUCTURED_LEVELS: frozenset[DocumentLevel] = frozenset(
+    {DocumentLevel.LAYOUT, DocumentLevel.LAYOUT_TABLES, DocumentLevel.FULL}
+)
+
 
 def docling_library_version() -> str:
     """Версия установленной библиотеки ``docling`` — **единственный** источник (Д-8).
@@ -437,6 +458,23 @@ def _page_count(result: object) -> int | None:
     return len(pages) if pages is not None else None
 
 
+def _converted_page_count(result: object) -> int | None:
+    """Сколько страниц **реально попало** в результат (``len(result.pages)``).
+
+    Другой вопрос, чем у :func:`_page_count`: там — размер документа, здесь — объём
+    проделанной работы. Пара нужна, чтобы «частично» было числом (``3 из 665``), а не
+    прилагательным: без него человек не отличит «не прочиталась одна страница из семи» от
+    «не прочиталось 662 из 665».
+    """
+    pages = getattr(result, "pages", None)
+    if pages is None:
+        return None
+    try:
+        return len(pages)
+    except TypeError:  # pragma: no cover — бэкенд отдал не коллекцию
+        return None
+
+
 class DoclingDocumentExtractor:
     """Документ (PDF/DOCX/PPTX/XLSX) → markdown через docling. Реализация ``ExtractorPort``.
 
@@ -713,12 +751,29 @@ class DoclingDocumentExtractor:
     def _convert(self, converter: object, path: str) -> ExtractedDoc:
         """Общий хвост обоих входов: ``convert`` → markdown → ``ExtractedDoc``.
 
+        Статус конвертации разбирается на три исхода, а не на два:
+
+        * ``SUCCESS`` — полный текст, ``partial=False`` (прежнее поведение);
+        * ``PARTIAL_SUCCESS`` — текст **части** документа, ``partial=True`` и причина
+          (:meth:`_partial`). Пустой текст при этом статусе — не частичный успех, а
+          провал: ``_error``;
+        * любой другой статус — ``_error`` (прежняя строка ошибки).
+
         Любой сбой конвертации — грациозная деградация ``docling: <причина>`` (прежняя
         строка ошибки), а не исключение.
         """
         try:
             result = converter.convert(path)
             status = getattr(result.status, "name", str(result.status))
+            if status == PARTIAL_SUCCESS_STATUS:
+                doc = self._partial(result, status)
+                if doc.error is None:
+                    # Операционная видимость: артефакт прогона признак частичности пока не
+                    # несёт (его место — ``corpus_docs``/манифест), поэтому факт «документ
+                    # прочитан не целиком» обязан быть виден хотя бы в журнале, а не
+                    # растворяться в числе документов.
+                    _log.warning("частичное извлечение %s: %s", path, doc.partial_reason)
+                return doc
             if status != "SUCCESS":
                 return self._error(f"docling: статус конвертации {status}")
             text = result.document.export_to_markdown()
@@ -731,6 +786,56 @@ class DoclingDocumentExtractor:
             )
         except Exception as exc:  # noqa: BLE001 - грациозная деградация на уровне адаптера
             return self._error(f"docling: {exc}")
+
+    def _partial(self, result: object, status: str) -> ExtractedDoc:
+        """``PARTIAL_SUCCESS`` → документ с текстом **части** и видимой причиной.
+
+        Частичность не выдаётся за полный успех по двум признакам сразу:
+
+        * ``partial=True`` — машинный признак для вызывающего (сегодня его читает только
+          журнал: персистенция в ``corpus_docs``/манифест — отдельная правка ядра, не
+          адаптера);
+        * ``partial_reason`` называет **статус**, **сколько страниц получено из скольких**
+          и **объявленный уровень** — ``layout``/``layout_tables``/``full`` обещают
+          структуру целого документа, поэтому их частичный результат не вправе читаться
+          как «full», не будучи таковым (``extractor_version`` при этом не меняется: он
+          описывает движок и ось уровня, а не объём проделанной работы).
+
+        Пустой текст при частичном статусе — это не частичный успех: страницы, которых нет
+        в результате, не дали ничего. Тогда — прежняя строка ``_error``, чтобы «прочитали
+        частично» не стало способом вернуть пустой документ в корпус.
+        """
+        text = result.document.export_to_markdown()
+        if not text.strip():
+            return self._error(f"docling: статус конвертации {status} без текста")
+        total = _page_count(result)
+        converted = _converted_page_count(result)
+        pages_note = ""
+        if converted is not None and total is not None:
+            pages_note = f", получено страниц {converted} из {total}"
+        elif converted is not None:
+            pages_note = f", получено страниц {converted}"
+        # Формулировка зависит от уровня: ``layout``/``layout_tables``/``full`` обещают
+        # **структуру целого** документа (заголовки, таблицы, reading order), поэтому их
+        # частичный результат не вправе читаться как обещанное; ``text`` структуры не
+        # обещает вовсе — там частичность означает только «часть страниц не прочитана».
+        claim = (
+            "обещана структура целого документа — получен текст части"
+            if self._level in _STRUCTURED_LEVELS
+            else "получен текст части документа"
+        )
+        reason = (
+            f"docling: статус конвертации {status}{pages_note}; "
+            f"уровень {self._level.value}: {claim}"
+        )
+        return ExtractedDoc(
+            text=text,
+            content_hash=_sha256(text),
+            extractor_version=self.version,
+            page_count=total,
+            partial=True,
+            partial_reason=reason,
+        )
 
     def _error(self, message: str) -> ExtractedDoc:
         return ExtractedDoc(

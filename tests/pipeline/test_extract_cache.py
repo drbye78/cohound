@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -216,6 +217,25 @@ def test_error_document_not_stored(tmp_path: Path) -> None:
     assert cache.get(RAW_A, "ext-1", "full") is None
     assert cache.stats()["writes"] == 0
 
+
+def test_partial_document_not_stored(tmp_path: Path) -> None:
+    """Частичный результат не кэшируется: иначе «7 страниц из 2763» — навсегда.
+
+    Ключ кэша — ``(content_hash байтов, extractor_version, level)``; объём реально
+    проделанной работы в него не входит. Живой случай: PDF на 2763 страницы дал
+    ``PARTIAL_SUCCESS`` с 7 прочитанными страницами (79 810 символов). Заморозить такой
+    результат значило бы объявить документом текст части без всякой возможности
+    пере-экстракции — и признак частичности при чтении ещё и терялся бы (``get`` собирает
+    ``partial=False`` по умолчанию).
+    """
+    cache = ExtractionCache(tmp_path / "cache")
+    partial = replace(_doc("семь страниц из 2763"), partial=True, partial_reason="PARTIAL_SUCCESS")
+
+    cache.put(partial, level="full", content_hash=RAW_A)
+
+    assert not _entry(tmp_path / "cache", RAW_A).exists()
+    assert cache.get(RAW_A, "ext-1", "full") is None
+    assert cache.stats()["writes"] == 0
 
 def test_empty_and_whitespace_text_not_stored(tmp_path: Path) -> None:
     cache = ExtractionCache(tmp_path / "cache")
