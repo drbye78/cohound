@@ -27,6 +27,7 @@ from core.domain.models import (
 )
 from core.pipeline.normalize import RunInputs
 from core.pipeline.plan import derive_run_id
+from core.pipeline.digests import EXECUTION_CONTRACT_FIELDS
 from core.pipeline.run_identity import (
     RunIdentity,
     build_execution_contract,
@@ -242,6 +243,52 @@ def test_execution_contract_uses_available_values_and_none_for_later_wiring() ->
     )
     assert changed != first
 
+
+def test_prompt_template_is_a_contract_condition_not_provenance(monkeypatch: pytest.MonkeyPatch) -> None:
+    """§7.1/§7.4: шаблон промпта входит в ``execution_contract_digest``.
+
+    Шаблон не «настройка вида»: он задаёт, какой ответ считается заявленным, а какой —
+    отсутствием. Замер это показал на числах: ``v3`` перестал выдумывать ``❌`` ценой
+    потери различения частичного утверждения, ``v4`` вернул его. Вердикты меняются —
+    значит меняются условия измерения, а поля в контракте не было, то есть такая правка
+    прошла бы под прежним ``run_id``. Это тот же класс, что ``--max-depth``, применявшийся
+    при сборке фаз и не входивший в идентичность.
+    """
+    from core.pipeline import run_identity as module
+
+    assert "prompt_template" in EXECUTION_CONTRACT_FIELDS
+
+    inputs = _inputs()
+    kwargs = {"cohort_digest": "cohort", "seeds_digest": "seeds"}
+    baseline = build_execution_contract(inputs, **kwargs)
+
+    # Тот же текст шаблона — та же идентичность (детерминизм).
+    assert build_execution_contract(inputs, **kwargs) == baseline
+
+    # Другой шаблон — другая идентичность, при полностью совпадающих прочих входах.
+    monkeypatch.setattr(module, "_prompt_template_identity", lambda: "evaluator_v4@deadbeef0000")
+    assert build_execution_contract(inputs, **kwargs) != baseline
+
+def test_prompt_template_identity_carries_content_not_only_name(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Имя версии без содержимого позволило бы переписать шаблон, не сменив ``run_id``."""
+    from core.pipeline import prompt as prompt_module
+    from core.pipeline.run_identity import _prompt_template_identity
+
+    monkeypatch.setattr(prompt_module, "_load_template", lambda version: "текст А")
+    first = _prompt_template_identity()
+    assert first.startswith(f"{prompt_module.TEMPLATE_VERSION}@")
+    assert first == _prompt_template_identity()
+
+    monkeypatch.setattr(prompt_module, "_load_template", lambda version: "текст Б")
+    assert _prompt_template_identity() != first
+
+    # Шаблона нет на диске (подменён в процессе пробы) — честно называется только имя,
+    # а не выдуманный хеш.
+    def _missing(version: str) -> str:
+        raise FileNotFoundError(version)
+
+    monkeypatch.setattr(prompt_module, "_load_template", _missing)
+    assert _prompt_template_identity() == prompt_module.TEMPLATE_VERSION
 
 # ---------------------------------------------------------------------------
 # change_class / RunIdentity

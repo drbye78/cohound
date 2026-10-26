@@ -2471,7 +2471,8 @@ def _report_gates() -> None:
 
         # Расхождение контракта — причина ``execution_change`` по дайджесту + честная
         # детализация: доступные на манифесте поля совпадают, а ``cohort_digest``/
-        # ``seeds_digest`` на ``RunManifest`` отсутствуют — предел диагностики назван,
+        # ``seeds_digest``/``prompt_template`` на ``RunManifest`` отсутствуют — предел
+        # диагностики назван,
         # причина не выдумывается (09 §12.5).
         contract_reasons = diff_boundary_violations(
             _manifest("ib_a", execution_contract_digest="ec_1"),
@@ -2481,7 +2482,7 @@ def _report_gates() -> None:
             "execution_change: execution_contract_digest: ec_1 → ec_2",
             "execution_change: execution_contract_digest: различающееся поле не "
             "восстановимо из манифеста (cohort_digest/seeds_digest/extractor_stack/"
-        "serp_rounds либо иная ось)",
+        "serp_rounds/prompt_template либо иная ось)",
         ]
         if contract_reasons != expected_contract_reasons:
             raise AssertionError(

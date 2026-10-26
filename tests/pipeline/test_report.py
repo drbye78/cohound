@@ -1427,9 +1427,12 @@ def test_diff_boundary_contract_mismatch_names_fields_in_contract_order() -> Non
 def test_diff_boundary_contract_mismatch_states_diagnostic_limit() -> None:
     """Дайджесты разные, доступные поля совпадают → предел диагностики, без выдумки имён.
 
-    ``cohort_digest``/``seeds_digest``/``extractor_stack`` входят в контракт, но на
-    ``RunManifest`` их нет (только ``cohort_ref``; стека извлечения манифест не несёт):
-    причина не восстановима и **не** выдумывается (A3).
+    ``cohort_digest``/``seeds_digest``/``extractor_stack``/``prompt_template`` входят в
+    контракт, но на ``RunManifest`` их нет (только ``cohort_ref``; ни стека извлечения, ни
+    шаблона промпта манифест не несёт): причина не восстановима и **не** выдумывается (A3).
+    ``prompt_template`` попадает сюда сознательно: восстановить применённый шаблон из
+    манифеста нельзя, а объявить на манифесте текущий значило бы соврать про прогон,
+    сделанный другим шаблоном.
     """
     prev = _manifest(execution_contract_digest="ec_1")
     curr = _manifest(execution_contract_digest="ec_2")
@@ -1438,7 +1441,7 @@ def test_diff_boundary_contract_mismatch_states_diagnostic_limit() -> None:
         "execution_change: execution_contract_digest: ec_1 → ec_2",
         "execution_change: execution_contract_digest: различающееся поле не "
         "восстановимо из манифеста (cohort_digest/seeds_digest/extractor_stack/"
-        "serp_rounds либо иная ось)",
+        "serp_rounds/prompt_template либо иная ось)",
     ]
     assert not any("chunker_version" in reason for reason in reasons)
     assert not any("embed_model_id" in reason for reason in reasons)
@@ -1478,7 +1481,7 @@ def test_diff_boundary_names_cohort_change_instead_of_contract_mismatch() -> Non
         "execution_change: execution_contract_digest: ec_1 → ec_2",
         "execution_change: execution_contract_digest: различающееся поле не "
         "восстановимо из манифеста (cohort_digest/seeds_digest/extractor_stack/"
-        "serp_rounds либо иная ось)",
+        "serp_rounds/prompt_template либо иная ось)",
     ]
 
 

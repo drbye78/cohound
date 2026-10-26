@@ -31,6 +31,7 @@ from typing import Any, Protocol
 from core.domain.enums import ChangeClass, RefreshPolicy, RunScope
 from core.domain.models import RunConfig
 from core.pipeline.digests import execution_contract_digest
+from core.util.hashing import content_hash
 from core.pipeline.normalize import RunInputs
 
 __all__ = [
@@ -162,6 +163,23 @@ def resolve_refresh_policy(
     return RefreshPolicy(configured) if configured is not None else RefreshPolicy.AUTO
 
 
+def _prompt_template_identity() -> str:
+    """``имя_шаблона@хеш_содержимого`` — условие измерения, а не провенанс (§7.1).
+
+    Зачем хеш: один ``TEMPLATE_VERSION`` не описывает текст. Правка шаблона меняет
+    вердикты (``v3`` перестал выдумывать ``❌``, ``v4`` вернул различение частичного
+    утверждения), и без хеша такая правка прошла бы под прежним ``run_id``. Файл может
+    отсутствовать (шаблон подменён в процессе пробы) — тогда честно называется только
+    имя: выдумывать хеш нечего.
+    """
+    from core.pipeline.prompt import TEMPLATE_VERSION, _load_template
+
+    try:
+        text = _load_template(TEMPLATE_VERSION)
+    except OSError:
+        return TEMPLATE_VERSION
+    return f"{TEMPLATE_VERSION}@{content_hash(text)[:12]}"
+
 def build_execution_contract(
     inputs: RunInputs,
     *,
@@ -228,6 +246,10 @@ def build_execution_contract(
         # условия измерения. Пустой набор — стабильный дайджест пустого множества, а не
         # ``None``: «артефактов не объявлено» — это факт входа, а не отсутствие значения.
         "manual_artifacts_digest": _declared(declared, "manual_artifacts_digest"),
+        # §7.1/§7.4: шаблон промпта оценщика. Имя версии без содержимого позволило бы
+        # переписать текст шаблона, не сменив идентичность, поэтому в контракт идёт пара
+        # «имя + хеш файла»: шаблон задаёт, что считается заявленным, а что отсутствием.
+        "prompt_template": _prompt_template_identity(),
     }
     return execution_contract_digest(values)
 
