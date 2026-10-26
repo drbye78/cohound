@@ -86,6 +86,7 @@ from core.util.security import validate_url
 
 __all__ = [
     "CrawlLimits",
+    "DEFAULT_DOCUMENT_TIMEOUT_S",
     "Frontier",
     "SCOPE_ARTIFACT_OUTSIDE_PREFIX",
     "SCOPE_IN",
@@ -110,6 +111,18 @@ ARTIFACT_BYPASS_EXAMPLES_MAX = 10
 
 #: Потолок примеров отвергнутых поддоменов **на хост** в провенансе (счётчик — точный).
 SUBDOMAIN_REJECT_EXAMPLES_MAX = 3
+
+#: Потолок времени извлечения **одного** документа/члена контейнера
+#: (ось ``crawl.document_timeout_s``), секунды.
+#:
+#: Значение **равно прежнему зашитому поведению**: до появления оси тот же потолок жил
+#: константой ``_EXTRACT_TASK_TIMEOUT_S = 1800.0`` в :mod:`core.pipeline.corpus`
+#: (``future.result(timeout=...)`` на одну задачу экстракции). Новая ось обязана
+#: сохранить это число дефолтом: иначе первый же прогон после правки получил бы другой
+#: ``run_id`` и другой (не измеренный) сценарий таймаута без изменения измерения (A3).
+#: 1800 с — guard от зависания воркера, а не SLA: замер layout_tables на 665-стр. PDF —
+#: 866 с (``docs/architecture/05-dependency-stack.md`` §2).
+DEFAULT_DOCUMENT_TIMEOUT_S = 1800.0
 
 
 def normalize_scope_host(host: str) -> str:
@@ -202,6 +215,16 @@ class CrawlLimits:
     #: входит в ``as_dict()`` **всегда**: механизм определяет текст документа, то есть
     #: состав корпуса (``execution_change``, §13), а не расписание.
     pdf_pipeline: PdfPipeline = PdfPipeline.STRUCTURED
+    #: P8: таймаут **документа** (``crawl.document_timeout_s``) — потолок ожидания
+    #: извлечения одного документа/члена контейнера, секунды. Дефолт равен прежнему
+    #: зашитому значению (:data:`DEFAULT_DOCUMENT_TIMEOUT_S` = 1800.0), поэтому объявление
+    #: оси не меняет поведение прогона, который её не объявлял. В :meth:`as_dict` входит
+    #: **только при явном задании** — как ``max_response_bytes``/``archive_*``: иначе ключ
+    #: появился бы у всех прогонов и ``crawl_config_digest``/``run_id`` сменились бы без
+    #: изменения измерения (§13). Задание оси — ``execution_change``: потолок решает, какой
+    #: документ успел стать корпусом (медленный источник), то есть условие измерения.
+    document_timeout_s: float = DEFAULT_DOCUMENT_TIMEOUT_S
+    document_timeout_s_explicit: bool = False
     #: D1/§10: **эффективная** egress-политика ``robots.txt`` для корня (включена/выключена).
     #: Это условие измерения, а не рычаг пропускной способности: гейт ``robots.txt`` решает,
     #: какие документы вообще допускаются в корпус, поэтому он входит в ``as_dict()``
@@ -255,6 +278,8 @@ class CrawlLimits:
         }
         # Та же обратная совместимость: ключ появляется только при явно заданной оси,
         # поэтому дайджест прогонов без неё не меняется, а при задании — честно меняется.
+        if self.document_timeout_s_explicit:
+            payload["document_timeout_s"] = self.document_timeout_s
         if self.revalidate_max_documents is not None:
             payload["revalidate_max_documents"] = self.revalidate_max_documents
         if self.max_response_bytes_explicit:
@@ -497,6 +522,18 @@ def resolve_crawl_limits(
         run_pdf_pipeline,
         site_attr("pdf_pipeline"),
     )
+    # P8: таймаут документа — та же цепочка app < run < site. ``None`` на всех слоях =
+    # ось не объявлена ⇒ действует прежнее зашитое значение (:data:`DEFAULT_DOCUMENT_TIMEOUT_S`),
+    # поэтому ``as_dict`` не получает ключ и ``run_id`` не меняется.
+    run_document_timeout = (
+        getattr(run, "document_timeout_s", None) if run is not None else None
+    )
+    site_document_timeout = site_attr("document_timeout_s")
+    document_timeout = _pick(
+        getattr(app, "document_timeout_s", None),
+        run_document_timeout,
+        site_document_timeout,
+    )
     # P6: контейнеры. ``None`` на site/run — «наследовать»; app-дефолт всегда есть.
     app_max_artifact_bytes = getattr(app, "max_artifact_bytes", None)
     site_max_artifact_bytes = site_attr("max_artifact_bytes")
@@ -645,6 +682,14 @@ def resolve_crawl_limits(
         ),
         pdf_pipeline=PdfPipeline(
             PdfPipeline.STRUCTURED if pdf_pipeline is None else pdf_pipeline
+        ),
+        document_timeout_s=(
+            DEFAULT_DOCUMENT_TIMEOUT_S
+            if document_timeout is None
+            else float(document_timeout)  # type: ignore[arg-type]
+        ),
+        document_timeout_s_explicit=_axis_explicit(
+            app, "document_timeout_s", run_document_timeout, site_document_timeout
         ),
     )
 

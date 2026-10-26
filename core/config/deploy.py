@@ -452,6 +452,12 @@ class CrawlConfig(BaseModel):
     # (любой эффективный ``max_depth > 0`` или сконфигурированный per-site ``sitemap``),
     # чтобы прогоны без discovery оставались байт-в-байт прежними (без fetch robots.txt).
     robots: bool | None = None
+    # P8: таймаут **документа** (``crawl.document_timeout_s``) — потолок ожидания извлечения
+    # одного документа/члена контейнера, секунды. ``None`` — ось не объявлена: действует
+    # прежнее зашитое значение (1800 с, ``DEFAULT_DOCUMENT_TIMEOUT_S``), поведение и
+    # ``run_id`` байт-в-байт. Именно поэтому поле ``None``, а не ``1800.0``: дефолт app-слоя
+    # не должен делать ось «явной» и менять дайджест старых прогонов (§13).
+    document_timeout_s: float | None = Field(default=None, gt=0)
 
     @field_validator("exclude_paths", "exclude_documents")
     @classmethod

@@ -703,3 +703,40 @@ def test_check_unknown_exhaustion_contract_class_is_not_enough() -> None:
 
 def test_check_unknown_exhaustion_human_review_satisfies_i3() -> None:
     assert check_unknown_exhaustion(_unknown_cell(reviewed_by="human"), None) == []
+
+
+def test_absence_rule_none_does_not_fabricate_scope() -> None:
+    """``absence_rule=None`` (legacy-строка) не достраивает класс отрицания.
+
+    Прежде чтение подставляло ``explicit``, то есть прочитанная ячейка заявляла правило,
+    которого каталог не объявлял. Теперь «правило не записано» — это отсутствие правила:
+    реестровый автодострой срабатывает только на **объявленном** ``registry_absence``.
+    """
+    cell = Cell.model_construct(
+        run_id="r1",
+        product_id="p",
+        param_id="param",
+        state=CellState.EVALUATED,
+        status=Status.ABSENT,
+        absence_rule=None,
+        evidence=[],
+        absence_evidence=[{"registry_ids": ["reg-1"]}],
+        evidence_scope=None,
+    )
+    # I2: нет класса отрицания — «нет» не публикуется; выдуманного правила не появилось.
+    assert cell.evidence_scope is None
+    assert "I2" in _codes(check_cell(cell))
+
+
+def test_absence_rule_none_allows_presence_cells() -> None:
+    """Наличие-ячейка с незаписанным правилом валидна: правило к вердикту не относится."""
+    cell = Cell(
+        run_id="r1",
+        product_id="p",
+        param_id="param",
+        state=CellState.EVALUATED,
+        status=Status.OK,
+        absence_rule=None,
+        evidence=[LLMEvidence(source_id="c1", quote="q")],
+    )
+    assert check_cell(cell) == []

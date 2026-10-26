@@ -22,6 +22,7 @@ from core.domain.enums import (
     DenialClaim,
     DenialStrength,
     DocumentLevel,
+    ExcludedCellClass,
     ExtractionRoute,
     FailureKind,
     FetchMode,
@@ -34,6 +35,7 @@ from core.domain.enums import (
     PdfPipeline,
     ProductMode,
     ProductScope,
+    PublishabilityClass,
     RankingPolicy,
     RefreshPolicy,
     ReuseKind,
@@ -45,6 +47,7 @@ from core.domain.enums import (
     SkipReason,
     StaleReason,
     Status,
+    UnknownCause,
     UnknownPolicy,
 )
 
@@ -119,6 +122,10 @@ def assert_dictionary_integrity(path: str | Path) -> None:
         # MVP-3a (09 §6.3/§9): инкрементальный work-set и переиспользование.
         "incremental_kind",
         "reuse_kind",
+        # A1/§6: класс публикуемости и разложение неизвестности — обязательные секции.
+        "publishability_class",
+        "unknown_cause",
+        "excluded_cell_class",
     ]
     missing = [k for k in required if k not in data]
     if missing:
@@ -167,6 +174,12 @@ def assert_dictionary_integrity(path: str | Path) -> None:
         "failure_kind": {v.value for v in FailureKind},
         # Вариант 2: что модель вправе заявить о своём «нет» (ровно два класса).
         "denial_claim": {v.value for v in DenialClaim},
+        # A1/§6: класс публикуемости карты и разложение неизвестности. Без этих секций
+        # общий гейт словаря не знал о них, и словарь мог разъехаться с enum незаметно
+        # (тест профиля ловит это только в своём файле).
+        "publishability_class": {v.value for v in PublishabilityClass},
+        "unknown_cause": {v.value for v in UnknownCause},
+        "excluded_cell_class": {v.value for v in ExcludedCellClass},
     }
     for section, expected in checks.items():
         actual = set(data[section])

@@ -367,6 +367,42 @@ def test_report_human_prints_paths(
 
 
 
+def test_report_json_carries_publishability(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A1/§6: ``hound report --json`` публикует класс и числа, а не только шапку карты.
+
+    Класс — результат измерения, и машинный вывод обязан его нести: человек, читающий
+    JSON, иначе видит ``ok: true`` и не видит, что карта непубликуема как сравнение.
+    """
+    from core.domain.enums import PublishabilityClass
+
+    db = tmp_path / "cohound.db"
+    _seed_run(
+        db,
+        "run.r",
+        cells=[(PRODUCT_A, PARAM_A, Status.OK), (PRODUCT_B, PARAM_B, Status.OK)],
+    )
+    out = tmp_path / "runs"
+
+    code = main(
+        ["report", "--db", str(db), "--run-id", "run.r", "--out", str(out), "--json"]
+    )
+    assert code == EXIT_OK
+    payload = json_out(capsys)
+    assert payload["publishability"] is not None
+    assert payload["publishability"]["klass"] in {
+        item.value for item in PublishabilityClass
+    }
+    # Числа, из которых класс выведен, едут рядом с классом (иначе класс — приговор).
+    assert "unknown_share" in payload["publishability"]
+    assert "coverage" in payload["publishability"]
+    # Артефакт разложения неизвестности на месте.
+    artifacts = out / "run.r" / "outputs" / "publishability.yaml"
+    assert Path(payload["artifacts"]["publishability"]) == artifacts
+    assert artifacts.exists()
+
+
 def test_report_lists_urls_blocked_by_robots(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     """``hound report`` обязан ПОКАЗАТЬ недоступное, а не написать «недоступного нет».
 

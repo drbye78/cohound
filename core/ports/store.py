@@ -80,7 +80,21 @@ class StorePort(Protocol):
         """
         ...
 
-    def save_cell(self, cell: Cell) -> None: ...
+    def save_cell(self, cell: Cell) -> None:
+        """Upsert ячейки по PK ``(run_id, product_id, param_id)``.
+
+        Контракт реализации (``SqliteStore``):
+
+        * ``Cell.absence_rule`` пишется в ``cells.absence_rule``; ``None`` — «правило не
+          записано», и при чтении возвращается ``None``, а не ``explicit`` (выдуманное
+          правило делало бы ``I2`` проверяемым на значении, которого никто не объявлял —
+          ``review.promote`` работает с прочитанными ячейками);
+        * ``Cell.validation_notes`` **накапливаются**: реализация сливает их с уже
+          записанными (без дублей), потому что ``INSERT OR REPLACE`` иначе стёр бы
+          причину прошлой оценки при resume;
+        * ``iter_cells`` возвращает обе колонки обратно (``Cell.absence_rule`` /
+          ``Cell.validation_notes``).
+        """
 
     def save_cells_batch(self, cells: list[Cell], chunk_size: int = 200) -> None: ...
 

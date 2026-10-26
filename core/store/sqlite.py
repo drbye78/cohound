@@ -69,6 +69,7 @@ CREATE TABLE IF NOT EXISTS runs (
     execution_contract_digest TEXT,                    -- §13/09 §12.5: отпечаток условий измерения (methodology_change boundary)
     manual_artifacts_digest TEXT,                      -- 13-manual-artifacts §3.2: отпечаток объявленных ручных артефактов (execution_change)
     manual_artifacts_json TEXT,                        -- 13-manual-artifacts §3.4: доля ручного (наблюдение, не потолок)
+    publishability_json   TEXT,                        -- §6/A1: профиль публикуемости (класс + числа, из которых он выведен)
     ranking_epsilon       REAL,                        -- §6/B-1: порог неразличимости ранжирования
     deploy_profile        TEXT,                        -- 07 §7: профиль доверенных зон (R7)
     edge_schema_version   TEXT,                        -- 07 §7: версия контракта шва /v1/* (execution-class)
@@ -177,9 +178,10 @@ CREATE TABLE IF NOT EXISTS cells (
     status            TEXT,                             -- NULL при failed/preliminary (I4/I13)
     preliminary_status TEXT,
     source_kind       TEXT,
+    absence_rule      TEXT,                             -- правило отсутствия параметра (§4.2/I2); NULL = не записано
     justification     TEXT,
     rule_note         TEXT,
-    validation_notes  TEXT,
+    validation_notes  TEXT,                             -- JSON-массив: свидетельство о дефектах оценки (ремонт/отказ)
     failure_kind      TEXT,
     model_id          TEXT,
     llm_scenario      TEXT,                             -- §7.4/I21
@@ -682,6 +684,12 @@ def connect(db_path: str | Path = ":memory:") -> sqlite3.Connection:
             "manual_artifacts_json": "TEXT",
         },
     )
+    # §6/A1: профиль публикуемости — блок манифеста, а не пересчёт читателя. Колонка
+    # аддитивная и идемпотентная: старые строки получают NULL (профиль не вычислялся —
+    # не фабрикуется). ``schema_version`` **не** поднимается: аддитивная миграция не
+    # меняет форму читаемых данных, а подъём версии (11 §2.6) отверг бы существующие
+    # прогоны — их читаемость здесь важнее формальной метки.
+    _ensure_columns(conn, "runs", {"publishability_json": "TEXT"})
     # DDL-миграция v3.6 (P6): аннотация причины pending-ячейки (конфликт источников vs
     # условное наследование). Аддитивно и идемпотентно; это не статус и не перечисление.
     _ensure_columns(conn, "cells", {"review_reason": "TEXT"})
@@ -693,6 +701,13 @@ def connect(db_path: str | Path = ":memory:") -> sqlite3.Connection:
     # поднимается — иначе гейт версии (11 §2.6) отверг бы уже существующие прогоны, а
     # «старые прогоны остаются читаемыми» здесь важнее формальной метки.
     _ensure_columns(conn, "cells", {"evidence_scope": "TEXT"})
+    # Правило отсутствия параметра (I2): прежде оно жило только в каталоге, и читатель
+    # подставлял ``explicit`` — прочитанная ячейка утверждала правило, которого никто не
+    # объявлял, а ``review.promote`` работает именно с прочитанными ячейками. Колонка
+    # аддитивная, старые строки получают NULL = «правило не записано» (не подставляется);
+    # ``schema_version`` **не** поднимается — иначе гейт версии (11 §2.6) отверг бы
+    # существующие прогоны, а их читаемость здесь важнее формальной метки.
+    _ensure_columns(conn, "cells", {"absence_rule": "TEXT"})
     # Переименование подписи: ``scope_attested_by`` → ``scope_acceptance`` (смысл —
     # принятие риска, а не аттестация полноты). Колонка аддитивная, значения старых строк
     # **копируются**: читатель больше не смотрит на старую колонку, и без копирования

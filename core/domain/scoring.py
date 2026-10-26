@@ -17,16 +17,20 @@ from __future__ import annotations
 
 import itertools
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from typing import Any
 
 from core.domain.enums import (
     CapabilityPolicy,
     CellState,
     ComparabilityLevel,
+    DenialStrength,
+    ExcludedCellClass,
     Importance,
+    PublishabilityClass,
     RankingPolicy,
     Status,
+    UnknownCause,
     UnknownPolicy,
 )
 from core.domain.models import AlignmentReport, CatalogRow, Cell, Cohort
@@ -37,12 +41,19 @@ __all__ = [
     "ModuleScore",
     "Comparability",
     "SensitivityReport",
+    "Bucket",
+    "ProductPublishability",
+    "PublishabilityProfile",
+    "DEFAULT_UNKNOWN_SHARE_THRESHOLD",
+    "DEFAULT_WEAK_DENIAL_SHARE_THRESHOLD",
+    "DEFAULT_COVERAGE_FLOOR",
     "resolved_capability",
     "evidence_coverage",
     "failure_rate",
     "comparability",
     "sensitivity",
     "module_scores",
+    "publishability_profile",
 ]
 
 _EPS = 1e-9
@@ -728,3 +739,559 @@ def module_scores(
         )
     result.sort(key=lambda item: item.module)
     return result
+
+
+# ---------------------------------------------------------------------------
+# Профиль публикуемости (A1, §6): разложение неизвестности по причинам
+# ---------------------------------------------------------------------------
+
+#: Доля неизвестных ячеек, выше которой карта **не** публикуется как сравнение (A1).
+#:
+#: Это **объявленный дефолт, а не измеренная константа** (аксиома A3: «дефолты — это
+#: assumption/candidate; замена дефолта происходит по измерению, не по предвидению»).
+#: Происхождение: D-19 формулировал A1 как «>30 % ``❓``/``❌`` без absence-evidence ⇒
+#: карта непригодна». Сегодня ``❌`` без absence-evidence недостижим по конструкции
+#: (I2: ``❌`` несёт силу отрицания), поэтому доля считается по ``❓`` + ``failed`` +
+#: ``pending``, а слабые «нет» (``bounded``) публикуются **отдельным** числом и в долю не
+#: подмешиваются. Достигнутая доля всегда публикуется рядом с порогом — порог без
+#: достигнутого значения ничего не измеряет.
+DEFAULT_UNKNOWN_SHARE_THRESHOLD: float = 0.30
+
+#: Доля «нет» на слабом основании (``denial_strength=bounded``) среди **опубликованных**
+#: ``❌``, после которой появляется оговорка ``weak_denials_above_threshold``.
+#:
+#: Тоже assumption/candidate (A3), не измерение: ``bounded`` — законное ``❌``, но оно
+#: держится на принятии риска человеком, а не на полном охвате. Порог не запрещает
+#: публикацию — он делает основание видимым.
+DEFAULT_WEAK_DENIAL_SHARE_THRESHOLD: float = 0.10
+
+#: Нижний уровень Coverage, ниже которого карта не публикуется как сравнение (A1).
+#:
+#: Согласован с границей Comparability ``INSUFFICIENT`` (``_level_for``: <0.50): ниже
+#: половины протокола «сравнимость» описывает не продукты, а пробелы измерения.
+DEFAULT_COVERAGE_FLOOR: float = 0.50
+
+
+@dataclass(frozen=True)
+class Bucket:
+    """Один класс разложения: сколько ячеек и какая доля веса знаменателя.
+
+    ``share`` — доля **своего** знаменателя; какой именно, называет владелец бакета
+    (:class:`ProductPublishability.denominator` для причин неизвестности,
+    ``denials_weight`` для слабых «нет»). ``missing`` — пары вселенной **без строки**
+    ячейки (только ``pending``): «не смотрели» отличается от «строка есть, но пустая».
+    """
+
+    cells: int = 0
+    weight: float = 0.0
+    share: float = 0.0
+    missing: int = 0
+
+
+@dataclass(frozen=True)
+class ProductPublishability:
+    """Разложение неизвестности одного продукта (§6/A1) — часть профиля публикуемости.
+
+    ``denominator`` совпадает с весом знаменателя Coverage этого продукта в том же режиме
+    (universe/legacy): разложение объясняет **тот же** знаменатель, а не свой собственный.
+    ``causes`` — только внутри знаменателя (``UnknownCause``), ``excluded`` — вне его
+    (``ExcludedCellClass``, I7/I13): смешать их значило бы выдать ``N/A`` за незнание.
+    """
+
+    product_id: str
+    denominator: float
+    measured_cells: int
+    measured_weight: float
+    unknown_cells: int
+    unknown_weight: float
+    unknown_share: float
+    causes: dict[str, Bucket]
+    excluded: dict[str, Bucket]
+    #: вес опубликованных ``❌`` (знаменатель доли слабых «нет»)
+    denials_weight: float
+    weak_denials: Bucket
+    #: контекст покрытия корпуса (``complete``/``observed``/``expected``/``blocked``).
+    #: Это **не** причина (причина живёт в ячейке, ``EvidenceScope``), а объяснение, почему
+    #: материал мог не наблюдаться; ``None`` — записи покрытия нет.
+    corpus: dict[str, Any] | None = None
+
+
+@dataclass(frozen=True)
+class PublishabilityProfile:
+    """Профиль публикуемости карты (§6/A1): класс + числа, из которых он выведен.
+
+    :param klass: класс :class:`~core.domain.enums.PublishabilityClass` — **результат**.
+    :param unknown_share: достигнутая доля неизвестного веса (знаменатель Coverage).
+    :param unknown_share_threshold: объявленный порог (:data:`DEFAULT_UNKNOWN_SHARE_THRESHOLD`).
+    :param coverage: агрегатный Coverage (``None`` ⇔ ``UNDEFINED``).
+    :param coverage_floor: объявленный уровень Coverage (:data:`DEFAULT_COVERAGE_FLOOR`).
+    :param weak_denial_share: доля слабых «нет» среди опубликованных ``❌``.
+    :param dominant_cause: класс причины с наибольшим весом (``None`` — неизвестных нет).
+    :param causes / excluded: агрегат по всем продуктам.
+    :param products: разложение по продуктам (детерминированный порядок ключей).
+    :param measured_products: сколько продуктов имеют хотя бы одну измеренную ячейку.
+    :param caveats: названные оговорки (коды); пустой список — оговорок нет.
+    :param reasons: условия, определившие класс (коды).
+    :param banner: готовая строка для шапки отчёта — класс и доминирующая причина.
+    """
+
+    klass: str
+    unknown_share: float
+    unknown_share_threshold: float
+    coverage: float | None
+    coverage_floor: float
+    weak_denial_share: float
+    weak_denial_share_threshold: float
+    dominant_cause: str | None
+    causes: dict[str, Bucket]
+    excluded: dict[str, Bucket]
+    weak_denials: Bucket
+    products: dict[str, ProductPublishability]
+    measured_products: int
+    caveats: list[str]
+    reasons: list[str]
+    banner: str
+
+    def to_dict(self) -> dict[str, Any]:
+        """JSON/YAML-совместимый словарь (манифест, CLI ``--json``, артефакт ``outputs/``).
+
+        Один сериализатор на все выходы: манифест, battle card и
+        ``outputs/publishability.yaml`` обязаны показывать **одни и те же** числа.
+        """
+        return asdict(self)
+
+
+def _unknown_cause(cell: Cell) -> str:
+    """Причина неизвестности ячейки из **записанных** данных (не догадка)."""
+    scope = getattr(cell, "evidence_scope", None)
+    strength = getattr(scope, "denial_strength", None)
+    if strength is DenialStrength.NOT_STATED:
+        return UnknownCause.NOT_STATED.value
+    if strength is DenialStrength.UNOBSERVED:
+        return UnknownCause.UNOBSERVED_SCOPE.value
+    if strength is DenialStrength.INSTRUMENT_FAILED:
+        return UnknownCause.INSTRUMENT_FAILED.value
+    # Класс не записан (историческая строка без ``evidence_scope``) либо записан
+    # несогласованно со статусом ``❓`` (аномалия данных) — причина не выводится, и
+    # подставлять вместо неё «вероятную» значило бы выдумать измерение.
+    return UnknownCause.UNSPECIFIED.value
+
+
+def _cell_class(cell: Cell | None, *, legacy: bool) -> tuple[str, str]:
+    """Классифицирует строку разложения: ``(вид, класс)``.
+
+    Вид: ``resolved`` (ячейка дала вердикт), ``unknown`` (внутри знаменателя, причина
+    названа) либо ``excluded`` (вне знаменателя, I7/I13/аномалия статуса). Правила
+    повторяют **построчно** цикл :func:`evidence_coverage`: разложение обязано объяснять
+    тот же знаменатель, иначе это второе определение Coverage.
+    """
+    if cell is None:
+        return "unknown", UnknownCause.PENDING.value
+    if cell.status is Status.NOT_APPLICABLE:
+        return "excluded", ExcludedCellClass.NOT_APPLICABLE.value
+    if cell.state is CellState.PRELIMINARY:
+        return "excluded", ExcludedCellClass.PRELIMINARY.value
+    if cell.state in _MEASURED_STATES and cell.status in _APPLICABLE_STATUSES:
+        if cell.status in _RESOLVED_STATUSES:
+            return "resolved", ""
+        return "unknown", _unknown_cause(cell)
+    if cell.state is CellState.FAILED:
+        return "unknown", UnknownCause.INSTRUMENT_FAILED.value
+    if cell.status is None and cell.state in _MEASURED_STATES:
+        # Ячейка «измерена», но статуса нет: в universe-режиме Coverage считает её
+        # неразрешённой, в legacy — не засчитывает вовсе. Повторяем оба правила.
+        return (
+            ("unknown", UnknownCause.PENDING.value)
+            if not legacy
+            else ("excluded", ExcludedCellClass.UNRESOLVED_STATE.value)
+        )
+    return "unknown", UnknownCause.PENDING.value
+
+
+def _partition(
+    cells: list[Cell],
+    params: Mapping[str, CatalogRow],
+    weights: Mapping[str, float],
+    universe: Iterable[tuple[str, str]] | None,
+) -> Iterable[tuple[str, Cell | None, float]]:
+    """Обход строк разложения с **теми же** весами, что у Coverage.
+
+    Universe-режим идёт по ``sorted(universe)`` (детерминизм суммы float — тот же приём,
+    что в :func:`evidence_coverage`: порядок ``set`` зависит от хеш-сида процесса).
+    """
+    if universe is None:
+        for cell in cells:
+            yield cell.product_id, cell, _cell_weight(cell, params, weights)
+        return
+    by_key = {(cell.product_id, cell.param_id): cell for cell in cells}
+    for product_id, param_id in sorted(universe):
+        yield (
+            product_id,
+            by_key.get((product_id, param_id)),
+            _param_weight(param_id, params, weights),
+        )
+
+
+def _corpus_context(entry: Any) -> dict[str, Any] | None:
+    """Контекст покрытия корпуса продукта из ``CorpusCoverage`` (объект или mapping)."""
+    if entry is None:
+        return None
+
+    def _get(name: str, default: Any = None) -> Any:
+        if isinstance(entry, Mapping):
+            return entry.get(name, default)
+        return getattr(entry, name, default)
+
+    context = {
+        "complete": _get("complete"),
+        "expected_sources": _get("expected_sources", 0),
+        "observed_sources": _get("observed_sources", 0),
+        "blocked": dict(_get("blocked", None) or {}),
+        "reason": _get("reason"),
+    }
+    return context
+
+
+def publishability_profile(
+    cells: Iterable[Cell],
+    params: Mapping[str, CatalogRow],
+    weights: Mapping[str, float],
+    *,
+    coverage: Coverage,
+    universe: Iterable[tuple[str, str]] | None = None,
+    comparability_level: str | None = None,
+    comparability_reasons: Sequence[str] = (),
+    cross_cycle: bool = False,
+    corpus_coverage: Mapping[str, Any] | None = None,
+    unknown_share_threshold: float = DEFAULT_UNKNOWN_SHARE_THRESHOLD,
+    weak_denial_share_threshold: float = DEFAULT_WEAK_DENIAL_SHARE_THRESHOLD,
+    coverage_floor: float = DEFAULT_COVERAGE_FLOOR,
+) -> PublishabilityProfile:
+    """Строит профиль публикуемости: разложение неизвестности + класс (A1, §6).
+
+    **Разложение.** Каждая строка знаменателя Coverage попадает ровно в один бакет:
+    ``resolved`` (✅/⚠️/❌) либо одна из причин :class:`UnknownCause`. Строки вне
+    знаменателя (``N/A`` — I7, ``preliminary`` — I13) идут в ``excluded`` и знаменатель
+    **не** объясняют. Поэтому ``Σ causes + resolved_weight == coverage.denominator`` —
+    это инвариант, а не совпадение (проверяется тестом).
+
+    **Класс** (порядок проверок фиксирован — первый сработавший побеждает):
+
+    1. ``NOT_COMPARABLE`` — ``coverage.defined is False`` (``UNDEFINED``) либо ни у одного
+       продукта нет измеренных ячеек: сравнивать структурно нечего;
+    2. ``ANALYTICAL_ONLY`` — Capability вычислим, но ``unknown_share > порога`` либо
+       ``coverage < coverage_floor``: карта как сравнение не публикуется;
+    3. ``PUBLISHABLE_WITH_CAVEAT`` — публикуется, но оговорки непусты;
+    4. ``PUBLISHABLE`` — оговорок нет.
+
+    :param cells: ячейки прогона (**без** устаревших: ``stale`` исключены в
+        :mod:`core.pipeline.compute` — разложение считает тот же вход, что Capability).
+    :param coverage: уже посчитанный Coverage того же входа: знаменатель разложения берётся
+        из него, второй формулы нет.
+    :param universe: вселенная scope (§6/B-3a); ``None`` — legacy-режим.
+    :param comparability_level/reasons/cross_cycle: аннотация Comparability прогона —
+        источник оговорок (сама по себе в класс не входит: ``INSUFFICIENT`` покрыт
+        проверкой ``coverage_floor``, а как оговорка публикуется отдельно).
+    :param corpus_coverage: ``{product_id: CorpusCoverage}`` — контекст неполноты корпуса.
+        В причины **не** превращается: причина выводится из ``EvidenceScope`` ячейки.
+    """
+    cell_list = list(cells)
+    corpus_map = dict(corpus_coverage or {})
+    # Материализуем вселенную один раз: она нужна и обходу, и составу продуктов
+    # (генератор был бы исчерпан первым проходом).
+    universe_list: list[tuple[str, str]] | None = (
+        None if universe is None else sorted(set(universe))
+    )
+
+    # Аккумуляторы на продукт; порядок ключей — отсортированный (детерминизм артефакта).
+    denominator: dict[str, float] = {}
+    measured_cells: dict[str, int] = {}
+    measured_weight: dict[str, float] = {}
+    denials_weight: dict[str, float] = {}
+    weak_cells: dict[str, int] = {}
+    weak_weight: dict[str, float] = {}
+    causes: dict[str, dict[str, dict[str, float]]] = {}
+    excluded: dict[str, dict[str, dict[str, float]]] = {}
+
+    def _bump(
+        store: dict[str, dict[str, dict[str, float]]],
+        product: str,
+        key: str,
+        weight: float,
+        *,
+        missing: bool,
+    ) -> None:
+        bucket = store.setdefault(product, {}).setdefault(
+            key, {"cells": 0, "weight": 0.0, "missing": 0}
+        )
+        bucket["cells"] += 1
+        bucket["weight"] += weight
+        if missing:
+            bucket["missing"] += 1
+
+    for product_id, cell, weight in _partition(
+        cell_list, params, weights, universe_list
+    ):
+        product_id = str(product_id)
+        kind, key = _cell_class(cell, legacy=universe_list is None)
+        if kind == "excluded":
+            _bump(excluded, product_id, key, weight, missing=False)
+            continue
+        denominator[product_id] = denominator.get(product_id, 0.0) + weight
+        if kind == "resolved":
+            measured_cells[product_id] = measured_cells.get(product_id, 0) + 1
+            measured_weight[product_id] = measured_weight.get(product_id, 0.0) + weight
+            scope = getattr(cell, "evidence_scope", None)
+            if cell is not None and cell.status is Status.ABSENT:
+                denials_weight[product_id] = denials_weight.get(product_id, 0.0) + weight
+                if getattr(scope, "denial_strength", None) is DenialStrength.BOUNDED:
+                    weak_cells[product_id] = weak_cells.get(product_id, 0) + 1
+                    weak_weight[product_id] = weak_weight.get(product_id, 0.0) + weight
+            continue
+        _bump(causes, product_id, key, weight, missing=cell is None)
+
+    all_products = sorted(
+        set(denominator)
+        | set(excluded)
+        | ({str(pair[0]) for pair in universe_list} if universe_list else set())
+        | {str(cell.product_id) for cell in cell_list}
+    )
+
+    def _bucket(
+        raw: Mapping[str, Mapping[str, float]] | None, denom: float
+    ) -> dict[str, Bucket]:
+        if not raw:
+            return {}
+        result: dict[str, Bucket] = {}
+        for key in sorted(raw):
+            cells_count = int(raw[key].get("cells", 0))
+            weight = float(raw[key].get("weight", 0.0))
+            result[key] = Bucket(
+                cells=cells_count,
+                weight=weight,
+                share=(weight / denom) if denom > 0 else 0.0,
+                missing=int(raw[key].get("missing", 0)),
+            )
+        return result
+
+    products: dict[str, ProductPublishability] = {}
+    for product_id in all_products:
+        denom = denominator.get(product_id, 0.0)
+        resolved_w = measured_weight.get(product_id, 0.0)
+        denials_w = denials_weight.get(product_id, 0.0)
+        weak_w = weak_weight.get(product_id, 0.0)
+        product_causes = _bucket(causes.get(product_id), denom)
+        products[product_id] = ProductPublishability(
+            product_id=product_id,
+            denominator=denom,
+            measured_cells=measured_cells.get(product_id, 0),
+            measured_weight=resolved_w,
+            unknown_cells=sum(bucket.cells for bucket in product_causes.values()),
+            # Неизвестный вес = знаменатель минус разрешённый: разложение и Coverage
+            # считают один вход, поэтому величина не может «разойтись» с ним.
+            unknown_weight=max(denom - resolved_w, 0.0),
+            unknown_share=(1.0 - resolved_w / denom) if denom > 0 else 0.0,
+            causes=product_causes,
+            excluded=_bucket(excluded.get(product_id), denom),
+            denials_weight=denials_w,
+            weak_denials=Bucket(
+                cells=weak_cells.get(product_id, 0),
+                weight=weak_w,
+                share=(weak_w / denials_w) if denials_w > 0 else 0.0,
+            ),
+            corpus=_corpus_context(corpus_map.get(product_id)),
+        )
+
+    total_denominator = sum(product.denominator for product in products.values())
+    total_resolved = sum(product.measured_weight for product in products.values())
+    unknown_share = (
+        (total_denominator - total_resolved) / total_denominator
+        if total_denominator > 0
+        else 0.0
+    )
+    total_denials = sum(product.denials_weight for product in products.values())
+    total_weak = sum(product.weak_denials.weight for product in products.values())
+    weak_share = (total_weak / total_denials) if total_denials > 0 else 0.0
+
+    aggregate_causes = _aggregate_buckets(products, "causes", total_denominator)
+    aggregate_excluded = _aggregate_buckets(products, "excluded", total_denominator)
+    dominant_cause: str | None = None
+    if aggregate_causes:
+        # Максимум веса; ничья решается именем класса — детерминизм артефакта.
+        dominant_cause = sorted(
+            aggregate_causes.items(), key=lambda item: (-item[1].weight, item[0])
+        )[0][0]
+
+    measured_products = sum(1 for product in products.values() if product.measured_cells > 0)
+    klass, reasons, caveats = _publishability_class(
+        coverage=coverage,
+        unknown_share=unknown_share,
+        weak_denial_share=weak_share,
+        measured_products=measured_products,
+        products=products,
+        comparability_level=comparability_level,
+        cross_cycle=cross_cycle,
+        unknown_share_threshold=unknown_share_threshold,
+        weak_denial_share_threshold=weak_denial_share_threshold,
+        coverage_floor=coverage_floor,
+    )
+    banner = _publishability_banner(
+        klass=klass,
+        unknown_share=unknown_share,
+        unknown_share_threshold=unknown_share_threshold,
+        coverage=coverage.value,
+        coverage_floor=coverage_floor,
+        dominant_cause=dominant_cause,
+        causes=aggregate_causes,
+        caveats=caveats,
+        reasons=reasons,
+        comparability_reasons=comparability_reasons,
+    )
+    return PublishabilityProfile(
+        klass=klass,
+        unknown_share=unknown_share,
+        unknown_share_threshold=unknown_share_threshold,
+        coverage=coverage.value,
+        coverage_floor=coverage_floor,
+        weak_denial_share=weak_share,
+        weak_denial_share_threshold=weak_denial_share_threshold,
+        dominant_cause=dominant_cause,
+        causes=aggregate_causes,
+        excluded=aggregate_excluded,
+        weak_denials=Bucket(
+            cells=sum(product.weak_denials.cells for product in products.values()),
+            weight=total_weak,
+            share=weak_share,
+        ),
+        products=products,
+        measured_products=measured_products,
+        caveats=caveats,
+        reasons=reasons,
+        banner=banner,
+    )
+
+
+def _aggregate_buckets(
+    products: Mapping[str, ProductPublishability], attribute: str, denominator: float
+) -> dict[str, Bucket]:
+    """Суммирует одноимённые бакеты продуктов (детерминированный порядок ключей)."""
+    totals: dict[str, dict[str, float]] = {}
+    for product in products.values():
+        buckets: Mapping[str, Bucket] = getattr(product, attribute)
+        for key, bucket in buckets.items():
+            slot = totals.setdefault(key, {"cells": 0.0, "weight": 0.0, "missing": 0.0})
+            slot["cells"] += bucket.cells
+            slot["weight"] += bucket.weight
+            slot["missing"] += bucket.missing
+    return {
+        key: Bucket(
+            cells=int(totals[key]["cells"]),
+            weight=totals[key]["weight"],
+            share=(totals[key]["weight"] / denominator) if denominator > 0 else 0.0,
+            missing=int(totals[key]["missing"]),
+        )
+        for key in sorted(totals)
+    }
+
+
+def _publishability_class(
+    *,
+    coverage: Coverage,
+    unknown_share: float,
+    weak_denial_share: float,
+    measured_products: int,
+    products: Mapping[str, ProductPublishability],
+    comparability_level: str | None,
+    cross_cycle: bool,
+    unknown_share_threshold: float,
+    weak_denial_share_threshold: float,
+    coverage_floor: float,
+) -> tuple[str, list[str], list[str]]:
+    """Выводит класс публикуемости из чисел: ``(класс, причины класса, оговорки)``.
+
+    Порог — не приговор, а **измеряемая граница**: достигнутая доля всегда публикуется
+    рядом, поэтому читатель видит, насколько карта отстоит от класса.
+    """
+    reasons: list[str] = []
+    caveats: list[str] = []
+
+    if not coverage.defined:
+        reasons.append("coverage_undefined")
+    if measured_products == 0:
+        reasons.append("no_measured_cells")
+    if reasons:
+        return PublishabilityClass.NOT_COMPARABLE.value, reasons, []
+
+    below_floor = (coverage.value or 0.0) < coverage_floor
+    above_threshold = unknown_share > unknown_share_threshold
+    if above_threshold:
+        reasons.append("unknown_share_above_threshold")
+    if below_floor:
+        reasons.append("coverage_below_floor")
+    if reasons:
+        return PublishabilityClass.ANALYTICAL_ONLY.value, reasons, []
+
+    if measured_products < 2:
+        caveats.append("single_product_cohort")
+    if len([p for p in products.values() if p.denominator > 0]) >= 2 and any(
+        product.measured_cells == 0 for product in products.values()
+    ):
+        caveats.append("product_without_measurements")
+    if comparability_level == ComparabilityLevel.INSUFFICIENT.value:
+        caveats.append("comparability_insufficient")
+    if cross_cycle:
+        caveats.append("comparability_cross_cycle")
+    if weak_denial_share > weak_denial_share_threshold:
+        caveats.append("weak_denials_above_threshold")
+    if caveats:
+        return PublishabilityClass.PUBLISHABLE_WITH_CAVEAT.value, reasons, caveats
+    return PublishabilityClass.PUBLISHABLE.value, reasons, []
+
+
+def _publishability_banner(
+    *,
+    klass: str,
+    unknown_share: float,
+    unknown_share_threshold: float,
+    coverage: float | None,
+    coverage_floor: float,
+    dominant_cause: str | None,
+    causes: Mapping[str, Bucket],
+    caveats: Sequence[str],
+    reasons: Sequence[str],
+    comparability_reasons: Sequence[str],
+) -> str:
+    """Строка для шапки отчёта: класс **и** причина, по которой класс такой.
+
+    Баннер обязан называть доминирующую причину, а не только «coverage
+    INSUFFICIENT»: иначе читатель видит отказ без основания и не знает, что чинить
+    (наблюдать материал, спрашивать вендора или перезапускать сбойное измерение).
+    """
+    def pct(value: float) -> str:
+        return f"{value * 100:.1f}%"
+
+    if klass == PublishabilityClass.NOT_COMPARABLE.value:
+        detail = ", ".join(reasons)
+        parts = [f"{klass}: сравнивать нечего ({detail})"]
+        if coverage is None:
+            parts.append("Coverage UNDEFINED")
+        elif reasons == ["no_measured_cells"]:
+            parts.append("нет ни одной измеренной ячейки")
+        return "; ".join(parts)
+
+    parts = [f"{klass}: {pct(unknown_share)} ячеек неизвестны"]
+    parts.append(f"порог {pct(unknown_share_threshold)}")
+    if dominant_cause is not None:
+        cause_share = causes[dominant_cause].share if dominant_cause in causes else 0.0
+        parts.append(f"доминирует {dominant_cause} ({pct(cause_share)})")
+    if coverage is not None:
+        suffix = f" < уровня {coverage_floor:.4f}" if "coverage_below_floor" in reasons else ""
+        parts.append(f"coverage {coverage:.4f}{suffix}")
+    else:
+        parts.append("coverage UNDEFINED")
+    if caveats:
+        parts.append(f"оговорки: {', '.join(caveats)}")
+    if not caveats and klass == PublishabilityClass.PUBLISHABLE.value and comparability_reasons:
+        parts.append(f"comparability: {', '.join(comparability_reasons)}")
+    return "; ".join(parts)
+

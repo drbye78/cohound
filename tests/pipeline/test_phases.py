@@ -421,6 +421,63 @@ def test_inheritance_phase_uses_baselines_and_passports() -> None:
     assert any("p2" in err for err in result.errors)
 
 
+def test_corpus_phase_passes_document_timeout_to_extraction(tmp_path: Path, monkeypatch) -> None:
+    """P8: ось ``document_timeout_s`` не только объявлена, но и исполняется.
+
+    Дефект, который здесь закрыт, уже случался: ось входит в ``run_id``, но до
+    исполнения не доходит — вход меняет идентичность и не меняет поведение. Проверяется
+    **потребление**: значение из run-слоя доезжает до ``build_corpus`` как
+    ``extract_task_timeout_s`` (потолок ожидания одной задачи извлечения), а без
+    объявления остаётся прежнее зашитое 1800 с.
+    """
+    import dataclasses
+
+    import core.pipeline.phases as phases_module
+    from core.domain.models import CrawlRunConfig
+
+    captured: dict[str, object] = {}
+    real_build_corpus = phases_module.build_corpus
+
+    def spy(*args, **kwargs):
+        captured.update(kwargs)
+        return real_build_corpus(*args, **kwargs)
+
+    monkeypatch.setattr(phases_module, "build_corpus", spy)
+
+    def _run(document_timeout_s: float | None):
+        inputs = _inputs()
+        if document_timeout_s is not None:
+            # ``RunInputs`` — обычный dataclass; ``run`` — pydantic-модель.
+            inputs = dataclasses.replace(
+                inputs,
+                run=inputs.run.model_copy(
+                    update={"crawl": CrawlRunConfig(document_timeout_s=document_timeout_s)}
+                ),
+            )
+        ports = Ports(
+            crawler=FakeCrawler(pages={}),
+            extractor=FakeExtractor(),
+            chunker=FakeChunker(),
+            embedder=FakeEmbedder(),
+            index_builder=FakeIndexBuilder(),
+        )
+        store = _store()
+        build_phases(
+            inputs=inputs,
+            plan=_plan(),
+            ports=ports,
+            urls={},
+            raw_root=str(tmp_path / "raw"),
+        )["corpus"](_context(store, ports))
+        return captured.get("extract_task_timeout_s")
+
+    # Дефолт равен прежнему зашитому поведению, а не «новому» числу.
+    from core.pipeline import corpus as corpus_module
+
+    assert _run(None) == corpus_module._EXTRACT_TASK_TIMEOUT_S
+    # Объявленная ось доезжает до исполнителя.
+    assert _run(120.0) == 120.0
+
 def test_corpus_phase_builds_and_captures_index_build_id(tmp_path: Path) -> None:
     inputs = _inputs()
     plan = _plan()
@@ -1508,6 +1565,22 @@ def test_build_manifest_deterministic_and_populated() -> None:
     assert manifest.edge_schema_version == "1.0.0"
     assert manifest.edge_capabilities == {"edge": "1"}
 
+
+def test_build_manifest_carries_publishability_block() -> None:
+    """A1/§6: профиль публикуемости — часть записи воспроизведения, а не только отчёта.
+
+    Проводка в ``build_manifest`` написана заранее и включается по наличию поля в схеме
+    (``_BASE`` — ``extra="forbid"``), поэтому здесь важно именно то, что блок доезжает
+    до манифеста **тем же** словарём, что публикует ``outputs/publishability.yaml``:
+    два разных представления одного числа — та же ложная точность, что и класс без чисел.
+    """
+    bundle = _bundle(_store())
+    assert bundle.publishability is not None  # прогон всегда даёт профиль
+    manifest = build_manifest(
+        inputs=_inputs(), plan=_plan(), bundle=bundle, created_at=FIXED_TS
+    )
+    assert manifest.publishability == bundle.publishability.to_dict()
+    assert manifest.publishability["klass"] == bundle.publishability.klass
 
 def test_build_manifest_defaults_without_extra_run_fields() -> None:
     """Без обогащённого run манифест строится: ``package_version`` из package, версии — дефолт."""

@@ -21,9 +21,9 @@ from core.domain import (
     CellState,
     Cohort,
     CohortEntry,
+    DenialStrength,
     RegistryFact,
     SourceKind,
-    SourceScope,
     Status,
     check_cell,
     check_evidence,
@@ -211,7 +211,15 @@ def test_r1_valid_facts_carry_source_url_in_evidence() -> None:
 # --------------------------------------------------------------------------- #
 
 
-def test_registry_absence_yields_absent_exhaustive_for_registry_rule() -> None:
+def test_registry_absence_yields_authoritative_denial_for_registry_rule() -> None:
+    """Пустота реестра — авторитетное «нет»; сила отрицания живёт в одном месте.
+
+    Прежде сила неслась устаревшим скаляром ``source_scope=exhaustive`` в
+    ``absence_evidence``, и рядом появился ``EvidenceScope(denial_strength=...)``:
+    два писателя одного факта давали два ответа на один вопрос. Скаляр снят,
+    проверяется объект — и то, что читатель исторических строк (детектор аномалий)
+    на новой ячейке не срабатывает.
+    """
     fetcher = _StubFetcher("reg_x", responder=lambda product_id, param_id: [])
     result = registry_wave(_plan(), {"reg_x": fetcher})
 
@@ -220,7 +228,10 @@ def test_registry_absence_yields_absent_exhaustive_for_registry_rule() -> None:
     absent = by_param["param_a"]
     assert absent.status is Status.ABSENT
     assert absent.absence_rule is AbsenceRuleType.REGISTRY_ABSENCE
-    assert absent.absence_evidence[0]["source_scope"] == SourceScope.EXHAUSTIVE.value
+    assert absent.evidence_scope is not None
+    assert absent.evidence_scope.denial_strength is DenialStrength.AUTHORITATIVE
+    # Устаревший скаляр больше не публикуется: иначе два ответа на один вопрос.
+    assert "source_scope" not in absent.absence_evidence[0]
     assert check_cell(absent) == []
     # param_b объявлен absence_rule=explicit → реестр не даёт права на ❌.
     assert "param_b" not in by_param

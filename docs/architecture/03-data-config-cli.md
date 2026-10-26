@@ -381,7 +381,7 @@ diff, ради которого делается инкрементальнос�
 
   | класс | оси | где ловится |
   |---|---|---|
-  | (а) `CrawlLimits` | `max_workers`, `max_depth`, `max_documents`, `exclude_paths`, `exclude_documents`, `document_level`, а также `revalidate_max_documents`, `max_response_bytes`, `max_artifact_bytes`, `attachment_formats`, `archive_max_*`, `archive_descent` (последние — **только когда заданы явно**) | `crawl_config_digest` — по каждому site-key + `__default__`, т.е. **все слои** (app/run/per-site); плюс индивидуальные `crawl_*` поля run-слоя. Класс — `execution_change` |
+  | (а) `CrawlLimits` | `max_workers`, `max_depth`, `max_documents`, `exclude_paths`, `exclude_documents`, `document_level`, а также `revalidate_max_documents`, `max_response_bytes`, `max_artifact_bytes`, `attachment_formats`, `archive_max_*`, `archive_descent`, `document_timeout_s` (последние — **только когда заданы явно**) | `crawl_config_digest` — по каждому site-key + `__default__`, т.е. **все слои** (app/run/per-site); плюс индивидуальные `crawl_*` поля run-слоя. Класс — `execution_change` |
   | (а′) расписание экстракции: `extract_workers`, `extract_max_tasks_per_child` | **не** входят в контракт (F0, `11` §2.10): параллелизм извлечения не может изменить состав корпуса — документ уже добыт и ретенирован, чанки — детерминированная функция его текста и уровня. В отличие от `max_workers`, конкурентность fetch взаимодействует с усечением `max_documents` и потому **остаётся** осью контракта | наблюдённый факт: `metrics.json.resources.scheduling` (`source`: `declared`\|`derived`). Резолвнутое значение публикуется, но `run_id` не меняет — иначе выведенное из бюджета хоста окно делало бы `run_id` функцией машины |
   | (б) `crawl.strategy` / `crawl.rate_limit` | только run-слой (`run.yaml:crawl`); per-site `strategy` из `domain_profiles.yaml` идентичность **не** меняет | отдельные поля контракта `crawl_strategy`/`crawl_rate_limit` (`core/cli/execution_axes.py`); класс — `execution_change` |
   | (в) `crawl.robots` | включение/выключение `robots.txt` — **app-слой** (`deploy.yaml:crawl.robots`; в `run.yaml:crawl` поля нет) | входит в `crawl_config_digest` **всегда** (как `max_depth`), класс — `execution_change` (D-5): гейт `robots.txt` решает, какие документы вообще допущены, т.е. это условие измерения, а не рычаг пропускной способности. Пробел закрыт: до правки D-5 ось меняла поведение, но не входила ни в один дайджест |
@@ -621,6 +621,17 @@ basename/path без знания content-type); «полная» экономи
 (6–12 страниц); **183** страницы (**1.14 %**) без текстового слоя дают видимый отказ
 `no_text_layer`, а не пустой документ. Под `split` ось не действует: экстрактор — remote,
 конвертеры строит edge (R-S).
+
+**`document_timeout_s` (P8) — таймаут документа.** Ось `crawl.document_timeout_s`
+(цепочка `app < run < site`) объявляет потолок ожидания извлечения **одного** документа/
+члена контейнера. Дефолт — **прежнее зашитое поведение** (`DEFAULT_DOCUMENT_TIMEOUT_S` =
+1800 с, бывший `_EXTRACT_TASK_TIMEOUT_S` в `core/pipeline/corpus.py`), поэтому объявление
+оси не меняет ни поведения, ни `run_id` прогона, который её не задавал; ключ попадает в
+`CrawlLimits.as_dict()`/`crawl_config_digest` **только при явном задании** (как
+`max_response_bytes`/`archive_*`). Задание оси — `execution_change` (§13): потолок решает,
+какой медленный документ успел стать корпусом, то есть это условие измерения, а не рычаг
+пропускной способности. Механизм — guard от зависания воркера, а не SLA: замер
+`layout_tables` на 665-стр. PDF — 866 с (`05` §2).
 
 **Память по уровням.** Пик = `parent_floor + W × peak(level корня)` (`W` = `extract_workers`),
 где замеренные пики — `text` 855 MB, `layout` 1563, `layout_tables` **3679**, `full` 3107,
@@ -883,6 +894,9 @@ crawl:                         # операционная политика HTTP-
   extract_max_tasks_per_child: null  # опц. (>=1): рециклинг воркер-процессов экстракции
   document_level: full         # P5: уровень извлечения документов (off|text|layout|
                                # layout_tables|full; дефолт full = сегодняшнее поведение)
+  document_timeout_s: null     # P8, опц. (>0): потолок извлечения ОДНОГО документа, с.
+                               # null = прежнее зашитое значение 1800 (DEFAULT_DOCUMENT_TIMEOUT_S);
+                               # задание входит в crawl_config_digest → run_id (execution_change)
   max_depth: 0                 # >=0: 0 = только seeds (BFS идёт и под executor/split — A2/R2)
   max_documents: null          # опц. (>0): потолок добытых страниц на (продукт, seed-root)
   revalidate_max_documents: null  # опц. (>=1): потолок известных URL ревалидации на продукт
@@ -1237,7 +1251,7 @@ onboarding-префлайт (seed-набор, §A.1.1): `--until plan` его **
 | `hound runs [--runs-dir DIR]` | список прогонов каталога: `run_id`, пакет, дата, последняя фаза, состояние, счётчики. БД читается **только на чтение** (каталог/файл не создаются); БД чужой `schema_version` пропускается с видимой пометкой `skipped`; пустой/отсутствующий каталог → пустой список (`EXIT_OK`) | — (только чтение) |
 | `hound status <run_id> [--runs-dir DIR]` | где прогон и что дальше: последняя исполненная фаза, гейт остановки и записанное решение (кто/почему), счётчики ячеек/корпуса и **готовая следующая команда** (`hound gate …` / `hound run …` / `hound report …`). Отсутствующий прогон → `EXIT_NOT_FOUND` (4) | — (только чтение) |
 | `hound resolve <source_id> --db PATH` | резолв `source_id` → URL по БД прогона (I10/I15), без сети | — (только чтение БД) |
-| `hound plan` | нормализация входов + линт + план прогона, когорта | — (отчёт в stdout/`--json`; запись черновика `run.yaml`/`cohort.yaml` — roadmap W10, сегодня `--dry-run` не нужен: ничего не пишется) |
+| `hound plan` | нормализация входов + линт + план прогона, когорта; принимает **те же оси краула**, что `run` (`--max-depth`/`--max-documents`/`--exclude-path`/`--exclude-document`/`--document-level`/`--pdf-pipeline`), плюс `--serp-rounds` — и печатает `run_id` вместе со слагаемыми контракта (`execution_contract_digest`, `crawl_config_digest`, `serp_rounds`/`serp_source`) | — (отчёт в stdout/`--json`; запись черновика `run.yaml`/`cohort.yaml` — roadmap W10. Флага `--dry-run` нет: `plan` и так ничего не пишет, а флаг обещал «есть и не-dry режим») |
 | `hound discover` | Discovery-агент | passports, run |
 | `hound passport-scout` | авто-генерация **черновика** паспорта продукта: краул `--url` (и, при поиске, URL выдачи) → tool-less LLM-разведка (`discovery_llm`) → консервативный черновик. Сателлиты — только `draft`/`not_found`; `relationship_evidence`/`upstream` — лишь при подтверждённом URL и дословной цитате (I10/I15, precision-first). Публикация только при `report.ok`; `--dry-run` не пишет. Кандидаты не выдумываются без LLM-конфигурации | `passports/{product_id}/…yaml` (+ sidecar кандидатов) |
 | `hound package scout` | веб-заземлённая разведка пакета категории: pipeline сам делает SERP+краул+extract, tool-less LLM синтезирует гипотезы → консервативный маппинг → кандидаты (`needs_human=True`; auto-approve нет, I18/I19/A3). Провайдер поиска резолвится из `config/deploy.yaml` (`search.adapter`/`search.by_language` по `--lang`) детерминированно; `--search-adapter` переопределяет (I16/I21/I23) | `packages/{case_id}/sources/scout/{date}.candidates.json` (+ `.provenance.json`, в т.ч. `search_provider`) |

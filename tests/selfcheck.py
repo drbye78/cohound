@@ -158,6 +158,10 @@ def main() -> int:
         "валидный ✅ с evidence",
         lambda: LLMCellOutput(status=Status.OK, justification="x", evidence=[LLMEvidence(source_id="c1", quote="q")]),
     )
+    check(
+        "✅ с полями отрицания принимается (шум провайдера не теряет вердикт)",
+        lambda: _llm_present_with_denial(),
+    )
     expect_raises(
         "✅ без evidence отклоняется (I1)",
         ValueError,
@@ -365,6 +369,7 @@ def main() -> int:
 
     section("Store (L3) — W3")
     check("SqliteStore I19: резолв + сверка content_hash", lambda: _store_resolver_i19())
+    check("cells: absence_rule/validation_notes пишутся, читаются, legacy=NULL", lambda: _store_cell_columns())
 
     section("Конвейер (L1) — W4")
     check("гейт не пройден без gate_decisions; durable resume (S9/P4)", lambda: _pipeline_gates_resume())
@@ -394,6 +399,7 @@ def main() -> int:
     section("Оценка (Ш6) — W9")
     check("validate: цитата-подстрока + CellEvidence hash (I10/I19)", lambda: _validate_echelon())
     check("evaluate: strict failed≠status (I4), preliminary (I13)", lambda: _evaluate_failed())
+    check("evaluate: замер relevant_evidence_coverage (None без знаменателя)", lambda: _relevant_coverage_check())
 
     section("Отчётность (Ш8-9) — W10")
     check("report: I11 Coverage отсутствует → G4-блок; §13 diff-граница", lambda: _report_gates())
@@ -485,6 +491,12 @@ def main() -> int:
     check(
         "archive_descent: прогноз/члены/цикл/бюджет/plan/unreadable",
         lambda: _archive_descent_checks(),
+    )
+
+    section("Профиль публикуемости (A1, §6)")
+    check(
+        "publishability: класс из чисел + разложение объясняет знаменатель",
+        lambda: _publishability_profile_check(),
     )
 
     print(f"\n{CHECKS - len(FAILURES)}/{CHECKS} проверок пройдено")
@@ -1414,6 +1426,169 @@ def _domain_scoring() -> None:
         raise AssertionError("I5: ❓ обязан быть вне знаменателя Capability")
 
 
+def _llm_present_with_denial() -> None:
+    """``✅``/``⚠️`` + поля отрицания: ответ принимается, вердикт не оспаривается.
+
+    Живая проба оценщика дала ``✅`` с ``denial_strength=explicit`` и получила failed
+    целиком (потеря позитивного вердикта из-за шумового поля). Теперь схема такие поля
+    допускает, а отбрасывает их потребитель (``core.pipeline.evaluate``).
+    """
+    from core.domain import LLMCellOutput, LLMEvidence, Status
+
+    for strength in ("not_stated", "explicit"):
+        out = LLMCellOutput(
+            status=Status.OK,
+            justification="есть",
+            evidence=[LLMEvidence(source_id="c1", quote="q")],
+            denial_strength=strength,
+            denial_reason="почему-то заполнено",
+        )
+        if out.status is not Status.OK:
+            raise AssertionError("статус наличия обязан сохраниться")
+        if not out.evidence:
+            raise AssertionError("I1: evidence наличия обязано дойти до ячейки")
+    # Конструктор не ослаблен: N/A и ✅ без evidence по-прежнему отвергаются.
+    for bad in (
+        dict(status=Status.NOT_APPLICABLE, justification="x"),
+        dict(status=Status.OK, justification="x", evidence=[]),
+    ):
+        try:
+            LLMCellOutput(**bad)
+        except ValueError:
+            continue
+        raise AssertionError(f"невалидный выход принят: {bad.get('status')}")
+
+
+def _store_cell_columns() -> None:
+    """``cells.absence_rule``/``cells.validation_notes``: запись, чтение, накопление, legacy.
+
+    ``absence_rule`` прежде не хранился, и чтение подставляло ``explicit`` — прочитанная
+    ячейка заявляла правило, которого каталог не объявлял. ``validation_notes`` не имели
+    писателя вовсе: причина отказа оценщика исчезала после прогона.
+    """
+    import datetime as _dtc
+
+    from core.domain import (
+        AbsenceRuleType,
+        Cell,
+        CellState,
+        Focus,
+        LLMEvidence,
+        RankingPolicy,
+        RunConfig,
+        RunMode,
+        Status,
+    )
+    from core.store.sqlite_store import SqliteStore
+
+    with SqliteStore(":memory:") as store:
+        store.create_run(
+            "run-x",
+            RunConfig(
+                case_id="case-x",
+                anchor="p1",
+                cohort="cohort.yaml",
+                products=["p1"],
+                package="pkg-x",
+                focus=Focus(modules=["m1"], params=[]),
+                languages=["ru"],
+                snapshot_date=_dtc.date(2026, 1, 1),
+                mode=RunMode.STRICT,
+                ranking_policy=RankingPolicy.CAPABILITY_RANKED,
+            ),
+        )
+
+        def _cell(notes: list[str]) -> Cell:
+            return Cell(
+                run_id="run-x",
+                product_id="p1",
+                param_id="param.x",
+                state=CellState.EVALUATED,
+                status=Status.OK,
+                absence_rule=AbsenceRuleType.PARAMETER_REFERENCE,
+                evidence=[LLMEvidence(source_id="c1", quote="q")],
+                validation_notes=notes,
+            )
+
+        store.save_cell(_cell(["причина-1"]))
+        store.save_cell(_cell(["причина-2"]))
+        read = next(store.iter_cells("run-x"))
+        if read.absence_rule is not AbsenceRuleType.PARAMETER_REFERENCE:
+            raise AssertionError(f"absence_rule не прочитан: {read.absence_rule}")
+        if read.validation_notes != ["причина-1", "причина-2"]:
+            raise AssertionError(
+                f"validation_notes обязаны накапливаться, получено {read.validation_notes}"
+            )
+
+        # Legacy-строка: колонка NULL (запись до появления колонки) не выдаётся за explicit.
+        store.conn.execute(
+            "UPDATE cells SET absence_rule = NULL, validation_notes = NULL"
+        )
+        legacy = next(store.iter_cells("run-x"))
+        if legacy.absence_rule is not None:
+            raise AssertionError(
+                f"legacy absence_rule обязан читаться как None, получено {legacy.absence_rule}"
+            )
+        if legacy.validation_notes != []:
+            raise AssertionError("legacy validation_notes обязаны читаться пустым списком")
+
+
+def _relevant_coverage_check() -> None:
+    """``EvidenceScope.relevant_evidence_coverage``: настоящий замер, а не заглушка.
+
+    Доля = процитированные (прошедшие сверку) фрагменты / переданные оценщику. Без
+    знаменателя — ``None``, а не ноль: «не измерено» не подменяется значением.
+    """
+    from core.domain import CellEvidence, EvidenceScope, EvidenceType, SourceKind
+    from core.pipeline.evaluate import _relevant_evidence_coverage, evaluate_cell
+    from core.pipeline.validate import ValidationResult
+
+    cited = CellEvidence(
+        evidence_id="ev1", run_id="r", product_id="p", param_id="x",
+        source_kind=SourceKind.DOCUMENTATION, evidence_type=EvidenceType.DIRECT,
+        source_id="c1", content_hash="h1",
+    )
+    validation = ValidationResult(ok=True, failure_kind=None, resolved_evidence=[cited])
+    if _relevant_evidence_coverage(validation, 4) != 0.25:
+        raise AssertionError("доля обязана быть 1/4 от переданных фрагментов")
+    if _relevant_evidence_coverage(validation, 0) is not None:
+        raise AssertionError("без знаменателя замер обязан быть None, а не 0")
+
+    # Интеграция: замер доезжает до объекта ячейки, а не только до хелпера.
+    from core.domain import CatalogRow, LLMEvidence, LLMCellOutput, Status
+    from core.ports.llm import LLMResponse, TokenUsage
+    from core.ports.types import Chunk
+
+    chunk = Chunk(chunk_id="c1", chunk_no=0, text="фрагмент про свойство",
+                  heading_path="H", context_prefix="", content_hash="h1")
+    param = CatalogRow.model_construct(
+        param_id="x", title="t", module="m", group="g", importance="Кр",
+        param_type="fact", rule="r", absence_rule="explicit", role_binding=None,
+        concept_terms={},
+    )
+
+    class _Evaluator:
+        model_id = "selfcheck"
+
+        def complete(self, req):  # noqa: ANN001
+            out = LLMCellOutput(
+                status=Status.UNKNOWN,
+                justification="не установлено",
+                denial_reason="нет дословного утверждения",
+            )
+            return LLMResponse(output=out, raw="{}", prompt_hash="ph",
+                               decoder="none", usage=TokenUsage())
+
+    outcome = evaluate_cell(param=param, product_id="p1", run_id="r1",
+                            evaluator=_Evaluator(), chunks=[chunk], max_retries=0)
+    scope = outcome.cell.evidence_scope
+    if not isinstance(scope, EvidenceScope) or scope.relevant_evidence_coverage != 0.0:
+        raise AssertionError(
+            "фрагмент передан, ни один не процитирован => измеренный ноль, "
+            f"получено {None if scope is None else scope.relevant_evidence_coverage}"
+        )
+
+
 def _store_resolver_i19() -> None:
     """SqliteStore резолвит source_id и сверяет content_hash (I10/I15/I19, T3.4)."""
     from core.domain.anchors import verify_evidence_hash
@@ -1652,7 +1827,6 @@ def _cli_plan_lint() -> None:
             str(fixtures / "run.yaml"),
             "--package",
             str(fixtures),
-            "--dry-run",
             "--json",
         ]
     )
@@ -1674,7 +1848,6 @@ def _cli_plan_lint() -> None:
                 str(pkg / "run.yaml"),
                 "--package",
                 str(pkg),
-                "--dry-run",
                 "--json",
             ]
         )
@@ -4279,6 +4452,95 @@ def _exhaustion_producer() -> None:
         pass
     else:
         raise AssertionError("I3: sufficient_evidence для ❓ обязан отвергаться")
+
+
+
+
+def _publishability_profile_check() -> None:
+    """A1/§6: класс — **результат измерения**, а разложение объясняет знаменатель.
+
+    Проверяется три вещи, без которых профиль был бы украшением:
+
+    1. ``Σ причин + измеренное == coverage.denominator`` — разложение объясняет **тот**
+       знаменатель, что опубликован (иначе это второе определение Coverage);
+    2. ``N/A`` (I7) вне знаменателя и в отдельном бакете — неизвестность и неприменимость
+       не смешиваются;
+    3. класс выводится из чисел: доля неизвестности выше объявленного порога даёт
+       ``ANALYTICAL_ONLY``, и баннер называет доминирующую причину.
+    """
+    from core.domain import (
+        DEFAULT_UNKNOWN_SHARE_THRESHOLD,
+        ExcludedCellClass,
+        Importance,
+        PublishabilityClass,
+        evidence_coverage,
+        publishability_profile,
+    )
+    from core.domain.models import CatalogRow
+
+    def _row(param_id: str) -> CatalogRow:
+        return CatalogRow(
+            param_id=param_id,
+            title=param_id,
+            module="m",
+            group="g",
+            importance=Importance.BASIC,
+            param_type="fact",
+            rule="правило",
+        )
+
+    catalog = {pid: _row(pid) for pid in ("x", "y", "z")}
+    universe = {(product, param) for product in ("p.a", "p.b") for param in catalog}
+    cells = [
+        Cell(
+            run_id="r1", product_id="p.a", param_id="x", state=CellState.EVALUATED,
+            status=Status.OK, evidence=[LLMEvidence(source_id="s.1", quote="цитата")],
+        ),
+        Cell(
+            run_id="r1", product_id="p.a", param_id="y", state=CellState.EVALUATED,
+            status=Status.UNKNOWN,
+            evidence_scope=EvidenceScope(
+                denial_strength=DenialStrength.NOT_STATED, reason="нет дословного"
+            ),
+        ),
+        Cell(run_id="r1", product_id="p.a", param_id="z", state=CellState.FAILED),
+        Cell(
+            run_id="r1", product_id="p.b", param_id="x", state=CellState.EVALUATED,
+            status=Status.OK, evidence=[LLMEvidence(source_id="s.1", quote="цитата")],
+        ),
+        Cell(
+            run_id="r1", product_id="p.b", param_id="y", state=CellState.EVALUATED,
+            status=Status.OK, evidence=[LLMEvidence(source_id="s.1", quote="цитата")],
+        ),
+        # N/A — человеческое решение (I7): вне знаменателя, но видимое отдельным бакетом.
+        Cell(
+            run_id="r1", product_id="p.b", param_id="z", state=CellState.EVALUATED,
+            status=Status.NOT_APPLICABLE, reviewed_by="human",
+        ),
+    ]
+    coverage = evidence_coverage(cells, catalog, {}, universe=universe)
+    profile = publishability_profile(
+        cells, catalog, {}, coverage=coverage, universe=universe
+    )
+    explained = sum(
+        product.measured_weight for product in profile.products.values()
+    ) + sum(bucket.weight for bucket in profile.causes.values())
+    if abs(explained - coverage.denominator) > 1e-9:
+        raise AssertionError(
+            f"A1: разложение обязано объяснять знаменатель Coverage "
+            f"({explained} != {coverage.denominator})"
+        )
+    excluded = profile.products["p.b"].excluded
+    if excluded["not_applicable"].cells != 1:
+        raise AssertionError("I7: N/A обязан быть вне знаменателя отдельным бакетом")
+    if ExcludedCellClass.NOT_APPLICABLE.value in profile.causes:
+        raise AssertionError("I7: N/A не может быть причиной неизвестности")
+    if profile.unknown_share <= DEFAULT_UNKNOWN_SHARE_THRESHOLD:
+        raise AssertionError("A1: доля неизвестности посчитана неверно")
+    if profile.klass != PublishabilityClass.ANALYTICAL_ONLY.value:
+        raise AssertionError(f"A1: ожидался ANALYTICAL_ONLY, получено {profile.klass}")
+    if profile.dominant_cause not in profile.banner:
+        raise AssertionError("A1: баннер обязан называть доминирующую причину")
 
 
 if __name__ == "__main__":

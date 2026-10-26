@@ -78,6 +78,13 @@ def run(args: argparse.Namespace) -> int:
         "requested_ranking": report.requested_ranking,
         "computed_ranking": report.computed_ranking,
         "ranking_epsilon": report.ranking_epsilon,
+        # A1/§6: тот же блок, что в ``hound report --json`` — класс публикуемости
+        # считается тем же ``compute``, поэтому смена вывода не должна терять его.
+        "publishability": (
+            bundle.publishability.to_dict()
+            if getattr(bundle, "publishability", None) is not None
+            else None
+        ),
         "notes": notes,
     }
     if args.json:

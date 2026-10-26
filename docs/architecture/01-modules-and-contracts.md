@@ -144,6 +144,7 @@ def sensitivity(cells, params, weights, axes, *,
                 requested_ranking=RankingPolicy.CAPABILITY_RANKED,
                 ranking_epsilon=0.0) -> SensitivityReport            # §6, K6/B-1
 def module_scores(cells, params, weights, *, universe=None) -> list[ModuleScore]
+def publishability_profile(cells, params, weights, *, coverage, universe=None, ...) -> PublishabilityProfile  # A1: класс + разложение неизвестности
 ```
 
 **Coverage по вселенной scope (v2.1, §6/B-3a).** При `universe` (множество пар `(product_id,

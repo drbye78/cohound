@@ -41,6 +41,7 @@ from core.domain.enums import (
     AnchorRelation,
     CellState,
     ComparabilityLevel,
+    PublishabilityClass,
     RankingPolicy,
 )
 from core.domain.models import (
@@ -54,12 +55,14 @@ from core.domain.scoring import (
     Comparability,
     Coverage,
     ModuleScore,
+    PublishabilityProfile,
     Score,
     SensitivityReport,
     comparability,
     evidence_coverage,
     failure_rate,
     module_scores,
+    publishability_profile,
     resolved_capability,
     sensitivity,
 )
@@ -72,6 +75,7 @@ __all__ = [
     "per_product_bundle",
     "assert_publishable",
     "publish_warnings",
+    "publishability_notes",
     "scope_universe",
     "score_universe",
 ]
@@ -98,6 +102,9 @@ class ScoreBundle:
     :param sensitivity: пост-хок sensitivity-анализ и допустимый ранг.
     :param requested_ranking: запрошенный режим отображения (K6).
     :param computed_ranking: вычисленный допустимый ранг (демотируется sensitivity, K6).
+    :param publishability: профиль публикуемости (A1, §6): класс + разложение
+        неизвестности по причинам и продуктам. ``None`` — бандл собран не из прогона
+        (тесты/синтетика): класс не выдумывается, а честно отсутствует.
     """
 
     capability: Score
@@ -115,6 +122,12 @@ class ScoreBundle:
     #: Coverage. Список — «что требует пере-оценки» (отчёт), а не молчаливое вычитание:
     #: запись ``{"product_id","param_id","stale_reason","index_build_id"}``.
     stale_cells: list[dict[str, Any]] = field(default_factory=list)
+    #: A1/§6: **профиль публикуемости** — класс (результат измерения) вместе с числами,
+    #: из которых он выведен: доля неизвестности, порог, coverage, разложение по причинам
+    #: и продуктам, доминирующая причина, оговорки. Отдельное поле, а не пересчёт в
+    #: отчёте: манифест, battle card и ``outputs/publishability.yaml`` обязаны показывать
+    #: одни и те же числа.
+    publishability: PublishabilityProfile | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Словарь бандла для отчёта/манифеста (JSON-совместимый, вложенный)."""
@@ -262,6 +275,7 @@ def _compute_from_cells(
     requested_ranking: str,
     universe: Iterable[tuple[str, str]] | None = None,
     ranking_epsilon: float = 0.0,
+    corpus_coverage: Mapping[str, Any] | None = None,
 ) -> ScoreBundle:
     """Считает :class:`ScoreBundle` по уже загруженным ячейкам (без I/O).
 
@@ -276,6 +290,11 @@ def _compute_from_cells(
     * перечисляются в :attr:`ScoreBundle.stale_cells` — «требует пере-оценки» видно в
       отчёте, а не прячется.
     Статус ячейки при этом не меняется: исключение из расчёта — не смена вердикта (I12).
+
+    :param corpus_coverage: ``{product_id: CorpusCoverage}`` — контекст покрытия корпуса
+        для профиля публикуемости (A1). В **причины** неизвестности не превращается:
+        причина выводится из ``EvidenceScope`` ячейки; неполнота корпуса публикуется
+        рядом как объяснение, а не как подмена данных.
     """
     stale = _stale_rows(cells)
     fresh = [cell for cell in cells if getattr(cell, "stale_reason", None) is None]
@@ -300,26 +319,61 @@ def _compute_from_cells(
     per_product = _per_product_coverage(
         fresh, catalog, module_weights, universe=universe_set
     )
+    coverage = evidence_coverage(fresh, catalog, module_weights, universe=universe_set)
+    comp = _comparability(cohort, per_product, alignment)
+    # A1: профиль публикуемости считается по **тому же** входу и тому же знаменателю, что
+    # Capability/Coverage (``fresh`` = без stale, с preliminary, которая попадёт в
+    # ``excluded``, а не в знаменатель). Второй формулы нет: разложение объясняет именно
+    # тот знаменатель, который опубликован.
+    publishability = publishability_profile(
+        fresh,
+        catalog,
+        module_weights,
+        coverage=coverage,
+        universe=universe_set,
+        comparability_level=comp.level,
+        comparability_reasons=comp.reasons,
+        cross_cycle=comp.cross_cycle,
+        corpus_coverage=corpus_coverage,
+    )
     return ScoreBundle(
         capability=resolved_capability(measured, catalog, module_weights),
-        coverage=evidence_coverage(
-            fresh, catalog, module_weights, universe=universe_set
-        ),
+        coverage=coverage,
         failure_rate=failure_rate(measured),
         modules=module_scores(measured, catalog, module_weights, universe=universe_set),
-        comparability=_comparability(cohort, per_product, alignment),
+        comparability=comp,
         sensitivity=report,
         requested_ranking=requested_ranking,
         # K6/A3: демотирование по sensitivity объединено с запрошенным режимом (min).
         computed_ranking=report.computed_ranking,
         ranking_epsilon=ranking_epsilon,
         stale_cells=stale,
+        publishability=publishability,
     )
 
 
 # ---------------------------------------------------------------------------
 # Публичный интерфейс
 # ---------------------------------------------------------------------------
+
+
+def _read_corpus_coverage(
+    store: StorePort, run_id: str
+) -> dict[str, Any] | None:
+    """Покрытие корпуса прогона ``{product_id: CorpusCoverage}`` для профиля A1.
+
+    Контекст, а не измерение: ``None`` при отсутствии чтеца/записи (legacy-прогон)
+    означает «покрытие неизвестно», а не «полное» (то же правило, что у
+    :meth:`StorePort.read_corpus_coverage`). Сбой чтения не роняет расчёт: профиль
+    публикуемости обязан строиться и по ячейкам.
+    """
+    reader = getattr(store, "iter_corpus_coverage", None)
+    if not callable(reader):
+        return None
+    try:
+        return {entry.product_id: entry for entry in reader(run_id)}
+    except Exception:  # noqa: BLE001 — контекст отчёта, не источник вердиктов
+        return None
 
 
 def compute(
@@ -350,6 +404,9 @@ def compute(
     Формулы не дублируются: вызовы делегированы :mod:`core.domain.scoring`. ``computed_ranking``
     всегда берётся из sensitivity как ``min(requested, computed)`` (K6). Пустой прогон
     обрабатывается детерминированно.
+
+    Покрытие корпуса читается из store (``iter_corpus_coverage``), если чтец есть: оно —
+    контекст профиля публикуемости (A1), а не вход Capability/Coverage.
     """
     cells = list(store.iter_cells(run_id))
     requested = _resolve_requested_ranking(store, run_id, requested_ranking)
@@ -362,6 +419,7 @@ def compute(
         requested_ranking=requested,
         universe=universe,
         ranking_epsilon=ranking_epsilon,
+        corpus_coverage=_read_corpus_coverage(store, run_id),
     )
 
 
@@ -424,6 +482,7 @@ def per_product_bundle(
     cells = list(store.iter_cells(run_id))
     requested = _resolve_requested_ranking(store, run_id, requested_ranking)
     universe_set = set(universe) if universe is not None else None
+    corpus = _read_corpus_coverage(store, run_id)
 
     by_product: dict[str, list[Cell]] = {}
     for cell in cells:
@@ -450,6 +509,11 @@ def per_product_bundle(
             requested_ranking=requested,
             universe=product_universe,
             ranking_epsilon=ranking_epsilon,
+            corpus_coverage=(
+                {product_id: corpus[product_id]}
+                if corpus is not None and product_id in corpus
+                else None
+            ),
         )
     return result
 
@@ -478,6 +542,14 @@ def publish_warnings(bundle: ScoreBundle) -> list[str]:
     Возвращает список предупреждений; пустой — публикация допустима (при ``INSUFFICIENT``
     покрытие приглушается, но не блокирует). Блок — при ``UNDEFINED``-покрытии
     (``universe = 0``, §6/B-3a) либо при пустом знаменателе legacy-режима.
+
+    Это **жёсткий** гейт (``report.render_battle_card`` бросает
+    :class:`~core.pipeline.report.PublishBlockedError`), поэтому список остаётся узким:
+    «нет Coverage — нет артефакта». Всё остальное — свойство **качества** карты, и оно
+    публикуется числами в :attr:`ScoreBundle.publishability`, а не запретом (A1:
+    измерять, а не ограничивать). Смешивать их значило бы терять battle card на любом
+    прогоне с высокой неизвестностью — то есть терять ровно тот материал, по которому
+    решают, что дальше наблюдать.
     """
     coverage = bundle.coverage
     if not coverage.defined or (
@@ -490,12 +562,51 @@ def publish_warnings(bundle: ScoreBundle) -> list[str]:
     return []
 
 
-def assert_publishable(bundle: ScoreBundle) -> None:
-    """G4/I11 guard: предупреждает, если бандл публиковал бы Capability без Coverage.
+def publishability_notes(bundle: ScoreBundle) -> list[str]:
+    """Класс публикуемости и доминирующая причина — списком строк (A1, §6).
 
-    Мягкая проверка (``RuntimeWarning``): жёсткий блокирующий гейт G4 реализует
-    ``pipeline/report.py`` (I11). Coverage из бандла не удаляется и не подменяется молча.
+    Пусто для ``PUBLISHABLE`` и для бандлов без профиля (синтетика/тесты): класс не
+    выдумывается. ``PUBLISHABLE_WITH_CAVEAT`` даёт **одну** строку-баннер: карта
+    публикуется, но оговорки обязаны быть названы. ``ANALYTICAL_ONLY``/``NOT_COMPARABLE``
+    дают ту же строку плюс причины класса — читателю нужно знать, какое условие не
+    выполнено, а не только что оно не выполнено.
+    """
+    profile = bundle.publishability
+    if profile is None:
+        return []
+    if profile.klass == PublishabilityClass.PUBLISHABLE.value:
+        return []
+    notes = [profile.banner]
+    if profile.klass != PublishabilityClass.PUBLISHABLE_WITH_CAVEAT.value:
+        notes.extend(f"reason: {reason}" for reason in profile.reasons)
+    return notes
+
+
+def assert_publishable(bundle: ScoreBundle) -> None:
+    """G4/I11 guard: предупреждает, если бандл не описывает измеренную карту.
+
+    Две разные претензии, разные сообщения:
+
+    * **Нет Coverage** (I11, :func:`publish_warnings`) — публиковать нечего;
+    * **Класс публикуемости** (A1) — ``ANALYTICAL_ONLY``/``NOT_COMPARABLE``: сообщение
+      называет класс, достигнутую долю неизвестности, порог, доминирующую причину и
+      coverage. Раньше здесь была одна проверка «coverage определён», и прогон с 55 %
+      ``❓`` проходил молча — отказ без причины ничего не сообщает читателю.
+
+    ``PUBLISHABLE_WITH_CAVEAT`` предупреждения не даёт: карта публикуется, оговорки
+    названы в баннере battle card и в ``outputs/publishability.yaml``. Мягкая проверка
+    (``RuntimeWarning``): жёсткий блокирующий гейт G4 реализует ``pipeline/report.py``.
     """
     problems = publish_warnings(bundle)
     if problems:
         warnings.warn("; ".join(problems), RuntimeWarning, stacklevel=2)
+        return
+    profile = bundle.publishability
+    if profile is None or profile.klass in {
+        PublishabilityClass.PUBLISHABLE.value,
+        PublishabilityClass.PUBLISHABLE_WITH_CAVEAT.value,
+    }:
+        return
+    warnings.warn(
+        "; ".join(publishability_notes(bundle)), RuntimeWarning, stacklevel=2
+    )

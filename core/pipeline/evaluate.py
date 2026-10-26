@@ -134,6 +134,26 @@ ABSENT_CLAIM_WITHOUT_DENIAL_REASON = "absent_claim_without_denial_citation"
 #: чтобы повторная оценка ячейки перезаписывала ту же строку ``cell_evidence``.
 _PROTOCOL_ABSENCE_SEQ = 0
 
+#: Машинный префикс записи о **ремонте**: модель прислала ``✅``/``⚠️`` вместе с полями
+#: отрицания. Вердикт наличия не оспаривается (I1/I22 в силе), поля отбрасываются, но
+#: отбрасывание обязано быть видимым: иначе ремонт выглядит как «модель и не заявляла».
+PRESENT_DENIAL_REPAIR_PREFIX = "denial_fields_ignored_on_present"
+
+#: Классы отрицания, которые при наличии-вердикте считаются шумом провайдера: они ничего
+#: не утверждают о вендоре («не заявлено»/«не наблюдалось»), поэтому отбрасываются без
+#: последствий. Всё остальное (``explicit``, а в будущем любой авторитетный класс) —
+#: **противоречие**: модель одновременно говорит «есть» и «доказано, что нет». Разрешать
+#: его механикой нельзя (это предмет ревью), поэтому вердикт сохраняется, а противоречие
+#: пишется в ``review_reason`` тем же текстом, что и запись о ремонте.
+_NOISE_DENIAL_STRENGTHS: frozenset[DenialStrength] = frozenset(
+    {DenialStrength.NOT_STATED, DenialStrength.UNOBSERVED}
+)
+
+#: Предел длины одной записи в ``cells.validation_notes``. Это опубликованное
+#: свидетельство о дефекте ячейки, а не журнал: текст исключения валидатора содержит
+#: ``input_value`` и легко достигает килобайтов, после чего артефакт перестаёт читаться.
+VALIDATION_NOTE_LIMIT = 400
+
 #: Максимум запросов на ячейку (S13/I16): title + концепт-термины ru → en.
 MAX_QUERIES = 3
 
@@ -500,6 +520,85 @@ def _denial_basis(scope_vector: dict[str, Any], coverage: CorpusCoverage | None)
     return DenialStrength.NOT_STATED.value
 
 
+def _relevant_evidence_coverage(
+    validation: ValidationResult, candidates: int
+) -> float | None:
+    """Доля **переданных оценщику** фрагментов, использованных в доказательстве.
+
+    Формула: ``|{чанки, на которые ссылается прошедший цитатную сверку evidence}| /
+    |{чанки, переданные оценщику}|``. Числитель берётся из ``validation.resolved_evidence``,
+    то есть из evidence, чья цитата **дословно** подтверждена в тексте чанка (§10): так
+    «использован» означает «процитирован», а не «упомянут в рассуждении», и замер нельзя
+    улучшить болтливостью.
+
+    ``None`` — не измерено: знаменателя нет (оценщику не передали ни одного фрагмента).
+    Ноль здесь — **реальный** ноль (фрагменты переданы, ни один не процитирован), и он не
+    подменяется ``None``: в проекте уже была ошибка, когда «не измерено» выдавалось за
+    измеренное значение.
+    """
+    if candidates <= 0:
+        return None
+    cited = {
+        str(ev.source_id)
+        for ev in validation.resolved_evidence
+        if ev.source_id is not None
+    }
+    return min(1.0, len(cited) / candidates)
+
+
+def _compact_note(text: str) -> str:
+    """Схлопывает пробелы и обрезает запись до :data:`VALIDATION_NOTE_LIMIT`."""
+    collapsed = " ".join(str(text).split())
+    if len(collapsed) <= VALIDATION_NOTE_LIMIT:
+        return collapsed
+    return collapsed[: VALIDATION_NOTE_LIMIT - 1].rstrip() + "…"
+
+
+def _compact_notes(notes: Sequence[str]) -> list[str]:
+    """Готовит заметки к записи в ``cells.validation_notes`` (без дублей, с пределом длины)."""
+    compact: list[str] = []
+    for note in notes:
+        text = _compact_note(note)
+        if text and text not in compact:
+            compact.append(text)
+    return compact
+
+
+def _present_status_denial(out: LLMCellOutput) -> tuple[list[str], str | None]:
+    """Ремонт шумовых полей отрицания при наличии-вердикте (§7).
+
+    Модель отвечает ``✅``/``⚠️`` с доказательством, но заполняет ``denial_strength``/
+    ``denial_reason`` (шаблон перечисляет их в схеме ответа, а провайдер недетерминирован).
+    Вердикт наличия доказывается evidence (I1/I22) и **не оспаривается** шумовым полем:
+    ответ принимается, поля в артефакты не попадают.
+
+    Различаются два случая:
+
+    * ``denial_strength ∈ {not_stated, unobserved}`` — шум: запись о ремонте пишется,
+      ``review_reason`` не трогается;
+    * любой иной класс (``explicit``; в модели сейчас недостижим ``authoritative`` —
+      :class:`~core.domain.enums.DenialClaim` разрешает модели только ``explicit`` и
+      ``not_stated``) — **противоречие**: «есть» и «вендор прямо отрицает» одновременно.
+      Вердикт сохраняется (доказательство наличия на месте), но противоречие видно в
+      ``review_reason`` — тем же текстом, что и запись о ремонте.
+
+    :returns: ``(заметки, review_reason)``; пустой список и ``None`` — полей не было.
+    """
+    if out.status not in {Status.OK, Status.PARTIAL}:
+        return [], None
+    strength = out.denial_strength
+    reason = (out.denial_reason or "").strip()
+    if strength is None and not reason:
+        return [], None
+    note = (
+        f"{PRESENT_DENIAL_REPAIR_PREFIX}: "
+        f"denial_strength={strength.value if strength is not None else 'none'}, "
+        f"denial_reason={'present' if reason else 'none'}"
+    )
+    contradiction = strength is not None and strength not in _NOISE_DENIAL_STRENGTHS
+    return [_compact_note(note)], note if contradiction else None
+
+
 def _resolve_denial(
     *,
     param: CatalogRow,
@@ -508,6 +607,7 @@ def _resolve_denial(
     coverage: CorpusCoverage | None,
     scope_acceptance: str | None,
     composition_id: str | None,
+    candidates: int = 0,
 ) -> tuple[EvidenceScope | None, list[str]]:
     """Строит :class:`EvidenceScope` для ``❌``/``❓`` — **единственное** место вердикта.
 
@@ -524,9 +624,17 @@ def _resolve_denial(
       наблюдённому охвату, а не по самоотчёту модели.
     * ``authoritative`` здесь **не** выставляется никогда: он приходит от реестра.
 
+    :param candidates: сколько фрагментов **передано** оценщику (знаменатель замера
+        ``relevant_evidence_coverage``); ``0`` — замера нет, поле остаётся ``None``.
     :returns: ``(scope, notes)``: объект силы отрицания и диагностические заметки.
     """
     vector = _coverage_vector(coverage)
+    # Замер релевантности живёт в том же векторе охвата: он отвечает на вопрос «сколько из
+    # переданных фрагментов реально вошло в доказательство». Считается по подтверждённому
+    # evidence, то есть по факту цитирования, а не по самоотчёту модели.
+    vector["relevant_evidence_coverage"] = _relevant_evidence_coverage(
+        validation, candidates
+    )
     quotes = [
         ev.citation_quote
         for ev in validation.resolved_evidence
@@ -794,8 +902,17 @@ def _evaluated_cell(
     run_id: str,
     provenance: tuple[str | None, str | None, str | None],
     evidence_scope: EvidenceScope | None = None,
+    validation_notes: Sequence[str] = (),
+    review_reason: str | None = None,
 ) -> Cell:
-    """Собирает успешную ``evaluated``-ячейку (§2.2; I1/I2/I3/I4/I13-совместимую)."""
+    """Собирает успешную ``evaluated``-ячейку (§2.2; I1/I2/I3/I4/I13-совместимую).
+
+    ``validation_notes`` — свидетельство о дефектах оценки (ремонт шумовых полей
+    отрицания, аномалии §10.4): пишется в ``cells.validation_notes`` и переживает
+    прогон, поэтому читается отчётом/ревью, а не только консолью. ``review_reason``
+    заполняется только противоречием «наличие + прямое отрицание» (см.
+    :func:`_present_status_denial`): вердикт не оспаривается, но конфликт виден.
+    """
     index_build_id, retrieval_profile, retrieval_params_json = provenance
     return Cell(
         run_id=run_id,
@@ -811,6 +928,8 @@ def _evaluated_cell(
         index_build_id=index_build_id,
         retrieval_profile=retrieval_profile,
         retrieval_params_json=retrieval_params_json,
+        review_reason=review_reason,
+        validation_notes=list(validation_notes),
     )
 
 
@@ -822,12 +941,16 @@ def _unresolved_cell(
     run_id: str,
     provenance: tuple[str | None, str | None, str | None],
     evidence_scope: EvidenceScope | None = None,
+    validation_notes: Sequence[str] = (),
 ) -> Cell:
     """Собирает ``failed``/``preliminary``-ячейку без статуса (I4/I13).
 
     ``failed`` несёт класс ``instrument_failed``: прибор не смог, а не «вендор не заявил»
     (это разные вещи, и различие видно в карте). ``preliminary`` — кандидат без статуса:
     вердикта ещё нет, поэтому объект силы отрицания не заполняется.
+
+    ``validation_notes`` нужны именно здесь: без них причина отказа (класс исключения,
+    провал цитатной сверки) исчезала после прогона, и её приходилось печатать в консоль.
     """
     index_build_id, retrieval_profile, retrieval_params_json = provenance
     return Cell(
@@ -844,6 +967,7 @@ def _unresolved_cell(
         index_build_id=index_build_id,
         retrieval_profile=retrieval_profile,
         retrieval_params_json=retrieval_params_json,
+        validation_notes=list(validation_notes),
     )
 
 
@@ -1180,8 +1304,13 @@ def evaluate_cell(
             coverage=effective_coverage,
             scope_acceptance=scope_acceptance,
             composition_id=provenance[0],
+            candidates=len(chunks_by_id),
         )
         out_status = out.status if evidence_scope is None else evidence_scope.verdict()
+        # Ремонт шумовых полей отрицания при наличии-вердикте (§7). Вердикт не
+        # оспаривается; отбрасывание видно в validation_notes, противоречие —
+        # дополнительно в review_reason.
+        repair_notes, contradiction = _present_status_denial(out)
         absence_evidence: list[dict] = []
         if out_status is Status.ABSENT and evidence_scope is not None:
             absence_evidence = _build_absence_evidence(
@@ -1209,6 +1338,12 @@ def evaluate_cell(
             run_id=run_id,
             provenance=provenance,
             evidence_scope=evidence_scope,
+            # Заметки эшелона §10 (аномалии «✅ на одной цитате», низкий score), ремонт и
+            # понижение класса — всё это свидетельства о качестве ячейки, а не отладка.
+            validation_notes=_compact_notes(
+                [*repair_notes, *last_validation.notes, *denial_notes]
+            ),
+            review_reason=contradiction,
         )
         _persist(
             store,
@@ -1304,6 +1439,9 @@ def _unresolved_outcome(
         run_id=run_id,
         provenance=provenance,
         evidence_scope=scope,
+        # Причина отказа обязана пережить прогон: без неё в артефактах остаётся
+        # `failed` без объяснения, и тип исключения приходится печатать в консоль.
+        validation_notes=_compact_notes(merged),
     )
     _persist(
         store,

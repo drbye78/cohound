@@ -614,6 +614,7 @@ bundle = {
                            ranking_epsilon=run_cfg.ranking_epsilon),  # §6/B-1 предикат устойчивости
   requested_ranking: run_cfg.ranking_policy,                  # K6: запрошенный режим отображения
   computed_ranking: join(requested, computed),                # K6: min; unranked не повышается
+  publishability: publishability_profile(cells, params, weights, coverage=coverage, universe=scope),  # A1: класс + разложение неизвестности по причинам
 }
 ```
 

@@ -103,6 +103,11 @@ class DomainProfile(BaseModel):
     # здесь: «тяжёлый» сайт с сотнями PDF — типичный повод переключить корень на
     # текстовый слой без правки пакета.
     pdf_pipeline: PdfPipeline | None = None
+    # P8: per-site слой таймаута **документа** (секунды; высший приоритет цепочки
+    # app < run < site). ``None`` = не задано на этом слое (наследуется run/app, затем
+    # ``DEFAULT_DOCUMENT_TIMEOUT_S``). Ось нужна здесь по той же причине, что
+    # ``pdf_pipeline``: «тяжёлый» корень — повод поднять таймаут, не трогая пакет.
+    document_timeout_s: float | None = Field(default=None, gt=0)
     # D3: per-site URL публичного ``sitemap.xml`` (опц.). ``None`` = не задан (поведение
     # неизменно). ``<loc>`` sitemap становятся **дополнительными** depth-0 seeds (не заменяют
     # seed-URL оператора); сам sitemap — не страница (не ретейнится/не ингестится, I19).

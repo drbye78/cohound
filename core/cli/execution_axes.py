@@ -46,6 +46,13 @@
 граница класса ``execution_versions`` (``execution_change``, §13): меняется ``run_id``,
 ``methodology_version`` — нет.
 
+**Инвентарь операторских осей краула — один список.** :data:`CRAWL_AXIS_DESTS` называет
+и флаги CLI, и слагаемые ``crawl_config_digest`` одной записью на ось; его читают и
+:func:`add_crawl_axis_flags` (регистрация флагов), и :func:`_crawl_axis_overrides` (значения
+в дайджест). Причина — измеренный дефект: ``--max-depth``/``--max-documents``/``--exclude-*``
+применялись только при сборке фаз, поэтому прогон с другим корпусом мог жить под прежним
+``run_id``. Список осей разъезжается молча — поэтому он назван один раз.
+
 Нейтрален к предметной категории (§1.3).
 """
 
@@ -63,7 +70,13 @@ from core.adapters.extract_document import (
     docling_engine_build,
 )
 from core.adapters.extract_html import HtmlExtractor
-from core.cli.context import _load_registry_specs
+from core.cli.context import (
+    _document_level,
+    _load_registry_specs,
+    _non_negative_int,
+    _pdf_pipeline,
+    _positive_int,
+)
 from core.cli.errors import EXIT_USAGE, CliError
 from core.cli.wiring import (
     manifest_deploy_fields,
@@ -72,14 +85,17 @@ from core.cli.wiring import (
 )
 from core.config.deploy import ENV_SERP, DeployConfig, resolve_llm_slot, resolve_serp_rounds
 from core.domain.dictionary import load_dictionary
-from core.domain.models import canonical_rate_limit
+from core.domain.models import CrawlRunConfig, canonical_rate_limit
 from core.pipeline.normalize import RunInputs
 from core.pipeline.manual_artifacts import load_manual_artifacts
 from core.pipeline.report import crawl_control_digest
 
 __all__ = [
+    "CRAWL_AXIS_DESTS",
     "DeclaredExecutionAxes",
     "DOCLING_ADAPTER_FAMILY",
+    "add_crawl_axis_flags",
+    "add_serp_rounds_flag",
     "declared_status_dict_version",
     "extractor_stack_version",
     "resolve_declared_axes",
@@ -89,6 +105,130 @@ __all__ = [
 _STATUS_DICTIONARY_PATH = (
     Path(__file__).resolve().parents[2] / "docs" / "status-dictionary.yaml"
 )
+
+#: **Единый инвентарь операторских осей краула** (CLI), §13/AGENTS «не менять ось краула
+#: на месте».
+#:
+#: ``dest`` — одновременно имя атрибута ``args`` и ключ ``CrawlLimits.as_dict()``: одна
+#: запись описывает и флаг, и слагаемое ``crawl_config_digest``. Потребители:
+#:
+#: * :func:`add_crawl_axis_flags` — регистрация флагов (``plan``; ``run``/``crawl``
+#:   объявляют те же флаги в ``_add_phase4_flags``, паритет проверяется тестом);
+#: * :func:`_crawl_axis_overrides` — чтение значений в дайджест (общий код ``run``/``plan``
+#:   через :func:`resolve_declared_axes`).
+#:
+#: Список — не удобство, а страховка от того дефекта, который уже был: ``--max-depth`` и
+#: ``--max-documents`` применялись только при сборке фаз, поэтому другой корпус жил под
+#: прежним ``run_id``. Новая ось добавляется **здесь**, и оба потребителя видят её сразу.
+CRAWL_AXIS_DESTS: tuple[str, ...] = (
+    "max_depth",
+    "max_documents",
+    "exclude_paths",
+    "exclude_documents",
+    "document_level",
+    "pdf_pipeline",
+    "document_timeout_s",
+)
+
+
+def add_crawl_axis_flags(parser: argparse.ArgumentParser) -> None:
+    """Регистрирует операторские оси краула (:data:`CRAWL_AXIS_DESTS`) на парсере.
+
+    Форма флагов, типы и help **совпадают** с ``run``/``crawl`` (``_add_phase4_flags``):
+    ``plan`` обязан принимать тот же вход, иначе напечатанный ``run_id`` описывает не тот
+    прогон, который можно запустить. Расхождение ловит
+    ``tests/cli/test_plan_crawl_axes.py::test_crawl_flag_inventory_matches_run``.
+
+    Функция — регистрация, не разрешение: значения читает
+    :func:`_crawl_axis_overrides`. ``plan`` ничего не пишет и не исполняет.
+    """
+    parser.add_argument(
+        "--max-depth",
+        dest="max_depth",
+        type=_non_negative_int,
+        default=None,
+        metavar="D",
+        help="глубина BFS-обхода in-site ссылок (0 — только seeds; дефолт 0)",
+    )
+    parser.add_argument(
+        "--max-documents",
+        dest="max_documents",
+        type=_positive_int,
+        default=None,
+        metavar="N",
+        help="потолок добытых страниц на (продукт, seed-root); усечение → partial-сеанс",
+    )
+    parser.add_argument(
+        "--exclude-path",
+        dest="exclude_paths",
+        action="append",
+        default=None,
+        metavar="GLOB",
+        help="glob блэклиста по пути URL (fnmatchcase, повторяемый)",
+    )
+    parser.add_argument(
+        "--exclude-document",
+        dest="exclude_documents",
+        action="append",
+        default=None,
+        metavar="GLOB",
+        help="glob блэклиста по basename URL, напр. '*.pdf' (повторяемый)",
+    )
+    parser.add_argument(
+        "--document-level",
+        dest="document_level",
+        type=_document_level,
+        default=None,
+        metavar="LEVEL",
+        help=(
+            "уровень извлечения документов: off|text|layout|layout_tables|full "
+            "(дефолт full = сегодняшнее поведение)"
+        ),
+    )
+    parser.add_argument(
+        "--pdf-pipeline",
+        dest="pdf_pipeline",
+        type=_pdf_pipeline,
+        default=None,
+        metavar="PIPELINE",
+        help=(
+            "механизм извлечения PDF: structured|text_layer "
+            "(дефолт structured = docling: layout/таблицы/OCR)"
+        ),
+    )
+
+
+    parser.add_argument(
+        "--document-timeout",
+        dest="document_timeout_s",
+        type=float,
+        default=None,
+        metavar="SECONDS",
+        help=(
+            "потолок времени на извлечение одного документа в секундах "
+            "(дефолт 1800 = сегодняшнее поведение; ось входит в run_id при объявлении)"
+        ),
+    )
+
+def add_serp_rounds_flag(parser: argparse.ArgumentParser) -> None:
+    """Флаг ``--serp-rounds`` (I3/§5) для входов, считающих identity.
+
+    Раунды SERP-контура входят в ``EXECUTION_CONTRACT_FIELDS`` (``serp_rounds``), поэтому
+    ``plan`` обязан принимать флаг наравне с ``run``: иначе напечатанный ``run_id`` не
+    описывает прогон с поиском. Приоритет значения — один и тот же резолвер
+    (:func:`core.config.deploy.resolve_serp_rounds`) для обоих входов:
+    ``флаг > COHOUND_SERP > run.yaml: serp.rounds > deploy.search.serp.rounds > 0``.
+    """
+    parser.add_argument(
+        "--serp-rounds",
+        dest="serp_rounds",
+        default=None,
+        metavar="N",
+        help="раунды SERP-контура внешнего поиска (0 — выключить). Приоритет: "
+        "флаг > COHOUND_SERP > run.yaml: serp.rounds > deploy.search.serp.rounds > 0. "
+        "Значение входит в execution contract (serp_rounds) ⇒ новый run_id; бюджет "
+        "объявляется в run.yaml: serp.budget",
+    )
 
 
 @dataclass(frozen=True)
@@ -212,27 +352,59 @@ def _resolve_llm_scenarios(
 
 
 def _crawl_axis_overrides(args: argparse.Namespace) -> dict[str, Any]:
-    """Операторские оси краула из CLI (``--document-level``/``--pdf-pipeline``).
+    """Операторские оси краула из CLI — **один** инвентарь для ``run``/``crawl``/``plan``.
 
-    Это **объявление** прогона, а не уточнение исполнения: обе оси меняют текст документа
-    (уровень docling / механизм PDF), значит корпус и ``run_id`` (§13). Слой применяется
-    к разрешённой конфигурации (поверх app < run < site) в
-    :func:`core.pipeline.report.crawl_control_digest`; здесь — только чтение флагов.
+    Это **объявление** прогона, а не уточнение исполнения: каждая ось меняет состав
+    корпуса, значит ``run_id`` (§13). Читаются ровно флаги :data:`CRAWL_AXIS_DESTS`;
+    значения применяются к **run-слою** (:func:`_run_layer_overrides`) — ровно так же, как
+    это делает исполнение (``build_phases``/``crawl``: ``model_copy(update=...)`` поверх
+    ``run.yaml:crawl``), поэтому дайджест и прогон видят одну и ту же цепочку
+    app < run < site: явный per-site профиль остаётся сильнее флага.
 
     Отдельный шаг вместо подстановки в ``inputs.run.crawl``: синтез секции ``crawl``
     объявил бы за оператора и остальные оси (``strategy`` имеет непустой дефолт), и
     ``--pdf-pipeline structured`` — эффективно no-op — дал бы другой ``run_id``.
 
+    До этой правки в дайджест попадали только ``--document-level``/``--pdf-pipeline``, а
+    ``--max-depth``/``--max-documents``/``--exclude-*`` применялись лишь при сборке фаз:
+    прогон с другим корпусом жил под тем же ``run_id``. Инвентарь осей теперь назван
+    списком (:data:`CRAWL_AXIS_DESTS`), а паритет флагов ``run``/``plan`` проверяется
+    тестом — разъехаться молча они больше не могут.
+
     ``{}`` — оси не заданы (поведение и ``run_id`` неизменны).
     """
     overrides: dict[str, Any] = {}
-    document_level = getattr(args, "document_level", None)
-    if document_level is not None:
-        overrides["document_level"] = getattr(document_level, "value", document_level)
-    pdf_pipeline = getattr(args, "pdf_pipeline", None)
-    if pdf_pipeline is not None:
-        overrides["pdf_pipeline"] = getattr(pdf_pipeline, "value", pdf_pipeline)
+    for dest in CRAWL_AXIS_DESTS:
+        value = getattr(args, dest, None)
+        if value is not None:
+            # Значения не приводятся к строкам: ``model_copy`` отдаёт их в
+            # ``resolve_crawl_limits``, который сам канонизирует enum/list.
+            overrides[dest] = value
     return overrides
+
+
+def _run_layer_overrides(run_crawl: Any, overrides: dict[str, Any]) -> Any:
+    """run-слой осей краула с операторскими уточнениями (тот же путь, что у исполнения).
+
+    Одна формула на контракт и на исполнение: ``build_phases``/``crawl`` накладывают
+    ``--max-depth``/``--max-documents``/``--exclude-*``/``--document-level``/
+    ``--pdf-pipeline`` на ``run.yaml:crawl`` через ``model_copy(update=...)``, и
+    :func:`core.pipeline.report.crawl_control_digest` получает **тот же** объект. Если бы
+    дайджест накладывал флаг поверх разрешённой цепочки (как это делал параметр
+    ``overrides``), флаг объявлялся бы сильнее per-site профиля, тогда как прогон исполнял
+    профиль: ``run_id`` описывал бы не тот корпус (живой пример — пакет, где
+    ``domain_profiles.yaml`` задаёт ``max_depth``/``max_documents`` на хост).
+
+    ``overrides == {}`` — исходный объект без изменений (поведение и ``run_id``
+    байт-в-байт, включая случай ``run.yaml`` без секции ``crawl``: ``run_crawl=None``).
+
+    :raises pydantic.ValidationError: не ожидается — значения уже провалидированы argparse;
+        защита от ``model_copy`` не нужна, ключи совпадают с полями ``CrawlRunConfig``.
+    """
+    if not overrides:
+        return run_crawl
+    base = run_crawl if run_crawl is not None else CrawlRunConfig()
+    return base.model_copy(update=dict(overrides))
 
 
 def _manual_artifacts_digest(args: argparse.Namespace) -> str:
@@ -327,14 +499,13 @@ def resolve_declared_axes(
         crawl_strategy=_crawl_strategy(run_crawl),
         crawl_rate_limit=canonical_rate_limit(getattr(run_crawl, "rate_limit", None)),
         # Чистая функция pipeline (app < run < per-site) — вызывается, а не дублируется:
-        # вторая формула дайджеста разошлась бы с манифестом.
+        # вторая формула дайджеста разошлась бы с манифестом. Операторские оси краула
+        # накладываются на **run-слой** — тот же путь, что у исполнения, иначе флаг
+        # оказался бы сильнее per-site профиля, которого прогон не отменял.
         crawl_config_digest=crawl_control_digest(
-            run_crawl=run_crawl,
+            run_crawl=_run_layer_overrides(run_crawl, axis_overrides),
             app=config.crawl,
             profiles=getattr(inputs, "domain_profiles", None),
-            # P5/P7: операторские оси краула применяются поверх разрешённой цепочки —
-            # флаг CLI объявляет этот прогон (меняет текст документа ⇒ ``run_id``).
-            overrides=axis_overrides,
         ),
         serp_rounds=serp_rounds,
         serp_source=serp_source,

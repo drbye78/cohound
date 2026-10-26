@@ -156,9 +156,14 @@ def test_resolve_miss_json(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -
 # ---------------------------------------------------------------------------
 
 
-def test_plan_dry_run_valid_fixtures_returns_zero(
+def test_plan_valid_fixtures_returns_zero(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    """``plan`` без флагов: линт-чистый пакет → план в ``--json`` (и ничего не пишет).
+
+    Флага ``--dry-run`` нет: план по построению ничего не пишет, а флаг обещал
+    существование «не-dry» режима.
+    """
     package = valid_package(tmp_path)
 
     code = main(
@@ -168,14 +173,13 @@ def test_plan_dry_run_valid_fixtures_returns_zero(
             str(package / RUN_YAML_NAME),
             "--package",
             str(package),
-            "--dry-run",
             "--json",
         ]
     )
     assert code == EXIT_OK
     payload = json_out(capsys)
     assert payload["ok"] is True
-    assert payload["dry_run"] is True
+    assert "dry_run" not in payload
     assert payload["anchor"] == "p1"
     assert payload["products"] == ["p1", "p2"]
     assert payload["modules"] == ["mod_a"]
@@ -196,13 +200,15 @@ def test_plan_human_output(
             str(package / RUN_YAML_NAME),
             "--package",
             str(package),
-            "--dry-run",
         ]
     )
     assert code == EXIT_OK
     out = capsys.readouterr().out
     assert "anchor: p1" in out
-    assert "dry-run: yes" in out
+    # План называет слагаемые идентичности: «чем я измеряю» — до прогона.
+    assert "contract: " in out
+    assert "crawl axes: digest=" in out
+    assert "serp: rounds=" in out
 
 
 def _write_deploy_profile(directory: Path, profile: str) -> None:
@@ -236,7 +242,6 @@ def test_plan_warns_split_hardened_in_json_and_human(
         str(package / RUN_YAML_NAME),
         "--package",
         str(package),
-        "--dry-run",
     ]
     code = main([*argv, "--json"])
     assert code == EXIT_OK
@@ -266,7 +271,6 @@ def test_plan_plain_split_has_no_profile_warning(
             str(package / RUN_YAML_NAME),
             "--package",
             str(package),
-            "--dry-run",
             "--json",
         ]
     )
@@ -287,7 +291,6 @@ def test_plan_blocking_lint_prints_rule_code(
             str(CONFIG_FIXTURES / RUN_YAML_NAME),
             "--package",
             str(CONFIG_FIXTURES),
-            "--dry-run",
         ]
     )
     assert code == EXIT_USAGE
@@ -303,7 +306,6 @@ def test_plan_blocking_lint_json(capsys: pytest.CaptureFixture[str]) -> None:
             str(CONFIG_FIXTURES / RUN_YAML_NAME),
             "--package",
             str(CONFIG_FIXTURES),
-            "--dry-run",
             "--json",
         ]
     )

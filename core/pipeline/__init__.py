@@ -87,6 +87,7 @@ from core.pipeline.compute import (
     assert_publishable,
     compute,
     per_product_bundle,
+    publishability_notes,
     publish_warnings,
 )
 from core.pipeline.evaluate import (
@@ -426,6 +427,7 @@ __all__ = [
     "compute",
     "per_product_bundle",
     "publish_warnings",
+    "publishability_notes",
     "assert_publishable",
     # evaluate (T9.3)/validate (T9.4), Ш6
     "EvaluationOutcome",

@@ -346,6 +346,13 @@ def _artifacts_payload(artifacts: Any) -> dict[str, Any]:
         # 13-manual-artifacts §4: заполняемый вход следующего прогона — в ``--json``
         # payload, чтобы оператор видел путь, не угадывая раскладку ``outputs/``.
         "artifacts_gap": _path(getattr(artifacts, "artifacts_gap", None)),
+        # A1/§6: профиль публикуемости — артефакт разложения неизвестности.
+        "publishability": _path(getattr(artifacts, "publishability", None)),
+        # §13/K2 и P6: списки работы, которые иначе пришлось бы искать в ``outputs/``
+        # по догадке. Артефакт без объявленного пути — та же невидимость, что и его
+        # отсутствие: оператор не знает, что смотреть.
+        "stale_cells": _path(getattr(artifacts, "stale_cells", None)),
+        "cell_diagnostics": _path(getattr(artifacts, "cell_diagnostics", None)),
         "i3_anomalies": list(getattr(artifacts, "i3_anomalies", None) or []),
         "crawl_truncation_anomalies": list(
             getattr(artifacts, "crawl_truncation_anomalies", None) or []
@@ -1937,6 +1944,8 @@ def _resolve_phases(
         "axes": axes,
         "declared_status_dict_version": declared_status_dict_version,
         "crawl_app": deploy_config.crawl if deploy_config is not None else None,
+        # P8: та же ось, что видит исполнение (``corpus_phase`` резолвит app < run).
+        "document_timeout_s": getattr(args, "document_timeout_s", None),
         # P4: исполнитель параллельной экстракции по профилю зон (local — процессы,
         # split — потоки поверх RemoteExtractor). Ось ``crawl.extract_workers`` решается
         # в pipeline; при ``None``/``1`` пул не создаётся (поведение байт-в-байт).
@@ -2102,7 +2111,6 @@ def _print_plan(payload: dict[str, Any]) -> None:
         f"roles: {', '.join(payload['roles'])}",
         f"weights: {weights or '—'}",
         f"golden: {payload['golden_count']} (state: {payload['golden_state']})",
-        f"dry-run: {'yes' if payload.get('dry_run') else 'no'}",
     ]
     # Причина непригодности эталона — рядом со счётчиком, а не только в ``--json``:
     # «0 строк» без причины читается как «эталон потеряли».
@@ -2397,6 +2405,20 @@ def _add_phase4_flags(parser: argparse.ArgumentParser) -> None:
         help=(
             "механизм извлечения PDF: structured|text_layer "
             "(дефолт structured = docling: layout/таблицы/OCR)"
+        ),
+    )
+    # P8: потолок времени на извлечение одного документа (run-слой поверх run.yaml).
+    # Дефолт ``None`` = ось не объявлена: резолв берёт app-слой, затем прежнее зашитое
+    # значение (1800 с), поэтому объявление флага — единственный способ изменить `run_id`.
+    parser.add_argument(
+        "--document-timeout",
+        dest="document_timeout_s",
+        type=float,
+        default=None,
+        metavar="SECONDS",
+        help=(
+            "потолок времени на извлечение одного документа в секундах "
+            "(дефолт 1800 = сегодняшнее поведение; ось входит в run_id при объявлении)"
         ),
     )
     parser.add_argument(

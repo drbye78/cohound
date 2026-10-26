@@ -43,7 +43,6 @@ from core.domain import (
     LLMEvidence,
     RegistryFact,
     SourceKind,
-    SourceScope,
     Status,
     derived_evidence_id,
 )
@@ -200,10 +199,17 @@ def _absence_cell(
     row: CatalogRow,
     registry_ids: list[str],
 ) -> Cell:
-    """R-ячейка реестровой пустоты: ❌ + absence-evidence с ``source_scope=exhaustive``.
+    """R-ячейка реестровой пустоты: ❌ + ``EvidenceScope(denial_strength=authoritative)``.
 
     ``registry_absence`` — авторитетная энумерация: пустота реестра есть валидное
-    негативное свидетельство **по построению** (I2b); ``scope_attested_by`` не требуется.
+    негативное свидетельство **по построению** (I2b); ``scope_acceptance`` не требуется.
+
+    Скаляр ``source_scope=exhaustive`` здесь **не** пишется: силу отрицания несёт
+    ``EvidenceScope`` (её выводит валидатор :class:`~core.domain.models.Cell` из
+    ``absence_rule``), а два писателя одного факта давали бы два ответа на один вопрос.
+    Читатель исторических строк (``report.collect_crawl_truncation_anomalies``) ключуется
+    на скаляр только для ячеек **без** объекта силы отрицания, поэтому старые прогоны
+    читаются как прежде.
     """
     source_id = f"registry://{'+'.join(registry_ids)}/{product_id}#{row.param_id}"
     return Cell(
@@ -217,7 +223,6 @@ def _absence_cell(
         absence_evidence=[
             {
                 "source_id": source_id,
-                "source_scope": SourceScope.EXHAUSTIVE.value,
                 "registry_ids": list(registry_ids),
             }
         ],

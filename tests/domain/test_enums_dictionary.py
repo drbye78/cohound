@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from core.domain import (
     CapabilityPolicy,
     CrawlStrategy,
@@ -47,6 +49,42 @@ def test_new_enums_match_dictionary() -> None:
     assert set(data["skip_reason"]) == {v.value for v in SkipReason}
     # Ф0: классы сбоя краула/конвейера — словарь и enum не могут разойтись молча.
     assert set(data["failure_kind"]) == {v.value for v in FailureKind}
+
+
+def test_dictionary_integrity_rejects_drifted_publishability_section(
+    tmp_path: Path,
+) -> None:
+    """A1/§6: гейт словаря знает секции публикуемости, а не только тест профиля.
+
+    Секции ``publishability_class``/``unknown_cause``/``excluded_cell_class`` введены
+    вместе с профилем, но общий ``assert_dictionary_integrity`` их не проверял — словарь
+    мог разъехаться с enum незаметно (тест полосы ловил это только в своём файле).
+    Проверка идёт на **копии** словаря: реальный файл не портится.
+    """
+    import yaml
+
+    data = yaml.safe_load(DICT.read_text(encoding="utf-8"))
+    # Подмена внутри секции: класс, объявленного в enum, нет в словаре, а в словаре —
+    # значение, которого в enum нет. Оба направления обязаны отвергаться.
+    data["unknown_cause"] = {
+        "not_stated": data["unknown_cause"]["not_stated"],
+        "parallel_truth": "класс, которого нет в UnknownCause",
+    }
+    broken = tmp_path / "status-dictionary-broken.yaml"
+    broken.write_text(
+        yaml.safe_dump(data, sort_keys=False, allow_unicode=True), encoding="utf-8"
+    )
+    with pytest.raises(ValueError, match="unknown_cause"):
+        assert_dictionary_integrity(broken)
+
+    # Пропавшая секция — тоже отказ (``required``), а не молчаливое «нечего сравнивать».
+    data = yaml.safe_load(DICT.read_text(encoding="utf-8"))
+    data.pop("publishability_class")
+    broken.write_text(
+        yaml.safe_dump(data, sort_keys=False, allow_unicode=True), encoding="utf-8"
+    )
+    with pytest.raises(ValueError, match="publishability_class"):
+        assert_dictionary_integrity(broken)
 
 
 def test_interrupted_is_operational_not_methodological() -> None:

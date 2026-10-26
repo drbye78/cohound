@@ -61,6 +61,7 @@ from core.pipeline.corpus import ExtractionPool, build_corpus
 from core.pipeline.embed_cache import EmbedCache
 from core.pipeline.extract_cache import ExtractionCache
 from core.pipeline.eval_cache import EvalVerdictCache
+from core.pipeline.crawl_frontier import resolve_crawl_limits
 from core.pipeline.crawl_session import default_session_id
 from core.pipeline.crawl_sources import crawl_sources_digest
 from core.pipeline.discovery import discover
@@ -806,6 +807,7 @@ def build_phases(
     crawl_app: CrawlConfig | None = None,
     document_level: DocumentLevel | None = None,
     pdf_pipeline: PdfPipeline | None = None,
+    document_timeout_s: float | None = None,
     state: Any = None,
     product_modes: Mapping[str, str] | None = None,
     refresh_policy: str = "auto",
@@ -1007,6 +1009,8 @@ def build_phases(
             override["document_level"] = document_level
         if pdf_pipeline is not None:
             override["pdf_pipeline"] = pdf_pipeline
+        if document_timeout_s is not None:
+            override["document_timeout_s"] = document_timeout_s
         if override:
             base = run_crawl if run_crawl is not None else CrawlRunConfig()
             run_crawl = base.model_copy(update=override)
@@ -1047,6 +1051,16 @@ def build_phases(
             # P4: исполнитель экстракции (process-local / thread-split) — аддитивная ось
             # ``crawl.extract_workers``; ``None`` ⇒ inline (поведение байт-в-байт).
             extraction_pool=extraction_pool,
+            # P8: потолок ожидания **одного** документа. Пул экстракции один на прогон,
+            # поэтому per-site слой здесь не применяется (он резолвится там, где адрес
+            # известен — краул/фетч); app < run — ровно те слои, которые объявляют
+            # стоимость извлечения. ``None`` ⇒ прежнее зашитое значение, поведение
+            # байт-в-байт (I19/§13: ось не меняет прогон, пока её не объявили).
+            extract_task_timeout_s=resolve_crawl_limits(
+                "",
+                app=crawl_app if crawl_app is not None else CrawlConfig(),
+                run=run_crawl,
+            ).document_timeout_s,
             # P5: фабрика per-level экстрактора для inline-пути (переданная ссылка из
             # composition root; ``None`` ⇒ уровень на inline-пути не действует, как прежде).
             extractor_factory=extractor_factory,

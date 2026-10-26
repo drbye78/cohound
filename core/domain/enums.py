@@ -777,3 +777,85 @@ class RunScope(StrEnum):
     FULL = "full"
     ONLY_FAILED = "only_failed"
     PRODUCT_ONLY = "product_only"
+
+
+class PublishabilityClass(StrEnum):
+    """Класс публикуемости карты (A1, §6) — **результат** измерения, а не приговор.
+
+    Прежний код знал одно состояние — «coverage ``UNDEFINED``» — и потому не мог назвать
+    причину, по которой карта не публикуется: живой прогон с 55 % ``❓`` и coverage 0.208
+    проходил проверку «coverage определён, знаменатель > 0» и выглядел публикуемым.
+    Класс выводится из измеренных чисел (доля неизвестности, порог, coverage, слабые
+    «нет», состав когорты), и **рядом с классом всегда публикуются** эти числа
+    (:class:`~core.domain.scoring.PublishabilityProfile`): класс без чисел — та же ложная
+    точность, что и скаляр «охват исчерпан».
+
+    * ``PUBLISHABLE`` — Capability и Coverage определены, доля неизвестности не выше
+      объявленного порога, слабые «нет» не превышают объявленной доли, оговорок нет.
+    * ``PUBLISHABLE_WITH_CAVEAT`` — публикуется, но с **названными** оговорками
+      (однопродуктовая когорта, продукт без измерений, Comparability ``INSUFFICIENT``,
+      слабые «нет» сверх доли).
+    * ``ANALYTICAL_ONLY`` — Capability вычислим, но карта как **сравнение** не публикуется:
+      доля неизвестности выше порога либо coverage ниже объявленного уровня.
+    * ``NOT_COMPARABLE`` — сравнивать нечего: Coverage ``UNDEFINED`` либо ни у одного
+      продукта нет измеренных ячеек.
+
+    Методологическая секция словаря: смена правил вывода класса — версионная граница
+    ``methodology_version`` (§13). Источник истины — ``docs/status-dictionary.yaml``.
+    """
+
+    PUBLISHABLE = "PUBLISHABLE"
+    PUBLISHABLE_WITH_CAVEAT = "PUBLISHABLE_WITH_CAVEAT"
+    ANALYTICAL_ONLY = "ANALYTICAL_ONLY"
+    NOT_COMPARABLE = "NOT_COMPARABLE"
+
+
+class UnknownCause(StrEnum):
+    """Почему ячейка **внутри** знаменателя не дала вердикта (разложение A1, §6).
+
+    Одна доля «неизвестно» ничего не объясняет: 55 % ``❓`` живого прогона состояли из
+    четырёх разных ситуаций, и лечить их надо по-разному. Класс причины читается из
+    данных, а не назначается:
+
+    * ``not_stated`` — вендор не заявил, дословного утверждения нет
+      (``EvidenceScope.denial_strength == not_stated``) → ``❓``;
+    * ``unobserved_scope`` — часть материала не наблюдалась, охват неполон
+      (``denial_strength == unobserved``) → ``❓``;
+    * ``instrument_failed`` — измерение не состоялось (``failed``-ячейка либо
+      ``denial_strength == instrument_failed``) → статуса нет (I4);
+    * ``pending`` — ячейка не оценена (``pending``/``preliminary``-состояние, пара
+      вселенной без строки): это **не** «вендор молчит», а «мы ещё не смотрели»;
+    * ``unspecified`` — причина **не записана** в данных (историческая строка без
+      ``evidence_scope``, рассинхронизированный класс). Не догадка: доля, у которой
+      причина не выводится, обязана быть видимой отдельным числом, а не растворяться
+      в чужом классе.
+
+    Источник истины — ``docs/status-dictionary.yaml`` (секция ``unknown_cause``).
+    """
+
+    NOT_STATED = "not_stated"
+    UNOBSERVED_SCOPE = "unobserved_scope"
+    INSTRUMENT_FAILED = "instrument_failed"
+    PENDING = "pending"
+    UNSPECIFIED = "unspecified"
+
+
+class ExcludedCellClass(StrEnum):
+    """Ячейка **вне** знаменателя: не неизвестность, а исключение по правилу.
+
+    Смешивать эти классы с :class:`UnknownCause` нельзя — иначе ``N/A`` начнёт выглядеть
+    как незнание, а ``preliminary`` как пробел измерения:
+
+    * ``not_applicable`` — ``N/A``, поставлено человеком (I7); в знаменатель Coverage не
+      входит;
+    * ``preliminary`` — предварительный вердикт, вне **всех** расчётов (I13);
+    * ``unresolved_state`` — ячейка в состоянии измерения без применимого статуса: протокол
+      её не засчитывает (аномалия данных, не вердикт). Класс существует, чтобы сумма
+      разложения объясняла знаменатель и на таких строках.
+
+    Источник истины — ``docs/status-dictionary.yaml`` (секция ``excluded_cell_class``).
+    """
+
+    NOT_APPLICABLE = "not_applicable"
+    PRELIMINARY = "preliminary"
+    UNRESOLVED_STATE = "unresolved_state"

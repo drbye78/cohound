@@ -43,7 +43,7 @@ from __future__ import annotations
 import csv
 import json
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
@@ -251,6 +251,14 @@ class Artifacts:
     #: (§13/K2: ``stale_reason`` = привязка к прошлой сборке). ``None`` — устаревших нет
     #: (файл не создаётся: пустой список — не артефакт).
     stale_cells: Path | None = None
+    #: ``outputs/publishability.yaml`` — профиль публикуемости (A1/§6): класс и разложение
+    #: неизвестности по причинам и продуктам. ``None`` — бандл без профиля (синтетика).
+    publishability: Path | None = None
+    #: ``outputs/cell_diagnostics.csv`` — ячейки, о которых нужно знать человеку:
+    #: непустые ``validation_notes``, незаписанное ``absence_rule``, непустой
+    #: ``review_reason``. ``None`` — таких ячеек нет (файл не создаётся: пустой список
+    #: не артефакт).
+    cell_diagnostics: Path | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -947,6 +955,14 @@ def build_manifest(
         inputs, "edge_capabilities", None
     )
     extra["edge_capabilities"] = dict(edge_caps or {})
+    # A1/§6: профиль публикуемости — **блок манифеста**, а не пересчёт читателя. Поле
+    # добавляется только если схема ``RunManifest`` его объявляет (``_BASE`` —
+    # ``extra="forbid"``): без поля в схеме манифест об этом молчит, а не падает.
+    # С появлением поля проводка уже готова — значение то же, что в бандле.
+    if "publishability" in manifest_fields and bundle is not None:
+        profile = getattr(bundle, "publishability", None)
+        if profile is not None:
+            extra["publishability"] = asdict(profile)
 
     return RunManifest(
         run_id=str(getattr(plan, "run_id", "")),
@@ -1105,6 +1121,28 @@ def _battle_card_header(
         ("computed_ranking", bundle.computed_ranking),
         ("coverage_insufficient", insufficient),
     ]
+    # A1/§6: баннер публикуемости — **класс и причина**, а не только «coverage
+    # INSUFFICIENT». Строки добавляются, если бандл несёт профиль (синтетические бандлы
+    # тестов его не несут — класс тогда не выдумывается).
+    profile = getattr(bundle, "publishability", None)
+    if profile is not None:
+        rows.extend(
+            [
+                ("publishability_class", profile.klass),
+                ("publishability_banner", profile.banner),
+                ("publishability_unknown_share", round(profile.unknown_share, 6)),
+                ("publishability_unknown_share_threshold", profile.unknown_share_threshold),
+                ("publishability_coverage_floor", profile.coverage_floor),
+                ("publishability_dominant_cause", profile.dominant_cause or ""),
+                ("publishability_measured_products", profile.measured_products),
+                ("publishability_weak_denial_share", round(profile.weak_denial_share, 6)),
+                ("publishability_caveats", "; ".join(profile.caveats)),
+            ]
+        )
+        for cause, bucket in sorted(profile.causes.items()):
+            rows.append((f"publishability_unknown_{cause}", round(bucket.share, 6)))
+        for skipped, bucket in sorted(profile.excluded.items()):
+            rows.append((f"publishability_excluded_{skipped}", bucket.cells))
     # §4.4/Phase 2/2.1: провенанс краула — движки (информационно) и durable-флаг
     # неоднородности. ``crawl_engines`` публикуется безусловно (стабильная схема шапки);
     # ``crawl_engines_heterogeneous`` — только при флаге. Это **наблюдение**, а не
@@ -1674,11 +1712,11 @@ def render_preliminary_findings(cells: Iterable[Any], out_path: str | Path) -> P
             "product_id": str(cell.product_id),
             "param_id": str(cell.param_id),
             "preliminary_status": "" if getattr(cell, "status", None) is None else _status_symbol(cell),
-            "validation_notes": str(
-                getattr(cell, "validation_notes", None)
-                or getattr(cell, "notes", None)
-                or ""
-            ),
+            "validation_notes": "; ".join(
+                getattr(cell, "validation_notes", ()) or ()
+            )
+            or getattr(cell, "notes", None)
+            or "",
             "marker": NOT_FOR_PUBLICATION,
         }
         for cell in prelim
@@ -2195,6 +2233,63 @@ def _write_placeholder_diff(out_path: Path, manifest: RunManifest) -> Path:
 # ---------------------------------------------------------------------------
 
 
+def write_publishability_artifact(
+    profile: Any,
+    out_path: str | Path,
+    *,
+    run_id: str | None = None,
+) -> Path | None:
+    """Пишет ``outputs/publishability.yaml`` — полное разложение неизвестности (A1, §6).
+
+    Это **измерение**, а не отчёт: класс и числа, из которых он выведен, читаются без
+    парсинга battle card. Раньше причина непубликуемости жила только в голове читателя
+    отчёта («coverage INSUFFICIENT»), и по ней нельзя было решить, что делать дальше.
+
+    :param profile: :class:`~core.domain.scoring.PublishabilityProfile` либо ``None``
+        (синтетический бандл) — тогда файл не пишется и возвращается ``None``.
+    :param run_id: для провенанса файла; ``None`` — не записывается.
+    """
+    if profile is None:
+        return None
+    path = Path(out_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # Один сериализатор с манифестом и CLI (``PublishabilityProfile.to_dict``): артефакт
+    # не может разойтись с манифестом по составу полей.
+    payload: dict[str, Any] = (
+        profile.to_dict() if hasattr(profile, "to_dict") else asdict(profile)
+    )
+    payload["artifact"] = "publishability"
+    if run_id is not None:
+        payload["run_id"] = run_id
+    # Происхождение чисел рядом с числами (A3): порог — объявленный дефолт, а не факт.
+    payload["thresholds"] = {
+        "unknown_share": {
+            "value": profile.unknown_share_threshold,
+            "source": "assumption",
+            "note": (
+                "DEFAULT_UNKNOWN_SHARE_THRESHOLD (core.domain.scoring): объявленный "
+                "дефолт по ориентиру D-19, а не измеренная константа (A3)"
+            ),
+        },
+        "weak_denial_share": {
+            "value": profile.weak_denial_share_threshold,
+            "source": "assumption",
+            "note": "DEFAULT_WEAK_DENIAL_SHARE_THRESHOLD (A3)",
+        },
+        "coverage_floor": {
+            "value": profile.coverage_floor,
+            "source": "assumption",
+            "note": (
+                "DEFAULT_COVERAGE_FLOOR: согласован с границей Comparability "
+                "INSUFFICIENT (<0.50)"
+            ),
+        },
+    }
+    text = yaml.safe_dump(payload, sort_keys=True, allow_unicode=True, default_flow_style=False)
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
 def _write_stale_cells(cells: Iterable[Any], path: Path) -> Path | None:
     """Пишет ``stale_cells.csv`` — «требует пере-оценки» (§13/K2); пусто → ``None``.
 
@@ -2233,6 +2328,105 @@ def _write_stale_cells(cells: Iterable[Any], path: Path) -> Path | None:
         rows,
     )
 
+
+def _write_cell_diagnostics(cells: Iterable[Any], path: Path) -> Path | None:
+    """Пишет ``cell_diagnostics.csv`` — ячейки, о которых человек обязан знать.
+
+    Поводом попасть в файл служит **записанный факт**, а не догадка читателя: непустые
+    ``validation_notes`` (что было с ячейкой при персисте/валидации), непустой
+    ``review_reason`` (причина pending) и незаписанное ``absence_rule`` (правило
+    отсутствия не объявлено — тогда ``❌`` опирается на правило, которого никто не
+    заявлял). Всё это уже лежало в БД, но было невидимо человеку: три новые записи
+    ячейки без артефакта остаются невидимыми.
+
+    Незаписанное ``absence_rule`` — повод **ячейки** только в смешанном прогоне, где
+    правило где-то записано. Если не записано ни у одной ячейки (прогон старше
+    колонки), это свойство прогона, а не N задач: иначе очередь разбора вырождается в
+    полный список ячеек с одним общим поводом (наблюдено: 476 строк, все по этой
+    причине; 476 — число ячеек, а не число находок). Такой факт публикуется **одной**
+    строкой ``kind=run``, чтобы он не исчез и не притворялся триажем.
+
+    ``denial_strength``/``relevant_evidence_coverage`` берутся из
+    ``cell.evidence_scope`` (может отсутствовать) и печатаются пустыми, если не
+    измерены — «не измерено» не выдаётся за ноль. Пустой список поводов ⇒ ``None``
+    (файл не создаётся: пустой список — не артефакт).
+    """
+    material = list(cells)
+    # Правило отсутствия записано хотя бы у одной ячейки ⇒ смешанный прогон, и
+    # незаписанное правило у остальных — аномалия конкретной ячейки.
+    rule_recorded = any(getattr(cell, "absence_rule", None) is not None for cell in material)
+    rows: list[dict[str, Any]] = []
+    for cell in material:
+        notes = list(getattr(cell, "validation_notes", ()) or ())
+        absence_rule = getattr(cell, "absence_rule", None)
+        review_reason = getattr(cell, "review_reason", None)
+        if not notes and not review_reason and not (absence_rule is None and rule_recorded):
+            continue
+        scope = getattr(cell, "evidence_scope", None)
+        coverage_value = getattr(scope, "relevant_evidence_coverage", None)
+        rows.append(
+            {
+                "kind": "cell",
+                "product_id": str(cell.product_id),
+                "param_id": str(cell.param_id),
+                "state": getattr(getattr(cell, "state", None), "value", None),
+                "status": getattr(getattr(cell, "status", None), "value", None),
+                "absence_rule": (
+                    getattr(absence_rule, "value", None)
+                    or ("" if absence_rule is None else str(absence_rule))
+                ),
+                "review_reason": review_reason or "",
+                "denial_strength": getattr(
+                    getattr(scope, "denial_strength", None), "value", None
+                )
+                or "",
+                "relevant_evidence_coverage": (
+                    f"{float(coverage_value):.3f}"
+                    if isinstance(coverage_value, (int, float))
+                    else ""
+                ),
+                "validation_notes": " | ".join(str(note) for note in notes),
+            }
+        )
+    if material and not rule_recorded:
+        rows.append(
+            {
+                "kind": "run",
+                "product_id": "",
+                "param_id": "",
+                "state": "",
+                "status": "",
+                "absence_rule": "",
+                "review_reason": "",
+                "denial_strength": "",
+                "relevant_evidence_coverage": "",
+                "validation_notes": (
+                    f"absence_rule не записан ни у одной из {len(material)} ячеек: прогон "
+                    "сделан до появления колонки; правило отсутствия при чтении не "
+                    "восстанавливалось (его нельзя выдумать из каталога — объявление и "
+                    "факт измерения разные вещи)"
+                ),
+            }
+        )
+    if not rows:
+        return None
+    rows.sort(key=lambda row: (row["kind"] != "run", row["product_id"], row["param_id"]))
+    return _write_csv(
+        path,
+        [
+            "kind",
+            "product_id",
+            "param_id",
+            "state",
+            "status",
+            "absence_rule",
+            "review_reason",
+            "denial_strength",
+            "relevant_evidence_coverage",
+            "validation_notes",
+        ],
+        rows,
+    )
 
 def write_reports(
     *,
@@ -2294,6 +2488,15 @@ def write_reports(
     except PublishBlockedError:
         battle_card = None
 
+    # A1/§6: полное разложение неизвестности — отдельный артефакт, читаемый без разбора
+    # battle card. Пишется всегда, когда бандл несёт профиль: «почему такой класс» —
+    # измерение, а не приложение к отчёту.
+    publishability_path = write_publishability_artifact(
+        getattr(bundle, "publishability", None),
+        outputs_dir / "publishability.yaml",
+        run_id=run_id,
+    )
+
     # D1/G/B3: усечённый краул продукта + заявленный ``exhaustive`` — аномалия для человека
     # (паттерн I3 reviewed_by); статус ячейки не меняется и прогон не блокируется. Вычисляем
     # ДО ``nda_questions``, чтобы аномалии попали в операторский CSV (B3).
@@ -2324,6 +2527,12 @@ def write_reports(
     # (:mod:`core.pipeline.compute`), но человек обязан их видеть: это очередь
     # пере-оценки, а не тихое вычитание. Файл пишется только при непустом списке.
     stale_cells = _write_stale_cells(cell_list, outputs_dir / "stale_cells.csv")
+    # P6/absence_rule/validation_notes: записи ячейки, о которых человек обязан знать.
+    # Файл — очередь разбора (как ``stale_cells.csv``), а не измерение; пишется только
+    # при непустом списке поводов.
+    cell_diagnostics = _write_cell_diagnostics(
+        cell_list, outputs_dir / "cell_diagnostics.csv"
+    )
 
     nda_questions = render_nda_questions(
         cell_list,
@@ -2361,6 +2570,8 @@ def write_reports(
     return Artifacts(
         battle_card=battle_card,
         stale_cells=stale_cells,
+        cell_diagnostics=cell_diagnostics,
+        publishability=publishability_path,
         preliminary_findings=preliminary,
         nda_questions=nda_questions,
         diff=diff,

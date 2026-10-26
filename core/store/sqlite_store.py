@@ -85,6 +85,14 @@ _CELL_COLUMNS = (
     #: Вариант 2: объект силы отрицания + вектор охвата (JSON). Единственный носитель
     #: ответа «можно ли утверждать отсутствие» — см. ``core.domain.models.EvidenceScope``.
     "evidence_scope",
+    #: Правило отсутствия параметра. Прежде не хранилось, и чтение подставляло
+    #: ``explicit`` (см. ``_row_to_cell``): прочитанная ячейка утверждала правило,
+    #: которого каталог не объявлял. ``NULL`` у legacy-строк = «не записано».
+    "absence_rule",
+    #: Свидетельство о дефектах оценки (ремонт шумового выхода, отказ валидации).
+    #: Пишется **слиянием** с уже записанным (``_merge_validation_notes``), поэтому
+    #: повторная оценка при resume не теряет прежнюю причину.
+    "validation_notes",
 )
 
 #: Источники, стоящие в порядке §2.2 п.7 **ниже** реестра. Guard использует это только
@@ -198,6 +206,54 @@ def _row_optional(row: sqlite3.Row, column: str) -> Any:
     в такой БД отсутствует. Отсутствие = «значение не записано», а не сбой чтения прогона.
     """
     return row[column] if column in row.keys() else None
+
+
+def _notes_from_text(raw: str | None) -> list[str]:
+    """Разбирает ``cells.validation_notes`` в список заметок (терпимо к legacy-тексту).
+
+    Новый писатель кладёт JSON-массив. Строка, записанная иначе (руками, прошлой
+    редакцией), не должна теряться: она читается как одна заметка, а не как «пусто».
+    """
+    if raw is None:
+        return []
+    payload = _parse_json_text(raw)
+    if isinstance(payload, list):
+        return [text for item in payload if (text := str(item).strip())]
+    text = str(raw).strip()
+    return [text] if text else []
+
+
+def _merge_validation_notes(existing: str | None, incoming: Iterable[str]) -> str | None:
+    """Сливает записанные заметки с новыми: без дублей, порядок поступления сохранён.
+
+    Слияние, а не перезапись: одну ячейку могут оценивать дважды (resume), и вторая
+    оценка не должна стирать причину первой — иначе «накопление по нескольким причинам»
+    превращается в «последняя запись». ``None`` — заметок нет вовсе (колонка остаётся
+    ``NULL``, чтобы «пусто» не выглядело как записанный пустой массив).
+    """
+    merged = _notes_from_text(existing)
+    for note in incoming:
+        text = str(note).strip()
+        if text and text not in merged:
+            merged.append(text)
+    return json.dumps(merged, ensure_ascii=False) if merged else None
+
+
+def _parse_absence_rule(raw: Any) -> AbsenceRuleType | None:
+    """Правило отсутствия из колонки ``cells.absence_rule``.
+
+    ``NULL``/отсутствующая колонка (legacy-строка, read-only БД старой версии) → ``None``:
+    «правило не записано». Прежнее чтение подставляло ``explicit``, то есть **выдумывало**
+    объявление каталога, и I2 по прочитанным ячейкам проверялся на выдуманном значении.
+    Неизвестное значение в колонке — тоже ``None``: терпимость чтения прогона важнее,
+    чем отказ открыть старую БД.
+    """
+    if raw is None:
+        return None
+    try:
+        return AbsenceRuleType(str(raw))
+    except ValueError:
+        return None
 
 
 def _parse_evidence_scope(raw: str | None) -> EvidenceScope | None:
@@ -408,7 +464,16 @@ class SqliteStore:
         return _parse_phase_state(row["state"])
 
     # -- cells ----------------------------------------------------------- #
-    def _cell_row(self, cell: Cell) -> tuple[Any, ...]:
+    def _cell_row(
+        self, cell: Cell, validation_notes: str | None
+    ) -> tuple[Any, ...]:
+        """Строка ``cells`` в порядке :data:`_CELL_COLUMNS`.
+
+        ``validation_notes`` передаётся **готовым текстом** (уже слитым с записанным),
+        а не берётся из модели: слияние требует чтения БД, и делать его в «чистой»
+        сборке строки значило бы либо потерять накопление, либо сходить в БД из
+        канонического сериализатора.
+        """
         return (
             cell.run_id,
             cell.product_id,
@@ -427,7 +492,30 @@ class SqliteStore:
                 if cell.evidence_scope is not None
                 else None
             ),
+            _as_text(cell.absence_rule),
+            validation_notes,
         )
+
+    def _validation_notes_map(
+        self, run_id: str
+    ) -> dict[tuple[str, str], str | None]:
+        """Записанные ``validation_notes`` прогона: ``(product_id, param_id) → текст``.
+
+        Читается **до** upsert: ``INSERT OR REPLACE`` заменяет строку целиком, поэтому
+        колонка, не попавшая в ``INSERT``, была бы стёрта — накопление обязано случиться
+        на стороне писателя. Колонка может отсутствовать в read-only БД старой версии
+        (:meth:`_readable`), тогда карта пуста: «не записано» вместо падения чтения.
+        """
+        columns = ("product_id", "param_id", "validation_notes")
+        sql = (
+            f"SELECT {self._readable('cells', columns)} FROM cells WHERE run_id = ?"
+        )
+        stored: dict[tuple[str, str], str | None] = {}
+        for row in self.conn.execute(sql, (run_id,)):
+            stored[(row["product_id"], row["param_id"])] = _row_optional(
+                row, "validation_notes"
+            )
+        return stored
 
     def _guard_against_downgrade(self, cell: Cell) -> None:
         """Defense-in-depth: запрет тихой замены evaluated-ячейки высокого источника.
@@ -474,17 +562,27 @@ class SqliteStore:
         сохраняется как NULL. Триггеры I4/I6/I7/I13 применяются БД. Перед записью
         срабатывает guard против тихого понижения высокого источника (defense-in-depth).
 
-        Примечание (T3.1): ``absence_rule``/``evidence``/``absence_evidence`` не имеют
-        колонок в ``cells`` — evidence живёт в ``cell_evidence``, ``absence_rule`` —
-        свойство каталога; при чтении восстанавливаются дефолтами модели.
+        **``validation_notes`` накапливаются, а не перезаписываются.** ``INSERT OR
+        REPLACE`` заменяет строку целиком, поэтому заметки, уже лежащие в БД, читаются
+        до записи и сливаются с ``cell.validation_notes`` (без дублей, порядок
+        сохранён). Причина: одну ячейку могут оценивать дважды (resume), и вторая
+        оценка обязана оставить видимой причину первой.
+
+        ``absence_rule`` пишется в свою колонку (аддитивная миграция), ``evidence``/
+        ``absence_evidence`` колонок в ``cells`` по-прежнему не имеют: evidence живёт в
+        ``cell_evidence``.
         """
         placeholders = ", ".join("?" for _ in _CELL_COLUMNS)
+        stored = self._validation_notes_map(cell.run_id).get(
+            (cell.product_id, cell.param_id)
+        )
+        notes = _merge_validation_notes(stored, cell.validation_notes)
         with self.conn:
             self._guard_against_downgrade(cell)
             self.conn.execute(
                 f"INSERT OR REPLACE INTO cells ({', '.join(_CELL_COLUMNS)})"
                 f" VALUES ({placeholders})",
-                self._cell_row(cell),
+                self._cell_row(cell, notes),
             )
 
     def set_cell_provenance(
@@ -514,7 +612,9 @@ class SqliteStore:
     def save_cells_batch(self, cells: list[Cell], chunk_size: int = DEFAULT_BATCH_SIZE) -> None:
         """Пишет ячейки пачками: одна транзакция на ``chunk_size`` (по умолчанию 200).
 
-        Каждая ячейка проходит тот же guard, что и :meth:`save_cell`.
+        Каждая ячейка проходит тот же guard, что и :meth:`save_cell`, и то же слияние
+        ``validation_notes``: заметки читаются **до** upsert (одна выборка на прогон в
+        пределах пачки), иначе ``INSERT OR REPLACE`` стёр бы причину прошлой оценки.
         """
         if chunk_size <= 0:
             raise ValueError("chunk_size обязан быть > 0")
@@ -525,10 +625,23 @@ class SqliteStore:
         )
         for start in range(0, len(cells), chunk_size):
             part = cells[start : start + chunk_size]
+            stored: dict[str, dict[tuple[str, str], str | None]] = {}
+            rows: list[tuple[Any, ...]] = []
+            for cell in part:
+                notes_map = stored.get(cell.run_id)
+                if notes_map is None:
+                    notes_map = self._validation_notes_map(cell.run_id)
+                    stored[cell.run_id] = notes_map
+                key = (cell.product_id, cell.param_id)
+                notes = _merge_validation_notes(
+                    notes_map.get(key), cell.validation_notes
+                )
+                notes_map[key] = notes
+                rows.append(self._cell_row(cell, notes))
             with self.conn:
                 for cell in part:
                     self._guard_against_downgrade(cell)
-                self.conn.executemany(sql, [self._cell_row(c) for c in part])
+                self.conn.executemany(sql, rows)
 
     def iter_cells(self, run_id: str, state: str | None = None) -> Iterator[Cell]:
         """Итерирует ячейки прогона, восстанавливая доменные ``Cell``.
@@ -539,6 +652,11 @@ class SqliteStore:
         одним запросом на прогон. Без этого ``❌`` обеднялся при любом чтении из store —
         отчёт (``report_phase`` читает именно ``iter_cells``) и ревью видели статус без
         протокола отсутствия даже в одном процессе, а на resume — тем более.
+
+        ``absence_rule`` и ``validation_notes`` читаются из своих колонок (обе — аддитивные
+        дельты схемы). Legacy-строка без правила даёт ``absence_rule=None`` («правило не
+        записано»), а не выдуманный ``explicit``: I2 по прочитанным данным не должен
+        проверяться на значении, которого не объявлял каталог.
         """
         sql = (
             f"SELECT {self._readable('cells', _CELL_COLUMNS)} FROM cells WHERE run_id = ?"
@@ -579,6 +697,15 @@ class SqliteStore:
 
         ``evidence_scope`` разбирается **терпимо**: повреждённый JSON исторической строки —
         это «объекта нет» (прежнее правило), а не падение чтения всего прогона.
+
+        ``absence_rule`` **не достраивается**: ``NULL`` (строка записана до появления
+        колонки, или read-only БД старой версии без неё) читается как ``None`` — «правило
+        не записано». Прежнее жёсткое ``explicit`` означало, что любая прочитанная ячейка
+        заявляла правило, которого каталог не объявлял, и I2 по прочитанным данным
+        проверялся на выдуманном значении (``review.promote`` работает именно с
+        прочитанными ячейками). Доменные проверки :mod:`core.domain.invariants`
+        ``None``-значение допускают: I2/I2b/I2c решаются классом отрицания
+        (``evidence_scope``), а не этим полем.
         """
         status = row["status"]
         source_kind = row["source_kind"]
@@ -590,7 +717,7 @@ class SqliteStore:
             state=CellState(row["state"]),
             status=Status(status) if status is not None else None,
             source_kind=SourceKind(source_kind) if source_kind is not None else None,
-            absence_rule=AbsenceRuleType.EXPLICIT,
+            absence_rule=_parse_absence_rule(_row_optional(row, "absence_rule")),
             evidence=[],
             absence_evidence=[],
             evidence_scope=_parse_evidence_scope(_row_optional(row, "evidence_scope")),
@@ -600,6 +727,9 @@ class SqliteStore:
             retrieval_params_json=row["retrieval_params_json"],
             stale_reason=StaleReason(stale_reason) if stale_reason is not None else None,
             review_reason=row["review_reason"],
+            validation_notes=_notes_from_text(
+                _row_optional(row, "validation_notes")
+            ),
         )
 
     # -- evidence -------------------------------------------------------- #
@@ -1036,6 +1166,7 @@ class SqliteStore:
                 " crawl_config_digest = ?, registry_spec_digest = ?,"
                 " execution_contract_digest = ?,"
                 " manual_artifacts_digest = ?, manual_artifacts_json = ?,"
+                " publishability_json = ?,"
                 " deploy_profile = ?, edge_schema_version = ?, edge_capabilities_json = ?"
                 " WHERE run_id = ?",
                 (
@@ -1068,6 +1199,11 @@ class SqliteStore:
                     manifest.manual_artifacts_digest,
                     json.dumps(
                         dict(manifest.manual_artifacts or {}),
+                        ensure_ascii=False,
+                        sort_keys=True,
+                    ),
+                    json.dumps(
+                        dict(manifest.publishability or {}),
                         ensure_ascii=False,
                         sort_keys=True,
                     ),
@@ -2040,6 +2176,17 @@ class SqliteStore:
         manual_artifacts_block = (
             manual_artifacts_raw if isinstance(manual_artifacts_raw, dict) else {}
         )
+        # §6/A1: профиль публикуемости. Терпимость к **старой** БД (read-only файл версии
+        # без колонки) — часть контракта чтения: отсутствие колонки значит «профиль не
+        # записывался», а не отказ читать строку. NULL/не-словарь → ``{}``.
+        publishability_raw = (
+            _parse_json_text(row["publishability_json"])
+            if "publishability_json" in row.keys()
+            else None
+        )
+        publishability_block = (
+            publishability_raw if isinstance(publishability_raw, dict) else {}
+        )
         return RunManifest(
             run_id=row["run_id"],
             case_id=row["case_id"],
@@ -2085,6 +2232,8 @@ class SqliteStore:
                 else None
             ),
             manual_artifacts=manual_artifacts_block,
+            # §6/A1: профиль публикуемости из записи воспроизведения; пусто — legacy.
+            publishability=publishability_block,
             llm_scenarios=scenarios,
             snapshot_date=row["snapshot_date"],
             deploy_profile=row["deploy_profile"],

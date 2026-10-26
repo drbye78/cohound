@@ -35,6 +35,7 @@ import yaml
 
 from core.domain import REQUIRED_EXHAUSTION_CONTOURS
 from core.domain.enums import (
+    AbsenceRuleType,
     CellState,
     ChangeClass,
     DenialStrength,
@@ -1886,6 +1887,107 @@ def test_write_reports_lists_stale_cells_for_re_evaluation(tmp_path: Path) -> No
     store.close()
     clean_store.close()
 
+
+# ---------------------------------------------------------------------------
+# P6/absence_rule/validation_notes: записи ячейки обязаны быть видны человеку
+# ---------------------------------------------------------------------------
+
+def test_write_cell_diagnostics_lists_each_reason(tmp_path: Path) -> None:
+    """``outputs/cell_diagnostics.csv``: три новые записи ячейки не остаются невидимыми.
+
+    До этого файла ``cells.validation_notes`` (почему запись не удалась/что было при
+    персисте), ``cells.absence_rule`` (правило отсутствия не объявлено) и
+    ``review_reason`` (причина ``pending``) лежали в БД и не попадали ни в один артефакт:
+    человек видел последствие, не видя записи. Каждый повод — отдельная строка; пустые
+    значения печатаются пустыми, а не нулём («не измерено» ≠ 0).
+    """
+    from core.pipeline.report import _write_cell_diagnostics
+
+    with_scope = _cell(PRODUCT_A, "param.ok", Status.OK).model_copy(
+        update={
+            "validation_notes": ["цитата не найдена в чанке", "повтор после resume"],
+            "evidence_scope": EvidenceScope(
+                denial_strength=DenialStrength.BOUNDED,
+                reason="справочник с объявленной процедурой полноты",
+                observed=3,
+                expected=4,
+                relevant_evidence_coverage=2 / 3,
+                scope_acceptance="reviewer",
+            ),
+        }
+    )
+    no_rule = _cell(PRODUCT_A, "param.norule", Status.OK)  # absence_rule=None
+    review = _cell(PRODUCT_A, "param.pending", Status.UNKNOWN).model_copy(
+        update={"review_reason": "конфликт источников"}
+    )
+    # Смешанный прогон: правило записано хотя бы у одной ячейки, поэтому незаписанное
+    # правило у ``param.norule`` — аномалия именно этой ячейки.
+    with_rule = _cell(PRODUCT_A, "param.rule", Status.OK).model_copy(
+        update={"absence_rule": AbsenceRuleType.EXPLICIT}
+    )
+    path = tmp_path / "cell_diagnostics.csv"
+
+    written = _write_cell_diagnostics([with_scope, review, no_rule, with_rule], path)
+
+    assert written == path
+    rows = {row["param_id"]: row for row in _read_csv(path)}
+    # ``param.rule`` не попал: у него нет ни одной записи, а правило объявлено.
+    assert set(rows) == {"param.ok", "param.norule", "param.pending"}
+    assert rows["param.ok"]["validation_notes"] == (
+        "цитата не найдена в чанке | повтор после resume"
+    )
+    assert rows["param.ok"]["denial_strength"] == "bounded"
+    assert rows["param.ok"]["relevant_evidence_coverage"] == "0.667"
+    # Правило не записано — пусто, а не подставленное «explicit».
+    assert rows["param.norule"]["absence_rule"] == ""
+    assert rows["param.norule"]["relevant_evidence_coverage"] == ""  # не измерено ≠ 0
+    assert rows["param.pending"]["review_reason"] == "конфликт источников"
+
+
+def test_write_cell_diagnostics_absent_when_nothing_to_report(tmp_path: Path) -> None:
+    """Полное отсутствие поводов ⇒ ``None``: файл не создаётся.
+
+    Пустой список — не артефакт: пустой ``cell_diagnostics.csv`` читался бы как
+    «проверено, замечаний нет», хотя проверять было нечего.
+    """
+    from core.pipeline.report import _write_cell_diagnostics
+
+    clean = [
+        _cell(PRODUCT_A, "param.ok", Status.OK).model_copy(
+            update={"absence_rule": AbsenceRuleType.EXPLICIT}
+        ),
+        _cell(PRODUCT_B, "param.ok", Status.OK).model_copy(
+            update={"absence_rule": AbsenceRuleType.EXPLICIT}
+        ),
+    ]
+    path = tmp_path / "cell_diagnostics.csv"
+
+    assert _write_cell_diagnostics(clean, path) is None
+    assert not path.exists()
+
+
+def test_write_cell_diagnostics_reports_total_legacy_as_one_row(tmp_path: Path) -> None:
+    """Тотальное «правило не записано» — свойство прогона, а не N задач.
+
+    Живой факт: прогон, сделанный до появления колонки, давал 476 строк — по строке на
+    каждую ячейку с единственным общим поводом. 476 здесь — число ячеек, а не число
+    находок, и очередь разбора вырождалась в полный список. Тотальное отсутствие правила
+    публикуется одной строкой ``kind=run``; выдумывать правило из каталога нельзя —
+    объявление и факт измерения разные вещи.
+    """
+    from core.pipeline.report import _write_cell_diagnostics
+
+    legacy = [_cell(PRODUCT_A, f"param.{i}", Status.OK) for i in range(5)]
+    path = tmp_path / "cell_diagnostics.csv"
+
+    written = _write_cell_diagnostics(legacy, path)
+
+    assert written == path
+    rows = _read_csv(path)
+    assert len(rows) == 1
+    assert rows[0]["kind"] == "run"
+    assert rows[0]["param_id"] == ""
+    assert "не записан ни у одной из 5 ячеек" in rows[0]["validation_notes"]
 
 def test_registry_denial_is_not_a_truncation_anomaly() -> None:
     """Авторитетная реестровая пустота не зависит от полноты краула (Вариант 2).

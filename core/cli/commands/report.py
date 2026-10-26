@@ -123,6 +123,14 @@ def run(args: argparse.Namespace) -> int:
         "out": str(Path(out_dir) / run_id / "outputs"),
         "manifest_partial": partial,
         "artifacts": _artifacts_payload(artifacts),
+        # A1/§6: класс публикуемости и числа, из которых он выведен — в машинном
+        # выводе, а не только в шапке battle card. Отсутствие профиля не выдумывается
+        # (``None``): синтетический бандл без профиля честно молчит.
+        "publishability": (
+            bundle.publishability.to_dict()
+            if getattr(bundle, "publishability", None) is not None
+            else None
+        ),
         "notes": notes,
     }
     if args.json:

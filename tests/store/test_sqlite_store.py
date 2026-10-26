@@ -284,6 +284,7 @@ def test_save_cell_and_iter_cells_round_trip(store: SqliteStore) -> None:
         retrieval_profile="R1",
         retrieval_params_json='{"rrf_k": 60}',
         stale_reason=StaleReason.NEW_BUILD,
+        absence_rule=AbsenceRuleType.PARAMETER_REFERENCE,
     )
     store.save_cell(cell)
 
@@ -303,8 +304,9 @@ def test_save_cell_and_iter_cells_round_trip(store: SqliteStore) -> None:
     # evidence не хранится в cells — восстанавливается пустым
     assert c.evidence == []
     assert c.absence_evidence == []
-    # absence_rule не имеет колонки в cells — дефолт модели
-    assert c.absence_rule is AbsenceRuleType.EXPLICIT
+    # absence_rule хранится в своей колонке и читается фактическим значением
+    # (прежде подставлялся дефолт ``explicit`` — правило, которого каталог не объявлял).
+    assert c.absence_rule is AbsenceRuleType.PARAMETER_REFERENCE
 
 
 def test_save_cell_failed_and_preliminary_null_status(store: SqliteStore) -> None:
@@ -1629,3 +1631,81 @@ def test_persist_manifest_roundtrips_manual_artifacts(store: SqliteStore) -> Non
     legacy = store.read_manifest("run-legacy")
     assert legacy.manual_artifacts_digest is None
     assert legacy.manual_artifacts == {}
+
+def test_persist_manifest_roundtrips_publishability(store: SqliteStore) -> None:
+    """§6/A1: профиль публикуемости — блок манифеста, а не пересчёт читателя.
+
+    Класс и числа, из которых он выведен, обязаны пережить запись: иначе
+    ``hound report`` из строки ``runs`` показывал бы иной профиль, чем тот, по которому
+    принималось решение публиковать (или не публиковать) карту.
+    """
+    store.create_run(RUN_ID, _cfg())
+    block = {
+        "klass": "ANALYTICAL_ONLY",
+        "unknown_share": 0.55,
+        "coverage": 0.208,
+        "causes": {"not_stated": {"cells": 63, "weight": 55.0}},
+        "products": {"p1": {"unknown_share": 0.55}},
+        "caveats": ["single_product_cohort"],
+    }
+    manifest = RunManifest(
+        run_id=RUN_ID,
+        case_id="case-1",
+        created_at="2026-01-01T00:00:00Z",
+        mode=RunMode.STRICT,
+        methodology_version="0.1.0",
+        package_version="pkg-1.2.3",
+        catalog_version="cat-1",
+        status_dict_version="sd-1",
+        scoring_policy_version="sp-1",
+        anchor_product_id="p1",
+        publishability=block,
+    )
+    store.persist_manifest(RUN_ID, manifest)
+    read = store.read_manifest(RUN_ID)
+    assert read.publishability == block
+
+    # Legacy-строка (профиль не вычислялся) читается как пустой блок, а не как NULL.
+    store.create_run("run-legacy", _cfg())
+    assert store.read_manifest("run-legacy").publishability == {}
+
+def test_read_manifest_tolerates_missing_publishability_column(tmp_path: Path) -> None:
+    """Read-only БД прошлой версии: колонки нет ⇒ пусто, а не отказ читать прогон.
+
+    Миграция аддитивна и ``schema_version`` не поднят, поэтому старые файлы
+    существуют в живом виде; читатель обязан их открыть (иначе уже принятые прогоны
+    стали бы нечитаемыми из-за одного нового блока).
+    """
+    path = tmp_path / "legacy.db"
+    store = SqliteStore(path)
+    store.create_run(RUN_ID, _cfg())
+    store.persist_manifest(
+        RUN_ID,
+        RunManifest(
+            run_id=RUN_ID,
+            case_id="case-1",
+            created_at="2026-01-01T00:00:00Z",
+            mode=RunMode.STRICT,
+            methodology_version="0.1.0",
+            package_version="pkg-1.2.3",
+            catalog_version="cat-1",
+            status_dict_version="sd-1",
+            scoring_policy_version="sp-1",
+            anchor_product_id="p1",
+            publishability={"klass": "PUBLISHABLE"},
+        ),
+    )
+    store.close()
+
+    raw = sqlite3.connect(path)
+    raw.execute("ALTER TABLE runs DROP COLUMN publishability_json")
+    raw.commit()
+    raw.close()
+
+    legacy = SqliteStore(path, read_only=True)
+    try:
+        read = legacy.read_manifest(RUN_ID)
+        assert read.publishability == {}
+        assert read.run_id == RUN_ID
+    finally:
+        legacy.close()
