@@ -13,7 +13,7 @@ import pytest
 
 from core.domain import Focus, RunConfig, RunMode, SkipReason
 from core.pipeline import PHASES, PhaseResult, Ports, Runner, run_isolated
-from core.pipeline.gates import gate_g1
+from core.pipeline.gates import gate_g1, gate_g4
 from core.pipeline.runner import GATE_PHASES
 from core.store.sqlite_store import SqliteStore
 from tests.fakes import (
@@ -121,18 +121,36 @@ def test_phase_state_persisted_to_store(store: SqliteStore) -> None:
     assert runner.state_of(RUN_ID, "plan") == "ok"
 
 
-def test_run_stops_at_gate_without_decision(store: SqliteStore) -> None:
-    # Гейты — дефолтные (реестр по умолчанию); не-гейтовые фазы — ok-фейки, т.к. дефолтных
-    # реализаций больше нет: G1 без решения → blocked до достижения прочих фаз.
+def test_run_without_gate_decisions_reaches_the_phase_after_g3(
+    store: SqliteStore,
+) -> None:
+    """G1/G2/G3 без решения не останавливают прогон: блокирует только G4 (публикация).
+
+    Решение владельца 26.10.2026: гейты G1/G2/G3 — избыток, ценности не приносят. Их
+    отсутствие решения больше не блокирует, но и не прячется: фаза ``skipped`` с причиной
+    ``gate_not_blocking`` (+ запись «решение не требуется» в ``gate_decisions``).
+    """
     runner = Runner(store, phases=_ok_phases())
     report = runner.run(RUN_ID)
 
     assert not report.ok
-    assert report.stopped_at == "g1"
+    assert report.stopped_at == "g4"  # публикация — по-прежнему внешнее решение
     assert report.status == "blocked"
-    assert [r.phase for r in report.results if r.status == "blocked"] == ["g1"]
-    # discovery не выполнялась
-    assert runner.state_of(RUN_ID, "discovery") is None
+    non_blocking = {
+        result.phase: result.skip_reason
+        for result in report.results
+        if result.skip_reason is SkipReason.GATE_NOT_BLOCKING
+    }
+    assert non_blocking == {
+        "g1": SkipReason.GATE_NOT_BLOCKING,
+        "g2": SkipReason.GATE_NOT_BLOCKING,
+        "g3": SkipReason.GATE_NOT_BLOCKING,
+    }
+    # Фазы после гейтов исполнились (след, а не остановка).
+    assert runner.state_of(RUN_ID, "discovery") == "ok"
+    assert runner.state_of(RUN_ID, "evaluate") == "ok"
+    assert runner.state_of(RUN_ID, "compute") == "ok"
+    assert runner.state_of(RUN_ID, "g1") == "skipped"
 
 
 def test_resume_skips_completed_phases(store: SqliteStore) -> None:
@@ -190,13 +208,18 @@ def test_interrupted_run_resumes_without_losing_progress(store: SqliteStore) -> 
 
 
 def test_gate_passes_after_decision_and_run_continues(store: SqliteStore) -> None:
+    """Решение по G1 записано → гейт ``ok`` (не ``ok`` по умолчанию: пропуск бы был ``skipped``)."""
     runner = Runner(store, phases=_ok_phases())
-    assert runner.run(RUN_ID, until="g1").status == "blocked"
+    # Без решения гейт не блокирует, но и не пройден: ``skipped``.
+    first = runner.run(RUN_ID, until="g1")
+    assert first.ok
+    assert runner.state_of(RUN_ID, "g1") == "skipped"
 
     gate_g1(store, RUN_ID, actor="human-1", notes="cohort accepted")
-    report = runner.resume(RUN_ID, until="g1")
+    runner_b = Runner(store, phases=_ok_phases())
+    report = runner_b.resume(RUN_ID, until="g1")
     assert report.ok
-    assert runner.state_of(RUN_ID, "g1") == "ok"
+    assert runner_b.state_of(RUN_ID, "g1") == "ok"
 
 
 def test_gate_error_isolated_not_aborting(store: SqliteStore) -> None:
@@ -312,30 +335,38 @@ def test_durable_resume_across_runner_instances(store: SqliteStore) -> None:
 
 
 def test_durable_gate_blocked_state_resumes_across_instances(store: SqliteStore) -> None:
+    """Durable ``blocked`` у блокирующего G4: новый инстанс перезапускает только гейт."""
     runner_a = Runner(store, phases=_ok_phases())
-    first = runner_a.run(RUN_ID, until="g1")
+    first = runner_a.run(RUN_ID, until="g4")
     assert first.status == "blocked"
-    assert store.get_phase_state(RUN_ID) == {
-        "normalize": "ok",
-        "lint": "ok",
-        "plan": "ok",
-        "g1": "blocked",
+    state = store.get_phase_state(RUN_ID)
+    assert state["g4"] == "blocked"
+    # Неблокирующие гейты записались как ``skipped`` — это видно в durable-состоянии.
+    assert {gate: state[gate] for gate in ("g1", "g2", "g3")} == {
+        "g1": "skipped",
+        "g2": "skipped",
+        "g3": "skipped",
     }
 
     # Новый инстанс видит blocked: ранние ok-фазы пропускаются, гейт перезапускается.
     runner_b = Runner(store, phases=_ok_phases())
-    second = runner_b.run(RUN_ID, until="g1")
+    second = runner_b.run(RUN_ID, until="g4")
     assert second.status == "blocked"
-    assert second.skipped == ["normalize", "lint", "plan"]
-    assert [r.phase for r in second.results] == ["g1"]
+    assert second.skipped == [
+        name
+        for name in PHASES[: PHASES.index("g4") + 1]
+        if name not in ("g1", "g2", "g3", "g4")
+    ]
+    # ``skipped`` пересчитывается на resume, поэтому гейты G1–G3 исполняются снова.
+    assert [r.phase for r in second.results] == ["g1", "g2", "g3", "g4"]
 
-    # Человеческое решение в gate_decisions → новый инстанс продолжает с гейта.
-    gate_g1(store, RUN_ID, actor="human-1", notes="accepted")
+    # Внешнее решение по G4 в gate_decisions → новый инстанс продолжает с гейта.
+    gate_g4(store, RUN_ID, actor="publication-system", notes="published")
     runner_c = Runner(store, phases=_ok_phases())
-    third = runner_c.run(RUN_ID, until="g1")
+    third = runner_c.run(RUN_ID, until="g4")
     assert third.ok
-    assert runner_c.state_of(RUN_ID, "g1") == "ok"
-    assert store.get_phase_state(RUN_ID)["g1"] == "ok"
+    assert runner_c.state_of(RUN_ID, "g4") == "ok"
+    assert store.get_phase_state(RUN_ID)["g4"] == "ok"
 
 
 def test_reset_forces_full_restart_ignoring_durable_state(store: SqliteStore) -> None:

@@ -296,15 +296,19 @@ def test_walking_skeleton_end_to_end(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_walking_skeleton_blocks_without_g1(tmp_path: Path) -> None:
-    """Без решения G1 ``Runner`` останавливается ``blocked`` и не доходит до Ш8/Ш9."""
+def test_walking_skeleton_blocks_without_gate_decisions(tmp_path: Path) -> None:
+    """Без решений G1–G3 прогон идёт дальше и останавливается на публикации (G4).
+
+    G1/G2/G3 не блокируют (решение владельца 26.10.2026), но их пропуск **записан**;
+    блокирует только G4 — публикация остаётся внешним решением, поэтому Ш9 не выполняется.
+    """
     inputs, run_plan = _load()
     run_id = run_plan.run_id
     composition_id, partition_id = _expected_ids(inputs, run_plan)
 
     store = build_store(":memory:")
     store.create_run(run_id, inputs.run)
-    # Гейты НЕ записаны: g1 обязан остановить прогон (S9 — гейт не проходится сам).
+    # Гейты НЕ записаны: G1–G3 пропускаются со следом, G4 обязан остановить прогон (S9).
 
     ports = _build_ports(composition_id, partition_id)
     phases = _build_phases(inputs, run_plan, ports, store, tmp_path)
@@ -312,11 +316,10 @@ def test_walking_skeleton_blocks_without_g1(tmp_path: Path) -> None:
 
     report = runner.run(run_id)
 
-    assert report.stopped_at == "g1"
+    assert report.stopped_at == "g4"
     assert report.status == "blocked"
-    # compute/report не выполнялись, ячеек нет, манифест не записан.
-    assert runner.state_of(run_id, "evaluate") is None
-    assert runner.state_of(run_id, "compute") is None
+    # Ш6/Ш8 выполнены (гейты G1–G3 больше не режут конвейер), Ш9 — нет.
+    assert runner.state_of(run_id, "evaluate") == "ok"
+    assert runner.state_of(run_id, "compute") == "ok"
     assert runner.state_of(run_id, "report") is None
-    assert list(store.iter_cells(run_id)) == []
     assert not (tmp_path / run_id / "run_manifest.yaml").exists()

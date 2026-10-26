@@ -54,7 +54,16 @@ from core.pipeline.gate_subject import (
 )
 from core.pipeline.gates import evaluate_gate, gate_g3, gate_g4, record_decision
 from core.pipeline.review import ReviewItem
-from core.pipeline.runner import GateRuntime, Ports, RunContext, _gate_phase
+from core.pipeline.runner import (
+    GATE_PHASES,
+    PHASES,
+    GateRuntime,
+    PhaseResult,
+    Ports,
+    RunContext,
+    Runner,
+    _gate_phase,
+)
 from core.store.sqlite_store import SqliteStore
 
 RUN_ID = "run.g"
@@ -214,16 +223,16 @@ def test_g4_subject_digest_changes_with_ranking(store: SqliteStore) -> None:
 def test_blocked_gate_writes_deterministic_request(
     store: SqliteStore, tmp_path: Path
 ) -> None:
-    """Блок пишет ``gates/G3-request.json``: побайтно стабильный, с ``subject_digest``."""
-    subject = _g3_subject()
-    phase = _gate_phase("g3", Gate.G3, _runtime(subject, runs_dir=tmp_path))
+    """Блок блокирующего G4 пишет ``gates/G4-request.json``: побайтно стабильный, с отпечатком."""
+    subject = publication_subject(_bundle(store), run_id=RUN_ID)
+    phase = _gate_phase("g4", Gate.G4, _runtime(subject, runs_dir=tmp_path))
 
     first = phase(_ctx(store))
     assert first.status == "blocked"
-    path = tmp_path / RUN_ID / "gates" / "G3-request.json"
+    path = tmp_path / RUN_ID / "gates" / "G4-request.json"
     assert path.is_file()
     payload = json.loads(path.read_text(encoding="utf-8"))
-    assert payload["gate"] == "G3"
+    assert payload["gate"] == "G4"
     assert payload["run_id"] == RUN_ID
     assert payload["subject_digest"] == subject.digest
     assert payload["subject"] == subject.material
@@ -234,22 +243,54 @@ def test_blocked_gate_writes_deterministic_request(
     assert phase(_ctx(store)).status == "blocked"
     assert path.read_bytes() == first_bytes
     # Отпечаток читается обратно — именно его возвращает внешняя система.
-    assert read_gate_request_digest(tmp_path, RUN_ID, Gate.G3) == subject.digest
-    assert read_gate_request_subject(tmp_path, RUN_ID, Gate.G3) == subject.material
+    assert read_gate_request_digest(tmp_path, RUN_ID, Gate.G4) == subject.digest
+    assert read_gate_request_subject(tmp_path, RUN_ID, Gate.G4) == subject.material
 
 
 def test_blocked_gate_names_the_request_and_the_command(
     store: SqliteStore, tmp_path: Path
 ) -> None:
     """Сообщение блока действенно: где запрос и какой командой ответить."""
-    subject = _g3_subject()
-    result = _gate_phase("g3", Gate.G3, _runtime(subject, runs_dir=tmp_path))(_ctx(store))
+    subject = publication_subject(_bundle(store), run_id=RUN_ID)
+    result = _gate_phase("g4", Gate.G4, _runtime(subject, runs_dir=tmp_path))(_ctx(store))
 
     message = "\n".join(result.errors)
     assert "нет строки в gate_decisions" in message
-    assert "G3-request.json" in message
+    assert "G4-request.json" in message
     assert f"--subject-digest {subject.digest}" in message
     assert "--verdict approved|rejected" in message
+
+
+def test_non_blocking_gate_skips_with_a_trace_instead_of_blocking(
+    store: SqliteStore, tmp_path: Path
+) -> None:
+    """G3 без решения: ``skipped`` + строка «решение не требуется» вместо блока.
+
+    Решение владельца 26.10.2026: G1/G2/G3 не блокируют. Пропуск при этом не немая
+    неполнота — он записан (``gate_decisions``) и объяснён в логе фазы.
+    """
+    subject = _g3_subject()
+    result = _gate_phase("g3", Gate.G3, _runtime(subject, runs_dir=tmp_path))(
+        _ctx(store)
+    )
+
+    assert result.status == "skipped"
+    assert result.skip_reason is SkipReason.GATE_NOT_BLOCKING
+    rows = [d for d in store.iter_gate_decisions(RUN_ID) if d.gate is Gate.G3]
+    assert len(rows) == 1
+    assert rows[0].external_ref == "waiver:policy:nonblocking:g3"
+    assert "решение не требуется" in (rows[0].notes or "")
+    assert "нет строки в gate_decisions" in (rows[0].notes or "")
+    # Запрос на решение — экспорт предмета (для `hound gate`), а не ожидание: прогон идёт
+    # дальше, файл лишь даёт отпечаток для записи решения по неблокирующему гейту.
+    assert read_gate_request_digest(tmp_path, RUN_ID, Gate.G3) == subject.digest
+    # Строка не проходит гейт как одобрение: waiver — не решение.
+    assert evaluate_gate(store, RUN_ID, Gate.G3, subject.digest).status == "missing"
+    # Идемпотентно: повторный resume не плодит строк.
+    assert _gate_phase("g3", Gate.G3, _runtime(subject, runs_dir=tmp_path))(
+        _ctx(store)
+    ).status == "skipped"
+    assert len([d for d in store.iter_gate_decisions(RUN_ID) if d.gate is Gate.G3]) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -310,7 +351,7 @@ def test_external_rejection_of_current_subject_blocks_with_refusal(
 def test_external_rejection_of_stale_subject_says_it_is_stale(
     store: SqliteStore, tmp_path: Path
 ) -> None:
-    """Отказ по устаревшему предмету блокирует, но сообщает, что ревью было о прошлом."""
+    """Отказ по устаревшему предмету у неблокирующего G3: пропуск с оговоркой, не блок."""
     old = _g3_subject([_item()])
     record_decision(
         store,
@@ -329,42 +370,48 @@ def test_external_rejection_of_stale_subject_says_it_is_stale(
     result = _gate_phase(
         "g3", Gate.G3, _runtime(current, runs_dir=tmp_path)
     )(_ctx(store))
-    assert result.status == "blocked"
-    message = "\n".join(result.errors)
+    # Отказ относился к прошлому состоянию, а не к текущему: гейт не блокирует прогон,
+    # но сообщение говорит, что отказ был о прошлом (не «решения нет»).
+    assert result.status == "skipped"
+    assert result.skip_reason is SkipReason.GATE_NOT_BLOCKING
+    message = "\n".join(result.log_entries)
     assert "относится к устаревшему состоянию" in message
     assert "REV-19" in message
     assert "Повторное ревью" in message
 
 
-def test_stale_approval_blocks_and_names_the_changed_component(
+def test_stale_approval_blocks_g4_and_names_the_changed_component(
     store: SqliteStore, tmp_path: Path
 ) -> None:
-    """Одобрение прошлого предмета не действует: сообщение называет, что изменилось."""
-    approved_state = _g3_subject([_item()])
+    """Одобрение прошлого предмета не действует: G4 блокирует и называет, что изменилось."""
+    approved_state = publication_subject(
+        _bundle(store, ranking="capability_ranked"), run_id=RUN_ID
+    )
     write_gate_request(tmp_path, RUN_ID, approved_state)
     record_decision(
         store,
         RUN_ID,
-        Gate.G3,
-        actor="review-system",
+        Gate.G4,
+        actor="publication-system",
         notes="одобрено",
         subject_digest=approved_state.digest,
         source=GateSource.EXTERNAL,
-        external_ref="REV-20",
+        external_ref="PUB-20",
     )
 
-    current = _g3_subject([_item(), _item("p2", "param_b")])
+    current = publication_subject(
+        _bundle(store, ranking="coverage_fallback"), run_id=RUN_ID
+    )
     result = _gate_phase(
-        "g3", Gate.G3, _runtime(current, runs_dir=tmp_path)
+        "g4", Gate.G4, _runtime(current, runs_dir=tmp_path)
     )(_ctx(store))
 
     assert result.status == "blocked"
     message = "\n".join(result.errors)
     assert "устаревшему состоянию предмета" in message
-    assert "cells" in message
-    assert "param_b" in message
+    assert "ranking" in message
     # Запрос перезаписан текущим состоянием: следующее решение относится к нему.
-    assert read_gate_request_digest(tmp_path, RUN_ID, Gate.G3) == current.digest
+    assert read_gate_request_digest(tmp_path, RUN_ID, Gate.G4) == current.digest
 
 
 def test_legacy_unbound_decision_still_passes(store: SqliteStore, tmp_path: Path) -> None:
@@ -462,7 +509,16 @@ def test_waiver_is_not_available_for_internal_gates(store: SqliteStore) -> None:
         subject=lambda gate: None, policies={"G1": GatePolicy.WAIVED}
     )
     result = _gate_phase("g1", Gate.G1, runtime)(_ctx(store))
-    assert result.status == "blocked"
+    # Гейт не пройден (делегирование не выдаёт одобрение) и не заблокировал прогон —
+    # G1 не блокирующий; в записи нет waiver-строки делегирования.
+    assert result.status == "skipped"
+    assert result.skip_reason is SkipReason.GATE_NOT_BLOCKING
+    refs = [
+        d.external_ref
+        for d in store.iter_gate_decisions(RUN_ID)
+        if d.gate is Gate.G1
+    ]
+    assert refs == ["waiver:policy:nonblocking:g1"]
 
 
 def test_run_config_accepts_only_delegable_gate_policies() -> None:
@@ -523,15 +579,17 @@ def test_waiver_row_does_not_pass_the_gate_when_policy_is_external(
     assert waived(_ctx(store)).status == "skipped"
 
     # Политика снова ``external`` (например, процесс перестал делегировать): факт
-    # делегирования не превращается в одобрение ревью.
+    # делегирования не превращается в одобрение ревью. G3 при этом не блокирует —
+    # прогон идёт дальше, а факт «решения нет» записывается отдельной строкой.
     external = _gate_phase("g3", Gate.G3, _runtime(subject, runs_dir=tmp_path))
     result = external(_ctx(store))
-    assert result.status == "blocked"
+    assert result.status == "skipped"
+    assert result.skip_reason is SkipReason.GATE_NOT_BLOCKING
     assert evaluate_gate(store, RUN_ID, Gate.G3, subject.digest).status == "missing"
 
 
 def test_manifest_records_policies_and_waivers(store: SqliteStore) -> None:
-    """Манифест показывает делегирование: прогон без одобрения ревью не выглядит одобренным."""
+    """Манифест показывает след гейтов: делегирование и «решение не требуется»."""
     from types import SimpleNamespace
 
     from core.pipeline.phases import _gate_provenance
@@ -547,8 +605,64 @@ def test_manifest_records_policies_and_waivers(store: SqliteStore) -> None:
         SimpleNamespace(run=SimpleNamespace(gates={"g3": GatePolicy.WAIVED})),
     )
     assert provenance["gate_policies"] == {"g3": "waived"}
-    assert [item["gate"] for item in provenance["gate_waivers"]] == ["G3"]
-    assert provenance["gate_waivers"][0]["external_ref"] == "waiver:run.yaml:gates.g3"
+    trail = {item["gate"]: item for item in provenance["gate_waivers"]}
+    assert trail["G3"]["state"] == "delegated"
+    assert trail["G3"]["external_ref"] == "waiver:run.yaml:gates.g3"
+    # G1/G2 не исполнялись в этом тесте, но они неблокирующие: строка синтезируется
+    # честно («решение не требуется»), а не молчанием.
+    assert trail["G1"]["state"] == "not_required"
+    assert trail["G2"]["state"] == "not_required"
+    # G4 без записи строки не получает: прогон, дошедший до публикации, всегда несёт
+    # решение или waiver.
+    assert "G4" not in trail
+
+
+def test_run_without_g1_g2_g3_decisions_leaves_a_trace_in_the_manifest(
+    store: SqliteStore,
+) -> None:
+    """Прогон без единого решения по G1/G2/G3 доходит до конца и несёт три строки следа.
+
+    Невидимый пропуск запрещён: для каждого неблокирующего гейта в манифесте есть строка
+    (решение — если оно записано, иначе «решение не требуется» с датой и причиной).
+    """
+    from types import SimpleNamespace
+
+    from core.pipeline.phases import _gate_provenance
+    from core.pipeline.runner import PHASES as ALL_PHASES, PhaseResult
+
+    def _ok(phase: str):
+        def _fn(ctx) -> PhaseResult:
+            return PhaseResult(status="ok", phase=phase)
+
+        return _fn
+
+    # G1/G2/G3 — настоящие фазы-гейты (реестр по умолчанию); G4 подменён: публикация
+    # в этом тесте не предмет проверки.
+    phases = {name: _ok(name) for name in ALL_PHASES if name not in GATE_PHASES}
+    phases["g4"] = _ok("g4")
+    report = Runner(store, phases=phases).run(RUN_ID)
+
+    assert report.ok, report.errors
+    # Фазы после неблокирующих гейтов исполнились: report — последняя фаза прогона.
+    assert report.results[-1].phase == "report"
+    assert [r.phase for r in report.results if r.skip_reason is SkipReason.GATE_NOT_BLOCKING] == [
+        "g1",
+        "g2",
+        "g3",
+    ]
+
+    provenance = _gate_provenance(
+        _ctx(store),
+        SimpleNamespace(run_id=RUN_ID),
+        SimpleNamespace(run=SimpleNamespace(gates={})),
+    )
+    trail = {item["gate"]: item for item in provenance["gate_waivers"]}
+    assert set(trail) == {"G1", "G2", "G3"}  # по строке на каждый неблокирующий гейт
+    for gate in ("G1", "G2", "G3"):
+        assert trail[gate]["state"] == "not_required"
+        assert trail[gate]["decided_at"]  # дата записи есть
+        assert "не блокирует прогон" in trail[gate]["notes"]
+        assert "решение не требуется" in trail[gate]["notes"]
 
 
 def test_run_manifest_serializes_gate_waivers(tmp_path: Path) -> None:

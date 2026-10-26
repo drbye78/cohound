@@ -25,6 +25,7 @@ from core.cli.context import (
 from core.cli.errors import EXIT_OK
 from core.cli.wiring import build_store
 from core.pipeline.compute import compute, scope_universe
+from core.pipeline.gates import gate_trail
 from core.pipeline.report import write_reports
 
 
@@ -76,6 +77,16 @@ def run(args: argparse.Namespace) -> int:
             universe=universe,
         )
         cells = list(store.iter_cells(run_id))
+        # §13: след гейтов не персистится в строке ``runs`` (там нет такой колонки), поэтому
+        # пост-хок пересборка артефактов восстановила бы манифест **без** него. След
+        # восстанавливается из того же источника, что у фазы отчёта, — ``gate_decisions``
+        # (:func:`core.pipeline.gates.gate_trail`), иначе ``run_manifest.yaml``,
+        # перезаписанный командой ``report``, молчал бы о делегировании/пропуске гейта.
+        # Читается внутри ``with``: после закрытия store соединения уже нет.
+        if not _manifest_partial(manifest):
+            manifest = manifest.model_copy(
+                update={"gate_waivers": gate_trail(store, run_id)}
+            )
 
     assert run_id is not None and bundle is not None and manifest is not None
     # Базовый каталог артефактов: явный --out > --runs-dir > resolved paths.runs > runs.

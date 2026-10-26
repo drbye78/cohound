@@ -516,7 +516,18 @@ def test_run_stops_at_gate_blocked(
     assert code == EXIT_BLOCKED
     payload = json_out(capsys)
     assert payload["status"] == "blocked"
-    assert payload["stopped_at"] == "g1"
+    # G1/G2/G3 больше не блокируют (решение владельца 26.10.2026); блокирует публикация.
+    assert payload["stopped_at"] == "g4"
+    skipped = {
+        item["phase"]: item["skip_reason"]
+        for item in payload["skip_summary"]
+        if item["phase"] in ("g1", "g2", "g3")
+    }
+    assert skipped == {
+        "g1": "gate_not_blocking",
+        "g2": "gate_not_blocking",
+        "g3": "gate_not_blocking",
+    }
 
 
 def test_run_split_profile_unavailable(

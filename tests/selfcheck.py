@@ -1409,7 +1409,7 @@ def _pipeline_gates_resume() -> None:
 
     from core.domain import Gate, RunConfig, RunMode
     from core.domain.models import ProfileAttestationRow
-    from core.pipeline.gates import is_gate_passed, record_decision
+    from core.pipeline.gates import gate_trail, is_gate_passed, record_decision
     from core.pipeline.runner import GateRuntime
     from core.pipeline.profile_attestation import (
         make_profile_gate,
@@ -1470,13 +1470,30 @@ def _pipeline_gates_resume() -> None:
     )
     with SqliteStore(":memory:") as store:
         store.create_run("r1", cfg)
-        # Гейт не пройден без строки; прогон останавливается на g1.
+        # Неблокирующий гейт без решения: прогон идёт дальше, но гейт **не** пройден,
+        # и пропуск оставляет след (решение владельца 26.10.2026; S9/«невидимый waiver
+        # запрещён»).
         r1 = Runner(store, phases=_ok_phases())
         rep = r1.run("r1", until="g1")
-        if rep.stopped_at != "g1" or rep.status != "blocked":
-            raise AssertionError("гейт обязан остановить прогон без решения (S9)")
+        if rep.stopped_at is not None or r1.state_of("r1", "g1") != "skipped":
+            raise AssertionError(
+                "G1 не блокирует прогон (skipped), но и не проходится без решения (S9)"
+            )
         if is_gate_passed(store, "r1", Gate.G1):
             raise AssertionError("гейт не пройден без строки gate_decisions")
+        trail = {entry["gate"]: entry for entry in gate_trail(store, "r1")}
+        if trail.get("G1", {}).get("state") != "not_required":
+            raise AssertionError(
+                "пропуск неблокирующего гейта обязан оставить след «решение не требуется»"
+            )
+        # Блокирующий гейт (публикация) без решения по-прежнему останавливает прогон.
+        store.create_run("r_block", cfg)
+        runner_block = Runner(store, phases=_ok_phases())
+        rep_block = runner_block.run("r_block", until="g4")
+        if rep_block.stopped_at != "g4" or rep_block.status != "blocked":
+            raise AssertionError("G4 обязан остановить прогон без решения (публикация)")
+        if is_gate_passed(store, "r_block", Gate.G4):
+            raise AssertionError("G4 не пройден без строки gate_decisions")
         # Durable resume: новый Runner видит завершённые фазы через store.
         r2 = Runner(store, phases=_ok_phases())
         rep2 = r2.run("r1", until="plan")
@@ -1503,12 +1520,12 @@ def _pipeline_gates_resume() -> None:
         digest = material_digest(material)
         with SqliteStateStore(":memory:") as state:
             ctx = RunContext(run_id="r1", store=store, ports=Ports())
-            # Без аттестации — blocked, и сообщение называет команду аттестации.
-            blocked = _gate_phase("g2", Gate.G2, GateRuntime(profile_gate=make_profile_gate(state, material)))(ctx)
-            if blocked.status != "blocked":
-                raise AssertionError("без аттестации профиля гейт обязан быть blocked")
-            if not any("hound profile attest" in err for err in blocked.errors):
-                raise AssertionError("блок обязан называть команду аттестации профиля")
+            # Без аттестации — пропуск (G2 не блокирует), и лог называет команду аттестации.
+            skipped = _gate_phase("g2", Gate.G2, GateRuntime(profile_gate=make_profile_gate(state, material)))(ctx)
+            if skipped.status != "skipped":
+                raise AssertionError("без аттестации профиля неблокирующий гейт обязан быть skipped")
+            if not any("hound profile attest" in entry for entry in skipped.log_entries):
+                raise AssertionError("пропуск обязан называть команду аттестации профиля")
             # Действующая аттестация — ok без строки gate_decisions.
             state.save_profile_attestation(
                 ProfileAttestationRow(
@@ -1549,10 +1566,10 @@ def _pipeline_gates_resume() -> None:
                 passports={"p1": "pp1", "p2": None},
             )
             stale = _gate_phase("g2", Gate.G2, GateRuntime(profile_gate=make_profile_gate(state, changed)))(ctx)
-            if stale.status != "blocked":
-                raise AssertionError("изменённый профиль обязан блокировать гейт")
-            if not any("cohort_digest" in err for err in stale.errors):
-                raise AssertionError("блок обязан называть изменившийся компонент cohort_digest")
+            if stale.status != "skipped":
+                raise AssertionError("изменённый профиль не проходит гейт (skipped, не ok)")
+            if not any("cohort_digest" in entry for entry in stale.log_entries):
+                raise AssertionError("пропуск обязан называть изменившийся компонент cohort_digest")
 
 
 def _cli_plan_lint() -> None:
@@ -2939,9 +2956,9 @@ def _build_phases_gate() -> None:
 
 
 def _walking_skeleton() -> None:
-    """Интеграция: реальные фазы зарегистрированы; без решения G1 прогон стоит blocked."""
+    """Интеграция: реальные фазы зарегистрированы; G1/G2 не блокируют, но и не проходятся."""
     from core.cli.wiring import build_store
-    from core.domain import RunMode
+    from core.domain import RunMode, SkipReason
     from core.pipeline.normalize import load_inputs
     from core.pipeline.phases import build_phases
     from core.pipeline.plan import plan
@@ -2958,11 +2975,25 @@ def _walking_skeleton() -> None:
         phases = build_phases(inputs=inputs, plan=run_plan, ports=Ports())
         runner = Runner(store, ports=Ports(), phases=phases)
         report = runner.run(run_plan.run_id, until="g2")
-        # Без строки решения G1 прогон обязан остановиться на гейте (I6/I7, S9).
-        if report.stopped_at != "g1":
-            raise AssertionError(f"без решения G1 ожидалась остановка на g1, получено {report.stopped_at!r}")
-        if runner.state_of(run_plan.run_id, "g2") is not None:
-            raise AssertionError("g2 не должен выполняться, пока g1 не пройден")
+        # G1/G2 не блокируют прогон (решение владельца 26.10.2026), но и не «пройдены»:
+        # фазы возвращают ``skipped`` с причиной ``gate_not_blocking`` (I6/I7, S9).
+        if report.stopped_at is not None:
+            raise AssertionError(
+                f"G1/G2 не блокируют прогон, получена остановка на {report.stopped_at!r}"
+            )
+        for gate_phase in ("g1", "g2"):
+            state = runner.state_of(run_plan.run_id, gate_phase)
+            if state != "skipped":
+                raise AssertionError(
+                    f"{gate_phase} без решения обязан быть skipped, получено {state!r}"
+                )
+        reasons = {
+            result.phase: result.skip_reason
+            for result in report.results
+            if result.phase in ("g1", "g2")
+        }
+        if set(reasons.values()) != {SkipReason.GATE_NOT_BLOCKING}:
+            raise AssertionError(f"причина пропуска гейта не названа: {reasons!r}")
         if inputs.run.mode is not RunMode.STRICT:
             raise AssertionError("неожиданный режим e2e-фикстуры")
     finally:

@@ -429,6 +429,8 @@ skip_reason:
   - no_search_adapter   # нет поискового адаптера (Ш2/I19)
   - no_queries          # не заданы запросы разведки
   - gate_delegated_external  # гейт делегирован внешнему процессу (run.yaml:gates.<gate>=waived)
+  - gate_not_blocking   # гейт не блокирует прогон (G1/G2/G3): решения не требуется,
+                        # waiver-строка «решение не требуется» пишется в gate_decisions
   # зарезервировано: объявлено, но пока не излучается ни одной фазой
   - no_urls             # не задан план URL (Ш5) — reserved
   - no_embedder         # нет эмбеддера для плотной ветви — reserved

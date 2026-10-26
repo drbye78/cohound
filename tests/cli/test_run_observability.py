@@ -3,12 +3,15 @@
 Проверяют сквозную проводку :mod:`core.pipeline.observability` в :func:`core.cli.main.cmd_run`
 на **реальном** реестре фаз из e2e-фикстуры (``tests/fixtures/e2e``):
 
-* остановка на ``g1`` всё равно оставляет ``runs/{run_id}/logs/{normalize,lint,plan,g1}.jsonl``
-  и ``runs/{run_id}/metrics.json`` (метрики отражают то, что реально отработало);
+* остановка на публикации (``g4``) всё равно оставляет ``runs/{run_id}/logs/{phase}.jsonl``
+  для каждой отработавшей фазы и ``runs/{run_id}/metrics.json`` (метрики отражают то, что
+  реально отработало);
 * ``--dry-run`` не пишет ни логов, ни метрик.
 
-Гейт ``g1`` остаётся человеческим (S9/I6/I7): без решения прогон ``blocked``. Внешние
-системы не используются (до ``g1`` сеть/LLM не задействованы).
+Публикация (``g4``) остаётся человеческим/внешним решением (S9/I6/I7): без него прогон
+``blocked``. G1/G2/G3 прогон не блокируют (решение владельца 26.10.2026), поэтому до
+публикации он доходит. Внешние системы не используются; домен фикстуры недоступен, поэтому
+корпус пуст и сетевые отказы видны как изолированные ошибки фаз.
 """
 
 from __future__ import annotations
@@ -57,15 +60,18 @@ def _argv(runs_dir: Path, run_id: str, *, dry_run: bool = False) -> list[str]:
     return argv
 
 
-def test_run_blocked_at_g1_still_writes_phase_logs_and_metrics(tmp_path: Path) -> None:
+def test_run_blocked_at_publication_still_writes_phase_logs_and_metrics(
+    tmp_path: Path,
+) -> None:
     runs_dir = tmp_path / "runs"
     run_id = "obs-g1"
 
     code = main(_argv(runs_dir, run_id))
+    # Блокирует публикацию (G4): G1/G2/G3 пропускаются, но прогон идёт дальше.
     assert code == EXIT_BLOCKED
 
     logs = runs_dir / run_id / "logs"
-    for phase in ("normalize", "lint", "plan", "g1"):
+    for phase in ("normalize", "lint", "plan", "g1", "g4"):
         path = logs / f"{phase}.jsonl"
         assert path.is_file(), f"нет лога фазы {phase}"
         events = [
@@ -77,22 +83,31 @@ def test_run_blocked_at_g1_still_writes_phase_logs_and_metrics(tmp_path: Path) -
             assert event["phase"] == phase
             assert event["level"] in {"INFO", "WARN", "ERROR"}
 
-    # g1 остановил прогон: его конец — WARN (blocked).
+    # Неблокирующий g1 прошёл без остановки — его конец INFO, а не WARN.
     g1_events = [
         json.loads(line)
         for line in (logs / "g1.jsonl").read_text(encoding="utf-8").splitlines()
     ]
-    assert g1_events[-1]["level"] == "WARN"
+    assert g1_events[-1]["level"] == "INFO"
+    # Остановил прогон G4 — его конец WARN (blocked).
+    g4_events = [
+        json.loads(line)
+        for line in (logs / "g4.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert g4_events[-1]["level"] == "WARN"
 
     metrics_path = runs_dir / run_id / "metrics.json"
     assert metrics_path.is_file()
     metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
     assert set(metrics) == B2_KEYS
     # Метрики записаны ДО остановки и содержат тайминги реально отработавших фаз.
-    assert {"normalize", "lint", "plan", "g1"} <= set(metrics["duration_by_phase"])
+    assert {"normalize", "lint", "plan", "g1", "corpus", "g4"} <= set(
+        metrics["duration_by_phase"]
+    )
     # До compute/report не дошли — в знаменателе нет ячеек.
     assert metrics["cells_by_state"]["evaluated"] == 0
-    # Backlog A: счётчики краула присутствуют и нулевы (до Ш5 не дошли).
+    # Backlog A: счётчики краула присутствуют; Ш5 исполнялась (корпус пуст — домен
+    # фикстуры недоступен), поэтому ``failed`` не ноль, а остальные счётчики — ноль.
     assert set(metrics["crawl"]) == {
         "pending",
         "running",
@@ -100,21 +115,24 @@ def test_run_blocked_at_g1_still_writes_phase_logs_and_metrics(tmp_path: Path) -
         "failed",
         "cancelled",
     }
-    assert all(value == 0 for value in metrics["crawl"].values())
+    assert metrics["crawl"]["failed"] >= 1
+    for status_name in ("pending", "running", "fetched", "cancelled"):
+        assert metrics["crawl"][status_name] == 0
 
     # F0: блок ``resources`` собран CLI из трёх источников — пики RSS по фазам
-    # (наблюдаемость), наблюдение фазы корпуса (её не было) и провенанс бюджета памяти.
+    # (наблюдаемость), наблюдение фазы корпуса и провенанс бюджета памяти.
     resources = metrics["resources"]
     assert {"normalize", "lint", "plan", "g1"} <= set(resources["phases"])
     assert resources["phases"]["plan"]["peak_rss_mb"] is not None
     assert resources["phases"]["plan"]["wall_s"] is not None
     assert resources["budget"]["source"] in {"env", "available", "unknown"}
     assert resources["budget"]["parent_floor_mb"] > 0
-    assert resources["scheduling"]["source"] == "declared"
-    # Корпус не исполнялся: наблюдения нет, и нули не выдумываются.
+    # Ш5 исполнялась (гейты G1–G3 больше не режут конвейер), поэтому источник расписания —
+    # наблюдённый (миграция «declared» осталась только для прогонов без корпуса).
+    assert resources["scheduling"]["source"] in {"declared", "derived"}
+    # Корпус пуст (домен фикстуры недоступен): нули — факт, а не выдумка.
     assert resources["documents"] == 0
     assert resources["chunks"] == 0
-    assert resources["workers_peak_rss_mb"] is None
 
 
 def test_run_dry_run_writes_no_logs_or_metrics(tmp_path: Path) -> None:

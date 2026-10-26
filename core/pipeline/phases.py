@@ -69,7 +69,7 @@ from core.pipeline.evaluate import (
     evaluate_phase,
 )
 from core.pipeline.exhaustion import ExhaustionFacts, contours_run
-from core.pipeline.gates import WAIVER_REF_PREFIX
+from core.pipeline.gates import gate_trail
 from core.pipeline.inheritance import inheritance_wave
 from core.pipeline.normalize import load_scope_attestations
 from core.pipeline.precedence import collect_protected_cells
@@ -659,11 +659,15 @@ def _observed_exhaustion_facts(
 
 
 def _gate_provenance(ctx: RunContext, plan: Any, inputs: Any) -> dict[str, Any]:
-    """Политика гейтов и waiver-строки для манифеста (§13: процесс, не измерение).
+    """Политика гейтов и след гейтов для манифеста (§13: процесс, не измерение).
 
-    ``gate_policies`` — что объявлено в ``run.yaml:gates``; ``gate_waivers`` — какие гейты
-    прошли **без** внутрисистемного одобрения. Второе обязательно: прогон, опубликованный
-    по waiver, не должен выглядеть как прогон с одобрением ревью/публикации. В
+    ``gate_policies`` — что объявлено в ``run.yaml:gates``; ``gate_waivers`` — след гейтов,
+    которые прогон **не блокировали**: записанное решение (``state=decided``),
+    делегирование (``state=delegated``) или «решение не требуется» у неблокирующего гейта
+    G1/G2/G3 (``state=not_required``). След строится **одним** механизмом —
+    :func:`core.pipeline.gates.gate_trail` поверх ``gate_decisions``: второго списка в
+    манифесте нет. Он обязателен: прогон, прошедший гейт без одобрения (или вообще без
+    решения), не должен выглядеть как прогон с одобрением. В
     ``EXECUTION_CONTRACT_FIELDS`` эти поля не входят (иначе смена процедуры меняла бы
     ``run_id`` и рвала межцикловый diff).
     """
@@ -673,18 +677,10 @@ def _gate_provenance(ctx: RunContext, plan: Any, inputs: Any) -> dict[str, Any]:
             getattr(getattr(inputs, "run", None), "gates", None) or {}
         ).items()
     }
-    waivers = [
-        {
-            "gate": decision.gate.value,
-            "external_ref": decision.external_ref,
-            "actor": decision.actor,
-            "notes": decision.notes,
-            "decided_at": decision.decided_at,
-        }
-        for decision in ctx.store.iter_gate_decisions(plan.run_id)
-        if (decision.external_ref or "").startswith(WAIVER_REF_PREFIX)
-    ]
-    return {"gate_policies": policies, "gate_waivers": waivers}
+    return {
+        "gate_policies": policies,
+        "gate_waivers": gate_trail(ctx.store, plan.run_id),
+    }
 
 
 def build_phases(

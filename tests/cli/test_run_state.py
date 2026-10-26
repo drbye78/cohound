@@ -160,7 +160,8 @@ def test_real_run_reconciles_seed_set(tmp_path: Path, home: Path) -> None:
     """Реальный (незаблокированный) прогон материализует state и синхронизирует seed'ы."""
     package = valid_package(tmp_path)
 
-    # ``--until g1``: онбординг в области прогона; дальше гейт без решения → blocked.
+    # ``--until g1``: онбординг в области прогона; G1 не блокирует, поэтому прогон
+    # останавливается на запрошенной фазе (Ш5/Ш6 не исполняются).
     code = main(
         run_argv(
             package,
@@ -170,7 +171,7 @@ def test_real_run_reconciles_seed_set(tmp_path: Path, home: Path) -> None:
         )
     )
 
-    assert code == EXIT_BLOCKED
+    assert code == EXIT_OK
     db_path = _state_db(home)
     assert db_path.exists()
     with SqliteStateStore(db_path) as state:
@@ -180,8 +181,8 @@ def test_real_run_reconciles_seed_set(tmp_path: Path, home: Path) -> None:
         assert [row.normalized_url for row in state.seed_rows("p2")] == [
             "https://p2.test/"
         ]
-        # Готовность материализована (writer-сторона MVP-2a), но прогон остановлен на g1:
-        # рубежей корпуса/оценки ещё нет — значения не выдумываются.
+        # Готовность материализована (writer-сторона MVP-2a), но прогон остановлен на
+        # ``--until g1``: рубежей корпуса/оценки ещё нет — значения не выдумываются.
         row = state.get_product_state("p1")
         assert row is not None
         assert row.onboarding_state is OnboardingState.READY

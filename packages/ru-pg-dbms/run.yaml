@@ -1,6 +1,13 @@
 anchor: pangolin
 case_id: ru-pg-dbms
 cohort: cohort-ru-pg-dbms-2026-10-01
+# §13: версия методологии объявлена **входом прогона**, а не только дефолтом кода
+# (`RunConfig.methodology_version` → манифест → `execution_contract_digest` → `run_id`).
+# 0.1.0 — сброс нумерации решением владельца 26.10.2026: методология ещё не дала ни одного
+# нормального результата, 2.x описывали нереализованное. Смена этого поля — версионная
+# граница (`methodology_change`, `golden-full` + пере-аннотация golden), а не правка
+# «на месте».
+methodology_version: '0.1.0'
 focus:
   modules:
   - core

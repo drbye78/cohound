@@ -42,7 +42,7 @@ from core.adapters.feed_poller import LocalFeedPoller, RemoteFeedPoller
 from core.adapters.remote_crawl_executor import EdgeCrawlExecutor
 from core.adapters.remote_crawler import RemoteCrawler
 from core.cli.context import _resolve_ports
-from core.cli.main import EXIT_BLOCKED, main
+from core.cli.main import EXIT_OK, main
 from core.cli.wiring import (
     ENV_SCOUT_CRAWLER,
     LOCAL_PROFILE,
@@ -519,18 +519,24 @@ def test_run_closes_crawler_with_close_in_finally(
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """``run`` закрывает краулер с ``close`` в ``finally`` (останов на гейте ``g1``)."""
+    """``run`` закрывает краулер с ``close`` в ``finally`` (закрытие не зависит от исхода).
+
+    Прогон останавливается на неблокирующем гейте (``--until g2``): ``finally`` исполняется
+    и при штатном завершении, и при остановке — краулер не утекает ни в одном случае.
+    """
     monkeypatch.chdir(tmp_path)
     package = valid_package(tmp_path)
     crawler = _ClosableCrawler()
     ports = Ports(crawler=crawler)  # type: ignore[arg-type]
 
     code = main(
-        run_argv(package, run_id="close-crawler", db=tmp_path / "c.db"),
+        run_argv(
+            package, run_id="close-crawler", db=tmp_path / "c.db", until="g2"
+        ),
         ports=ports,
     )
 
-    assert code == EXIT_BLOCKED  # g1 без человеческого решения (I6)
+    assert code == EXIT_OK
     assert crawler.closed == 1
 
 
@@ -545,11 +551,13 @@ def test_run_tolerates_crawler_without_close_in_finally(
     ports = Ports(crawler=HttpCrawler())  # HTTP-краулер без ``close``
 
     code = main(
-        run_argv(package, run_id="no-close-crawler", db=tmp_path / "c.db"),
+        run_argv(
+            package, run_id="no-close-crawler", db=tmp_path / "c.db", until="g2"
+        ),
         ports=ports,
     )
 
-    assert code == EXIT_BLOCKED
+    assert code == EXIT_OK
 
 
 # ---------------------------------------------------------------------------

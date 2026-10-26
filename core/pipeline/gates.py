@@ -13,6 +13,11 @@
 Гейт **никогда не проходится автоматически**: оркестратор не «одобряет» гейт сам, он лишь
 регистрирует решение. Носитель и аудит-след — таблица ``gate_decisions`` (S9).
 
+**G1/G2/G3 не блокируют прогон** (решение владельца 26.10.2026, :data:`NON_BLOCKING_GATES`):
+действующего решения нет — фаза идёт дальше и пишет waiver-строку «решение не требуется».
+Блокирующим остаётся ``G4`` (публикация) и **явный отказ** по текущему предмету у любого
+гейта — отказ есть решение, а не молчание. След виден и в ``gate_trail`` (манифест).
+
 **Решение привязано к предмету.** ``subject_digest`` — отпечаток того, о чём решали
 (профиль для G1/G2, очередь ревью для G3, Coverage/Capability/артефакты для G4).
 Раньше любая строка проходила гейт навсегда, независимо от состояния прогона; привязка
@@ -37,6 +42,8 @@ from core.ports.store import GateStore
 
 __all__ = [
     "WAIVER_REF_PREFIX",
+    "NON_BLOCKING_REF_PREFIX",
+    "NON_BLOCKING_GATES",
     "GateCheck",
     "GateCheckStatus",
     "evaluate_gate",
@@ -45,13 +52,34 @@ __all__ = [
     "gate_g2",
     "gate_g3",
     "gate_g4",
-    "is_gate_passed",
     "gate_decision_for",
+    "gate_trail",
+    "is_gate_passed",
 ]
 
 
 #: Префикс ``external_ref`` waiver-строки (делегирование гейта внешнему процессу).
 WAIVER_REF_PREFIX = "waiver:"
+
+#: Префикс waiver-строки «решение не требуется» (не блокирующий гейт: G1/G2/G3).
+#: Лежит **под** :data:`WAIVER_REF_PREFIX` намеренно: это тот же механизм записи следа
+#: (строка в ``gate_decisions`` + запись в манифесте), и он так же не является
+#: одобрением — :func:`evaluate_gate` исключает все waiver-строки из сверки решений.
+NON_BLOCKING_REF_PREFIX = f"{WAIVER_REF_PREFIX}policy:nonblocking:"
+
+#: Гейты, которые **не блокируют** прогон (решение владельца 26.10.2026: «наличие гейтов
+#: G1, G2, G3 — избыток, не приносящий ценности»). Отсутствие решения по ним больше не
+#: останавливает конвейер: фаза отрабатывает ``skipped`` и пишет waiver-строку «решение не
+#: требуется». Правило «невидимый waiver запрещён» сохраняется — видимость обеспечивает
+#: та же запись ``gate_decisions`` и тот же список в манифесте.
+#:
+#: **Явный отказ по текущему предмету остаётся блокирующим** и для этих гейтов: отказ —
+#: записанное решение, а не молчание. Блокирующим остаётся и ``G4`` (публикация —
+#: внешнее решение, его здесь нет).
+NON_BLOCKING_GATES: frozenset[Gate] = frozenset({Gate.G1, Gate.G2, Gate.G3})
+
+#: Гейты, которые останавливают прогон без действующего решения.
+_BLOCKING_GATES: frozenset[Gate] = frozenset(Gate) - NON_BLOCKING_GATES
 
 
 def _now_iso() -> str:
@@ -415,3 +443,83 @@ def gate_decision_for(
         if decision.gate is normalized:
             last = decision
     return last
+
+
+def _trail_state(decision: GateDecision) -> str:
+    """Состояние записи следа: чем гейт прошёл (или почему он не блокировал)."""
+    ref = decision.external_ref or ""
+    if ref.startswith(NON_BLOCKING_REF_PREFIX):
+        return "not_required"
+    if ref.startswith(WAIVER_REF_PREFIX):
+        return "delegated"
+    return "decided"
+
+
+def _trail_entry(decision: GateDecision) -> dict[str, Any]:
+    """Строка следа гейта для манифеста (детерминированная, без пересчёта)."""
+    state = _trail_state(decision)
+    entry: dict[str, Any] = {
+        "gate": decision.gate.value,
+        "state": state,
+        "external_ref": decision.external_ref,
+        "actor": decision.actor,
+        "notes": decision.notes,
+        "decided_at": decision.decided_at,
+    }
+    if state == "decided":
+        entry["verdict"] = decision.verdict.value
+    return entry
+
+
+def gate_trail(
+    store: GateStore, run_id: str, *, gates: tuple[Gate, ...] | None = None
+) -> list[dict[str, Any]]:
+    """След гейтов прогона для манифеста: **одна** строка на гейт (§13, процесс не измерение).
+
+    Единственный механизм: строки берутся из того же ``gate_decisions``, что и решения
+    (waiver-строки делегирования и «решение не требуется» — там же), и попадают в
+    ``RunManifest.gate_waivers``. Второго параллельного следа нет.
+
+    Для каждого гейта берётся **последняя** запись (``iter_gate_decisions`` упорядочивает
+    по ``decided_at``/``decision_id``): она и есть итог. ``state`` называет, чем именно:
+
+    * ``decided`` — решение записано (``approved``/``rejected`` после записи решаются
+      заново, но сам факт и автор видны);
+    * ``delegated`` — гейт делегирован внешнему процессу (``run.yaml:gates.<gate>=waived``);
+    * ``not_required`` — гейт не блокирующий (G1/G2/G3): действующего решения нет, и это
+      не остановка прогона.
+
+    Записи **нет вовсе** только у гейта, который прогон не исполнял; для неблокирующих
+    гейтов строка синтезируется честно («решение не требуется»), чтобы отсутствие записи
+    нельзя было прочитать как «одобрено». Блокирующий G4 без записи строки не получает:
+    прогон, дошедший до публикации, всегда несёт решение или waiver.
+
+    :param gates: какие гейты показывать (по умолчанию — все, в порядке G1…G4).
+    """
+    selected = gates if gates is not None else (Gate.G1, Gate.G2, Gate.G3, Gate.G4)
+    last_by_gate: dict[Gate, GateDecision] = {}
+    for decision in store.iter_gate_decisions(run_id):
+        last_by_gate[decision.gate] = decision
+    trail: list[dict[str, Any]] = []
+    for gate in selected:
+        decision = last_by_gate.get(gate)
+        if decision is not None:
+            trail.append(_trail_entry(decision))
+            continue
+        if gate in _BLOCKING_GATES:
+            continue
+        trail.append(
+            {
+                "gate": gate.value,
+                "state": "not_required",
+                "external_ref": f"{NON_BLOCKING_REF_PREFIX}{gate.value.lower()}",
+                "actor": None,
+                "notes": (
+                    f"гейт {gate.value} не блокирует прогон: решение не требуется "
+                    "(не блокирующий гейт); записи в gate_decisions нет"
+                ),
+                "decided_at": None,
+            }
+        )
+    return trail
+

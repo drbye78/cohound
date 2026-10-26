@@ -332,15 +332,23 @@ def test_build_phases_implements_non_gate_phases_only() -> None:
     assert all(callable(fn) for fn in phases.values())
 
 
-def test_gate_phases_still_block_when_phases_registered() -> None:
-    """Регистрация build_phases не обходит гейт: без решения прогон стоит на g1 (S9)."""
+def test_gate_phases_still_not_bypassed_when_phases_registered() -> None:
+    """Регистрация ``build_phases`` не обходит гейт: без решения g1 не пройден (S9).
+
+    Неблокирующий гейт — не то же самое, что пройденный: состояние фазы ``skipped``
+    (причина ``gate_not_blocking``), а не ``ok``; прогон при этом продолжается.
+    """
     store = _store()
     runner = Runner(store, Ports(), clock=_Clock(), phases=build_phases(
         inputs=_inputs(), plan=_plan(), ports=Ports()
     ))
     report = runner.run(RUN_ID, until="g1")
-    assert report.stopped_at == "g1"
-    assert report.status == "blocked"
+    assert report.stopped_at is None
+    assert report.status == "ok"
+    assert runner.state_of(RUN_ID, "g1") == "skipped"
+    assert [r.skip_reason for r in report.results if r.phase == "g1"] == [
+        SkipReason.GATE_NOT_BLOCKING
+    ]
 
 
 # ---------------------------------------------------------------------------

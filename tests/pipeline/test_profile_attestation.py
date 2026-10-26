@@ -29,7 +29,7 @@ from pathlib import Path
 import pytest
 
 from core.config.passports import passport_content_digest, passport_content_digests
-from core.domain import Focus, Gate, GatePolicy, RunConfig, RunMode
+from core.domain import Focus, Gate, GatePolicy, RunConfig, RunMode, SkipReason
 from core.domain.models import ProfileAttestationRow
 from core.pipeline.gates import gate_g1, gate_g2
 from core.pipeline.profile_attestation import (
@@ -500,20 +500,29 @@ def test_state_db_migrates_from_schema_3_to_4(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_gate_blocked_without_row_and_without_attestation() -> None:
-    """(a) Ни строки ``gate_decisions``, ни аттестации → ``blocked`` с действенной подсказкой."""
+def test_gate_skips_without_row_and_without_attestation() -> None:
+    """(a) Ни строки ``gate_decisions``, ни аттестации → ``skipped`` (G1 не блокирует).
+
+    Решение владельца 26.10.2026: гейт не останавливает прогон, но подсказка остаётся
+    действенной (в логе фазы): чего не хватает и какой командой это закрывается.
+    """
     material = _material()
     digest = material_digest(material)
     with _state_store() as state, _run_store() as store:
         phase = _gate_phase("g1", Gate.G1, GateRuntime(profile_gate=make_profile_gate(state, material)))
         result = phase(_ctx(store))
-        assert result.status == "blocked"
+        assert result.status == "skipped"
         assert result.phase == "g1"
-        message = "\n".join(result.errors)
+        assert result.skip_reason is SkipReason.GATE_NOT_BLOCKING
+        message = "\n".join(result.log_entries)
         assert "нет строки в gate_decisions" in message
         assert "нет аттестации профиля" in message
         assert "hound profile attest" in message
         assert digest[:12] in message
+        # Пропуск записан: строка «решение не требуется» в аудит-следе.
+        rows = [d for d in store.iter_gate_decisions(RUN_ID) if d.gate is Gate.G1]
+        assert [d.external_ref for d in rows] == ["waiver:policy:nonblocking:g1"]
+        assert "решение не требуется" in (rows[0].notes or "")
 
 
 def test_gate_passes_with_matching_attestation_without_per_run_row() -> None:
@@ -534,8 +543,8 @@ def test_gate_passes_with_matching_attestation_without_per_run_row() -> None:
         assert list(store.iter_gate_decisions(RUN_ID)) == []
 
 
-def test_gate_blocked_with_stale_digest_and_error_names_the_component() -> None:
-    """(c) Устаревший дайджест → ``blocked``, и сообщение называет изменившийся компонент."""
+def test_gate_skips_with_stale_digest_and_message_names_the_component() -> None:
+    """(c) Устаревший дайджест → ``skipped``, а сообщение называет изменившийся компонент."""
     attested_material = _material()
     attested_digest = material_digest(attested_material)
     current_material = _material(cohort_digest="cd_9999", products=["p1", "p2", "p3"])
@@ -550,8 +559,9 @@ def test_gate_blocked_with_stale_digest_and_error_names_the_component() -> None:
             GateRuntime(profile_gate=make_profile_gate(state, current_material)),
         )(_ctx(store))
 
-        assert result.status == "blocked"
-        message = "\n".join(result.errors)
+        assert result.status == "skipped"
+        assert result.skip_reason is SkipReason.GATE_NOT_BLOCKING
+        message = "\n".join(result.log_entries)
         # Назван именно изменившийся компонент, а не «нет строки» без деталей.
         assert "cohort_digest" in message
         assert "cohort" in message
@@ -586,10 +596,11 @@ def test_gate_passes_with_per_run_row_without_attestation() -> None:
 def test_gate_phase_without_resolver_keeps_previous_behaviour() -> None:
     """Без резолвера (dry-run/``--until plan``) гейт проверяет только ``gate_decisions``."""
     with _run_store() as store:
-        blocked = _gate_phase("g1", Gate.G1)(_ctx(store))
-        assert blocked.status == "blocked"
-        # Первая часть сообщения — факт отсутствия решения; далее действенная подсказка.
-        assert blocked.errors[0].startswith(
+        skipped = _gate_phase("g1", Gate.G1)(_ctx(store))
+        # G1 не блокирует: прогон идёт дальше, причина названа в логе фазы.
+        assert skipped.status == "skipped"
+        assert skipped.skip_reason is SkipReason.GATE_NOT_BLOCKING
+        assert skipped.log_entries[0].startswith(
             "гейт G1 не пройден: нет строки в gate_decisions (S9)"
         )
         gate_g2(store, RUN_ID, actor="human-1")
@@ -609,12 +620,13 @@ def test_superseded_attestation_does_not_pass_the_gate() -> None:
         result = _gate_phase("g1", Gate.G1, GateRuntime(profile_gate=make_profile_gate(state, material)))(
             _ctx(store)
         )
-        assert result.status == "blocked"
-        assert "нет аттестации профиля" in "\n".join(result.errors)
+        # Гейт не пройден (аттестации нет) — и не блокирует: G1 не блокирующий.
+        assert result.status == "skipped"
+        assert "нет аттестации профиля" in "\n".join(result.log_entries)
 
 
-def test_runner_stops_at_g1_and_resumes_with_profile_attestation() -> None:
-    """Сквозная проверка через ``Runner``: блок без аттестации, проход с ней."""
+def test_runner_does_not_stop_without_profile_attestation_and_passes_with_it() -> None:
+    """Сквозная проверка через ``Runner``: без аттестации — пропуск, с ней — проход."""
     from core.pipeline.runner import Runner
 
     material = _material()
@@ -640,9 +652,15 @@ def test_runner_stops_at_g1_and_resumes_with_profile_attestation() -> None:
         for name, gate in GATE_PHASES.items():
             phases[name] = _gate_phase(name, gate, runtime)
 
-        blocked = Runner(store, phases=dict(phases)).run(RUN_ID, until="g2")
-        assert blocked.stopped_at == "g1"
-        assert blocked.status == "blocked"
+        # Без аттестации прогон **не останавливается**: G1/G2 неблокирующие (пропуск + след).
+        skipped = Runner(store, phases=dict(phases)).run(RUN_ID, until="g2")
+        assert skipped.stopped_at is None
+        assert skipped.status == "ok"
+        assert [
+            r.phase
+            for r in skipped.results
+            if r.skip_reason is SkipReason.GATE_NOT_BLOCKING
+        ] == ["g1", "g2"]
 
         # Аттестация профиля по обоим гейтам: прогон проходит без per-run решений.
         for gate in (Gate.G1, Gate.G2):

@@ -37,14 +37,14 @@ from core.cli.wiring import (
     build_lite_embedder,
     build_store,
 )
-from core.domain import LLMCellOutput, Status
+from core.domain import Gate, LLMCellOutput, Status
 from core.pipeline import (
     GATE_PHASES,
     IMPLEMENTED_PHASES,
     Ports,
     build_phases,
 )
-from core.pipeline.gates import gate_g1, gate_g2, gate_g3, gate_g4
+from core.pipeline.gates import evaluate_gate, gate_g1, gate_g2, gate_g3, gate_g4
 from core.ports.vector_index import RetrievedChunk
 from tests.fakes.crawl_probe import page
 from tests.fakes.ports import (
@@ -246,12 +246,12 @@ def test_split_without_valid_config_still_rejected() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_cmd_run_registers_real_phases_and_blocks_at_g1(
+def test_cmd_run_registers_real_phases_and_blocks_at_publication(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """CLI строит реальные фазы (не заглушки); g1 без решения → ``blocked``."""
+    """CLI строит реальные фазы (не заглушки); без решения блокирует только G4."""
     # Дефолт --passports-dir относителен cwd: переходим в tmp_path, чтобы «нет каталога
     # passports» было детерминировано и не зависело от реальных паспортов в корне репо.
     monkeypatch.chdir(tmp_path)
@@ -267,13 +267,21 @@ def test_cmd_run_registers_real_phases_and_blocks_at_g1(
         return phases
 
     code = main(
-        run_argv(package, run_id="g1-blocked", db=db, runs_dir=runs_dir),
+        run_argv(
+            package, run_id="g1-blocked", db=db, runs_dir=runs_dir, until="g2"
+        ),
         phases_factory=spy_factory,
     )
-    assert code == EXIT_BLOCKED
+    assert code == EXIT_OK
     payload = json_out(capsys)
-    assert payload["status"] == "blocked"
-    assert payload["stopped_at"] == "g1"
+    assert payload["status"] == "ok"
+    assert payload["stopped_at"] is None
+    # G1/G2 не блокируют (решение владельца 26.10.2026): прогон проходит их со следом.
+    skip = {item["phase"]: item.get("skip_reason") for item in payload["results"]}
+    assert {gate: skip[gate] for gate in ("g1", "g2")} == {
+        "g1": "gate_not_blocking",
+        "g2": "gate_not_blocking",
+    }
 
     # Реестр — реальный: ровно не-гейтовые фазы, гейты остаются дефолтными в Runner (S9).
     phases = captured["phases"]
@@ -290,8 +298,10 @@ def test_cmd_run_registers_real_phases_and_blocks_at_g1(
         "p2": ["https://p2.test/"],
     }
     assert captured["passports"] == {}
-    # Не дошли до compute/report — гейт остановил раньше.
-    assert {item["phase"] for item in payload["results"]}.isdisjoint({"compute", "report"})
+    # Остановились на --until g2: corpus/compute/report не исполнялись.
+    assert {item["phase"] for item in payload["results"]}.isdisjoint(
+        {"corpus", "compute", "report"}
+    )
 
 
 def test_cmd_run_passes_gates_by_profile_attestation_without_per_run_rows(
@@ -331,9 +341,9 @@ def test_cmd_run_passes_gates_by_profile_attestation_without_per_run_rows(
     run_id = "attest-e2e"
     argv = run_argv(package, run_id=run_id, db=db, runs_dir=runs_dir)
 
-    # Предполёт: строка прогона + normalize/lint/plan; g1 без аттестации → blocked
-    # (реальный прогон открывает/создаёт ``state.db`` пакета).
-    assert main([*argv, "--until", "g1"]) == EXIT_BLOCKED
+    # Предполёт: строка прогона + normalize/lint/plan; g1 без аттестации — ``skipped``
+    # (не блокировка: G1 неблокирующий; реальный прогон создаёт ``state.db`` пакета).
+    assert main([*argv, "--until", "g1"]) == EXIT_OK
     capsys.readouterr()
 
     # Материал профиля — тем же composition-хелпером, что и у прогона.
@@ -390,10 +400,16 @@ def test_cmd_run_passes_gates_by_profile_attestation_without_per_run_rows(
     # g1 и g2 проходятся без per-run решений: прогон идёт дальше по фазам.
     assert main([*argv, "--until", "g2"]) == EXIT_OK
     with build_store(db) as store:
-        assert list(store.iter_gate_decisions(run_id)) == []
+        # Решений по G1/G2 нет вовсе — только waiver-строки «решение не требуется»
+        # (g1 успел записать её до аттестации): гейты не пройдены, но и не блокируют.
+        refs = {d.external_ref for d in store.iter_gate_decisions(run_id)}
+        assert refs
+        assert all(
+            (ref or "").startswith("waiver:policy:nonblocking:") for ref in refs
+        )
 
-    # Отзыв аттестации G1 → **новый** прогон того же профиля снова стоит на g1, и
-    # сообщение называет, что аттестации нет и какой командой её создать.
+    # Отзыв аттестации G1 → **новый** прогон того же профиля идёт дальше (G1 неблокирующий),
+    # а сообщение называет, что аттестации нет и какой командой её создать.
     with SqliteStateStore(state_path) as state:
         state.supersede_profile_attestation(
             profile_attestation_id(
@@ -409,9 +425,12 @@ def test_cmd_run_passes_gates_by_profile_attestation_without_per_run_rows(
     stale_argv = run_argv(
         package, run_id="attest-e2e-2", db=db, runs_dir=runs_dir
     )
-    assert main([*stale_argv, "--until", "g1"]) == EXIT_BLOCKED
+    assert main([*stale_argv, "--until", "g1"]) == EXIT_OK
     payload = json_out(capsys)
-    assert payload["stopped_at"] == "g1"
+    assert payload["stopped_at"] is None
+    g1 = next(item for item in payload["results"] if item["phase"] == "g1")
+    assert g1["status"] == "skipped"
+    assert g1["skip_reason"] == "gate_not_blocking"
     message = json.dumps(payload, ensure_ascii=False)
     assert "нет аттестации профиля" in message
     assert "hound profile attest" in message
@@ -529,14 +548,17 @@ def test_cmd_run_g3_g4_are_external_integration_points(
         kwargs["eval_cache"] = None
         return build_phases(**kwargs)
 
-    # 1) Первый прогон останавливается на G3 и экспортирует предмет решения наружу.
+    # 1) G3 больше не блокирует: прогон доходит до G4 и экспортирует предметы решений
+    #    наружу по обоим гейтам (файл запроса — экспорт, а не ожидание).
     assert main(argv, ports=ports, phases_factory=factory) == EXIT_BLOCKED
     g3_request = runs_dir / run_id / "gates" / "G3-request.json"
-    assert g3_request.is_file()
+    g4_request = runs_dir / run_id / "gates" / "G4-request.json"
+    assert g3_request.is_file() and g4_request.is_file()
     g3_digest = json.loads(g3_request.read_text(encoding="utf-8"))["subject_digest"]
-    assert g3_digest
+    g4_digest = json.loads(g4_request.read_text(encoding="utf-8"))["subject_digest"]
+    assert g3_digest and g4_digest
 
-    # 2) Внешняя система одобряет ровно этот предмет (отпечаток берётся из запроса).
+    # 2) Внешняя система одобряет ровно предмет G3 (отпечаток берётся из запроса).
     assert (
         main(
             [
@@ -560,11 +582,10 @@ def test_cmd_run_g3_g4_are_external_integration_points(
         == EXIT_OK
     )
 
-    # 3) Прогон идёт дальше и останавливается уже на G4 (утверждение публикации).
+    # 3) Решение записано и видно: гейт G3 проходит (ok), прогон всё ещё стоит на G4.
     assert main(argv, ports=ports, phases_factory=factory) == EXIT_BLOCKED
-    g4_request = runs_dir / run_id / "gates" / "G4-request.json"
-    assert g4_request.is_file()
-    g4_digest = json.loads(g4_request.read_text(encoding="utf-8"))["subject_digest"]
+    with build_store(db) as store:
+        assert evaluate_gate(store, run_id, Gate.G3, g3_digest).status == "passed"
 
     # 4) Отказ внешней системы блокирует прогон и назван явно (не «решения нет»).
     assert (
@@ -627,9 +648,14 @@ def test_cmd_run_g3_g4_are_external_integration_points(
     loaded = yaml.safe_load(
         (runs_dir / run_id / "run_manifest.yaml").read_text(encoding="utf-8")
     )
-    # Гейты не делегированы: политика пуста, waiver-строк нет — прогон с одобрением.
+    # Гейты не делегированы: политика пуста. След гейтов — по строке на гейт, и у каждого
+    # она называет источник решения (G3 — внешнее ревью, G4 — утверждение публикации).
     assert loaded.get("gate_policies", {}) == {}
-    assert loaded.get("gate_waivers", []) == []
+    trail = {entry["gate"]: entry for entry in loaded["gate_waivers"]}
+    assert set(trail) == {"G1", "G2", "G3", "G4"}
+    assert all(entry["state"] == "decided" for entry in trail.values())
+    assert trail["G3"]["external_ref"] == "REV-1"
+    assert trail["G4"]["external_ref"] == "PUB-8"
 
 
 def test_cmd_run_wires_package_registry_specs_end_to_end(

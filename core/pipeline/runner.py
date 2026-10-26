@@ -4,14 +4,19 @@
 плагинируем (``dict[str, PhaseFn]``): composition root подставляет реальные реализации
 (:func:`~core.pipeline.phases.build_phases`). Фаза **без зарегистрированной реализации** —
 ошибка: ``Runner`` вернёт ``failed`` («не зарегистрирована»), а не выдаст фиктивную удачу
-(echo-заглушка удалена). Гейты останавливают прогон, пока нет решения, привязанного к
-текущему предмету (``gate_decisions``, S9/I6/I7). Для G1/G2 это либо per-run решение, либо
-действующая аттестация профиля пакета-якоря (``profile_attestation`` в ``state.db``); для
-G3/G4 — решение **внешней** системы (``source='external'``), которое coHound записывает, а
-не принимает: на блоке он экспортирует предмет в ``runs/{run_id}/gates/{gate}-request.json``.
-Отказ внешней системы (``verdict='rejected'``) блокирует гейт так же явно, как отсутствие
-решения. Политика ``run.yaml:gates`` (``waived``) снимает ожидание, но **записывает** факт
-делегирования (waiver-строка + ``gate_waivers`` в манифесте).
+(echo-заглушка удалена).
+
+**Гейты.** Блокирует прогон только ``G4`` (публикация — внешнее решение): он ждёт решения,
+привязанного к текущему предмету (``gate_decisions``, S9/I6/I7), экспортирует предмет в
+``runs/{run_id}/gates/{gate}-request.json``, а отказ (``verdict='rejected'``) блокирует
+так же явно, как отсутствие решения. ``G1``/``G2``/``G3`` **не блокируют** (решение
+владельца 26.10.2026, :data:`~core.pipeline.gates.NON_BLOCKING_GATES`): нет действующего
+решения — фаза возвращает ``skipped`` с причиной ``gate_not_blocking`` и **пишет**
+waiver-строку «решение не требуется»; записанное решение по-прежнему видно и учитывается,
+а явный отказ по текущему предмету остаётся остановкой. Политика ``run.yaml:gates``
+(``waived``) снимает ожидание для ``G3``/``G4``, но **записывает** факт делегирования
+(waiver-строка + ``gate_waivers`` в манифесте). Невидимый пропуск/waiver запрещён: след
+обязан быть в манифесте.
 
 **Статусы фаз.** ``ok`` — отработала и незакрытого не осталось; ``skipped`` — предпосылка
 отсутствовала, работы не было (**не** сбой, прогон **не** останавливает); ``blocked`` —
@@ -85,7 +90,13 @@ from core.pipeline.gate_subject import (
     read_gate_request_subject,
     write_gate_request,
 )
-from core.pipeline.gates import WAIVER_REF_PREFIX, evaluate_gate, record_decision
+from core.pipeline.gates import (
+    NON_BLOCKING_GATES,
+    NON_BLOCKING_REF_PREFIX,
+    WAIVER_REF_PREFIX,
+    evaluate_gate,
+    record_decision,
+)
 from core.pipeline.profile_attestation import ProfileGateResult
 
 __all__ = [
@@ -99,6 +110,7 @@ __all__ = [
     "Clock",
     "PHASES",
     "GATE_PHASES",
+    "NON_BLOCKING_GATES",
     "run_isolated",
 ]
 
@@ -109,7 +121,8 @@ __all__ = [
 #: :attr:`PhaseResult.skip_reason` (:class:`~core.domain.enums.SkipReason`).
 PhaseStatus = Literal["ok", "skipped", "blocked", "failed"]
 
-#: Порядок фаз конвейера (02 §A.3). Гейты идут отдельными фазами и останавливают прогон.
+#: Порядок фаз конвейера (02 §A.3). Гейты идут отдельными фазами; блокирует прогон только
+#: ``g4`` (остальные пишут след и идут дальше — :data:`~core.pipeline.gates.NON_BLOCKING_GATES`).
 #:
 #: ``g1``/``g2`` — внутренняя аттестация (профиль пакета-якоря, матрица роль×продукт);
 #: ``g3``/``g4`` — точки интеграции: strict-ревью и утверждение публикации выполняются
@@ -472,12 +485,76 @@ def _waiver_row(
     )
 
 
+def _nonblocking_row(
+    ctx: RunContext, gate: Gate, runtime: GateRuntime | None, reason: str
+) -> GateDecision:
+    """Идемпотентно записывает waiver-строку «решение не требуется» (не блокирующий гейт).
+
+    Тот же механизм, что у :func:`_waiver_row`: строка в ``gate_decisions``
+    (``source='external'``, ``external_ref='waiver:policy:nonblocking:<gate>'``,
+    ``verdict='approved'``) — иначе :func:`evaluate_gate` принял бы её за одобрение, здесь
+    она **не** решение, а запись «действующего решения нет и это не остановка». Причина
+    названа в ``notes``: пропуск гейта обязан быть объяснён, а не подразумеваться.
+    Повторный вызов строку не дублирует (поиск по ``external_ref``).
+    """
+    ref = f"{NON_BLOCKING_REF_PREFIX}{gate.value.lower()}"
+    for decision in ctx.store.iter_gate_decisions(ctx.run_id):
+        if decision.gate is gate and decision.external_ref == ref:
+            return decision
+    notes = (
+        f"гейт {gate.value} не блокирует прогон: решение не требуется "
+        f"(не блокирующий гейт, решение владельца); причина: {reason}"
+    )
+    return record_decision(
+        ctx.store,
+        ctx.run_id,
+        gate,
+        actor="policy",
+        target="nonblocking",
+        notes=notes,
+        clock=runtime.clock if runtime is not None else None,
+        subject_digest=None,
+        source=GateSource.EXTERNAL,
+        external_ref=ref,
+        verdict=GateVerdict.APPROVED,
+    )
+
+
+def _nonblocking_result(
+    ctx: RunContext,
+    runtime: GateRuntime | None,
+    gate: Gate,
+    phase: str,
+    reason: str,
+    subject: GateSubject | None = None,
+) -> PhaseResult:
+    """Результат неблокирующего гейта без действующего решения: ``skipped`` + след.
+
+    Причина остаётся видимой оператору (``log_entries``: почему решения нет — «нет строки»,
+    «одобрение устарело», «профиль не аттестован»), а факт «гейт не блокирует» фиксируется
+    строкой в ``gate_decisions`` и попадает в манифест (``gate_waivers``).
+
+    Запрос на решение (``gates/{gate}-request.json``) пишется и здесь: это **экспорт
+    предмета**, а не ожидание — из него ``hound gate`` берёт ``subject_digest``, поэтому
+    записать решение по неблокирующему гейту (и увидеть его в следе) можно без ручного
+    отпечатка. Файл детерминирован и на прогон не влияет.
+    """
+    _nonblocking_row(ctx, gate, runtime, reason)
+    path = _write_gate_request(runtime, ctx.run_id, subject)
+    return PhaseResult(
+        status="skipped",
+        phase=phase,
+        skip_reason=SkipReason.GATE_NOT_BLOCKING,
+        log_entries=[reason + _request_hint(gate, subject, path)],
+    )
+
+
 def _gate_phase(
     phase: str,
     gate: Gate,
     runtime: GateRuntime | None = None,
 ) -> PhaseFn:
-    """Фаза-гейт: ``ok`` если гейт пройден, иначе ``blocked`` (или ``skipped`` при waiver).
+    """Фаза-гейт: ``ok`` если гейт пройден, ``skipped`` если он не блокирующий, иначе ``blocked``.
 
     Гейт **не** проходится сам. Пути прохождения, в порядке приоритета:
 
@@ -492,15 +569,24 @@ def _gate_phase(
        Профиль квази-константен (2–5 правок в год при еженедельных прогонах), поэтому
        повторное решение на каждый прогон не требуется.
 
+    **Неблокирующие гейты** (:data:`~core.pipeline.gates.NON_BLOCKING_GATES` — G1/G2/G3):
+    если действующего одобрения нет (нет строки / одобрение устарело / профиль не
+    аттестован), фаза **не останавливает** прогон: возвращает ``skipped`` с причиной
+    ``gate_not_blocking``, пишет waiver-строку «решение не требуется» и продолжает
+    конвейер. Пропуск назван в логе фазы и виден в манифесте — невидимый waiver запрещён.
+
     **Отказ блокирует так же явно, как отсутствие решения, но другим сообщением.**
-    ``verdict='rejected'`` по текущему предмету → «отклонён внешней системой (ref): notes»;
-    отказ по устаревшему предмету → сообщение говорит, что отказ относится к прошлому
-    состоянию и повторное ревью может быть обосновано. Молчание внешней системы не
-    превращается в отказ и не выдаётся за одобрение.
+    ``verdict='rejected'`` по текущему предмету → «отклонён внешней системой (ref): notes».
+    Отказ по **устаревшему** предмету (``rejected_stale``) у неблокирующего гейта не
+    останавливает прогон (это отказ о прошлом состоянии, а не о текущем), но остаётся в
+    записи с этой оговоркой. Молчание внешней системы не превращается в отказ и не
+    выдаётся за одобрение.
 
     **На блоке пишется запрос на решение** — ``runs/{run_id}/gates/{gate}-request.json``
     (детерминированный, без меток времени): внешняя система получает предмет и
-    ``subject_digest``, который обязан вернуть в решении.
+    ``subject_digest``, который обязан вернуть в решении. Неблокирующий гейт пишет тот же
+    файл: это экспорт предмета (из него ``hound gate`` берёт отпечаток), а не ожидание —
+    прогон файла не ждёт.
 
     :param runtime: зависимости сверх :class:`RunContext`. ``None`` — поведение прежнее
         (решения без привязки, без экспорта); так вызывают тесты и selfcheck.
@@ -522,13 +608,15 @@ def _gate_phase(
                 ],
             )
 
+        non_blocking = gate in NON_BLOCKING_GATES
         digest = subject.digest if subject is not None else None
         check = evaluate_gate(ctx.store, ctx.run_id, gate, digest)
         if check.status == "passed":
             return PhaseResult(status="ok", phase=phase)
         if check.status == "rejected":
             # Явный отказ: сначала отказ, потом всё остальное — отказ не перекрывается
-            # аттестацией профиля и не выдаётся за «решения нет».
+            # аттестацией профиля и не выдаётся за «решения нет». Он остаётся остановкой
+            # и у неблокирующего гейта: отказ — записанное решение, а не молчание.
             return PhaseResult(
                 status="blocked",
                 phase=phase,
@@ -539,6 +627,10 @@ def _gate_phase(
             if verdict.passed:
                 return PhaseResult(status="ok", phase=phase)
             if verdict.detail and check.status == "missing":
+                if non_blocking:
+                    return _nonblocking_result(
+                        ctx, runtime, gate, phase, verdict.detail, subject
+                    )
                 path = _write_gate_request(runtime, ctx.run_id, subject)
                 return PhaseResult(
                     status="blocked",
@@ -547,35 +639,41 @@ def _gate_phase(
                 )
         if check.status == "rejected_stale":
             detail = _stale_detail(runtime, ctx.run_id, gate, subject)
+            message = _rejected_stale_message(gate, check.previous, detail)
+            if non_blocking:
+                return _nonblocking_result(
+                    ctx, runtime, gate, phase, message, subject
+                )
             path = _write_gate_request(runtime, ctx.run_id, subject)
             return PhaseResult(
                 status="blocked",
                 phase=phase,
-                errors=[
-                    _rejected_stale_message(gate, check.previous, detail)
-                    + _request_hint(gate, subject, path)
-                ],
+                errors=[message + _request_hint(gate, subject, path)],
             )
         if check.status == "stale":
             detail = _stale_detail(runtime, ctx.run_id, gate, subject)
+            message = (
+                f"гейт {gate.value} не пройден: решение относится к устаревшему "
+                f"состоянию предмета; {detail}."
+            )
+            if non_blocking:
+                return _nonblocking_result(
+                    ctx, runtime, gate, phase, message, subject
+                )
             path = _write_gate_request(runtime, ctx.run_id, subject)
             return PhaseResult(
                 status="blocked",
                 phase=phase,
-                errors=[
-                    f"гейт {gate.value} не пройден: решение относится к устаревшему "
-                    f"состоянию предмета; {detail}."
-                    + _request_hint(gate, subject, path)
-                ],
+                errors=[message + _request_hint(gate, subject, path)],
             )
+        message = f"гейт {gate.value} не пройден: нет строки в gate_decisions (S9)."
+        if non_blocking:
+            return _nonblocking_result(ctx, runtime, gate, phase, message, subject)
         path = _write_gate_request(runtime, ctx.run_id, subject)
         return PhaseResult(
             status="blocked",
             phase=phase,
-            errors=[
-                f"гейт {gate.value} не пройден: нет строки в gate_decisions (S9)."
-                + _request_hint(gate, subject, path)
-            ],
+            errors=[message + _request_hint(gate, subject, path)],
         )
 
     return _fn
@@ -683,9 +781,10 @@ class Runner:
     def run(self, run_id: str, until: str | None = None) -> RunReport:
         """Выполняет фазы по порядку, пропуская уже ``ok`` и останавливаясь на ``blocked``/``failed``.
 
-        Прогон останавливают только ``blocked`` (человеческий гейт без решения) и ``failed``
-        (ошибка). ``skipped`` — не остановка: фаза не нашла себе работы, но следующие фазы
-        обязаны исполниться.
+        Прогон останавливают только ``blocked`` (гейт, который ждёт решения: ``g4`` либо
+        явный отказ по текущему предмету) и ``failed`` (ошибка). ``skipped`` — не
+        остановка: фаза не нашла себе работы (в т.ч. неблокирующий гейт без решения), но
+        следующие фазы обязаны исполниться.
 
         Журнал фаз разогревается из ``store.get_phase_state`` при пустом in-memory-журнале,
         поэтому новый ``Runner`` (новый процесс) продолжает ранее прерванный прогон.

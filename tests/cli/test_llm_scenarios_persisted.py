@@ -27,7 +27,7 @@ import pytest
 import yaml
 
 from core.cli.commands.run import _persist_llm_scenarios
-from core.cli.main import EXIT_BLOCKED, EXIT_OK, main
+from core.cli.main import EXIT_OK, main
 from core.domain.enums import EndpointKind, LLMScenario
 
 #: Корень e2e-фикстур: прогон останавливается на человеческом гейте ``g1`` — до сети/LLM.
@@ -103,7 +103,11 @@ def test_run_persists_declared_scenario_binding(
     _deploy_yaml(tmp_path)
     runs_dir = tmp_path / "runs"
 
-    assert main(["run", *_common(runs_dir, "llm-scen-run")]) == EXIT_BLOCKED
+    # ``--until g2``: проверяется персист строки до фаз, а не исполнение корпуса/оценки
+    # (внешние контуры здесь не нужны — сеть запрещена контрактом теста).
+    assert (
+        main(["run", *_common(runs_dir, "llm-scen-run"), "--until", "g2"]) == EXIT_OK
+    )
 
     rows = _rows(runs_dir, "llm-scen-run")
     assert len(rows) == 1
@@ -141,7 +145,11 @@ def test_inactive_slot_writes_no_row(tmp_path: Path, home: Path) -> None:
     _deploy_yaml(tmp_path, active=False)
     runs_dir = tmp_path / "runs"
 
-    assert main(["run", *_common(runs_dir, "llm-scen-empty")]) == EXIT_BLOCKED
+    # ``--until g2``: G1/G2 не блокируют, поэтому прогон доходит до второй фазы-гейта;
+    # проверяется отсутствие строки сценария, а не исход фаз.
+    assert (
+        main(["run", *_common(runs_dir, "llm-scen-empty"), "--until", "g2"]) == EXIT_OK
+    )
     assert _rows(runs_dir, "llm-scen-empty") == []
 
 

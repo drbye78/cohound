@@ -525,6 +525,10 @@ class SkipReason(StrEnum):
     * ``gate_delegated_external`` — гейт делегирован внешнему процессу
       (``run.yaml:gates.<gate>=waived``): решение принимается вне coHound, факт
       делегирования записан waiver-строкой и виден в манифесте.
+    * ``gate_not_blocking`` — гейт **не блокирует** прогон, а действующего решения по
+      текущему предмету нет (G1/G2/G3, решение владельца 26.10.2026). Фаза не
+      останавливает прогон, но пишет waiver-строку «решение не требуется»: невидимый
+      пропуск гейта запрещён так же, как невидимый waiver.
     """
 
     NO_SEARCH_ADAPTER = "no_search_adapter"
@@ -533,6 +537,7 @@ class SkipReason(StrEnum):
     NO_EMBEDDER = "no_embedder"
     NO_REGISTRY_SPEC = "no_registry_spec"
     GATE_DELEGATED_EXTERNAL = "gate_delegated_external"
+    GATE_NOT_BLOCKING = "gate_not_blocking"
 
 
 class CrawlItemStatus(StrEnum):
