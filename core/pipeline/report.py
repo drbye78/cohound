@@ -79,6 +79,10 @@ from core.pipeline.compute import (
 from core.pipeline.crawl_frontier import resolve_crawl_limits
 from core.pipeline.digests import EXECUTION_CONTRACT_FIELDS
 from core.pipeline.evaluate import CORPUS_INCOMPLETE_REVIEW_REASON
+from core.pipeline.partial_docs import (
+    partial_docs_summary,
+    write_partial_docs_artifact,
+)
 from core.util.hashing import short_hash
 
 #: Строковые значения блокирующих классов — для разбора legacy-аудита в ячейке,
@@ -259,6 +263,14 @@ class Artifacts:
     #: ``review_reason``. ``None`` — таких ячеек нет (файл не создаётся: пустой список
     #: не артефакт).
     cell_diagnostics: Path | None = None
+    #: ``outputs/partial_docs.csv`` — документы корпуса, прочитанные **не целиком**
+    #: (I2/I2c): продукт, документ, причина, страницы прочитано/заявлено, символы.
+    #: ``None`` — частичных документов нет (пустой список не артефакт).
+    partial_docs: Path | None = None
+    #: Блок ``partial_docs`` манифеста (те же числа, свёрнутые до продукта) — чтобы CLI
+    #: мог назвать факт строкой, даже когда CSV не создан.
+    partial_docs_summary: dict[str, Any] | None = None
+
 
 
 # ---------------------------------------------------------------------------
@@ -652,6 +664,7 @@ def build_manifest(
     execution_contract_digest: str | None = None,
     manual_artifacts: Mapping[str, Any] | None = None,
     manual_artifacts_digest: str | None = None,
+    partial_docs: Mapping[str, Any] | None = None,
     axes: Any = None,
     declared_status_dict_version: str | None = None,
     scope_attestations: Mapping[str, str] | None = None,
@@ -1064,6 +1077,10 @@ def build_manifest(
             else manual_artifacts_digest
         ),
         manual_artifacts=dict(manual_artifacts or {}),
+        # I2/I2c: частичное извлечение — наблюдение прогона (документы/страницы/символы
+        # по продуктам). В ``EXECUTION_CONTRACT_FIELDS`` не входит: это факт о том, что
+        # прибор прочитал, а не смена условий измерения.
+        partial_docs=dict(partial_docs or {}),
         snapshot_date=snapshot_date,
         # I2b/I2c: подписи, которыми прогон авторизовал ❌ (product → actor). В
         # ``EXECUTION_CONTRACT_FIELDS`` не входят: это авторизация, не измерение.
@@ -2533,6 +2550,21 @@ def write_reports(
     cell_diagnostics = _write_cell_diagnostics(
         cell_list, outputs_dir / "cell_diagnostics.csv"
     )
+    # I2/I2c: документы, прочитанные не целиком — числом, отдельным артефактом. Без него
+    # «7 страниц из 2763» видно только в строке покрытия (``blocked``), а сам документ
+    # (URL, причина, страницы, символы) назвать негде. Сбой выгрузки отчёт не роняет
+    # (как и ``artifacts_gap``): факт остаётся в покрытии и в манифесте, теряется лишь
+    # удобная таблица — ``Artifacts.partial_docs`` тогда ``None``.
+    try:
+        partial_docs_path = write_partial_docs_artifact(
+            store, run_id, outputs_dir / "partial_docs.csv"
+        )
+    except Exception:  # noqa: BLE001 — артефакт вторичен к измерению
+        partial_docs_path = None
+    partial_summary = partial_docs_summary(
+        store, run_id, products=sorted({str(cell.product_id) for cell in cell_list})
+    )
+
 
     nda_questions = render_nda_questions(
         cell_list,
@@ -2571,6 +2603,9 @@ def write_reports(
         battle_card=battle_card,
         stale_cells=stale_cells,
         cell_diagnostics=cell_diagnostics,
+        partial_docs=partial_docs_path,
+        partial_docs_summary=partial_summary,
+
         publishability=publishability_path,
         preliminary_findings=preliminary,
         nda_questions=nda_questions,

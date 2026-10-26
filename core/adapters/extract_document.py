@@ -835,6 +835,7 @@ class DoclingDocumentExtractor:
             page_count=total,
             partial=True,
             partial_reason=reason,
+            pages_converted=converted,
         )
 
     def _error(self, message: str) -> ExtractedDoc:

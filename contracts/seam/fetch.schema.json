@@ -73,7 +73,10 @@
         "content": {"type": ["string", "null"]},
         "hash": {"type": ["string", "null"]},
         "extractor_version": {"type": ["string", "null"]},
-        "page_count": {"type": ["integer", "null"]}
+        "page_count": {"type": ["integer", "null"]},
+        "pages_converted": {"type": ["integer", "null"]},
+        "partial": {"type": ["boolean", "null"]},
+        "partial_reason": {"type": ["string", "null"]}
       }
     }
   }

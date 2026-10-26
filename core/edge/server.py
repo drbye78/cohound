@@ -596,11 +596,34 @@ class EdgeGateway:
         content = getattr(doc, "text", "")
         content_str = "" if content is None else str(content)
         claimed_hash = getattr(doc, "content_hash", None)
+        # Частичность и счётчики страниц едут вместе с текстом: ядро не может вывести
+        # «прочитана часть документа» из markdown-строки, а без этого признака шов
+        # терял бы факт, который локальный путь сохраняет (парность профилей).
+        page_count = getattr(doc, "page_count", None)
+        pages_converted = getattr(doc, "pages_converted", None)
+        partial = bool(getattr(doc, "partial", False))
         return {
             "content": content_str,
             "hash": str(claimed_hash) if claimed_hash else content_hash(content_str),
             "extractor_version": str(
                 getattr(doc, "extractor_version", None) or self._primary_extractor_version()
+            ),
+            "page_count": (
+                int(page_count)
+                if isinstance(page_count, int) and not isinstance(page_count, bool)
+                else None
+            ),
+            "pages_converted": (
+                int(pages_converted)
+                if isinstance(pages_converted, int)
+                and not isinstance(pages_converted, bool)
+                else None
+            ),
+            "partial": partial,
+            "partial_reason": (
+                str(getattr(doc, "partial_reason", None) or "") or None
+                if partial
+                else None
             ),
         }
 

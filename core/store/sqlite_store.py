@@ -1166,6 +1166,7 @@ class SqliteStore:
                 " crawl_config_digest = ?, registry_spec_digest = ?,"
                 " execution_contract_digest = ?,"
                 " manual_artifacts_digest = ?, manual_artifacts_json = ?,"
+                " partial_docs_json = ?,"
                 " publishability_json = ?,"
                 " deploy_profile = ?, edge_schema_version = ?, edge_capabilities_json = ?"
                 " WHERE run_id = ?",
@@ -1199,6 +1200,11 @@ class SqliteStore:
                     manifest.manual_artifacts_digest,
                     json.dumps(
                         dict(manifest.manual_artifacts or {}),
+                        ensure_ascii=False,
+                        sort_keys=True,
+                    ),
+                    json.dumps(
+                        dict(manifest.partial_docs or {}),
                         ensure_ascii=False,
                         sort_keys=True,
                     ),
@@ -1246,8 +1252,9 @@ class SqliteStore:
             self.conn.execute(
                 "INSERT OR REPLACE INTO corpus_docs"
                 " (doc_id, product_id, url, fetched_at, content_hash, raw_path,"
-                "  extractor_version, render_mode, lang, origin)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "  extractor_version, render_mode, lang, origin,"
+                "  partial, partial_reason, page_count, pages_converted, extracted_chars)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     doc.doc_id,
                     doc.product_id,
@@ -1259,6 +1266,13 @@ class SqliteStore:
                     _as_text(doc.render_mode),
                     doc.lang,
                     str(origin),
+                    # Частичность — факт провенанса, а не украшение: ``0`` у старых
+                    # строк означает «прочитано полностью либо признак не наблюдался».
+                    1 if doc.partial else 0,
+                    doc.partial_reason,
+                    doc.page_count,
+                    doc.pages_converted,
+                    doc.extracted_chars,
                 ),
             )
 
@@ -1938,6 +1952,13 @@ class SqliteStore:
                 extractor_version=doc["extractor_version"],
                 render_mode=doc["render_mode"],
                 lang=doc["lang"],
+                # Частичность читается обратно тем же путём, каким записана: отчёт и
+                # покрытие не могут «потерять» её на втором круге (resume/report).
+                partial=bool(doc["partial"]),
+                partial_reason=doc["partial_reason"],
+                page_count=doc["page_count"],
+                pages_converted=doc["pages_converted"],
+                extracted_chars=doc["extracted_chars"],
             )
 
     # -- спуск в контейнеры (B3) ------------------------------------------- #
@@ -2187,6 +2208,17 @@ class SqliteStore:
         publishability_block = (
             publishability_raw if isinstance(publishability_raw, dict) else {}
         )
+        # I2/I2c: блок частичного извлечения. NULL/не-словарь (старая БД, прогон без
+        # частичных документов) → ``{}``: «частичных не было» не выдумывается из
+        # отсутствия значения, но и не подменяется нулём вместо факта.
+        partial_docs_raw = (
+            _parse_json_text(row["partial_docs_json"])
+            if "partial_docs_json" in row.keys()
+            else None
+        )
+        partial_docs_block = (
+            partial_docs_raw if isinstance(partial_docs_raw, dict) else {}
+        )
         return RunManifest(
             run_id=row["run_id"],
             case_id=row["case_id"],
@@ -2232,6 +2264,9 @@ class SqliteStore:
                 else None
             ),
             manual_artifacts=manual_artifacts_block,
+            # I2/I2c: частичное извлечение — наблюдение прогона (документы/страницы/
+            # символы по продуктам); NULL-блок читается пустым.
+            partial_docs=partial_docs_block,
             # §6/A1: профиль публикуемости из записи воспроизведения; пусто — legacy.
             publishability=publishability_block,
             llm_scenarios=scenarios,

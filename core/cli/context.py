@@ -153,6 +153,7 @@ __all__ = [
     "_resolve_ports",
     "_resolve_phases",
     "_open_state_store",
+    "_previous_cycle_id",
     "_load_passports_dir",
     "_load_corpus_urls",
     "_load_render_modes",
@@ -251,6 +252,32 @@ def _open_state_store(args: argparse.Namespace, *, create: bool = False) -> Any:
     if create:
         db_path.parent.mkdir(parents=True, exist_ok=True)
     return SqliteStateStore(db_path)
+
+
+def _previous_cycle_id(args: argparse.Namespace) -> str | None:
+    """Предыдущий ``cycle_id`` пакета — **только чтение** ``state.db`` (09 §2.4).
+
+    Нужен ``plan``, чтобы ``--update`` вёл себя как у прогона: ``resolve_cycle_id``
+    отвергает ``--update`` с циклом, равным предыдущему, и план обязан повторить **этот
+    отказ**, иначе напечатает ``run_id`` прогона, который не стартует.
+
+    Штатное открытие состояния (:func:`_open_state_store`) применяет схему и пишет
+    ``schema_meta`` — для ``plan`` это нарушило бы обещание «ничего не пишет». Поэтому
+    читается одна колонка ``run_lineage.cycle_id`` через ``mode=ro``
+    (:func:`core.store.state_store.read_previous_cycle_id`), без миграции и без записи.
+
+    ``None`` — истории нет либо пакет не является каталогом: «неизвестно», не «пусто».
+    """
+    from core.store.state_sqlite import state_db_path
+    from core.store.state_store import read_previous_cycle_id
+
+    package = getattr(args, "package", None)
+    if not package or not Path(package).is_dir():
+        return None
+    paths = getattr(args, "paths", None)
+    if paths is None:
+        paths = _resolve_paths(args)
+    return read_previous_cycle_id(state_db_path(paths.state, Path(package).name), Path(package).name)
 
 
 def _read_cycle(args: argparse.Namespace, run_id: str) -> tuple[Any, list[Any], list[Any]]:
@@ -353,6 +380,10 @@ def _artifacts_payload(artifacts: Any) -> dict[str, Any]:
         # отсутствие: оператор не знает, что смотреть.
         "stale_cells": _path(getattr(artifacts, "stale_cells", None)),
         "cell_diagnostics": _path(getattr(artifacts, "cell_diagnostics", None)),
+        # I2/I2c: документы, прочитанные не целиком — путь к таблице (числа — в ней и в
+        # строке заметки). Артефакт без объявленного пути — та же невидимость, что и его
+        # отсутствие: оператор не знает, что смотреть.
+        "partial_docs": _path(getattr(artifacts, "partial_docs", None)),
         "i3_anomalies": list(getattr(artifacts, "i3_anomalies", None) or []),
         "crawl_truncation_anomalies": list(
             getattr(artifacts, "crawl_truncation_anomalies", None) or []

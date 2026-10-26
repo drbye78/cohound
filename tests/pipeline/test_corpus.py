@@ -4851,6 +4851,9 @@ def test_blocking_failure_kinds_are_canonical() -> None:
         "attempts_exhausted",
         "dlp_blocked",
         "quarantined",
+        # I2/I2c: документ получен, но прочитана часть страниц — непрочитанное есть
+        # ненаблюдённый материал, поэтому охват не может объявляться полным.
+        "partial_extraction",
     }
     assert FailureKind.NOT_FOUND not in BLOCKING_FAILURE_KINDS
     assert FailureKind.SOURCE_UNAVAILABLE not in BLOCKING_FAILURE_KINDS

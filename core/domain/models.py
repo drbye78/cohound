@@ -1470,6 +1470,13 @@ class RunManifest(BaseModel):
     #: §4.4/Phase 2: провенанс краула (сеансы/движки/виды источника + дайджест источников).
     #: Информационен — не влияет на §6/Comparability и не входит в diff-границы (§13).
     crawl_provenance: CrawlProvenance = Field(default_factory=CrawlProvenance)
+    #: Частичное извлечение — **числом**, а не потолком: ``{"documents": n, "by_product":
+    #: {...}, "reasons": {...}, "pages_converted": x, "pages_declared": y, "chars": z,
+    #: "by_product_pages": {...}}``. Документ, прочитанный на 7 страницах из 2763,
+    #: обязан быть виден в манифесте, а не растворяться в числе документов корпуса.
+    #: Наблюдение (как ``crawl_provenance``): в границы версий §13 не входит — это факт
+    #: о том, что прибор прочитал, а не смена условий измерения.
+    partial_docs: dict[str, Any] = Field(default_factory=dict)
     #: §13 (Backlog B): ось стратегии краула (``run.yaml:crawl.strategy``) и каноническая
     #: форма диапазона задержек (``run.yaml:crawl.rate_limit``, :func:`canonical_rate_limit`).
     #: Это **операционные** дефолты commodity-слоя (A2): их смена — граница класса
@@ -1616,6 +1623,24 @@ class CorpusDoc(BaseModel):
     ``raw_path`` — retention байтов (§3.2); ``extractor_version`` позволяет re-extract
     без ре-фетча. ``render_mode`` — строка (не ``ports.FetchMode``): домен L0 не
     импортирует порты L2 (матрица 01 §1). Имя поля/колонки сохранено (D2 не меняет DDL).
+
+    **Частичность (``partial``/``partial_reason``).** Признак приходит из
+    :class:`core.ports.types.ExtractedDoc` и обязан пережить границу корпуса: раньше он
+    умирал здесь, и документ, прочитанный на 7 страницах из 2763, был в корпусе и в
+    отчёте неотличим от прочитанного полностью. Молчание непрочитанных страниц
+    превращалось в «вендор не заявил» и далее в ``❌`` (I2/I2c) — ровно та тихая потеря,
+    ради видимости которой проект существует.
+
+    ``page_count`` — сколько страниц **заявлено документом**, ``pages_converted`` —
+    сколько реально попало в текст (числом, а не прилагательным); ``extracted_chars`` —
+    длина извлечённого текста. Любое из чисел ``None``, если экстрактор его не сообщил:
+    выдумывать нельзя (A3).
+
+    Инвариант (``_check_partial``): ``partial`` требует непустого ``partial_reason`` и
+    запрещает ``partial_reason``/``pages_converted`` без самого ``partial`` (ложная
+    провенанс-запись); счётчики страниц не могут противоречить друг другу. Пустой
+    текст как условие проверяет ``ExtractedDoc`` (у строки ``corpus_docs`` текста нет:
+    он живёт в чанках).
     """
 
     model_config = _BASE
@@ -1629,6 +1654,50 @@ class CorpusDoc(BaseModel):
     extractor_version: str | None = None
     render_mode: str | None = None
     lang: str | None = None
+    #: Документ прочитан **не целиком** (часть страниц/членов не сконвертирована).
+    partial: bool = False
+    #: Почему частично: статус движка, сколько страниц получено из скольких, уровень.
+    partial_reason: str | None = None
+    #: Заявленное документом число страниц; ``None`` — экстрактор числа не сообщает.
+    page_count: int | None = None
+    #: Сколько страниц реально попало в текст; ``None`` — не измерено.
+    pages_converted: int | None = None
+    #: Длина извлечённого текста (не сумма чанков: чанки могут быть отброшены I19).
+    extracted_chars: int | None = None
+
+    @model_validator(mode="after")
+    def _check_partial(self) -> CorpusDoc:
+        """Держит инвариант частичности на границе корпуса (по образцу ``ExtractedDoc``)."""
+        if self.partial:
+            if not (self.partial_reason or "").strip():
+                raise ValueError(
+                    "corpus_docs: partial=True без partial_reason — частичный документ "
+                    "обязан называть, почему он частичный"
+                )
+        else:
+            if self.partial_reason is not None:
+                raise ValueError(
+                    "corpus_docs: partial_reason при partial=False — причина частичности "
+                    "без самой частичности"
+                )
+            if self.pages_converted is not None:
+                raise ValueError(
+                    "corpus_docs: pages_converted при partial=False — счётчик прочитанных "
+                    "страниц без частичности"
+                )
+        if self.page_count is not None and self.page_count < 0:
+            raise ValueError("corpus_docs: page_count не может быть отрицательным")
+        if self.pages_converted is not None:
+            if self.pages_converted < 0:
+                raise ValueError("corpus_docs: pages_converted не может быть отрицательным")
+            if self.page_count is not None and self.pages_converted > self.page_count:
+                raise ValueError(
+                    "corpus_docs: pages_converted больше page_count — прочитано больше "
+                    "страниц, чем документ заявляет"
+                )
+        if self.extracted_chars is not None and self.extracted_chars < 0:
+            raise ValueError("corpus_docs: extracted_chars не может быть отрицательным")
+        return self
 
 
 class CorpusMember(BaseModel):

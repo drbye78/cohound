@@ -294,6 +294,16 @@ def _validate_fetch(payload: Any) -> list[str]:
                 violations, "fetch.text", "extractor_version", text.get("extractor_version")
             )
             _check_opt_int(violations, "fetch.text", "page_count", text.get("page_count"))
+            # Частичное извлечение (аддитивно): признак + счётчик прочитанных страниц +
+            # причина. Форма проверяется здесь, потому что ядро не может вывести
+            # частичность из markdown-строки — она приходит только этим каналом.
+            _check_opt_int(
+                violations, "fetch.text", "pages_converted", text.get("pages_converted")
+            )
+            _check_opt_bool(violations, "fetch.text", "partial", text.get("partial"))
+            _check_opt_str(
+                violations, "fetch.text", "partial_reason", text.get("partial_reason")
+            )
 
     # Клиент (``raw_page_from_response``) требует источник содержимого либо error.
     if raw is None and text is None and not payload.get("error"):

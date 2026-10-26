@@ -69,6 +69,7 @@ CREATE TABLE IF NOT EXISTS runs (
     execution_contract_digest TEXT,                    -- §13/09 §12.5: отпечаток условий измерения (methodology_change boundary)
     manual_artifacts_digest TEXT,                      -- 13-manual-artifacts §3.2: отпечаток объявленных ручных артефактов (execution_change)
     manual_artifacts_json TEXT,                        -- 13-manual-artifacts §3.4: доля ручного (наблюдение, не потолок)
+    partial_docs_json     TEXT,                        -- I2/I2c: частичное извлечение числом (наблюдение, не потолок)
     publishability_json   TEXT,                        -- §6/A1: профиль публикуемости (класс + числа, из которых он выведен)
     ranking_epsilon       REAL,                        -- §6/B-1: порог неразличимости ранжирования
     deploy_profile        TEXT,                        -- 07 §7: профиль доверенных зон (R7)
@@ -109,7 +110,15 @@ CREATE TABLE IF NOT EXISTS corpus_docs (
     lang             TEXT,
     -- 13-manual-artifacts §3.3: происхождение **байтов** ('crawl'|'manual'). Отказ краула
     -- (crawl_session_items) не стирается: материал наблюдён другим путём — два факта.
-    origin           TEXT NOT NULL DEFAULT 'crawl'
+    origin           TEXT NOT NULL DEFAULT 'crawl',
+    -- Частичное извлечение (I2/I2c): документ получен, но прочитана лишь часть страниц.
+    -- Признак обязан пережить границу корпуса — иначе «7 страниц из 2763» неотличимо от
+    -- «прочитано всё», и молчание страниц становится ``❌``.
+    partial          INTEGER NOT NULL DEFAULT 0,
+    partial_reason   TEXT,
+    page_count       INTEGER,           -- заявлено документом; NULL — не сообщено
+    pages_converted  INTEGER,           -- реально прочитано; NULL — не измерено
+    extracted_chars  INTEGER            -- длина извлечённого текста
 );
 
 -- 13-manual-artifacts §3.3: аудит предоставления. Строка на объявленную подачу, дошедшую
@@ -684,6 +693,11 @@ def connect(db_path: str | Path = ":memory:") -> sqlite3.Connection:
             "manual_artifacts_json": "TEXT",
         },
     )
+    # I2/I2c: частичное извлечение в манифесте — блок наблюдения (документы/страницы/
+    # символы по продуктам), а не пересчёт читателя. Колонка аддитивная: старые строки
+    # получают NULL (блок читается пустым). ``schema_version`` **не** поднимается —
+    # форма читаемых данных не меняется (прецедент — ``manual_artifacts_json``).
+    _ensure_columns(conn, "runs", {"partial_docs_json": "TEXT"})
     # §6/A1: профиль публикуемости — блок манифеста, а не пересчёт читателя. Колонка
     # аддитивная и идемпотентная: старые строки получают NULL (профиль не вычислялся —
     # не фабрикуется). ``schema_version`` **не** поднимается: аддитивная миграция не
@@ -778,6 +792,23 @@ def connect(db_path: str | Path = ":memory:") -> sqlite3.Connection:
     # читаемым» было бы нарушено (прецедент — ``cells.evidence_scope``). Таблица
     # ``manual_artifacts`` создаётся ``CREATE TABLE IF NOT EXISTS`` в DDL — ALTER не нужен.
     _ensure_columns(conn, "corpus_docs", {"origin": "TEXT NOT NULL DEFAULT 'crawl'"})
+    # Частичное извлечение (I2/I2c): признак существовал у ``ExtractedDoc`` и умирал на
+    # границе корпуса — документ, прочитанный на 7 страницах из 2763, был неотличим от
+    # полного. Колонки аддитивные: старые строки читаются как «прочитано полностью»
+    # (``partial=0``), чисел нет (``NULL``) — выдумывать их нельзя. ``schema_version``
+    # **не** поднимается: форма читаемых данных не меняется, а гейт версии (11 §2.6)
+    # отверг бы уже существующие прогоны (прецедент — ``cells.evidence_scope``).
+    _ensure_columns(
+        conn,
+        "corpus_docs",
+        {
+            "partial": "INTEGER NOT NULL DEFAULT 0",
+            "partial_reason": "TEXT",
+            "page_count": "INTEGER",
+            "pages_converted": "INTEGER",
+            "extracted_chars": "INTEGER",
+        },
+    )
     # v3.1.0 — удаление legacy per-URL таблицы попыток (полностью замещена сеансом краула,
     # back-compat не требуется): DDL-таблицы/индексов и их миграции больше нет.
     # DDL-миграция v3.11.0 (G3/G4 как точки интеграции): решение гейта привязывается к

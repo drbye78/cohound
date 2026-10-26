@@ -166,7 +166,9 @@ class ExtractedDoc:
 
     Инвариант (проверяется :meth:`__post_init__`): ``partial=True`` требует непустого
     ``text`` и ``error is None`` — «частичный успех» без текста есть провал, а не успех;
-    ``partial_reason`` без ``partial`` — ложная провенанс-запись.
+    ``partial_reason`` без ``partial`` — ложная провенанс-запись. Счётчики страниц
+    (``page_count``/``pages_converted``) не могут противоречить друг другу, а
+    ``pages_converted`` без ``partial`` — счётчик без факта.
     """
 
     text: str
@@ -179,6 +181,12 @@ class ExtractedDoc:
     partial: bool = False
     #: Почему частично: статус движка + сколько страниц получено + уровень, который обещался.
     partial_reason: str | None = None
+    #: Сколько страниц **реально** попало в текст (``page_count`` — сколько заявлено
+    #: документом). Пара нужна, чтобы «частично» было числом, а не прилагательным:
+    #: без неё человек не отличит «не прочиталась одна страница из семи» от «не
+    #: прочиталось 662 из 665». ``None`` — движок числа не сообщает; выдумывать нельзя
+    #: (A3), а ``page_count - 1`` не является измерением.
+    pages_converted: int | None = None
 
     def __post_init__(self) -> None:
         """Держит инвариант частичности: она не бывает пустой и не бывает без текста.
@@ -187,11 +195,29 @@ class ExtractedDoc:
         «частичный» документ без текста и «полный» документ с причиной частичности —
         одинаково ложные провенанс-записи, независимо от того, кто их собрал.
         """
+        # Счётчики страниц — факты, а не оценки: противоречивая пара (прочитано больше,
+        # чем заявлено документом, либо отрицательное) — ложная провенанс-запись.
+        if self.pages_converted is not None:
+            if self.pages_converted < 0:
+                raise ValueError(
+                    "ExtractedDoc: pages_converted отрицателен — число прочитанных "
+                    "страниц не может быть меньше нуля"
+                )
+            if self.page_count is not None and self.pages_converted > self.page_count:
+                raise ValueError(
+                    "ExtractedDoc: pages_converted больше page_count — прочитано больше "
+                    "страниц, чем документ заявляет"
+                )
         if not self.partial:
             if self.partial_reason is not None:
                 raise ValueError(
                     "ExtractedDoc: partial_reason задан при partial=False — "
                     "причина частичности без самой частичности"
+                )
+            if self.pages_converted is not None:
+                raise ValueError(
+                    "ExtractedDoc: pages_converted задан при partial=False — "
+                    "счётчик прочитанных страниц без частичности"
                 )
             return
         if self.error is not None:

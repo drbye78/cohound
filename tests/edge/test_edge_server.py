@@ -418,6 +418,13 @@ def test_fetch_with_extract_returns_text() -> None:
         "content": "# clean markdown",
         "hash": content_hash("# clean markdown"),
         "extractor_version": "fake-extractor-1",
+        # Частичность и счётчики страниц едут вместе с текстом: ядро не может вывести
+        # «прочитана часть документа» из markdown-строки. Полное извлечение честно
+        # объявляет ``partial=False`` и отсутствие чисел.
+        "page_count": None,
+        "pages_converted": None,
+        "partial": False,
+        "partial_reason": None,
     }
     assert env["payload"]["error"] is None
 

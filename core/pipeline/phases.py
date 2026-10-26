@@ -74,6 +74,10 @@ from core.pipeline.exhaustion import ExhaustionFacts, contours_run
 from core.pipeline.gates import gate_trail
 from core.pipeline.inheritance import inheritance_wave
 from core.pipeline.normalize import load_scope_attestations
+from core.pipeline.partial_docs import (
+    human_line as partial_docs_human_line,
+    partial_docs_summary,
+)
 from core.pipeline.precedence import collect_protected_cells
 from core.pipeline.registry import (
     registry_covered_params,
@@ -1279,6 +1283,12 @@ def build_phases(
                 ctx.store, plan.run_id, products=plan.products
             ),
             manual_artifacts_digest=getattr(axes, "manual_artifacts_digest", None),
+            # I2/I2c: документы, прочитанные не целиком — в манифест **числом**.
+            # Источник — персистентный корпус (как у ``manual_artifacts``), поэтому resume
+            # публикует тот же факт; нули по продуктам плана видны (симметрия).
+            partial_docs=partial_docs_summary(
+                ctx.store, plan.run_id, products=plan.products
+            ),
             # §13 (2.4.0): декларированные оси — тот же резолвер, что у контракта.
             axes=axes,
             declared_status_dict_version=declared_status_dict_version,
@@ -1372,6 +1382,11 @@ def build_phases(
         # сужает Ш6 до этих ячеек (селектор ``evaluate.select_stale_cells``).
         pending: list[str] = []
         stale_count = len(bundle.stale_cells)
+        # I2/I2c: частичное извлечение — advisory-строкой, потому что оно меняет
+        # достижимость ❌ на всём корпусе продукта, а не только отчётную таблицу.
+        partial_line = partial_docs_human_line(artifacts.partial_docs_summary)
+        if partial_line:
+            pending.append(f"отчёт: {partial_line} (список: outputs/partial_docs.csv)")
         if artifacts.stale_cells is not None:
             pending.append(
                 f"отчёт: {stale_count} ячеек исключены из расчёта как устаревшие "

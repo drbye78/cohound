@@ -583,6 +583,7 @@ def derive_corpus_coverage(
     truncated: bool,
     computed_at: str,
     manual_urls: Iterable[str] = (),
+    partial_docs: Iterable[str] = (),
 ) -> CorpusCoverage:
     """Строит :class:`CorpusCoverage` продукта из персистентных элементов сеанса (Ф0).
 
@@ -611,7 +612,8 @@ def derive_corpus_coverage(
        вовсе. ``reason`` при этом остаётся ``None``: неполноту объясняют
        ``expected_sources``/``observed_sources``/``blocked``/``unreadable_origins``.
 
-    ``complete = (not truncated) and (not unreadable_origins) and (no blocking failure) and (observed_sources > 0)``.
+    ``complete = (not truncated) and (not unreadable_origins) and (no blocking failure) and (observed_sources > 0)``;
+    частичное извлечение входит в условие через блокирующий класс ``partial_extraction``.
 
     Явно **не** блокируют ``complete``:
 
@@ -626,6 +628,18 @@ def derive_corpus_coverage(
 
     ``partial_blocks`` фиксирует не-``not_found`` сбои каждого origin'а: человек видит
     частичные отказы, но они больше не «тихие» — блокирующий класс означает неполноту.
+
+    **Частичное извлечение (``partial_docs``).** URL документов, которые экстрактор
+    прочитал **не целиком** (``CorpusDoc.partial``: docling ``PARTIAL_SUCCESS``, битая
+    страница pdfium). Формально это не отказ — элемент остаётся ``FETCHED``, текст
+    вошёл в корпус, — но непрочитанная часть страниц есть ненаблюдённый материал. Если
+    её не учесть, документ, прочитанный на 7 страницах из 2763, выглядит как полностью
+    прочитанный, молчание страниц читается как «вендор не заявил», и ``❌`` публикуется
+    на корпусе, где половина документа не наблюдалась. Поэтому каждый такой документ
+    считается блокирующим классом ``partial_extraction``: ``complete=False``, причина
+    видна в ``blocked`` и в ``partial_blocks`` по origin'у. Число — **документы**, а не
+    страницы: страницы публикуются отдельно (``CorpusDoc.page_count``/
+    ``pages_converted``) и в класс сбоя не подмешиваются.
 
     **Ручной артефакт закрывает пробел, а не отказ (13-manual-artifacts §3.3).**
     ``manual_urls`` — URL, чей материал **предъявлен** объявленным артефактом
@@ -693,6 +707,28 @@ def derive_corpus_coverage(
     unreadable_origins = sorted(
         origin for origin in losses_by_origin if fetched_by_origin.get(origin, 0) == 0
     )
+    # Частичное извлечение: документ **получен**, но прочитана лишь часть. Формально не
+    # отказ (элемент ``FETCHED``), фактически — часть материала ненаблюдена, поэтому
+    # класс блокирующий: ``complete=False``, причина в ``blocked`` и в ``partial_blocks``
+    # по origin'у. Без этого «7 страниц из 2763» молчало бы как «прочитано всё», а
+    # молчание страниц стало бы ``❌`` (I2/I2c).
+    partial_origin_counts: dict[str, int] = {}
+    for raw_url in partial_docs:
+        text_url = str(raw_url or "")
+        origin = (
+            (urlsplit(text_url).netloc or "").lower()
+            or text_url.strip().lower()
+            or "unknown"
+        )
+        partial_origin_counts[origin] = partial_origin_counts.get(origin, 0) + 1
+    if partial_origin_counts:
+        partial_total = sum(partial_origin_counts.values())
+        kind = FailureKind.PARTIAL_EXTRACTION.value
+        blocked[kind] = blocked.get(kind, 0) + partial_total
+        for origin, count in partial_origin_counts.items():
+            counts = partial_blocks.setdefault(origin, {})
+            counts[kind] = counts.get(kind, 0) + count
+        blocking_failures = True
     # 13-manual-artifacts §3.3: «ни одного наблюдения» — не только про краул. Материал,
     # предъявленный человеком, наблюдён; ``observed_sources`` при этом остаётся счётчиком
     # **краула** (строка не должна утверждать, что сайт прочитан), а ручная часть названа
@@ -764,13 +800,20 @@ def _product_notes(events: Sequence[Mapping[str, Any]]) -> list[str]:
         elif kind == "product_end":
             reason = event.get("reason")
             tail = f", причина {reason}" if reason else ""
+            # Частичное извлечение называется в строке продукта только когда оно есть:
+            # «прочитано не целиком» — факт, который оператор обязан увидеть до отчёта,
+            # а прогон без частичных документов не должен обрастать шумом.
+            partial = int(event.get("partial_docs") or 0)
+            partial_note = (
+                f", документов прочитано частично {partial} (охват неполон)" if partial else ""
+            )
             notes.append(
                 f"corpus: продукт {event.get('product_id')} — "
                 f"корней {event.get('roots')}, seed'ов поставлено "
                 f"{event.get('seeds_enqueued')} из {event.get('seeds_declared')}, "
                 f"элементов {event.get('session_items')} "
                 f"(fetched {event.get('fetched')}, failed {event.get('failed')}), "
-                f"документов {event.get('docs')}, "
+                f"документов {event.get('docs')}{partial_note}, "
                 f"{event.get('elapsed_seconds')} с{tail}"
             )
     return notes
@@ -785,6 +828,7 @@ def _persist_corpus_coverage(
     products: Iterable[str] | None = None,
     reasons: Mapping[str, str | None] | None = None,
     resolved_manually: Mapping[str, Iterable[str]] | None = None,
+    partial_docs: Mapping[str, Iterable[str]] | None = None,
 ) -> None:
     """Вычисляет и персистит покрытие **каждого** продукта плана (Ф0, O3).
 
@@ -803,6 +847,12 @@ def _persist_corpus_coverage(
     ``resolved_manually`` — ``product_id → [url]``, чей материал предъявлен объявленным
     ручным артефактом (13-manual-artifacts §3.3): отказ остаётся аудитом, но перестаёт
     делать покрытие неполным. Значение по умолчанию — пусто (поведение прежнее).
+
+    ``partial_docs`` — ``product_id → [url]`` документов, прочитанных **не целиком**
+    (:attr:`~core.domain.models.CorpusDoc.partial`). Каждый такой документ делает
+    покрытие неполным с причиной ``partial_extraction``: непрочитанные страницы —
+    ненаблюдённый материал, и объявлять охват полным на нём нельзя. Значение по
+    умолчанию — пусто (прогон без частичных документов ведёт себя как прежде).
     """
     by_product: dict[str, list[CrawlSessionItem]] = {}
     for item in store.iter_crawl_session_items(session_id):
@@ -830,6 +880,9 @@ def _persist_corpus_coverage(
                 computed_at=computed_at,
                 # 13-manual-artifacts §3.3: URL, чей материал предъявлен артефактом.
                 manual_urls=(resolved_manually or {}).get(product_id, ()),
+                # I2/I2c: документы, прочитанные не целиком (причина
+                # ``partial_extraction`` в ``blocked``).
+                partial_docs=(partial_docs or {}).get(product_id, ()),
             )
         store.save_corpus_coverage(run_id, coverage)
 
@@ -1612,6 +1665,41 @@ def _ordered_unique(values: Iterable[Any]) -> list[str]:
 def _as_text(value: Any) -> Any:
     """Приводит enum-значение (``StrEnum``) к строке ``.value``; прочее — как есть."""
     return getattr(value, "value", value)
+
+#: Причина частичности, когда экстрактор её не назвал. Не выдумка причины, а **факт её
+#: отсутствия**: частичный документ обязан остаться в корпусе (текст реален) и обязан
+#: быть помечен, поэтому «причина не сообщена» честнее и тихого ``partial=False``, и
+#: падения на инварианте ``CorpusDoc``, и придуманного объяснения.
+PARTIAL_REASON_UNSTATED = "извлечение частичное: причина экстрактором не сообщена"
+
+
+def _partial_fields(extracted: Any) -> dict[str, Any]:
+    """Поля частичности ``ExtractedDoc`` → ``CorpusDoc`` (общая точка обоих путей).
+
+    Один маппинг на страницу и на члена контейнера: иначе «пул vs inline» или «страница
+    vs член архива» могли бы разойтись в признаке, а это признак, ради которого всё и
+    делается. ``None``/нечисло остаются ``None`` — «не измерено» не превращается в ноль.
+    """
+    partial = bool(getattr(extracted, "partial", False))
+    reason = str(getattr(extracted, "partial_reason", None) or "").strip() or None
+    page_count = getattr(extracted, "page_count", None)
+    pages_converted = getattr(extracted, "pages_converted", None)
+    text = getattr(extracted, "text", None)
+    return {
+        "partial": partial,
+        "partial_reason": (reason or PARTIAL_REASON_UNSTATED) if partial else None,
+        "page_count": (
+            page_count
+            if isinstance(page_count, int) and not isinstance(page_count, bool)
+            else None
+        ),
+        "pages_converted": (
+            pages_converted
+            if isinstance(pages_converted, int) and not isinstance(pages_converted, bool)
+            else None
+        ),
+        "extracted_chars": len(text) if isinstance(text, str) else None,
+    }
 
 
 def _looks_like_html(page: RawPage) -> bool:
@@ -2940,6 +3028,9 @@ def _ingest_member_doc(
         extractor_version=str(getattr(extracted, "extractor_version", None) or "") or None,
         render_mode=_as_text(FetchMode.HTTP),
         lang=lang,
+        # Член контейнера — тот же путь извлечения, что и страница: признак частичности
+        # обязан пережить его так же (иначе «прочитан 1 член из 47» молчит внутри архива).
+        **_partial_fields(extracted),
     )
     ingest.docs.append(doc)
     _persist_docs(store, [doc], errors)
@@ -4495,6 +4586,11 @@ def _build_corpus(
             return document_id
         seen_docs[doc_hash] = url
 
+        # Частичность берётся из **фактического** извлечения. На пути переиспользования
+        # (``304``) извлечения не было: признак неизвестен, и ``partial=False`` там
+        # означает «в этом прогоне не наблюдался», а не «страницы прочитаны все».
+        # Признак не выводится из текста: «прочитано 7 страниц из 2763» — это факт
+        # прибора (``ExtractedDoc.partial``), а не свойство markdown-строки.
         doc = CorpusDoc(
             doc_id=document_id,
             product_id=product_id,
@@ -4505,6 +4601,7 @@ def _build_corpus(
             extractor_version=doc_extractor_version,
             render_mode=_as_text(page.fetch_mode),
             lang=page.lang,
+            **_partial_fields(extracted),
         )
         ingest.docs.append(doc)
         # Инкрементальная персистенция retention-провенанса: ``doc`` полностью сформирован
@@ -6275,8 +6372,9 @@ def _build_corpus(
     #: **структурные** (dict) в ``PhaseResult.log_entries``: ``product_start`` до первого
     #: корня (``roots``/``seeds_declared``) и ``product_end`` после доводки хвостов
     #: (``roots``/``seeds_enqueued``/``session_items``/``fetched``/``failed``/
-    #: ``elapsed_seconds``/``reason``). ``product_end`` пишется и при нулевом выходе —
-    #: именно этот случай раньше был немым. Одна пара на продукт (не на URL).
+    #: ``elapsed_seconds``/``reason``/``partial_docs``). ``product_end`` пишется и при
+    #: нулевом выходе — именно этот случай раньше был немым. Одна пара на продукт
+    #: (не на URL).
     product_events: list[dict[str, Any]] = []
 
     #: Наблюдаемость эмбеддинга: измеренная пропускная способность — по строке на продукт
@@ -6422,6 +6520,13 @@ def _build_corpus(
     #: отказ краула по такому URL остаётся аудитом, но перестаёт делать покрытие
     #: неполным. Объявляется до цикла — нужен и на границе продукта, и в конце фазы.
     manual_urls_by_product: dict[str, list[str]] = {}
+    #: I2/I2c: ``product_id → [url]`` документов, прочитанных **не целиком**
+    #: (``CorpusDoc.partial``). Объявляется до цикла по той же причине, что и
+    #: ``manual_urls_by_product``: нужен и на границе продукта, и в конце фазы — строка
+    #: покрытия перезаписывается дважды, и оба раза причина ``partial_extraction``
+    #: обязана быть на месте. Накопитель, а не чтение БД: документы продукта уже в
+    #: памяти, а ``corpus_docs`` не несёт ``run_id`` (общая БД — объединение корпусов).
+    partial_urls_by_product: dict[str, list[str]] = {}
     for product_id in products:
         product_started = time.perf_counter()
         ingest = _ProductIngest(product_id=product_id)
@@ -8291,6 +8396,15 @@ def _build_corpus(
                 f"roots={len(product_roots)}, "
                 f"seeds_enqueued={product_seeds_enqueued} — ячейки будут failed, не ❌"
             )
+        # I2/I2c: документы, прочитанные **не целиком**. Признак уже в ``CorpusDoc`` —
+        # здесь он только считается, чтобы попасть в две наблюдаемые точки: строку
+        # продукта (``results[].notes``) и строку покрытия (``blocked`` с причиной
+        # ``partial_extraction``). Считать из ``ingest.docs`` (память продукта), а не из
+        # БД: ``corpus_docs`` не несёт ``run_id``, и в общей БД выборка была бы
+        # объединением корпусов.
+        product_partial = [doc.url for doc in ingest.docs if doc.partial]
+        if product_partial:
+            partial_urls_by_product[product_id] = product_partial
         product_events.append(
             {
                 "event": "product_end",
@@ -8302,6 +8416,7 @@ def _build_corpus(
                 "fetched": product_fetched,
                 "failed": product_failed,
                 "docs": len(ingest.docs),
+                "partial_docs": len(product_partial),
                 # 13-manual-artifacts §3.3: «объявлено» и «дошло до корпуса» —
                 # разные факты, и разницу нельзя выводить один из другого.
                 "manual_declared": len(manual_entries),
@@ -8492,6 +8607,7 @@ def _build_corpus(
                     products=[product_id],
                     reasons=zero_source_reasons,
                     resolved_manually=manual_urls_by_product,
+                    partial_docs=partial_urls_by_product,
                 )
             except Exception as exc:  # noqa: BLE001 — наблюдаемость важнее персистенции
                 errors.append(
@@ -8559,6 +8675,9 @@ def _build_corpus(
                 products=products,
                 reasons=zero_source_reasons,
                 resolved_manually=manual_urls_by_product,
+                # I2/I2c: та же карта, что на границе продукта — конец фазы
+                # перезаписывает строки покрытия и обязан сохранить причину.
+                partial_docs=partial_urls_by_product,
             )
         except Exception as exc:  # noqa: BLE001 — наблюдаемость важнее персистенции
             errors.append(

@@ -467,10 +467,22 @@ def extracted_doc_from_response(
         verify_content_hash(content_str.encode("utf-8"), str(claimed_hash))
     extractor_version = text.get("extractor_version") or version
     page_count = text.get("page_count")
+    # Частичность (аддитивный канал контракта): ядро не выводит её из текста, поэтому
+    # отсутствие поля означает «edge о частичности не сообщил», а не «прочитано всё».
+    partial = text.get("partial") is True
+    partial_reason = text.get("partial_reason")
+    pages_converted = text.get("pages_converted")
     return ExtractedDoc(
         text=content_str,
         content_hash=content_hash(content_str),
         extractor_version=str(extractor_version),
         page_count=int(page_count) if page_count is not None else None,
         error=None,
+        partial=partial,
+        partial_reason=(str(partial_reason) if partial_reason else None) if partial else None,
+        pages_converted=(
+            int(pages_converted) if pages_converted is not None else None
+        )
+        if partial
+        else None,
     )

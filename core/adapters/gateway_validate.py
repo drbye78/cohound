@@ -542,6 +542,39 @@ def validate_extracted_doc(
                 "schema", "text.page_count должен быть целым числом или null", "text.page_count"
             )
         )
+    # Частичное извлечение (аддитивно к контракту): признак, счётчик прочитанных
+    # страниц и причина. Без них документ, прочитанный на 7 страницах из 2763, приезжал
+    # бы из DMZ неотличимым от полного — то есть шов терял бы факт, который локальный
+    # путь сохраняет.
+    pages_converted = text.get("pages_converted")
+    if pages_converted is not None and not _is_int(pages_converted):
+        issues.append(
+            ValidationIssue(
+                "schema",
+                "text.pages_converted должен быть целым числом или null",
+                "text.pages_converted",
+            )
+        )
+        pages_converted = None
+    partial_raw = text.get("partial")
+    if partial_raw is not None and not isinstance(partial_raw, bool):
+        issues.append(
+            ValidationIssue(
+                "schema", "text.partial должен быть булевым или null", "text.partial"
+            )
+        )
+        partial_raw = None
+    partial_reason = text.get("partial_reason")
+    if partial_reason is not None and not isinstance(partial_reason, str):
+        issues.append(
+            ValidationIssue(
+                "schema",
+                "text.partial_reason должен быть строкой или null",
+                "text.partial_reason",
+            )
+        )
+        partial_reason = None
+    partial = bool(partial_raw)
 
     value: ExtractedDoc | None = None
     if not _has_rejecting(issues):
@@ -551,6 +584,10 @@ def validate_extracted_doc(
             extractor_version=str(version),
             page_count=page_count,
             error=None,
+            # Признак не выдумывается: ``partial=False`` — «edge о частичности не сообщил».
+            partial=partial,
+            partial_reason=(partial_reason or None) if partial else None,
+            pages_converted=pages_converted if partial else None,
         )
     return ValidatedResponse(ok=not _has_rejecting(issues), issues=issues, value=value)
 

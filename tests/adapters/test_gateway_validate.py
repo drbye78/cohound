@@ -307,6 +307,74 @@ def test_extracted_doc_happy_path() -> None:
     assert result.value.page_count == 1
 
 
+def test_extracted_doc_carries_partial_extraction_across_the_seam() -> None:
+    """Шов не теряет частичность: она приезжает признаком и числами (парность профилей).
+
+    Без этого документ, прочитанный на 7 страницах из 2763, приезжал бы из DMZ
+    неотличимым от полного, и локальный путь знал бы то, чего не знает `split`.
+    """
+    text = "# часть документа"
+    payload = {
+        "final_url": _URL,
+        "text": {
+            "content": text,
+            "hash": content_hash(text),
+            "extractor_version": "extractor-1",
+            "page_count": 2763,
+            "pages_converted": 7,
+            "partial": True,
+            "partial_reason": "docling: статус конвертации PARTIAL_SUCCESS",
+        },
+        "error": None,
+    }
+
+    result = validate_extracted_doc(payload)
+
+    assert result.ok is True
+    assert isinstance(result.value, ExtractedDoc)
+    assert result.value.partial is True
+    assert result.value.pages_converted == 7
+    assert result.value.page_count == 2763
+    assert "PARTIAL_SUCCESS" in (result.value.partial_reason or "")
+
+def test_extracted_doc_ignores_partial_counters_without_the_flag() -> None:
+    """Счётчик без признака не создаёт частичность: значения без факта не публикуются."""
+    text = "body"
+    payload = {
+        "text": {
+            "content": text,
+            "hash": content_hash(text),
+            "extractor_version": "e1",
+            "page_count": 10,
+            "pages_converted": 4,
+        }
+    }
+
+    result = validate_extracted_doc(payload)
+
+    assert result.ok is True
+    assert result.value is not None
+    assert result.value.partial is False
+    assert result.value.pages_converted is None
+
+def test_extracted_doc_rejects_malformed_partial_flag() -> None:
+    """Неверный тип признака — отказ схемы, а не «наверное, полный»."""
+    text = "body"
+    payload = {
+        "text": {
+            "content": text,
+            "hash": content_hash(text),
+            "extractor_version": "e1",
+            "partial": "yes",
+        }
+    }
+
+    result = validate_extracted_doc(payload)
+
+    assert result.ok is False
+    assert any(issue.field == "text.partial" for issue in result.issues)
+    assert result.value is None
+
 def test_extracted_doc_corrupted_hash_rejected() -> None:
     payload = {
         "text": {
