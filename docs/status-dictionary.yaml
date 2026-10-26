@@ -74,10 +74,13 @@ source_kind:
   - web
   - manual
 
-# §4.1. evidence_type — прямое или производное доказательство.
+# §4.1. evidence_type — прямое, производное доказательство или протокол отсутствия.
+# absence — законный вид (§4.2): у него нет цитаты (I22 к нему не применяется), а носитель —
+# cell_evidence с evidence_type='absence' + source_scope/scope_attested_by.
 evidence_type:
   - direct
   - derived
+  - absence
 
 # §4.2. absence_rule_type — тип правила отсутствия параметра.
 # Дефолт catalog.csv — explicit.

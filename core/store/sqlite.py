@@ -436,10 +436,16 @@ END;
 
 -- I10/I15: source_url не задаётся вручную для корпусного evidence — только резолв.
 -- (проверка делается кодом резолвера; триггер фиксирует, что source_id обязателен)
-CREATE TRIGGER IF NOT EXISTS trg_evidence_source_id
+-- Исключение — absence-evidence (§4.2): у протокола отсутствия источника нет по
+-- построению (цитировать нечего), поэтому его источник — `evidence_type='absence'`, а
+-- NULL в source_id честнее выдуманного нерезолвимого id. Триггер пересоздаётся явно:
+-- `CREATE TRIGGER IF NOT EXISTS` оставил бы старую (строгую) редакцию в уже
+-- существующих БД прогонов, и запись отсутствия падала бы там, где код её допускает.
+DROP TRIGGER IF EXISTS trg_evidence_source_id;
+CREATE TRIGGER trg_evidence_source_id
 BEFORE INSERT ON cell_evidence
 FOR EACH ROW
-WHEN NEW.source_id IS NULL
+WHEN NEW.source_id IS NULL AND NEW.evidence_type IS NOT 'absence'
 BEGIN
     SELECT RAISE(ABORT, 'I10/I15: evidence обязан иметь source_id для системного резолва');
 END;

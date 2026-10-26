@@ -27,8 +27,18 @@ class SourceKind(StrEnum):
 
 
 class EvidenceType(StrEnum):
+    """Вид доказательства (§4.1).
+
+    ``absence`` — отдельный вид, а не подвид ``direct``: у него нет и не может быть цитаты
+    (цитировать нечего — «искали и не нашли»), поэтому I22 к нему не применяется, а законное
+    место такой записи — ``cell_evidence`` с ``evidence_type='absence'`` (§4.2). Без этого
+    значения оценщик физически не мог выразить «нет»: строка протокола отсутствия получала
+    ``direct`` (или не сохранялась вовсе), и `❌` оставался недостижимым.
+    """
+
     DIRECT = "direct"
     DERIVED = "derived"
+    ABSENCE = "absence"
 
 
 class AbsenceRuleType(StrEnum):

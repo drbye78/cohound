@@ -47,6 +47,7 @@ from core.domain import (
     Status,
     TerminationReason,
 )
+from core.pipeline.evaluate import evaluate_cell
 from core.ports.store import RunIndexRef
 from core.ports.types import Chunk
 from core.store.sqlite import SCHEMA_VERSION
@@ -1289,3 +1290,149 @@ def test_corpus_coverage_round_trip_and_idempotent_upsert(
         ),
     )
     assert [c.product_id for c in store.iter_corpus_coverage(RUN_ID)] == ["p1", "p2"]
+
+
+# --------------------------------------------------------------------------- #
+# absence-evidence (§4.2): запись, чтение, узость ослабления триггера
+# --------------------------------------------------------------------------- #
+
+
+def _absence_record(**overrides: object) -> dict:
+    """Запись протокола отсутствия в форме носителя ``Cell.absence_evidence``."""
+    record: dict = {
+        "evidence_id": "ev-absence-1",
+        "run_id": RUN_ID,
+        "product_id": "p1",
+        "param_id": "param.a",
+        "source_id": None,
+        "source_url": None,
+        "citation_quote": None,
+        "content_hash": None,
+        "source_kind": None,
+        "evidence_type": "absence",
+        "source_scope": SourceScope.EXHAUSTIVE.value,
+        "scope_attested_by": "human-1",
+        "index_build_id": "cb_run",
+    }
+    record.update(overrides)
+    return record
+
+
+def test_absence_evidence_round_trip(store: SqliteStore) -> None:
+    """R4+R5: absence-evidence переживает запись и чтение, включая scope и подпись.
+
+    До правки записи отсутствия не писались вовсе, а ``iter_cells`` возвращал
+    ``absence_evidence=[]`` жёстко — отчёт и ревью не видели ``❌`` даже в одном процессе.
+    """
+    store.create_run(RUN_ID, _cfg())
+    # Ячейка несёт протокол отсутствия и в домене, и в store (I2 проверяется моделью):
+    # в store протокол уходит отдельным вызовом, как это делает ``_persist``.
+    record = _absence_record()
+    store.save_cell(
+        _cell(
+            "param.a",
+            state=CellState.EVALUATED,
+            status=Status.ABSENT,
+            absence_evidence=[record],
+        )
+    )
+    store.add_absence_evidence([record])
+
+    cell = next(store.iter_cells(RUN_ID))
+
+    assert cell.absence_evidence, "absence-evidence потерян при чтении"
+    entry = cell.absence_evidence[0]
+    assert entry["evidence_id"] == "ev-absence-1"
+    assert entry["source_scope"] == SourceScope.EXHAUSTIVE.value
+    assert entry["scope_attested_by"] == "human-1"
+    assert entry["index_build_id"] == "cb_run"
+    assert entry["source_id"] is None
+    # Чтение не подменяет вид доказательства: это протокол отсутствия.
+    assert entry["evidence_type"] == "absence"
+
+
+def test_iter_absence_evidence_is_idempotent(store: SqliteStore) -> None:
+    """Повторная запись того же ``evidence_id`` — upsert, а не дубль (S8)."""
+    store.create_run(RUN_ID, _cfg())
+    record = _absence_record()
+    store.save_cell(
+        _cell(
+            "param.a",
+            state=CellState.EVALUATED,
+            status=Status.ABSENT,
+            absence_evidence=[record],
+        )
+    )
+    store.add_absence_evidence([record])
+    store.add_absence_evidence([record])
+
+    assert len(list(store.iter_absence_evidence(RUN_ID))) == 1
+
+
+def test_source_id_trigger_still_rejects_direct_evidence_without_source(
+    store: SqliteStore,
+) -> None:
+    """Ослабление триггера узкое: ``direct`` без ``source_id`` по-прежнему отвергается (I10/I15).
+
+    Исключение сделано только для ``evidence_type='absence'``: у протокола отсутствия
+    источника нет по построению. Если бы ослабили триггер целиком, I10/I15 перестал бы
+    держаться на уровне БД для цитат.
+    """
+    with pytest.raises(sqlite3.IntegrityError, match="I10/I15"):
+        store.add_evidence_batch(
+            [
+                CellEvidence(
+                    evidence_id="ev-direct",
+                    run_id=RUN_ID,
+                    product_id="p1",
+                    param_id="param.a",
+                    source_kind=SourceKind.MANUAL,
+                    evidence_type=EvidenceType.DIRECT,
+                    source_id="src-1",
+                ).model_copy(update={"source_id": None})
+            ]
+        )
+
+
+def test_evaluated_absent_cell_survives_store_round_trip(store: SqliteStore) -> None:
+    """E2E R4+R5: ``❌`` оценщика доходит до читателя из store вместе с протоколом.
+
+    Здесь проверяется именно **звено персистенции**: ячейка, полученная ``evaluate_cell``
+    с подписью, пишется в настоящий ``SqliteStore`` и читается обратно через ``iter_cells``
+    (тот же путь, которым ячейки получает ``report_phase``).
+    """
+    from tests.pipeline.test_evaluate import (
+        _ScriptedEvaluator,
+        _absent_output,
+        _chunks,
+        _data,
+        _param,
+    )
+
+    store.create_run(RUN_ID, _cfg())
+    data = _data()
+    outcome = evaluate_cell(
+        param=_param(data),
+        product_id="p1",
+        run_id=RUN_ID,
+        evaluator=_ScriptedEvaluator([_absent_output()]),
+        chunks=_chunks(data),
+        store=store,
+        coverage=CorpusCoverage(
+            product_id="p1",
+            complete=True,
+            expected_sources=3,
+            observed_sources=3,
+            computed_at="2026-01-01T00:00:00+00:00",
+        ),
+        scope_attested_by="human-1",
+    )
+    assert outcome.cell.status is Status.ABSENT
+
+    stored = next(store.iter_cells(RUN_ID))
+
+    assert stored.status is Status.ABSENT
+    assert stored.absence_evidence, "❌ потерял протокол отсутствия при чтении из store"
+    entry = stored.absence_evidence[0]
+    assert entry["source_scope"] == SourceScope.EXHAUSTIVE.value
+    assert entry["scope_attested_by"] == "human-1"

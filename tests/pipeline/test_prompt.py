@@ -366,3 +366,76 @@ def test_compiled_prompt_save_delegates(tmp_path) -> None:
     assert isinstance(compiled, CompiledPrompt)
     path = compiled.save(tmp_path)
     assert path.name == f"{compiled.prompt_hash}.json"
+
+
+# ---------------------------------------------------------------------------
+# Доступность ❌: адресат инструкции и версия шаблона (R1/R3)
+# ---------------------------------------------------------------------------
+
+
+def test_absent_is_a_legitimate_answer_for_the_model() -> None:
+    """Шаблон не требует от модели несуществующего поля и разрешает ``❌``.
+
+    ``LLMCellOutput`` (``extra="forbid"``) не имеет полей про scope/absence-evidence,
+    поэтому инструкция «``❌`` → absence-evidence» была **неисполнима**: модель, честно не
+    нашедшая параметр, не имела способа его выразить. Теперь правило честное: evidence
+    может отсутствовать, а justification обязан назвать, что искали.
+    """
+    compiled = compile_prompt(
+        param=_param(), product_id="p1", chunks=[_chunk("c1")]
+    )
+    assert "absence-evidence" not in compiled.text
+    assert "❌ — законный ответ" in compiled.text
+    assert "что именно искал" in compiled.text
+
+
+@pytest.mark.parametrize(
+    "rule",
+    [AbsenceRuleType.PARAMETER_REFERENCE, AbsenceRuleType.DISTRIBUTION_ABSENCE],
+)
+def test_absence_guidance_is_addressed_to_the_model_not_to_a_human(
+    rule: AbsenceRuleType,
+) -> None:
+    """Гайд не обещает модели аттестацию охвата: её ставит человек (I6/I7).
+
+    Прежняя формулировка («❌ требует source_scope=exhaustive и scope_attested_by»)
+    предъявляла модели процедурное условие человека — и вдобавок поле, которого нет в
+    форме ответа.
+    """
+    guidance = ABSENCE_GUIDANCE[rule]
+    assert "❌ — законный ответ" in guidance
+    assert "требует source_scope=exhaustive" not in guidance
+    assert "ставит человек" in guidance
+
+    compiled = compile_prompt(
+        param=_param(absence_rule=rule),
+        product_id="p1",
+        chunks=[_chunk("c1")],
+    )
+    assert guidance in compiled.text
+
+
+def test_template_version_is_v2_and_v1_is_preserved() -> None:
+    """Смена текста шаблона — новая версия; старый файл остаётся провенансом прогонов."""
+    from core.pipeline.prompt import TEMPLATES_DIR, _load_template
+
+    assert TEMPLATE_VERSION == "evaluator_v2"
+    v1 = TEMPLATES_DIR / "evaluator_v1.txt"
+    v2 = TEMPLATES_DIR / "evaluator_v2.txt"
+    assert v1.is_file(), "старый шаблон удалять нельзя: он провенанс прошлых прогонов"
+    assert v2.is_file()
+    assert _load_template("evaluator_v1") != _load_template(TEMPLATE_VERSION)
+    # v1 остаётся байт-в-байт тем, чем был: hash прошлых прогонов не должен «поехать».
+    assert "❌ → absence-evidence" in _load_template("evaluator_v1")
+
+
+def test_template_bump_changes_prompt_hash_but_not_retrieval_queries() -> None:
+    """``prompt_hash`` учитывает версию шаблона; ``render_queries`` от шаблона не зависит."""
+    param = _param(concept_terms={"ru": ["r1", "r2"]})
+    compiled = compile_prompt(param=param, product_id="p1", chunks=[_chunk("c1")])
+
+    assert compiled.template_version == TEMPLATE_VERSION
+    assert compiled.prompt_hash != prompt_hash(
+        "evaluator_v1", param.rule, AbsenceRuleType.EXPLICIT.value, ["c1"]
+    )
+    assert render_queries(param) == ["Параметр A", "r1", "r2"]

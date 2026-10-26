@@ -458,8 +458,12 @@ class SqliteStore:
     def iter_cells(self, run_id: str, state: str | None = None) -> Iterator[Cell]:
         """Итерирует ячейки прогона, восстанавливая доменные ``Cell``.
 
-        ``evidence``/``absence_evidence`` не хранятся в ``cells`` — возвращаются пустыми
-        (evidence читается отдельно; Ш6 пишет его через ``add_evidence*``).
+        ``evidence`` в ``cells`` не хранится — цитаты живут в ``cell_evidence`` и читаются
+        отдельно. **Absence-evidence восстанавливается** (R5): записи
+        ``evidence_type='absence'`` приклеиваются к ячейке по ``(product_id, param_id)``
+        одним запросом на прогон. Без этого ``❌`` обеднялся при любом чтении из store —
+        отчёт (``report_phase`` читает именно ``iter_cells``) и ревью видели статус без
+        протокола отсутствия даже в одном процессе, а на resume — тем более.
         """
         sql = (
             f"SELECT {', '.join(_CELL_COLUMNS)} FROM cells WHERE run_id = ?"
@@ -468,9 +472,14 @@ class SqliteStore:
         if state is not None:
             sql += " AND state = ?"
             params.append(state)
+        absences = self._absence_by_cell(run_id)
         cursor = self.conn.execute(sql, params)
         for row in cursor:
-            yield self._row_to_cell(row)
+            cell = self._row_to_cell(row)
+            entries = absences.get((row["product_id"], row["param_id"]))
+            if entries:
+                cell = cell.model_copy(update={"absence_evidence": entries})
+            yield cell
 
     def iter_registry_cells(self, run_id: str) -> Iterator[Cell]:
         """Итерирует ячейки реестрового источника прогона (документированная поверхность).
@@ -554,6 +563,99 @@ class SqliteStore:
         )
         with self.conn:
             self.conn.executemany(sql, [self._evidence_row(ev) for ev in evs])
+
+    # -- absence-evidence (§4.2) ------------------------------------------ #
+    @staticmethod
+    def _absence_evidence_row(entry: Mapping[str, Any]) -> tuple[Any, ...]:
+        """Строка ``cell_evidence`` из записи absence-evidence (dict → колонки).
+
+        ``evidence_type`` фиксирован (``absence``), ``partition_build_id``/``retrieved_at``
+        остаются ``NULL``: у протокола отсутствия нет ни чанка-партиции, ни момента
+        извлечения. ``source_id``/``content_hash``/``source_kind`` — ``NULL``, когда
+        отсутствие синтетическое (цитировать нечего); это законно, PK — ``evidence_id``.
+        """
+        return (
+            entry["evidence_id"],
+            entry["run_id"],
+            entry["product_id"],
+            entry["param_id"],
+            _as_text(entry.get("source_kind")),
+            EvidenceType.ABSENCE.value,
+            entry.get("source_id"),
+            entry.get("source_url"),
+            entry.get("citation_quote"),
+            entry.get("content_hash"),
+            _as_text(entry.get("source_scope")),
+            entry.get("scope_attested_by"),
+            entry.get("index_build_id"),
+            None,
+            None,
+        )
+
+    def add_absence_evidence(self, entries: list[Mapping[str, Any]]) -> None:
+        """Пишет absence-evidence в ``cell_evidence`` (``evidence_type='absence'``).
+
+        Записи приходят словарями (носитель — ``Cell.absence_evidence``): у синтетической
+        записи протокола нет ``source_id``, поэтому типизированный ``CellEvidence`` (требует
+        непустой ``source_id``) для неё не строится. ``evidence_id`` детерминирован у
+        вызывающего (:func:`core.domain.models.absence_evidence_id`), upsert идемпотентен.
+        """
+        if not entries:
+            return
+        placeholders = ", ".join("?" for _ in _EVIDENCE_COLUMNS)
+        sql = (
+            f"INSERT OR REPLACE INTO cell_evidence ({', '.join(_EVIDENCE_COLUMNS)})"
+            f" VALUES ({placeholders})"
+        )
+        with self.conn:
+            self.conn.executemany(
+                sql, [self._absence_evidence_row(entry) for entry in entries]
+            )
+
+    @staticmethod
+    def _row_to_absence(row: sqlite3.Row) -> dict[str, Any]:
+        """Строка ``cell_evidence`` → запись ``absence_evidence`` (носитель — словарь).
+
+        Ключи совпадают с тем, что кладёт в ячейку Ш6 (``evaluate._absence_dict`` /
+        протокол отсутствия), поэтому читатель приклеивает запись к ``Cell`` как есть.
+        """
+        return {
+            "evidence_id": row["evidence_id"],
+            "run_id": row["run_id"],
+            "product_id": row["product_id"],
+            "param_id": row["param_id"],
+            "source_id": row["source_id"],
+            "source_url": row["source_url"],
+            "citation_quote": row["citation_quote"],
+            "content_hash": row["content_hash"],
+            "source_kind": row["source_kind"],
+            "evidence_type": EvidenceType.ABSENCE.value,
+            "source_scope": row["source_scope"],
+            "scope_attested_by": row["scope_attested_by"],
+            "index_build_id": row["index_build_id"],
+        }
+
+    def iter_absence_evidence(self, run_id: str) -> Iterator[dict[str, Any]]:
+        """Читает absence-evidence прогона (по словарю на запись, R5).
+
+        Порядок — порядок вставки (``rowid``). Аннотации аудита покрытия (``corpus_*``)
+        строками не становятся: у ``cell_evidence`` нет колонки под JSON, а их машинный
+        источник — персистентная ``corpus_coverage`` (отчёт читает её оттуда).
+        """
+        sql = (
+            f"SELECT {', '.join(_EVIDENCE_COLUMNS)} FROM cell_evidence"
+            " WHERE run_id = ? AND evidence_type = ? ORDER BY rowid"
+        )
+        for row in self.conn.execute(sql, (run_id, EvidenceType.ABSENCE.value)):
+            yield self._row_to_absence(row)
+
+    def _absence_by_cell(self, run_id: str) -> dict[tuple[str, str], list[dict[str, Any]]]:
+        """Группирует absence-записи прогона по ключу ячейки (одним запросом, R5)."""
+        grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}
+        for entry in self.iter_absence_evidence(run_id):
+            key = (entry["product_id"], entry["param_id"])
+            grouped.setdefault(key, []).append(entry)
+        return grouped
 
     # -- search log ------------------------------------------------------ #
     def log_search(self, entry: SearchLogEntry) -> None:

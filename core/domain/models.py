@@ -715,6 +715,20 @@ def derived_evidence_id(
     return "ev_" + hashlib.sha256(raw).hexdigest()[:24]
 
 
+def absence_evidence_id(run_id: str, product_id: str, param_id: str, seq: int) -> str:
+    """Детерминированный ``evidence_id`` absence-записи (S8).
+
+    Отличие от :func:`derived_evidence_id` — отсутствие не имеет ``source_id`` (цитировать
+    нечего), поэтому ключом служит литерал ``absence`` и порядковый номер записи в ячейке.
+    ``NULL`` в PK невозможен, а ключ включает ``(run, product, param)`` — записи разных
+    ячеек не склеиваются, даже если обе синтетические.
+    """
+    import hashlib
+
+    raw = f"{run_id}|{product_id}|{param_id}|absence|{seq}".encode()
+    return "ev_" + hashlib.sha256(raw).hexdigest()[:24]
+
+
 # ---------------------------------------------------------------------------
 # Инварианты ячейки (§2.3) и Р-2 (§4.1)
 # ---------------------------------------------------------------------------

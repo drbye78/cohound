@@ -113,6 +113,7 @@ from core.domain.models import (
     Upstream,
     UpstreamRef,
     Violation,
+    absence_evidence_id,
     canonical_rate_limit,
     derived_evidence_id,
 )
@@ -254,6 +255,7 @@ __all__ = [
     "Upstream",
     "UpstreamRef",
     "Violation",
+    "absence_evidence_id",
     "canonical_rate_limit",
     "derived_evidence_id",
     # r2

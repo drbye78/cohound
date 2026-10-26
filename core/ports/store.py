@@ -88,6 +88,21 @@ class StorePort(Protocol):
 
     def add_evidence_batch(self, evs: list[CellEvidence]) -> None: ...
 
+    def add_absence_evidence(self, entries: list[Mapping[str, Any]]) -> None:
+        """Пишет absence-evidence (§4.2) в ``cell_evidence`` как ``evidence_type='absence'``.
+
+        Записи — словари носителя ``Cell.absence_evidence`` (у протокола отсутствия нет
+        ``source_id``, поэтому типизированный ``CellEvidence`` для него не строится).
+        ``evidence_id`` детерминирован вызывающим, upsert идемпотентен (S8).
+        """
+
+    def iter_absence_evidence(self, run_id: str) -> Iterator[dict[str, Any]]:
+        """Читает absence-записи прогона (по словарю на запись).
+
+        Симметричен :meth:`add_absence_evidence`; ``iter_cells`` приклеивает их к ячейке,
+        поэтому ``❌`` не теряет протокол отсутствия при чтении из store (отчёт/ревью).
+        """
+
     def log_search(self, entry: SearchLogEntry) -> None: ...
 
     def save_exhaustion(self, pe: ProtocolExhaustion) -> None: ...

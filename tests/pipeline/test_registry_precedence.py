@@ -285,9 +285,17 @@ def _final_cell(store: SqliteStore, param_id: str) -> Cell:
 
 
 def _evidence_kinds(store: SqliteStore, param_id: str) -> set[str]:
+    """Виды источников **положительного** evidence ячейки (контуры, которыми она получена).
+
+    Строки ``evidence_type='absence'`` исключены намеренно: это протокол отсутствия, а не
+    контур свидетельства. У него нет ``source_id``/``source_kind`` по построению (цитировать
+    нечего), поэтому включение таких строк добавило бы ``None`` в набор видов источников и
+    сделало бы сравнение контуров бессмысленным.
+    """
     rows = store.conn.execute(
         "SELECT source_kind FROM cell_evidence"
-        " WHERE run_id = ? AND product_id = ? AND param_id = ?",
+        " WHERE run_id = ? AND product_id = ? AND param_id = ?"
+        " AND COALESCE(evidence_type, '') <> 'absence'",
         (RUN_ID, "p1", param_id),
     ).fetchall()
     return {row["source_kind"] for row in rows}

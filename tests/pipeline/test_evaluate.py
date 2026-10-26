@@ -22,11 +22,15 @@ from core.domain import (
     CorpusCoverage,
     Importance,
     LLMCellOutput,
+    LLMEvidence,
     ParamType,
     SourceKind,
+    SourceScope,
     Status,
+    check_cell,
 )
 from core.pipeline.evaluate import (
+    ABSENCE_UNATTESTED_REVIEW_REASON,
     EvaluationOutcome,
     evaluate_batch,
     evaluate_cell,
@@ -103,12 +107,16 @@ class _RecordingStore:
     def __init__(self) -> None:
         self.cells: list = []
         self.evidence: list = []
+        self.absence: list[dict] = []
 
     def save_cell(self, cell) -> None:  # noqa: ANN001
         self.cells.append(cell)
 
     def add_evidence_batch(self, evs) -> None:  # noqa: ANN001
         self.evidence.extend(evs)
+
+    def add_absence_evidence(self, entries) -> None:  # noqa: ANN001
+        self.absence.extend(entries)
 
 
 class _CoverageStore(_RecordingStore):
@@ -133,9 +141,10 @@ def _evaluate(  # noqa: ANN001 - тестовый helper
     min_retrieval_score: float | None = None,
     coverage=None,
     scope_attested_by: str | None = None,
+    param=None,
 ):
     return evaluate_cell(
-        param=_param(data),
+        param=_param(data) if param is None else param,
         product_id=data["product_id"],
         run_id=data["run_id"],
         evaluator=evaluator,
@@ -663,3 +672,165 @@ def test_evaluate_batch_isolates_failures(monkeypatch: pytest.MonkeyPatch) -> No
     assert len(outcomes) == 1
     assert len(errors) == 1
     assert "param_beta" in errors[0]
+
+
+# ---------------------------------------------------------------------------
+# Доступность ❌: аттестация охвата, absence-evidence и её персистенция
+# ---------------------------------------------------------------------------
+
+#: Цитата «ближайшего» фрагмента, где искомого свойства нет (естественное поведение модели).
+_ABSENT_QUOTE_SOURCE = "chunk_a1"
+_ABSENT_QUOTE = "Документ описывает экспорт данных в формате CSV."
+
+
+def _absent_with_quote() -> LLMCellOutput:
+    """``❌`` **с цитатой**: модель процитировала фрагмент, в котором свойства нет.
+
+    Это не вырожденный случай, а самый частый: модель выдаёт ближайший найденный текст.
+    До правки такая ячейка теряла подпись человека целиком — синтетическая запись-аттестация
+    создавалась только при ``if not absences``, поэтому I2b не выполнялся никогда.
+    """
+    return LLMCellOutput(
+        status=Status.ABSENT,
+        justification="Искал «свойство альфа»; в переданных фрагментах только экспорт CSV.",
+        evidence=[LLMEvidence(source_id=_ABSENT_QUOTE_SOURCE, quote=_ABSENT_QUOTE)],
+    )
+
+
+def _distribution_param(data: dict) -> CatalogRow:
+    """Строка каталога с ``absence_rule=distribution_absence`` (требует аттестации, I2b)."""
+    return _param(data).model_copy(
+        update={"absence_rule": AbsenceRuleType.DISTRIBUTION_ABSENCE}
+    )
+
+
+@pytest.mark.parametrize(
+    "factory",
+    [_absent_output, _absent_with_quote],
+    ids=["without_quote", "with_quote"],
+)
+def test_attested_distribution_absence_is_reachable(factory) -> None:  # noqa: ANN001
+    """Подпись есть → ``❌`` публикуется, и подпись стоит на записи протокола (I2b).
+
+    Тест обязан падать на коде до правки: ``distribution_absence`` + ABSENT уходил в
+    ``failed`` при любом ответе модели (и с цитатой, и без), потому что ни одна
+    absence-запись не несла ``source_scope=exhaustive`` вместе с ``scope_attested_by``.
+    """
+    data = _data()
+    outcome = _evaluate(
+        data,
+        _ScriptedEvaluator([factory()]),
+        param=_distribution_param(data),
+        scope_attested_by="Roger",
+    )
+
+    assert outcome.cell.state is CellState.EVALUATED
+    assert outcome.cell.status is Status.ABSENT
+    assert outcome.failure_kind is None
+    asserted = [
+        entry
+        for entry in outcome.cell.absence_evidence
+        if entry.get("source_scope") == SourceScope.EXHAUSTIVE.value
+        and entry.get("scope_attested_by") == "Roger"
+    ]
+    assert asserted, outcome.cell.absence_evidence
+    # Доменный валидатор I2b принимает ячейку (исключения нет).
+    assert check_cell(outcome.cell) == []
+    assert not [note for note in outcome.validation.notes if "I2b" in note]
+
+
+@pytest.mark.parametrize("attestation", [None, ""], ids=["no_signature", "empty_signature"])
+def test_unattested_distribution_absence_is_pending_candidate_not_failed(
+    attestation,
+) -> None:  # noqa: ANN001
+    """Нет подписи → ``pending``-кандидат с видимой причиной, а **не** ``failed`` (I4).
+
+    Процедурное условие (нет человеческой аттестации охвата) — вопрос к человеку (I6/I7),
+    а не сбой прибора: ``failed`` сделал бы честное «нет» хуже незнания (I4).
+    """
+    data = _data()
+    outcome = _evaluate(
+        data,
+        _ScriptedEvaluator([_absent_output()]),
+        param=_distribution_param(data),
+        scope_attested_by=attestation,
+    )
+
+    assert outcome.cell.state is CellState.PENDING
+    assert outcome.cell.state is not CellState.FAILED
+    assert outcome.cell.status is None
+    assert outcome.cell.review_reason == ABSENCE_UNATTESTED_REVIEW_REASON
+    assert outcome.cell.reviewed_by is None  # I6/I7: решает человек
+    assert outcome.failure_kind is None
+    # Протокол отсутствия сохранён в ячейке: ревью видит, что искали.
+    assert outcome.cell.absence_evidence
+    assert any("I2b" in note for note in outcome.validation.notes)
+
+
+def test_i2b_is_not_weakened_for_distribution_absence() -> None:
+    """I2b остаётся прежним: без ``exhaustive`` на одной записи ``❌`` недопустим."""
+    with pytest.raises(ValueError, match="I2b"):
+        Cell(
+            run_id="run_eval_1",
+            product_id="p1",
+            param_id="param_alpha",
+            state=CellState.EVALUATED,
+            status=Status.ABSENT,
+            absence_rule=AbsenceRuleType.DISTRIBUTION_ABSENCE,
+            absence_evidence=[
+                {
+                    "evidence_id": "ev_absence",
+                    "source_id": None,
+                    "source_scope": SourceScope.PARTIAL.value,
+                    "scope_attested_by": "Roger",
+                }
+            ],
+        )
+
+
+def test_persist_writes_absence_evidence_with_attestation() -> None:
+    """``_persist`` пишет протокол отсутствия (R4), а не только цитаты модели.
+
+    До правки ``_persist`` писал исключительно ``validation.resolved_evidence``, поэтому
+    absence-запись не попадала в store никогда — ``❌`` существовал лишь в памяти процесса.
+    """
+    data = _data()
+    store = _RecordingStore()
+    outcome = _evaluate(
+        data,
+        _ScriptedEvaluator([_absent_output()]),
+        store=store,
+        scope_attested_by="Roger",
+    )
+
+    assert outcome.cell.status is Status.ABSENT
+    assert store.absence, "absence-evidence не записан в store"
+    record = store.absence[0]
+    assert record["evidence_type"] == "absence"
+    assert record["source_scope"] == SourceScope.EXHAUSTIVE.value
+    assert record["scope_attested_by"] == "Roger"
+    # PK не NULL и не пуст: синтетическая запись получает детерминированный id.
+    assert record["evidence_id"]
+    assert record["run_id"] == data["run_id"]
+    assert record["product_id"] == data["product_id"]
+    assert record["param_id"] == data["param"]["param_id"]
+
+
+def test_absence_record_id_is_deterministic_per_cell() -> None:
+    """Повторная оценка ячейки перезаписывает ту же строку, а не плодит новую (S8)."""
+    data = _data()
+    first = _evaluate(data, _ScriptedEvaluator([_absent_output()]))
+    second = _evaluate(data, _ScriptedEvaluator([_absent_with_quote()]))
+
+    first_ids = [
+        entry.get("evidence_id")
+        for entry in first.cell.absence_evidence
+        if entry.get("evidence_type") == "absence"
+    ]
+    second_ids = [
+        entry.get("evidence_id")
+        for entry in second.cell.absence_evidence
+        if entry.get("evidence_type") == "absence"
+    ]
+    assert len(first_ids) == 1, "протокол отсутствия обязан быть ровно один"
+    assert first_ids == second_ids

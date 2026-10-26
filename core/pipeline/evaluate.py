@@ -50,6 +50,7 @@ from core.domain import (
     Cell,
     CellState,
     CorpusCoverage,
+    EvidenceType,
     FailureKind,
     LLMCellOutput,
     Satellite,
@@ -58,6 +59,7 @@ from core.domain import (
     Status,
 )
 from core.domain.anchors import SourceResolver
+from core.domain.models import absence_evidence_id
 from core.pipeline.eval_cache import (
     EVAL_CACHE_FORMAT,
     EvalVerdictCache,
@@ -91,6 +93,7 @@ from core.ports.vector_index import (
 from core.util.hashing import content_hash
 
 __all__ = [
+    "ABSENCE_UNATTESTED_REVIEW_REASON",
     "CORPUS_INCOMPLETE_REVIEW_REASON",
     "DEFAULT_QUERY_EMBED_BATCH",
     "DEFAULT_RETRIEVAL_CUTOFF_K",
@@ -109,6 +112,19 @@ __all__ = [
 #: Ф0: причина ``pending``-кандидата, когда ``❌`` предложен при неполном корпусе.
 #: Свободнотекстовая аннотация (не статус/не перечисление), как ``precedence_conflict``.
 CORPUS_INCOMPLETE_REVIEW_REASON = "corpus_incomplete_absence"
+
+#: I2b/I6/I7: причина ``pending``-кандидата, когда ``❌`` механически недоказуем —
+#: нет человеческой аттестации охвата (``source_scope=exhaustive`` + ``scope_attested_by``).
+#:
+#: **Почему не ``failed``.** Отсутствие подписи — процедурное условие, а не сбой прибора
+#: (I4). Если вести этот случай в ``failed``, то честное «в переданных фрагментах этого
+#: нет» станет **хуже** незнания: ``❓`` хотя бы остаётся в карте, а ``failed`` выпадает из
+#: неё целиком. Поэтому исход — ``pending``-кандидат с видимой причиной: решает человек.
+ABSENCE_UNATTESTED_REVIEW_REASON = "absence_unattested"
+
+#: ``seq`` записи протокола отсутствия в ``evidence_id``. Фиксирован (а не «после цитат»),
+#: чтобы повторная оценка ячейки перезаписывала ту же строку ``cell_evidence``.
+_PROTOCOL_ABSENCE_SEQ = 0
 
 #: Максимум запросов на ячейку (S13/I16): title + концепт-термины ru → en.
 MAX_QUERIES = 3
@@ -433,6 +449,10 @@ def _absence_dict(ev) -> dict:  # noqa: ANN001 - CellEvidence, без импор
         "citation_quote": ev.citation_quote,
         "content_hash": ev.content_hash,
         "source_kind": ev.source_kind.value,
+        # Модельная запись — цитата, а не протокол отсутствия: в ``cell_evidence`` она уже
+        # лежит как ``direct`` (её пишет ``_persist``), и дублировать её как ``absence``
+        # значило бы переписать ту же строку другим ``evidence_type``.
+        "evidence_type": EvidenceType.DIRECT.value,
         "source_scope": ev.source_scope.value if ev.source_scope else None,
         "scope_attested_by": ev.scope_attested_by,
         # R7/09 §8.1: та же привязка, что у ``cell_evidence`` — композиция прогона.
@@ -444,6 +464,8 @@ def _build_absence_evidence(
     param: CatalogRow,
     validation: ValidationResult,
     *,
+    run_id: str,
+    product_id: str,
     scope_attested_by: str | None = None,
     composition_id: str | None = None,
 ) -> tuple[list[dict], str | None]:
@@ -455,28 +477,54 @@ def _build_absence_evidence(
     двух — ещё и ``scope_attested_by``, который ставит **человек**). Если подтверждённых
     цитат нет, ставится синтетическая запись протокола над срезом; недоказуемость на
     уровне эшелона (нехватка exhaustive/attestation) возвращается как ошибка — вызывающий
-    уводит её в ``failed``/preliminary, а не публикует ``❌`` молча.
+    уводит её в ``pending``-кандидат, а не публикует и не теряет ``❌`` молча.
+
+    **Запись-аттестация добавляется всегда.** Подпись человека прикладывается к отсутствию
+    независимо от того, дала ли модель цитаты: пока синтетическая запись создавалась только
+    при ``if not absences``, ``❌`` с цитатой («ближайший фрагмент, где этого нет») не нёс
+    подписи ни на одной записи, и I2b не выполнялся **никогда** — ровно тот случай, когда
+    модель ведёт себя естественно. Модельные записи остаются без ``source_scope``
+    (охват аттестует человек, I6/I7), запись протокола несёт и ``source_scope``, и
+    ``scope_attested_by``.
 
     ``scope_attested_by`` — явная человеческая аттестация, переданная вызывающим
-    (composition root / решение гейта). Она проставляется на синтетическую запись, чтобы
-    Ф0-гейт мог отличить принятый человеком риск от машинного ``❌`` при неполном корпусе.
+    (composition root / решение гейта). Роль записи-аттестации: ``source_scope=exhaustive``
+    ставится **только** при непустой подписи — иначе ``unknown``, и I2b честно не проходит.
 
     ``composition_id`` — композиция прогона (``RetrievalResult.build_id``). Синтетическая
     запись не имеет чанка, но привязана к сборке **прогона**, а не к партиции, поэтому
     несёт ``index_build_id=composition_id`` (R7/09 §8.1).
+
+    ``evidence_id`` синтетической записи детерминирован
+    (:func:`core.domain.absence_evidence_id`) и не зависит от числа цитат модели: у записи
+    протокола фиксированный ``seq``, поэтому повторная оценка ячейки перезаписывает ту же
+    строку ``cell_evidence``, а не плодит новую.
     """
     absences = [_absence_dict(ev) for ev in validation.resolved_evidence]
-    if not absences:
-        absences.append(
-            {
-                "evidence_id": None,
-                "source_id": None,
-                "source_scope": SourceScope.UNKNOWN.value,
-                "scope_attested_by": scope_attested_by,
-                "index_build_id": composition_id,
-                "note": "явное отсутствие по переданному срезу фрагментов",
-            }
-        )
+    absences.append(
+        {
+            "evidence_id": absence_evidence_id(
+                run_id, product_id, param.param_id, _PROTOCOL_ABSENCE_SEQ
+            ),
+            "run_id": run_id,
+            "product_id": product_id,
+            "param_id": param.param_id,
+            "source_id": None,
+            "source_url": None,
+            "citation_quote": None,
+            "content_hash": None,
+            "source_kind": None,
+            "evidence_type": EvidenceType.ABSENCE.value,
+            "source_scope": (
+                SourceScope.EXHAUSTIVE.value
+                if scope_attested_by
+                else SourceScope.UNKNOWN.value
+            ),
+            "scope_attested_by": scope_attested_by,
+            "index_build_id": composition_id,
+            "note": "протокол отсутствия над переданным срезом фрагментов",
+        }
+    )
 
     if param.absence_rule in {
         AbsenceRuleType.PARAMETER_REFERENCE,
@@ -630,7 +678,12 @@ def _unresolved_cell(
     run_id: str,
     provenance: tuple[str | None, str | None, str | None],
 ) -> Cell:
-    """Собирает ``failed``/``preliminary``-ячейку без статуса (I4/I13)."""
+    """Собирает ``failed``/``preliminary``/``pending``-ячейку без статуса (I4/I13).
+
+    ``pending`` — исход «механически недоказуемого, но не сбойного» ответа (I2b без
+    человеческой аттестации охвата): статуса нет, причина видна в ``review_reason``,
+    протокол отсутствия дописывается вызывающим через ``model_copy``.
+    """
     index_build_id, retrieval_profile, retrieval_params_json = provenance
     return Cell(
         run_id=run_id,
@@ -697,6 +750,37 @@ def _record_cell_provenance(
     )
 
 
+def _absence_records(cell: Cell) -> list[dict]:
+    """Отбирает записи ``cell.absence_evidence``, которые являются протоколом отсутствия.
+
+    Носитель ``Cell.absence_evidence`` смешивает два вида записей:
+
+    * **цитаты модели** (:func:`_absence_dict`) — они уже лежат в ``cell_evidence`` с
+      ``evidence_type=direct`` (их пишет ``add_evidence_batch``); переписывать их как
+      ``absence`` значило бы подменить вид доказательства;
+    * **протокол отсутствия** (``evidence_type='absence'``) — у него нет чанка и цитаты,
+      и именно он иначе не персистился вовсе (пятое звено разрыва: ``❌`` живой ячейки
+      терял свою absence-запись на чтении из store).
+
+    Аннотации аудита покрытия (``corpus_*``) сюда не попадают: их машинный источник —
+    персистентная ``corpus_coverage``, а не урезанная строка ``cell_evidence`` без колонки
+    под JSON. Возвращает копии с достроенными ключами ячейки (``run_id``/``product_id``/
+    ``param_id``) — запись, пришедшая из ещё не персистированной ячейки, может их не нести.
+    """
+    records: list[dict] = []
+    for entry in cell.absence_evidence:
+        if entry.get("evidence_type") != EvidenceType.ABSENCE.value:
+            continue
+        if not entry.get("evidence_id"):
+            continue
+        record = dict(entry)
+        record.setdefault("run_id", cell.run_id)
+        record.setdefault("product_id", cell.product_id)
+        record.setdefault("param_id", cell.param_id)
+        records.append(record)
+    return records
+
+
 def _persist(
     store: StorePort | None,
     cell: Cell,
@@ -717,6 +801,12 @@ def _persist(
     ``prompt_hash``/``model_id`` — аддитивный провенанс ячейки (колонки ``cells`` существуют,
     но доменная модель их не несёт). Пишутся только для реально сохранённой ячейки, поэтому
     при ``kept_high`` чужой провенанс не затирается.
+
+    **Absence-evidence (R4, §4.2).** Протокол отсутствия пишется тем же батч-механизмом, что
+    и прочие evidence (``add_absence_evidence``), с ``evidence_type='absence'`` и
+    ``source_scope``/``scope_attested_by`` из записи. Без этого ``❌`` существовал только в
+    памяти процесса оценки: отчёт и ревью читают ячейки из store, где отсутствие не лежало
+    никогда. Store-двойники без метода пропускаются — как у прочих аддитивных писателей.
     """
     if store is None:
         return
@@ -738,6 +828,12 @@ def _persist(
         )
     if validation is not None and validation.resolved_evidence:
         store.add_evidence_batch(validation.resolved_evidence)
+    # Absence пишется независимо от прецедента — как и прочие evidence: строки
+    # ``cell_evidence`` детерминированы (S8) и переживают upsert ячейки.
+    records = _absence_records(cell)
+    writer = getattr(store, "add_absence_evidence", None)
+    if records and callable(writer):
+        writer(records)
 
 
 def evaluate_cell(
@@ -780,7 +876,10 @@ def evaluate_cell(
     :param coverage: покрытие корпуса продукта (Ф0). ``None`` — прочитать из store
         (``read_corpus_coverage``) либо, если записи нет, сохранить прежнее поведение.
     :param scope_attested_by: человеческая аттестация охвата для ``❌`` (Ф0). Не
-        подставляется автоматически: это решение человека, переданное вызывающим.
+        подставляется автоматически: это решение человека, переданное вызывающим. Без неё
+        ``parameter_reference``/``distribution_absence`` (I2b) дают ``pending``-кандидата
+        с ``review_reason=absence_unattested`` — не ``failed``: отсутствие подписи это
+        процедурное условие, а не сбой прибора (I4).
     :param extra_instructions: дополнительный текст промпта (в ``prompt_hash`` §5 не
         входит, но входит в текст и потому в ключ кэша вердиктов).
     :param eval_cache: межпрогонный кэш сырых вердиктов (:class:`EvalVerdictCache`).
@@ -918,25 +1017,49 @@ def evaluate_cell(
             absence_evidence, absence_error = _build_absence_evidence(
                 param,
                 last_validation,
+                run_id=run_id,
+                product_id=product_id,
                 scope_attested_by=scope_attested_by,
                 composition_id=provenance[0],
             )
             if absence_error is not None:
-                # Механически недоказуемое ❌ → не публикуем: failed (strict) / кандидат.
-                return _unresolved_outcome(
-                    strict=strict,
-                    kind=FailureKind.VALIDATION_FAILED.value,
-                    validation=last_validation,
-                    notes=[absence_error],
+                # I2b не выполнен: ``❌`` механически недоказуем — нет человеческой
+                # аттестации охвата. Это вопрос к человеку (I6/I7), а не сбой прибора (I4),
+                # поэтому исход — ``pending``-кандидат: ``failed`` сделал бы честное «нет»
+                # хуже незнания (``❓`` остаётся в карте, ``failed`` выпадает из неё).
+                # Протокол отсутствия сохраняется в ячейке: ревью видит, что искали.
+                pending = _unresolved_cell(
+                    state=CellState.PENDING,
                     param=param,
                     product_id=product_id,
                     run_id=run_id,
                     provenance=provenance,
-                    prompt_hash=compiled.prompt_hash,
-                    store=store,
-                    raw=last_response.raw,
+                ).model_copy(
+                    update={
+                        "evidence": list(out.evidence),
+                        "absence_evidence": absence_evidence,
+                        "review_reason": ABSENCE_UNATTESTED_REVIEW_REASON,
+                    }
+                )
+                _persist(
+                    store,
+                    pending,
+                    last_validation,
                     protected=protected,
+                    prompt_hash=compiled.prompt_hash,
                     model_id=request.model_id,
+                )
+                return EvaluationOutcome(
+                    cell=pending,
+                    prompt_hash=compiled.prompt_hash,
+                    validation=ValidationResult(
+                        ok=last_validation.ok,
+                        failure_kind=None,
+                        notes=[*last_validation.notes, absence_error],
+                        resolved_evidence=last_validation.resolved_evidence,
+                    ),
+                    failure_kind=None,
+                    raw=last_response.raw,
                 )
 
             # Ф0/I2c: неполный корпус не доказывает отсутствие. Машинный ``❌`` при
