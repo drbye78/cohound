@@ -37,12 +37,14 @@ from core.domain import REQUIRED_EXHAUSTION_CONTOURS
 from core.domain.enums import (
     CellState,
     ChangeClass,
+    DenialStrength,
     CrawlStrategy,
     DocumentLevel,
     EndpointKind,
     LLMScenario,
     RankingPolicy,
     RunMode,
+    StaleReason,
     Status,
     TerminationReason,
 )
@@ -50,6 +52,7 @@ from core.domain.models import (
     METHODOLOGY_VERSION,
     CatalogRow,
     Cell,
+    EvidenceScope,
     CorpusCoverage,
     CrawlProvenance,
     CrawlRunConfig,
@@ -78,6 +81,7 @@ from core.pipeline.report import (
     PublishBlockedError,
     build_manifest,
     collect_i3_anomalies,
+    compact_search_effort,
     collect_corpus_coverage_anomalies,
     diff_boundary_violations,
     render_battle_card,
@@ -148,13 +152,14 @@ def _cell(
             evidence=[LLMEvidence(source_id="src.1", quote="цитата")],
         )
     if status is Status.ABSENT:
+        # Вариант 2: публикуемое «нет» несёт класс силы отрицания (I2).
         return Cell(
             run_id=RUN_ID,
             product_id=product_id,
             param_id=param_id,
             state=state,
             status=status,
-            absence_evidence=[{"source_scope": "partial"}],
+            evidence_scope=EvidenceScope.for_registry_absence(registry_ids=["reg"]),
         )
     if status is Status.NOT_APPLICABLE:
         return Cell(
@@ -330,6 +335,104 @@ def test_build_manifest_carries_provenance_and_epsilon(tmp_path: Path) -> None:
     )
     assert override.ranking_epsilon == 0.0
     assert override.settings_provenance == {"ranking_epsilon": {"source": "default"}}
+
+
+def test_diff_names_serp_rounds_change_from_provenance() -> None:
+    """``hound diff`` называет смену раундов SERP **значением**, а не «иная ось».
+
+    Отдельного столбца у оси нет — объявленное число живёт в
+    ``search_effort_budget_json.serp.rounds.declared``. Без этого геттера смена раундов
+    (новый корпус, новый ``run_id``) диагностировалась бы общей строкой «поле не
+    восстановимо из манифеста», и оператор не увидел бы, **что** изменилось.
+    """
+    def _effort(rounds: int) -> str:
+        return json.dumps({"serp": {"rounds": {"declared": rounds, "executed": rounds}}})
+
+    prev = _manifest(
+        execution_contract_digest="ec_1", search_effort_budget_json=_effort(0)
+    )
+    curr = _manifest(
+        execution_contract_digest="ec_2", search_effort_budget_json=_effort(2)
+    )
+    reasons = diff_boundary_violations(prev, curr)
+    assert (
+        "execution_change: execution_contract_digest: serp_rounds: 0 → 2" in reasons
+    ), reasons
+    # Историческая строка без канала (оба ``None``) — по-прежнему «не восстановимо».
+    legacy = diff_boundary_violations(
+        _manifest(execution_contract_digest="ec_1"),
+        _manifest(execution_contract_digest="ec_2"),
+    )
+    assert any(
+        "serp_rounds" in reason and "не восстановимо" in reason for reason in legacy
+    ), legacy
+
+
+def test_build_manifest_records_search_effort_state() -> None:
+    """I23/§5: объявленный и израсходованный поисковый бюджет доезжает до манифеста.
+
+    Колонка ``runs.search_effort_budget_json`` читалась отчётом, но не писалась никем —
+    всегда ``null``. Теперь её заполняет фаза отчёта из durable-провенанса контура;
+    здесь проверяется контракт ``build_manifest``: явное наблюдение сильнее строки
+    прогона, а пустое наблюдение ничего не выдумывает.
+    """
+    run = SimpleNamespace(
+        methodology_version="2.1.0",
+        catalog_version="1.0.0",
+        cohort_ref="cohort.yaml",
+        mode=RunMode.STRICT,
+        search_effort_budget_json=None,
+    )
+    inputs = SimpleNamespace(run=run, package=None)
+    plan = SimpleNamespace(
+        run_id="run-serp-effort",
+        anchor=PRODUCT_A,
+        modules=[],
+        methodology_version="2.1.0",
+        catalog_version="1.0.0",
+        cohort_ref="cohort.yaml",
+    )
+    observed = {
+        "serp": {
+            "enabled": True,
+            "rounds": {"declared": 2, "executed": 1, "source": "run.yaml"},
+            "budget": {
+                "declared_per_round": 5,
+                "effective_per_product": 10,
+                "used": {PRODUCT_A: 4},
+                "exhausted": {PRODUCT_A: False},
+            },
+            "accepted": {PRODUCT_A: ["https://docs.test/a", "https://docs.test/b"]},
+            "termination": {PRODUCT_A: "results_exhausted"},
+            "ingest": {PRODUCT_A: {"enqueued": 2}},
+            "unavailable_reason": None,
+        }
+    }
+    manifest = build_manifest(
+        inputs=inputs,
+        plan=plan,
+        created_at="2026-01-01T00:00:00Z",
+        search_effort=compact_search_effort(observed),
+    )
+    payload = json.loads(manifest.search_effort_budget_json)
+    assert payload["serp"]["rounds"] == {
+        "declared": 2,
+        "executed": 1,
+        "source": "run.yaml",
+    }
+    assert payload["serp"]["budget"]["used"] == {PRODUCT_A: 4}
+    # Список запросов в манифест не копируется: он уже в провенансе сеанса.
+    assert "queries" not in payload["serp"]
+    # «Нашли» и «вошло в корпус» — разные факты, и второй назван сводкой.
+    assert payload["serp"]["ingest"] == {
+        PRODUCT_A: {"enqueued": 2, "dup": 0, "blacklisted": 0, "truncated": 0}
+    }
+
+    # Контур не наблюдался → поле остаётся пустым (не выдумываем нули).
+    absent = build_manifest(
+        inputs=inputs, plan=plan, created_at="2026-01-01T00:00:00Z", search_effort=None
+    )
+    assert absent.search_effort_budget_json is None
 
 
 def test_build_manifest_carries_execution_contract_digest() -> None:
@@ -850,24 +953,31 @@ def test_nda_questions_contains_only_unknown(tmp_path: Path) -> None:
 
 
 def test_nda_questions_records_i3_anomaly(tmp_path: Path) -> None:
-    """§5/I3 (v2.1): неполный протокол → аномалия, статус ``❓`` не меняется."""
+    """§5/I3 (Вариант 2): аномалия — ``❓`` **без причины**, а не без перечня контуров."""
     cells = [
-        _cell(PRODUCT_A, "param.full", Status.UNKNOWN),
-        _cell(PRODUCT_A, "param.partial", Status.UNKNOWN),
-        _cell(PRODUCT_A, "param.missing", Status.UNKNOWN),
+        _cell(PRODUCT_A, "param.known", Status.UNKNOWN),
+        _cell(PRODUCT_A, "param.legacy", Status.UNKNOWN).model_copy(
+            update={"evidence_scope": None}
+        ),
+        _cell(PRODUCT_A, "param.missing", Status.UNKNOWN).model_copy(
+            update={"evidence_scope": None}
+        ),
     ]
     exhaustions = {
-        (PRODUCT_A, "param.full"): ProtocolExhaustion(
+        # Полный протокол у ячейки с причиной: протокол — провенанс, не условие.
+        (PRODUCT_A, "param.known"): ProtocolExhaustion(
             run_id=RUN_ID,
             product_id=PRODUCT_A,
-            param_id="param.full",
+            param_id="param.known",
             contours=list(REQUIRED_EXHAUSTION_CONTOURS),
             termination_reason=TerminationReason.BUDGET_EXHAUSTED,
         ),
-        (PRODUCT_A, "param.partial"): ProtocolExhaustion(
+        # Неполный протокол у исторической строки без объекта: тоже не аномалия —
+        # перечень контуров больше не обосновывает ``❓``.
+        (PRODUCT_A, "param.legacy"): ProtocolExhaustion(
             run_id=RUN_ID,
             product_id=PRODUCT_A,
-            param_id="param.partial",
+            param_id="param.legacy",
             contours=["corpus", "serp"],
             termination_reason=TerminationReason.BUDGET_EXHAUSTED,
         ),
@@ -878,24 +988,23 @@ def test_nda_questions_records_i3_anomaly(tmp_path: Path) -> None:
     rows = _read_csv(path)
     by_key = {(r["product_id"], r["param_id"]): r for r in rows}
 
-    assert by_key[(PRODUCT_A, "param.full")]["protocol_status"] == "complete"
-    assert by_key[(PRODUCT_A, "param.full")]["i3_anomaly"] == ""
+    assert by_key[(PRODUCT_A, "param.known")]["protocol_status"] == "complete"
+    assert by_key[(PRODUCT_A, "param.known")]["i3_anomaly"] == ""
 
-    assert by_key[(PRODUCT_A, "param.partial")]["protocol_status"] == "incomplete"
-    assert by_key[(PRODUCT_A, "param.partial")]["i3_anomaly"]
+    assert by_key[(PRODUCT_A, "param.legacy")]["protocol_status"] == "complete"
+    assert by_key[(PRODUCT_A, "param.legacy")]["i3_anomaly"] == ""
 
     assert by_key[(PRODUCT_A, "param.missing")]["protocol_status"] == "incomplete"
     assert by_key[(PRODUCT_A, "param.missing")]["i3_anomaly"]
+    assert "причин" in by_key[(PRODUCT_A, "param.missing")]["i3_anomaly"]
 
     # I12: статус неизменен — аномалия не превращает ❓ в ❌.
     assert all(r["status"] == Status.UNKNOWN.value for r in rows)
 
     anomalies = collect_i3_anomalies(cells, exhaustions)
     assert {(a["product_id"], a["param_id"]) for a in anomalies} == {
-        (PRODUCT_A, "param.partial"),
-        (PRODUCT_A, "param.missing"),
+        (PRODUCT_A, "param.missing")
     }
-    assert all(a["reason"].startswith("I3:") for a in anomalies)
 
 
 def test_nda_questions_includes_crawl_truncation_rows(tmp_path: Path) -> None:
@@ -945,9 +1054,13 @@ def test_write_reports_surfaces_truncation_anomaly_in_artifacts_and_csv(
             param_id="param.abs",
             state=CellState.EVALUATED,
             status=Status.ABSENT,
-            absence_evidence=[
-                {"source_scope": "exhaustive", "scope_attested_by": "human"}
-            ],
+            absence_evidence=[{"source_scope": "exhaustive"}],
+            evidence_scope=EvidenceScope(
+                denial_strength=DenialStrength.BOUNDED,
+                reason="конечный справочник",
+                enumerated=True,
+                scope_acceptance="human",
+            ),
         )
     ]
     bundle = compute(store=store, run_id=RUN_ID, catalog=_catalog(), module_weights={})
@@ -1323,7 +1436,8 @@ def test_diff_boundary_contract_mismatch_states_diagnostic_limit() -> None:
     assert reasons == [
         "execution_change: execution_contract_digest: ec_1 → ec_2",
         "execution_change: execution_contract_digest: различающееся поле не "
-        "восстановимо из манифеста (cohort_digest/seeds_digest/extractor_stack либо иная ось)",
+        "восстановимо из манифеста (cohort_digest/seeds_digest/extractor_stack/"
+        "serp_rounds либо иная ось)",
     ]
     assert not any("chunker_version" in reason for reason in reasons)
     assert not any("embed_model_id" in reason for reason in reasons)
@@ -1362,7 +1476,8 @@ def test_diff_boundary_names_cohort_change_instead_of_contract_mismatch() -> Non
     assert diff_boundary_violations(prev, curr) == [
         "execution_change: execution_contract_digest: ec_1 → ec_2",
         "execution_change: execution_contract_digest: различающееся поле не "
-        "восстановимо из манифеста (cohort_digest/seeds_digest/extractor_stack либо иная ось)",
+        "восстановимо из манифеста (cohort_digest/seeds_digest/extractor_stack/"
+        "serp_rounds либо иная ось)",
     ]
 
 
@@ -1713,3 +1828,130 @@ def test_build_manifest_uses_observed_versions_from_index_build() -> None:
         observed_versions={"embed_model_id": "BAAI/bge-m3"},
     )
     assert live.embed_model_id == "observed-live-model"
+
+# ---------------------------------------------------------------------------
+# §13/K2: «требует пере-оценки» — устаревшие ячейки видны, а не вычтены молча
+# ---------------------------------------------------------------------------
+
+def test_write_reports_lists_stale_cells_for_re_evaluation(tmp_path: Path) -> None:
+    """Ячейки со ``stale_reason`` исключены из расчёта, но обязаны быть видны человеку.
+
+    Исключение без артефакта было бы тихим вычитанием: цифры «похудели», а работы
+    (пере-оценка на новой сборке) не видно. Файл ``outputs/stale_cells.csv`` и
+    ``pending``-строка называют её прямо.
+    """
+    store = SqliteStore(":memory:")
+    store.create_run(RUN_ID, _cfg())
+    cells = [
+        _cell(PRODUCT_A, "param.ok", Status.OK),
+        _cell(PRODUCT_A, "param.stale", Status.OK).model_copy(
+            update={"stale_reason": StaleReason.NEW_BUILD, "index_build_id": "build.0"}
+        ),
+    ]
+    _save(store, cells)
+    bundle = compute(store=store, run_id=RUN_ID, catalog=_catalog(), module_weights={})
+    assert bundle.stale_cells  # расчёт уже исключил её
+
+    artifacts = write_reports(
+        bundle=bundle,
+        cells=list(store.iter_cells(RUN_ID)),
+        catalog=_catalog(),
+        manifest=_manifest(),
+        out_dir=tmp_path,
+        run_id=RUN_ID,
+    )
+    assert artifacts.stale_cells is not None
+    rows = _read_csv(artifacts.stale_cells)
+    assert [(r["product_id"], r["param_id"], r["stale_reason"]) for r in rows] == [
+        (PRODUCT_A, "param.stale", "new_build")
+    ]
+
+    # Устаревших нет — артефакт не создаётся (пустой список — не артефакт).
+    clean_cells = [_cell(PRODUCT_A, "param.ok", Status.OK)]
+    clean_store = SqliteStore(":memory:")
+    clean_store.create_run(RUN_ID, _cfg())
+    _save(clean_store, clean_cells)
+    clean_bundle = compute(
+        store=clean_store, run_id=RUN_ID, catalog=_catalog(), module_weights={}
+    )
+    clean = write_reports(
+        bundle=clean_bundle,
+        cells=clean_cells,
+        catalog=_catalog(),
+        manifest=_manifest(),
+        out_dir=tmp_path / "clean",
+        run_id=RUN_ID,
+    )
+    assert clean.stale_cells is None
+    store.close()
+    clean_store.close()
+
+
+def test_registry_denial_is_not_a_truncation_anomaly() -> None:
+    """Авторитетная реестровая пустота не зависит от полноты краула (Вариант 2).
+
+    Детектор ``collect_crawl_truncation_anomalies`` ищет противоречие «заявлен
+    исчерпывающий охват, а краул усечён политикой». Реестровое ``❌`` такого заявления не
+    делает: реестр — авторитетная энумерация, и усечение краула её не опровергает. Прежде
+    детектор ключевался на устаревшем скаляре ``source_scope=exhaustive``, который
+    ``registry.py`` продолжает писать, поэтому каждый реестровый ``❌`` усечённого продукта
+    давал **ложную** аномалию (проверено вызовом до правки: 1 из 1).
+
+    Под правилом остаётся ``bounded`` — единственный класс, чья сила именно в объявленной
+    полноте, — и legacy-строки без объекта силы отрицания.
+    """
+    from core.domain import CatalogRow
+    from core.domain.enums import AbsenceRuleType, DenialStrength, Importance, ParamType
+    from core.domain.models import EvidenceScope
+    from core.pipeline.registry import _absence_cell
+    from core.pipeline.report import collect_crawl_truncation_anomalies
+
+    row = CatalogRow(
+        param_id="p1",
+        title="t",
+        module="m",
+        group="g",
+        importance=list(Importance)[0],
+        param_type=ParamType.FACT,
+        rule="r",
+        absence_rule=AbsenceRuleType.REGISTRY_ABSENCE,
+    )
+    registry_cell = _absence_cell("r1", "prod", row, ["reg-1"])
+    assert registry_cell.evidence_scope is not None
+    assert registry_cell.evidence_scope.denial_strength is DenialStrength.AUTHORITATIVE
+
+    # Свидетельство о факте: усечение краула его не опровергает.
+    assert collect_crawl_truncation_anomalies([registry_cell], truncated_products={"prod"}) == []
+
+    explicit_cell = Cell(
+        run_id="r1",
+        product_id="prod",
+        param_id="p2",
+        state=CellState.EVALUATED,
+        status=Status.ABSENT,
+        absence_rule=AbsenceRuleType.EXPLICIT,
+        evidence_scope=EvidenceScope(
+            denial_strength=DenialStrength.EXPLICIT,
+            citation_quote="функция не поддерживается",
+            reason="цитата",
+        ),
+    )
+    assert collect_crawl_truncation_anomalies([explicit_cell], truncated_products={"prod"}) == []
+
+    # ``bounded`` — заявление о полноте, поэтому аномалия остаётся и требует человека.
+    bounded_cell = Cell(
+        run_id="r1",
+        product_id="prod",
+        param_id="p3",
+        state=CellState.EVALUATED,
+        status=Status.ABSENT,
+        absence_rule=AbsenceRuleType.DISTRIBUTION_ABSENCE,
+        evidence_scope=EvidenceScope(
+            denial_strength=DenialStrength.BOUNDED,
+            reason="конечный справочник",
+            scope_acceptance="Roger",
+        ),
+    )
+    anomalies = collect_crawl_truncation_anomalies([bounded_cell], truncated_products={"prod"})
+    assert len(anomalies) == 1
+    assert "bounded" in anomalies[0]["reason"]

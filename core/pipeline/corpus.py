@@ -213,6 +213,7 @@ from core.pipeline.crawl_session import (
     finalize_session,
     open_session,
     prior_items,
+    read_provenance,
 )
 from core.pipeline.composition import (
     CompositionView,
@@ -2955,6 +2956,289 @@ class _PhaseLifecycle:
     completed: bool = False
 
 
+def _serp_disabled_observation(source: str | None) -> dict[str, Any]:
+    """Провенанс **выключенного** контура: «выключено, источник <уровень>».
+
+    Отсутствие записи неотличимо от «контур есть, но не сработал», поэтому выключенный
+    контур тоже пишет наблюдение — с уровнем, который его выключил (``run.yaml``/
+    ``deploy.yaml``/``default``/``env``). Значения не выдумываются: бюджет не показывается,
+    если контур выключен.
+    """
+    return {
+        "enabled": False,
+        "rounds": {"declared": 0, "executed": 0, "source": str(source or "default")},
+        "budget": {"declared_per_round": None, "effective_per_product": None, "used": {}, "exhausted": {}},
+        "adapter": None,
+        "unavailable_reason": None,
+        "queries": {},
+        "candidates": {},
+        "accepted": {},
+        "rejected": {},
+        "termination": {},
+    }
+
+
+def _run_serp_contour(
+    *,
+    plan: Any,
+    url_map: Mapping[str, list[str]],
+    search: Any,
+    serp_rounds: int,
+    serp_budget: int | None,
+    serp_source: str | None,
+    serp_langs: Sequence[str] | None,
+    product_names: Mapping[str, str] | None,
+    domain_profiles: Mapping[str, DomainProfile] | None,
+    crawl_app: Any,
+    crawl_defaults: Any,
+    store: Any,
+    run_id: str | None,
+    errors: list[str],
+) -> tuple[dict[str, Any], dict[str, dict[str, list[str]]]]:
+    """Исполняет SERP-контур **до** дренажа: поиск → допуск → привязка к корням.
+
+    Почему до дренажа, а не «построить корпус, потом долить». Ячейки прогона создаёт Ш6
+    (``evaluate``), то есть **после** корпуса: на момент второго прохода внутри Ш5 старых
+    ячеек не существует, и «пересборка + инвалидация» дала бы вторую полную экстракцию и
+    вторую нумерацию партиций без нового знания. Один проход по объединённому набору URL
+    даёт ровно тот же состав корпуса (старые + найденные документы) и тот же
+    ``index_build_id``, но платит за него один раз; I19 при этом сохраняется полностью —
+    найденный URL попадает в корпус обычным путём (retention → hash → index), а не
+    подсовывается как evidence.
+
+    Инвалидация затронутых ячеек (:func:`core.pipeline.serp_loop.invalidate_affected`)
+    остаётся в механизме раундов (``run_serp_loop``) для случая, когда ячейки уже
+    существуют (выборочная пере-оценка/повторный раунд в том же прогоне) — здесь она
+    неприменима по той же причине: инвалидировать нечего.
+
+    Возвращает ``(observation, seeds_by_product)``: второе — найденные URL, разложенные
+    по объявленным корням (:func:`core.pipeline.serp_loop.assign_serp_seeds`). Найденный
+    URL входит depth-0 seed'ом **своего** корня, а не новым корнем: иначе
+    ``seeds_declared``/``max_documents``/«число корней продукта» описывали бы результат
+    поиска, то есть зависели бы от ранжирования провайдера (A2/I16). Наблюдение пишется
+    в провенанс сеанса.
+
+    :raises ValueError: ``rounds > 0`` без бюджета (безлимит запрещён выше по стеку; здесь
+        — защита от прямого вызова модуля).
+    """
+    # Локальный импорт: ``serp_loop`` импортирует ``IndexBuild`` из этого модуля, поэтому
+    # модульный импорт дал бы цикл (та же причина, что у ``_worker_extractor_for``).
+    from core.domain.enums import SearchPhase
+    from core.pipeline.search_log import SearchBudget, SearchEffort
+    from core.pipeline.serp_loop import (
+        assign_serp_seeds,
+        build_serp_queries,
+        declared_serp_hosts,
+        serp_discover,
+    )
+
+    if serp_rounds <= 0:
+        return _serp_disabled_observation(serp_source), {}
+    if serp_budget is None or int(serp_budget) < 1:
+        raise ValueError(
+            "SERP-контур: rounds > 0 требует объявленного серп-бюджета "
+            "(run.yaml: serp.budget) — безлимит внешнего поиска запрещён"
+        )
+
+    products = sorted(str(pid) for pid in url_map)
+    own_hosts, declared_hosts = declared_serp_hosts(url_map, domain_profiles)
+    param_rows = list(getattr(plan, "params", None) or [])
+    langs = [str(lang) for lang in (serp_langs or ()) if str(lang).strip()]
+    queries = build_serp_queries(
+        products=products,
+        params=param_rows,
+        product_names=product_names,
+        langs=langs or ["ru"],
+    )
+    # Блэклист — из **разрешённых** осей продукта (app < run < site): тот же предикат, что
+    # у краула, иначе поиск протащил бы в корпус то, что краул зачёркивает.
+    limits_by_product: dict[str, CrawlLimits] = {}
+    for product_id in products:
+        roots = url_map.get(product_id) or []
+        base_url = str(roots[0]) if roots else ""
+        if not base_url:
+            continue
+        try:
+            limits_by_product[product_id] = resolve_crawl_limits(
+                base_url,
+                app=crawl_app if crawl_app is not None else CrawlConfig(),
+                run=crawl_defaults,
+                profiles=domain_profiles or {},
+            )
+        except Exception as exc:  # noqa: BLE001 — оси краула вторичны к поиску
+            errors.append(
+                f"serp: resolve_crawl_limits({product_id}): {type(exc).__name__}: {exc}"
+            )
+
+    effort = SearchEffort(
+        budget=SearchBudget(limits={SearchPhase.SERP.value: int(serp_budget) * int(serp_rounds)})
+    )
+    discovery = serp_discover(
+        adapter=search,
+        queries_by_product=queries,
+        store=store,
+        run_id=str(run_id or ""),
+        effort=effort,
+        rounds=int(serp_rounds),
+        own_hosts_by_product=own_hosts,
+        declared_hosts=declared_hosts,
+        known_urls_by_product=url_map,
+        limits_by_product=limits_by_product,
+        source=str(serp_source or "run.yaml"),
+        budget_declared=int(serp_budget),
+    )
+    observation = discovery.to_observation()
+    if discovery.unavailable_reason == "no_adapter":
+        # Объявленный контур без адаптера — видимый отказ, а не молчаливый пропуск:
+        # в ``split`` адаптер приходит швом, в ``local`` его подключает оператор.
+        errors.append(
+            "serp: объявлены раунды, но адаптер внешнего поиска не подключён "
+            "(local: поисковый адаптер не собран; split: шов /v1/search) — "
+            "контур не исполнен"
+        )
+    elif discovery.unavailable_reason == "no_queries":
+        errors.append("serp: объявлены раунды, но запросов нет (пустой каталог/языки)")
+
+    # Находки раскладываем по **авторским** корням: url_map не расширяется — иначе
+    # найденный документ стал бы корнем и принёс бы с собой собственный бюджет.
+    seeds_by_product = assign_serp_seeds(discovery.accepted_by_product, url_map)
+    return observation, seeds_by_product
+
+
+def _serp_note(observation: Mapping[str, Any]) -> str:
+    """Операторская строка о состоянии SERP-контура (наблюдение, не ошибка).
+
+    Выключенный контур тоже печатается: «выключено, источник X» — это факт прогона, а не
+    отсутствие факта. У включённого видны раунды, бюджет, число принятых URL и причины
+    отказов — то есть **доходность** контура (замер: 189 запросов → 10 новых URL на
+    объявленном хосте), а не только его факт.
+    """
+    rounds = observation.get("rounds") or {}
+    budget = observation.get("budget") or {}
+    if not observation.get("enabled"):
+        return (
+            "serp: контур выключен "
+            f"(источник: {rounds.get('source', 'default')}) — вызовов внешнего поиска нет"
+        )
+    accepted = observation.get("accepted") or {}
+    accepted_total = sum(len(urls) for urls in accepted.values())
+    used = budget.get("used") or {}
+    used_total = sum(int(n) for n in used.values())
+    rejected = observation.get("rejected") or {}
+    rejected_total = sum(
+        int(count) for reasons in rejected.values() for count in reasons.values()
+    )
+    note = (
+        f"serp: раундов {rounds.get('executed', 0)}/{rounds.get('declared', 0)} "
+        f"(источник: {rounds.get('source', 'run.yaml')}), запросов {used_total}, "
+        f"принято URL {accepted_total}, отказов {rejected_total} "
+        f"(бюджет на продукт: {budget.get('effective_per_product')})"
+    )
+    if observation.get("unavailable_reason"):
+        note += f"; контур не исполнен: {observation['unavailable_reason']}"
+    exhausted = [
+        pid for pid, flag in (budget.get("exhausted") or {}).items() if flag
+    ]
+    if exhausted:
+        note += f"; бюджет исчерпан: {', '.join(sorted(exhausted))}"
+    # «Нашли» ≠ «вошло в корпус»: принятый кандидат может быть зачёркнут блэклистом или
+    # не поместиться в ``max_documents`` корня — это отдельный факт и он называется.
+    ingest = observation.get("ingest") or {}
+    if ingest:
+        enqueued = sum(int(row.get("enqueued", 0)) for row in ingest.values())
+        dropped = sum(len(row.get("blacklisted", ())) for row in ingest.values())
+        truncated = sum(len(row.get("truncated", ())) for row in ingest.values())
+        note += f"; в очередь корпуса {enqueued}"
+        if dropped:
+            note += f", зачёркнуто блэклистом {dropped}"
+        if truncated:
+            note += f", не поместилось в max_documents {truncated}"
+    return note
+
+
+def _persist_serp_provenance(
+    store: Any, session_id: str | None, observation: Mapping[str, Any], errors: list[str]
+) -> None:
+    """Дописывает наблюдение SERP-контура в провенанс сеанса краула (durable).
+
+    Источник — провенанс **сеанса**, а не отдельная таблица: контур расширяет тот же
+    краул (его документы добыты в этом же сеансе), а ``StorePort`` не даёт отдельного
+    места под факты поиска. Запись аддитивна (ключ ``serp``), поэтому старые читатели
+    провенанса не ломаются.
+
+    Идемпотентность: повтор (resume/report) перезаписывает ключ тем же детерминированным
+    значением. Сбой записи изолируется в ``errors`` — провенанс не роняет фазу.
+    """
+    if store is None or session_id is None:
+        return
+    try:
+        session = store.get_crawl_session(session_id)
+        if session is None:
+            return
+        existing = read_provenance(session)
+        existing["serp"] = dict(observation)
+        store.set_crawl_session_provenance(
+            session_id,
+            json.dumps(existing, ensure_ascii=False, sort_keys=True),
+        )
+    except Exception as exc:  # noqa: BLE001 — наблюдаемость важнее персистенции
+        errors.append(f"serp: set_crawl_session_provenance: {type(exc).__name__}: {exc}")
+
+
+def _invalidate_previous_build_cells(
+    store: Any, run_id: str | None, index_build_id: str, errors: list[str]
+) -> list[str]:
+    """Помечает ``stale_reason='new_build'`` ячейки прогона, привязанные к прошлой сборке.
+
+    Зачем это здесь, а не в Ш6: сборка создаётся в Ш5, и только она знает, какая
+    сборка теперь текущая. ``evaluate`` не умеет выборочной пере-оценки (нет селектора
+    затронутых ячеек), поэтому «ячейка описывает ушедшую сборку» — факт, который
+    фиксирует фаза корпуса; расчёт (:mod:`core.pipeline.compute`) уже умеет исключать
+    такие ячейки, а отчёт — называть их очередью пере-оценки.
+
+    Идемпотентно (``invalidate_affected`` пропускает уже помеченные) и безопасно при
+    отсутствии ячеек: пустой список — no-op. Сбой изолируется в ``errors`` — провенансная
+    пометка не должна ронять уже собранный корпус.
+
+    :returns: строки-наблюдения для ``log_entries`` (не ошибки: пометка — это факт, а
+        не сбой фазы).
+    """
+    if store is None or not run_id or not index_build_id:
+        return []
+    try:
+        previous = {
+            cell.index_build_id
+            for cell in store.iter_cells(str(run_id))
+            if cell.index_build_id and cell.index_build_id != index_build_id
+        }
+    except Exception as exc:  # noqa: BLE001 — наблюдаемость важнее пометки
+        errors.append(f"stale(new_build): iter_cells: {type(exc).__name__}: {exc}")
+        return []
+    if not previous:
+        return []
+    from core.pipeline.serp_loop import invalidate_affected
+
+    notes: list[str] = []
+
+    for old_build_id in sorted(previous):
+        try:
+            invalidated = invalidate_affected(
+                store, str(run_id), old_build_id, index_build_id
+            )
+        except Exception as exc:  # noqa: BLE001 — изоляция по контракту фазы
+            errors.append(
+                f"stale(new_build): invalidate_affected({old_build_id}): "
+                f"{type(exc).__name__}: {exc}"
+            )
+            continue
+        if invalidated:
+            notes.append(
+                f"corpus: {len(invalidated)} ячеек прошлой сборки ({old_build_id}) "
+                "помечены устаревшими (new_build) — требуют пере-оценки"
+            )
+    return notes
+
+
 def _build_corpus(
     plan: Any,
     crawler: CrawlerPort,
@@ -3002,6 +3286,12 @@ def _build_corpus(
     lifecycle: _PhaseLifecycle | None = None,
     mem_budget_mb: int | None = None,
     derive_extract_workers: bool = False,
+    search: Any = None,
+    serp_rounds: int = 0,
+    serp_budget: int | None = None,
+    serp_source: str | None = None,
+    serp_langs: Sequence[str] | None = None,
+    product_names: Mapping[str, str] | None = None,
 ) -> PhaseResult:
     """Ш5: собирает корпус из ``plan × urls`` и возвращает ``PhaseResult``.
 
@@ -3186,6 +3476,21 @@ def _build_corpus(
         локального экстрактора (процессный пул/inline в ядре); под ``split`` воркеры живут
         на edge со своим бюджетом, поэтому флаг приходит ``False`` — его решает composition
         root, а не фаза.
+    :param search: адаптер внешнего поиска (``SearchAdapterPort``) — исполняет SERP-контур.
+        ``None`` при объявленных раундах — видимый отказ (``errors``), а не молчаливый
+        пропуск: в ``split`` адаптер приходит швом, в ``local`` его подключает оператор.
+    :param serp_rounds: раунды SERP-контура (0 — выключен). Вход — объявленная ось
+        (``serp_rounds`` контракта), а не чтение конфига внутри фазы.
+    :param serp_budget: потолок запросов **на продукт на раунд** (``run.yaml:
+        serp.budget``). Обязан быть объявлен при ``serp_rounds > 0``.
+    :param serp_source: уровень, которым включён контур (``cli``/``env``/``run.yaml``/
+        ``deploy.yaml``/``default``) — попадает в провенанс, чтобы «почему поиск не
+        работал» было отличимо от «поиск не объявлен».
+    :param serp_langs: языки запросов по умолчанию (``run.yaml: languages``); язык
+        параметра (``catalog.csv: search_langs``) сильнее.
+    :param product_names: ``product_id → каноническое имя`` (из паспорта) для запросов
+        «каталог + имя продукта» (замер: с именем 45/63 попаданий против 27/63 без него).
+        Продукт без имени ищется по заголовку параметра, и это видно в провенансе.
 
     Возвращает ``PhaseResult`` со ``status='ok'`` (даже при изолированных ошибках),
     ``cells=[]`` (Ш5 не производит ячеек) и ``log_entries=[IndexBuild, ResourcesObservation]``
@@ -3235,10 +3540,50 @@ def _build_corpus(
             )
 
     declared = sorted({str(p) for p in (getattr(plan, "products", None) or [])})
+
+    errors: list[str] = []
+
+    # --- SERP-контур (I3/§5): поиск → допуск → расширение объявленного seed-набора --- #
+    # Контур исполняется **внутри** фазы корпуса (не отдельной фазой ``PHASES``) и до
+    # дренажа: найденные URL входят в тот же набор, что и авторские, поэтому проходят
+    # обычный путь retention → hash → index (I19). Почему не «после сборки» — см.
+    # докстринг :func:`_run_serp_contour`.
+    serp_observation: dict[str, Any] = _serp_disabled_observation(serp_source)
+    #: Найденные SERP документы, разложенные по авторским корням: ``product → root → urls``.
+    #: Второй проход по ним — обычный дренаж тех же корней (глубина 0), не «долив в индекс».
+    serp_seeds_by_product: dict[str, dict[str, list[str]]] = {}
+    #: Судьба находок по продуктам (``queued``/``dup``/``blacklisted``/``truncated``).
+    serp_ingest_by_product: dict[str, dict[str, Any]] = {}
+    if serp_rounds:
+        try:
+            serp_observation, serp_seeds_by_product = _run_serp_contour(
+                plan=plan,
+                url_map=url_map,
+                search=search,
+                serp_rounds=int(serp_rounds),
+                serp_budget=serp_budget,
+                serp_source=serp_source,
+                serp_langs=serp_langs,
+                product_names=product_names,
+                domain_profiles=domain_profiles,
+                crawl_app=crawl_app,
+                crawl_defaults=crawl_defaults,
+                store=store,
+                run_id=run_id,
+                errors=errors,
+            )
+        except ValueError:
+            # Безлимит/битый конфиг — не «частичный успех»: отказ обязан дойти до вызывающего.
+            raise
+        except Exception as exc:  # noqa: BLE001 — контур не роняет объявленную фазу
+            errors.append(f"serp: проход не исполнен: {type(exc).__name__}: {exc}")
+
     # Объём корпуса = продукты **с эффективными seed'ами**, а не весь план: при
     # ``--only-product``/``--only-failed`` ``urls`` уже сужен фильтром, и запись
     # zero-source покрытия для продуктов вне области прогона была бы ложной (09 §6.2).
-    # Пустой ``urls`` (не задан) → весь план, как прежде.
+    # Пустой ``urls`` (не задан) → весь план, как прежде. SERP-находки объём **не**
+    # расширяют: они не корни, а seeds уже объявленных корней — продукт без авторского
+    # seed'а поиском не «заводится» (иначе число продуктов зависело бы от ранжирования).
     products = sorted(url_map) if url_map else declared
 
     package = _resolve_package_id(plan, package_id)
@@ -3259,7 +3604,6 @@ def _build_corpus(
     lexical_engine_version = str(getattr(index_builder, "lexical_engine_version", "") or "")
     vector_store = str(getattr(index_builder, "vector_store", "") or "")
 
-    errors: list[str] = []
     #: Наблюдаемость дедупа по ``content_hash`` внутри продукта: ``{"product_id": n}``.
     #: Считается по продукту (``seen_docs`` — per-product), поэтому и карта продуктовая;
     #: суммарный ``duplicate_count`` — сумма. Дедуп легитимен, но не должен быть невидим.
@@ -5772,6 +6116,17 @@ def _build_corpus(
         #: расходовать ``max_documents`` каждого из них — иначе бюджет исчерпывается досрочно.
         resume_counted: set[str] = set()
         product_roots = url_map.get(product_id, [])
+        #: I3/§5: наблюдённая судьба SERP-находок этого продукта (``queued``/``dup``/
+        #: ``blacklisted``/``truncated``). Пишется в провенанс контура ниже: «поиск нашёл»
+        #: и «находка вошла в корпус» — разные факты, и второй нельзя выводить из первого.
+        serp_ingest: dict[str, Any] = {
+            "enqueued": 0,
+            "dup": 0,
+            "blacklisted": [],
+            "truncated": [],
+        }
+        #: Находки, разложенные по корням этого продукта (:func:`assign_serp_seeds`).
+        serp_seeds_by_root = dict(serp_seeds_by_product.get(str(product_id), {}))
         #: Граница продукта (start): до первого дренажа — «продукт начат», а не «потерян».
         product_events.append(
             {
@@ -5871,6 +6226,7 @@ def _build_corpus(
             *,
             sitemap_seeds: bool = False,
             revalidate: Sequence[str] = (),
+            serp_seeds: Sequence[str] = (),
             seed: bool = True,
             defer_tail: bool = True,
         ) -> tuple[Frontier, list[dict[str, Any]], _RootDrain]:
@@ -5884,6 +6240,12 @@ def _build_corpus(
             **после** авторского seed и **до** BFS отдельным путём
             (:meth:`Frontier.add_revalidate_seed`), поэтому не расходуют ``max_documents``,
             не расширяют BFS (листья) и дедуплицируются ``_seen`` с переоткрытием ссылкой.
+            ``serp_seeds`` — документы, найденные внешним поиском (I3/§5): ставятся
+            depth-0 seed'ами **этого** корня через :meth:`Frontier.add_seed`, то есть
+            расходуют его ``max_documents`` и проходят блэклист, но не становятся новыми
+            корнями. Так «доход» поиска платит из бюджета уже объявленного корня
+            (нет умножения бюджета числом находок) и ``seeds_declared`` остаётся
+            авторским.
             ``seed=False`` — synthetic-бакет (orphan): авторского seed нет, только
             ревалидация; усечение такого бакета не пишется вызывающим.
             Ставка в очередь гейтится scope (объявленный host + path-граница, C) и
@@ -6130,6 +6492,32 @@ def _build_corpus(
                 elif extra_status == "truncated":
                     errors.append(
                         f"{pid}/{extra}: sitemap-seed не поставлен — достигнут max_documents"
+                    )
+
+            # I3/§5: документы, найденные SERP-контуром, — depth-0 seeds **этого** корня.
+            # Тот же путь, что у sitemap-`<loc>` (блэклист + ``max_documents`` + дедуп
+            # ``_seen``), поэтому бюджет продукта не умножается на число находок, а
+            # отказ виден (блэклист/потолок) — молчаливого дропа нет. Scope/SSRF хоста
+            # уже проверены при допуске кандидата (``serp_discover``), path-prefix здесь
+            # не применяется — как у терминальных артефактов: найденный документ не
+            # продолжает навигацию корня, поэтому «раздел» к нему не относится.
+            for found in serp_seeds:
+                found_status = frontier.add_seed(found)
+                if found_status == "queued":
+                    product_seeds_enqueued += 1
+                    serp_ingest["enqueued"] += 1
+                elif found_status == "dup":
+                    serp_ingest["dup"] += 1
+                elif found_status == "blacklisted":
+                    serp_ingest["blacklisted"].append(found)
+                    errors.append(
+                        f"{pid}/{found}: serp-находка зачёркнута блэклистом "
+                        "(exclude_paths/exclude_documents) — не enqueued"
+                    )
+                elif found_status == "truncated":
+                    serp_ingest["truncated"].append(found)
+                    errors.append(
+                        f"{pid}/{found}: serp-находка не поставлена — достигнут max_documents"
                     )
 
             def _resolve_target(pid: str, url: str) -> Any:
@@ -7313,6 +7701,9 @@ def _build_corpus(
                     root_target,
                     sitemap_seeds=sitemap_seeds,
                     revalidate=known_urls,
+                    # SERP-находки этого корня: depth-0 seeds под тем же блэклистом
+                    # и ``max_documents``, что и авторские/`<loc>` seeds.
+                    serp_seeds=serp_seeds_by_root.get(root_url, ()),
                 )
 
                 def _finalize_root(
@@ -7768,6 +8159,15 @@ def _build_corpus(
         # «дампа» продукта здесь нет намеренно: он лишь повторно писал бы те же строки
         # (``INSERT OR REPLACE`` по PK) и удваивал бы транзакции без выигрыша в durability.
         ingests.append(ingest)
+        if serp_seeds_by_root:
+            # Наблюдение контура: «нашли» и «вошло в корпус» — разные факты; второй
+            # нельзя выводить из первого (блэклист/потолок могут его отменить).
+            serp_ingest_by_product[str(product_id)] = {
+                "enqueued": int(serp_ingest["enqueued"]),
+                "dup": int(serp_ingest["dup"]),
+                "blacklisted": list(serp_ingest["blacklisted"]),
+                "truncated": list(serp_ingest["truncated"]),
+            }
 
     # Продукт плана **без записи** в непустом ``urls``: в цикл он не попал (``products``
     # выводится из ``url_map``), поэтому молча не краулится и получает строку покрытия
@@ -7909,6 +8309,16 @@ def _build_corpus(
     if not _persist_manifest(store, manifest_entries, errors):
         all_physical_ok = False
 
+    # K2/§13: ячейки, привязанные к **прошлой** сборке этого же прогона, помечаются
+    # устаревшими. Живой случай — повтор фазы на существующем прогоне (``--reset``/
+    # ``--from-scratch``) или повторный раунд: вердикт относится к ушедшей сборке, и
+    # публиковать его как измерение текущей нельзя. Сами ячейки не удаляются и статус
+    # не меняется (I12): помеченные исключаются из расчёта и видны в отчёте как
+    # «требует пере-оценки». При обычном прогоне ячеек ещё нет — вызов no-op.
+    stale_notes = _invalidate_previous_build_cells(
+        store, run_id, index_build_id, errors
+    )
+
     if entries and embedder is not None and index_builder is not None:
         commit_ok = True
         try:
@@ -7988,6 +8398,17 @@ def _build_corpus(
         except Exception as exc:  # noqa: BLE001 — изоляция персистенции
             errors.append(f"corpus_members: {type(exc).__name__}: {exc}")
 
+    # SERP-контур: наблюдение в durable-провенанс сеанса (ключ ``serp``) — источник фактов
+    # для I3-протокола (``phases._observed_exhaustion_facts``) и для ``search_effort``
+    # манифеста. Пишется **после** финализации сеанса: ``finalize_session`` перезаписывает
+    # ``provenance_json`` целиком.
+    if serp_observation.get("enabled") and serp_seeds_by_product:
+        serp_observation["ingest"] = {
+            product: serp_ingest_by_product.get(product, {"enqueued": 0})
+            for product in sorted(serp_seeds_by_product)
+        }
+    _persist_serp_provenance(store, session, serp_observation, errors)
+
     build = IndexBuild(
         index_build_id=index_build_id,
         entries=entries,
@@ -8023,6 +8444,11 @@ def _build_corpus(
     #: существует и заметка была бы выдуманной. Это же условие держит инвариант «``state is
     #: None`` — прежняя форма фазы» (``test_state_none_keeps_previous_truncation_shape``):
     #: прямой вызов без стора не приобретает новых строк.
+    #: Строка оператору нужна, когда контур что-то делал или был объявлен и не исполнен;
+    #: выключенный контур виден структурной записью (``enabled: false`` + источник).
+    serp_note_needed = bool(serp_observation.get("enabled")) or bool(
+        serp_observation.get("unavailable_reason")
+    )
     log_entries: list[Any] = [
         build,
         *product_events,
@@ -8031,6 +8457,18 @@ def _build_corpus(
         # оператор узнал о пробеле из вывода фазы, а не из чтения файла.
         *([gap_line] if gap_line else []),
         *embed_notes,
+        # I3/§5: наблюдение SERP-контура — структурная запись (машинному потребителю) и
+        # строка (оператору). Пишется и при выключенном контуре: «выключено, источник X»
+        # отличимо от «контур был, но ничего не дал».
+        serp_observation,
+        # Строка — только когда контур действительно исполнялся (или объявлен, но не
+        # исполнен): выключенный контур уже назван структурной записью выше, а тихий
+        # прогон не должен обрастать декоративными строками (их отсутствие — часть
+        # контракта наблюдаемости: `test_state_none_keeps_previous_truncation_shape`).
+        *([_serp_note(serp_observation)] if serp_note_needed else []),
+        # K2/§13: пометка ячеек прошлой сборки — наблюдение фазы (очередь пере-оценки),
+        # а не ошибка: корпус собран, вердикты прошлой сборки опубликованы не будут.
+        *stale_notes,
     ]
     # B3: провенанс спуска доступен из результата фазы (и из run DB — таблицы
     # ``archive_observations``/``corpus_members``). Запись есть даже при нулевом выходе.

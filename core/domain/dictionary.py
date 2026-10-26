@@ -19,6 +19,8 @@ from core.domain.enums import (
     CrawlItemStatus,
     CrawlSessionStatus,
     CrawlStrategy,
+    DenialClaim,
+    DenialStrength,
     DocumentLevel,
     ExtractionRoute,
     FailureKind,
@@ -65,6 +67,9 @@ def assert_dictionary_integrity(path: str | Path) -> None:
         "source_kind",
         "evidence_type",
         "absence_rule_type",
+        # Вариант 2 (§2.3): сила отрицания — единственный носитель вопроса об отсутствии.
+        "denial_strength",
+        "denial_claim",
         "source_scope",
         "failure_kind",
         "cell_state",
@@ -160,6 +165,8 @@ def assert_dictionary_integrity(path: str | Path) -> None:
         "reuse_kind": {v.value for v in ReuseKind},
         # Ф0: классы сбоя краула/конвейера — иначе словарь и enum расходятся молча.
         "failure_kind": {v.value for v in FailureKind},
+        # Вариант 2: что модель вправе заявить о своём «нет» (ровно два класса).
+        "denial_claim": {v.value for v in DenialClaim},
     }
     for section, expected in checks.items():
         actual = set(data[section])
@@ -168,3 +175,12 @@ def assert_dictionary_integrity(path: str | Path) -> None:
                 f"словарь.{section} рассинхронизирован со схемой: "
                 f"словарь={sorted(actual)}, схема={sorted(expected)}"
             )
+    # ``denial_strength`` несёт не только значения, но и аннотации (``verdicts``,
+    # ``evaluator_can_claim``) — как ``absence_rule_type``. Поэтому проверяется не
+    # равенство ключей, а полнота: каждый класс перечисления обязан быть назван.
+    undocumented = {v.value for v in DenialStrength} - set(data["denial_strength"])
+    if undocumented:
+        raise ValueError(
+            "словарь.denial_strength не документирует классы: "
+            f"{sorted(undocumented)}"
+        )

@@ -24,7 +24,9 @@ from core.domain import (
     CorpusDoc,
     CrawlProvenance,
     CrawlSessionProvenance,
+    DenialStrength,
     EndpointKind,
+    EvidenceScope,
     EvidenceType,
     Focus,
     Gate,
@@ -85,6 +87,12 @@ def _cell(param_id: str, **overrides: object) -> Cell:
         "state": CellState.PENDING,
     }
     base.update(overrides)
+    # Вариант 2: ``❌`` без объекта силы отрицания домен не собирает (I2). Здесь класс
+    # подставляется реестровым — тест проверяет персистенцию, а не выбор класса.
+    if base.get("status") is Status.ABSENT and "evidence_scope" not in base:
+        base["evidence_scope"] = EvidenceScope.for_registry_absence(
+            registry_ids=["reg-1"]
+        )
     return Cell(**base)  # type: ignore[arg-type]
 
 
@@ -375,7 +383,7 @@ def test_add_evidence_round_trip(store: SqliteStore) -> None:
         source_url="https://example.test/doc",
         citation_quote="quote",
         source_scope=SourceScope.PARTIAL,
-        scope_attested_by="human-1",
+        scope_acceptance="human-1",
         index_build_id="build-1",
         retrieved_at="2026-01-01T00:00:00Z",
     )
@@ -387,7 +395,7 @@ def test_add_evidence_round_trip(store: SqliteStore) -> None:
     assert row["evidence_type"] == "direct"
     assert row["source_scope"] == "partial"
     assert row["source_url"] == "https://example.test/doc"
-    assert row["scope_attested_by"] == "human-1"
+    assert row["scope_acceptance"] == "human-1"
 
 
 def test_add_evidence_batch(store: SqliteStore) -> None:
@@ -1311,7 +1319,7 @@ def _absence_record(**overrides: object) -> dict:
         "source_kind": None,
         "evidence_type": "absence",
         "source_scope": SourceScope.EXHAUSTIVE.value,
-        "scope_attested_by": "human-1",
+        "scope_acceptance": "human-1",
         "index_build_id": "cb_run",
     }
     record.update(overrides)
@@ -1344,7 +1352,7 @@ def test_absence_evidence_round_trip(store: SqliteStore) -> None:
     entry = cell.absence_evidence[0]
     assert entry["evidence_id"] == "ev-absence-1"
     assert entry["source_scope"] == SourceScope.EXHAUSTIVE.value
-    assert entry["scope_attested_by"] == "human-1"
+    assert entry["scope_acceptance"] == "human-1"
     assert entry["index_build_id"] == "cb_run"
     assert entry["source_id"] is None
     # Чтение не подменяет вид доказательства: это протокол отсутствия.
@@ -1398,12 +1406,12 @@ def test_evaluated_absent_cell_survives_store_round_trip(store: SqliteStore) -> 
     """E2E R4+R5: ``❌`` оценщика доходит до читателя из store вместе с протоколом.
 
     Здесь проверяется именно **звено персистенции**: ячейка, полученная ``evaluate_cell``
-    с подписью, пишется в настоящий ``SqliteStore`` и читается обратно через ``iter_cells``
-    (тот же путь, которым ячейки получает ``report_phase``).
+    с прямым отрицанием вендора, пишется в настоящий ``SqliteStore`` и читается обратно
+    через ``iter_cells`` (тот же путь, которым ячейки получает ``report_phase``).
     """
     from tests.pipeline.test_evaluate import (
         _ScriptedEvaluator,
-        _absent_output,
+        _absent_explicit,
         _chunks,
         _data,
         _param,
@@ -1415,7 +1423,7 @@ def test_evaluated_absent_cell_survives_store_round_trip(store: SqliteStore) -> 
         param=_param(data),
         product_id="p1",
         run_id=RUN_ID,
-        evaluator=_ScriptedEvaluator([_absent_output()]),
+        evaluator=_ScriptedEvaluator([_absent_explicit()]),
         chunks=_chunks(data),
         store=store,
         coverage=CorpusCoverage(
@@ -1425,7 +1433,6 @@ def test_evaluated_absent_cell_survives_store_round_trip(store: SqliteStore) -> 
             observed_sources=3,
             computed_at="2026-01-01T00:00:00+00:00",
         ),
-        scope_attested_by="human-1",
     )
     assert outcome.cell.status is Status.ABSENT
 
@@ -1434,5 +1441,148 @@ def test_evaluated_absent_cell_survives_store_round_trip(store: SqliteStore) -> 
     assert stored.status is Status.ABSENT
     assert stored.absence_evidence, "❌ потерял протокол отсутствия при чтении из store"
     entry = stored.absence_evidence[0]
-    assert entry["source_scope"] == SourceScope.EXHAUSTIVE.value
-    assert entry["scope_attested_by"] == "human-1"
+    # Класс отрицания переживает store: это JSON-колонка ``cells.evidence_scope``,
+    # а не вычисляемое при чтении поле.
+    assert stored.evidence_scope is not None, "сила отрицания потеряна при чтении"
+    assert stored.evidence_scope.denial_strength is DenialStrength.EXPLICIT
+    assert stored.evidence_scope.citation_quote
+    # Класс живёт в объекте ячейки (``cells.evidence_scope``) — единственный источник
+    # истины; запись протокола несёт подпись и вид доказательства, а не вердикт.
+    assert entry["scope_acceptance"] is None
+
+
+def test_connect_migrates_scope_attested_by_to_scope_acceptance(tmp_path: Path) -> None:
+    """Вариант 2: подпись старой схемы копируется в ``scope_acceptance`` при открытии.
+
+    Переименование смысла (аттестация полноты → принятие риска) не должно терять
+    аудит-след: читатель больше не смотрит на старую колонку, поэтому без копирования
+    подпись исторического прогона исчезла бы, а не «переехала».
+    """
+    from core.store.sqlite import connect
+
+    db = tmp_path / "legacy_scope.db"
+    legacy = sqlite3.connect(db)
+    legacy.execute(
+        "CREATE TABLE cell_evidence (evidence_id TEXT PRIMARY KEY, run_id TEXT NOT NULL,"
+        " product_id TEXT NOT NULL, param_id TEXT NOT NULL, evidence_type TEXT NOT NULL,"
+        " source_scope TEXT, scope_attested_by TEXT)"
+    )
+    legacy.execute(
+        "INSERT INTO cell_evidence(evidence_id, run_id, product_id, param_id,"
+        " evidence_type, source_scope, scope_attested_by)"
+        " VALUES ('ev-1','r1','p1','param.a','absence','exhaustive','human-1')"
+    )
+    legacy.commit()
+    legacy.close()
+
+    migrated = connect(db)
+    row = migrated.execute(
+        "SELECT scope_attested_by, scope_acceptance FROM cell_evidence"
+        " WHERE evidence_id = 'ev-1'"
+    ).fetchone()
+    assert row["scope_acceptance"] == "human-1"
+    # Старая колонка не стирается: SQLite не умеет удалять колонки без пересборки таблицы,
+    # и её значение остаётся проверяемым следом миграции.
+    assert row["scope_attested_by"] == "human-1"
+    migrated.close()
+
+    # Идемпотентно: повторное открытие не переписывает уже заполненное значение.
+    again = connect(db)
+    again.execute(
+        "UPDATE cell_evidence SET scope_acceptance = 'human-2' WHERE evidence_id = 'ev-1'"
+    )
+    again.commit()
+    again.close()
+    third = connect(db)
+    assert (
+        third.execute(
+            "SELECT scope_acceptance FROM cell_evidence WHERE evidence_id = 'ev-1'"
+        ).fetchone()["scope_acceptance"]
+        == "human-2"
+    )
+    third.close()
+
+
+def test_optional_column_read_tolerates_legacy_row() -> None:
+    """Read-only открытие старой БД: отсутствующей колонки нет — это «не записано».
+
+    ``connect_read_only`` не применяет аддитивные миграции (файл только читается),
+    поэтому чтение не должно падать на колонке, добавленной в новой схеме.
+    """
+    from core.store.sqlite_store import _parse_evidence_scope, _row_optional
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    row = conn.execute("SELECT 'x' AS known").fetchone()
+    assert _row_optional(row, "known") == "x"
+    assert _row_optional(row, "evidence_scope") is None
+    assert _parse_evidence_scope(None) is None
+    conn.close()
+
+
+def test_read_only_open_of_run_made_before_new_columns(tmp_path: Path) -> None:
+    """Read-only чтение прогона, сделанного ДО появления ``evidence_scope``/``scope_acceptance``.
+
+    Проверяется не доступ к строке (:func:`_row_optional`), а **сам SQL**: проекция
+    ``SELECT`` собиралась из кортежа имён текущего кода, поэтому на старой БД чтение
+    падало ``no such column: scope_acceptance`` — живой дефект: ``hound report`` по
+    прогону ``ru-pg-dbms-3edf2b06097c`` возвращал ошибку вместо отчёта.
+    """
+    from core.domain import (
+        CellEvidence,
+        CellState,
+        EvidenceType,
+        LLMEvidence,
+        SourceKind,
+        Status,
+    )
+    from core.store.sqlite_store import SqliteStore
+
+    path = tmp_path / "legacy.db"
+    store = SqliteStore(path)
+    store.create_run(RUN_ID, _cfg())
+    store.save_cell(
+        _cell(
+            "p1",
+            state=CellState.EVALUATED,
+            status=Status.OK,
+            evidence=[LLMEvidence(source_id="src-1", quote="цитата")],
+            index_build_id="build-1",
+            retrieval_profile="R0",
+        )
+    )
+    store.add_evidence(
+        CellEvidence(
+            evidence_id="e1",
+            run_id="r1",
+            product_id="prod",
+            param_id="p1",
+            source_kind=SourceKind.DOCUMENTATION,
+            evidence_type=EvidenceType.DIRECT,
+            source_id="s1",
+            source_url="https://example.test/a",
+            citation_quote="цитата",
+            content_hash="h",
+            index_build_id="b1",
+        )
+    )
+    store.close()
+
+    # Схема «до»: колонок новой семантики нет (как в БД прошлых прогонов).
+    raw = sqlite3.connect(path)
+    raw.execute("ALTER TABLE cells DROP COLUMN evidence_scope")
+    raw.execute("ALTER TABLE cell_evidence DROP COLUMN scope_acceptance")
+    raw.commit()
+    raw.close()
+
+    legacy = SqliteStore(path, read_only=True)
+    try:
+        cells = list(legacy.iter_cells(run_id=RUN_ID))
+        assert len(cells) == 1
+        assert cells[0].status is Status.OK
+        # Отсутствующая колонка = «не записано», а не сбой чтения.
+        assert cells[0].evidence_scope is None
+        evidence = list(legacy.iter_absence_evidence(run_id=RUN_ID))
+        assert evidence == []
+    finally:
+        legacy.close()

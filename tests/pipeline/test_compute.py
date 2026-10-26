@@ -23,9 +23,11 @@ import pytest
 from core.domain.enums import (
     AnchorRelation,
     CellState,
+    DenialStrength,
     Importance,
     RankingPolicy,
     RunMode,
+    StaleReason,
     Status,
 )
 from core.domain.models import (
@@ -34,6 +36,7 @@ from core.domain.models import (
     Cell,
     Cohort,
     CohortEntry,
+    EvidenceScope,
     Focus,
     LLMEvidence,
     RunConfig,
@@ -110,6 +113,9 @@ def _cell(
             evidence=[LLMEvidence(source_id="src.1", quote="цитата")],
         )
     if status is Status.ABSENT:
+        # Вариант 2 (§2.3): «нет» несёт класс отрицания, а не скаляр «охват исчерпан».
+        # Явное отрицание вендора — единственный класс, который даёт ``❌`` без
+        # человеческой подписи; цитата для него обязательна.
         return Cell(
             run_id=RUN_ID,
             product_id=product_id,
@@ -117,6 +123,10 @@ def _cell(
             state=state,
             status=status,
             absence_evidence=[{"source_scope": "partial"}],
+            evidence_scope=EvidenceScope(
+                denial_strength=DenialStrength.EXPLICIT,
+                citation_quote="функция не поддерживается",
+            ),
         )
     if status is Status.NOT_APPLICABLE:
         return Cell(
@@ -271,6 +281,67 @@ def test_preliminary_excluded_from_everything(store: SqliteStore) -> None:
     assert with_prelim.failure_rate == baseline.failure_rate
     assert with_prelim.modules == baseline.modules
     assert "mod.three" not in {m.module for m in with_prelim.modules}
+
+
+# ---------------------------------------------------------------------------
+# §13/K2: устаревшие ячейки исключаются из расчёта, но не теряются
+# ---------------------------------------------------------------------------
+
+
+def test_stale_cells_excluded_from_capability_and_coverage(
+    store: SqliteStore,
+) -> None:
+    """Ячейка со ``stale_reason`` описывает прошлую сборку и в цифрах не участвует.
+
+    Иначе Capability/Coverage молча смешали бы две сборки — ровно тот дефект, ради
+    которого ``stale_reason`` и пишется. Статус при этом не меняется (I12): меняется
+    только участие в расчёте, и исключение **видно** (``ScoreBundle.stale_cells``), а не
+    вычитается тихо.
+    """
+    catalog = _catalog()
+    _save(store, _mixed_cells())
+    baseline = compute(store=store, run_id=RUN_ID, catalog=catalog, module_weights={})
+    assert baseline.stale_cells == []
+
+    stale = _cell(PRODUCT_A, "param.partial", Status.OK).model_copy(
+        update={"stale_reason": StaleReason.NEW_BUILD, "index_build_id": "build-old"}
+    )
+    _save(store, [stale])
+    with_stale = compute(store=store, run_id=RUN_ID, catalog=catalog, module_weights={})
+
+    # Эталон: та же сборка **без** этой ячейки вовсе. Устаревшая должна дать ровно тот
+    # же расчёт — «не измерено» (в universe-режиме — неразрешённая ячейка, I5), а не
+    # «измерено по прошлой сборке».
+    with SqliteStore(":memory:") as fresh_store:
+        fresh_store.create_run(RUN_ID, _cfg())
+        _save(
+            fresh_store,
+            [cell for cell in _mixed_cells() if cell.param_id != "param.partial"],
+        )
+        without = compute(
+            store=fresh_store, run_id=RUN_ID, catalog=catalog, module_weights={}
+        )
+    assert with_stale.capability == without.capability
+    assert with_stale.coverage == without.coverage
+    assert with_stale.modules == without.modules
+    # Устаревание — не «нет»: статус ⚠️ остаётся, Coverage не превращается в отказ.
+    assert with_stale.coverage.value >= 0.0
+    assert with_stale.stale_cells == [
+        {
+            "product_id": PRODUCT_A,
+            "param_id": "param.partial",
+            "stale_reason": "new_build",
+            "index_build_id": "build-old",
+        }
+    ]
+    # В хранилище ячейка осталась со своим статусом — исключение только из расчёта.
+    stored = {
+        cell.product_id: cell
+        for cell in store.iter_cells(RUN_ID)
+        if cell.param_id == "param.partial"
+    }[PRODUCT_A]
+    assert stored.status is Status.OK
+    assert stored.stale_reason is StaleReason.NEW_BUILD
 
 
 # ---------------------------------------------------------------------------

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
@@ -17,17 +18,18 @@ from core.domain.enums import (
     AbsenceRuleType,
     CellState,
     EvidenceState,
+    DenialStrength,
     EvidenceType,
     InheritanceMode,
     Origin,
     Relationship,
     SatelliteState,
     SourceKind,
-    SourceScope,
     Status,
     TerminationReason,
 )
 from core.domain.invariants import (
+    EXHAUSTION_CONTOURS,
     REQUIRED_EXHAUSTION_CONTOURS,
     check_cell,
     check_derived_evidence,
@@ -41,6 +43,7 @@ from core.domain.models import (
     Cell,
     CellEvidence,
     Citation,
+    EvidenceScope,
     LLMEvidence,
     ProtocolExhaustion,
     Satellite,
@@ -111,16 +114,18 @@ def test_i1_pass_with_evidence() -> None:
 
 
 # ---------------------------------------------------------------------------
-# I2 / I2b
+# I2 / I2b (Вариант 2): сила отрицания вместо булева «исчерпан ли охват»
 # ---------------------------------------------------------------------------
 
 
-def test_i2_absent_without_absence_evidence() -> None:
+def test_i2_absent_without_denial_scope() -> None:
+    """``❌`` без объекта силы отрицания — вердикт без основания."""
     c = _cell(state=CellState.EVALUATED, status=Status.ABSENT, absence_evidence=[])
     assert "I2" in _codes(check_cell(c))
 
 
-def test_i2_explicit_does_not_require_scope() -> None:
+def test_i2_explicit_scope_with_quote_passes() -> None:
+    """explicit с цитатой — достаточно; принятие риска не требуется."""
     c = Cell(
         run_id=_RUN,
         product_id=_PRODUCT,
@@ -128,22 +133,60 @@ def test_i2_explicit_does_not_require_scope() -> None:
         state=CellState.EVALUATED,
         status=Status.ABSENT,
         absence_rule=AbsenceRuleType.EXPLICIT,
-        absence_evidence=[{"source_scope": SourceScope.PARTIAL.value}],
+        evidence_scope=EvidenceScope(
+            denial_strength=DenialStrength.EXPLICIT,
+            citation_quote="возможность не поддерживается",
+        ),
     )
     assert check_cell(c) == []
 
 
-def test_i2b_parameter_reference_requires_attestation() -> None:
+def test_i2b_explicit_scope_without_quote_is_refused() -> None:
+    """explicit без цитаты — отказ: отрицание без цитаты это мнение, а не доказательство."""
+    with pytest.raises(ValueError, match="explicit"):
+        EvidenceScope(denial_strength=DenialStrength.EXPLICIT)
     c = _cell(
         state=CellState.EVALUATED,
         status=Status.ABSENT,
-        absence_rule=AbsenceRuleType.PARAMETER_REFERENCE,
-        absence_evidence=[{"source_scope": SourceScope.EXHAUSTIVE.value}],
+        evidence_scope=EvidenceScope.model_construct(
+            denial_strength=DenialStrength.EXPLICIT, citation_quote=None
+        ),
     )
     assert "I2b" in _codes(check_cell(c))
 
 
-def test_i2b_parameter_reference_pass_with_attestation() -> None:
+def test_i2_not_stated_scope_cannot_carry_absent() -> None:
+    """``❓``-класс не даёт ``❌``: незнание не публикуется как отсутствие."""
+    with pytest.raises(ValueError, match="I2"):
+        Cell(
+            run_id=_RUN,
+            product_id=_PRODUCT,
+            param_id=_PARAM,
+            state=CellState.EVALUATED,
+            status=Status.ABSENT,
+            evidence_scope=EvidenceScope(
+                denial_strength=DenialStrength.NOT_STATED, reason="нет дословного"
+            ),
+        )
+
+
+def test_i2b_bounded_requires_scope_acceptance() -> None:
+    """bounded — измерение не покрывает пространство, поэтому риск принимает человек."""
+    with pytest.raises(ValueError, match="scope_acceptance"):
+        EvidenceScope(
+            denial_strength=DenialStrength.BOUNDED, reason="конечный справочник"
+        )
+    c = _cell(
+        state=CellState.EVALUATED,
+        status=Status.ABSENT,
+        evidence_scope=EvidenceScope.model_construct(
+            denial_strength=DenialStrength.BOUNDED, reason="конечный справочник"
+        ),
+    )
+    assert "I2b" in _codes(check_cell(c))
+
+
+def test_i2b_parameter_reference_bounded_with_acceptance_passes() -> None:
     c = Cell(
         run_id=_RUN,
         product_id=_PRODUCT,
@@ -151,17 +194,17 @@ def test_i2b_parameter_reference_pass_with_attestation() -> None:
         state=CellState.EVALUATED,
         status=Status.ABSENT,
         absence_rule=AbsenceRuleType.PARAMETER_REFERENCE,
-        absence_evidence=[
-            {
-                "source_scope": SourceScope.EXHAUSTIVE.value,
-                "scope_attested_by": "reviewer",
-            }
-        ],
+        evidence_scope=EvidenceScope(
+            denial_strength=DenialStrength.BOUNDED,
+            reason="справочник полон, записи нет",
+            scope_acceptance="reviewer",
+        ),
     )
     assert check_cell(c) == []
 
 
-def test_i2b_registry_absence_exhaustive_pass() -> None:
+def test_i2_authoritative_registry_absence_needs_no_acceptance() -> None:
+    """authoritative без подписи — ``❌``: авторитетная энумерация не требует риска."""
     c = Cell(
         run_id=_RUN,
         product_id=_PRODUCT,
@@ -169,19 +212,65 @@ def test_i2b_registry_absence_exhaustive_pass() -> None:
         state=CellState.EVALUATED,
         status=Status.ABSENT,
         absence_rule=AbsenceRuleType.REGISTRY_ABSENCE,
-        absence_evidence=[{"source_scope": SourceScope.EXHAUSTIVE.value}],
+        absence_evidence=[{"registry_ids": ["reg-1"]}],
     )
+    assert c.evidence_scope is not None
+    assert c.evidence_scope.denial_strength is DenialStrength.AUTHORITATIVE
+    assert c.evidence_scope.scope_acceptance is None
     assert check_cell(c) == []
 
 
-def test_i2b_registry_absence_non_exhaustive_fails() -> None:
-    c = _cell(
-        state=CellState.EVALUATED,
-        status=Status.ABSENT,
-        absence_rule=AbsenceRuleType.REGISTRY_ABSENCE,
-        absence_evidence=[{"source_scope": SourceScope.PARTIAL.value}],
+def test_i2_authoritative_cannot_be_declared_unenumerated() -> None:
+    with pytest.raises(ValueError, match="enumerated"):
+        EvidenceScope(denial_strength=DenialStrength.AUTHORITATIVE, enumerated=False)
+
+
+def test_i4_failed_carries_instrument_failed_only() -> None:
+    """Сбой прибора — ``instrument_failed``; отрицание в ``failed`` недопустимо."""
+    ok = Cell(
+        run_id=_RUN,
+        product_id=_PRODUCT,
+        param_id=_PARAM,
+        state=CellState.FAILED,
+        status=None,
+        evidence_scope=EvidenceScope.for_instrument_failure("evaluation_failed"),
     )
-    assert "I2b" in _codes(check_cell(c))
+    assert check_cell(ok) == []
+    with pytest.raises(ValueError, match="I4"):
+        Cell(
+            run_id=_RUN,
+            product_id=_PRODUCT,
+            param_id=_PARAM,
+            state=CellState.FAILED,
+            status=None,
+            evidence_scope=EvidenceScope(
+                denial_strength=DenialStrength.NOT_STATED, reason="нет"
+            ),
+        )
+
+
+def test_i2_vector_instead_of_scalar() -> None:
+    """Вектор охвата: факты наблюдаемы, доля названа мерой URL, вероятности нет."""
+    scope = EvidenceScope(
+        denial_strength=DenialStrength.UNOBSERVED,
+        reason="robots_disallow",
+        observed=17,
+        expected=28,
+        blocked_by_reason={"robots_disallow": 11},
+        unreadable_sources=["closed.example"],
+        termination="results_exhausted",
+    )
+    assert scope.observed == 17 and scope.expected == 28
+    assert scope.blocked_by_reason == {"robots_disallow": 11}
+    assert scope.url_observation_ratio == pytest.approx(17 / 28)
+    assert not hasattr(scope, "absence_probability")
+    # «0 из 0» — отсутствие знаменателя, а не единица.
+    assert (
+        EvidenceScope(
+            denial_strength=DenialStrength.NOT_STATED, reason="x"
+        ).url_observation_ratio
+        is None
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -538,7 +627,7 @@ def test_check_evidence_total(
 
 
 # ---------------------------------------------------------------------------
-# I3 (§5, v2.1): полный протокол исчерпания strict-❓
+# I3 (Вариант 2): ``❓`` обосновывается классом отрицания и причиной
 # ---------------------------------------------------------------------------
 
 
@@ -547,7 +636,7 @@ def _exhaustion(**kw: Any) -> ProtocolExhaustion:
         "run_id": _RUN,
         "product_id": _PRODUCT,
         "param_id": _PARAM,
-        "contours": list(REQUIRED_EXHAUSTION_CONTOURS),
+        "contours": list(EXHAUSTION_CONTOURS),
         "queries": ["q1"],
         "rounds": 1,
         "budget": {},
@@ -557,46 +646,60 @@ def _exhaustion(**kw: Any) -> ProtocolExhaustion:
     return ProtocolExhaustion.model_construct(**base)
 
 
-def _unknown_cell() -> Cell:
-    return Cell.model_construct(
-        run_id=_RUN,
-        product_id=_PRODUCT,
-        param_id=_PARAM,
-        state=CellState.EVALUATED,
-        status=Status.UNKNOWN,
-    )
+def _unknown_cell(**kw: Any) -> Cell:
+    base: dict[str, Any] = {
+        "run_id": _RUN,
+        "product_id": _PRODUCT,
+        "param_id": _PARAM,
+        "state": CellState.EVALUATED,
+        "status": Status.UNKNOWN,
+    }
+    base.update(kw)
+    return Cell.model_construct(**base)
 
 
-def test_required_exhaustion_contours_constant() -> None:
-    assert REQUIRED_EXHAUSTION_CONTOURS == ("corpus", "serp", "registry", "inheritance")
+def test_exhaustion_contours_are_provenance_not_invariant() -> None:
+    """Перечень контуров остаётся справочником наблюдаемого, а не требованием."""
+    assert EXHAUSTION_CONTOURS == ("corpus", "serp", "registry", "inheritance")
+    assert REQUIRED_EXHAUSTION_CONTOURS == EXHAUSTION_CONTOURS
 
 
-def test_check_unknown_exhaustion_missing_protocol() -> None:
-    violations = check_unknown_exhaustion(_unknown_cell(), None)
-    assert "I3" in _codes(violations)
-
-
-def test_check_unknown_exhaustion_missing_termination() -> None:
-    violations = check_unknown_exhaustion(
-        _unknown_cell(), _exhaustion(termination_reason=None)
-    )
-    assert "I3" in _codes(violations)
-
-
-def test_check_unknown_exhaustion_incomplete_contours() -> None:
-    violations = check_unknown_exhaustion(
-        _unknown_cell(), _exhaustion(contours=["corpus", "serp"])
-    )
-    assert "I3" in _codes(violations)
-    assert "registry" in violations[0].message
-
-
-def test_check_unknown_exhaustion_pass() -> None:
+def test_check_unknown_exhaustion_legacy_cell_without_scope() -> None:
+    """Историческая строка без объекта: прежнее правило по протоколу (читаемость)."""
+    assert "I3" in _codes(check_unknown_exhaustion(_unknown_cell(), None))
     assert check_unknown_exhaustion(_unknown_cell(), _exhaustion()) == []
 
 
-def test_check_unknown_exhaustion_custom_required() -> None:
-    violations = check_unknown_exhaustion(
-        _unknown_cell(), _exhaustion(contours=["corpus"]), required=("corpus",)
+def test_check_unknown_exhaustion_not_stated_with_reason_passes() -> None:
+    """Новый путь: причина незнания — в объекте, протокол не нужен вовсе."""
+    cell = _unknown_cell(
+        evidence_scope=EvidenceScope(
+            denial_strength=DenialStrength.NOT_STATED,
+            reason="материал релевантен, дословного утверждения нет",
+        )
     )
-    assert violations == []
+    assert check_unknown_exhaustion(cell, None) == []
+
+
+def test_check_unknown_exhaustion_requires_reason() -> None:
+    cell = _unknown_cell(
+        evidence_scope=EvidenceScope.model_construct(
+            denial_strength=DenialStrength.NOT_STATED, reason=None
+        )
+    )
+    violations = check_unknown_exhaustion(cell, None)
+    assert "I3" in _codes(violations)
+
+
+def test_check_unknown_exhaustion_contract_class_is_not_enough() -> None:
+    """Класс ``❌`` при статусе ``❓`` — противоречие, а не основание."""
+    cell = _unknown_cell(
+        evidence_scope=EvidenceScope.model_construct(
+            denial_strength=DenialStrength.EXPLICIT, citation_quote="q"
+        )
+    )
+    assert "I3" in _codes(check_unknown_exhaustion(cell, None))
+
+
+def test_check_unknown_exhaustion_human_review_satisfies_i3() -> None:
+    assert check_unknown_exhaustion(_unknown_cell(reviewed_by="human"), None) == []

@@ -7,7 +7,9 @@ from __future__ import annotations
 
 from core.domain.dictionary import assert_dictionary_integrity, load_dictionary
 from core.domain.enums import (
+    ABSENT_DENIAL_STRENGTHS,
     BLOCKING_FAILURE_KINDS,
+    UNKNOWN_DENIAL_STRENGTHS,
     AbsenceRuleType,
     AdapterKind,
     AnchorRelation,
@@ -22,6 +24,8 @@ from core.domain.enums import (
     CrawlItemStatus,
     CrawlSessionStatus,
     CrawlStrategy,
+    DenialClaim,
+    DenialStrength,
     DocumentLevel,
     EndpointKind,
     EvidenceState,
@@ -82,6 +86,7 @@ from core.domain.models import (
     CrawlSession,
     CrawlSessionItem,
     CrawlSessionProvenance,
+    EvidenceScope,
     Focus,
     GateDecision,
     GoldenRow,
@@ -110,6 +115,7 @@ from core.domain.models import (
     SearchLogEntry,
     SeedEntry,
     SeedsConfig,
+    SerpRunConfig,
     Upstream,
     UpstreamRef,
     Violation,
@@ -119,6 +125,7 @@ from core.domain.models import (
 )
 from core.domain.r2 import apply_r2
 from core.domain.invariants import (
+    EXHAUSTION_CONTOURS,
     REQUIRED_EXHAUSTION_CONTOURS,
     check_absence_coverage,
     check_cell,
@@ -156,7 +163,9 @@ __all__ = [
     "Archetype",
     "ArchiveDescent",
     "ArchiveDescentStatus",
+    "ABSENT_DENIAL_STRENGTHS",
     "BLOCKING_FAILURE_KINDS",
+    "UNKNOWN_DENIAL_STRENGTHS",
     "Cap",
     "CapabilityPolicy",
     "CellState",
@@ -164,6 +173,8 @@ __all__ = [
     "CrawlItemStatus",
     "CrawlSessionStatus",
     "CrawlStrategy",
+    "DenialClaim",
+    "DenialStrength",
     "DocumentLevel",
     "PdfPipeline",
     "EndpointKind",
@@ -224,6 +235,7 @@ __all__ = [
     "CrawlSession",
     "CrawlSessionItem",
     "CrawlSessionProvenance",
+    "EvidenceScope",
     "Focus",
     "GateDecision",
     "GoldenRow",
@@ -252,6 +264,7 @@ __all__ = [
     "SearchLogEntry",
     "SeedEntry",
     "SeedsConfig",
+    "SerpRunConfig",
     "Upstream",
     "UpstreamRef",
     "Violation",
@@ -268,6 +281,7 @@ __all__ = [
     "check_derived_evidence",
     "check_satellite",
     "check_unknown_exhaustion",
+    "EXHAUSTION_CONTOURS",
     "REQUIRED_EXHAUSTION_CONTOURS",
     # anchors (T2.4)
     "ResolvedSource",

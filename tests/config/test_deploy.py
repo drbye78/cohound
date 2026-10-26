@@ -28,8 +28,10 @@ from core.config.deploy import (
     is_split,
     load_deploy_config,
     profile_notices,
+    parse_serp_switch,
     resolve_llm_slot,
     resolve_search_provider,
+    resolve_serp_rounds,
 )
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -159,10 +161,60 @@ def test_oidc_auth_mapping_parsed(tmp_path: Path) -> None:
     assert cfg.edge.oidc is not None and cfg.edge.oidc.audience == "cohound-edge"
 
 
-def test_search_budget_parsed() -> None:
+def test_search_serp_rounds_parsed() -> None:
+    """``search.serp.rounds`` — низший уровень переключения контура (бюджета здесь нет).
+
+    Бюджет объявляется только входом прогона (``run.yaml: serp.budget``), потому что
+    определяет число ушедших запросов, то есть состав корпуса и ``run_id``.
+    """
     cfg = load_deploy_config(FIXTURES / "deploy.yaml")
-    assert cfg.search.budget == {"ru": 5, "en": 5}
+    assert cfg.search.serp.rounds == 2
     assert cfg.search.adapter == "example_adapter"
+    assert not hasattr(cfg.search, "budget")
+
+
+def test_search_budget_key_rejected() -> None:
+    """Удалённый ``search.budget`` отвергается (extra="forbid"), а не игнорируется молча."""
+    with pytest.raises(ValidationError):
+        SearchDeployConfig.model_validate({"budget": {"ru": 5, "en": 5}})
+
+
+# ---------------------------------------------------------------------------
+# SERP-контур: переключатель на четырёх уровнях (I3/§5)
+# ---------------------------------------------------------------------------
+
+
+def test_parse_serp_switch_forms() -> None:
+    """Переключатель: «не задано» ≠ «выключено», off/0 выключают, мусор — отказ."""
+    assert parse_serp_switch(None) is None
+    assert parse_serp_switch("") is None
+    assert parse_serp_switch("off") == 0
+    assert parse_serp_switch(" OFF ") == 0
+    assert parse_serp_switch("0") == 0
+    assert parse_serp_switch(0) == 0
+    assert parse_serp_switch("3") == 3
+    assert parse_serp_switch(2) == 2
+    for bad in ("-1", -1, True, "maybe", 1.5):
+        with pytest.raises(ValueError):
+            parse_serp_switch(bad)
+
+
+def test_resolve_serp_rounds_priority_and_source() -> None:
+    """Приоритет ``cli > env > run.yaml > deploy.yaml > default`` и уровень-источник.
+
+    Источник обязателен: «почему поиск не работал» должно быть отличимо от «поиск не
+    объявлен», а ``run_id`` обязан описывать тот контур, который реально исполнялся.
+    """
+    search = SearchDeployConfig(serp={"rounds": 1})
+    assert resolve_serp_rounds(None) == (0, "default")
+    assert resolve_serp_rounds(search) == (1, "deploy.yaml")
+    assert resolve_serp_rounds(search, run_rounds=0) == (0, "run.yaml")
+    assert resolve_serp_rounds(search, run_rounds=0, env="2") == (2, "env")
+    assert resolve_serp_rounds(
+        search, run_rounds=0, env="2", cli=4
+    ) == (4, "cli")
+    # env «off» выключает объявленный контур — и это видно как уровень env.
+    assert resolve_serp_rounds(search, env="off") == (0, "env")
 
 
 # ---------------------------------------------------------------------------

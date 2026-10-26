@@ -90,13 +90,16 @@ from core.cli.errors import EXIT_USAGE, CliError
 from core.config.deploy import (
     DeployConfig,
     CrawlConfig,
+    ENV_SERP,
     LLMDeployConfig,
     LLMSlotConfig,
     SPLIT_PROFILES,
     is_split,
     load_deploy_config,
+    parse_serp_switch,
     resolve_llm_slot,
     resolve_search_provider,
+    resolve_serp_rounds,
 )
 from core.config.domain_profiles import DomainProfile
 from core.config.crawl_sources import CrawlSourcesConfig
@@ -924,6 +927,68 @@ def llm_env_notices(
                 "объявленном endpoint"
             )
     return tuple(notices)
+
+
+def serp_env_notices(
+    *,
+    deploy_search: Any = None,
+    run_rounds: int | None = None,
+    cli_rounds: Any = None,
+) -> tuple[str, ...]:
+    """Видимые предупреждения о переключателе SERP-контура из env (I3/§5).
+
+    ``COHOUND_SERP`` — операционный аварийный троттл (образец — :func:`llm_env_notices`).
+    Он **читается** (в отличие от ``COHOUND_LLM_MODEL``), потому что число раундов меняет
+    корпус, а значит и ``run_id``; но именно поэтому расхождение env с объявленным входом
+    обязано быть видимым: молчаливая подмена превратила бы «аварийное выключение» в
+    невидимое изменение условий измерения.
+
+    Сообщается: (а) значение env и его эффект; (б) если env перекрывает значение
+    ``run.yaml``/``deploy.yaml`` — об этом говорится прямо; (в) если контур выключен
+    env, а объявлен включённым — тоже.
+
+    Функция чистая (env + конфиг), вызывается один раз composition root'ом; те же строки
+    попадают в payload прогона и ``logs/wiring.jsonl``.
+    """
+    raw = os.environ.get(ENV_SERP)
+    if raw is None or not str(raw).strip():
+        return ()
+    try:
+        parse_serp_switch(raw, where=ENV_SERP)
+    except ValueError as exc:  # невалидное значение — не «проигнорируем тихо»
+        return (f"{ENV_SERP}={raw!r} не разбирается ({exc}); контур остаётся как объявлен",)
+    effective, source = resolve_serp_rounds(
+        deploy_search,
+        cli=cli_rounds,
+        env=raw,
+        run_rounds=run_rounds,
+    )
+    if source != "env":
+        declared = (
+            "cli" if source == "cli" else "run.yaml/deploy.yaml"
+        )
+        return (
+            f"{ENV_SERP}={raw.strip() or '∅'} не действует: раунды заданы уровнем "
+            f"{declared} (эффективно {effective})",
+        )
+    declared_rounds = run_rounds
+    if declared_rounds is None:
+        declared_rounds = getattr(getattr(deploy_search, "serp", None), "rounds", None)
+    if effective == 0:
+        tail = (
+            f"перекрывает объявленные run.yaml/deploy.yaml rounds={declared_rounds}"
+            if declared_rounds
+            else "контур был выключен и остаётся выключенным"
+        )
+        return (
+            f"SERP-контур ВЫКЛЮЧЕН из env {ENV_SERP}={raw.strip()}: {tail}; "
+            "значение входит в serp_rounds ⇒ run_id другого корпуса",
+        )
+    return (
+        f"SERP-контур включён из env {ENV_SERP}={raw.strip()}: раундов {effective} "
+        f"(объявлено run.yaml/deploy.yaml: {declared_rounds}); env перекрывает "
+        "объявленный вход, значение входит в serp_rounds ⇒ run_id",
+    )
 
 
 def build_discovery_llm(

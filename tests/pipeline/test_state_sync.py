@@ -26,6 +26,7 @@ from core.domain.enums import (
 from core.domain.models import (
     Cell,
     CorpusCoverage,
+    EvidenceScope,
     Focus,
     ProductPlan,
     ProductSeeds,
@@ -153,6 +154,11 @@ def _cell(product_id: str, param_id: str, state_: CellState) -> Cell:
         status=Status.ABSENT if state_ is CellState.EVALUATED else None,
         absence_evidence=(
             [{"source_scope": "exhaustive"}] if state_ is CellState.EVALUATED else []
+        ),
+        evidence_scope=(
+            EvidenceScope.for_registry_absence(registry_ids=["reg"])
+            if state_ is CellState.EVALUATED
+            else None
         ),
     )
 

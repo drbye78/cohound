@@ -7055,3 +7055,216 @@ def test_scope_observation_persisted_incrementally_to_session_provenance(
         assert edu not in {item.url for item in _items(store)}
     finally:
         store.close()
+
+# --------------------------------------------------------------------------- #
+# I3/§5: SERP-контур внутри фазы корпуса (второй проход по объявленным хостам)
+# --------------------------------------------------------------------------- #
+
+class _Search:
+    """Адаптер внешнего поиска: один и тот же список на любой запрос.
+
+    Текст запроса пишется, но не фильтрует: контур проверяется на **допуске кандидатов**,
+    а не на формулировке (её проверяет ``test_serp_loop.py``).
+    """
+
+    #: ``search_log`` валидирует вид адаптера по ``AdapterKind`` — SERP-контур пишется
+    #: именно как ``serp`` (а не свободной строкой).
+    adapter_kind = "serp"
+    provider = "fake"
+
+    def __init__(self, urls: list[str], *, raises: Exception | None = None) -> None:
+        self.urls = list(urls)
+        self.raises = raises
+        self.queries: list[str] = []
+
+    def search(self, q) -> list[Any]:  # noqa: ANN001 — duck-typed SearchQuery
+        from core.ports.search import SearchResult
+
+        self.queries.append(q.text)
+        if self.raises is not None:
+            raise self.raises
+        return [
+            SearchResult(url=url, title="t", rank=index)
+            for index, url in enumerate(self.urls)
+        ]
+
+    def fetch(self, url: str):  # noqa: ANN201 — не используется в SERP-проходе
+        raise AssertionError("SERP-контур не фетчит сам: документ добывает краул")
+
+def test_serp_round_adds_documents_to_the_declared_root(tmp_path: Path) -> None:
+    """Раунд SERP добавляет найденный документ **в корпус**, не заводя новый корень.
+
+    Проверяется то, что нельзя увидеть в объявлении: найденный URL действительно добыт
+    краулом (I19: retention → hash → index), ``seeds_declared`` остаётся авторским, а
+    провенанс контура различает «нашли» и «вошло в корпус».
+    """
+    root = "https://docs.test/p1/"
+    found = "https://docs.test/p1/found.html"
+    pages = {root: b"seed page", found: b"found page"}
+    crawler = _Crawler(pages)
+    search = _Search([found])
+    store = SqliteStore(":memory:")
+    _make_run(store)
+    try:
+        result = _build(
+            tmp_path,
+            pages=pages,
+            urls={"p1": [root]},
+            crawler=crawler,
+            store=store,
+            run_id=RUN_ID,
+            search=search,
+            serp_rounds=1,
+            # Бюджет — на продукт на раунд; 4 > числа запросов каталога, поэтому
+            # исчерпание здесь не наступает и видно отдельно от «сколько ушло».
+            serp_budget=4,
+            serp_source="run.yaml",
+            product_names={"p1": "Product One"},
+        )
+        assert result.errors == []
+        # Документ добыт обычным путём корпуса (не подсунут как evidence).
+        build = _build_of(result)
+        assert found in {doc.url for doc in build.docs}
+        assert found in {url for url, _ in crawler.calls}
+        # Корень остался один: находка — seed, а не новый корень.
+        start = _event(result, "product_start", "p1")
+        assert start["seeds_declared"] == 1
+        # Решение контура видно в log_entries (операторская строка + структура).
+        notes = [e for e in result.log_entries if isinstance(e, str) and "serp:" in e]
+        assert any("принято URL 1" in note for note in notes)
+        # Durable-провенанс сеанса: «нашли» и «вошло в корпус» — разные факты.
+        provenance = json.loads(
+            store.get_crawl_session(SESSION_ID).provenance_json or "{}"
+        )
+        serp = provenance["serp"]
+        assert serp["enabled"] is True
+        assert serp["rounds"]["declared"] == 1 and serp["rounds"]["executed"] == 1
+        # Израсходовано ровно столько вызовов, сколько было запросов (по одному на
+        # параметр каталога), и это не больше объявленного бюджета на продукт.
+        assert serp["budget"]["used"] == {"p1": len(search.queries)}
+        assert len(search.queries) <= serp["budget"]["effective_per_product"]
+        assert serp["budget"]["exhausted"].get("p1") is not True
+        assert serp["accepted"] == {"p1": [found]}
+        assert serp["ingest"]["p1"]["enqueued"] == 1
+    finally:
+        store.close()
+
+def test_serp_disabled_contour_is_visible_in_provenance(tmp_path: Path) -> None:
+    """Выключенный контур тоже пишет наблюдение: «выключено, уровень X».
+
+    Отсутствие записи было бы неотличимо от «контур есть, но ничего не нашёл» — именно
+    поэтому выключенный контур называется явно, а не молчит.
+    """
+    store = SqliteStore(":memory:")
+    _make_run(store)
+    try:
+        result = _build(
+            tmp_path,
+            pages={URL_P1_A: b"page"},
+            urls={"p1": [URL_P1_A]},
+            store=store,
+            run_id=RUN_ID,
+            serp_source="default",
+        )
+        assert result.errors == []
+        provenance = json.loads(
+            store.get_crawl_session(SESSION_ID).provenance_json or "{}"
+        )
+        assert provenance["serp"]["enabled"] is False
+        assert provenance["serp"]["rounds"]["source"] == "default"
+        # Структурная запись — в log_entries (машинному потребителю), строка оператору не
+        # нужна: выключенный контур не «событие» прогона.
+        records = [
+            entry
+            for entry in result.log_entries
+            if isinstance(entry, dict) and "serp" not in entry and "enabled" in entry
+        ]
+        assert records and records[0]["enabled"] is False
+    finally:
+        store.close()
+
+def test_serp_without_adapter_is_a_visible_refusal_not_a_silent_pass(
+    tmp_path: Path,
+) -> None:
+    """Объявленные раунды без адаптера: контур не исполнен, причина названа.
+
+    Молчаливый пропуск выдавал бы «поиск ничего не дал» за «поиска не было».
+    """
+    store = SqliteStore(":memory:")
+    _make_run(store)
+    try:
+        result = _build(
+            tmp_path,
+            pages={URL_P1_A: b"page"},
+            urls={"p1": [URL_P1_A]},
+            store=store,
+            run_id=RUN_ID,
+            serp_rounds=1,
+            serp_budget=2,
+        )
+        assert any("адаптер внешнего поиска не подключён" in err for err in result.errors)
+        provenance = json.loads(
+            store.get_crawl_session(SESSION_ID).provenance_json or "{}"
+        )
+        assert provenance["serp"]["unavailable_reason"] == "no_adapter"
+    finally:
+        store.close()
+
+def test_serp_rounds_without_budget_is_refused(tmp_path: Path) -> None:
+    """Безлимит внешнего поиска запрещён: ``rounds > 0`` без бюджета — ``ValueError``."""
+    with pytest.raises(ValueError):
+        _build(
+            tmp_path,
+            pages={URL_P1_A: b"page"},
+            urls={"p1": [URL_P1_A]},
+            serp_rounds=1,
+            search=_Search([]),
+        )
+
+def test_previous_build_cells_are_marked_stale_on_rebuild(tmp_path: Path) -> None:
+    """Повтор сборки в том же прогоне: ячейки прошлой сборки → ``new_build`` (K2).
+
+    Живой случай — ``--reset``/``--from-scratch``: корпус пересобирается, а ячейки,
+    записанные ранее, описывают ушедшую сборку. Расчёт такие ячейки исключает
+    (``compute``), отчёт называет очередью пере-оценки; здесь проверяется **производитель**
+    пометки. Статус не меняется (I12) — меняется только участие в цифрах.
+    """
+    from core.domain import Cell, CellState, Status, StaleReason, LLMEvidence
+
+    store = SqliteStore(":memory:")
+    _make_run(store)
+    try:
+        pages = {URL_P1_A: b"page one"}
+        first = _build(tmp_path, pages=pages, urls={"p1": [URL_P1_A]}, store=store, run_id=RUN_ID)
+        old_build_id = _build_of(first).index_build_id
+        store.save_cell(
+            Cell(
+                run_id=RUN_ID,
+                product_id="p1",
+                param_id="param_a",
+                state=CellState.EVALUATED,
+                status=Status.OK,
+                evidence=[LLMEvidence(source_id="src.1", quote="цитата")],
+                index_build_id=old_build_id,
+            )
+        )
+        # Вторая сборка того же прогона с **другим составом** корпуса → новая композиция
+        # (ранее добытые страницы берутся из сеанса: «тот же URL» ≠ тот же корпус).
+        second = _build(
+            tmp_path,
+            pages={URL_P1_A: b"page one", URL_P1_B: b"page two"},
+            urls={"p1": [URL_P1_A, URL_P1_B]},
+            store=store,
+            run_id=RUN_ID,
+        )
+        assert _build_of(second).index_build_id != old_build_id
+        cells = {(cell.product_id, cell.param_id): cell for cell in store.iter_cells(RUN_ID)}
+        cell = cells[("p1", "param_a")]
+        assert cell.stale_reason is StaleReason.NEW_BUILD
+        assert cell.status is Status.OK  # I12: пометка не меняет вердикт
+        assert any(
+            isinstance(entry, str) and "помечены устаревшими" in entry
+            for entry in second.log_entries
+        )
+    finally:
+        store.close()

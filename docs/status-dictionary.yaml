@@ -76,7 +76,8 @@ source_kind:
 
 # §4.1. evidence_type — прямое, производное доказательство или протокол отсутствия.
 # absence — законный вид (§4.2): у него нет цитаты (I22 к нему не применяется), а носитель —
-# cell_evidence с evidence_type='absence' + source_scope/scope_attested_by.
+# cell_evidence с evidence_type='absence'. Класс отрицания (denial_strength) живёт в
+# EvidenceScope ячейки (cells.evidence_scope), а не в самой записи evidence.
 evidence_type:
   - direct
   - derived
@@ -87,23 +88,57 @@ evidence_type:
 absence_rule_type:
   default: explicit
   values:
-    explicit: "Явное отрицание вендора; source_scope не требуется (само отрицание есть evidence)."
-    parameter_reference: "Требует source_scope=exhaustive И scope_attested_by != null, иначе ❓."
-    distribution_absence: "Требует source_scope=exhaustive И scope_attested_by != null, иначе ❓."
-    registry_absence: "Exhaustive по построению (авторитетная энумерация); scope_attested_by не требуется."
-  # I2b: какие типы требуют человеческой аттестации исчерпанности.
-  requires_attestation:
-    - parameter_reference
-    - distribution_absence
-  # Типы, для которых source_scope обязан быть exhaustive в силу конструкции.
-  exhaustive_by_construction:
-    - registry_absence
+    explicit: "Прямое отрицание/ограничение вендора с цитатой → denial_strength=explicit → ❌; без цитаты → not_stated → ❓."
+    parameter_reference: "Конечный справочник: без прямого отрицания требует принятия риска (scope_acceptance) → bounded → ❌; иначе ❓."
+    distribution_absence: "Конечный справочник: без прямого отрицания требует принятия риска (scope_acceptance) → bounded → ❌; иначе ❓."
+    registry_absence: "Авторитетная энумерация → denial_strength=authoritative → ❌; принятие риска не требуется."
+  # Вариант 2 §2.3: тип правила больше не задаёт отдельную блокировку (I2b). Он лишь
+  # подсказывает, какой класс отрицания вообще достижим: explicit — всегда,
+  # parameter_reference/distribution_absence — bounded (с принятием риска),
+  # registry_absence — authoritative.
+  denial_strength_reachable:
+    explicit: [explicit]
+    parameter_reference: [explicit, bounded]
+    distribution_absence: [explicit, bounded]
+    registry_absence: [authoritative]
 
-# §4.1. source_scope — свойство экземпляра источника (поле evidence).
+# §4.1. source_scope — УСТАРЕВШИЙ скаляр прежних прогонов (persisted data).
+# Новый писатель его не выставляет: вопрос «можно ли утверждать отсутствие» решает
+# denial_strength + вектор охвата (EvidenceScope). Секция сохранена, чтобы словарь
+# оставался зеркалом перечисления и старые строки читались без догадок.
 source_scope:
   - exhaustive
   - partial
   - unknown
+
+# §2.3 (Вариант 2). denial_strength — **один** ответ на вопрос «можно ли утверждать
+# отсутствие». Заменяет три независимые блокировки (I2b «exhaustive + подпись», I2c
+# «человеческая аттестация при неполном корпусе», I3 «полный протокол из четырёх контуров»).
+# Класс — функция ПРОИСХОЖДЕНИЯ утверждения, а не его эмоциональной силы. Методологическая
+# секция: смена значений — версионная граница methodology_version.
+denial_strength:
+  authoritative: "Авторитетная полная энумерация (реестр), записи нет → ❌."
+  explicit: "Вендор прямо отрицает/ограничивает, есть цитата → ❌."
+  bounded: "Конечный справочник с объявленной процедурой полноты + принятие риска → ❌ (слабее explicit)."
+  unobserved: "Охват неполон/заблокирован (часть материала не наблюдалась) → ❓ + причина."
+  not_stated: "Вендор не заявил, охват не доказан → ❓ + причина."
+  instrument_failed: "Краул/экстрактор/ретривал/оценщик не смогли → failed (статуса нет, I4)."
+  # Классы, при которых статус определён. Один маппинг: класс → статус.
+  verdicts:
+    authoritative: "❌"
+    explicit: "❌"
+    bounded: "❌"
+    unobserved: "❓"
+    not_stated: "❓"
+    instrument_failed: "failed"
+  # Классы, которые вправе заявить оценщик (Ш6). Авторитет и сбой прибора — не его.
+  evaluator_can_claim: [explicit, not_stated]
+
+# §7. denial_claim — что модель вправе заявить о своём «нет» (поле ответа LLMCellOutput).
+# Ровно два значения: всё прочее — присвоение авторитета, которого у модели нет.
+denial_claim:
+  - explicit
+  - not_stated
 
 # §4.1. failure_kind — класс сбоя; failed никогда не статус (I4).
 # Исходы краула (crawl_session_items.error_kind) — persisted-данные: строки стабильны.

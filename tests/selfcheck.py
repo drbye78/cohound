@@ -33,6 +33,8 @@ from core.domain import (  # noqa: E402
     CellState,
     Cohort,
     CohortEntry,
+    DenialStrength,
+    EvidenceScope,
     EvidenceState,
     EvidenceType,
     LLMCellOutput,
@@ -169,15 +171,18 @@ def main() -> int:
 
     section("Инварианты ячейки §2.3")
     check(
-        "evaluated ❌ с registry_absence и exhaustive (I2b)",
-        lambda: Cell(
-            run_id="r1",
-            product_id="p",
-            param_id="param",
-            state=CellState.EVALUATED,
-            status=Status.ABSENT,
-            absence_rule=AbsenceRuleType.REGISTRY_ABSENCE,
-            absence_evidence=[{"source_scope": "exhaustive"}],
+        "evaluated ❌ registry_absence достраивает authoritative (I2)",
+        lambda: _assert(
+            Cell(
+                run_id="r1",
+                product_id="p",
+                param_id="param",
+                state=CellState.EVALUATED,
+                status=Status.ABSENT,
+                absence_rule=AbsenceRuleType.REGISTRY_ABSENCE,
+                absence_evidence=[{"registry_ids": ["reg-1"]}],
+            ).evidence_scope.denial_strength
+            is DenialStrength.AUTHORITATIVE
         ),
     )
     expect_raises(
@@ -205,7 +210,7 @@ def main() -> int:
         ),
     )
     expect_raises(
-        "I2b: parameter_reference не-exhaustive отклоняется",
+        "I2: ❌ без силы отрицания отклоняется",
         ValueError,
         lambda: Cell(
             run_id="r1", product_id="p", param_id="param",
@@ -214,14 +219,30 @@ def main() -> int:
             absence_evidence=[{"source_scope": "partial"}],
         ),
     )
+    expect_raises(
+        "I2b: bounded без принятия риска отклоняется",
+        ValueError,
+        lambda: EvidenceScope(
+            denial_strength=DenialStrength.BOUNDED, reason="конечный справочник"
+        ),
+    )
     check(
-        "I2b: parameter_reference с exhaustive+attested проходит",
+        "I2b: parameter_reference bounded с принятием риска проходит",
         lambda: Cell(
             run_id="r1", product_id="p", param_id="param",
             state=CellState.EVALUATED, status=Status.ABSENT,
             absence_rule=AbsenceRuleType.PARAMETER_REFERENCE,
-            absence_evidence=[{"source_scope": "exhaustive", "scope_attested_by": "analyst"}],
+            evidence_scope=EvidenceScope(
+                denial_strength=DenialStrength.BOUNDED,
+                reason="конечный справочник",
+                scope_acceptance="analyst",
+            ),
         ),
+    )
+    expect_raises(
+        "I2b: explicit без цитаты отклоняется",
+        ValueError,
+        lambda: EvidenceScope(denial_strength=DenialStrength.EXPLICIT),
     )
 
     section("Р-2: маппинг сателлита на зачёт §4.1")
@@ -1070,21 +1091,25 @@ def _domain_invariants() -> None:
         raise AssertionError("I7 не пойман")
     if "I2" not in _codes(_cell(status=Status.ABSENT)):
         raise AssertionError("I2 не пойман")
+    # Вариант 2: ``bounded`` без принятия риска — нарушение, даже если запись протокола
+    # выглядит «исчерпывающей»: полноту принимает человек, а не текст записи.
     if "I2b" not in _codes(
         _cell(
             status=Status.ABSENT,
             absence_rule=AbsenceRuleType.PARAMETER_REFERENCE,
-            absence_evidence=[{"source_scope": "exhaustive"}],
+            evidence_scope=EvidenceScope.model_construct(
+                denial_strength=DenialStrength.BOUNDED, reason="конечный справочник"
+            ),
         )
     ):
-        raise AssertionError("I2b не пойман (нет scope_attested_by)")
+        raise AssertionError("I2b не пойман (bounded без принятия риска)")
     clean = _cell(
         status=Status.ABSENT,
         absence_rule=AbsenceRuleType.REGISTRY_ABSENCE,
-        absence_evidence=[{"source_scope": "exhaustive"}],
+        evidence_scope=EvidenceScope.for_registry_absence(registry_ids=["reg-1"]),
     )
     if check_cell(clean):
-        raise AssertionError("registry_absence exhaustive должен быть чистым")
+        raise AssertionError("registry_absence (authoritative) должен быть чистым")
 
 
 def _corpus_coverage_invariant() -> None:
@@ -1102,7 +1127,7 @@ def _corpus_coverage_invariant() -> None:
         Status,
     )
     from core.domain.invariants import check_absence_coverage
-    from core.domain.models import Cell, CorpusCoverage, CrawlSessionItem
+    from core.domain.models import Cell, CorpusCoverage, CrawlSessionItem, EvidenceScope
 
     incomplete = CorpusCoverage(
         product_id="p",
@@ -1115,14 +1140,19 @@ def _corpus_coverage_invariant() -> None:
         truncated=False,
         computed_at="2026-01-01T00:00:00+00:00",
     )
-    machine_absent = Cell(
+    # Классы слабее «отсутствие»: охват неполон ⇒ публиковать ``❌`` нельзя.
+    # ``model_construct`` — потому что валидатор такую ячейку не соберёт (это и есть
+    # предмет проверки чистых инвариантов).
+    machine_absent = Cell.model_construct(
         run_id="r",
         product_id="p",
         param_id="x",
         state=CellState.EVALUATED,
         status=Status.ABSENT,
         absence_rule=AbsenceRuleType.EXPLICIT,
-        absence_evidence=[{"source_scope": "unknown", "scope_attested_by": None}],
+        evidence_scope=EvidenceScope(
+            denial_strength=DenialStrength.NOT_STATED, reason="нет дословного"
+        ),
     )
     violations = check_absence_coverage(machine_absent, incomplete)
     codes = {v.code for v in violations}
@@ -1131,15 +1161,32 @@ def _corpus_coverage_invariant() -> None:
     if not any("closed.example" in v.message for v in violations):
         raise AssertionError("I2c: сообщение обязано называть нечитаемый origin")
 
+    # Подпись не превращает слабый класс в сильный: ``not_stated`` остаётся ``❓``.
     attested = machine_absent.model_copy(
         update={
-            "absence_evidence": [
-                {"source_scope": "unknown", "scope_attested_by": "human"}
-            ]
+            "evidence_scope": EvidenceScope(
+                denial_strength=DenialStrength.NOT_STATED,
+                reason="нет дословного",
+                scope_acceptance="human",
+            )
         }
     )
-    if check_absence_coverage(attested, incomplete):
-        raise AssertionError("I2c: аттестованный человеком ❌ обязан быть допустим")
+    if not check_absence_coverage(attested, incomplete):
+        raise AssertionError(
+            "I2c: подпись не делает not_stated доказанным отсутствием"
+        )
+
+    # Прямое отрицание вендора — свидетельство, а не вывод из полноты корпуса.
+    explicit = machine_absent.model_copy(
+        update={
+            "evidence_scope": EvidenceScope(
+                denial_strength=DenialStrength.EXPLICIT,
+                citation_quote="возможность не поддерживается",
+            )
+        }
+    )
+    if check_absence_coverage(explicit, incomplete):
+        raise AssertionError("I2c: explicit не зависит от полноты корпуса")
 
     complete = incomplete.model_copy(
         update={
@@ -2250,7 +2297,8 @@ def _report_gates() -> None:
         expected_contract_reasons = [
             "execution_change: execution_contract_digest: ec_1 → ec_2",
             "execution_change: execution_contract_digest: различающееся поле не "
-            "восстановимо из манифеста (cohort_digest/seeds_digest/extractor_stack либо иная ось)",
+            "восстановимо из манифеста (cohort_digest/seeds_digest/extractor_stack/"
+        "serp_rounds либо иная ось)",
         ]
         if contract_reasons != expected_contract_reasons:
             raise AssertionError(
@@ -4138,13 +4186,16 @@ def _crawl_probe() -> None:
 
 
 def _exhaustion_producer() -> None:
-    """I3/§5: производитель протокола называет **только исполненные** контуры.
+    """I3/§5: протокол — **провенанс** поиска, а ``❓`` обосновывает причина в ячейке.
 
-    Проверяет, что неполный протокол (только ``corpus``) даёт аномалию с перечнем
-    непройденных контуров, полный — не даёт, а ``❓`` с ``reviewed_by`` не аномален
-    (I3-OR). Терминация ``sufficient_evidence`` для ``❓`` запрещена.
+    Вариант 2 снял требование «полного протокола из четырёх контуров»: параметр, который
+    нельзя доказать поиском, обязан получать честное ``❓`` без SERP-контура. Здесь
+    проверяется: (1) протокол называет только исполненные контуры; (2) неполный протокол
+    не делает ``❓`` аномальным; (3) ``❓`` без причины — аномалия; (4) ``reviewed_by``
+    удовлетворяет I3 (дизъюнкция); (5) ``sufficient_evidence`` для ``❓`` запрещён.
     """
     from core.domain import REQUIRED_EXHAUSTION_CONTOURS, TerminationReason
+    from core.domain.models import EvidenceScope
     from core.pipeline.exhaustion import build_protocols, contours_run
     from core.pipeline.report import collect_i3_anomalies
 
@@ -4154,6 +4205,9 @@ def _exhaustion_producer() -> None:
         param_id="x",
         state=CellState.EVALUATED,
         status=Status.UNKNOWN,
+        evidence_scope=EvidenceScope(
+            denial_strength=DenialStrength.NOT_STATED, reason="нет дословного"
+        ),
     )
     partial = build_protocols(
         [cell], run_id="r1", contours_run=contours_run(["p1"], corpus=["p1"])
@@ -4166,15 +4220,10 @@ def _exhaustion_producer() -> None:
     if partial[0].termination_reason is TerminationReason.SUFFICIENT_EVIDENCE:
         raise AssertionError("I3: ❓ не может иметь sufficient_evidence")
     partial_map = {(row.product_id, row.param_id): row for row in partial}
-    anomalies = collect_i3_anomalies([cell], partial_map)
-    if len(anomalies) != 1:
-        raise AssertionError(f"I3: ожидалась ровно одна аномалия, получено {anomalies}")
-    for missing in ("serp", "registry", "inheritance"):
-        if missing not in anomalies[0]["reason"]:
-            raise AssertionError(
-                f"I3: аномалия обязана назвать непройденный контур {missing!r}: "
-                f"{anomalies[0]['reason']}"
-            )
+    if collect_i3_anomalies([cell], partial_map):
+        raise AssertionError(
+            "I3: неполный протокол не должен делать ❓ аномальным (Вариант 2)"
+        )
 
     full = build_protocols(
         [cell],
@@ -4193,6 +4242,17 @@ def _exhaustion_producer() -> None:
         [cell], {(row.product_id, row.param_id): row for row in full}
     ):
         raise AssertionError("I3: полный протокол не должен давать аномалию")
+
+    # ``❓`` без причины — аномалия (это и есть новое условие I3).
+    bare = cell.model_copy(
+        update={
+            "evidence_scope": EvidenceScope.model_construct(
+                denial_strength=DenialStrength.NOT_STATED, reason=None
+            )
+        }
+    )
+    if not collect_i3_anomalies([bare], partial_map):
+        raise AssertionError("I3: ❓ без причины обязан быть аномалией")
 
     reviewed = cell.model_copy(update={"reviewed_by": "human-1"})
     if collect_i3_anomalies([reviewed], None):

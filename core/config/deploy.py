@@ -49,6 +49,7 @@ __all__ = [
     "OIDCConfig",
     "AuditConfig",
     "EdgeConfig",
+    "SerpDeployConfig",
     "SearchDeployConfig",
     "CrawlConfig",
     "CrawlBrowserConfig",
@@ -61,6 +62,9 @@ __all__ = [
     "SPLIT_HARDENED_WARNING",
     "resolve_search_provider",
     "resolve_llm_slot",
+    "resolve_serp_rounds",
+    "parse_serp_switch",
+    "ENV_SERP",
     "LLM_SLOTS",
     "DEFAULT_LLM_SLOT",
     "DEFAULT_LLM_MODEL_ID",
@@ -217,11 +221,28 @@ class EdgeConfig(BaseModel):
     audit: AuditConfig = Field(default_factory=AuditConfig)
 
 
-class SearchDeployConfig(BaseModel):
-    """Бюджет и адаптер внешнего поиска (07 §7 / D.5).
+class SerpDeployConfig(BaseModel):
+    """Операционный дефолт SERP-контура (``deploy.search.serp``).
 
-    Бюджет — целочисленные лимиты по языкам (``{ru: 5, en: 5}``); симметрия I16 —
-    методологическое правило конвейера, здесь значение лишь парсится.
+    Это **низший** уровень переключения (``CLI > env > run.yaml > deploy.yaml >
+    default``): профиль развёртывания объявляет, работает ли контур на этой инсталляции
+    по умолчанию. Значение ``0`` (дефолт) — контур выключен.
+
+    Бюджета здесь **нет** намеренно: бюджет — объявленный вход прогона
+    (``run.yaml: serp.budget``), потому что он определяет число ушедших запросов, то есть
+    влияет на корпус. Два бюджетных словаря на одну вещь — источник тихого безлимита
+    (прежняя секция ``search.budget`` ключевалась по языку, тогда как
+    :class:`~core.pipeline.search_log.SearchBudget` ключуется по фазе, и не ограничивала
+    ничего).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    rounds: int = Field(default=0, ge=0)
+
+
+class SearchDeployConfig(BaseModel):
+    """Адаптер внешнего поиска (07 §7 / D.5).
 
     **Провайдер поиска.** ``adapter`` — провайдер **по умолчанию**; ``by_language`` —
     детерминированное переопределение по языку (география-прокси), например
@@ -229,23 +250,20 @@ class SearchDeployConfig(BaseModel):
     не от продукта, поэтому симметричный протокол I16 сохраняется. Имена провайдеров —
     свободные строки-данные: валидация против реестра (``SUPPORTED_SEARCH_ADAPTERS``)
     живёт в composition root (CLI), а не в config-слое (§1.3, 01 §1).
+
+    **Симметрия I16** — методологическое правило конвейера; конфиг лишь парсит значения.
+    Прежнее поле ``budget: {ru: 5, en: 5}`` **удалено**: оно ключевалось по языку, тогда
+    как фактический потребитель (:class:`~core.pipeline.search_log.SearchBudget`)
+    ключуется по фазе, и производственного вызова ``SearchBudget.from_config`` не было —
+    то есть конфиг не ограничивал ничего. Единственный бюджет контура — объявленный вход
+    прогона (``run.yaml: serp.budget``).
     """
 
     model_config = ConfigDict(extra="forbid")
 
-    budget: dict[str, int] = Field(default_factory=dict)
     adapter: str | None = None
     by_language: dict[str, str] = Field(default_factory=dict)
-
-    @field_validator("budget")
-    @classmethod
-    def _check_budget(cls, value: dict[str, int]) -> dict[str, int]:
-        for lang, limit in value.items():
-            if not str(lang).strip():
-                raise ValueError("search.budget: пустой код языка")
-            if limit < 0:
-                raise ValueError(f"search.budget[{lang}]: лимит не может быть отрицательным")
-        return value
+    serp: SerpDeployConfig = Field(default_factory=SerpDeployConfig)
 
     @field_validator("by_language")
     @classmethod
@@ -719,4 +737,81 @@ def resolve_llm_slot(
             f"llm-slot default: недопустимый слот «{default}»; ожидается один из {list(LLM_SLOTS)}"
         )
     return default
+
+
+# ---------------------------------------------------------------------------
+# Резолвер переключателя SERP-контура (I3/§5)
+# ---------------------------------------------------------------------------
+
+#: Имя env-переключателя контура. Операционный аварийный троттл: ``0``/``off`` выключает
+#: контур на инсталляции, целое ``N ≥ 1`` задаёт число раундов. Значение **входит** в
+#: объявленную ось (``serp_rounds``), потому что раунды меняют корпус: скрытая подмена
+#: дала бы прогон, у которого ``run_id`` описывает не тот контур, которым собран корпус.
+ENV_SERP = "COHOUND_SERP"
+
+#: Значения env/CLI, означающие «контур выключен».
+_SERP_OFF_VALUES: frozenset[str] = frozenset({"0", "off", "false", "no", "выкл"})
+
+
+def parse_serp_switch(raw: Any, *, where: str = ENV_SERP) -> int | None:
+    """Разбирает значение переключателя контура: ``None`` — не задано, ``0`` — выключен.
+
+    Принимаются только две формы: «выключено» (:data:`_SERP_OFF_VALUES`, регистр не важен)
+    и целое ``N ≥ 0``. Иные значения — :class:`ValueError`: неоднозначный переключатель
+    («вроде включено») не должен разрешаться молчаливым дефолтом.
+    """
+    if raw is None:
+        return None
+    if isinstance(raw, bool):
+        raise ValueError(f"{where}: ожидалось целое или off, получено {raw!r}")
+    if isinstance(raw, int):
+        if raw < 0:
+            raise ValueError(f"{where}: раунды не могут быть отрицательными: {raw}")
+        return raw
+    text = str(raw).strip()
+    if not text:
+        return None
+    if text.lower() in _SERP_OFF_VALUES:
+        return 0
+    try:
+        value = int(text)
+    except ValueError:
+        raise ValueError(
+            f"{where}: ожидалось целое число раундов или off, получено {text!r}"
+        ) from None
+    if value < 0:
+        raise ValueError(f"{where}: раунды не могут быть отрицательными: {value}")
+    return value
+
+
+def resolve_serp_rounds(
+    search: SearchDeployConfig | None,
+    *,
+    cli: Any = None,
+    env: Any = None,
+    run_rounds: int | None = None,
+) -> tuple[int, str]:
+    """Эффективное число раундов SERP-контура и **уровень**, который его задал.
+
+    Приоритет: ``cli`` (``--serp-rounds``) > ``env`` (``COHOUND_SERP``) > ``run_rounds``
+    (``run.yaml: serp.rounds``) > ``search.serp.rounds`` (``deploy.search.serp.rounds``)
+    > ``0`` (контур выключен). Возвращаемый источник идёт в провенанс прогона: прогон
+    обязан называть уровень, которым включён контур, иначе «почему поиск не работал»
+    неотличимо от «поиск не объявлен».
+
+    :raises ValueError: значение любого уровня не разбирается (не целое/отрицательное).
+    """
+    cli_rounds = parse_serp_switch(cli, where="--serp-rounds")
+    if cli_rounds is not None:
+        return cli_rounds, "cli"
+    env_rounds = parse_serp_switch(env, where=ENV_SERP)
+    if env_rounds is not None:
+        return env_rounds, "env"
+    if run_rounds is not None:
+        return int(run_rounds), "run.yaml"
+    deploy_rounds = getattr(getattr(search, "serp", None), "rounds", None)
+    if deploy_rounds is not None:
+        return int(deploy_rounds), "deploy.yaml"
+    return 0, "default"
+
 

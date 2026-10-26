@@ -199,7 +199,7 @@ def test_build_adapters_wires_split_registry_fetchers_multi(tmp_path: Path) -> N
             "profile": "split",
             "edge": {"base_url": "https://edge.test:8443", "timeout_s": 5, "max_retries": 0},
             "extractor_zone": "edge",
-            "search": {"budget": {"ru": 1}, "adapter": "example_adapter"},
+            "search": {"adapter": "example_adapter"},
         }
     )
     gateway = HttpContentGateway("https://edge.test", transport=lambda *a, **k: {})
@@ -1192,3 +1192,110 @@ def test_cmd_run_binds_retrieval_to_corpus_composition_and_reuses_partition(
     evaluated = [cell for cell in cells if cell.product_id == "p1"]
     assert evaluated
     assert {cell.index_build_id for cell in evaluated} == {composition_a}
+
+# ---------------------------------------------------------------------------
+# I3/§5: SERP-контур в реальном CLI-прогоне
+# ---------------------------------------------------------------------------
+
+def test_cmd_run_serp_round_extends_corpus_and_is_provenanced(
+    tmp_path: Path,
+) -> None:
+    """``--serp-rounds`` в live-прогоне: находка входит в корпус и видна в провенансе.
+
+    Проводка целиком: CLI-флаг → ось (``serp_rounds``) → ``run_id`` → фаза корпуса →
+    внешний поиск (заглушка) → допуск кандидата → краул/индекс **той же** сборки →
+    ``runs.search_effort_budget_json``. Документ добывается обычным путём (I19), поэтому
+    новую сборку не «перепривязываем»: композиция одна, и ``evaluate`` видит её по
+    ``runs.index_build_id`` — здесь это проверяется записью ссылки на сборку.
+    """
+    from dataclasses import replace
+
+    from core.ports.search import SearchQuery, SearchResult
+
+    class _SerpAdapter:
+        """Внешний поиск — заглушка: один и тот же документ на любой запрос."""
+
+        adapter_kind = "serp"
+        provider = "fake"
+
+        def __init__(self, found: str) -> None:
+            self.found = found
+            self.calls: list[str] = []
+
+        def search(self, q: SearchQuery) -> list[SearchResult]:
+            self.calls.append(q.text)
+            return [SearchResult(url=self.found, title="найденный документ", rank=0)]
+
+        def fetch(self, url: str):  # noqa: ANN201 — контур не фетчит сам
+            raise AssertionError("SERP-контур не фетчит: документ добывает краул")
+
+    package = valid_package(tmp_path)
+    run_yaml = package / "run.yaml"
+    data = yaml.safe_load(run_yaml.read_text(encoding="utf-8"))
+    data["serp"] = {"rounds": 1, "budget": 2}
+    run_yaml.write_text(
+        yaml.safe_dump(data, allow_unicode=True, sort_keys=False), encoding="utf-8"
+    )
+    db = tmp_path / "cohound.db"
+    runs_dir = tmp_path / "runs"
+    run_id = "serp-local"
+    argv = run_argv(package, run_id=run_id, db=db, runs_dir=runs_dir)
+
+    assert main([*argv, "--until", "plan"]) == EXIT_OK
+    with build_store(db) as store:
+        for gate_fn in (gate_g1, gate_g2, gate_g3, gate_g4):
+            gate_fn(store, run_id, actor="cli-test")
+
+    found = "https://p1.test/found.html"
+    pages = {
+        "https://p1.test/": page(
+            "https://p1.test/",
+            content=b"<html><body><p>fixture documentation text</p></body></html>",
+        ),
+        "https://p2.test/": page(
+            "https://p2.test/",
+            content=b"<html><body><p>fixture documentation text</p></body></html>",
+        ),
+        found: page(
+            found,
+            content=b"<html><body><p>found documentation text</p></body></html>",
+        ),
+    }
+    adapter = _SerpAdapter(found)
+    ports = Ports(
+        evaluator=FakeEvaluator(
+            default=LLMCellOutput(
+                status=Status.ABSENT, justification="нет в срезе", evidence=[]
+            )
+        ),
+        lexical_index=FakeLexicalIndex(),
+        crawler=FakeCrawler(pages),
+        extractor=FakeExtractor(),
+        chunker=FakeChunker(),
+        search=adapter,
+    )
+
+    def factory(**kwargs: Any) -> dict:
+        kwargs["retrieval_profile"] = "R0"
+        kwargs["cutoff_k"] = 3
+        kwargs["eval_cache"] = None
+        return build_phases(**kwargs)
+
+    assert main(argv, ports=ports, phases_factory=factory) == EXIT_OK
+    assert adapter.calls, "объявленный контур обязан выпустить запросы"
+
+    with build_store(db) as store:
+        docs = {doc.url for doc in store.iter_corpus_docs(run_id)}
+        assert found in docs, "найденный документ обязан войти в корпус"
+        # Ссылка прогона на сборку заполнена: evaluate/ретривал видят именно её.
+        ref = store.read_run_index_ref(run_id)
+        assert ref is not None and ref.index_build_id
+        manifest = store.read_manifest(run_id)
+        effort = json.loads(manifest.search_effort_budget_json or "null")
+        assert effort is not None and effort["serp"]["enabled"] is True
+        assert effort["serp"]["rounds"]["declared"] == 1
+        # Израсходованный бюджет назван числом, а не «примерно».
+        assert effort["serp"]["budget"]["used"]
+        assert sum(effort["serp"]["budget"]["used"].values()) <= 2 * effort["serp"][
+            "budget"
+        ]["effective_per_product"]

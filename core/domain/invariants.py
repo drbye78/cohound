@@ -15,13 +15,14 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 from core.domain.enums import (
-    AbsenceRuleType,
+    ABSENT_DENIAL_STRENGTHS,
+    UNKNOWN_DENIAL_STRENGTHS,
     CellState,
+    DenialStrength,
     EvidenceType,
     InheritanceMode,
     SatelliteState,
     SourceKind,
-    SourceScope,
     Status,
 )
 from core.domain.models import (
@@ -29,19 +30,26 @@ from core.domain.models import (
     Cell,
     CellEvidence,
     CorpusCoverage,
+    EvidenceScope,
     ProtocolExhaustion,
     Satellite,
     UpstreamRef,
     Violation,
 )
 
-#: I3 (v2.1 §5): обязательные контуры полного протокола исчерпания для strict-❓.
-REQUIRED_EXHAUSTION_CONTOURS: tuple[str, ...] = (
-    "corpus",
-    "serp",
-    "registry",
-    "inheritance",
-)
+#: Исторический перечень контуров протокола исчерпания (``corpus/serp/registry/inheritance``).
+#:
+#: **Не инвариант.** Прежняя редакция I3 требовала все четыре контура для strict-``❓``, то
+#: есть задавала рецепт реализации: параметр, который нельзя доказать поиском, не должен
+#: требовать SERP для честного «не установлено». Теперь ``❓`` обосновывается классом
+#: отрицания (``unobserved``/``not_stated``) и его причиной, а перечень остаётся как
+#: справочник того, что вообще наблюдается: протокол исчерпания — провенанс поиска
+#: (``core.pipeline.exhaustion``), а не условие вердикта.
+EXHAUSTION_CONTOURS: tuple[str, ...] = ("corpus", "serp", "registry", "inheritance")
+
+#: Deprecated-алиас :data:`EXHAUSTION_CONTOURS` (публичный символ домена; читается
+#: отчётом и старыми вызовами). Смысл изменился: список контуров больше не требование.
+REQUIRED_EXHAUSTION_CONTOURS: tuple[str, ...] = EXHAUSTION_CONTOURS
 
 # Контракт derived-evidence (K5) допускает два пути:
 #   * наследование — ``source_kind: inheritance``;
@@ -63,30 +71,59 @@ def _violation(code: str, message: str, field: str | None = None) -> Violation:
     return Violation(code=code, message=message, field=field)
 
 
-def _has_exhaustive_scope(absences: list[dict[str, object]]) -> bool:
-    """Есть ли среди absence-evidence запись со ``source_scope: exhaustive``."""
-    return any(e.get("source_scope") == SourceScope.EXHAUSTIVE for e in absences)
-
-
 def check_unknown_exhaustion(
     cell: Cell,
-    exhaustion: ProtocolExhaustion | None,
+    exhaustion: ProtocolExhaustion | None = None,
     *,
-    required: Sequence[str] = REQUIRED_EXHAUSTION_CONTOURS,
+    required: Sequence[str] | None = None,
 ) -> list[Violation]:
-    """I3 (§5, v2.1): strict-❓ обязан опираться на полный протокол исчерпания.
+    """I3 (Вариант 2): ``❓`` обязан **назвать причину незнания** — и всё.
 
-    Возвращает нарушение при: отсутствии ``exhaustion``, отсутствии ``termination_reason``
-    либо неполном перечне пройденных контуров (``required ⊄ contours``). «Full» — не пустое
-    слово, а перечисление контуров; ❓ без обязательных контуров — аномалия прогона, а не
-    статус (риск преждевременного ❓ = FN, §12).
+    Прежняя редакция требовала «полный протокол исчерпания» (``corpus``+``serp``+
+    ``registry``+``inheritance``). Это был рецепт реализации, а не инвариант: он делал
+    честное ``❓`` недостижимым для параметра, который нельзя доказать поиском (нужен
+    SERP-контур, которого у параметра нет), и при этом ничего не говорил о том, **почему**
+    отсутствие не установлено. Теперь причина — свойство самой ячейки: класс
+    ``unobserved``/``not_stated`` и непустая ``reason`` в :class:`EvidenceScope`.
+
+    Дизъюнкция сохраняется: человеческое решение (``reviewed_by``) само по себе
+    удовлетворяет I3 (регламент §2.3).
+
+    **Исторические строки.** Ячейка без объекта (записана до варианта 2) проверяется
+    прежним правилом по ``exhaustion``: удалить это нельзя — старые прогоны обязаны
+    остаться читаемыми и честно диагностируемыми. Новый писатель всегда несёт объект.
+
+    :param exhaustion: протокол исчерпания (провенанс поиска). Используется **только**
+        для исторических строк без объекта.
+    :param required: deprecated: перечень контуров больше не требуется (принят ради
+        совместимости вызовов); игнорируется.
     """
+    if cell.reviewed_by:
+        return []
+    scope = cell.evidence_scope
+    if scope is not None:
+        if scope.denial_strength in UNKNOWN_DENIAL_STRENGTHS and (
+            scope.reason or ""
+        ).strip():
+            return []
+        return [
+            _violation(
+                "I3",
+                "I3: ❓ требует denial_strength ∈ "
+                f"{sorted(s.value for s in UNKNOWN_DENIAL_STRENGTHS)} и непустую reason; "
+                f"получено {scope.denial_strength.value!r} "
+                f"(reason={scope.reason!r})",
+                "evidence_scope",
+            )
+        ]
+    # -- историческая строка без объекта: прежнее правило -----------------------
     if exhaustion is None:
         return [
             _violation(
                 "I3",
-                "I3: strict-❓ без протокола исчерпания (search_exhaustion)",
-                "exhaustion",
+                "I3: strict-❓ без причины незнания (нет evidence_scope и нет "
+                "протокола исчерпания)",
+                "evidence_scope",
             )
         ]
     if exhaustion.termination_reason is None:
@@ -97,22 +134,75 @@ def check_unknown_exhaustion(
                 "termination_reason",
             )
         ]
-    contours = set(exhaustion.contours)
-    missing = [name for name in required if name not in contours]
-    if missing:
-        return [
-            _violation(
-                "I3",
-                "I3: неполный протокол исчерпания strict-❓; не пройдены контуры: "
-                f"{', '.join(missing)}",
-                "contours",
-            )
-        ]
     return []
 
 
+def _scope_violations(scope: EvidenceScope, field: str = "evidence_scope") -> list[Violation]:
+    """I2/I2b (Вариант 2): требования **внутри** объекта силы отрицания.
+
+    Зеркалит валидатор :class:`EvidenceScope` для ячеек, собранных ``model_construct``
+    (чтение из store) и для диагностики: каждое требование класса — именованное нарушение,
+    а не исключение.
+
+    * ``explicit`` → непустая цитата (отрицание без цитаты — мнение);
+    * ``bounded`` → причина **и** принятие риска человеком;
+    * ``unobserved``/``not_stated``/``instrument_failed`` → непустая причина;
+    * ``authoritative`` несовместим с заведомо неполной энумерацией.
+    """
+    violations: list[Violation] = []
+    strength = scope.denial_strength
+    if strength is DenialStrength.EXPLICIT and not (scope.citation_quote or "").strip():
+        violations.append(
+            _violation(
+                "I2b",
+                "I2b: explicit-отрицание обязано нести непустую citation_quote",
+                field,
+            )
+        )
+    requires_reason = {
+        DenialStrength.UNOBSERVED,
+        DenialStrength.NOT_STATED,
+        DenialStrength.BOUNDED,
+        DenialStrength.INSTRUMENT_FAILED,
+    }
+    if strength in requires_reason and not (scope.reason or "").strip():
+        violations.append(
+            _violation(
+                "I2b",
+                f"I2b: denial_strength={strength.value} требует непустую reason",
+                field,
+            )
+        )
+    if strength is DenialStrength.BOUNDED and not (scope.scope_acceptance or "").strip():
+        violations.append(
+            _violation(
+                "I2b",
+                "I2b: bounded-отрицание требует scope_acceptance (принятия риска): "
+                "измерение не покрывает пространство",
+                field,
+            )
+        )
+    if strength is DenialStrength.AUTHORITATIVE and scope.enumerated is False:
+        violations.append(
+            _violation(
+                "I2b",
+                "I2b: authoritative несовместим с enumerated=False",
+                field,
+            )
+        )
+    return violations
+
+
 def check_cell(cell: Cell) -> list[Violation]:
-    """Инварианты ячейки: I1, I2, I2b, I4, I6, I7, I13 (§2.3).
+    """Инварианты ячейки: I1, I2, I4, I6, I7, I13 (§2.3).
+
+    I2/I2b/I2c/I3 (бывшие три независимые блокировки) сведены к **одному** механизму:
+    вопрос «можно ли утверждать отсутствие» решает заполненность
+    :class:`~core.domain.models.EvidenceScope`:
+
+    * ``❌`` → класс ``authoritative|explicit|bounded`` (+ требования класса, :func:`_scope_violations`);
+    * ``❓`` → класс ``unobserved|not_stated`` и непустая причина (:func:`check_unknown_exhaustion`);
+    * ``failed`` → класс ``instrument_failed`` (I4: статуса нет).
 
     Зеркалит ``Cell._enforce_invariants``, но не возбуждает исключений — возвращает
     список нарушений. Пустой список означает, что инварианты выполнены.
@@ -141,6 +231,10 @@ def check_cell(cell: Cell) -> list[Violation]:
             _violation("I7", "I6/I7: N/A → reviewed_by обязателен", "reviewed_by")
         )
 
+    scope = cell.evidence_scope
+    if scope is not None:
+        violations.extend(_scope_violations(scope))
+
     if cell.state is CellState.EVALUATED:
         # I1: evaluated ✅/⚠️ → evidence ≥ 1.
         if cell.status in {Status.OK, Status.PARTIAL} and not cell.evidence:
@@ -148,47 +242,40 @@ def check_cell(cell: Cell) -> list[Violation]:
                 _violation("I1", "I1: evaluated ✅/⚠️ → evidence ≥ 1", "evidence")
             )
 
-        # I2/I2b: evaluated ❌ → absence-evidence по absence_rule параметра.
+        # I2: evaluated ❌ → сила отрицания достаточна, чтобы публиковать «нет».
         if cell.status is Status.ABSENT:
-            if not cell.absence_evidence:
-                # Нет absence-evidence — I2; scope проверять не на чем (I2b не добавляем).
+            if scope is None:
+                # Историческая строка (до варианта 2) либо ячейка, собранная не тем
+                # путём: вердикт без силы отрицания недоказуем.
                 violations.append(
                     _violation(
                         "I2",
-                        "I2: evaluated ❌ → absence-evidence обязателен",
-                        "absence_evidence",
+                        "I2: evaluated ❌ требует evidence_scope с denial_strength ∈ "
+                        f"{sorted(s.value for s in ABSENT_DENIAL_STRENGTHS)}",
+                        "evidence_scope",
                     )
                 )
-            elif cell.absence_rule in {
-                AbsenceRuleType.PARAMETER_REFERENCE,
-                AbsenceRuleType.DISTRIBUTION_ABSENCE,
-            }:
-                # I2b: исчерпанность справочника должна быть подтверждена человеком.
-                has_attested = any(
-                    e.get("source_scope") == SourceScope.EXHAUSTIVE
-                    and bool(e.get("scope_attested_by"))
-                    for e in cell.absence_evidence
+            elif scope.denial_strength not in ABSENT_DENIAL_STRENGTHS:
+                violations.append(
+                    _violation(
+                        "I2",
+                        "I2: ❌ требует denial_strength ∈ "
+                        f"{sorted(s.value for s in ABSENT_DENIAL_STRENGTHS)}; "
+                        f"получено {scope.denial_strength.value}",
+                        "evidence_scope",
+                    )
                 )
-                if not has_attested:
-                    violations.append(
-                        _violation(
-                            "I2b",
-                            "I2b: parameter_reference/distribution_absence требуют "
-                            "source_scope=exhaustive и scope_attested_by",
-                            "absence_evidence",
-                        )
-                    )
-            elif cell.absence_rule is AbsenceRuleType.REGISTRY_ABSENCE:
-                # I2b: реестр — авторитетная энумерация, exhaustive по построению;
-                # scope_attested_by не требуется.
-                if not _has_exhaustive_scope(cell.absence_evidence):
-                    violations.append(
-                        _violation(
-                            "I2b",
-                            "I2b: registry_absence — exhaustive по построению",
-                            "absence_evidence",
-                        )
-                    )
+
+    # I4: failed несёт только сбой прибора.
+    if cell.state is CellState.FAILED and scope is not None:
+        if scope.denial_strength is not DenialStrength.INSTRUMENT_FAILED:
+            violations.append(
+                _violation(
+                    "I4",
+                    "I4: failed несёт только denial_strength=instrument_failed",
+                    "evidence_scope",
+                )
+            )
 
     return violations
 
@@ -196,40 +283,71 @@ def check_cell(cell: Cell) -> list[Violation]:
 def check_absence_coverage(
     cell: Cell, coverage: CorpusCoverage | None
 ) -> list[Violation]:
-    """Ф0/§2.3: ``❌`` при неполном покрытии корпуса требует человеческой аттестации.
+    """I2c (Вариант 2): класс отрицания согласован с **наблюдённым** охватом.
 
-    Дыра, которую закрывает проверка: заблокированный источник даёт тонкий корпус →
-    оценщик может выдать ABSENT → ``❌`` публикуется как доказательство отсутствия.
-    Для ``absence_rule=explicit`` правило отсутствия не требует ``source_scope``, поэтому
-    единственный барьер — человеческая аттестация (``scope_attested_by``).
+    Что изменилось. Прежняя редакция требовала человеческой подписи всякий раз, когда
+    корпус неполон, — то есть делала вывод «отсутствие» зависимым от полноты краула даже
+    тогда, когда вендор прямо отрицает свойство. Теперь условие зависит от **класса**:
 
-    Возвращает нарушение ``I2c`` для ``evaluated ❌`` при ``coverage.complete is False``
-    без ``scope_attested_by``. Прочие правила отсутствия (``parameter_reference``/
-    ``distribution_absence``/``registry_absence``) уже требуют ``exhaustive`` (I2b) и здесь
-    не дублируются. ``coverage=None`` — записи покрытия нет (legacy/без краула): проверка
-    неприменима, поведение прежнее.
+    * ``explicit`` — это свидетельство вендора (цитата), а не вывод из полноты корпуса:
+      неполнота охвата его не отменяет;
+    * ``authoritative`` — авторитетная энумерация по построению: тоже не зависит;
+    * ``bounded`` — зависит от пространства, поэтому требует ``scope_acceptance``
+      (проверяется в :func:`_scope_violations`); при неполном охвате без принятия риска
+      публиковать ``❌`` нельзя;
+    * ``unobserved``/``not_stated`` — не дают ``❌`` вообще.
+
+    ``coverage=None`` — записи покрытия нет (legacy/без краула): проверка неприменима.
     """
     if coverage is None or coverage.complete:
         return []
     if cell.state is not CellState.EVALUATED or cell.status is not Status.ABSENT:
         return []
-    if cell.absence_rule is not AbsenceRuleType.EXPLICIT:
-        return []
-    attested = any(bool(entry.get("scope_attested_by")) for entry in cell.absence_evidence)
-    if attested:
-        return []
-    unreadable = list(coverage.unreadable_origins)
-    blocking = dict(coverage.blocking_failures)
-    return [
-        _violation(
-            "I2c",
-            "I2c: ❌ при неполном покрытии корпуса требует scope_attested_by "
-            "(человеческой аттестации); иначе это не доказательство отсутствия "
-            f"(блокирующие сбои: {blocking or '{}'}, "
-            f"нечитаемые origin'ы: {unreadable or '[]'})",
-            "absence_evidence",
-        )
-    ]
+    scope = cell.evidence_scope
+    if scope is None:
+        # Историческая строка: прежнее правило — принятие риска в absence-записи.
+        # Читаются оба имени: колонка БД мигрируется при открытии, а in-memory словари
+        # прошлых прогонов (и фикстур) несут прежний ключ ``scope_attested_by``.
+        if any(
+            entry.get("scope_acceptance") or entry.get("scope_attested_by")
+            for entry in cell.absence_evidence
+        ):
+            return []
+        return [
+            _violation(
+                "I2c",
+                "I2c: ❌ без evidence_scope при неполном покрытии корпуса недоказуем "
+                "(историческая строка без принятия риска); блокирующие сбои: "
+                f"{dict(coverage.blocking_failures) or '{}'}, нечитаемые origin'ы: "
+                f"{list(coverage.unreadable_origins) or '[]'}",
+                "absence_evidence",
+            )
+        ]
+    if scope.denial_strength in UNKNOWN_DENIAL_STRENGTHS:
+        return [
+            _violation(
+                "I2c",
+                "I2c: класс "
+                f"{scope.denial_strength.value} не даёт ❌ — при неполном покрытии "
+                "ячейка обязана быть ❓ с этой причиной; блокирующие сбои: "
+                f"{dict(coverage.blocking_failures) or '{}'}, нечитаемые origin'ы: "
+                f"{list(coverage.unreadable_origins) or '[]'}",
+                "evidence_scope",
+            )
+        ]
+    if scope.denial_strength is DenialStrength.BOUNDED and not (
+        scope.scope_acceptance or ""
+    ).strip():
+        return [
+            _violation(
+                "I2c",
+                "I2c: bounded при неполном покрытии требует scope_acceptance "
+                "(принятия риска человеком); блокирующие сбои: "
+                f"{dict(coverage.blocking_failures) or '{}'}",
+                "evidence_scope",
+            )
+        ]
+    return []
 
 
 def check_evidence(ev: CellEvidence, cell: Cell | None = None) -> list[Violation]:

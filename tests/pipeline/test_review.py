@@ -343,10 +343,15 @@ def test_promote_unknown_without_protocol_succeeds_via_reviewed_by(
     assert check_unknown_exhaustion(machine, None)
 
 
-def test_promote_unknown_with_incomplete_protocol_succeeds_but_anomaly(
+def test_promote_unknown_with_incomplete_protocol_is_not_anomaly(
     store: SqliteStore,
 ) -> None:
-    """I3-OR (§2.3): неполный протокол не блокирует promote (human-ветка), но это аномалия."""
+    """Вариант 2: перечень контуров — провенанс, а не условие ``❓`` (I3).
+
+    Прежнее правило объявляло неполный протокол аномалией даже после человеческого
+    решения. Теперь ``❓`` обосновывает причина в самой ячейке (либо ``reviewed_by``),
+    а протокол остаётся записью о том, что реально исполнялось, и в базе не меняется.
+    """
     store.save_cell(_preliminary("p1", "param.a"))
     incomplete = ProtocolExhaustion(
         run_id=RUN_ID,
@@ -367,9 +372,11 @@ def test_promote_unknown_with_incomplete_protocol_succeeds_but_anomaly(
     )
     assert promoted.state is CellState.EVALUATED
     assert promoted.reviewed_by == "human-1"
+    assert check_unknown_exhaustion(promoted, incomplete) == []
 
-    # Протокол остаётся неполным — check_unknown_exhaustion это фиксирует.
-    assert check_unknown_exhaustion(promoted, incomplete)
+    # Протокол остаётся провенансом: он записан как наблюдение, а не «стёрт» решением.
+    stored = list(store.iter_exhaustions(RUN_ID))
+    assert stored and list(stored[0].contours) == ["corpus", "serp"]
 
 
 def test_promote_unknown_with_full_protocol_succeeds(store: SqliteStore) -> None:

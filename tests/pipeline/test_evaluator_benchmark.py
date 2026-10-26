@@ -25,6 +25,7 @@ import pytest
 from core.domain import (
     AbsenceRuleType,
     CatalogRow,
+    DenialClaim,
     GoldenRow,
     Importance,
     LLMCellOutput,
@@ -100,9 +101,17 @@ def _ok_output(quote: str = TEXT_OK) -> LLMCellOutput:
     )
 
 def _absent_output() -> LLMCellOutput:
+    """Идеальный ``❌``: класс объявлен и цитата приложена (иначе это ``❓``, не ``❌``).
+
+    Вариант 2: модель, которая говорит «отсутствует» без прямого отрицания и цитаты,
+    правильно получает ``❓`` — поэтому эталонная модель обязана объявить ``explicit``.
+    """
     return LLMCellOutput(
         status=Status.ABSENT,
-        justification="Документация не описывает функцию.",
+        justification="Документация прямо заявляет отсутствие функции.",
+        evidence=[LLMEvidence(source_id="c1", quote=TEXT_ABSENT)],
+        denial_strength=DenialClaim.EXPLICIT,
+        denial_reason="прямое утверждение об отсутствии в документации",
     )
 
 def _unknown_output() -> LLMCellOutput:

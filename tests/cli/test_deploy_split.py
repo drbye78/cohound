@@ -74,7 +74,6 @@ edge:
   max_response_bytes: 52428800
 extractor_zone: edge
 search:
-  budget: {ru: 1, en: 1}
   adapter: example_adapter
 """
 
@@ -82,7 +81,6 @@ _LOCAL_YAML = """\
 profile: local
 extractor_zone: core
 search:
-  budget: {ru: 1, en: 1}
   adapter: example_adapter
 """
 
@@ -132,7 +130,7 @@ def _split_config() -> DeployConfig:
             "profile": "split",
             "edge": {"base_url": "https://edge.test:8443", "timeout_s": 5, "max_retries": 0},
             "extractor_zone": "edge",
-            "search": {"budget": {"ru": 1}, "adapter": "example_adapter"},
+            "search": {"adapter": "example_adapter"},
         }
     )
 

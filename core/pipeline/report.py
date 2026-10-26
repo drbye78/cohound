@@ -45,7 +45,7 @@ import json
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable
 
 import yaml
 
@@ -53,6 +53,7 @@ from core.domain.enums import (
     BLOCKING_FAILURE_KINDS,
     CellState,
     ChangeClass,
+    DenialStrength,
     RankingPolicy,
     SourceScope,
     Status,
@@ -105,6 +106,7 @@ __all__ = [
     "resolve_diff_change_class",
     "crawl_control_digest",
     "build_manifest",
+    "compact_search_effort",
     "write_run_manifest",
     "render_battle_card",
     "render_nda_questions",
@@ -245,6 +247,10 @@ class Artifacts:
     #: входа следующего прогона (13-manual-artifacts §4). ``None`` — файл не записан
     #: (сбой выгрузки); форма отчёта от этого не зависит.
     artifacts_gap: Path | None = None
+    #: ``outputs/stale_cells.csv`` — ячейки, **исключённые** из расчёта как устаревшие
+    #: (§13/K2: ``stale_reason`` = привязка к прошлой сборке). ``None`` — устаревших нет
+    #: (файл не создаётся: пустой список — не артефакт).
+    stale_cells: Path | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -557,6 +563,64 @@ def crawl_control_digest(
 
 
 
+def compact_search_effort(facts: Any) -> dict[str, Any] | None:
+    """Компактное состояние поискового контура для ``runs.search_effort_budget_json``.
+
+    Манифест обязан называть **объявленный и израсходованный** бюджет (I23), но не список
+    запросов: полное наблюдение контура (``queries``/``accepted``/``rejected``) уже лежит
+    в провенансе сеанса краула, а колонка ``runs.search_effort_budget_json`` — сводка для
+    сравнения прогонов. Избыточность здесь стоила бы размера строки манифеста и ничего не
+    добавляла к провенансу.
+
+    :param facts: наблюдение контура (``{"serp": {...}}`` из провенанса сеанса либо уже
+        компактный словарь); ``None``/пусто → ``None`` (контур не наблюдался — значение не
+        выдумывается, поле остаётся ``null``, как у прогонов без контура).
+    """
+    if not isinstance(facts, Mapping) or not facts:
+        return None
+    block = facts.get("serp") if isinstance(facts.get("serp"), Mapping) else facts
+    rounds = block.get("rounds") or {}
+    budget = block.get("budget") or {}
+    accepted = block.get("accepted") or {}
+    return {
+        "serp": {
+            "enabled": bool(block.get("enabled")),
+            "rounds": {
+                "declared": rounds.get("declared"),
+                "executed": rounds.get("executed"),
+                "source": rounds.get("source"),
+            },
+            "budget": {
+                "declared_per_round": budget.get("declared_per_round"),
+                "effective_per_product": budget.get("effective_per_product"),
+                "used": {str(pid): int(n) for pid, n in (budget.get("used") or {}).items()},
+                "exhausted": {
+                    str(pid): bool(flag)
+                    for pid, flag in (budget.get("exhausted") or {}).items()
+                },
+            },
+            "accepted_urls": {
+                str(pid): (len(urls) if not isinstance(urls, int) else int(urls))
+                for pid, urls in accepted.items()
+            },
+            "termination": {
+                str(pid): reason for pid, reason in (block.get("termination") or {}).items()
+            },
+            # «Нашли» ≠ «вошло в корпус»: сводка входа находок в корпус (блэклист/потолок).
+            "ingest": {
+                str(pid): {
+                    "enqueued": int(row.get("enqueued", 0) or 0),
+                    "dup": int(row.get("dup", 0) or 0),
+                    "blacklisted": len(row.get("blacklisted") or ()),
+                    "truncated": len(row.get("truncated") or ()),
+                }
+                for pid, row in (block.get("ingest") or {}).items()
+            },
+            "unavailable_reason": block.get("unavailable_reason"),
+        }
+    }
+
+
 def build_manifest(
     *,
     inputs: RunInputs,
@@ -582,6 +646,7 @@ def build_manifest(
     declared_status_dict_version: str | None = None,
     scope_attestations: Mapping[str, str] | None = None,
     observed_versions: Mapping[str, Any] | None = None,
+    search_effort: Mapping[str, Any] | None = None,
 ) -> RunManifest:
     """Собирает полностью заполненный :class:`RunManifest` (R7/§13) фазы Ш9.
 
@@ -729,8 +794,13 @@ def build_manifest(
             getattr(plan, "retrieval_params_json", None),
         )
     )
+    # I23/§5: объявленный и **израсходованный** поисковый бюджет. Приоритет: явный
+    # аргумент (наблюдённое состояние SERP-контура из durable-провенанса сеанса) → поле
+    # строки прогона → вход. Колонка ``runs.search_effort_budget_json`` читалась отчётом,
+    # но не писалась никем и всегда оставалась ``null`` — теперь её заполняет фаза отчёта.
     search_effort_budget_json = _embed_json(
         _first_present(
+            search_effort,
             getattr(run, "search_effort_budget_json", None),
             getattr(inputs, "search_effort_budget_json", None),
         )
@@ -1353,15 +1423,24 @@ def collect_crawl_truncation_anomalies(
     cells: Iterable[Any],
     truncated_products: Iterable[str] | None = None,
 ) -> list[dict[str, Any]]:
-    """D1/G: аномалия «``exhaustive`` при усечённом крауле» для человеческой аттестации.
+    """D1/G: аномалия «заявлен исчерпывающий охват, а краул продукта усечён политикой».
 
-    Если cell несёт absence-evidence с ``source_scope: exhaustive``, а краул её продукта был
-    **политико-усечён** (``max_documents``/``max_depth``, см.
-    :func:`core.pipeline.crawl_session.finalize_session`), заявленная исчерпывающость охвата
-    недоказуема — corpus неполон по построению. Это **аномалия**, а не смена статуса и не
-    жёсткая блокировка: она требует повторной аттестации человеком (паттерн I3
-    ``reviewed_by``). Возвращает детерминированный (``product_id, param_id``) список записей
+    Если cell заявляет **исчерпывающий охват** (устаревший скаляр ``source_scope:
+    exhaustive`` или класс ``bounded``), а краул её продукта был **политико-усечён**
+    (``max_documents``/``max_depth``, см.
+    :func:`core.pipeline.crawl_session.finalize_session`), заявленная полнота недоказуема —
+    corpus неполон по построению. Это **аномалия**, а не смена статуса и не жёсткая
+    блокировка: она требует повторной аттестации человеком (паттерн I3 ``reviewed_by``).
+    Возвращает детерминированный (``product_id, param_id``) список записей
     ``{"product_id", "param_id", "reason"}``.
+
+    **Классы ``authoritative`` и ``explicit`` под правило не подпадают** (Вариант 2): они
+    свидетельствуют о факте, а не о полноте охвата. Реестровая энумерация авторитетна
+    независимо от того, что успел скачать краул, а прямое отрицание вендора — цитата, а не
+    утверждение «больше нигде ничего нет». Держать их под правилом значило бы выдавать
+    ложную аномалию на каждом реестровом ``❌`` усечённого продукта. Аномалия остаётся для
+    ``bounded`` (единственный класс, чья сила именно в объявленной полноте) и для legacy-строк
+    без объекта силы отрицания (прежнее правило, иначе исторический прогон потерял бы сигнал).
     """
     truncated = {str(p) for p in (truncated_products or []) if p}
     if not truncated:
@@ -1371,8 +1450,27 @@ def collect_crawl_truncation_anomalies(
         pid = str(getattr(cell, "product_id", "") or "")
         if pid not in truncated:
             continue
+        scope_obj = getattr(cell, "evidence_scope", None)
+        if scope_obj is not None and scope_obj.denial_strength not in (
+            DenialStrength.BOUNDED,
+        ):
+            # Свидетельство о факте (реестр/цитата) от полноты краула не зависит.
+            continue
         absences = getattr(cell, "absence_evidence", None) or []
-        declared = False
+        declared = scope_obj is not None
+        if declared:
+            anomalies.append(
+                {
+                    "product_id": pid,
+                    "param_id": str(getattr(cell, "param_id", "") or ""),
+                    "reason": (
+                        "I2b/G: класс bounded при усечённом крауле продукта "
+                        "(max_documents/max_depth) — объявленная полнота справочника "
+                        "недоказуема, требуется принятие риска человеком (scope_acceptance)"
+                    ),
+                }
+            )
+            continue
         for entry in absences:
             scope = (
                 entry.get("source_scope")
@@ -1623,6 +1721,36 @@ def _boundary_value(manifest: RunManifest, name: str) -> Any:
 _CONTRACT_FIELD_ATTRS: dict[str, str] = {"cutoff_K": "retrieval_cutoff_K"}
 
 
+def _serp_rounds_from_manifest(manifest: RunManifest) -> int | None:
+    """Объявленные раунды SERP-контура из провенанса манифеста (``None`` — не записано).
+
+    Отдельного столбца у оси нет: значение живёт в
+    ``search_effort_budget_json.serp.rounds.declared`` (провенанс контура). Возвращаем
+    ровно объявленное число — не «сколько исполнилось»: граница §13 — про **условие**
+    измерения, а фактический расход это наблюдение, а не контракт.
+    """
+    raw = getattr(manifest, "search_effort_budget_json", None)
+    if not raw:
+        return None
+    try:
+        payload = json.loads(raw) if isinstance(raw, str) else raw
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(payload, Mapping):
+        return None
+    rounds = (payload.get("serp") or {}).get("rounds") or {}
+    declared = rounds.get("declared")
+    return int(declared) if isinstance(declared, (int, float)) else None
+
+
+#: Поля контракта, значение которых манифест не хранит отдельным атрибутом: геттер
+#: читает его из провенанса. ``None`` с обеих сторон — по-прежнему «не восстановимо»
+#: (историческая строка без канала), и это называется, а не выдумывается.
+_CONTRACT_FIELD_GETTERS: dict[str, Callable[[RunManifest], Any]] = {
+    "serp_rounds": _serp_rounds_from_manifest,
+}
+
+
 def _contract_field_attr(name: str) -> str:
     """Имя атрибута ``RunManifest``, несущего поле контракта (``cutoff_K`` → ``retrieval_cutoff_K``)."""
     return _CONTRACT_FIELD_ATTRS.get(name, name)
@@ -1646,6 +1774,18 @@ def _contract_field_diagnostics(
     changed: list[str] = []
     missing: list[str] = []
     for name in EXECUTION_CONTRACT_FIELDS:
+        getter = _CONTRACT_FIELD_GETTERS.get(name)
+        if getter is not None:
+            before = getter(prev)
+            after = getter(curr)
+            if before is None and after is None:
+                missing.append(name)
+            elif before != after:
+                changed.append(
+                    f"execution_change: execution_contract_digest: {name}: "
+                    f"{before!r} → {after!r}"
+                )
+            continue
         attr = _contract_field_attr(name)
         if not (hasattr(prev, attr) and hasattr(curr, attr)):
             missing.append(name)
@@ -2038,6 +2178,45 @@ def _write_placeholder_diff(out_path: Path, manifest: RunManifest) -> Path:
 # ---------------------------------------------------------------------------
 
 
+def _write_stale_cells(cells: Iterable[Any], path: Path) -> Path | None:
+    """Пишет ``stale_cells.csv`` — «требует пере-оценки» (§13/K2); пусто → ``None``.
+
+    Ячейка со ``stale_reason`` привязана к **прошлой** сборке/условиям и исключена из
+    расчёта (иначе Capability/Coverage смешали бы две сборки). Статус её при этом не
+    меняется (I12) — меняется только участие в цифрах, и этот файл делает исключение
+    видимым: пере-оценка — работа, а не пропуск.
+    """
+    rows = [
+        {
+            "product_id": str(cell.product_id),
+            "param_id": str(cell.param_id),
+            "status": getattr(getattr(cell, "status", None), "value", None),
+            "stale_reason": str(
+                getattr(getattr(cell, "stale_reason", None), "value", cell.stale_reason)
+            ),
+            "index_build_id": getattr(cell, "index_build_id", None),
+            "retrieval_profile": getattr(cell, "retrieval_profile", None),
+        }
+        for cell in cells
+        if getattr(cell, "stale_reason", None) is not None
+    ]
+    if not rows:
+        return None
+    rows.sort(key=lambda row: (row["product_id"], row["param_id"]))
+    return _write_csv(
+        path,
+        [
+            "product_id",
+            "param_id",
+            "status",
+            "stale_reason",
+            "index_build_id",
+            "retrieval_profile",
+        ],
+        rows,
+    )
+
+
 def write_reports(
     *,
     bundle: ScoreBundle,
@@ -2124,6 +2303,11 @@ def write_reports(
         cell_list, coverage_source
     )
 
+    # §13/K2: ячейки со ``stale_reason`` исключены из Capability/Coverage
+    # (:mod:`core.pipeline.compute`), но человек обязан их видеть: это очередь
+    # пере-оценки, а не тихое вычитание. Файл пишется только при непустом списке.
+    stale_cells = _write_stale_cells(cell_list, outputs_dir / "stale_cells.csv")
+
     nda_questions = render_nda_questions(
         cell_list,
         outputs_dir / "nda_questions.csv",
@@ -2159,6 +2343,7 @@ def write_reports(
 
     return Artifacts(
         battle_card=battle_card,
+        stale_cells=stale_cells,
         preliminary_findings=preliminary,
         nda_questions=nda_questions,
         diff=diff,

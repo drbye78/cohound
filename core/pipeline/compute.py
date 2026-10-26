@@ -33,7 +33,7 @@ from __future__ import annotations
 import json
 import warnings
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass, fields, is_dataclass
+from dataclasses import dataclass, field, fields, is_dataclass
 from enum import Enum
 from typing import Any
 
@@ -110,6 +110,11 @@ class ScoreBundle:
     computed_ranking: str
     #: Порог неразличимости ранжирования (§6/B-1); идёт в манифест с provenance (A3).
     ranking_epsilon: float = 0.0
+    #: §13/K2: ячейки, **исключённые** из расчёта как устаревшие (``stale_reason``): они
+    #: описывают прошлую сборку и до пере-оценки не участвуют ни в Capability, ни в
+    #: Coverage. Список — «что требует пере-оценки» (отчёт), а не молчаливое вычитание:
+    #: запись ``{"product_id","param_id","stale_reason","index_build_id"}``.
+    stale_cells: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         """Словарь бандла для отчёта/манифеста (JSON-совместимый, вложенный)."""
@@ -231,6 +236,22 @@ def _comparability(
     )
 
 
+def _stale_rows(cells: Iterable[Cell]) -> list[dict[str, Any]]:
+    """Ячейки с ``stale_reason`` как записи «требует пере-оценки» (детерминированный порядок)."""
+    rows = [
+        {
+            "product_id": str(cell.product_id),
+            "param_id": str(cell.param_id),
+            "stale_reason": str(getattr(cell.stale_reason, "value", cell.stale_reason)),
+            "index_build_id": cell.index_build_id,
+        }
+        for cell in cells
+        if getattr(cell, "stale_reason", None) is not None
+    ]
+    rows.sort(key=lambda row: (row["product_id"], row["param_id"]))
+    return rows
+
+
 def _compute_from_cells(
     cells: list[Cell],
     *,
@@ -242,12 +263,27 @@ def _compute_from_cells(
     universe: Iterable[tuple[str, str]] | None = None,
     ranking_epsilon: float = 0.0,
 ) -> ScoreBundle:
-    """Считает :class:`ScoreBundle` по уже загруженным ячейкам (без I/O)."""
+    """Считает :class:`ScoreBundle` по уже загруженным ячейкам (без I/O).
+
+    **Устаревшие ячейки исключаются (§13/K2).** Ячейка со ``stale_reason`` описывает
+    **прошлую** сборку/условия (новый раунд SERP, смена промпта/модели/каталога) и до
+    пере-оценки не является измерением текущего корпуса. Если оставить её в расчёте,
+    Capability и Coverage молча смешают две сборки — именно тот дефект, который
+    ``stale_reason`` и вводился писать. Поэтому такие ячейки:
+    * не входят в Capability/module_scores/failure_rate (как ``preliminary``, I13);
+    * не засчитываются как разрешённые в Coverage (в universe-режиме они попадают в
+      знаменатель как **неразрешённые**, I5, а не как доказанное «нет»);
+    * перечисляются в :attr:`ScoreBundle.stale_cells` — «требует пере-оценки» видно в
+      отчёте, а не прячется.
+    Статус ячейки при этом не меняется: исключение из расчёта — не смена вердикта (I12).
+    """
+    stale = _stale_rows(cells)
+    fresh = [cell for cell in cells if getattr(cell, "stale_reason", None) is None]
     # I13: preliminary вне всех расчётов. Фильтруем явно (модульные баллы иначе содержали бы
     # фантомные модули с нулевым покрытием). Coverage в universe-режиме исключает
     # preliminary по тому же правилу, поэтому отдельный assert эквивалентности не нужен.
-    measured = [cell for cell in cells if cell.state is not CellState.PRELIMINARY]
-    assert resolved_capability(cells, catalog, module_weights) == resolved_capability(
+    measured = [cell for cell in fresh if cell.state is not CellState.PRELIMINARY]
+    assert resolved_capability(fresh, catalog, module_weights) == resolved_capability(
         measured, catalog, module_weights
     ), "I13: preliminary не должны влиять на Capability"
 
@@ -259,15 +295,15 @@ def _compute_from_cells(
         requested_ranking=requested_ranking,
         ranking_epsilon=ranking_epsilon,
     )
-    # Coverage получает **полный** набор ячеек: preliminary должна быть видна и
-    # исключена (§6/B-3a, I13), иначе в universe-режиме она читалась бы как отсутствующая.
+    # Coverage получает ячейки **без** устаревших: preliminary должна быть видна и
+    # исключена (§6/B-3a, I13), а stale — не засчитана как разрешённая (I5).
     per_product = _per_product_coverage(
-        cells, catalog, module_weights, universe=universe_set
+        fresh, catalog, module_weights, universe=universe_set
     )
     return ScoreBundle(
         capability=resolved_capability(measured, catalog, module_weights),
         coverage=evidence_coverage(
-            cells, catalog, module_weights, universe=universe_set
+            fresh, catalog, module_weights, universe=universe_set
         ),
         failure_rate=failure_rate(measured),
         modules=module_scores(measured, catalog, module_weights, universe=universe_set),
@@ -277,6 +313,7 @@ def _compute_from_cells(
         # K6/A3: демотирование по sensitivity объединено с запрошенным режимом (min).
         computed_ranking=report.computed_ranking,
         ranking_epsilon=ranking_epsilon,
+        stale_cells=stale,
     )
 
 

@@ -18,6 +18,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 from pathlib import Path
 
 import pytest
@@ -28,11 +29,14 @@ from core.domain import (
     Cell,
     CellState,
     CorpusCoverage,
+    DenialStrength,
+    EvidenceScope,
     LLMCellOutput,
     ScopeAttestation,
     Status,
     TerminationReason,
 )
+from core.domain.enums import AbsenceRuleType
 from core.pipeline.digests import EXECUTION_CONTRACT_FIELDS
 from core.pipeline.evaluate import evaluate_phase
 from core.pipeline.exhaustion import (
@@ -68,12 +72,17 @@ FIXED_TS = "2026-01-01T00:00:00+00:00"
 
 
 def _unknown_cell(product_id: str = "p1", param_id: str = "param_a") -> Cell:
+    """``❓`` нового образца: несёт причину незнания — это и есть его обоснование (I3)."""
     return Cell(
         run_id=RUN_ID,
         product_id=product_id,
         param_id=param_id,
         state=CellState.EVALUATED,
         status=Status.UNKNOWN,
+        evidence_scope=EvidenceScope(
+            denial_strength=DenialStrength.NOT_STATED,
+            reason="материал релевантен, дословного утверждения нет",
+        ),
     )
 
 
@@ -102,18 +111,41 @@ def test_build_protocols_covers_only_unknown_cells() -> None:
     assert rows[0].contours == ["corpus"]
 
 
-def test_partial_protocol_is_reported_as_anomaly_naming_missing_contours() -> None:
-    """Неполный протокол — аномалия с перечнем непройденных контуров (не «нет протокола»)."""
-    cell = _unknown_cell()
+def test_unknown_without_reason_is_reported_as_anomaly() -> None:
+    """Аномалия I3 — ``❓``, не называющий причину незнания (Вариант 2)."""
+    # Объект есть, но причины нет: домен такую ячейку не соберёт, а из store она
+    # прийти может (повреждённая/частичная запись) — отчёт обязан назвать это аномалией.
+    cell = _unknown_cell().model_copy(
+        update={
+            "evidence_scope": EvidenceScope.model_construct(
+                denial_strength=DenialStrength.NOT_STATED, reason=None
+            )
+        }
+    )
     rows = build_protocols(
         [cell], run_id=RUN_ID, contours_run=contours_run(["p1"], corpus=["p1"])
     )
     anomalies = collect_i3_anomalies([cell], protocol_map(rows))
     assert len(anomalies) == 1
     reason = anomalies[0]["reason"]
-    for missing in ("serp", "registry", "inheritance"):
-        assert missing in reason
-    assert "нет протокола" not in reason
+    assert "reason" in reason
+    # Прежнее требование перечня контуров снято: протокол — провенанс поиска.
+    assert "контур" not in reason
+
+
+def test_partial_protocol_is_not_an_anomaly() -> None:
+    """Неполный протокол не делает ``❓`` аномальным: причина живёт в ячейке.
+
+    Раньше здесь требовались все четыре контура, и параметр, который нельзя доказать
+    поиском, не мог получить честное ``❓`` без SERP-контура. Теперь ``❓`` обоснован
+    классом ``not_stated`` + причиной, а протокол остаётся записью о том, что исполнялось.
+    """
+    cell = _unknown_cell()
+    rows = build_protocols(
+        [cell], run_id=RUN_ID, contours_run=contours_run(["p1"], corpus=["p1"])
+    )
+    assert rows[0].contours == ["corpus"]
+    assert collect_i3_anomalies([cell], protocol_map(rows)) == []
 
 
 def test_full_protocol_produces_no_anomaly() -> None:
@@ -431,8 +463,22 @@ def _absent_evaluator() -> FakeEvaluator:
     )
 
 
-def test_incomplete_corpus_without_attestation_keeps_absent_unpublished() -> None:
-    """I2c: неполный корпус + ``explicit`` без подписи ⇒ кандидат, а не ``❌``."""
+def _distribution_plan(products: tuple[str, ...] = ("p1",)):  # noqa: ANN202
+    """План с конечным справочником: только для таких правил достижим ``bounded``."""
+    plan = _plan(products=products)
+    params = [
+        row.model_copy(update={"absence_rule": AbsenceRuleType.DISTRIBUTION_ABSENCE})
+        for row in plan.params
+    ]
+    return dataclasses.replace(plan, params=params)
+
+
+def test_undeduced_absence_becomes_unknown_not_published() -> None:
+    """Вариант 2: ``❌`` без объявленного класса не публикуется — остаётся ``❓``.
+
+    Неполный охват при этом не превращает честное «не установлено» в ``pending``-
+    кандидата: ячейка остаётся на карте, а причина (класс + текст) видна читателю.
+    """
     store = _store()
     store.save_corpus_coverage(RUN_ID, _coverage("p1", complete=False))
     result = evaluate_phase(
@@ -445,43 +491,57 @@ def test_incomplete_corpus_without_attestation_keeps_absent_unpublished() -> Non
     )
     assert result.status == "ok"
     cell = [c for c in result.cells if c.product_id == "p1"][0]
-    assert cell.state is CellState.PENDING
-    assert cell.review_reason
+    assert cell.state is CellState.EVALUATED
+    assert cell.status is Status.UNKNOWN
+    assert cell.evidence_scope is not None
+    assert cell.evidence_scope.denial_strength is DenialStrength.UNOBSERVED
+    assert "corpus_incomplete" in (cell.evidence_scope.reason or "")
+    assert cell.absence_evidence == []  # протокол отсутствия — только для ❌
 
 
-def test_scope_attestation_mapping_is_looked_up_per_product() -> None:
-    """Подпись p2 не публикует ``❌`` p1: покрытие per product (I2b/I2c)."""
+def test_scope_acceptance_mapping_is_looked_up_per_product() -> None:
+    """Принятие риска для p2 не публикует ``❌`` p1: покрытие per product."""
     store = _store()
     store.save_corpus_coverage(RUN_ID, _coverage("p1", complete=False))
     other = evaluate_phase(
-        plan=_plan(products=("p1",)),
+        plan=_distribution_plan(),
         ports=Ports(evaluator=_absent_evaluator(), lexical_index=_chunks_index()),
         store=store,
         run_id=RUN_ID,
         profile="R0",
         cutoff_k=3,
-        scope_attested_by={"p2": "expert-2"},
+        scope_acceptance={"p2": "expert-2"},
     )
-    assert [c for c in other.cells if c.product_id == "p1"][0].state is CellState.PENDING
+    cell = [c for c in other.cells if c.product_id == "p1"][0]
+    assert cell.state is CellState.EVALUATED
+    assert cell.status is Status.UNKNOWN
+    assert cell.evidence_scope is not None
+    # Подпись чужого продукта не применилась: риска за p1 никто не принимал.
+    assert cell.evidence_scope.scope_acceptance is None
+    assert "absence_unattested" in (cell.evidence_scope.reason or "")
+    assert cell.evidence_scope.denial_strength is DenialStrength.UNOBSERVED
 
 
-def test_scope_attestation_mapping_publishes_absent_for_attested_product() -> None:
-    """Подписанный продукт публикует ``❌``, и подпись видна в absence-evidence."""
+def test_scope_acceptance_mapping_publishes_bounded_absent_for_accepted_product() -> None:
+    """Принятый риск делает конечный справочник ``bounded`` ⇒ ``❌``, подпись видна."""
     store = _store()
     store.save_corpus_coverage(RUN_ID, _coverage("p1", complete=False))
     result = evaluate_phase(
-        plan=_plan(products=("p1",)),
+        plan=_distribution_plan(),
         ports=Ports(evaluator=_absent_evaluator(), lexical_index=_chunks_index()),
         store=store,
         run_id=RUN_ID,
         profile="R0",
         cutoff_k=3,
-        scope_attested_by={"p1": "expert-1"},
+        scope_acceptance={"p1": "expert-1"},
     )
     cell = [c for c in result.cells if c.product_id == "p1"][0]
     assert cell.state is CellState.EVALUATED
     assert cell.status is Status.ABSENT
+    assert cell.evidence_scope is not None
+    assert cell.evidence_scope.denial_strength is DenialStrength.BOUNDED
+    assert cell.evidence_scope.scope_acceptance == "expert-1"
     assert any(
-        entry.get("scope_attested_by") == "expert-1"
+        entry.get("scope_acceptance") == "expert-1"
         for entry in cell.absence_evidence
     )

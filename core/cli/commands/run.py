@@ -61,12 +61,15 @@ from core.cli.execution_axes import (
 from core.cli.wiring import (
     LOCAL_PROFILE,
     SPLIT_PROFILE,
+    SearchResolutionError,
     WiringError,
     build_runner,
     build_store,
     build_vector_index,
     llm_env_notices,
     manifest_deploy_fields,
+    resolve_and_build_search_adapter,
+    serp_env_notices,
     preflight_extraction_budget,
     resolve_extraction_budget,
     run_db_path,
@@ -507,6 +510,15 @@ def run(args: argparse.Namespace) -> int:
             run_slot=getattr(getattr(inputs, "run", None), "llm_slot", None),
         ),
         *profile_notices(deploy_config),
+        # I3/§5: env-троттл SERP-контура виден, как и LLM-расхождения: он меняет корпус,
+        # а значит и ``run_id`` — молчаливая подмена здесь была бы подменой измерения.
+        *serp_env_notices(
+            deploy_search=getattr(deploy_config, "search", None),
+            run_rounds=getattr(
+                getattr(getattr(inputs, "run", None), "serp", None), "rounds", None
+            ),
+            cli_rounds=getattr(args, "serp_rounds", None),
+        ),
     ]
     status_dict_version = declared_status_dict_version()
     contract_d = build_execution_contract(
@@ -865,6 +877,40 @@ def run(args: argparse.Namespace) -> int:
                 store=store,
                 run_id=run_id,
             )
+            # I3/§5: SERP-контур исполняется в фазе корпуса и требует адаптера внешнего
+            # поиска. В ``split`` он приходит швом из портов; в ``local`` сетевые порты не
+            # собираются автоматически — поэтому при **объявленных** раундах адаптер
+            # собирается здесь (единственная точка решения провайдера — deploy-конфиг,
+            # как у ``hound discover``). Объявленные раунды без адаптера были бы тихим
+            # «контур есть, но не работал» — вместо этого фаза пишет видимый отказ.
+            # Адаптер нужен только если фаза корпуса вообще будет исполнена: на
+            # ``--until plan`` сборка портов поиска была бы работой ради уведомления.
+            if (
+                getattr(args, "ports", None) is None
+                and getattr(declared, "serp_rounds", 0) > 0
+                and getattr(ports, "search", None) is None
+                and "corpus" in _phases_until(args.until)
+            ):
+                search_lang = (
+                    str(getattr(inputs.run, "languages", None)[0])
+                    if getattr(inputs.run, "languages", None)
+                    else "ru"
+                )
+                try:
+                    serp_adapter, serp_provider = resolve_and_build_search_adapter(
+                        lang=search_lang, explicit=None
+                    )
+                except (SearchResolutionError, WiringError) as exc:
+                    # Не отказ прогона: корпус строится без находок поиска, а причина
+                    # остаётся видимой строкой предупреждения (не тихим пропуском).
+                    config_notices.append(f"serp: адаптер не собран — {exc}")
+                else:
+                    if serp_adapter is not None:
+                        ports.search = serp_adapter
+                        config_notices.append(
+                            f"serp: адаптер внешнего поиска {serp_provider or 'injected'} "
+                            "(провайдер из deploy.search)"
+                        )
             phases = _resolve_phases(
                 args,
                 inputs=inputs,
@@ -1352,5 +1398,15 @@ def configure(sub: Any) -> None:
         help="активный LLM-слот оценщика (override COHOUND_LLM_SLOT/deploy.llm.slot)",
     )
     _add_llm_model_flag(p_run)
+    p_run.add_argument(
+        "--serp-rounds",
+        dest="serp_rounds",
+        default=None,
+        metavar="N",
+        help="раунды SERP-контура внешнего поиска (0 — выключить). Приоритет: "
+        "флаг > COHOUND_SERP > run.yaml: serp.rounds > deploy.search.serp.rounds > 0. "
+        "Значение входит в execution contract (serp_rounds) ⇒ новый run_id; бюджет "
+        "объявляется в run.yaml: serp.budget",
+    )
     _add_common(p_run)
     p_run.set_defaults(handler=run)

@@ -38,6 +38,7 @@ from core.domain import (
     CrawlSessionItem,
     CrawlSessionStatus,
     EndpointKind,
+    EvidenceScope,
     EvidenceType,
     Gate,
     GateDecision,
@@ -59,7 +60,7 @@ from core.domain import (
 )
 from core.ports.store import RunIndexRef
 from core.ports.types import Chunk
-from core.store.sqlite import connect, connect_read_only
+from core.store.sqlite import SchemaVersionMismatch, connect, connect_read_only
 from core.util.ids import parse_source_id
 
 #: Размер пачки по умолчанию для батчевых записей (§B.2, T3.1).
@@ -81,6 +82,9 @@ _CELL_COLUMNS = (
     "retrieval_params_json",
     "stale_reason",
     "review_reason",
+    #: Вариант 2: объект силы отрицания + вектор охвата (JSON). Единственный носитель
+    #: ответа «можно ли утверждать отсутствие» — см. ``core.domain.models.EvidenceScope``.
+    "evidence_scope",
 )
 
 #: Источники, стоящие в порядке §2.2 п.7 **ниже** реестра. Guard использует это только
@@ -111,8 +115,10 @@ _EVIDENCE_COLUMNS = (
     "source_url",
     "citation_quote",
     "content_hash",
+    # Устаревший скаляр прежних прогонов: читается, новым писателем не выставляется.
     "source_scope",
-    "scope_attested_by",
+    # Принятие риска человеком (прежде ``scope_attested_by``).
+    "scope_acceptance",
     "index_build_id",
     "partition_build_id",
     "retrieved_at",
@@ -184,6 +190,37 @@ def _parse_json_text(value: str | None) -> Any:
         return None
 
 
+def _row_optional(row: sqlite3.Row, column: str) -> Any:
+    """Значение колонки или ``None``, если колонки в строке нет.
+
+    Нужно для **read-only** открытия старой БД: ``connect_read_only`` не выполняет
+    аддитивных DDL-миграций (файл только читается), поэтому колонка, добавленная позже,
+    в такой БД отсутствует. Отсутствие = «значение не записано», а не сбой чтения прогона.
+    """
+    return row[column] if column in row.keys() else None
+
+
+def _parse_evidence_scope(raw: str | None) -> EvidenceScope | None:
+    """Разбирает JSON-колонку ``cells.evidence_scope`` (Вариант 2).
+
+    Терпимость к повреждённому/историческому значению: ``NULL``, невалидный JSON или
+    рассинхронизированная схема дают ``None`` («объекта нет»). Это прежнее правило
+    диагностики, а не падение чтения прогона: отчёт по старому прогону обязан работать.
+    Производная ``url_observation_ratio``, если она записана в артефакт, игнорируется
+    (``extra="forbid"`` не применяется — ключ вырезается до валидации) и пересчитывается
+    из ``observed``/``expected``, поэтому разойтись с ними не может.
+    """
+    payload = _parse_json_text(raw)
+    if not isinstance(payload, Mapping):
+        return None
+    data = dict(payload)
+    data.pop("url_observation_ratio", None)
+    try:
+        return EvidenceScope.model_validate(data)
+    except ValueError:
+        return None
+
+
 def _parse_phase_state(raw: str | None) -> dict[str, str]:
     """Извлекает карту ``{phase: state}`` из ``runs.state`` (durable resume, 02 §A.1).
 
@@ -228,6 +265,39 @@ class SqliteStore:
         self.conn: sqlite3.Connection = (
             connect_read_only(db_path) if read_only else connect(db_path)
         )
+        #: Кэш фактических колонок таблиц (см. :meth:`_readable`).
+        self._present_columns: dict[str, frozenset[str]] = {}
+
+    def _readable(self, table: str, columns: tuple[str, ...]) -> str:
+        """Список колонок для ``SELECT``, отфильтрованный по **фактической** схеме.
+
+        ``connect_read_only`` не применяет аддитивных миграций (файл только читается),
+        поэтому колонка, добавленная позже, в старой БД отсутствует. Проекция обязана это
+        учитывать: иначе чтение падает на ``no such column``, хотя данные целы.
+        :func:`_row_optional` спасает доступ к **строке**, но не сам SQL — а проекция
+        собирается из кортежа имён, объявленного текущим кодом.
+
+        Отсутствующая колонка означает «значение не записано», а не сбой чтения прогона:
+        так остаются читаемыми прогоны, сделанные до появления колонки (например
+        ``cells.evidence_scope`` / ``cell_evidence.scope_acceptance``).
+        """
+        present = self._present_columns.get(table)
+        if present is None:
+            present = frozenset(
+                row["name"] for row in self.conn.execute(f"PRAGMA table_info({table})")
+            )
+            self._present_columns[table] = present
+        missing = [c for c in columns if c not in present]
+        if not missing:
+            return ", ".join(columns)
+        # Пустая проекция сделала бы `SELECT  FROM` синтаксической ошибкой; в таблице
+        # всегда есть ключевые колонки, поэтому такой ветки быть не может — но пусть
+        # отказ будет видимым, а не молча пустым.
+        if len(missing) == len(columns):
+            raise SchemaVersionMismatch(
+                f"таблица {table} не имеет ни одной ожидаемой колонки: схема не читается"
+            )
+        return ", ".join(c for c in columns if c in present)
 
     # -- lifecycle ------------------------------------------------------- #
     def close(self) -> None:
@@ -352,6 +422,11 @@ class SqliteStore:
             _as_json_text(cell.retrieval_params_json),
             _as_text(cell.stale_reason),
             cell.review_reason,
+            (
+                _as_json_text(cell.evidence_scope.to_json())
+                if cell.evidence_scope is not None
+                else None
+            ),
         )
 
     def _guard_against_downgrade(self, cell: Cell) -> None:
@@ -466,7 +541,7 @@ class SqliteStore:
         протокола отсутствия даже в одном процессе, а на resume — тем более.
         """
         sql = (
-            f"SELECT {', '.join(_CELL_COLUMNS)} FROM cells WHERE run_id = ?"
+            f"SELECT {self._readable('cells', _CELL_COLUMNS)} FROM cells WHERE run_id = ?"
         )
         params: list[Any] = [run_id]
         if state is not None:
@@ -497,9 +572,13 @@ class SqliteStore:
     def _row_to_cell(row: sqlite3.Row) -> Cell:
         """Восстанавливает ``Cell`` из строки без повторной валидации инвариантов.
 
-        Инварианты I1/I2 зависят от ``evidence``/``absence_evidence``, которые живут в
-        ``cell_evidence``, а не в ``cells``. Строка уже прошла валидацию и триггеры БД при
-        записи, поэтому ``model_construct`` избегает ложного срабатывания I1/I2 при чтении.
+        Инварианты I1/I2/I3 зависят от ``evidence``/``absence_evidence``/``evidence_scope``,
+        которые живут в ``cell_evidence`` (или в JSON-колонке), а не в самой строке
+        ``cells``. Строка уже прошла валидацию и триггеры БД при записи, поэтому
+        ``model_construct`` избегает ложного срабатывания инвариантов при чтении.
+
+        ``evidence_scope`` разбирается **терпимо**: повреждённый JSON исторической строки —
+        это «объекта нет» (прежнее правило), а не падение чтения всего прогона.
         """
         status = row["status"]
         source_kind = row["source_kind"]
@@ -514,6 +593,7 @@ class SqliteStore:
             absence_rule=AbsenceRuleType.EXPLICIT,
             evidence=[],
             absence_evidence=[],
+            evidence_scope=_parse_evidence_scope(_row_optional(row, "evidence_scope")),
             reviewed_by=row["reviewed_by"],
             index_build_id=row["index_build_id"],
             retrieval_profile=row["retrieval_profile"],
@@ -536,7 +616,7 @@ class SqliteStore:
             ev.citation_quote,
             ev.content_hash,
             _as_text(ev.source_scope),
-            ev.scope_attested_by,
+            ev.scope_acceptance,
             ev.index_build_id,
             ev.partition_build_id,
             ev.retrieved_at,
@@ -586,7 +666,7 @@ class SqliteStore:
             entry.get("citation_quote"),
             entry.get("content_hash"),
             _as_text(entry.get("source_scope")),
-            entry.get("scope_attested_by"),
+            entry.get("scope_acceptance"),
             entry.get("index_build_id"),
             None,
             None,
@@ -631,7 +711,7 @@ class SqliteStore:
             "source_kind": row["source_kind"],
             "evidence_type": EvidenceType.ABSENCE.value,
             "source_scope": row["source_scope"],
-            "scope_attested_by": row["scope_attested_by"],
+            "scope_acceptance": row["scope_acceptance"],
             "index_build_id": row["index_build_id"],
         }
 
@@ -643,7 +723,7 @@ class SqliteStore:
         источник — персистентная ``corpus_coverage`` (отчёт читает её оттуда).
         """
         sql = (
-            f"SELECT {', '.join(_EVIDENCE_COLUMNS)} FROM cell_evidence"
+            f"SELECT {self._readable('cell_evidence', _EVIDENCE_COLUMNS)} FROM cell_evidence"
             " WHERE run_id = ? AND evidence_type = ? ORDER BY rowid"
         )
         for row in self.conn.execute(sql, (run_id, EvidenceType.ABSENCE.value)):

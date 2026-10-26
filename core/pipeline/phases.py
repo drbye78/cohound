@@ -45,6 +45,7 @@ from core.domain.enums import (
     DocumentLevel,
     PdfPipeline,
     SkipReason,
+    TerminationReason,
 )
 from core.domain.models import (
     CrawlProvenance,
@@ -78,7 +79,7 @@ from core.pipeline.registry import (
     registry_wave,
     resolve_registry_ids,
 )
-from core.pipeline.report import build_manifest, write_reports
+from core.pipeline.report import build_manifest, compact_search_effort, write_reports
 from core.pipeline.retrieve import RetrievalProfile
 from core.pipeline.review import review_queue
 from core.pipeline.runner import PhaseFn, PhaseResult, Ports, RunContext
@@ -562,6 +563,44 @@ def _phase_done(ctx: RunContext, run_id: str, phase: str) -> bool:
     return states.get(phase) == "ok"
 
 
+def _serp_rounds(axes: Any) -> int:
+    """Эффективные раунды SERP-контура из объявленных осей (``None``/0 — выключен).
+
+    Ось разрешается **один** раз composition root'ом
+    (:func:`core.cli.execution_axes.resolve_declared_axes`) и используется двумя
+    потребителями: контрактом (``serp_rounds`` → ``run_id``) и фазой корпуса. Второй
+    резолвер (со своим порядком приоритетов) дал бы прогон, у которого ``run_id``
+    описывает не тот контур, который реально исполнялся.
+    """
+    try:
+        return max(int(getattr(axes, "serp_rounds", 0) or 0), 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _serp_facts(store: Any, run_id: str) -> dict[str, Any]:
+    """Наблюдённые факты SERP-контура из провенанса **сеанса** краула (I3/§5).
+
+    Контур пишет своё наблюдение в ``crawl_sessions.provenance_json`` (ключ ``serp``,
+    ``corpus._persist_serp_provenance``): ``StorePort`` не даёт отдельного места под факты
+    поиска, а сеанс — durable-адрес того же краула, которого контур расширял.
+
+    Пусто/сбой чтения → ``{}``: фактов нет, и завышать их нельзя («не наблюдал» ≠
+    «исполнился»). Выключенный контур пишет ``enabled: false`` — это тоже факт: его
+    отличаем от отсутствия контура по полю ``enabled``.
+    """
+    if not run_id:
+        return {}
+    try:
+        session = store.get_crawl_session(default_session_id(str(run_id)))
+    except Exception:  # noqa: BLE001 — факты информационны, протокол не роняем
+        return {}
+    if session is None:
+        return {}
+    serp = _session_provenance_json(session).get("serp")
+    return serp if isinstance(serp, dict) else {}
+
+
 def _observed_exhaustion_facts(
     ctx: RunContext,
     plan: Any,
@@ -583,8 +622,11 @@ def _observed_exhaustion_facts(
     * ``inheritance`` — фаза отработала (durable ``ok``) **и** у продукта есть upstream
       с совпадающей строкой ``baselines.csv`` (ровно условие, при котором волна Ш4
       рассматривает продукт);
-    * ``serp`` — **пусто**: производителя SERP-раундов в прогоне нет (``run_serp_loop``
-      не вызывается), поэтому контур честно «не исполнялся»; бюджет/раунды не выдумываются.
+    * ``serp`` — контур **реально** выпускал запросы к адаптеру внешнего поиска
+      (``budget.used > 0`` по продукту из провенанса контура). Выключенный контур,
+      объявленный без адаптера или без запросов контуром не считается: наличие
+      ``serp`` в провенансе само по себе — не исполнение. Раунды/бюджет/запросы/
+      терминация берутся оттуда же как **наблюдения**, а не из объявления.
 
     ``yielded`` — дал ли исполненный контур хоть что-то (документы корпуса либо ячейка
     высокого источника). Неизвестное не подменяется догадкой.
@@ -638,20 +680,58 @@ def _observed_exhaustion_facts(
         for product in products
     }
 
+    # I3/§5: SERP-контур — наблюдённые факты из провенанса сеанса (пишет фаза корпуса).
+    # «Исполнился» = адаптер действительно вызывался (``used > 0``), а не «контур объявлен».
+    serp_facts = _serp_facts(ctx.store, run_id)
+    serp_products: set[str] = set()
+    serp_termination: dict[str, TerminationReason] = {}
+    serp_queries: dict[str, list[str]] = {}
+    serp_budget: dict[str, dict[str, Any]] = {}
+    serp_rounds = 0
+    if serp_facts.get("enabled"):
+        serp_rounds = int((serp_facts.get("rounds") or {}).get("executed", 0) or 0)
+        block = serp_facts.get("budget") or {}
+        used = block.get("used") or {}
+        exhausted = block.get("exhausted") or {}
+        for product, count in used.items():
+            if int(count or 0) <= 0:
+                continue
+            serp_products.add(str(product))
+            serp_budget[str(product)] = {
+                "declared": block.get("effective_per_product"),
+                "used": int(count or 0),
+                # Факт исчерпания — только явный флаг контура, не «остаток 0» вычислением.
+                "exhausted": bool(exhausted.get(product)),
+            }
+        serp_queries = {
+            str(product): list(values or ())
+            for product, values in (serp_facts.get("queries") or {}).items()
+            if str(product) in serp_products
+        }
+        for product, reason in (serp_facts.get("termination") or {}).items():
+            if str(product) not in serp_products or not reason:
+                continue
+            try:
+                serp_termination[str(product)] = TerminationReason(str(reason))
+            except ValueError:
+                serp_termination[str(product)] = TerminationReason.ERROR
+
     return ExhaustionFacts(
         contours_run=contours_run(
             products,
             corpus=corpus_products,
-            # SERP-контур не исполнялся: run_serp_loop не вызывается ни одной фазой.
-            serp=(),
+            serp=serp_products,
             registry=registry_products,
             inheritance=inheritance_products,
         ),
-        rounds_by_product={product: 0 for product in products},
-        budget_by_product={},
-        queries_by_product={},
+        rounds_by_product={
+            product: (serp_rounds if product in serp_products else 0)
+            for product in products
+        },
+        budget_by_product=serp_budget,
+        queries_by_product=serp_queries,
         yielded_by_product=yielded,
-        termination_by_product={},
+        termination_by_product=serp_termination,
         exhausted_at=(
             ctx.clock.now_iso() if getattr(ctx, "clock", None) is not None else None
         ),
@@ -907,6 +987,9 @@ def build_phases(
         run_crawl: CrawlRunConfig | None = getattr(
             getattr(inputs, "run", None), "crawl", None
         )
+        # Секция ``serp`` run.yaml: бюджет объявлен **только** там (решение: один бюджет,
+        # и он определяет число ушедших запросов, то есть состав корпуса).
+        run_serp = getattr(getattr(inputs, "run", None), "serp", None)
         override: dict[str, Any] = {}
         if max_depth is not None:
             override["max_depth"] = max_depth
@@ -989,6 +1072,21 @@ def build_phases(
             # читает); ``derive_extract_workers`` решён там же по профилю зон.
             mem_budget_mb=mem_budget_mb,
             derive_extract_workers=derive_extract_workers,
+            # I3/§5: SERP-контур — внутри этой же фазы (не отдельная фаза ``PHASES``).
+            # Адаптер поиска приходит портом (``split`` — шов ``/v1/search``; ``local`` —
+            # ``None``, тогда объявленные раунды дают видимый отказ в ``errors``).
+            search=getattr(ctx.ports, "search", None),
+            serp_rounds=_serp_rounds(axes),
+            serp_budget=getattr(run_serp, "budget", None),
+            serp_source=getattr(axes, "serp_source", None),
+            serp_langs=getattr(inputs.run, "languages", None),
+            # Запросы контура = каталог + **имя продукта** (замер: 45/63 против 27/63):
+            # имя берётся из паспорта (канонический), а не из product_id.
+            product_names={
+                str(pid): str(getattr(passport, "canonical_name", "") or "")
+                for pid, passport in (passports or {}).items()
+                if getattr(passport, "canonical_name", None)
+            },
         )
         _capture_index_build(holder, result)
         # 09 §8.5: переиспользование партиций — видимая оператору строка лога (не ошибка).
@@ -1152,13 +1250,19 @@ def build_phases(
             # §13 (2.4.0): декларированные оси — тот же резолвер, что у контракта.
             axes=axes,
             declared_status_dict_version=declared_status_dict_version,
-            # I2b/I2c: подписи, которыми прогон авторизовал ❌ (product → actor). Только
-            # продукты плана: подпись продукта вне плана прогоном не использовалась.
+            # Вариант 2: принятия риска, которыми прогон достиг ❌ класса bounded
+            # (product → actor). Только продукты плана: подпись продукта вне плана
+            # прогоном не использовалась.
             scope_attestations={
                 product_id: attestation.attested_by
                 for product_id, attestation in scope_attestations.items()
                 if product_id in set(plan.products)
             },
+            # I23/§5: состояние SERP-контура (раунды, израсходованный и объявленный бюджет,
+            # терминация) — в ``runs.search_effort_budget_json``. Колонка существовала и
+            # читалась отчётом, но никем не писалась (всегда ``null``); источник — durable
+            # провенанс сеанса, поэтому значение переживает resume и не выдумывается.
+            search_effort=compact_search_effort(_serp_facts(ctx.store, plan.run_id)),
         )
         # §13/точки интеграции: политика гейтов и waiver-строки — в манифест, чтобы
         # делегирование гейта наружу было видно в артефакте, а не подразумевалось.
@@ -1230,7 +1334,28 @@ def build_phases(
             store=ctx.store,
         )
         holder["artifacts"] = artifacts
-        return PhaseResult(status="ok", phase="report", log_entries=[artifacts])
+        # §13/K2: устаревшие ячейки исключены из расчёта — «что требует пере-оценки» идёт
+        # advisory-каналом (``pending``), а не тишиной: это работа человека, не дефект.
+        pending: list[str] = []
+        stale_count = len(bundle.stale_cells)
+        if artifacts.stale_cells is not None:
+            pending.append(
+                f"отчёт: {stale_count} ячеек исключены из расчёта как устаревшие "
+                "(stale_reason) — требуют пере-оценки: outputs/stale_cells.csv"
+            )
+        return PhaseResult(
+            status="ok",
+            phase="report",
+            log_entries=[
+                artifacts,
+                *(
+                    [f"report: {stale_count} stale-ячеек исключены из расчёта"]
+                    if artifacts.stale_cells is not None
+                    else []
+                ),
+            ],
+            pending=pending,
+        )
 
     return {
         "normalize": normalize_phase,

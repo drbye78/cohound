@@ -91,6 +91,10 @@ EXECUTION_CONTRACT_FIELDS: tuple[str, ...] = (
     "crawl_strategy",
     "crawl_rate_limit",
     "crawl_config_digest",
+    # I3/§5: число объявленных раундов SERP-контура. Раунд добавляет документы корпуса,
+    # то есть доказательства, поэтому это **условие измерения**, а не провенанс: если
+    # спрятать его в ``settings_provenance``, корпус изменится, а ``run_id`` — нет.
+    "serp_rounds",
     "registry_spec_digest",
     "deploy_profile",
     "edge_schema_version",

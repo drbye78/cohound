@@ -14,5 +14,9 @@ edge:
   audit: { sink: file, target: /var/log/cohound/audit.jsonl }
 extractor_zone: edge
 search:
-  budget: { ru: 5, en: 5 }
+  # Бюджета здесь нет: единственный потолок поиска объявляется входом прогона
+  # (run.yaml: serp.budget) — прежний search.budget ключевался по языку и ничего не
+  # ограничивал (см. core/config/deploy.py:SearchDeployConfig).
   adapter: example_adapter
+  serp:
+    rounds: 2

@@ -8,7 +8,7 @@
 from __future__ import annotations
 
 from core.domain.enums import CellState, Status
-from core.domain.models import Cell, LLMEvidence
+from core.domain.models import Cell, EvidenceScope, LLMEvidence
 
 __all__ = ["cell"]
 
@@ -25,13 +25,14 @@ def cell(run_id: str, product_id: str, param_id: str, status: Status) -> Cell:
             evidence=[LLMEvidence(source_id="src.1", quote="q")],
         )
     if status is Status.ABSENT:
+        # Вариант 2: публикуемое «нет» обязано нести класс силы отрицания (I2).
         return Cell(
             run_id=run_id,
             product_id=product_id,
             param_id=param_id,
             state=CellState.EVALUATED,
             status=status,
-            absence_evidence=[{"source_scope": "partial"}],
+            evidence_scope=EvidenceScope.for_registry_absence(registry_ids=["reg"]),
         )
     return Cell(
         run_id=run_id,

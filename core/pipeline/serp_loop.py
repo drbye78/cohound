@@ -50,6 +50,7 @@ import json
 from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
+from urllib.parse import unquote, urlsplit
 
 from core.domain import (
     Cell,
@@ -57,12 +58,20 @@ from core.domain import (
     StaleReason,
     TerminationReason,
 )
+from core.domain.enums import SearchPhase
 from core.pipeline.corpus import IndexBuild
+from core.pipeline.crawl_frontier import (
+    CrawlLimits,
+    is_blacklisted,
+    normalize_scope_host,
+    root_path_prefix,
+)
 from core.pipeline.idempotency import mark_stale, upsert_cells
 from core.pipeline.search_log import SearchBudget, SearchEffort, external_search
 from core.ports.search import SearchAdapterPort, SearchQuery, SearchResult
 from core.ports.store import StorePort
 from core.util.hashing import short_hash
+from core.util.security import validate_url
 
 __all__ = [
     "ImmutableBuildError",
@@ -72,8 +81,15 @@ __all__ = [
     "RoundBuildContext",
     "SerpRound",
     "SerpLoopResult",
+    "SerpDiscovery",
+    "SERP_QUERY_LIMIT",
     "RoundBuilder",
     "default_round_builder",
+    "build_serp_queries",
+    "declared_serp_hosts",
+    "serp_host_in_scope",
+    "serp_discover",
+    "assign_serp_seeds",
     "derive_round_build_id",
     "derive_round_partition_id",
     "assert_build_id_new",
@@ -86,6 +102,9 @@ __all__ = [
 _FIELD_SEP = "\x1f"
 #: Разделитель групп внутри одной группы полей (кандидат ↔ ранг ↔ url).
 _GROUP_SEP = "\x1e"
+#: Сколько кандидатов запрашивать у адаптера на один SERP-запрос (тот же масштаб, что
+#: у ретривального выреза: внешний поиск отдаёт первые страницы, не весь выдачу).
+SERP_QUERY_LIMIT = 10
 
 
 # --------------------------------------------------------------------------- #
@@ -530,6 +549,480 @@ def run_serp_round(
         search_calls=search_calls,
         termination_reason=termination,
     )
+
+
+# --------------------------------------------------------------------------- #
+# Производственный проход контура: запросы → поиск → допуск кандидатов (I3/§5)
+# --------------------------------------------------------------------------- #
+
+
+@dataclass
+class SerpDiscovery:
+    """Наблюдённый результат SERP-прохода (до долива в корпус).
+
+    Это **наблюдение**, а не evidence (I19): принятые URL станут доказательствами только
+    после ``corpus_raw`` → hash → index. Поля названы так, как они попадут в провенанс
+    сеанса/манифеста, — второго словаря не заводим.
+
+    :param rounds: объявленное число раундов (0 — контур выключен).
+    :param executed_rounds: сколько раундов реально исполнено (ранняя терминация видна).
+    :param source: уровень, которым включён контур (``cli``/``env``/``run.yaml``/…).
+    :param budget_declared: объявленный бюджет **на продукт на раунд** (``None`` — выкл.).
+    :param adapter: провайдер адаптера поиска (провенанс; ``None`` — адаптера не было).
+    :param queries_by_product: выпущенные запросы (тексты, в порядке выпуска).
+    :param accepted_by_product: принятые в корпус URL (новые, дедуплицированные).
+    :param rejected_by_product: отказы по причинам (``ssrf``/``out_of_scope_host``/
+        ``blacklisted``/``known``) — «сколько не пустили и почему», а не тихий фильтр.
+    :param candidates_by_product: сколько кандидатов вернул адаптер (всего).
+    :param calls_by_product: сколько вызовов адаптера состоялось (без отказов бюджета).
+    :param exhausted_by_product: бюджет продукта исчерпан (факт, не догадка).
+    :param termination_by_product: причина терминации по продукту (§5).
+    :param unavailable_reason: почему контур не исполнен при объявленных раундах
+        (``no_adapter``/``no_queries``) — видимый отказ, а не молчаливый пропуск.
+    """
+
+    rounds: int = 0
+    executed_rounds: int = 0
+    source: str = "default"
+    budget_declared: int | None = None
+    adapter: str | None = None
+    queries_by_product: dict[str, list[str]] = field(default_factory=dict)
+    accepted_by_product: dict[str, list[str]] = field(default_factory=dict)
+    rejected_by_product: dict[str, dict[str, int]] = field(default_factory=dict)
+    candidates_by_product: dict[str, int] = field(default_factory=dict)
+    calls_by_product: dict[str, int] = field(default_factory=dict)
+    exhausted_by_product: dict[str, bool] = field(default_factory=dict)
+    termination_by_product: dict[str, str | None] = field(default_factory=dict)
+    unavailable_reason: str | None = None
+
+    @property
+    def enabled(self) -> bool:
+        """Объявлен ли контур (``rounds > 0``)."""
+        return self.rounds > 0
+
+    @property
+    def accepted_total(self) -> int:
+        """Сколько URL принято всего (сумма по продуктам)."""
+        return sum(len(items) for items in self.accepted_by_product.values())
+
+    @property
+    def any_exhausted(self) -> bool:
+        """Исчерпан ли бюджет хотя бы у одного продукта (видимая запись, не тишина)."""
+        return any(self.exhausted_by_product.values())
+
+    def to_observation(self) -> dict[str, Any]:
+        """Провенанс контура для сеанса краула/манифеста (детерминированный JSON-вид)."""
+        return {
+            "enabled": self.enabled,
+            "rounds": {
+                "declared": int(self.rounds),
+                "executed": int(self.executed_rounds),
+                "source": self.source,
+            },
+            "budget": {
+                "declared_per_round": self.budget_declared,
+                "effective_per_product": (
+                    None
+                    if self.budget_declared is None
+                    else int(self.budget_declared) * int(self.rounds)
+                ),
+                "used": {pid: int(n) for pid, n in sorted(self.calls_by_product.items())},
+                "exhausted": {pid: bool(v) for pid, v in sorted(self.exhausted_by_product.items())},
+            },
+            "adapter": self.adapter,
+            "unavailable_reason": self.unavailable_reason,
+            "queries": {pid: list(qs) for pid, qs in sorted(self.queries_by_product.items())},
+            "candidates": {pid: int(n) for pid, n in sorted(self.candidates_by_product.items())},
+            "accepted": {pid: list(urls) for pid, urls in sorted(self.accepted_by_product.items())},
+            "rejected": {
+                pid: {reason: int(count) for reason, count in sorted(reasons.items())}
+                for pid, reasons in sorted(self.rejected_by_product.items())
+            },
+            "termination": {
+                pid: reason for pid, reason in sorted(self.termination_by_product.items())
+            },
+        }
+
+
+def declared_serp_hosts(
+    urls_by_product: Mapping[str, Sequence[str]],
+    domain_profiles: Mapping[str, Any] | None = None,
+) -> tuple[dict[str, frozenset[str]], frozenset[str]]:
+    """Объявленные хосты: ``(own_hosts_by_product, declared_all)``.
+
+    Зеркало правила scope фазы корпуса (``corpus`` §«scope — объявленные хосты»):
+    объявленные хосты — все seed-корни прогона плюс ключи ``domain_profiles.yaml``;
+    собственные хосты продукта — хосты его корней. Кандидат SERP допускается, если его
+    хост принадлежит продукту (собственный хост либо **объявленный** поддомен корня) —
+    чужой хост не «добирается» поиском (§13: поддомен вне объявления = execution_change).
+    """
+    profile_hosts = {
+        normalize_scope_host(str(key).split("/", 1)[0])
+        for key in (domain_profiles or {})
+    }
+    own: dict[str, frozenset[str]] = {}
+    for product_id, urls in urls_by_product.items():
+        own[str(product_id)] = frozenset(
+            host
+            for host in (
+                normalize_scope_host(urlsplit(str(url)).hostname or "") for url in urls
+            )
+            if host
+        )
+    declared = frozenset(profile_hosts.union(*own.values()) - {""}) if own else frozenset(
+        profile_hosts - {""}
+    )
+    return own, declared
+
+
+def serp_host_in_scope(
+    host: str, own_hosts: frozenset[str], declared: frozenset[str]
+) -> bool:
+    """Проходит ли хост scope продукта (собственный хост либо объявленный поддомен).
+
+    Это **та же** семантика, что у ``Frontier.host_in_scope`` (``www.`` эквивалентен
+    базовому хосту с обеих сторон), но без привязки к одному корню: продукт может иметь
+    несколько seed-корней. Никакого наследования осей профиля здесь нет — только право
+    продукта тратить свой бюджет.
+    """
+    norm = normalize_scope_host(host)
+    if not norm:
+        return False
+    if norm in own_hosts:
+        return True
+    for root in own_hosts:
+        if norm.endswith("." + root) and norm in declared:
+            return True
+    return False
+
+
+def build_serp_queries(
+    *,
+    products: Sequence[str],
+    params: Sequence[Any],
+    product_names: Mapping[str, str] | None = None,
+    langs: Sequence[str] = ("ru",),
+    limit: int = SERP_QUERY_LIMIT,
+) -> dict[str, list[SearchQuery]]:
+    """Запросы контура: **каталог + имя продукта** (замер: имя продукта обязательно).
+
+    Замер на остатке ``❓`` (63 ячейки): запросы без имени продукта попадали в целевой
+    документ в 27 случаях из 63, с именем — в 45. ``render_queries`` (внутренний ретривал)
+    отдаёт заголовок параметра и концепт-термины, но имени продукта не содержит, поэтому
+    для **внешнего** поиска оно добавляется здесь: внешний поиск ищет по всему интернету,
+    и «потоковая репликация» без бренда приносит чужие продукты.
+
+    Порядок детерминирован: продукты — ``products`` как объявлено, параметры — порядок
+    каталога, языки — объявленный порядок ``run.yaml: languages``. Дубли схлопываются по
+    ``casefold`` (заголовок параметра может повторяться у разных строк).
+
+    :param product_names: ``product_id → каноническое имя`` (из паспорта). Продукт без
+        имени получает запрос из одного заголовка, и это видно в провенансе
+        (``product_names`` в observation отсутствует) — значение не выдумывается.
+    :param limit: ``SearchQuery.limit`` — сколько кандидатов просить у адаптера.
+    """
+    names = {str(pid): str(name) for pid, name in (product_names or {}).items() if name}
+    language_list = [str(lang) for lang in (langs or ()) if str(lang).strip()] or ["ru"]
+    result: dict[str, list[SearchQuery]] = {}
+    for product_id in products:
+        pid = str(product_id)
+        name = names.get(pid)
+        queries: list[SearchQuery] = []
+        seen: set[tuple[str, str]] = set()
+        for param in params:
+            title = str(getattr(param, "title", "") or "").strip()
+            if not title:
+                continue
+            text = f"{title} {name}".strip() if name else title
+            # Языки параметра (`catalog.csv: search_langs`) сильнее объявленного набора
+            # прогона: язык — свойство параметра, а `languages` — дефолт прогона.
+            param_langs = [
+                str(lang) for lang in (getattr(param, "search_langs", None) or ())
+            ] or language_list
+            for lang in param_langs:
+                key = (text.casefold(), lang)
+                if key in seen:
+                    continue
+                seen.add(key)
+                queries.append(
+                    SearchQuery(
+                        text=text,
+                        lang=lang,
+                        limit=limit,
+                        phase=SearchPhase.SERP.value,
+                    )
+                )
+        result[pid] = queries
+    return result
+
+
+def _known_url_key(url: str) -> str:
+    """Ключ дедупликации URL: без фрагмента, с нормализованным хостом и без ``/`` в конце."""
+    parsed = urlsplit(str(url))
+    host = normalize_scope_host(parsed.hostname or "")
+    path = (parsed.path or "/").rstrip("/") or "/"
+    query = f"?{parsed.query}" if parsed.query else ""
+    return f"{parsed.scheme.lower()}://{host}{path}{query}"
+
+
+def _admit_candidate(
+    result: SearchResult,
+    *,
+    own_hosts: frozenset[str],
+    declared: frozenset[str],
+    limits: CrawlLimits | None,
+    seen: set[str],
+) -> tuple[str | None, str | None]:
+    """Допуск кандидата: ``(url|None, причина_отказа|None)``.
+
+    Порядок проверок повторяет краул: SSRF → scope хоста (объявленные хосты) → блэклист →
+    дедупликация. Path-prefix **не** применяется: найденный документ не обязан лежать под
+    корнем seed'а (он не продолжает навигацию корня), но SSRF/host-scope/блэклист
+    остаются обязательными (та же граница, что у терминального артефакта в ``Frontier``).
+    """
+    url = str(result.url or "").strip()
+    if not url:
+        return None, "empty"
+    try:
+        validate_url(url)
+    except ValueError:
+        return None, "ssrf"
+    parsed = urlsplit(url)
+    if not serp_host_in_scope(parsed.hostname or "", own_hosts, declared):
+        return None, "out_of_scope_host"
+    if limits is not None and is_blacklisted(url, limits):
+        return None, "blacklisted"
+    key = _known_url_key(url)
+    if key in seen:
+        return None, "known"
+    seen.add(key)
+    return url, None
+
+
+def _host_equivalent(left: str, right: str) -> bool:
+    """``www.``-эквивалентность хостов (``example.org`` ≡ ``www.example.org``)."""
+    a = normalize_scope_host(left)
+    b = normalize_scope_host(right)
+    if not a or not b:
+        return False
+    return a == b or a.removeprefix("www.") == b.removeprefix("www.")
+
+
+def _path_within(url_path: str, prefix: str) -> bool:
+    """Путь укладывается в prefix по границе сегмента (``""`` — нет префикса)."""
+    if not prefix:
+        return True
+    if not url_path:
+        return False
+    return url_path == prefix or url_path.startswith(prefix + "/")
+
+
+def assign_serp_seeds(
+    found_by_product: Mapping[str, Sequence[str]],
+    roots_by_product: Mapping[str, Sequence[str]],
+) -> dict[str, dict[str, list[str]]]:
+    """Раскладывает находки SERP по **объявленным корням** продукта.
+
+    Вопрос, на который отвечает функция: как найденный URL входит в корпус, не став
+    при этом новым «авторским корнем»? Ответ: он ставится depth-0 seed'ом того корня,
+    чей host и path-prefix его покрывают (при нескольких — самый длинный prefix).
+    Найденный URL **не** становится отдельным корнем: иначе ``seeds_declared``,
+    ``max_documents`` и «сколько корней у продукта» начали бы описывать результат
+    поиска, то есть число корней зависело бы от ранжирования провайдера (A2/I16).
+
+    Причины, по которым URL всё же может не покрываться ни одним корнем:
+
+    * host объявлен (ключ ``domain_profiles.yaml`` или корень другого продукта), но
+      собственного корня у продукта на нём нет → URL идёт на первый корень продукта;
+    * URL на объявленном **поддомене** своего же корня → тот же случай.
+
+    В обоих случаях бюджет платит указанный корень, и ``accepted_foreign_hosts``
+    frontier'а фиксирует это как **объявленный чужой хост** — не тихий захват бюджета.
+
+    :param found_by_product: принятые кандидаты (``SerpDiscovery.accepted_by_product``).
+    :param roots_by_product: объявленные (авторские) корни: ``product_id → [url]``.
+    :returns: ``{product_id: {root_url: [найденные url]}}`` (детерминированный порядок,
+        пустые продукты/корни опущены).
+    """
+    assigned: dict[str, dict[str, list[str]]] = {}
+    for product_id, found in found_by_product.items():
+        pid = str(product_id)
+        roots = [str(root) for root in (roots_by_product.get(pid) or ())]
+        if not found or not roots:
+            continue
+        by_root: dict[str, list[str]] = {}
+        for url in found:
+            parsed = urlsplit(str(url))
+            host = parsed.hostname or ""
+            # Percent-декодирование — как в scope-предикате краула: иначе ``%2F`` обходил
+            # бы границу сегмента при выборе корня.
+            path = unquote(parsed.path or "")
+            best_root: str | None = None
+            best_prefix = -1
+            for root in roots:
+                root_host = urlsplit(root).hostname or ""
+                prefix = root_path_prefix(root)
+                if not _host_equivalent(host, root_host):
+                    continue
+                if not _path_within(path or "/", prefix):
+                    continue
+                if len(prefix) > best_prefix:
+                    best_root = root
+                    best_prefix = len(prefix)
+            owner = best_root or roots[0]
+            by_root.setdefault(owner, [])
+            if str(url) not in by_root[owner]:
+                by_root[owner].append(str(url))
+        if by_root:
+            assigned[pid] = {root: by_root[root] for root in sorted(by_root)}
+    return assigned
+
+
+def serp_discover(
+    *,
+    adapter: SearchAdapterPort | None,
+    queries_by_product: Mapping[str, Sequence[SearchQuery]],
+    store: Any,
+    run_id: str,
+    effort: SearchEffort,
+    rounds: int,
+    own_hosts_by_product: Mapping[str, frozenset[str]] | None = None,
+    declared_hosts: frozenset[str] | None = None,
+    known_urls_by_product: Mapping[str, Sequence[str]] | None = None,
+    limits_by_product: Mapping[str, CrawlLimits] | None = None,
+    source: str = "run.yaml",
+    budget_declared: int | None = None,
+    clock: Callable[[], str] | None = None,
+) -> SerpDiscovery:
+    """Исполняет SERP-проход: запросы → ``external_search`` → допуск кандидатов.
+
+    **I19.** Возвращаются только URL-кандидаты: ни один не считается доказательством,
+    пока не пройдёт ``corpus_raw`` → hash → index в фазе корпуса. Функция не читает
+    корпус и не пишет чанков.
+
+    **Бюджет.** Один бюджет на продукт на раунд (``SearchEffort`` с ключом
+    ``(serp, product_id)`` внутри одного прогона): эффективный потолок — ``rounds ×
+    budget``. Отказ бюджета виден (:class:`SerpDiscovery.exhausted_by_product`) и
+    пишется в ``search_log`` причиной ``budget_exhausted`` — исчерпание не «тихое».
+
+    **Ранняя терминация.** Раунд, не принёсший **ни одного нового** допущенного URL,
+    останавливает проход: следующие раунды выпустили бы те же запросы по тому же
+    провайдеру. Число исполненных раундов остаётся в наблюдении.
+
+    **Видимый отказ вместо пропуска.** Адаптера нет или запросов нет при объявленных
+    раундах — ``unavailable_reason`` заполняется, и фаза сообщает об этом; контур не
+    изображает «исполнился и ничего не нашёл».
+
+    :param known_urls_by_product: уже известные URL продукта (seed'ы + ранее найденное) —
+        дедупликация, чтобы раунд не «нашёл» собственный корпус.
+    :param limits_by_product: разрешённые оси краула продукта (источник блэклиста).
+    """
+    if rounds < 0:
+        raise ValueError(f"rounds обязан быть ≥ 0, получено {rounds}")
+    discovery = SerpDiscovery(
+        rounds=int(rounds),
+        source=str(source),
+        budget_declared=None if budget_declared is None else int(budget_declared),
+        adapter=getattr(adapter, "provider", None) if adapter is not None else None,
+    )
+    if rounds == 0:
+        return discovery
+    own_hosts_by_product = dict(own_hosts_by_product or {})
+    declared = frozenset(declared_hosts or ())
+    limits_by_product = dict(limits_by_product or {})
+    seen_by_product: dict[str, set[str]] = {
+        str(pid): {_known_url_key(url) for url in (known_urls_by_product or {}).get(pid, ())}
+        for pid in queries_by_product
+    }
+    for pid in queries_by_product:
+        discovery.accepted_by_product.setdefault(str(pid), [])
+
+    if adapter is None:
+        discovery.unavailable_reason = "no_adapter"
+        discovery.termination_by_product = {
+            str(pid): TerminationReason.ERROR.value for pid in queries_by_product
+        }
+        return discovery
+    if not any(queries_by_product.values()):
+        discovery.unavailable_reason = "no_queries"
+        discovery.termination_by_product = {
+            str(pid): TerminationReason.NOT_FOUND.value for pid in queries_by_product
+        }
+        return discovery
+
+    for offset in range(int(rounds)):
+        new_this_round = 0
+        candidates_this_round = 0
+        for product_id in sorted(queries_by_product):
+            pid = str(product_id)
+            queries = queries_by_product[product_id]
+            own = frozenset(own_hosts_by_product.get(pid, frozenset()))
+            seen = seen_by_product.setdefault(pid, set())
+            for query in queries:
+                before = effort.used(SearchPhase.SERP, pid)
+                results = external_search(
+                    adapter,
+                    query,
+                    store=store,
+                    run_id=run_id,
+                    effort=effort,
+                    budget=effort.budget,
+                    product_id=pid,
+                    clock=clock,
+                )
+                used = effort.used(SearchPhase.SERP, pid) - before
+                discovery.calls_by_product[pid] = (
+                    discovery.calls_by_product.get(pid, 0) + max(used, 0)
+                )
+                if not results:
+                    if effort.remaining(SearchPhase.SERP, pid) == 0:
+                        discovery.exhausted_by_product[pid] = True
+                    continue
+                queries_log = discovery.queries_by_product.setdefault(pid, [])
+                if query.text not in queries_log:
+                    queries_log.append(query.text)
+                discovery.candidates_by_product[pid] = (
+                    discovery.candidates_by_product.get(pid, 0) + len(results)
+                )
+                candidates_this_round += len(results)
+                rejects = discovery.rejected_by_product.setdefault(pid, {})
+                for result in results:
+                    accepted, reason = _admit_candidate(
+                        result,
+                        own_hosts=own,
+                        declared=declared,
+                        limits=limits_by_product.get(pid),
+                        seen=seen,
+                    )
+                    if accepted is not None:
+                        discovery.accepted_by_product[pid].append(accepted)
+                        new_this_round += 1
+                    elif reason is not None:
+                        rejects[reason] = rejects.get(reason, 0) + 1
+        discovery.executed_rounds = offset + 1
+        if new_this_round == 0:
+            # Дальнейшие раунды выпустили бы те же запросы: терминация видима.
+            if candidates_this_round == 0:
+                reason = TerminationReason.NOT_FOUND
+            elif discovery.any_exhausted:
+                reason = TerminationReason.BUDGET_EXHAUSTED
+            else:
+                reason = TerminationReason.RESULTS_EXHAUSTED
+            discovery.termination_by_product = {
+                pid: reason.value for pid in queries_by_product
+            }
+            break
+
+    if not discovery.termination_by_product:
+        discovery.termination_by_product = {
+            pid: (
+                TerminationReason.BUDGET_EXHAUSTED.value
+                if discovery.exhausted_by_product.get(pid)
+                else TerminationReason.RESULTS_EXHAUSTED.value
+            )
+            for pid in queries_by_product
+        }
+    return discovery
 
 
 # --------------------------------------------------------------------------- #

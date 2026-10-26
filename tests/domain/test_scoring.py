@@ -30,6 +30,7 @@ from core.domain.models import (
     Cell,
     Cohort,
     CohortEntry,
+    EvidenceScope,
     LLMEvidence,
 )
 from core.domain.scoring import (
@@ -87,13 +88,15 @@ def _cell(
             evidence=[LLMEvidence(source_id="s1", quote="q")],
         )
     if status is Status.ABSENT:
+        # Вариант 2: «нет» без класса силы отрицания недоказуемо (I2). Здесь класс
+        # объявлен явно — расчёту §6 он безразличен, важна лишь пара статус/состояние.
         return Cell(
             run_id="r1",
             product_id=product_id,
             param_id=param_id,
             state=state,
             status=status,
-            absence_evidence=[{"source_scope": "partial"}],
+            evidence_scope=EvidenceScope.for_registry_absence(registry_ids=["reg"]),
         )
     if status is Status.NOT_APPLICABLE:
         return Cell(

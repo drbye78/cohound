@@ -52,6 +52,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -63,12 +64,13 @@ from core.adapters.extract_document import (
 )
 from core.adapters.extract_html import HtmlExtractor
 from core.cli.context import _load_registry_specs
+from core.cli.errors import EXIT_USAGE, CliError
 from core.cli.wiring import (
     manifest_deploy_fields,
     registry_specs_digest,
     resolve_evaluator_model_identity,
 )
-from core.config.deploy import DeployConfig, resolve_llm_slot
+from core.config.deploy import ENV_SERP, DeployConfig, resolve_llm_slot, resolve_serp_rounds
 from core.domain.dictionary import load_dictionary
 from core.domain.models import canonical_rate_limit
 from core.pipeline.normalize import RunInputs
@@ -102,6 +104,11 @@ class DeclaredExecutionAxes:
     crawl_strategy: str | None
     crawl_rate_limit: str | None
     crawl_config_digest: str | None
+    #: I3/§5: число раундов SERP-контура и **уровень**, который его задал
+    #: (``cli``/``env``/``run.yaml``/``deploy.yaml``/``default``). Раунды входят в
+    #: контракт (``serp_rounds``): они меняют корпус, значит и условия измерения.
+    serp_rounds: int | None
+    serp_source: str | None
     registry_spec_digest: str | None
     deploy_profile: str | None
     edge_schema_version: str | None
@@ -221,6 +228,42 @@ def _crawl_axis_overrides(args: argparse.Namespace) -> dict[str, Any]:
     return overrides
 
 
+def _serp_axis(
+    *, args: argparse.Namespace, run: Any, deploy: DeployConfig
+) -> tuple[int, str]:
+    """Эффективные раунды SERP-контура и уровень-источник (I3/§5).
+
+    Приоритет — как у LLM-слота (``CLI > env > run.yaml > deploy.yaml > default``,
+    :func:`core.config.deploy.resolve_serp_rounds`). Env ``COHOUND_SERP`` здесь
+    **читается**, в отличие от ``COHOUND_LLM_MODEL``: это операционный троттл контура, а
+    раунды — условие измерения. Скрыть env-значение из контракта значило бы дать прогон,
+    у которого ``run_id`` описывает выключенный контур, а корпус собран с поиском.
+
+    Бюджет объявляется **только** в ``run.yaml: serp.budget``; включение контура без
+    бюджета — отказ ``EXIT_USAGE``, а не молчаливый безлимит.
+
+    :raises ValueError: значение уровня не разбирается (не целое/отрицательное).
+    :raises core.cli.errors.CliError: раунды включены, а бюджет не объявлен.
+    """
+    run_serp = getattr(run, "serp", None)
+    rounds, source = resolve_serp_rounds(
+        getattr(deploy, "search", None),
+        cli=getattr(args, "serp_rounds", None),
+        env=os.environ.get(ENV_SERP),
+        run_rounds=getattr(run_serp, "rounds", None),
+    )
+    if rounds > 0 and getattr(run_serp, "budget", None) is None:
+        raise CliError(
+            f"SERP-контур включён ({rounds} раунд(ов), источник {source}), но "
+            "run.yaml: serp.budget не объявлен. Бюджет определяет число ушедших "
+            "запросов, то есть стоимость и состав корпуса: безлимит по умолчанию "
+            "запрещён — объявите serp.budget: <запросов на продукт на раунд>",
+            code="serp",
+            exit_code=EXIT_USAGE,
+        )
+    return rounds, source
+
+
 def resolve_declared_axes(
     *,
     args: argparse.Namespace,
@@ -247,6 +290,7 @@ def resolve_declared_axes(
     run_crawl = getattr(run, "crawl", None)
     axis_overrides = _crawl_axis_overrides(args)
     deploy_fields = manifest_deploy_fields(config)
+    serp_rounds, serp_source = _serp_axis(args=args, run=run, deploy=config)
     return DeclaredExecutionAxes(
         crawl_strategy=_crawl_strategy(run_crawl),
         crawl_rate_limit=canonical_rate_limit(getattr(run_crawl, "rate_limit", None)),
@@ -260,6 +304,8 @@ def resolve_declared_axes(
             # флаг CLI объявляет этот прогон (меняет текст документа ⇒ ``run_id``).
             overrides=axis_overrides,
         ),
+        serp_rounds=serp_rounds,
+        serp_source=serp_source,
         registry_spec_digest=registry_specs_digest(_load_registry_specs(args, inputs)),
         deploy_profile=deploy_fields["deploy_profile"],
         edge_schema_version=deploy_fields["edge_schema_version"],

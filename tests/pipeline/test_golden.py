@@ -32,6 +32,7 @@ from core.domain.enums import (
 from core.domain.models import (
     CatalogRow,
     Cell,
+    EvidenceScope,
     Focus,
     GoldenRow,
     LLMEvidence,
@@ -153,13 +154,14 @@ def _cell(product_id: str, param_id: str, status: Status) -> Cell:
             evidence=[LLMEvidence(source_id="src.1", quote="цитата")],
         )
     if status is Status.ABSENT:
+        # Вариант 2: ``❌`` обязан нести класс силы отрицания (I2).
         return Cell(
             run_id=RUN_ID,
             product_id=product_id,
             param_id=param_id,
             state=CellState.EVALUATED,
             status=status,
-            absence_evidence=[{"source_scope": "partial"}],
+            evidence_scope=EvidenceScope.for_registry_absence(registry_ids=["reg"]),
         )
     return Cell(
         run_id=RUN_ID,

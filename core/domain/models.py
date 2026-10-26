@@ -7,13 +7,16 @@ T2.2 в ``domain/invariants.py``). Нейтральны (§1.3).
 from __future__ import annotations
 
 import datetime as _dt
+from collections.abc import Sequence
 from typing import Any
 from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from core.domain.enums import (
+    ABSENT_DENIAL_STRENGTHS,
     BLOCKING_FAILURE_KINDS,
+    UNKNOWN_DENIAL_STRENGTHS,
     AbsenceRuleType,
     AdapterKind,
     AnchorRelation,
@@ -24,6 +27,8 @@ from core.domain.enums import (
     CrawlItemStatus,
     CrawlSessionStatus,
     CrawlStrategy,
+    DenialClaim,
+    DenialStrength,
     DocumentLevel,
     EndpointKind,
     EvidenceState,
@@ -560,6 +565,38 @@ class CrawlRunConfig(BaseModel):
             raise ValueError(f"crawl.attachment_formats: {exc}") from exc
 
 
+class SerpRunConfig(BaseModel):
+    """Секция ``serp`` run.yaml — SERP-контур (I3, §5) как **объявленный вход** прогона.
+
+    Контур внешнего поиска — не настройка удобства: он добавляет документы в корпус,
+    то есть меняет доказательства. Поэтому число раундов объявлено во входе и входит в
+    ``EXECUTION_CONTRACT_FIELDS`` (``serp_rounds`` → ``run_id``/``execution_change``), а
+    не в ``settings_provenance``.
+
+    :param rounds: число проходов внешнего поиска; ``0`` (дефолт) — контур выключен и
+        прогон ведёт себя как без него (ни одного вызова поиска).
+    :param budget: потолок запросов внешнего поиска **на продукт на раунд**. Обязан быть
+        объявлен при ``rounds > 0``: бюджет определяет число ушедших запросов, а
+        безлимит по умолчанию означал бы «стоимость контура решается случаем». Дефолта
+        нет (см. решение владельца: потолок — признание, что измерять не умеют; но
+        **молчаливый** безлимит хуже явного потолка, поэтому требуется объявление).
+    """
+
+    model_config = _BASE
+
+    rounds: int = Field(default=0, ge=0)
+    budget: int | None = Field(default=None, ge=1)
+
+    @model_validator(mode="after")
+    def _check(self) -> SerpRunConfig:
+        if self.rounds > 0 and self.budget is None:
+            raise ValueError(
+                "serp: объявлены rounds > 0, но budget не задан — безлимит внешнего "
+                "поиска запрещён (объявите serp.budget: <запросов на продукт на раунд>)"
+            )
+        return self
+
+
 class RunConfig(BaseModel):
     """run.yaml (§4.5): мандат прогона (case/anchor/cohort/products/package/mode) и
     необязательный выбор активного LLM-слота ``llm_slot`` (§7.4).
@@ -611,6 +648,10 @@ class RunConfig(BaseModel):
     #: ``EXECUTION_CONTRACT_FIELDS`` секция намеренно не входит (§13 — иначе смена
     #: процедуры меняла бы ``run_id`` и рвала межцикловый diff).
     gates: dict[str, GatePolicy] = Field(default_factory=dict)
+    #: Секция ``serp`` — SERP-контур (I3/§5). ``None`` — не объявлен: контур выключен
+    #: (поведение и ``run_id`` прогонов без контура не меняются, дефолт ``rounds = 0``).
+    #: Объявленные раунды входят в ``execution_contract_digest`` (``serp_rounds``).
+    serp: SerpRunConfig | None = None
 
     @model_validator(mode="after")
     def _check(self) -> RunConfig:
@@ -652,17 +693,33 @@ class LLMEvidence(BaseModel):
 #: сохранённого выхода, поэтому при любой такой правке константу **обязано** повысить.
 #: Иначе кэш обслужит вердикт, разобранный старой схемой, под новой. Исторического
 #: значения константа не имеет: схема версионируется с момента появления этого поля.
-EVAL_SCHEMA_VERSION = 1
+#:
+#: 2 — вариант 2 силы отрицания: у модели появилось поле ``denial_strength``
+#: (:class:`~core.domain.enums.DenialClaim`), а ``❌`` без цитаты перестал быть ``❌``.
+#: Вердикт, закэшированный по схеме 1, означал другое правило и обслуживать новый
+#: прогон не может.
+EVAL_SCHEMA_VERSION = 2
 
 
 class LLMCellOutput(BaseModel):
-    """Схема ячейки, навязываемая оценщику constrained decoding'ом (§7)."""
+    """Схема ячейки, навязываемая оценщику constrained decoding'ом (§7).
+
+    ``denial_strength`` — что модель **вправе** заявить о своём «нет»: только
+    ``explicit`` (и тогда цитата обязательна) либо ``not_stated``. Авторитет
+    (``authoritative``/``bounded``) у модели не спрашивают: он приходит от реестра,
+    человека или объявленной процедуры полноты, а ``instrument_failed`` — от кода.
+    Поле опционально: если адаптер/провайдер его не отдал, класс выводится механически
+    из наличия цитаты (см. ``core.pipeline.evaluate``), и выведение **никогда** не даёт
+    авторитета.
+    """
 
     model_config = _BASE
 
     status: Status
     justification: str
     evidence: list[LLMEvidence] = Field(default_factory=list)
+    denial_strength: DenialClaim | None = None
+    denial_reason: str | None = None
 
     @model_validator(mode="after")
     def _check(self) -> LLMCellOutput:
@@ -670,7 +727,168 @@ class LLMCellOutput(BaseModel):
             raise ValueError("N/A запрещён на выходе LLM (I7)")
         if self.status in {Status.OK, Status.PARTIAL} and not self.evidence:
             raise ValueError("✅/⚠️ требуют evidence ≥ 1 (I1)")
+        # Отрицание и наличие — не одно и то же: класс отрицания у ✅/⚠️ бессмыслен.
+        if self.status not in {Status.ABSENT, Status.UNKNOWN} and (
+            self.denial_strength is not None or self.denial_reason is not None
+        ):
+            raise ValueError(
+                "denial_strength/denial_reason относятся только к ❌/❓"
+            )
         return self
+
+
+class EvidenceScope(BaseModel):
+    """Сила отрицания + **вектор охвата** для одной ячейки (§2.3, Вариант 2).
+
+    Один объект отвечает на вопрос «можно ли утверждать отсутствие» вместо трёх
+    независимых блокировок (I2b/I2c/I3). Вопрос решается **происхождением** утверждения
+    (:class:`~core.domain.enums.DenialStrength`), а не булевым «охват исчерпан»: скаляр
+    ``source_scope: exhaustive`` не измерял ничего и давал ложную точность.
+
+    **Вектор охвата — факты, а не доля.** Покрытие описывается наблюдёнными величинами
+    (``observed``/``expected``/``blocked_by_reason``/``unreadable_sources``/``enumerated``/
+    ``termination``), потому что «17 из 28 URL прочитано» — мера обработанных URL, а не
+    вероятность отсутствия. Единственная её производная — :attr:`url_observation_ratio`,
+    и она называется именно так. Поля «вероятность отсутствия» здесь нет и не заводится:
+    его нельзя измерить этим прибором.
+
+    :param denial_strength: класс отрицания — единственный носитель вердикта.
+    :param reason: **обязательна** для ``unobserved``/``not_stated``/``bounded``/
+        ``instrument_failed``: незнание обязано называть свою причину, иначе ``❓``
+        неотличим от «ещё не смотрели».
+    :param citation_quote: **обязательна** для ``explicit``: отрицание без цитаты —
+        мнение, а не доказательство (I22-родственное правило для отсутствия).
+    :param observed / expected: сколько источников продукта прочитано и объявлено.
+    :param blocked_by_reason: ``error_kind → count`` наблюдавшихся отказов (аудит).
+    :param unreadable_sources: источники/``origin``'ы, от которых не получено ничего.
+    :param enumerated: наблюдалась ли **полная** энумерация пространства (реестр/каталог):
+        ``None`` — неизвестно, ``False`` — заведомо нет.
+    :param termination: чем закончился контур охвата (``TerminationReason`` либо имя
+        объявленной процедуры полноты); ``None`` — контур не исполнялся/неизвестно.
+    :param relevant_evidence_coverage: объявленный замер «доля релевантных фрагментов,
+        покрытых цитатами»; ``None`` — **не измерено** (сегодня нечем: релевантность
+        фрагмента механически не устанавливается). Значение не подменяется догадкой.
+    :param scope_acceptance: человек, **принявший риск** ненаблюдённой части
+        (``scope_acceptance``; прежде ``scope_attested_by``). Это принятие риска, а не
+        улучшение измерения: подпись не делает охват полным и не участвует в провенансе
+        контракта (в ``EXECUTION_CONTRACT_FIELDS`` не входит).
+    :param basis: откуда взялся класс (``registry``/``evaluator:explicit``/…) — аудит.
+    """
+
+    model_config = _BASE
+
+    denial_strength: DenialStrength
+    reason: str | None = None
+    citation_quote: str | None = None
+    observed: int = Field(default=0, ge=0)
+    expected: int = Field(default=0, ge=0)
+    blocked_by_reason: dict[str, int] = Field(default_factory=dict)
+    unreadable_sources: list[str] = Field(default_factory=list)
+    enumerated: bool | None = None
+    termination: str | None = None
+    relevant_evidence_coverage: float | None = Field(default=None, ge=0.0, le=1.0)
+    scope_acceptance: str | None = None
+    basis: str | None = None
+
+    @property
+    def url_observation_ratio(self) -> float | None:
+        """Прочитанная доля объявленных источников — **мера URL**, не вероятность отсутствия.
+
+        ``None``, если объявленного пространства нет (``expected == 0``): «0 из 0» —
+        не единица и не ноль, а отсутствие знаменателя.
+        """
+        if self.expected <= 0:
+            return None
+        return min(1.0, self.observed / self.expected)
+
+    def verdict(self) -> Status:
+        """Статус, который этот класс отрицания разрешает, — единственное место маппинга."""
+        if self.denial_strength in ABSENT_DENIAL_STRENGTHS:
+            return Status.ABSENT
+        if self.denial_strength in UNKNOWN_DENIAL_STRENGTHS:
+            return Status.UNKNOWN
+        return Status.UNKNOWN  # instrument_failed статуса не даёт (I4) — см. Cell
+
+    def to_json(self) -> dict[str, Any]:
+        """JSON-совместимое представление (хранение в ``cells.evidence_scope``).
+
+        Производные величины (``url_observation_ratio``) пишутся в артефакт, но **не**
+        читаются обратно как поля: они пересчитываются из ``observed``/``expected``,
+        поэтому хранение не может с ними разойтись.
+        """
+        payload = self.model_dump(mode="json")
+        payload["url_observation_ratio"] = self.url_observation_ratio
+        return payload
+
+    @model_validator(mode="after")
+    def _check(self) -> EvidenceScope:
+        strength = self.denial_strength
+        if strength is DenialStrength.EXPLICIT:
+            if not (self.citation_quote or "").strip():
+                raise ValueError(
+                    "denial_strength=explicit требует непустую citation_quote: "
+                    "отрицание без цитаты — мнение, а не доказательство отсутствия"
+                )
+        if strength in {
+            DenialStrength.UNOBSERVED,
+            DenialStrength.NOT_STATED,
+            DenialStrength.INSTRUMENT_FAILED,
+        }:
+            if not (self.reason or "").strip():
+                raise ValueError(
+                    f"denial_strength={strength.value} требует непустую reason: "
+                    "незнание обязано называть причину"
+                )
+        if strength is DenialStrength.BOUNDED:
+            if not (self.reason or "").strip():
+                raise ValueError(
+                    "denial_strength=bounded требует reason (процедура полноты/основание)"
+                )
+            if not (self.scope_acceptance or "").strip():
+                raise ValueError(
+                    "denial_strength=bounded требует scope_acceptance: измерение не "
+                    "покрывает пространство, поэтому риск принимает человек"
+                )
+        if strength is DenialStrength.AUTHORITATIVE and self.enumerated is False:
+            raise ValueError(
+                "denial_strength=authoritative несовместим с enumerated=False: "
+                "авторитетная энумерация не может быть заведомо неполной"
+            )
+        return self
+
+    @classmethod
+    def for_registry_absence(
+        cls, *, registry_ids: Sequence[str], basis: str = "registry"
+    ) -> EvidenceScope:
+        """Класс ``authoritative`` для реестровой пустоты (объявленная семантика правила).
+
+        Не догадка: ``registry_absence`` в каталоге объявляет, что отсутствие записи в
+        реестре — полноценное негативное свидетельство. Здесь это объявление лишь
+        записывается тем же классом, которым пользуется вердикт.
+        """
+        return cls(
+            denial_strength=DenialStrength.AUTHORITATIVE,
+            enumerated=True,
+            termination="registry_enumeration",
+            basis=basis,
+            reason=(
+                "реестровая энумерация полна по построению; "
+                f"реестры: {', '.join(sorted(registry_ids)) or '—'}"
+            ),
+        )
+
+    @classmethod
+    def for_instrument_failure(cls, kind: str, *, detail: str | None = None) -> EvidenceScope:
+        """Класс ``instrument_failed``: прибор не смог, статуса нет (I4)."""
+        reason = f"instrument_failed: {kind}"
+        if detail:
+            reason = f"{reason} — {detail}"
+        return cls(
+            denial_strength=DenialStrength.INSTRUMENT_FAILED,
+            reason=reason,
+            termination=kind,
+            basis="pipeline",
+        )
 
 
 class CellEvidence(BaseModel):
@@ -693,7 +911,10 @@ class CellEvidence(BaseModel):
     citation_quote: str | None = None
     content_hash: str | None = None
     source_scope: SourceScope | None = None
-    scope_attested_by: str | None = None
+    #: Принятие риска человеком (прежде ``scope_attested_by``). **Не** улучшает измерение:
+    #: подпись говорит «знаю, чего не видел», а не «всё видел». Носитель вердикта — не она,
+    #: а :class:`EvidenceScope` ячейки.
+    scope_acceptance: str | None = None
     index_build_id: str | None = None
     #: 09 §8.1: партиция, из которой пришёл чанк-цитата. ``None`` — неизвестно
     #: (исторические строки/не корпусный источник); аддитивно, без backfill.
@@ -744,7 +965,13 @@ def absence_evidence_id(run_id: str, product_id: str, param_id: str, seq: int) -
 
 
 class Cell(BaseModel):
-    """Ячейка для проверки инвариантов I1–I13."""
+    """Ячейка для проверки инвариантов I1–I13.
+
+    ``evidence_scope`` — **единственный** носитель ответа «можно ли утверждать
+    отсутствие» (§2.3, Вариант 2). Пока объект не заполнен, вопрос считается открытым:
+    ``❌`` без него недоказуем, ``❓`` без него — аномалия (кроме исторических строк,
+    см. ``invariants.check_unknown_exhaustion``).
+    """
 
     model_config = _BASE
 
@@ -757,6 +984,9 @@ class Cell(BaseModel):
     absence_rule: AbsenceRuleType = AbsenceRuleType.EXPLICIT
     evidence: list[LLMEvidence] = Field(default_factory=list)
     absence_evidence: list[dict[str, Any]] = Field(default_factory=list)
+    #: Сила отрицания + вектор охвата. ``None`` — не заполнен (строки, записанные до
+    #: варианта 2, и ячейки наличия: у ✅/⚠️ вопрос отсутствия не стоит).
+    evidence_scope: EvidenceScope | None = None
     reviewed_by: str | None = None
     # Провенанс ячейки (R7/§13): смена сборки/профиля/промпта детектируется сравнением.
     index_build_id: str | None = None
@@ -782,32 +1012,65 @@ class Cell(BaseModel):
         if self.state is CellState.EVALUATED:
             if self.status in {Status.OK, Status.PARTIAL} and not self.evidence:
                 raise ValueError("I1: evaluated ✅/⚠️ → evidence ≥ 1")
-            # I2/I2b: evaluated ❌ → absence-evidence с учётом типа правила
+        # Объявленная семантика реестрового правила: отсутствие записи в авторитетной
+        # энумерации — негативное свидетельство по построению. Класс достраивается из
+        # **объявленных** данных (``absence_rule`` + наличие записи), а не выдумывается,
+        # и достраивается ДО проверки «❌ без класса невозможен».
+        if (
+            self.evidence_scope is None
+            and self.status is Status.ABSENT
+            and self.absence_rule is AbsenceRuleType.REGISTRY_ABSENCE
+        ):
+            registry_ids: list[str] = []
+            for entry in self.absence_evidence:
+                registry_ids.extend(str(item) for item in entry.get("registry_ids") or ())
+            self.evidence_scope = EvidenceScope.for_registry_absence(
+                registry_ids=registry_ids
+            )
+        # I2: класс отрицания обязан согласовываться со статусом — один механизм вместо
+        # I2b/I2c. Для **опубликованного** ``❌`` (evaluated) объект обязателен: «нет» без
+        # объявленной силы отрицания — вердикт без основания. ``pending`` с заполненным
+        # статусом ничего не публикует (это предмет решения), поэтому объекта не требует;
+        # исторические строки читаются ``model_construct`` и валидацию не проходят.
+        scope = self.evidence_scope
+        if (
+            self.state is CellState.EVALUATED
+            and self.status is Status.ABSENT
+            and scope is None
+        ):
+            raise ValueError(
+                "I2: ❌ требует EvidenceScope (силу отрицания и вектор охвата) — "
+                "«нет» без основания не публикуется"
+            )
+        if scope is not None:
             if self.status is Status.ABSENT:
-                if not self.absence_evidence:
-                    raise ValueError("I2: evaluated ❌ → absence-evidence обязателен")
-                if self.absence_rule in {
-                    AbsenceRuleType.PARAMETER_REFERENCE,
-                    AbsenceRuleType.DISTRIBUTION_ABSENCE,
-                }:
-                    ok = any(
-                        e.get("source_scope") == SourceScope.EXHAUSTIVE.value
-                        and e.get("scope_attested_by")
-                        for e in self.absence_evidence
+                if scope.denial_strength not in ABSENT_DENIAL_STRENGTHS:
+                    raise ValueError(
+                        "I2: ❌ требует denial_strength ∈ "
+                        f"{sorted(s.value for s in ABSENT_DENIAL_STRENGTHS)}, "
+                        f"получено {scope.denial_strength.value}"
                     )
-                    if not ok:
-                        raise ValueError(
-                            "I2b: parameter_reference/distribution_absence требуют "
-                            "source_scope=exhaustive и scope_attested_by"
-                        )
-                if self.absence_rule is AbsenceRuleType.REGISTRY_ABSENCE:
-                    if not any(
-                        e.get("source_scope") == SourceScope.EXHAUSTIVE.value
-                        for e in self.absence_evidence
-                    ):
-                        raise ValueError(
-                            "I2b: registry_absence — exhaustive по построению"
-                        )
+            elif self.status is Status.UNKNOWN:
+                if scope.denial_strength not in UNKNOWN_DENIAL_STRENGTHS:
+                    raise ValueError(
+                        "I3: ❓ требует denial_strength ∈ "
+                        f"{sorted(s.value for s in UNKNOWN_DENIAL_STRENGTHS)}, "
+                        f"получено {scope.denial_strength.value}"
+                    )
+            elif self.status in {Status.OK, Status.PARTIAL, Status.NOT_APPLICABLE}:
+                raise ValueError(
+                    "I2: объект силы отрицания относится только к ❌/❓/failed; "
+                    f"статус {self.status}, класс {scope.denial_strength.value}"
+                )
+        if self.state is CellState.EVALUATED and self.status is Status.ABSENT:
+            if not self.absence_evidence and scope is None:
+                raise ValueError("I2: evaluated ❌ → absence-evidence обязателен")
+        # I4: failed несёт только ``instrument_failed`` (сбой прибора, не отрицание).
+        if self.state is CellState.FAILED and scope is not None:
+            if scope.denial_strength is not DenialStrength.INSTRUMENT_FAILED:
+                raise ValueError(
+                    "I4: failed несёт только denial_strength=instrument_failed"
+                )
         return self
 
 
@@ -978,8 +1241,8 @@ class ProfileAttestationRow(BaseModel):
     вычисляется, что именно изменилось, когда текущий профиль перестал совпадать с
     аттестованным. ``superseded_at`` — отзыв аттестации (не удаление строки: аудит).
 
-    Имя таблицы намеренно не ``attestation``: та — cell-level ``source_scope``
-    аттестация (I2b, ``scope_attested_by``), другая сущность.
+    Имя таблицы намеренно не ``attestation``: та — cell-level принятие риска
+    (``scope_acceptance``, Вариант 2), другая сущность.
     """
 
     model_config = _BASE
@@ -1230,13 +1493,34 @@ class RunManifest(BaseModel):
     #: допускать). Имя ключа сохранено ради обратной совместимости артефактов: у прогонов
     #: до 0.1.0 там лежали только делегирования.
     gate_waivers: list[dict[str, Any]] = Field(default_factory=list)
-    #: I2b/I2c: подписи аттестации охвата источника, **использованные** прогоном
-    #: (``product_id → attested_by``). Тот же класс, что ``reviewed_by``: подпись
-    #: авторизует ``❌`` из тех же измерений, но не меняет измерение. Поэтому в
-    #: ``EXECUTION_CONTRACT_FIELDS`` поле **не входит** (как и ``gate_policies``):
-    #: смена подписанта не создаёт новый ``run_id`` и не рвёт межцикловый diff.
-    #: Видно в манифесте, чтобы опубликованный ``❌`` был прослеживаем к человеку.
-    scope_attestations: dict[str, str] = Field(default_factory=dict)
+    #: I2b/I2c → Вариант 2: **принятия риска** человеком, использованные прогоном
+    #: (``product_id → actor``). Тот же класс, что ``reviewed_by``: принятие расширяет
+    #: достижимость ``❌`` только для класса ``bounded`` (там, где измерение не покрывает
+    #: пространство), но не меняет измерение. Поэтому в ``EXECUTION_CONTRACT_FIELDS``
+    #: поле **не входит** (как и ``gate_policies``): смена подписанта не создаёт новый
+    #: ``run_id`` и не рвёт межцикловый diff. Видно в манифесте, чтобы опубликованный
+    #: ``❌`` был прослеживаем к человеку, принявшему риск.
+    #:
+    #: Имя сменилось с ``scope_attestations``: подпись — **принятие риска**
+    #: (``scope_acceptance``), а не аттестация полноты. Старые манифесты читаются:
+    #: ``_migrate_legacy_keys`` перекладывает исторический ключ.
+    scope_acceptance: dict[str, str] = Field(default_factory=dict)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _migrate_legacy_keys(cls, data: Any) -> Any:
+        """Читает манифесты/вызовы со старым ключом ``scope_attestations``.
+
+        Переименование поля — часть варианта 2 (подпись = принятие риска). Строки
+        манифеста и вызовы, записанные до переименования, обязаны оставаться читаемыми:
+        ключ перекладывается, значение не пересчитывается.
+        """
+        if isinstance(data, dict) and "scope_attestations" in data:
+            payload = dict(data)
+            legacy = payload.pop("scope_attestations")
+            payload.setdefault("scope_acceptance", legacy or {})
+            return payload
+        return data
 
 
 class Violation(BaseModel):

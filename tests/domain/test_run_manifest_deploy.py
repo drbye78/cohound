@@ -168,3 +168,30 @@ def test_crawl_provenance_heterogeneous_survives_dump_validate() -> None:
     # ``read_manifest`` валидирует JSON-текст так же — флаг не теряется под extra="forbid".
     from_json = CrawlProvenance.model_validate(dumped["crawl_provenance"])
     assert from_json.heterogeneous is True
+
+
+# --- Вариант 2: переименование подписи в манифесте -------------------------
+
+
+def test_manifest_scope_acceptance_is_the_published_name() -> None:
+    """Подпись опубликована как ``scope_acceptance`` — имя видно в манифесте и артефактах.
+
+    Смысл поля — принятие риска человеком, а не аттестация полноты охвата, поэтому и имя
+    обязано это называть: published-контракт читают отчёт и внешние потребители.
+    """
+    manifest = _manifest(scope_acceptance={"p1": "expert-1"})
+    dumped = manifest.model_dump(mode="json")
+    assert dumped["scope_acceptance"] == {"p1": "expert-1"}
+    assert "scope_attestations" not in dumped
+
+
+def test_manifest_reads_legacy_scope_attestations_key() -> None:
+    """Старый ключ ``scope_attestations`` читается: манифесты прошлых прогонов живы.
+
+    Иначе объявленный ❌ исторического прогона потерял бы подписанта — аудит-след исчез бы
+    при переименовании, а не при удалении данных.
+    """
+    legacy = _manifest(scope_attestations={"p1": "expert-1"})
+    assert legacy.scope_acceptance == {"p1": "expert-1"}
+    # Пустое историческое значение не превращается в «подписано кем-то».
+    assert _manifest(scope_attestations={}).scope_acceptance == {}

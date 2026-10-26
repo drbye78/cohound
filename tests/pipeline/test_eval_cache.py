@@ -48,6 +48,7 @@ from core.store.sqlite_store import SqliteStore
 from core.util.hashing import content_hash
 from tests.pipeline.test_evaluate import (
     _ScriptedEvaluator,
+    _absent_explicit,
     _absent_output,
     _bad_output,
     _chunks,
@@ -151,8 +152,12 @@ def test_eval_schema_version_is_pinned() -> None:
 
     Константа существует потому, что схема ``LLMCellOutput`` до Ф3 не версионировалась:
     кэш иначе не смог бы отличить выход, разобранный старой схемой, от нового.
+
+    Версия 2 (Вариант 2): в форму ответа добавлены ``denial_strength``/``denial_reason``,
+    и **смысл** прежнего выхода изменился — ``❌`` без объявленного класса больше не
+    публикуется. Кэш версии 1 обязан промахнуться: тот же JSON теперь означает другое.
     """
-    assert EVAL_SCHEMA_VERSION == 1
+    assert EVAL_SCHEMA_VERSION == 2
 
 
 # ---------------------------------------------------------------------------
@@ -567,10 +572,15 @@ def test_evaluator_config_change_busts_key(
 # ---------------------------------------------------------------------------
 
 
-def test_cached_absent_still_hits_coverage_gate(tmp_path: Path) -> None:
-    """Ф0: кэшированный ``❌`` при неполном корпусе снова становится ``pending``."""
+def test_cached_absent_survives_incomplete_coverage(tmp_path: Path) -> None:
+    """Пост-шаг переисполняется на хите: неполный охват **не** отменяет прямое отрицание.
+
+    Вариант 2: ``❌`` больше не выводится из полноты корпуса, поэтому блокировки краула
+    не превращают доказанное вендором «нет» в ``pending``. Аудит блокировок при этом
+    остаётся видимым — он не влияет на вердикт, но обязан дожить до отчёта.
+    """
     data = _data()
-    evaluator = _ScriptedEvaluator([_absent_output()])
+    evaluator = _ScriptedEvaluator([_absent_explicit()])
     cache = EvalVerdictCache(tmp_path / "cache")
 
     first = _evaluate(data, evaluator, cache, coverage=_coverage(complete=True))
@@ -585,15 +595,17 @@ def test_cached_absent_still_hits_coverage_gate(tmp_path: Path) -> None:
     )
 
     assert len(evaluator.calls) == 1  # хит
-    assert second.cell.state is CellState.PENDING
-    assert second.cell.review_reason == "corpus_incomplete_absence"
-    assert second.cell.reviewed_by is None  # I6/I7
+    assert second.cell.state is CellState.EVALUATED
+    assert second.cell.status is Status.ABSENT
+    assert second.cell.reviewed_by is None  # подпись не требуется: explicit — свидетельство
+    audit = [e for e in second.cell.absence_evidence if e.get("corpus_complete") is False]
+    assert audit and audit[0]["corpus_blocked"] == {"robots_disallow": 4}
 
 
 def test_cached_verdict_still_hits_precedence(tmp_path: Path) -> None:
     """P6: кэшированный ``❌`` против высокой ``✅`` снова даёт pending-конфликт."""
     data = _data()
-    evaluator = _ScriptedEvaluator([_absent_output()])
+    evaluator = _ScriptedEvaluator([_absent_explicit()])
     cache = EvalVerdictCache(tmp_path / "cache")
     store = _RecordingStore()
     high = Cell(
@@ -684,8 +696,12 @@ def test_unresolved_run_never_writes_verdict(
     assert list((tmp_path / "cache").rglob("*.json")) == []
 
 
-def test_cached_unknown_still_requires_i3_protocol(tmp_path: Path) -> None:
-    """``❓`` кэшируется, но I3-проверка исчерпания выполняется downstream всегда."""
+def test_cached_unknown_carries_reason_and_satisfies_i3(tmp_path: Path) -> None:
+    """``❓`` кэшируется вместе с причиной незнания — и I3 выполняется без протокола.
+
+    Вариант 2: обоснование ``❓`` — причина в самой ячейке, а не перечень контуров поиска.
+    Кэш обязан хранить её (иначе хит терял бы обоснование вердикта).
+    """
     data = _data()
     evaluator = _ScriptedEvaluator([_unknown_output()])
     cache = EvalVerdictCache(tmp_path / "cache")
@@ -696,6 +712,7 @@ def test_cached_unknown_still_requires_i3_protocol(tmp_path: Path) -> None:
     assert len(evaluator.calls) == 1  # ❓ — легитимный вердикт, хит
     assert second.cell.status is Status.UNKNOWN
     assert second.cell.model_dump_json() == first.cell.model_dump_json()
+    assert second.cell.evidence_scope is not None
+    assert (second.cell.evidence_scope.reason or "").strip()
 
-    violations = check_unknown_exhaustion(second.cell, None)
-    assert violations and violations[0].code == "I3"
+    assert check_unknown_exhaustion(second.cell, None) == []

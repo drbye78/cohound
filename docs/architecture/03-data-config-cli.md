@@ -420,6 +420,9 @@ settings_provenance:            # A3: default|measured (+ experiment_id при m
 gates:                          # опц.: политика G3/G4; процесс, НЕ условие измерения (не в run_id)
   g3: external                  # external (дефолт) | waived
   g4: external
+serp:                           # опц.: SERP-контур (I3/§5); ВХОДИТ в контракт (serp_rounds) ⇒ run_id
+  rounds: 0                     # число раундов внешнего поиска до дренажа корпуса (0 — выключен)
+  budget: 5                     # обязателен при rounds > 0: запросов на продукт на раунд
 crawl:                          # §3.2/D4: дефолты оси стратегии краула и politeness-пейсинга
   strategy: auto                # auto | honest | hybrid (как используется браузер)
   rate_limit: {min_s: 1.0, max_s: 3.0}   # опц.: uniform(min_s, max_s) между запросами (per-host)
@@ -458,6 +461,50 @@ preliminary не совместим с capability_ranked — I13). `ranking_poli
 `llm_scenarios`). `methodology_version` входит в контракт, но `run_id`-материал напрямую не
 содержит: он свёрнут в `execution_contract_digest`. Секция `gates` — **процесс**, не условие
 измерения: `run_id` от неё не зависит (§13).
+
+#### D.1.0. SERP-контур: внешний поиск как источник документов корпуса (I3/§5)
+
+Секция `serp` включает **второй проход по объявленным хостам**: фаза корпуса (Ш5) до
+дренажа выпускает запросы «каталог + имя продукта» во внешний поиск, допускает
+найденные URL по правилам scope/блэклиста и ставит их depth-0 seed'ами **уже
+объявленных** корней. Новых корней и новых продуктов поиск не заводит: иначе
+`seeds_declared`, `max_documents` и само число корней описывали бы результат
+ранжирования провайдера (A2/I16). Найденный документ проходит обычный путь
+`corpus_raw → hash → index` (I19), поэтому отдельной фазы в `PHASES` нет.
+
+**Три уровня переключения** (приоритет сверху вниз, первый задавший побеждает):
+
+| Уровень | Ключ | Провенанс |
+|---|---|---|
+| CLI | `--serp-rounds N` | `source: cli` |
+| окружение | `COHOUND_SERP=N` (или `off`/`0`) | `source: env` |
+| вход прогона | `run.yaml: serp.rounds` | `source: run.yaml` |
+| профиль | `deploy.yaml: search.serp.rounds` | `source: deploy.yaml` |
+| дефолт | `0` (выключен) | `source: default` |
+
+Наблюдённые раунды входят в `EXECUTION_CONTRACT_FIELDS` (`serp_rounds`): раунд меняет
+состав корпуса, то есть условие измерения, поэтому его смена — `execution_change`
+(новый `run_id`), а не правка текущего прогона. Уровень-источник пишется в провенанс
+(`rounds.source`), чтобы «поиск не работал» было отличимо от «поиск не объявлен».
+
+**Бюджет — один.** `serp.budget` (запросов на продукт на раунд) объявляется **только** во
+входе прогона: он определяет, сколько запросов реально уйдёт, то есть стоимость и состав
+корпуса. `rounds > 0` без `budget` — отказ `EXIT_USAGE` (код `serp`), а не молчаливый
+безлимит (прежний `search.budget: {ru: …, en: …}` удалён: он ключевался по языку, тогда
+как потребитель (`SearchBudget`) ключуется по фазе, и не ограничивал ничего).
+
+**Видимый отказ вместо тихого пропуска.** Если раунды объявлены, а адаптер внешнего поиска
+не собран (нет провайдера/ключа) — фаза пишет ошибку `serp: объявлены раунды, но адаптер
+внешнего поиска не подключён`, а провенанс контура несёт `unavailable_reason: no_adapter`.
+Выключенный контур тоже пишет наблюдение (`enabled: false`, `rounds.source`) — отсутствие
+записи было бы неотличимо от «контур был, но ничего не нашёл».
+
+**Что видно в прогоне.** Наблюдение контура (`rounds`/`budget`/`queries`/`candidates`/
+`accepted`/`rejected`/`termination`/`ingest`) пишется в провенанс сеанса краула
+(`crawl_sessions.provenance_json`, ключ `serp`), сводка — в
+`runs.search_effort_budget_json` (колонка читалась отчётом, но до этого не писалась).
+`ingest` отделяет «нашли» от «вошло в корпус»: принятый кандидат может быть зачёркнут
+блэклистом или не поместиться в `max_documents` корня.
 
 #### D.1.1. Спуск в контейнеры (`crawl.archive_*`, P6/B3)
 
@@ -810,12 +857,15 @@ edge:
   audit: { sink: file, target: "…" }   # SIEM-экспорт; sink: file | syslog (одно значение)
 extractor_zone: edge           # edge | core | separate
 search:
-  budget: { ru: 5, en: 5 }      # симметрия I16
   adapter: yandex               # провайдер поиска по умолчанию (Yandex Search API)
   # режим Yandex `async` (дефолт) | `sync` — env YANDEX_SEARCH_MODE (§D.6), не поле YAML
   by_language:                  # переопределение по языку (география-прокси, I16)
     ru: yandex
     en: glm
+  serp:                         # нейтральный дефолт SERP-контура (§D.1.0)
+    rounds: 0                   # низший уровень переключения; 0 — контур выключен.
+                                # Бюджета здесь НЕТ: он объявляется в run.yaml (serp.budget),
+                                # потому что определяет число запросов и состав корпуса.
 crawl:                         # операционная политика HTTP-краулинга корпуса (local|split)
   user_agent: "coHound-crawler/0.1"   # None → дефолт HttpCrawler
   timeout_s: 30                # None → дефолт HttpCrawler (30 с)
@@ -945,7 +995,8 @@ cpu_count)` — `peak` замерен по уровням (`text` 855 MB, `layou
 дефолт `yandex`. Маршрут — **функция от языка**, а не от продукта: один и тот же язык
 даёт один и тот же провайдер для всех продуктов цикла, поэтому симметричный протокол
 **I16** сохраняется, а дифференциация по географии реализуется через каноничную ось
-`lang` (`SearchQuery.lang`, `search_log.language`, бюджет по языкам §7.2). Решение
+`lang` (`SearchQuery.lang`, `search_log.language`; бюджет поиска — один, объявляется входом
+прогона `serp.budget`, см. §D.1.0). Решение
 вычисляется по правилу, а не LLM (**дух I21**). Имена провайдеров — свободные строки-данные:
 config-слой не импортирует `cli.wiring`; валидация против `SUPPORTED_SEARCH_ADAPTERS` —
 в composition root, неизвестный провайдер отвергается с понятной ошибкой (I19: кандидаты
@@ -983,6 +1034,7 @@ edge** (composition root Z1, `07` §4/§7); ядро ходит за канди�
 | `COHOUND_LLM_TIMEOUT` | таймаут LLM-запроса, с (>0) | опц. | `120.0` | `wiring.build_discovery_llm`/`build_evaluator_llm` (операционный параметр хоста) |
 | `COHOUND_LLM_MAX_TOKENS` | максимум токенов ответа (>0) | опц. | `4096` | `wiring.build_discovery_llm` |
 | `COHOUND_MEM_BUDGET_MB` | явный бюджет памяти прогона для экстракции, MB (>0) | опц. | `MemAvailable − 512 MB` | `core/pipeline/resources.resolve_mem_budget_mb` через composition root (`wiring`); из бюджета выводится окно экстракции `floor((бюджет − 500) / пик уровня)`. **Не входит в `run_id`**: число воркеров — расписание, а не условие измерения (11 §2.10) |
+| `COHOUND_SERP` | раунды SERP-контура: целое `N ≥ 0` либо `off`/`0` | опц. | — (уровень ниже: `run.yaml: serp.rounds` → `deploy.search.serp.rounds` → 0) | `cli.execution_axes._serp_axis` (раунды → `serp_rounds` контракта ⇒ `run_id`) и фаза корпуса; расхождение с объявленным входом видно в `warnings` прогона (`wiring.serp_env_notices`), как у `COHOUND_LLM_*` |
 | `COHOUND_SCOUT_CRAWLER` | краулер `passport-scout`: `http`\|`scrapy`\|`browser` | опц. | `http` | `wiring.build_scout_crawler` |
 | `COHOUND_NO_REEXEC` | отключить автоперезапуск `hound.py` в проектной `.venv` | опц. | — | `hound.py` |
 | `COHOUND_REEXEC` | предохранитель от зацикливания перезапуска (ставит `hound.py`) | служебная | — | `hound.py` |

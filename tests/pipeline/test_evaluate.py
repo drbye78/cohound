@@ -20,6 +20,8 @@ from core.domain import (
     Cell,
     CellState,
     CorpusCoverage,
+    DenialStrength,
+    EvidenceScope,
     Importance,
     LLMCellOutput,
     LLMEvidence,
@@ -28,6 +30,7 @@ from core.domain import (
     SourceScope,
     Status,
     check_cell,
+    check_unknown_exhaustion,
 )
 from core.pipeline.evaluate import (
     ABSENCE_UNATTESTED_REVIEW_REASON,
@@ -140,7 +143,7 @@ def _evaluate(  # noqa: ANN001 - тестовый helper
     retrievals=None,
     min_retrieval_score: float | None = None,
     coverage=None,
-    scope_attested_by: str | None = None,
+    scope_acceptance: str | None = None,
     param=None,
 ):
     return evaluate_cell(
@@ -155,7 +158,7 @@ def _evaluate(  # noqa: ANN001 - тестовый helper
         retrievals=retrievals,
         min_retrieval_score=min_retrieval_score,
         coverage=coverage,
-        scope_attested_by=scope_attested_by,
+        scope_acceptance=scope_acceptance,
     )
 
 
@@ -281,17 +284,32 @@ def test_store_persists_cell_and_evidence() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Ф0: покрытие корпуса гейтит ❌ (I2c)
+# Вариант 2: сила отрицания вместо булева «исчерпан ли охват»
 # ---------------------------------------------------------------------------
 
 
 def _absent_output() -> LLMCellOutput:
-    """ABSENT без цитат: отсутствие подтверждается протоколом над срезом."""
+    """ABSENT **без цитаты**: модель сказала «нет», ничем это не подтвердив.
+
+    Раньше такой ответ публиковался как ``❌``. Именно он дал ложные «нет» в живом
+    контроле («вендор не сказал дословно» ≠ «вендор не заявил»), поэтому теперь это
+    ``not_stated`` → ``❓``.
+    """
     return LLMCellOutput(
         status=Status.ABSENT,
         justification="Свойство не найдено в переданном срезе.",
         evidence=[],
     )
+
+
+def _absent_explicit() -> LLMCellOutput:
+    """ABSENT **с цитатой прямого отрицания**: единственный законный путь к ``❌``."""
+    return LLMCellOutput(**(_data()["absent_explicit_output"]))
+
+
+def _absent_not_stated_with_relevant_chunk() -> LLMCellOutput:
+    """Живой регресс: материал релевантен, но дословного утверждения нет."""
+    return LLMCellOutput(**(_data()["absent_not_stated_output"]))
 
 
 def _coverage(*, complete: bool, blocked: dict[str, int] | None = None) -> CorpusCoverage:
@@ -309,171 +327,176 @@ def _coverage(*, complete: bool, blocked: dict[str, int] | None = None) -> Corpu
     )
 
 
-def test_absence_evidence_record_carries_run_composition() -> None:
-    """Синтетическая absence-запись (без чанка) привязана к композиции прогона (R7)."""
+def test_explicit_denial_publishes_absent_with_class_and_citation() -> None:
+    """``❌`` публикуется, когда есть прямое отрицание с цитатой — и видна его сила."""
     data = _data()
-    evaluator = _ScriptedEvaluator([_absent_output()])
-    retrievals = RetrievalResult(
-        chunks=[], profile="R2", cutoff_K=5, build_id="cb_run"
-    )
-    outcome = _evaluate(data, evaluator, retrievals=retrievals)
+    outcome = _evaluate(data, _ScriptedEvaluator([_absent_explicit()]))
 
     assert outcome.cell.status is Status.ABSENT
-    synthetic = outcome.cell.absence_evidence[0]
-    assert synthetic["source_id"] is None
-    assert synthetic["index_build_id"] == "cb_run"
+    assert outcome.cell.state is CellState.EVALUATED
+    scope = outcome.cell.evidence_scope
+    assert scope is not None
+    assert scope.denial_strength is DenialStrength.EXPLICIT
+    assert scope.citation_quote and "не поддерживается" in scope.citation_quote
+    assert check_cell(outcome.cell) == []
 
 
-def test_incomplete_corpus_absence_becomes_pending_candidate() -> None:
-    """Ф0: заблокированный источник + ABSENT → pending, а не ❌ (I2c)."""
+def test_explicit_claim_without_citation_is_refused_and_becomes_unknown() -> None:
+    """``explicit`` без цитаты — отказ: вердикт понижается до ``❓``, не до ``❌``."""
     data = _data()
-    evaluator = _ScriptedEvaluator([_absent_output()])
-    store = _RecordingStore()
-    coverage = _coverage(complete=False, blocked={"robots_disallow": 4})
-
-    outcome = _evaluate(data, evaluator, store=store, coverage=coverage)
-
-    assert outcome.cell.state is CellState.PENDING
-    assert outcome.cell.status is Status.ABSENT  # предложенный, не опубликованный
-    assert outcome.cell.review_reason == "corpus_incomplete_absence"
-    assert outcome.cell.reviewed_by is None  # I6/I7: решает человек
-    assert store.cells == [outcome.cell]
-    audit = [
-        entry
-        for entry in outcome.cell.absence_evidence
-        if entry.get("corpus_complete") is False
-    ]
-    assert audit and audit[0]["corpus_blocked"] == {"robots_disallow": 4}
-    assert audit[0]["corpus_blocking_failures"] == {"robots_disallow": 4}
-    assert "robots_disallow" in audit[0]["note"]
-    assert audit[0]["corpus_observed_sources"] == 2
-
-
-def test_incomplete_corpus_with_human_attestation_keeps_absent_and_records_counts() -> None:
-    """Ф0: человек принял риск (scope_attested_by) — ❌ остаётся, счётчики в evidence."""
-    data = _data()
-    evaluator = _ScriptedEvaluator([_absent_output()])
-    coverage = _coverage(complete=False, blocked={"robots_disallow": 4})
-
     outcome = _evaluate(
         data,
-        evaluator,
-        coverage=coverage,
-        scope_attested_by="human-reviewer",
+        _ScriptedEvaluator([LLMCellOutput(**data["absent_claim_without_citation_output"])]),
+    )
+
+    assert outcome.cell.status is Status.UNKNOWN
+    assert outcome.cell.status is not Status.ABSENT
+    scope = outcome.cell.evidence_scope
+    assert scope is not None
+    assert scope.denial_strength is DenialStrength.NOT_STATED
+    assert "explicit_without_citation" in (scope.reason or "")
+    assert any("explicit" in note for note in outcome.validation.notes)
+    assert outcome.cell.absence_evidence == []
+
+
+def test_not_stated_with_relevant_chunk_is_unknown_not_absent() -> None:
+    """Регресс-тест живого ложного «нет»: релевантный фрагмент без дословности — ``❓``.
+
+    Живой контроль: 2 из 12 ячеек получали «отсутствует» там, где вендор заявил свойство
+    (не дословно). Здесь ровно этот вход: цитата подтверждённого фрагмента есть, но она
+    **не** отрицание. ``❌`` запрещён, статус — ``❓`` с причиной.
+    """
+    data = _data()
+    outcome = _evaluate(data, _ScriptedEvaluator([_absent_not_stated_with_relevant_chunk()]))
+
+    assert outcome.cell.status is Status.UNKNOWN
+    scope = outcome.cell.evidence_scope
+    assert scope is not None
+    assert scope.denial_strength is DenialStrength.NOT_STATED
+    assert scope.reason
+    assert check_cell(outcome.cell) == []
+    assert check_unknown_exhaustion(outcome.cell, None) == []
+
+
+def test_unknown_output_carries_reason_and_coverage_vector() -> None:
+    """``❓`` несёт причину и вектор охвата; доля названа мерой URL."""
+    data = _data()
+    outcome = _evaluate(
+        data,
+        _ScriptedEvaluator([LLMCellOutput(**data["unknown_output"])]),
+        coverage=_coverage(complete=False, blocked={"robots_disallow": 2}),
+    )
+
+    assert outcome.cell.status is Status.UNKNOWN
+    scope = outcome.cell.evidence_scope
+    assert scope is not None
+    assert scope.denial_strength is DenialStrength.UNOBSERVED  # охват неполон ⇒ код решает
+    assert "corpus_incomplete_absence" in (scope.reason or "")
+    assert scope.observed == 4 and scope.expected == 6
+    assert scope.blocked_by_reason == {"robots_disallow": 2}
+    assert scope.url_observation_ratio == pytest.approx(4 / 6)
+
+
+def test_complete_corpus_unknown_is_not_stated() -> None:
+    """Полный охват, но вендор не заявил — ``not_stated``, а не ``unobserved``."""
+    data = _data()
+    outcome = _evaluate(
+        data,
+        _ScriptedEvaluator([LLMCellOutput(**data["unknown_output"])]),
+        coverage=_coverage(complete=True),
+    )
+    assert outcome.cell.evidence_scope is not None
+    assert outcome.cell.evidence_scope.denial_strength is DenialStrength.NOT_STATED
+
+
+def test_bounded_requires_scope_acceptance_and_publishes_absent() -> None:
+    """Конечный справочник + принятие риска ⇒ ``bounded`` ⇒ ``❌``."""
+    data = _data()
+    outcome = _evaluate(
+        data,
+        _ScriptedEvaluator([_absent_output()]),
+        param=_distribution_param(data),
+        scope_acceptance="Roger",
+    )
+
+    assert outcome.cell.status is Status.ABSENT
+    scope = outcome.cell.evidence_scope
+    assert scope is not None
+    assert scope.denial_strength is DenialStrength.BOUNDED
+    assert scope.scope_acceptance == "Roger"
+    assert scope.enumerated is True
+    assert check_cell(outcome.cell) == []
+    protocol = [
+        entry
+        for entry in outcome.cell.absence_evidence
+        if entry.get("evidence_type") == "absence"
+    ]
+    assert protocol and protocol[0]["scope_acceptance"] == "Roger"
+    assert protocol[0]["denial_strength"] == "bounded"
+
+
+@pytest.mark.parametrize("acceptance", [None, ""], ids=["no_acceptance", "empty"])
+def test_bounded_without_acceptance_becomes_unknown(acceptance) -> None:  # noqa: ANN001
+    """Без принятия риска ``bounded`` недостижим: ``❓`` с причиной, а не ``❌`` и не ``failed``."""
+    data = _data()
+    outcome = _evaluate(
+        data,
+        _ScriptedEvaluator([_absent_output()]),
+        param=_distribution_param(data),
+        scope_acceptance=acceptance,
     )
 
     assert outcome.cell.state is CellState.EVALUATED
-    assert outcome.cell.status is Status.ABSENT
-    assert outcome.cell.review_reason is None
-    audit = [
-        entry
-        for entry in outcome.cell.absence_evidence
-        if entry.get("corpus_complete") is False
-    ]
-    assert audit and audit[0]["corpus_blocked"] == {"robots_disallow": 4}
-    assert audit[0]["scope_attested_by"] == "human-reviewer"
+    assert outcome.cell.status is Status.UNKNOWN
+    assert outcome.failure_kind is None
+    scope = outcome.cell.evidence_scope
+    assert scope is not None
+    assert scope.denial_strength is DenialStrength.NOT_STATED
+    assert ABSENCE_UNATTESTED_REVIEW_REASON in (scope.reason or "")
 
-def _unreadable_origin_coverage() -> CorpusCoverage:
-    """Покрытие с полностью закрытым origin'ом (origin-уровневый порог Ф0)."""
-    return CorpusCoverage(
-        product_id="p1",
-        complete=False,
-        expected_sources=2,
-        observed_sources=1,
-        blocked={"robots_disallow": 1},
-        unreadable_origins=["closed.example"],
-        partial_blocks={"closed.example": {"robots_disallow": 1}},
-        truncated=False,
-        computed_at="2026-01-01T00:00:00+00:00",
+
+def test_incomplete_corpus_does_not_cancel_explicit_denial() -> None:
+    """Неполный охват **не** отменяет прямое отрицание вендора: это свидетельство."""
+    data = _data()
+    outcome = _evaluate(
+        data,
+        _ScriptedEvaluator([_absent_explicit()]),
+        store=_RecordingStore(),
+        coverage=_coverage(complete=False, blocked={"robots_disallow": 4}),
     )
 
+    assert outcome.cell.status is Status.ABSENT
+    assert outcome.cell.state is CellState.EVALUATED
+    assert outcome.cell.evidence_scope is not None
+    assert outcome.cell.evidence_scope.denial_strength is DenialStrength.EXPLICIT
+    # Аудит блокировок корпуса остаётся видимым (отчёт/аудит), но вердикт от него не зависит.
+    audit = [e for e in outcome.cell.absence_evidence if e.get("corpus_complete") is False]
+    assert audit and audit[0]["corpus_blocked"] == {"robots_disallow": 4}
 
-def test_incomplete_corpus_pending_names_unreadable_origin() -> None:
-    """Ф0: pending-кандидат называет закрытый origin, а не только счётчик блокировок."""
+
+def test_absent_without_denial_is_unobserved_when_corpus_incomplete() -> None:
+    """Неполный охват + недоказанное «нет» ⇒ ``unobserved`` ⇒ ``❓`` (не ``❌``, не ``pending``)."""
     data = _data()
     store = _RecordingStore()
-
     outcome = _evaluate(
         data,
         _ScriptedEvaluator([_absent_output()]),
         store=store,
-        coverage=_unreadable_origin_coverage(),
-    )
-
-    assert outcome.cell.state is CellState.PENDING
-    assert outcome.cell.review_reason == "corpus_incomplete_absence"
-    audit = [
-        entry
-        for entry in outcome.cell.absence_evidence
-        if entry.get("corpus_complete") is False
-    ]
-    assert audit
-    assert audit[0]["corpus_unreadable_origins"] == ["closed.example"]
-    assert "closed.example" in audit[0]["note"]
-    assert audit[0]["corpus_partial_blocks"] == {
-        "closed.example": {"robots_disallow": 1}
-    }
-
-
-def test_unreadable_origin_with_human_attestation_keeps_absent() -> None:
-    """Ф0/I2c: человек аттестовал — ``❌`` остаётся, origin виден в evidence."""
-    data = _data()
-
-    outcome = _evaluate(
-        data,
-        _ScriptedEvaluator([_absent_output()]),
-        coverage=_unreadable_origin_coverage(),
-        scope_attested_by="human-reviewer",
+        coverage=_coverage(complete=False, blocked={"robots_disallow": 4}),
     )
 
     assert outcome.cell.state is CellState.EVALUATED
-    assert outcome.cell.status is Status.ABSENT
-    assert outcome.cell.review_reason is None
-    audit = [
-        entry
-        for entry in outcome.cell.absence_evidence
-        if entry.get("corpus_complete") is False
-    ]
-    assert audit
-    assert audit[0]["corpus_unreadable_origins"] == ["closed.example"]
-    assert audit[0]["scope_attested_by"] == "human-reviewer"
-
-
-def test_complete_corpus_absence_is_byte_identical_to_previous_behaviour() -> None:
-    """Ф0: полное покрытие не меняет ячейку — сравнение с исходом без coverage."""
-    data = _data()
-    baseline = _evaluate(data, _ScriptedEvaluator([_absent_output()]))
-    with_coverage = _evaluate(
-        data,
-        _ScriptedEvaluator([_absent_output()]),
-        coverage=_coverage(complete=True),
-    )
-
-    assert baseline.cell.state is CellState.EVALUATED
-    assert baseline.cell.status is Status.ABSENT
-    assert with_coverage.cell == baseline.cell
-    assert with_coverage.validation == baseline.validation
-    assert with_coverage.prompt_hash == baseline.prompt_hash
-
-
-def test_nonblocking_source_unavailable_does_not_gate_absent() -> None:
-    """Ф0/2.2.0: ``source_unavailable`` на читаемом origin'е не блокирует публикацию ❌."""
-    data = _data()
-    coverage = _coverage(complete=True, blocked={"source_unavailable": 1})
-
-    outcome = _evaluate(
-        data,
-        _ScriptedEvaluator([_absent_output()]),
-        coverage=coverage,
-    )
-
-    assert outcome.cell.state is CellState.EVALUATED
-    assert outcome.cell.status is Status.ABSENT
-    assert outcome.cell.review_reason is None
+    assert outcome.cell.status is Status.UNKNOWN
+    scope = outcome.cell.evidence_scope
+    assert scope is not None
+    assert scope.denial_strength is DenialStrength.UNOBSERVED
+    assert scope.blocked_by_reason == {"robots_disallow": 4}
+    assert store.cells == [outcome.cell]
+    assert store.absence == []  # протокол отсутствия пишется только для ❌
 
 
 def test_gate_reads_coverage_from_store_when_not_passed() -> None:
-    """Ф0: оценщик читает покрытие из store (путь фазы Ш6), не только из аргумента."""
+    """Путь фазы Ш6: покрытие читается из store и определяет класс отрицания."""
     data = _data()
     coverage = _coverage(complete=False, blocked={"robots_disallow": 4})
     store = _CoverageStore(coverage)
@@ -484,9 +507,44 @@ def test_gate_reads_coverage_from_store_when_not_passed() -> None:
         store=store,
     )
 
-    assert outcome.cell.state is CellState.PENDING
-    assert outcome.cell.review_reason == "corpus_incomplete_absence"
+    assert outcome.cell.status is Status.UNKNOWN
+    assert outcome.cell.evidence_scope is not None
+    assert outcome.cell.evidence_scope.denial_strength is DenialStrength.UNOBSERVED
     assert store.cells == [outcome.cell]
+
+
+def test_instrument_failure_is_failed_with_instrument_failed_class() -> None:
+    """Сбой прибора ⇒ ``failed`` + ``instrument_failed``; статуса нет (I4)."""
+    data = _data()
+    outcome = _evaluate(data, _ScriptedEvaluator([RuntimeError("адаптер недоступен")]))
+
+    assert outcome.cell.state is CellState.FAILED
+    assert outcome.cell.status is None
+    scope = outcome.cell.evidence_scope
+    assert scope is not None
+    assert scope.denial_strength is DenialStrength.INSTRUMENT_FAILED
+    assert "evaluation_failed" in (scope.reason or "")
+    assert check_cell(outcome.cell) == []
+
+
+def test_absence_record_id_is_deterministic_per_cell() -> None:
+    """Повторная оценка ячейки перезаписывает ту же строку, а не плодит новую (S8)."""
+    data = _data()
+    first = _evaluate(data, _ScriptedEvaluator([_absent_explicit()]))
+    second = _evaluate(data, _ScriptedEvaluator([_absent_explicit()]))
+
+    first_ids = [
+        entry.get("evidence_id")
+        for entry in first.cell.absence_evidence
+        if entry.get("evidence_type") == "absence"
+    ]
+    second_ids = [
+        entry.get("evidence_id")
+        for entry in second.cell.absence_evidence
+        if entry.get("evidence_type") == "absence"
+    ]
+    assert len(first_ids) == 1, "протокол отсутствия обязан быть ровно один"
+    assert first_ids == second_ids
 
 
 # ---------------------------------------------------------------------------
@@ -675,7 +733,7 @@ def test_evaluate_batch_isolates_failures(monkeypatch: pytest.MonkeyPatch) -> No
 
 
 # ---------------------------------------------------------------------------
-# Доступность ❌: аттестация охвата, absence-evidence и её персистенция
+# Доступность ❌: класс отрицания, absence-evidence и её персистенция
 # ---------------------------------------------------------------------------
 
 #: Цитата «ближайшего» фрагмента, где искомого свойства нет (естественное поведение модели).
@@ -684,11 +742,10 @@ _ABSENT_QUOTE = "Документ описывает экспорт данных
 
 
 def _absent_with_quote() -> LLMCellOutput:
-    """``❌`` **с цитатой**: модель процитировала фрагмент, в котором свойства нет.
+    """``❌`` **с цитатой неотрицающего фрагмента** — это ``not_stated``, а не ``explicit``.
 
-    Это не вырожденный случай, а самый частый: модель выдаёт ближайший найденный текст.
-    До правки такая ячейка теряла подпись человека целиком — синтетическая запись-аттестация
-    создавалась только при ``if not absences``, поэтому I2b не выполнялся никогда.
+    Самый частый ответ модели: «искал, нашёл смежный текст, свойства в нём нет». Цитата
+    подтверждает наблюдение, но не отрицание вендора, поэтому класс отрицания — слабый.
     """
     return LLMCellOutput(
         status=Status.ABSENT,
@@ -698,78 +755,72 @@ def _absent_with_quote() -> LLMCellOutput:
 
 
 def _distribution_param(data: dict) -> CatalogRow:
-    """Строка каталога с ``absence_rule=distribution_absence`` (требует аттестации, I2b)."""
+    """Строка каталога с ``absence_rule=distribution_absence`` (конечный справочник, I2b)."""
     return _param(data).model_copy(
         update={"absence_rule": AbsenceRuleType.DISTRIBUTION_ABSENCE}
     )
 
 
-@pytest.mark.parametrize(
-    "factory",
-    [_absent_output, _absent_with_quote],
-    ids=["without_quote", "with_quote"],
-)
-def test_attested_distribution_absence_is_reachable(factory) -> None:  # noqa: ANN001
-    """Подпись есть → ``❌`` публикуется, и подпись стоит на записи протокола (I2b).
+def test_explicit_denial_wins_over_rule_class() -> None:
+    """Прямое отрицание с цитатой даёт ``explicit`` даже на правиле конечного справочника.
 
-    Тест обязан падать на коде до правки: ``distribution_absence`` + ABSENT уходил в
-    ``failed`` при любом ответе модели (и с цитатой, и без), потому что ни одна
-    absence-запись не несла ``source_scope=exhaustive`` вместе с ``scope_attested_by``.
+    Принятие риска остаётся в силе, но сильнейший класс — свидетельство вендора, а не вывод
+    из полноты: подпись человека не должна повышать слабый класс до сильного.
     """
     data = _data()
     outcome = _evaluate(
         data,
-        _ScriptedEvaluator([factory()]),
+        _ScriptedEvaluator([_absent_explicit()]),
         param=_distribution_param(data),
-        scope_attested_by="Roger",
+        scope_acceptance="Roger",
     )
 
     assert outcome.cell.state is CellState.EVALUATED
     assert outcome.cell.status is Status.ABSENT
-    assert outcome.failure_kind is None
-    asserted = [
-        entry
-        for entry in outcome.cell.absence_evidence
-        if entry.get("source_scope") == SourceScope.EXHAUSTIVE.value
-        and entry.get("scope_attested_by") == "Roger"
-    ]
-    assert asserted, outcome.cell.absence_evidence
-    # Доменный валидатор I2b принимает ячейку (исключения нет).
+    scope = outcome.cell.evidence_scope
+    assert scope is not None
+    assert scope.denial_strength is DenialStrength.EXPLICIT
+    assert scope.basis == "evaluator:explicit"
     assert check_cell(outcome.cell) == []
-    assert not [note for note in outcome.validation.notes if "I2b" in note]
 
 
-@pytest.mark.parametrize("attestation", [None, ""], ids=["no_signature", "empty_signature"])
-def test_unattested_distribution_absence_is_pending_candidate_not_failed(
-    attestation,
-) -> None:  # noqa: ANN001
-    """Нет подписи → ``pending``-кандидат с видимой причиной, а **не** ``failed`` (I4).
-
-    Процедурное условие (нет человеческой аттестации охвата) — вопрос к человеку (I6/I7),
-    а не сбой прибора: ``failed`` сделал бы честное «нет» хуже незнания (I4).
-    """
+def test_quote_without_denial_is_not_stated_even_for_distribution_rule() -> None:
+    """Цитата неотрицающего фрагмента + конечный справочник без подписи ⇒ ``❓``."""
     data = _data()
     outcome = _evaluate(
         data,
-        _ScriptedEvaluator([_absent_output()]),
+        _ScriptedEvaluator([_absent_with_quote()]),
         param=_distribution_param(data),
-        scope_attested_by=attestation,
     )
 
-    assert outcome.cell.state is CellState.PENDING
-    assert outcome.cell.state is not CellState.FAILED
-    assert outcome.cell.status is None
-    assert outcome.cell.review_reason == ABSENCE_UNATTESTED_REVIEW_REASON
-    assert outcome.cell.reviewed_by is None  # I6/I7: решает человек
-    assert outcome.failure_kind is None
-    # Протокол отсутствия сохранён в ячейке: ревью видит, что искали.
-    assert outcome.cell.absence_evidence
-    assert any("I2b" in note for note in outcome.validation.notes)
+    assert outcome.cell.state is CellState.EVALUATED
+    assert outcome.cell.status is Status.UNKNOWN
+    scope = outcome.cell.evidence_scope
+    assert scope is not None
+    assert scope.denial_strength is DenialStrength.NOT_STATED
+    assert ABSENCE_UNATTESTED_REVIEW_REASON in (scope.reason or "")
 
 
-def test_i2b_is_not_weakened_for_distribution_absence() -> None:
-    """I2b остаётся прежним: без ``exhaustive`` на одной записи ``❌`` недопустим."""
-    with pytest.raises(ValueError, match="I2b"):
+def test_legacy_alias_scope_attested_by_still_accepted() -> None:
+    """Прежнее имя аргумента читается как принятие риска (совместимость вызовов)."""
+    data = _data()
+    outcome = evaluate_cell(
+        param=_distribution_param(data),
+        product_id=data["product_id"],
+        run_id=data["run_id"],
+        evaluator=_ScriptedEvaluator([_absent_output()]),
+        chunks=_chunks(data),
+        scope_attested_by="Roger",
+    )
+
+    assert outcome.cell.status is Status.ABSENT
+    assert outcome.cell.evidence_scope is not None
+    assert outcome.cell.evidence_scope.scope_acceptance == "Roger"
+
+
+def test_i2b_absent_without_scope_cannot_be_constructed() -> None:
+    """Доменный валидатор: ``❌`` без класса отрицания не собирается (I2)."""
+    with pytest.raises(ValueError, match="I2"):
         Cell(
             run_id="run_eval_1",
             product_id="p1",
@@ -782,14 +833,13 @@ def test_i2b_is_not_weakened_for_distribution_absence() -> None:
                     "evidence_id": "ev_absence",
                     "source_id": None,
                     "source_scope": SourceScope.PARTIAL.value,
-                    "scope_attested_by": "Roger",
                 }
             ],
         )
 
 
-def test_persist_writes_absence_evidence_with_attestation() -> None:
-    """``_persist`` пишет протокол отсутствия (R4), а не только цитаты модели.
+def test_persist_writes_absence_evidence_with_acceptance() -> None:
+    """``_persist`` пишет протокол отсутствия (R4) с классом и подписью, а не только цитаты.
 
     До правки ``_persist`` писал исключительно ``validation.resolved_evidence``, поэтому
     absence-запись не попадала в store никогда — ``❌`` существовал лишь в памяти процесса.
@@ -799,38 +849,21 @@ def test_persist_writes_absence_evidence_with_attestation() -> None:
     outcome = _evaluate(
         data,
         _ScriptedEvaluator([_absent_output()]),
+        param=_distribution_param(data),
         store=store,
-        scope_attested_by="Roger",
+        scope_acceptance="Roger",
     )
 
     assert outcome.cell.status is Status.ABSENT
     assert store.absence, "absence-evidence не записан в store"
     record = store.absence[0]
     assert record["evidence_type"] == "absence"
-    assert record["source_scope"] == SourceScope.EXHAUSTIVE.value
-    assert record["scope_attested_by"] == "Roger"
+    assert record["scope_acceptance"] == "Roger"
+    # Класс отрицания — в объекте ячейки; протокол несёт подпись и вид доказательства.
+    assert outcome.cell.evidence_scope is not None
+    assert outcome.cell.evidence_scope.denial_strength is DenialStrength.BOUNDED
     # PK не NULL и не пуст: синтетическая запись получает детерминированный id.
     assert record["evidence_id"]
     assert record["run_id"] == data["run_id"]
     assert record["product_id"] == data["product_id"]
     assert record["param_id"] == data["param"]["param_id"]
-
-
-def test_absence_record_id_is_deterministic_per_cell() -> None:
-    """Повторная оценка ячейки перезаписывает ту же строку, а не плодит новую (S8)."""
-    data = _data()
-    first = _evaluate(data, _ScriptedEvaluator([_absent_output()]))
-    second = _evaluate(data, _ScriptedEvaluator([_absent_with_quote()]))
-
-    first_ids = [
-        entry.get("evidence_id")
-        for entry in first.cell.absence_evidence
-        if entry.get("evidence_type") == "absence"
-    ]
-    second_ids = [
-        entry.get("evidence_id")
-        for entry in second.cell.absence_evidence
-        if entry.get("evidence_type") == "absence"
-    ]
-    assert len(first_ids) == 1, "протокол отсутствия обязан быть ровно один"
-    assert first_ids == second_ids

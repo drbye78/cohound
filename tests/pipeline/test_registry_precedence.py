@@ -30,6 +30,9 @@ from core.domain import (
     EvidenceType,
     Focus,
     InheritanceMode,
+    DenialClaim,
+    DenialStrength,
+    EvidenceScope,
     LLMCellOutput,
     LLMEvidence,
     Passport,
@@ -189,10 +192,19 @@ def _ok_output() -> LLMCellOutput:
 
 
 def _absent_output() -> LLMCellOutput:
+    """``❌`` **с объявленным** прямым отрицанием: единственный путь к публикуемому «нет».
+
+    Вариант 2: ответ «не подтверждает» без класса силы отрицания даёт ``❓``, поэтому для
+    проверки механизма прецедента нужен настоящий ``❌`` (иначе конфликта нет вовсе).
+    """
     return LLMCellOutput(
         status=Status.ABSENT,
-        justification="корпус не подтверждает",
-        evidence=[LLMEvidence(source_id="chunk_1", quote="neutral corpus evidence")],
+        justification="документация прямо отрицает поддержку",
+        evidence=[
+            LLMEvidence(source_id="chunk_1", quote="neutral corpus evidence")
+        ],
+        denial_strength=DenialClaim.EXPLICIT,
+        denial_reason="прямое отрицание в документации",
     )
 
 
@@ -446,7 +458,10 @@ def test_store_guard_rejects_silent_downgrade(store: SqliteStore) -> None:
         state=CellState.EVALUATED,
         status=Status.ABSENT,
         source_kind=SourceKind.DOCUMENTATION,
-        absence_evidence=[{"source_scope": SourceScope.PARTIAL.value}],
+        evidence_scope=EvidenceScope(
+            denial_strength=DenialStrength.EXPLICIT,
+            citation_quote="neutral corpus evidence",
+        ),
     )
     with pytest.raises(ValueError, match="прецедент источника"):
         store.save_cell(downgrade)

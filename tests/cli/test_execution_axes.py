@@ -25,6 +25,8 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+import yaml
+from pydantic import ValidationError
 
 import core.cli.commands.crawl as crawl_mod
 import core.cli.commands.plan as plan_mod
@@ -125,7 +127,9 @@ def test_declared_axes_are_deterministic(tmp_path: Path) -> None:
     assert first.extractor_stack.startswith(
         "trafilatura-html-2+docling-doc-3/docling-"
     )
-    # Девять объявленных осей — ровно по списку §13; наблюдаемых здесь нет.
+    # Десять объявленных осей — ровно по списку §13 (+ ``serp_rounds``: раунд внешнего
+    # поиска меняет состав корпуса, то есть условие измерения); наблюдаемых здесь нет.
+    # ``serp_source`` — провенанс («какой уровень включил контур»), не измерение.
     assert {field.name for field in dataclasses.fields(first)} == {
         "crawl_strategy",
         "crawl_rate_limit",
@@ -136,7 +140,66 @@ def test_declared_axes_are_deterministic(tmp_path: Path) -> None:
         "chunker_version",
         "llm_scenarios",
         "extractor_stack",
+        "serp_rounds",
+        "serp_source",
     }
+
+
+def _with_serp(package: Path, *, rounds: int | None, budget: int | None) -> Path:
+    """Дописывает секцию ``serp`` в ``run.yaml`` пакета (вход прогона)."""
+    run_yaml = package / "run.yaml"
+    data = yaml.safe_load(run_yaml.read_text(encoding="utf-8"))
+    section: dict[str, Any] = {}
+    if rounds is not None:
+        section["rounds"] = rounds
+    if budget is not None:
+        section["budget"] = budget
+    data["serp"] = section
+    run_yaml.write_text(yaml.safe_dump(data, allow_unicode=True, sort_keys=False), encoding="utf-8")
+    return package
+
+
+def test_serp_axis_reads_run_yaml_and_names_its_source(tmp_path: Path) -> None:
+    """``serp.rounds`` из ``run.yaml`` — ось контракта; уровень-источник назван."""
+    package = _with_serp(_package(tmp_path), rounds=2, budget=5)
+    axes = _resolve(package)
+    assert axes.serp_rounds == 2
+    assert axes.serp_source == "run.yaml"
+
+
+def test_serp_axis_cli_overrides_run_yaml(tmp_path: Path) -> None:
+    """``--serp-rounds`` сильнее ``run.yaml`` (и это видно по источнику)."""
+    package = _with_serp(_package(tmp_path), rounds=0, budget=5)
+    args = SimpleNamespace(
+        package=str(package), llm_slot=None, llm_model=None, serp_rounds=3
+    )
+    axes = _resolve(package, args=args)
+    assert axes.serp_rounds == 3 and axes.serp_source == "cli"
+
+
+def test_serp_axis_requires_declared_budget(tmp_path: Path) -> None:
+    """``rounds > 0`` без ``serp.budget`` — отказ, а не молчаливый безлимит.
+
+    Два слоя одной политики: схема ``run.yaml`` (:class:`SerpRunConfig`) отвергает такую
+    комбинацию при загрузке входа, а резолвер осей — при прямом вызове (DI/тесты), где
+    схема обойдена. Бюджет определяет число ушедших запросов, то есть стоимость и состав
+    корпуса: молчаливый безлимит был бы невидимым изменением условий измерения.
+    """
+    package = _with_serp(_package(tmp_path), rounds=1, budget=None)
+    with pytest.raises(ValidationError) as excinfo:
+        _inputs(package)
+    assert "budget" in str(excinfo.value)
+
+    serp = SimpleNamespace(rounds=1, budget=None)
+    run = SimpleNamespace(serp=serp)
+    with pytest.raises(CliError) as cli_error:
+        execution_axes._serp_axis(  # noqa: SLF001 — гвард проверяется напрямую
+            args=SimpleNamespace(serp_rounds=None),
+            run=run,
+            deploy=DeployConfig(),
+        )
+    assert cli_error.value.code == "serp"
+    assert cli_error.value.exit_code != 0
 
 
 def test_chunker_version_is_a_composite_of_both_chunkers(tmp_path: Path) -> None:
@@ -482,6 +545,8 @@ def test_build_manifest_takes_declared_axes(tmp_path: Path) -> None:
         crawl_strategy="honest",
         crawl_rate_limit="uniform(min=1.0,max=2.0)",
         crawl_config_digest="crawl-dig",
+        serp_rounds=2,
+        serp_source="run.yaml",
         registry_spec_digest="reg-dig",
         deploy_profile="split",
         edge_schema_version="9.9.9",

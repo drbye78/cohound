@@ -20,6 +20,7 @@ import datetime as _dt
 import json
 from collections.abc import Iterator
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -42,6 +43,8 @@ from core.pipeline.corpus import IndexBuild
 from core.pipeline.search_log import SearchBudget, SearchEffort
 from core.pipeline.serp_loop import (
     ImmutableBuildError,
+    assign_serp_seeds,
+    build_serp_queries,
     SerpLoopResult,
     SerpLoopStoreGap,
     assert_build_id_new,
@@ -593,3 +596,80 @@ def test_module_does_not_import_adapters() -> None:
         if line.strip().startswith(("import ", "from "))
     ]
     assert all("core.adapters" not in line for line in imports)
+
+
+# --------------------------------------------------------------------------- #
+# Раскладка находок по объявленным корням (не «новый корень на находку»)
+# --------------------------------------------------------------------------- #
+
+
+def test_assign_serp_seeds_uses_the_covering_root() -> None:
+    """Находка принадлежит корню, чей host и path-prefix её покрывают.
+
+    Найденный документ входит seed'ом **своего** корня: иначе ``seeds_declared`` и
+    ``max_documents`` описывали бы результат поиска, то есть зависели бы от ранжирования
+    провайдера (A2/I16).
+    """
+    assigned = assign_serp_seeds(
+        found_by_product={
+            "p1": [
+                "https://example.com/docs/guide.html",
+                "https://example.com/other/page.html",
+            ]
+        },
+        roots_by_product={"p1": ["https://example.com/", "https://example.com/docs/"]},
+    )
+    assert assigned == {
+        "p1": {
+            "https://example.com/": ["https://example.com/other/page.html"],
+            "https://example.com/docs/": ["https://example.com/docs/guide.html"],
+        }
+    }
+
+
+def test_assign_serp_seeds_path_prefix_holds_segment_boundary() -> None:
+    """``/docs`` не покрывает ``/docsx``: граница сегмента, а не префикс строки."""
+    assigned = assign_serp_seeds(
+        found_by_product={"p1": ["https://example.com/docsx/page.html"]},
+        roots_by_product={"p1": ["https://example.com/", "https://example.com/docs"]},
+    )
+    assert assigned == {"p1": {"https://example.com/": ["https://example.com/docsx/page.html"]}}
+
+
+def test_assign_serp_seeds_foreign_declared_host_falls_back_to_first_root() -> None:
+    """Находка на объявленном, но не своём корне — на первый корень (бюджет виден).
+
+    Кандидат уже прошёл допуск по объявленным хостам; здесь важно лишь, что он не
+    становится отдельным корнем: бюджет платит названный корень, и frontier фиксирует
+    это как ``accepted_foreign_hosts``.
+    """
+    assigned = assign_serp_seeds(
+        found_by_product={"p1": ["https://docs.example.com/x.html"]},
+        roots_by_product={"p1": ["https://example.com/a/", "https://example.com/b/"]},
+    )
+    assert assigned == {"p1": {"https://example.com/a/": ["https://docs.example.com/x.html"]}}
+
+
+def test_assign_serp_seeds_ignores_products_without_roots_or_finds() -> None:
+    """Продукт без авторских корней поиском не заводится; пустые списки опускаются."""
+    assert assign_serp_seeds({"p1": ["https://example.com/a"]}, {}) == {}
+    assert assign_serp_seeds({"p1": []}, {"p1": ["https://example.com/"]}) == {}
+
+
+def test_build_serp_queries_appends_product_name() -> None:
+    """Запрос контура = заголовок параметра **+ имя продукта** (решение по замеру).
+
+    Без имени внешний поиск ищет по всему интернету: замер на остатке ``❓`` дал 27/63
+    попаданий без имени против 45/63 с ним. Имя берётся из паспорта, а не из
+    ``product_id``: «потоковая репликация» без бренда приносит чужие продукты.
+    """
+    param = SimpleNamespace(title="Потоковая репликация", search_langs=["ru"])
+    queries = build_serp_queries(
+        products=["p1", "p2"],
+        params=[param],
+        product_names={"p1": "Example DB"},
+        langs=["ru"],
+    )
+    assert [q.text for q in queries["p1"]] == ["Потоковая репликация Example DB"]
+    # Продукт без объявленного имени — запрос из заголовка (значение не выдумывается).
+    assert [q.text for q in queries["p2"]] == ["Потоковая репликация"]

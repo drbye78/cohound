@@ -146,7 +146,9 @@ def test_absence_rule_override_changes_text_and_hash() -> None:
         absence_rule=AbsenceRuleType.REGISTRY_ABSENCE,
     )
     assert "registry_absence" in compiled.text
-    assert "exhaustive" in compiled.text
+    assert "авторитетная энумерация" in compiled.text
+    # Скаляр охвата модели больше не предъявляется: вердикт по реестру ставит не она.
+    assert "exhaustive" not in compiled.text
     assert compiled.prompt_hash == prompt_hash(
         TEMPLATE_VERSION, param.rule, "registry_absence", ["c1"]
     )
@@ -373,20 +375,22 @@ def test_compiled_prompt_save_delegates(tmp_path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_absent_is_a_legitimate_answer_for_the_model() -> None:
-    """Шаблон не требует от модели несуществующего поля и разрешает ``❌``.
+def test_absent_is_a_legitimate_answer_only_with_direct_denial() -> None:
+    """Шаблон не требует несуществующего поля и не подменяет незнание отсутствием.
 
     ``LLMCellOutput`` (``extra="forbid"``) не имеет полей про scope/absence-evidence,
-    поэтому инструкция «``❌`` → absence-evidence» была **неисполнима**: модель, честно не
-    нашедшая параметр, не имела способа его выразить. Теперь правило честное: evidence
-    может отсутствовать, а justification обязан назвать, что искали.
+    поэтому инструкция «``❌`` → absence-evidence» была **неисполнима**. Теперь правило
+    честное и узкое: ``❌`` достижим только через объявленный ``explicit`` с цитатой,
+    а релевантный-но-не-дословный фрагмент даёт ``❓``.
     """
     compiled = compile_prompt(
         param=_param(), product_id="p1", chunks=[_chunk("c1")]
     )
     assert "absence-evidence" not in compiled.text
-    assert "❌ — законный ответ" in compiled.text
-    assert "что именно искал" in compiled.text
+    assert "denial_strength" in compiled.text
+    assert "ГЛАВНОЕ ПРАВИЛО" in compiled.text
+    assert "это ❓ (не установлено), а НЕ ❌ (отсутствует)" in compiled.text
+    assert "непустой denial_reason" in compiled.text
 
 
 @pytest.mark.parametrize(
@@ -396,16 +400,19 @@ def test_absent_is_a_legitimate_answer_for_the_model() -> None:
 def test_absence_guidance_is_addressed_to_the_model_not_to_a_human(
     rule: AbsenceRuleType,
 ) -> None:
-    """Гайд не обещает модели аттестацию охвата: её ставит человек (I6/I7).
+    """Гайд не предъявляет модели ни процедуру человека, ни несуществующее поле.
 
-    Прежняя формулировка («❌ требует source_scope=exhaustive и scope_attested_by»)
-    предъявляла модели процедурное условие человека — и вдобавок поле, которого нет в
-    форме ответа.
+    Аттестация полноты — вопрос человека (I6/I7), а скаляр ``exhaustive`` модели
+    недоступен: в форме ответа его нет. Гайд говорит только о том, что модель вправе
+    заявить (``explicit``/``not_stated``), и называет человеческую роль как чужую.
     """
     guidance = ABSENCE_GUIDANCE[rule]
-    assert "❌ — законный ответ" in guidance
-    assert "требует source_scope=exhaustive" not in guidance
-    assert "ставит человек" in guidance
+    assert "человек" in guidance
+    assert "explicit" in guidance
+    assert "source_scope" not in guidance
+    assert "scope_attested_by" not in guidance
+    # Конечный справочник не даёт модели права объявлять класс bounded.
+    assert "bounded" in guidance
 
     compiled = compile_prompt(
         param=_param(absence_rule=rule),
@@ -415,27 +422,18 @@ def test_absence_guidance_is_addressed_to_the_model_not_to_a_human(
     assert guidance in compiled.text
 
 
-def test_template_version_is_v2_and_v1_is_preserved() -> None:
-    """Смена текста шаблона — новая версия; старый файл остаётся провенансом прогонов."""
+def test_template_version_is_v3_and_older_ones_are_preserved() -> None:
+    """Смена текста шаблона — новая версия; старые файлы остаются провенансом прогонов."""
     from core.pipeline.prompt import TEMPLATES_DIR, _load_template
 
-    assert TEMPLATE_VERSION == "evaluator_v2"
+    assert TEMPLATE_VERSION == "evaluator_v3"
     v1 = TEMPLATES_DIR / "evaluator_v1.txt"
     v2 = TEMPLATES_DIR / "evaluator_v2.txt"
+    v3 = TEMPLATES_DIR / "evaluator_v3.txt"
     assert v1.is_file(), "старый шаблон удалять нельзя: он провенанс прошлых прогонов"
     assert v2.is_file()
+    assert v3.is_file()
     assert _load_template("evaluator_v1") != _load_template(TEMPLATE_VERSION)
-    # v1 остаётся байт-в-байт тем, чем был: hash прошлых прогонов не должен «поехать».
+    # v1/v2 остаются байт-в-байт тем, чем были: hash прошлых прогонов не должен «поехать».
     assert "❌ → absence-evidence" in _load_template("evaluator_v1")
-
-
-def test_template_bump_changes_prompt_hash_but_not_retrieval_queries() -> None:
-    """``prompt_hash`` учитывает версию шаблона; ``render_queries`` от шаблона не зависит."""
-    param = _param(concept_terms={"ru": ["r1", "r2"]})
-    compiled = compile_prompt(param=param, product_id="p1", chunks=[_chunk("c1")])
-
-    assert compiled.template_version == TEMPLATE_VERSION
-    assert compiled.prompt_hash != prompt_hash(
-        "evaluator_v1", param.rule, AbsenceRuleType.EXPLICIT.value, ["c1"]
-    )
-    assert render_queries(param) == ["Параметр A", "r1", "r2"]
+    assert "❌ — законный ответ" in _load_template("evaluator_v2")

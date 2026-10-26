@@ -30,6 +30,14 @@
       "heading_path": "Раздел 2",
       "context_prefix": "контекст",
       "content_hash": "hash_a2"
+    },
+    {
+      "chunk_id": "chunk_a3",
+      "chunk_no": 2,
+      "text": "Свойство Альфа не поддерживается в этой версии продукта.",
+      "heading_path": "Раздел 3",
+      "context_prefix": "контекст",
+      "content_hash": "hash_a3"
     }
   ],
   "ok_output": {
@@ -66,5 +74,41 @@
         "quote": "экспорт   данных\nв формате CSV"
       }
     ]
+  },
+  "absent_explicit_output": {
+    "status": "❌",
+    "justification": "Вендор прямо отрицает поддержку свойства.",
+    "denial_strength": "explicit",
+    "denial_reason": "прямое отрицание в документации",
+    "evidence": [
+      {
+        "source_id": "chunk_a3",
+        "quote": "Свойство Альфа не поддерживается в этой версии продукта."
+      }
+    ]
+  },
+  "absent_claim_without_citation_output": {
+    "status": "❌",
+    "justification": "Свойство не найдено в переданном срезе.",
+    "denial_strength": "explicit",
+    "denial_reason": "показалось, что не заявлено",
+    "evidence": []
+  },
+  "absent_not_stated_output": {
+    "status": "❌",
+    "justification": "Материал релевантен, но дословного утверждения нет.",
+    "denial_strength": "not_stated",
+    "denial_reason": "описано иными словами, дословного утверждения нет",
+    "evidence": [
+      {
+        "source_id": "chunk_a2",
+        "quote": "Свойство Альфа доступно без дополнительной настройки."
+      }
+    ]
+  },
+  "unknown_output": {
+    "status": "❓",
+    "justification": "Установить не удалось.",
+    "denial_reason": "фрагменты описывают смежную возможность"
   }
 }

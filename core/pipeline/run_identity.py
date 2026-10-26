@@ -57,6 +57,9 @@ class DeclaredAxesLike(Protocol):
     crawl_strategy: str | None
     crawl_rate_limit: str | None
     crawl_config_digest: str | None
+    #: I3/§5: число раундов SERP-контура (0 — контур выключен). Объявленная ось: раунд
+    #: добавляет документы в корпус, поэтому входит в контракт, а не в провенанс.
+    serp_rounds: int | None
     registry_spec_digest: str | None
     deploy_profile: str | None
     edge_schema_version: str | None
@@ -209,6 +212,10 @@ def build_execution_contract(
         "crawl_strategy": _declared(declared, "crawl_strategy"),
         "crawl_rate_limit": _declared(declared, "crawl_rate_limit"),
         "crawl_config_digest": _declared(declared, "crawl_config_digest"),
+        # I3/§5: раунды SERP-контура — объявленный вход (``run.yaml: serp.rounds``,
+        # переопределяемый ``--serp-rounds``/``COHOUND_SERP``/``deploy.search.serp``).
+        # Идут в контракт: раунд меняет корпус, значит и ``run_id`` (execution_change).
+        "serp_rounds": _declared(declared, "serp_rounds"),
         "registry_spec_digest": _declared(declared, "registry_spec_digest"),
         "deploy_profile": _declared(declared, "deploy_profile"),
         "edge_schema_version": _declared(declared, "edge_schema_version"),

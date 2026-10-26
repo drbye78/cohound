@@ -165,6 +165,7 @@ CREATE TABLE IF NOT EXISTS cells (
     retrieval_params_json TEXT,
     stale_reason      TEXT,                             -- инвалидация при смене сборки/prompt
     review_reason     TEXT,                             -- аннотация причины pending (не статус)
+    evidence_scope    TEXT,                             -- JSON силы отрицания + вектора охвата (§2.3)
     primary_evidence_id TEXT,
     reviewed_by       TEXT,
     updated_at        TEXT,
@@ -183,8 +184,8 @@ CREATE TABLE IF NOT EXISTS cell_evidence (
     source_url        TEXT,
     citation_quote    TEXT,
     content_hash      TEXT,
-    source_scope      TEXT,                             -- absence-evidence (§4.2)
-    scope_attested_by TEXT,                             -- человек для param_ref/distribution
+    source_scope      TEXT,                             -- УСТАРЕЛО: скаляр прежних прогонов
+    scope_acceptance  TEXT,                             -- принятие риска человеком (было scope_attested_by)
     index_build_id    TEXT,                             -- привязка evidence к сборке (R7)
     partition_build_id TEXT,                            -- партиция чанка-evidence (09 §8.1)
     retrieved_at      TEXT
@@ -471,6 +472,26 @@ def _ensure_columns(
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {ddl_type}")
 
 
+def _migrate_scope_acceptance(conn: sqlite3.Connection) -> None:
+    """Копирует прежнюю подпись ``scope_attested_by`` в ``scope_acceptance`` (Вариант 2).
+
+    Переименование смысла: человек не «аттестует полноту охвата», а **принимает риск**
+    ненаблюдённой части. Старая колонка остаётся в файле (SQLite не умеет удалять
+    колонки без пересборки таблицы), но читатель её больше не использует, поэтому
+    значения обязаны быть скопированы: иначе подпись исторического прогона стала бы
+    невидимой — потеря аудит-следа, а не «чистое» переименование.
+
+    Идемпотентно: копируются только строки, где новое значение ещё пусто, а старое есть.
+    """
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(cell_evidence)")}
+    if "scope_attested_by" not in columns or "scope_acceptance" not in columns:
+        return
+    conn.execute(
+        "UPDATE cell_evidence SET scope_acceptance = scope_attested_by"
+        " WHERE scope_acceptance IS NULL AND scope_attested_by IS NOT NULL"
+    )
+
+
 class SchemaVersionMismatch(RuntimeError):
     """Файл ``cohound.db`` объявляет другую версию схемы, чем ожидает код.
 
@@ -625,6 +646,20 @@ def connect(db_path: str | Path = ":memory:") -> sqlite3.Connection:
     # DDL-миграция v3.6 (P6): аннотация причины pending-ячейки (конфликт источников vs
     # условное наследование). Аддитивно и идемпотентно; это не статус и не перечисление.
     _ensure_columns(conn, "cells", {"review_reason": "TEXT"})
+    # Вариант 2 (сила отрицания, §2.3): объект ``EvidenceScope`` — единственный носитель
+    # ответа «можно ли утверждать отсутствие». Хранится **JSON-колонкой**, а не
+    # нормализацией: объект читается и пишется целиком, отдельных запросов по его полям
+    # нет, а вектор охвата у каждого прогона свой. Аддитивная колонка: старые БД получают
+    # NULL (строки без объекта читаются прежним правилом), ``schema_version`` не
+    # поднимается — иначе гейт версии (11 §2.6) отверг бы уже существующие прогоны, а
+    # «старые прогоны остаются читаемыми» здесь важнее формальной метки.
+    _ensure_columns(conn, "cells", {"evidence_scope": "TEXT"})
+    # Переименование подписи: ``scope_attested_by`` → ``scope_acceptance`` (смысл —
+    # принятие риска, а не аттестация полноты). Колонка аддитивная, значения старых строк
+    # **копируются**: читатель больше не смотрит на старую колонку, и без копирования
+    # подпись исторического прогона стала бы невидимой (потеря аудит-следа).
+    _ensure_columns(conn, "cell_evidence", {"scope_acceptance": "TEXT"})
+    _migrate_scope_acceptance(conn)
     # DDL-миграция v2.2 (P2): content-addressed build-id witness — версия экстрактора у чанка
     # и версия экстрактора + отпечаток содержимого у продукт-партиции манифеста.
     _ensure_columns(conn, "corpus_chunks", {"extractor_version": "TEXT"})
