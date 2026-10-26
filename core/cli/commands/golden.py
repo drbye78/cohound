@@ -13,6 +13,7 @@ from typing import Any
 import argparse
 import json
 import sys
+from collections import Counter
 
 from core.cli.context import (
     _add_common,
@@ -22,7 +23,7 @@ from core.cli.context import (
     _resolve_db_path,
     _restore_plan_inputs,
 )
-from core.cli.errors import EXIT_ERROR, EXIT_OK
+from core.cli.errors import EXIT_ERROR, EXIT_OK, EXIT_USAGE
 from core.cli.wiring import build_store
 from core.pipeline import check_thresholds, evaluate_golden
 
@@ -61,7 +62,35 @@ def run(args: argparse.Namespace) -> int:
         store.read_manifest(run_id)  # валидация: прогон существует
         golden = _load_golden_arg(args.golden)
         if args.tier is not None:
-            golden = [row for row in golden if row.tier.value == args.tier]
+            selected = [row for row in golden if row.tier.value == args.tier]
+            if not selected:
+                # Пустой отбор — **не** провал порога, а невыполнимый запрос: набор не
+                # содержит строк этого tier'а. Прежде пустой список уходил в
+                # ``evaluate_golden``, и оператор видел «agreement 0.0% < 80%» — то есть
+                # сообщение о качестве оценщика там, где проблема в данных golden.csv
+                # (живой факт: 236 строк, все ``full``; ``--tier fast`` выбирал ноль).
+                available = dict(sorted(Counter(row.tier.value for row in golden).items()))
+                message = (
+                    f"в golden-наборе нет строк tier={args.tier!r}: "
+                    f"доступно {available or '{}'}, всего строк {len(golden)} — "
+                    "фильтр выбрал бы 0 строк"
+                )
+                if args.json:
+                    _print_json(
+                        {
+                            "ok": False,
+                            "error": "golden_tier_empty",
+                            "message": message,
+                            "run_id": run_id,
+                            "tier": args.tier,
+                            "available_tiers": available,
+                            "total_rows": len(golden),
+                        }
+                    )
+                else:
+                    sys.stdout.write(f"golden: {message} (неисполнимый запрос)\n")
+                return EXIT_USAGE
+            golden = selected
         catalog, _weights, _cohort, notes = _restore_plan_inputs(
             args, run_id, purpose="golden", store=store
         )

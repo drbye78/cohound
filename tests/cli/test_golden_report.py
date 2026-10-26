@@ -424,3 +424,33 @@ def test_report_lists_urls_blocked_by_robots(tmp_path: Path, capsys: pytest.Capt
     # Заготовка входа заполняется человеком, машина её не выдумывает.
     assert document["gaps"][0]["provide"]["path"] is None
     assert document["gaps"][0]["provide"]["provided_by"] is None
+
+
+def test_golden_tier_with_no_rows_is_not_a_threshold_failure(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """``--tier fast`` при отсутствии fast-строк — неисполнимый запрос, а не провал R6.
+
+    Живой факт: ``packages/ru-pg-dbms/golden.csv`` содержит 236 строк, **все** ``tier=full``.
+    Прежде пустой отбор уходил в ``evaluate_golden``, и оператор получал
+    ``violations: ['R6: golden agreement 0.0% < порога 80.0%']`` — сообщение о качестве
+    оценщика там, где дефект в данных эталона. Дороже всего то, что отчёт при этом выглядел
+    как содержательное измерение.
+    """
+    db = tmp_path / "cohound.db"
+    _seed_run(db, "run.g", cells=[(PRODUCT_A, PARAM_A, Status.OK)])
+    golden = _write_golden(
+        tmp_path / "golden.csv",
+        [f"{PRODUCT_A},{PARAM_A},✅,documentation,class_a,full"],
+    )
+
+    code = main([*_golden_argv(db, golden), "--tier", "fast", "--json"])
+    assert code == EXIT_USAGE
+    payload = json_out(capsys)
+    assert payload["ok"] is False
+    assert payload["error"] == "golden_tier_empty"
+    assert payload["available_tiers"] == {"full": 1}
+    assert payload["total_rows"] == 1
+    assert "0 строк" in payload["message"]
+    # Провала порога в ответе быть не должно: несравнение — не несогласие.
+    assert "violations" not in payload
