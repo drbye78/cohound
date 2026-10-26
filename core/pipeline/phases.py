@@ -136,6 +136,52 @@ def _retrieval_params_json(holder: Mapping[str, Any]) -> str | None:
     )
 
 
+def _observed_retrieval(
+    holder: Mapping[str, Any], store: Any, run_id: str
+) -> tuple[str | None, int | None, str | None]:
+    """Профиль/``K``/params ретривала для манифеста: держатель → ячейки (R7/§13).
+
+    ``holder`` живёт в памяти одного процесса, поэтому на resume (фаза ``evaluate`` уже
+    ``ok`` и короткозамкнута) он пуст — ровно как у ``index_build_id``. Ячейки несут тот
+    же провенанс (``evaluate._provenance``), поэтому при пустом держателе читаем их:
+    иначе ``run_manifest.yaml`` объявлял ``retrieval_profile: null`` при ячейках,
+    оцененных профилем ``R0``, — то есть карта не называла прибор, которым получены
+    вердикты, хотя ``retrieval_profile`` входит в ``EXECUTION_CONTRACT_FIELDS``.
+
+    Несколько разных профилей в одном прогоне — неоднозначность (например, resume с
+    другими аргументами): тогда профиль **не объявляется** (``None``), а не подменяется
+    первым попавшимся — манифест не должен угадывать.
+    """
+    import json as _json
+
+    profile = holder.get("retrieval_profile")
+    cutoff = holder.get("retrieval_cutoff_K")
+    if profile is not None:
+        return profile, cutoff, _retrieval_params_json(holder)
+
+    try:
+        cells = list(store.iter_cells(run_id))
+    except Exception:  # noqa: BLE001 — провенанс не роняет отчёт
+        return None, None, None
+    profiles = {cell.retrieval_profile for cell in cells if cell.retrieval_profile}
+    if len(profiles) != 1:
+        return None, None, None
+    resolved_profile = next(iter(profiles))
+
+    stored = {cell.retrieval_params_json for cell in cells if cell.retrieval_params_json}
+    params_json = next(iter(stored)) if len(stored) == 1 else None
+    if params_json is None:
+        params_json = _retrieval_params_json(
+            {"retrieval_profile": resolved_profile, "retrieval_cutoff_K": cutoff}
+        )
+    if cutoff is None:
+        try:
+            cutoff = _json.loads(params_json).get("cutoff_K")
+        except (TypeError, ValueError, AttributeError):
+            cutoff = None
+    return resolved_profile, cutoff, params_json
+
+
 #: Настройка, измеряемая экспериментом фиксации (``hound experiment retrieval``, A3).
 #: Единственный писатель ``source: measured`` — та команда; run-путь только **читает**
 #: персистентную фиксацию и не должен молча понижать её дефолтом (``default``).
@@ -1066,6 +1112,13 @@ def build_phases(
             except Exception:  # noqa: BLE001 — провенанс не роняет отчёт
                 ref = None
             index_build_id = getattr(ref, "index_build_id", None)
+        # R7/§13: профиль ретривала — тоже durable-провенанс, и на resume ``holder`` пуст
+        # ровно как у сборки. Ячейки его несут (``_provenance`` Ш6), поэтому читаем оттуда,
+        # а не оставляем ``null``: манифест обязан называть прибор, которым получены
+        # вердикты, иначе ``retrieval_profile`` (поле контракта) в прогоне не объявлен.
+        observed_profile, observed_cutoff, observed_params_json = _observed_retrieval(
+            holder, ctx.store, plan.run_id
+        )
         manifest = build_manifest(
             inputs=inputs,
             plan=plan,
@@ -1082,9 +1135,9 @@ def build_phases(
             deploy_profile=deploy_profile,
             edge_schema_version=edge_schema_version,
             edge_capabilities=edge_capabilities,
-            retrieval_profile=holder.get("retrieval_profile"),
-            retrieval_cutoff_K=holder.get("retrieval_cutoff_K"),
-            retrieval_params_json=_retrieval_params_json(holder),
+            retrieval_profile=observed_profile,
+            retrieval_cutoff_K=observed_cutoff,
+            retrieval_params_json=observed_params_json,
             crawl_provenance=_crawl_provenance(ctx.store, inputs, plan.run_id),
             # N6: разрешённая конфигурация контроля краула (app<run<site) — дайджест в
             # манифест, чтобы смена осей на app/per-site слое тоже давала execution_change.

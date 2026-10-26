@@ -965,16 +965,17 @@ def _run_chain_to_report(
         embedder=FakeEmbedder(),
         index_builder=FakeIndexBuilder(),
     )
-    phases = build_phases(
-        inputs=inputs,
-        plan=plan,
-        ports=ports,
-        urls={"p1": ["https://docs.test/p1"], "p2": ["https://docs.test/p2"]},
-        passports=_passports(),
-        out_dir=str(tmp_path),
-        raw_root=str(tmp_path / "raw"),
+    build_kwargs: dict[str, Any] = {
+        "inputs": inputs,
+        "plan": plan,
+        "ports": ports,
+        "urls": {"p1": ["https://docs.test/p1"], "p2": ["https://docs.test/p2"]},
+        "passports": _passports(),
+        "out_dir": str(tmp_path),
+        "raw_root": str(tmp_path / "raw"),
         **phase_kwargs,
-    )
+    }
+    phases = build_phases(**build_kwargs)
     store = _store()
     ctx = _context(store, ports)
     for name in ("registry", "inheritance", "corpus", "evaluate", "compute"):
@@ -1040,6 +1041,76 @@ def test_build_phases_forwards_explicit_retrieval_provenance(tmp_path: Path) -> 
         "profile": "R1",
         "cutoff_K": 25,
     }
+
+
+class _ObservedCell:
+    """Минимум ячейки для провенанса: профиль и params ретривала."""
+
+    def __init__(self, profile: str | None, params_json: str | None) -> None:
+        self.retrieval_profile = profile
+        self.retrieval_params_json = params_json
+
+
+class _CellStore:
+    """Хранилище только с ``iter_cells`` — для проверки чтения провенанса из ячеек."""
+
+    def __init__(self, profiles: tuple[str, ...] = ("R0",), cutoff: int = 10) -> None:
+        self._cells = [
+            _ObservedCell(
+                profile,
+                json.dumps({"profile": profile, "cutoff_K": cutoff}, sort_keys=True),
+            )
+            for profile in profiles
+        ]
+
+    def iter_cells(self, run_id: str) -> list[_ObservedCell]:
+        return list(self._cells)
+
+
+def test_resume_report_recovers_retrieval_provenance_from_cells() -> None:
+    """Resume: ``holder`` пуст, но манифест обязан назвать профиль — он в ячейках.
+
+    Живой случай (`ru-pg-dbms-3edf2b06097c`): прогон дошёл до G4 в одном процессе, а
+    ``report`` запускался в другом. Фазы ``corpus``/``evaluate`` короткозамкнуты
+    durable-``ok``, замыкание ``holder`` пусто — и ``run_manifest.yaml:104`` писал
+    ``retrieval_profile: null`` при ячейках, оценённых профилем ``R0``.
+
+    ``retrieval_profile`` входит в ``EXECUTION_CONTRACT_FIELDS``: манифест, который его не
+    называет, не описывает прибор, которым получены вердикты. Значения читаются из ячеек
+    (``evaluate._provenance``), а не угадываются.
+    """
+    from core.pipeline.evaluate import (
+        DEFAULT_RETRIEVAL_CUTOFF_K,
+        DEFAULT_RETRIEVAL_PROFILE,
+    )
+    from core.pipeline.phases import _observed_retrieval
+
+    profile, cutoff, params_json = _observed_retrieval({}, _CellStore(), RUN_ID)
+    assert profile == DEFAULT_RETRIEVAL_PROFILE.value
+    assert cutoff == DEFAULT_RETRIEVAL_CUTOFF_K
+    assert json.loads(params_json) == {
+        "profile": DEFAULT_RETRIEVAL_PROFILE.value,
+        "cutoff_K": DEFAULT_RETRIEVAL_CUTOFF_K,
+    }
+
+
+def test_holder_wins_over_cells_for_retrieval_provenance() -> None:
+    """Живой держатель приоритетнее ячеек: манифест называет то, чем считали сейчас."""
+    from core.pipeline.phases import _observed_retrieval
+
+    profile, cutoff, params_json = _observed_retrieval(
+        {"retrieval_profile": "R2", "retrieval_cutoff_K": 25}, _CellStore(), RUN_ID
+    )
+    assert (profile, cutoff) == ("R2", 25)
+    assert json.loads(params_json) == {"profile": "R2", "cutoff_K": 25}
+
+
+def test_mixed_retrieval_profiles_are_not_declared() -> None:
+    """Разные профили в одном прогоне — неоднозначность: ``None``, а не первый попавшийся."""
+    from core.pipeline.phases import _observed_retrieval
+
+    store = _CellStore(profiles=("R0", "R2"))
+    assert _observed_retrieval({}, store, RUN_ID) == (None, None, None)
 
 
 class _QueueAwareExtractor(FakeExtractor):
