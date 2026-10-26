@@ -245,15 +245,29 @@ def render_queries(param: CatalogRow, max_queries: int = 3) -> list[str]:
     Порядок детерминирован и не зависит от реализации/LLM (сохраняет симметрию I16):
     заголовок, затем термины языка ``ru``, затем ``en``, затем прочие языки в
     лексикографическом порядке; внутри языка — порядок пакета (порядок списка).
+
+    **Дубликаты схлопываются (замер).** Автор каталога кладёт в ``concept_terms[lang][0]``
+    полный заголовок параметра — иначе говоря, повторяет ``title``. Без схлопывания
+    ``[title, title, 'первый-термин']``: из трёх слотов бюджета ретривала один уходил на
+    повтор уже выполненного запроса. Замер по каталогу ``ru-pg-dbms``: **119 из 119**
+    параметров имели дубликат, ровно один потерянный слот на параметр. Схлопывание
+    сохраняет порядок первого появления, поэтому выбор «какие ≤3 запроса пойдут»
+    остаётся тем же, что и прежде, — меняется только состав: вместо повтора приходит
+    следующий по порядку термин.
     """
     if max_queries < 0:
         raise ValueError("max_queries не может быть отрицательным")
     terms = param.concept_terms or {}
     ordered_langs = [lang for lang in _QUERY_LANG_ORDER if lang in terms]
     ordered_langs += sorted(lang for lang in terms if lang not in _QUERY_LANG_ORDER)
-    queries = [param.title]
-    for lang in ordered_langs:
-        queries.extend(terms[lang])
+    queries: list[str] = []
+    seen: set[str] = set()
+    for candidate in [param.title, *(t for lang in ordered_langs for t in terms[lang])]:
+        key = candidate.strip().casefold()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        queries.append(candidate)
     return queries[:max_queries]
 
 

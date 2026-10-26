@@ -261,6 +261,24 @@ def test_render_queries_bounds() -> None:
         render_queries(param, max_queries=-1)
 
 
+def test_render_queries_collapses_duplicate_of_title() -> None:
+    """Повтор заголовка в ``concept_terms`` не съедает слот бюджета ретривала.
+
+    Замер по каталогу ``ru-pg-dbms``: автор кладёт полный заголовок параметра первым
+    элементов ``concept_terms[lang]``, поэтому без схлопывания **119 из 119** параметров
+    получали ``[title, title, ...]`` — один из трёх слотов уходил на повтор уже
+    выполненного запроса.
+    """
+    param = _param(concept_terms={"ru": ["Параметр A", "r1", "r2"]})
+    assert render_queries(param, max_queries=3) == ["Параметр A", "r1", "r2"]
+
+
+def test_render_queries_collapses_duplicates_across_languages() -> None:
+    """Один и тот же термин в ru и en — один запрос, а не два (регистр не различает)."""
+    param = _param(concept_terms={"ru": ["xid"], "en": ["XID", "xid64"]})
+    assert render_queries(param, max_queries=10) == ["Параметр A", "xid", "xid64"]
+
+
 # ---------------------------------------------------------------------------
 # I18 / I10 / I15 / I7 — гарантии текста промпта
 # ---------------------------------------------------------------------------
