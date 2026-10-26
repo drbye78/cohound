@@ -54,6 +54,13 @@ def run(args: argparse.Namespace) -> int:
     bundle = None
     catalog: dict[str, Any] = {}
     cells: list[Any] = []
+    # Базовый каталог артефактов: явный --out > --runs-dir > resolved paths.runs > runs.
+    out_dir = args.out
+    if out_dir is None:
+        out_dir = getattr(args, "runs_dir", None)
+    if out_dir is None:
+        _paths = getattr(args, "paths", None)
+        out_dir = str(_paths.runs) if _paths is not None else "runs"
     with build_store(db_path, profile=args.profile, read_only=True) as store:
         if run_id is None:
             run_id = _infer_run_id(store)
@@ -87,24 +94,23 @@ def run(args: argparse.Namespace) -> int:
             manifest = manifest.model_copy(
                 update={"gate_waivers": gate_trail(store, run_id)}
             )
+        # Артефакты пишутся **внутри** ``with``: ``write_reports`` пересобирает
+        # ``artifacts_gap.yaml`` из ``crawl_session_items`` и без живого соединения получал
+        # закрытый store. Раньше ошибка чтения глушилась внутри сбора пробелов, и файл
+        # писался пустым (``total: 0``) — то есть отчёт «недоступного нет» на прогоне, где
+        # таких URL 17. Живой факт: ``hound report`` давал ``gaps: []`` при 17 отказах
+        # ``robots_disallow`` в БД.
+        artifacts = write_reports(
+            bundle=bundle,
+            cells=cells,
+            catalog=catalog,
+            manifest=manifest,
+            out_dir=out_dir,
+            run_id=run_id,
+            store=store,
+        )
 
     assert run_id is not None and bundle is not None and manifest is not None
-    # Базовый каталог артефактов: явный --out > --runs-dir > resolved paths.runs > runs.
-    out_dir = args.out
-    if out_dir is None:
-        out_dir = getattr(args, "runs_dir", None)
-    if out_dir is None:
-        _paths = getattr(args, "paths", None)
-        out_dir = str(_paths.runs) if _paths is not None else "runs"
-    artifacts = write_reports(
-        bundle=bundle,
-        cells=cells,
-        catalog=catalog,
-        manifest=manifest,
-        out_dir=out_dir,
-        run_id=run_id,
-        store=store,
-    )
     partial = _manifest_partial(manifest)
     if partial:
         notes.append(

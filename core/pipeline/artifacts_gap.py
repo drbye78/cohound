@@ -285,9 +285,15 @@ def read_run_items(
     ids: set[str] = {str(session_id)} if session_id else set()
     reader = getattr(store, "iter_crawl_sessions", None)
     if callable(reader):
+        # Отсутствие метода — «стор не умеет перечислять сеансы» (законно: вызывающий уже
+        # держит ``session_id``). Остальные сбои **не** глушатся: закрытое или повреждённое
+        # соединение обязано быть видимым. Прежний широкий ``except Exception`` превращал
+        # ``ProgrammingError: Cannot operate on a closed database`` в пустой список, и
+        # ``artifacts_gap.yaml`` писался с ``total: 0`` рядом с 17 отказами в БД — отчёт
+        # «недоступного нет» на прогоне, где оно есть.
         try:
             sessions = list(reader())
-        except Exception:  # noqa: BLE001 — перечисление не обязательно: есть явный session_id
+        except (AttributeError, NotImplementedError):
             sessions = []
         for session in sessions:
             if getattr(session, "run_id", None) == run_id:

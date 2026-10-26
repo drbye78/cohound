@@ -365,3 +365,62 @@ def test_report_human_prints_paths(
     assert "nda_questions:" in text
 
 
+
+
+def test_report_lists_urls_blocked_by_robots(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """``hound report`` обязан ПОКАЗАТЬ недоступное, а не написать «недоступного нет».
+
+    Регресс на живой дефект: команда собирала артефакты уже после выхода из
+    ``with build_store(...)``, поэтому ``write_reports`` получал **закрытый** store;
+    ``read_run_items`` глушил ``ProgrammingError``, и ``artifacts_gap.yaml`` писался с
+    ``total: 0`` рядом с 17 отказами ``robots_disallow`` в БД. Отчёт «всё скачалось» на
+    прогоне, где часть документов запрещена robots, — худший вид ошибки: он снимает
+    вопрос вместо того, чтобы его задать.
+    """
+    from core.domain.enums import CrawlItemStatus, FailureKind
+    from core.domain.models import CrawlSessionItem
+    from core.pipeline.crawl_session import default_session_id, open_session
+
+    db = tmp_path / "cohound.db"
+    _seed_run(db, "run.r", cells=[(PRODUCT_A, PARAM_A, Status.OK)])
+    blocked = "https://p1.example/files/blocked.pdf"
+    with SqliteStore(db) as store:
+        open_session(store, session_id=default_session_id("run.r"), run_id="run.r")
+        store.upsert_crawl_session_item(
+            CrawlSessionItem(
+                session_id=default_session_id("run.r"),
+                product_id=PRODUCT_A,
+                url=blocked,
+                status=CrawlItemStatus.FAILED,
+                attempts=1,
+                error_kind=FailureKind.ROBOTS_DISALLOW.value,
+                last_attempt="2026-06-01T00:00:00+00:00",
+            )
+        )
+
+    package = valid_package(tmp_path, scope_attestation=False)
+    out = tmp_path / "runs"
+    code = main(
+        [
+            *_report_argv(db, out),
+            "--run-yaml",
+            str(package / "run.yaml"),
+            "--package",
+            str(package),
+            "--json",
+        ]
+    )
+    assert code == EXIT_OK
+    payload = json_out(capsys)
+    gap_path = Path(payload["artifacts"]["artifacts_gap"])
+    assert gap_path.exists()
+
+    import yaml
+
+    document = yaml.safe_load(gap_path.read_text(encoding="utf-8"))
+    assert document["summary"]["total"] == 1
+    assert document["summary"]["by_error_kind"] == {"robots_disallow": 1}
+    assert [gap["url"] for gap in document["gaps"]] == [blocked]
+    # Заготовка входа заполняется человеком, машина её не выдумывает.
+    assert document["gaps"][0]["provide"]["path"] is None
+    assert document["gaps"][0]["provide"]["provided_by"] is None
