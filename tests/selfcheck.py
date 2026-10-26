@@ -797,6 +797,16 @@ def _db_smoke() -> None:
     # Backlog B (schema 3.3.0): операционные оси краула — границы ``execution_change`` (§13).
     _assert("crawl_strategy" in runs_cols and "crawl_rate_limit" in runs_cols)
 
+    # 13-manual-artifacts §3.3: происхождение **байтов** корпуса (аддитивная колонка,
+    # ``crawl`` по умолчанию — старые БД читаются как «получено краулом»), аудит
+    # предоставлений (отказ краула живёт отдельно и не стирается) и аннотация покрытия.
+    _assert("manual_artifacts" in tables)
+    docs_cols = {r["name"] for r in conn.execute("PRAGMA table_info(corpus_docs)")}
+    _assert("origin" in docs_cols)
+    coverage_cols = {r["name"] for r in conn.execute("PRAGMA table_info(corpus_coverage)")}
+    _assert("resolved_manually" in coverage_cols)
+    _assert("manual_artifacts_digest" in runs_cols and "manual_artifacts_json" in runs_cols)
+
     # P1 (schema 3.4.0): деплой-провенанс манифеста (07 §7) и порог ранжирования (§6/B-1)
     # — реальные колонки; ``run_inputs`` — источник истины самодостаточности прогона.
     _assert({"deploy_profile", "edge_schema_version", "edge_capabilities_json",

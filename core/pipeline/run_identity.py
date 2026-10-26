@@ -66,6 +66,11 @@ class DeclaredAxesLike(Protocol):
     chunker_version: str | None
     llm_scenarios: tuple[dict[str, Any], ...]
     extractor_stack: str
+    #: 13-manual-artifacts §3.2: отпечаток объявленных ручных артефактов. Раунд подачи
+    #: добавляет документы корпуса, то есть доказательства, — это **условие измерения**,
+    #: а не провенанс записи: спрятать его значило бы дать корпусу измениться без
+    #: изменения ``run_id``.
+    manual_artifacts_digest: str | None = None
 
 
 def _declared(declared: DeclaredAxesLike | None, name: str) -> Any:
@@ -219,6 +224,10 @@ def build_execution_contract(
         "registry_spec_digest": _declared(declared, "registry_spec_digest"),
         "deploy_profile": _declared(declared, "deploy_profile"),
         "edge_schema_version": _declared(declared, "edge_schema_version"),
+        # 13-manual-artifacts §3.2: подача ручных артефактов меняет корпус, значит и
+        # условия измерения. Пустой набор — стабильный дайджест пустого множества, а не
+        # ``None``: «артефактов не объявлено» — это факт входа, а не отсутствие значения.
+        "manual_artifacts_digest": _declared(declared, "manual_artifacts_digest"),
     }
     return execution_contract_digest(values)
 

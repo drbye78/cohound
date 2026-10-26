@@ -38,6 +38,7 @@ URL/имена в иллюстративных местах используют
 | `run.yaml` | обязателен для прогона | `products` — **ровно** множество `product_id` когорты (S11); `anchor ∈ products`; `focus` — модули и параметры. |
 | `scope_attestation.yaml` | опционален | Процедура аттестации полноты источника для `absence_rule ∈ {parameter_reference, distribution_absence}` (I2b). |
 | `domain_profiles.yaml` | опционален | Профили получения/извлечения per domain (`fetch`/`extract`/`strategy`/`wait_for`); корень — словарь словарей. |
+| `sources/manual_artifacts.yaml` | опционален | Ручные артефакты: файлы, которые не взял краулер (robots/CAPTCHA/платный барьер). Вход I19 (файл → `corpus_raw` → экстракция → индекс), `origin=manual` в `corpus_docs`, отказ краула остаётся в сессии, дайджест входит в `run_id` (13-manual-artifacts §3). Пустой `provide: []` — подач нет. |
 
 Реестровые спецификации — **package-scoped**: `packages/{case_id}/registries/{registry_id}.yaml`,
 перечисляются в `package.yaml: registries` (03 §D.4). Секреты в спецификации не хранятся

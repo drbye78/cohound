@@ -48,7 +48,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from typing import Any
 
 from core.domain.models import Cohort, SeedsConfig
@@ -59,6 +59,7 @@ __all__ = [
     "EXECUTION_CONTRACT_FIELDS",
     "cohort_digest",
     "execution_contract_digest",
+    "manual_artifacts_digest",
     "seeds_digest",
 ]
 
@@ -98,6 +99,13 @@ EXECUTION_CONTRACT_FIELDS: tuple[str, ...] = (
     "registry_spec_digest",
     "deploy_profile",
     "edge_schema_version",
+    # 13-manual-artifacts §3.2: отпечаток объявленных ручных артефактов
+    # (``sources/manual_artifacts.yaml``). Меняет корпус, значит и условия измерения —
+    # но в материал входят только ``(product_id, url, sha256)``: ``path``/``provided_by``/
+    # ``provided_at``/``reason`` это провенанс записи, а не измерение (как ``source``/
+    # ``added_*`` у ``seeds_digest``). Пустой набор даёт стабильный дайджест пустого
+    # множества, поэтому «артефактов нет» и «поле отсутствует» различимы.
+    "manual_artifacts_digest",
 )
 
 #: Длина короткого дайджеста идентичности (§12.2/§6.2).
@@ -175,6 +183,28 @@ def seeds_digest(seeds: SeedsConfig) -> str:
     ]
     rows.sort(key=lambda row: (row["product_id"], row["order"]))
     return short_hash(_canonical({"products": rows}), _DIGEST_LEN)
+
+
+def manual_artifacts_digest(rows: Iterable[tuple[str, str, str]]) -> str:
+    """Дайджест объявленных ручных артефактов (13-manual-artifacts §3.2), 24 hex.
+
+    Материал: отсортированные ``(product_id, url, sha256)``. ``path``/``provided_by``/
+    ``provided_at``/``reason`` **не** входят — это провенанс записи, а не измерение
+    (зеркало ``seeds_digest``, где исключены ``source``/``added_*``). ``sha256`` —
+    **вычисленный** из байтов хеш (сверка объявленного — обязанность загрузчика, не
+    этой функции): замена файла без правки декларации обязана менять ``run_id``.
+
+    Пустой набор даёт стабильный дайджест пустого множества (``{"artifacts": []}``),
+    а не пустую строку: «артефактов нет» — это объявленное условие измерения.
+
+    Порядок аргумента не важен (сортировка внутри); дубликаты строк не схлопываются
+    тихо — ``(product_id, url)`` уникален по контракту загрузчика, поэтому дубль здесь
+    был бы дефектом декларации, и он виден в материале.
+    """
+    material = sorted((str(pid), str(url), str(sha)) for pid, url, sha in rows)
+    return short_hash(
+        _canonical({"artifacts": [list(row) for row in material]}), _DIGEST_LEN
+    )
 
 
 def execution_contract_digest(values: Mapping[str, Any]) -> str:

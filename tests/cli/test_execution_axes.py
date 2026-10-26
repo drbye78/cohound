@@ -127,9 +127,10 @@ def test_declared_axes_are_deterministic(tmp_path: Path) -> None:
     assert first.extractor_stack.startswith(
         "trafilatura-html-2+docling-doc-3/docling-"
     )
-    # Десять объявленных осей — ровно по списку §13 (+ ``serp_rounds``: раунд внешнего
-    # поиска меняет состав корпуса, то есть условие измерения); наблюдаемых здесь нет.
-    # ``serp_source`` — провенанс («какой уровень включил контур»), не измерение.
+    # Объявленные оси — ровно по списку §13 (+ ``serp_rounds``: раунд внешнего поиска
+    # меняет состав корпуса, то есть условие измерения; + ``manual_artifacts_digest``:
+    # поданный файл добавляет документы корпуса, 13-manual-artifacts §3.2); наблюдаемых
+    # здесь нет. ``serp_source`` — провенанс («какой уровень включил контур»), не измерение.
     assert {field.name for field in dataclasses.fields(first)} == {
         "crawl_strategy",
         "crawl_rate_limit",
@@ -142,6 +143,7 @@ def test_declared_axes_are_deterministic(tmp_path: Path) -> None:
         "extractor_stack",
         "serp_rounds",
         "serp_source",
+        "manual_artifacts_digest",
     }
 
 
@@ -853,3 +855,75 @@ def test_run_id_does_not_depend_on_ports(
     assert "порты не должны требоваться" in _payload(capsys)["message"]
 
     assert seen["run_id"] == expected
+
+
+# ---------------------------------------------------------------------------
+# 13-manual-artifacts §3.2: объявленные ручные артефакты — условие измерения
+# ---------------------------------------------------------------------------
+
+
+def _with_manual_artifact(package: Path, *, sha256: str | None = None) -> Path:
+    """Пишет ``sources/manual_artifacts.yaml`` + реальный файл внутрь пакета."""
+    body = b"%PDF-1.4 provided by the operator"
+    target = package / "sources" / "manual" / "1C.pdf"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(body)
+    record: dict[str, Any] = {
+        "product_id": "p1",
+        "url": "https://docs.invalid/files/1C.pdf",
+        "path": "sources/manual/1C.pdf",
+        "reason": "robots_disallow",
+    }
+    if sha256 is not None:
+        record["sha256"] = sha256
+    (package / "sources" / "manual_artifacts.yaml").write_text(
+        yaml.safe_dump(
+            {"schema": "manual_artifacts/1", "provide": [record]},
+            allow_unicode=True,
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    return package
+
+
+def test_manual_artifacts_change_run_id_and_invalid_declaration_is_usage_error(
+    tmp_path: Path, home: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Подача меняет корпус ⇒ меняет ``run_id``; битая декларация — видимый отказ.
+
+    Обратная сторона того же требования: объявленный, но несовпавший/нечитаемый артефакт
+    не должен молча стать «подачи нет» — иначе прогон посчитал бы корпус без документа,
+    который оператор считал предоставленным.
+    """
+    package = valid_package(tmp_path)
+
+    assert main(["run", *_common(package), "--dry-run"]) == EXIT_OK
+    without = _payload(capsys)["run_id"]
+
+    _with_manual_artifact(package)
+    assert main(["run", *_common(package), "--dry-run"]) == EXIT_OK
+    with_artifact = _payload(capsys)["run_id"]
+    assert with_artifact != without
+
+    # Декларация та же, но объявленный ``sha256`` не совпадает с байтами → EXIT_USAGE.
+    _with_manual_artifact(package, sha256="0" * 64)
+    assert main(["run", *_common(package), "--dry-run"]) == 2  # EXIT_USAGE
+    payload = _payload(capsys)
+    assert payload["error"] == "manual_artifacts"
+    assert "sha256" in payload["message"]
+
+
+def test_declared_manual_artifact_digest_is_resolver_value(
+    tmp_path: Path,
+) -> None:
+    """Резолвер и загрузчик дают **один** дайджест: второй формулы нет."""
+    package = _with_manual_artifact(_package(tmp_path))
+    axes = _resolve(package)
+    from core.pipeline.manual_artifacts import load_manual_artifacts
+
+    assert axes.manual_artifacts_digest == load_manual_artifacts(package).digest()
+    # Пакет без декларации — стабильный дайджест пустого множества (не ``None``).
+    empty = _resolve(_package(tmp_path, name="empty"))
+    assert empty.manual_artifacts_digest == load_manual_artifacts(None).digest()
+    assert empty.manual_artifacts_digest != axes.manual_artifacts_digest

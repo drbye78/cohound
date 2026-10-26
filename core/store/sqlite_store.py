@@ -1035,6 +1035,7 @@ class SqliteStore:
                 " crawl_strategy = ?, crawl_rate_limit = ?,"
                 " crawl_config_digest = ?, registry_spec_digest = ?,"
                 " execution_contract_digest = ?,"
+                " manual_artifacts_digest = ?, manual_artifacts_json = ?,"
                 " deploy_profile = ?, edge_schema_version = ?, edge_capabilities_json = ?"
                 " WHERE run_id = ?",
                 (
@@ -1064,6 +1065,12 @@ class SqliteStore:
                     manifest.crawl_config_digest,
                     manifest.registry_spec_digest,
                     manifest.execution_contract_digest,
+                    manifest.manual_artifacts_digest,
+                    json.dumps(
+                        dict(manifest.manual_artifacts or {}),
+                        ensure_ascii=False,
+                        sort_keys=True,
+                    ),
                     manifest.deploy_profile,
                     manifest.edge_schema_version,
                     json.dumps(
@@ -1089,14 +1096,22 @@ class SqliteStore:
                 (index_build_id, run_id),
             )
 
-    def upsert_corpus_doc(self, doc: CorpusDoc) -> None:
-        """Upsert строки ``corpus_docs`` (raw retention + provenance экстракции, §3.2)."""
+    def upsert_corpus_doc(self, doc: CorpusDoc, *, origin: str = "crawl") -> None:
+        """Upsert строки ``corpus_docs`` (raw retention + provenance экстракции, §3.2).
+
+        ``origin`` — происхождение **байтов** (13-manual-artifacts §3.3): ``crawl`` для
+        обычного краула (дефолт, поведение прежнее) и ``manual`` для объявленного файла
+        оператора. Один и тот же текст под одним продуктом — одна строка
+        (``doc_id = product_id:content_hash``), поэтому ``INSERT OR REPLACE`` оставляет
+        значение последнего писателя: если байты позже **наблюдены краулом**, строка честно
+        говорит ``crawl`` — это более сильное утверждение (сайт действительно прочитан).
+        """
         with self.conn:
             self.conn.execute(
                 "INSERT OR REPLACE INTO corpus_docs"
                 " (doc_id, product_id, url, fetched_at, content_hash, raw_path,"
-                "  extractor_version, render_mode, lang)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "  extractor_version, render_mode, lang, origin)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     doc.doc_id,
                     doc.product_id,
@@ -1107,8 +1122,62 @@ class SqliteStore:
                     doc.extractor_version,
                     _as_text(doc.render_mode),
                     doc.lang,
+                    str(origin),
                 ),
             )
+
+    def save_manual_artifact(self, record: Mapping[str, Any]) -> None:
+        """Upsert аудит-строки предоставления (13-manual-artifacts §3.3).
+
+        Идентичность — ``(run_id, product_id, url)``: повторная подача того же URL в том же
+        прогоне перекрывает строку, а не плодит её (идемпотентность resume). Факт отказа
+        краула живёт отдельно (``crawl_session_items``) и здесь **не** трогается: отказ не
+        стирается, он аннотируется.
+        """
+        with self.conn:
+            self.conn.execute(
+                "INSERT INTO manual_artifacts"
+                " (run_id, product_id, url, sha256, doc_id, raw_path, declared_path,"
+                "  reason, provided_by, provided_at, byte_size, created_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                " ON CONFLICT(run_id, product_id, url) DO UPDATE SET"
+                "  sha256 = excluded.sha256,"
+                "  doc_id = excluded.doc_id,"
+                "  raw_path = excluded.raw_path,"
+                "  declared_path = excluded.declared_path,"
+                "  reason = excluded.reason,"
+                "  provided_by = excluded.provided_by,"
+                "  provided_at = excluded.provided_at,"
+                "  byte_size = excluded.byte_size,"
+                "  created_at = excluded.created_at",
+                (
+                    str(record.get("run_id") or ""),
+                    str(record.get("product_id") or ""),
+                    str(record.get("url") or ""),
+                    str(record.get("sha256") or ""),
+                    record.get("doc_id"),
+                    record.get("raw_path"),
+                    record.get("declared_path"),
+                    record.get("reason"),
+                    record.get("provided_by"),
+                    record.get("provided_at"),
+                    (
+                        None
+                        if record.get("byte_size") is None
+                        else int(record["byte_size"])
+                    ),
+                    record.get("created_at"),
+                ),
+            )
+
+    def iter_manual_artifacts(self, run_id: str) -> Iterator[dict[str, Any]]:
+        """Аудит предоставлений прогона (порядок ``product_id, url`` — детерминизм)."""
+        for row in self.conn.execute(
+            "SELECT * FROM manual_artifacts WHERE run_id = ?"
+            " ORDER BY product_id, url",
+            (str(run_id),),
+        ):
+            yield {key: row[key] for key in row.keys()}
 
     def add_chunk(self, chunk: CorpusChunk) -> None:
         """Upsert строки ``corpus_chunks`` (PK ``chunk_id``), идемпотентно (S8/I19)."""
@@ -1603,6 +1672,12 @@ class SqliteStore:
             truncated=bool(row["truncated"]),
             computed_at=row["computed_at"],
             reason=(row["reason"] if "reason" in row.keys() else None),
+            # 13-manual-artifacts §3.3: аддитивная колонка; старая строка без неё — 0.
+            resolved_manually=(
+                int(row["resolved_manually"] or 0)
+                if "resolved_manually" in row.keys()
+                else 0
+            ),
         )
 
     def save_corpus_coverage(self, run_id: str, coverage: CorpusCoverage) -> None:
@@ -1630,8 +1705,8 @@ class SqliteStore:
                 "INSERT INTO corpus_coverage"
                 " (run_id, product_id, complete, expected_sources, observed_sources,"
                 "  blocked_json, unreadable_origins_json, partial_blocks_json,"
-                "  truncated, computed_at, reason)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                "  truncated, computed_at, reason, resolved_manually)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
                 " ON CONFLICT(run_id, product_id) DO UPDATE SET"
                 "  complete = excluded.complete,"
                 "  expected_sources = excluded.expected_sources,"
@@ -1641,7 +1716,8 @@ class SqliteStore:
                 "  partial_blocks_json = excluded.partial_blocks_json,"
                 "  truncated = excluded.truncated,"
                 "  computed_at = excluded.computed_at,"
-                "  reason = excluded.reason",
+                "  reason = excluded.reason,"
+                "  resolved_manually = excluded.resolved_manually",
                 (
                     run_id,
                     coverage.product_id,
@@ -1654,6 +1730,7 @@ class SqliteStore:
                     int(coverage.truncated),
                     coverage.computed_at,
                     coverage.reason,
+                    int(coverage.resolved_manually),
                 ),
             )
 
@@ -1953,6 +2030,16 @@ class SqliteStore:
         edge_capabilities = (
             edge_capabilities_raw if isinstance(edge_capabilities_raw, dict) else {}
         )
+        # 13-manual-artifacts §3.4: опубликованная доля ручного. NULL/не-словарь → ``{}``:
+        # «ручных подач не было» не выдумывается из отсутствия значения.
+        manual_artifacts_raw = (
+            _parse_json_text(row["manual_artifacts_json"])
+            if "manual_artifacts_json" in row.keys()
+            else None
+        )
+        manual_artifacts_block = (
+            manual_artifacts_raw if isinstance(manual_artifacts_raw, dict) else {}
+        )
         return RunManifest(
             run_id=row["run_id"],
             case_id=row["case_id"],
@@ -1989,6 +2076,15 @@ class SqliteStore:
             # 09 §12.5: отпечаток условий измерения (граница ``methodology_change``).
             # NULL → ``None`` (legacy-прогон; дайджест не фабрикуется).
             execution_contract_digest=row["execution_contract_digest"],
+            # 13-manual-artifacts §3.2/§3.4: отпечаток объявленных артефактов (поле
+            # контракта) и опубликованная доля ручного. NULL-блок читается как ``{}``:
+            # «ручных подач не было» не выдумывается из отсутствия значения.
+            manual_artifacts_digest=(
+                row["manual_artifacts_digest"]
+                if "manual_artifacts_digest" in row.keys()
+                else None
+            ),
+            manual_artifacts=manual_artifacts_block,
             llm_scenarios=scenarios,
             snapshot_date=row["snapshot_date"],
             deploy_profile=row["deploy_profile"],

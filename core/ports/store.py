@@ -316,6 +316,26 @@ class StorePort(Protocol):
         """
         ...
 
+    def save_manual_artifact(self, record: Mapping[str, Any]) -> None:
+        """Upsert аудит-строки предоставления (13-manual-artifacts §3.3).
+
+        Ключи записи — :func:`core.pipeline.manual_artifacts.artifact_record`:
+        ``run_id``/``product_id``/``url``/``sha256``/``doc_id``/``raw_path``/
+        ``declared_path``/``reason``/``provided_by``/``provided_at``/``byte_size``/
+        ``created_at``. Идентичность — ``(run_id, product_id, url)``: повторная подача
+        перекрывает строку (идемпотентность resume). Факт отказа краула живёт в
+        ``crawl_session_items`` и этим методом **не** трогается.
+        """
+        ...
+
+    def iter_manual_artifacts(self, run_id: str) -> Iterator[dict[str, Any]]:
+        """Аудит предоставлений прогона (порядок ``product_id, url``).
+
+        Источник блока ``manual_artifacts`` манифеста (13-manual-artifacts §3.4): доля
+        ручного публикуется числом, потолка нет. Пустой итератор — подач не было.
+        """
+        ...
+
     # -- чтение ---------------------------------------------------------- #
     def iter_cells(self, run_id: str, state: str | None = None) -> Iterator[Cell]: ...
 

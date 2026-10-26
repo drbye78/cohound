@@ -153,6 +153,7 @@ import operator
 import os
 import shutil
 import time
+import uuid
 from collections import deque
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from concurrent.futures import Executor, ThreadPoolExecutor
@@ -227,7 +228,7 @@ from core.pipeline.crawl_sources import (
 )
 from core.pipeline.embed_cache import EmbedCache
 from core.pipeline.extract_cache import ExtractionCache
-from core.pipeline.fetch_plan import _host_matches, select_domain_profile
+from core.pipeline.fetch_plan import _host_matches, resolve_fetch_plan, select_domain_profile
 from core.pipeline.incremental import (
     IncrementalItem,
     chunk_row_id,
@@ -236,6 +237,13 @@ from core.pipeline.incremental import (
     plan_incremental,
 )
 from core.pipeline.liveness import Heartbeat
+from core.pipeline.manual_artifacts import (
+    ORIGIN_CRAWL,
+    ORIGIN_MANUAL,
+    ManualArtifact,
+    ManualArtifacts,
+    artifact_record,
+)
 from core.pipeline.resources import ResourcesObservation, summarize_chunks_per_doc
 from core.pipeline.runner import PhaseResult
 from core.ports.chunker import ChunkerPort
@@ -574,6 +582,7 @@ def derive_corpus_coverage(
     items: Iterable[CrawlSessionItem],
     truncated: bool,
     computed_at: str,
+    manual_urls: Iterable[str] = (),
 ) -> CorpusCoverage:
     """Строит :class:`CorpusCoverage` продукта из персистентных элементов сеанса (Ф0).
 
@@ -618,10 +627,19 @@ def derive_corpus_coverage(
     ``partial_blocks`` фиксирует не-``not_found`` сбои каждого origin'а: человек видит
     частичные отказы, но они больше не «тихие» — блокирующий класс означает неполноту.
 
+    **Ручной артефакт закрывает пробел, а не отказ (13-manual-artifacts §3.3).**
+    ``manual_urls`` — URL, чей материал **предъявлен** объявленным артефактом
+    (``corpus_docs.origin=manual``). Такой блокирующий ``FAILED`` остаётся в ``blocked`` и
+    ``partial_blocks`` (аудит: краулу отказано), но больше не делает покрытие неполным и не
+    делает origin «нечитаемым»: материал наблюдён, хоть и другим путём. Их число —
+    :attr:`CorpusCoverage.resolved_manually`. Заменяется не факт, а его последствие для
+    полноты: карта не должна выглядеть так, будто краул прочитал сайт.
+
     **Человеческий escape hatch.** ``scope_attested_by`` остаётся единственным способом
     опубликовать ``❌`` на неполном корпусе: человек осознанно принимает риск, что
     ненаблюдённая часть сайта могла бы содержать параметр. Машинный ``❌`` в этом случае
-    понижается до ``pending``-кандидата (I2c/I6/I7).
+    понижается до ``pending``-кандидата (I2c/I6/I7). Где материал предъявлен, подпись риска
+    не нужна — нужен документ.
     """
     expected = 0
     observed = 0
@@ -630,6 +648,10 @@ def derive_corpus_coverage(
     #: origin → число «недостач» (не-FETCHED исходов, кроме ``not_found``).
     losses_by_origin: dict[str, int] = {}
     partial_blocks: dict[str, dict[str, int]] = {}
+    resolved_urls = {str(url) for url in manual_urls}
+    resolved_manually = 0
+    blocking_values = {kind.value for kind in BLOCKING_FAILURE_KINDS}
+    blocking_failures = False
     for item in items:
         expected += 1
         origin = (
@@ -647,22 +669,41 @@ def derive_corpus_coverage(
         if kind == FailureKind.NOT_FOUND.value:
             # Разрешённое наблюдение отсутствия: не потеря и не блокировка покрытия.
             continue
+        # Ручной артефакт (§3.3): отказ **остаётся** аудитом (``blocked`` уже посчитан
+        # выше, ``partial_blocks`` — здесь), но перестаёт быть потерей: материал наблюдён
+        # другим путём, поэтому origin не «нечитаем», а покрытие не «неполно».
+        if str(item.url) in resolved_urls:
+            if kind:
+                counts = partial_blocks.setdefault(origin, {})
+                counts[kind] = counts.get(kind, 0) + 1
+                # Счётчик называет **закрытые пробелы**, поэтому считает блокирующие
+                # классы: неблокирующий отказ (``source_unavailable``/``not_found``/
+                # ``redirect_out_of_scope``) пробела не открывал, и приписывать его
+                # подаче значило бы завышать её вклад.
+                if kind in blocking_values:
+                    resolved_manually += 1
+            continue
         losses_by_origin[origin] = losses_by_origin.get(origin, 0) + 1
         if kind:
             counts = partial_blocks.setdefault(origin, {})
             counts[kind] = counts.get(kind, 0) + 1
+            if kind in blocking_values:
+                blocking_failures = True
 
     unreadable_origins = sorted(
         origin for origin in losses_by_origin if fetched_by_origin.get(origin, 0) == 0
     )
-    blocking_values = {kind.value for kind in BLOCKING_FAILURE_KINDS}
-    blocking_failures = any(kind in blocking_values for kind in blocked)
+    # 13-manual-artifacts §3.3: «ни одного наблюдения» — не только про краул. Материал,
+    # предъявленный человеком, наблюдён; ``observed_sources`` при этом остаётся счётчиком
+    # **краула** (строка не должна утверждать, что сайт прочитан), а ручная часть названа
+    # отдельно — ``resolved_manually``.
+    observed_any = observed > 0 or resolved_manually > 0
     return CorpusCoverage(
         product_id=product_id,
         complete=(not truncated)
         and not unreadable_origins
         and not blocking_failures
-        and observed > 0,
+        and observed_any,
         expected_sources=expected,
         observed_sources=observed,
         blocked=dict(sorted(blocked.items())),
@@ -672,6 +713,7 @@ def derive_corpus_coverage(
             for origin in sorted(partial_blocks)
         },
         truncated=truncated,
+        resolved_manually=resolved_manually,
         computed_at=computed_at,
     )
 
@@ -742,6 +784,7 @@ def _persist_corpus_coverage(
     *,
     products: Iterable[str] | None = None,
     reasons: Mapping[str, str | None] | None = None,
+    resolved_manually: Mapping[str, Iterable[str]] | None = None,
 ) -> None:
     """Вычисляет и персистит покрытие **каждого** продукта плана (Ф0, O3).
 
@@ -756,6 +799,10 @@ def _persist_corpus_coverage(
     Продукт с элементами, но без единого ``FETCHED`` (все ``not_found``/``pending``),
     получает ``complete=False`` из :func:`derive_corpus_coverage` с ``reason=None``:
     неполноту объясняют счётчики, а не новая причина.
+
+    ``resolved_manually`` — ``product_id → [url]``, чей материал предъявлен объявленным
+    ручным артефактом (13-manual-artifacts §3.3): отказ остаётся аудитом, но перестаёт
+    делать покрытие неполным. Значение по умолчанию — пусто (поведение прежнее).
     """
     by_product: dict[str, list[CrawlSessionItem]] = {}
     for item in store.iter_crawl_session_items(session_id):
@@ -781,6 +828,8 @@ def _persist_corpus_coverage(
                 items=items,
                 truncated=product_id in truncated_products,
                 computed_at=computed_at,
+                # 13-manual-artifacts §3.3: URL, чей материал предъявлен артефактом.
+                manual_urls=(resolved_manually or {}).get(product_id, ()),
             )
         store.save_corpus_coverage(run_id, coverage)
 
@@ -1779,6 +1828,8 @@ def _persist_docs(
     store: Any,
     docs: list[CorpusDoc],
     errors: list[str],
+    *,
+    origin: str = ORIGIN_CRAWL,
 ) -> None:
     """Пишет ``corpus_docs`` (retention + provenance экстракции, §3.2).
 
@@ -1791,12 +1842,20 @@ def _persist_docs(
     Каждая запись обёрнута в try/except: сбой одного ``upsert_corpus_doc`` фиксируется в
     ``errors`` и не прерывает ни обработку остальных документов, ни краул (контракт
     изоляции фаз, ``runner.py``).
+
+    ``origin`` (13-manual-artifacts §3.3) — происхождение **байтов**: ``crawl`` (дефолт,
+    вызов байт-в-байт прежний — лишний kwarg не передаётся) либо ``manual``. Отдельный
+    аргумент, а не поле ``CorpusDoc``: доменная модель не получает смысла, которого у неё
+    нет, а ``corpus_docs.origin`` — провенанс записи байтов, а не документа.
     """
     if store is None:
         return
     for doc in docs:
         try:
-            store.upsert_corpus_doc(doc)
+            if origin == ORIGIN_CRAWL:
+                store.upsert_corpus_doc(doc)
+            else:
+                store.upsert_corpus_doc(doc, origin=origin)
         except Exception as exc:  # noqa: BLE001 — наблюдаемость важнее персистенции
             errors.append(f"upsert_corpus_doc({doc.doc_id}): {type(exc).__name__}: {exc}")
 
@@ -3292,6 +3351,7 @@ def _build_corpus(
     serp_source: str | None = None,
     serp_langs: Sequence[str] | None = None,
     product_names: Mapping[str, str] | None = None,
+    manual_artifacts: ManualArtifacts | None = None,
 ) -> PhaseResult:
     """Ш5: собирает корпус из ``plan × urls`` и возвращает ``PhaseResult``.
 
@@ -3479,6 +3539,13 @@ def _build_corpus(
     :param search: адаптер внешнего поиска (``SearchAdapterPort``) — исполняет SERP-контур.
         ``None`` при объявленных раундах — видимый отказ (``errors``), а не молчаливый
         пропуск: в ``split`` адаптер приходит швом, в ``local`` его подключает оператор.
+    :param manual_artifacts: объявленные ручные артефакты пакета
+        (``sources/manual_artifacts.yaml``, 13-manual-artifacts §3) — байты, которые не
+        взял краулер. Подаются **тем же** путём I19 (``RawPage`` → :func:`_retain` →
+        экстракция → чанкер → индекс): второго пути байтов в evidence не появляется.
+        Отказ краула при этом остаётся в ``crawl_session_items``, а наблюдённость
+        материала видна отдельно — ``corpus_docs.origin`` со значением ``manual``.
+        ``None`` — подач нет (поведение байт-в-байт прежнее).
     :param serp_rounds: раунды SERP-контура (0 — выключен). Вход — объявленная ось
         (``serp_rounds`` контракта), а не чтение конфига внутри фазы.
     :param serp_budget: потолок запросов **на продукт на раунд** (``run.yaml:
@@ -4130,6 +4197,7 @@ def _build_corpus(
         fetch_plan: FetchPlan,
         *,
         depth: int | None = None,
+        origin: str = ORIGIN_CRAWL,
     ) -> Path | None:
         """Retention сырых байтов (I19) + durable-элемент ``FETCHED``; ``None`` при сбое.
 
@@ -4144,8 +4212,16 @@ def _build_corpus(
         его и нет), публикация — :func:`_publish_staged` (переезд в том же ФС без копии и
         без чтения в RAM). ``staged_path is None`` — прежний путь ``write_bytes``
         байт-в-байт.
+
+        **Ручной артефакт (§3.3).** ``origin != 'crawl'`` — байты предъявил человек: цепочка
+        та же (хеш считается здесь же, публикация та же), но элемент сеанса **не**
+        перезаписывается. Отказ краула (``failed`` + ``robots_disallow``) остаётся фактом
+        аудита; наблюдённость материала видна отдельно — ``corpus_docs.origin='manual'``.
+        Поэтому ``_mark`` здесь не вызывается ни при успехе, ни при сбое: иначе карта
+        выглядела бы так, будто сайт прочитан.
         """
         staged = Path(page.staged_path) if page.staged_path else None
+        manual = origin != ORIGIN_CRAWL
         raw_path: Path | None = None
         try:
             raw_hash = _hash_file(staged) if staged is not None else content_hash(page.content)
@@ -4163,6 +4239,8 @@ def _build_corpus(
                     pass
             reason = f"{type(exc).__name__}: {exc}"
             errors.append(f"{product_id}/{url}: retention: {reason}")
+            if manual:
+                return None
             # L1a: сбой сохранения байтов = недоступность источника по этому URL;
             # помечаем FAILED, чтобы очередь/счётчики были правдивы (не ``pending``).
             _mark(
@@ -4174,6 +4252,8 @@ def _build_corpus(
                 depth=depth,
             )
             return None
+        if manual:
+            return raw_path
         # L1a: байты сохранены — durable-элемент сеанса (provenance фетча).
         _mark(
             product_id,
@@ -4202,7 +4282,9 @@ def _build_corpus(
         seen_chunk_ids: set[str],
         extractor_obj: ExtractorPort,
         level: DocumentLevel,
-    ) -> None:
+        *,
+        origin: str = ORIGIN_CRAWL,
+    ) -> str | None:
         """Inline-экстракция → доводка одного URL (путь без пула, ``None``/``1``).
 
         Тело экстракции (``extractor_obj.extract``) вынесено в :func:`_finish_one`; здесь —
@@ -4211,6 +4293,11 @@ def _build_corpus(
         корня (P5; ``full`` переиспользует переданный порт). ``level`` — уровень корня:
         нужен как ключ кэша экстракции (Ф1.2) и не выводится из ``extractor_obj``, потому
         что ``full`` переиспользует переданный порт.
+
+        :returns: ``doc_id`` созданного/найденного документа корпуса либо ``None`` — исход
+            не дал документа (сбой экстракции/нарезки). Нужен ручной подаче
+            (13-manual-artifacts §3.3): только дошедший до корпуса артефакт закрывает
+            пробел покрытия, а не «объявленный файл».
         """
         try:
             level_text = _as_text(level)
@@ -4249,9 +4336,10 @@ def _build_corpus(
                 extractor_obj,
                 level,
                 extract_error=f"{type(exc).__name__}: {exc}",
+                origin=origin,
             )
-            return
-        _finish_one(
+            return None
+        return _finish_one(
             product_id,
             url,
             page,
@@ -4263,6 +4351,7 @@ def _build_corpus(
             seen_chunk_ids,
             extractor_obj,
             level,
+            origin=origin,
         )
 
     def _finish_one(
@@ -4281,7 +4370,8 @@ def _build_corpus(
         extract_error: str | None = None,
         extract_failure_kind: FailureKind | None = None,
         reuse: _DocReuse | None = None,
-    ) -> None:
+        origin: str = ORIGIN_CRAWL,
+    ) -> str | None:
         """Доводка одного URL после экстракции: дедуп → нарезка → ``_mark`` (главный поток).
 
         P4: граница расщепления проходит **механически** по ``extracted`` — результат
@@ -4298,7 +4388,21 @@ def _build_corpus(
 
         ``extract_failure_kind`` — класс отказа извлечения: ``None`` ⇒ ``parser_failed``
         (прежнее отображение), таймаут задания пула приходит как ``extraction_timeout``.
+
+        **Ручной артефакт (§3.3).** ``origin != 'crawl'`` — элемент сеанса не пишется:
+        отказ краула (``robots_disallow``) остаётся фактом аудита, а не превращается в
+        ``fetched``. Меняется только писатель ``corpus_docs`` (``origin='manual'``).
+        :returns: ``doc_id``, если документ попал в корпус, иначе ``None`` — по этому
+            признаку ручная подача закрывает пробел покрытия.
         """
+        manual = origin != ORIGIN_CRAWL
+
+        def mark(pid: str, u: str, status: CrawlItemStatus, **fields: Any) -> None:
+            """``_mark`` для краула; для ручного артефакта — no-op (аудит не перезаписывается)."""
+            if manual:
+                return
+            _mark(pid, u, status, **fields)
+
         if reuse is not None and extracted is not None and getattr(extracted, "error", None):
             # Экстрактор текущего прогона сообщил сбой: переиспользование скрыло бы его,
             # а сбой парсера — это сигнал о конвейере, а не повод «взять старое».
@@ -4311,7 +4415,7 @@ def _build_corpus(
         if reuse is None:
             if extract_error is not None:
                 errors.append(f"{product_id}/{url}: extract: {extract_error}")
-                _mark(
+                mark(
                     product_id,
                     url,
                     CrawlItemStatus.FAILED,
@@ -4321,11 +4425,11 @@ def _build_corpus(
                     error=extract_error,
                     raw_path=str(raw_path),
                 )
-                return
+                return None
             if extracted is None or getattr(extracted, "error", None):
                 reason = getattr(extracted, "error", None) or "пустой ExtractedDoc"
                 errors.append(f"{product_id}/{url}: extract: {reason}")
-                _mark(
+                mark(
                     product_id,
                     url,
                     CrawlItemStatus.FAILED,
@@ -4333,14 +4437,14 @@ def _build_corpus(
                     error=reason,
                     raw_path=str(raw_path),
                 )
-                return
+                return None
 
             doc_hash = str(getattr(extracted, "content_hash", "") or "")
             if not doc_hash:
                 errors.append(
                     f"I19: {product_id}/{url}: ExtractedDoc без content_hash — отклонён"
                 )
-                _mark(
+                mark(
                     product_id,
                     url,
                     CrawlItemStatus.FAILED,
@@ -4348,7 +4452,7 @@ def _build_corpus(
                     error="ExtractedDoc без content_hash",
                     raw_path=str(raw_path),
                 )
-                return
+                return None
             doc_extractor_version = getattr(extracted, "extractor_version", None)
             extractor_token = str(doc_extractor_version or "") or extractor_token
         else:
@@ -4360,6 +4464,7 @@ def _build_corpus(
             level_text = reuse.doc_version.level or level_text
 
         # 4. Дедуп по content_hash (в пределах продукта).
+        document_id = f"{product_id}:{doc_hash}"
         if doc_hash in seen_docs:
             # Наблюдаемость: сколько документов схлопнулось по продукту. Класс исхода
             # не меняется (алиас получает ``FETCHED`` и версию близнеца) — это счётчик,
@@ -4371,7 +4476,7 @@ def _build_corpus(
             found = _find_doc_version(
                 product_id, doc_hash, extractor_token, level_text
             )
-            _mark(
+            mark(
                 product_id,
                 url,
                 CrawlItemStatus.FETCHED,
@@ -4385,10 +4490,9 @@ def _build_corpus(
                     "last_http_status": page.status_code,
                 },
             )
-            return
+            return document_id
         seen_docs[doc_hash] = url
 
-        document_id = f"{product_id}:{doc_hash}"
         doc = CorpusDoc(
             doc_id=document_id,
             product_id=product_id,
@@ -4407,7 +4511,7 @@ def _build_corpus(
         # Поэтому пишем строку сразу, а не в конце продукта: жёсткое убийство (OOM/SIGKILL)
         # теряет максимум документ «в полёте» (ещё извлекаемый), а не весь накопленный
         # продукт. ``_persist_docs`` изолирует сбой записи в ``errors`` — краул продолжается.
-        _persist_docs(store, [doc], errors)
+        _persist_docs(store, [doc], errors, origin=origin)
 
         # 5. Переиспользование версии (200 с прежним content_hash) либо чанкер.
         active_reuse = reuse
@@ -4436,7 +4540,7 @@ def _build_corpus(
                 # Сбой нарезки — не отказ источника/парсера: raw сохранён (FETCHED),
                 # повторный resume сможет ре-извлечь без ре-фетча.
                 errors.append(f"{product_id}/{url}: chunk: {type(exc).__name__}: {exc}")
-                return
+                return None
             candidates = [
                 (
                     int(getattr(chunk, "chunk_no", 0)),
@@ -4507,7 +4611,8 @@ def _build_corpus(
 
         # L1a: документ успешно добыт и нарезан → элемент сеанса терминален ``FETCHED``
         # (сеанс трекает краул: сырые байты сохранены = «ready» для материализации).
-        _mark(
+        # Для ручного артефакта ``mark`` — no-op: отказ краула остаётся в аудите (§3.3).
+        mark(
             product_id,
             url,
             CrawlItemStatus.FETCHED,
@@ -4523,6 +4628,211 @@ def _build_corpus(
                 "last_changed_at": None if reused else _now_iso(),
             },
         )
+        return document_id
+
+    # -- 13-manual-artifacts §3: подача объявленных файлов оператора ---------- #
+    def _manual_host_scope(product_id: str) -> tuple[frozenset[str], frozenset[str]]:
+        """``(own_hosts, declared_hosts)`` продукта — та же семантика, что у scope краула.
+
+        Собственные хосты продукта (его seed-корни) и **все** объявленные хосты прогона
+        (корни + ключи ``domain_profiles.yaml``). Ручной артефакт не расширяет scope:
+        поддомен допускается только объявленным, чужой хост — нет. Иначе «предоставление»
+        стало бы способом дописать корпус чужим хостом — то есть execution_change,
+        проведённым мимо ``run_id``.
+        """
+        from core.pipeline.serp_loop import declared_serp_hosts
+
+        own_by_product, declared = declared_serp_hosts(
+            {product_id: url_map.get(product_id, [])}, domain_profiles
+        )
+        return own_by_product.get(product_id, frozenset()), declared
+
+    def _persist_manual_audit(
+        entry: ManualArtifact, *, doc_id: str | None, raw_path: Path | None
+    ) -> None:
+        """Аудит предоставления (§3.3): акт человека, а не «повторная попытка фетча».
+
+        Пишется и при неудаче (``doc_id``/``raw_path`` — ``None``): «объявлено, но не
+        дошло» — факт, который нельзя терять, иначе провал подачи выглядел бы как её
+        отсутствие. Отказ краула по этому URL живёт отдельно (``crawl_session_items``)
+        и этим методом не трогается.
+        """
+        if store is None:
+            return
+        try:
+            store.save_manual_artifact(
+                artifact_record(
+                    entry,
+                    run_id=str(run_id or ""),
+                    doc_id=doc_id,
+                    raw_path=None if raw_path is None else str(raw_path),
+                    created_at=_now_iso(),
+                )
+            )
+        except Exception as exc:  # noqa: BLE001 — наблюдаемость важнее персистенции
+            errors.append(
+                f"{entry.product_id}/{entry.url}: manual_artifact audit: "
+                f"{type(exc).__name__}: {exc}"
+            )
+
+    def _feed_manual_artifact(
+        product_id: str,
+        entry: ManualArtifact,
+        ingest: _ProductIngest,
+        seen_docs: dict[str, str],
+        seen_chunk_ids: set[str],
+    ) -> tuple[str | None, Path | None]:
+        """Один объявленный файл: допуск → retention → экстракция → корпус (I19).
+
+        **Чего здесь нет.** Нет второго пути байтов: файл оператора читается и отдаётся
+        ``RawPage``, дальше работает :func:`_retain` — единственный writer сырых байтов,
+        который сам хеширует их и кладёт в ``corpus_raw``. Файл оператора **не
+        перемещается и не изменяется**: ``_publish_staged`` (переезд staging-файла) здесь
+        не используется вовсе, поэтому предоставленный файл остаётся там, где его положил
+        человек, и следующий прогон перечитает его же.
+
+        **Краулер обходится, границы — нет** (§3.3): живой фетч не выполняется (robots
+        снова отказал бы), но SSRF-валидация, scope объявленных хостов продукта и
+        блэклист остаются обязательными, а потолок размера артефакта берётся тот же, что
+        у краулера (не новый лимит, а уже объявленный ``crawl.max_artifact_bytes``).
+
+        **Отказ не стирается.** Элемент сеанса этим путём не перезаписывается
+        (``origin=ORIGIN_MANUAL`` отключает ``_mark``): ``failed`` + ``robots_disallow``
+        остаётся в ``crawl_session_items``, а наблюдённость материала видна отдельно —
+        ``corpus_docs.origin = 'manual'``.
+
+        :returns: ``(doc_id, raw_path)``: ``doc_id`` — документ попал в корпус (только
+            такой артефакт закрывает пробел покрытия), ``raw_path`` — retained-байты
+            (``None`` — байты не сохранены).
+        """
+        from core.pipeline.serp_loop import serp_host_in_scope
+
+        url = entry.url
+        where = f"{product_id}/{url}: manual_artifact"
+        # 1. SSRF — та же единственная проверка URL, что у всего прогона. Дублируется
+        #    намеренно: загрузчик проверяет декларацию, фаза — допуск байтов.
+        try:
+            validate_url(url)
+        except ValueError as exc:
+            errors.append(f"{where}: URL не проходит SSRF-проверку ({exc}) — не допущен")
+            return None, None
+        # 2. Scope — только объявленные хосты продукта (поддомен — если объявлен).
+        own_hosts, declared_hosts = _manual_host_scope(product_id)
+        if not serp_host_in_scope(
+            urlsplit(url).hostname or "", own_hosts, declared_hosts
+        ):
+            errors.append(
+                f"{where}: хост вне объявленных хостов продукта — не допущен "
+                "(предоставление не расширяет scope краула)"
+            )
+            return None, None
+        # 3. Пределы — те же объявленные оси, что у краула (app < run < site).
+        limits = resolve_crawl_limits(
+            url,
+            app=crawl_app or CrawlConfig(),
+            run=crawl_defaults,
+            profiles=domain_profiles or {},
+            derive_extract_workers=derive_extract_workers,
+            mem_budget_mb=mem_budget_mb,
+        )
+        if is_blacklisted(url, limits):
+            errors.append(f"{where}: URL в блэклисте — не допущен")
+            return None, None
+        if entry.size > limits.max_artifact_bytes:
+            # Не новый потолок: ровно та граница, на которой краулер отказал бы этому же
+            # файлу (``payload_too_large``). Молчаливая обрезка запрещена.
+            errors.append(
+                f"{where}: {entry.size} Б > crawl.max_artifact_bytes="
+                f"{limits.max_artifact_bytes} — не допущен "
+                f"({FailureKind.PAYLOAD_TOO_LARGE.value}, как у краула)"
+            )
+            return None, None
+        target = resolve_crawl_target(
+            product_id,
+            url,
+            sources=crawl_sources or CrawlSourcesConfig(),
+            profiles=domain_profiles or {},
+            explicit=explicit_fetch,
+            run_default_strategy=crawl_strategy_default,
+            run_default_rate_limit=crawl_rate_default,
+        )
+        fetch_plan = target.plan
+        level = limits.document_level
+        extractor_obj: ExtractorPort = extractor
+        if extractor_factory is not None and (
+            level is not DocumentLevel.FULL
+            or limits.pdf_pipeline is not PdfPipeline.STRUCTURED
+        ):
+            # Зеркало пути корня (P5): уровень/механизм — свойство настройки, а не
+            # «какой экстрактор случайно передали». Отказ фабрики — видимая деградация.
+            try:
+                extractor_obj = extractor_factory(level, limits.pdf_pipeline)
+            except Exception as exc:  # noqa: BLE001 — изоляция по контракту фазы
+                errors.append(
+                    f"{where}: extractor_factory({level.value}, "
+                    f"{limits.pdf_pipeline.value}): {type(exc).__name__}: {exc} — "
+                    "понижен до переданного экстрактора"
+                )
+                extractor_obj = extractor
+        # 4. Байты оператора → RawPage. Файл только читается (аудит сохраняет его на
+        #    месте): retained-копию пишет ``_retain``, и именно её хеш станет evidence.
+        try:
+            body = entry.path.read_bytes()
+        except OSError as exc:
+            errors.append(f"{where}: объявленный файл не читается: {exc}")
+            return None, None
+        page = RawPage(
+            url=url,
+            content=body,
+            fetched_at=_now_iso(),
+            # Получения не было: ``render_mode='http'`` был бы ложной провенанс-записью,
+            # поэтому NULL + ``origin='manual'`` (два факта вместо одного неверного).
+            fetch_mode=None,  # type: ignore[arg-type]
+            content_type=_MEMBER_CONTENT_TYPES.get(document_suffix(url) or ""),
+            engine=ORIGIN_MANUAL,
+        )
+        raw_path = _retain(product_id, url, page, fetch_plan, origin=ORIGIN_MANUAL)
+        if raw_path is None:
+            return None, None
+        # 5. Контейнер — маршрут **спуска**, а не экстрактора; спуск живёт внутри дренажа
+        #    корня (пулы/окна/провенанс). Ручная подача его не исполняет, поэтому говорит
+        #    это вслух: тихая попытка «скормить zip docling-у» дала бы невнятный
+        #    ``parser_failed`` вместо честного «предоставьте документы членами».
+        try:
+            probe = probe_artifact(
+                raw_path,
+                product_id=product_id,
+                url=url,
+                content_type=page.content_type,
+                container_for=container_for,
+            )
+            artifact_probes.append(probe.as_dict())
+            if probe.is_container:
+                errors.append(
+                    f"{where}: контейнер ({probe.artifact.format}) — спуск для ручной "
+                    "подачи не подключён; предоставьте документы членами архива "
+                    "(спуск исполняется только краулом)"
+                )
+                return None, raw_path
+        except Exception as exc:  # noqa: BLE001 — зонд не роняет фазу
+            errors.append(
+                f"{where}: зонд артефакта: {type(exc).__name__}: {exc} — "
+                "артефакт подан экстрактору как есть"
+            )
+        doc_id = _ingest_one(
+            product_id,
+            url,
+            page,
+            fetch_plan,
+            raw_path,
+            ingest,
+            seen_docs,
+            seen_chunk_ids,
+            extractor_obj,
+            level,
+            origin=ORIGIN_MANUAL,
+        )
+        return doc_id, raw_path
 
     def _submit_collect(work: list[CrawlWorkItem]) -> dict[tuple[str, str], CrawlResultItem]:
         """Phase 3.3/5.3: подача набора работ исполнителю → ожидание → сбор результатов.
@@ -6105,6 +6415,11 @@ def _build_corpus(
         if limits.extract_workers_derived:
             observed_extract_derived = True
 
+    #: 13-manual-artifacts §3.3: ``product_id → [url]``, чей материал **предъявлен**
+    #: объявленным артефактом и дошёл до корпуса. Это вход ``derive_corpus_coverage``:
+    #: отказ краула по такому URL остаётся аудитом, но перестаёт делать покрытие
+    #: неполным. Объявляется до цикла — нужен и на границе продукта, и в конце фазы.
+    manual_urls_by_product: dict[str, list[str]] = {}
     for product_id in products:
         product_started = time.perf_counter()
         ingest = _ProductIngest(product_id=product_id)
@@ -7856,6 +8171,26 @@ def _build_corpus(
         while extract_pending:
             _finish_extract(extract_pending.popleft())
         _finalize_ready_roots()
+        # -- 13-manual-artifacts §3: подача объявленных файлов оператора ---------- #
+        # Порядок важен: **после** дренажа (отказы краула уже в элементах сеанса —
+        # иначе аннотировать нечего) и **до** Pass B (документы входят в ту же сборку,
+        # I19). Очередь и счётчики сеанса подача не трогает, поэтому ``fetched``
+        # продукта по-прежнему означает «прочитано краулом».
+        manual_entries = (
+            manual_artifacts.for_product(product_id)
+            if manual_artifacts is not None
+            else ()
+        )
+        manual_resolved: list[str] = []
+        for entry in manual_entries:
+            doc_id, raw_path = _feed_manual_artifact(
+                product_id, entry, ingest, seen_docs, seen_chunk_ids
+            )
+            if doc_id is not None:
+                manual_resolved.append(entry.url)
+            _persist_manual_audit(entry, doc_id=doc_id, raw_path=raw_path)
+        if manual_resolved:
+            manual_urls_by_product[product_id] = manual_resolved
 
         # Ops-потолок ревалидации — **продуктовое** усечение через существующий канал
         # (``truncated`` + ``truncated_reason``), без новой coverage/freshness-оси.
@@ -7926,7 +8261,10 @@ def _build_corpus(
         product_reason: str | None = None
         # Zero-source — утверждение о **сеансе**: без сеанса «нет элементов» не значит
         # «нет источников» (счётчики просто не ведутся), поэтому причина не выдумывается.
-        if session is not None and not product_items:
+        # ``and not manual_resolved``: продукт, чей материал предъявлен объявленным
+        # артефактом, без источников **не** остался — иначе ошибка утверждала бы
+        # пустой корпус при непустом.
+        if session is not None and not product_items and not manual_resolved:
             # Истинная причина вместо единой константы ``no_seeds``: пустой seed-набор,
             # полностью отклонённые seed'ы и отсутствие записи в ``urls`` — разные пути.
             if product_id not in url_map:
@@ -7962,6 +8300,10 @@ def _build_corpus(
                 "fetched": product_fetched,
                 "failed": product_failed,
                 "docs": len(ingest.docs),
+                # 13-manual-artifacts §3.3: «объявлено» и «дошло до корпуса» —
+                # разные факты, и разницу нельзя выводить один из другого.
+                "manual_declared": len(manual_entries),
+                "manual_resolved": len(manual_resolved),
                 "elapsed_seconds": round(time.perf_counter() - product_started, 3),
                 "reason": product_reason,
             }
@@ -8147,6 +8489,7 @@ def _build_corpus(
                     _now_iso(),
                     products=[product_id],
                     reasons=zero_source_reasons,
+                    resolved_manually=manual_urls_by_product,
                 )
             except Exception as exc:  # noqa: BLE001 — наблюдаемость важнее персистенции
                 errors.append(
@@ -8213,6 +8556,7 @@ def _build_corpus(
                 _now_iso(),
                 products=products,
                 reasons=zero_source_reasons,
+                resolved_manually=manual_urls_by_product,
             )
         except Exception as exc:  # noqa: BLE001 — наблюдаемость важнее персистенции
             errors.append(

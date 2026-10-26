@@ -74,6 +74,7 @@ from core.config.deploy import ENV_SERP, DeployConfig, resolve_llm_slot, resolve
 from core.domain.dictionary import load_dictionary
 from core.domain.models import canonical_rate_limit
 from core.pipeline.normalize import RunInputs
+from core.pipeline.manual_artifacts import load_manual_artifacts
 from core.pipeline.report import crawl_control_digest
 
 __all__ = [
@@ -115,6 +116,12 @@ class DeclaredExecutionAxes:
     chunker_version: str | None
     llm_scenarios: tuple[dict[str, Any], ...]
     extractor_stack: str
+    #: 13-manual-artifacts §3.2: отпечаток объявленных ручных артефактов
+    #: (``sources/manual_artifacts.yaml``). Объявленный вход (файл пакета), поэтому
+    #: вычислим до сборки портов; материал — ``(product_id, url, sha256)``, где
+    #: ``sha256`` **вычислен из байтов** (объявленный — сверка, не основание доверия).
+    #: ``None`` — резолвер не вызывался (DI/legacy): «неизвестно», не «пусто».
+    manual_artifacts_digest: str | None = None
 
 
 def extractor_stack_version() -> str:
@@ -228,6 +235,31 @@ def _crawl_axis_overrides(args: argparse.Namespace) -> dict[str, Any]:
     return overrides
 
 
+def _manual_artifacts_digest(args: argparse.Namespace) -> str:
+    """Отпечаток объявленных ручных артефактов (13-manual-artifacts §3.2).
+
+    Читается **тот же** файл пакета тем же загрузчиком, что и фаза корпуса
+    (:func:`core.pipeline.manual_artifacts.load_manual_artifacts`): двух формул
+    дайджеста нет, иначе ``run_id`` описывал бы не тот корпус, который собран.
+
+    Загрузка — здесь, а не в фазе корпуса, потому что ось объявлена: она обязана быть
+    видна ``run_id`` **до** запуска. Объявленный, но нечитаемый/несовпавший по ``sha256``
+    артефакт — отказ ``EXIT_USAGE`` (§3.1: сверка хеша — не основание доверия, а проверка).
+    Отсутствие файла — не ошибка: стабильный дайджест пустого множества.
+
+    :raises core.cli.errors.CliError: декларация есть, но невалидна.
+    """
+    package_dir = getattr(args, "package", None)
+    try:
+        return load_manual_artifacts(package_dir).digest()
+    except ValueError as exc:
+        raise CliError(
+            f"manual_artifacts: {exc}",
+            code="manual_artifacts",
+            exit_code=EXIT_USAGE,
+        ) from exc
+
+
 def _serp_axis(
     *, args: argparse.Namespace, run: Any, deploy: DeployConfig
 ) -> tuple[int, str]:
@@ -316,4 +348,7 @@ def resolve_declared_axes(
         chunker_version=composite_chunker_version(),
         llm_scenarios=_resolve_llm_scenarios(args=args, inputs=inputs, deploy=config),
         extractor_stack=extractor_stack_version(),
+        # 13-manual-artifacts §3.2: ручные артефакты объявлены файлом пакета, поэтому
+        # отпечаток — функция входа (как seeds_digest), а не наблюдение прогона.
+        manual_artifacts_digest=_manual_artifacts_digest(args),
     )

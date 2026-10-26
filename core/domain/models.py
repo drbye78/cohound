@@ -1505,6 +1505,19 @@ class RunManifest(BaseModel):
     #: (``scope_acceptance``), а не аттестация полноты. Старые манифесты читаются:
     #: ``_migrate_legacy_keys`` перекладывает исторический ключ.
     scope_acceptance: dict[str, str] = Field(default_factory=dict)
+    #: 13-manual-artifacts §3.4: доля ручного — **публикуется числом, потолка нет**.
+    #: ``{count, share_of_corpus, bytes, by_reason, by_product}``: ``count`` — предъявленные
+    #: артефакты, дошедшие до корпуса; ``share_of_corpus`` — их доля в документах корпуса;
+    #: ``by_product`` содержит **все** продукты плана, включая нули — правило симметрии
+    #: («одинаково доступно всем продуктам», регламент §10) видно, а не подразумевается.
+    #: В ``EXECUTION_CONTRACT_FIELDS`` входит только ``manual_artifacts_digest``: сам блок —
+    #: наблюдение прогона (сколько байтов реально предъявлено), а не условие измерения.
+    manual_artifacts: dict[str, Any] = Field(default_factory=dict)
+    #: 13-manual-artifacts §3.2: отпечаток **объявленных** артефактов — поле контракта
+    #: (``EXECUTION_CONTRACT_FIELDS``), поэтому ``hound diff`` называет его изменение сменой
+    #: условий измерения, а не «неизвестно чем». ``None`` — legacy-манифест: дайджест не
+    #: вычислялся и не фабрикуется.
+    manual_artifacts_digest: str | None = None
 
     @model_validator(mode="before")
     @classmethod
@@ -1819,6 +1832,9 @@ class CorpusCoverage(BaseModel):
     :param partial_blocks: ``origin → {error_kind: count}`` — не-``not_found`` сбои по
         каждому origin (аудит частичных отказов; ключи отсортированы).
     :param truncated: продукт попал в ``truncated_products`` сеанса.
+    :param resolved_manually: сколько блокирующих отказов закрыто объявленным ручным
+        артефактом (13-manual-artifacts §3.3): отказ остаётся в :attr:`blocked` как аудит,
+        но материал наблюдён, поэтому он не делает покрытие неполным.
     :param computed_at: момент вычисления (ISO-8601); детерминизм обеспечивает вызывающий.
     """
 
@@ -1833,6 +1849,11 @@ class CorpusCoverage(BaseModel):
     partial_blocks: dict[str, dict[str, int]] = Field(default_factory=dict)
     truncated: bool = False
     computed_at: str
+    #: 13-manual-artifacts §3.3: сколько **блокирующих** отказов закрыто объявленным ручным
+    #: артефактом (материал наблюдён, хоть и другим путём). Отказ при этом остаётся в
+    #: :attr:`blocked`/``partial_blocks`` как аудит — заменяется не факт, а его последствие
+    #: для полноты покрытия. ``0`` — ручных подач не было (поведение прежнее).
+    resolved_manually: int = 0
     #: Машинная причина неполноты/отсутствия наблюдения (``no_seeds``,
     #: ``all_seeds_rejected``, ``no_urls_entry``, ``coverage_missing``). Наблюдательное
     #: поле: класс сбоя ячеек остаётся ``no_sources``, словарь §4.1 не расширяется.
@@ -1908,6 +1929,11 @@ class CorpusCoverage(BaseModel):
         """``complete=True`` несовместимо с усечением и нечитаемыми origin'ами."""
         if self.expected_sources < 0 or self.observed_sources < 0:
             raise ValueError("corpus_coverage: счётчики не могут быть отрицательными")
+        if self.resolved_manually < 0 or self.resolved_manually > self.expected_sources:
+            raise ValueError(
+                "corpus_coverage: resolved_manually — число закрытых вручную отказов "
+                "(0..expected_sources)"
+            )
         if self.observed_sources > self.expected_sources:
             raise ValueError(
                 "corpus_coverage: observed_sources не может превышать expected_sources"

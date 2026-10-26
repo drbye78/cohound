@@ -67,6 +67,8 @@ CREATE TABLE IF NOT EXISTS runs (
     crawl_config_digest   TEXT,                        -- §13/N6: дайджест разрешённой конфигурации контроля краула (execution_change)
     registry_spec_digest  TEXT,                        -- §13/E2: дайджест package-scoped спецификаций реестров (execution_change)
     execution_contract_digest TEXT,                    -- §13/09 §12.5: отпечаток условий измерения (methodology_change boundary)
+    manual_artifacts_digest TEXT,                      -- 13-manual-artifacts §3.2: отпечаток объявленных ручных артефактов (execution_change)
+    manual_artifacts_json TEXT,                        -- 13-manual-artifacts §3.4: доля ручного (наблюдение, не потолок)
     ranking_epsilon       REAL,                        -- §6/B-1: порог неразличимости ранжирования
     deploy_profile        TEXT,                        -- 07 §7: профиль доверенных зон (R7)
     edge_schema_version   TEXT,                        -- 07 §7: версия контракта шва /v1/* (execution-class)
@@ -103,7 +105,29 @@ CREATE TABLE IF NOT EXISTS corpus_docs (
     raw_path         TEXT,
     extractor_version TEXT,
     render_mode      TEXT,
-    lang             TEXT
+    lang             TEXT,
+    -- 13-manual-artifacts §3.3: происхождение **байтов** ('crawl'|'manual'). Отказ краула
+    -- (crawl_session_items) не стирается: материал наблюдён другим путём — два факта.
+    origin           TEXT NOT NULL DEFAULT 'crawl'
+);
+
+-- 13-manual-artifacts §3.3: аудит предоставления. Строка на объявленную подачу, дошедшую
+-- до корпуса; факт отказа по этому URL остаётся в crawl_session_items.
+CREATE TABLE IF NOT EXISTS manual_artifacts (
+    run_id          TEXT NOT NULL,
+    product_id      TEXT NOT NULL,
+    url             TEXT NOT NULL,
+    sha256          TEXT NOT NULL,
+    doc_id          TEXT,
+    raw_path        TEXT,
+    declared_path   TEXT,
+    reason          TEXT,
+    provided_by     TEXT,
+    provided_at     TEXT,
+    byte_size       INTEGER,
+    created_at      TEXT,
+    PRIMARY KEY (run_id, product_id, url),
+    FOREIGN KEY (run_id) REFERENCES runs(run_id)
 );
 
 CREATE TABLE IF NOT EXISTS corpus_chunks (
@@ -333,6 +357,9 @@ CREATE TABLE IF NOT EXISTS corpus_coverage (
     truncated         INTEGER NOT NULL DEFAULT 0,
     computed_at       TEXT NOT NULL,
     reason            TEXT,
+    -- 13-manual-artifacts §3.3: блокирующие отказы, закрытые объявленным ручным артефактом.
+    -- Отказ остаётся в blocked_json (аудит); поле меняет только последствие для complete.
+    resolved_manually INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (run_id, product_id)
 );
 
@@ -643,6 +670,18 @@ def connect(db_path: str | Path = ":memory:") -> sqlite3.Connection:
     # недельный (инкрементальный) diff всегда отказывал бы. Аддитивно и идемпотентно;
     # старые строки получают NULL — legacy-прогон, дайджест не фабрикуется.
     _ensure_columns(conn, "runs", {"execution_contract_digest": "TEXT"})
+    # 13-manual-artifacts §3.2/§3.4: отпечаток объявленных ручных артефактов (поле
+    # контракта, поэтому ``hound diff`` обязан его называть) и опубликованный блок доли
+    # ручного. Аддитивно: старые строки получают NULL (дайджест не вычислялся — не
+    # фабрикуется), блок — пустой словарь при чтении.
+    _ensure_columns(
+        conn,
+        "runs",
+        {
+            "manual_artifacts_digest": "TEXT",
+            "manual_artifacts_json": "TEXT",
+        },
+    )
     # DDL-миграция v3.6 (P6): аннотация причины pending-ячейки (конфликт источников vs
     # условное наследование). Аддитивно и идемпотентно; это не статус и не перечисление.
     _ensure_columns(conn, "cells", {"review_reason": "TEXT"})
@@ -712,8 +751,18 @@ def connect(db_path: str | Path = ":memory:") -> sqlite3.Connection:
             "partial_blocks_json": "TEXT NOT NULL DEFAULT '{}'",
             # MVP-1 (09 §11.3): причина zero-source/аномалии покрытия.
             "reason": "TEXT",
+            # 13-manual-artifacts §3.3: блокирующий отказ, закрытый объявленным артефактом.
+            # Аддитивно: старые строки читаются как «ручных подач не было» (0).
+            "resolved_manually": "INTEGER NOT NULL DEFAULT 0",
         },
     )
+    # 13-manual-artifacts §3.3: происхождение **байтов** корпуса — аддитивная колонка
+    # (``crawl`` по умолчанию): старые БД читают прежние строки как «получено краулом»,
+    # а ``schema_version`` **не** поднимается — гейт версии (11 §2.6) отверг бы уже
+    # существующие прогоны, то есть выполнимое требование «старый прогон остаётся
+    # читаемым» было бы нарушено (прецедент — ``cells.evidence_scope``). Таблица
+    # ``manual_artifacts`` создаётся ``CREATE TABLE IF NOT EXISTS`` в DDL — ALTER не нужен.
+    _ensure_columns(conn, "corpus_docs", {"origin": "TEXT NOT NULL DEFAULT 'crawl'"})
     # v3.1.0 — удаление legacy per-URL таблицы попыток (полностью замещена сеансом краула,
     # back-compat не требуется): DDL-таблицы/индексов и их миграции больше нет.
     # DDL-миграция v3.11.0 (G3/G4 как точки интеграции): решение гейта привязывается к

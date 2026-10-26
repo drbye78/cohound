@@ -1586,3 +1586,46 @@ def test_read_only_open_of_run_made_before_new_columns(tmp_path: Path) -> None:
         assert evidence == []
     finally:
         legacy.close()
+
+
+def test_persist_manifest_roundtrips_manual_artifacts(store: SqliteStore) -> None:
+    """13-manual-artifacts §3.2/§3.4: дайджест (поле контракта) и блок доли — round-trip.
+
+    Оба значения идут через один ``UPDATE`` строки ``runs``; рассогласование SQL и
+    параметров здесь означало бы молчаливый ``NULL`` в манифесте завершённого прогона —
+    то есть опубликованный отчёт без провенанса подачи.
+    """
+    store.create_run(RUN_ID, _cfg())
+    manifest = RunManifest(
+        run_id=RUN_ID,
+        case_id="case-1",
+        created_at="2026-01-01T00:00:00Z",
+        mode=RunMode.STRICT,
+        methodology_version="0.1.0",
+        package_version="pkg-1.2.3",
+        catalog_version="cat-1",
+        status_dict_version="sd-1",
+        scoring_policy_version="sp-1",
+        anchor_product_id="p1",
+        manual_artifacts_digest="a" * 24,
+        manual_artifacts={
+            "count": 1,
+            "declared": 2,
+            "share_of_corpus": 0.25,
+            "bytes": 1024,
+            "by_reason": {"robots_disallow": 1},
+            "by_product": {"p1": 1, "p2": 0},
+        },
+    )
+    store.persist_manifest(RUN_ID, manifest)
+    read = store.read_manifest(RUN_ID)
+    assert read.manual_artifacts_digest == "a" * 24
+    assert read.manual_artifacts["count"] == 1
+    assert read.manual_artifacts["by_product"] == {"p1": 1, "p2": 0}
+
+    # Legacy-строка (ни разу не писавшая блок) читается как пустой блок, а не как NULL:
+    # «подач не было» не выдумывается из отсутствия значения.
+    store.create_run("run-legacy", _cfg())
+    legacy = store.read_manifest("run-legacy")
+    assert legacy.manual_artifacts_digest is None
+    assert legacy.manual_artifacts == {}

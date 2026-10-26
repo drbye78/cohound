@@ -642,6 +642,8 @@ def build_manifest(
     operator_document_level: str | None = None,
     registry_spec_digest: str | None = None,
     execution_contract_digest: str | None = None,
+    manual_artifacts: Mapping[str, Any] | None = None,
+    manual_artifacts_digest: str | None = None,
     axes: Any = None,
     declared_status_dict_version: str | None = None,
     scope_attestations: Mapping[str, str] | None = None,
@@ -703,6 +705,11 @@ def build_manifest(
       прогон авторизовал ``❌``. Информационный провенанс того же класса, что
       ``reviewed_by``: в ``EXECUTION_CONTRACT_FIELDS`` **не входит** (авторизация, не
       измерение), поэтому смена подписанта не даёт новый ``run_id``.
+    * 13-manual-artifacts §3.2/§3.4 — ``manual_artifacts_digest`` (отпечаток объявленных
+      файлов оператора; поле контракта) и ``manual_artifacts`` (наблюдённая доля ручного:
+      ``count``/``share_of_corpus``/``bytes``/``by_reason``/``by_product``). Первый —
+      условие измерения (меняет корпус), второй — факт прогона: он **не** входит в
+      контракт, иначе «сколько предъявлено» стало бы входом, влияющим на ``run_id``.
     * ``observed_versions`` — наблюдаемые величины сборки (``embed_model_id``/
       ``extractor_version``/``lexical_engine_version``/``vector_store``/``chunker_version``),
       которые фаза отчёта читает из **durable-манифеста индексной сборки**, когда живой
@@ -1031,6 +1038,16 @@ def build_manifest(
         ),
         # 09 §12.5: готовый отпечаток условий измерения (не пересчитывается здесь).
         execution_contract_digest=execution_contract_digest,
+        # 13-manual-artifacts §3.2/§3.4: отпечаток **объявленных** артефактов (поле
+        # контракта — его называет ``hound diff``) и **наблюдённая** доля ручного
+        # (публикуется числом, потолка нет). Разные классы: первый — условие измерения
+        # (входит в ``run_id``), второй — факт прогона и в контракт **не** входит.
+        manual_artifacts_digest=(
+            getattr(axes, "manual_artifacts_digest", None)
+            if manual_artifacts_digest is None and axes is not None
+            else manual_artifacts_digest
+        ),
+        manual_artifacts=dict(manual_artifacts or {}),
         snapshot_date=snapshot_date,
         # I2b/I2c: подписи, которыми прогон авторизовал ❌ (product → actor). В
         # ``EXECUTION_CONTRACT_FIELDS`` не входят: это авторизация, не измерение.

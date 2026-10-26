@@ -80,6 +80,10 @@ from core.pipeline.registry import (
     resolve_registry_ids,
 )
 from core.pipeline.report import build_manifest, compact_search_effort, write_reports
+from core.pipeline.manual_artifacts import (
+    load_manual_artifacts,
+    manual_artifacts_summary,
+)
 from core.pipeline.retrieve import RetrievalProfile
 from core.pipeline.review import review_queue
 from core.pipeline.runner import PhaseFn, PhaseResult, Ports, RunContext
@@ -1025,6 +1029,13 @@ def build_phases(
             index_root=index_root,
             package_id=_package_id(inputs, plan),
             domain_profiles=domain_profiles or {},
+            # 13-manual-artifacts §3: объявленные файлы оператора — **вход фазы**
+            # (``sources/manual_artifacts.yaml`` пакета). Ось задана файлом, а не
+            # флагом: флаг теряется в следующем вызове, а ``run_id`` перестал бы
+            # описывать корпус. Загрузка здесь, а не в ``execution_axes``: там она
+            # уже была (для контракта) и там же отказывает ``EXIT_USAGE``, здесь —
+            # прямое исполнение (resume/прямой вызов модуля).
+            manual_artifacts=load_manual_artifacts(package_dir),
             explicit_fetch=explicit_fetch,
             # Lane A/L3a: слои источников краула и карта per-engine краулеров; пейсинг —
             # единый владелец (RateLimiter), протягивается composition root'ом.
@@ -1247,6 +1258,13 @@ def build_phases(
             # 09 §12.5: готовый отпечаток условий измерения (не пересчитывается здесь) —
             # носитель границы ``hound diff``; ``None`` не подменяется пустой строкой.
             execution_contract_digest=execution_contract_digest,
+            # 13-manual-artifacts §3.4: доля ручного — **числом**, не потолком.
+            # Источник — персистентный аудит (``manual_artifacts``), поэтому resume
+            # публикует тот же факт; нули по продуктам плана видны (симметрия).
+            manual_artifacts=manual_artifacts_summary(
+                ctx.store, plan.run_id, products=plan.products
+            ),
+            manual_artifacts_digest=getattr(axes, "manual_artifacts_digest", None),
             # §13 (2.4.0): декларированные оси — тот же резолвер, что у контракта.
             axes=axes,
             declared_status_dict_version=declared_status_dict_version,
