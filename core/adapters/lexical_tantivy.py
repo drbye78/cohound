@@ -88,6 +88,26 @@ _PROFILES = {"stemmed", "identifier", "raw", "ngram"}
 #: Поля, обязательные в индексируемой записи.
 _REQUIRED_FIELDS = ("chunk_id", "product_id", "text")
 
+#: Стартовый запас выдачи сверх ``top_k`` при поиске (R7: детерминизм границы).
+#:
+#: Tantivy-коллектор держит кучу ровно на запрошенное число документов, поэтому при
+#: **равных баллах на границе** выживает тот, кого выбрал движок, а не тот, кто меньше
+#: по ``chunk_id``. Замер (корпус ``jatoba``, K=10, 189 запросов): у 12 запросов (6.3 %)
+#: группа равных баллов на границе шире K, максимум — 12 документов. Наблюдёмый дефект:
+#: два процесса на той же сборке вернули на позиции 9 разные чанки при балле 16.671051,
+#: из-за чего ``prompt_hash`` ячеек разошёлся.
+#:
+#: Запас — не потолок, а старт: :meth:`TantivyLexicalIndex._deterministic_hits`
+#: расширяет окно вдвое, пока граница не выйдет из группы ничьих, поэтому результат
+#: точен при любом размере группы. Число нужно только чтобы обычный запрос не платил
+#: за полный перебор партиции.
+_TIE_HEADROOM = 16
+
+#: Потолок расширения окна (документов). Достигается только на патологической партиции,
+#: где ничья тянется до самого конца; тогда выдача усекается по ``(-score, chunk_id)``
+#: среди всех выданных — детерминированно, хотя и без полной гарантии полноты группы.
+_TIE_WINDOW_MAX = 4096
+
 
 def tantivy_available() -> bool:
     """Установлен ли ``tantivy`` (проверка без импорта тяжёлого движка)."""
@@ -255,6 +275,11 @@ class TantivyLexicalIndex:
             )
         writer.commit()
         index.reload()
+        # Writer отпускается сразу: он держит lock-файлы каталога индекса, а следующий
+        # шаг — создание searcher'а, которому writer не нужен. Без явного ``del``
+        # момент финализации объекта движка непредсказуем (GC), и уборка каталога в
+        # ``close()`` может соревноваться с ещё живым writer'ом.
+        del writer
 
         self._schema = schema
         self._index = index
@@ -306,7 +331,9 @@ class TantivyLexicalIndex:
 
     def _resolve_path(self, index_path: str | Path | None) -> Path:
         if index_path is None:
-            self._tmp = tempfile.TemporaryDirectory(prefix="cohound-tantivy-")
+            self._tmp = tempfile.TemporaryDirectory(
+                prefix="cohound-tantivy-", ignore_cleanup_errors=True
+            )
             return Path(self._tmp.name)
         path = Path(index_path)
         path.mkdir(parents=True, exist_ok=True)
@@ -356,29 +383,63 @@ class TantivyLexicalIndex:
         combined = tantivy.Query.boolean_query(
             [(tantivy.Occur.Must, base), (tantivy.Occur.Must, product_filter)]
         )
-        hits = self._searcher.search(combined, max(1, top_k))
-
-        allowed_set = set(allowed)
-        out: list[RetrievedChunk] = []
-        for score, address in hits.hits:
-            document = self._searcher.doc(address)
-            chunk_id = document.get_first(FIELD_CHUNK_ID)
-            record = self._records_by_id.get(chunk_id)
-            if record is None or record.product_id not in allowed_set:
-                continue
-            out.append(
-                RetrievedChunk(
-                    chunk_id=record.chunk_id,
-                    product_id=record.product_id,
-                    text=record.text,
-                    content_hash=record.content_hash,
-                    heading_path=record.heading_path,
-                    build_id=record.build_id or self.build_id,
-                    score=float(score),
-                )
-            )
+        out = self._deterministic_hits(combined, top_k, allowed)
         out.sort(key=lambda chunk: (-chunk.score, chunk.chunk_id))
         return out[:top_k]
+
+    def _deterministic_hits(
+        self, combined: Any, top_k: int, allowed: Sequence[str]
+    ) -> list[RetrievedChunk]:
+        """Выдача tantivy, у которой граница ``top_k`` **не разрезает группу равных баллов**.
+
+        Tantivy-коллектор отдаёт ровно запрошенное число документов, и при равенстве
+        баллов на границе выбор зависит от внутреннего порядка движка — он не обязан
+        совпадать между процессами (наблюдено на позиции 9: балл 16.671051 у двух чанков,
+        в разных процессах выживал разный). Это ломает провенанс: ``prompt_hash`` ячейки
+        считается по ``chunk_ids``, поэтому «тот же промпт» переставал быть тем же.
+
+        Поэтому окно запрашивается с запасом и **расширяется вдвое**, пока балл на
+        позиции ``top_k-1`` строго больше балла последнего полученного документа: это
+        доказательство, что группа ничьих целиком внутри окна и усечение по
+        ``(-score, chunk_id)`` даёт одно и то же множество в любом процессе. Плата за
+        обычный запрос — один лишний шаг кучи, а не перебор партиции.
+
+        Симметрия с dense-плечом: :func:`core.adapters.vector_npy._ranked_rows` держит то
+        же свойство («равные баллы на границе не теряются»), здесь оно достигается
+        расширением окна, потому что tantivy не умеет «дай всё с баллом ≥ X».
+        """
+        allowed_set = set(allowed)
+        window = max(1, top_k) + _TIE_HEADROOM
+        while True:
+            hits = self._searcher.search(combined, window)
+            out: list[RetrievedChunk] = []
+            for score, address in hits.hits:
+                document = self._searcher.doc(address)
+                chunk_id = document.get_first(FIELD_CHUNK_ID)
+                record = self._records_by_id.get(chunk_id)
+                if record is None or record.product_id not in allowed_set:
+                    continue
+                out.append(
+                    RetrievedChunk(
+                        chunk_id=record.chunk_id,
+                        product_id=record.product_id,
+                        text=record.text,
+                        content_hash=record.content_hash,
+                        heading_path=record.heading_path,
+                        build_id=record.build_id or self.build_id,
+                        score=float(score),
+                    )
+                )
+            # Окно исчерпало движок (все совпадения внутри) либо потолок — расширять
+            # больше нечем: усечение остаётся детерминированным по (-score, chunk_id).
+            if len(out) <= top_k or len(hits.hits) < window:
+                return out
+            ordered = sorted(out, key=lambda chunk: (-chunk.score, chunk.chunk_id))
+            if ordered[top_k - 1].score > ordered[-1].score:
+                return out  # граница top_k строго выше дна окна — ничья не разрезана
+            if window >= _TIE_WINDOW_MAX:
+                return out
+            window = min(window * 2, _TIE_WINDOW_MAX)
 
     def _query_for_profile(self, query: str, *, profile: str, lang: str | None) -> Any:
         """Строит разобранный запрос под профиль (``None`` — пустой запрос)."""
@@ -431,13 +492,25 @@ class TantivyLexicalIndex:
         return parsed
 
     def close(self) -> None:
-        """Освобождает временный каталог индекса (если он принадлежит адаптеру)."""
-        if self._tmp is not None:
-            self._tmp.cleanup()
-            self._tmp = None
+        """Освобождает временный каталог индекса (если он принадлежит адаптеру).
+
+        **Порядок важен, и он не косметика.** Сначала отпускаются объекты движка
+        (``searcher`` держит читателей сегментов, ``index`` — meta.json и lock-файлы),
+        и только потом удаляется каталог. В обратном порядке ``rmtree`` соревнуется с
+        движком и падает ``OSError[39] Directory not empty``; исключение всплывало из
+        ``__exit__`` контекстного менеджера, т.е. из самого ``close()`` — это ресурсный
+        флак, который в тестах выглядел как падение проверки, а не как проблема уборки.
+
+        Уборка каталога терпима к гонке (``ignore_cleanup_errors``): недоделанный
+        каталог во временной директории — цена, которую дешевле заплатить, чем уронить
+        прогон на выходе из фазы.
+        """
         self._index = None
         self._searcher = None
         self._built = False
+        if self._tmp is not None:
+            self._tmp.cleanup()
+            self._tmp = None
 
     def __enter__(self) -> TantivyLexicalIndex:
         return self

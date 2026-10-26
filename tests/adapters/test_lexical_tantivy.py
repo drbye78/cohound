@@ -183,6 +183,48 @@ def test_same_query_twice_is_deterministic() -> None:
     assert first  # запрос действительно что-то нашёл
 
 
+@requires_tantivy
+def test_boundary_tie_does_not_depend_on_insertion_order() -> None:
+    """Граница ``top_k`` не разрезает группу равных баллов (R7).
+
+    Двадцать документов с **одинаковым** текстом дают одинаковый BM25-балл, поэтому
+    позиция ``top_k`` попадает внутрь группы ничьих. Коллектор tantivy отдаёт ровно
+    запрошенное число и при равенстве баллов выбирает по внутреннему порядку — он
+    зависит от порядка вставки. Наблюдено на живом корпусе: два процесса на одной
+    сборке вернули на позиции 9 разные чанки при балле 16.671051.
+
+    Инвариант: выдача при фиксированном ``top_k`` не зависит от порядка вставки и
+    совпадает с лексикографически младшими участниками ничьей.
+    """
+    records = [
+        LexicalChunk(chunk_id=f"c{i:02d}", product_id=PRODUCT_A, text="экспорт данных")
+        for i in range(20)
+    ]
+    with _index(records) as ascending:
+        asc = [c.chunk_id for c in ascending.search("экспорт", [PRODUCT_A], top_k=5)]
+    with _index(list(reversed(records))) as descending:
+        desc = [c.chunk_id for c in descending.search("экспорт", [PRODUCT_A], top_k=5)]
+    assert asc == desc == ["c00", "c01", "c02", "c03", "c04"]
+
+
+@requires_tantivy
+def test_boundary_tie_wider_than_headroom_is_still_deterministic() -> None:
+    """Ничья шире стартового запаса расширяет окно, а не режется по воле движка.
+
+    Сорок равных документов при ``top_k=5`` не помещаются в окно ``top_k + запас``,
+    поэтому окно обязано вырасти; результат — тот же, что при узкой ничьей.
+    """
+    records = [
+        LexicalChunk(chunk_id=f"d{i:02d}", product_id=PRODUCT_A, text="экспорт данных")
+        for i in range(40)
+    ]
+    with _index(records) as ascending:
+        asc = [c.chunk_id for c in ascending.search("экспорт", [PRODUCT_A], top_k=5)]
+    with _index(list(reversed(records))) as descending:
+        desc = [c.chunk_id for c in descending.search("экспорт", [PRODUCT_A], top_k=5)]
+    assert asc == desc == ["d00", "d01", "d02", "d03", "d04"]
+
+
 # ---------------------------------------------------------------------------
 # Identifier-профиль
 # ---------------------------------------------------------------------------
