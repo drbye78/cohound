@@ -114,7 +114,8 @@ write-site'ов у них пока нет, но словарь обязан их
 | `failure_rate` | failed/(evaluated∪failed) — R13 |
 | `coverage_aggregate` | Evidence Coverage по вселенной scope (§6/B-3a; `universe`/`completed`/`defined`) |
 | `search_calls_by_phase` | расход поискового бюджета (I23) |
-| `llm_calls`, `tokens` | стоимость (важно для M1/§15) |
+| `llm_calls`, `tokens` | стоимость (важно для M1/§15); **накопленная** по заходам прогона (см. `llm_usage`) |
+| `llm_usage` | стоимость с разбивкой: `calls_cumulative`/`tokens_cumulative` (весь прогон), `calls_this_process`/`tokens_this_process` (этот заход, `usage_summary()` живёт один процесс), `processes` (сколько заходов учтено), `accounting: processes_that_wrote` (граница: заход, убитый до записи метрик, вклад теряет — это видно по `processes`), `current_source` (`adapter`\|`absent`\|`error` — «ноль» vs «не умеем считать»), `previous_source` (`none`\|`ok`\|`unreadable`) и тексты ошибок |
 | `duration_by_phase` | производительность |
 | `crawl` | durable-сеанс краула: гистограмма `{status: count}` из `crawl_session_counts`; пусто, если сеанса нет |
 | `crawl_truncation` | политическое усечение (N4): `truncated`/`truncated_reason`/`truncated_products`/`pages_fetched`/`revalidation_fetched`/`effective_limits`; пусто, если не усечён |

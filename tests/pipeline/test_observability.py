@@ -20,7 +20,7 @@ from typing import Any
 
 import pytest
 
-from core.pipeline.metrics import compute_metrics
+from core.pipeline.metrics import PriorLlmUsage, compute_metrics, merge_llm_usage
 from core.pipeline.observability import (
     InstrumentedPhases,
     instrument_phases,
@@ -40,6 +40,9 @@ B2_KEYS = {
     "search_calls_by_phase",
     "llm_calls",
     "tokens",
+    # M1/§15: стоимость LLM с разбивкой «накоплено прогоном / вклад процесса» и границей
+    # учёта (resume-заходы). ``llm_calls`` остаётся накопленным — поле не ломается.
+    "llm_usage",
     "duration_by_phase",
     "crawl",
     "crawl_truncation",
@@ -330,7 +333,12 @@ def test_write_run_metrics_is_deterministic_and_sort_keys(tmp_path: Path) -> Non
 def test_write_run_metrics_injected_durations_match_metrics_module(tmp_path: Path) -> None:
     durations = {"plan": 0.1, "evaluate": 2.0}
     path = write_run_metrics(run_id="run_y", out_dir=tmp_path, durations=durations)
-    expected = compute_metrics(phase_durations=durations).to_manifest_json()
+    # Блок ``llm_usage`` собирает :func:`merge_llm_usage` из пустого предыдущего состояния
+    # (файла ещё нет): сравниваем байт-в-байт с той же сборкой, а не «с формой без блока».
+    expected = compute_metrics(
+        phase_durations=durations,
+        llm_usage=merge_llm_usage(PriorLlmUsage(), calls_this_process=0),
+    ).to_manifest_json()
     assert path.read_text(encoding="utf-8") == expected
 
 

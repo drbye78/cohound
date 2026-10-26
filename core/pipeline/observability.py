@@ -32,6 +32,15 @@
 :func:`core.pipeline.resources.build_resources_block`; здесь же измеряется пик RSS на
 конец каждой фазы (``VmHWM``).
 
+**Стоимость LLM накапливается через файл.** ``usage_summary()`` адаптера живёт ровно один
+процесс, а прогон продолжается заходами (``--until corpus`` → продолжение). Поэтому
+:func:`write_run_metrics` перед записью читает **существующий** ``metrics.json`` и берёт
+его ``llm_usage``/``llm_calls``/``tokens`` как вклад предыдущих процессов, а
+``llm_calls``/``tokens`` аргументы — как вклад текущего
+(:func:`core.pipeline.metrics.merge_llm_usage`). Схема БД при этом не меняется: файл —
+носитель накопления. Граница названа в ``llm_usage.accounting``: заход, убитый до записи
+метрик, свой вклад теряет, и ``processes`` делает это вычислимым.
+
 Принципы
 --------
 * **Ключи/версии — в held-out JSON-контракте** §B.1/§B.2: поля не выдумываются,
@@ -48,22 +57,99 @@
 
 from __future__ import annotations
 
+import os
 import time
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from core.pipeline.metrics import compute_metrics
+from core.pipeline.metrics import (
+    compute_metrics,
+    merge_llm_usage,
+    read_prior_llm_usage,
+)
 from core.pipeline.resources import read_peak_rss_mb
 from core.pipeline.runner import Clock, PhaseFn, PhaseResult, RunContext
 from core.util.logging import PhaseLogger
 from core.util.security import sanitize_filename
 
-__all__ = ["InstrumentedPhases", "instrument_phases", "write_run_metrics"]
+__all__ = [
+    "InstrumentedPhases",
+    "LlmUsageSnapshot",
+    "collect_llm_usage",
+    "instrument_phases",
+    "write_run_metrics",
+]
 
 #: Имя файла метрик прогона (04 §B.2).
 METRICS_FILENAME = "metrics.json"
+
+
+@dataclass(frozen=True)
+class LlmUsageSnapshot:
+    """Вклад **текущего** процесса в стоимость LLM (M1/§15).
+
+    :param calls: вызовы LLM за процесс (``usage_summary()["calls"]``).
+    :param tokens: токены за процесс по категориям.
+    :param source: откуда вклад — ``adapter`` (адаптер посчитал), ``absent``
+        (``usage_summary`` нет: шов/иной адаптер) или ``error`` (метод есть, но сбой).
+        Различает «ноль вызовов» и «расход неизвестен»: без этого различия метрика снова
+        лгала бы формой.
+    :param error: текст сбоя получения вклада (``None``, если сбоя не было).
+    """
+
+    calls: int = 0
+    tokens: dict[str, int] = field(default_factory=dict)
+    source: str = "absent"
+    error: str | None = None
+
+
+def collect_llm_usage(evaluator: Any) -> LlmUsageSnapshot:
+    """Снимает вклад процесса с адаптера оценщика (duck typing, без импорта адаптеров).
+
+    Отсутствие ``usage_summary`` — не ошибка (шов/иной адаптер): вклад нулевой и
+    помечен ``source="absent"``, то есть «не умеем считать», а не «вызовов не было».
+    Сбой самого метода тоже не роняет прогон (наблюдаемость вторична), но публикуется
+    как ``source="error"`` с текстом.
+
+    :param evaluator: порт оценщика (``ports.evaluator``) или ``None``.
+    """
+    summary = getattr(evaluator, "usage_summary", None)
+    if not callable(summary):
+        return LlmUsageSnapshot()
+    try:
+        raw = summary()
+    except Exception as exc:  # noqa: BLE001 — наблюдаемость вторична к прогону
+        return LlmUsageSnapshot(source="error", error=f"{type(exc).__name__}: {exc}")
+    if not isinstance(raw, Mapping):
+        return LlmUsageSnapshot(
+            source="error",
+            error=f"usage_summary вернул {type(raw).__name__}, не объект",
+        )
+    try:
+        calls = int(raw.get("calls", 0) or 0)
+    except (TypeError, ValueError) as exc:
+        return LlmUsageSnapshot(
+            source="error", error=f"usage.calls: {type(exc).__name__}: {exc}"
+        )
+    tokens_raw = raw.get("tokens") or {}
+    tokens: dict[str, int] = {}
+    if isinstance(tokens_raw, Mapping):
+        for key, value in tokens_raw.items():
+            try:
+                tokens[str(key)] = int(value)
+            except (TypeError, ValueError) as exc:
+                return LlmUsageSnapshot(
+                    source="error",
+                    error=f"usage.tokens.{key}: {type(exc).__name__}: {exc}",
+                )
+    return LlmUsageSnapshot(
+        calls=calls if calls >= 0 else 0,
+        tokens=dict(sorted(tokens.items())),
+        source="adapter",
+    )
+
 
 
 @dataclass
@@ -229,6 +315,8 @@ def write_run_metrics(
     search_log: Iterable[Any] | None = None,
     llm_calls: int = 0,
     tokens: Mapping[str, Any] | None = None,
+    llm_usage_source: str = "adapter",
+    llm_usage_error: str | None = None,
     crawl_counts: Mapping[str, Any] | None = None,
     crawl_truncation: Mapping[str, Any] | None = None,
     crawl_session: Mapping[str, Any] | None = None,
@@ -240,6 +328,19 @@ def write_run_metrics(
     (формулы не дублируются). JSON детерминирован (``sort_keys=True``,
     ``ensure_ascii=False``) через :meth:`RunMetrics.to_manifest_json`.
 
+    **Накопление стоимости LLM.** ``llm_calls``/``tokens`` — вклад **этого** процесса;
+    перед записью читается уже существующий ``metrics.json`` и его ``llm_usage`` (или, для
+    файлов прежнего формата, ``llm_calls``/``tokens``) берётся как вклад предыдущих
+    процессов. Итог пишется в ``llm_calls``/``tokens`` (накопленное) и в блок ``llm_usage``
+    (:func:`~core.pipeline.metrics.merge_llm_usage`) с разбивкой и числом заходов. Поэтому
+    функция **не идемпотентна по вкладу процесса**: два вызова за один процесс посчитают
+    вклад дважды. В прогоне call-site один (``core/cli/commands/run.py``, метрики пишутся
+    ровно один раз после исполнения фаз); это проверяется тестом, а не обещанием.
+
+    Запись атомарна (временный файл + ``os.replace``): убитый посреди записи процесс
+    оставляет прежний ``metrics.json`` целым, а не полфайла — иначе следующий заход читал бы
+    битый файл и терял накопленное.
+
     :param run_id: идентификатор прогона.
     :param out_dir: корень прогонов (по умолчанию ``runs``; composition root передаёт
         resolved ``paths.runs``, ``03`` §A.1); файл — ``{out_dir}/{run_id}/metrics.json``.
@@ -249,8 +350,11 @@ def write_run_metrics(
     :param cells: явный список ячеек (приоритетнее ``store``).
     :param score_bundle: готовый ``ScoreBundle`` (``failure_rate``/``coverage_aggregate``).
     :param search_log: iterable записей с атрибутом ``.phase`` (I23).
-    :param llm_calls: число вызовов LLM (стоимость, M1/§15).
-    :param tokens: токены по категориям (``prompt``/``completion``/…).
+    :param llm_calls: вызовы LLM **текущего процесса** (``usage_summary()["calls"]``).
+    :param tokens: токены **текущего процесса** по категориям (``prompt``/``completion``/…).
+    :param llm_usage_source: как получен вклад процесса — ``adapter`` | ``absent`` |
+        ``error`` (:class:`LlmUsageSnapshot`); виден в ``llm_usage.current_source``.
+    :param llm_usage_error: текст сбоя получения вклада (``None``, если сбоя не было).
     :param crawl_counts: счётчики durable-сеанса краула (Backlog A) — источник поля
         ``crawl`` метрик; ``None`` → пустая карта.
     :param crawl_truncation: сводка политического усечения краула (N4) — источник поля
@@ -263,6 +367,17 @@ def write_run_metrics(
         (поле присутствует всегда, но нейтрально: «не измеряли» ≠ «ноль»).
     :returns: путь записанного ``metrics.json``.
     """
+    target = Path(out_dir) / sanitize_filename(run_id) / METRICS_FILENAME
+    # Накопление через файл: схема БД не меняется, носитель — сам ``metrics.json``.
+    # Битый/нечитаемый файл не роняет прогон: предыдущее считается нулём, но факт виден
+    # в ``llm_usage.previous_source``/``previous_error``.
+    usage = merge_llm_usage(
+        read_prior_llm_usage(target),
+        calls_this_process=llm_calls,
+        tokens_this_process=tokens,
+        current_source=llm_usage_source,
+        current_error=llm_usage_error,
+    )
     metrics = compute_metrics(
         store=store,
         run_id=run_id,
@@ -270,14 +385,19 @@ def write_run_metrics(
         score_bundle=score_bundle,
         search_log=search_log,
         phase_durations=durations,
-        llm_calls=llm_calls,
-        tokens=tokens,
+        # ``llm_calls``/``tokens`` верхнего уровня — накопленные: внешние потребители
+        # читают их и раньше, поэтому смысл поля сохранён, а разбивка — в ``llm_usage``.
+        llm_calls=int(usage["calls_cumulative"]),
+        tokens=usage["tokens_cumulative"],
+        llm_usage=usage,
         crawl_counts=crawl_counts,
         crawl_truncation=crawl_truncation,
         crawl_session=crawl_session,
         resources=resources,
     )
-    target = Path(out_dir) / sanitize_filename(run_id) / METRICS_FILENAME
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(metrics.to_manifest_json(), encoding="utf-8")
+    # Атомарная замена: прежний файл остаётся целым, если процесс убьют посреди записи.
+    staging = target.with_name(f"{METRICS_FILENAME}.{os.getpid()}.tmp")
+    staging.write_text(metrics.to_manifest_json(), encoding="utf-8")
+    os.replace(staging, target)
     return target

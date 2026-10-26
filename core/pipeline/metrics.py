@@ -7,7 +7,10 @@
 * ``failure_rate`` — ``failed / (evaluated ∪ failed)`` (R13, I5);
 * ``coverage_aggregate`` — Evidence Coverage (§6);
 * ``search_calls_by_phase`` — расход поискового бюджета (I23);
-* ``llm_calls``/``tokens`` — стоимость (M1/§15);
+* ``llm_calls``/``tokens`` — стоимость прогона (M1/§15): **накопленная** по всем процессам
+  заходам (см. ниже);
+* ``llm_usage`` — та же стоимость с разбивкой «прогон / текущий процесс» и явной границей
+  учёта (:func:`merge_llm_usage`);
 * ``duration_by_phase`` — производительность;
 * ``resources`` — F0: пики RSS по фазам, расписание экстракции, чанки на документ,
   пик воркера и бюджет памяти (:mod:`core.pipeline.resources`).
@@ -22,6 +25,11 @@
   передаёт runner явной картой ``{phase: seconds}``; см. :func:`collect_phase_durations`.
 * **Детерминизм.** Все словари возвращаются с отсортированными ключами; JSON —
   ``sort_keys=True``.
+* **Стоимость прогона ≠ стоимость процесса.** ``usage_summary()`` адаптера LLM живёт ровно
+  один процесс, поэтому накопление идёт через уже записанный ``metrics.json``
+  (:func:`read_prior_llm_usage` + :func:`merge_llm_usage`). Без этого продолженный прогон
+  публиковал в машинном отчёте число вызовов **последнего** процесса — «стоимость
+  фрагмента» под видом стоимости прогона.
 
 Модуль категорийно нейтрален (§1.3), зависимостей не добавляет.
 """
@@ -31,12 +39,30 @@ from __future__ import annotations
 import json
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from core.domain.enums import CellState
 from core.domain.scoring import failure_rate as _failure_rate
 
-__all__ = ["RunMetrics", "compute_metrics", "collect_phase_durations"]
+__all__ = [
+    "LLM_USAGE_ACCOUNTING",
+    "PriorLlmUsage",
+    "RunMetrics",
+    "collect_phase_durations",
+    "compute_metrics",
+    "merge_llm_usage",
+    "read_prior_llm_usage",
+]
+
+#: Семантика поля ``llm_usage.accounting``.
+#:
+#: Накопление считает **заходы, дошедшие до записи** ``metrics.json``. Процесс, убитый
+#: (OOM/сигнал/обрыв) до записи метрик, свой вклад теряет: его вызовы LLM уже оплачены, но
+#: в файл не попали. Это названная граница, а не незамеченная погрешность — поэтому
+#: ``processes`` публикуется: читатель видит, сколько заходов учтено, и не принимает
+#: накопленное за полную стоимость многосуточного прогона, продолженного десяток раз.
+LLM_USAGE_ACCOUNTING = "processes_that_wrote"
 
 
 def _value_of(raw: Any) -> str:
@@ -93,6 +119,199 @@ def _normalize_tokens(tokens: Mapping[str, Any] | None) -> dict[str, int]:
     if not tokens:
         return {}
     return dict(sorted((str(key), int(value)) for key, value in tokens.items()))
+
+
+def _coerce_count(value: Any) -> int | None:
+    """Приводит счётчик к неотрицательному ``int``; ``None`` — значение непригодно.
+
+    ``bool`` отвергается: ``true`` в поле расхода — испорченный файл, а не «один вызов».
+    Строка-число принимается: JSON от внешних инструментов бывает снисходительным к типам,
+    а нам важна величина, не происхождение.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value >= 0 else None
+    if isinstance(value, float):
+        if not value.is_integer() or value < 0:
+            return None
+        return int(value)
+    if isinstance(value, str):
+        try:
+            parsed = int(value.strip())
+        except ValueError:
+            return None
+        return parsed if parsed >= 0 else None
+    return None
+
+
+def _coerce_tokens(raw: Any, notes: list[str], field_name: str) -> dict[str, int]:
+    """Нормализует карту токенов из файла; непригодные записи считаются нулём с заметкой.
+
+    Метрика — не измерение: испорченное поле не повод уронить прогон, но и не повод молча
+    выдать ноль. Всё, что не удалось прочитать, попадает в ``notes`` и публикуется в
+    ``llm_usage.previous_error``.
+    """
+    if raw is None:
+        return {}
+    if not isinstance(raw, Mapping):
+        notes.append(f"{field_name}: ожидался объект, получено {type(raw).__name__}")
+        return {}
+    tokens: dict[str, int] = {}
+    for key, value in raw.items():
+        count = _coerce_count(value)
+        if count is None:
+            notes.append(f"{field_name}.{key}: непригодное значение {value!r} → 0")
+            continue
+        tokens[str(key)] = tokens.get(str(key), 0) + count
+    return dict(sorted(tokens.items()))
+
+
+@dataclass(frozen=True)
+class PriorLlmUsage:
+    """Расход LLM, накопленный **предыдущими** процессами прогона (M1/§15).
+
+    :param calls: суммарные вызовы предыдущих процессов (0, если неизвестно).
+    :param tokens: токены по категориям — сумма предыдущих процессов.
+    :param processes: число заходов, чей вклад попал в файл. Для ``metrics.json``,
+        записанного до накопления (нет блока ``llm_usage``), — 1, если в нём есть
+        ненулевой расход, иначе 0: точное число заходов там не восстановить, поэтому
+        значение — нижняя граница, а не догадка о факте.
+    :param source: ``none`` (файла нет) | ``ok`` | ``unreadable`` (есть, но не разобран).
+    :param error: текст проблемы чтения/разбора (``None``, если проблемы не было).
+    """
+
+    calls: int = 0
+    tokens: dict[str, int] = field(default_factory=dict)
+    processes: int = 0
+    source: str = "none"
+    error: str | None = None
+
+
+def read_prior_llm_usage(path: str | Path) -> PriorLlmUsage:
+    """Читает накопленный расход LLM из уже записанного ``metrics.json``.
+
+    Отсутствие файла — нормальный первый заход (``source="none"``, всё по нулям). Битый или
+    нечитаемый файл — ``source="unreadable"``: предыдущее считается нулём (продолжать
+    прогон важнее, чем угадать цену), но факт публикуется в ``llm_usage.previous_error``,
+    чтобы «ноль из-за сбоя чтения» не выглядел как «ноль вызовов».
+
+    :param path: путь к ``runs/{run_id}/metrics.json``.
+    """
+    target = Path(path)
+    try:
+        raw = target.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return PriorLlmUsage()
+    except (OSError, UnicodeDecodeError) as exc:
+        return PriorLlmUsage(
+            source="unreadable", error=f"{type(exc).__name__}: {exc}"
+        )
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        return PriorLlmUsage(
+            source="unreadable", error=f"{type(exc).__name__}: {exc}"
+        )
+    if not isinstance(data, Mapping):
+        return PriorLlmUsage(
+            source="unreadable",
+            error=f"корень metrics.json — {type(data).__name__}, не объект",
+        )
+
+    notes: list[str] = []
+    block = data.get("llm_usage")
+    if isinstance(block, Mapping):
+        calls = _coerce_count(block.get("calls_cumulative"))
+        if calls is None:
+            notes.append("llm_usage.calls_cumulative непригоден → 0")
+            calls = 0
+        tokens = _coerce_tokens(
+            block.get("tokens_cumulative"), notes, "llm_usage.tokens_cumulative"
+        )
+        processes = _coerce_count(block.get("processes"))
+        if processes is None:
+            notes.append("llm_usage.processes непригоден → 0")
+            processes = 0
+    else:
+        # Формат до накопления: ``llm_calls``/``tokens`` описывают ОДИН заход — тот, что
+        # писал файл последним. Это ровно та неполнота, которую мы закрываем, поэтому
+        # прочитанное берётся как вклад одного захода, а не как «весь прогон».
+        calls = _coerce_count(data.get("llm_calls"))
+        if calls is None:
+            notes.append("llm_calls непригоден → 0")
+            calls = 0
+        tokens = _coerce_tokens(data.get("tokens"), notes, "tokens")
+        processes = 1 if (calls > 0 or tokens) else 0
+
+    return PriorLlmUsage(
+        calls=calls,
+        tokens=tokens,
+        processes=processes,
+        source="ok",
+        error="; ".join(notes) if notes else None,
+    )
+
+
+def merge_llm_usage(
+    prior: PriorLlmUsage,
+    *,
+    calls_this_process: int = 0,
+    tokens_this_process: Mapping[str, Any] | None = None,
+    current_source: str = "adapter",
+    current_error: str | None = None,
+) -> dict[str, Any]:
+    """Накопленный блок ``llm_usage``: заход + предыдущие процессы (M1/§15).
+
+    Считает **в одном месте** (здесь), а не в вызывающем: ``calls_cumulative`` =
+    ``prior.calls`` + вклад процесса, токены — по категориям. ``processes`` —
+    число заходов, дошедших до записи (``LLM_USAGE_ACCOUNTING``): заход, убитый до записи
+    метрик, свой вклад теряет, и это видно по числу.
+
+    :param prior: прочитанное предыдущее состояние (:func:`read_prior_llm_usage`).
+    :param calls_this_process: вызовы LLM за текущий процесс (``usage_summary()["calls"]``).
+    :param tokens_this_process: токены текущего процесса по категориям.
+    :param current_source: как получен вклад процесса — ``adapter`` (адаптер отдал
+        ``usage_summary``) | ``absent`` (шов/адаптер не умеет считать) | ``error``
+        (метод есть, но сбой). Различает «ноль» и «неизвестно», иначе метрика врёт формой.
+    :param current_error: текст сбоя получения вклада (``None``, если сбоя не было).
+    """
+    calls = _coerce_count(calls_this_process)
+    if calls is None:
+        calls = 0
+    tokens = _coerce_tokens(tokens_this_process, [], "tokens")
+    cumulative = dict(prior.tokens)
+    for key, value in tokens.items():
+        cumulative[key] = cumulative.get(key, 0) + value
+    return {
+        "calls_cumulative": prior.calls + calls,
+        "calls_this_process": calls,
+        "tokens_cumulative": dict(sorted(cumulative.items())),
+        "tokens_this_process": tokens,
+        "processes": prior.processes + 1,
+        "accounting": LLM_USAGE_ACCOUNTING,
+        "current_source": str(current_source),
+        "current_error": current_error,
+        "previous_source": prior.source,
+        "previous_error": prior.error,
+    }
+
+
+def _normalize_llm_usage(llm_usage: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Нормализует готовый блок ``llm_usage`` к детерминированному JSON-совместимому dict.
+
+    Блок собирает :func:`merge_llm_usage`; здесь только гарантия формы (сортировка карт
+    токенов). Пусто — блок не передан (``compute_metrics`` вызван напрямую): тогда поля нет
+    смысла выдумывать, и в отчёте остаётся пустая карта — «не считали».
+    """
+    if not llm_usage:
+        return {}
+    data = dict(llm_usage)
+    for key in ("tokens_cumulative", "tokens_this_process"):
+        tokens = data.get(key)
+        if isinstance(tokens, Mapping):
+            data[key] = dict(sorted((str(k), int(v)) for k, v in tokens.items()))
+    return data
 
 
 def _normalize_durations(phase_durations: Mapping[str, Any] | None) -> dict[str, float]:
@@ -189,9 +408,12 @@ class RunMetrics:
     :param failure_rate: ``failed / (evaluated ∪ failed)`` (R13).
     :param coverage_aggregate: Evidence Coverage (0.0, если бандл не передан).
     :param search_calls_by_phase: вызовы поиска по фазам (I23).
-    :param llm_calls: число вызовов LLM (стоимость, M1/§15).
-    :param tokens: токены по категориям (``prompt``/``completion``/…).
+    :param llm_calls: число вызовов LLM (стоимость, M1/§15) — **накопленное** по всем
+        заходам прогона; разбивка «прогон / процесс» — в :attr:`llm_usage`.
+    :param tokens: токены по категориям (``prompt``/``completion``/…), накопленные.
     :param duration_by_phase: длительности фаз в секундах (инжектируются runner-ом).
+    :param llm_usage: блок :func:`merge_llm_usage` — накопленное и вклад процесса рядом,
+        плюс источник вклада и граница учёта (``accounting``).
     """
 
     cells_by_state: dict[str, int]
@@ -201,6 +423,10 @@ class RunMetrics:
     llm_calls: int
     tokens: dict[str, int]
     duration_by_phase: dict[str, float]
+    #: M1/§15: стоимость LLM с разбивкой «накоплено прогоном / вклад этого процесса»,
+    #: источником вклада (``adapter``/``absent``/``error``) и границей учёта
+    #: (``accounting``). Пусто — блок не передан (прямой вызов ``compute_metrics``).
+    llm_usage: dict[str, Any] = field(default_factory=dict)
     #: Backlog A (Phase 4): счётчики durable-сеанса краула (``{status: count}``) из
     #: ``crawl_session_counts``; пустая карта, если сеанса/краула нет.
     crawl: dict[str, int] = field(default_factory=dict)
@@ -225,6 +451,7 @@ class RunMetrics:
             "search_calls_by_phase": dict(self.search_calls_by_phase),
             "llm_calls": self.llm_calls,
             "tokens": dict(self.tokens),
+            "llm_usage": dict(self.llm_usage),
             "duration_by_phase": dict(self.duration_by_phase),
             "crawl": dict(self.crawl),
             "crawl_truncation": dict(self.crawl_truncation),
@@ -274,6 +501,7 @@ def compute_metrics(
     phase_durations: Mapping[str, Any] | None = None,
     llm_calls: int = 0,
     tokens: Mapping[str, Any] | None = None,
+    llm_usage: Mapping[str, Any] | None = None,
     crawl_counts: Mapping[str, Any] | None = None,
     crawl_truncation: Mapping[str, Any] | None = None,
     crawl_session: Mapping[str, Any] | None = None,
@@ -288,8 +516,11 @@ def compute_metrics(
         ``failure_rate`` и ``coverage_aggregate``.
     :param search_log: iterable записей с атрибутом ``.phase`` (duck typing).
     :param phase_durations: явная карта ``{phase: seconds}`` (тайминг инжектирует runner).
-    :param llm_calls: число вызовов LLM (передаёт evaluator/runner).
-    :param tokens: токены (передаёт evaluator/runner).
+    :param llm_calls: накопленное число вызовов LLM (передаёт runner/CLI после слияния с
+        предыдущими заходами; формула накопления — :func:`merge_llm_usage`).
+    :param tokens: накопленные токены (передаёт runner/CLI).
+    :param llm_usage: блок :func:`merge_llm_usage` (накопленное + вклад процесса + граница
+        учёта). ``None`` → пустая карта: «не считали», а не выдуманные нули.
     :param crawl_counts: счётчики durable-сеанса краула (``crawl_session_counts``) — источник
         поля ``crawl`` (Backlog A). Вызывающий читает их у стора (least coupling: метрика
         не знает соглашения об ``session_id``). ``None`` → пустая карта.
@@ -316,6 +547,7 @@ def compute_metrics(
         search_calls_by_phase=_count_search_calls(search_log),
         llm_calls=int(llm_calls),
         tokens=_normalize_tokens(tokens),
+        llm_usage=_normalize_llm_usage(llm_usage),
         duration_by_phase=_normalize_durations(phase_durations),
         crawl=_normalize_crawl(crawl_counts),
         crawl_truncation=_normalize_crawl_truncation(crawl_truncation),

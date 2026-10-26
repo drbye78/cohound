@@ -32,6 +32,8 @@ B2_KEYS = {
     "search_calls_by_phase",
     "llm_calls",
     "tokens",
+    # M1/§15: накопленная стоимость LLM по заходам + вклад этого процесса.
+    "llm_usage",
     "duration_by_phase",
     "crawl",
     "crawl_truncation",
@@ -133,6 +135,41 @@ def test_run_blocked_at_publication_still_writes_phase_logs_and_metrics(
     # Корпус пуст (домен фикстуры недоступен): нули — факт, а не выдумка.
     assert resources["documents"] == 0
     assert resources["chunks"] == 0
+
+
+def test_run_llm_usage_accumulates_across_invocations_of_same_run(
+    tmp_path: Path,
+) -> None:
+    """Продолжение прогона другим процессом суммирует стоимость, а не перезаписывает её.
+
+    Два захода ``run`` по одному ``run_id`` — это ровно сценарий resume: каждый процесс
+    видит только свой ``usage_summary()``, а ``metrics.json`` обязан описывать прогон.
+    """
+    runs_dir = tmp_path / "runs"
+    run_id = "obs-usage"
+
+    assert main(_argv(runs_dir, run_id)) in {EXIT_OK, EXIT_BLOCKED}
+    first = json.loads(
+        (runs_dir / run_id / "metrics.json").read_text(encoding="utf-8")
+    )
+    assert first["llm_usage"]["processes"] == 1
+    assert first["llm_usage"]["calls_cumulative"] == first["llm_calls"]
+
+    assert main(_argv(runs_dir, run_id)) in {EXIT_OK, EXIT_BLOCKED}
+    second = json.loads(
+        (runs_dir / run_id / "metrics.json").read_text(encoding="utf-8")
+    )
+    usage = second["llm_usage"]
+    assert usage["processes"] == 2
+    # Накопленное = первый заход + второй; поля не перезаписаны «ценой последнего».
+    assert usage["calls_cumulative"] == (
+        first["llm_usage"]["calls_cumulative"] + usage["calls_this_process"]
+    )
+    assert usage["previous_source"] == "ok"
+    assert second["llm_calls"] == usage["calls_cumulative"]
+    assert usage["accounting"] == "processes_that_wrote"
+    # Source вклада назван: формат оценивался адаптером (в e2e-фикстуре — фейк с методом).
+    assert usage["current_source"] in {"adapter", "absent"}
 
 
 def test_run_dry_run_writes_no_logs_or_metrics(tmp_path: Path) -> None:

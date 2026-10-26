@@ -94,7 +94,11 @@ from core.pipeline.crawl_session import (
 from core.pipeline.liveness import stale_reason
 from core.pipeline.lint import lint_run_inputs
 from core.pipeline.normalize import load_inputs
-from core.pipeline.observability import instrument_phases, write_run_metrics
+from core.pipeline.observability import (
+    collect_llm_usage,
+    instrument_phases,
+    write_run_metrics,
+)
 from core.pipeline.resources import (
     ResourcesObservation,
     build_resources_block,
@@ -1170,12 +1174,14 @@ def run(args: argparse.Namespace) -> int:
                 # Стоимость (M1/§15): расход считает **адаптер оценщика** — выше по стеку
                 # ячеек ``usage`` уже нет, а ``metrics.json`` до этого писал ``llm_calls: 0``
                 # при ~117 живых вызовах, то есть метрика стоимости молча лгала.
-                # Отсутствие метода — не ошибка (шов/иной адаптер): тогда нули означают
-                # «расход неизвестен», а не «вызовов не было».
-                evaluator_usage = getattr(
-                    getattr(ports, "evaluator", None), "usage_summary", None
-                )
-                usage = evaluator_usage() if callable(evaluator_usage) else {}
+                # ``usage_summary()`` живёт **один процесс**, поэтому передаём вклад этого
+                # захода, а накопление по заходам делает ``write_run_metrics`` из уже
+                # записанного ``metrics.json`` (схема БД не меняется). Отсутствие метода — не
+                # ошибка (шов/иной адаптер): вклад нулевой и помечен ``source="absent"``,
+                # то есть «расход неизвестен», а не «вызовов не было».
+                usage = collect_llm_usage(getattr(ports, "evaluator", None))
+                if usage.error is not None:
+                    instrumentation_errors.append(f"llm_usage: {usage.error}")
                 # Coverage/Capability — из **той же** формулы, что у фазы ``compute`` и
                 # предмета G4 (``bundle_for_run``), а не пересчёт «своими руками»: без бандла
                 # ``compute_metrics`` публиковал ``coverage_aggregate: 0.0`` при реальных
@@ -1200,8 +1206,10 @@ def run(args: argparse.Namespace) -> int:
                     crawl_counts=crawl_counts,
                     crawl_truncation=truncation or None,
                     crawl_session=crawl_session_lifecycle or None,
-                    llm_calls=int(usage.get("calls", 0) or 0),
-                    tokens=usage.get("tokens") or None,
+                    llm_calls=usage.calls,
+                    tokens=usage.tokens or None,
+                    llm_usage_source=usage.source,
+                    llm_usage_error=usage.error,
                     resources=build_resources_block(
                         phase_peaks=instrumentation.peak_rss_mb,
                         phase_durations=instrumentation.durations,
