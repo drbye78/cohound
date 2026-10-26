@@ -27,6 +27,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from core.domain.models import CatalogRow, Cohort, GoldenRow, PackageManifest, RunConfig
+from core.pipeline.golden_status import GoldenStatus
 from core.pipeline.lint import lint_run_inputs
 from core.pipeline.normalize import RunInputs, load_inputs
 from core.util.hashing import short_hash
@@ -52,7 +53,12 @@ class RunPlan:
     :param params: выбранный (focused) каталог, отсортирован по ``param_id``.
     :param module_weights: объявленные веса scope-модулей (из ``package.yaml``).
     :param renormalized_weights: веса, перенормированные на применимые модули (Σ = 1.0).
-    :param golden: golden-набор (весь, детерминированно отсортирован).
+    :param golden: golden-набор (весь, детерминированно отсортирован). Пуст, если
+        эталон объявлен ``absent``/``declined`` — тогда сверка не выполняется.
+    :param golden_status: объявленное состояние эталона (``absent``/``present``/
+        ``declined`` + причина для ``declined``); ``None`` — состояние не определялось.
+        **Не** входит в материал ``run_id``: эталон — проверочный инструмент, а не
+        условие измерения, поэтому его смена не меняет идентичность прогона.
     :param warnings: предупреждения плана + lint-warnings входов (не блокируют).
     """
 
@@ -67,6 +73,7 @@ class RunPlan:
     cohort: Cohort
     golden: list[GoldenRow]
     warnings: list[str] = field(default_factory=list)
+    golden_status: GoldenStatus | None = None
 
 
 def derive_run_id(
@@ -277,6 +284,7 @@ def plan(
         cohort=inputs.cohort,
         golden=golden,
         warnings=warnings,
+        golden_status=inputs.golden_status,
     )
 
 

@@ -43,6 +43,9 @@ repo/
     registries/{registry_id}.yaml   # ОПЦ.: package-scoped конфиг фетчеров (§D.4);
                              # сейчас нет ни в одном пакете (шаблоны — docs/templates/registries/)
     sources/                 # авторские входы и операторские артефакты
+      golden_status.yaml     # ОПЦ.: состояние эталона (`schema: golden_status/1`):
+                             # absent | present | declined (+ reason/declined_by) —
+                             # объявленное «сверять не с чем» вместо удаления golden.csv
       seeds.yaml             # КАНОНИЧЕСКИЙ seed-набор (`schema: seeds/1`, §A.1.1);
                              # сейчас пакеты ещё на legacy corpus_urls.yaml
       corpus_urls.yaml       # legacy `{product_id: [url, …]}` (миграционный fallback)
@@ -1243,7 +1246,7 @@ onboarding-префлайт (seed-набор, §A.1.1): `--until plan` его **
 | `hound crawl {run\|status\|list\|resume\|restart\|cancel}` | сеансы краула (`local`): durable-запуск фазы корпуса Ш5, статус/счётчики, resume/restart/cancel | `crawl_sessions`, `crawl_session_items` |
 | `hound review` | очередь ревью / preliminary-стол: `preliminary`-контур + `❓`-кандидаты (Ш7) — **только печать**, ячейки не меняет | — (только чтение БД) |
 | `hound report` | сборка артефактов | outputs |
-| `hound golden --golden PATH [--tier fast\|full]` | прогон golden; `--golden` **обязателен** (путь к `golden.csv`) | отчёт |
+| `hound golden [--golden PATH \| --package DIR] [--tier fast\|full]` | прогон golden; источник эталона — явный `--golden` **или** объявление пакета `sources/golden_status.yaml` (`present` — сверка; `absent`/`declined` — «неприменимо», `EXIT_USAGE` с `error: golden_not_configured`, пороги не считались) | отчёт |
 | `hound sensitivity` | пост-хок по осям | отчёт |
 | `hound diff <run_a> <run_b>` | межцикловый diff (запрещён через major) | diff.md |
 | `hound promote --actor <вы> [--validated-only]` | preliminary → strict (переаттестация); `--actor` **обязателен** (I6/I7) | cells |

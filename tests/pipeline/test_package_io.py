@@ -129,9 +129,16 @@ def test_load_artifacts_reads_template(tmp_path: Path) -> None:
 
 def test_load_artifacts_missing_dir_returns_empty(tmp_path: Path) -> None:
     artifacts = load_artifacts(tmp_path / "nope")
-    assert artifacts == PackageArtifacts()
     assert artifacts.manifest is None
     assert artifacts.catalog == []
+    # Артефактов нет. ``golden_status`` — метаданные объявления, а не артефакт: каталога
+    # нет ⇒ нет ни файла, ни объявления ⇒ выведенное ``absent`` (см. golden_status).
+    assert artifacts.golden_status is not None
+    assert artifacts.golden_status.state == "absent"
+    assert artifacts.golden_status.declared is False
+    assert artifacts == PackageArtifacts(
+        golden_status=artifacts.golden_status
+    )
 
 
 def test_save_and_reload_round_trip(tmp_path: Path) -> None:

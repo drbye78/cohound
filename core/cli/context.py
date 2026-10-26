@@ -1999,7 +1999,15 @@ def _resolve_phases(
 
 
 def _plan_payload(result: RunPlan) -> dict[str, Any]:
-    """Сериализует :class:`RunPlan` в JSON-совместимый словарь."""
+    """Сериализует :class:`RunPlan` в JSON-совместимый словарь.
+
+    Состояние эталона (``golden_state``/``golden_declared``/``golden_reason``/
+    ``golden_declined_by``/``golden_file_present``) печатается явно: «сверять не с чем» —
+    законный режим (:mod:`core.pipeline.golden_status`), и оператор обязан увидеть его до
+    прогона, а не догадываться по отсутствию ``golden.csv``. ``golden_count`` — строки,
+    реально участвующие в сверке (0 при ``absent``/``declined``).
+    """
+    status = result.golden_status
     return {
         "run_id": result.run_id,
         "case_id": result.cohort.case_id,
@@ -2011,6 +2019,17 @@ def _plan_payload(result: RunPlan) -> dict[str, Any]:
         "module_weights": dict(result.module_weights),
         "renormalized_weights": dict(result.renormalized_weights),
         "golden_count": len(result.golden),
+        # ``golden_status is None`` — план собран в обход ``load_inputs`` (напр. в тестах):
+        # состояние не определялось, показываем прежнее представление «есть строки → present».
+        "golden_state": (
+            status.state if status is not None else ("present" if result.golden else "absent")
+        ),
+        "golden_declared": status.declared if status is not None else False,
+        "golden_file_present": (
+            status.file_present if status is not None else bool(result.golden)
+        ),
+        "golden_reason": status.reason if status is not None else None,
+        "golden_declined_by": status.declined_by if status is not None else None,
         "warnings": list(result.warnings),
     }
 
@@ -2082,9 +2101,17 @@ def _print_plan(payload: dict[str, Any]) -> None:
         f"params: {', '.join(payload['params'])}",
         f"roles: {', '.join(payload['roles'])}",
         f"weights: {weights or '—'}",
-        f"golden: {payload['golden_count']}",
+        f"golden: {payload['golden_count']} (state: {payload['golden_state']})",
         f"dry-run: {'yes' if payload.get('dry_run') else 'no'}",
     ]
+    # Причина непригодности эталона — рядом со счётчиком, а не только в ``--json``:
+    # «0 строк» без причины читается как «эталон потеряли».
+    if payload.get("golden_reason"):
+        author = payload.get("golden_declined_by")
+        lines.append(
+            f"golden reason: {payload['golden_reason']}"
+            + (f" (declined_by={author})" if author else "")
+        )
     for warning in payload.get("warnings", ()):
         lines.append(f"warning: {warning}")
     sys.stdout.write("\n".join(lines) + "\n")

@@ -11,6 +11,15 @@
 процедуры аттестации полноты источника для ``absence_rule`` I2b (см. ``lint`` и
 :data:`RunInputs.scope_attestation_procedure`).
 
+``golden.csv`` — **проверочный** вход, а не условие измерения: он не входит в
+``execution_contract_digest`` и на вердикты не влияет, поэтому его отсутствие — законный
+режим («сверять не с чем»), а не сбой загрузки. Состояние эталона объявляется файлом
+``sources/golden_status.yaml`` (:mod:`core.pipeline.golden_status`): ``absent`` — файла
+нет, ``present`` — есть и используется, ``declined`` — файл есть, но объявлен
+непригодным (сверка не выполняется, файл остаётся). При ``absent``/``declined``
+:attr:`RunInputs.golden` пуст по построению: набор, который не используется, не является
+входом сверки.
+
 Нейтрален к предметной категории (§1.3): никаких названий продуктов/вендоров.
 """
 
@@ -42,6 +51,7 @@ from core.domain.models import (
     RunConfig,
     ScopeAttestation,
 )
+from core.pipeline.golden_status import GoldenStatus, read_golden_status
 
 __all__ = [
     "RunInputs",
@@ -60,6 +70,14 @@ SCOPE_ATTESTATION_FILE = "scope_attestation.yaml"
 class RunInputs:
     """Нормализованные входы прогона: все артефакты пакета + ``run.yaml``.
 
+    :param golden: эталонные строки, **участвующие в сверке**. Пусто при
+        ``golden_status.state ∈ {absent, declined}``: набор, объявленный непригодным или
+        отсутствующий, не является входом сверки (см.
+        :mod:`core.pipeline.golden_status`).
+    :param golden_status: объявленное состояние эталона (``absent``/``present``/
+        ``declined`` + причина и автор для ``declined``). ``None`` — состояние не
+        определялось (входы собраны в обход :func:`load_inputs`, напр. в тестах): линтер
+        тогда работает по прежнему правилу «пустой список = нет сети».
     :param scope_attestation_procedure: описание действующей процедуры аттестации
         полноты источника (человеческая проверка «справочник действительно полон»).
         ``None``/пусто означает, что механизм не настроен: параметры с
@@ -77,6 +95,7 @@ class RunInputs:
     domain_profiles: dict[str, DomainProfile] = field(default_factory=dict)
     crawl_sources: CrawlSourcesConfig = field(default_factory=CrawlSourcesConfig)
     scope_attestation_procedure: str | None = None
+    golden_status: GoldenStatus | None = None
 
 
 def load_scope_attestation(package_dir: str | Path) -> str | None:
@@ -200,11 +219,19 @@ def load_scope_attestations(
 def load_inputs(run_yaml_path: str | Path, package_dir: str | Path) -> RunInputs:
     """Нормализует входы прогона: ``run.yaml`` + артефакты каталога пакета.
 
-    Обязательны ``run.yaml`` и пять артефактов пакета (``package.yaml``,
-    ``catalog.csv``, ``baselines.csv``, ``cohort.yaml``, ``golden.csv``);
-    ``domain_profiles.yaml``, ``crawl_sources.yaml`` и ``scope_attestation.yaml`` — опциональны.
+    Обязательны ``run.yaml`` и четыре артефакта пакета (``package.yaml``,
+    ``catalog.csv``, ``baselines.csv``, ``cohort.yaml``); ``domain_profiles.yaml``,
+    ``crawl_sources.yaml``, ``scope_attestation.yaml`` и ``sources/golden_status.yaml`` —
+    опциональны.
 
-    :raises ValueError: артефакт отсутствует или не разбирается/не валиден.
+    ``golden.csv`` читается **только** если эталон объявлен действующим
+    (``golden_status.state == present``, в т.ч. выведенным из наличия файла при
+    отсутствии объявления). При ``absent``/``declined`` сверка не выполняется, поэтому
+    строки не читаются вовсе: непригодный файл может быть и не разбираемым, а его форма
+    не является входом прогона. Состояние при этом объявлено и видно вызывающему.
+
+    :raises ValueError: артефакт отсутствует или не разбирается/не валиден; объявление
+        состояния эталона противоречиво (:mod:`core.pipeline.golden_status`).
     """
     package_path = Path(package_dir)
     run = load_run_config(run_yaml_path)
@@ -212,7 +239,31 @@ def load_inputs(run_yaml_path: str | Path, package_dir: str | Path) -> RunInputs
     catalog = load_catalog(package_path / "catalog.csv")
     baselines = load_baselines(package_path / "baselines.csv")
     cohort = load_cohort(package_path / "cohort.yaml")
-    golden = load_golden(package_path / "golden.csv")
+    golden_status = read_golden_status(package_path)
+    golden = (
+        load_golden(package_path / "golden.csv")
+        if golden_status.comparison_available
+        else []
+    )
+
+    profiles_path = package_path / "domain_profiles.yaml"
+    domain_profiles = load_domain_profiles(profiles_path) if profiles_path.exists() else {}
+
+    crawl_path = package_path / "crawl_sources.yaml"
+    crawl_sources = load_crawl_sources(crawl_path) if crawl_path.exists() else CrawlSourcesConfig()
+
+    return RunInputs(
+        run=run,
+        package=package,
+        catalog=catalog,
+        baselines=baselines,
+        cohort=cohort,
+        golden=golden,
+        domain_profiles=domain_profiles,
+        crawl_sources=crawl_sources,
+        scope_attestation_procedure=load_scope_attestation(package_path),
+        golden_status=golden_status,
+    )
 
     profiles_path = package_path / "domain_profiles.yaml"
     domain_profiles = load_domain_profiles(profiles_path) if profiles_path.exists() else {}

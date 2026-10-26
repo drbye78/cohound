@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 from core.domain import Archetype, GoldenTier, ModuleDef, Status
+from core.pipeline.golden_status import GoldenStatus
 from core.pipeline.lint import (
     RULES,
     LintReport,
@@ -216,6 +217,67 @@ def test_golden_missing_full_warns() -> None:
 
 def test_empty_golden_warns() -> None:
     inputs = replace(_clean(), golden=[])
+    messages = check_golden_presence(inputs)
+    assert messages and "пуст" in messages[0]
+
+
+# Объявленное состояние эталона: «сверять не с чем» — режим, а не недочёт.
+# Необъявленное отсутствие остаётся warning'ом: молчание не должно выглядеть решением.
+
+
+def _status(state: str, *, declared: bool, file_present: bool, reason: str | None = None):
+    """Объявленное состояние эталона для линтер-тестов (нейтральные значения)."""
+    return GoldenStatus(
+        state=state,  # type: ignore[arg-type] — значения заданы тестом
+        declared=declared,
+        file_present=file_present,
+        reason=reason,
+    )
+
+
+def test_golden_absence_declared_is_not_warning() -> None:
+    inputs = replace(
+        _clean(),
+        golden=[],
+        golden_status=_status("absent", declared=True, file_present=False),
+    )
+    assert check_golden_presence(inputs) == []
+    assert lint_run_inputs(inputs).warnings == []
+
+
+def test_golden_declined_is_not_warning() -> None:
+    inputs = replace(
+        _clean(),
+        golden=[],
+        golden_status=_status(
+            "declined",
+            declared=True,
+            file_present=True,
+            reason="разметка непригодна",
+        ),
+    )
+    assert check_golden_presence(inputs) == []
+    assert lint_run_inputs(inputs).warnings == []
+
+
+def test_golden_absence_undeclared_still_warns() -> None:
+    inputs = replace(
+        _clean(),
+        golden=[],
+        golden_status=_status("absent", declared=False, file_present=False),
+    )
+    messages = check_golden_presence(inputs)
+    assert messages and "golden.csv отсутствует" in messages[0]
+    assert any("golden" in warning for warning in lint_run_inputs(inputs).warnings)
+
+
+def test_golden_present_but_empty_still_warns() -> None:
+    """Объявленный ``present`` с пустым набором — недочёт, а не режим."""
+    inputs = replace(
+        _clean(),
+        golden=[],
+        golden_status=_status("present", declared=True, file_present=True),
+    )
     messages = check_golden_presence(inputs)
     assert messages and "пуст" in messages[0]
 

@@ -10,7 +10,9 @@ pydantic-валидаторами домена (нужно сопоставле�
   процедуры аттестации полноты источника ``scope_attested_by`` → **блок** (§4.2/I2b);
 - пустые ``concept_terms`` у параметра → warning (§4.2; S13);
 - ``golden-full`` без страты ожидаемых ❌ → **блок** (§4.2/§11.6); наличие тиров
-  ``fast``/``full`` в golden-наборе → warning;
+  ``fast``/``full`` в golden-наборе → warning; **объявленное** отсутствие эталона
+  (``state: absent``/``declined`` в ``sources/golden_status.yaml``) — не недочёт:
+  сверка не выполняется, и это решение, а не пропуск;
 - ``showcase`` с ``rule`` без публичной величины/метрики → **блок** (зеркало домена);
 - ``param_id`` не в нижнем регистре → **блок** (зеркало домена);
 - ``products`` — проекция когорты (S11) и ``anchor ∈ products`` → **блок** (§4.5);
@@ -33,6 +35,7 @@ from typing import Literal
 
 from core.config.run_config import cross_check_products
 from core.domain.enums import AbsenceRuleType, Archetype, GoldenTier, ParamType, Status
+from core.pipeline.golden_status import STATE_ABSENT, STATE_DECLINED
 from core.pipeline.normalize import RunInputs
 
 __all__ = [
@@ -204,8 +207,30 @@ def check_golden_full_absent_stratum(inputs: RunInputs) -> list[str]:
 
 
 def check_golden_presence(inputs: RunInputs) -> list[str]:
-    """§11.6: presence-предупреждения golden-набора (тиры fast/full)."""
+    """§11.6: presence-предупреждения golden-набора (тиры fast/full).
+
+    Учитывает **объявленное** состояние эталона (:mod:`core.pipeline.golden_status`):
+
+    * ``present`` — прежнее поведение (пустой набор и недостающие тиры — warning);
+    * ``absent``/``declined`` **с объявлением** — не warning: это законный режим
+      («сверять не с чем» / «эталон объявлен непригодным»), а не недочёт пакета;
+    * ``absent`` **без объявления** (и ``golden_status is None``, т.е. входы собраны в
+      обход :func:`~core.pipeline.normalize.load_inputs`) — warning остаётся: молчаливое
+      отсутствие обязано быть видимым.
+    """
+    status = inputs.golden_status
+    if status is not None:
+        if status.state == STATE_DECLINED:
+            return []
+        if status.state == STATE_ABSENT and status.declared:
+            return []
     if not inputs.golden:
+        if status is not None and not status.file_present:
+            return [
+                "§11.6: golden.csv отсутствует и эталон не объявлен — golden-сеть "
+                "отсутствует (объявите state: absent в sources/golden_status.yaml, "
+                "если сверка намеренно не выполняется)"
+            ]
         return ["§11.6: golden.csv пуст — golden-сеть отсутствует"]
     messages: list[str] = []
     if not any(row.tier is GoldenTier.FAST for row in inputs.golden):

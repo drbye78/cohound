@@ -3,7 +3,9 @@
 Модуль отвечает за **детерминированное** чтение и запись артефактов раскладки пакета
 (``03`` §A.1): ``package.yaml``, ``catalog.csv``, ``baselines.csv``, ``cohort.yaml``,
 ``golden.csv``, ``domain_profiles.yaml``, ``crawl_sources.yaml``, ``scope_attestation.yaml``,
-``run.yaml``.
+``run.yaml``. Дополнительно **читается** объявление состояния эталона
+(``sources/golden_status.yaml``, :mod:`core.pipeline.golden_status`) — оно не таблица, а
+авторский вход, поэтому в :data:`ARTIFACT_FILES` (CRUD-реестр) не входит.
 
 Ключевые свойства
 -----------------
@@ -65,6 +67,7 @@ from core.domain.models import (
     ScopeAttestation,
 )
 from core.pipeline.lint import LintReport, lint_run_inputs
+from core.pipeline.golden_status import GoldenStatus, read_golden_status
 from core.pipeline.normalize import (
     RunInputs,
     cross_check,
@@ -143,6 +146,10 @@ class PackageArtifacts:
     catalog: list[CatalogRow] = field(default_factory=list)
     baselines: list[BaselineRow] = field(default_factory=list)
     cohort: Cohort | None = None
+    #: Строки ``golden.csv`` **как файл** — читаются независимо от объявления, потому что
+    #: это материал авторских правок (``hound package golden list/edit``). Участие в
+    #: сверке определяет ``golden_status``: при ``absent``/``declined`` набор в сверке
+    #: не участвует (:func:`build_run_inputs`).
     golden: list[GoldenRow] = field(default_factory=list)
     domain_profiles: dict[str, DomainProfile] = field(default_factory=dict)
     crawl_sources: CrawlSourcesConfig = field(default_factory=CrawlSourcesConfig)
@@ -150,6 +157,9 @@ class PackageArtifacts:
     #: Подписи аттестации охвата по продуктам (``scope_attestation.yaml:attestations``).
     #: Пусто — механизм не использован (опционален, I2b/I2c).
     scope_attestations: list[ScopeAttestation] = field(default_factory=list)
+    #: Объявленное состояние эталона (``sources/golden_status.yaml``); ``None`` — артефакты
+    #: собраны вызывающим напрямую (``PackageArtifacts()``), объявление не читалось.
+    golden_status: GoldenStatus | None = None
     run: RunConfig | None = None
 
 
@@ -554,6 +564,11 @@ def load_artifacts(package_dir: str | Path) -> PackageArtifacts:
     if golden_file.is_file():
         artifacts.golden = load_golden(golden_file)
 
+    # Объявление состояния эталона читается всегда (даже при отсутствии файла): оно и
+    # решает, участвует ли набор в сверке. Противоречивое объявление — ошибка пакета,
+    # видимая вызывающему (``PackageSummary.error`` в ``hound package list``).
+    artifacts.golden_status = read_golden_status(base)
+
     profiles_file = base / "domain_profiles.yaml"
     if profiles_file.is_file():
         artifacts.domain_profiles = load_domain_profiles(profiles_file)
@@ -847,21 +862,34 @@ def build_run_inputs(artifacts: PackageArtifacts) -> RunInputs:
     Если ``run``/``manifest``/``cohort`` отсутствуют (частичный пакет), синтезируется
     минимальное валидное состояние — чтобы линт давал осмысленный результат даже для
     неполного каталога.
+
+    Строки эталона попадают в ``inputs.golden`` **только** при действующем объявлении
+    (``golden_status.comparison_available``): при ``absent``/``declined`` сверка не
+    выполняется, поэтому набор не является входом. ``golden_status is None`` — артефакты
+    собраны напрямую (не через :func:`load_artifacts`): поведение прежнее, строки
+    передаются как есть.
     """
     case_id = artifacts.manifest.case_id if artifacts.manifest is not None else "package"
     cohort = artifacts.cohort if artifacts.cohort is not None else _synthesized_cohort(case_id)
     manifest = artifacts.manifest if artifacts.manifest is not None else _synthesized_manifest(case_id)
     run = artifacts.run if artifacts.run is not None else _synthesized_run(case_id, cohort)
+    status = artifacts.golden_status
+    golden = (
+        list(artifacts.golden)
+        if status is None or status.comparison_available
+        else []
+    )
     return RunInputs(
         run=run,
         package=manifest,
         catalog=list(artifacts.catalog),
         baselines=list(artifacts.baselines),
         cohort=cohort,
-        golden=list(artifacts.golden),
+        golden=golden,
         domain_profiles=dict(artifacts.domain_profiles),
         crawl_sources=artifacts.crawl_sources,
         scope_attestation_procedure=artifacts.scope_attestation,
+        golden_status=status,
     )
 
 
