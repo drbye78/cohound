@@ -53,6 +53,18 @@
 применялись только при сборке фаз, поэтому прогон с другим корпусом мог жить под прежним
 ``run_id``. Список осей разъезжается молча — поэтому он назван один раз.
 
+**Инвентарь контрактных флагов ретривала — тоже один список.** :data:`CONTRACT_FLAG_DESTS`
+называет флаги, чьи значения входят в ``EXECUTION_CONTRACT_FIELDS``, но **не** входят в
+:class:`DeclaredExecutionAxes`: ``retrieval_profile`` и ``cutoff_K`` передаются в
+:func:`core.pipeline.run_identity.build_execution_contract` отдельными аргументами (так их
+передаёт ``run``), поэтому «декларированными осями» они не являются и в датакласс не
+переносятся. Одна запись инвентаря описывает и ``dest`` флага, и имя параметра контракта;
+его читают :func:`add_contract_flags` (регистрация) и :func:`contract_flag_values`
+(значения в контракт). Причина та же, что у осей краула, и она измерена: ``plan`` не
+принимал ``--retrieval-profile``/``--cutoff-k``, поэтому с этими флагами печатал **другой**
+``run_id``, чем прогон, — инструмент, чья единственная задача — предсказать идентичность,
+предсказывал неверно.
+
 Нейтрален к предметной категории (§1.3).
 """
 
@@ -89,13 +101,19 @@ from core.domain.models import CrawlRunConfig, canonical_rate_limit
 from core.pipeline.normalize import RunInputs
 from core.pipeline.manual_artifacts import load_manual_artifacts
 from core.pipeline.report import crawl_control_digest
+from core.pipeline.retrieve import RetrievalProfile
 
 __all__ = [
+    "CONTRACT_FLAG_DESTS",
+    "CONTRACT_FLAGS",
     "CRAWL_AXIS_DESTS",
+    "ContractFlag",
     "DeclaredExecutionAxes",
     "DOCLING_ADAPTER_FAMILY",
+    "add_contract_flags",
     "add_crawl_axis_flags",
     "add_serp_rounds_flag",
+    "contract_flag_values",
     "declared_status_dict_version",
     "extractor_stack_version",
     "resolve_declared_axes",
@@ -229,6 +247,117 @@ def add_serp_rounds_flag(parser: argparse.ArgumentParser) -> None:
         "Значение входит в execution contract (serp_rounds) ⇒ новый run_id; бюджет "
         "объявляется в run.yaml: serp.budget",
     )
+
+
+@dataclass(frozen=True)
+class ContractFlag:
+    """Одна запись инвентаря контрактных флагов (:data:`CONTRACT_FLAGS`).
+
+    :param dest: имя атрибута ``args`` (то же, что ``dest`` флага);
+    :param flag: option string CLI (``--retrieval-profile``);
+    :param contract_arg: имя параметра
+        :func:`core.pipeline.run_identity.build_execution_contract`;
+    :param help: help флага — **тот же**, что у ``run`` (паритет проверяется тестом);
+    :param metavar: подпись значения в usage;
+    :param choices: допустимые значения (``None`` — свободное значение);
+    :param type: конвертер argparse (``None`` — ``str`` по умолчанию).
+    """
+
+    dest: str
+    flag: str
+    contract_arg: str
+    help: str
+    metavar: str
+    choices: tuple[str, ...] | None = None
+    type: Any = None
+
+
+#: **Единый инвентарь контрактных флагов ретривала** (§13, I16/I20).
+#: ``dest`` — имя атрибута ``args``; ``contract_arg`` — имя параметра
+#: :func:`core.pipeline.run_identity.build_execution_contract` (у ``--cutoff-k`` оно
+#: отличается: контрактное поле называется ``cutoff_K``). Потребители:
+#:
+#: * :func:`add_contract_flags` — регистрация флагов (``plan``; ``run`` объявляет те же
+#:   флаги в ``configure``, паритет проверяется тестом, читающим собранные парсеры);
+#: * :func:`contract_flag_values` — значения в контракт (``plan``; ``run`` читает те же
+#:   ``args``-атрибуты в своём composition root).
+#:
+#: Почему это отдельный список, а не поля :class:`DeclaredExecutionAxes`: профиль и
+#: ``cutoff_K`` попадают в контракт **отдельными аргументами**
+#: :func:`~core.pipeline.run_identity.build_execution_contract` (так их передаёт ``run``),
+#: а не через декларированный датакласс. Переносить их в датакласс значило бы завести
+#: вторую форму разрешения рядом с той, которой уже пользуется ``run``, — ровно тот
+#: дефект, от которого этот модуль избавляется. Список один, и он же — материал теста
+#: паритета: новая ось добавляется **здесь**, и оба входа видят её сразу.
+CONTRACT_FLAGS: tuple[ContractFlag, ...] = (
+    ContractFlag(
+        # I16: профиль ретривала — условие измерения, а не настройка удобства.
+        dest="retrieval_profile",
+        flag="--retrieval-profile",
+        contract_arg="retrieval_profile",
+        choices=tuple(profile.value for profile in RetrievalProfile),
+        metavar="PROFILE",
+        help="зафиксированный профиль ретривала R0|R1|R2 (I16). Изменение измеренной "
+        "настройки требует пере-измерения (`hound experiment retrieval`, A3)",
+    ),
+    ContractFlag(
+        # I20: один K на цикл (golden и ретривал режутся одним значением).
+        dest="cutoff_k",
+        flag="--cutoff-k",
+        contract_arg="cutoff_K",
+        type=_positive_int,
+        metavar="K",
+        help="retrieval_cutoff_K (I20) выреза ретривала для фазы оценки; дефолт — "
+        "DEFAULT_RETRIEVAL_CUTOFF_K (10)",
+    ),
+)
+
+#: ``dest``-ы инвентаря — то, что проверяется паритетом ``run``/``plan`` по собранным
+#: парсерам (``tests/cli/test_plan_contract_flags.py``). Выводится из
+#: :data:`CONTRACT_FLAGS`, чтобы второго списка не было.
+CONTRACT_FLAG_DESTS: tuple[str, ...] = tuple(spec.dest for spec in CONTRACT_FLAGS)
+
+
+def add_contract_flags(parser: argparse.ArgumentParser) -> None:
+    """Регистрирует контрактные флаги ретривала (:data:`CONTRACT_FLAGS`) на парсере.
+
+    Флаги **порождены** инвентарём: ни ``option string``, ни ``dest``, ни тип/``choices``/
+    help не написаны здесь второй раз. Форма должна совпадать с ``run`` (``configure``):
+    ``plan`` обязан принимать тот же вход, иначе напечатанный ``run_id`` описывает не тот
+    прогон, который можно запустить. Расхождение ловит
+    ``tests/cli/test_plan_contract_flags.py::test_contract_flag_inventory_matches_run``,
+    который читает **собранные** парсеры, а не этот код.
+
+    Значения читает :func:`contract_flag_values`; ``plan`` ничего не пишет и не исполняет.
+    """
+    for spec in CONTRACT_FLAGS:
+        kwargs: dict[str, Any] = {
+            "dest": spec.dest,
+            "default": None,
+            "metavar": spec.metavar,
+            "help": spec.help,
+        }
+        if spec.choices is not None:
+            kwargs["choices"] = list(spec.choices)
+        if spec.type is not None:
+            kwargs["type"] = spec.type
+        parser.add_argument(spec.flag, **kwargs)
+
+
+def contract_flag_values(args: argparse.Namespace) -> dict[str, Any]:
+    """Значения контрактных флагов ретривала — **под имена параметров контракта**.
+
+    Возвращает ``{"retrieval_profile": ..., "cutoff_K": ...}``: словарь можно передать
+    :func:`core.pipeline.run_identity.build_execution_contract` как ``**kwargs``. ``None``
+    означает «флаг не объявлен» — контрактная доктрина фиксирует это как ``null``, а не
+    подменяет дефолтом Ш6: ``run_id`` описывает объявленное, а не предположенное.
+
+    Читаются ровно ``dest`` из :data:`CONTRACT_FLAGS`: список флагов и их чтение — одна
+    запись, поэтому разъехаться молча они не могут.
+    """
+    return {
+        spec.contract_arg: getattr(args, spec.dest, None) for spec in CONTRACT_FLAGS
+    }
 
 
 @dataclass(frozen=True)

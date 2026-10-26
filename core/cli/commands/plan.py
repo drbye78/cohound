@@ -3,13 +3,24 @@
 Вынесено из ``core.cli.main`` (P1-A). Модуль экспортирует :func:`configure`
 (регистрация аргументов подкоманды) и :func:`run` (тело команды).
 
-**Зачем плану оси краула и SERP.** ``plan`` существует ради ответа «чем я измеряю» **до**
-прогона: он печатает ``run_id`` и слагаемые контракта. Поэтому он принимает те же
-операторские оси, что ``run``/``crawl`` (:data:`core.cli.execution_axes.CRAWL_AXIS_DESTS`
-+ ``--serp-rounds``) и считает их **тем же** резолвером
-(:func:`core.cli.execution_axes.resolve_declared_axes` → ``crawl_control_digest`` /
-``resolve_serp_rounds``). Второй формулы нет: иначе напечатанный ``run_id`` не описывал бы
-прогон, который можно запустить.
+**Зачем плану оси краула, SERP и контрактные флаги ретривала.** ``plan`` существует ради
+ответа «чем я измеряю» **до** прогона: он печатает ``run_id`` и слагаемые контракта.
+Поэтому он принимает те же входы, что ``run``/``crawl``, которые входят в
+``execution_contract_digest``:
+
+* операторские оси краула (:data:`core.cli.execution_axes.CRAWL_AXIS_DESTS`) —
+  :func:`core.cli.execution_axes.add_crawl_axis_flags`, значения через
+  ``resolve_declared_axes`` → ``crawl_control_digest``;
+* ``--serp-rounds`` — :func:`core.cli.execution_axes.add_serp_rounds_flag`, значения через
+  ``resolve_serp_rounds``;
+* ``--retrieval-profile``/``--cutoff-k``
+  (:data:`core.cli.execution_axes.CONTRACT_FLAGS`) — :func:`add_contract_flags`, значения в
+  ``build_execution_contract(retrieval_profile=…, cutoff_K=…)`` тем же способом, каким их
+  передаёт ``run``.
+
+Второй формулы нет: иначе напечатанный ``run_id`` не описывал бы прогон, который можно
+запустить. Паритет флагов ``run``/``plan`` закреплён тестами, читающими **собранные**
+парсеры (``tests/cli/test_plan_crawl_axes.py``, ``tests/cli/test_plan_contract_flags.py``).
 
 Оси, объявленные в ``run.yaml`` (``crawl.*``, ``serp.*``), план видит и без флагов — они
 приходят из ``load_inputs``. Флаг ``--dry-run`` удалён: он ничего не менял (``plan`` и так
@@ -36,8 +47,10 @@ from core.cli.context import (
 from core.cli.errors import EXIT_OK, EXIT_USAGE, CliError, LintFailure
 from core.cli.execution_axes import (
     DeclaredExecutionAxes,
+    add_contract_flags,
     add_crawl_axis_flags,
     add_serp_rounds_flag,
+    contract_flag_values,
     declared_status_dict_version,
     resolve_declared_axes,
 )
@@ -51,7 +64,9 @@ from core.pipeline.plan import plan as build_plan
 from core.pipeline.run_identity import build_execution_contract, resolve_cycle_id
 
 
-def _declared_payload(declared: DeclaredExecutionAxes, contract: str) -> dict[str, Any]:
+def _declared_payload(
+    declared: DeclaredExecutionAxes, contract: str, contract_flags: dict[str, Any]
+) -> dict[str, Any]:
     """Слагаемые контракта, которые план обязан назвать: «чем я измеряю».
 
     ``execution_contract_digest`` → ``run_id``; ``crawl_config_digest`` — свёртка
@@ -60,12 +75,20 @@ def _declared_payload(declared: DeclaredExecutionAxes, contract: str) -> dict[st
     ``serp_rounds``/``serp_source`` — контур поиска и **уровень**, который его задал
     (``cli``/``env``/``run.yaml``/``deploy.yaml``/``default``): «0 раундов» без источника
     читается как «поиск не нужен», а не как «env его выключил».
+
+    ``retrieval_profile``/``cutoff_K`` — из :data:`core.cli.execution_axes.CONTRACT_FLAGS`
+    (имена — как у полей ``EXECUTION_CONTRACT_FIELDS``). Печатаются отдельно от дайджеста,
+    потому что иначе «какой профиль/вырез поехал в ``run_id``» читается только разбором
+    хеша. ``None`` — флаг не объявлен: план не подставляет дефолт Ш6, иначе показывал бы
+    значение, которого в измерении нет.
     """
     return {
         "execution_contract_digest": contract,
         "crawl_config_digest": declared.crawl_config_digest,
         "serp_rounds": declared.serp_rounds,
         "serp_source": declared.serp_source,
+        "retrieval_profile": contract_flags.get("retrieval_profile"),
+        "cutoff_K": contract_flags.get("cutoff_K"),
     }
 
 
@@ -80,6 +103,8 @@ def _axis_lines(payload: dict[str, Any]) -> list[str]:
         f"crawl axes: digest={payload.get('crawl_config_digest') or '—'}",
         f"serp: rounds={payload.get('serp_rounds')} "
         f"(source: {payload.get('serp_source') or '—'})",
+        f"retrieval: profile={payload.get('retrieval_profile') or '—'} "
+        f"cutoff_K={payload.get('cutoff_K') if payload.get('cutoff_K') is not None else '—'}",
     ]
 
 
@@ -89,9 +114,10 @@ def run(args: argparse.Namespace) -> int:
     План чисто вычислим и **ничего не пишет** — ни ``runs/``, ни пакета. Блокирующий линт
     прерывает построение плана с кодом правила.
 
-    Оси краула/SERP считаются тем же резолвером, что у ``run``
-    (:func:`core.cli.execution_axes.resolve_declared_axes`): контракт плана и прогона —
-    одна функция входа (§13), иначе «план» описывал бы другой прогон.
+    Оси краула/SERP и контрактные флаги ретривала считаются тем же резолвером/теми же
+    аргументами, что у ``run`` (:func:`core.cli.execution_axes.resolve_declared_axes`,
+    :func:`core.cli.execution_axes.contract_flag_values`): контракт плана и прогона — одна
+    функция входа (§13), иначе «план» описывал бы другой прогон.
     """
     inputs = load_inputs(args.run_yaml, args.package)
     report = lint_run_inputs(inputs)
@@ -105,6 +131,10 @@ def run(args: argparse.Namespace) -> int:
     notices: list[str] = list(profile_notices(deploy_config))
     declared: DeclaredExecutionAxes | None = None
     contract: str | None = None
+    # §13/I16/I20: профиль ретривала и ``cutoff_K`` — слагаемые контракта, значит и
+    # ``run_id``. Читаются из единого инвентаря (``CONTRACT_FLAGS``), а не перечисляются
+    # здесь: перечисление и было дефектом (``plan`` печатал чужой ``run_id``).
+    contract_flags = contract_flag_values(args)
     if args.run_id is not None:
         result = build_plan(inputs, run_id=args.run_id)
     else:
@@ -155,6 +185,10 @@ def run(args: argparse.Namespace) -> int:
             seeds_digest=seeds,
             declared=declared,
             status_dict_version=declared_status_dict_version(),
+            # I16/I20: те же аргументы, что передаёт ``run`` (``run.py``), из того же
+            # инвентаря флагов. ``None`` — флаг не объявлен: контракт пишет ``null``,
+            # а не дефолт Ш6 (``run_id`` описывает объявленное).
+            **contract_flags,
         )
         result = build_plan(
             inputs,
@@ -170,7 +204,7 @@ def run(args: argparse.Namespace) -> int:
         )
     payload = _plan_payload(result)
     if declared is not None and contract is not None:
-        payload.update(_declared_payload(declared, contract))
+        payload.update(_declared_payload(declared, contract, contract_flags))
     if notices:
         payload["warnings"] = list(notices)
     if args.json:
@@ -194,6 +228,9 @@ def configure(sub: Any) -> None:
     # один инвентарь (``CRAWL_AXIS_DESTS``), а паритет флагов закреплён тестом.
     add_crawl_axis_flags(p_plan)
     add_serp_rounds_flag(p_plan)
+    # §13/I16/I20: профиль ретривала и ``cutoff_K`` — слагаемые ``run_id``; флаги порождены
+    # инвентарём ``CONTRACT_FLAGS`` (не второй список), паритет с ``run`` — в тесте.
+    add_contract_flags(p_plan)
     _add_common(p_plan)
     _add_llm_slot_flag(p_plan)
     _add_llm_model_flag(p_plan)
