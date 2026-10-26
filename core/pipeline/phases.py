@@ -1368,12 +1368,15 @@ def build_phases(
         holder["artifacts"] = artifacts
         # §13/K2: устаревшие ячейки исключены из расчёта — «что требует пере-оценки» идёт
         # advisory-каналом (``pending``), а не тишиной: это работа человека, не дефект.
+        # Исполняется она не новым прогоном, а выборочной пере-оценкой: ``hound revalidate``
+        # сужает Ш6 до этих ячеек (селектор ``evaluate.select_stale_cells``).
         pending: list[str] = []
         stale_count = len(bundle.stale_cells)
         if artifacts.stale_cells is not None:
             pending.append(
                 f"отчёт: {stale_count} ячеек исключены из расчёта как устаревшие "
-                "(stale_reason) — требуют пере-оценки: outputs/stale_cells.csv"
+                "(stale_reason) — требуют пере-оценки: hound revalidate "
+                "(список: outputs/stale_cells.csv)"
             )
         return PhaseResult(
             status="ok",

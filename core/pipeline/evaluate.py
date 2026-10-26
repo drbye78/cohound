@@ -32,6 +32,16 @@ preliminary → ``preliminary``-кандидат c ``status=None`` (**I13**).
 ``failure_kind``. Это осознанное расширение подписей из 01 §4: иначе канонический
 ``prompt_hash`` (шаблон + rule + absence_rule + sorted chunk_ids, §5) терялся бы.
 
+**Выборочная пере-оценка устаревших ячеек (§13/K2).** Фаза пере-оценивает **все** пары
+``product × param``; для ячеек, помеченных ``stale_reason`` (новая индексная сборка), это
+означало бы платить за незатронутое. Поэтому у фазы есть адресный вход:
+:func:`select_stale_cells` (селектор «ровно помеченные ячейки», читается из store, а не из
+``stale_cells.csv``) и :func:`reevaluate_stale` (исполнение того же конвейера только по
+селекции, со снятием пометки **лишь** при вердикте по текущей сборке). CLI-точка —
+``hound revalidate``: она работает на существующем прогоне и ``run_id`` не меняет, потому
+что состав объявленных условий измерения не меняется — доводится до конца работа Ш6,
+которая была отложена.
+
 Модуль категорийно нейтрален (§1.3), без сети, без новых зависимостей.
 """
 
@@ -101,13 +111,30 @@ __all__ = [
     "DEFAULT_RETRIEVAL_CUTOFF_K",
     "DEFAULT_RETRIEVAL_PROFILE",
     "EvaluationOutcome",
+    "REVALIDATE_FAILED_PREFIX",
+    "REVALIDATE_NOTHING_TO_DO",
+    "REVALIDATE_SKIP_BUILD_MISMATCH",
+    "REVALIDATE_SKIP_NO_EVALUATOR",
+    "REVALIDATE_SKIP_NO_VERDICT",
+    "REVALIDATE_STATUS_NOOP",
+    "REVALIDATE_STATUS_REEVALUATED",
+    "REVALIDATE_STATUS_REFUSED",
+    "RevalidationReport",
+    "STALE_SKIP_NO_BUILD",
+    "STALE_SKIP_PARAM",
+    "STALE_SKIP_SOURCE_KIND",
+    "STALE_SKIP_STATE",
+    "STALE_SKIP_UNKNOWN_BUILD",
+    "StaleSelection",
     "evaluate_batch",
     "evaluate_cell",
     "evaluate_phase",
     "precompute_dense_hits",
     "precompute_query_vectors",
+    "reevaluate_stale",
     "retrieve_for_cell",
     "run_queries_for_cell",
+    "select_stale_cells",
     "unique_queries",
 ]
 
@@ -1787,3 +1814,573 @@ def evaluate_phase(
             store.save_exhaustion(protocol)
 
     return PhaseResult(status="ok", phase="evaluate", cells=cells, errors=errors)
+
+
+# ---------------------------------------------------------------------------
+# Пере-оценка устаревших ячеек (§13/K2): селектор + исполнение
+# ---------------------------------------------------------------------------
+
+#: Префикс машинной заметки о **неудавшейся** пере-оценке (``cells.validation_notes``).
+REVALIDATE_FAILED_PREFIX = "revalidate_failed"
+
+#: Причина, по которой stale-ячейка вне пере-оценки: её вердикт пришёл не из корпуса
+#: (реестр/наследование/baselines/ручное) — у неё нет оценки, которую можно пересчитать.
+STALE_SKIP_SOURCE_KIND = "source_kind_not_documentation"
+#: Причина: состояние ячейки не несёт корпусного вердикта (``pending``/``failed``/
+#: ``reviewed``): пересчитывать нечего, а ре-оценка подменила бы чужое решение (I6/I7).
+STALE_SKIP_STATE = "state_not_reevaluable"
+#: Причина: ``param_id`` ячейки отсутствует в восстановленном каталоге прогона — запросы и
+#: промпт по нему не построить (значения не выдумываем).
+STALE_SKIP_PARAM = "param_not_in_catalog"
+#: Причина: у stale-ячейки нет ``index_build_id`` — снимать пометку «описывает прошлую
+#: сборку» не на что (обновлять её на текущую сборку нечего).
+STALE_SKIP_NO_BUILD = "no_index_build_id"
+#: Причина: текущая сборка прогона не объявлена (``runs.index_build_id`` пуст) — свежесть
+#: ячейки после пере-оценки была бы утверждением без предмета.
+STALE_SKIP_UNKNOWN_BUILD = "current_build_unknown"
+#: Причина: оценщик не сконфигурирован — пере-оценка оценщиком невозможна.
+REVALIDATE_SKIP_NO_EVALUATOR = "no_evaluator"
+#: Причина остатка: пере-оценка состоялась, но вердикта не получено (I4 ``failed``/I13
+#: ``preliminary``) — пометка сохранена, ячейка по-прежнему вне расчёта.
+REVALIDATE_SKIP_NO_VERDICT = "no_verdict"
+#: Причина остатка: срез ретривала пришёл из **другой** сборки, не из текущей: вердикт
+#: описывал бы не тот корпус, свежесть объявлять нельзя.
+REVALIDATE_SKIP_BUILD_MISMATCH = "build_mismatch"
+
+#: Статус отчёта: пере-оценка что-то сняла.
+REVALIDATE_STATUS_REEVALUATED = "reevaluated"
+#: Статус отчёта: работы не было (``stale`` пуст либо ничего не адресуется оценщику).
+REVALIDATE_STATUS_NOOP = "noop"
+#: Статус отчёта: пере-оценка невозможна по объявленной причине (не «пусто»).
+REVALIDATE_STATUS_REFUSED = "refused"
+
+#: Явное сообщение идемпотентного no-op (повторный вызов без stale-ячеек).
+REVALIDATE_NOTHING_TO_DO = "пере-оценивать нечего: stale-ячеек нет"
+
+#: Состояния, из которых пере-оценка оценщиком по корпусу вообще возможна: ``evaluated``
+#: (вердикт получен) и ``preliminary`` (кандидат того же контура, I13). Прочие состояния —
+#: ``pending`` (вердикта ещё нет), ``failed`` (сбой прибора, I4), ``reviewed`` (решение
+#: человека, I6/I7) — пере-оценкой не переписываются.
+_REEVALUABLE_STATES: frozenset[CellState] = frozenset(
+    {CellState.EVALUATED, CellState.PRELIMINARY}
+)
+
+
+def _cell_key(cell: Cell) -> dict[str, str]:
+    """Ключ ячейки для payload'ов (``product_id``/``param_id``)."""
+    return {"product_id": str(cell.product_id), "param_id": str(cell.param_id)}
+
+
+def _enum_text(value: Any) -> str:
+    """Строковое значение перечисления/``None`` для записей отчёта."""
+    return str(getattr(value, "value", value))
+
+
+@dataclass(frozen=True)
+class StaleSelection:
+    """Результат селектора: **все** stale-ячейки прогона, разделённые по достижимости.
+
+    :param run_id: прогон, по которому читались ячейки.
+    :param reevaluable_cells: ячейки, которые оценщик вправе пере-оценить
+        (``source_kind=documentation``, состояние ``evaluated``/``preliminary``), порядок
+        ``(product_id, param_id)``.
+    :param skipped: остальные stale-ячейки с причиной недостижимости — «сколько осталось и
+        почему» видно, а не выпадает молча.
+
+    Инвариант: ``len(reevaluable_cells) + len(skipped)`` = число ячеек прогона со
+    ``stale_reason`` (после фильтров ``product_ids``/``param_ids``). Селектор не теряет
+    помеченные ячейки: часть, которую нельзя пере-оценить, возвращается с причиной, а не
+    отбрасывается.
+    """
+
+    run_id: str
+    reevaluable_cells: tuple[Cell, ...] = ()
+    skipped: tuple[dict[str, Any], ...] = ()
+
+    @property
+    def total(self) -> int:
+        """Сколько ячеек прогона помечено stale (пере-оцениваемые + недостижимые)."""
+        return len(self.reevaluable_cells) + len(self.skipped)
+
+    def to_dict(self) -> dict[str, Any]:
+        """JSON-совместимый вид селекции (счётчики + ключи + причины)."""
+        return {
+            "run_id": self.run_id,
+            "stale_total": self.total,
+            "reevaluable": len(self.reevaluable_cells),
+            "reevaluable_cells": [
+                _cell_key(cell) for cell in self.reevaluable_cells
+            ],
+            "skipped": len(self.skipped),
+            "skipped_cells": list(self.skipped),
+        }
+
+
+def _stale_skip_reason(cell: Cell) -> str | None:
+    """Почему stale-ячейку **нельзя** пере-оценить оценщиком (``None`` — можно).
+
+    Проверка «нет корпуса» — первая и главная: вердикт реестра/наследования/baselines
+    пришёл из другого контура, и пере-оценка «по документации» подменила бы механизм
+    (I2b/§2.2 п.7-8), а не обновила измерение. Состояние проверяется вторым: ``reviewed``
+    несёт человеческое решение (I6/I7), ``failed``/``pending`` — вердикта нет вовсе.
+    """
+    if cell.source_kind is not _CELL_SOURCE_KIND:
+        return f"{STALE_SKIP_SOURCE_KIND}:{_enum_text(cell.source_kind)}"
+    if cell.state not in _REEVALUABLE_STATES:
+        return f"{STALE_SKIP_STATE}:{_enum_text(cell.state)}"
+    if not cell.index_build_id:
+        return STALE_SKIP_NO_BUILD
+    return None
+
+
+def select_stale_cells(
+    store: StorePort,
+    run_id: str,
+    *,
+    product_ids: Sequence[str] | None = None,
+    param_ids: Sequence[str] | None = None,
+) -> StaleSelection:
+    """Селектор: stale-ячейки прогона **из хранилища** (не из ``stale_cells.csv``).
+
+    Источник истины — ``iter_cells``: CSV/отчётные артефакты производны и могут быть
+    устаревшими или вовсе не сгенерированными (отчёт идёт после ``compute``), поэтому
+    пере-оценка читает то же, что читает расчёт.
+
+    Возвращаются **ровно** помеченные ячейки (``stale_reason is not None``), разделённые
+    на пере-оцениваемые и недостижимые: см. :func:`_stale_skip_reason`. Ячейки без пометки
+    не возвращаются ни в одной части — пере-оценка их не касается (она не «пересчитывает
+    фазу на всякий случай»).
+
+    :param product_ids: фильтр продуктов (``None`` — все).
+    :param param_ids: фильтр параметров (``None`` — все).
+    """
+    products = set(product_ids) if product_ids is not None else None
+    params = set(param_ids) if param_ids is not None else None
+    reevaluable: list[Cell] = []
+    skipped: list[dict[str, Any]] = []
+    for cell in store.iter_cells(str(run_id)):
+        if cell.stale_reason is None:
+            continue
+        if products is not None and str(cell.product_id) not in products:
+            continue
+        if params is not None and str(cell.param_id) not in params:
+            continue
+        reason = _stale_skip_reason(cell)
+        if reason is None:
+            reevaluable.append(cell)
+            continue
+        skipped.append(
+            {
+                **_cell_key(cell),
+                "reason": reason,
+                "stale_reason": _enum_text(cell.stale_reason),
+                "source_kind": _enum_text(cell.source_kind),
+                "state": _enum_text(cell.state),
+                "index_build_id": cell.index_build_id,
+            }
+        )
+    reevaluable.sort(key=lambda c: (str(c.product_id), str(c.param_id)))
+    skipped.sort(key=lambda row: (row["product_id"], row["param_id"]))
+    return StaleSelection(
+        run_id=str(run_id),
+        reevaluable_cells=tuple(reevaluable),
+        skipped=tuple(skipped),
+    )
+
+
+@dataclass
+class RevalidationReport:
+    """Отчёт пере-оценки: что было stale, что пере-оценено, что осталось и почему.
+
+    :param status: :data:`REVALIDATE_STATUS_REEVALUATED` | ``..._NOOP`` | ``..._REFUSED``.
+    :param message: человекочитаемая сводка **тех же** чисел, что в полях (оператор видит
+        «сколько было / пере-оценено / осталось», не разбирая ``--json``).
+    :param stale_total: сколько ячеек было помечено stale на входе.
+    :param reevaluated: снятые пометки (успех) — ``product_id``/``param_id``/``status``/
+        ``index_build_id``/``state``.
+    :param remaining: пометки, которые **сохранились**, с причиной
+        (:data:`REVALIDATE_SKIP_NO_VERDICT`/``..._BUILD_MISMATCH``/``retrieval_failed``/
+        ``evaluation_error``).
+    :param skipped: stale-ячейки, к которым оценщик не имеет права прикасаться
+        (реестр/наследование/состояние без вердикта/нет параметра в каталоге).
+    :param errors: изолированные сбои ретривала/оценки (видны, а не проглочены).
+    """
+
+    run_id: str
+    index_build_id: str | None = None
+    status: str = REVALIDATE_STATUS_NOOP
+    message: str = ""
+    stale_total: int = 0
+    reevaluated: list[dict[str, Any]] = field(default_factory=list)
+    remaining: list[dict[str, Any]] = field(default_factory=list)
+    skipped: list[dict[str, Any]] = field(default_factory=list)
+    errors: list[str] = field(default_factory=list)
+
+    @property
+    def ok(self) -> bool:
+        """Состоялась ли пере-оценка хотя бы одной ячейки."""
+        return bool(self.reevaluated)
+
+    def to_dict(self) -> dict[str, Any]:
+        """JSON-совместимый вид отчёта (``--json`` payload команды ``revalidate``)."""
+        return {
+            "run_id": self.run_id,
+            "index_build_id": self.index_build_id,
+            "status": self.status,
+            "message": self.message,
+            "stale_total": self.stale_total,
+            "reevaluated": len(self.reevaluated),
+            "remaining": len(self.remaining),
+            "skipped": len(self.skipped),
+            "reevaluated_cells": list(self.reevaluated),
+            "remaining_cells": list(self.remaining),
+            "skipped_cells": list(self.skipped),
+            "errors": list(self.errors),
+        }
+
+
+def _reasons_breakdown(rows: Sequence[Mapping[str, Any]]) -> str:
+    """``reason=count, ...`` в детерминированном порядке (для сводки)."""
+    counts: dict[str, int] = {}
+    for row in rows:
+        reason = str(row.get("reason", "?"))
+        counts[reason] = counts.get(reason, 0) + 1
+    return ", ".join(f"{reason}={count}" for reason, count in sorted(counts.items()))
+
+
+def _revalidation_summary(report: RevalidationReport) -> str:
+    """Сводка отчёта: было stale / пере-оценено / осталось (+причины) / вне пере-оценки."""
+    parts = [
+        f"stale было {report.stale_total}",
+        f"пере-оценено {len(report.reevaluated)}",
+        f"осталось {len(report.remaining)}",
+    ]
+    if report.remaining:
+        parts.append(f"осталось почему: {_reasons_breakdown(report.remaining)}")
+    if report.skipped:
+        parts.append(
+            f"вне пере-оценки {len(report.skipped)} "
+            f"({_reasons_breakdown(report.skipped)})"
+        )
+    return "; ".join(parts)
+
+
+def _cell_condition(cell: Cell) -> tuple[str, str, int]:
+    """Условия измерения **самой ячейки**: ``(product_id, профиль, cutoff_K)``.
+
+    Пере-оценка не вводит новых условий: она повторяет условия, под которыми ячейка была
+    получена (``retrieval_profile``/``retrieval_params_json``, R7/I16/I20). Профиль из
+    манифеста — лишь fallback для исторических строк без полей.
+    """
+    profile = str(cell.retrieval_profile or DEFAULT_RETRIEVAL_PROFILE.value)
+    cutoff = DEFAULT_RETRIEVAL_CUTOFF_K
+    raw = cell.retrieval_params_json
+    if raw:
+        try:
+            parsed = json.loads(raw)
+        except (TypeError, ValueError):
+            parsed = None
+        if isinstance(parsed, Mapping):
+            value = parsed.get("cutoff_K")
+            if isinstance(value, int) and value > 0:
+                cutoff = int(value)
+    return str(cell.product_id), profile, cutoff
+
+
+def _accepted_risk(cell: Cell) -> str | None:
+    """Принятие риска, уже данное человеком ранее для этой ячейки (``scope_acceptance``).
+
+    Пере-оценка **не переспрашивает** и не выдумывает подпись: она повторяет ту, что
+    лежит в ``cell.evidence_scope``. Иначе ячейка, получившая ``❌`` класса ``bounded``,
+    после пере-оценки молча понизилась бы до ``❓`` — то есть пере-оценка корпуса
+    отменила бы человеческое решение о принятии риска.
+    """
+    scope = cell.evidence_scope
+    return scope.scope_acceptance if scope is not None else None
+
+
+def _current_build_id(store: StorePort, run_id: str) -> str | None:
+    """Текущая сборка прогона (``runs.index_build_id``), если store это умеет читать."""
+    reader = getattr(store, "read_run_index_ref", None)
+    if not callable(reader):
+        return None
+    try:
+        ref = reader(str(run_id))
+    except Exception:  # noqa: BLE001 — чтение провенанса не должно ронять команду
+        return None
+    return getattr(ref, "index_build_id", None) or None
+
+
+def _kept_stale_cell(cell: Cell, *, reason: str, detail: str | None) -> Cell:
+    """Возвращает stale-ячейку **с сохранённой пометкой** плюс запись о неудаче.
+
+    Неуспешная пере-оценка не имеет права объявить ячейку свежей (§13/K2): вердикта по
+    текущей сборке нет. При этом уже полученный вердикт старой сборки **не стирается** —
+    он остаётся привязан к своей сборке и с явной пометкой устаревания, а причина отказа
+    пере-оценки ложится в ``cells.validation_notes`` (переживает прогон, читается ревью).
+    Терять статус старой сборки ради записи ``failed`` было бы хуже: ``failed`` (I4) —
+    факт о текущем приборе, а старая ячейка — факт о прошлом корпусе.
+    """
+    note = f"{REVALIDATE_FAILED_PREFIX}: {reason}"
+    if detail:
+        note = f"{note} — {detail}"
+    notes = _compact_notes([*cell.validation_notes, note])
+    return cell.model_copy(update={"validation_notes": notes})
+
+
+def reevaluate_stale(
+    *,
+    store: StorePort,
+    run_id: str,
+    params: Mapping[str, CatalogRow],
+    ports: Ports,
+    satellites: Sequence[Satellite] = (),
+    resolver: SourceResolver | None = None,
+    strict: bool = True,
+    eval_cache: EvalVerdictCache | None = None,
+    max_retries: int = 2,
+    product_ids: Sequence[str] | None = None,
+    param_ids: Sequence[str] | None = None,
+    current_build_id: str | None = None,
+) -> RevalidationReport:
+    """Пере-оценивает **только** устаревшие ячейки и снимает пометку при вердикте.
+
+    Это исполнение селектора :func:`select_stale_cells`: набор ячеек сужается до
+    ``stale_reason is not None`` **и** ``source_kind=documentation`` (см. там же), поэтому
+    незатронутое не оплачивается повторно, а вердикты чужих контуров не переписываются.
+
+    Порядок для каждой ячейки — тот же, что в фазе Ш6 (:func:`evaluate_cell`): ретривал
+    под условиями ячейки (:func:`retrieve_for_cell`, I16/I17/I20) → промпт → оценщик
+    (I18) → эшелон валидации §10. Разница одна: персистенция выполняется **здесь**, после
+    классификации исхода, а не внутри оценки.
+
+    **Снятие пометки (§13/K2).** Ячейка объявляется свежей ровно тогда, когда получен
+    вердикт (``state=evaluated``) **и** срез пришёл из текущей сборки прогона
+    (``index_build_id == current_build_id``). Тогда сохраняется новая ячейка с
+    ``stale_reason=None`` и ``index_build_id`` текущей сборки. Иначе пометка
+    **сохраняется**: ``no_verdict`` (I4 ``failed``/I13 ``preliminary`` — вердикта нет) или
+    ``build_mismatch`` (вердикт описывал бы другую сборку). «Не получилось» не выдаётся за
+    «свежо», и старый вердикт при этом не стирается (:func:`_kept_stale_cell`).
+
+    **Идемпотентность.** Повторный вызов без изменений ничего не оценивает: селектор даёт
+    пусто, отчёт возвращается со ``status=noop`` и :data:`REVALIDATE_NOTHING_TO_DO`.
+
+    :param params: каталог прогона ``param_id → CatalogRow`` (снимок ``run_inputs`` или
+        пакет): из него строятся запросы и промпт. Ячейка с ``param_id`` вне каталога
+        остаётся stale с причиной :data:`STALE_SKIP_PARAM` — параметры не выдумываются.
+    :param ports: оценщик и (опционально) индексы/эмбеддер ретривала.
+    :param current_build_id: текущая сборка прогона; ``None`` — читается из
+        ``runs.index_build_id``. Не объявлена — пере-оценка **отказывается** работать:
+        снимать пометку «описывает прошлую сборку» не на что.
+    :param max_retries: повторы вызова оценщика (как в фазе, §7.1).
+    """
+    selection = select_stale_cells(
+        store, run_id, product_ids=product_ids, param_ids=param_ids
+    )
+    resolved_build = current_build_id or _current_build_id(store, run_id)
+    report = RevalidationReport(
+        run_id=str(run_id),
+        index_build_id=resolved_build,
+        status=REVALIDATE_STATUS_NOOP,
+        stale_total=selection.total,
+        skipped=[dict(row) for row in selection.skipped],
+    )
+    if selection.total == 0:
+        report.message = REVALIDATE_NOTHING_TO_DO
+        return report
+
+    catalog = {str(key): row for key, row in params.items()}
+    targets: list[Cell] = []
+    for cell in selection.reevaluable_cells:
+        if str(cell.param_id) not in catalog:
+            report.skipped.append({**_cell_key(cell), "reason": STALE_SKIP_PARAM})
+            continue
+        targets.append(cell)
+    if not targets:
+        report.message = (
+            f"пере-оценивать нечего: stale-ячеек {selection.total}, но ни одна не "
+            f"адресуется оценщику по корпусу ({_reasons_breakdown(report.skipped)})"
+        )
+        return report
+
+    evaluator = getattr(ports, "evaluator", None)
+    if evaluator is None:
+        report.status = REVALIDATE_STATUS_REFUSED
+        report.remaining = [
+            {**_cell_key(cell), "reason": REVALIDATE_SKIP_NO_EVALUATOR} for cell in targets
+        ]
+        report.message = (
+            "пере-оценка невозможна: оценщик не сконфигурирован — stale-ячейки остаются "
+            "stale, снимать пометку без вердикта нельзя"
+        )
+        return report
+    if not resolved_build:
+        report.status = REVALIDATE_STATUS_REFUSED
+        report.remaining = [
+            {**_cell_key(cell), "reason": STALE_SKIP_UNKNOWN_BUILD} for cell in targets
+        ]
+        report.message = (
+            "пере-оценка невозможна: текущая сборка прогона не объявлена "
+            "(runs.index_build_id пуст) — свежесть ячейки не к чему привязать"
+        )
+        return report
+
+    model_id = getattr(evaluator, "model_id", "") or _UNSPECIFIED_MODEL_ID
+
+    # Группы = условия измерения ячейки (продукт/профиль/K): векторы запросов и dense-плечо
+    # считаются **на группу**, а не на всю фазу — цена пропорциональна затронутым ячейкам.
+    groups: dict[tuple[str, str, int], list[Cell]] = {}
+    for cell in targets:
+        groups.setdefault(_cell_condition(cell), []).append(cell)
+
+    for product_id, profile, cutoff in sorted(groups):
+        group = sorted(groups[(product_id, profile, cutoff)], key=lambda c: str(c.param_id))
+        group_params = [catalog[str(cell.param_id)] for cell in group]
+        try:
+            query_vectors = precompute_query_vectors(
+                group_params,
+                profile=profile,
+                embedder=getattr(ports, "embedder", None),
+                memo={},
+            )
+        except Exception as exc:  # noqa: BLE001 — сбой виден в errors, а не притворяется успехом
+            report.errors.append(
+                f"{product_id}: query_vectors: {type(exc).__name__}: {exc}"
+            )
+            query_vectors = None
+        coverage = _coverage_for(None, store, str(run_id), product_id)
+        try:
+            dense_by_query = precompute_dense_hits(
+                group_params,
+                product_ids=[product_id],
+                profile=profile,
+                cutoff_k=cutoff,
+                vector_index=getattr(ports, "vector_index", None),
+                query_vectors=query_vectors,
+            )
+        except Exception as exc:  # noqa: BLE001 — батч не удался: идём поштучно, но видимо
+            report.errors.append(
+                f"{product_id}: dense batch: {type(exc).__name__}: {exc} — "
+                "поиск пошёл поштучно"
+            )
+            dense_by_query = None
+
+        for cell in group:
+            param = catalog[str(cell.param_id)]
+            try:
+                retrieval = retrieve_for_cell(
+                    param,
+                    product_id=product_id,
+                    profile=profile,
+                    cutoff_k=cutoff,
+                    lexical_index=getattr(ports, "lexical_index", None),
+                    vector_index=getattr(ports, "vector_index", None),
+                    embedder=getattr(ports, "embedder", None),
+                    query_vectors=query_vectors,
+                    dense_by_query=dense_by_query,
+                )
+            except Exception as exc:  # noqa: BLE001 — изоляция по контракту фазы
+                report.errors.append(
+                    f"{product_id}/{cell.param_id}: retrieval: {type(exc).__name__}: {exc}"
+                )
+                report.remaining.append(
+                    {
+                        **_cell_key(cell),
+                        "reason": "retrieval_failed",
+                        "stale_reason": _enum_text(cell.stale_reason),
+                        "index_build_id": cell.index_build_id,
+                    }
+                )
+                continue
+            try:
+                # ``store=None``: персистенция — только после классификации исхода.
+                # Иначе неуспешная пере-оценка успела бы снять пометку upsert'ом.
+                outcome = evaluate_cell(
+                    param=param,
+                    product_id=product_id,
+                    run_id=str(run_id),
+                    evaluator=evaluator,
+                    chunks=retrieval.chunks,
+                    satellites=satellites,
+                    resolver=resolver,
+                    strict=strict,
+                    retrievals=retrieval,
+                    max_retries=max_retries,
+                    store=None,
+                    coverage=coverage,
+                    scope_acceptance=_accepted_risk(cell),
+                    eval_cache=eval_cache,
+                )
+            except Exception as exc:  # noqa: BLE001 — изоляция по контракту фазы
+                report.errors.append(
+                    f"{product_id}/{cell.param_id}: evaluate: {type(exc).__name__}: {exc}"
+                )
+                report.remaining.append(
+                    {
+                        **_cell_key(cell),
+                        "reason": "evaluation_error",
+                        "stale_reason": _enum_text(cell.stale_reason),
+                        "index_build_id": cell.index_build_id,
+                    }
+                )
+                continue
+
+            keep_reason = _keep_stale_reason(outcome, resolved_build)
+            if keep_reason is None:
+                fresh = outcome.cell.model_copy(update={"stale_reason": None})
+                _persist(
+                    store,
+                    fresh,
+                    outcome.validation,
+                    prompt_hash=outcome.prompt_hash,
+                    model_id=model_id,
+                )
+                report.reevaluated.append(
+                    {
+                        **_cell_key(cell),
+                        "state": _enum_text(fresh.state),
+                        "status": _enum_text(fresh.status),
+                        "index_build_id": fresh.index_build_id,
+                        "previous_index_build_id": cell.index_build_id,
+                    }
+                )
+                continue
+
+            detail = outcome.failure_kind or next(
+                (note for note in reversed(outcome.validation.notes) if note), None
+            )
+            kept = _kept_stale_cell(cell, reason=keep_reason, detail=detail)
+            store.save_cell(kept)
+            report.remaining.append(
+                {
+                    **_cell_key(cell),
+                    "reason": keep_reason,
+                    "stale_reason": _enum_text(kept.stale_reason),
+                    "index_build_id": kept.index_build_id,
+                    "state": _enum_text(outcome.cell.state),
+                    "failure_kind": outcome.failure_kind,
+                    "note": f"{REVALIDATE_FAILED_PREFIX}: {keep_reason}",
+                }
+            )
+
+    report.status = (
+        REVALIDATE_STATUS_REEVALUATED if report.reevaluated else REVALIDATE_STATUS_NOOP
+    )
+    report.message = _revalidation_summary(report)
+    return report
+
+
+def _keep_stale_reason(outcome: EvaluationOutcome, current_build_id: str) -> str | None:
+    """Оставить ли пометку после попытки: причина (``None`` — снимать).
+
+    Снятие пометки — утверждение «вердикт получен по **текущей** сборке». Оба условия
+    проверяются явно: ``state=evaluated`` (иначе вердикта нет: I4/I13) и
+    ``index_build_id == current_build_id`` (иначе вердикт описывает другую сборку, и
+    «свежая» ячейка снова попала бы в расчёт с чужим корпусом).
+    """
+    cell = outcome.cell
+    if cell.state is not CellState.EVALUATED:
+        return REVALIDATE_SKIP_NO_VERDICT
+    if (cell.index_build_id or "") != current_build_id:
+        return REVALIDATE_SKIP_BUILD_MISMATCH
+    return None
