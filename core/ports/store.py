@@ -117,6 +117,19 @@ class StorePort(Protocol):
         поэтому ``❌`` не теряет протокол отсутствия при чтении из store (отчёт/ревью).
         """
 
+    def iter_cell_quotes(self, run_id: str) -> Iterator[dict[str, Any]]:
+        """Читает цитаты доказательств прогона — **любого** вида, включая производные.
+
+        Зачем отдельный читатель: ``iter_cells`` не восстанавливает ``Cell.evidence``
+        (цитаты живут в ``cell_evidence``), а замер «о предмете ли доказательство» обязан
+        видеть и ``direct``, и ``derived``. Наблюдавшийся дефект — визитка продукта как
+        единственная «поддержка» 19 разных параметров — живёт именно в производных
+        цитатах наследования; читатель, видящий только ``direct``, показал бы ноль.
+
+        Запись — словарь ``product_id``/``param_id``/``citation_quote``/
+        ``evidence_type``/``source_kind``. Порядок — порядок вставки (детерминизм).
+        """
+
     def log_search(self, entry: SearchLogEntry) -> None: ...
 
     def save_exhaustion(self, pe: ProtocolExhaustion) -> None: ...

@@ -83,6 +83,10 @@ from core.pipeline.partial_docs import (
     partial_docs_summary,
     write_partial_docs_artifact,
 )
+from core.pipeline.support_quality import (
+    support_quality,
+    write_support_quality_artifact,
+)
 from core.util.hashing import short_hash
 
 #: Строковые значения блокирующих классов — для разбора legacy-аудита в ячейке,
@@ -270,7 +274,12 @@ class Artifacts:
     #: Блок ``partial_docs`` манифеста (те же числа, свёрнутые до продукта) — чтобы CLI
     #: мог назвать факт строкой, даже когда CSV не создан.
     partial_docs_summary: dict[str, Any] | None = None
-
+    #: ``outputs/support_quality.yaml`` — два замера качества поддержки карты: «о предмете
+    #: ли доказательство» и «сколько presence-ячеек держится на одной цитате». Наблюдения,
+    #: а не гейты. ``None`` — замер не нашёл материала (нет presence-ячеек).
+    support_quality: Path | None = None
+    #: Те же числа свёрнутыми — чтобы CLI назвал факт строкой, даже когда файла нет.
+    support_quality_summary: dict[str, Any] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -2564,7 +2573,21 @@ def write_reports(
     partial_summary = partial_docs_summary(
         store, run_id, products=sorted({str(cell.product_id) for cell in cell_list})
     )
-
+    # A3: два замера качества поддержки получают производителя. До этого числа
+    # существовали только в тестах: `support_overlap_scan` и `support_concentration`
+    # считались, но ни один артефакт их не публиковал — то есть «поле есть, производителя
+    # нет». Это тот же дефект, что пустой `relevant_evidence_coverage`: измерение, которого
+    # не видно, не является измерением.
+    try:
+        support_payload = support_quality(
+            cells=cell_list, catalog=catalog, store=store, run_id=run_id
+        )
+        support_path = write_support_quality_artifact(
+            support_payload, outputs_dir / "support_quality.yaml", run_id=run_id
+        )
+    except Exception:  # noqa: BLE001 — наблюдение вторично к измерению, отчёт не роняем
+        support_payload = None
+        support_path = None
 
     nda_questions = render_nda_questions(
         cell_list,
@@ -2605,7 +2628,8 @@ def write_reports(
         cell_diagnostics=cell_diagnostics,
         partial_docs=partial_docs_path,
         partial_docs_summary=partial_summary,
-
+        support_quality=support_path,
+        support_quality_summary=support_payload,
         publishability=publishability_path,
         preliminary_findings=preliminary,
         nda_questions=nda_questions,

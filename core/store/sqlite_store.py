@@ -859,6 +859,31 @@ class SqliteStore:
         for row in self.conn.execute(sql, (run_id, EvidenceType.ABSENCE.value)):
             yield self._row_to_absence(row)
 
+    def iter_cell_quotes(self, run_id: str) -> Iterator[dict[str, Any]]:
+        """Цитаты доказательств прогона любого вида (``direct``/``derived``/``absence``).
+
+        Один запрос на прогон (R5): замер поддержки нуждается в **всех** цитатах сразу,
+        потому что вопрос замера — не «что в этой ячейке», а «на чём держится карта»
+        (одна визитка продукта как поддержка 19 параметров видна только в срезе по
+        прогону). Пустые цитаты не отдаются: у отсутствия цитаты нет по определению, и
+        пустая строка в замере означала бы «цитата есть, но ни о чём».
+        """
+        sql = (
+            "SELECT product_id, param_id, citation_quote, evidence_type, source_kind"
+            " FROM cell_evidence WHERE run_id = ? ORDER BY rowid"
+        )
+        for row in self.conn.execute(sql, (run_id,)):
+            quote = row["citation_quote"]
+            if not (quote or "").strip():
+                continue
+            yield {
+                "product_id": str(row["product_id"]),
+                "param_id": str(row["param_id"]),
+                "citation_quote": str(quote),
+                "evidence_type": row["evidence_type"],
+                "source_kind": row["source_kind"],
+            }
+
     def _absence_by_cell(self, run_id: str) -> dict[tuple[str, str], list[dict[str, Any]]]:
         """Группирует absence-записи прогона по ключу ячейки (одним запросом, R5)."""
         grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}

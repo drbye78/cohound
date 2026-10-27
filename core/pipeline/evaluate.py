@@ -49,9 +49,10 @@ from __future__ import annotations
 
 import datetime as _dt
 import json
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
 
 from core.domain import (
     EVAL_SCHEMA_VERSION,
@@ -112,6 +113,7 @@ __all__ = [
     "DEFAULT_RETRIEVAL_PROFILE",
     "EvaluationOutcome",
     "REVALIDATE_FAILED_PREFIX",
+    "SUPPORT_CONCENTRATION_QUOTE_LIMIT",
     "REVALIDATE_NOTHING_TO_DO",
     "REVALIDATE_SKIP_BUILD_MISMATCH",
     "REVALIDATE_SKIP_NO_EVALUATOR",
@@ -125,7 +127,10 @@ __all__ = [
     "STALE_SKIP_SOURCE_KIND",
     "STALE_SKIP_STATE",
     "STALE_SKIP_UNKNOWN_BUILD",
+    "SUPPORT_NOT_ABOUT_SUBJECT",
     "StaleSelection",
+    "SupportSubjectOverlap",
+    "compose_review_reason",
     "evaluate_batch",
     "evaluate_cell",
     "evaluate_phase",
@@ -135,6 +140,10 @@ __all__ = [
     "retrieve_for_cell",
     "run_queries_for_cell",
     "select_stale_cells",
+    "support_concentration",
+    "support_overlap_counts",
+    "support_overlap_scan",
+    "support_subject_overlap",
     "unique_queries",
 ]
 
@@ -217,6 +226,9 @@ class EvaluationOutcome:
     :param failure_kind: вид сбоя при ``failed`` (``validation_failed``/``evaluation_failed``);
         ``None`` для успеха и preliminary-кандидата. Дублируется здесь, потому что модель
         ``Cell`` не имеет поля ``failure_kind`` (колонка БД заполняется на W10).
+    :param support_overlap: замер «о предмете ли доказательства» (:func:`support_subject_overlap`);
+        ``None`` — не мерили (не presence-вердикт либо предмет не измерим). Вердикт ячейки
+        от него **не зависит**: это публикуемая величина, а не решение.
     """
 
     cell: Cell
@@ -224,6 +236,7 @@ class EvaluationOutcome:
     validation: ValidationResult
     failure_kind: str | None = None
     raw: str | None = field(default=None)
+    support_overlap: SupportSubjectOverlap | None = field(default=None)
 
 
 # ---------------------------------------------------------------------------
@@ -591,6 +604,427 @@ def _compact_notes(notes: Sequence[str]) -> list[str]:
     return compact
 
 
+# ---------------------------------------------------------------------------
+# Замер: о предмете ли цитата (fabricated_support без смены вердикта)
+# ---------------------------------------------------------------------------
+
+#: Префикс машинной записи «доказательства есть, но ни одно не упоминает предмет».
+#: Пишется в ``cells.validation_notes`` (и, для ``✅``, в ``review_reason``) — это
+#: **человеческий сигнал**, а не смена вердикта: I22 требует лишь непустую цитату, и
+#: строка шапки документа формально её исполняет. Отчёт считает агрегат по этому префиксу.
+SUPPORT_NOT_ABOUT_SUBJECT = "support_not_about_subject"
+
+#: Предел длины цитаты в публикуемом замере концентрации поддержки
+#: (:func:`support_concentration`). Полный текст цитаты уже лежит в ``cell_evidence``;
+#: здесь нужен опознаваемый «якорь», чтобы одна и та же цитата читалась в отчёте как одна,
+#: а не как килобайты текста. Это предел читаемости артефакта, а не порог решения.
+SUPPORT_CONCENTRATION_QUOTE_LIMIT = 160
+
+#: Длина стема: первые 5 символов слова. Это не подобранный порог, а грубая
+#: нормализация словоформы: «Оптимизация»/«оптимизации» → ``оптим``, «SLRU»/``slru`` →
+#: ``slru``. Порога «доля ≥ X» здесь нет вовсе — состояние определяется **фактом**
+#: пересечения стемов (A3: подобранное число было бы предположением, а не измерением).
+SUBJECT_STEM_LEN = 5
+
+#: Минимальная длина слова, участвующего в стемминге: предлоги/союзы короче 4 букв
+#: ничего не различают, а их стем — шум («и», «в», «на» → «на»).
+SUBJECT_MIN_WORD_LEN = 4
+
+#: Служебные слова названия параметра: не несут предмета, а совпадают со служебными
+#: словами любой цитаты и дали бы ложное «про предмет».
+SUBJECT_STOPWORDS: frozenset[str] = frozenset(
+    {
+        "для",
+        "при",
+        "или",
+        "как",
+        "что",
+        "это",
+        "под",
+        "над",
+        "без",
+        "между",
+        "через",
+        "после",
+        "сверх",
+    }
+)
+
+#: Токен слова: латиница и кириллица обрабатываются одинаково (регистр снят заранее).
+_SUBJECT_WORD_RE = re.compile(r"[0-9a-zа-я]+")
+
+#: Состояние замера: хотя бы одна цитата пересекается с предметом.
+SUPPORT_STATE_SUPPORTED = "supported"
+#: Состояние замера: цитаты есть, ни одна не упоминает предмет.
+SUPPORT_STATE_UNRELATED = "unrelated_support"
+#: Состояние замера: прямых цитат нет — это не наша аномалия, её ловит I22.
+SUPPORT_STATE_NO_QUOTES = "no_quotes"
+
+#: Три состояния замера. Больше состояний нет: это классификация факта пересечения.
+SupportSubjectState = Literal["supported", "unrelated_support", "no_quotes"]
+
+
+def _subject_stems(text: str) -> frozenset[str]:
+    """Стемы слов текста: первые :data:`SUBJECT_STEM_LEN` символов слова ≥4 букв.
+
+    Регистр снимается, ``ё`` приводится к ``е`` (иначе «расчёт» и «расчет» — разные
+    стемы), служебные слова отбрасываются. Стем — приближение, а не лингвистика:
+    задача замера — отличить «цитата про предмет» от «цитата про что угодно другое»,
+    поэтому ложное совпадение по одному грубому стему засчитывается как совпадение
+    (замер консервативен в сторону «доказательство признано»).
+    """
+    normalized = str(text or "").lower().replace("ё", "е")
+    stems: set[str] = set()
+    for word in _SUBJECT_WORD_RE.findall(normalized):
+        if len(word) < SUBJECT_MIN_WORD_LEN or word in SUBJECT_STOPWORDS:
+            continue
+        stems.add(word[:SUBJECT_STEM_LEN])
+    return frozenset(stems)
+
+
+@dataclass(frozen=True)
+class SupportSubjectOverlap:
+    """Замер «о предмете ли доказательства» для одной ячейки (без смены вердикта).
+
+    :param state: :data:`SUPPORT_STATE_SUPPORTED` / :data:`SUPPORT_STATE_UNRELATED` /
+        :data:`SUPPORT_STATE_NO_QUOTES`.
+    :param quoted: сколько непустых прямых цитат рассмотрено.
+    :param unrelated: сколько из них не пересекается с предметом по стемам.
+    :param subject_stems: стемы предмета — чтобы читатель видел, **чем** мерили (иначе
+        вердикт замера не проверить).
+    """
+
+    state: SupportSubjectState
+    quoted: int
+    unrelated: int
+    subject_stems: frozenset[str] = frozenset()
+
+    @property
+    def related(self) -> int:
+        """Сколько цитат упоминают предмет."""
+        return self.quoted - self.unrelated
+
+    def note(self) -> str | None:
+        """Строка ``validation_notes`` для ``unrelated_support``; ``None`` — молчание.
+
+        ``supported`` не пишется вовсе: заметки — свидетельство о дефектах, а норма
+        засоряла бы артефакт. ``no_quotes`` — не наша аномалия (I22), молчим и здесь.
+        """
+        if self.state != SUPPORT_STATE_UNRELATED:
+            return None
+        return (
+            f"{SUPPORT_NOT_ABOUT_SUBJECT}: "
+            f"{self.unrelated}/{self.quoted} цитат не упоминают предмет"
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        """JSON-совместимый вид замера (счётчики + чем мерили)."""
+        return {
+            "state": self.state,
+            "quoted": self.quoted,
+            "related": self.related,
+            "unrelated": self.unrelated,
+            "subject_stems": sorted(self.subject_stems),
+        }
+
+
+def support_subject_overlap(
+    param: CatalogRow, quotes: Sequence[str]
+) -> SupportSubjectOverlap | None:
+    """Считает, сколько прямых цитат ячейки вообще упоминают предмет параметра.
+
+    Предмет берётся из ``catalog.csv:title`` (при пустом ``title`` — из ``rule``):
+    ``concept_terms`` для этого непригодны — в живом пакете они содержат языковые метки
+    (``["ru","en"]``), а не понятия. Пересечение считается по стемам
+    (:func:`_subject_stems`), без порога «доля ≥ X»: состояние — факт пересечения.
+
+    Замер **не меняет вердикт** и не является гейтом: ``✅``/``⚠️`` остаются как есть,
+    публикуемость не затрагивается. Его назначение — сделать видимым
+    ``fabricated_support``: I22 требует непустую цитату, и строка шапки документа её
+    формально исполняет, хотя предмета не касается.
+
+    :param param: строка каталога — источник предмета (``title``, иначе ``rule``).
+    :param quotes: цитаты прямых доказательств, прошедших цитатную сверку §10.
+    :returns: замер; ``None`` — предмет не измерим (в ``title``/``rule`` нет ни одного
+        слова ≥4 букв вне стоп-слов). Возвращается ``None``, а не ``supported``:
+        «не измерено» не должно выглядеть измеренным значением.
+    """
+    stems = _subject_stems(param.title) or _subject_stems(param.rule)
+    if not stems:
+        return None
+    present = [str(q) for q in quotes if (q or "").strip()]
+    if not present:
+        return SupportSubjectOverlap(
+            state=SUPPORT_STATE_NO_QUOTES, quoted=0, unrelated=0, subject_stems=stems
+        )
+    unrelated = sum(1 for quote in present if not (_subject_stems(quote) & stems))
+    state: SupportSubjectState = (
+        SUPPORT_STATE_UNRELATED if unrelated == len(present) else SUPPORT_STATE_SUPPORTED
+    )
+    return SupportSubjectOverlap(
+        state=state,
+        quoted=len(present),
+        unrelated=unrelated,
+        subject_stems=stems,
+    )
+
+
+def _direct_quotes(validation: ValidationResult) -> list[str]:
+    """Цитаты прямых доказательств из прошедшего сверку набора (§10, I22).
+
+    Берётся ``resolved_evidence``, а не сырой выход модели: сверка §10 отбросила
+    выдуманные цитаты, и мерить надо ровно то, что **сохранится** в ``cell_evidence``
+    (и что увидит отчёт). ``absence``/``derived`` не участвуют: они не претендуют на
+    доказательство наличия.
+    """
+    return [
+        str(ev.citation_quote)
+        for ev in validation.resolved_evidence
+        if ev.evidence_type is EvidenceType.DIRECT
+        and (ev.citation_quote or "").strip()
+    ]
+
+
+def compose_review_reason(*reasons: str | None) -> str | None:
+    """Склеивает причины ревью в одну строку (``None``, если причин нет).
+
+    ``review_reason`` — единственный канал человеческого сигнала на ячейке, и терять
+    одну причину из-за появления второй нельзя: противоречие «наличие + отрицание» и
+    «доказательство не о предмете» должны читаться оба. Склейка — не решение: порядок
+    аргументов задаёт вызывающий, код ничего не отбрасывает и не приоритизирует.
+
+    Функция публичная, потому что склеивают **разные фазы**: Ш6 (противоречие модели +
+    постороннее доказательство) и Ш4 (унаследованная ``conditional``-причина +
+    постороннее доказательство). Своя копия склейки в каждой фазе разошлась бы.
+    """
+    kept = [reason for reason in reasons if reason]
+    return "; ".join(kept) if kept else None
+
+
+def support_overlap_counts(cells: Sequence[Cell]) -> dict[str, Any]:
+    """Агрегат замера по набору ячеек прогона — для отчёта (читается из заметок).
+
+    Носитель, переживающий прогон, — ``cells.validation_notes``: ячейка считается
+    помеченной, если среди заметок есть строка с префиксом
+    :data:`SUPPORT_NOT_ABOUT_SUBJECT`. Считается и распределение по статусам: ``✅``
+    с посторонним доказательством и ``⚠️`` с ним — разные по весу человеческие сигналы.
+
+    .. note::
+
+       Это счёт **по записям Ш6**: ячейки высоких источников (наследование/реестр)
+       заметок Ш6 не несут, хотя их доказательство тоже может быть не о предмете.
+       Полный замер по прогону — :func:`support_overlap_scan` (он берёт цитаты из
+       ``cell_evidence`` любого вида и потому видит обе ветви).
+    """
+    flagged = [
+        cell
+        for cell in cells
+        if any(
+            str(note).startswith(SUPPORT_NOT_ABOUT_SUBJECT)
+            for note in cell.validation_notes
+        )
+    ]
+    by_status: dict[str, int] = {}
+    for cell in flagged:
+        key = _enum_text(cell.status)
+        by_status[key] = by_status.get(key, 0) + 1
+    return {
+        "measurement": SUPPORT_NOT_ABOUT_SUBJECT,
+        "cells_total": len(cells),
+        "cells_flagged": len(flagged),
+        "by_status": dict(sorted(by_status.items())),
+    }
+
+
+def support_overlap_scan(
+    cells: Sequence[Cell],
+    params: Mapping[str, CatalogRow],
+    quotes_by_cell: Mapping[tuple[str, str], Sequence[str]],
+) -> dict[str, Any]:
+    """Замер «о предмете ли доказательства» **по прогону**: счётчик + адресный список.
+
+    Единственная точка агрегата для отчёта. Цитаты берутся из ``cell_evidence`` по ключу
+    ``(product_id, param_id)`` **любого вида** (``direct`` и ``derived``): у ячеек
+    наследования доказательство производное, и именно там живёт наблюдавшийся дефект
+    (шапка документа как «поддержка»). Считать только записи Ш6 значило бы показать
+    ноль там, где дефект есть.
+
+    Замер не меняет ни вердикт, ни публикуемость: он публикует величину и адреса.
+
+    :param cells: ячейки прогона (``iter_cells`` стора).
+    :param params: каталог прогона по ``param_id`` — источник предмета замера.
+    :param quotes_by_cell: цитаты доказательств по ключу ``(product_id, param_id)``.
+    :returns: ``cells_considered`` (presence-ячейки с измеримым предметом),
+        ``cells_flagged`` (``unrelated_support``), ``by_status`` и адресный список
+        ``cells`` с числами ``quoted``/``unrelated``.
+    """
+    considered = 0
+    entries: list[dict[str, Any]] = []
+    by_status: dict[str, int] = {}
+    for cell in cells:
+        if cell.status not in {Status.OK, Status.PARTIAL}:
+            continue
+        param = params.get(str(cell.param_id))
+        if param is None:
+            # Параметр не объявлен в каталоге — мерить нечего: предмета нет.
+            continue
+        measured = support_subject_overlap(
+            param, quotes_by_cell.get((str(cell.product_id), str(cell.param_id)), ())
+        )
+        if measured is None:
+            continue
+        considered += 1
+        if measured.state != SUPPORT_STATE_UNRELATED:
+            continue
+        key = _enum_text(cell.status)
+        by_status[key] = by_status.get(key, 0) + 1
+        entries.append(
+            {
+                "product_id": str(cell.product_id),
+                "param_id": str(cell.param_id),
+                "status": _enum_text(cell.status),
+                "source_kind": _enum_text(cell.source_kind),
+                "quoted": measured.quoted,
+                "unrelated": measured.unrelated,
+                "subject_stems": sorted(measured.subject_stems),
+            }
+        )
+    entries.sort(key=lambda item: (item["product_id"], item["param_id"]))
+    return {
+        "measurement": SUPPORT_NOT_ABOUT_SUBJECT,
+        "cells_considered": considered,
+        "cells_flagged": len(entries),
+        "by_status": dict(sorted(by_status.items())),
+        "cells": entries,
+    }
+
+
+def _cell_quotes(
+    quotes_by_cell: Mapping[tuple[str, str], Sequence[str]], key: tuple[str, str]
+) -> list[str]:
+    """Непустые уникальные цитаты ячейки в порядке появления.
+
+    Идентичность цитаты — её **полный текст**: две ячейки «опираются на одну цитату»
+    только если строки совпали целиком. Обрезка (:func:`_truncate_quote`) применяется
+    позже и только к публикуемому виду, поэтому она не может ни склеить две разные
+    цитаты, ни развести одну.
+    """
+    cleaned: list[str] = []
+    for quote in quotes_by_cell.get(key, ()):
+        text = str(quote or "").strip()
+        if text and text not in cleaned:
+            cleaned.append(text)
+    return cleaned
+
+
+def _truncate_quote(quote: str) -> str:
+    """Публикуемый вид цитаты: схлопнутые пробелы, обрезка до предела замера."""
+    collapsed = " ".join(quote.split())
+    if len(collapsed) <= SUPPORT_CONCENTRATION_QUOTE_LIMIT:
+        return collapsed
+    return collapsed[: SUPPORT_CONCENTRATION_QUOTE_LIMIT - 1].rstrip() + "…"
+
+
+def support_concentration(
+    quotes_by_cell: Mapping[tuple[str, str], Sequence[str]],
+    cells: Sequence[Cell],
+) -> dict[str, Any]:
+    """**Концентрация поддержки**: сколько presence-ячеек держится на одной цитате.
+
+    Это факт о качестве карты, а не о продукте: если 19 разных параметров опираются на
+    одну и ту же цитату, «поддержка» у них общая, и карта утверждает больше, чем
+    доказала. Замер не меняет вердикты и не вводит порогов (A3): публикуется число
+    (:attr:`max_share`) и адресный список, решение — за человеком.
+
+    Что публикуется по продукту:
+
+    * ``cells_present`` — presence-ячейки (``✅``/``⚠️``) — знаменатель доли;
+    * ``cells_with_quotes`` / ``cells_without_quotes`` — у presence-ячейки цитата обязана
+      быть (I1/I22); отсутствие видно отдельным счётчиком, а не прячется делением;
+    * ``distinct_quotes`` — сколько **различных** цитат её поддерживает;
+    * ``max_share`` — доля ячеек, опирающихся на самую частую цитату
+      (``top_quote_count / cells_present``); ``0.0`` — цитат нет вовсе;
+    * ``top_quote`` (обрезанная), ``top_quote_count`` и ``top_quote_source_kinds`` —
+      распределение ``source_kind`` по ячейкам именно этой цитаты: одна паспортная
+      визитка, размноженная наследованием на N параметров, отличается от N независимых
+      корпусных цитат ровно этим распределением.
+
+    Ничьи разрешаются детерминированно (счётчик, затем текст цитаты), поэтому повторный
+    расчёт на тех же данных даёт тот же результат (R7).
+
+    :param quotes_by_cell: цитаты доказательств по ключу ``(product_id, param_id)``.
+    :param cells: ячейки прогона (``iter_cells`` стора).
+    :returns: JSON-совместимый словарь: счётчики по продуктам + адресный список
+        ``cells`` — ячейки, опирающиеся на самую частую цитату своего продукта.
+        В БД и в файлы функция ничего не пишет.
+    """
+    presence = [
+        cell for cell in cells if cell.status in {Status.OK, Status.PARTIAL}
+    ]
+    grouped: dict[str, list[Cell]] = {}
+    for cell in presence:
+        grouped.setdefault(str(cell.product_id), []).append(cell)
+
+    products: dict[str, dict[str, Any]] = {}
+    addresses: list[dict[str, Any]] = []
+    for product_id in sorted(grouped):
+        product_cells = sorted(grouped[product_id], key=lambda cell: str(cell.param_id))
+        per_cell: dict[str, list[str]] = {}
+        quote_counts: dict[str, int] = {}
+        for cell in product_cells:
+            param_id = str(cell.param_id)
+            quotes = _cell_quotes(quotes_by_cell, (product_id, param_id))
+            per_cell[param_id] = quotes
+            for quote in quotes:
+                quote_counts[quote] = quote_counts.get(quote, 0) + 1
+        top_quote: str | None = None
+        top_count = 0
+        if quote_counts:
+            top_quote, top_count = sorted(
+                quote_counts.items(), key=lambda item: (-item[1], item[0])
+            )[0]
+        present = len(product_cells)
+        kinds: dict[str, int] = {}
+        for cell in product_cells:
+            param_id = str(cell.param_id)
+            if top_quote is None or top_quote not in per_cell[param_id]:
+                continue
+            kind = _enum_text(cell.source_kind)
+            kinds[kind] = kinds.get(kind, 0) + 1
+            addresses.append(
+                {
+                    "product_id": product_id,
+                    "param_id": param_id,
+                    "status": _enum_text(cell.status),
+                    "source_kind": kind,
+                }
+            )
+        products[product_id] = {
+            "cells_present": present,
+            "cells_with_quotes": sum(1 for quotes in per_cell.values() if quotes),
+            "cells_without_quotes": sum(
+                1 for quotes in per_cell.values() if not quotes
+            ),
+            "distinct_quotes": len(quote_counts),
+            "max_share": round(top_count / present, 4) if present else 0.0,
+            "top_quote": _truncate_quote(top_quote) if top_quote else None,
+            "top_quote_count": top_count,
+            "top_quote_source_kinds": dict(sorted(kinds.items())),
+        }
+
+    addresses.sort(key=lambda item: (item["product_id"], item["param_id"]))
+    return {
+        "measurement": "support_concentration",
+        "quote_limit": SUPPORT_CONCENTRATION_QUOTE_LIMIT,
+        "cells_present": len(presence),
+        "cells_without_quotes": sum(
+            entry["cells_without_quotes"] for entry in products.values()
+        ),
+        "products": products,
+        "cells": addresses,
+    }
+
+
 def _present_status_denial(out: LLMCellOutput) -> tuple[list[str], str | None]:
     """Ремонт шумовых полей отрицания при наличии-вердикте (§7).
 
@@ -935,10 +1369,11 @@ def _evaluated_cell(
     """Собирает успешную ``evaluated``-ячейку (§2.2; I1/I2/I3/I4/I13-совместимую).
 
     ``validation_notes`` — свидетельство о дефектах оценки (ремонт шумовых полей
-    отрицания, аномалии §10.4): пишется в ``cells.validation_notes`` и переживает
-    прогон, поэтому читается отчётом/ревью, а не только консолью. ``review_reason``
-    заполняется только противоречием «наличие + прямое отрицание» (см.
-    :func:`_present_status_denial`): вердикт не оспаривается, но конфликт виден.
+    отрицания, аномалии §10.4, доказательство не о предмете): пишется в
+    ``cells.validation_notes`` и переживает прогон, поэтому читается отчётом/ревью, а не
+    только консолью. ``review_reason`` заполняется противоречием «наличие + прямое
+    отрицание» (см. :func:`_present_status_denial`) и посторонним доказательством у ``✅``
+    (:func:`support_subject_overlap`): вердикт не оспаривается, но конфликт виден.
     """
     index_build_id, retrieval_profile, retrieval_params_json = provenance
     return Cell(
@@ -1338,6 +1773,16 @@ def evaluate_cell(
         # оспаривается; отбрасывание видно в validation_notes, противоречие —
         # дополнительно в review_reason.
         repair_notes, contradiction = _present_status_denial(out)
+        # Замер «о предмете ли доказательства» — только для наличия (``✅``/``⚠️``):
+        # у ``❓``/``❌`` цитата — наблюдение, а не поддержка. Вердикт замера не меняет
+        # (I22 требует лишь непустую цитату), но делает fabricated_support видимым.
+        support_overlap = (
+            support_subject_overlap(param, _direct_quotes(last_validation))
+            if out_status in {Status.OK, Status.PARTIAL}
+            else None
+        )
+        support_note = support_overlap.note() if support_overlap is not None else None
+        support_reason = support_note if out_status is Status.OK else None
         absence_evidence: list[dict] = []
         if out_status is Status.ABSENT and evidence_scope is not None:
             absence_evidence = _build_absence_evidence(
@@ -1368,9 +1813,17 @@ def evaluate_cell(
             # Заметки эшелона §10 (аномалии «✅ на одной цитате», низкий score), ремонт и
             # понижение класса — всё это свидетельства о качестве ячейки, а не отладка.
             validation_notes=_compact_notes(
-                [*repair_notes, *last_validation.notes, *denial_notes]
+                [
+                    *repair_notes,
+                    *last_validation.notes,
+                    *denial_notes,
+                    *([support_note] if support_note else []),
+                ]
             ),
-            review_reason=contradiction,
+            # ``review_reason`` — единственный человеческий сигнал на ячейке; причины
+            # складываются, а не затирают друг друга (противоречие + постороннее
+            # доказательство). Решение по ним принимает человек, не код.
+            review_reason=compose_review_reason(contradiction, support_reason),
         )
         _persist(
             store,
@@ -1394,6 +1847,7 @@ def evaluate_cell(
             validation=validation,
             failure_kind=None,
             raw=last_response.raw,
+            support_overlap=support_overlap,
         )
 
     # Валидация/вызов не прошли после всех попыток: failed (strict) или кандидат.

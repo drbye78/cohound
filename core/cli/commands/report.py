@@ -27,6 +27,7 @@ from core.cli.wiring import build_store
 from core.pipeline.compute import compute, scope_universe
 from core.pipeline.gates import gate_trail
 from core.pipeline.partial_docs import human_line as partial_docs_human_line
+from core.pipeline.support_quality import support_quality_line
 from core.pipeline.report import write_reports
 
 
@@ -119,6 +120,14 @@ def run(args: argparse.Namespace) -> int:
     )
     if partial_line:
         notes.append(partial_line)
+    # A3: качество поддержки карты — строкой, как и частичность. Три замера
+    # (поддержка не о предмете, концентрация) не меняют вердиктов, но именно они
+    # объясняют, почему карта «зелёная» при почти пустом доказательстве.
+    support_line = support_quality_line(
+        getattr(artifacts, "support_quality_summary", None) or {}
+    )
+    if support_line:
+        notes.append(support_line)
     partial = _manifest_partial(manifest)
     if partial:
         notes.append(

@@ -384,6 +384,10 @@ def _artifacts_payload(artifacts: Any) -> dict[str, Any]:
         # строке заметки). Артефакт без объявленного пути — та же невидимость, что и его
         # отсутствие: оператор не знает, что смотреть.
         "partial_docs": _path(getattr(artifacts, "partial_docs", None)),
+        # A3: качество поддержки карты — путь к файлу с двумя замерами и их адресами.
+        # Числа публикуются и строкой-заметкой (см. ``commands/report.py``), путь нужен,
+        # чтобы оператор знал, куда смотреть.
+        "support_quality": _path(getattr(artifacts, "support_quality", None)),
         "i3_anomalies": list(getattr(artifacts, "i3_anomalies", None) or []),
         "crawl_truncation_anomalies": list(
             getattr(artifacts, "crawl_truncation_anomalies", None) or []

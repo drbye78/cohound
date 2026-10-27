@@ -55,7 +55,12 @@ from core.store.sqlite_store import SqliteStore
 RUN_ID = "run-precedence"
 FIXTURES = Path(__file__).parent / "fixtures"
 
-CHUNK_TEXT = "neutral corpus evidence text"
+#: Текст нейтрального чанка. Слово «Param» в нём — не украшение: замер
+#: ``support_subject_overlap`` сверяет цитату с предметом (``title`` каталога), и
+#: доказательство, не упоминающее предмет, помечается ``support_not_about_subject``
+#: (``validation_notes``/``review_reason``). Фикстура прецедента описывает **настоящую**
+#: поддержку, поэтому её предмет («Param A/B/C») в цитате присутствует.
+CHUNK_TEXT = "Param item: neutral corpus evidence text"
 
 
 # --------------------------------------------------------------------------- #
@@ -187,7 +192,7 @@ def _ok_output() -> LLMCellOutput:
     return LLMCellOutput(
         status=Status.OK,
         justification="корпус подтверждает",
-        evidence=[LLMEvidence(source_id="chunk_1", quote="neutral corpus evidence")],
+        evidence=[LLMEvidence(source_id="chunk_1", quote="Param item: neutral corpus evidence")],
     )
 
 
@@ -201,7 +206,7 @@ def _absent_output() -> LLMCellOutput:
         status=Status.ABSENT,
         justification="документация прямо отрицает поддержку",
         evidence=[
-            LLMEvidence(source_id="chunk_1", quote="neutral corpus evidence")
+            LLMEvidence(source_id="chunk_1", quote="Param item: neutral corpus evidence")
         ],
         denial_strength=DenialClaim.EXPLICIT,
         denial_reason="прямое отрицание в документации",
@@ -212,7 +217,7 @@ def _unknown_output() -> LLMCellOutput:
     return LLMCellOutput(
         status=Status.UNKNOWN,
         justification="недостаточно свидетельств",
-        evidence=[LLMEvidence(source_id="chunk_1", quote="neutral corpus evidence")],
+        evidence=[LLMEvidence(source_id="chunk_1", quote="Param item: neutral corpus evidence")],
     )
 
 
@@ -460,7 +465,7 @@ def test_store_guard_rejects_silent_downgrade(store: SqliteStore) -> None:
         source_kind=SourceKind.DOCUMENTATION,
         evidence_scope=EvidenceScope(
             denial_strength=DenialStrength.EXPLICIT,
-            citation_quote="neutral corpus evidence",
+            citation_quote="Param item: neutral corpus evidence",
         ),
     )
     with pytest.raises(ValueError, match="прецедент источника"):
