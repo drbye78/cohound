@@ -388,9 +388,16 @@ def test_absent_is_a_legitimate_answer_only_with_direct_denial() -> None:
     )
     assert "absence-evidence" not in compiled.text
     assert "denial_strength" in compiled.text
-    assert "ГЛАВНОЕ ПРАВИЛО" in compiled.text
-    assert "это ❓ (не установлено), а НЕ ❌ (отсутствует)" in compiled.text
     assert "непустой denial_reason" in compiled.text
+    # v4: запрет выдуманного отсутствия назван как различение ВОПРОСА, а не как лозунг —
+    # «❌ — заявление вендора, а не твой вывод из молчания».
+    assert "не твой вывод" in compiled.text
+    assert "Без такой цитаты ❌ запрещён" in compiled.text
+    # v4: различение частичного утверждения от незнания — то, что v3 потерял (замер:
+    # 15 ⚠️ → ❓ из 24), а v4 вернул на 9 из 15.
+    assert "ЗАЯВЛЕНО ЧАСТИЧНО" in compiled.text
+    assert "НЕ УСТАНОВЛЕНО" in compiled.text
+    assert "КАК ВЫБИРАТЬ МЕЖДУ ⚠️ И ❓" in compiled.text
 
 
 @pytest.mark.parametrize(
@@ -422,17 +429,19 @@ def test_absence_guidance_is_addressed_to_the_model_not_to_a_human(
     assert guidance in compiled.text
 
 
-def test_template_version_is_v3_and_older_ones_are_preserved() -> None:
+def test_template_version_is_v4_and_older_ones_are_preserved() -> None:
     """Смена текста шаблона — новая версия; старые файлы остаются провенансом прогонов."""
     from core.pipeline.prompt import TEMPLATES_DIR, _load_template
 
-    assert TEMPLATE_VERSION == "evaluator_v3"
+    assert TEMPLATE_VERSION == "evaluator_v4"
     v1 = TEMPLATES_DIR / "evaluator_v1.txt"
     v2 = TEMPLATES_DIR / "evaluator_v2.txt"
     v3 = TEMPLATES_DIR / "evaluator_v3.txt"
+    v4 = TEMPLATES_DIR / "evaluator_v4.txt"
     assert v1.is_file(), "старый шаблон удалять нельзя: он провенанс прошлых прогонов"
     assert v2.is_file()
     assert v3.is_file()
+    assert v4.is_file()
     assert _load_template("evaluator_v1") != _load_template(TEMPLATE_VERSION)
     # v1/v2 остаются байт-в-байт тем, чем были: hash прошлых прогонов не должен «поехать».
     assert "❌ → absence-evidence" in _load_template("evaluator_v1")
