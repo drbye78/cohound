@@ -17,8 +17,8 @@ from hypothesis import strategies as st
 from core.domain.enums import (
     AbsenceRuleType,
     CellState,
-    EvidenceState,
     DenialStrength,
+    EvidenceState,
     EvidenceType,
     InheritanceMode,
     Origin,

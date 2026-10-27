@@ -50,8 +50,8 @@ from core.pipeline.runner import (
     RunContext,
     _gate_phase,
 )
-from core.store.state_sqlite import STATE_SCHEMA_VERSION, connect_state
 from core.store.sqlite_store import SqliteStore
+from core.store.state_sqlite import STATE_SCHEMA_VERSION, connect_state
 from core.store.state_store import SqliteStateStore
 
 RUN_ID = "run.p"

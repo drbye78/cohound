@@ -102,7 +102,7 @@ def _legacy_search(
     with np.errstate(divide="ignore", invalid="ignore"):
         scores = np.where(denominators > 0.0, dots / denominators, 0.0)
     scored = []
-    for chunk_id, score in zip(chunk_ids, scores):
+    for chunk_id, score in zip(chunk_ids, scores, strict=True):
         meta = index._lookup(chunk_id)
         if meta is None:
             continue
@@ -142,7 +142,7 @@ def test_ranking_matches_legacy_full_scan(tmp_path: Path) -> None:
         legacy = _legacy_search(tmp_path, index, query, ids)
         hits = index.search(query)
         assert [c.chunk_id for c in hits] == [item[1] for item in legacy]
-        for hit, (score, _, meta) in zip(hits, legacy):
+        for hit, (score, _, meta) in zip(hits, legacy, strict=True):
             assert abs(hit.score - score) <= 1e-6
             assert hit.text == meta.text
             assert hit.content_hash == meta.content_hash
@@ -169,10 +169,10 @@ def test_single_and_batched_search_agree(tmp_path: Path) -> None:
     batched = index.search_many(
         [VectorQuery(product_ids=[PRODUCT], top_k=5, vector=v) for v in vectors]
     )
-    for vector, batch_hits in zip(vectors, batched):
+    for vector, batch_hits in zip(vectors, batched, strict=True):
         single = index.search(VectorQuery(product_ids=[PRODUCT], top_k=5, vector=vector))
         assert [c.chunk_id for c in single] == [c.chunk_id for c in batch_hits]
-        for one, many in zip(single, batch_hits):
+        for one, many in zip(single, batch_hits, strict=True):
             # Балл несёт шум блокировки BLAS (≤ 1e-6) между размерами батча; порядок — нет.
             assert abs(one.score - many.score) <= 1e-6
 
@@ -371,10 +371,10 @@ def test_search_many_matches_single_search(tmp_path: Path) -> None:
     ]
     batched = index.search_many(queries)
     assert len(batched) == len(queries)
-    for query, hits in zip(queries, batched):
+    for query, hits in zip(queries, batched, strict=True):
         single = index.search(query)
         assert [c.chunk_id for c in hits] == [c.chunk_id for c in single]
-        for one, two in zip(single, hits):
+        for one, two in zip(single, hits, strict=True):
             # Блочность BLAS зависит от размера батча: баллы сверяются с допуском,
             # порядок и tie-break — побитово.
             assert two.score == pytest.approx(one.score, abs=1e-6)

@@ -11,7 +11,6 @@ from __future__ import annotations
 from pathlib import Path
 
 from core.adapters.extract_html import HtmlExtractor
-from core.ports.extractor import ExtractorPort
 from core.ports.types import ExtractedDoc, RawPage
 from core.util.hashing import content_hash
 
@@ -104,7 +103,7 @@ def test_charset_from_content_type_is_honoured() -> None:
 
 def test_unknown_charset_falls_back_to_utf8() -> None:
     fn, calls = _capturing("ok")
-    page = _page("ёж".encode("utf-8"), "text/html; charset=definitely-not-a-codec")
+    page = _page("ёж".encode(), "text/html; charset=definitely-not-a-codec")
     HtmlExtractor(extract_fn=fn).extract(page)
     assert "ёж" in calls[0]
 

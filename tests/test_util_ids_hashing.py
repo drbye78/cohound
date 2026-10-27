@@ -88,7 +88,7 @@ def test_content_hash_deterministic_and_full_hex() -> None:
 
 
 def test_content_hash_str_and_bytes_agree_utf8() -> None:
-    assert content_hash("ёж") == content_hash("ёж".encode("utf-8"))
+    assert content_hash("ёж") == content_hash("ёж".encode())
 
 
 def test_content_hash_known_vector() -> None:

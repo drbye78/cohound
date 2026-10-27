@@ -28,18 +28,18 @@ from core.edge.audit import (
     MemoryAuditSink,
 )
 from core.edge.auth import (
+    _OP_SCOPE,
     AUTHORIZED_OPS,
     PUBLIC_OPS,
     MTLSAuthenticator,
-    _OP_SCOPE,
 )
 from core.edge.config import EdgeRuntimeConfig, load_edge_runtime_config
 from core.edge.seam_schema import ENDPOINT_OPS
 from core.edge.server import (
+    _KNOWN_OPS,
     DEFAULT_MAX_BODY_BYTES,
     EdgeGateway,
     EdgeSecurityError,
-    _KNOWN_OPS,
     build_server,
     is_loopback_host,
     make_handler,
@@ -65,7 +65,7 @@ _SUBJECTS = {
 class _Crawler:
     version = "fake-crawler-1"
 
-    def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:
+    def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:  # noqa: B008 - сигнатура порта, FetchPlan frozen
         return RawPage(
             url=url,
             content=b"<html>neutral</html>",
@@ -561,7 +561,7 @@ def test_config_rejects_incomplete_auth_blocks(tmp_path: Path) -> None:
 
     bad_audit = tmp_path / "audit.yaml"
     bad_audit.write_text("audit: {sink: file}\n", encoding="utf-8")
-    with pytest.raises(ValueError, match="audit.path"):
+    with pytest.raises(ValueError, match=re.escape("audit.path")):
         load_edge_runtime_config(bad_audit)
 
 

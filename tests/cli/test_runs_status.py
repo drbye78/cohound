@@ -220,7 +220,7 @@ def test_status_blocked_on_gate_prints_gate_command(
     )
     (db.parent / "gates").mkdir()
     (db.parent / "gates" / "G1-request.json").write_text(
-        '{"run_id": "%s", "gate": "G1", "subject_digest": "d1"}' % RUN_ID, encoding="utf-8"
+        json.dumps({"run_id": RUN_ID, "gate": "G1", "subject_digest": "d1"}), encoding="utf-8"
     )
 
     assert main(["status", RUN_ID, "--runs-dir", str(runs_dir), "--json"]) == EXIT_OK

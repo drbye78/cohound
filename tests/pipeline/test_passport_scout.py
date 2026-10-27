@@ -199,7 +199,7 @@ def test_partial_upstream_flags_needs_human() -> None:
 
 
 def test_build_passport_draft_accepts_empty_hypothesis() -> None:
-    passport, needs_human, provenance = build_passport_draft(
+    passport, _, provenance = build_passport_draft(
         product_name="P",
         hypothesis=DiscoveryPassportHypothesis(),
         allowed_urls={"https://x.test/"},
@@ -253,7 +253,7 @@ def test_fetch_error_is_isolated() -> None:
     class _BoomCrawler:
         version = "boom"
 
-        def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:
+        def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:  # noqa: B008 - сигнатура порта, FetchPlan frozen
             raise RuntimeError("network down")
 
     report = _report(crawler=_BoomCrawler())
@@ -279,7 +279,7 @@ def test_unavailable_candidate_page_is_soft_error() -> None:
     class _PartialCrawler:
         version = "partial"
 
-        def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:
+        def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:  # noqa: B008 - сигнатура порта, FetchPlan frozen
             if url == URL:
                 return RawPage(
                     url=URL,
@@ -337,7 +337,7 @@ def test_write_sidecar_is_json() -> None:
 
 
 def test_search_extends_whitelist_for_doc_domains() -> None:
-    from core.ports.search import SearchQuery, SearchResult
+    from core.ports.search import SearchResult
 
     class _Search:
         adapter_kind = "serp"

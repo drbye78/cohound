@@ -132,7 +132,7 @@ def test_write_requires_actor(capsys, tmp_path: Path) -> None:
     pkg = _package(tmp_path)
     out = tmp_path / "probe"
     before = (pkg / "domain_profiles.yaml").read_bytes()
-    code, _, err = _run(capsys, _argv(pkg, out, "--write"), _ports(ScriptedHttpCrawler()))
+    code, _, _ = _run(capsys, _argv(pkg, out, "--write"), _ports(ScriptedHttpCrawler()))
     assert code == EXIT_USAGE
     assert (pkg / "domain_profiles.yaml").read_bytes() == before
     assert not out.exists()

@@ -462,7 +462,7 @@ def test_cli_apply_stdin(capsys, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 
 
 def test_cli_package_list_json_and_search(capsys, tmp_path: Path) -> None:
-    package = _new(capsys, tmp_path)  # demo_pkg в tmp_path
+    _new(capsys, tmp_path)  # demo_pkg в tmp_path
     code, out, _ = _run(capsys, ["package", "list", "--dir", str(tmp_path), "--json"])
     assert code == EXIT_OK
     payload = json.loads(out)
@@ -492,9 +492,9 @@ def test_cli_package_list_includes_template(capsys, tmp_path: Path) -> None:
         "roles: []\nbaselines: []\nbaseline_participant: null\n",
         encoding="utf-8",
     )
-    code, out, _ = _run(capsys, ["package", "list", "--dir", str(tmp_path), "--json"])
+    _, out, _ = _run(capsys, ["package", "list", "--dir", str(tmp_path), "--json"])
     assert json.loads(out)["count"] == 0
-    code, out, _ = _run(
+    _, out, _ = _run(
         capsys, ["package", "list", "--dir", str(tmp_path), "--include-template", "--json"]
     )
     assert json.loads(out)["count"] == 1

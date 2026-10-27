@@ -59,7 +59,7 @@ def _pk(conn: sqlite3.Connection, table: str) -> list[str]:
 
 
 def test_all_tables_exist(conn: sqlite3.Connection) -> None:
-    assert EXPECTED_TABLES <= _tables(conn)
+    assert _tables(conn) >= EXPECTED_TABLES
 
 
 def test_schema_version(conn: sqlite3.Connection) -> None:

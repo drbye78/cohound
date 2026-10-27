@@ -40,8 +40,8 @@ from core.domain import (
     RunConfig,
     RunMode,
 )
-from core.domain.scoring import Comparability, Coverage, Score, SensitivityReport
 from core.domain.models import RunManifest
+from core.domain.scoring import Comparability, Coverage, Score, SensitivityReport
 from core.pipeline import RunPlan
 from core.pipeline.artifacts_gap import (
     ARTIFACTS_GAP_FILENAME,
@@ -166,7 +166,7 @@ class _RefusedCrawler:
     def __init__(self) -> None:
         self.calls: list[str] = []
 
-    def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:
+    def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:  # noqa: B008 - сигнатура порта, FetchPlan frozen
         self.calls.append(url)
         raise _RefusedError(f"robots.txt запрещает краул {url!r}")
 

@@ -53,7 +53,7 @@ class FakeCrawler:
         self._entered = entered
         self.calls: list[tuple[str, FetchPlan]] = []
 
-    def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:
+    def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:  # noqa: B008 - сигнатура порта, FetchPlan frozen
         self.calls.append((url, plan))
         if self._entered is not None:
             self._entered.set()
@@ -380,7 +380,7 @@ class _MapCrawler:
         self._pages = dict(pages)
         self.calls: list[str] = []
 
-    def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:
+    def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:  # noqa: B008 - сигнатура порта, FetchPlan frozen
         self.calls.append(url)
         return RawPage(url=url, content=self._pages[url], fetched_at="2026-01-01T00:00:00Z")
 

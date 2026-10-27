@@ -17,7 +17,6 @@ from core.adapters.registry_generic import (
     RegistryConfig,
     RegistryConfigError,
     load_package_registry_configs,
-    package_registry_dir,
     registry_spec_path,
     resolve_registry_headers,
 )

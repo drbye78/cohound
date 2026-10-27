@@ -440,7 +440,7 @@ def test_i19_module_is_structurally_evidence_free() -> None:
     # никаких импортов хранилища
     assert not any(name == f or name.startswith(f"{f}.") for f in _FORBIDDEN_IMPORTS for name in imported)
     # никаких доменных сущностей evidence
-    assert all(not name.split(".")[-1] in _FORBIDDEN_NAMES for name in imported)
+    assert all(name.split(".")[-1] not in _FORBIDDEN_NAMES for name in imported)
     # ни одного *использования* имён evidence в коде (упоминания в докстринге не в счёт)
     bare_names = {node.id for node in ast.walk(tree) if isinstance(node, ast.Name)}
     attr_names = {node.attr for node in ast.walk(tree) if isinstance(node, ast.Attribute)}

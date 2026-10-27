@@ -20,7 +20,6 @@ from core.adapters import index_format
 from core.adapters.feed_poller import LocalFeedPoller
 from core.adapters.index_npy import NpyIndexBuilder
 from core.config.crawl_sources import CrawlSource, CrawlSourcesConfig
-from core.config.deploy import CrawlConfig
 from core.config.domain_profiles import DomainProfile
 from core.domain import (
     BLOCKING_FAILURE_KINDS,
@@ -31,10 +30,10 @@ from core.domain import (
     CorpusDoc,
     CrawlItemStatus,
     CrawlRunConfig,
-    DocumentLevel,
     CrawlSessionItem,
     CrawlSessionStatus,
     CrawlStrategy,
+    DocumentLevel,
     FailureKind,
     RateLimitSpec,
     RunConfig,
@@ -42,16 +41,16 @@ from core.domain import (
 )
 from core.pipeline import RunPlan
 from core.pipeline.corpus import (
-    IndexBuild,
     _SUBMIT_MAX_ATTEMPTS,
+    ZERO_SOURCE_ALL_SEEDS_REJECTED,
+    ZERO_SOURCE_NO_SEEDS,
+    ZERO_SOURCE_NO_URLS_ENTRY,
+    IndexBuild,
     _derive_partition_build_id,
     _product_content_token,
     _work_set_idempotency_key,
     build_corpus,
     derive_corpus_coverage,
-    ZERO_SOURCE_ALL_SEEDS_REJECTED,
-    ZERO_SOURCE_NO_SEEDS,
-    ZERO_SOURCE_NO_URLS_ENTRY,
 )
 from core.pipeline.crawl_frontier import CrawlLimits
 from core.pipeline.crawl_session import default_session_id, truncation_summary
@@ -63,6 +62,7 @@ from core.ports.crawl_executor import (
     CrawlSubmitResult,
     CrawlWorkItem,
 )
+from core.ports.state import UrlStateRow
 from core.ports.types import (
     Chunk,
     ExtractedDoc,
@@ -71,7 +71,6 @@ from core.ports.types import (
     FetchPlan,
     RawPage,
 )
-from core.ports.state import UrlStateRow
 from core.store.sqlite_store import SqliteStore
 from core.store.state_store import SqliteStateStore
 from core.util.feed import FeedEntry
@@ -181,7 +180,7 @@ class _Crawler:
         self.calls: list[tuple[str, FetchPlan]] = []
         self.engine = engine
 
-    def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:
+    def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:  # noqa: B008 - сигнатура порта, FetchPlan frozen
         self.calls.append((url, plan))
         if url in self.raising:
             raise RuntimeError(f"crawl failed: {url}")
@@ -210,7 +209,7 @@ class _NotFoundCrawler(_Crawler):
     def __init__(self) -> None:
         super().__init__({})
 
-    def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:
+    def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:  # noqa: B008 - сигнатура порта, FetchPlan frozen
         self.calls.append((url, plan))
         raise _NotFoundError(f"HTTP 404: {url}")
 
@@ -227,7 +226,7 @@ class _RefusedCrawler(_Crawler):
     def __init__(self) -> None:
         super().__init__({})
 
-    def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:
+    def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:  # noqa: B008 - сигнатура порта, FetchPlan frozen
         self.calls.append((url, plan))
         raise _RefusedError(f"robots.txt запрещает краул {url!r}")
 
@@ -252,7 +251,7 @@ class _StatusCrawler(_Crawler):
         super().__init__({})
         self.status = status
 
-    def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:
+    def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:  # noqa: B008 - сигнатура порта, FetchPlan frozen
         self.calls.append((url, plan))
         raise _StatusError(f"HTTP {self.status}: {url}", http_status=self.status)
 
@@ -272,7 +271,7 @@ class _NotFoundStatusCrawler(_Crawler):
     def __init__(self) -> None:
         super().__init__({})
 
-    def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:
+    def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:  # noqa: B008 - сигнатура порта, FetchPlan frozen
         self.calls.append((url, plan))
         raise _NotFoundStatusError(f"HTTP 404: {url}")
 
@@ -626,7 +625,7 @@ def test_zero_source_without_urls_mapping_names_no_urls_entry(tmp_path: Path) ->
 
 
 def test_retention_file_written(tmp_path: Path) -> None:
-    content = "retained bytes".encode()
+    content = b"retained bytes"
     result = _build(tmp_path, pages={URL_P1_A: content}, urls={"p1": [URL_P1_A]})
     build = _build_of(result)
     doc = build.docs[0]
@@ -1205,7 +1204,7 @@ class _AbortOnUrlCrawler(_Crawler):
         super().__init__(pages)
         self.abort_url = abort_url
 
-    def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:
+    def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:  # noqa: B008 - сигнатура порта, FetchPlan frozen
         if url == self.abort_url:
             raise _AbortCrawl(url)
         return super().fetch(url, plan)
@@ -1602,7 +1601,7 @@ def test_partial_product_failure(tmp_path: Path) -> None:
 class _BombCrawler(_Crawler):
     """Краулер, обязанный НЕ вызываться: любой ``fetch`` — провал теста (resume)."""
 
-    def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:
+    def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:  # noqa: B008 - сигнатура порта, FetchPlan frozen
         raise AssertionError("краулер вызван при наличии retained-байтов (L1a resume)")
 
 
@@ -4562,7 +4561,7 @@ def test_split_round_idempotency_keys_distinct_per_round_and_session_stable(
         )
         keys = [k["idempotency_key"] for k in executor.submit_kwargs]
         assert len(set(keys)) == len(keys)  # разные наборы работ ⇒ разные ключи
-        for work, kwargs in zip(executor.submits, executor.submit_kwargs):
+        for work, kwargs in zip(executor.submits, executor.submit_kwargs, strict=True):
             assert kwargs["idempotency_key"] == _work_set_idempotency_key(work)
             assert kwargs["session_id"] == SESSION_ID
     finally:
@@ -5221,7 +5220,7 @@ class _StatefulCrawler(_Crawler):
         self.etag = etag
         self.last_modified = last_modified
 
-    def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:
+    def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:  # noqa: B008 - сигнатура порта, FetchPlan frozen
         self.calls.append((url, plan))
         confirmed = (
             url in self.not_modified
@@ -5992,12 +5991,12 @@ def test_composition_written_only_after_all_members_committed(tmp_path: Path) ->
 @requires_numpy
 def test_identity_chain_partition_vs_composition(tmp_path: Path) -> None:
     """Сквозная цепочка id: pb — чанки/партиции/evidence; cid — manifest/cell/runs."""
+    from core.adapters.vector_npy import NpyVectorIndex
     from core.domain import LLMCellOutput, LLMEvidence, Status
     from core.pipeline.composition import CompositionView
     from core.pipeline.evaluate import _provenance
     from core.pipeline.validate import validate_output
-    from core.adapters.vector_npy import NpyVectorIndex
-    from core.ports.vector_index import RetrievedChunk, RetrievalResult
+    from core.ports.vector_index import RetrievalResult
 
     index_root = tmp_path / "index_store"
     store = SqliteStore(":memory:")
@@ -6884,7 +6883,7 @@ def test_root_order_preserves_authored_order_not_lexicographic(tmp_path: Path) -
     assert records[valuable]["pages_fetched"] == 2
     assert records[big]["pages_fetched"] == 2
     # Первый фетч прогона — seed ценного корня (docs), а не портала.
-    assert [url for url, _plan in crawler.calls][0] == valuable
+    assert next(url for url, _plan in crawler.calls) == valuable
 
     # Обратный авторский порядок соблюдается так же — это не сортировка.
     reversed_crawler = _Crawler(pages)
@@ -6899,7 +6898,7 @@ def test_root_order_preserves_authored_order_not_lexicographic(tmp_path: Path) -
         big,
         valuable,
     ]
-    assert [url for url, _plan in reversed_crawler.calls][0] == big
+    assert next(url for url, _plan in reversed_crawler.calls) == big
 
 def test_undeclared_subdomain_rejected_and_counted_in_root_provenance(
     tmp_path: Path,
@@ -7232,7 +7231,7 @@ def test_previous_build_cells_are_marked_stale_on_rebuild(tmp_path: Path) -> Non
     (``compute``), отчёт называет очередью пере-оценки; здесь проверяется **производитель**
     пометки. Статус не меняется (I12) — меняется только участие в цифрах.
     """
-    from core.domain import Cell, CellState, Status, StaleReason, LLMEvidence
+    from core.domain import Cell, CellState, LLMEvidence, StaleReason, Status
 
     store = SqliteStore(":memory:")
     _make_run(store)

@@ -15,10 +15,14 @@ from pathlib import Path
 import pytest
 
 from core.adapters import index_format, vector_npy
-from core.adapters.vector_npy import NpyVectorIndex, VectorIndexUnavailable, numpy_available
+from core.adapters.vector_npy import (
+    NpyVectorIndex,
+    VectorIndexUnavailable,
+    numpy_available,
+)
 from core.pipeline.composition import CompositionView
 from core.ports.types import Chunk
-from core.ports.vector_index import VectorIndexPort, VectorQuery
+from core.ports.vector_index import VectorQuery
 
 pytestmark = pytest.mark.skipif(not numpy_available(), reason="numpy не установлен")
 

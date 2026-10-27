@@ -40,9 +40,9 @@ from core.domain import (
 from core.pipeline import RunPlan
 from core.pipeline.corpus import (
     EMBED_BATCH_CHUNKS,
-    _EmbedThroughput,
     _embed_and_build,
     _embed_batched,
+    _EmbedThroughput,
     _make_embed_reporter,
     build_corpus,
     format_embed_progress,
@@ -137,7 +137,7 @@ class _Crawler:
         self.pages = dict(pages)
         self.calls: list[str] = []
 
-    def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:
+    def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:  # noqa: B008 - сигнатура порта, FetchPlan frozen
         self.calls.append(url)
         return RawPage(
             url=url,

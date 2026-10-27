@@ -47,9 +47,7 @@ from core.pipeline.prompt import compile_prompt
 from core.store.sqlite_store import SqliteStore
 from core.util.hashing import content_hash
 from tests.pipeline.test_evaluate import (
-    _ScriptedEvaluator,
     _absent_explicit,
-    _absent_output,
     _bad_output,
     _chunks,
     _coverage,
@@ -57,6 +55,7 @@ from tests.pipeline.test_evaluate import (
     _ok_output,
     _param,
     _RecordingStore,
+    _ScriptedEvaluator,
 )
 
 # ---------------------------------------------------------------------------

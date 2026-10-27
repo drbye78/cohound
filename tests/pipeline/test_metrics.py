@@ -13,14 +13,13 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from types import SimpleNamespace
-from typing import Any
 
 import pytest
 
 from core.domain.enums import CellState, SearchPhase
 from core.domain.scoring import Comparability, Coverage, Score, SensitivityReport
 from core.pipeline.compute import ScoreBundle
-from core.pipeline.metrics import RunMetrics, collect_phase_durations, compute_metrics
+from core.pipeline.metrics import collect_phase_durations, compute_metrics
 
 
 @dataclass

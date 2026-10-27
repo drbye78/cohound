@@ -7,14 +7,12 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import pytest
 
 from core.config.run_config import load_run_config
 from core.pipeline import package_admin as pa
-from core.pipeline import package_candidates as pc
 from core.pipeline.package_candidates import (
     CANDIDATE_KINDS,
     Candidate,

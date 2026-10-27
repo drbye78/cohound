@@ -16,15 +16,13 @@ from pathlib import Path
 import pytest
 
 import core.cli.doctor as doctor
-from core.cli.main import EXIT_ERROR, EXIT_OK, build_parser, main
 from core.cli.doctor import (
     DEPENDENCY_GROUPS,
-    CheckGroup,
     DoctorReport,
     _dependency_group,
     run_doctor,
 )
-
+from core.cli.main import EXIT_ERROR, EXIT_OK, main
 
 # ---------------------------------------------------------------------------
 # Помощники

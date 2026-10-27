@@ -1412,11 +1412,11 @@ def test_evaluated_absent_cell_survives_store_round_trip(store: SqliteStore) -> 
     через ``iter_cells`` (тот же путь, которым ячейки получает ``report_phase``).
     """
     from tests.pipeline.test_evaluate import (
-        _ScriptedEvaluator,
         _absent_explicit,
         _chunks,
         _data,
         _param,
+        _ScriptedEvaluator,
     )
 
     store.create_run(RUN_ID, _cfg())

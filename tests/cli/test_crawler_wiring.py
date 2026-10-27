@@ -33,7 +33,11 @@ import core.cli.context as context_mod
 import core.cli.wiring as wiring_mod
 from core.adapters.crawl_browser import (
     DEFAULT_TIMEOUT_MS as DEFAULT_BROWSER_TIMEOUT_MS,
+)
+from core.adapters.crawl_browser import (
     DEFAULT_USER_AGENT as DEFAULT_BROWSER_USER_AGENT,
+)
+from core.adapters.crawl_browser import (
     BrowserCrawler,
 )
 from core.adapters.crawl_http import HttpCrawler
@@ -47,7 +51,6 @@ from core.cli.wiring import (
     ENV_SCOUT_CRAWLER,
     LOCAL_PROFILE,
     SPLIT_PROFILE,
-    SUPPORTED_SCOUT_CRAWLERS,
     WiringError,
     build_adapters,
     build_scout_crawler,
@@ -65,7 +68,6 @@ from core.util.cache import ContentAddressedCache
 from core.util.logging import PhaseLogger
 from tests.helpers.packages import run_argv, valid_package
 from tests.helpers.scout import clear_env
-
 
 # ---------------------------------------------------------------------------
 # Помощники
@@ -1170,7 +1172,6 @@ def test_preflight_does_not_refuse_declared_axis_but_warns() -> None:
     без них «может не поместиться» неотличимо от догадки.
     """
     from core.cli.wiring import preflight_extraction_budget
-    from core.config.deploy import CrawlConfig
     from core.domain.enums import DocumentLevel
     from core.pipeline.resources import DOCLING_PEAK_MB, PARENT_FLOOR_MB
 
@@ -1259,10 +1260,10 @@ def test_local_extract_pool_recycles_worker_and_reinits_extractor(
     вернул бы ``error`` вместо текста. Docling не импортируется: фабрика подменена
     крошечным fake-экстрактором.
     """
-    from core.domain.enums import DocumentLevel
-    from core.pipeline.corpus import _ExtractRequest, _extract_worker
-    from core.ports.types import ExtractionRoute
     from core.cli.wiring import _local_extract_pool_factory
+    from core.domain.enums import DocumentLevel
+    from core.pipeline.corpus import _extract_worker, _ExtractRequest
+    from core.ports.types import ExtractionRoute
 
     raw = tmp_path / "page.bin"
     raw.write_bytes(b"<html>recycle</html>")

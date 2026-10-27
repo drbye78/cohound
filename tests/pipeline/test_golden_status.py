@@ -20,6 +20,7 @@
 
 from __future__ import annotations
 
+import re
 import shutil
 from pathlib import Path
 
@@ -320,7 +321,7 @@ def test_load_inputs_present_reads_rows(tmp_path: Path) -> None:
 def test_load_inputs_propagates_package_error(tmp_path: Path) -> None:
     package = _package(tmp_path, golden=False)
     _declare(package, _HEADER + "state: present\n")
-    with pytest.raises(ValueError, match="golden_status.yaml"):
+    with pytest.raises(ValueError, match=re.escape("golden_status.yaml")):
         load_inputs(RUN_YAML, package)
 
 

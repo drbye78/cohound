@@ -60,7 +60,6 @@ from tests.fakes.ports import (
 from tests.helpers.output import json_out
 from tests.helpers.packages import REGISTRY_FIXTURES, run_argv, valid_package
 
-
 # ---------------------------------------------------------------------------
 # Помощники
 # ---------------------------------------------------------------------------
@@ -1208,7 +1207,6 @@ def test_cmd_run_serp_round_extends_corpus_and_is_provenanced(
     новую сборку не «перепривязываем»: композиция одна, и ``evaluate`` видит её по
     ``runs.index_build_id`` — здесь это проверяется записью ссылки на сборку.
     """
-    from dataclasses import replace
 
     from core.ports.search import SearchQuery, SearchResult
 

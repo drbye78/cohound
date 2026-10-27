@@ -24,7 +24,6 @@ from core.domain.enums import (
     AnchorRelation,
     CellState,
     DenialStrength,
-    Importance,
     RankingPolicy,
     RunMode,
     StaleReason,

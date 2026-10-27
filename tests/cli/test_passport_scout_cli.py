@@ -16,7 +16,7 @@ import pytest
 from core.adapters.llm_discovery import DiscoveryLLM
 from core.cli.main import EXIT_OK, EXIT_USAGE, main
 from core.cli.wiring import DEFAULT_LLM_MODEL
-from core.ports.types import FetchMode, FetchPlan, RawPage
+from core.ports.types import FetchPlan, RawPage
 from tests.fakes.ports import FakeExtractor
 from tests.helpers.output import json_out
 from tests.helpers.scout import clear_env, fake_crawler
@@ -155,8 +155,8 @@ def test_happy_path_writes_yaml_and_sidecar(
     payload = json_out(capsys)
     assert payload["ok"] is True
     assert payload["product_id"] == "Alpha_Product"
-    yaml_path = out / "Alpha_Product" / "2026-06-01.yaml"
-    sidecar_path = out / "Alpha_Product" / "2026-06-01.candidates.json"
+
+
     # Дата снимка — сегодня (today не задан в CLI), поэтому ищем любой *.yaml.
     yamls = list((out / "Alpha_Product").glob("*.yaml"))
     sidecars = list((out / "Alpha_Product").glob("*.candidates.json"))
@@ -263,7 +263,7 @@ def test_errors_do_not_write_draft(
     class _BoomCrawler:
         version = "boom"
 
-        def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:
+        def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:  # noqa: B008 - сигнатура порта, FetchPlan frozen
             raise RuntimeError("network down")
 
     from core.cli.main import EXIT_ERROR

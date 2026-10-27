@@ -43,7 +43,12 @@ from core.domain.scoring import (
     evidence_coverage,
     publishability_profile,
 )
-from core.pipeline.compute import assert_publishable, compute, publish_warnings, scope_universe
+from core.pipeline.compute import (
+    assert_publishable,
+    compute,
+    publish_warnings,
+    scope_universe,
+)
 
 ROOT = Path(__file__).parents[2]
 RUN_ID = "run-publishability"
@@ -607,11 +612,10 @@ def test_live_run_class_and_decomposition() -> None:
 @pytest.fixture()
 def store_bundle():
     """Бандл прогона, у которого доля неизвестности выше порога (для проверки гейта)."""
-    from core.store.sqlite_store import SqliteStore
-
     import datetime as _dt
 
     from core.domain.models import Focus, RunConfig
+    from core.store.sqlite_store import SqliteStore
 
     with SqliteStore(":memory:") as store:
         store.create_run(

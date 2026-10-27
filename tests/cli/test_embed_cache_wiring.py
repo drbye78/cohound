@@ -21,8 +21,6 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-import pytest
-
 from core.cli.context import _resolve_phases
 from core.config.paths import PathsConfig
 

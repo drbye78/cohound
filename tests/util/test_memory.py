@@ -15,7 +15,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, ClassVar
 
 import pytest
 
@@ -25,7 +25,7 @@ from core.util import memory
 class _FakeTrim:
     """Замена ``malloc_trim``: как ``ctypes``-функция, принимает ``argtypes``/``restype``."""
 
-    argtypes: list[Any] = []
+    argtypes: ClassVar[list[Any]] = []
     restype: Any = None
 
     def __init__(self, rc: int) -> None:

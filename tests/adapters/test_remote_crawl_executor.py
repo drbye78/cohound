@@ -17,8 +17,6 @@ from typing import Any
 import pytest
 
 from core.adapters.remote_crawl_executor import (
-    ACTIVE_JOB_STATUSES,
-    DEFAULT_MAX_BATCH_ITEMS,
     EdgeCrawlExecutor,
 )
 from core.adapters.remote_gateway import RemoteContentError
@@ -26,7 +24,6 @@ from core.domain.enums import CrawlStrategy, ExtractionRoute, FetchMode
 from core.domain.models import RateLimitSpec
 from core.ports.crawl_executor import (
     CrawlBatch,
-    CrawlExecutorPort,
     CrawlProgress,
     CrawlResultItem,
     CrawlSubmitResult,
@@ -390,7 +387,7 @@ def test_status_missing_status_raises() -> None:
 
 
 def test_collect_decodes_bytes_and_rehashes() -> None:
-    payload_bytes = "привет".encode("utf-8")
+    payload_bytes = "привет".encode()
     b64 = base64.b64encode(payload_bytes).decode("ascii")
     gateway = _FakeGateway(
         {

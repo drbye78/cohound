@@ -15,12 +15,12 @@ from pathlib import Path
 import pytest
 
 from core.domain import (
+    REQUIRED_EXHAUSTION_CONTOURS,
     Cell,
     CellState,
     Focus,
     LLMEvidence,
     ProtocolExhaustion,
-    REQUIRED_EXHAUSTION_CONTOURS,
     RunConfig,
     RunMode,
     SourceKind,

@@ -130,7 +130,7 @@ class _LocalCrawler:
         self.final_url = dict(final_url or {})
         self.calls: list[str] = []
 
-    def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:
+    def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:  # noqa: B008 - сигнатура порта, FetchPlan frozen
         self.calls.append(url)
         return RawPage(
             url=self.final_url.get(url, url),
@@ -147,7 +147,7 @@ class _BombCrawler:
     version = "crawler-1"
     engine = "http"
 
-    def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:
+    def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:  # noqa: B008 - сигнатура порта, FetchPlan frozen
         raise AssertionError("локальный краулер вызван в split-режиме")
 
 

@@ -15,9 +15,7 @@ import json
 from typing import Any
 
 from core.adapters.gateway_validate import (
-    MAX_RESPONSE_BYTES,
     ValidationIssue,
-    check_size,
     decoded_base64_size,
     validate_envelope_shape,
     validate_extracted_doc,
@@ -25,7 +23,7 @@ from core.adapters.gateway_validate import (
     validate_registry_payload,
     validate_search_payload,
 )
-from core.ports.types import ExtractedDoc, RawPage, FetchMode
+from core.ports.types import ExtractedDoc, FetchMode, RawPage
 from core.util.hashing import content_hash
 
 # ---------------------------------------------------------------------------

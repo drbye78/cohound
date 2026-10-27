@@ -259,7 +259,7 @@ def test_incremental_item_is_frozen() -> None:
         depth=0,
         kind=IncrementalKind.FETCH,
     )
-    with pytest.raises(Exception):
+    with pytest.raises(dataclasses.FrozenInstanceError):
         item.url = "https://p1.test/other"  # type: ignore[misc]
 
 

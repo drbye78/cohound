@@ -29,7 +29,7 @@ class _FakeCrawler:
         self._content = content
         self.calls: list[str] = []
 
-    def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:
+    def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:  # noqa: B008 - сигнатура порта, FetchPlan frozen
         self.calls.append(url)
         return RawPage(url=url, content=self._content, fetched_at="2026-01-01T00:00:00Z")
 

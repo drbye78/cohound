@@ -24,10 +24,9 @@ from core.adapters.search_glm import (
     DEFAULT_SEARCH_PATH,
     GlmSearchAdapter,
     SearchAdapterUnavailable,
-    SearchError,
 )
-from core.ports.search import SearchAdapterPort, SearchQuery, SearchResult
-from core.ports.types import RawPage, FetchMode
+from core.ports.search import SearchQuery, SearchResult
+from core.ports.types import FetchMode, RawPage
 from core.util.cache import ContentAddressedCache, http_key
 
 URL_A = "https://example.com/a"

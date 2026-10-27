@@ -28,6 +28,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import subprocess
@@ -40,12 +41,12 @@ PORT = 8765
 JS_TEXT = "JS-RENDERED-CONTENT-7f3a"
 STATIC_TEXT = "STATIC-ONLY-1b2c"
 
-PAGE_JS = f"""<!doctype html><html><body>
+PAGE_JS = """<!doctype html><html><body>
 <div id="app">loading</div>
 <script>
-  setTimeout(function() {{
+  setTimeout(function() {
     document.getElementById('app').textContent = ['JS','RENDERED','CONTENT','7f3a'].join('-');
-  }}, 50);
+  }, 50);
 </script>
 </body></html>"""
 
@@ -153,10 +154,8 @@ def _run_browser_subprocess(browser_type: str) -> dict[str, str]:
     except (OSError, json.JSONDecodeError):
         data = {"_error": (proc.stderr or proc.stdout or "")[-400:]}
     finally:
-        try:
+        with contextlib.suppress(OSError):
             os.unlink(out_path)
-        except OSError:
-            pass
     return data
 
 

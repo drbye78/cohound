@@ -24,19 +24,19 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from core.config.domain_profiles import DomainProfile
-from core.util.feed import FeedEntry
-
 from test_corpus import (
     RUN_ID,
     SqliteStore,
-    _Crawler,
-    _FakePoller,
     _build,
     _build_of,
+    _Crawler,
+    _FakePoller,
     _items,
     _make_run,
 )
+
+from core.config.domain_profiles import DomainProfile
+from core.util.feed import FeedEntry
 
 HOST = "docs.test"
 SITEMAP_URL = f"https://{HOST}/sitemap.xml"

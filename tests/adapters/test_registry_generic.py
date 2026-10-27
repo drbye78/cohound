@@ -22,7 +22,6 @@ from core.adapters.registry_generic import (
     RegistryParseError,
     load_registry_config,
 )
-from core.ports.registry import RegistryFetcherPort
 from core.ports.types import ProductRef
 
 FIXTURES = Path(__file__).parent / "fixtures"

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import random
 import threading
+from itertools import pairwise
 
 import pytest
 
@@ -189,7 +190,7 @@ def test_concurrent_same_host_reservations_are_unique_and_spaced() -> None:
     assert len(results) == threads_count
     targets = sorted(results)  # now=0 ⇒ slept == target
     assert len(set(targets)) == threads_count  # без дублей
-    for earlier, later in zip(targets, targets[1:]):
+    for earlier, later in pairwise(targets):
         assert later - earlier == pytest.approx(1.0)
 
 

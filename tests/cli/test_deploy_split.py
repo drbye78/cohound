@@ -28,7 +28,6 @@ from core.adapters.remote_crawler import RemoteCrawler
 from core.adapters.remote_extractor import RemoteExtractor
 from core.adapters.remote_gateway import (
     DEFAULT_SCHEMA_VERSION,
-    GatewaySchemaError,
     GatewayTransportError,
     HttpContentGateway,
 )
@@ -38,18 +37,20 @@ from core.cli.main import EXIT_ERROR, EXIT_OK, EXIT_USAGE, main
 from core.cli.wiring import (
     LOCAL_PROFILE,
     SPLIT_PROFILE,
-    WiringError,
     build_adapters,
     build_gateway,
     manifest_deploy_fields,
 )
 from core.config.deploy import (
-    DeployConfig,
     SPLIT_HARDENED_WARNING,
+    DeployConfig,
     load_deploy_config,
 )
-from core.edge.seam_schema import SEAM_SCHEMA_VERSION, validate_envelope, validate_payload
-from core.pipeline import Ports
+from core.edge.seam_schema import (
+    SEAM_SCHEMA_VERSION,
+    validate_envelope,
+    validate_payload,
+)
 from core.ports.search import SearchQuery
 from tests.helpers.output import json_out
 from tests.helpers.packages import (

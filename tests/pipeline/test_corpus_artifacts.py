@@ -118,7 +118,7 @@ class _BufferedCrawler:
         self.content_types = dict(content_types or {})
         self.calls: list[str] = []
 
-    def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:
+    def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:  # noqa: B008 - сигнатура порта, FetchPlan frozen
         self.calls.append(url)
         return RawPage(
             url=url,
@@ -154,7 +154,7 @@ class _StagingCrawler:
         self.digest = ""
         self.path: Path | None = None
 
-    def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:
+    def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:  # noqa: B008 - сигнатура порта, FetchPlan frozen
         self.calls.append(url)
         assert url == self.url
         self.staging_dir.mkdir(parents=True, exist_ok=True)
@@ -195,7 +195,7 @@ class _ExplodingCrawler:
     def __init__(self) -> None:
         self.calls: list[str] = []
 
-    def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:
+    def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:  # noqa: B008 - сигнатура порта, FetchPlan frozen
         self.calls.append(url)
         raise AssertionError(f"живой фетч при resume: {url}")
 

@@ -256,7 +256,7 @@ def test_open_session_does_not_touch_fresh_running_session_of_previous_attempt()
                 status=CrawlSessionStatus.RUNNING,
                 created_at="2026-01-01T00:00:00+00:00",
                 owner="other-host/4242/777",
-                heartbeat_at=_dt.datetime.now(_dt.timezone.utc).isoformat(),
+                heartbeat_at=_dt.datetime.now(_dt.UTC).isoformat(),
             )
         )
 

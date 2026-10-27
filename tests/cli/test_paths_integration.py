@@ -28,7 +28,6 @@ from core.cli.wiring import build_adapters
 from core.config.paths import PathsConfig
 from tests.helpers.packages import capturing_factory, run_argv, valid_package
 
-
 # ---------------------------------------------------------------------------
 # Обратная совместимость (без env/файла)
 # ---------------------------------------------------------------------------
@@ -202,7 +201,7 @@ def test_resolve_ports_passes_index_root(tmp_path: Path) -> None:
     )
     ports = _resolve_ports(args, deploy_config=None)  # type: ignore[arg-type]
     if ports.index_builder is not None:  # numpy доступен
-        assert getattr(ports.index_builder, "index_root") == tmp_path / "idx"
+        assert ports.index_builder.index_root == tmp_path / "idx"
 
 
 def test_build_adapters_index_root_default_matches_pathsconfig() -> None:
@@ -210,4 +209,4 @@ def test_build_adapters_index_root_default_matches_pathsconfig() -> None:
     ports = build_adapters(profile="local")
     assert PathsConfig().index_store == Path("index_store")
     if ports.index_builder is not None:
-        assert getattr(ports.index_builder, "index_root") == Path("index_store")
+        assert ports.index_builder.index_root == Path("index_store")

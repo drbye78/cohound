@@ -7,7 +7,6 @@
 
 from __future__ import annotations
 
-
 from core.util.sanitize import (
     neutralize_prompt_injection_marks,
     sanitize_html,

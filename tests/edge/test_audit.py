@@ -15,7 +15,6 @@ from pathlib import Path
 
 import pytest
 
-import core.edge.audit as audit_module
 from core.edge.audit import (
     AUDIT_STATUS_ALLOW,
     AUDIT_STATUS_DENY,
@@ -24,7 +23,6 @@ from core.edge.audit import (
     CLASSIFICATION_DEFAULT,
     CLASSIFICATION_INTERNAL,
     AuditEvent,
-    AuditSink,
     Classification,
     FileAuditSink,
     MemoryAuditSink,
@@ -295,6 +293,9 @@ def test_to_json_is_deterministic_sorted() -> None:
 
 
 def test_audit_statuses_exact() -> None:
+    # Сравнение в естественном порядке (переменная слева): автофикс SIM300 в ruff
+    # 0.17.3 переворачивает операнды, если один из них — вызов, и создаёт йода-условие,
+    # против которого само правило написано. Правило из набора убрано (pyproject.toml).
     assert AUDIT_STATUSES == frozenset({"allow", "deny", "error"})
 
 

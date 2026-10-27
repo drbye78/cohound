@@ -38,7 +38,7 @@ from core.store.sqlite_store import SqliteStore
 RUN_ID = "run-fixture"
 SESSION_ID = "crawl:run-fixture"
 OTHER_SESSION_ID = "crawl:other"
-NOW = _dt.datetime(2026, 6, 1, 12, 0, 0, tzinfo=_dt.timezone.utc)
+NOW = _dt.datetime(2026, 6, 1, 12, 0, 0, tzinfo=_dt.UTC)
 
 
 def _store() -> SqliteStore:

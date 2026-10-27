@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import datetime as _dt
 import json
-import sqlite3
 from collections.abc import Iterator
 from pathlib import Path
 

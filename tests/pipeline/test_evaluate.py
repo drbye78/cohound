@@ -21,7 +21,6 @@ from core.domain import (
     CellState,
     CorpusCoverage,
     DenialStrength,
-    EvidenceScope,
     Importance,
     LLMCellOutput,
     LLMEvidence,
@@ -258,7 +257,6 @@ def test_preliminary_invalid_becomes_preliminary_candidate() -> None:
 
 
 def test_retrieval_provenance_lands_on_cell() -> None:
-    from core.pipeline.retrieve import RetrievalResult
 
     data = _data()
     evaluator = _ScriptedEvaluator([_ok_output(data)])

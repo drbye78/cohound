@@ -33,13 +33,15 @@ from typing import Any
 import pytest
 import yaml
 
+from core.config.deploy import CrawlConfig
+from core.config.domain_profiles import DomainProfile
 from core.domain import REQUIRED_EXHAUSTION_CONTOURS
 from core.domain.enums import (
     AbsenceRuleType,
     CellState,
     ChangeClass,
-    DenialStrength,
     CrawlStrategy,
+    DenialStrength,
     DocumentLevel,
     EndpointKind,
     LLMScenario,
@@ -53,11 +55,11 @@ from core.domain.models import (
     METHODOLOGY_VERSION,
     CatalogRow,
     Cell,
-    EvidenceScope,
     CorpusCoverage,
     CrawlProvenance,
     CrawlRunConfig,
     CrawlSessionProvenance,
+    EvidenceScope,
     LLMEvidence,
     ProtocolExhaustion,
     RateLimitSpec,
@@ -67,8 +69,6 @@ from core.domain.models import (
     canonical_rate_limit,
 )
 from core.domain.scoring import Comparability, Coverage, Score, SensitivityReport
-from core.config.deploy import CrawlConfig
-from core.config.domain_profiles import DomainProfile
 from core.pipeline.compute import ScoreBundle, compute, publish_warnings
 from core.pipeline.report import (
     DIFF_BOUNDARY_FIELDS,
@@ -81,9 +81,9 @@ from core.pipeline.report import (
     CrossCycleDiffError,
     PublishBlockedError,
     build_manifest,
+    collect_corpus_coverage_anomalies,
     collect_i3_anomalies,
     compact_search_effort,
-    collect_corpus_coverage_anomalies,
     diff_boundary_violations,
     render_battle_card,
     render_diff,
@@ -2045,7 +2045,7 @@ def test_registry_denial_is_not_a_truncation_anomaly() -> None:
         title="t",
         module="m",
         group="g",
-        importance=list(Importance)[0],
+        importance=next(iter(Importance)),
         param_type=ParamType.FACT,
         rule="r",
         absence_rule=AbsenceRuleType.REGISTRY_ABSENCE,

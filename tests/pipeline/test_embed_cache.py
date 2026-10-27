@@ -21,6 +21,7 @@
 from __future__ import annotations
 
 import datetime as _dt
+import json
 from pathlib import Path
 
 import numpy as np
@@ -36,10 +37,10 @@ from core.domain import (
 from core.pipeline import RunPlan
 from core.pipeline.corpus import (
     EMBED_BATCH_CHUNKS,
-    _EmbedCensus,
-    _EmbedThroughput,
     _embed_and_build,
     _embed_batched,
+    _EmbedCensus,
+    _EmbedThroughput,
     _make_embed_reporter,
     build_corpus,
     format_embed_progress,
@@ -292,9 +293,15 @@ def test_corrupt_or_mismatched_entries_are_misses(tmp_path: Path) -> None:
     cache.put(key, MODEL, [0.0, 0.1, 0.2, 0.3], dim=4)
     raw = path.read_bytes().partition(b"\n")[2]
     path.write_bytes(
-        (
-            '{"byteorder":"little","content_hash":"%s","dim":4,"dtype":"float16",'
-            '"embed_model_id":"%s","format":%d}' % (key, MODEL, ENVELOPE_FORMAT + 1)
+        json.dumps(
+            {
+                "byteorder": "little",
+                "content_hash": key,
+                "dim": 4,
+                "dtype": "float16",
+                "embed_model_id": MODEL,
+                "format": ENVELOPE_FORMAT + 1,
+            }
         ).encode()
         + b"\n"
         + raw
@@ -406,7 +413,7 @@ def test_progress_publishes_cached_count_and_hit_ratio(tmp_path: Path) -> None:
     assert last["embed_hit_ratio_pct"] == 50
     # Темп — по фактически посчитанным чанкам, а не по «обработанным» (A3-сравнимость).
     assert census.embedded == total - total // 2
-    assert last["embed_chunks_per_min"] == int(round(throughput.rate * 60.0))
+    assert last["embed_chunks_per_min"] == round(throughput.rate * 60.0)
     # Итоговая строка продукта называет «сколько из скольких» и «сколько из кэша».
     line = format_embed_progress(
         total, total, throughput.rate, 0, cached=last["embed_cached"]
@@ -508,7 +515,7 @@ class _Crawler:
         self.pages = dict(pages)
         self.calls: list[str] = []
 
-    def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:
+    def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:  # noqa: B008 - сигнатура порта, FetchPlan frozen
         self.calls.append(url)
         return RawPage(
             url=url,

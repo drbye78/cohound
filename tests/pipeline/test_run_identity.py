@@ -25,9 +25,9 @@ from core.domain.models import (
     PackageManifest,
     RunConfig,
 )
+from core.pipeline.digests import EXECUTION_CONTRACT_FIELDS
 from core.pipeline.normalize import RunInputs
 from core.pipeline.plan import derive_run_id
-from core.pipeline.digests import EXECUTION_CONTRACT_FIELDS
 from core.pipeline.run_identity import (
     RunIdentity,
     build_execution_contract,

@@ -16,7 +16,6 @@ import pytest
 from core.adapters.crawl_browser import BrowserCrawler, CrawlUnavailable
 from core.adapters.crawl_scrapy import CrawlError
 from core.domain.enums import CrawlStrategy, ExtractionRoute, FetchMode
-from core.ports.types import RawPage
 from core.pipeline.crawl_probe import (
     MIN_USABLE_TEXT,
     Observation,
@@ -32,9 +31,9 @@ from core.pipeline.crawl_probe import (
     pick_urls,
     render_profiles_with_verdicts,
     split_header,
-    synthesize_url,
 )
 from core.pipeline.crawl_probe_driver import ProbePorts, run_probe
+from core.ports.types import RawPage
 from tests.fakes.crawl_probe import (
     FakeBackend,
     RecordingHttpGet,

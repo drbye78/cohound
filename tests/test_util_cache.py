@@ -13,7 +13,6 @@ import pytest
 
 from core.util.cache import ContentAddressedCache, http_key, serp_key
 
-
 # --- round-trip ---------------------------------------------------------------
 
 

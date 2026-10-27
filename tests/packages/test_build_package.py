@@ -128,7 +128,7 @@ def test_generator_emits_domain_profiles_accepted_by_strict_loader(tmp_path: Pat
     loaded = load_domain_profiles(path)
 
     assert set(loaded) == set(profiles)
-    for key, profile in loaded.items():
+    for profile in loaded.values():
         assert isinstance(profile, DomainProfile)
     # Мёртвая схема (render/index) не должна присутствовать в выходе.
     for key, raw in profiles.items():

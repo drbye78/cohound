@@ -448,8 +448,7 @@ class _FakeStore:
             yield SimpleNamespace(product_id=product_id, package_id="pkg")
 
     def iter_chunks(self, build_id: str, *, product_id: str | None = None):  # noqa: ANN201, ARG002
-        for chunk in self.products.get(product_id or "", []):
-            yield chunk
+        yield from self.products.get(product_id or "", [])
 
 def _golden(param_id: str, expected: Status, product_id: str = PRODUCT) -> GoldenRow:
     return GoldenRow(

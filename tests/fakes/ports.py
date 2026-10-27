@@ -11,14 +11,21 @@
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import replace
-from typing import Any, Callable
+from typing import Any
 
 from core.domain import LLMCellOutput, RegistryFact
 from core.ports.index_builder import IndexMeta
 from core.ports.llm import LLMRequest, LLMResponse, TokenUsage
-from core.ports.types import Chunk, ExtractedDoc, ExtractionRoute, FetchPlan, ProductRef, RawPage
+from core.ports.types import (
+    Chunk,
+    ExtractedDoc,
+    ExtractionRoute,
+    FetchPlan,
+    ProductRef,
+    RawPage,
+)
 from core.ports.vector_index import RetrievedChunk, VectorQuery
 
 #: Фиксированная метка времени (детерминизм фейков).
@@ -26,15 +33,15 @@ FIXED_TS = "2026-01-01T00:00:00+00:00"
 
 __all__ = [
     "FIXED_TS",
-    "FakeEvaluator",
-    "FakeSearchAdapter",
-    "FakeCrawler",
-    "FakeExtractor",
     "FakeChunker",
-    "FakeRegistryFetcher",
+    "FakeCrawler",
     "FakeEmbedder",
+    "FakeEvaluator",
+    "FakeExtractor",
     "FakeIndexBuilder",
     "FakeLexicalIndex",
+    "FakeRegistryFetcher",
+    "FakeSearchAdapter",
     "FakeVectorIndex",
 ]
 
@@ -54,7 +61,7 @@ def _hash_vector(text: str, dim: int) -> list[float]:
     """
     values: list[float] = []
     for index in range(dim):
-        digest = hashlib.sha256(f"{text}\x1f{index}".encode("utf-8")).digest()
+        digest = hashlib.sha256(f"{text}\x1f{index}".encode()).digest()
         values.append(int.from_bytes(digest[:4], "big") / 0xFFFFFFFF)
     return values
 
@@ -63,7 +70,7 @@ def _cosine(a: Sequence[float], b: Sequence[float]) -> float:
     """Косинусная близость; при несовпадении размеров/нулевой норме — ``0.0``."""
     if not a or not b or len(a) != len(b):
         return 0.0
-    dot = sum(x * y for x, y in zip(a, b))
+    dot = sum(x * y for x, y in zip(a, b, strict=True))
     norm_a = sum(x * x for x in a) ** 0.5
     norm_b = sum(y * y for y in b) ** 0.5
     if norm_a == 0.0 or norm_b == 0.0:
@@ -149,7 +156,7 @@ class FakeCrawler:
     def __init__(self, pages: dict[str, RawPage] | None = None) -> None:
         self.pages = dict(pages or {})
 
-    def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:
+    def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:  # noqa: B008 - сигнатура порта, FetchPlan frozen
         """Возвращает заданную страницу; неизвестный URL — пустые байты."""
         page = self.pages.get(url)
         if page is not None:

@@ -11,7 +11,7 @@ from collections.abc import Iterable
 
 import pytest
 
-from core.ports.types import RawPage, FetchMode
+from core.ports.types import FetchMode, RawPage
 from tests.fakes.ports import FakeCrawler
 
 #: Фиксированная метка времени (детерминизм фейков).

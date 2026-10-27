@@ -20,8 +20,9 @@ from __future__ import annotations
 
 import base64
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from email.utils import format_datetime
+from itertools import pairwise
 from pathlib import Path
 from typing import Any
 
@@ -44,8 +45,8 @@ from core.adapters.search_yandex import (
     SearchError,
     YandexSearchAdapter,
 )
-from core.ports.search import SearchAdapterPort, SearchQuery, SearchResult
-from core.ports.types import RawPage, FetchMode
+from core.ports.search import SearchQuery, SearchResult
+from core.ports.types import FetchMode, RawPage
 from core.util.cache import ContentAddressedCache, http_key
 
 URL_A = "https://example.com/a"
@@ -89,11 +90,11 @@ def _xml_two_docs() -> str:
     """base64-XML веб-поиска v2 с двумя ``doc`` (для async-ответа ``response.rawData``)."""
     xml = (
         "<yandexsearch><response><results><grouping><group>"
-        "<doc><url>{a}</url><title>Example A</title>"
+        f"<doc><url>{URL_A}</url><title>Example A</title>"
         "<passages><passage>alpha</passage><passage>beta</passage></passages></doc>"
-        "<doc><url>{b}</url><title>Example B</title></doc>"
+        f"<doc><url>{URL_B}</url><title>Example B</title></doc>"
         "</group></grouping></results></response></yandexsearch>"
-    ).format(a=URL_A, b=URL_B)
+    )
     return base64.b64encode(xml.encode("utf-8")).decode("ascii")
 
 
@@ -182,11 +183,11 @@ def test_search_accepts_alt_field_names() -> None:
 def test_search_parses_rawdata_xml() -> None:
     xml = (
         "<yandexsearch><response><results><grouping><group>"
-        "<doc><url>{a}</url><title>Example A</title>"
+        f"<doc><url>{URL_A}</url><title>Example A</title>"
         "<passages><passage>alpha</passage><passage>beta</passage></passages></doc>"
-        "<doc><url>{b}</url><title>Example B</title></doc>"
+        f"<doc><url>{URL_B}</url><title>Example B</title></doc>"
         "</group></grouping></results></response></yandexsearch>"
-    ).format(a=URL_A, b=URL_B)
+    )
     raw_data = base64.b64encode(xml.encode("utf-8")).decode("ascii")
     adapter = _sync(http_post=_post_returning({"rawData": raw_data}))
     results = adapter.search(SearchQuery(text="neutral query"))
@@ -583,7 +584,7 @@ def test_retry_after_seconds_respected(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_retry_after_http_date_respected(monkeypatch: pytest.MonkeyPatch) -> None:
-    when = datetime.now(timezone.utc) + timedelta(seconds=30)
+    when = datetime.now(UTC) + timedelta(seconds=30)
     retry_after = format_datetime(when, usegmt=True)
     fake = _FakeHttpx(
         post=[
@@ -665,7 +666,7 @@ def test_backoff_delays_grow(monkeypatch: pytest.MonkeyPatch) -> None:
         adapter.search(SearchQuery(text="neutral query"))
 
     assert len(sleeps) == MAX_RETRY_ATTEMPTS - 1
-    assert all(later > earlier for earlier, later in zip(sleeps, sleeps[1:]))
+    assert all(later > earlier for earlier, later in pairwise(sleeps))
     assert max(sleeps) <= MAX_RETRY_DELAY
 
 

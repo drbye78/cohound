@@ -13,6 +13,7 @@ import pytest
 from core.domain import CorpusDoc
 from core.ports.types import ExtractedDoc
 
+
 def _doc(**overrides: object) -> CorpusDoc:
     base: dict[str, object] = {
         "doc_id": "p1:hash",

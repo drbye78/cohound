@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import ast
 import base64
-import importlib
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -75,7 +74,7 @@ class FakeCrawler:
         self._raises = raises
         self.calls: list[tuple[str, FetchMode]] = []
 
-    def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:
+    def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:  # noqa: B008 - сигнатура порта, FetchPlan frozen
         self.calls.append((url, FetchMode(plan.fetch)))
         if self._raises is not None:
             raise self._raises

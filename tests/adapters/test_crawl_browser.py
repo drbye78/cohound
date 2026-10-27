@@ -25,7 +25,6 @@ from core.adapters.crawl_browser import (
 from core.adapters.crawl_scrapy import CrawlError, CrawlNotFound, CrawlUrlError
 from core.domain.enums import CrawlStrategy, FailureKind
 from core.domain.models import RateLimitSpec
-from core.ports.crawler import CrawlerPort
 from core.ports.types import FetchMode, FetchPlan, RawPage
 from core.util.cache import ContentAddressedCache, http_key
 from core.util.rate_limit import RateLimiter

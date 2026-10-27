@@ -12,11 +12,9 @@ import base64
 import json
 import re
 from collections.abc import Mapping
-from pathlib import Path
 
 import pytest
 
-import core.edge.auth as auth_module
 from core.edge.auth import (
     AUTH_METHOD_MTLS,
     AUTH_METHOD_OIDC,
@@ -27,8 +25,6 @@ from core.edge.auth import (
     SCOPE_FETCH,
     SCOPE_REGISTRY,
     SCOPE_SEARCH,
-    AuthDecision,
-    Authenticator,
     MTLSAuthenticator,
     OIDCAuthenticator,
     Principal,

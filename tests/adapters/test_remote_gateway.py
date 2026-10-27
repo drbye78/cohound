@@ -35,7 +35,6 @@ from core.adapters.remote_gateway import (
 from core.adapters.remote_registry import RemoteRegistry
 from core.adapters.remote_search import RemoteSearch
 from core.domain import RegistryFact
-from core.ports.crawler import CrawlerPort
 from core.ports.extractor import ExtractorPort
 from core.ports.gateway import ContentGateway
 from core.ports.registry import RegistryFetcherPort

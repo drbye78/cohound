@@ -44,7 +44,6 @@ from core.pipeline.evaluate import (
 )
 from core.pipeline.plan import RunPlan
 from core.pipeline.runner import Ports
-from core.ports.types import Chunk
 from core.ports.vector_index import RetrievedChunk, VectorQuery, batched_search
 from core.store.sqlite_store import SqliteStore
 from tests.fakes.ports import FakeEvaluator
@@ -188,14 +187,13 @@ class _RecordingVectorIndex:
         self.many_calls: list[tuple[int, list[list[str]]]] = []
 
     def _hits(self, q: VectorQuery) -> list[RetrievedChunk]:
-        allowed = set(q.product_ids)
         hits = []
         for product_id in q.product_ids:
             chunk_id = f"chunk-{product_id}"
             hits.append(
                 RetrievedChunk(
                     chunk_id=chunk_id,
-                    product_id=product_id if product_id in allowed else product_id,
+                    product_id=product_id,
                     text=f"текст {chunk_id}",
                     content_hash=f"hash-{chunk_id}",
                     heading_path=f"H-{chunk_id}",
@@ -245,7 +243,7 @@ def test_precompute_covers_every_unique_query_text() -> None:
     assert vectors is not None
     assert set(vectors) == set(texts)
     # Тексты батча — ровно уникальные, без повторов (≤3 на параметр).
-    assert sorted(sum(embedder.calls, [])) == sorted(texts)
+    assert sorted(text for batch in embedder.calls for text in batch) == sorted(texts)
 
 
 def test_precompute_skipped_for_lexical_profile() -> None:

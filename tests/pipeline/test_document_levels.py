@@ -50,7 +50,12 @@ from core.domain import (
     RunMode,
 )
 from core.pipeline import RunPlan
-from core.pipeline.corpus import _ExtractRequest, ExtractionPool, IndexBuild, build_corpus
+from core.pipeline.corpus import (
+    ExtractionPool,
+    IndexBuild,
+    _ExtractRequest,
+    build_corpus,
+)
 from core.pipeline.crawl_frontier import resolve_crawl_limits
 from core.pipeline.crawl_session import default_session_id
 from core.ports.types import Chunk, ExtractedDoc, ExtractionRoute, FetchPlan, RawPage
@@ -138,7 +143,7 @@ class _Crawler:
         self.pages = dict(pages)
         self.calls: list[str] = []
 
-    def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:
+    def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:  # noqa: B008 - сигнатура порта, FetchPlan frozen
         self.calls.append(url)
         content, content_type = self.pages[url]
         return RawPage(
@@ -230,7 +235,7 @@ def _level_worker(request: _ExtractRequest) -> ExtractedDoc:
 
 
 class _FakeFuture:
-    def __init__(self, pool: "_FakePool", fn: Any, request: _ExtractRequest) -> None:
+    def __init__(self, pool: _FakePool, fn: Any, request: _ExtractRequest) -> None:
         self._fn, self._request = fn, request
 
     def result(self, timeout: float | None = None) -> Any:

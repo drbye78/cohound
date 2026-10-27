@@ -149,7 +149,7 @@ def test_extractor_version_for_document_is_document_version() -> None:
     был write-only. Совпадение обязано следовать из одного диспетчера маршрута, а не из
     дисциплины вызывающего.
     """
-    composite, html, documents = _composite()
+    composite, html, _ = _composite()
     page = _page()
 
     assert composite.extractor_version_for(page, ExtractionRoute.AUTO) == "doc-1"

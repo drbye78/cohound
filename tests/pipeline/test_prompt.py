@@ -35,7 +35,6 @@ from core.ports.types import Chunk
 from core.ports.vector_index import RetrievedChunk
 from core.util.hashing import prompt_hash
 
-
 # ---------------------------------------------------------------------------
 # Фикстуры (нейтральные данные, §1.3)
 # ---------------------------------------------------------------------------

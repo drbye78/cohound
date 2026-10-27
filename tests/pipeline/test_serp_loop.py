@@ -43,11 +43,11 @@ from core.pipeline.corpus import IndexBuild
 from core.pipeline.search_log import SearchBudget, SearchEffort
 from core.pipeline.serp_loop import (
     ImmutableBuildError,
-    assign_serp_seeds,
-    build_serp_queries,
     SerpLoopResult,
     SerpLoopStoreGap,
     assert_build_id_new,
+    assign_serp_seeds,
+    build_serp_queries,
     default_round_builder,
     derive_round_build_id,
     invalidate_affected,

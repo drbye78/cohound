@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import shutil
 from types import SimpleNamespace
+from typing import ClassVar
 
 import pytest
 
@@ -139,15 +140,15 @@ class _FakeInfo:
 class _FakeRarFile:
     """Минимальная форма ``rarfile.RarFile``: infolist/open/needs_password."""
 
-    entries: list[_FakeInfo] = []
-    payloads: dict[str, bytes] = {}
+    entries: ClassVar[list[_FakeInfo]] = []
+    payloads: ClassVar[dict[str, bytes]] = {}
     password: bool = False
     listing_error: Exception | None = None
 
     def __init__(self, path: str) -> None:
         self.path = path
 
-    def __enter__(self) -> "_FakeRarFile":
+    def __enter__(self) -> _FakeRarFile:
         return self
 
     def __exit__(self, *exc: object) -> None:
@@ -172,7 +173,7 @@ class _FakeStream:
         self._data = data
         self._pos = 0
 
-    def __enter__(self) -> "_FakeStream":
+    def __enter__(self) -> _FakeStream:
         return self
 
     def __exit__(self, *exc: object) -> None:

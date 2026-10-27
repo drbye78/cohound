@@ -14,8 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from core.cli.commands import COMMANDS
-from core.cli.main import EXIT_OK, EXIT_USAGE, build_parser, main
+from core.cli.main import EXIT_OK, EXIT_USAGE, main
 from core.domain.enums import Status
 from tests.helpers.output import json_out
 

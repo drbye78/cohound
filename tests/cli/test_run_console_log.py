@@ -24,11 +24,9 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-import pytest
-
 from core.cli.commands.run import (
-    _ConsoleTee,
     _append_console,
+    _ConsoleTee,
     _install_console_log,
     _restore_console,
 )

@@ -9,7 +9,7 @@ from __future__ import annotations
 import datetime as _dt
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 from core.domain import (
     AnchorRelation,
@@ -105,7 +105,7 @@ class _Crawler:
         self.final_url = dict(final_url or {})
         self.calls: list[str] = []
 
-    def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:
+    def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:  # noqa: B008 - сигнатура порта, FetchPlan frozen
         self.calls.append(url)
         return RawPage(
             url=self.final_url.get(url, url),
@@ -360,7 +360,7 @@ def test_exhaustive_absence_anomaly_fires_on_truncated_product() -> None:
     class _Cell:
         product_id = "p1"
         param_id = "param_a"
-        absence_evidence = [{"source_scope": "exhaustive"}]
+        absence_evidence: ClassVar[list[dict]] = [{"source_scope": "exhaustive"}]
 
     anomalies = collect_crawl_truncation_anomalies([_Cell()], ["p1"])
     assert len(anomalies) == 1

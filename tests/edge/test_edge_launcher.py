@@ -11,13 +11,10 @@
 
 from __future__ import annotations
 
-import ast
-import pickle
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 import pytest
-from pydantic import ValidationError
 
 import core.edge.__main__ as edge_main
 from core.adapters.crawl_browser import BrowserCrawler
@@ -32,7 +29,6 @@ from core.edge.poller import FeedPollService
 from core.edge.server import EdgeGateway, serve
 from core.ports.types import ExtractedDoc, ExtractionRoute, FetchPlan, RawPage
 
-
 # ---------------------------------------------------------------------------
 # Fake-адаптеры / gateway (без сети)
 # ---------------------------------------------------------------------------
@@ -42,7 +38,7 @@ class _Crawler:
     version = "fake-crawler-1"
     engine = "http"
 
-    def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:
+    def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:  # noqa: B008 - сигнатура порта, FetchPlan frozen
         return RawPage(url=url, content=b"<html>hi</html>", fetched_at="t")
 
 
@@ -275,7 +271,7 @@ class _FeedCrawler:
     version = "fake-feed-crawler-1"
     engine = "http"
 
-    def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:
+    def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:  # noqa: B008 - сигнатура порта, FetchPlan frozen
         return RawPage(
             url=url,
             content=(
@@ -327,7 +323,7 @@ def test_build_gateway_wires_poller_for_crawl_poll(
 class _FakeScheduler:
     """Фейковый планировщик: фиксирует конструирование и жизненный цикл."""
 
-    instances: list["_FakeScheduler"] = []
+    instances: ClassVar[list[_FakeScheduler]] = []
 
     def __init__(
         self, config: Any, crawlers: Any, *, crawler_factory: Any = None
@@ -361,9 +357,9 @@ def test_crawler_factory_builds_expected_adapters() -> None:
     assert isinstance(edge_main.crawler_factory("scrapy"), ScrapyCrawler)
     assert isinstance(edge_main.crawler_factory("browser"), BrowserCrawler)
     # Регистронезависимо (со strip); движок-атрибут совпадает с запрошенным (провенанс).
-    assert getattr(edge_main.crawler_factory("HTTP"), "engine") == "http"
-    assert getattr(edge_main.crawler_factory("Scrapy"), "engine") == "scrapy"
-    assert getattr(edge_main.crawler_factory(" browser "), "engine") == "browser"
+    assert edge_main.crawler_factory("HTTP").engine == "http"
+    assert edge_main.crawler_factory("Scrapy").engine == "scrapy"
+    assert edge_main.crawler_factory(" browser ").engine == "browser"
 
 
 def test_crawler_factory_rejects_unknown_engine() -> None:

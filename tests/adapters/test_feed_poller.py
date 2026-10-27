@@ -54,7 +54,7 @@ class _FakeCrawler:
         self._content_type = content_type
         self.calls: list[str] = []
 
-    def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:
+    def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:  # noqa: B008 - сигнатура порта, FetchPlan frozen
         self.calls.append(url)
         return RawPage(
             url=url,
@@ -191,7 +191,7 @@ def test_local_poll_since_filters_older_entries() -> None:
 
 def test_local_poll_rejects_non_public_feed_url() -> None:
     poller = LocalFeedPoller(_FakeCrawler(RSS))
-    with pytest.raises(ValueError, match="приватн|SSRF|metadata"):
+    with pytest.raises(ValueError, match=r"приватн|SSRF|metadata"):
         poller.poll("http://127.0.0.1/feed", kind="feed", params={}, plan=FetchPlan())
 
 
@@ -414,7 +414,7 @@ class _MapCrawler:
         self._content_type = content_type
         self.calls: list[str] = []
 
-    def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:
+    def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:  # noqa: B008 - сигнатура порта, FetchPlan frozen
         self.calls.append(url)
         return RawPage(
             url=url,

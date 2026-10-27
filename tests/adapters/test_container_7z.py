@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from types import SimpleNamespace
+from typing import ClassVar
 
 import pytest
 
@@ -65,16 +66,16 @@ def test_backend_absent_open_member_raises_typed() -> None:
 class _FakeSevenZipFile:
     """Минимальная форма ``py7zr.SevenZipFile``: list/archiveinfo/extract."""
 
-    entries: list[dict] = []
+    entries: ClassVar[list[dict]] = []
     info: object = SimpleNamespace(solid=True, method_names=["LZMA2"])
     password: bool = False
-    payloads: dict[str, bytes] = {}
+    payloads: ClassVar[dict[str, bytes]] = {}
     listing_error: Exception | None = None
 
     def __init__(self, path: str, mode: str = "r") -> None:
         self.path = path
 
-    def __enter__(self) -> "_FakeSevenZipFile":
+    def __enter__(self) -> _FakeSevenZipFile:
         return self
 
     def __exit__(self, *exc: object) -> None:

@@ -29,7 +29,9 @@ from typing import Any
 import pytest
 import yaml
 
+from core.config.crawl_sources import CrawlSource, CrawlSourcesConfig
 from core.domain import (
+    METHODOLOGY_VERSION,
     AbsenceRuleType,
     AnchorRelation,
     Archetype,
@@ -46,7 +48,6 @@ from core.domain import (
     InheritanceMode,
     LLMCellOutput,
     LLMEvidence,
-    METHODOLOGY_VERSION,
     ModuleDef,
     PackageManifest,
     ParamType,
@@ -60,7 +61,6 @@ from core.domain import (
     Status,
     Upstream,
 )
-from core.config.crawl_sources import CrawlSource, CrawlSourcesConfig
 from core.pipeline.compute import compute
 from core.pipeline.evaluate import evaluate_phase
 from core.pipeline.normalize import RunInputs
@@ -844,7 +844,7 @@ class _RecordingCrawler:
         self.pages = dict(pages)
         self.calls: list[str] = []
 
-    def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:
+    def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:  # noqa: B008 - сигнатура порта, FetchPlan frozen
         self.calls.append(url)
         page = self.pages.get(url)
         if page is not None:

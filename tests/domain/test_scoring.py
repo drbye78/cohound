@@ -35,7 +35,6 @@ from core.domain.models import (
 )
 from core.domain.scoring import (
     Coverage,
-    ModuleScore,
     Score,
     _is_order_stable,
     _join_ranking,

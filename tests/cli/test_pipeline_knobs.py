@@ -24,15 +24,14 @@ import pytest
 from core.adapters.crawl_http import HttpCrawler
 from core.cli.main import EXIT_OK, EXIT_USAGE, main
 from core.cli.wiring import (
-    LOCAL_PROFILE,
     ENV_SCOUT_CRAWLER,
+    LOCAL_PROFILE,
     build_adapters,
     build_scout_crawler,
 )
 from core.config.deploy import CrawlConfig, DeployConfig
 from core.ports.types import FetchMode
 from tests.helpers.packages import capturing_factory, run_argv, valid_package
-
 
 # ---------------------------------------------------------------------------
 # --render-modes

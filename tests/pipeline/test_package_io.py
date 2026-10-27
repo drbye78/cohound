@@ -14,13 +14,6 @@ import pytest
 
 from core.config.crawl_sources import CrawlSource, CrawlSourcesConfig
 from core.config.run_config import load_catalog, load_run_config
-from core.domain.models import (
-    CatalogRow,
-    CrawlRunConfig,
-    ModuleDef,
-    PackageManifest,
-    RunConfig,
-)
 from core.domain.enums import (
     Archetype,
     CrawlStrategy,
@@ -28,6 +21,13 @@ from core.domain.enums import (
     FetchMode,
     Importance,
     ParamType,
+)
+from core.domain.models import (
+    CatalogRow,
+    CrawlRunConfig,
+    ModuleDef,
+    PackageManifest,
+    RunConfig,
 )
 from core.pipeline.lint import LintReport
 from core.pipeline.package_io import (
@@ -103,7 +103,7 @@ def test_atomic_write_csv_uses_lf_and_creates_parent(tmp_path: Path) -> None:
     atomic_write_csv(path, ["a", "b"], [["1", "2"], ["3", None]])
     raw = path.read_bytes()
     assert b"\r\n" not in raw
-    assert raw == "a,b\n1,2\n3,\n".encode("utf-8")
+    assert raw == b"a,b\n1,2\n3,\n"
 
 
 def test_validate_case_id_accepts_slug_and_rejects_bad() -> None:

@@ -36,6 +36,7 @@ from core.domain import (
 from core.pipeline import RunPlan
 from core.pipeline.corpus import IndexBuild, build_corpus
 from core.pipeline.crawl_session import default_session_id
+from core.ports.state import UrlStateRow
 from core.ports.types import (
     Chunk,
     ExtractedDoc,
@@ -44,7 +45,6 @@ from core.ports.types import (
     FetchPlan,
     RawPage,
 )
-from core.ports.state import UrlStateRow
 from core.store.sqlite_store import SqliteStore
 from core.store.state_store import SqliteStateStore
 from core.util.hashing import content_hash
@@ -132,7 +132,7 @@ class _Crawler:
         self._active = 0
         self.max_active = 0
 
-    def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:
+    def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:  # noqa: B008 - сигнатура порта, FetchPlan frozen
         with self._lock:
             self.calls.append(url)
             self._active += 1
@@ -162,7 +162,7 @@ class _Crawler:
 class _BombCrawler(_Crawler):
     """Краулер, обязанный НЕ вызываться: любой ``fetch`` — провал (resume)."""
 
-    def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:
+    def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:  # noqa: B008 - сигнатура порта, FetchPlan frozen
         raise AssertionError("краулер вызван при наличии retained-байтов (resume)")
 
 

@@ -24,7 +24,7 @@ from core.adapters.crawl_scrapy import (
     _CrawlSpec,
     _ReactorWorker,
 )
-from core.ports.types import FetchMode, FetchPlan, RawPage
+from core.ports.types import FetchMode, RawPage
 
 _SETTINGS: dict[str, int] = {"RETRY_TIMES": 0, "DOWNLOAD_TIMEOUT": 1}
 

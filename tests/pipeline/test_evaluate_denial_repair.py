@@ -65,7 +65,6 @@ class _ScriptedEvaluator:
 
 
 def _ok_with_denial(**denial: object) -> LLMCellOutput:
-    data = _data()
     return LLMCellOutput(
         status=Status.OK,
         justification="Свойство Альфа подтверждено документацией.",

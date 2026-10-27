@@ -13,8 +13,8 @@ import pytest
 
 from core.config.domain_profiles import DomainProfile, load_domain_profiles
 from core.domain.enums import ExtractionRoute, FetchMode
-from core.ports.types import CrawlStrategy, FetchPlan, RateLimitSpec
 from core.pipeline.fetch_plan import resolve_fetch_plan
+from core.ports.types import CrawlStrategy, FetchPlan, RateLimitSpec
 
 
 def _profiles() -> dict[str, DomainProfile]:

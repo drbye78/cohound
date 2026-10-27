@@ -47,10 +47,10 @@ from core.domain import (
 from core.pipeline import RunPlan
 from core.pipeline.corpus import (
     _EXTRACT_MAX_POOL_REBUILDS,
-    _ExtractRequest,
-    _extract_cache_key,
     ExtractionPool,
     IndexBuild,
+    _extract_cache_key,
+    _ExtractRequest,
     build_corpus,
 )
 from core.pipeline.crawl_frontier import resolve_crawl_limits
@@ -134,7 +134,7 @@ class _Crawler:
         self.pages = dict(pages)
         self.calls: list[str] = []
 
-    def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:
+    def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:  # noqa: B008 - сигнатура порта, FetchPlan frozen
         self.calls.append(url)
         return RawPage(
             url=url,
@@ -216,7 +216,7 @@ def _raise_worker(request: _ExtractRequest) -> ExtractedDoc:
 
 
 class _FakeFuture:
-    def __init__(self, pool: "_FakePool", fn: Any, request: _ExtractRequest) -> None:
+    def __init__(self, pool: _FakePool, fn: Any, request: _ExtractRequest) -> None:
         self._pool = pool
         self._fn = fn
         self._request = request
@@ -1468,7 +1468,7 @@ def test_extract_pool_shutdown_once_for_two_products(tmp_path: Path) -> None:
 class _GateFuture:
     """Future, ждущий управляемого события (без sleep-гонок): таймаут — реальный."""
 
-    def __init__(self, pool: "_GatePool", fn: Any, request: _ExtractRequest) -> None:
+    def __init__(self, pool: _GatePool, fn: Any, request: _ExtractRequest) -> None:
         self._pool = pool
         self._fn = fn
         self._request = request
@@ -1518,7 +1518,7 @@ class _SignallingCrawler(_Crawler):
         self._log = log
         self._signal_url = signal_url
 
-    def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:
+    def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:  # noqa: B008 - сигнатура порта, FetchPlan frozen
         page = super().fetch(url, plan)
         self._log.append(("fetch", url))
         if url == self._signal_url:
@@ -1865,7 +1865,11 @@ def test_corpus_phase_emits_resources_observation(tmp_path: Path) -> None:
 def test_corpus_phase_observation_marks_derived_scheduling(tmp_path: Path) -> None:
     """F0: окно, выведенное из бюджета, видно как ``derived`` (а не как воля оператора)."""
     from core.domain.enums import DocumentLevel
-    from core.pipeline.resources import DOCLING_PEAK_MB, PARENT_FLOOR_MB, ResourcesObservation
+    from core.pipeline.resources import (
+        DOCLING_PEAK_MB,
+        PARENT_FLOOR_MB,
+        ResourcesObservation,
+    )
 
     level = DocumentLevel.TEXT
     budget = PARENT_FLOOR_MB + 3 * DOCLING_PEAK_MB[level]

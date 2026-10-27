@@ -11,6 +11,7 @@ from __future__ import annotations
 import core.edge.__main__ as edge_main
 from core.ports.types import ExtractedDoc, ExtractionRoute, RawPage
 
+
 class _FakeHtml:
     version = "html-1"
 

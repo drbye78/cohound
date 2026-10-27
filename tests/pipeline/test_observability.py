@@ -20,13 +20,13 @@ from typing import Any
 
 import pytest
 
+from core.domain.enums import SkipReason
 from core.pipeline.metrics import PriorLlmUsage, compute_metrics, merge_llm_usage
 from core.pipeline.observability import (
     InstrumentedPhases,
     instrument_phases,
     write_run_metrics,
 )
-from core.domain.enums import SkipReason
 from core.pipeline.runner import PhaseResult
 
 #: Поля записи §B.1 (04-reliability-adr).

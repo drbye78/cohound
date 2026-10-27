@@ -28,7 +28,6 @@ from core.adapters.crawl_scrapy import (
     _scrapy_failure_status,
 )
 from core.domain.enums import FailureKind
-from core.ports.crawler import CrawlerPort
 from core.ports.types import FetchMode, FetchPlan, RawPage
 from core.util.cache import ContentAddressedCache, http_key
 
@@ -52,7 +51,7 @@ class _RecordingFetcher:
         self.calls: list[tuple[str, FetchMode]] = []
         self.content = content
 
-    def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:
+    def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:  # noqa: B008 - сигнатура порта, FetchPlan frozen
         self.calls.append((url, plan.fetch))
         return _page(url, self.content, plan.fetch)
 
@@ -62,7 +61,7 @@ def _counting_fetcher(
 ):
     """Callable-фетчер ``(url, plan) -> RawPage``, пишущий вызовы в ``calls``."""
 
-    def fetch(url: str, plan: FetchPlan = FetchPlan()) -> RawPage:
+    def fetch(url: str, plan: FetchPlan = FetchPlan()) -> RawPage:  # noqa: B008 - сигнатура порта, FetchPlan frozen
         calls.append((url, plan.fetch))
         return _page(url, content, plan.fetch)
 
@@ -225,7 +224,7 @@ def test_ssrf_error_is_crawl_error_too() -> None:
 
 
 def test_fetcher_exception_wrapped_in_crawl_error(tmp_path: Path) -> None:
-    def boom(url: str, plan: FetchPlan = FetchPlan()) -> RawPage:
+    def boom(url: str, plan: FetchPlan = FetchPlan()) -> RawPage:  # noqa: B008 - сигнатура порта, FetchPlan frozen
         raise RuntimeError("network down")
 
     cache = ContentAddressedCache(tmp_path)
@@ -356,7 +355,7 @@ def test_conditional_plan_bypasses_cache_and_does_not_write_on_304(
     cache.put_bytes("http", http_key(URL), b"cached-representation")
     seen: list[FetchPlan] = []
 
-    def fetcher(url: str, plan: FetchPlan = FetchPlan()) -> RawPage:
+    def fetcher(url: str, plan: FetchPlan = FetchPlan()) -> RawPage:  # noqa: B008 - сигнатура порта, FetchPlan frozen
         seen.append(plan)
         return RawPage(
             url=url,
@@ -507,7 +506,7 @@ def test_scrapy_plan_validators_override_cache_meta(tmp_path: Path) -> None:
     _seed_cache(cache)
     seen: list[FetchPlan] = []
 
-    def fetcher(url: str, plan: FetchPlan = FetchPlan()) -> RawPage:
+    def fetcher(url: str, plan: FetchPlan = FetchPlan()) -> RawPage:  # noqa: B008 - сигнатура порта, FetchPlan frozen
         seen.append(plan)
         return _page(url, b"fresh-body")
 

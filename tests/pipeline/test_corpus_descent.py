@@ -136,7 +136,7 @@ class _BufferedCrawler:
         self.content_types = dict(content_types)
         self.calls: list[str] = []
 
-    def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:
+    def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:  # noqa: B008 - сигнатура порта, FetchPlan frozen
         self.calls.append(url)
         return RawPage(
             url=url,
@@ -602,7 +602,7 @@ def test_member_read_failure_writes_visible_row(tmp_path: Path) -> None:
         inner = container_for(path)
         return None if inner is None else _ReadFailingReader(inner, {"b.md"})
 
-    with _run(tmp_path, archive, container_reader=_reader) as (store, result, extractor):
+    with _run(tmp_path, archive, container_reader=_reader) as (store, result, _):
         rows = {row.member_path: row for row in _members(store)}
         assert set(rows) == {"a.md", "b.md", "c.md"}, (
             "непрочитанный член обязан иметь строку: иначе он неотличим от отсутствующего"

@@ -28,7 +28,7 @@ import pytest
 
 from core.adapters import index_format
 from core.adapters.embed_model2vec import LiteEmbedder
-from core.cli.main import EXIT_ERROR, EXIT_OK, EXIT_USAGE, main
+from core.cli.main import EXIT_ERROR, EXIT_OK, main
 from core.cli.wiring import (
     EmbedderBuildMismatch,
     assert_embedder_matches_build,

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 import yaml
@@ -28,8 +29,8 @@ from core.pipeline.package_add_product import (
     AddProductError,
     DiscoveredSite,
     _derive_sites,
-    _site_seed_url,
     _profile_for_verdict,
+    _site_seed_url,
     _sitemap_budget,
     apply_add_product,
     plan_add_product,

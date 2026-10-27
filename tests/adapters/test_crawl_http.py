@@ -23,8 +23,7 @@ from core.adapters.crawl_scrapy import (
     CrawlUrlError,
 )
 from core.domain.enums import FailureKind
-from core.ports.crawler import CrawlerPort
-from core.ports.types import FetchPlan, FetchMode, RawPage
+from core.ports.types import FetchMode, FetchPlan, RawPage
 from core.util.cache import ContentAddressedCache, http_key
 
 URL = "https://example.com/page"
@@ -78,7 +77,7 @@ class _FakeResponse:
         if self.content:
             yield self.content
 
-    def __enter__(self) -> "_FakeResponse":
+    def __enter__(self) -> _FakeResponse:
         return self
 
     def __exit__(self, *_exc: object) -> bool:

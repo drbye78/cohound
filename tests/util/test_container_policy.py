@@ -275,11 +275,11 @@ def test_plan_non_capacity_skips_do_not_truncate() -> None:
         SKIP_NOT_INGESTIBLE,
     }
     # Бюджетные причины — ровно три оси: всё остальное «по природе».
-    assert CAPACITY_REASONS == {
+    assert {
         SKIP_MEMBER_TOO_LARGE,
         SKIP_MEMBER_LIMIT,
         SKIP_TOTAL_EXCEEDED,
-    }
+    } == CAPACITY_REASONS
 
 
 def test_plan_propagates_listing_truncation() -> None:

@@ -52,7 +52,13 @@ from core.pipeline.manual_artifacts import (
     load_manual_artifacts,
     manual_artifacts_summary,
 )
-from core.ports.types import Chunk, ExtractedDoc, ExtractionRoute, FetchMode, FetchPlan, RawPage
+from core.ports.types import (
+    Chunk,
+    ExtractedDoc,
+    ExtractionRoute,
+    FetchPlan,
+    RawPage,
+)
 from core.store.sqlite_store import SqliteStore
 from core.util.hashing import content_hash
 
@@ -140,7 +146,7 @@ class _Crawler:
         self.raising = set(raising or ())
         self.calls: list[tuple[str, FetchPlan]] = []
 
-    def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:
+    def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:  # noqa: B008 - сигнатура порта, FetchPlan frozen
         self.calls.append((url, plan))
         if url in self.raising:
             raise _RefusedError(f"robots.txt запрещает краул {url!r}")

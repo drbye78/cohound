@@ -11,8 +11,8 @@ from pathlib import Path
 
 import pytest
 
-from core.domain.models import BaselineRow
 from core.domain.enums import InheritanceMode
+from core.domain.models import BaselineRow
 from core.pipeline import package_admin as pa
 from core.pipeline.package_io import load_artifacts, save_artifact
 

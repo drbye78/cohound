@@ -25,7 +25,6 @@ from core.adapters.embed_local import (
     EmbedderUnavailable,
     LocalEmbedder,
 )
-from core.ports.embedder import EmbedderPort
 
 
 def _fixed_fn(dim: int, batches: list[list[str]] | None = None):

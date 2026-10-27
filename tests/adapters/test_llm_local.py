@@ -25,7 +25,7 @@ from core.adapters.llm_local import (
     LocalEvaluator,
 )
 from core.domain import LLMCellOutput, Status
-from core.ports.llm import EvaluatorPort, LLMRequest, TokenUsage
+from core.ports.llm import LLMRequest, TokenUsage
 from core.util.hashing import content_hash
 
 httpx = pytest.importorskip("httpx")

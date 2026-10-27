@@ -490,7 +490,7 @@ def test_undeduced_absence_becomes_unknown_not_published() -> None:
         cutoff_k=3,
     )
     assert result.status == "ok"
-    cell = [c for c in result.cells if c.product_id == "p1"][0]
+    cell = next(c for c in result.cells if c.product_id == "p1")
     assert cell.state is CellState.EVALUATED
     assert cell.status is Status.UNKNOWN
     assert cell.evidence_scope is not None
@@ -512,7 +512,7 @@ def test_scope_acceptance_mapping_is_looked_up_per_product() -> None:
         cutoff_k=3,
         scope_acceptance={"p2": "expert-2"},
     )
-    cell = [c for c in other.cells if c.product_id == "p1"][0]
+    cell = next(c for c in other.cells if c.product_id == "p1")
     assert cell.state is CellState.EVALUATED
     assert cell.status is Status.UNKNOWN
     assert cell.evidence_scope is not None
@@ -535,7 +535,7 @@ def test_scope_acceptance_mapping_publishes_bounded_absent_for_accepted_product(
         cutoff_k=3,
         scope_acceptance={"p1": "expert-1"},
     )
-    cell = [c for c in result.cells if c.product_id == "p1"][0]
+    cell = next(c for c in result.cells if c.product_id == "p1")
     assert cell.state is CellState.EVALUATED
     assert cell.status is Status.ABSENT
     assert cell.evidence_scope is not None

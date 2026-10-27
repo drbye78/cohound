@@ -119,7 +119,7 @@ def test_run_yaml_blacklist_keeps_containers_and_drops_readerless_suffixes() -> 
         "форматы с читателем (.zip/.rar/.7z) не должны резаться блэклистом: "
         f"лишние {sorted(globs & ADMITTED_CONTAINER_GLOBS)}"
     )
-    assert RETAINED_BLACKLIST_GLOBS <= globs, (
+    assert globs >= RETAINED_BLACKLIST_GLOBS, (
         "потеряны расширения без читателя/вне допуска: "
         f"{sorted(RETAINED_BLACKLIST_GLOBS - globs)}"
     )
@@ -157,7 +157,7 @@ def test_generator_emits_same_exclude_documents_list(
     assert emitted["crawl"]["max_artifact_bytes"] == _on_disk_crawl()["max_artifact_bytes"]
     # Тот же инвариант на выходе генератора — регрессия читается по имени списка.
     assert not (set(emitted_globs) & ADMITTED_CONTAINER_GLOBS)
-    assert RETAINED_BLACKLIST_GLOBS <= set(emitted_globs)
+    assert set(emitted_globs) >= RETAINED_BLACKLIST_GLOBS
 
 
 def test_measured_zip_is_not_blacklisted_while_image_stays_excluded() -> None:

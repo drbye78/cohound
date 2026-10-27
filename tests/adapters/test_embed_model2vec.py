@@ -25,7 +25,6 @@ from core.adapters.embed_model2vec import (
     EmbedderUnavailable,
     LiteEmbedder,
 )
-from core.ports.embedder import EmbedderPort
 
 try:  # необязательная зависимость
     import numpy as np  # type: ignore[import-not-found]
@@ -210,7 +209,7 @@ def _fake_model2vec(dim: int, *, one_d_for_single: bool = False) -> tuple[types.
             instances.append(self)
 
         @classmethod
-        def from_pretrained(cls, path: str) -> "_Model":
+        def from_pretrained(cls, path: str) -> _Model:
             model = cls()
             model.path = path
             return model

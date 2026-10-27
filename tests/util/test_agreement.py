@@ -117,7 +117,7 @@ def test_chance_level_kappa_is_zero() -> None:
     # Маргиналы A: ✅×6/❌×4, B: ✅×5/❌×5 → pe=0.5; расстановка даёт po=0.5 ⇒ κ=0.
     labels_a = [OK] * 6 + [ABSENT] * 4
     labels_b = [OK, OK, OK, ABSENT, ABSENT, ABSENT, OK, OK, ABSENT, ABSENT]
-    report = _report(list(zip(labels_a, labels_b)))
+    report = _report(list(zip(labels_a, labels_b, strict=True)))
     assert report.overall.kappa == pytest.approx(0.0, abs=1e-12)
     assert report.overall.observed_agreement == pytest.approx(0.5)
     assert report.overall.expected_agreement == pytest.approx(0.5)
@@ -127,7 +127,7 @@ def test_negative_kappa_is_reported_not_clamped() -> None:
     # Согласие хуже случайного: A и B размечают ровно наоборот, κ = -1 и не обрезается до 0.
     labels_a = [OK, OK, ABSENT, ABSENT]
     labels_b = [ABSENT, ABSENT, OK, OK]
-    report = _report(list(zip(labels_a, labels_b)))
+    report = _report(list(zip(labels_a, labels_b, strict=True)))
     assert report.overall.kappa == pytest.approx(-1.0)
 
 
@@ -135,7 +135,7 @@ def test_na_kappa_diverges_from_overall() -> None:
     """Сердце фазы: общий κ положителен, N/A-κ отрицателен — числа расходятся (§11.5)."""
     labels_a = [OK] * 10 + [ABSENT] * 4 + [NA] * 3 + [ABSENT] * 3
     labels_b = [OK] * 10 + [ABSENT] * 4 + [ABSENT] * 3 + [NA] * 3
-    report = _report(list(zip(labels_a, labels_b)))
+    report = _report(list(zip(labels_a, labels_b, strict=True)))
 
     assert report.overall.kappa == pytest.approx(0.5041322314, abs=1e-9)
     assert report.na_binary is not None
@@ -151,7 +151,7 @@ def test_na_kappa_diverges_from_overall() -> None:
 def test_na_disagreements_are_subset_of_disagreements() -> None:
     labels_a = [OK, OK, NA, ABSENT]
     labels_b = [OK, ABSENT, OK, ABSENT]
-    report = _report(list(zip(labels_a, labels_b)))
+    report = _report(list(zip(labels_a, labels_b, strict=True)))
     assert set(report.na_disagreements) <= set(report.disagreements)
     assert report.na_disagreements == ("p1/param_2",)
 

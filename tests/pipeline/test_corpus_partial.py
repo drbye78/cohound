@@ -37,7 +37,11 @@ from core.domain import (
 )
 from core.domain.invariants import check_absence_coverage
 from core.pipeline import RunPlan
-from core.pipeline.corpus import PARTIAL_REASON_UNSTATED, build_corpus, derive_corpus_coverage
+from core.pipeline.corpus import (
+    PARTIAL_REASON_UNSTATED,
+    build_corpus,
+    derive_corpus_coverage,
+)
 from core.ports.types import Chunk, ExtractedDoc, ExtractionRoute, RawPage
 from core.store.sqlite_store import SqliteStore
 from core.util.hashing import content_hash

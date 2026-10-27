@@ -54,7 +54,7 @@ def page(
 
 def html_page(text: str = USABLE_TEXT) -> RawPage:
     """HTML-страница с извлекаемым текстом (используется как дефолт :func:`page`)."""
-    body = f"<html><body><p>{text}</p></body></html>".encode("utf-8")
+    body = f"<html><body><p>{text}</p></body></html>".encode()
     return RawPage(
         url="about:blank", content=body, fetched_at="2026-01-01T00:00:00+00:00"
     )
@@ -111,7 +111,7 @@ class ScriptedHttpCrawler:
         self.default = default
         self.calls: list[str] = []
 
-    def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:
+    def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:  # noqa: B008 - сигнатура порта, FetchPlan frozen
         """Возвращает заданный результат или ``default``; ``None`` ⇒ ``CrawlError``."""
         self.calls.append(url)
         result = self.results.get(url, self.default)
@@ -143,7 +143,7 @@ class ScriptedBrowserCrawler:
         #: Полные планы фетча (для проверки прокинутого ``wait_for``/``strategy``).
         self.plan_calls: list[FetchPlan] = []
 
-    def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:
+    def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:  # noqa: B008 - сигнатура порта, FetchPlan frozen
         """Возвращает заданный результат тира; ``None`` ⇒ ``CrawlError``."""
         self.calls.append((url, plan.strategy))
         self.plan_calls.append(plan)

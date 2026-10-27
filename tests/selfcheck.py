@@ -18,12 +18,6 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from core.store.sqlite import (  # noqa: E402
-    DDL,
-    SCHEMA_VERSION,
-    SchemaVersionMismatch,
-    connect,
-)
 from core.domain import (  # noqa: E402
     AbsenceRuleType,
     AnchorRelation,
@@ -46,11 +40,15 @@ from core.domain import (  # noqa: E402
     RunConfig,
     RunMode,
     SourceKind,
-    SourceScope,
     Status,
     apply_r2,
     assert_dictionary_integrity,
     derived_evidence_id,
+)
+from core.store.sqlite import (  # noqa: E402
+    SCHEMA_VERSION,
+    SchemaVersionMismatch,
+    connect,
 )
 
 FAILURES: list[str] = []
@@ -724,7 +722,8 @@ def _ports_type_reuse() -> None:
     """Адаптеры переиспользуют порт-типы (единый тип Chunk/ExtractedDoc, не дубль)."""
     from core.adapters.chunker_markdown import Chunk as AdapterChunk
     from core.adapters.extract_document import ExtractedDoc as AdapterDoc
-    from core.ports.types import Chunk as PortChunk, ExtractedDoc as PortDoc
+    from core.ports.types import Chunk as PortChunk
+    from core.ports.types import ExtractedDoc as PortDoc
 
     if AdapterChunk is not PortChunk:
         raise AssertionError("chunker Chunk должен быть ports.types.Chunk")
@@ -1616,7 +1615,7 @@ def _relevant_coverage_check() -> None:
         raise AssertionError("без знаменателя замер обязан быть None, а не 0")
 
     # Интеграция: замер доезжает до объекта ячейки, а не только до хелпера.
-    from core.domain import CatalogRow, LLMEvidence, LLMCellOutput, Status
+    from core.domain import CatalogRow, LLMCellOutput, Status
     from core.ports.llm import LLMResponse, TokenUsage
     from core.ports.types import Chunk
 
@@ -1703,7 +1702,6 @@ def _pipeline_gates_resume() -> None:
     from core.domain import Gate, RunConfig, RunMode
     from core.domain.models import ProfileAttestationRow
     from core.pipeline.gates import gate_trail, is_gate_passed, record_decision
-    from core.pipeline.runner import GateRuntime
     from core.pipeline.profile_attestation import (
         make_profile_gate,
         material_digest,
@@ -1713,6 +1711,7 @@ def _pipeline_gates_resume() -> None:
     from core.pipeline.runner import (
         GATE_PHASES,
         PHASES,
+        GateRuntime,
         PhaseResult,
         Ports,
         RunContext,
@@ -1873,7 +1872,12 @@ def _cli_plan_lint() -> None:
     import tempfile
 
     from core.cli.main import EXIT_OK, EXIT_USAGE, main
-    from core.cli.wiring import LOCAL_PROFILE, SPLIT_PROFILE, WiringError, build_adapters
+    from core.cli.wiring import (
+        LOCAL_PROFILE,
+        SPLIT_PROFILE,
+        WiringError,
+        build_adapters,
+    )
 
     def _silent(argv: list[str]) -> int:
         """Запускает CLI, подавляя его stdout/stderr (проверяется только код возврата)."""
@@ -1931,7 +1935,13 @@ def _cli_wiring_profiles() -> None:
     import tempfile
 
     from core.cli.main import EXIT_NOT_FOUND, main
-    from core.cli.wiring import LOCAL_PROFILE, SPLIT_PROFILE, SUPPORTED_PROFILES, WiringError, build_adapters
+    from core.cli.wiring import (
+        LOCAL_PROFILE,
+        SPLIT_PROFILE,
+        SUPPORTED_PROFILES,
+        WiringError,
+        build_adapters,
+    )
 
     if set(SUPPORTED_PROFILES) != {LOCAL_PROFILE, SPLIT_PROFILE}:
         raise AssertionError(f"неожиданный набор профилей: {SUPPORTED_PROFILES}")
@@ -2004,7 +2014,11 @@ def _extract_html() -> None:
 
 def _util_sanitize() -> None:
     """Санитайзинг сохраняет оболочку документа и вырезает активный HTML (T7.5)."""
-    from core.util.sanitize import _DANGEROUS_BLOCK_TAGS, _stdlib_sanitize_html, sanitize_html
+    from core.util.sanitize import (
+        _DANGEROUS_BLOCK_TAGS,
+        _stdlib_sanitize_html,
+        sanitize_html,
+    )
 
     doc = (
         "<html><head><title>Документ: главная</title>"
@@ -2046,7 +2060,7 @@ def _crawl_scrapy() -> None:
 
     calls: list[int] = []
 
-    def _fake(url: str, plan: FetchPlan = FetchPlan()) -> RawPage:
+    def _fake(url: str, plan: FetchPlan = FetchPlan()) -> RawPage:  # noqa: B008 - сигнатура порта, FetchPlan frozen
         calls.append(1)
         return RawPage(url=url, content=b"<html>ok</html>", fetched_at="t", fetch_mode=plan.fetch)
 
@@ -2296,7 +2310,16 @@ def _compute_i5() -> None:
     """compute: failed в знаменателе Coverage, вне Capability (I5); K6-демотирование."""
     import datetime as _dt
 
-    from core.domain import CatalogRow, Cell, CellState, Importance, ParamType, RunConfig, RunMode, Status
+    from core.domain import (
+        CatalogRow,
+        Cell,
+        CellState,
+        Importance,
+        ParamType,
+        RunConfig,
+        RunMode,
+        Status,
+    )
     from core.pipeline.compute import compute
     from core.store.sqlite_store import SqliteStore
 
@@ -2408,11 +2431,11 @@ def _evaluate_failed() -> None:
 def _report_gates() -> None:
     """Отчётность: G4/I11 (Coverage отсутствует/UNDEFINED → блок), §13/B-7 diff, §5/I3."""
     from core.domain import (
+        REQUIRED_EXHAUSTION_CONTOURS,
+        CatalogRow,
         Cell,
         CellState,
-        CatalogRow,
         ProtocolExhaustion,
-        REQUIRED_EXHAUSTION_CONTOURS,
         RunManifest,
         RunMode,
         SensitivityReport,
@@ -3103,12 +3126,11 @@ def _directory_kinds_helpers() -> None:
     N1 (Wave 5.2): ``parse_instant``/``entry_not_before`` живут в ``core.util.feed`` и
     используются обоими поллерами; ``RFC822`` и ISO ``Z`` разбираются единообразно.
     """
-    import datetime as _dt
 
     from core.pipeline.corpus import _DIRECTORY_KINDS
     from core.util.feed import FeedEntry, entry_not_before, parse_instant
 
-    if _DIRECTORY_KINDS != frozenset({"feed", "channel"}):
+    if frozenset({"feed", "channel"}) != _DIRECTORY_KINDS:
         raise AssertionError(f"директорные kind неверны: {_DIRECTORY_KINDS}")
     threshold = parse_instant("2026-10-08T00:00:00Z")
     if threshold is None or threshold.tzinfo is None:
@@ -3161,7 +3183,6 @@ def _serp_loop() -> None:
         run_serp_round,
     )
     from core.ports.search import SearchQuery, SearchResult
-    from core.ports.types import RawPage
     from core.store.sqlite_store import SqliteStore
 
     class _Fake:
@@ -3677,10 +3698,9 @@ def _cli_run_self_contained() -> None:
     ``run_id``, несовместимая версия и отсутствующая запись — значения не подставляются.
     """
     import argparse as _argparse
+    import importlib as _il
     import tempfile as _tempfile
     from pathlib import Path as _Path
-
-    import importlib as _il
 
     main = _il.import_module("core.cli.main")
     for const in (
@@ -3869,7 +3889,7 @@ def _archive_descent_checks() -> None:
         pdf_path.write_bytes(_pdf(3))
         _assert(pdf_page_count(pdf_path) == 3)
 
-    observation, observations, members, errors, ingested = _run(archive)
+    observation, _, members, errors, ingested = _run(archive)
     _assert(observation.status is ArchiveDescentStatus.DESCENDED)
     # Прогноз — до извлечения: 3 записи, 2 приняты, png пропущен с причиной.
     _assert(observation.forecast["members_total"] == 3)
@@ -3953,6 +3973,8 @@ def _crawl_control_axes() -> None:
     (``core.util.robots``, ре-экспорт из crawl-probe); извлечение ссылок не выходит за
     ``http(s)``.
     """
+    from pydantic import ValidationError
+
     from core.config.deploy import CrawlConfig
     from core.config.domain_profiles import DomainProfile
     from core.domain.models import CrawlRunConfig
@@ -3964,7 +3986,6 @@ def _crawl_control_axes() -> None:
     from core.pipeline.crawl_probe import RobotsGate as ProbeRobotsGate
     from core.util.html_links import extract_links
     from core.util.robots import RobotsGate
-    from pydantic import ValidationError
 
     app = CrawlConfig()
     assert resolve_crawl_limits("https://h/a", app=app).max_depth == 0
@@ -4202,21 +4223,21 @@ def _crawl_probe() -> None:
     сохраняет шапку байт-в-байт и неизмеренные поля. Перечисления зонда зеркалируются
     ``docs/status-dictionary.yaml`` (источник истины).
     """
+    from core.domain.dictionary import load_dictionary
     from core.domain.enums import CrawlStrategy, ExtractionRoute, FetchMode
     from core.pipeline.crawl_probe import (
+        Observation,
         ProbeConfidence,
         ProbeKeyStatus,
         ProbeReason,
         ProbeSource,
         ProbeTier,
-        Observation,
         UrlProbe,
         decide,
         is_usable,
         render_profiles_with_verdicts,
         split_header,
     )
-    from core.domain.dictionary import load_dictionary
 
     def obs(**kw):
         base = dict(

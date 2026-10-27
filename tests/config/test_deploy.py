@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
 
@@ -17,18 +18,17 @@ from pydantic import ValidationError
 from core.config.deploy import (
     DEFAULT_LLM_MODEL_ID,
     DEFAULT_LLM_SLOT,
-    LLM_SLOTS,
+    SPLIT_HARDENED_WARNING,
     CrawlBrowserConfig,
     CrawlConfig,
     DeployConfig,
     LLMDeployConfig,
     LLMSlotConfig,
     SearchDeployConfig,
-    SPLIT_HARDENED_WARNING,
     is_split,
     load_deploy_config,
-    profile_notices,
     parse_serp_switch,
+    profile_notices,
     resolve_llm_slot,
     resolve_search_provider,
     resolve_serp_rounds,
@@ -632,7 +632,7 @@ def test_bad_audit_sink_rejected(tmp_path: Path) -> None:
         tmp_path,
         "profile: split\nedge:\n  base_url: https://edge.example:8443\n  audit: { sink: kafka }\n",
     )
-    with pytest.raises(ValidationError, match="audit.sink"):
+    with pytest.raises(ValidationError, match=re.escape("audit.sink")):
         load_deploy_config(path)
 
 
@@ -773,9 +773,9 @@ def test_default_model_constants_track_deploy_config() -> None:
     canonical = cfg.llm.cheap.model_id
 
     assert canonical == cfg.llm.flagship.model_id  # оба слота — одна модель
-    assert DEFAULT_LLM_MODEL_ID == canonical  # конфиг-дефолт
-    assert EVALUATOR_ADAPTER_FALLBACK == canonical  # fallback прямой конструкции
-    assert DISCOVERY_FALLBACK == canonical  # последний фолбэк разведки
+    assert canonical == DEFAULT_LLM_MODEL_ID  # конфиг-дефолт
+    assert canonical == EVALUATOR_ADAPTER_FALLBACK  # fallback прямой конструкции
+    assert canonical == DISCOVERY_FALLBACK  # последний фолбэк разведки
 
 
 def test_llm_scenarios_empty_when_slot_inactive_so_model_id_is_not_in_run_id() -> None:
@@ -861,7 +861,7 @@ def test_resolve_llm_slot_strips() -> None:
 
 
 def test_invalid_llm_slot_rejected() -> None:
-    with pytest.raises(ValidationError, match="llm.slot"):
+    with pytest.raises(ValidationError, match=re.escape("llm.slot")):
         LLMDeployConfig(slot="turbo")
     with pytest.raises(ValueError, match="слот"):
         resolve_llm_slot(None, explicit="turbo")

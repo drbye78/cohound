@@ -11,6 +11,7 @@ recovery ``running→pending``, ``cancel``, ``collect`` (пагинация/base
 from __future__ import annotations
 
 import base64
+import contextlib
 import itertools
 import pickle
 import random
@@ -28,7 +29,6 @@ from core.domain.models import RateLimitSpec
 from core.edge.config import EdgeRuntimeConfig
 from core.edge.crawler_factory import crawler_factory
 from core.edge.scheduler import (
-    EdgeScheduler,
     ITEM_CANCELLED,
     ITEM_FETCHED,
     ITEM_PENDING,
@@ -36,6 +36,7 @@ from core.edge.scheduler import (
     JOB_CANCELLED,
     JOB_COMPLETED,
     JOB_PARTIAL,
+    EdgeScheduler,
     _process_fetch,
     _process_worker_init,
 )
@@ -73,7 +74,7 @@ class FakeCrawler:
         self._raises = raises
         self.calls = 0
 
-    def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:
+    def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:  # noqa: B008 - сигнатура порта, FetchPlan frozen
         self.calls += 1
         if self._raises is not None:
             raise self._raises
@@ -106,7 +107,7 @@ class BlockingCrawler:
         self._gate = gate
         self.calls = 0
 
-    def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:
+    def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:  # noqa: B008 - сигнатура порта, FetchPlan frozen
         self.calls += 1
         self._gate.wait(timeout=10)
         return RawPage(
@@ -134,7 +135,7 @@ class BlockingThenFastCrawler:
         self._blocked = False
         self.calls: list[str] = []
 
-    def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:
+    def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:  # noqa: B008 - сигнатура порта, FetchPlan frozen
         self.calls.append(url)
         if not self._blocked:
             self._blocked = True
@@ -158,7 +159,7 @@ class RedirectCrawler:
         self.engine = engine
         self._final = final_url
 
-    def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:
+    def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:  # noqa: B008 - сигнатура порта, FetchPlan frozen
         return RawPage(
             url=self._final,
             content=b"<html>redirected</html>",
@@ -179,7 +180,7 @@ class ConditionalCrawler:
         self._content = content
         self.plans: list[FetchPlan] = []
 
-    def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:
+    def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:  # noqa: B008 - сигнатура порта, FetchPlan frozen
         self.plans.append(plan)
         return RawPage(
             url=url,
@@ -273,10 +274,9 @@ def make_scheduler(tmp_path: Path) -> Iterator[Any]:
 
     yield _make
     for scheduler in created:
-        try:
+        # Уборка не должна ронять тест: отказ остановки не отменяет close.
+        with contextlib.suppress(Exception):
             scheduler.stop(timeout=10)
-        except Exception:  # noqa: BLE001 - уборка не должна ронять тест
-            pass
         scheduler.close()
 
 

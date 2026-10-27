@@ -22,7 +22,6 @@ from core.domain import (
     Cohort,
     CohortEntry,
     EvidenceType,
-    InheritanceMode,
     Passport,
     SourceKind,
     Status,

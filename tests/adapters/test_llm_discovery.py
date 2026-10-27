@@ -25,7 +25,6 @@ from core.adapters.llm_discovery import (
     DiscoveryLLMUnavailable,
 )
 from core.ports.discovery_llm import (
-    DiscoveryLLMPort,
     DiscoveryLLMRequest,
     DiscoveryLLMResponse,
 )

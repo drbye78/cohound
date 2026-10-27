@@ -15,8 +15,9 @@ from __future__ import annotations
 
 import hashlib
 import tracemalloc
+from collections.abc import Iterator
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 import pytest
 
@@ -83,7 +84,7 @@ class _StreamResponse:
             sent += size
             yield chunk
 
-    def __enter__(self) -> "_StreamResponse":
+    def __enter__(self) -> _StreamResponse:
         return self
 
     def __exit__(self, *_exc: object) -> bool:

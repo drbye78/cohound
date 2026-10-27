@@ -10,7 +10,6 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from pydantic import ValidationError
 
 from core.config.crawl_sources import (
     CRAWL_SOURCES_FILENAME,

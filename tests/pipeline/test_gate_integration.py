@@ -56,7 +56,6 @@ from core.pipeline.gates import evaluate_gate, gate_g3, gate_g4, record_decision
 from core.pipeline.review import ReviewItem
 from core.pipeline.runner import (
     GATE_PHASES,
-    PHASES,
     GateRuntime,
     PhaseResult,
     Ports,
@@ -628,7 +627,8 @@ def test_run_without_g1_g2_g3_decisions_leaves_a_trace_in_the_manifest(
     from types import SimpleNamespace
 
     from core.pipeline.phases import _gate_provenance
-    from core.pipeline.runner import PHASES as ALL_PHASES, PhaseResult
+    from core.pipeline.runner import PHASES as ALL_PHASES
+    from core.pipeline.runner import PhaseResult
 
     def _ok(phase: str):
         def _fn(ctx) -> PhaseResult:

@@ -21,7 +21,6 @@ from core.cli.main import (
     EXIT_NOT_FOUND,
     EXIT_OK,
     EXIT_USAGE,
-    build_parser,
     main,
 )
 from core.pipeline import Ports
@@ -52,7 +51,7 @@ class _RecordingCrawler:
         self.raising = set(raising or ())
         self.calls: list[str] = []
 
-    def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:
+    def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:  # noqa: B008 - сигнатура порта, FetchPlan frozen
         """Помечает URL и возвращает заданную страницу (или пустые байты)."""
         self.calls.append(url)
         if url in self.raising:

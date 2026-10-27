@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import datetime as _dt
+import json
 from pathlib import Path
 
 import pytest
@@ -398,8 +399,7 @@ def test_gate_takes_digest_from_request_file(
     gates_dir = runs_dir / RUN_ID / "gates"
     gates_dir.mkdir(parents=True)
     (gates_dir / "G3-request.json").write_text(
-        '{"run_id": "%s", "gate": "G3", "subject_digest": "d_from_request"}'
-        % RUN_ID,
+        json.dumps({"run_id": RUN_ID, "gate": "G3", "subject_digest": "d_from_request"}),
         encoding="utf-8",
     )
 

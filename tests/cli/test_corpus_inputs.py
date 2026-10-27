@@ -196,7 +196,7 @@ def test_urls_missing_file_is_usage_error(
     package = valid_package(tmp_path)
     db = tmp_path / "cohound.db"
 
-    captured, factory = capturing_factory()
+    _, factory = capturing_factory()
     code = main(
         [*run_argv(package, run_id="inputs-1", db=db, until="plan"), "--urls", str(tmp_path / "absent.json")],
         phases_factory=factory,

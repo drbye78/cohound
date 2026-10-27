@@ -275,7 +275,7 @@ def test_unavailable_candidate_page_is_soft_error() -> None:
     class _PartialCrawler:
         version = "partial"
 
-        def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:
+        def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:  # noqa: B008 - сигнатура порта, FetchPlan frozen
             if url == URL:
                 return RawPage(
                     url=URL,
@@ -299,7 +299,7 @@ def test_no_page_extracted_is_fatal() -> None:
     class _BoomCrawler:
         version = "boom"
 
-        def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:
+        def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:  # noqa: B008 - сигнатура порта, FetchPlan frozen
             raise RuntimeError("network down")
 
     report = _report(crawler=_BoomCrawler())
@@ -363,7 +363,7 @@ def test_build_seed_accepts_empty_hypotheses() -> None:
 
 
 def test_build_seed_skips_existing_ids() -> None:
-    profile, _archetype, candidates, _needs = build_seed_from_hypotheses(
+    _, _archetype, candidates, _needs = build_seed_from_hypotheses(
         subject_name=SUBJECT,
         landscape=ScoutLandscapeHypothesis.model_validate(_landscape()),
         catalog=ScoutCatalogHypothesis.model_validate(_catalog()),

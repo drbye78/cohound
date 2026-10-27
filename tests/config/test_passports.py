@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
 
@@ -209,7 +210,7 @@ def test_malformed_yaml_raises_with_filename(tmp_path: Path) -> None:
     path = tmp_path / "p1" / "2026-01-01.yaml"
     path.parent.mkdir(parents=True)
     path.write_text("product_id: [unclosed\n", encoding="utf-8")
-    with pytest.raises(PassportLoadError, match="2026-01-01.yaml"):
+    with pytest.raises(PassportLoadError, match=re.escape("2026-01-01.yaml")):
         load_passport("p1", tmp_path)
 
 

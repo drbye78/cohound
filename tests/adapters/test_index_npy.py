@@ -10,7 +10,6 @@
 
 from __future__ import annotations
 
-import importlib.util
 import json
 from pathlib import Path
 
@@ -21,7 +20,6 @@ from core.adapters.index_npy import (
     ImmutableBuildError,
     NpyIndexBuilder,
     derive_build_id,
-    numpy_available,
 )
 from core.ports.index_builder import IndexBuilderPort, IndexMeta
 from core.ports.types import Chunk

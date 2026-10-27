@@ -14,7 +14,6 @@ from typing import Any
 
 import pytest
 import yaml
-from pydantic import ValidationError
 
 from core.config.paths import (
     ENV_BY_FIELD,
@@ -258,7 +257,7 @@ def test_file_argument_over_env(tmp_path: Path) -> None:
 
 def test_unknown_key_in_file_rejected(tmp_path: Path) -> None:
     path = _write(tmp_path, {"packages": "p", "unexpected": "x"})
-    with pytest.raises(ValueError, match="unexpected|extra"):
+    with pytest.raises(ValueError, match=r"unexpected|extra"):
         resolve_paths(env={}, file=path)
     with pytest.raises(ValueError):
         resolve_paths(env={}, file=path)

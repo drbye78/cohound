@@ -46,8 +46,8 @@ from core.domain import (
     RunMode,
     Status,
 )
-from core.pipeline.compute import compute
 from core.pipeline.composition import derive_composition_id
+from core.pipeline.compute import compute
 from core.pipeline.corpus import _derive_partition_build_id, _product_content_token
 from core.pipeline.gates import gate_g1, gate_g2, gate_g3, gate_g4
 from core.pipeline.lint import lint_run_inputs
@@ -55,11 +55,10 @@ from core.pipeline.normalize import RunInputs, load_inputs
 from core.pipeline.phases import build_phases
 from core.pipeline.plan import RunPlan
 from core.pipeline.report import build_manifest, write_run_manifest
-from core.pipeline.runner import Ports, RunReport, Runner
+from core.pipeline.runner import Ports, Runner, RunReport
 from core.ports.types import RawPage
 from core.ports.vector_index import RetrievedChunk
 from core.util.hashing import content_hash
-from tests.helpers.packages import plan_with_identity
 from tests.fakes.ports import (
     FIXED_TS,
     FakeChunker,
@@ -70,6 +69,7 @@ from tests.fakes.ports import (
     FakeIndexBuilder,
     FakeLexicalIndex,
 )
+from tests.helpers.packages import plan_with_identity
 
 #: Корень фикстур e2e (``tests/fixtures/e2e``).
 FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "e2e"
