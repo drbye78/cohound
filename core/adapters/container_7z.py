@@ -39,6 +39,7 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any
 
+from core.domain.enums import ContainerEncryption
 from core.ports.container import (
     ContainerListing,
     ContainerMember,
@@ -99,19 +100,31 @@ def _solid(info: Any) -> bool | None:
     return raw if isinstance(raw, bool) else None
 
 
-def _encrypted(archive: Any, info: Any) -> bool:
-    """Требует ли архив пароля: собственный предикат бэкенда, иначе — метод шифра."""
+def _encrypted(archive: Any, info: Any) -> ContainerEncryption:
+    """Требует ли архив пароля — **три** состояния: заявлено, заявлено «нет», не заявлено.
+
+    Порядок источников:
+
+    1. собственный предикат бэкенда (``needs_password``) — он **определённый**: ответил
+       ``True``/``False``, значит вопрос закрыт;
+    2. если предиката нет (или он упал на битом заголовке) — имена методов шифра записи:
+       ``AES`` в методе доказывает шифрование;
+    3. иначе — ``UNKNOWN``: **не** «не зашифрован». Молчание предиката — наблюдение о
+       читателе, а не свойство контейнера, и `False` здесь снова сделал бы отказ чтения
+       беспричинным.
+    """
     probe = getattr(archive, "needs_password", None)
     if callable(probe):
-        # Предикат бэкенда может упасть на битом заголовке. Это не потеря исхода:
-        # решение принимает эвристика ниже (имена методов шифра записи), то есть ответ
-        # остаётся определённым — молчание здесь меняет источник ответа, не вердикт.
-        # Третьего состояния у ``ContainerInfo.encrypted`` нет (порт), поэтому
-        # «предикат не ответил» не может быть выражено отдельно.
         with contextlib.suppress(Exception):
-            return bool(probe())
+            return (
+                ContainerEncryption.ENCRYPTED
+                if probe()
+                else ContainerEncryption.NOT_ENCRYPTED
+            )
     methods = _field(info, "method_names", None) or ()
-    return any("AES" in str(method).upper() for method in methods)
+    if any("AES" in str(method).upper() for method in methods):
+        return ContainerEncryption.ENCRYPTED
+    return ContainerEncryption.UNKNOWN
 
 
 def _member(entry: Any) -> ContainerMember:
@@ -166,7 +179,7 @@ class SevenZipContainer:
                 format="7z",
                 members=(),
                 solid=None,
-                encrypted=False,
+                encryption=ContainerEncryption.UNKNOWN,
                 truncated=False,
                 unreadable=_REASON,
             )
@@ -175,13 +188,14 @@ class SevenZipContainer:
                 entries = list(archive.list())
                 info = _archive_info(archive)
                 solid = _solid(info)
-                encrypted = _encrypted(archive, info)
+                encryption = _encrypted(archive, info)
         except Exception as exc:  # noqa: BLE001 — контракт порта: причина, не исключение
             return ContainerListing(
                 format="7z",
                 members=(),
                 solid=None,
-                encrypted=False,
+                # Заголовок не разобран ⇒ предикат не спрашивался: «не знаю».
+                encryption=ContainerEncryption.UNKNOWN,
                 truncated=False,
                 unreadable=f"{type(exc).__name__}: {exc}",
             )
@@ -189,7 +203,7 @@ class SevenZipContainer:
             format="7z",
             members=tuple(_member(entry) for entry in entries),
             solid=solid,
-            encrypted=encrypted,
+            encryption=encryption,
             truncated=False,
             unreadable=None,
         )

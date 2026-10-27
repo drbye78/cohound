@@ -10,7 +10,7 @@
 * пакет есть (фейк), утилиты нет → ``available() is False`` и **точная** причина про
   утилиту;
 * пакет и утилита есть → успешный путь: состав, ``solid=None`` (``rarfile`` флаг не
-  отдаёт — не догадываемся), ``encrypted``, потоковое чтение.
+  отдаёт — не догадываемся), три-состояние ``encryption``, потоковое чтение.
 
 Пакет не устанавливается: ``rarfile`` подменяется фейком.
 """
@@ -25,6 +25,7 @@ import pytest
 
 from core.adapters import container_rar
 from core.adapters.container_rar import RarContainer
+from core.domain.enums import ContainerEncryption
 from core.ports.container import ContainerUnavailable
 
 _REASON_PACKAGE = "backend_unavailable: rarfile не установлен (extra extract-archives)"
@@ -78,7 +79,8 @@ def test_backend_absent_listing_reason_is_exact(monkeypatch: pytest.MonkeyPatch)
     assert listing.unreadable == _REASON_PACKAGE
     # rarfile солидность не сообщает — и без бэкенда тоже «не знаю».
     assert listing.solid is None
-    assert listing.encrypted is False
+    # Предикат не спрашивался (бэкенда нет) ⇒ «не знаю», а не «не зашифрован».
+    assert listing.encryption is ContainerEncryption.UNKNOWN
 
 
 def test_backend_absent_open_member_raises_typed(
@@ -226,7 +228,7 @@ def test_listing_from_header(monkeypatch: pytest.MonkeyPatch) -> None:
     listing = container.list_members("a.rar")
     assert listing.unreadable is None
     assert listing.solid is None
-    assert listing.encrypted is False
+    assert listing.encryption is ContainerEncryption.NOT_ENCRYPTED
     assert [
         (m.path, m.size, m.compressed_size, m.crc32, m.is_dir) for m in listing.members
     ] == [
@@ -255,10 +257,10 @@ def test_listing_accepts_mapping_entries(monkeypatch: pytest.MonkeyPatch) -> Non
 
 
 def test_encrypted_flag(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Пароль требуется → ``encrypted=True``."""
+    """Пароль требуется → ``ENCRYPTED``."""
     _install_fake(monkeypatch, _fake_module(entries=[], password=True))
     _tool(monkeypatch)
-    assert RarContainer().list_members("a.rar").encrypted is True
+    assert RarContainer().list_members("a.rar").encryption is ContainerEncryption.ENCRYPTED
 
 
 def test_encrypted_member_without_archive_predicate(
@@ -271,7 +273,7 @@ def test_encrypted_member_without_archive_predicate(
     )
     _install_fake(monkeypatch, module)
     _tool(monkeypatch)
-    assert RarContainer().list_members("a.rar").encrypted is True
+    assert RarContainer().list_members("a.rar").encryption is ContainerEncryption.ENCRYPTED
 
 
 def test_listing_error_becomes_unreadable(monkeypatch: pytest.MonkeyPatch) -> None:

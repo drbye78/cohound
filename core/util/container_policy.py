@@ -38,6 +38,7 @@ from dataclasses import dataclass
 from pathlib import PurePosixPath
 from typing import Protocol
 
+from core.domain.enums import ContainerEncryption
 from core.util.document_formats import DOCUMENT_SUFFIXES, TEXTUAL_SUFFIXES
 
 __all__ = [
@@ -140,7 +141,7 @@ class ListingLike(Protocol):
     def solid(self) -> bool | None: ...
 
     @property
-    def encrypted(self) -> bool: ...
+    def encryption(self) -> ContainerEncryption: ...
 
     @property
     def truncated(self) -> bool: ...
@@ -255,8 +256,13 @@ def plan_members(
     под исчерпанный бюджет и прогноз врал бы о причине.
 
     Шифрование — свойство **контейнера** (в индексе нет флага на члена): при
-    ``listing.encrypted`` ни один член не принимается, причина одна и та же —
+    ``listing.encryption is ENCRYPTED`` ни один член не принимается, причина одна и та же —
     ``encrypted``. Спуск в зашифрованный архив без пароля — не «пустой архив».
+
+    ``UNKNOWN`` (читатель предикат не заявил) членов **не** отсеивает: незнание не равно
+    «зашифрован», и отказ здесь терял бы материал. Но и не проходит молча: состояние
+    уходит в прогноз (``encrypted: unknown``), а отказ чтения члена объясняется
+    непроверенным предикатом (``archive_descent``).
     """
     entries: list[tuple[str | None, MemberLike]] = [
         (normalize_member_path(member.path), member) for member in listing.members
@@ -277,7 +283,7 @@ def plan_members(
         if normalized is None:
             skipped.append((member.path, SKIP_PATH_REJECTED))
             continue
-        if listing.encrypted:
+        if listing.encryption is ContainerEncryption.ENCRYPTED:
             skipped.append((display, SKIP_ENCRYPTED))
             continue
         if _member_suffix(normalized) not in suffixes:
@@ -333,7 +339,10 @@ def archive_forecast(listing: ListingLike, plan: MemberPlan) -> dict:
     * ``formats`` — гистограмма суффиксов **принятых** членов (``{".pdf": 3, ".txt": 1}``);
     * ``total_uncompressed`` — сумма заявленных размеров принятых;
     * ``solid`` — ``true``/``false``/``null`` («формат не сообщает», см. порт);
-    * ``encrypted`` — требует ли контейнер пароля;
+    * ``encrypted`` — **что заявил читатель** о требовании пароля: ``encrypted``/
+      ``not_encrypted``/``unknown`` (ключ сохранён ради читаемости прежних наблюдений;
+      значение — tri-state :class:`~core.domain.enums.ContainerEncryption`, поэтому
+      ``unknown`` виден и не выдают себя за «не зашифрован»);
     * ``skipped`` — ``{причина: {"count": N, "examples": [...]}}``, причины с нулём
       отсутствуют, примеры ограничены :data:`FORECAST_EXAMPLES_MAX` (счётчик — полный);
     * ``truncated`` — план урезан бюджетом или индекс неполон;
@@ -356,7 +365,7 @@ def archive_forecast(listing: ListingLike, plan: MemberPlan) -> dict:
         "formats": _suffix_histogram(plan.accepted),
         "total_uncompressed": plan.total_uncompressed,
         "solid": listing.solid,
-        "encrypted": listing.encrypted,
+        "encrypted": listing.encryption,
         "skipped": {reason: buckets[reason] for reason in sorted(buckets)},
         "truncated": plan.truncated,
         "representative": plan.representative,

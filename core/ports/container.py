@@ -17,8 +17,8 @@ commodity-слой (A2), методологию не меняет.
 целиком. Потребитель обязан применять жёсткий байтовый потолок на чтении
 (``container_policy.bounded_iter``), потому что заявленный размер — не гарантия.
 
-Нейтрален (§1.3): в модуле нет предметных терминов; импорты — только stdlib (слой
-``ports``).
+Нейтрален (§1.3): в модуле нет предметных терминов; импорты — stdlib и домен (матрица
+зависимостей 01 §1: ``ports`` → ``domain``; перечисления — из словаря, не второй копией).
 """
 
 from __future__ import annotations
@@ -27,7 +27,15 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
-__all__ = ["ContainerListing", "ContainerMember", "ContainerPort", "ContainerUnavailable"]
+from core.domain.enums import ContainerEncryption
+
+__all__ = [
+    "ContainerEncryption",
+    "ContainerListing",
+    "ContainerMember",
+    "ContainerPort",
+    "ContainerUnavailable",
+]
 
 
 class ContainerUnavailable(RuntimeError):
@@ -69,11 +77,18 @@ class ContainerListing:
     ``format`` — ``"zip"``/``"7z"``/``"rar"``; ``solid`` — флаг сплошного блока из
     индекса, причём ``None`` означает «формат/бэкенд этого не сообщает» (zip несолиден
     **по построению** — для него ``False``, а не ``None``; RAR — ``None``, флаг в индексе
-    не читается); ``encrypted`` — контейнер требует пароля (AES/ZipCrypto/7zAES/RAR-
-    заголовок); ``truncated`` — листинг неполон (бэкенд оборвал индекс по своему
-    внутреннему потолку); ``unreadable`` — человекочитаемая причина, если
+    не читается); ``encryption`` — **что заявил** читатель о требовании пароля
+    (:class:`~core.domain.enums.ContainerEncryption`): ``encrypted``/``not_encrypted``/
+    ``unknown``, где ``unknown`` — «предикат не заявлен» (нет метода, он упал, листинг не
+    удался), а не «не зашифрован»; ``truncated`` — листинг неполон (бэкенд оборвал индекс
+    по своему внутреннему потолку); ``unreadable`` — человекочитаемая причина, если
     **листинг вообще не удался** (битый файл, нет бэкенда, нет внешней утилиты). При
     ``unreadable`` состав пуст, но поля ``format``/``solid`` остаются осмысленными.
+
+    Имя поля — ``encryption``, а не ``encrypted``: значение трёхзначное, и старое имя
+    приглашало бы к проверке истинности (``if listing.encrypted``), где любая непустая
+    строка — правда. Состояние читается сравнением с
+    :class:`~core.domain.enums.ContainerEncryption`.
 
     ``unreadable`` — не исключение и не тихий пустой список: потребитель обязан
     показать его как видимый пропуск спуска.
@@ -82,7 +97,7 @@ class ContainerListing:
     format: str
     members: tuple[ContainerMember, ...]
     solid: bool | None
-    encrypted: bool
+    encryption: ContainerEncryption
     truncated: bool
     unreadable: str | None
 

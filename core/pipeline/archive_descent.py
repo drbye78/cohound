@@ -63,7 +63,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from core.domain.enums import ArchiveDescent, ArchiveDescentStatus
+from core.domain.enums import ArchiveDescent, ArchiveDescentStatus, ContainerEncryption
 from core.domain.models import ArchiveObservation, CorpusMember
 from core.ports.container import ContainerPort
 from core.util.container_policy import (
@@ -80,6 +80,7 @@ from core.util.hashing import short_hash
 
 __all__ = [
     "DESCENT_SUFFIXES",
+    "ENCRYPTION_UNVERIFIED",
     "SKIP_BUDGET",
     "SKIP_CONTAINER_READER",
     "SKIP_CYCLE",
@@ -121,6 +122,12 @@ SKIP_NESTED = "nested_descended"
 SKIP_READ_FAILED = "member_read_failed"
 #: Читатель контейнера не подключён composition root'ом (спуск невозможен).
 SKIP_CONTAINER_READER = "container_reader_unavailable"
+
+#: Приписка к причине отказа члена, когда читатель **не заявил** предикат шифрования
+#: (``ContainerEncryption.UNKNOWN``): отказ чтения может быть вызван паролем. Без неё
+#: контейнер без поддержки AES «падает позже» без причины в наблюдении — ровно тот
+#: дефект, из-за которого предикат стал три-состоянием.
+ENCRYPTION_UNVERIFIED = "encryption_unverified"
 
 
 @dataclass(frozen=True)
@@ -546,6 +553,14 @@ class ArchiveDescentWalker:
         )
         # Прогноз фиксируется **до** любого чтения байтов члена (решение владельца).
         forecast = archive_forecast(listing, plan)
+        # Незнание предиката шифрования — не отказ читать, но и не «читаем как обычно»:
+        # отказ чтения ниже обязан назвать эту возможность (см. ``ENCRYPTION_UNVERIFIED``).
+        encryption_unverified = (
+            f" ({ENCRYPTION_UNVERIFIED}: читатель не заявил предикат шифрования — "
+            "отказ чтения может быть вызван паролем)"
+            if listing.encryption is ContainerEncryption.UNKNOWN
+            else ""
+        )
 
         if listing.unreadable:
             reason = str(listing.unreadable)
@@ -769,6 +784,7 @@ class ArchiveDescentWalker:
                 self.errors.append(
                     f"{self.product_id}/{archive_url}: {SKIP_READ_FAILED}: "
                     f"член {normalized!r}: {type(exc).__name__}: {exc}"
+                    f"{encryption_unverified}"
                 )
                 # Строка члена обязательна: без неё «член не прочитан» и «члена не было»
                 # выглядят в ``corpus_members`` одинаково, и вопрос «почему этого файла

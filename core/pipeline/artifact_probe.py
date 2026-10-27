@@ -24,6 +24,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from core.domain.enums import ContainerEncryption
 from core.ports.container import ContainerPort
 from core.util.document_probe import ArtifactProbe, classify_artifact
 
@@ -35,7 +36,9 @@ class ArtifactProbeRecord:
     """Наблюдение зонда: класс артефакта + (для контейнера) индекс его состава.
 
     ``container`` — сводка листинга: ``format``/``members_total``/``solid``/``encrypted``/
-    ``truncated``/``unreadable``. Она **не** заменяет прогноз спуска
+    ``truncated``/``unreadable``; значение ``encrypted`` — три-состояние
+    :class:`~core.domain.enums.ContainerEncryption` (``unknown`` — читатель предикат не
+    заявил, в том числе когда читатель вообще не подключён). Она **не** заменяет прогноз спуска
     (``archive_forecast``): зонд фиксирует «что лежит в индексе», спуск — «что из этого
     будет взято и почему». Для не-контейнера ``container is None``.
     """
@@ -90,7 +93,9 @@ def probe_artifact(
                 "format": artifact.format,
                 "members_total": 0,
                 "solid": None,
-                "encrypted": False,
+                # Читатель не вызывался ⇒ предикат шифрования не спрашивался: «не знаю».
+                # Прежнее ``False`` утверждало небывшее наблюдение.
+                "encrypted": ContainerEncryption.UNKNOWN,
                 "truncated": False,
                 "unreadable": (
                     "container_reader_unavailable: ContainerPort не инжектирован"
@@ -104,7 +109,7 @@ def probe_artifact(
                 "format": listing.format,
                 "members_total": len(listing.members),
                 "solid": listing.solid,
-                "encrypted": listing.encrypted,
+                "encrypted": listing.encryption,
                 "truncated": listing.truncated,
                 "unreadable": listing.unreadable,
             }

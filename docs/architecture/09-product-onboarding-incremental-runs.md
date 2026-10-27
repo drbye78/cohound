@@ -1692,7 +1692,7 @@ RAM), поэтому адаптер извлекает **один** член в�
 |---|---|---|
 | `is_directory` | запись-каталог, тела нет | нет |
 | `path_rejected` | путь не принадлежит пространству имён архива | нет |
-| `encrypted` | контейнер требует пароля (свойство контейнера, не члена) | нет |
+| `encryption` | что заявил читатель о шифровании контейнера: `encrypted` / `not_encrypted` / `unknown` (три состояния; «молчит» ≠ «не зашифрован») | нет |
 | `not_ingestible_format` | суффикс вне реестра форматов + текстовых целей спуска | нет |
 | `member_too_large` | заявленный размер члена выше `archive_max_member_bytes` | да |
 | `member_limit_exceeded` | исчерпан `archive_max_members` | да |
@@ -1701,7 +1701,9 @@ RAM), поэтому адаптер извлекает **один** член в�
 **Прогноз до извлечения (форма будущих `archive_observations`).**
 `container_policy.archive_forecast(listing, plan)` — JSON-сериализуемая запись:
 `format`, `members_total`, `members_accepted`, `formats` (гистограмма суффиксов
-принятых), `total_uncompressed`, `solid`, `encrypted`, `skipped`
+принятых), `total_uncompressed`, `solid`, `encryption` (три состояния; ключ прогноза сохранён
+как `encrypted` ради читаемости прежних наблюдений, значение — `encrypted`/`not_encrypted`/
+`unknown`), `skipped`
 (`{причина: {"count": N, "examples": […]}}`, примеры ограничены — как
 `artifacts_outside_prefix`), `truncated`, `representative` (наименьший нормализованный
 путь среди принятых), `unreadable`. Прогноз фиксируется **до** извлечения: он объясняет,

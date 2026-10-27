@@ -16,6 +16,7 @@ from core.domain.enums import (
     ArchiveDescentStatus,
     CapabilityPolicy,
     ChangeClass,
+    ContainerEncryption,
     CrawlItemStatus,
     CrawlSessionStatus,
     CrawlStrategy,
@@ -106,6 +107,8 @@ def assert_dictionary_integrity(path: str | Path) -> None:
         "archive_descent",
         # B3: исход спуска в один контейнер (archive_observations.status).
         "archive_descent_status",
+        # B2: предикат шифрования контейнера — tri-state модели порта.
+        "container_encryption",
         # Lane B: жизненный цикл сеанса краула и per-URL статус его элемента.
         "crawl_session_status",
         "crawl_item_status",
@@ -157,6 +160,9 @@ def assert_dictionary_integrity(path: str | Path) -> None:
         "decoder": {v.value for v in Decoder},
         "archive_descent": {v.value for v in ArchiveDescent},
         "archive_descent_status": {v.value for v in ArchiveDescentStatus},
+        # B2: предикат шифрования контейнера — три состояния, иначе словарь и enum
+        # расходятся молча (и «не знаю» снова станет «не зашифрован»).
+        "container_encryption": {v.value for v in ContainerEncryption},
         "crawl_session_status": {v.value for v in CrawlSessionStatus},
         "crawl_item_status": {v.value for v in CrawlItemStatus},
         "skip_reason": {v.value for v in SkipReason},

@@ -8,7 +8,8 @@
 доступности проверяются и без extra, и с ним.
 
 Форма успешного пути проверяется на фейковом бэкенде (пакет не устанавливается): состав,
-``solid`` из индекса (а не догадка), ``encrypted``, потоковое чтение через временный файл.
+``solid`` из индекса (а не догадка), три-состояние ``encryption``, потоковое чтение через
+временный файл.
 """
 
 from __future__ import annotations
@@ -21,6 +22,7 @@ import pytest
 
 from core.adapters import container_7z
 from core.adapters.container_7z import SevenZipContainer
+from core.domain.enums import ContainerEncryption
 from core.ports.container import ContainerUnavailable
 
 _ABSENT = "backend_unavailable: py7zr не установлен (extra extract-archives)"
@@ -58,7 +60,8 @@ def test_backend_absent_listing_reason_is_exact(monkeypatch: pytest.MonkeyPatch)
     assert listing.members == ()
     assert listing.unreadable == _ABSENT
     assert listing.solid is None
-    assert listing.encrypted is False
+    # Предикат не спрашивался (бэкенда нет) ⇒ «не знаю», а не «не зашифрован».
+    assert listing.encryption is ContainerEncryption.UNKNOWN
     assert listing.truncated is False
 
 
@@ -152,7 +155,7 @@ def test_listing_from_header(monkeypatch: pytest.MonkeyPatch) -> None:
     listing = container.list_members("a.7z")
     assert listing.unreadable is None
     assert listing.solid is True
-    assert listing.encrypted is False
+    assert listing.encryption is ContainerEncryption.NOT_ENCRYPTED
     assert [
         (m.path, m.size, m.compressed_size, m.crc32, m.is_dir) for m in listing.members
     ] == [
@@ -195,9 +198,9 @@ def test_solid_non_bool_is_not_coerced(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_encrypted_from_backend_predicate(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Пароль требуется → ``encrypted=True``."""
+    """Пароль требуется → ``ENCRYPTED``."""
     _install_fake(monkeypatch, _fake_module(entries=[], password=True))
-    assert SevenZipContainer().list_members("a.7z").encrypted is True
+    assert SevenZipContainer().list_members("a.7z").encryption is ContainerEncryption.ENCRYPTED
 
 
 def test_encrypted_from_cipher_name(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -208,7 +211,7 @@ def test_encrypted_from_cipher_name(monkeypatch: pytest.MonkeyPatch) -> None:
         info=SimpleNamespace(solid=False, method_names=["7zAES", "LZMA2"]),
     )
     _install_fake(monkeypatch, module)
-    assert SevenZipContainer().list_members("a.7z").encrypted is True
+    assert SevenZipContainer().list_members("a.7z").encryption is ContainerEncryption.ENCRYPTED
 
 
 def test_listing_error_becomes_unreadable(monkeypatch: pytest.MonkeyPatch) -> None:

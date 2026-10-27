@@ -31,6 +31,7 @@ from collections.abc import Iterator, Mapping
 from types import ModuleType
 from typing import Any
 
+from core.domain.enums import ContainerEncryption
 from core.ports.container import (
     ContainerListing,
     ContainerMember,
@@ -111,7 +112,8 @@ def _unavailable_listing(reason: str) -> ContainerListing:
         format="rar",
         members=(),
         solid=None,
-        encrypted=False,
+        # Архив не открыт ⇒ предикат не спрашивался: «не знаю», а не «не зашифрован».
+        encryption=ContainerEncryption.UNKNOWN,
         truncated=False,
         unreadable=reason,
     )
@@ -150,26 +152,43 @@ def _member(entry: Any) -> ContainerMember:
     )
 
 
-def _encrypted(archive: Any, infos: list[Any]) -> bool:
-    """Требует ли архив пароля: предикат архива, иначе — предикаты членов."""
+def _encrypted(archive: Any, infos: list[Any]) -> ContainerEncryption:
+    """Требует ли архив пароля — **три** состояния, а не булево.
+
+    Источники по порядку: предикат архива, затем предикаты членов (``rarfile`` умеет
+    отвечать на обоих уровнях). Каждый ответ **определённый**: ``True`` доказывает
+    шифрование, ``False`` — его отсутствие. Если не ответил **никто** (нет метода или
+    предикат упал на битом заголовке), исход — ``UNKNOWN``: это наблюдение о читателе,
+    а не «не зашифрован». Прежнее ``False`` в этой ветке делало отказ чтения
+    беспричинным.
+    """
     probe = getattr(archive, "needs_password", None)
     if callable(probe):
-        # Битый заголовок архива не должен ронять листинг: ниже — предикаты членов, они
-        # и дают ответ, когда архив его не дал.
+        # Битый заголовок архива не должен ронять листинг: ниже — предикаты членов.
         with contextlib.suppress(Exception):
-            return bool(probe())
+            return (
+                ContainerEncryption.ENCRYPTED
+                if probe()
+                else ContainerEncryption.NOT_ENCRYPTED
+            )
+    answered = False
+    unanswered = False
     for info in infos:
         member_probe = getattr(info, "needs_password", None)
         if not callable(member_probe):
+            unanswered = True
             continue
         # Сбой предиката одного члена не роняет листинг и не решает за остальных:
-        # опрашиваем все записи. Если не ответил ни один, исход — «не заявлено»
-        # (``False``), ровно как у бэкенда без предиката: ``ContainerInfo.encrypted``
-        # третьего состояния не имеет, и выдумывать «зашифрован» нельзя.
-        with contextlib.suppress(Exception):
+        # опрашиваем все записи, а «был сбой» запоминаем отдельно.
+        try:
             if member_probe():
-                return True
-    return False
+                return ContainerEncryption.ENCRYPTED
+            answered = True
+        except Exception:  # noqa: BLE001 — битый заголовок члена
+            unanswered = True
+    if answered and not unanswered:
+        return ContainerEncryption.NOT_ENCRYPTED
+    return ContainerEncryption.UNKNOWN
 
 
 class RarContainer:
@@ -206,13 +225,13 @@ class RarContainer:
         try:
             with module.RarFile(path) as archive:
                 infos = list(archive.infolist())
-                encrypted = _encrypted(archive, infos)
+                encryption = _encrypted(archive, infos)
         except Exception as exc:  # noqa: BLE001 — контракт порта: причина, не исключение
             return ContainerListing(
                 format="rar",
                 members=(),
                 solid=None,
-                encrypted=False,
+                encryption=ContainerEncryption.UNKNOWN,
                 truncated=False,
                 unreadable=f"{type(exc).__name__}: {exc}",
             )
@@ -221,7 +240,7 @@ class RarContainer:
             members=tuple(_member(info) for info in infos),
             # rarfile флаг сплошного блока не отдаёт: «не знаю», а не догадка.
             solid=None,
-            encrypted=encrypted,
+            encryption=encryption,
             truncated=False,
             unreadable=None,
         )

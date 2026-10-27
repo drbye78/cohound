@@ -27,6 +27,7 @@
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import datetime as _dt
 import io
 import json
@@ -55,8 +56,13 @@ from core.domain import (
     RunConfig,
     RunMode,
 )
+from core.domain.enums import ContainerEncryption
 from core.pipeline import RunPlan
-from core.pipeline.archive_descent import SKIP_READ_FAILED, SKIP_STREAM_TOO_LARGE
+from core.pipeline.archive_descent import (
+    ENCRYPTION_UNVERIFIED,
+    SKIP_READ_FAILED,
+    SKIP_STREAM_TOO_LARGE,
+)
 from core.pipeline.corpus import (
     ExtractionPool,
     IndexBuild,
@@ -757,6 +763,88 @@ def test_member_read_failure_keeps_other_errors(tmp_path: Path) -> None:
         # Две ошибки чтения — и обе на месте: причина пишется до эмита строки.
         assert sum(SKIP_READ_FAILED in error for error in result.errors) == 2
 
+
+class _EncryptionStatingReader:
+    """Обёртка над читателем: индекс правдив, но заявление о шифровании — заданное.
+
+    Так моделируется контейнер, у которого читатель **не умеет** определять шифрование
+    (``UNKNOWN``): предикат молчит, чтение члена отказывает. Прежний булев предикат отдавал
+    в этой ситуации «не зашифрован», и отказ чтения оставался без причины.
+    """
+
+    def __init__(self, inner: Any, encryption: ContainerEncryption, broken: set[str]) -> None:
+        self._inner = inner
+        self._encryption = encryption
+        self._broken = set(broken)
+        self.version = getattr(inner, "version", "wrapped-1")
+
+    def available(self) -> bool:
+        return self._inner.available()
+
+    def list_members(self, path: str) -> Any:
+        return dataclasses.replace(
+            self._inner.list_members(path), encryption=self._encryption
+        )
+
+    def open_member(self, path: str, member_path: str) -> Iterator[bytes]:
+        if member_path in self._broken:
+            raise zipfile.BadZipFile(f"пароль не принят: {member_path}")
+        yield from self._inner.open_member(path, member_path)
+
+def test_unverified_encryption_is_named_on_read_failure(tmp_path: Path) -> None:
+    """``UNKNOWN`` не выдаёт себя за «не зашифрован»: отказ чтения называет непроверенный предикат."""
+    archive = _zip({"a.md": b"# a\n", "b.md": b"# b\n"})
+
+    def _reader(path: str) -> Any:
+        inner = container_for(path)
+        if inner is None:
+            return None
+        return _EncryptionStatingReader(inner, ContainerEncryption.UNKNOWN, {"b.md"})
+
+    with _run(tmp_path, archive, container_reader=_reader) as (store, result, _):
+        # Наблюдение спуска называет состояние предиката фактом (прогноз — до извлечения).
+        observation = _observations(store)[0]
+        # Прогноз читается из БД: значение — та же строка (``unknown``), не bool.
+        assert observation.forecast["encrypted"] == ContainerEncryption.UNKNOWN
+        # Причина отказа члена названа: иначе «падает позже» остаётся без объяснения.
+        error = next(item for item in result.errors if SKIP_READ_FAILED in item)
+        assert ENCRYPTION_UNVERIFIED in error
+        assert "пароль" in error
+        rows = {row.member_path: row for row in _members(store)}
+        assert rows["b.md"].skip_reason == SKIP_READ_FAILED
+        assert rows["a.md"].doc_id is not None
+
+def test_stated_negative_encryption_is_not_marked_unverified(tmp_path: Path) -> None:
+    """Если предикат заявлен и отрицателен — приписки о непроверенном предикате нет."""
+    archive = _zip({"a.md": b"# a\n", "b.md": b"# b\n"})
+
+    def _reader(path: str) -> Any:
+        inner = container_for(path)
+        if inner is None:
+            return None
+        return _EncryptionStatingReader(
+            inner, ContainerEncryption.NOT_ENCRYPTED, {"b.md"}
+        )
+
+    with _run(tmp_path, archive, container_reader=_reader) as (store, result, _):
+        observation = _observations(store)[0]
+        assert observation.forecast["encrypted"] == ContainerEncryption.NOT_ENCRYPTED
+        error = next(item for item in result.errors if SKIP_READ_FAILED in item)
+        assert ENCRYPTION_UNVERIFIED not in error
+
+def test_probe_without_reader_reports_unknown_encryption(tmp_path: Path) -> None:
+    """Не подключённый читатель: предикат не спрашивался — ``unknown``, а не «не зашифрован»."""
+    from core.pipeline.artifact_probe import probe_artifact
+
+    path = tmp_path / "bundle.zip"
+    path.write_bytes(_zip({"a.md": b"# a\n"}))
+    record = probe_artifact(
+        path, product_id="p1", url=ZIP_URL, container_for=None
+    )
+
+    assert record.container is not None
+    assert record.container["encrypted"] is ContainerEncryption.UNKNOWN
+    assert record.container["unreadable"].startswith("container_reader_unavailable")
 
 def test_stream_over_ceiling_keeps_row(tmp_path: Path) -> None:
     """``member_stream_too_large`` продолжает писать строку (соседняя причина не сломана)."""

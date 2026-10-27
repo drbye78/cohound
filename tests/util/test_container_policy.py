@@ -15,8 +15,11 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
+from core.domain.enums import ContainerEncryption
 from core.ports.container import ContainerListing, ContainerMember
 from core.util.container_policy import (
     CAPACITY_REASONS,
@@ -60,7 +63,7 @@ def _listing(
     *members: ContainerMember,
     format: str = "zip",
     solid: bool | None = False,
-    encrypted: bool = False,
+    encryption: ContainerEncryption = ContainerEncryption.NOT_ENCRYPTED,
     truncated: bool = False,
     unreadable: str | None = None,
 ) -> ContainerListing:
@@ -69,7 +72,7 @@ def _listing(
         format=format,
         members=tuple(members),
         solid=solid,
-        encrypted=encrypted,
+        encryption=encryption,
         truncated=truncated,
         unreadable=unreadable,
     )
@@ -204,7 +207,9 @@ def test_plan_reason_path_rejected_keeps_raw_path() -> None:
 
 def test_plan_reason_encrypted_covers_every_member() -> None:
     """Шифрование — свойство контейнера: ни один член не принимается."""
-    listing = _listing(_member("a.pdf"), _member("b.txt"), encrypted=True)
+    listing = _listing(
+        _member("a.pdf"), _member("b.txt"), encryption=ContainerEncryption.ENCRYPTED
+    )
     plan = plan_members(listing)
     assert plan.accepted == ()
     assert {reason for _, reason in plan.skipped} == {SKIP_ENCRYPTED}
@@ -353,7 +358,9 @@ def test_plan_reasons_cover_whole_taxonomy() -> None:
         SKIP_MEMBER_TOO_LARGE,
         SKIP_MEMBER_LIMIT,
     }
-    encrypted = plan_members(_listing(_member("a.pdf"), encrypted=True))
+    encrypted = plan_members(
+        _listing(_member("a.pdf"), encryption=ContainerEncryption.ENCRYPTED)
+    )
     assert {reason for _, reason in encrypted.skipped} == {SKIP_ENCRYPTED}
 
 
@@ -380,7 +387,7 @@ def test_forecast_shape() -> None:
         "formats": {".pdf": 1, ".txt": 1},
         "total_uncompressed": 25,
         "solid": False,
-        "encrypted": False,
+        "encrypted": ContainerEncryption.NOT_ENCRYPTED,
         "skipped": {
             "member_too_large": {"count": 1, "examples": ["docs/a.pdf"]},
             "not_ingestible_format": {"count": 1, "examples": ["tool.exe"]},
@@ -393,8 +400,6 @@ def test_forecast_shape() -> None:
 
 def test_forecast_is_json_serializable() -> None:
     """Запись обязана лечь в ``archive_observations`` без конвертеров."""
-    import json
-
     listing = _listing(_member("a.pdf"))
     forecast = archive_forecast(listing, plan_members(listing))
     assert json.loads(json.dumps(forecast)) == forecast
@@ -420,11 +425,46 @@ def test_forecast_keeps_unreadable_reason() -> None:
     assert forecast["solid"] is None
 
 
+def test_unknown_encryption_does_not_skip_members_but_is_recorded() -> None:
+    """``UNKNOWN`` — незнание читателя, а не «зашифрован»: материал берётся, запись молчит нет.
+
+    Прежнее булево отдавало здесь ``False``, то есть утверждало наблюдение, которого не
+    было. Теперь незнание видно в прогнозе: ``encrypted: unknown``.
+    """
+    listing = _listing(_member("a.pdf"), encryption=ContainerEncryption.UNKNOWN)
+    plan = plan_members(listing)
+    forecast = archive_forecast(listing, plan)
+
+    assert [member.path for member in plan.accepted] == ["a.pdf"]
+    assert SKIP_ENCRYPTED not in {reason for _, reason in plan.skipped}
+    assert forecast["encrypted"] is ContainerEncryption.UNKNOWN
+    assert forecast["encrypted"] is not ContainerEncryption.NOT_ENCRYPTED
+
+def test_three_encryption_states_stay_distinguishable() -> None:
+    """Три состояния различимы сквозь политику и прогноз — и не сводятся к двум."""
+    states = {
+        state: plan_members(_listing(_member("a.pdf"), encryption=state))
+        for state in ContainerEncryption
+    }
+    encrypted = states[ContainerEncryption.ENCRYPTED]
+    assert {reason for _, reason in encrypted.skipped} == {SKIP_ENCRYPTED}
+    assert states[ContainerEncryption.NOT_ENCRYPTED].accepted
+    assert states[ContainerEncryption.UNKNOWN].accepted
+
+    forecast = archive_forecast(
+        _listing(_member("a.pdf"), encryption=ContainerEncryption.UNKNOWN),
+        states[ContainerEncryption.UNKNOWN],
+    )
+    # JSON-значение остаётся строкой словаря (persisted data), но смысл — tri-state.
+    assert json.loads(json.dumps(forecast))["encrypted"] == "unknown"
+
 def test_forecast_encrypted_container() -> None:
     """Шифрованный контейнер: все члены в одной причине, план не урезан."""
-    listing = _listing(_member("a.pdf"), _member("b.pdf"), encrypted=True)
+    listing = _listing(
+        _member("a.pdf"), _member("b.pdf"), encryption=ContainerEncryption.ENCRYPTED
+    )
     forecast = archive_forecast(listing, plan_members(listing))
-    assert forecast["encrypted"] is True
+    assert forecast["encrypted"] is ContainerEncryption.ENCRYPTED
     assert forecast["members_accepted"] == 0
     assert forecast["skipped"][SKIP_ENCRYPTED]["count"] == 2
     assert forecast["truncated"] is False

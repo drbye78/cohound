@@ -7,7 +7,8 @@
   архив с испорченным телом члена листается, а чтение этого члена честно падает;
 * чтение — поток чанков (несколько чанков на член > 2 MiB, пик памяти не растёт до
   размера члена);
-* шифрование видно флагом (``encrypted=True``), а чтение шифрованного члена отказывает
+* шифрование видно флагом (``ContainerEncryption.ENCRYPTED``), а чтение шифрованного члена
+  отказывает
   видимо, не отдавая пустоту;
 * битый/отсутствующий файл → ``unreadable``, без исключения;
 * OOXML (``docx``-подобный zip) классифицируется как **документ**, а не контейнер.
@@ -28,6 +29,7 @@ from core.adapters.container_any import (
     unknown_reason,
 )
 from core.adapters.container_zip import CHUNK_SIZE, ZipContainer
+from core.domain.enums import ContainerEncryption
 from core.util.document_formats import classify_archive_bytes
 
 _PAYLOAD = b"coHound container payload\n"
@@ -86,7 +88,7 @@ def test_listing_matches_index(tmp_path: Path) -> None:
     listing = ZipContainer().list_members(str(path))
     assert listing.format == "zip"
     assert listing.unreadable is None
-    assert listing.encrypted is False
+    assert listing.encryption is ContainerEncryption.NOT_ENCRYPTED
     assert listing.truncated is False
     # ZIP несолиден по построению — факт формата, а не «не знаю».
     assert listing.solid is False
@@ -177,11 +179,11 @@ def test_streaming_read_unknown_member_raises(tmp_path: Path) -> None:
 
 
 def test_encrypted_flag_is_visible(tmp_path: Path) -> None:
-    """Флаг ``0x1`` в индексе → ``encrypted=True`` (ZipCrypto и AES alike)."""
+    """Флаг ``0x1`` в индексе → ``ENCRYPTED`` (ZipCrypto и AES alike)."""
     path = _make_zip(tmp_path / "secret.zip", {"a.pdf": _PAYLOAD})
     assert _set_encrypted_flag(path) == 1
     listing = ZipContainer().list_members(str(path))
-    assert listing.encrypted is True
+    assert listing.encryption is ContainerEncryption.ENCRYPTED
     assert listing.unreadable is None
     assert [member.path for member in listing.members] == ["a.pdf"]
 

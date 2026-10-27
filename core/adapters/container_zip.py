@@ -5,7 +5,9 @@
 ``extract-archives`` только ради **AES**-zip (WinZip AE-1/AE-2); до его подключения
 AES-члены деградируют **видимо** — ``open_member`` поднимает ``RuntimeError`` от
 ``zipfile`` («encrypted, password required»), а ``list_members`` честно ставит
-``encrypted=True`` (флаг ``0x1`` в общем бите).
+``ContainerEncryption.ENCRYPTED`` (флаг ``0x1`` в общем бите). Предикат у ZIP
+**определённый**: флаг есть в central directory у каждого члена, поэтому незнание
+(``.UNKNOWN``) у zip возможно только там, где индекс вообще не прочитан.
 
 **Листинг — только central directory** (инвариант (a)): ``infolist()`` разбирает индекс
 архива, тела членов не читаются. Размеры — заявленные из индекса.
@@ -28,6 +30,7 @@ import sys
 import zipfile
 from collections.abc import Iterator
 
+from core.domain.enums import ContainerEncryption
 from core.ports.container import ContainerListing, ContainerMember
 
 __all__ = ["CHUNK_SIZE", "ZipContainer"]
@@ -76,7 +79,9 @@ class ZipContainer:
                 format="zip",
                 members=(),
                 solid=False,
-                encrypted=False,
+                # Индекс не прочитан ⇒ предикат шифрования не спрашивался: «не знаю», а
+                # не «не зашифрован» (иначе отказ чтения останется без причины).
+                encryption=ContainerEncryption.UNKNOWN,
                 truncated=False,
                 unreadable=str(exc) or exc.__class__.__name__,
             )
@@ -95,7 +100,11 @@ class ZipContainer:
             members=members,
             # ZIP несолиден по построению — это факт формата, а не «бэкенд не умеет».
             solid=False,
-            encrypted=any(info.flag_bits & _ENCRYPTED_FLAG for info in infos),
+            encryption=(
+                ContainerEncryption.ENCRYPTED
+                if any(info.flag_bits & _ENCRYPTED_FLAG for info in infos)
+                else ContainerEncryption.NOT_ENCRYPTED
+            ),
             truncated=False,
             unreadable=None,
         )
