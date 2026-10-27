@@ -362,6 +362,7 @@ def main() -> int:
     section("Домен (L0) — W2")
     check("инварианты домена возвращают Violation (I1/I4/I13/I7)", lambda: _domain_invariants())
     check("Ф0: ❌ при неполном корпусе требует аттестации (I2c)", lambda: _corpus_coverage_invariant())
+    check("частичное извлечение делает охват неполным (I2/I2c)", lambda: _partial_extraction())
     check("derived-evidence требует hash/резолв (I1/I10/I15/I19, K5)", lambda: _domain_derived())
     check("source_id round-trip + резолв с hash (I10/I15/I19)", lambda: _domain_anchors())
     check("content_hash/prompt_hash детерминированы (§5/I19)", lambda: _util_hashing())
@@ -1132,6 +1133,66 @@ def _domain_invariants() -> None:
     )
     if check_cell(clean):
         raise AssertionError("registry_absence (authoritative) должен быть чистым")
+
+
+def _partial_extraction() -> None:
+    """I2/I2c: частично прочитанный документ делает охват неполным, полный — нет.
+
+    Проверяются три вещи, каждая из которых была бы «тихой потерей»: инвариант модели
+    ``CorpusDoc`` (частичность без причины запрещена), деривация покрытия
+    (``partial_extraction`` в ``blocked`` ⇒ ``complete=False``) и отсутствие регресса
+    (без частичных документов полный корпус остаётся полным).
+    """
+    from core.domain.enums import CrawlItemStatus
+    from core.domain.models import CorpusCoverage, CorpusDoc, CrawlSessionItem
+    from core.pipeline.corpus import derive_corpus_coverage
+
+    # 1. Модель: «частично» без причины — ложная провенанс-запись.
+    try:
+        CorpusDoc(doc_id="d", product_id="p", url="https://a.test/d", partial=True)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("CorpusDoc: partial=True без partial_reason принят")
+
+    # 2. Покрытие: частичный документ становится блокирующим классом.
+    partial = derive_corpus_coverage(
+        product_id="p",
+        items=[
+            CrawlSessionItem(
+                session_id="crawl:r",
+                product_id="p",
+                url="https://a.test/d",
+                status=CrawlItemStatus.FETCHED,
+            )
+        ],
+        truncated=False,
+        computed_at="2026-01-01T00:00:00+00:00",
+        partial_docs=["https://a.test/d"],
+    )
+    if partial.complete or partial.blocked.get("partial_extraction") != 1:
+        raise AssertionError(
+            f"частичное извлечение не сделало охват неполным: {partial.blocked!r}"
+        )
+    if "partial_extraction" not in partial.blocking_failures:
+        raise AssertionError("partial_extraction не в blocking_failures")
+
+    # 3. Регресс-защита: без частичных документов корпус остаётся полным.
+    full = derive_corpus_coverage(
+        product_id="p",
+        items=[
+            CrawlSessionItem(
+                session_id="crawl:r",
+                product_id="p",
+                url="https://a.test/d",
+                status=CrawlItemStatus.FETCHED,
+            )
+        ],
+        truncated=False,
+        computed_at="2026-01-01T00:00:00+00:00",
+    )
+    if not isinstance(full, CorpusCoverage) or not full.complete:
+        raise AssertionError("полный корпус без частичных документов перестал быть полным")
 
 
 def _corpus_coverage_invariant() -> None:
