@@ -25,6 +25,19 @@
   ``# yaml comment`` стал бы ATX-заголовком, а закрывающий ``---`` — setext-заголовком.
   Без тела-отображения документ трактуется по CommonMark (``---`` — разрыв/setext).
 
+**Границы куска.** Кусок кончается на границе строки, иначе слова
+(в обоих случаях — только во второй половине окна, чтобы перевод строки у самого начала
+не ужимал кусок почти до нуля), и только при отсутствии границы (длинный токен без
+пробелов) — жёстким разрезом по ``chunk_size``. Начало следующего куска — ``end -
+chunk_overlap`` — сдвигается **вперёд** к границе слова: кусок не начинается обрывком
+слова. Отсюда следствие, которое важно не путать с обещанием: фактическое перекрытие
+**≤** ``chunk_overlap`` (снап двигает начало вперёд, ``strip`` снимает краевые пробелы),
+«ровно 200» не гарантируется никогда — 200 это верхняя граница, а не измерение.
+
+**Порог фрагмента.** Кусок короче :data:`MIN_CHUNK_SIZE` в индекс не попадает: иначе
+односимвольный остаток таблицы мог бы стать ``source_id`` цитаты. Число — из замера, не
+«на глаз» (см. константу).
+
 Происхождение: адаптировано из проекта gag5 (`ingestion/structural_chunker.py`,
 MIT License, Copyright (c) 2024). Изменения: собственная
 модель ``Chunk`` (chunk_no/heading_path/context_prefix/content_hash), детерминированные
@@ -51,6 +64,27 @@ _THEMATIC_BREAK_RE = re.compile(
 # Строки, которые не являются обычным текстом абзаца (консервативный отказ setext):
 # отступ кода, цитата, список, HTML-блок, строка таблицы.
 _NON_PARAGRAPH_RE = re.compile(r"^(?: {4,}|\t|>|[-*+][ \t]|\d{1,9}[.)][ \t]|<|\|)")
+
+#: Минимальная длина чанка (символы): кусок короче в индекс не попадает.
+#:
+#: Замер на реальном корпусе (``runs/ru-pg-dbms-3edf2b06097c/cohound.db``, 9398 чанков,
+#: ``md-heading-2``, дефолтная геометрия 1500/200): распределение длин p1=36, p5=110,
+#: p50=725, p90=1434; чанков короче 20 символов — 71 (0.76 %), и это почти исключительно
+#: обломки разметки: ``|``, номера страниц (``203``), колонтитулы (``Листов 81``),
+#: заглушки (``<!-- image -->``, 14). «Фразовых» (≥3 слова длиной ≥3) среди них 1 из 71;
+#: в следующей полосе 20–40 символов — уже 27 из 35 (``Версия для работы в Docker``,
+#: ``apt-get remove jatoba18-jcs``). Разрыв на 20 символах и есть граница «мусор ↔
+#: короткая настоящая строка», поэтому порог стоит именно там: выше него начинают
+#: теряться настоящие однострочные утверждения. Доказательств порог не отнимает:
+#: в том же прогоне кратчайший чанк, ставший evidence, — 178 символов (в чанки корпуса
+#: резолвятся 130 из 187 evidence-строк; остальные — на уровне URL), и ни один документ
+#: не теряет все свои чанки (0 из 56 — и при 20, и при 40 символах).
+#:
+#: Порог — антифрагментная защита, а не ось геометрии: он задаётся для дефолтного
+#: ``chunk_size`` и **не** масштабируется сам. При малой ``chunk_size`` его надо объявлять
+#: явно, иначе он выбросит целые короткие куски (``min_chunk_size < chunk_size`` —
+#: проверяется в конструкторе).
+MIN_CHUNK_SIZE = 20
 
 
 def _fence_open(line: str) -> tuple[str, int] | None:
@@ -133,18 +167,33 @@ class MarkdownChunker:
     ``version`` входит в ``partition_build_id``/ключи кэша и в
     ``execution_contract_digest``: смена распознавания заголовков (fence-aware +
     setext) меняет chunk-set, поэтому версия поднята ``md-heading-1`` → ``md-heading-2``.
+
+    Границы куска и порог фрагмента меняют нарезку так же, как распознавание заголовков,
+    поэтому их правка — версионная граница ``execution_versions`` (§13): версию поднимает
+    владелец правки вместе с пере-прогоном, а не адаптер «на месте». Пока версия не
+    поднята, ``chunker_version`` описывает прежнюю нарезку — это известно и объявлено.
     """
 
-    version = "md-heading-2"
+    #: ``md-heading-3`` (было ``md-heading-2``): изменилась **граница куска** (не рвёт
+    #: слова, снап к пробелу) и **порог фрагмента** (1 → 20). Оба меняют набор чанков, то
+    #: есть условия измерения: без подъёма версии ``chunker_version`` описывал бы прежнюю
+    #: нарезку — ложь в контракте. Класс — ``execution_versions`` (§13), не методология.
+    version = "md-heading-3"
 
     def __init__(
         self,
         chunk_size: int = 1500,
         chunk_overlap: int = 200,
-        min_chunk_size: int = 1,
+        min_chunk_size: int = MIN_CHUNK_SIZE,
     ) -> None:
+        if chunk_overlap < 0:
+            raise ValueError("chunk_overlap не может быть отрицательным")
         if chunk_overlap >= chunk_size:
             raise ValueError("chunk_overlap должен быть меньше chunk_size")
+        if min_chunk_size < 0:
+            raise ValueError("min_chunk_size не может быть отрицательным")
+        if min_chunk_size >= chunk_size:
+            raise ValueError("min_chunk_size должен быть меньше chunk_size")
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
         self.min_chunk_size = min_chunk_size
@@ -260,21 +309,63 @@ class MarkdownChunker:
             )
         return sections
 
+    def _cut_point(self, content: str, pos: int, end: int) -> int:
+        """Конец куска: граница строки, иначе любого пробела, иначе жёсткий разрез.
+
+        Граница ищется только во **второй половине** окна: иначе перевод строки у самого
+        ``pos`` ужал бы кусок почти до нуля (``newline > pos`` пропускал ``pos + 1``), и
+        «перекрытие» перестало бы быть перекрытием.
+        """
+        floor = pos + max(self.chunk_size // 2, 1)
+        newline = content.rfind("\n", floor, end)
+        if newline > pos:
+            return newline
+        for index in range(end - 1, floor - 1, -1):
+            if content[index].isspace():
+                return index
+        return end  # границы нет (длинный неразрывный токен) — режем жёстко
+
+    @staticmethod
+    def _start_point(content: str, pos: int, end: int) -> int:
+        """Начало следующего куска — на границе слова (слово не рвётся).
+
+        ``pos`` — это ``end - chunk_overlap``, произвольная позиция внутри слова.
+        Сдвиг вперёд к первому пробельному символу (пробел, перевод строки, табуляция)
+        делает фактическое перекрытие ≤ ``chunk_overlap`` и никогда не начинает кусок
+        с обрывка слова; начало строки — тоже граница слова. Если границы до ``end``
+        нет — остаётся жёсткий разрез (иначе кусок стал бы пустым, а цикл не сдвинулся).
+        """
+        if pos <= 0:
+            return pos
+        if content[pos - 1].isspace() or content[pos].isspace():
+            return pos
+        for index in range(pos, end):
+            if content[index].isspace():
+                return index + 1
+        return pos
+
     def _split_with_overlap(self, content: str) -> list[str]:
+        """Режет секцию на куски ≤ ``chunk_size`` с перекрытием и границами слов.
+
+        Инварианты: длина куска ≤ ``chunk_size``; кусок не начинается и не кончается
+        обрывком слова, кроме случая длинного токена без пробелов/переводов строк;
+        перекрытие соседних кусков ≤ ``chunk_overlap`` (см. докстринг модуля).
+        """
         pieces: list[str] = []
         pos = 0
         length = len(content)
         while pos < length:
             end = min(pos + self.chunk_size, length)
             if end < length:
-                newline = content.rfind("\n", pos, end)
-                if newline > pos:
-                    end = newline
+                end = self._cut_point(content, pos, end)
             piece = content[pos:end].strip()
             if piece:
                 pieces.append(piece)
             next_pos = end - self.chunk_overlap
-            pos = next_pos if next_pos > pos else end
+            if next_pos <= pos or next_pos >= end:
+                pos = end  # перекрытия не осталось — идём строго вперёд
+            else:
+                pos = self._start_point(content, next_pos, end)
         return pieces
 
 

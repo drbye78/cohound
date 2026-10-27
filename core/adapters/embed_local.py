@@ -9,6 +9,12 @@
 ``batch_size``, конкатенируя результаты. Порядок выхода совпадает с порядком входа
 (детерминизм, A3).
 
+**Ревизия и оффлайн.** ``revision`` (git-sha/тег) входит в ``model_id`` как
+``repo@<sha>``, поэтому ``embed_model_id`` описывает фактические веса, а не «текущий
+main»; ``local_files_only=True`` по умолчанию — как у ``LiteEmbedder``: веса берутся из
+локального кэша, и отсутствие снапшота видно как ошибка загрузки, а не как тихий поход
+в интернет из ядра.
+
 **Ленивый импорт тяжёлой зависимости.** ``sentence-transformers`` (тянет ``torch``)
 импортируется только в реальном пути. Модуль импортируется и тестируется без него;
 ``available`` показывает готовность.
@@ -77,9 +83,20 @@ class LocalEmbedder:
     """Локальный батчевый эмбеддер (bge-m3). Реализация ``EmbedderPort``.
 
     :param embed_fn: шов для тестов/подмены; ``None`` → реальная модель (лениво).
-    :param model_id: идентификатор модели; пишется в манифест как ``embed_model_id``.
+    :param model_id: идентификатор модели (HF-repo); пишется в манифест как
+        ``embed_model_id`` — с пином ревизии, если она объявлена (см. ``revision``).
     :param dim: ожидаемая размерность вектора (для bge-m3 — 1024).
     :param batch_size: размер батча при нарезке входа (детерминирован).
+    :param revision: пин ревизии весов (git-sha/тег). При задании ``model_id``
+        становится ``repo@<rev>``: иначе ``embed_model_id`` описывал бы «какую-то»
+        версию весов, а не фактические байты, из которых построен индекс (тот же
+        приём, что в :class:`core.adapters.embed_model2vec.LiteEmbedder`).
+    :param local_files_only: не ходить в сеть за весами (дефолт ``True`` — как у
+        ``LiteEmbedder``): снапшот модели обязан быть в локальном кэше HF, иначе
+        загрузка **видимо** падает. Это осознанно: ядро не тянет веса из интернета
+        в момент прогона, а ``available`` говорит только о наличии стека, не о кэше.
+        Оператор, которому нужен первый скачок, передаёт ``local_files_only=False``
+        явно — тогда это его объявленное действие, а не умолчание адаптера.
     """
 
     def __init__(
@@ -89,6 +106,8 @@ class LocalEmbedder:
         model_id: str = DEFAULT_MODEL_ID,
         dim: int = DEFAULT_DIM,
         batch_size: int = DEFAULT_BATCH_SIZE,
+        revision: str | None = None,
+        local_files_only: bool = True,
     ) -> None:
         if not model_id:
             raise ValueError("model_id обязан быть непустым")
@@ -96,7 +115,11 @@ class LocalEmbedder:
             raise ValueError(f"dim обязан быть положительным, получено {dim!r}")
         if batch_size <= 0:
             raise ValueError(f"batch_size обязан быть положительным, получено {batch_size!r}")
-        self.model_id = model_id
+        self._repo_id = model_id
+        #: Идентификатор с пином ревизии: ``repo@<sha>`` (пишется в манифест, §13).
+        self.model_id = f"{model_id}@{revision}" if revision else model_id
+        self.revision = revision
+        self.local_files_only = local_files_only
         self.dim = dim
         self.batch_size = batch_size
         self._embed_fn = embed_fn
@@ -141,11 +164,20 @@ class LocalEmbedder:
         return self._load_model()
 
     def _load_model(self) -> EmbedFn:
-        """Лениво загружает ``SentenceTransformer`` и кэширует его в экземпляре."""
+        """Лениво загружает ``SentenceTransformer`` и кэширует его в экземпляре.
+
+        Ревизия и оффлайн-режим передаются в загрузчик явно: без ``revision``
+        загрузились бы «текущие» веса, и ``embed_model_id`` перестал бы описывать
+        фактическую сборку (C11).
+        """
         if self._model is None:
             from sentence_transformers import SentenceTransformer  # type: ignore[import-not-found]
 
-            self._model = SentenceTransformer(self.model_id)
+            self._model = SentenceTransformer(
+                self._repo_id,
+                revision=self.revision,
+                local_files_only=self.local_files_only,
+            )
 
         model = self._model
 

@@ -10,6 +10,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from core.adapters import index_format
 from core.util.index_layout import COMPOSITIONS_DIR
 
@@ -82,3 +84,70 @@ def test_is_committed_false_when_manifest_unreadable(tmp_path: Path) -> None:
 
 def test_is_committed_false_when_partition_absent(tmp_path: Path) -> None:
     assert not index_format.is_committed(tmp_path, PKG, BUILD, PRODUCT)
+
+
+# ---------------------------------------------------------------------------
+# Атомарность записи партиции (C10) — нужен numpy (write_partition)
+# ---------------------------------------------------------------------------
+
+try:  # необязательная зависимость (extra ``retrieval``)
+    import numpy as np  # type: ignore[import-not-found]
+except ImportError:  # pragma: no cover - зависит от окружения
+    np = None  # type: ignore[assignment]
+
+requires_numpy = pytest.mark.skipif(np is None, reason="numpy не установлен (extra retrieval)")
+
+
+def _write(root: Path, chunk_ids: list[str], tag: float = 1.0) -> Path:
+    return index_format.write_partition(
+        root,
+        PKG,
+        BUILD,
+        PRODUCT,
+        [[tag, tag] for _ in chunk_ids],
+        chunk_ids,
+        {"dim": 2, "chunk_ids": chunk_ids},
+    )
+
+
+def _leftovers(root: Path) -> list[str]:
+    """Служебные каталоги рядом с партицией: staging или отведённый «мусор»."""
+    parent = index_format.build_root(root, PKG, BUILD, PRODUCT).parent
+    return sorted(p.name for p in parent.iterdir() if p.name.startswith("."))
+
+
+@requires_numpy
+def test_rewrite_replaces_partition_and_leaves_no_debris(tmp_path: Path) -> None:
+    """Перезапись существующей партиции не оставляет staging/мусора (C10)."""
+    _write(tmp_path, ["c1", "c2"])
+    target = _write(tmp_path, ["c9"])
+
+    assert index_format.read_partition(tmp_path, PKG, BUILD, PRODUCT).chunk_ids == ["c9"]
+    assert target.is_dir()
+    assert _leftovers(tmp_path) == []
+
+
+@requires_numpy
+def test_write_partition_failure_keeps_previous_partition(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Сбой финального ``os.replace`` возвращает прежнюю партицию, а не теряет её (C10)."""
+    _write(tmp_path, ["c1", "c2"])
+    real_replace = index_format.os.replace
+    calls: list[tuple[str, str]] = []
+
+    def flaky_replace(src, dst):  # noqa: ANN001, ANN202 - подмена сигнатуры os.replace
+        calls.append((str(src), str(dst)))
+        if len(calls) == 2:  # 1-й — увод прежней партиции, 2-й — вставка новой
+            raise OSError("имитация сбоя replace")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(index_format.os, "replace", flaky_replace)
+
+    with pytest.raises(OSError):
+        _write(tmp_path, ["cX"])
+
+    # Прежняя партиция на месте и читается целиком (не «наполовину удалена»).
+    assert index_format.is_committed(tmp_path, PKG, BUILD, PRODUCT)
+    assert index_format.read_partition(tmp_path, PKG, BUILD, PRODUCT).chunk_ids == ["c1", "c2"]
+    assert _leftovers(tmp_path) == []

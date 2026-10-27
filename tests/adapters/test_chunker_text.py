@@ -1,4 +1,4 @@
-"""Тесты абзацного чанкера plain text (``text-para-1``).
+"""Тесты абзацного чанкера plain text (``text-para-2``).
 
 Ключевое отличие от markdown-чанкера: у плоского текста нет заголовков, поэтому единица
 нарезки — **абзац**, а не «единственный раздел, порезанный по размеру». Проверяется:
@@ -9,6 +9,7 @@
   и только «бесконечное» предложение — жёстко;
 * ``heading_path`` всегда пуст (заголовков в тексте нет — выдумывать нельзя);
 * ``context_prefix`` — первое предложение первого абзаца чанка, ограниченное по длине;
+* порог фрагмента (``MIN_CHUNK_SIZE``): кусок короче в индекс не попадает (C6);
 * детерминизм и стабильность версии (``chunker_version`` входит в контракт/``run_id``).
 
 Нейтрален (§1.3).
@@ -16,8 +17,11 @@
 
 from __future__ import annotations
 
+import pytest
+
 from core.adapters.chunker_text import (
     CONTEXT_PREFIX_MAX,
+    MIN_CHUNK_SIZE,
     TEXT_CHUNKER_VERSION,
     TextChunker,
     TextChunkerPort,
@@ -33,7 +37,7 @@ _LONG = (
 
 
 def test_version_and_port_contract() -> None:
-    assert TextChunker.version == TEXT_CHUNKER_VERSION == "text-para-1"
+    assert TextChunker.version == TEXT_CHUNKER_VERSION == "text-para-2"
     assert isinstance(TextChunkerPort(), ChunkerPort)
 
 
@@ -137,3 +141,27 @@ def test_port_path_chunks_extracted_doc() -> None:
 
 def test_empty_text_produces_no_chunks() -> None:
     assert TextChunker().chunk("doc", "   \n\n  \n") == []
+
+
+# ---------------------------------------------------------------------------
+# порог фрагмента (C6)
+# ---------------------------------------------------------------------------
+
+
+def test_min_chunk_size_default_is_declared() -> None:
+    """Порог объявлен константой и действует по умолчанию (C6)."""
+    assert MIN_CHUNK_SIZE == 20
+    assert TextChunker().min_chunk_size == MIN_CHUNK_SIZE
+
+
+def test_fragment_below_min_chunk_size_is_not_indexed() -> None:
+    """Обломок разметки не попадает в индекс: как ``source_id`` он ложен (C6/I22)."""
+    assert TextChunker().chunk("doc", "|\n\nЛистов 81") == []
+    assert [c.text for c in TextChunker().chunk("doc", _LONG)] == [_LONG]
+
+
+def test_min_chunk_size_must_fit_chunk_size() -> None:
+    with pytest.raises(ValueError):
+        TextChunker(chunk_size=20, min_chunk_size=20)
+    with pytest.raises(ValueError):
+        TextChunker(min_chunk_size=-1)

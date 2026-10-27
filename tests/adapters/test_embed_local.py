@@ -182,8 +182,10 @@ def _fake_st_module(dim: int) -> tuple[types.ModuleType, list[Any]]:
             return self._rows
 
     class _Model:
-        def __init__(self, model_id: str) -> None:
+        def __init__(self, model_id: str, **kwargs: Any) -> None:
             self.model_id = model_id
+            # Журнал аргументов загрузчика: ревизия и оффлайн-режим (C11).
+            self.init_kwargs = kwargs
             self.encode_calls: list[dict[str, Any]] = []
             instances.append(self)
 
@@ -221,6 +223,8 @@ def test_real_path_lazy_loads_and_batches(monkeypatch: pytest.MonkeyPatch) -> No
 
     assert emb._model is instances[0]
     assert instances[0].model_id == "test/model"
+    # Ревизия и оффлайн-режим передаются явно: по умолчанию сеть не трогается (C11).
+    assert instances[0].init_kwargs == {"revision": None, "local_files_only": True}
     assert [call["batch"] for call in instances[0].encode_calls] == [["a", "bb"], ["ccc"]]
     assert instances[0].encode_calls[0]["normalize_embeddings"] is True
     assert instances[0].encode_calls[0]["convert_to_numpy"] is True
@@ -232,3 +236,22 @@ def test_real_path_lazy_loads_and_batches(monkeypatch: pytest.MonkeyPatch) -> No
 # ---------------------------------------------------------------------------
 
 
+
+
+def test_revision_is_pinned_and_passed_to_loader(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``revision`` пинится в ``model_id`` и уходит в загрузчик весов (C11)."""
+    fake, instances = _fake_st_module(dim=2)
+    monkeypatch.setattr(module, "_sentence_transformers_available", lambda: True)
+    monkeypatch.setitem(sys.modules, "sentence_transformers", fake)
+
+    emb = LocalEmbedder(
+        model_id="test/model", dim=2, revision="abc123", local_files_only=False
+    )
+    assert emb.model_id == "test/model@abc123"
+    assert emb.revision == "abc123"
+
+    emb.embed(["a"])
+
+    # Веса загружаются по repo, а не по «repo@rev»: ревизия — отдельный аргумент.
+    assert instances[0].model_id == "test/model"
+    assert instances[0].init_kwargs == {"revision": "abc123", "local_files_only": False}

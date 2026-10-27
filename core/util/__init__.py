@@ -3,7 +3,6 @@
 __all__ = [
     "agreement",
     "cache",
-    "fusion",
     "hashing",
     "ids",
     "logging",

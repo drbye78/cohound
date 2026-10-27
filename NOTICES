@@ -20,7 +20,6 @@
 |---|---|---|
 | `core/util/security.py` | `core/security.py` | удалена функция под графовую БД (Cypher); добавлена типизация; сохранена категорийная нейтральность (§1.3) |
 | `core/util/text_utils.py` | `core/text_utils.py` | нейтрализация под §1.3; удалены доменные/LLM-специфичные ветки; API упрощён |
-| `core/util/fusion.py` | `retrieval/fusion.py` | убраны доменные веса (graph/code/docs); ключ дедупликации вынесен в параметр (`chunk_id`); добавлена типизация |
 | `core/adapters/chunker_markdown.py` | `ingestion/structural_chunker.py` | сохранён `heading_path`; добавлено fence-aware распознавание заголовков (`md-heading-2`); вынесено в `ChunkerPort` |
 | `core/adapters/extract_document.py` | `documents/parse.py` | оставлен путь `DocumentConverter.export_to_markdown()`; расширен на Office-форматы; добавлена ось `document_level`; ленивый импорт docling |
 

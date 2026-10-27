@@ -45,6 +45,7 @@ from pathlib import Path
 from typing import Any
 
 from core.adapters import index_format
+from core.ports.index_builder import ImmutableBuildError as PortImmutableBuildError
 from core.ports.index_builder import IndexMeta
 from core.ports.types import Chunk
 from core.util.hashing import content_hash, short_hash
@@ -86,19 +87,30 @@ def derive_build_id(
 ) -> str:
     """Детерминированный ``build_id`` автономной сборки (без явного id от вызывающего).
 
-    Склейка фиксированным разделителем; порядок ``chunk_ids``/``content_hashes`` значим,
-    т.к. задаёт отображение «строка ``chunk_ids.jsonl`` ↔ строка матрицы векторов». Группы
-    (id ↔ хеши) разделены отдельным символом — это исключает коллизии при склейке.
-    ``snapshot_date`` не входит (09 §8.1: провенанс, не содержимое). Возвращает ``pb_`` +
-    24 hex-символа SHA-256.
+    Склейка двумя разными символами: **поля** — ``_FIELD_SEP`` (``\\x1f``), **группы**
+    «id чанков ↔ хеши» — ``_GROUP_SEP`` (``\\x1e``). Раньше обе склейки шли одним
+    ``_FIELD_SEP``, хотя комментарий обещал «отдельный символ»: ``package``/``chunker_version``
+    /``embed_model_id`` и два списка сливались в одну плоскую строку, и граница между
+    группами восстанавливалась только по числу элементов. Теперь группы отделены иначе,
+    чем поля.
+
+    Остаётся объявленное допущение: внутри одного списка элементы разделяются тем же
+    ``_FIELD_SEP``, поэтому элемент списка не должен содержать ``\\x1f``/``\\x1e``.
+    Для ``chunk_id`` и ``content_hash`` это гарантировано форматом (``doc_id#N``,
+    hex), и ``corpus`` пишет только такие id (``corpus.py:1877``).
+
+    Порядок ``chunk_ids``/``content_hashes`` значим, т.к. задаёт отображение
+    «строка ``chunk_ids.jsonl`` ↔ строка матрицы векторов». ``snapshot_date`` не входит
+    (09 §8.1: провенанс, не содержимое). Возвращает ``pb_`` + 24 hex-символа SHA-256.
     """
     material = _FIELD_SEP.join(
         (
             package,
             chunker_version,
             embed_model_id,
-            _FIELD_SEP.join(chunk_ids),
-            _FIELD_SEP.join(content_hashes),
+            _GROUP_SEP.join(
+                (_FIELD_SEP.join(chunk_ids), _FIELD_SEP.join(content_hashes))
+            ),
         )
     )
     return _BUILD_ID_PREFIX + short_hash(material, 24)
@@ -118,8 +130,12 @@ def _content_digest(
     return content_hash(meta_material + _GROUP_SEP.encode("utf-8") + matrix.tobytes())
 
 
-class ImmutableBuildError(RuntimeError):
-    """Попытка изменить уже зафиксированную сборку другим содержимым (K2/§13)."""
+class ImmutableBuildError(PortImmutableBuildError):
+    """Попытка изменить уже зафиксированную сборку другим содержимым (K2/§13).
+
+    Наследует одноимённый класс порта (``core/ports/index_builder.py``), чтобы
+    ``pipeline`` ловил его **типом**, а не сравнением имени (S9c).
+    """
 
 
 class NpyIndexBuilder:

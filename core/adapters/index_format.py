@@ -13,8 +13,9 @@
 через :func:`write_partition`, ``vector_npy.py`` (``VectorIndexPort``) читает через
 :func:`read_partition`. Это исключает расхождение раскладки между писателем и читателем.
 
-Существующая сборка **не мутируется** (K2/§13): запись идёт в staging-каталог и
-фиксируется атомарным ``os.replace``. Нейтрален (§1.3).
+Существующая сборка **не мутируется** (K2/§13): запись идёт в staging-каталог, прежняя
+партиция уводится одним rename в мусорное имя, и на её место встаёт staging атомарным
+``os.replace`` — пути партиции не бывает «наполовину удалённым». Нейтрален (§1.3).
 
 **Чтение — через ``mmap``.** ``read_partition`` отображает ``vectors.fp16.npy`` в память
 (``mmap_mode="r"``), а не читает его в кучу на каждый вызов; формат на диске остаётся
@@ -24,6 +25,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import shutil
@@ -89,9 +91,18 @@ def write_partition(
 ) -> Path:
     """Пишет партицию **атомарно** в ``index_store/{package}/{build}/{product_id}/``.
 
-    Байты формируются в staging-каталоге рядом с целью, затем каталог заменяется
-    через ``os.replace`` (существующая сборка не мутируется на месте — K2/§13).
-    Векторы конвертируются в ``float16`` (02 §B.2). Возвращает путь партиции.
+    Байты формируются в staging-каталоге рядом с целью. Прежняя партиция (если есть)
+    уводится **целиком одним rename** в мусорное имя, затем на её место встаёт staging
+    через ``os.replace``; мусор удаляется после. Существующая сборка не мутируется
+    на месте (K2/§13). Векторы конвертируются в ``float16`` (02 §B.2). Возвращает путь
+    партиции.
+
+    Почему не ``rmtree`` + ``replace``: ``rmtree`` удаляет файл за файлом, и на всё это
+    время каталог партиции **существует частично** — конкурентный читатель
+    (``read_partition``/``is_committed``/``list_partitions``) получал ``FileNotFoundError``
+    на ``chunk_ids.jsonl`` или манифест. Теперь партиция на пути видна либо целиком
+    старая, либо целиком новая: окно между двумя rename — один системный вызов, а не
+    длительность удаления дерева файлов.
 
     :raises ValueError: если длины ``vectors`` и ``chunk_ids`` не совпадают.
     """
@@ -104,6 +115,7 @@ def write_partition(
     target = build_root(index_root, package, build_id, product_id)
     target.parent.mkdir(parents=True, exist_ok=True)
     staging = Path(tempfile.mkdtemp(prefix=".staging-", dir=str(target.parent)))
+    trash: Path | None = None
     try:
         matrix = np.asarray(vectors, dtype=np.float16)
         if matrix.ndim != 2:
@@ -117,11 +129,19 @@ def write_partition(
             encoding="utf-8",
         )
         if target.exists():
-            shutil.rmtree(target)
+            # Имя мусора уникально: staging-каталог уже создан с уникальным суффиксом.
+            trash = staging.with_name(f"{staging.name}-old")
+            os.replace(target, trash)
         os.replace(staging, target)
     except Exception:
         shutil.rmtree(staging, ignore_errors=True)
+        if trash is not None and trash.exists() and not target.exists():
+            # Новая партиция не встала на место — возвращаем прежнюю, чтобы не потерять сборку.
+            with contextlib.suppress(OSError):
+                os.replace(trash, target)
         raise
+    if trash is not None:
+        shutil.rmtree(trash, ignore_errors=True)
     return target
 
 

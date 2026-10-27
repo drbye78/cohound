@@ -24,6 +24,7 @@ from core.adapters.index_npy import (
 from core.ports.index_builder import IndexBuilderPort, IndexMeta
 from core.ports.types import Chunk
 from core.util.hashing import content_hash as chash
+from core.util.hashing import short_hash
 
 try:  # необязательная зависимость (extra ``retrieval``)
     import numpy as np  # type: ignore[import-not-found]
@@ -404,3 +405,38 @@ def test_build_without_numpy_raises_clear_error(tmp_path: Path, monkeypatch) -> 
 # --------------------------------------------------------------------------- #
 
 
+
+
+# --------------------------------------------------------------------------- #
+# Формула build_id: группы отделены от полей (C9)
+# --------------------------------------------------------------------------- #
+
+def test_build_id_separates_groups_from_fields() -> None:
+    """Поля и группы склеиваются **разными** разделителями (C9).
+
+    Раньше ``package``/``chunker_version``/``embed_model_id`` и два списка сливались одним
+    ``_FIELD_SEP``, хотя докстринг обещал «отдельный символ»: границу между группами можно
+    было восстановить только по числу элементов. Поэтому две разные пары
+    «(id чанков), (хеши)» с разделителем внутри id давали один и тот же ``pb_``.
+    """
+    field_sep, group_sep = "\x1f", "\x1e"
+    split_a = (["x" + field_sep + "y"], ["z"])
+    split_b = (["x"], ["y" + field_sep + "z"])
+
+    # Старая (плоская) склейка: обе пары дают одну строку → одна сборка.
+    def _flat(ids: list[str], hashes: list[str]) -> str:
+        return field_sep.join(("p", "c", "m", field_sep.join(ids), field_sep.join(hashes)))
+
+    assert _flat(*split_a) == _flat(*split_b)
+    # Новая формула группы различает.
+    assert derive_build_id("p", "c", "m", *split_a) != derive_build_id("p", "c", "m", *split_b)
+    # И совпадает со склейкой «поля \x1f, группы \x1e».
+    material = field_sep.join(
+        (
+            "p",
+            "c",
+            "m",
+            group_sep.join((field_sep.join(split_a[0]), field_sep.join(split_a[1]))),
+        )
+    )
+    assert derive_build_id("p", "c", "m", *split_a) == "pb_" + short_hash(material, 24)

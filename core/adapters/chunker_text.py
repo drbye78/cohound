@@ -14,11 +14,17 @@
 
 ``heading_path`` — всегда ``""``: заголовков в плоском тексте нет, и выдумывать их нельзя
 (anchor-blind/честность структуры). ``context_prefix`` — первое предложение первого абзаца
-чанка, ограниченное :data:`CONTEXT_PREFIX_MAX` символами (дешёвый контекст для эмбеддинга,
-а не заголовок).
+чанка, ограниченное :data:`CONTEXT_PREFIX_MAX` символами. Контекст идёт в промпт оценщика
+шапкой фрагмента (``context:``, ``core.pipeline.prompt``) и **в эмбеддинг не входит**:
+эмбеддится чистый ``text``, поэтому правка контекста не меняет ``index_build_id``. На
+retrieval-пути поле пока теряется: ``RetrievedChunk`` его не несёт, и до оценщика строка
+``context:`` доходит только там, где передан ``Chunk``.
 
 ``version`` = ``text-para-1``: входит в ``chunker_version`` → ``partition_build_id``/
 ``index_build_id``, поэтому смена правил нарезки обязана поднять версию (§13).
+Порог фрагмента (:data:`MIN_CHUNK_SIZE`) — такая же смена нарезки: её версионная граница
+``execution_versions``, и версию поднимает владелец правки вместе с пере-прогоном, а не
+адаптер «на месте». Пока она не поднята, ``chunker_version`` описывает прежний набор чанков.
 
 Нейтрален (§1.3).
 """
@@ -30,13 +36,31 @@ import re
 
 from core.ports.types import Chunk, ExtractedDoc
 
-__all__ = ["CONTEXT_PREFIX_MAX", "TEXT_CHUNKER_VERSION", "TextChunker", "TextChunkerPort"]
+__all__ = [
+    "CONTEXT_PREFIX_MAX",
+    "MIN_CHUNK_SIZE",
+    "TEXT_CHUNKER_VERSION",
+    "TextChunker",
+    "TextChunkerPort",
+]
 
 #: Версия правил нарезки (провенанс/``chunker_version``).
-TEXT_CHUNKER_VERSION = "text-para-1"
+#: ``text-para-2`` (было ``text-para-1``): введён порог фрагмента (1 → 20). Порог меняет
+#: набор чанков, то есть условие измерения: ``execution_versions`` (§13), не методология.
+TEXT_CHUNKER_VERSION = "text-para-2"
 
-#: Потолок ``context_prefix`` (символы): контекст нужен для эмбеддинга, а не как второй
-#: абзац; значение совпадает по масштабу с заголовочным путём markdown-чанкера.
+#: Минимальная длина чанка (символы): кусок короче в индекс не попадает.
+#:
+#: То же значение и то же обоснование, что у markdown-чанкера (замер распределения длин
+#: на реальном корпусе — :data:`core.adapters.chunker_markdown.MIN_CHUNK_SIZE`): кусок
+#: короче порога — обломок разметки, а не утверждение, и как ``source_id`` цитаты он
+#: опасен (I22). Порог не масштабируется под ``chunk_size`` сам: при малой геометрии
+#: его объявляют явно (``min_chunk_size < chunk_size`` — проверяется конструктором).
+MIN_CHUNK_SIZE = 20
+
+#: Потолок ``context_prefix`` (символы): контекст — шапка фрагмента в промпте оценщика
+#: (в эмбеддинг он не входит), а не второй абзац; значение совпадает по масштабу с
+#: заголовочным путём markdown-чанкера.
 CONTEXT_PREFIX_MAX = 200
 
 #: Граница абзаца — строка, состоящая только из пробелов (plain text из CMS часто несёт
@@ -136,10 +160,14 @@ class TextChunker:
     def __init__(
         self,
         chunk_size: int = 1500,
-        min_chunk_size: int = 1,
+        min_chunk_size: int = MIN_CHUNK_SIZE,
     ) -> None:
         if chunk_size <= 0:
             raise ValueError("chunk_size должен быть положительным")
+        if min_chunk_size < 0:
+            raise ValueError("min_chunk_size не может быть отрицательным")
+        if min_chunk_size >= chunk_size:
+            raise ValueError("min_chunk_size должен быть меньше chunk_size")
         self.chunk_size = chunk_size
         self.min_chunk_size = min_chunk_size
 
