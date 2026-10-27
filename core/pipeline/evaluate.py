@@ -73,6 +73,7 @@ from core.domain import (
     Status,
 )
 from core.domain.anchors import SourceResolver
+from core.domain.invariants import check_absence_coverage
 from core.domain.models import absence_evidence_id
 from core.pipeline.eval_cache import (
     EVAL_CACHE_FORMAT,
@@ -107,6 +108,7 @@ from core.ports.vector_index import (
 from core.util.hashing import content_hash
 
 __all__ = [
+    "ABSENCE_COVERAGE_UNSATISFIED_REASON",
     "ABSENCE_UNATTESTED_REVIEW_REASON",
     "CORPUS_INCOMPLETE_REVIEW_REASON",
     "DEFAULT_QUERY_EMBED_BATCH",
@@ -159,6 +161,13 @@ CORPUS_INCOMPLETE_REVIEW_REASON = "corpus_incomplete_absence"
 #: (I4), поэтому исход — ``❓`` с этой причиной, а не ``failed``: ``❓`` остаётся в карте,
 #: ``failed`` выпадает из неё целиком.
 ABSENCE_UNATTESTED_REVIEW_REASON = "absence_unattested"
+
+#: Машинный токен I2c: ``❌`` **не публикуется**, потому что класс отрицания несовместим с
+#: наблюдённым охватом корпуса (нет принятия риска, класс не даёт «нет» либо у строки нет
+#: объекта силы отрицания). Пишется и в ``evidence_scope.reason`` (почему ``❓``), и в
+#: ``cells.validation_notes`` (что именно не так) — предъявим после прогона, а не только
+#: в консоли.
+ABSENCE_COVERAGE_UNSATISFIED_REASON = "absence_coverage_unsatisfied"
 
 #: Токен причины, по которой ``❌``-претензия модели не стала ``❌``: заявлен ``explicit``,
 #: но цитаты нет. Отказ направлен наружу (ложное «нет» уезжает в карту как факт), поэтому
@@ -1350,6 +1359,92 @@ def _build_absence_evidence(
     return entries
 
 
+def _enforce_absence_coverage(
+    *,
+    out_status: Status,
+    scope: EvidenceScope | None,
+    absence_evidence: Sequence[dict],
+    param: CatalogRow,
+    product_id: str,
+    coverage: CorpusCoverage | None,
+) -> tuple[Status, EvidenceScope | None, bool, list[str]]:
+    """I2c: ``❌`` сверяется с **наблюдённым** охватом корпуса — единственное место вызова.
+
+    Инвариант объявлен в домене (:func:`core.domain.invariants.check_absence_coverage`) и
+    продублирован в отчёте, но до этой правки в конвейере **не исполнялся**: недоказанное
+    «нет» уезжало в ``❓`` только потому, что :func:`_resolve_denial` выбирает класс по
+    неполноте охвата. Совпадение по построению — не защита: любое послабление модели
+    (или новый писатель ячейки, собирающий ``EvidenceScope`` мимо ``_resolve_denial``)
+    публиковало бы ``❌`` на тонком корпусе молча.
+
+    Почему нарушение даёт ``❓``, а не ``failed`` (I2/I2c/I4). Отсутствие принятия риска —
+    **процедурное** условие, а не отказ прибора: краул и экстрактор отработали, измерение
+    состоялось, но его охват не покрывает пространство. ``failed`` (I4) означает «прибор
+    не смог» и выпадает из карты целиком, а здесь факт наблюдался — он просто не доказывает
+    отсутствия. Поэтому ячейка **остаётся** в карте как ``❓`` с причиной (I12: ``❓``
+    никогда не трактуется как ``❌``), и на ней нет протокола отсутствия: ``absence_evidence``
+    — носитель утверждения «искали и не нашли», а утверждение не доказано.
+
+    Кандидатная строка строится через ``model_construct`` намеренно: валидаторы домена
+    такие комбинации **не собирают** (двойная защита), поэтому инвариант спрашивается у
+    *предполагаемой* строки. Это второй рубеж, и он исполняется, а не подразумевается.
+
+    ``coverage is None`` — записи покрытия нет (нет краула/историческая строка): проверка
+    неприменима, вердикт не меняется (объявленная семантика I2c).
+
+    :returns: ``(status, scope, demoted, notes)``. ``demoted`` говорит вызывающему, что
+        протокол отсутствия публиковать нельзя; ``notes`` — машинные записи для
+        ``cells.validation_notes`` (называют нарушенный компонент и виновника).
+    """
+    if out_status is not Status.ABSENT:
+        # Не ``❌`` — вопрос I2c не стоит (домен проверяет то же условие у себя).
+        return out_status, scope, False, []
+    prospective = Cell.model_construct(
+        run_id="",
+        product_id=product_id,
+        param_id=param.param_id,
+        state=CellState.EVALUATED,
+        status=out_status,
+        absence_rule=param.absence_rule,
+        absence_evidence=list(absence_evidence),
+        evidence_scope=scope,
+    )
+    violations = check_absence_coverage(prospective, coverage)
+    if not violations:
+        return out_status, scope, False, []
+
+    # Сообщение домена уже называет инвариант (``I2c:``) и недостающий компонент
+    # (``scope_acceptance``/``evidence_scope``); приписываем только поле строки.
+    detail = "; ".join(
+        f"[{violation.field or '—'}] {violation.message}" for violation in violations
+    )
+    reason = (
+        f"{ABSENCE_COVERAGE_UNSATISFIED_REASON}: ❌ не публикуется — {detail}"
+    )
+    demoted = (
+        EvidenceScope(
+            denial_strength=DenialStrength.NOT_STATED,
+            reason=reason,
+            basis="i2c_demoted",
+        )
+        if scope is None
+        else scope.model_copy(
+            update={
+                "denial_strength": DenialStrength.NOT_STATED,
+                "reason": reason,
+                "basis": f"{scope.basis or 'pipeline'}->i2c_demoted",
+            }
+        )
+    )
+    notes = [
+        _compact_note(
+            f"{ABSENCE_COVERAGE_UNSATISFIED_REASON}: {product_id}/{param.param_id}: "
+            f"I2c [{violation.field or '—'}] {violation.message}"
+        )
+        for violation in violations
+    ]
+    return Status.UNKNOWN, demoted, True, notes
+
 def _coverage_for(
     coverage: CorpusCoverage | None,
     store: StorePort | None,
@@ -1754,8 +1849,10 @@ def evaluate_cell(
         §2.2 п.7/п.8); ``None`` — обычная запись Ш6.
     :param coverage: покрытие корпуса продукта (Ф0). ``None`` — прочитать из store
         (``read_corpus_coverage``) либо, если записи нет, сохранить прежнее поведение.
-        Покрытие задаёт **класс** отрицания (``unobserved`` при неполном охвате), а не
-        запрет публиковать ``❌``.
+        Покрытие задаёт **класс** отрицания (``unobserved`` при неполном охвате) и —
+        через I2c (:func:`_enforce_absence_coverage`) — проверяет, согласован ли ``❌``
+        с наблюдённым охватом. ``coverage=None`` (записи нет) делает I2c неприменимым:
+        вердикт не меняется.
     :param scope_acceptance: **принятие риска** человеком (прежде ``scope_attested_by``).
         Не подставляется автоматически: это решение человека, переданное вызывающим.
         Нужно только там, где измерение не покрывает пространство (``bounded``);
@@ -1970,6 +2067,22 @@ def evaluate_cell(
                     effective_coverage,
                     accepted_by=evidence_scope.scope_acceptance,
                 )
+        # I2c: объявленный инвариант исполняется здесь и только здесь. Если класс
+        # отрицания не согласован с наблюдённым охватом, ``❌`` не публикуется: ячейка
+        # становится ``❓`` с причиной, а протокол отсутствия снимается (см.
+        # :func:`_enforce_absence_coverage`).
+        out_status, evidence_scope, demoted, coverage_notes = _enforce_absence_coverage(
+            out_status=out_status,
+            scope=evidence_scope,
+            absence_evidence=absence_evidence,
+            param=param,
+            product_id=product_id,
+            coverage=effective_coverage,
+        )
+        if demoted:
+            # Протокол пустоты на ``❓``-ячейке был бы утверждением «искали и не нашли».
+            absence_evidence = []
+            denial_notes = [*denial_notes, *coverage_notes]
         cell = _evaluated_cell(
             out_status=out_status,
             evidence=out.evidence,

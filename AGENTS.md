@@ -333,11 +333,23 @@ Source routing краула (`crawl_sources.yaml`): директорные ис�
   `source_scope: exhaustive` **записывается** (проверяется `_has_exhaustive_scope`), а
   `scope_attested_by` не требуется: реестр — авторитетная энумерация. Для `explicit`
   `source_scope` не требуется — но см. I2c.
-- **I2c** `❌` при **неполном** покрытии корпуса (`coverage.complete is False`) и
-  `absence_rule=explicit` требует человеческой аттестации `scope_attested_by` в
-  absence-evidence (`check_absence_coverage`, зеркало в отчёте). Без неё заблокированный
-  источник давал бы тонкий корпус, а оценщик — `❌`, опубликованный как доказательство
-  отсутствия. `coverage=None` (нет записи покрытия) — проверка неприменима.
+- **I2c** `❌` при **неполном** покрытии корпуса (`coverage.complete is False`) — условие
+  зависит от **класса отрицания**, а не от одной полноты краула
+  (`check_absence_coverage`, зеркало в отчёте; вызывается в Ш6 через
+  `evaluate._enforce_absence_coverage` — до 28.10 он был объявлен, но в конвейере **не
+  исполнялся**):
+  - `explicit` (дословная цитата вендора) и `authoritative` (авторитетная энумерация) —
+    неполнота охвата их **не отменяет**: это свидетельство, а не вывод из полноты корпуса;
+  - `bounded` — зависит от пространства, поэтому требует `scope_acceptance` (принятия риска
+    человеком); без неё `❌` не публикуется;
+  - `unobserved`/`not_stated` — `❌` не дают вообще (I2).
+  Нарушение → ячейка **`❓`** (`not_stated`, I12), а не `failed`: отсутствие принятия риска
+  — процедурное условие, а не отказ прибора (I4), и ячейка обязана остаться в карте. Снятый
+  `❌` не публикует и протокол отсутствия (`absence_evidence=[]`): «искали и не нашли» —
+  утверждение, которое здесь не доказано. Причина уходит машинным токеном
+  `absence_coverage_unsatisfied` в `evidence_scope.reason` **и** `cells.validation_notes`,
+  называя недостающий компонент и виновника (`{product_id}/{param_id}`).
+  `coverage=None` (нет записи покрытия) — проверка неприменима.
   Подпись живёт в `packages/{case_id}/scope_attestation.yaml:attestations` (**per product**),
   ставится `hound package scope attest --package … --product … --actor …`; прогон читает её
   и передаёт в Ш6, использованные подписи видны в манифесте (`scope_attestations`).
