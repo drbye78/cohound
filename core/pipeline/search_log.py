@@ -13,6 +13,14 @@
   с записью в ``search_log``. Возвращает **только кандидатов** :class:`SearchResult`,
   никогда не evidence (I19): превращение внешнего контента в доказательство возможно
   лишь после Ш5 (``corpus_raw`` → extract → chunk → ``content_hash`` → index).
+  :func:`external_search_observed` — та же работа, но с наблюдением вызова
+  (:class:`SearchOutcome`: попадание в кэш, сбой адаптера, списание) — им пользуется
+  SERP-контур, чтобы отличить «не нашлось» от «сорвалось» (S8).
+* **SERP-кэш (R7).** Единственная точка чтения/записи ``cache/serp/{query_hash}.json`` —
+  :func:`external_search_observed`: ключ :func:`core.util.cache.serp_key` несёт текст
+  запроса, провайдера, **язык** и ``limit``. Попадание отдаёт кандидатов без вызова
+  адаптера и **без списания бюджета**; промах — вызов и запись удачного ответа.
+  До этого кэш был объявлен в §11.7 и не реализован: ``serp_key`` не вызывался ни разу.
 
 Протокол исчерпания §5 кодируется :func:`termination_for`
 (``budget_exhausted``/``results_count``/``sufficient``/``error`` → ``TerminationReason``).
@@ -24,7 +32,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
@@ -37,17 +45,23 @@ from core.domain.enums import (
 )
 from core.domain.models import SearchLogEntry
 from core.ports.search import SearchAdapterPort, SearchQuery, SearchResult
+from core.util.cache import ContentAddressedCache, serp_key
 
 __all__ = [
     "SearchBudget",
     "SearchEffort",
+    "SearchOutcome",
     "external_search",
+    "external_search_observed",
     "record_search",
     "termination_for",
 ]
 
 #: Ключи mapping-бюджета, задающие «потолок по умолчанию» для фаз без явного лимита.
 _DEFAULT_KEYS = frozenset({"default", "*", "all"})
+
+#: Подкаталог SERP-кэша (``cache/serp/{query_hash}.json``, 03 §A.1, §11.7).
+_SERP_CACHE_KIND = "serp"
 
 
 def _utcnow() -> str:
@@ -160,7 +174,7 @@ class SearchBudget:
         return self.default
 
 
-@dataclass
+@dataclass(frozen=True)
 class SearchEffort:
     """Счётчик внешних поисковых вызовов на ``(phase, product_id)`` (I16, I23).
 
@@ -168,13 +182,31 @@ class SearchEffort:
     не пересекаются, поэтому исчерпание одним продуктом не лишает бюджета другой —
     симметрия поискового усилия (I16).
 
+    **Frozen.** Счётчик передаётся между вызывающим и :func:`external_search`, и раньше
+    функция присваивала ему ``budget`` на месте (``effort.budget = budget``) — то есть
+    меняла чужой объект ради удобства проверки (S9a). Теперь бюджет счётчика неизменяем:
+    вариант «другой бюджет, тот же журнал» даёт :meth:`with_budget`, а журнал
+    (:attr:`_counts`) намеренно **общий** с исходным счётчиком, поэтому списания видны
+    вызывающему.
+
     :param budget: потолки по фазам; пустой бюджет — без ограничений.
     """
 
     budget: SearchBudget = field(default_factory=SearchBudget)
     _counts: dict[tuple[str, str], int] = field(
-        default_factory=dict, init=False, repr=False
+        default_factory=dict, init=False, repr=False, compare=False
     )
+
+    def with_budget(self, budget: SearchBudget) -> SearchEffort:
+        """Вид счётчика с другим бюджетом: тот же журнал расходов, другой потолок.
+
+        Возвращается **новый** объект: бюджет исходного не меняется (S9a), но списания
+        попадают в общий ``_counts``, поэтому ``used``/``remaining`` исходного счётчика
+        остаются правдой.
+        """
+        view = SearchEffort(budget=budget)
+        object.__setattr__(view, "_counts", self._counts)
+        return view
 
     @property
     def counts(self) -> dict[tuple[str, str], int]:
@@ -287,6 +319,133 @@ def termination_for(
     return TerminationReason.RESULTS_EXHAUSTED
 
 
+@dataclass(frozen=True)
+class SearchOutcome:
+    """Наблюдение **одного** вызова внешнего поиска: результаты и факты о нём.
+
+    Нужен вызывающему (``serp_discover``), чтобы отличить «ничего не нашлось» от
+    «вызов сорвался» (S8): ``[]`` в обоих случаях одинаков, а ``search_log`` вызывающий
+    не читает. Поля — наблюдение, а не решение: ``termination`` уже выведена по §5.
+
+    :param results: кандидаты ответа (I19: не evidence), в порядке провайдера.
+    :param termination: причина терминации этого вызова (``None`` — протокол продолжается).
+    :param error: сбой адаптера (``None`` — вызов состоялся).
+    :param from_cache: ответ взят из R7-кэша, живого вызова не было.
+    :param charged: с бюджета списан вызов (при попадании в кэш — не списывается).
+    """
+
+    results: tuple[SearchResult, ...] = ()
+    termination: TerminationReason | None = None
+    error: BaseException | None = None
+    from_cache: bool = False
+    charged: bool = False
+
+    @property
+    def found(self) -> bool:
+        """Вернул ли вызов хотя бы одного кандидата."""
+        return bool(self.results)
+
+
+def _serp_cache_key(
+    cache: ContentAddressedCache | None,
+    adapter: SearchAdapterPort,
+    query: SearchQuery,
+) -> str | None:
+    """Ключ SERP-кэша для вызова либо ``None`` (кэша нет / провайдер не объявлен).
+
+    Кэшируем только при **объявленном** провайдере: провайдер — ось ключа, и без него
+    две разные поисковые системы писали бы в одну запись (``serp_key`` различает их
+    только по строке). Пустой после нормализации запрос не кэшируется — кэшировать нечего.
+    """
+    if cache is None:
+        return None
+    provider = getattr(adapter, "provider", None)
+    if not isinstance(provider, str) or not provider.strip():
+        return None
+    try:
+        return serp_key(
+            query.text, provider, lang=query.lang, limit=int(query.limit)
+        )
+    except (TypeError, ValueError):
+        return None
+
+
+def _serp_cache_read(
+    cache: ContentAddressedCache | None, key: str
+) -> list[SearchResult] | None:
+    """Кандидаты из SERP-кэша либо ``None`` при промахе/порче записи.
+
+    Порча кэша не роняет прогон: битый или чужой по форме JSON — промах (тот же принцип,
+    что у :meth:`ContentAddressedCache.get_meta`). Признак «сырые байты страницы» в записи
+    невозможен: такие ответы не кэшируются (см. :func:`_serp_cache_write`).
+    """
+    if cache is None:
+        return None
+    try:
+        payload = cache.get_json(_SERP_CACHE_KIND, key)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(payload, Mapping):
+        return None
+    raw_items = payload.get("results")
+    if not isinstance(raw_items, list):
+        return None
+    results: list[SearchResult] = []
+    for item in raw_items:
+        if not isinstance(item, Mapping):
+            return None
+        url = item.get("url")
+        if not isinstance(url, str) or not url:
+            return None
+        results.append(
+            SearchResult(
+                url=url,
+                title=str(item.get("title") or ""),
+                snippet=str(item.get("snippet") or ""),
+                rank=int(item.get("rank") or 0),
+            )
+        )
+    return results
+
+
+def _serp_cache_write(
+    cache: ContentAddressedCache | None,
+    key: str,
+    adapter: SearchAdapterPort,
+    query: SearchQuery,
+    results: Sequence[SearchResult],
+) -> None:
+    """Записывает удачный ответ в SERP-кэш (R7); ответы с байтами — не кэшируются.
+
+    ``SearchResult.raw_bytes`` в JSON не сериализуемы и I19-специфичны для retention;
+    если адаптер их вернул, запись пропускается (иначе попадание отдало бы ``None``
+    вместо байтов — подмена, а не кэш).
+    """
+    if cache is None:
+        return
+    if any(getattr(result, "raw_bytes", None) is not None for result in results):
+        return
+    payload = {
+        "query": str(query.text),
+        "lang": str(query.lang),
+        "limit": int(query.limit),
+        "provider": str(getattr(adapter, "provider", "") or ""),
+        "results": [
+            {
+                "url": str(result.url),
+                "title": str(getattr(result, "title", "") or ""),
+                "snippet": str(getattr(result, "snippet", "") or ""),
+                "rank": int(getattr(result, "rank", 0) or 0),
+            }
+            for result in results
+        ],
+    }
+    try:
+        cache.put_json(_SERP_CACHE_KIND, key, payload)
+    except OSError:  # запись кэша — удобство R7, а не условие прогона
+        return
+
+
 def external_search(
     adapter: SearchAdapterPort,
     query: SearchQuery,
@@ -296,14 +455,59 @@ def external_search(
     effort: SearchEffort,
     budget: SearchBudget,
     product_id: str,
+    cache: ContentAddressedCache | None = None,
     clock: Callable[[], str] | None = None,
 ) -> list[SearchResult]:
     """Ограниченный бюджетом одиночный внешний поиск с записью в ``search_log`` (I16/I19/I23).
 
-    Порядок: сначала проверяется **продукт-специфичный** остаток бюджета; если он
-    исчерпан — пишется ``BUDGET_EXHAUSTED`` и возвращается ``[]`` без вызова адаптера.
-    Иначе вызывается ``adapter.search(query)``, расход списывается через
-    :meth:`SearchEffort.charge`, а результат (``results_count``) фиксируется в логе.
+    Тонкая обёртка над :func:`external_search_observed`: возвращает только кандидатов.
+
+    :param cache: глобальный content-addressed кэш (R7); ``None`` — без кэша.
+    """
+    return list(
+        external_search_observed(
+            adapter,
+            query,
+            store=store,
+            run_id=run_id,
+            effort=effort,
+            budget=budget,
+            product_id=product_id,
+            cache=cache,
+            clock=clock,
+        ).results
+    )
+
+
+def external_search_observed(
+    adapter: SearchAdapterPort,
+    query: SearchQuery,
+    *,
+    store: Any,
+    run_id: str,
+    effort: SearchEffort,
+    budget: SearchBudget,
+    product_id: str,
+    cache: ContentAddressedCache | None = None,
+    clock: Callable[[], str] | None = None,
+) -> SearchOutcome:
+    """Один внешний поиск: SERP-кэш (R7) → бюджет → вызов → ``search_log`` (§5).
+
+    Порядок шагов (он важен):
+
+    1. **Кэш.** Ключ :func:`core.util.cache.serp_key` — текст + провайдер + **язык** +
+       ``limit``. Попадание → кандидаты из кэша, адаптер **не** вызывается и бюджет
+       **не** списывается: иначе второй прогон отличался бы от первого по ``search_log``,
+       а через него — по наблюдению и ``metrics`` (R7 обещает «без живого ре-фетча», а не
+       «с другим счётом»).
+    2. **Бюджет.** Исчерпан продукт-специфичный остаток → ``BUDGET_EXHAUSTED`` без вызова.
+    3. **Вызов** ``adapter.search(query)``; расход списывается через
+       :meth:`SearchEffort.charge` (в т.ч. неуспешный: сеть была потрачена, и именно
+       неуспех чаще всего означает троттлинг — обнулять счётчик значило бы снимать
+       единственный предохранитель; факт сбоя виден в :attr:`SearchOutcome.error` и в
+       наблюдении контура).
+    4. **Запись в кэш** — только удачный ответ (сбой в кэш не попадает, иначе R7
+       зафиксировал бы поломку как результат).
 
     Гарантия I19: возвращаются только кандидаты :class:`SearchResult`; функция не
     производит evidence и не обращается к хранилищу за доказательствами.
@@ -311,31 +515,62 @@ def external_search(
     :param effort: счётчик усилия на ``(phase, product_id)`` (ключ симметрии I16).
     :param budget: бюджет прогона; используется, если ``effort`` его не несёт.
     :param product_id: продукт, на который списывается усилие (I16).
+    :param cache: глобальный content-addressed кэш (R7); ``None`` — без кэша.
     """
     phase = _require_phase(query.phase)
+    provider = getattr(adapter, "provider", None)
+    adapter_kind = getattr(adapter, "adapter_kind", None)
+
+    cache_key = _serp_cache_key(cache, adapter, query)
+    if cache_key is not None:
+        cached = _serp_cache_read(cache, cache_key)
+        if cached is not None:
+            hit_termination = (
+                termination_for(False, 0, False, None) if not cached else None
+            )
+            record_search(
+                store,
+                run_id=run_id,
+                phase=phase,
+                provider=provider,
+                adapter_kind=adapter_kind,
+                language=query.lang,
+                query=query.text,
+                results_count=len(cached),
+                termination_reason=hit_termination,
+                clock=clock,
+            )
+            return SearchOutcome(
+                results=tuple(cached),
+                termination=hit_termination,
+                from_cache=True,
+            )
+
     # ``effort`` — носитель бюджета (charge не принимает бюджет отдельно). Если он пуст,
-    # а явный ``budget`` задаёт лимит для фазы — принимаем его, чтобы аргумент не был мёртвым.
+    # а явный ``budget`` задаёт лимит для фазы — берём **вид** с этим бюджетом, не меняя
+    # исходный объект (S9a); журнал расходов общий, поэтому списания видны вызывающему.
+    scoped = effort
     if (
         budget is not None
         and effort.budget.limit_for(phase) is None
         and budget.limit_for(phase) is not None
     ):
-        effort.budget = budget
+        scoped = effort.with_budget(budget)
 
-    if effort.remaining(phase, product_id) == 0:
+    if scoped.remaining(phase, product_id) == 0:
         record_search(
             store,
             run_id=run_id,
             phase=phase,
-            provider=getattr(adapter, "provider", None),
-            adapter_kind=getattr(adapter, "adapter_kind", None),
+            provider=provider,
+            adapter_kind=adapter_kind,
             language=query.lang,
             query=query.text,
             results_count=0,
             termination_reason=TerminationReason.BUDGET_EXHAUSTED,
             clock=clock,
         )
-        return []
+        return SearchOutcome(termination=TerminationReason.BUDGET_EXHAUSTED)
 
     error: BaseException | None = None
     results: list[SearchResult] = []
@@ -345,7 +580,7 @@ def external_search(
         error = exc
 
     # Вызов (в т.ч. неуспешный) израсходовал усилие провайдера — списываем бюджет.
-    effort.charge(phase, product_id)
+    charged = scoped.charge(phase, product_id)
 
     if error is not None:
         termination: TerminationReason | None = termination_for(
@@ -361,12 +596,19 @@ def external_search(
         store,
         run_id=run_id,
         phase=phase,
-        provider=getattr(adapter, "provider", None),
-        adapter_kind=getattr(adapter, "adapter_kind", None),
+        provider=provider,
+        adapter_kind=adapter_kind,
         language=query.lang,
         query=query.text,
         results_count=(None if error is not None else len(results)),
         termination_reason=termination,
         clock=clock,
     )
-    return results
+    if error is None and cache_key is not None:
+        _serp_cache_write(cache, cache_key, adapter, query, results)
+    return SearchOutcome(
+        results=tuple(results),
+        termination=termination,
+        error=error,
+        charged=charged,
+    )

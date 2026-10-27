@@ -32,12 +32,14 @@ from core.pipeline.search_log import (
     SearchBudget,
     SearchEffort,
     external_search,
+    external_search_observed,
     record_search,
     termination_for,
 )
 from core.ports.search import SearchQuery, SearchResult
 from core.ports.types import RawPage
 from core.store.sqlite_store import SqliteStore
+from core.util.cache import ContentAddressedCache
 
 RUN_ID = "run-1"
 FIXED_TS = "2026-10-08T00:00:00+00:00"
@@ -453,6 +455,218 @@ def test_external_search_returns_candidates_not_evidence_i19(store: SqliteStore)
         for banned in ("source_id", "citation_quote", "content_hash", "evidence"):
             assert not hasattr(result, banned)
 
+
+# --------------------------------------------------------------------------- #
+# S9a: бюджет счётчика не подменяется на месте
+# --------------------------------------------------------------------------- #
+
+def test_external_search_does_not_mutate_effort_budget(store: SqliteStore) -> None:
+    """Бюджет приходит из ``budget``, но объект ``effort`` не меняется (S9a).
+
+    Прежняя редакция присваивала ``effort.budget = budget`` — то есть правило о
+    лимите оседало в чужом объекте, разделяемом с вызывающим.
+    """
+    bare = SearchEffort()  # бюджет не несёт лимитов
+    budget = SearchBudget.from_mapping({"serp": 1})
+    adapter = _FakeAdapter(_results())
+
+    def _run() -> list[SearchResult]:
+        return external_search(
+            adapter,
+            SearchQuery(text="neutral query", lang="ru", phase="serp"),
+            store=store,
+            run_id=RUN_ID,
+            effort=bare,
+            budget=budget,
+            product_id="p1",
+            clock=lambda: FIXED_TS,
+        )
+
+    assert len(_run()) == 2
+    # Счётчик исходного объекта не подменён...
+    assert bare.budget.limit_for("serp") is None
+    # ...но расход и лимит из ``budget`` учтены: второй вызов упирается в потолок 1.
+    assert bare.used("serp", "p1") == 1
+    assert _run() == []
+    rows = _row(store, phase="serp")
+    assert rows[1]["termination_reason"] == "budget_exhausted"
+
+# --------------------------------------------------------------------------- #
+# SERP-кэш (P1, R7): попадание без вызова адаптера и без списания бюджета
+# --------------------------------------------------------------------------- #
+
+@pytest.fixture()
+def cache(tmp_path: Any) -> ContentAddressedCache:
+    return ContentAddressedCache(tmp_path / "cache")
+
+
+def _search(
+    store: SqliteStore,
+    adapter: _FakeAdapter,
+    *,
+    cache: ContentAddressedCache | None = None,
+    effort: SearchEffort | None = None,
+    query: SearchQuery | None = None,
+) -> list[SearchResult]:
+    budget = SearchBudget.from_mapping({"serp": 5})
+    return external_search(
+        adapter,
+        query or SearchQuery(text="neutral query", lang="ru", phase="serp"),
+        store=store,
+        run_id=RUN_ID,
+        effort=effort or SearchEffort(budget),
+        budget=budget,
+        product_id="p1",
+        cache=cache,
+        clock=lambda: FIXED_TS,
+    )
+
+
+def test_two_runs_second_served_from_cache_without_live_call(
+    store: SqliteStore, cache: ContentAddressedCache
+) -> None:
+    """R7: второй прогон того же входа не делает живых вызовов поиска (P1)."""
+    adapter = _FakeAdapter(_results())
+
+    first = _search(store, adapter, cache=cache)
+    calls_after_first = len(adapter.calls)
+    second_effort = SearchEffort(SearchBudget.from_mapping({"serp": 5}))
+    second = _search(store, adapter, cache=cache, effort=second_effort)
+
+    assert [r.url for r in first] == [URL_A, URL_B]
+    assert [r.url for r in second] == [URL_A, URL_B]
+    assert calls_after_first == 1
+    assert len(adapter.calls) == calls_after_first  # живого вызова на втором прогоне нет
+    # Файл кэша существует и он — SERP-запись (cache/serp/{query_hash}.json).
+    assert list((cache.root / "serp").glob("*.json"))
+    # Второй прогон обслужен, но бюджет **не** списан (иначе менялись бы search_log/метрики).
+    assert second_effort.used("serp", "p1") == 0
+    logs = _row(store, phase="serp")
+    assert len(logs) == 2
+    assert logs[1]["results_count"] == 2
+    assert logs[1]["termination_reason"] is None
+
+
+def test_cache_hit_does_not_charge_budget(
+    store: SqliteStore, cache: ContentAddressedCache
+) -> None:
+    adapter = _FakeAdapter(_results())
+    effort = SearchEffort(SearchBudget.from_mapping({"serp": 1}))
+
+    assert _search(store, adapter, cache=cache, effort=effort) == adapter.results
+    assert effort.used("serp", "p1") == 1
+    # Бюджет исчерпан, но запрос уже в кэше: попадание обслуживается без вызова и
+    # без списания — исчерпание не подменяет ответ кэша.
+    outcome = external_search_observed(
+        adapter,
+        SearchQuery(text="neutral query", lang="ru", phase="serp"),
+        store=store,
+        run_id=RUN_ID,
+        effort=effort,
+        budget=effort.budget,
+        product_id="p1",
+        cache=cache,
+        clock=lambda: FIXED_TS,
+    )
+    assert outcome.from_cache is True
+    assert outcome.charged is False
+    assert len(outcome.results) == 2
+    assert effort.used("serp", "p1") == 1
+    assert len(adapter.calls) == 1
+
+
+def test_cache_key_differs_by_language(
+    store: SqliteStore, cache: ContentAddressedCache
+) -> None:
+    """Ось языка: одинаковый текст на разных языках — разные записи и живые вызовы."""
+    adapter = _FakeAdapter(_results())
+    _search(store, adapter, cache=cache, query=SearchQuery(text="neutral query", lang="ru", phase="serp"))
+    _search(store, adapter, cache=cache, query=SearchQuery(text="neutral query", lang="en", phase="serp"))
+
+    assert len(adapter.calls) == 2  # ключи различны → второй запрос ушёл провайдеру
+    assert len(list((cache.root / "serp").glob("*.json"))) == 2
+
+
+def test_provider_without_declared_name_is_not_cached(
+    store: SqliteStore, cache: ContentAddressedCache
+) -> None:
+    """Без объявленного провайдера ключ неразличим между системами — не кэшируем."""
+
+    class _Anonymous(_FakeAdapter):
+        provider = ""
+
+    adapter = _Anonymous(_results())
+    _search(store, adapter, cache=cache)
+    _search(store, adapter, cache=cache)
+    assert len(adapter.calls) == 2
+    assert not list((cache.root / "serp").glob("*.json"))
+
+
+def test_error_is_not_cached(
+    store: SqliteStore, cache: ContentAddressedCache
+) -> None:
+    """Сбой в кэш не попадает: иначе R7 зафиксировал бы поломку как результат."""
+    failing = _FakeAdapter(error=RuntimeError("backend down"))
+    assert _search(store, failing, cache=cache) == []
+    assert not list((cache.root / "serp").glob("*.json"))
+
+    healthy = _FakeAdapter(_results())
+    assert [r.url for r in _search(store, healthy, cache=cache)] == [URL_A, URL_B]
+    assert len(healthy.calls) == 1
+
+
+def test_corrupt_cache_entry_is_a_miss(
+    store: SqliteStore, cache: ContentAddressedCache
+) -> None:
+    adapter = _FakeAdapter(_results())
+    _search(store, adapter, cache=cache)
+    entry = next((cache.root / "serp").glob("*.json"))
+    entry.write_text("{not json", encoding="utf-8")
+
+    assert [r.url for r in _search(store, adapter, cache=cache)] == [URL_A, URL_B]
+    assert len(adapter.calls) == 2  # порча записи = промах, а не отказ прогона
+
+
+def test_empty_result_is_cached_and_replayed(
+    store: SqliteStore, cache: ContentAddressedCache
+) -> None:
+    """«Не нашлось» — тоже ответ: повтор отдаётся без живого вызова, но с not_found."""
+    adapter = _FakeAdapter([])
+    _search(store, adapter, cache=cache)
+    outcome = external_search_observed(
+        adapter,
+        SearchQuery(text="neutral query", lang="ru", phase="serp"),
+        store=store,
+        run_id=RUN_ID,
+        effort=SearchEffort(SearchBudget.from_mapping({"serp": 5})),
+        budget=SearchBudget.from_mapping({"serp": 5}),
+        product_id="p1",
+        cache=cache,
+        clock=lambda: FIXED_TS,
+    )
+    assert outcome.from_cache is True
+    assert outcome.termination is TerminationReason.NOT_FOUND
+    assert len(adapter.calls) == 1
+
+
+def test_external_search_reports_error_in_outcome(
+    store: SqliteStore, cache: ContentAddressedCache
+) -> None:
+    """S8: сбой адаптера виден вызывающему, а не растворяется в пустом списке."""
+    outcome = external_search_observed(
+        _FakeAdapter(error=RuntimeError("backend down")),
+        SearchQuery(text="neutral query", lang="ru", phase="serp"),
+        store=store,
+        run_id=RUN_ID,
+        effort=SearchEffort(SearchBudget.from_mapping({"serp": 5})),
+        budget=SearchBudget.from_mapping({"serp": 5}),
+        product_id="p1",
+        cache=cache,
+        clock=lambda: FIXED_TS,
+    )
+    assert outcome.results == ()
+    assert isinstance(outcome.error, RuntimeError)
+    assert outcome.termination is TerminationReason.ERROR
 
 # --------------------------------------------------------------------------- #
 # Нейтральность модуля (§1.3)

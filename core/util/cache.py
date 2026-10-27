@@ -20,11 +20,21 @@
   URL не приводится к нижнему регистру (путь и query-часть регистрозависимы),
   удаляются только ведущие/замыкающие пробелы. Префикс схемы разводит пространства
   ключей HTTP и SERP на случай совпадения материалов.
-* ``serp_key(query, provider=None)`` — запрос нормализуется: ``strip`` +
-  схлопывание любых пробельных последовательностей в один пробел + ``casefold``
-  (регистронезависимое сравнение запросов). Провайдер нормализуется так же
-  (``None`` → пустая строка). Ключ = ``short_hash("serp\\x1f" + provider + "\\x1f"
-  + query, 32)``.
+* ``serp_key(query, provider=None, *, lang=None, limit=None)`` — запрос нормализуется:
+  ``strip`` + схлопывание любых пробельных последовательностей в один пробел +
+  ``casefold`` (регистронезависимое сравнение запросов). Провайдер и **язык**
+  нормализуются так же (``None`` → пустая строка), ``limit`` — как целое (``None`` →
+  пустая строка). Ключ = ``short_hash("serp2\\x1f" + provider + "\\x1f" + lang +
+  "\\x1f" + limit + "\\x1f" + query, 32)``.
+
+**Язык и ``limit`` — оси ключа, а не украшение.** Запросы SERP-контура строятся по
+``languages`` прогона (``build_serp_queries``), поэтому два запроса с одинаковым текстом
+и разными языками приходят к провайдеру как разные запросы и обязаны иметь разные ключи:
+иначе кэш вернул бы выдачу не того языка (это и был дефект S1: до появления осей ключ
+содержал только нормализованный текст и провайдера). ``limit`` — по той же причине:
+выдача, снятая с ``limit=10``, не является ответом на запрос ``limit=5``. Префикс схемы
+поднят до ``serp2``: старые ключи (``serp``) не содержат осей и потому невалидны —
+кэш SERP просто перезаполнится, ни один прогон от этого не падает.
 
 Длина ключа — 32 hex-символа (128-битный усечённый SHA-256); коллизий для объёма
 кэша проекта достаточно. Хэш-функция — ``core.util.hashing.short_hash`` (SHA-256).
@@ -51,6 +61,10 @@ _FIELD_SEP = "\x1f"
 
 # Длина ключа в hex-символах (см. докстринг модуля).
 _KEY_LEN = 32
+
+#: Префикс схемы ключа SERP. Поднят до ``serp2`` вместе с осями ``lang``/``limit``:
+#: ключи прежней схемы не описывают запрос целиком и намеренно не читаются.
+_SERP_KEY_SCHEME = "serp2"
 
 # Суффиксы по назначению: сырые байты HTTP, JSON-ответы SERP (03 §A.1) и
 # метаданные-сайдкар HTTP-записи (валидаторы/статус/финальный URL).
@@ -81,19 +95,38 @@ def _normalize_serp_part(value: str) -> str:
     return " ".join(value.split()).casefold()
 
 
-def serp_key(query: str, provider: str | None = None) -> str:
-    """Детерминированный ключ SERP-запроса: нормализация query/provider → truncated SHA-256.
+def serp_key(
+    query: str,
+    provider: str | None = None,
+    *,
+    lang: str | None = None,
+    limit: int | None = None,
+) -> str:
+    """Детерминированный ключ SERP-запроса: нормализация осей → truncated SHA-256.
 
     Нормализация (см. докстринг модуля): ``strip`` + схлопывание пробелов +
-    ``casefold``. Провайдер ``None`` трактуется как пустая строка и участвует в
-    ключе (смена провайдера → новый ключ). Пустой (после нормализации) запрос
-    отклоняется — кэшировать нечего.
+    ``casefold`` для ``query``/``provider``/``lang``. Провайдер ``None`` трактуется как
+    пустая строка и участвует в ключе (смена провайдера → новый ключ). ``lang`` и
+    ``limit`` — такие же оси: язык входит в запрос к провайдеру (``build_serp_queries``
+    строит запросы по ``languages``), а выдача, снятая с одним ``limit``, не является
+    ответом на запрос с другим. Пустой (после нормализации) запрос отклоняется —
+    кэшировать нечего.
     """
     normalized_query = _normalize_serp_part(query)
     if not normalized_query:
         raise ValueError("SERP-запрос пуст после нормализации")
     normalized_provider = _normalize_serp_part(provider) if provider is not None else ""
-    material = f"serp{_FIELD_SEP}{normalized_provider}{_FIELD_SEP}{normalized_query}"
+    normalized_lang = _normalize_serp_part(lang) if lang is not None else ""
+    normalized_limit = "" if limit is None else str(int(limit))
+    material = _FIELD_SEP.join(
+        (
+            _SERP_KEY_SCHEME,
+            normalized_provider,
+            normalized_lang,
+            normalized_limit,
+            normalized_query,
+        )
+    )
     return short_hash(material, _KEY_LEN)
 
 

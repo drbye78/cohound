@@ -46,6 +46,7 @@ from core.cli.context import (
     _run_report_payload,
     _session_snapshot,
     _snapshot_run_inputs,
+    resolve_content_cache,
 )
 from core.cli.errors import (
     EXIT_BLOCKED,
@@ -898,8 +899,13 @@ def run(args: argparse.Namespace) -> int:
                     else "ru"
                 )
                 try:
+                    # R7 (P1): адаптер собирается с тем же кэшем, что краулеры, — pipeline
+                    # кэширует ответы поиска (``cache/serp``) через него, без второй точки
+                    # построения кэша. ``--from-scratch`` → без кэша (живой ре-фетч).
                     serp_adapter, serp_provider = resolve_and_build_search_adapter(
-                        lang=search_lang, explicit=None
+                        lang=search_lang,
+                        explicit=None,
+                        cache=resolve_content_cache(args, no_cache=from_scratch),
                     )
                 except (SearchResolutionError, WiringError) as exc:
                     # Не отказ прогона: корпус строится без находок поиска, а причина

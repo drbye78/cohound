@@ -55,6 +55,7 @@ from core.util.hashing import content_hash
 __all__ = [
     "DEFAULT_MAX_BODY_BYTES",
     "EDGE_SCHEMA_VERSION",
+    "SEAM_SEARCH_MAX_LIMIT",
     "EdgeAdapterError",
     "EdgeError",
     "EdgeGateway",
@@ -86,6 +87,16 @@ EDGE_SCHEMA_VERSION = "1"
 #: DMZ в приёмник произвольных объёмов. Оператор переопределяет
 #: ``max_body_bytes`` в ``edge.yaml``.
 DEFAULT_MAX_BODY_BYTES = 1_048_576
+
+#: Верхняя граница ``limit`` в ``POST /v1/search`` (S9e).
+#: Шов исполняет **один** вызов поиска и не пагинирует, поэтому ``limit`` больше одной
+#: страницы выдачи означал бы требование пагинации, которой у шва нет. Одна страница —
+#: ровно тот размер, который объявляет единственный потребитель шва
+#: (``SERP_QUERY_LIMIT``, ``core/pipeline/serp_loop.py``); это и есть граница, а не
+#: круглое число «на всякий случай». Равенство с пайплайном пинит тест
+#: ``tests/edge/test_edge_server.py::test_search_limit_bound_mirrors_pipeline_page``,
+#: поэтому смена размера страницы в пайплайне не оставит границу шва в прошлом.
+SEAM_SEARCH_MAX_LIMIT = 10
 
 #: Операции, которые в протоколе edge принимают тело (07 §3).
 #: Crawl-операции очереди краула (Phase 3.1) и опрос фидов (Wave 5.1) — тоже POST.
@@ -271,6 +282,26 @@ def _coerce_int(value: Any, *, default: int) -> int:
         return int(value)
     except (TypeError, ValueError) as exc:
         raise EdgeRequestError(f"нечисловое значение: {value!r}") from exc
+
+def _coerce_limit(value: Any, *, default: int = 10) -> int:
+    """``limit`` поиска: ``int`` в диапазоне ``[0, SEAM_SEARCH_MAX_LIMIT]`` (S9e).
+
+    Верхняя граница — **объявленная**, а не «на всякий случай»: шов исполняет **один**
+    вызов поиска и не пагинирует, поэтому ``limit`` больше одной страницы означал бы
+    требование пагинации, которой у шва нет. Одна страница — это ровно тот размер,
+    который объявляет единственный потребитель шва (``SERP_QUERY_LIMIT`` в
+    ``core/pipeline/serp_loop.py``); равенство держит тест
+    ``tests/edge/test_edge_server.py::test_search_limit_bound_mirrors_pipeline_page``.
+
+    Значения выше границы **усекаются**, а не отвергаются: контракт (``
+    contracts/seam/search.schema.json``) публикует ``maximum`` и прямо говорит об
+    усечении, поэтому это объявленная нормализация, а не тихая подмена. Отрицательное
+    значение — ``0``: адаптер на ``limit <= 0`` не делает вызова (пустая выдача).
+    ``default`` (поле не передано) — прежние 10: это дефолт ``SearchQuery.limit``, а не
+    граница — граница применяется к запрошенному значению.
+    """
+    limit = _coerce_int(value, default=default)
+    return max(0, min(limit, SEAM_SEARCH_MAX_LIMIT))
 
 
 def _fact_json(value: Any) -> str:
@@ -637,7 +668,7 @@ class EdgeGateway:
         query = SearchQuery(
             text=str(text),
             lang=str(payload.get("lang") or "ru"),
-            limit=_coerce_int(payload.get("limit"), default=10),
+            limit=_coerce_limit(payload.get("limit")),
             phase=str(payload.get("phase") or "corpus"),
         )
         adapter = self._select_searcher(payload)

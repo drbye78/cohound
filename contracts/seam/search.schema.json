@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://cohound.local/contracts/seam/search.schema.json",
   "title": "POST /v1/search payload",
-  "description": "Запрос внешнего поиска и ответ edge (07 §3). Ответ — список кандидатов {url, title, snippet, rank}; это не evidence (I19).",
+  "description": "Запрос внешнего поиска и ответ edge (07 §3). Ответ — список кандидатов {url, title, snippet, rank}; это не evidence (I19). Шов исполняет один вызов поиска и не пагинирует, поэтому limit ограничен одной страницей выдачи: значения выше maximum усекаются до него (объявленная нормализация, не тихая подмена).",
   "type": "array",
   "items": {"$ref": "#/$defs/item"},
   "$defs": {
@@ -14,7 +14,12 @@
       "properties": {
         "query": {"type": "string", "minLength": 1},
         "lang": {"type": ["string", "null"]},
-        "limit": {"type": "integer", "minimum": 0},
+        "limit": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10,
+          "description": "Сколько кандидатов просить. Верхняя граница — одна страница выдачи (SERP_QUERY_LIMIT пайплайна): шов не пагинирует, поэтому больше одного вызова не сделает. Значения выше maximum усекаются сервером."
+        },
         "phase": {"type": "string"}
       }
     },

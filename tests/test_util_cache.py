@@ -193,6 +193,15 @@ def test_serp_key_empty_query_rejected() -> None:
     with pytest.raises(ValueError):
         serp_key("   ")
 
+def test_serp_key_language_and_limit_participate() -> None:
+    """Оси языка и ``limit`` входят в ключ (S1): иначе кэш отдал бы чужую выдачу."""
+    assert serp_key("q", "prov", lang="ru") != serp_key("q", "prov", lang="en")
+    assert serp_key("q", "prov", lang="RU") == serp_key("q", "prov", lang="ru")
+    assert serp_key("q", "prov", limit=10) != serp_key("q", "prov", limit=5)
+    assert serp_key("q", "prov", limit=None) == serp_key("q", "prov")
+    # Разные оси не «сливаются» при склейке: сдвиг значения между полями меняет ключ.
+    assert serp_key("q", "prov", lang="10") != serp_key("q", "prov", limit=10)
+
 
 def test_keys_are_distinct_between_http_and_serp() -> None:
     # одинаковый материал в разных пространствах ключей не коллизирует

@@ -54,6 +54,7 @@ from core.pipeline.serp_loop import (
     run_serp_loop,
     run_serp_round,
 )
+from core.ports.index_builder import ImmutableBuildError as PortImmutableBuildError
 from core.ports.search import SearchQuery, SearchResult
 from core.ports.types import RawPage
 from core.store.sqlite_store import SqliteStore
@@ -384,14 +385,32 @@ def test_append_only_rerun_same_round_raises(store: SqliteStore) -> None:
 
 
 def test_builder_immutable_error_is_translated(store: SqliteStore) -> None:
-    class ImmutableBuildError(RuntimeError):  # одноимённый адаптерный тип
+    """Адаптерный ``ImmutableBuildError`` — подкласс одноимённого класса **порта** (S9c)."""
+
+    def _builder(ctx: Any) -> IndexBuild:
+        raise PortImmutableBuildError("adapters: сборка уже существует")
+
+    with pytest.raises(module.ImmutableBuildError) as err:
+        _round(store, _FakeAdapter(_results()), builder=_builder)
+    assert isinstance(err.value, PortImmutableBuildError)
+
+def test_lookalike_error_with_same_name_is_not_translated(store: SqliteStore) -> None:
+    """S9c: трансляция по **типу**, а не по имени класса.
+
+    Прежняя редакция сравнивала ``type(exc).__name__ == "ImmutableBuildError"`` и
+    подменяла ЛЮБОЕ одноимённое исключение (в том числе чужое) локальным типом петли.
+    Теперь транслируется только ошибка контракта порта.
+    """
+
+    class ImmutableBuildError(RuntimeError):  # одноимённый, но чужой тип
         pass
 
     def _builder(ctx: Any) -> IndexBuild:
-        raise ImmutableBuildError("adapters: сборка уже существует")
+        raise ImmutableBuildError("чужой сбой с тем же именем")
 
-    with pytest.raises(module.ImmutableBuildError):
+    with pytest.raises(ImmutableBuildError) as err:
         _round(store, _FakeAdapter(_results()), builder=_builder)
+    assert not isinstance(err.value, module.ImmutableBuildError)
 
 
 def test_assert_build_id_new_guards() -> None:

@@ -218,7 +218,9 @@ def test_search_provider_resolved_from_config_by_language(
     clear_env(monkeypatch, _ENV_NAMES)
     requested: list[str] = []
 
-    def _fake_build(name: str) -> FakeSearchAdapter:
+    def _fake_build(
+        name: str, *, cache: Any | None = None
+    ) -> FakeSearchAdapter:
         requested.append(name)
         return FakeSearchAdapter()
 
@@ -252,7 +254,9 @@ def test_search_provider_explicit_flag_overrides_config(
     clear_env(monkeypatch, _ENV_NAMES)
     requested: list[str] = []
 
-    def _fake_build(name: str) -> FakeSearchAdapter:
+    def _fake_build(
+        name: str, *, cache: Any | None = None
+    ) -> FakeSearchAdapter:
         requested.append(name)
         return FakeSearchAdapter()
 

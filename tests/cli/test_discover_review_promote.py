@@ -23,6 +23,7 @@ from __future__ import annotations
 import datetime as _dt
 import importlib
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -239,6 +240,42 @@ def test_search_adapter_configured_generic_key_handling() -> None:
     assert _search_adapter_configured(_Keyless()) is False
 
 
+def test_resolve_and_build_search_adapter_passes_r7_cache(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """P1: адаптер собирается с тем же кэшем (R7), а не с ``None`` по умолчанию."""
+    from core.cli.wiring import build_search_adapter as real_build
+    from core.util.cache import ContentAddressedCache
+
+    cli_wiring = importlib.import_module("core.cli.wiring")
+    cache = ContentAddressedCache(tmp_path / "cache")
+
+    built = real_build("yandex", cache=cache)
+    assert built.cache is cache
+    assert real_build("yandex").cache is None
+
+    captured: dict[str, Any] = {}
+
+    def _fake_build(name: str, *, cache: Any | None = None) -> FakeSearchAdapter:
+        captured["name"] = name
+        captured["cache"] = cache
+        return FakeSearchAdapter()
+
+    monkeypatch.setattr(cli_wiring, "build_search_adapter", _fake_build)
+    monkeypatch.setattr(
+        cli_wiring,
+        "load_deploy_config",
+        lambda _path=None: DeployConfig(
+            profile="local", search=SearchDeployConfig(adapter="yandex")
+        ),
+    )
+    adapter, provider = cli_wiring.resolve_and_build_search_adapter(
+        lang="ru", explicit=None, cache=cache
+    )
+    assert isinstance(adapter, FakeSearchAdapter)
+    assert provider == "yandex"  # разрешённый провайдер (провенанс I23)
+    assert captured == {"name": "yandex", "cache": cache}
+
 def test_discover_provider_from_config_by_language(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -247,7 +284,9 @@ def test_discover_provider_from_config_by_language(
     cli_wiring = importlib.import_module("core.cli.wiring")
     requested: list[str] = []
 
-    def _fake_build(name: str) -> FakeSearchAdapter:
+    def _fake_build(
+        name: str, *, cache: Any | None = None
+    ) -> FakeSearchAdapter:
         requested.append(name)
         return FakeSearchAdapter()
 
@@ -276,7 +315,9 @@ def test_discover_explicit_flag_overrides_config(
     cli_wiring = importlib.import_module("core.cli.wiring")
     requested: list[str] = []
 
-    def _fake_build(name: str) -> FakeSearchAdapter:
+    def _fake_build(
+        name: str, *, cache: Any | None = None
+    ) -> FakeSearchAdapter:
         requested.append(name)
         return FakeSearchAdapter()
 

@@ -36,11 +36,12 @@ run_serp_loop:
   фильтром по провенансу ``Cell.index_build_id`` (R15);
 * чтения ``cell_evidence`` нет — evidence-провенанс не используется, только ``Cell``.
 
-**Формат-авторитет ``adapters/index_format.py``.** ``is_committed``/``ImmutableBuildError``
-живут в адаптерах (``index_npy``), а ``pipeline`` по матрице зависимостей (01 §1) **не
-импортирует** ``core.adapters.*``. Поэтому логическая иммутабельность (новый id ≠ прошлый)
-обеспечивается здесь, а физическая — инжектируемым ``builder``; поднятый им
-``ImmutableBuildError`` (по имени класса) транслируется в :class:`ImmutableBuildError`.
+**Формат-авторитет ``adapters/index_format.py``.** Класс ``ImmutableBuildError`` объявлен
+в **порту** (``core.ports.index_builder``), а адаптер (``index_npy``) наследует его: по
+матрице зависимостей (01 §1) ``pipeline`` **не импортирует** ``core.adapters.*``, а
+только порт. Поэтому логическая иммутабельность (новый id ≠ прошлый) обеспечивается
+здесь, а физическая — инжектируемым ``builder``; поднятый им ``ImmutableBuildError``
+транслируется в :class:`ImmutableBuildError` **по типу** (S9c), а не по имени класса.
 Если требуемого метода store нет — поднимается :class:`SerpLoopStoreGap`.
 
 Модуль категорийно нейтрален (§1.3), детерминирован (без random/UUID), часы инжектируются.
@@ -69,7 +70,13 @@ from core.pipeline.crawl_frontier import (
     root_path_prefix,
 )
 from core.pipeline.idempotency import mark_stale, upsert_cells
-from core.pipeline.search_log import SearchBudget, SearchEffort, external_search
+from core.pipeline.search_log import (
+    SearchBudget,
+    SearchEffort,
+    external_search,
+    external_search_observed,
+)
+from core.ports.index_builder import ImmutableBuildError as PortImmutableBuildError
 from core.ports.search import SearchAdapterPort, SearchQuery, SearchResult
 from core.ports.store import StorePort
 from core.util.hashing import short_hash
@@ -107,6 +114,8 @@ _GROUP_SEP = "\x1e"
 #: Сколько кандидатов запрашивать у адаптера на один SERP-запрос (тот же масштаб, что
 #: у ретривального выреза: внешний поиск отдаёт первые страницы, не весь выдачу).
 SERP_QUERY_LIMIT = 10
+#: Причина неисполненного раунда: набор запросов не изменился (S3, см. ``serp_discover``).
+NO_QUERY_VARIATION_REASON = "no_query_variation"
 
 
 # --------------------------------------------------------------------------- #
@@ -118,13 +127,13 @@ class SerpLoopError(RuntimeError):
     """Базовая ошибка SERP-петли."""
 
 
-class ImmutableBuildError(SerpLoopError):
+class ImmutableBuildError(PortImmutableBuildError, SerpLoopError):
     """Попытка переиспользовать/изменить уже зафиксированную сборку (K2/§13).
 
-    Локальное зеркало семантики ``core.adapters.index_npy.ImmutableBuildError``: сам класс
-    адаптерный и не импортируется из ``pipeline`` (матрица зависимостей 01 §1), поэтому
-    :func:`run_serp_round` транслирует поднятый ``builder``-ом ``ImmutableBuildError``
-    (по имени класса) в этот тип.
+    Наследует одноимённый класс **порта** (``core.ports.index_builder``): ``pipeline``
+    ловит его типом, а не сравнением имени (S9c), и по матрице зависимостей (01 §1) не
+    импортирует ``core.adapters``. ``SerpLoopError`` сохранён в предках — на него
+    опираются вызывающие, ловящие ошибки петли одним типом.
     """
 
 
@@ -421,12 +430,17 @@ def _normalize_build(build: IndexBuild, new_build_id: str, package: str) -> Inde
 
 
 def _call_builder(builder: RoundBuilder, ctx: RoundBuildContext) -> IndexBuild:
-    """Вызывает ``builder``, транслируя его ``ImmutableBuildError`` в локальный тип (K2)."""
+    """Вызывает ``builder``, транслируя его ``ImmutableBuildError`` в локальный тип (K2).
+
+    Ловится **тип порта** (``core.ports.index_builder.ImmutableBuildError``), а не имя
+    класса: адаптерный ``ImmutableBuildError`` — его подкласс, поэтому переименование в
+    адаптере не превращает транслируемую ошибку в постороннюю (S9c).
+    """
     try:
         return builder(ctx)
-    except Exception as exc:  # noqa: BLE001 — диагностика важнее типа сбоя
-        if type(exc).__name__ == "ImmutableBuildError":
-            raise ImmutableBuildError(str(exc)) from exc
+    except PortImmutableBuildError as exc:
+        raise ImmutableBuildError(str(exc)) from exc
+    except Exception:  # noqa: BLE001 — прочие сбои пробрасываются как есть
         raise
 
 
@@ -576,9 +590,16 @@ class SerpDiscovery:
     :param rejected_by_product: отказы по причинам (``ssrf``/``out_of_scope_host``/
         ``blacklisted``/``known``) — «сколько не пустили и почему», а не тихий фильтр.
     :param candidates_by_product: сколько кандидатов вернул адаптер (всего).
-    :param calls_by_product: сколько вызовов адаптера состоялось (без отказов бюджета).
+    :param calls_by_product: сколько **живых** вызовов адаптера состоялось (без отказов
+        бюджета и без попаданий в кэш).
+    :param cache_hits_by_product: сколько ответов взято из R7-кэша без живого вызова.
+    :param errors_by_product: сколько вызовов завершилось сбоем адаптера (S8: сбой
+        отличается от «ничего не нашлось»).
     :param exhausted_by_product: бюджет продукта исчерпан (факт, не догадка).
     :param termination_by_product: причина терминации по продукту (§5).
+    :param not_executed_rounds: сколько объявленных раундов не исполнено.
+    :param not_executed_reason: почему раунды не исполнены (``no_query_variation`` —
+        набор запросов не менялся между раундами, S3).
     :param unavailable_reason: почему контур не исполнен при объявленных раундах
         (``no_adapter``/``no_queries``) — видимый отказ, а не молчаливый пропуск.
     """
@@ -593,8 +614,12 @@ class SerpDiscovery:
     rejected_by_product: dict[str, dict[str, int]] = field(default_factory=dict)
     candidates_by_product: dict[str, int] = field(default_factory=dict)
     calls_by_product: dict[str, int] = field(default_factory=dict)
+    cache_hits_by_product: dict[str, int] = field(default_factory=dict)
+    errors_by_product: dict[str, int] = field(default_factory=dict)
     exhausted_by_product: dict[str, bool] = field(default_factory=dict)
     termination_by_product: dict[str, str | None] = field(default_factory=dict)
+    not_executed_rounds: int = 0
+    not_executed_reason: str | None = None
     unavailable_reason: str | None = None
 
     @property
@@ -612,6 +637,20 @@ class SerpDiscovery:
         """Исчерпан ли бюджет хотя бы у одного продукта (видимая запись, не тишина)."""
         return any(self.exhausted_by_product.values())
 
+    @property
+    def served_by_product(self) -> dict[str, int]:
+        """Сколько запросов **обслужено** по продукту (живые вызовы + попадания в кэш).
+
+        Это число — «контур исполнялся»: ответ из кэша такой же ответ на выпущенный
+        запрос, просто без сети. Стоимость (списания бюджета) — :attr:`calls_by_product`.
+        """
+        products = set(self.calls_by_product) | set(self.cache_hits_by_product)
+        return {
+            pid: int(self.calls_by_product.get(pid, 0))
+            + int(self.cache_hits_by_product.get(pid, 0))
+            for pid in sorted(products)
+        }
+
     def to_observation(self) -> dict[str, Any]:
         """Провенанс контура для сеанса краула/манифеста (детерминированный JSON-вид)."""
         return {
@@ -619,6 +658,8 @@ class SerpDiscovery:
             "rounds": {
                 "declared": int(self.rounds),
                 "executed": int(self.executed_rounds),
+                "not_executed": int(self.not_executed_rounds),
+                "not_executed_reason": self.not_executed_reason,
                 "source": self.source,
             },
             "budget": {
@@ -628,7 +669,13 @@ class SerpDiscovery:
                     if self.budget_declared is None
                     else int(self.budget_declared) * int(self.rounds)
                 ),
-                "used": {pid: int(n) for pid, n in sorted(self.calls_by_product.items())},
+                # ``used`` — обслуженные запросы (живые + из кэша): «контур исполнялся»;
+                # ``charged`` — списания (живые вызовы); ``from_cache`` — ответы без сети.
+                "used": self.served_by_product,
+                "charged": {pid: int(n) for pid, n in sorted(self.calls_by_product.items())},
+                "from_cache": {
+                    pid: int(n) for pid, n in sorted(self.cache_hits_by_product.items())
+                },
                 "exhausted": {pid: bool(v) for pid, v in sorted(self.exhausted_by_product.items())},
             },
             "adapter": self.adapter,
@@ -640,6 +687,8 @@ class SerpDiscovery:
                 pid: {reason: int(count) for reason, count in sorted(reasons.items())}
                 for pid, reasons in sorted(self.rejected_by_product.items())
             },
+            # Сбои вызовов отделены от «не нашлось» (S8): разные причины — разные записи.
+            "errors": {pid: int(n) for pid, n in sorted(self.errors_by_product.items())},
             "termination": {
                 pid: reason for pid, reason in sorted(self.termination_by_product.items())
             },
@@ -757,11 +806,35 @@ def build_serp_queries(
     return result
 
 
+def _normalized_path(path: str) -> str:
+    """Percent-декодированный путь без dot-segments и пустых сегментов (S9d).
+
+    ``/a/%62`` и ``/a/b``, ``/a/./b`` и ``/a/x/../b`` — один документ; без нормализации
+    кандидат входил бы в корпус повторно. Пустой/корневой путь — ``/``.
+    """
+    segments: list[str] = []
+    for segment in unquote(str(path or "/")).split("/"):
+        if segment in {"", "."}:
+            continue
+        if segment == "..":
+            if segments:
+                segments.pop()
+            continue
+        segments.append(segment)
+    return "/" + "/".join(segments)
+
+
 def _known_url_key(url: str) -> str:
-    """Ключ дедупликации URL: без фрагмента, с нормализованным хостом и без ``/`` в конце."""
+    """Ключ дедупликации URL: без фрагмента, нормализованные хост, путь и схема (S9d).
+
+    Нормализуются ровно те части, где различия не меняют документ: схема и хост — к
+    нижнему регистру (хост ещё и без ``www.``/хвостовой точки), путь — percent-декодируется
+    и чистится от dot-segments (``..``/``.``) и пустых сегментов, хвостовой ``/``
+    отбрасывается. Регистр пути и query сохраняются: они регистрозависимы.
+    """
     parsed = urlsplit(str(url))
     host = normalize_scope_host(parsed.hostname or "")
-    path = (parsed.path or "/").rstrip("/") or "/"
+    path = _normalized_path(parsed.path or "/")
     query = f"?{parsed.query}" if parsed.query else ""
     return f"{parsed.scheme.lower()}://{host}{path}{query}"
 
@@ -879,6 +952,27 @@ def assign_serp_seeds(
     return assigned
 
 
+def _queries_signature(
+    queries_by_product: Mapping[str, Sequence[SearchQuery]],
+) -> tuple[tuple[str, tuple[tuple[str, str, int], ...]], ...]:
+    """Детерминированный отпечаток **набора** запросов раунда (S3).
+
+    В отпечаток входит всё, что уходит провайдеру: текст, язык и ``limit`` (ось страницы
+    у ``SearchQuery`` отсутствует, поэтому пагинация в отпечаток попасть не может).
+    Сравнение отпечатков соседних раундов отвечает на вопрос «раунд r+1 спросит что-то
+    новое?» — если нет, раунд не исполняется.
+    """
+    return tuple(
+        (
+            str(product_id),
+            tuple(
+                (str(query.text), str(query.lang), int(query.limit))
+                for query in queries_by_product[product_id]
+            ),
+        )
+        for product_id in sorted(queries_by_product)
+    )
+
 def serp_discover(
     *,
     adapter: SearchAdapterPort | None,
@@ -893,6 +987,7 @@ def serp_discover(
     limits_by_product: Mapping[str, CrawlLimits] | None = None,
     source: str = "run.yaml",
     budget_declared: int | None = None,
+    cache: Any | None = None,
     clock: Callable[[], str] | None = None,
 ) -> SerpDiscovery:
     """Исполняет SERP-проход: запросы → ``external_search`` → допуск кандидатов.
@@ -906,9 +1001,28 @@ def serp_discover(
     budget``. Отказ бюджета виден (:class:`SerpDiscovery.exhausted_by_product`) и
     пишется в ``search_log`` причиной ``budget_exhausted`` — исчерпание не «тихое».
 
+    **Кэш (R7).** ``cache`` — глобальный content-addressed кэш; ответы поиска
+    кэшируются в ``cache/serp`` внутри :func:`external_search_observed`, а попадание не
+    списывает бюджет. Если ``cache`` не передан, берётся кэш, которым уже пользуется
+    адаптер (``adapter.cache``): composition root собирает адаптер с тем же
+    ``paths.cache``, и второй точки построения кэша не заводим. Хиты/живые вызовы
+    различаются в наблюдении (:attr:`SerpDiscovery.cache_hits_by_product`).
+
+    **Раунды и доходность (S3).** Раунд исполняется только если его набор запросов
+    **отличается** от предыдущего (:func:`_queries_signature`). Ось страницы/сдвига в
+    ``SearchQuery`` отсутствует, а провайдеры снимают фиксированную первую страницу,
+    поэтому при ``rounds > 1`` раунды 2..n запросов не меняют: они **не исполняются**, и
+    это видно в наблюдении (``rounds.not_executed``/``rounds.not_executed_reason``), а
+    не выражается молчаливым сжиганием бюджета. Проверка не «запрещает» ``rounds > 1``:
+    как только набор запросов начнёт меняться, раунды пойдут без правки этого кода.
+
     **Ранняя терминация.** Раунд, не принёсший **ни одного нового** допущенного URL,
     останавливает проход: следующие раунды выпустили бы те же запросы по тому же
     провайдеру. Число исполненных раундов остаётся в наблюдении.
+
+    **Сбой адаптера ≠ «не нашлось» (S8).** Ошибка вызова считается в
+    :attr:`SerpDiscovery.errors_by_product` и даёт ``termination_reason=error``, когда
+    кандидатов не было вовсе; «ничего не нашлось» остаётся ``not_found``.
 
     **Видимый отказ вместо пропуска.** Адаптера нет или запросов нет при объявленных
     раундах — ``unavailable_reason`` заполняется, и фаза сообщает об этом; контур не
@@ -917,6 +1031,7 @@ def serp_discover(
     :param known_urls_by_product: уже известные URL продукта (seed'ы + ранее найденное) —
         дедупликация, чтобы раунд не «нашёл» собственный корпус.
     :param limits_by_product: разрешённые оси краула продукта (источник блэклиста).
+    :param cache: глобальный кэш (R7); ``None`` → кэш адаптера, если он его объявляет.
     """
     if rounds < 0:
         raise ValueError(f"rounds обязан быть ≥ 0, получено {rounds}")
@@ -931,6 +1046,8 @@ def serp_discover(
     own_hosts_by_product = dict(own_hosts_by_product or {})
     declared = frozenset(declared_hosts or ())
     limits_by_product = dict(limits_by_product or {})
+    if cache is None and adapter is not None:
+        cache = getattr(adapter, "cache", None)
     seen_by_product: dict[str, set[str]] = {
         str(pid): {_known_url_key(url) for url in (known_urls_by_product or {}).get(pid, ())}
         for pid in queries_by_product
@@ -951,7 +1068,17 @@ def serp_discover(
         }
         return discovery
 
+    signature = _queries_signature(queries_by_product)
     for offset in range(int(rounds)):
+        if offset > 0:
+            current = _queries_signature(queries_by_product)
+            if current == signature:
+                # S3: раунд спросил бы провайдера ровно то же самое — бюджет ушёл бы
+                # впустую. Раунд не исполняется; отказ виден в наблюдении.
+                discovery.not_executed_rounds = int(rounds) - offset
+                discovery.not_executed_reason = NO_QUERY_VARIATION_REASON
+                break
+            signature = current
         new_this_round = 0
         candidates_this_round = 0
         for product_id in sorted(queries_by_product):
@@ -961,7 +1088,7 @@ def serp_discover(
             seen = seen_by_product.setdefault(pid, set())
             for query in queries:
                 before = effort.used(SearchPhase.SERP, pid)
-                results = external_search(
+                outcome = external_search_observed(
                     adapter,
                     query,
                     store=store,
@@ -969,19 +1096,31 @@ def serp_discover(
                     effort=effort,
                     budget=effort.budget,
                     product_id=pid,
+                    cache=cache,
                     clock=clock,
                 )
                 used = effort.used(SearchPhase.SERP, pid) - before
                 discovery.calls_by_product[pid] = (
                     discovery.calls_by_product.get(pid, 0) + max(used, 0)
                 )
+                if outcome.from_cache:
+                    discovery.cache_hits_by_product[pid] = (
+                        discovery.cache_hits_by_product.get(pid, 0) + 1
+                    )
+                if outcome.error is not None:
+                    discovery.errors_by_product[pid] = (
+                        discovery.errors_by_product.get(pid, 0) + 1
+                    )
+                # S7: запрос записывается **до** любых ``continue`` — иначе знаменатель
+                # «принято/queries» считал бы только результативные запросы.
+                queries_log = discovery.queries_by_product.setdefault(pid, [])
+                if query.text not in queries_log:
+                    queries_log.append(query.text)
+                results = outcome.results
                 if not results:
                     if effort.remaining(SearchPhase.SERP, pid) == 0:
                         discovery.exhausted_by_product[pid] = True
                     continue
-                queries_log = discovery.queries_by_product.setdefault(pid, [])
-                if query.text not in queries_log:
-                    queries_log.append(query.text)
                 discovery.candidates_by_product[pid] = (
                     discovery.candidates_by_product.get(pid, 0) + len(results)
                 )
@@ -1003,6 +1142,8 @@ def serp_discover(
         discovery.executed_rounds = offset + 1
         if new_this_round == 0:
             # Дальнейшие раунды выпустили бы те же запросы: терминация видима.
+            # Сбой адаптера считается **по продукту** (S8, ``_product_termination``):
+            # ошибка одного продукта не переписывает причину другого.
             if candidates_this_round == 0:
                 reason = TerminationReason.NOT_FOUND
             elif discovery.any_exhausted:
@@ -1010,20 +1151,45 @@ def serp_discover(
             else:
                 reason = TerminationReason.RESULTS_EXHAUSTED
             discovery.termination_by_product = {
-                pid: reason.value for pid in queries_by_product
+                pid: _product_termination(discovery, str(pid), reason).value
+                for pid in queries_by_product
             }
             break
 
     if not discovery.termination_by_product:
         discovery.termination_by_product = {
-            pid: (
-                TerminationReason.BUDGET_EXHAUSTED.value
-                if discovery.exhausted_by_product.get(pid)
-                else TerminationReason.RESULTS_EXHAUSTED.value
-            )
+            pid: _final_termination(discovery, str(pid)).value
             for pid in queries_by_product
         }
     return discovery
+
+def _product_termination(
+    discovery: SerpDiscovery,
+    product_id: str,
+    fallback: TerminationReason,
+) -> TerminationReason:
+    """Причина терминации продукта с приоритетом сбоя над «выдача кончилась» (S8).
+
+    Ошибка важнее ``fallback`` только когда кандидатов у продукта **не было вовсе**:
+    если часть вызовов отработала, протокол продолжался, и сбой одного не превращает
+    результат в сбой контура.
+    """
+    if (
+        discovery.errors_by_product.get(product_id, 0) > 0
+        and discovery.candidates_by_product.get(product_id, 0) == 0
+    ):
+        return TerminationReason.ERROR
+    return fallback
+
+
+def _final_termination(discovery: SerpDiscovery, product_id: str) -> TerminationReason:
+    """Причина терминации продукта, когда раунды исчерпаны без раннего выхода."""
+    fallback = (
+        TerminationReason.BUDGET_EXHAUSTED
+        if discovery.exhausted_by_product.get(product_id)
+        else TerminationReason.RESULTS_EXHAUSTED
+    )
+    return _product_termination(discovery, product_id, fallback)
 
 
 # --------------------------------------------------------------------------- #

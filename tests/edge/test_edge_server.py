@@ -33,6 +33,7 @@ from core.adapters.remote_registry import RemoteRegistry
 from core.adapters.remote_search import RemoteSearch
 from core.edge.server import (
     EDGE_SCHEMA_VERSION,
+    SEAM_SEARCH_MAX_LIMIT,
     EdgeGateway,
     build_server,
     make_handler,
@@ -483,6 +484,34 @@ def test_search_returns_candidates_only() -> None:
 def test_search_rejects_empty_query() -> None:
     env = _edge().envelope("search", {"query": "   "})
     assert env["status"] == "error"
+
+def test_search_limit_is_clamped_to_declared_maximum() -> None:
+    """S9e: ``limit`` без верхней границы уходил провайдеру как есть — теперь клампится."""
+    searcher = FakeSearcher([SearchResult(url="https://a.test", rank=1)])
+    env = _edge(searchers=searcher).envelope(
+        "search", {"query": "q", "limit": 10**9}
+    )
+
+    assert env["status"] == "ok"
+    assert searcher.last_query is not None
+    assert searcher.last_query.limit == SEAM_SEARCH_MAX_LIMIT
+
+def test_search_limit_negative_is_zero() -> None:
+    searcher = FakeSearcher([SearchResult(url="https://a.test", rank=1)])
+    _edge(searchers=searcher).envelope("search", {"query": "q", "limit": -5})
+    assert searcher.last_query is not None
+    assert searcher.last_query.limit == 0
+
+def test_search_limit_bound_mirrors_pipeline_page() -> None:
+    """Граница шва — размер одной страницы пайплайна, а не круглое число с потолка.
+
+    Шов исполняет один вызов и не пагинирует; «одна страница» — это ровно то, что
+    объявляет единственный потребитель (``SERP_QUERY_LIMIT``). Тест держит равенство,
+    чтобы смена размера страницы не оставляла границу шва в прошлом.
+    """
+    from core.pipeline.serp_loop import SERP_QUERY_LIMIT
+
+    assert SEAM_SEARCH_MAX_LIMIT == SERP_QUERY_LIMIT
 
 
 # ---------------------------------------------------------------------------
