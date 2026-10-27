@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable, Mapping, Sequence
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from core.config.crawl_sources import CrawlSourcesConfig
@@ -815,6 +816,7 @@ def build_phases(
     deploy_profile: str | None = None,
     edge_schema_version: str | None = None,
     edge_capabilities: Mapping[str, Any] | None = None,
+    llm_rnd_endpoint: bool | None = None,
     max_attempts: int | None = None,
     progress: Callable[[dict[str, int]], None] | None = None,
     on_product: Callable[[str, str], None] | None = None,
@@ -872,6 +874,10 @@ def build_phases(
         не заполняется.
     :param edge_capabilities: версии edge-компонентов (gateway) для манифеста Ш9; ``None`` →
         пустой mapping (backward-compatible).
+    :param llm_rnd_endpoint: объявленное исключение стенда RnD (``deploy.llm.rnd_endpoint``,
+        §10): ``None`` — не объявлено, ``True`` — endpoint вне корпоративного периметра.
+        Протягивается в профиль публикуемости (Ш8) и оттуда в манифест/артефакты. На
+        ``run_id`` не влияет: это декларация о месте исполнения, а не условие измерения.
     :param max_attempts: Phase 4 — потолок попыток по ``(product_id, url)`` в Ш5
         (``--max-attempts``); исчерпавшие URL → терминальный ``FAILED`` ``attempts_exhausted``.
         ``None`` → без потолка.
@@ -1216,11 +1222,37 @@ def build_phases(
 
     # -- Ш8: расчёт (бандл → holder для report) ----------------------------- #
     def compute_phase(ctx: RunContext) -> PhaseResult:
-        """Ш8: считает ``ScoreBundle`` и кладёт его в ``holder`` для фазы отчёта."""
+        """Ш8: считает ``ScoreBundle`` и кладёт его в ``holder`` для фазы отчёта.
+
+        Профиль публикуемости несёт объявленное исключение стенда (§10) и хосты
+        endpoint'ов из ``llm_scenarios``; хосты читаются из store (durable), декларация
+        приходит из composition root. Записывается она **сразу** (``save_publishability``):
+        ``persist_manifest`` пишет блок только в Ш9, а предмет G4 собирается между Ш8 и
+        Ш9 — без ранней записи пост-хок ``hound report`` пересобрал бы профиль без
+        декларации и перезаписал опубликованную карту как производственную.
+        """
         bundle = bundle_for_run(
-            ctx.store, run_id=plan.run_id, plan=plan, inputs=inputs
+            ctx.store,
+            run_id=plan.run_id,
+            plan=plan,
+            inputs=inputs,
+            rnd_endpoint=llm_rnd_endpoint,
         )
         holder["bundle"] = bundle
+        profile = bundle.publishability
+        writer = getattr(ctx.store, "save_publishability", None)
+        if profile is not None and callable(writer):
+            try:
+                writer(plan.run_id, profile.to_dict())
+            except Exception as exc:  # noqa: BLE001 — провенанс не роняет расчёт
+                return PhaseResult(
+                    status="ok",
+                    phase="compute",
+                    log_entries=[
+                        f"compute: профиль публикуемости не записан в runs: "
+                        f"{type(exc).__name__}: {exc}"
+                    ],
+                )
         return PhaseResult(status="ok", phase="compute")
 
 

@@ -8,7 +8,11 @@
 * ``preliminary_findings.xlsx`` — кандидаты с маркером «не публикация»;
 * ``nda_questions.csv`` — все ``❓`` (продукт, параметр, исчерпанные контуры);
 * ``diff.md`` — изменённые статусы + evidence_id;
-* ``run_manifest.yaml`` — агрегат версий/моделей/сборки/профиля+K/бюджета (R7).
+* ``run_manifest.yaml`` — агрегат версий/моделей/сборки/профиля+K/бюджета (R7);
+* ``outputs/publishability.yaml`` — профиль публикуемости (A1/§6) вместе с объявленным
+  исключением стенда RnD (§10): ``rnd_endpoint``, хосты endpoint'ов, замечания;
+* ``outputs/measurement_uncertainty.yaml`` — полоса неопределённости вердиктов (P6c) с
+  провенансом и машинным ограничением ранжирования.
 
 Инварианты:
 
@@ -77,6 +81,7 @@ from core.pipeline.compute import (
 )
 from core.pipeline.crawl_frontier import resolve_crawl_limits
 from core.pipeline.digests import EXECUTION_CONTRACT_FIELDS
+from core.pipeline.measurement_uncertainty import build_measurement_uncertainty
 from core.pipeline.partial_docs import (
     partial_docs_summary,
     write_partial_docs_artifact,
@@ -120,6 +125,7 @@ __all__ = [
     "render_nda_questions",
     "render_preliminary_findings",
     "resolve_diff_change_class",
+    "write_measurement_uncertainty_artifact",
     "write_reports",
     "write_run_manifest",
 ]
@@ -260,6 +266,10 @@ class Artifacts:
     #: ``outputs/publishability.yaml`` — профиль публикуемости (A1/§6): класс и разложение
     #: неизвестности по причинам и продуктам. ``None`` — бандл без профиля (синтетика).
     publishability: Path | None = None
+    #: ``outputs/measurement_uncertainty.yaml`` — полоса неопределённости измерения вердиктов
+    #: (P6c): доля ячеек, меняющих вердикт при повторе, с провенансом и машинным
+    #: ограничением ранжирования. ``None`` — файл не записан (сбой выгрузки).
+    measurement_uncertainty: Path | None = None
     #: ``outputs/cell_diagnostics.csv`` — ячейки, о которых нужно знать человеку:
     #: непустые ``validation_notes``, незаписанное ``absence_rule``, непустой
     #: ``review_reason``. ``None`` — таких ячеек нет (файл не создаётся: пустой список
@@ -1161,8 +1171,16 @@ def _battle_card_header(
                 ("publishability_measured_products", profile.measured_products),
                 ("publishability_weak_denial_share", round(profile.weak_denial_share, 6)),
                 ("publishability_caveats", "; ".join(profile.caveats)),
+                # §10: объявленное исключение стенда RnD — рядом с классом, а не в
+                # примечании. Класс от него не меняется (условие стенда ≠ качество
+                # измерения), но «карта со стенда» обязана быть видна в шапке.
+                ("publishability_rnd_endpoint", profile.rnd_endpoint),
+                ("publishability_llm_hosts", ", ".join(profile.llm_hosts)),
             ]
         )
+        for notice in profile.llm_host_notices:
+            if notice.get("message"):
+                rows.append(("note", str(notice["message"])))
         for cause, bucket in sorted(profile.causes.items()):
             rows.append((f"publishability_unknown_{cause}", round(bucket.share, 6)))
         for skipped, bucket in sorted(profile.excluded.items()):
@@ -2313,6 +2331,34 @@ def write_publishability_artifact(
     path.write_text(text, encoding="utf-8")
     return path
 
+def write_measurement_uncertainty_artifact(
+    payload: Mapping[str, Any],
+    out_path: str | Path,
+    *,
+    run_id: str | None = None,
+) -> Path:
+    """Пишет ``outputs/measurement_uncertainty.yaml`` — полосу неопределённости вердиктов (P6c).
+
+    Тем же механизмом, что ``publishability.yaml``: ``yaml.safe_dump(sort_keys=True)``,
+    ``run_id`` в провенансе файла, никакого пересчёта на выходе. Полоса и её происхождение
+    — **одна запись**: «4.2 % из замера» и «4.2 %, измеренные здесь» различимы полем
+    ``computed_from_this_run`` и ``provenance.kind``, и это различие нельзя потерять при
+    сериализации.
+
+    :param payload: результат :func:`core.pipeline.measurement_uncertainty.build_measurement_uncertainty`.
+    :param run_id: для провенанса файла; ``None`` — не записывается.
+    """
+    path = Path(out_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    document: dict[str, Any] = dict(payload)
+    if run_id is not None:
+        document["run_id"] = run_id
+    text = yaml.safe_dump(
+        document, sort_keys=True, allow_unicode=True, default_flow_style=False
+    )
+    path.write_text(text, encoding="utf-8")
+    return path
+
 
 def _write_stale_cells(cells: Iterable[Any], path: Path) -> Path | None:
     """Пишет ``stale_cells.csv`` — «требует пере-оценки» (§13/K2); пусто → ``None``.
@@ -2479,6 +2525,12 @@ def write_reports(
         факт извлекается из absence-evidence ячеек (гейт ``❌`` пишет аудит покрытия).
     :param store: опциональный ``StorePort`` — источник per-product покрытия (Ф0).
 
+    Пишет также ``outputs/measurement_uncertainty.yaml`` (P6c): полоса неопределённости
+    вердиктов — объявленная (с путём замера и датой) либо измеренная в этом прогоне;
+    ``computed_from_this_run`` различает два случая, чтобы объявленное не выдавалось за
+    измеренное. Ограничение ранжирования публикуется машинным токеном
+    (``ranking_restriction``), а не только текстом.
+
     Пишет также ``outputs/artifacts_gap.yaml`` (13-manual-artifacts §4): per-URL список
     недоступных артефактов и заготовку входа следующего прогона. Генератор — тот же,
     что у фазы ``corpus`` (:func:`core.pipeline.artifacts_gap.write_artifacts_gap`), и
@@ -2518,6 +2570,19 @@ def write_reports(
     publishability_path = write_publishability_artifact(
         getattr(bundle, "publishability", None),
         outputs_dir / "publishability.yaml",
+        run_id=run_id,
+    )
+
+    # P6c: полоса неопределённости вердиктов — рядом с профилем публикуемости, тем же
+    # сериализатором. Без неё точечные вердикты читаются как точные, а замер (5 из 119 при
+    # идентичном промпте) остаётся в файле отчёта и в прогон не попадает.
+    uncertainty_path = write_measurement_uncertainty_artifact(
+        build_measurement_uncertainty(
+            cells=cell_list,
+            catalog=_catalog_map(catalog),
+            run_dir=run_dir,
+        ),
+        outputs_dir / "measurement_uncertainty.yaml",
         run_id=run_id,
     )
 
@@ -2629,6 +2694,7 @@ def write_reports(
         support_quality=support_path,
         support_quality_summary=support_payload,
         publishability=publishability_path,
+        measurement_uncertainty=uncertainty_path,
         preliminary_findings=preliminary,
         nda_questions=nda_questions,
         diff=diff,

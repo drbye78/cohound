@@ -377,6 +377,10 @@ def _artifacts_payload(artifacts: Any) -> dict[str, Any]:
         "artifacts_gap": _path(getattr(artifacts, "artifacts_gap", None)),
         # A1/§6: профиль публикуемости — артефакт разложения неизвестности.
         "publishability": _path(getattr(artifacts, "publishability", None)),
+        # P6c: полоса неопределённости вердиктов — артефакт условия измерения.
+        "measurement_uncertainty": _path(
+            getattr(artifacts, "measurement_uncertainty", None)
+        ),
         # §13/K2 и P6: списки работы, которые иначе пришлось бы искать в ``outputs/``
         # по догадке. Артефакт без объявленного пути — та же невидимость, что и его
         # отсутствие: оператор не знает, что смотреть.
@@ -1202,6 +1206,7 @@ def _gate_subject_resolver(
     seeds_digest: str,
     store: StorePort,
     runs_dir: str,
+    rnd_endpoint: bool | None = None,
 ) -> Callable[[Gate], GateSubject | None]:
     """Резолвер **предмета решения** для всех четырёх гейтов (S9, точки интеграции).
 
@@ -1217,6 +1222,10 @@ def _gate_subject_resolver(
 
     Резолвер **ленивый**: предмет считается в момент фазы-гейта, а не при сборке
     конвейера (``compute`` для G4 читает ячейки, которых до Ш6/Ш8 ещё нет).
+
+    :param rnd_endpoint: объявленное исключение стенда (§10) — тот же вход, что у фазы
+        Ш8: предмет G4 обязан описывать **тот же** профиль публикуемости, который будет
+        опубликован (иначе внешняя система утверждала бы не то, что выходит).
     """
     outputs_dir = Path(runs_dir) / plan.run_id / "outputs"
 
@@ -1240,7 +1249,11 @@ def _gate_subject_resolver(
             return review_subject(items, run_id=plan.run_id)
         if gate is Gate.G4:
             bundle = bundle_for_run(
-                store, run_id=plan.run_id, plan=plan, inputs=inputs
+                store,
+                run_id=plan.run_id,
+                plan=plan,
+                inputs=inputs,
+                rnd_endpoint=rnd_endpoint,
             )
             return publication_subject(
                 bundle,
@@ -1262,12 +1275,17 @@ def _gate_runtime(
     seeds_digest: str,
     state: Any,
     store: StorePort,
+    rnd_endpoint: bool | None = None,
 ) -> GateRuntime:
     """Собирает :class:`~core.pipeline.runner.GateRuntime` для фаз-гейтов.
 
     Один объект на прогон: предмет решения (все гейты), аттестация профиля (G1/G2),
     политика из ``run.yaml:gates`` (``waived`` — только G3/G4), каталог прогонов для
     запроса на решение (``runs/{run_id}/gates/{gate}-request.json``).
+
+    :param rnd_endpoint: объявленное исключение стенда (§10) — входит в профиль
+        публикуемости, то есть и в предмет G4. Один вход с фазой Ш8: гейт утверждает ровно
+        тот профиль, который публикуется.
     """
     runs_dir = str(getattr(args, "runs_dir", None) or "runs")
     return GateRuntime(
@@ -1279,6 +1297,7 @@ def _gate_runtime(
             seeds_digest=seeds_digest,
             store=store,
             runs_dir=runs_dir,
+            rnd_endpoint=rnd_endpoint,
         ),
         profile_gate=_profile_gate_resolver(
             args,
@@ -1947,6 +1966,14 @@ def _resolve_phases(
         "deploy_profile": deploy_profile,
         "edge_schema_version": edge_schema_version,
         "edge_capabilities": edge_capabilities,
+        # §10: объявленное исключение стенда RnD — в профиль публикуемости (Ш8). Источник —
+        # deploy-конфиг (единственное место, где исключение объявляется); ``None`` — не
+        # объявлено, и это видно замечанием в профиле, а не подразумевается.
+        "llm_rnd_endpoint": (
+            getattr(getattr(deploy_config, "llm", None), "rnd_endpoint", None)
+            if deploy_config is not None
+            else None
+        ),
         # URLs: только явный операторский вход; doc_domains не фетчатся молча (I19).
         "urls": corpus_urls,
         # Паспорта: --passports-dir либо resolved paths.passports; отсутствие → {}.

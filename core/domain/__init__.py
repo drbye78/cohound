@@ -59,6 +59,7 @@ from core.domain.enums import (
     ProductScope,
     PublishabilityClass,
     RankingPolicy,
+    RankingRestriction,
     RefreshPolicy,
     Relationship,
     ReuseKind,
@@ -76,6 +77,7 @@ from core.domain.enums import (
     StaleReason,
     Status,
     TerminationReason,
+    UncertaintyProvenance,
     UnknownCause,
     UnknownPolicy,
 )
@@ -159,6 +161,7 @@ from core.domain.scoring import (
     Score,
     SensitivityReport,
     comparability,
+    endpoint_host_notices,
     evidence_coverage,
     failure_rate,
     module_scores,
@@ -218,6 +221,7 @@ __all__ = [  # noqa: RUF022
     "ProductScope",
     "PublishabilityClass",
     "RankingPolicy",
+    "RankingRestriction",
     "RefreshPolicy",
     "Relationship",
     "ReuseKind",
@@ -237,6 +241,7 @@ __all__ = [  # noqa: RUF022
     "TerminationReason",
     "ComparabilityLevel",
     "UnknownCause",
+    "UncertaintyProvenance",
     "UnknownPolicy",
     # models
     "BaselineRow",
@@ -319,6 +324,7 @@ __all__ = [  # noqa: RUF022
     "evidence_coverage",
     "failure_rate",
     "comparability",
+    "endpoint_host_notices",
     "sensitivity",
     "module_scores",
     # A1/§6: профиль публикуемости (класс + разложение неизвестности)

@@ -48,6 +48,7 @@ __all__ = [
     "Score",
     "SensitivityReport",
     "comparability",
+    "endpoint_host_notices",
     "evidence_coverage",
     "failure_rate",
     "module_scores",
@@ -855,6 +856,20 @@ class PublishabilityProfile:
     :param caveats: названные оговорки (коды); пустой список — оговорок нет.
     :param reasons: условия, определившие класс (коды).
     :param banner: готовая строка для шапки отчёта — класс и доминирующая причина.
+    :param rnd_endpoint: карта получена со стенда, endpoint которого **объявлен вне**
+        корпоративного периметра (``deploy.llm.rnd_endpoint: true``). Это условие
+        стенда, а не качество измерения, поэтому на **класс публикуемости оно не
+        влияет**: демотировать карту за место исполнения значило бы назвать измерение
+        плохим из-за адреса шлюза (A1/A3). Видимость даётся полем профиля, строкой
+        ``publishability_notes`` и шапкой battle card: «карта не является
+        производственной публикацией» — утверждение о провенансе, а не о качестве.
+    :param llm_hosts: хосты endpoint'ов из объявленных ``llm_scenarios`` (без схемы/пути,
+        отсортированы и дедуплицированы) — факт «куда ушёл корпус». Пусто — прогон не
+        объявлял endpoint (оценщик не поднимался).
+    :param llm_host_notices: машиночитаемые замечания о хостах
+        (:func:`endpoint_host_notices`): ``{"code", "level", "hosts", "message"}``.
+        Строятся **только** из объявленных входов (флаг + хосты) — окружение сюда не
+        читается, иначе провенанс публикации зависел бы от env хоста.
     """
 
     klass: str
@@ -873,6 +888,16 @@ class PublishabilityProfile:
     caveats: list[str]
     reasons: list[str]
     banner: str
+    #: Стенд объявлен вне корпоративного периметра (``deploy.llm.rnd_endpoint: true``).
+    rnd_endpoint: bool = False
+    #: Объявлена ли принадлежность периметру вообще (``rnd_endpoint`` не ``None``).
+    #: Отдельное поле, потому что ``rnd_endpoint: false`` — это **декларация** «внутри
+    #: периметра», а отсутствие декларации — другое состояние (см. замечания).
+    rnd_endpoint_declared: bool = False
+    #: Объявленные хосты endpoint'ов (``llm_scenarios.endpoint_host``), детерминированно.
+    llm_hosts: list[str] = field(default_factory=list)
+    #: Замечания о хостах/периметре (коды + текст), детерминированный порядок.
+    llm_host_notices: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         """JSON/YAML-совместимый словарь (манифест, CLI ``--json``, артефакт ``outputs/``).
@@ -881,6 +906,81 @@ class PublishabilityProfile:
         ``outputs/publishability.yaml`` обязаны показывать **одни и те же** числа.
         """
         return asdict(self)
+
+
+def endpoint_host_notices(
+    *, rnd_endpoint: bool | None, hosts: Sequence[str]
+) -> list[dict[str, Any]]:
+    """Машиночитаемые замечания о хостах endpoint'а оценщика (§10, исключение стенда RnD).
+
+    Источник — **только объявленные** входы: флаг ``deploy.llm.rnd_endpoint`` и хосты из
+    ``llm_scenarios.endpoint_host``. Имя хоста не классифицируется: «внутренний» и
+    «внешний» — это то, что заявлено, а не то, что угадано по строке (корпоративный
+    endpoint тоже может быть публичным FQDN, а разрешение DNS ради провенанса зависело бы
+    от сети и не было бы детерминированным).
+
+    Коды:
+
+    * ``rnd_endpoint_not_declared`` (``warning``) — endpoint объявлен, а принадлежность
+      периметру — нет (``rnd_endpoint: null``). Внешний хост в этом состоянии неотличим от
+      ошибки конфигурации: объявите ``true`` (стенд) или ``false`` (внутри периметра);
+    * ``rnd_endpoint_declared`` (``warning``) — объявлен стенд вне периметра: карта
+      получена на внешнем endpoint и **не является производственной публикацией**;
+    * ``rnd_endpoint_without_endpoint`` (``notice``) — исключение объявлено, а endpoint не
+      объявлен вовсе (``llm_scenarios`` пуста): признак лишний, хоста для него нет.
+
+    Порядок детерминирован (порядок проверок ниже), хосты в замечании — отсортированы.
+    ``rnd_endpoint: false`` (явно объявлено «внутри периметра») замечаний не даёт: это
+    декларация оператора, а не наблюдение, и спорить с ней коду нечем.
+    """
+    declared_hosts = sorted(
+        {str(host).strip() for host in hosts if str(host).strip()}
+    )
+    notices: list[dict[str, Any]] = []
+    if rnd_endpoint is True and not declared_hosts:
+        notices.append(
+            {
+                "code": "rnd_endpoint_without_endpoint",
+                "level": "notice",
+                "hosts": [],
+                "message": (
+                    "llm.rnd_endpoint объявлен, но endpoint не объявлен ни одним слотом "
+                    "(llm_scenarios пуста): исключение стенда не к чему отнести — "
+                    "оценщик на этом прогоне не поднимался"
+                ),
+            }
+        )
+    elif rnd_endpoint is True:
+        notices.append(
+            {
+                "code": "rnd_endpoint_declared",
+                "level": "warning",
+                "hosts": declared_hosts,
+                "message": (
+                    "стенд RnD: endpoint "
+                    + ", ".join(declared_hosts)
+                    + " объявлен вне корпоративного периметра (llm.rnd_endpoint: true) — "
+                    "карта получена на стенде и не является производственной публикацией"
+                ),
+            }
+        )
+    elif rnd_endpoint is None and declared_hosts:
+        notices.append(
+            {
+                "code": "rnd_endpoint_not_declared",
+                "level": "warning",
+                "hosts": declared_hosts,
+                "message": (
+                    "endpoint "
+                    + ", ".join(declared_hosts)
+                    + " объявлен в llm_scenarios, но принадлежность корпоративному "
+                    "периметру не объявлена (llm.rnd_endpoint: null): внешний хост здесь "
+                    "неотличим от ошибки конфигурации — объявите true (стенд RnD) или "
+                    "false (внутри периметра)"
+                ),
+            }
+        )
+    return notices
 
 
 def _unknown_cause(cell: Cell) -> str:
@@ -988,6 +1088,8 @@ def publishability_profile(
     unknown_share_threshold: float = DEFAULT_UNKNOWN_SHARE_THRESHOLD,
     weak_denial_share_threshold: float = DEFAULT_WEAK_DENIAL_SHARE_THRESHOLD,
     coverage_floor: float = DEFAULT_COVERAGE_FLOOR,
+    rnd_endpoint: bool | None = None,
+    llm_hosts: Sequence[str] = (),
 ) -> PublishabilityProfile:
     """Строит профиль публикуемости: разложение неизвестности + класс (A1, §6).
 
@@ -1016,7 +1118,20 @@ def publishability_profile(
         проверкой ``coverage_floor``, а как оговорка публикуется отдельно).
     :param corpus_coverage: ``{product_id: CorpusCoverage}`` — контекст неполноты корпуса.
         В причины **не** превращается: причина выводится из ``EvidenceScope`` ячейки.
+    :param rnd_endpoint: объявленное исключение стенда RnD (§10): ``None`` — не объявлено,
+        ``True`` — endpoint вне корпоративного периметра. В класс публикуемости **не
+        входит** (условие стенда, не качество измерения): попадает в профиль полем,
+        строкой ``publishability_notes`` и шапкой battle card.
+    :param llm_hosts: объявленные хосты endpoint'ов (``llm_scenarios.endpoint_host``).
+        Сортируются и дедуплицируются здесь, чтобы артефакт был детерминирован независимо
+        от порядка строк в БД.
     """
+    declared_hosts = sorted(
+        {str(host).strip() for host in llm_hosts if str(host).strip()}
+    )
+    host_notices = endpoint_host_notices(
+        rnd_endpoint=rnd_endpoint, hosts=declared_hosts
+    )
     cell_list = list(cells)
     corpus_map = dict(corpus_coverage or {})
     # Материализуем вселенную один раз: она нужна и обходу, и составу продуктов
@@ -1190,6 +1305,11 @@ def publishability_profile(
         caveats=caveats,
         reasons=reasons,
         banner=banner,
+        # §10: исключение стенда RnD — видимое, но не влияющее на класс (без демотирования).
+        rnd_endpoint=rnd_endpoint is True,
+        rnd_endpoint_declared=rnd_endpoint is not None,
+        llm_hosts=declared_hosts,
+        llm_host_notices=host_notices,
     )
 
 

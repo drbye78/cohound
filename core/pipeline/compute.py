@@ -32,7 +32,7 @@ from __future__ import annotations
 
 import json
 import warnings
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, fields, is_dataclass
 from enum import Enum
 from typing import Any
@@ -276,6 +276,8 @@ def _compute_from_cells(
     universe: Iterable[tuple[str, str]] | None = None,
     ranking_epsilon: float = 0.0,
     corpus_coverage: Mapping[str, Any] | None = None,
+    rnd_endpoint: bool | None = None,
+    llm_hosts: Sequence[str] = (),
 ) -> ScoreBundle:
     """Считает :class:`ScoreBundle` по уже загруженным ячейкам (без I/O).
 
@@ -295,6 +297,10 @@ def _compute_from_cells(
         для профиля публикуемости (A1). В **причины** неизвестности не превращается:
         причина выводится из ``EvidenceScope`` ячейки; неполнота корпуса публикуется
         рядом как объяснение, а не как подмена данных.
+    :param rnd_endpoint: объявленное исключение стенда RnD (§10): ``None`` — принадлежность
+        периметру не объявлена, ``True`` — endpoint вне корпоративного периметра,
+        ``False`` — объявлено «внутри периметра». На класс публикуемости не влияет.
+    :param llm_hosts: объявленные хосты endpoint'ов (``llm_scenarios.endpoint_host``).
     """
     stale = _stale_rows(cells)
     fresh = [cell for cell in cells if getattr(cell, "stale_reason", None) is None]
@@ -338,6 +344,8 @@ def _compute_from_cells(
         comparability_reasons=comp.reasons,
         cross_cycle=comp.cross_cycle,
         corpus_coverage=corpus_coverage,
+        rnd_endpoint=rnd_endpoint,
+        llm_hosts=llm_hosts,
     )
     return ScoreBundle(
         capability=resolved_capability(measured, catalog, module_weights),
@@ -358,6 +366,52 @@ def _compute_from_cells(
 # ---------------------------------------------------------------------------
 # Публичный интерфейс
 # ---------------------------------------------------------------------------
+
+
+def _read_endpoint_declaration(store: StorePort, run_id: str) -> bool | None:
+    """Объявленное исключение стенда (``deploy.llm.rnd_endpoint``) из durable-профиля.
+
+    Декларация о месте исполнения не выводится из ячеек, поэтому её единственный
+    durable-носитель — профиль публикуемости прошлой записи (``runs.publishability_json``).
+    Читается **только** для пост-хок путей (``hound report``), где живого deploy-конфига
+    прогона нет: там результат обязан совпасть с тем, что было записано, иначе
+    пересборка артефактов молча снимала бы признак стенда с уже опубликованной карты.
+
+    ``None`` — декларации нет (профиль не писался либо поле отсутствует): состояние
+    «не объявлено», а не «внутри периметра». Это разные утверждения.
+    """
+    try:
+        manifest = store.read_manifest(run_id)
+    except Exception:  # noqa: BLE001 — провенанс отчёта, не источник вердиктов
+        return None
+    payload = getattr(manifest, "publishability", None)
+    if not isinstance(payload, Mapping):
+        return None
+    # Три состояния восстанавливаются парой полей: ``rnd_endpoint_declared`` отличает
+    # явное «внутри периметра» от «не объявлено» (одного bool для этого мало).
+    if payload.get("rnd_endpoint_declared") is not True:
+        return None
+    return payload.get("rnd_endpoint") is True
+
+
+def _read_llm_hosts(store: StorePort, run_id: str) -> list[str]:
+    """Хосты endpoint'ов из объявленных ``llm_scenarios`` (без схемы/пути), детерминированно.
+
+    Источник — durable-таблица ``llm_scenarios`` (её пишет composition root из
+    ``DeclaredExecutionAxes.llm_scenarios``), а не живой deploy-конфиг: пост-хок
+    ``hound report`` обязан видеть тот же endpoint, на котором получены вердикты.
+    Сбой чтения — пустой список (нет объявленного endpoint'а): выдумывать хост нельзя.
+    """
+    try:
+        manifest = store.read_manifest(run_id)
+    except Exception:  # noqa: BLE001 — провенанс отчёта, не источник вердиктов
+        return []
+    hosts = {
+        str(binding.endpoint_host)
+        for binding in (getattr(manifest, "llm_scenarios", None) or [])
+        if getattr(binding, "endpoint_host", None)
+    }
+    return sorted(hosts)
 
 
 def _read_corpus_coverage(
@@ -390,6 +444,8 @@ def compute(
     requested_ranking: RankingPolicy | str | None = None,
     universe: Iterable[tuple[str, str]] | None = None,
     ranking_epsilon: float = 0.0,
+    rnd_endpoint: bool | None = None,
+    llm_hosts: Iterable[str] | None = None,
 ) -> ScoreBundle:
     """Собирает :class:`ScoreBundle` прогона из store (Ш8, §6, 02 §E.1).
 
@@ -403,6 +459,9 @@ def compute(
     :param universe: вселенная scope ``{(product_id, param_id)}`` (§6/B-3a); ``None`` —
         legacy-режим Coverage по существующим ячейкам.
     :param ranking_epsilon: порог неразличимости ранжирования (§6/B-1, дефолт 0).
+    :param rnd_endpoint: объявленное исключение стенда (§10). ``None`` — взять durable-
+        декларацию прошлой записи (пост-хок ``hound report``), иначе «не объявлено».
+    :param llm_hosts: хосты endpoint'ов; ``None`` — прочитать из ``llm_scenarios`` (durable).
 
     Формулы не дублируются: вызовы делегированы :mod:`core.domain.scoring`. ``computed_ranking``
     всегда берётся из sensitivity как ``min(requested, computed)`` (K6). Пустой прогон
@@ -413,6 +472,14 @@ def compute(
     """
     cells = list(store.iter_cells(run_id))
     requested = _resolve_requested_ranking(store, run_id, requested_ranking)
+    declared_rnd = (
+        rnd_endpoint if rnd_endpoint is not None else _read_endpoint_declaration(store, run_id)
+    )
+    hosts = (
+        sorted({str(host) for host in llm_hosts if str(host).strip()})
+        if llm_hosts is not None
+        else _read_llm_hosts(store, run_id)
+    )
     return _compute_from_cells(
         cells,
         catalog=catalog,
@@ -423,6 +490,8 @@ def compute(
         universe=universe,
         ranking_epsilon=ranking_epsilon,
         corpus_coverage=_read_corpus_coverage(store, run_id),
+        rnd_endpoint=declared_rnd,
+        llm_hosts=hosts,
     )
 
 
@@ -432,6 +501,8 @@ def bundle_for_run(
     run_id: str,
     plan: Any,
     inputs: Any,
+    rnd_endpoint: bool | None = None,
+    llm_hosts: Iterable[str] | None = None,
 ) -> ScoreBundle:
     """``ScoreBundle`` прогона по плану и входам — **единственная** формула аргументов.
 
@@ -442,6 +513,9 @@ def bundle_for_run(
 
     :param plan: ``RunPlan`` (``params``/``products``/веса модулей/когорта).
     :param inputs: ``RunInputs`` (``run`` — политика ранжирования и порог неразличимости).
+    :param rnd_endpoint: объявленное исключение стенда RnD (§10); ``None`` — durable-
+        декларация прошлой записи, иначе «не объявлено».
+    :param llm_hosts: хосты endpoint'ов; ``None`` — из ``llm_scenarios`` (durable).
     """
     catalog = {p.param_id: p for p in plan.params}
     module_weights = (
@@ -459,6 +533,8 @@ def bundle_for_run(
         requested_ranking=getattr(run, "ranking_policy", None),
         universe=scope_universe(catalog, plan.products),
         ranking_epsilon=getattr(run, "ranking_epsilon", None) or 0.0,
+        rnd_endpoint=rnd_endpoint,
+        llm_hosts=llm_hosts,
     )
 
 
@@ -473,6 +549,8 @@ def per_product_bundle(
     requested_ranking: RankingPolicy | str | None = None,
     universe: Iterable[tuple[str, str]] | None = None,
     ranking_epsilon: float = 0.0,
+    rnd_endpoint: bool | None = None,
+    llm_hosts: Iterable[str] | None = None,
 ) -> dict[str, ScoreBundle]:
     """Бандл на каждый продукт (для battle card): ``{product_id: ScoreBundle}``.
 
@@ -480,12 +558,22 @@ def per_product_bundle(
     для детерминизма). Comparability считается на **однопродуктовой** когорте продукта, чтобы
     уровень отражал его собственное покрытие (кросс-продуктовый уровень — у агрегатного
     :func:`compute`). Продукты когорты без ячеек дают пустой бандл. ``universe``/``ranking_epsilon``
-    прокидываются; вселенная фильтруется по продукту.
+    прокидываются; вселенная фильтруется по продукту. Хосты endpoint'ов и объявленное
+    исключение стенда (§10) читаются один раз (durable) — профиль каждого продукта несёт
+    тот же провенанс, что агрегатный.
     """
     cells = list(store.iter_cells(run_id))
     requested = _resolve_requested_ranking(store, run_id, requested_ranking)
     universe_set = set(universe) if universe is not None else None
     corpus = _read_corpus_coverage(store, run_id)
+    declared_rnd = (
+        rnd_endpoint if rnd_endpoint is not None else _read_endpoint_declaration(store, run_id)
+    )
+    hosts = (
+        sorted({str(host) for host in llm_hosts if str(host).strip()})
+        if llm_hosts is not None
+        else _read_llm_hosts(store, run_id)
+    )
 
     by_product: dict[str, list[Cell]] = {}
     for cell in cells:
@@ -517,6 +605,8 @@ def per_product_bundle(
                 if corpus is not None and product_id in corpus
                 else None
             ),
+            rnd_endpoint=declared_rnd,
+            llm_hosts=hosts,
         )
     return result
 
@@ -573,13 +663,20 @@ def publishability_notes(bundle: ScoreBundle) -> list[str]:
     публикуется, но оговорки обязаны быть названы. ``ANALYTICAL_ONLY``/``NOT_COMPARABLE``
     дают ту же строку плюс причины класса — читателю нужно знать, какое условие не
     выполнено, а не только что оно не выполнено.
+
+    Отдельно — замечания о хостах endpoint'а (§10): они **не** оговорки класса и не
+    меняют его. «Прогон шёл на внешний endpoint» — условие стенда, а не качество
+    измерения; поэтому строка идёт рядом с классом, а не превращается в демотирование
+    (иначе выбор стенда молча переписывал бы оценку карты).
     """
     profile = bundle.publishability
     if profile is None:
         return []
+    notes = [str(notice.get("message") or "") for notice in profile.llm_host_notices]
+    notes = [note for note in notes if note]
     if profile.klass == PublishabilityClass.PUBLISHABLE.value:
-        return []
-    notes = [profile.banner]
+        return notes
+    notes.append(profile.banner)
     if profile.klass != PublishabilityClass.PUBLISHABLE_WITH_CAVEAT.value:
         notes.extend(f"reason: {reason}" for reason in profile.reasons)
     return notes
@@ -599,13 +696,24 @@ def assert_publishable(bundle: ScoreBundle) -> None:
     ``PUBLISHABLE_WITH_CAVEAT`` предупреждения не даёт: карта публикуется, оговорки
     названы в баннере battle card и в ``outputs/publishability.yaml``. Мягкая проверка
     (``RuntimeWarning``): жёсткий блокирующий гейт G4 реализует ``pipeline/report.py``.
+
+    **Исключение — замечания о хостах endpoint'а (§10).** Они предупреждают при **любом**
+    классе: «прогон шёл на endpoint, принадлежность которого периметру не объявлена» —
+    это не оговорка качества карты, а факт о провенансе, и молчать о нём нельзя именно
+    тогда, когда карта выглядит публикуемой.
     """
     problems = publish_warnings(bundle)
     if problems:
         warnings.warn("; ".join(problems), RuntimeWarning, stacklevel=2)
         return
     profile = bundle.publishability
-    if profile is None or profile.klass in {
+    if profile is None:
+        return
+    host_notes = [str(n.get("message") or "") for n in profile.llm_host_notices]
+    host_notes = [note for note in host_notes if note]
+    if host_notes:
+        warnings.warn("; ".join(host_notes), RuntimeWarning, stacklevel=2)
+    if profile.klass in {
         PublishabilityClass.PUBLISHABLE.value,
         PublishabilityClass.PUBLISHABLE_WITH_CAVEAT.value,
     }:
