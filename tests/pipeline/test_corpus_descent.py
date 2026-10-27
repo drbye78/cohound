@@ -1646,3 +1646,79 @@ def test_write_through_window_matches_inline_order(tmp_path: Path) -> None:
         "nested/two.md",
         "g/last.txt",
     ], paths
+
+# ---------------------------------------------------------------------------
+# Частичный член: «прочитал часть» — законный исход, видимый в корпусе и наблюдении
+# ---------------------------------------------------------------------------
+
+class _PartialMemberExtractor(_FileExtractor):
+    """Как ``_FileExtractor``, но PDF-член читается **частично** (1 страница из 7).
+
+    Ровно то, что присылает docling на ``PARTIAL_SUCCESS``: текст прочитанной части есть.
+    Бинарный исход члена («ингестнут») без признака выдавал бы это за полное чтение.
+    """
+
+    version = "extractor-descent-partial-1"
+
+    def extract(
+        self, page: RawPage, route: ExtractionRoute = ExtractionRoute.AUTO
+    ) -> ExtractedDoc:
+        doc = super().extract(page, route)
+        if not page.url.endswith(".pdf"):
+            return doc
+        return dataclasses.replace(
+            doc,
+            page_count=7,
+            partial=True,
+            partial_reason="docling: PARTIAL_SUCCESS, получено страниц 1 из 7",
+            pages_converted=1,
+        )
+
+def test_partial_member_is_visible_in_corpus_and_observation(tmp_path: Path) -> None:
+    """Частично прочитанный член: документ в корпусе, признак в документе и в исходе спуска.
+
+    Проверяется весь путь: извлечение члена → ``corpus_docs.partial`` (свидетельство) →
+    ``MemberOutcome.partial`` → ``archive_observations.outcome.members_partial`` →
+    ``CorpusCoverage.complete=False``. До этого частичный член выглядел как полностью
+    прочитанный: ``members_ingested`` рос, а признака не было нигде.
+    """
+    archive = _zip(
+        {
+            "docs/manual.pdf": _pdf(3),
+            "notes/readme.md": b"# hello\nbody\n",
+        }
+    )
+    with _run(tmp_path, archive, extractor=_PartialMemberExtractor()) as (
+        store,
+        result,
+        _extractor,
+    ):
+        docs = {doc.url: doc for doc in _build_of(result).docs}
+        pdf = docs[f"{ZIP_URL}!/docs/manual.pdf"]
+        assert pdf.partial is True
+        assert (pdf.pages_converted, pdf.page_count) == (1, 7)
+        assert "PARTIAL_SUCCESS" in (pdf.partial_reason or "")
+        # Сосед прочитан целиком — признак не размазывается по всем членам архива.
+        md = docs[f"{ZIP_URL}!/notes/readme.md"]
+        assert md.partial is False
+
+        # Строка члена бинарна (doc_id/skip_reason), а свидетельство частичности —
+        # сама строка документа выше; спуск называет частичные члены отдельным счётчиком.
+        rows = {row.member_path: row for row in _members(store)}
+        assert rows["docs/manual.pdf"].doc_id is not None
+        assert rows["docs/manual.pdf"].skip_reason is None
+
+        root = _observations(store)[0]
+        assert root.outcome["members_ingested"] == 2
+        assert root.outcome["members_partial"] == 1
+        assert root.outcome["partial"] == {
+            "docling: PARTIAL_SUCCESS, получено страниц 1 из 7": {
+                "count": 1,
+                "examples": ["docs/manual.pdf"],
+            }
+        }
+
+        coverage = store.read_corpus_coverage(RUN_ID, "p1")
+        assert coverage is not None
+        assert coverage.complete is False
+        assert coverage.blocked == {"partial_extraction": 1}

@@ -164,6 +164,11 @@ _DOCUMENT_VERSION_COLUMNS = (
     "raw_path",
     "chunker_version",
     "chunk_ids_digest",
+    # v5 (частичность извлечения): ``None`` пишется как SQL NULL = «не измерено».
+    "extract_partial",
+    "extract_partial_reason",
+    "extract_pages_converted",
+    "extract_page_count",
     "first_seen_run_id",
     "last_seen_run_id",
     "first_seen_at",
@@ -504,7 +509,14 @@ class SqliteStateStore:
 
     @staticmethod
     def _document_version_row(row: sqlite3.Row) -> DocumentVersionRow:
-        """Строка SQLite → :class:`DocumentVersionRow`."""
+        """Строка SQLite → :class:`DocumentVersionRow`.
+
+        Частичность читается как **три состояния**: ``NULL`` в ``extract_partial`` —
+        «не измерено» (строка записана до v5 или извлечение не наблюдалось), а не «полное».
+        ``sqlite3`` отдаёт ``INTEGER``, поэтому признак приводится к ``bool | None`` явно:
+        ``bool(0)`` и ``False`` в Python — одно и то же только пока об этом помнят.
+        """
+        partial_raw = row["extract_partial"]
         return DocumentVersionRow(
             doc_version_id=row["doc_version_id"],
             doc_id=row["doc_id"],
@@ -516,6 +528,10 @@ class SqliteStateStore:
             raw_path=row["raw_path"],
             chunker_version=row["chunker_version"],
             chunk_ids_digest=row["chunk_ids_digest"],
+            extract_partial=(None if partial_raw is None else bool(partial_raw)),
+            extract_partial_reason=row["extract_partial_reason"],
+            extract_pages_converted=row["extract_pages_converted"],
+            extract_page_count=row["extract_page_count"],
             first_seen_run_id=row["first_seen_run_id"],
             last_seen_run_id=row["last_seen_run_id"],
             first_seen_at=row["first_seen_at"],

@@ -158,6 +158,18 @@ class DocumentVersionRow:
     first_seen_at: str
     last_seen_at: str
     status: str
+    #: Частичность извлечения — **измеренное** свойство версии (не вывод из текста).
+    #: ``True`` — прочитана часть (docling ``PARTIAL_SUCCESS``, pdfium: часть страниц не
+    #: прочитана), ``False`` — прочитано всё, ``None`` — **не измерено** (строка записана
+    #: версией, которая признак не сохраняла). ``None`` нельзя читать как «полное»:
+    #: переиспользование такой версии не вправе объявлять покрытие полным молча.
+    extract_partial: bool | None = None
+    #: Почему частично — как сообщил прибор (''/None при ``extract_partial is not True``).
+    extract_partial_reason: str | None = None
+    #: Сколько страниц реально попало в текст (``None`` — прибор числа не сообщил).
+    extract_pages_converted: int | None = None
+    #: Сколько страниц заявлено документом (``None`` — не сообщено).
+    extract_page_count: int | None = None
 
 
 @dataclass(frozen=True)

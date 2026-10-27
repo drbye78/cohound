@@ -225,8 +225,11 @@ def test_partial_document_not_stored(tmp_path: Path) -> None:
     проделанной работы в него не входит. Живой случай: PDF на 2763 страницы дал
     ``PARTIAL_SUCCESS`` с 7 прочитанными страницами (79 810 символов). Заморозить такой
     результат значило бы объявить документом текст части без всякой возможности
-    пере-экстракции — и признак частичности при чтении ещё и терялся бы (``get`` собирает
-    ``partial=False`` по умолчанию).
+    пере-экстракции.
+
+    Признак при этом не теряется (v5): он живёт в durable-записи версии документа
+    (``document_version.extract_partial``) и восстанавливается переиспользованием, а
+    конверт, помеченный ``partial``, читается как частичный, а не как полный (см. ниже).
     """
     cache = ExtractionCache(tmp_path / "cache")
     partial = replace(_doc("семь страниц из 2763"), partial=True, partial_reason="PARTIAL_SUCCESS")
@@ -454,6 +457,8 @@ def test_stats_snapshot_has_stable_keys(tmp_path: Path) -> None:
         "corrupt",
         "evicted",
         "invalid_key",
+        # v5: хиты, отдавшие частичное наблюдение (подмножество ``hits``).
+        "partial_hits",
     }
     assert all(isinstance(value, int) for value in stats.values())
 
@@ -534,3 +539,83 @@ def test_pre_build_key_envelope_is_not_served(
     assert upgraded.version == "docling-doc-3:full/docling-2.135.0"
     assert cache.get(RAW_A, upgraded.version, "full") is None
     assert cache.stats()["misses"] == 1
+
+# ---------------------------------------------------------------------------
+# Частичность как свойство записи (v5)
+# ---------------------------------------------------------------------------
+
+def test_partial_record_is_served_as_partial(tmp_path: Path) -> None:
+    """Запись с ``partial`` отдаётся частичной: подменить её полной нельзя.
+
+    Писатель этого модуля частичный текст не сохраняет (P8), но конверт умеет нести
+    признак — и тогда ``get`` обязан вернуть наблюдение **как есть**, с причиной и числом
+    прочитанных страниц. Иначе повторное использование усечённого извлечения выглядело бы
+    полным, а ``CorpusCoverage`` объявило бы охват полным на непрочитанных страницах.
+    """
+    cache = ExtractionCache(tmp_path / "cache")
+    _write_envelope(
+        _entry(tmp_path / "cache", RAW_A),
+        text="семь страниц из 2763",
+        doc_content_hash=content_hash("семь страниц из 2763"),
+        page_count=2763,
+        partial=True,
+        partial_reason="docling: PARTIAL_SUCCESS, получено страниц 7 из 2763",
+        pages_converted=7,
+    )
+
+    restored = cache.get(RAW_A, "ext-1", "full")
+
+    assert restored is not None
+    assert restored.partial is True
+    assert "PARTIAL_SUCCESS" in (restored.partial_reason or "")
+    assert (restored.pages_converted, restored.page_count) == (7, 2763)
+    assert cache.stats()["partial_hits"] == 1
+    assert cache.stats()["hits"] == 1
+
+def test_full_record_is_not_served_as_partial(tmp_path: Path) -> None:
+    """Полный конверт (без поля частичности) остаётся полным — регресс-защита."""
+    cache = ExtractionCache(tmp_path / "cache")
+    cache.put(_doc("whole document", pages=1), level="full", content_hash=RAW_A)
+
+    restored = cache.get(RAW_A, "ext-1", "full")
+
+    assert restored is not None
+    assert restored.partial is False
+    assert restored.partial_reason is None
+    assert restored.pages_converted is None
+    assert cache.stats()["partial_hits"] == 0
+
+def test_partial_record_without_reason_is_a_miss(tmp_path: Path) -> None:
+    """``partial`` без причины — противоречивая запись: не обслуживается (не «полная»)."""
+    cache = ExtractionCache(tmp_path / "cache")
+    _write_envelope(_entry(tmp_path / "cache", RAW_A), partial=True)
+
+    assert cache.get(RAW_A, "ext-1", "full") is None
+    assert cache.stats()["corrupt"] == 1
+
+def test_reason_without_partial_flag_is_a_miss(tmp_path: Path) -> None:
+    """Причина частичности без признака — ложный провенанс: промах, а не полное."""
+    cache = ExtractionCache(tmp_path / "cache")
+    _write_envelope(
+        _entry(tmp_path / "cache", RAW_A),
+        partial_reason="docling: PARTIAL_SUCCESS",
+    )
+
+    assert cache.get(RAW_A, "ext-1", "full") is None
+    assert cache.stats()["corrupt"] == 1
+
+def test_partial_with_more_converted_pages_than_declared_is_a_miss(
+    tmp_path: Path,
+) -> None:
+    """Прочитано больше заявленного — счётчики противоречат друг другу: промах."""
+    cache = ExtractionCache(tmp_path / "cache")
+    _write_envelope(
+        _entry(tmp_path / "cache", RAW_A),
+        page_count=3,
+        partial=True,
+        partial_reason="docling: PARTIAL_SUCCESS",
+        pages_converted=7,
+    )
+
+    assert cache.get(RAW_A, "ext-1", "full") is None
+    assert cache.stats()["corrupt"] == 1

@@ -436,7 +436,7 @@ def test_state_db_migrates_from_schema_3_to_4(tmp_path: Path) -> None:
         version = migrated.execute(
             "SELECT value FROM schema_meta WHERE key = 'schema_version'"
         ).fetchone()["value"]
-        assert version == STATE_SCHEMA_VERSION == "4"
+        assert version == STATE_SCHEMA_VERSION == "5"
         tables = {
             row["name"]
             for row in migrated.execute(
@@ -479,7 +479,7 @@ def test_state_db_migrates_from_schema_3_to_4(tmp_path: Path) -> None:
             again.execute(
                 "SELECT value FROM schema_meta WHERE key = 'schema_version'"
             ).fetchone()["value"]
-            == "4"
+            == "5"
         )
     finally:
         again.close()

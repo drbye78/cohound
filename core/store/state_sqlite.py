@@ -31,7 +31,14 @@ __all__ = ["STATE_DDL", "STATE_SCHEMA_VERSION", "connect_state", "state_db_path"
 #: требуют повторного решения G1/G2. Таблица **новая**, поэтому миграция аддитивна и
 #: сводится к ``CREATE TABLE IF NOT EXISTS``: старые БД получают её при открытии, строки
 #: не переносятся и не пересчитываются (отсутствие строк = «профиль не аттестован»).
-STATE_SCHEMA_VERSION = "4"
+#: 5 — частичность извлечения как **durable** свойство версии документа
+#: (``document_version.extract_partial``/``extract_partial_reason``/
+#: ``extract_pages_converted``/``extract_page_count``). Причина: переиспользование версии
+#: (``304``/тот же ``content_hash``) не знало, прочитан ли документ целиком, и объявляло
+#: покрытие полным там, где текст был усечён. Колонки аддитивны и допускают ``NULL``:
+#: строки, записанные до v5, признак не несли, и ``NULL`` («не измерено») — единственное
+#: честное значение для них (``0`` утверждало бы полноту, небывшую наблюдением).
+STATE_SCHEMA_VERSION = "5"
 
 #: DDL §4.2. Идемпотентен: ``CREATE ... IF NOT EXISTS`` на всех объектах.
 STATE_DDL = """
@@ -114,6 +121,12 @@ CREATE TABLE IF NOT EXISTS document_version (
     raw_path          TEXT,                     -- может быть NULL после retention
     chunker_version   TEXT,
     chunk_ids_digest  TEXT,
+    -- v5: частичность извлечения — измеренное свойство версии, а не вывод из текста.
+    -- NULL — не измерено (строка до v5); читать NULL как «полное» запрещено.
+    extract_partial        INTEGER,             -- 1 частично, 0 полное, NULL неизвестно
+    extract_partial_reason TEXT,
+    extract_pages_converted INTEGER,            -- прочитано страниц (NULL — прибор не сказал)
+    extract_page_count      INTEGER,            -- заявлено документом
     first_seen_run_id TEXT NOT NULL,
     last_seen_run_id  TEXT NOT NULL,
     first_seen_at     TEXT NOT NULL,
@@ -319,6 +332,12 @@ _ADDITIVE_COLUMNS: dict[str, dict[str, str]] = {
         "raw_path": "TEXT",
         "chunker_version": "TEXT",
         "chunk_ids_digest": "TEXT",
+        # v5: nullable by design — отсутствие значения означает «не измерено», а не
+        # «полностью прочитано» (см. STATE_SCHEMA_VERSION).
+        "extract_partial": "INTEGER",
+        "extract_partial_reason": "TEXT",
+        "extract_pages_converted": "INTEGER",
+        "extract_page_count": "INTEGER",
         "first_seen_run_id": "TEXT NOT NULL DEFAULT ''",
         "last_seen_run_id": "TEXT NOT NULL DEFAULT ''",
         "first_seen_at": "TEXT NOT NULL DEFAULT ''",
@@ -377,6 +396,8 @@ def connect_state(db_path: str | Path = ":memory:") -> sqlite3.Connection:
     :func:`_migrate` (``ALTER TABLE ... ADD COLUMN``), а индексы v3 — после миграции,
     поэтому старая БД открывается без потери данных. v4 (``profile_attestation``) —
     новая таблица, поэтому миграция v3 → v4 целиком покрыта ``IF NOT EXISTS``.
+    v5 (частичность извлечения) — четыре nullable-колонки ``document_version``: старые
+    строки получают ``NULL`` = «не измерено», и это значение не переписывается на ``0``.
     """
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row

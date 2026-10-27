@@ -1282,6 +1282,25 @@ class SqliteStore:
                 (index_build_id, run_id),
             )
 
+    def save_publishability(self, run_id: str, profile: Mapping[str, Any]) -> None:
+        """Пишет ``runs.publishability_json`` (A1/§6) — durable блок профиля публикуемости.
+
+        Зачем отдельный писатель, если ``persist_manifest`` и так пишет этот блок: фаза
+        ``compute`` идёт **до** Ш9, а профиль несёт объявленное исключение стенда
+        (``rnd_endpoint``/``rnd_endpoint_declared``), которое нельзя вывести из ячеек.
+        Без ранней записи пост-хок ``hound report`` пересобрал бы профиль без декларации
+        и перезаписал уже опубликованную карту как производственную. ``UPDATE`` по
+        существующей строке: строку прогона создаёт :meth:`create_run`.
+        """
+        with self.conn:
+            self.conn.execute(
+                "UPDATE runs SET publishability_json = ? WHERE run_id = ?",
+                (
+                    json.dumps(dict(profile), ensure_ascii=False, sort_keys=True),
+                    run_id,
+                ),
+            )
+
     def upsert_corpus_doc(self, doc: CorpusDoc, *, origin: str = "crawl") -> None:
         """Upsert строки ``corpus_docs`` (raw retention + provenance экстракции, §3.2).
 

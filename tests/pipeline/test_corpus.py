@@ -7325,3 +7325,340 @@ def test_serp_note_names_observed_wait_only_when_it_is_not_zero() -> None:
             from_cache=False,
         )
     )
+
+# --------------------------------------------------------------------------- #
+# v5: частичность извлечения как durable свойство версии (переиспользование, 304)
+# --------------------------------------------------------------------------- #
+
+PARTIAL_REASON_DOCLING = "docling: PARTIAL_SUCCESS, получено страниц 7 из 2763"
+
+class _PartialExtractor(_Extractor):
+    """Экстрактор частичного извлечения: текст 7 страниц из 2763, статус и счётчики.
+
+    Ровно тот факт, который сообщает docling на ``PARTIAL_SUCCESS``. Текст реален, поэтому
+    документ обязан попасть в корпус, но признак «прочитана часть» обязан пережить и
+    запись версии, и переиспользование.
+    """
+
+    version = "extractor-partial-1"
+
+    def extract(
+        self, page: RawPage, route: ExtractionRoute = ExtractionRoute.AUTO
+    ) -> ExtractedDoc:
+        return ExtractedDoc(
+            text=page.content.decode("utf-8", errors="replace"),
+            content_hash=content_hash(page.content),
+            extractor_version=self.version,
+            page_count=2763,
+            partial=True,
+            partial_reason=PARTIAL_REASON_DOCLING,
+            pages_converted=7,
+        )
+
+class _SameEngineFullExtractor(_PartialExtractor):
+    """Тот же движок и версия, но документ прочитан целиком (``SUCCESS``)."""
+
+    def extract(
+        self, page: RawPage, route: ExtractionRoute = ExtractionRoute.AUTO
+    ) -> ExtractedDoc:
+        return ExtractedDoc(
+            text=page.content.decode("utf-8", errors="replace"),
+            content_hash=content_hash(page.content),
+            extractor_version=self.version,
+            page_count=1,
+        )
+
+class _NoExtractionExtractor(_Extractor):
+    """Экстрактор второго прогона: вызов означает, что переиспользования не было."""
+
+    version = "extractor-partial-1"
+
+    def extract(
+        self, page: RawPage, route: ExtractionRoute = ExtractionRoute.AUTO
+    ) -> ExtractedDoc:
+        raise AssertionError("экстракция вызвана на пути переиспользования (304)")
+
+def test_304_reuse_restores_partial_extraction(tmp_path: Path) -> None:
+    """Переиспользование (``304``) **восстанавливает** частичность, а не выдаёт её за полное.
+
+    Сценарий дефекта (v5): первый прогон прочитал документ частично (``PARTIAL_SUCCESS``:
+    7 страниц из 2763), второй получил ``304`` и переиспользовал версию. Признак при этом
+    терялся (``partial=False`` по умолчанию), и ``CorpusCoverage`` объявляло охват полным
+    на усечённом тексте — то есть ``❌`` публиковался бы на ненаблюдённых страницах
+    (I2/I2c). Теперь признак лежит в ``document_version`` и возвращается в наблюдение.
+    """
+    with SqliteStateStore(":memory:") as state:
+        first_store = SqliteStore(":memory:")
+        _make_run(first_store)
+        try:
+            _build(
+                tmp_path,
+                pages={URL_P1_A: b"page one"},
+                urls={"p1": [URL_P1_A]},
+                store=first_store,
+                crawler=_StatefulCrawler({URL_P1_A: b"page one"}),
+                extractor=_PartialExtractor(),
+                state=state,
+                product_modes={"p1": "incremental"},
+                run_id=RUN_ID,
+            )
+            versions = state.iter_document_versions("p1")
+            assert len(versions) == 1
+            stored = versions[0]
+            # Персистентность: признак — в записи версии, а не только в run-БД.
+            assert stored.extract_partial is True
+            assert stored.extract_pages_converted == 7
+            assert stored.extract_page_count == 2763
+            assert "PARTIAL_SUCCESS" in (stored.extract_partial_reason or "")
+        finally:
+            first_store.close()
+
+        second_store = SqliteStore(":memory:")
+        _make_run(second_store)
+        try:
+            result = _build(
+                tmp_path,
+                pages={URL_P1_A: b"page one"},
+                urls={"p1": [URL_P1_A]},
+                store=second_store,
+                crawler=_StatefulCrawler(
+                    {URL_P1_A: b"page one"}, not_modified={URL_P1_A}
+                ),
+                extractor=_NoExtractionExtractor(),
+                state=state,
+                product_modes={"p1": "incremental"},
+                run_id=RUN_ID,
+            )
+            docs = list(second_store.iter_corpus_docs(RUN_ID))
+            coverage = second_store.read_corpus_coverage(RUN_ID, "p1")
+        finally:
+            second_store.close()
+
+    assert len(docs) == 1
+    doc = docs[0]
+    assert doc.partial is True, "переиспользование потеряло частичность"
+    assert doc.pages_converted == 7 and doc.page_count == 2763
+    assert "PARTIAL_SUCCESS" in (doc.partial_reason or "")
+    # Покрытие не может быть полным на документе, прочитанном не целиком.
+    assert coverage is not None
+    assert coverage.complete is False
+    assert coverage.blocked == {"partial_extraction": 1}
+    notes = [entry for entry in result.log_entries if isinstance(entry, str)]
+    assert any("частично" in note for note in notes), notes
+
+def test_304_reuse_of_legacy_row_reports_unknown_partiality(tmp_path: Path) -> None:
+    """Строка до v5 признак не несла: «не измерено» называется, а не выдаётся за «полное».
+
+    ``NULL`` — не ``0``: запись создана версией, которая частичность не сохраняла, поэтому
+    переиспользование не вправе утверждать ни полноту, ни частичность. Молчать нельзя —
+    иначе этот документ в отчёте неотличим от прочитанного целиком.
+    """
+    with SqliteStateStore(":memory:") as state:
+        first_store = SqliteStore(":memory:")
+        _make_run(first_store)
+        try:
+            _build(
+                tmp_path,
+                pages={URL_P1_A: b"page one"},
+                urls={"p1": [URL_P1_A]},
+                store=first_store,
+                crawler=_StatefulCrawler({URL_P1_A: b"page one"}),
+                extractor=_PartialExtractor(),
+                state=state,
+                product_modes={"p1": "incremental"},
+                run_id=RUN_ID,
+            )
+            # Эмуляция строки, записанной до v5: колонки существуют, значения — NULL.
+            stored = state.iter_document_versions("p1")[0]
+            state._conn.execute(  # noqa: SLF001 - прямой откат к до-v5 состоянию строки
+                "UPDATE document_version SET extract_partial = NULL, "
+                "extract_partial_reason = NULL, extract_pages_converted = NULL, "
+                "extract_page_count = NULL WHERE doc_version_id = ?",
+                (stored.doc_version_id,),
+            )
+            state._conn.commit()  # noqa: SLF001
+            legacy = state.get_document_version(stored.doc_version_id)
+            assert legacy is not None and legacy.extract_partial is None
+        finally:
+            first_store.close()
+
+        second_store = SqliteStore(":memory:")
+        _make_run(second_store)
+        try:
+            result = _build(
+                tmp_path,
+                pages={URL_P1_A: b"page one"},
+                urls={"p1": [URL_P1_A]},
+                store=second_store,
+                crawler=_StatefulCrawler(
+                    {URL_P1_A: b"page one"}, not_modified={URL_P1_A}
+                ),
+                extractor=_NoExtractionExtractor(),
+                state=state,
+                product_modes={"p1": "incremental"},
+                run_id=RUN_ID,
+            )
+            coverage = second_store.read_corpus_coverage(RUN_ID, "p1")
+        finally:
+            second_store.close()
+
+    end = _event(result, "product_end", "p1")
+    assert end["partial_unknown"] == 1
+    notes = [entry for entry in result.log_entries if isinstance(entry, str)]
+    assert any("неизвестной частичностью" in note for note in notes), notes
+    # Неизвестное не объявляется частичным: покрытие остаётся прежним (полным по счёту),
+    # иначе апгрейд схемы задним числом «испортил» бы весь накопленный корпус.
+    assert coverage is not None
+    assert coverage.blocked == {}
+
+def test_partiality_change_is_visible_when_same_key_gives_full_text(
+    tmp_path: Path,
+) -> None:
+    """Смена «частично → полное» видна в строке продукта, а не тихо перезаписывается.
+
+    Путь: версия та же (байты/движок/уровень не изменились), но chunk-set в durable-
+    субстрате пуст → переиспользование отвергнуто, документ пере-извлечён и на этот раз
+    прочитан целиком. Объём работы по тому же ключу изменился — это факт наблюдения.
+    """
+    with SqliteStateStore(":memory:") as state:
+        first_store = SqliteStore(":memory:")
+        _make_run(first_store)
+        try:
+            _build(
+                tmp_path,
+                pages={URL_P1_A: b"page one"},
+                urls={"p1": [URL_P1_A]},
+                store=first_store,
+                crawler=_StatefulCrawler({URL_P1_A: b"page one"}),
+                extractor=_PartialExtractor(),
+                state=state,
+                product_modes={"p1": "incremental"},
+                run_id=RUN_ID,
+            )
+            stored = state.iter_document_versions("p1")[0]
+            assert stored.extract_partial is True
+            # Пустой chunk-set → переиспользование отвергнуто → повторное извлечение.
+            state.replace_doc_chunks(stored.doc_version_id, [])
+        finally:
+            first_store.close()
+
+        second_store = SqliteStore(":memory:")
+        _make_run(second_store)
+        try:
+            result = _build(
+                tmp_path,
+                pages={URL_P1_A: b"page one"},
+                urls={"p1": [URL_P1_A]},
+                store=second_store,
+                crawler=_StatefulCrawler({URL_P1_A: b"page one"}),
+                extractor=_SameEngineFullExtractor(),  # тот же движок, полное чтение
+                state=state,
+                product_modes={"p1": "incremental"},
+                run_id=RUN_ID,
+            )
+            stored_after = state.iter_document_versions("p1")[0]
+        finally:
+            second_store.close()
+
+    assert stored_after.extract_partial is False
+    end = _event(result, "product_end", "p1")
+    changes = end["partiality_changes"]
+    assert len(changes) == 1
+    assert changes[0] == {"url": URL_P1_A, "was": "partial", "now": "full"}
+    notes = [entry for entry in result.log_entries if isinstance(entry, str)]
+    assert any("частичность изменилась" in note for note in notes), notes
+
+def test_serp_note_names_call_failures_separately_from_rejections() -> None:
+    """Сбой вызова (``errors``) печатается отдельно от отказов допуска (S8).
+
+    Без этой строки прогон, в котором провайдер отказал на каждом запросе, читался бы
+    оператором как «поиск ничего не нашёл»: в строке стояло бы только «принято URL 0,
+    отказов 0». Отказов допуска при этом действительно ноль — отвергать было нечего.
+    """
+    from core.pipeline.corpus import _serp_note
+
+    def _observation(errors: dict[str, int], **rest: object) -> dict[str, object]:
+        return {
+            "enabled": True,
+            "rounds": {"declared": 1, "executed": 1, "source": "run.yaml"},
+            "budget": {"effective_per_product": 4, "used": {"p1": 3}},
+            "accepted": {"p1": []},
+            "rejected": {"p1": {"off_host": 2}},
+            "errors": errors,
+            **rest,
+        }
+
+    note = _serp_note(_observation({"p1": 3}))
+    assert "сбоев 3" in note
+    assert "отказов 2" in note
+
+    # Исправный контур: счётчик пуст — строки нет (иначе шум в каждом прогоне).
+    assert "сбоев" not in _serp_note(_observation({}))
+
+
+def test_serp_note_names_yield_only_when_there_is_a_denominator() -> None:
+    """Доходность печатается только при наблюдённом знаменателе.
+
+    ``served == 0`` — не «доля 0», а отсутствие замера: ноль обслуженных запросов не даёт
+    отношения. Поэтому ``None`` в знаменателе молчит, а не печатает «0.000».
+    """
+    from core.pipeline.corpus import _serp_note
+
+    def _observation(yield_rows: dict[str, dict[str, object]]) -> dict[str, object]:
+        return {
+            "enabled": True,
+            "rounds": {"declared": 1, "executed": 1, "source": "run.yaml"},
+            "budget": {"effective_per_product": 4, "used": {"p1": 4}},
+            "accepted": {"p1": ["https://a.example/1", "https://a.example/2"]},
+            "rejected": {},
+            "errors": {},
+            "yield": yield_rows,
+        }
+
+    note = _serp_note(_observation({"p1": {"served": 4, "accepted_per_served": 0.5}}))
+    assert "доходность 0.500" in note
+    assert "(2/4)" in note
+
+    # Знаменатель нулевой (все запросы — отказ бюджета): замерять нечего.
+    assert "доходность" not in _serp_note(
+        _observation({"p1": {"served": 0, "accepted_per_served": None}})
+    )
+    # Контур без ``yield`` (провенанс старой формы) — строки тоже нет, и это не ошибка.
+    assert "доходность" not in _serp_note(_observation({}))
+
+
+def test_serp_disabled_observation_has_the_same_shape_as_enabled() -> None:
+    """Выключенный контур пишет наблюдение **той же формы**, что и включённый.
+
+    Иначе читатель не отличает «поля нет, потому что контур выключен» от «поле не
+    собрали»: сравнение двух прогонов по ``yield``/``errors``/``query_outcomes`` падало бы
+    на выключенном контуре или читалось бы как отсутствие замера вместо «вызовов не было».
+    Нули при ``enabled=False`` — измеренный факт (ни одного вызова), а объявленный бюджет
+    остаётся ``None``: ``0`` объявил бы бюджет, которого никто не задавал.
+    """
+    from core.pipeline.corpus import _serp_disabled_observation
+    from core.pipeline.serp_loop import SerpDiscovery
+
+    disabled = _serp_disabled_observation("run.yaml")
+    # Форма включённого контура берётся из **самого** ``to_observation``, а не из копии в
+    # тесте: добавит контур новое поле — тест скажет, что выключенный от него отстал.
+    enabled = SerpDiscovery(rounds=1, executed_rounds=1, budget_declared=4).to_observation()
+    assert set(disabled) == set(enabled), set(enabled) ^ set(disabled)
+    for key in ("rounds", "budget"):
+        assert set(disabled[key]) == set(enabled[key]), key
+    assert disabled["enabled"] is False
+    assert disabled["rounds"]["source"] == "run.yaml"
+    assert disabled["budget"]["declared_per_round"] is None
+    assert disabled["budget"]["effective_per_product"] is None
+    assert disabled["budget"]["used"] == {}
+    assert disabled["query_outcomes"] == {}
+    assert disabled["errors"] == {}
+    assert disabled["timing"] == {}
+    # Строка оператора: выключенный контур по-прежнему называется выключенным, и
+    # нулевые счётчики сбоев/доходности в неё не просачиваются.
+    from core.pipeline.corpus import _serp_note
+
+    note = _serp_note(disabled)
+    assert "контур выключен" in note
+    assert "сбоев" not in note
+    assert "доходность" not in note

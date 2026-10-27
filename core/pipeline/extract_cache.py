@@ -16,8 +16,9 @@
 **Конверт** (JSON, UTF-8) несёт ``format`` (версия формата), ``content_hash`` (ключ — хеш
 ретенированных байтов), ``extractor_version``, ``level``, ``text``, ``page_count``,
 ``family`` (семейство формата — вход выбора чанкера; поле аддитивное, в старых конвертах
-отсутствует и читается как ``None`` = markdown-совместимое семейство) и
-``doc_content_hash`` — хеш **извлечённого текста** (поле ``ExtractedDoc.content_hash``).
+отсутствует и читается как ``None`` = markdown-совместимое семейство),
+``doc_content_hash`` — хеш **извлечённого текста** (поле ``ExtractedDoc.content_hash``) — и
+аддитивные поля частичности ``partial``/``partial_reason``/``pages_converted`` (v5).
 Два хеша различны по смыслу и оба обязательны: ключ адресует сырьё, ``doc_content_hash``
 восстанавливает ровно тот ``ExtractedDoc``, который вернул экстрактор (по нему pipeline
 делает дедуп и строит ``doc_id``). Несовпадение ``content_hash``/``extractor_version``/
@@ -44,6 +45,22 @@
 ``(content_hash байтов, extractor_version, level)`` — от объёма проделанной работы не
 зависит, поэтому заморозка превратила бы «7 страниц из 2763» в документ навсегда, без
 всякой возможности пере-экстракции.
+
+**Частичность — свойство записи, а не вывода из текста (v5).** Конверт, помеченный
+``partial: true``, обязан отдаваться частичным (``partial=True`` с причиной) и никогда —
+полным: молчаливое повышение частичного наблюдения до полного и есть та подмена, ради
+которой поле существует. Отсутствие поля читается как ``partial=False``, и это честно по
+построению: **писатель этого модуля** частичный текст не сохраняет (предыдущий абзац),
+поэтому запись без поля полная. Поле закрывает чужой/будущий случай — запись, сделанную
+кодом, который частичность сохраняет.
+
+**Где признак живёт durable.** Текст частичного извлечения здесь не хранится, поэтому
+переживает прогоны сам признак — в per-product состоянии:
+``document_version.extract_partial``/``extract_partial_reason``/
+``extract_pages_converted``/``extract_page_count`` (``core/store/state_sqlite.py``, схема 5).
+Переиспользование версии (``304``) — единственный путь, где признак нельзя пере-наблюдать,
+и до v5 он там молча становился «полным»: усечённый текст объявлялся прочитанным целиком,
+а ``CorpusCoverage`` — полным на нём (I2/I2c).
 
 **I19.** Модуль сам не читает ``corpus_raw`` и не может проверить, что ключ соответствует
 фактическим байтам: верификация — обязанность вызывающего (в pipeline ключ считается из
@@ -121,6 +138,8 @@ class ExtractionCache:
         self._corrupt = 0
         self._evicted = 0
         self._invalid_key = 0
+        #: Обслуженные записи, несущие частичность (v5): хит — не «полное извлечение».
+        self._partial_hits = 0
 
     # ------------------------------------------------------------------ #
     # Свойства (нужны composition root'у, чтобы передать конфиг в воркер)
@@ -150,6 +169,11 @@ class ExtractionCache:
         ``extractor_version``/``level``). Ни один из случаев не бросает исключение:
         устаревший или повреждённый конверт не должен ломать прогон и не должен
         обслуживаться. Невалидный ключ (не hex / содержит путь) — тоже промах.
+
+        Запись, несущая частичность, возвращается **частичной** (``partial=True`` с
+        причиной и числом прочитанных страниц); отдать её полной нельзя — это и было бы
+        тихой подменой наблюдения. Противоречивая запись (причина без признака, признак
+        без причины, прочитано больше, чем заявлено) — порча, то есть промах.
 
         Функция детерминирована: результат зависит только от аргументов и файлов на диске.
         """
@@ -206,6 +230,44 @@ class ExtractionCache:
             self._corrupt += 1
             self._misses += 1
             return None
+        # Частичность — свойство записи (v5): отсутствие поля = полное (писатель этого
+        # модуля частичный текст не сохраняет), наличие ``true`` = запись обязана
+        # отдаваться частичной. Обратное («есть смысл в partial_reason, но нет признака»)
+        # — противоречивая запись, то есть порча, а не полное извлечение.
+        partial_raw = envelope.get("partial")
+        if partial_raw is not None and not isinstance(partial_raw, bool):
+            self._corrupt += 1
+            self._misses += 1
+            return None
+        partial = bool(partial_raw)
+        partial_reason = envelope.get("partial_reason")
+        pages_converted = envelope.get("pages_converted")
+        if partial_reason is not None and not isinstance(partial_reason, str):
+            self._corrupt += 1
+            self._misses += 1
+            return None
+        if pages_converted is not None and (
+            isinstance(pages_converted, bool)
+            or not isinstance(pages_converted, int)
+            or pages_converted < 0
+        ):
+            self._corrupt += 1
+            self._misses += 1
+            return None
+        if not partial and (
+            partial_reason
+            or pages_converted is not None
+            # Причина частичности без самой частичности — ложная провенанс-запись.
+        ):
+            self._corrupt += 1
+            self._misses += 1
+            return None
+        if partial and not (partial_reason or "").strip():
+            # «Частичный» без причины не обслуживается: молчание о том, что именно
+            # прочитано, нельзя выдать ни за полное, ни за объяснимое частичное.
+            self._corrupt += 1
+            self._misses += 1
+            return None
         if not isinstance(text, str) or not text.strip():
             self._corrupt += 1
             self._misses += 1
@@ -222,8 +284,19 @@ class ExtractionCache:
             self._corrupt += 1
             self._misses += 1
             return None
+        if (
+            partial
+            and pages_converted is not None
+            and page_count is not None
+            and pages_converted > page_count
+        ):
+            self._corrupt += 1
+            self._misses += 1
+            return None
 
         self._hits += 1
+        if partial:
+            self._partial_hits += 1
         return ExtractedDoc(
             text=text,
             content_hash=doc_hash,
@@ -231,6 +304,9 @@ class ExtractionCache:
             page_count=page_count,
             error=None,
             family=family,
+            partial=partial,
+            partial_reason=partial_reason if partial else None,
+            pages_converted=pages_converted if partial else None,
         )
 
     # ------------------------------------------------------------------ #
@@ -273,6 +349,12 @@ class ExtractionCache:
         # объявить документом «7 страниц из 2763», и пере-экстракция не случилась бы
         # никогда. Частичность транзиентна (OCR, таймаут, память), поэтому кэшируется
         # только полный результат — по той же причине, что и сбои.
+        #
+        # Признак при этом **не теряется** (v5): он пишется в durable-запись версии
+        # документа (``document_version.extract_partial``), откуда его восстанавливает
+        # переиспользование (``304``) — единственный путь, где признак нельзя
+        # пере-наблюдать. Конверт тоже умеет его нести (``get``), чтобы запись, сделанная
+        # писателем, который частичность сохраняет, не была выдана за полную.
         if getattr(doc, "partial", False):
             return
         text = getattr(doc, "text", "")
@@ -394,7 +476,9 @@ class ExtractionCache:
 
         ``hits`` — обслуженные ``get``; ``misses`` — все промахи (включая битые файлы);
         ``writes`` — успешные ``put``; ``corrupt`` — битые/несовместимые конверты;
-        ``evicted`` — вытесненные записи; ``invalid_key`` — отказы по невалидному ключу.
+        ``evicted`` — вытесненные записи; ``invalid_key`` — отказы по невалидному ключу;
+        ``partial_hits`` — хиты, отдавшие **частичное** наблюдение (подмножество ``hits``),
+        то есть «переиспользовано, но не как полное».
         """
         return {
             "hits": self._hits,
@@ -403,6 +487,7 @@ class ExtractionCache:
             "corrupt": self._corrupt,
             "evicted": self._evicted,
             "invalid_key": self._invalid_key,
+            "partial_hits": self._partial_hits,
         }
 
     # ------------------------------------------------------------------ #

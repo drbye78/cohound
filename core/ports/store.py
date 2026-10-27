@@ -160,6 +160,18 @@ class StorePort(Protocol):
         """
         ...
 
+    def save_publishability(self, run_id: str, profile: Mapping[str, Any]) -> None:
+        """Персистит блок профиля публикуемости в ``runs.publishability_json`` (A1/§6).
+
+        Нужен **до** Ш9: профиль несёт объявленное исключение стенда
+        (``rnd_endpoint`` + ``rnd_endpoint_declared``), а это декларация о месте
+        исполнения, которую нельзя вывести из ячеек. Без ранней записи пост-хок
+        ``hound report`` пересобирал бы профиль из ячеек и терял признак стенда
+        (перезаписывая уже опубликованную карту как производственную). Колонка уже
+        существует; ``persist_manifest`` позже перезапишет её тем же значением.
+        """
+        ...
+
     def save_plan_inputs(
         self, run_id: str, *, payload: Mapping[str, Any], payload_sha256: str
     ) -> None:

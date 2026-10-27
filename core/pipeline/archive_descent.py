@@ -174,12 +174,65 @@ class MemberOutcome:
 
     ``content_hash`` — хеш **извлечённого** текста (тот же, что у ``CorpusDoc``); он
     попадает в ``corpus_members.extracted_content_hash``, а не хеш байтов члена.
+
+    **Частичный успех (``partial``/``partial_reason``).** Член контейнера — такой же
+    документ, как страница: docling может вернуть ``PARTIAL_SUCCESS`` (часть страниц PDF
+    не сконвертирована), и текст прочитанной части реален. Бинарная модель
+    «ингестнут/пропущен» выдавливала этот исход в «ингестнут» **без всякого следа**: член
+    с одной прочитанной страницей из семи выглядел в провенансе спуска так же, как
+    прочитанный целиком.
+
+    Свидетельство обязательно, и оно — сам документ: ``partial=True`` без ``doc_id``
+    отвергается (:meth:`__post_init__`), потому что «прочитал часть» без прочитанного
+    документа — не наблюдение, а утверждение. Частичность члена живёт в двух местах,
+    которые уже есть в модели: ``corpus_docs.partial`` (своя строка документа с причиной
+    и числом страниц) и счётчик ``archive_observations.outcome.members_partial`` —
+    поэтому ``corpus_members`` остаётся бинарным по ``doc_id``/``skip_reason`` и не
+    требует ни новой колонки, ни бампа схемы прогона.
+
+    Инвариант держится здесь, а не в вызывающем: ``MemberOutcome`` собирается и в фазе
+    корпуса (:func:`core.pipeline.corpus._ingest_member_doc`), и в самом обходе (отказы),
+    а «частичное без документа» — ложная провенанс-запись независимо от того, кто её
+    собрал.
     """
 
     doc_id: str | None = None
     skip_reason: str | None = None
     detail: str | None = None
     content_hash: str | None = None
+    #: Член прочитан **частично**: текст реален, часть страниц не сконвертирована.
+    partial: bool = False
+    #: Почему частично — как сообщил прибор (обязательна при ``partial``).
+    partial_reason: str | None = None
+
+    def __post_init__(self) -> None:
+        """Держит инвариант исхода члена: свидетельство частичности и взаимоисключение.
+
+        Отказ — ``ValueError``: это дефект вызывающего (пропущенный ``doc_id`` или
+        перепутанные поля), а не исход извлечения. Молчаливая нормализация здесь была бы
+        ровно той потерей, ради которой исход и разделён.
+        """
+        if self.doc_id is not None and self.skip_reason is not None:
+            raise ValueError(
+                "MemberOutcome: член одновременно ингестнут и пропущен "
+                f"(doc_id={self.doc_id!r}, skip_reason={self.skip_reason!r})"
+            )
+        if self.partial:
+            if self.doc_id is None:
+                raise ValueError(
+                    "MemberOutcome: partial=True без doc_id — частичный исход обязан "
+                    "называть документ, в котором прочитанная часть наблюдена"
+                )
+            if not (self.partial_reason or "").strip():
+                raise ValueError(
+                    "MemberOutcome: partial=True без partial_reason — частичный член "
+                    "обязан называть, почему он частичный"
+                )
+        elif self.partial_reason is not None:
+            raise ValueError(
+                "MemberOutcome: partial_reason при partial=False — причина частичности "
+                "без самой частичности"
+            )
 
 
 @dataclass(frozen=True)
@@ -432,14 +485,25 @@ class ArchiveDescentWalker:
         bytes_written: int,
         stopped_reason: str | None,
         cycle_stops: int,
+        partial: list[tuple[str, str]] | None = None,
     ) -> dict[str, Any]:
-        """Исход спуска: что сделано и почему остановились (видимо, не «молча»)."""
+        """Исход спуска: что сделано и почему остановились (видимо, не «молча»).
+
+        ``members_partial`` — члены, прочитанные **частично** (``PARTIAL_SUCCESS``):
+        они входят в ``members_ingested`` (текст прочитанной части в корпусе), но
+        отдельным счётчиком, потому что «член прочитан не целиком» — не то же самое,
+        что «член прочитан». Причины и примеры — ``partial`` (по образцу ``skipped``):
+        счёт полный, примеры ограничены.
+        """
+        partial_entries = list(partial or ())
         return {
             "members_total": members_total,
             "members_accepted": members_accepted,
             "members_ingested": ingested,
             "members_failed": failed,
             "members_skipped": len(skipped),
+            "members_partial": len(partial_entries),
+            "partial": _bounded_histogram(partial_entries),
             "skipped": _bounded_histogram(skipped),
             "bytes_written": bytes_written,
             "stopped_reason": stopped_reason,
@@ -611,6 +675,11 @@ class ArchiveDescentWalker:
 
         ingested = failed = cycle_stops = bytes_written = 0
         skipped: list[tuple[str, str]] = []
+        #: Члены, ингестнутые **частично** (текст есть, часть страниц не прочитана).
+        #: Отдельный счётчик, а не подмножество ``ingested``: «один член из семи страниц»
+        #: и «член целиком» — разные наблюдения, и разница обязана быть видна в исходе
+        #: спуска, а не выводиться из размера текста.
+        partial_members: list[tuple[str, str]] = []
         stopped_reason: str | None = None
 
         # -- окно упреждения: стрим вперёд, доводка строго FIFO ------------------ #
@@ -649,6 +718,12 @@ class ArchiveDescentWalker:
             Path(task.temp_path).unlink(missing_ok=True)
             if outcome.doc_id is not None:
                 ingested += 1
+                if outcome.partial:
+                    # Частичный член — ингестнут (текст в корпусе), но не «полностью
+                    # прочитан»: счётчик и причина уходят в исход спуска.
+                    partial_members.append(
+                        (task.member_path, outcome.partial_reason or "partial")
+                    )
             else:
                 failed += 1
                 reason = outcome.skip_reason or SKIP_EXTRACT_FAILED
@@ -939,6 +1014,7 @@ class ArchiveDescentWalker:
                 bytes_written=bytes_written,
                 stopped_reason=stopped_reason,
                 cycle_stops=cycle_stops,
+                partial=partial_members,
             ),
             reason=stopped_reason,
         )

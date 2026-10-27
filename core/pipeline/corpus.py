@@ -810,13 +810,35 @@ def _product_notes(events: Sequence[Mapping[str, Any]]) -> list[str]:
             partial_note = (
                 f", документов прочитано частично {partial} (охват неполон)" if partial else ""
             )
+            # v5: признак частичности мог не попасть в версию (строка до схемы 5) —
+            # переиспользование такого документа не должно читаться как «прочитан весь».
+            unknown = int(event.get("partial_unknown") or 0)
+            unknown_note = (
+                f", документов с неизвестной частичностью {unknown} "
+                "(признак в версии не записан)"
+                if unknown
+                else ""
+            )
+            # v5: смена частичности — тот же ключ (байты/движок/уровень) дал другой объём
+            # работы. Молчание здесь прятало бы и деградацию, и восстановление.
+            changes = event.get("partiality_changes") or []
+            changes_note = (
+                ", частичность изменилась: "
+                + "; ".join(
+                    f"{item.get('url')} ({item.get('was')} → {item.get('now')})"
+                    for item in changes[:3]
+                )
+                + (f" и ещё {len(changes) - 3}" if len(changes) > 3 else "")
+                if changes
+                else ""
+            )
             notes.append(
                 f"corpus: продукт {event.get('product_id')} — "
                 f"корней {event.get('roots')}, seed'ов поставлено "
                 f"{event.get('seeds_enqueued')} из {event.get('seeds_declared')}, "
                 f"элементов {event.get('session_items')} "
                 f"(fetched {event.get('fetched')}, failed {event.get('failed')}), "
-                f"документов {event.get('docs')}{partial_note}, "
+                f"документов {event.get('docs')}{partial_note}{unknown_note}{changes_note}, "
                 f"{event.get('elapsed_seconds')} с{tail}"
             )
     return notes
@@ -856,6 +878,10 @@ def _persist_corpus_coverage(
     покрытие неполным с причиной ``partial_extraction``: непрочитанные страницы —
     ненаблюдённый материал, и объявлять охват полным на нём нельзя. Значение по
     умолчанию — пусто (прогон без частичных документов ведёт себя как прежде).
+
+    Список не различает «измерено в этом прогоне» и «восстановлено из durable-записи
+    версии» (``304``-переиспользование): оба — наблюдения одного и того же документа, и
+    второе не становится слабее от того, что прибор не вызывался повторно (v5).
     """
     by_product: dict[str, list[CrawlSessionItem]] = {}
     for item in store.iter_crawl_session_items(session_id):
@@ -1704,6 +1730,63 @@ def _partial_fields(extracted: Any) -> dict[str, Any]:
         ),
         "extracted_chars": len(text) if isinstance(text, str) else None,
     }
+
+def _reused_partial_fields(doc_version: Any) -> tuple[dict[str, Any], bool]:
+    """Поля частичности **из durable-записи** версии: ``(поля CorpusDoc, признак известен)``.
+
+    Переиспользование версии (``304``: экстракции не было) не вправе ответить на вопрос
+    «прочитан документ целиком?» из самого факта переиспользования. До v5 ответа не было
+    вовсе, и ``partial=False`` означал «в этом прогоне не наблюдался» — то есть усечённый
+    текст молча объявлялся полным, а ``CorpusCoverage`` объявляло покрытие полным на
+    нём (I2/I2c). Теперь признак лежит в ``document_version`` рядом с версией, к которой
+    он относится, и переиспользование его **восстанавливает**.
+
+    :returns: ``(поля, известен)``. ``известен=False`` — строка записана версией, которая
+        признак не сохраняла (``extract_partial IS NULL``). Тогда поля не утверждают
+        ничего (``partial=False`` — вынужденное булево модели, а не измерение), и
+        вызывающий обязан **сказать**, что признак неизвестен, а не выдать это за
+        «полное».
+    """
+    raw = getattr(doc_version, "extract_partial", None)
+    if raw is None:
+        return (
+            {
+                "partial": False,
+                "partial_reason": None,
+                "page_count": None,
+                "pages_converted": None,
+                "extracted_chars": None,
+            },
+            False,
+        )
+    partial = bool(raw)
+    reason = (
+        str(getattr(doc_version, "extract_partial_reason", None) or "").strip() or None
+    )
+    page_count = getattr(doc_version, "extract_page_count", None)
+    pages_converted = getattr(doc_version, "extract_pages_converted", None)
+    return (
+        {
+            "partial": partial,
+            # Частичный документ обязан назвать причину (инвариант ``CorpusDoc``); причина
+            # из записи — это причина, которую **сообщил прибор**, а не пересказ.
+            "partial_reason": (reason or PARTIAL_REASON_UNSTATED) if partial else None,
+            "page_count": (
+                page_count
+                if isinstance(page_count, int) and not isinstance(page_count, bool)
+                else None
+            ),
+            "pages_converted": (
+                pages_converted
+                if isinstance(pages_converted, int)
+                and not isinstance(pages_converted, bool)
+                and partial
+                else None
+            ),
+            "extracted_chars": None,
+        },
+        True,
+    )
 
 
 def _looks_like_html(page: RawPage) -> bool:
@@ -3019,6 +3102,9 @@ def _ingest_member_doc(
     if doc_hash in seen_docs:
         # Тот же текст уже в партиции: член остаётся в corpus_members, но нового
         # документа/чанков не появляется (I17: повтор перепечатки не индексируется).
+        # Признак частичности здесь **не** заявляется: документа этим ингестом не
+        # создавалось, а признак принадлежит строке близнеца (``corpus_docs.partial``) —
+        # второй заявкой о том же тексте мы бы спорили с ней.
         return MemberOutcome(doc_id=document_id, content_hash=doc_hash)
     seen_docs[doc_hash] = task.member_url
 
@@ -3040,13 +3126,26 @@ def _ingest_member_doc(
     ingest.docs.append(doc)
     _persist_docs(store, [doc], errors)
 
+    # Тот же признак — в исходе члена: документ корпуса (`corpus_docs.partial`) — само
+    # свидетельство, а `MemberOutcome.partial` делает его **машинным**. Бинарный исход
+    # «ингестнут/пропущен» без этого выдавал бы «прочитал часть» за полное чтение.
+    member_partial = bool(getattr(extracted, "partial", False))
+    member_partial_reason = (
+        str(getattr(extracted, "partial_reason", None) or "").strip() or None
+    )
+
     try:
         chunks = chunker.chunk(extracted, document_id)
     except Exception as exc:  # noqa: BLE001 — сбой нарезки не отменяет документ
         errors.append(
             f"{task.product_id}/{task.member_url}: chunk: {type(exc).__name__}: {exc}"
         )
-        return MemberOutcome(doc_id=document_id, content_hash=doc_hash)
+        return MemberOutcome(
+            doc_id=document_id,
+            content_hash=doc_hash,
+            partial=member_partial,
+            partial_reason=member_partial_reason,
+        )
 
     for chunk in sorted(chunks or [], key=lambda c: getattr(c, "chunk_no", 0)):
         chunk_no = int(getattr(chunk, "chunk_no", 0))
@@ -3081,7 +3180,12 @@ def _ingest_member_doc(
                 embedded_at=None,
             )
         )
-    return MemberOutcome(doc_id=document_id, content_hash=doc_hash)
+    return MemberOutcome(
+        doc_id=document_id,
+        content_hash=doc_hash,
+        partial=member_partial,
+        partial_reason=member_partial_reason,
+    )
 
 
 @dataclass
@@ -3272,6 +3376,13 @@ def _serp_note(observation: Mapping[str, Any]) -> str:
     непусто: «ждали 0 с» — не новость, а вот «полтора часа ушло в паузы внешней
     async-операции» оператор иначе не увидел бы. Машинно-читаемое число живёт в
     наблюдении (``timing``), строка — лишь его краткий пересказ.
+
+    Сбои вызовов (S8) называются **отдельно** от отказов допуска: «принято URL 0, отказов
+    0» при отказавшем провайдере читалось бы как «поиск ничего не нашёл», хотя искали и не
+    получили ответа. Строка печатается только по непустому счётчику — исправному контуру
+    она ничего не добавляет. Доходность (принятых URL на обслуженный запрос) печатается
+    **только при непустом знаменателе**: ноль обслуженных запросов не даёт «доли 0», он не
+    даёт доли вовсе.
     """
     rounds = observation.get("rounds") or {}
     budget = observation.get("budget") or {}
@@ -3294,6 +3405,26 @@ def _serp_note(observation: Mapping[str, Any]) -> str:
         f"принято URL {accepted_total}, отказов {rejected_total} "
         f"(бюджет на продукт: {budget.get('effective_per_product')})"
     )
+    # S8: сбой вызова — **отдельная** строка счёта, а не «ничего не нашлось». Прогон, в
+    # котором провайдер отказал на каждом запросе, иначе читался бы оператором ровно как
+    # «поиск ничего не нашёл»: он видел бы только «принято URL 0». Печатается по непустому
+    # счётчику: у исправного контура эта строка — шум.
+    errors_total = sum(int(n) for n in (observation.get("errors") or {}).values())
+    if errors_total:
+        note += f"; сбоев {errors_total}"
+    # Доходность — числитель и знаменатель рядом, чтобы доля не вычислялась «на глаз» из
+    # разных блоков. Только при непустом знаменателе: ``served == 0`` не даёт «доли 0», он
+    # не даёт доли вовсе (``None`` в наблюдении — отсутствие замера, а не нулевой выход).
+    served_total = sum(
+        int(row.get("served") or 0)
+        for row in (observation.get("yield") or {}).values()
+        if isinstance(row, Mapping)
+    )
+    if served_total:
+        note += (
+            f"; доходность {accepted_total / served_total:.3f} принятых URL "
+            f"на обслуженный запрос ({accepted_total}/{served_total})"
+        )
     if observation.get("unavailable_reason"):
         note += f"; контур не исполнен: {observation['unavailable_reason']}"
     exhausted = [
@@ -3885,6 +4016,15 @@ def _build_corpus(
     #: ``(product_id, normalized_url) → (If-None-Match, If-Modified-Since)``.
     planned_validators: dict[tuple[str, str], tuple[str | None, str | None]] = {}
 
+    #: v5: ``product_id → [url]`` документов, у которых переиспользуется версия, а признак
+    #: частичности в ней **не записан** (``document_version.extract_partial IS NULL``:
+    #: строка создана до v5). Это не «полное» и не «частичное» — это «не измерено», и в
+    #: отчёте оно называется отдельно, чтобы молчание не читалось как полнота.
+    partial_unknown_products: dict[str, list[str]] = {}
+    #: v5: смены частичности при записи версии (``было частично → стало полное`` и обратно).
+    #: Смена — факт наблюдения, а не ошибка: он попадает в строку продукта, а не в ``errors``.
+    partiality_changes: list[dict[str, Any]] = []
+
     def _validators(pid: str, url: str) -> tuple[str | None, str | None]:
         """Валидаторы условного GET для URL (09 §6.3): ``(etag, last_modified)``.
 
@@ -4158,6 +4298,8 @@ def _build_corpus(
         level_text: str,
         raw_path: Path,
         chunks: Sequence[tuple[int, str, str, str]],
+        partial_fields: Mapping[str, Any],
+        partial_known: bool,
     ) -> None:
         """Пишет версию документа и её chunk-set в durable-субстрат (09 §4.2/§9).
 
@@ -4171,6 +4313,18 @@ def _build_corpus(
         того же документа выглядело бы как новый (``docs_new``/``docs_reused`` в
         :func:`core.pipeline.state_sync.record_run_outcome`).
 
+        **Частичность (v5).** ``partial_fields``/``partial_known`` — признак, пришедший из
+        извлечения (или восстановленный из этой же строки при переиспользовании). Он
+        пишется вместе с версией, потому что переиспользование (``304``) — единственное
+        место, где признак нельзя пере-наблюдать, и до v5 там молча подставлялось
+        «полное». ``partial_known=False`` пишет ``NULL`` во все четыре колонки: «не
+        измерено» не превращается в «полное».
+
+        Смена признака при записи — видимый факт (:data:`partiality_changes`), а не тихая
+        перезапись: «было частично — стало полное» означает, что тот же ключ
+        ``(байты, движок, уровень)`` дал другой объём работы (пере-извлечение, смена
+        окружения), и молчать об этом значило бы терять деградацию так же, как её потерю.
+
         :param chunks: ``(chunk_no, text, heading_path, context_prefix)`` принятых чанков.
         """
         if state is None:
@@ -4178,6 +4332,32 @@ def _build_corpus(
         try:
             now = _now_iso()
             existing = state.get_document_version(dv_id)
+            previous_partial = (
+                None if existing is None else existing.extract_partial
+            )
+            new_partial = (
+                None if not partial_known else bool(partial_fields.get("partial"))
+            )
+            if (
+                partial_known
+                and previous_partial is not None
+                and bool(previous_partial) != bool(new_partial)
+            ):
+                partiality_changes.append(
+                    {
+                        "product_id": pid,
+                        "url": url,
+                        "doc_version_id": dv_id,
+                        "was": "partial" if previous_partial else "full",
+                        "now": "partial" if new_partial else "full",
+                        "was_pages_converted": getattr(
+                            existing, "extract_pages_converted", None
+                        ),
+                        "was_page_count": getattr(existing, "extract_page_count", None),
+                        "now_pages_converted": partial_fields.get("pages_converted"),
+                        "now_page_count": partial_fields.get("page_count"),
+                    }
+                )
             run_token = str(run_id or "")
             rows: list[tuple[ChunkRow, str]] = []
             for chunk_no, text, heading_path, context_prefix in chunks:
@@ -4208,6 +4388,21 @@ def _build_corpus(
                     raw_path=str(raw_path),
                     chunker_version=resolved_chunker_version,
                     chunk_ids_digest=digest,
+                    # v5: частичность — измеренное свойство версии. При неизвестном
+                    # признаке в колонках остаётся NULL (не 0): «полное» здесь было бы
+                    # утверждением, которого никто не делал.
+                    extract_partial=new_partial,
+                    extract_partial_reason=(
+                        partial_fields.get("partial_reason")
+                        if new_partial
+                        else None
+                    ),
+                    extract_pages_converted=(
+                        partial_fields.get("pages_converted") if new_partial else None
+                    ),
+                    extract_page_count=(
+                        partial_fields.get("page_count") if partial_known else None
+                    ),
                     first_seen_run_id=(
                         existing.first_seen_run_id if existing is not None else run_token
                     ),
@@ -4615,11 +4810,23 @@ def _build_corpus(
             return document_id
         seen_docs[doc_hash] = url
 
-        # Частичность берётся из **фактического** извлечения. На пути переиспользования
-        # (``304``) извлечения не было: признак неизвестен, и ``partial=False`` там
-        # означает «в этом прогоне не наблюдался», а не «страницы прочитаны все».
-        # Признак не выводится из текста: «прочитано 7 страниц из 2763» — это факт
-        # прибора (``ExtractedDoc.partial``), а не свойство markdown-строки.
+        # Частичность — **измеренное** свойство, а не вывод из текста: «прочитано 7 страниц
+        # из 2763» сообщает прибор (``ExtractedDoc.partial``), а markdown-строка об этом
+        # молчит. Два пути, и оба обязаны назвать одно и то же:
+        # * извлечение было (inline/пул/кэш) — признак из ``ExtractedDoc``;
+        # * переиспользование (``304``) — извлечения не было, поэтому признак берётся из
+        #   durable-записи версии (``document_version.extract_partial``). До v5 его там не
+        #   было, и усечённый текст объявлялся полным; теперь ``partial_known`` различает
+        #   «полное» и «не измерено», и второе не выдаётся за первое.
+        if reuse is None:
+            partial_fields = _partial_fields(extracted)
+            partial_known = True
+        else:
+            partial_fields, partial_known = _reused_partial_fields(reuse.doc_version)
+            if not partial_known:
+                # «Не измерено» называется явно: иначе этот документ в отчёте неотличим от
+                # прочитанного целиком, а ``CorpusCoverage`` считает полноту по признаку.
+                partial_unknown_products.setdefault(product_id, []).append(page.url)
         doc = CorpusDoc(
             doc_id=document_id,
             product_id=product_id,
@@ -4630,7 +4837,7 @@ def _build_corpus(
             extractor_version=doc_extractor_version,
             render_mode=_as_text(page.fetch_mode),
             lang=page.lang,
-            **_partial_fields(extracted),
+            **partial_fields,
         )
         ingest.docs.append(doc)
         # Инкрементальная персистенция retention-провенанса: ``doc`` полностью сформирован
@@ -4733,6 +4940,8 @@ def _build_corpus(
             level_text=level_text,
             raw_path=raw_path,
             chunks=accepted,
+            partial_fields=partial_fields,
+            partial_known=partial_known,
         )
         reused = active_reuse is not None
         _count_doc(product_id, reused=reused)
@@ -8529,6 +8738,21 @@ def _build_corpus(
                 "failed": product_failed,
                 "docs": len(ingest.docs),
                 "partial_docs": len(product_partial),
+                # v5: «признак частичности неизвестен» — отдельный факт, а не «полное».
+                # Строка версии могла быть записана до v5 (признак не сохранялся), и
+                # переиспользование такой версии не вправе молчать об этом.
+                "partial_unknown": len(partial_unknown_products.get(product_id, [])),
+                # v5: смены частичности (было частично → стало полное и обратно): тот же
+                # ключ дал другой объём работы. Не ошибка, но обязано быть видно.
+                "partiality_changes": [
+                    {
+                        "url": change["url"],
+                        "was": change["was"],
+                        "now": change["now"],
+                    }
+                    for change in partiality_changes
+                    if change["product_id"] == product_id
+                ],
                 # 13-manual-artifacts §3.3: «объявлено» и «дошло до корпуса» —
                 # разные факты, и разницу нельзя выводить один из другого.
                 "manual_declared": len(manual_entries),
