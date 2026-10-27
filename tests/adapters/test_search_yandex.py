@@ -48,6 +48,7 @@ from core.adapters.search_yandex import (
 from core.ports.search import SearchQuery, SearchResult
 from core.ports.types import FetchMode, RawPage
 from core.util.cache import ContentAddressedCache, http_key
+from core.util.redirects import DEFAULT_MAX_REDIRECTS
 
 URL_A = "https://example.com/a"
 URL_B = "https://example.com/b"
@@ -411,6 +412,69 @@ def test_fetch_blocks_ssrf_loopback_without_http() -> None:
     assert calls == []
 
 
+@pytest.mark.parametrize(
+    "internal",
+    ["http://127.0.0.1:8080/admin", "http://10.0.0.1/internal", "http://169.254.169.254/latest/meta-data/"],
+)
+def test_fetch_rejects_redirect_to_internal_address(
+    monkeypatch: pytest.MonkeyPatch, internal: str
+) -> None:
+    """R10: редирект на внутренний адрес — типизированный отказ, запрос не выпущен.
+
+    ``follow_redirects=True`` у собственного клиента адаптера означал, что публичная
+    страница уводила фетч внутрь периметра, а проверка видела бы уже готовый ответ.
+    Теперь каждый ``Location`` валидируется до запроса: внутренний адрес не получает
+    ни одного байта запроса.
+    """
+    fake = _FakeHttpx(get=[_FakeResponse(302, headers={"Location": internal})])
+    _install_fake_httpx(monkeypatch, fake)
+    adapter = YandexSearchAdapter(search_mode="sync")
+
+    with pytest.raises(SearchError) as err:
+        adapter.fetch(URL_A)
+
+    assert "редирект на небезопасный адрес" in str(err.value)
+    assert fake.get_calls == [URL_A]  # внутренний адрес НЕ запрошен
+
+
+def test_fetch_forwards_hop_by_hop_and_keeps_final_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Штатный публичный редирект проходит: хоп переносится, URL — финальный."""
+    fake = _FakeHttpx(
+        get=[
+            _FakeResponse(301, headers={"Location": "/moved"}),
+            _FakeResponse(200, b"<html>final</html>"),
+        ]
+    )
+    _install_fake_httpx(monkeypatch, fake)
+    adapter = YandexSearchAdapter(search_mode="sync")
+
+    page = adapter.fetch(URL_A)
+
+    assert fake.get_calls == [URL_A, "https://example.com/moved"]  # относительный Location
+    assert page.content == b"<html>final</html>"
+    assert page.url == "https://example.com/moved"  # провенанс финального адреса
+
+
+def test_fetch_redirect_loop_is_capped(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Потолок хопов — дефолт ``httpx`` (20); бесконечная карусель не крутится вечно."""
+    fake = _FakeHttpx(
+        get=[
+            _FakeResponse(302, headers={"Location": "/loop"})
+            for _ in range(DEFAULT_MAX_REDIRECTS + 1)
+        ]
+    )
+    _install_fake_httpx(monkeypatch, fake)
+    adapter = YandexSearchAdapter(search_mode="sync")
+
+    with pytest.raises(SearchError) as err:
+        adapter.fetch(URL_A)
+
+    assert "редиректов" in str(err.value)
+    assert len(fake.get_calls) == DEFAULT_MAX_REDIRECTS + 1
+
+
 def test_fetch_cache_hit_avoids_http_get(tmp_path: Path) -> None:
     cache = ContentAddressedCache(root=tmp_path)
     cache.put_bytes("http", http_key(URL_A), b"cached page")
@@ -453,12 +517,26 @@ def test_fetch_without_cache_calls_http_each_time() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_available_with_seam_without_httpx(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_available_requires_all_required_seams(monkeypatch: pytest.MonkeyPatch) -> None:
+    """S9b: readiness — конъюнкция по требуемым швам, а не «есть хотя бы один».
+
+    Одного ``http_get`` недостаточно: ``search()`` уходит в POST-путь и упал бы.
+    В async-режиме (дефолт) к POST добавляется опрос операции.
+    """
     monkeypatch.setattr(module, "_httpx_available", lambda: False)
-    with_seam = YandexSearchAdapter(http_post=_post_returning({"results": []}))
-    without_seam = YandexSearchAdapter()
-    assert with_seam.available is True
-    assert without_seam.available is False
+    post = _post_returning({"results": []})
+    get = lambda url: b""  # noqa: E731 — шов-заглушка, вызываться не должен
+    poll = lambda url: b"{}"  # noqa: E731 — шов-заглушка, вызываться не должен
+
+    assert YandexSearchAdapter(http_post=post, http_get=get, http_poll=poll).available is True
+    assert YandexSearchAdapter(http_post=post, http_get=get, search_mode="sync").available is True
+    # Только GET: POST-путь уйдёт в реальный httpx и упадёт — адаптер не готов.
+    assert YandexSearchAdapter(http_get=get).available is False
+    # POST без fetch-шва: половина контракта не обслужена.
+    assert YandexSearchAdapter(http_post=post, http_poll=poll).available is False
+    # async без шва опроса: операция запустится, а забрать её будет нечем.
+    assert YandexSearchAdapter(http_post=post, http_get=get).available is False
+    assert YandexSearchAdapter().available is False
 
 
 def test_available_reflects_httpx() -> None:
@@ -505,6 +583,12 @@ class _FakeResponse:
         self.status_code = status_code
         self.content = content
         self.headers = headers or {}
+        self.url = URL_A
+
+    def raise_for_status(self) -> None:
+        """Как у ``httpx.Response``: ``>= 400`` — исключение (проверяется фетчем)."""
+        if self.status_code >= 400:
+            raise RuntimeError(f"HTTP {self.status_code}")
 
 
 class _FakeHttpx:

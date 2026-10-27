@@ -37,7 +37,13 @@
 **Кэш (R7).** ``fetch`` консультирует внедрённый ``ContentAddressedCache`` по
 ``http_key(url)``: попадание → ``RawPage`` из кэшированных байтов без сети, промах →
 живой GET + запись. Кэш глобальный и переживает ``run_id``. Ответы поиска адаптер не
-кэширует: нормализация запроса (включая язык) и его кэширование — за pipeline (T11.2).
+кэширует: нормализация запроса (текст + провайдер + язык + ``limit``) и запись в
+``cache/serp/{query_hash}.json`` — за pipeline (``core.pipeline.search_log.external_search``,
+T11.2), иначе адаптер решал бы за измерение, что считать тем же запросом.
+
+**Повторы.** Политика bounded retry/backoff (429/5xx, ``Retry-After``, потолок задержки)
+живёт в :mod:`core.util.retry` — общая с остальными HTTP-адаптерами (S6); модуль её не
+дублирует.
 
 Нейтрален (§1.3): имя провайдера — данные-конфигурация, в модуле нет названий
 продуктов/категорий.
@@ -48,6 +54,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import time
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from typing import Any
@@ -55,6 +62,8 @@ from typing import Any
 from core.ports.search import SearchQuery, SearchResult
 from core.ports.types import FetchMode, RawPage
 from core.util.cache import ContentAddressedCache, http_key
+from core.util.redirects import follow_validated_redirects
+from core.util.retry import HttpRetryError, request_with_retry
 from core.util.security import validate_url
 
 __all__ = [
@@ -68,6 +77,7 @@ __all__ = [
     "HttpPostFn",
     "SearchAdapterUnavailable",
     "SearchError",
+    "SleepFn",
 ]
 
 #: База Z.ai Web Search API по умолчанию. Переопределяется ``base_url``.
@@ -86,6 +96,8 @@ ENV_API_KEY = "GLM_SEARCH_API_KEY"
 HttpPostFn = Callable[[str, dict[str, Any]], bytes]
 #: Внедряемая функция GET: (url) → сырые байты страницы.
 HttpGetFn = Callable[[str], bytes]
+#: Внедряемая функция ожидания: (секунды) → None (в тестах — no-op, повторы не спят).
+SleepFn = Callable[[float], None]
 
 #: Ключи известных форм ответа поиска (порядок — приоритет разбора).
 _RESULT_KEYS = ("search_result", "results", "items", "organic", "docs")
@@ -119,6 +131,8 @@ class GlmSearchAdapter:
 
     :param http_post: шов POST (тесты/подмена); ``None`` → реальный ``httpx``.
     :param http_get: шов GET для ``fetch``; ``None`` → реальный ``httpx``.
+    :param sleep: инъектируемое ожидание повторов (по умолчанию ``time.sleep``);
+        в тестах — no-op, иначе ``429``/``5xx`` заставляли бы тест спать.
     :param api_key: ключ API (иначе из ``GLM_SEARCH_API_KEY``); не хардкодится.
     :param base_url: база API; ``search_path`` — путь веб-поиска.
     :param search_engine: движок поиска провайдера (данные-конфигурация).
@@ -134,6 +148,7 @@ class GlmSearchAdapter:
         http_post: HttpPostFn | None = None,
         http_get: HttpGetFn | None = None,
         *,
+        sleep: SleepFn = time.sleep,
         api_key: str | None = None,
         base_url: str = DEFAULT_BASE_URL,
         search_path: str = DEFAULT_SEARCH_PATH,
@@ -151,6 +166,7 @@ class GlmSearchAdapter:
             raise ValueError(f"timeout обязан быть положительным, получено {timeout!r}")
         self._http_post = http_post
         self._http_get = http_get
+        self._sleep = sleep
         self.api_key = api_key if api_key is not None else os.environ.get(ENV_API_KEY)
         self.base_url = base_url.rstrip("/")
         self.search_path = search_path
@@ -165,10 +181,27 @@ class GlmSearchAdapter:
 
     @property
     def available(self) -> bool:
-        """Готов ли адаптер: внедрён HTTP-шов либо установлен ``httpx``."""
-        if self._http_post is not None or self._http_get is not None:
+        """Готов ли адаптер: **все** нужные швы внедрены либо установлен ``httpx``.
+
+        Требуемые швы (S9b): ``http_post`` — для ``search``, ``http_get`` — для ``fetch``.
+        Прежнее «есть хотя бы один» считало адаптер готовым при одном ``http_get``, хотя
+        ``search()`` уходил в POST-путь и падал; readiness-гейт
+        (``core.cli.wiring._search_adapter_configured``) такой адаптер пропускал.
+        """
+        if self._http_post is not None and self._http_get is not None:
             return True
         return _httpx_available()
+
+    @property
+    def cache(self) -> ContentAddressedCache | None:
+        """R7-кэш, которым адаптер уже пользуется (``fetch``); ``None`` — кэша нет.
+
+        Публичное имя, а не ``_cache``: тем же объектом пользуется pipeline — ответы
+        поиска кэширует ``external_search`` (``cache/serp``), и второй объект кэша на тот
+        же корень заводить незачем (``serp_discover`` берёт кэш адаптера, если ему не
+        передан явный).
+        """
+        return self._cache
 
     # ------------------------------------------------------------------
     # Контракт порта
@@ -325,17 +358,23 @@ class GlmSearchAdapter:
         return self._post_real(url, payload)
 
     def _post_real(self, url: str, payload: dict[str, Any]) -> bytes:
-        """Реальный POST веб-поиска; отсутствие зависимости → ``SearchAdapterUnavailable``."""
+        """Реальный POST веб-поиска; отсутствие зависимости → ``SearchAdapterUnavailable``.
+
+        Повторы/backoff — общая политика :mod:`core.util.retry` (429/5xx, ``Retry-After``).
+        До S6 их здесь не было вовсе: троттлинг провайдера валил вызов с первой попытки,
+        а бюджет прогона всё равно списывался.
+        """
         httpx = self._import_http()
         headers = {"Content-Type": "application/json"}
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
-        try:
-            response = httpx.post(url, json=payload, headers=headers, timeout=self.timeout)
-            response.raise_for_status()
-            return response.content
-        except Exception as exc:  # noqa: BLE001 - унификация ошибок адаптера
-            raise SearchError(f"HTTP-поиск не удался: {exc}") from exc
+
+        def _request() -> Any:
+            return httpx.post(url, json=payload, headers=headers, timeout=self.timeout)
+
+        return bytes(
+            self._request_with_retry(httpx, _request, "HTTP-поиск").content
+        )
 
     def _fetch_live(self, url: str) -> RawPage:
         """Живой фетч: внедрённый шов или реальный ``httpx`` (без кэша)."""
@@ -350,22 +389,70 @@ class GlmSearchAdapter:
         return self._get_real(url)
 
     def _get_real(self, url: str) -> RawPage:
-        """Реальный GET страницы; отсутствие зависимости → ``SearchAdapterUnavailable``."""
+        """Реальный GET с похоповой валидацией редиректов (R10).
+
+        ``follow_redirects=False`` у каждого запроса: цикл ведёт
+        :func:`core.util.redirects.follow_validated_redirects`, и каждый ``Location``
+        проходит ``validate_url`` **до** выпуска запроса. Прежде адаптер полагался на
+        ``follow_redirects=True`` — публичная страница могла увести фетч на
+        ``127.0.0.1``/``10.0.0.1``/metadata-эндпоинт, и SSRF-проверка видела бы уже
+        готовый ответ. Отказ хопа — :class:`SearchError` с причиной «редирект на
+        небезопасный адрес».
+
+        Повторы — общая политика (:mod:`core.util.retry`) и **на каждый хоп**: цепочка
+        редиректов не переигрывается с начала из-за сбоя последнего хопа, а отказ
+        валидации не попадает в ретрай (он не ретраибелен по смыслу).
+        """
         httpx = self._import_http()
-        try:
-            response = httpx.get(url, timeout=self.timeout, follow_redirects=True)
-            response.raise_for_status()
-        except Exception as exc:  # noqa: BLE001 - унификация ошибок адаптера
-            raise SearchError(f"HTTP-фетч {url!r} не удался: {exc}") from exc
+
+        def _fetch_hop(current: str) -> Any:
+            def _request() -> Any:
+                return httpx.get(
+                    current, timeout=self.timeout, follow_redirects=False
+                )
+
+            return self._request_with_retry(
+                httpx, _request, f"HTTP-фетч {current!r}"
+            )
+
+        response, final_url = follow_validated_redirects(
+            _fetch_hop,
+            url,
+            error=SearchError,
+            label=f"HTTP-фетч {url!r}",
+        )
         content_type = response.headers.get("Content-Type")
         return RawPage(
-            url=str(response.url),
+            url=final_url,
             content=response.content,
             fetched_at=_now_iso(),
             fetch_mode=FetchMode.HTTP,
             status_code=response.status_code,
             content_type=content_type or None,
         )
+
+    def _request_with_retry(
+        self,
+        httpx: Any,
+        request: Callable[[], Any],
+        label: str,
+    ) -> Any:
+        """HTTP-вызов с общей политикой повторов (:mod:`core.util.retry`).
+
+        Повторяются ``httpx.TransportError`` и ``RETRYABLE_STATUSES`` (429/5xx) с
+        уважением ``Retry-After``; иначе — exponential backoff с jitter. Сбой
+        транслируется в :class:`SearchError`, чтобы pipeline видел прежнюю семантику
+        «вызов не удался» (и записал ``termination_reason=error``, S8).
+        """
+        try:
+            return request_with_retry(
+                request,
+                label=label,
+                sleep=self._sleep,
+                transport_error=getattr(httpx, "TransportError", ()),
+            )
+        except HttpRetryError as exc:
+            raise SearchError(str(exc)) from exc
 
     # ------------------------------------------------------------------
     # Кэш

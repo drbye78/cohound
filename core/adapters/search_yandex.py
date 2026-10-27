@@ -45,7 +45,13 @@ URL-кандидаты (``SearchResult``) и, для ``fetch``, сырые ба�
 **Кэш (R7).** ``fetch`` консультирует внедрённый ``ContentAddressedCache`` по
 ``http_key(url)``: попадание → ``RawPage`` из кэшированных байтов без сети, промах →
 живой GET + запись. Кэш глобальный и переживает ``run_id``. SERP-ответы адаптер не
-кэширует: нормализация запроса (включая язык) и его кэширование — за pipeline (T11.2).
+кэширует: нормализация запроса (текст + провайдер + язык + ``limit``) и запись в
+``cache/serp/{query_hash}.json`` — за pipeline (``core.pipeline.search_log.external_search``,
+T11.2), иначе адаптер решал бы за измерение, что считать тем же запросом.
+
+**Повторы.** Политика bounded retry/backoff (429/5xx, ``Retry-After``, потолок задержки)
+живёт в :mod:`core.util.retry` — общая с остальными HTTP-адаптерами (S6); модуль её не
+дублирует.
 
 Нейтрален (§1.3): имя провайдера — данные-конфигурация, в модуле нет названий
 продуктов/категорий.
@@ -57,17 +63,24 @@ import base64
 import importlib.util
 import json
 import os
-import random
 import time
 import xml.etree.ElementTree as ET
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
-from email.utils import parsedate_to_datetime
 from typing import Any
 
 from core.ports.search import SearchQuery, SearchResult
 from core.ports.types import FetchMode, RawPage
 from core.util.cache import ContentAddressedCache, http_key
+from core.util.redirects import follow_validated_redirects
+from core.util.retry import (
+    BASE_RETRY_DELAY,
+    MAX_RETRY_ATTEMPTS,
+    MAX_RETRY_DELAY,
+    RETRYABLE_STATUSES,
+    HttpRetryError,
+    request_with_retry,
+)
 from core.util.security import validate_url
 
 __all__ = [
@@ -110,15 +123,6 @@ DEFAULT_POLL_INTERVAL = 30.0
 DEFAULT_MAX_WAIT = 1800.0
 #: Таймаут HTTP-запроса, с.
 DEFAULT_TIMEOUT = 30.0
-
-#: Максимальное число попыток реального HTTP-вызова (включая первую).
-MAX_RETRY_ATTEMPTS = 5
-#: Базовая задержка exponential backoff, с.
-BASE_RETRY_DELAY = 1.0
-#: Потолок задержки повтора, с (включая ``Retry-After``).
-MAX_RETRY_DELAY = 60.0
-#: Статусы, при которых реальный HTTP-вызов повторяется.
-RETRYABLE_STATUSES = frozenset({429, 500, 502, 503, 504})
 
 #: Допустимые режимы поиска и режим по умолчанию.
 SEARCH_MODES = ("async", "sync")
@@ -273,10 +277,30 @@ class YandexSearchAdapter:
 
     @property
     def available(self) -> bool:
-        """Готов ли адаптер: внедрён HTTP-шов либо установлен ``httpx``."""
-        if self._http_post is not None or self._http_get is not None:
+        """Готов ли адаптер: **все** нужные швы внедрены либо установлен ``httpx``.
+
+        Требуемые швы (S9b): ``http_post`` и — в async-режиме — ``http_poll`` для поиска,
+        ``http_get`` — для ``fetch``. Прежнее условие «есть хотя бы один шов» считало
+        адаптер готовым при одном ``http_get``, хотя ``search()`` уходит в POST-путь и
+        падал; ``and`` по требуемым швам не даёт readiness-гейту пропустить такой адаптер.
+        """
+        search_seams = self._http_post is not None and (
+            self._http_poll is not None or self.search_mode == "sync"
+        )
+        if search_seams and self._http_get is not None:
             return True
         return _httpx_available()
+
+    @property
+    def cache(self) -> ContentAddressedCache | None:
+        """R7-кэш, которым адаптер уже пользуется (``fetch``); ``None`` — кэша нет.
+
+        Публичное имя, а не ``_cache``: тем же объектом пользуется pipeline — ответы
+        поиска кэширует ``external_search`` (``cache/serp``), и второй объект кэша на тот
+        же корень заводить незачем (``serp_discover`` берёт кэш адаптера, если ему не
+        передан явный).
+        """
+        return self._cache
 
     # ------------------------------------------------------------------
     # Контракт порта
@@ -557,108 +581,24 @@ class YandexSearchAdapter:
         request: Callable[[], Any],
         label: str,
     ) -> bytes:
-        """Выполняет HTTP-запрос с bounded retry/backoff.
+        """Тело успешного ответа с общей политикой повторов (S6).
 
-        Повторяются только ``httpx.TransportError`` и статусы ``RETRYABLE_STATUSES``.
-        Прочие 4xx (400/401/403/404/422 и т.п.) не ретраятся. Задержка — ``Retry-After``
-        (секунды или HTTP-date), иначе exponential backoff с jitter; потолок —
-        ``MAX_RETRY_DELAY``, попыток не больше ``MAX_RETRY_ATTEMPTS``. Ожидание идёт
-        через внедрённую ``sleep``. В сообщение об ошибке попадают только статус/число
-        попыток — заголовки и ключи не логируются.
+        Политика — :mod:`core.util.retry` (одна на все адаптеры): повторяются
+        ``httpx.TransportError`` и ``RETRYABLE_STATUSES`` (429/5xx) с ``Retry-After``,
+        иначе exponential backoff с jitter; попыток не больше ``MAX_RETRY_ATTEMPTS``.
+        Ожидание идёт через внедрённую ``sleep``. Сбой транслируется в ``SearchError``
+        (pipeline видит прежнюю семантику «вызов не удался»).
         """
-        transport_error = getattr(httpx, "TransportError", ())
-        attempt = 0
-        while True:
-            attempt += 1
-            try:
-                response = request()
-            except transport_error as exc:  # type: ignore[misc]
-                if attempt < MAX_RETRY_ATTEMPTS:
-                    self._sleep(self._retry_delay(attempt, None))
-                    continue
-                raise SearchError(
-                    f"{label} не удался после {attempt} попыток: {type(exc).__name__}"
-                ) from exc
-            except Exception as exc:  # noqa: BLE001 - унификация ошибок адаптера
-                raise SearchError(
-                    f"{label} не удался: {type(exc).__name__}"
-                ) from exc
-
-            status = getattr(response, "status_code", None)
-            if (
-                isinstance(status, int)
-                and status in RETRYABLE_STATUSES
-                and attempt < MAX_RETRY_ATTEMPTS
-            ):
-                self._sleep(
-                    self._retry_delay(attempt, self._retry_after_header(response))
-                )
-                continue
-            if isinstance(status, int) and status >= 400:
-                raise SearchError(
-                    f"{label} не удался: HTTP {status} после {attempt} попыток"
-                )
-            return bytes(response.content)
-
-    @staticmethod
-    def _retry_after_header(response: Any) -> str | None:
-        """Достаёт ``Retry-After`` из заголовков ответа (регистронезависимо)."""
-        headers = getattr(response, "headers", None)
-        if headers is None:
-            return None
-        getter = getattr(headers, "get", None)
-        if callable(getter):
-            for name in ("Retry-After", "retry-after"):
-                value = getter(name)
-                if value is not None:
-                    return str(value)
-            return None
-        if isinstance(headers, Mapping):
-            for key, value in headers.items():
-                if str(key).lower() == "retry-after":
-                    return str(value)
-        return None
-
-    @staticmethod
-    def _parse_retry_after(value: str | None) -> float | None:
-        """Разбирает ``Retry-After``: целые секунды или HTTP-date → секунды ожидания."""
-        if value is None:
-            return None
-        text = str(value).strip()
-        if not text:
-            return None
         try:
-            return max(0.0, float(int(text)))
-        except ValueError:
-            pass
-        try:
-            when = parsedate_to_datetime(text)
-        except (TypeError, ValueError, OverflowError):
-            return None
-        if when is None:
-            return None
-        if when.tzinfo is None:
-            when = when.replace(tzinfo=UTC)
-        delay = (when - datetime.now(UTC)).total_seconds()
-        return max(0.0, delay)
-
-    def _retry_delay(self, attempt: int, retry_after: str | None) -> float:
-        """Задержка перед повтором: ``Retry-After`` либо exponential backoff с jitter.
-
-        ``attempt`` — номер только что завершившейся попытки (1-based). Jitter —
-        аддитивный (до +50% базовой задержки), поэтому диапазоны последовательных
-        задержек не пересекаются и растут. Потолок — ``MAX_RETRY_DELAY``.
-        """
-        parsed = self._parse_retry_after(retry_after)
-        if parsed is not None:
-            return min(MAX_RETRY_DELAY, parsed)
-        base = BASE_RETRY_DELAY * (2 ** (attempt - 1))
-        # S311: jitter повтора между клиентами одного провайдера, а не секрет. Здесь
-        # нужна именно дешёвая не-криптографическая случайность; CSPRNG был бы
-        # бесполезен (не скрывает ничего и не защищает от перебора) и дороже в горячем
-        # пути ретрая.
-        jittered = base * (1.0 + random.uniform(0.0, 0.5))  # noqa: S311 — jitter, не секрет
-        return min(MAX_RETRY_DELAY, jittered)
+            response = request_with_retry(
+                request,
+                label=label,
+                sleep=self._sleep,
+                transport_error=getattr(httpx, "TransportError", ()),
+            )
+        except HttpRetryError as exc:
+            raise SearchError(str(exc)) from exc
+        return bytes(response.content)
 
     def _fetch_live(self, url: str) -> RawPage:
         """Живой фетч: внедрённый шов или реальный ``httpx`` (без кэша)."""
@@ -673,16 +613,36 @@ class YandexSearchAdapter:
         return self._get_real(url)
 
     def _get_real(self, url: str) -> RawPage:
-        """Реальный GET страницы; отсутствие зависимости → ``SearchAdapterUnavailable``."""
+        """Реальный GET с похоповой валидацией редиректов (R10); без ``httpx`` → отказ.
+
+        ``follow_redirects=False`` у самого запроса: цикл ведёт
+        :func:`core.util.redirects.follow_validated_redirects`, и каждый ``Location``
+        проходит ``validate_url`` **до** выпуска запроса. Прежде адаптер полагался на
+        ``follow_redirects=True`` — публичная страница могла увести фетч на
+        ``127.0.0.1``/``10.0.0.1``/metadata-эндпоинт, и SSRF-проверка видела бы уже
+        готовый ответ. Отказ хопа — :class:`SearchError` с причиной «редирект на
+        небезопасный адрес» (pipeline ловит один класс на все сбои поиска).
+        """
         httpx = self._import_http()
+
+        def _fetch_hop(current: str) -> Any:
+            return httpx.get(current, timeout=self.timeout, follow_redirects=False)
+
         try:
-            response = httpx.get(url, timeout=self.timeout, follow_redirects=True)
+            response, final_url = follow_validated_redirects(
+                _fetch_hop,
+                url,
+                error=SearchError,
+                label=f"HTTP-фетч {url!r}",
+            )
             response.raise_for_status()
+        except SearchError:
+            raise
         except Exception as exc:  # noqa: BLE001 - унификация ошибок адаптера
             raise SearchError(f"HTTP-фетч {url!r} не удался: {exc}") from exc
         content_type = response.headers.get("Content-Type")
         return RawPage(
-            url=str(response.url),
+            url=final_url,
             content=response.content,
             fetched_at=_now_iso(),
             fetch_mode=FetchMode.HTTP,
