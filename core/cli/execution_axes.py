@@ -92,6 +92,7 @@ from core.adapters.extract_document import (
     docling_engine_build,
 )
 from core.adapters.extract_html import HtmlExtractor
+from core.adapters.lexical_tantivy import lexical_schema_spec
 from core.adapters.llm_local import (
     EVALUATOR_DEFAULT_SEED,
     EVALUATOR_DEFAULT_TEMPERATURE,
@@ -101,9 +102,11 @@ from core.adapters.llm_local import (
 from core.cli.context import (
     _document_level,
     _load_registry_specs,
+    _load_render_modes,
     _non_negative_int,
     _pdf_pipeline,
     _positive_int,
+    _resolve_passports_dir,
 )
 from core.cli.errors import EXIT_USAGE, CliError
 from core.cli.wiring import (
@@ -117,9 +120,11 @@ from core.config.deploy import (
     resolve_llm_slot,
     resolve_serp_rounds,
 )
+from core.config.passports import passport_content_digests
 from core.domain.dictionary import load_dictionary
 from core.domain.enums import RefreshPolicy
 from core.domain.models import CrawlRunConfig, canonical_rate_limit
+from core.pipeline.digests import passports_digest, render_modes_digest
 from core.pipeline.evaluation_policy import evaluation_policy_spec
 from core.pipeline.manual_artifacts import load_manual_artifacts
 from core.pipeline.normalize import RunInputs
@@ -597,6 +602,17 @@ class DeclaredExecutionAxes:
     #: V3: политика повтора оценщика
     #: (:func:`core.pipeline.evaluation_policy.evaluation_policy_spec`). ``None`` — не объявлена.
     evaluation_policy: dict[str, Any] | None = None
+    #: §11.1: объявленные входы **корпуса**. Оба определяют, какие байты станут
+    #: доказательствами, и до правки не входили в ``run_id``: документ мог быть прочитан
+    #: другим механизмом (браузер против HTTP) или паспорт мог быть другим, оставаясь под
+    #: прежней идентичностью. ``None`` — ось не передана (чистые вызовы/legacy-
+    #: конструкторы): «не объявлено» отличимо от «объявлено пустое множество».
+    render_modes_digest: str | None = None
+    passports_digest: str | None = None
+    #: C8: схема лексического индекса — читается из адаптера, а не из копии констант:
+    #: разъехаться с фактической схемой она не может (тот же приём, что у
+    #: ``chunking_spec``).
+    lexical_spec: dict[str, Any] | None = None
 
 
 def extractor_stack_version() -> str:
@@ -845,6 +861,19 @@ def resolve_declared_axes(
     axis_overrides = _crawl_axis_overrides(args)
     deploy_fields = manifest_deploy_fields(config)
     serp_rounds, serp_source = _serp_axis(args=args, run=run, deploy=config)
+    # §11.1: входы корпуса считаются тем же кодом, что читает исполнение
+    # (``_load_corpus_urls``/``_load_render_modes``/``_resolve_passports_dir``), — вторая
+    # формула дайджеста разошлась бы с фактическим корпусом. Функции бросают ``CliError``
+    # на нечитаемом файле: объявленный вход, который нельзя прочитать, не может быть
+    # частью идентичности — это отказ, а не ``None``.
+    render_modes = _load_render_modes(getattr(args, "render_modes", None))
+    passports_dir = _resolve_passports_dir(args, getattr(args, "paths", None))
+    cohort = getattr(inputs, "cohort", None)
+    cohort_products = (
+        [str(entry.product_id) for entry in cohort.entries]
+        if cohort is not None
+        else []
+    )
     return DeclaredExecutionAxes(
         crawl_strategy=_crawl_strategy(run_crawl),
         crawl_rate_limit=canonical_rate_limit(getattr(run_crawl, "rate_limit", None)),
@@ -871,6 +900,13 @@ def resolve_declared_axes(
         # входа», а не наблюдение: читаются из тех же мест, откуда их берёт исполнение.
         chunking_spec=composite_chunking_spec(),
         evaluation_policy=evaluation_policy_spec(),
+        render_modes_digest=render_modes_digest(
+            {url: mode.value for url, mode in render_modes.items()}
+        ),
+        passports_digest=passports_digest(
+            passport_content_digests(cohort_products, passports_dir)
+        ),
+        lexical_spec=lexical_schema_spec(),
         llm_scenarios=_resolve_llm_scenarios(args=args, inputs=inputs, deploy=config),
         extractor_stack=extractor_stack_version(),
         # 13-manual-artifacts §3.2: ручные артефакты объявлены файлом пакета, поэтому

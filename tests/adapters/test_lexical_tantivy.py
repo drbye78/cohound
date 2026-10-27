@@ -1,17 +1,19 @@
 """Тесты ``TantivyLexicalIndex`` (W8/T8.3) — реализация ``LexicalIndexPort``.
 
 Проверяются: реальный BM25-поиск на tantivy, RU-стемминг (запрос «экспорта» находит
-«Экспорт»), EN-поле, продукт-скоупед (I17), детерминизм/tie-break (R7), identifier-профиль
-(точное совпадение с учётом регистра), ngram-профиль (подстрочный матч фрагмента
-идентификатора/слова, двойной профиль T8.3), провенанс ``RetrievedChunk``, контракт порта,
-ленивый импорт/guard отсутствия зависимости и валидация входа. Фикстуры категорийно
-нейтральны (§1.3). Тесты, требующие tantivy, помечены ``requires_tantivy`` и
+«Экспорт»), EN-стемминг одним анализатором, продукт-скоупед (I17), детерминизм/tie-break
+(R7), identifier- и ngram-профили как **отдельные сборки** (одно поле, анализатор по
+профилю — C8), состав схемы (ровно одно текстовое поле), провенанс ``RetrievedChunk``,
+контракт порта, ленивый импорт/guard отсутствия зависимости и валидация входа. Фикстуры
+категорийно нейтральны (§1.3). Тесты, требующие tantivy, помечены ``requires_tantivy`` и
 пропускаются при отсутствии зависимости.
 """
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
+from pathlib import Path
 
 import pytest
 
@@ -114,17 +116,53 @@ def test_english_query_matches_english_field() -> None:
 
 
 @requires_tantivy
-def test_lang_selects_language_analyzer() -> None:
-    """``lang`` выбирает анализатор языка: RU-стеммер для «экспорта», EN — для «exports».
+def test_single_analyzer_stems_both_languages() -> None:
+    """Один анализатор несёт оба стеммера: RU-формы сближает русский, EN — английский.
 
-    Это не языковой firewall: стеммер чужого скрипта может пропустить токен дословно,
-    поэтому проверяется именно морфологическое сближение форм внутри своего языка.
+    До C8 это делали два поля (``body_stem_ru``/``body_stem_en``) с одним текстом и
+    выбором поля по ``lang``. Теперь поле одно, и ``lang`` — ось **запроса** (контракт
+    ``LexicalIndexPort``), а не ось индекса: выдача от него не зависит. Проверяется
+    именно морфологическое сближение форм внутри своего алфавита (это не языковой
+    firewall: стеммер чужого скрипта проходит токен дословно).
     """
     with _index() as index:
         ru = index.search("экспорта", [PRODUCT_A], top_k=5, lang="ru")
         en = index.search("exports", [PRODUCT_B], top_k=5, lang="en")
+        ru_without_lang = index.search("экспорта", [PRODUCT_A], top_k=5)
     assert [c.chunk_id for c in ru] == ["c1"]
     assert [c.chunk_id for c in en] == ["c3"]
+    assert [c.chunk_id for c in ru_without_lang] == [c.chunk_id for c in ru]
+
+
+@requires_tantivy
+def test_schema_has_exactly_one_text_field(tmp_path: Path) -> None:
+    """C8: одно текстовое поле на сборку. Возврат к четырём — снова 4× анализа и объёма.
+
+    Состав полей читается из ``meta.json`` собранного индекса: tantivy-py 0.26 не отдаёт
+    список полей через API, а ``meta.json`` — фактическая схема сегментов, то есть
+    измерение, а не чтение константы модуля.
+    """
+    path = tmp_path / "idx"
+    with TantivyLexicalIndex(index_path=path) as index:
+        index.index([LexicalChunk("c1", PRODUCT_A, "экспорт данных во внешний файл")])
+    schema = json.loads((path / "meta.json").read_text(encoding="utf-8"))["schema"]
+    assert [f["name"] for f in schema] == ["chunk_id", "product_id", "body"]
+    body = schema[2]
+    assert body["options"]["indexing"]["tokenizer"] == lexical_tantivy._STEM_TOKENIZER
+    # Ни одного прежнего поля профиля: они и были четырьмя копиями одного текста.
+    assert not {f["name"] for f in schema} & {
+        "body_stem_ru",
+        "body_stem_en",
+        "body_identifier",
+        "body_ngram",
+    }
+
+
+@requires_tantivy
+def test_identifier_build_switches_the_field_analyzer() -> None:
+    """Тот же единственный токенайзер-слот, но другой анализатор — ``whitespace``."""
+    with _index([LexicalChunk("c1", PRODUCT_A, "see API-2024_X endpoint")], profile="identifier") as idx:
+        assert idx._field_tokenizer() == "whitespace"
 
 
 # ---------------------------------------------------------------------------
@@ -244,11 +282,26 @@ def test_identifier_profile_is_case_sensitive() -> None:
 
 
 @requires_tantivy
-def test_search_identifier_overrides_stemmed_profile() -> None:
-    records = [LexicalChunk("id1", PRODUCT_A, "see API-2024_X endpoint")]
-    with _index(records, profile="stemmed") as index:
-        hits = index.search_identifier("API-2024_X", [PRODUCT_A], top_k=5)
-    assert [c.chunk_id for c in hits] == ["id1"]
+def test_identifier_requires_its_own_build() -> None:
+    """Профиль — свойство сборки (C8): кросс-профильного поиска по индексу нет.
+
+    Раньше ``search_identifier`` работал по стенмленному индексу, потому что в схеме
+    лежали все четыре поля сразу. Одно поле — один анализ: точный идентификатор
+    находится только индексом, построенным под ``identifier`` (там ``whitespace`` без
+    lowercase), а стенмленный находит его лишь как стеммированный токен — то есть
+    регистр и пунктуация не значимы. Это и есть оплаченная цена C8, и здесь она
+    зафиксирована, чтобы возврат к «всем профилям сразу» был видимым решением.
+    """
+    records = [
+        LexicalChunk("id1", PRODUCT_A, "see API-2024_X endpoint"),
+        LexicalChunk("id2", PRODUCT_A, "see api-2024_x endpoint"),
+    ]
+    with _index(records, profile="identifier") as exact:
+        assert [c.chunk_id for c in exact.search("API-2024_X", [PRODUCT_A], top_k=5)] == ["id1"]
+    with _index(records, profile="stemmed") as stemmed:
+        # стеммированный анализ регистр не различает — оба документа равноправны
+        found = {c.chunk_id for c in stemmed.search("API-2024_X", [PRODUCT_A], top_k=5)}
+    assert found == {"id1", "id2"}
 
 
 @requires_tantivy
@@ -440,12 +493,14 @@ def test_ngram_query_shorter_than_min_gram_is_empty() -> None:
 
 
 @requires_tantivy
-def test_search_ngram_overrides_stemmed_profile() -> None:
-    with _index(_NGRAM_DOCS, profile="stemmed") as index:
-        stemmed = index.search("i-202", [PRODUCT_A, PRODUCT_B], top_k=5)
-        via_ngram = index.search_ngram("i-202", [PRODUCT_A, PRODUCT_B], top_k=5)
-    assert stemmed == []  # стеммированный парсер не сближает подстроку
-    assert [c.chunk_id for c in via_ngram] == ["n1"]
+def test_ngram_requires_its_own_build() -> None:
+    """Подстрочный матч — только у ngram-сборки; стенмленная подстроку не сближает."""
+    with _index(_NGRAM_DOCS, profile="stemmed") as stemmed:
+        assert stemmed.search("i-202", [PRODUCT_A, PRODUCT_B], top_k=5) == []
+    with _index(_NGRAM_DOCS, profile="ngram") as ngram:
+        assert [c.chunk_id for c in ngram.search("i-202", [PRODUCT_A, PRODUCT_B], top_k=5)] == [
+            "n1"
+        ]
 
 
 @requires_tantivy

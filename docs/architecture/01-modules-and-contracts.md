@@ -301,7 +301,13 @@ class SearchAdapterPort(Protocol):
 Порт не возвращает «доказательство», только контент. Вызовы логируются вызывающим pipeline
 в `search_log` (I23).
 
-### 3.5. `ports/{crawler,extractor,chunker,registry,store}.py`
+### 3.5. `ports/{crawler,crawl_errors,extractor,chunker,registry,store}.py`
+
+`ports/crawl_errors.py` объявляет таксономию сбоев краула отдельным модулем, а не в
+`crawler.py`: пять потребителей (`crawl_http`/`crawl_browser`/`wiring`/`edge/__main__`/
+`crawler_factory`) не используют сам `CrawlerPort`, и импорт рядом с протоколом тянул бы
+`ports.types` ради имени исключения. Страж — ast-скан в `tests/selfcheck.py`, который
+падает на возврате импорта из `core.adapters.crawl_scrapy`.
 
 ```python
 class CrawlerPort(Protocol):     def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage: ...
@@ -447,7 +453,12 @@ class ContainerPort(Protocol):
 контейнера (zip central directory / заголовок 7z / заголовок RAR); `size` члена — заявленный
 размер из индекса, а не измеренный распаковкой. **Инвариант 2 — стримящий `open_member`:**
 член читается порциями, а не целиком в RAM. `ContainerListing` несёт `format`, `members`,
-`solid`, `encrypted`, `truncated`, `unreadable` (видимый пропуск, а не «пустой контейнер»).
+`solid`, `encryption`, `truncated`, `unreadable` (видимый пропуск, а не «пустой контейнер»).
+`encryption` — **три состояния** (`encrypted` | `not_encrypted` | `unknown`), а не булево:
+«предикат молчит» (читатель не умеет определять шифрование) неотличим от «не зашифрован»,
+если значение двоичное, и тогда отказ чтения члена приходит без причины. `unknown` **не**
+отсеивает членов (незнание ≠ «зашифрован») и **не** проходит молча: состояние видно в
+прогнозе, а отказ чтения получает приписку `encryption_unverified`.
 **Гарантия I19:** байты члена становятся контентом только через corpus_raw→hash→index.
 Реализации — `adapters/container_{zip,7z,rar}.py` + диспетчер `container_any.py`
 (`container_for(path)`); в `pipeline` приходит как `Ports.container`, а не импортом адаптера.

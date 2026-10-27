@@ -6,21 +6,81 @@
 05 §6: ``Filter.stemmer("russian")``/``Filter.stopword("russian")`` доступны в
 tantivy 0.26).
 
-**Двойной профиль (§B.3 / T8.3).** Индекс хранит поля:
+**Одно текстовое поле, анализатор выбирает профиль (C8).** Схема — ``chunk_id`` и
+``product_id`` (служебные, ``raw``) плюс **одно** текстовое поле ``body``. Профиль
+конструктора задаёт **анализатор** этого поля, а не набор полей:
 
-* ``body_stem_ru`` — RU-анализатор: lowercase → russian stemmer → russian stopword;
-* ``body_stem_en`` — EN-анализатор: lowercase → english stemmer → english stopword;
-* ``body_identifier`` — identifier-профиль: whitespace-токенизация **без** lowercase
-  и стемминга, поэтому точные идентификаторы (``API-2024_X``) различают регистр и
-  сохраняют пунктуацию/подчёркивания;
-* ``body_ngram`` — ngram-профиль: символьные n-граммы (``Tokenizer.ngram``,
-  ``min_gram=3``, ``max_gram=3``) по lowercase-тексту, для fuzzy/подстрочного
-  совпадения по фрагменту идентификатора (``"2024"`` находит ``API-2024_X``).
+* ``"stemmed"`` (по умолчанию, RU/EN) — ``lowercase`` → ``stemmer(russian)`` →
+  ``stemmer(english)`` → ``stopword(russian)`` → ``stopword(english)``. Цепочка двух
+  стеммеров — не «два языка в одном токене»: snowball-стеммеры работают в своём
+  алфавите, поэтому кириллический токен проходит русский стеммер и не меняется
+  английским, латинский — наоборот. Это то же сближение форм, что раньше давали два
+  отдельных поля;
+* ``"identifier"`` (псевдоним ``"raw"``) — ``whitespace`` без lowercase и стемминга:
+  точные идентификаторы (``API-2024_X``) различают регистр и сохраняют пунктуацию;
+* ``"ngram"`` — символьные триграммы (``Tokenizer.ngram``, ``min_gram=3``,
+  ``max_gram=3``) по lowercase-тексту, для подстрочного совпадения по фрагменту
+  идентификатора (``"2024"`` находит ``API-2024_X``).
 
-Профиль выбирается параметром ``profile`` конструктора: ``"stemmed"`` (по умолчанию,
-RU/EN), ``"identifier"`` (псевдоним ``"raw"``) либо ``"ngram"``. Методы
-:meth:`search_identifier`/:meth:`search_ngram` позволяют выполнить поиск по
-соответствующему профилю независимо от выбранного при конструировании.
+**Почему одно поле (замер, а не вкус).** До C8 схема держала **четыре** текстовых поля
+с одним и тем же текстом (``body_stem_ru``, ``body_stem_en``, ``body_identifier``,
+``body_ngram``), чтобы один индекс отвечал на все профили сразу. Прогон запрашивает
+только ``stemmed``: ``wiring.seed_lexical_index`` строит ``TantivyLexicalIndex()`` без
+профиля, а ``search_identifier``/``search_ngram`` в ``core/`` не вызываются ни разу.
+То есть три поля из четырёх платились работой анализаторов и объёмом индекса и не
+читались. Замер на корпусе прогона ``ru-pg-dbms-3edf2b06097c`` (9398 чанков, 7.2 МБ
+текста), одна машина, один процесс, по 3 сборки на схему:
+
+==================  ============================  ================
+схема               объём индекса (устоявшийся)   сборка, медиана
+==================  ============================  ================
+4 поля (до C8)      33.60 МБ (32.0 MiB)           1.10 с
+1 поле (после C8)   3.66 МБ (3.49 MiB)            0.25 с
+==================  ============================  ================
+
+Пик RSS процесса сборки: 295 → 151 MiB. Объём мерян через 5 с после ``commit``:
+движок сливает сегменты в фоновых потоках, и «сразу после сборки» даёт нестабильные
+25.1 МБ против 2.12 МБ (устоявшееся значение совпадает на +5 с и +20 с).
+
+**Что это меняет в выдаче (измерено, а не предположено).** Ранжирование при
+``lang=None`` (а именно так зовёт ``pipeline.retrieve`` из ``evaluate``: все три вызова
+``retrieve_for_cell`` — два в ``evaluate``, один в ``evaluator_benchmark`` — не передают
+``lang``) раньше складывало баллы **двух** полей с
+одним текстом: тот же термин учитывался дважды, а русские стоп-слова через английский
+фильтр оставались термами — «и» индексировалось как обычный токен в 3981 чанке из 9398
+(42 % корпуса). На 14 пробных запросах корпуса top-10 при ``lang=None``: средний
+Jaccard 0.56, при ``lang="ru"``/``"en"`` — 0.94 и совпадение множеств в 10 случаях из
+14. То есть смена схемы — **не переупаковка**: при ``lang=None`` выдача меняется, и это
+исправление двойного счёта, а не регрессия.
+
+**Провенанс (разрыв, названный явно).** Схема лексического индекса **не входит** ни в
+``partition_build_id``, ни в ``index_build_id``: туда идёт ``lexical_engine_version``
+(``tantivy-<ver>``, версия движка), а не состав полей. Поэтому смена схемы не двигает
+``run_id``/``pb_``/``cb_`` — это тот же класс, что «геометрия чанка вне контракта»
+(C3), и решение о версионной границе принимает владелец, а не этот модуль.
+
+**Цена решения, названная явно.** Профили больше **не сосуществуют** в одной сборке:
+``identifier``/``ngram`` доступны только как явно построенный индекс с этим профилем.
+Кросс-профильный поиск (``search_identifier``/``search_ngram`` по стенмленному индексу)
+убран: именно он и требовал держать все четыре поля сразу. Профиль — это выбор
+**анализа**, а не выбор поля в готовом индексе.
+
+**Язык запроса.** Языковая ось больше не делит индекс на поля: единственный анализатор
+применяет оба стеммера, поэтому ``lang`` не сужает выдачу (параметр принимается ради
+контракта ``LexicalIndexPort`` и остаётся осью запроса в ``pipeline.retrieve``). Разница
+с прежним поведением односторонняя: латинские словоформы теперь сближаются и в
+«русском» запросе, потому что латинский токен документа анализируется английским
+стеммером. Языкового firewall порт и не обещал (см. ниже).
+
+**Время жизни индекса — процесс прогона (объявлено, C8).** Индекс строится в
+временном каталоге (``tempfile.TemporaryDirectory``, префикс ``cohound-tantivy-``) и
+удаляется в :meth:`TantivyLexicalIndex.close` (или GC); персиста нет, каждый прогон
+пересобирает индекс из персистентных чанков сборки. Это решение, а не недосмотр:
+источник чанков уже персистентен (``corpus_chunks``/партиции ``index_store/``), а
+персист лексического индекса потребовал бы версии схемы индекса и миграции при каждой
+смене профиля или движка — при цене 0.25 с на 9398 чанков хранение и инвалидация
+дороже пересборки. Каталог виден оператору как ``cohound-tantivy-*`` в ``$TMPDIR``
+на время фазы оценки.
 
 **Границы ngram-профиля (честно).** Это **не** лексический fuzzy по расстоянию
 редактирования (опечатки/Левенштейн) и не ngram-per-token: ``Tokenizer.ngram`` в
@@ -58,23 +118,66 @@ from typing import Any
 from core.ports.vector_index import RetrievedChunk
 
 __all__ = [
+    "LEXICAL_SCHEMA_VERSION",
     "LexicalChunk",
     "LexicalIndexUnavailable",
     "TantivyLexicalIndex",
+    "lexical_schema_spec",
     "tantivy_available",
     "tantivy_engine_version",
 ]
 
-#: Имена полей схемы (держатся в одном месте).
+#: Версия **схемы** лексического индекса — то, из чего получается выдача.
+#:
+#: Отдельно от ``tantivy_engine_version``: версия движка приходит из установленного
+#: wheel'а (наблюдаемая, хост-зависимая), а схема объявлена кодом. Именно поэтому схема
+#: входит в контракт (``lexical_spec``), а версия движка — нет (правило §13: хеширование
+#: наблюдаемой версии сделало бы ``run_id`` хост-зависимым).
+#:
+#: ``single-body-stem-ru-en-v1`` — C8: одно текстовое поле вместо четырёх. Профиль задаёт
+#: анализатор поля, а не набор полей. Замер на живом корпусе (9398 чанков): объём индекса
+#: 31.8 → 3.5 MiB, сборка 1.10 → 0.25 с. **Смена выдачи, а не оптимизация:** при
+#: ``lang=None`` (единственный продовый путь) прежняя схема складывала баллы двух полей с
+#: одним текстом и держала русские стоп-слова термами (средний Jaccard top-10 0.56 против
+#: 0.94 при явном языке). Значит это условие измерения и требует новой версии.
+LEXICAL_SCHEMA_VERSION = "single-body-stem-ru-en-v1"
+
+def lexical_schema_spec() -> dict[str, object]:
+    """Объявленная схема лексического индекса — значение поля контракта ``lexical_spec``.
+
+    Материал — только то, что определяет **выдачу**: состав полей и цепочка анализатора.
+    Версия движка сюда не входит (она наблюдаемая, см. ``LEXICAL_SCHEMA_VERSION``).
+    Хранимые-но-неиндексируемые поля (``chunk_id``) названы явно: их наличие тоже часть
+    схемы, а не деталь реализации.
+    """
+    return {
+        "version": LEXICAL_SCHEMA_VERSION,
+        #: Единственное индексируемое текстовое поле: выдача определяется им одним.
+        "indexed_fields": [FIELD_BODY],
+        #: Фильтр-поля (не участвуют в скоринге, но входят в схему).
+        "filter_fields": [FIELD_PRODUCT],
+        "stored_fields": [FIELD_CHUNK_ID],
+        #: Цепочка анализатора ``stemmed`` — порядок значим (lowercase до стеммеров,
+        #: стоп-слова после), поэтому перечисление, а не множество.
+        "stemmed_analyzer": [
+            "tokenizer:simple",
+            "filter:lowercase",
+            "filter:stemmer:russian",
+            "filter:stemmer:english",
+            "filter:stopword:russian",
+            "filter:stopword:english",
+        ],
+    }
+
+#: Имена полей схемы (держатся в одном месте). Текстовое поле **одно** (C8): профиль
+#: задаёт его анализатор, а не добавляет поле.
 FIELD_CHUNK_ID = "chunk_id"
 FIELD_PRODUCT = "product_id"
-FIELD_STEM_RU = "body_stem_ru"
-FIELD_STEM_EN = "body_stem_en"
-FIELD_IDENTIFIER = "body_identifier"
-FIELD_NGRAM = "body_ngram"
+FIELD_BODY = "body"
 
-_RU_TOKENIZER = "cohound_ru"
-_EN_TOKENIZER = "cohound_en"
+#: Токенайзеры профилей. Один действующий на сборку: ``identifier`` использует встроенный
+#: ``whitespace``, поэтому своих имён у него нет.
+_STEM_TOKENIZER = "cohound_stem_ru_en"
 _NGRAM_TOKENIZER = "cohound_ngram"
 
 #: Границы n-грамм ngram-профиля (символы). Фиксированы детерминированно; триграмма —
@@ -186,11 +289,14 @@ def _coerce_record(record: Any) -> LexicalChunk:
 
 
 class TantivyLexicalIndex:
-    """BM25-поиск на tantivy с RU/EN-стеммингом, identifier- и ngram-профилями (§3.2, I16/I17).
+    """BM25-поиск на tantivy: одно текстовое поле, анализатор по профилю (§3.2, I16/I17).
 
-    :param index_path: каталог индекса; ``None`` → временный каталог (авто-удаление).
-    :param profile: ``"stemmed"`` (RU/EN, по умолчанию), ``"identifier"``/``"raw"``,
-        ``"ngram"`` (символьные триграммы для подстрочного/fuzzy-совпадения).
+    :param index_path: каталог индекса; ``None`` → временный каталог (авто-удаление по
+        ``close``/GC). Время жизни индекса в прогоне — процесс (см. докстринг модуля).
+    :param profile: анализатор **единственного** текстового поля: ``"stemmed"`` (RU+EN,
+        по умолчанию), ``"identifier"``/``"raw"`` (точный токен, регистр значим),
+        ``"ngram"`` (символьные триграммы для подстрочного совпадения). Профиль — свойство
+        сборки: индекс обслуживает один профиль (C8).
 
     Атрибуты ``engine_version``/``build_id`` доступны до построения индекса;
     ``build_id`` заполняется при :meth:`index` (из параметра либо из записей).
@@ -266,10 +372,7 @@ class TantivyLexicalIndex:
                     **{
                         FIELD_CHUNK_ID: record.chunk_id,
                         FIELD_PRODUCT: record.product_id,
-                        FIELD_STEM_RU: record.text,
-                        FIELD_STEM_EN: record.text,
-                        FIELD_IDENTIFIER: record.text,
-                        FIELD_NGRAM: record.text,
+                        FIELD_BODY: record.text,
                     }
                 )
             )
@@ -295,35 +398,18 @@ class TantivyLexicalIndex:
         top_k: int,
         lang: str | None = None,
     ) -> list[RetrievedChunk]:
-        """BM25-поиск, продукт-скоупед (I17), с детерминированным tie-break (R7).
+        """BM25-поиск по профилю сборки, продукт-скоупед (I17), tie-break (R7).
 
-        :param lang: ``"ru"``/``"en"`` выбирает анализатор языка (свой стеммер/стоп-слова);
-            ``None`` ищет по обоим полям. Это не языковой firewall: стеммер чужого
-            скрипта может пропустить токен дословно.
+        :param lang: язык запроса (``"ru"``/``"en"``). Анализатор единственного поля
+            несёт **оба** стеммера, поэтому ``lang`` не сужает выдачу — параметр
+            принимается ради контракта ``LexicalIndexPort`` (ось объявлена в
+            ``pipeline.retrieve``). Это не языковой firewall: стеммер чужого скрипта
+            проходит токен дословно.
+
+        Профиль поиска — свойство **сборки** (``profile`` конструктора): кросс-профильного
+        поиска по готовому индексу нет, для другого профиля строится другой индекс (C8).
         """
-        if self.profile == "stemmed":
-            return self._search(query, product_ids, top_k, profile="stemmed", lang=lang)
-        if self.profile == "ngram":
-            return self._search(query, product_ids, top_k, profile="ngram", lang=None)
-        return self._search(query, product_ids, top_k, profile="identifier", lang=None)
-
-    def search_identifier(
-        self,
-        query: str,
-        product_ids: list[str],
-        top_k: int,
-    ) -> list[RetrievedChunk]:
-        """Поиск по identifier-профилю независимо от ``profile`` конструктора."""
-        return self._search(query, product_ids, top_k, profile="identifier", lang=None)
-
-    def search_ngram(
-        self,
-        query: str,
-        product_ids: list[str],
-        top_k: int,
-    ) -> list[RetrievedChunk]:
-        """Поиск по ngram-профилю независимо от ``profile`` конструктора."""
-        return self._search(query, product_ids, top_k, profile="ngram", lang=None)
+        return self._search(query, product_ids, top_k, lang=lang)
 
     # ------------------------------------------------------------------ #
     # Внутреннее
@@ -339,21 +425,28 @@ class TantivyLexicalIndex:
         path.mkdir(parents=True, exist_ok=True)
         return path
 
+    def _field_tokenizer(self) -> str:
+        """Токенайзер единственного текстового поля под профиль сборки (C8)."""
+        if self.profile == "identifier":
+            return "whitespace"
+        if self.profile == "ngram":
+            return _NGRAM_TOKENIZER
+        return _STEM_TOKENIZER
+
     def _build_schema(self, tantivy: Any) -> Any:
         builder = tantivy.SchemaBuilder()
         builder.add_text_field(FIELD_CHUNK_ID, stored=True, tokenizer_name="raw")
         builder.add_text_field(FIELD_PRODUCT, tokenizer_name="raw")
-        builder.add_text_field(FIELD_STEM_RU, tokenizer_name=_RU_TOKENIZER)
-        builder.add_text_field(FIELD_STEM_EN, tokenizer_name=_EN_TOKENIZER)
-        builder.add_text_field(FIELD_IDENTIFIER, tokenizer_name="whitespace")
-        builder.add_text_field(FIELD_NGRAM, tokenizer_name=_NGRAM_TOKENIZER)
+        builder.add_text_field(FIELD_BODY, tokenizer_name=self._field_tokenizer())
         return builder.build()
 
     def _open_index(self, tantivy: Any, schema: Any) -> Any:
         index = tantivy.Index(schema, path=str(self._path))
-        index.register_tokenizer(_RU_TOKENIZER, _analyzer(tantivy, "russian"))
-        index.register_tokenizer(_EN_TOKENIZER, _analyzer(tantivy, "english"))
-        index.register_tokenizer(_NGRAM_TOKENIZER, _ngram_analyzer(tantivy))
+        tokenizer = self._field_tokenizer()
+        if tokenizer == _STEM_TOKENIZER:
+            index.register_tokenizer(_STEM_TOKENIZER, _stem_analyzer(tantivy))
+        elif tokenizer == _NGRAM_TOKENIZER:
+            index.register_tokenizer(_NGRAM_TOKENIZER, _ngram_analyzer(tantivy))
         return index
 
     def _search(
@@ -362,7 +455,6 @@ class TantivyLexicalIndex:
         product_ids: Sequence[str],
         top_k: int,
         *,
-        profile: str,
         lang: str | None,
     ) -> list[RetrievedChunk]:
         if not self._built or self._searcher is None:
@@ -374,7 +466,7 @@ class TantivyLexicalIndex:
         allowed = list(dict.fromkeys(str(pid) for pid in product_ids))
         if not allowed:
             return []
-        base = self._query_for_profile(query, profile=profile, lang=lang)
+        base = self._build_query(query, lang)
         if base is None:
             return []
 
@@ -441,26 +533,25 @@ class TantivyLexicalIndex:
                 return out
             window = min(window * 2, _TIE_WINDOW_MAX)
 
-    def _query_for_profile(self, query: str, *, profile: str, lang: str | None) -> Any:
-        """Строит разобранный запрос под профиль (``None`` — пустой запрос)."""
-        if profile == "identifier":
-            return self._identifier_query(query)
-        if profile == "ngram":
-            return self._ngram_query(query)
-        return self._stemmed_query(query, lang)
+    def _build_query(self, query: str, lang: str | None) -> Any:
+        """Разобранный запрос по профилю сборки (``None`` — пустой запрос).
 
-    def _stemmed_query(self, query: str, lang: str | None) -> Any:
+        ``lang`` не меняет поле (оно одно) и не выбирает анализатор: анализатор — свойство
+        сборки, а не запроса. Языковая ось остаётся осью **запроса** в ``pipeline.retrieve``
+        и объявлена в контракте порта, поэтому параметр принимается и документируется как
+        несужающий (см. :meth:`search`).
+        """
+        del lang  # ось запроса, не ось индекса: единственный анализатор несёт оба стеммера
+        if self.profile == "identifier":
+            return self._identifier_query(query)
+        if self.profile == "ngram":
+            return self._ngram_query(query)
         if not query or not query.strip():
             return None
-        language = (lang or "").strip().lower()
-        if language == "ru":
-            fields = [FIELD_STEM_RU]
-        elif language == "en":
-            fields = [FIELD_STEM_EN]
-        else:
-            fields = [FIELD_STEM_RU, FIELD_STEM_EN]
         # lenient: невалидные фрагменты превращаются в match-nothing, а не в исключение.
-        parsed, _errors = self._index.parse_query_lenient(query, default_field_names=fields)
+        parsed, _errors = self._index.parse_query_lenient(
+            query, default_field_names=[FIELD_BODY]
+        )
         return parsed
 
     def _identifier_query(self, query: str) -> Any:
@@ -471,7 +562,7 @@ class TantivyLexicalIndex:
         clauses = [
             (
                 tantivy.Occur.Should,
-                tantivy.Query.term_query(self._schema, FIELD_IDENTIFIER, token),
+                tantivy.Query.term_query(self._schema, FIELD_BODY, token),
             )
             for token in tokens
         ]
@@ -487,7 +578,7 @@ class TantivyLexicalIndex:
         if not query or not query.strip():
             return None
         parsed, _errors = self._index.parse_query_lenient(
-            query, default_field_names=[FIELD_NGRAM]
+            query, default_field_names=[FIELD_BODY]
         )
         return parsed
 
@@ -527,13 +618,23 @@ def _derive_build_id(records: Sequence[LexicalChunk]) -> str:
     return ""
 
 
-def _analyzer(tantivy: Any, language: str) -> Any:
-    """Анализатор: lowercase → stemmer(language) → stopword(language)."""
+def _stem_analyzer(tantivy: Any) -> Any:
+    """Анализатор профиля ``stemmed``: lowercase → оба стеммера → оба набора стоп-слов.
+
+    Два стеммера в одной цепочке — не суперпозиция языков на токен: snowball-стеммер
+    ``russian`` работает с кириллицей, ``english`` — с латиницей, поэтому каждый токен
+    проходит ровно «свой» стеммер и остаётся нетронутым чужим. Это воспроизводит
+    поведение двух прежних полей (``body_stem_ru``/``body_stem_en``) в одном поле (C8),
+    сохраняя сближение словоформ в каждом языке. Порядок фильтров фиксирован: lowercase
+    до стеммеров, стоп-слова после (как было в пофайловых анализаторах).
+    """
     return (
         tantivy.TextAnalyzerBuilder(tantivy.Tokenizer.simple())
         .filter(tantivy.Filter.lowercase())
-        .filter(tantivy.Filter.stemmer(language))
-        .filter(tantivy.Filter.stopword(language))
+        .filter(tantivy.Filter.stemmer("russian"))
+        .filter(tantivy.Filter.stemmer("english"))
+        .filter(tantivy.Filter.stopword("russian"))
+        .filter(tantivy.Filter.stopword("english"))
         .build()
     )
 

@@ -83,6 +83,17 @@ class DeclaredAxesLike(Protocol):
     #: а не провенанс записи: спрятать его значило бы дать корпусу измениться без
     #: изменения ``run_id``.
     manual_artifacts_digest: str | None = None
+    #: §11.1: объявленные входы **корпуса**, не входившие в идентичность: per-URL режим
+    #: рендера (``--render-modes``) и содержимое паспортов (``--passports-dir``). Оба
+    #: определяют, какие байты станут доказательствами, поэтому это условия измерения, а
+    #: не провенанс хоста. ``--urls`` здесь **отсутствует** осознанно: он заменяет
+    #: seed-набор и уже входит в ``seeds_digest`` — второе поле на тот же материал
+    #: нарушило бы правило «одно поле — один материал».
+    render_modes_digest: str | None = None
+    passports_digest: str | None = None
+    #: C8: объявленная схема лексического индекса (состав полей + цепочка анализатора).
+    #: Меняет лексическую выдачу, значит вердикты; версия движка сюда не входит.
+    lexical_spec: dict[str, Any] | None = None
 
 
 def _declared(declared: DeclaredAxesLike | None, name: str) -> Any:
@@ -275,6 +286,11 @@ def build_execution_contract(
         # честное «не объявлено» для чистых вызовов; живой прогон передаёт обе.
         "chunking_spec": _declared(declared, "chunking_spec"),
         "evaluation_policy": _declared(declared, "evaluation_policy"),
+        # §11.1: входы корпуса. ``None`` — ось не передана (чистые вызовы): «не
+        # объявлено» остаётся отличимым от «объявлено пустое множество».
+        "render_modes_digest": _declared(declared, "render_modes_digest"),
+        "passports_digest": _declared(declared, "passports_digest"),
+        "lexical_spec": _declared(declared, "lexical_spec"),
         "extractor_stack": _declared(declared, "extractor_stack"),
         "crawl_strategy": _declared(declared, "crawl_strategy"),
         "crawl_rate_limit": _declared(declared, "crawl_rate_limit"),

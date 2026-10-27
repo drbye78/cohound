@@ -149,6 +149,13 @@ def test_declared_axes_are_deterministic(tmp_path: Path) -> None:
         "chunking_spec",
         # V3: политика повтора меняет вердикты (повтор переиздаёт запрос).
         "evaluation_policy",
+        # §11.1: объявленные входы корпуса — режим рендера и содержимое паспортов.
+        # Оба меняют доказательства, оставаясь до правки под прежним ``run_id``.
+        # ``--urls`` здесь отсутствует осознанно: он уже входит в ``seeds_digest``.
+        "render_modes_digest",
+        "passports_digest",
+        # C8: схема лексического индекса — меняет лексическую выдачу, значит вердикты.
+        "lexical_spec",
     }
 
 
@@ -937,3 +944,113 @@ def test_declared_manual_artifact_digest_is_resolver_value(
     empty = _resolve(_package(tmp_path, name="empty"))
     assert empty.manual_artifacts_digest == load_manual_artifacts(None).digest()
     assert empty.manual_artifacts_digest != axes.manual_artifacts_digest
+
+# ---------------------------------------------------------------------------
+# §11.1: объявленные входы корпуса — набор URL, режим рендера, паспорта
+# ---------------------------------------------------------------------------
+
+def _write_json(path: Path, payload: Any) -> Path:
+    path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    return path
+
+def test_corpus_urls_are_already_in_the_contract_via_seeds(tmp_path: Path) -> None:
+    """``--urls`` входит в идентичность **через** ``seeds_digest``, отдельного поля нет.
+
+    Пин против двух ошибок сразу. Первая: думать, что операторский корпусный вход не
+    учтён, и добавить второе поле на тот же материал — тогда два поля менялись бы
+    вместе, а разбор расхождения прогонов не смог бы их различить. Вторая: убрать
+    ``--urls`` из материала seed-набора, решив, что это «настройка удобства».
+
+    Проверяется наблюдаемое следствие: разные ``--urls`` дают разные ``seeds_digest``
+    (А потому и разные ``run_id``), а порядок URL внутри продукта — тоже, потому что
+    бюджет краула расходуется в порядке обхода.
+    """
+    package = _package(tmp_path)
+    first = _write_json(tmp_path / "urls_a.json", {"p1": ["https://p1.test/docs"]})
+    second = _write_json(tmp_path / "urls_b.json", {"p1": ["https://p1.test/other"]})
+    forward = _write_json(
+        tmp_path / "urls_fwd.json", {"p1": ["https://p1.test/a", "https://p1.test/b"]}
+    )
+    backward = _write_json(
+        tmp_path / "urls_bwd.json", {"p1": ["https://p1.test/b", "https://p1.test/a"]}
+    )
+
+    def _seeds_digest_of(urls: Path) -> str:
+        from core.cli.context import _load_corpus_urls
+        from core.pipeline.digests import seeds_digest
+        from core.pipeline.onboarding import load_effective_seeds
+
+        inputs = _inputs(package)
+        config, _ = load_effective_seeds(
+            str(package),
+            inputs.run.products,
+            urls_override=_load_corpus_urls(str(urls)),
+        )
+        return seeds_digest(config)
+
+    digests = [
+        _seeds_digest_of(first),
+        _seeds_digest_of(second),
+        _seeds_digest_of(forward),
+        _seeds_digest_of(backward),
+    ]
+    assert len(set(digests)) == len(digests), (
+        "каждый объявленный набор URL обязан давать свой seeds_digest"
+    )
+    # Отдельного поля на тот же материал в контракте нет.
+    assert "corpus_urls_digest" not in EXECUTION_CONTRACT_FIELDS
+    # Резолвер осей не заводит второй оси на тот же материал.
+    assert not hasattr(_resolve(package), "corpus_urls_digest")
+
+def test_render_modes_change_the_contract(tmp_path: Path) -> None:
+    """``http`` и ``browser`` дают разный текст страницы — значит другое измерение."""
+    package = _package(tmp_path)
+    http_modes = _write_json(tmp_path / "m_http.json", {"https://p1.test/": "http"})
+    browser_modes = _write_json(tmp_path / "m_browser.json", {"https://p1.test/": "browser"})
+    a = _resolve(
+        package, args=SimpleNamespace(package=str(package), render_modes=str(http_modes))
+    )
+    b = _resolve(
+        package,
+        args=SimpleNamespace(package=str(package), render_modes=str(browser_modes)),
+    )
+    assert a.render_modes_digest != b.render_modes_digest
+
+def test_passports_change_the_contract(tmp_path: Path) -> None:
+    """Правка байтов паспорта меняет контракт; переезд каталога — нет.
+
+    Паспорт даёт документы корпуса и сателлиты, то есть доказательства. ``--passports-dir``
+    указывал на другой набор файлов, не меняя ``run_id``.
+    """
+    package = _package(tmp_path)
+    products = [entry.product_id for entry in _inputs(package).cohort.entries]
+    assert products, "фикстура должна содержать продукты когорты"
+    product_id = products[0]
+
+    def _passport_dir(name: str, body: str) -> Path:
+        directory = tmp_path / name
+        (directory / product_id).mkdir(parents=True)
+        (directory / product_id / "2026-01-01.yaml").write_text(body, encoding="utf-8")
+        return directory
+
+    first = _passport_dir("pp_a", "title: Паспорт А\n")
+    second = _passport_dir("pp_b", "title: Паспорт Б\n")
+    moved = tmp_path / "pp_a_moved"
+    moved.mkdir()
+    (moved / product_id).mkdir()
+    (moved / product_id / "2026-01-01.yaml").write_text(
+        "title: Паспорт А\n", encoding="utf-8"
+    )
+
+    a = _resolve(
+        package, args=SimpleNamespace(package=str(package), passports_dir=str(first))
+    )
+    b = _resolve(
+        package, args=SimpleNamespace(package=str(package), passports_dir=str(second))
+    )
+    relocated = _resolve(
+        package, args=SimpleNamespace(package=str(package), passports_dir=str(moved))
+    )
+    assert a.passports_digest != b.passports_digest
+    # Путь — провенанс: те же байты в другом каталоге дают тот же дайджест.
+    assert a.passports_digest == relocated.passports_digest

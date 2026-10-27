@@ -16,7 +16,13 @@ from core.ports.vector_index import RetrievedChunk
 
 @runtime_checkable
 class LexicalIndexPort(Protocol):
-    """BM25-поиск по продукт-партициям. Дефолт — tantivy; baseline — in-process BM25."""
+    """BM25-поиск по продукт-партициям. Дефолт — tantivy; baseline — in-process BM25.
+
+    ``lang`` — ось **запроса**: язык запрашиваемого текста. Реализация вправе её не
+    использовать (анализатор может нести оба языка сразу — так делает tantivy-адаптер
+    после C8: одно поле, оба стеммера); порт не обещает языкового firewall и не
+    требует разделения индекса по языкам.
+    """
 
     engine_version: str
 

@@ -177,6 +177,7 @@ text/markdown/EPUB как первый класс (`adapters/extract_text.py`, `
 | `ports/lexical_index.py` | BM25 поиск | Симметрия профиля (I16) |
 | `ports/search.py` | Внешний поиск как источник контента | Логирование в `search_log` (I23) |
 | `ports/crawler.py` | Краул страниц | Возвращает сырые байты (retention) |
+| `ports/crawl_errors.py` | Таксономия сбоев краула (`CrawlError`/`CrawlUrlError`/`CrawlNotFound`/… ) | Контракт **ошибок** живёт в слое портов: адаптеры импортируют его, а не объявляют |
 | `ports/extractor.py` | HTML / PDF / Office (docx/pptx/xlsx) / plain text / markdown / EPUB → текст или markdown | `extractor_version`; семейство — `ExtractedDoc.family` |
 | `ports/chunker.py` | Текст → чанки с `heading_path` | `chunker_version` |
 | `ports/embedder.py` | Текст → вектор (батч; локальная модель) | Модель не покидает контур; `embed_model_id` |
@@ -291,7 +292,7 @@ core/
   __init__.py
   domain/      enums.py models.py invariants.py scoring.py r2.py anchors.py dictionary.py
   ports/       llm.py discovery_llm.py vector_index.py lexical_index.py search.py
-               crawler.py poller.py crawl_executor.py extractor.py container.py
+               crawler.py crawl_errors.py poller.py crawl_executor.py extractor.py container.py
                chunker.py embedder.py index_builder.py registry.py
                store.py gate_store.py (шим) state.py gateway.py types.py
   pipeline/    runner.py phases.py composition.py normalize.py lint.py plan.py

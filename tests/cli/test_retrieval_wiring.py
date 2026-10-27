@@ -447,11 +447,19 @@ def test_run_experiment_executes_hybrid_arm_with_wired_ports(tmp_path: Path) -> 
 def test_build_adapters_publishes_actual_lexical_engine(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Composition root передаёт сборщику фактический движок (§13:676, дефект ``pb``).
+    """Composition root передаёт сборщику фактический движок **и схему** (§13:676, ``pb``).
 
-    ``tantivy`` есть → ``tantivy-<ver>``; нет → пустая строка (лексического плеча нет,
-    R0/R2 пропускаются), а не «неизвестная версия» и не дефолт ``NpyIndexBuilder``.
+    ``tantivy`` есть → ``tantivy-<ver>+schema-<v>``; нет → пустая строка (лексического
+    плеча нет, R0/R2 пропускаются), а не «неизвестная версия» и не дефолт
+    ``NpyIndexBuilder``.
+
+    Почему схема входит в строку версии: ``pb_`` — **адрес сборки на диске**. Версия
+    движка одна и та же при смене схемы, поэтому без схемы два разных лексических
+    индекса жили бы под одним адресом (тот же класс дефекта, что C9 про разделители).
+    Смену ``lexical_spec`` ловит контракт (``run_id``); здесь проверяется, что **адрес**
+    тоже различается.
     """
+    from core.adapters.lexical_tantivy import LEXICAL_SCHEMA_VERSION
     if not numpy_available():
         pytest.skip("numpy не установлен (extra retrieval)")
     from core.cli import wiring
@@ -460,7 +468,9 @@ def test_build_adapters_publishes_actual_lexical_engine(
     monkeypatch.setattr(wiring, "tantivy_engine_version", lambda: "tantivy-0.26.2")
     with_tantivy = build_adapters(profile="local", index_root=tmp_path, package=PKG)
     assert with_tantivy.index_builder is not None
-    assert with_tantivy.index_builder.lexical_engine_version == "tantivy-0.26.2"
+    assert with_tantivy.index_builder.lexical_engine_version == (
+        f"tantivy-0.26.2+schema-{LEXICAL_SCHEMA_VERSION}"
+    )
 
     monkeypatch.setattr(wiring, "tantivy_available", lambda: False)
     without_tantivy = build_adapters(profile="local", index_root=tmp_path, package=PKG)
