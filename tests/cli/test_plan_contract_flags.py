@@ -1,10 +1,13 @@
-"""Контрактные флаги ретривала: ``plan`` принимает всё, что входит в ``run_id``.
+"""Флаги идентичности: ``plan`` принимает всё, что входит в ``run_id``.
 
-Измеренный дефект (класс, а не случай): ``run`` передавал ``--retrieval-profile`` и
-``--cutoff-k`` в :func:`core.pipeline.run_identity.build_execution_contract`, а ``plan`` этих
-флагов не принимал — значит при явных значениях печатал **другой** ``run_id``, чем будет у
-прогона. Инструмент, чья единственная задача — предсказать идентичность, предсказывал
-неверно.
+Измеренный дефект (класс, а не случай) найден дважды. Сначала ``run`` передавал
+``--retrieval-profile`` и ``--cutoff-k`` в
+:func:`core.pipeline.run_identity.build_execution_contract`, а ``plan`` этих флагов не
+принимал — значит при явных значениях печатал **другой** ``run_id``, чем будет у прогона.
+Затем то же обнаружилось у ``--urls`` (→ ``seeds_digest``), ``--cycle-id``/``--update``
+(→ ``cycle_id``), ``--only-failed``/``--only-product`` (→ ``run_scope``) и ``--refresh``
+(→ ``refresh_policy``): они меняли ``run_id`` у ``run`` и отсутствовали у ``plan``.
+Инструмент, чья единственная задача — предсказать идентичность, предсказывал неверно.
 
 Требования и как они проверены вызовом:
 
@@ -12,22 +15,38 @@
   читает **собранные** парсеры ``run`` и ``plan`` и сверяет форму (option strings, ``dest``,
   дефолт, тип, ``choices``, ``metavar``, help). Расхождение — падение
   (``test_contract_flag_inventory_matches_run``).
+* **читатели инвентаря не отстают.** ``contract_flag_values`` возвращает ровно материал
+  ``contract`` под именами параметров контракта, ``identity_flag_values`` — ровно остальные
+  ``dest`` (``test_contract_flag_values_names_contract_arguments``,
+  ``test_identity_flag_values_cover_inventory``). Новый материал без читателя валит второй.
 * **нет необъявленных разрывов.** Полное множество ``dest``, которые есть у ``run`` и нет у
   ``plan``, обязано совпадать с отрецензированным списком: «операционные» (не влияют на
   идентичность) и «известные разрывы» с адресом. Новый флаг ``run`` валит тест, пока его не
   отнесли к одной из групп (``test_run_only_flags_are_reviewed``).
-* **тот же ``run_id``.** ``plan --retrieval-profile X --cutoff-k N`` == ``run --dry-run`` с
-  теми же флагами (``test_plan_run_id_matches_run_with_retrieval_flags``).
-* **отсутствие флагов ничего не меняет.** Без флагов контракт обязан содержать ``null`` в
-  обоих полях — иначе «не объявлено» тихо превращалось бы в дефолт Ш6
-  (``test_plan_absent_flags_do_not_change_contract``).
-* **``plan`` ничего не пишет** — снимок пакета/``COHOUND_HOME``/``runs/`` до и после.
+* **тот же ``run_id``.** ``plan`` с флагом печатает тот же ``run_id``, что ``run --dry-run``
+  с тем же флагом — для **каждого** флага идентичности
+  (``test_plan_run_id_matches_run_with_identity_flags``), и каждое значение действительно
+  меняет ``run_id`` (``test_identity_flags_change_run_id``) — иначе паритет был бы паритетом
+  нулей.
+* **те же отказы.** ``plan`` повторяет отказ прогона на противоречивых входах
+  (``--update``+``--only-failed``, ``--only-failed``+``--only-product``): предсказание
+  «прогон, который не стартует» — тоже ложь об идентичности
+  (``test_plan_repeats_run_refusals``).
+* **``deploy_profile`` назван слагаемым.** Он в контракте (``local``/``split`` — разные
+  механизмы добычи корпуса) и обязан читаться в payload плана, а не только в хеше
+  (``test_plan_names_deploy_profile_and_identity_terms``).
+* **``plan`` ничего не пишет** — снимок пакета/``COHOUND_HOME``/``runs/`` до и после, в том
+  числе с ``--update``, который читает предыдущий цикл **без записи** в ``state.db``
+  (``test_plan_writes_nothing_with_retrieval_flags``,
+  ``test_plan_reads_previous_cycle_without_writing_state``).
 
 Офлайн: ``plan`` и ``run --dry-run`` не запускают сеть и не собирают корпус.
 """
 
 from __future__ import annotations
 
+import dataclasses
+import datetime as _dt
 import json
 from pathlib import Path
 from typing import Any
@@ -37,8 +56,11 @@ import pytest
 from core.cli.execution_axes import (
     CONTRACT_FLAG_DESTS,
     CONTRACT_FLAGS,
+    MATERIAL_CONTRACT,
+    IdentityFlags,
     contract_flag_values,
     declared_status_dict_version,
+    identity_flag_values,
     resolve_declared_axes,
 )
 from core.cli.main import EXIT_OK, EXIT_USAGE, main
@@ -72,20 +94,10 @@ _OPERATIONAL_RUN_ONLY: frozenset[str] = frozenset(
 )
 
 #: ``dest``, которые есть у ``run`` и нет у ``plan``, **и это известный разрыв**: они
-#: входят в материал ``run_id``. Здесь они названы, а не забыты: закрытие разрыва обязано
-#: убрать запись (иначе тест упадёт), а новый разрыв — добавить.
-_KNOWN_IDENTITY_GAPS: dict[str, str] = {
-    # --urls полностью заменяет seeds.yaml → seeds_digest (поле контракта!) → run_id.
-    "urls": "core/cli/commands/run.py:477-486 (seeds_override → seeds_digest)",
-    # --update/--cycle-id меняют cycle_id, а он — материал derive_run_id.
-    "update": "core/cli/commands/run.py:462-471 (resolve_cycle_id)",
-    "cycle_id": "core/cli/commands/run.py:462-471 (resolve_cycle_id)",
-    # --refresh меняет refresh_policy, а она — материал derive_run_id.
-    "refresh": "core/cli/commands/run.py:443-445 (resolve_refresh_policy)",
-    # --only-failed/--only-product меняют run_scope — материал derive_run_id.
-    "only_failed": "core/cli/commands/run.py:439-442 (resolve_run_scope)",
-    "only_product": "core/cli/commands/run.py:439-442 (resolve_run_scope)",
-}
+#: входят в материал ``run_id``. Список пуст: разрывы закрыты, и это состояние
+#: охраняется — новый разрыв обязан появиться здесь с адресом (или флаг обязан попасть
+#: в :data:`CONTRACT_FLAGS`, что лучше). Пустая запись — не «забыли», а «разрывов нет».
+_KNOWN_IDENTITY_GAPS: dict[str, str] = {}
 
 
 @pytest.fixture()
@@ -117,36 +129,78 @@ def _subparser_args(command: str) -> dict[str, Any]:
     return {action.dest: action for action in sub.choices[command]._actions}
 
 
+def _urls_file(tmp_path: Path) -> Path:
+    """``--urls``-файл фикстурного пакета (операторский вход Ш5).
+
+    Названы **оба** продукта когорты: ``--urls`` заменяет пакетный seed-набор целиком,
+    поэтому продукт без URL сделал бы предфлайт ``blocked`` (``no_seeds``) и проверка
+    паритета утонула бы в посторонней причине отказа.
+    """
+    path = tmp_path / "urls.yaml"
+    path.write_text(
+        json.dumps(
+            {
+                "p1": ["https://alt.p1.test/"],
+                "p2": ["https://alt.p2.test/"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
+def _identity_cases(tmp_path: Path) -> list[tuple[str, list[str]]]:
+    """Флаг(и) идентичности и его argv — по одной записи на материал ``run_id``."""
+    return [
+        ("urls", ["--urls", str(_urls_file(tmp_path))]),
+        ("cycle_id", ["--cycle-id", "2026-W44"]),
+        ("update", ["--update"]),
+        ("only_failed", ["--only-failed"]),
+        ("only_product", ["--only-product", "p1"]),
+        ("refresh", ["--refresh", "refresh"]),
+        ("retrieval", ["--retrieval-profile", "R1", "--cutoff-k", "7"]),
+    ]
+
+
 # ---------------------------------------------------------------------------
 # 1. Один инвентарь: форма флагов совпадает у run и plan
 # ---------------------------------------------------------------------------
 
 
 def test_contract_flag_inventory_matches_run() -> None:
-    """``plan`` и ``run`` объявляют контрактные флаги **одинаково** (иначе ``run_id`` врёт).
+    """``plan`` и ``run`` объявляют флаги идентичности **одинаково** (иначе ``run_id`` врёт).
 
-    Сравнивается не только наличие ``dest``: ``choices``/``type``/``metavar``/``help`` —
-    тоже вход. Флаг с тем же именем, но другой формой принимал бы другое значение (напр.
-    ``--cutoff-k 0`` у ``plan`` и отказ у ``run``), и идентичности разъехались бы молча.
+    Сравнивается не только наличие ``dest``: ``choices``/``type``/``metavar``/``action``/
+    ``default``/``help`` — тоже вход. Флаг с тем же именем, но другой формой принимал бы
+    другое значение (напр. ``--cutoff-k 0`` у ``plan`` и отказ у ``run``), и идентичности
+    разъехались бы молча. Булевы флаги сверяются ``nargs``: ``store_true`` — это ``0``
+    аргументов, а не «значение по умолчанию».
     """
     plan_args = _subparser_args("plan")
     run_args = _subparser_args("run")
-    assert CONTRACT_FLAG_DESTS, "инвентарь контрактных флагов пуст"
+    assert CONTRACT_FLAG_DESTS, "инвентарь флагов идентичности пуст"
     for spec in CONTRACT_FLAGS:
-        assert spec.dest in plan_args, f"plan не принимает контрактный флаг {spec.dest}"
-        assert spec.dest in run_args, f"run перестал принимать контрактный флаг {spec.dest}"
+        assert spec.dest in plan_args, f"plan не принимает флаг {spec.dest}"
+        assert spec.dest in run_args, f"run перестал принимать флаг {spec.dest}"
         for where, args in (("plan", plan_args), ("run", run_args)):
             action = args[spec.dest]
             assert action.option_strings == [spec.flag], (
                 f"{where}: option strings {action.option_strings} != [{spec.flag}]"
             )
-            assert action.default is None, f"{where}: дефолт {action.dest} не None"
+            assert action.default == spec.default, (
+                f"{where}: дефолт {action.dest} = {action.default!r}, ожидался "
+                f"{spec.default!r}"
+            )
             assert action.type is spec.type, f"{where}: тип {action.dest} разошёлся"
             assert action.choices == (
                 list(spec.choices) if spec.choices is not None else None
             ), f"{where}: choices {action.dest} разошлись"
             assert action.metavar == spec.metavar, f"{where}: metavar {action.dest} разошёлся"
             assert action.help == spec.help, f"{where}: help {action.dest} разошёлся"
+            if spec.action == "store_true":
+                # ``--update``/``--only-failed`` — переключатели: значение не принимают и
+                # по умолчанию выключены (прежнее поведение ≠ третье состояние).
+                assert action.nargs == 0, f"{where}: {action.dest} не переключатель"
         # Обе стороны читают один ``dest``: значение, поданное флагу, видно одинаково.
         assert plan_args[spec.dest] is not run_args[spec.dest]
 
@@ -157,8 +211,8 @@ def test_run_only_flags_are_reviewed() -> None:
     Это сторож того же класса дефекта с другой стороны: ``test_contract_flag_inventory_matches_run``
     ловит расхождение **известных** флагов, а здесь ловится новый флаг ``run``. Тест падает
     на любом необъявленном ``dest`` и требует решения: «операционный» (в
-    ``_OPERATIONAL_RUN_ONLY``) или «входит в идентичность» — тогда либо ``plan`` его
-    принимает, либо он назван в ``_KNOWN_IDENTITY_GAPS`` с адресом.
+    ``_OPERATIONAL_RUN_ONLY``) или «входит в идентичность» — тогда ``plan`` его принимает
+    (``CONTRACT_FLAGS``) либо он назван в ``_KNOWN_IDENTITY_GAPS`` с адресом.
 
     ``plan``-only флагов быть не должно: план не может принимать вход, которого прогон не
     знает, — такой флаг описывал бы прогон, который нельзя запустить.
@@ -183,12 +237,19 @@ def test_run_only_flags_are_reviewed() -> None:
 
 
 def test_contract_flag_values_names_contract_arguments() -> None:
-    """Чтение значений — из того же инвентаря и под именами параметров контракта.
+    """Чтение значений контракта — из инвентаря и под именами параметров контракта.
 
     ``cutoff_k`` (флаг) и ``cutoff_K`` (поле контракта) — разные имена; перепутать их
     значило бы передать в контракт ``None`` при заданном ``--cutoff-k``. Здесь проверяется
-    именно это соответствие, а не поведение ``plan`` целиком.
+    именно это соответствие, а не поведение ``plan`` целиком. Флаги иных материалов
+    (``--urls``, ``--update``, …) в этот словарь попадать не должны: их ``dest`` не являются
+    параметрами ``build_execution_contract``.
     """
+    contract_args = {
+        spec.contract_arg
+        for spec in CONTRACT_FLAGS
+        if spec.material == MATERIAL_CONTRACT
+    }
     parser = build_parser()
     args = parser.parse_args(
         [
@@ -201,13 +262,73 @@ def test_contract_flag_values_names_contract_arguments() -> None:
             "R1",
             "--cutoff-k",
             "7",
+            "--urls",
+            "u.yaml",
+            "--update",
+            "--only-failed",
+            "--refresh",
+            "refresh",
         ]
     )
     assert contract_flag_values(args) == {"retrieval_profile": "R1", "cutoff_K": 7}
 
     empty = parser.parse_args(["plan", "--run-yaml", "run.yaml", "--package", "pkg"])
     assert contract_flag_values(empty) == {"retrieval_profile": None, "cutoff_K": None}
-    assert set(contract_flag_values(empty)) == {spec.contract_arg for spec in CONTRACT_FLAGS}
+    assert set(contract_flag_values(empty)) == contract_args
+
+
+def test_identity_flag_values_cover_inventory() -> None:
+    """Читатель неконтрактных флагов знает **каждый** ``dest`` инвентаря.
+
+    ``IdentityFlags(**{spec.dest: ...})`` упал бы на неизвестном поле, но проверять это
+    падением в проде — поздно. Здесь состав читателя сверяется с инвентарём, поэтому новый
+    флаг идентичности без поля в читателе валит тест, а не ``plan`` у оператора.
+    Уникальность ``dest`` проверяется тоже: две записи на один ``dest`` молча перекрыли бы
+    друг друга в словаре.
+    """
+    non_contract = [
+        spec.dest for spec in CONTRACT_FLAGS if spec.material != MATERIAL_CONTRACT
+    ]
+    assert len(non_contract) == len(set(non_contract)), "дубли dest в инвентаре"
+    assert {field.name for field in dataclasses.fields(IdentityFlags)} == set(
+        non_contract
+    )
+
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "plan",
+            "--run-yaml",
+            "run.yaml",
+            "--package",
+            "pkg",
+            "--urls",
+            "u.yaml",
+            "--cycle-id",
+            "2026-W44",
+            "--only-product",
+            "p1",
+            "--refresh",
+            "offline",
+        ]
+    )
+    assert identity_flag_values(args) == IdentityFlags(
+        urls="u.yaml",
+        cycle_id="2026-W44",
+        update=False,
+        only_failed=False,
+        only_product="p1",
+        refresh="offline",
+    )
+    absent = parser.parse_args(["plan", "--run-yaml", "run.yaml", "--package", "pkg"])
+    assert identity_flag_values(absent) == IdentityFlags(
+        urls=None,
+        cycle_id=None,
+        update=False,
+        only_failed=False,
+        only_product=None,
+        refresh=None,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -251,28 +372,104 @@ def test_plan_run_id_matches_run_with_retrieval_flags(
     assert planned["cutoff_K"] == expected_cutoff
 
 
-def test_plan_retrieval_flags_change_run_id(
-    tmp_path: Path, home: Path, capsys: pytest.CaptureFixture[str]
+@pytest.mark.parametrize(
+    "case", ["urls", "cycle_id", "update", "only_failed", "only_product", "refresh"]
+)
+def test_plan_run_id_matches_run_with_identity_flags(
+    tmp_path: Path,
+    home: Path,
+    capsys: pytest.CaptureFixture[str],
+    case: str,
 ) -> None:
-    """Флаги **действительно** входят в ``run_id``: иначе паритет был бы паритетом нулей.
+    """Остальной материал ``run_id`` тоже предсказывается планом — по одному флагу.
 
-    Если бы обе стороны одинаково игнорировали флаги, предыдущий тест проходил бы, а
-    инструмент врал бы так же дружно, как раньше. Поэтому: каждое значение (и их пара) даёт
-    свой ``run_id``, отличный от «не объявлено».
+    ``--urls`` (``seeds_digest``), ``--cycle-id``/``--update`` (``cycle_id``),
+    ``--only-failed``/``--only-product`` (``run_scope``) и ``--refresh``
+    (``refresh_policy``) входят в ``derive_run_id`` (09 §6.2). Пока ``plan`` их не принимал,
+    он печатал ``full``/``auto``/пакетный seed-набор при объявленном ином входе — то есть
+    ``run_id`` другого прогона.
     """
     package = valid_package(tmp_path)
     common = _common(package)
-    ids: set[str] = set()
-    for flags in (
-        [],
-        ["--retrieval-profile", "R1"],
-        ["--retrieval-profile", "R2"],
-        ["--cutoff-k", "7"],
-        ["--retrieval-profile", "R1", "--cutoff-k", "7"],
-    ):
+    flags = dict(_identity_cases(tmp_path))[case]
+
+    assert main(["run", *common, "--dry-run", *flags]) == EXIT_OK
+    run_id = _payload(capsys)["run_id"]
+
+    assert main(["plan", *common, *flags]) == EXIT_OK
+    assert _payload(capsys)["run_id"] == run_id
+
+
+def test_identity_flags_change_run_id(
+    tmp_path: Path, home: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Каждое значение **действительно** входит в ``run_id`` — иначе паритет был бы пустым.
+
+    Если бы обе стороны одинаково игнорировали флаг, паритетный тест проходил бы, а
+    инструмент врал бы так же дружно, как раньше. Поэтому: базовый случай и каждый флаг
+    идентичности дают **разные** ``run_id`` (семь значений — семь идентичностей).
+    """
+    package = valid_package(tmp_path)
+    common = _common(package)
+    ids: dict[str, str] = {}
+    cases = [("base", []), *_identity_cases(tmp_path)]
+    for name, flags in cases:
         assert main(["plan", *common, *flags]) == EXIT_OK
-        ids.add(_payload(capsys)["run_id"])
-    assert len(ids) == 5
+        ids[name] = _payload(capsys)["run_id"]
+    assert len(set(ids.values())) == len(ids), f"идентичности совпали: {ids}"
+
+
+def test_identity_flags_reported_in_payload(
+    tmp_path: Path, home: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """План **называет** объявленный материал ``run_id``, а не только хеши.
+
+    ``cycle_id``/``run_scope``/``refresh_policy``/``deploy_profile`` — то, чем измеряют;
+    без них «план не увидел флаг» и «флаг не влияет» выглядят одинаково.
+    """
+    package = valid_package(tmp_path)
+    flags = dict(_identity_cases(tmp_path))["only_product"]
+    assert main(["plan", *_common(package), *flags, "--cycle-id", "2026-W44"]) == EXIT_OK
+    payload = _payload(capsys)
+    assert payload["run_scope"] == "product:p1"
+    assert payload["cycle_id"] == "2026-W44"
+    assert payload["refresh_policy"] == "auto"
+    assert payload["deploy_profile"] == "local"
+
+
+def test_plan_names_deploy_profile_from_deploy_config(
+    tmp_path: Path,
+    home: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``deploy_profile`` в контракте и в payload: ``local`` и ``split`` — разные измерения.
+
+    Профиль зон не «где запущен процесс», а какими механизмами добыт корпус (в ``split``
+    игнорируется ``document_level``, делается двойной фетч, члены контейнеров не
+    извлекаются). Поэтому он слагаемое контракта, и план обязан его печатать — иначе
+    оператор увидит смену ``run_id`` без причины.
+    """
+    package = valid_package(tmp_path)
+    common = _common(package)
+
+    assert main(["plan", *common]) == EXIT_OK
+    local = _payload(capsys)
+    assert local["deploy_profile"] == "local"
+    assert main(["run", *common, "--dry-run"]) == EXIT_OK
+    assert _payload(capsys)["run_id"] == local["run_id"]
+
+    cfg = tmp_path / "config"
+    cfg.mkdir()
+    (cfg / "deploy.yaml").write_text(
+        "profile: split\nedge:\n  base_url: https://edge.test:8443\n", encoding="utf-8"
+    )
+    assert main(["plan", *common]) == EXIT_OK
+    split = _payload(capsys)
+    assert split["deploy_profile"] == "split"
+    assert split["run_id"] != local["run_id"], "профиль зон не вошёл в run_id"
+    assert main(["run", *common, "--dry-run"]) == EXIT_OK
+    assert _payload(capsys)["run_id"] == split["run_id"]
 
 
 def test_plan_absent_flags_do_not_change_contract(
@@ -338,6 +535,87 @@ def test_plan_rejects_invalid_retrieval_values(
     assert main(["run", *_common(package), "--dry-run", *flags]) == EXIT_USAGE
 
 
+@pytest.mark.parametrize(
+    "flags",
+    [
+        # 09 §6.2: новый цикл по «только проваленному» подмножеству — неоднозначный work-set.
+        ["--update", "--only-failed"],
+        # Взаимоисключающий объём: молчаливый приоритет запрещён.
+        ["--only-failed", "--only-product", "p1"],
+    ],
+)
+def test_plan_repeats_run_refusals(
+    tmp_path: Path, home: Path, flags: list[str]
+) -> None:
+    """Противоречивый вход отвергается **одинаково**: прогон не стартует, план тоже.
+
+    Предсказать ``run_id`` прогона, который откажется стартовать, — та же ложь об
+    идентичности, что и напечатать чужой ``run_id``. Проверка вынесена в одну функцию
+    (:func:`core.pipeline.run_identity.check_update_scope`), поэтому отказ не разъедется.
+    """
+    package = valid_package(tmp_path)
+    assert main(["plan", *_common(package), *flags]) == EXIT_USAGE
+    assert main(["run", *_common(package), "--dry-run", *flags]) == EXIT_USAGE
+
+
+def test_plan_reads_previous_cycle_without_writing_state(
+    tmp_path: Path, home: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """``--update`` с прежним циклом отвергается планом, а ``state.db`` не меняется.
+
+    Прогон отвергает ``--update``, если новый цикл равен предыдущему (09 §2.4). Чтобы план
+    повторил это, ему нужен предыдущий ``cycle_id`` — и он читается **без записи**
+    (``mode=ro``), иначе ``plan`` нарушал бы собственное обещание «ничего не пишет»
+    (штатное открытие состояния применяет схему и пишет ``schema_meta``).
+    """
+    import sqlite3
+
+    package = valid_package(tmp_path)
+    today = _dt.date.today().isoformat()
+    db_path = home / "state" / package.name / "state.db"
+    db_path.parent.mkdir(parents=True)
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "CREATE TABLE run_lineage ("
+        "run_id TEXT PRIMARY KEY, package_id TEXT NOT NULL, cycle_id TEXT NOT NULL,"
+        "previous_run_id TEXT, cohort_digest TEXT NOT NULL, seeds_digest TEXT NOT NULL,"
+        "execution_contract_digest TEXT NOT NULL, change_class TEXT NOT NULL,"
+        "status TEXT NOT NULL, started_at TEXT NOT NULL, completed_at TEXT, error TEXT,"
+        "products_json TEXT, refresh_policy TEXT)"
+    )
+    conn.execute(
+        "INSERT INTO run_lineage VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (
+            "prev-run",
+            package.name,
+            today,
+            None,
+            "c",
+            "s",
+            "ec",
+            "none",
+            "complete",
+            "2026-01-01T00:00:00+00:00",
+            None,
+            None,
+            None,
+            None,
+        ),
+    )
+    conn.commit()
+    conn.close()
+    before = (db_path.stat().st_mtime_ns, db_path.stat().st_size)
+
+    # Предыдущий цикл равен today() → прогон откажет, значит и план обязан отказать.
+    assert main(["plan", *_common(package), "--update"]) == EXIT_USAGE
+    after = (db_path.stat().st_mtime_ns, db_path.stat().st_size)
+    assert after == before, "plan --update изменил state.db"
+
+    # Тот же отказ у прогона: паритет отказа проверяется отдельно от «не пишет» —
+    # ``run`` открывает состояние штатно (с миграцией), и это его право, не плана.
+    assert main(["run", *_common(package), "--dry-run", "--update"]) == EXIT_USAGE
+
+
 # ---------------------------------------------------------------------------
 # 3. plan ничего не пишет
 # ---------------------------------------------------------------------------
@@ -358,13 +636,15 @@ def _snapshot(*roots: Path) -> dict[str, tuple[int, int]]:
 def test_plan_writes_nothing_with_retrieval_flags(
     tmp_path: Path, home: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """``plan`` с контрактными флагами не создаёт ни ``runs/``, ни файлов пакета.
+    """``plan`` с флагами идентичности не создаёт ни ``runs/``, ни файлов пакета.
 
-    Приём нового входа не должен превращать предсказание идентичности в прогон: снимок
-    берётся до и после, «ничего не пишет» остаётся проверяемым свойством.
+    Приём новых входов не должен превращать предсказание идентичности в прогон: снимок
+    берётся до и после, «ничего не пишет» остаётся проверяемым свойством. Флаги взяты из
+    всех материалов сразу — ``--urls`` читает файл, но не корпус.
     """
     package = valid_package(tmp_path)
     before = _snapshot(package, home, tmp_path / "runs")
+    urls = _urls_file(tmp_path)
 
     assert (
         main(
@@ -375,6 +655,11 @@ def test_plan_writes_nothing_with_retrieval_flags(
                 "R2",
                 "--cutoff-k",
                 "7",
+                "--urls",
+                str(urls),
+                "--update",
+                "--refresh",
+                "revalidate",
             ]
         )
         == EXIT_OK

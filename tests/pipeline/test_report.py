@@ -1383,6 +1383,35 @@ def test_diff_boundary_contract_mismatch_names_contract_field() -> None:
     assert resolve_diff_change_class(prev, curr) is ChangeClass.EXECUTION_CHANGE
 
 
+def test_diff_boundary_contract_mismatch_names_deploy_profile(tmp_path: Path) -> None:
+    """``deploy_profile`` — слагаемое контракта, и ``hound diff`` его **называет**.
+
+    ``local`` и ``split`` исполняют работу в разных зонах: в ``split`` игнорируется
+    ``document_level``, делается двойной фетч и не извлекаются члены контейнеров. Значит
+    вердикты могут отличаться при одинаковом ``run.yaml`` — поле обязано быть и в
+    контракте, и в диагностике расхождения (иначе оператор видит смену ``run_id`` без
+    причины). Поле читается с манифеста (``runs.deploy_profile``), поэтому отдельного
+    геттера не требуется — это и проверяется здесь; живой ``render_diff`` подтверждает,
+    что строка доходит до отказа ``hound diff``, а не остаётся в helper'е.
+    """
+    prev = _manifest(execution_contract_digest="ec_1", deploy_profile="local")
+    curr = _manifest(execution_contract_digest="ec_2", deploy_profile="split")
+    reasons = diff_boundary_violations(prev, curr)
+    assert reasons[0] == "execution_change: execution_contract_digest: ec_1 → ec_2"
+    assert reasons[1:] == [
+        "execution_change: execution_contract_digest: deploy_profile: "
+        "'local' → 'split'"
+    ]
+    assert resolve_diff_change_class(prev, curr) is ChangeClass.EXECUTION_CHANGE
+
+    with pytest.raises(CrossCycleDiffError) as excinfo:
+        render_diff(prev, curr, [], [], tmp_path / "diff.md")
+    message = str(excinfo.value)
+    assert "deploy_profile" in message
+    assert "'local' → 'split'" in message
+    assert not (tmp_path / "diff.md").exists()
+
+
 def test_diff_boundary_contract_mismatch_names_fields_in_contract_order() -> None:
     """Несколько различающихся полей — все названы в порядке ``EXECUTION_CONTRACT_FIELDS``.
 

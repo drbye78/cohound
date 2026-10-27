@@ -13,6 +13,8 @@
   задали цикл, берётся ``today()`` (иначе retry следующего дня стал бы новым прогоном).
 * ``run_scope`` — ``full`` | ``only_failed`` | ``product:<id>``; входит в ``run_id``,
   чтобы scoped-прогон не совпал с полным и не был пропущен как resume.
+  Несовместимость ``--update`` с ``only_failed`` проверяется здесь же
+  (:func:`check_update_scope`) — одна формула на ``run`` и ``plan``.
 * ``refresh_policy`` — ``--refresh`` > ``run.yaml:refresh_policy`` > ``auto``.
 * ``change_class`` — честная классификация по предыдущему lineage: сначала состав
   когорты (expansion/reduction), затем execution contract, иначе ``none``.
@@ -39,6 +41,7 @@ __all__ = [
     "RunIdentity",
     "build_execution_contract",
     "build_run_identity",
+    "check_update_scope",
     "classify_change",
     "golden_required_for",
     "resolve_cycle_id",
@@ -151,6 +154,21 @@ def resolve_run_scope(*, only_failed: bool, only_product: str | None) -> str:
     if only_product is not None:
         return f"product:{only_product}"
     return RunScope.FULL.value
+
+
+def check_update_scope(*, update: bool, run_scope: str) -> None:
+    """``--update`` несовместим с ``only_failed`` — одна проверка на ``run`` и ``plan``.
+
+    Причина запрета — 09 §6.2: «новый цикл по уже проваленному подмножеству» не описывает
+    измерения (виден только хвост корпуса, а цикл объявляется новым целиком). Проверка
+    живёт здесь, а не в composed root, потому что ``plan`` обязан воспроизводить **отказ**
+    прогона: иначе он печатал бы ``run_id`` прогона, который не стартует, — та же ошибка
+    предсказания, что и расхождение по ``run_id``.
+
+    :raises ValueError: ``--update`` объявлен вместе с ``--only-failed``.
+    """
+    if update and run_scope == RunScope.ONLY_FAILED.value:
+        raise ValueError("--update несовместим с --only-failed (09 §6.2)")
 
 
 def resolve_refresh_policy(

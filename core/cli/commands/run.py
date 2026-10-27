@@ -82,7 +82,6 @@ from core.domain import (
     CrawlSessionStatus,
     ProductScope,
     RefreshPolicy,
-    RunScope,
 )
 from core.pipeline import GATE_PHASES, PHASES, Ports
 from core.pipeline.compute import bundle_for_run
@@ -114,6 +113,7 @@ from core.pipeline.run_identity import (
     RunIdentity,
     build_execution_contract,
     build_run_identity,
+    check_update_scope,
     resolve_cycle_id,
     resolve_refresh_policy,
     resolve_run_scope,
@@ -443,14 +443,14 @@ def run(args: argparse.Namespace) -> int:
         refresh_policy = resolve_refresh_policy(
             cli=getattr(args, "refresh", None), run_config=inputs.run
         )
+        # 09 §6.2: ``--update`` + ``--only-failed`` — неоднозначный work-set. Формула одна
+        # на ``run`` и ``plan`` (``resolve_identity``-резолверы): план обязан повторить и
+        # отказ, иначе напечатал бы ``run_id`` прогона, который не стартует.
+        check_update_scope(
+            update=bool(getattr(args, "update", False)), run_scope=run_scope
+        )
     except ValueError as exc:
         raise CliError(str(exc), code="usage", exit_code=EXIT_USAGE) from exc
-    if bool(getattr(args, "update", False)) and run_scope == RunScope.ONLY_FAILED.value:
-        raise CliError(
-            "--update несовместим с --only-failed (09 §6.2)",
-            code="usage",
-            exit_code=EXIT_USAGE,
-        )
 
     # Предыдущий lineage читается ДО вывода run_id (нужен предыдущий cycle_id для
     # проверки --update) и ДО записи текущей строки (иначе она сослалась бы на себя).

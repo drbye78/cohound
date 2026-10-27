@@ -3,10 +3,10 @@
 Вынесено из ``core.cli.main`` (P1-A). Модуль экспортирует :func:`configure`
 (регистрация аргументов подкоманды) и :func:`run` (тело команды).
 
-**Зачем плану оси краула, SERP и контрактные флаги ретривала.** ``plan`` существует ради
+**Зачем плану оси краула, SERP и все флаги идентичности.** ``plan`` существует ради
 ответа «чем я измеряю» **до** прогона: он печатает ``run_id`` и слагаемые контракта.
-Поэтому он принимает те же входы, что ``run``/``crawl``, которые входят в
-``execution_contract_digest``:
+Поэтому он принимает те же входы, что ``run``/``crawl``, чьи значения входят в
+идентичность прогона:
 
 * операторские оси краула (:data:`core.cli.execution_axes.CRAWL_AXIS_DESTS`) —
   :func:`core.cli.execution_axes.add_crawl_axis_flags`, значения через
@@ -14,13 +14,23 @@
 * ``--serp-rounds`` — :func:`core.cli.execution_axes.add_serp_rounds_flag`, значения через
   ``resolve_serp_rounds``;
 * ``--retrieval-profile``/``--cutoff-k``
-  (:data:`core.cli.execution_axes.CONTRACT_FLAGS`) — :func:`add_contract_flags`, значения в
+  (:data:`core.cli.execution_axes.CONTRACT_FLAGS`, материал ``contract``) —
+  :func:`add_contract_flags`, значения в
   ``build_execution_contract(retrieval_profile=…, cutoff_K=…)`` тем же способом, каким их
-  передаёт ``run``.
+  передаёт ``run``;
+* ``--urls``, ``--cycle-id``, ``--update``, ``--only-failed``, ``--only-product``,
+  ``--refresh`` — **тот же** инвентарь (иные материалы), значения через
+  :func:`core.cli.execution_axes.identity_flag_values` и **те же** чистые резолверы, что у
+  прогона: ``seeds_digest`` (:func:`~core.pipeline.onboarding.load_effective_seeds` с
+  ``urls_override``), ``cycle_id`` (``resolve_cycle_id``), ``run_scope``
+  (``resolve_run_scope``), ``refresh_policy`` (``resolve_refresh_policy``).
 
 Второй формулы нет: иначе напечатанный ``run_id`` не описывал бы прогон, который можно
 запустить. Паритет флагов ``run``/``plan`` закреплён тестами, читающими **собранные**
 парсеры (``tests/cli/test_plan_crawl_axes.py``, ``tests/cli/test_plan_contract_flags.py``).
+``plan`` повторяет и **отказы**, которые прогон делает на этих входах
+(``--update``+``--only-failed``, ``--only-failed``+``--only-product``, ``--update`` с
+прежним циклом): предсказание «прогон, который не стартует» — тоже ложь об идентичности.
 
 Оси, объявленные в ``run.yaml`` (``crawl.*``, ``serp.*``), план видит и без флагов — они
 приходят из ``load_inputs``. Флаг ``--dry-run`` удалён: он ничего не менял (``plan`` и так
@@ -40,18 +50,22 @@ from core.cli.context import (
     _add_common,
     _add_llm_model_flag,
     _add_llm_slot_flag,
+    _load_corpus_urls,
     _plan_payload,
+    _previous_cycle_id,
     _print_json,
     _print_plan,
 )
 from core.cli.errors import EXIT_OK, EXIT_USAGE, CliError, LintFailure
 from core.cli.execution_axes import (
     DeclaredExecutionAxes,
+    IdentityFlags,
     add_contract_flags,
     add_crawl_axis_flags,
     add_serp_rounds_flag,
     contract_flag_values,
     declared_status_dict_version,
+    identity_flag_values,
     resolve_declared_axes,
 )
 from core.cli.wiring import llm_env_notices, serp_env_notices
@@ -61,13 +75,25 @@ from core.pipeline.lint import lint_run_inputs
 from core.pipeline.normalize import load_inputs
 from core.pipeline.onboarding import load_effective_seeds
 from core.pipeline.plan import plan as build_plan
-from core.pipeline.run_identity import build_execution_contract, resolve_cycle_id
+from core.pipeline.run_identity import (
+    build_execution_contract,
+    check_update_scope,
+    resolve_cycle_id,
+    resolve_refresh_policy,
+    resolve_run_scope,
+)
 
 
 def _declared_payload(
-    declared: DeclaredExecutionAxes, contract: str, contract_flags: dict[str, Any]
+    declared: DeclaredExecutionAxes,
+    contract: str,
+    contract_flags: dict[str, Any],
+    *,
+    cycle_id: str,
+    run_scope: str,
+    refresh_policy: str,
 ) -> dict[str, Any]:
-    """Слагаемые контракта, которые план обязан назвать: «чем я измеряю».
+    """Слагаемые идентичности, которые план обязан назвать: «чем я измеряю».
 
     ``execution_contract_digest`` → ``run_id``; ``crawl_config_digest`` — свёртка
     разрешённых осей краула (app < run < site + операторские флаги), поэтому оператор
@@ -81,14 +107,25 @@ def _declared_payload(
     потому что иначе «какой профиль/вырез поехал в ``run_id``» читается только разбором
     хеша. ``None`` — флаг не объявлен: план не подставляет дефолт Ш6, иначе показывал бы
     значение, которого в измерении нет.
+
+    ``deploy_profile`` печатается рядом с прочими «чем я измеряю», потому что он —
+    **слагаемое контракта** (``local`` и ``split`` исполняют работу в разных зонах и
+    паритета между ними нет), а не провенанс хоста.
+
+    ``cycle_id``/``run_scope``/``refresh_policy`` — остальной материал ``run_id``
+    (09 §6.2): без них оператор не отличит «план не увидел флаг» от «флаг не влияет».
     """
     return {
         "execution_contract_digest": contract,
+        "deploy_profile": declared.deploy_profile,
         "crawl_config_digest": declared.crawl_config_digest,
         "serp_rounds": declared.serp_rounds,
         "serp_source": declared.serp_source,
         "retrieval_profile": contract_flags.get("retrieval_profile"),
         "cutoff_K": contract_flags.get("cutoff_K"),
+        "cycle_id": cycle_id,
+        "run_scope": run_scope,
+        "refresh_policy": refresh_policy,
     }
 
 
@@ -100,11 +137,14 @@ def _axis_lines(payload: dict[str, Any]) -> list[str]:
         return ["contract: — (run_id задан явно, оси не считались)"]
     return [
         f"contract: {digest}",
+        f"deploy: profile={payload.get('deploy_profile') or '—'}",
         f"crawl axes: digest={payload.get('crawl_config_digest') or '—'}",
         f"serp: rounds={payload.get('serp_rounds')} "
         f"(source: {payload.get('serp_source') or '—'})",
         f"retrieval: profile={payload.get('retrieval_profile') or '—'} "
         f"cutoff_K={payload.get('cutoff_K') if payload.get('cutoff_K') is not None else '—'}",
+        f"identity: cycle={payload.get('cycle_id')} scope={payload.get('run_scope')} "
+        f"refresh={payload.get('refresh_policy')}",
     ]
 
 
@@ -135,6 +175,42 @@ def run(args: argparse.Namespace) -> int:
     # ``run_id``. Читаются из единого инвентаря (``CONTRACT_FLAGS``), а не перечисляются
     # здесь: перечисление и было дефектом (``plan`` печатал чужой ``run_id``).
     contract_flags = contract_flag_values(args)
+    # 09 §6.2: остальной материал ``run_id`` — seed-набор (``--urls``), цикл
+    # (``--cycle-id``/``--update``), объём (``--only-failed``/``--only-product``) и политика
+    # наблюдения (``--refresh``). Тот же инвентарь, те же чистые резолверы, что у ``run``:
+    # вторая формула разошлась бы с прогоном молча — именно это и было измерено.
+    identity_flags: IdentityFlags = identity_flag_values(args)
+    try:
+        run_scope = resolve_run_scope(
+            only_failed=bool(identity_flags.only_failed),
+            only_product=identity_flags.only_product,
+        )
+        refresh_policy = resolve_refresh_policy(
+            cli=identity_flags.refresh, run_config=inputs.run
+        )
+        # Отказ прогона повторяется планом: иначе план печатал бы ``run_id`` прогона,
+        # который не стартует (§13 — 09 §6.2).
+        check_update_scope(update=bool(identity_flags.update), run_scope=run_scope)
+        cycle_id = resolve_cycle_id(
+            cli_cycle_id=identity_flags.cycle_id,
+            run_config=inputs.run,
+            update=bool(identity_flags.update),
+            today=_dt.date.today(),
+            # Предыдущий цикл нужен только проверкой ``--update`` и читается **без записи**
+            # (``mode=ro``): ``plan`` обещает не трогать ``state.db``.
+            previous_cycle_id=(
+                _previous_cycle_id(args) if identity_flags.update else None
+            ),
+        )
+    except ValueError as exc:
+        raise CliError(str(exc), code="usage", exit_code=EXIT_USAGE) from exc
+    # ``--urls`` заменяет пакетный seed-набор **целиком** → ``seeds_digest`` (поле
+    # контракта). Тот же загрузчик и то же значение, что увидит прогон.
+    operator_urls = (
+        _load_corpus_urls(identity_flags.urls)
+        if identity_flags.urls is not None
+        else None
+    )
     if args.run_id is not None:
         result = build_plan(inputs, run_id=args.run_id)
     else:
@@ -142,7 +218,10 @@ def run(args: argparse.Namespace) -> int:
         # иначе ``plan`` показывал бы иной run_id, чем реальный прогон.
         profiles = getattr(inputs, "domain_profiles", None) or {}
         seed_config, _ = load_effective_seeds(
-            args.package, inputs.run.products, profiles=profiles
+            args.package,
+            inputs.run.products,
+            profiles=profiles,
+            urls_override=operator_urls,
         )
         cohort = cohort_digest(
             inputs.cohort,
@@ -192,19 +271,28 @@ def run(args: argparse.Namespace) -> int:
         )
         result = build_plan(
             inputs,
-            cycle_id=resolve_cycle_id(
-                cli_cycle_id=None,
-                run_config=inputs.run,
-                update=False,
-                today=_dt.date.today(),
-            ),
+            cycle_id=cycle_id,
             cohort_digest=cohort,
             seeds_digest=seeds,
             execution_contract_digest=contract,
+            # 09 §6.2: объём и политика наблюдения — материал ``derive_run_id``. Без них
+            # ``plan`` считал бы ``full``/``auto`` при объявленных флагах и печатал иной
+            # ``run_id``, чем прогон.
+            run_scope=run_scope,
+            refresh_policy=refresh_policy.value,
         )
     payload = _plan_payload(result)
     if declared is not None and contract is not None:
-        payload.update(_declared_payload(declared, contract, contract_flags))
+        payload.update(
+            _declared_payload(
+                declared,
+                contract,
+                contract_flags,
+                cycle_id=cycle_id,
+                run_scope=run_scope,
+                refresh_policy=refresh_policy.value,
+            )
+        )
     if notices:
         payload["warnings"] = list(notices)
     if args.json:
@@ -228,8 +316,10 @@ def configure(sub: Any) -> None:
     # один инвентарь (``CRAWL_AXIS_DESTS``), а паритет флагов закреплён тестом.
     add_crawl_axis_flags(p_plan)
     add_serp_rounds_flag(p_plan)
-    # §13/I16/I20: профиль ретривала и ``cutoff_K`` — слагаемые ``run_id``; флаги порождены
-    # инвентарём ``CONTRACT_FLAGS`` (не второй список), паритет с ``run`` — в тесте.
+    # §13/I16/I20 + 09 §6.2: **весь** материал ``run_id``, который приходит флагами
+    # (контракт, seed-набор, цикл, объём, политика наблюдения); флаги порождены инвентарём
+    # ``CONTRACT_FLAGS`` (не второй список), паритет с ``run``/``crawl`` — в тесте,
+    # читающем собранные парсеры.
     add_contract_flags(p_plan)
     _add_common(p_plan)
     _add_llm_slot_flag(p_plan)

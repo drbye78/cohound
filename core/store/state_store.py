@@ -35,7 +35,48 @@ from core.ports.state import (
 )
 from core.store.state_sqlite import connect_state
 
-__all__ = ["SqliteStateStore"]
+__all__ = ["SqliteStateStore", "read_previous_cycle_id"]
+
+#: Выборка последней строки lineage пакета — **одна** формула на штатное чтение
+#: (:meth:`SqliteStateStore.previous_lineage`) и на чтение без записи
+#: (:func:`read_previous_cycle_id`). Порядок ``started_at DESC, run_id DESC`` — тот же,
+#: что у lineage: «последний» не должен означать разное в двух местах.
+_PREVIOUS_LINEAGE_SQL = (
+    "SELECT * FROM run_lineage WHERE package_id = ? "
+    "ORDER BY started_at DESC, run_id DESC LIMIT 1"
+)
+
+
+def read_previous_cycle_id(db_path: str | Path, package_id: str) -> str | None:
+    """Последний ``cycle_id`` пакета — **без записи** в ``state.db`` (``mode=ro``).
+
+    Зачем отдельная функция: штатное открытие (:func:`connect_state`) применяет схему и
+    пишет ``schema_meta.schema_version`` — идемпотентно, но это **запись**, а предсказание
+    идентичности (``hound plan``) обещает «ничего не пишет». Кроме того, открытие с
+    миграцией меняет файл состояния оператора ради ответа на один вопрос.
+
+    Читается одна колонка ``cycle_id`` (она есть с первой версии схемы, поэтому миграция не
+    нужна: читать старую БД безопасно). Отсутствующий файл — ``None`` («истории нет»), а не
+    ошибка: ``plan`` в чистом каталоге — законный режим.
+
+    Только для чтения: писать через этот путь нельзя (соединение открыто ``mode=ro``).
+    """
+    path = Path(db_path)
+    if not path.exists():
+        return None
+    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    try:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            _PREVIOUS_LINEAGE_SQL, (str(package_id),)
+        ).fetchone()
+    except sqlite3.DatabaseError:
+        # Битый/несовместимый файл состояния не должен подменять отказ прогона отказом
+        # предсказания: «история неизвестна» — честное состояние (A3), а не выдумка.
+        return None
+    finally:
+        conn.close()
+    return None if row is None else str(row["cycle_id"])
 
 #: Колонки ``product_state`` в порядке записи (кроме ``product_id`` — он ключ).
 _PRODUCT_STATE_COLUMNS = (
@@ -804,8 +845,7 @@ class SqliteStateStore:
     def previous_lineage(self, package_id: str) -> RunLineageRow | None:
         """Последняя строка lineage пакета (``None`` — истории нет)."""
         row = self._conn.execute(
-            "SELECT * FROM run_lineage WHERE package_id = ? "
-            "ORDER BY started_at DESC, run_id DESC LIMIT 1",
+            _PREVIOUS_LINEAGE_SQL,
             (package_id,),
         ).fetchone()
         return self._lineage_row(row) if row is not None else None

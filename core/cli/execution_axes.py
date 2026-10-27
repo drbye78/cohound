@@ -53,17 +53,24 @@
 применялись только при сборке фаз, поэтому прогон с другим корпусом мог жить под прежним
 ``run_id``. Список осей разъезжается молча — поэтому он назван один раз.
 
-**Инвентарь контрактных флагов ретривала — тоже один список.** :data:`CONTRACT_FLAG_DESTS`
-называет флаги, чьи значения входят в ``EXECUTION_CONTRACT_FIELDS``, но **не** входят в
-:class:`DeclaredExecutionAxes`: ``retrieval_profile`` и ``cutoff_K`` передаются в
+**Инвентарь флагов идентичности — тоже один список.** :data:`CONTRACT_FLAGS` называет
+флаги, чьи значения входят в идентичность прогона, и **материал** каждого
+(:data:`IDENTITY_MATERIALS`): значения ``retrieval_profile``/``cutoff_K`` идут в
 :func:`core.pipeline.run_identity.build_execution_contract` отдельными аргументами (так их
 передаёт ``run``), поэтому «декларированными осями» они не являются и в датакласс не
-переносятся. Одна запись инвентаря описывает и ``dest`` флага, и имя параметра контракта;
-его читают :func:`add_contract_flags` (регистрация) и :func:`contract_flag_values`
-(значения в контракт). Причина та же, что у осей краула, и она измерена: ``plan`` не
-принимал ``--retrieval-profile``/``--cutoff-k``, поэтому с этими флагами печатал **другой**
-``run_id``, чем прогон, — инструмент, чья единственная задача — предсказать идентичность,
-предсказывал неверно.
+переносятся; остальные питают другие слагаемые ``run_id`` (09 §6.2) — ``seeds_digest``
+(``--urls``), ``cycle_id`` (``--cycle-id``/``--update``), ``run_scope``
+(``--only-failed``/``--only-product``), ``refresh_policy`` (``--refresh``). Одна запись
+инвентаря описывает ``dest`` флага, форму и то, что он питает; её читают
+:func:`add_contract_flags` (регистрация), :func:`contract_flag_values` (значения в
+контракт) и :func:`identity_flag_values` (значения в прочий материал ``run_id``).
+
+Причина, по которой список назван один раз, измерена дважды. Сначала ``plan`` не принимал
+``--retrieval-profile``/``--cutoff-k`` и печатал **другой** ``run_id``, чем прогон. Затем
+то же обнаружилось у ``--urls``/``--cycle-id``/``--update``/``--only-failed``/
+``--only-product``/``--refresh``: они меняли ``run_id`` у ``run`` и отсутствовали у
+``plan``. Инструмент, чья единственная задача — предсказать идентичность до запуска,
+обязан предсказывать верно, а не «для тех флагов, которые вспомнили».
 
 Нейтрален к предметной категории (§1.3).
 """
@@ -97,6 +104,7 @@ from core.cli.wiring import (
 )
 from core.config.deploy import ENV_SERP, DeployConfig, resolve_llm_slot, resolve_serp_rounds
 from core.domain.dictionary import load_dictionary
+from core.domain.enums import RefreshPolicy
 from core.domain.models import CrawlRunConfig, canonical_rate_limit
 from core.pipeline.normalize import RunInputs
 from core.pipeline.manual_artifacts import load_manual_artifacts
@@ -110,12 +118,20 @@ __all__ = [
     "ContractFlag",
     "DeclaredExecutionAxes",
     "DOCLING_ADAPTER_FAMILY",
+    "IDENTITY_MATERIALS",
+    "IdentityFlags",
+    "MATERIAL_CONTRACT",
+    "MATERIAL_CYCLE",
+    "MATERIAL_REFRESH",
+    "MATERIAL_SCOPE",
+    "MATERIAL_SEEDS",
     "add_contract_flags",
     "add_crawl_axis_flags",
     "add_serp_rounds_flag",
     "contract_flag_values",
     "declared_status_dict_version",
     "extractor_stack_version",
+    "identity_flag_values",
     "resolve_declared_axes",
 ]
 
@@ -249,46 +265,110 @@ def add_serp_rounds_flag(parser: argparse.ArgumentParser) -> None:
     )
 
 
+#: Материал флага идентичности: **что именно** питает его значение в ``run_id`` (§13).
+#: Инвентарь (:data:`CONTRACT_FLAGS`) называет материал каждой записи, поэтому «второго
+#: списка» нет: регистрация (:func:`add_contract_flags`), чтение в контракт
+#: (:func:`contract_flag_values`), чтение в прочие слагаемые ``run_id``
+#: (:func:`identity_flag_values`) и сторож паритета в тестах читают одну запись.
+#:
+#: * :data:`MATERIAL_CONTRACT` — аргумент
+#:   :func:`core.pipeline.run_identity.build_execution_contract`
+#:   (``retrieval_profile``/``cutoff_K``);
+#: * :data:`MATERIAL_SEEDS` — ``seeds_digest`` (``--urls`` заменяет seed-набор);
+#: * :data:`MATERIAL_CYCLE` — ``cycle_id`` (``--cycle-id``/``--update``);
+#: * :data:`MATERIAL_SCOPE` — ``run_scope`` (``--only-failed``/``--only-product``);
+#: * :data:`MATERIAL_REFRESH` — ``refresh_policy`` (``--refresh``).
+MATERIAL_CONTRACT = "contract"
+MATERIAL_SEEDS = "seeds"
+MATERIAL_CYCLE = "cycle"
+MATERIAL_SCOPE = "scope"
+MATERIAL_REFRESH = "refresh"
+
+#: Допустимые материалы (закрытый список: новый материал — новая ветка чтения).
+IDENTITY_MATERIALS: tuple[str, ...] = (
+    MATERIAL_CONTRACT,
+    MATERIAL_SEEDS,
+    MATERIAL_CYCLE,
+    MATERIAL_SCOPE,
+    MATERIAL_REFRESH,
+)
+
+
 @dataclass(frozen=True)
 class ContractFlag:
-    """Одна запись инвентаря контрактных флагов (:data:`CONTRACT_FLAGS`).
+    """Одна запись инвентаря флагов идентичности (:data:`CONTRACT_FLAGS`).
 
     :param dest: имя атрибута ``args`` (то же, что ``dest`` флага);
     :param flag: option string CLI (``--retrieval-profile``);
+    :param help: help флага — **тот же**, что у ``run``/``crawl`` (паритет проверяется
+        тестом, читающим собранные парсеры);
+    :param material: что значение питает в идентичности — один из
+        :data:`IDENTITY_MATERIALS`;
     :param contract_arg: имя параметра
-        :func:`core.pipeline.run_identity.build_execution_contract`;
-    :param help: help флага — **тот же**, что у ``run`` (паритет проверяется тестом);
-    :param metavar: подпись значения в usage;
+        :func:`core.pipeline.run_identity.build_execution_contract`; ``None`` — флаг питает
+        не контракт, а иное слагаемое ``run_id`` (материал в :attr:`material`);
+    :param metavar: подпись значения в usage (``None`` — как у ``run``: без подписи);
     :param choices: допустимые значения (``None`` — свободное значение);
-    :param type: конвертер argparse (``None`` — ``str`` по умолчанию).
+    :param type: конвертер argparse (``None`` — ``str`` по умолчанию);
+    :param action: ``action`` argparse (``"store_true"`` для булевых флагов);
+    :param default: дефолт argparse. ``None`` — «не объявлено» для value-флагов,
+        ``False`` — «не включено» для булевых: прежнее поведение, при котором отсутствие
+        флага равно его выключенности, а не третьему состоянию.
+
+    Инвариант формы проверяется в :meth:`__post_init__`: материал ``contract`` обязан
+    нести ``contract_arg`` (иначе значение молча не попало бы в контракт), а любой иной
+    материал — не нести (иначе флаг читался бы как аргумент контракта, которого у
+    :func:`~core.pipeline.run_identity.build_execution_contract` нет).
     """
 
     dest: str
     flag: str
-    contract_arg: str
     help: str
-    metavar: str
+    material: str = MATERIAL_CONTRACT
+    contract_arg: str | None = None
+    metavar: str | None = None
     choices: tuple[str, ...] | None = None
     type: Any = None
+    action: str | None = None
+    default: Any = None
+
+    def __post_init__(self) -> None:
+        if self.material not in IDENTITY_MATERIALS:
+            raise ValueError(
+                f"contract flag {self.flag}: неизвестный материал {self.material!r} "
+                f"(допустимо: {IDENTITY_MATERIALS})"
+            )
+        is_contract = self.material == MATERIAL_CONTRACT
+        if is_contract != (self.contract_arg is not None):
+            raise ValueError(
+                f"contract flag {self.flag}: material={self.material!r}, "
+                f"contract_arg={self.contract_arg!r} — материал contract требует "
+                "contract_arg, иной материал его запрещает"
+            )
 
 
-#: **Единый инвентарь контрактных флагов ретривала** (§13, I16/I20).
-#: ``dest`` — имя атрибута ``args``; ``contract_arg`` — имя параметра
-#: :func:`core.pipeline.run_identity.build_execution_contract` (у ``--cutoff-k`` оно
-#: отличается: контрактное поле называется ``cutoff_K``). Потребители:
+#: **Единый инвентарь флагов идентичности** (§13, I16/I20, 09 §6.2).
+#: ``dest`` — имя атрибута ``args``; ``material`` — что значение питает; ``contract_arg``
+#: — имя параметра :func:`core.pipeline.run_identity.build_execution_contract` (у
+#: ``--cutoff-k`` оно отличается: контрактное поле называется ``cutoff_K``). Потребители:
 #:
-#: * :func:`add_contract_flags` — регистрация флагов (``plan``; ``run`` объявляет те же
-#:   флаги в ``configure``, паритет проверяется тестом, читающим собранные парсеры);
+#: * :func:`add_contract_flags` — регистрация флагов (``plan``; ``run``/``crawl``
+#:   объявляют те же флаги собственными местами регистрации, паритет проверяется тестом,
+#:   читающим собранные парсеры);
 #: * :func:`contract_flag_values` — значения в контракт (``plan``; ``run`` читает те же
-#:   ``args``-атрибуты в своём composition root).
+#:   ``args``-атрибуты в своём composition root);
+#: * :func:`identity_flag_values` — значения в прочие слагаемые ``run_id``
+#:   (``cycle_id``/``run_scope``/``refresh_policy``/``seeds_digest``).
 #:
-#: Почему это отдельный список, а не поля :class:`DeclaredExecutionAxes`: профиль и
-#: ``cutoff_K`` попадают в контракт **отдельными аргументами**
+#: Почему часть записей — не поля :class:`DeclaredExecutionAxes`: профиль/``cutoff_K``
+#: попадают в контракт **отдельными аргументами**
 #: :func:`~core.pipeline.run_identity.build_execution_contract` (так их передаёт ``run``),
-#: а не через декларированный датакласс. Переносить их в датакласс значило бы завести
-#: вторую форму разрешения рядом с той, которой уже пользуется ``run``, — ровно тот
-#: дефект, от которого этот модуль избавляется. Список один, и он же — материал теста
-#: паритета: новая ось добавляется **здесь**, и оба входа видят её сразу.
+#: а ``--cycle-id``/``--update``/``--only-failed``/``--only-product``/``--refresh``/``--urls``
+#: вообще не являются материалом контракта — они входят в ``derive_run_id``/``seeds_digest``.
+#: Переносить их в датакласс значило бы завести вторую форму разрешения рядом с той,
+#: которой уже пользуется ``run``, — ровно тот дефект, от которого этот модуль
+#: избавляется. Список один, и он же — материал теста паритета: новая ось добавляется
+#: **здесь**, и оба входа видят её сразу.
 CONTRACT_FLAGS: tuple[ContractFlag, ...] = (
     ContractFlag(
         # I16: профиль ретривала — условие измерения, а не настройка удобства.
@@ -310,6 +390,60 @@ CONTRACT_FLAGS: tuple[ContractFlag, ...] = (
         help="retrieval_cutoff_K (I20) выреза ретривала для фазы оценки; дефолт — "
         "DEFAULT_RETRIEVAL_CUTOFF_K (10)",
     ),
+    ContractFlag(
+        # ``--urls`` — полная замена пакетного seed-набора, то есть ``seeds_digest`` —
+        # поле контракта. Полагать его «операционным» значило бы дать корпусу измениться
+        # под прежним ``run_id``.
+        dest="urls",
+        flag="--urls",
+        material=MATERIAL_SEEDS,
+        help="опциональный JSON/YAML {product_id: [url, ...]} — операторский корпусный "
+        "вход Ш5; без него корпус URL пуст (doc_domains паспортов не фетчатся молча)",
+    ),
+    ContractFlag(
+        # ``cycle_id`` — слагаемое ``derive_run_id``: другой цикл = другой прогон.
+        dest="cycle_id",
+        flag="--cycle-id",
+        material=MATERIAL_CYCLE,
+        help="идентификатор цикла (ISO-дата/ISO-неделя); без --update — "
+        "run.yaml:cycle_id > run.yaml:snapshot_date",
+    ),
+    ContractFlag(
+        # ``--update`` не меняет материал напрямую, но переключает ветку резолва цикла
+        # (``today()`` вместо ``snapshot_date``), значит меняет ``cycle_id`` → ``run_id``.
+        dest="update",
+        flag="--update",
+        material=MATERIAL_CYCLE,
+        action="store_true",
+        default=False,
+        help="явно начать новый цикл: требует cycle_id, отличного от предыдущего (09 §2.4)",
+    ),
+    ContractFlag(
+        # ``only_failed``/``only_product`` — ``run_scope``, слагаемое ``run_id``: иначе
+        # scoped-прогон совпал бы с полным и был бы пропущен как resume (09 §6.2).
+        dest="only_failed",
+        flag="--only-failed",
+        material=MATERIAL_SCOPE,
+        action="store_true",
+        default=False,
+        help="только URL со статусом failed в сеансе (нет сеанса → обычный прогон)",
+    ),
+    ContractFlag(
+        dest="only_product",
+        flag="--only-product",
+        material=MATERIAL_SCOPE,
+        metavar="ID",
+        help="только указанный продукт из --urls",
+    ),
+    ContractFlag(
+        # ``refresh_policy`` — тоже слагаемое ``run_id``: политика наблюдения корпуса
+        # решает, будет ли он пере-прочитан, то есть другим ли будет измерение.
+        dest="refresh",
+        flag="--refresh",
+        material=MATERIAL_REFRESH,
+        choices=tuple(policy.value for policy in RefreshPolicy),
+        help="политика обновления корпуса: auto|revalidate|refresh|offline (дефолт auto)",
+    ),
 )
 
 #: ``dest``-ы инвентаря — то, что проверяется паритетом ``run``/``plan`` по собранным
@@ -319,24 +453,30 @@ CONTRACT_FLAG_DESTS: tuple[str, ...] = tuple(spec.dest for spec in CONTRACT_FLAG
 
 
 def add_contract_flags(parser: argparse.ArgumentParser) -> None:
-    """Регистрирует контрактные флаги ретривала (:data:`CONTRACT_FLAGS`) на парсере.
+    """Регистрирует флаги идентичности (:data:`CONTRACT_FLAGS`) на парсере.
 
     Флаги **порождены** инвентарём: ни ``option string``, ни ``dest``, ни тип/``choices``/
-    help не написаны здесь второй раз. Форма должна совпадать с ``run`` (``configure``):
-    ``plan`` обязан принимать тот же вход, иначе напечатанный ``run_id`` описывает не тот
-    прогон, который можно запустить. Расхождение ловит
+    ``metavar``/``action``/``default``, ни help не написаны здесь второй раз. Форма должна
+    совпадать с ``run``/``crawl`` (места регистрации — ``configure`` и
+    ``_add_phase4_flags``): ``plan`` обязан принимать тот же вход, иначе напечатанный
+    ``run_id`` описывает не тот прогон, который можно запустить. Расхождение ловит
     ``tests/cli/test_plan_contract_flags.py::test_contract_flag_inventory_matches_run``,
     который читает **собранные** парсеры, а не этот код.
 
-    Значения читает :func:`contract_flag_values`; ``plan`` ничего не пишет и не исполняет.
+    Значения читают :func:`contract_flag_values` (материал контракта) и
+    :func:`identity_flag_values` (прочие слагаемые ``run_id``); ``plan`` ничего не пишет
+    и не исполняет.
     """
     for spec in CONTRACT_FLAGS:
         kwargs: dict[str, Any] = {
             "dest": spec.dest,
-            "default": None,
-            "metavar": spec.metavar,
+            "default": spec.default,
             "help": spec.help,
         }
+        if spec.action is not None:
+            kwargs["action"] = spec.action
+        if spec.metavar is not None:
+            kwargs["metavar"] = spec.metavar
         if spec.choices is not None:
             kwargs["choices"] = list(spec.choices)
         if spec.type is not None:
@@ -345,19 +485,62 @@ def add_contract_flags(parser: argparse.ArgumentParser) -> None:
 
 
 def contract_flag_values(args: argparse.Namespace) -> dict[str, Any]:
-    """Значения контрактных флагов ретривала — **под имена параметров контракта**.
+    """Контрактные флаги — **под именами параметров контракта**.
 
     Возвращает ``{"retrieval_profile": ..., "cutoff_K": ...}``: словарь можно передать
     :func:`core.pipeline.run_identity.build_execution_contract` как ``**kwargs``. ``None``
     означает «флаг не объявлен» — контрактная доктрина фиксирует это как ``null``, а не
     подменяет дефолтом Ш6: ``run_id`` описывает объявленное, а не предположенное.
 
-    Читаются ровно ``dest`` из :data:`CONTRACT_FLAGS`: список флагов и их чтение — одна
-    запись, поэтому разъехаться молча они не могут.
+    Читаются ровно записи материала :data:`MATERIAL_CONTRACT`: список флагов и их чтение —
+    одна запись, поэтому разъехаться молча они не могут. Флаги иных материалов сюда **не**
+    попадают: их ``dest`` не являются параметрами ``build_execution_contract``, и такой
+    ``**kwargs`` был бы ``TypeError`` — «широкий» словарь здесь дефект, а не запас.
     """
     return {
-        spec.contract_arg: getattr(args, spec.dest, None) for spec in CONTRACT_FLAGS
+        spec.contract_arg: getattr(args, spec.dest, None)
+        for spec in CONTRACT_FLAGS
+        if spec.material == MATERIAL_CONTRACT
     }
+
+
+@dataclass(frozen=True)
+class IdentityFlags:
+    """Флаги идентичности, питающие ``run_id`` **вне** execution contract (09 §6.2).
+
+    Поля названы ``dest`` инвентаря: ``IdentityFlags(**{spec.dest: ...})`` падает
+    ``TypeError``, если в :data:`CONTRACT_FLAGS` появился флаг идентичности, а этот
+    читатель его не знает. Разъехаться молча список флагов и их чтение не могут — то же
+    свойство, что у :func:`contract_flag_values`, но для ``seeds_digest``/``cycle_id``/
+    ``run_scope``/``refresh_policy``.
+
+    ``None``/``False`` у поля означают «флаг не объявлен»: план не подставляет дефолт
+    вместо объявленного значения. Дефолты применяют те же резолверы, что у прогона
+    (:func:`core.pipeline.run_identity.resolve_cycle_id`/``resolve_run_scope``/
+    ``resolve_refresh_policy``) — второй формулы нет.
+    """
+
+    urls: str | None
+    cycle_id: str | None
+    update: bool
+    only_failed: bool
+    only_product: str | None
+    refresh: str | None
+
+
+def identity_flag_values(args: argparse.Namespace) -> IdentityFlags:
+    """Значения флагов идентичности, кроме контрактных — по ``dest`` инвентаря.
+
+    Читаются ровно записи :data:`CONTRACT_FLAGS` с материалом, отличным от
+    :data:`MATERIAL_CONTRACT` (материал контракта читает :func:`contract_flag_values`:
+    он идёт в другой аргумент и под другим именем).
+    """
+    values = {
+        spec.dest: getattr(args, spec.dest, None)
+        for spec in CONTRACT_FLAGS
+        if spec.material != MATERIAL_CONTRACT
+    }
+    return IdentityFlags(**values)
 
 
 @dataclass(frozen=True)
