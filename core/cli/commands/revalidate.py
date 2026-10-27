@@ -258,6 +258,8 @@ def run(args: argparse.Namespace) -> int:
                 product_ids=product_ids or None,
                 param_ids=param_ids or None,
                 current_build_id=current_build,
+                # V7: аудит промптов пере-оценки — тот же каталог прогона.
+                prompt_dir=Path(db_path).parent / "prompts",
             )
             payload = {
                 "ok": report.ok,

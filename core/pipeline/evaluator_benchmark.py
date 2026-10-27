@@ -62,6 +62,7 @@ from core.pipeline.evaluate import (
     evaluate_cell,
     retrieve_for_cell,
 )
+from core.pipeline.golden_status import STATE_DECLINED, GoldenStatus
 from core.pipeline.prompt import TEMPLATE_VERSION
 from core.pipeline.retrieve import DEFAULT_RRF_K, RetrievalProfile, RetrievalResult
 from core.pipeline.validate import ChunkLike
@@ -75,6 +76,7 @@ from core.util.hashing import content_hash
 
 __all__ = [
     "BENCHMARK_CONTRACT",
+    "PRECONDITION_GOLDEN_DECLINED",
     "BenchmarkContractError",
     "BenchmarkPreconditionError",
     "BenchmarkReport",
@@ -104,6 +106,14 @@ PRECONDITION_NO_INDEX_BUILD = "no_index_build"
 PRECONDITION_NO_PRODUCTS = "no_products"
 PRECONDITION_NO_CASES = "no_cases"
 
+#: Причина «эталон объявлен непригодным» (:mod:`core.pipeline.golden_status`).
+#:
+#: Отдельная причина, а не ``no_cases``: ``no_cases`` описывает **неудачу подготовки**
+#: (строки не сошлись со сборкой), а здесь подготовка не начинается — эталон отозван
+#: человеком. Смешав их, единственный инструмент измерения точности оценщика отвечал бы
+#: «нечего мерить» там, где ответ «эталон объявлен непригодным, вот кем и почему».
+PRECONDITION_GOLDEN_DECLINED = "golden_declined"
+
 class BenchmarkContractError(RuntimeError):
     """Условия измерения нарушены (не тот seed/temperature, включён веб-тул).
 
@@ -116,11 +126,21 @@ class BenchmarkPreconditionError(RuntimeError):
 
     Несёт машиночитаемую ``reason`` — вызывающий печатает явный ``skipped`` с причиной,
     а не выдумывает результат.
+
+    :param details: машинно-читаемое разложение **второго уровня** (напр. по строкам
+        golden: сколько ячеек и почему пропущено). Главная причина — ``reason``;
+        ``details`` её не заменяют и не переопределяют.
     """
 
-    def __init__(self, reason: str, message: str) -> None:
+    def __init__(
+        self,
+        reason: str,
+        message: str,
+        details: Mapping[str, Any] | None = None,
+    ) -> None:
         super().__init__(message)
         self.reason = reason
+        self.details: dict[str, Any] = dict(details or {})
 
 # ---------------------------------------------------------------------------
 # Входы измерения
@@ -282,6 +302,7 @@ def prepare_cases(
     satellites: Mapping[str, Sequence[Satellite]] | None = None,
     limit: int | None = None,
     max_queries: int = MAX_QUERIES,
+    golden_status: GoldenStatus | None = None,
 ) -> PreparedCases:
     """Готовит :class:`CellCase` из БД прогона, каталога и golden-набора.
 
@@ -299,12 +320,24 @@ def prepare_cases(
     ``build_mismatch`` (результат не из сборки прогона — I17). Дубликат golden-строки
     игнорируется с заметкой (не молча).
 
+    **Объявленный отказ эталона (P6b).** ``golden_status.state == declined`` — причина
+    отказа **эталона**, а не отсутствия пригодных ячеек: сверять не с чем по решению
+    человека, и это решение сильнее наличия файла. Поэтому подготовка не выполняет ни
+    одного ретривала и отвечает ``golden_declined`` с автором/датой/причиной из
+    объявления, а причины уровня строк (``product_not_in_build`` и т.п.) уходят в
+    ``details`` как **разложение**, а не как главная причина. Иначе инструмент,
+    измеряющий точность оценщика, отвечал бы ``no_cases`` — и объявленный отказ эталона
+    оставался бы невидимым для того, кто выбирает модель (A3).
+
     :param store: открытый стор прогона (**только чтение**).
     :param catalog: ``param_id -> CatalogRow`` из пакета прогона.
     :param product_ids: продукты сборки; ``None`` — из ``index_manifest``.
     :param build_id: сборка прогона; ``None`` — ``runs.index_build_id``/манифест.
     :param limit: ограничить число ячеек (smoke-подмножество, детерминированно по golden).
-    :raises BenchmarkPreconditionError: нет сборки/продуктов/ни одной пригодной ячейки.
+    :param golden_status: объявленное состояние эталона (:func:`read_golden_status`);
+        ``None`` — объявления нет/не читалось (прежнее поведение: golden как данные).
+    :raises BenchmarkPreconditionError: нет сборки/продуктов, эталон объявлен
+        непригодным (``golden_declined``) либо нет ни одной пригодной ячейки.
     """
     manifest = store.read_manifest(run_id)
     ref = store.read_run_index_ref(run_id) if hasattr(store, "read_run_index_ref") else None
@@ -321,6 +354,11 @@ def prepare_cases(
         )
 
     notes: list[str] = []
+    # P6b: отказ эталона — решение человека, и оно сильнее наличия файла. Ретривал при
+    # отказе не выполняется вовсе: тратить срез на отозванный набор значило бы выдать его
+    # за действующий. Разложение по строкам всё равно считается (оно дешёвое) — но как
+    # **второй** уровень причины, а не как главная.
+    declined = golden_status is not None and golden_status.state == STATE_DECLINED
     profile_raw, profile_fixed = _manifest_setting(
         manifest, "retrieval_profile", DEFAULT_RETRIEVAL_PROFILE.value
     )
@@ -408,6 +446,10 @@ def prepare_cases(
         if not has_chunks.get(row.product_id, False):
             skipped[cell_id] = "no_chunks"
             continue
+        if declined:
+            # Строка сама по себе годна — непригоден эталон целиком (P6b).
+            skipped[cell_id] = PRECONDITION_GOLDEN_DECLINED
+            continue
         try:
             result = retrieve_for_cell(
                 param,
@@ -449,6 +491,8 @@ def prepare_cases(
             )
         )
 
+    if declined and golden_status is not None:
+        raise _golden_declined_error(golden_status, skipped=skipped, notes=notes)
     if not cases:
         detail = "; ".join(f"{cid}: {reason}" for cid, reason in sorted(skipped.items()))
         raise BenchmarkPreconditionError(
@@ -470,6 +514,48 @@ def prepare_cases(
         retrieval_cutoff_k=cutoff_k,
         rrf_k=rrf_k,
         notes=tuple(notes),
+    )
+
+
+def _skip_reason_counts(skipped: Mapping[str, str]) -> dict[str, int]:
+    """Сколько строк пропущено по каждой причине (машинный токен до ``':'``).
+
+    Причины уровня строк бывают составными (``chunk_read_failed: …``), но в разложении
+    считается класс: детали остаются в полной карте ``row_skips``.
+    """
+    counts: Counter[str] = Counter()
+    for reason in skipped.values():
+        counts[reason.split(":", 1)[0].strip()] += 1
+    return dict(sorted(counts.items()))
+
+
+def _golden_declined_error(
+    status: GoldenStatus,
+    *,
+    skipped: Mapping[str, str],
+    notes: Sequence[str],
+) -> BenchmarkPreconditionError:
+    """Ошибка предпосылки «эталон объявлен непригодным»: причина + разложение по строкам.
+
+    Главная причина — объявление (``golden_declined``): кто, когда и почему. Строковое
+    разложение (``product_not_in_build`` и т.п.) идёт в ``details`` и в текст сообщения
+    как **второй** уровень: оно объясняет, что ещё случилось бы с набором, но не
+    подменяет причину отказа.
+    """
+    counts = _skip_reason_counts(skipped)
+    breakdown = (
+        ", ".join(f"{reason}={count}" for reason, count in counts.items())
+        or "пригодных строк не обнаружено"
+    )
+    return BenchmarkPreconditionError(
+        PRECONDITION_GOLDEN_DECLINED,
+        f"{status.describe()}. Benchmark не выполняется: {breakdown}",
+        details={
+            "golden": status.as_dict(),
+            "row_skip_reasons": counts,
+            "row_skips": dict(sorted(skipped.items())),
+            "notes": list(notes),
+        },
     )
 
 # ---------------------------------------------------------------------------
@@ -1003,6 +1089,9 @@ def _model_metrics(
         "changed_cells": 0,
         "fraction_changed": None,
         "stable_fraction": None,
+        # База доли: без неё «changed_cells=0» неотличим от «сравнивать было нечего»
+        # (полоса неопределённости публикуется числами, а не одной долей).
+        "cells_total": 0,
     }
     if repeats >= 2:
         statuses: dict[str, list[str | None]] = {}
@@ -1015,6 +1104,7 @@ def _model_metrics(
             "changed_cells": changed,
             "fraction_changed": changed / len(statuses) if statuses else None,
             "stable_fraction": (1.0 - changed / len(statuses)) if statuses else None,
+            "cells_total": len(statuses),
         }
 
     axes = model.declared_axes()

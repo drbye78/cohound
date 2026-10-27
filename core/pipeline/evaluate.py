@@ -53,6 +53,7 @@ import json
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Literal
 
 from core.domain import (
@@ -86,7 +87,12 @@ from core.pipeline.precedence import (
     collect_protected_cells,
     resolve_precedence,
 )
-from core.pipeline.prompt import CompiledPrompt, compile_prompt, render_queries
+from core.pipeline.prompt import (
+    CompiledPrompt,
+    PromptArchive,
+    compile_prompt,
+    render_queries,
+)
 from core.pipeline.retrieve import (
     DEFAULT_RRF_K,
     RetrievalProfile,
@@ -1830,6 +1836,7 @@ def evaluate_cell(
     extra_instructions: str = "",
     eval_cache: EvalVerdictCache | None = None,
     scope_attested_by: str | None = None,
+    prompt_archive: PromptArchive | None = None,
 ) -> EvaluationOutcome:
     """Оценивает одну ячейку Ш6 и возвращает :class:`EvaluationOutcome` (§5/§7.1).
 
@@ -1866,6 +1873,12 @@ def evaluate_cell(
     :param scope_attested_by: deprecated-алиас ``scope_acceptance`` (прежнее имя).
         Принят, чтобы вызывающие, объявляющие подпись старым именем, не ломались на
         переименовании; смысл — тот же (принятие риска, не аттестация полноты).
+    :param prompt_archive: каталог аудита исполненных промптов (``prompts/{prompt_hash}
+        .json``, V7). ``None`` ⇒ артефакт не пишется (поведение байт-в-байт прежнее).
+        Сохраняется **тот же** объект :class:`CompiledPrompt`, из которого построен
+        ``LLMRequest``, — не пере-собранный: иначе артефакт описывал бы другой вход.
+        Хит ``eval_cache`` не пишется: модель в этом прогоне не вызывалась, и промпт не
+        был исполнен (кэш ключуется текстом, см. ``eval_echo`` ниже — ключ не меняется).
 
     **Пустой срез не тратит вызов модели.** При ``chunks == ()`` промпт компилируется
     (провенанс: ``prompt_hash`` ячейки остаётся честной функцией входа), но оценщик не
@@ -1982,6 +1995,11 @@ def evaluate_cell(
                 cache_hit = True
 
     if not cache_hit:
+        # V7/§7.1: артефакт аудита — **ровно то, что уходит в модель**. Сохраняется
+        # `compiled`, из которого построен `request`, ниже по коду (не пере-сборка).
+        # Пишется один раз на ячейку независимо от числа повторов: вход у повторов тот же.
+        if prompt_archive is not None:
+            prompt_archive.record(compiled)
         for _ in range(max_retries + 1):
             try:
                 response = evaluator.complete(request)
@@ -2243,6 +2261,7 @@ def evaluate_batch(
     scope_acceptance: str | None = None,
     extra_instructions: str = "",
     eval_cache: EvalVerdictCache | None = None,
+    prompt_archive: PromptArchive | None = None,
 ) -> tuple[list[EvaluationOutcome], list[str]]:
     """Прогоняет :func:`evaluate_cell` по параметрам с изоляцией сбоев (§A.1).
 
@@ -2282,6 +2301,7 @@ def evaluate_batch(
             scope_acceptance=scope_acceptance,
             extra_instructions=extra_instructions,
             eval_cache=eval_cache,
+            prompt_archive=prompt_archive,
         )
 
     return run_isolated(params, _one)
@@ -2302,6 +2322,7 @@ def evaluate_phase(
     eval_cache: EvalVerdictCache | None = None,
     exhaustion_facts: ExhaustionFacts | None = None,
     scope_attested_by: str | Mapping[str, str] | None = None,
+    prompt_dir: str | Path | None = None,
 ) -> PhaseResult:
     """Фаза оценки Ш6 на уровне конвейера: продукты × параметры → ретривал → оценщик.
 
@@ -2349,6 +2370,12 @@ def evaluate_phase(
         поведение модульного вызова). Факты передаёт ``phases`` — Ш6 **не** догадывается,
         что происходило в других фазах (I3/§5). Наблюдённая терминация попадает в
         **вектор охвата** каждой ``❓``-ячейки (``EvidenceScope.termination``).
+    :param prompt_dir: каталог аудита промптов ``runs/{run_id}/prompts`` (V7, §7.1).
+        ``None`` ⇒ артефакт не пишется (модульный вызов: раскладки прогона нет, а
+        выдумывать путь значило бы писать аудит мимо ``runs/{run_id}``). Каталог передаёт
+        composition root через ``phases.build_phases``; фактическое число файлов и байт
+        попадает в ``log_entries`` фазы, а сбои записи — в ``errors`` (видимо, но без
+        отнятия уже полученных вердиктов: артефакт аудита — не условие измерения).
 
     При ``ports.evaluator is None`` фаза сразу ``failed``: без оценщика Ш6 не имеет смысла,
     а молчаливый ``ok`` скрыл бы неполноту карты.
@@ -2372,6 +2399,11 @@ def evaluate_phase(
 
     cells: list[Cell] = []
     errors: list[str] = []
+    log_entries: list[Any] = []
+
+    # V7: аудит исполненных промптов. Архив живёт в фазе, а не в ячейке: путь артефакта —
+    # свойство прогона, и ячейка не должна знать раскладку ``runs/``.
+    prompt_archive = PromptArchive(Path(prompt_dir)) if prompt_dir is not None else None
 
     # Запросы пакета одинаковы для всех продуктов когорты, поэтому векторы считаются
     # **один раз до цикла оценки**: батчами и по уникальному тексту. Оценщик за
@@ -2568,6 +2600,7 @@ def evaluate_phase(
             coverage=coverage,
             scope_acceptance=accepted,
             eval_cache=eval_cache,
+            prompt_archive=prompt_archive,
         )
         cells.extend(outcome.cell for outcome in outcomes)
         errors.extend(batch_errors)
@@ -2614,7 +2647,20 @@ def evaluate_phase(
         for protocol in protocols:
             store.save_exhaustion(protocol)
 
-    return PhaseResult(status="ok", phase="evaluate", cells=cells, errors=errors)
+    if prompt_archive is not None:
+        # Наблюдение аудита промптов: число/объём — измеренный факт, аномалии записи —
+        # ошибки фазы (прогон продолжается: вердикты уже получены и не зависят от
+        # артефакта аудита).
+        log_entries.append(f"evaluate: {prompt_archive.summary()}")
+        errors.extend(prompt_archive.errors)
+
+    return PhaseResult(
+        status="ok",
+        phase="evaluate",
+        cells=cells,
+        log_entries=log_entries,
+        errors=errors,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -2943,6 +2989,7 @@ def reevaluate_stale(
     product_ids: Sequence[str] | None = None,
     param_ids: Sequence[str] | None = None,
     current_build_id: str | None = None,
+    prompt_dir: str | Path | None = None,
 ) -> RevalidationReport:
     """Пере-оценивает **только** устаревшие ячейки и снимает пометку при вердикте.
 
@@ -3028,6 +3075,11 @@ def reevaluate_stale(
 
     model_id = getattr(evaluator, "model_id", "") or _UNSPECIFIED_MODEL_ID
 
+    # V7: пере-оценка исполняет промпты тем же путём, что Ш6, поэтому её артефакт аудита
+    # лежит в том же каталоге прогона (``prompt_dir``); ``None`` — пере-оценка без аудита
+    # (модульный вызов).
+    prompt_archive = PromptArchive(Path(prompt_dir)) if prompt_dir is not None else None
+
     # Группы = условия измерения ячейки (продукт/профиль/K): векторы запросов и dense-плечо
     # считаются **на группу**, а не на всю фазу — цена пропорциональна затронутым ячейкам.
     groups: dict[tuple[str, str, int], list[Cell]] = {}
@@ -3111,6 +3163,7 @@ def reevaluate_stale(
                     coverage=coverage,
                     scope_acceptance=_accepted_risk(cell),
                     eval_cache=eval_cache,
+                    prompt_archive=prompt_archive,
                 )
             except Exception as exc:  # noqa: BLE001 — изоляция по контракту фазы
                 report.errors.append(
@@ -3168,6 +3221,10 @@ def reevaluate_stale(
         REVALIDATE_STATUS_REEVALUATED if report.reevaluated else REVALIDATE_STATUS_NOOP
     )
     report.message = _revalidation_summary(report)
+    if prompt_archive is not None:
+        # Объём аудита — наблюдённый факт в сообщении, аномалии записи — в ``errors``.
+        report.message = f"{report.message}; {prompt_archive.summary()}"
+        report.errors.extend(prompt_archive.errors)
     return report
 
 

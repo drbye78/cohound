@@ -975,6 +975,15 @@ def test_full_phase_chain_writes_report_artifacts(tmp_path: Path) -> None:
         result = phases[name](ctx)
         assert result.status == "ok", (name, result.errors)
 
+    # V7: аудит исполненных промптов лежит в `{out_dir}/{run_id}/prompts` (03 §A.2) и равен
+    # ровно тому, что ушло оценщику — иначе восстановить вход модели по артефактам нельзя.
+    prompt_files = sorted((tmp_path / RUN_ID / "prompts").glob("*.json"))
+    assert prompt_files
+    saved_texts = {
+        json.loads(path.read_text(encoding="utf-8"))["text"] for path in prompt_files
+    }
+    assert saved_texts == {call.prompt for call in ports.evaluator.calls}
+
     report = phases["report"](ctx)
     assert report.status == "ok", report.errors
     artifacts = report.log_entries[0]

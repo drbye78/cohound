@@ -36,6 +36,7 @@ from core.domain import (
 )
 from core.pipeline.evaluator_benchmark import (
     BENCHMARK_CONTRACT,
+    PRECONDITION_GOLDEN_DECLINED,
     BenchmarkContractError,
     BenchmarkPreconditionError,
     CellCase,
@@ -43,6 +44,7 @@ from core.pipeline.evaluator_benchmark import (
     prepare_cases,
     run_benchmark,
 )
+from core.pipeline.golden_status import GoldenStatus
 from core.pipeline.retrieve import RetrievalResult
 from core.ports.llm import LLMRequest, LLMResponse, TokenUsage
 from core.ports.vector_index import RetrievedChunk
@@ -563,3 +565,108 @@ def test_report_limits_are_computed() -> None:
     assert "детерминизм не измерен" in text
     assert "store=None" in text
     assert "failed" in text  # κ не вбирает failed-ячейки молча
+
+
+# ---------------------------------------------------------------------------
+# P6b: объявленный отказ эталона — главная причина, а не строка разложения
+# ---------------------------------------------------------------------------
+
+
+def _declined(reason: str = "размечен не на те продукты") -> GoldenStatus:
+    return GoldenStatus(
+        state="declined",
+        declared=True,
+        file_present=True,
+        reason=reason,
+        declined_by="analyst-name",
+        declined_at="2026-10-27",
+    )
+
+
+def test_declined_golden_is_named_before_row_reasons() -> None:
+    """``declined`` — причина отказа **эталона**, а ``product_not_in_build`` — разложение.
+
+    До правки единственный инструмент, обязанный мерить точность оценщика, отвечал
+    ``no_cases``: объявленный человеком отказ эталона растворялся в причинах уровня строк
+    и не доходил до того, кто выбирает модель (A3).
+    """
+    chunk = _chunk(TEXT_OK)
+    store = _FakeStore(products={PRODUCT: [chunk]})
+    lexical = _FakeLexicalIndex({PRODUCT: [chunk]})
+    golden = [
+        _golden("param_ok", Status.OK),
+        _golden("param_ok", Status.OK, product_id="p9"),
+    ]
+    with pytest.raises(BenchmarkPreconditionError) as exc:
+        prepare_cases(
+            store=store,
+            run_id=RUN_ID,
+            golden=golden,
+            catalog={"param_ok": _param("param_ok", "CELL_OK")},
+            lexical_index=lexical,
+            golden_status=_declined(),
+        )
+    error = exc.value
+    assert error.reason == PRECONDITION_GOLDEN_DECLINED
+    message = str(error)
+    # Автор, дата и причина — из объявления (не выдуманы и не потеряны).
+    assert "analyst-name" in message
+    assert "2026-10-27" in message
+    assert "размечен не на те продукты" in message
+    # Разложение по строкам сохранено — как второй уровень причины.
+    assert error.details["row_skip_reasons"] == {
+        "golden_declined": 1,
+        "product_not_in_build": 1,
+    }
+    assert error.details["golden"]["declined_by"] == "analyst-name"
+    # Ни одного ретривала: отозванный эталон не измеряется «понарошку».
+    assert lexical.queries == []
+
+
+def test_declined_golden_wins_even_when_rows_would_be_usable() -> None:
+    """Отказ эталона не зависит от того, сошлись ли строки со сборкой."""
+    chunk = _chunk(TEXT_OK)
+    with pytest.raises(BenchmarkPreconditionError) as exc:
+        prepare_cases(
+            store=_FakeStore(products={PRODUCT: [chunk]}),
+            run_id=RUN_ID,
+            golden=[_golden("param_ok", Status.OK)],
+            catalog={"param_ok": _param("param_ok", "CELL_OK")},
+            lexical_index=_FakeLexicalIndex({PRODUCT: [chunk]}),
+            golden_status=_declined(),
+        )
+    assert exc.value.reason == PRECONDITION_GOLDEN_DECLINED
+    assert exc.value.details["row_skip_reasons"] == {"golden_declined": 1}
+
+
+def test_present_golden_status_keeps_previous_behaviour() -> None:
+    """``state: present`` — прежнее поведение: ячейки готовятся, причин отказа нет."""
+    chunk = _chunk(TEXT_OK)
+    lexical = _FakeLexicalIndex({PRODUCT: [chunk]})
+    prepared = prepare_cases(
+        store=_FakeStore(products={PRODUCT: [chunk]}),
+        run_id=RUN_ID,
+        golden=[_golden("param_ok", Status.OK)],
+        catalog={"param_ok": _param("param_ok", "CELL_OK")},
+        lexical_index=lexical,
+        golden_status=GoldenStatus(
+            state="present", declared=True, file_present=True
+        ),
+    )
+    assert len(prepared.cases) == 1
+    assert prepared.skipped == {}
+    assert lexical.queries
+
+
+def test_absent_golden_status_keeps_previous_behaviour() -> None:
+    """Объявления нет (``golden_status=None``) — прежние причины уровня строк."""
+    with pytest.raises(BenchmarkPreconditionError) as exc:
+        prepare_cases(
+            store=_FakeStore(products={PRODUCT: []}),
+            run_id=RUN_ID,
+            golden=[_golden("param_ok", Status.OK)],
+            catalog={"param_ok": _param("param_ok", "CELL_OK")},
+            lexical_index=_FakeLexicalIndex({}),
+        )
+    assert exc.value.reason == "no_cases"
+    assert exc.value.details == {}

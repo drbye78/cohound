@@ -48,6 +48,7 @@ from core.pipeline.evaluate import (
 )
 from core.pipeline.evaluator_benchmark import (
     BENCHMARK_CONTRACT,
+    PRECONDITION_GOLDEN_DECLINED,
     BenchmarkContractError,
     BenchmarkPreconditionError,
     BenchmarkReport,
@@ -259,6 +260,7 @@ from core.pipeline.profile_attestation import (
 from core.pipeline.prompt import (
     TEMPLATE_VERSION,
     CompiledPrompt,
+    PromptArchive,
     compile_prompt,
     render_queries,
     save_prompt,
@@ -422,6 +424,7 @@ __all__ = [  # noqa: RUF022
     # prompt (T9.1, Ш6)
     "TEMPLATE_VERSION",
     "CompiledPrompt",
+    "PromptArchive",
     "compile_prompt",
     "render_queries",
     "save_prompt",
@@ -443,6 +446,7 @@ __all__ = [  # noqa: RUF022
     "validate_output",
     # evaluator benchmark (A3, Ш6) — измерение моделей оценщика
     "BENCHMARK_CONTRACT",
+    "PRECONDITION_GOLDEN_DECLINED",
     "BenchmarkContractError",
     "BenchmarkPreconditionError",
     "BenchmarkReport",

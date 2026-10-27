@@ -1171,6 +1171,10 @@ def build_phases(
                 for product_id, attestation in scope_attestations.items()
             },
             eval_cache=eval_cache,
+            # V7: аудит исполненных промптов — `runs/{run_id}/prompts/{prompt_hash}.json`
+            # (03 §A.2, 04 §B.3, 09 §14.4). Путь — из resolved-раскладки прогона
+            # (`out_dir`), а не выдуман: фаза не читает окружение.
+            prompt_dir=Path(out_dir) / plan.run_id / "prompts",
             # I3/§5: факты других фаз — только наблюдённые (см. helper).
             exhaustion_facts=_observed_exhaustion_facts(
                 ctx, plan, inputs, passports

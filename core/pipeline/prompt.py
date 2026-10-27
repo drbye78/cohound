@@ -50,7 +50,7 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import cache
 from pathlib import Path
 
@@ -62,13 +62,26 @@ from core.util.hashing import prompt_hash
 
 __all__ = [
     "ABSENCE_GUIDANCE",
+    "PROMPT_HASH_CONFLICT",
+    "PROMPT_SAVE_FAILED",
     "TEMPLATES_DIR",
     "TEMPLATE_VERSION",
     "CompiledPrompt",
+    "PromptArchive",
     "compile_prompt",
     "render_queries",
     "save_prompt",
 ]
+
+#: Машинный токен: исполненный промпт не удалось записать в каталог аудита (I/O).
+PROMPT_SAVE_FAILED = "prompt_save_failed"
+
+#: Машинный токен: файл с тем же ``prompt_hash`` уже несёт **другой** текст.
+#:
+#: Это не рутинный повтор: ``prompt_hash`` обязан адресовать содержимое, поэтому
+#: расхождение означает, что формула hash перестала покрывать вход (напр. правка
+#: шаблона без bump версии) — аудит доверять такому файлу не может.
+PROMPT_HASH_CONFLICT = "prompt_hash_conflict"
 
 #: Версия шаблона промпта оценщика. Имя файла — ``templates/{TEMPLATE_VERSION}.txt``.
 #: Смена содержимого шаблона = bump версии → новый ``prompt_hash`` → инвалидация ячеек (§13).
@@ -398,18 +411,120 @@ def render_queries(param: CatalogRow, max_queries: int = 3) -> list[str]:
     return queries[:max_queries]
 
 
+def _payload(compiled: CompiledPrompt) -> str:
+    """Детерминированный JSON-текст артефакта ``prompts/{prompt_hash}.json``.
+
+    Единственный источник формы файла: и :func:`save_prompt`, и сверка содержимого в
+    :meth:`PromptArchive.record` берут текст отсюда, иначе сравнение «тот же файл или
+    нет» зависело бы от двух разных сериализаций.
+    """
+    return json.dumps(
+        compiled.to_json(), ensure_ascii=False, indent=2, sort_keys=True
+    ) + "\n"
+
+
 def save_prompt(compiled: CompiledPrompt, out_dir: str | Path) -> Path:
     """Пишет ``out_dir/{prompt_hash}.json``; **иммутабельно** — существующий файл не трогает.
 
     Возвращает путь. Повторный вызов идемпотентен (тот же hash → тот же файл, без
     перезаписи), что защищает аудит-артефакт от мутации.
+
+    Расхождение содержимого при совпавшем ``prompt_hash`` здесь **не** диагностируется
+    (функция остаётся «пиши, если нет»): видимая диагностика — дело
+    :class:`PromptArchive`, который пишет в наблюдение прогона, а не в файл.
     """
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     path = out / f"{compiled.prompt_hash}.json"
     if not path.exists():
-        payload = json.dumps(
-            compiled.to_json(), ensure_ascii=False, indent=2, sort_keys=True
-        )
-        path.write_text(payload + "\n", encoding="utf-8")
+        path.write_text(_payload(compiled), encoding="utf-8")
     return path
+
+
+@dataclass
+class PromptArchive:
+    """Каталог аудита **исполненных** промптов: ``{dir}/{prompt_hash}.json`` (V7, §7.1).
+
+    Зачем объект, а не один вызов :func:`save_prompt`: запись артефакта аудита не имеет
+    права ни ронять фазу, ни пропадать молча. Фаза отдаёт архив в ячейки, а после цикла
+    забирает из него наблюдение — так сбой диска виден в ``PhaseResult.errors``, а
+    вердикты остаются полученными (артефакт аудита — не условие измерения).
+
+    **Стоимость.** Файл — один на ``prompt_hash``, поэтому запись дедуплицируется по
+    содержимому входа: две ячейки с одинаковым входом (те же чанки, то же правило) дают
+    один файл. Учёт (``saved``/``reused``/``bytes_written``) — наблюдённые факты, их
+    печатает фаза; оценок «сколько должно быть» архив не делает.
+    """
+
+    directory: Path
+    #: Файлов реально создано этим архивом.
+    saved: int = 0
+    #: Файлов уже было на диске (тот же адрес) — переиспользованы, не перезаписаны.
+    reused: int = 0
+    #: Байт записано этим архивом (фактический объём каталога, не прогноз).
+    bytes_written: int = 0
+    #: Видимые аномалии записи: ``prompt_save_failed`` / ``prompt_hash_conflict``.
+    errors: list[str] = field(default_factory=list)
+    #: Сколько сбоев записи уже сжато в один агрегат (чтобы не печатать 119 строк).
+    _collapsed_failures: int = field(default=0, repr=False)
+    _last_failure: str = field(default="", repr=False)
+
+    def __post_init__(self) -> None:
+        self.directory = Path(self.directory)
+
+    def record(self, compiled: CompiledPrompt) -> Path | None:
+        """Сохраняет промпт и возвращает путь; ``None`` — запись не удалась (видно в ``errors``).
+
+        Идемпотентность — content-addressed: существующий файл не перезаписывается, а его
+        текст сверяется с тем, что дал бы этот вход. Расхождение — видимая аномалия
+        :data:`PROMPT_HASH_CONFLICT`, а не тихая подмена и не падение прогона.
+        """
+        path = self.directory / f"{compiled.prompt_hash}.json"
+        expected = _payload(compiled)
+        if path.exists():
+            self.reused += 1
+            try:
+                existing = path.read_text(encoding="utf-8")
+            except OSError as exc:
+                self._fail(path, f"{type(exc).__name__}: {exc}", reading=True)
+                return None
+            if existing != expected:
+                self.errors.append(
+                    f"{PROMPT_HASH_CONFLICT}: {path} — файл с тем же prompt_hash несёт "
+                    "другой текст (не перезаписан): prompt_hash перестал адресовать вход"
+                )
+            return path
+        try:
+            path = save_prompt(compiled, self.directory)
+        except OSError as exc:
+            self._fail(path, f"{type(exc).__name__}: {exc}")
+            return None
+        self.saved += 1
+        self.bytes_written += len(expected.encode("utf-8"))
+        return path
+
+    def _fail(self, path: Path, detail: str, *, reading: bool = False) -> None:
+        """Регистрирует сбой записи, сжимая повторы (диск кончился — 119 одинаковых строк).
+
+        Сбой не пробрасывается: артефакт аудита вторичен к измерению, а ``OSError`` из
+        фазы отнял бы уже полученные вердикты. Видимость даёт агрегат в ``errors``.
+        """
+        what = "чтении" if reading else "записи"
+        self._collapsed_failures += 1
+        self._last_failure = f"{PROMPT_SAVE_FAILED}: {what} {path}: {detail}"
+        if self._collapsed_failures == 1:
+            self.errors.append(self._last_failure)
+
+    def summary(self) -> str:
+        """Сводка для ``PhaseResult.log_entries``: сколько файлов, байт, где."""
+        parts = [
+            f"промпты (аудит): {self.saved} записано, {self.reused} переиспользовано",
+            f"{self.bytes_written} байт",
+            f"каталог {self.directory}",
+        ]
+        if self._collapsed_failures > 1:
+            parts.append(
+                f"сбоев записи: {self._collapsed_failures} "
+                f"(последний: {self._last_failure})"
+            )
+        return "; ".join(parts)

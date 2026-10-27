@@ -51,6 +51,7 @@ from typing import Any
 
 from core.cli.context import (
     _add_common,
+    _concise,
     _infer_run_id,
     _load_golden_arg,
     _positive_int,
@@ -72,6 +73,7 @@ from core.domain.enums import SkipReason
 from core.pipeline import (
     BENCHMARK_CONTRACT,
     DEFAULT_PROFILES,
+    PRECONDITION_GOLDEN_DECLINED,
     BenchmarkPreconditionError,
     ModelUnderTest,
     load_retrieval_golden,
@@ -80,6 +82,7 @@ from core.pipeline import (
     run_retrieval_experiment,
 )
 from core.pipeline.evaluate import DEFAULT_RETRIEVAL_CUTOFF_K
+from core.pipeline.golden_status import GoldenStatus, read_golden_status
 from core.pipeline.retrieve import DEFAULT_RRF_K
 
 __all__ = ["configure", "run", "run_evaluator_benchmark"]
@@ -176,19 +179,26 @@ def _emit_skip(
     message: str,
     *,
     exit_code: int = EXIT_OK,
+    details: dict[str, Any] | None = None,
 ) -> int:
     """Печатает явное ``skipped`` (N3) и возвращает ``exit_code`` (по умолчанию успех).
 
     Пропуск ретривал-эксперимента — INFO (``EXIT_OK``); для benchmark отсутствие
     предпосылки (нет чанков/golden) — ненулевой код: измерение не состоялось.
+
+    ``details`` — машинно-читаемое разложение второго уровня (напр. причины пропуска по
+    строкам golden). Главная причина остаётся в ``skip_reason``: ``details`` её не
+    переопределяют и печатаются только в ``--json`` (человеку хватает ``message``).
     """
-    payload = {
+    payload: dict[str, Any] = {
         "ok": False,
         "status": "skipped",
         "run_id": run_id,
         "skip_reason": reason,
         "message": message,
     }
+    if details:
+        payload["details"] = details
     if args.json:
         _print_json(payload)
     else:
@@ -491,6 +501,31 @@ def _emit_benchmark(args: argparse.Namespace, payload: dict[str, Any]) -> None:
     lines.append(_benchmark_table(payload))
     sys.stdout.write("\n".join(lines) + "\n")
 
+def _benchmark_golden_status(args: argparse.Namespace) -> GoldenStatus | None:
+    """Объявленное состояние эталона для benchmark (P6b).
+
+    Источник — файл пакета ``sources/golden_status.yaml`` (носитель авторского входа,
+    :mod:`core.pipeline.golden_status`). Каталог пакета: явный ``--package``; без него —
+    каталог ``--golden`` (``golden.csv`` лежит в корне пакета, §4.2), иначе самая частая
+    форма вызова теряла бы объявление и снова отчитывалась бы ``no_cases``.
+
+    Битое/противоречивое объявление — **видимая** ошибка (``EXIT_USAGE``, код ``golden``):
+    трактовать его как «объявления нет» значило бы вернуть ровно ту потерю, ради которой
+    файл и заведён.
+    """
+    package_dir: Path | None = None
+    if getattr(args, "package", None):
+        package_dir = Path(str(args.package))
+    elif getattr(args, "golden", None):
+        package_dir = Path(str(args.golden)).parent
+    if package_dir is None:
+        return None
+    try:
+        return read_golden_status(package_dir)
+    except (OSError, ValueError) as exc:
+        raise CliError(_concise(exc), code="golden", exit_code=EXIT_USAGE) from exc
+
+
 def run_evaluator_benchmark(args: argparse.Namespace) -> int:
     """``hound experiment evaluator-benchmark``: измерение моделей на сценарии Ш6 (A3).
 
@@ -501,7 +536,10 @@ def run_evaluator_benchmark(args: argparse.Namespace) -> int:
 
     Код возврата: ``0`` — измерение состоялось, даже если модель плоха; ненулевой —
     только при отсутствии предпосылки (нет сборки/продуктов/чанков/golden) с видимой
-    причиной (честная деградация N3).
+    причиной (честная деградация N3). Объявленный отказ эталона
+    (``sources/golden_status.yaml: state: declined``) — отдельный исход
+    ``golden_declined`` с автором/датой/причиной и ``EXIT_USAGE``: это не сбой прибора и
+    не «всё хорошо», а отозванный человеком вход (как в ``hound golden``).
     """
     db_path = _resolve_db_path(args)
     run_id = args.run_id
@@ -544,6 +582,10 @@ def run_evaluator_benchmark(args: argparse.Namespace) -> int:
             )
 
         golden = _load_golden_arg(args.golden)
+        # P6b: объявленное состояние эталона читается из пакета, а не угадывается по
+        # `no_cases`: инструмент измерения точности обязан назвать **объявленный** отказ
+        # эталона, а не растворять его в причинах уровня строк.
+        golden_status = _benchmark_golden_status(args)
         catalog, _weights, _cohort, notes = _restore_plan_inputs(
             args, run_id, purpose="evaluator-benchmark", store=store
         )
@@ -559,10 +601,22 @@ def run_evaluator_benchmark(args: argparse.Namespace) -> int:
                 vector_index=getattr(ports, "vector_index", None),
                 embedder=getattr(ports, "embedder", None),
                 limit=args.limit,
+                golden_status=golden_status,
             )
         except BenchmarkPreconditionError as exc:
             return _emit_skip(
-                args, run_id, exc.reason, str(exc), exit_code=EXIT_ERROR
+                args,
+                run_id,
+                exc.reason,
+                str(exc),
+                # Отозванный эталон — «вход не выполним» (EXIT_USAGE), как в `hound
+                # golden`: это не сбой прибора (EXIT_ERROR) и не «всё хорошо» (EXIT_OK).
+                exit_code=(
+                    EXIT_USAGE
+                    if exc.reason == PRECONDITION_GOLDEN_DECLINED
+                    else EXIT_ERROR
+                ),
+                details=exc.details,
             )
 
         models = _build_benchmark_models(args, load_deploy_config(None).llm)

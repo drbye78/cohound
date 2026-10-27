@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import json
+import shutil
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -352,3 +353,132 @@ def test_missing_golden_is_usage_error(
     payload = json_out(capsys)
     assert code == EXIT_USAGE
     assert payload["ok"] is False
+
+# ---------------------------------------------------------------------------
+# P6b: объявленный отказ эталона виден как своя причина, а не как `no_cases`
+# ---------------------------------------------------------------------------
+
+
+def _declined_package(tmp_path: Path, *, body: str | None = None) -> Path:
+    """Копия пакета-фикстуры с объявлением ``sources/golden_status.yaml`` (P6b).
+
+    ``golden.csv`` перезаписывается двумя строками: ``p1`` есть в сборке (строка годна),
+    ``p2`` — нет (``product_not_in_build``). Так видно, что главная причина — объявление,
+    а причины уровня строк остаются разложением.
+    """
+    package = tmp_path / PKG
+    shutil.copytree(FIXTURES, package)
+    (package / "golden.csv").write_text(
+        "product_id,param_id,expected_status,expected_evidence_kind,case_class,tier,note\n"
+        "p1,param_a,✅,documentation|web,class_a,fast,примечание\n"
+        "p2,param_a,✅,documentation|web,class_a,fast,примечание\n",
+        encoding="utf-8",
+    )
+    declaration = body or (
+        "schema: golden_status/1\n"
+        "state: declined\n"
+        "reason: эталон размечен не на те продукты\n"
+        "declined_by: analyst-name\n"
+        "declined_at: '2026-10-27'\n"
+    )
+    (package / "sources" / "golden_status.yaml").write_text(declaration, encoding="utf-8")
+    return package
+
+
+def _bench_args(db: Path, package: Path, *extra: str) -> list[str]:
+    return [
+        "experiment",
+        "evaluator-benchmark",
+        "--db",
+        str(db),
+        "--run-id",
+        "run.bench",
+        "--golden",
+        str(package / "golden.csv"),
+        "--run-yaml",
+        str(package / "run.yaml"),
+        "--package",
+        str(package),
+        *extra,
+    ]
+
+
+def test_declined_golden_is_reported_as_its_own_skip(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """``skip_reason=golden_declined`` + автор/дата/причина; строки — только разложение.
+
+    До правки здесь был ``no_cases``: инструмент, который обязан мерить точность
+    оценщика, скрывал, что эталон объявлен непригодным, — и оператор читал «строки не
+    сошлись со сборкой» вместо «эталон отозван человеком».
+    """
+    db = tmp_path / "runs" / "run.bench" / "cohound.db"
+    _store(db)
+    package = _declined_package(tmp_path)
+
+    code = main(
+        _bench_args(db, package, "--model", "flag-model", "--json"),
+        ports=_ports(),
+        evaluator_generate=_generate,
+    )
+
+    payload = json_out(capsys)
+    assert code == EXIT_USAGE  # отозванный вход, не сбой прибора (EXIT_ERROR)
+    assert payload["ok"] is False
+    assert payload["status"] == "skipped"
+    assert payload["skip_reason"] == "golden_declined"
+    assert "analyst-name" in payload["message"]
+    assert "2026-10-27" in payload["message"]
+    assert "эталон размечен не на те продукты" in payload["message"]
+    details = payload["details"]
+    assert details["golden"]["declined_by"] == "analyst-name"
+    assert details["golden"]["declined_at"] == "2026-10-27"
+    # Разложение по строкам сохранено: p2 отсутствует в сборке — но это НЕ главная причина.
+    assert details["row_skip_reasons"] == {
+        "golden_declined": 1,
+        "product_not_in_build": 1,
+    }
+
+
+def test_present_declaration_measures_as_before(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """``state: present`` — поведение не меняется: измерение состоялось."""
+    db = tmp_path / "runs" / "run.bench" / "cohound.db"
+    _store(db)
+    package = _declined_package(
+        tmp_path, body="schema: golden_status/1\nstate: present\n"
+    )
+
+    code = main(
+        _bench_args(db, package, "--model", "flag-model", "--json"),
+        ports=_ports(),
+        evaluator_generate=_generate,
+    )
+
+    payload = json_out(capsys)
+    assert code == EXIT_OK
+    assert payload["status"] == "measured"
+
+
+def test_broken_declaration_is_a_visible_package_error(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Битое объявление — видимая ошибка пакета, а не «объявления нет»."""
+    db = tmp_path / "runs" / "run.bench" / "cohound.db"
+    _store(db)
+    package = _declined_package(
+        tmp_path, body="schema: golden_status/1\nstate: declined\nreason: без автора\n"
+    )
+
+    code = main(
+        _bench_args(db, package, "--model", "flag-model", "--json"),
+        ports=_ports(),
+        evaluator_generate=_generate,
+    )
+
+    payload = json_out(capsys)
+    assert code == EXIT_USAGE
+    assert payload["ok"] is False
+    assert "golden_status.yaml" in payload["message"]
+    assert "declined_by" in payload["message"]
