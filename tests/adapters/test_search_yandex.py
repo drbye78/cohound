@@ -20,6 +20,9 @@ from __future__ import annotations
 
 import base64
 import json
+import select
+import socket
+import xml.etree.ElementTree as ET
 from datetime import UTC, datetime, timedelta
 from email.utils import format_datetime
 from itertools import pairwise
@@ -344,6 +347,241 @@ def test_async_search_missing_operation_id_raises() -> None:
 def _noop_poll(url: str) -> bytes:  # pragma: no cover - не должен вызываться
     """Заглушка опроса: при отсутствии operationId поллинг не стартует."""
     raise AssertionError("опрос не должен вызываться без operationId")
+
+
+# ---------------------------------------------------------------------------
+# Тайминги (S4): ожидание измеряется, а не оценивается
+# ---------------------------------------------------------------------------
+
+
+class _Clock:
+    """Скриптованные монотонные часы: время двигают и ``sleep``, и швы.
+
+    Без этого тест доказывал бы только факт вызова паузы. С часами он доказывает
+    **величину**: «ждали 30 с» и «ждали 0.03 с» дают разные числа в наблюдении.
+    """
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+
+def test_async_timing_records_wait_magnitude_and_requests() -> None:
+    """S4: пауза вызывается, её величина и время запросов попадают в наблюдение."""
+    clock = _Clock()
+    sleeps: list[float] = []
+    polls = 0
+
+    def _post(url: str, body: dict[str, Any]) -> bytes:
+        clock.advance(0.25)  # запуск операции «стоил» 0.25 с
+        return json.dumps({"done": False, "id": "op1"}).encode()
+
+    def _poll(url: str) -> bytes:
+        nonlocal polls
+        polls += 1
+        clock.advance(0.5)  # каждый опрос «стоит» 0.5 с
+        if polls == 1:
+            return json.dumps({"done": False}).encode()
+        return json.dumps(
+            {"done": True, "response": {"rawData": _xml_two_docs()}}
+        ).encode()
+
+    def _sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        clock.advance(seconds)  # пауза длится ровно столько, сколько просят
+
+    adapter = YandexSearchAdapter(
+        http_post=_post,
+        http_poll=_poll,
+        sleep=_sleep,
+        monotonic=clock,
+        poll_interval=30.0,
+    )
+    results = adapter.search(SearchQuery(text="neutral query", limit=10))
+
+    timing = adapter.last_timing
+    assert [r.url for r in results] == [URL_A, URL_B]
+    assert sleeps == [30.0]  # (а) пауза реально вызывается
+    assert timing.measured is True
+    assert timing.wait_seconds == pytest.approx(30.0)  # (б) величина в наблюдении
+    assert timing.request_seconds == pytest.approx(1.25)  # 0.25 запуск + 2 × 0.5 опрос
+    assert timing.polls == 2
+    assert timing.from_cache is False
+
+
+def test_sync_call_reports_zero_wait_as_a_fact() -> None:
+    """S4: «ноль ожидания» — публикуемый факт (0.0), а не отсутствие поля."""
+    clock = _Clock()
+    payload = json.dumps(
+        {"results": [{"url": URL_A, "title": "Example A", "rank": 1}]}
+    ).encode()
+
+    def _post(url: str, body: dict[str, Any]) -> bytes:
+        clock.advance(0.125)
+        return payload
+
+    adapter = YandexSearchAdapter(
+        http_post=_post,
+        sleep=_noop_sleep,
+        monotonic=clock,
+        search_mode="sync",
+    )
+    adapter.search(SearchQuery(text="neutral query", limit=10))
+
+    timing = adapter.last_timing
+    assert timing.measured is True  # наблюдали, а не «не измеряли»
+    assert timing.wait_seconds == 0.0
+    assert timing.request_seconds == pytest.approx(0.125)
+    assert timing.polls == 0
+
+
+def test_timing_before_first_call_is_not_measured() -> None:
+    """«Не наблюдали» отличимо от «ждали ноль»: до вызова ``measured=False``."""
+    adapter = YandexSearchAdapter(http_post=_post_returning({"results": []}))
+
+    assert adapter.last_timing.measured is False
+    assert adapter.last_timing.wait_seconds == 0.0
+
+
+def test_failed_async_call_keeps_waited_time() -> None:
+    """Ожидание до сбоя — тоже стоимость прогона: отказ не обнуляет наблюдение."""
+    clock = _Clock()
+    polls = 0
+
+    def _post(url: str, body: dict[str, Any]) -> bytes:
+        return json.dumps({"done": False, "id": "op9"}).encode()
+
+    def _poll(url: str) -> bytes:
+        nonlocal polls
+        polls += 1
+        if polls == 1:
+            return json.dumps({"done": False}).encode()
+        return json.dumps({"done": False, "error": "provider failed"}).encode()
+
+    def _sleep(seconds: float) -> None:
+        clock.advance(seconds)
+
+    adapter = YandexSearchAdapter(
+        http_post=_post,
+        http_poll=_poll,
+        sleep=_sleep,
+        monotonic=clock,
+        poll_interval=30.0,
+    )
+    with pytest.raises(SearchError, match="provider failed"):
+        adapter.search(SearchQuery(text="neutral query"))
+
+    # 1 пауза + 2 опроса: сбоем контур не «подешевел».
+    assert adapter.last_timing.wait_seconds == pytest.approx(30.0)
+    assert adapter.last_timing.polls == 2
+    assert adapter.last_timing.measured is True
+
+
+# ---------------------------------------------------------------------------
+# Недоверенный XML ``rawData`` (S9f): обоснование проверяется, а не декларируется
+# ---------------------------------------------------------------------------
+
+
+def _billion_laughs_xml() -> str:
+    """``billion laughs``: 7 уровней × 10 — заведомо выше порога CPython.
+
+    Порог защиты pyexpat — «input amplification factor»; шесть уровней по замеру
+    (см. ``tests/adapters/test_extract_epub.py``) уже отвергаются, семь берём с запасом,
+    чтобы тест падал по причине «бомба отвергнута», а не «бомба оказалась мала».
+    """
+    entities = ['<!ENTITY lol "lol">']
+    previous = "lol"
+    for level in range(1, 8):
+        body = "".join(f"&{previous};" for _ in range(10))
+        entities.append(f'<!ENTITY lol{level} "{body}">')
+        previous = f"lol{level}"
+    dtd = "\n ".join(entities)
+    return (
+        '<?xml version="1.0"?>\n'
+        f"<!DOCTYPE yandexsearch [\n {dtd}\n]>\n"
+        f"<yandexsearch><x>&{previous};</x></yandexsearch>"
+    )
+
+
+def _search_raw_data(xml_text: str) -> list[SearchResult]:
+    """Прогоняет XML через **публичный** путь адаптера (``search`` → ``rawData``)."""
+    encoded = base64.b64encode(xml_text.encode("utf-8")).decode("ascii")
+
+    def _post(url: str, body: dict[str, Any]) -> bytes:
+        return json.dumps({"done": False, "id": "opx"}).encode()
+
+    def _poll(url: str) -> bytes:
+        return json.dumps(
+            {"done": True, "response": {"rawData": encoded}}
+        ).encode()
+
+    adapter = YandexSearchAdapter(http_post=_post, http_poll=_poll, sleep=_noop_sleep)
+    return adapter.search(SearchQuery(text="neutral query", limit=10))
+
+
+def test_billion_laughs_raw_data_is_rejected_not_expanded() -> None:
+    """S9f: амплификация сущностей отвергается ``ParseError``, кандидатов нет.
+
+    Обоснование в коде («stdlib безопасен по замеру на 3.14») проверяется двумя
+    утверждениями: разбор этих же байтов stdlib-ом **падает** (значит, разворачивания
+    не было), а публичный путь адаптера отдаёт пустую выдачу, а не падает.
+    """
+    xml_text = _billion_laughs_xml()
+
+    with pytest.raises(ET.ParseError, match="amplification"):
+        ET.fromstring(xml_text.encode("utf-8"))  # noqa: S314 — проверяем отказ парсера
+
+    assert _search_raw_data(xml_text) == []
+
+
+def test_external_entity_in_raw_data_is_not_resolved(tmp_path: Path) -> None:
+    """S9f (XXE): внешняя сущность не ресолвится — файл не читается, кандидатов нет."""
+    secret = tmp_path / "secret.txt"
+    secret.write_text("SENTINEL-SECRET", encoding="utf-8")
+    xml_text = (
+        '<?xml version="1.0"?>\n'
+        f'<!DOCTYPE yandexsearch [<!ENTITY xxe SYSTEM "file://{secret}">]>\n'
+        "<yandexsearch><doc><url>&xxe;</url><title>&xxe;</title></doc></yandexsearch>"
+    )
+
+    with pytest.raises(ET.ParseError, match="undefined entity"):
+        ET.fromstring(xml_text.encode("utf-8"))  # noqa: S314 — проверяем отказ парсера
+
+    results = _search_raw_data(xml_text)
+    assert results == []
+    assert "SENTINEL-SECRET" not in json.dumps(
+        [{"url": r.url, "title": r.title, "snippet": r.snippet} for r in results]
+    )
+
+
+def test_external_dtd_is_not_fetched_over_the_network() -> None:
+    """S9f: ``SYSTEM "http://…"`` не превращается в запрос — 0 соединений.
+
+    pyexpat не тянет внешние DTD, поэтому документ разбирается, но к слушающему
+    сокету не приходит **ни одного** соединения (замер, а не ссылка на документацию).
+    """
+    server = socket.create_server(("127.0.0.1", 0))
+    port = server.getsockname()[1]
+    try:
+        xml_text = (
+            '<?xml version="1.0"?>\n'
+            f'<!DOCTYPE yandexsearch SYSTEM "http://127.0.0.1:{port}/evil.dtd">\n'
+            f"<yandexsearch><doc><url>{URL_A}</url>"
+            "<title>Example A</title></doc></yandexsearch>"
+        )
+        results = _search_raw_data(xml_text)
+
+        ready, _, _ = select.select([server], [], [], 0.3)
+        assert ready == []  # ни одного соединения: DTD не запрашивался
+    finally:
+        server.close()
+    # Документ при этом разобран — «отказ» касается DTD, а не выдачи.
+    assert [r.url for r in results] == [URL_A]
 
 
 # ---------------------------------------------------------------------------

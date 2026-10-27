@@ -77,7 +77,7 @@ from core.pipeline.search_log import (
     external_search_observed,
 )
 from core.ports.index_builder import ImmutableBuildError as PortImmutableBuildError
-from core.ports.search import SearchAdapterPort, SearchQuery, SearchResult
+from core.ports.search import SearchAdapterPort, SearchQuery, SearchResult, SearchTiming
 from core.ports.store import StorePort
 from core.util.hashing import short_hash
 from core.util.security import validate_url
@@ -597,6 +597,9 @@ class SerpDiscovery:
         отличается от «ничего не нашлось»).
     :param exhausted_by_product: бюджет продукта исчерпан (факт, не догадка).
     :param termination_by_product: причина терминации по продукту (§5).
+    :param timing_by_product: наблюдённое время вызовов по продукту (S4): сколько ушло в
+        ожидание внешней системы и сколько на сами запросы. Поле есть у каждого продукта,
+        у которого были вызовы: ноль — факт, отсутствие записи — «вызовов не было».
     :param not_executed_rounds: сколько объявленных раундов не исполнено.
     :param not_executed_reason: почему раунды не исполнены (``no_query_variation`` —
         набор запросов не менялся между раундами, S3).
@@ -618,6 +621,7 @@ class SerpDiscovery:
     errors_by_product: dict[str, int] = field(default_factory=dict)
     exhausted_by_product: dict[str, bool] = field(default_factory=dict)
     termination_by_product: dict[str, str | None] = field(default_factory=dict)
+    timing_by_product: dict[str, SearchTiming] = field(default_factory=dict)
     not_executed_rounds: int = 0
     not_executed_reason: str | None = None
     unavailable_reason: str | None = None
@@ -689,6 +693,21 @@ class SerpDiscovery:
             },
             # Сбои вызовов отделены от «не нашлось» (S8): разные причины — разные записи.
             "errors": {pid: int(n) for pid, n in sorted(self.errors_by_product.items())},
+            # S4: наблюдаемое время вызовов. Поле присутствует у каждого продукта с
+            # вызовами, в том числе нулевое («ждали ноль» — это факт); ``measured=False``
+            # означает «шов тайминги не передаёт», а не «быстро отработали». Округление
+            # до микросекунд: наблюдаемое время, а не счётчик — шум float в 16-м знаке
+            # измерением не является.
+            "timing": {
+                pid: {
+                    "measured": bool(timing.measured),
+                    "wait_seconds": round(float(timing.wait_seconds), 6),
+                    "request_seconds": round(float(timing.request_seconds), 6),
+                    "polls": int(timing.polls),
+                    "from_cache": bool(timing.from_cache),
+                }
+                for pid, timing in sorted(self.timing_by_product.items())
+            },
             "termination": {
                 pid: reason for pid, reason in sorted(self.termination_by_product.items())
             },
@@ -1024,6 +1043,13 @@ def serp_discover(
     :attr:`SerpDiscovery.errors_by_product` и даёт ``termination_reason=error``, когда
     кандидатов не было вовсе; «ничего не нашлось» остаётся ``not_found``.
 
+    **Стоимость ожидания (S4).** Время каждого вызова складывается по продукту
+    (:attr:`SerpDiscovery.timing_by_product`) и публикуется в наблюдении полем ``timing``:
+    сколько ушло в паузах внешней async-операции и сколько на самих запросах. Это
+    измерение, а не потолок: контур по-прежнему последовательный, и числа ничего не
+    ускоряют — они делают видимой ту часть прогона, которую раньше нельзя было
+    отделить от «контур медленный».
+
     **Видимый отказ вместо пропуска.** Адаптера нет или запросов нет при объявленных
     раундах — ``unavailable_reason`` заполняется, и фаза сообщает об этом; контур не
     изображает «исполнился и ничего не нашёл».
@@ -1102,6 +1128,15 @@ def serp_discover(
                 used = effort.used(SearchPhase.SERP, pid) - before
                 discovery.calls_by_product[pid] = (
                     discovery.calls_by_product.get(pid, 0) + max(used, 0)
+                )
+                # S4: время каждого вызова складывается по продукту. Сумма сохраняет
+                # ``measured`` только если все слагаемые наблюдались (см.
+                # ``SearchTiming.merged_with``): часть без наблюдения не превращается в ноль.
+                previous_timing = discovery.timing_by_product.get(pid)
+                discovery.timing_by_product[pid] = (
+                    outcome.timing
+                    if previous_timing is None
+                    else previous_timing.merged_with(outcome.timing)
                 )
                 if outcome.from_cache:
                     discovery.cache_hits_by_product[pid] = (

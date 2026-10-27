@@ -514,6 +514,22 @@ def test_search_limit_bound_mirrors_pipeline_page() -> None:
     assert SEAM_SEARCH_MAX_LIMIT == SERP_QUERY_LIMIT
 
 
+def test_search_limit_bound_is_the_published_schema_maximum() -> None:
+    """S9e: серверная граница и ``maximum`` публикуемой схемы — **одно** число.
+
+    Константа сервера и литерал в ``contracts/seam/search.schema.json`` — две роли одной
+    границы: схема объявляет допустимое, сервер его применяет. Без этого теста они
+    расходятся молча, и шов начинает отвергать (или пропускать) не то, что опубликовал.
+    """
+    from core.edge.seam_schema import load_schema
+
+    limit = load_schema("search")["$defs"]["request"]["properties"]["limit"]
+
+    assert limit["maximum"] == SEAM_SEARCH_MAX_LIMIT
+    # Нижняя граница тоже объявлена и совпадает с нормализацией сервера (``<0`` → 0).
+    assert limit["minimum"] == 0
+
+
 # ---------------------------------------------------------------------------
 # /v1/registry
 # ---------------------------------------------------------------------------

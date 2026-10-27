@@ -14,8 +14,9 @@
   никогда не evidence (I19): превращение внешнего контента в доказательство возможно
   лишь после Ш5 (``corpus_raw`` → extract → chunk → ``content_hash`` → index).
   :func:`external_search_observed` — та же работа, но с наблюдением вызова
-  (:class:`SearchOutcome`: попадание в кэш, сбой адаптера, списание) — им пользуется
-  SERP-контур, чтобы отличить «не нашлось» от «сорвалось» (S8).
+  (:class:`SearchOutcome`: попадание в кэш, сбой адаптера, списание, **наблюдённое
+  время вызова**) — им пользуется SERP-контур, чтобы отличить «не нашлось» от
+  «сорвалось» (S8) и «ждали» от «быстро» (S4).
 * **SERP-кэш (R7).** Единственная точка чтения/записи ``cache/serp/{query_hash}.json`` —
   :func:`external_search_observed`: ключ :func:`core.util.cache.serp_key` несёт текст
   запроса, провайдера, **язык** и ``limit``. Попадание отдаёт кандидатов без вызова
@@ -44,7 +45,7 @@ from core.domain.enums import (
     TerminationReason,
 )
 from core.domain.models import SearchLogEntry
-from core.ports.search import SearchAdapterPort, SearchQuery, SearchResult
+from core.ports.search import SearchAdapterPort, SearchQuery, SearchResult, SearchTiming
 from core.util.cache import ContentAddressedCache, serp_key
 
 __all__ = [
@@ -332,6 +333,9 @@ class SearchOutcome:
     :param error: сбой адаптера (``None`` — вызов состоялся).
     :param from_cache: ответ взят из R7-кэша, живого вызова не было.
     :param charged: с бюджета списан вызов (при попадании в кэш — не списывается).
+    :param timing: наблюдённое время вызова — ожидание внешней системы отдельно от самих
+        запросов (S4). Поле есть всегда: «ноль ожидания» — это факт, а не отсутствие
+        факта; «не наблюдали» помечается ``timing.measured is False``.
     """
 
     results: tuple[SearchResult, ...] = ()
@@ -339,11 +343,26 @@ class SearchOutcome:
     error: BaseException | None = None
     from_cache: bool = False
     charged: bool = False
+    timing: SearchTiming = field(default_factory=SearchTiming)
 
     @property
     def found(self) -> bool:
         """Вернул ли вызов хотя бы одного кандидата."""
         return bool(self.results)
+
+
+def _observed_timing(adapter: SearchAdapterPort) -> SearchTiming:
+    """Тайминги вызова, которые адаптер наблюдает (S4); иначе — «не наблюдали».
+
+    Читается **после** вызова: адаптер публикует время последнего ``search``
+    (:attr:`last_timing`), а pipeline не знает ни провайдера, ни того, где тот спал.
+    Адаптер без такого наблюдения (шов DMZ, ``remote_search``) даёт ``measured=False``:
+    его нули означают «не наблюдали», а не «ждали ноль секунд».
+    """
+    observed = getattr(adapter, "last_timing", None)
+    if isinstance(observed, SearchTiming):
+        return observed
+    return SearchTiming()
 
 
 def _serp_cache_key(
@@ -544,6 +563,9 @@ def external_search_observed(
                 results=tuple(cached),
                 termination=hit_termination,
                 from_cache=True,
+                # Живого вызова не было — времени не ушло: это наблюдённый ноль, а не
+                # «не измеряли» (сеть в этом пути не задействована по построению).
+                timing=SearchTiming(measured=True, from_cache=True),
             )
 
     # ``effort`` — носитель бюджета (charge не принимает бюджет отдельно). Если он пуст,
@@ -570,7 +592,11 @@ def external_search_observed(
             termination_reason=TerminationReason.BUDGET_EXHAUSTED,
             clock=clock,
         )
-        return SearchOutcome(termination=TerminationReason.BUDGET_EXHAUSTED)
+        return SearchOutcome(
+            termination=TerminationReason.BUDGET_EXHAUSTED,
+            # Вызова не было — ожидания тоже: ноль наблюдаем по построению.
+            timing=SearchTiming(measured=True),
+        )
 
     error: BaseException | None = None
     results: list[SearchResult] = []
@@ -581,6 +607,9 @@ def external_search_observed(
 
     # Вызов (в т.ч. неуспешный) израсходовал усилие провайдера — списываем бюджет.
     charged = scoped.charge(phase, product_id)
+    # S4: время вызова наблюдается **после** него, включая неуспешный — ожидание до
+    # сбоя тоже стоимость прогона, и терять его значило бы показывать сбой бесплатным.
+    timing = _observed_timing(adapter)
 
     if error is not None:
         termination: TerminationReason | None = termination_for(
@@ -611,4 +640,5 @@ def external_search_observed(
         termination=termination,
         error=error,
         charged=charged,
+        timing=timing,
     )

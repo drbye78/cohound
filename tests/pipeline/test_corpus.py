@@ -7270,3 +7270,58 @@ def test_previous_build_cells_are_marked_stale_on_rebuild(tmp_path: Path) -> Non
         )
     finally:
         store.close()
+
+
+# --------------------------------------------------------------------------- #
+# S4: стоимость ожидания внешней системы — наблюдение, а не потолок
+# --------------------------------------------------------------------------- #
+
+
+def test_serp_note_names_observed_wait_only_when_it_is_not_zero() -> None:
+    """``_serp_note`` пересказывает **наблюдённое** ожидание; ноль и «не измеряли» молчат.
+
+    Машинно-читаемое число живёт в наблюдении (``timing``), строка — лишь его краткий
+    пересказ: «ждали 0 с» оператору ничего не сообщает, а «ждали полтора часа» — сообщает.
+    Неизмеренное ожидание (``measured=False``) не пересказывается вовсе, иначе отсутствие
+    наблюдения читалось бы как факт.
+    """
+    from core.pipeline.corpus import _serp_note
+
+    def _observation(**timing: object) -> dict[str, object]:
+        return {
+            "enabled": True,
+            "rounds": {"declared": 1, "executed": 1, "source": "run.yaml"},
+            "budget": {"effective_per_product": 4, "used": {"p1": 2}},
+            "timing": {"p1": timing},
+        }
+
+    note = _serp_note(
+        _observation(
+            measured=True,
+            wait_seconds=5400.0,
+            request_seconds=12.5,
+            polls=180,
+            from_cache=False,
+        )
+    )
+    assert "ожидание внешней системы 5400.0 с" in note
+    assert "запросы 12.5 с" in note
+
+    assert "ожидание внешней системы" not in _serp_note(
+        _observation(
+            measured=True,
+            wait_seconds=0.0,
+            request_seconds=0.4,
+            polls=1,
+            from_cache=False,
+        )
+    )
+    assert "ожидание внешней системы" not in _serp_note(
+        _observation(
+            measured=False,
+            wait_seconds=5400.0,
+            request_seconds=0.0,
+            polls=0,
+            from_cache=False,
+        )
+    )

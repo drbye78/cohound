@@ -531,3 +531,35 @@ def test_external_entity_in_opf_is_a_visible_error(tmp_path: Path) -> None:
     assert doc.text == ""
     assert doc.error is not None
     assert "OPF" in doc.error
+
+
+def test_malformed_opf_is_a_visible_error_not_an_exception(tmp_path: Path) -> None:
+    """F5: битый OPF — видимый ``error`` читателя, а не исключение через ``extract``.
+
+    До приведения к одной точке разбора ``_parse_opf`` звал ``ET.fromstring`` напрямую,
+    и наружу выходил ``ParseError``. Тест пинит **причину** отказа («не разобран»), а не
+    просто «что-то не так»: сообщение обязано приходить из ветки OPF, а не из
+    грациозного ``except`` вокруг всего ``extract``.
+    """
+    epub = _epub_with_raw_opf(tmp_path / "broken-opf.epub", "<package><metadata>")
+
+    doc = EpubExtractor(html=_fake_html()).extract(_page(epub.read_bytes()))
+
+    assert doc.text == ""
+    assert doc.error is not None
+    assert "OPF" in doc.error
+    assert "не разобран" in doc.error
+
+
+def test_opf_shares_the_single_xml_parse_entry_point() -> None:
+    """F5: у OPF тот же путь разбора, что у ``container.xml``: ``None``, а не исключение.
+
+    Это утверждение о **структуре**: второй путь разбора означал бы второй набор правил
+    безопасности, и обоснование про pyexpat было бы верно только для одного из них.
+    """
+    from core.adapters.extract_epub import _parse_opf, _parse_xml
+
+    assert _parse_xml(b"<package><metadata>") is None
+    assert _parse_opf(b"<package><metadata>") is None
+    # Обе функции разбирают один и тот же well-formed документ одинаково.
+    assert _parse_opf(b"<package><manifest/><spine/></package>") is not None

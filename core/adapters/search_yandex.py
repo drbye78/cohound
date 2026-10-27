@@ -30,13 +30,20 @@ URL-кандидаты (``SearchResult``) и, для ``fetch``, сырые ба�
 Ожидание отсекается по накопленному (симулированному) времени, поэтому внедряемая
 ``sleep`` (по умолчанию ``time.sleep``) делает тесты мгновенными и детерминированными.
 
+**Тайминги измеряются, а не оцениваются (S4).** Каждый вызов ``search`` возвращает не
+только кандидатов, но и наблюдённое время — :attr:`YandexSearchAdapter.last_timing`
+(:class:`core.ports.search.SearchTiming`): сколько ушло в паузах async-операции
+(``wait_seconds``) и сколько на самих HTTP-вызовах (``request_seconds``). Часы тоже
+внедряемые (``monotonic``), поэтому тест доказывает **величину** паузы, а не только её
+факт. Это измерение стоимости ожидания, а не потолок и не попытка ускорить контур.
+
 **Ленивый ``httpx``.** Модуль импортируется и тестируется без ``httpx``: HTTP-клиент
 подтягивается только в реальном пути, ``available`` показывает готовность.
 
 **Изолированный шов для тестов.** Конструктор принимает ``http_post``, ``http_get`` и
 ``http_poll`` (``(url, payload) -> bytes``, ``(url) -> bytes``, ``(url) -> bytes``) плюс
-``sleep``. Если заданы — реальный путь не задействуется, сеть не нужна. Если ``None`` —
-реальные вызовы ``httpx`` к API.
+``sleep`` и ``monotonic``. Если заданы — реальный путь не задействуется, сеть не нужна.
+Если ``None`` — реальные вызовы ``httpx`` к API.
 
 **Учётные данные — из окружения/конструктора, не хардкод.** ``api_key``/``folder_id``
 берутся из аргументов либо переменных среды ``YANDEX_SEARCH_API_KEY``/
@@ -66,10 +73,11 @@ import os
 import time
 import xml.etree.ElementTree as ET
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
-from core.ports.search import SearchQuery, SearchResult
+from core.ports.search import SearchQuery, SearchResult, SearchTiming
 from core.ports.types import FetchMode, RawPage
 from core.util.cache import ContentAddressedCache, http_key
 from core.util.redirects import follow_validated_redirects
@@ -103,6 +111,7 @@ __all__ = [
     "HttpGetFn",
     "HttpPollFn",
     "HttpPostFn",
+    "MonotonicFn",
     "SearchAdapterUnavailable",
     "SearchError",
     "SleepFn",
@@ -142,10 +151,37 @@ HttpGetFn = Callable[[str], bytes]
 HttpPollFn = Callable[[str], bytes]
 #: Внедряемая функция ожидания: (секунды) → None (в тестах — no-op).
 SleepFn = Callable[[float], None]
+#: Внедряемые часы для наблюдения таймингов: () → секунды (монотонные).
+MonotonicFn = Callable[[], float]
 
 #: Соответствие языка запроса типу поиска провайдера (данные, не категория).
 _SEARCH_TYPES = {"ru": "SEARCH_TYPE_RU", "en": "SEARCH_TYPE_COM"}
 _DEFAULT_SEARCH_TYPE = "SEARCH_TYPE_COM"
+
+
+@dataclass
+class _Timing:
+    """Накопитель таймингов **одного** вызова ``search`` (S4).
+
+    Мутабельный и приватный: снаружи живёт неизменяемый
+    :class:`core.ports.search.SearchTiming`, который адаптер публикует после вызова.
+    Разделение нужно, потому что ожидание рождается в цикле опроса
+    (:meth:`YandexSearchAdapter._await_operation`), а прочие вызовы — в
+    ``_search_async``/``search``; один накопитель передаётся по цепочке.
+    """
+
+    wait: float = 0.0
+    request: float = 0.0
+    polls: int = 0
+
+    def snapshot(self) -> SearchTiming:
+        """Наблюдённый снимок: ``measured=True`` — этот адаптер тайминги измеряет."""
+        return SearchTiming(
+            wait_seconds=float(self.wait),
+            request_seconds=float(self.request),
+            polls=int(self.polls),
+            measured=True,
+        )
 
 
 class SearchError(RuntimeError):
@@ -186,6 +222,8 @@ class YandexSearchAdapter:
     :param http_get: шов GET для ``fetch``; ``None`` → реальный ``httpx``.
     :param http_poll: шов GET опроса async-операции; ``None`` → реальный ``httpx``.
     :param sleep: инъектируемое ожидание (по умолчанию ``time.sleep``); в тестах — no-op.
+    :param monotonic: инъектируемые часы для наблюдения таймингов (по умолчанию
+        ``time.monotonic``); тест получает **величину** паузы, а не её отсутствие.
     :param api_key: ключ API (иначе из ``YANDEX_SEARCH_API_KEY``); не хардкодится.
     :param folder_id: идентификатор каталога (иначе из ``YANDEX_FOLDER_ID``).
     :param base_url: база API; ``search_path``/``async_search_path`` — пути веб-поиска.
@@ -207,6 +245,7 @@ class YandexSearchAdapter:
         *,
         http_poll: HttpPollFn | None = None,
         sleep: SleepFn = time.sleep,
+        monotonic: MonotonicFn = time.monotonic,
         api_key: str | None = None,
         folder_id: str | None = None,
         base_url: str = DEFAULT_BASE_URL,
@@ -249,6 +288,10 @@ class YandexSearchAdapter:
         self._http_get = http_get
         self._http_poll = http_poll
         self._sleep = sleep
+        self._monotonic = monotonic
+        # Тайминг последнего вызова. До первого вызова — «не наблюдали»: ноль без
+        # наблюдения не факт (pipeline отличает это флагом ``measured``).
+        self._last_timing = SearchTiming()
         self.api_key = api_key if api_key is not None else os.environ.get(ENV_API_KEY)
         self.folder_id = folder_id if folder_id is not None else os.environ.get(ENV_FOLDER_ID)
         self.base_url = base_url.rstrip("/")
@@ -302,6 +345,17 @@ class YandexSearchAdapter:
         """
         return self._cache
 
+    @property
+    def last_timing(self) -> SearchTiming:
+        """Тайминги **последнего** ``search``: ожидание внешней системы и сами запросы.
+
+        Публичное имя по тому же принципу, что :attr:`cache`: наблюдение принадлежит
+        вызову, но сообщает его адаптер, а читает pipeline (``search_log``/наблюдение
+        SERP-контура), который не имеет права знать, как устроен провайдер.
+        ``measured=False`` — вызовов ещё не было либо адаптер тайминги не измеряет.
+        """
+        return self._last_timing
+
     # ------------------------------------------------------------------
     # Контракт порта
     # ------------------------------------------------------------------
@@ -314,6 +368,9 @@ class YandexSearchAdapter:
 
         Режим ``sync`` — один POST и разбор; ``async`` (дефолт) — запуск операции
         и опрос до ``done``/``error``/``max_wait``.
+
+        Наблюдённое время вызова публикуется в :attr:`last_timing` **всегда**, включая
+        неуспешный вызов (ожидание до сбоя — тоже стоимость прогона).
         """
         text = q.text.strip()
         if not text:
@@ -322,11 +379,16 @@ class YandexSearchAdapter:
         if limit <= 0:
             return []
         payload = self._build_payload(text, q.lang, limit)
-        if self.search_mode == "sync":
-            raw = self._post(self.endpoint, payload)
-            data = self._decode(raw)
-            return self._parse(data, limit)
-        return self._search_async(payload, limit)
+        timing = _Timing()
+        self._last_timing = SearchTiming()
+        try:
+            if self.search_mode == "sync":
+                raw = self._post_timed(self.endpoint, payload, timing)
+                data = self._decode(raw)
+                return self._parse(data, limit)
+            return self._search_async(payload, limit, timing)
+        finally:
+            self._last_timing = timing.snapshot()
 
     def fetch(self, url: str) -> RawPage:
         """Загружает страницу по URL: SSRF-валидация → кэш → живой GET → кэш.
@@ -402,7 +464,9 @@ class YandexSearchAdapter:
     # Асинхронный поиск (operation-based v2)
     # ------------------------------------------------------------------
 
-    def _search_async(self, payload: dict[str, Any], limit: int) -> list[SearchResult]:
+    def _search_async(
+        self, payload: dict[str, Any], limit: int, timing: _Timing
+    ) -> list[SearchResult]:
         """Async-поиск: запуск операции → опрос → разбор ``response.rawData``.
 
         Запуск переиспользует ``_post`` (URL — ``async_endpoint``); ответ обязан
@@ -411,35 +475,40 @@ class YandexSearchAdapter:
         Готовый результат — base64-XML в ``response.rawData`` — проходит тот же
         путь разбора, что и sync (``_parse`` → ``_records`` → ``_records_from_xml``).
         """
-        raw = self._post(self.async_endpoint, payload)
+        raw = self._post_timed(self.async_endpoint, payload, timing)
         data = self._decode(raw)
         op_id = self._operation_id(data)
         if not op_id:
             raise SearchError("async-запуск не вернул id операции (operationId)")
-        response = self._await_operation(op_id)
+        response = self._await_operation(op_id, timing)
         if isinstance(response, Mapping) and isinstance(response.get("rawData"), str):
             return self._parse({"rawData": response["rawData"]}, limit)
         return self._parse(response, limit)
 
-    def _await_operation(self, op_id: str) -> Any:
+    def _await_operation(self, op_id: str, timing: _Timing) -> Any:
         """Опрашивает операцию до ``done``/``error``/``max_wait``; возвращает ``response``.
 
         Ошибка проверяется **до** ``done`` (поле ``error`` может прийти и при
         ``done:false``). Ожидание ограничено накопленным временем: каждая итерация
         добавляет ``poll_interval``, при превышении ``max_wait`` — :class:`SearchError`.
         Внедряемая ``sleep`` позволяет тестам не ждать реально.
+
+        Время каждой паузы и каждого опроса наблюдаются в ``timing`` (S4): «ждали 30 с»
+        и «ждали 0.03 с» различимы в наблюдении, а не только в тексте заметки.
         """
         url = self.operation_endpoint(op_id)
         elapsed = 0.0
         while True:
-            data = self._decode(self._poll(url))
+            data = self._decode(self._poll_timed(url, timing))
             if isinstance(data, Mapping) and data.get("error"):
                 raise SearchError(f"async-операция {op_id} завершилась ошибкой: {data['error']}")
             if isinstance(data, Mapping) and data.get("done") is True:
                 return data.get("response")
             if elapsed >= self.max_wait:
                 raise SearchError(f"превышено время ожидания async-операции {op_id}")
+            started = self._monotonic()
             self._sleep(self.poll_interval)
+            timing.wait += self._monotonic() - started
             elapsed += self.poll_interval
 
     @staticmethod
@@ -485,10 +554,14 @@ class YandexSearchAdapter:
             return []
         try:
             # ``rawData`` — XML поисковика, а его содержимое собрано из чужих страниц:
-            # вход недоверенный. stdlib безопасен по замеру на 3.14 (пин проекта):
-            # амплификация сущностей (billion laughs) отвергается ``ParseError``,
-            # внешние сущности не ресолвятся (``undefined entity``). ``defusedxml``
-            # опционален (extra ``safety``), а поисковый адаптер обязан работать без него.
+            # вход недоверенный. stdlib безопасен по замеру на 3.14 (пин проекта), и
+            # замер закреплён тестами (tests/adapters/test_search_yandex.py, S9f):
+            # амплификация сущностей (billion laughs) отвергается ``ParseError``
+            # («limit on input amplification factor»), внешние сущности не ресолвятся
+            # (``undefined entity``), внешний DTD не запрашивается — при ``SYSTEM
+            # "http://…"`` разбор проходит, но к слушающему сокету приходит 0 соединений
+            # (pyexpat не тянет внешние DTD). ``defusedxml`` опционален (extra
+            # ``safety``), а поисковый адаптер обязан работать без него.
             root = ET.fromstring(xml_bytes)  # noqa: S314 — обоснование в комментарии
         except ET.ParseError:
             return []
@@ -538,6 +611,16 @@ class YandexSearchAdapter:
             return bytes(self._http_post(url, payload))
         return self._post_real(url, payload)
 
+    def _post_timed(
+        self, url: str, payload: dict[str, Any], timing: _Timing
+    ) -> bytes:
+        """``_post`` с наблюдением длительности (S4): время запроса — отдельный факт."""
+        started = self._monotonic()
+        try:
+            return self._post(url, payload)
+        finally:
+            timing.request += self._monotonic() - started
+
     def _post_real(self, url: str, payload: dict[str, Any]) -> bytes:
         """Реальный POST веб-поиска v2; отсутствие зависимости → ``SearchAdapterUnavailable``.
 
@@ -559,6 +642,15 @@ class YandexSearchAdapter:
         if self._http_poll is not None:
             return bytes(self._http_poll(url))
         return self._poll_real(url)
+
+    def _poll_timed(self, url: str, timing: _Timing) -> bytes:
+        """``_poll`` с наблюдением длительности и счётом опросов (S4)."""
+        started = self._monotonic()
+        try:
+            return self._poll(url)
+        finally:
+            timing.request += self._monotonic() - started
+            timing.polls += 1
 
     def _poll_real(self, url: str) -> bytes:
         """Реальный GET операции; отсутствие зависимости → ``SearchAdapterUnavailable``.

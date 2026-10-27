@@ -108,7 +108,9 @@ POST /v1/fetch    {url, fetch: "http"|"browser", strategy: "auto"|"honest"|"hybr
       text: {content, hash, extractor_version, page_count?} | null,  # очищенный markdown (результат extract-оси)
       error: str | null}
 
-POST /v1/search   {query, lang, limit, phase}
+POST /v1/search   {query, lang, limit ≤ 10, phase}   # граница — в публикуемой схеме
+                                                      # (contracts/seam/search.schema.json: maximum)
+                                                      # и та же константа в сервере (SEAM_SEARCH_MAX_LIMIT)
    → [{url, title, snippet, rank}]                          # кандидаты, НЕ evidence
 
 POST /v1/registry {registry_id, product_ref, scope}

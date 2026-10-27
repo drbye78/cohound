@@ -33,7 +33,7 @@ from core.domain import (
 )
 from core.pipeline.search_log import SearchBudget, SearchEffort
 from core.pipeline.serp_loop import NO_QUERY_VARIATION_REASON, serp_discover
-from core.ports.search import SearchQuery, SearchResult
+from core.ports.search import SearchQuery, SearchResult, SearchTiming
 from core.ports.types import RawPage
 from core.store.sqlite_store import SqliteStore
 from core.util.cache import ContentAddressedCache
@@ -286,3 +286,80 @@ def test_known_urls_are_normalized_too(store: SqliteStore) -> None:
     )
     assert discovery.accepted_by_product["p1"] == []
     assert discovery.rejected_by_product["p1"] == {"known": 1}
+# --------------------------------------------------------------------------- #
+# S4: стоимость ожидания видна в наблюдении контура
+# --------------------------------------------------------------------------- #
+
+class _TimedFakeAdapter(_FakeAdapter):
+    """Фейк, публикующий тайминг каждого вызова (как реальный SERP-адаптер)."""
+
+    def __init__(
+        self,
+        results: list[SearchResult] | None = None,
+        timings: list[SearchTiming] | None = None,
+        error: BaseException | None = None,
+    ) -> None:
+        super().__init__(results=results, error=error)
+        self._timings = list(timings or [])
+        self.last_timing = SearchTiming()
+
+    def search(self, q: SearchQuery) -> list[SearchResult]:
+        if self._timings:
+            self.last_timing = self._timings.pop(0)
+        return super().search(q)
+
+
+def test_timing_is_aggregated_per_product_and_published(store: SqliteStore) -> None:
+    """S4: время вызовов складывается по продукту и видно в наблюдении контура."""
+    adapter = _TimedFakeAdapter(
+        [SearchResult(url=URL_A, rank=1)],
+        timings=[
+            SearchTiming(wait_seconds=30.0, request_seconds=1.0, polls=2, measured=True),
+            SearchTiming(wait_seconds=30.0, request_seconds=0.5, polls=2, measured=True),
+        ],
+    )
+
+    discovery = _discover(
+        store,
+        adapter,
+        rounds=1,
+        queries={
+            "p1": [
+                SearchQuery(text="neutral query", lang="ru", phase="serp"),
+                SearchQuery(text="neutral query two", lang="ru", phase="serp"),
+            ]
+        },
+    )
+
+    assert discovery.timing_by_product["p1"].wait_seconds == pytest.approx(60.0)
+    timing = discovery.to_observation()["timing"]["p1"]
+    assert timing["measured"] is True
+    assert timing["wait_seconds"] == pytest.approx(60.0)
+    assert timing["request_seconds"] == pytest.approx(1.5)
+    assert timing["polls"] == 4
+    assert timing["from_cache"] is False
+
+
+def test_zero_wait_is_published_not_omitted(store: SqliteStore) -> None:
+    """«Ноль ожидания» — факт: поле присутствует и равно 0.0, а не отсутствует."""
+    adapter = _TimedFakeAdapter(
+        [SearchResult(url=URL_A, rank=1)],
+        timings=[SearchTiming(wait_seconds=0.0, request_seconds=0.2, polls=1, measured=True)],
+    )
+
+    observation = _discover(store, adapter, rounds=1).to_observation()
+
+    assert "timing" in observation
+    assert observation["timing"]["p1"]["wait_seconds"] == 0.0
+    assert observation["timing"]["p1"]["measured"] is True
+
+
+def test_adapter_without_timing_is_not_published_as_zero(store: SqliteStore) -> None:
+    """Шов без таймингов: ``measured=False``, а не «ждали ноль секунд»."""
+    discovery = _discover(
+        store, _FakeAdapter([SearchResult(url=URL_A, rank=1)]), rounds=1
+    )
+
+    timing = discovery.to_observation()["timing"]["p1"]
+    assert timing["measured"] is False
+    assert timing["wait_seconds"] == 0.0

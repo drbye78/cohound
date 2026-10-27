@@ -3267,6 +3267,11 @@ def _serp_note(observation: Mapping[str, Any]) -> str:
     отсутствие факта. У включённого видны раунды, бюджет, число принятых URL и причины
     отказов — то есть **доходность** контура (замер: 189 запросов → 10 новых URL на
     объявленном хосте), а не только его факт.
+
+    Время ожидания внешней системы (S4) называется, только если оно **наблюдено** и
+    непусто: «ждали 0 с» — не новость, а вот «полтора часа ушло в паузы внешней
+    async-операции» оператор иначе не увидел бы. Машинно-читаемое число живёт в
+    наблюдении (``timing``), строка — лишь его краткий пересказ.
     """
     rounds = observation.get("rounds") or {}
     budget = observation.get("budget") or {}
@@ -3296,6 +3301,24 @@ def _serp_note(observation: Mapping[str, Any]) -> str:
     ]
     if exhausted:
         note += f"; бюджет исчерпан: {', '.join(sorted(exhausted))}"
+    # S4: стоимость ожидания внешней системы. Печатается только наблюдённое и непустое:
+    # «ждали 0 с» — не факт для оператора, а вот «сколько прогона ушло в паузы» — факт.
+    timing = observation.get("timing") or {}
+    if isinstance(timing, Mapping):
+        wait = sum(
+            float(row.get("wait_seconds") or 0)
+            for row in timing.values()
+            if isinstance(row, Mapping) and row.get("measured")
+        )
+        request = sum(
+            float(row.get("request_seconds") or 0)
+            for row in timing.values()
+            if isinstance(row, Mapping) and row.get("measured")
+        )
+        if wait > 0:
+            note += (
+                f"; ожидание внешней системы {wait:.1f} с, запросы {request:.1f} с"
+            )
     # «Нашли» ≠ «вошло в корпус»: принятый кандидат может быть зачёркнут блэклистом или
     # не поместиться в ``max_documents`` корня — это отдельный факт и он называется.
     ingest = observation.get("ingest") or {}

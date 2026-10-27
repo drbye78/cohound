@@ -36,7 +36,7 @@ from core.pipeline.search_log import (
     record_search,
     termination_for,
 )
-from core.ports.search import SearchQuery, SearchResult
+from core.ports.search import SearchQuery, SearchResult, SearchTiming
 from core.ports.types import RawPage
 from core.store.sqlite_store import SqliteStore
 from core.util.cache import ContentAddressedCache
@@ -667,6 +667,123 @@ def test_external_search_reports_error_in_outcome(
     assert outcome.results == ()
     assert isinstance(outcome.error, RuntimeError)
     assert outcome.termination is TerminationReason.ERROR
+
+# --------------------------------------------------------------------------- #
+# Тайминги вызова (S4): ожидание наблюдается, а не оценивается
+# --------------------------------------------------------------------------- #
+
+
+class _TimedAdapter(_FakeAdapter):
+    """Фейк, публикующий тайминг последнего вызова (как реальный SERP-адаптер)."""
+
+    def __init__(
+        self,
+        timing: SearchTiming,
+        results: list[SearchResult] | None = None,
+        error: BaseException | None = None,
+    ) -> None:
+        super().__init__(results=results, error=error)
+        self.last_timing = timing
+
+
+def _observed(
+    store: SqliteStore,
+    adapter: _FakeAdapter,
+    *,
+    cache: ContentAddressedCache | None = None,
+    limit: int = 5,
+) -> Any:
+    budget = SearchBudget.from_mapping({"serp": limit})
+    return external_search_observed(
+        adapter,
+        SearchQuery(text="neutral query", lang="ru", phase="serp"),
+        store=store,
+        run_id=RUN_ID,
+        effort=SearchEffort(budget),
+        budget=budget,
+        product_id="p1",
+        cache=cache,
+        clock=lambda: FIXED_TS,
+    )
+
+
+def test_outcome_carries_observed_adapter_timing(store: SqliteStore) -> None:
+    """S4: время вызова доходит до наблюдателя через ``SearchOutcome.timing``."""
+    adapter = _TimedAdapter(
+        SearchTiming(wait_seconds=30.0, request_seconds=1.5, polls=2, measured=True),
+        results=_results(),
+    )
+
+    outcome = _observed(store, adapter)
+
+    assert outcome.timing.wait_seconds == 30.0
+    assert outcome.timing.request_seconds == 1.5
+    assert outcome.timing.polls == 2
+    assert outcome.timing.measured is True
+    assert outcome.timing.from_cache is False
+
+
+def test_adapter_without_timing_is_marked_unmeasured(store: SqliteStore) -> None:
+    """Адаптер-шов таймингов не отдаёт: нули помечены ``measured=False``, а не выданы за факт."""
+    outcome = _observed(store, _FakeAdapter(results=_results()))
+
+    assert outcome.timing.measured is False
+    assert outcome.timing.wait_seconds == 0.0
+
+
+def test_error_outcome_keeps_waited_time(store: SqliteStore) -> None:
+    """Ожидание до сбоя — стоимость прогона: сбой не обнуляет наблюдение (S4)."""
+    adapter = _TimedAdapter(
+        SearchTiming(wait_seconds=30.0, request_seconds=0.5, polls=1, measured=True),
+        error=RuntimeError("backend down"),
+    )
+
+    outcome = _observed(store, adapter)
+
+    assert isinstance(outcome.error, RuntimeError)
+    assert outcome.timing.wait_seconds == 30.0
+    assert outcome.timing.measured is True
+
+
+def test_cache_hit_reports_zero_wait_as_a_fact(
+    store: SqliteStore, cache: ContentAddressedCache
+) -> None:
+    """Попадание в кэш: вызова не было — ожидания ровно 0 с, и это опубликовано."""
+    adapter = _TimedAdapter(
+        SearchTiming(wait_seconds=30.0, request_seconds=1.0, polls=1, measured=True),
+        results=_results(),
+    )
+    _observed(store, adapter, cache=cache)
+
+    cached = _observed(store, adapter, cache=cache)
+
+    assert cached.from_cache is True
+    assert cached.timing.measured is True
+    assert cached.timing.from_cache is True
+    assert cached.timing.wait_seconds == 0.0
+    assert cached.timing.request_seconds == 0.0
+
+
+def test_budget_exhausted_reports_zero_wait_as_a_fact(store: SqliteStore) -> None:
+    """Отказ бюджета: вызова не было — «ждали 0 с» публикуется как наблюдённый ноль."""
+    outcome = _observed(store, _FakeAdapter(results=_results()), limit=0)
+
+    assert outcome.termination is TerminationReason.BUDGET_EXHAUSTED
+    assert outcome.timing.measured is True
+    assert outcome.timing.wait_seconds == 0.0
+
+
+def test_timing_merge_keeps_unmeasured_as_unmeasured() -> None:
+    """Сумма наблюдений: слагаемое без наблюдения не превращается в ноль."""
+    measured = SearchTiming(wait_seconds=30.0, request_seconds=1.0, polls=1, measured=True)
+    unmeasured = SearchTiming()
+
+    merged = measured.merged_with(unmeasured)
+
+    assert merged.wait_seconds == 30.0
+    assert merged.request_seconds == 1.0
+    assert merged.measured is False  # конъюнкция: часть суммы не наблюдалась
+
 
 # --------------------------------------------------------------------------- #
 # Нейтральность модуля (§1.3)

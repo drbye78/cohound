@@ -105,7 +105,15 @@ def _elements(root: ET.Element, name: str) -> list[ET.Element]:
 
 
 def _parse_xml(data: bytes) -> ET.Element | None:
-    """Разбирает XML; битый документ → ``None`` (решение принимает вызывающий).
+    """**Единственная** точка разбора недоверенного XML модуля; битый вход → ``None``.
+
+    Через неё идут **все** XML-пути читателя: ``META-INF/container.xml``
+    (:func:`_opf_path`), OPF-пакет (:func:`_parse_opf`) и заголовок главы
+    (:func:`_chapter_title`). Второго пути разбора нет намеренно: два набора правил —
+    это и два набора гарантий, и обоснование безопасности, верное для одного из них,
+    ложно для другого (``_parse_opf`` раньше звал ``ET.fromstring`` напрямую, и битый
+    OPF выходил исключением из контракта «отказ — ``error``, не исключение»). Решение
+    по ``None`` принимает вызывающий: у OPF это ``error``, у заголовка — fallback.
 
     **Почему stdlib, а не ``defusedxml``.** OCF/OPF-манифест — недоверенный вход, но
     ``defusedxml`` живёт только в необязательном extra ``safety`` (05 §2.7.1), а EPUB —
@@ -113,7 +121,9 @@ def _parse_xml(data: bytes) -> ET.Element | None:
     закрыты самим CPython: замерено на 3.14 (пин проекта) — ``ET.fromstring`` отвергает
     billion-laughs (``ParseError: limit on input amplification factor``) и не ресолвит
     внешние сущности (``ParseError: undefined entity``), потому что pyexpat включает
-    защиту от амплификации и не тянет внешние DTD. XXE-вектора у stdlib нет.
+    защиту от амплификации и не тянет внешние DTD. XXE-вектора у stdlib нет. Замер
+    закреплён тестами ``tests/adapters/test_extract_epub.py`` (hostile XML по обоим
+    путям: контейнер и OPF).
     """
     try:
         return ET.fromstring(data)  # noqa: S314 — обоснование в докстринге (замер 3.14)
@@ -144,14 +154,20 @@ def _opf_path(container_xml: bytes) -> str | None:
     return None
 
 
-def _parse_opf(opf: bytes) -> tuple[dict[str, tuple[str, str]], list[str]]:
+def _parse_opf(opf: bytes) -> tuple[dict[str, tuple[str, str]], list[str]] | None:
     """Разбирает OPF: ``(manifest: id → (href, media-type), spine: [idref])``.
 
     ``manifest`` — инвентарь (порядок не значим), ``spine`` — **порядок чтения**.
     Элементы без ``id``/``href`` и ``itemref`` без ``idref`` пропускаются: они не
     адресуют контент, и выдумывать им место в книге нельзя.
+
+    ``None`` — OPF не разобран (не well-formed XML). Разбор идёт через
+    :func:`_parse_xml`, то есть через **ту же** точку и те же гарантии, что у
+    ``container.xml``: битый пакет — видимый ``error`` читателя, а не исключение наружу.
     """
-    root = ET.fromstring(opf)  # noqa: S314 — см. ``_parse_xml``: stdlib + защита pyexpat
+    root = _parse_xml(opf)
+    if root is None:
+        return None
     manifest: dict[str, tuple[str, str]] = {}
     for item in _elements(root, "item"):
         identifier = (item.get("id") or "").strip()
@@ -287,10 +303,12 @@ class EpubExtractor:
         except _MemberUnreadable as exc:
             return self._error(f"epub: OPF «{opf_path}» не прочитан: {exc}")
 
-        try:
-            manifest, spine = _parse_opf(opf_bytes)
-        except ET.ParseError as exc:
-            return self._error(f"epub: OPF не разобран: {exc}")
+        parsed = _parse_opf(opf_bytes)
+        if parsed is None:
+            # Один путь разбора (см. ``_parse_xml``): битый пакет — это отказ читателя,
+            # а не ``ET.ParseError`` наружу через ``extract``.
+            return self._error(f"epub: OPF «{opf_path}» не разобран — не well-formed XML")
+        manifest, spine = parsed
         if not spine:
             return self._error("epub: spine пуст — порядок чтения не определён")
 
