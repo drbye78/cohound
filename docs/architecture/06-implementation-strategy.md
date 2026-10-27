@@ -29,7 +29,7 @@
 | `core/db.py` (был) | ✅ переехал в W1/T1.3 → `core/store/sqlite.py`; монолит **удалён** | DDL §4.4 + триггеры |
 | `core/util/text_utils.py` | готово (W1/W2/W8) | RU/EN-нормализация |
 | `core/util/security.py` | готово (W2/W7) | SSRF-защита URL, `sanitize_slug` |
-| `core/util/fusion.py` | готово; обёрнуто в ретривал W8 | RRF-слияние |
+| `core/util/fusion.py` | мёртвый дубль: не подключён ни одним прод-путём (живое RRF — `pipeline/retrieve.py`); докстринг модуля и эта строка врали о W8 | RRF-слияние (реализация — в `retrieve.py`) |
 | `core/util/retrieval_eval.py` | готово; основа W8/T8.6 | retrieval-метрики |
 | `core/adapters/chunker_markdown.py` | готово; за портом W7/T7.3 | чанкер с `heading_path` |
 | `core/adapters/extract_document.py` | готово (PDF+Office); за портом W7/T7.2 | docling-экстрактор |

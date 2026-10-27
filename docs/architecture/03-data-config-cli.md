@@ -123,7 +123,8 @@ runs/{run_id}/
   plan_inputs.json           # производный экспорт снимка плановых входов (источник истины — run_inputs в cohound.db)
   gates/{gate}-request.json  # G3/G4: детерминированный предмет решения + subject_digest (точка интеграции)
   logs/{phase}.jsonl         # структурированные логи по фазам
-  prompts/{prompt_hash}.json # скомпилированные промпты (для аудита/воспроизводимости)
+  prompts/{prompt_hash}.json # скомпилированные промпты — для аудита; **сейчас не создаётся**
+                             # (`save_prompt` не вызывается конвейером; открытый дефект V7)
   outputs/
     battle_card.xlsx
     preliminary_findings.xlsx

@@ -3116,7 +3116,7 @@ state/{package_id}/state.db-wal
 runs/{run_id}/
   cohound.db                             # входы плана, манифест, ячейки, гейты
   plan_inputs.json                       # производный экспорт
-  logs/, prompts/, outputs/
+  logs/, prompts/, outputs/              # prompts/ сейчас не создаётся (V7, открытый дефект)
 
 index_store/{package}/
   {partition_build_id}/{product_id}/     # иммутабельная продукт-партиция

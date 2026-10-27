@@ -485,8 +485,13 @@ Fusion-параметры (включая `rrf_k`) входят в `retrieval_pa
 - **Выход:** `LLMCellOutput` (status, justification, evidence[{source_id, quote}]).
 - **Схема:** constrained decoding (xgrammar/XGrammar) — гарантия **формы**; семантика проверяется
   эшелоном.
-- **Детерминизм:** greedy или seed; `temperature`/`seed` из `ScenarioBinding`; фиксируется
-  в `run_manifest.yaml` (R7).
+- **Детерминизм:** greedy или seed; `temperature`/`seed` из `ScenarioBinding`; **намерены**
+  фиксировать в `run_manifest.yaml` (R7) — фактически колонки `seed`/`temperature`/
+  `constrained_decoding` сейчас пишутся `NULL` (`_resolve_llm_scenarios` их не заполняет),
+  то есть манифест условия генерации не подтверждает. Провайдер может игнорировать
+  `seed`: замер — 4.2 % (5 из 119) ячеек меняют вердикт при идентичном `prompt_hash`
+  (`docs/reports/measurements/2026-10-26-verdict-reproducibility.md`). Это остаточный
+  недетерминизм, а не гарантия.
 - **I18 физически:** порт не принимает `tools`; адаптер подключается к [OI]-совместимому endpoint
   корп. облака без веб-тула. Веб-поиск —
   отдельный порт, к оценщику не подключён.
@@ -505,9 +510,20 @@ prompt_hash = H(template_version, rule, absence_rule, sorted(chunk_ids))
 ```
 (1) source_id существует и резолвится в URL       # I10/I15
 (2) цитата — подстрока чистого text чанка          # strict; context_prefix не входит
-(3) достаточность: over-claim → аномалия
+(3) достаточность: over-claim → аномалия           # НЕ реализовано как шаг эшелона
 (4) аномалии: ✅ при слабом retrieval-скоре; расхождения по группе → ревью
 ```
+
+**Про шаг (3) — честно.** Эшелон `pipeline/validate.py` его не исполняет: там восемь проверок
+(`validate.py:300-381`), и ни одна не спрашивает, **следует ли заявленный статус из цитаты**.
+Регламент (§7.1) разрешает «частично механически» и требует следствия-*аномалии*, поэтому
+шаг присутствует в норме, но не в коде. Что существует вместо него: замер
+`support_subject_overlap` (`pipeline/evaluate.py:735`) — пересечение стемов параметра и цитаты
+для ✅/⚠️; он **не меняет вердиктов**, пишет `cells.validation_notes`/`review_reason` и
+агрегируется в `outputs/support_quality.yaml`. Измеренный масштаб — в
+`docs/reports/measurements/2026-10-27-support-not-about-subject.md`: v2 публиковал 45 `✅`
+из 70 без доказательства о предмете. Механизм проверки класса утверждения — открытая работа
+(`docs/architecture/15-external-review-findings-plan.md`, V1).
 
 Каждый шаг возвращает `ValidationResult(ok, failure_kind, notes)`. Провал → `failure_kind` →
 retry ≤2 → `failed` (status=null, I4). В preliminary невалидная цитата → кандидат + `validation_notes`.
