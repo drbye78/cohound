@@ -151,6 +151,13 @@ class ProbeReason(StrEnum):
     ответ); ``EXTRACTION_EMPTY`` — транспорт дошёл до контента, но экстракция дала 0
     символов (сбой **экстрактора**). Это разные диагнозы: первый смотрит на краулер,
     второй — на экстрактор.
+
+    ``ROBOTS_DISALLOWED`` и ``ROBOTS_UNAVAILABLE`` различают **наблюдение** ленты
+    ``robots.txt``: первое — лента прочитана и выигравшее правило запретило URL, второе —
+    ленту прочитать не удалось (5xx/сеть/таймаут/сбой разбора), и обход не выполняется по
+    RFC 9309 §2.3.1.4 («не смог прочитать запрет» ≠ «запрета нет»). Следствие у них одно
+    (URL не фетчится), но факты разные, поэтому один код на оба случая подменял бы
+    наблюдение: «сайт не ответил» читалось бы как «сайт запретил».
     """
 
     NO_URL = "no_url"
@@ -160,6 +167,9 @@ class ProbeReason(StrEnum):
     BROWSER_UNAVAILABLE = "browser_unavailable"
     BROWSER_DISABLED = "browser_disabled"
     ROBOTS_DISALLOWED = "robots_disallowed"
+    #: Лента ``robots.txt`` **не прочитана** (недоступна/нечитаема): обход не выполняется,
+    #: но это не запрет сайта, а отсутствие наблюдения (:data:`RobotsFeedState.UNAVAILABLE`).
+    ROBOTS_UNAVAILABLE = "robots_unavailable"
     FETCH_BUDGET_EXHAUSTED = "fetch_budget_exhausted"
 
 

@@ -496,7 +496,9 @@ crawl_probe_reason:
   - extraction_empty       # транспорт дошёл, экстракция дала 0 символов (смотреть экстрактор)
   - browser_unavailable
   - browser_disabled
-  - robots_disallowed
+  - robots_disallowed      # лента прочитана, выигравшее Disallow запретило URL
+  - robots_unavailable     # ленту robots.txt НЕ прочитали (5xx/сеть/разбор): обход не
+                           # выполняется по RFC 9309 §2.3.1.4, но это не запрет сайта
   - fetch_budget_exhausted
 
 # Сеанс краула: жизненный цикл (crawl_sessions).

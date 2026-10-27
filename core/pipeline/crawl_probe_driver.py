@@ -32,8 +32,11 @@
 
 **Вежливость.** ``robots.txt`` читается :class:`~core.pipeline.crawl_probe.RobotsGate`;
 межзапросная задержка — :class:`~core.util.rate_limit.RateLimiter`; общий бюджет фетчей
-ограничен (:data:`MAX_TOTAL_FETCHES`). §10: honest/hybrid рендер публичной JS-страницы —
-исполнение её штатного механизма; обход CAPTCHA/платности не делается.
+ограничен (:data:`MAX_TOTAL_FETCHES`). Отказ по ленте различается по наблюдению:
+``robots_disallowed`` (лента прочитана, правило запретило) против ``robots_unavailable``
+(ленту не удалось прочитать) — следствие одно, факты разные. §10: honest/hybrid рендер
+публичной JS-страницы — исполнение её штатного механизма; обход CAPTCHA/платности не
+делается.
 
 Нейтрален к предметной категории (§1.3).
 """
@@ -64,6 +67,7 @@ from core.pipeline.crawl_probe import (
 from core.ports.crawl_errors import CrawlUnavailable
 from core.ports.types import FetchPlan, RawPage
 from core.util.rate_limit import RateLimiter, jittered_backoff
+from core.util.robots import ROBOTS_UNAVAILABLE_REASON
 
 __all__ = [
     "HTTP_RETRIES",
@@ -358,8 +362,10 @@ def run_probe(
 
     ``candidates[key] = (source, [url, ...])`` — уже разрешённые приоритетом источника
     кандидаты; драйвер применяет детерминированный отбор (:func:`pick_urls`) и робот-этику.
-    Ключ без кандидатов, с запретом ``robots.txt`` или без бюджета становится ``unresolved``
-    с причиной — не подставляет дефолт и не исчезает (A3).
+    Ключ без кандидатов, с отказом ``robots.txt`` или без бюджета становится ``unresolved``
+    с причиной — не подставляет дефолт и не исчезает (A3). Отказ робот-политики назван
+    своим фактом: ``robots_disallowed`` (лента прочитана, правило запретило) против
+    ``robots_unavailable`` (ленту не прочитали).
 
     ``wait_for_by_key[key]`` — **авторское** ``wait_for`` ключа из ``domain_profiles.yaml``
     (``None``/отсутствие ⇒ ``wait_for=None``). Условие передаётся в браузерные тиры как есть
@@ -391,18 +397,10 @@ def run_probe(
                 unresolved_verdict(key, ProbeReason.NO_URL, source=source)
             )
             continue
-        allowed = [url for url in chosen if _robots_allows(ports.robots, url)]
+        decisions = [(url, _robots_decision(ports.robots, url)) for url in chosen]
+        allowed = [url for url, decision in decisions if decision.allowed]
         if not allowed:
-            verdicts.append(
-                unresolved_verdict(
-                    key,
-                    ProbeReason.ROBOTS_DISALLOWED,
-                    detail="robots.txt запрещает выбранные URL",
-                    source=source,
-                    url=chosen[0],
-                    urls=chosen,
-                )
-            )
+            verdicts.append(_robots_unresolved(key, decisions, source=source))
             continue
         key_wait_for = (
             None if wait_for_by_key is None else wait_for_by_key.get(key)
@@ -425,11 +423,98 @@ def run_probe(
     return verdicts
 
 
-def _robots_allows(robots: Any | None, url: str) -> bool:
-    """Разрешён ли URL робот-политикой (нет политики ⇒ разрешено)."""
+@dataclass(frozen=True)
+class _RobotsDecision:
+    """Наблюдение робот-политики по одному URL: допуск, машинный код причины, состояние ленты.
+
+    Три поля, а не ``bool``, потому что за одним следствием («URL не фетчится») стоят два
+    разных факта: лента прочитана и запрет выиграл правило (``reason=robots_disallow``)
+    либо лента **не прочитана** (``reason=robots_unavailable``). Булево их склеивало.
+    """
+
+    allowed: bool
+    reason: str | None = None
+    state: str | None = None
+
+
+def _state_name(state: object) -> str | None:
+    """Имя состояния ленты строкой (``state.value`` у перечисления); ``None`` — не сообщено."""
+    if state is None:
+        return None
+    return str(getattr(state, "value", state))
+
+
+def _robots_decision(robots: Any | None, url: str) -> _RobotsDecision:
+    """Решение робот-политики по ``url`` — наблюдение, а не только ``bool``.
+
+    Предпочитается :meth:`~core.util.robots.RobotsGate.verdict`: он отдаёт состояние ленты
+    и машинный код причины, поэтому недоступная лента не выдаётся за запрет сайта. Объект
+    без ``verdict`` (упрощённый шов с одним ``allowed``) даёт голое булево: причина
+    неизвестна, и отказ трактуется как запрет — ровно как до появления ``verdict``.
+
+    ``robots is None`` — путь **без гейта**: проверку не передали, политика не
+    спрашивалась, и допуск не выводится из «правил нет». В проде гейт передаётся всегда
+    (``hound package crawl-probe`` собирает :class:`~core.util.robots.RobotsGate`); ветка
+    остаётся для вызовов, где робот-этика снята осознанно.
+
+    ``except Exception`` — **защитный** путь, а не основной: :class:`RobotsGate` сам гасит
+    сбои чтения в состояние ``unavailable`` и возвращает отказ с кодом
+    ``robots_unavailable``, поэтому исключение здесь означает негодный объект политики, а не
+    сбой ленты. Ронять из-за него зонд нельзя — проверка снимается целиком (как и раньше).
+    """
     if robots is None:
-        return True
+        return _RobotsDecision(True)
+    verdict_of = getattr(robots, "verdict", None)
     try:
-        return bool(robots.allowed(url))
-    except Exception:  # noqa: BLE001 — сбой политики не роняет зонд
-        return True
+        if callable(verdict_of):
+            verdict = verdict_of(url)
+            return _RobotsDecision(
+                bool(verdict.allowed),
+                getattr(verdict, "reason", None),
+                _state_name(getattr(verdict, "state", None)),
+            )
+        return _RobotsDecision(bool(robots.allowed(url)))
+    except Exception:  # noqa: BLE001 — негодная политика не роняет зонд
+        return _RobotsDecision(True)
+
+
+def _robots_unresolved(
+    key: str,
+    decisions: Sequence[tuple[str, _RobotsDecision]],
+    *,
+    source: ProbeSource,
+) -> Verdict:
+    """``unresolved`` по робот-политике: причина и ``detail`` называются по **наблюдению**.
+
+    Запрет и непрочитанная лента получают разные машинные коды
+    (:data:`~core.pipeline.crawl_probe.ProbeReason.ROBOTS_DISALLOWED` против
+    :data:`~core.pipeline.crawl_probe.ProbeReason.ROBOTS_UNAVAILABLE`) и разные
+    формулировки: «сайт не ответил» не читается как «сайт запретил». Порядок причин —
+    порядок URL (детерминирован :func:`~core.pipeline.crawl_probe.pick_urls`).
+    """
+    reasons: list[ProbeReason] = []
+    details: list[str] = []
+    for url, decision in decisions:
+        if decision.allowed:
+            continue
+        if decision.reason == ROBOTS_UNAVAILABLE_REASON:
+            reasons.append(ProbeReason.ROBOTS_UNAVAILABLE)
+            state = f" (state={decision.state})" if decision.state else ""
+            details.append(
+                f"robots.txt не прочитан{state}: разрешение не установлено, "
+                f"обход не выполнен — {url}"
+            )
+        else:
+            reasons.append(ProbeReason.ROBOTS_DISALLOWED)
+            details.append(f"robots.txt запрещает URL: {url}")
+    chosen = [url for url, _decision in decisions]
+    return unresolved_verdict(
+        key,
+        reasons[0],
+        extra_reasons=reasons[1:],
+        detail="; ".join(details),
+        source=source,
+        url=chosen[0],
+        urls=chosen,
+    )
+

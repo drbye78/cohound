@@ -32,8 +32,9 @@ from core.pipeline.crawl_probe import (
     split_header,
 )
 from core.pipeline.crawl_probe_driver import ProbePorts, run_probe
-from core.ports.crawl_errors import CrawlError, CrawlUnavailable
+from core.ports.crawl_errors import CrawlError, CrawlNotFound, CrawlUnavailable
 from core.ports.types import RawPage
+from core.util.robots import RobotsGate
 from tests.fakes.crawl_probe import (
     FakeBackend,
     RecordingHttpGet,
@@ -266,6 +267,53 @@ def test_robots_disallowed_is_unresolved() -> None:
     verdict = _run(http, ports=_ports(http, robots=_Deny()))
     assert not verdict.resolved
     assert ProbeReason.ROBOTS_DISALLOWED.value in verdict.reasons
+    assert http.calls == []
+
+
+def test_robots_unavailable_is_not_reported_as_disallow() -> None:
+    """⚠ Непрочитанная лента → ``robots_unavailable``, и ``detail`` не говорит «запрещает».
+
+    Пины держат различие наблюдений: если недоступность снова склеится с запретом (один
+    ``robots_disallowed`` на оба случая), тест обязан упасть — «сайт не ответил» нельзя
+    читать как «сайт запретил».
+    """
+
+    def _five_xx(_host: str) -> str:
+        raise RuntimeError("502 Bad Gateway")
+
+    http = ScriptedHttpCrawler({URL: page(URL)})
+    verdict = _run(http, ports=_ports(http, robots=RobotsGate(_five_xx)))
+    assert not verdict.resolved
+    assert verdict.reasons == (ProbeReason.ROBOTS_UNAVAILABLE.value,)
+    assert ProbeReason.ROBOTS_DISALLOWED.value not in verdict.reasons
+    assert verdict.detail is not None
+    assert "не прочитан" in verdict.detail
+    assert "state=unavailable" in verdict.detail
+    assert "запреща" not in verdict.detail
+    assert http.calls == []
+
+
+def test_robots_not_found_is_an_observation_and_fetches() -> None:
+    """Определённый ``404`` ленты — наблюдение «правил нет»: зонд фетчит URL."""
+    def _absent(_host: str) -> str:
+        raise CrawlNotFound("robots.txt отсутствует", http_status=404)
+
+    http = ScriptedHttpCrawler({URL: page(URL)})
+    verdict = _run(http, ports=_ports(http, robots=RobotsGate(_absent)))
+    assert verdict.resolved
+    assert http.calls == [URL]
+
+
+def test_robots_disallow_detail_names_the_ban() -> None:
+    """Прочитанная лента с выигравшим ``Disallow`` → ``robots_disallowed``, URL не фетчится."""
+    http = ScriptedHttpCrawler({URL: page(URL)})
+    gate = RobotsGate(lambda _host: "User-agent: *\nDisallow: /")
+    verdict = _run(http, ports=_ports(http, robots=gate))
+    assert not verdict.resolved
+    assert verdict.reasons == (ProbeReason.ROBOTS_DISALLOWED.value,)
+    assert ProbeReason.ROBOTS_UNAVAILABLE.value not in verdict.reasons
+    assert verdict.detail is not None
+    assert "запрещает" in verdict.detail
     assert http.calls == []
 
 
