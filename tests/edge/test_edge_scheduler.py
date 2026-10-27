@@ -212,15 +212,35 @@ class RecordingRateLimiter(RateLimiter):
 
 
 class StubRobotsGate:
-    """Стаб ``RobotsGate`` без сети: фиксированный вердикт + запись проверок (§10)."""
+    """Стаб ``RobotsGate`` без сети: фиксированный вердикт + запись проверок (§10).
+
+    Реализует ``verdict`` (боевой API адаптеров): отказ по политике — ``robots_disallow``,
+    разрешение — ``fetched`` без причины. ``allowed`` оставлен для мест, которым код причины
+    не нужен, и отвечает тем же решением.
+    """
 
     def __init__(self, *, allowed: bool = True) -> None:
         self._allowed = allowed
         self.calls: list[str] = []
 
     def allowed(self, url: str) -> bool:
+        return self.verdict(url).allowed
+
+    def verdict(self, url: str, *, enabled: bool = True):  # noqa: ANN201 - RobotsVerdict
+        from core.util.robots import (
+            ROBOTS_DISALLOW_REASON,
+            RobotsFeedState,
+            RobotsVerdict,
+        )
+
+        if not enabled:  # «не просили проверку»: наблюдения нет, запрос не нужен
+            return RobotsVerdict(RobotsFeedState.DISABLED, True, None)
         self.calls.append(url)
-        return self._allowed
+        return RobotsVerdict(
+            RobotsFeedState.FETCHED,
+            self._allowed,
+            None if self._allowed else ROBOTS_DISALLOW_REASON,
+        )
 
 
 class NoopGateway:

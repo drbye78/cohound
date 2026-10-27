@@ -115,6 +115,7 @@ from core.pipeline.package_scout import (
     scout_package,
     write_scout_artifacts,
 )
+from core.ports.crawl_errors import CrawlNotFound
 from core.ports.types import FetchPlan
 from core.store.backup import (
     _live_compositions,
@@ -1638,15 +1639,26 @@ def _corpus_urls(db_path: str | Path) -> list[str]:
 
 
 def _make_robots_fetcher(http_crawler: Any) -> Any:
-    """Фетчер ``robots.txt`` через HTTP-краулер (без кэша); недоступно → ``None``."""
+    """Фетчер ``robots.txt`` через HTTP-краулер (без кэша).
+
+    Четыре исхода различаются, потому что у них разные следствия (RFC 9309 §2.3.1.4):
+    прочитано ⇒ текст (в т.ч. пустой — «разрешено всё»); ``404``/``410`` ⇒
+    :class:`CrawlNotFound` пропускается наружу (гейт выведет ``not_found``); 5xx/сеть/таймаут
+    ⇒ ``None`` ⇒ ``unavailable`` ⇒ origin не обходится. Зонд осей краула считает исходы так
+    же, как живой прогон, иначе предложение осей измерялось бы на другой политике.
+    """
     def fetch(host: str) -> str | None:
         url = f"https://{host}/robots.txt"
         try:
             page = http_crawler.fetch(url, FetchPlan(FetchMode.HTTP))
-        except Exception:  # noqa: BLE001 — недоступный robots.txt = «правил нет»
+        except CrawlNotFound:
+            # ``404``/``410`` — ответ origin «ленты нет»: гейт выведет ``not_found``.
+            raise
+        except Exception:  # noqa: BLE001 — 5xx/сеть/таймаут = наблюдения нет
             return None
+        # Пустой прочитанный ответ — факт («разрешено всё»), а не ``None``.
         raw = getattr(page, "content", b"") or b""
-        return raw.decode("utf-8", errors="replace") if raw else None
+        return raw.decode("utf-8", errors="replace")
 
     return fetch
 

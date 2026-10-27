@@ -1,18 +1,29 @@
 """Тесты единой робот-политики ``core.util.robots`` (D1/§10) и её промоушена.
 
-Без сети: текст ленты robots инъектируется. Проверяются дефолт-разрешение при недоступной
-ленте, явный запрет, ``Crawl-delay``, RFC 9309-матчинг (``*``/``$``/query, самое длинное
-правило, при равенстве ``Allow``), ABNF-пустые строки внутри группы, UTF-8 BOM, линейность
-матчера на вложенных звёздочках и то, что ``core.pipeline.crawl_probe`` ре-экспортирует
-ту же реализацию (single implementation).
+Без сети: текст ленты robots инъектируется. Проверяются состояния ленты (``fetched``/
+``not_found``/``unavailable``/``not_checked``/``disabled``) и выведенные из них следствия
+(недоступность = запрет origin'а по RFC 9309 §2.3.1.4, ``404`` = разрешено всё), явный
+запрет, ``Crawl-delay``, RFC 9309-матчинг (``*``/``$``/query, самое длинное правило, при
+равенстве ``Allow``), ABNF-пустые строки внутри группы, UTF-8 BOM, линейность матчера на
+вложенных звёздочках и то, что ``core.pipeline.crawl_probe`` ре-экспортирует ту же
+реализацию (single implementation).
 """
 
 from __future__ import annotations
 
 import time
 
+import pytest
+
 from core.pipeline.crawl_probe import RobotsGate as ProbeRobotsGate
-from core.util.robots import RobotsGate
+from core.ports.crawl_errors import NOT_FOUND_STATUSES, CrawlNotFound
+from core.util.robots import (
+    ROBOTS_DISALLOW_REASON,
+    ROBOTS_UNAVAILABLE_REASON,
+    RobotsFeed,
+    RobotsFeedState,
+    RobotsGate,
+)
 
 DISALLOW = "User-agent: *\nDisallow: /blocked\n"
 DELAY = "User-agent: *\nCrawl-delay: 5\n"
@@ -61,14 +72,120 @@ def _gate(text: str) -> RobotsGate:
     return RobotsGate(lambda _host: text)
 
 
-def test_unavailable_robots_is_allowed() -> None:
+def _absent_robots(_host: str) -> str:
+    """Фетчер «ленты нет»: ``CrawlNotFound`` — определённый ответ origin'а (404)."""
+    raise CrawlNotFound("HTTP 404 для robots.txt", http_status=404)
+
+
+def test_unavailable_robots_blocks_origin() -> None:
+    """RFC 9309 §2.3.1.4: недоступная лента = запрет origin'а, а не «правил нет».
+
+    Прошлое поведение (дефолт-разрешение) превращало «мы не знаем разрешения» в
+    разрешение: сайт краулился целиком именно тогда, когда запрет прочитать не удалось.
+    """
     gate = RobotsGate(lambda _host: None)
-    assert gate.allowed("https://example.com/anything") is True
+
+    verdict = gate.verdict("https://example.com/anything")
+
+    assert verdict.allowed is False
+    assert verdict.state is RobotsFeedState.UNAVAILABLE
+    assert verdict.reason == ROBOTS_UNAVAILABLE_REASON
+    assert gate.allowed("https://example.com/anything") is False
+    assert gate.state("https://example.com/anything") is RobotsFeedState.UNAVAILABLE
+
+
+def test_absent_robots_allows_everything_and_is_observation() -> None:
+    """``404``/``410`` — факт «ленты нет»: это наблюдение, поэтому обход разрешён."""
+    gate = RobotsGate(_absent_robots)
+
+    verdict = gate.verdict("https://example.com/anything")
+
+    assert verdict.allowed is True
+    assert verdict.state is RobotsFeedState.NOT_FOUND
+    assert verdict.reason is None
+
+
+@pytest.mark.parametrize("status", sorted(NOT_FOUND_STATUSES))
+def test_absent_statuses_are_not_found(status: int) -> None:
+    """Статус ``not_found`` берётся из таксономии порта (``NOT_FOUND_STATUSES``)."""
+
+    def fetch(_host: str) -> str:
+        raise CrawlNotFound(f"HTTP {status}", http_status=status)
+
+    assert RobotsGate(fetch).verdict("https://example.com/x").state is (
+        RobotsFeedState.NOT_FOUND
+    )
+
+
+def test_not_found_statuses_mirror_ports_contract() -> None:
+    """Локальная копия статусов не разъехалась с контрактом ``ports`` (направление
+    зависимости ``ports → util`` запрещает импорт, поэтому равенство пинится тестом)."""
+    from core.util.robots import _ROBOTS_ABSENT_STATUSES
+
+    assert _ROBOTS_ABSENT_STATUSES == NOT_FOUND_STATUSES
+
+
+def test_explicit_feed_state_is_honoured() -> None:
+    """Фетчер вправе сообщить состояние явно (``RobotsFeed``) вместо «текст либо None»."""
+    missing = RobotsGate(lambda _host: RobotsFeed(RobotsFeedState.NOT_FOUND))
+    assert missing.verdict("https://example.com/x").state is RobotsFeedState.NOT_FOUND
+    assert missing.verdict("https://example.com/x").allowed is True
+
+    broken = RobotsGate(lambda _host: RobotsFeed(RobotsFeedState.UNAVAILABLE))
+    assert broken.verdict("https://example.com/x").allowed is False
+
+
+def test_empty_feed_is_fetched_and_allows_everything() -> None:
+    """Пустая лента — прочитанный факт «разрешено всё», а не отсутствие наблюдения."""
+    gate = RobotsGate(lambda _host: "")
+    verdict = gate.verdict("https://example.com/x")
+    assert verdict.state is RobotsFeedState.FETCHED
+    assert verdict.allowed is True
+
+
+def test_disabled_axis_reports_state_without_fetching() -> None:
+    """Выключенная ось — состояние ``disabled`` и ни одного запроса к ленте."""
+    calls: list[str] = []
+
+    def fetch(host: str) -> str:
+        calls.append(host)
+        return DISALLOW
+
+    verdict = RobotsGate(fetch).verdict("https://example.com/blocked", enabled=False)
+
+    assert verdict.state is RobotsFeedState.DISABLED
+    assert verdict.allowed is True
+    assert calls == []
+
+
+def test_not_checked_before_first_observation() -> None:
+    """``observed_state`` не делает сетевого шага: «ещё не спрашивали» ≠ «не смогли»."""
+    gate = RobotsGate(lambda _host: DISALLOW)
+    assert gate.observed_state("https://example.com/x") is RobotsFeedState.NOT_CHECKED
+    gate.verdict("https://example.com/x")
+    assert gate.observed_state("https://example.com/x") is RobotsFeedState.FETCHED
+
+
+def test_per_origin_observation_is_cached() -> None:
+    """Один ``robots.txt`` на origin за прогон: повторные проверки не ходят в сеть."""
+    calls: list[str] = []
+
+    def fetch(host: str) -> str:
+        calls.append(host)
+        return DISALLOW
+
+    gate = RobotsGate(fetch)
+    for url in ("https://example.com/a", "https://example.com/b", "https://example.com/c"):
+        gate.verdict(url)
+    assert calls == ["example.com"]
 
 
 def test_disallow_refused() -> None:
     gate = RobotsGate(lambda _host: DISALLOW)
-    assert gate.allowed("https://example.com/blocked") is False
+    verdict = gate.verdict("https://example.com/blocked")
+    assert verdict.allowed is False
+    assert verdict.reason == ROBOTS_DISALLOW_REASON
+    assert verdict.state is RobotsFeedState.FETCHED
     assert gate.allowed("https://example.com/open") is True
 
 
@@ -78,11 +195,17 @@ def test_crawl_delay_reported() -> None:
     assert RobotsGate(lambda _host: None).crawl_delay("https://example.com/x") is None
 
 
-def test_fetch_error_is_allowed_default() -> None:
+def test_fetch_error_is_unavailable_not_absent() -> None:
+    """Сетевой сбой — отсутствие наблюдения, а не «правил нет» (≠ ``not_found``)."""
+
     def boom(_host: str) -> str:
         raise RuntimeError("no robots")
 
-    assert RobotsGate(boom).allowed("https://example.com/x") is True
+    gate = RobotsGate(boom)
+    verdict = gate.verdict("https://example.com/x")
+    assert verdict.allowed is False
+    assert verdict.state is RobotsFeedState.UNAVAILABLE
+    assert gate.crawl_delay("https://example.com/x") is None
 
 
 def test_crawl_probe_reexports_single_implementation() -> None:

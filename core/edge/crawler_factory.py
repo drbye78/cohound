@@ -25,6 +25,7 @@ from __future__ import annotations
 from core.adapters.crawl_browser import BrowserCrawler
 from core.adapters.crawl_http import HttpCrawler
 from core.adapters.crawl_scrapy import ScrapyCrawler
+from core.ports.crawl_errors import CrawlNotFound
 from core.ports.crawler import CrawlerPort
 from core.ports.types import FetchMode, FetchPlan
 from core.util.robots import RobotsGate
@@ -37,9 +38,12 @@ def build_robots_gate(user_agent: str | None) -> RobotsGate:
 
     Фетч ``robots.txt`` ленивый (при первом ``allowed(host)``) и идёт **внутри** ``fetch``
     страницы, который планировщик уже пейсит (:class:`~core.util.rate_limit.RateLimiter`):
-    отдельного пейсера не заводим. Недоступная лента трактуется как «правил нет»
-    (:class:`RobotsGate`), отказ ``Disallow`` несёт ``refusal_reason="robots_disallow"``
-    (адаптер, egress-слой). ``user_agent`` — операционная настройка с ядра
+    отдельного пейсера не заводим. **Три исхода чтения ленты** (:class:`RobotsGate`):
+    прочитано — разрешено всё; ``404``/``410`` (:class:`CrawlNotFound` пропускается наружу) —
+    ``not_found``, тоже разрешено всё; 5xx/сеть/таймаут (``None``) — ``unavailable``, origin
+    **не обходится** (RFC 9309 §2.3.1.4: «не смог прочитать запрет» ≠ «запрета нет»).
+    Код отказа у адаптера различает причины: ``robots_disallow`` против
+    ``robots_unavailable``. ``user_agent`` — операционная настройка с ядра
     (``deploy.yaml:crawl.user_agent``); ``None``/пустое ⇒ ``"*"``.
 
     Module-level и picklable by reference (как :func:`crawler_factory`): воркер-процесс
@@ -50,10 +54,15 @@ def build_robots_gate(user_agent: str | None) -> RobotsGate:
     def fetch(host: str) -> str | None:
         try:
             page = HttpCrawler().fetch(f"https://{host}/robots.txt", FetchPlan(FetchMode.HTTP))
-        except Exception:  # noqa: BLE001 — недоступный robots.txt = «правил нет»
+        except CrawlNotFound:
+            # ``404``/``410`` — ответ origin «ленты нет»; гейт выведет ``not_found``.
+            # Глотать здесь значило бы запретить origin, про который сказано обратное.
+            raise
+        except Exception:  # noqa: BLE001 — 5xx/сеть/таймаут = наблюдения нет
             return None
+        # Пустой прочитанный ответ — факт, а не ``None`` (см. ``_normalize_feed``).
         raw = getattr(page, "content", b"") or b""
-        return raw.decode("utf-8", errors="replace") if raw else None
+        return raw.decode("utf-8", errors="replace")
 
     return RobotsGate(fetch, user_agent=user_agent)
 

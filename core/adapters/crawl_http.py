@@ -255,17 +255,19 @@ class HttpCrawler:
 
         # D1/§10: robots.txt-запрет — отказ (не сбой). Персистентный отказ не латаем
         # кэшем: проверяем до обращения к кэшу (кэш мог быть добыт до появления правил).
-        # Гейт **условен**: проверяем только когда политика внедрена И ``plan.robots``
-        # (политика приходит с ядра; при выключенном robots лишних fetch нет).
-        if self._robots is not None and plan.robots:
-            try:
-                allowed = self._robots.allowed(url)
-            except Exception:  # noqa: BLE001 — сбой robots-проверки не роняет краул
-                allowed = True
-            if not allowed:
+        # Гейт **условен**: политика внедрена ядром, а ось ``plan.robots`` говорит, спрашивать
+        # ли ленту. При выключенной оси ``verdict`` не делает ни одного запроса и отдаёт
+        # состояние ``disabled``: «не спрашивали» — это факт оси, а не наблюдение.
+        if self._robots is not None:
+            verdict = self._robots.verdict(url, enabled=plan.robots)
+            if not verdict.allowed:
+                # Причина различается машинным кодом: ``robots_disallow`` — сайт запретил,
+                # ``robots_unavailable`` — ленту прочитать не удалось (RFC 9309 §2.3.1.4:
+                # недоступность = запрет origin'а). Смешивать их значило бы утверждать, что
+                # сайт нас запретил, когда мы просто не смогли установить разрешение.
                 raise CrawlRefused(
-                    f"robots.txt запрещает краул {url!r}",
-                    refusal_reason="robots_disallow",
+                    f"robots.txt ({verdict.state.value}) не разрешает краул {url!r}",
+                    refusal_reason=verdict.reason or "robots_disallow",
                 )
 
         key = http_key(url)

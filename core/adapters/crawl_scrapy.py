@@ -3,8 +3,13 @@
 Адаптер загружает страницы и возвращает **сырые байты** в ``RawPage`` (retention,
 I19; 02 §B.1). Ответственность адаптера (01 §3.2, ``ports/crawler.py``):
 
-* **robots=obey** — реальный путь явно выставляет ``ROBOTSTXT_OBEY = True``
-  (дефолт Scrapy при встраивании как библиотеки — ``False``, 05 §2.5);
+* **robots по оси** — политика ``robots.txt`` подчиняется объявленной оси ``plan.robots``,
+  а не константе: ``ROBOTSTXT_OBEY=True`` держится в дефолтных настройках (дефолт Scrapy при
+  встраивании как библиотеки — ``False``, 05 §2.5), а при выключенной оси запрос несёт
+  ``meta={"dont_obey_robotstxt": True}`` — стоковый ``RobotsTxtMiddleware`` в этом случае
+  вообще не обращается к ленте (проверено по исходнику установленной 2.19.0:
+  ``process_request`` начинается с этой проверки). До исправления объявленное
+  ``crawl.robots: false`` на Scrapy-пути **не действовало** — конфиг врал;
 * **похоповая валидация редиректов** (R10) — стоковые ``RedirectMiddleware`` и
   ``MetaRefreshMiddleware`` заменяются подклассами, которые проверяют цель каждого хопа
   (``validate_url``) и при нарушении поднимают ``IgnoreRequest``, **не** выпуская запрос;
@@ -205,6 +210,11 @@ class _CrawlSpec:
     (R10). Отдельный флаг, а не ``error_kind``: ``FailureKind`` описывает наблюдения
     краула/конвейера, а это отказ транспорта до запроса — он поднимается как
     ``CrawlUrlError``, ровно как отказ входного URL.
+
+    ``robots`` — **объявленная ось** ``FetchPlan.robots``: ``True`` (дефолт) — Scrapy
+    соблюдает ``robots.txt``; ``False`` — запрос несёт ``dont_obey_robotstxt``, и лента не
+    запрашивается вовсе. Дефолт ``True`` повторяет прежнее поведение пути, где ось не
+    читалась.
     """
 
     url: str
@@ -217,6 +227,7 @@ class _CrawlSpec:
     error_kind: str | None = None
     http_status: int | None = None
     unsafe_redirect: bool = False
+    robots: bool = True
 
 
 # Активные ``CrawlerRunner``: держим ссылку, пока краул не завершён (иначе движок
@@ -278,11 +289,14 @@ def _record_failure(spec: _CrawlSpec, failure: Any) -> None:
         spec.error_kind = FailureKind.NOT_FOUND.value
         spec.error = f"HTTP {status} для {spec.url!r}: ресурс отсутствует"
         return
-    if _is_oversize_failure(failure):
+    if (evidence := _oversize_evidence(failure)) is not None:
         spec.error_kind = FailureKind.PAYLOAD_TOO_LARGE.value
+        # Путь классификации — в наблюдение: структурный признак (тип загрузчика) или
+        # последний рубеж (подстрока). Без этого «почему решили, что ответ велик»
+        # неотличимо от догадки.
         spec.error = (
             f"Scrapy-краул {spec.url!r}: ответ превысил "
-            f"DOWNLOAD_MAXSIZE ({_failure_value(failure)})"
+            f"DOWNLOAD_MAXSIZE ({evidence}: {_failure_value(failure)})"
         )
         return
     spec.error = f"Scrapy-краул {spec.url!r} не удался: {_failure_value(failure)}"
@@ -368,6 +382,47 @@ def _default_thread_factory(target: Callable[[], None]) -> threading.Thread:
     return threading.Thread(target=target, name="cohound-scrapy-reactor", daemon=True)
 
 
+def _request_meta(spec: _CrawlSpec) -> dict[str, Any]:
+    """``meta`` одного запроса Scrapy по плану: playwright-опции и ось ``robots``.
+
+    Ось ``robots`` реализуется **per-request** (``dont_obey_robotstxt``), а не только
+    глобальной настройкой ``ROBOTSTXT_OBEY``: настройка одна на движок, поэтому
+    объявленное ``robots: false`` на ней не действовало (конфиг врал). Проверено на
+    установленной 2.19.0: ``RobotsTxtMiddleware.process_request`` первым делом делает
+    ``if request.meta.get("dont_obey_robotstxt"): return`` — то есть лента для такого
+    запроса не запрашивается вовсе, а не «скачивается и игнорируется».
+
+    Обратное направление (``spec.robots=True``) **не** ставит ``dont_obey_robotstxt``:
+    соблюдение ленты остаётся на ``ROBOTSTXT_OBEY=True`` из дефолтных настроек, чтобы
+    операторский ``scrapy_settings`` мог ослабить его осознанно, а адаптер не отменял
+    объявленную ось двумя разными способами.
+    """
+    meta: dict[str, Any] = {}
+    if spec.fetch is FetchMode.BROWSER:
+        from scrapy_playwright.page import (  # type: ignore[import-not-found]
+            PageMethod,
+        )
+
+        methods = []
+        if spec.wait_for:
+            methods.append(
+                PageMethod(
+                    "wait_for_function",
+                    spec.wait_for,
+                    timeout=_WAIT_FOR_TIMEOUT_MS,
+                )
+            )
+        meta = {
+            "playwright": True,
+            # Page не удерживаем: иначе без закрытия краул повисает (V5).
+            "playwright_include_page": False,
+            "playwright_page_methods": methods,
+        }
+    if not spec.robots:
+        meta["dont_obey_robotstxt"] = True
+    return meta
+
+
 def _default_crawl(settings: Mapping[str, Any], spec: _CrawlSpec) -> Any:
     """Свежий ``CrawlerRunner`` на один submit; возвращает ``Deferred`` паука.
 
@@ -382,35 +437,15 @@ def _default_crawl(settings: Mapping[str, Any], spec: _CrawlSpec) -> Any:
         name = "cohound-fetch"
 
         async def start(self):  # noqa: ANN201 - сигнатура Scrapy 2.19
-            meta: dict[str, Any] = {}
-            if spec.fetch is FetchMode.BROWSER:
-                from scrapy_playwright.page import (  # type: ignore[import-not-found]
-                    PageMethod,
-                )
-
-                methods = []
-                if spec.wait_for:
-                    methods.append(
-                        PageMethod(
-                            "wait_for_function",
-                            spec.wait_for,
-                            timeout=_WAIT_FOR_TIMEOUT_MS,
-                        )
-                    )
-                meta = {
-                    "playwright": True,
-                    # Page не удерживаем: иначе без закрытия краул повисает (V5).
-                    "playwright_include_page": False,
-                    "playwright_page_methods": methods,
-                }
             # dont_filter=True: один и тот же URL в разных fetch не дедуплицируется.
             # Условные заголовки — те же, что несёт план (additive; пусто = как раньше).
+            # meta — playwright-опции и per-request ось robots (см. ``_request_meta``).
             yield Request(
                 spec.url,
                 callback=self._collect,
                 errback=self._failed,
                 dont_filter=True,
-                meta=meta,
+                meta=_request_meta(spec),
                 headers=spec.headers or None,
             )
 
@@ -477,32 +512,68 @@ def _is_robots_refusal(failure: Any) -> bool:
     return str(value).strip() == _ROBOTS_REFUSAL_MESSAGE
 
 
-def _is_oversize_failure(failure: Any) -> bool:
-    """Похоже ли исключение на превышение ``DOWNLOAD_MAXSIZE`` (Scrapy/Twisted).
+#: Метки пути классификации превышения потолка (пишутся в наблюдение). Структурный
+#: признак — тип исключения загрузчика; подстрока — последний рубеж на случай, когда
+#: типа в таксономии Scrapy не оказалось.
+OVERSIZE_BY_TYPE = "тип DownloadCancelledError"
+OVERSIZE_BY_MESSAGE = "подстрока сообщения"
 
-    Scrapy не гарантирует стабильного типа между версиями (``FileSizeError``/
-    ``StopDownload``/``PotentialDataLoss``), поэтому класс и сообщение проверяются
-    терпимо; этого достаточно, чтобы отобразить исход в ``payload_too_large``, а не в
-    бесцветный ``source_unavailable``.
 
-    Фактическая формулировка загрузчика (``get_maxsize_msg``) —
-    ``"Expected to receive N bytes which is larger than download max size (M) in
-    request …"``: ни одно из прежних терпимых совпадений её не ловит. Тип здесь не
-    годится как единственный признак: ``DownloadCancelledError`` поднимается и на
-    обычную отмену загрузки, без всякого потолка размера.
+def _download_cancelled_error() -> type[BaseException] | None:
+    """Тип «загрузчик отменил загрузку» (``scrapy.exceptions.DownloadCancelledError``)."""
+    try:
+        from scrapy.exceptions import (  # type: ignore[import-not-found]
+            DownloadCancelledError,
+        )
+    except ImportError:  # модуль импортируется и без Scrapy (см. шапку)
+        return None
+    return DownloadCancelledError
+
+
+def _oversize_message(message: str) -> bool:
+    """Подстрочный признак превышения — **последний рубеж**, а не основной путь.
+
+    Фактическая формулировка загрузчика (``get_maxsize_msg``): «Expected to receive N
+    bytes which is larger than download max size (M) in request …». Набор терпимый, потому
+    что Scrapy не обещает стабильного текста между версиями; в штатном пути этот признак
+    недостижим — срабатывает структурный (см. :func:`_oversize_evidence`).
     """
-    value = _failure_value(failure)
-    name = type(value).__name__.lower()
-    message = str(value).lower()
     return (
-        "filesize" in name
-        or "stopdownload" in name
-        or "maxsize" in message
+        "maxsize" in message
         or "maximum size" in message
         or "larger than download max size" in message
         or "downloaded more than" in message
         or "too large" in message
     )
+
+
+def _oversize_evidence(failure: Any) -> str | None:
+    """Чем установлено превышение потолка ``DOWNLOAD_MAXSIZE``: тип или подстрока.
+
+    **Основной путь — структурный.** Загрузчик Scrapy отменяет загрузку, поднимая
+    ``scrapy.exceptions.DownloadCancelledError``; проверено по исходнику установленной
+    2.19.0: maxsize-abort поднимает его **без** ``__cause__`` (``http11.py:594`` —
+    pre-check по ``Content-Length``; ``handlers/_base_streaming.py:277`` — потоковый
+    путь; ``_http2/stream.py:461``), а отмена транспорта приходит обёрнутой
+    (``scrapy/utils/_download_handlers.py:59``: ``raise DownloadCancelledError(str(e))
+    from e``, где ``e`` — Twisted ``CancelledError``). Поэтому «тип совпал и причины нет»
+    отличает потолок отмены от прочих отмен без чтения текста.
+
+    Подстрока остаётся **последним рубежом** на случай, если тип в таксономии не найден
+    (Scrapy нет в окружении / сменился тип). Прошлый набор подстрок уже промахнулся на
+    фактической формулировке, поэтому он больше не единственный критерий, а путь
+    классификации попадает в наблюдение (``error`` элемента сеанса).
+    """
+    value = _failure_value(failure)
+    cancelled = _download_cancelled_error()
+    if cancelled is not None and isinstance(value, cancelled):
+        return OVERSIZE_BY_TYPE if value.__cause__ is None else None
+    return OVERSIZE_BY_MESSAGE if _oversize_message(str(value).lower()) else None
+
+
+def _is_oversize_failure(failure: Any) -> bool:
+    """Похоже ли исключение на превышение ``DOWNLOAD_MAXSIZE`` (см. :func:`_oversize_evidence`)."""
+    return _oversize_evidence(failure) is not None
 
 
 def _as_crawl_error(url: str, exc: BaseException) -> CrawlError:
@@ -966,6 +1037,7 @@ class ScrapyCrawler:
             wait_for=plan.wait_for,
             headers=headers,
             cached=cached,
+            robots=bool(plan.robots),
         )
         fut: Future[bool] = Future()
         timeout_s = self._submit_timeout(settings)

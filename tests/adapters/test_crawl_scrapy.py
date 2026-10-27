@@ -1137,3 +1137,179 @@ def test_other_ignore_request_is_not_unsafe_redirect() -> None:
     assert not isinstance(excinfo.value, CrawlUrlError)
     assert _spec_of(worker).unsafe_redirect is False
 
+
+# ---------------------------------------------------------------------------
+# R1: ось ``plan.robots`` действует per-request, а не остаётся константой движка
+# ---------------------------------------------------------------------------
+
+class _RecordingDeferred:
+    """Дублёр ``Deferred``: ``_default_crawl`` вешает на него снятие ссылки runner'а."""
+
+    def addBoth(self, _fn):  # noqa: ANN001, ANN201 - минимум для _default_crawl
+        return self
+
+
+class _RecordingRunner:
+    """Дублёр ``CrawlerRunner``: запоминает класс паука, движок не поднимается."""
+
+    last: _RecordingRunner | None = None
+
+    def __init__(self, settings) -> None:  # noqa: ANN001 - позиционная сигнатура Scrapy
+        self.settings = dict(settings)
+        self.spider_class: type | None = None
+        type(self).last = self
+
+    def crawl(self, spider_class):  # noqa: ANN001, ANN201 - сигнатура Scrapy
+        self.spider_class = spider_class
+        return _RecordingDeferred()
+
+
+def _request_of(spec: _CrawlSpec, monkeypatch: pytest.MonkeyPatch):  # noqa: ANN202
+    """Настоящий запрос реального паука: ``meta`` собирается боевым кодом адаптера."""
+    import asyncio
+
+    import scrapy.crawler
+
+    from core.adapters.crawl_scrapy import _default_crawl
+
+    monkeypatch.setattr(scrapy.crawler, "CrawlerRunner", _RecordingRunner)
+    _default_crawl({}, spec)
+    runner = _RecordingRunner.last
+    assert runner is not None and runner.spider_class is not None
+    spider = runner.spider_class("cohound-fetch")
+
+    async def first():  # noqa: ANN202 - async-генератор ``start`` паука
+        return await anext(spider.start())
+
+    return asyncio.run(first())
+
+
+def test_robots_axis_off_disables_obedience_per_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``plan.robots=False`` → ``meta['dont_obey_robotstxt']``: конфиг перестаёт врать.
+
+    ``ROBOTSTXT_OBEY`` — одна настройка на движок, поэтому объявленное ``robots: false``
+    на ней не действовало: Scrapy всё равно проверял ленту. Ось реализуется per-request
+    (проверено по исходнику 2.19.0: ``RobotsTxtMiddleware.process_request`` первым делом
+    смотрит именно этот meta-ключ).
+    """
+    pytest.importorskip("scrapy")
+    spec = _CrawlSpec(url=URL, fetch=FetchMode.HTTP, wait_for=None, robots=False)
+
+    request = _request_of(spec, monkeypatch)
+
+    assert request.meta.get("dont_obey_robotstxt") is True
+
+
+def test_robots_axis_on_keeps_obedience(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``plan.robots=True`` не ставит ``dont_obey_robotstxt``: лента соблюдается."""
+    pytest.importorskip("scrapy")
+    spec = _CrawlSpec(url=URL, fetch=FetchMode.HTTP, wait_for=None, robots=True)
+
+    request = _request_of(spec, monkeypatch)
+
+    assert "dont_obey_robotstxt" not in request.meta
+
+
+def test_obedience_default_setting_stays_on() -> None:
+    """Дефолт движка по-прежнему соблюдает ленту (ось гасит её только per-request)."""
+    from core.adapters.crawl_scrapy import DEFAULT_SCRAPY_SETTINGS
+
+    assert DEFAULT_SCRAPY_SETTINGS["ROBOTSTXT_OBEY"] is True
+
+
+class _CapturingWorker:
+    """Шов воркера: запоминает ``spec`` и «успешно» завершает без тела."""
+
+    def __init__(self) -> None:
+        self.specs: list[_CrawlSpec] = []
+
+    def submit(self, settings, spec: _CrawlSpec, fut, timeout_s) -> None:  # noqa: ANN001
+        self.specs.append(spec)
+        fut.set_result(True)
+
+    def close(self) -> None:
+        pass
+
+
+@pytest.mark.parametrize("axis", [True, False])
+def test_plan_robots_axis_reaches_the_request_spec(axis: bool) -> None:
+    """Ось плана доезжает до запроса: ``FetchPlan.robots`` → ``_CrawlSpec.robots``."""
+    worker = _CapturingWorker()
+    crawler = ScrapyCrawler(worker=worker)
+
+    with pytest.raises(CrawlError):
+        crawler.fetch(URL, FetchPlan(robots=axis))
+
+    assert _spec_of(worker).robots is axis  # type: ignore[arg-type]
+
+
+# ---------------------------------------------------------------------------
+# R6: «слишком большой ответ» — по структурному признаку, подстрока — последний рубеж
+# ---------------------------------------------------------------------------
+
+def _download_cancelled(message: str, *, cause: BaseException | None = None) -> BaseException:
+    """Реальный ``DownloadCancelledError`` установленной Scrapy (иначе skip)."""
+    exceptions = pytest.importorskip("scrapy.exceptions")
+    exc = exceptions.DownloadCancelledError(message)
+    exc.__cause__ = cause
+    return exc
+
+
+def test_oversize_is_detected_by_type_without_any_message() -> None:
+    """Пустое сообщение, но тип загрузчика — уже ``payload_too_large``.
+
+    Тест падает, если вернуть подстрочный матчинг как единственный: подстроки здесь нет.
+    """
+    from core.adapters.crawl_scrapy import OVERSIZE_BY_TYPE, _oversize_evidence
+
+    assert _oversize_evidence(_FakeFailure(_download_cancelled(""))) == OVERSIZE_BY_TYPE
+
+
+def test_transport_cancel_is_not_oversize() -> None:
+    """Обёрнутая отмена транспорта (``DownloadCancelledError`` **с** причиной) — не потолок."""
+    from core.adapters.crawl_scrapy import _oversize_evidence
+
+    wrapped = _download_cancelled("cancelled", cause=RuntimeError("slot closed"))
+    assert _oversize_evidence(_FakeFailure(wrapped)) is None
+
+
+def test_oversize_end_to_end_names_the_classification_path() -> None:
+    """Наблюдение называет путь: без этого «почему решили, что ответ велик» — догадка."""
+    from core.adapters.crawl_scrapy import OVERSIZE_BY_TYPE
+
+    worker = _FailingWorker(_FakeFailure(_download_cancelled("")))
+    crawler = ScrapyCrawler(worker=worker)
+
+    with pytest.raises(CrawlPayloadTooLarge) as excinfo:
+        crawler.fetch(URL)
+
+    assert excinfo.value.failure_kind == FailureKind.PAYLOAD_TOO_LARGE.value
+    spec = _spec_of(worker)  # type: ignore[arg-type]
+    assert spec.error_kind == FailureKind.PAYLOAD_TOO_LARGE.value
+    assert spec.error is not None and OVERSIZE_BY_TYPE in spec.error
+
+
+def test_substring_path_remains_last_resort_and_is_labelled() -> None:
+    """Подстрока остаётся последним рубежом — и это видно в наблюдении."""
+    from core.adapters.crawl_scrapy import OVERSIZE_BY_MESSAGE, _oversize_evidence
+
+    expected = (
+        "Expected to receive 125727643 bytes which is larger than download "
+        "max size (20971520) in request <GET https://example.com/big.zip>."
+    )
+    assert _oversize_evidence(_FakeFailure(RuntimeError(expected))) == OVERSIZE_BY_MESSAGE
+
+
+def test_structural_oversize_survives_twisted_failure_wrapping() -> None:
+    """Twisted ``Failure`` не теряет тип и причину: классификация та же, что у голого исключения."""
+    from twisted.python.failure import Failure
+
+    from core.adapters.crawl_scrapy import OVERSIZE_BY_TYPE, _oversize_evidence
+
+    plain = _download_cancelled("")
+    wrapped = Failure(plain)
+
+    assert wrapped.value is plain
+    assert _oversize_evidence(wrapped) == OVERSIZE_BY_TYPE

@@ -513,16 +513,16 @@ class BrowserCrawler:
 
         # D1/§10: robots.txt-запрет — отказ (не сбой транспорта); элемент терминален, и
         # frontier от него не расширяется (обрабатывает pipeline). Гейт **условен**:
-        # проверяем только когда политика внедрена И ``plan.robots`` (политика с ядра).
-        if self._robots is not None and plan.robots:
-            try:
-                allowed = self._robots.allowed(url)
-            except Exception:  # noqa: BLE001 — сбой robots-проверки не роняет краул
-                allowed = True
-            if not allowed:
+        # политика внедрена ядром, ось ``plan.robots`` решает, спрашивать ли ленту (при
+        # выключенной оси запроса нет, состояние ``disabled``). Причина отказа различается
+        # машинным кодом: ``robots_disallow`` — сайт запретил, ``robots_unavailable`` —
+        # лента недоступна и origin не обходится (RFC 9309 §2.3.1.4).
+        if self._robots is not None:
+            verdict = self._robots.verdict(url, enabled=plan.robots)
+            if not verdict.allowed:
                 raise CrawlRefused(
-                    f"robots.txt запрещает краул {url!r}",
-                    refusal_reason="robots_disallow",
+                    f"robots.txt ({verdict.state.value}) не разрешает краул {url!r}",
+                    refusal_reason=verdict.reason or "robots_disallow",
                 )
 
         if self._rate_limiter is not None:
