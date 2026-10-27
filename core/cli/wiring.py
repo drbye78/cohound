@@ -76,11 +76,13 @@ from core.adapters.llm_local import (
     DEFAULT_TIMEOUT as EVALUATOR_DEFAULT_TIMEOUT,
 )
 from core.adapters.llm_local import (
-    GenerateFn as EvaluatorGenerateFn,
-)
-from core.adapters.llm_local import (
+    EVALUATOR_DEFAULT_SEED,
+    EVALUATOR_DEFAULT_TEMPERATURE,
     LocalEvaluator,
     normalize_api_base,
+)
+from core.adapters.llm_local import (
+    GenerateFn as EvaluatorGenerateFn,
 )
 from core.adapters.registry_generic import (
     GenericRegistryFetcher,
@@ -167,6 +169,7 @@ from core.util.document_formats import (
 )
 from core.util.hashing import short_hash
 from core.util.logging import PhaseLogger
+from core.util.redirects import follow_validated_redirects
 from core.util.robots import RobotsGate
 from core.util.sitemap import MAX_SITEMAP_ENTRIES
 
@@ -664,7 +667,9 @@ def _module_installed(name: str) -> bool:
     return importlib.util.find_spec(name) is not None
 
 
-def build_search_adapter(adapter: str) -> SearchAdapterPort:
+def build_search_adapter(
+    adapter: str, *, cache: ContentAddressedCache | None = None
+) -> SearchAdapterPort:
     """Собирает внешний поисковый адаптер по имени для ``hound discover`` (``03`` §D.6).
 
     Провайдер — данные-конфигурация (не предметная категория, §1.3). Реальный адаптер
@@ -673,12 +678,16 @@ def build_search_adapter(adapter: str) -> SearchAdapterPort:
     кандидатами (I19) — это решает :func:`core.cli.main.cmd_discover`.
 
     :param adapter: имя адаптера из :data:`SUPPORTED_SEARCH_ADAPTERS`.
+    :param cache: глобальный content-addressed кэш (R7). Тот же объект, что получают
+        краулеры: адаптер кэширует им ``fetch``, а pipeline — ответы поиска
+        (``cache/serp``, :func:`core.pipeline.search_log.external_search_observed`).
+        ``None`` — без кэша (``--from-scratch``).
     :raises WiringError: неизвестный адаптер.
     """
     if adapter == "yandex":
-        return YandexSearchAdapter()
+        return YandexSearchAdapter(cache=cache)
     if adapter == "glm":
-        return GlmSearchAdapter()
+        return GlmSearchAdapter(cache=cache)
     raise WiringError(
         f"неизвестный поисковый адаптер: {adapter!r}; "
         f"поддерживаются: {', '.join(SUPPORTED_SEARCH_ADAPTERS)}"
@@ -695,16 +704,25 @@ def _llm_configured(adapter: Any) -> bool:
 def _search_adapter_configured(adapter: Any) -> bool:
     """Готов ли реальный поисковый адаптер к вызовам (зависимость и учётные данные).
 
+    Условие — **конъюнкция** (S9b): адаптер объявляет себя доступным (``available`` —
+    его собственный вердикт по **всем** требуемым швам, см. ``search_yandex``/
+    ``search_glm``) **и** учётные данные на месте. Прежняя редакция выходила из проверки
+    по первому ``False`` — это то же ``and``, но записанное так, что «доступен» и «есть
+    ключ» выглядели независимыми воротами; при одном внедрённом ``http_get`` гейт
+    пропускал адаптер, который падал в ``search()``.
+
     Все известные адаптеры (``yandex``/``glm``) выставляют атрибут ``api_key``; без
     ключа такой адаптер не готов, и кандидаты не выдумываются (I19). Логика остаётся
     generic: если у адаптера нет атрибута ``api_key`` вовсе, достаточно доступности
     (``available``) — иначе он ошибочно блокировался бы. Для инъектированного
     тестового шва проверка не применяется (см. ``cmd_discover``).
     """
-    if not bool(getattr(adapter, "available", True)):
-        return False
+    available = bool(getattr(adapter, "available", True))
     # Атрибут ``api_key`` есть → он обязан быть непустым; нет атрибута → хватает доступности.
-    return not (hasattr(adapter, "api_key") and not getattr(adapter, "api_key", None))
+    has_key = not (
+        hasattr(adapter, "api_key") and not getattr(adapter, "api_key", None)
+    )
+    return available and has_key
 
 
 class SearchResolutionError(WiringError):
@@ -731,6 +749,7 @@ def resolve_and_build_search_adapter(
     explicit: str | None,
     injected: Any | None = None,
     no_search: bool = False,
+    cache: ContentAddressedCache | None = None,
 ) -> tuple[Any | None, str | None]:
     """Разрешает провайдера поиска и собирает адаптер (общий хелпер ``discover``/scout).
 
@@ -743,6 +762,9 @@ def resolve_and_build_search_adapter(
       против :data:`SUPPORTED_SEARCH_ADAPTERS` → :func:`build_search_adapter` → проверка
       готовности (:func:`_search_adapter_configured`).
 
+    :param cache: глобальный content-addressed кэш (R7), передаётся в адаптер; ``None``
+        — без кэша (``--from-scratch``). Тот же объект обслуживает ``fetch`` адаптера и
+        SERP-кэш pipeline: второй кэш на тот же корень заводить незачем.
     :returns: ``(adapter, provider)`` — провайдер для провенанса (I23).
     :raises SearchResolutionError: неизвестный провайдер (``code="search"``) либо
         недоступный реальный адаптер (``code="I19"``).
@@ -763,7 +785,7 @@ def resolve_and_build_search_adapter(
             "(config/deploy.yaml search.adapter/by_language либо --search-adapter); "
             f"поддерживаются: {', '.join(SUPPORTED_SEARCH_ADAPTERS)}",
         )
-    adapter = build_search_adapter(provider)
+    adapter = build_search_adapter(provider, cache=cache)
     if not _search_adapter_configured(adapter):
         raise SearchResolutionError(
             "I19",
@@ -1199,8 +1221,17 @@ def build_evaluator_llm(
         base_url=str(resolved_base).strip(),
         api_key=(resolved_key or None),
         timeout=resolved_timeout,
-        seed=0 if seed is None else seed,
-        temperature=0.0 if temperature is None else temperature,
+        seed=EVALUATOR_DEFAULT_SEED if seed is None else seed,
+        temperature=(
+            EVALUATOR_DEFAULT_TEMPERATURE if temperature is None else temperature
+        ),
+        # V5: потолок генерации из слота. До правки поле читалось только
+        # discovery-адаптером, а оценщик уходил без ``max_tokens`` — потолок задавал
+        # сервер, и обрезание приходило как невалидный JSON. Одна константа на провод,
+        # провенанс (``llm_scenarios.max_tokens``) и адаптер.
+        max_tokens=(
+            slot_config.max_tokens if slot_config is not None else None
+        ),
     )
 
 
@@ -1908,6 +1939,7 @@ class _LocalExtractor:
 def build_worker_extractor(
     level: DocumentLevel = DocumentLevel.FULL,
     pdf_pipeline: PdfPipeline = PdfPipeline.STRUCTURED,
+    document_timeout: float | None = None,
 ) -> ExtractorPort:
     """Строит экстрактор **внутри** воркер-процесса (P4/P5/P7; picklable by reference, §7).
 
@@ -1930,13 +1962,22 @@ def build_worker_extractor(
     в trafilatura — ровно тот дефект, из-за которого они умирали в ``parser_failed``.
     ``version``/поведение HTML при этом не меняются: ``_LocalExtractor(html, None).version``
     равен версии HTML-адаптера.
+
+    **P8/F7: ``document_timeout``.** Явно объявленная ось ``crawl.document_timeout_s``
+    доезжает до docling; ``None`` — ось не объявлена, и действует прежняя таблица уровней
+    (:data:`core.adapters.extract_document._LEVEL_DOCUMENT_TIMEOUT_S`, включая ``full: None``).
+    Подстановка дефолта оси вместо ``None`` запрещена: 1800 с — потолок **задачи** фазы,
+    а не per-level таймаут конвертера, и подмена изменила бы поведение прогонов, которые
+    ось не объявляли.
     """
     html = HtmlExtractor()
     pipeline = PdfPipeline(pdf_pipeline)
     pdf: ExtractorPort | None = None
     documents: DoclingDocumentExtractor | None = None
     if level is not DocumentLevel.OFF:
-        candidate = DoclingDocumentExtractor(level=level)
+        candidate = DoclingDocumentExtractor(
+            level=level, document_timeout=document_timeout
+        )
         documents = candidate if candidate.available else None
         if pipeline is PdfPipeline.TEXT_LAYER:
             text_layer = PdfiumDocumentExtractor()
@@ -2243,6 +2284,7 @@ def _build_local_ports(
     vector_index: VectorIndexPort | None = None,
     lexical_index: LexicalIndexPort | None = None,
     pdf_pipeline: PdfPipeline = PdfPipeline.STRUCTURED,
+    document_timeout: float | None = None,
 ) -> Ports:
     """Собирает in-process порты профиля ``local`` (без сети/тяжёлых зависимостей).
 
@@ -2273,9 +2315,15 @@ def _build_local_ports(
     ``structured`` (дефолт) — прежний docling, ``text_layer`` — читатель текстового слоя.
     Недоступный явно выбранный механизм — :class:`WiringError` (EXIT_USAGE до прогона), а
     не фолбэк: ``extractor_version`` обязан описывать движок, который реально работал.
+
+    **Таймаут документа (P8/F7).** ``document_timeout`` — значение явно объявленной оси
+    ``crawl.document_timeout_s`` (``None`` — ось не объявлена: docling берёт per-level
+    значение своей таблицы). Раньше ось не доезжала до конвертера вовсе: адаптер имел
+    параметр, а конструктор его не передавал, поэтому объявленный потолок документа не
+    действовал.
     """
     html = HtmlExtractor()
-    documents = DoclingDocumentExtractor()
+    documents = DoclingDocumentExtractor(document_timeout=document_timeout)
     # P7: PDF-механизм — часть композита, а не «настройка внутри docling». ``structured``
     # (дефолт) — тот же docling: поведение и ``version`` байт-в-байт прежние.
     pdf_adapter: ExtractorPort | None = None
@@ -2417,12 +2465,37 @@ class _RegistryHttpClient:
     def get(
         self, url: str, headers: Mapping[str, str], timeout: float | None = None
     ) -> bytes:
+        """GET реестрового URL с похоповой валидацией редиректов (R10).
+
+        ``follow_redirects=False`` у каждого запроса: цикл ведёт
+        :func:`core.util.redirects.follow_validated_redirects`, и каждый ``Location``
+        проходит ``validate_url`` **до** выпуска запроса. Прежде клиент полагался на
+        ``follow_redirects=True``: реестровая страница (внешний, недоверенный ответ) могла
+        увести запрос на ``127.0.0.1``/``10.0.0.1``/metadata-эндпоинт, и SSRF-проверка
+        видела бы уже готовый ответ. Отказ хопа — :class:`RegistryFetchError` с причиной
+        «редирект на небезопасный адрес», чтобы вызывающий отличал SSRF-отказ от
+        недоступности источника по тексту и типу.
+        """
         httpx = self._import_http()
+
+        def _fetch_hop(current: str) -> Any:
+            return httpx.get(
+                current,
+                headers=dict(headers),
+                timeout=timeout,
+                follow_redirects=False,
+            )
+
         try:
-            response = httpx.get(
-                url, headers=dict(headers), timeout=timeout, follow_redirects=True
+            response, _final_url = follow_validated_redirects(
+                _fetch_hop,
+                url,
+                error=RegistryFetchError,
+                label="HTTP-запрос к реестру",
             )
             response.raise_for_status()
+        except RegistryFetchError:
+            raise
         except Exception as exc:  # noqa: BLE001 — единая граница ошибки реестра
             raise RegistryFetchError(f"HTTP-запрос к реестру не удался: {url}") from exc
         return bytes(response.content)
@@ -2604,13 +2677,24 @@ def build_adapters(
         # (операторский ``--pdf-pipeline``) сильнее цепочки: он объявляет механизм этого
         # прогона и обязан действовать и на пробном экстракторе, а не только в Ш5 —
         # иначе диагностика мерила бы другой движок, чем корпус.
+        #
+        # P8/F7: та же цепочка даёт ось ``document_timeout_s``. В адаптер идёт **только
+        # объявленное** значение (``document_timeout_s_explicit``): дефолт оси (1800 с)
+        # равен потолку задачи фазы, а не per-level таймауту конвертера, и его подстановка
+        # изменила бы поведение прогонов, которые ось не объявляли.
+        crawl_limits = resolve_crawl_limits(
+            "",
+            app=(deploy.crawl if deploy is not None else CrawlConfig()),
+            run=run_crawl,
+            profiles=None,
+        )
         if pdf_pipeline is None:
-            pdf_pipeline = resolve_crawl_limits(
-                "",
-                app=(deploy.crawl if deploy is not None else CrawlConfig()),
-                run=run_crawl,
-                profiles=None,
-            ).pdf_pipeline
+            pdf_pipeline = crawl_limits.pdf_pipeline
+        document_timeout = (
+            crawl_limits.document_timeout_s
+            if crawl_limits.document_timeout_s_explicit
+            else None
+        )
         return _build_local_ports(
             evaluator=evaluator,
             registry=registry,
@@ -2628,6 +2712,7 @@ def build_adapters(
             lexical_index=lexical_index,
             embedder=embedder,
             pdf_pipeline=pdf_pipeline,
+            document_timeout=document_timeout,
         )
     if profile == SPLIT_PROFILE:
         config = deploy if deploy is not None else load_deploy_config(None)

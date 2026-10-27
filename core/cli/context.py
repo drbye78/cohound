@@ -15,6 +15,7 @@ import hashlib
 import json
 import sys
 from collections.abc import Callable, Mapping, Sequence
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -1079,6 +1080,11 @@ def _persist_llm_scenarios(store: Any, run_id: str, declared: Any) -> list[str]:
                 seed=row.get("seed"),
                 temperature=row.get("temperature"),
                 constrained_decoding=row.get("constrained_decoding"),
+                # V5/V6: условия генерации. Строка объявлена таблицей
+                # ``_resolve_llm_scenarios`` и обязана дойти до манифеста целиком —
+                # иначе «куда ушёл корпус» и «обрезали ли ответ» остаются догадкой.
+                endpoint_host=row.get("endpoint_host"),
+                max_tokens=row.get("max_tokens"),
             )
             for row in rows
         ]
@@ -1314,6 +1320,21 @@ def _load_registry_specs(
         ) from exc
 
 
+def resolve_content_cache(
+    args: argparse.Namespace, *, no_cache: bool = False
+) -> ContentAddressedCache | None:
+    """R7-кэш прогона по resolved-раскладке (``paths.cache``); ``None`` — без кэша.
+
+    Единственная точка построения объекта: им пользуются и порты (краулеры, поисковый
+    адаптер), и SERP-контур. ``no_cache`` (``--from-scratch``) — единственный
+    документированный способ обхода кэша; без resolved-раскладки (тесты/``--runs-dir``
+    без ``paths``) кэш не строится.
+    """
+    if no_cache:
+        return None
+    paths = getattr(args, "paths", None)
+    return ContentAddressedCache(paths.cache) if paths is not None else None
+
 def _resolve_ports(
     args: argparse.Namespace,
     deploy_config: DeployConfig | None,
@@ -1379,11 +1400,7 @@ def _resolve_ports(
     )
     paths = getattr(args, "paths", None)
     index_root = str(paths.index_store) if paths is not None else "index_store"
-    cache = (
-        None
-        if no_cache
-        else (ContentAddressedCache(paths.cache) if paths is not None else None)
-    )
+    cache = resolve_content_cache(args, no_cache=no_cache)
     evaluator = (
         build_evaluator_llm(
             deploy_llm=deploy_config.llm,
@@ -2024,8 +2041,20 @@ def _resolve_phases(
         ),
         # P5: фабрика per-level экстрактора для inline-пути. Под ``split`` ось
         # ``document_level`` не действует (R-S: edge строит конвертеры сам) — ``None``.
+        # F7: ось ``crawl.document_timeout_s`` обязана доезжать до **воркеров пула** —
+        # это основной путь извлечения. Фабрика передаётся в процесс по ссылке, поэтому
+        # объявленное значение привязывается ``partial`` (picklable: модульная функция +
+        # скалярный kwarg), а не замыканием. Не объявлена — ``None``, и действует
+        # per-level таблица docling: подставлять дефолт оси нельзя, он про задачу фазы.
         "extractor_factory": (
-            build_worker_extractor
+            (
+                build_worker_extractor
+                if getattr(args, "document_timeout_s", None) is None
+                else partial(
+                    build_worker_extractor,
+                    document_timeout=getattr(args, "document_timeout_s", None),
+                )
+            )
             if (deploy_config.profile if deploy_config is not None else LOCAL_PROFILE)
             == LOCAL_PROFILE
             else None
