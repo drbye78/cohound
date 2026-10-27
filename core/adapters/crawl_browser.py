@@ -70,11 +70,12 @@ Playwright при ``launch``/``launch_persistent_context`` добавляет ``
 ``follow_redirects=False`` и ручным redirect-loop: каждый ``Location`` резолвится и
 повторно валидируется (приватный/metadata-хост в редиректе → ``CrawlUrlError``).
 
-**Ошибки.** ``CrawlError`` — базовая (переиспользована из ``crawl_scrapy``); ``CrawlUrlError``
-— отказ SSRF; ``CrawlNotFound`` — определённый ответ ``404``/``410`` (``not_found``; hybrid
-классифицирует, honest — нет, статус в рендере не наблюдаем); ``CrawlUnavailable``
-(локально, как в ``crawl_http``) — нет ``playwright``/``httpx`` или не поднялись
-браузерные бинари.
+**Ошибки.** Таксономия объявлена в порту — ``core.ports.crawl_errors`` (R5), модуль её
+только поднимает: ``CrawlError`` — базовая; ``CrawlUrlError`` — отказ SSRF;
+``CrawlNotFound`` — определённый ответ ``404``/``410`` (``not_found``; hybrid
+классифицирует, honest — нет, статус в рендере не наблюдаем); ``CrawlUnavailable`` — нет
+``playwright``/``httpx`` или не поднялись браузерные бинари (один тип на все транспорты,
+а не локальный дубль).
 
 Нейтрален (§1.3): нет названий продуктов/вендоров/предметных терминов.
 """
@@ -92,15 +93,16 @@ from datetime import UTC, datetime
 from typing import Any, Protocol
 from urllib.parse import urljoin, urlsplit
 
-from core.adapters.crawl_scrapy import (
+from core.domain.enums import CrawlStrategy
+from core.domain.models import RateLimitSpec
+from core.ports.crawl_errors import (
     NOT_FOUND_STATUSES,
     CrawlError,
     CrawlNotFound,
     CrawlRefused,
+    CrawlUnavailable,
     CrawlUrlError,
 )
-from core.domain.enums import CrawlStrategy
-from core.domain.models import RateLimitSpec
 from core.ports.types import FetchMode, FetchPlan, RawPage
 from core.util.cache import ContentAddressedCache, http_key
 from core.util.rate_limit import RateLimiter, jittered_backoff
@@ -120,7 +122,6 @@ __all__ = [
     "BrowserBackend",
     "BrowserCrawler",
     "BrowserSession",
-    "CrawlUnavailable",
     "HttpGetFn",
 ]
 
@@ -165,10 +166,6 @@ _LAUNCH_ARGS: tuple[str, ...] = ("--disable-blink-features=AutomationControlled"
 #: Убирает дефолтный ``--enable-automation`` (в одиночку не помогает — нужен вместе с
 #: ``_LAUNCH_ARGS``; см. замеры в докстринге модуля).
 _IGNORE_DEFAULT_ARGS: tuple[str, ...] = ("--enable-automation",)
-
-
-class CrawlUnavailable(CrawlError):
-    """Браузерный краулер недоступен: нет ``playwright``/``httpx`` или не поднялись бинари."""
 
 
 class BrowserSession(Protocol):

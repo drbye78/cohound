@@ -13,8 +13,7 @@ from typing import Any
 
 import pytest
 
-from core.adapters.crawl_browser import BrowserCrawler, CrawlUnavailable
-from core.adapters.crawl_scrapy import CrawlError
+from core.adapters.crawl_browser import BrowserCrawler
 from core.domain.enums import CrawlStrategy, ExtractionRoute, FetchMode
 from core.pipeline.crawl_probe import (
     MIN_USABLE_TEXT,
@@ -33,6 +32,7 @@ from core.pipeline.crawl_probe import (
     split_header,
 )
 from core.pipeline.crawl_probe_driver import ProbePorts, run_probe
+from core.ports.crawl_errors import CrawlError, CrawlUnavailable
 from core.ports.types import RawPage
 from tests.fakes.crawl_probe import (
     FakeBackend,

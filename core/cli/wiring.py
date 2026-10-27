@@ -38,7 +38,7 @@ from core.adapters.chunker_family import FamilyChunker
 from core.adapters.container_any import container_for
 from core.adapters.crawl_browser import BrowserCrawler
 from core.adapters.crawl_http import HttpCrawler
-from core.adapters.crawl_scrapy import CrawlError, ScrapyCrawler
+from core.adapters.crawl_scrapy import ScrapyCrawler
 from core.adapters.embed_local import LocalEmbedder
 from core.adapters.embed_model2vec import LiteEmbedder, model2vec_available
 from core.adapters.extract_document import DoclingDocumentExtractor
@@ -49,6 +49,7 @@ from core.adapters.extract_text import TextExtractor
 from core.adapters.feed_poller import LocalFeedPoller, RemoteFeedPoller
 from core.adapters.index_npy import NpyIndexBuilder, numpy_available
 from core.adapters.lexical_tantivy import (
+    LEXICAL_SCHEMA_VERSION,
     LexicalChunk,
     TantivyLexicalIndex,
     tantivy_available,
@@ -138,6 +139,7 @@ from core.pipeline.resources import (
     workers_from_budget,
 )
 from core.pipeline.runner import PHASES, Clock, PhaseFn
+from core.ports.crawl_errors import CrawlError
 from core.ports.crawler import CrawlerPort
 from core.ports.discovery_llm import DiscoveryLLMPort
 from core.ports.embedder import EmbedderPort
@@ -387,7 +389,7 @@ def build_vector_index(
 
 
 def _lexical_engine_version() -> str:
-    """Фактический лексический движок прогона — для ``pb``/манифеста партиции (§13:676).
+    """Фактический лексический движок **и схема** прогона — для ``pb``/манифеста (§13:676).
 
     Лексическое плечо R0/R2 в прогоне обслуживает только ``TantivyLexicalIndex``
     (:func:`seed_lexical_index`); in-pipeline BM25 (``adapters.lexical_bm25``) —
@@ -397,7 +399,15 @@ def _lexical_engine_version() -> str:
     строка**: «движка нет», а не «версия неизвестна». Заполненное значение — версия
     движка, которая реально засеет лексический индекс этой сборки.
     """
-    return tantivy_engine_version() if tantivy_available() else ""
+    if not tantivy_available():
+        return ""
+    # Схема входит в строку **версии** намеренно: ``pb_``/``cb_`` — адрес сборки на
+    # диске, и два разных лексических индекса не могут жить под одним адресом. Версия
+    # движка одна и та же при смене схемы (движок тот же), поэтому без схемы ``pb``
+    # различал бы движки, но не различал бы выдачу — тот же класс, что C9 про
+    # разделители формулы. Форма — ``tantivy-<ver>+schema-<v>``: одна строка,
+    # человекочитаемая в манифесте.
+    return f"{tantivy_engine_version()}+schema-{LEXICAL_SCHEMA_VERSION}"
 
 
 def seed_lexical_index(
@@ -421,6 +431,14 @@ def seed_lexical_index(
     ``index.build_id`` — **композиция** (``composition_id``), провенанс R0/R2 и
     ``RetrievalResult.build_id``. Иначе — ``None`` (явное отсутствие; эксперимент
     пропускает R0/R2, N3).
+
+    **Время жизни индекса — прогон (C8, объявлено).** Здесь строится
+    ``TantivyLexicalIndex()`` без ``index_path``, то есть индекс живёт во временном
+    каталоге (``cohound-tantivy-*``) до ``close()``/GC и **не персистится** в
+    ``index_store/``: каждый прогон пересобирает его из персистентных чанков сборки.
+    Это решение, а не недосмотр — источник чанков уже персистентен, персист индекса
+    потребовал бы версии схемы и миграции при смене профиля/движка, а замер стоимости
+    сборки — 0.25 с на 9398 чанков (``adapters/lexical_tantivy.py``, докстринг модуля).
     """
     if not tantivy_available() or not package or store is None:
         return None
@@ -1596,7 +1614,7 @@ def build_scout_crawlers(
     Это исключает ленивое поднятие Playwright/Scrapy, когда они не нужны (A1).
 
     Сборка каждого тяжёлого адаптера обёрнута в guard: недоступность зависимости
-    (:class:`~core.adapters.crawl_scrapy.CrawlError`/``CrawlUnavailable``), ``ImportError``
+    (:class:`~core.ports.crawl_errors.CrawlError`/``CrawlUnavailable``), ``ImportError``
     или ошибка конфигурации (:class:`WiringError`) → движок **опускается**, а не валит всю
     сборку. Отсутствующий ``engine`` в карте — не ошибка: в
     :func:`core.pipeline.corpus.build_corpus` активным остаётся дефолтный ``crawler``.

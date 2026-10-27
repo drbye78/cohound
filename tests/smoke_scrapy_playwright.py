@@ -171,7 +171,8 @@ def _run_multi() -> int:
     """
     from pathlib import Path
 
-    from core.adapters.crawl_scrapy import CrawlError, ScrapyCrawler
+    from core.adapters.crawl_scrapy import ScrapyCrawler
+    from core.ports.crawl_errors import CrawlError
     from core.ports.types import FetchMode, FetchPlan
     from core.util.cache import ContentAddressedCache, http_key
 

@@ -16,11 +16,6 @@ from pathlib import Path
 import pytest
 
 from core.adapters.crawl_scrapy import (
-    CrawlError,
-    CrawlNotFound,
-    CrawlPayloadTooLarge,
-    CrawlRefused,
-    CrawlUrlError,
     ScrapyCrawler,
     _CrawlSpec,
     _raw_page_from_scrapy_response,
@@ -29,6 +24,13 @@ from core.adapters.crawl_scrapy import (
     _scrapy_failure_status,
 )
 from core.domain.enums import FailureKind
+from core.ports.crawl_errors import (
+    CrawlError,
+    CrawlNotFound,
+    CrawlPayloadTooLarge,
+    CrawlRefused,
+    CrawlUrlError,
+)
 from core.ports.types import FetchMode, FetchPlan, RawPage
 from core.util.cache import ContentAddressedCache, http_key
 

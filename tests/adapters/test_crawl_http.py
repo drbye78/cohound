@@ -19,14 +19,15 @@ from typing import Any, cast
 
 import pytest
 
-from core.adapters.crawl_http import CrawlUnavailable, HttpCrawler
-from core.adapters.crawl_scrapy import (
+from core.adapters.crawl_http import HttpCrawler
+from core.domain.enums import FailureKind
+from core.ports.crawl_errors import (
     CrawlError,
     CrawlNotFound,
     CrawlPayloadTooLarge,
+    CrawlUnavailable,
     CrawlUrlError,
 )
-from core.domain.enums import FailureKind
 from core.ports.types import FetchMode, FetchPlan, RawPage
 from core.util.cache import ContentAddressedCache, http_key
 

@@ -20,11 +20,15 @@ from core.adapters.crawl_browser import (
     CHALLENGE_STATUSES,
     HYBRID_MAX_ATTEMPTS,
     BrowserCrawler,
-    CrawlUnavailable,
 )
-from core.adapters.crawl_scrapy import CrawlError, CrawlNotFound, CrawlUrlError
 from core.domain.enums import CrawlStrategy, FailureKind
 from core.domain.models import RateLimitSpec
+from core.ports.crawl_errors import (
+    CrawlError,
+    CrawlNotFound,
+    CrawlUnavailable,
+    CrawlUrlError,
+)
 from core.ports.types import FetchMode, FetchPlan, RawPage
 from core.util.cache import ContentAddressedCache, http_key
 from core.util.rate_limit import RateLimiter

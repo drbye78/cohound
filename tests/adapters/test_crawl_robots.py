@@ -13,8 +13,8 @@ import pytest
 
 from core.adapters.crawl_browser import BrowserCrawler
 from core.adapters.crawl_http import HttpCrawler
-from core.adapters.crawl_scrapy import CrawlRefused
 from core.domain.models import RateLimitSpec
+from core.ports.crawl_errors import CrawlRefused
 from core.ports.types import FetchPlan
 from core.util.robots import RobotsGate
 

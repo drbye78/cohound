@@ -56,12 +56,15 @@ Twisted-реактор и не требуют браузеров. Если ``fet
 настоящий Scrapy. Дополнительно ``worker`` позволяет подменить общий реактор-воркер
 (детерминированные юнит-тесты без Twisted/сети).
 
-**Ошибки.** Сбой фетча поднимает ``CrawlError`` (pipeline изолирует по документу и
+**Ошибки.** Таксономия сбоев объявлена в порту — ``core.ports.crawl_errors`` (R5):
+``CrawlError``, ``CrawlNotFound`` (``failure_kind="not_found"``), ``CrawlUrlError``
+(``CrawlError`` + ``ValueError``), ``CrawlRefused`` (политика), ``CrawlPayloadTooLarge``,
+``CrawlUnavailable`` (движок не поднялся). Этот модуль их **не объявляет** — только
+поднимает. Сбой фетча здесь — ``CrawlError`` (pipeline изолирует по документу и
 отображает на ``source_unavailable``). Определённый ответ «ресурса нет» (HTTP 404/410)
-поднимает ``CrawlNotFound`` — подкласс ``CrawlError`` с ``failure_kind="not_found"``:
-pipeline делает такой исход терминальным (без повторов) и не считает origin нечитаемым.
-Отклонённый SSRF-валидацией URL поднимает ``CrawlUrlError`` (подкласс и ``CrawlError``,
-и ``ValueError``) — и на входе, и на любом хопе редиректа.
+поднимает ``CrawlNotFound``: pipeline делает такой исход терминальным (без повторов) и
+не считает origin нечитаемым. Отклонённый SSRF-валидацией URL поднимает ``CrawlUrlError``
+— и на входе, и на любом хопе редиректа.
 
 Нейтрален (§1.3): в модуле нет названий продуктов/вендоров; профили — данные.
 """
@@ -82,25 +85,26 @@ from typing import Any, Protocol, cast, runtime_checkable
 
 from core.domain.enums import FailureKind
 from core.domain.models import DEFAULT_MAX_RESPONSE_BYTES
+from core.ports.crawl_errors import (
+    NOT_FOUND_STATUSES,
+    CrawlError,
+    CrawlNotFound,
+    CrawlPayloadTooLarge,
+    CrawlRefused,
+    CrawlUrlError,
+)
 from core.ports.types import FetchMode, FetchPlan, RawPage
 from core.util.cache import ContentAddressedCache, http_key
 from core.util.security import validate_url
 
+#: Таксономия сбоев (``CrawlError`` и подклассы) объявлена в **порту** —
+#: ``core.ports.crawl_errors`` (R5), а не здесь: её ловит вызывающий, не зная транспорта.
+#: Здесь остаются только константы исполнения этого транспорта.
 __all__ = [
     "DEFAULT_MAX_RESPONSE_BYTES",
     "DEFAULT_SCRAPY_SETTINGS",
-    "NOT_FOUND_STATUSES",
-    "CrawlError",
-    "CrawlNotFound",
-    "CrawlPayloadTooLarge",
-    "CrawlRefused",
-    "CrawlUrlError",
     "ScrapyCrawler",
 ]
-
-#: HTTP-статусы определённого ответа «ресурса нет» (404/410). Классификация общая для
-#: всех транспортов, видящих статус ответа: HTTP, Scrapy и hybrid-путь браузера.
-NOT_FOUND_STATUSES: frozenset[int] = frozenset({404, 410})
 
 # Внедряемый фетчер: callable ``(url, plan) -> RawPage``. Объект с методом
 # ``fetch(url, plan)`` также принимается (см. ``PageFetcher``).
@@ -150,100 +154,6 @@ _STARTUP_TIMEOUT = 30.0
 _SHUTDOWN_TIMEOUT = 10.0
 # Таймаут JS-ожидания для browser-профиля (совпадает с navigation timeout).
 _WAIT_FOR_TIMEOUT_MS = 15000
-
-
-class CrawlError(Exception):
-    """Базовая ошибка краулера. Pipeline отображает её на ``source_unavailable``.
-
-    ``http_status`` — **наблюдаемость**, а не классификация: фактический HTTP-статус
-    ответа, если транспорт успел его увидеть (429/403/503/404 …). Он протаскивается
-    до ``crawl_session_items.http_status``, чтобы оператор различал транзиентный
-    rate-limit/недоступность (повтор осмыслен) и политический запрет (повтор
-    бессмысленен). Класс отказа (``failure_kind``/``refusal_reason``) от статуса
-    **не зависит** — таксономия ``FailureKind`` этим полем не расширяется.
-    ``None`` — статус неизвестен (сетевой сбой до ответа, SSRF-отказ и т.п.).
-    """
-
-    def __init__(self, message: str = "", *, http_status: int | None = None) -> None:
-        super().__init__(message)
-        self.http_status = http_status
-
-
-class CrawlUrlError(CrawlError, ValueError):
-    """URL отклонён SSRF-валидацией (небезопасная/некорректная цель).
-
-    Множественное наследование намеренно: вызывающий может ловить и как
-    ``CrawlError``, и как ``ValueError`` (``validate_url`` поднимает ``ValueError``).
-    """
-
-
-class CrawlRefused(CrawlError):
-    """Краул URL **отказан** по политике (не сбой транспорта). D1/§10.
-
-    Единственный носитель — ``robots.txt``-запрет: адаптер (egress-слой) отказывает URL,
-    происходит ли это от ``Disallow``. ``refusal_reason`` — машинный код причины
-    (``"robots_disallow"``); pipeline помечает элемент терминальным с этим кодом и **не**
-    расширяет frontier от отказа. Отличается от ``CrawlError`` (недоступность источника)
-    намеренно: отказ — не «источник упал», а соблюдение политики.
-    """
-
-    def __init__(
-        self,
-        message: str,
-        *,
-        refusal_reason: str = "robots_disallow",
-        http_status: int | None = None,
-    ) -> None:
-        super().__init__(message, http_status=http_status)
-        self.refusal_reason = refusal_reason
-
-
-class CrawlNotFound(CrawlError):
-    """Источник **определённо** ответил, что ресурса нет (HTTP 404/410).
-
-    Это не недоступность источника: origin прочитан, и ответ окончателен. Поэтому
-    ``failure_kind`` несёт ``FailureKind.NOT_FOUND``: pipeline пишет его в
-    ``crawl_session_items.error_kind``, считает исход терминальным (без повторов) и
-    **не** делает origin нечитаемым (``derive_corpus_coverage`` уже игнорирует
-    ``not_found``). ``failed`` при этом остаётся классом сбоя, а не статусом (I4).
-
-    Отдельно от :class:`CrawlRefused` намеренно: отказ — соблюдение политики
-    (``robots.txt``), а здесь — ответ сервера об отсутствии ресурса. Смешивать их
-    значило бы потерять различие «мы не пошли» / «нам ответили».
-
-    Форма повторяет ``CrawlRefused``: машинный код — атрибут экземпляра, который
-    pipeline читает через ``getattr`` (``corpus._commit_local``).
-    """
-
-    def __init__(
-        self,
-        message: str,
-        *,
-        failure_kind: str = FailureKind.NOT_FOUND.value,
-        http_status: int | None = None,
-    ) -> None:
-        super().__init__(message, http_status=http_status)
-        self.failure_kind = failure_kind
-
-
-class CrawlPayloadTooLarge(CrawlError):
-    """Ответ превысил свой потолок: страничный ``max_response_bytes`` либо
-    потоковый ``max_stream_bytes`` терминального артефакта (P0/OOM, P6).
-
-    Несёт ``failure_kind = payload_too_large``: pipeline помечает элемент терминальным
-    ``FAILED``, **не** ретейнит байты и не запускает экстракцию. Это осознанная граница
-    исполнения, а не транзиентная недоступность; повтор не помогает (I4: failed, не статус).
-    """
-
-    def __init__(
-        self,
-        message: str,
-        *,
-        failure_kind: str = FailureKind.PAYLOAD_TOO_LARGE.value,
-        http_status: int | None = None,
-    ) -> None:
-        super().__init__(message, http_status=http_status)
-        self.failure_kind = failure_kind
 
 
 @runtime_checkable

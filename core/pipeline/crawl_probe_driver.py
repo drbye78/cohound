@@ -61,6 +61,7 @@ from core.pipeline.crawl_probe import (
     pick_urls,
     unresolved_verdict,
 )
+from core.ports.crawl_errors import CrawlUnavailable
 from core.ports.types import FetchPlan, RawPage
 from core.util.rate_limit import RateLimiter, jittered_backoff
 
@@ -139,12 +140,15 @@ def _host(url: str) -> str:
 
 
 def _is_unavailable(exc: BaseException) -> bool:
-    """Недоступен ли браузерный движок (``CrawlUnavailable``) без импорта адаптеров.
+    """Недоступен ли браузерный движок (:class:`CrawlUnavailable`).
 
-    Класс ``CrawlUnavailable`` объявлен в адаптерах; ``pipeline`` не импортирует
-    ``adapters`` (матрица §1), поэтому признак — имя класса-исключения.
+    Признак — **тип из порта**, а не имя класса. До R5 ``CrawlUnavailable`` был объявлен
+    в адаптерах (и дважды — по своему в ``crawl_http``/``crawl_browser``), ``pipeline``
+    не имел права их импортировать, и различение делалось сравнением
+    ``type(exc).__name__``. Сравнение строк ломалось от переименования, а одинаковое имя
+    у двух разных классов делало признак ложным в одну из сторон.
     """
-    return type(exc).__name__ == "CrawlUnavailable"
+    return isinstance(exc, CrawlUnavailable)
 
 
 def _observe_page(

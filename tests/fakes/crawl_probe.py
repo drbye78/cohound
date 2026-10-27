@@ -13,8 +13,8 @@ from __future__ import annotations
 import hashlib
 from typing import Any
 
-from core.adapters.crawl_scrapy import CrawlError
 from core.domain.enums import CrawlStrategy, ExtractionRoute, FetchMode
+from core.ports.crawl_errors import CrawlError
 from core.ports.types import ExtractedDoc, FetchPlan, RawPage
 
 __all__ = [

@@ -52,7 +52,7 @@ from typing import Any
 from core.adapters.chunker_family import FamilyChunker
 from core.adapters.crawl_browser import BrowserCrawler
 from core.adapters.crawl_http import HttpCrawler
-from core.adapters.crawl_scrapy import CrawlError, ScrapyCrawler
+from core.adapters.crawl_scrapy import ScrapyCrawler
 from core.adapters.extract_document import DoclingDocumentExtractor
 from core.adapters.extract_epub import EpubExtractor
 from core.adapters.extract_html import HtmlExtractor
@@ -65,6 +65,7 @@ from core.edge.poller import FeedPollService
 from core.edge.scheduler import EdgeScheduler
 from core.edge.server import EdgeError, EdgeGateway, ensure_safe_binding, serve
 from core.ports.chunker import ChunkerPort
+from core.ports.crawl_errors import CrawlError
 from core.ports.crawler import CrawlerPort
 from core.ports.extractor import ExtractorPort
 from core.ports.types import ExtractionRoute, FetchMode, FetchPlan, RawPage

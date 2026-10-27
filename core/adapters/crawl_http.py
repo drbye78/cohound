@@ -48,10 +48,10 @@ callable ``(url) -> bytes``. Если он задан, реальный ``httpx`
 поднимает понятную ``CrawlError`` (не молчаливую подмену на HTTP): браузерный рендер — задача
 ``ScrapyCrawler``/playwright.
 
-**Ошибки.** Единый тип ``CrawlError`` (переиспользован из ``crawl_scrapy``), чтобы
-pipeline ловил один класс для всех краулеров; отсутствие ``httpx`` наследует
-``CrawlUnavailable(CrawlError)``. Отказ SSRF — ``CrawlUrlError`` (и на входном URL, и
-на любом хопе редиректа). Ответ ``404``/``410`` —
+**Ошибки.** Таксономия объявлена в порту — ``core.ports.crawl_errors`` (R5), и этот
+модуль её только поднимает: ``CrawlError`` — единый тип для всех транспортов (pipeline
+ловит один класс); отсутствие ``httpx`` — ``CrawlUnavailable(CrawlError)``. Отказ SSRF —
+``CrawlUrlError`` (и на входном URL, и на любом хопе редиректа). Ответ ``404``/``410`` —
 ``CrawlNotFound`` (``failure_kind="not_found"``): ресурса нет, а не источник недоступен.
 
 Нейтрален (§1.3): в модуле нет названий продуктов/вендоров/предметных терминов.
@@ -71,13 +71,14 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urljoin, urlsplit
 
-from core.adapters.crawl_scrapy import (
-    DEFAULT_MAX_RESPONSE_BYTES,
+from core.domain.models import DEFAULT_MAX_RESPONSE_BYTES
+from core.ports.crawl_errors import (
     NOT_FOUND_STATUSES,
     CrawlError,
     CrawlNotFound,
     CrawlPayloadTooLarge,
     CrawlRefused,
+    CrawlUnavailable,
     CrawlUrlError,
 )
 from core.ports.types import FetchMode, FetchPlan, RawPage
@@ -96,7 +97,6 @@ __all__ = [
     "DEFAULT_MAX_RESPONSE_BYTES",
     "DEFAULT_TIMEOUT",
     "DEFAULT_USER_AGENT",
-    "CrawlUnavailable",
     "HttpCrawler",
     "HttpGetFn",
 ]
@@ -117,10 +117,6 @@ DEFAULT_USER_AGENT = "coHound-crawler/0.1"
 #: Заголовки контент-согласования обычной HTML-страницы.
 DEFAULT_ACCEPT = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
 DEFAULT_ACCEPT_LANGUAGE = "ru,en;q=0.7"
-
-
-class CrawlUnavailable(CrawlError):
-    """Лёгкий краулер недоступен: нет ``httpx`` и не внедрён HTTP-шов."""
 
 
 def _httpx_available() -> bool:

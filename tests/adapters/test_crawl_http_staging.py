@@ -22,7 +22,7 @@ from typing import Any
 import pytest
 
 from core.adapters.crawl_http import HttpCrawler
-from core.adapters.crawl_scrapy import CrawlPayloadTooLarge
+from core.ports.crawl_errors import CrawlPayloadTooLarge
 from core.ports.types import FetchPlan, RawPage
 from core.util.cache import ContentAddressedCache, http_key
 from core.util.document_formats import BINARY_SNIFF_BYTES

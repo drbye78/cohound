@@ -19,11 +19,11 @@ from concurrent.futures import Future
 import pytest
 
 from core.adapters.crawl_scrapy import (
-    CrawlError,
     ScrapyCrawler,
     _CrawlSpec,
     _ReactorWorker,
 )
+from core.ports.crawl_errors import CrawlError
 from core.ports.types import FetchMode, RawPage
 
 _SETTINGS: dict[str, int] = {"RETRY_TIMES": 0, "DOWNLOAD_TIMEOUT": 1}

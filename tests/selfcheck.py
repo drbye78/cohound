@@ -353,6 +353,7 @@ def main() -> int:
     section("Инженерные гейты (W1/T1.4)")
     check("матрица зависимостей core.* (01 §1, ast)", lambda: _import_graph())
     check("§1.3 нейтральность domain/ports/pipeline (грепп)", lambda: _neutrality())
+    check("R5: таксономия краула — из порта, не из адаптера (ast)", lambda: _crawl_taxonomy_from_port())
     check("transitional-шимы schemas.py/db.py удалены", lambda: _shims_removed())
     check("core.domain.__all__ полон (публичные символы домена)", lambda: _domain_all_complete())
 
@@ -1029,6 +1030,94 @@ def _neutrality() -> None:
                     hits.append(f"{py.relative_to(root)}:{i}")
     if hits:
         raise AssertionError("§1.3: предметные термины в нейтральных слоях: " + ", ".join(hits))
+
+
+#: Имена таксономии сбоев краула — контракт порта ``core/ports/crawl_errors.py`` (R5).
+_CRAWL_TAXONOMY = frozenset(
+    {
+        "CrawlError",
+        "CrawlUrlError",
+        "CrawlRefused",
+        "CrawlNotFound",
+        "CrawlPayloadTooLarge",
+        "CrawlUnavailable",
+        "NOT_FOUND_STATUSES",
+    }
+)
+
+
+def _crawl_taxonomy_from_port() -> None:
+    """Таксономия сбоев краула импортируется из порта, а не из адаптера (R5).
+
+    Приём — как у ``_neutrality``, но разбор ``ast``, а не грепп по строке: имя в
+    многострочном ``from ... import (...)`` грепп по одной строке не видит, а
+    ``import core.adapters.crawl_browser as m`` + ``m.CrawlError`` — видит ложно.
+
+    Правило: ни один модуль **вне** ``core/adapters/`` не импортирует имена таксономии
+    из ``core.adapters.*``. Сканируются ``core/`` (все слои, включая ``cli``/``edge``/
+    ``pipeline``), ``tests/``, ``scripts/`` и ``hound.py`` — тесты и смоук тоже не
+    держат старый путь живым. Второе правило — ни один модуль вне адаптеров не
+    **объявляет** такие классы: повторное объявление и есть тот дрейф (``CrawlUnavailable``
+    до R5 существовал дважды), из-за которого гейт нужен.
+    """
+    root = Path(__file__).resolve().parent.parent
+    targets = [
+        root / "hound.py",
+        *sorted((root / "core").rglob("*.py")),
+        *sorted((root / "tests").rglob("*.py")),
+        *sorted((root / "scripts").rglob("*.py")),
+    ]
+    violations = _crawl_taxonomy_violations(targets, root=root)
+    if violations:
+        raise AssertionError(
+            "R5: таксономия краула тянется из адаптера: " + "; ".join(violations)
+        )
+
+
+def _crawl_taxonomy_violations(files, *, root: Path) -> list[str]:
+    """Нарушения правила R5 в перечисленных файлах (пусто — правило держится).
+
+    Вынесено из :func:`_crawl_taxonomy_from_port`, чтобы страж
+    ``tests/test_crawl_error_taxonomy.py`` мог подать **заведомо нарушающий** файл и
+    убедиться, что гейт падает, а не просто «всегда молчит на чистом дереве».
+    """
+    import ast
+
+    adapters_dir = root / "core" / "adapters"
+    declaring_module = root / "core" / "ports" / "crawl_errors.py"
+    violations: list[str] = []
+    for py in files:
+        if not py.is_file():
+            continue
+        try:
+            py.relative_to(adapters_dir)
+            continue  # сама реализация вправе их импортировать/поднимать
+        except ValueError:
+            pass
+        tree = ast.parse(py.read_text(encoding="utf-8"), filename=str(py))
+        where = py.relative_to(root) if py.is_relative_to(root) else py
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.ClassDef)
+                and node.name in _CRAWL_TAXONOMY
+                and py != declaring_module
+            ):
+                violations.append(f"{where}:{node.lineno}: объявлен {node.name} вне порта")
+            if isinstance(node, ast.ImportFrom):
+                mod = node.module or ""
+                if node.level and node.level > 0:
+                    mod = _resolve_relative_import(py, root / "core", node.level, mod) or mod
+                if not mod.startswith("core.adapters"):
+                    continue
+                bad = sorted(
+                    alias.name for alias in node.names if alias.name in _CRAWL_TAXONOMY
+                )
+                if bad:
+                    violations.append(
+                        f"{where}:{node.lineno}: {', '.join(bad)} из {mod}"
+                        " (ожидается core.ports.crawl_errors)"
+                    )
+    return violations
 
 
 def _shims_removed() -> None:
@@ -2560,7 +2649,7 @@ def _report_gates() -> None:
             "execution_change: execution_contract_digest: ec_1 → ec_2",
             "execution_change: execution_contract_digest: различающееся поле не "
             "восстановимо из манифеста (cohort_digest/seeds_digest/extractor_stack/"
-            "serp_rounds/prompt_template/chunking_spec/evaluation_policy либо иная ось)",
+            "serp_rounds/prompt_template/chunking_spec/evaluation_policy/lexical_spec/render_modes_digest/passports_digest либо иная ось)",
         ]
         if contract_reasons != expected_contract_reasons:
             raise AssertionError(

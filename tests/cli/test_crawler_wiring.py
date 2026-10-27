@@ -1002,7 +1002,7 @@ def test_robots_override_false_with_discovery(tmp_path: Path, monkeypatch: pytes
 
 def test_wiring_robots_gate_refusal_is_distinct() -> None:
     """N1: gate из проводки даёт отдельную причину ``robots_disallow`` (не общий сбой)."""
-    from core.adapters.crawl_scrapy import CrawlRefused
+    from core.ports.crawl_errors import CrawlRefused
 
     class _RobotsFetcher:
         engine = "http"
