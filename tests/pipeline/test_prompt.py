@@ -1,10 +1,12 @@
 """Тесты механической компиляции промпта оценщика (T9.1, §7.1/§5).
 
-Проверяют: механическую сборку (rule/absence_rule/сателлиты/чанки), рендер
-``[source: chunk_id]``, детерминированный порядок и порядко-независимый ``prompt_hash``,
+Проверяют: механическую сборку (rule/absence_rule/сателлиты/чанки), рендер фрагмента
+(структурная шапка ``[фрагмент N]``/``source_id``/``document``/``heading``/``context`` +
+дословный текст), детерминированный порядок и порядко-независимый ``prompt_hash``,
 ``render_queries`` (S13), I18-гард (нет инструкций искать; работает только по чанкам,
-без URL), запрет N/A (I7), идемпотентное сохранение ``prompts/{hash}.json`` и
-JSON-раундтрип ``CompiledPrompt``. Фикстуры категорийно-нейтральны (§1.3).
+без URL), запрет N/A (I7), правило языка цитаты и семантику пустого раздела ДАННЫЕ (v5),
+идемпотентное сохранение ``prompts/{hash}.json`` и JSON-раундтрип ``CompiledPrompt``.
+Фикстуры категорийно-нейтральны (§1.3).
 """
 
 from __future__ import annotations
@@ -73,6 +75,16 @@ def _chunk(cid: str, text: str | None = None) -> Chunk:
 
 def _sat(role: str, state: SatelliteState = SatelliteState.DRAFT) -> Satellite:
     return Satellite(role=role, state=state)
+
+
+def _data_section(text: str) -> str:
+    """Только раздел ДАННЫЕ: шапка шаблона тоже упоминает ``document:``/``context:``.
+
+    Проверять отсутствие строки шапки надо в отрендеренных данных, а не во всём промпте:
+    иначе проверка срабатывала бы на самом описании формата.
+    """
+    marker = "--- ДАННЫЕ ---"
+    return text.split(marker, 1)[1] if marker in text else text
 
 
 # ---------------------------------------------------------------------------
@@ -158,14 +170,107 @@ def test_absence_rule_override_changes_text_and_hash() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_chunks_rendered_with_source_marker() -> None:
+def test_chunks_rendered_with_structural_header() -> None:
+    """C7: фрагмент несёт шапку (source_id/документ/заголовок) и дословный текст.
+
+    Текст фрагмента обязан остаться **дословным** фрагментом промпта: цитатная сверка
+    (I22, ``validate.py``) сравнивает цитату с чистым ``text`` чанка, и любая правка
+    текста при рендере сделала бы законную цитату недоказуемой.
+    """
     compiled = compile_prompt(
         param=_param(),
         product_id="p1",
         chunks=[_chunk("c1", "тело один"), _chunk("c2", "тело два")],
     )
-    assert "[source: c1]\nтело один" in compiled.text
-    assert "[source: c2]\nтело два" in compiled.text
+    assert "[фрагмент 1]\nsource_id: c1\n" in compiled.text
+    assert "[фрагмент 2]\nsource_id: c2\n" in compiled.text
+    # Текст идёт после явной границы шапки и остаётся дословным.
+    assert "текст:\nтело один" in compiled.text
+    assert "текст:\nтело два" in compiled.text
+    # Старый маркер ``[source: …]`` больше не печатается: шапка машинно-различима.
+    assert "[source:" not in compiled.text
+
+
+def test_chunk_header_shows_document_heading_and_context() -> None:
+    """Документ и путь заголовков доходят до модели; контекст — отдельной строкой."""
+    chunk = Chunk(
+        chunk_id="prod:9f2ab1c3d4e5:7",
+        chunk_no=7,
+        text="Тело фрагмента.",
+        heading_path="Администрирование > Резервное копирование",
+        context_prefix="Администрирование — раздел про эксплуатацию.",
+        content_hash="h7",
+    )
+    compiled = compile_prompt(param=_param(), product_id="prod", chunks=[chunk])
+    assert "document: prod:9f2ab1c3d4e5\n" in compiled.text
+    assert "heading: Администрирование > Резервное копирование\n" in compiled.text
+    assert "context: Администрирование — раздел про эксплуатацию.\n" in compiled.text
+    assert "текст:\nТело фрагмента." in compiled.text
+
+
+def test_context_prefix_equal_to_heading_is_not_duplicated() -> None:
+    """markdown-чанкер кладёт в ``context_prefix`` тот же путь: дубль не печатается."""
+    chunk = Chunk(
+        chunk_id="doc#1",
+        chunk_no=1,
+        text="Тело.",
+        heading_path="A > B",
+        context_prefix="A > B",
+        content_hash="h",
+    )
+    compiled = compile_prompt(param=_param(), product_id="p1", chunks=[chunk])
+    data = _data_section(compiled.text)
+    assert "heading: A > B\n" in data
+    assert "context:" not in data
+
+
+def test_empty_heading_document_and_context_render_no_garbage() -> None:
+    """Пустые поля шапки **не** дают строк: ни ``None``, ни ``[]``, ни пустых строк.
+
+    Плоский текст не имеет заголовков (``heading_path=""``), а ``chunk_id`` может не
+    нести номера фрагмента — тогда документ не выводится, а не выдумывается.
+    """
+    chunk = Chunk(
+        chunk_id="doc",
+        chunk_no=0,
+        text="Плоский текст.",
+        heading_path="",
+        context_prefix="",
+        content_hash="h",
+    )
+    compiled = compile_prompt(param=_param(), product_id="p1", chunks=[chunk])
+    data = _data_section(compiled.text)
+    assert "document:" not in data
+    assert "heading:" not in data
+    assert "context:" not in data
+    assert "None" not in data
+    assert "[]" not in data
+
+
+def test_retrieved_chunk_has_no_context_line_but_keeps_header() -> None:
+    """Граница порта видна: у ``RetrievedChunk`` нет ``context_prefix``.
+
+    ``RetrievedChunk`` (``core/ports/vector_index.py``) не несёт ``context_prefix``,
+    поэтому на retrieval-пути строка ``context:`` отсутствует. Тест пинит **факт**, а не
+    желаемое: когда порт получит поле, здесь появится ``context:``, и это будет
+    осознанное расширение провенанса, а не тихая подмена.
+    """
+    rc = RetrievedChunk(
+        chunk_id="prod:aa11:0",
+        product_id="prod",
+        text="Векторный текст.",
+        content_hash="h1",
+        heading_path="Раздел",
+        build_id="b1",
+        score=0.9,
+    )
+    compiled = compile_prompt(param=_param(), product_id="prod", chunks=[rc])
+    data = _data_section(compiled.text)
+    assert "source_id: prod:aa11:0\n" in data
+    assert "document: prod:aa11\n" in data
+    assert "heading: Раздел\n" in data
+    assert "context:" not in data
+    assert "текст:\nВекторный текст." in data
 
 
 def test_chunks_ordered_by_chunk_id() -> None:
@@ -174,9 +279,9 @@ def test_chunks_ordered_by_chunk_id() -> None:
         product_id="p1",
         chunks=[_chunk("c3"), _chunk("c1"), _chunk("c2")],
     )
-    i1 = compiled.text.index("[source: c1]")
-    i2 = compiled.text.index("[source: c2]")
-    i3 = compiled.text.index("[source: c3]")
+    i1 = compiled.text.index("source_id: c1")
+    i2 = compiled.text.index("source_id: c2")
+    i3 = compiled.text.index("source_id: c3")
     assert i1 < i2 < i3
     assert compiled.chunk_ids == ["c1", "c2", "c3"]
 
@@ -192,7 +297,8 @@ def test_retrieved_chunk_is_accepted() -> None:
         score=0.9,
     )
     compiled = compile_prompt(param=_param(), product_id="p1", chunks=[rc])
-    assert "[source: c1]\nвекторный текст" in compiled.text
+    assert "source_id: c1\n" in compiled.text
+    assert "текст:\nвекторный текст" in compiled.text
 
 
 def test_prompt_hash_order_independent() -> None:
@@ -428,20 +534,116 @@ def test_absence_guidance_is_addressed_to_the_model_not_to_a_human(
     assert guidance in compiled.text
 
 
-def test_template_version_is_v4_and_older_ones_are_preserved() -> None:
+def test_template_version_is_v5_and_older_ones_are_preserved() -> None:
     """Смена текста шаблона — новая версия; старые файлы остаются провенансом прогонов."""
     from core.pipeline.prompt import TEMPLATES_DIR, _load_template
 
-    assert TEMPLATE_VERSION == "evaluator_v4"
+    assert TEMPLATE_VERSION == "evaluator_v5"
     v1 = TEMPLATES_DIR / "evaluator_v1.txt"
     v2 = TEMPLATES_DIR / "evaluator_v2.txt"
     v3 = TEMPLATES_DIR / "evaluator_v3.txt"
     v4 = TEMPLATES_DIR / "evaluator_v4.txt"
+    v5 = TEMPLATES_DIR / "evaluator_v5.txt"
     assert v1.is_file(), "старый шаблон удалять нельзя: он провенанс прошлых прогонов"
     assert v2.is_file()
     assert v3.is_file()
     assert v4.is_file()
+    assert v5.is_file()
     assert _load_template("evaluator_v1") != _load_template(TEMPLATE_VERSION)
     # v1/v2 остаются байт-в-байт тем, чем были: hash прошлых прогонов не должен «поехать».
     assert "❌ → absence-evidence" in _load_template("evaluator_v1")
     assert "❌ — законный ответ" in _load_template("evaluator_v2")
+    # v4 не переписан: версии шаблонов — провенанс, а не рабочая площадка.
+    assert "КАК ВЫБИРАТЬ МЕЖДУ ⚠️ И ❓" in _load_template("evaluator_v4")
+
+
+# ---------------------------------------------------------------------------
+# C7: шапка фрагмента не ломает цитатную сверку; шаблон описывает новый вход
+# ---------------------------------------------------------------------------
+
+
+def test_chunk_text_stays_a_verbatim_substring_of_the_prompt() -> None:
+    """Цитата, взятая из чанка, остаётся подстрокой промпта (I22 не ломается рендером)."""
+    text = "Резервное копирование   доступно\nтолько в полной версии."
+    chunk = Chunk(
+        chunk_id="prod:aa11:0",
+        chunk_no=0,
+        text=text,
+        heading_path="Резервное копирование",
+        context_prefix="Резервное копирование",
+        content_hash="h",
+    )
+    compiled = compile_prompt(param=_param(), product_id="prod", chunks=[chunk])
+    assert text in compiled.text
+
+
+def test_template_explains_header_and_forbids_quoting_it() -> None:
+    """Модель должна знать, что шапка — метаданные: иначе она процитирует ``heading:``."""
+    compiled = compile_prompt(param=_param(), product_id="p1", chunks=[_chunk("c1")])
+    assert "source_id:" in compiled.text
+    assert "текст:" in compiled.text
+    assert "ШАПКА — МЕТАДАННЫЕ" in compiled.text
+    assert "цитировать нельзя" in compiled.text
+
+
+def test_template_requires_quoting_in_the_fragment_language() -> None:
+    """Правило языка цитаты: перевод цитаты = I22-провал = retry = ``failed``.
+
+    Ни v1–v4 такого правила не содержали, а у нас русский вопрос над англоязычной
+    документацией — ровно та ситуация, где модель склонна переводить.
+    """
+    compiled = compile_prompt(param=_param(), product_id="p1", chunks=[_chunk("c1")])
+    assert "ЯЗЫК ЦИТАТЫ" in compiled.text
+    assert "на языке фрагмента" in compiled.text
+    assert "перевод" in compiled.text.lower()
+    # Шаблон не разрешает перевод даже когда вопрос на другом языке.
+    assert "не повод переводить" in compiled.text
+
+
+def test_template_specifies_empty_data_section_semantics() -> None:
+    """Пустой раздел ДАННЫЕ: семантика названа в шаблоне, а не только в коде.
+
+    Код уже не вызывает модель на пустом срезе (``no_fragments``), но шаблон обязан
+    задавать тот же ответ и для случая, когда пустой блок всё-таки дошёл до модели
+    (например, ручной вызов) — иначе поведение зависело бы от того, кто зовёт.
+    """
+    compiled = compile_prompt(param=_param(), product_id="p1", chunks=[])
+    assert "(нет фрагментов)" in compiled.text
+    assert "ЕСЛИ РАЗДЕЛ ДАННЫЕ ПУСТ" in compiled.text
+    assert "no_fragments" in compiled.text
+
+
+@pytest.mark.parametrize("rule", list(AbsenceRuleType))
+def test_rendered_guidance_has_no_escaped_quotes(rule: AbsenceRuleType) -> None:
+    """Бэкслешей в guidance нет: печатается ``denial_strength="explicit"``.
+
+    Проверка идёт по ``repr``/``ascii``, а не по выводу шелла: терминал искажает
+    обратные слэши, и «на глаз» дефект выглядел исправленным.
+    """
+    assert '\\"' not in repr(ABSENCE_GUIDANCE[rule])
+    assert '\\"' not in ascii(ABSENCE_GUIDANCE[rule])
+    compiled = compile_prompt(
+        param=_param(absence_rule=rule), product_id="p1", chunks=[_chunk("c1")]
+    )
+    assert '\\"' not in repr(compiled.text), rule
+    assert 'denial_strength=\\"explicit\\"' not in ascii(compiled.text)
+
+
+def test_prompt_template_identity_changes_with_v5(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``prompt_template`` = имя@hash условий → v5 даёт новую идентичность прогона.
+
+    Это версионная граница ``execution_versions``: шаблон — условие измерения (§7.1/§7.4),
+    поэтому его смена обязана дать новый ``run_id``, а не правку текущего прогона.
+    Проверяется вызовом: та же формула под ``v4`` даёт другое значение.
+    """
+    from core.pipeline import prompt as prompt_module
+    from core.pipeline.run_identity import _prompt_template_identity
+
+    identity = _prompt_template_identity()
+    assert identity.startswith("evaluator_v5@")
+    monkeypatch.setattr(prompt_module, "TEMPLATE_VERSION", "evaluator_v4")
+    assert _prompt_template_identity() != identity
+    assert _prompt_template_identity().startswith("evaluator_v4@")
+

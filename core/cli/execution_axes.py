@@ -83,12 +83,21 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from core.adapters.chunker_family import composite_chunker_version
+from core.adapters.chunker_family import (
+    composite_chunker_version,
+    composite_chunking_spec,
+)
 from core.adapters.extract_document import (
     DOCLING_ADAPTER_FAMILY,
     docling_engine_build,
 )
 from core.adapters.extract_html import HtmlExtractor
+from core.adapters.llm_local import (
+    EVALUATOR_DEFAULT_SEED,
+    EVALUATOR_DEFAULT_TEMPERATURE,
+    decoder_wire_type,
+    endpoint_host,
+)
 from core.cli.context import (
     _document_level,
     _load_registry_specs,
@@ -111,6 +120,7 @@ from core.config.deploy import (
 from core.domain.dictionary import load_dictionary
 from core.domain.enums import RefreshPolicy
 from core.domain.models import CrawlRunConfig, canonical_rate_limit
+from core.pipeline.evaluation_policy import evaluation_policy_spec
 from core.pipeline.manual_artifacts import load_manual_artifacts
 from core.pipeline.normalize import RunInputs
 from core.pipeline.report import crawl_control_digest
@@ -579,6 +589,14 @@ class DeclaredExecutionAxes:
     #: ``sha256`` **вычислен из байтов** (объявленный — сверка, не основание доверия).
     #: ``None`` — резолвер не вызывался (DI/legacy): «неизвестно», не «пусто».
     manual_artifacts_digest: str | None = None
+    #: C3: геометрия нарезки и состав входа эмбеддера — читается из самих чанкеров
+    #: (:func:`core.adapters.chunker_family.composite_chunking_spec`), поэтому не может
+    #: разъехаться с фактической нарезкой. ``None`` — ось не передана (чистые вызовы,
+    #: legacy-конструкторы в тестах): «не объявлено», а не «выключено».
+    chunking_spec: dict[str, Any] | None = None
+    #: V3: политика повтора оценщика
+    #: (:func:`core.pipeline.evaluation_policy.evaluation_policy_spec`). ``None`` — не объявлена.
+    evaluation_policy: dict[str, Any] | None = None
 
 
 def extractor_stack_version() -> str:
@@ -656,6 +674,11 @@ def _resolve_llm_scenarios(
         slot_name=slot,
         model_id=getattr(args, "llm_model", None),
     )
+    # V5/V6: условия генерации — часть того, что описывает ``run_id``. Поле ``decoder``
+    # до правки было единственным, а ``seed``/``temperature``/``constrained_decoding``
+    # писались NULL, хотя объявлены в схеме и обещаны §7.1/02 C.1: манифест не мог
+    # подтвердить даже greedy-режим, не говоря о форме ответа. Значения берутся из тех же
+    # констант, что уходят в адаптер (одна формула, не вторая).
     row = {
         "scenario": "evaluator",
         "model_id": model_id,
@@ -664,6 +687,16 @@ def _resolve_llm_scenarios(
         # I18: оценщик без веб-тула — структурная гарантия, а не настройка.
         "web_tool": False,
         "decoder": decoder,
+        # Метка и провод: провенанс называет **исполненный** механизм, а не запрошенную
+        # метку (V4: в живом прогоне манифест объявлял json_object, шёл json_schema).
+        "constrained_decoding": decoder_wire_type(decoder),
+        "seed": EVALUATOR_DEFAULT_SEED,
+        "temperature": EVALUATOR_DEFAULT_TEMPERATURE,
+        # Хост endpoint'а: «куда ушёл корпус» — факт манифеста. Схема/путь/секрет сюда
+        # не входят намеренно (V6). Стенд RnD объявлен исключением в спеке §10 и обязан
+        # быть виден именно здесь.
+        "endpoint_host": endpoint_host(str(base_url)),
+        "max_tokens": getattr(config, "max_tokens", None),
     }
     return (row,)
 
@@ -834,6 +867,10 @@ def resolve_declared_axes(
         # Смена строки — версионная граница ``execution_versions`` (§13), меняет ``run_id``;
         # ``METHODOLOGY_VERSION`` не затрагивается.
         chunker_version=composite_chunker_version(),
+        # C3/V3: геометрия нарезки и политика повтора. Обе величины — «функция кода и
+        # входа», а не наблюдение: читаются из тех же мест, откуда их берёт исполнение.
+        chunking_spec=composite_chunking_spec(),
+        evaluation_policy=evaluation_policy_spec(),
         llm_scenarios=_resolve_llm_scenarios(args=args, inputs=inputs, deploy=config),
         extractor_stack=extractor_stack_version(),
         # 13-manual-artifacts §3.2: ручные артефакты объявлены файлом пакета, поэтому

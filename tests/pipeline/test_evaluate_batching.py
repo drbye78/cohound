@@ -24,9 +24,12 @@ from core.domain import (
     AbsenceRuleType,
     AnchorRelation,
     CatalogRow,
+    CellState,
     Cohort,
     CohortEntry,
     CorpusCoverage,
+    DenialStrength,
+    FailureKind,
     Importance,
     LLMCellOutput,
     ParamType,
@@ -519,3 +522,60 @@ def test_dense_batch_failure_is_visible_and_falls_back() -> None:
     assert any("dense batch" in error for error in result.errors)
     assert vector_index.search_calls  # поштучный путь отработал
     assert result.cells  # ячейки построены, а не потеряны
+
+# ---------------------------------------------------------------------------
+# (ж) сбой ретривала — failed (I4), а не измеренное «❓»
+# ---------------------------------------------------------------------------
+
+class _BrokenLexicalIndex:
+    """Лексический индекс, который **падает**: прибор отказал, а не «ничего не нашёл»."""
+
+    engine_version = "fake-bm25-1"
+    build_id = "build-lex"
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def search(self, query, product_ids, top_k, lang=None):  # noqa: ANN001, ANN202
+        self.calls += 1
+        raise RuntimeError("индекс недоступен")
+
+def _store_without_protected_cells() -> SqliteStore:
+    return _store()
+
+def test_retrieval_failure_is_failed_not_unknown() -> None:
+    """Упавший ретривал даёт ``failed`` с ``instrument_failed``, а не ``❓ no_fragments``.
+
+    Регрессия, которую ловит тест: пустой срез перестал тратить вызов модели, и если
+    отказ прибора приходит в оценку как «нет ключа в карте чанков» → ``()``, то ячейка
+    публикуется как измеренное «вендор не заявил». I4 запрещает статус при отказе
+    инструмента: ``failed`` — единственный честный исход, и он виден в ``errors``.
+    """
+    store = _store_without_protected_cells()
+    plan = _plan()
+    index = _BrokenLexicalIndex()
+    evaluator = FakeEvaluator(default=_ok_output("chunk-p1"))
+    ports = Ports(evaluator=evaluator, lexical_index=index)
+    try:
+        result = evaluate_phase(
+            plan=plan, ports=ports, store=store, run_id=RUN_ID, profile="R0", cutoff_k=3
+        )
+        persisted = list(store.iter_cells(RUN_ID))
+    finally:
+        store.close()
+
+    assert result.status == "ok"
+    # Индекс реально вызывался и реально падал — сценарий не вырожденный.
+    assert index.calls >= 1
+    assert any("retrieval: RuntimeError" in error for error in result.errors)
+    # Модель не вызывалась: оценивать было нечего, и это не «пустой срез».
+    assert evaluator.calls == []
+    assert persisted
+    for cell in persisted:
+        assert cell.state is CellState.FAILED
+        assert cell.status is None  # I4: failed никогда не статус
+        scope = cell.evidence_scope
+        assert scope is not None
+        assert scope.denial_strength is DenialStrength.INSTRUMENT_FAILED
+        assert scope.termination == FailureKind.SEARCH_FAILED.value
+        assert "no_fragments" not in (cell.validation_notes or [])

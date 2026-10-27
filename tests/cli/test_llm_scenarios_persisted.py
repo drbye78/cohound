@@ -81,7 +81,8 @@ def _rows(runs_dir: Path, run_id: str) -> list[tuple[Any, ...]]:
     try:
         return conn.execute(
             "SELECT run_id, scenario, model_id, model_version, endpoint_kind, web_tool,"
-            " decoder, seed, temperature, constrained_decoding FROM llm_scenarios"
+            " decoder, seed, temperature, constrained_decoding, endpoint_host, max_tokens"
+            " FROM llm_scenarios"
         ).fetchall()
     finally:
         conn.close()
@@ -111,7 +112,20 @@ def test_run_persists_declared_scenario_binding(
 
     rows = _rows(runs_dir, "llm-scen-run")
     assert len(rows) == 1
-    run_id, scenario, model_id, version, endpoint, web_tool, decoder, seed, temp, _ = rows[0]
+    (
+        run_id,
+        scenario,
+        model_id,
+        version,
+        endpoint,
+        web_tool,
+        decoder,
+        seed,
+        temp,
+        constrained,
+        host,
+        max_tokens,
+    ) = rows[0]
     assert run_id == "llm-scen-run"
     assert scenario == "evaluator"
     assert model_id == "cheap-model"
@@ -119,7 +133,13 @@ def test_run_persists_declared_scenario_binding(
     assert endpoint == "api"
     assert web_tool == 0  # I18: оценщик без веб-тула — по построению
     assert decoder == "json_object"
-    assert seed is None and temp is None  # не объявлены — не выдумываем
+    # V4/V5/V6: условия генерации объявлены и записаны. До правки три колонки были NULL,
+    # а endpoint не писался вовсе — манифест не мог подтвердить ни greedy-режим, ни форму
+    # ответа, ни «куда ушёл корпус».
+    assert seed == 0 and temp == 0.0  # greedy — исполненный режим, а не «неизвестно»
+    assert constrained == "json_object"  # исполненный механизм = провод, а не метка слота
+    assert host == "llm.test"  # хост без схемы/пути; секрета здесь нет по построению
+    assert max_tokens is None  # слот не объявлял потолок — действует дефолт провайдера
 
 
 def test_crawl_persists_declared_scenario_binding(tmp_path: Path, home: Path) -> None:

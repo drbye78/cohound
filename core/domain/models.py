@@ -1153,6 +1153,13 @@ class ScenarioBinding(BaseModel):
     seed: int | None = None
     temperature: float | None = None
     constrained_decoding: str | None = None
+    #: Хост endpoint'а без схемы и пути (V6). Нужен потому, что «куда ушёл корпус» —
+    #: факт манифеста, а не догадка: ``endpoint_kind: api`` одинаково описывает и
+    #: внутренний шлюз, и внешний стенд RnD. Секрет здесь не хранится никогда.
+    endpoint_host: str | None = None
+    #: Потолок генерации, с которым шёл вызов (V5). ``None`` — серверный дефолт
+    #: провайдера; это тоже факт условия измерения, а не отсутствие значения.
+    max_tokens: int | None = None
 
     @model_validator(mode="after")
     def _check(self) -> ScenarioBinding:

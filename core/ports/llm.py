@@ -33,6 +33,10 @@ class LLMRequest:
     model_version: str = ""
     seed: int | None = None
     temperature: float | None = None
+    #: Потолок генерации (V5). ``None`` — дефолт адаптера/провайдера. Условие измерения,
+    #: а не «настройка вида»: без потолка сервер выбирает сам, и обрезание приходит как
+    #: ``finish_reason=length`` с пустым текстом, неотличимое от невалидного JSON.
+    max_tokens: int | None = None
 
 
 @dataclass(frozen=True)

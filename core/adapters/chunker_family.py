@@ -26,8 +26,52 @@ from core.adapters.chunker_text import TextChunker, TextChunkerPort
 from core.ports.types import Chunk, ExtractedDoc
 from core.util.document_formats import FAMILY_TEXT
 
-__all__ = ["FamilyChunker", "composite_chunker_version"]
+__all__ = [
+    "EMBED_INPUT_FIELDS",
+    "FamilyChunker",
+    "composite_chunker_version",
+    "composite_chunking_spec",
+]
 
+
+#: Из каких полей чанка собирается текст, уходящий в эмбеддер. Часть **условия
+#: измерения**, а не деталь реализации: смена состава меняет индекс, не меняя версию
+#: правил нарезки, поэтому она обязана попадать в ``run_id`` через
+#: :func:`composite_chunking_spec`. Сегодня — только ``text`` (``context_prefix``
+#: генерируется и хранится, но в эмбеддинг не входит).
+EMBED_INPUT_FIELDS: tuple[str, ...] = ("text",)
+
+def composite_chunking_spec() -> dict[str, object]:
+    """Геометрия нарезки и состав входа эмбеддера — объявленная часть контракта (C3).
+
+    **Зачем это отдельно от ``chunker_version``.** ``chunker_version`` — метка-строка
+    (``"md-heading-2+text-para-1"``), а не вывод из геометрии. Правка ``chunk_size`` на
+    другое число давала другой корпус чанков при том же ``run_id``: тот же класс дефекта,
+    за который проект ругает себя в ``embed_model_id``. Здесь геометрия **читается из
+    самих чанкеров** (не из копии констант), поэтому разъехаться с фактической нарезкой
+    она не может: поменяли дефолт в чанкере — поменялся контракт.
+
+    Значения — только объявленные дефолты конструкторов. Свойства конкретного прогона
+    (наблюдаемые размеры чанков) остаются провенансом и в контракт не входят.
+    """
+    markdown = MarkdownChunkerPort()
+    text = TextChunkerPort()
+    # Версии правил сюда **не** входят: их несёт ``chunker_version`` (композит
+    # ``"md-...+text-..."``). Дублировать их значило бы получить две оси, меняющиеся
+    # вместе, и потерять различение «изменились правила нарезки» vs «изменилась
+    # геометрия» — а это разные вопросы при разборе расхождения прогонов.
+    return {
+        "embed_input": list(EMBED_INPUT_FIELDS),
+        "markdown": {
+            "chunk_size": getattr(markdown, "chunk_size", None),
+            "chunk_overlap": getattr(markdown, "chunk_overlap", None),
+            "min_chunk_size": getattr(markdown, "min_chunk_size", None),
+        },
+        "text": {
+            "chunk_size": getattr(text, "chunk_size", None),
+            "min_chunk_size": getattr(text, "min_chunk_size", None),
+        },
+    }
 
 def composite_chunker_version() -> str:
     """Объявленная ``chunker_version``: версия markdown-чанкера + версия текстового.

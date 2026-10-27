@@ -470,7 +470,10 @@ def test_cmd_run_full_local_writes_manifest_with_real_compute_report(
     )
     ports = Ports(
         evaluator=evaluator,
-        lexical_index=FakeLexicalIndex(),
+        # Профиль R0 — лексический: один чанк в индексе, чтобы ретривал отдал непустой
+        # срез. Пустой срез по новому правилу модель не вызывает (``no_fragments``),
+        # и проверка «evaluate вызвала оценщик» стала бы тождеством ``0 == 0``.
+        lexical_index=FakeLexicalIndex(docs=[_p1_chunk()]),
         **_offline_crawl_kwargs(),
     )
 
@@ -799,13 +802,13 @@ def _absent_evaluator_ports() -> Ports:
     )
 
 
-def _retrieval_ports() -> Ports:
-    """Порты с рабочим ретривалом (лексика + dense), чтобы Ш6 реально разрешил профиль.
+def _p1_chunk() -> RetrievedChunk:
+    """Единственный чанк продукта ``p1`` для фейковых индексов.
 
-    Без dense-плеча профиль R1/R2 в оценке падает в изоляцию ретривала (ячейка без
-    провенанса) — тогда проверка «ячейки несут измеренный профиль» была бы вакуумной.
+    Он не «декорация»: без него ретривал возвращает пустой срез, оценщик не вызывается,
+    и любая проверка «оценка действительно исполнилась» становится вакуумной (0 == 0).
     """
-    chunk = RetrievedChunk(
+    return RetrievedChunk(
         chunk_id="chunk_a1",
         product_id="p1",
         text="Свойство А доступно.",
@@ -814,6 +817,14 @@ def _retrieval_ports() -> Ports:
         build_id="ib_fake",
         score=1.0,
     )
+
+def _retrieval_ports() -> Ports:
+    """Порты с рабочим ретривалом (лексика + dense), чтобы Ш6 реально разрешил профиль.
+
+    Без dense-плеча профиль R1/R2 в оценке падает в изоляцию ретривала (ячейка без
+    провенанса) — тогда проверка «ячейки несут измеренный профиль» была бы вакуумной.
+    """
+    chunk = _p1_chunk()
     return Ports(
         evaluator=FakeEvaluator(
             default=LLMCellOutput(

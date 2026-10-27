@@ -144,6 +144,11 @@ def test_declared_axes_are_deterministic(tmp_path: Path) -> None:
         "serp_rounds",
         "serp_source",
         "manual_artifacts_digest",
+        # C3: геометрия нарезки отдельно от метки ``chunker_version`` — правка
+        # ``chunk_size`` меняла корпус, не меняя ``run_id``.
+        "chunking_spec",
+        # V3: политика повтора меняет вердикты (повтор переиздаёт запрос).
+        "evaluation_policy",
     }
 
 
@@ -214,7 +219,7 @@ def test_chunker_version_is_a_composite_of_both_chunkers(tmp_path: Path) -> None
     declared = _resolve(_package(tmp_path))
 
     assert declared.chunker_version == f"{MarkdownChunker.version}+{TextChunker.version}"
-    assert declared.chunker_version == "md-heading-2+text-para-1"
+    assert declared.chunker_version == "md-heading-3+text-para-2"
     assert MarkdownChunker.version in declared.chunker_version
     assert TextChunker.version in declared.chunker_version
 
@@ -346,6 +351,11 @@ def test_llm_scenarios_are_deterministic_rows(tmp_path: Path) -> None:
             "endpoint_kind": "api",
             "web_tool": False,
             "decoder": "json_object",
+            "constrained_decoding": "json_object",
+            "seed": 0,
+            "temperature": 0.0,
+            "endpoint_host": "llm.test",
+            "max_tokens": None,
         },
     )
     assert "run_id" not in rows[0]

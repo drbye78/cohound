@@ -10,6 +10,7 @@ resp    = evaluator.complete(LLMRequest(prompt, LLMCellOutput, ...))   # I18: б
 valid   = validate_output(resp.output, chunks_by_id, ...)              # T9.4/§10
 strict:      passed → evaluated · не прошёл → failed (retry ≤2)
 preliminary: passed → evaluated · не прошёл → preliminary-кандидат
+empty:       chunks=() → evaluated ❓, validation_notes=[no_fragments] — вызова модели нет
 ```
 
 **Границы (I16/I17/I18/I20).** Ретривал выполняет **вызывающий**: ``evaluate_cell``
@@ -111,6 +112,8 @@ __all__ = [
     "DEFAULT_QUERY_EMBED_BATCH",
     "DEFAULT_RETRIEVAL_CUTOFF_K",
     "DEFAULT_RETRIEVAL_PROFILE",
+    "DENIAL_QUOTE_WITHOUT_MARKERS",
+    "NO_FRAGMENTS_REASON",
     "REVALIDATE_FAILED_PREFIX",
     "REVALIDATE_NOTHING_TO_DO",
     "REVALIDATE_SKIP_BUILD_MISMATCH",
@@ -165,6 +168,22 @@ EXPLICIT_WITHOUT_CITATION_REASON = "explicit_without_citation"
 #: Токен причины, по которой ``❌``-претензия модели без цитаты осталась ``not_stated``:
 #: «материал релевантен, но дословного утверждения нет» — это незнание, не отсутствие.
 ABSENT_CLAIM_WITHOUT_DENIAL_REASON = "absent_claim_without_denial_citation"
+
+#: Первоклассная заметка **пустого среза**: оценщику не передан ни один фрагмент.
+#:
+#: Пустой срез — это не вопрос к модели, а факт о ретривале, поэтому вызов не делается
+#: вовсе (``evaluate_cell`` → ``no_fragments``), а ячейка получает ``❓`` с этой заметкой.
+#: Отличие от «искали, вендор молчит» принципиально: там модель прочитала фрагменты и
+#: ничего не нашла в них, здесь материала не было ни одного. Без отдельного токена оба
+#: состояния выглядели бы одинаково (`❓` + пустые ``validation_notes``), и «ноль
+#: фрагментов» приходилось бы выяснять из БД.
+NO_FRAGMENTS_REASON = "no_fragments"
+
+#: Машинный префикс заметки о **неудачном** выборе цитаты отрицания: модель заявила
+#: ``explicit``, но ни в одной подтверждённой цитате нет маркеров отрицания. Выбор тогда
+#: падает на прежнее правило (первая цитата), и это видно — вердикт не меняется (это
+#: предмет ревью, §2.2), но основание выбора опубликовано.
+DENIAL_QUOTE_WITHOUT_MARKERS = "denial_quote_without_markers"
 
 #: ``seq`` записи протокола отсутствия в ``evidence_id``. Фиксирован (а не «после цитат»),
 #: чтобы повторная оценка ячейки перезаписывала ту же строку ``cell_evidence``.
@@ -1064,6 +1083,67 @@ def _present_status_denial(out: LLMCellOutput) -> tuple[list[str], str | None]:
     return [_compact_note(note)], note if contradiction else None
 
 
+#: Маркеры отрицания/ограничения в подтверждённой цитате (RU и EN).
+#:
+#: Это **не** понимание смысла и не второй LLM-вызов: регулярное выражение над текстом
+#: цитаты, опубликованное правило выбора. Маркер называет ровно то, чем вендор заявляет
+#: отсутствие или ограничение; утвердительные обороты, которые легко спутать с
+#: отрицанием, в набор **не** входят осознанно: «без дополнительной настройки» и «не
+#: требуется настройка» — это утверждение наличия, а не отрицание.
+_DENIAL_MARKER_RE = re.compile(
+    r"(?iu)(?<!\w)(?:"
+    r"не\s+(?:поддерж|реализ|предусмотр|допуска|может|работа|имеет|входит|включа|совместим)\w*"
+    r"|недоступ\w*|невозможн\w*|отсутств\w*|запрещ\w*|исключ\w*|ограничен\w*"
+    r"|not\s+supported|unsupported|doesn['’]?t\s+support|do\s+not\s+support"
+    r"|no\s+support|not\s+available|cannot|can['’]?t\s+be\s+used|without\s+support"
+    r"|disabled|restricted\s+to|only\s+(?:when|if|for)"
+    r")"
+)
+
+def _denial_marker_count(text: str) -> int:
+    """Сколько **различных** маркеров отрицания в тексте (повтор одного не считается)."""
+    return len({match.casefold() for match in _DENIAL_MARKER_RE.findall(text)})
+
+def _designated_denial_quote(quotes: Sequence[str]) -> tuple[str, list[str]]:
+    """Выбирает цитату отрицания детерминированно, а не «первую попавшуюся».
+
+    Зачем. Цитата отрицания — это доказательство, а ``quotes[0]`` — порядок, в котором
+    модель перечислила evidence. Проба на двух цитатах («…добавлена поддержка…» и
+    «…не поддерживаются…») давала ``❌`` с ``citation_quote`` = **первая**, то есть
+    неотрицающая: отрицание опубликовано без своего доказательства. Живой экспозиции не
+    было только потому, что ``❌`` не публиковался ни разу; ``evaluator_v4`` делает ветку
+    ``explicit`` нормальной, и дефект перестаёт быть теоретическим.
+
+    Правило (без LLM и без нового поля схемы ответа):
+
+    * каждая цитата оценивается числом **различных** маркеров отрицания/ограничения
+      (:data:`_DENIAL_MARKER_RE`) — длинная цитата с повтором одного слова не выигрывает
+      у короткой с двумя разными;
+    * берётся цитата с максимумом, при равенстве — первая по порядку (порядок evidence —
+      часть входа, поэтому выбор детерминирован байт-в-байт);
+    * если маркеров нет ни в одной цитате, остаётся прежнее правило (первая цитата), но
+      основание публикуется заметкой :data:`DENIAL_QUOTE_WITHOUT_MARKERS`.
+
+    Чего правило **не** делает: не решает, было ли отрицание (это по-прежнему объявление
+    модели), не понижает статус (это предмет ревью, §2.2) и не трогает доказательство
+    наличия у ``✅``/``⚠️``.
+
+    Альтернатива — поле ``evidence_role`` в схеме ответа — отвергнута: это
+    ``SCHEMA_VERSION``, constrained decoding и пере-прогон ради выбора из уже
+    подтверждённых цитат, тогда как маркерный выбор ничего не расширяет и ничего не
+    отвергает.
+    """
+    if not quotes:
+        raise ValueError("цитата отрицания выбирается из непустого списка цитат")
+    scores = [_denial_marker_count(quote) for quote in quotes]
+    best = max(scores)
+    if best == 0:
+        return quotes[0], [
+            f"{DENIAL_QUOTE_WITHOUT_MARKERS}: ни одна подтверждённая цитата не содержит "
+            "маркеров отрицания — цитатой отрицания оставлена первая в evidence"
+        ]
+    return quotes[scores.index(best)], []
+
 def _resolve_denial(
     *,
     param: CatalogRow,
@@ -1100,11 +1180,13 @@ def _resolve_denial(
     vector["relevant_evidence_coverage"] = _relevant_evidence_coverage(
         validation, candidates
     )
-    quotes = [
-        ev.citation_quote
-        for ev in validation.resolved_evidence
-        if (ev.citation_quote or "").strip()
-    ]
+    # Цитаты для выбора цитаты отрицания: непустые (но **исходные**, не нормализованные —
+    # в ячейку и в scope попадает то, что вернула модель, §10).
+    quotes: list[str] = []
+    for ev in validation.resolved_evidence:
+        quote = ev.citation_quote or ""
+        if quote.strip():
+            quotes.append(quote)
     declared = out.denial_strength
     claim_text = (out.denial_reason or out.justification or "").strip()
     basis_prefix = "evaluator"
@@ -1118,15 +1200,16 @@ def _resolve_denial(
         wants_explicit = declared is DenialClaim.EXPLICIT
         if wants_explicit:
             if quotes:
+                designated, quote_notes = _designated_denial_quote(quotes)
                 return (
                     EvidenceScope(
                         denial_strength=DenialStrength.EXPLICIT,
-                        citation_quote=quotes[0],
+                        citation_quote=designated,
                         reason=claim_text or "прямое отрицание вендора (цитата приложена)",
                         basis=f"{basis_prefix}:explicit",
                         **vector,
                     ),
-                    [],
+                    quote_notes,
                 )
             # Заявлен explicit — цитаты нет. Отказ, а не публикация.
             return (
@@ -1572,6 +1655,65 @@ def _persist(
         writer(records)
 
 
+def _no_fragments_outcome(
+    *,
+    param: CatalogRow,
+    product_id: str,
+    run_id: str,
+    provenance: tuple[str | None, str | None, str | None],
+    prompt_hash: str,
+    store: StorePort | None,
+    protected: Cell | None = None,
+) -> EvaluationOutcome:
+    """Исход **пустого среза**: ``❓`` с заметкой ``no_fragments`` и без вызова модели.
+
+    Почему не вызов. Пустой срез — отсутствие материала, а не вопрос; модель на нём
+    отвечает «не установлено», и этот ответ неотличим от честного «прочитал фрагменты,
+    утверждения нет». Цена при этом реальная: один оплаченный запрос на ячейку. Заметка
+    :data:`NO_FRAGMENTS_REASON` делает различие машинно-читаемым в
+    ``cells.validation_notes`` — «материала не было» отдельно от «материал был, вендора
+    в нём нет».
+
+    Класс отрицания — ``not_stated`` с причиной ``no_fragments``: незнание, называющее
+    свою причину. ``unobserved``/``bounded`` здесь не ставятся осознанно — они говорят о
+    **неполноте охвата**, а не об отсутствии фрагментов после ретривала; и ``❌`` из
+    пустого входа не следует ни по одному правилу (I2).
+    """
+    scope = EvidenceScope(
+        denial_strength=DenialStrength.NOT_STATED,
+        reason=(
+            f"{NO_FRAGMENTS_REASON}: ретривал не передал ни одного фрагмента — "
+            "вопрос оценщику не задавался, а вызов модели не тратился"
+        ),
+        # Знаменателя нет: «0 из 0» — не ноль и не единица, а не измерено.
+        relevant_evidence_coverage=None,
+        basis="pipeline:no_fragments",
+    )
+    cell = _evaluated_cell(
+        out_status=Status.UNKNOWN,
+        evidence=[],
+        absence_evidence=[],
+        param=param,
+        product_id=product_id,
+        run_id=run_id,
+        provenance=provenance,
+        evidence_scope=scope,
+        validation_notes=_compact_notes([NO_FRAGMENTS_REASON]),
+    )
+    # ``model_id=None``: модель не вызывалась, и записывать её как источник вердикта
+    # значило бы соврать о провенансе. ``prompt_hash`` пишется: промпт ячейки существует.
+    _persist(store, cell, None, protected=protected, prompt_hash=prompt_hash)
+    return EvaluationOutcome(
+        cell=cell,
+        prompt_hash=prompt_hash,
+        validation=ValidationResult(
+            ok=True,
+            failure_kind=None,
+            notes=_compact_notes([NO_FRAGMENTS_REASON]),
+            resolved_evidence=[],
+        ),
+    )
+
 def evaluate_cell(
     *,
     param: CatalogRow,
@@ -1628,6 +1770,14 @@ def evaluate_cell(
         Принят, чтобы вызывающие, объявляющие подпись старым именем, не ломались на
         переименовании; смысл — тот же (принятие риска, не аттестация полноты).
 
+    **Пустой срез не тратит вызов модели.** При ``chunks == ()`` промпт компилируется
+    (провенанс: ``prompt_hash`` ячейки остаётся честной функцией входа), но оценщик не
+    вызывается: ``no_fragments`` — факт о ретривале, а не вопрос, на который модель
+    отвечает. Ячейка получает ``❓`` с первоклассной заметкой :data:`NO_FRAGMENTS_REASON`,
+    отличимой от «искали, вендор молчит» (там фрагменты были). Это не экономия ради
+    экономии: вызов на пустом входе давал 1 оплаченный запрос на ячейку и вердикт,
+    который нельзя было отличить от честного незнания.
+
     Повтор переиздаёт тот же запрос — для детерминированного оценщика это ограниченный
     no-op, полезный только для транзиентных ошибок адаптера; см. докстринг модуля.
     """
@@ -1644,6 +1794,20 @@ def evaluate_cell(
         satellites=satellites,
         extra_instructions=extra_instructions,
     )
+
+    # Пустой срез — факт о ретривале, а не вопрос к модели: вызова нет, ячейка ``❓`` с
+    # первоклассной заметкой ``no_fragments``. Промпт уже скомпилирован выше, поэтому
+    # провенанс ячейки (``prompt_hash``) остаётся функцией входа.
+    if not chunks_by_id:
+        return _no_fragments_outcome(
+            param=param,
+            product_id=product_id,
+            run_id=run_id,
+            provenance=_provenance(retrievals),
+            prompt_hash=compiled.prompt_hash,
+            store=store,
+            protected=protected,
+        )
 
     request = LLMRequest(
         prompt=compiled.text,
@@ -1971,15 +2135,29 @@ def evaluate_batch(
 
     Возвращает ``(успешные_исходы, ошибки)``: исключение на одном параметре не роняет
     батч (``run_isolated``). Порядок исходов соответствует порядку ``params``.
+
+    **Контракт ``chunks_by_param``.** Ключ обязан быть на каждый параметр: пустой срез —
+    это наблюдённый факт («ретривал отработал и ничего не нашёл»), а отсутствие ключа —
+    «ретривал не состоялся». Смешивать их нельзя: во втором случае оценщик получал бы
+    пустой вход и его ответ выдавался бы за наблюдение, хотя прибора не было (I4).
     """
 
     def _one(param: CatalogRow) -> EvaluationOutcome:
+        # Контракт карты: ключ на **каждый** переданный параметр. Отсутствие ключа —
+        # это «ретривал не состоялся», а не пустой срез: подстановка ``()`` превращала
+        # отказ прибора в измеренное ``❓``/``❌`` (I4). Сбой остаётся видимым
+        # (``run_isolated`` → ``errors``), а не маскируется пустым входом.
+        if param.param_id not in chunks_by_param:
+            raise ValueError(
+                f"chunks_by_param не содержит ключ {param.param_id!r}: отсутствие "
+                "ключа означает, что ретривал не состоялся, а не что срез пуст"
+            )
         return evaluate_cell(
             param=param,
             product_id=product_id,
             run_id=run_id,
             evaluator=evaluator,
-            chunks=chunks_by_param.get(param.param_id, ()),
+            chunks=chunks_by_param[param.param_id],
             satellites=satellites,
             resolver=resolver,
             strict=strict,
@@ -2121,6 +2299,12 @@ def evaluate_phase(
         }
         chunks_by_param: dict[str, Sequence[ChunkLike]] = {}
         retrievals_by_param: dict[str, RetrievalResult] = {}
+        #: Пары (параметр, готовая причина) для ячеек, чей ретривал упал: они
+        #: становятся ``failed`` (I4) и **не** попадают в батч оценки. Хранится текст, а
+        #: не объект исключения: держать десятки исключений живыми ради строки не нужно,
+        #: а имя ``exc`` вне ``except``-блока Python удаляет — и читать его оттуда
+        #: небезопасно.
+        retrieval_failures: list[tuple[CatalogRow, str]] = []
         # Ф0: покрытие корпуса продукта читается один раз (на главном потоке) и
         # прокидывается в ячейки. Продукт плана без строки покрытия — аномалия (O3).
         coverage = _coverage_for(None, store, run_id, product_id, planned=True)
@@ -2207,12 +2391,57 @@ def evaluate_phase(
                     f"{product_id}/{param.param_id}: retrieval: "
                     f"{type(exc).__name__}: {exc}"
                 )
+                # I4: сбой прибора — ``failed``, а не ``❓``. Отсутствие ключа в
+                # ``chunks_by_param`` означает «ретривал не состоялся», и это **не**
+                # пустой срез: ``evaluate_batch`` не имеет права подставить сюда ``()``.
+                # До этой правки ячейка с упавшим ретривалом доходила до оценщика с
+                # пустым срезом; после того как пустой срез перестал тратить вызов
+                # модели, она стала публиковаться как измеренное ``❓`` с заметкой
+                # ``no_fragments`` — то есть отказ инструмента выдавался за наблюдение
+                # «вендор не заявил». Это ровно тот класс, который запрещает I4.
+                retrieval_failures.append((param, f"{type(exc).__name__}: {exc}"))
                 continue
             chunks_by_param[param.param_id] = result.chunks
             retrievals_by_param[param.param_id] = result
 
+        failed_ids = {param.param_id for param, _ in retrieval_failures}
+        if retrieval_failures:
+            # Ячейка высокого источника (реестр/наследование) не затирается сбоем
+            # ретривала — так же, как в ветке ``expected_sources=0``.
+            failure_provenance = (
+                None,
+                resolved_profile.value
+                if isinstance(resolved_profile, RetrievalProfile)
+                else resolved_profile,
+                None,
+            )
+            for param, detail in retrieval_failures:
+                protected = protected_by_param.get(param.param_id)
+                if protected is not None:
+                    cells.append(protected)
+                    continue
+                failed = _unresolved_cell(
+                    state=CellState.FAILED,
+                    param=param,
+                    product_id=product_id,
+                    run_id=run_id,
+                    provenance=failure_provenance,
+                    # Класс сбоя виден в карте: это не «вендор не заявил».
+                    evidence_scope=EvidenceScope.for_instrument_failure(
+                        FailureKind.SEARCH_FAILED.value, detail=detail
+                    ),
+                    # Причина обязана пережить прогон: ``failed`` без объяснения
+                    # заставляет оператора разбирать консольный лог.
+                    validation_notes=_compact_notes(
+                        [f"{FailureKind.SEARCH_FAILED.value}: {detail}"]
+                    ),
+                )
+                _persist(store, failed, None)
+                _record_cell_failure(store, failed, FailureKind.SEARCH_FAILED.value)
+                cells.append(failed)
+
         outcomes, batch_errors = evaluate_batch(
-            params=list(plan.params),
+            params=[p for p in plan.params if p.param_id not in failed_ids],
             product_id=product_id,
             run_id=run_id,
             evaluator=evaluator,

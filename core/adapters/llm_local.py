@@ -49,10 +49,12 @@ from __future__ import annotations
 import importlib.util
 from collections.abc import Callable
 from typing import Any
+from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ValidationError
 
 from core.domain import LLMCellOutput
+from core.domain.enums import Decoder
 from core.ports.llm import LLMRequest, LLMResponse, TokenUsage
 from core.util.hashing import content_hash
 
@@ -63,10 +65,14 @@ __all__ = [
     "DEFAULT_ENDPOINT_KIND",
     "DEFAULT_MODEL_ID",
     "DEFAULT_TIMEOUT",
+    "EVALUATOR_DEFAULT_SEED",
+    "EVALUATOR_DEFAULT_TEMPERATURE",
     "EvaluationError",
     "EvaluatorUnavailable",
     "GenerateFn",
     "LocalEvaluator",
+    "decoder_wire_type",
+    "endpoint_host",
     "normalize_api_base",
 ]
 
@@ -130,6 +136,45 @@ def _httpx_available() -> bool:
     return importlib.util.find_spec("httpx") is not None
 
 
+#: Seed оценщика по умолчанию — то же значение, что передаёт composition root
+#: (``build_evaluator_llm``), и то же, что записывается в ``llm_scenarios.seed``.
+#: Одна константа на обе роли: иначе провенанс и провод разъедутся молча.
+EVALUATOR_DEFAULT_SEED = 0
+#: Температура оценщика по умолчанию (``0.0`` — greedy). См. выше: одна константа.
+EVALUATOR_DEFAULT_TEMPERATURE = 0.0
+
+def endpoint_host(base_url: str) -> str | None:
+    """Хост endpoint'а без схемы/пути/учётных данных (V6): факт «куда ушёл корпус».
+
+    Возвращает ``None`` для пустой строки и для строки без хоста. Порт сохраняется:
+    один хост на разных портах — разные шлюзы. Секрет сюда попасть не может: берётся
+    только ``hostname`` (+порт), логин/пароль/путь отбрасываются.
+    """
+    try:
+        parsed = urlsplit(base_url or "")
+    except ValueError:
+        return None
+    host = parsed.hostname
+    if not host:
+        return None
+    return f"{host}:{parsed.port}" if parsed.port else host
+
+def decoder_wire_type(decoder: str) -> str | None:
+    """Механизм, который реально уходит по проводам для объявленной метки (V4).
+
+    Одна формула на две роли: адаптер строит по ней ``response_format``, а провенанс
+    (``llm_scenarios.constrained_decoding``) записывает **фактический** механизм. До
+    правки эти две роли расходились: метка бралась из конфига как есть, а по проводам
+    на любое значение ≠ ``none`` уходил ``json_schema``.
+
+    ``None`` — механизм не запрошен (``decoder=none``): схема не навязывается, форма
+    ответа держится только pydantic-парсом.
+    """
+    kind = Decoder(decoder)
+    if kind is Decoder.NONE:
+        return None
+    return kind.value
+
 class LocalEvaluator:
     """Оценщик за ``EvaluatorPort`` (OI-совместимый API корпоративного облака).
 
@@ -159,6 +204,7 @@ class LocalEvaluator:
         base_url: str = DEFAULT_BASE_URL,
         api_key: str | None = None,
         timeout: float = DEFAULT_TIMEOUT,
+        max_tokens: int | None = None,
     ) -> None:
         if not model_id:
             raise ValueError("model_id обязан быть непустым")
@@ -172,11 +218,21 @@ class LocalEvaluator:
             raise ValueError(f"seed не может быть отрицательным, получено {seed!r}")
         if temperature < 0.0:
             raise ValueError(f"temperature не может быть отрицательной, получено {temperature!r}")
+        if max_tokens is not None and max_tokens <= 0:
+            raise ValueError(f"max_tokens обязан быть положительным, получено {max_tokens!r}")
+        try:
+            resolved_decoder = Decoder(decoder)
+        except ValueError as exc:  # V4: метка вне перечисления — отказ, а не «включим схему»
+            allowed = ", ".join(item.value for item in Decoder)
+            raise ValueError(
+                f"decoder={decoder!r} вне перечисления ({allowed}); "
+                "метка обязана совпадать с исполняемым механизмом"
+            ) from exc
         # I18: здесь намеренно НЕТ и не будет параметров tools/web_search.
         self.model_id = model_id
         self.model_version = model_version
         self.endpoint_kind = endpoint_kind
-        self.decoder = decoder
+        self.decoder = resolved_decoder
         self.seed = seed
         self.temperature = temperature
         # Хранится **как объявлено** (провенанс: эту строку задал оператор), а
@@ -184,6 +240,9 @@ class LocalEvaluator:
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.timeout = timeout
+        #: Потолок генерации (V5): ``None`` — серверный дефолт провайдера, и это надо
+        #: знать: без потолка обрезание приходит как ``finish_reason=length``.
+        self.max_tokens = max_tokens
         self._generate = generate
         # Счётчики стоимости (§15/M1): заполняются в :meth:`complete`. Нужны потому, что
         # ``metrics.json`` обязан называть цену прогона, а факт вызова и расход токенов
@@ -299,16 +358,18 @@ class LocalEvaluator:
             "seed": seed,
             "stream": False,
         }
-        if self.decoder != "none":
-            # Форма, не семантика: сервер строит грамматику xgrammar из JSON Schema (§7.1).
-            payload["response_format"] = {
-                "type": "json_schema",
-                "json_schema": {
-                    "name": "llm_cell_output",
-                    "schema": req.response_schema.model_json_schema(),
-                    "strict": True,
-                },
-            }
+        # V5: потолок генерации — условие измерения, а не «настройка вида». До правки
+        # ``max_tokens`` из слота не доезжал до провода вообще, поэтому потолок задавал
+        # сервер своим дефолтом, а обрезанная генерация была неотличима от невалидного
+        # JSON (оба приходили как один ``EvaluationError``).
+        max_tokens = req.max_tokens if req.max_tokens is not None else self.max_tokens
+        if max_tokens is not None:
+            payload["max_tokens"] = int(max_tokens)
+        if self.decoder != Decoder.NONE:
+            # V4: метка и провод — одно и то же. До правки любое значение ≠ none
+            # отправляло ``json_schema``, а в провенанс уходила запрошенная метка
+            # (в живом прогоне: манифест ``json_object``, провод ``json_schema``).
+            payload["response_format"] = self._response_format(req)
         # I18: tools/web_search в запрос НЕ добавляются — здесь их нет по построению.
         try:
             response = httpx.post(
@@ -323,13 +384,48 @@ class LocalEvaluator:
             raise EvaluationError(f"HTTP-вызов оценщика не удался: {exc}") from exc
         return self._extract(data)
 
+    def _response_format(self, req: LLMRequest) -> dict[str, Any]:
+        """``response_format`` под объявленный механизм (зеркало discovery-адаптера).
+
+        ``json_schema`` — грамматика из JSON Schema (сильнее); ``json_object`` — только
+        «верни объект»; ``none`` сюда не доходит. Различать их обязательно: спека §7.1
+        называет **два** механизма, и провайдеры поддерживают их по-разному, поэтому
+        подмена одного другим — это другое исполнение, а не то же самое под другим именем.
+        """
+        if decoder_wire_type(self.decoder) == Decoder.JSON_OBJECT.value:
+            return {"type": "json_object"}
+        return {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "llm_cell_output",
+                "schema": req.response_schema.model_json_schema(),
+                "strict": True,
+            },
+        }
+
     def _extract(self, data: Any) -> tuple[str, TokenUsage]:
-        """Достаёт ``choices[0].message.content`` и ``usage`` из ответа сервера."""
+        """Достаёт ``choices[0].message.content`` и ``usage`` из ответа сервера.
+
+        V5: ``finish_reason == "length"`` с пустым текстом — это **исчерпанный потолок
+        генерации**, а не «невалидный JSON». Различать обязательно: иначе обрезание
+        уходит в ``validation_failed`` → retry ≤2 → ``failed``, и причина отказа не
+        называется ни в ячейке, ни в отчёте (так же поступает discovery-адаптер,
+        ``llm_discovery.py:256-272``).
+        """
         try:
-            message = data["choices"][0]["message"]
+            choice = data["choices"][0]
+            message = choice["message"]
             content = message["content"]
         except (KeyError, IndexError, TypeError) as exc:
             raise EvaluationError(f"неожиданная форма ответа сервера: {data!r}") from exc
+        finish_reason = choice.get("finish_reason") if isinstance(choice, dict) else None
+        if (content is None or content == "") and finish_reason == "length":
+            limit = self.max_tokens if self.max_tokens is not None else "серверный"
+            raise EvaluationError(
+                "генерация оценщика оборвана по потолку токенов "
+                f"(finish_reason=length, max_tokens={limit}): увеличьте "
+                "llm.<slot>.max_tokens — модель израсходовала бюджет на reasoning"
+            )
         if not isinstance(content, str):
             raise EvaluationError(
                 f"choices[0].message.content обязан быть строкой, получено {type(content).__name__}"

@@ -30,6 +30,7 @@ from core.domain.enums import (
     CrawlItemStatus,
     CrawlSessionStatus,
     CrawlStrategy,
+    Decoder,
     DenialClaim,
     DenialStrength,
     DocumentLevel,
@@ -173,6 +174,7 @@ __all__ = [  # noqa: RUF022
     # enums
     "AbsenceRuleType",
     "AdapterKind",
+    "Decoder",
     "AnchorRelation",
     "Archetype",
     "ArchiveDescent",

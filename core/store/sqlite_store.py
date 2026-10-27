@@ -143,6 +143,8 @@ _SCENARIO_COLUMNS = (
     "seed",
     "temperature",
     "constrained_decoding",
+    "endpoint_host",
+    "max_tokens",
 )
 
 _SEARCH_LOG_COLUMNS = (
@@ -1120,6 +1122,11 @@ class SqliteStore:
                 b.seed,
                 b.temperature,
                 b.constrained_decoding,
+                # V5/V6: условия генерации. Порядок обязан совпадать с
+                # ``_SCENARIO_COLUMNS`` — расхождение даёт ``ProgrammingError`` на каждом
+                # сохранении (проверяется тестом, а не глазами).
+                b.endpoint_host,
+                b.max_tokens,
             )
             for b in bindings
         ]
@@ -2204,6 +2211,11 @@ class SqliteStore:
                 seed=s["seed"],
                 temperature=s["temperature"],
                 constrained_decoding=s["constrained_decoding"],
+                # Additive-колонки (V5/V6): у прогонов, созданных до правки, их нет.
+                endpoint_host=(
+                    s["endpoint_host"] if _has_column(s, "endpoint_host") else None
+                ),
+                max_tokens=(s["max_tokens"] if _has_column(s, "max_tokens") else None),
             )
             for s in self.conn.execute(
                 "SELECT * FROM llm_scenarios WHERE run_id = ? ORDER BY scenario", (run_id,)

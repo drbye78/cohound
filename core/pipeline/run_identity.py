@@ -26,6 +26,7 @@
 from __future__ import annotations
 
 import datetime as _dt
+import json
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol
@@ -68,6 +69,13 @@ class DeclaredAxesLike(Protocol):
     deploy_profile: str | None
     edge_schema_version: str | None
     chunker_version: str | None
+    #: C3: геометрия нарезки + состав входа эмбеддера (``composite_chunking_spec``).
+    #: Отдельно от ``chunker_version``: метка не выводится из геометрии, поэтому правка
+    #: ``chunk_size`` проходила под прежним ``run_id``.
+    chunking_spec: dict[str, Any] | None
+    #: V3: политика повтора оценщика (``max_retries``). Повтор переиздаёт запрос, значит
+    #: вердикт зависит от истории сэмплов — это условие измерения.
+    evaluation_policy: dict[str, Any] | None
     llm_scenarios: tuple[dict[str, Any], ...]
     extractor_stack: str
     #: 13-manual-artifacts §3.2: отпечаток объявленных ручных артефактов. Раунд подачи
@@ -190,13 +198,27 @@ def _prompt_template_identity() -> str:
     отсутствовать (шаблон подменён в процессе пробы) — тогда честно называется только
     имя: выдумывать хеш нечего.
     """
-    from core.pipeline.prompt import TEMPLATE_VERSION, _load_template
+    from core.domain.models import LLMCellOutput
+    from core.pipeline.prompt import ABSENCE_GUIDANCE, TEMPLATE_VERSION, _load_template
 
     try:
         text = _load_template(TEMPLATE_VERSION)
     except OSError:
+        # Шаблон подменён в процессе пробы (файла нет) — честно называется только имя.
         return TEMPLATE_VERSION
-    return f"{TEMPLATE_VERSION}@{content_hash(text)[:12]}"
+    # **Композиция, а не файл.** Отрендеренный промпт собирается из трёх текстов:
+    # шаблона, подсказки по правилу отсутствия (``ABSENCE_GUIDANCE`` живёт в коде
+    # ``prompt.py``) и JSON-схемы ответа. Хешировать только файл значило бы дать правке
+    # подсказки изменить промпт у всех ячеек, не сменив ``run_id`` — ровно тот класс,
+    # что ``chunker_version`` без геометрии (C3). Схема входит потому, что она задаёт,
+    # какой ответ вообще считается заявленным.
+    payload = {
+        "template": text,
+        "guidance": {rule.value: hint for rule, hint in ABSENCE_GUIDANCE.items()},
+        "schema": LLMCellOutput.model_json_schema(),
+    }
+    composite = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return f"{TEMPLATE_VERSION}@{content_hash(composite)[:12]}"
 
 def build_execution_contract(
     inputs: RunInputs,
@@ -249,6 +271,10 @@ def build_execution_contract(
         "cutoff_K": cutoff_K,
         "retrieval_params_json": retrieval_params_json,
         "chunker_version": _declared(declared, "chunker_version"),
+        # C3/V3: геометрия нарезки и политика повтора. ``None`` (ось не передана) —
+        # честное «не объявлено» для чистых вызовов; живой прогон передаёт обе.
+        "chunking_spec": _declared(declared, "chunking_spec"),
+        "evaluation_policy": _declared(declared, "evaluation_policy"),
         "extractor_stack": _declared(declared, "extractor_stack"),
         "crawl_strategy": _declared(declared, "crawl_strategy"),
         "crawl_rate_limit": _declared(declared, "crawl_rate_limit"),

@@ -1647,7 +1647,7 @@ def test_observed_index_versions_reads_build_manifest() -> None:
         extractor_version="docling-doc-3:layout_tables/docling-2.135.0",
         lexical_engine_version="tantivy-0.26.2",
         vector_store="npy-fp16",
-        chunker_version="md-heading-2+text-para-1",
+        chunker_version="md-heading-3+text-para-2",
         product_id="p1",
     )
     store = _FakeIndexStore([entry])

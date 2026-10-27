@@ -19,6 +19,7 @@ from core.domain.enums import (
     CrawlItemStatus,
     CrawlSessionStatus,
     CrawlStrategy,
+    Decoder,
     DenialClaim,
     DenialStrength,
     DocumentLevel,
@@ -99,6 +100,8 @@ def assert_dictionary_integrity(path: str | Path) -> None:
         "document_level",
         # P7: механизм извлечения PDF (crawl.pdf_pipeline).
         "pdf_pipeline",
+        # §7.1/§7.4: механизм constrained decoding оценщика (V4).
+        "decoder",
         # P6: глубина спуска в контейнеры (crawl.archive_descent).
         "archive_descent",
         # B3: исход спуска в один контейнер (archive_observations.status).
@@ -151,6 +154,7 @@ def assert_dictionary_integrity(path: str | Path) -> None:
         "crawl_strategy": {v.value for v in CrawlStrategy},
         "document_level": {v.value for v in DocumentLevel},
         "pdf_pipeline": {v.value for v in PdfPipeline},
+        "decoder": {v.value for v in Decoder},
         "archive_descent": {v.value for v in ArchiveDescent},
         "archive_descent_status": {v.value for v in ArchiveDescentStatus},
         "crawl_session_status": {v.value for v in CrawlSessionStatus},

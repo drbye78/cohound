@@ -75,13 +75,13 @@ def test_attributes_are_overridable() -> None:
         model_id="vendor/model",
         model_version="1.2.3",
         endpoint_kind="self_host",
-        decoder="xgrammar",
+        decoder="json_schema",
         seed=7,
         temperature=0.0,
     )
     assert ev.model_id == "vendor/model"
     assert ev.model_version == "1.2.3"
-    assert ev.decoder == "xgrammar"
+    assert ev.decoder == "json_schema"
     assert ev.seed == 7
 
 
@@ -127,8 +127,21 @@ def test_complete_parses_valid_output() -> None:
 
 
 def test_decoder_is_echoed() -> None:
-    ev = LocalEvaluator(generate=lambda p, s: _valid_json(), decoder="xgrammar")
-    assert ev.complete(_req()).decoder == "xgrammar"
+    """Метка ``decoder`` возвращается как объявлена — и она же называет провод (V4)."""
+    ev = LocalEvaluator(generate=lambda p, s: _valid_json(), decoder="json_schema")
+    assert ev.complete(_req()).decoder == "json_schema"
+
+
+def test_unknown_decoder_label_is_refused() -> None:
+    """Метка вне перечисления — отказ с перечислением допустимых, а не «включим схему».
+
+    V4: до этой правки любое значение ≠ ``none`` отправляло ``json_schema``, а в
+    провенанс уходила запрошенная метка — манифест живого прогона объявлял
+    ``json_object`` при проводе ``json_schema``. Свободная строка делала это
+    необнаружимым, поэтому набор меток закрыт словарём ``docs/status-dictionary.yaml``.
+    """
+    with pytest.raises(ValueError, match="decoder"):
+        LocalEvaluator(generate=lambda p, s: _valid_json(), decoder="xgrammar")
 
 
 def test_prompt_hash_is_content_hash_of_prompt() -> None:
@@ -259,13 +272,13 @@ def _http_body(content: str | None = None, usage: dict[str, int] | None = None) 
 def test_real_path_parses_response_and_usage() -> None:
     with respx.mock(assert_all_called=True) as mock:
         route = mock.post(ENDPOINT).mock(return_value=httpx.Response(200, json=_http_body()))
-        ev = LocalEvaluator(base_url="http://localhost:8000", decoder="xgrammar")
+        ev = LocalEvaluator(base_url="http://localhost:8000", decoder="json_schema")
         resp = ev.complete(_req())
 
     assert route.called
     assert resp.output.status is Status.OK
     assert resp.raw == _valid_json()
-    assert resp.decoder == "xgrammar"
+    assert resp.decoder == "json_schema"
     assert resp.usage == TokenUsage(prompt_tokens=120, completion_tokens=40)
 
 
@@ -327,7 +340,7 @@ def test_real_path_payload_has_no_web_tools() -> None:
 
     with respx.mock(assert_all_called=False) as mock:
         mock.post(ENDPOINT).mock(side_effect=handler)
-        LocalEvaluator(base_url="http://localhost:8000", decoder="xgrammar").complete(_req())
+        LocalEvaluator(base_url="http://localhost:8000", decoder="json_schema").complete(_req())
 
     assert "tools" not in captured
     assert "web_search" not in captured
@@ -343,7 +356,7 @@ def test_real_path_requests_json_schema_when_constrained() -> None:
 
     with respx.mock(assert_all_called=False) as mock:
         mock.post(ENDPOINT).mock(side_effect=handler)
-        LocalEvaluator(base_url="http://localhost:8000", decoder="xgrammar").complete(_req())
+        LocalEvaluator(base_url="http://localhost:8000", decoder="json_schema").complete(_req())
 
     response_format = captured["response_format"]
     assert response_format["type"] == "json_schema"

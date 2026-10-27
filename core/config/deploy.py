@@ -30,7 +30,7 @@ from typing import Any
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from core.domain.enums import ArchiveDescent, DocumentLevel, PdfPipeline
+from core.domain.enums import ArchiveDescent, Decoder, DocumentLevel, PdfPipeline
 from core.domain.models import (
     DEFAULT_ARCHIVE_MAX_MEMBER_BYTES,
     DEFAULT_ARCHIVE_MAX_TOTAL_UNCOMPRESSED_BYTES,
@@ -506,7 +506,12 @@ class LLMSlotConfig(BaseModel):
     base_url: str | None = None
     model_id: str | None = None
     model_version: str | None = None
-    decoder: str | None = None
+    #: Механизм constrained decoding (:class:`core.domain.enums.Decoder`). Тип — enum, а
+    #: не ``str``: до правки (V4) слот принимал любую строку, адаптер отправлял
+    #: ``json_schema`` на всё, что ≠ ``none``, и провенанс объявлял запрошенную метку
+    #: вместо исполненного механизма. Опечатка/регистр («JSoN_ObJeCt») теперь отказ, а не
+    #: молчаливое включение схемы.
+    decoder: Decoder | None = None
     timeout_s: float | None = Field(default=None, gt=0)
     max_tokens: int | None = Field(default=None, gt=0)
 

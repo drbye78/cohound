@@ -92,6 +92,8 @@ CREATE TABLE IF NOT EXISTS llm_scenarios (
     seed              INTEGER,
     temperature       REAL,
     constrained_decoding TEXT,
+    endpoint_host     TEXT,                            -- V6: хост endpoint'а (без схемы/пути; не секрет)
+    max_tokens        INTEGER,                         -- V5: потолок генерации (NULL = дефолт провайдера)
     PRIMARY KEY (run_id, scenario),
     FOREIGN KEY (run_id) REFERENCES runs(run_id)
 );
@@ -722,6 +724,13 @@ def connect(db_path: str | Path = ":memory:") -> sqlite3.Connection:
     # ``schema_version`` **не** поднимается — иначе гейт версии (11 §2.6) отверг бы
     # существующие прогоны, а их читаемость здесь важнее формальной метки.
     _ensure_columns(conn, "cells", {"absence_rule": "TEXT"})
+    # V5/V6: условия генерации оценщика — хост endpoint'а и потолок токенов. Оба факта
+    # обязаны быть в манифесте, иначе «куда ушёл корпус» и «обрезали ли ответ» — догадки.
+    _ensure_columns(
+        conn,
+        "llm_scenarios",
+        {"endpoint_host": "TEXT", "max_tokens": "INTEGER"},
+    )
     # Переименование подписи: ``scope_attested_by`` → ``scope_acceptance`` (смысл —
     # принятие риска, а не аттестация полноты). Колонка аддитивная, значения старых строк
     # **копируются**: читатель больше не смотрит на старую колонку, и без копирования

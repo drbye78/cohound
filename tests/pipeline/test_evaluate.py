@@ -33,6 +33,8 @@ from core.domain import (
 )
 from core.pipeline.evaluate import (
     ABSENCE_UNATTESTED_REVIEW_REASON,
+    DENIAL_QUOTE_WITHOUT_MARKERS,
+    NO_FRAGMENTS_REASON,
     EvaluationOutcome,
     evaluate_batch,
     evaluate_cell,
@@ -159,6 +161,163 @@ def _evaluate(  # noqa: ANN001 - тестовый helper
         coverage=coverage,
         scope_acceptance=scope_acceptance,
     )
+
+
+# ---------------------------------------------------------------------------
+# Пустой срез: вызова модели нет, заметка `no_fragments` первоклассна
+# ---------------------------------------------------------------------------
+
+
+def _evaluate_empty(  # noqa: ANN001 - тестовый helper
+    data: dict,
+    evaluator,
+    *,
+    store=None,
+    retrievals=None,
+    strict: bool = True,
+):
+    return evaluate_cell(
+        param=_param(data),
+        product_id=data["product_id"],
+        run_id=data["run_id"],
+        evaluator=evaluator,
+        chunks=[],
+        strict=strict,
+        store=store,
+        retrievals=retrievals,
+    )
+
+
+def test_empty_slice_does_not_call_the_model() -> None:
+    """Пустой срез — факт о ретривале, а не вопрос: модель не вызывается вовсе.
+
+    До правки ``chunks=[]`` давал **один оплаченный вызов** на ячейку, ответ «не
+    установлено» и пустые ``validation_notes``: «материала не было» было неотличимо от
+    «материал прочитан, утверждения в нём нет».
+    """
+    data = _data()
+    evaluator = _ScriptedEvaluator([LLMCellOutput(**data["unknown_output"])])
+    outcome = _evaluate_empty(data, evaluator)
+
+    assert evaluator.calls == []
+    assert outcome.cell.state is CellState.EVALUATED
+    assert outcome.cell.status is Status.UNKNOWN
+    assert outcome.failure_kind is None
+    assert outcome.validation.ok is True
+
+
+def test_empty_slice_note_is_first_class_and_distinguishable() -> None:
+    """Заметка ``no_fragments`` попадает в ``cells.validation_notes`` и названа в причине."""
+    data = _data()
+    outcome = _evaluate_empty(data, _ScriptedEvaluator([_ok_output(data)]))
+
+    assert outcome.cell.validation_notes == [NO_FRAGMENTS_REASON]
+    scope = outcome.cell.evidence_scope
+    assert scope is not None
+    assert scope.denial_strength is DenialStrength.NOT_STATED
+    assert scope.reason is not None and scope.reason.startswith(NO_FRAGMENTS_REASON)
+    # Знаменателя нет: замер доли использования цитат не определён, а не равен нулю.
+    assert scope.relevant_evidence_coverage is None
+    assert check_cell(outcome.cell) == []
+
+
+def test_empty_slice_keeps_prompt_provenance_and_persists_cell() -> None:
+    """Промпт ячейки компилируется (``prompt_hash`` — функция входа), но модель — нет."""
+    data = _data()
+    store = _RecordingStore()
+    outcome = _evaluate_empty(
+        data, _ScriptedEvaluator([RuntimeError("вызов на пустом срезе недопустим")]), store=store
+    )
+
+    expected = compile_prompt(param=_param(data), product_id=data["product_id"], chunks=[])
+    assert outcome.prompt_hash == expected.prompt_hash
+    assert outcome.cell.validation_notes == [NO_FRAGMENTS_REASON]
+    assert store.cells == [outcome.cell]
+    assert store.evidence == [] and store.absence == []
+
+
+# ---------------------------------------------------------------------------
+# Цитата отрицания выбирается детерминированно, а не `quotes[0]`
+# ---------------------------------------------------------------------------
+
+
+def test_designated_denial_quote_is_the_negating_one() -> None:
+    """Отрицание публикуется со **своей** цитатой, даже если она не первая в evidence.
+
+    Проба до правки: evidence = [«Свойство Альфа доступно…» (утверждение),
+    «Свойство Альфа не поддерживается…» (отрицание)] → ``❌`` с ``citation_quote`` =
+    утверждение. Отрицание оставалось без доказательства.
+    """
+    data = _data()
+    output = LLMCellOutput(
+        status=Status.ABSENT,
+        justification="Вендор прямо отрицает поддержку свойства.",
+        denial_strength="explicit",
+        denial_reason="прямое отрицание в документации",
+        evidence=[
+            LLMEvidence(
+                source_id="chunk_a2",
+                quote="Свойство Альфа доступно без дополнительной настройки.",
+            ),
+            LLMEvidence(
+                source_id="chunk_a3",
+                quote="Свойство Альфа не поддерживается в этой версии продукта.",
+            ),
+        ],
+    )
+    outcome = _evaluate(data, _ScriptedEvaluator([output]))
+
+    assert outcome.cell.status is Status.ABSENT
+    scope = outcome.cell.evidence_scope
+    assert scope is not None
+    assert scope.denial_strength is DenialStrength.EXPLICIT
+    assert scope.citation_quote == "Свойство Альфа не поддерживается в этой версии продукта."
+    # Выбор состоялся по маркерам — аномалии нет.
+    assert not any(DENIAL_QUOTE_WITHOUT_MARKERS in n for n in outcome.cell.validation_notes)
+
+
+def test_designated_denial_quote_is_deterministic_across_runs() -> None:
+    """Повтор того же входа даёт тот же выбор (R7: промпт и вердикт воспроизводимы)."""
+    data = _data()
+    output = LLMCellOutput(
+        status=Status.ABSENT,
+        justification="Отрицание.",
+        denial_strength="explicit",
+        denial_reason="отрицание",
+        evidence=[
+            LLMEvidence(source_id="chunk_a2", quote="Свойство Альфа доступно без дополнительной настройки."),
+            LLMEvidence(source_id="chunk_a3", quote="Свойство Альфа не поддерживается в этой версии продукта."),
+        ],
+    )
+    first = _evaluate(data, _ScriptedEvaluator([output]))
+    second = _evaluate(data, _ScriptedEvaluator([output]))
+    assert first.cell.evidence_scope is not None and second.cell.evidence_scope is not None
+    assert first.cell.evidence_scope.citation_quote == second.cell.evidence_scope.citation_quote
+
+
+def test_denial_quote_without_markers_falls_back_visibly() -> None:
+    """Маркеров нет ни в одной цитате — прежнее правило остаётся, но основание видно.
+
+    Статус и класс не меняются: выбор цитаты — не политика валидации (§2.2), а
+    публикуемое основание. Молчаливый выбор «первой» и был бы дефектом.
+    """
+    data = _data()
+    output = LLMCellOutput(
+        status=Status.ABSENT,
+        justification="Отрицание без явного маркера в цитате.",
+        denial_strength="explicit",
+        denial_reason="прямое отрицание",
+        evidence=[
+            LLMEvidence(source_id="chunk_a1", quote="Документ описывает экспорт данных в формате CSV."),
+        ],
+    )
+    outcome = _evaluate(data, _ScriptedEvaluator([output]))
+
+    assert outcome.cell.status is Status.ABSENT
+    scope = outcome.cell.evidence_scope
+    assert scope is not None
+    assert scope.citation_quote == "Документ описывает экспорт данных в формате CSV."
+    assert any(DENIAL_QUOTE_WITHOUT_MARKERS in n for n in outcome.cell.validation_notes)
 
 
 # ---------------------------------------------------------------------------
@@ -718,12 +877,15 @@ def test_evaluate_batch_isolates_failures(monkeypatch: pytest.MonkeyPatch) -> No
         )
 
     monkeypatch.setattr(module, "evaluate_cell", _fake_evaluate_cell)
+    # Карта обязана покрывать оба параметра: ``{}`` означал бы «ретривал не состоялся»
+    # и подменял бы сбой одного параметра другим дефектом — поэтому здесь явные пустые
+    # срезы (``evaluate_cell`` подменён, значения не используются).
     outcomes, errors = evaluate_batch(
         params=[bad, good],
         product_id=data["product_id"],
         run_id=data["run_id"],
         evaluator=_ScriptedEvaluator([_ok_output(data)]),
-        chunks_by_param={},
+        chunks_by_param={bad.param_id: (), good.param_id: ()},
     )
     assert len(outcomes) == 1
     assert len(errors) == 1
