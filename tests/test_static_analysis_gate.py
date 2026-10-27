@@ -82,3 +82,23 @@ def test_baseline_entries_are_well_formed_and_line_number_free() -> None:
     pattern = re.compile(r"^core/[^:]+: .+\[[a-z-]+\]$")
     bad = [e for e in _baseline_entries() if pattern.match(e) is None]
     assert not bad, f"строки baseline не в формате `путь: сообщение [код]`: {bad[:3]}"
+
+
+def test_baseline_messages_carry_no_line_numbers() -> None:
+    """Номер строки **внутри** сообщения тоже не должен попадать в ключ.
+
+    Регрессия, которую ловит тест: mypy пишет ``Name "x" already defined on line 7714``.
+    Номер строки-адреса гейт выбрасывает, а этот — нет, поэтому правка выше по файлу
+    превращала одну и ту же ошибку в «новую» (и старую в «устаревшую»): долг не менялся,
+    а гейт требовал ``--update``. Ровно это случилось при добавлении комментариев в
+    ``core/pipeline/corpus.py`` — четыре записи «переехали» без изменения долга.
+    """
+    numbered = [
+        entry
+        for entry in _baseline_entries()
+        if re.search(r"\bline \d+\b", entry) is not None
+    ]
+    assert not numbered, (
+        "в baseline остались номера строк внутри сообщений — ключ сдвинется от любой "
+        f"правки выше: {numbered[:3]}"
+    )

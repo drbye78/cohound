@@ -48,6 +48,18 @@ _SEV_ERROR = "error"
 _ABORTED = "errors prevented further checking"
 
 
+#: Номера строк **внутри** сообщения mypy (``already defined on line 7714``): их надо
+#: выбросить так же, как номер строки-адреса. Иначе ключ остаётся привязанным к строке, и
+#: правка выше по файлу даёт «новую» ошибку на месте старой: гейт кричит о росте долга,
+#: которого нет, а ``--update`` становится рутиной — то есть перестаёт быть осознанным.
+#: Ровно это и произошло при добавлении комментариев в ``corpus.py``: 4 записи
+#: «переехали», долг не изменился.
+_MSG_LINE = re.compile(r"\bline \d+\b")
+
+def _normalise_msg(msg: str) -> str:
+    """Сообщение без номеров строк: ``line 7714`` → ``line <N>``."""
+    return _MSG_LINE.sub("line <N>", msg)
+
 def _run_mypy() -> tuple[collections.Counter[str], str]:
     """Запустить mypy по ``core/`` и вернуть мультимножество ошибок и сырой вывод."""
     proc = subprocess.run(
@@ -65,7 +77,7 @@ def _run_mypy() -> tuple[collections.Counter[str], str]:
             continue
         # Номер строки выброшен намеренно: ключ должен переживать правки выше по файлу.
         # ``msg`` уже содержит ``[код]`` — это то, что делает запись осмысленной.
-        keys[f"{match.group('path')}: {match.group('msg')}"] += 1
+        keys[f"{match.group('path')}: {_normalise_msg(match.group('msg'))}"] += 1
     if not keys and proc.returncode not in (0, 1):
         # mypy упал не из-за ошибок типов (конфиг/импорт/интерпретатор): «ноль ошибок»
         # здесь означал бы «проверка не выполнялась», и молчать об этом нельзя.
