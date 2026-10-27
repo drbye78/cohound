@@ -123,8 +123,13 @@ runs/{run_id}/
   plan_inputs.json           # производный экспорт снимка плановых входов (источник истины — run_inputs в cohound.db)
   gates/{gate}-request.json  # G3/G4: детерминированный предмет решения + subject_digest (точка интеграции)
   logs/{phase}.jsonl         # структурированные логи по фазам
-  prompts/{prompt_hash}.json # скомпилированные промпты — для аудита; **сейчас не создаётся**
-                             # (`save_prompt` не вызывается конвейером; открытый дефект V7)
+  prompts/{prompt_hash}.json # аудит **исполненных** промптов (V7): ровно то, что ушло в модель.
+                             # Пишется `PromptArchive` (фаза Ш6 и пере-оценка), один файл на
+                             # `prompt_hash` — то есть стоимость пропорциональна числу различных
+                             # входов, а не числу ячеек. Сбой записи виден в `PhaseResult.errors`
+                             # (`prompt_save_failed`) и не роняет фазу: аудит — след измерения,
+                             # а не его условие. Расхождение содержимого при совпавшем хеше —
+                             # `prompt_hash_conflict` (формула хеша перестала покрывать вход).
   outputs/
     battle_card.xlsx
     preliminary_findings.xlsx
@@ -918,6 +923,8 @@ edge:
 extractor_zone: edge           # edge | core | separate
 search:
   adapter: yandex               # провайдер поиска по умолчанию (Yandex Search API)
+                                # режим запроса (sync|async) — НЕ здесь: он объявляется
+                                # входом прогона `run.yaml: serp.mode` (ось контракта)
   # режим Yandex `async` (дефолт) | `sync` — env YANDEX_SEARCH_MODE (§D.6), не поле YAML
   by_language:                  # переопределение по языку (география-прокси, I16)
     ru: yandex
@@ -1066,7 +1073,10 @@ config-слой не импортирует `cli.wiring`; валидация п�
 не выдумываются). Выбранный провайдер фиксируется в провенансе/`search_log` (**I23**).
 Смена таблицы провайдеров меняет протокол поиска и потому влияет на сопоставимость
 циклов — это **версионная граница**: фиксируется в манифесте/провенансе (§13).
-Режим Yandex Search API — `async` (дефолт; переопределяется env `YANDEX_SEARCH_MODE`).
+Режим Yandex Search API — **объявленный вход прогона** `run.yaml: serp.mode`
+(`sync` | `async`, дефолт `async`), ось контракта `serp_mode`. Env `YANDEX_SEARCH_MODE`
+конвейер не читает (её читает разведка, чей выход — кандидаты, а не evidence): `sync` и
+`async` — два бэкенда одного API, поэтому режим меняет состав находок, то есть корпус.
 
 Загрузчик `core/config/deploy.py` → `DeployConfig`
 (домен-нейтрален). `deploy_profile`, версии edge-компонентов (`/v1/capabilities`) и

@@ -38,10 +38,14 @@
 | **наблюдаемые исходы краула** (пишутся в `crawl_session_items.error_kind`) | `not_found`, `robots_disallow`, `attempts_exhausted`, `redirect_out_of_scope`, `dlp_blocked`, `quarantined`, `extraction_timeout`, `payload_too_large`, `unsupported_binary`, `no_sources`, `coverage_missing` |
 
 Разделение не косметическое: `not_found` — **разрешённое наблюдение отсутствия** (origin
-ответил определённо), а `robots_disallow`/`parser_failed`/`extraction_timeout`/
-`attempts_exhausted`/`dlp_blocked`/`quarantined` входят в `BLOCKING_FAILURE_KINDS` — они
-делают корпус продукта неполным по построению (I2c), и `❌` без аттестации охвата не
-публикуется. `dlp_blocked`/`quarantined` — зарезервированные классы egress-контура:
+ответил определённо), а `robots_disallow`/`robots_unavailable`/`parser_failed`/`extraction_timeout`/
+`attempts_exhausted`/`partial_extraction`/`dlp_blocked`/`quarantined` входят в
+`BLOCKING_FAILURE_KINDS` — они делают корпус продукта неполным по построению (I2c), и `❌`
+без аттестации охвата не публикуется. `robots_unavailable` отделён от `robots_disallow`
+намеренно: «сайт запретил» и «ленту не удалось прочитать» — разные наблюдения с одним
+следствием (обход не выполняется), но с разной причиной, и в охвате они должны быть
+различимы (RFC 9309 §2.3.1.4). `partial_extraction` — прочитанная часть документа: текст
+реален, поэтому это не `failed`, но и не «прочитано целиком». `dlp_blocked`/`quarantined` — зарезервированные классы egress-контура:
 write-site'ов у них пока нет, но словарь обязан их знать заранее.
 
 ### A.1b. Модель угроз и граница зон (07)
@@ -130,11 +134,15 @@ write-site'ов у них пока нет, но словарь обязан их
 
 ### B.3. Аудит и воспроизводимость
 
-- `prompts/{prompt_hash}.json` — **замысел**: точный промпт каждой ячейки (аудит §7).
-  Фактически артефакта нет: `save_prompt` экспортирован и покрыт тестами, но конвейер его не
-  вызывает, поэтому восстановить вход модели по артефактам прогона нельзя — неизвестен набор
-  переданных чанков (в `cell_evidence` попадают только процитированные). Открытый дефект V7
-  (`docs/architecture/15-external-review-findings-plan.md`).
+- `prompts/{prompt_hash}.json` — точный промпт **исполненной** ячейки (аудит §7). Пишет
+  `PromptArchive` (`core/pipeline/prompt.py`), каталог задаёт фаза: `runs/{run_id}/prompts`
+  (`phases.py`, тот же путь у пере-оценки). Файл адресуется хешем содержимого, поэтому две
+  ячейки с одинаковым входом дают один файл; `prompt_hash` сверяется с содержимым при
+  повторной записи (`prompt_hash_conflict`), чтобы правка шаблона без bump версии не
+  оставила доверчивый аудит под старым хешем. Сбой записи — `prompt_save_failed` в
+  `PhaseResult.errors`, а не падение фазы: без следа измерение остаётся измерением.
+  Набор переданных чанков теперь восстановим; в `cell_evidence` по-прежнему попадают
+  только процитированные — это разные вопросы, и второй не отменяется первым.
 - `search_log` — полный лог поисковых вызовов (I23).
 - `run_manifest.yaml` — все версии; достаточно для воспроизведения (плюс кэш/индекс).
 - Провенанс evidence: `source_id → source_url → content_hash → чанк`.

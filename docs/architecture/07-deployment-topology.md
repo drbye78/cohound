@@ -427,7 +427,9 @@ search:
   budget: { ru: 5, en: 5 }          # симметрия I16
   adapter: yandex                   # провайдер поиска по умолчанию (Yandex Search API)
   # by_language: { ru: yandex, en: glm }   # дифференциация по языку (I16)
-  # режим async (дефолт) | sync — env YANDEX_SEARCH_MODE (03 §D.6)
+  # режим запроса (sync | async) объявляется НЕ здесь и не в env, а во входе прогона
+  # (`run.yaml: serp.mode` → ось контракта `serp_mode`): он определяет бэкенд провайдера,
+  # значит состав находок и корпус. Env YANDEX_SEARCH_MODE — настройка разведки (03 §D.6)
 ```
 
 **Двух полей здесь сознательно нет.** `registry_fetchers` в модели отсутствует (реестровые

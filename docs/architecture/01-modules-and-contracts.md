@@ -304,10 +304,19 @@ class SearchAdapterPort(Protocol):
 ### 3.5. `ports/{crawler,crawl_errors,extractor,chunker,registry,store}.py`
 
 `ports/crawl_errors.py` объявляет таксономию сбоев краула отдельным модулем, а не в
-`crawler.py`: пять потребителей (`crawl_http`/`crawl_browser`/`wiring`/`edge/__main__`/
-`crawler_factory`) не используют сам `CrawlerPort`, и импорт рядом с протоколом тянул бы
-`ports.types` ради имени исключения. Страж — ast-скан в `tests/selfcheck.py`, который
-падает на возврате импорта из `core.adapters.crawl_scrapy`.
+`crawler.py`: большинство потребителей (`crawl_http`/`crawl_browser`/`crawl_scrapy`,
+`wiring`, `edge/__main__`, `crawler_factory`, `cli/package/commands`, а также
+`pipeline/crawl_probe_driver` и `util/robots`) не используют сам `CrawlerPort`, и импорт
+рядом с протоколом тянул бы `ports.types` ради имени исключения — то есть адаптер зависел
+бы от тяжёлого модуля портов из-за одного исключения.
+
+Здесь же живёт **причина отказа** (`refusal_reason`: `robots_disallow` /
+`robots_unavailable`), а не только класс сбоя: «сайт запретил» и «ленту не удалось
+прочитать» имеют одно следствие (обход не выполняется) и разные причины, и охват обязан
+их различать (RFC 9309 §2.3.1.4).
+
+Страж — ast-скан в `tests/selfcheck.py`, который падает на возврате импорта из
+`core.adapters.crawl_scrapy` (таксономия не уезжает обратно в тяжёлый адаптер).
 
 ```python
 class CrawlerPort(Protocol):     def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage: ...

@@ -1692,7 +1692,7 @@ RAM), поэтому адаптер извлекает **один** член в�
 |---|---|---|
 | `is_directory` | запись-каталог, тела нет | нет |
 | `path_rejected` | путь не принадлежит пространству имён архива | нет |
-| `encryption` | что заявил читатель о шифровании контейнера: `encrypted` / `not_encrypted` / `unknown` (три состояния; «молчит» ≠ «не зашифрован») | нет |
+| `encrypted` | что заявил читатель о шифровании контейнера: `encrypted` / `not_encrypted` / `unknown` (три состояния; «молчит» ≠ «не зашифрован») | нет |
 | `not_ingestible_format` | суффикс вне реестра форматов + текстовых целей спуска | нет |
 | `member_too_large` | заявленный размер члена выше `archive_max_member_bytes` | да |
 | `member_limit_exceeded` | исчерпан `archive_max_members` | да |
@@ -3116,13 +3116,14 @@ packages/{case_id}/
   sources/seeds.yaml                     # канонический seed-набор (MVP-1; миграция legacy)
   sources/add_product/{date}-{product_id}.json  # артефакт apply (seed_plan/onboarding)
 
-state/{package_id}/state.db              # durable per-product state (есть, STATE_SCHEMA_VERSION="4")
+state/{package_id}/state.db              # durable per-product state (есть, STATE_SCHEMA_VERSION="5")
 state/{package_id}/state.db-wal
 
 runs/{run_id}/
   cohound.db                             # входы плана, манифест, ячейки, гейты
   plan_inputs.json                       # производный экспорт
-  logs/, prompts/, outputs/              # prompts/ сейчас не создаётся (V7, открытый дефект)
+  logs/, prompts/, outputs/              # prompts/ — аудит исполненных промптов (V7): один
+                                         # файл на prompt_hash, пишет Ш6 и пере-оценка
 
 index_store/{package}/
   {partition_build_id}/{product_id}/     # иммутабельная продукт-партиция
