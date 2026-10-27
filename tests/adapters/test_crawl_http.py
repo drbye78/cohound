@@ -10,8 +10,12 @@ content-addressed кэшем (промах → фетч → запись → п�
 
 from __future__ import annotations
 
+import contextlib
+import threading
+from collections.abc import Iterator
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -53,6 +57,8 @@ class _FakeResponse:
         etag: str | None = None,
         last_modified: str | None = None,
         content_length: int | None = None,
+        location: str | None = None,
+        set_cookie: str | None = None,
     ) -> None:
         self.url = url
         self.content = content
@@ -66,6 +72,10 @@ class _FakeResponse:
             self.headers["Last-Modified"] = last_modified
         if content_length is not None:
             self.headers["Content-Length"] = str(content_length)
+        if location is not None:
+            self.headers["Location"] = location
+        if set_cookie is not None:
+            self.headers["Set-Cookie"] = set_cookie
 
     def raise_for_status(self) -> None:
         """Как ``httpx``: 4xx/5xx — ошибка, ``304`` — не ошибка."""
@@ -85,21 +95,36 @@ class _FakeResponse:
 
 
 class _FakeHttpx:
-    """Мини-дублёр ``httpx``: отдаёт заготовленные ответы, пишет заголовки запроса."""
+    """Мини-дублёр ``httpx``: отдаёт заготовленные ответы, пишет заголовки запроса.
+
+    ``cookies`` (если переданы) дописываются в записанные заголовки как ``Cookie``:
+    так тест видит, что ушло бы на сервер, — как это делает клиент ``httpx``.
+    """
 
     def __init__(self, responses: list[_FakeResponse]) -> None:
         self._responses = list(responses)
         self.calls: list[tuple[str, dict[str, str]]] = []
 
+    @staticmethod
+    def _headers_of(kwargs: dict[str, Any]) -> dict[str, str]:
+        """Заголовки запроса: явные плюс ``Cookie`` из переданного jar."""
+        headers = dict(kwargs.get("headers") or {})
+        cookies = kwargs.get("cookies")
+        if cookies:
+            headers["Cookie"] = "; ".join(
+                f"{name}={value}" for name, value in dict(cookies).items()
+            )
+        return headers
+
     def get(self, url: str, **kwargs: Any) -> _FakeResponse:
-        self.calls.append((url, dict(kwargs.get("headers") or {})))
+        self.calls.append((url, self._headers_of(kwargs)))
         index = min(len(self.calls) - 1, len(self._responses) - 1)
         return self._responses[index]
 
     def stream(self, method: str, url: str, **kwargs: Any) -> _FakeResponse:
         """Потоковый путь: та же запись вызовов, ответ — контекстный менеджер."""
         assert method == "GET"
-        self.calls.append((url, dict(kwargs.get("headers") or {})))
+        self.calls.append((url, self._headers_of(kwargs)))
         index = min(len(self.calls) - 1, len(self._responses) - 1)
         return self._responses[index]
 
@@ -693,3 +718,299 @@ def test_injected_fetcher_respects_cap() -> None:
     crawler = HttpCrawler(_counting_fetcher([], b"z" * 100), max_response_bytes=10)
     with pytest.raises(CrawlPayloadTooLarge):
         crawler.fetch(URL)
+
+
+# ---------------------------------------------------------------------------
+# R10 (P3): похоповая валидация редиректов на транспорте
+# ---------------------------------------------------------------------------
+
+#: Цели редиректа, которые обязаны быть отклонены на хопе (литеральные внутренние IP).
+_HOSTILE_HOPS = ("http://127.0.0.1:{port}/secret", "http://10.0.0.1/")
+
+
+def test_redirect_to_hostile_hop_is_typed_and_never_requested(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Редирект на внутренний IP отклоняется **до** запроса и без записи в кэш.
+
+    До правки ``follow_redirects=True`` уводил httpx на любой ``Location``, а байты
+    внутреннего адреса ложились в ``cache/http`` раньше любых проверок scope.
+    """
+    cache = ContentAddressedCache(tmp_path)
+    crawler, fake = _crawler_with_httpx(
+        monkeypatch,
+        [_FakeResponse(url=URL, status_code=302, location="http://10.0.0.1/secret")],
+        cache,
+    )
+
+    with pytest.raises(CrawlUrlError) as excinfo:
+        crawler.fetch(URL)
+
+    assert "SSRF" in str(excinfo.value)
+    # Запрос на небезопасный хоп не выпущен: транспорт видел ровно один URL.
+    assert [call[0] for call in fake.calls] == [URL]
+    # И ни одного байта в кэше: запись идёт только после допуска финального URL.
+    assert cache.get_bytes("http", http_key(URL)) is None
+    assert not list((tmp_path / "http").glob(f"{http_key(URL)}.*"))
+
+
+def test_redirect_hops_are_validated_one_by_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Проверяется **каждый** хоп: безопасный первый не открывает путь второму."""
+    cache = ContentAddressedCache(tmp_path)
+    crawler, fake = _crawler_with_httpx(
+        monkeypatch,
+        [
+            _FakeResponse(url=URL, status_code=302, location="/stage-1"),
+            _FakeResponse(
+                url="https://example.com/stage-1",
+                status_code=301,
+                location="http://169.254.169.254/latest/meta-data/",
+            ),
+        ],
+        cache,
+    )
+
+    with pytest.raises(CrawlUrlError):
+        crawler.fetch(URL)
+
+    assert [call[0] for call in fake.calls] == [URL, "https://example.com/stage-1"]
+    assert cache.get_bytes("http", http_key(URL)) is None
+
+
+def test_safe_redirect_chain_is_followed_and_keyed_by_requested_url(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Легитимный редирект работает как раньше: финальный URL, кэш по запрошенному."""
+    cache = ContentAddressedCache(tmp_path)
+    crawler, fake = _crawler_with_httpx(
+        monkeypatch,
+        [
+            _FakeResponse(url=URL, status_code=302, location="/final"),
+            _FakeResponse(url="https://example.com/final", content=BODY, status_code=200),
+        ],
+        cache,
+    )
+
+    page = crawler.fetch(URL)
+
+    assert [call[0] for call in fake.calls] == [URL, "https://example.com/final"]
+    assert page.url == "https://example.com/final"
+    assert page.content == BODY
+    # Ключ кэша — запрошенный URL (осознанно: повторный фетч идёт с него).
+    assert cache.get_bytes("http", http_key(URL)) == BODY
+    assert cache.get_meta("http", http_key(URL))["final_url"] == "https://example.com/final"
+
+
+def test_redirect_loop_stops_at_declared_hop_ceiling(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Потолок хопов — объявленный параметр (дефолт httpx = 20), не молчаливый лимит."""
+    from core.adapters.crawl_http import DEFAULT_MAX_REDIRECTS
+
+    assert DEFAULT_MAX_REDIRECTS == 20
+    cache = ContentAddressedCache(tmp_path)
+    fake = _FakeHttpx([_FakeResponse(url=URL, status_code=302, location="/loop")])
+    monkeypatch.setattr(HttpCrawler, "_import_http", staticmethod(lambda: fake))
+    crawler = HttpCrawler(cache=cache, max_redirects=3)
+
+    with pytest.raises(CrawlError, match="редиректов"):
+        crawler.fetch(URL)
+
+    # Три хопа выпущены, четвёртый — уже нет.
+    assert len(fake.calls) == 4
+    assert cache.get_bytes("http", http_key(URL)) is None
+
+
+def test_follow_redirects_false_keeps_legacy_single_request(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``follow_redirects=False`` — прежняя семантика: ответ ``3xx`` как есть, без хопов."""
+    cache = ContentAddressedCache(tmp_path)
+    fake = _FakeHttpx([_FakeResponse(url=URL, content=b"", status_code=302, location="/x")])
+    monkeypatch.setattr(HttpCrawler, "_import_http", staticmethod(lambda: fake))
+    crawler = HttpCrawler(cache=cache, follow_redirects=False)
+
+    page = crawler.fetch(URL)
+
+    assert [call[0] for call in fake.calls] == [URL]
+    assert page.status_code == 302
+
+
+def test_redirect_keeps_cookie_set_by_hop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Куки, поставленные хопом, доезжают до следующего: ручной цикл не теряет их.
+
+    ``httpx``-клиент вёл jar сам, пока редиректы шли внутри одного вызова; при ручном
+    цикле перенос обязан быть явным — иначе штатный «302 + Set-Cookie» обрывался бы.
+    """
+    cache = ContentAddressedCache(tmp_path)
+    crawler, fake = _crawler_with_httpx(
+        monkeypatch,
+        [
+            _FakeResponse(
+                url=URL,
+                status_code=302,
+                location="/final",
+                set_cookie="sid=abc; Path=/",
+            ),
+            _FakeResponse(url="https://example.com/final", content=BODY, status_code=200),
+        ],
+        cache,
+    )
+
+    crawler.fetch(URL)
+
+    assert fake.calls[0][1].get("Cookie") is None
+    assert fake.calls[1][1]["Cookie"] == "sid=abc"
+
+
+def test_redirect_does_not_forward_cookie_to_foreign_host(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Куки остаются на поставившем их хосте: чужому (но публичному) хосту не уходят."""
+    cache = ContentAddressedCache(tmp_path)
+    crawler, fake = _crawler_with_httpx(
+        monkeypatch,
+        [
+            _FakeResponse(
+                url=URL,
+                status_code=302,
+                location="https://other.example.net/final",
+                set_cookie="sid=abc",
+            ),
+            _FakeResponse(
+                url="https://other.example.net/final", content=BODY, status_code=200
+            ),
+        ],
+        cache,
+    )
+
+    crawler.fetch(URL)
+
+    assert fake.calls[1][1].get("Cookie") is None
+
+
+# -- живой fake-сервер: редирект на внутренний адрес -------------------------
+
+
+class _RedirectingHandler(BaseHTTPRequestHandler):
+    """Fake-сервер: ``Location`` из карты маршрутов и счётчик запросов по путям."""
+
+    protocol_version = "HTTP/1.1"
+
+    def do_GET(self) -> None:  # noqa: N802 - имя задано базовым классом
+        server = cast("_RedirectServer", self.server)
+        server.seen.append(self.path)
+        location = server.routes.get(self.path)
+        body = b"<html><body>secret</body></html>"
+        if location is None:
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        self.send_response(302)
+        self.send_header("Location", location)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def log_message(self, format: str, *args: object) -> None:  # noqa: A002 - сигнатура базы
+        """Тишина: тест не должен засорять вывод серверным логом."""
+
+
+class _RedirectServer(ThreadingHTTPServer):
+    """Сервер с картой ``путь → Location`` и журналом фактических запросов."""
+
+    routes: dict[str, str]
+    seen: list[str]
+
+
+@contextlib.contextmanager
+def _redirect_server(routes: dict[str, str]) -> Iterator[_RedirectServer]:
+    """Поднимает fake-сервер на ``localhost`` и гасит его после теста.
+
+    Входной URL — DNS-имя ``localhost`` (проходит ``validate_url``: блокируются только
+    литеральные IP), а ``Location`` ведёт на литеральный внутренний адрес — ровно тот
+    случай, который обязан отсекаться на хопе.
+    """
+    server = _RedirectServer(("localhost", 0), _RedirectingHandler)
+    server.routes = routes
+    server.seen = []
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield server
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+@pytest.mark.parametrize("hostile", _HOSTILE_HOPS)
+def test_live_redirect_to_internal_address_is_rejected_without_bytes(
+    tmp_path: Path, hostile: str
+) -> None:
+    """Живой путь: редирект на внутренний адрес — типизированный отказ, кэш пуст.
+
+    Проверяется и то, что запрос на внутренний адрес **не выпущен**: сервер считает
+    запросы, а внутренний адрес и не должен до него дойти (для ``127.0.0.1:<port>``
+    это тот же сервер, поэтому счётчик был бы виден).
+    """
+    pytest.importorskip("httpx")
+    cache = ContentAddressedCache(tmp_path)
+    with _redirect_server({}) as server:
+        port = server.server_address[1]
+        server.routes["/start"] = hostile.format(port=port)
+        crawler = HttpCrawler(cache=cache)
+        entry = f"http://localhost:{port}/start"
+
+        with pytest.raises(CrawlUrlError) as excinfo:
+            crawler.fetch(entry)
+
+        assert "SSRF" in str(excinfo.value)
+        # Редирект не исполнен: второго запроса к серверу не было.
+        assert server.seen == ["/start"]
+        # Байтов в кэше нет вовсе — ни по запрошенному, ни по какому-либо ключу.
+        assert cache.get_bytes("http", http_key(entry)) is None
+        assert not list((tmp_path / "http").glob("*.bin"))
+
+
+def test_live_safe_redirect_is_followed_and_cached(tmp_path: Path) -> None:
+    """Положительный контроль: тот же живой путь на безопасном хопе работает как раньше."""
+    pytest.importorskip("httpx")
+    cache = ContentAddressedCache(tmp_path)
+    with _redirect_server({}) as server:
+        port = server.server_address[1]
+        server.routes["/start"] = "/final"
+        crawler = HttpCrawler(cache=cache)
+        entry = f"http://localhost:{port}/start"
+
+        page = crawler.fetch(entry)
+
+        assert server.seen == ["/start", "/final"]
+        assert page.url == f"http://localhost:{port}/final"
+        assert page.status_code == 200
+        assert b"secret" in page.content
+        assert cache.get_bytes("http", http_key(entry)) == page.content
+
+
+def test_live_redirect_chain_reveals_which_hop_was_rejected(tmp_path: Path) -> None:
+    """Отказ называет хоп: причина в сообщении, а не «что-то не так с URL»."""
+    pytest.importorskip("httpx")
+    with _redirect_server({}) as server:
+        port = server.server_address[1]
+        server.routes["/start"] = "/middle"
+        server.routes["/middle"] = "http://10.0.0.1/final"
+        crawler = HttpCrawler(cache=ContentAddressedCache(tmp_path))
+        entry = f"http://localhost:{port}/start"
+
+        with pytest.raises(CrawlUrlError) as excinfo:
+            crawler.fetch(entry)
+
+        assert "10.0.0.1" in str(excinfo.value)
+        # Первый (безопасный) хоп исполнен, второй — нет.
+        assert server.seen == ["/start", "/middle"]

@@ -545,15 +545,51 @@ def test_collect_not_modified_without_bytes_raises() -> None:
         EdgeCrawlExecutor(gateway).collect("job-1")
 
 
-def test_collect_final_url_malformed_degrades_to_none() -> None:
-    """Malformed ``final_url`` (не-строка) не роняет сбор — деградирует в ``None``."""
+def test_collect_final_url_malformed_is_visible_rejection() -> None:
+    """Malformed ``final_url`` (не-строка) — видимый отказ, а не тихий ``None`` (R7).
+
+    ``final_url`` становится ``RawPage.url`` (источником документа), поэтому молчаливая
+    деградация выдала бы содержимое одного ответа за содержимое другого.
+    """
     gateway = _FakeGateway(
         {"crawl/collect": {"items": [_item(final_url=123)], "done": True}}
     )
     executor = EdgeCrawlExecutor(gateway)
 
-    (item,) = executor.collect("job-1").items
-    assert item.final_url is None
+    with pytest.raises(RemoteContentError, match="final_url"):
+        executor.collect("job-1")
+
+
+def test_collect_final_url_non_public_address_is_rejected() -> None:
+    """R7: ``final_url`` перепроверяется тем же правилом SSRF, что и запрошенный URL."""
+    gateway = _FakeGateway(
+        {
+            "crawl/collect": {
+                "items": [_item(final_url="http://127.0.0.1/secret")],
+                "done": True,
+            }
+        }
+    )
+    executor = EdgeCrawlExecutor(gateway)
+
+    with pytest.raises(RemoteContentError, match="небезопасный final_url"):
+        executor.collect("job-1")
+
+
+def test_collect_final_url_metadata_endpoint_is_rejected() -> None:
+    """Metadata-эндпоинт в ``final_url`` тоже отвергается (edge не доверяем)."""
+    gateway = _FakeGateway(
+        {
+            "crawl/collect": {
+                "items": [_item(final_url="http://169.254.169.254/latest/meta-data")],
+                "done": True,
+            }
+        }
+    )
+    executor = EdgeCrawlExecutor(gateway)
+
+    with pytest.raises(RemoteContentError, match="небезопасный final_url"):
+        executor.collect("job-1")
 
 
 def test_collect_error_item_is_not_trusted_as_success() -> None:

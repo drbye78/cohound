@@ -58,16 +58,29 @@ def _opt_str(value: Any) -> str | None:
     return text if text else None
 
 
-def _opt_url(value: Any) -> str | None:
-    """URL-строка или ``None``: не-строка/пустая → ``None`` (malformed не роняет сбор).
+def _validated_final_url(value: Any) -> str | None:
+    """``final_url`` из ответа edge — с SSRF-перепроверкой на стороне ядра (C1/R7).
 
-    Строже :func:`_opt_str`: для ``final_url`` коэрция числа/объекта в строку дала бы
-    мусорный URL — безопаснее трактовать как отсутствие (R7: нет ``final_url`` ⇒
-    запрошенный URL).
+    ``None`` — только когда поля нет вовсе (``final_url`` опционален). Кривое значение
+    (не-строка, пустая строка, небезопасный адрес) — **видимый отказ элемента** с
+    причиной, а не тихий ``None``: ``final_url`` становится ``RawPage.url``, то есть
+    источником документа (``core.pipeline.corpus``), поэтому правило «edge не доверяем»
+    распространяется и на него. Молчаливый ``None`` подменил бы адрес запрошенным и
+    выдал бы содержимое одного ответа за содержимое другого.
     """
-    if isinstance(value, str) and value:
-        return value
-    return None
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value:
+        raise RemoteContentError(
+            "crawl/collect.items: final_url должен быть непустой строкой"
+        )
+    try:
+        validate_url(value)
+    except ValueError as exc:
+        raise RemoteContentError(
+            f"crawl/collect.items: небезопасный final_url ({exc})"
+        ) from exc
+    return value
 
 
 def _opt_int(value: Any) -> int | None:
@@ -321,6 +334,10 @@ class EdgeCrawlExecutor:
             raise RemoteContentError(
                 f"crawl/collect.items: небезопасный url ({exc})"
             ) from exc
+        # R7: ``final_url`` — не провенанс-поле, а ``RawPage.url`` (источник документа):
+        # проверяется тем же правилом, что и запрошенный URL, а кривое значение —
+        # видимый отказ элемента, а не тихая деградация в ``None``.
+        final_url = _validated_final_url(item.get("final_url"))
 
         raw = item.get("raw")
         claimed_hash = item.get("content_hash")
@@ -355,7 +372,7 @@ class EdgeCrawlExecutor:
             content_hash=computed_hash,
             raw_bytes=raw_bytes,
             error=_opt_str(item.get("error")),
-            final_url=_opt_url(item.get("final_url")),
+            final_url=final_url,
             etag=_opt_str(item.get("etag")),
             last_modified=_opt_str(item.get("last_modified")),
             not_modified=not_modified,

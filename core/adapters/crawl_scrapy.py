@@ -5,6 +5,10 @@ I19; 02 §B.1). Ответственность адаптера (01 §3.2, ``por
 
 * **robots=obey** — реальный путь явно выставляет ``ROBOTSTXT_OBEY = True``
   (дефолт Scrapy при встраивании как библиотеки — ``False``, 05 §2.5);
+* **похоповая валидация редиректов** (R10) — стоковые ``RedirectMiddleware`` и
+  ``MetaRefreshMiddleware`` заменяются подклассами, которые проверяют цель каждого хопа
+  (``validate_url``) и при нарушении поднимают ``IgnoreRequest``, **не** выпуская запрос;
+  отказ доезжает до вызывающего как ``CrawlUrlError`` (см. ``_redirect_guard_classes``);
 * **playwright per-request** — при ``plan.fetch is FetchMode.BROWSER`` запрос идёт с
   ``playwright``-meta (снимок после готовности JS, ``plan.wait_for``; V5-оговорки 05 §2.5);
 * **retries/backoff** — через настройки Scrapy (``RETRY_TIMES``/``DOWNLOAD_DELAY``);
@@ -57,7 +61,7 @@ Twisted-реактор и не требуют браузеров. Если ``fet
 поднимает ``CrawlNotFound`` — подкласс ``CrawlError`` с ``failure_kind="not_found"``:
 pipeline делает такой исход терминальным (без повторов) и не считает origin нечитаемым.
 Отклонённый SSRF-валидацией URL поднимает ``CrawlUrlError`` (подкласс и ``CrawlError``,
-и ``ValueError``).
+и ``ValueError``) — и на входе, и на любом хопе редиректа.
 
 Нейтрален (§1.3): в модуле нет названий продуктов/вендоров; профили — данные.
 """
@@ -73,6 +77,7 @@ from concurrent.futures import Future
 from concurrent.futures import TimeoutError as FuturesTimeoutError
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
+from functools import lru_cache
 from typing import Any, Protocol, cast, runtime_checkable
 
 from core.domain.enums import FailureKind
@@ -285,7 +290,11 @@ class _CrawlSpec:
     представления не несёт); ``error`` — сбой, который нельзя поднять из callback паука;
     ``error_kind`` — машинный класс сбоя (``FailureKind``), если ответ определён (404/410);
     ``http_status`` — фактический статус ответа, если он наблюдался (наблюдаемость:
-    переносится в исключение и далее в ``crawl_session_items.http_status``).
+    переносится в исключение и далее в ``crawl_session_items.http_status``);
+    ``unsafe_redirect`` — запрос не выпущен: цель редиректа отклонена SSRF-валидацией
+    (R10). Отдельный флаг, а не ``error_kind``: ``FailureKind`` описывает наблюдения
+    краула/конвейера, а это отказ транспорта до запроса — он поднимается как
+    ``CrawlUrlError``, ровно как отказ входного URL.
     """
 
     url: str
@@ -297,6 +306,7 @@ class _CrawlSpec:
     error: str | None = None
     error_kind: str | None = None
     http_status: int | None = None
+    unsafe_redirect: bool = False
 
 
 # Активные ``CrawlerRunner``: держим ссылку, пока краул не завершён (иначе движок
@@ -323,7 +333,8 @@ def _scrapy_failure_status(failure: Any) -> int | None:
 
 def _record_failure(spec: _CrawlSpec, failure: Any) -> None:
     """Классифицирует сбой запроса в ``spec``: robots-запрет → ``robots_disallow``,
-    404/410 → ``not_found``, oversize → ``payload_too_large``, иначе общий сбой.
+    404/410 → ``not_found``, oversize → ``payload_too_large``, небезопасный редирект →
+    ``unsafe_redirect``, иначе общий сбой.
 
     Без errback'а Scrapy только логировала ошибку, и ``_fetch_with_scrapy`` сообщал
     «контент не получен» — определённый ответ об отсутствии терялся.
@@ -337,6 +348,13 @@ def _record_failure(spec: _CrawlSpec, failure: Any) -> None:
         # Наблюдаемость: статус доезжает до элемента сеанса даже когда класс
         # отказа остаётся общим (``source_unavailable``).
         spec.http_status = status
+    if _is_unsafe_redirect(failure):
+        # R10: цель редиректа отклонена SSRF-валидацией — запрос не выпускался.
+        # ``error_kind`` не заполняется: это отказ транспорта до запроса, а не
+        # наблюдение краула (см. ``_CrawlSpec.unsafe_redirect``).
+        spec.unsafe_redirect = True
+        spec.error = f"Scrapy-краул {spec.url!r}: {_failure_value(failure)}"
+        return
     if _is_robots_refusal(failure):
         # ``robots_disallow`` входит в ``BLOCKING_FAILURE_KINDS``, а
         # ``source_unavailable`` — нет. Записанный как недоступность robots-запрет
@@ -582,6 +600,102 @@ def _as_crawl_error(url: str, exc: BaseException) -> CrawlError:
     if isinstance(exc, CrawlError):
         return exc
     return CrawlError(f"Scrapy-краул {url!r} не удался: {exc}")
+
+
+#: Префикс сообщения ``IgnoreRequest``, которым наш redirect-middleware отказывает в
+#: небезопасном хопе (R10). Классификация сверяет **префикс**: широкий предикат по
+#: подстроке превратил бы в отказ любой отфильтрованный запрос (см. ``_is_robots_refusal``).
+_REDIRECT_GUARD_MARKER = "cohound: redirect target rejected by SSRF validation"
+
+#: Стоковые middleware редиректов Scrapy, которые заменяются нашими подклассами.
+#: Оба обязательны: meta-refresh — второй способ увести запрос на чужой адрес.
+_STOCK_REDIRECT_MIDDLEWARES: tuple[str, ...] = (
+    "scrapy.downloadermiddlewares.redirect.RedirectMiddleware",
+    "scrapy.downloadermiddlewares.redirect.MetaRefreshMiddleware",
+)
+#: Приоритеты взяты у стоковых middleware (``DOWNLOADER_MIDDLEWARES_BASE``).
+_REDIRECT_MIDDLEWARE_PRIORITY = 600
+_METAREFRESH_MIDDLEWARE_PRIORITY = 580
+
+
+@lru_cache(maxsize=1)
+def _redirect_guard_classes() -> tuple[type, type]:
+    """Строит подклассы redirect/meta-refresh middleware с **похоповой** валидацией (R10).
+
+    Стоковый ``RedirectMiddleware`` резолвит ``Location`` и сразу возвращает запрос —
+    единственная ``validate_url`` в адаптере стоит на входном URL, поэтому редирект на
+    приватный/metadata-адрес обходил SSRF-защиту. Подкласс перехватывает
+    ``_redirect`` (единственную точку, через которую проходят и обычный редирект, и
+    переход ``POST``→``GET``): цель проверяется ``validate_url`` до возврата запроса,
+    при нарушении поднимается ``IgnoreRequest`` с меткой :data:`_REDIRECT_GUARD_MARKER`
+    — запрос на небезопасный адрес **не выпускается**.
+
+    Scrapy-классы строятся лениво (модуль импортируется и без Scrapy), поэтому фабрика,
+    а не объявление на уровне модуля. ``lru_cache``: идентичность классов стабильна,
+    настройки Scrapy ссылаются на них напрямую.
+
+    Потолок хопов не вводится: действует ``REDIRECT_MAX_TIMES`` (дефолт 20), при
+    превышении стоковый код поднимает ``IgnoreRequest("max redirections reached")`` и
+    классификация остаётся общей (``source_unavailable``) — это не SSRF-отказ.
+    """
+    from scrapy.downloadermiddlewares.redirect import (  # type: ignore[import-not-found]
+        MetaRefreshMiddleware,
+        RedirectMiddleware,
+    )
+    from scrapy.exceptions import IgnoreRequest  # type: ignore[import-not-found]
+
+    def _guard(redirected: Any) -> None:
+        """Проверяет цель хопа; при отказе — ``IgnoreRequest`` (запрос не выпущен).
+
+        Вызывается **до** построения/возврата запроса, поэтому небезопасная цель не
+        доходит ни до планировщика, ни до загрузчика. Причина видна оператору текстом,
+        принадлежность к SSRF-отказу несёт метка :data:`_REDIRECT_GUARD_MARKER`.
+        """
+        target = getattr(redirected, "url", None)
+        if not target:
+            return
+        try:
+            validate_url(str(target))
+        except ValueError as exc:
+            raise IgnoreRequest(f"{_REDIRECT_GUARD_MARKER}: {target!r}: {exc}") from exc
+
+    # ``super()._redirect`` здесь недоступен: базовые классы приходят из ленивого
+    # импорта, и статический анализ не видит их ``_redirect``. Вызов базы по имени
+    # явный и проверяемый (`mypy`-gate: «_redirect undefined in superclass»).
+    class _GuardedRedirectMiddleware(RedirectMiddleware):  # type: ignore[misc]
+        """``RedirectMiddleware`` + SSRF-проверка каждого ``Location`` (R10)."""
+
+        def _redirect(self, redirected: Any, request: Any, reason: Any) -> Any:
+            """Валидирует цель хопа до возврата запроса (R10)."""
+            _guard(redirected)
+            return RedirectMiddleware._redirect(self, redirected, request, reason)
+
+    class _GuardedMetaRefreshMiddleware(MetaRefreshMiddleware):  # type: ignore[misc]
+        """``MetaRefreshMiddleware`` + та же проверка (meta-refresh — второй путь ухода)."""
+
+        def _redirect(self, redirected: Any, request: Any, reason: Any) -> Any:
+            """Валидирует цель meta-refresh до возврата запроса (R10)."""
+            _guard(redirected)
+            return MetaRefreshMiddleware._redirect(self, redirected, request, reason)
+
+    return _GuardedRedirectMiddleware, _GuardedMetaRefreshMiddleware
+
+
+def _is_unsafe_redirect(failure: Any) -> bool:
+    """Отказал ли наш redirect-middleware (небезопасный хоп, R10).
+
+    Предикат строгий: тип ``IgnoreRequest`` **и** префикс сообщения с меткой. Так же
+    различается robots-запрет (:func:`_is_robots_refusal`): ``IgnoreRequest`` — базовый
+    класс и для дубликатов, и для offsite, и для ``HttpError``.
+    """
+    try:
+        from scrapy.exceptions import IgnoreRequest  # type: ignore[import-not-found]
+    except ImportError:
+        return False
+    value = _failure_value(failure)
+    if not isinstance(value, IgnoreRequest):
+        return False
+    return str(value).strip().startswith(_REDIRECT_GUARD_MARKER)
 
 
 class _ReactorWorker:
@@ -948,6 +1062,14 @@ class ScrapyCrawler:
         self._worker_instance().submit(settings, spec, fut, timeout_s)
 
         if spec.error:
+            if spec.unsafe_redirect:
+                # R10: редирект вёл на небезопасный адрес — запрос не выпускался.
+                # Тип тот же, что у отказа входного URL (``CrawlUrlError``): для
+                # pipeline это отказ SSRF-валидации, а не наблюдение краула.
+                raise CrawlUrlError(
+                    spec.error,
+                    http_status=spec.http_status,
+                )
             if spec.error_kind == FailureKind.ROBOTS_DISALLOW.value:
                 # Отказ по политике, а не сбой транспорта: ``CrawlRefused`` несёт
                 # ``refusal_reason``, по которому pipeline пишет ``robots_disallow``
@@ -1025,6 +1147,9 @@ class ScrapyCrawler:
         прогоне так потерялись 240 активных документов). Разрешён ровно ``304`` —
         404/410 и прочие не-2xx обязаны остаться на errback-пути с прежней
         классификацией.
+
+        Там же (после переопределений) ставится redirect-middleware с похоповой
+        валидацией (R10, см. :meth:`_install_redirect_guard`).
         """
         settings = dict(DEFAULT_SCRAPY_SETTINGS)
         cap = self._cap_for(plan)
@@ -1047,4 +1172,26 @@ class ScrapyCrawler:
         if 304 not in statuses:
             statuses.append(304)
         settings["HTTPERROR_ALLOWED_CODES"] = statuses
+        self._install_redirect_guard(settings)
         return settings
+
+    @staticmethod
+    def _install_redirect_guard(settings: dict[str, Any]) -> None:
+        """Ставит redirect-middleware с похоповой валидацией вместо стокового (R10).
+
+        Стоковые ``RedirectMiddleware``/``MetaRefreshMiddleware`` заменяются подклассами
+        с :func:`_redirect_guard_classes` на их же приоритетах (600/580), а сами стоковые
+        отключаются (``None``) — иначе редирект проходил бы мимо проверки. Ставится
+        **после** переопределений оператора: отказ от проверки не должен получаться
+        забывчивостью конфига (та же логика, что у ``304`` выше).
+
+        ``None`` в ``DOWNLOADER_MIDDLEWARES`` — штатный способ Scrapy выключить
+        middleware из ``DOWNLOADER_MIDDLEWARES_BASE``.
+        """
+        guarded_redirect, guarded_metarefresh = _redirect_guard_classes()
+        middleware = dict(settings.get("DOWNLOADER_MIDDLEWARES") or {})
+        for name in _STOCK_REDIRECT_MIDDLEWARES:
+            middleware[name] = None
+        middleware[guarded_redirect] = _REDIRECT_MIDDLEWARE_PRIORITY
+        middleware[guarded_metarefresh] = _METAREFRESH_MIDDLEWARE_PRIORITY
+        settings["DOWNLOADER_MIDDLEWARES"] = middleware

@@ -11,8 +11,16 @@
 * **SSRF-этика** — ``validate_url`` (``core.util.security``) до фетча; приватные/
   петлевые/metadata-цели отклоняются ``CrawlUrlError`` (подкласс ``CrawlError`` и
   ``ValueError``);
-* **redirects** — ``follow_redirects=True``; ``RawPage.url`` — финальный URL после
-  редиректов (``str(response.url)``), ``status_code``/``content_type`` — из ответа;
+* **redirects — похоповая валидация на транспорте** (R10). ``follow_redirects=False``
+  для ``httpx``: цикл ``Location`` ведёт адаптер, и **каждый** хоп проходит
+  ``validate_url`` до выпуска запроса (образец — ``crawl_browser.py``). Запрос на
+  небезопасную цель не выпускается, а байты её ответа не читаются и **не кэшируются**:
+  запись в ``cache/http`` происходит только после того, как финальный URL прошёл
+  проверку. Потолок хопов — объявленный параметр ``max_redirects``
+  (:data:`DEFAULT_MAX_REDIRECTS` = 20, ровно дефолт ``httpx``). ``RawPage.url`` —
+  финальный URL (``str(response.url)``), ``status_code``/``content_type`` — из ответа.
+  Куки, поставленные хопом, переносятся в следующий — с привязкой к поставившему хосту
+  (``httpx``-клиент делал это сам, пока цикл был внутри одного вызова);
 * **content-addressed кэш** — при внедрённом ``ContentAddressedCache`` попадание по
   ``http_key(url)`` отдаёт ``RawPage`` из байтов с mtime (детерминизм R7 между
   ``run_id``); промах → живой фетч + запись;
@@ -42,7 +50,8 @@ callable ``(url) -> bytes``. Если он задан, реальный ``httpx`
 
 **Ошибки.** Единый тип ``CrawlError`` (переиспользован из ``crawl_scrapy``), чтобы
 pipeline ловил один класс для всех краулеров; отсутствие ``httpx`` наследует
-``CrawlUnavailable(CrawlError)``. Отказ SSRF — ``CrawlUrlError``. Ответ ``404``/``410`` —
+``CrawlUnavailable(CrawlError)``. Отказ SSRF — ``CrawlUrlError`` (и на входном URL, и
+на любом хопе редиректа). Ответ ``404``/``410`` —
 ``CrawlNotFound`` (``failure_kind="not_found"``): ресурса нет, а не источник недоступен.
 
 Нейтрален (§1.3): в модуле нет названий продуктов/вендоров/предметных терминов.
@@ -57,8 +66,10 @@ import tempfile
 from collections.abc import Callable
 from dataclasses import replace
 from datetime import UTC, datetime
+from http.cookies import CookieError, SimpleCookie
 from pathlib import Path
 from typing import Any
+from urllib.parse import urljoin, urlsplit
 
 from core.adapters.crawl_scrapy import (
     DEFAULT_MAX_RESPONSE_BYTES,
@@ -81,6 +92,7 @@ from core.util.security import validate_url
 __all__ = [
     "DEFAULT_ACCEPT",
     "DEFAULT_ACCEPT_LANGUAGE",
+    "DEFAULT_MAX_REDIRECTS",
     "DEFAULT_MAX_RESPONSE_BYTES",
     "DEFAULT_TIMEOUT",
     "DEFAULT_USER_AGENT",
@@ -94,6 +106,12 @@ HttpGetFn = Callable[[str], bytes]
 
 #: Таймаут HTTP-запроса, с.
 DEFAULT_TIMEOUT = 30.0
+#: Потолок числа редиректов на один фетч. Значение — ровно дефолт ``httpx``
+#: (``httpx._config.DEFAULT_MAX_REDIRECTS``): ручной цикл по ``Location`` не вводит
+#: нового поведения, а переносит валидацию каждого хопа на транспорт (R10).
+DEFAULT_MAX_REDIRECTS = 20
+#: Статусы, на которых транспорт делает следующий хоп (набор ``httpx``).
+_REDIRECT_STATUSES: frozenset[int] = frozenset({301, 302, 303, 307, 308})
 #: User-Agent по умолчанию (описательный; можно переопределить/отключить ``None``).
 DEFAULT_USER_AGENT = "coHound-crawler/0.1"
 #: Заголовки контент-согласования обычной HTML-страницы.
@@ -115,6 +133,37 @@ def _now_iso() -> str:
     return datetime.now(UTC).isoformat()
 
 
+def _host_of(url: str) -> str:
+    """Хост URL в нижнем регистре (пустая строка, если хост не читается)."""
+    return (urlsplit(url).hostname or "").lower()
+
+
+def _collect_cookies(response: Any, jar: dict[str, str]) -> None:
+    """Складывает ``Set-Cookie`` ответа в jar хоста ``name → value``.
+
+    Разбирается stdlib-ом (:class:`http.cookies.SimpleCookie`), а не регуляркой: значение
+    куки может содержать ``;``/``=`` внутри кавычек. ``get_list`` предпочитается
+    ``get``: у ``httpx`` несколько ``Set-Cookie`` схлопываются в один заголовок с
+    запятыми, а ``Expires`` их тоже содержит — разбор «по запятой» испортил бы значение.
+    """
+    headers = response.headers
+    get_list = getattr(headers, "get_list", None)
+    if callable(get_list):
+        raw_values: list[str] = [str(value) for value in get_list("Set-Cookie")]
+    else:  # дублёр ответа в тестах (плоский dict)
+        single = headers.get("Set-Cookie")
+        raw_values = [str(single)] if single else []
+    for raw in raw_values:
+        parsed = SimpleCookie()
+        try:
+            parsed.load(raw)
+        except CookieError:
+            # Битая кука не должна ронять фетч: она не относится к представлению.
+            continue
+        for name, morsel in parsed.items():
+            jar[name] = morsel.value
+
+
 class HttpCrawler:
     """Лёгкий HTTP-краулер (``httpx``) с SSRF-защитой и опциональным кэшем.
 
@@ -127,7 +176,10 @@ class HttpCrawler:
     :param cache: глобальный content-addressed кэш (R7); ``None`` → без кэша.
     :param timeout: таймаут HTTP-запроса, с (>0).
     :param user_agent: значение заголовка ``User-Agent``; ``None`` → без заголовка.
-    :param follow_redirects: следовать ли HTTP-редиректам (по умолчанию да).
+    :param follow_redirects: следовать ли HTTP-редиректам (по умолчанию да). ``False``
+        оставляет ответ ``3xx`` как есть — хопов тогда нет и валидировать нечего.
+    :param max_redirects: потолок числа хопов (дефолт :data:`DEFAULT_MAX_REDIRECTS`);
+        превышение — ``CrawlError``, как ``TooManyRedirects`` у ``httpx``.
     """
 
     version = "http-crawler-1"
@@ -147,6 +199,7 @@ class HttpCrawler:
         timeout: float = DEFAULT_TIMEOUT,
         user_agent: str | None = DEFAULT_USER_AGENT,
         follow_redirects: bool = True,
+        max_redirects: int = DEFAULT_MAX_REDIRECTS,
         robots: RobotsGate | None = None,
         max_response_bytes: int = DEFAULT_MAX_RESPONSE_BYTES,
     ) -> None:
@@ -154,6 +207,10 @@ class HttpCrawler:
             raise ValueError("задайте только один шов: fetcher или http_get")
         if timeout <= 0:
             raise ValueError(f"timeout обязан быть положительным, получено {timeout!r}")
+        if max_redirects < 0:
+            raise ValueError(
+                f"max_redirects не может быть отрицательным, получено {max_redirects!r}"
+            )
         if max_response_bytes <= 0:
             raise ValueError(
                 "max_response_bytes должен быть положительным, "
@@ -164,6 +221,7 @@ class HttpCrawler:
         self.timeout = timeout
         self.user_agent = user_agent
         self.follow_redirects = follow_redirects
+        self.max_redirects = int(max_redirects)
         # D1/§10: per-host политика robots.txt (egress-слой). ``None`` → без проверки
         # (обратная совместимость); тесты инъектят политику без сети.
         self._robots = robots
@@ -244,6 +302,9 @@ class HttpCrawler:
         # P6: staging-артефакт в память не читался — ``page.content`` пуст, и запись его
         # в кэш отравила бы ключ пустым телом. Источник истины для такого ответа —
         # retention (``corpus_raw``, I19), а не URL-кэш.
+        # R10: ``_fetch_live`` возвращает страницу только после валидации **каждого**
+        # хопа, поэтому запись ниже означает «финальный URL прошёл проверку». Отказ на
+        # любом хопе поднимает исключение выше — байты недоступного адреса не кэшируются.
         if self._cache is not None and not page.not_modified and page.staged_path is None:
             self._cache.put_bytes("http", key, page.content)
             self._cache.put_meta(
@@ -294,7 +355,17 @@ class HttpCrawler:
             )
 
     def _get_real(self, url: str, plan: FetchPlan) -> RawPage:
-        """Потоковый GET; ``304`` — не ошибка, а подтверждение кэша (см. ниже).
+        """Потоковый GET с **похоповой** валидацией редиректов (R10).
+
+        ``follow_redirects=False`` у ``httpx``: цикл ведёт адаптер, и каждый ``Location``
+        разрешается относительно текущего URL и проходит ``validate_url`` **до** выпуска
+        запроса. Это одна точка для всех HTTP-путей (краул, ``robots.txt``, реестры,
+        discovery-проба, SERP-фетч, шов ``/v1/fetch``): проверка живёт на транспорте, а
+        не в пайплайне. Отказ хопа — ``CrawlUrlError`` (тот же тип, что у браузерного
+        транспорта), байты недоступного адреса не читаются.
+
+        Потолок хопов — ``max_redirects`` (дефолт :data:`DEFAULT_MAX_REDIRECTS`, ровно
+        дефолт ``httpx``); превышение — ``CrawlError``, как ``TooManyRedirects``.
 
         Тело **не** буферизуется целиком до проверки: ``Content-Length`` проверяется до
         чтения, а поток обрывается сразу при превышении потолка. Потолки два:
@@ -311,79 +382,109 @@ class HttpCrawler:
         """
         httpx = self._import_http()
         cap = self._cap_for(plan)
+        headers = self._headers(plan)
         # Наблюдаемость: статус ответа, если транспорт успел его увидеть (см. CrawlError).
         # Заполняется сразу после входа в потоковый ответ; None — ответа не было.
         observed_status: int | None = None
+        # ``url`` — **запрошенный** URL: он же ключ кэша (``http_key``) и предмет записи
+        # в сайдкар. ``current`` — текущий хоп, который и валидируется/фетчится.
+        current = url
+        hops = 0
+        # Куки цепочки редиректов. ``httpx``-клиент переносил их сам (доменно-скоупед
+        # jar внутри одного вызова); ручной цикл обязан сделать это явно, иначе штатный
+        # сценарий «302 + Set-Cookie» (JS-challenge публичной страницы) оборвался бы на
+        # первом хопе. Jar ключуется хостом: чужому хосту куки не отдаём, а отклонённому
+        # (SSRF) — тем более.
+        jar: dict[str, dict[str, str]] = {}
         try:
-            with httpx.stream(
-                "GET",
-                url,
-                timeout=self.timeout,
-                follow_redirects=self.follow_redirects,
-                headers=self._headers(plan),
-            ) as response:
-                if int(response.status_code) == 304:
-                    return self._page_not_modified(url, response)
-                # 404/410 — определённый ответ «ресурса нет», а не недоступность источника.
-                # Классифицируем ДО ``raise_for_status``: иначе статус схлопнулся бы в
-                # бесцветный ``CrawlError`` и pipeline записал бы ``source_unavailable``.
-                status = int(response.status_code)
-                observed_status = status
-                if status in NOT_FOUND_STATUSES:
-                    raise CrawlNotFound(
-                        f"HTTP {status} для {url!r}: ресурс отсутствует",
-                        http_status=status,
-                    )
-                try:
-                    response.raise_for_status()
-                except CrawlError:
-                    raise
-                except Exception as exc:  # noqa: BLE001 - статус известен, класс общий
-                    # 403/429/503 и прочие не-2xx: класс отказа прежний
-                    # (``source_unavailable``), но статус теперь виден оператору.
-                    raise CrawlError(
-                        f"HTTP-фетч {url!r} не удался: {exc}",
-                        http_status=status,
-                    ) from exc
-                # P6: класс ответа известен только здесь (заголовки получены): страница —
-                # прежний in-memory потолок, допущенный артефакт — staging-файл.
-                staging_dir = self._staging_path(
-                    plan, url=url, content_type=response.headers.get("Content-Type")
-                )
-                ceiling = (
-                    cap
-                    if staging_dir is None
-                    else max(cap, int(plan.max_stream_bytes or 0))
-                )
-                declared = response.headers.get("Content-Length")
-                declared_size: int | None = None
-                if declared is not None:
-                    try:
-                        declared_size = int(declared)
-                    except (TypeError, ValueError):
-                        declared_size = None
-                    if declared_size is not None and declared_size > ceiling:
-                        raise CrawlPayloadTooLarge(
-                            f"ответ {url!r}: Content-Length {declared_size} байт "
-                            f"> лимита {ceiling} (payload_too_large)"
+            while True:
+                hop_host = _host_of(current)
+                with httpx.stream(
+                    "GET",
+                    current,
+                    timeout=self.timeout,
+                    follow_redirects=False,
+                    headers=headers,
+                    cookies=jar.get(hop_host) or None,
+                ) as response:
+                    target = self._redirect_target(current, response)
+                    if target is not None:
+                        hops += 1
+                        if hops > self.max_redirects:
+                            raise CrawlError(
+                                f"превышено число редиректов ({self.max_redirects}) "
+                                f"при фетче {url!r}"
+                            )
+                        _collect_cookies(response, jar.setdefault(hop_host, {}))
+                        current = target
+                        # ``continue`` выходит из ``with`` (поток закрывается) и берёт
+                        # следующий хоп уже провалидированным.
+                        continue
+                    if int(response.status_code) == 304:
+                        return self._page_not_modified(url, response)
+                    # 404/410 — определённый ответ «ресурса нет», а не недоступность
+                    # источника. Классифицируем ДО ``raise_for_status``: иначе статус
+                    # схлопнулся бы в бесцветный ``CrawlError`` и pipeline записал бы
+                    # ``source_unavailable``.
+                    status = int(response.status_code)
+                    observed_status = status
+                    if status in NOT_FOUND_STATUSES:
+                        raise CrawlNotFound(
+                            f"HTTP {status} для {current!r}: ресурс отсутствует",
+                            http_status=status,
                         )
-                content, staged_path, head = self._read_stream(
-                    url,
-                    response,
-                    plan,
-                    cap,
-                    staging_dir,
-                    # Известный размер свыше in-memory потолка — сразу в файл: не
-                    # буферизуем ``cap`` байт ради последующей записи их на диск.
-                    stage_first=(
-                        staging_dir is not None
-                        and declared_size is not None
-                        and declared_size > cap
-                    ),
-                )
-                return self._page_from_response(
-                    response, content, staged_path=staged_path, head=head
-                )
+                    try:
+                        response.raise_for_status()
+                    except CrawlError:
+                        raise
+                    except Exception as exc:  # noqa: BLE001 - статус известен, класс общий
+                        # 403/429/503 и прочие не-2xx: класс отказа прежний
+                        # (``source_unavailable``), но статус теперь виден оператору.
+                        raise CrawlError(
+                            f"HTTP-фетч {current!r} не удался: {exc}",
+                            http_status=status,
+                        ) from exc
+                    # P6: класс ответа известен только здесь (заголовки получены): страница —
+                    # прежний in-memory потолок, допущенный артефакт — staging-файл.
+                    staging_dir = self._staging_path(
+                        plan,
+                        url=current,
+                        content_type=response.headers.get("Content-Type"),
+                    )
+                    ceiling = (
+                        cap
+                        if staging_dir is None
+                        else max(cap, int(plan.max_stream_bytes or 0))
+                    )
+                    declared = response.headers.get("Content-Length")
+                    declared_size: int | None = None
+                    if declared is not None:
+                        try:
+                            declared_size = int(declared)
+                        except (TypeError, ValueError):
+                            declared_size = None
+                        if declared_size is not None and declared_size > ceiling:
+                            raise CrawlPayloadTooLarge(
+                                f"ответ {current!r}: Content-Length {declared_size} байт "
+                                f"> лимита {ceiling} (payload_too_large)"
+                            )
+                    content, staged_path, head = self._read_stream(
+                        current,
+                        response,
+                        plan,
+                        cap,
+                        staging_dir,
+                        # Известный размер свыше in-memory потолка — сразу в файл: не
+                        # буферизуем ``cap`` байт ради последующей записи их на диск.
+                        stage_first=(
+                            staging_dir is not None
+                            and declared_size is not None
+                            and declared_size > cap
+                        ),
+                    )
+                    return self._page_from_response(
+                        response, content, staged_path=staged_path, head=head
+                    )
         except CrawlError:
             raise
         except Exception as exc:  # noqa: BLE001 - унификация ошибок адаптера
@@ -391,6 +492,40 @@ class HttpCrawler:
                 f"HTTP-фетч {url!r} не удался: {exc}",
                 http_status=observed_status,
             ) from exc
+
+    def _redirect_target(self, current: str, response: Any) -> str | None:
+        """Цель следующего хопа или ``None`` (это не редирект / редиректы выключены).
+
+        Возвращает **уже провалидированный** абсолютный URL: ``Location`` разрешается
+        относительно ``current`` (:func:`urllib.parse.urljoin`) и проходит
+        ``validate_url``. Небезопасная цель — ``CrawlUrlError``: запрос на неё не
+        выпускается, её байты не читаются и не кэшируются (R10). Тип совпадает с
+        отказом браузерного транспорта (``crawl_browser._default_http_get``) и с
+        отказом входного URL, поэтому pipeline ловит один класс на все три случая.
+
+        ``follow_redirects=False`` — прежняя семантика: ответ ``3xx`` отдаётся как есть,
+        хопов нет, проверять нечего.
+        """
+        if not self.follow_redirects:
+            return None
+        try:
+            status = int(response.status_code)
+        except (TypeError, ValueError):
+            return None
+        if status not in _REDIRECT_STATUSES:
+            return None
+        location = response.headers.get("Location")
+        if not location:
+            # ``3xx`` без ``Location`` — не хоп: остаётся обычным ответом (как у httpx).
+            return None
+        target = urljoin(current, str(location))
+        try:
+            validate_url(target)
+        except ValueError as exc:
+            raise CrawlUrlError(
+                f"редирект на небезопасный URL отклонён SSRF-валидацией: {exc}"
+            ) from exc
+        return target
 
     def _staging_path(
         self, plan: FetchPlan, *, url: str, content_type: str | None = None

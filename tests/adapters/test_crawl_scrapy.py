@@ -25,6 +25,7 @@ from core.adapters.crawl_scrapy import (
     _CrawlSpec,
     _raw_page_from_scrapy_response,
     _record_failure,
+    _redirect_guard_classes,
     _scrapy_failure_status,
 )
 from core.domain.enums import FailureKind
@@ -931,3 +932,206 @@ def test_http_error_middleware_passes_304_with_our_settings() -> None:
         middleware.process_spider_input(_response(403))
     with pytest.raises(httperror.HttpError):
         middleware.process_spider_input(_response(404))
+
+
+# ---------------------------------------------------------------------------
+# R10 (P3): похоповая валидация редиректов на транспорте
+# ---------------------------------------------------------------------------
+
+_HOSTILE = "http://10.0.0.1/secret"
+
+
+def _guard_middleware() -> object:
+    """Настоящий ``RedirectMiddleware``-подкласс с настройками как из ``_build_settings``.
+
+    Проверка идёт на реальных классах Scrapy (``Settings``/``Request``/``Response``):
+    иначе правка была бы декларацией — стоковый middleware резолвит ``Location`` сам.
+    """
+    pytest.importorskip("scrapy")
+    from scrapy.settings import Settings
+
+    redirect_cls, _metarefresh_cls = _redirect_guard_classes()
+    middleware = redirect_cls(
+        Settings(
+            {
+                "REDIRECT_ENABLED": True,
+                "REDIRECT_MAX_TIMES": 20,
+                "REDIRECT_PRIORITY_ADJUST": 2,
+            }
+        )
+    )
+    # ``process_response`` читает ``crawler.spider.handle_httpstatus_list``.
+    middleware.crawler = type(
+        "C", (), {"spider": type("S", (), {"handle_httpstatus_list": ()})()}
+    )()
+    return middleware
+
+
+def _redirect_response(location: str, *, request_url: str = URL) -> tuple[object, object]:
+    """Пара ``(request, response)`` с ``Location`` — как у настоящего ``302``."""
+    from scrapy.http import Request, Response
+
+    request = Request(request_url)
+    response = Response(
+        request_url, status=302, headers={"Location": location}, request=request
+    )
+    return request, response
+
+
+def test_redirect_guard_rejects_private_hop_before_request_is_built() -> None:
+    """Редирект на приватный IP не выпускается: ``IgnoreRequest`` с меткой отказа.
+
+    До правки единственная ``validate_url`` стояла на входном URL, поэтому
+    ``RedirectMiddleware`` спокойно строил запрос на внутренний адрес (слепой SSRF).
+    """
+    exceptions = pytest.importorskip("scrapy.exceptions")
+    middleware = _guard_middleware()
+    request, response = _redirect_response(_HOSTILE)
+
+    with pytest.raises(exceptions.IgnoreRequest) as excinfo:
+        middleware.process_response(request, response)
+
+    message = str(excinfo.value)
+    assert message.startswith("cohound: redirect target rejected by SSRF validation")
+    assert "10.0.0.1" in message
+
+
+def test_redirect_guard_passes_safe_hop() -> None:
+    """Безопасный (относительный) хоп по-прежнему проходит и резолвится штатно."""
+    middleware = _guard_middleware()
+    request, response = _redirect_response("/next")
+
+    redirected = middleware.process_response(request, response)
+
+    assert redirected.url == "https://example.com/next"
+    assert redirected.meta["redirect_times"] == 1
+
+
+def test_meta_refresh_guard_rejects_private_target() -> None:
+    """Meta-refresh — второй путь ухода на чужой адрес: тоже проверяется."""
+    pytest.importorskip("scrapy")
+    exceptions = pytest.importorskip("scrapy.exceptions")
+    from scrapy.http import HtmlResponse, Request
+    from scrapy.settings import Settings
+
+    _redirect_cls, metarefresh_cls = _redirect_guard_classes()
+    middleware = metarefresh_cls(
+        Settings(
+            {
+                "METAREFRESH_ENABLED": True,
+                "METAREFRESH_MAXDELAY": 100,
+                "REDIRECT_MAX_TIMES": 20,
+                "REDIRECT_PRIORITY_ADJUST": 2,
+            }
+        )
+    )
+    middleware.crawler = type(
+        "C", (), {"spider": type("S", (), {"handle_httpstatus_list": ()})()}
+    )()
+    request = Request(URL)
+    response = HtmlResponse(
+        URL,
+        body=b'<html><head><meta http-equiv="refresh" content="0;url='
+        + _HOSTILE.encode()
+        + b'"></head></html>',
+        encoding="utf-8",
+        request=request,
+    )
+
+    with pytest.raises(exceptions.IgnoreRequest, match="rejected by SSRF validation"):
+        middleware.process_response(request, response)
+
+
+def test_redirect_guard_is_installed_in_settings() -> None:
+    """Стоковые middleware редиректов выключены, наши — на их приоритетах.
+
+    Регистрация проверяется на реальном слиянии с ``DOWNLOADER_MIDDLEWARES_BASE``:
+    иначе подмена осталась бы в объявлении и стоковый редирект продолжил бы работать.
+    """
+    scrapy_settings = pytest.importorskip("scrapy.settings")
+    conf = pytest.importorskip("scrapy.utils.conf")
+
+    crawler = ScrapyCrawler(fetcher=_page)
+    settings = crawler._build_settings(FetchPlan())
+    merged = scrapy_settings.Settings(
+        {"DOWNLOADER_MIDDLEWARES": settings["DOWNLOADER_MIDDLEWARES"]}
+    ).getwithbase("DOWNLOADER_MIDDLEWARES")
+    names = [
+        getattr(item, "__qualname__", str(item))
+        for item in conf.build_component_list(merged)
+    ]
+
+    stock = "scrapy.downloadermiddlewares.redirect.RedirectMiddleware"
+    stock_refresh = "scrapy.downloadermiddlewares.redirect.MetaRefreshMiddleware"
+    assert stock not in names and stock_refresh not in names
+    assert any(name.endswith("_GuardedRedirectMiddleware") for name in names)
+    assert any(name.endswith("_GuardedMetaRefreshMiddleware") for name in names)
+
+
+def test_redirect_guard_survives_operator_middleware_overrides() -> None:
+    """Переопределения оператора не отменяют проверку (ставится после них)."""
+    scrapy_settings = pytest.importorskip("scrapy.settings")
+    conf = pytest.importorskip("scrapy.utils.conf")
+
+    crawler = ScrapyCrawler(
+        fetcher=_page,
+        scrapy_settings={
+            "DOWNLOADER_MIDDLEWARES": {
+                "scrapy.downloadermiddlewares.redirect.RedirectMiddleware": 601,
+            }
+        },
+    )
+    settings = crawler._build_settings(FetchPlan())
+    merged = scrapy_settings.Settings(
+        {"DOWNLOADER_MIDDLEWARES": settings["DOWNLOADER_MIDDLEWARES"]}
+    ).getwithbase("DOWNLOADER_MIDDLEWARES")
+    names = [
+        getattr(item, "__qualname__", str(item))
+        for item in conf.build_component_list(merged)
+    ]
+
+    assert "scrapy.downloadermiddlewares.redirect.RedirectMiddleware" not in names
+    assert any(name.endswith("_GuardedRedirectMiddleware") for name in names)
+
+
+def test_unsafe_redirect_failure_is_classified_and_not_cached(tmp_path: Path) -> None:
+    """Отказ хопа доезжает как ``CrawlUrlError`` и не оставляет байтов в кэше.
+
+    Кэш пишется только после успешного ``_fetch_live``, поэтому отказ SSRF-проверки
+    означает «ключ не тронут» — это и проверяется (R10: байты не кэшируются).
+    """
+    exceptions = pytest.importorskip("scrapy.exceptions")
+    cache = ContentAddressedCache(tmp_path)
+    failure = _FakeFailure(
+        exceptions.IgnoreRequest(
+            "cohound: redirect target rejected by SSRF validation: "
+            f"{_HOSTILE!r}: URL указывает на приватный/внутренний IP"
+        )
+    )
+    worker = _FailingWorker(failure)
+    crawler = ScrapyCrawler(worker=worker, cache=cache)
+
+    with pytest.raises(CrawlUrlError) as excinfo:
+        crawler.fetch(URL)
+
+    spec = _spec_of(worker)
+    assert spec.unsafe_redirect is True
+    # Отказ транспорта до запроса — не наблюдение краула: таксономия не расширена.
+    assert spec.error_kind is None
+    assert excinfo.value.http_status is None
+    # Кэш-ключ запрошенного URL не тронут: байтов небезопасной цели нет.
+    assert cache.get_bytes("http", http_key(URL)) is None
+    assert not list((tmp_path / "http").glob(f"{http_key(URL)}.*"))
+
+
+def test_other_ignore_request_is_not_unsafe_redirect() -> None:
+    """Обычный ``IgnoreRequest`` (offsite/дубликаты) не становится SSRF-отказом."""
+    worker = _FailingWorker(_FakeFailure(_scrapy_ignore_request("Filtered offsite request")))
+    crawler = ScrapyCrawler(worker=worker)
+
+    with pytest.raises(CrawlError) as excinfo:
+        crawler.fetch(URL)
+
+    assert not isinstance(excinfo.value, CrawlUrlError)
+    assert _spec_of(worker).unsafe_redirect is False
+
