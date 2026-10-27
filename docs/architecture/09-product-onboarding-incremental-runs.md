@@ -1840,8 +1840,8 @@ RAM), поэтому адаптер извлекает **один** член в�
 | Семейство / формат | Сигнал | Читатель | Чанкер |
 |---|---|---|---|
 | HTML (страница) | остальное (по умолчанию) | `HtmlExtractor` (trafilatura) | `MarkdownChunker` |
-| markdown | `.md`/`.markdown`/`.mdown`/`.mkd`, `text/markdown`, `text/x-markdown`, `application/x-markdown` | `TextExtractor` (`text-plain-1`) | `MarkdownChunker` (`md-heading-2`) |
-| plain text | `.txt`/`.text`/`.log`/`.sql`/`.rst`, `text/plain` | `TextExtractor` (`text-plain-1`) | `TextChunker` (`text-para-1`) |
+| markdown | `.md`/`.markdown`/`.mdown`/`.mkd`, `text/markdown`, `text/x-markdown`, `application/x-markdown` | `TextExtractor` (`text-plain-1`) | `MarkdownChunker` (`md-heading-3`) |
+| plain text | `.txt`/`.text`/`.log`/`.sql`/`.rst`, `text/plain` | `TextExtractor` (`text-plain-1`) | `TextChunker` (`text-para-2`) |
 | документ | `.pdf`/`.docx`/`.pptx`/`.xlsx` + MIME | `DoclingDocumentExtractor` | `MarkdownChunker` |
 | EPUB | `.epub`, `application/epub+zip` | `EpubExtractor` (`epub-1`) | `MarkdownChunker` |
 
@@ -1874,17 +1874,21 @@ CRLF/CR → LF, удаление NUL/управляющих символов (т
 `container.xml`/OPF/spine или архив не ZIP — видимая ошибка, не исключение. Байты читателя
 не пишутся в `corpus_raw` отдельно: ретейленится исходный `.epub` (I19).
 
-**Чанкеры.** Абзацный чанкер `core/adapters/chunker_text.py` (`text-para-1`): блоки по
+**Чанкеры.** Абзацный чанкер `core/adapters/chunker_text.py` (`text-para-2`): блоки по
 пустым строкам, слияние до `chunk_size`, блок, который помещается, не режется, блок сверх
 `chunk_size` режется по границам предложений (`. ! ? ;` и `…`), и только «бесконечное»
-предложение — жёстко (по возможности по пробелу). `heading_path=""` всегда,
-`context_prefix` — первое предложение первого абзаца чанка (≤200 символов). Диспетчер —
+предложение — жёстко (по возможности по пробелу). Порог фрагмента — `MIN_CHUNK_SIZE = 20`
+символов (замер распределения: полоса `<20` — 0.76 % чанков, и в ней 1 «фразовый» кусок из
+71, остальное `|`, номера страниц, пути); ниже порога кусок в индекс не попадает.
+`heading_path=""` всегда,
+`context_prefix` — первое предложение первого абзаца чанка (≤200 символов); он идёт
+**шапкой фрагмента в промпт**, в эмбеддинг не входит (эмбеддится чистый `text`). Диспетчер —
 `core/adapters/chunker_family.FamilyChunker` по `ExtractedDoc.family` (аддитивное поле
 порта: `"markdown"`/`"text"`/`"epub"`; `None` = markdown-совместимое семейство, так ведут
 себя HTML и docling).
 
 **Контрактная граница.** `chunker_version` — поле `EXECUTION_CONTRACT_FIELDS`, поэтому с
-двумя чанкерами оно стало **композитом** `"md-heading-2+text-para-1"`
+двумя чанкерами оно стало **композитом** `"md-heading-3+text-para-2"`
 (`chunker_family.composite_chunker_version`, тот же источник у декларации и у собранного
 порта). Это версионная граница класса `execution_versions` (`execution_change`, §13):
 меняется `run_id`, `METHODOLOGY_VERSION` — нет.

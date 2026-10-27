@@ -333,7 +333,6 @@ def main() -> int:
     section("Скопированные утилиты/адаптеры (gag5, MIT) — §3.2/§5")
     check("text_utils: детект RU, ё→е, разбиение предложений", lambda: _util_text())
     check("security: SSRF-блок и санитизация", lambda: _util_security())
-    check("fusion: RRF дедуп по chunk_id + детерминизм", lambda: _util_fusion())
     check("MarkdownChunker: heading_path иерархичен (I17/§3.2)", lambda: _chunker())
     check("DoclingDocumentExtractor: pdf/office + грациозная деградация", lambda: _pdf_extractor())
 
@@ -541,25 +540,17 @@ def _util_security() -> None:
     _assert(s.sanitize_slug("Platform V Pangolin!") == "Platform_V_Pangolin")
 
 
-def _util_fusion() -> None:
-    from core.util import fusion as f
-
-    bm25 = [{"chunk_id": "c1", "content": "a", "score": 0.9},
-            {"chunk_id": "c2", "content": "b", "score": 0.5}]
-    dense = [{"chunk_id": "c2", "content": "b", "score": 0.8},
-             {"chunk_id": "c3", "content": "c", "score": 0.7}]
-    res = f.rrf_fuse([bm25, dense], rrf_k=60)
-    # c2 присутствует в обоих списках → первый; дедуп по chunk_id даёт 3 записи.
-    _assert(res[0]["content"] == "b")
-    _assert(len(res) == 3)
-    res2 = f.rrf_fuse([bm25, dense], rrf_k=60)
-    _assert([r["content"] for r in res] == [r["content"] for r in res2])  # детерминизм
-
 
 def _chunker() -> None:
     from core.adapters.chunker_markdown import MarkdownChunker
 
-    md = "# H1\nтело\n\n## H2\nтело2\n\n### H3\nтело3\n"
+    # Порог фрагмента (C6) действует и здесь: тела не короче MIN_CHUNK_SIZE, иначе
+    # проверялся бы не heading_path, а фильтр размера.
+    md = (
+        "# H1\nтело первого раздела документа\n\n"
+        "## H2\nтело второго раздела документа\n\n"
+        "### H3\nтело третьего раздела документа\n"
+    )
     chunks = MarkdownChunker(chunk_size=100, chunk_overlap=20).chunk("doc1", md)
     _assert(chunks[0].heading_path == "H1")
     _assert(chunks[1].heading_path == "H1 > H2")
@@ -567,6 +558,8 @@ def _chunker() -> None:
     _assert([c.chunk_id for c in chunks] == ["doc1#0", "doc1#1", "doc1#2"])
     _assert(all(c.context_prefix == c.heading_path for c in chunks))
     _assert(all(len(c.content_hash) == 16 for c in chunks))
+    # Обломок разметки чанком не становится (C6): односимвольная секция отброшена.
+    _assert(MarkdownChunker().chunk("doc2", "# H1\n|") == [])
 
 
 def _pdf_extractor() -> None:
@@ -2104,7 +2097,8 @@ def _chunker_port() -> None:
     if not isinstance(chunker, ChunkerPort):
         raise AssertionError("MarkdownChunkerPort обязан удовлетворять ChunkerPort")
     chunks = chunker.chunk(
-        ExtractedDoc(text="# H1\nтело", content_hash="h", extractor_version="v"), "doc1"
+        ExtractedDoc(text="# H1\nтело первого раздела", content_hash="h", extractor_version="v"),
+        "doc1",
     )
     if [c.chunk_id for c in chunks] != ["doc1#0"] or chunks[0].heading_path != "H1":
         raise AssertionError("порт-чанкинг сломан")
@@ -2566,7 +2560,7 @@ def _report_gates() -> None:
             "execution_change: execution_contract_digest: ec_1 → ec_2",
             "execution_change: execution_contract_digest: различающееся поле не "
             "восстановимо из манифеста (cohort_digest/seeds_digest/extractor_stack/"
-        "serp_rounds/prompt_template либо иная ось)",
+            "serp_rounds/prompt_template/chunking_spec/evaluation_policy либо иная ось)",
         ]
         if contract_reasons != expected_contract_reasons:
             raise AssertionError(

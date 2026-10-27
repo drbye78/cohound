@@ -119,10 +119,17 @@ config/deploy.yaml · config/paths.example.yaml  # профиль зон (edge) 
 варианты) и EPUB — **первый класс** наравне с HTML (свой читатель `extract_text`/
 `extract_epub` и свой чанкер, не docling); PDF и Office (docx/pptx/xlsx) — через docling
 (`--document-level`: `off|text|layout|layout_tables|full`). Заявленные контейнеры
-(`zip`/`7z`/`rar`) раскрываются спуском (`archive_descent.py`): **потолка глубины нет** —
-конечность дают цикл по хешу содержимого (`archive_cycle`) и кумулятивный бюджет корня
+(`zip`/`7z`/`rar`) раскрываются спуском (`archive_descent.py`): **потолка глубины нет**, и
+это держится **механикой обхода, а не только бюджетом**: обход итеративен (явный стек
+кадров-генераторов), поэтому глубина не упирается в стек интерпретатора. Конечность дают
+цикл по хешу содержимого (`archive_cycle`) и кумулятивный бюджет корня
 (`archive_max_total_uncompressed_bytes`; оси `archive_max_*` ограничивают **один**
-контейнер). Исчерпание бюджета — видимая запись `archive_budget_exhausted`, а не тихое
+контейнер). Замер (почему это важно): до перехода на явный стек цепочка **различных**
+маленьких архивов упиралась в рекурсию на ~990 уровнях и заканчивалась видимой, но ложно
+названной ошибкой `container_reader_unavailable` (`RecursionError` гасился в выборе
+читателя); цепочка 5000 различных zip теперь проходит до конца с 5001 наблюдением и нулём
+ошибок. Тест — `tests/pipeline/test_corpus_descent.py::test_chain_of_5000_distinct_archives_reaches_the_end`.
+Исчерпание бюджета — видимая запись `archive_budget_exhausted`, а не тихое
 завершение. Бэкенды: `zip` читается stdlib-ом, `7z`/`rar` — extra `extract-archives`
 (`py7zr`/`rarfile`; сжатые члены `rar` требуют внешнего `bsdtar`/`unrar`/`7z`, AES-zip —
 `pyzipper`). Без бэкенда контейнер **не разворачивается видимо** (`available()=False`,

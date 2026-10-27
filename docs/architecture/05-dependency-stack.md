@@ -441,7 +441,6 @@ bash scripts/ci.sh                               # всё вместе: ruff →
 |---|---|
 | `core/util/security.py` | `core/security.py` |
 | `core/util/text_utils.py` | `core/text_utils.py` |
-| `core/util/fusion.py` | `retrieval/fusion.py` |
 | `core/adapters/chunker_markdown.py` | `ingestion/structural_chunker.py` |
 | `core/adapters/extract_document.py` | `documents/parse.py` (перенесён **не файл**, а идея graceful-degradation и способ вызова `DocumentConverter.export_to_markdown()`) |
 
