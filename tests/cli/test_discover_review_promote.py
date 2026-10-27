@@ -256,7 +256,9 @@ def test_resolve_and_build_search_adapter_passes_r7_cache(
 
     captured: dict[str, Any] = {}
 
-    def _fake_build(name: str, *, cache: Any | None = None) -> FakeSearchAdapter:
+    def _fake_build(
+        name: str, *, cache: Any | None = None, search_mode: str | None = None
+    ) -> FakeSearchAdapter:
         captured["name"] = name
         captured["cache"] = cache
         return FakeSearchAdapter()
@@ -285,7 +287,7 @@ def test_discover_provider_from_config_by_language(
     requested: list[str] = []
 
     def _fake_build(
-        name: str, *, cache: Any | None = None
+        name: str, *, cache: Any | None = None, search_mode: str | None = None
     ) -> FakeSearchAdapter:
         requested.append(name)
         return FakeSearchAdapter()
@@ -316,7 +318,7 @@ def test_discover_explicit_flag_overrides_config(
     requested: list[str] = []
 
     def _fake_build(
-        name: str, *, cache: Any | None = None
+        name: str, *, cache: Any | None = None, search_mode: str | None = None
     ) -> FakeSearchAdapter:
         requested.append(name)
         return FakeSearchAdapter()

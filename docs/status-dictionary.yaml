@@ -12,7 +12,8 @@
 # product_mode, refresh_policy, product_scope, incremental_kind, reuse_kind, change_class,
 # run_scope, skip_reason, stale_reason, search_phase, termination_reason, adapter_kind,
 # endpoint_kind, llm_scenario, gate/gate_source/gate_verdict/gate_policy, golden_tier, cap,
-# importance, param_type, archetype, anchor_relation, crawl_probe_*.
+# importance, param_type, archetype, anchor_relation, crawl_probe_*,
+# ranking_restriction, uncertainty_provenance.
 # Класс конкретной секции, где он неочевиден, помечен комментарием рядом с ней.
 #
 # ПРАВИЛО: операционные перечисления (напр. crawl_session_status/crawl_item_status,
@@ -463,6 +464,16 @@ container_encryption:
   - not_encrypted
   - unknown
 
+# Режим запроса внешнего поиска (I3/§5): какой бэкенд провайдера отвечает. Условие
+# измерения — объявляется в run.yaml:serp.mode и входит в execution contract
+# (serp_mode), а НЕ приходит из env: смена бэкенда меняет состав находок, то есть
+# корпус. Операционное перечисление, версия словаря не бампается.
+#   sync  — один POST /v2/web/search, ответ в том же запросе;
+#   async — запуск операции /v2/web/searchAsync и опрос (объявленный минимум 5 мин).
+search_mode:
+  - sync
+  - async
+
 # hound package crawl-probe: наблюдаемые значения зонда осей краула по ключам
 # domain_profiles.yaml. Операционное перечисление — без бампа версии словаря.
 # source — приоритет источника URL (первый хит на ключ); status — исход зонда;
@@ -645,3 +656,19 @@ run_scope:
   - full
   - only_failed
   - product_only
+
+# P6c. Ограничение ранжирования полосой неопределённости вердиктов.
+# Операционное перечисление (условие публикации, не семантика правила): добавление
+# значений не требует бампа версии словаря (§13). `forbidden_within_band` запрещает
+# порядок продуктов (не отчёт), когда в полосе могла смениться критическая (Кр) ячейка.
+ranking_restriction:
+  - none
+  - forbidden_within_band
+
+# P6c. Происхождение полосы неопределённости вердиктов.
+# Операционное перечисление: различает «объявлено по замеру», «измерено в этом прогоне»
+# и «не объявлено» (неизвестность не измерена ≠ нулевая неопределённость).
+uncertainty_provenance:
+  - declared
+  - measured_in_this_run
+  - not_declared

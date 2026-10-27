@@ -1840,11 +1840,35 @@ def _serp_rounds_from_manifest(manifest: RunManifest) -> int | None:
     return int(declared) if isinstance(declared, (int, float)) else None
 
 
+def _serp_mode_from_manifest(manifest: RunManifest) -> str | None:
+    """Объявленный режим поиска из провенанса контура (``None`` — не записано).
+
+    Отдельного столбца у оси нет: значение живёт в
+    ``search_effort_budget_json.serp.mode.declared``. Читается **объявленное**, а не
+    исполненное: контракт описывает условие измерения, а ``used`` — наблюдение (и оно
+    остаётся в провенансе, чтобы расхождение «объявлено ≠ исполнено» было видно).
+    """
+    raw = getattr(manifest, "search_effort_budget_json", None)
+    if not raw:
+        return None
+    try:
+        payload = json.loads(raw) if isinstance(raw, str) else raw
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(payload, Mapping):
+        return None
+    mode = (payload.get("serp") or {}).get("mode") or {}
+    declared = mode.get("declared") if isinstance(mode, Mapping) else None
+    return str(declared) if declared else None
+
 #: Поля контракта, значение которых манифест не хранит отдельным атрибутом: геттер
 #: читает его из провенанса. ``None`` с обеих сторон — по-прежнему «не восстановимо»
 #: (историческая строка без канала), и это называется, а не выдумывается.
 _CONTRACT_FIELD_GETTERS: dict[str, Callable[[RunManifest], Any]] = {
     "serp_rounds": _serp_rounds_from_manifest,
+    # Режим поиска — тем же путём: иначе расхождение прогонов по этой оси объявлялось бы
+    # невосстановимым, хотя значение записано (в провенансе контура).
+    "serp_mode": _serp_mode_from_manifest,
 }
 
 

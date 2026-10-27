@@ -3215,24 +3215,66 @@ class _PhaseLifecycle:
     completed: bool = False
 
 
-def _serp_disabled_observation(source: str | None) -> dict[str, Any]:
+def _serp_disabled_observation(
+    source: str | None, mode: str | None = None
+) -> dict[str, Any]:
     """Провенанс **выключенного** контура: «выключено, источник <уровень>».
 
     Отсутствие записи неотличимо от «контур есть, но не сработал», поэтому выключенный
     контур тоже пишет наблюдение — с уровнем, который его выключил (``run.yaml``/
     ``deploy.yaml``/``default``/``env``). Значения не выдумываются: бюджет не показывается,
     если контур выключен.
+
+    **Форма совпадает с включённым контуром.** Набор ключей — тот же, что у
+    :meth:`core.pipeline.serp_loop.SerpDiscovery.to_observation`, и это не косметика:
+    читатель провенанса обязан отличать «поля нет, потому что контур выключен» от «поле не
+    собрали». Разные формы делали это различие невыразимым — сравнение двух прогонов по
+    ``yield``/``errors`` падало бы на выключенном контуре в ``KeyError`` или, хуже, читалось
+    бы как «замер отсутствует» вместо «вызовов не было».
+
+    Что именно означают нули: при ``enabled=False`` **ни один** вызов не сделан, поэтому
+    нулевые счётчики (``used``/``charged``/``errors``/``budget_refused``) — измеренный факт,
+    а не подстановка. Пустые отображения ``query_outcomes``/``yield``/``timing`` значат
+    «ни одного продукта с вызовами» — ровно то же, что у включённого контура без запросов.
+    ``measured`` живёт внутри строки ``timing`` на продукт и здесь не появляется по той же
+    причине: строк нет, потому что не было вызова. ``declared_per_round``/
+    ``effective_per_product`` остаются ``None``: объявленного бюджета у выключенного контура
+    не существует, а ``0`` объявил бы бюджет, которого никто не задавал.
     """
     return {
         "enabled": False,
-        "rounds": {"declared": 0, "executed": 0, "source": str(source or "default")},
-        "budget": {"declared_per_round": None, "effective_per_product": None, "used": {}, "exhausted": {}},
+        "rounds": {
+            "declared": 0,
+            "executed": 0,
+            "not_executed": 0,
+            "not_executed_reason": None,
+            "source": str(source or "default"),
+        },
+        "budget": {
+            "declared_per_round": None,
+            "effective_per_product": None,
+            "used": {},
+            "charged": {},
+            "from_cache": {},
+            "exhausted": {},
+        },
         "adapter": None,
+        # Объявленный режим виден и при выключенном контуре: ``run_id`` описывает его
+        # всегда (ось в контракте), а ``used=None`` — «адаптера не было», не «async».
+        "mode": {"declared": mode, "used": None},
         "unavailable_reason": None,
         "queries": {},
+        # S7: исходов запросов нет, потому что запросов не было. Пустое отображение
+        # говорит именно это; отсутствие ключа не говорило ничего.
+        "query_outcomes": {},
+        # Доходность и сбои — те же ключи, что у включённого контура (S8): оператор
+        # сравнивает прогоны по ним, и выключенный контур не должен выпадать из сравнения.
+        "yield": {},
         "candidates": {},
         "accepted": {},
         "rejected": {},
+        "errors": {},
+        "timing": {},
         "termination": {},
     }
 
@@ -3245,6 +3287,7 @@ def _run_serp_contour(
     serp_rounds: int,
     serp_budget: int | None,
     serp_source: str | None,
+    serp_mode: str | None,
     serp_langs: Sequence[str] | None,
     product_names: Mapping[str, str] | None,
     domain_profiles: Mapping[str, DomainProfile] | None,
@@ -3292,7 +3335,7 @@ def _run_serp_contour(
     )
 
     if serp_rounds <= 0:
-        return _serp_disabled_observation(serp_source), {}
+        return _serp_disabled_observation(serp_source, serp_mode), {}
     if serp_budget is None or int(serp_budget) < 1:
         raise ValueError(
             "SERP-контур: rounds > 0 требует объявленного серп-бюджета "
@@ -3345,6 +3388,9 @@ def _run_serp_contour(
         limits_by_product=limits_by_product,
         source=str(serp_source or "run.yaml"),
         budget_declared=int(serp_budget),
+        # Режим — из объявленной оси (контракт ``serp_mode``), а не из env: он
+        # определяет бэкенд, значит и состав находок, и записывается в наблюдение.
+        mode=serp_mode,
     )
     observation = discovery.to_observation()
     if discovery.unavailable_reason == "no_adapter":
@@ -3601,6 +3647,7 @@ def _build_corpus(
     serp_rounds: int = 0,
     serp_budget: int | None = None,
     serp_source: str | None = None,
+    serp_mode: str | None = None,
     serp_langs: Sequence[str] | None = None,
     product_names: Mapping[str, str] | None = None,
     manual_artifacts: ManualArtifacts | None = None,
@@ -3867,7 +3914,7 @@ def _build_corpus(
     # дренажа: найденные URL входят в тот же набор, что и авторские, поэтому проходят
     # обычный путь retention → hash → index (I19). Почему не «после сборки» — см.
     # докстринг :func:`_run_serp_contour`.
-    serp_observation: dict[str, Any] = _serp_disabled_observation(serp_source)
+    serp_observation: dict[str, Any] = _serp_disabled_observation(serp_source, serp_mode)
     #: Найденные SERP документы, разложенные по авторским корням: ``product → root → urls``.
     #: Второй проход по ним — обычный дренаж тех же корней (глубина 0), не «долив в индекс».
     serp_seeds_by_product: dict[str, dict[str, list[str]]] = {}
@@ -3882,6 +3929,7 @@ def _build_corpus(
                 serp_rounds=int(serp_rounds),
                 serp_budget=serp_budget,
                 serp_source=serp_source,
+                serp_mode=serp_mode,
                 serp_langs=serp_langs,
                 product_names=product_names,
                 domain_profiles=domain_profiles,

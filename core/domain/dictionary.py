@@ -39,16 +39,19 @@ from core.domain.enums import (
     ProductScope,
     PublishabilityClass,
     RankingPolicy,
+    RankingRestriction,
     RefreshPolicy,
     ReuseKind,
     RunScope,
     SearchKind,
+    SearchMode,
     SeedRole,
     SeedSource,
     SeedState,
     SkipReason,
     StaleReason,
     Status,
+    UncertaintyProvenance,
     UnknownCause,
     UnknownPolicy,
 )
@@ -109,6 +112,8 @@ def assert_dictionary_integrity(path: str | Path) -> None:
         "archive_descent_status",
         # B2: предикат шифрования контейнера — tri-state модели порта.
         "container_encryption",
+        # I3/§5: режим запроса внешнего поиска — условие измерения (какой бэкенд отвечает).
+        "search_mode",
         # Lane B: жизненный цикл сеанса краула и per-URL статус его элемента.
         "crawl_session_status",
         "crawl_item_status",
@@ -132,6 +137,9 @@ def assert_dictionary_integrity(path: str | Path) -> None:
         "publishability_class",
         "unknown_cause",
         "excluded_cell_class",
+        # P6c: полоса неопределённости вердиктов — ограничение ранжирования и провенанс.
+        "ranking_restriction",
+        "uncertainty_provenance",
     ]
     missing = [k for k in required if k not in data]
     if missing:
@@ -163,6 +171,9 @@ def assert_dictionary_integrity(path: str | Path) -> None:
         # B2: предикат шифрования контейнера — три состояния, иначе словарь и enum
         # расходятся молча (и «не знаю» снова станет «не зашифрован»).
         "container_encryption": {v.value for v in ContainerEncryption},
+        # Режим поиска: две ветки одного API; словарь и enum разъезжаются молча, и
+        # ``serp_mode`` в контракте описывал бы значение, которого нет в перечислении.
+        "search_mode": {v.value for v in SearchMode},
         "crawl_session_status": {v.value for v in CrawlSessionStatus},
         "crawl_item_status": {v.value for v in CrawlItemStatus},
         "skip_reason": {v.value for v in SkipReason},
@@ -190,6 +201,10 @@ def assert_dictionary_integrity(path: str | Path) -> None:
         "publishability_class": {v.value for v in PublishabilityClass},
         "unknown_cause": {v.value for v in UnknownCause},
         "excluded_cell_class": {v.value for v in ExcludedCellClass},
+        # P6c: запрет ранжирования и происхождение полосы неопределённости — иначе
+        # словарь и enum разъезжаются молча (как было бы с любой строкой «на глаз»).
+        "ranking_restriction": {v.value for v in RankingRestriction},
+        "uncertainty_provenance": {v.value for v in UncertaintyProvenance},
     }
     for section, expected in checks.items():
         actual = set(data[section])

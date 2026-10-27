@@ -1128,6 +1128,11 @@ def build_phases(
             serp_rounds=_serp_rounds(axes),
             serp_budget=getattr(run_serp, "budget", None),
             serp_source=getattr(axes, "serp_source", None),
+            # Режим поиска — объявленная ось (``run.yaml: serp.mode``); пишется в
+            # провенанс контура парой «объявлено/исполнено», чтобы ``serp_mode`` в
+            # контракте был восстановим из манифеста (иначе расхождение прогонов по
+            # этой оси объявлялось бы невосстановимым).
+            serp_mode=getattr(axes, "serp_mode", None),
             serp_langs=getattr(inputs.run, "languages", None),
             # Запросы контура = каталог + **имя продукта** (замер: 45/63 против 27/63):
             # имя берётся из паспорта (канонический), а не из product_id.

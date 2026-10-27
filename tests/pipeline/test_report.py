@@ -369,6 +369,26 @@ def test_diff_names_serp_rounds_change_from_provenance() -> None:
     ), legacy
 
 
+def test_diff_names_serp_mode_change_from_provenance() -> None:
+    """Смена **режима** поиска называется значением, а не «иная ось».
+
+    Режим (``sync``/``async``) — отдельное условие измерения: два бэкенда одного API дают
+    разный состав находок, значит и разный корпус. Значение живёт в провенансе контура
+    (``search_effort_budget_json.serp.mode.declared``); без геттера расхождение прогонов по
+    этой оси объявлялось бы невосстановимым, хотя оно записано.
+    """
+    def _effort(mode: str) -> str:
+        return json.dumps(
+            {"serp": {"mode": {"declared": mode, "used": mode}, "rounds": {"declared": 1}}}
+        )
+
+    prev = _manifest(execution_contract_digest="ec_1", search_effort_budget_json=_effort("async"))
+    curr = _manifest(execution_contract_digest="ec_2", search_effort_budget_json=_effort("sync"))
+    reasons = diff_boundary_violations(prev, curr)
+    assert (
+        "execution_change: execution_contract_digest: serp_mode: 'async' → 'sync'" in reasons
+    ), reasons
+
 def test_build_manifest_records_search_effort_state() -> None:
     """I23/§5: объявленный и израсходованный поисковый бюджет доезжает до манифеста.
 
@@ -1470,7 +1490,7 @@ def test_diff_boundary_contract_mismatch_states_diagnostic_limit() -> None:
         "execution_change: execution_contract_digest: ec_1 → ec_2",
         "execution_change: execution_contract_digest: различающееся поле не "
         "восстановимо из манифеста (cohort_digest/seeds_digest/extractor_stack/"
-        "serp_rounds/prompt_template/chunking_spec/evaluation_policy/lexical_spec/render_modes_digest/passports_digest либо иная ось)",
+        "serp_rounds/serp_mode/prompt_template/chunking_spec/evaluation_policy/lexical_spec/render_modes_digest/passports_digest либо иная ось)",
     ]
     assert not any("chunker_version" in reason for reason in reasons)
     assert not any("embed_model_id" in reason for reason in reasons)
@@ -1510,7 +1530,7 @@ def test_diff_boundary_names_cohort_change_instead_of_contract_mismatch() -> Non
         "execution_change: execution_contract_digest: ec_1 → ec_2",
         "execution_change: execution_contract_digest: различающееся поле не "
         "восстановимо из манифеста (cohort_digest/seeds_digest/extractor_stack/"
-        "serp_rounds/prompt_template/chunking_spec/evaluation_policy/lexical_spec/render_modes_digest/passports_digest либо иная ось)",
+        "serp_rounds/serp_mode/prompt_template/chunking_spec/evaluation_policy/lexical_spec/render_modes_digest/passports_digest либо иная ось)",
     ]
 
 

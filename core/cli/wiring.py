@@ -28,7 +28,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -122,6 +122,7 @@ from core.config.deploy import (
 from core.config.domain_profiles import DomainProfile
 from core.domain.enums import DocumentLevel, PdfPipeline
 from core.domain.models import CrawlRunConfig
+from core.domain.scoring import endpoint_host_notices
 from core.pipeline import Ports, Runner
 from core.pipeline.composition import (
     CompositionView,
@@ -139,7 +140,7 @@ from core.pipeline.resources import (
     workers_from_budget,
 )
 from core.pipeline.runner import PHASES, Clock, PhaseFn
-from core.ports.crawl_errors import CrawlError
+from core.ports.crawl_errors import CrawlError, CrawlNotFound
 from core.ports.crawler import CrawlerPort
 from core.ports.discovery_llm import DiscoveryLLMPort
 from core.ports.embedder import EmbedderPort
@@ -208,6 +209,7 @@ __all__ = [
     "build_store",
     "build_vector_index",
     "llm_env_notices",
+    "llm_host_notices",
     "manifest_deploy_fields",
     "preflight_extraction_budget",
     "resolve_and_build_search_adapter",
@@ -686,7 +688,10 @@ def _module_installed(name: str) -> bool:
 
 
 def build_search_adapter(
-    adapter: str, *, cache: ContentAddressedCache | None = None
+    adapter: str,
+    *,
+    cache: ContentAddressedCache | None = None,
+    search_mode: str | None = None,
 ) -> SearchAdapterPort:
     """Собирает внешний поисковый адаптер по имени для ``hound discover`` (``03`` §D.6).
 
@@ -700,10 +705,13 @@ def build_search_adapter(
         краулеры: адаптер кэширует им ``fetch``, а pipeline — ответы поиска
         (``cache/serp``, :func:`core.pipeline.search_log.external_search_observed`).
         ``None`` — без кэша (``--from-scratch``).
+    :param search_mode: объявленный режим запроса (``sync``/``async``, ``run.yaml:
+        serp.mode``). ``None`` — не объявлено: адаптер возьмёт env/дефолт кода (путь
+        разведки, чей выход — кандидаты, а не измерение).
     :raises WiringError: неизвестный адаптер.
     """
     if adapter == "yandex":
-        return YandexSearchAdapter(cache=cache)
+        return YandexSearchAdapter(cache=cache, search_mode=search_mode)
     if adapter == "glm":
         return GlmSearchAdapter(cache=cache)
     raise WiringError(
@@ -768,6 +776,7 @@ def resolve_and_build_search_adapter(
     injected: Any | None = None,
     no_search: bool = False,
     cache: ContentAddressedCache | None = None,
+    search_mode: str | None = None,
 ) -> tuple[Any | None, str | None]:
     """Разрешает провайдера поиска и собирает адаптер (общий хелпер ``discover``/scout).
 
@@ -783,6 +792,9 @@ def resolve_and_build_search_adapter(
     :param cache: глобальный content-addressed кэш (R7), передаётся в адаптер; ``None``
         — без кэша (``--from-scratch``). Тот же объект обслуживает ``fetch`` адаптера и
         SERP-кэш pipeline: второй кэш на тот же корень заводить незачем.
+    :param search_mode: объявленный режим запроса (``run.yaml: serp.mode``); ``None`` —
+        не объявлено, адаптер возьмёт env/дефолт (разведка). Передаётся **явно** из
+        контракта прогона: условие измерения не наследуется из окружения.
     :returns: ``(adapter, provider)`` — провайдер для провенанса (I23).
     :raises SearchResolutionError: неизвестный провайдер (``code="search"``) либо
         недоступный реальный адаптер (``code="I19"``).
@@ -803,7 +815,7 @@ def resolve_and_build_search_adapter(
             "(config/deploy.yaml search.adapter/by_language либо --search-adapter); "
             f"поддерживаются: {', '.join(SUPPORTED_SEARCH_ADAPTERS)}",
         )
-    adapter = build_search_adapter(provider, cache=cache)
+    adapter = build_search_adapter(provider, cache=cache, search_mode=search_mode)
     if not _search_adapter_configured(adapter):
         raise SearchResolutionError(
             "I19",
@@ -985,6 +997,49 @@ def llm_env_notices(
                 "объявленном endpoint"
             )
     return tuple(notices)
+
+
+def llm_host_notices(
+    *,
+    deploy_llm: LLMDeployConfig | None = None,
+    hosts: Sequence[str] = (),
+    slot: str | None = None,
+    run_slot: str | None = None,
+) -> tuple[dict[str, Any], ...]:
+    """Машиночитаемые замечания о хостах endpoint'а оценщика (§10): объявленное исключение.
+
+    Замечания делятся на два класса:
+
+    * **объявленные** — из флага ``deploy.llm.rnd_endpoint`` и хостов ``llm_scenarios``:
+      строится доменной функцией :func:`core.domain.scoring.endpoint_host_notices`
+      (единственная формула — фаза Ш8 кладёт **те же** замечания в профиль публикуемости,
+      поэтому CLI и манифест не могут разойтись);
+    * **env-расхождение** — endpoint пришёл из ``COHOUND_LLM_BASE_URL`` и поэтому вне
+      ``execution_contract_digest``. Текст **переиспользуется** из
+      :func:`llm_env_notices` (второй формулировки нет): здесь он только получает код
+      ``endpoint_from_env``, чтобы попадать в один машиночитаемый список.
+
+    Порядок детерминирован: сначала объявленные (порядок проверок доменной функции),
+    затем env-расхождение. Пустой список — замечаний нет.
+    """
+    declared = list(
+        endpoint_host_notices(
+            rnd_endpoint=getattr(deploy_llm, "rnd_endpoint", None), hosts=hosts
+        )
+    )
+    env_texts = llm_env_notices(deploy_llm=deploy_llm, slot=slot, run_slot=run_slot)
+    for text in env_texts:
+        if ENV_LLM_BASE_URL not in text:
+            continue
+        declared.append(
+            {
+                "code": "endpoint_from_env",
+                "level": "warning",
+                "hosts": [],
+                "message": text,
+            }
+        )
+    return tuple(declared)
 
 
 def serp_env_notices(
@@ -1301,9 +1356,19 @@ def _robots_gate(http_crawler: CrawlerPort, *, user_agent: str | None) -> Robots
 
     Фетч ``robots.txt`` — ленивый (при первом ``allowed(host)``) и происходит **внутри**
     ``fetch`` страницы, который corpus уже пейсит единым владельцем (:class:`RateLimiter`,
-    P2-3): отдельного пейсера не заводим (иначе было бы два владельца). Недоступная лента
-    трактуется как «правил нет» (:class:`RobotsGate`), отказ ``Disallow`` несёт
-    ``refusal_reason="robots_disallow"`` (адаптер, egress-слой).
+    P2-3): отдельного пейсера не заводим (иначе было бы два владельца).
+
+    **Три исхода чтения ленты, а не два** (:class:`RobotsGate`, RFC 9309 §2.3.1.4): прочитано
+    (в т.ч. пусто) ⇒ разрешено всё; ``404``/``410`` ⇒ :class:`CrawlNotFound` пропускается
+    наружу и гейт выводит ``not_found`` — тоже разрешено всё, это ответ origin; 5xx/сеть/
+    таймаут ⇒ ``None`` ⇒ ``unavailable`` ⇒ origin **не обходится**. Каждому исходу свой
+    ``refusal_reason`` у адаптера: ``robots_disallow`` против ``robots_unavailable``.
+
+    Почему пропуск ``CrawlNotFound`` обязателен (замер 28.10, 12 хостов пакета):
+    ``edu.postgrespro.ru``, ``docs.tantorlabs.ru`` и ``wiki.astralinux.ru`` отвечают ``404``
+    на ``robots.txt``. С ```` except Exception: return None```` они получали ``unavailable``
+    и выпадали из корпуса **целиком** — по комментариям пакета это ~800 + ~664 + ~68
+    документов. Политика, которая на пустом месте отнимает три хоста, — не осторожность.
     """
 
     def fetch(host: str) -> str | None:
@@ -1311,10 +1376,19 @@ def _robots_gate(http_crawler: CrawlerPort, *, user_agent: str | None) -> Robots
             page = http_crawler.fetch(
                 f"https://{host}/robots.txt", FetchPlan(FetchMode.HTTP)
             )
-        except Exception:  # noqa: BLE001 — недоступный robots.txt = «правил нет»
+        except CrawlNotFound:
+            # ``404``/``410`` — **наблюдение** «ленты нет», а не отсутствие наблюдения.
+            # Пропускаем исключение: :meth:`RobotsGate._read` распознаёт его по таксономии
+            # (``http_status``/``failure_kind``) и даёт ``not_found`` — разрешено всё.
+            # Глотать его здесь значило бы объявить недоступной ленту, про которую origin
+            # прямо сказал, что её нет.
+            raise
+        except Exception:  # noqa: BLE001 — 5xx/сеть/таймаут = наблюдения нет
             return None
+        # Пустой прочитанный ответ — факт («лента пуста, разрешено всё»), а не ``None``:
+        # ``None`` означает «не смогли прочитать» и по RFC запрещает origin.
         raw = getattr(page, "content", b"") or b""
-        return raw.decode("utf-8", errors="replace") if raw else None
+        return raw.decode("utf-8", errors="replace")
 
     return RobotsGate(fetch, user_agent=user_agent or "*")
 

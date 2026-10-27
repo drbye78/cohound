@@ -228,7 +228,11 @@ class YandexSearchAdapter:
     :param folder_id: идентификатор каталога (иначе из ``YANDEX_FOLDER_ID``).
     :param base_url: база API; ``search_path``/``async_search_path`` — пути веб-поиска.
     :param operation_base_url: база Operations API для опроса async-операций.
-    :param search_mode: ``"async"`` (по умолчанию) или ``"sync"``; иначе ``ValueError``.
+    :param search_mode: ``"async"``/``"sync"``. ``None`` — не объявлено: берётся env
+        ``YANDEX_SEARCH_MODE``, иначе дефолт кода ``async``. Объявленное значение
+        сильнее окружения **всегда** (прежняя редакция давала env приоритет там, где
+        аргумент совпадал с дефолтом, — то есть объявленный ``async`` исполнялся как
+        ``sync`` при ``YANDEX_SEARCH_MODE=sync``).
     :param poll_interval: интервал опроса async-операции, с (>0).
     :param max_wait: общий таймаут ожидания async-операции, с (>0).
     :param cache: глобальный content-addressed кэш ``fetch`` (R7); ``None`` → без кэша.
@@ -252,7 +256,7 @@ class YandexSearchAdapter:
         search_path: str = DEFAULT_SEARCH_PATH,
         async_search_path: str = DEFAULT_ASYNC_SEARCH_PATH,
         operation_base_url: str = DEFAULT_OPERATION_BASE_URL,
-        search_mode: str = DEFAULT_SEARCH_MODE,
+        search_mode: str | None = None,
         poll_interval: float = DEFAULT_POLL_INTERVAL,
         max_wait: float = DEFAULT_MAX_WAIT,
         cache: ContentAddressedCache | None = None,
@@ -274,12 +278,17 @@ class YandexSearchAdapter:
             )
         if max_wait <= 0:
             raise ValueError(f"max_wait обязан быть положительным, получено {max_wait!r}")
-        mode = search_mode.strip() if isinstance(search_mode, str) else search_mode
-        # Дефолт режима переопределяется средой (явный непустой аргумент имеет приоритет).
-        if mode == DEFAULT_SEARCH_MODE:
+        # Порядок: явный аргумент → env → дефолт кода. Прежняя редакция читала env
+        # всякий раз, когда аргумент **равнялся дефолту**, поэтому объявленное «async»
+        # при ``YANDEX_SEARCH_MODE=sync`` молча исполнялось как ``sync``: явное значение
+        # проигрывало окружению ровно в одном направлении, и это направление — то, в
+        # котором объявленный вход перестаёт быть правдой. ``None`` теперь означает
+        # «не объявлено» и **только** он допускает env.
+        if search_mode is None:
             env_mode = os.environ.get(ENV_SEARCH_MODE)
-            if env_mode is not None and env_mode.strip():
-                mode = env_mode.strip()
+            mode = env_mode.strip() if env_mode and env_mode.strip() else DEFAULT_SEARCH_MODE
+        else:
+            mode = search_mode.strip() if isinstance(search_mode, str) else search_mode
         if mode not in SEARCH_MODES:
             raise ValueError(
                 f"search_mode должен быть одним из {SEARCH_MODES}, получено {search_mode!r}"

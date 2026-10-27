@@ -54,6 +54,7 @@ from core.domain.enums import (
     RunMode,
     SatelliteState,
     SearchKind,
+    SearchMode,
     SearchPhase,
     SeedRole,
     SeedSource,
@@ -592,6 +593,14 @@ class SerpRunConfig(BaseModel):
 
     rounds: int = Field(default=0, ge=0)
     budget: int | None = Field(default=None, ge=1)
+    #: Режим запроса провайдера (:class:`SearchMode`). ``None`` — исполнение возьмёт
+    #: дефолт кода (``async``) и **объявит** его в контракте: условие измерения не может
+    #: приходить из env (``YANDEX_SEARCH_MODE`` остаётся настройкой разведки).
+    #: Зачем это вход, а не удобство: ``sync`` и ``async`` — два бэкенда одного API;
+    #: замер 28.10 — sync отвечает за 6.9 с медиана, async за 180 с при опросе 30 с и
+    #: отвечает ``search API backends are overloaded`` там, где sync работает. Разные
+    #: бэкенды дают разный состав находок, то есть разный корпус.
+    mode: SearchMode | None = None
 
     @model_validator(mode="after")
     def _check(self) -> SerpRunConfig:

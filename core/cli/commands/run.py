@@ -69,6 +69,7 @@ from core.cli.wiring import (
     build_store,
     build_vector_index,
     llm_env_notices,
+    llm_host_notices,
     manifest_deploy_fields,
     preflight_extraction_budget,
     resolve_and_build_search_adapter,
@@ -507,12 +508,31 @@ def run(args: argparse.Namespace) -> int:
     # не молчаливые: эти переменные живут в runbook'ах операторов.
     # D-8: профиль ``split-hardened`` тоже даёт видимое предупреждение — он принимается,
     # но ничего не добавляет сверх ``split`` (ложный «хардненинг» молчать не должен).
+    llm_env_texts = llm_env_notices(
+        deploy_llm=getattr(deploy_config, "llm", None),
+        slot=getattr(args, "llm_slot", None),
+        run_slot=getattr(getattr(inputs, "run", None), "llm_slot", None),
+    )
+    # §10: хосты endpoint'а — объявленное исключение стенда RnD. Текст env-расхождения
+    # переиспользуется из ``llm_env_notices`` (см. ``llm_host_notices``), поэтому здесь
+    # берутся только те замечания, которых в списке ещё нет: дубль обесценивает сигнал.
+    host_notices = llm_host_notices(
+        deploy_llm=getattr(deploy_config, "llm", None),
+        hosts=[
+            str(row.get("endpoint_host"))
+            for row in (getattr(declared, "llm_scenarios", ()) or ())
+            if row.get("endpoint_host")
+        ],
+        slot=getattr(args, "llm_slot", None),
+        run_slot=getattr(getattr(inputs, "run", None), "llm_slot", None),
+    )
     config_notices = [
-        *llm_env_notices(
-            deploy_llm=getattr(deploy_config, "llm", None),
-            slot=getattr(args, "llm_slot", None),
-            run_slot=getattr(getattr(inputs, "run", None), "llm_slot", None),
+        *(
+            note["message"]
+            for note in host_notices
+            if note.get("message") not in llm_env_texts
         ),
+        *llm_env_texts,
         *profile_notices(deploy_config),
         # I3/§5: env-троттл SERP-контура виден, как и LLM-расхождения: он меняет корпус,
         # а значит и ``run_id`` — молчаливая подмена здесь была бы подменой измерения.
@@ -906,6 +926,10 @@ def run(args: argparse.Namespace) -> int:
                         lang=search_lang,
                         explicit=None,
                         cache=resolve_content_cache(args, no_cache=from_scratch),
+                        # Режим — из объявленных осей (``run.yaml: serp.mode``), а не из
+                        # env: он определяет, какой бэкенд отдаёт находки, значит и
+                        # корпус. Env-значение остаётся настройкой разведки.
+                        search_mode=getattr(declared, "serp_mode", None),
                     )
                 except (SearchResolutionError, WiringError) as exc:
                     # Не отказ прогона: корпус строится без находок поиска, а причина
@@ -1003,6 +1027,9 @@ def run(args: argparse.Namespace) -> int:
                 seeds_digest=seeds_d,
                 state=state_store,
                 store=store,
+                # §10: тот же вход, что у фазы Ш8 — предмет G4 обязан описывать тот же
+                # профиль публикуемости (включая признак стенда), который публикуется.
+                rnd_endpoint=getattr(deploy_config.llm, "rnd_endpoint", None),
             )
             instrumentable: dict[str, PhaseFn] = dict(phases)
             for gate_name, gate in GATE_PHASES.items():
@@ -1193,7 +1220,11 @@ def run(args: argparse.Namespace) -> int:
                 # видно в ``instrumentation_errors``.
                 try:
                     score_bundle = bundle_for_run(
-                        store, run_id=run_id, plan=run_plan, inputs=inputs
+                        store,
+                        run_id=run_id,
+                        plan=run_plan,
+                        inputs=inputs,
+                        rnd_endpoint=getattr(deploy_config.llm, "rnd_endpoint", None),
                     )
                 except Exception as exc:  # noqa: BLE001 — метрики не роняют прогон
                     score_bundle = None

@@ -122,7 +122,7 @@ from core.config.deploy import (
 )
 from core.config.passports import passport_content_digests
 from core.domain.dictionary import load_dictionary
-from core.domain.enums import RefreshPolicy
+from core.domain.enums import RefreshPolicy, SearchMode
 from core.domain.models import CrawlRunConfig, canonical_rate_limit
 from core.pipeline.digests import passports_digest, render_modes_digest
 from core.pipeline.evaluation_policy import evaluation_policy_spec
@@ -582,6 +582,10 @@ class DeclaredExecutionAxes:
     #: контракт (``serp_rounds``): они меняют корпус, значит и условия измерения.
     serp_rounds: int | None
     serp_source: str | None
+    #: Режим запроса внешнего поиска (``run.yaml: serp.mode``). Решается **кодом** из
+    #: объявленного входа: ``None`` в run.yaml ⇒ эффективный дефолт ``async`` всё равно
+    #: объявляется, иначе ``run_id`` не описывал бы, каким бэкендом снят корпус.
+    serp_mode: str | None
     registry_spec_digest: str | None
     deploy_profile: str | None
     edge_schema_version: str | None
@@ -800,7 +804,7 @@ def _manual_artifacts_digest(args: argparse.Namespace) -> str:
 
 def _serp_axis(
     *, args: argparse.Namespace, run: Any, deploy: DeployConfig
-) -> tuple[int, str]:
+) -> tuple[int, str, str]:
     """Эффективные раунды SERP-контура и уровень-источник (I3/§5).
 
     Приоритет — как у LLM-слота (``CLI > env > run.yaml > deploy.yaml > default``,
@@ -811,6 +815,13 @@ def _serp_axis(
 
     Бюджет объявляется **только** в ``run.yaml: serp.budget``; включение контура без
     бюджета — отказ ``EXIT_USAGE``, а не молчаливый безлимит.
+
+    **Режим поиска объявляется, а не наследуется из окружения.** ``run.yaml: serp.mode``
+    задаёт бэкенд провайдера (``sync`` — прямой POST, ``async`` — operation-очередь).
+    Если вход его не назвал, объявляется **эффективный дефолт кода** (``SearchMode.ASYNC``),
+    а не пустое значение: «чем снимали корпус» — часть идентичности, и ``None`` в контракте
+    означал бы неизвестность там, где режим фактически известен. Env ``YANDEX_SEARCH_MODE``
+    конвейером не читается (её читает разведка, чей выход — кандидаты, не evidence).
 
     :raises ValueError: значение уровня не разбирается (не целое/отрицательное).
     :raises core.cli.errors.CliError: раунды включены, а бюджет не объявлен.
@@ -831,7 +842,9 @@ def _serp_axis(
             code="serp",
             exit_code=EXIT_USAGE,
         )
-    return rounds, source
+    declared_mode = getattr(run_serp, "mode", None)
+    mode = str(declared_mode or SearchMode.ASYNC)
+    return rounds, source, mode
 
 
 def resolve_declared_axes(
@@ -860,7 +873,7 @@ def resolve_declared_axes(
     run_crawl = getattr(run, "crawl", None)
     axis_overrides = _crawl_axis_overrides(args)
     deploy_fields = manifest_deploy_fields(config)
-    serp_rounds, serp_source = _serp_axis(args=args, run=run, deploy=config)
+    serp_rounds, serp_source, serp_mode = _serp_axis(args=args, run=run, deploy=config)
     # §11.1: входы корпуса считаются тем же кодом, что читает исполнение
     # (``_load_corpus_urls``/``_load_render_modes``/``_resolve_passports_dir``), — вторая
     # формула дайджеста разошлась бы с фактическим корпусом. Функции бросают ``CliError``
@@ -888,6 +901,7 @@ def resolve_declared_axes(
         ),
         serp_rounds=serp_rounds,
         serp_source=serp_source,
+        serp_mode=serp_mode,
         registry_spec_digest=registry_specs_digest(_load_registry_specs(args, inputs)),
         deploy_profile=deploy_fields["deploy_profile"],
         edge_schema_version=deploy_fields["edge_schema_version"],

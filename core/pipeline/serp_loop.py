@@ -73,6 +73,7 @@ from core.pipeline.idempotency import mark_stale, upsert_cells
 from core.pipeline.search_log import (
     SearchBudget,
     SearchEffort,
+    SearchOutcome,
     external_search,
     external_search_observed,
 )
@@ -83,8 +84,15 @@ from core.util.hashing import short_hash
 from core.util.security import validate_url
 
 __all__ = [
+    "EARLY_TERMINATION_REASON",
+    "NO_QUERY_VARIATION_REASON",
+    "QUERY_OUTCOME_BUDGET",
+    "QUERY_OUTCOME_ERROR",
+    "QUERY_OUTCOME_NO_RESULTS",
+    "QUERY_OUTCOME_RESULTS",
     "SERP_QUERY_LIMIT",
     "ImmutableBuildError",
+    "QueryOutcomeRow",
     "RoundBuildContext",
     "RoundBuilder",
     "SerpDiscovery",
@@ -116,6 +124,21 @@ _GROUP_SEP = "\x1e"
 SERP_QUERY_LIMIT = 10
 #: Причина неисполненного раунда: набор запросов не изменился (S3, см. ``serp_discover``).
 NO_QUERY_VARIATION_REASON = "no_query_variation"
+#: Причина неисполненного раунда: контур остановился раньше объявленного числа раундов.
+#: Отличается от :data:`NO_QUERY_VARIATION_REASON`: там «спрашивать было бы нечего», здесь
+#: «спрашивать было бы не за чем» (выдача/бюджет/сбой уже терминальны). Без этого токена
+#: ``executed + not_executed`` не сходилось с ``declared`` — арифметика раундов врала.
+EARLY_TERMINATION_REASON = "early_termination"
+#: Исходы выпущенного запроса в наблюдении (S7). Не перечисление, а токены — как
+#: ``unavailable_reason``/``not_executed_reason`` в этом же модуле: новый ``StrEnum``
+#: потребовал бы строки в ``docs/status-dictionary.yaml``, а наблюдение контура — не
+#: методологическое перечисление.
+QUERY_OUTCOME_RESULTS = "results"
+QUERY_OUTCOME_NO_RESULTS = "no_results"
+QUERY_OUTCOME_ERROR = "error"
+QUERY_OUTCOME_BUDGET = "budget_exhausted"
+#: Потолок текста ошибки в наблюдении: отказ должен быть назван, но провенанс — не лог.
+QUERY_ERROR_TEXT_LIMIT = 200
 
 
 # --------------------------------------------------------------------------- #
@@ -572,6 +595,51 @@ def run_serp_round(
 # --------------------------------------------------------------------------- #
 
 
+@dataclass(frozen=True)
+class QueryOutcomeRow:
+    """Исход **одного** выпущенного запроса контура (S7/S8): «что стало с этим запросом».
+
+    До этой строки наблюдение знало только список текстов (``queries``) и суммы по
+    продукту: «сколько запросов дали пустую выдачу» и «сколько сорвались» приходилось
+    выводить из ``search_log``, склеивая строки по тексту запроса. Склейка ломается на
+    повторе текста и на кэше, поэтому исход живёт рядом с запросом:
+
+    * ``results`` — запрос обслужен и вернул кандидатов;
+    * ``no_results`` — обслужен и вернул пусто (**наблюдение**, а не отсутствие записи:
+      именно это и было дефектом S7 — пустая выдача выпадала из знаменателя приёмки);
+    * ``error`` — вызов сорвался; текст отказа (``type: message``, усечён) отличает
+      «провайдер ответил 503 после 5 попыток» от «ничего не нашлось» (S6/S8);
+    * ``budget_exhausted`` — бюджет продукта не дал выпустить вызов (**не** обслужен:
+      ``served`` такие строки не считает, иначе знаменатель доходности раздувался бы
+      запросами, которых не было).
+
+    :param query: текст выпущенного запроса.
+    :param outcome: один из ``results``/``no_results``/``error``/``budget_exhausted``.
+    :param results: сколько кандидатов вернул вызов (0 у ``no_results``/``error``/отказа).
+    :param accepted: сколько из них допущено в корпус (после SSRF/scope/блэклиста/дедупа).
+    :param from_cache: ответ взят из R7-кэша (живого вызова не было).
+    :param error: ``type: message`` сбоя адаптера (усечён до :data:`QUERY_ERROR_TEXT_LIMIT`).
+    """
+
+    query: str
+    outcome: str
+    results: int = 0
+    accepted: int = 0
+    from_cache: bool = False
+    error: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        """Детерминированный JSON-вид строки (провенанс контура)."""
+        return {
+            "query": str(self.query),
+            "outcome": str(self.outcome),
+            "results": int(self.results),
+            "accepted": int(self.accepted),
+            "from_cache": bool(self.from_cache),
+            "error": self.error,
+        }
+
+
 @dataclass
 class SerpDiscovery:
     """Наблюдённый результат SERP-прохода (до долива в корпус).
@@ -586,6 +654,9 @@ class SerpDiscovery:
     :param budget_declared: объявленный бюджет **на продукт на раунд** (``None`` — выкл.).
     :param adapter: провайдер адаптера поиска (провенанс; ``None`` — адаптера не было).
     :param queries_by_product: выпущенные запросы (тексты, в порядке выпуска).
+    :param query_outcomes: исход каждого выпущенного запроса (:class:`QueryOutcomeRow`) —
+        включая ``no_results`` и отказы бюджета: знаменатель доходности строится из этих
+        строк, а не из «сколько раз что-то нашлось».
     :param accepted_by_product: принятые в корпус URL (новые, дедуплицированные).
     :param rejected_by_product: отказы по причинам (``ssrf``/``out_of_scope_host``/
         ``blacklisted``/``known``) — «сколько не пустили и почему», а не тихий фильтр.
@@ -613,6 +684,7 @@ class SerpDiscovery:
     budget_declared: int | None = None
     adapter: str | None = None
     queries_by_product: dict[str, list[str]] = field(default_factory=dict)
+    query_outcomes: dict[str, list[QueryOutcomeRow]] = field(default_factory=dict)
     accepted_by_product: dict[str, list[str]] = field(default_factory=dict)
     rejected_by_product: dict[str, dict[str, int]] = field(default_factory=dict)
     candidates_by_product: dict[str, int] = field(default_factory=dict)
@@ -625,6 +697,12 @@ class SerpDiscovery:
     not_executed_rounds: int = 0
     not_executed_reason: str | None = None
     unavailable_reason: str | None = None
+    #: Объявленный режим запроса (``run.yaml: serp.mode`` → контракт ``serp_mode``).
+    mode_declared: str | None = None
+    #: Режим, которым **фактически** снят корпус (свойство адаптера). Отдельно от
+    #: объявленного: расхождение — дефект сборки, и оно обязано быть видимым, а не
+    #: выводимым из догадки «наверное, тот же».
+    mode_used: str | None = None
 
     @property
     def enabled(self) -> bool:
@@ -655,6 +733,53 @@ class SerpDiscovery:
             for pid in sorted(products)
         }
 
+    @property
+    def yield_by_product(self) -> dict[str, dict[str, Any]]:
+        """Доходность контура по продукту: числитель, знаменатель и их отношение.
+
+        Вопрос, на который отвечает блок: «сколько принятых URL принёс один **обслуженный**
+        запрос» и «какая часть обслуженных запросов не принесла ничего». Обслуженные — это
+        строки :attr:`query_outcomes` с исходом ``results``/``no_results``/``error``; отказ
+        бюджета в знаменатель **не** входит (вызова не было), а сбой входит — отдельной
+        строкой ``errors``, поэтому «провайдер отказал» не растворяется в «ничего не нашли»
+        (S8).
+
+        Отношения — ``None``, когда знаменатель нулевой: ноль запросов не даёт «доли 0»,
+        он не даёт доли вовсе. Значения округлены до 6 знаков (наблюдение, не счётчик).
+
+        :returns: ``{product_id: {issued, served, cached, with_results, no_results,
+            errors, budget_refused, candidates, accepted, accepted_per_served,
+            accepted_per_candidate}}`` — по продуктам, у которых были выпущенные запросы.
+        """
+        out: dict[str, dict[str, Any]] = {}
+        for pid, rows in sorted(self.query_outcomes.items()):
+            budget_refused = sum(1 for r in rows if r.outcome == QUERY_OUTCOME_BUDGET)
+            errors = sum(1 for r in rows if r.outcome == QUERY_OUTCOME_ERROR)
+            with_results = sum(1 for r in rows if r.outcome == QUERY_OUTCOME_RESULTS)
+            no_results = sum(1 for r in rows if r.outcome == QUERY_OUTCOME_NO_RESULTS)
+            cached = sum(1 for r in rows if r.from_cache)
+            served = len(rows) - budget_refused
+            accepted = sum(r.accepted for r in rows)
+            candidates = int(self.candidates_by_product.get(pid, 0))
+            out[pid] = {
+                "issued": len(rows),
+                "served": served,
+                "cached": cached,
+                "with_results": with_results,
+                "no_results": no_results,
+                "errors": errors,
+                "budget_refused": budget_refused,
+                "candidates": candidates,
+                "accepted": accepted,
+                "accepted_per_served": (
+                    None if served == 0 else round(accepted / served, 6)
+                ),
+                "accepted_per_candidate": (
+                    None if candidates == 0 else round(accepted / candidates, 6)
+                ),
+            }
+        return out
+
     def to_observation(self) -> dict[str, Any]:
         """Провенанс контура для сеанса краула/манифеста (детерминированный JSON-вид)."""
         return {
@@ -683,8 +808,24 @@ class SerpDiscovery:
                 "exhausted": {pid: bool(v) for pid, v in sorted(self.exhausted_by_product.items())},
             },
             "adapter": self.adapter,
+            # Режим запроса: объявленный (условие измерения, входит в ``run_id``) и
+            # фактический (свойство адаптера). Пара, а не одно значение: если сборка
+            # адаптера не донесла объявленный режим, ``used`` это покажет — иначе
+            # ``serp_mode`` в контракте описывал бы не то, чем спрашивали.
+            "mode": {"declared": self.mode_declared, "used": self.mode_used},
             "unavailable_reason": self.unavailable_reason,
             "queries": {pid: list(qs) for pid, qs in sorted(self.queries_by_product.items())},
+            # S7: исход **каждого** выпущенного запроса, до любых ``continue``. Пустая
+            # выдача — строка ``no_results``, а не отсутствие записи; отказ бюджета —
+            # ``budget_exhausted`` (не обслужен и в знаменатель доходности не входит).
+            "query_outcomes": {
+                pid: [row.to_dict() for row in rows]
+                for pid, rows in sorted(self.query_outcomes.items())
+            },
+            # Доходность контура: числитель и знаменатель названы рядом, чтобы доля не
+            # вычислялась «на глаз» из разных блоков. ``errors`` — отдельная строка
+            # знаменателя (S8), а не часть ``no_results``.
+            "yield": self.yield_by_product,
             "candidates": {pid: int(n) for pid, n in sorted(self.candidates_by_product.items())},
             "accepted": {pid: list(urls) for pid, urls in sorted(self.accepted_by_product.items())},
             "rejected": {
@@ -971,6 +1112,55 @@ def assign_serp_seeds(
     return assigned
 
 
+def _error_text(exc: BaseException) -> str:
+    """Текст сбоя для наблюдения: ``type: message``, усечённый (S6/S8).
+
+    Отличить «провайдер отказал после 5 попыток» от «ничего не нашлось» можно только по
+    тексту: сам тип (``SearchError``) у обоих путей общий для pipeline. Заголовки и ключи
+    в сообщения сбоя не попадают (это гарантирует :mod:`core.util.retry`), но длину всё
+    равно ограничиваем — провенанс не лог.
+    """
+    text = f"{type(exc).__name__}: {exc}"
+    if len(text) <= QUERY_ERROR_TEXT_LIMIT:
+        return text
+    return text[:QUERY_ERROR_TEXT_LIMIT] + "…"
+
+
+def _query_outcome_label(outcome: SearchOutcome) -> str:
+    """Токен исхода одного вызова (S7): ``results``/``no_results``/``error``/``budget_exhausted``.
+
+    Порядок важен: отказ бюджета — это «вызова не было», и он не должен выглядеть как
+    пустая выдача; сбой — отдельный исход, даже если кандидатов ноль (S8).
+    """
+    if outcome.error is not None:
+        return QUERY_OUTCOME_ERROR
+    if (
+        outcome.termination is TerminationReason.BUDGET_EXHAUSTED
+        and not outcome.charged
+        and not outcome.from_cache
+    ):
+        return QUERY_OUTCOME_BUDGET
+    return QUERY_OUTCOME_RESULTS if outcome.results else QUERY_OUTCOME_NO_RESULTS
+
+
+def _query_outcome_row(
+    query: SearchQuery,
+    outcome: SearchOutcome,
+    label: str,
+    *,
+    accepted: int = 0,
+) -> QueryOutcomeRow:
+    """Строка наблюдения по одному выпущенному запросу (S7/S8)."""
+    return QueryOutcomeRow(
+        query=str(query.text),
+        outcome=label,
+        results=len(outcome.results),
+        accepted=int(accepted),
+        from_cache=bool(outcome.from_cache),
+        error=None if outcome.error is None else _error_text(outcome.error),
+    )
+
+
 def _queries_signature(
     queries_by_product: Mapping[str, Sequence[SearchQuery]],
 ) -> tuple[tuple[str, tuple[tuple[str, str, int], ...]], ...]:
@@ -1006,6 +1196,7 @@ def serp_discover(
     limits_by_product: Mapping[str, CrawlLimits] | None = None,
     source: str = "run.yaml",
     budget_declared: int | None = None,
+    mode: str | None = None,
     cache: Any | None = None,
     clock: Callable[[], str] | None = None,
 ) -> SerpDiscovery:
@@ -1034,6 +1225,21 @@ def serp_discover(
     это видно в наблюдении (``rounds.not_executed``/``rounds.not_executed_reason``), а
     не выражается молчаливым сжиганием бюджета. Проверка не «запрещает» ``rounds > 1``:
     как только набор запросов начнёт меняться, раунды пойдут без правки этого кода.
+
+    **Арифметика раундов.** ``executed + not_executed == declared`` выполняется на любом
+    выходе: неисполненные раунды называют причину — ``no_query_variation`` (S3) или
+    ``early_termination`` (ранняя терминация ниже). Иначе наблюдение с ``executed=1`` из
+    ``declared=3`` и ``not_executed=0`` выглядело как «два раунда исполнились незаметно».
+
+    **Исход каждого запроса (S7).** Наблюдение несёт :attr:`SerpDiscovery.query_outcomes`:
+    строка на **каждый** выпущенный запрос с исходом ``results``/``no_results``/``error``/
+    ``budget_exhausted``. Это то, из чего строится знаменатель доходности: пустая выдача —
+    запись ``no_results``, а не отсутствие записи; отказ бюджета — ``budget_exhausted`` и в
+    обслуженные не входит.
+
+    **Фаза запроса — контракт (I16).** Запрос, объявленный не фазой ``serp``, отвергается
+    :class:`ValueError`: бюджет списывается по ключу ``(фаза, продукт)``, и такой запрос
+    списал бы чужой счётчик — вызовы были бы, а ``used``/``exhausted`` остались бы нулевыми.
 
     **Ранняя терминация.** Раунд, не принёсший **ни одного нового** допущенного URL,
     останавливает проход: следующие раунды выпустили бы те же запросы по тому же
@@ -1066,6 +1272,14 @@ def serp_discover(
         source=str(source),
         budget_declared=None if budget_declared is None else int(budget_declared),
         adapter=getattr(adapter, "provider", None) if adapter is not None else None,
+        # Режим — пара «объявлено / исполнено»: объявленный приходит из контракта,
+        # фактический читается у собранного адаптера. Расхождение видно в наблюдении.
+        mode_declared=None if mode is None else str(mode),
+        mode_used=(
+            None
+            if adapter is None
+            else (str(getattr(adapter, "search_mode", None) or "") or None)
+        ),
     )
     if rounds == 0:
         return discovery
@@ -1095,6 +1309,20 @@ def serp_discover(
         return discovery
 
     signature = _queries_signature(queries_by_product)
+    # Фаза запроса — не украшение: бюджет списывается по ключу ``(фаза, продукт)``, и
+    # запрос, объявленный чужой фазой, списал бы чужой счётчик при работающем контуре:
+    # наблюдение показало бы ``used=0``, бюджет SERP не исчерпывался бы никогда, а
+    # протокол исчерпания счёл бы контур неисполненным. Отказ — видимый и с именем
+    # виновника (I16), а не тихое списание не туда.
+    for _pid in sorted(queries_by_product):
+        for _query in queries_by_product[_pid]:
+            _phase = _as_phase(_query.phase)
+            if _phase != SearchPhase.SERP.value:
+                raise ValueError(
+                    f"serp: запрос {str(_pid)!r}/{_query.text!r} объявлен фазой "
+                    f"{_phase!r}, а контур исполняется как {SearchPhase.SERP.value!r}: "
+                    "списание ушло бы в чужой бюджет (I16)"
+                )
     for offset in range(int(rounds)):
         if offset > 0:
             current = _queries_signature(queries_by_product)
@@ -1113,7 +1341,6 @@ def serp_discover(
             own = frozenset(own_hosts_by_product.get(pid, frozenset()))
             seen = seen_by_product.setdefault(pid, set())
             for query in queries:
-                before = effort.used(SearchPhase.SERP, pid)
                 outcome = external_search_observed(
                     adapter,
                     query,
@@ -1125,10 +1352,18 @@ def serp_discover(
                     cache=cache,
                     clock=clock,
                 )
-                used = effort.used(SearchPhase.SERP, pid) - before
-                discovery.calls_by_product[pid] = (
-                    discovery.calls_by_product.get(pid, 0) + max(used, 0)
-                )
+                # Живой вызов = списание (``SearchOutcome.charged``), а не разница счётчика
+                # по ключу фазы: разница молчала, если запрос пришёл с чужой фазой, —
+                # вызовы были, а наблюдение показывало ``used=0`` и бюджет не исчерпывался
+                # (контур врал о доходности: нулевой знаменатель). Фаза проверяется до
+                # цикла, но счёт факта не должен зависеть от ключа бюджета.
+                # Ноль у продукта, которому запросы не стоили вызова, — тоже факт
+                # («не списывали»), поэтому ключ заводится на каждом выпущенном запросе.
+                discovery.calls_by_product.setdefault(pid, 0)
+                if outcome.charged:
+                    discovery.calls_by_product[pid] = (
+                        discovery.calls_by_product.get(pid, 0) + 1
+                    )
                 # S4: время каждого вызова складывается по продукту. Сумма сохраняет
                 # ``measured`` только если все слагаемые наблюдались (см.
                 # ``SearchTiming.merged_with``): часть без наблюдения не превращается в ноль.
@@ -1152,9 +1387,14 @@ def serp_discover(
                 if query.text not in queries_log:
                     queries_log.append(query.text)
                 results = outcome.results
+                label = _query_outcome_label(outcome)
+                accepted_here = 0
                 if not results:
                     if effort.remaining(SearchPhase.SERP, pid) == 0:
                         discovery.exhausted_by_product[pid] = True
+                    discovery.query_outcomes.setdefault(pid, []).append(
+                        _query_outcome_row(query, outcome, label)
+                    )
                     continue
                 discovery.candidates_by_product[pid] = (
                     discovery.candidates_by_product.get(pid, 0) + len(results)
@@ -1172,8 +1412,14 @@ def serp_discover(
                     if accepted is not None:
                         discovery.accepted_by_product[pid].append(accepted)
                         new_this_round += 1
+                        accepted_here += 1
                     elif reason is not None:
                         rejects[reason] = rejects.get(reason, 0) + 1
+                discovery.query_outcomes.setdefault(pid, []).append(
+                    _query_outcome_row(
+                        query, outcome, label, accepted=accepted_here
+                    )
+                )
         discovery.executed_rounds = offset + 1
         if new_this_round == 0:
             # Дальнейшие раунды выпустили бы те же запросы: терминация видима.
@@ -1189,6 +1435,12 @@ def serp_discover(
                 pid: _product_termination(discovery, str(pid), reason).value
                 for pid in queries_by_product
             }
+            # Арифметика раундов обязана сходиться: ``executed + not_executed == declared``.
+            # Раньше ранняя терминация писала ``not_executed=0``, и наблюдение утверждало,
+            # что объявленные раунды исполнились все (или не были объявлены вовсе) —
+            # «сколько бюджета осталось на бумаге» становилось неверным.
+            discovery.not_executed_rounds = int(rounds) - (offset + 1)
+            discovery.not_executed_reason = EARLY_TERMINATION_REASON
             break
 
     if not discovery.termination_by_product:

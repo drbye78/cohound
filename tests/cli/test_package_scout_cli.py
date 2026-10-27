@@ -219,7 +219,7 @@ def test_search_provider_resolved_from_config_by_language(
     requested: list[str] = []
 
     def _fake_build(
-        name: str, *, cache: Any | None = None
+        name: str, *, cache: Any | None = None, search_mode: str | None = None
     ) -> FakeSearchAdapter:
         requested.append(name)
         return FakeSearchAdapter()
@@ -255,7 +255,7 @@ def test_search_provider_explicit_flag_overrides_config(
     requested: list[str] = []
 
     def _fake_build(
-        name: str, *, cache: Any | None = None
+        name: str, *, cache: Any | None = None, search_mode: str | None = None
     ) -> FakeSearchAdapter:
         requested.append(name)
         return FakeSearchAdapter()

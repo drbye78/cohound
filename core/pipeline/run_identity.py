@@ -65,6 +65,9 @@ class DeclaredAxesLike(Protocol):
     #: I3/§5: число раундов SERP-контура (0 — контур выключен). Объявленная ось: раунд
     #: добавляет документы в корпус, поэтому входит в контракт, а не в провенанс.
     serp_rounds: int | None
+    #: I3/§5: режим запроса внешнего поиска (``sync``/``async``). Условие измерения:
+    #: два бэкенда одного API дают разный состав находок, значит разный корпус.
+    serp_mode: str | None
     registry_spec_digest: str | None
     deploy_profile: str | None
     edge_schema_version: str | None
@@ -299,6 +302,10 @@ def build_execution_contract(
         # переопределяемый ``--serp-rounds``/``COHOUND_SERP``/``deploy.search.serp``).
         # Идут в контракт: раунд меняет корпус, значит и ``run_id`` (execution_change).
         "serp_rounds": _declared(declared, "serp_rounds"),
+        # Режим поиска — тем же правом, что и раунды: находка становится документом,
+        # а какой бэкенд её отдал, зависит от режима. ``None`` здесь означал бы
+        # «неизвестно, чем спрашивали», поэтому резолвер подставляет эффективный дефолт.
+        "serp_mode": _declared(declared, "serp_mode"),
         "registry_spec_digest": _declared(declared, "registry_spec_digest"),
         "deploy_profile": _declared(declared, "deploy_profile"),
         "edge_schema_version": _declared(declared, "edge_schema_version"),

@@ -143,6 +143,9 @@ def test_declared_axes_are_deterministic(tmp_path: Path) -> None:
         "extractor_stack",
         "serp_rounds",
         "serp_source",
+        # I3/§5: режим запроса поиска — отдельное условие измерения (какой бэкенд
+        # отвечает), поэтому отдельная ось от ``serp_rounds``.
+        "serp_mode",
         "manual_artifacts_digest",
         # C3: геометрия нарезки отдельно от метки ``chunker_version`` — правка
         # ``chunk_size`` меняла корпус, не меняя ``run_id``.
@@ -566,6 +569,7 @@ def test_build_manifest_takes_declared_axes(tmp_path: Path) -> None:
         crawl_config_digest="crawl-dig",
         serp_rounds=2,
         serp_source="run.yaml",
+        serp_mode="sync",
         registry_spec_digest="reg-dig",
         deploy_profile="split",
         edge_schema_version="9.9.9",
