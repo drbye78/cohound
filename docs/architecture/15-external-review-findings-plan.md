@@ -88,12 +88,12 @@ mypy: домен 0 ошибок + baseline 121, selfcheck 111/111, pytest 4801 p
 
 | ID | Находка | Вердикт | Доказательство (HEAD) | Тест | Класс | P |
 |---|---|---|---|---|---|---|
-| R1 | robots: http-путь получает гейт, Scrapy всегда `ROBOTSTXT_OBEY`, per-item `robots` игнорируется | ПОДТВЕРЖДЕНО | `wiring.py:1463-1472` (`robots=_crawler_robots(...)`, комментарий про Scrapy), `crawl_scrapy.py:118`, `edge/crawler_factory.py:77` | да, пинит: `tests/cli/test_crawler_wiring.py:939-991` | М | P5 |
-| R2 | robots fail-open: недоступная лента = «правил нет» | ПОДТВЕРЖДЕНО | `util/robots.py:19-22` (осознанное отступление от RFC 9309 §2.3.1.4), `:247-248`, `:302-303`, `crawl_http.py:209-210` | да: `test_crawl_robots.py:70` | М/Б | P5 |
+| R1 | robots: http-путь получает гейт, Scrapy всегда `ROBOTSTXT_OBEY`, per-item `robots` игнорируется | ПОДТВЕРЖДЕНО → **закрыто** (`f928624`: `dont_obey_robotstxt` — per-request, Scrapy-настройка не глобальный выключатель) | `crawl_scrapy.py` (`dont_obey_robotstxt` per-item), `wiring._robots_gate`, `edge/crawler_factory.build_robots_gate` | `test_crawl_scrapy.py`, `test_crawl_robots.py`, `test_edge_scheduler.py` | М | P5 |
+| R2 | robots fail-open: недоступная лента = «правил нет» | ПОДТВЕРЖДЕНО → **закрыто** (`f928624`: `RobotsFeedState` из 5 состояний; `unavailable` ⇒ отказ `robots_unavailable`, `404`/`410` ⇒ разрешение как наблюдённый факт) | `util/robots.py:342-386` (`RobotsGate.verdict`); проба: `None`/5xx → `allowed=False reason=robots_unavailable`, `404` → `allowed=True state=not_found` | `test_util_robots.py`, `test_crawl_robots.py` | М/Б | P5 |
 | R3 | анти-автоматизационные флаги браузера | ПОДТВЕРЖДЕНО | `crawl_browser.py:164`,`:167`,`:471`; заявлено в `:36-45` и в спеке §10 | да: `test_crawl_browser.py:837` | М | — |
 | R4 | пейсинг размывается процессами | ОПРОВЕРГНУТО для `local` | см. §1.1 | нет (докстринг `rate_limit.py:12-19`) | Д | — |
 | R5 | таксономия `CrawlError` живёт в тяжёлом адаптере | ПОДТВЕРЖДЕНО → **исправлено** (таксономия в `core/ports/`) | `crawl_scrapy.py:150-241`; импортируют `crawl_http.py:63`, `crawl_browser.py:95`, `wiring.py:41`, `edge/__main__.py:55`, `crawler_factory.py:27` | косвенно (12 файлов тестов) | Г | P5 |
-| R6 | признак «слишком большой ответ» — по подстрокам сообщений Scrapy | ПОДТВЕРЖДЕНО | `crawl_scrapy.py:552-577` (докстринг признаёт, что прошлый набор уже промахнулся) | да, пинит литералы: `test_crawl_scrapy.py:767-792` | Г | P5 |
+| R6 | признак «слишком большой ответ» — по подстрокам сообщений Scrapy | ПОДТВЕРЖДЕНО → **закрыто** (`f928624`: структурный `DownloadCancelledError`, подстрочный разбор снят) | `crawl_scrapy.py` (перехват по типу, не по тексту) | `test_crawl_scrapy.py` | Г | P5 |
 | R7 | `final_url` из edge не валидируется | ПОДТВЕРЖДЕНО | `remote_crawl_executor.py:319` (`validate_url(url)`) vs `:358` (`final_url` без проверки); `final_url` становится `RawPage.url` (`corpus.py:7917`) | нет: тест утверждает **деградацию** malformed `final_url` (`test_remote_crawl_executor.py:548-556`) | Б | P3 |
 | R8 | robots всегда по `https://`, http-фолбэка нет | ПОДТВЕРЖДЕНО | `crawler_factory.py:52`, `wiring.py:1263`, `package_add_product.py:905`,`:954`, `package/commands.py:1643` | нет ни одного | Г | P4 |
 | R9 | сайдкар меты кэша: легаси-запись теряет статус/тип | ПОДТВЕРЖДЕНО | `crawl_http.py:217` (ключ по запрошенному URL), `:248-262`, `:598-608` | легаси-путь исполняется, потеря не утверждается (`test_crawl_http.py:232-241`) | Г | P4 |
@@ -107,7 +107,7 @@ mypy: домен 0 ошибок + baseline 121, selfcheck 111/111, pytest 4801 p
 | F2 | тест зависит от числа CPU хоста | ПОДТВЕРЖДЕНО (замер: `cpu_count=2` → `assert 2 == 3`) | `test_corpus_extract_pool.py:1900` без `cpu_cap`; режет `resources.py:434` | тест сам дефект | Г | **P4** |
 | F3 | 6 тестов проверяют **реальное** отсутствие `py7zr`/`rarfile`; с extra `extract-archives` они падают | ПОДТВЕРЖДЕНО (замер: 6 failed / 19 passed при подмене бэкенда) | `test_container_7z.py:35,43,54`, `test_container_rar.py:55,63,74` | — | Г | **P4** |
 | F4 | `pdf_page_count` читает файл целиком, докстринг обещает «по шапке/без разбора» | ПОДТВЕРЖДЕНО, цена замерена: ≈16.5 мс/MiB, линейно | `document_probe.py:144-180`, вызов `:240` из `classify_artifact` (`corpus.py:7275`), синхронно в фазе | только корректность (`selfcheck.py:3822-3890`) | Д/Г | P4 |
-| F5 | EPUB читает недоверенный XML stdlib-ом, тогда как feed/sitemap — `defusedxml` | ПОДТВЕРЖДЕНО как расхождение; защита на 3.14 замерена и верна | `extract_epub.py:119`,`:154` (+ `noqa: S314`, обоснование `:110-118`) vs `util/feed.py:69`,`:300`, `util/sitemap.py:157` | нет hostile-XML теста для EPUB | Г | P5 |
+| F5 | EPUB читает недоверенный XML stdlib-ом, тогда как feed/sitemap — `defusedxml` | ПОДТВЕРЖДЕНО как расхождение; защита на 3.14 замерена и верна → **закрыто** (`0c683f0`: один вход разбора XML, hostile-тесты) | `util/feed.py`, `extract_epub.py` (единая точка разбора) | hostile-XML тесты (billion-laughs / XXE `file://` / внешний DTD) | Г | P5 |
 | F6 | `if value` вместо `is not None` в бюджете спуска обнуляет стримовый гейт | ЧАСТИЧНО: «читаем всё» не проходит, отключается второй гейт | `archive_descent.py:613-614`, `:621`; сравнить `container_policy.py:286` (`is not None`) | нет (`max_member_bytes=0` не строится ни в одном тесте) | Г | P4 |
 | F7 | ось `crawl.document_timeout_s` до docling не доходит; `full` — без таймаута; рециклинга воркеров нет | ПОДТВЕРЖДЕНО | `extract_document.py:383-391` (`FULL: None`), `wiring.py:1939`,`:2278`, `edge/__main__.py:133` — без `document_timeout`; guard только родительский `corpus.py:5198-5209`; `wiring.py:2055` recycle=None | частично, только родительская сторона (`test_corpus_extract_pool.py:863-930`) | Д/М | P4 |
 | F8 | OOXML без документного суффикса: маркер в первых 8192 байтах → класс `binary`, за ними → `container` и пустой спуск с `errors=[]` | ПОДТВЕРЖДЕНО замером (смещения 78/4078 → binary; 8258/9078/20078 → container) | `document_formats.py:85`,`:198`,`:444-449`, `corpus.py:7277-7281` | нет: все тесты кладут маркер в голову | М | P4 |
@@ -123,7 +123,7 @@ mypy: домен 0 ошибок + baseline 121, selfcheck 111/111, pytest 4801 p
 | C5 | текстовый чанкер склеивает текст, `citation_quote` не дословен относительно документа | ПОДТВЕРЖДЕНО, компенсация найдена | `chunker_text.py:99-110`; нормализация `validate.py:332` | сверка цитат покрыта (`test_validate.py:116-118`) | Г | — |
 | C6 | `min_chunk_size = 1`: односимвольный чанк может стать источником цитаты | ПОДТВЕРЖДЕНО | `chunker_markdown.py:144`,`:165`, `chunker_text.py:139` | нет | М | P4 |
 | C7 | `heading_path` не доходит до промпта, `context_prefix` не потребляется нигде | ПОДТВЕРЖДЕНО | `prompt.py:220`, `corpus.py:2391`, `retrieve.py:135`; ложный докстринг `chunker_text.py:17-18` | `test_prompt.py:68`,`:167` молча пинят отсутствие | М | **P2** |
-| C8 | лексический индекс: 4 поля с одним текстом, пересборка каждый прогон в temp, запрашивается только `stemmed` | ПОДТВЕРЖДЕНО | `lexical_tantivy.py:264-275`,`:332-350`, `wiring.py:438-439` | профили покрыты, «в проде не нужны» не зафиксировано | Д | P5 |
+| C8 | лексический индекс: 4 поля с одним текстом, пересборка каждый прогон в temp, запрашивается только `stemmed` | ПОДТВЕРЖДЕНО → **закрыто** (`1e7fad9`: одно поле + `lexical_spec` в контракте) | `lexical_tantivy.py`, `core/pipeline/digests.py` (`lexical_spec`) | `test_lexical_tantivy.py`, `test_digests.py` | Д | P5 |
 | C9 | `index_npy` склеивает поля тем же разделителем, что и группы (латентно) | ПОДТВЕРЖДЕНО формально; сейчас не эксплуатируемо | `index_npy.py:95-103` vs `_GROUP_SEP` `:59` | нет | Г | P5 |
 | C10 | `index_format` не атомарен: окно между `rmtree` и `replace` | ПОДТВЕРЖДЕНО | `index_format.py:119-121` (докстринг `:90` обещает атомарность) | нет | Г | P5 |
 | C11 | `LocalEmbedder` без `revision`/`local_files_only` | ПОДТВЕРЖДЕНО | `embed_local.py:148` (сравнить `embed_model2vec.py:112`,`:181-187`) | нет для `LocalEmbedder` | М | P5 |
@@ -326,12 +326,12 @@ absence-модель, scoring и определения Coverage/Comparability �
 | ID | Находка | Вердикт | Доказательство (HEAD) | Класс | P |
 |---|---|---|---|---|---|
 | V1 | §7.1 требует достаточность цитаты, в коде её нет | **ЧАСТИЧНО**: entailment отсутствует, «механизма нет вообще» — неверно | `cohound-spec-v2.md:649` (шаг 3 эшелона, «частично механически», следствие — **аномалия**); `validate.py:300-381` — восемь проверок, ни одна не спрашивает «следует ли статус»; но `evaluate.py:735` `support_subject_overlap` + `:1784-1790` + `outputs/support_quality.yaml`. Врут два документа: `02-subsystems.md:508` и `llm_local.py:22` приписывают шаг 3 `validate.py` | М | P0 + P6 |
-| V2 | Точность оценщика неизмерима | **ПОДТВЕРЖДЕНО**, причина иная | `packages/ru-pg-dbms/sources/golden_status.yaml:11` `state: declined`; `golden.csv` = 118 `pangolin` + 118 `postgrespro` + **0** `jatoba`; benchmark **не читает** `golden_status` (`grep` пуст) и отказывается по случайной причине: `skip_reason: no_cases`, все 236 строк — `product_not_in_build`, слова `declined` в выводе нет | М | P6 |
+| V2 | Точность оценщика неизмерима | **ПОДТВЕРЖДЕНО**, причина иная → **закрыто как отчётность** (`4ee192f`: `golden_declined` вместо случайного `no_cases`) | `packages/ru-pg-dbms/sources/golden_status.yaml:11` `state: declined`; `golden.csv` = 118 `pangolin` + 118 `postgrespro` + **0** `jatoba`; benchmark **не читает** `golden_status` (`grep` пуст) и отказывается по случайной причине: `skip_reason: no_cases`, все 236 строк — `product_not_in_build`, слова `declined` в выводе нет | М | P6 |
 | V3 | 4.2 % вердиктов меняются на идентичном промпте; retry ≤2 — лотерея | **ЧАСТИЧНО**: число и лотерея верны, «docstring'и продают байт-в-байт» — нет | `2026-10-26-verdict-reproducibility.md:40` (5 из 119); `evaluate.py:1586` `max_retries=2`, `:1724-1751` цикл публикует **первый валидный** сэмпл; `templates`… ; **но** `max_retries` не в контракте, номер попытки не пишется, полосы в артефактах нет, R7 пайплайном не считается. Число 95.8 % формально проходит порог §11.7 (≥95 %) | М | P2 |
 | V4 | `decoder` — лейбл, а не механизм | **ПОДТВЕРЖДЕНО**, все три ноги | `prompt.py:23` «схема навязывается»; `llm_local.py:82` `DEFAULT_DECODER="none"` достижим в проде (`wiring.py:885`); `llm_local.py:302-311` — единственная ветка `json_schema` на **любое** значение ≠ `"none"`; проба: `json_object` → по проводам `json_schema`, `JSoN_ObJeCt` принимается (метки не enum — `deploy.py:509` `str`, в `status-dictionary.yaml` ключа нет); живой прогон: манифест `decoder=json_object`, провод — `json_schema` | М | P2 |
 | V5 | `max_tokens: 4096` мёртв | **ЧАСТИЧНО**: мёртв **для оценщика**, жив для discovery | `config/deploy.yaml:84`,`:91`; в `LLMRequest` поля нет (`ports/llm.py:26-35`), в payload нет (`llm_local.py:295-311`), `build_evaluator_llm` не читает (`wiring.py:1105-1204`), читает `build_discovery_llm` (`:1058-1102`). Хуже: `llm_local._extract` не читает `finish_reason` → обрезание неотличимо от невалидного JSON | Г/М | P2 |
 | V6 | Внешний LLM-хост в закоммиченном конфиге | **ПОДТВЕРЖДЕНО, и хуже аудита** | `config/deploy.yaml:79` `https://plusvibeapi.ru` при шапке того же файла `:13-14` «внутреннего периметра, внешние хосты не используются»; `run.py:497` `load_deploy_config(None)` безусловно на каждом прогоне, флага `--deploy` у `run` нет; `base_url` **не входит ни в `llm_scenarios`, ни в контракт** (`ScenarioBinding` — 11 полей, endpoint только как `endpoint_kind: api`); поведение запинено тестом `test_deploy.py:812-831`; ссылка «Д-36» в `deploy.yaml:77` не имеет адресата в `docs/` | Б/М | **P0 + P2** |
-| V7 | Провенанс промпта не персистится | **ПОДТВЕРЖДЕНО**; «бонус» про узкий `prompt_hash` — **ЧАСТИЧНО** | `save_prompt` не импортируется в `evaluate.py` (только `compile_prompt`); в живом прогоне каталога `prompts/` нет (`runs/ru-pg-dbms-3edf2b06097c/`: db, gates, logs, outputs, workers — и всё); три документа обещают артефакт (`03:126`, `04:133`, `09:3119`). Узость `prompt_hash` осознана и компенсирована: ключ `eval_cache` — по тексту (`evaluate.py:1657-1661`), коллизий в прогоне нет (104/104 различных) | М | P6 |
+| V7 | Провенанс промпта не персистится | **ПОДТВЕРЖДЕНО** → **закрыто** (`4ee192f`: `PromptArchive` пишет `runs/{run_id}/prompts/{prompt_hash}.json` для исполненных промптов; замер — 117 файлов, 2.93 MiB на 119 параметров); «бонус» про узкий `prompt_hash` — **ЧАСТИЧНО** | `save_prompt` не импортируется в `evaluate.py` (только `compile_prompt`); в живом прогоне каталога `prompts/` нет (`runs/ru-pg-dbms-3edf2b06097c/`: db, gates, logs, outputs, workers — и всё); три документа обещают артефакт (`03:126`, `04:133`, `09:3119`). Узость `prompt_hash` осознана и компенсирована: ключ `eval_cache` — по тексту (`evaluate.py:1657-1661`), коллизий в прогоне нет (104/104 различных) | М | P6 |
 
 ### 6.2. Мелочи
 
@@ -502,6 +502,33 @@ P5-ловушки (удаление `fusion.py`, C4/C6/C9/C10/C11).
 **После сведения:** полный CI один раз, P0-остаток (`AGENTS.md` про конечность спуска, §11.7,
 статус SERP-раундов, состав промпта в `02` C.1) — только после того, как код сделает эти
 утверждения правдой.
+
+### 10.2. Состояние на 2026-10-28 (as-built)
+
+Все три волны и архитектурный хвост сведены и проверены одним полным прогоном:
+`ruff` 0, `mypy` 121 = baseline (домен 0), `selfcheck` 111/111, `pytest` 5080 passed /
+5 skipped, покрытие 89.83 %.
+
+Коммиты волны 3 (архитектурный хвост и то, что шло вместе с ним):
+
+| Коммит | Что сделано |
+|---|---|
+| `dfa428d` | R5: таксономия `CrawlError` в `core/ports/crawl_errors.py`, два `CrawlUnavailable` слиты в один, AST-гейт против возврата в адаптер |
+| `1e7fad9` | C8: одно лексическое поле; `lexical_spec` в контракте; схема в `pb_`-строке |
+| `5a72b4f` | `ContainerEncryption` — трёхзначный признак (`None` = не измерено, не «без шифрования») |
+| `aef7e72` | I2c **исполняется** в Ш6 (`evaluate._enforce_absence_coverage`); нарушение даёт `❓` + `absence_coverage_unsatisfied`, а не `failed` (I4) |
+| `0c683f0` | SERP-тайминги как замер, hostile-XML, EPUB — одна точка разбора (F5), пин S9e |
+| `f928624` | R1/R2/R6: robots-feed как наблюдение (5 состояний), `robots_unavailable`, структурная отмена скачивания |
+| `8d55b6a` | частичность извлечения как измеренное свойство (+ durable `document_version` v5), `_serp_note` про сбои вызовов |
+| `4ee192f` | V7 (аудит исполненных промптов), V2 (`golden_declined` — именованный отказ, а не `no_cases`) |
+| `89ac3ca` | P6: стенд RnD объявлен (`llm.rnd_endpoint`), полоса неопределённости вердиктов (P6c) с запретом ранжирования |
+| `abc2267` | `serp.mode` — объявленная ось контракта (`serp_mode`, 28 полей), env остаётся разведке |
+| `ad91bfc` | SERP включён для `ru-pg-dbms`: `rounds: 1`, `budget: 238` (= размер набора запросов, не потолок), `mode: sync` |
+
+Остаток — не «недоделки волн», а названные границы: `golden-full` и `scope attest` для
+`jatoba` — работа владельца; `split` не паритетен (волна 4: члены архивов через шов,
+`document_level`/`pdf_pipeline` в edge, повторный фетч); A1-профиль публикуемости
+(`not_implemented`/`unobserved_scope`/…) принят, но не реализован.
 
 ---
 
