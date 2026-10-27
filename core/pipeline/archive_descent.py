@@ -20,6 +20,16 @@
   каждый из которых «в бюджете», иначе исчерпали бы CPU/диск. Исчерпание бюджета —
   **видимая** запись ``archive_budget_exhausted``, а не тихое завершение.
 
+**Ни один из этих механизмов не ограничивает глубину — и не должен.** Обещание
+«потолка нет» держится тем, что обход **итеративен** (:meth:`ArchiveDescentWalker._walk`
+— драйвер с явным стеком кадров-генераторов): цепочка из 5000 различных архивов
+(разные хеши, каждый крошечный — бюджет байтов её не ловит) проходит до конца и даёт
+видимый исход. Рекурсивная форма делала это обещание ложью: на ~990 уровнях
+``RecursionError`` гасился в выборе читателя и выходил как обманчивое
+``container_reader_unavailable``, а на другой форме цепочки — наружу из
+:func:`core.util.container_policy.plan_members`. Глубина для этого обхода — не ось
+контракта, а свойство входа; потолок глубины не вводится.
+
 **Прогноз — до извлечения.** :func:`core.util.container_policy.archive_forecast`
 фиксируется в наблюдении раньше первого байта члена: он объясняет, почему спуск взял
 меньше, чем «есть в архиве», и переживает отказ посреди спуска.
@@ -48,7 +58,7 @@ from __future__ import annotations
 import hashlib
 import tempfile
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Generator
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -191,6 +201,22 @@ class _PendingMember:
     handle: Any = None
 
 
+@dataclass(frozen=True)
+class _NestedDescent:
+    """Запрос вложенного спуска: кадр отдаёт его драйверу и ждёт наблюдение обратно.
+
+    Это **не** рекурсивный вызов: кадр-генератор приостанавливается на ``yield``, а
+    драйвер (:meth:`ArchiveDescentWalker._walk`) кладёт новый кадр на явный стек. Стек
+    Python не растёт, поэтому глубина цепочки архивов ограничена только памятью под
+    кадры (а не ``sys.getrecursionlimit()``).
+    """
+
+    archive_path: Path
+    archive_url: str
+    archive_content_hash: str
+    depth: int
+
+
 def member_url(archive_url: str, member_path: str) -> str:
     """Адрес члена как URL провенанса: ``{archive_url}!/{member_path}``.
 
@@ -308,11 +334,21 @@ class ArchiveDescentWalker:
     # -- внутреннее --------------------------------------------------------- #
 
     def _reader(self, path: Path) -> ContainerPort | None:
-        """Читатель контейнера для файла (``None`` — не подключён/не распознан)."""
+        """Читатель контейнера для файла (``None`` — не подключён/не распознан).
+
+        Отказ выбора читателя гасится: «этот адаптер не умеет» — нормальный исход
+        перебора, он не должен ронять фазу. **Но не любой отказ**: ``RecursionError``
+        и ``MemoryError`` — это «машина сломалась», а не «формат не распознан», и
+        молчаливое превращение их в ``None`` давало ложную причину
+        ``container_reader_unavailable``. Они поднимаются дальше (страховка: обход
+        итеративен и стека не исчерпывает, см. модульный докстринг).
+        """
         if self._container_for is None:
             return None
         try:
             return self._container_for(path)
+        except (RecursionError, MemoryError):
+            raise
         except Exception:  # noqa: BLE001 — выбор читателя не должен ронять фазу
             return None
 
@@ -413,7 +449,64 @@ class ArchiveDescentWalker:
         archive_content_hash: str,
         depth: int,
     ) -> ArchiveObservation:
-        """Спуск в один архив: прогноз, затем члены (``full``) или только план (``plan``)."""
+        """Драйвер обхода: явный стек кадров вместо рекурсии (F1).
+
+        Обещание модуля — «потолка глубины нет» — держится именно здесь: каждый кадр
+        (:meth:`_walk_archive`) — генератор, который на вложенном архиве отдаёт
+        :class:`_NestedDescent` и приостанавливается; драйвер кладёт новый кадр на
+        **свой** список и по завершении отдаёт наблюдение родителю. Стек CPython при этом
+        не растёт, поэтому цепочка любой длины проходит до конца (проверено на 5000
+        различных вложенных zip — см. ``tests/pipeline/test_corpus_descent.py``).
+
+        Порядок наблюдений/строк членов сохраняется байт-в-байт прежним (рекурсивным):
+        кадр-родитель возобновляется ровно там, где отдал запрос, поэтому наблюдения
+        идут post-order (сначала вложенные, потом родитель), а члены — порядком обхода.
+        """
+        frames: list[
+            Generator[_NestedDescent, ArchiveObservation | None, ArchiveObservation]
+        ] = [
+            self._walk_archive(
+                archive_path=archive_path,
+                archive_url=archive_url,
+                archive_content_hash=archive_content_hash,
+                depth=depth,
+            )
+        ]
+        value: ArchiveObservation | None = None
+        while True:
+            try:
+                request = frames[-1].send(value)
+            except StopIteration as stop:
+                frames.pop()
+                if not frames:
+                    # Кадр корня завершён: его наблюдение — результат спуска.
+                    return stop.value
+                value = stop.value
+                continue
+            frames.append(
+                self._walk_archive(
+                    archive_path=request.archive_path,
+                    archive_url=request.archive_url,
+                    archive_content_hash=request.archive_content_hash,
+                    depth=request.depth,
+                )
+            )
+            value = None
+
+    def _walk_archive(
+        self,
+        *,
+        archive_path: Path,
+        archive_url: str,
+        archive_content_hash: str,
+        depth: int,
+    ) -> Generator[_NestedDescent, ArchiveObservation | None, ArchiveObservation]:
+        """Спуск в один архив: прогноз, затем члены (``full``) или только план (``plan``).
+
+        Кадр обхода: ``yield`` :class:`_NestedDescent` — просьба к драйверу спуститься во
+        вложенный архив; возвращаемое значение (наблюдение вложенного) кадру не нужно,
+        важен порядок — родитель возобновляется после его завершения.
+        """
         reader = self._reader(archive_path)
         if reader is None:
             reason = (
@@ -610,7 +703,11 @@ class ArchiveDescentWalker:
                     depth=depth,
                 )
                 continue
-            limits = [value for value in (self.budget.max_member_bytes, remaining) if value]
+            limits = [
+                value
+                for value in (self.budget.max_member_bytes, remaining)
+                if value is not None
+            ]
             member_limit = min(limits) if limits else None
             temp_path = self._temp_path()
             hasher = hashlib.sha256()
@@ -618,7 +715,11 @@ class ArchiveDescentWalker:
             try:
                 with temp_path.open("wb") as handle:
                     chunks = reader.open_member(str(archive_path), member.path)
-                    stream = bounded_iter(chunks, member_limit) if member_limit else chunks
+                    stream = (
+                        bounded_iter(chunks, member_limit)
+                        if member_limit is not None
+                        else chunks
+                    )
                     for chunk in stream:
                         handle.write(chunk)
                         hasher.update(chunk)
@@ -691,8 +792,10 @@ class ArchiveDescentWalker:
 
             if suffix in {f".{fmt}" for fmt in SUPPORTED_ARCHIVE_FORMATS}:
                 # Вложенный архив: спуск без потолка глубины, конечность — цикл + бюджет.
-                # Окно доводится **до** записи строки и рекурсии: члены вложенного архива
-                # коммитятся после всех предшествующих соседей, как при inline-пути.
+                # Окно доводится **до** записи строки и вложенного спуска: члены
+                # вложенного архива коммитятся после всех предшествующих соседей, как при
+                # inline-пути. Рекурсии нет (F1): кадр отдаёт запрос драйверу и
+                # приостанавливается, поэтому глубина не упирается в стек CPython.
                 _flush()
                 if member_hash in self._seen:
                     cycle_stops += 1
@@ -730,7 +833,7 @@ class ArchiveDescentWalker:
                         depth=depth,
                     )
                 )
-                self._walk(
+                yield _NestedDescent(
                     archive_path=temp_path,
                     archive_url=url,
                     archive_content_hash=member_hash,

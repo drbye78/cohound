@@ -59,6 +59,8 @@ __all__ = [
     "FAMILY_MARKDOWN",
     "FAMILY_TEXT",
     "MARKDOWN_SUFFIXES",
+    "OOXML_MARKER",
+    "OOXML_MARKER_NAME",
     "PDF_SUFFIX",
     "PLAIN_TEXT_SUFFIXES",
     "SUPPORTED_ARCHIVE_FORMATS",
@@ -194,8 +196,14 @@ _ARCHIVE_MAGIC: dict[str, tuple[bytes, ...]] = {
     "rar": (b"Rar!\x1a\x07",),
 }
 
-#: Маркер OOXML внутри ZIP: наличие означает документ, а не контейнер.
-_OOXML_MARKER = b"[Content_Types].xml"
+#: Маркер OOXML внутри ZIP: наличие означает документ, а не контейнер. Это **имя записи**
+#: (``[Content_Types].xml`` в корне пакета), поэтому искать его нужно по центральному
+#: каталогу zip (см. :func:`core.util.document_probe.ooxml_content_types`), а не только в
+#: голове файла: у большого OOXML заголовок записи лежит далеко за первыми 8 KiB.
+OOXML_MARKER = b"[Content_Types].xml"
+
+#: Имя той же записи как текст (для сверки с записями центрального каталога).
+OOXML_MARKER_NAME = OOXML_MARKER.decode("ascii")
 
 
 def document_suffix(url_or_name: str) -> str | None:
@@ -437,15 +445,20 @@ def classify_archive_bytes(head: bytes) -> str | None:
     для спуска. ``7z``/RAR4/RAR5 определяются по собственной магии (OOXML-маркер к ним
     неприменим). Прочие форматы (tar/OVA/ISO/gzip) → ``None``: они не контейнеры допуска.
 
-    Смотрится **только** голова (:data:`BINARY_SNIFF_BYTES`): вызывающему можно передать
-    и целое тело — поиск маркера не пойдёт по членам контейнера (иначе zip с docx-членом
-    ложно считался бы документом).
+    Это **дешёвая проверка по голове**, а не приговор OOXML: маркер ищется только в
+    :data:`BINARY_SNIFF_BYTES` байтах, поэтому у большого OOXML (``[Content_Types].xml``
+    далеко за 8 KiB — замерено на смещениях 8258/9078/20078) голова его не покажет и
+    функция вернёт ``"zip"``. Истину о **файле** решает
+    :func:`core.util.document_probe.classify_artifact`: он сверяет записи центрального
+    каталога zip (``document_probe.ooxml_content_types``) и отдаёт класс ``document``.
+    Голову смотреть всё равно нужно: она отсекает zip, *члены* которого содержат
+    OOXML-маркер (иначе zip с docx-членом ложно считался бы документом).
     """
     head = head[:BINARY_SNIFF_BYTES]
     fmt = _container_magic(head[:8])
     if fmt is None:
         return None
-    if fmt == "zip" and _OOXML_MARKER in head:
+    if fmt == "zip" and OOXML_MARKER in head:
         return None
     return fmt
 

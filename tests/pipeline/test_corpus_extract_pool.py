@@ -1862,14 +1862,24 @@ def test_corpus_phase_emits_resources_observation(tmp_path: Path) -> None:
     assert observation.workers_peak_rss_mb is not None
     assert observation.workers_peak_rss_mb > 0
 
-def test_corpus_phase_observation_marks_derived_scheduling(tmp_path: Path) -> None:
-    """F0: окно, выведенное из бюджета, видно как ``derived`` (а не как воля оператора)."""
+def test_corpus_phase_observation_marks_derived_scheduling(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F0: окно, выведенное из бюджета, видно как ``derived`` (а не как воля оператора).
+
+    Потолок по CPU инъектируется (F2): иначе ожидание зависело бы от хоста —
+    ``workers_from_budget`` режет окно числом CPU, и на 2-ядерной машине тест падал
+    (``assert 2 == 3``). Арифметика бюджета — предмет проверки, число ядер — нет.
+    """
     from core.domain.enums import DocumentLevel
+    from core.pipeline import resources
     from core.pipeline.resources import (
         DOCLING_PEAK_MB,
         PARENT_FLOOR_MB,
         ResourcesObservation,
     )
+
+    monkeypatch.setattr(resources, "cpu_parallelism_cap", lambda: 8)
 
     level = DocumentLevel.TEXT
     budget = PARENT_FLOOR_MB + 3 * DOCLING_PEAK_MB[level]

@@ -1,10 +1,14 @@
 """7z-контейнер: ``core/adapters/container_7z.py`` (срез B2).
 
-``py7zr`` в окружении **нет** (extra ``extract-archives``, LGPL-исключение) — и это
-проверяется как штатное состояние: ``available() is False``, листинг несёт **точную**
-видимую причину, ``open_member`` отказывает типизированно. Форма успешного пути
-проверяется на фейковом бэкенде (пакет не устанавливается): состав, ``solid`` из индекса
-(а не догадка), ``encrypted``, потоковое чтение через временный файл.
+Отсутствие бэкенда проверяется **инъекцией** (``backend_module() -> None``), а не
+предположением о хосте: ``py7zr`` — extra ``extract-archives``, и в окружении с этой
+группой «реального отсутствия» просто нет — тест, который на него опирался, падал ровно
+там, где зависимость установлена (F3). Инъекция та же, что на успешном пути
+(``test_container_7z.py``: подмена ``backend_module``), поэтому обе половины условия
+доступности проверяются и без extra, и с ним.
+
+Форма успешного пути проверяется на фейковом бэкенде (пакет не устанавливается): состав,
+``solid`` из индекса (а не догадка), ``encrypted``, потоковое чтение через временный файл.
 """
 
 from __future__ import annotations
@@ -27,21 +31,28 @@ def _install_fake(monkeypatch: pytest.MonkeyPatch, module: object) -> None:
     monkeypatch.setattr(container_7z, "backend_module", lambda: module)
 
 
+def _no_backend(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Смоделировать отсутствие пакета (независимо от того, установлен ли extra)."""
+    monkeypatch.setattr(container_7z, "backend_module", lambda: None)
+
+
 # --------------------------------------------------------------------------- #
-# Реальное состояние окружения: бэкенда нет
+# Бэкенда нет: инъекция, а не факт окружения
 # --------------------------------------------------------------------------- #
 
 
-def test_backend_absent_is_visible() -> None:
+def test_backend_absent_is_visible(monkeypatch: pytest.MonkeyPatch) -> None:
     """Без ``py7zr``: ``available() is False`` и версия-заглушка провенанса."""
+    _no_backend(monkeypatch)
     container = SevenZipContainer()
     assert container.available() is False
     assert container.version == "py7zr-unavailable"
     assert container.unavailable_reason() == _ABSENT
 
 
-def test_backend_absent_listing_reason_is_exact() -> None:
+def test_backend_absent_listing_reason_is_exact(monkeypatch: pytest.MonkeyPatch) -> None:
     """Листинг объясняет отсутствие бэкенда, а не отдаёт пустой архив."""
+    _no_backend(monkeypatch)
     listing = SevenZipContainer().list_members("/nonexistent/a.7z")
     assert listing.format == "7z"
     assert listing.members == ()
@@ -51,8 +62,11 @@ def test_backend_absent_listing_reason_is_exact() -> None:
     assert listing.truncated is False
 
 
-def test_backend_absent_open_member_raises_typed() -> None:
+def test_backend_absent_open_member_raises_typed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Потока нет по определению → ``ContainerUnavailable`` с той же причиной."""
+    _no_backend(monkeypatch)
     with pytest.raises(ContainerUnavailable) as excinfo:
         list(SevenZipContainer().open_member("/nonexistent/a.7z", "a.pdf"))
     assert excinfo.value.reason == _ABSENT

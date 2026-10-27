@@ -25,7 +25,11 @@ from core.adapters.container_7z import SevenZipContainer
 from core.adapters.container_rar import RarContainer
 from core.adapters.container_zip import ZipContainer
 from core.ports.container import ContainerPort
-from core.util.document_formats import BINARY_SNIFF_BYTES, classify_archive_bytes
+from core.util.document_formats import (
+    BINARY_SNIFF_BYTES,
+    OOXML_MARKER,
+    classify_archive_bytes,
+)
 
 __all__ = [
     "SNIFF_BYTES",
@@ -49,7 +53,9 @@ _ADAPTERS: dict[str, ContainerPort] = {
 }
 
 #: Маркер OOXML внутри ZIP: такой файл — документ, а не контейнер для спуска.
-_OOXML_MARKER = b"[Content_Types].xml"
+#: Источник истины — :data:`core.util.document_formats.OOXML_MARKER`; здесь он только
+#: импортируется, чтобы копия не разъезжалась с основной (F8).
+_OOXML_MARKER = OOXML_MARKER
 
 
 def container_formats() -> tuple[str, ...]:

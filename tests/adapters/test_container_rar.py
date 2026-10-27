@@ -1,11 +1,14 @@
 """RAR-контейнер: ``core/adapters/container_rar.py`` (срез B2).
 
-``rarfile`` в окружении **нет**, зато внешние утилиты (``unrar``/``7z``) есть — поэтому
-проверяются **обе** половины условия доступности:
+``rarfile`` — extra ``extract-archives``: его отсутствие проверяется **инъекцией**
+(``backend_module() -> None``), а не фактом окружения (F3: тест на «реальное отсутствие»
+падал в окружении, где extra установлен). Вторая половина условия доступности —
+внешняя утилита (``shutil.which`` подменяется на «ничего не найдено»). Итог — обе
+половины и успешный путь проверяются и без extra, и с ним:
 
-* нет пакета → ``available() is False`` и **точная** причина про пакет;
+* нет пакета (инъекция) → ``available() is False`` и **точная** причина про пакет;
 * пакет есть (фейк), утилиты нет → ``available() is False`` и **точная** причина про
-  утилиту (``shutil.which`` подменяется на «ничего не найдено»);
+  утилиту;
 * пакет и утилита есть → успешный путь: состав, ``solid=None`` (``rarfile`` флаг не
   отдаёт — не догадываемся), ``encrypted``, потоковое чтение.
 
@@ -47,21 +50,28 @@ def _install_fake(monkeypatch: pytest.MonkeyPatch, module: object) -> None:
     monkeypatch.setattr(container_rar, "backend_module", lambda: module)
 
 
+def _no_backend(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Смоделировать отсутствие пакета (независимо от того, установлен ли extra)."""
+    monkeypatch.setattr(container_rar, "backend_module", lambda: None)
+
+
 # --------------------------------------------------------------------------- #
-# Реальное состояние окружения: пакета нет
+# Пакета нет: инъекция, а не факт окружения
 # --------------------------------------------------------------------------- #
 
 
-def test_backend_absent_is_visible() -> None:
+def test_backend_absent_is_visible(monkeypatch: pytest.MonkeyPatch) -> None:
     """Без ``rarfile``: ``available() is False`` и версия-заглушка провенанса."""
+    _no_backend(monkeypatch)
     container = RarContainer()
     assert container.available() is False
     assert container.version == "rarfile-unavailable"
     assert container.unavailable_reason() == _REASON_PACKAGE
 
 
-def test_backend_absent_listing_reason_is_exact() -> None:
+def test_backend_absent_listing_reason_is_exact(monkeypatch: pytest.MonkeyPatch) -> None:
     """Листинг объясняет отсутствие пакета, а не отдаёт пустой архив."""
+    _no_backend(monkeypatch)
     listing = RarContainer().list_members("/nonexistent/a.rar")
     assert listing.format == "rar"
     assert listing.members == ()
@@ -71,8 +81,11 @@ def test_backend_absent_listing_reason_is_exact() -> None:
     assert listing.encrypted is False
 
 
-def test_backend_absent_open_member_raises_typed() -> None:
+def test_backend_absent_open_member_raises_typed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Потока нет → ``ContainerUnavailable`` с той же причиной."""
+    _no_backend(monkeypatch)
     with pytest.raises(ContainerUnavailable) as excinfo:
         list(RarContainer().open_member("/nonexistent/a.rar", "a.pdf"))
     assert excinfo.value.reason == _REASON_PACKAGE

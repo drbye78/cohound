@@ -9,7 +9,8 @@
 
 * zip с pdf+md+png: pdf и md ингестятся **разными** ``CorpusDoc``, png — видимый пропуск
   с причиной (``not_ingestible_format``), прогноз фиксируется до извлечения;
-* вложенность 3 уровня ингестится — потолка глубины нет;
+* вложенность 3 уровня ингестится — потолка глубины нет; цепочка **5000** различных
+  вложенных zip проходит до конца без падений и без ``errors`` (F1: обход итеративен);
 * повтор того же архива внутри корня останавливается циклом (``archive_cycle``) — именно
   это делает спуск без потолка глубины конечным;
 * член больше ``archive_max_member_bytes`` пропускается, а его соседи ингестятся;
@@ -379,6 +380,124 @@ def test_nested_archives_three_levels_are_ingested(tmp_path: Path) -> None:
         assert all(
             item.status is ArchiveDescentStatus.DESCENDED for item in observations
         )
+
+
+#: Глубина цепочки в тесте F1. Замер: 5000 различных вложенных zip (см. ниже) — это
+#: ~990 уровней прежней рекурсивной формы, то есть точка, где она уже падала.
+_CHAIN_DEPTH = 5000
+
+
+def _zip_chain(depth: int, innermost: dict[str, bytes]) -> bytes:
+    """Цепочка ``depth`` **различных** вложенных zip; на дне — ``innermost``.
+
+    ``ZIP_STORED``: тело уровня — уже сжатый zip, дефлейт дал бы только время. Хеши
+    содержимого у всех уровней разные (размер и заголовок предыдущего входят в байты),
+    поэтому цикл ``archive_cycle`` здесь не срабатывает: конечность даёт только бюджет
+    байтов — а он крошечные уровни не ловит, поэтому единственная защита от падения —
+    итеративный обход (F1).
+    """
+    payload = _zip_stored(innermost)
+    for _ in range(depth):
+        payload = _zip_stored({"a.zip": payload})
+    return payload
+
+
+def _zip_stored(files: dict[str, bytes]) -> bytes:
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_STORED) as archive:
+        for name, data in files.items():
+            archive.writestr(name, data)
+    return buffer.getvalue()
+
+
+def _walker(
+    path: Path,
+    *,
+    observations: list[Any],
+    members: list[Any],
+    errors: list[str],
+) -> Any:
+    """Walker уровня модуля (без фазы): для тестов формы обхода, не провенанса."""
+    from core.pipeline.archive_descent import (
+        ArchiveDescentWalker,
+        DescentBudget,
+        MemberOutcome,
+    )
+
+    return ArchiveDescentWalker(
+        product_id="p1",
+        root_url=ZIP_URL,
+        descent=ArchiveDescent.FULL,
+        budget=DescentBudget(max_member_bytes=1024 * 1024),
+        container_for=container_for,
+        ingest_member=lambda task: MemberOutcome(
+            doc_id=f"p1:{task.member_path}", content_hash="h" * 64
+        ),
+        observations=observations,
+        members=members,
+        errors=errors,
+        run_id=RUN_ID,
+    )
+
+
+def test_chain_of_5000_distinct_archives_reaches_the_end(tmp_path: Path) -> None:
+    """F1: цепочка 5000 различных вложенных zip проходит до конца (нет падения).
+
+    Прежняя рекурсивная форма умирала на ~990 уровнях: ``RecursionError`` гасился в
+    выборе читателя и выходил как обманчивое ``container_reader_unavailable`` (или
+    наружу из ``plan_members``). Явный стек кадров делает обещание «потолка глубины
+    нет» правдой: наблюдений — по одному на уровень, ``errors`` пуст, исход видим.
+    """
+    payload = _zip_chain(_CHAIN_DEPTH, {"note.md": b"bottom"})
+    path = tmp_path / "chain.bin"
+    path.write_bytes(payload)
+
+    observations: list[Any] = []
+    members: list[Any] = []
+    errors: list[str] = []
+    walker = _walker(path, observations=observations, members=members, errors=errors)
+    observation = walker.descend(
+        archive_path=path,
+        archive_url=ZIP_URL,
+        archive_content_hash=content_hash(payload),
+    )
+
+    assert errors == []
+    # По наблюдению на каждый уровень: корень (0) + 5000 вложенных.
+    assert len(observations) == _CHAIN_DEPTH + 1
+    assert max(item.depth for item in observations) == _CHAIN_DEPTH
+    assert all(
+        item.status is ArchiveDescentStatus.DESCENDED for item in observations
+    )
+    assert observation.outcome["cycle_stops"] == 0
+    # Документ на дне цепочки извлечён (последняя строка — он, а не пропуск).
+    assert members[-1].member_path == "note.md"
+    assert members[-1].doc_id is not None
+
+
+def test_document_at_the_end_of_a_chain_is_ingested(tmp_path: Path) -> None:
+    """F1: документ на дне вложенной цепочки доходит до ингеста со своим URL."""
+    depth = 50
+    payload = _zip_chain(depth, {"note.md": b"bottom"})
+    path = tmp_path / "chain.bin"
+    path.write_bytes(payload)
+
+    observations: list[Any] = []
+    members: list[Any] = []
+    errors: list[str] = []
+    walker = _walker(path, observations=observations, members=members, errors=errors)
+    walker.descend(
+        archive_path=path,
+        archive_url=ZIP_URL,
+        archive_content_hash=content_hash(payload),
+    )
+
+    assert errors == []
+    document = members[-1]
+    assert document.member_path == "note.md"
+    assert document.doc_id is not None
+    assert document.depth == depth
+    assert document.member_url == f"{ZIP_URL}{'!/a.zip' * depth}!/note.md"
 
 
 # ---------------------------------------------------------------------------

@@ -5,15 +5,20 @@
 содержимое:
 
 * :func:`classify_artifact` — класс (``container``/``document``/``page``/``binary``) и формат;
-* :func:`pdf_page_count` — число страниц PDF **по шапке/структуре файла** (``/Type /Pages``
-  + ``/Count``), без рендеринга и без docling: рендер — работа экстрактора, а не зонда.
+  OOXML узнаётся по **центральному каталогу** zip (:func:`ooxml_content_types`), а не по
+  первым 8 KiB: иначе большой ``.docx`` без документарного суффикса классифицировался бы
+  как контейнер и спуск отдал бы «пусто, ошибок нет» (F8);
+* :func:`pdf_page_count` — число страниц PDF по **окнам** файла (шапка + хвост, потолок
+  :data:`_SCAN_HEAD_BYTES`/:data:`_SCAN_TAIL_BYTES` на сторону): ``/Type /Pages`` +
+  ``/Count`` из шапки/хвоста, без рендеринга и без docling. Полный файл читается только
+  если он целиком укладывается в эти окна.
 
-Почему счётчик страниц — по шапке: проба классифицирует артефакт **до** извлечения
-(``archive_descent=plan`` вообще ничего не извлекает), и «сколько страниц в PDF» нужно
-знать без запуска тяжёлого конвертера. Это **оценка по индексу файла**, а не гарантия:
-PDF с перекрёстными ссылками в сжатых объектных потоках может не показать ``/Type /Pages``
-открытым текстом — тогда функция честно возвращает ``None`` («шапка не сообщает»), а не
-выдуманное число (A3).
+Почему счётчик страниц — по структуре, а не рендером: проба классифицирует артефакт
+**до** извлечения (``archive_descent=plan`` вообще ничего не извлекает), и «сколько страниц
+в PDF» нужно знать без запуска тяжёлого конвертера. Это **оценка по индексу файла**, а не
+гарантия: PDF с перекрёстными ссылками в сжатых объектных потоках может не показать
+``/Type /Pages`` открытым текстом — тогда функция честно возвращает ``None`` («не
+сообщает»), а не выдуманное число (A3).
 
 Нейтрален (§1.3).
 """
@@ -21,12 +26,15 @@ PDF с перекрёстными ссылками в сжатых объект�
 from __future__ import annotations
 
 import re
+import zipfile
 from dataclasses import dataclass
 from pathlib import Path
+from typing import BinaryIO
 
 from core.util.document_formats import (
     BINARY_SNIFF_BYTES,
     DOCUMENT_SUFFIXES,
+    OOXML_MARKER_NAME,
     classify_archive_bytes,
     document_suffix,
     is_textual_content_type,
@@ -40,6 +48,7 @@ __all__ = [
     "PDF_MAGIC",
     "ArtifactProbe",
     "classify_artifact",
+    "ooxml_content_types",
     "pdf_page_count",
     "read_head",
 ]
@@ -53,8 +62,18 @@ CLASS_BINARY = "binary"
 #: Магия PDF (перенос строки/пробелы после версии допускаются).
 PDF_MAGIC = b"%PDF-"
 
-#: Читаемый блок файла при сканировании шапки (1 MiB): счёт страниц не требует RAM.
+#: Читаемый блок файла при сканировании шапки/хвоста (1 MiB): счёт страниц не требует RAM.
 _SCAN_CHUNK = 1024 * 1024
+
+#: Потолок чтения **с начала** файла (1 MiB). Стоимость замера (чтение + два
+#: regex-прохода): ≈1.4–1.7 мс на MiB, поэтому окно ограничивает цену пробы на документ
+#: (~3 мс на оба окна), а не растёт линейно с размером файла: PDF на 128 MiB читался
+#: целиком и стоил **177 мс** (замер: 1.3/9.1/29.3/176.8 мс на 1/8/32/128 MiB).
+_SCAN_HEAD_BYTES = 1024 * 1024
+
+#: Потолок чтения **с конца** файла (1 MiB): хвост несёт xref/trailer, а объект
+#: ``/Type /Pages`` часто пишется последним — без хвоста заявленное ``/Count`` терялось бы.
+_SCAN_TAIL_BYTES = 1024 * 1024
 
 #: Перекрытие между блоками: токен ``/Type /Page`` или ``/Count N`` может лечь на границу.
 _SCAN_OVERLAP = 256
@@ -141,48 +160,122 @@ def _declared_format(
     return None
 
 
+def _scan_text(handle: BinaryIO, start: int, length: int) -> tuple[int, int]:
+    """``(declared, objects)`` по окну ``[start, start+length)`` файла.
+
+    Окно читается блоками по :data:`_SCAN_CHUNK` с перекрытием :data:`_SCAN_OVERLAP`:
+    токен на границе блоков не теряется, а RAM не зависит ни от окна, ни от файла.
+    """
+    declared = 0
+    objects = 0
+    tail = b""
+    handle.seek(start)
+    remaining = length
+    while remaining > 0:
+        chunk = handle.read(min(_SCAN_CHUNK, remaining))
+        if not chunk:
+            break
+        remaining -= len(chunk)
+        window = tail + chunk
+        objects += len(_PAGE_OBJECT_RE.findall(window))
+        for match in _PAGES_COUNT_RE.finditer(window):
+            try:
+                value = int(match.group(1))
+            except ValueError:  # pragma: no cover - regex гарантирует цифры
+                continue
+            declared = max(declared, value)
+        tail = window[-_SCAN_OVERLAP:]
+    return declared, objects
+
+
+def _pdf_windows(size: int) -> tuple[list[tuple[int, int]], bool]:
+    """Окна чтения для файла размера ``size`` и признак «покрыт целиком».
+
+    Файл целиком читается, только если он укладывается в шапку+хвост (тогда счётчик
+    точен). Иначе читаются две ограниченные стороны — и результат может быть только
+    **заявленным** ``/Count``, а не числом увиденных объектов (см. :func:`pdf_page_count`).
+    """
+    if size <= _SCAN_HEAD_BYTES + _SCAN_TAIL_BYTES:
+        return [(0, size)], True
+    head = _SCAN_HEAD_BYTES
+    return [(0, head), (size - _SCAN_TAIL_BYTES, _SCAN_TAIL_BYTES)], False
+
+
+def ooxml_content_types(path: str | Path) -> bool | None:
+    """Есть ли запись ``[Content_Types].xml`` в **центральном каталоге** zip.
+
+    ``True``/``False`` — каталог прочитан, ответ определён; ``None`` — файл не читается
+    как zip (тогда класс решает не эта функция, а вызывающий: ``None`` — не «нет
+    маркера»).
+
+    Читается только центральный каталог (хвост файла), тела членов не читаются: цена —
+    O(число записей), а не O(размер архива). Именно это делает распознавание OOXML
+    независимым от смещения заголовка записи: у большого ``.docx`` маркер лежит далеко за
+    первыми :data:`BINARY_SNIFF_BYTES` байтами (F8: замерено на 8258/9078/20078 —
+    голова его не видит, и спуск отдавал «пусто, ошибок нет»).
+    """
+    try:
+        with zipfile.ZipFile(path) as archive:
+            names = archive.namelist()
+    except (RecursionError, MemoryError):
+        raise
+    except Exception:  # noqa: BLE001 — «не читается как zip» — валидный ответ пробы
+        return None
+    for name in names:
+        if name.replace("\\", "/").lstrip("./") == OOXML_MARKER_NAME:
+            return True
+    return False
+
+
 def pdf_page_count(path: str | Path) -> int | None:
-    """Число страниц PDF по структуре файла (``None`` — не PDF или шапка не сообщает).
+    """Число страниц PDF по структуре файла (``None`` — не PDF или число не сообщено).
+
+    Читаются **два окна**: шапка (:data:`_SCAN_HEAD_BYTES`) и хвост
+    (:data:`_SCAN_TAIL_BYTES`). Хвост нужен потому, что xref/trailer и объект
+    ``/Type /Pages`` часто пишутся последними; шапка — потому что часть генераторов
+    кладёт дерево страниц в начало. Файл целиком читается **только** если он целиком
+    укладывается в эти окна (``size <= 2 MiB``) — тогда счётчик точен.
 
     Два независимых признака, оба из открытого текста файла:
 
     1. ``/Type /Pages ... /Count N`` — **заявленное** число листьев дерева страниц
        (авторитетно, когда видно);
-    2. число объектов ``/Type /Page`` — фактическое число листьев, видимых в файле.
+    2. число объектов ``/Type /Page`` — фактическое число листьев, видимых в окнах.
 
-    Возвращается максимум из двух: PDF, у которого дерево объявляет 665 страниц, но
-    часть листьев в сжатых объектных потоках, обязан дать 665, а не «сколько увидели».
-    Файл читается блоками по 1 MiB с перекрытием 256 байт — токен на границе блоков не
-    теряется, а RAM не зависит от размера документа.
+    Возвращается максимум из двух, **если файл прочитан целиком**. Для файла больше окон
+    возвращается только ``declared``: частичный пересчёт объектов занизил бы число, а
+    выдуманное число хуже отсутствия (A3) — «увидели 6 листьев из 665» это не ответ.
+    Ничего не найдено → ``None``.
+
+    **Стоимость (замер, 3.14):** ≈1.4–1.7 мс на MiB прочитанного (чтение + два
+    regex-прохода). Прежняя форма читала файл целиком, поэтому цена росла линейно с
+    размером: 1/8/32/128 MiB → 1.3/9.1/29.3/**176.8** мс на артефакт. Теперь читается не
+    больше двух окон (2 MiB) — 2.0–3.4 мс на тех же файлах, то есть цена пробы перестала
+    зависеть от размера документа (>50× на 128 MiB).
     """
-    declared = 0
-    objects = 0
-    seen_magic = False
-    tail = b""
     try:
-        with Path(path).open("rb") as handle:
-            while True:
-                chunk = handle.read(_SCAN_CHUNK)
-                if not chunk:
-                    break
-                if not seen_magic:
-                    seen_magic = chunk.lstrip()[: len(PDF_MAGIC)] == PDF_MAGIC
-                    if not seen_magic:
-                        return None
-                window = tail + chunk
-                objects += len(_PAGE_OBJECT_RE.findall(window))
-                for match in _PAGES_COUNT_RE.finditer(window):
-                    try:
-                        value = int(match.group(1))
-                    except ValueError:  # pragma: no cover - regex гарантирует цифры
-                        continue
-                    declared = max(declared, value)
-                tail = window[-_SCAN_OVERLAP:]
+        size = Path(path).stat().st_size
     except OSError:
         return None
-    if not seen_magic:
+    if size <= 0:
         return None
-    best = max(declared, objects)
+    windows, complete = _pdf_windows(size)
+    declared = 0
+    objects = 0
+    try:
+        with Path(path).open("rb") as handle:
+            # Магия — в самом начале (BOM/пробелы перед ``%PDF-`` допускаются): не PDF
+            # считается без сканирования окон, цена отказа — 1 KiB чтения.
+            probe = handle.read(min(len(PDF_MAGIC) + 1024, size)).lstrip()
+            if not probe.startswith(PDF_MAGIC):
+                return None
+            for start, length in windows:
+                part_declared, part_objects = _scan_text(handle, start, length)
+                declared = max(declared, part_declared)
+                objects += part_objects
+    except OSError:
+        return None
+    best = max(declared, objects) if complete else declared
     return best if best > 0 else None
 
 
@@ -197,15 +290,17 @@ def classify_artifact(
 
     Порядок решений:
 
-    1. магия контейнера (``zip``/``7z``/``rar``) **и** заявленный формат не документ —
-       ``container``. OOXML (``docx``/``pptx``/``xlsx``) тоже ZIP, но
-       ``classify_archive_bytes`` отличает его по ``[Content_Types].xml``; кроме того,
-       заявленный документный суффикс/``Content-Type`` оставляет файл документом даже с
-       байтами обычного zip — его судьбу решает экстрактор, а не спуск;
-    2. магия PDF либо документный суффикс/``Content-Type`` — ``document`` (+``page_count``
+    1. ZIP-магия в голове **и** запись ``[Content_Types].xml`` в центральном каталоге —
+        ``document`` (OOXML: ``docx``/``pptx``/``xlsx``; голова его не всегда видит —
+        маркер ищется по каталогу, см. :func:`ooxml_content_types`). Заявленный
+        документный суффикс/``Content-Type`` оставляет файл документом даже с байтами
+        обычного zip: его судьбу решает экстрактор, а не спуск;
+    2. магия контейнера (``zip``/``7z``/``rar``) **и** заявленный формат не документ —
+       ``container``;
+    3. магия PDF либо документный суффикс/``Content-Type`` — ``document`` (+``page_count``
        для PDF);
-    3. текстовая разметка (суффикс/``Content-Type``) — ``page``;
-    4. иначе — ``binary``.
+    4. текстовая разметка (суффикс/``Content-Type``) — ``page``;
+    5. иначе — ``binary``.
 
     ``head`` можно передать заранее прочитанным (тот же файл уже в памяти вызывающего).
     """
@@ -224,6 +319,20 @@ def classify_artifact(
         or declared in {item.lstrip(".") for item in document_suffixes}
     )
     archive_format = classify_archive_bytes(head_bytes)
+    # OOXML за пределами головы: маркер ищется по центральному каталогу zip (F8). Без
+    # этого большой ``.docx`` без документарного суффикса классифицировался как
+    # ``container``, спуск не принимал ни одного члена (члены — ``word/document.xml``) и
+    # наблюдение выходило ``descended`` с ``members_accepted=0`` и **пустыми** ``errors``:
+    # документ молча терялся. Здесь он становится документом — маршрут экстрактора, а его
+    # отказ виден как ``parser_failed``.
+    if not declared_document and head_bytes[:2] == b"PK" and ooxml_content_types(path):
+        return ArtifactProbe(
+            kind=CLASS_DOCUMENT,
+            format="ooxml",
+            suffix=suffix,
+            size=size,
+            declared_format=declared,
+        )
     # Контейнер — только когда **заявленный** формат не документ: ``.docx`` с байтами
     # обычного zip остаётся документом (маршрут экстрактора, как и до спуска). Иначе
     # «zip без ``[Content_Types].xml``» отбирал бы у экстрактора документ, который он

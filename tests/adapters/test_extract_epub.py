@@ -410,3 +410,124 @@ def test_no_bytes_and_no_source_path_is_a_visible_error() -> None:
 
     assert doc.error is not None
     assert "нет ни байтов" in doc.error
+
+
+# ---------------------------------------------------------------------------
+# Недоверенный XML (F5): stdlib-парсер обязан отказать, а не разорвать процесс
+# ---------------------------------------------------------------------------
+
+#: ``billion laughs``: экспоненциальное раскрытие сущностей (DoS через память). Шесть
+#: уровней — **замеренный** порог CPython 3.14: пять дают 300 KB и разбираются, шесть
+#: отвергаются ``ParseError: limit on input amplification factor`` (pyexpat). Меньше
+#: брать нельзя (бомба «пройдёт»), больше — уже не нужно.
+def _billion_laughs(tag: str, inner: str) -> str:
+    """XML-бомба в обёртке ``<tag>`` (``container`` — OCF, ``package`` — OPF)."""
+    entities = ['<!ENTITY lol "lol">']
+    previous = "lol"
+    for level in range(1, 7):
+        body = "".join(f"&{previous};" for _ in range(10))
+        entities.append(f'<!ENTITY lol{level} "{body}">')
+        previous = f"lol{level}"
+    dtd = "\n ".join(entities)
+    return (
+        f'<?xml version="1.0"?>\n<!DOCTYPE {tag} [\n {dtd}\n]>\n'
+        f"<{tag}>{inner}<x>&{previous};</x></{tag}>\n"
+    )
+
+
+#: XXE: внешняя сущность (файловая система/SSRF) — не должна ресолвиться.
+def _external_entity(tag: str, inner: str) -> str:
+    """XML с внешней сущностью ``&xxe;`` (``file://``) в обёртке ``<tag>``."""
+    return (
+        f'<?xml version="1.0"?>\n'
+        f'<!DOCTYPE {tag} [<!ENTITY xxe SYSTEM "file:///etc/passwd">]>\n'
+        f"<{tag}>{inner}<x>&xxe;</x></{tag}>\n"
+    )
+
+_ROOTFILE = (
+    '<rootfile full-path="OEBPS/content.opf" '
+    'media-type="application/oebps-package+xml"/>'
+)
+
+
+def _epub_with_raw_container(path: Path, container_xml: str) -> Path:
+    """EPUB с **подложенным** ``container.xml`` (валидный OPF на месте)."""
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr(
+            zipfile.ZipInfo("mimetype"), "application/epub+zip", zipfile.ZIP_STORED
+        )
+        archive.writestr("META-INF/container.xml", container_xml)
+        archive.writestr(
+            "OEBPS/content.opf",
+            _OPF.format(manifest="", spine='<itemref idref="c1"/>'),
+        )
+    return path
+
+
+def _epub_with_raw_opf(path: Path, opf_xml: str) -> Path:
+    """EPUB с **подложенным** OPF (валидный ``container.xml`` на месте)."""
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr(
+            zipfile.ZipInfo("mimetype"), "application/epub+zip", zipfile.ZIP_STORED
+        )
+        archive.writestr(
+            "META-INF/container.xml", _CONTAINER_XML.format(opf="OEBPS/content.opf")
+        )
+        archive.writestr("OEBPS/content.opf", opf_xml)
+    return path
+
+
+def test_billion_laughs_in_container_xml_is_a_visible_error(tmp_path: Path) -> None:
+    """Экспоненциальные сущности: ``ParseError`` внутри, наружу — ``error`` документа."""
+    epub = _epub_with_raw_container(
+        tmp_path / "bomb.epub",
+        _billion_laughs("container", f"<rootfiles>{_ROOTFILE}</rootfiles>"),
+    )
+
+    doc = EpubExtractor(html=_fake_html()).extract(_page(epub.read_bytes()))
+
+    assert doc.text == ""
+    assert doc.error is not None
+    assert doc.error.startswith("epub:")
+    assert "container.xml" in doc.error
+
+
+def test_external_entity_in_container_xml_is_not_resolved(tmp_path: Path) -> None:
+    """XXE не ресолвится: документ с ошибкой, содержимое файла не попадает в текст."""
+    epub = _epub_with_raw_container(
+        tmp_path / "xxe.epub",
+        _external_entity("container", f"<rootfiles>{_ROOTFILE}</rootfiles>"),
+    )
+
+    doc = EpubExtractor(html=_fake_html()).extract(_page(epub.read_bytes()))
+
+    assert doc.text == ""
+    assert doc.error is not None
+    assert "root:" not in doc.text  # /etc/passwd не прочитан
+    assert "container.xml" in doc.error
+
+
+def test_billion_laughs_in_opf_is_a_visible_error(tmp_path: Path) -> None:
+    """OPF с бомбой сущностей: ``epub: OPF не разобран`` — видимая ошибка, не падение."""
+    epub = _epub_with_raw_opf(
+        tmp_path / "opf-bomb.epub", _billion_laughs("package", "")
+    )
+
+    doc = EpubExtractor(html=_fake_html()).extract(_page(epub.read_bytes()))
+
+    assert doc.text == ""
+    assert doc.error is not None
+    assert "OPF" in doc.error
+
+
+def test_external_entity_in_opf_is_a_visible_error(tmp_path: Path) -> None:
+    """XXE в OPF: отказ парсера виден как ошибка OPF, текст пуст."""
+    epub = _epub_with_raw_opf(
+        tmp_path / "opf-xxe.epub", _external_entity("package", "")
+    )
+
+    doc = EpubExtractor(html=_fake_html()).extract(_page(epub.read_bytes()))
+
+    assert doc.text == ""
+    assert doc.error is not None
+    assert "OPF" in doc.error
