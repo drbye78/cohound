@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import datetime as _dt
 import os
 import sys
@@ -27,17 +28,17 @@ from core.cli.context import (
     _ensure_run,
     _filter_corpus_urls,
     _follow_session,
+    _gate_runtime,
     _load_corpus_urls,
     _load_render_modes,
     _open_state_store,
-    _phases_until,
     _persist_llm_scenarios,
+    _phases_until,
     _positive_int,
     _print_json,
     _print_run_dry,
     _print_run_report,
     _product_callback,
-    _gate_runtime,
     _progress_callback,
     _resolve_phases,
     _resolve_plan,
@@ -68,12 +69,12 @@ from core.cli.wiring import (
     build_vector_index,
     llm_env_notices,
     manifest_deploy_fields,
-    resolve_and_build_search_adapter,
-    serp_env_notices,
     preflight_extraction_budget,
+    resolve_and_build_search_adapter,
     resolve_extraction_budget,
     run_db_path,
     seed_lexical_index,
+    serp_env_notices,
 )
 from core.config.deploy import is_split, load_deploy_config, profile_notices
 from core.domain import (
@@ -90,24 +91,24 @@ from core.pipeline.crawl_session import (
     read_provenance,
     truncation_summary,
 )
-from core.pipeline.liveness import stale_reason
+from core.pipeline.digests import cohort_digest, seeds_digest
 from core.pipeline.lint import lint_run_inputs
+from core.pipeline.liveness import stale_reason
 from core.pipeline.normalize import load_inputs
 from core.pipeline.observability import (
     collect_llm_usage,
     instrument_phases,
     write_run_metrics,
 )
+from core.pipeline.onboarding import effective_seeds, load_effective_seeds, preflight
+from core.pipeline.phases import resolve_measured_retrieval, resolve_package_id
+from core.pipeline.plan import derive_run_id
+from core.pipeline.report import Artifacts
 from core.pipeline.resources import (
     ResourcesObservation,
     build_resources_block,
     mem_budget_provenance,
 )
-from core.pipeline.digests import cohort_digest, seeds_digest
-from core.pipeline.onboarding import effective_seeds, load_effective_seeds, preflight
-from core.pipeline.phases import resolve_measured_retrieval, resolve_package_id
-from core.pipeline.plan import derive_run_id
-from core.pipeline.report import Artifacts
 from core.pipeline.retrieve import RetrievalProfile
 from core.pipeline.run_identity import (
     RunIdentity,
@@ -334,18 +335,19 @@ class _ConsoleTee:
 
     def write(self, data: str) -> int:
         for stream in self._streams:
-            try:
+            # Тишина верна и обязательна: консоль первична, файл-приёмник вторичен, и сбой
+            # записи в него (диск кончился, канал закрыт) не должен ни падать, ни менять
+            # вывод прогона (см. докстринг класса). ``suppress`` — форма подавления:
+            # ``Exception`` не сужается, потому что писать может любой объект-поток.
+            with contextlib.suppress(Exception):
                 stream.write(data)
-            except Exception:  # noqa: BLE001 — вторичный приёмник не ломает вывод
-                pass
         return len(data)
 
     def flush(self) -> None:
         for stream in self._streams:
-            try:
+            # См. ``write``: сбой вторичного приёмника не ломает восстановление консоли.
+            with contextlib.suppress(Exception):
                 stream.flush()
-            except Exception:  # noqa: BLE001 — см. write
-                pass
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._streams[0], name)
@@ -380,15 +382,12 @@ def _restore_console(marker: tuple[Any, Any, Any] | None) -> None:
         return
     out, err, handle = marker
     for stream in (sys.stdout, sys.stderr):
-        try:
+        # Восстановление не вправе падать: потоки уже могли быть закрыты (см. write).
+        with contextlib.suppress(Exception):
             stream.flush()
-        except Exception:  # noqa: BLE001 — восстановление не вправе падать
-            pass
     sys.stdout, sys.stderr = out, err
-    try:
+    with contextlib.suppress(OSError):  # pragma: no cover — закрытие уже закрытого
         handle.close()
-    except OSError:  # pragma: no cover — закрытие уже закрытого
-        pass
 
 
 def _append_console(marker: tuple[Any, Any, Any] | None, text: str) -> None:
@@ -401,10 +400,10 @@ def _append_console(marker: tuple[Any, Any, Any] | None, text: str) -> None:
     """
     if marker is None:
         return
-    try:
+    # См. ``_ConsoleTee.write``: без этой записи причина отказа не попала бы в файл,
+    # но её недоступность не вправе ломать сам вывод ошибки.
+    with contextlib.suppress(Exception):
         marker[2].write(text.rstrip("\n") + "\n")
-    except Exception:  # noqa: BLE001 — см. _ConsoleTee.write
-        pass
 
 
 def run(args: argparse.Namespace) -> int:
@@ -775,14 +774,12 @@ def run(args: argparse.Namespace) -> int:
         # фазу Ш9 (run_manifest.yaml и строка ``runs``); здесь те же поля кладутся в отчёт
         # прогона (``deploy``) для наблюдаемости CLI. Версии edge-компонентов
         # (``/v1/capabilities``) cmd_run не собирает — пусто, если не известны.
-        deploy_fields: dict[str, Any] = {}
-        if args.profile == SPLIT_PROFILE:
-            if not is_split(deploy_config):
-                raise WiringError(
-                    "профиль split требует deploy-конфиг с profile split/split-hardened "
-                    "(07 §6/§7)"
-                )
-        deploy_fields = manifest_deploy_fields(deploy_config)
+        if args.profile == SPLIT_PROFILE and not is_split(deploy_config):
+            raise WiringError(
+                "профиль split требует deploy-конфиг с profile split/split-hardened "
+                "(07 §6/§7)"
+            )
+        deploy_fields: dict[str, Any] = manifest_deploy_fields(deploy_config)
 
         # Phase 4: ``--from-scratch`` не строит R7-кэш (cache=None) — живой ре-фетч; URL-фильтры
         # (``--only-failed``/``--only-product``) читают durable-сеанс до сборки фаз, чтобы

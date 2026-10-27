@@ -44,11 +44,14 @@ def validate_url(url: str, allowed_domain: str | None = None) -> str:
     if not hostname:
         raise ValueError("URL должен содержать корректный hostname")
 
-    if allowed_domain is not None:
-        if hostname != allowed_domain and not hostname.endswith(f".{allowed_domain}"):
-            raise ValueError(
-                f"hostname '{hostname}' не принадлежит разрешённому домену '{allowed_domain}'"
-            )
+    if (
+        allowed_domain is not None
+        and hostname != allowed_domain
+        and not hostname.endswith(f".{allowed_domain}")
+    ):
+        raise ValueError(
+            f"hostname '{hostname}' не принадлежит разрешённому домену '{allowed_domain}'"
+        )
 
     try:
         ip = ipaddress.ip_address(hostname)

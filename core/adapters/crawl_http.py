@@ -50,12 +50,13 @@ pipeline ловил один класс для всех краулеров; от
 
 from __future__ import annotations
 
+import contextlib
 import importlib.util
 import os
 import tempfile
 from collections.abc import Callable
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -78,14 +79,14 @@ from core.util.robots import RobotsGate
 from core.util.security import validate_url
 
 __all__ = [
-    "CrawlUnavailable",
-    "HttpCrawler",
-    "HttpGetFn",
+    "DEFAULT_ACCEPT",
+    "DEFAULT_ACCEPT_LANGUAGE",
     "DEFAULT_MAX_RESPONSE_BYTES",
     "DEFAULT_TIMEOUT",
     "DEFAULT_USER_AGENT",
-    "DEFAULT_ACCEPT",
-    "DEFAULT_ACCEPT_LANGUAGE",
+    "CrawlUnavailable",
+    "HttpCrawler",
+    "HttpGetFn",
 ]
 
 #: Внедряемый шов: ``(url) -> сырые байты страницы``.
@@ -111,7 +112,7 @@ def _httpx_available() -> bool:
 
 def _now_iso() -> str:
     """Текущий UTC-таймстемп в ISO-8601 (поле ``fetched_at`` живого фетча)."""
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 class HttpCrawler:
@@ -175,13 +176,19 @@ class HttpCrawler:
 
     # -- публичный контракт ---------------------------------------------------
 
-    def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:
+    def fetch(self, url: str, plan: FetchPlan | None = None) -> RawPage:
         """Загружает ``url``: проверка плана → SSRF → валидаторы → кэш/живой фетч → кэш.
 
         Валидаторы берутся из плана, иначе — из сайдкара кэша (см. модульный докстринг):
         при наличии любых валидаторов запрос уходит на сервер (возможен ``304``).
         ``FetchMode.BROWSER`` этим адаптером не поддерживается (понятная ошибка).
+
+        ``plan=None`` — дефолтный план (:class:`FetchPlan` без осей): строится здесь, а не
+        в сигнатуре, чтобы дефолт не был общим объектом на все вызовы и чтобы
+        ``fetch(url, None)`` читался как «план не задан», а не падал на ``None.fetch``.
         """
+        if plan is None:
+            plan = FetchPlan()
         if plan.fetch is FetchMode.BROWSER:
             raise CrawlError(
                 "HttpCrawler не поддерживает browser-рендер; "
@@ -436,7 +443,10 @@ class HttpCrawler:
         total = 0
         try:
             if stage_first:
-                assert staging_dir is not None
+                # S101: политика вызывающего (``stage_first`` вычисляется как
+                # ``staging_dir is not None and ...`` в единственной точке вызова) — ветка
+                # недостижима, а ``assert`` ещё и сужает тип для mypy-gate.
+                assert staging_dir is not None  # noqa: S101 — см. выше, недостижимо
                 staged_path, handle = self._open_stage(staging_dir)
             for chunk in response.iter_bytes():
                 total += len(chunk)
@@ -471,10 +481,11 @@ class HttpCrawler:
             if handle is not None:
                 handle.close()
             if staged_path is not None:
-                try:
+                # Уборка staging-файла — best-effort: исходная ошибка фетча важнее, и
+                # подменять её сбоем ``unlink`` нельзя (файл уже мог быть снят, каталог —
+                # принадлежать вызывающему). Видимость отказа обеспечена исходным raise.
+                with contextlib.suppress(OSError):
                     Path(staged_path).unlink(missing_ok=True)
-                except OSError:
-                    pass
             raise
         else:
             if handle is not None:
@@ -609,13 +620,18 @@ class HttpCrawler:
 
     def _cache_mtime_iso(self, url: str) -> str:
         """ISO-8601 (UTC) mtime файла кэша; при отсутствии — текущее время."""
-        assert self._cache is not None
+        # S101: несуществующая ветка — инвариант конструктора (метод зовётся только
+        # там, где кэш внедрён: ``fetched_at`` берётся из mtime файла кэша, без кэша
+        # записи времени неоткуда взять). ``assert`` нужен ещё и как сужение типа для
+        # mypy-gate (``self._cache`` объявлен Optional): ``if`` там же сузил бы, но
+        # тогда «недостижимо» перестало бы быть проверяемым утверждением.
+        assert self._cache is not None  # noqa: S101 — инвариант конструктора
         try:
             path = self._cache.path_for("http", http_key(url), ".bin")
             stamp = path.stat().st_mtime
         except (OSError, ValueError):
             return _now_iso()
-        return datetime.fromtimestamp(stamp, tz=timezone.utc).isoformat()
+        return datetime.fromtimestamp(stamp, tz=UTC).isoformat()
 
     # -- ленивый импорт -------------------------------------------------------
 

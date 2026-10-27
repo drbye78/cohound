@@ -51,8 +51,8 @@ from core.ports.registry import RegistryFetcherPort
 from core.ports.types import ProductRef
 
 __all__ = [
-    "registry_wave",
     "registry_covered_params",
+    "registry_wave",
     "resolve_registry_ids",
 ]
 

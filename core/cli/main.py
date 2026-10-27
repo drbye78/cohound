@@ -37,20 +37,14 @@ from core.cli.commands.sensitivity import run as cmd_sensitivity
 from core.cli.commands.status import run as cmd_status
 from core.cli.context import *  # noqa: F401,F403 — реэкспорт исторической поверхности main
 from core.cli.context import (
-    PLAN_INPUTS_FILENAME,
-    PLAN_INPUTS_SNAPSHOT_VERSION,
-    RUN_YAML_FILENAME,
+    _FALLBACK_CODE,
     GatewayFactory,
     PhasesFactory,
     PlanFactory,
-    _FALLBACK_CODE,
-    _PROMOTE_STATUSES,
     _concise,
     _emit_error,
     _emit_lint_failure,
-    _print_json,
     _resolve_paths,
-    _resolve_ports,
 )
 from core.cli.errors import (
     EXIT_BLOCKED,
@@ -65,8 +59,14 @@ from core.cli.errors import (
 from core.cli.parser import build_parser
 from core.cli.wiring import (
     WiringError,
-    _llm_configured,
-    _search_adapter_configured,
+)
+
+# ``_search_adapter_configured`` — реэкспорт, а не локальное использование:
+# ``tests/cli/test_discover_review_promote.py`` импортирует его именно из ``core.cli.main``
+# (историческая поверхность). Форма ``import X as X`` (PEP 484) заявляет реэкспорт явно;
+# отдельной строкой — потому что isort не смешивает разные стили алиасов в одном блоке.
+from core.cli.wiring import (
+    _search_adapter_configured as _search_adapter_configured,
 )
 from core.config.dotenv import apply_dotenv, dotenv_disabled, resolve_env_file
 from core.pipeline import Ports
@@ -80,16 +80,36 @@ from core.store.sqlite import (
     StoreNotInitialized,
 )
 
+# ``cmd_*`` ниже — **реэкспорт**, а не локальный код: тела команд переехали в
+# :mod:`core.cli.commands.*` (P1-A), но ``core.cli.main.cmd_run`` и остальные имена
+# остаются адресуемыми для тестов и внешних вызывающих (см. докстринг модуля выше).
+# Именно поэтому они объявлены в ``__all__``: без записи здесь линтер (F401) видел бы в
+# них мёртвый импорт и удаление сломало бы документированную поверхность.
 __all__ = [
-    "EXIT_OK",
-    "EXIT_ERROR",
-    "EXIT_USAGE",
     "EXIT_BLOCKED",
+    "EXIT_ERROR",
     "EXIT_NOT_FOUND",
+    "EXIT_OK",
+    "EXIT_USAGE",
     "CliError",
     "LintFailure",
-    "main",
     "build_parser",
+    "cmd_deploy_check",
+    "cmd_diff",
+    "cmd_discover",
+    "cmd_gate",
+    "cmd_golden",
+    "cmd_passport_scout",
+    "cmd_plan",
+    "cmd_promote",
+    "cmd_report",
+    "cmd_resolve",
+    "cmd_review",
+    "cmd_run",
+    "cmd_runs",
+    "cmd_sensitivity",
+    "cmd_status",
+    "main",
 ]
 
 #: Команды, чей ``--runs-dir`` — операционный дефолт раскладки (03 §A.1): при отсутствии

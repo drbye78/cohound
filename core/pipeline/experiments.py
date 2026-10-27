@@ -17,9 +17,9 @@ Dense-плечо (R1/R2) требует вектор запроса. Он пол
 from __future__ import annotations
 
 import json
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Iterable, Sequence
 
 from core.pipeline.retrieve import DEFAULT_RRF_K, RetrievalProfile, retrieve
 from core.ports.lexical_index import LexicalIndexPort
@@ -28,8 +28,8 @@ from core.util.retrieval_eval import GoldenQuery, RetrievalReport, evaluate_retr
 
 __all__ = [
     "DEFAULT_PROFILES",
-    "ProfileExperiment",
     "ExperimentReport",
+    "ProfileExperiment",
     "load_retrieval_golden",
     "run_retrieval_experiment",
 ]
@@ -194,7 +194,8 @@ def _run_profile(
     def ranker(query: str, k: int) -> Sequence[str]:
         query_vector: Sequence[float] | None = None
         if profile in (RetrievalProfile.R1, RetrievalProfile.R2):
-            assert embed is not None  # обеспечено проверкой зависимостей выше
+            if embed is None:  # недостижимо: такой профиль отсеян _missing_dependencies
+                raise ValueError(f"профиль {profile.value} требует embed")
             query_vector = embed(query)
         result = retrieve(
             query_text=query,

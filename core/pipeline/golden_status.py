@@ -62,11 +62,11 @@ __all__ = [
     "GOLDEN_STATUS_DIR",
     "GOLDEN_STATUS_FILE",
     "GOLDEN_STATUS_SCHEMA",
-    "GoldenState",
-    "GoldenStatus",
     "STATE_ABSENT",
     "STATE_DECLINED",
     "STATE_PRESENT",
+    "GoldenState",
+    "GoldenStatus",
     "golden_status_path",
     "read_golden_status",
 ]

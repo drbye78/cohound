@@ -69,20 +69,6 @@ from core.domain import (
     GateVerdict,
     SkipReason,
 )
-from core.ports.chunker import ChunkerPort
-from core.ports.container import ContainerPort
-from core.ports.crawl_executor import CrawlExecutorPort
-from core.ports.crawler import CrawlerPort
-from core.ports.embedder import EmbedderPort
-from core.ports.extractor import ExtractorPort
-from core.ports.index_builder import IndexBuilderPort
-from core.ports.lexical_index import LexicalIndexPort
-from core.ports.llm import EvaluatorPort
-from core.ports.poller import PollPort
-from core.ports.registry import RegistryFetcherPort
-from core.ports.search import SearchAdapterPort
-from core.ports.store import StorePort
-from core.ports.vector_index import VectorIndexPort
 from core.pipeline.gate_subject import (
     GateSubject,
     SubjectResolver,
@@ -98,19 +84,33 @@ from core.pipeline.gates import (
     record_decision,
 )
 from core.pipeline.profile_attestation import ProfileGateResult
+from core.ports.chunker import ChunkerPort
+from core.ports.container import ContainerPort
+from core.ports.crawl_executor import CrawlExecutorPort
+from core.ports.crawler import CrawlerPort
+from core.ports.embedder import EmbedderPort
+from core.ports.extractor import ExtractorPort
+from core.ports.index_builder import IndexBuilderPort
+from core.ports.lexical_index import LexicalIndexPort
+from core.ports.llm import EvaluatorPort
+from core.ports.poller import PollPort
+from core.ports.registry import RegistryFetcherPort
+from core.ports.search import SearchAdapterPort
+from core.ports.store import StorePort
+from core.ports.vector_index import VectorIndexPort
 
 __all__ = [
-    "Runner",
-    "RunReport",
-    "RunContext",
-    "Ports",
-    "PhaseResult",
-    "PhaseStatus",
-    "PhaseFn",
-    "Clock",
-    "PHASES",
     "GATE_PHASES",
     "NON_BLOCKING_GATES",
+    "PHASES",
+    "Clock",
+    "PhaseFn",
+    "PhaseResult",
+    "PhaseStatus",
+    "Ports",
+    "RunContext",
+    "RunReport",
+    "Runner",
     "run_isolated",
 ]
 
@@ -155,7 +155,12 @@ GATE_PHASES: dict[str, Gate] = {
     "g4": Gate.G4,
 }
 
-assert set(GATE_PHASES) <= set(PHASES), "фазы-гейты обязаны входить в PHASES"
+# Рассогласование объявлений — ошибка сборки, а не данных: проверка исполняется всегда
+# (не ``assert``, который исчезает под ``python -O``), поэтому рассинхрон не переживёт импорт.
+if not set(GATE_PHASES) <= set(PHASES):
+    raise RuntimeError(
+        f"фазы-гейты обязаны входить в PHASES: {sorted(set(GATE_PHASES) - set(PHASES))}"
+    )
 
 
 @dataclass

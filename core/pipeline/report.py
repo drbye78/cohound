@@ -42,10 +42,10 @@ from __future__ import annotations
 
 import csv
 import json
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any
 
 import yaml
 
@@ -61,7 +61,6 @@ from core.domain.enums import (
 from core.domain.invariants import check_unknown_exhaustion
 from core.domain.models import (
     CatalogRow,
-    Cell,
     CorpusCoverage,
     CrawlProvenance,
     ProtocolExhaustion,
@@ -78,7 +77,6 @@ from core.pipeline.compute import (
 )
 from core.pipeline.crawl_frontier import resolve_crawl_limits
 from core.pipeline.digests import EXECUTION_CONTRACT_FIELDS
-from core.pipeline.evaluate import CORPUS_INCOMPLETE_REVIEW_REASON
 from core.pipeline.partial_docs import (
     partial_docs_summary,
     write_partial_docs_artifact,
@@ -100,30 +98,30 @@ if TYPE_CHECKING:  # только для аннотаций: без рантай
     from core.pipeline.plan import RunPlan
 
 __all__ = [
-    "Artifacts",
-    "PublishBlockedError",
-    "CrossCycleDiffError",
     "COVERAGE_INSUFFICIENT_THRESHOLD",
+    "DIFF_BOUNDARY_FIELDS",
+    "EXECUTION_FIELDS",
     "FALLBACK_ORDER_LABEL",
     "INSUFFICIENT_COVERAGE_NOTE",
-    "NOT_FOR_PUBLICATION",
     "METHODOLOGY_FIELDS",
-    "EXECUTION_FIELDS",
-    "DIFF_BOUNDARY_FIELDS",
-    "diff_boundary_violations",
-    "resolve_diff_change_class",
-    "crawl_control_digest",
+    "NOT_FOR_PUBLICATION",
+    "Artifacts",
+    "CrossCycleDiffError",
+    "PublishBlockedError",
     "build_manifest",
+    "collect_corpus_coverage_anomalies",
+    "collect_crawl_truncation_anomalies",
+    "collect_i3_anomalies",
     "compact_search_effort",
-    "write_run_manifest",
+    "crawl_control_digest",
+    "diff_boundary_violations",
     "render_battle_card",
+    "render_diff",
     "render_nda_questions",
     "render_preliminary_findings",
-    "render_diff",
+    "resolve_diff_change_class",
     "write_reports",
-    "collect_i3_anomalies",
-    "collect_crawl_truncation_anomalies",
-    "collect_corpus_coverage_anomalies",
+    "write_run_manifest",
 ]
 
 #: Порог «недостаточного» Coverage для приглушения battle card (§9/02 §E.2).

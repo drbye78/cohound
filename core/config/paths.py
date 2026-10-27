@@ -36,7 +36,7 @@ from typing import Any
 import yaml
 from pydantic import BaseModel, ConfigDict, ValidationError
 
-__all__ = [
+__all__ = [  # noqa: RUF022 — порядок смысловыми группами (env-константы, модель/API), алфавит их смешал бы
     # Env-константы
     "ENV_HOME",
     "ENV_PATHS_FILE",

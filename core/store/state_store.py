@@ -203,7 +203,7 @@ _PROFILE_ATTESTATION_COLUMNS = (
 #: затирается повторной подачей — отозванная аттестация не «воскресает» молча
 #: (COALESCE берёт уже проставленную метку, если она есть).
 _PROFILE_ATTESTATION_UPSERT = (
-    f"INSERT INTO profile_attestation (attestation_id, "
+    f"INSERT INTO profile_attestation (attestation_id, "  # noqa: S608 - имена из _PROFILE_ATTESTATION_COLUMNS, значения — bind
     f"{', '.join(_PROFILE_ATTESTATION_COLUMNS)}) "
     f"VALUES ({', '.join('?' for _ in range(len(_PROFILE_ATTESTATION_COLUMNS) + 1))}) "
     "ON CONFLICT(attestation_id) DO UPDATE SET "
@@ -220,7 +220,7 @@ _PROFILE_ATTESTATION_UPSERT = (
 def _now() -> str:
     """Текущее время в ISO-8601 (UTC, ``Z``) — как в остальных TEXT-колонках."""
     return (
-        _dt.datetime.now(_dt.timezone.utc)
+        _dt.datetime.now(_dt.UTC)
         .replace(microsecond=0)
         .isoformat()
         .replace("+00:00", "Z")
@@ -234,13 +234,18 @@ def _upsert_sql(
 
     ``key`` — одна колонка или составной ключ (например, ``url_state``:
     ``(product_id, normalized_url)``).
+
+    Все аргументы — **имена**, не данные, и все вызовы модуль-приватны: ``table`` и
+    ``key`` передаются литералами, ``columns`` — модульной константой
+    (``_PRODUCT_STATE_COLUMNS`` и т. п.). Внешний вход (URL, id продукта, имя файла)
+    сюда не попадает: значения идут bind-параметрами в ``execute``.
     """
     keys = (key,) if isinstance(key, str) else tuple(key)
     names = ", ".join((*keys, *columns))
     placeholders = ", ".join("?" for _ in range(len(keys) + len(columns)))
     updates = ", ".join(f"{name} = excluded.{name}" for name in columns)
     return (
-        f"INSERT INTO {table} ({names}) VALUES ({placeholders}) "
+        f"INSERT INTO {table} ({names}) VALUES ({placeholders}) "  # noqa: S608 - только имена таблицы/колонок, см. докстринг
         f"ON CONFLICT({', '.join(keys)}) DO UPDATE SET {updates}"
     )
 
@@ -630,7 +635,7 @@ class SqliteStateStore:
                 "DELETE FROM chunk_meta WHERE doc_version_id = ?", (doc_version_id,)
             )
             self._conn.executemany(
-                f"INSERT INTO chunk_meta ({', '.join(_CHUNK_COLUMNS)}) "
+                f"INSERT INTO chunk_meta ({', '.join(_CHUNK_COLUMNS)}) "  # noqa: S608 - имена из _CHUNK_COLUMNS, значения — bind
                 f"VALUES ({', '.join('?' for _ in _CHUNK_COLUMNS)})",
                 [
                     tuple(getattr(chunk, name) for name in _CHUNK_COLUMNS)

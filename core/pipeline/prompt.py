@@ -32,7 +32,7 @@ import json
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass
-from functools import lru_cache
+from functools import cache
 from pathlib import Path
 
 from core.domain.enums import AbsenceRuleType
@@ -42,9 +42,9 @@ from core.ports.vector_index import RetrievedChunk
 from core.util.hashing import prompt_hash
 
 __all__ = [
-    "TEMPLATE_VERSION",
-    "TEMPLATES_DIR",
     "ABSENCE_GUIDANCE",
+    "TEMPLATES_DIR",
+    "TEMPLATE_VERSION",
     "CompiledPrompt",
     "compile_prompt",
     "render_queries",
@@ -151,7 +151,7 @@ class CompiledPrompt:
         return save_prompt(self, out_dir)
 
 
-@lru_cache(maxsize=None)
+@cache
 def _load_template(version: str) -> str:
     """Читает шаблон ``templates/{version}.txt`` (локальный файл, кэшируется; без сети)."""
     path = TEMPLATES_DIR / f"{version}.txt"

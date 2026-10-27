@@ -20,13 +20,12 @@
 
 from __future__ import annotations
 
-from typing import Any
-
 import argparse
 import json
 import sys
 from collections import Counter
 from pathlib import Path
+from typing import Any
 
 from core.cli.context import (
     _add_common,
@@ -183,7 +182,11 @@ def run(args: argparse.Namespace) -> int:
             golden=golden, store=store, run_id=run_id, catalog=catalog
         )
 
-    assert report is not None  # evaluate_golden выполняется безусловно (см. выше)
+    # Сужение типа для mypy: ``report`` присваивается безусловно (ветка выше возвращает
+    # EXIT_USAGE, когда золотой набор не исполним), поэтому ``None`` здесь недостижим.
+    # ``raise`` вместо ``assert`` завёл бы новый путь ошибки с выдуманным кодом для
+    # состояния, которого нет; молчание исключено — это проверка инварианта, не отказ.
+    assert report is not None  # noqa: S101 — сужение типа для недостижимого None
     violations = check_thresholds(report)
     ok = report.passes() and report.has_absent_stratum
     payload = {

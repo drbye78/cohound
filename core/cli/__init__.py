@@ -54,23 +54,23 @@ from core.cli.wiring import (  # noqa: E402
 )
 
 __all__ = [
-    # точка входа и коды возврата (T5.3)
-    "main",
-    "build_parser",
-    "CliError",
-    "LintFailure",
-    "EXIT_OK",
-    "EXIT_ERROR",
-    "EXIT_USAGE",
     "EXIT_BLOCKED",
+    "EXIT_ERROR",
     "EXIT_NOT_FOUND",
-    # сборка зависимостей (composition root Z0)
-    "build_store",
-    "build_adapters",
-    "build_runner",
-    "run_db_path",
-    "WiringError",
+    "EXIT_OK",
+    "EXIT_USAGE",
     "LOCAL_PROFILE",
     "SPLIT_PROFILE",
     "SUPPORTED_PROFILES",
+    "CliError",
+    "LintFailure",
+    "WiringError",
+    "build_adapters",
+    "build_parser",
+    "build_runner",
+    # сборка зависимостей (composition root Z0)
+    "build_store",
+    # точка входа и коды возврата (T5.3)
+    "main",
+    "run_db_path",
 ]

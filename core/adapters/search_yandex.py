@@ -61,39 +61,39 @@ import random
 import time
 import xml.etree.ElementTree as ET
 from collections.abc import Callable, Mapping
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from typing import Any
 
 from core.ports.search import SearchQuery, SearchResult
-from core.ports.types import RawPage, FetchMode
+from core.ports.types import FetchMode, RawPage
 from core.util.cache import ContentAddressedCache, http_key
 from core.util.security import validate_url
 
 __all__ = [
-    "SearchAdapterUnavailable",
-    "SearchError",
-    "YandexSearchAdapter",
-    "HttpPostFn",
-    "HttpGetFn",
-    "HttpPollFn",
-    "SleepFn",
-    "DEFAULT_BASE_URL",
-    "DEFAULT_SEARCH_PATH",
+    "BASE_RETRY_DELAY",
     "DEFAULT_ASYNC_SEARCH_PATH",
+    "DEFAULT_BASE_URL",
+    "DEFAULT_MAX_WAIT",
     "DEFAULT_OPERATION_BASE_URL",
     "DEFAULT_POLL_INTERVAL",
-    "DEFAULT_MAX_WAIT",
+    "DEFAULT_SEARCH_MODE",
+    "DEFAULT_SEARCH_PATH",
     "DEFAULT_TIMEOUT",
-    "MAX_RETRY_ATTEMPTS",
-    "BASE_RETRY_DELAY",
-    "MAX_RETRY_DELAY",
-    "RETRYABLE_STATUSES",
     "ENV_API_KEY",
     "ENV_FOLDER_ID",
     "ENV_SEARCH_MODE",
+    "MAX_RETRY_ATTEMPTS",
+    "MAX_RETRY_DELAY",
+    "RETRYABLE_STATUSES",
     "SEARCH_MODES",
-    "DEFAULT_SEARCH_MODE",
+    "HttpGetFn",
+    "HttpPollFn",
+    "HttpPostFn",
+    "SearchAdapterUnavailable",
+    "SearchError",
+    "SleepFn",
+    "YandexSearchAdapter",
 ]
 
 #: База Yandex Search API (Yandex Cloud) по умолчанию. Переопределяется ``base_url``.
@@ -159,7 +159,7 @@ def _httpx_available() -> bool:
 
 def _now_iso() -> str:
     """Текущий UTC-таймстемп в ISO-8601 (поле ``fetched_at`` живого фетча)."""
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def _as_text(value: Any) -> str:
@@ -460,7 +460,12 @@ class YandexSearchAdapter:
         except (ValueError, TypeError):
             return []
         try:
-            root = ET.fromstring(xml_bytes)
+            # ``rawData`` — XML поисковика, а его содержимое собрано из чужих страниц:
+            # вход недоверенный. stdlib безопасен по замеру на 3.14 (пин проекта):
+            # амплификация сущностей (billion laughs) отвергается ``ParseError``,
+            # внешние сущности не ресолвятся (``undefined entity``). ``defusedxml``
+            # опционален (extra ``safety``), а поисковый адаптер обязан работать без него.
+            root = ET.fromstring(xml_bytes)  # noqa: S314 — обоснование в комментарии
         except ET.ParseError:
             return []
         records: list[Mapping[str, Any]] = []
@@ -633,8 +638,8 @@ class YandexSearchAdapter:
         if when is None:
             return None
         if when.tzinfo is None:
-            when = when.replace(tzinfo=timezone.utc)
-        delay = (when - datetime.now(timezone.utc)).total_seconds()
+            when = when.replace(tzinfo=UTC)
+        delay = (when - datetime.now(UTC)).total_seconds()
         return max(0.0, delay)
 
     def _retry_delay(self, attempt: int, retry_after: str | None) -> float:
@@ -648,7 +653,11 @@ class YandexSearchAdapter:
         if parsed is not None:
             return min(MAX_RETRY_DELAY, parsed)
         base = BASE_RETRY_DELAY * (2 ** (attempt - 1))
-        jittered = base * (1.0 + random.uniform(0.0, 0.5))
+        # S311: jitter повтора между клиентами одного провайдера, а не секрет. Здесь
+        # нужна именно дешёвая не-криптографическая случайность; CSPRNG был бы
+        # бесполезен (не скрывает ничего и не защищает от перебора) и дороже в горячем
+        # пути ретрая.
+        jittered = base * (1.0 + random.uniform(0.0, 0.5))  # noqa: S311 — jitter, не секрет
         return min(MAX_RETRY_DELAY, jittered)
 
     def _fetch_live(self, url: str) -> RawPage:
@@ -699,13 +708,18 @@ class YandexSearchAdapter:
 
         mtime — момент первого фетча, что сохраняет детерминизм R7 между ``run_id``.
         """
-        assert self._cache is not None
+        # S101: несуществующая ветка — инвариант конструктора (метод зовётся только
+        # там, где кэш внедрён: ``fetched_at`` берётся из mtime файла кэша, без кэша
+        # записи времени неоткуда взять). ``assert`` нужен ещё и как сужение типа для
+        # mypy-gate (``self._cache`` объявлен Optional): ``if`` там же сузил бы, но
+        # тогда «недостижимо» перестало бы быть проверяемым утверждением.
+        assert self._cache is not None  # noqa: S101 — инвариант конструктора
         try:
             path = self._cache.path_for("http", http_key(url), ".bin")
             stamp = path.stat().st_mtime
         except (OSError, ValueError):
             return _now_iso()
-        return datetime.fromtimestamp(stamp, tz=timezone.utc).isoformat()
+        return datetime.fromtimestamp(stamp, tz=UTC).isoformat()
 
     # ------------------------------------------------------------------
     # Ленивый импорт

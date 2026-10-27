@@ -26,7 +26,7 @@ import ipaddress
 import json
 import uuid
 from collections.abc import Callable, Mapping, Sequence
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
@@ -39,10 +39,10 @@ from core.edge.audit import (
     audit_call,
 )
 from core.edge.auth import (
-    AuthRequest,
-    Authenticator,
-    Principal,
     PUBLIC_OPS,
+    Authenticator,
+    AuthRequest,
+    Principal,
     authorize,
 )
 from core.edge.seam_schema import validate_crawl_request, validate_fetch_request
@@ -53,18 +53,18 @@ from core.ports.types import ExtractionRoute, FetchMode, FetchPlan, ProductRef
 from core.util.hashing import content_hash
 
 __all__ = [
-    "EDGE_SCHEMA_VERSION",
     "DEFAULT_MAX_BODY_BYTES",
-    "EdgeError",
-    "EdgeRequestError",
+    "EDGE_SCHEMA_VERSION",
     "EdgeAdapterError",
-    "EdgeSecurityError",
+    "EdgeError",
     "EdgeGateway",
-    "is_loopback_host",
-    "ensure_safe_binding",
-    "route_request",
-    "make_handler",
+    "EdgeRequestError",
+    "EdgeSecurityError",
     "build_server",
+    "ensure_safe_binding",
+    "is_loopback_host",
+    "make_handler",
+    "route_request",
     "serve",
 ]
 
@@ -147,7 +147,7 @@ class EdgeSecurityError(EdgeError):
 
 def _utc_now_iso() -> str:
     """Текущий UTC-таймстемп ISO-8601 (дефолтные часы, если адаптер не дал ``fetched_at``)."""
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def is_loopback_host(host: str | None) -> bool:
@@ -1086,9 +1086,10 @@ def route_request(
     # 5. Тело → payload.
     if method == "POST":
         payload, error = _decode_json_body(raw_body)
-        if error is not None:
-            return deny(400, error, AUDIT_STATUS_ERROR)
-        assert payload is not None  # гарантировано ветвлением выше
+        if error is not None or payload is None:
+            # ``payload is None`` в паре с ``error``: контракт декодера — либо объект,
+            # либо причина. Ветка страхует от «None без причины» видимым 400.
+            return deny(400, error or "тело запроса не разобрано", AUDIT_STATUS_ERROR)
     else:
         payload = {}
 

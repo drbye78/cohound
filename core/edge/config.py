@@ -47,10 +47,10 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_valida
 from core.edge.server import DEFAULT_MAX_BODY_BYTES
 
 __all__ = [
-    "ENV_EDGE_STATE_DIR",
     "DEFAULT_EDGE_RUNTIME_FILE",
-    "EdgeAuthConfig",
+    "ENV_EDGE_STATE_DIR",
     "EdgeAuditConfig",
+    "EdgeAuthConfig",
     "EdgeRuntimeConfig",
     "load_edge_runtime_config",
 ]
@@ -94,11 +94,11 @@ class EdgeAuthConfig(BaseModel):
     subjects: dict[str, list[str]] = Field(default_factory=dict)
     #: mTLS: заголовок с уже проверенным субъектом (от терминирующего прокси).
     subject_header: str = "X-Client-Cert-Subject"
-    #: OIDC: заголовок с bearer-токеном.
-    token_header: str = "Authorization"
+    #: OIDC: заголовок с bearer-токеном (имя заголовка, не секрет).
+    token_header: str = "Authorization"  # noqa: S105
 
     @model_validator(mode="after")
-    def _check_mode(self) -> "EdgeAuthConfig":
+    def _check_mode(self) -> EdgeAuthConfig:
         """Fail-closed на уровне конфига: режим без нужных полей не собирается."""
         if self.mode == "mtls" and not self.subjects:
             raise ValueError(
@@ -135,7 +135,7 @@ class EdgeAuditConfig(BaseModel):
     path: str | None = None
 
     @model_validator(mode="after")
-    def _check_path(self) -> "EdgeAuditConfig":
+    def _check_path(self) -> EdgeAuditConfig:
         """``sink=file`` без пути — ошибка конфигурации, а не молчаливый no-op."""
         if self.sink == "file" and not str(self.path or "").strip():
             raise ValueError("audit.sink=file требует непустой audit.path")

@@ -24,7 +24,6 @@
 from __future__ import annotations
 
 import json
-import os
 import shutil
 import sqlite3
 import tempfile
@@ -38,10 +37,10 @@ from core.util.index_layout import COMPOSITIONS_DIR
 __all__ = [
     "CompositionGcResult",
     "backup_run",
-    "restore_run",
-    "list_builds",
     "gc_index_builds",
     "gc_index_compositions",
+    "list_builds",
+    "restore_run",
 ]
 
 #: Имя файла операционной БД прогона (§A.2).
@@ -90,9 +89,7 @@ def _is_excluded(rel: PurePosixPath) -> bool:
         return True
     if name in _SECRET_NAMES or name.startswith(".env"):
         return True
-    if name.endswith(_SECRET_SUFFIXES):
-        return True
-    return False
+    return name.endswith(_SECRET_SUFFIXES)
 
 
 def _snapshot_db(source_db: Path, target_db: Path) -> None:

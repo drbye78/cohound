@@ -32,6 +32,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import tempfile
 from collections.abc import Iterator, Mapping
 from pathlib import Path
@@ -44,7 +45,7 @@ from core.ports.container import (
     ContainerUnavailable,
 )
 
-__all__ = ["CHUNK_SIZE", "BACKEND", "SevenZipContainer", "backend_module", "unavailable_reason"]
+__all__ = ["BACKEND", "CHUNK_SIZE", "SevenZipContainer", "backend_module", "unavailable_reason"]
 
 #: Имя опционального пакета-бэкенда.
 BACKEND = "py7zr"
@@ -102,10 +103,13 @@ def _encrypted(archive: Any, info: Any) -> bool:
     """Требует ли архив пароля: собственный предикат бэкенда, иначе — метод шифра."""
     probe = getattr(archive, "needs_password", None)
     if callable(probe):
-        try:
+        # Предикат бэкенда может упасть на битом заголовке. Это не потеря исхода:
+        # решение принимает эвристика ниже (имена методов шифра записи), то есть ответ
+        # остаётся определённым — молчание здесь меняет источник ответа, не вердикт.
+        # Третьего состояния у ``ContainerInfo.encrypted`` нет (порт), поэтому
+        # «предикат не ответил» не может быть выражено отдельно.
+        with contextlib.suppress(Exception):
             return bool(probe())
-        except Exception:  # noqa: BLE001 — предикат бэкенда может упасть на битом файле
-            pass
     methods = _field(info, "method_names", None) or ()
     return any("AES" in str(method).upper() for method in methods)
 

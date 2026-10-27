@@ -44,30 +44,30 @@ from core.util.document_formats import (
 )
 
 __all__ = [
-    "TLSConfig",
-    "AuthConfig",
-    "OIDCConfig",
-    "AuditConfig",
-    "EdgeConfig",
-    "SerpDeployConfig",
-    "SearchDeployConfig",
-    "CrawlConfig",
-    "CrawlBrowserConfig",
-    "LLMSlotConfig",
-    "LLMDeployConfig",
-    "DeployConfig",
-    "load_deploy_config",
-    "is_split",
-    "profile_notices",
-    "SPLIT_HARDENED_WARNING",
-    "resolve_search_provider",
-    "resolve_llm_slot",
-    "resolve_serp_rounds",
-    "parse_serp_switch",
+    "DEFAULT_LLM_MODEL_ID",
+    "DEFAULT_LLM_SLOT",
     "ENV_SERP",
     "LLM_SLOTS",
-    "DEFAULT_LLM_SLOT",
-    "DEFAULT_LLM_MODEL_ID",
+    "SPLIT_HARDENED_WARNING",
+    "AuditConfig",
+    "AuthConfig",
+    "CrawlBrowserConfig",
+    "CrawlConfig",
+    "DeployConfig",
+    "EdgeConfig",
+    "LLMDeployConfig",
+    "LLMSlotConfig",
+    "OIDCConfig",
+    "SearchDeployConfig",
+    "SerpDeployConfig",
+    "TLSConfig",
+    "is_split",
+    "load_deploy_config",
+    "parse_serp_switch",
+    "profile_notices",
+    "resolve_llm_slot",
+    "resolve_search_provider",
+    "resolve_serp_rounds",
 ]
 
 # Канонические допустимые значения (ЗЕРКАЛО 07 §7 / 03 D.5). Не выносим в доменные
@@ -577,12 +577,13 @@ class DeployConfig(BaseModel):
     @model_validator(mode="after")
     def _require_edge_base_url_for_split(self) -> DeployConfig:
         """Для ``split``/``split-hardened`` шов обязан иметь ``edge.base_url``."""
-        if self.profile in SPLIT_PROFILES:
-            if self.edge.base_url is None or not self.edge.base_url.strip():
-                raise ValueError(
-                    f"profile «{self.profile}» требует непустой edge.base_url "
-                    "(адрес DMZ-шва, 07 §7)"
-                )
+        if self.profile in SPLIT_PROFILES and (
+            self.edge.base_url is None or not self.edge.base_url.strip()
+        ):
+            raise ValueError(
+                f"profile «{self.profile}» требует непустой edge.base_url "
+                "(адрес DMZ-шва, 07 §7)"
+            )
         return self
 
 

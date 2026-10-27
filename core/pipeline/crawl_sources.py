@@ -31,7 +31,7 @@ import json
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from types import MappingProxyType
-from typing import Any, TypeVar
+from typing import Any
 
 from core.config.crawl_sources import CrawlSource, CrawlSourcesConfig
 from core.config.domain_profiles import DomainProfile
@@ -42,8 +42,6 @@ from core.ports.types import FetchPlan
 from core.util.hashing import short_hash
 
 __all__ = ["CrawlTarget", "crawl_sources_digest", "resolve_crawl_target"]
-
-_T = TypeVar("_T")
 
 
 @dataclass(frozen=True)
@@ -60,9 +58,9 @@ class CrawlTarget:
     params: Mapping[str, Any]
 
 
-def _last(*values: _T | None) -> _T | None:
+def _last[T](*values: T | None) -> T | None:
     """Последнее не-``None`` значение; слои передаются от низкого приоритета к высокому."""
-    result: _T | None = None
+    result: T | None = None
     for value in values:
         if value is not None:
             result = value

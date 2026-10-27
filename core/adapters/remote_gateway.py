@@ -35,19 +35,19 @@ from core.util.hashing import content_hash
 
 __all__ = [
     "GatewayError",
-    "GatewayTransportError",
-    "GatewaySchemaError",
-    "GatewayStatusError",
     "GatewayPayloadError",
+    "GatewaySchemaError",
     "GatewaySizeError",
-    "RemoteProxyError",
-    "RemoteContentError",
+    "GatewayStatusError",
+    "GatewayTransportError",
     "HttpContentGateway",
+    "RemoteContentError",
+    "RemoteProxyError",
     "TransportFn",
-    "raw_page_from_response",
-    "extracted_doc_from_response",
-    "verify_content_hash",
     "as_items",
+    "extracted_doc_from_response",
+    "raw_page_from_response",
+    "verify_content_hash",
 ]
 
 #: Версия конверта по умолчанию (07 §3/§7 — фиксируется в манифесте R7).
@@ -222,7 +222,10 @@ class HttpContentGateway:
                     raise
                 if self._retry_backoff_s:
                     time.sleep(self._retry_backoff_s)
-        assert last_exc is not None  # pragma: no cover - недостижимо
+        # S101: после цикла возможен только выход через ``return`` либо ``raise`` выше,
+        # поэтому ``last_exc`` здесь всегда заполнен; этот ``assert`` — статическое
+        # утверждение о недостижимости (нужно и для сужения типа под mypy).
+        assert last_exc is not None  # noqa: S101 — недостижимо, см. выше
         raise last_exc
 
     def _send(self, op: str, envelope: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -401,7 +404,7 @@ def raw_page_from_response(
     if content is None:
         error = response.get("error")
         raise RemoteContentError(
-            f"ответ edge не содержит сырых байтов (raw.bytes_b64/raw.content/text.content)"
+            "ответ edge не содержит сырых байтов (raw.bytes_b64/raw.content/text.content)"
             + (f"; error={error}" if error else "")
         )
     if claimed_hash is not None:

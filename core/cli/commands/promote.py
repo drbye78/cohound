@@ -24,7 +24,7 @@ from core.cli.context import (
 from core.cli.errors import EXIT_ERROR, EXIT_OK
 from core.cli.wiring import build_store
 from core.domain.enums import Status
-from core.pipeline import promote_batch, review_queue
+from core.pipeline import PromotionResult, promote_batch, review_queue
 from core.pipeline.review import ReviewError
 
 
@@ -86,7 +86,10 @@ def run(args: argparse.Namespace) -> int:
             _emit_error(args, exc.code or "I14", _concise(exc))
             return EXIT_ERROR
 
-    assert result is not None  # promote_batch выполняется безусловно (см. выше)
+    # Сужение типа для mypy: ``promote_batch`` вызывается безусловно, ветка ``ReviewError``
+    # выше возвращает код, поэтому ``None`` недостижим; ``raise`` завёл бы путь ошибки для
+    # несуществующего состояния.
+    assert result is not None  # noqa: S101 — сужение типа для недостижимого None
     payload: dict[str, Any] = {
         "ok": bool(result.promoted),
         "run_id": run_id,

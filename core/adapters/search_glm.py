@@ -49,25 +49,25 @@ import importlib.util
 import json
 import os
 from collections.abc import Callable, Mapping
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from core.ports.search import SearchQuery, SearchResult
-from core.ports.types import RawPage, FetchMode
+from core.ports.types import FetchMode, RawPage
 from core.util.cache import ContentAddressedCache, http_key
 from core.util.security import validate_url
 
 __all__ = [
-    "GlmSearchAdapter",
-    "SearchAdapterUnavailable",
-    "SearchError",
-    "HttpPostFn",
-    "HttpGetFn",
     "DEFAULT_BASE_URL",
-    "DEFAULT_SEARCH_PATH",
     "DEFAULT_SEARCH_ENGINE",
+    "DEFAULT_SEARCH_PATH",
     "DEFAULT_TIMEOUT",
     "ENV_API_KEY",
+    "GlmSearchAdapter",
+    "HttpGetFn",
+    "HttpPostFn",
+    "SearchAdapterUnavailable",
+    "SearchError",
 ]
 
 #: База Z.ai Web Search API по умолчанию. Переопределяется ``base_url``.
@@ -106,7 +106,7 @@ def _httpx_available() -> bool:
 
 def _now_iso() -> str:
     """Текущий UTC-таймстемп в ISO-8601 (поле ``fetched_at`` живого фетча)."""
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def _as_text(value: Any) -> str:
@@ -385,13 +385,18 @@ class GlmSearchAdapter:
 
         mtime — момент первого фетча, что сохраняет детерминизм R7 между ``run_id``.
         """
-        assert self._cache is not None
+        # S101: несуществующая ветка — инвариант конструктора (метод зовётся только
+        # там, где кэш внедрён: ``fetched_at`` берётся из mtime файла кэша, без кэша
+        # записи времени неоткуда взять). ``assert`` нужен ещё и как сужение типа для
+        # mypy-gate (``self._cache`` объявлен Optional): ``if`` там же сузил бы, но
+        # тогда «недостижимо» перестало бы быть проверяемым утверждением.
+        assert self._cache is not None  # noqa: S101 — инвариант конструктора
         try:
             path = self._cache.path_for("http", http_key(url), ".bin")
             stamp = path.stat().st_mtime
         except (OSError, ValueError):
             return _now_iso()
-        return datetime.fromtimestamp(stamp, tz=timezone.utc).isoformat()
+        return datetime.fromtimestamp(stamp, tz=UTC).isoformat()
 
     # ------------------------------------------------------------------
     # Ленивый импорт

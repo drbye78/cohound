@@ -41,9 +41,9 @@ from core.util.hashing import short_hash
 
 __all__ = [
     "PassportLoadError",
+    "latest_passport_path",
     "load_passport",
     "load_passports",
-    "latest_passport_path",
     "passport_content_digest",
     "passport_content_digests",
     "passport_urls",
@@ -193,10 +193,7 @@ def passport_urls(passport: Passport) -> list[str]:
         raw = str(domain).strip()
         if not raw:
             continue
-        if _SCHEME_PREFIX.match(raw):
-            url = raw
-        else:
-            url = f"https://{raw.strip('/')}/"
+        url = raw if _SCHEME_PREFIX.match(raw) else f"https://{raw.strip('/')}/"
         if url not in urls:
             urls.append(url)
     return urls

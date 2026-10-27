@@ -12,19 +12,6 @@
 
 from __future__ import annotations
 
-from core.config.run_config import (
-    cross_check_products,
-    load_baselines,
-    load_catalog,
-    load_cohort,
-    load_golden,
-    load_package_manifest,
-    load_run_config,
-)
-from core.config.domain_profiles import (
-    DomainProfile,
-    load_domain_profiles,
-)
 from core.config.crawl_sources import (
     CRAWL_SOURCES_FILENAME,
     CrawlSource,
@@ -36,17 +23,9 @@ from core.config.deploy import (
     is_split,
     load_deploy_config,
 )
-from core.config.seeds import (
-    CORPUS_URLS_RELPATH,
-    SEEDS_RELPATH,
-    SEEDS_SCHEMA,
-    ensure_seeds_file,
-    load_seeds,
-    merge_seeds,
-    normalize_seed_url,
-    resolve_profile_key,
-    save_seeds,
-    seed_id,
+from core.config.domain_profiles import (
+    DomainProfile,
+    load_domain_profiles,
 )
 from core.config.passports import (
     PassportLoadError,
@@ -73,8 +52,29 @@ from core.config.paths import (
     resolve_paths,
     with_home,
 )
+from core.config.run_config import (
+    cross_check_products,
+    load_baselines,
+    load_catalog,
+    load_cohort,
+    load_golden,
+    load_package_manifest,
+    load_run_config,
+)
+from core.config.seeds import (
+    CORPUS_URLS_RELPATH,
+    SEEDS_RELPATH,
+    SEEDS_SCHEMA,
+    ensure_seeds_file,
+    load_seeds,
+    merge_seeds,
+    normalize_seed_url,
+    resolve_profile_key,
+    save_seeds,
+    seed_id,
+)
 
-__all__ = [
+__all__ = [  # noqa: RUF022 — порядок смысловыми группами (по артефакту, с аннотацией), алфавит рассыпал бы их
     # run.yaml (§4.5)
     "load_run_config",
     # package.yaml (§4.2)

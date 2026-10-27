@@ -33,12 +33,12 @@ from core.util.document_formats import (
 )
 
 __all__ = [
-    "ArtifactProbe",
     "CLASS_BINARY",
     "CLASS_CONTAINER",
     "CLASS_DOCUMENT",
     "CLASS_PAGE",
     "PDF_MAGIC",
+    "ArtifactProbe",
     "classify_artifact",
     "pdf_page_count",
     "read_head",

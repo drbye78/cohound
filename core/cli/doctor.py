@@ -24,6 +24,7 @@ runtime/инсталляция, зависимости по extras-группа�
 
 from __future__ import annotations
 
+import contextlib
 import importlib.metadata
 import importlib.util
 import json
@@ -41,7 +42,11 @@ from typing import Any
 from core.adapters.search_glm import ENV_API_KEY as ENV_GLM_API_KEY
 from core.adapters.search_yandex import (
     ENV_API_KEY as ENV_YANDEX_API_KEY,
+)
+from core.adapters.search_yandex import (
     ENV_FOLDER_ID as ENV_YANDEX_FOLDER_ID,
+)
+from core.adapters.search_yandex import (
     ENV_SEARCH_MODE as ENV_YANDEX_MODE,
 )
 from core.cli.errors import EXIT_ERROR, EXIT_OK
@@ -71,11 +76,11 @@ from core.config.paths import (
 from core.ports.search import SearchAdapterPort
 
 __all__ = [
-    "CheckResult",
     "CheckGroup",
+    "CheckResult",
     "DoctorReport",
-    "run_doctor",
     "cmd_doctor",
+    "run_doctor",
 ]
 
 #: Коды состояния проверки.
@@ -270,16 +275,23 @@ def _version(module: str) -> str | None:
 
 
 def _required_python(root: Path) -> str:
-    """Читает ``requires-python`` из ``pyproject.toml``; иначе :data:`DEFAULT_REQUIRES_PYTHON`."""
-    try:
-        import tomllib
+    """Читает ``requires-python`` из ``pyproject.toml``; иначе :data:`DEFAULT_REQUIRES_PYTHON`.
 
-        data = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
-        value = data.get("project", {}).get("requires-python")
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-    except Exception:  # noqa: BLE001 — нет файла/парсера — дефолт
-        pass
+    Подавление ограничено **чтением/парсингом** файла (нет файла, нет прав, битый TOML):
+    это не отказ проверки, а её вход — doctor обязан собрать отчёт даже без pyproject.
+    Дефолт не выдуман: :data:`DEFAULT_REQUIRES_PYTHON` совпадает с пин-базлайном (§1), и
+    он печатается в ``detail`` проверки рядом с фактической версией. Любая иная ошибка
+    (шире ``OSError``/``ValueError``) не подавляется — она становится ``FAIL`` проверки.
+    """
+    import tomllib
+
+    document: dict[str, Any] = {}
+    with contextlib.suppress(OSError, ValueError):
+        document = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+    project = document.get("project")
+    value = project.get("requires-python") if isinstance(project, dict) else None
+    if isinstance(value, str) and value.strip():
+        return value.strip()
     return DEFAULT_REQUIRES_PYTHON
 
 
@@ -477,7 +489,10 @@ def _config_group(root: Path, package: str | Path | None = None) -> CheckGroup:
         Без ``--package`` проверка информационна; с ``--package`` загружает каждую
         спецификацию строгим ``load_registry_config`` (схема + отсутствие секретов в файле).
         """
-        from core.adapters.registry_generic import load_registry_config, package_registry_dir
+        from core.adapters.registry_generic import (
+            load_registry_config,
+            package_registry_dir,
+        )
 
         base = package_registry_dir(package) if package is not None else None
         if base is None:
@@ -615,17 +630,19 @@ def _layout_group() -> CheckGroup:
     except ValueError:
         file_doc = {}
 
-    def _check(field: str) -> tuple[str, str, str | None]:
+    # Имя оси называется ``name``, а не ``field``: ``field`` — импорт из ``dataclasses``
+    # (строка 37), и затенение делало бы чтение модуля двусмысленным (F402).
+    def _check(name: str) -> tuple[str, str, str | None]:
         config = resolve_paths()
-        value = getattr(config, field)
-        source = _layout_source(field, file_doc)
+        value = getattr(config, name)
+        source = _layout_source(name, file_doc)
         hint = None
-        if field in ("runs", "packages", "passports"):
+        if name in ("runs", "packages", "passports"):
             hint = "CLI-флаг (--runs-dir/--passports-dir/--dir) переопределяет resolved-значение"
         return OK, f"{value} (источник: {source})", hint
 
-    for field in HARNESS_FIELDS:
-        builder.add(f"layout.{field}", lambda _f=field: _check(_f))
+    for name in HARNESS_FIELDS:
+        builder.add(f"layout.{name}", lambda _f=name: _check(_f))
     return builder.group
 
 
@@ -698,7 +715,10 @@ def _foundation_group(root: Path, *, with_selfcheck: bool) -> CheckGroup:
     if with_selfcheck:
 
         def _run() -> tuple[str, str]:
-            completed = subprocess.run(
+            # S603 подавлен точечно: argv фиксирован и не собирается из пользовательского
+            # ввода — интерпретатор текущего процесса плюс путь к ``tests/selfcheck.py``
+            # внутри резолвнутого root. ``shell=False`` (дефолт), метасимволы не толкуются.
+            completed = subprocess.run(  # noqa: S603
                 [sys.executable, str(script)],
                 cwd=str(root),
                 capture_output=True,

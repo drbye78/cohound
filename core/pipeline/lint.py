@@ -38,7 +38,9 @@ from core.domain.enums import AbsenceRuleType, Archetype, GoldenTier, ParamType,
 from core.pipeline.golden_status import STATE_ABSENT, STATE_DECLINED
 from core.pipeline.normalize import RunInputs
 
-__all__ = [
+#: Порядок сгруппирован по назначению (типы → правила → предикаты), а не по алфавиту:
+#: комментарий-разделитель — часть документации публичной поверхности модуля.
+__all__ = [  # noqa: RUF022
     "LintReport",
     "LintRule",
     "Severity",

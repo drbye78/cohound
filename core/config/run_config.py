@@ -52,13 +52,13 @@ from core.domain.models import (
 )
 
 __all__ = [
-    "load_run_config",
-    "load_package_manifest",
-    "load_catalog",
+    "cross_check_products",
     "load_baselines",
+    "load_catalog",
     "load_cohort",
     "load_golden",
-    "cross_check_products",
+    "load_package_manifest",
+    "load_run_config",
 ]
 
 # Разделители списочных значений внутри CSV-ячейки (учитывая, что запятая — разделитель
@@ -132,8 +132,7 @@ def _iter_csv(
             missing = [c for c in required if c not in fieldnames]
             if missing:
                 raise ValueError(f"{where}: отсутствуют обязательные колонки {missing} в {p}")
-            for lineno, row in enumerate(reader, start=2):
-                yield lineno, row
+            yield from enumerate(reader, start=2)
     except csv.Error as exc:
         raise ValueError(f"некорректный CSV {p}: {exc}") from exc
 

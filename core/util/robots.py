@@ -139,8 +139,7 @@ def _parse(text: str) -> list[_Group]:
     встреченный после правил. Ведущий UTF-8 BOM отбрасывается: иначе первый ключ не
     распознаётся и вся первая группа молча теряется.
     """
-    if text.startswith("\ufeff"):
-        text = text[1:]
+    text = text.removeprefix("\ufeff")
     groups: list[_Group] = []
     group = _Group()
     in_rules = False
@@ -270,11 +269,13 @@ class RobotsGate:
         for group in groups:
             specificity = -1
             for agent in group.agents:
-                token = agent.strip().lower()
-                if token == "*":
+                # ``product-token`` агента (RFC 9309 §2.2.1): с ним сравнивается наше
+                # собственное имя как с префиксом, поэтому и имя — ``agent_prefix``.
+                agent_prefix = agent.strip().lower()
+                if agent_prefix == "*":
                     specificity = max(specificity, 0)
-                elif token and our_agent.startswith(token):
-                    specificity = max(specificity, len(token))
+                elif agent_prefix and our_agent.startswith(agent_prefix):
+                    specificity = max(specificity, len(agent_prefix))
             if specificity < 0:
                 continue
             if specificity > best:

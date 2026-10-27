@@ -38,10 +38,12 @@ import json
 from collections.abc import Callable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
+from core.config.crawl_sources import CrawlSourcesConfig
+from core.config.deploy import CrawlConfig
+from core.config.domain_profiles import DomainProfile
 from core.domain.anchors import SourceResolver
 from core.domain.enums import (
     CrawlItemStatus,
-    CrawlSessionStatus,
     DocumentLevel,
     PdfPipeline,
     SkipReason,
@@ -53,29 +55,32 @@ from core.domain.models import (
     CrawlSessionProvenance,
     Satellite,
 )
-from core.config.crawl_sources import CrawlSourcesConfig
-from core.config.deploy import CrawlConfig
-from core.config.domain_profiles import DomainProfile
-from core.pipeline.compute import bundle_for_run, compute, scope_universe
+from core.pipeline.compute import bundle_for_run
 from core.pipeline.corpus import ExtractionPool, build_corpus
-from core.pipeline.embed_cache import EmbedCache
-from core.pipeline.extract_cache import ExtractionCache
-from core.pipeline.eval_cache import EvalVerdictCache
 from core.pipeline.crawl_frontier import resolve_crawl_limits
 from core.pipeline.crawl_session import default_session_id
 from core.pipeline.crawl_sources import crawl_sources_digest
 from core.pipeline.discovery import discover
+from core.pipeline.embed_cache import EmbedCache
+from core.pipeline.eval_cache import EvalVerdictCache
 from core.pipeline.evaluate import (
     DEFAULT_RETRIEVAL_CUTOFF_K,
     DEFAULT_RETRIEVAL_PROFILE,
     evaluate_phase,
 )
 from core.pipeline.exhaustion import ExhaustionFacts, contours_run
+from core.pipeline.extract_cache import ExtractionCache
 from core.pipeline.gates import gate_trail
 from core.pipeline.inheritance import inheritance_wave
+from core.pipeline.manual_artifacts import (
+    load_manual_artifacts,
+    manual_artifacts_summary,
+)
 from core.pipeline.normalize import load_scope_attestations
 from core.pipeline.partial_docs import (
     human_line as partial_docs_human_line,
+)
+from core.pipeline.partial_docs import (
     partial_docs_summary,
 )
 from core.pipeline.precedence import collect_protected_cells
@@ -85,10 +90,6 @@ from core.pipeline.registry import (
     resolve_registry_ids,
 )
 from core.pipeline.report import build_manifest, compact_search_effort, write_reports
-from core.pipeline.manual_artifacts import (
-    load_manual_artifacts,
-    manual_artifacts_summary,
-)
 from core.pipeline.retrieve import RetrievalProfile
 from core.pipeline.review import review_queue
 from core.pipeline.runner import PhaseFn, PhaseResult, Ports, RunContext
@@ -101,10 +102,10 @@ if TYPE_CHECKING:  # только аннотации: без рантайм-им
     from core.pipeline.plan import RunPlan
 
 __all__ = [
-    "build_phases",
     "MEASURED_RETRIEVAL_SETTING",
-    "measured_retrieval_fixation",
+    "build_phases",
     "measured_conflict_message",
+    "measured_retrieval_fixation",
     "resolve_measured_retrieval",
 ]
 
@@ -453,7 +454,9 @@ def _observed_index_versions(store: Any, index_build_id: str | None) -> dict[str
     }
 
 
-def _crawl_provenance(store: Any, inputs: Any, run_id: str) -> CrawlProvenance:
+def _crawl_provenance(
+    store: Any, inputs: Any, run_id: str, notes: list[str]
+) -> CrawlProvenance:
     """Собирает :class:`CrawlProvenance` из сеанса краула прогона (§4.4, Phase 2).
 
     Читает ``crawl_sessions`` (``get_crawl_session``), элементы сеанса
@@ -462,12 +465,20 @@ def _crawl_provenance(store: Any, inputs: Any, run_id: str) -> CrawlProvenance:
     :func:`~core.pipeline.crawl_session.finalize_session`, объединяются с per-item
     ``engine``/``kind``. Дайджест — отпечаток ``inputs.crawl_sources`` (Phase 2). Любая
     ошибка чтения изолируется: провенанс **информационен** и не роняет фазу отчёта.
+
+    Изоляция не означает молчания: причина отказа дописывается в ``notes`` (канал
+    ``pending`` фазы), потому что пустой провенанс без причины читался бы как «краула не
+    было» — утверждение о прогоне, которого мы не проверяли.
     """
     sources = getattr(inputs, "crawl_sources", None)
     try:
         digest = crawl_sources_digest(sources) if sources is not None else None
-    except Exception:  # noqa: BLE001 — провенанс информационен
+    except Exception as exc:  # noqa: BLE001 — провенанс информационен
         digest = None
+        notes.append(
+            "crawl_provenance: дайджест crawl_sources не вычислен "
+            f"({type(exc).__name__}: {exc})"
+        )
 
     sessions: list[CrawlSessionProvenance] = []
     engines: set[str] = set()
@@ -514,8 +525,11 @@ def _crawl_provenance(store: Any, inputs: Any, run_id: str) -> CrawlProvenance:
             )
             engines |= set(session_engines)
             kinds |= set(session_kinds)
-    except Exception:  # noqa: BLE001 — провенанс информационен, фазу не роняем
-        pass
+    except Exception as exc:  # noqa: BLE001 — провенанс информационен, фазу не роняем
+        notes.append(
+            "crawl_provenance: провенанс сеанса не прочитан "
+            f"({type(exc).__name__}: {exc}): сеансы/движки в манифесте неполны"
+        )
 
     return CrawlProvenance(
         sessions=sessions,
@@ -1242,6 +1256,9 @@ def build_phases(
         observed_profile, observed_cutoff, observed_params_json = _observed_retrieval(
             holder, ctx.store, plan.run_id
         )
+        # Изолированные отказы провенанса краула собираются здесь и уходят в ``pending``:
+        # строка видима человеку, но фазу отчёта не роняет.
+        provenance_notes: list[str] = []
         manifest = build_manifest(
             inputs=inputs,
             plan=plan,
@@ -1261,7 +1278,9 @@ def build_phases(
             retrieval_profile=observed_profile,
             retrieval_cutoff_K=observed_cutoff,
             retrieval_params_json=observed_params_json,
-            crawl_provenance=_crawl_provenance(ctx.store, inputs, plan.run_id),
+            crawl_provenance=_crawl_provenance(
+                ctx.store, inputs, plan.run_id, provenance_notes
+            ),
             # N6: разрешённая конфигурация контроля краула (app<run<site) — дайджест в
             # манифест, чтобы смена осей на app/per-site слое тоже давала execution_change.
             domain_profiles=domain_profiles,
@@ -1380,7 +1399,8 @@ def build_phases(
         # advisory-каналом (``pending``), а не тишиной: это работа человека, не дефект.
         # Исполняется она не новым прогоном, а выборочной пере-оценкой: ``hound revalidate``
         # сужает Ш6 до этих ячеек (селектор ``evaluate.select_stale_cells``).
-        pending: list[str] = []
+        # отчёт: изолированные отказы провенанса краула — сначала, они объясняют пустоту.
+        pending: list[str] = list(provenance_notes)
         stale_count = len(bundle.stale_cells)
         # I2/I2c: частичное извлечение — advisory-строкой, потому что оно меняет
         # достижимость ❌ на всём корпусе продукта, а не только отчётную таблицу.

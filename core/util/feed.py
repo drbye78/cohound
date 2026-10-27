@@ -28,7 +28,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from typing import Any
 from urllib.parse import urljoin
@@ -42,8 +42,8 @@ __all__ = [
     "FeedEntry",
     "FeedParseError",
     "entry_not_before",
-    "parse_feed",
     "parse_channel_document",
+    "parse_feed",
     "parse_instant",
 ]
 
@@ -117,7 +117,7 @@ def parse_instant(value: str) -> datetime | None:
     if instant is None:
         return None
     if instant.tzinfo is None:
-        instant = instant.replace(tzinfo=timezone.utc)
+        instant = instant.replace(tzinfo=UTC)
     return instant
 
 

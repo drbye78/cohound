@@ -152,6 +152,20 @@ _STRUCTURED_LEVELS: frozenset[DocumentLevel] = frozenset(
 )
 
 
+def _dist_version(dist: str) -> str | None:
+    """Версия дистрибутива ``dist`` либо ``None``, если метаданные не отвечают.
+
+    ``None`` — значение, а не тишина: вызывающий переходит к следующему имени
+    дистрибутива и в итоге честно сообщает ``"unknown"`` (версия не выдумывается, A3).
+    """
+    try:
+        return importlib.metadata.version(dist)
+    except importlib.metadata.PackageNotFoundError:
+        return None
+    except Exception:  # noqa: BLE001 — битые метаданные не роняют резолв версии
+        return None
+
+
 def docling_library_version() -> str:
     """Версия установленной библиотеки ``docling`` — **единственный** источник (Д-8).
 
@@ -163,12 +177,9 @@ def docling_library_version() -> str:
     правдоподобным дефолтом.
     """
     for dist in _DOCLING_DISTRIBUTIONS:
-        try:
-            return importlib.metadata.version(dist)
-        except importlib.metadata.PackageNotFoundError:
-            continue
-        except Exception:  # noqa: BLE001 — метаданные не роняют резолв версии
-            continue
+        version = _dist_version(dist)
+        if version is not None:
+            return version
     return "unknown"
 
 

@@ -29,7 +29,7 @@ from core.ports.crawler import CrawlerPort
 from core.ports.types import FetchMode, FetchPlan
 from core.util.robots import RobotsGate
 
-__all__ = ["crawler_factory", "build_robots_gate"]
+__all__ = ["build_robots_gate", "crawler_factory"]
 
 
 def build_robots_gate(user_agent: str | None) -> RobotsGate:

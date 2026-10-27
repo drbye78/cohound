@@ -34,9 +34,9 @@ from core.util.hashing import short_hash
 
 __all__ = [
     "RunPlan",
-    "plan",
-    "load_plan",
     "derive_run_id",
+    "load_plan",
+    "plan",
 ]
 
 #: Точность округления весов при перенормировке (знаки после запятой).

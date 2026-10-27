@@ -35,15 +35,12 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import replace
-from typing import TypeVar
 from urllib.parse import urlsplit
 
 from core.config.domain_profiles import DomainProfile
 from core.ports.types import CrawlStrategy, FetchMode, FetchPlan, RateLimitSpec
 
 __all__ = ["resolve_fetch_plan", "select_domain_profile", "select_site_source"]
-
-_T = TypeVar("_T")
 
 
 def _split_key(raw_key: str) -> tuple[str, str]:
@@ -76,7 +73,7 @@ def _profile_rank(host_key: str, path_key: str) -> tuple[int, int]:
     return (len(path_key), len(host_key))
 
 
-def _select_best(url: str, mapping: Mapping[str, _T]) -> _T | None:
+def _select_best[T](url: str, mapping: Mapping[str, T]) -> T | None:
     """Возвращает значение лучшего по ключу ``host[+path]`` из ``mapping`` или ``None``.
 
     Семантика матчинга/приоритета — общая для профилей доменов и site-слоя источников краула:
@@ -88,7 +85,7 @@ def _select_best(url: str, mapping: Mapping[str, _T]) -> _T | None:
     url_host = (parsed.hostname or "").strip().lower()
     url_path = parsed.path or "/"
 
-    best: _T | None = None
+    best: T | None = None
     best_rank: tuple[int, int] | None = None
     best_key: str | None = None
 
@@ -119,7 +116,7 @@ def select_domain_profile(
     return _select_best(url, profiles)
 
 
-def select_site_source(url: str, mapping: Mapping[str, _T]) -> _T | None:
+def select_site_source[T](url: str, mapping: Mapping[str, T]) -> T | None:
     """Выбирает лучший site-источник ``host[+path]`` для ``url`` (или ``None``).
 
     Использует ту же семантику матчинга, что и :func:`select_domain_profile`; тип значения

@@ -28,25 +28,25 @@ from __future__ import annotations
 import json
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
 __all__ = [
+    "AUDIT_STATUSES",
     "AUDIT_STATUS_ALLOW",
     "AUDIT_STATUS_DENY",
     "AUDIT_STATUS_ERROR",
-    "AUDIT_STATUSES",
     "CLASSIFICATION_DEFAULT",
     "CLASSIFICATION_INTERNAL",
     "CLASSIFICATION_UNTRUSTED_PUBLIC",
     "AuditEvent",
     "AuditSink",
+    "Classification",
     "FileAuditSink",
     "MemoryAuditSink",
-    "Classification",
-    "classify",
     "audit_call",
+    "classify",
 ]
 
 # ---------------------------------------------------------------------------
@@ -75,7 +75,7 @@ CLASSIFICATION_DEFAULT = CLASSIFICATION_INTERNAL
 
 def _utc_now_iso() -> str:
     """Текущее время UTC в ISO-8601 (дефолтные часы аудита)."""
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 # ---------------------------------------------------------------------------

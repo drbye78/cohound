@@ -47,15 +47,14 @@ import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from core.domain.enums import (
     AbsenceRuleType,
     Archetype,
-    InheritanceMode,
     Importance,
+    InheritanceMode,
     ParamType,
 )
 from core.pipeline.package_admin import _slug_from_title, _unique_param_id
@@ -71,35 +70,47 @@ from core.pipeline.package_io import atomic_write_text
 from core.pipeline.prompt import _fill_template, _load_template
 from core.pipeline.scout_common import (
     as_date as _as_date,
+)
+from core.pipeline.scout_common import (
     clean as _clean,
+)
+from core.pipeline.scout_common import (
     dedupe as _dedupe,
+)
+from core.pipeline.scout_common import (
     fetch_one as _fetch_one,
+)
+from core.pipeline.scout_common import (
     join_pages as _join_pages,
+)
+from core.pipeline.scout_common import (
     url_allowed as _url_allowed,
+)
+from core.pipeline.scout_common import (
     usage_dict as _usage_dict,
 )
 from core.ports.crawler import CrawlerPort
-from core.ports.discovery_llm import DiscoveryLLMRequest, DiscoveryLLMPort
+from core.ports.discovery_llm import DiscoveryLLMPort, DiscoveryLLMRequest
 from core.ports.extractor import ExtractorPort
 from core.ports.search import SearchAdapterPort, SearchQuery
 from core.util.hashing import content_hash
 from core.util.security import sanitize_slug
 
 __all__ = [
-    "LANDSCAPE_TEMPLATE_VERSION",
-    "CATALOG_TEMPLATE_VERSION",
     "BASELINE_TEMPLATE_VERSION",
-    "ScoutUpstream",
-    "ScoutProduct",
-    "ScoutModule",
-    "ScoutRole",
-    "ScoutArchetypeSignal",
-    "ScoutLandscapeHypothesis",
-    "ScoutParam",
-    "ScoutCatalogHypothesis",
+    "CATALOG_TEMPLATE_VERSION",
+    "LANDSCAPE_TEMPLATE_VERSION",
     "PackageScoutReport",
-    "scout_package",
+    "ScoutArchetypeSignal",
+    "ScoutCatalogHypothesis",
+    "ScoutLandscapeHypothesis",
+    "ScoutModule",
+    "ScoutParam",
+    "ScoutProduct",
+    "ScoutRole",
+    "ScoutUpstream",
     "build_seed_from_hypotheses",
+    "scout_package",
     "write_scout_artifacts",
 ]
 
@@ -622,17 +633,16 @@ def build_seed_from_hypotheses(
 
     # --- upstream / alternatives / derivatives / cross-line ------------------
     upstream_name: str | None = None
-    if land.upstream is not None:
-        if _accept_entity(
-            land.upstream.name,
-            land.upstream.url,
-            land.upstream.quote,
-            allowed=allowed_urls,
-            corpus=corpus_text,
-            needs_human=needs_human,
-            label="upstream",
-        ):
-            upstream_name = _clean(land.upstream.name)
+    if land.upstream is not None and _accept_entity(
+        land.upstream.name,
+        land.upstream.url,
+        land.upstream.quote,
+        allowed=allowed_urls,
+        corpus=corpus_text,
+        needs_human=needs_human,
+        label="upstream",
+    ):
+        upstream_name = _clean(land.upstream.name)
     if upstream_name:
         profile["upstream_name"] = upstream_name
 

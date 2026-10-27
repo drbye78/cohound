@@ -31,8 +31,9 @@ import argparse
 import datetime as _dt
 import sys
 import time
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from core.cli.context import (
     _add_common,
@@ -44,15 +45,15 @@ from core.cli.context import (
     _follow_session,
     _load_corpus_urls,
     _load_render_modes,
-    _phases_until,
     _persist_llm_scenarios,
+    _phases_until,
     _print_json,
     _product_callback,
     _progress_callback,
     _resolve_db_path,
+    _resolve_phases,
     _resolve_plan,
     _resolve_ports,
-    _resolve_phases,
     _session_snapshot,
 )
 from core.cli.errors import (
@@ -101,13 +102,13 @@ from core.pipeline.run_identity import (
 from core.pipeline.runner import RunContext
 
 __all__ = [
+    "cancel",
     "configure",
+    "list_sessions",
+    "restart",
+    "resume",
     "run",
     "status",
-    "list_sessions",
-    "resume",
-    "restart",
-    "cancel",
 ]
 
 #: Phase 4: хук сна цикла ``--follow`` (тесты инжектят no-op через monkeypatch).
@@ -121,7 +122,7 @@ _SLEEP: Callable[[float], None] = time.sleep
 
 def _now_iso() -> str:
     """Текущее время в ISO-8601 (UTC) — метка финала сеанса (``cancel``)."""
-    return _dt.datetime.now(_dt.timezone.utc).isoformat()
+    return _dt.datetime.now(_dt.UTC).isoformat()
 
 
 def _effective_runs_dir(args: argparse.Namespace) -> str:

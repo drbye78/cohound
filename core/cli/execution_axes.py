@@ -102,29 +102,34 @@ from core.cli.wiring import (
     registry_specs_digest,
     resolve_evaluator_model_identity,
 )
-from core.config.deploy import ENV_SERP, DeployConfig, resolve_llm_slot, resolve_serp_rounds
+from core.config.deploy import (
+    ENV_SERP,
+    DeployConfig,
+    resolve_llm_slot,
+    resolve_serp_rounds,
+)
 from core.domain.dictionary import load_dictionary
 from core.domain.enums import RefreshPolicy
 from core.domain.models import CrawlRunConfig, canonical_rate_limit
-from core.pipeline.normalize import RunInputs
 from core.pipeline.manual_artifacts import load_manual_artifacts
+from core.pipeline.normalize import RunInputs
 from core.pipeline.report import crawl_control_digest
 from core.pipeline.retrieve import RetrievalProfile
 
 __all__ = [
-    "CONTRACT_FLAG_DESTS",
     "CONTRACT_FLAGS",
+    "CONTRACT_FLAG_DESTS",
     "CRAWL_AXIS_DESTS",
-    "ContractFlag",
-    "DeclaredExecutionAxes",
     "DOCLING_ADAPTER_FAMILY",
     "IDENTITY_MATERIALS",
-    "IdentityFlags",
     "MATERIAL_CONTRACT",
     "MATERIAL_CYCLE",
     "MATERIAL_REFRESH",
     "MATERIAL_SCOPE",
     "MATERIAL_SEEDS",
+    "ContractFlag",
+    "DeclaredExecutionAxes",
+    "IdentityFlags",
     "add_contract_flags",
     "add_crawl_axis_flags",
     "add_serp_rounds_flag",

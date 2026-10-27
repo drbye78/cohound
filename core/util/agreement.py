@@ -31,14 +31,14 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 
 __all__ = [
-    "REQUIRED_COLUMNS",
     "NOT_NA",
+    "REQUIRED_COLUMNS",
+    "AgreementReport",
     "AnnotationRow",
     "ConfusionMatrix",
     "KappaResult",
-    "AgreementReport",
-    "parse_annotations_csv",
     "compute_agreement",
+    "parse_annotations_csv",
 ]
 
 #: Обязательные колонки CSV-разметки (порядок не важен; лишние колонки игнорируются).

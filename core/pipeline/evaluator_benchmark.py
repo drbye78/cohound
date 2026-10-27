@@ -602,7 +602,7 @@ def _bootstrap_mean_ci(
     """Bootstrap-перцентильный CI для среднего (``values`` — 0/1 для доли)."""
     if not values:
         return Interval(None, None, level=level, resamples=resamples, note="нет наблюдений")
-    rng = random.Random(seed)
+    rng = random.Random(seed)  # noqa: S311 — bootstrap воспроизводим по seed: криптостойкость вредна
     n = len(values)
     means = [
         sum(values[rng.randrange(n)] for _ in range(n)) / n for _ in range(resamples)
@@ -631,7 +631,7 @@ def _bootstrap_kappa_ci(
     """
     if not rows:
         return Interval(None, None, level=level, resamples=resamples, note="нет парных ячеек")
-    rng = random.Random(seed)
+    rng = random.Random(seed)  # noqa: S311 — bootstrap воспроизводим по seed: криптостойкость вредна
     n = len(rows)
     values: list[float] = []
     undefined = 0
@@ -852,7 +852,6 @@ def _measure_once(
     """
     proxy = _CountingEvaluator(model.evaluator)
     started = timer()
-    harness_error: str | None = None
     try:
         outcome = evaluate_cell(
             param=case.param,
@@ -1248,7 +1247,7 @@ def run_benchmark(
         limits=limits,
         models=metrics,
         generated_at=generated_at
-        or _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds"),
+        or _dt.datetime.now(_dt.UTC).isoformat(timespec="seconds"),
         eval_cache_enabled=eval_cache is not None,
         bootstrap_resamples=bootstrap_resamples,
         notes=tuple(notes or ()),

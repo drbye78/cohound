@@ -50,13 +50,13 @@ from typing import Any
 from core.adapters.embed_local import EmbedderUnavailable, EmbedFn
 
 __all__ = [
-    "EmbedderUnavailable",
-    "EmbedFn",
-    "LiteEmbedder",
-    "DEFAULT_MODEL_ID",
-    "DEFAULT_DIM",
     "DEFAULT_BATCH_SIZE",
+    "DEFAULT_DIM",
     "DEFAULT_MAX_LENGTH",
+    "DEFAULT_MODEL_ID",
+    "EmbedFn",
+    "EmbedderUnavailable",
+    "LiteEmbedder",
     "model2vec_available",
 ]
 

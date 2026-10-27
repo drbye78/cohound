@@ -11,9 +11,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass
-from typing import Any, Iterable, Iterator, Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 from core.domain import (
     ArchiveObservation,

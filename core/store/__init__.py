@@ -5,4 +5,4 @@
 
 from __future__ import annotations
 
-__all__ = ["sqlite", "backup"]
+__all__ = ["backup", "sqlite"]

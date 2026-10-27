@@ -18,6 +18,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 import tempfile
 from pathlib import Path
@@ -55,9 +56,9 @@ def atomic_write_text(path: str | Path, text: str) -> Path:
         os.chmod(tmp_name, mode)
         os.replace(tmp_name, target)
     except BaseException:
-        try:
+        # Первичная ошибка важнее ошибки уборки: неудачный ``unlink`` не должен
+        # подменить исходное исключение.
+        with contextlib.suppress(OSError):
             os.unlink(tmp_name)
-        except OSError:
-            pass
         raise
     return target

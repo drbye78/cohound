@@ -27,7 +27,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
 
 import yaml
 
@@ -54,12 +53,12 @@ from core.domain.models import (
 from core.pipeline.golden_status import GoldenStatus, read_golden_status
 
 __all__ = [
+    "SCOPE_ATTESTATION_FILE",
     "RunInputs",
+    "cross_check",
     "load_inputs",
     "load_scope_attestation",
     "load_scope_attestations",
-    "cross_check",
-    "SCOPE_ATTESTATION_FILE",
 ]
 
 #: Имя опционального файла пакета с процедурой аттестации ``source_scope`` (I2b).

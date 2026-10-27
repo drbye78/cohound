@@ -65,13 +65,14 @@ pipeline делает такой исход терминальным (без п�
 from __future__ import annotations
 
 import atexit
+import contextlib
 import importlib.util
 import threading
 from collections.abc import Callable, Mapping
 from concurrent.futures import Future
 from concurrent.futures import TimeoutError as FuturesTimeoutError
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any, Protocol, cast, runtime_checkable
 
 from core.domain.enums import FailureKind
@@ -81,14 +82,14 @@ from core.util.cache import ContentAddressedCache, http_key
 from core.util.security import validate_url
 
 __all__ = [
-    "CrawlError",
-    "CrawlUrlError",
-    "CrawlRefused",
-    "CrawlNotFound",
-    "CrawlPayloadTooLarge",
-    "NOT_FOUND_STATUSES",
     "DEFAULT_MAX_RESPONSE_BYTES",
     "DEFAULT_SCRAPY_SETTINGS",
+    "NOT_FOUND_STATUSES",
+    "CrawlError",
+    "CrawlNotFound",
+    "CrawlPayloadTooLarge",
+    "CrawlRefused",
+    "CrawlUrlError",
     "ScrapyCrawler",
 ]
 
@@ -244,12 +245,12 @@ class CrawlPayloadTooLarge(CrawlError):
 class PageFetcher(Protocol):
     """Минимальный контракт внедряемого фетчера (альтернатива callable)."""
 
-    def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage: ...
+    def fetch(self, url: str, plan: FetchPlan | None = None) -> RawPage: ...
 
 
 def _now_iso() -> str:
     """Текущий UTC-таймстемп в ISO-8601 (поле ``fetched_at`` при живом фетче)."""
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def _conditional_headers(plan: FetchPlan) -> dict[str, str]:
@@ -698,10 +699,11 @@ class _ReactorWorker:
             reactor = self._reactor
             thread = self._thread
         if reactor is not None:
-            try:
+            # Best-effort останов: реактор глобальный на процесс и мог быть уже остановлен
+            # (atexit идёт после явного close). Сбой остановки не должен отменять join
+            # потока ниже — иначе поток остался бы жить после teardown.
+            with contextlib.suppress(Exception):
                 reactor.callFromThread(reactor.stop)
-            except Exception:  # noqa: BLE001 - best-effort останов
-                pass
         if thread is not None and thread.is_alive():
             thread.join(timeout)
 
@@ -768,14 +770,18 @@ class ScrapyCrawler:
 
     # -- публичный контракт ---------------------------------------------------
 
-    def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:
+    def fetch(self, url: str, plan: FetchPlan | None = None) -> RawPage:
         """Загружает ``url`` по готовому ``plan`` (fetch/extract/wait_for).
 
         Порядок: SSRF-валидация → (для HTTP) валидаторы (план → мета кэша) → кэш/живой
         фетч → (для HTTP) запись в кэш (байты + сайдкар). Браузерный рендер **не**
         консультирует и не пишет кэш: он недетерминирован, а общий ключ
         ``http_key(url)`` дал бы кросс-контаминацию HTTP/browser по одному URL.
+        ``plan=None`` — дефолтный план, построенный здесь (дефолт-объект в сигнатуре был
+        бы общим на все вызовы).
         """
+        if plan is None:
+            plan = FetchPlan()
         try:
             validate_url(url)
         except ValueError as exc:
@@ -833,13 +839,18 @@ class ScrapyCrawler:
 
     def _cache_mtime_iso(self, url: str) -> str:
         """ISO-8601 (UTC) mtime файла кэша; при отсутствии — текущее время."""
-        assert self._cache is not None
+        # S101: несуществующая ветка — инвариант конструктора (метод зовётся только
+        # там, где кэш внедрён: ``fetched_at`` берётся из mtime файла кэша, без кэша
+        # записи времени неоткуда взять). ``assert`` нужен ещё и как сужение типа для
+        # mypy-gate (``self._cache`` объявлен Optional): ``if`` там же сузил бы, но
+        # тогда «недостижимо» перестало бы быть проверяемым утверждением.
+        assert self._cache is not None  # noqa: S101 — инвариант конструктора
         try:
             path = self._cache.path_for("http", http_key(url), ".bin")
             stamp = path.stat().st_mtime
         except (OSError, ValueError):
             return _now_iso()
-        return datetime.fromtimestamp(stamp, tz=timezone.utc).isoformat()
+        return datetime.fromtimestamp(stamp, tz=UTC).isoformat()
 
     def _store(self, url: str, key: str, page: RawPage) -> None:
         """Пишет байты и сайдкар валидаторов в глобальный кэш (R7), если кэш внедрён.

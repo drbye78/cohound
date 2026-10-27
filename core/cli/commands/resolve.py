@@ -8,10 +8,9 @@
 
 from __future__ import annotations
 
-from typing import Any
-
 import argparse
 import sys
+from typing import Any
 
 from core.cli.context import _add_common, _print_json
 from core.cli.errors import EXIT_NOT_FOUND, EXIT_OK

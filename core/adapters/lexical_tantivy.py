@@ -58,8 +58,8 @@ from typing import Any
 from core.ports.vector_index import RetrievedChunk
 
 __all__ = [
-    "LexicalIndexUnavailable",
     "LexicalChunk",
+    "LexicalIndexUnavailable",
     "TantivyLexicalIndex",
     "tantivy_available",
     "tantivy_engine_version",

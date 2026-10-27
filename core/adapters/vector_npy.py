@@ -48,8 +48,8 @@ from __future__ import annotations
 import importlib.util
 from collections import OrderedDict
 from collections.abc import Callable, Iterator, Mapping, Sequence
-from itertools import islice
 from dataclasses import dataclass
+from itertools import islice
 from pathlib import Path
 from typing import Any
 
@@ -63,9 +63,9 @@ from core.ports.vector_index import (
 
 __all__ = [
     "DEFAULT_PARTITION_CACHE_BYTES",
+    "NpyVectorIndex",
     "PartitionCache",
     "VectorIndexUnavailable",
-    "NpyVectorIndex",
     "numpy_available",
 ]
 
@@ -340,8 +340,12 @@ class NpyVectorIndex:
                         )
                     )
 
+        # ``strict=True``: ``scored`` и ``units`` построены как ``[[] for _ in queries]``,
+        # поэтому длины обязаны совпадать. Расхождение — дефект инварианта (выдача
+        # сдвинулась бы на чужой запрос), и он должен падать здесь, а не отдавать
+        # вызывающему чужие чанки.
         return [
-            _to_chunks(items, q.top_k) for items, q in zip(scored, queries)
+            _to_chunks(items, q.top_k) for items, q in zip(scored, queries, strict=True)
         ]
 
     def _resolve_top(

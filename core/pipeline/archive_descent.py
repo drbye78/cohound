@@ -70,11 +70,6 @@ from core.util.hashing import short_hash
 
 __all__ = [
     "DESCENT_SUFFIXES",
-    "DescentBudget",
-    "ArchiveDescentWalker",
-    "MemberDeferral",
-    "MemberOutcome",
-    "MemberTask",
     "SKIP_BUDGET",
     "SKIP_CONTAINER_READER",
     "SKIP_CYCLE",
@@ -83,6 +78,11 @@ __all__ = [
     "SKIP_NESTED",
     "SKIP_READ_FAILED",
     "SKIP_STREAM_TOO_LARGE",
+    "ArchiveDescentWalker",
+    "DescentBudget",
+    "MemberDeferral",
+    "MemberOutcome",
+    "MemberTask",
     "member_url",
 ]
 
@@ -525,7 +525,10 @@ class ArchiveDescentWalker:
             if outcome is None:
                 # ``handle`` есть только у отложенного ингеста (``_defer_member`` задан).
                 deferral = self._defer_member
-                assert deferral is not None
+                if deferral is None:  # недостижимо: outcome is None только у отложенного
+                    raise RuntimeError(
+                        f"член {task.member_path!r} без исхода и без отложенного ингеста"
+                    )
                 try:
                     # Контракт ``resolve`` — вернуть исход, не бросать; защита ниже нужна
                     # лишь чтобы отказ одного члена не потерял его строку и счётчик.

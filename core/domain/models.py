@@ -64,7 +64,6 @@ from core.domain.enums import (
     Status,
     TerminationReason,
 )
-
 from core.util.document_formats import normalize_attachment_formats
 
 _BASE = ConfigDict(extra="forbid", str_strip_whitespace=True)
@@ -470,7 +469,7 @@ def canonical_rate_limit(spec: RateLimitSpec | None) -> str | None:
     """
     if spec is None:
         return None
-    return f"uniform(min={repr(float(spec.min_s))},max={repr(float(spec.max_s))})"
+    return f"uniform(min={float(spec.min_s)!r},max={float(spec.max_s)!r})"
 
 
 class CrawlRunConfig(BaseModel):
@@ -852,22 +851,20 @@ class EvidenceScope(BaseModel):
     @model_validator(mode="after")
     def _check(self) -> EvidenceScope:
         strength = self.denial_strength
-        if strength is DenialStrength.EXPLICIT:
-            if not (self.citation_quote or "").strip():
-                raise ValueError(
-                    "denial_strength=explicit требует непустую citation_quote: "
-                    "отрицание без цитаты — мнение, а не доказательство отсутствия"
-                )
+        if strength is DenialStrength.EXPLICIT and not (self.citation_quote or "").strip():
+            raise ValueError(
+                "denial_strength=explicit требует непустую citation_quote: "
+                "отрицание без цитаты — мнение, а не доказательство отсутствия"
+            )
         if strength in {
             DenialStrength.UNOBSERVED,
             DenialStrength.NOT_STATED,
             DenialStrength.INSTRUMENT_FAILED,
-        }:
-            if not (self.reason or "").strip():
-                raise ValueError(
-                    f"denial_strength={strength.value} требует непустую reason: "
-                    "незнание обязано называть причину"
-                )
+        } and not (self.reason or "").strip():
+            raise ValueError(
+                f"denial_strength={strength.value} требует непустую reason: "
+                "незнание обязано называть причину"
+            )
         if strength is DenialStrength.BOUNDED:
             if not (self.reason or "").strip():
                 raise ValueError(
@@ -955,9 +952,12 @@ class CellEvidence(BaseModel):
         if not self.source_id:
             raise ValueError("I10/I15: evidence обязан иметь source_id")
         # Корпусный evidence обязан нести hash (I19).
-        if self.source_kind in {SourceKind.DOCUMENTATION, SourceKind.WEB, SourceKind.DISTRIBUTION}:
-            if not self.content_hash:
-                raise ValueError("I19: корпусный evidence обязан иметь content_hash")
+        if (
+            self.source_kind
+            in {SourceKind.DOCUMENTATION, SourceKind.WEB, SourceKind.DISTRIBUTION}
+            and not self.content_hash
+        ):
+            raise ValueError("I19: корпусный evidence обязан иметь content_hash")
         # absence-evidence: scope по типу правила проверяется на уровне Cell.
         if self.source_kind is SourceKind.REGISTRY and not self.source_url:
             raise ValueError("R1: registry evidence обязан иметь source_url")
@@ -1056,9 +1056,12 @@ class Cell(BaseModel):
         if self.status is Status.NOT_APPLICABLE and not self.reviewed_by:
             raise ValueError("I6/I7: N/A → reviewed_by обязателен")
         # I1: evaluated ✅/⚠️ → evidence ≥ 1
-        if self.state is CellState.EVALUATED:
-            if self.status in {Status.OK, Status.PARTIAL} and not self.evidence:
-                raise ValueError("I1: evaluated ✅/⚠️ → evidence ≥ 1")
+        if (
+            self.state is CellState.EVALUATED
+            and self.status in {Status.OK, Status.PARTIAL}
+            and not self.evidence
+        ):
+            raise ValueError("I1: evaluated ✅/⚠️ → evidence ≥ 1")
         # Объявленная семантика реестрового правила: отсутствие записи в авторитетной
         # энумерации — негативное свидетельство по построению. Класс достраивается из
         # **объявленных** данных (``absence_rule`` + наличие записи), а не выдумывается,
@@ -1109,15 +1112,20 @@ class Cell(BaseModel):
                     "I2: объект силы отрицания относится только к ❌/❓/failed; "
                     f"статус {self.status}, класс {scope.denial_strength.value}"
                 )
-        if self.state is CellState.EVALUATED and self.status is Status.ABSENT:
-            if not self.absence_evidence and scope is None:
-                raise ValueError("I2: evaluated ❌ → absence-evidence обязателен")
+        if (
+            self.state is CellState.EVALUATED
+            and self.status is Status.ABSENT
+            and not self.absence_evidence
+            and scope is None
+        ):
+            raise ValueError("I2: evaluated ❌ → absence-evidence обязателен")
         # I4: failed несёт только ``instrument_failed`` (сбой прибора, не отрицание).
-        if self.state is CellState.FAILED and scope is not None:
-            if scope.denial_strength is not DenialStrength.INSTRUMENT_FAILED:
-                raise ValueError(
-                    "I4: failed несёт только denial_strength=instrument_failed"
-                )
+        if (
+            self.state is CellState.FAILED
+            and scope is not None
+            and scope.denial_strength is not DenialStrength.INSTRUMENT_FAILED
+        ):
+            raise ValueError("I4: failed несёт только denial_strength=instrument_failed")
         return self
 
 

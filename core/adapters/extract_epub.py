@@ -105,9 +105,18 @@ def _elements(root: ET.Element, name: str) -> list[ET.Element]:
 
 
 def _parse_xml(data: bytes) -> ET.Element | None:
-    """Разбирает XML; битый документ → ``None`` (решение принимает вызывающий)."""
+    """Разбирает XML; битый документ → ``None`` (решение принимает вызывающий).
+
+    **Почему stdlib, а не ``defusedxml``.** OCF/OPF-манифест — недоверенный вход, но
+    ``defusedxml`` живёт только в необязательном extra ``safety`` (05 §2.7.1), а EPUB —
+    формат первого класса: читатель обязан работать без этой группы. Риски при этом
+    закрыты самим CPython: замерено на 3.14 (пин проекта) — ``ET.fromstring`` отвергает
+    billion-laughs (``ParseError: limit on input amplification factor``) и не ресолвит
+    внешние сущности (``ParseError: undefined entity``), потому что pyexpat включает
+    защиту от амплификации и не тянет внешние DTD. XXE-вектора у stdlib нет.
+    """
     try:
-        return ET.fromstring(data)
+        return ET.fromstring(data)  # noqa: S314 — обоснование в докстринге (замер 3.14)
     except ET.ParseError:
         return None
 
@@ -142,7 +151,7 @@ def _parse_opf(opf: bytes) -> tuple[dict[str, tuple[str, str]], list[str]]:
     Элементы без ``id``/``href`` и ``itemref`` без ``idref`` пропускаются: они не
     адресуют контент, и выдумывать им место в книге нельзя.
     """
-    root = ET.fromstring(opf)
+    root = ET.fromstring(opf)  # noqa: S314 — см. ``_parse_xml``: stdlib + защита pyexpat
     manifest: dict[str, tuple[str, str]] = {}
     for item in _elements(root, "item"):
         identifier = (item.get("id") or "").strip()

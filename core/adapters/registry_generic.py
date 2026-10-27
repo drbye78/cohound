@@ -37,7 +37,7 @@ import os
 import re
 import string
 from collections.abc import Callable, Iterable, Mapping
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any, Literal, Protocol, cast, runtime_checkable
@@ -50,9 +50,9 @@ from core.domain import RegistryFact
 from core.ports.types import ProductRef
 
 __all__ = [
+    "REGISTRY_SPECS_DIRNAME",
     "GenericRegistryFetcher",
     "HttpClient",
-    "REGISTRY_SPECS_DIRNAME",
     "RegistryConfig",
     "RegistryConfigError",
     "RegistryError",
@@ -360,7 +360,7 @@ def _resolve_html_value(node: _HtmlNode, source_path: str) -> Any:
 class _HtmlNode:
     """Собранный элемент: тег, атрибуты и накопленный текст (включая вложенный)."""
 
-    __slots__ = ("tag", "attrs", "text_parts")
+    __slots__ = ("attrs", "tag", "text_parts")
 
     def __init__(self, tag: str, attrs: Mapping[str, str]) -> None:
         self.tag = tag
@@ -410,7 +410,7 @@ class _HtmlCollector(HTMLParser):
 
 
 def _utcnow() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 class GenericRegistryFetcher:

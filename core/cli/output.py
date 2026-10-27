@@ -19,9 +19,9 @@ from core.cli.errors import FALLBACK_CODE, LintFailure
 
 __all__ = [
     "concise",
-    "print_json",
-    "emit_lint_failure",
     "emit_error",
+    "emit_lint_failure",
+    "print_json",
 ]
 
 

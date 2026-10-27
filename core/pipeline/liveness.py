@@ -31,8 +31,9 @@ import datetime as _dt
 import os
 import socket
 import time
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from core.domain import CrawlSessionStatus
 
@@ -73,7 +74,7 @@ _PROC_START_INDEX = 19
 
 def _now_utc() -> _dt.datetime:
     """Текущее время в UTC (aware)."""
-    return _dt.datetime.now(_dt.timezone.utc)
+    return _dt.datetime.now(_dt.UTC)
 
 
 def _parse_instant(text: str | None) -> _dt.datetime | None:
@@ -88,7 +89,7 @@ def _parse_instant(text: str | None) -> _dt.datetime | None:
     except (TypeError, ValueError):
         return None
     if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=_dt.timezone.utc)
+        parsed = parsed.replace(tzinfo=_dt.UTC)
     return parsed
 
 
@@ -168,11 +169,16 @@ def owner_is_alive(
         return None
     recorded_start = parts[2] if len(parts) > 2 else ""
     actual_start = _proc_start_token(pid, proc_root)
-    if recorded_start and recorded_start != "?" and actual_start:
-        if recorded_start != actual_start:
-            # PID переиспользован: «тот» процесс мёртв, хотя номер занят.
-            return False
-    return True
+    # Время старта известно с обеих сторон и различается ⇒ номер PID принадлежал другому
+    # процессу: «тот» процесс мёртв, хотя номер занят. Нечитаемый токен (``actual_start``
+    # пуст) не считается доказательством смерти: живого не объявляем мёртвым.
+    reused = (
+        bool(recorded_start)
+        and recorded_start != "?"
+        and bool(actual_start)
+        and actual_start != recorded_start
+    )
+    return not reused
 
 
 def stale_reason(

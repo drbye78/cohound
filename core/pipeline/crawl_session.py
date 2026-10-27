@@ -31,8 +31,8 @@ from core.pipeline.liveness import current_owner, recover_interrupted_sessions
 
 __all__ = [
     "default_session_id",
-    "open_session",
     "finalize_session",
+    "open_session",
     "prior_items",
     "read_provenance",
     "truncation_summary",
@@ -41,7 +41,7 @@ __all__ = [
 
 def _now_iso() -> str:
     """Текущее время в ISO-8601 (UTC)."""
-    return _dt.datetime.now(_dt.timezone.utc).isoformat()
+    return _dt.datetime.now(_dt.UTC).isoformat()
 
 
 def default_session_id(run_id: str) -> str:

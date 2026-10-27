@@ -76,28 +76,28 @@ from core.util.hashing import short_hash
 from core.util.security import validate_url
 
 __all__ = [
+    "SERP_QUERY_LIMIT",
     "ImmutableBuildError",
+    "RoundBuildContext",
+    "RoundBuilder",
+    "SerpDiscovery",
     "SerpLoopError",
+    "SerpLoopResult",
     "SerpLoopStoreGap",
     "SerpQuery",
-    "RoundBuildContext",
     "SerpRound",
-    "SerpLoopResult",
-    "SerpDiscovery",
-    "SERP_QUERY_LIMIT",
-    "RoundBuilder",
-    "default_round_builder",
+    "assert_build_id_new",
+    "assign_serp_seeds",
     "build_serp_queries",
     "declared_serp_hosts",
-    "serp_host_in_scope",
-    "serp_discover",
-    "assign_serp_seeds",
+    "default_round_builder",
     "derive_round_build_id",
     "derive_round_partition_id",
-    "assert_build_id_new",
-    "run_serp_round",
     "invalidate_affected",
     "run_serp_loop",
+    "run_serp_round",
+    "serp_discover",
+    "serp_host_in_scope",
 ]
 
 #: Разделитель полей material-строки ``index_build_id`` (unit separator — однозначная склейка).
@@ -692,10 +692,9 @@ def serp_host_in_scope(
         return False
     if norm in own_hosts:
         return True
-    for root in own_hosts:
-        if norm.endswith("." + root) and norm in declared:
-            return True
-    return False
+    # Поддомен проходит только будучи **объявленным** (семантика ``Frontier.host_in_scope``):
+    # наследование осей профиля правом тратить бюджет корня не является.
+    return any(norm.endswith("." + root) and norm in declared for root in own_hosts)
 
 
 def build_serp_queries(

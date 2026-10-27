@@ -29,10 +29,9 @@
 
 from __future__ import annotations
 
+import argparse
 from pathlib import Path
 from typing import Any
-
-import argparse
 
 from core.cli.context import (
     _add_common,

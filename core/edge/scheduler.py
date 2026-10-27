@@ -62,7 +62,7 @@ import time
 import uuid
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -83,20 +83,20 @@ from core.util.robots import RobotsGate
 from core.util.security import validate_url
 
 __all__ = [
-    "EdgeScheduler",
+    "ITEM_CANCELLED",
+    "ITEM_FAILED",
+    "ITEM_FETCHED",
     "ITEM_PENDING",
     "ITEM_RUNNING",
-    "ITEM_FETCHED",
-    "ITEM_FAILED",
-    "ITEM_CANCELLED",
     "ITEM_TERMINAL",
-    "JOB_CREATED",
-    "JOB_RUNNING",
-    "JOB_COMPLETED",
-    "JOB_PARTIAL",
     "JOB_CANCELLED",
+    "JOB_COMPLETED",
+    "JOB_CREATED",
     "JOB_FAILED",
+    "JOB_PARTIAL",
+    "JOB_RUNNING",
     "JOB_TERMINAL",
+    "EdgeScheduler",
 ]
 
 # ---------------------------------------------------------------------------
@@ -150,7 +150,7 @@ def _non_terminal_job_filter() -> str:
     заданий в терминальном статусе (``completed|partial|cancelled|failed``).
     """
     return (
-        "job_id IN (SELECT job_id FROM edge_jobs"
+        "job_id IN (SELECT job_id FROM edge_jobs"  # noqa: S608 - «?»-плейсхолдеры из _TERMINAL_PLACEHOLDERS, значения — bind _TERMINAL_PARAMS
         f" WHERE status NOT IN ({_TERMINAL_PLACEHOLDERS}))"
     )
 
@@ -235,7 +235,7 @@ _ITEM_MIGRATED_COLUMNS: tuple[tuple[str, str], ...] = (
 
 def _utc_now_iso() -> str:
     """Текущий UTC-таймстемп ISO-8601 (дефолтные часы планировщика)."""
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def _default_id_factory() -> str:
@@ -380,6 +380,28 @@ def _pool_workers(pool: Any) -> list[Any]:
     return workers
 
 
+def _drain_error(action: str, target: Any, exc: BaseException) -> str:
+    """Однострочное описание сбоя слива пула: операция, тип цели, тип и текст ошибки."""
+    return f"{action}({type(target).__name__}): {type(exc).__name__}: {exc}"
+
+
+def _report_drain_errors(errors: Sequence[str]) -> None:
+    """Пишет в ``stderr`` сбои слива пулов при остановке планировщика.
+
+    Остановка продолжается при сбое отдельного пула (graceful), но **не молча**:
+    проглоченный ``shutdown``/``join`` скрыл бы, что воркеры или процессы не слиты, и
+    утечка ресурсов выглядела бы штатным завершением — ровно тот класс дефекта, который
+    в проекте считается главным. Строка в логе не отменяет остановку, она её называет.
+    """
+    if not errors:
+        return
+    sys.stderr.write(
+        f"edge: scheduler.stop(): сбоев слива пулов: {len(errors)} — "
+        + "; ".join(errors)
+        + "\n"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Планировщик
 # ---------------------------------------------------------------------------
@@ -495,12 +517,12 @@ class EdgeScheduler:
             if conn is not None:
                 with conn:
                     conn.execute(
-                        "UPDATE edge_job_items SET status = ? WHERE status = ?"
+                        "UPDATE edge_job_items SET status = ? WHERE status = ?"  # noqa: S608 - фрагмент из _non_terminal_job_filter(); статусы — bind-параметры
                         f" AND {_non_terminal_job_filter()}",
                         (ITEM_PENDING, ITEM_RUNNING, *_TERMINAL_PARAMS),
                     )
                 rows = conn.execute(
-                    "SELECT job_id FROM edge_jobs WHERE status NOT IN "
+                    "SELECT job_id FROM edge_jobs WHERE status NOT IN "  # noqa: S608 - «?»-плейсхолдеры из _TERMINAL_PLACEHOLDERS, значения — bind _TERMINAL_PARAMS
                     f"({_TERMINAL_PLACEHOLDERS})",
                     _TERMINAL_PARAMS,
                 ).fetchall()
@@ -517,7 +539,7 @@ class EdgeScheduler:
                 self._conn.close()
                 self._conn = None
 
-    def __enter__(self) -> "EdgeScheduler":
+    def __enter__(self) -> EdgeScheduler:
         return self
 
     def __exit__(self, *exc: Any) -> None:
@@ -937,20 +959,22 @@ class EdgeScheduler:
           стороне адаптеров (их таймауты), это лишь следствие.
         """
         pools = [pool for pool in (thread_pool, process_pool) if pool is not None]
+        errors: list[str] = []
         if timeout is None:
             for pool in pools:
                 try:
                     pool.shutdown(wait=True, cancel_futures=True)
-                except Exception:  # noqa: BLE001 - останов обязан быть graceful
-                    pass
+                except Exception as exc:  # noqa: BLE001 - останов обязан быть graceful
+                    errors.append(_drain_error("shutdown", pool, exc))
+            _report_drain_errors(errors)
             return
 
         deadline = time.monotonic() + max(0.0, float(timeout))
         for pool in pools:
             try:
                 pool.shutdown(wait=False, cancel_futures=True)
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as exc:  # noqa: BLE001 - видимая запись, см. _report_drain_errors
+                errors.append(_drain_error("shutdown", pool, exc))
         alive: list[Any] = []
         for pool in pools:
             for worker in _pool_workers(pool):
@@ -958,10 +982,11 @@ class EdgeScheduler:
                 if remaining > 0:
                     try:
                         worker.join(remaining)
-                    except Exception:  # noqa: BLE001
-                        pass
+                    except Exception as exc:  # noqa: BLE001 - видимая запись ниже
+                        errors.append(_drain_error("join", worker, exc))
                 if worker.is_alive():
                     alive.append(worker)
+        _report_drain_errors(errors)
         if alive:
             sys.stderr.write(
                 f"edge: scheduler.stop(): {len(alive)} воркер(ов) не завершились за "
@@ -984,12 +1009,12 @@ class EdgeScheduler:
         with self._lock:
             with conn:
                 conn.execute(
-                    "UPDATE edge_job_items SET status = ? WHERE status = ?"
+                    "UPDATE edge_job_items SET status = ? WHERE status = ?"  # noqa: S608 - фрагмент из _non_terminal_job_filter(); статусы — bind-параметры
                     f" AND {_non_terminal_job_filter()}",
                     (ITEM_PENDING, ITEM_RUNNING, *_TERMINAL_PARAMS),
                 )
             rows = conn.execute(
-                "SELECT job_id FROM edge_jobs WHERE status NOT IN "
+                "SELECT job_id FROM edge_jobs WHERE status NOT IN "  # noqa: S608 - «?»-плейсхолдеры из _TERMINAL_PLACEHOLDERS, значения — bind _TERMINAL_PARAMS
                 f"({_TERMINAL_PLACEHOLDERS})",
                 _TERMINAL_PARAMS,
             ).fetchall()
@@ -1031,9 +1056,9 @@ class EdgeScheduler:
         (``completed|partial|cancelled|failed``) никогда не клеймятся.
         """
         conn = self._conn
-        assert conn is not None
+        assert conn is not None  # noqa: S101 - narrowing: соединение открыто start()
         row = conn.execute(
-            "SELECT * FROM edge_job_items WHERE status = ?"
+            "SELECT * FROM edge_job_items WHERE status = ?"  # noqa: S608 - фрагмент из _non_terminal_job_filter(); статусы — bind-параметры
             f" AND {_non_terminal_job_filter()}"
             " ORDER BY job_id, product_id, url LIMIT 1",
             (ITEM_PENDING, *_TERMINAL_PARAMS),
@@ -1152,7 +1177,7 @@ class EdgeScheduler:
         last_modified = _opt_str(getattr(page, "last_modified", None))
         not_modified = 1 if getattr(page, "not_modified", False) else 0
         conn = self._conn
-        assert conn is not None
+        assert conn is not None  # noqa: S101 - narrowing: соединение открыто start()
         with conn:
             cursor = conn.execute(
                 "UPDATE edge_job_items SET status = ?, engine = ?, http_status = ?,"
@@ -1374,8 +1399,14 @@ def _attach_robots(crawler: Any, gate: RobotsGate) -> None:
     """
     try:
         crawler._robots = gate  # noqa: SLF001 - документированный seam адаптеров (§10)
-    except (AttributeError, TypeError):  # pragma: no cover - защита от нестандартных краулеров
-        pass
+    except (AttributeError, TypeError) as exc:  # pragma: no cover - нестандартный краулер
+        # Адаптер без seam'а: политика осталась непривязанной — robots.txt этим
+        # адаптером **не** проверяется. Краул продолжаем (адаптер не наш), но молчание
+        # здесь читалось бы как «вежливость включена».
+        sys.stderr.write(
+            f"edge: robots-политика не привязана к {type(crawler).__name__} "
+            f"({type(exc).__name__}: {exc}); robots.txt не проверяется\n"
+        )
 
 
 def _coerce_enum(enum_cls: Any, value: Any, default: Any) -> Any:

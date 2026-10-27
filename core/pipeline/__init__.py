@@ -15,80 +15,28 @@ upsert, S8/R15), ``normalize.py``/``lint.py``/``plan.py`` (нормализац�
 
 from __future__ import annotations
 
-from core.pipeline.gates import (
-    GateCheck,
-    evaluate_gate,
-    gate_decision_for,
-    gate_g1,
-    gate_g2,
-    gate_g3,
-    gate_g4,
-    is_gate_passed,
-    record_decision,
-)
-from core.pipeline.gate_subject import (
-    DECISION_CONTRACT,
-    PUBLISHED_ARTIFACTS,
-    GateSubject,
-    SubjectResolver,
-    describe_subject_diff,
-    gate_request_payload,
-    publication_subject,
-    read_gate_request_digest,
-    read_gate_request_subject,
-    review_subject,
-    write_gate_request,
-)
-from core.pipeline.idempotency import (
-    evidence_id_for,
-    mark_stale,
-    upsert_cells,
-    upsert_evidence,
-)
-from core.pipeline.lint import (
-    RULES,
-    LintReport,
-    LintRule,
-    assert_lint,
-    lint_run_inputs,
-)
-from core.pipeline.normalize import (
-    RunInputs,
-    cross_check,
-    load_inputs,
-    load_scope_attestation,
-)
-from core.pipeline.inheritance import apply_precedence, inheritance_wave
-from core.pipeline.corpus import IndexBuild, build_corpus
-from core.pipeline.fetch_plan import resolve_fetch_plan
-from core.pipeline.crawl_sources import CrawlTarget, resolve_crawl_target
-from core.pipeline.retrieve import (
-    PROFILE_DESCRIPTIONS,
-    RetrievalProfile,
-    retrieve,
-    rrf_fuse_chunks,
-)
-from core.pipeline.experiments import (
-    DEFAULT_PROFILES,
-    ExperimentReport,
-    ProfileExperiment,
-    load_retrieval_golden,
-    run_retrieval_experiment,
-)
-from core.pipeline.prompt import (
-    TEMPLATE_VERSION,
-    CompiledPrompt,
-    compile_prompt,
-    render_queries,
-    save_prompt,
+from core.pipeline.adversarial import (
+    AdversarialBreachError,
+    AdversarialCase,
+    AdversarialReport,
+    load_adversarial,
+    run_adversarial,
 )
 from core.pipeline.compute import (
     ScoreBundle,
     assert_publishable,
     compute,
     per_product_bundle,
-    publishability_notes,
     publish_warnings,
+    publishability_notes,
+)
+from core.pipeline.corpus import IndexBuild, build_corpus
+from core.pipeline.crawl_sources import CrawlTarget, resolve_crawl_target
+from core.pipeline.discovery import (
+    DiscoveryCandidate,
+    DiscoveryReport,
+    discover,
+    review_candidates,
 )
 from core.pipeline.evaluate import (
     EvaluationOutcome,
@@ -111,22 +59,12 @@ from core.pipeline.evaluator_benchmark import (
     prepare_cases,
     run_benchmark,
 )
-from core.pipeline.validate import (
-    ValidationFailureKind,
-    ValidationResult,
-    validate_output,
-)
-from core.pipeline.report import (
-    Artifacts,
-    CrossCycleDiffError,
-    PublishBlockedError,
-    build_manifest,
-    render_battle_card,
-    render_diff,
-    render_nda_questions,
-    render_preliminary_findings,
-    write_reports,
-    write_run_manifest,
+from core.pipeline.experiments import (
+    DEFAULT_PROFILES,
+    ExperimentReport,
+    ProfileExperiment,
+    load_retrieval_golden,
+    run_retrieval_experiment,
 )
 from core.pipeline.extraction_eval import (
     ExtractionCaseResult,
@@ -137,53 +75,32 @@ from core.pipeline.extraction_eval import (
     load_extraction_golden,
     run_extraction_golden,
 )
-from core.pipeline.metrics import (
-    RunMetrics,
-    collect_phase_durations,
-    compute_metrics,
+from core.pipeline.fetch_plan import resolve_fetch_plan
+from core.pipeline.gate_subject import (
+    DECISION_CONTRACT,
+    PUBLISHED_ARTIFACTS,
+    GateSubject,
+    SubjectResolver,
+    describe_subject_diff,
+    gate_request_payload,
+    publication_subject,
+    read_gate_request_digest,
+    read_gate_request_subject,
+    review_subject,
+    write_gate_request,
 )
-from core.pipeline.search_log import (
-    SearchBudget,
-    SearchEffort,
-    external_search,
-    record_search,
-    termination_for,
+from core.pipeline.gates import (
+    GateCheck,
+    evaluate_gate,
+    gate_decision_for,
+    gate_g1,
+    gate_g2,
+    gate_g3,
+    gate_g4,
+    is_gate_passed,
+    record_decision,
 )
-from core.pipeline.discovery import (
-    DiscoveryCandidate,
-    DiscoveryReport,
-    discover,
-    review_candidates,
-)
-from core.pipeline.passport_scout import (
-    DISCOVERY_TEMPLATE_VERSION,
-    DiscoveryPassportHypothesis,
-    PassportScoutError,
-    PassportScoutReport,
-    build_passport_draft,
-    scout_passport,
-    write_passport_draft,
-)
-from core.pipeline.adversarial import (
-    AdversarialBreachError,
-    AdversarialCase,
-    AdversarialReport,
-    load_adversarial,
-    run_adversarial,
-)
-from core.pipeline.serp_loop import (
-    SerpLoopError,
-    SerpLoopResult,
-    SerpQuery,
-    SerpRound,
-    derive_round_build_id,
-    invalidate_affected,
-    run_serp_loop,
-    run_serp_round,
-)
-from core.pipeline.phases import IMPLEMENTED_PHASES, build_phases
 from core.pipeline.golden import (
-    ERROR_CLASSES,
     GoldenCaseResult,
     GoldenReport,
     GoldenThresholdError,
@@ -193,39 +110,95 @@ from core.pipeline.golden import (
     evaluate_golden,
     run_golden,
 )
-from core.pipeline.review import (
-    PromotionResult,
-    ReviewError,
-    ReviewItem,
-    promote,
-    promote_batch,
-    review_queue,
+from core.pipeline.idempotency import (
+    evidence_id_for,
+    mark_stale,
+    upsert_cells,
+    upsert_evidence,
 )
-from core.pipeline.plan import RunPlan, derive_run_id, load_plan, plan
-from core.pipeline.registry import (
-    registry_covered_params,
-    registry_wave,
-    resolve_registry_ids,
+from core.pipeline.inheritance import apply_precedence, inheritance_wave
+from core.pipeline.lint import (
+    RULES,
+    LintReport,
+    LintRule,
+    assert_lint,
+    lint_run_inputs,
 )
-from core.pipeline.profile_attestation import (
-    PROFILE_MATERIAL_KEYS,
-    ProfileGateResult,
-    describe_material_diff,
-    make_profile_gate,
-    profile_attestation_id,
-    profile_digest,
-    profile_material,
+from core.pipeline.metrics import (
+    RunMetrics,
+    collect_phase_durations,
+    compute_metrics,
 )
-from core.pipeline.runner import (
-    GATE_PHASES,
-    PHASES,
-    GateRuntime,
-    PhaseResult,
-    Ports,
-    RunContext,
-    Runner,
-    RunReport,
-    run_isolated,
+from core.pipeline.normalize import (
+    RunInputs,
+    cross_check,
+    load_inputs,
+    load_scope_attestation,
+)
+from core.pipeline.package_add_product import (
+    AddProductError,
+    AddProductPlan,
+    DiscoveredSite,
+    apply_add_product,
+    plan_add_product,
+    write_domain_profiles_with_new_keys,
+)
+from core.pipeline.package_admin import (
+    OpResult,
+    PackageAdminError,
+    add_baseline,
+    add_module,
+    add_param,
+    add_role,
+    bump_version,
+    clear_scope_attestation,
+    create_package,
+    find_baselines,
+    get_baseline,
+    get_cohort,
+    get_module,
+    get_param,
+    get_role,
+    get_run_config,
+    get_scope_attestation,
+    list_baselines,
+    list_golden,
+    list_modules,
+    list_params,
+    list_roles,
+    remove_baseline,
+    remove_module,
+    remove_param,
+    remove_role,
+    renormalize_modules,
+    set_archetype,
+    set_cohort,
+    set_scope_attestation,
+    show_package,
+    update_baseline,
+    update_cohort,
+    update_module,
+    update_param,
+    update_role,
+    validate_package,
+)
+from core.pipeline.package_candidates import (
+    CANDIDATE_KINDS,
+    Candidate,
+    apply_candidate,
+    apply_candidates,
+    dumps_candidates,
+    loads_candidates,
+    plan_candidates,
+)
+from core.pipeline.package_discovery import (
+    ArchetypeHypothesis,
+    BaselineProposal,
+    compose_baselines,
+    infer_archetype,
+    suggest_cohort_members,
+    suggest_modules,
+    suggest_roles,
 )
 from core.pipeline.package_io import (
     ARTIFACT_FILES,
@@ -246,71 +219,6 @@ from core.pipeline.package_io import (
     scan_packages,
     validate_case_id,
 )
-from core.pipeline.package_discovery import (
-    ArchetypeHypothesis,
-    BaselineProposal,
-    compose_baselines,
-    infer_archetype,
-    suggest_cohort_members,
-    suggest_modules,
-    suggest_roles,
-)
-from core.pipeline.package_admin import (
-    OpResult,
-    PackageAdminError,
-    add_baseline,
-    add_module,
-    add_param,
-    add_role,
-    bump_version,
-    clear_scope_attestation,
-    create_package,
-    find_baselines,
-    get_baseline,
-    get_param,
-    get_role,
-    get_run_config,
-    get_scope_attestation,
-    list_baselines,
-    list_golden,
-    list_params,
-    list_roles,
-    remove_baseline,
-    remove_module,
-    remove_param,
-    remove_role,
-    renormalize_modules,
-    set_archetype,
-    set_cohort,
-    set_scope_attestation,
-    show_package,
-    update_baseline,
-    update_cohort,
-    update_module,
-    update_param,
-    update_role,
-    validate_package,
-    get_cohort,
-    get_module,
-    list_modules,
-)
-from core.pipeline.package_candidates import (
-    CANDIDATE_KINDS,
-    Candidate,
-    apply_candidate,
-    apply_candidates,
-    dumps_candidates,
-    loads_candidates,
-    plan_candidates,
-)
-from core.pipeline.package_add_product import (
-    AddProductError,
-    AddProductPlan,
-    DiscoveredSite,
-    apply_add_product,
-    plan_add_product,
-    write_domain_profiles_with_new_keys,
-)
 from core.pipeline.package_scout import (
     BASELINE_TEMPLATE_VERSION,
     CATALOG_TEMPLATE_VERSION,
@@ -328,8 +236,103 @@ from core.pipeline.package_scout import (
     scout_package,
     write_scout_artifacts,
 )
+from core.pipeline.passport_scout import (
+    DISCOVERY_TEMPLATE_VERSION,
+    DiscoveryPassportHypothesis,
+    PassportScoutError,
+    PassportScoutReport,
+    build_passport_draft,
+    scout_passport,
+    write_passport_draft,
+)
+from core.pipeline.phases import IMPLEMENTED_PHASES, build_phases
+from core.pipeline.plan import RunPlan, derive_run_id, load_plan, plan
+from core.pipeline.profile_attestation import (
+    PROFILE_MATERIAL_KEYS,
+    ProfileGateResult,
+    describe_material_diff,
+    make_profile_gate,
+    profile_attestation_id,
+    profile_digest,
+    profile_material,
+)
+from core.pipeline.prompt import (
+    TEMPLATE_VERSION,
+    CompiledPrompt,
+    compile_prompt,
+    render_queries,
+    save_prompt,
+)
+from core.pipeline.registry import (
+    registry_covered_params,
+    registry_wave,
+    resolve_registry_ids,
+)
+from core.pipeline.report import (
+    Artifacts,
+    CrossCycleDiffError,
+    PublishBlockedError,
+    build_manifest,
+    render_battle_card,
+    render_diff,
+    render_nda_questions,
+    render_preliminary_findings,
+    write_reports,
+    write_run_manifest,
+)
+from core.pipeline.retrieve import (
+    PROFILE_DESCRIPTIONS,
+    RetrievalProfile,
+    retrieve,
+    rrf_fuse_chunks,
+)
+from core.pipeline.review import (
+    PromotionResult,
+    ReviewError,
+    ReviewItem,
+    promote,
+    promote_batch,
+    review_queue,
+)
+from core.pipeline.runner import (
+    GATE_PHASES,
+    PHASES,
+    GateRuntime,
+    PhaseResult,
+    Ports,
+    RunContext,
+    Runner,
+    RunReport,
+    run_isolated,
+)
+from core.pipeline.search_log import (
+    SearchBudget,
+    SearchEffort,
+    external_search,
+    record_search,
+    termination_for,
+)
+from core.pipeline.serp_loop import (
+    SerpLoopError,
+    SerpLoopResult,
+    SerpQuery,
+    SerpRound,
+    derive_round_build_id,
+    invalidate_affected,
+    run_serp_loop,
+    run_serp_round,
+)
+from core.pipeline.validate import (
+    ValidationFailureKind,
+    ValidationResult,
+    validate_output,
+)
 
-__all__ = [
+#: Порядок намеренно сгруппирован по подсистемам (runner → gates → …), а не по алфавиту:
+#: группы повторяют раскладку модулей и задокументированы комментариями. Сортировка
+#: перемешала бы соседние модули и оторвала комментарии от своих имён — публичная
+#: поверхность пакета читается группами.
+__all__ = [  # noqa: RUF022
     # runner (T4.1)
     "Runner",
     "RunReport",

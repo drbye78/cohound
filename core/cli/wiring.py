@@ -33,6 +33,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from core.adapters import index_format
 from core.adapters.chunker_family import FamilyChunker
 from core.adapters.container_any import container_for
 from core.adapters.crawl_browser import BrowserCrawler
@@ -41,33 +42,50 @@ from core.adapters.crawl_scrapy import CrawlError, ScrapyCrawler
 from core.adapters.embed_local import LocalEmbedder
 from core.adapters.embed_model2vec import LiteEmbedder, model2vec_available
 from core.adapters.extract_document import DoclingDocumentExtractor
-from core.adapters.extract_pdf_text import PdfiumDocumentExtractor
 from core.adapters.extract_epub import EpubExtractor
 from core.adapters.extract_html import HtmlExtractor
+from core.adapters.extract_pdf_text import PdfiumDocumentExtractor
 from core.adapters.extract_text import TextExtractor
 from core.adapters.feed_poller import LocalFeedPoller, RemoteFeedPoller
 from core.adapters.index_npy import NpyIndexBuilder, numpy_available
-from core.adapters import index_format
 from core.adapters.lexical_tantivy import (
     LexicalChunk,
     TantivyLexicalIndex,
     tantivy_available,
     tantivy_engine_version,
 )
-from core.adapters.vector_npy import ChunkLookup, NpyVectorIndex
 from core.adapters.llm_discovery import (
     DEFAULT_DECODER as DISCOVERY_DEFAULT_DECODER,
+)
+from core.adapters.llm_discovery import (
     DEFAULT_MAX_TOKENS as DISCOVERY_DEFAULT_MAX_TOKENS,
+)
+from core.adapters.llm_discovery import (
     DEFAULT_TIMEOUT as DISCOVERY_DEFAULT_TIMEOUT,
+)
+from core.adapters.llm_discovery import (
     DiscoveryLLM,
+)
+from core.adapters.llm_discovery import (
     GenerateFn as DiscoveryGenerateFn,
 )
 from core.adapters.llm_local import (
     DEFAULT_DECODER as EVALUATOR_DEFAULT_DECODER,
+)
+from core.adapters.llm_local import (
     DEFAULT_TIMEOUT as EVALUATOR_DEFAULT_TIMEOUT,
+)
+from core.adapters.llm_local import (
     GenerateFn as EvaluatorGenerateFn,
+)
+from core.adapters.llm_local import (
     LocalEvaluator,
     normalize_api_base,
+)
+from core.adapters.registry_generic import (
+    GenericRegistryFetcher,
+    RegistryConfig,
+    RegistryFetchError,
 )
 from core.adapters.remote_crawl_executor import EdgeCrawlExecutor
 from core.adapters.remote_crawler import RemoteCrawler
@@ -77,23 +95,20 @@ from core.adapters.remote_gateway import (
     HttpContentGateway,
     TransportFn,
 )
-from core.adapters.registry_generic import (
-    GenericRegistryFetcher,
-    RegistryConfig,
-    RegistryFetchError,
-)
 from core.adapters.remote_registry import RemoteRegistry
 from core.adapters.remote_search import RemoteSearch
 from core.adapters.search_glm import GlmSearchAdapter
 from core.adapters.search_yandex import YandexSearchAdapter
+from core.adapters.vector_npy import ChunkLookup, NpyVectorIndex
 from core.cli.errors import EXIT_USAGE, CliError
+from core.config.crawl_sources import CrawlSourcesConfig
 from core.config.deploy import (
-    DeployConfig,
-    CrawlConfig,
     ENV_SERP,
+    SPLIT_PROFILES,
+    CrawlConfig,
+    DeployConfig,
     LLMDeployConfig,
     LLMSlotConfig,
-    SPLIT_PROFILES,
     is_split,
     load_deploy_config,
     parse_serp_switch,
@@ -102,7 +117,6 @@ from core.config.deploy import (
     resolve_serp_rounds,
 )
 from core.config.domain_profiles import DomainProfile
-from core.config.crawl_sources import CrawlSourcesConfig
 from core.domain.enums import DocumentLevel, PdfPipeline
 from core.domain.models import CrawlRunConfig
 from core.pipeline import Ports, Runner
@@ -117,7 +131,6 @@ from core.pipeline.resources import (
     MEM_BUDGET_ENV,
     PARENT_FLOOR_MB,
     MemoryBudgetError,
-    docling_peak_mb,
     pdf_peak_mb,
     resolve_mem_budget_mb,
     workers_from_budget,
@@ -134,8 +147,14 @@ from core.ports.poller import PollPort
 from core.ports.registry import RegistryFetcherPort
 from core.ports.search import SearchAdapterPort
 from core.ports.store import StorePort
-from core.ports.types import Chunk, ExtractedDoc, ExtractionRoute, FetchMode, RawPage
-from core.ports.types import FetchPlan
+from core.ports.types import (
+    Chunk,
+    ExtractedDoc,
+    ExtractionRoute,
+    FetchMode,
+    FetchPlan,
+    RawPage,
+)
 from core.ports.vector_index import VectorIndexPort
 from core.store.sqlite_store import SqliteStore
 from core.util.cache import ContentAddressedCache
@@ -152,46 +171,46 @@ from core.util.robots import RobotsGate
 from core.util.sitemap import MAX_SITEMAP_ENTRIES
 
 __all__ = [
-    "LOCAL_PROFILE",
-    "SPLIT_PROFILE",
-    "SUPPORTED_PROFILES",
-    "SUPPORTED_SEARCH_ADAPTERS",
     "DEFAULT_REGISTRY_ID",
+    "DEFAULT_SCOUT_CRAWLER",
+    "ENV_EMBED_LITE_MODEL",
+    "ENV_EMBED_LITE_PATH",
+    "ENV_EMBED_LITE_REVISION",
     "ENV_LLM_SLOT",
     "ENV_SCOUT_CRAWLER",
-    "DEFAULT_SCOUT_CRAWLER",
-    "SUPPORTED_SCOUT_CRAWLERS",
-    "ENV_EMBED_LITE_MODEL",
-    "ENV_EMBED_LITE_REVISION",
-    "ENV_EMBED_LITE_PATH",
     "EVALUATOR_ENV_IGNORED",
+    "LOCAL_PROFILE",
     "PHASES",
+    "SPLIT_PROFILE",
+    "SUPPORTED_PROFILES",
+    "SUPPORTED_SCOUT_CRAWLERS",
+    "SUPPORTED_SEARCH_ADAPTERS",
+    "EmbedderBuildMismatch",
+    "ExperimentTarget",
+    "SearchResolutionError",
     "WiringError",
-    "run_db_path",
-    "build_store",
-    "build_gateway",
-    "build_search_adapter",
+    "assert_embedder_matches_build",
+    "build_adapters",
     "build_discovery_llm",
     "build_evaluator_llm",
-    "resolve_evaluator_model_identity",
-    "llm_env_notices",
+    "build_extraction_pool",
+    "build_gateway",
     "build_lite_embedder",
-    "build_vector_index",
-    "seed_lexical_index",
-    "ExperimentTarget",
-    "resolve_experiment_target",
-    "EmbedderBuildMismatch",
-    "assert_embedder_matches_build",
+    "build_runner",
     "build_scout_crawler",
     "build_scout_crawlers",
-    "build_adapters",
-    "build_runner",
-    "build_extraction_pool",
-    "resolve_extraction_budget",
-    "preflight_extraction_budget",
+    "build_search_adapter",
+    "build_store",
+    "build_vector_index",
+    "llm_env_notices",
     "manifest_deploy_fields",
-    "SearchResolutionError",
+    "preflight_extraction_budget",
     "resolve_and_build_search_adapter",
+    "resolve_evaluator_model_identity",
+    "resolve_experiment_target",
+    "resolve_extraction_budget",
+    "run_db_path",
+    "seed_lexical_index",
 ]
 
 #: Профиль ``local`` — один процесс, реальные адаптеры in-process (дефолт, ``07``).
@@ -684,9 +703,8 @@ def _search_adapter_configured(adapter: Any) -> bool:
     """
     if not bool(getattr(adapter, "available", True)):
         return False
-    if hasattr(adapter, "api_key") and not getattr(adapter, "api_key", None):
-        return False
-    return True
+    # Атрибут ``api_key`` есть → он обязан быть непустым; нет атрибута → хватает доступности.
+    return not (hasattr(adapter, "api_key") and not getattr(adapter, "api_key", None))
 
 
 class SearchResolutionError(WiringError):
@@ -2159,7 +2177,15 @@ def preflight_extraction_budget(
                 derive_extract_workers=derive_extract_workers,
                 mem_budget_mb=mem_budget_mb,
             )
-        except Exception:  # noqa: BLE001 — резолв осей не место падать в preflight
+        except Exception as exc:  # noqa: BLE001 — отказ резолва осей не роняет preflight
+            # Тишина здесь была бы потерей: непроверенный корень = конфигурация, которую
+            # preflight «прошёл», не увидев. Отказ становится видимым предупреждением с
+            # именем корня и первой строкой ошибки, затем проверка идёт по остальным.
+            detail = (str(exc).splitlines() or [""])[0]
+            warnings.append(
+                f"crawl.extract_workers: оси корня {root} не разрешены "
+                f"({type(exc).__name__}: {detail}) — бюджет для него не проверен"
+            )
             continue
         level = limits.document_level
         pdf_pipeline = limits.pdf_pipeline

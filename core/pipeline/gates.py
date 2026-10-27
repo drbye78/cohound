@@ -41,20 +41,20 @@ from core.domain import Gate, GateDecision, GateSource, GateVerdict
 from core.ports.store import GateStore
 
 __all__ = [
-    "WAIVER_REF_PREFIX",
-    "NON_BLOCKING_REF_PREFIX",
     "NON_BLOCKING_GATES",
+    "NON_BLOCKING_REF_PREFIX",
+    "WAIVER_REF_PREFIX",
     "GateCheck",
     "GateCheckStatus",
     "evaluate_gate",
-    "record_decision",
+    "gate_decision_for",
     "gate_g1",
     "gate_g2",
     "gate_g3",
     "gate_g4",
-    "gate_decision_for",
     "gate_trail",
     "is_gate_passed",
+    "record_decision",
 ]
 
 
@@ -84,7 +84,7 @@ _BLOCKING_GATES: frozenset[Gate] = frozenset(Gate) - NON_BLOCKING_GATES
 
 def _now_iso() -> str:
     """Текущее время в ISO-8601 (UTC)."""
-    return _dt.datetime.now(_dt.timezone.utc).isoformat()
+    return _dt.datetime.now(_dt.UTC).isoformat()
 
 
 def _as_gate(gate: Gate | str) -> Gate:

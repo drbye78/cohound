@@ -27,8 +27,8 @@ from core.cli.wiring import build_store
 from core.pipeline.compute import compute, scope_universe
 from core.pipeline.gates import gate_trail
 from core.pipeline.partial_docs import human_line as partial_docs_human_line
-from core.pipeline.support_quality import support_quality_line
 from core.pipeline.report import write_reports
+from core.pipeline.support_quality import support_quality_line
 
 
 def run(args: argparse.Namespace) -> int:
@@ -112,7 +112,10 @@ def run(args: argparse.Namespace) -> int:
             store=store,
         )
 
-    assert run_id is not None and bundle is not None and manifest is not None
+    # Сужение типа для mypy: ``run_id``/``bundle``/``manifest`` присваиваются безусловно
+    # внутри ``with`` выше. ``None`` недостижим, поэтому ``raise`` завёл бы путь ошибки для
+    # несуществующего состояния; проверка остаётся инвариантом, а не отказом.
+    assert run_id is not None and bundle is not None and manifest is not None  # noqa: S101 — сужение типа для недостижимого None
     # I2/I2c: частичное извлечение — строкой, а не только файлом, который надо открыть.
     # Оператор обязан узнать «корпус неполон из-за частичного чтения» из вывода команды.
     partial_line = partial_docs_human_line(

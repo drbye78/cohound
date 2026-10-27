@@ -79,6 +79,6 @@ def verify_evidence_hash(ev: CellEvidence, resolver: SourceResolver) -> bool:
         return False
     if ev.content_hash != resolved.content_hash:
         return False
-    if ev.source_url and resolved.source_url and ev.source_url != resolved.source_url:
-        return False
+    if ev.source_url and resolved.source_url:
+        return ev.source_url == resolved.source_url
     return True

@@ -50,6 +50,11 @@ from core.domain.models import (
     RunConfig,
     ScopeAttestation,
 )
+from core.pipeline.normalize import (
+    cross_check,
+    load_scope_attestation,
+    load_scope_attestations,
+)
 from core.pipeline.package_io import (
     PackageArtifacts,
     append_apply_log,
@@ -66,55 +71,50 @@ from core.pipeline.package_io import (
     save_artifact,
     validate_case_id,
 )
-from core.pipeline.normalize import (
-    cross_check,
-    load_scope_attestation,
-    load_scope_attestations,
-)
 from core.util.security import sanitize_slug
 
 __all__ = [
     "OpResult",
     "PackageAdminError",
-    "create_package",
-    "show_package",
-    "validate_package",
-    "set_archetype",
-    "bump_version",
-    "add_module",
-    "update_module",
-    "remove_module",
-    "renormalize_modules",
-    "get_module",
-    "list_modules",
-    "add_role",
-    "update_role",
-    "remove_role",
-    "get_role",
-    "list_roles",
-    "add_param",
-    "update_param",
-    "remove_param",
-    "get_param",
-    "list_params",
-    "get_baseline",
-    "find_baselines",
-    "list_baselines",
     "add_baseline",
-    "update_baseline",
-    "remove_baseline",
-    "set_cohort",
-    "update_cohort",
+    "add_module",
+    "add_param",
+    "add_role",
+    "attest_scope",
+    "bump_version",
+    "clear_scope_attestation",
+    "create_package",
+    "find_baselines",
+    "get_artifact",
+    "get_baseline",
     "get_cohort",
+    "get_module",
+    "get_param",
+    "get_role",
+    "get_run_config",
     "get_scope_attestation",
     "get_scope_attestations",
-    "set_scope_attestation",
-    "attest_scope",
-    "clear_scope_attestation",
-    "list_golden",
-    "get_run_config",
     "list_artifacts",
-    "get_artifact",
+    "list_baselines",
+    "list_golden",
+    "list_modules",
+    "list_params",
+    "list_roles",
+    "remove_baseline",
+    "remove_module",
+    "remove_param",
+    "remove_role",
+    "renormalize_modules",
+    "set_archetype",
+    "set_cohort",
+    "set_scope_attestation",
+    "show_package",
+    "update_baseline",
+    "update_cohort",
+    "update_module",
+    "update_param",
+    "update_role",
+    "validate_package",
 ]
 
 #: Идентификаторы пакетных сущностей — ``[a-z0-9_]+``.
@@ -175,7 +175,7 @@ class OpResult:
 
 def _now() -> str:
     """UTC-метка времени авторской операции (для журнала; не влияет на артефакты)."""
-    return _dt.datetime.now(_dt.timezone.utc).isoformat()
+    return _dt.datetime.now(_dt.UTC).isoformat()
 
 
 def _validate_ident(value: str, label: str) -> str:
@@ -579,7 +579,8 @@ def set_archetype(
         ) from exc
     artifacts = _load(package_dir)
     before = prospective_lint(artifacts)
-    assert artifacts.manifest is not None
+    if artifacts.manifest is None:  # недостижимо: _load отверг пакет без package.yaml
+        raise PackageAdminError("package.yaml не загружен", kind="usage")
     if arch is Archetype.C and (artifacts.manifest.baselines or artifacts.baselines):
         raise PackageAdminError(
             "archetype-c-baselines: архетип C не заполняет baselines (§1.5/§4.2)",
@@ -610,7 +611,8 @@ def bump_version(
         )
     artifacts = _load(package_dir)
     before = prospective_lint(artifacts)
-    assert artifacts.manifest is not None
+    if artifacts.manifest is None:  # недостижимо: _load отверг пакет без package.yaml
+        raise PackageAdminError("package.yaml не загружен", kind="usage")
     major, minor, patch = _parse_semver(artifacts.manifest.package_version)
     if level == "major":
         major, minor, patch = major + 1, 0, 0
@@ -655,7 +657,8 @@ def add_module(
     _validate_ident(module_id, "module_id")
     artifacts = _load(package_dir)
     before = prospective_lint(artifacts)
-    assert artifacts.manifest is not None
+    if artifacts.manifest is None:  # недостижимо: _load отверг пакет без package.yaml
+        raise PackageAdminError("package.yaml не загружен", kind="usage")
     if any(module.module_id == module_id for module in artifacts.manifest.modules):
         raise PackageAdminError(f"модуль уже существует: {module_id}", kind="usage")
     try:
@@ -680,7 +683,8 @@ def update_module(
     """Меняет вес модуля; остальные перенормируются так, чтобы Σ = 100 (§4.2)."""
     artifacts = _load(package_dir)
     before = prospective_lint(artifacts)
-    assert artifacts.manifest is not None
+    if artifacts.manifest is None:  # недостижимо: _load отверг пакет без package.yaml
+        raise PackageAdminError("package.yaml не загружен", kind="usage")
     if not any(module.module_id == module_id for module in artifacts.manifest.modules):
         raise PackageAdminError(f"модуль не найден: {module_id}", kind="usage")
     try:
@@ -709,7 +713,8 @@ def remove_module(
     """Удаляет модуль. Если на него ссылается каталог — нужен ``reassign_to`` (§4.2)."""
     artifacts = _load(package_dir)
     before = prospective_lint(artifacts)
-    assert artifacts.manifest is not None
+    if artifacts.manifest is None:  # недостижимо: _load отверг пакет без package.yaml
+        raise PackageAdminError("package.yaml не загружен", kind="usage")
     if not any(module.module_id == module_id for module in artifacts.manifest.modules):
         raise PackageAdminError(f"модуль не найден: {module_id}", kind="usage")
     affected = sorted(row.param_id for row in artifacts.catalog if row.module == module_id)
@@ -751,7 +756,8 @@ def renormalize_modules(
     """Перенормирует веса модулей к Σ = 100 (§4.2)."""
     artifacts = _load(package_dir)
     before = prospective_lint(artifacts)
-    assert artifacts.manifest is not None
+    if artifacts.manifest is None:  # недостижимо: _load отверг пакет без package.yaml
+        raise PackageAdminError("package.yaml не загружен", kind="usage")
     modules = _apply_weights(list(artifacts.manifest.modules))
     artifacts.manifest = _rebuild_manifest(artifacts.manifest, modules=modules)
     return _finalize(
@@ -789,7 +795,8 @@ def list_modules(package_dir: str | Path, *, query: str | None = None) -> list[M
     регистронезависимо, ё→е).
     """
     artifacts = _load(package_dir)
-    assert artifacts.manifest is not None  # гарантировано _load
+    if artifacts.manifest is None:  # недостижимо: _load отверг пакет без package.yaml
+        raise PackageAdminError("package.yaml не загружен", kind="usage")
     modules = list(artifacts.manifest.modules)
     if query:
         modules = [module for module in modules if matches(module.module_id, query)]
@@ -839,7 +846,8 @@ def add_role(
     _validate_ident(role_id, "role_id")
     artifacts = _load(package_dir)
     before = prospective_lint(artifacts)
-    assert artifacts.manifest is not None
+    if artifacts.manifest is None:  # недостижимо: _load отверг пакет без package.yaml
+        raise PackageAdminError("package.yaml не загружен", kind="usage")
     if any(role.role_id == role_id for role in artifacts.manifest.roles):
         raise PackageAdminError(f"роль уже существует: {role_id}", kind="usage")
     role = _build_role(
@@ -873,7 +881,8 @@ def update_role(
     """Обновляет поля роли (``role_id`` иммутабелен)."""
     artifacts = _load(package_dir)
     before = prospective_lint(artifacts)
-    assert artifacts.manifest is not None
+    if artifacts.manifest is None:  # недостижимо: _load отверг пакет без package.yaml
+        raise PackageAdminError("package.yaml не загружен", kind="usage")
     target = next((role for role in artifacts.manifest.roles if role.role_id == role_id), None)
     if target is None:
         raise PackageAdminError(f"роль не найдена: {role_id}", kind="usage")
@@ -910,7 +919,8 @@ def remove_role(
     """Удаляет роль. Если на неё ссылается каталог — нужен ``reassign_to`` (§4.2)."""
     artifacts = _load(package_dir)
     before = prospective_lint(artifacts)
-    assert artifacts.manifest is not None
+    if artifacts.manifest is None:  # недостижимо: _load отверг пакет без package.yaml
+        raise PackageAdminError("package.yaml не загружен", kind="usage")
     if not any(role.role_id == role_id for role in artifacts.manifest.roles):
         raise PackageAdminError(f"роль не найдена: {role_id}", kind="usage")
     affected = sorted(
@@ -1023,7 +1033,9 @@ def _slug_from_title(title: str) -> str:
     """
     base = sanitize_slug(title.lower())
     if base == "node":
-        digest = hashlib.sha1(title.encode("utf-8")).hexdigest()[:8]
+        # Не хеш-защита, а детерминированный slug (8 hex-символов от заголовка):
+        # ``usedforsecurity=False`` называет это явно и работает в FIPS-режиме.
+        digest = hashlib.sha1(title.encode("utf-8"), usedforsecurity=False).hexdigest()[:8]
         return f"param_{digest}"
     return base
 
@@ -1048,7 +1060,8 @@ def add_param(
     """Добавляет параметр в ``catalog.csv`` (slug из title; коллизия → суффикс ``_2``)."""
     artifacts = _load(package_dir)
     before = prospective_lint(artifacts)
-    assert artifacts.manifest is not None
+    if artifacts.manifest is None:  # недостижимо: _load отверг пакет без package.yaml
+        raise PackageAdminError("package.yaml не загружен", kind="usage")
     _validate_links(artifacts.manifest, module=module, role_binding=role_binding)
     base = param_id or _slug_from_title(title)
     candidate = _unique_param_id({row.param_id for row in artifacts.catalog}, base)
@@ -1096,7 +1109,8 @@ def update_param(
     """Обновляет параметр; ``param_id`` иммутабелен, инварианты перепроверяются."""
     artifacts = _load(package_dir)
     before = prospective_lint(artifacts)
-    assert artifacts.manifest is not None
+    if artifacts.manifest is None:  # недостижимо: _load отверг пакет без package.yaml
+        raise PackageAdminError("package.yaml не загружен", kind="usage")
     index = next(
         (i for i, row in enumerate(artifacts.catalog) if row.param_id == param_id), None
     )

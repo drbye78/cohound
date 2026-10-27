@@ -13,8 +13,8 @@ Copyright (c) 2024). Изменения: убраны доменные веса
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Callable
 from enum import StrEnum
-from typing import Callable
 
 # Результат ретривала: минимум — стабильный идентификатор и текстовое представление.
 ResultDict = dict[str, object]

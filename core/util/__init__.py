@@ -1,16 +1,16 @@
 """coHound — утилиты ядра (категорийно-нейтральные, без внешних тяжёлых зависимостей)."""
 
 __all__ = [
-    "text_utils",
-    "security",
-    "fusion",
-    "retrieval_eval",
     "agreement",
-    "ids",
-    "hashing",
     "cache",
-    "sanitize",
+    "fusion",
+    "hashing",
+    "ids",
     "logging",
-    "rate_limit",
     "memory",
+    "rate_limit",
+    "retrieval_eval",
+    "sanitize",
+    "security",
+    "text_utils",
 ]

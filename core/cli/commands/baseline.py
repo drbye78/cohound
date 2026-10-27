@@ -48,7 +48,7 @@ from core.util.agreement import (
     parse_annotations_csv,
 )
 
-__all__ = ["run", "configure"]
+__all__ = ["configure", "run"]
 
 
 def _kappa_payload(result: KappaResult) -> dict[str, Any]:
@@ -152,7 +152,7 @@ def _print_report(payload: dict[str, Any]) -> None:
     for label, count in payload["unknown_labels"].items():
         lines.append(f"unknown label: {label!r} × {count} (вне словаря статусов)")
     lines.append(
-        f"note: N/A-решения задают знаменатель Coverage (I6/I7) — κ по N/A публикуется "
+        "note: N/A-решения задают знаменатель Coverage (I6/I7) — κ по N/A публикуется "
         "отдельно (§11.5)"
     )
     lines.append(f"ok: {'yes' if payload['ok'] else 'no'}")

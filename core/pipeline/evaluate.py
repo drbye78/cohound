@@ -111,9 +111,7 @@ __all__ = [
     "DEFAULT_QUERY_EMBED_BATCH",
     "DEFAULT_RETRIEVAL_CUTOFF_K",
     "DEFAULT_RETRIEVAL_PROFILE",
-    "EvaluationOutcome",
     "REVALIDATE_FAILED_PREFIX",
-    "SUPPORT_CONCENTRATION_QUOTE_LIMIT",
     "REVALIDATE_NOTHING_TO_DO",
     "REVALIDATE_SKIP_BUILD_MISMATCH",
     "REVALIDATE_SKIP_NO_EVALUATOR",
@@ -121,13 +119,15 @@ __all__ = [
     "REVALIDATE_STATUS_NOOP",
     "REVALIDATE_STATUS_REEVALUATED",
     "REVALIDATE_STATUS_REFUSED",
-    "RevalidationReport",
     "STALE_SKIP_NO_BUILD",
     "STALE_SKIP_PARAM",
     "STALE_SKIP_SOURCE_KIND",
     "STALE_SKIP_STATE",
     "STALE_SKIP_UNKNOWN_BUILD",
+    "SUPPORT_CONCENTRATION_QUOTE_LIMIT",
     "SUPPORT_NOT_ABOUT_SUBJECT",
+    "EvaluationOutcome",
+    "RevalidationReport",
     "StaleSelection",
     "SupportSubjectOverlap",
     "compose_review_reason",
@@ -349,7 +349,7 @@ def precompute_query_vectors(
             raise ValueError(
                 f"эмбеддер вернул {len(vectors)} векторов на {len(batch)} запросов"
             )
-        for text, vector in zip(batch, vectors):
+        for text, vector in zip(batch, vectors, strict=True):
             store[text] = list(vector)
     return {text: store[text] for text in texts}
 
@@ -399,7 +399,9 @@ def precompute_dense_hits(
     if not requests:
         return None
     hits = batched_search(vector_index, requests)
-    return {text: list(batch) for text, batch in zip(queries, hits)}
+    # Контракт ``batched_search``: ``hits[i]`` — выдача ``queries[i]``. ``strict=True`` —
+    # чтобы реализация, вернувшая не то число выдач, падала видимо, а не теряла запросы.
+    return {text: list(batch) for text, batch in zip(queries, hits, strict=True)}
 
 
 def retrieve_for_cell(
@@ -444,9 +446,11 @@ def retrieve_for_cell(
     for query in queries:
         vector = None
         dense_hits = None if dense_by_query is None else dense_by_query.get(query)
-        if resolved_profile in (RetrievalProfile.R1, RetrievalProfile.R2):
-            if dense_hits is None:
-                vector = _query_vector(query, query_vectors, embedder)
+        if (
+            resolved_profile in (RetrievalProfile.R1, RetrievalProfile.R2)
+            and dense_hits is None
+        ):
+            vector = _query_vector(query, query_vectors, embedder)
         result = retrieve(
             query_text=query,
             query_vector=vector,
@@ -1293,7 +1297,7 @@ def _coverage_for(
             complete=False,
             expected_sources=0,
             observed_sources=0,
-            computed_at=_dt.datetime.now(_dt.timezone.utc).isoformat(),
+            computed_at=_dt.datetime.now(_dt.UTC).isoformat(),
             reason=FailureKind.COVERAGE_MISSING.value,
         )
     return None
@@ -1746,7 +1750,8 @@ def evaluate_cell(
                 break
             last_kind = FailureKind.VALIDATION_FAILED.value
 
-    assert last_validation is not None  # цикл выполняет ≥1 попытку
+    if last_validation is None:  # цикл обязан исполнить ≥1 попытку (max_retries ≥ 0)
+        raise RuntimeError("цикл валидации не исполнил ни одной попытки: max_retries < 0")
 
     # Успешная валидация — оцениваем ячейку.
     if last_validation.ok and last_response is not None:

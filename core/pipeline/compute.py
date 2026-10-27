@@ -70,10 +70,10 @@ from core.ports.store import StorePort
 
 __all__ = [
     "ScoreBundle",
+    "assert_publishable",
     "bundle_for_run",
     "compute",
     "per_product_bundle",
-    "assert_publishable",
     "publish_warnings",
     "publishability_notes",
     "scope_universe",
@@ -302,9 +302,12 @@ def _compute_from_cells(
     # фантомные модули с нулевым покрытием). Coverage в universe-режиме исключает
     # preliminary по тому же правилу, поэтому отдельный assert эквивалентности не нужен.
     measured = [cell for cell in fresh if cell.state is not CellState.PRELIMINARY]
-    assert resolved_capability(fresh, catalog, module_weights) == resolved_capability(
+    # Проверка эквивалентности исполняется всегда (не ``assert``): инвариант I13 обязан
+    # ловить нарушение и под ``python -O``, иначе preliminary тихо влияли бы на Capability.
+    if resolved_capability(fresh, catalog, module_weights) != resolved_capability(
         measured, catalog, module_weights
-    ), "I13: preliminary не должны влиять на Capability"
+    ):
+        raise RuntimeError("I13: preliminary не должны влиять на Capability")
 
     universe_set = set(universe) if universe is not None else None
     report = sensitivity(

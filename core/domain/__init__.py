@@ -5,6 +5,12 @@
 
 from __future__ import annotations
 
+from core.domain.anchors import (
+    ResolvedSource,
+    SourceResolver,
+    resolve_source_url,
+    verify_evidence_hash,
+)
 from core.domain.dictionary import assert_dictionary_integrity, load_dictionary
 from core.domain.enums import (
     ABSENT_DENIAL_STRENGTHS,
@@ -71,7 +77,22 @@ from core.domain.enums import (
     UnknownCause,
     UnknownPolicy,
 )
+from core.domain.invariants import (
+    EXHAUSTION_CONTOURS,
+    REQUIRED_EXHAUSTION_CONTOURS,
+    check_absence_coverage,
+    check_cell,
+    check_derived_evidence,
+    check_evidence,
+    check_inheritance,
+    check_satellite,
+    check_unknown_exhaustion,
+)
 from core.domain.models import (
+    EVAL_SCHEMA_VERSION,
+    METHODOLOGY_VERSION,
+    AlignmentReport,
+    ArchiveObservation,
     BaselineRow,
     CatalogRow,
     Cell,
@@ -80,9 +101,8 @@ from core.domain.models import (
     Cohort,
     CohortEntry,
     CorpusChunk,
-    CorpusDoc,
     CorpusCoverage,
-    ArchiveObservation,
+    CorpusDoc,
     CorpusMember,
     CrawlProvenance,
     CrawlRunConfig,
@@ -94,18 +114,15 @@ from core.domain.models import (
     GateDecision,
     GoldenRow,
     IndexManifestEntry,
-    ProfileAttestationRow,
-    EVAL_SCHEMA_VERSION,
     LLMCellOutput,
     LLMEvidence,
-    AlignmentReport,
-    METHODOLOGY_VERSION,
     ModuleDef,
     PackageManifest,
     Passport,
     ProductPlan,
     ProductPlanSet,
     ProductSeeds,
+    ProfileAttestationRow,
     ProtocolExhaustion,
     RateLimitSpec,
     RegistryFact,
@@ -127,23 +144,6 @@ from core.domain.models import (
     derived_evidence_id,
 )
 from core.domain.r2 import apply_r2
-from core.domain.invariants import (
-    EXHAUSTION_CONTOURS,
-    REQUIRED_EXHAUSTION_CONTOURS,
-    check_absence_coverage,
-    check_cell,
-    check_derived_evidence,
-    check_evidence,
-    check_inheritance,
-    check_satellite,
-    check_unknown_exhaustion,
-)
-from core.domain.anchors import (
-    ResolvedSource,
-    SourceResolver,
-    resolve_source_url,
-    verify_evidence_hash,
-)
 from core.domain.scoring import (
     DEFAULT_COVERAGE_FLOOR,
     DEFAULT_UNKNOWN_SHARE_THRESHOLD,
@@ -165,7 +165,11 @@ from core.domain.scoring import (
     sensitivity,
 )
 
-__all__ = [
+# RUF022 (сортировка ``__all__``) неприменим по существу: порядок здесь — **слои**
+# (enums → константы → models → …), и каждый блок несёт свой комментарий. Алфавитная
+# сортировка смешала бы слои и оторвала бы комментарии от групп, то есть уничтожила бы
+# единственную существующую карту публичного API домена.
+__all__ = [  # noqa: RUF022
     # enums
     "AbsenceRuleType",
     "AdapterKind",

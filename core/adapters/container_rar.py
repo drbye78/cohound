@@ -25,6 +25,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import shutil
 from collections.abc import Iterator, Mapping
 from types import ModuleType
@@ -127,10 +128,11 @@ def _is_dir(entry: Any) -> bool:
     """Запись-каталог (``rarfile`` отдаёт метод ``is_dir()``)."""
     probe = getattr(entry, "is_dir", None)
     if callable(probe):
-        try:
+        # Битый заголовок не должен ронять листинг: ответ даёт эвристика ниже (слеш в
+        # конце имени). Тишина верна, потому что вердикт всё равно будет вынесен —
+        # меняется только его источник.
+        with contextlib.suppress(Exception):
             return bool(probe())
-        except Exception:  # noqa: BLE001 — битый заголовок не должен ронять листинг
-            pass
     return str(_field(entry, "filename", "")).endswith("/")
 
 
@@ -152,18 +154,21 @@ def _encrypted(archive: Any, infos: list[Any]) -> bool:
     """Требует ли архив пароля: предикат архива, иначе — предикаты членов."""
     probe = getattr(archive, "needs_password", None)
     if callable(probe):
-        try:
+        # Битый заголовок архива не должен ронять листинг: ниже — предикаты членов, они
+        # и дают ответ, когда архив его не дал.
+        with contextlib.suppress(Exception):
             return bool(probe())
-        except Exception:  # noqa: BLE001 — битый заголовок не должен ронять листинг
-            pass
     for info in infos:
         member_probe = getattr(info, "needs_password", None)
-        if callable(member_probe):
-            try:
-                if member_probe():
-                    return True
-            except Exception:  # noqa: BLE001
-                continue
+        if not callable(member_probe):
+            continue
+        # Сбой предиката одного члена не роняет листинг и не решает за остальных:
+        # опрашиваем все записи. Если не ответил ни один, исход — «не заявлено»
+        # (``False``), ровно как у бэкенда без предиката: ``ContainerInfo.encrypted``
+        # третьего состояния не имеет, и выдумывать «зашифрован» нельзя.
+        with contextlib.suppress(Exception):
+            if member_probe():
+                return True
     return False
 
 

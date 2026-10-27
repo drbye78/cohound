@@ -70,8 +70,8 @@ from core.cli.wiring import (
 from core.config.deploy import LLM_SLOTS, load_deploy_config
 from core.domain.enums import SkipReason
 from core.pipeline import (
-    DEFAULT_PROFILES,
     BENCHMARK_CONTRACT,
+    DEFAULT_PROFILES,
     BenchmarkPreconditionError,
     ModelUnderTest,
     load_retrieval_golden,
@@ -82,7 +82,7 @@ from core.pipeline import (
 from core.pipeline.evaluate import DEFAULT_RETRIEVAL_CUTOFF_K
 from core.pipeline.retrieve import DEFAULT_RRF_K
 
-__all__ = ["run", "run_evaluator_benchmark", "configure"]
+__all__ = ["configure", "run", "run_evaluator_benchmark"]
 
 #: Настройки-предпосылки: попадают в артефакт, но НЕ измерены этим прогоном.
 #: ``retrieval_cutoff_K`` задан оператором/зафиксирован ранее, ``rrf_k`` не варьируется
@@ -413,7 +413,7 @@ def _build_benchmark_models(
 
 def _benchmark_artifact_path(db_path: str | Path) -> Path:
     """``runs/{run_id}/benchmark/evaluator-<timestamp>.json`` рядом с БД прогона."""
-    stamp = _dt.datetime.now(_dt.timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    stamp = _dt.datetime.now(_dt.UTC).strftime("%Y%m%dT%H%M%S%fZ")
     return Path(str(db_path)).parent / BENCHMARK_ARTIFACT_DIR / f"evaluator-{stamp}.json"
 
 def _fmt_ci_dict(data: dict[str, Any] | None) -> str:

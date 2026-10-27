@@ -24,8 +24,9 @@ Coverage и публикуемость и не вводят порогов (A3: 
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Mapping
 from pathlib import Path
-from typing import Any, Iterable, Mapping
+from typing import Any
 
 import yaml
 
@@ -46,7 +47,7 @@ def _params_by_id(catalog: Any) -> dict[str, Any]:
     """Каталог по ``param_id`` — независимо от того, дали его словарём или списком."""
     if isinstance(catalog, Mapping):
         return {str(key): row for key, row in catalog.items()}
-    return {str(getattr(row, "param_id")): row for row in (catalog or ())}
+    return {str(row.param_id): row for row in (catalog or ())}
 
 
 def _quotes_by_cell(store: Any, run_id: str) -> dict[tuple[str, str], list[str]]:

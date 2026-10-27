@@ -38,12 +38,12 @@ from core.ports.search import SearchAdapterPort, SearchQuery, SearchResult
 from core.util.security import sanitize_slug
 
 __all__ = [
-    "DiscoveryStatus",
-    "ReviewAction",
     "BudgetPort",
-    "ReviewDecision",
     "DiscoveryCandidate",
     "DiscoveryReport",
+    "DiscoveryStatus",
+    "ReviewAction",
+    "ReviewDecision",
     "discover",
     "review_candidates",
 ]

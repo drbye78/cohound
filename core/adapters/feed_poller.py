@@ -126,11 +126,10 @@ def _params_messages(kind: str, params: Mapping[str, Any]) -> list[str]:
         messages.append(f"params.limit={limit!r} недопустим: ожидается целое > 0")
 
     since = params.get("since")
-    if since is not None:
-        if not isinstance(since, str) or parse_instant(since) is None:
-            messages.append(
-                f"params.since={since!r} недопустим: ожидается ISO-8601/RFC822-метка времени"
-            )
+    if since is not None and (not isinstance(since, str) or parse_instant(since) is None):
+        messages.append(
+            f"params.since={since!r} недопустим: ожидается ISO-8601/RFC822-метка времени"
+        )
 
     return messages
 

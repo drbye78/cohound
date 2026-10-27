@@ -36,11 +36,11 @@ from core.util.security import sanitize_slug
 __all__ = [
     "ArchetypeHypothesis",
     "BaselineProposal",
-    "infer_archetype",
     "compose_baselines",
+    "infer_archetype",
+    "suggest_cohort_members",
     "suggest_modules",
     "suggest_roles",
-    "suggest_cohort_members",
 ]
 
 #: Уровень уверенности, ниже которого предложение требует человеческого решения.
@@ -217,10 +217,7 @@ def _param_ids(catalog: Sequence[CatalogRow], scope: Any) -> list[str]:
     ordered = sorted({row.param_id for row in catalog})
     if scope in (None, "all"):
         return ordered
-    if isinstance(scope, str):
-        wanted = [scope]
-    else:
-        wanted = [str(item) for item in scope]
+    wanted = [scope] if isinstance(scope, str) else [str(item) for item in scope]
     wanted_set = set(wanted)
     # Если scope не пересекается с param_id, трактуем его как имя модуля.
     if wanted_set & set(ordered):

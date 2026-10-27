@@ -17,15 +17,15 @@ from core.domain.models import RateLimitSpec
 # Переиспользуем доменные оси (D2/D4): краулер видит ``fetch``/``extract``/``strategy``
 # как value-объекты, не как строки. Реэкспорт — чтобы адаптеры/edge импортировали их из порт-слоя.
 __all__ = [
+    "Chunk",
+    "CrawlStrategy",
+    "ExtractedDoc",
     "ExtractionRoute",
     "FetchMode",
-    "CrawlStrategy",
-    "RateLimitSpec",
     "FetchPlan",
-    "RawPage",
-    "ExtractedDoc",
-    "Chunk",
     "ProductRef",
+    "RateLimitSpec",
+    "RawPage",
 ]
 
 

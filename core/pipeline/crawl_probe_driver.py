@@ -47,7 +47,6 @@ from dataclasses import dataclass
 from typing import Any
 
 from core.domain.enums import CrawlStrategy, ExtractionRoute, FetchMode
-from core.ports.types import FetchPlan, RawPage
 from core.pipeline.crawl_probe import (
     DEFAULT_DOCUMENT_SUFFIXES,
     PROBE_RATE_LIMIT,
@@ -62,6 +61,7 @@ from core.pipeline.crawl_probe import (
     pick_urls,
     unresolved_verdict,
 )
+from core.ports.types import FetchPlan, RawPage
 from core.util.rate_limit import RateLimiter, jittered_backoff
 
 __all__ = [

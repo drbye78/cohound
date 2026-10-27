@@ -16,7 +16,7 @@ G2 (A3); порт не пишет evidence и не импортирует ``LLMC
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
 
 from pydantic import BaseModel
@@ -24,9 +24,9 @@ from pydantic import BaseModel
 from core.ports.llm import TokenUsage
 
 __all__ = [
+    "DiscoveryLLMPort",
     "DiscoveryLLMRequest",
     "DiscoveryLLMResponse",
-    "DiscoveryLLMPort",
 ]
 
 
@@ -61,7 +61,11 @@ class DiscoveryLLMResponse:
     raw: str
     prompt_hash: str
     decoder: str = "none"
-    usage: TokenUsage = TokenUsage()
+    # ``default_factory``, а не общий ``TokenUsage()``: не про алиасинг (``TokenUsage``
+    # объявлен ``frozen=True`` и мутировать его нельзя), а про форму — ruff-правило
+    # RUF009 требует ``default_factory`` для вызываемого дефолта, и один канон в обоих
+    # портах дешевле двух. Видимое значение дефолта то же (нули).
+    usage: TokenUsage = field(default_factory=TokenUsage)
     reasoning_tokens: int = 0
 
 

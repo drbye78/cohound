@@ -31,7 +31,7 @@ from typing import Any
 
 from core.util.security import sanitize_filename
 
-__all__ = ["PhaseLogger", "LEVELS", "LEVEL_RANK", "HAS_STRUCTLOG"]
+__all__ = ["HAS_STRUCTLOG", "LEVELS", "LEVEL_RANK", "PhaseLogger"]
 
 #: Допустимые уровни (04 §B.1), по возрастанию важности.
 LEVELS: tuple[str, ...] = ("DEBUG", "INFO", "WARN", "ERROR")
@@ -50,7 +50,7 @@ except ImportError:  # pragma: no cover - штатный путь без вне�
 
 def _utc_now_iso() -> str:
     """Текущее время UTC в ISO-8601 (дефолтные часы)."""
-    return _dt.datetime.now(_dt.timezone.utc).isoformat()
+    return _dt.datetime.now(_dt.UTC).isoformat()
 
 
 def _json_dumps(obj: Any, **kwargs: Any) -> str:

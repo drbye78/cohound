@@ -45,12 +45,12 @@ from collections.abc import Callable, Sequence
 from typing import Any
 
 __all__ = [
+    "DEFAULT_BATCH_SIZE",
+    "DEFAULT_DIM",
+    "DEFAULT_MODEL_ID",
+    "EmbedFn",
     "EmbedderUnavailable",
     "LocalEmbedder",
-    "EmbedFn",
-    "DEFAULT_MODEL_ID",
-    "DEFAULT_DIM",
-    "DEFAULT_BATCH_SIZE",
 ]
 
 #: Модель-кандидат по умолчанию (05 §2.3, V3): плотные мультиязычные эмбеддинги bge-m3.

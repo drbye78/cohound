@@ -17,7 +17,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-__all__ = ["STATE_SCHEMA_VERSION", "STATE_DDL", "connect_state", "state_db_path"]
+__all__ = ["STATE_DDL", "STATE_SCHEMA_VERSION", "connect_state", "state_db_path"]
 
 #: Версия схемы ``state.db`` (пишется в ``schema_meta.schema_version``).
 #: 2 — аддитивно: ``run_lineage.products_json`` (состав когорты прогона) и

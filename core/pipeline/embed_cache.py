@@ -77,14 +77,16 @@ float32/float64: кэш не имеет права менять измеряем
 
 from __future__ import annotations
 
+import contextlib
 import json
 import math
 import os
 import re
 import struct
 import tempfile
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any
 
 from core.util.hashing import short_hash
 
@@ -412,10 +414,11 @@ class EmbedCache:
                 os.fsync(handle.fileno())
             os.replace(tmp, path)
         except OSError:
-            try:
+            # Уборка временного файла — best-effort и молча: исходная ошибка записи уже
+            # видна вызывающему (``None`` = «не закэшировано»), второй отказ (файл снят
+            # другим процессом / нет прав) этого факта не меняет и не должен подменять.
+            with contextlib.suppress(OSError):
                 tmp.unlink()
-            except OSError:
-                pass
             return None
         return path
 

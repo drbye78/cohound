@@ -20,9 +20,10 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any
 
 from core.pipeline import package_admin as _admin
 from core.pipeline import package_discovery as _discovery
@@ -32,11 +33,11 @@ from core.pipeline.package_io import load_artifacts
 __all__ = [
     "CANDIDATE_KINDS",
     "Candidate",
-    "plan_candidates",
     "apply_candidate",
     "apply_candidates",
     "dumps_candidates",
     "loads_candidates",
+    "plan_candidates",
 ]
 
 #: Допустимые виды кандидатов (маршрутизируются в ``add_*``/``update_*``).

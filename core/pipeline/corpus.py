@@ -145,6 +145,7 @@ URL/документов/чанков:
 
 from __future__ import annotations
 
+import contextlib
 import datetime as _dt
 import errno
 import hashlib
@@ -153,7 +154,6 @@ import operator
 import os
 import shutil
 import time
-import uuid
 from collections import deque
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from concurrent.futures import Executor, ThreadPoolExecutor
@@ -189,6 +189,22 @@ from core.domain import (
     RefreshPolicy,
     ReuseKind,
 )
+from core.pipeline.archive_descent import (
+    SKIP_EXTRACT_FAILED,
+    SKIP_EXTRACT_UNAVAILABLE,
+    ArchiveDescentWalker,
+    DescentBudget,
+    MemberDeferral,
+    MemberOutcome,
+    MemberTask,
+)
+from core.pipeline.artifact_probe import probe_artifact
+from core.pipeline.artifacts_gap import write_artifacts_gap
+from core.pipeline.composition import (
+    CompositionView,
+    derive_composition_id,
+    write_composition,
+)
 from core.pipeline.crawl_frontier import (
     SCOPE_ARTIFACT_OUTSIDE_PREFIX,
     SCOPE_OUT,
@@ -198,28 +214,12 @@ from core.pipeline.crawl_frontier import (
     normalize_scope_host,
     resolve_crawl_limits,
 )
-from core.pipeline.archive_descent import (
-    ArchiveDescentWalker,
-    DescentBudget,
-    MemberDeferral,
-    MemberOutcome,
-    MemberTask,
-    SKIP_EXTRACT_FAILED,
-    SKIP_EXTRACT_UNAVAILABLE,
-)
-from core.pipeline.artifact_probe import probe_artifact
-from core.pipeline.artifacts_gap import write_artifacts_gap
 from core.pipeline.crawl_session import (
     default_session_id,
     finalize_session,
     open_session,
     prior_items,
     read_provenance,
-)
-from core.pipeline.composition import (
-    CompositionView,
-    derive_composition_id,
-    write_composition,
 )
 from core.pipeline.crawl_sources import (
     CrawlTarget,
@@ -228,7 +228,10 @@ from core.pipeline.crawl_sources import (
 )
 from core.pipeline.embed_cache import EmbedCache
 from core.pipeline.extract_cache import ExtractionCache
-from core.pipeline.fetch_plan import _host_matches, resolve_fetch_plan, select_domain_profile
+from core.pipeline.fetch_plan import (
+    _host_matches,
+    select_domain_profile,
+)
 from core.pipeline.incremental import (
     IncrementalItem,
     chunk_row_id,
@@ -285,10 +288,10 @@ from core.util.document_formats import (
     unsupported_binary_reason,
 )
 from core.util.hashing import content_hash, short_hash
+from core.util.html_links import extract_links
 from core.util.index_partition import build_root as _partition_root
 from core.util.index_partition import is_committed as _partition_is_committed
 from core.util.index_partition import read_manifest as _read_partition_manifest
-from core.util.html_links import extract_links
 from core.util.rate_limit import RateLimiter
 from core.util.security import validate_url
 
@@ -1052,10 +1055,10 @@ def _worker_extractor_for(
     извлечь текст не тем движком, чем объявлено.
     """
     if _WORKER_EXTRACTOR is not None and (
-        _WORKER_EXTRACTOR_LEVEL is None or _WORKER_EXTRACTOR_LEVEL == level
+        _WORKER_EXTRACTOR_LEVEL is None or level == _WORKER_EXTRACTOR_LEVEL
     ) and (
         _WORKER_EXTRACTOR_PIPELINE is None
-        or _WORKER_EXTRACTOR_PIPELINE == pdf_pipeline
+        or pdf_pipeline == _WORKER_EXTRACTOR_PIPELINE
     ):
         return _WORKER_EXTRACTOR
     if _WORKER_EXTRACTOR_FACTORY is not None:
@@ -1372,10 +1375,12 @@ class _ExtractPools:
         terminate = getattr(executor, "terminate_workers", None)
         if terminate is None:
             return
-        try:
+        # Reaping — best-effort: воркер мог умереть сам или не поддерживать terminate.
+        # Молчание здесь верно, потому что след не теряется: пул всё равно сбрасывается
+        # (:meth:`discard`/``rebuild``), а вызывающий пишет видимую запись о мёртвом пуле
+        # в ``errors`` при исчерпании пересборок.
+        with contextlib.suppress(Exception):
             terminate()
-        except Exception:  # noqa: BLE001 — reaping best-effort
-            pass
 
     def discard(self, key: _ExtractPoolKey) -> None:
         """Закрывает пул ключа синхронно и отменяет запланированное (P0/OOM)."""
@@ -1384,18 +1389,17 @@ class _ExtractPools:
         slot.executor = None
         if executor is None:
             return
-        try:
-            # P0/OOM: дождаться реального завершения воркеров и отменить запланированное.
-            # ``wait=False`` оставлял бы старые процессы живыми поверх следующего корня
-            # (двойной рабочий набор → OOM).
-            executor.shutdown(wait=True, cancel_futures=True)
-        except TypeError:  # фейки/старые исполнители без cancel_futures
+        # Reaping best-effort: сбой ``shutdown`` не отменяет факт «слот сброшен» — новый
+        # пул ключа создаётся заново, а исчерпание пересборок видно вызывающему
+        # (``rebuild`` → ``False`` → терминальный отказ в ``errors``).
+        with contextlib.suppress(Exception):
             try:
+                # P0/OOM: дождаться реального завершения воркеров и отменить запланированное.
+                # ``wait=False`` оставлял бы старые процессы живыми поверх следующего корня
+                # (двойной рабочий набор → OOM).
+                executor.shutdown(wait=True, cancel_futures=True)
+            except TypeError:  # фейки/старые исполнители без cancel_futures
                 executor.shutdown(wait=True)
-            except Exception:  # noqa: BLE001 — reaping best-effort
-                pass
-        except Exception:  # noqa: BLE001 — reaping best-effort
-            pass
 
     def rebuild(self, key: _ExtractPoolKey) -> bool:
         """Discard + bounded rebuild; ``False`` — пересборки исчерпаны (ключ abandon'ен)."""
@@ -1744,7 +1748,7 @@ def _sitemap_skip_class(loc: str, root_url: str) -> str:
 
 def _now_iso() -> str:
     """Текущее время в ISO-8601 (UTC) — для провенанса элементов сеанса (L1a)."""
-    return _dt.datetime.now(_dt.timezone.utc).isoformat()
+    return _dt.datetime.now(_dt.UTC).isoformat()
 
 
 def _work_set_idempotency_key(work: Sequence[CrawlWorkItem]) -> str:
@@ -2173,7 +2177,7 @@ class _EmbedCensus:
         total = self.processed
         if total <= 0:
             return 0
-        return int(round(100.0 * self.cached / total))
+        return round(100.0 * self.cached / total)
 
 
 @dataclass
@@ -2225,7 +2229,7 @@ class _EmbedThroughput:
             return 0
         if self.rate is None or self.rate <= 0:
             return None
-        return int(round((total - done) / self.rate))
+        return round((total - done) / self.rate)
 
 
 def format_embed_progress(
@@ -2249,7 +2253,7 @@ def format_embed_progress(
     """
     parts = [f"{done}/{total} чанков"]
     if cached is not None:
-        share = int(round(100.0 * cached / done)) if done > 0 else 0
+        share = round(100.0 * cached / done) if done > 0 else 0
         parts.append(f"из кэша {cached} ({share}%)")
     if rate is not None and rate > 0:
         parts.append(f"{rate:.2f} чанк/с")
@@ -2311,10 +2315,11 @@ def _make_embed_reporter(
         if progress is None:
             return
         if session is not None:
-            try:
+            # Прогресс информационен: агрегат сеанса дополняет живую строку, а его
+            # недоступность не роняет фазу. Оператор видит остальные ключи строки
+            # (``embed_*`` заполняются ниже безусловно) и итоговую строку продукта.
+            with contextlib.suppress(Exception):
                 counts.update(dict(store.crawl_session_counts(session)))
-            except Exception:  # noqa: BLE001 — прогресс информационен
-                pass
         counts["embed_chunks"] = done
         counts["embed_chunks_total"] = total
         counts["embed_elapsed_s"] = int(elapsed)
@@ -2322,13 +2327,13 @@ def _make_embed_reporter(
             counts["embed_cached"] = census.cached
             counts["embed_hit_ratio_pct"] = census.hit_ratio_pct
         if rate is not None and rate > 0:
-            counts["embed_chunks_per_min"] = int(round(rate * 60.0))
+            counts["embed_chunks_per_min"] = round(rate * 60.0)
         if eta is not None:
             counts["embed_eta_s"] = int(eta)
-        try:
+        # Сбой колбэка ``--follow`` не роняет эмбеддинг: результат прогона от него не
+        # зависит, а полная картина всё равно публикуется итоговой строкой продукта.
+        with contextlib.suppress(Exception):
             progress(dict(counts))
-        except Exception:  # noqa: BLE001 — прогресс информационен
-            pass
 
     return _report
 
@@ -2810,7 +2815,7 @@ def _resume_page(
     if not fetched_at:
         try:
             fetched_at = _dt.datetime.fromtimestamp(
-                retained.path.stat().st_mtime, tz=_dt.timezone.utc
+                retained.path.stat().st_mtime, tz=_dt.UTC
             ).isoformat()
         except OSError:
             fetched_at = ""
@@ -4326,10 +4331,11 @@ def _build_corpus(
                 raw_path.write_bytes(page.content)
         except Exception as exc:  # noqa: BLE001
             if staged is not None:
-                try:
+                # Сбой удаления staging-файла не меняет исход: retention уже провален и
+                # его причина ниже попадёт в ``errors`` (и в элемент сеанса). Осиротевший
+                # staging-файл — цена меньше, чем подмена причины отказа.
+                with contextlib.suppress(OSError):
                     staged.unlink(missing_ok=True)
-                except OSError:
-                    pass
             reason = f"{type(exc).__name__}: {exc}"
             errors.append(f"{product_id}/{url}: retention: {reason}")
             if manual:
@@ -4950,7 +4956,13 @@ def _build_corpus(
         (без молчаливого дропа), сеанс финализируется ``PARTIAL``. Отвергнутые ``submit`` не
         создают заданий, поэтому повтор после деления безопасен.
         """
-        assert executor is not None
+        if executor is None:
+            # Внутренний инвариант: волны подаёт только транспортный путь (``split``).
+            # Явная проверка, а не ``assert``: под ``-O`` assert исчез, и функция упала бы
+            # позже на ``executor.submit`` с неинформативным ``AttributeError``.
+            raise AssertionError(
+                "_submit_collect вызван без исполнителя (локальный краул волны не подаёт)"
+            )
         if not work:
             return {}
 
@@ -5104,10 +5116,10 @@ def _build_corpus(
         heartbeat.touch()
         if progress is None or session is None:
             return
-        try:
+        # Сбой колбэка ``--follow`` не роняет дренаж: прогресс наблюдаем, но не измеряем.
+        # Оператор увидит потерю живых строк и итоговые счётчики фазы/продукта в отчёте.
+        with contextlib.suppress(Exception):
             progress(dict(store.crawl_session_counts(session)))
-        except Exception:  # noqa: BLE001 — прогресс информационен
-            pass
 
     def _emit_product(phase: str, product_id: str) -> None:
         """Живая граница продукта для ``on_product`` (``--follow``).
@@ -5118,10 +5130,10 @@ def _build_corpus(
         """
         if on_product is None:
             return
-        try:
+        # Сбой колбэка границы продукта тоже не роняет фазу: продукт дренируется дальше,
+        # а его исход виден в ``errors``/провенансе и в ``crawl_product`` итогового отчёта.
+        with contextlib.suppress(Exception):
             on_product(phase, product_id)
-        except Exception:  # noqa: BLE001 — прогресс информационен
-            pass
 
     _emit_progress()
 
@@ -5189,10 +5201,11 @@ def _build_corpus(
             # продолжает работу. ``cancel`` на уже исполняемом future — no-op.
             cancel = getattr(item.future, "cancel", None)
             if cancel is not None:
-                try:
+                # Инвалидация best-effort: задание всё равно коммитится как
+                # ``extraction_timeout`` ниже, поэтому оператор видит исход артефакта
+                # независимо от того, удалось ли отменить future.
+                with contextlib.suppress(Exception):
                     cancel()
-                except Exception:  # noqa: BLE001 — инвалидация best-effort
-                    pass
             item.commit(None, "extraction timeout", FailureKind.EXTRACTION_TIMEOUT)
             if pools.note_timeout(item.pool_key):
                 # ``2 × timeout`` без единого завершения: пул мёртв — reap + bounded rebuild.
@@ -5717,10 +5730,11 @@ def _build_corpus(
         # очистка (на диске остаётся, но сессия больше на него не опирается).
         if desc.reject is not None:
             reject = desc.reject
-            try:
+            # Сбой удаления файла не меняет исход: отказ уже терминальный и виден в
+            # ``errors`` + элементе сеанса (``raw_path``/``content_hash`` очищены, то есть
+            # байты вне evidence). Неудалённый файл — вопрос retention, не вердикта.
+            with contextlib.suppress(OSError):
                 reject.path.unlink(missing_ok=True)
-            except OSError:
-                pass
             errors.append(f"{pid}/{wu}: {reject.error_kind.value}: {reject.reason}")
             _mark(
                 pid,
@@ -5735,7 +5749,12 @@ def _build_corpus(
             return None
 
         if desc.resume is not None:
-            assert desc.prior_item is not None  # resume возможен только при наличии элемента
+            if desc.prior_item is None:
+                # Инвариант сборки ``_LocalFetch``: resume существует только у элемента,
+                # который уже был в сеансе (иначе возобновлять нечего).
+                raise AssertionError(
+                    f"{pid}/{wu}: resume без prior_item — _LocalFetch собран неверно"
+                )
             retained = desc.resume
             # 09 §6.3: валидаторы сеанс не хранит — они приходят из ``url_state`` (durable),
             # чтобы запись состояния после resume не потеряла условную валидацию.
@@ -6605,7 +6624,9 @@ def _build_corpus(
                 skipped_by_root,
                 skipped_by_origin,
                 revalidation_deferred_total,
-                revalidation_skipped_total,
+                # skipped_total: контракт возвращает, но потребителя нет — деталь
+                # считается по ``skipped_by_root``/``skipped_by_origin`` (провенанс корня).
+                _revalidation_skipped_total,
                 revalidation_cap_fired,
             ) = _apply_revalidation_cap(
                 product_id,
@@ -6626,7 +6647,6 @@ def _build_corpus(
             skipped_by_root = {}
             skipped_by_origin = {}
             revalidation_deferred_total = 0
-            revalidation_skipped_total = 0
             revalidation_cap_fired = False
         #: **Все** известные URL продукта (включая отложенные cap'ом) — вне resume-
         #: бюджета ``max_documents`` (B2/F13): отложенный URL не фетчится в этом цикле,
@@ -6651,6 +6671,17 @@ def _build_corpus(
             serp_seeds: Sequence[str] = (),
             seed: bool = True,
             defer_tail: bool = True,
+            # B023/F13: per-продуктное состояние привязывается при **определении** функции
+            # (дефолт вычисляется в объемлющей области). ``_drain_root`` переопределяется
+            # на каждой итерации цикла продуктов, а эти значения пересоздаются там же:
+            # без привязки тело читало бы их поздним связыванием, то есть зависело бы от
+            # порядка вызовов — а не от продукта, которому корень принадлежит.
+            ingest: _ProductIngest = ingest,
+            seen_docs: dict[str, str] = seen_docs,
+            seen_chunk_ids: set[str] = seen_chunk_ids,
+            serp_ingest: dict[str, Any] = serp_ingest,
+            resume_counted: set[str] = resume_counted,
+            revalidation_url_set: set[str] = revalidation_url_set,
         ) -> tuple[Frontier, list[dict[str, Any]], _RootDrain]:
             """D1/D3: BFS-drain одного seed-root (scope/блэклист/лимиты/глубина).
 
@@ -6730,13 +6761,18 @@ def _build_corpus(
                     )
                     root_extractor = extractor
 
-            def _record_document_skip(url: str, reason: str) -> None:
-                """P5: видимая запись пропуска документа (frontier + агрегат ``IndexBuild``)."""
-                frontier.note_document_skip(url, reason)
+            def _record_document_skip(skip_url: str, reason: str) -> None:
+                """P5: видимая запись пропуска документа (frontier + агрегат ``IndexBuild``).
+
+                Параметр назван ``skip_url``, а не ``url``, намеренно: ``url`` —
+                переменная цикла внешней области, и совпадение имён делало бы связывание
+                неотличимым от позднего (B023).
+                """
+                frontier.note_document_skip(skip_url, reason)
                 document_skips.append(
                     {
                         "product_id": pid,
-                        "url": url,
+                        "url": skip_url,
                         "reason": reason,
                         "level": level.value,
                     }
@@ -6942,20 +6978,25 @@ def _build_corpus(
                         f"{pid}/{found}: serp-находка не поставлена — достигнут max_documents"
                     )
 
-            def _resolve_target(pid: str, url: str) -> Any:
-                """Разрешает ``CrawlTarget`` URL (кэш ``targets``), как в обоих путях."""
-                target = targets.get((pid, url))
+            def _resolve_target(target_pid: str, target_url: str) -> Any:
+                """Разрешает ``CrawlTarget`` URL (кэш ``targets``), как в обоих путях.
+
+                ``target_pid``/``target_url`` вместо ``pid``/``url``: последние —
+                переменные циклов внешней области, и совпадение имён делало бы
+                привязку неотличимой от поздней (B023).
+                """
+                target = targets.get((target_pid, target_url))
                 if target is None:
                     target = resolve_crawl_target(
-                        pid,
-                        url,
+                        target_pid,
+                        target_url,
                         sources=crawl_sources or CrawlSourcesConfig(),
                         profiles=domain_profiles or {},
                         explicit=explicit_fetch,
                         run_default_strategy=crawl_strategy_default,
                         run_default_rate_limit=crawl_rate_default,
                     )
-                    targets[(pid, url)] = target
+                    targets[(target_pid, target_url)] = target
                 return target
 
             def _new_extract_pool() -> Executor:
@@ -7463,7 +7504,14 @@ def _build_corpus(
                     _commit_outcome(pid_arg, url_arg, depth_arg, outcome)
                     return
 
-                assert pool_key is not None  # defer_extract ⇒ окно и ключ заданы
+                if pool_key is None:
+                    # Инвариант ветки: ``defer_extract`` истинно только при заданном окне,
+                    # а окно и есть ключ пула. Проверка явная — под ``-O`` assert исчез бы
+                    # и ключ ушёл бы в ``pools.executor`` как ``None``.
+                    raise AssertionError(
+                        f"{pid_arg}/{url_arg}: defer_extract без ключа пула "
+                        "(окно экстракции не задано)"
+                    )
                 try:
                     executor = pools.executor(pool_key, _new_extract_pool)
                 except Exception as exc:  # noqa: BLE001 — изоляция по контракту фазы
@@ -7522,7 +7570,12 @@ def _build_corpus(
                         continue
                     if entry.kind == "attempts":
                         prior_item = entry.prior_item
-                        assert prior_item is not None
+                        if prior_item is None:
+                            # Инвариант сборки ``_WaveEntry(kind="attempts")``: запись
+                            # создаётся только по существующему элементу сеанса.
+                            raise AssertionError(
+                                f"{entry.pid}/{entry.wu}: attempts-запись без prior_item"
+                            )
                         reason = (
                             f"max_attempts exhausted "
                             f"(attempts={prior_item.attempts} >= {max_attempts})"
@@ -7539,7 +7592,12 @@ def _build_corpus(
                         _emit_progress()
                         continue
                     desc = entry.desc
-                    assert desc is not None
+                    if desc is None:
+                        # Инвариант ``_WaveEntry``: не-attempts/не-блэклист запись несёт
+                        # либо desc, либо future (и то и другое заполняется сборкой).
+                        raise AssertionError(
+                            f"{entry.pid}/{entry.wu}: запись волны без desc"
+                        )
                     if entry.future is not None:
                         try:
                             page = entry.future.result()
@@ -7598,16 +7656,19 @@ def _build_corpus(
                                 _finish_extract(extract_pending.popleft())
                         else:
                             break
-                    if not _has_fetch_capacity() and not root_drain.pending:
-                        # D3: seeds sitemap ставятся пачкой; ``max_documents`` обязан
-                        # ограничивать и их (не только обнаруженные ссылки). Без лимита —
-                        # всегда есть ёмкость. Проверка — в голове цикла на главном потоке.
-                        # 09 §6.3: ревалидация известных URL бюджет не расходует; если
-                        # голова очереди — такая группа, дренаж продолжается (бюджет
-                        # исчерпан только для discovery).
-                        if not frontier.next_is_revalidation():
-                            frontier.mark_truncated("max_documents")
-                            break
+                    # D3: seeds sitemap ставятся пачкой; ``max_documents`` обязан
+                    # ограничивать и их (не только обнаруженные ссылки). Без лимита —
+                    # всегда есть ёмкость. Проверка — в голове цикла на главном потоке.
+                    # 09 §6.3: ревалидация известных URL бюджет не расходует; если
+                    # голова очереди — такая группа, дренаж продолжается (бюджет
+                    # исчерпан только для discovery).
+                    if (
+                        not _has_fetch_capacity()
+                        and not root_drain.pending
+                        and not frontier.next_is_revalidation()
+                    ):
+                        frontier.mark_truncated("max_documents")
+                        break
                     if executor is not None:
                         # --- P3-A2: executor-волна (раунд). Один раунд = один submit; --- #
                         # раунды строго последовательны (набор работы N+1 зависит от ссылок N).
@@ -7784,7 +7845,13 @@ def _build_corpus(
                                 continue
                             if entry.kind == "attempts":
                                 prior_item = entry.prior_item
-                                assert prior_item is not None
+                                if prior_item is None:
+                                    # См. инвариант ``_WaveEntry(kind="attempts")`` выше:
+                                    # запись создаётся только по существующему элементу.
+                                    raise AssertionError(
+                                        f"{entry.pid}/{entry.wu}: attempts-запись "
+                                        "без prior_item"
+                                    )
                                 reason = (
                                     f"max_attempts exhausted "
                                     f"(attempts={prior_item.attempts} >= {max_attempts})"
@@ -7801,7 +7868,12 @@ def _build_corpus(
                                 _emit_progress()
                                 continue
                             desc = entry.desc
-                            assert desc is not None
+                            if desc is None:
+                                # Инвариант ``_WaveEntry``: не-attempts/не-блэклист запись
+                                # несёт desc — иначе коммитить нечего.
+                                raise AssertionError(
+                                    f"{entry.pid}/{entry.wu}: запись волны без desc"
+                                )
                             if desc.resume is not None or desc.reject is not None:
                                 # Resume/reject: живого фетча нет — коммит локально без submit.
                                 outcome = _commit_local(desc)
@@ -8005,7 +8077,13 @@ def _build_corpus(
                         # resume-элементы тоже минуют пул (живого фетча нет; ``poolable``).
                         future = None
                         if desc.poolable:
-                            assert pool is not None
+                            if pool is None:
+                                # Инвариант ветки: ``poolable`` выставляется только когда
+                                # создан пул фетча этого корня (``executor is None`` путь
+                                # пула не имеет вовсе).
+                                raise AssertionError(
+                                    f"{desc.pid}/{desc.wu}: poolable без пула фетча"
+                                )
                             future = pool.submit(_local_fetch, desc)
                         entries.append(
                             _WaveEntry(
@@ -8134,6 +8212,17 @@ def _build_corpus(
                     _frontier: Frontier = frontier,
                     _sitemap_skips: list[dict[str, Any]] = sitemap_skips,
                     _known_urls: Sequence[str] = known_urls,
+                    # B023: провенанс ревалидации привязывается при определении — этот
+                    # финализатор живёт в ``extract_finalizers`` и вызывается **позже**
+                    # (когда хвост корня доведён), то есть уже после того, как цикл
+                    # продукта ушёл вперёд; поздняя привязка подменила бы его данными
+                    # следующего продукта.
+                    _all_revalidation_groups: Mapping[str, Sequence[str]] = (
+                        all_revalidation_groups
+                    ),
+                    _cap_fired: bool = revalidation_cap_fired,
+                    _deferred_by_root: Mapping[str, int] = deferred_by_root,
+                    _skipped_by_root: Mapping[str, int] = skipped_by_root,
                 ) -> None:
                     """Провенанс корня после доводки его экстракционного хвоста (C1).
 
@@ -8146,7 +8235,7 @@ def _build_corpus(
                     #: известные URL (даже если cap отложил все — ``selected=0``). У корня
                     #: без известных URL ключа нет: ``state is None`` остаётся байт-в-байт.
                     revalidation_info: dict[str, Any] | None = None
-                    if all_revalidation_groups.get(_root_url):
+                    if _all_revalidation_groups.get(_root_url):
                         revalidation_info = {
                             "selected": sum(
                                 1
@@ -8157,12 +8246,12 @@ def _build_corpus(
                             # ``pages_fetched`` не смешивается с этим полем.
                             "fetched": _frontier.revalidation_fetched,
                         }
-                        if revalidation_cap_fired:
-                            revalidation_info["deferred"] = deferred_by_root.get(
+                        if _cap_fired:
+                            revalidation_info["deferred"] = _deferred_by_root.get(
                                 _root_url, 0
                             )
-                        if skipped_by_root.get(_root_url):
-                            revalidation_info["skipped"] = skipped_by_root[_root_url]
+                        if _skipped_by_root.get(_root_url):
+                            revalidation_info["skipped"] = _skipped_by_root[_root_url]
                     _record_root_outcome(
                         _pid,
                         _root_url,
@@ -9033,15 +9122,16 @@ def _finalize_interrupted_session(
     Сбой самой записи не поднимается: обработчик не имеет права подменить исходное
     исключение (оно и есть причина прерывания).
     """
-    try:
+    # Сбой записи не поднимается (см. докстринг): исходное исключение важнее. След не
+    # теряется — незакрытый ``running`` увидит :mod:`core.pipeline.liveness` при открытии
+    # сеанса и переведёт в ``interrupted`` со ``stale_reason`` (в ``crawl status/list``).
+    with contextlib.suppress(Exception):
         lifecycle.store.update_crawl_session_status(
             lifecycle.session_id,
             CrawlSessionStatus.INTERRUPTED,
             finished_at=_now_iso(),
             error=f"phase interrupted: corpus did not complete ({type(exc).__name__})",
         )
-    except Exception:  # noqa: BLE001 — не маскируем исходное исключение
-        pass
 
 
 def build_corpus(*args: Any, **kwargs: Any) -> PhaseResult:

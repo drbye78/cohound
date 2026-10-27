@@ -167,7 +167,7 @@ _SEARCH_LOG_COLUMNS = (
 
 def _now_iso() -> str:
     """Текущее время в ISO-8601 (UTC)."""
-    return _dt.datetime.now(_dt.timezone.utc).isoformat()
+    return _dt.datetime.now(_dt.UTC).isoformat()
 
 
 def _as_text(value: Any) -> Any:
@@ -198,6 +198,18 @@ def _parse_json_text(value: str | None) -> Any:
         return None
 
 
+def _has_column(row: sqlite3.Row, column: str) -> bool:
+    """Есть ли колонка ``column`` в строке ``row``.
+
+    ``sqlite3.Row`` — **не** ``dict``: у типа нет ``__contains__``, поэтому ``in row``
+    перебирает *значения* строки, а не имена колонок. Проверка имени обязана идти по
+    ``row.keys()``: ``"reason" in row`` было бы истинно только при совпадении *значения*
+    с этой строкой, то есть почти всегда ложно — и «колонки нет» превратилось бы в
+    «значение не записано» для любой существующей колонки.
+    """
+    return column in row.keys()  # noqa: SIM118 - sqlite3.Row: `in row` смотрит значения
+
+
 def _row_optional(row: sqlite3.Row, column: str) -> Any:
     """Значение колонки или ``None``, если колонки в строке нет.
 
@@ -205,7 +217,7 @@ def _row_optional(row: sqlite3.Row, column: str) -> Any:
     аддитивных DDL-миграций (файл только читается), поэтому колонка, добавленная позже,
     в такой БД отсутствует. Отсутствие = «значение не записано», а не сбой чтения прогона.
     """
-    return row[column] if column in row.keys() else None
+    return row[column] if _has_column(row, column) else None
 
 
 def _notes_from_text(raw: str | None) -> list[str]:
@@ -508,7 +520,7 @@ class SqliteStore:
         """
         columns = ("product_id", "param_id", "validation_notes")
         sql = (
-            f"SELECT {self._readable('cells', columns)} FROM cells WHERE run_id = ?"
+            f"SELECT {self._readable('cells', columns)} FROM cells WHERE run_id = ?"  # noqa: S608 - проекция из литерала, run_id — bind
         )
         stored: dict[tuple[str, str], str | None] = {}
         for row in self.conn.execute(sql, (run_id,)):
@@ -580,7 +592,7 @@ class SqliteStore:
         with self.conn:
             self._guard_against_downgrade(cell)
             self.conn.execute(
-                f"INSERT OR REPLACE INTO cells ({', '.join(_CELL_COLUMNS)})"
+                f"INSERT OR REPLACE INTO cells ({', '.join(_CELL_COLUMNS)})"  # noqa: S608 - имена из _CELL_COLUMNS, значения — bind
                 f" VALUES ({placeholders})",
                 self._cell_row(cell, notes),
             )
@@ -620,7 +632,7 @@ class SqliteStore:
             raise ValueError("chunk_size обязан быть > 0")
         placeholders = ", ".join("?" for _ in _CELL_COLUMNS)
         sql = (
-            f"INSERT OR REPLACE INTO cells ({', '.join(_CELL_COLUMNS)})"
+            f"INSERT OR REPLACE INTO cells ({', '.join(_CELL_COLUMNS)})"  # noqa: S608 - имена из _CELL_COLUMNS, значения — bind
             f" VALUES ({placeholders})"
         )
         for start in range(0, len(cells), chunk_size):
@@ -659,7 +671,7 @@ class SqliteStore:
         проверяться на значении, которого не объявлял каталог.
         """
         sql = (
-            f"SELECT {self._readable('cells', _CELL_COLUMNS)} FROM cells WHERE run_id = ?"
+            f"SELECT {self._readable('cells', _CELL_COLUMNS)} FROM cells WHERE run_id = ?"  # noqa: S608 - проекция из _CELL_COLUMNS, run_id — bind
         )
         params: list[Any] = [run_id]
         if state is not None:
@@ -757,7 +769,7 @@ class SqliteStore:
         placeholders = ", ".join("?" for _ in _EVIDENCE_COLUMNS)
         with self.conn:
             self.conn.execute(
-                f"INSERT OR REPLACE INTO cell_evidence ({', '.join(_EVIDENCE_COLUMNS)})"
+                f"INSERT OR REPLACE INTO cell_evidence ({', '.join(_EVIDENCE_COLUMNS)})"  # noqa: S608 - имена из _EVIDENCE_COLUMNS, значения — bind
                 f" VALUES ({placeholders})",
                 self._evidence_row(ev),
             )
@@ -768,7 +780,7 @@ class SqliteStore:
             return
         placeholders = ", ".join("?" for _ in _EVIDENCE_COLUMNS)
         sql = (
-            f"INSERT OR REPLACE INTO cell_evidence ({', '.join(_EVIDENCE_COLUMNS)})"
+            f"INSERT OR REPLACE INTO cell_evidence ({', '.join(_EVIDENCE_COLUMNS)})"  # noqa: S608 - имена из _EVIDENCE_COLUMNS, значения — bind
             f" VALUES ({placeholders})"
         )
         with self.conn:
@@ -814,7 +826,7 @@ class SqliteStore:
             return
         placeholders = ", ".join("?" for _ in _EVIDENCE_COLUMNS)
         sql = (
-            f"INSERT OR REPLACE INTO cell_evidence ({', '.join(_EVIDENCE_COLUMNS)})"
+            f"INSERT OR REPLACE INTO cell_evidence ({', '.join(_EVIDENCE_COLUMNS)})"  # noqa: S608 - имена из _EVIDENCE_COLUMNS, значения — bind
             f" VALUES ({placeholders})"
         )
         with self.conn:
@@ -853,7 +865,7 @@ class SqliteStore:
         источник — персистентная ``corpus_coverage`` (отчёт читает её оттуда).
         """
         sql = (
-            f"SELECT {self._readable('cell_evidence', _EVIDENCE_COLUMNS)} FROM cell_evidence"
+            f"SELECT {self._readable('cell_evidence', _EVIDENCE_COLUMNS)} FROM cell_evidence"  # noqa: S608 - проекция из _EVIDENCE_COLUMNS, аргументы — bind
             " WHERE run_id = ? AND evidence_type = ? ORDER BY rowid"
         )
         for row in self.conn.execute(sql, (run_id, EvidenceType.ABSENCE.value)):
@@ -920,7 +932,7 @@ class SqliteStore:
         placeholders = ", ".join("?" for _ in columns)
         with self.conn:
             self.conn.execute(
-                f"INSERT OR REPLACE INTO search_log ({', '.join(columns)})"
+                f"INSERT OR REPLACE INTO search_log ({', '.join(columns)})"  # noqa: S608 - имена из _SEARCH_LOG_COLUMNS и log_id, значения — bind
                 f" VALUES ({placeholders})",
                 values,
             )
@@ -1093,7 +1105,7 @@ class SqliteStore:
             return
         placeholders = ", ".join("?" for _ in _SCENARIO_COLUMNS)
         sql = (
-            f"INSERT OR REPLACE INTO llm_scenarios ({', '.join(_SCENARIO_COLUMNS)})"
+            f"INSERT OR REPLACE INTO llm_scenarios ({', '.join(_SCENARIO_COLUMNS)})"  # noqa: S608 - имена из _SCENARIO_COLUMNS, значения — bind
             f" VALUES ({placeholders})"
         )
         rows = [
@@ -1352,7 +1364,7 @@ class SqliteStore:
             " ORDER BY product_id, url",
             (str(run_id),),
         ):
-            yield {key: row[key] for key in row.keys()}
+            yield {key: row[key] for key in row.keys()}  # noqa: SIM118 - sqlite3.Row, см. _has_column
 
     def add_chunk(self, chunk: CorpusChunk) -> None:
         """Upsert строки ``corpus_chunks`` (PK ``chunk_id``), идемпотентно (S8/I19)."""
@@ -1574,7 +1586,7 @@ class SqliteStore:
         )
         with self.conn:
             self.conn.execute(
-                f"INSERT INTO crawl_sessions ({', '.join(self._CRAWL_SESSION_COLUMNS)})"
+                f"INSERT INTO crawl_sessions ({', '.join(self._CRAWL_SESSION_COLUMNS)})"  # noqa: S608 - имена из _CRAWL_SESSION_*, значения — bind
                 f" VALUES ({placeholders}) ON CONFLICT(session_id) DO UPDATE SET {updates}",
                 values,
             )
@@ -1617,7 +1629,7 @@ class SqliteStore:
             error_clause = "error = COALESCE(?, error)"
         with self.conn:
             self.conn.execute(
-                "UPDATE crawl_sessions SET"
+                "UPDATE crawl_sessions SET"  # noqa: S608 - фрагменты из литералов по enum-статусу, значения — bind
                 " status = ?,"
                 " started_at = COALESCE(?, started_at),"
                 f" {finished_clause},"
@@ -1694,7 +1706,7 @@ class SqliteStore:
         )
         with self.conn:
             self.conn.execute(
-                f"INSERT OR REPLACE INTO crawl_session_items"
+                f"INSERT OR REPLACE INTO crawl_session_items"  # noqa: S608 - имена из _CRAWL_ITEM_COLUMNS, значения — bind
                 f" ({', '.join(self._CRAWL_ITEM_COLUMNS)}) VALUES ({placeholders})",
                 values,
             )
@@ -1846,11 +1858,11 @@ class SqliteStore:
             },
             truncated=bool(row["truncated"]),
             computed_at=row["computed_at"],
-            reason=(row["reason"] if "reason" in row.keys() else None),
+            reason=(row["reason"] if _has_column(row, "reason") else None),
             # 13-manual-artifacts §3.3: аддитивная колонка; старая строка без неё — 0.
             resolved_manually=(
                 int(row["resolved_manually"] or 0)
-                if "resolved_manually" in row.keys()
+                if _has_column(row, "resolved_manually")
                 else 0
             ),
         )
@@ -2140,7 +2152,7 @@ class SqliteStore:
             params.append(product_id)
         where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
         for row in self.conn.execute(
-            "SELECT * FROM corpus_members"
+            "SELECT * FROM corpus_members"  # noqa: S608 - WHERE из литералов, значения — bind
             f"{where} ORDER BY archive_content_hash, member_path, product_id",
             tuple(params),
         ):
@@ -2216,7 +2228,7 @@ class SqliteStore:
         # «ручных подач не было» не выдумывается из отсутствия значения.
         manual_artifacts_raw = (
             _parse_json_text(row["manual_artifacts_json"])
-            if "manual_artifacts_json" in row.keys()
+            if _has_column(row, "manual_artifacts_json")
             else None
         )
         manual_artifacts_block = (
@@ -2227,7 +2239,7 @@ class SqliteStore:
         # записывался», а не отказ читать строку. NULL/не-словарь → ``{}``.
         publishability_raw = (
             _parse_json_text(row["publishability_json"])
-            if "publishability_json" in row.keys()
+            if _has_column(row, "publishability_json")
             else None
         )
         publishability_block = (
@@ -2238,7 +2250,7 @@ class SqliteStore:
         # отсутствия значения, но и не подменяется нулём вместо факта.
         partial_docs_raw = (
             _parse_json_text(row["partial_docs_json"])
-            if "partial_docs_json" in row.keys()
+            if _has_column(row, "partial_docs_json")
             else None
         )
         partial_docs_block = (
@@ -2285,7 +2297,7 @@ class SqliteStore:
             # «ручных подач не было» не выдумывается из отсутствия значения.
             manual_artifacts_digest=(
                 row["manual_artifacts_digest"]
-                if "manual_artifacts_digest" in row.keys()
+                if _has_column(row, "manual_artifacts_digest")
                 else None
             ),
             manual_artifacts=manual_artifacts_block,
@@ -2383,7 +2395,7 @@ class SqliteStore:
         (URL резолвится отдельно через ``resolve_source_url``).
         """
         row = self.conn.execute(
-            f"SELECT {', '.join(self._CHUNK_COLUMNS)} FROM corpus_chunks"
+            f"SELECT {', '.join(self._CHUNK_COLUMNS)} FROM corpus_chunks"  # noqa: S608 - имена из _CHUNK_COLUMNS, chunk_id — bind
             " WHERE chunk_id = ?",
             (chunk_id,),
         ).fetchone()
@@ -2402,7 +2414,7 @@ class SqliteStore:
         переносится (см. :meth:`get_chunk`).
         """
         sql = (
-            f"SELECT {', '.join(self._CHUNK_COLUMNS)} FROM corpus_chunks"
+            f"SELECT {', '.join(self._CHUNK_COLUMNS)} FROM corpus_chunks"  # noqa: S608 - имена из _CHUNK_COLUMNS, параметры — bind
             " WHERE build_id = ?"
         )
         params: list[Any] = [build_id]

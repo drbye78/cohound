@@ -267,15 +267,18 @@ def check_cell(cell: Cell) -> list[Violation]:
                 )
 
     # I4: failed несёт только сбой прибора.
-    if cell.state is CellState.FAILED and scope is not None:
-        if scope.denial_strength is not DenialStrength.INSTRUMENT_FAILED:
-            violations.append(
-                _violation(
-                    "I4",
-                    "I4: failed несёт только denial_strength=instrument_failed",
-                    "evidence_scope",
-                )
+    if (
+        cell.state is CellState.FAILED
+        and scope is not None
+        and scope.denial_strength is not DenialStrength.INSTRUMENT_FAILED
+    ):
+        violations.append(
+            _violation(
+                "I4",
+                "I4: failed несёт только denial_strength=instrument_failed",
+                "evidence_scope",
             )
+        )
 
     return violations
 

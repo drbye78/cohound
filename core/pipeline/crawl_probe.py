@@ -59,10 +59,10 @@ from core.util.document_formats import (
 from core.util.robots import RobotsGate
 
 __all__ = [
+    "DEFAULT_DOCUMENT_SUFFIXES",
     "MIN_USABLE_TEXT",
     "PROBE_RATE_LIMIT",
     "RATE_LIMIT_HINT",
-    "DEFAULT_DOCUMENT_SUFFIXES",
     "Observation",
     "ProbeConfidence",
     "ProbeKeyStatus",

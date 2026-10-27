@@ -35,9 +35,9 @@ __all__ = [
     "RunSummary",
     "effective_paths",
     "effective_runs_dir",
+    "iter_run_dbs",
     "scan_runs",
     "summarize_run",
-    "iter_run_dbs",
 ]
 
 

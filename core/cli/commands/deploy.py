@@ -8,9 +8,8 @@
 
 from __future__ import annotations
 
-from typing import Any
-
 import argparse
+from typing import Any
 
 from core.cli.context import (
     _diagnostic_gateway,

@@ -75,18 +75,19 @@ from core.domain.enums import (
 )
 from core.domain.models import CatalogRow, Cohort, ScenarioBinding
 from core.pipeline import PHASES, Ports, RunReport, build_phases
-from core.pipeline.extract_cache import ExtractionCache
+from core.pipeline.compute import bundle_for_run
 from core.pipeline.embed_cache import EmbedCache
 from core.pipeline.eval_cache import EvalVerdictCache
-from core.pipeline.normalize import RunInputs, load_inputs
-from core.pipeline.phases import resolve_package_id
-from core.pipeline.plan import RunPlan, plan as build_plan
-from core.pipeline.compute import bundle_for_run
+from core.pipeline.extract_cache import ExtractionCache
 from core.pipeline.gate_subject import (
     GateSubject,
     publication_subject,
     review_subject,
 )
+from core.pipeline.normalize import RunInputs, load_inputs
+from core.pipeline.phases import resolve_package_id
+from core.pipeline.plan import RunPlan
+from core.pipeline.plan import plan as build_plan
 from core.pipeline.profile_attestation import (
     ProfileGateResult,
     make_profile_gate,
@@ -100,8 +101,8 @@ from core.ports.store import StorePort
 from core.ports.types import FetchMode
 from core.util.cache import ContentAddressedCache
 from core.util.logging import PhaseLogger
-from core.util.security import sanitize_filename
 from core.util.rate_limit import RateLimiter
+from core.util.security import sanitize_filename
 
 # -- Типовые швы (тестовые инъекции) --------------------------------------- #
 #: Фабрика диагностического gateway по deploy-конфигу (тестовый шов ``deploy-check``).
@@ -139,74 +140,74 @@ PLAN_INPUTS_FILENAME = "plan_inputs.json"
 PLAN_INPUTS_SNAPSHOT_VERSION = 1
 
 __all__ = [
+    "PLAN_INPUTS_FILENAME",
+    "PLAN_INPUTS_SNAPSHOT_VERSION",
+    "RUN_YAML_FILENAME",
+    "_FALLBACK_CODE",
+    # Константы и приватные алиасы
+    "_PROMOTE_STATUSES",
     # Типовые швы
     "GatewayFactory",
     "PhasesFactory",
     "PlanFactory",
-    # DI-хелперы и машинерия команд
-    "_resolve_paths",
-    "_resolve_plan",
-    "_resolve_passports_dir",
-    "_profile_material_for_run",
-    "_profile_gate_resolver",
-    "_gate_runtime",
-    "_resolve_ports",
-    "_resolve_phases",
-    "_open_state_store",
-    "_previous_cycle_id",
-    "_load_passports_dir",
-    "_load_corpus_urls",
-    "_load_render_modes",
-    "_load_package_roles",
-    "_restore_plan_inputs",
-    "_plan_inputs_from_payload",
-    "_plan_inputs_sha256",
-    "_read_cycle",
-    "_infer_run_id",
-    "_resolve_db_path",
-    "_load_golden_arg",
-    "_manifest_partial",
+    "_add_common",
+    "_add_llm_model_flag",
+    "_add_llm_slot_flag",
     "_artifacts_payload",
-    "_review_item_payload",
-    "_discover_seed_queries",
+    "_concise",
     "_diagnostic_gateway",
-    "_seam_diagnostics",
-    "_validate_health_payload",
-    "_validate_capabilities_payload",
-    "_short_json",
-    "_phases_until",
-    "_ensure_run",
-    "_persist_llm_scenarios",
-    "_plan_payload",
-    "_run_report_payload",
-    "_plan_inputs_payload",
-    "_snapshot_run_inputs",
-    "_snapshot_run_yaml",
-    "_snapshot_plan_inputs",
+    "_discover_seed_queries",
     "_emit_deploy_check",
+    "_emit_error",
+    "_emit_lint_failure",
+    "_ensure_run",
+    "_gate_runtime",
+    "_infer_run_id",
+    "_load_corpus_urls",
+    "_load_golden_arg",
+    "_load_package_roles",
+    "_load_passports_dir",
+    "_load_render_modes",
+    "_manifest_partial",
+    "_open_state_store",
+    "_persist_llm_scenarios",
+    "_phases_until",
+    "_plan_inputs_from_payload",
+    "_plan_inputs_payload",
+    "_plan_inputs_sha256",
+    "_plan_payload",
+    "_positive_int",
+    "_previous_cycle_id",
+    "_print_discover",
+    "_print_gate",
+    "_print_json",
+    "_print_passport_scout",
     "_print_plan",
+    "_print_promote",
+    "_print_review",
     "_print_run_dry",
     "_print_run_report",
     "_print_sensitivity",
-    "_print_discover",
-    "_print_review",
-    "_print_promote",
-    "_print_gate",
-    "_print_passport_scout",
-    "_add_common",
-    "_add_llm_slot_flag",
-    "_add_llm_model_flag",
-    "_positive_int",
-    # Константы и приватные алиасы
-    "_PROMOTE_STATUSES",
-    "RUN_YAML_FILENAME",
-    "PLAN_INPUTS_FILENAME",
-    "PLAN_INPUTS_SNAPSHOT_VERSION",
-    "_FALLBACK_CODE",
-    "_concise",
-    "_print_json",
-    "_emit_error",
-    "_emit_lint_failure",
+    "_profile_gate_resolver",
+    "_profile_material_for_run",
+    "_read_cycle",
+    "_resolve_db_path",
+    "_resolve_passports_dir",
+    # DI-хелперы и машинерия команд
+    "_resolve_paths",
+    "_resolve_phases",
+    "_resolve_plan",
+    "_resolve_ports",
+    "_restore_plan_inputs",
+    "_review_item_payload",
+    "_run_report_payload",
+    "_seam_diagnostics",
+    "_short_json",
+    "_snapshot_plan_inputs",
+    "_snapshot_run_inputs",
+    "_snapshot_run_yaml",
+    "_validate_capabilities_payload",
+    "_validate_health_payload",
 ]
 
 def _resolve_paths(args: argparse.Namespace) -> Any:
@@ -1511,10 +1512,7 @@ def _load_corpus_urls(path: str | Path | None) -> dict[str, list[str]]:
             exit_code=EXIT_USAGE,
         ) from exc
     try:
-        if p.suffix.lower() == ".json":
-            data = json.loads(text)
-        else:
-            data = yaml.safe_load(text)
+        data = json.loads(text) if p.suffix.lower() == ".json" else yaml.safe_load(text)
     except (json.JSONDecodeError, yaml.YAMLError) as exc:
         raise CliError(
             f"некорректный {p}: {_concise(exc)}", code="urls", exit_code=EXIT_USAGE
@@ -1758,10 +1756,7 @@ def _load_render_modes(path: str | Path | None) -> dict[str, FetchMode]:
             exit_code=EXIT_USAGE,
         ) from exc
     try:
-        if p.suffix.lower() == ".json":
-            data = json.loads(text)
-        else:
-            data = yaml.safe_load(text)
+        data = json.loads(text) if p.suffix.lower() == ".json" else yaml.safe_load(text)
     except (json.JSONDecodeError, yaml.YAMLError) as exc:
         raise CliError(
             f"некорректный {p}: {_concise(exc)}",

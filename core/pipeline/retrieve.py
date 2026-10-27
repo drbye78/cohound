@@ -23,21 +23,20 @@ Tie-break детерминирован по ``chunk_id`` (R7). Модуль ка
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Sequence
 from enum import StrEnum
-from typing import Sequence
 
 from core.ports.lexical_index import LexicalIndexPort
 from core.ports.vector_index import (
-    RetrievedChunk,
     RetrievalResult,
+    RetrievedChunk,
     VectorIndexPort,
     VectorQuery,
 )
 
 __all__ = [
-    "RetrievalProfile",
     "PROFILE_DESCRIPTIONS",
+    "RetrievalProfile",
     "retrieve",
     "rrf_fuse_chunks",
 ]
@@ -60,6 +59,20 @@ PROFILE_DESCRIPTIONS: dict[RetrievalProfile, str] = {
 
 #: RRF-константа по умолчанию (версионируется в ``retrieval_params_json``, S1).
 DEFAULT_RRF_K = 60
+
+
+def _required_index[T](
+    value: T | None, what: str, profile: RetrievalProfile
+) -> T:
+    """Зависимость профиля, уже проверенная вызывающим: ``None`` здесь — нарушение контракта.
+
+    Развилка по профилю (ниже) выбирает плечо по тому же признаку, по которому проверка
+    выше требует порт, поэтому ветка видит не-``None``. Возврат значения вместо ``assert``
+    держит сужение типа и под ``python -O``: молчаливая подмена пустым плечом невозможна.
+    """
+    if value is None:
+        raise ValueError(f"профиль {profile.value} требует {what}")
+    return value
 
 
 def _as_profile(profile: RetrievalProfile | str) -> RetrievalProfile:
@@ -163,9 +176,8 @@ def retrieve(
     resolved = _as_profile(profile)
     products = list(product_ids)
 
-    if resolved in (RetrievalProfile.R0, RetrievalProfile.R2):
-        if lexical_index is None:
-            raise ValueError(f"профиль {resolved.value} требует lexical_index")
+    if resolved in (RetrievalProfile.R0, RetrievalProfile.R2) and lexical_index is None:
+        raise ValueError(f"профиль {resolved.value} требует lexical_index")
     if resolved in (RetrievalProfile.R1, RetrievalProfile.R2):
         if vector_index is None:
             raise ValueError(f"профиль {resolved.value} требует vector_index")
@@ -173,36 +185,35 @@ def retrieve(
             raise ValueError(f"профиль {resolved.value} требует query_vector (dense-плечо)")
 
     if resolved is RetrievalProfile.R0:
-        assert lexical_index is not None  # проверено выше
-        chunks = list(
-            lexical_index.search(query_text, products, top_k=cutoff_k, lang=lang)
-        )
+        lexical = _required_index(lexical_index, "lexical_index", resolved)
+        chunks = list(lexical.search(query_text, products, top_k=cutoff_k, lang=lang))
         # Провенанс R0 — сборка (composition_id), а не ``engine_version``: движок
         # описывает реализацию BM25, а не данные. Источник тот же, что у dense-плеча:
         # атрибут ``build_id`` порта (``TantivyLexicalIndex`` заполняет его при засеве).
-        build_id = _index_build_id(lexical_index)
+        build_id = _index_build_id(lexical)
     elif resolved is RetrievalProfile.R1:
-        assert vector_index is not None
+        vectors = _required_index(vector_index, "vector_index", resolved)
         chunks = list(
             dense_hits
             if dense_hits is not None
-            else vector_index.search(
+            else vectors.search(
                 VectorQuery(product_ids=products, top_k=cutoff_k, vector=list(query_vector or []))
             )
         )
-        build_id = vector_index.build_id
+        build_id = vectors.build_id
     else:  # R2 — RRF-гибрид обеих плеч.
-        assert lexical_index is not None and vector_index is not None
-        lexical_hits = lexical_index.search(query_text, products, top_k=cutoff_k, lang=lang)
+        lexical = _required_index(lexical_index, "lexical_index", resolved)
+        vectors = _required_index(vector_index, "vector_index", resolved)
+        lexical_hits = lexical.search(query_text, products, top_k=cutoff_k, lang=lang)
         dense_leg = (
             list(dense_hits)
             if dense_hits is not None
-            else vector_index.search(
+            else vectors.search(
                 VectorQuery(product_ids=products, top_k=cutoff_k, vector=list(query_vector or []))
             )
         )
         chunks = rrf_fuse_chunks(lexical_hits, dense_leg, rrf_k=rrf_k, top_k=cutoff_k)
-        build_id = vector_index.build_id
+        build_id = vectors.build_id
 
     # Детерминированный порядок + обрезка до K (I20). tie-break по chunk_id (R7).
     chunks.sort(key=lambda c: (-c.score, c.chunk_id))

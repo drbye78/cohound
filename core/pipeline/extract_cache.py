@@ -58,6 +58,7 @@ LLM, ни часов. Счётчики :meth:`stats` — наблюдаемос�
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import tempfile
@@ -336,10 +337,11 @@ class ExtractionCache:
                 os.fsync(handle.fileno())
             os.replace(tmp, path)
         except OSError:
-            try:
+            # Уборка временного файла — best-effort и молча: исходная ошибка записи уже
+            # видна вызывающему (``None`` = «не закэшировано»), второй отказ (файл снят
+            # другим процессом / нет прав) этого факта не меняет и не должен подменять.
+            with contextlib.suppress(OSError):
                 tmp.unlink()
-            except OSError:
-                pass
             return None
         return path
 

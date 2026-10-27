@@ -36,7 +36,7 @@ import re
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Union
+from typing import Any
 
 import yaml
 from pydantic import BaseModel
@@ -44,7 +44,6 @@ from pydantic import BaseModel
 from core.config.crawl_sources import CrawlSourcesConfig, load_crawl_sources
 from core.config.domain_profiles import DomainProfile, load_domain_profiles
 from core.config.run_config import (
-    _BASELINE_COLUMNS,
     _CATALOG_COLUMNS,
     _GOLDEN_COLUMNS,
     load_baselines,
@@ -66,8 +65,8 @@ from core.domain.models import (
     RunConfig,
     ScopeAttestation,
 )
-from core.pipeline.lint import LintReport, lint_run_inputs
 from core.pipeline.golden_status import GoldenStatus, read_golden_status
+from core.pipeline.lint import LintReport, lint_run_inputs
 from core.pipeline.normalize import (
     RunInputs,
     cross_check,
@@ -78,36 +77,36 @@ from core.util.atomic_write import atomic_write_text as _atomic_write_text
 from core.util.text_utils import normalize_cyrillic
 
 __all__ = [
+    "APPLY_LOG_RELPATH",
     "ARTIFACT_FILES",
-    "CATALOG_WRITE_COLUMNS",
     "BASELINE_WRITE_COLUMNS",
+    "CATALOG_WRITE_COLUMNS",
     "GOLDEN_WRITE_COLUMNS",
     "PackageArtifacts",
     "PackageSummary",
-    "atomic_write_text",
-    "atomic_write_csv",
-    "validate_case_id",
-    "load_artifacts",
-    "list_artifacts",
-    "get_artifact",
-    "save_artifact",
-    "patch_run_projection",
-    "delete_artifact",
-    "build_run_inputs",
-    "prospective_lint",
-    "assert_no_new_blocking",
     "append_apply_log",
-    "APPLY_LOG_RELPATH",
+    "assert_no_new_blocking",
+    "atomic_write_csv",
+    "atomic_write_text",
+    "build_run_inputs",
+    "delete_artifact",
+    "get_artifact",
+    "list_artifacts",
+    "load_artifacts",
     "matches",
+    "patch_run_projection",
+    "prospective_lint",
+    "save_artifact",
     "scan_packages",
+    "validate_case_id",
 ]
 
 #: Канонический порядок CSV-колонок каталога при записи (обязательные + опц. §13).
-CATALOG_WRITE_COLUMNS: tuple[str, ...] = _CATALOG_COLUMNS + ("deprecated", "replaced_by")
+CATALOG_WRITE_COLUMNS: tuple[str, ...] = (*_CATALOG_COLUMNS, "deprecated", "replaced_by")
 #: Канонический порядок CSV-колонок baselines при записи.
 BASELINE_WRITE_COLUMNS: tuple[str, ...] = ("baseline_id", "param_id", "min_version", "inheritance_mode", "note")
 #: Канонический порядок CSV-колонок golden при записи.
-GOLDEN_WRITE_COLUMNS: tuple[str, ...] = _GOLDEN_COLUMNS + ("tier", "note")
+GOLDEN_WRITE_COLUMNS: tuple[str, ...] = (*_GOLDEN_COLUMNS, "tier", "note")
 
 #: Имя файла артефакта по внутреннему имени (ключи :class:`PackageArtifacts`).
 ARTIFACT_FILES: dict[str, str] = {
@@ -129,7 +128,7 @@ APPLY_LOG_RELPATH = ".authoring/apply_log.jsonl"
 _CASE_ID_RE = re.compile(r"^[a-z0-9_]+$")
 
 # Тип значения ячейки CSV.
-_Cell = Union[str, None]
+_Cell = str | None
 
 
 @dataclass
@@ -907,14 +906,14 @@ def prospective_lint(artifacts: PackageArtifacts) -> LintReport:
     return report
 
 
-def _blocking_messages(report: Union[LintReport, Sequence[str]]) -> list[str]:
+def _blocking_messages(report: LintReport | Sequence[str]) -> list[str]:
     if isinstance(report, LintReport):
         return list(report.blocking)
     return list(report)
 
 
 def assert_no_new_blocking(
-    before: Union[LintReport, Sequence[str]], after: Union[LintReport, Sequence[str]]
+    before: LintReport | Sequence[str], after: LintReport | Sequence[str]
 ) -> list[str]:
     """Предикат: возвращает **новые** блокирующие нарушения (``after`` минус ``before``).
 

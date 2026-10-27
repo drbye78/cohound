@@ -31,11 +31,11 @@ from core.util.index_layout import COMPOSITIONS_DIR
 __all__ = [
     "CompositionView",
     "ImmutableCompositionError",
+    "composition_path",
     "derive_composition_id",
     "legacy_view",
-    "composition_path",
-    "write_composition",
     "read_composition",
+    "write_composition",
 ]
 
 #: Схема входов деривации id (09 §8.1): меняется только вместе с формулой.

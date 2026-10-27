@@ -8,11 +8,10 @@
 
 from __future__ import annotations
 
-from typing import Any
-
 import argparse
 import sys
 from pathlib import Path
+from typing import Any
 
 from core.cli.context import (
     _add_common,

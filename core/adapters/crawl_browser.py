@@ -81,13 +81,14 @@ Playwright при ``launch``/``launch_persistent_context`` добавляет ``
 
 from __future__ import annotations
 
+import contextlib
 import importlib.util
 import shutil
 import tempfile
 import time
 from collections.abc import Callable
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any, Protocol
 from urllib.parse import urljoin, urlsplit
 
@@ -107,20 +108,20 @@ from core.util.robots import RobotsGate
 from core.util.security import validate_url
 
 __all__ = [
-    "BrowserCrawler",
-    "BrowserBackend",
-    "BrowserSession",
-    "HttpGetFn",
-    "CrawlUnavailable",
-    "DEFAULT_TIMEOUT_MS",
-    "DEFAULT_USER_AGENT",
+    "CHALLENGE_STATUSES",
     "DEFAULT_ACCEPT",
     "DEFAULT_ACCEPT_LANGUAGE",
+    "DEFAULT_TIMEOUT_MS",
+    "DEFAULT_USER_AGENT",
     "HTTP_TIMEOUT_S",
-    "CHALLENGE_STATUSES",
     "HYBRID_MAX_ATTEMPTS",
-    "INTERSTITIAL_MIN_RENDER_BYTES",
     "INTERSTITIAL_LENGTH_RATIO",
+    "INTERSTITIAL_MIN_RENDER_BYTES",
+    "BrowserBackend",
+    "BrowserCrawler",
+    "BrowserSession",
+    "CrawlUnavailable",
+    "HttpGetFn",
 ]
 
 #: Шов hybrid-HTTP: ``(url, headers, cookies) -> (status, body, resp_headers)``.
@@ -214,7 +215,7 @@ def _httpx_available() -> bool:
 
 def _now_iso() -> str:
     """Текущий UTC-таймстемп в ISO-8601 (поле ``fetched_at`` живого фетча)."""
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def _looks_like_interstitial(http_body: bytes, rendered: bytes | None) -> bool:
@@ -306,10 +307,11 @@ class _PlaywrightSession:
         if self._closed:
             return
         self._closed = True
-        try:
+        # Teardown best-effort: закрытие уже инициировано вызывающим, страница ему не
+        # принадлежит (контекст — бэкенду). Сбой одной страницы не повод отменять
+        # закрытие бэкенда; видимого исхода у закрытия нет, поэтому и записи нет.
+        with contextlib.suppress(Exception):
             self._page.close()
-        except Exception:  # noqa: BLE001 - best-effort
-            pass
 
 
 class _PlaywrightBackend:
@@ -410,11 +412,12 @@ class _PlaywrightBackend:
             if resource is None:
                 continue
             closer = getattr(resource, "close", None) or getattr(resource, "stop", None)
-            try:
+            # Best-effort по каждому ресурсу отдельно: цикл обязан дойти до конца, иначе
+            # сбой уже закрытого контекста оставил бы браузер и движок незакрытыми
+            # (утечка процессов). Порядок ресурсов и есть отчёт о том, что закрывали.
+            with contextlib.suppress(Exception):
                 if callable(closer):
                     closer()
-            except Exception:  # noqa: BLE001 - best-effort
-                pass
         self._context = None
         self._browser = None
         self._playwright = None
@@ -494,12 +497,15 @@ class BrowserCrawler:
 
     # -- публичный контракт ---------------------------------------------------
 
-    def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:
+    def fetch(self, url: str, plan: FetchPlan | None = None) -> RawPage:
         """Исполняет ``plan.strategy`` для ``url``: гард → SSRF → пейсинг → honest/hybrid.
 
         ``plan.fetch`` не влияет на диспетчер (см. докстринг модуля). hybrid при сбое
-        транспорта откатывается на honest.
+        транспорта откатывается на honest. ``plan=None`` — дефолтный план, построенный
+        здесь (дефолт-объект в сигнатуре был бы общим на все вызовы).
         """
+        if plan is None:
+            plan = FetchPlan()
         if self._closed:
             raise CrawlError("BrowserCrawler закрыт: fetch после close() запрещён")
 
@@ -553,10 +559,11 @@ class BrowserCrawler:
         self._closed = True
         backend = self._backend
         if backend is not None:
-            try:
+            # Best-effort: закрытие запрошено вызывающим, и его исход не наблюдаем (у
+            # Playwright нет «остаточного» состояния). Исключение здесь отменило бы
+            # освобождение временного профиля в ``_cleanup``.
+            with contextlib.suppress(Exception):
                 backend.close()
-            except Exception:  # noqa: BLE001 - best-effort
-                pass
 
     # -- honest ---------------------------------------------------------------
 
@@ -895,13 +902,18 @@ class BrowserCrawler:
 
     def _cache_mtime_iso(self, url: str) -> str:
         """ISO-8601 (UTC) mtime файла кэша; при отсутствии — текущее время (R7)."""
-        assert self._cache is not None
+        # S101: несуществующая ветка — инвариант конструктора (метод зовётся только
+        # там, где кэш внедрён: ``fetched_at`` берётся из mtime файла кэша, без кэша
+        # записи времени неоткуда взять). ``assert`` нужен ещё и как сужение типа для
+        # mypy-gate (``self._cache`` объявлен Optional): ``if`` там же сузил бы, но
+        # тогда «недостижимо» перестало бы быть проверяемым утверждением.
+        assert self._cache is not None  # noqa: S101 — инвариант конструктора
         try:
             path = self._cache.path_for("http", http_key(url), ".bin")
             stamp = path.stat().st_mtime
         except (OSError, ValueError):
             return _now_iso()
-        return datetime.fromtimestamp(stamp, tz=timezone.utc).isoformat()
+        return datetime.fromtimestamp(stamp, tz=UTC).isoformat()
 
     # -- ленивый импорт -------------------------------------------------------
 

@@ -14,11 +14,11 @@ import re
 from collections.abc import Sequence
 
 __all__ = [
-    "EXIT_OK",
-    "EXIT_ERROR",
-    "EXIT_USAGE",
     "EXIT_BLOCKED",
+    "EXIT_ERROR",
     "EXIT_NOT_FOUND",
+    "EXIT_OK",
+    "EXIT_USAGE",
     "FALLBACK_CODE",
     "CliError",
     "LintFailure",

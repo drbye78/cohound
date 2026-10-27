@@ -39,14 +39,14 @@ from core.ports.llm import TokenUsage
 from core.util.hashing import content_hash
 
 __all__ = [
+    "CHAT_COMPLETIONS_PATH",
+    "DEFAULT_DECODER",
+    "DEFAULT_MAX_TOKENS",
+    "DEFAULT_TIMEOUT",
+    "DiscoveryLLM",
     "DiscoveryLLMError",
     "DiscoveryLLMUnavailable",
-    "DiscoveryLLM",
     "GenerateFn",
-    "DEFAULT_DECODER",
-    "DEFAULT_TIMEOUT",
-    "DEFAULT_MAX_TOKENS",
-    "CHAT_COMPLETIONS_PATH",
 ]
 
 #: Механизм декодирования по умолчанию. ``json_object`` подтверждён рабочим на

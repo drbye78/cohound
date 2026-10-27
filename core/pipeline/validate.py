@@ -39,7 +39,6 @@ from core.domain import (
     FailureKind,
     LLMCellOutput,
     SourceKind,
-    SourceScope,
     Status,
     derived_evidence_id,
 )
@@ -81,8 +80,13 @@ class ValidationFailureKind(StrEnum):
 
 
 # Проверка синхронности с доменом (источник истины — ``FailureKind``): рассогласование —
-# ошибка сборки, а не данных.
-assert ValidationFailureKind.VALIDATION_FAILED.value == FailureKind.VALIDATION_FAILED.value
+# ошибка сборки, а не данных. Не ``assert``: проверка обязана исполниться и под ``python -O``.
+if ValidationFailureKind.VALIDATION_FAILED.value != FailureKind.VALIDATION_FAILED.value:
+    raise RuntimeError(
+        "ValidationFailureKind рассинхронизирован с FailureKind: "
+        f"{ValidationFailureKind.VALIDATION_FAILED.value!r} != "
+        f"{FailureKind.VALIDATION_FAILED.value!r}"
+    )
 
 
 @dataclass

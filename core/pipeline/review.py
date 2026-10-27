@@ -177,9 +177,8 @@ def review_queue(
     wanted = set(states)
     items: list[ReviewItem] = []
     for cell in store.iter_cells(run_id):
-        if cell.state in wanted:
-            items.append(_review_item(cell))
-        elif cell.state is CellState.EVALUATED and cell.status is Status.UNKNOWN:
+        unknown_evaluated = cell.state is CellState.EVALUATED and cell.status is Status.UNKNOWN
+        if cell.state in wanted or unknown_evaluated:
             items.append(_review_item(cell))
     items.sort(key=lambda item: (item.product_id, item.param_id))
     return items

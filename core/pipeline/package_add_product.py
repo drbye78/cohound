@@ -22,9 +22,10 @@ from __future__ import annotations
 import datetime as _dt
 import json
 import re
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any
 from urllib.parse import urlsplit
 
 import yaml
@@ -41,7 +42,6 @@ from core.config.seeds import (
     validate_seed_url,
 )
 from core.domain.enums import (
-    CrawlStrategy,
     ExtractionRoute,
     FetchMode,
     OnboardingState,
@@ -62,21 +62,21 @@ from core.pipeline.package_io import atomic_write_text, load_artifacts
 from core.pipeline.scout_common import dedupe, url_allowed
 from core.ports.types import FetchPlan
 from core.util.security import sanitize_slug
-from core.util.text_utils import transliterate
 from core.util.sitemap import (
     ROUTE_INDEX,
     SitemapParseError,
     expand_sitemap,
     parse_sitemap,
 )
+from core.util.text_utils import transliterate
 
 __all__ = [
     "SITEMAP_MAX_FETCHES",
     "AddProductError",
     "AddProductPlan",
     "DiscoveredSite",
-    "plan_add_product",
     "apply_add_product",
+    "plan_add_product",
     "write_domain_profiles_with_new_keys",
 ]
 
@@ -1583,7 +1583,7 @@ def apply_add_product(
             "new_profile_keys": new_keys,
             "passport_written": bool(write_passport),
             "written_files": list(written),
-            "applied_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+            "applied_at": _dt.datetime.now(_dt.UTC).isoformat(),
         }
     )
     artifact = {

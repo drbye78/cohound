@@ -32,11 +32,12 @@
 from __future__ import annotations
 
 import re
+import warnings
 
 __all__ = [
+    "neutralize_prompt_injection_marks",
     "sanitize_html",
     "strip_control_chars",
-    "neutralize_prompt_injection_marks",
 ]
 
 # ---------------------------------------------------------------------------
@@ -134,7 +135,9 @@ def sanitize_html(html: str) -> str:
 
     Сначала пробуется ``nh3.clean`` с явным allow-list тегов/атрибутов и схем URL.
     Если ``nh3`` не установлен или его вызов завершился ошибкой — используется
-    :func:`_stdlib_sanitize_html`. Пустая строка возвращается как есть.
+    :func:`_stdlib_sanitize_html`; сбой ``nh3`` при этом **не молчит**: он поднимает
+    ``RuntimeWarning`` (деградация к более слабому regex-пути должна быть видна).
+    Пустая строка возвращается как есть.
 
     **Оболочка документа сохраняется намеренно** (``html``/``head``/``title``/``body``).
     ``nh3`` сериализует body-фрагмент, поэтому literal ``<html>``/``<body>`` не выводит,
@@ -158,8 +161,19 @@ def sanitize_html(html: str) -> str:
                 url_schemes=_NH3_URL_SCHEMES,
                 strip_comments=True,
             )
-        except Exception:  # noqa: BLE001 - деградация к stdlib-fallback
-            pass
+        except Exception as exc:  # noqa: BLE001 - деградация к stdlib-fallback
+            # Молчаливая деградация недопустима: stdlib-фолбэк — регулярные выражения, он
+            # слабее allow-list ``nh3``, и «санитайзинг прошёл» перестало бы значить одно и
+            # то же для двух путей. Отказ **видим** (``RuntimeWarning``), но не смертелен:
+            # сломанный ``nh3`` не должен валить извлечение документа — фолбэк по-прежнему
+            # снимает активный HTML, поэтому падать вызывающему коду не за что.
+            warnings.warn(
+                "nh3.clean не смог обработать HTML "
+                f"({type(exc).__name__}: {exc}); "
+                "санитизация деградировала к stdlib-regex-фолбэку",
+                RuntimeWarning,
+                stacklevel=2,
+            )
     return _stdlib_sanitize_html(html)
 
 

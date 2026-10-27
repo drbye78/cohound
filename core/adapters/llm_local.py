@@ -47,27 +47,26 @@ HTTP-клиент подтягивается только в реальном п
 from __future__ import annotations
 
 import importlib.util
-import json
 from collections.abc import Callable
 from typing import Any
 
 from pydantic import BaseModel, ValidationError
 
 from core.domain import LLMCellOutput
-from core.ports.llm import EvaluatorPort, LLMRequest, LLMResponse, TokenUsage
+from core.ports.llm import LLMRequest, LLMResponse, TokenUsage
 from core.util.hashing import content_hash
 
 __all__ = [
+    "CHAT_COMPLETIONS_PATH",
+    "DEFAULT_BASE_URL",
+    "DEFAULT_DECODER",
+    "DEFAULT_ENDPOINT_KIND",
+    "DEFAULT_MODEL_ID",
+    "DEFAULT_TIMEOUT",
     "EvaluationError",
     "EvaluatorUnavailable",
-    "LocalEvaluator",
     "GenerateFn",
-    "DEFAULT_MODEL_ID",
-    "DEFAULT_ENDPOINT_KIND",
-    "DEFAULT_DECODER",
-    "DEFAULT_BASE_URL",
-    "DEFAULT_TIMEOUT",
-    "CHAT_COMPLETIONS_PATH",
+    "LocalEvaluator",
     "normalize_api_base",
 ]
 

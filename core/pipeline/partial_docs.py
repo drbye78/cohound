@@ -32,9 +32,9 @@ from pathlib import Path
 from typing import Any
 
 __all__ = [
+    "human_line",
     "partial_docs_summary",
     "write_partial_docs_artifact",
-    "human_line",
 ]
 
 #: Колонки ``outputs/partial_docs.csv`` (порядок стабилен: файл читают глазами и скриптом).

@@ -28,14 +28,21 @@ import json
 import os
 import shutil
 import tempfile
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any
 
 from core.util.index_partition import (
     CHUNK_IDS_FILE as _CHUNK_IDS,
+)
+from core.util.index_partition import (
     MANIFEST_FILE as _MANIFEST,
+)
+from core.util.index_partition import (
     VECTORS_FILE as _VECTORS,
+)
+from core.util.index_partition import (
     build_root,
     compositions_dir,
     is_committed,
@@ -49,15 +56,15 @@ from core.util.index_partition import (
 __all__ = [
     "PartitionData",
     "build_root",
-    "partition_dir",
-    "list_partitions",
+    "compositions_dir",
+    "is_committed",
     "list_build_ids",
     "list_composition_ids",
-    "compositions_dir",
-    "write_partition",
-    "read_partition",
+    "list_partitions",
+    "partition_dir",
     "read_manifest",
-    "is_committed",
+    "read_partition",
+    "write_partition",
 ]
 
 
@@ -116,16 +123,6 @@ def write_partition(
         shutil.rmtree(staging, ignore_errors=True)
         raise
     return target
-
-
-def read_manifest(
-    index_root: str | Path, package: str, build_id: str, product_id: str
-) -> dict[str, Any]:
-    """Читает ``manifest.json`` партиции (пустой dict, если нет)."""
-    path = build_root(index_root, package, build_id, product_id) / _MANIFEST
-    if not path.is_file():
-        return {}
-    return json.loads(path.read_text(encoding="utf-8"))
 
 
 def read_partition(

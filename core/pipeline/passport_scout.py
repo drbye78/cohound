@@ -42,17 +42,29 @@ from core.domain.models import Citation, Passport, Satellite, Upstream
 from core.pipeline.prompt import _fill_template, _load_template
 from core.pipeline.scout_common import (
     as_date as _as_date,
+)
+from core.pipeline.scout_common import (
     clean as _clean,
+)
+from core.pipeline.scout_common import (
     dedupe as _dedupe,
+)
+from core.pipeline.scout_common import (
     fetch_one as _fetch_one,
+)
+from core.pipeline.scout_common import (
     join_pages as _join_pages,
+)
+from core.pipeline.scout_common import (
     url_allowed as _url_allowed,
+)
+from core.pipeline.scout_common import (
     usage_dict as _usage_dict,
 )
 from core.ports.crawler import CrawlerPort
 from core.ports.discovery_llm import (
-    DiscoveryLLMRequest,
     DiscoveryLLMPort,
+    DiscoveryLLMRequest,
 )
 from core.ports.extractor import ExtractorPort
 from core.ports.search import SearchAdapterPort, SearchQuery
@@ -61,13 +73,13 @@ from core.util.security import sanitize_slug
 
 __all__ = [
     "DISCOVERY_TEMPLATE_VERSION",
-    "PassportScoutError",
-    "EvidenceHint",
-    "SatelliteHypothesis",
     "DiscoveryPassportHypothesis",
+    "EvidenceHint",
+    "PassportScoutError",
     "PassportScoutReport",
-    "scout_passport",
+    "SatelliteHypothesis",
     "build_passport_draft",
+    "scout_passport",
     "write_passport_draft",
 ]
 

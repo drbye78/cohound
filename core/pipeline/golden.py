@@ -30,14 +30,14 @@ from core.ports.store import StorePort
 
 __all__ = [
     "ERROR_CLASSES",
-    "GoldenThresholds",
     "GoldenCaseResult",
     "GoldenReport",
     "GoldenThresholdError",
-    "run_golden",
-    "evaluate_golden",
-    "check_thresholds",
+    "GoldenThresholds",
     "assert_golden",
+    "check_thresholds",
+    "evaluate_golden",
+    "run_golden",
 ]
 
 #: Допустимые machine-классы ошибки сравнения одной golden-строки.

@@ -26,7 +26,7 @@ from __future__ import annotations
 import json
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from core.domain.enums import (
@@ -41,9 +41,9 @@ from core.ports.search import SearchAdapterPort, SearchQuery, SearchResult
 __all__ = [
     "SearchBudget",
     "SearchEffort",
+    "external_search",
     "record_search",
     "termination_for",
-    "external_search",
 ]
 
 #: Ключи mapping-бюджета, задающие «потолок по умолчанию» для фаз без явного лимита.
@@ -52,7 +52,7 @@ _DEFAULT_KEYS = frozenset({"default", "*", "all"})
 
 def _utcnow() -> str:
     """Текущее время в UTC ISO-8601 (дефолтные часы для :func:`record_search`)."""
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def _as_enum(enum_cls: type[Any], value: Any) -> Any:
@@ -315,9 +315,12 @@ def external_search(
     phase = _require_phase(query.phase)
     # ``effort`` — носитель бюджета (charge не принимает бюджет отдельно). Если он пуст,
     # а явный ``budget`` задаёт лимит для фазы — принимаем его, чтобы аргумент не был мёртвым.
-    if budget is not None and effort.budget.limit_for(phase) is None:
-        if budget.limit_for(phase) is not None:
-            effort.budget = budget
+    if (
+        budget is not None
+        and effort.budget.limit_for(phase) is None
+        and budget.limit_for(phase) is not None
+    ):
+        effort.budget = budget
 
     if effort.remaining(phase, product_id) == 0:
         record_search(

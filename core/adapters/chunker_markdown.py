@@ -37,8 +37,7 @@ import hashlib
 import re
 from dataclasses import dataclass, field
 
-from core.ports.types import Chunk
-from core.ports.types import ExtractedDoc
+from core.ports.types import Chunk, ExtractedDoc
 
 _HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
 # Открывающий fence: до 3 пробелов отступа, маркер ` или ~ длиной ≥3, info-string.

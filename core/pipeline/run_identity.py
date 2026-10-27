@@ -33,8 +33,8 @@ from typing import Any, Protocol
 from core.domain.enums import ChangeClass, RefreshPolicy, RunScope
 from core.domain.models import RunConfig
 from core.pipeline.digests import execution_contract_digest
-from core.util.hashing import content_hash
 from core.pipeline.normalize import RunInputs
+from core.util.hashing import content_hash
 
 __all__ = [
     "DeclaredAxesLike",

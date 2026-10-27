@@ -75,7 +75,7 @@ from core.util.document_formats import (
     textual_family,
 )
 
-__all__ = ["main", "crawler_factory"]
+__all__ = ["crawler_factory", "main"]
 
 #: Коды возврата edge-лаунчера (edge — отдельный composition root, CLI-ядро не импортирует).
 EXIT_OK = 0
@@ -233,7 +233,7 @@ class _EngineCrawler:
                     return engine
         return self._default
 
-    def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:
+    def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:  # noqa: B008 - frozen
         """Делегирует выбранному движку (SSRF/деградация — ответственность адаптера)."""
         crawler = self._crawlers.get(self._pick(plan)) or self._crawlers[self._default]
         return crawler.fetch(url, plan)
@@ -323,7 +323,7 @@ def _build_audit_sink(config: EdgeRuntimeConfig) -> AuditSink | None:
     if config.audit.sink == "none":
         return None
     if config.audit.sink == "file":
-        assert config.audit.path is not None  # гарантировано моделью конфига
+        assert config.audit.path is not None  # noqa: S101 - narrowing: путь проверен валидатором
         return FileAuditSink(config.audit.path)
     raise ValueError(
         f"неизвестный audit.sink: {config.audit.sink!r}"

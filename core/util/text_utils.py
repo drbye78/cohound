@@ -19,7 +19,8 @@ from enum import StrEnum
 from functools import lru_cache
 
 try:  # необязательная зависимость: при отсутствии — эвристика по алфавиту
-    from langdetect import LangDetectException, detect as _langdetect  # type: ignore[import-not-found]
+    from langdetect import LangDetectException  # type: ignore[import-not-found]
+    from langdetect import detect as _langdetect
 
     _LANGDETECT_AVAILABLE = True
 except ImportError:  # pragma: no cover - зависит от окружения

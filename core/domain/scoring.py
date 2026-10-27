@@ -36,24 +36,24 @@ from core.domain.enums import (
 from core.domain.models import AlignmentReport, CatalogRow, Cell, Cohort
 
 __all__ = [
-    "Score",
-    "Coverage",
-    "ModuleScore",
-    "Comparability",
-    "SensitivityReport",
-    "Bucket",
-    "ProductPublishability",
-    "PublishabilityProfile",
+    "DEFAULT_COVERAGE_FLOOR",
     "DEFAULT_UNKNOWN_SHARE_THRESHOLD",
     "DEFAULT_WEAK_DENIAL_SHARE_THRESHOLD",
-    "DEFAULT_COVERAGE_FLOOR",
-    "resolved_capability",
+    "Bucket",
+    "Comparability",
+    "Coverage",
+    "ModuleScore",
+    "ProductPublishability",
+    "PublishabilityProfile",
+    "Score",
+    "SensitivityReport",
+    "comparability",
     "evidence_coverage",
     "failure_rate",
-    "comparability",
-    "sensitivity",
     "module_scores",
     "publishability_profile",
+    "resolved_capability",
+    "sensitivity",
 ]
 
 _EPS = 1e-9
@@ -259,6 +259,20 @@ def _normalize_axes(axes: Mapping[str, Iterable[Any]] | None) -> dict[str, list[
     return out
 
 
+def _axis_partial_score(raw: object) -> float:
+    """Значение оси ``partial_score`` как ``float``; нечисловая форма — видимая ошибка.
+
+    Ось приходит извне домена (sensitivity-спека §6), поэтому приводится **с проверкой**,
+    а не вслепую: ``0.5`` и ``"0.5"`` проходят, ``None`` даёт ``TypeError`` с именем оси.
+    """
+    if isinstance(raw, (int, float, str)):
+        try:
+            return float(raw)
+        except ValueError as exc:
+            raise ValueError(f"partial_score: не число ({raw!r})") from exc
+    raise TypeError(f"partial_score: ожидалось число, получено {type(raw).__name__}")
+
+
 def _cohort_product_ids(cohort: Any) -> list[str]:
     """Извлекает product_id из когорты (или итерируемого набора идентификаторов)."""
     if cohort is None:
@@ -396,22 +410,28 @@ def evidence_coverage(
     # отвергалось как «устаревшее» — гейт становился непроходимым на resume.
     for product_id, param_id in sorted(universe):
         w = _param_weight(param_id, params, weights)
-        cell = by_key.get((product_id, param_id))
-        if cell is None:
+        # Имя `scope_cell`, а не `cell`: в первой ветке (universe is None) `cell` уже
+        # связана как `Cell`, и повторное присваивание `Cell | None` сузило бы её тип
+        # вопреки проверкам ниже — mypy ловил это как not-assignable.
+        scope_cell = by_key.get((product_id, param_id))
+        if scope_cell is None:
             # Отсутствующая в прогоне ячейка scope — неразрешённая.
             universe_weight += w
             continue
-        if cell.status is Status.NOT_APPLICABLE:
+        if scope_cell.status is Status.NOT_APPLICABLE:
             continue  # N/A вне знаменателя (I7)
-        if cell.state is CellState.PRELIMINARY:
+        if scope_cell.state is CellState.PRELIMINARY:
             continue  # I13: preliminary вне всех расчётов
-        if cell.state in _MEASURED_STATES and cell.status in _APPLICABLE_STATUSES:
+        if (
+            scope_cell.state in _MEASURED_STATES
+            and scope_cell.status in _APPLICABLE_STATUSES
+        ):
             universe_weight += w
             completed += w
             n_used += 1
-            if cell.status in _RESOLVED_STATUSES:
+            if scope_cell.status in _RESOLVED_STATUSES:
                 numerator += w
-        elif cell.state is CellState.FAILED:
+        elif scope_cell.state is CellState.FAILED:
             universe_weight += w
             completed += w
             n_used += 1
@@ -420,13 +440,15 @@ def evidence_coverage(
             universe_weight += w
 
     defined = universe_weight > 0
+    # `coverage_value`, а не `value`: в ветке `universe is None` имя `value` уже занято
+    # скаляром `float`, а здесь тип шире (`None` означает «Coverage не определён», I11).
     if defined:
-        value: float | None = numerator / universe_weight
+        coverage_value: float | None = numerator / universe_weight
     else:
-        value = None
+        coverage_value = None
         completed = 0.0
     return Coverage(
-        value=value,
+        value=coverage_value,
         numerator=numerator,
         denominator=universe_weight,
         n_used=n_used,
@@ -637,7 +659,7 @@ def sensitivity(
                 by_product,
                 params,
                 weights,
-                partial_score=float(combo["partial_score"]),
+                partial_score=_axis_partial_score(combo["partial_score"]),
                 unknown_policy=combo["unknown_policy"]
                 if isinstance(combo["unknown_policy"], UnknownPolicy)
                 else UnknownPolicy(str(combo["unknown_policy"])),

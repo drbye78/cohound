@@ -32,20 +32,20 @@ from typing import Any
 from core.ports.types import CrawlStrategy, ExtractionRoute, FetchMode
 
 __all__ = [
-    "SEAM_SCHEMA_VERSION",
-    "SCHEMA_DIR",
-    "ENDPOINT_OPS",
     "CRAWL_OPS",
-    "FETCH_VALUES",
+    "ENDPOINT_OPS",
     "EXTRACT_VALUES",
-    "STRATEGY_VALUES",
+    "FETCH_VALUES",
     "POLL_KIND_VALUES",
-    "load_schema",
-    "validate_envelope",
-    "validate_payload",
-    "validate_fetch_request",
-    "validate_crawl_request",
+    "SCHEMA_DIR",
+    "SEAM_SCHEMA_VERSION",
+    "STRATEGY_VALUES",
     "contract_digest",
+    "load_schema",
+    "validate_crawl_request",
+    "validate_envelope",
+    "validate_fetch_request",
+    "validate_payload",
 ]
 
 #: Версия контракта шва. Обязана совпадать с клиентской/серверной
@@ -362,13 +362,10 @@ def _validate_capabilities(payload: Any) -> list[str]:
     for field in ("extractor_version", "crawler_version", "search_engine"):
         _check_opt_str(violations, "capabilities", field, payload.get(field))
     formats = payload.get("supported_formats")
-    if formats is not None:
-        if not isinstance(formats, list) or not all(
-            isinstance(item, str) for item in formats
-        ):
-            violations.append(
-                "capabilities: supported_formats должен быть списком строк"
-            )
+    if formats is not None and (
+        not isinstance(formats, list) or not all(isinstance(item, str) for item in formats)
+    ):
+        violations.append("capabilities: supported_formats должен быть списком строк")
     return violations
 
 

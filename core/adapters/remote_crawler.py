@@ -40,14 +40,17 @@ class RemoteCrawler:
         """Доступен ли транспорт шва (``httpx`` или внедрённый ``transport``)."""
         return bool(getattr(self._gateway, "available", True))
 
-    def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:
+    def fetch(self, url: str, plan: FetchPlan | None = None) -> RawPage:
         """``/v1/fetch`` → ``RawPage`` (сырые байты, retention).
 
         План сериализуется целиком (``fetch``/``extract``/``strategy``/``wait_for``):
         edge исполняет оси, а прокси потребляет сырые байты. Ось ``strategy``
         (``auto``/``honest``/``hybrid``) — **additive**: старые edge без неё продолжают
-        работать (поле необязательно). Нейтрален (§1.3).
+        работать (поле необязательно). Нейтрален (§1.3). ``plan=None`` — дефолтный план,
+        построенный здесь (дефолт-объект в сигнатуре был бы общим на все вызовы).
         """
+        if plan is None:
+            plan = FetchPlan()
         payload = {
             "url": url,
             "fetch": plan.fetch.value,

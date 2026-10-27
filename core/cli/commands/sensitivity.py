@@ -8,9 +8,8 @@
 
 from __future__ import annotations
 
-from typing import Any
-
 import argparse
+from typing import Any
 
 from core.cli.context import (
     _add_common,
@@ -67,7 +66,9 @@ def run(args: argparse.Namespace) -> int:
             universe=universe,
         )
 
-    assert bundle is not None  # compute выполняется безусловно (см. выше)
+    # Сужение типа для mypy: ``bundle`` присваивается безусловно внутри ``with`` выше, и
+    # ``None`` недостижим — проверка это инвариант, а не путь отказа.
+    assert bundle is not None  # noqa: S101 — сужение типа для недостижимого None
     report = bundle.sensitivity
     payload = {
         "ok": True,
