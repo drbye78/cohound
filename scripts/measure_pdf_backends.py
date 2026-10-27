@@ -33,7 +33,6 @@ import resource
 import subprocess
 import sys
 import time
-import unicodedata
 
 REPO = "/home/roger/src/cohound"
 

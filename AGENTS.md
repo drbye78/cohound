@@ -229,8 +229,14 @@ python3 -m core.cli experiment evaluator-benchmark --runs-dir runs --run-id {run
 # Проверка фундамента (без pytest)
 python3 tests/selfcheck.py
 
-# CI-гейты (selfcheck + pytest + порог покрытия ядра) — провайдер-нейтрально
+# CI-гейты (ruff → mypy [домен «ноль» + baseline ядра] → selfcheck → pytest + порог покрытия) —
+# провайдер-нейтрально
 bash scripts/ci.sh
+
+# Линтер и type-checker по отдельности (оба в extra `dev`; реестр — 05-dependency-stack §2.7.1)
+.venv/bin/ruff check core tests scripts
+.venv/bin/python scripts/mypy_gate.py           # домен обязан быть чистым (0 ошибок)
+.venv/bin/python scripts/mypy_gate.py --update  # перегенерировать baseline ядра — осознанно
 
 # pytest (dev-окружение): обёртка над selfcheck + property-тесты домена
 uv pip install -e '.[dev]'           # или воспроизводимо из лока: uv sync --frozen --extra dev

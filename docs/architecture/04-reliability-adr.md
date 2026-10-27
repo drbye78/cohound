@@ -141,16 +141,20 @@ write-site'ов у них пока нет, но словарь обязан их
 
 ### C.1. Проверки на PR
 
-**`scripts/ci.sh` выполняет ровно два шага:** `python3 tests/selfcheck.py` и
-`python3 -m pytest -q --cov=core` с порогом покрытия ядра (`fail_under = 80` в
-`pyproject.toml`). Таблица ниже разделена по этому факту: «гейт» из второй половины в CI
-**не** выполняется, даже если он обязателен к исполнению — его запускают вручную или на
-релизном (full-CI) прогоне.
+**`scripts/ci.sh` выполняет четыре шага:** `ruff check core tests scripts` (линтер) →
+`scripts/mypy_gate.py` (type-checker: `core/domain` — гейт «ноль ошибок», остальной `core/` —
+зафиксированный baseline) → `python3 tests/selfcheck.py` → `python3 -m pytest -q --cov=core` с
+порогом покрытия ядра (`fail_under = 80` в `pyproject.toml`). Таблица ниже разделена по этому
+факту: «гейт» из второй половины в CI **не** выполняется, даже если он обязателен к исполнению —
+его запускают вручную или на релизном (full-CI) прогоне.
 
-**В CI (`scripts/ci.sh` = `selfcheck.py` + `pytest --cov`):**
+**В CI (`scripts/ci.sh` = `ruff` + `mypy_gate.py` + `selfcheck.py` + `pytest --cov`):**
 
 | Гейт | Что проверяет | Где |
 |---|---|---|
+| **Линтер** | набор `E4,E7,E9,F,B,BLE,I,UP,SIM,S,RUF`: мёртвый код, тихое проглатывание исключения, позднее связывание в цикле, undefined-name в аннотации | `ruff` (конфиг — `pyproject.toml`; обоснования — 05 §2.7.1) |
+| **Типы: домен** | `core/domain` — ноль ошибок mypy (инварианты и scoring типизированы верно) | `scripts/mypy_gate.py` |
+| **Типы: долг не растёт** | остальной `core/` — ровно baseline, новая ошибка блокирует сборку | `scripts/mypy_gate.py` + `docs/architecture/mypy-baseline.txt` |
 | **Импорт-граф** | матрица зависимостей слоёв (итерация 1 §1) | `tests/selfcheck.py::_import_graph` (`ast`) |
 | **Грепп-нейтральность** | предметных терминов в `core/domain`/`core/ports`/`core/pipeline` нет (три слоя — это и есть гейт) | `tests/selfcheck.py::_neutrality` |
 | **DDL/триггеры** | схема + триггеры I4/I6/I7/I13/I18 | selfcheck |
@@ -169,6 +173,7 @@ write-site'ов у них пока нет, но словарь обязан их
 
 | Гейт | Что проверяет | Инструмент |
 |---|---|---|
+| **mypy `--strict`** | полная строгость на `core/`: сверх baseline снимаются `Any`-заражение (1581 упоминание) и `getattr` (1047 вызовов) | `mypy --strict core/`, когда долг закрыт |
 | **golden-full** | согласие ≥80% на полной страте (см. §C.2) — нужен завершённый прогон | `hound golden --tier full` |
 | **Линт пакета** | §4.2 + правила линтера на живом пакете (сам линтер покрыт `tests/pipeline/test_lint.py`) | `hound package validate` |
 | **Разрешимость зависимостей** | `pyproject.toml` резолвится на базлайне Python 3.14 | `uv pip compile --python-version 3.14` |

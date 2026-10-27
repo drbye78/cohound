@@ -4,8 +4,10 @@
 # Запуск (из корня репозитория):
 #   bash scripts/ci.sh
 #
-# Гейты: автономный selfcheck (словарь/схемы/DDL/инварианты + импорт-граф §1 + нейтральность
-# §1.3) → pytest с порогом покрытия ядра (W1/T1.5). Ненулевой код = провал сборки.
+# Гейты: ruff (линтер) → mypy (домен — ноль ошибок, остальное ядро — зафиксированный
+# baseline) → автономный selfcheck (словарь/схемы/DDL/инварианты + импорт-граф §1 +
+# нейтральность §1.3) → pytest с порогом покрытия ядра (W1/T1.5). Ненулевой код = провал
+# сборки.
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -13,6 +15,26 @@ cd "$root"
 
 py="${PYTHON:-python3}"
 
+echo "== ruff (линтер) =="
+# Набор правил и обоснования — pyproject.toml [tool.ruff.lint] и
+# docs/architecture/05-dependency-stack.md §2.7. Гейт ловит класс дефектов, который
+# runtime-валидация не видит: мёртвый код, тихое проглатывание исключения, undefined-name
+# в аннотации, позднее связывание в цикле.
+if "$py" -c "import ruff" >/dev/null 2>&1; then
+  "$py" -m ruff check core tests scripts
+else
+  echo "ruff не установлен — пропускаю. Установка: uv sync --frozen --extra dev"
+fi
+
+echo
+echo "== mypy (домен — гейт, остальное ядро — baseline) =="
+if "$py" -c "import mypy" >/dev/null 2>&1; then
+  "$py" scripts/mypy_gate.py
+else
+  echo "mypy не установлен — пропускаю. Установка: uv sync --frozen --extra dev"
+fi
+
+echo
 echo "== selfcheck (автономный, без pytest) =="
 "$py" tests/selfcheck.py
 

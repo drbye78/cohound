@@ -69,7 +69,13 @@ def _reexec_in_project_venv(root: Path) -> None:
     if _in_project_venv(root):
         return
     os.environ[ENV_REEXEC_GUARD] = "1"
-    os.execv(str(venv_python), [str(venv_python), str(Path(__file__).resolve()), *sys.argv[1:]])
+    # S606 (start process without a shell) не применим: ``execv`` принимает argv
+    # списком и **заменяет** процесс, не порождая дочерний, — оболочки здесь нет
+    # by construction. Разбор аргументов через shell был бы как раз дефектом.
+    os.execv(  # noqa: S606
+        str(venv_python),
+        [str(venv_python), str(Path(__file__).resolve()), *sys.argv[1:]],
+    )
 
 
 def main_wrapper() -> int:
