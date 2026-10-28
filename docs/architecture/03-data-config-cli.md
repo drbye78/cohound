@@ -447,6 +447,9 @@ crawl:                          # §3.2/D4: дефолты оси стратег
   extract_max_tasks_per_child: null   # опц. (>=1): рециклинг воркер-процессов экстракции
   document_level: full          # опц.: P5-уровень извлечения документов
                                 # (off|text|layout|layout_tables|full; дефолт full)
+  pdf_pipeline: structured      # опц.: P7-механизм извлечения PDF (structured|text_layer)
+  pdf_device: cpu               # опц.: P9-устройство моделей PDF (cpu|cuda; дефолт cpu);
+                                # cuda без устройства — отказ, а не тихий CPU
   max_depth: 2                  # опц. (>=0): глубина BFS-обхода in-site ссылок (0 — только seeds)
   max_documents: 500            # опц. (>0): потолок добытых страниц на (продукт, seed-root)
   revalidate_max_documents: null      # опц. (>=1): потолок известных URL ревалидации на продукт
@@ -676,6 +679,22 @@ basename/path без знания content-type); «полная» экономи
 `no_text_layer`, а не пустой документ. Под `split` ось не действует: экстрактор — remote,
 конвертеры строит edge (R-S).
 
+**`pdf_device` (P9) — устройство моделей извлечения PDF.** Ось `crawl.pdf_device`
+(`cpu` — дефолт, `cuda`) объявляет, **на чём** исполняются layout-модели/таблицы/OCR.
+`auto` не существует намеренно (R5, `10` §1): объявленная ось обязана действовать, а
+`auto` = «устройство выбрал движок», то есть тот же класс, что чтение модели оценщика из
+env (§7.4). Цепочка — `app < run`, **без** per-site слоя: устройство принадлежит хосту
+исполнения, а не сайту. CLI-флага нет по той же причине. Отдельного значения в
+`crawl_config_digest` ось **не** получает: материал уже назван `extractor_stack`
+(`docling-doc-3/<device>/docling-<build>`) и `extractor_version` документа, а второе поле на
+тот же материал не дало бы различить расхождение прогонов; `run_id` меняется через стек —
+`execution_change` (§13), один раз. `cuda` при недоступном устройстве — `EXIT_USAGE` с
+числами (версия torch, `cuda_available`, объём карты), **не** тихий CPU: иначе провенанс
+назвал бы GPU, на котором прогон не исполнялся. Замер (`10` §3.4–3.6): `layout_tables` на
+RTX 3050 — 9.94×/11.73×/8.45× на 22/181/665 стр. против одного CPU-воркера; параллель на одной
+карте — 1.10×, поэтому правильная конфигурация — один GPU-воркер. Под `split` ось не
+действует: конвертеры строит edge своим конфигом (R-S).
+
 **`document_timeout_s` (P8) — таймаут документа.** Ось `crawl.document_timeout_s`
 (цепочка `app < run < site`) объявляет потолок ожидания извлечения **одного** документа/
 члена контейнера. Дефолт — **прежнее зашитое поведение** (`DEFAULT_DOCUMENT_TIMEOUT_S` =
@@ -688,10 +707,14 @@ basename/path без знания content-type); «полная» экономи
 `layout_tables` на 665-стр. PDF — 866 с (`05` §2).
 
 **Память по уровням.** Пик = `parent_floor + W × peak(level корня)` (`W` = `extract_workers`),
-где замеренные пики — `text` 855 MB, `layout` 1563, `layout_tables` **3679**, `full` 3107,
-`parent_floor` ≈ 500 MB (`docs/reports/measurements/2026-10-23-docling-level-peaks.md`,
+где замеренные пики — `text` 855 MB, `layout` 1563, `layout_tables` **3679**, `full` **4833**
+(3679 + синтетическая дельта OCR+ACCURATE 1154; прямой замер `full` на реальном корпусе —
+открытая задача, `10` §3), `parent_floor` ≈ 500 MB
+(`docs/reports/measurements/2026-10-23-docling-level-peaks.md`,
 константы — `core/pipeline/resources.py`). Если ось `extract_workers` **не объявлена** ни на
 одном слое, окно выводится как `min(floor((бюджет − parent_floor) / peak(level)), cpu_count)`,
+а под `crawl.pdf_device: cuda` — с третьим слагаемым `floor(usable_vram / vram_peak(level))`
+(`10` §5.5),
 где бюджет — `COHOUND_MEM_BUDGET_MB` либо `MemAvailable − 512 MB`; нулевой результат — отказ
 прогона с названными числами (`EXIT_USAGE`), а не «возьмём один» (F0, `11` §3.3). Пулы корней
 **последовательны** (создаются лениво на корень и `shutdown` в `finally`), поэтому пик —
@@ -1022,7 +1045,7 @@ path-prefix seed-root к нему не применяется: `/docs/` може
 **Окно выводится из замера, а не назначается вручную** (F0/Д-7, `11` §3.3): при оси,
 не объявленной ни на одном слое, `W = min(floor((бюджет − parent_floor) / peak(level)),
 cpu_count)` — `peak` замерен по уровням (`text` 855 MB, `layout` 1563, `layout_tables` 3679,
-`full` 3107), `parent_floor` ≈ 500 MB, бюджет — `COHOUND_MEM_BUDGET_MB` либо
+`full` 4833), `parent_floor` ≈ 500 MB, бюджет — `COHOUND_MEM_BUDGET_MB` либо
 `MemAvailable − 512 MB` (`core/pipeline/resources.py`). Потолок по CPU обязателен: память
 отвечает «сколько поместится», но не «сколько успеет», и без него хост с запасом RAM получил
 бы сотню процессов docling. Ноль воркеров — отказ прогона на входе (`EXIT_USAGE` с числами),
@@ -1493,7 +1516,7 @@ CLI-поверхности. Каждая проверка обёрнута в tr
 | 1 | Расщепить `core/schemas.py` → `domain/{enums,models,invariants,r2,anchors}.py` | `tests/selfcheck.py` зелёный | ✅ сделано (T1.2; `core/domain/enums.py:1` … `core/domain/anchors.py:1`) — монолит **удалён**, гейт `tests/selfcheck.py:1123` |
 | 2 | Расщепить `core/db.py` → `store/sqlite.py` (DDL) + `ports/store.py` (контракт) | DDL-тест + триггеры | ✅ сделано (T1.3; `core/store/sqlite.py:21`) — монолит **удалён**, тот же гейт `tests/selfcheck.py:1123` |
 | 3 | Ввести `ports/*` (Protocol) и адаптеры-заглушки | импорт-граф CI (итерация 4) | ✅ сделано (`core/ports/` — 20 модулей портов, напр. `core/ports/store.py:1`; импорт-граф — `tests/selfcheck.py:948`) |
-| 4 | Перенести проверки `Cell._enforce_invariants` в `domain/invariants.py` (вызов из Pydantic) | selfcheck | ⬜ не сделано — правила **продублированы**, а не перенесены: Pydantic-валидатор `core/domain/models.py:1057` держит проверки inline (77 `raise ValueError` в модуле, импорта `core.domain.invariants` нет — он был бы циклическим), а `core/domain/invariants.py:196` (`check_cell`) лишь «зеркалит» их для pipeline/store/selfcheck |
+| 4 | Перенести проверки `Cell._enforce_invariants` в `domain/invariants.py` (вызов из Pydantic) | selfcheck | ⬜ не сделано — правила **продублированы**, а не перенесены: Pydantic-валидатор `core/domain/models.py:1065` держит проверки inline (77 `raise ValueError` в модуле, импорта `core.domain.invariants` нет — он был бы циклическим), а `core/domain/invariants.py:196` (`check_cell`) лишь «зеркалит» их для pipeline/store/selfcheck |
 
 Ранее использовавшиеся transitional re-export-шимы `core.schemas`/`core.db` **удалены**;
 публичный контракт — `core.domain` и `core.store.sqlite` (проверяется

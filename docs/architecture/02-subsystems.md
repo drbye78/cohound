@@ -240,7 +240,7 @@ plan.rate_limit)` (адаптерный `rate_limiter` — опц. хук для
   `crawl_config_digest` всегда (как `max_depth`), а не только когда задан явно;
 - `document_level` тоже входит в дайджест **безусловно** (дефолт `full` присутствует
   всегда), а дополнительно кодируется в наблюдаемой версии экстрактора
-  (`extract_document.py:393` — `docling-doc-3:{level}`): он меняет извлечённый текст
+  (`extract_document.py:128` — `docling-doc-3:{level}`): он меняет извлечённый текст
   (замер: `layout_tables → text` дал 154 678 → 138 598 символов) и влечёт новую
   `partition_build_id`. Класс от этого не меняется — идентичность прогона разошлась уже на
   дайджесте; новая сборка лишь следствие.
@@ -389,7 +389,7 @@ top-level URL, затем опрос каталогов, волна 2 — зап
 
 - `partition_build_id` = `"pb_" + short_hash(_PARTITION_SCHEMA, package_id, product_id,
   chunker_version, embed_model_id, extractor_version, lexical_engine_version, vector_store,
-  product_content_token)` (`_derive_partition_build_id`, `corpus.py:1450-1500`).
+  product_content_token)` (`_derive_partition_build_id`, `corpus.py:1904-1953`).
   `product_content_token` — отпечаток содержимого партиции, sorted `(chunk_id,
   content_hash)`: порядко-независим и чувствителен к любому изменению контента.
   **`params_token` (каталог/фокус) и `snapshot_date` намеренно исключены** — каталог и фокус

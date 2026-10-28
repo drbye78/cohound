@@ -38,7 +38,7 @@ mypy: домен 0 ошибок + baseline 121, selfcheck 111/111, pytest 4801 p
 
 | Утверждение ревью | Что на самом деле |
 |---|---|
-| SSRF через редирект — «единственный дефект уровня до продакшена»; байты внутреннего эндпоинта попадают в retention и к LLM | Факт есть (`crawl_http.py:149`, `:322`; `crawl_scrapy.py:786` — единственная валидация), тяжесть завышена: в корпусном пути при `max_depth > 0` редирект-эскейп **отвергается** (`corpus.py:5839-5852`, `redirect_out_of_scope`, покрыто тестом). Настоящая дыра другая: запрос всё равно выпускается (слепой SSRF), байты ложатся в `cache/http` **до** проверки scope (`crawl_http.py:248`), гейт выключен при `max_depth=0` (`corpus.py:7803`), и вне краул-очереди гейта нет вовсе (robots.txt, реестры, discovery-проба, SERP-фетч, edge `/v1/fetch`) |
+| SSRF через редирект — «единственный дефект уровня до продакшена»; байты внутреннего эндпоинта попадают в retention и к LLM | Факт есть (`crawl_http.py:149`, `:322`; `crawl_scrapy.py:881` — единственная валидация), тяжесть завышена: в корпусном пути при `max_depth > 0` редирект-эскейп **отвергается** (`corpus.py:5839-5852`, `redirect_out_of_scope`, покрыто тестом). Настоящая дыра другая: запрос всё равно выпускается (слепой SSRF), байты ложатся в `cache/http` **до** проверки scope (`crawl_http.py:248`), гейт выключен при `max_depth=0` (`corpus.py:7803`), и вне краул-очереди гейта нет вовсе (robots.txt, реестры, discovery-проба, SERP-фетч, edge `/v1/fetch`) |
 | Пейсинг размывается числом процессов | В `local` фетч идёт пулом **потоков** в одном процессе — лимитер один, разбавления нет (`corpus.py:5635-5648`, `:7634-7637`). Разбавление `процессы × 1/delay` — только в DMZ-планировщике для `scrapy`/`browser` (`edge/scheduler.py:425-427`), и оно задокументировано |
 | Многораундовая SERP-петля мертва; `SearchPhase.SERP` не излучается; спека это признаёт | Мертвы только `run_serp_round`/`run_serp_loop`. `invalidate_affected` **вызывается** (`corpus.py:3375-3381` из `:8872`), `SearchPhase.SERP` **излучается** (`corpus.py:3229`, `serp_loop.py:753`). Устарела спека (§546-548), а не код |
 | `context_prefix`/`heading_path` лежат в четырёх таблицах | Их две: `corpus_chunks` (`store/sqlite.py:143-158`) и `chunk_meta` (`store/state_sqlite.py:132-142`) |
@@ -62,10 +62,10 @@ mypy: домен 0 ошибок + baseline 121, selfcheck 111/111, pytest 4801 p
    `build_serp_queries` строит запросы по двум языкам (`serp_loop.py:743-752`) — наивный кэш
    вернёт выдачу не того языка.
 2. **Оценщик не видит заголовков (C7).** В промпт уходит
-   `f"[source: {chunk.chunk_id}]\n{chunk.text}"` (`prompt.py:220`);
+   `f"[source: {chunk.chunk_id}]\n{chunk.text}"` (`prompt.py:290-314`);
    `RetrievedChunk.heading_path` заполняется (`retrieve.py:135`) и не доходит;
    `context_prefix` генерируется, хранится и **не потребляется нигде** — эмбеддится
-   `[c.text for c in batch]` (`corpus.py:2391`), а докстринг `chunker_text.py:17-18`
+   `[c.text for c in batch]` (`corpus.py:2474`), а докстринг `chunker_text.py:17-18`
    обещает, что «контекст нужен для эмбеддинга». Регламент при этом не нарушен: §7.1
    фиксирует `[source: chunk_id]` без заголовка. То есть решение **незаявленное**, и оно
    прямо бьёт по качеству вердиктов: модель видит 1500 символов без пути заголовков и без
@@ -98,12 +98,12 @@ mypy: домен 0 ошибок + baseline 121, selfcheck 111/111, pytest 4801 p
 | R2 | robots fail-open: недоступная лента = «правил нет» | ПОДТВЕРЖДЕНО → **закрыто** (`f928624`: `RobotsFeedState` из 5 состояний; `unavailable` ⇒ отказ `robots_unavailable`, `404`/`410` ⇒ разрешение как наблюдённый факт) | `util/robots.py:342-386` (`RobotsGate.verdict`); проба: `None`/5xx → `allowed=False reason=robots_unavailable`, `404` → `allowed=True state=not_found` | `test_util_robots.py`, `test_crawl_robots.py` | М/Б | P5 |
 | R3 | анти-автоматизационные флаги браузера | ПОДТВЕРЖДЕНО | `crawl_browser.py:164`,`:167`,`:471`; заявлено в `:36-45` и в спеке §10 | да: `test_crawl_browser.py:837` | М | — |
 | R4 | пейсинг размывается процессами | ОПРОВЕРГНУТО для `local` | см. §1.1 | нет (докстринг `rate_limit.py:12-19`) | Д | — |
-| R5 | таксономия `CrawlError` живёт в тяжёлом адаптере | ПОДТВЕРЖДЕНО → **исправлено** (таксономия в `core/ports/`) | `crawl_scrapy.py:150-241`; импортируют `crawl_http.py:63`, `crawl_browser.py:95`, `wiring.py:41`, `edge/__main__.py:55`, `crawler_factory.py:27` | косвенно (12 файлов тестов) | Г | P5 |
+| R5 | таксономия `CrawlError` живёт в тяжёлом адаптере | ПОДТВЕРЖДЕНО → **исправлено** (таксономия в `core/ports/`) | `crawl_scrapy.py:150-241`; импортируют `crawl_http.py:63`, `crawl_browser.py:98`, `wiring.py:41`, `edge/__main__.py:55`, `crawler_factory.py:27` | косвенно (12 файлов тестов) | Г | P5 |
 | R6 | признак «слишком большой ответ» — по подстрокам сообщений Scrapy | ПОДТВЕРЖДЕНО → **закрыто** (`f928624`: структурный `DownloadCancelledError`, подстрочный разбор снят) | `crawl_scrapy.py` (перехват по типу, не по тексту) | `test_crawl_scrapy.py` | Г | P5 |
 | R7 | `final_url` из edge не валидируется | ПОДТВЕРЖДЕНО | `remote_crawl_executor.py:319` (`validate_url(url)`) vs `:358` (`final_url` без проверки); `final_url` становится `RawPage.url` (`corpus.py:7917`) | нет: тест утверждает **деградацию** malformed `final_url` (`test_remote_crawl_executor.py:548-556`) | Б | P3 |
 | R8 | robots всегда по `https://`, http-фолбэка нет | ПОДТВЕРЖДЕНО | `crawler_factory.py:52`, `wiring.py:1263`, `package_add_product.py:905`,`:954`, `package/commands.py:1643` | нет ни одного | Г | P4 |
 | R9 | сайдкар меты кэша: легаси-запись теряет статус/тип | ПОДТВЕРЖДЕНО | `crawl_http.py:217` (ключ по запрошенному URL), `:248-262`, `:598-608` | легаси-путь исполняется, потеря не утверждается (`test_crawl_http.py:232-241`) | Г | P4 |
-| R10 | редиректы не валидируются по-хопово | ПОДТВЕРЖДЕНО → **исправлено** (per-hop в http/scrapy/edge + `util/redirects` для SERP-адаптеров и реестров); браузер был сделан правильно | `crawl_http.py:149`,`:322`, `crawl_scrapy.py:786`; правильно: `crawl_browser.py:282`,`:840` + тесты `:624/637/655` | нет для http/scrapy | Б | **P3** |
+| R10 | редиректы не валидируются по-хопово | ПОДТВЕРЖДЕНО → **исправлено** (per-hop в http/scrapy/edge + `util/redirects` для SERP-адаптеров и реестров); браузер был сделан правильно | `crawl_http.py:149`,`:322`, `crawl_scrapy.py:881`; правильно: `crawl_browser.py:282`,`:840` + тесты `:624/637/655` | нет для http/scrapy | Б | **P3** |
 
 **Статус на 2026-10-28.** ✅ R1, R2, R5, R6, R7, R9, R10 · ➖ R3, R4 · ⬜ R8.
 
@@ -131,21 +131,21 @@ mypy: домен 0 ошибок + baseline 121, selfcheck 111/111, pytest 4801 p
 
 | ID | Находка | Вердикт | Доказательство | Тест | Класс | P |
 |---|---|---|---|---|---|---|
-| F1 | «потолка глубины нет, конечность — цикл+бюджет» — обоснование ложно; цепочка различных архивов упирается в рекурсию | ПОДТВЕРЖДЕНО (замером) | `archive_descent.py:733-738` (`_walk` рекурсивен, вне `try`), `:314-317` (RecursionError гасится в «не распознан»), `container_policy.py:194` | нет: максимум 3 уровня (`test_corpus_descent.py:378`) | М/Б | **P4** |
+| F1 | «потолка глубины нет, конечность — цикл+бюджет» — обоснование ложно; цепочка различных архивов упирается в рекурсию | ПОДТВЕРЖДЕНО (замером) | `archive_descent.py:733-738` (`_walk` рекурсивен, вне `try`), `:314-317` (RecursionError гасится в «не распознан»), `container_policy.py:194` | нет: максимум 3 уровня (`test_corpus_descent.py:374`) | М/Б | **P4** |
 | F2 | тест зависит от числа CPU хоста | ПОДТВЕРЖДЕНО (замер: `cpu_count=2` → `assert 2 == 3`) | `test_corpus_extract_pool.py:1900` без `cpu_cap`; режет `resources.py:434` | тест сам дефект | Г | **P4** |
-| F3 | 6 тестов проверяют **реальное** отсутствие `py7zr`/`rarfile`; с extra `extract-archives` они падают | ПОДТВЕРЖДЕНО (замер: 6 failed / 19 passed при подмене бэкенда) | `test_container_7z.py:35,43,54`, `test_container_rar.py:55,63,74` | — | Г | **P4** |
+| F3 | 6 тестов проверяют **реальное** отсутствие `py7zr`/`rarfile`; с extra `extract-archives` они падают | ПОДТВЕРЖДЕНО (замер: 6 failed / 19 passed при подмене бэкенда) | `test_container_7z.py:36-38` (`_no_backend`), тесты `:46`,`:55`,`:68`, `test_container_rar.py:55,63,74` | — | Г | **P4** |
 | F4 | `pdf_page_count` читает файл целиком, докстринг обещает «по шапке/без разбора» | ПОДТВЕРЖДЕНО, цена замерена: ≈16.5 мс/MiB, линейно | `document_probe.py:144-180`, вызов `:240` из `classify_artifact` (`corpus.py:7275`), синхронно в фазе | только корректность (`selfcheck.py:3822-3890`) | Д/Г | P4 |
 | F5 | EPUB читает недоверенный XML stdlib-ом, тогда как feed/sitemap — `defusedxml` | ПОДТВЕРЖДЕНО как расхождение; защита на 3.14 замерена и верна → **закрыто** (`0c683f0`: один вход разбора XML, hostile-тесты) | `util/feed.py`, `extract_epub.py` (единая точка разбора) | hostile-XML тесты (billion-laughs / XXE `file://` / внешний DTD) | Г | P5 |
 | F6 | `if value` вместо `is not None` в бюджете спуска обнуляет стримовый гейт | ЧАСТИЧНО: «читаем всё» не проходит, отключается второй гейт | `archive_descent.py:613-614`, `:621`; сравнить `container_policy.py:286` (`is not None`) | нет (`max_member_bytes=0` не строится ни в одном тесте) | Г | P4 |
-| F7 | ось `crawl.document_timeout_s` до docling не доходит; `full` — без таймаута; рециклинга воркеров нет | ПОДТВЕРЖДЕНО | `extract_document.py:383-391` (`FULL: None`), `wiring.py:1939`,`:2278`, `edge/__main__.py:133` — без `document_timeout`; guard только родительский `corpus.py:5198-5209`; `wiring.py:2055` recycle=None | частично, только родительская сторона (`test_corpus_extract_pool.py:863-930`) | Д/М | P4 |
-| F8 | OOXML без документного суффикса: маркер в первых 8192 байтах → класс `binary`, за ними → `container` и пустой спуск с `errors=[]` | ПОДТВЕРЖДЕНО замером (смещения 78/4078 → binary; 8258/9078/20078 → container) | `document_formats.py:85`,`:198`,`:444-449`, `corpus.py:7277-7281` | нет: все тесты кладут маркер в голову | М | P4 |
+| F7 | ось `crawl.document_timeout_s` до docling не доходит; `full` — без таймаута; рециклинга воркеров нет | ПОДТВЕРЖДЕНО | `extract_document.py:383-391` (`FULL: None`), `wiring.py:2186`,`:2252`, `edge/__main__.py:134` — без `document_timeout`; guard только родительский `corpus.py:5198-5209`; `wiring.py:2226` recycle=None | частично, только родительская сторона (`test_corpus_extract_pool.py:863-930`) | Д/М | P4 |
+| F8 | OOXML без документного суффикса: маркер в первых 8192 байтах → класс `binary`, за ними → `container` и пустой спуск с `errors=[]` | ПОДТВЕРЖДЕНО замером (смещения 78/4078 → binary; 8258/9078/20078 → container) | `document_formats.py:87`,`:203`,`:461-462`, `corpus.py:7277-7281` | нет: все тесты кладут маркер в голову | М | P4 |
 
 **Статус на 2026-10-28.** ✅ F1–F8 (пакет P4 закрыт по всем строкам).
 
 - ✅ F1 — обход итеративен явным стеком кадров: `core/pipeline/archive_descent.py:515-565`;
   цепочка 5000 различных zip — `tests/pipeline/test_corpus_descent.py:449`.
-- ✅ F2 — потолок CPU инъектируется: `tests/pipeline/test_corpus_extract_pool.py:1881`
-  (`monkeypatch` `cpu_parallelism_cap`), `tests/pipeline/test_resources.py:93`.
+- ✅ F2 — потолок CPU инъектируется: `tests/pipeline/test_corpus_extract_pool.py:1882`
+  (`monkeypatch` `cpu_parallelism_cap`), `tests/pipeline/test_resources.py:105`.
 - ✅ F3 — отсутствие бэкенда инъектируется, а не предполагается: `tests/adapters/test_container_7z.py:38`.
 - ✅ F4 — чтение окнами (1 MiB шапка + 1 MiB хвост), файл целиком — только если он в них
   укладывается: `core/util/document_probe.py:11-14`, `:72-76`.
@@ -154,7 +154,7 @@ mypy: домен 0 ошибок + baseline 121, selfcheck 111/111, pytest 4801 p
 - ✅ F7 — ось `crawl.document_timeout_s` доходит до docling: `core/cli/wiring.py:2071`, `:2418`,
   `:2785`; ось объявлена в аргументах — `core/cli/execution_axes.py:184`.
 - ✅ F8 — OOXML по **центральному каталогу** zip, неузнанный OOXML остаётся `document`:
-  `core/util/document_probe.py:8`, `core/util/document_formats.py:451-453`.
+  `core/util/document_probe.py:8`, `core/util/document_formats.py:461-462`.
 
 ### 3.3. Чанкинг и индекс (C1–C11)
 
@@ -165,8 +165,8 @@ mypy: домен 0 ошибок + baseline 121, selfcheck 111/111, pytest 4801 p
 | C3 | геометрия чанка не входит в `run_id` | ПОДТВЕРЖДЕНО | `EXECUTION_CONTRACT_FIELDS` (22 поля, только `chunker_version`), `chunker_family.py:15` | нет | М | **P2** |
 | C4 | markdown-чанкер режет по середине слова; реальное перекрытие ≠ 200 | ПОДТВЕРЖДЕНО | `chunker_markdown.py:270-277` | только детерминизм (`test_chunker_markdown.py:173-179`) | Г | P4 |
 | C5 | текстовый чанкер склеивает текст, `citation_quote` не дословен относительно документа | ПОДТВЕРЖДЕНО, компенсация найдена | `chunker_text.py:99-110`; нормализация `validate.py:332` | сверка цитат покрыта (`test_validate.py:116-118`) | Г | — |
-| C6 | `min_chunk_size = 1`: односимвольный чанк может стать источником цитаты | ПОДТВЕРЖДЕНО | `chunker_markdown.py:144`,`:165`, `chunker_text.py:139` | нет | М | P4 |
-| C7 | `heading_path` не доходит до промпта, `context_prefix` не потребляется нигде | ПОДТВЕРЖДЕНО | `prompt.py:220`, `corpus.py:2391`, `retrieve.py:135`; ложный докстринг `chunker_text.py:17-18` | `test_prompt.py:68`,`:167` молча пинят отсутствие | М | **P2** |
+| C6 | `min_chunk_size = 1`: односимвольный чанк может стать источником цитаты | ПОДТВЕРЖДЕНО | `chunker_markdown.py:87`,`:214`, `chunker_text.py:59` | нет | М | P4 |
+| C7 | `heading_path` не доходит до промпта, `context_prefix` не потребляется нигде | ПОДТВЕРЖДЕНО | `prompt.py:290-314`, `corpus.py:2474`, `retrieve.py:135`; ложный докстринг `chunker_text.py:17-18` | `test_prompt.py:68`,`:167` молча пинят отсутствие | М | **P2** |
 | C8 | лексический индекс: 4 поля с одним текстом, пересборка каждый прогон в temp, запрашивается только `stemmed` | ПОДТВЕРЖДЕНО → **закрыто** (`1e7fad9`: одно поле + `lexical_spec` в контракте) | `lexical_tantivy.py`, `core/pipeline/digests.py` (`lexical_spec`) | `test_lexical_tantivy.py`, `test_digests.py` | Д | P5 |
 | C9 | `index_npy` склеивает поля тем же разделителем, что и группы (латентно) | ПОДТВЕРЖДЕНО формально; сейчас не эксплуатируемо | `index_npy.py:95-103` vs `_GROUP_SEP` `:59` | нет | Г | P5 |
 | C10 | `index_format` не атомарен: окно между `rmtree` и `replace` | ПОДТВЕРЖДЕНО | `index_format.py:119-121` (докстринг `:90` обещает атомарность) | нет | Г | P5 |
@@ -295,9 +295,9 @@ mypy: домен 0 ошибок + baseline 121, selfcheck 111/111, pytest 4801 p
 `context_prefix`, состав входа эмбеддера станет таким же необъявленным входом, как сейчас
 `chunk_size`.
 
-- `prompt.py:220` — в блок чанка добавить путь заголовков (и идентификатор документа), а не
+- `prompt.py:290-314` — в блок чанка добавить путь заголовков (и идентификатор документа), а не
   только `chunk_id`.
-- `corpus.py:2391`,`:2408` — эмбеддить `context_prefix + text` (или осознанно решить
+- `corpus.py:2474`,`:2491` — эмбеддить `context_prefix + text` (или осознанно решить
   обратное и исправить докстринг `chunker_text.py:17-18` — сейчас он врёт в любом случае).
 - В `EXECUTION_CONTRACT_FIELDS` добавить **геометрию и состав входа эмбеддера**
   (`chunk_size`, `chunk_overlap`, `min_chunk_size`, состав текста для эмбеддинга) — либо
@@ -445,10 +445,10 @@ absence-модель, scoring и определения Coverage/Comparability �
 
 | ID | Находка | Вердикт | Доказательство (HEAD) | Класс | P |
 |---|---|---|---|---|---|
-| V1 | §7.1 требует достаточность цитаты, в коде её нет | **ЧАСТИЧНО**: entailment отсутствует, «механизма нет вообще» — неверно | `cohound-spec-v2.md:649` (шаг 3 эшелона, «частично механически», следствие — **аномалия**); `validate.py:300-381` — восемь проверок, ни одна не спрашивает «следует ли статус»; но `evaluate.py:735` `support_subject_overlap` + `:1784-1790` + `outputs/support_quality.yaml`. Врут два документа: `02-subsystems.md:508` и `llm_local.py:22` приписывают шаг 3 `validate.py` | М | P0 + P6 |
+| V1 | §7.1 требует достаточность цитаты, в коде её нет | **ЧАСТИЧНО**: entailment отсутствует, «механизма нет вообще» — неверно | `cohound-spec-v2.md:660` (шаг 3 эшелона, «частично механически», следствие — **аномалия**); `validate.py:300-381` — восемь проверок, ни одна не спрашивает «следует ли статус»; но `evaluate.py:735` `support_subject_overlap` + `:1784-1790` + `outputs/support_quality.yaml`. Врут два документа: `02-subsystems.md:508` и `llm_local.py:22` приписывают шаг 3 `validate.py` | М | P0 + P6 |
 | V2 | Точность оценщика неизмерима | **ПОДТВЕРЖДЕНО**, причина иная → **закрыто как отчётность** (`4ee192f`: `golden_declined` вместо случайного `no_cases`) | `packages/ru-pg-dbms/sources/golden_status.yaml:11` `state: declined`; `golden.csv` = 118 `pangolin` + 118 `postgrespro` + **0** `jatoba`; benchmark **не читает** `golden_status` (`grep` пуст) и отказывается по случайной причине: `skip_reason: no_cases`, все 236 строк — `product_not_in_build`, слова `declined` в выводе нет | М | P6 |
 | V3 | 4.2 % вердиктов меняются на идентичном промпте; retry ≤2 — лотерея | **ЧАСТИЧНО**: число и лотерея верны, «docstring'и продают байт-в-байт» — нет | `2026-10-26-verdict-reproducibility.md:40` (5 из 119); `evaluate.py:1586` `max_retries=2`, `:1724-1751` цикл публикует **первый валидный** сэмпл; `templates`… ; **но** `max_retries` не в контракте, номер попытки не пишется, полосы в артефактах нет, R7 пайплайном не считается. Число 95.8 % формально проходит порог §11.7 (≥95 %) | М | P2 |
-| V4 | `decoder` — лейбл, а не механизм | **ПОДТВЕРЖДЕНО**, все три ноги | `prompt.py:23` «схема навязывается»; `llm_local.py:82` `DEFAULT_DECODER="none"` достижим в проде (`wiring.py:885`); `llm_local.py:302-311` — единственная ветка `json_schema` на **любое** значение ≠ `"none"`; проба: `json_object` → по проводам `json_schema`, `JSoN_ObJeCt` принимается (метки не enum — `deploy.py:509` `str`, в `status-dictionary.yaml` ключа нет); живой прогон: манифест `decoder=json_object`, провод — `json_schema` | М | P2 |
+| V4 | `decoder` — лейбл, а не механизм | **ПОДТВЕРЖДЕНО**, все три ноги | `prompt.py:23` «схема навязывается»; `llm_local.py:82` `DEFAULT_DECODER="none"` достижим в проде (`wiring.py:885`); `llm_local.py:302-311` — единственная ветка `json_schema` на **любое** значение ≠ `"none"`; проба: `json_object` → по проводам `json_schema`, `JSoN_ObJeCt` принимается (метки не enum — `core/config/deploy.py:528` `Decoder | None`, в `status-dictionary.yaml` ключа нет); живой прогон: манифест `decoder=json_object`, провод — `json_schema` | М | P2 |
 | V5 | `max_tokens: 4096` мёртв | **ЧАСТИЧНО**: мёртв **для оценщика**, жив для discovery | `config/deploy.yaml:84`,`:91`; в `LLMRequest` поля нет (`ports/llm.py:26-35`), в payload нет (`llm_local.py:295-311`), `build_evaluator_llm` не читает (`wiring.py:1105-1204`), читает `build_discovery_llm` (`:1058-1102`). Хуже: `llm_local._extract` не читает `finish_reason` → обрезание неотличимо от невалидного JSON | Г/М | P2 |
 | V6 | Внешний LLM-хост в закоммиченном конфиге | **ПОДТВЕРЖДЕНО, и хуже аудита** | `config/deploy.yaml:79` `https://plusvibeapi.ru` при шапке того же файла `:13-14` «внутреннего периметра, внешние хосты не используются»; `run.py:497` `load_deploy_config(None)` безусловно на каждом прогоне, флага `--deploy` у `run` нет; `base_url` **не входит ни в `llm_scenarios`, ни в контракт** (`ScenarioBinding` — 11 полей, endpoint только как `endpoint_kind: api`); поведение запинено тестом `test_deploy.py:812-831`; ссылка «Д-36» в `deploy.yaml:77` не имеет адресата в `docs/` | Б/М | **P0 + P2** |
 | V7 | Провенанс промпта не персистится | **ПОДТВЕРЖДЕНО** → **закрыто** (`4ee192f`: `PromptArchive` пишет `runs/{run_id}/prompts/{prompt_hash}.json` для исполненных промптов; замер — 117 файлов, 2.93 MiB на 119 параметров); «бонус» про узкий `prompt_hash` — **ЧАСТИЧНО** На момент находки: `save_prompt` не импортировался в `evaluate.py`; в `runs/ru-pg-dbms-3edf2b06097c/` каталога `prompts/` не было; три документа обещали артефакт. Сейчас: `PromptArchive` пишет каталог из фазы (замер на 119 параметрах jatoba — 117 различных промптов, 2.93 MiB), документы исправлены. Узость `prompt_hash` осознана и компенсирована: ключ `eval_cache` — по тексту (`evaluate.py:1657-1661`), коллизий в прогоне нет (104/104 различных) | М | P6 |
@@ -485,7 +485,7 @@ absence-модель, scoring и определения Coverage/Comparability �
 | 2 | Пустой раздел ДАННЫЕ | **ЧАСТИЧНО**: текст закрыт v4, конвейер — нет | v4:32/45 задают семантику; но `evaluate.py:1650` компилирует безусловно, `:1735` вызывает модель → **1 вызов LLM на пустом срезе**, ячейка `❓` без заметки, `relevant_evidence_coverage=None` | M |
 | 3 | Нет правила «цитируй на языке фрагмента» | **ПОДТВЕРЖДЕНО**, ни в v1–v4 | `validate.py:109-115` сверяет байты → перевод = `validation_failed` = retry = `failed` | S (новый файл `evaluator_v5`) |
 | 4 | `min_retrieval_score` только для ✅ | **ПОДТВЕРЖДЕНО, и хуже**: порог **не подключён вовсе** | `validate.py:367-381`; `evaluate_phase`→`evaluate_batch` (`evaluate.py:2214-2230`) его не передаёт, в `config/`/`packages/` нет → аномалия §10.4 в прогоне недостижима | S + M (сначала объявить вход) |
-| 5 | `_resolve_denial` берёт `quotes[0]` | **ПОДТВЕРЖДЕНО прогоном** | `evaluate.py:1124`; проба: evidence = [«добавлена поддержка» (a), «не поддерживаются» (b)] → `❌`, `citation_quote` = **первая**, не отрицающая. Живой экспозиции нет: `❌` = 0 ячеек. v4 расширяет риск (`v4:35` делает ветку `explicit` нормальной) | M |
+| 5 | `_resolve_denial` берёт `quotes[0]` | **ПОДТВЕРЖДЕНО прогоном** | `evaluate.py:1122-1160`; проба: evidence = [«добавлена поддержка» (a), «не поддерживаются» (b)] → `❌`, `citation_quote` = **первая**, не отрицающая. Живой экспозиции нет: `❌` = 0 ячеек. v4 расширяет риск (`v4:35` делает ветку `explicit` нормальной) | M |
 | 6 | `assert last_validation is not None` | **ОПРОВЕРГНУТО** — починено в `97b2776` | `evaluate.py:1753-1754` теперь `if … raise RuntimeError`; ассертов в `evaluate/validate/prompt/retrieve` нет | — |
 | 7 | Adversarial — 9 кейсов | **ПОДТВЕРЖДЕНО** и задокументировано | `fixtures/adversarial_prompts.json` (9), `adversarial.py:3-5` «регрессионный gate, а не заявление о безопасности» | — |
 | 8 | `extra_instructions` мёртв в проде | **ПОДТВЕРЖДЕНО** | `evaluate_cell`/`evaluate_batch` имеют параметр, `evaluate_phase` не передаёт (`evaluate.py:2214-2230`); тест пинит влияние на ключ кэша | S |
@@ -524,7 +524,7 @@ absence-модель, scoring и определения Coverage/Comparability �
    Проверено чтением БД. То есть V6/V4/V3 складываются в одно: **условия измерения не
    записаны**, а не «записаны неверно».
 3. **`base_url` не входит в идентичность ни в каком виде** — только `endpoint_kind: api`.
-   Аргумент `deploy.yaml:74-78` («endpoint обязан быть объявлен, иначе `run_id` не описывает
+   Аргумент `config/deploy.yaml:74-78` («endpoint обязан быть объявлен, иначе `run_id` не описывает
    модель») верен, но применён наполовину: объявить объявили, в контракт не внесли.
 4. **`evaluator-benchmark` не знает про `golden_status`** — отказ при `declined` случаен
    (совпал с `product_not_in_build`). На другой сборке тот же вызов посчитал бы по мусору.

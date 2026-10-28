@@ -74,7 +74,7 @@ class LLMScenario(StrEnum):  EVALUATOR="evaluator"; SEARCH_ADAPTER="search_adapt
 | `CrawlItemStatus` | `pending`, `running`, `fetched`, `failed`, `cancelled` | `crawl_session_items` (per-URL) |
 | `ArchiveDescent` | `plan`, `full` — ось `crawl.archive_descent` | `corpus`/`archive_descent`, `crawl_config_digest` |
 | `ArchiveDescentStatus` | `planned`, `descended`, `unreadable`, `budget_exhausted` | `archive_observations` (`09` §6.7.1) |
-| `DocumentLevel` | `off`, `text`, `layout`, `layout_tables`, `full` — ось `crawl.document_level` | `CrawlLimits.as_dict()` включает её **безусловно** → `crawl_config_digest` → `run_id`: смена оси — `execution_change` (§13). Вторично она входит в наблюдаемый `extractor_version` (`docling-doc-3:{level}`) → новая индексная сборка; это следствие, а не класс изменения |
+| `DocumentLevel` | `off`, `text`, `layout`, `layout_tables`, `full` — ось `crawl.document_level` | `CrawlLimits.as_dict()` включает её **безусловно** → `crawl_config_digest` → `run_id`: смена оси — `execution_change` (§13). Вторично она входит в наблюдаемый `extractor_version` (`docling-doc-3:{level}/{device}`) → новая индексная сборка; это следствие, а не класс изменения |
 | `PdfPipeline` | `structured` (дефолт, docling), `text_layer` (текстовый слой pdfium) — ось `crawl.pdf_pipeline` / `--pdf-pipeline` | механизм, а не библиотека: `CrawlLimits.as_dict()` включает её **безусловно** → `crawl_config_digest` → `run_id` (`execution_change`, §13); `text_layer` не имеет уровней (`document_level` к нему неприменим) и входит в наблюдаемый `extractor_version` (`pdfium-text-1`) → новая сборка |
 | `SkipReason` | `no_search_adapter`, `no_queries`, `no_urls`, `no_embedder`, `no_registry_spec`, `gate_delegated_external` | `PhaseResult.skip_reason` (инвариант `skip_reason ⟺ skipped`) |
 | `Gate`, `GateSource`, `GateVerdict`, `GatePolicy` | G1–G4; `internal`/`external`; `approved`/`rejected`; `external`/`waived` | `gate_decisions`, `run.yaml:gates`, `hound gate`, `pipeline/{gates,runner}` |
@@ -729,7 +729,7 @@ JSONPath-маппинг полей) и реализует `RegistryFetcherPort`.
 
 **Открытые вопросы к итерации 2:** точные сигнатуры фьюжна RRF — ✅ сделано
 (`core/pipeline/retrieve.py:98`, `rrf_fuse_chunks(…, rrf_k=60, top_k)`); формат `AlignmentReport` —
-✅ сделано (`core/domain/models.py:1367`); структура `ProtocolExhaustion` — ✅ сделано
+✅ сделано (`core/domain/models.py:1375`); структура `ProtocolExhaustion` — ✅ сделано
 (`core/domain/models.py:1204`); политика ретраев в `evaluate.py` — ✅ сделано
 (`core/pipeline/evaluate.py:1829`, цикл `:2003`); как передавать чанки в `validate` — ✅ сделано
 **объектами из RetrievalResult**, а не выборкой из store: `validate_output(*, chunks:

@@ -195,7 +195,7 @@ evaluate, review, g3, compute, g4, report`.
 `crawl-probe` остались в пакете. Подпункт «READ/WRITE выражен единообразно» не закрыт, а
 ухудшился: `--dry-run` у **27** листьев, `--apply` у 3 (`package add-product`, `package
 index-gc`, `package builds-gc`), `--write` у 2 — и он по-прежнему значит разное: «записать
-JSON-план в файл» (`package candidates`, `parser.py:528`) против «внести измеренные оси в
+JSON-план в файл» (`package candidates`, `core/cli/package/parser.py:528`) против «внести измеренные оси в
 `domain_profiles.yaml`» (`package crawl-probe`, `:668-671`).
 
 25 подкоманд, из них:
@@ -473,7 +473,7 @@ GateVerdict.REJECTED else EXIT_OK`; решение пишется в БД в о�
 | строка | документация говорит | код делает |
 |---|---|---|
 | `03:1179` | `resolve` — «нормализация входов + линт» | резолв `source_id` → URL по БД (`resolve.py:31-33`) |
-| `03:1187` | `review` пишет `cells (reviewed)` | read-only, только печать (`review.py:45`) |
+| `03:1187` | `review` пишет `cells (reviewed)` | read-only, только печать (`core/cli/commands/review.py:40`) |
 | `03:1197` | benchmark «персистит `llm_scenarios`» | пишет только JSON-артефакт (`experiment.py:580-586`); `persist_manifest` есть лишь в ветке `retrieval` (`:329`) |
 
 Пользователь, читающий документацию, получает неверную карту. Это дефект того же

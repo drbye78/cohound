@@ -327,7 +327,7 @@ file); порты без наследников (`core/ports/llm.py:4` — «б�
 
 ### W2 — Домен — ✅ done
 
-✅ сделано (проверено) — `core/domain/models.py:70` (`ConfigDict(extra="forbid", …)` — база всех моделей),
+✅ сделано (проверено) — `core/domain/models.py:71` (`ConfigDict(extra="forbid", …)` — база всех моделей),
 `core/domain/scoring.py:407` (знаменатель `scope_universe`), property-тесты — `tests/domain/`.
 
 - Модели Pydantic с `extra="forbid"`, `StrEnum`-перечисления, чистые `check_*`-инварианты,
@@ -642,7 +642,7 @@ F1 (первый прогон до `report`) уже выполнен 2026-10-26 
 [OI]-совместимый API внутри периметра (§W9). Реестр `05` не переписывается в этой фазе (вне задачи
 P5), но строка помечена здесь как неактуальная — **residual doc debt**, см. §12.
 
-➖ снято — долг уже закрыт: строка `docs/architecture/05-dependency-stack.md:135` несёт
+➖ снято — долг уже закрыт: строка `docs/architecture/05-dependency-stack.md:180` несёт
 «**снято (2026-10, см. `06` §5.W9/§5.13)**» и «конвейер путь не использует».
 
 ---
@@ -802,7 +802,7 @@ golden-full, adversarial как приёмочный прогон) — **хар�
 | Окружение | Содержимое | Где |
 |---|---|---|
 | **cli-light** | ядро + `retrieval`(numpy/tantivy) + `crawl` + `extract` + `safety` + `ops` (+ `extract-archives`, если нужен спуск в контейнеры) | везде, py3.14 |
-| **pdf** | `docling-slim[standard]` (+torch/torchvision, CPU-ядра) | отдельно (PDF-layout) |
+| **pdf** | `docling-slim[standard]` (+torch/torchvision: `cu130` на Linux, CPU на macOS; устройство объявляет `crawl.pdf_device`) | отдельно (PDF-layout) |
 | **index** | `sentence-transformers` (+torch) — bge-m3; либо `embed-lite` (model2vec, без torch) | отдельно |
 | **edge** | те же `crawl`+`extract` extras (веб-адаптеры) | DMZ/Z1 (профиль `split`, 07) |
 | **test** | `pytest`/`hypothesis`/`respx` | dev/CI |
@@ -956,7 +956,7 @@ DLP, набор IDS-правил) — design-требования зафикси
 - **`05-dependency-stack.md`:** строка о `llama-cpp-python` (опц. CPU/GGUF-инференс) описывает
   отклонённый путь (см. §5.W9/§5.13); конвейер её не использует. Рядом со строкой стоит пометка
   «снято» — правка реестра стека остаётся отдельной задачей (не входила в объём P5).
-  ➖ снято — правка состоялась: `05-dependency-stack.md:135` уже помечен «снято».
+  ➖ снято — правка состоялась: `05-dependency-stack.md:180` уже помечен «снято».
 - **Риски Phase 5 (source routing/feed/channel):** прежний список остаточных рисков (каталожный GET
   не занимает слот планировщика, лимиты `defusedxml`, отсутствие capability-negotiation, потеря при
   усечении `max_feed_bytes`, элемент feed/channel без `raw_path`) при переписывании опущен; он не был

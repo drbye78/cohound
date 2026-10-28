@@ -48,12 +48,12 @@ production-масштабе, — это четыре дефекта **нашег
 `product_ids: Sequence[str] | None = None` с докстрингом «по умолчанию `[product_id]`;
 сателлиты добавляет вызывающий (I17)», а `NpyVectorIndex.search_many`
 (`core/adapters/vector_npy.py:272-330`) обходит `for product_id in products` и читает
-партицию продукта. Строки `evaluate.py:206`/`vector_npy.py:141-190` в тексте — нумерация на
-момент разбора, после волны правок они сдвинулись; смысл не изменился.
+партицию продукта. Номера строк в абзаце ниже сверены с кодом (2026-10-28):
+`evaluate.py:441`, `vector_npy.py:312-330`; смысл не изменился.
 
-`core/pipeline/evaluate.py:206` + `retrieve_for_cell` (`:186-215`): `product_ids` — по
+`core/pipeline/evaluate.py:441` + `retrieve_for_cell` (`:441-513`): `product_ids` — по
 умолчанию `[product_id]`, сателлиты добавляет вызывающий (I17). В
-`core/adapters/vector_npy.py:141-190` цикл `for product_id in dict.fromkeys(q.product_ids)`
+`core/adapters/vector_npy.py:312-330` цикл `for product_id in dict.fromkeys(q.product_ids)`
 читает **партицию продукта**, а не общий индекс.
 
 То есть пространство поиска одного запроса — **11.4 тыс. векторов** (максимум по замеру —
@@ -316,7 +316,7 @@ embed:
 
 ✅ локальная часть сделана — `LiteEmbedder` даёт `repo@sha`: `self.model_id = f"{model_id}@{revision}"
 if revision else model_id` (`core/adapters/embed_model2vec.py:111-112`; то же объяснение в
-`core/adapters/embed_local.py:84-92` для `LocalEmbedder`).
+`core/adapters/embed_local.py:119-120` для `LocalEmbedder`).
 ⬜ внешняя часть не сделана — нет `RemoteEmbedder`, значит нет ни сверки `model_version` с
 объявленной, ни отказа на пустой пин (правило 1 §5.0).
 Нормативная часть (смена `embed_model_id` классифицируется как `content_change`, а не
@@ -348,7 +348,7 @@ if revision else model_id` (`core/adapters/embed_model2vec.py:111-112`; то ж�
 (`core/pipeline/embed_cache.py`) кэширует векторы **чанков**, кэша запросов нет — оговорка
 сохраняется в ослабленном виде, как и записано ниже.
 
-`_query_vector` (`evaluate.py:170-183`): если `query_vectors` не передан, вектор запроса
+`_query_vector` (`evaluate.py:305-322`): если `query_vectors` не передан, вектор запроса
 считается `embedder.embed([query])` — **по одному тексту на запрос**, внутри `evaluate`.
 `phases.py` `query_vectors` не передаёт вовсе.
 

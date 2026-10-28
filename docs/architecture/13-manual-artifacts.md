@@ -17,10 +17,10 @@
 
 Предложение не требует менять методологию — механизм уже объявлен, кода нет.
 
-- `cohound-spec-v2.md:203` (§10, политика краула): «Обход запрещён для CAPTCHA, платных/
+- `cohound-spec-v2.md:213` (§10, политика краула): «Обход запрещён для CAPTCHA, платных/
   авторизационных барьеров и любых закрытых разделов; **для них штатный путь — ручной
   drop-in корпус** с правилом симметрии (одинаково доступен всем продуктам кейса)».
-- `cohound-spec-v2.md:715`: «обход CAPTCHA, платных/авторизационных барьеров и закрытых
+- `cohound-spec-v2.md:726`: «обход CAPTCHA, платных/авторизационных барьеров и закрытых
   разделов запрещён (**ручной drop-in — штатный escape hatch**)».
 
 То есть регламент называет ручной корпус **штатным** механизмом и требует от него
@@ -197,13 +197,13 @@ robots остаётся в аудите.
 Это самая дешёвая часть и без неё остальное бесполезно: оператору нужен заполняемый файл.
 
 **Сегодня его нет.** Провалы фетчей попадают в отчёт только агрегатами
-(`core/domain/models.py:1043` — `CrawlSessionProvenance.failed: int`; `report.py:1001-1008`
-— движки в шапке; `report.py:1401-1435` — `blocked = {error_kind: count}` и
+(`core/domain/models.py:1043` — `CrawlSessionProvenance.failed: int`; `core/pipeline/report.py:1188-1193`
+— движки в шапке; `core/pipeline/report.py:1606-1646` — `blocked = {error_kind: count}` и
 `unreadable_origins` от `derive_corpus_coverage`). Ни URL, ни текста ошибки. Per-URL
 детализация живёт в `crawl_session_items` и доступна только через
 `hound crawl status --per-url` — то есть «посмотреть глазами», а не «получить файл».
 
-Ближайший образец формы — `report.py:1191-1260` `render_nda_questions`: единый CSV, строка =
+Ближайший образец формы — `core/pipeline/report.py:1370` `render_nda_questions`: единый CSV, строка =
 аномалия, `anomaly_kind ∈ {i3_protocol, crawl_truncation, corpus_incomplete}`. Тот же приём,
 другая таблица.
 

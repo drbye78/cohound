@@ -47,7 +47,7 @@ CLI-ядро (`pydantic`+`pyyaml`+stdlib) ставится везде; инде�
 `crawl`, `extract`, `safety`, `ops`, `dev`, `ann`, `fallback`, `embed-lite`) разрешаются и
 устанавливаются; `torch`/`sentence-transformers` (`embed`) — тоже (колёса `cp314` есть). Полный
 совместный набор — 137 пакетов, без torch по умолчанию. `extract-pdf` намеренно тяжёлый
-(`torch`+`torchvision`, CPU-ядра — см. §2.4/§4).
+(`torch`+`torchvision` — см. §1: `cu130` на Linux, CPU на macOS).
 `requires-python = ">=3.14"` в `pyproject.toml`; CI резолвит на 3.14.
 
 **Воспроизводимость установки (`uv.lock`, проверено 2026-10-23).** `uv lock --check` проходит;
@@ -73,22 +73,63 @@ crawl,extract]'` (+ `extract-archives`, если нужен спуск в 7z/rar
 адаптер `extract_document.py` менять не нужно. Разделены extras `extract` (лёгкий) и
 `extract-pdf` (тяжёлый, отдельное окружение).
 
-**Решение (2026-10-17): CPU-ядра PyTorch — декларативно из индекса `pytorch-cpu`.** Контуры
-`extract-pdf` (PDF-layout) и `embed` (индекс-контур) используют **CPU-only** сборки PyTorch
-(`torch 2.14.1+cpu`, `torchvision 0.29.1+cpu`) — без CUDA/nvidia-колёс. Пиннинг —
-декларативный и единственно возможный на `uv 0.11.16`: `[[tool.uv.index]]` `pytorch-cpu`
-(`https://download.pytorch.org/whl/cpu`, `explicit = true`) + `[tool.uv.sources]`
-`torch`/`torchvision` → этот индекс; CPU-ядра объявлены **прямыми** зависимостями
-`extract-pdf`, иначе транзитивный `docling` притянул бы CUDA-колесо `torchvision` с pypi.org
-(ABI-несовместимость с CPU-`torch`). `[tool.uv.sources]` действует **проектно-глобально**:
-`embed` (`sentence-transformers` → `torch`) тоже резолвит CPU-ядра — это **осознанно и
+**Решение (2026-10-17, уточнено 2026-10-28): PyTorch — декларативно из индекса, одним
+источником для `torch` и `torchvision`.** Контуры `extract-pdf` (PDF-layout) и `embed`
+(индекс-контур) используют сборки PyTorch, объявленные в `pyproject.toml`:
+`torch 2.14.1+cu130` / `torchvision 0.29.1+cu130` из индекса `pytorch-cu130`
+(`https://download.pytorch.org/whl/cu130`) на `sys_platform != 'darwin'` и
+`torch 2.14.1+cpu` / `torchvision 0.29.1+cpu` из `pytorch-cpu` на macOS (колёс `cu130` под
+darwin не существует). Пиннинг —
+декларативный и единственно возможный на `uv 0.11.16`: два `[[tool.uv.index]]`
+(`pytorch-cpu`, `pytorch-cu130`, оба `explicit = true`) + `[tool.uv.sources]`
+`torch`/`torchvision` → эти индексы по маркеру платформы; ядра объявлены **прямыми**
+зависимостями `extract-pdf`, иначе транзитивный `docling` притянул бы колесо `torchvision`
+с pypi.org (ABI-несовместимость: «operator torchvision::nms does not exist» → пустой текст
+PDF). Оба пакета обязаны приходить из **одного** индекса — ABI-пара собирается только из
+одной сборки; это и есть причина, по которой они объявлены парой.
+`[tool.uv.sources]` действует **проектно-глобально**: `embed`
+(`sentence-transformers` → `torch`) тоже резолвит те же ядра — это **осознанно и
 объявлено здесь**, а не побочный эффект. `[tool.uv] torch-backend = "cpu"` резолвером проекта
 (`lock`/`sync`) **молча игнорируется**; `--torch-backend` есть только у `uv pip` — поэтому
 index+sources и есть единственная декларативная опция. Новый supply-chain host —
 `download.pytorch.org` (редиректит на `download-r2.pytorch.org`) — при зеркалировании закрытого
-контура учитывать как отдельный источник. **Escape hatch (GPU-хост):**
-`uv pip install --torch-backend=auto --reinstall-package torch --reinstall-package torchvision` —
-пересобирает только эти два колеса под хост, `uv.lock` при этом не меняется.
+контура учитывать как отдельный источник.
+
+**Решение (2026-10-28): CUDA-колёса и ось `crawl.pdf_device` (P9).** GPU внесён как
+**объявленная ось**, а не как неявный выбор по установленным колёсам: `deploy.yaml`/
+`run.yaml:crawl.pdf_device: cpu | cuda`, дефолт `cpu`. `auto` не существует намеренно
+(R5, `10-extraction-pipeline-architecture.md` §1): объявленная ось обязана действовать, а
+`auto` = «устройство выбрал движок», тот же класс, что чтение модели оценщика из env (§7.4).
+Устройство подставляется в `accelerator_options` конвертера, входит в `extractor_version`
+(`docling-doc-3:<level>/<device>/docling-<build>`) и в `extractor_stack` — значит меняет
+ключ `extract_cache` и `run_id` (`execution_change`, §13). `pdf_device: cuda` при
+недоступном устройстве — `EXIT_USAGE` с числами, **не** тихий CPU.
+
+Замеры на целевом контуре (WSL2 гость 7 GB, RTX 3050 Laptop 4096 MiB, cc 8.6; `layout_tables`,
+против одного CPU-воркера): 22 стр. — **9.94×**, 181 — **11.73×**, 665 — **8.45×**; на
+уровне `text` (нативный pdfium) выигрыша нет — там пол ~19.9 с на 665 стр. и GPU не участвует.
+Память на GPU-воркер (VRAM / пик host RSS): 22 стр. — 647/2447 MB, 181 — 691/2488,
+665 — 817/2904. RSS после документа **не возвращается** (2488 → 2475 MB), поэтому воркеры
+считаются по сумме. Параллель на карте бессмысленна: 2 × 181 стр. дали **1.10×** при
+ΣRSS 4787 MB и ΣVRAM 1344 MB — карта насыщена, связывает host; правильная конфигурация —
+**один GPU-воркер**. Воспроизведение: `uv sync --frozen --all-extras`;
+`python -c "import torch; print(torch.__version__, torch.cuda.is_available())"` →
+`2.14.1+cu130 True`. Один и тот же 7-стр. PDF под `cpu` и `cuda` дал **разный** текст
+(12 203 и 12 199 симв.) — это и есть причина, по которой устройство стоит в ключе
+`extract_cache`, а не только в логе.
+
+Выбор одного индекса на Linux (вместо двух сборок) опирается на то, что колесо `cu130`
+**импортируется без доступного устройства**: проверено в этом же venv с `CUDA_VISIBLE_DEVICES=""` —
+`torch.cuda.is_available()` → `False`, `cuda_available()` → `False`, извлечение
+`layout_tables` прошло штатно (7 стр., 12 203 симв.) и назвалось `/cpu/`. Поэтому
+`pdf_device: cuda` на машине без карты отвергается preflight'ом (`EXIT_USAGE` с числами), а
+`cpu` — штатный режим. ❔ **не проверено:** поведение в чистом CI-контейнере **без**
+установленных CUDA-библиотек дистрибутива (локально они приходят pip-пакетами `nvidia-*`
+из того же индекса; на голом образе импорт может упасть на загрузке `libcuda`-зависимых
+модулей — тогда Linux-полосе понадобится CPU-индекс как второй источник).
+Проверено в этом venv: до установки колесо было `+cpu`, после — `+cu130` с
+`cuda_available=True`, матричное умножение на устройстве проходит (`max_memory_allocated`
+10 MB на пробном тензоре 512×512); `uv lock --check` сходится, `uv sync --frozen` — тоже.
 
 ---
 
@@ -165,7 +206,7 @@ index+sources и есть единственная декларативная о
 |---|---|---|---|---|
 | `trafilatura` | 2.3.x | Apache-2.0 ✅ | **a** | main-content → markdown, заголовки/списки/таблицы |
 | `docling-slim[format-office]` | 2.135.x | MIT ✅ | **a** | DOCX/PPTX/XLSX нативно (python-docx/-pptx/openpyxl), **без torch**. `rtree` для Office **обязателен**: extra `[format-office]` его не покрывает, а цепочка импорта `DocumentConverter` (`pipeline→models.factories→base_ocr_model→datamodel.spatial`) требует `rtree` — поэтому он объявлен в extra `extract` явно (`pyproject.toml`), и `doctor` держит его в обязательных для `deps:extract` |
-| `docling-slim[standard]` | 2.135.x | MIT ✅ | **a** (отдельное окружение) | PDF layout+tables; **тянет torch+torchvision** (CPU-ядра из индекса `pytorch-cpu`, §1); обязателен для PDF-контура (блокер M0) |
+| `docling-slim[standard]` | 2.135.x | MIT ✅ | **a** (отдельное окружение) | PDF layout+tables; **тянет torch+torchvision** (из индексов `pytorch-cu130`/`pytorch-cpu`, §1); обязателен для PDF-контура (блокер M0) |
 | `lxml` | 6.1.x | BSD-3 ✅ | **a** (транзитивно) | уже в дереве trafilatura/Scrapy |
 | `openpyxl` | 3.1.x | MIT ✅ | **a** | XLSX-отчёты; Office-бэкенд docling |
 | `python-docx` / `python-pptx` | 1.2.x / 1.0.x | MIT ✅ | **b** (через docling) | отдельно не нужны |
@@ -514,8 +555,8 @@ bash scripts/ci.sh                               # всё вместе: ruff →
 `.npy`-шарды и лексическое плечо требуют extra `retrieval` (см. §2.1).
 
 **Отдельные окружения (не в CLI-venv):**
-- **PDF layout:** `docling-slim[standard]` (torch+torchvision, CPU-ядра — §1) — extra `extract-pdf`, блокер M0.
-- **Индекс-контур:** `sentence-transformers` (+torch, CPU-ядра — проектно-глобальные `[tool.uv.sources]`, §1) — extra `embed`, изолированный venv/образ.
+- **PDF layout:** `docling-slim[standard]` (torch+torchvision; `cu130` на Linux, CPU на macOS — §1) — extra `extract-pdf`, блокер M0.
+- **Индекс-контур:** `sentence-transformers` (+torch, те же ядра через проектно-глобальные `[tool.uv.sources]`, §1) — extra `embed`, изолированный venv/образ.
 - **LLM-инференс:** модели корпоративного облака по [OI]-совместимому API — **вне наших окружений**
   (не ставим и не развёртываем; `vLLM`/`SGLang` — возможный backend облака, §2.3).
 - **Спуск в 7z/rar:** extra `extract-archives` (`py7zr`, `rarfile`, `pyzipper`) — ставится по
@@ -580,7 +621,7 @@ bash scripts/ci.sh                               # всё вместе: ruff →
 | V1 | RU/EN-стемминг `tantivy` из Python-биндингов | ✅ **закрыт (2026-10-08):** русский стеммер и стоп-слова доступны нативно — `Filter.stemmer("russian")`, `Filter.stopword("russian")` (tantivy 0.26.2); end-to-end индекс+поиск на смешанном RU/EN корпусе прошёл («экспорт» находит «Экспорт»/«экспорта»). Внешний `snowballstemmer` не нужен |
 | V2 | Колёса `torch`/`sentence-transformers` под Python 3.14 | ✅ **закрыт (2026-10-08):** `torch 2.14.1` и `sentence-transformers 6.1.0` имеют колёса `cp314`; резолв `uv` на 3.14 прошёл. См. `pyproject.toml` |
 | V3 | Выбор RU/EN-эмбеддинга | 🟡 **решение:** RU — абсолютный приоритет, EN — очень хорошо; **основной — `BAAI/bge-m3`** (MIT, 8192 контекста). Подтверждение и сравнение с RU-файнтюнами (`deepvk/USER-bge-m3`, `ai-forever/ru-en-RoSBERTa`) — R9/R10. ⬜ не сделано — `bge-m3` зафиксирован кодом как дефолт (`core/adapters/embed_local.py:63`), но **сравнения с RU-файнтюнами не было**: ни одного замера по `USER-bge-m3`/`RoSBERTa` в `docs/reports/measurements/` нет |
-| V4 | docling offline-веса в контуре + лицензии весов | ⚠️ **механика уточнена:** штатный офлайн-механизм — `DOCLING_ARTIFACTS_PATH` / pipeline `artifacts_path`, заполняемый `docling-tools models download` (см. §7); `HF_HUB_OFFLINE=1` — вспомогательный guard; Office-форматы весов не требуют. Открыт аудит лицензий весов. ⬜ не сделано — аудита лицензий весов нет, и офлайн-бандл **ничем не включён**: в docling 2.135.0 `DOCLING_ARTIFACTS_PATH` не читается (`.venv/…/docling/datamodel/settings.py:71` — только поле `artifacts_path`), а coHound передаёт `artifacts_path` лишь в OCR-пробу (`core/adapters/extract_document.py:362`), в `PdfPipelineOptions` экстракции его нет |
+| V4 | docling offline-веса в контуре + лицензии весов | ⚠️ **механика уточнена:** штатный офлайн-механизм — `DOCLING_ARTIFACTS_PATH` / pipeline `artifacts_path`, заполняемый `docling-tools models download` (см. §7); `HF_HUB_OFFLINE=1` — вспомогательный guard; Office-форматы весов не требуют. Открыт аудит лицензий весов. ⬜ не сделано — аудита лицензий весов нет, и офлайн-бандл **ничем не включён**: в docling 2.135.0 `DOCLING_ARTIFACTS_PATH` не читается (`.venv/…/docling/datamodel/settings.py:71` — только поле `artifacts_path`), а coHound передаёт `artifacts_path` лишь в OCR-пробу (`core/adapters/extract_document.py:364-400`), в `PdfPipelineOptions` экстракции его нет |
 | V5 | `scrapy-playwright` 0.0.x на сложных антибот-доменах | ✅ **закрыт smoke-тестом (2026-10-08):** зрелый де-факто стандарт (org `scrapy-plugins`, BSD-3, py3.14). Smoke `tests/smoke_scrapy_playwright.py` пройден на Scrapy 2.19.0 + scrapy-playwright 0.0.48 + playwright **1.63.0** (chromium + firefox) → **оставляем с жёстким пином**; связка 1.63/2.19 подтверждена, фолбэк 1.57 не нужен. Изолируется за портом `crawler`. Альтернативы не берём (см. §2.5) |
 
 ---

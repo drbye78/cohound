@@ -154,6 +154,15 @@
 конвертера в каждом воркере. Это не потолок на работу (R6), а отказ начинать заведомо
 невозможную конфигурацию; объём работы по-прежнему не ограничен.
 
+**Третье слагаемое — видеопамять (2026-10-28, P9).** Под объявленным
+`crawl.pdf_device: cuda` preflight берёт минимум ещё и по VRAM:
+`floor(usable_vram / vram_peak(level))` (`usable = total − 512 MB` резерва; `vram_peak` —
+замер, `817 MB` для `layout_tables`, `full` не измерен и потому не ограничивает). Без него
+формула по host-памяти вывела бы воркеров, которых карта не держит (CUDA OOM вместо
+видимого отказа). На измеренной карте (RTX 3050, 4 GB) связывает host, а не VRAM —
+параллель на одной карте даёт 1.10×, поэтому правильная конфигурация — один GPU-воркер
+(`10` §3.4–3.6, §5.5).
+
 ---
 
 ## 4. Фазы
@@ -171,7 +180,7 @@
 из бюджета вместо константы, preflight с `EXIT_USAGE`, пик воркера через файл-сток,
 `COHOUND_MEM_BUDGET_MB` (`03` §D.6). Закрывает Д-7.
 *Доказательство исполнения (HEAD `f6100c7`):* блок собирается в прогоне
-(`core/cli/commands/run.py:1247` — `build_resources_block`) и пишется в `metrics.json`
+(`core/cli/commands/run.py:1261` — `build_resources_block`) и пишется в `metrics.json`
 (`core/pipeline/metrics.py:459`); живой прогон его несёт — `runs/ru-pg-dbms-3edf2b06097c/metrics.json`
 (`resources.budget.source = "available"`, `resources.phases.discovery.peak_rss_mb`).
 Распределение чанков по семействам наполняется фазой корпуса
@@ -212,11 +221,12 @@ peak=1563 MB, parent floor=500 MB → workers=0`, отказ **до** фаз. Ф
 ### F1 — Первый полный прогон (M0.5)
 
 > ⬜ не сделано как фаза (5 из 6 пунктов закрыты, Exit достигнут; открыт один пункт).
-> - ✅ Д-8 `extractor_version` называет сборку движка: `core/adapters/extract_document.py:197`
+> - ✅ Д-8 `extractor_version` называет сборку движка: `core/adapters/extract_document.py:202`
 >   (`docling_extractor_version`), живое значение в манифесте —
->   `docling-doc-3:layout_tables/docling-2.135.0,trafilatura-html-2`.
-> - ✅ воркеры из бюджета + уровень из профиля: `core/cli/wiring.py:2328` (`workers_from_budget`),
->   preflight `core/cli/wiring.py:2273` (`preflight_extraction_budget`, `EXIT_USAGE`).
+>   `docling-doc-3:layout_tables/cpu/docling-2.135.0,trafilatura-html-2` (сегмент
+>   `cpu`/`cuda` — ось `crawl.pdf_device`, P9).
+> - ✅ воркеры из бюджета + уровень из профиля: `core/cli/wiring.py:2438` (`workers_from_budget`),
+>   preflight `core/cli/wiring.py:2380` (`preflight_extraction_budget`, `EXIT_USAGE`).
 > - ✅ durable хвост спуска (write-through): синки `persist_observation`/`persist_member`
 >   (`core/pipeline/archive_descent.py:337,473,1031`), подключены в
 >   `core/pipeline/corpus.py:7477`; видимая строка пропуска по бюджету —
@@ -226,7 +236,7 @@ peak=1563 MB, parent floor=500 MB → workers=0`, отказ **до** фаз. Ф
 > - ✅ liveness: `heartbeat_at`/`owner`, `interrupted` в словаре —
 >   `core/pipeline/liveness.py:54,66`, порог 600 s / интервал 60 s.
 > - ⬜ изоляция прогона от соседей по памяти (cgroup/unit) — **не сделана**: cgroup только
->   упомянут в комментарии о том, что `MemAvailable` врёт (`core/pipeline/resources.py:320`),
+>   упомянут в комментарии о том, что `MemAvailable` врёт (`core/pipeline/resources.py:441`),
 >   изоляции запуска нет.
 >
 > **Exit ✅ достигнут (2026-10-27):** прогон `ru-pg-dbms-3edf2b06097c` дошёл до `report` —
@@ -252,7 +262,7 @@ peak=1563 MB, parent floor=500 MB → workers=0`, отказ **до** фаз. Ф
   вызовы `409`/`445`/`467`/`741`), член — `_settle` (`:530`), где уже есть `doc_id`/
   `extracted_content_hash`; вложенные — `:634`/`:652`. Финальную пачку сохранить как
   идемпотентный reconciliation-pass (дешёвый повторный upsert). Сбой записи изолируется в
-  `errors` по образцу `_persist_docs` (`corpus.py:1705`) — отказ store не должен убивать спуск.
+  `errors` по образцу `_persist_docs` (`corpus.py:2002-2033`) — отказ store не должен убивать спуск.
   Идемпотентность уже обеспечена: `observation_id` детерминирован (`run|product|root|hash|depth`),
   `corpus_members` — UPSERT. **Не делать в первом патче:** предварительное observation «контейнер
   начат» (нужна отдельная семантика промежуточного состояния) и micro-batch (сначала измерить
@@ -596,8 +606,8 @@ docling, а не писатель. При 100 параллельных прог�
   F1 можно начинать, но до изоляции вывод «прогон упал» неотличим от «сосед съел память»,
   а значит F1 не может закрыть G6 честно.
   → ⬜ не сделано: изоляции прогона (cgroup/unit) в коде нет — cgroup упомянут только как
-  источник вранья `MemAvailable` (`core/pipeline/resources.py:320`); бюджет выводится из
-  `MemAvailable` (✅, `core/pipeline/resources.py:317`), а изоляция — нет.
+  источник вранья `MemAvailable` (`core/pipeline/resources.py:442`); бюджет выводится из
+  `MemAvailable` (✅, `core/pipeline/resources.py:439-458`), а изоляция — нет.
 - **Нужен ли F5 (флот).** Если недельный цикл на 100 якорях — цель, G9 закрывается; если нет,
   F5 не начинается и план заканчивается на F4.
   → ❔ не проверено: решения владельца в документе нет, а F5 всё равно заблокирована A1-гейтом
