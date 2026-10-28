@@ -25,7 +25,13 @@ import itertools
 
 import pytest
 
-from core.adapters.chunker_markdown import MIN_CHUNK_SIZE, MarkdownChunker
+from core.adapters.chunker_markdown import (
+    MIN_CHUNK_SIZE,
+    MarkdownChunker,
+    MarkdownChunkerPort,
+)
+from core.ports.chunker import ChunkerPort
+from core.ports.types import ExtractedDoc
 
 
 def _chunk(md: str, **kwargs: int):
@@ -292,3 +298,32 @@ def test_min_chunk_size_must_fit_chunk_size() -> None:
         MarkdownChunker(chunk_size=40, min_chunk_size=40)
     with pytest.raises(ValueError):
         MarkdownChunker(chunk_overlap=-1)
+
+
+# ---------------------------------------------------------------------------
+# порт-контракт (T7.3)
+# ---------------------------------------------------------------------------
+
+
+def test_markdown_chunker_port_conformance() -> None:
+    """``MarkdownChunkerPort`` структурно реализует ``ChunkerPort`` (T7.3).
+
+    Порт принимает ``ExtractedDoc`` + ``document_id`` и обязан отдавать ту же нарезку,
+    что и базовый ``MarkdownChunker``: нумерация ``chunk_no`` с нуля, ``chunk_id`` из
+    ``document_id`` и ``heading_path`` по заголовку секции.
+    """
+    chunker = MarkdownChunkerPort()
+    assert isinstance(chunker, ChunkerPort)
+
+    chunks = chunker.chunk(
+        ExtractedDoc(
+            text="# H1\nтело первого раздела документа",
+            content_hash="h",
+            extractor_version="v",
+        ),
+        "doc1",
+    )
+
+    assert [chunk.chunk_id for chunk in chunks] == ["doc1#0"]
+    assert [chunk.chunk_no for chunk in chunks] == [0]
+    assert chunks[0].heading_path == "H1"

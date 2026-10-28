@@ -856,3 +856,22 @@ def test_extracted_doc_partiality_invariant(kwargs: dict[str, object]) -> None:
             **kwargs,  # type: ignore[arg-type]
         )
 
+
+
+# --------------------------------------------------------------------------- #
+# Реестр форматов: pdf + office (§3.2)
+# --------------------------------------------------------------------------- #
+
+
+def test_supports_registry_covers_pdf_and_office() -> None:
+    """``supports`` — тот же реестр, что отдаётся docling: pdf + office, не text/epub.
+
+    PDF и Office извлекает docling, plain text/markdown и EPUB — собственные читатели
+    (``extract_text``/``extract_epub``), поэтому ``False`` здесь не отказ формату, а
+    указание, что это не его путь. Проверка не грузит docling: ``supports`` — предикат
+    по суффиксу.
+    """
+    for name in ("a.pdf", "a.docx", "a.pptx", "a.xlsx"):
+        assert DoclingDocumentExtractor.supports(name) is True, name
+    for name in ("a.txt", "a.epub"):
+        assert DoclingDocumentExtractor.supports(name) is False, name

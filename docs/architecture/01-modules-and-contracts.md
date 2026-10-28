@@ -1,8 +1,9 @@
 # coHound — архитектура: Итерация 1 — модули и контракты
 
-> **Статус открытых вопросов на 2026-10-29** (HEAD `3fbdbfb`): 7 закрыто, 1 открыто —
-> миграция `tests/selfcheck.py` (§9). §10 закрыт полностью (5 из 5). У каждого пункта
-> маркер ✅/⬜/➖/❔ с доказательством `путь:строка`.
+> **Статус на 2026-10-29** (HEAD `d5a537a`): §10 закрыт полностью (5 из 5); §9 закрыт
+> полностью — миграция `tests/selfcheck.py` сверена построчно (94 двойника / 8 дописанных
+> тестов / 9 структурных гейтов). У каждого пункта маркер ✅/⬜/➖/❔ с доказательством
+> `путь:строка`.
 
 **Документ:** `docs/architecture/01-modules-and-contracts.md`
 **Статус:** принято (ревью-гейт @oracle пройден 2026-10-08)
@@ -804,7 +805,8 @@ pytest-тестами **предмета** — `_crawl_taxonomy_from_port` (`tes
 в selfcheck как гейты над деревом. Остальные инварианты
 обеспечиваются структурно и проверяются юнит-тестами по слоям (I3/I3b/I12/I14, I16–I21, I23). Это
 не «I1–I23 целиком» — и не должно им быть: гейт над деревом и юнит-тест отвечают на разные вопросы,
-и копия гейта в pytest разошлась бы с оригиналом.
+и копия гейта в pytest разошлась бы с оригиналом. Построчная сверка 29.10 (§9) показала: у 94 из
+111 утверждений pytest-двойник есть, 8 дописаны, 9 — структурные по природе.
 
 **I10/I15 (K7):** SQL обеспечивает `source_id NOT NULL` **кроме** `evidence_type='absence'`
 (триггер `trg_evidence_source_id`, `core/store/sqlite.py:486`): у протокола отсутствия источника нет
@@ -860,7 +862,7 @@ JSONPath-маппинг полей) и реализует `RegistryFetcherPort`.
 |---|---|---|
 | `core/schemas.py` (монолит) | `domain/enums.py` + `domain/models.py` + `domain/invariants.py` + `domain/r2.py` + `domain/anchors.py` | ✅ сделано (T1.2; `core/domain/enums.py:1`, `core/domain/anchors.py:1`); монолит **удалён** — гейт `tests/selfcheck.py:1123` (`_shims_removed`) |
 | `core/db.py` DDL/триггеры | `store/sqlite.py` (DDL) + `ports/store.py` (контракт) | ✅ сделано (T1.3; `core/store/sqlite.py:20` `DDL`); монолит **удалён** — тот же гейт `tests/selfcheck.py:1123` |
-| `tests/selfcheck.py` | `tests/domain/*`, `tests/store/*` | ⬜ **открыто (единственный остаток)** — доменные и сторовые проверки живут в pytest-пирамиде (`tests/domain/` — 11 файлов / 162 тест-функции, 170 кейсов с параметризацией; `tests/store/` — 15 файлов / 189 функций, 194 кейса), а в `tests/selfcheck.py` (4736 строк / 231 073 байта, **111 утверждений** = 97 `check` + 14 `expect_raises`) остался **структурный** набор: `_import_graph`, `_neutrality`, `_shims_removed`, `_edge_isolation` — у них pytest-двойника нет и быть не должно (гейт над деревом не дублируется юнит-тестом), плюс `_crawl_taxonomy_from_port` и `_seam_schema`, у которых двойники **есть** (`tests/test_crawl_error_taxonomy.py`, `tests/edge/test_seam_schema.py`): те проверяют предмет, а гейт остаётся над деревом. Перенос поэтому не механический: без построчной сверки «какая проверка уже покрыта в `tests/`» объявить миграцию законченной нельзя. selfcheck остаётся **автономным входом CI** (`scripts/ci.sh:50`), обёртка — `tests/test_selfcheck.py` |
+| `tests/selfcheck.py` | `tests/domain/*`, `tests/store/*` | ✅ **закрыто** (29.10) — построчная сверка всех **111 утверждений** (97 `check` + 14 `expect_raises`) с pytest-пирамидой: **94** имеют двойника (указан `путь:строка`), **8** держали покрытие в одиночку и дописаны тестами, **9** — структурные гейты над деревом, которым pytest-двойник противопоказан: `_import_graph`, `_neutrality`, `_shims_removed`, `_edge_isolation`, `_domain_all_complete`, `_ports_contracts`, `_ports_i18`, `_ports_type_reuse`, полнота CLI-поверхности. Дописанные: конструктор `CellEvidence` (I19/R1/I10 — прежний тест проверял `check_evidence` на `model_construct`, то есть в обход валидатора), `core/util/text_utils` (язык, ё→е, нарезка, RU-токены), `core/util/security` (SSRF/allowlist/traversal/slug), `core/adapters/lexical_bm25` (**единственный адаптер без тестов**), `DoclingDocumentExtractor.supports`, `MarkdownChunkerPort`↔`ChunkerPort`. Пиксель-в-пиксель дублировать оставшиеся 94 не нужно и вредно: гейт над деревом и юнит-тест отвечают на разные вопросы. selfcheck остаётся **автономным входом CI** (`scripts/ci.sh:50`), обёртка — `tests/test_selfcheck.py`; `tests/domain` — 12 файлов / 165 функций / 173 кейса, `tests/store` — 15 файлов / 189 функций / 194 кейса |
 
 Ранее использовавшиеся transitional re-export-шимы `core/schemas.py` и `core/db.py` **удалены**:
 импорты идут напрямую из `core.domain` и `core.store.sqlite`. Последовательность миграции и её
