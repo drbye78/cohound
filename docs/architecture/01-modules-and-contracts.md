@@ -104,10 +104,11 @@ URL сейчас выражается не пропуском фазы, а zero-
 
 ### 2.2. `domain/models.py`
 
-Чистые Pydantic-модели (без I/O). Перенесены из бывшего `core/schemas.py` (удалён в T1.2); таблица
-фиксирует, что дала миграция — состав моделей as-built читается в `core/domain/models.py`.
+Чистые Pydantic-модели (без I/O). Перенесены из бывшего `core/schemas.py` (удалён в T1.2); колонка
+«что добавила миграция» — **историческая справка** о разнице с монолитом, а не утверждение о текущем
+дереве: as-built состав моделей читается в `core/domain/models.py`.
 
-| Модель | Изменение против текущей |
+| Модель | Что добавила миграция (историческая справка) |
 |---|---|
 | `PackageManifest`, `ModuleDef`, `RoleDef` | + `package_version` |
 | `CatalogRow` | без изменений (11 колонок) |
@@ -300,9 +301,9 @@ Search-enabled модели обслуживаются **другим порто
 @dataclass(frozen=True)
 class VectorQuery:
     product_ids: list[str]        # продукт-партиции (I17): запрос не выходит за них
-    text: str | None              # raw запрос
-    vector: list[float] | None
     top_k: int                    # = retrieval_cutoff_K
+    text: str | None = None       # raw запрос
+    vector: list[float] | None = None
 
 @dataclass(frozen=True)
 class RetrievedChunk:
@@ -319,11 +320,33 @@ class VectorIndexPort(Protocol):
     build_id: str
     dim: int
     def search(self, q: VectorQuery) -> list[RetrievedChunk]: ...
+    def search_many(self, queries: Sequence[VectorQuery]) -> list[list[RetrievedChunk]]: ...
     def shard_ids(self, product_id: str) -> list[str]: ...
+
+class CompositionViewPort(Protocol):          # вид когорты: product_id → build_id
+    composition_id: str
+    members: Mapping[str, str]
+    def build_id_for(self, product_id: str) -> str: ...
+    def product_ids(self) -> list[str]: ...
+
+def batched_search(index: VectorIndexPort,
+                   queries: Sequence[VectorQuery]) -> list[list[RetrievedChunk]]
 ```
 
 `RetrievedChunk` несёт `content_hash` и `build_id`, поэтому evidence и `prompt_hash` привязаны к
 конкретной сборке; резолв `source_id` сверяет их (I19).
+
+**`search_many` и `batched_search` — батч-путь, а не второй контракт.** Порт объявляет
+`search_many`, но реализации без своего батч-пути его не пишут: `batched_search` берёт метод
+через `getattr` и откатывается на цикл `search` (`core/ports/vector_index.py:89`). Смысл батча —
+прочитать партицию **один раз на набор запросов**; там, где реализация этого не умеет, вызовы
+эквивалентны поштучным, поэтому расширение контракта не ломает ни одну существующую реализацию
+(структурная типизация). `pipeline` вызывает только `batched_search` — одна точка вызова.
+
+**`CompositionViewPort` — отдельный порт, а не поле индекса.** Композиция индексных партиций
+(`pipeline/composition.py`) живёт в манифесте, а не в конкретной сборке: `build_id_for(product_id)`
+отвечает, какую сборку читать для продукта, не раскрывая `VectorIndexPort` деталей размещения
+(`09` §8.1–§8.4).
 
 **Усечение запросов (S13).** Число запросов на ячейку ≤3, приоритет детерминирован:
 (1) `param.title`; (2) `concept_terms` в фиксированном порядке (ru, затем en, затем порядок в
@@ -335,8 +358,13 @@ class VectorIndexPort(Protocol):
 class LexicalIndexPort(Protocol):
     engine_version: str
     def search(self, query: str, product_ids: list[str], top_k: int,
-               lang: str) -> list[RetrievedChunk]: ...
+               lang: str | None = None) -> list[RetrievedChunk]: ...
 ```
+
+`lang` — ось **запроса**, не обещание языкового firewall: реализация вправе её не использовать
+(анализатор может нести оба языка сразу — так делает tantivy-адаптер после C8: одно поле, оба
+стеммера). Поэтому дефолт `None`, а не `"ru"`: «язык не задан» — честное состояние, и порт не
+подменяет его русским по умолчанию.
 
 Гибрид (RRF) собирается в `pipeline/retrieve.py` (`rrf_fuse_chunks`, `retrieve`) из этих двух
 портов — фьюжн не спрятан в адаптер, чтобы профиль R0/R1/R2 был явным и логируемым;
@@ -580,7 +608,7 @@ class ProductStatePort(Protocol):
 прогоны). `upsert_*`/`record_*` идемпотентны (`INSERT … ON CONFLICT DO UPDATE`);
 `reconcile_seed_set` **не удаляет** строки: seed, исчезнувший из авторского файла, →
 `disabled` + `retired_at`. Реализация — `store/state_store.py` (`SqliteStateStore`) поверх DDL
-`store/state_sqlite.py` (`STATE_SCHEMA_VERSION = "4"`). Схема и семантика — `09` §4.
+`store/state_sqlite.py` (`STATE_SCHEMA_VERSION = "5"`, `core/store/state_sqlite.py:41`). Схема и семантика — `09` §4.
 
 ### 3.11. `ports/crawl_executor.py` — исполнение краула (split)
 
@@ -830,9 +858,9 @@ JSONPath-маппинг полей) и реализует `RegistryFetcherPort`.
 
 | Было | Стало | Статус |
 |---|---|---|
-| `core/schemas.py` (монолит) | `domain/enums.py` + `domain/models.py` + `domain/invariants.py` + `domain/r2.py` | ✅ сделано (T1.2; `core/domain/enums.py:1`, `core/domain/anchors.py:1`); монолит **удалён** — гейт `tests/selfcheck.py:1123` (`_shims_removed`) |
-| `core/db.py` DDL/триггеры | `store/sqlite.py` (DDL) + `ports/store.py` (контракт) | ✅ сделано (T1.3; `core/store/sqlite.py:21`); монолит **удалён** — тот же гейт `tests/selfcheck.py:1123` |
-| `tests/selfcheck.py` | `tests/domain/*`, `tests/store/*` | ⬜ **открыто (единственный остаток)** — доменные и сторовые проверки живут в pytest-пирамиде (`tests/domain/` — 11 файлов / 162 тест-функции, 170 кейсов с параметризацией; `tests/store/` — 15 файлов / 189 функций, 194 кейса), а в `tests/selfcheck.py` (4717 строк / 229 742 байта, **111 утверждений** = 97 `check` + 14 `expect_raises`) остался **структурный** набор: `_import_graph`, `_neutrality`, `_shims_removed`, `_edge_isolation` — у них pytest-двойника нет и быть не должно (гейт над деревом не дублируется юнит-тестом), плюс `_crawl_taxonomy_from_port` и `_seam_schema`, у которых двойники **есть** (`tests/test_crawl_error_taxonomy.py`, `tests/edge/test_seam_schema.py`): те проверяют предмет, а гейт остаётся над деревом. Перенос поэтому не механический: без построчной сверки «какая проверка уже покрыта в `tests/`» объявить миграцию законченной нельзя. selfcheck остаётся **автономным входом CI** (`scripts/ci.sh:50`), обёртка — `tests/test_selfcheck.py` |
+| `core/schemas.py` (монолит) | `domain/enums.py` + `domain/models.py` + `domain/invariants.py` + `domain/r2.py` + `domain/anchors.py` | ✅ сделано (T1.2; `core/domain/enums.py:1`, `core/domain/anchors.py:1`); монолит **удалён** — гейт `tests/selfcheck.py:1123` (`_shims_removed`) |
+| `core/db.py` DDL/триггеры | `store/sqlite.py` (DDL) + `ports/store.py` (контракт) | ✅ сделано (T1.3; `core/store/sqlite.py:20` `DDL`); монолит **удалён** — тот же гейт `tests/selfcheck.py:1123` |
+| `tests/selfcheck.py` | `tests/domain/*`, `tests/store/*` | ⬜ **открыто (единственный остаток)** — доменные и сторовые проверки живут в pytest-пирамиде (`tests/domain/` — 11 файлов / 162 тест-функции, 170 кейсов с параметризацией; `tests/store/` — 15 файлов / 189 функций, 194 кейса), а в `tests/selfcheck.py` (4736 строк / 231 073 байта, **111 утверждений** = 97 `check` + 14 `expect_raises`) остался **структурный** набор: `_import_graph`, `_neutrality`, `_shims_removed`, `_edge_isolation` — у них pytest-двойника нет и быть не должно (гейт над деревом не дублируется юнит-тестом), плюс `_crawl_taxonomy_from_port` и `_seam_schema`, у которых двойники **есть** (`tests/test_crawl_error_taxonomy.py`, `tests/edge/test_seam_schema.py`): те проверяют предмет, а гейт остаётся над деревом. Перенос поэтому не механический: без построчной сверки «какая проверка уже покрыта в `tests/`» объявить миграцию законченной нельзя. selfcheck остаётся **автономным входом CI** (`scripts/ci.sh:50`), обёртка — `tests/test_selfcheck.py` |
 
 Ранее использовавшиеся transitional re-export-шимы `core/schemas.py` и `core/db.py` **удалены**:
 импорты идут напрямую из `core.domain` и `core.store.sqlite`. Последовательность миграции и её
