@@ -16,7 +16,7 @@ import datetime as _dt
 import hashlib
 import json
 import sqlite3
-from collections.abc import Iterable, Iterator, Mapping
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -2433,6 +2433,41 @@ class SqliteStore:
         if row is None:
             return None
         return self._row_to_chunk(row)
+
+    #: Шаг пачки для ``get_chunks``: число параметров одного запроса.
+    #:
+    #: SQLite ограничивает число переменных в одном операторе
+    #: (``SQLITE_MAX_VARIABLE_NUMBER``: 999 в сборках до 3.32, 32766 в новых). Берётся
+    #: заведомо меньший шаг, чтобы поведение не зависело от сборки SQLite: 500
+    #: укладывается в оба предела и не режет пачку top-k (поиск просит окно
+    #: ``top_k + запас``, то есть десятки идентификаторов).
+    _CHUNK_ID_BATCH = 500
+
+    def get_chunks(self, chunk_ids: Sequence[str]) -> dict[str, Chunk]:
+        """Батч-чтение чанков по идентификаторам: ``IN (...)`` на пачку, без N+1.
+
+        Гидртация ретривала (A1/Д-3) просит сразу всё поисковое окно, поэтому один
+        ``SELECT`` на пачку вместо point-lookup на каждый хит. Дубли во входе снимаются
+        (``IN`` и так вернул бы строку один раз — снятие дублей лишь не платит за них
+        параметрами). Порядок результата не значим: вызывающий собирает выдачу сам.
+        """
+        unique = list(dict.fromkeys(str(cid) for cid in chunk_ids if cid))
+        if not unique:
+            return {}
+        columns = ", ".join(self._CHUNK_COLUMNS)
+        out: dict[str, Chunk] = {}
+        for start in range(0, len(unique), self._CHUNK_ID_BATCH):
+            batch = unique[start : start + self._CHUNK_ID_BATCH]
+            placeholders = ", ".join("?" for _ in batch)
+            rows = self.conn.execute(
+                f"SELECT {columns} FROM corpus_chunks"  # noqa: S608 - имена из _CHUNK_COLUMNS, id — bind
+                f" WHERE chunk_id IN ({placeholders})",
+                batch,
+            )
+            for row in rows:
+                chunk = self._row_to_chunk(row)
+                out[chunk.chunk_id] = chunk
+        return out
 
     def iter_chunks(
         self, build_id: str, *, product_id: str | None = None

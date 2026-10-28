@@ -11,7 +11,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Iterator, Mapping
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
 
@@ -379,6 +379,23 @@ class StorePort(Protocol):
     def iter_cells(self, run_id: str, state: str | None = None) -> Iterator[Cell]: ...
 
     def get_chunk(self, chunk_id: str) -> Chunk | None: ...
+
+    def get_chunks(self, chunk_ids: Sequence[str]) -> dict[str, Chunk]:
+        """Читает **пачку** чанков по идентификаторам (гидртация ретривала, A1/Д-3).
+
+        Зачем пачкой, а не ``get_chunk`` в цикле: гидртатор лексического индекса
+        получает сразу все ``chunk_id`` одного поискового окна, и point-lookup на
+        каждый хит — это N+1 обращений к БД на запрос (тот же класс дефекта, что
+        закрыт в dense-плече батчем ``search_many``).
+
+        Контракт реализации: ровно один SQL с ``IN (...)`` на пачку, разбитую по
+        пределу параметров запроса (SQLite: ``SQLITE_MAX_VARIABLE_NUMBER``; берётся
+        заведомо меньший шаг); колонки — тот же набор, что у :meth:`get_chunk`.
+        Отсутствующие в хранилище идентификаторы в результат **не** попадают
+        (вызывающий отличает «нет записи» от «пустой текст»); пустой вход — пустой
+        словарь. Порядок словаря не является частью контракта.
+        """
+        ...
 
     def iter_chunks(
         self, build_id: str, *, product_id: str | None = None

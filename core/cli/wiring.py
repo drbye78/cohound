@@ -434,12 +434,19 @@ def seed_lexical_index(
     ``store.iter_chunks(partition_build_id, product_id=…)`` (``partition_build_id`` —
     из вида композиции, 09 §8.4), поэтому поиск остаётся продукт-скоупед (I17).
 
+    **Потоковый засев (A1/Д-3).** Записи не собираются в список: они идут генератором
+    из ``iter_chunks`` прямо в ``index()``, а индекс не держит ни записей, ни их текста.
+    Текст при поиске догружается из store пачкой — ``store.get_chunks`` передаётся как
+    провайдер гидртации, поэтому адаптер не знает ни SQL, ни раскладки БД.
+
     **Два идентификатора (09 §8.1/§8.4).** ``build_id`` записи (``LexicalChunk``) —
     **партиция** продукта (``view.build_id_for(product_id)``), поэтому
     ``RetrievedChunk.build_id`` у R0-хита — ``pb_`` (физическая партиция, как и у dense).
     ``index.build_id`` — **композиция** (``composition_id``), провенанс R0/R2 и
     ``RetrievalResult.build_id``. Иначе — ``None`` (явное отсутствие; эксперимент
-    пропускает R0/R2, N3).
+    пропускает R0/R2, N3). Карта ``продукт → партиция`` передаётся адаптеру как ``view``:
+    после удаления зеркала у него нет записи, из которой можно было бы взять ``pb_``, а
+    выводить его из ``chunk_id`` значило бы зависеть от формата идентификатора.
 
     **Время жизни индекса — прогон (C8, объявлено).** Здесь строится
     ``TantivyLexicalIndex()`` без ``index_path``, то есть индекс живёт во временном
@@ -455,26 +462,41 @@ def seed_lexical_index(
     if resolved is None:
         return None
     view = _composition_view(index_root, package, resolved)
-    records: list[LexicalChunk] = []
-    for product_id in view.product_ids():
-        # Чанки читаются из партиции продукта; id записи — партиция (``pb_``), id
-        # индекса — композиция (``cb_``). Иначе R0-хит нёс бы ``cb_`` в
-        # ``RetrievedChunk.build_id`` и evidence назвал бы композицию партицией.
-        partition_build_id = view.build_id_for(product_id)
-        for chunk in store.iter_chunks(partition_build_id, product_id=product_id):
-            records.append(_lexical_record(chunk, product_id, partition_build_id))
-    if not records:
+    # Adapter/port mismatch (``CompositionViewPort`` объявляет ``composition_id``/``members``
+    # сеттеблами, а вид композиции — frozen-снимок с read-only атрибутами): статическая
+    # несовместимость, поведение корректно — тот же класс, что ``lexical_index`` в
+    # ``build_adapters``. Чинится изменением протокола на read-only свойства, а это
+    # отдельная правка порта, не эта полоса.
+    index = TantivyLexicalIndex(
+        hydrate=store.get_chunks,
+        view=view,  # type: ignore[arg-type]
+    )
+
+    def _records() -> Iterable[LexicalChunk]:
+        """Записи по одной: ни список чанков, ни их текст не живут вне записи в индекс."""
+        for product_id in view.product_ids():
+            # Чанки читаются из партиции продукта; id записи — партиция (``pb_``), id
+            # индекса — композиция (``cb_``). Иначе R0-хит нёс бы ``cb_`` в
+            # ``RetrievedChunk.build_id`` и evidence назвал бы композицию партицией.
+            partition_build_id = view.build_id_for(product_id)
+            for chunk in store.iter_chunks(partition_build_id, product_id=product_id):
+                yield _lexical_record(chunk, product_id, partition_build_id)
+
+    if not index.index(_records(), build_id=view.composition_id):
+        # Пустая композиция — явное отсутствие лексического плеча (N3), а не пустой
+        # индекс, на котором поиск падал бы с «index() не вызван».
+        index.close()
         return None
-    index = TantivyLexicalIndex()
-    index.index(records, build_id=view.composition_id)
     return index
 
 
 def _lexical_record(chunk: Chunk, product_id: str, build_id: str) -> LexicalChunk:
     """``ports.types.Chunk`` + ``product_id`` (из партиции) → запись лексического индекса.
 
-    ``build_id`` записи — **партиция** продукта (``pb_``), а не композиция: из него
-    ``TantivyLexicalIndex.search`` собирает ``RetrievedChunk.build_id`` (09 §8.4).
+    ``build_id`` записи — **партиция** продукта (``pb_``), а не композиция. В индексе он
+    **не хранится** (тело и провенанс приходят из store, A1/Д-3): записи живут только на
+    время засева. Основной источник ``pb_`` у R0-хита — ``view``, переданный адаптеру;
+    это значение работает как фолбэк для сборок без вида композиции (09 §8.4).
     """
     return LexicalChunk(
         chunk_id=chunk.chunk_id,

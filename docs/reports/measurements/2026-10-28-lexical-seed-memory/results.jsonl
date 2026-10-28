@@ -1,0 +1,7 @@
+{"n": 60000, "mode": "generator", "written": 60000, "peak_rss_mb": 127.3}
+{"n": 120000, "mode": "generator", "written": 120000, "peak_rss_mb": 140.5}
+{"n": 240000, "mode": "generator", "written": 240000, "peak_rss_mb": 192.7}
+{"n": 480000, "mode": "generator", "written": 480000, "peak_rss_mb": 209.5}
+{"n": 60000, "mode": "list", "written": 60000, "peak_rss_mb": 382.9}
+{"n": 120000, "mode": "list", "written": 120000, "peak_rss_mb": 650.5}
+{"n": 240000, "mode": "list", "written": 240000, "peak_rss_mb": 1228.3}

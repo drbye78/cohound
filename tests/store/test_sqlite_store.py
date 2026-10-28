@@ -684,6 +684,51 @@ def test_iter_chunks_product_filter(store: SqliteStore) -> None:
     assert [c.chunk_id for c in all_chunks] == ["p1-a", "p1-b", "p2-a"]
 
 
+def test_get_chunks_reads_a_batch_and_skips_unknown_ids(store: SqliteStore) -> None:
+    """Гидртация top-k одним ``IN (...)``: пачка → словарь, отсутствующие не выдумываются.
+
+    Батч-чтение заменяет point-lookup на каждый хит (A1/Д-3): тот же набор колонок, что
+    у ``get_chunk``, и отсутствие записи отличимо от пустого текста (идентификатора
+    просто нет в словаре).
+    """
+    store.upsert_corpus_doc(_doc("doc-1", "p1"))
+    store.add_chunks_batch(
+        [
+            _chunk("p1-a", chunk_no=0),
+            _chunk("p1-b", chunk_no=1),
+            _chunk("p1-c", chunk_no=2, text=""),
+        ]
+    )
+    got = store.get_chunks(["p1-a", "p1-c", "missing", "p1-a"])
+    assert set(got) == {"p1-a", "p1-c"}
+    assert isinstance(got["p1-a"], Chunk)
+    assert got["p1-a"].text == "body text"
+    assert got["p1-a"].content_hash == "hash-p1-a"
+    assert got["p1-a"].heading_path == "H1 > H2"
+    # Пустой текст — это запись, а не «нет записи».
+    assert got["p1-c"].text == ""
+    assert store.get_chunks([]) == {}
+
+
+def test_get_chunks_splits_large_batches(store: SqliteStore) -> None:
+    """Пачка больше шага режется на несколько запросов и возвращает всё.
+
+    Предел параметров SQLite различается между сборками (999 / 32766), поэтому шаг взят
+    заведомо меньшим, а не «под размер конкретной машины». Проверяется, что разбиение не
+    теряет записи: 1200 идентификаторов при шаге 500 — три запроса.
+    """
+    store.upsert_corpus_doc(_doc("doc-1", "p1"))
+    count = 1200
+    store.add_chunks_batch(
+        [_chunk(f"p1-{i:04d}", chunk_no=i) for i in range(count)]
+    )
+    ids = [f"p1-{i:04d}" for i in range(count)]
+    got = store.get_chunks(ids)
+    assert len(got) == count
+    assert set(got) == set(ids)
+    assert store._CHUNK_ID_BATCH < count  # шаг действительно меньше пачки
+
+
 def test_iter_chunks_unknown_build_is_empty(store: SqliteStore) -> None:
     store.upsert_corpus_doc(_doc("doc-1", "p1"))
     store.add_chunks_batch([_chunk("p1-a", build_id="build-1")])

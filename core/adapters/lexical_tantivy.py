@@ -94,6 +94,41 @@ tantivy 0.26 нарезает n-граммы по всему тексту пол
 запроса (term-set по ``product_id``), и защитной пост-фильтрацией. Пустой список
 ``product_ids`` даёт пустой результат — ретривал не выходит за явно запрошенный скоуп.
 
+**Текст чанка живёт в store, а не в индексе (A1/Д-3, R2).** Раньше адаптер держал
+``_records_by_id`` — полную копию всех записей **с текстом** на всё время прогона, и
+читал её только для ≤``top_k`` хитов. Оценка порядка (10 §4 Д-3, не наш замер): текст
+≈3.1 KB на чанк, то есть при миллионах чанков — гигабайты RAM, привязанные ко времени
+жизни процесса, а не стадии (10 §1, R2). Теперь тело чанка в индексе **не хранится**
+(``body`` без ``stored=True``): tantivy отдаёт из stored-полей только ``chunk_id`` и
+``product_id``, а текст и остальной провенанс догружаются **одним пачковым вызовом**
+``hydrate(chunk_ids)`` на поисковое окно. Провайдер гидртации инжектится composition
+root'ом (``wiring.seed_lexical_index`` передаёт ``store.get_chunks``); адаптер не знает
+ни SQL, ни раскладки БД.
+
+Собственного замера RSS этого адаптера не делалось: здесь закреплено **структурное**
+свойство (записи не удерживаются — проверяется weakref'ами), а не измеренный пик.
+Плата названа явно: на каждый запрос появился один батч-запрос к store (``IN (...)`` по
+идентификаторам окна), которого раньше не было.
+
+Почему ``product_id`` — stored, а не отдельный запрос: это ось скоупа (I17). Фильтр
+скоупа обязан читаться из того же документа, что дал hit, иначе защитная пост-фильтрация
+сверялась бы с гидртацией и могла бы разойтись с term-set'ом запроса.
+
+Почему ``build_id`` хита не берётся из индекса: в индексе его нет (и не должно быть —
+это провенанс сборки, а не текста), ``ports.types.Chunk`` его не несёт, и гидртатор
+его не знает. Источник — composition root: ``view`` (``CompositionViewPort``)
+отображает продукт в его ``partition_build_id`` (09 §8.4), поэтому R0-хит по-прежнему
+несёт ``pb_``. Порядок разрешения: ``view`` → ``build_id`` гидрированной записи →
+``self.build_id`` (композиция).
+
+**Индекс не держит per-chunk объектов (проверяемое свойство).** После :meth:`index`
+в объекте нет ни записей, ни их текста: записи потребляются потоково и отпускаются
+сразу (``tests/adapters/test_lexical_tantivy.py`` проверяет это weakref'ами на сами
+записи). Плата названа честно: контроль дублей ``chunk_id`` внутри адаптера снят —
+он существовал потому, что ``chunk_id`` был ключом зеркала-словаря; уникальность
+идентичности обеспечивает хранилище (``corpus_chunks.chunk_id`` — PRIMARY KEY) и
+генератор ``chunk_id`` ядра, а не индекс.
+
 **Детерминизм (R7).** Результаты сортируются по ``(-score, chunk_id)``.
 
 **Ленивый импорт.** ``tantivy`` импортируется только в реальном пути; модуль
@@ -110,15 +145,16 @@ from __future__ import annotations
 
 import importlib.util
 import tempfile
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from core.ports.vector_index import RetrievedChunk
+from core.ports.vector_index import CompositionViewPort, RetrievedChunk
 
 __all__ = [
     "LEXICAL_SCHEMA_VERSION",
+    "HydrateFn",
     "LexicalChunk",
     "LexicalIndexUnavailable",
     "TantivyLexicalIndex",
@@ -145,10 +181,24 @@ LEXICAL_SCHEMA_VERSION = "single-body-stem-ru-en-v1"
 def lexical_schema_spec() -> dict[str, object]:
     """Объявленная схема лексического индекса — значение поля контракта ``lexical_spec``.
 
-    Материал — только то, что определяет **выдачу**: состав полей и цепочка анализатора.
-    Версия движка сюда не входит (она наблюдаемая, см. ``LEXICAL_SCHEMA_VERSION``).
-    Хранимые-но-неиндексируемые поля (``chunk_id``) названы явно: их наличие тоже часть
-    схемы, а не деталь реализации.
+    Материал — только то, что определяет **выдачу**: состав **индексируемых** полей и
+    цепочка анализатора. Версия движка сюда не входит (она наблюдаемая, см.
+    ``LEXICAL_SCHEMA_VERSION``).
+
+    Флаги ``stored`` сюда **не** входят, и это исправление дефекта, а не пропуск. Прежний
+    словарь называл ``stored_fields``, хотя stored-раскладка не влияет ни на скоринг, ни
+    на состав hit'ов: это свойство способа доставки провенанса, а не условия измерения.
+    Пока в индексе лежала копия тела (Д-3), расхождение было незаметно — но добавление
+    ``product_id`` в stored-поля (A1: гидртация читает скоуп I17 из документа, а не из
+    записи store) сдвигало ``execution_contract_digest`` и ``run_id`` при неизменной
+    выдаче. Это тот же класс ошибки, что хеширование наблюдаемой версии движка: ``run_id``
+    начинал бы утверждать изменение измерения, которого не было.
+
+    **Следствие сдвига — однократное и названное.** Удаление ключа меняет дайджест один
+    раз (как и любое изменение материала). Дальше stored-раскладка может меняться без
+    новой идентичности прогона, что и есть правильное поведение: индекс не персистится
+    (время жизни — процесс, см. докстринг модуля), поэтому on-disk совместимости
+    хранимого набора не существует.
     """
     return {
         "version": LEXICAL_SCHEMA_VERSION,
@@ -156,7 +206,6 @@ def lexical_schema_spec() -> dict[str, object]:
         "indexed_fields": [FIELD_BODY],
         #: Фильтр-поля (не участвуют в скоринге, но входят в схему).
         "filter_fields": [FIELD_PRODUCT],
-        "stored_fields": [FIELD_CHUNK_ID],
         #: Цепочка анализатора ``stemmed`` — порядок значим (lowercase до стеммеров,
         #: стоп-слова после), поэтому перечисление, а не множество.
         "stemmed_analyzer": [
@@ -190,6 +239,14 @@ _PROFILES = {"stemmed", "identifier", "raw", "ngram"}
 
 #: Поля, обязательные в индексируемой записи.
 _REQUIRED_FIELDS = ("chunk_id", "product_id", "text")
+
+#: Провайдер гидртации: пачка ``chunk_id`` → запись с телом и провенансом из store.
+#:
+#: Значение — ``Mapping``/объект с полями ``text``/``heading_path``/``content_hash``
+#: (и опционально ``build_id``); ``ports.types.Chunk`` подходит как есть, поэтому
+#: composition root передаёт ``store.get_chunks`` без обёртки. Возврат — пачкой, а не
+#: по одному: запрос гидртации один на поисковое окно (см. докстринг модуля).
+HydrateFn = Callable[[Sequence[str]], Mapping[str, object]]
 
 #: Стартовый запас выдачи сверх ``top_k`` при поиске (R7: детерминизм границы).
 #:
@@ -297,6 +354,14 @@ class TantivyLexicalIndex:
         по умолчанию), ``"identifier"``/``"raw"`` (точный токен, регистр значим),
         ``"ngram"`` (символьные триграммы для подстрочного совпадения). Профиль — свойство
         сборки: индекс обслуживает один профиль (C8).
+    :param hydrate: провайдер гидртации top-k (A1/Д-3). Без него индекс хранит только
+        термины: тело чанка в индексе не хранится, поэтому :meth:`search` поднимает
+        ``LexicalIndexUnavailable``, а не выдаёт пустой ``text`` (пустая цитата выглядела
+        бы как отсутствие доказательства, I22).
+    :param view: вид композиции (``CompositionViewPort``) — карта ``product_id →
+        partition_build_id`` (09 §8.4). Из неё ``RetrievedChunk.build_id`` R0-хита
+        получает ``pb_``; без неё действует ``build_id`` гидрированной записи, затем
+        ``self.build_id`` (композиция).
 
     Атрибуты ``engine_version``/``build_id`` доступны до построения индекса;
     ``build_id`` заполняется при :meth:`index` (из параметра либо из записей).
@@ -307,6 +372,8 @@ class TantivyLexicalIndex:
         index_path: str | Path | None = None,
         *,
         profile: str = "stemmed",
+        hydrate: HydrateFn | None = None,
+        view: CompositionViewPort | None = None,
     ) -> None:
         normalized = profile.strip().lower()
         if normalized not in _PROFILES:
@@ -321,7 +388,8 @@ class TantivyLexicalIndex:
         self._schema: Any = None
         self._index: Any = None
         self._searcher: Any = None
-        self._records_by_id: dict[str, LexicalChunk] = {}
+        self._hydrate = hydrate
+        self._view = view
         self._built = False
 
     # -- зависимость ---------------------------------------------------- #
@@ -340,42 +408,54 @@ class TantivyLexicalIndex:
 
     def index(
         self,
-        chunks: Sequence[Any],
+        chunks: Iterable[Any],
         *,
         build_id: str | None = None,
-    ) -> None:
-        """Строит лексический индекс по записям (полная перестройка).
+    ) -> int:
+        """Строит лексический индекс по записям (полная перестройка), потоково.
 
-        :param chunks: последовательность :class:`LexicalChunk`/``Mapping``/объектов.
-        :param build_id: идентификатор сборки; ``None`` → берётся из записей.
+        :param chunks: **итерируемое** записей (:class:`LexicalChunk`/``Mapping``/объектов).
+            Материализации нет: запись приводится, пишется в индекс и отпускается, поэтому
+            ни список записей, ни их текст не переживают этот вызов (A1/Д-3). Список тоже
+            принимается — это не отдельный режим, а вырожденный случай итератора.
+        :param build_id: идентификатор сборки; ``None`` → первый непустой ``build_id``
+            среди записей.
+        :returns: число записанных документов (``0`` — индекс пуст: вызывающий отличает
+            «пустой корпус» от «сборка не разрешилась»).
         :raises LexicalIndexUnavailable: если ``tantivy`` не установлен.
-        :raises ValueError: дубли ``chunk_id`` или отсутствие обязательных полей.
+        :raises ValueError: отсутствие обязательных полей в записи.
+
+        Контроля дублей ``chunk_id`` здесь больше нет: он существовал потому, что
+        ``chunk_id`` был ключом зеркала-словаря, а само зеркало удалено. Идентичность
+        обеспечивают хранилище (``corpus_chunks.chunk_id`` PRIMARY KEY) и генератор
+        ``chunk_id`` ядра; проверять её на каждом чанке значило бы держать множество всех
+        идентификаторов в памяти — ровно то, что здесь убирается.
         """
-        records = [_coerce_record(record) for record in chunks]
-        mapping: dict[str, LexicalChunk] = {}
-        for record in records:
-            if record.chunk_id in mapping:
-                raise ValueError(f"дублирующийся chunk_id в индексе: {record.chunk_id!r}")
-            mapping[record.chunk_id] = record
-
-        self._records_by_id = mapping
-        self.build_id = build_id if build_id is not None else _derive_build_id(records)
-
         tantivy = _require_tantivy()
         schema = self._build_schema(tantivy)
         index = self._open_index(tantivy, schema)
         writer = index.writer()
         writer.delete_all_documents()
-        for record in records:
+        written = 0
+        derived_build_id = ""
+        for record in chunks:
+            entry = _coerce_record(record)
+            if not derived_build_id and entry.build_id:
+                derived_build_id = entry.build_id
             writer.add_document(
                 tantivy.Document(
                     **{
-                        FIELD_CHUNK_ID: record.chunk_id,
-                        FIELD_PRODUCT: record.product_id,
-                        FIELD_BODY: record.text,
+                        FIELD_CHUNK_ID: entry.chunk_id,
+                        FIELD_PRODUCT: entry.product_id,
+                        FIELD_BODY: entry.text,
                     }
                 )
             )
+            written += 1
+            # Ссылка на запись отпускается сразу: иначе последняя запись пережила бы
+            # цикл, и «в объекте не остаётся текста чанка» перестало бы быть правдой
+            # без нужды.
+            del entry
         writer.commit()
         index.reload()
         # Writer отпускается сразу: он держит lock-файлы каталога индекса, а следующий
@@ -384,10 +464,12 @@ class TantivyLexicalIndex:
         # ``close()`` может соревноваться с ещё живым writer'ом.
         del writer
 
+        self.build_id = build_id if build_id is not None else derived_build_id
         self._schema = schema
         self._index = index
         self._searcher = index.searcher()
         self._built = True
+        return written
 
     # -- search (LexicalIndexPort.shape) -------------------------------- #
 
@@ -434,9 +516,17 @@ class TantivyLexicalIndex:
         return _STEM_TOKENIZER
 
     def _build_schema(self, tantivy: Any) -> Any:
+        """Схема: одно индексируемое текстовое поле + два stored-поля провенанса.
+
+        ``product_id`` объявлен stored намеренно: защитная пост-фильтрация скоупа (I17)
+        обязана читать продукт из того же документа, что дал hit, а не сверяться с
+        гидртацией. ``body`` — **не** stored: тело чанка живёт в store (A1/Д-3), и его
+        копия в индексе была бы ровно той памятью/объёмом, ради которых гидртация
+        введена.
+        """
         builder = tantivy.SchemaBuilder()
         builder.add_text_field(FIELD_CHUNK_ID, stored=True, tokenizer_name="raw")
-        builder.add_text_field(FIELD_PRODUCT, tokenizer_name="raw")
+        builder.add_text_field(FIELD_PRODUCT, stored=True, tokenizer_name="raw")
         builder.add_text_field(FIELD_BODY, tokenizer_name=self._field_tokenizer())
         return builder.build()
 
@@ -499,29 +589,27 @@ class TantivyLexicalIndex:
         Симметрия с dense-плечом: :func:`core.adapters.vector_npy._ranked_rows` держит то
         же свойство («равные баллы на границе не теряются»), здесь оно достигается
         расширением окна, потому что tantivy не умеет «дай всё с баллом ≥ X».
+
+        Гидртация (A1/Д-3) идёт **после** отсечения по продукту и **одним** вызовом на
+        окно: документ индекса несёт только ``chunk_id``/``product_id``, тело приходит из
+        store пачкой. Расширение окна — исключительный путь, поэтому «один вызов на
+        запрос» верно для обычного запроса и проверяется счётчиком провайдера.
         """
         allowed_set = set(allowed)
         window = max(1, top_k) + _TIE_HEADROOM
         while True:
             hits = self._searcher.search(combined, window)
-            out: list[RetrievedChunk] = []
+            matched: list[tuple[float, str, str]] = []
             for score, address in hits.hits:
                 document = self._searcher.doc(address)
                 chunk_id = document.get_first(FIELD_CHUNK_ID)
-                record = self._records_by_id.get(chunk_id)
-                if record is None or record.product_id not in allowed_set:
+                product_id = document.get_first(FIELD_PRODUCT)
+                # Скоуп читается из stored-поля документа: это ось запроса (I17), а не
+                # свойство гидрированной записи.
+                if not chunk_id or product_id not in allowed_set:
                     continue
-                out.append(
-                    RetrievedChunk(
-                        chunk_id=record.chunk_id,
-                        product_id=record.product_id,
-                        text=record.text,
-                        content_hash=record.content_hash,
-                        heading_path=record.heading_path,
-                        build_id=record.build_id or self.build_id,
-                        score=float(score),
-                    )
-                )
+                matched.append((float(score), chunk_id, product_id))
+            out = self._hydrate_hits(matched)
             # Окно исчерпало движок (все совпадения внутри) либо потолок — расширять
             # больше нечем: усечение остаётся детерминированным по (-score, chunk_id).
             if len(out) <= top_k or len(hits.hits) < window:
@@ -532,6 +620,69 @@ class TantivyLexicalIndex:
             if window >= _TIE_WINDOW_MAX:
                 return out
             window = min(window * 2, _TIE_WINDOW_MAX)
+
+    def _hydrate_hits(
+        self, matched: Sequence[tuple[float, str, str]]
+    ) -> list[RetrievedChunk]:
+        """Собирает ``RetrievedChunk`` из документа индекса и записи store (один батч).
+
+        :param matched: ``(score, chunk_id, product_id)`` в порядке выдачи tantivy.
+        :raises LexicalIndexUnavailable: индекс построен без провайдера гидртации —
+            тело чанка взять неоткуда, а пустой ``text`` выдал бы ложное «доказательства
+            нет» (I22).
+
+        Чанк, которого нет в store, **пропускается**: провенанс — обязательная часть
+        выдачи (симметрично ``vector_npy``: «метаданных нет — провенанса нет»).
+        """
+        if not matched:
+            return []
+        if self._hydrate is None:
+            raise LexicalIndexUnavailable(
+                "TantivyLexicalIndex: индекс построен без провайдера гидртации (hydrate) — "
+                "тело чанка в индексе не хранится (A1/Д-3), собрать RetrievedChunk нечем"
+            )
+        hydrated = self._hydrate([chunk_id for _, chunk_id, _ in matched])
+        partition_build_ids: dict[str, str] = {}
+        out: list[RetrievedChunk] = []
+        for score, chunk_id, product_id in matched:
+            value = hydrated.get(chunk_id)
+            if value is None:
+                continue
+            text, heading_path, content_hash, record_build_id = _hydrated_fields(value)
+            build_id = (
+                self._partition_build_id(product_id, partition_build_ids)
+                or record_build_id
+                or self.build_id
+            )
+            out.append(
+                RetrievedChunk(
+                    chunk_id=chunk_id,
+                    product_id=product_id,
+                    text=text,
+                    content_hash=content_hash,
+                    heading_path=heading_path,
+                    build_id=build_id,
+                    score=score,
+                )
+            )
+        return out
+
+    def _partition_build_id(self, product_id: str, cache: dict[str, str]) -> str:
+        """``partition_build_id`` продукта из вида композиции (09 §8.4); ``""`` — нет вида.
+
+        Кэш — на один поиск (не на процесс): карта продукт→партиция — несколько строк, но
+        и она не нужна вне запроса.
+        """
+        if self._view is None:
+            return ""
+        if product_id not in cache:
+            try:
+                cache[product_id] = self._view.build_id_for(product_id)
+            except KeyError:
+                # Продукт вне композиции — не повод падать в поиске: вызывающий уже
+                # ограничил скоуп, а провенанс деградирует к build_id записи/сборки.
+                cache[product_id] = ""
+        return cache[product_id]
 
     def _build_query(self, query: str, lang: str | None) -> Any:
         """Разобранный запрос по профилю сборки (``None`` — пустой запрос).
@@ -610,12 +761,25 @@ class TantivyLexicalIndex:
         self.close()
 
 
-def _derive_build_id(records: Sequence[LexicalChunk]) -> str:
-    """Берёт первый непустой ``build_id`` из записей (иначе пустая строка)."""
-    for record in records:
-        if record.build_id:
-            return record.build_id
-    return ""
+def _hydrated_fields(value: object) -> tuple[str, str, str, str]:
+    """Достаёт ``(text, heading_path, content_hash, build_id)`` из записи store.
+
+    Принимает ``Mapping`` и объекты с атрибутами (``ports.types.Chunk`` подходит как
+    есть; ``LexicalChunk`` — тоже, тогда ``build_id`` записи участвует в провенансе).
+    Отсутствующие поля — пустая строка: ``Chunk`` не несёт ``build_id``, и это штатный
+    случай, а не ошибка (``product_id`` вообще не берётся из гидртации — он из документа).
+    """
+    if isinstance(value, Mapping):
+        text = value.get("text") or ""
+        heading_path = value.get("heading_path") or ""
+        content_hash = value.get("content_hash") or ""
+        build_id = value.get("build_id") or ""
+    else:
+        text = getattr(value, "text", "") or ""
+        heading_path = getattr(value, "heading_path", "") or ""
+        content_hash = getattr(value, "content_hash", "") or ""
+        build_id = getattr(value, "build_id", "") or ""
+    return str(text), str(heading_path), str(content_hash), str(build_id)
 
 
 def _stem_analyzer(tantivy: Any) -> Any:
