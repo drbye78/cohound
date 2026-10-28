@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import argparse
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -67,6 +68,34 @@ REPO_ROOTS = ("core", "tests", "scripts", "docs", "packages", "edge", "contracts
 
 def _repo_root() -> Path:
     return Path(__file__).resolve().parent.parent
+
+
+def git_ignored(root: Path) -> set[Path]:
+    """Файлы, которые git игнорирует: они не часть обещания репозитория.
+
+    Документ, не отслеживаемый git (``.gitignore``), не публикуется, поэтому его якоря —
+    рабочие заметки, а не обещание читателю. Считать их провалом CI значило бы требовать
+    правки в файле, который в репозиторий не попадает. Список берётся у git, а не у копии
+    правил: копия разошлась бы с ``.gitignore`` молча. git недоступен — фильтра нет
+    (лучше лишний отчёт, чем тишина).
+    """
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(root), "ls-files", "-oi", "--exclude-standard"],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):  # pragma: no cover — нет git/таймаут
+        return set()
+    if completed.returncode != 0:
+        return set()
+    return {
+        (root / line.strip()).resolve()
+        for line in completed.stdout.splitlines()
+        if line.strip()
+    }
 
 
 def _index_code_files(root: Path) -> dict[str, list[Path]]:
@@ -119,11 +148,16 @@ def main(argv: list[str] | None = None) -> int:
 
     root = _repo_root()
     index = _index_code_files(root)
+    ignored = git_ignored(root)
     problems: list[str] = []
     warnings: list[str] = []
     checked = 0
+    skipped_docs = 0
 
     for doc in _doc_files(root):
+        if doc.resolve() in ignored:
+            skipped_docs += 1
+            continue
         try:
             text = doc.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
@@ -168,6 +202,8 @@ def main(argv: list[str] | None = None) -> int:
                     problems.append(f"{where}: {anchor_path}:{start} — пустая строка")
 
     print(f"якорей проверено: {checked}")
+    if skipped_docs:
+        print(f"документов пропущено (не отслеживаются git): {skipped_docs}")
     for problem in problems:
         print(f"ОШИБКА  {problem}")
     for warning in warnings:

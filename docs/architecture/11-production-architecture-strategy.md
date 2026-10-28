@@ -307,10 +307,10 @@ peak=1563 MB, parent floor=500 MB → workers=0`, отказ **до** фаз. Ф
 >   `docs/reports/measurements/` нет файла с результатами benchmark'а, а обе слоты `deploy.yaml`
 >   несут одну и ту же модель (`config/deploy.yaml:88-89` и `:94`). Выбор модели по κ
 >   **не сделан** — модель объявлена, а не измерена (A3).
-> - **`base_url` в слот:** ✅ сделано — `config/deploy.yaml:88`
+> - **`base_url` в слот:** ✅ сделано — `config/deploy.yaml:107`
 >   (`base_url: "https://plusvibeapi.ru"`), пустой слот теперь означает «оценщик не
 >   поднимается», а не «endpoint берётся из env»; место исполнения объявлено флагом
->   `rnd_endpoint` (`config/deploy.yaml:80`).
+>   `rnd_endpoint` (`config/deploy.yaml:99`).
 > - **SERP-контур:** ✅ сделано, но **не** через `run_serp_loop`. Производитель запросов —
 >   `_run_serp_contour` (`core/pipeline/corpus.py:3282`), вызов внутри фазы корпуса **до**
 >   дренажа — `core/pipeline/corpus.py:3925`; `run_serp_loop` сам остаётся невызываемым
