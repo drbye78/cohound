@@ -21,9 +21,11 @@ scope-чека, поэтому host-wide sitemap при path-scoped seed зал�
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
+import pytest
 from test_corpus import (
     RUN_ID,
     SqliteStore,
@@ -74,6 +76,24 @@ def _root_record(result: Any, root: str) -> dict[str, Any]:
     return records[0]
 
 
+def _doc_urls(store: SqliteStore) -> set[str]:
+    """URL документов корпуса **из стора**: результат фазы их больше не несёт (Д-2/A4).
+
+    ``crawler.calls`` доказывает фетч, а не ингест; ингест виден только строкой
+    ``corpus_docs``, поэтому документы читаются из того же стора, куда пишет фаза.
+    """
+    return {doc.url for doc in store.iter_corpus_docs(RUN_ID)}
+
+@pytest.fixture
+def store() -> Iterator[SqliteStore]:
+    """Стор прогона (с строкой ``runs``): носитель документов корпуса (Д-2/A4)."""
+    instance = SqliteStore(":memory:")
+    _make_run(instance)
+    try:
+        yield instance
+    finally:
+        instance.close()
+
 def _skips(result: Any, root: str) -> list[dict[str, Any]]:
     """Агрегированные записи отказов scope у ``<loc>`` sitemap этого корня."""
     return list(_root_record(result, root).get("skipped_out_of_scope", []))
@@ -85,7 +105,9 @@ def _by_reason(skips: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     return {rec["reason"]: rec for rec in skips}
 
 
-def test_loc_inside_path_scope_is_fetched(tmp_path: Path) -> None:
+def test_loc_inside_path_scope_is_fetched(
+    tmp_path: Path, store: SqliteStore
+) -> None:
     """``<loc>`` под path-префиксом корня — ставится и фетчится (аугментация seed'а)."""
     poller = _locs(LOC_A_IN)
     crawler = _Crawler({ROOT_A: b"seed", LOC_A_IN: b"loc"})
@@ -96,16 +118,20 @@ def test_loc_inside_path_scope_is_fetched(tmp_path: Path) -> None:
         crawler=crawler,
         domain_profiles=_sitemap_profile(),
         pollers={"sitemap": poller},
+        store=store,
+        run_id=RUN_ID,
     )
     assert result.errors == []
     assert [c[0] for c in poller.calls] == [SITEMAP_URL]
     assert [u for u, _ in crawler.calls] == [ROOT_A, LOC_A_IN]
-    assert {d.url for d in _build_of(result).docs} == {ROOT_A, LOC_A_IN}
+    assert _doc_urls(store) == {ROOT_A, LOC_A_IN}
     # Всё в scope ⇒ отказов нет ⇒ ключа провенанса нет (запись не «шумит»).
     assert "skipped_out_of_scope" not in _root_record(result, ROOT_A)
 
 
-def test_loc_outside_path_scope_recorded_in_provenance_not_errors(tmp_path: Path) -> None:
+def test_loc_outside_path_scope_recorded_in_provenance_not_errors(
+    tmp_path: Path, store: SqliteStore
+) -> None:
     """``<loc>`` вне path-scope не ставится; отказ — провенанс корня, а не ``errors``."""
     poller = _locs(LOC_A_IN, LOC_A_OUT)
     crawler = _Crawler({ROOT_A: b"seed", LOC_A_IN: b"loc", LOC_A_OUT: b"other"})
@@ -116,9 +142,11 @@ def test_loc_outside_path_scope_recorded_in_provenance_not_errors(tmp_path: Path
         crawler=crawler,
         domain_profiles=_sitemap_profile(),
         pollers={"sitemap": poller},
+        store=store,
+        run_id=RUN_ID,
     )
     assert LOC_A_OUT not in [u for u, _ in crawler.calls]
-    assert {d.url for d in _build_of(result).docs} == {ROOT_A, LOC_A_IN}
+    assert _doc_urls(store) == {ROOT_A, LOC_A_IN}
     # F10: штатный отказ scope не деградирует канал сбоев и не делает корпус усечённым.
     assert result.errors == []
     assert _build_of(result).truncated is False
@@ -188,7 +216,9 @@ def test_large_rejection_set_is_one_aggregated_record_with_exact_count(
     assert "и ещё 497" in skip["message"]
 
 
-def test_host_root_seed_keeps_whole_host_in_scope(tmp_path: Path) -> None:
+def test_host_root_seed_keeps_whole_host_in_scope(
+    tmp_path: Path, store: SqliteStore
+) -> None:
     """Host-root seed (``https://h/``) ⇒ scope = весь host: host-wide sitemap не режется."""
     locs = (f"https://{HOST}/x", f"https://{HOST}/y/z")
     poller = _locs(*locs)
@@ -200,10 +230,12 @@ def test_host_root_seed_keeps_whole_host_in_scope(tmp_path: Path) -> None:
         crawler=crawler,
         domain_profiles=_sitemap_profile(),
         pollers={"sitemap": poller},
+        store=store,
+        run_id=RUN_ID,
     )
     assert result.errors == []
     assert [u for u, _ in crawler.calls] == [ROOT_HOST, *locs]
-    assert {d.url for d in _build_of(result).docs} == {ROOT_HOST, *locs}
+    assert _doc_urls(store) == {ROOT_HOST, *locs}
     assert _skips(result, ROOT_HOST) == []
 
 
@@ -231,7 +263,9 @@ def test_loc_rejected_by_root_a_still_offered_to_root_b(tmp_path: Path) -> None:
     assert _skips(result, ROOT_B) == []
 
 
-def test_same_loc_offered_by_two_roots_fetched_once(tmp_path: Path) -> None:
+def test_same_loc_offered_by_two_roots_fetched_once(
+    tmp_path: Path, store: SqliteStore
+) -> None:
     """Loc в scope обоих корней: дедуп ``(pid, loc)`` сохраняет один фетч."""
     poller = _locs(LOC_A_IN)
     crawler = _Crawler({ROOT_HOST: b"host", ROOT_A: b"a", LOC_A_IN: b"loc"})
@@ -242,10 +276,12 @@ def test_same_loc_offered_by_two_roots_fetched_once(tmp_path: Path) -> None:
         crawler=crawler,
         domain_profiles=_sitemap_profile(),
         pollers={"sitemap": poller},
+        store=store,
+        run_id=RUN_ID,
     )
     assert result.errors == []
     assert [u for u, _ in crawler.calls].count(LOC_A_IN) == 1
-    assert {d.url for d in _build_of(result).docs} == {ROOT_HOST, ROOT_A, LOC_A_IN}
+    assert _doc_urls(store) == {ROOT_HOST, ROOT_A, LOC_A_IN}
     # Дедуп — не отказ: ни у одного корня провенанса отказов нет.
     assert _skips(result, ROOT_HOST) == []
     assert _skips(result, ROOT_A) == []
@@ -261,7 +297,9 @@ ROOT_INNER = f"https://{HOST}/p1/a"
 LOC_SHARED = f"https://{HOST}/p1/a/page"
 
 
-def test_loc_blacklisted_at_root_a_still_offered_to_root_b(tmp_path: Path) -> None:
+def test_loc_blacklisted_at_root_a_still_offered_to_root_b(
+    tmp_path: Path, store: SqliteStore
+) -> None:
     """Loc заблэклистен профилем корня A — не помечен использованным, берётся корнем B.
 
     Блэклист резолвится по **корню** (``resolve_crawl_limits(root_url)``), поэтому вложенные
@@ -283,6 +321,8 @@ def test_loc_blacklisted_at_root_a_still_offered_to_root_b(tmp_path: Path) -> No
         crawler=crawler,
         domain_profiles=profiles,
         pollers={"sitemap": poller},
+        store=store,
+        run_id=RUN_ID,
     )
     # Sitemap опрошен один раз (кэш по ``(pid, sitemap_url)``).
     assert [c[0] for c in poller.calls] == [SITEMAP_URL]
@@ -292,7 +332,7 @@ def test_loc_blacklisted_at_root_a_still_offered_to_root_b(tmp_path: Path) -> No
         for e in result.errors
     )
     assert [u for u, _ in crawler.calls] == [ROOT_OUTER, ROOT_INNER, LOC_SHARED]
-    assert {d.url for d in _build_of(result).docs} == {
+    assert _doc_urls(store) == {
         ROOT_INNER,
         ROOT_OUTER,
         LOC_SHARED,
@@ -348,7 +388,7 @@ def test_loc_budget_rejected_root_a_still_offered_to_root_b(tmp_path: Path) -> N
             for e in result.errors
         )
         assert [u for u, _ in crawler.calls].count(extra_loc) == 1
-        assert extra_loc in {d.url for d in _build_of(result).docs}
+        assert extra_loc in _doc_urls(store)
         host_record = _root_record(result, ROOT_HOST)
         assert host_record["truncated"] is True
         assert host_record["truncated_reason"] == "max_documents"
@@ -358,7 +398,7 @@ def test_loc_budget_rejected_root_a_still_offered_to_root_b(tmp_path: Path) -> N
         store.close()
 
 
-def test_no_sitemap_never_calls_poller(tmp_path: Path) -> None:
+def test_no_sitemap_never_calls_poller(tmp_path: Path, store: SqliteStore) -> None:
     """Без sitemap путь не исполняется: ни поллера, ни новых seeds/errors/провенанса."""
     poller = _FakePoller(raising=RuntimeError("поллер не должен вызываться"))
     crawler = _Crawler({ROOT_A: b"seed"})
@@ -369,10 +409,12 @@ def test_no_sitemap_never_calls_poller(tmp_path: Path) -> None:
         crawler=crawler,
         domain_profiles={HOST: DomainProfile()},
         pollers={"sitemap": poller},
+        store=store,
+        run_id=RUN_ID,
     )
     assert poller.calls == []
     assert result.errors == []
     assert [u for u, _ in crawler.calls] == [ROOT_A]
-    assert {d.url for d in _build_of(result).docs} == {ROOT_A}
+    assert _doc_urls(store) == {ROOT_A}
     # Без sitemap запись корня байт-в-байт прежняя: ключа провенанса отказов нет.
     assert "skipped_out_of_scope" not in _root_record(result, ROOT_A)

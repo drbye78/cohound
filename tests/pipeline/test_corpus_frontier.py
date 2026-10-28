@@ -399,7 +399,7 @@ def test_redirect_escape_off_host_dropped(tmp_path: Path) -> None:
         store.close()
 
     build = _build_of(result)
-    assert build.docs == []  # не ingested
+    assert build.doc_count == 0  # не ingested
     assert not (tmp_path / "p1").exists() or not any(
         (tmp_path / "p1").iterdir()
     )  # raw не ретейнится
@@ -425,7 +425,7 @@ def test_redirect_escape_off_host_retained_at_depth_zero(tmp_path: Path) -> None
         store.close()
     build = _build_of(result)
     assert build.crawl_fetched == 1
-    assert build.docs  # страница ingested
+    assert build.doc_count  # страница ingested
     assert items[("p1", ROOT)].error_kind is None
 
 
@@ -455,7 +455,7 @@ def test_www_to_apex_seed_retained_at_depth_zero(tmp_path: Path) -> None:
         store.close()
     build = _build_of(result)
     assert build.crawl_fetched >= 1
-    assert build.docs  # build не пуст
+    assert build.doc_count  # build не пуст
     assert crawler.calls == [www]
     # B4: глубина персистится как 0 (не NULL) — seed-root это глубина 0.
     assert item.depth == 0
@@ -474,7 +474,7 @@ def test_www_to_apex_retained_under_discovery(tmp_path: Path) -> None:
         urls={"p1": [www]},
         crawl_defaults=CrawlRunConfig(max_depth=1),
     )
-    assert _build_of(result).docs
+    assert _build_of(result).doc_count
     assert crawler.calls == [www]
 
 
@@ -499,7 +499,7 @@ def test_unrelated_redirect_dropped_with_reason_under_discovery(tmp_path: Path) 
         }[("p1", ROOT)]
     finally:
         store.close()
-    assert _build_of(result).docs == []
+    assert _build_of(result).doc_count == 0
     assert item.error_kind == "redirect_out_of_scope"
     assert any("redirect" in e for e in result.errors)
 

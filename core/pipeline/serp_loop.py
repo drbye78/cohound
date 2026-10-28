@@ -410,7 +410,6 @@ def default_round_builder(ctx: RoundBuildContext) -> IndexBuild:
     return IndexBuild(
         index_build_id=ctx.new_build_id,
         entries=entries,
-        docs=[],
         chunk_count=0,
     )
 
@@ -422,6 +421,11 @@ def _normalize_build(build: IndexBuild, new_build_id: str, package: str) -> Inde
     раунду важен **новый** id. Копируем ``IndexManifestEntry`` (``model_copy``) с новым
     ``index_build_id``/``partition_key``/``store_path``; физические артефакты — зона
     ``builder``. Если id уже совпадает — возвращаем сборку без изменений.
+
+    Документы раунд **не переносит**: ``IndexBuild`` несёт только счётчик (``doc_count``),
+    а сами ``CorpusDoc`` живут в ``corpus_docs``. Раньше здесь копировался ``build.docs``,
+    то есть список документов ехал из фазы в память вызывающего ради кода, который его не
+    читает; при необходимости документы берутся из стора (``store.iter_corpus_docs``).
     """
     if build.index_build_id == new_build_id:
         return build
@@ -447,7 +451,7 @@ def _normalize_build(build: IndexBuild, new_build_id: str, package: str) -> Inde
     return IndexBuild(
         index_build_id=new_build_id,
         entries=entries,
-        docs=list(build.docs),
+        doc_count=build.doc_count,
         chunk_count=build.chunk_count,
     )
 
@@ -1568,6 +1572,13 @@ def run_serp_loop(
     clock: Callable[[], str] | None = None,
 ) -> SerpLoopResult:
     """Ограниченная петля SERP: ``R_start..R_{start+rounds-1}`` (append-only, K2).
+
+    Документы корпуса петля **не получает** из фазы: ``IndexBuild`` несёт их счётчик, а
+    сами ``CorpusDoc`` живут в ``corpus_docs`` и читаются оттуда (``store``/``run_id``
+    уже параметры петли). Раньше сборка везла список документов ради кода, который его не
+    читает, — то есть результат фазы пересекал границу в памяти (Д-2/A4). В прогоне
+    ``run_serp_loop`` не вызывается (SERP-контур исполняется внутри фазы корпуса), так что
+    смена потребителя поведения не меняет.
 
     Каждый раунд порождает **новую** сборку (id цепочкой от предыдущей) и, если есть
     родительская сборка, инвалидирует затронутые ячейки (``stale_reason='new_build'``).

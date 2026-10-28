@@ -226,7 +226,7 @@ peak=1563 MB, parent floor=500 MB → workers=0`, отказ **до** фаз. Ф
 >   `docling-doc-3:layout_tables/cpu/docling-2.135.0,trafilatura-html-2` (сегмент
 >   `cpu`/`cuda` — ось `crawl.pdf_device`, P9).
 > - ✅ воркеры из бюджета + уровень из профиля: `core/cli/wiring.py:2438` (`workers_from_budget`),
->   preflight `core/cli/wiring.py:2380` (`preflight_extraction_budget`, `EXIT_USAGE`).
+>   preflight `core/cli/wiring.py:2402` (`preflight_extraction_budget`, `EXIT_USAGE`).
 > - ✅ durable хвост спуска (write-through): синки `persist_observation`/`persist_member`
 >   (`core/pipeline/archive_descent.py:337,473,1031`), подключены в
 >   `core/pipeline/corpus.py:7477`; видимая строка пропуска по бюджету —
@@ -316,7 +316,7 @@ peak=1563 MB, parent floor=500 MB → workers=0`, отказ **до** фаз. Ф
 >   дренажа — `core/pipeline/corpus.py:3925`; `run_serp_loop` сам остаётся невызываемым
 >   (единственные вхождения — определение `core/pipeline/serp_loop.py:1549` и реэкспорт).
 >   Ось в контракте — `serp_rounds` (`core/pipeline/digests.py:100`), значение из
->   `--serp-rounds`/`run.yaml:serp.rounds`/`COHOUND_SERP` (`core/cli/wiring.py:1073`).
+>   `--serp-rounds`/`run.yaml:serp.rounds`/`COHOUND_SERP` (`core/cli/wiring.py:1095`).
 >   Оговорка: контур исполняется только при объявленных `rounds > 0` **и** бюджете
 >   (`core/pipeline/corpus.py:3939`); на прогоне `ru-pg-dbms-3edf2b06097c` он не исполнялся.
 > - **Exit:** прогон с непустой `llm_scenarios` и живыми вердиктами есть

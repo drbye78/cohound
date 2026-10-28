@@ -307,7 +307,7 @@ def test_staged_artifact_is_retained_byte_identical_without_extraction(
         assert not any(staging.iterdir())
         # Контейнер — не документ: экстрактор не звался; спуск дал видимый unreadable.
         assert extractor.calls == 0
-        assert _build_of(result).docs == []
+        assert _build_of(result).doc_count == 0
         assert any("archive_unreadable" in e for e in result.errors)
     finally:
         store.close()
@@ -352,7 +352,7 @@ def test_ooxml_zip_is_a_document_not_a_container(tmp_path: Path) -> None:
         )
 
         assert extractor.calls == 1
-        assert len(_build_of(result).docs) == 1
+        assert _build_of(result).doc_count == 1
         assert not any("archive_unreadable" in e for e in result.errors)
     finally:
         store.close()
@@ -558,7 +558,7 @@ def test_staged_pdf_is_retained_and_extracted(tmp_path: Path) -> None:
         # 25 MiB по пути, и при этом ноль байтов поднято в RAM вызывающего.
         assert extractor.source_sizes == [25 * MIB]
         assert extractor.sizes == [0]
-        assert len(_build_of(result).docs) == 1
+        assert _build_of(result).doc_count == 1
         assert not any("payload_too_large" in e for e in result.errors)
         assert not any("archive_unreadable" in e for e in result.errors)
     finally:

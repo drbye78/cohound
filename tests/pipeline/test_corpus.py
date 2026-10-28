@@ -386,6 +386,14 @@ def _build_of(result) -> IndexBuild:  # noqa: ANN001
     assert len(builds) == 1
     return builds[0]
 
+def _docs(store):  # noqa: ANN001, ANN202
+    """Документы корпуса **из стора**: результат фазы их больше не несёт (Д-2/A4).
+
+    Носитель документов один — ``corpus_docs``; порядок — детерминированный
+    ``product_id, doc_id`` (порядок ingest читается по вставке чанков).
+    """
+    return list(store.iter_corpus_docs(RUN_ID))
+
 
 # --------------------------------------------------------------------------- #
 # Сквозная сборка, retention, dedup
@@ -405,7 +413,7 @@ def test_end_to_end_two_products(tmp_path: Path) -> None:
     # p1: две перепечатки → один документ; p2: один документ.
     assert build.chunk_count == 2
     assert {e.product_id for e in build.entries} == {"p1", "p2"}
-    assert len(build.docs) == 2
+    assert build.doc_count == 2
     assert result.errors == []
 
 
@@ -626,15 +634,22 @@ def test_zero_source_without_urls_mapping_names_no_urls_entry(tmp_path: Path) ->
 
 def test_retention_file_written(tmp_path: Path) -> None:
     content = b"retained bytes"
-    result = _build(tmp_path, pages={URL_P1_A: content}, urls={"p1": [URL_P1_A]})
-    build = _build_of(result)
-    doc = build.docs[0]
-    expected = tmp_path / "p1" / f"{content_hash(content)}.bin"
-    assert expected.exists()
-    assert expected.read_bytes() == content
-    assert doc.raw_path == str(expected)
-    assert doc.content_hash == content_hash(content)
-    assert doc.extractor_version == "extractor-1"
+    store = SqliteStore(":memory:")
+    _make_run(store)
+    try:
+        _build(
+            tmp_path, pages={URL_P1_A: content}, urls={"p1": [URL_P1_A]},
+            store=store, run_id=RUN_ID,
+        )
+        doc = _docs(store)[0]
+        expected = tmp_path / "p1" / f"{content_hash(content)}.bin"
+        assert expected.exists()
+        assert expected.read_bytes() == content
+        assert doc.raw_path == str(expected)
+        assert doc.content_hash == content_hash(content)
+        assert doc.extractor_version == "extractor-1"
+    finally:
+        store.close()
 
 
 def test_dedup_same_content_two_urls_indexed_once(tmp_path: Path) -> None:
@@ -648,7 +663,7 @@ def test_dedup_same_content_two_urls_indexed_once(tmp_path: Path) -> None:
     build = _build_of(result)
     # Обе страницы скачаны (retention по каждой), но проиндексирован один документ.
     assert len(crawler.calls) == 2
-    assert len(build.docs) == 1
+    assert build.doc_count == 1
     assert build.chunk_count == 1
     assert {e.product_id for e in build.entries} == {"p1"}
     # Наблюдаемость: схлопывание посчитано и видно (раньше терялось молча).
@@ -664,7 +679,7 @@ def test_dedup_counter_is_product_scoped(tmp_path: Path) -> None:
         urls={"p1": [URL_P1_A], "p2": [URL_P2_A]},
     )
     build = _build_of(result)
-    assert len(build.docs) == 2
+    assert build.doc_count == 2
     assert build.duplicates == {}
     assert build.duplicate_count == 0
 
@@ -702,7 +717,7 @@ def test_dedup_is_product_scoped(tmp_path: Path) -> None:
     )
     build = _build_of(result)
     assert build.chunk_count == 2
-    assert {d.product_id for d in build.docs} == {"p1", "p2"}
+    assert build.doc_count == 2
     assert {e.product_id for e in build.entries} == {"p1", "p2"}
 
 
@@ -718,7 +733,7 @@ def test_dedup_alias_gets_twin_doc_version_and_is_counted(tmp_path: Path) -> Non
             crawler=crawler,
         )
         build = _build_of(result)
-        assert len(build.docs) == 1
+        assert build.doc_count == 1
         assert build.duplicates == {"p1": 1}
         assert build.duplicate_count == 1
 
@@ -1081,7 +1096,7 @@ def test_browser_plan_on_http_only_crawler_skips_url_scoped(tmp_path: Path) -> N
         for err in result.errors
     )
     # HTTP-URL обработан, без ошибки для него.
-    assert [d.url for d in build.docs] == [URL_P1_A]
+    assert build.doc_count == 1
     assert not any(URL_P1_A in err for err in result.errors)
 
 
@@ -1632,7 +1647,7 @@ def test_resume_from_retained_raw_skips_refetch(tmp_path: Path) -> None:
         build = _build_of(second)
         assert second.errors == []
         assert build.chunk_count == 1
-        assert build.docs[0].content_hash == content_hash(b"retained bytes")
+        assert _docs(store)[0].content_hash == content_hash(b"retained bytes")
         # Повторный resume идемпотентен: один и тот же id сборки, статус FETCHED.
         assert build.index_build_id == _build_of(first).index_build_id
         assert next(iter(_items(store))).status is CrawlItemStatus.FETCHED
@@ -2015,13 +2030,18 @@ def test_stale_raw_mismatch_triggers_refetch(tmp_path: Path) -> None:
         Path(row.raw_path).write_bytes(b"corrupted-on-disk")
 
         crawler = _Crawler({URL_P1_A: b"refetched"})
-        second = _build(
+        _build(
             tmp_path, pages={}, urls={"p1": [URL_P1_A]},
             crawler=crawler, store=store, run_id=RUN_ID,
         )
         assert len(crawler.calls) == 1  # расхождение хеша → снова фетч
-        doc = _build_of(second).docs[0]
-        assert doc.content_hash == content_hash(b"refetched")
+        # Свежий фетч дал документ с новым содержимым. Строк с этим URL в
+        # ``corpus_docs`` может быть больше одной (doc_id производен от содержимого:
+        # прежняя версия остаётся retention-провенансом), поэтому ищем по хешу.
+        assert any(
+            doc.url == URL_P1_A and doc.content_hash == content_hash(b"refetched")
+            for doc in _docs(store)
+        )
     finally:
         store.close()
 
@@ -2155,11 +2175,11 @@ def test_lang_preserved_across_resume(tmp_path: Path) -> None:
         row = next(iter(_items(store)))
         assert row.lang == "en"  # из _Crawler (RawPage.lang)
 
-        second = _build(
+        _build(
             tmp_path, pages={}, urls={"p1": [URL_P1_A]},
             crawler=_BombCrawler({}), store=store, run_id=RUN_ID,
         )
-        assert _build_of(second).docs[0].lang == "en"
+        assert _docs(store)[0].lang == "en"
     finally:
         store.close()
 
@@ -2639,7 +2659,7 @@ def test_executor_ingests_marks_and_finalizes(tmp_path: Path) -> None:
         assert result.errors == []
         build = _build_of(result)
         assert build.chunk_count == 1
-        assert build.docs[0].content_hash == content_hash(b"executor page")
+        assert _docs(store)[0].content_hash == content_hash(b"executor page")
         item = next(iter(_items(store)))
         assert item.status is CrawlItemStatus.FETCHED
         assert item.engine == "scrapy"  # S1: применённый движок из результата шва
@@ -2952,7 +2972,7 @@ def test_executor_ignores_local_crawler_even_if_available(tmp_path: Path) -> Non
     _make_run(store)
     local = _Crawler({URL_P1_A: b"local should not be used"})
     try:
-        result = _build(
+        _build(
             tmp_path,
             pages={},
             urls={"p1": [URL_P1_A]},
@@ -2965,7 +2985,7 @@ def test_executor_ignores_local_crawler_even_if_available(tmp_path: Path) -> Non
             run_id=RUN_ID,
         )
         assert local.calls == []
-        assert _build_of(result).docs[0].content_hash == content_hash(b"from executor")
+        assert _docs(store)[0].content_hash == content_hash(b"from executor")
     finally:
         store.close()
 
@@ -3160,8 +3180,8 @@ def test_directory_feed_fanout_fetches_retains_ingests(tmp_path: Path) -> None:
         build = _build_of(result)
         # Индексируются только две записи (каталог не даёт документа).
         assert build.chunk_count == 2
-        assert len(build.docs) == 2
-        assert {d.product_id for d in build.docs} == {"p1"}
+        assert build.doc_count == 2
+        assert {d.product_id for d in _docs(store)} == {"p1"}
 
         items = {i.url: i for i in _items(store)}
         feed_item = items[FEED_URL]
@@ -3196,8 +3216,8 @@ def test_directory_feed_url_not_retained(tmp_path: Path) -> None:
             run_id=RUN_ID,
         )
         build = _build_of(result)
-        assert len(build.docs) == 1
-        assert build.docs[0].content_hash == content_hash(b"only entry")
+        assert build.doc_count == 1
+        assert _docs(store)[0].content_hash == content_hash(b"only entry")
         # Ни один ретейнед-файл не соответствует байтам каталога.
         assert not (tmp_path / "p1" / f"{content_hash(b'feed bytes')}.bin").exists()
     finally:
@@ -3471,7 +3491,7 @@ def test_directory_entry_equal_to_catalog_url_skipped(tmp_path: Path) -> None:
         assert feed_item.status is CrawlItemStatus.FETCHED
         assert not feed_item.raw_path  # каталог не ретейнится
         assert items[ENTRY_1].status is CrawlItemStatus.FETCHED
-        assert len(_build_of(result).docs) == 1
+        assert _build_of(result).doc_count == 1
     finally:
         store.close()
 
@@ -3511,8 +3531,8 @@ def test_real_poller_catalog_bytes_not_retained_entry_retained(tmp_path: Path) -
         assert entry_bin.exists() and entry_bin.read_bytes() == entry_bytes
         assert items[entry_url].raw_path and Path(items[entry_url].raw_path).is_file()
         build = _build_of(result)
-        assert len(build.docs) == 1
-        assert build.docs[0].content_hash == content_hash(entry_bytes)
+        assert build.doc_count == 1
+        assert _docs(store)[0].content_hash == content_hash(entry_bytes)
     finally:
         store.close()
 
@@ -3595,7 +3615,7 @@ def test_executor_directory_feed_entries_each_own_root(tmp_path: Path) -> None:
         # Записи добыты исполнителем и сохранены (I19), каталог — нет.
         assert (tmp_path / "p1" / f"{content_hash(b'one')}.bin").exists()
         assert (tmp_path / "p1" / f"{content_hash(b'two')}.bin").exists()
-        assert len(_build_of(result).docs) == 3
+        assert _build_of(result).doc_count == 3
         assert [c[0] for c in poller.calls] == [EXEC_FEED_URL]
     finally:
         store.close()
@@ -3896,7 +3916,9 @@ def test_executor_root_order_matches_local(tmp_path: Path) -> None:
             [zzz],
         ]
         # Порядок документов = порядок ingest: top, e1, e2, zzz (записи на месте каталога).
-        order = [d.content_hash for d in _build_of(result).docs]
+        order = [row["content_hash"] for row in store.conn.execute(
+            "SELECT content_hash FROM corpus_chunks ORDER BY rowid"
+        )]
         assert order == [
             content_hash(b"top"),
             content_hash(b"one"),
@@ -3962,7 +3984,7 @@ def test_sitemap_locs_become_depth0_seeds_and_sitemap_not_retained(tmp_path: Pat
         assert [u for u, _ in crawler.calls] == [SITEMAP_ROOT, SITEMAP_LOC_1, SITEMAP_LOC_2]
         build = _build_of(result)
         assert build.chunk_count == 3
-        assert {d.url for d in build.docs} == {SITEMAP_ROOT, SITEMAP_LOC_1, SITEMAP_LOC_2}
+        assert {d.url for d in _docs(store)} == {SITEMAP_ROOT, SITEMAP_LOC_1, SITEMAP_LOC_2}
 
         items = {i.url: i for i in _items(store)}
         sitemap_item = items[SITEMAP_URL]
@@ -4000,7 +4022,7 @@ def test_sitemap_gzip_via_local_poller(tmp_path: Path) -> None:
             run_id=RUN_ID,
         )
         assert result.errors == []
-        assert {d.url for d in _build_of(result).docs} == {SITEMAP_ROOT, SITEMAP_LOC_1}
+        assert {d.url for d in _docs(store)} == {SITEMAP_ROOT, SITEMAP_LOC_1}
     finally:
         store.close()
 
@@ -4034,7 +4056,7 @@ def test_sitemap_index_one_level_via_local_poller(tmp_path: Path) -> None:
         items = {i.url: i for i in _items(store)}
         assert items[SITEMAP_URL].status is CrawlItemStatus.FAILED
         # seed оператора всё равно добыт (аугментация, не замена).
-        assert SITEMAP_ROOT in {d.url for d in _build_of(result).docs}
+        assert SITEMAP_ROOT in {d.url for d in _docs(store)}
         session = store.get_crawl_session(SESSION_ID)
         assert session is not None and session.status is CrawlSessionStatus.PARTIAL
     finally:
@@ -4065,7 +4087,7 @@ def test_sitemap_poller_entry_cap_enforced(tmp_path: Path) -> None:
             run_id=RUN_ID,
         )
         assert result.errors == []
-        assert {d.url for d in _build_of(result).docs} == {SITEMAP_ROOT, SITEMAP_LOC_1}
+        assert {d.url for d in _docs(store)} == {SITEMAP_ROOT, SITEMAP_LOC_1}
     finally:
         store.close()
 
@@ -4090,7 +4112,7 @@ def test_sitemap_loc_ssrf_rejected(tmp_path: Path) -> None:
         )
         assert any("sitemap <loc>" in e for e in result.errors)
         assert unsafe not in [u for u, _ in crawler.calls]
-        assert {d.url for d in _build_of(result).docs} == {SITEMAP_ROOT, SITEMAP_LOC_1}
+        assert {d.url for d in _docs(store)} == {SITEMAP_ROOT, SITEMAP_LOC_1}
     finally:
         store.close()
 
@@ -4115,7 +4137,7 @@ def test_sitemap_loc_obeys_blacklist(tmp_path: Path) -> None:
         )
         assert any("блэклист" in e for e in result.errors)
         assert pdf not in [u for u, _ in crawler.calls]
-        assert {d.url for d in _build_of(result).docs} == {SITEMAP_ROOT, SITEMAP_LOC_1}
+        assert {d.url for d in _docs(store)} == {SITEMAP_ROOT, SITEMAP_LOC_1}
     finally:
         store.close()
 
@@ -4140,7 +4162,7 @@ def test_sitemap_seeds_obey_max_documents(tmp_path: Path) -> None:
             run_id=RUN_ID,
         )
         build = _build_of(result)
-        assert {d.url for d in build.docs} == {SITEMAP_ROOT}
+        assert {d.url for d in _docs(store)} == {SITEMAP_ROOT}
         assert build.truncated is True
         assert any(rec["truncated_reason"] == "max_documents" for rec in build.truncation)
     finally:
@@ -4208,7 +4230,7 @@ def test_sitemap_multi_root_resume_budget_counts_shared_url_once(tmp_path: Path)
         assert records[PATH_SCOPE_ROOT]["pages_fetched"] == 1
         assert records[PATH_SCOPE_ROOT]["truncated"] is False
         assert [u for u, _ in crawler.calls] == [PATH_SCOPE_ROOT]
-        assert PATH_SCOPE_ROOT in {d.url for d in _build_of(result).docs}
+        assert PATH_SCOPE_ROOT in {d.url for d in _docs(store)}
     finally:
         store.close()
 
@@ -4231,7 +4253,7 @@ def test_sitemap_absent_behaviour_unchanged(tmp_path: Path) -> None:
         )
         assert result.errors == []
         assert poller.calls == []
-        assert {d.url for d in _build_of(result).docs} == {SITEMAP_ROOT}
+        assert {d.url for d in _docs(store)} == {SITEMAP_ROOT}
     finally:
         store.close()
 
@@ -4254,7 +4276,7 @@ def test_sitemap_without_poller_records_error(tmp_path: Path) -> None:
         assert any("поллер sitemap не сконфигурирован" in e for e in result.errors)
         items = {i.url: i for i in _items(store)}
         assert items[SITEMAP_URL].status is CrawlItemStatus.FAILED
-        assert SITEMAP_ROOT in {d.url for d in _build_of(result).docs}
+        assert SITEMAP_ROOT in {d.url for d in _docs(store)}
     finally:
         store.close()
 
@@ -4292,7 +4314,7 @@ def test_executor_sitemap_locs_share_root_frontier(tmp_path: Path) -> None:
         assert [[w.url for w in s] for s in executor.submits] == [
             [SITEMAP_ROOT, SITEMAP_LOC_1]
         ]
-        assert {d.url for d in _build_of(result).docs} == {SITEMAP_ROOT, SITEMAP_LOC_1}
+        assert {d.url for d in _docs(store)} == {SITEMAP_ROOT, SITEMAP_LOC_1}
     finally:
         store.close()
 
@@ -4348,7 +4370,7 @@ def test_split_bfs_rounds_until_frontier_drained(tmp_path: Path) -> None:
             [SPLIT_D1A, SPLIT_D1B],
             [SPLIT_D2A, SPLIT_D2B],
         ]
-        assert {d.url for d in _build_of(result).docs} == {
+        assert {d.url for d in _docs(store)} == {
             SPLIT_ROOT,
             SPLIT_D1A,
             SPLIT_D1B,
@@ -4388,7 +4410,7 @@ def test_split_round_respects_max_documents_across_rounds(tmp_path: Path) -> Non
             [SPLIT_D1A],
         ]
         build = _build_of(result)
-        assert len(build.docs) == 2
+        assert build.doc_count == 2
         assert build.truncated is True
         assert any(
             rec["truncated_reason"] == "max_documents" for rec in build.truncation
@@ -4450,7 +4472,7 @@ def test_split_resume_charges_budget_once(tmp_path: Path) -> None:
             urls={"p1": [SPLIT_ROOT]},
             domain_profiles=profile,
         )
-        assert len(_build_of(first).docs) == 2  # бюджет исчерпан (root + /a)
+        assert _build_of(first).doc_count == 2  # бюджет исчерпан (root + /a)
         first_items = {i.url: i for i in _items(store)}
         assert first_items[SPLIT_ROOT].raw_path
         assert first_items[SPLIT_D1A].raw_path
@@ -4497,7 +4519,7 @@ def test_split_blacklist_and_scope_enforced(tmp_path: Path) -> None:
             [SPLIT_ROOT],
             [SPLIT_D1A],
         ]
-        assert {d.url for d in _build_of(result).docs} == {SPLIT_ROOT, SPLIT_D1A}
+        assert {d.url for d in _docs(store)} == {SPLIT_ROOT, SPLIT_D1A}
         record = _build_of(result).truncation[0]
         assert SPLIT_BLOCKED in record["skipped_blacklisted"]
     finally:
@@ -4528,7 +4550,7 @@ def test_split_redirect_scope_uses_final_url(tmp_path: Path) -> None:
             [SPLIT_REDIR],
         ]
         # Финальный URL ушёл из scope → страница не ретейнится и ссылки не расширяются.
-        assert {d.url for d in _build_of(result).docs} == {SPLIT_ROOT}
+        assert {d.url for d in _docs(store)} == {SPLIT_ROOT}
         item = {i.url: i for i in _items(store)}[SPLIT_REDIR]
         assert item.status is CrawlItemStatus.FAILED
         assert item.error_kind == "redirect_out_of_scope"
@@ -4610,7 +4632,7 @@ def test_split_backpressure_bisects_and_singleton_fails_honestly(
         )
         assert any("бисекция" in e for e in result.errors)
         # Обе половины добыты: волна из двух отвергнута, затем принята по частям.
-        assert {d.url for d in _build_of(result).docs} == {
+        assert {d.url for d in _docs(store)} == {
             SPLIT_ROOT,
             SPLIT_D1A,
             SPLIT_D1B,
@@ -4677,7 +4699,7 @@ def test_split_missing_result_marks_failed(tmp_path: Path) -> None:
         assert items[SPLIT_D1B].status is CrawlItemStatus.FAILED
         assert items[SPLIT_D1B].error_kind == FailureKind.SOURCE_UNAVAILABLE.value
         assert any("результат не получен" in e for e in result.errors)
-        assert {d.url for d in _build_of(result).docs} == {SPLIT_ROOT, SPLIT_D1A}
+        assert {d.url for d in _docs(store)} == {SPLIT_ROOT, SPLIT_D1A}
     finally:
         store.close()
 
@@ -6916,16 +6938,24 @@ def test_undeclared_subdomain_rejected_and_counted_in_root_provenance(
         "https://corp.test/own": b"own page",
         edu: b"training material",
     }
-    result = _build(
-        tmp_path,
-        pages=pages,
-        urls={"p1": [root]},
-        crawler=_Crawler(pages),
-        domain_profiles={"corp.test": DomainProfile(max_depth=2)},
-    )
+    store = SqliteStore(":memory:")
+    _make_run(store)
+    try:
+        result = _build(
+            tmp_path,
+            pages=pages,
+            urls={"p1": [root]},
+            crawler=_Crawler(pages),
+            domain_profiles={"corp.test": DomainProfile(max_depth=2)},
+            store=store,
+            run_id=RUN_ID,
+        )
+        docs = _docs(store)
+    finally:
+        store.close()
     assert result.errors == []
     build = _build_of(result)
-    assert {doc.url for doc in build.docs} == {root, "https://corp.test/own"}
+    assert {doc.url for doc in docs} == {root, "https://corp.test/own"}
     record = build.truncation[0]
     assert record["root"] == root
     assert record["pages_fetched"] == 2
@@ -6957,16 +6987,23 @@ def test_declared_subdomain_with_own_root_is_not_drained_under_parent(
         lesson: b"training material",
     }
     crawler = _Crawler(pages)
-    result = _build(
-        tmp_path,
-        pages=pages,
-        urls={"p1": [parent, edu]},
-        crawler=crawler,
-        domain_profiles={
-            "corp.test": DomainProfile(max_depth=2),
-            "edu.corp.test": DomainProfile(max_depth=2),
-        },
-    )
+    store = SqliteStore(":memory:")
+    _make_run(store)
+    try:
+        result = _build(
+            tmp_path,
+            pages=pages,
+            urls={"p1": [parent, edu]},
+            crawler=crawler,
+            domain_profiles={
+                "corp.test": DomainProfile(max_depth=2),
+                "edu.corp.test": DomainProfile(max_depth=2),
+            },
+            store=store,
+            run_id=RUN_ID,
+        )
+    finally:
+        store.close()
     assert result.errors == []
     build = _build_of(result)
     records = {rec["root"]: rec for rec in build.truncation}
@@ -6988,19 +7025,27 @@ def test_declared_subdomain_without_own_root_is_crawled_and_counted_as_foreign(
         root: b'<a href="https://docs.corp.test/guide">g</a>',
         guide: b"guide",
     }
-    result = _build(
-        tmp_path,
-        pages=pages,
-        urls={"p1": [root]},
-        crawler=_Crawler(pages),
-        domain_profiles={
-            "corp.test": DomainProfile(max_depth=2),
-            "docs.corp.test": DomainProfile(max_depth=2),
-        },
-    )
+    store = SqliteStore(":memory:")
+    _make_run(store)
+    try:
+        result = _build(
+            tmp_path,
+            pages=pages,
+            urls={"p1": [root]},
+            crawler=_Crawler(pages),
+            domain_profiles={
+                "corp.test": DomainProfile(max_depth=2),
+                "docs.corp.test": DomainProfile(max_depth=2),
+            },
+            store=store,
+            run_id=RUN_ID,
+        )
+        docs = _docs(store)
+    finally:
+        store.close()
     assert result.errors == []
     build = _build_of(result)
-    assert {doc.url for doc in build.docs} == {root, guide}
+    assert {doc.url for doc in docs} == {root, guide}
     record = build.truncation[0]
     assert record["accepted_foreign_hosts"] == {"docs.corp.test": 1}
     assert "out_of_scope_subdomains" not in record
@@ -7125,8 +7170,7 @@ def test_serp_round_adds_documents_to_the_declared_root(tmp_path: Path) -> None:
         )
         assert result.errors == []
         # Документ добыт обычным путём корпуса (не подсунут как evidence).
-        build = _build_of(result)
-        assert found in {doc.url for doc in build.docs}
+        assert found in {doc.url for doc in _docs(store)}
         assert found in {url for url, _ in crawler.calls}
         # Корень остался один: находка — seed, а не новый корень.
         start = _event(result, "product_start", "p1")

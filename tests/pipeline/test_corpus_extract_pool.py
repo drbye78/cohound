@@ -339,9 +339,17 @@ def _build_of(result: Any) -> IndexBuild:
     return builds[0]
 
 
-def _snapshot(result: Any, store: SqliteStore | None) -> dict[str, Any]:
+def _docs(store: SqliteStore, product_id: str | None = None) -> list[Any]:
+    """Документы корпуса **из стора** (``IndexBuild`` их больше не несёт — Д-2/A4)."""
+    docs = list(store.iter_corpus_docs(RUN_ID))
+    if product_id is not None:
+        docs = [doc for doc in docs if doc.product_id == product_id]
+    return docs
+
+
+def _snapshot(result: Any, store: SqliteStore) -> dict[str, Any]:
     build = _build_of(result)
-    docs = sorted((d.product_id, d.url, d.content_hash) for d in build.docs)
+    docs = sorted((d.product_id, d.url, d.content_hash) for d in _docs(store))
     entries = sorted(
         (e.product_id, e.content_digest, e.stats_json) for e in build.entries
     )
@@ -391,37 +399,53 @@ BFS1 = CrawlRunConfig(max_depth=1)
 def test_extract_workers_default_is_byte_identical(tmp_path: Path) -> None:
     pages = _site_dup()
 
-    baseline = _build(tmp_path / "base", pages=pages, crawl_defaults=BFS1)
+    store_base = SqliteStore(":memory:")
+    store_default = SqliteStore(":memory:")
+    store_one = SqliteStore(":memory:")
+    try:
+        for store in (store_base, store_default, store_one):
+            _make_run(store)
+        baseline = _build(tmp_path / "base", pages=pages, crawl_defaults=BFS1,
+                          store=store_base, run_id=RUN_ID)
 
-    created: list[_FakePool] = []
-    factory = _recording_factory(created)
-    pool = ExtractionPool(pool_factory=factory, worker=_reconstruct_worker)
+        created: list[_FakePool] = []
+        factory = _recording_factory(created)
+        pool = ExtractionPool(pool_factory=factory, worker=_reconstruct_worker)
 
-    default = _build(
-        tmp_path / "default",
-        pages=pages,
-        crawl_defaults=BFS1,
-        extraction_pool=pool,  # ось не задана (None) ⇒ пул не создаётся
-    )
-    one = _build(
-        tmp_path / "one",
-        pages=pages,
-        crawl_defaults=CrawlRunConfig(max_depth=1, extract_workers=1),
-        extraction_pool=pool,
-    )
+        default = _build(
+            tmp_path / "default",
+            pages=pages,
+            crawl_defaults=BFS1,
+            extraction_pool=pool,  # ось не задана (None) ⇒ пул не создаётся
+            store=store_default,
+            run_id=RUN_ID,
+        )
+        one = _build(
+            tmp_path / "one",
+            pages=pages,
+            crawl_defaults=CrawlRunConfig(max_depth=1, extract_workers=1),
+            extraction_pool=pool,
+            store=store_one,
+            run_id=RUN_ID,
+        )
 
-    # Самый важный guardrail: ось None/1 ⇒ фабрика пула НЕ вызвана.
-    assert created == []
-    b_base, b_default, b_one = (
-        _build_of(baseline),
-        _build_of(default),
-        _build_of(one),
-    )
-    assert b_base.index_build_id == b_default.index_build_id == b_one.index_build_id
-    assert sorted((d.doc_id, d.url) for d in b_base.docs) == sorted(
-        (d.doc_id, d.url) for d in b_default.docs
-    ) == sorted((d.doc_id, d.url) for d in b_one.docs)
-    assert baseline.errors == default.errors == one.errors == []
+        # Самый важный guardrail: ось None/1 ⇒ фабрика пула НЕ вызвана.
+        assert created == []
+        b_base, b_default, b_one = (
+            _build_of(baseline),
+            _build_of(default),
+            _build_of(one),
+        )
+        assert b_base.index_build_id == b_default.index_build_id == b_one.index_build_id
+        # Документы читаются из стора: результат фазы их не несёт (Д-2/A4).
+        assert _docs(store_base)
+        assert [(d.doc_id, d.url) for d in _docs(store_base)] == [
+            (d.doc_id, d.url) for d in _docs(store_default)
+        ] == [(d.doc_id, d.url) for d in _docs(store_one)]
+        assert baseline.errors == default.errors == one.errors == []
+    finally:
+        for store in (store_base, store_default, store_one):
+            store.close()
 
 
 # --------------------------------------------------------------------------- #
@@ -589,7 +613,7 @@ def test_extract_pool_parity_sequential_vs_pool(tmp_path: Path) -> None:
 
         # Победитель дедупа — первый по FIFO (``a``), одинаков в обоих прогонах.
         dup_hash = content_hash(pages["https://docs.test/a"])
-        winners = [d for d in _build_of(pooled).docs if d.content_hash == dup_hash]
+        winners = [d for d in _docs(store_b) if d.content_hash == dup_hash]
         assert len(winners) == 1
         assert winners[0].url == "https://docs.test/a"
         assert _session_items(store_b)[("p1", "https://docs.test/a")].status is (
@@ -652,7 +676,7 @@ def test_extract_capacity_honest_with_window(tmp_path: Path) -> None:
         )
         build = _build_of(result)
         # Ровно 2 свеже-добытых и ровно 2 задания экстракции (нет пере-удержания).
-        assert len(build.docs) == 2
+        assert build.doc_count == 2
         assert created[0].submitted_requests and len(created[0].submitted_requests) == 2
         assert build.truncated is True
         assert build.truncation[0]["truncated_reason"] == "max_documents"
@@ -686,7 +710,7 @@ def test_extract_worker_error_is_honest(tmp_path: Path) -> None:
             )
             build = _build_of(result)
             assert result.status == "ok"
-            assert build.docs == []
+            assert build.doc_count == 0
             item = _session_items(store)[("p1", ROOT)]
             assert item.status is CrawlItemStatus.FAILED
             assert item.error_kind == "parser_failed"
@@ -847,7 +871,7 @@ def test_extract_worker_crash_reaps_and_degrades(tmp_path: Path) -> None:
         assert all(items[("p1", u)].error_kind == "parser_failed" for u in failed)
         # Пул пересобран (bounded rebuild) и доводка продолжилась.
         assert len(created) >= 2
-        assert build.docs, "после пересборки пула экстракция обязана продолжиться"
+        assert build.doc_count, "после пересборки пула экстракция обязана продолжиться"
         assert store.get_crawl_session(SESSION_ID).status.value == "partial"
         assert any("extraction worker died" in e for e in result.errors)
     finally:
@@ -915,7 +939,7 @@ def test_extract_timeout_keeps_other_documents_of_root(tmp_path: Path) -> None:
             ),
             worker=_reconstruct_worker,
         )
-        result = _build(
+        _build(
             tmp_path,
             pages=pages,
             store=store,
@@ -924,14 +948,13 @@ def test_extract_timeout_keeps_other_documents_of_root(tmp_path: Path) -> None:
             extraction_pool=pool,
             extract_task_timeout_s=0.01,
         )
-        build = _build_of(result)
         items = _session_items(store)
         # Зависший артефакт — единственный терминальный отказ класса таймаута.
         assert items[("p1", "https://docs.test/slow")].error_kind == "extraction_timeout"
         failed = [i for i in items.values() if i.status is CrawlItemStatus.FAILED]
         assert [i.url for i in failed] == ["https://docs.test/slow"]
         # Остальные документы дошли до чанков (включая корень и две ссылки).
-        urls = {doc.url for doc in build.docs}
+        urls = {doc.url for doc in _docs(store)}
         assert "https://docs.test/slow" not in urls
         assert {
             ROOT,
@@ -1057,9 +1080,9 @@ def test_extract_pool_missing_factory_falls_back_inline(tmp_path: Path) -> None:
     assert any("extract_workers" in e and "inline" in e for e in result.errors)
     # Inline-экстракция: вывод идентичен последовательному эталону.
     assert _build_of(result).index_build_id == _build_of(baseline).index_build_id
-    assert sorted((d.doc_id, d.url) for d in _build_of(result).docs) == sorted(
-        (d.doc_id, d.url) for d in _build_of(baseline).docs
-    )
+    # Документы сравниваются счётом: результат фазы их не несёт (Д-2/A4), а сторов у
+    # этих прогонов нет. Идентичность содержимого уже запинена ``index_build_id``.
+    assert _build_of(result).doc_count == _build_of(baseline).doc_count
 
 
 # --------------------------------------------------------------------------- #
@@ -1408,7 +1431,9 @@ def test_extract_pool_is_phase_scoped_for_two_roots(tmp_path: Path) -> None:
     pool = ExtractionPool(
         pool_factory=_recording_factory(created), worker=_reconstruct_worker
     )
-    result = _build(
+    store = SqliteStore(":memory:")
+    _make_run(store)
+    _build(
         tmp_path,
         pages={
             root_a: b"<html>root-a</html>",
@@ -1417,6 +1442,8 @@ def test_extract_pool_is_phase_scoped_for_two_roots(tmp_path: Path) -> None:
         urls={"p1": [root_a, root_b]},
         crawl_defaults=CrawlRunConfig(extract_workers=2),
         extraction_pool=pool,
+        store=store,
+        run_id=RUN_ID,
     )
     # Один пул на прогон (не на корень): фабрика вызвана ровно один раз, и оба корня
     # действительно сдали в него задания — воркеры/веса переиспользованы.
@@ -1426,7 +1453,8 @@ def test_extract_pool_is_phase_scoped_for_two_roots(tmp_path: Path) -> None:
     assert created[0].shutdown_calls == 1
     assert created[0].shutdown_wait is True
     assert created[0].shutdown_cancel_futures is True
-    assert {doc.url for doc in _build_of(result).docs} == {root_a, root_b}
+    assert {doc.url for doc in _docs(store)} == {root_a, root_b}
+    store.close()
 
 
 def test_extract_pool_shutdown_once_for_two_products(tmp_path: Path) -> None:
@@ -1435,8 +1463,10 @@ def test_extract_pool_shutdown_once_for_two_products(tmp_path: Path) -> None:
     pool = ExtractionPool(
         pool_factory=_recording_factory(created), worker=_reconstruct_worker
     )
+    store = SqliteStore(":memory:")
+    _make_run(store)
     plan = dataclasses.replace(_plan(), products=["p1", "p2"])
-    result = build_corpus(
+    build_corpus(
         plan,
         _Crawler(
             {
@@ -1446,7 +1476,7 @@ def test_extract_pool_shutdown_once_for_two_products(tmp_path: Path) -> None:
         ),
         _Extractor(),
         _Chunker(),
-        None,
+        store,
         urls={
             "p1": ["https://docs.test/p1"],
             "p2": ["https://docs.test/p2"],
@@ -1454,10 +1484,12 @@ def test_extract_pool_shutdown_once_for_two_products(tmp_path: Path) -> None:
         raw_root=tmp_path,
         crawl_defaults=CrawlRunConfig(extract_workers=2),
         extraction_pool=pool,
+        run_id=RUN_ID,
     )
     assert len(created) == 1
     assert created[0].shutdown_calls == 1
-    assert {doc.product_id for doc in _build_of(result).docs} == {"p1", "p2"}
+    assert {doc.product_id for doc in _docs(store)} == {"p1", "p2"}
+    store.close()
 
 
 # --------------------------------------------------------------------------- #
@@ -1536,11 +1568,13 @@ def test_extract_pool_does_not_block_next_root_fetch(tmp_path: Path) -> None:
     root_a, root_b = "https://docs.test/a", "https://docs.test/b"
     gate = threading.Event()
     log: list[tuple[str, str]] = []
+    store = SqliteStore(":memory:")
+    _make_run(store)
     pool = ExtractionPool(
         pool_factory=lambda n, level=None, **_: _GatePool(gate, log),
         worker=_reconstruct_worker,
     )
-    result = build_corpus(
+    build_corpus(
         _plan(),
         _SignallingCrawler(
             {root_a: b"<html>root-a</html>", root_b: b"<html>root-b</html>"},
@@ -1550,18 +1584,20 @@ def test_extract_pool_does_not_block_next_root_fetch(tmp_path: Path) -> None:
         ),
         _Extractor(),
         _Chunker(),
-        None,
+        store,
         urls={"p1": [root_a, root_b]},
         raw_root=tmp_path,
         crawl_defaults=CrawlRunConfig(extract_workers=2),
         extraction_pool=pool,
         extract_task_timeout_s=3.0,
+        run_id=RUN_ID,
     )
     assert ("fetch", root_b) in log and ("extract", root_a) in log
     # Фетч корня B — до завершения экстракции корня A (главное утверждение C1).
     assert log.index(("fetch", root_b)) < log.index(("extract", root_a))
     # Оба документа всё равно дошли до корпуса (хвост доведён, не потерян).
-    assert {doc.url for doc in _build_of(result).docs} == {root_a, root_b}
+    assert {doc.url for doc in _docs(store)} == {root_a, root_b}
+    store.close()
 
 
 # --------------------------------------------------------------------------- #
@@ -1581,12 +1617,17 @@ def test_parent_extract_cache_hit_skips_submit(tmp_path: Path) -> None:
     """C1/L4: готовый кэш-хит не сабмитится в пул и даёт тот же текст/сборку."""
     cache = ExtractionCache(tmp_path / "extract_cache")
     pages = {ROOT: b"<html>cached-doc</html>"}
+    store_first, store_second = SqliteStore(":memory:"), SqliteStore(":memory:")
+    _make_run(store_first)
+    _make_run(store_second)
     # Прогон 1: inline — наполняет кэш (ключ = хеш ретенированных байтов).
     first = _build(
         tmp_path / "first",
         pages=pages,
         crawl_defaults=CrawlRunConfig(extract_workers=1),
         extract_cache=cache,
+        store=store_first,
+        run_id=RUN_ID,
     )
     created: list[_FakePool] = []
     pool = ExtractionPool(
@@ -1598,17 +1639,24 @@ def test_parent_extract_cache_hit_skips_submit(tmp_path: Path) -> None:
         crawl_defaults=CrawlRunConfig(extract_workers=2),
         extraction_pool=pool,
         extract_cache=cache,
+        store=store_second,
+        run_id=RUN_ID,
     )
     # L4: хит распознан в родителе — ни одного submit и даже пул не создан
     # (слот воркера/инициализатор не оплачены).
     assert created == []
     first_build, second_build = _build_of(first), _build_of(second)
     assert second_build.index_build_id == first_build.index_build_id
-    assert [doc.content_hash for doc in second_build.docs] == [
-        doc.content_hash for doc in first_build.docs
+    # Текст тот же (кэш вернул ровно извлечённый ``ExtractedDoc``). Документы читаются из
+    # сторов прогонов: результат фазы их не несёт (Д-2/A4).
+    assert [doc.content_hash for doc in _docs(store_second)] == [
+        doc.content_hash for doc in _docs(store_first)
     ]
-    # Текст тот же (кэш вернул ровно извлечённый ``ExtractedDoc``).
-    assert [doc.url for doc in second_build.docs] == [doc.url for doc in first_build.docs]
+    assert [doc.url for doc in _docs(store_second)] == [
+        doc.url for doc in _docs(store_first)
+    ]
+    store_first.close()
+    store_second.close()
 
 
 # --------------------------------------------------------------------------- #
@@ -1853,9 +1901,9 @@ def test_corpus_phase_emits_resources_observation(tmp_path: Path) -> None:
     assert len(observations) == 1, "наблюдение — одно на фазу, не на документ"
     observation = observations[0]
     build = _build_of(result)
-    assert observation.documents == len(build.docs)
+    assert observation.documents == build.doc_count
     assert observation.chunks == build.chunk_count
-    assert observation.chunks_per_doc["html"]["count"] == len(build.docs)
+    assert observation.chunks_per_doc["html"]["count"] == build.doc_count
     assert observation.extract_workers == 2
     assert observation.scheduling_source == "declared"
     # Пик воркера прочитан из стока (число процесса-воркера, не выдумка).

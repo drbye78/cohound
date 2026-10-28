@@ -306,7 +306,9 @@ def _snapshot(result: Any, store: SqliteStore) -> dict[str, Any]:
 
     docs_by_product: dict[str, list[str]] = {}
     urls_by_product: dict[str, list[str]] = {}
-    for doc in build.docs:
+    # Документы читаются из стора: ``IndexBuild`` их больше не несёт (Д-2/A4), а носитель
+    # у них один — ``corpus_docs``. Порядок ``product_id, doc_id`` детерминирован.
+    for doc in store.iter_corpus_docs(RUN_ID):
         docs_by_product.setdefault(doc.product_id, []).append(doc.content_hash or "")
         urls_by_product.setdefault(doc.product_id, []).append(doc.url)
     for bucket in docs_by_product.values():
@@ -501,13 +503,13 @@ def test_parity_local_vs_split_full_bfs_site(tmp_path: Path) -> None:
     assert build.truncation[0]["truncated_reason"] == "max_documents"
     assert build.truncation[0]["pages_fetched"] == 5  # кэп действительно сработал
     assert P_BLOCKED in build.truncation[0]["skipped_blacklisted"]
-    assert P_A_CHILD in {d.url for d in build.docs}  # BFS до глубины 2
-    assert P_REDIR_FINAL in {d.url for d in build.docs}  # финальный URL применён
-    assert P_AWAY_FINAL not in {d.url for d in build.docs}
+    assert P_A_CHILD in local["urls_by_product"]["p1"]  # BFS до глубины 2
+    assert P_REDIR_FINAL in local["urls_by_product"]["p1"]  # финальный URL применён
+    assert P_AWAY_FINAL not in local["urls_by_product"]["p1"]
     away = local_items[("p1", P_AWAY)]
     assert away.error_kind == "redirect_out_of_scope"
-    assert P_AWAY not in {d.url for d in build.docs}
-    assert P_REDIR_CHILD not in {d.url for d in build.docs}  # глубина 3 недостижима
+    assert P_AWAY not in local["urls_by_product"]["p1"]
+    assert P_REDIR_CHILD not in local["urls_by_product"]["p1"]  # глубина 3 недостижима
     assert len(executor.submits) >= 3  # минимум: seed / depth-1 / depth-2
 
     # --- Паритет. ---
@@ -594,8 +596,8 @@ def test_parity_local_vs_split_directory_and_sitemap(tmp_path: Path) -> None:
     assert V2_FEED not in roots
     assert V2_LOC1 not in roots  # sitemap-seed НЕ отдельный корень — делит фронтир V2_SEED
     assert V2_A not in roots  # обнаруженный URL не становится корнем
-    assert V2_LOC1 in {d.url for d in _build_of(local_result).docs}
-    assert V2_LOC2 not in {d.url for d in _build_of(local_result).docs}  # кэп=2 съеден
+    assert V2_LOC1 in local["urls_by_product"]["p1"]
+    assert V2_LOC2 not in local["urls_by_product"]["p1"]  # кэп=2 съеден
     assert local_items[("p1", V2_FEED)].raw_path is None  # каталог не контент (I19)
     assert local_items[("p1", V2_SITEMAP)].raw_path is None  # sitemap не контент (I19)
     # Каждая запись каталога дренится своим корнем/раундом (раскладка §5).

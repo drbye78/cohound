@@ -67,7 +67,8 @@ id: ретривал-конфиг не меняет чанкинг/вектор�
 
 **Два прохода (один вызов, без ре-краула).** Pass A (ingest) по каждому продукту выполняет
 краул → retention (I19) → экстракцию → дедуп(``content_hash``) → чанкинг и копит
-``_ProductIngest`` в памяти; ``corpus_docs`` персистятся **инкрементально** — сразу при
+``_ProductIngest`` в памяти **только на время своего продукта**; ``corpus_docs`` персистятся
+**инкрементально** — сразу при
 коммите каждого документа (retention-провенанс не зависит от сборки), поэтому жёсткое
 убийство теряет максимум документ «в полёте», а не весь продукт; ``build_id`` чанков пока
 ``None``. Pass B (index) идёт **на границе каждого продукта**, сразу после его Pass A:
@@ -75,7 +76,11 @@ id: ретривал-конфиг не меняет чанкинг/вектор�
 продукт-скоупед, I17), ``build_id = pb`` проставляется чанкам, партиция либо
 переиспользуется (ноль эмбеддингов, 09 §8.5), либо собирается ``_embed_and_build``; при
 успехе **сразу** персистятся ``corpus_chunks`` («сначала диск, потом БД»). Иначе смерть на
-N-м продукте уничтожала бы посчитанную, но не персистентную работу предыдущих. Только
+N-м продукте уничтожала бы посчитанную, но не персистентную работу предыдущих. Там же, на
+границе продукта, ``_ProductIngest`` **освобождает** ``docs``/``chunks``: после персистенции
+единственный носитель продукта — БД, а в памяти остаётся сводка (``chunk_count``/
+``distinct_docs``), которой достаточно пост-циклу. Поэтому пик памяти фазы определяется
+**одним** продуктом, а не их суммой (Д-2). Только
 после **всех** продуктов (ибо он зависит от состава когорты) выводится ``composition_id``
 (``runs.index_build_id``), пишутся строки ``index_manifest`` (их PK включает композицию) и
 иммутабельная композиция ``_compositions/{cid}.json``. Никакого round/parent-чейнинга.
@@ -1454,7 +1459,10 @@ class IndexBuild:
 
     :param index_build_id: детерминированный идентификатор иммутабельной сборки (§B.1/§13).
     :param entries: по одной ``IndexManifestEntry`` на продукт-партицию (I17).
-    :param docs: уникальные ``CorpusDoc`` (retention + provenance экстракции, §3.2).
+    :param doc_count: сколько документов корпуса прошло фазу (сумма по продуктам). Сами
+        ``CorpusDoc`` **не** едут в результате: их носитель — ``corpus_docs``, и читаются
+        они оттуда (``store.iter_corpus_docs``). Поле-список здесь означало бы, что фаза
+        пересекает границу в памяти и держит все документы до конца прогона (Д-2/A4).
     :param chunk_count: суммарное число проиндексированных чанков.
     :param crawl_pending: L1a-наблюдаемость: элементы сеанса в очереди (``PENDING``/``RUNNING``).
     :param crawl_fetched: L1a: элементы ``FETCHED`` (сырые байты сохранены = «ready» для
@@ -1492,7 +1500,9 @@ class IndexBuild:
 
     index_build_id: str
     entries: list[IndexManifestEntry] = field(default_factory=list)
-    docs: list[CorpusDoc] = field(default_factory=list)
+    #: Счётчик документов фазы. Документы живут в ``corpus_docs``; возвращать их списком
+    #: значило бы удерживать весь корпус в памяти до конца прогона (Д-2/A4).
+    doc_count: int = 0
     chunk_count: int = 0
     crawl_pending: int = 0
     crawl_fetched: int = 0
@@ -1534,18 +1544,27 @@ class IndexBuild:
 class _ProductIngest:
     """Промежуточный результат Pass A (ingest) по одному продукту.
 
-    Копит ``docs`` (retention + провенанс экстракции) и ``chunks``. ``chunks``
-    персистятся на границе продукта (Pass B, «сначала диск, потом БД»); ``docs`` живут
-    до конца фазы, потому что ``PhaseResult`` их возвращает.
+    Копит ``docs`` (retention + провенанс экстракции) и ``chunks`` — но **только до
+    границы продукта**. Там чанки персистятся (Pass B, «сначала диск, потом БД»),
+    документы уже персистентны (``corpus_docs`` пишется инкрементально), и обе коллекции
+    освобождаются: пик памяти фазы должен определяться **одним** продуктом, а не их суммой.
+
+    После освобождения остаётся сводка — ``chunk_count``/``distinct_docs``. Финальному
+    циклу манифеста этого достаточно: ``partition_build_id``/``content_digest``/
+    ``extractor_version`` лежат в ``product_plans``, а сами данные — в БД.
 
     Граница честности: копление — **память, а не durability**. Персистенция на границе
-    продукта переживает падение, но чанки всех продуктов всё равно остаются в RAM до
-    конца фазы (их держит этот объект), поэтому пик памяти переносом записи не снижается.
+    продукта переживает падение; освобождение ниже её не заменяет, а снимает удержание.
     """
 
     product_id: str
     docs: list[CorpusDoc] = field(default_factory=list)
     chunks: list[CorpusChunk] = field(default_factory=list)
+    #: Сколько чанков продукта записано (нужно финальному циклу манифеста для ``stats_json``).
+    chunk_count: int = 0
+    #: Сколько **разных** документов эти чанки покрывают (``stats_json.docs``). Документ
+    #: без чанков сюда не входит — это и есть прежняя семантика поля.
+    distinct_docs: int = 0
 
 
 @dataclass
@@ -6701,7 +6720,9 @@ def _build_corpus(
     digests: dict[str, str] = {}
     #: Pass B-аккумуляторы (провенанс ``IndexBuild``); чанки и партиции фиксируются
     #: per-product, здесь — только то, что видит вызывающий по завершении фазы.
-    all_docs: list[CorpusDoc] = []
+    #: Документы **не** накапливаются: их носитель — ``corpus_docs`` (Д-2/A4), а фазе нужен
+    #: только счётчик прошедших документов.
+    doc_count = 0
     chunk_count = 0
     partitions_reused = 0
     all_physical_ok = True
@@ -8972,7 +8993,20 @@ def _build_corpus(
                     "изменение корпуса требует нового run_id/раунда"
                 )
         physically_ok[product_id] = physical_ok
-        all_docs.extend(ingest.docs)
+        # A3/Д-2: граница продукта — конец удержания продукта в памяти. Всё, что
+        # считается из ``ingest.docs``/``ingest.chunks`` (распределение чанков на документ,
+        # продукт-токен, ``pb``, версии чанков, признак ``partial``), уже посчитано выше,
+        # а чанки записаны (или отказ виден в ``errors``). Пост-циклу нужна сводка —
+        # документы и чанки дальше существуют только в БД. ``product_chunks`` отсоединяется
+        # от объекта, а затем и локальная ссылка снимается: иначе список чанков прожил бы
+        # до следующей итерации, то есть ровно тот пик, который снимается.
+        doc_count += len(ingest.docs)
+        ingest.chunk_count = len(product_chunks)
+        ingest.distinct_docs = len(product_chunk_counts)
+        ingest.docs = []
+        ingest.chunks = []
+        del product_chunks
+        del product_chunk_counts
 
         # Ф0/O3: покрытие продукта пишется на его границе, а не только в конце фазы.
         # Элементы сеанса продукта **финальны** (продукт-цикл строго последователен),
@@ -9107,10 +9141,9 @@ def _build_corpus(
     #: Записи, чьи партиции физически зафиксированы: только они идут в реестр прогона.
     manifest_entries: list[IndexManifestEntry] = []
     for ingest in ingests:
-        if not ingest.chunks:
+        if not ingest.chunk_count:
             continue
         product_id = ingest.product_id
-        product_chunks = ingest.chunks
         plan = product_plans[product_id]
         partition_build_id = plan["partition_build_id"]
         product_token = plan["content_digest"]
@@ -9137,8 +9170,10 @@ def _build_corpus(
             created_at=snapshot,
             stats_json=json.dumps(
                 {
-                    "chunks": len(product_chunks),
-                    "docs": len({c.doc_id for c in product_chunks}),
+                    # Сводка продукта, снятая на его границе (A3): сами чанки к этому
+                    # моменту давно в БД, и в памяти их нет.
+                    "chunks": ingest.chunk_count,
+                    "docs": ingest.distinct_docs,
                 },
                 ensure_ascii=False,
                 sort_keys=True,
@@ -9261,7 +9296,7 @@ def _build_corpus(
     build = IndexBuild(
         index_build_id=index_build_id,
         entries=entries,
-        docs=all_docs,
+        doc_count=doc_count,
         chunk_count=chunk_count,
         crawl_pending=crawl_pending,
         crawl_fetched=crawl_fetched,

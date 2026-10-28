@@ -205,7 +205,7 @@ def test_binary_bin_is_terminal_without_retention_or_extraction(tmp_path: Path) 
         assert item.raw_path is None
         assert extractor.calls == 0
         assert list((tmp_path / "p1").glob("*.bin")) == []
-        assert _build_of(result).docs == []
+        assert _build_of(result).doc_count == 0
         assert any("unsupported_binary" in e for e in result.errors)
     finally:
         store.close()
@@ -219,7 +219,7 @@ def test_pdf_magic_passes_without_suffix(tmp_path: Path) -> None:
         extractor=extractor,
     )
     assert extractor.calls == 1
-    assert _build_of(result).docs
+    assert _build_of(result).doc_count
 
 
 def test_ooxml_docx_passes(tmp_path: Path) -> None:
@@ -231,7 +231,7 @@ def test_ooxml_docx_passes(tmp_path: Path) -> None:
         root="https://docs.test/file.docx",
     )
     assert extractor.calls == 1
-    assert _build_of(result).docs
+    assert _build_of(result).doc_count
 
 
 def test_utf8_html_passes(tmp_path: Path) -> None:
@@ -242,7 +242,7 @@ def test_utf8_html_passes(tmp_path: Path) -> None:
         extractor=extractor,
     )
     assert extractor.calls == 1
-    assert _build_of(result).docs
+    assert _build_of(result).doc_count
 
 
 def test_text_plain_with_nul_is_binary(tmp_path: Path) -> None:

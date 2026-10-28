@@ -416,7 +416,7 @@ def test_off_skips_url_suffix_document_prefetch(tmp_path: Path) -> None:
     build = _build_of(result)
 
     assert crawler.calls == []  # pre-fetch: документ не фетчится
-    assert build.docs == []  # не индексируется
+    assert build.doc_count == 0  # не индексируется
     assert build.truncation[0]["pages_fetched"] == 0  # не в max_documents
     skips = build.document_skips
     assert [s["reason"] for s in skips] == ["url_suffix"]
@@ -451,7 +451,7 @@ def test_off_skips_content_type_document_postfetch(tmp_path: Path) -> None:
         assert crawler.calls == [DOC_SUFFIXLESS_URL]
         assert build.truncation[0]["pages_fetched"] == 1
         assert [s["reason"] for s in build.document_skips] == ["content_type"]
-        assert build.docs == []  # docling не зван → документа в корпусе нет
+        assert build.doc_count == 0  # docling не зван → документа в корпусе нет
 
         # Элемент сеанса — FETCHED (правдиво: байты есть), НЕ FAILED (skip ≠ сбой).
         items = {i.url: i for i in store.iter_crawl_session_items(SESSION_ID)}
@@ -472,7 +472,7 @@ def test_off_leaves_html_unaffected(tmp_path: Path) -> None:
         crawl_defaults=CrawlRunConfig(document_level=DocumentLevel.OFF),
     )
     build = _build_of(result)
-    assert len(build.docs) == 1
+    assert build.doc_count == 1
     assert build.chunk_count == 1
     assert build.document_skips == []
     assert result.errors == []
@@ -629,8 +629,10 @@ def test_office_level_only_off_differs(tmp_path: Path) -> None:
             extractor_factory=_level_factory,
         )
         build = _build_of(result)
-        assert len(build.docs) == 1, level
-        texts[level.value] = build.docs[0].content_hash
+        assert build.doc_count == 1, level
+        # Идентичность текста пинится отпечатком содержимого партиции (``chunk_id`` +
+        # ``content_hash``): документы из результата фазы больше не читаются (Д-2/A4).
+        texts[level.value] = build.entries[0].content_digest
     # Ось не меняет Office-текст (реальный docling: SimplePipeline игнорирует PDF-опции).
     # Фейк возвращает один и тот же текст для документа => один content_hash.
     assert len(set(texts.values())) == 1
@@ -642,7 +644,7 @@ def test_office_level_only_off_differs(tmp_path: Path) -> None:
         crawl_defaults=CrawlRunConfig(document_level=DocumentLevel.OFF),
         extractor_factory=_level_factory,
     )
-    assert _build_of(off).docs == []
+    assert _build_of(off).doc_count == 0
     assert [s["reason"] for s in _build_of(off).document_skips] == ["url_suffix"]
 
 
@@ -695,9 +697,12 @@ def test_default_identity_preserves_manifest_only_churn(tmp_path: Path) -> None:
         extractor_factory=_level_factory,
     )
     bd, bf = _build_of(default), _build_of(explicit_full)
-    assert [(d.doc_id, d.content_hash) for d in bd.docs] == [
-        (d.doc_id, d.content_hash) for d in bf.docs
+    # Контент тот же: отпечаток партиции включает ``chunk_id`` и ``content_hash`` чанков,
+    # а документы из результата фазы больше не читаются (Д-2/A4).
+    assert [e.content_digest for e in bd.entries] == [
+        e.content_digest for e in bf.entries
     ]
+    assert bd.doc_count == bf.doc_count
     assert bd.index_build_id == bf.index_build_id
     assert bd.chunk_count == bf.chunk_count
 
@@ -710,8 +715,8 @@ def test_default_identity_preserves_manifest_only_churn(tmp_path: Path) -> None:
         extractor_factory=_level_factory,
     )
     bt = _build_of(text)
-    assert [(d.doc_id, d.content_hash) for d in bt.docs] == [
-        (d.doc_id, d.content_hash) for d in bd.docs
+    assert [e.content_digest for e in bt.entries] == [
+        e.content_digest for e in bd.entries
     ]
     assert bt.index_build_id != bd.index_build_id
 

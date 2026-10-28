@@ -432,7 +432,6 @@ def test_builder_may_return_foreign_id_but_round_renormalizes(store: SqliteStore
                     index_build_id="ib_builder_derived", product_id="p1", package_id="pkg-1"
                 )
             ],
-            docs=[],
             chunk_count=0,
         )
 

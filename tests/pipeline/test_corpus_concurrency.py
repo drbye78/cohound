@@ -259,9 +259,12 @@ def _build_of(result: Any) -> IndexBuild:
     return builds[0]
 
 
-def _docs(build: IndexBuild) -> list[tuple[str, str]]:
-    """Retained-set (``doc_id``, ``url``) в детерминированном порядке."""
-    return sorted((d.doc_id, d.url) for d in build.docs)
+def _docs(store: SqliteStore) -> list[tuple[str, str]]:
+    """Retained-set (``doc_id``, ``url``) из стора, в детерминированном порядке.
+
+    ``IndexBuild`` документы больше не несёт (Д-2/A4): носитель — ``corpus_docs``.
+    """
+    return sorted((d.doc_id, d.url) for d in store.iter_corpus_docs(RUN_ID))
 
 
 def _multi_host_pages(n: int = 4, body: str = "page") -> dict[str, bytes]:
@@ -314,7 +317,7 @@ def test_default_and_single_worker_are_identical_and_create_no_pool(
     assert created == []
     b_default, b_one = _build_of(default), _build_of(one)
     assert b_default.index_build_id == b_one.index_build_id
-    assert _docs(b_default) == _docs(b_one)
+    assert b_default.doc_count == b_one.doc_count
     assert default.errors == one.errors == []
 
 
@@ -364,23 +367,38 @@ def test_two_k4_runs_are_deterministic_including_dedup_winner(tmp_path: Path) ->
     pages["https://h2.docs.test/2"] = b"<html>two</html>"
     pages["https://h3.docs.test/3"] = b"<html>three</html>"
 
-    def run(sub: str) -> Any:
-        return _build(
+    def run(sub: str) -> tuple[SqliteStore, Any]:
+        store = SqliteStore(":memory:")
+        _make_run(store)
+        result = _build(
             tmp_path / sub,
             pages=pages,
             domain_profiles=_declared_multi_host_profiles(4),
             crawl_defaults=CrawlRunConfig(max_depth=1, max_workers=4),
+            store=store,
+            run_id=RUN_ID,
         )
+        return store, result
 
-    a, b = _build_of(run("a")), _build_of(run("b"))
-    assert a.index_build_id == b.index_build_id
-    assert _docs(a) == _docs(b)
+    store_a, result_a = run("a")
+    store_b, result_b = run("b")
+    try:
+        a, b = _build_of(result_a), _build_of(result_b)
+        assert a.index_build_id == b.index_build_id
+        assert _docs(store_a) == _docs(store_b)
 
-    # Победитель дедупа детерминирован FIFO-коммитом: первый в HTML-порядке (h0).
-    dup_hash = content_hash(dup)
-    winners = [d for d in a.docs if d.content_hash == dup_hash]
-    assert len(winners) == 1
-    assert winners[0].url == "https://h0.docs.test/0"
+        # Победитель дедупа детерминирован FIFO-коммитом: первый в HTML-порядке (h0).
+        dup_hash = content_hash(dup)
+        winners = [
+            d
+            for d in store_a.iter_corpus_docs(RUN_ID)
+            if d.content_hash == dup_hash
+        ]
+        assert len(winners) == 1
+        assert winners[0].url == "https://h0.docs.test/0"
+    finally:
+        store_a.close()
+        store_b.close()
 
 
 # --------------------------------------------------------------------------- #
@@ -400,7 +418,7 @@ def test_max_documents_respected_under_concurrency(tmp_path: Path) -> None:
     )
     build = _build_of(result)
 
-    assert len(build.docs) == 2  # нет пере-удержания сверх ёмкости
+    assert build.doc_count == 2  # нет пере-удержания сверх ёмкости
     assert build.truncated is True
     assert build.truncation[0]["truncated_reason"] == "max_documents"
     # Остаток ёмкости ограничивает волну: после seed остаётся 1 слот.
@@ -470,7 +488,9 @@ def test_resume_items_bypass_pool(tmp_path: Path) -> None:
         build = _build_of(second)
         assert second.errors == []
         assert build.index_build_id == _build_of(first).index_build_id
-        assert build.docs[0].content_hash == content_hash(b"retained bytes")
+        assert next(iter(store.iter_corpus_docs(RUN_ID))).content_hash == content_hash(
+            b"retained bytes"
+        )
         # Пул мог быть создан (K=3), но resume в него не отправляется; краулер не вызван.
         assert all(p.submitted == 0 for p in created)
     finally:

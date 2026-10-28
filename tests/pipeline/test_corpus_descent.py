@@ -292,6 +292,27 @@ def _build_of(result: Any) -> IndexBuild:
     return builds[0]
 
 
+def _docs(store: SqliteStore) -> list[Any]:
+    """Документы корпуса **из стора**: результат фазы их больше не несёт (Д-2/A4).
+
+    Порядок — детерминированный ``product_id, doc_id`` (не порядок обхода): порядок
+    обхода, если он важен, читается отдельно по вставке чанков
+    (:func:`_commit_order_urls`).
+    """
+    return list(store.iter_corpus_docs(RUN_ID))
+
+def _commit_order_urls(store: SqliteStore) -> list[str]:
+    """URL документов в порядке **записи** чанков (``corpus_chunks.rowid``).
+
+    Это тот же порядок обхода членов, в котором продукт коммитится на своей границе:
+    держать его в памяти как список документов больше не нужно (Д-2/A4), а порядок
+    остаётся наблюдаемым фактом.
+    """
+    rows = store.conn.execute(
+        "SELECT url FROM corpus_chunks ORDER BY rowid"
+    ).fetchall()
+    return list(dict.fromkeys(row["url"] for row in rows))
+
 def _observations(store: SqliteStore) -> list[Any]:
     return list(store.iter_archive_observations(RUN_ID))
 
@@ -314,8 +335,7 @@ def test_zip_members_ingested_with_png_skipped(tmp_path: Path) -> None:
         }
     )
     with _run(tmp_path, archive) as (store, result, extractor):
-        build = _build_of(result)
-        urls = sorted(doc.url for doc in build.docs)
+        urls = sorted(doc.url for doc in _docs(store))
         assert urls == [
             f"{ZIP_URL}!/docs/manual.pdf",
             f"{ZIP_URL}!/notes/readme.md",
@@ -345,7 +365,7 @@ def test_zip_members_ingested_with_png_skipped(tmp_path: Path) -> None:
         assert rows["docs/manual.pdf"].member_format == "pdf"
         assert rows["docs/manual.pdf"].skip_reason is None
         # Байты членов не ретейнятся: raw_path документа — сам архив (§6.7).
-        raw_paths = {doc.raw_path for doc in build.docs}
+        raw_paths = {doc.raw_path for doc in _docs(store)}
         assert len(raw_paths) == 1
         assert Path(next(iter(raw_paths))).name == f"{content_hash(archive)}.bin"
 
@@ -376,8 +396,8 @@ def test_nested_archives_three_levels_are_ingested(tmp_path: Path) -> None:
     middle = _zip({"inner.zip": deep})
     outer = _zip({"mid.zip": middle})
 
-    with _run(tmp_path, outer) as (store, result, _extractor):
-        docs = _build_of(result).docs
+    with _run(tmp_path, outer) as (store, _result, _extractor):
+        docs = _docs(store)
         assert len(docs) == 1
         assert docs[0].url == f"{ZIP_URL}!/mid.zip!/inner.zip!/deep.md"
         # Наблюдение на каждый уровень: 0 — корень, 1 — mid.zip, 2 — inner.zip.
@@ -523,8 +543,8 @@ def test_repeated_nested_archive_stops_on_cycle(tmp_path: Path) -> None:
     inner = _zip({"x.md": b"cycle content"})
     outer = _zip({"a/inner.zip": inner, "b/inner.zip": inner})
 
-    with _run(tmp_path, outer) as (store, result, _extractor):
-        docs = _build_of(result).docs
+    with _run(tmp_path, outer) as (store, _result, _extractor):
+        docs = _docs(store)
         assert len(docs) == 1
         root = _observations(store)[0]
         assert root.outcome["cycle_stops"] == 1
@@ -545,8 +565,8 @@ def test_member_over_ceiling_skipped_siblings_ingested(tmp_path: Path) -> None:
         tmp_path,
         archive,
         crawl_defaults=CrawlRunConfig(archive_max_member_bytes=1024),
-    ) as (store, result, _extractor):
-        docs = _build_of(result).docs
+    ) as (store, _result, _extractor):
+        docs = _docs(store)
         assert [doc.url for doc in docs] == [f"{ZIP_URL}!/small.md"]
         root = _observations(store)[0]
         assert root.forecast["skipped"]["member_too_large"]["count"] == 1
@@ -566,7 +586,7 @@ def test_plan_descent_lists_without_extracting(tmp_path: Path) -> None:
         crawl_defaults=CrawlRunConfig(archive_descent=ArchiveDescent.PLAN),
     ) as (store, result, extractor):
         assert extractor.calls == []
-        assert _build_of(result).docs == []
+        assert _build_of(result).doc_count == 0
         observations = _observations(store)
         assert len(observations) == 1
         assert observations[0].status is ArchiveDescentStatus.PLANNED
@@ -585,7 +605,7 @@ def test_corrupt_archive_is_visible_unreadable(tmp_path: Path) -> None:
     broken = b"PK\x03\x04" + bytes(256)
     with _run(tmp_path, broken) as (store, result, extractor):
         assert extractor.calls == []
-        assert _build_of(result).docs == []
+        assert _build_of(result).doc_count == 0
         assert any("archive_unreadable" in error for error in result.errors)
         observation = _observations(store)[0]
         assert observation.status is ArchiveDescentStatus.UNREADABLE
@@ -614,7 +634,7 @@ def test_cumulative_budget_exhaustion_is_visible(tmp_path: Path) -> None:
         archive,
         crawl_defaults=CrawlRunConfig(archive_max_total_uncompressed_bytes=1024),
     ) as (store, result, _extractor):
-        docs = _build_of(result).docs
+        docs = _docs(store)
         # Первый член уложился ровно в бюджет, остальные — остановлены.
         assert len(docs) == 1
         observation = _observations(store)[0]
@@ -647,7 +667,7 @@ def test_extractor_without_local_bytes_skips_members_visibly(tmp_path: Path) -> 
         tmp_path, archive, extractor=_RemoteLikeExtractor()
     ) as (store, result, extractor):
         assert extractor.calls == []  # шов не вызывается на локальных байтах
-        assert _build_of(result).docs == []
+        assert _build_of(result).doc_count == 0
         observation = _observations(store)[0]
         assert observation.status is ArchiveDescentStatus.DESCENDED
         assert observation.outcome["skipped"]["extract_unavailable"]["count"] == 2
@@ -739,7 +759,7 @@ def test_member_read_failure_writes_visible_row(tmp_path: Path) -> None:
         # Соседи не задеты: отказ одного члена изолирован.
         assert rows["a.md"].doc_id is not None
         assert rows["c.md"].doc_id is not None
-        assert sorted(doc.url for doc in _build_of(result).docs) == [
+        assert sorted(doc.url for doc in _docs(store)) == [
             f"{ZIP_URL}!/a.md",
             f"{ZIP_URL}!/c.md",
         ]
@@ -1030,7 +1050,7 @@ def _snapshot(store: SqliteStore, result: Any) -> dict[str, Any]:
                 doc.extractor_version,
                 doc.lang,
             )
-            for doc in build.docs
+            for doc in _docs(store)
         ],
         # Порядок **вставки** чанков (rowid), а не сортировка по chunk_no.
         "chunks": [row["chunk_id"] for row in chunk_rows],
@@ -1180,16 +1200,18 @@ def test_pooled_commit_order_is_walk_order_not_completion_order(
             assert not [
                 error for error in result.errors if "ImmutableBuildError" in error
             ], result.errors
+            chunk_rows = list(
+                store.conn.execute(
+                    "SELECT chunk_id, url FROM corpus_chunks ORDER BY rowid"
+                )
+            )
             return {
-                "docs": [doc.url for doc in _build_of(result).docs],
+                # Порядок обхода виден в порядке записи чанков; документы из результата
+                # фазы больше не читаются (Д-2/A4).
+                "docs": list(dict.fromkeys(row["url"] for row in chunk_rows)),
                 "partition_build_id": manifest["partition_build_id"],
                 "vector_digest": manifest["vector_digest"],
-                "chunks": [
-                    row["chunk_id"]
-                    for row in store.conn.execute(
-                        "SELECT chunk_id FROM corpus_chunks ORDER BY rowid"
-                    )
-                ],
+                "chunks": [row["chunk_id"] for row in chunk_rows],
             }
 
     inline = _build(tmp_path / "inline")
@@ -1232,8 +1254,8 @@ def test_pooled_nested_archive_commits_members_in_walk_order(tmp_path: Path) -> 
         outer,
         crawl_defaults=CrawlRunConfig(extract_workers=2),
         extraction_pool=_pool(created),
-    ) as (store, result, _extractor):
-        urls = [doc.url for doc in _build_of(result).docs]
+    ) as (store, _result, _extractor):
+        urls = _commit_order_urls(store)
         assert urls == [
             f"{ZIP_URL}!/a.md",
             f"{ZIP_URL}!/b.zip!/x.md",
@@ -1259,8 +1281,8 @@ def test_pooled_member_failure_is_visible_and_siblings_continue(
         crawl_defaults=CrawlRunConfig(extract_workers=2),
         extraction_pool=_pool(created, fail_urls=(f"{ZIP_URL}!/bad.md",)),
     ) as (store, result, _extractor):
-        docs = _build_of(result).docs
-        assert [doc.url for doc in docs] == [
+        docs = _docs(store)
+        assert sorted(doc.url for doc in docs) == [
             f"{ZIP_URL}!/ok1.md",
             f"{ZIP_URL}!/ok2.md",
         ]
@@ -1346,7 +1368,7 @@ def test_pooled_descent_removes_temp_files_on_failure(
             created, fail_urls=(f"{ZIP_URL}!/a.md", f"{ZIP_URL}!/b.md")
         ),
     ) as (_store, result, _extractor):
-        assert _build_of(result).docs == []
+        assert _build_of(result).doc_count == 0
 
     assert created_dirs, "спуск обязан был создать временный каталог"
     assert all(not Path(name).exists() for name in created_dirs), created_dirs
@@ -1424,7 +1446,7 @@ def test_pooled_submit_failure_falls_back_to_inline(tmp_path: Path) -> None:
         extraction_pool=pool,
     ) as (store, result, extractor):
         # Члены всё равно ингестятся — inline, после явной записи о сбое пула.
-        assert [doc.url for doc in _build_of(result).docs] == [
+        assert sorted(doc.url for doc in _docs(store)) == [
             f"{ZIP_URL}!/a.md",
             f"{ZIP_URL}!/b.md",
         ]
@@ -1596,7 +1618,7 @@ def test_store_failure_does_not_kill_descent(
     monkeypatch.setattr(SqliteStore, "save_corpus_members", _boom)
 
     with _run(tmp_path, archive) as (store, result, extractor):
-        assert [doc.url for doc in _build_of(result).docs] == [
+        assert sorted(doc.url for doc in _docs(store)) == [
             f"{ZIP_URL}!/a.md",
             f"{ZIP_URL}!/b.md",
         ]
@@ -1690,10 +1712,10 @@ def test_partial_member_is_visible_in_corpus_and_observation(tmp_path: Path) -> 
     )
     with _run(tmp_path, archive, extractor=_PartialMemberExtractor()) as (
         store,
-        result,
+        _result,
         _extractor,
     ):
-        docs = {doc.url: doc for doc in _build_of(result).docs}
+        docs = {doc.url: doc for doc in _docs(store)}
         pdf = docs[f"{ZIP_URL}!/docs/manual.pdf"]
         assert pdf.partial is True
         assert (pdf.pages_converted, pdf.page_count) == (1, 7)
