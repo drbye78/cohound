@@ -163,6 +163,13 @@ SSRF-валидацию, (2) принадлежит **объявленному**
 
 ## Гейты G1–G4
 
+- **Что блокирует прогон.** `NON_BLOCKING_GATES = {G1, G2, G3}` (`core/pipeline/gates.py:79`,
+  решение владельца 26.10.2026): нет действующего решения — фаза идёт дальше, а в
+  `gate_decisions` пишется строка-политика (`actor=policy`,
+  `external_ref=waiver:policy:nonblocking:{gate}`), которая в следе манифеста читается как
+  `state: not_required`. Блокируют только **G4** и **явный отказ** (`verdict=rejected`) по
+  текущему предмету у любого гейта: отказ — это решение, а молчание внешней системы не
+  выдаётся ни за отказ, ни за одобрение.
 - **G1/G2 — внутренняя аттестация.** Человек утверждает содержимое профиля пакета-якоря
   (когорта/роли/объём/паспорта) и матрицу роль×продукт. Второй путь — durable-аттестация
   профиля (`profile_attestation` в `state/{package_id}/state.db`) — **объявлен и
@@ -201,15 +208,20 @@ python3 -m core.cli plan --run-yaml packages/{case_id}/run.yaml --package packag
 python3 -m core.cli run --run-yaml packages/{case_id}/run.yaml \
   --package packages/{case_id} --urls packages/{case_id}/sources/corpus_urls.yaml --follow
 
-# 2. Свежий прогон встаёт на g1 (4-я фаза из 15) и возвращает код 3 (EXIT_BLOCKED).
-#    Это не ошибка: гейт не проходится автоматически никогда.
-echo $?    # → 3
+# 2. Свежий прогон НЕ встаёт на g1: G1/G2/G3 не блокируют (NON_BLOCKING_GATES,
+#    core/pipeline/gates.py:16, решение владельца 26.10.2026). Фаза g1 идёт с
+#    skip_reason=gate_not_blocking, в gate_decisions ложится waiver-строка
+#    (source=external, external_ref=waiver:policy:nonblocking:g1), и прогон
+#    продолжается в discovery/corpus. Решения «разблокировать» здесь не требуется.
+#    Блокируют только: G4 (публикация) и ЯВНЫЙ отказ (verdict=rejected) по текущему
+#    предмету у любого гейта — отказ есть решение, а не молчание.
+echo $?    # 0 — прогон дошёл до конца либо до блокирующего G4
 
-# 3. Разблокировка — только решением гейта (пишется в БД прогона, per-run).
-#    На блоке прогон пишет runs/{run_id}/gates/G1-request.json — оттуда берётся
-#    subject_digest; если файла нет, передайте --subject-digest явно.
+# 3. Если прогон встал на G4 (или нужен аудит-след G1/G2/G3) — решение пишется
+#    per-run. На блоке прогон пишет runs/{run_id}/gates/{gate}-request.json — оттуда
+#    берётся subject_digest; если файла нет, передайте --subject-digest явно.
 python3 -m core.cli gate --runs-dir runs --run-id {run_id} \
-  --gate G1 --actor {кто} --target cohort --notes "{почему}"
+  --gate G4 --actor {кто} --target publication --notes "{почему}"
 
 # 4. Артефакты отчёта из БД (пишет {out}/{run_id}/outputs/); очередь ревью — review.
 python3 -m core.cli report --runs-dir runs --run-id {run_id}

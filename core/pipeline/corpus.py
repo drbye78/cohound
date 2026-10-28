@@ -2283,6 +2283,158 @@ class _EmbedCensus:
 
 
 @dataclass
+class _CorpusStageTimings:
+    """Бакеты wall-времени **одного продукта** в фазе ``corpus`` (наблюдаемость, не контракт).
+
+    Отвечают на вопрос «где уходит время», которого ``elapsed_seconds`` продукта не отвечает:
+    он говорит «сколько», но не «на что». Ни одно поле отсюда не входит ни в
+    ``EXECUTION_CONTRACT_FIELDS``, ни в ``pb``/``content_digest``/манифест: это измерение
+    исполнения, а не условие измерения (иначе инструментирование меняло бы ``run_id``).
+
+    **Что именно измерено — ожидание или работа.** Фетч и экстракция идут в пулах (в т.ч.
+    процессов), поэтому главный поток видит **ожидание**, а не работу:
+
+    * ``fetch_wait_s`` — участок фетча на главном потоке. Четыре точки, все суммируются
+      сюда: ``entry.future.result()`` пула ``_local_fetch`` (локальный путь, **ожидание**);
+      inline ``_fetch_and_commit`` в волне (последовательный/браузерный путь — **работа**,
+      потому что фетч идёт на самом потоке); ``_process_local`` последовательного пути
+      (``max_workers in (None, 1)`` — тоже **работа**; без этой точки фетч без пула уходил
+      бы в ``overhead_s``) и ``_submit_collect`` (``split``: подача + опрос + сбор —
+      **ожидание** исполнителя).
+    * ``extract_wait_s`` — ожидание экстракции: ``future.result()`` в :func:`_finish_extract`
+      (страница/артефакт) и ``handle.result()`` в доводке члена контейнера. При окне
+      ``extract_workers == 1`` это почти работа; при окне > 1 включает ожидание чужих
+      заданий, поэтому окно публикуется рядом (``extract_workers``), иначе цифра читалась бы
+      неверно.
+    * ``chunk_s`` — **работа** на главном потоке: ``chunker.chunk(...)`` в двух точках
+      (документ и член контейнера).
+    * ``embed_s`` — ``_embed_batched`` внутри :func:`_embed_and_build` (работа главного
+      потока: эмбеддер вызывается синхронно).
+    * ``build_s`` — ``index_builder.build(...)`` (работа главного потока; время считается и
+      при исключении — бакет не теряется).
+
+    Остаток окна считается как ``elapsed - Σ бакетов`` и **не** зажимается в ``max(0, …)``:
+    отрицательное значение — дефект инструментирования (бакет посчитан дважды или покрывает
+    чужое окно), и он обязан быть виден, а не спрятан нулём.
+    """
+
+    #: Ожидание фетча на главном потоке (пул ``_local_fetch`` ‖ inline ``_fetch_and_commit``
+    #: ‖ ``_submit_collect`` split-пути).
+    fetch_wait_s: float = 0.0
+    #: Ожидание экстракции (``future.result`` страницы/артефакта и ``handle.result`` члена).
+    extract_wait_s: float = 0.0
+    #: Нарезка на главном потоке (документ и член контейнера).
+    chunk_s: float = 0.0
+    #: Эмбеддинг продукт-партиции (``_embed_batched``).
+    embed_s: float = 0.0
+    #: Физическая сборка продукт-партиции (``index_builder.build``).
+    build_s: float = 0.0
+    #: Фактическое окно экстракции (максимум по корням продукта); ``None`` — inline-путь.
+    extract_workers: int | None = None
+
+    def reset(self) -> None:
+        """Обнуляет бакеты перед следующим продуктом (объект живёт всю фазу).
+
+        Один объект на фазу, а не новый на продукт: closures, созданные **до** цикла
+        продуктов (``_submit_collect``/``_finish_extract``), захватывают переменную, и
+        переприсваивание внутри цикла читалось бы как захват переменной цикла — полагаться
+        на то, что closure вызван раньше следующей итерации, незачем, когда обнуление
+        решает ту же задачу без допущения.
+        """
+        self.fetch_wait_s = 0.0
+        self.extract_wait_s = 0.0
+        self.chunk_s = 0.0
+        self.embed_s = 0.0
+        self.build_s = 0.0
+        self.extract_workers = None
+
+    def note_extract_window(self, window: int | None) -> None:
+        """Запоминает фактическое окно экстракции корня (максимум по корням продукта).
+
+        Максимум, а не последнее значение: окно резолвится на корень, а бакет
+        ``extract_wait_s`` — на продукт, и он включает ожидание чужих заданий по самому
+        широкому окну.
+        """
+        if window is None:
+            return
+        candidate = int(window)
+        if self.extract_workers is None or candidate > self.extract_workers:
+            self.extract_workers = candidate
+
+    def stage_sum(self) -> float:
+        """Сумма пяти бакетов (сырая, без округления)."""
+        return (
+            self.fetch_wait_s
+            + self.extract_wait_s
+            + self.chunk_s
+            + self.embed_s
+            + self.build_s
+        )
+
+    def crawl_fields(self, elapsed_s: float) -> dict[str, Any]:
+        """Бакеты окна краула (Pass A) + остаток **этого** окна.
+
+        Эмбеддинг и сборка индекса (Pass B) идут после ``product_end``, поэтому в это окно
+        не входят и нулями здесь не выдаются: их публикует ``product_index_end``.
+        """
+        pass_a = self.fetch_wait_s + self.extract_wait_s + self.chunk_s
+        return {
+            "fetch_wait_s": round(self.fetch_wait_s, 3),
+            "extract_wait_s": round(self.extract_wait_s, 3),
+            "chunk_s": round(self.chunk_s, 3),
+            "extract_workers": self.extract_workers,
+            # Не max(0, …): отрицательное — видимый дефект инструментирования.
+            "overhead_s": round(elapsed_s - pass_a, 3),
+        }
+
+    def index_fields(self, elapsed_s: float) -> dict[str, Any]:
+        """Бакеты Pass B + остаток **полного** окна продукта (все пять бакетов)."""
+        return {
+            "embed_s": round(self.embed_s, 3),
+            "build_s": round(self.build_s, 3),
+            "overhead_s": round(elapsed_s - self.stage_sum(), 3),
+        }
+
+
+def _stage_timings_aggregate(
+    rows: Sequence[tuple[str, float, _CorpusStageTimings]],
+) -> dict[str, Any]:
+    """Агрегат стадийных бакетов фазы: по продуктам и суммой (складывать руками не нужно).
+
+    :param rows: ``(product_id, elapsed_s продукта целиком, бакеты)`` в порядке продуктов.
+    :returns: ``{"products": {...}, "total": {...}}``; ``overhead_s`` — по той же формуле
+        ``Σ elapsed − Σ бакетов`` и **без** зажима в ноль (отрицательное значение — дефект,
+        который обязан быть виден в машинном отчёте).
+    """
+    products: dict[str, Any] = {}
+    elapsed_total = 0.0
+    names = ("fetch_wait_s", "extract_wait_s", "chunk_s", "embed_s", "build_s")
+    buckets = dict.fromkeys(names, 0.0)
+    workers: int | None = None
+    for product_id, elapsed_s, timings in rows:
+        elapsed_total += elapsed_s
+        for name in names:
+            buckets[name] += getattr(timings, name)
+        if timings.extract_workers is not None and (
+            workers is None or timings.extract_workers > workers
+        ):
+            workers = timings.extract_workers
+        products[product_id] = {
+            "elapsed_seconds": round(elapsed_s, 3),
+            **{name: round(getattr(timings, name), 3) for name in names},
+            "extract_workers": timings.extract_workers,
+            "overhead_s": round(elapsed_s - timings.stage_sum(), 3),
+        }
+    total = {
+        "elapsed_seconds": round(elapsed_total, 3),
+        **{name: round(buckets[name], 3) for name in names},
+        "extract_workers": workers,
+        "overhead_s": round(elapsed_total - sum(buckets.values()), 3),
+    }
+    return {"products": products, "total": total}
+
+
+@dataclass
 class _EmbedThroughput:
     """Наблюдаемый темп батчевого эмбеддинга: EMA по батчам одного продукта.
 
@@ -2555,6 +2707,7 @@ def _embed_and_build(
     on_batch: Callable[[int, int, float], None] | None = None,
     cache: EmbedCache | None = None,
     census: _EmbedCensus | None = None,
+    timings: _CorpusStageTimings | None = None,
 ) -> bool:
     """Best-effort эмбеддинг и физическая сборка индекса продукт-партиции (K3, §B.1).
 
@@ -2572,6 +2725,9 @@ def _embed_and_build(
         без кэша, поведение прежнее. Кэш не меняет ни ``pb``, ни манифест партиции: он
         сокращает **стоимость** эмбеддинга, а не условия измерения.
     :param census: счётчики «из кэша / посчитано» этого продукта (наполняется эмбеддингом).
+    :param timings: бакеты стадий продукта (наблюдаемость): сюда пишутся ``embed_s`` и
+        ``build_s``. ``None`` — не измерять (юнит-путь). Оба бакета — **работа** главного
+        потока: эмбеддер вызывается синхронно, ``build`` — тоже.
     :param on_batch: ``(done, total, elapsed_s)`` — граница батча; ``None`` — без наблюдения
         (юнит-путь). Ошибка колбэка не должна выдавать себя за сбой сборки: наблюдение
         изолируется вызывающим.
@@ -2593,14 +2749,20 @@ def _embed_and_build(
             )
             for c in chunks
         ]
-        vectors = _embed_batched(
-            embedder,
-            chunks,
-            on_batch=on_batch,
-            cache=cache,
-            embed_model_id=embed_model_id,
-            census=census,
-        )
+        _embed_started = time.perf_counter()
+        try:
+            vectors = _embed_batched(
+                embedder,
+                chunks,
+                on_batch=on_batch,
+                cache=cache,
+                embed_model_id=embed_model_id,
+                census=census,
+            )
+        finally:
+            # Бакет не теряется и при исключении: время до отказа — измеренный факт.
+            if timings is not None:
+                timings.embed_s += time.perf_counter() - _embed_started
         meta = IndexMeta(
             package=package_id,
             chunker_version=chunker_version,
@@ -2622,7 +2784,14 @@ def _embed_and_build(
                 "vector_store": vector_store,
             },
         )
-        index_builder.build(port_chunks, vectors, meta)
+        _build_started = time.perf_counter()
+        try:
+            index_builder.build(port_chunks, vectors, meta)
+        finally:
+            # ``build_s`` — время **до** исключения: отказ сборки не отменяет того факта,
+            # что этот участок столько стоил (бакет не должен «пропадать» при сбое).
+            if timings is not None:
+                timings.build_s += time.perf_counter() - _build_started
         return True
     except Exception as exc:  # noqa: BLE001 — изоляция по контракту фазы
         errors.append(f"{product_id}: index build: {type(exc).__name__}: {exc}")
@@ -3049,6 +3218,7 @@ def _ingest_member_doc(
     lang: str | None,
     artifact_probes: list[dict[str, Any]],
     extracted: Any = _INLINE,
+    timings: _CorpusStageTimings | None = None,
 ) -> MemberOutcome:
     """Член контейнера → документ корпуса (``CorpusDoc`` + чанки) или видимый пропуск.
 
@@ -3072,6 +3242,9 @@ def _ingest_member_doc(
     извлекаем здесь, inline-путь байт-в-байт). Родительская часть (зонд, документ,
     нарезка, дедуп, строки) одна и та же для обоих путей — поэтому «пул vs inline» не
     может разойтись в наблюдаемых артефактах.
+
+    ``timings`` — бакеты стадий продукта (наблюдаемость): сюда идёт ``chunk_s`` нарезки
+    члена. ``None`` — не измерять (юнит-путь).
     """
     unavailable = _member_extract_unavailable(extractor)
     if unavailable is not None:
@@ -3154,7 +3327,13 @@ def _ingest_member_doc(
     )
 
     try:
-        chunks = chunker.chunk(extracted, document_id)
+        _chunk_started = time.perf_counter()
+        try:
+            chunks = chunker.chunk(extracted, document_id)
+        finally:
+            # ``chunk_s`` — работа главного потока; считается и при отказе нарезки.
+            if timings is not None:
+                timings.chunk_s += time.perf_counter() - _chunk_started
     except Exception as exc:  # noqa: BLE001 — сбой нарезки не отменяет документ
         errors.append(
             f"{task.product_id}/{task.member_url}: chunk: {type(exc).__name__}: {exc}"
@@ -4937,7 +5116,12 @@ def _build_corpus(
             ]
         else:
             try:
-                chunks = chunker.chunk(extracted, document_id)
+                _chunk_started = time.perf_counter()
+                try:
+                    chunks = chunker.chunk(extracted, document_id)
+                finally:
+                    # ``chunk_s`` — работа главного потока; считается и при отказе нарезки.
+                    timings.chunk_s += time.perf_counter() - _chunk_started
             except Exception as exc:  # noqa: BLE001
                 # Сбой нарезки — не отказ источника/парсера: raw сохранён (FETCHED),
                 # повторный resume сможет ре-извлечь без ре-фетча.
@@ -5444,6 +5628,10 @@ def _build_corpus(
     extract_pending: deque[_PendingExtract] = deque()
     #: Корни с недоведённым хвостом — в порядке дренажа (порядок провенанса сохраняется).
     extract_finalizers: deque[_RootDrain] = deque()
+    #: Бакеты стадий **текущего** продукта (наблюдаемость, не контракт). Объявлены здесь, а
+    #: не в цикле продуктов, потому что closures ниже (``_submit_collect``/``_finish_extract``)
+    #: видят переменную ячейкой; цикл обнуляет тот же объект (:meth:`_CorpusStageTimings.reset`).
+    timings = _CorpusStageTimings()
 
     def _finalize_ready_roots() -> None:
         """Вызывает финализаторы корней, чьи хвосты доведены, — строго в порядке корней."""
@@ -5492,9 +5680,20 @@ def _build_corpus(
         терминально помечается только это задание (``extraction_timeout``), пул продолжает
         работу; пересборка — только если пул не дал ни одного завершения за ``2 × timeout``
         (:meth:`_ExtractPools.note_timeout`).
+
+        Наблюдаемость: время ``future.result()`` (включая таймаут и смерть воркера) идёт в
+        ``timings.extract_wait_s`` — это **ожидание** главного потока, а не работа: при окне
+        ``extract_workers > 1`` оно включает и чужие задания, поэтому окно публикуется рядом.
         """
         try:
-            extracted = item.future.result(timeout=_extract_timeout)
+            _wait_started = time.perf_counter()
+            try:
+                extracted = item.future.result(timeout=_extract_timeout)
+            finally:
+                # ``extract_wait_s`` — **ожидание** экстракции на главном потоке (в т.ч. при
+                # таймауте/сбое воркера). При окне > 1 включает ожидание чужих заданий:
+                # рядом публикуется фактическое окно (``extract_workers``).
+                timings.extract_wait_s += time.perf_counter() - _wait_started
         except TimeoutError:
             # C1: зависший артефакт инвалидируется точечно; пул (и его здоровые воркеры)
             # продолжает работу. ``cancel`` на уже исполняемом future — no-op.
@@ -6847,8 +7046,16 @@ def _build_corpus(
     #: обязана быть на месте. Накопитель, а не чтение БД: документы продукта уже в
     #: памяти, а ``corpus_docs`` не несёт ``run_id`` (общая БД — объединение корпусов).
     partial_urls_by_product: dict[str, list[str]] = {}
+    #: Наблюдённые бакеты стадий по продуктам: ``(product_id, elapsed всего, бакеты)``.
+    #: Копятся до конца фазы — агрегат публикуется рядом с наблюдением ресурсов
+    #: (``metrics.json.resources.stage_timings``), а не только строками продуктов.
+    stage_timings_rows: list[tuple[str, float, _CorpusStageTimings]] = []
     for product_id in products:
         product_started = time.perf_counter()
+        #: Бакеты стадий этого продукта: Pass A (краул+нарезка) и Pass B (эмбеддинг+сборка).
+        #: Объект один на фазу и обнуляется здесь — closures фазы видят его ячейкой, и
+        #: переприсваивание внутри цикла было бы захватом переменной цикла.
+        timings.reset()
         ingest = _ProductIngest(product_id=product_id)
         # I17: дедуп в пределах продукт-партиции (см. docstring модуля).
         seen_docs: dict[str, str] = {}
@@ -7142,6 +7349,9 @@ def _build_corpus(
             #: экстракции. Пул один на прогон и переиспользуется всеми корнями/продуктами
             #: с тем же ключом (forkserver и веса конвертера платятся один раз);
             #: ``shutdown`` — один раз в ``finally`` фазы.
+            #: Наблюдаемость: фактическое окно уходит в строку продукта рядом с
+            #: ``extract_wait_s`` — иначе «ожидание» при окне > 1 читалось бы как работа.
+            timings.note_extract_window(extract_window)
             pool_key: _ExtractPoolKey | None = (
                 (level, pdf_pipeline, extract_window)
                 if extract_window is not None
@@ -7414,7 +7624,13 @@ def _build_corpus(
                         """
                         nonlocal member_pool_dead
                         try:
-                            extracted = handle.result(timeout=_extract_timeout)
+                            _wait_started = time.perf_counter()
+                            try:
+                                extracted = handle.result(timeout=_extract_timeout)
+                            finally:
+                                # Тот же бакет, что и у страничной доводки: ожидание пула
+                                # экстракции на главном потоке (член контейнера).
+                                timings.extract_wait_s += time.perf_counter() - _wait_started
                         except TimeoutError:
                             member_pool_dead = pools.note_timeout(pool_key)
                             return MemberOutcome(
@@ -7450,6 +7666,7 @@ def _build_corpus(
                             lang=page.lang,
                             artifact_probes=artifact_probes,
                             extracted=extracted,
+                            timings=timings,
                         )
 
                     defer_member = MemberDeferral(
@@ -7482,6 +7699,7 @@ def _build_corpus(
                         fetched_at=page.fetched_at,
                         lang=page.lang,
                         artifact_probes=artifact_probes,
+                        timings=timings,
                     ),
                     observations=archive_observations,
                     members=corpus_member_rows,
@@ -7900,11 +8118,17 @@ def _build_corpus(
                             f"{entry.pid}/{entry.wu}: запись волны без desc"
                         )
                     if entry.future is not None:
+                        _fetch_started = time.perf_counter()
                         try:
                             page = entry.future.result()
                         except Exception as exc:  # noqa: BLE001 — изоляция по контракту фазы
+                            # ``fetch_wait_s`` — **ожидание** пула ``_local_fetch``; коммит
+                            # (``_commit_local``) остаётся работой главного потока и в бакет
+                            # не входит.
+                            timings.fetch_wait_s += time.perf_counter() - _fetch_started
                             outcome = _commit_local(desc, exc=exc)
                         else:
+                            timings.fetch_wait_s += time.perf_counter() - _fetch_started
                             outcome = _commit_local(desc, page=page)
                     elif (
                         desc.resume is not None
@@ -7917,7 +8141,14 @@ def _build_corpus(
                     else:
                         # browser-режим (``supports_browser`` краулер): в пул не идёт —
                         # фетч inline на главном потоке (``_fetch_and_commit``), как прежде.
-                        outcome = _fetch_and_commit(desc)
+                        # Здесь ``fetch_wait_s`` — **работа**, а не ожидание: живого пула нет,
+                        # фетч (и коммит) исполняются на этом же потоке. Имя бакета общее с
+                        # пуловым путём намеренно: «участок фетча» — одна стадия продукта.
+                        _fetch_started = time.perf_counter()
+                        try:
+                            outcome = _fetch_and_commit(desc)
+                        finally:
+                            timings.fetch_wait_s += time.perf_counter() - _fetch_started
                     _commit_or_defer(entry.pid, entry.wu, entry.depth, outcome)
 
             # D4: ограниченный пул ТОЛЬКО на сетевой fetch локального пути. Пул создаётся
@@ -8114,7 +8345,15 @@ def _build_corpus(
                                         pid, work_url, work_target, robots=robots_enabled
                                     )
                                 )
-                        collected = _submit_collect(work)
+                        # ``fetch_wait_s`` split-пути: ``_submit_collect`` — это подача +
+                        # опрос статуса + сбор результатов, то есть **ожидание** исполнителя
+                        # (работу делает он, а не главный поток). Тот же бакет, что и у
+                        # локального пула: «участок фетча» — одна стадия продукта.
+                        _fetch_started = time.perf_counter()
+                        try:
+                            collected = _submit_collect(work)
+                        finally:
+                            timings.fetch_wait_s += time.perf_counter() - _fetch_started
                         for entry in entries:
                             if entry.kind == "blacklisted":
                                 errors.append(
@@ -8286,20 +8525,28 @@ def _build_corpus(
                             continue
 
                         work_target = _resolve_target(pid, work_url)
-                        outcome = _process_local(
-                            pid,
-                            work_url,
-                            work_target,
-                            depth=depth,
-                            scope_host=frontier.root_host,
-                            # B4: жёсткий redirect-scope — только при discovery (max_depth > 0);
-                            # на глубине 0 финальная страница ретейнится как прежде.
-                            enforce_redirect_scope=limits.max_depth > 0,
-                            robots=robots_enabled,
-                            max_response_bytes=limits.max_response_bytes,
-                            artifact_max_bytes=limits.max_artifact_bytes,
-                            attachment_formats=limits.attachment_formats,
-                        )
+                        # Последовательный путь (``max_workers in (None, 1)``): фетч inline на
+                        # главном потоке, поэтому ``fetch_wait_s`` здесь — **работа**, а не
+                        # ожидание (как и inline-ветка волны). Бакет общий: «участок фетча» —
+                        # одна стадия продукта.
+                        _fetch_started = time.perf_counter()
+                        try:
+                            outcome = _process_local(
+                                pid,
+                                work_url,
+                                work_target,
+                                depth=depth,
+                                scope_host=frontier.root_host,
+                                # B4: жёсткий redirect-scope — только при discovery (max_depth > 0);
+                                # на глубине 0 финальная страница ретейнится как прежде.
+                                enforce_redirect_scope=limits.max_depth > 0,
+                                robots=robots_enabled,
+                                max_response_bytes=limits.max_response_bytes,
+                                artifact_max_bytes=limits.max_artifact_bytes,
+                                attachment_formats=limits.attachment_formats,
+                            )
+                        finally:
+                            timings.fetch_wait_s += time.perf_counter() - _fetch_started
                         _commit_or_defer(pid, work_url, depth, outcome)
                         continue
 
@@ -8795,6 +9042,9 @@ def _build_corpus(
         product_partial = [doc.url for doc in ingest.docs if doc.partial]
         if product_partial:
             partial_urls_by_product[product_id] = product_partial
+        # Наблюдаемость: окно Pass A закрывается **здесь** — ``elapsed_seconds`` считается
+        # один раз, чтобы строка и остаток бакетов говорили об одном и том же интервале.
+        product_crawl_elapsed = time.perf_counter() - product_started
         product_events.append(
             {
                 "event": "product_end",
@@ -8826,7 +9076,12 @@ def _build_corpus(
                 # разные факты, и разницу нельзя выводить один из другого.
                 "manual_declared": len(manual_entries),
                 "manual_resolved": len(manual_resolved),
-                "elapsed_seconds": round(time.perf_counter() - product_started, 3),
+                "elapsed_seconds": round(product_crawl_elapsed, 3),
+                # Наблюдаемость стадий (**не** контракт): ожидание фетча/экстракции и работа
+                # нарезки на главном потоке + остаток этого же окна. ``embed_s``/``build_s``
+                # здесь нулями не выдаются: Pass B идёт после ``product_end`` и публикуется
+                # событием ``product_index_end``.
+                **timings.crawl_fields(product_crawl_elapsed),
                 "reason": product_reason,
             }
         )
@@ -8961,6 +9216,7 @@ def _build_corpus(
                         ),
                         cache=embed_cache,
                         census=census,
+                        timings=timings,
                     )
                     # Пропускная способность и доля кэша — опубликованные числа, а не
                     # впечатление: оператор видит, во что обошёлся эмбеддинг продукта,
@@ -9007,6 +9263,25 @@ def _build_corpus(
         ingest.chunks = []
         del product_chunks
         del product_chunk_counts
+
+        # Наблюдаемость: окно Pass B этого продукта закрыто. Пять бакетов вместе с
+        # ``elapsed_seconds`` Pass A дают полное окно продукта, и остаток
+        # (``overhead_s`` = всё окно − Σ пяти бакетов) считается по формуле, а не зажимается
+        # в ноль: отрицательное значение — видимый дефект инструментирования.
+        product_total_elapsed = time.perf_counter() - product_started
+        stage_timings_rows.append((product_id, product_total_elapsed, replace(timings)))
+        product_events.append(
+            {
+                "event": "product_index_end",
+                "product_id": product_id,
+                "index_elapsed_s": round(
+                    product_total_elapsed - product_crawl_elapsed, 3
+                ),
+                "total_elapsed_s": round(product_total_elapsed, 3),
+                "extract_workers": timings.extract_workers,
+                **timings.index_fields(product_total_elapsed),
+            }
+        )
 
         # Ф0/O3: покрытие продукта пишется на его границе, а не только в конце фазы.
         # Элементы сеанса продукта **финальны** (продукт-цикл строго последователен),
@@ -9409,6 +9684,9 @@ def _build_corpus(
                 if extraction_pool is not None and worker_rss_dir
                 else None
             ),
+            # Наблюдаемость стадий (не контракт): бакеты по продуктам и их сумма. Без
+            # агрегата «где уходит время» пришлось бы складывать строки продуктов руками.
+            stage_timings=_stage_timings_aggregate(stage_timings_rows),
         )
     )
     return PhaseResult(

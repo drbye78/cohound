@@ -619,6 +619,11 @@ class ResourcesObservation:
     :param scheduling_source: ``"derived"`` — окно выведено из бюджета памяти;
         ``"declared"`` — взято из объявленной оси (или окна нет вовсе).
     :param workers_peak_rss_mb: максимум ``ru_maxrss`` по воркерам пула экстракции.
+    :param stage_timings: бакеты стадий фазы по продуктам и суммой (``{products, total}``):
+        ожидание фетча/экстракции, работа нарезки/эмбеддинга/сборки и остаток окна.
+        ``{}`` — фаза не измеряла стадии (поле нейтрально: «не измеряли» ≠ «ноль»).
+        В ``metrics.json`` блок проходит через ``_round_floats`` (1 знак, политика блока
+        ``resources``); полная точность строк продуктов — в событиях фазы.
     """
 
     chunks_per_doc: dict[str, dict[str, Any]] = field(default_factory=dict)
@@ -628,6 +633,7 @@ class ResourcesObservation:
     extract_max_tasks_per_child: int | None = None
     scheduling_source: str = "declared"
     workers_peak_rss_mb: float | None = None
+    stage_timings: dict[str, Any] = field(default_factory=dict)
 
 
 def document_family(url: str) -> str:
@@ -728,6 +734,9 @@ def build_resources_block(
       ``derived``).
     * ``chunks_per_doc`` — распределение по семействам (из наблюдения фазы корпуса).
     * ``workers_peak_rss_mb`` — пик воркера пула (``None`` — пула не было).
+    * ``stage_timings`` — бакеты стадий фазы корпуса (по продуктам и суммой): ожидание
+      фетча/экстракции, работа нарезки/эмбеддинга/сборки, остаток окна. Пустой dict —
+      «фаза стадий не измеряла».
     * ``budget`` — бюджет памяти и его провенанс (:func:`mem_budget_provenance`).
 
     Фазы объединяются по объединению ключей: длительность без пика и пик без
@@ -767,4 +776,5 @@ def build_resources_block(
             else None
         ),
         "budget": dict(budget or {}),
+        "stage_timings": dict(observation.stage_timings) if observation is not None else {},
     }

@@ -184,7 +184,7 @@
 (`core/pipeline/metrics.py:459`); живой прогон его несёт — `runs/ru-pg-dbms-3edf2b06097c/metrics.json`
 (`resources.budget.source = "available"`, `resources.phases.discovery.peak_rss_mb`).
 Распределение чанков по семействам наполняется фазой корпуса
-(`core/pipeline/corpus.py:9364` — `summarize_chunks_per_doc`), поэтому в прогоне без
+(`core/pipeline/corpus.py:9664` — `summarize_chunks_per_doc`), поэтому в прогоне без
 переисполнения корпуса блок пуст — это наблюдение, а не дефект.
 
 **Содержание.**
@@ -229,7 +229,7 @@ peak=1563 MB, parent floor=500 MB → workers=0`, отказ **до** фаз. Ф
 >   preflight `core/cli/wiring.py:2404` (`preflight_extraction_budget`, `EXIT_USAGE`).
 > - ✅ durable хвост спуска (write-through): синки `persist_observation`/`persist_member`
 >   (`core/pipeline/archive_descent.py:337,473,1031`), подключены в
->   `core/pipeline/corpus.py:7477`; видимая строка пропуска по бюджету —
+>   `core/pipeline/corpus.py:7701`; видимая строка пропуска по бюджету —
 >   `core/pipeline/archive_descent.py:1050` (`SKIP_BUDGET`).
 > - ✅ PK `corpus_members` = `(archive_content_hash, member_path, product_id)` —
 >   `core/store/sqlite.py:404`.

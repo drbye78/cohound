@@ -128,13 +128,23 @@ write-site'ов у них пока нет, но словарь обязан их
 | `crawl` | durable-сеанс краула: гистограмма `{status: count}` из `crawl_session_counts`; пусто, если сеанса нет |
 | `crawl_truncation` | политическое усечение (N4): `truncated`/`truncated_reason`/`truncated_products`/`pages_fetched`/`revalidation_fetched`/`effective_limits`; пусто, если не усечён |
 | `crawl_session` | жизненный цикл сеанса краула (F1/Д-6): `status`/`owner`/`heartbeat_at`/`stale_reason`; пусто, если сеанса не было. `interrupted` виден здесь без разбора БД |
-| `resources` | F0 (`11` §4): `phases[phase] = {peak_rss_mb, wall_s}` (`VmHWM` и время на конец фазы), `scheduling = {extract_workers, extract_max_tasks_per_child, source}` (`source`: `declared`\|`derived` — окно выведено из бюджета памяти), `chunks_per_doc = {family: {count, p50, p90, max}}`, `documents`/`chunks`, `workers_peak_rss_mb`, `budget` (бюджет, его источник, `MemAvailable`, резерв, пол родителя, `cpu_count`, таблица пиков docling). Пусто — ресурсы не измерялись (нейтрально: «не измеряли» ≠ «ноль»). В `run_id` не входит: это расписание и наблюдение, а не условие измерения |
+| `resources` | F0 (`11` §4): `phases[phase] = {peak_rss_mb, wall_s}` (`VmHWM` и время на конец фазы), `scheduling = {extract_workers, extract_max_tasks_per_child, source}` (`source`: `declared`\|`derived` — окно выведено из бюджета памяти), `chunks_per_doc = {family: {count, p50, p90, max}}`, `documents`/`chunks`, `workers_peak_rss_mb`, `budget` (бюджет, его источник, `MemAvailable`, резерв, пол родителя, `cpu_count`, таблица пиков docling), `stage_timings = {products: {product_id: {...}}, total: {...}}` — бакеты стадий фазы корпуса (ожидание фетча/экстракции, работа нарезки/эмбеддинга/сборки, `overhead_s` = окно − Σ бакетов **без** зажима в ноль). Пусто — ресурсы не измерялись (нейтрально: «не измеряли» ≠ «ноль»). В `run_id` не входит: это расписание и наблюдение, а не условие измерения |
 
 **Per-product события — не метрики, а заметки.** `product_start`/`product_end`/
 `product_skipped` живут в `PhaseResult.log_entries` фазы корпуса и доходят до оператора
 строками `results[].notes` (структурные dict-события в файл не сериализуются). В
 `RunMetrics` их нет намеренно: это наблюдаемость хода работы, а не измеренная величина
 прогона.
+
+**Стадии продукта: «где время» — числа, а не впечатление.** `product_end` несёт окно
+краула (`fetch_wait_s` — ожидание пула фетча ‖ inline-фетч ‖ `_submit_collect` split-пути,
+`extract_wait_s` — ожидание экстракции, `chunk_s` — работа нарезки, `extract_workers` —
+фактическое окно, рядом с ожиданием), `product_index_end` — окно Pass B (`embed_s`,
+`build_s`, `index_elapsed_s`, `total_elapsed_s`) и `overhead_s` = окно − Σ бакетов. Остаток
+не зажимается в ноль: отрицательное значение — дефект инструментирования, и он обязан быть
+виден. Ни одно поле не входит в `EXECUTION_CONTRACT_FIELDS`: тайминг — наблюдение, а не
+условие измерения (иначе инструментирование меняло бы `run_id`). Агрегат по продуктам —
+`resources.stage_timings`.
 
 ### B.3. Аудит и воспроизводимость
 
