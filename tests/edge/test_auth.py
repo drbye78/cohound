@@ -22,6 +22,7 @@ from core.edge.auth import (
     PUBLIC_OPS,
     SCOPE_CAPABILITIES,
     SCOPE_CRAWL,
+    SCOPE_EXTRACT,
     SCOPE_FETCH,
     SCOPE_REGISTRY,
     SCOPE_SEARCH,
@@ -285,6 +286,14 @@ def test_authorize_crawl_ops_require_crawl_scope() -> None:
         assert authorize(None, op) is False
 
 
+def test_authorize_extract_ops_require_extract_scope() -> None:
+    """Приём артефакта — отдельный scope (10 §5.4): краул не открывает извлечение."""
+    for op in ("extract/upload", "extract/submit", "extract/collect", "extract/abort"):
+        assert authorize(_principal({SCOPE_EXTRACT}), op) is True
+        assert authorize(_principal({SCOPE_CRAWL}), op) is False
+        assert authorize(None, op) is False
+
+
 def test_authorize_health_is_public() -> None:
     """``health`` — публичная диагностика: доступна без принципала."""
     assert authorize(None, "health") is True
@@ -314,6 +323,10 @@ def test_authorized_ops_allowlist_exact() -> None:
             "crawl/cancel",
             "crawl/collect",
             "crawl/poll",
+            "extract/upload",
+            "extract/submit",
+            "extract/collect",
+            "extract/abort",
         }
     )
     assert PUBLIC_OPS == frozenset({"health"})
@@ -324,6 +337,7 @@ def test_required_scope_lookup() -> None:
     assert required_scope("Search") == SCOPE_SEARCH
     assert required_scope("crawl/submit") == SCOPE_CRAWL
     assert required_scope("crawl/poll") == SCOPE_CRAWL
+    assert required_scope("extract/submit") == SCOPE_EXTRACT
     assert required_scope("nope") is None
 
 

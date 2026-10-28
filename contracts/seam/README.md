@@ -18,7 +18,8 @@
 | `search.schema.json` | `POST /v1/search` — запрос `{query, lang, limit, phase}` и ответ-список `{url, title, snippet, rank}` |
 | `registry.schema.json` | `POST /v1/registry` — запрос `{registry_id, product_ref, scope}` и ответ-список `{fact_json, source_url, fetched_at}` (R1: `source_url` обязателен) |
 | `crawl.schema.json` | `POST /v1/crawl/{submit,status,cancel,collect,poll}` — постановка задания краула (`items`), прогресс (счётчики), отмена, постраничный забор результатов (`items`+`next_cursor`+`done`) и опрос каталогового документа (`url`+`kind` ∈ `{feed,channel,sitemap}` → `entries`+`count`+`truncated`, ссылки без байтов); контент/ссылки, не evidence (I19) |
-| `capabilities.schema.json` | `GET /v1/capabilities` → `{extractor_version, crawler_version, search_engine, supported_formats}` |
+| `extract.schema.json` | `POST /v1/extract/{upload,submit,collect,abort}` — извлечение **по артефакту** (`10` §5.4, модель M1): ядро ретенирует байты и передаёт их чанками, edge не ходит в сеть. Идентичность артефакта — `content_hash`; `submit` несёт оси `level`/`device`; `collect` называет экстрактор в пространстве имён ядра (B2), поэтому `pb` совпадает под `local` и `split` |
+| `capabilities.schema.json` | `GET /v1/capabilities` → `{extractor_version, crawler_version, search_engine, supported_formats}` плюс аддитивный блок `extract` (`supports_artifact`, `max_upload_chunk_bytes`, `levels`, `devices`, `staging_ttl_s`): размер чанка берётся из объявленного, а не из константы клиента |
 | `health.schema.json` | `GET /v1/health` → `{status}` |
 | `openapi.json` | OpenAPI 3.1 по всем эндпоинтам; конверт — схема ответа, `schema_version` документирован |
 
@@ -103,9 +104,13 @@ per-host rate-гейт. Под `split` он исполняется на стор
   `Content-Length` сверх лимита отвергается **до чтения** (413), чтение
   ограничено `max_body_bytes + 1`, на 413 соединение закрывается
   (`Connection: close`) — непрочитанное тело не может быть разобрано как
-  следующий запрос. 1 MiB обоснован крупнейшей легитимной формой:
-  `crawl/submit` с волной из 64 элементов (~128 КБ при URL ~2 КБ), см.
-  `core.edge.server.DEFAULT_MAX_BODY_BYTES`.
+  следующий запрос. Крупнейшая легитимная форма теперь — **чанк загрузки
+  артефакта** (`extract/upload`), поэтому лимит не «подобран под волну
+  `crawl/submit`», а **порождает** ось: `capabilities.extract.max_upload_chunk_bytes`
+  считается от фактического `max_body_bytes` (минус обвязка JSON, с поправкой
+  на base64 4/3) и объявляется клиенту. Оператор, поднявший лимит, получает
+  крупнее чанки без правки кода; клиент без блока `extract` в capabilities
+  откатывается на константу, а не угадывает.
 - **TLS-инспекция не блокируется:** никакого certificate pinning; доверие к
   корпоративному CA настраивается на стороне развёртывания (07 §8.1).
 

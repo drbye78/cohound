@@ -446,7 +446,9 @@ absence-модель, scoring и определения Coverage/Comparability �
 | ID | Находка | Вердикт | Доказательство (HEAD) | Класс | P |
 |---|---|---|---|---|---|
 | V1 | §7.1 требует достаточность цитаты, в коде её нет | **ЧАСТИЧНО**: entailment отсутствует, «механизма нет вообще» — неверно | `cohound-spec-v2.md:660` (шаг 3 эшелона, «частично механически», следствие — **аномалия**); `validate.py:300-381` — восемь проверок, ни одна не спрашивает «следует ли статус»; но `evaluate.py:735` `support_subject_overlap` + `:1784-1790` + `outputs/support_quality.yaml`. Врут два документа: `02-subsystems.md:508` и `llm_local.py:22` приписывают шаг 3 `validate.py` | М | P0 + P6 |
-| V2 | Точность оценщика неизмерима | **ПОДТВЕРЖДЕНО**, причина иная → **закрыто как отчётность** (`4ee192f`: `golden_declined` вместо случайного `no_cases`) | `packages/ru-pg-dbms/sources/golden_status.yaml:11` `state: declined`; `golden.csv` = 118 `pangolin` + 118 `postgrespro` + **0** `jatoba`; benchmark **не читает** `golden_status` (`grep` пуст) и отказывается по случайной причине: `skip_reason: no_cases`, все 236 строк — `product_not_in_build`, слова `declined` в выводе нет | М | P6 |
+| V2 | Точность оценщика неизмерима | **ПОДТВЕРЖДЕНО**, причина иная → **закрыто как отчётность** (`4ee192f`: `golden_declined` вместо случайного `no_cases`) | `packages/ru-pg-dbms/sources/golden_status.yaml:3` `state: declined` (**на 28.10 файл пересобран:**
+`state: present`, новый набор 181 параметр × 5 продуктов — посылка строки V2 требует
+пере-проверки, статус не переписан); `golden.csv` = 118 `pangolin` + 118 `postgrespro` + **0** `jatoba`; benchmark **не читает** `golden_status` (`grep` пуст) и отказывается по случайной причине: `skip_reason: no_cases`, все 236 строк — `product_not_in_build`, слова `declined` в выводе нет | М | P6 |
 | V3 | 4.2 % вердиктов меняются на идентичном промпте; retry ≤2 — лотерея | **ЧАСТИЧНО**: число и лотерея верны, «docstring'и продают байт-в-байт» — нет | `2026-10-26-verdict-reproducibility.md:40` (5 из 119); `evaluate.py:1586` `max_retries=2`, `:1724-1751` цикл публикует **первый валидный** сэмпл; `templates`… ; **но** `max_retries` не в контракте, номер попытки не пишется, полосы в артефактах нет, R7 пайплайном не считается. Число 95.8 % формально проходит порог §11.7 (≥95 %) | М | P2 |
 | V4 | `decoder` — лейбл, а не механизм | **ПОДТВЕРЖДЕНО**, все три ноги | `prompt.py:23` «схема навязывается»; `llm_local.py:82` `DEFAULT_DECODER="none"` достижим в проде (`wiring.py:966`); `llm_local.py:302-311` — единственная ветка `json_schema` на **любое** значение ≠ `"none"`; проба: `json_object` → по проводам `json_schema`, `JSoN_ObJeCt` принимается (метки не enum — `core/config/deploy.py:528` `Decoder | None`, в `status-dictionary.yaml` ключа нет); живой прогон: манифест `decoder=json_object`, провод — `json_schema` | М | P2 |
 | V5 | `max_tokens: 4096` мёртв | **ЧАСТИЧНО**: мёртв **для оценщика**, жив для discovery | `config/deploy.yaml:84`,`:91`; в `LLMRequest` поля нет (`ports/llm.py:26-35`), в payload нет (`llm_local.py:295-311`), `build_evaluator_llm` не читает (`wiring.py:1105-1204`), читает `build_discovery_llm` (`:1058-1102`). Хуже: `llm_local._extract` не читает `finish_reason` → обрезание неотличимо от невалидного JSON | Г/М | P2 |
@@ -463,7 +465,7 @@ absence-модель, scoring и определения Coverage/Comparability �
   той же строке: `core/adapters/llm_local.py:22` всё ещё приписывает «достаточность»
   `validate.py`.
 - ✅ V2 — `golden_declined` читается benchmark'ом: `core/pipeline/evaluator_benchmark.py:115,361,494`;
-  объявление — `packages/ru-pg-dbms/sources/golden_status.yaml:11`.
+  объявление — `packages/ru-pg-dbms/sources/golden_status.yaml:3`.
 - ✅ V3 — `max_retries` объявлен (`core/pipeline/evaluation_policy.py:31`, поле
   `evaluation_policy` — `core/pipeline/digests.py:151`) и полоса неопределённости публикуется
   (`core/pipeline/measurement_uncertainty.py:196`, запрет ранжирования — `:245-252`).

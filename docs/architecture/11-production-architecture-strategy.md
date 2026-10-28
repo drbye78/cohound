@@ -226,7 +226,7 @@ peak=1563 MB, parent floor=500 MB → workers=0`, отказ **до** фаз. Ф
 >   `docling-doc-3:layout_tables/cpu/docling-2.135.0,trafilatura-html-2` (сегмент
 >   `cpu`/`cuda` — ось `crawl.pdf_device`, P9).
 > - ✅ воркеры из бюджета + уровень из профиля: `core/cli/wiring.py:2438` (`workers_from_budget`),
->   preflight `core/cli/wiring.py:2402` (`preflight_extraction_budget`, `EXIT_USAGE`).
+>   preflight `core/cli/wiring.py:2404` (`preflight_extraction_budget`, `EXIT_USAGE`).
 > - ✅ durable хвост спуска (write-through): синки `persist_observation`/`persist_member`
 >   (`core/pipeline/archive_descent.py:337,473,1031`), подключены в
 >   `core/pipeline/corpus.py:7477`; видимая строка пропуска по бюджету —
@@ -606,8 +606,8 @@ docling, а не писатель. При 100 параллельных прог�
   F1 можно начинать, но до изоляции вывод «прогон упал» неотличим от «сосед съел память»,
   а значит F1 не может закрыть G6 честно.
   → ⬜ не сделано: изоляции прогона (cgroup/unit) в коде нет — cgroup упомянут только как
-  источник вранья `MemAvailable` (`core/pipeline/resources.py:442`); бюджет выводится из
-  `MemAvailable` (✅, `core/pipeline/resources.py:439-458`), а изоляция — нет.
+  источник вранья `MemAvailable` (`core/pipeline/resources.py:441`); бюджет выводится из
+  `MemAvailable` (✅, `core/pipeline/resources.py:436-458`), а изоляция — нет.
 - **Нужен ли F5 (флот).** Если недельный цикл на 100 якорях — цель, G9 закрывается; если нет,
   F5 не начинается и план заканчивается на F4.
   → ❔ не проверено: решения владельца в документе нет, а F5 всё равно заблокирована A1-гейтом

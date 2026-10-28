@@ -61,6 +61,7 @@ from core.edge.audit import AuditSink, FileAuditSink
 from core.edge.auth import Authenticator, MTLSAuthenticator, OIDCAuthenticator
 from core.edge.config import EdgeRuntimeConfig, load_edge_runtime_config
 from core.edge.crawler_factory import crawler_factory
+from core.edge.extract_service import ArtifactExtractService
 from core.edge.poller import FeedPollService
 from core.edge.scheduler import EdgeScheduler
 from core.edge.server import EdgeError, EdgeGateway, ensure_safe_binding, serve
@@ -262,11 +263,21 @@ def _build_gateway(
     dispatcher = _EngineCrawler(crawlers)
     extractor: ExtractorPort = _EdgeExtractor()
     chunker: ChunkerPort = FamilyChunker()
+    # Извлечение по артефакту (B1/B3): staging живёт рядом с остальным состоянием edge,
+    # TTL и окно извлечения объявлены в конфиге. Сервис не создаёт каталогов и потоков при
+    # конструировании — только при первом приёме чанка.
+    artifacts = ArtifactExtractService(
+        config.resolved_extract_dir,
+        ttl_s=config.extract_ttl_s,
+        workers=config.extract_workers,
+    )
     gateway = EdgeGateway(
         dispatcher,
         extractor,
         schema_version=config.schema_version,
         poller=FeedPollService(dispatcher),
+        extract_service=artifacts,
+        max_body_bytes=config.max_body_bytes,
     )
     return gateway, crawlers, chunker
 
@@ -451,6 +462,8 @@ def main(argv: list[str] | None = None) -> int:
             f"schema={config.schema_version} engines={engines} "
             f"extractor={gateway.capabilities()['extractor_version']} "
             f"state_dir={config.state_dir} blob_dir={config.resolved_blob_dir} "
+            f"extract_dir={config.resolved_extract_dir} "
+            f"extract_chunk={gateway.capabilities()['extract']['max_upload_chunk_bytes']} "
             f"auth={config.auth.mode} audit={config.audit.sink} "
             f"max_body_bytes={config.max_body_bytes} "
             f"scheduler=ready poller=ready\n"

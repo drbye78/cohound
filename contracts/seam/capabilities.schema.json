@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://cohound.local/contracts/seam/capabilities.schema.json",
   "title": "GET /v1/capabilities response payload",
-  "description": "Версии edge-компонентов для манифеста прогона (07 §3/§7, R7).",
+  "description": "Версии edge-компонентов для манифеста прогона (07 §3/§7, R7) плюс блок extract (аддитивно, 10 §5.4).",
   "type": "object",
   "additionalProperties": false,
   "properties": {
@@ -12,6 +12,26 @@
     "supported_formats": {
       "type": "array",
       "items": {"type": "string"}
+    },
+    "extract": {
+      "title": "Объявленные возможности извлечения по артефакту",
+      "description": "То, чего ядро не может знать само. max_upload_chunk_bytes — размер чанка, который этот узел действительно примет: он выводится из фактического лимита тела запроса (с поправкой на base64 и JSON-обвязку), а не из круглого числа, поэтому ядро не получает 413 на объявленном лимите и не угадывает размер. levels/devices — оси, которые узел исполнит; supports_artifact — поддержан ли подпротокол /v1/extract/* на этом узле. staging_ttl_s — объявленный TTL брошенной загрузки (сколько чанки живут без обращения), чтобы ядро не удерживало незавершённую передачу дольше объявленного.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["supports_artifact", "max_upload_chunk_bytes", "levels", "devices"],
+      "properties": {
+        "supports_artifact": {"type": "boolean"},
+        "max_upload_chunk_bytes": {"type": "integer", "minimum": 1},
+        "levels": {
+          "type": "array",
+          "items": {"type": "string"}
+        },
+        "devices": {
+          "type": "array",
+          "items": {"type": "string"}
+        },
+        "staging_ttl_s": {"type": "integer", "minimum": 1}
+      }
     }
   }
 }

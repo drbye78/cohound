@@ -45,7 +45,11 @@ from core.edge.auth import (
     Principal,
     authorize,
 )
-from core.edge.seam_schema import validate_crawl_request, validate_fetch_request
+from core.edge.seam_schema import (
+    validate_crawl_request,
+    validate_extract_request,
+    validate_fetch_request,
+)
 from core.ports.crawler import CrawlerPort
 from core.ports.extractor import ExtractorPort
 from core.ports.search import SearchAdapterPort, SearchQuery
@@ -65,6 +69,7 @@ __all__ = [
     "ensure_safe_binding",
     "is_loopback_host",
     "make_handler",
+    "max_upload_chunk_bytes",
     "route_request",
     "serve",
 ]
@@ -98,6 +103,39 @@ DEFAULT_MAX_BODY_BYTES = 1_048_576
 #: поэтому смена размера страницы в пайплайне не оставит границу шва в прошлом.
 SEAM_SEARCH_MAX_LIMIT = 10
 
+#: Запас на JSON-обвязку одного чанка в теле ``POST /v1/extract/upload``, байты.
+#:
+#: Считается не «на глаз», а по составу запроса: конверт (``schema_version``,
+#: ``request_id``, ``status``), ``content_hash`` (64 hex), три числа (``size``/
+#: ``chunk_no``/``chunk_total`` — до 20 цифр каждое), ключи и кавычки. Верхняя оценка
+#: такой обвязки — единицы сотен байт; 4 КиБ — округление вверх, оставляющее запас на
+#: поля, которые появятся аддитивно. Число участвует только в вычитании из лимита тела,
+#: поэтому завышение здесь безопасно (уменьшает объявленный чанк, а не увеличивает).
+EXTRACT_UPLOAD_JSON_RESERVE = 4096
+
+
+def max_upload_chunk_bytes(max_body_bytes: int = DEFAULT_MAX_BODY_BYTES) -> int:
+    """Размер чанка артефакта, который узел **действительно** примет, байты.
+
+    Выводится из фактического лимита тела (``DEFAULT_MAX_BODY_BYTES`` либо
+    ``edge.yaml:max_body_bytes``), а не из круглого числа: чанк едет в base64 внутри
+    JSON, поэтому ``len(data_b64) ≈ 4/3 · chunk`` плюс обвязка. Формула
+    ``(budget // 4) * 3`` даёт ровно ту длину, у которой base64-представление
+    (``4 · ceil(n/3)``) укладывается в бюджет: ``4 · (budget//4) <= budget``.
+
+    Почему это объявляется в ``capabilities``, а не задаётся константой ядра: иначе ядро
+    выбрало бы свой размер, получило ``413`` на чужом лимите тела и стало бы угадывать
+    (уменьшать вслепую). Здесь лимит тела — вход, а число — следствие, и оба видны
+    оператору.
+
+    :param max_body_bytes: лимит тела запроса этого узла (байты).
+    """
+    budget = max(0, int(max_body_bytes) - EXTRACT_UPLOAD_JSON_RESERVE)
+    # Минимум 3 байта: schema объявляет ``minimum: 1``, а «лимит тела меньше обвязки»
+    # означает, что узел непригоден для приёма артефактов, — это видно по самому числу,
+    # а не только по 413 на первом чанке.
+    return max(3, (budget // 4) * 3)
+
 #: Операции, которые в протоколе edge принимают тело (07 §3).
 #: Crawl-операции очереди краула (Phase 3.1) и опрос фидов (Wave 5.1) — тоже POST.
 _POST_OPS = frozenset(
@@ -110,6 +148,10 @@ _POST_OPS = frozenset(
         "crawl/cancel",
         "crawl/collect",
         "crawl/poll",
+        "extract/upload",
+        "extract/submit",
+        "extract/collect",
+        "extract/abort",
     }
 )
 #: Операции без тела (диагностика, 07 §3).
@@ -387,6 +429,14 @@ class EdgeGateway:
     :param poller: необязательный сервис опроса фидов/каналов (Wave 5.1) с методом
         ``poll(request) -> {entries, count, truncated}``. При ``None`` операция
         ``crawl/poll`` отвечает ``status=error`` (сервис недоступен на этом edge-узле).
+    :param extract_service: необязательный сервис извлечения **по артефакту** (B1/B3;
+        10 §5.4) с методами ``upload/submit/collect/abort(payload)`` и, необязательно,
+        ``purge_expired()``/``close()``/``levels``/``devices``/``ttl_s``. При ``None``
+        операции ``extract/*`` отвечают ``status=error``, а ``capabilities().extract``
+        честно объявляет ``supports_artifact=false`` (а не «поддерживается, но не работает»).
+    :param max_body_bytes: лимит тела запроса этого узла. Нужен гейтвею, чтобы объявить
+        ``capabilities().extract.max_upload_chunk_bytes`` — размер чанка, выведенный из
+        фактического лимита, а не из константы ядра.
     """
 
     def __init__(
@@ -407,6 +457,8 @@ class EdgeGateway:
         schema_version: str = EDGE_SCHEMA_VERSION,
         scheduler: Any = None,
         poller: Any = None,
+        extract_service: Any = None,
+        max_body_bytes: int = DEFAULT_MAX_BODY_BYTES,
     ) -> None:
         self._crawler = crawler
         self._extractors = _normalize_adapters(extractor)
@@ -422,6 +474,8 @@ class EdgeGateway:
         self.schema_version = schema_version
         self._scheduler = scheduler
         self._poller = poller
+        self._extract_service = extract_service
+        self._max_body_bytes = int(max_body_bytes)
 
     # -- идентификаторы --------------------------------------------------------
 
@@ -432,13 +486,36 @@ class EdgeGateway:
     # -- capabilities ----------------------------------------------------------
 
     def capabilities(self) -> dict[str, Any]:
-        """Версии edge-компонентов для манифеста (``/v1/capabilities``, 07 §3/§7)."""
-        return {
+        """Версии edge-компонентов для манифеста (``/v1/capabilities``, 07 §3/§7).
+
+        Блок ``extract`` (аддитивный, 10 §5.4) — не «реклама возможностей», а вход ядра:
+        размер чанка ядро берёт **отсюда**, а не из своей константы, иначе оно упрётся в
+        ``413`` на объявленном лимите тела. Уровни/устройства объявляются только те, что
+        узел действительно исполнит (``off`` не извлекает — его здесь нет, хотя как
+        значение оси он допустим в запросе и получает отказ с объяснением).
+        """
+        capabilities: dict[str, Any] = {
             "extractor_version": self._primary_extractor_version(),
             "crawler_version": str(getattr(self._crawler, "version", "") or ""),
             "search_engine": self._search_engine_name(),
             "supported_formats": self._supported_formats_list(),
         }
+        capabilities["extract"] = self._extract_capabilities()
+        return capabilities
+
+    def _extract_capabilities(self) -> dict[str, Any]:
+        """Объявленные возможности извлечения по артефакту (``capabilities.extract``)."""
+        service = self._extract_service
+        declared: dict[str, Any] = {
+            "supports_artifact": service is not None,
+            "max_upload_chunk_bytes": max_upload_chunk_bytes(self._max_body_bytes),
+            "levels": [str(item) for item in (getattr(service, "levels", None) or [])],
+            "devices": [str(item) for item in (getattr(service, "devices", None) or [])],
+        }
+        ttl = getattr(service, "ttl_s", None)
+        if isinstance(ttl, int) and not isinstance(ttl, bool) and ttl > 0:
+            declared["staging_ttl_s"] = ttl
+        return declared
 
     def _primary_extractor_version(self) -> str:
         if self._extractor_version is not None:
@@ -520,8 +597,10 @@ class EdgeGateway:
     # -- чистая диспетчеризация ------------------------------------------------
 
     def handle(self, op: str, payload: Mapping[str, Any]) -> Any:
-        """Чистая диспетчеризация по ``fetch``/``search``/``registry``/``capabilities``/``health``
-        и crawl-операциям ``crawl/{submit,status,cancel,collect}`` (Phase 3.1).
+        """Чистая диспетчеризация по ``fetch``/``search``/``registry``/``capabilities``/``health``,
+        crawl-операциям ``crawl/{submit,status,cancel,collect,poll}`` (Phase 3.1/Wave 5.1) и
+        операциям извлечения по артефакту ``extract/{upload,submit,collect,abort}``
+        (B1/B3; 10 §5.4).
 
         Возвращает **payload** конверта (оборачивает ``envelope``). Неизвестный op →
         ``EdgeRequestError``. Сбои адаптеров становятся ``EdgeAdapterError``.
@@ -539,6 +618,10 @@ class EdgeGateway:
             "crawl/cancel": self._handle_crawl_cancel,
             "crawl/collect": self._handle_crawl_collect,
             "crawl/poll": self._handle_crawl_poll,
+            "extract/upload": self._handle_extract_upload,
+            "extract/submit": self._handle_extract_submit,
+            "extract/collect": self._handle_extract_collect,
+            "extract/abort": self._handle_extract_abort,
         }.get(op)
         if handler is None:
             raise EdgeRequestError(f"неизвестная операция: {op!r}")
@@ -920,6 +1003,72 @@ class EdgeGateway:
         violations = validate_crawl_request(op, payload)
         if violations:
             raise EdgeRequestError("; ".join(violations))
+
+    # -- extract (B1/B3; 10 §5.4) ---------------------------------------------
+
+    def _require_extract_service(self) -> Any:
+        """Возвращает сервис извлечения по артефакту либо бросает ``EdgeError``."""
+        if self._extract_service is None:
+            raise EdgeError("extract service is not available on this edge node")
+        return self._extract_service
+
+    def _call_extract(
+        self, method: str, op: str, payload: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        """Валидирует запрос и делегирует сервису; результат — объект (не ``None``).
+
+        Порядок важен: сначала форма запроса, потом наличие сервиса. Иначе узел без
+        сервиса отвечал бы «недоступно» на структурно некорректный запрос, и клиент чинил
+        бы не то — ровно так же устроены crawl-операции.
+        """
+        violations = validate_extract_request(op, payload)
+        if violations:
+            raise EdgeRequestError("; ".join(violations))
+        service = self._require_extract_service()
+        try:
+            result = getattr(service, method)(payload)
+        except EdgeError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - грациозная граница адаптера
+            raise EdgeAdapterError(f"{op}: {exc}") from exc
+        if not isinstance(result, Mapping):
+            raise EdgeAdapterError(
+                f"{op}: сервис вернул не-объект ({type(result).__name__})"
+            )
+        return dict(result)
+
+    def _handle_extract_upload(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        """``/v1/extract/upload`` → сколько чанков и байт edge принял (B1)."""
+        return self._call_extract("upload", "extract/upload", payload)
+
+    def _handle_extract_submit(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        """``/v1/extract/submit`` → ``{accepted, extractor_version}``: работа ушла в фон.
+
+        ``extractor_version`` — идентичность **исполняющего** экстрактора (B2): ядро
+        сравнивает её со своей объявленной, и это единственное условие, при котором ``pb``
+        под ``split`` совпадёт с ``local``.
+        """
+        return self._call_extract("submit", "extract/submit", payload)
+
+    def _handle_extract_collect(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        """``/v1/extract/collect`` → ``{status, text, ...}``; контент, не evidence (I19)."""
+        return self._call_extract("collect", "extract/collect", payload)
+
+    def _handle_extract_abort(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        """``/v1/extract/abort`` → ``{aborted, removed_bytes}``: staging убран (B1)."""
+        return self._call_extract("abort", "extract/abort", payload)
+
+    # -- жизненный цикл --------------------------------------------------------
+
+    def close(self) -> None:
+        """Освобождает фоновые ресурсы узла (очередь извлечения по артефакту).
+
+        Вызывается на закрытии сервера (:func:`serve`). При ``extract_service=None`` —
+        no-op, поэтому поведение локального профиля не меняется.
+        """
+        closer = getattr(self._extract_service, "close", None)
+        if callable(closer):
+            closer()
 
     # -- выбор инъецированного адаптера ----------------------------------------
 
@@ -1399,5 +1548,12 @@ def serve(
         try:
             server.server_close()
         finally:
-            if scheduler is not None:
-                scheduler.stop()
+            try:
+                if scheduler is not None:
+                    scheduler.stop()
+            finally:
+                # Фоновые ресурсы узла: очередь извлечения по артефакту обязана
+                # остановиться вместе с сервером (иначе потоки остались бы висеть).
+                closer = getattr(gateway, "close", None)
+                if callable(closer):
+                    closer()

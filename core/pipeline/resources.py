@@ -47,6 +47,8 @@ from core.util.document_formats import (
     is_epub,
     textual_family,
 )
+from core.util.gpu import cuda_available as _cuda_available
+from core.util.gpu import cuda_total_vram_mb as _cuda_total_vram_mb
 
 __all__ = [
     "DOCLING_PEAK_MB",
@@ -355,22 +357,13 @@ def vram_peak_mb(
 
 
 def cuda_available() -> bool:
-    """Доступно ли CUDA-устройство — **ленивый** импорт torch (не на старте процесса).
+    """Доступно ли CUDA-устройство — делегирует общей пробе (:mod:`core.util.gpu`).
 
-    Импорт torch стоит сотни MB RSS и тянет весь стек моделей, поэтому он выполняется
-    только когда оператор объявил ``crawl.pdf_device=cuda``: тогда процесс всё равно
-    загрузит его для извлечения. Отсутствие torch/драйвера — честный ``False``, а не
-    исключение: решение «отказ или работа» принимает вызывающий (R5: ``cuda`` при
-    недоступном устройстве — ``EXIT_USAGE``, не тихий CPU-фолбэк).
+    Реализация одна на ядро и DMZ: две копии одного вопроса разошлись бы молча, и отказ
+    в preflight сочетался бы с тихой работой на другой стороне. Имя оставлено здесь,
+    потому что на него опираются вызывающие этого модуля.
     """
-    try:  # тяжёлая необязательная зависимость
-        import torch
-    except Exception:  # noqa: BLE001 — нет пакета/битые библиотеки: устройство недоступно
-        return False
-    try:
-        return bool(torch.cuda.is_available())
-    except Exception:  # noqa: BLE001 — драйвер отвечает ошибкой: устройство недоступно
-        return False
+    return _cuda_available()
 
 
 def cuda_total_vram_mb() -> int | None:
@@ -381,17 +374,7 @@ def cuda_total_vram_mb() -> int | None:
     зависеть от того, открыт ли у соседа браузер. Резерв вычитается отдельно
     (:func:`read_usable_vram_mb`), поэтому формула называет обе величины.
     """
-    try:  # тяжёлая необязательная зависимость
-        import torch
-    except Exception:  # noqa: BLE001 — нет пакета
-        return None
-    try:
-        if not bool(torch.cuda.is_available()):
-            return None
-        total = int(torch.cuda.get_device_properties(0).total_memory)
-    except Exception:  # noqa: BLE001 — драйвер/инициализация отвечают ошибкой
-        return None
-    return total // (1024 * 1024)
+    return _cuda_total_vram_mb()
 
 
 def read_usable_vram_mb() -> int | None:

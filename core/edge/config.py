@@ -9,6 +9,12 @@ store/domain: конфиг описывает только ресурсы веб
 
     state_dir: ./edge_state
     blob_dir: ./edge_state/blobs
+    # Staging-каталог извлечения по артефакту (B1): None → {state_dir}/extract.
+    extract_dir: null
+    # TTL брошенной загрузки артефакта, сек (уборка на каждой операции).
+    extract_ttl_s: 3600
+    # Одновременных извлечений по артефакту (ограничение по памяти, не по объёму).
+    extract_workers: 1
     host: 127.0.0.1
     port: 0
     workers: {http: 4, scrapy: 2, browser: 1}
@@ -170,6 +176,20 @@ class EdgeRuntimeConfig(BaseModel):
     queue_limit: int = 256
     #: TTL блобов, сек (``86400`` — сутки); истечение — ответственность edge-хранилища.
     ttl_s: int = 86400
+    #: Staging-каталог извлечения **по артефакту** (B1; 10 §5.4); ``None`` →
+    #: ``{state_dir}/extract`` (:attr:`resolved_extract_dir`). Здесь лежат принятые чанки
+    #: и результат разбора, поэтому каталог живёт рядом с остальным состоянием edge, а не
+    #: в системном ``/tmp``: временный каталог ОС не переживает перезагрузку и не виден
+    #: оператору в той же раскладке, что блобы.
+    extract_dir: str | None = None
+    #: TTL брошенной загрузки артефакта, сек (дефолт — час). Объявленное значение, а не
+    #: константа кода: передача артефакта — минуты, поэтому сутки (как у ``ttl_s`` для
+    #: блобов краула) держали бы недокачанный корпус на диске DMZ без пользы.
+    extract_ttl_s: int = Field(default=3600, gt=0)
+    #: Число одновременных извлечений по артефакту. Ограничение — по **ресурсу**: пик
+    #: docling на документ измерен в сотнях МБ-гигабайтах, поэтому параллельность задаётся
+    #: явно и по памяти, а не выводится из числа ядер.
+    extract_workers: int = Field(default=1, gt=0)
     #: Версия конверта шва (совпадает с ``EDGE_SCHEMA_VERSION``, 07 §3/§7).
     schema_version: str = "1"
     #: Потолок тела запроса, байты; превышение → HTTP 413 (07 §8.1).
@@ -183,6 +203,12 @@ class EdgeRuntimeConfig(BaseModel):
     def resolved_blob_dir(self) -> str:
         """Эффективный каталог блобов: явный ``blob_dir`` либо ``{state_dir}/blobs``."""
         return self.blob_dir or f"{self.state_dir.rstrip('/')}/blobs"
+
+    @property
+    def resolved_extract_dir(self) -> str:
+        """Эффективный staging-каталог извлечения: явный ``extract_dir`` либо
+        ``{state_dir}/extract`` (та же раскладка, что у блобов: одно место состояния)."""
+        return self.extract_dir or f"{self.state_dir.rstrip('/')}/extract"
 
 
 def _read_yaml(path: str | Path) -> Any:

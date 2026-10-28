@@ -15,15 +15,20 @@ import json
 import pytest
 
 from core.adapters.remote_gateway import DEFAULT_SCHEMA_VERSION, HttpContentGateway
+from core.domain.enums import DocumentLevel, PdfDevice, PdfPipeline
 from core.edge import seam_schema
 from core.edge.seam_schema import (
     CRAWL_OPS,
     ENDPOINT_OPS,
+    EXTRACT_LEVEL_VALUES,
+    EXTRACT_OPS,
+    PDF_DEVICE_VALUES,
     SEAM_SCHEMA_VERSION,
     contract_digest,
     load_schema,
     validate_crawl_request,
     validate_envelope,
+    validate_extract_request,
     validate_fetch_request,
     validate_payload,
 )
@@ -37,11 +42,21 @@ _SCHEMA_FILES = (
     "capabilities.schema.json",
     "health.schema.json",
     "crawl.schema.json",
+    "extract.schema.json",
     "openapi.json",
 )
 
 #: Контрактные файлы схем (без OpenAPI), пригодные для :func:`load_schema`.
-_LOADABLE = ("envelope", "fetch", "search", "registry", "capabilities", "health", "crawl")
+_LOADABLE = (
+    "envelope",
+    "fetch",
+    "search",
+    "registry",
+    "capabilities",
+    "health",
+    "crawl",
+    "extract",
+)
 
 _REQUEST_ID = "0" * 32
 
@@ -685,6 +700,320 @@ def test_validate_payload_health_accepts_and_requires_status() -> None:
 def test_validate_payload_unknown_op() -> None:
     violations = validate_payload("teleport", {})
     assert violations and "teleport" in violations[0]
+
+
+# ---------------------------------------------------------------------------
+# extract — извлечение по артефакту (B1/B2/B3; 10 §5.4)
+# ---------------------------------------------------------------------------
+
+_VALID_UPLOAD = {
+    "content_hash": "a" * 64,
+    "size": 10,
+    "chunk_no": 0,
+    "chunk_total": 2,
+    "data_b64": "YQ==",
+}
+
+
+def test_extract_ops_exported_and_routed() -> None:
+    """Четыре операции извлечения объявлены и у каждой есть валидатор ответа."""
+    assert EXTRACT_OPS == frozenset(
+        {"extract/upload", "extract/submit", "extract/collect", "extract/abort"}
+    )
+    assert EXTRACT_OPS <= ENDPOINT_OPS
+    for op in sorted(EXTRACT_OPS):
+        violations = validate_payload(op, {})
+        # Валидатор найден: жалоба на форму, а не «неизвестная операция».
+        assert violations and "неизвестная операция" not in " ".join(violations), op
+
+
+def test_extract_schema_declares_all_ops() -> None:
+    """Публикуемая схема несёт запрос и ответ каждой операции (источник истины полей)."""
+    schema = load_schema("extract")
+    defs = schema["$defs"]
+    for op in ("upload", "submit", "collect", "abort"):
+        assert f"{op}_request" in defs, op
+        assert f"{op}_response" in defs, op
+    assert defs["upload_request"]["required"] == [
+        "content_hash",
+        "size",
+        "chunk_no",
+        "chunk_total",
+        "data_b64",
+    ]
+    assert defs["submit_request"]["required"] == ["content_hash", "size", "level"]
+    assert defs["submit_response"]["required"] == ["content_hash", "accepted"]
+    assert defs["collect_response"]["required"] == ["content_hash", "status"]
+    assert defs["abort_request"]["required"] == ["content_hash"]
+    assert defs["abort_response"]["required"] == ["content_hash", "aborted"]
+    # Статусы collect: `unknown` обязателен — иначе ядро ждало бы вечно.
+    assert set(defs["collect_response"]["properties"]["status"]["enum"]) == {
+        "pending",
+        "done",
+        "error",
+        "unknown",
+    }
+    assert "text" in defs
+
+
+def test_extract_schema_axes_match_core_enums() -> None:
+    """Оси ``level``/``device`` в схеме — те же значения, что в перечислениях ядра.
+
+    Расхождение схемы и ``DocumentLevel``/``PdfDevice`` означало бы, что шов публикует
+    свою лестницу: ядро послало бы значение, которое edge не исполнит (или наоборот), и
+    ось перестала бы действовать молча (R5).
+    """
+    schema = load_schema("extract")
+    level_enum = set(schema["$defs"]["submit_request"]["properties"]["level"]["enum"])
+    device_enum = set(schema["$defs"]["submit_request"]["properties"]["device"]["enum"])
+    core_levels = {level.value for level in DocumentLevel} | {PdfPipeline.TEXT_LAYER.value}
+    assert level_enum == core_levels == set(EXTRACT_LEVEL_VALUES)
+    assert device_enum == {device.value for device in PdfDevice}
+    assert device_enum == set(PDF_DEVICE_VALUES)
+    # `text_layer` — механизм без лестницы, но значение оси: он обязан быть в обоих наборах.
+    assert "text_layer" in level_enum and PdfPipeline.TEXT_LAYER.value in core_levels
+
+
+def test_validate_extract_request_upload_accepts() -> None:
+    assert validate_extract_request("extract/upload", _VALID_UPLOAD) == []
+    assert (
+        validate_extract_request(
+            "extract/upload", {**_VALID_UPLOAD, "chunk_no": 1, "chunk_total": 2}
+        )
+        == []
+    )
+
+
+def test_validate_extract_request_upload_rejects_bad_forms() -> None:
+    assert any(
+        "data_b64" in v
+        for v in validate_extract_request("extract/upload", {**_VALID_UPLOAD, "data_b64": 5})
+    )
+    assert any(
+        "size" in v
+        for v in validate_extract_request("extract/upload", {**_VALID_UPLOAD, "size": -1})
+    )
+    assert any(
+        "chunk_total" in v
+        for v in validate_extract_request(
+            "extract/upload", {**_VALID_UPLOAD, "chunk_total": 0}
+        )
+    )
+    assert any(
+        "chunk_no" in v
+        for v in validate_extract_request(
+            "extract/upload", {**_VALID_UPLOAD, "chunk_no": 2, "chunk_total": 2}
+        )
+    )
+    assert any(
+        "content_hash" in v
+        for v in validate_extract_request(
+            "extract/upload", {**_VALID_UPLOAD, "content_hash": ""}
+        )
+    )
+
+
+def test_validate_extract_request_submit_accepts_axes() -> None:
+    assert (
+        validate_extract_request(
+            "extract/submit",
+            {"content_hash": "h", "size": 1, "level": "layout_tables"},
+        )
+        == []
+    )
+    assert (
+        validate_extract_request(
+            "extract/submit",
+            {
+                "content_hash": "h",
+                "size": 1,
+                "level": "text_layer",
+                "device": "cuda",
+                "format": "pdf",
+                "filename_hint": "document.pdf",
+                "lang": "ru",
+                "extractor_declared": "docling-doc-3:full/cpu/docling-2.135.0",
+            },
+        )
+        == []
+    )
+
+
+def test_validate_extract_request_submit_rejects_unknown_axes() -> None:
+    assert any(
+        "level" in v
+        for v in validate_extract_request(
+            "extract/submit", {"content_hash": "h", "size": 1, "level": "banana"}
+        )
+    )
+    assert any(
+        "level" in v
+        for v in validate_extract_request(
+            "extract/submit", {"content_hash": "h", "size": 1}
+        )
+    )
+    assert any(
+        "device" in v
+        for v in validate_extract_request(
+            "extract/submit",
+            {"content_hash": "h", "size": 1, "level": "full", "device": "auto"},
+        )
+    )
+
+
+def test_validate_extract_request_collect_and_abort() -> None:
+    assert validate_extract_request("extract/collect", {"content_hash": "h"}) == []
+    assert (
+        validate_extract_request(
+            "extract/collect", {"content_hash": "h", "level": "layout_tables"}
+        )
+        == []
+    )
+    assert any(
+        "content_hash" in v for v in validate_extract_request("extract/collect", {})
+    )
+    assert validate_extract_request("extract/abort", {"content_hash": "h"}) == []
+    assert any("content_hash" in v for v in validate_extract_request("extract/abort", {}))
+
+
+def test_validate_extract_request_unknown_op() -> None:
+    violations = validate_extract_request("extract/teleport", {})
+    assert violations and "extract/teleport" in violations[0]
+
+
+def test_validate_payload_extract_upload_and_submit() -> None:
+    assert (
+        validate_payload(
+            "extract/upload",
+            {
+                "content_hash": "h",
+                "received_chunks": 1,
+                "chunk_total": 2,
+                "received_bytes": 10,
+                "complete": False,
+                "expires_at": "2026-10-28T12:00:00+00:00",
+            },
+        )
+        == []
+    )
+    assert validate_payload("extract/upload", {"content_hash": "h", "complete": False})
+    assert (
+        validate_payload(
+            "extract/submit",
+            {
+                "content_hash": "h",
+                "accepted": True,
+                "extractor_version": "docling-doc-3:full/cpu/docling-2.135.0",
+                "error": None,
+            },
+        )
+        == []
+    )
+    assert validate_payload("extract/submit", {"content_hash": "h", "accepted": "yes"})
+
+
+def test_validate_payload_extract_collect_states() -> None:
+    done = {
+        "content_hash": "h",
+        "status": "done",
+        "text": {
+            "content": "# md",
+            "hash": "d",
+            "extractor_version": "docling-doc-3:full/cpu/docling-2.135.0",
+            "page_count": 3,
+            "pages_converted": None,
+            "partial": False,
+            "partial_reason": None,
+        },
+        "extractor_version": "docling-doc-3:full/cpu/docling-2.135.0",
+        "error": None,
+    }
+    assert validate_payload("extract/collect", done) == []
+    for status in ("pending", "error", "unknown"):
+        assert (
+            validate_payload(
+                "extract/collect", {"content_hash": "h", "status": status, "text": None}
+            )
+            == []
+        ), status
+    assert validate_payload("extract/collect", {"content_hash": "h", "status": "running"})
+    assert validate_payload(
+        "extract/collect", {"content_hash": "h", "status": "done", "text": "md"}
+    )
+    assert validate_payload(
+        "extract/collect",
+        {"content_hash": "h", "status": "done", "text": {"page_count": "3"}},
+    )
+
+
+def test_validate_payload_extract_abort() -> None:
+    assert (
+        validate_payload(
+            "extract/abort",
+            {"content_hash": "h", "aborted": True, "removed_bytes": 12},
+        )
+        == []
+    )
+    assert validate_payload("extract/abort", {"content_hash": "h", "aborted": 1})
+
+
+def test_capabilities_schema_declares_extract_block() -> None:
+    """Блок ``extract`` в схеме capabilities: без него ядро не узнает размер чанка."""
+    schema = load_schema("capabilities")
+    block = schema["properties"]["extract"]
+    assert block["type"] == "object"
+    assert block["additionalProperties"] is False
+    assert set(block["required"]) == {
+        "supports_artifact",
+        "max_upload_chunk_bytes",
+        "levels",
+        "devices",
+    }
+    assert block["properties"]["max_upload_chunk_bytes"]["minimum"] == 1
+
+
+def test_validate_payload_capabilities_extract_block() -> None:
+    payload = {
+        "extractor_version": "e1",
+        "crawler_version": "c1",
+        "search_engine": "s1",
+        "supported_formats": ["html"],
+        "extract": {
+            "supports_artifact": True,
+            "max_upload_chunk_bytes": 783_360,
+            "levels": ["layout_tables", "full"],
+            "devices": ["cpu", "cuda"],
+            "staging_ttl_s": 3600,
+        },
+    }
+    assert validate_payload("capabilities", payload) == []
+    # Старый ответ без блока остаётся валидным (аддитивность контракта).
+    assert validate_payload("capabilities", {"extractor_version": "e1"}) == []
+    assert validate_payload(
+        "capabilities", {"extract": {**payload["extract"], "levels": "full"}}
+    )
+    assert validate_payload(
+        "capabilities", {"extract": {**payload["extract"], "supports_artifact": "yes"}}
+    )
+
+
+def test_openapi_declares_extract_schemas() -> None:
+    openapi = load_schema("openapi")
+    schemas = openapi["components"]["schemas"]
+    for name in (
+        "ExtractUploadRequest",
+        "ExtractUploadResponse",
+        "ExtractSubmitRequest",
+        "ExtractSubmitResponse",
+        "ExtractCollectRequest",
+        "ExtractCollectResponse",
+        "ExtractAbortRequest",
+        "ExtractAbortResponse",
+    ):
+        assert name in schemas, name
+        assert schemas[name]["$ref"].startswith("extract.schema.json#/$defs/")
+    for op in sorted(EXTRACT_OPS):
+        assert "post" in openapi["paths"][f"/v1/{op}"]
 
 
 # ---------------------------------------------------------------------------

@@ -32,11 +32,13 @@ from core.adapters.remote_gateway import HttpContentGateway
 from core.adapters.remote_registry import RemoteRegistry
 from core.adapters.remote_search import RemoteSearch
 from core.edge.server import (
+    DEFAULT_MAX_BODY_BYTES,
     EDGE_SCHEMA_VERSION,
     SEAM_SEARCH_MAX_LIMIT,
     EdgeGateway,
     build_server,
     make_handler,
+    max_upload_chunk_bytes,
     route_request,
     serve,
 )
@@ -349,6 +351,15 @@ def test_capabilities_endpoint_shape() -> None:
         "crawler_version": "fake-crawler-1",
         "search_engine": "fake",
         "supported_formats": ["html", "pdf"],
+        # Блок извлечения по артефакту (аддитивно, 10 §5.4): узел без сервиса честно
+        # объявляет, что подпротокол не поддержан, но размер чанка называет — он выведен
+        # из лимита тела и не зависит от наличия сервиса.
+        "extract": {
+            "supports_artifact": False,
+            "max_upload_chunk_bytes": max_upload_chunk_bytes(DEFAULT_MAX_BODY_BYTES),
+            "levels": [],
+            "devices": [],
+        },
     }
     env = edge.envelope("capabilities", {})
     assert env["status"] == "ok"

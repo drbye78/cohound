@@ -45,6 +45,7 @@ __all__ = [
     "PUBLIC_OPS",
     "SCOPE_CAPABILITIES",
     "SCOPE_CRAWL",
+    "SCOPE_EXTRACT",
     "SCOPE_FETCH",
     "SCOPE_HEALTH",
     "SCOPE_REGISTRY",
@@ -87,6 +88,11 @@ SCOPE_CAPABILITIES = "capabilities"
 SCOPE_HEALTH = "health"
 #: Scope, требуемый для всех операций очереди краула ``crawl/{submit,status,cancel,collect}``.
 SCOPE_CRAWL = "crawl"
+#: Scope, требуемый для операций извлечения по артефакту ``extract/*`` (10 §5.4).
+#:
+#: Отдельный от ``crawl``: приём артефакта — не краул, у него другой ресурс (диск staging
+#: и память экстрактора), и оператор вправе разрешить ядру извлечение, не открывая краул.
+SCOPE_EXTRACT = "extract"
 
 #: Allowlist операций шва (07 §3/§5). Неизвестная операция авторизации не подлежит.
 AUTHORIZED_OPS: frozenset[str] = frozenset(
@@ -101,6 +107,10 @@ AUTHORIZED_OPS: frozenset[str] = frozenset(
         "crawl/cancel",
         "crawl/collect",
         "crawl/poll",
+        "extract/upload",
+        "extract/submit",
+        "extract/collect",
+        "extract/abort",
     }
 )
 
@@ -119,6 +129,10 @@ _OP_SCOPE: dict[str, str] = {
     "crawl/cancel": SCOPE_CRAWL,
     "crawl/collect": SCOPE_CRAWL,
     "crawl/poll": SCOPE_CRAWL,
+    "extract/upload": SCOPE_EXTRACT,
+    "extract/submit": SCOPE_EXTRACT,
+    "extract/collect": SCOPE_EXTRACT,
+    "extract/abort": SCOPE_EXTRACT,
 }
 
 #: Входящий запрос шва, как его видит аутентификатор: отображение заголовков.

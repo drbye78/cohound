@@ -6,8 +6,17 @@
   payload, error}`` (ответ + форма запроса в ``$defs.request``);
 * ``fetch.schema.json`` / ``search.schema.json`` / ``registry.schema.json`` —
   запрос+ответ операций ``POST /v1/*``;
+* ``crawl.schema.json`` — очередь краула ``POST /v1/crawl/*``;
+* ``extract.schema.json`` — извлечение **по артефакту** ``POST /v1/extract/*``
+  (B1/B2/B3; 10 §5.4): приём чанками, заказ, забор, уборка;
 * ``capabilities.schema.json`` / ``health.schema.json`` — ответы ``GET /v1/*``;
 * ``openapi.json`` — OpenAPI 3.1 по всем эндпоинтам (для DLP/IDS/IDP-политик, 07 §8).
+
+Значения осей ``level``/``device`` операций извлечения берутся из **перечислений ядра**
+(``DocumentLevel``/``PdfPipeline``/``PdfDevice``), а не из литералов этого модуля: шов
+публикует словарь осей, а не заводит второй. Импорт ``core.domain.enums`` здесь — словарь
+данных (StrEnum-объявления без I/O), а не доступ к домену: правила и store edge не видит
+(изоляция слоя проверяется тестом ``test_server_source_has_no_store_or_domain_import``).
 
 Модуль **нейтрален** (§1.3) и опирается только на stdlib: ``jsonschema`` — вердикт
 **b** в реестре зависимостей (``docs/architecture/05-dependency-stack.md`` §2.9),
@@ -29,13 +38,17 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+from core.domain.enums import DocumentLevel, PdfDevice, PdfPipeline
 from core.ports.types import CrawlStrategy, ExtractionRoute, FetchMode
 
 __all__ = [
     "CRAWL_OPS",
     "ENDPOINT_OPS",
+    "EXTRACT_LEVEL_VALUES",
+    "EXTRACT_OPS",
     "EXTRACT_VALUES",
     "FETCH_VALUES",
+    "PDF_DEVICE_VALUES",
     "POLL_KIND_VALUES",
     "SCHEMA_DIR",
     "SEAM_SCHEMA_VERSION",
@@ -44,6 +57,7 @@ __all__ = [
     "load_schema",
     "validate_crawl_request",
     "validate_envelope",
+    "validate_extract_request",
     "validate_fetch_request",
     "validate_payload",
 ]
@@ -56,7 +70,8 @@ SEAM_SCHEMA_VERSION = "1"
 #: Каталог опубликованных контрактов (``<repo>/contracts/seam``).
 SCHEMA_DIR: Path = Path(__file__).resolve().parents[2] / "contracts" / "seam"
 
-#: Операции протокола ``/v1/*`` (07 §3). Crawl-операции сохраняют слэш (``crawl/submit``).
+#: Операции протокола ``/v1/*`` (07 §3). Crawl-операции сохраняют слэш (``crawl/submit``);
+#: то же — для извлечения по артефакту (``extract/upload``, 10 §5.4).
 ENDPOINT_OPS: frozenset[str] = frozenset(
     {
         "fetch",
@@ -69,8 +84,32 @@ ENDPOINT_OPS: frozenset[str] = frozenset(
         "crawl/cancel",
         "crawl/collect",
         "crawl/poll",
+        "extract/upload",
+        "extract/submit",
+        "extract/collect",
+        "extract/abort",
     }
 )
+
+#: Операции извлечения **по артефакту** (B1/B3; 10 §5.4): приём чанками, заказ извлечения,
+#: забор результата, уборка брошенной загрузки.
+EXTRACT_OPS: frozenset[str] = frozenset(
+    {"extract/upload", "extract/submit", "extract/collect", "extract/abort"}
+)
+
+#: Допустимые значения оси ``level`` операций извлечения (**не** новый словарь).
+#:
+#: Источник — перечисления ядра: ``DocumentLevel`` (лестница ``crawl.document_level``, P5)
+#: плюс ``PdfPipeline.TEXT_LAYER``. Второе слагаемое не «ещё один уровень», а **механизм**
+#: (P7), у которого лестницы нет: ``documents/openapi`` публикует его как значение той же
+#: оси, поэтому шов обязан принимать его там же, где принимает ``DocumentLevel``. Список
+#: выводится из перечислений, а не переписывается литералами: иначе шов и ядро разошлись бы
+#: молча, а ось уровня объявлена действующей (R5).
+EXTRACT_LEVEL_VALUES: frozenset[str] = frozenset(
+    {level.value for level in DocumentLevel} | {PdfPipeline.TEXT_LAYER.value}
+)
+#: Допустимые значения оси ``device`` запросов извлечения (P9, ``PdfDevice``).
+PDF_DEVICE_VALUES: frozenset[str] = frozenset(device.value for device in PdfDevice)
 
 #: Допустимые значения оси ``fetch`` запроса ``/v1/fetch`` (D2).
 FETCH_VALUES: frozenset[str] = frozenset(mode.value for mode in FetchMode)
@@ -85,7 +124,16 @@ _RESPONSE_STATUSES: frozenset[str] = frozenset({"ok", "error"})
 
 #: Имена ``*_schema.json``, за которые отвечает :func:`load_schema`.
 _SCHEMA_NAMES: frozenset[str] = frozenset(
-    {"envelope", "fetch", "search", "registry", "capabilities", "health", "crawl"}
+    {
+        "envelope",
+        "fetch",
+        "search",
+        "registry",
+        "capabilities",
+        "health",
+        "crawl",
+        "extract",
+    }
 )
 
 #: Crawl-операции очереди краула (Phase 3.1): POST /v1/crawl/{submit,status,cancel,collect}.
@@ -174,6 +222,26 @@ def _check_opt_bool(violations: list[str], where: str, field: str, value: Any) -
     """Поле, если присутствует/не ``None``, должно быть булевым."""
     if value is not None and not isinstance(value, bool):
         violations.append(f"{where}: поле {field} должно быть булевым или null")
+
+
+def _check_required_int(
+    violations: list[str], where: str, field: str, value: Any, *, minimum: int = 0
+) -> None:
+    """Поле обязано присутствовать и быть целым не меньше ``minimum``.
+
+    ``bool`` отвергается: в Python он подкласс ``int``, поэтому ``True`` прошёл бы как
+    ``1`` — и «объявленный размер» стал бы булевым без единого сообщения.
+    """
+    if not _is_int(value) or value < minimum:
+        violations.append(f"{where}: обязательное поле {field} — целое число >= {minimum}")
+
+
+def _check_required_bool(
+    violations: list[str], where: str, field: str, value: Any
+) -> None:
+    """Поле обязано присутствовать и быть булевым."""
+    if not isinstance(value, bool):
+        violations.append(f"{where}: обязательное поле {field} — булево значение")
 
 
 def _check_opt_str_list(
@@ -355,7 +423,13 @@ def _validate_registry(payload: Any) -> list[str]:
 
 
 def _validate_capabilities(payload: Any) -> list[str]:
-    """Payload ``GET /v1/capabilities`` (07 §3): версии edge-компонентов."""
+    """Payload ``GET /v1/capabilities`` (07 §3): версии edge-компонентов + блок ``extract``.
+
+    Блок ``extract`` (аддитивный, 10 §5.4) объявляет то, чего ядро иначе не знает:
+    размер чанка, который узел действительно примет; уровни и устройства, которые он
+    исполнит; и факт поддержки извлечения **по артефакту**. Без него ядро выбирало бы
+    размер чанка из собственной константы и получало ``413`` на объявленном лимите тела.
+    """
     if not isinstance(payload, Mapping):
         return ["capabilities: payload должен быть объектом"]
     violations: list[str] = []
@@ -366,6 +440,27 @@ def _validate_capabilities(payload: Any) -> list[str]:
         not isinstance(formats, list) or not all(isinstance(item, str) for item in formats)
     ):
         violations.append("capabilities: supported_formats должен быть списком строк")
+    extract = payload.get("extract")
+    if extract is not None:
+        violations.extend(_validate_capabilities_extract(extract))
+    return violations
+
+
+def _validate_capabilities_extract(extract: Any) -> list[str]:
+    """Блок ``capabilities.extract``: объявленный размер чанка + исполнимые оси."""
+    where = "capabilities.extract"
+    if not isinstance(extract, Mapping):
+        return [f"{where}: должен быть объектом или null"]
+    violations: list[str] = []
+    _check_required_int(
+        violations, where, "max_upload_chunk_bytes", extract.get("max_upload_chunk_bytes"), minimum=1
+    )
+    _check_required_bool(violations, where, "supports_artifact", extract.get("supports_artifact"))
+    for field in ("levels", "devices"):
+        value = extract.get(field)
+        if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+            violations.append(f"{where}: поле {field} должно быть списком строк")
+    _check_opt_int(violations, where, "staging_ttl_s", extract.get("staging_ttl_s"))
     return violations
 
 
@@ -515,6 +610,98 @@ def _validate_crawl_poll_response(payload: Any) -> list[str]:
     return violations
 
 
+#: Статусы ответа ``POST /v1/extract/collect`` (10 §5.4): работа идёт / готова / упала /
+#: работы нет. ``unknown`` обязателен: «нет работы» ≠ «ещё не готово», иначе ядро ждало бы
+#: вечно артефакт, который никогда не загружали.
+EXTRACT_COLLECT_STATUSES: frozenset[str] = frozenset(
+    {"pending", "done", "error", "unknown"}
+)
+
+
+def _validate_extract_text(text: Any) -> list[str]:
+    """Блок ``text`` ответа ``extract/collect`` — тот же состав, что ``fetch.text`` (07 §3).
+
+    Повторяет форму ``$defs/text`` в ``extract.schema.json``: ядро получает результат
+    извлечения в одном виде независимо от того, пришёл он вместе с фетчем или по артефакту.
+    """
+    if text is None:
+        return []
+    if not isinstance(text, Mapping):
+        return ["extract/collect.text: должен быть объектом или null"]
+    violations: list[str] = []
+    where = "extract/collect.text"
+    for field in ("content", "hash", "extractor_version", "partial_reason"):
+        _check_opt_str(violations, where, field, text.get(field))
+    for field in ("page_count", "pages_converted"):
+        _check_opt_int(violations, where, field, text.get(field))
+    _check_opt_bool(violations, where, "partial", text.get("partial"))
+    return violations
+
+
+def _validate_extract_upload_response(payload: Any) -> list[str]:
+    """Payload ``POST /v1/extract/upload``: сколько чанков и байт edge реально принял."""
+    if not isinstance(payload, Mapping):
+        return ["extract/upload: payload должен быть объектом"]
+    violations: list[str] = []
+    where = "extract/upload"
+    _check_required_str(violations, where, "content_hash", payload.get("content_hash"))
+    _check_required_int(violations, where, "received_chunks", payload.get("received_chunks"))
+    _check_required_int(
+        violations, where, "chunk_total", payload.get("chunk_total"), minimum=1
+    )
+    _check_required_int(violations, where, "received_bytes", payload.get("received_bytes"))
+    _check_required_bool(violations, where, "complete", payload.get("complete"))
+    _check_opt_str(violations, where, "expires_at", payload.get("expires_at"))
+    return violations
+
+
+def _validate_extract_submit_response(payload: Any) -> list[str]:
+    """Payload ``POST /v1/extract/submit``: принят ли заказ и **каким** экстрактором.
+
+    ``extractor_version`` — идентичность исполняющего экстрактора в пространстве имён ядра
+    (B2): ядро сравнивает её с объявленной, поэтому поле не подменяется «своей» строкой.
+    """
+    if not isinstance(payload, Mapping):
+        return ["extract/submit: payload должен быть объектом"]
+    violations: list[str] = []
+    where = "extract/submit"
+    _check_required_str(violations, where, "content_hash", payload.get("content_hash"))
+    _check_required_bool(violations, where, "accepted", payload.get("accepted"))
+    _check_opt_str(violations, where, "extractor_version", payload.get("extractor_version"))
+    _check_opt_str(violations, where, "error", payload.get("error"))
+    return violations
+
+
+def _validate_extract_collect_response(payload: Any) -> list[str]:
+    """Payload ``POST /v1/extract/collect``: статус работы и (при ``done``) текст."""
+    if not isinstance(payload, Mapping):
+        return ["extract/collect: payload должен быть объектом"]
+    violations: list[str] = []
+    where = "extract/collect"
+    _check_required_str(violations, where, "content_hash", payload.get("content_hash"))
+    status = payload.get("status")
+    if status not in EXTRACT_COLLECT_STATUSES:
+        violations.append(
+            f"{where}: status должен быть одним из {sorted(EXTRACT_COLLECT_STATUSES)}"
+        )
+    violations.extend(_validate_extract_text(payload.get("text")))
+    for field in ("extractor_version", "error"):
+        _check_opt_str(violations, where, field, payload.get(field))
+    return violations
+
+
+def _validate_extract_abort_response(payload: Any) -> list[str]:
+    """Payload ``POST /v1/extract/abort``: убрана ли staging-область и сколько байт."""
+    if not isinstance(payload, Mapping):
+        return ["extract/abort: payload должен быть объектом"]
+    violations: list[str] = []
+    where = "extract/abort"
+    _check_required_str(violations, where, "content_hash", payload.get("content_hash"))
+    _check_required_bool(violations, where, "aborted", payload.get("aborted"))
+    _check_required_int(violations, where, "removed_bytes", payload.get("removed_bytes"))
+    return violations
+
+
 _PAYLOAD_VALIDATORS = {
     "fetch": _validate_fetch,
     "search": _validate_search,
@@ -526,6 +713,10 @@ _PAYLOAD_VALIDATORS = {
     "crawl/cancel": _validate_crawl_cancel_response,
     "crawl/collect": _validate_crawl_collect_response,
     "crawl/poll": _validate_crawl_poll_response,
+    "extract/upload": _validate_extract_upload_response,
+    "extract/submit": _validate_extract_submit_response,
+    "extract/collect": _validate_extract_collect_response,
+    "extract/abort": _validate_extract_abort_response,
 }
 
 
@@ -725,12 +916,128 @@ def _validate_rate_limit(violations: list[str], where: str, value: Any) -> None:
             violations.append(f"{where}: rate_limit.{field} не может быть отрицательным")
 
 
+# ---------------------------------------------------------------------------
+# extract — запросы (B1/B3; 10 §5.4)
+# ---------------------------------------------------------------------------
+
+
+def validate_extract_request(op: str, payload: Any) -> list[str]:
+    """Проверяет **запросный** payload операции извлечения по артефакту; ``[]`` — валиден.
+
+    Контракты запросов (все — POST ``/v1/extract/*``, ``contracts/seam/extract.schema.json``):
+
+    * ``extract/upload``: ``{content_hash, size, chunk_no, chunk_total, data_b64}`` —
+      один чанк артефакта в base64;
+    * ``extract/submit``: ``{content_hash, size, level, device?, format?, filename_hint?,
+      lang?, extractor_declared?}`` — заказ извлечения уже принятых байтов;
+    * ``extract/collect``: ``{content_hash, level?}`` — опрос результата;
+    * ``extract/abort``: ``{content_hash}`` — уборка staging-области.
+
+    ``level``/``device`` — **оси**, а не свободные строки: значения берутся из перечислений
+    ядра (:data:`EXTRACT_LEVEL_VALUES`, :data:`PDF_DEVICE_VALUES`). Неизвестное значение —
+    нарушение (edge отвечает ``status=error``), а не тихий дефолт: ось, объявленная в
+    запросе и проигнорированная, сделала бы провенанс ложным (R5).
+
+    :param op: ``extract/upload`` | ``extract/submit`` | ``extract/collect`` | ``extract/abort``.
+    """
+    where = str(op).strip().lower()
+    if where == "extract/upload":
+        return _validate_extract_upload_request(payload)
+    if where == "extract/submit":
+        return _validate_extract_submit_request(payload)
+    if where == "extract/collect":
+        return _validate_extract_collect_request(payload)
+    if where == "extract/abort":
+        return _validate_extract_abort_request(payload)
+    return [
+        f"неизвестная операция извлечения {op!r} "
+        f"(ожидается одна из: {sorted(EXTRACT_OPS)})"
+    ]
+
+
+def _validate_extract_upload_request(payload: Any) -> list[str]:
+    """Запрос ``extract/upload``: один чанк; ``chunk_no`` обязан укладываться в ``chunk_total``.
+
+    Верхняя граница ``chunk_no < chunk_total`` не выводится из JSON-схемы (там два
+    независимых ``minimum``), но без неё повтор с номером за пределами объявленного набора
+    создал бы файл, который никто не соберёт: загрузка стала бы «завершённой» только по
+    счётчику, а байт в ней не было бы.
+    """
+    if not isinstance(payload, Mapping):
+        return ["extract/upload: payload должен быть объектом"]
+    violations: list[str] = []
+    where = "extract/upload"
+    _check_required_str(violations, where, "content_hash", payload.get("content_hash"))
+    _check_required_int(violations, where, "size", payload.get("size"))
+    _check_required_int(violations, where, "chunk_no", payload.get("chunk_no"))
+    _check_required_int(violations, where, "chunk_total", payload.get("chunk_total"), minimum=1)
+    if not isinstance(payload.get("data_b64"), str):
+        violations.append(f"{where}: обязательное поле data_b64 — строка (base64)")
+    chunk_no = payload.get("chunk_no")
+    chunk_total = payload.get("chunk_total")
+    # Сравнение — только после сужения типа: ``payload.get`` даёт ``Any | None``, и
+    # арифметика на ``None`` была бы падением, а не сообщением о нарушении контракта.
+    if (
+        isinstance(chunk_no, int)
+        and not isinstance(chunk_no, bool)
+        and isinstance(chunk_total, int)
+        and not isinstance(chunk_total, bool)
+        and chunk_total >= 1
+        and chunk_no >= chunk_total
+    ):
+        violations.append(
+            f"{where}: chunk_no={chunk_no} вне диапазона 0..{chunk_total - 1} "
+            "(нумерация чанков — с нуля)"
+        )
+    return violations
+
+
+def _validate_extract_submit_request(payload: Any) -> list[str]:
+    """Запрос ``extract/submit``: артефакт + оси ``level`` (B3) и ``device`` (P9)."""
+    if not isinstance(payload, Mapping):
+        return ["extract/submit: payload должен быть объектом"]
+    violations: list[str] = []
+    where = "extract/submit"
+    _check_required_str(violations, where, "content_hash", payload.get("content_hash"))
+    _check_required_int(violations, where, "size", payload.get("size"))
+    _opt_enum(violations, where, "level", payload.get("level"), EXTRACT_LEVEL_VALUES)
+    if payload.get("level") is None:
+        violations.append(
+            f"{where}: обязательное поле level — одно из {sorted(EXTRACT_LEVEL_VALUES)}"
+        )
+    _opt_enum(violations, where, "device", payload.get("device"), PDF_DEVICE_VALUES)
+    for field in ("format", "filename_hint", "lang", "extractor_declared"):
+        _check_opt_str(violations, where, field, payload.get(field))
+    return violations
+
+
+def _validate_extract_collect_request(payload: Any) -> list[str]:
+    """Запрос ``extract/collect``: ``content_hash`` (+ опциональное ожидание ``level``)."""
+    if not isinstance(payload, Mapping):
+        return ["extract/collect: payload должен быть объектом"]
+    violations: list[str] = []
+    where = "extract/collect"
+    _check_required_str(violations, where, "content_hash", payload.get("content_hash"))
+    _opt_enum(violations, where, "level", payload.get("level"), EXTRACT_LEVEL_VALUES)
+    return violations
+
+
+def _validate_extract_abort_request(payload: Any) -> list[str]:
+    """Запрос ``extract/abort``: ``content_hash`` — единственная адресация staging-области."""
+    if not isinstance(payload, Mapping):
+        return ["extract/abort: payload должен быть объектом"]
+    violations: list[str] = []
+    _check_required_str(violations, "extract/abort", "content_hash", payload.get("content_hash"))
+    return violations
+
+
 def validate_payload(op: str, payload: Any) -> list[str]:
     """Проверяет payload операции ``/v1/*``; ``[]`` — валиден.
 
     :param op: ``fetch`` | ``search`` | ``registry`` | ``capabilities`` | ``health`` |
         ``crawl/submit`` | ``crawl/status`` | ``crawl/cancel`` | ``crawl/collect`` |
-        ``crawl/poll``.
+        ``crawl/poll`` | ``extract/upload`` | ``extract/submit`` | ``extract/collect`` |
+        ``extract/abort``.
     :param payload: вложенный ``payload`` конверта ответа.
     """
     key = str(op).strip().lower()

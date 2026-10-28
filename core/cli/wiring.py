@@ -2281,9 +2281,11 @@ def build_extraction_pool(
         def _remote_worker(request: Any) -> Any:
             return _run_extract(extractor, request)
 
-        # P5: ось ``document_level`` здесь не действует (R-S): под ``split`` документную
-        # экстракцию исполняет edge своим конфигом. То же — ``pdf_pipeline`` (P7). Обе оси
-        # принимаются и игнорируются, чтобы подпись фабрики совпадала с локальной.
+        # P5/P9: ось ``document_level``/``pdf_device`` здесь не действует — она уже
+        # объявлена на собранном ``RemoteExtractor`` и едет в ``extract/submit``
+        # (B3, 10 §5.4). ``pdf_pipeline`` под ``split`` не действует: механизм PDF
+        # выбирает edge (R-S). Обе оси принимаются и игнорируются, чтобы подпись фабрики
+        # совпадала с локальной.
         # F0: пик воркера не собирается — воркеры-threads живут в ядре, но их ``ru_maxrss``
         # это RSS всего процесса, а не воркера; подделывать число нельзя (``None``).
         def _thread_factory(n: int, *_: Any, **__: Any) -> Any:
@@ -2978,6 +2980,15 @@ def build_adapters(
         content_gateway = gateway or build_gateway(
             config, transport=transport, extra_headers=extra_headers
         )
+        # B1/B3: оси извлечения для шва — тот же резолв app < run, которым пользуется
+        # локальный композит, чтобы `split` и `local` получали одно объявленное значение,
+        # а не два «дефолта по месту».
+        split_limits = resolve_crawl_limits(
+            "",
+            app=config.crawl,
+            run=run_crawl,
+            profiles=None,
+        )
         # E2: mapping ``registry_id → RemoteRegistry`` из package-scoped спецификаций —
         # по одному remote-прокси на объявленный реестр (multi-registry на split).
         resolved_specs = dict(registry_specs or {})
@@ -3015,10 +3026,24 @@ def build_adapters(
             ),
             # B3: спуск в контейнеры остаётся в ядре и в ``split``: байты архива лежат на
             # стороне ядра (``corpus_raw``), а читатель — локальный (листинг/стриминг
-            # файла, не веб-эгресс). Извлечение членов в DMZ швом не покрыто (``/v1/fetch``
-            # работает по URL) — такой член получает видимый пропуск ``extract_unavailable``.
+            # файла, не веб-эгресс). Член контейнера извлекается швом **по артефакту**
+            # (``extract/upload`` + ``submit``): у него синтетический URL, но файл на диске
+            # есть, поэтому ``extract_unavailable`` больше не повод для пропуска.
             container=container_for,
-            extractor=RemoteExtractor(content_gateway),
+            extractor=RemoteExtractor(
+                content_gateway,
+                # B1/B3 (10 §5.4): объявленные оси извлечения едут в ``extract/submit``,
+                # поэтому смена уровня/устройства меняет результат под ``split`` так же,
+                # как под ``local``. Резолв — та же цепочка app < run, что у локального
+                # композита (:func:`_build_local_ports`); per-root слой здесь не виден —
+                # порты собираются до per-root резолва (то же ограничение, что у
+                # ``pdf_pipeline`` выше).
+                document_level=split_limits.document_level,
+                pdf_device=split_limits.pdf_device,
+                # Потолок ожидания извлечения — объявленная ось (её дефолт и есть прежний
+                # зашитый 1800 с), а не второй таймер на стороне адаптера.
+                document_timeout=split_limits.document_timeout_s,
+            ),
             registry=RemoteRegistry(content_gateway, registry_id=registry_id),
             registry_fetchers=split_registry_fetchers or None,
             registry_spec_digest=registry_specs_digest(resolved_specs),

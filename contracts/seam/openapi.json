@@ -86,6 +86,30 @@
       },
       "CrawlPollResponse": {
         "$ref": "crawl.schema.json#/$defs/poll_response"
+      },
+      "ExtractUploadRequest": {
+        "$ref": "extract.schema.json#/$defs/upload_request"
+      },
+      "ExtractUploadResponse": {
+        "$ref": "extract.schema.json#/$defs/upload_response"
+      },
+      "ExtractSubmitRequest": {
+        "$ref": "extract.schema.json#/$defs/submit_request"
+      },
+      "ExtractSubmitResponse": {
+        "$ref": "extract.schema.json#/$defs/submit_response"
+      },
+      "ExtractCollectRequest": {
+        "$ref": "extract.schema.json#/$defs/collect_request"
+      },
+      "ExtractCollectResponse": {
+        "$ref": "extract.schema.json#/$defs/collect_response"
+      },
+      "ExtractAbortRequest": {
+        "$ref": "extract.schema.json#/$defs/abort_request"
+      },
+      "ExtractAbortResponse": {
+        "$ref": "extract.schema.json#/$defs/abort_response"
       }
     },
     "securitySchemes": {
@@ -989,6 +1013,382 @@
             }
           }
         }
+      }
+    },
+    "/v1/extract/upload": {
+      "post": {
+        "operationId": "extract/upload",
+        "summary": "Приём одного чанка артефакта (извлечение по артефакту; байты — чанками, I19)",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/RequestId"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "allOf": [
+                  {
+                    "$ref": "#/components/schemas/RequestEnvelope"
+                  },
+                  {
+                    "properties": {
+                      "payload": {
+                        "$ref": "#/components/schemas/ExtractUploadRequest"
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Сколько чанков и байт edge реально принял: {content_hash, received_chunks, chunk_total, received_bytes, complete, expires_at}.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Envelope"
+                    },
+                    {
+                      "properties": {
+                        "payload": {
+                          "$ref": "#/components/schemas/ExtractUploadResponse"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Не аутентифицирован: отсутствуют/невалидны креденшелы. Возвращается только при настроенной аутентификации (auth.mode != none).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Идентичность подтверждена, но у субъекта нет scope операции. Возвращается только при настроенной аутентификации (auth.mode != none).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Тело запроса превышает max_body_bytes (Content-Length отвергается до чтения; соединение закрывается — Connection: close). Для extract/upload предел — объявленный capabilities.extract.max_upload_chunk_bytes с поправкой на base64.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "mtls": []
+          },
+          {
+            "bearerJWT": []
+          }
+        ],
+        "x-auth-enforcement": "configurable: auth.mode in {mtls, oidc}"
+      }
+    },
+    "/v1/extract/submit": {
+      "post": {
+        "operationId": "extract/submit",
+        "summary": "Заказ извлечения по уже принятому артефакту (оси level/device едут в запросе)",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/RequestId"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "allOf": [
+                  {
+                    "$ref": "#/components/schemas/RequestEnvelope"
+                  },
+                  {
+                    "properties": {
+                      "payload": {
+                        "$ref": "#/components/schemas/ExtractSubmitRequest"
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Заказ принят: {content_hash, accepted, extractor_version, error}. extractor_version — идентичность исполняющего экстрактора в пространстве имён ядра (B2).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Envelope"
+                    },
+                    {
+                      "properties": {
+                        "payload": {
+                          "$ref": "#/components/schemas/ExtractSubmitResponse"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Не аутентифицирован: отсутствуют/невалидны креденшелы. Возвращается только при настроенной аутентификации (auth.mode != none).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Идентичность подтверждена, но у субъекта нет scope операции. Возвращается только при настроенной аутентификации (auth.mode != none).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Тело запроса превышает max_body_bytes (Content-Length отвергается до чтения; соединение закрывается — Connection: close). Для extract/upload предел — объявленный capabilities.extract.max_upload_chunk_bytes с поправкой на base64.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "mtls": []
+          },
+          {
+            "bearerJWT": []
+          }
+        ],
+        "x-auth-enforcement": "configurable: auth.mode in {mtls, oidc}"
+      }
+    },
+    "/v1/extract/collect": {
+      "post": {
+        "operationId": "extract/collect",
+        "summary": "Забор результата извлечения по артефакту (контент, не evidence — I19)",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/RequestId"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "allOf": [
+                  {
+                    "$ref": "#/components/schemas/RequestEnvelope"
+                  },
+                  {
+                    "properties": {
+                      "payload": {
+                        "$ref": "#/components/schemas/ExtractCollectRequest"
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "{content_hash, status, text, extractor_version, error}; status ∈ {pending, done, error, unknown}.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Envelope"
+                    },
+                    {
+                      "properties": {
+                        "payload": {
+                          "$ref": "#/components/schemas/ExtractCollectResponse"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Не аутентифицирован: отсутствуют/невалидны креденшелы. Возвращается только при настроенной аутентификации (auth.mode != none).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Идентичность подтверждена, но у субъекта нет scope операции. Возвращается только при настроенной аутентификации (auth.mode != none).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Тело запроса превышает max_body_bytes (Content-Length отвергается до чтения; соединение закрывается — Connection: close). Для extract/upload предел — объявленный capabilities.extract.max_upload_chunk_bytes с поправкой на base64.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "mtls": []
+          },
+          {
+            "bearerJWT": []
+          }
+        ],
+        "x-auth-enforcement": "configurable: auth.mode in {mtls, oidc}"
+      }
+    },
+    "/v1/extract/abort": {
+      "post": {
+        "operationId": "extract/abort",
+        "summary": "Уборка staging-области артефакта (брошенная загрузка не держит диск)",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/RequestId"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "allOf": [
+                  {
+                    "$ref": "#/components/schemas/RequestEnvelope"
+                  },
+                  {
+                    "properties": {
+                      "payload": {
+                        "$ref": "#/components/schemas/ExtractAbortRequest"
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "{content_hash, aborted, removed_bytes}.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Envelope"
+                    },
+                    {
+                      "properties": {
+                        "payload": {
+                          "$ref": "#/components/schemas/ExtractAbortResponse"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Не аутентифицирован: отсутствуют/невалидны креденшелы. Возвращается только при настроенной аутентификации (auth.mode != none).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Идентичность подтверждена, но у субъекта нет scope операции. Возвращается только при настроенной аутентификации (auth.mode != none).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Тело запроса превышает max_body_bytes (Content-Length отвергается до чтения; соединение закрывается — Connection: close). Для extract/upload предел — объявленный capabilities.extract.max_upload_chunk_bytes с поправкой на base64.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "mtls": []
+          },
+          {
+            "bearerJWT": []
+          }
+        ],
+        "x-auth-enforcement": "configurable: auth.mode in {mtls, oidc}"
       }
     }
   }

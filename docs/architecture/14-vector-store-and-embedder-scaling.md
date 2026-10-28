@@ -222,7 +222,7 @@ numpy/torch). ⬜ адаптера нет: `RemoteEmbedder` в `core/` не су
 
 Что уже есть и чего нет:
 
-- `_resolve_embedder()` (`core/cli/wiring.py:2510-2527`) выбирает эмбеддер **по факту
+- `_resolve_embedder()` (`core/cli/wiring.py:2670-2687`) выбирает эмбеддер **по факту
   установки**: `LiteEmbedder` (model2vec) → `LocalEmbedder` (bge-m3) → `None`. Это выбор
   средой, а не объявленным входом — та самая асимметрия, из-за которой модель оценщика
   перестала читаться из env. Внешний инстанс обязан быть **объявленным** (`deploy.embed`),
@@ -447,7 +447,7 @@ if revision else model_id` (`core/adapters/embed_model2vec.py:111-112`; то ж�
    возврат к нему не был предметом памяти.
 
 Пункт 5 требует правки `_resolve_embedder()`: сейчас он выбирает backend **по факту
-установки** (`wiring.py:2510-2527` — `model2vec_available()` → `_module_installed("sentence_transformers")`
+установки** (`wiring.py:2670-2687` — `model2vec_available()` → `_module_installed("sentence_transformers")`
 → `None`). При появлении `deploy.embed` приоритет становится объявленным:
 `backend` из конфига, а наличие библиотек — предпосылка, а не решение.
 **Проверено на 2026-10-28: не сделано** (строки 2274-2295 → 2510-2527, логика прежняя).

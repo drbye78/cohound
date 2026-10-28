@@ -1,0 +1,129 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cohound.local/contracts/seam/extract.schema.json",
+  "title": "Извлечение по артефакту: POST /v1/extract/{upload,submit,collect,abort}",
+  "description": "Протокол извлечения по артефакту (10 §5.4, модель M1). Ядро ретенирует байты и передаёт их в DMZ чанками; edge **не ходит в сеть** — он извлекает ровно те байты, которые ядро уже сохранило, и называет экстрактор, которым это сделал. Идентичность артефакта — его `content_hash`: повторная загрузка тех же байтов адресует ту же staging-область, поэтому повтор идемпотентен, а брошенная загрузка отличается от завершённой по числу принятых чанков. Возвращается контент, не evidence (I19): ядро пересчитывает хэш очищенного текста само.",
+  "type": "object",
+  "additionalProperties": false,
+  "$defs": {
+    "upload_request": {
+      "title": "POST /v1/extract/upload request payload",
+      "description": "Один чанк артефакта. `chunk_no` нумеруется с 0 и обязан укладываться в `chunk_total`; повтор того же `chunk_no` перезаписывает чанк (идемпотентность повтора), поэтому несогласованный размер чанка виден как расхождение `size`, а не как тихая склейка.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["content_hash", "size", "chunk_no", "chunk_total", "data_b64"],
+      "properties": {
+        "content_hash": {"type": "string", "minLength": 1},
+        "size": {"type": "integer", "minimum": 0},
+        "chunk_no": {"type": "integer", "minimum": 0},
+        "chunk_total": {"type": "integer", "minimum": 1},
+        "data_b64": {"type": "string"}
+      }
+    },
+    "upload_response": {
+      "title": "POST /v1/extract/upload response payload",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["content_hash", "received_chunks", "chunk_total", "received_bytes", "complete"],
+      "properties": {
+        "content_hash": {"type": "string"},
+        "received_chunks": {"type": "integer", "minimum": 0},
+        "chunk_total": {"type": "integer", "minimum": 1},
+        "received_bytes": {"type": "integer", "minimum": 0},
+        "complete": {"type": "boolean"},
+        "expires_at": {"type": ["string", "null"]}
+      }
+    },
+    "submit_request": {
+      "title": "POST /v1/extract/submit request payload",
+      "description": "Просит извлечь уже загруженный артефакт. `level` — ось извлечения (B3): она едет в запросе, поэтому смена уровня меняет результат под `split` так же, как под `local`. `device` — ось устройства (P9) по той же причине: она входит в `extractor_version`, то есть в адрес партиции (`pb`), поэтому «ядро объявило `cuda`, а edge извлёк на CPU» было бы разными сборками под одним `run_id`. Отсутствие `device` = объявленный дефолт edge-хоста. `extractor_declared` — ожидание ядра (B2): если edge исполнит другим экстрактором, он обязан так и ответить, а не выдать чужую идентичность за ожидаемую.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["content_hash", "size", "level"],
+      "properties": {
+        "content_hash": {"type": "string", "minLength": 1},
+        "size": {"type": "integer", "minimum": 0},
+        "level": {"enum": ["off", "text", "text_layer", "layout", "layout_tables", "full"]},
+        "device": {"enum": ["cpu", "cuda"]},
+        "format": {"type": ["string", "null"]},
+        "filename_hint": {"type": ["string", "null"]},
+        "lang": {"type": ["string", "null"]},
+        "extractor_declared": {"type": ["string", "null"]}
+      }
+    },
+    "submit_response": {
+      "title": "POST /v1/extract/submit response payload",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["content_hash", "accepted"],
+      "properties": {
+        "content_hash": {"type": "string"},
+        "accepted": {"type": "boolean"},
+        "extractor_version": {"type": ["string", "null"]},
+        "error": {"type": ["string", "null"]}
+      }
+    },
+    "collect_request": {
+      "title": "POST /v1/extract/collect request payload",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["content_hash"],
+      "properties": {
+        "content_hash": {"type": "string", "minLength": 1},
+        "level": {"enum": ["off", "text", "text_layer", "layout", "layout_tables", "full"]}
+      }
+    },
+    "collect_response": {
+      "title": "POST /v1/extract/collect response payload",
+      "description": "Результат извлечения. `status=pending` — работа ещё идёт (ядро опрашивает); `status=error` — сбой назван в `error`, и это не «пустой текст»; `status=done` — текст в `text`. Отсутствие работы для артефакта — `status=unknown`, а не `pending`: иначе ядро ждало бы вечно.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["content_hash", "status"],
+      "properties": {
+        "content_hash": {"type": "string"},
+        "status": {"enum": ["pending", "done", "error", "unknown"]},
+        "text": {
+          "oneOf": [{"$ref": "#/$defs/text"}, {"type": "null"}]
+        },
+        "extractor_version": {"type": ["string", "null"]},
+        "error": {"type": ["string", "null"]}
+      }
+    },
+    "abort_request": {
+      "title": "POST /v1/extract/abort request payload",
+      "description": "Убирает staging-область и незавершённую работу артефакта. Брошенная загрузка иначе заняла бы диск навсегда, а TTL — страховка, не единственный механизм.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["content_hash"],
+      "properties": {
+        "content_hash": {"type": "string", "minLength": 1}
+      }
+    },
+    "abort_response": {
+      "title": "POST /v1/extract/abort response payload",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["content_hash", "aborted"],
+      "properties": {
+        "content_hash": {"type": "string"},
+        "aborted": {"type": "boolean"},
+        "removed_bytes": {"type": "integer", "minimum": 0}
+      }
+    },
+    "text": {
+      "title": "Очищенный markdown артефакта",
+      "description": "Тот же состав, что `text` в /v1/fetch: ядро получает результат извлечения в одном виде независимо от того, пришёл он вместе с фетчем или по артефакту.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "content": {"type": ["string", "null"]},
+        "hash": {"type": ["string", "null"]},
+        "extractor_version": {"type": ["string", "null"]},
+        "page_count": {"type": ["integer", "null"]},
+        "pages_converted": {"type": ["integer", "null"]},
+        "partial": {"type": ["boolean", "null"]},
+        "partial_reason": {"type": ["string", "null"]}
+      }
+    }
+  }
+}
