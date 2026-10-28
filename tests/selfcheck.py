@@ -421,7 +421,7 @@ def main() -> int:
 
     section("DMZ-шов (07) — W13")
     check("seam: schema_version=1 + конверт/payload + R1", lambda: _seam_schema())
-    check("edge server: зеркало клиента + изоляция от store/domain", lambda: _edge_isolation())
+    check("edge: зеркало клиента + изоляция слоя (store/pipeline/cli)", lambda: _edge_isolation())
     check("gateway_validate: повторный content_hash → отказ (I19)", lambda: _gateway_validate())
     check("auth/audit: подделка отвергнута + поля SIEM (07 §8)", lambda: _edge_auth_audit())
     check("deploy.yaml: отсутствие → local; split требует base_url", lambda: _deploy_config())
@@ -2973,26 +2973,45 @@ def _seam_schema() -> None:
         raise AssertionError("contract_digest обязан быть детерминирован")
 
 
-def _edge_isolation() -> None:
-    """Edge-сервер: зеркало клиента (envelope round-trip), изоляция от store/domain (I18/I19)."""
-    import ast as _ast
-    import inspect as _inspect
+def _edge_layer_isolation() -> None:
+    """DMZ не пишет в операционную БД и не исполняет доменную логику (I18/I19, 01 §1).
 
-    import core.edge.server as _srv
+    Проверяется **весь** слой ``core/edge/``, а не один ``server.py``: до 29.10 гейт смотрел
+    только сервер, и два файла (``extract_service.py``, ``seam_schema.py``) импортировали
+    ``core.domain`` мимо него. Матрица §1 разрешает ``edge → domain``, поэтому запрет —
+    по **слоям**, а не по одному файлу: ``store`` (запись в ``cohound.db`` — работа ядра),
+    ``pipeline`` (доменная логика), ``cli`` (composition root Z0). ``domain`` разрешён и
+    нужен: схемы шва описывают оси извлечения теми же перечислениями, и дублировать словарь
+    значило бы дать ему разойтись.
+    """
+    import ast as _ast
+
+    banned = ("core.store", "core.pipeline", "core.cli")
+    edge_dir = Path(__file__).resolve().parent.parent / "core" / "edge"
+    for py in sorted(edge_dir.glob("*.py")):
+        tree = _ast.parse(py.read_text(encoding="utf-8"), filename=str(py))
+        imports: set[str] = set()
+        for node in _ast.walk(tree):
+            if isinstance(node, _ast.ImportFrom) and node.module:
+                imports.add(node.module)
+            elif isinstance(node, _ast.Import):
+                imports.update(alias.name for alias in node.names)
+        hit = {m for m in imports if m.startswith(banned)}
+        if hit:
+            raise AssertionError(
+                f"{py.name}: edge не имеет права импортировать {sorted(hit)} "
+                "(store/pipeline/cli — работа ядра, 01 §1)"
+            )
+
+
+def _edge_isolation() -> None:
+    """Edge-сервер: зеркало клиента (envelope round-trip) + изоляция слоя (I18/I19)."""
     from core.adapters.remote_crawler import RemoteCrawler
     from core.adapters.remote_gateway import HttpContentGateway
     from core.edge.server import EdgeGateway
     from core.ports.types import ExtractedDoc, RawPage
 
-    tree = _ast.parse(_inspect.getsource(_srv))
-    imports: set[str] = set()
-    for node in _ast.walk(tree):
-        if isinstance(node, _ast.ImportFrom) and node.module:
-            imports.add(node.module)
-        if isinstance(node, _ast.Import):
-            imports.update(a.name for a in node.names)
-    if {m for m in imports if m.startswith("core.store") or m.startswith("core.domain")}:
-        raise AssertionError("edge не имеет права импортировать store/domain (I18/I19)")
+    _edge_layer_isolation()
 
     class _Crawler:
         version = "c1"

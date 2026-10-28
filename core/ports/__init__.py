@@ -26,7 +26,6 @@ from core.ports.discovery_llm import (
 )
 from core.ports.embedder import EmbedderPort
 from core.ports.extractor import ExtractorPort
-from core.ports.gate_store import GateStore
 from core.ports.gateway import ContentGateway
 from core.ports.index_builder import IndexBuilderPort, IndexMeta
 from core.ports.lexical_index import LexicalIndexPort
@@ -44,7 +43,7 @@ from core.ports.state import (
     SnapshotRow,
     UrlStateRow,
 )
-from core.ports.store import RunIndexRef, StorePort
+from core.ports.store import GateStore, RunIndexRef, StorePort
 from core.ports.types import (
     Chunk,
     ExtractedDoc,

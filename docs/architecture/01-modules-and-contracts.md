@@ -1,7 +1,8 @@
 # coHound — архитектура: Итерация 1 — модули и контракты
 
-> **Статус открытых вопросов на 2026-10-28** (HEAD `f6100c7`): 7 закрыто, 1 открыто.
-> У каждого пункта в §9–§10 маркер ✅/⬜/➖/❔ с доказательством.
+> **Статус открытых вопросов на 2026-10-29** (HEAD `3fbdbfb`): 7 закрыто, 1 открыто —
+> миграция `tests/selfcheck.py` (§9). §10 закрыт полностью (5 из 5). У каждого пункта
+> маркер ✅/⬜/➖/❔ с доказательством `путь:строка`.
 
 **Документ:** `docs/architecture/01-modules-and-contracts.md`
 **Статус:** принято (ревью-гейт @oracle пройден 2026-10-08)
@@ -34,8 +35,20 @@
 **Композиция (wiring):** `cli` и `edge` — два **composition root**. `cli` (Z0) соединяет `pipeline`
 с адаптерами (ручной DI, без фреймворка — A1); `edge` (Z1/DMZ, `07`) собирает **только веб-адаптеры**
 и публикует их через gateway. `pipeline` принимает порты как аргументы, никогда не инстанцирует
-адаптеры. `edge` **не зависит** от `pipeline`/`store`/`domain` (только `ports`+`adapters`+`config`+`util`),
-поэтому не может писать в операционную БД или исполнять доменную логику.
+адаптеры. `edge` **не зависит** от `pipeline`/`store`/`cli`: не пишет в операционную БД и не
+исполняет доменную логику. `domain` для `edge` разрешён и нужен — схемы шва описывают оси
+извлечения (`DocumentLevel`/`PdfPipeline`/`PdfDevice`) теми же перечислениями
+(`core/edge/extract_service.py:59`, `core/edge/seam_schema.py:41`); дублировать словарь значило бы
+дать ему разойтись с доменом.
+
+**Кто это проверяет.** Матрица — не декларация, а гейт: `tests/selfcheck.py:948` `_import_graph`
+разбирает импорты **статически** (`ast`, без исполнения), включая резолв relative-импортов
+(`_resolve_relative_import:992`); нарушение — пара вне `matrix[layer]` (`_check_edge:1009`), то
+есть проверка по принципу allow-list, отдельных «запретов» нет. Три гейта стоят рядом и не
+выражаются матрицей: `_neutrality:1016` (§1.3), `_shims_removed:1123` (нет `core.schemas`/`core.db`),
+`_edge_isolation:3007` (`core/edge/` не импортирует `store`/`pipeline`/`cli` — по **всему** слою, а
+не по одному `server.py`: матрица разрешает `edge → domain`, поэтому запрет сформулирован по
+запрещённым слоям, а не по файлам).
 
 **Следствие для §1.3:** `domain/`, `ports/`, `pipeline/` не содержат предметных терминов.
 Адаптеры, работающие с реестрами/доменами, остаются нейтральными: специфика — в данных
@@ -47,48 +60,52 @@
 
 ### 2.1. `domain/enums.py`
 
-Зеркало `docs/status-dictionary.yaml`. Существующие `StrEnum` (Status, SourceKind, …) перенесены
-из бывшего монолита `core/schemas.py` (удалён в T1.2) без изменения семантики. Перечисления,
-введённые в v2.1/итерациях 5–7 (состав — по `core/domain/enums.py`):
+Зеркало `docs/status-dictionary.yaml`. Существующие `StrEnum` перенесены из бывшего монолита
+`core/schemas.py` (удалён в T1.2) без изменения семантики. Состав ниже — **полный** (`core/domain/enums.py`,
+66 классов); выборочный список здесь был бы картой, которая врёт умолчанием.
 
-```python
-class Gate(StrEnum):        G1 = "G1"; G2 = "G2"; G3 = "G3"; G4 = "G4"
-class GateSource(StrEnum):  INTERNAL = "internal"; EXTERNAL = "external"
-class GateVerdict(StrEnum): APPROVED = "approved"; REJECTED = "rejected"
-class GatePolicy(StrEnum):  EXTERNAL = "external"; WAIVED = "waived"
-class CapabilityPolicy(StrEnum): RESOLVED_ONLY_V1 = "resolved-only-v1"
-class UnknownPolicy(StrEnum):    EXCLUDED = "excluded"; UNKNOWN_AS_ZERO = "unknown_as_zero"
-class RankingPolicy(StrEnum):    CAPABILITY_RANKED = "capability_ranked"
-                                  COVERAGE_FALLBACK = "coverage_fallback"; UNRANKED = "unranked"
-class LLMScenario(StrEnum):  EVALUATOR="evaluator"; SEARCH_ADAPTER="search_adapter"
-                             DISCOVERY="discovery"; CONCEPT_SCOUT="concept_scout"
-```
+| Группа | Перечисления (значения) |
+|---|---|
+| Статус ячейки | `Status` (✅ ⚠️ ❌ ❓ N/A) · `CellState` (`pending`, `preliminary`, `evaluated`, `failed`, `reviewed`) · `RunMode` (`strict`, `preliminary`) |
+| Доказательства | `EvidenceType` (`direct`, `derived`, `absence`) · `SourceKind` (`registry`, `inheritance`, `distribution`, `documentation`, `web`, `manual`) · `EvidenceState` (`verified`, `claimed`) |
+| Отрицание и охват | `AbsenceRuleType` (`explicit`, `parameter_reference`, `distribution_absence`, `registry_absence`) · `SourceScope` (`exhaustive`, `partial`, `unknown`) · `DenialStrength` (`authoritative`, `explicit`, `bounded`, `unobserved`, `not_stated`, `instrument_failed`) · `DenialClaim` (`explicit`, `not_stated`) |
+| Сбои | `FailureKind` — **17**: 5 классов сбоя ячейки (`search_failed`, `source_unavailable`, `evaluation_failed`, `validation_failed`, `parser_failed`) + 11 наблюдаемых исходов краула (`not_found`, `robots_disallow`, `attempts_exhausted`, `redirect_out_of_scope`, `dlp_blocked`, `quarantined`, `extraction_timeout`, `payload_too_large`, `unsupported_binary`, `no_sources`, `coverage_missing`) + `partial_extraction` (документ получен, прочитана часть страниц — блокирующий класс корпуса) |
+| Пропуск фазы | `SkipReason` — **7**: `no_search_adapter`, `no_queries`, `no_urls`, `no_embedder`, `no_registry_spec`, `gate_delegated_external`, `gate_not_blocking` (последний — не блокирующий гейт: фаза идёт дальше, в `gate_decisions` ложится waiver-строка `actor=policy`) |
+| Краул | `CrawlSessionStatus` — **8**: `created`, `running`, `paused`, `cancelled`, `completed`, `partial`, `interrupted`, `failed`; терминальных **пять** (`core/cli/context.py:1648`) · `CrawlItemStatus` (`pending`, `running`, `fetched`, `failed`, `cancelled`) · `CrawlStrategy` (`auto`, `honest`, `hybrid` — «как используется браузер») · `FetchMode` (`http`, `browser`) · `SearchMode` (`sync`, `async`) · `StaleReason` (`new_build`, `prompt_changed`, `catalog_changed`, `model_changed`) |
+| Извлечение | `ExtractionRoute` (`auto`, `html`, `document`) · `DocumentLevel` (`off`, `text`, `layout`, `layout_tables`, `full`) · `PdfPipeline` (`structured`, `text_layer`) · `PdfDevice` (`cpu`, `cuda`) |
+| Контейнеры | `ArchiveDescent` (`plan`, `full` — ось `crawl.archive_descent`) · `ArchiveDescentStatus` (`planned`, `descended`, `unreadable`, `budget_exhausted`) · `ContainerEncryption` (`encrypted`, `not_encrypted`, `unknown` — три состояния, а не булево: «предикат молчит» неотличим от «не зашифрован») |
+| Гейты | `Gate` (G1–G4) · `GateSource` (`internal`, `external`) · `GateVerdict` (`approved`, `rejected`) · `GatePolicy` (`external`, `waived`) |
+| Политики и ранжирование | `RankingPolicy` (`capability_ranked`, `coverage_fallback`, `unranked`) · `CapabilityPolicy` (`resolved-only-v1`) · `UnknownPolicy` (`excluded`, `unknown_as_zero`) · `ComparabilityLevel` (`HIGH`, `MEDIUM`, `LOW`, `INSUFFICIENT`, `cross-cycle`) · `PublishabilityClass` (`PUBLISHABLE`, `PUBLISHABLE_WITH_CAVEAT`, `ANALYTICAL_ONLY`, `NOT_COMPARABLE`) · `UnknownCause` (`not_stated`, `unobserved_scope`, `instrument_failed`, `pending`, `unspecified`) · `ExcludedCellClass` (`not_applicable`, `preliminary`, `unresolved_state`) · `RankingRestriction` (`none`, `forbidden_within_band`) · `UncertaintyProvenance` (`declared`, `measured_in_this_run`, `not_declared`) |
+| LLM и поиск | `LLMScenario` (`evaluator`, `search_adapter`, `discovery`, `concept_scout`; **не** поле запроса к LLM — §3.1) · `EndpointKind` (`self_host`, `api`) · `AdapterKind` (`serp`, `llm_grounding`) · `Decoder` (`none`, `json_object`, `json_schema`) · `SearchKind` (`retrieval`, `external`) · `SearchPhase` (`discovery`, `corpus`, `serp`, `scout`) · `TerminationReason` (`budget_exhausted`, `results_exhausted`, `sufficient_evidence`, `not_found`, `error`) · `Cap` (`none`, `partial`, `ok`, `parameter_rule`) |
+| Инкремент и состояние | `OnboardingState` (`ready`, `pending_seeds`, `blocked`, `retired`) · `SeedRole` (`primary`, `docs`, `satellite`, `host_root`) · `SeedSource` (`add_product`, `discovery`, `migration`, `operator`) · `SeedState` (`enabled`, `disabled`, `invalid`) · `ProductMode` (`new`, `full`, `incremental`) · `RefreshPolicy` (`auto`, `revalidate`, `refresh`, `offline`) · `ProductScope` (`full`, `product_only`) · `IncrementalKind` (`fetch`, `revalidate`, `reuse`) · `ReuseKind` (`live`, `revalidated`, `reused`, `stale`) · `ChangeClass` (`none`, `content_change`, `cohort_expansion`, `cohort_reduction`, `execution_change`, `methodology_change`) · `RunScope` (`full`, `only_failed`, `product_only`) |
+| Пакет и эталон | `Origin` (`in_house`, `third_party`, `upstream`, `community`, `unknown`) · `Relationship` (`bundled`, `integrated`, `certified`, `recommended`, `external`) · `InheritanceMode` (`direct`, `conditional`, `blocked`) · `ParamType` (`fact`, `showcase`) · `Importance` (Кр, Вж, Баз, Опц) · `Archetype` (A, B, C) · `AnchorRelation` (`anchor`, `analog`) · `GoldenTier` (`fast`, `full`) |
 
-**Перечисление → где используется** (кто читает/пишет; это карта, а не список «нового»):
+**Почему `interrupted` терминален.** Протухший `running` при открытии сеанса становится
+`interrupted`: тело краула не финализировано, поэтому это не `failed` и не `cancelled`. Без него в
+множестве терминальных `--follow` ждал бы вечно сеанс, который уже никто не исполняет
+(`core/cli/context.py:1648`).
 
-| Перечисление | Значения | Где используется |
-|---|---|---|
-| `Status`, `CellState`, `Origin`, `EvidenceState`, `SatelliteState` | доменные статусы ячейки/сателлита | `domain/*`, `pipeline/{evaluate,review,compute}`, DDL/триггеры `store/sqlite.py` |
-| `FailureKind` | **17**: 5 классов сбоя ячейки (`search_failed`, `source_unavailable`, `evaluation_failed`, `validation_failed`, `parser_failed`) + 11 наблюдаемых исходов краула (`not_found`, `robots_disallow`, `attempts_exhausted`, `redirect_out_of_scope`, `dlp_blocked`, `quarantined`, `extraction_timeout`, `payload_too_large`, `unsupported_binary`, `no_sources`, `coverage_missing`) + `partial_extraction` (документ получен, прочитана часть страниц — блокирующий класс корпуса) | `crawl_session_items.error_kind`, `corpus`; классы сбоя — `evaluate`/`report` |
-| `CrawlSessionStatus` | `created`, `running`, `paused`, `cancelled`, `completed`, `partial`, `failed` (терминальные — четыре последних) | `crawl_sessions` (durable-сеанс, `02` §A.1) |
-| `CrawlItemStatus` | `pending`, `running`, `fetched`, `failed`, `cancelled` | `crawl_session_items` (per-URL) |
-| `ArchiveDescent` | `plan`, `full` — ось `crawl.archive_descent` | `corpus`/`archive_descent`, `crawl_config_digest` |
-| `ArchiveDescentStatus` | `planned`, `descended`, `unreadable`, `budget_exhausted` | `archive_observations` (`09` §6.7.1) |
-| `DocumentLevel` | `off`, `text`, `layout`, `layout_tables`, `full` — ось `crawl.document_level` | `CrawlLimits.as_dict()` включает её **безусловно** → `crawl_config_digest` → `run_id`: смена оси — `execution_change` (§13). Вторично она входит в наблюдаемый `extractor_version` (`docling-doc-3:{level}/{device}`) → новая индексная сборка; это следствие, а не класс изменения |
-| `PdfPipeline` | `structured` (дефолт, docling), `text_layer` (текстовый слой pdfium) — ось `crawl.pdf_pipeline` / `--pdf-pipeline` | механизм, а не библиотека: `CrawlLimits.as_dict()` включает её **безусловно** → `crawl_config_digest` → `run_id` (`execution_change`, §13); `text_layer` не имеет уровней (`document_level` к нему неприменим) и входит в наблюдаемый `extractor_version` (`pdfium-text-1`) → новая сборка |
-| `SkipReason` | `no_search_adapter`, `no_queries`, `no_urls`, `no_embedder`, `no_registry_spec`, `gate_delegated_external` | `PhaseResult.skip_reason` (инвариант `skip_reason ⟺ skipped`) |
-| `Gate`, `GateSource`, `GateVerdict`, `GatePolicy` | G1–G4; `internal`/`external`; `approved`/`rejected`; `external`/`waived` | `gate_decisions`, `run.yaml:gates`, `hound gate`, `pipeline/{gates,runner}` |
-| `OnboardingState` | `ready`, `pending_seeds`, `blocked`, `retired` | `state.db: product_state` (`09` §3.1) |
-| `SeedRole`, `SeedSource`, `SeedState` | `primary`/`docs`/`satellite`/`host_root`; `add_product`/`discovery`/`migration`/`operator`; `enabled`/`disabled`/`invalid` | `state.db: seed_set` (`09` §7) |
-| `CrawlStrategy` | `auto`, `honest`, `hybrid` — ось «как используется браузер» | `FetchPlan.strategy`, `crawl_config_digest` |
-| `FetchMode`, `ExtractionRoute` | `http`/`browser`; `auto`/`html`/`document` | `FetchPlan` (`ports/types.py`) |
-| `RankingPolicy`, `CapabilityPolicy`, `UnknownPolicy` | политики расчёта/ранжирования | `domain/scoring`, `compute`, `sensitivity` |
-| `LLMScenario` | `evaluator`, `search_adapter`, `discovery`, `concept_scout` | `ScenarioBinding` (I21); **не** поле запроса к LLM (см. §3.1) |
+**Мёртвые значения в словаре.** `SkipReason` объявляет 7 значений, но производятся **пять**
+(`no_search_adapter`/`no_queries` — `core/pipeline/phases.py:975,981`, `gate_delegated_external`/
+`gate_not_blocking` — `core/pipeline/runner.py:608,552`, `no_embedder` — на уровне CLI,
+`core/cli/commands/experiment.py:284`);
+`no_urls` и `no_registry_spec` не производятся ничем (`grep` по `core/` пуст). Пустой план
+URL сейчас выражается не пропуском фазы, а zero-source причиной продукта (`ZERO_SOURCE_NO_URLS_ENTRY`,
+`core/pipeline/corpus.py:777`) — это другая ось наблюдения, и подменять одну другой нельзя. Значения
+оставлены в словаре как объявленные, но выдавать их за работающие механизмы нельзя.
+
+**Оси, которые входят в `run_id` (и почему).** `DocumentLevel`, `PdfPipeline`, `PdfDevice`,
+`CrawlStrategy` попадают в `crawl_config_digest`/`extractor_stack` → `run_id`: их смена —
+`execution_change` (§13), а не правка текущего прогона. Причина у всех одна: ось меняет текст,
+который прочитан, то есть корпус и доказательства. У `PdfDevice` **нет значения `auto`**
+намеренно: при недоступном устройстве прогон отказывает с числами (`EXIT_USAGE`), а не подменяет
+устройство молча — иначе `extractor_version` назвал бы GPU, на котором прогон не исполнялся
+(`docs/architecture/05-dependency-stack.md`).
 
 ### 2.2. `domain/models.py`
 
-Чистые Pydantic-модели (без I/O). Перенесены из бывшего `core/schemas.py` (удалён в T1.2) и
-уточнены:
+Чистые Pydantic-модели (без I/O). Перенесены из бывшего `core/schemas.py` (удалён в T1.2); таблица
+фиксирует, что дала миграция — состав моделей as-built читается в `core/domain/models.py`.
 
 | Модель | Изменение против текущей |
 |---|---|
@@ -113,25 +130,46 @@ class LLMScenario(StrEnum):  EVALUATOR="evaluator"; SEARCH_ADAPTER="search_adapt
 pipeline, БД-слое и selfcheck независимо от Pydantic:
 
 ```python
-def check_cell(cell: Cell) -> list[Violation]           # I1, I2, I2b, I4, I6, I7, I13
-def check_evidence(ev: CellEvidence, cell: Cell) -> list[Violation]   # I10, I15, I19, I22
-def check_inheritance(cell: Cell, baseline: BaselineRow) -> list[Violation]  # I8 + derived-evidence
-def check_derived_evidence(ev: CellEvidence, upstream: UpstreamRef) -> list[Violation]  # I1, I10, I15, I19
+def check_cell(cell: Cell) -> list[Violation]           # I1, I2, I2b, I4, I6/I7, I13
+def check_evidence(ev: CellEvidence, cell: Cell | None = None) -> list[Violation]   # I10, I15, I19, I22
+def check_inheritance(cell: Cell, baseline: BaselineRow,
+                      evidence: list[CellEvidence] | None = None) -> list[Violation]  # I8 + derived-evidence
+def check_derived_evidence(ev: CellEvidence, upstream: UpstreamRef) -> list[Violation]  # I1, I8, I10, I15, I19
 def check_satellite(sat: Satellite) -> list[Violation]   # I9
-def check_unknown_exhaustion(cell: Cell, exhaustion: ProtocolExhaustion | None,
-                             *, required=REQUIRED_EXHAUSTION_CONTOURS) -> list[Violation]  # I3 (§5, v2.1)
+def check_absence_coverage(cell: Cell, coverage: CorpusCoverage | None) -> list[Violation]  # I2c
+def check_unknown_exhaustion(cell: Cell, exhaustion: ProtocolExhaustion | None = None) -> list[Violation]  # I3
 ```
 
-`REQUIRED_EXHAUSTION_CONTOURS = ("corpus", "serp", "registry", "inheritance")` — обязательные контуры
-**полного** протокола исчерпания strict-`❓` (v2.1, §5). `check_unknown_exhaustion` фиксирует
-отсутствие протокола/`termination_reason`/неполный перечень контуров как нарушение `I3`, но это
-**аномалия**, а не смена статуса ячейки: `❓` остаётся `❓` (I12).
+**I3 — «назови причину незнания», а не «пройди четыре контура».** Прежняя редакция требовала
+полного протокола исчерпания (`corpus`+`serp`+`registry`+`inheritance`); это был **рецепт
+реализации**, а не инвариант: он делал честное `❓` недостижимым для параметра, который нельзя
+доказать поиском, и ничего не говорил о том, **почему** отсутствие не установлено. Действующее
+требование (вариант 2, `core/domain/invariants.py:74`): `reviewed_by` **ИЛИ**
+(`evidence_scope.denial_strength ∈ {unobserved, not_stated}` **и** непустая `reason`).
+`EXHAUSTION_CONTOURS` остался справочником того, что вообще наблюдается, а
+`REQUIRED_EXHAUSTION_CONTOURS` — **deprecated-алиас**: параметр `required` игнорируется.
+Протокол исчерпания — провенанс поиска (`core/pipeline/exhaustion.py`), а не условие вердикта.
+Для исторических строк без `evidence_scope` работает прежнее правило по `exhaustion`: старые
+прогоны обязаны остаться читаемыми. Нарушение I3 — **аномалия**, а не смена статуса: `❓`
+остаётся `❓` (I12).
+
+**I2c — класс отрицания против наблюдённого охвата** (`check_absence_coverage`, `:286`;
+исполняется в Ш6: `core/pipeline/evaluate.py:1368` `_enforce_absence_coverage` →
+`check_absence_coverage` на `:1418`, применяется к ячейке на `:2092`, токен причины
+`absence_coverage_unsatisfied` — `evaluate.py:176`). Условие `❌` зависит от **класса**, а не от
+одной полноты краула: `explicit` (цитата вендора) и `authoritative` (энумерация) неполнотой не
+отменяются — это свидетельство, а не вывод из полноты корпуса; `bounded` требует
+`scope_acceptance` (принятия риска человеком); `unobserved`/`not_stated` дают `❓`. Нарушение →
+ячейка **`❓`** (`not_stated`, I12), а не `failed`: отсутствие принятия риска — процедурное
+условие, а не отказ прибора (I4), и ячейка обязана остаться в карте. Снятый `❌` не публикует и
+протокол отсутствия (`absence_evidence=[]`).
 
 `check_inheritance` проверяет не только mode (I8): **унаследованный ✅/⚠️ обязан нести
 derived-evidence** (§4.2 регламента) — `evidence_type: derived`, `source_kind: inheritance`, с
-резолвом `source_url` (I10/I15) и `content_hash` (I19). Отсутствие или нерезолвимость
-derived-evidence → violation (иначе I1 нарушается на унаследованной ячейке). `check_derived_evidence`
-инкапсулирует этот контракт (наследование и сателлиты).
+резолвом `source_url` (I10/I15) и `content_hash` (I19). `evidence=None` трактуется как
+«derived-evidence не предоставлено» (fail-closed): отсутствие или нерезолвимость → violation,
+иначе I1 нарушается на унаследованной ячейке. `check_derived_evidence` инкапсулирует этот
+контракт (наследование и сателлиты) и проверяет I1, I8, I10, I15, I19.
 
 `Violation(code, message, field)` — типизированная ошибка; `code` — `"I2b"` и т.п. Это позволяет
 CI и ревью-эшелону ссылаться на инвариант машинно.
@@ -142,13 +180,21 @@ CI и ревью-эшелону ссылаться на инвариант ма�
 def resolved_capability(cells, params, weights, policy) -> Score        # I5 (failed вне числителя)
 def evidence_coverage(cells, params, weights, *, universe=None) -> Coverage  # §6/B-3a; I5/I7/I13
 def failure_rate(cells) -> float
-def comparability(cohort, per_product_coverage, alignment: AlignmentReport) -> Comparability
-def sensitivity(cells, params, weights, axes, *,
+def comparability(cohort, per_product_coverage, alignment: AlignmentReport | None = None) -> Comparability
+def sensitivity(cells, params, weights, axes=None, *,
                 requested_ranking=RankingPolicy.CAPABILITY_RANKED,
                 ranking_epsilon=0.0) -> SensitivityReport            # §6, K6/B-1
 def module_scores(cells, params, weights, *, universe=None) -> list[ModuleScore]
 def publishability_profile(cells, params, weights, *, coverage, universe=None, ...) -> PublishabilityProfile  # A1: класс + разложение неизвестности
+def endpoint_host_notices(*, rnd_endpoint, hosts) -> list[dict]        # V6: замечания о хостах LLM
 ```
+
+`publishability_profile` принимает ещё пороги разложения (`unknown_share_threshold`,
+`weak_denial_share_threshold`, `coverage_floor`), признаки `comparability_level`/
+`comparability_reasons`/`cross_cycle`, наблюдение `corpus_coverage` и объявление стенда
+(`rnd_endpoint`, `llm_hosts`) — то есть профиль публикуемости есть функция **наблюдённого**, а не
+одних ячеек. `endpoint_host_notices` выносит отдельно то, что видно только по хостам: прогон на
+стенде вне периметра не становится производственной публикацией от того, что ячейки сошлись.
 
 **Coverage по вселенной scope (v2.1, §6/B-3a).** При `universe` (множество пар `(product_id,
 param_id)` — декартово произведение scope-параметров на продукты когорты; строится
@@ -181,16 +227,25 @@ min` по порядку `capability_ranked ⊐ coverage_fallback ⊐ unranked` 
 
 ### 3.0. Классификация портов по доверенной зоне (07)
 
-Каждый порт имеет декларативный атрибут **зоны** (где исполняется его реальный адаптер):
+Таблица ниже — **карта проектирования**: где живёт реальный адаптер порта и что инстанцирует
+каждый профиль. Декларативного атрибута «зоны» у портов **нет** (`grep zone core/ports/` пуст), и
+это осознанно: зону выбирает composition root по профилю, а не сам порт — иначе контракт порта
+менялся бы вместе с профилем развёртывания.
 
 | Порт | Зона | Порт | Зона |
 |---|---|---|---|
 | `llm` (evaluator) | **core** | `crawler` | **edge** |
 | `vector_index`, `lexical_index` | **core** | `search` | **edge** |
 | `index_builder`, `embedder` | **core** | `registry` | **edge** |
-| `store`, `gate_store` | **core** | `extractor` | **edge** (по умолч.; `extractor_zone` объявлено, но не подключено — экстрактор всегда в ядре, D-9) |
+| `store`, `gate_store` | **core** | `extractor` | **core** (см. ниже) |
 | `chunker`, `state`, `container` | **core** (спуск в контейнеры исполняется в ядре; читатель инъектируется как `Ports.container`) | `poller`, `crawl_executor` | **edge** |
 | `discovery_llm` | **core** (инференс; без веб-тула) | `gateway` | **core**→edge (транспорт) |
+
+**`extractor_zone` объявлено, но не действует (D-9).** Значения `edge|core|separate`
+(`core/config/deploy.py:86`, поле `:592`) валидируются, но выбора реализации не делают:
+`RemoteExtractor` поднимается **по профилю** `split` (`core/cli/wiring.py:3033`), а не по этой оси.
+Экстрактор всегда в ядре; в `split` ядро получает байты через шов `extract/{upload,submit,collect,abort}`.
+Ось оставлена как объявление намерения — описывать её как работающий механизм нельзя.
 
 **Измерение локальности.** Порт с зоной `edge` реализуется дважды: реальный адаптер (живёт в
 `edge/`) и **remote-proxy** (живёт в ядре, вызывает `gateway`). Профиль `local` инстанцирует
@@ -208,18 +263,24 @@ class LLMRequest:
     model_version: str = ""
     seed: int | None = None
     temperature: float | None = None
+    max_tokens: int | None = None     # потолок генерации (V5); None — дефолт провайдера
 
 @dataclass(frozen=True)
 class LLMResponse:
     output: LLMCellOutput
     raw: str
     prompt_hash: str
-    decoder: str                  # "xgrammar" | "guidance" | ...
+    decoder: str                  # none | json_object | json_schema
     usage: TokenUsage
 
 class EvaluatorPort(Protocol):
     def complete(self, req: LLMRequest) -> LLMResponse: ...
 ```
+
+`max_tokens` в порту не «настройка вида»: без потолка сервер выбирает сам, и обрезание приходит
+как `finish_reason=length` с пустым текстом — неотличимое от невалидного JSON. `finish_reason`
+читает **адаптер** (`core/adapters/llm_local.py`), в контракт порта он не вынесен: это диагностика
+провайдера, а не часть ответа домена.
 
 **Почему в `LLMRequest` нет `scenario`.** Сценарий (`LLMScenario`) **не** передаётся запросом:
 он задаётся фазой, из которой пришёл вызов (I21 — маршрутизация модель→сценарий
@@ -286,19 +347,33 @@ class LexicalIndexPort(Protocol):
 ```python
 @dataclass(frozen=True)
 class SearchQuery:
-    text: str; lang: str; limit: int; phase: SearchPhase
+    text: str; lang: str = "ru"; limit: int = 10; phase: str = "corpus"
 
 @dataclass(frozen=True)
 class SearchResult:
-    url: str; title: str; snippet: str; rank: int
-    raw_bytes: bytes | None       # для retention в corpus_raw
+    url: str; title: str = ""; snippet: str = ""; rank: int = 0
+    raw_bytes: bytes | None = None       # для retention в corpus_raw
+
+@dataclass(frozen=True)
+class SearchTiming:                      # наблюдённое время одного вызова (S4)
+    wait_seconds: float                  # паузы между опросами async-операции — простой прогона
+    request_seconds: float               # HTTP-вызовы провайдера, включая backoff внутри них
+    polls: int; measured: bool; from_cache: bool
+    def merged_with(self, other: SearchTiming) -> SearchTiming: ...   # сумма наблюдений продукта
 
 class SearchAdapterPort(Protocol):
-    adapter_kind: AdapterKind     # serp | llm_grounding
+    adapter_kind: str                    # serp | llm_grounding
     provider: str
     def search(self, q: SearchQuery) -> list[SearchResult]: ...
     def fetch(self, url: str) -> RawPage: ...   # дозагрузка выбранных
 ```
+
+`phase` и `adapter_kind` объявлены **строками**, а не перечислениями (`core/ports/search.py:19,88`):
+порт — commodity-стык, и адаптер не обязан импортировать доменный словарь, чтобы назвать свою
+фазу. `SearchTiming` разделяет ожидание внешней async-операции и время самих запросов, потому что
+это разные факты: первое — простой прогона, второе — стоимость вызова; смешав их, нельзя ответить,
+что именно дорого. `merged_with` складывает наблюдения одного продукта, а `measured`/`from_cache`
+берёт **конъюнкцией**: сумма, где хоть одно слагаемое не наблюдалось, не выдаётся за измеренную.
 
 **Гарантия I19:** выход — только URL+байты; превращение в evidence происходит в Ш5 (chunk+hash).
 Порт не возвращает «доказательство», только контент. Вызовы логируются вызывающим pipeline
@@ -362,10 +437,12 @@ trafilatura) → EPUB (`extract_epub`, stdlib OCF, главы через тот 
 осознан: этот фолбэк убивал `.txt` в `parser_failed` (замер 22.10 — `09` §6.8).
 Адаптер `extract_document` предоставляет `extract_bytes(content, filename)` и
 `extract_path(path, filename_hint=...)`; формат определяется расширением/`Content-Type`,
-а не полем `structure`. Композит объявляет `supports_source_path = True` — он читает
-локальные байты по `RawPage.source_path` и потому пригоден для членов контейнеров
-(`adapters/remote_extractor.py` объявляет `False`: шов не имеет доступа к локальному пути,
-и `corpus` это проверяет). `content_hash` считает адаптер (§10/I19).
+а не полем `structure`. Флаг `supports_source_path` объявляют **все** реализации, включая
+`adapters/remote_extractor.py:214`: локальный композит читает байты по `RawPage.source_path`, а
+remote получает их отдельной операцией шва (`extract/upload`) — то есть путь как таковой ему не
+нужен, но контракт «работаю без тела в RAM» он выполняет. `corpus` проверяет флаг
+(`core/pipeline/corpus.py:3195`) прежде чем отдать локальный путь: адаптер без флага получил бы
+путь, которого не существует в его зоне. `content_hash` считает адаптер (§10/I19).
 
 **Единственный источник истины по форматам — `core/util/document_formats.py`**
 (`DOCUMENT_SUFFIXES` + `MARKDOWN_SUFFIXES`/`PLAIN_TEXT_SUFFIXES`/`TEXTUAL_SUFFIXES`,
@@ -409,12 +486,12 @@ class GateStore(Protocol):                               # персистенц�
 
 `IndexBuilderPort` — **единственный** писатель `.npy`-шардов и tantivy; `pipeline` не работает с
 файлами индекса напрямую. `build()` возвращает иммутабельный `build_id`, `commit()` фиксирует запись
-атомарно (существующая сборка не мутируется, §13). `GateStore` — носитель `gate_decisions`
-(объявлен **в `ports/store.py`**, рядом с `StorePort`; `core/ports/gate_store.py` —
-transitional re-export-шим `GateDecision`/`GateStore` для обратной совместимости импортов,
-см. §9). `GateDecision` несёт `decision_id`, `run_id`, `gate`, `target`, `actor`, `decided_at`,
-`notes`, а также интеграционную часть: `subject_digest`, `source` (`internal|external`),
-`external_ref`, `verdict` (`approved|rejected`).
+атомарно (существующая сборка не мутируется, §13). `GateStore` — носитель `gate_decisions`,
+объявлен **в `core/ports/store.py`**, рядом с `StorePort`; отдельного `ports/gate_store.py` больше
+нет (шим удалён 29.10, импорты идут напрямую). `GateDecision` живёт в `core/domain/models.py` и
+несёт `decision_id`, `run_id`, `gate`, `target`, `actor`, `decided_at`, `notes`, а также
+интеграционную часть: `subject_digest`, `source` (`internal|external`), `external_ref`,
+`verdict` (`approved|rejected`).
 
 ### 3.7. `ports/gateway.py` — транспорт core↔edge (07)
 
@@ -422,7 +499,6 @@ transitional re-export-шим `GateDecision`/`GateStore` для обратной
 class ContentGateway(Protocol):
     schema_version: str
     def call(self, op: str, payload: Mapping[str, Any]) -> Mapping[str, Any]: ...
-    # op ∈ {"fetch", "search", "registry", "capabilities", "health"}
     def capabilities(self) -> Mapping[str, Any]: ...   # версии edge-компонентов (в манифест)
 ```
 
@@ -430,9 +506,20 @@ class ContentGateway(Protocol):
 `RemoteCrawlExecutor`).
 **Гарантия (I19):** gateway возвращает контент/кандидатов, **не evidence**; ядро повторно
 хеширует/валидирует входящее (`07` §5). Реализация — `adapters/remote_gateway.py` (httpx, mTLS,
-таймауты, retry, лимит размера ответа). В профиле `local` не используется. Полный перечень
-операций шва — 8 POST (`fetch`, `search`, `registry`, `crawl/{submit,status,cancel,collect}`,
-`crawl/poll`) и 2 GET (`capabilities`, `health`), схемы — `contracts/seam/`, тела — `07` §3.
+таймауты, retry, лимит размера ответа). В профиле `local` не используется.
+
+**Перечень операций шва — 12 POST + 2 GET** (`contracts/seam/openapi.json`, allowlist сервера
+`core/edge/server.py:141-156`):
+
+| Метод | Пути |
+|---|---|
+| POST | `/v1/fetch`, `/v1/search`, `/v1/registry`, `/v1/crawl/{submit,status,cancel,collect,poll}`, `/v1/extract/{upload,submit,collect,abort}` |
+| GET | `/v1/capabilities`, `/v1/health` |
+
+`extract/*` — **аддитивное** расширение (B1): `SEAM_SCHEMA_VERSION` остаётся `"1"`. Байты
+передаются отдельной операцией `upload`, а не телом `submit`: `max_body_bytes` = 1 MiB, а
+допущенный артефакт — до 250 MB, и он не влезает в один запрос ни в одном кодировании. Идентичность
+артефакта — `content_hash`, поэтому повтор `upload` идемпотентен по построению.
 
 ### 3.8. `ports/poller.py` — опрос фидов/каналов
 
@@ -552,13 +639,39 @@ class DiscoveryLLMPort(Protocol):
 | `experiments.py` | `run_retrieval_experiment(profiles) -> ExperimentReport` | runs | R9, R10 |
 | `gates.py` | `gate_g1/gate_g2/gate_g3/gate_g4(...) -> GateDecision` (общий `record_decision`) | gate_decisions | G1–G4 |
 
+**Прочие модули (50).** Таблица выше — только сценарии фаз. Полный состав `core/pipeline/` — 65
+файлов; остальные держат механизмы, которые фазы вызывают. Описание — первая строка докстринга
+модуля, чтобы карта не расходилась с кодом.
+
+| Группа | Модули |
+|---|---|
+| Краул | `crawl_frontier` (frontier обхода in-site ссылок и контрольные оси краула, D1/D2) · `crawl_session` (локальная оркестрация сеанса краула для фазы корпуса) · `crawl_sources` (резолвер цели краула по слоям источников) · `fetch_plan` (резолвер плана получения страницы, D2) · `crawl_probe` / `crawl_probe_driver` (ядро решений автоподбора осей краула и его read-only драйвер) · `archive_descent` (спуск в контейнеры — исполнение плана членов, B3) · `artifact_probe` (классификация артефакта **до** экстракции) · `artifacts_gap` (`artifacts_gap.yaml` — недоступные артефакты как вход следующего прогона) · `liveness` (свидетельство живости сеанса: `owner`, heartbeat, recovery; F1/Д-6) |
+| Корпус и кэши | `extract_cache` (контент-адресуемый кэш экстракции, переживающий прогоны) · `eval_cache` (межпрогонный кэш вердиктов оценщика) · `embed_cache` (контент-адресуемый кэш векторов) · `partial_docs` (частичное извлечение — **числом**, а не прилагательным) · `composition` (композиция индексных партиций и её иммутабельный манифест) · `idempotency` (инвалидация и идемпотентность конвейера) |
+| Идентичность | `digests` (канонические дайджесты идентичности прогона) · `run_identity` (цикл, объём, lineage) |
+| Оценка | `prompt` (механическая компиляция промпта оценщика) · `exhaustion` (протокол исчерпания как провенанс поиска) · `evaluation_policy` (политика повтора оценщика — объявленное условие измерения, V3) · `measurement_uncertainty` (полоса неопределённости вердиктов) · `support_quality` (качество поддержки карты: два замера) · `evaluator_benchmark` (benchmark моделей оценщика при всём прочем фиксированном) · `extraction_eval` (extraction-golden и A/B экстракторов) · `adversarial` (adversarial-набор и регрессионный гейт) |
+| SERP и поиск | `serp_loop` (append-only раунды сборок + инвалидация затронутых ячеек) · `search_log` (бюджет внешнего поиска и `search_log`) |
+| Гейты и профиль | `gate_subject` (предметы решений G3/G4 и исходящий запрос на решение) · `profile_attestation` (аттестация профиля пакета-якоря для G1/G2; **design-only** — производителя в прогоне нет) · `precedence` (прецедент источника П>В) |
+| Инкремент и состояние | `incremental` (планировщик инкрементального корпуса и ключи durable-субстрата) · `onboarding` (onboarding-префлайт продукта) · `state_sync` (запись durable per-product состояния по итогам прогона) · `manual_artifacts` (`sources/manual_artifacts.yaml` — объявленный вход байтов, которые не взял краулер) |
+| Авторство пакета | `package_io` (I/O артефактов пакета) · `package_admin` (CRUD над пакетом) · `package_discovery` (базовый разведочный инференс) · `package_candidates` (кандидаты авторского применения) · `package_scout` (веб-заземлённая разведка пакета) · `package_add_product` (авторское добавление продукта в когорту) · `passport_scout` (черновик паспорта продукта) · `scout_common` (общие хелперы веб-разведки) |
+| Эталон | `golden` (golden-харнесс и калибровка порогов) · `golden_status` (`golden_status.yaml` — объявленное состояние эталонного набора) |
+| Наблюдаемость | `metrics` (метрики прогона) · `observability` (инструментирование фаз и запись метрик) · `resources` (F0 — измерительная база ресурсов: память, расписание экстракции, чанки, стадийные бакеты времени) |
+| Оркестрация | `runner` (оркестратор фаз Ш1–Ш9, персистентное состояние, resume) · `phases` (сборка `PhaseFn`-замыканий) |
+
 **Запросы Ш6 (S13).** `evaluate.py` формирует на ячейку ≤3 запроса, приоритет детерминирован:
 (1) `title`; (2) `concept_terms` (сначала ru, затем en, затем порядок в пакете). Состав запросов не
 зависит от реализации/LLM (сохраняет симметрию I16).
 
-**Гейты как фазы (дельта после мержа гейтов).** `PHASES` — 15 фаз: гейты идут **отдельными
-фазами** (`g1` после `plan`, `g2` после `discovery`, `g3` между `review` и `compute`, `g4`
-между `compute` и `report`), `GATE_PHASES` связывает имя фазы с доменным `Gate`.
+**Гейты как фазы (дельта после мержа гейтов).** `PHASES` — **15 фаз** в порядке исполнения
+(`core/pipeline/runner.py:132-148`): `normalize`, `lint`, `plan`, `g1`, `discovery`, `g2`,
+`registry`, `inheritance`, `corpus`, `evaluate`, `review`, `g3`, `compute`, `g4`, `report`.
+`GATE_PHASES` (`:151-156`) связывает имя фазы с доменным `Gate`: `g1`→G1, `g2`→G2, `g3`→G3,
+`g4`→G4; вложенность проверяется инвариантом (`:160-163`).
+* **Что блокирует прогон.** `NON_BLOCKING_GATES = {G1, G2, G3}` (`core/pipeline/gates.py:79`):
+  нет действующего решения — фаза идёт дальше, а в `gate_decisions` пишется строка-политика
+  (`actor=policy`, `external_ref=waiver:policy:nonblocking:{gate}`), которая в следе манифеста
+  читается как `state: not_required`. Блокируют только **G4** и **явный отказ**
+  (`verdict=rejected`) по текущему предмету у любого гейта: отказ — решение, молчание внешней
+  системы не выдаётся ни за отказ, ни за одобрение.
 * G1/G2 — **внутренняя аттестация** содержимого профиля пакета-якоря. Рабочий путь —
   per-run строка `gate_decisions` (аудит-след и override). Второй путь — durable
   `profile_attestation` в `state/{package}/state.db` (`pipeline/profile_attestation.py`,
@@ -616,9 +729,12 @@ class DiscoveryLLMPort(Protocol):
 | `feed.py` | чистый парсер фидов/каналов (`FeedEntry`) для `PollPort` |
 | `security.py`, `sanitize.py` | SSRF-защита URL и санитизация имён файлов; санитизация контента на границе экстракции |
 | `text_utils.py` | многоязычные текстовые утилиты (RU/EN) |
-| `fusion.py`, `retrieval_eval.py` | RRF-слияние; метрики ретривала (hit@K, MRR, recall@K) |
+| `retrieval_eval.py` | метрики ретривала (hit@K, MRR, recall@K). **RRF-слияния здесь нет**: `rrf_fuse_chunks` живёт в `pipeline/retrieve.py:98` — фьюжн вызывается из сценария, а не из утилиты, иначе профиль R0/R1/R2 перестал бы быть явным |
 | `agreement.py` | согласие аннотаторов: Cohen's κ (§11.5) |
 | `cache.py` | глобальный content-addressed кэш внешних вызовов (R7, ADR 0016) |
+| `retry.py` | bounded retry/backoff с уважением `Retry-After` (S6) — вынесен из поискового адаптера: политика повторов общая, а провайдер — commodity |
+| `redirects.py` | похоповая валидация редиректов для путей со своим HTTP-клиентом (R10) |
+| `gpu.py` | единственная проба CUDA (`cuda_available`, объём карты) — общая для ядра и DMZ: матрица §1 запрещает `edge → pipeline`, и две копии разошлись бы молча |
 | `index_layout.py`, `index_partition.py` | имена каталогов `index_store/`; read-only проверка продукт-партиций (09 §8.2) |
 | `atomic_write.py` | атомарная запись файлов с сохранением режима |
 
@@ -635,7 +751,8 @@ class DiscoveryLLMPort(Protocol):
 | Инвариант | Обеспечено структурно | pipeline | Проверено тестом |
 |---|---|---|---|
 | I1, I2, I2b | domain/invariants (`check_cell`) | evaluate | selfcheck |
-| I3, I12 | domain/invariants (`check_unknown_exhaustion`, `check_cell`) + report-контур | review/report | unit (review/report) |
+| **I2c** | domain/invariants (`check_absence_coverage`) | evaluate (`_enforce_absence_coverage`) | selfcheck (`_corpus_coverage_invariant`) + unit |
+| I3, I12 | domain/invariants (`check_unknown_exhaustion`, `check_cell`) + report-контур | review/report | unit (`tests/domain/test_invariants.py`) + selfcheck (исторический путь) |
 | I3b | domain/enums (`protocol: partial`) | review | unit (preliminary) |
 | I4, I6, I7, I13 | domain/invariants + SQL-триггеры | review | selfcheck |
 | I5, I11 | domain/scoring | compute | selfcheck |
@@ -650,11 +767,20 @@ class DiscoveryLLMPort(Protocol):
 | I22 | domain/invariants (`check_evidence`) | evaluate | selfcheck |
 | I23 | SQL (`search_log.kind`) | corpus/search | selfcheck |
 
-**CI-формулировка (K7):** `tests/selfcheck.py` покрывает I1/I2/I2b/I4/I6/I7/I13 и Р-2 — не
-«I1–I23» целиком. Остальные инварианты обеспечиваются структурно и проверяются юнит-тестами по
-слоям (I3/I3b/I12/I14, I16–I21, I23) и грепп-тестом нейтральности.
+**CI-формулировка (K7).** `tests/selfcheck.py` (**111 утверждений** = 97 `check` + 14
+`expect_raises`) покрывает инварианты I1/I2/I2b/**I2c**/I4/I6/I7/I13 и Р-2, а также
+**структурные** гейты, у которых нет pytest-двойника: `_import_graph` (матрица §1),
+`_neutrality` (§1.3), `_shims_removed`, `_edge_isolation`. Два гейта продублированы
+pytest-тестами **предмета** — `_crawl_taxonomy_from_port` (`tests/test_crawl_error_taxonomy.py`,
+включая подачу нарушающего файла) и `_seam_schema` (`tests/edge/test_seam_schema.py`) — и остаются
+в selfcheck как гейты над деревом. Остальные инварианты
+обеспечиваются структурно и проверяются юнит-тестами по слоям (I3/I3b/I12/I14, I16–I21, I23). Это
+не «I1–I23 целиком» — и не должно им быть: гейт над деревом и юнит-тест отвечают на разные вопросы,
+и копия гейта в pytest разошлась бы с оригиналом.
 
-**I10/I15 (K7):** SQL обеспечивает только `source_id NOT NULL`; детерминированный резолв
+**I10/I15 (K7):** SQL обеспечивает `source_id NOT NULL` **кроме** `evidence_type='absence'`
+(триггер `trg_evidence_source_id`, `core/store/sqlite.py:486`): у протокола отсутствия источника нет
+по построению, и `NULL` честнее выдуманного нерезолвимого id. Детерминированный резолв
 `source_id → source_url` — **код** (`domain/anchors.py` + `SourceResolver`), не триггер.
 
 ---
@@ -673,6 +799,13 @@ packages/{case_id}/
 `adapters/registry_generic.py` читает YAML (config-driven: URL-шаблон, метод, парсер `json|html`,
 JSONPath-маппинг полей) и реализует `RegistryFetcherPort`. Специфика реестра — чистые данные,
 ядро остаётся нейтральным. Грепп-тест §1.3 не ловится, т.к. названий в `core/` нет.
+
+**Состояние as-built:** механизм есть, **ни один пакет реестровых спецификаций сегодня не имеет**
+(`packages/*/registries/` отсутствует, включая `_template`). Пустой `Ports.registry_fetchers` →
+волна пуста, фаза `registry` завершается `ok` с нулём ячеек (`core/pipeline/phases.py:991`) — это
+не ошибка и не «нет данных»: реестры просто не сконфигурированы. `SkipReason.NO_REGISTRY_SPEC`
+объявлен, но конвейером **не производится** (`grep` по `core/pipeline/` пуст) — значение ждёт
+своего производителя, и выдавать его за работающий механизм нельзя.
 
 ---
 
@@ -699,19 +832,18 @@ JSONPath-маппинг полей) и реализует `RegistryFetcherPort`.
 |---|---|---|
 | `core/schemas.py` (монолит) | `domain/enums.py` + `domain/models.py` + `domain/invariants.py` + `domain/r2.py` | ✅ сделано (T1.2; `core/domain/enums.py:1`, `core/domain/anchors.py:1`); монолит **удалён** — гейт `tests/selfcheck.py:1123` (`_shims_removed`) |
 | `core/db.py` DDL/триггеры | `store/sqlite.py` (DDL) + `ports/store.py` (контракт) | ✅ сделано (T1.3; `core/store/sqlite.py:21`); монолит **удалён** — тот же гейт `tests/selfcheck.py:1123` |
-| `tests/selfcheck.py` | `tests/domain/*`, `tests/store/*` | ⬜ не сделано — `tests/domain/` (11 файлов) и `tests/store/` (15 файлов) заведены, но `tests/selfcheck.py` (229 КБ) остаётся **автономным входом CI** (`scripts/ci.sh:39`), обёртка — `tests/test_selfcheck.py` |
+| `tests/selfcheck.py` | `tests/domain/*`, `tests/store/*` | ⬜ **открыто (единственный остаток)** — доменные и сторовые проверки живут в pytest-пирамиде (`tests/domain/` — 11 файлов / 162 тест-функции, 170 кейсов с параметризацией; `tests/store/` — 15 файлов / 189 функций, 194 кейса), а в `tests/selfcheck.py` (4717 строк / 229 742 байта, **111 утверждений** = 97 `check` + 14 `expect_raises`) остался **структурный** набор: `_import_graph`, `_neutrality`, `_shims_removed`, `_edge_isolation` — у них pytest-двойника нет и быть не должно (гейт над деревом не дублируется юнит-тестом), плюс `_crawl_taxonomy_from_port` и `_seam_schema`, у которых двойники **есть** (`tests/test_crawl_error_taxonomy.py`, `tests/edge/test_seam_schema.py`): те проверяют предмет, а гейт остаётся над деревом. Перенос поэтому не механический: без построчной сверки «какая проверка уже покрыта в `tests/`» объявить миграцию законченной нельзя. selfcheck остаётся **автономным входом CI** (`scripts/ci.sh:50`), обёртка — `tests/test_selfcheck.py` |
 
 Ранее использовавшиеся transitional re-export-шимы `core/schemas.py` и `core/db.py` **удалены**:
 импорты идут напрямую из `core.domain` и `core.store.sqlite`. Последовательность миграции и её
 привязка к майлстоунам — `06-implementation-strategy.md` (§работа W1). Новые правки не должны
 возвращать эти модули (проверяется в `tests/selfcheck.py::_shims_removed`).
 
-**Исключение — `core/ports/gate_store.py`.** Это **действующий** transitional re-export-шим
-(14 строк): канонический `GateStore` объявлен в `core/ports/store.py`, доменный
-`GateDecision` — в `core/domain/models.py`, а шим реэкспортирует их для обратной
-совместимости импортов `from core.ports.gate_store import …`. Удалять его можно только
-вместе с правкой импортов; пока он существует, `ports/gate_store.py` **не** следует
-описывать как место объявления порта (см. §3.6).
+**Шимов больше нет.** `core/ports/gate_store.py` удалён 29.10 вместе с единственным импортом
+(`core/ports/__init__.py`): `GateStore` читается из `core.ports.store`, `GateDecision` — из
+`core.domain`. Порядок CI, который держит этот класс ошибок: `scripts/ci.sh` — ruff (`:24`) →
+mypy-гейт (`:32`) → `check_doc_anchors.py --strict` (`:46`) → `tests/selfcheck.py` (`:50`) →
+pytest + `--cov` (`:78-88`).
 
 ---
 
@@ -727,11 +859,10 @@ JSONPath-маппинг полей) и реализует `RegistryFetcherPort`.
 | I1–I23 | §6 матрица |
 | `09` онбординг/инкремент | §3.10 (`ProductStatePort`), §3.9 (контейнеры), §4 (`run_isolated`, resume/N4) |
 
-**Открытые вопросы к итерации 2:** точные сигнатуры фьюжна RRF — ✅ сделано
-(`core/pipeline/retrieve.py:98`, `rrf_fuse_chunks(…, rrf_k=60, top_k)`); формат `AlignmentReport` —
-✅ сделано (`core/domain/models.py:1375`); структура `ProtocolExhaustion` — ✅ сделано
-(`core/domain/models.py:1204`); политика ретраев в `evaluate.py` — ✅ сделано
-(`core/pipeline/evaluate.py:1829`, цикл `:2003`); как передавать чанки в `validate` — ✅ сделано
-**объектами из RetrievalResult**, а не выборкой из store: `validate_output(*, chunks:
-Mapping[str, ChunkLike], …)` (`core/pipeline/validate.py:267`), словарь строит вызывающий
-(`core/pipeline/evaluate.py:1899`).
+**Открытые вопросы к итерации 2 — закрыты все пять.** Точные сигнатуры фьюжна RRF —
+`core/pipeline/retrieve.py:98` `rrf_fuse_chunks(…, rrf_k=60, top_k)`; формат `AlignmentReport` —
+`core/domain/models.py:1375`; структура `ProtocolExhaustion` — `core/domain/models.py:1212`;
+политика ретраев в `evaluate.py` — `core/pipeline/evaluate.py:1829` (`max_retries`), цикл `:2003`;
+как передавать чанки в `validate` — **объектами из RetrievalResult**, а не выборкой из store:
+`validate_output(*, chunks: Mapping[str, ChunkLike], …)` (`core/pipeline/validate.py:267`), словарь
+строит вызывающий (`core/pipeline/evaluate.py:1899`).
