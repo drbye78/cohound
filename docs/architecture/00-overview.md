@@ -1,5 +1,11 @@
 # coHound — архитектура: Итерация 0 — мастер-обзор
 
+> **Статус реализации на 2026-10-28** (HEAD `f6100c7`): REFERENCE — плановые разделы §8/§9
+> закрыты: сдано 9 из 9 итераций, решены 4 из 4 «открытых вопросов», ADR 0001–0023 приняты.
+> Открытых пунктов самого документа нет; единственное ⬜ — смежный замер, вынесенный в `06` §5.W8.
+> Один список устарел (§8.1 «Заглушки») и помечен ➖; ADR 0014 реализован, но не подключён (§5.W11).
+> Ниже у каждого пункта стоит маркер ✅/⬜/➖/❔ с доказательством (`путь:строка`).
+
 **Документ:** `docs/architecture/00-overview.md`
 **Статус:** принято (ревью-гейт @oracle пройден 2026-10-08; правки K1–K7/S1–S13 интегрированы)
 **Источник истины:** `cohound-spec-v2.md` (регламент v2.1). При расхождении — регламент главнее;
@@ -367,6 +373,8 @@ packages/{case_id}/, passports/, runs/, index_store/, corpus_raw/, state/, cache
 | **7** | Развёртывание: доверенные зоны, DMZ-шов (L7), профили | `07-deployment-topology.md` | — |
 | **8** | Онбординг продукта и инкрементальные прогоны: durable `state.db`, seeds, `--update`, спуск в контейнеры, benchmark оценщика | `09-product-onboarding-incremental-runs.md` | — |
 
+✅ сделано — все артефакты итераций существуют (`ls docs/architecture/`: `00`…`09`, плюс `12`–`15`), включая `09` для итерации 8 и `08-crawl-platform-evolution-plan.md` (номер 08 занят не развёртыванием); R пройден 2026-10-08.
+
 ### 8.1. Вертикальный срез M0 (что реально в каркасе)
 
 M0 должен давать **сквозной вертикальный срез** на детерминированных волнах;
@@ -380,6 +388,12 @@ M0 должен давать **сквозной вертикальный сре�
 Заглушки реализуют свои порты и дают детерминированный пустой ответ: конвейер собирается сквозь
 них, но контуры Ш5/Ш6 в M0 рабочими не считаются. Сквозной результат M0 — мини-карта из
 детерминированных волн (реестры + наследование) на 3 продуктах.
+
+➖ снято — список заглушек устарел (M0, 2026-10): LLM-оценщик (`core/adapters/llm_local.py`), краулер
+(`core/adapters/crawl_{scrapy,http,browser}.py`), индексы/эмбеддер (`core/adapters/index_npy.py`,
+`lexical_tantivy.py`, `embed_local.py`), SERP (`core/adapters/search_yandex.py`), `edge/`
+(`core/edge/server.py`) реализованы; `edge/` по-прежнему не запускается в `local`. Таблица выше —
+исторический срез M0, а не текущее состояние.
 
 > **Стартовый актив (не greenfield).** К началу M0 уже существовали монолиты `core/schemas.py` / `core/db.py` (схемы + инварианты + DDL/триггеры), позже **расщеплены и удалены** (T1.2/T1.3);
 > утилиты (`text_utils`, `security`, `fusion`, `retrieval_eval`) и адаптеры (`chunker_markdown`,
@@ -420,11 +434,26 @@ M0 должен давать **сквозной вертикальный сре�
   **записывает** вердикт внешней системы; `waived` — видимый waiver, не молчание —
   `04` §E (уточняет 0011).
 
+✅ проверено на `f6100c7` (код-носители): 0001–0011 — `core/ports/*` + `core/domain/*`;
+0012 — шимы `core/schemas.py`/`core/db.py` **удалены** (`ls` → No such file); 0018/0019 —
+`core/edge/server.py`, `contracts/seam/openapi.json`; 0020 — знаменатель `scope_universe`
+(`core/domain/scoring.py:407`); 0021 — `pb_`/`cb_` (`core/pipeline/composition.py:98-119`);
+0022 — `core/util/memory.py` (`malloc_trim`); 0023 — `core/pipeline/gate_subject.py` + `gates/*-request.json`.
+
 **Открытые вопросы (для итераций):**
 - Гранулярность транзакций SQLite при массовой записи ячеек (итерация 3).
+  ✅ закрыто — батч-запись: `save_cells_batch` / `add_evidence_batch` через `executemany`
+  (`core/store/sqlite_store.py:626`, `:779`).
 - Формат и версионирование `prompt_hash` при смене шаблона (итерация 2).
+  ✅ закрыто — контракт `H(template_version, rule, absence_rule, sorted(chunk_ids))`
+  (`core/pipeline/prompt.py:34`); машинный токен «тот же hash — другой текст» — `:79`.
 - Механизм кэша SERP/корпуса для R7 — решён как глобальный content-addressed (ADR 0016, итерация 3 A.2).
+  ✅ сделано — `core/util/cache.py:133` (`ContentAddressedCache`, ключи `http_key`/`serp_key`, `:83`/`:98`).
 - Где живёт реестр экспериментов R0/R1/R2 и как связывается с `index_build_id` (итерация 2).
+  ✅ закрыто — `hound experiment retrieval` персистит `retrieval_profile`/`K`/`rrf_k` и
+  `settings_provenance` (только при полном сравнении) в манифест прогона
+  (`core/cli/commands/experiment.py:101-170`); `retrieval_params_json` — поле
+  `EXECUTION_CONTRACT_FIELDS` (`core/pipeline/report.py`). ⬜ остаётся сам замер (`06` §5.W8).
 
 ---
 

@@ -1,5 +1,11 @@
 # Разбор внешних аудитов (review_02, review_03) и план работ
 
+> **Статус реализации на 2026-10-28** (HEAD `f6100c7`): PARTIAL — пакеты P0–P7, P6b/P6c
+> и волны 1–3 сведены; открыто 6 позиций: R8, S9g, V1-аномалия, `min_retrieval_score`,
+> `extra_instructions`, паритет `split` (волна 4), плюс два остатка внутри закрытых строк
+> (V3 — номер попытки не пишется; P0 — `llm_local.py:22` всё ещё приписывает достаточность
+> `validate.py`). Ниже у каждого пункта маркер ✅/⬜/➖/❔ с доказательством.
+
 **Дата:** 2026-10-27
 **Повод.** Две внешние рецензии. `review_02.md` — четыре независимых аудита: краул, экстракция
 PDF и контейнеры, чанкинг и индекс, SERP-контур. `review_03.md` — аудит подсистемы
@@ -99,6 +105,28 @@ mypy: домен 0 ошибок + baseline 121, selfcheck 111/111, pytest 4801 p
 | R9 | сайдкар меты кэша: легаси-запись теряет статус/тип | ПОДТВЕРЖДЕНО | `crawl_http.py:217` (ключ по запрошенному URL), `:248-262`, `:598-608` | легаси-путь исполняется, потеря не утверждается (`test_crawl_http.py:232-241`) | Г | P4 |
 | R10 | редиректы не валидируются по-хопово | ПОДТВЕРЖДЕНО → **исправлено** (per-hop в http/scrapy/edge + `util/redirects` для SERP-адаптеров и реестров); браузер был сделан правильно | `crawl_http.py:149`,`:322`, `crawl_scrapy.py:786`; правильно: `crawl_browser.py:282`,`:840` + тесты `:624/637/655` | нет для http/scrapy | Б | **P3** |
 
+**Статус на 2026-10-28.** ✅ R1, R2, R5, R6, R7, R9, R10 · ➖ R3, R4 · ⬜ R8.
+
+- ✅ R1 — ось `robots` реализована per-request (`core/adapters/crawl_scrapy.py:422`), политика
+  вынесена в ядро (`core/util/robots.py:72`).
+- ✅ R2 — `RobotsFeedState` + отказ `robots_unavailable`: `core/util/robots.py:63,72,483`.
+- ➖ R3 (анти-автоматизационные флаги браузера) — **снято**: honest/hybrid-рендер штатного
+  JS-challenge публичной страницы объявлен исполнением механизма самой страницы, а не обходом
+  (`AGENTS.md`, раздел «Чего НЕ делать»; регламент §10). Не дефект, а граница метода.
+- ➖ R4 — опровергнуто и без правки: в `local` фетч идёт пулом потоков одного процесса, значит
+  лимитер один (докстринг `core/util/rate_limit.py:12-19`).
+- ✅ R5 — таксономия `CrawlError` в порту: `core/ports/crawl_errors.py` (`dfa428d`).
+- ✅ R6 — структурный `DownloadCancelledError` вместо разбора подстрок (`f928624`).
+- ✅ R7 — `final_url` валидируется до присвоения: `core/adapters/remote_crawl_executor.py:61-81`,
+  `:340`.
+- ⬜ R8 — **не сделано**: http-фолбэка для robots нет, оба фетчера жёстко берут `https://`
+  (`core/cli/wiring.py:1377`, `core/edge/crawler_factory.py:56`); http-origin без TLS
+  остаётся без ленты, а `404`-разрешение (`CrawlNotFound`) этого случая не покрывает.
+- ✅ R9 — сайдкар меты пишется (`core/adapters/crawl_http.py:308-316`) и читается
+  (`:742-752`); легаси-запись названа явно (`core/util/cache.py:10-12`).
+- ✅ R10 — per-hop валидация `core/util/redirects.py`; инвариант записи в кэш после проверки
+  зафиксирован комментарием `core/adapters/crawl_http.py:303`.
+
 ### 3.2. Экстракция и контейнеры (F1–F8)
 
 | ID | Находка | Вердикт | Доказательство | Тест | Класс | P |
@@ -111,6 +139,22 @@ mypy: домен 0 ошибок + baseline 121, selfcheck 111/111, pytest 4801 p
 | F6 | `if value` вместо `is not None` в бюджете спуска обнуляет стримовый гейт | ЧАСТИЧНО: «читаем всё» не проходит, отключается второй гейт | `archive_descent.py:613-614`, `:621`; сравнить `container_policy.py:286` (`is not None`) | нет (`max_member_bytes=0` не строится ни в одном тесте) | Г | P4 |
 | F7 | ось `crawl.document_timeout_s` до docling не доходит; `full` — без таймаута; рециклинга воркеров нет | ПОДТВЕРЖДЕНО | `extract_document.py:383-391` (`FULL: None`), `wiring.py:1939`,`:2278`, `edge/__main__.py:133` — без `document_timeout`; guard только родительский `corpus.py:5198-5209`; `wiring.py:2055` recycle=None | частично, только родительская сторона (`test_corpus_extract_pool.py:863-930`) | Д/М | P4 |
 | F8 | OOXML без документного суффикса: маркер в первых 8192 байтах → класс `binary`, за ними → `container` и пустой спуск с `errors=[]` | ПОДТВЕРЖДЕНО замером (смещения 78/4078 → binary; 8258/9078/20078 → container) | `document_formats.py:85`,`:198`,`:444-449`, `corpus.py:7277-7281` | нет: все тесты кладут маркер в голову | М | P4 |
+
+**Статус на 2026-10-28.** ✅ F1–F8 (пакет P4 закрыт по всем строкам).
+
+- ✅ F1 — обход итеративен явным стеком кадров: `core/pipeline/archive_descent.py:515-565`;
+  цепочка 5000 различных zip — `tests/pipeline/test_corpus_descent.py:449`.
+- ✅ F2 — потолок CPU инъектируется: `tests/pipeline/test_corpus_extract_pool.py:1881`
+  (`monkeypatch` `cpu_parallelism_cap`), `tests/pipeline/test_resources.py:93`.
+- ✅ F3 — отсутствие бэкенда инъектируется, а не предполагается: `tests/adapters/test_container_7z.py:38`.
+- ✅ F4 — чтение окнами (1 MiB шапка + 1 MiB хвост), файл целиком — только если он в них
+  укладывается: `core/util/document_probe.py:11-14`, `:72-76`.
+- ✅ F5 — единая точка разбора XML + hostile-тесты (`0c683f0`), сверено по `core/util/feed.py`.
+- ✅ F6 — предикат «ось не задана» — `is not None`: `core/util/container_policy.py:292,301`.
+- ✅ F7 — ось `crawl.document_timeout_s` доходит до docling: `core/cli/wiring.py:2071`, `:2418`,
+  `:2785`; ось объявлена в аргументах — `core/cli/execution_axes.py:184`.
+- ✅ F8 — OOXML по **центральному каталогу** zip, неузнанный OOXML остаётся `document`:
+  `core/util/document_probe.py:8`, `core/util/document_formats.py:451-453`.
 
 ### 3.3. Чанкинг и индекс (C1–C11)
 
@@ -127,6 +171,24 @@ mypy: домен 0 ошибок + baseline 121, selfcheck 111/111, pytest 4801 p
 | C9 | `index_npy` склеивает поля тем же разделителем, что и группы (латентно) | ПОДТВЕРЖДЕНО формально; сейчас не эксплуатируемо | `index_npy.py:95-103` vs `_GROUP_SEP` `:59` | нет | Г | P5 |
 | C10 | `index_format` не атомарен: окно между `rmtree` и `replace` | ПОДТВЕРЖДЕНО | `index_format.py:119-121` (докстринг `:90` обещает атомарность) | нет | Г | P5 |
 | C11 | `LocalEmbedder` без `revision`/`local_files_only` | ПОДТВЕРЖДЕНО | `embed_local.py:148` (сравнить `embed_model2vec.py:112`,`:181-187`) | нет для `LocalEmbedder` | М | P5 |
+
+**Статус на 2026-10-28.** ✅ C1–C4, C6–C11 · ➖ C5.
+
+- ✅ C1/C2 — `core/util/fusion.py` **удалён** (файла нет); живой путь RRF — `core/pipeline/retrieve.py:119-120`,
+  там ничья разрешается по `chunk_id`; `06-implementation-strategy.md:32` говорит правду («мёртвый дубль»).
+- ✅ C3 — геометрия чанка в контракте: `chunking_spec` — `core/pipeline/digests.py:145`
+  (28 полей, `_prompt_template_identity`-подобный композит из чанкеров).
+- ✅ C4 — граница реза по переводу строки, не по середине слова: `core/adapters/chunker_markdown.py:320`.
+- ➖ C5 — **снято компенсацией**: сверка цитаты идёт по нормализованным пробелам
+  (`core/pipeline/validate.py:326`), поэтому склейка абзацев не ломает I22. Правило не менялось.
+- ✅ C6 — `MIN_CHUNK_SIZE = 20` в обоих чанкерах: `core/adapters/chunker_markdown.py:87`,
+  `core/adapters/chunker_text.py:59`; конструктор требует `min_chunk_size < chunk_size` (`:195`).
+- ✅ C7 — структурная шапка фрагмента в промпте (`source_id`/`document`/`heading`/`context`):
+  `core/pipeline/prompt.py:298,306`; регламент — `cohound-spec-v2.md:648`.
+- ✅ C8 — одно лексическое поле + `lexical_spec` в контракте (`1e7fad9`).
+- ✅ C9 — поля и группы склеиваются разными разделителями: `core/adapters/index_npy.py:58-60`.
+- ✅ C10 — сборка через `os.replace` без окна `rmtree`→`replace`: `core/adapters/index_format.py:134-135`.
+- ✅ C11 — `revision`/`local_files_only` у `LocalEmbedder`: `core/adapters/embed_local.py:109-110`.
 
 ### 3.4. SERP-контур (S1–S9)
 
@@ -147,6 +209,34 @@ mypy: домен 0 ошибок + baseline 121, selfcheck 111/111, pytest 4801 p
 | S9e | `limit` без верхней границы в схеме шва и в сервере | ПОДТВЕРЖДЕНО → **исправлено** (`maximum: 10` в публикуемой схеме == `SEAM_SEARCH_MAX_LIMIT`; тест сверяет схему с константой) | `contracts/seam/search.schema.json:17`, `edge/server.py:636-641` | только положительный | Б | P5 |
 | S9f | stdlib XML в адаптере, обоснование замером, hostile-теста нет | ПОДТВЕРЖДЕНО → **исправлено** (billion-laughs / XXE `file://` / внешний DTD: 0 соединений; обоснование приведено к замеренному) | `search_yandex.py:462-468` | нет | Г | P5 |
 | S9g | DNS-rebinding не проверяется после резолва | ПОДТВЕРЖДЕНО, признано в `security.py:36-37` и передано фетчеру, фетчер не делает | `grep getaddrinfo` по `core/` — 0 | нет | Б | P3 |
+
+**Статус на 2026-10-28.** ✅ S1, S3–S9f · ➖ S2 · ⬜ S9g.
+
+- ✅ S1/S5 — кэш доходит до адаптера: `core/cli/wiring.py:693,714,716`; ключ несёт язык и
+  поставщика: `core/util/cache.py:23-28`; единственная точка чтения/записи —
+  `core/pipeline/search_log.py:20-21` (`_serp_cache_read` `:394`, `_serp_cache_write` `:432`).
+- ➖ S2 — **снято**: `run_serp_round`/`run_serp_loop` остаются без производителя намеренно, и
+  регламент это называет прямо (`cohound-spec-v2.md:556-558`); проход внутри `corpus` решает ту
+  же задачу без второй индексной сборки. «Устаревшая спека» исправлена.
+- ✅ S3 — раунды без вариации запросов не исполняются с причиной: `core/pipeline/serp_loop.py:126`
+  (`no_query_variation`).
+- ✅ S4 — тайминги измеряются: `core/adapters/search_yandex.py:177-180` (`SearchTiming` из
+  `core/ports/search.py`), параллелизм не вводился — «медленно» стало числом.
+- ✅ S6 — общая политика повтора `core/util/retry.py`, применена в GLM: `core/adapters/search_glm.py:66`.
+- ✅ S7/S8 — исход каждого запроса и отказы отдельными строками знаменателя:
+  `core/pipeline/serp_loop.py:137,139,608-618,687`.
+- ✅ S9a — бюджет не мутируется в SERP-пути (`core/pipeline/search_log.py:510` — бюджет
+  принимается как значение; тест `test_external_search_does_not_mutate_effort_budget`).
+- ✅ S9b — `available` — конъюнкция по всем швам: `core/adapters/search_glm.py:191-193`.
+- ✅ S9c — трансляция по типу порта: `core/pipeline/serp_loop.py:464`.
+- ✅ S9d — ключ известного URL нормализуется: `core/pipeline/serp_loop.py:987`.
+- ✅ S9e — `maximum: 10` в публикуемой схеме == `SEAM_SEARCH_MAX_LIMIT`:
+  `contracts/seam/search.schema.json:20`, `core/edge/server.py:99`.
+- ✅ S9f — stdlib XML с замеренным обоснованием (внешние DTD не тянутся):
+  `core/adapters/search_yandex.py:572`.
+- ⬜ S9g — **не сделано**: post-resolve проверки адреса нет, `grep getaddrinfo core/` пуст;
+  риск назван (`core/util/security.py:36`, `core/util/redirects.py:37`), но вопрос владельцу
+  (§9 п. 4) не отвечен, поэтому «принятым риском» это ещё не стало.
 
 ---
 
@@ -272,6 +362,36 @@ mypy: домен 0 ошибок + baseline 121, selfcheck 111/111, pytest 4801 p
 строка в `06`). Живой путь закрыт `retrieve.py` и проверяется независимо
 (`selfcheck.py:389`), так что удаление не ослабляет гейт.
 
+**Статус пакетов на 2026-10-28** (маркер — по пакету, детали — в блоках §3 и §6).
+
+- ✅ P0 — все перечисленные обещания приведены к коду: `core/util/cache.py:1-12` (SERP-кэш
+  теперь правда), `06-implementation-strategy.md:32` (`fusion` — мёртвый дубль), `AGENTS.md`
+  (спуск: итеративный обход, цепочка 5000), `core/util/document_probe.py:11-14` (окна вместо
+  «по шапке»), `02-subsystems.md:500-515` (шапка фрагмента), `core/adapters/llm_local.py:18-29`.
+  ⬜ **остаток P0**: `core/adapters/llm_local.py:22` всё ещё перечисляет «достаточность» среди
+  механических проверок `validate.py`, тогда как `02-subsystems.md:532` уже говорит
+  «НЕ реализовано как шаг эшелона» — одна из двух строк врёт (V1).
+- ✅ P1 — S1+S5+ось языка: `core/cli/wiring.py:693,714,716`, `core/util/cache.py:23-28`,
+  `core/pipeline/search_log.py:394,432`. `EXECUTION_CONTRACT_FIELDS` не менялся (кэш — механизм R7).
+- ✅ P2 — C3+C7 и P6: `core/pipeline/digests.py:145` (`chunking_spec`),
+  `core/pipeline/prompt.py:298,306`, `core/pipeline/execution_axes.py`-строка сценария
+  (см. п. 2 §6.3), `core/pipeline/evaluation_policy.py:31`.
+- ✅ P3 — R10 и R7-edge закрыты (`core/util/redirects.py`,
+  `core/adapters/remote_crawl_executor.py:61-81`); ⬜ **часть пакета**: S9g (DNS-rebinding) —
+  см. §3.4.
+- ✅ P4 — F1, F2, F3, F4, F6, F7, F8, C4, C6, R9 закрыты; ⬜ **R8** (robots http-фолбэк) —
+  единственный незакрытый пункт пакета.
+- ✅ P5 — S3, S6, S7, S8, S9a–d, C8, C9, C10, C11, R1, R2, R5, R6, F5 закрыты;
+  `core/util/fusion.py` удалён.
+- ✅ P6 — провенанс условий измерения и геометрия чанка в контракте (28 полей,
+  `core/pipeline/digests.py:80-181`).
+- ✅ P6b — `golden_declined` (`core/pipeline/evaluator_benchmark.py:115`).
+- ✅ P6c — полоса неопределённости (`core/pipeline/measurement_uncertainty.py:196`).
+- ✅ P7 — `evaluator_v5` действует (`core/pipeline/prompt.py:117`).
+
+**Что осталось по всему плану:** R8, S9g, V1-аномалия, `min_retrieval_score`,
+`extra_instructions` (§6.2 п. 4 и 8), паритет `split` (волна 4, §10.2).
+
 ---
 
 ## 5. Классификация версий
@@ -333,6 +453,30 @@ absence-модель, scoring и определения Coverage/Comparability �
 | V6 | Внешний LLM-хост в закоммиченном конфиге | **ПОДТВЕРЖДЕНО, и хуже аудита** | `config/deploy.yaml:79` `https://plusvibeapi.ru` при шапке того же файла `:13-14` «внутреннего периметра, внешние хосты не используются»; `run.py:497` `load_deploy_config(None)` безусловно на каждом прогоне, флага `--deploy` у `run` нет; `base_url` **не входит ни в `llm_scenarios`, ни в контракт** (`ScenarioBinding` — 11 полей, endpoint только как `endpoint_kind: api`); поведение запинено тестом `test_deploy.py:812-831`; ссылка «Д-36» в `deploy.yaml:77` не имеет адресата в `docs/` | Б/М | **P0 + P2** |
 | V7 | Провенанс промпта не персистится | **ПОДТВЕРЖДЕНО** → **закрыто** (`4ee192f`: `PromptArchive` пишет `runs/{run_id}/prompts/{prompt_hash}.json` для исполненных промптов; замер — 117 файлов, 2.93 MiB на 119 параметров); «бонус» про узкий `prompt_hash` — **ЧАСТИЧНО** На момент находки: `save_prompt` не импортировался в `evaluate.py`; в `runs/ru-pg-dbms-3edf2b06097c/` каталога `prompts/` не было; три документа обещали артефакт. Сейчас: `PromptArchive` пишет каталог из фазы (замер на 119 параметрах jatoba — 117 различных промптов, 2.93 MiB), документы исправлены. Узость `prompt_hash` осознана и компенсирована: ключ `eval_cache` — по тексту (`evaluate.py:1657-1661`), коллизий в прогоне нет (104/104 различных) | М | P6 |
 
+**Статус на 2026-10-28.** ✅ V2–V7 · ⬜ V1.
+
+- ⬜ V1 — **не сделано** в части «аномалия класса утверждения»: замер предмета есть
+  (`core/pipeline/evaluate.py:769` `support_subject_overlap`, артефакт `support_quality.yaml`),
+  но `anomaly_kind` в отчёте по-прежнему три (`core/pipeline/report.py:1414-1438`:
+  `i3_protocol`, `crawl_truncation`, `corpus_incomplete`) — строки «✅ при цитате без предмета»
+  среди них нет. §7 ставил этот шаг **после** P7; P7 сделан, шаг — нет. Плюс остаток P0 по
+  той же строке: `core/adapters/llm_local.py:22` всё ещё приписывает «достаточность»
+  `validate.py`.
+- ✅ V2 — `golden_declined` читается benchmark'ом: `core/pipeline/evaluator_benchmark.py:115,361,494`;
+  объявление — `packages/ru-pg-dbms/sources/golden_status.yaml:11`.
+- ✅ V3 — `max_retries` объявлен (`core/pipeline/evaluation_policy.py:31`, поле
+  `evaluation_policy` — `core/pipeline/digests.py:151`) и полоса неопределённости публикуется
+  (`core/pipeline/measurement_uncertainty.py:196`, запрет ранжирования — `:245-252`).
+  ⬜ остаток: номер попытки в ячейку не пишется (`grep "attempt" core/pipeline/evaluate.py` пуст),
+  поэтому «сколько раз переиздавали» из артефакта не восстановить.
+- ✅ V4 — `Decoder` как `StrEnum` (`core/domain/enums.py:400`), валидация слота
+  (`core/config/deploy.py:514`), ключ в словаре (`docs/status-dictionary.yaml:265`).
+- ✅ V5 — `max_tokens` и `finish_reason` читаются: `core/adapters/llm_local.py:409-426`.
+- ✅ V6 — `rnd_endpoint` объявлен и виден: `core/cli/wiring.py:1027`, `core/cli/commands/run.py:1032`,
+  профиль публикуемости (`core/domain/scoring.py:956`), правило в регламенте
+  (`cohound-spec-v2.md:741-754`).
+- ✅ V7 — архив исполненных промптов (`4ee192f`), документы исправлены (`45278b0`).
+
 ### 6.2. Мелочи
 
 | # | Пункт | Вердикт | Доказательство | Фикс |
@@ -345,6 +489,24 @@ absence-модель, scoring и определения Coverage/Comparability �
 | 6 | `assert last_validation is not None` | **ОПРОВЕРГНУТО** — починено в `97b2776` | `evaluate.py:1753-1754` теперь `if … raise RuntimeError`; ассертов в `evaluate/validate/prompt/retrieve` нет | — |
 | 7 | Adversarial — 9 кейсов | **ПОДТВЕРЖДЕНО** и задокументировано | `fixtures/adversarial_prompts.json` (9), `adversarial.py:3-5` «регрессионный gate, а не заявление о безопасности» | — |
 | 8 | `extra_instructions` мёртв в проде | **ПОДТВЕРЖДЕНО** | `evaluate_cell`/`evaluate_batch` имеют параметр, `evaluate_phase` не передаёт (`evaluate.py:2214-2230`); тест пинит влияние на ключ кэша | S |
+
+**Статус на 2026-10-28.** ✅ 1, 2, 3, 5, 6, 7 · ⬜ 4, 8.
+
+- ✅ 1 — бэкслеши сняты: в `ABSENCE_GUIDANCE` текст объявлен прямо, без экранирования
+  (`core/pipeline/prompt.py:141,151`), шаблон `evaluator_v5` (`:117`).
+- ✅ 2 — пустой срез не тратит вызов модели и не выдаётся за вердикт: `core/pipeline/evaluate.py:1911`
+  (`no_fragments`), причина зафиксирована комментарием `:1909-1911`.
+- ✅ 3 — правило языка цитаты есть в `evaluator_v5` (`core/pipeline/prompt.py:108-115`, `:117`).
+- ⬜ 4 — **не сделано**: `min_retrieval_score` объявлен в `core/pipeline/validate.py:374` и в
+  подписи `core/pipeline/evaluate.py:1832`, но `evaluate_batch` его не передаёт
+  (`:2287-2305`) и в `config/`/`packages/` значения нет (`grep -rn min_retrieval_score core/config packages` —
+  пусто) ⇒ аномалия §10.4 по-прежнему недостижима.
+- ✅ 5 — designated-quote вместо `quotes[0]`: `_designated_denial_quote`
+  (`core/pipeline/evaluate.py:1122`), выбор по числу маркеров отрицания, детерминированный.
+- ✅ 6 — `assert` заменён на `RuntimeError`: `core/pipeline/evaluate.py:2032-2033` (`97b2776`).
+- ✅ 7 — adversarial-набор на месте: `tests/pipeline/fixtures/adversarial_prompts.json`.
+- ⬜ 8 — **не сделано**: `extra_instructions` принимается (`core/pipeline/evaluate.py:1836,2262`),
+  но `evaluate_phase` его не передаёт (`:2588-2603`) ⇒ в проде параметр мёртв.
 
 ### 6.3. Чего аудит не увидел (найдено полосами и проверено мной)
 
@@ -370,6 +532,22 @@ absence-модель, scoring и определения Coverage/Comparability �
    `execution_change`; `2026-10-27-support-not-about-subject.md` — граница
    `methodology_version`, «решение за владельцем». Код исполняет первое. Расхождение живое:
    `TEMPLATE_VERSION = v4` уже действует.
+
+**Статус на 2026-10-28.**
+
+- ✅ 1 — guidance вошёл в идентичность через композит: `prompt_template` =
+  `имя@hash(шаблон + ABSENCE_GUIDANCE + JSON-схема)` (`core/pipeline/run_identity.py:216-236`).
+- ✅ 2 — условия генерации записываются: `seed`/`temperature`/`constrained_decoding`/
+  `endpoint_host`/`max_tokens` в строке сценария (`core/cli/execution_axes.py:698-719`),
+  фактические значения — из тех же констант, что уходят в адаптер.
+- ✅ 3 — `base_url` вошёл в идентичность как **хост**: `llm_scenarios.endpoint_host`
+  (`core/cli/execution_axes.py:718`), а `llm_scenarios` — поле контракта
+  (`core/pipeline/digests.py:88`). Схема/путь/секрет не пишутся намеренно.
+- ✅ 4 — benchmark читает `golden_status`: `core/pipeline/evaluator_benchmark.py:115,361,494`.
+- ✅ 5 — класс назван: `prompt_template` отнесён к `execution_versions`
+  (`cohound-spec-v2.md:861,880`), т.е. `execution_change`, как и исполняет код.
+  ❔ остаток: отчёт замера `2026-10-27-support-not-about-subject.md:84` продолжает называть
+  границей `methodology_version` — это историческая запись, не обновлена.
 
 ### 6.4. Пакеты P6 и P7
 
@@ -466,6 +644,30 @@ absence-модель, scoring и определения Coverage/Comparability �
    (V2). Рекомендую аномалию — но назвать это надо до P7, чтобы шаблон не пришлось менять
    дважды.
 
+**Статус вопросов на 2026-10-28.**
+
+- 1 ➖ снято — решением §10 п. 1: все правки до прогона, `run_id` меняется один раз. Исполнено:
+  P2/P6/P7 сведены в `f6100c7`.
+- 2 ✅ отвечен кодом — ось доходит до docling (`core/cli/wiring.py:2071,2418,2785`,
+  `core/cli/execution_axes.py:184`), т.е. выбран первый вариант.
+- 3 ✅ отвечен кодом — политика переехала в ядро (`core/util/robots.py:72,483`), одна для
+  транспортов; per-request ось осталась свойством адаптера (`core/adapters/crawl_scrapy.py:422`).
+- 4 ⬜ **не отвечен и не сделан** — post-resolve проверки нет (`grep getaddrinfo core/` пуст),
+  «принятым риском» это не названо ни в документе, ни в коде (`core/util/security.py:36`,
+  `core/util/redirects.py:37` — только констатация).
+- 5 ➖ снято — extra остаётся необязательным, тесты инъектируют отсутствие бэкенда
+  (`tests/adapters/test_container_7z.py:38`), поэтому установка extra их не красит.
+- 6 ➖ снято — решением §10 п. 2: правило ограничено production, стенд RnD объявлен; код пишет
+  `endpoint_host` (`core/cli/execution_axes.py:718`) и признак `rnd_endpoint`
+  (`core/domain/scoring.py:956`).
+- 7 ✅ названо — регламент отнёс `prompt_template` к `execution_versions`
+  (`cohound-spec-v2.md:861,880`). ❔ отчёт замера (`2026-10-27-support-not-about-subject.md:84`)
+  не обновлён.
+- 8 ✅ разведены и оба сделаны: P6 — `core/pipeline/digests.py:151`,
+  P7 — `core/pipeline/prompt.py:117`.
+- 9 ⬜ **решение принято (аномалия), реализация нет** — `anomaly_kind` в отчёте по-прежнему
+  три (`core/pipeline/report.py:1414-1438`), строки «✅ при цитате без предмета» нет.
+
 ---
 
 ## 10. Решения владельца (2026-10-28)
@@ -530,6 +732,23 @@ P5-ловушки (удаление `fusion.py`, C4/C6/C9/C10/C11).
 `document_level`/`pdf_pipeline` в edge, повторный фетч); A1-профиль публикуемости
 (`not_implemented`/`unobserved_scope`/…) принят, но не реализован.
 
+**Поправка на 2026-10-28 (проверено по коду, HEAD `f6100c7`).**
+
+- ⬜ **паритет `split`** — не сделан: волна 4 не начата, профиль по-прежнему игнорирует
+  `document_level`/`pipeline` и не передаёт члены архивов через шов
+  (`core/pipeline/digests.py:109-118` — это записано как причина, по которой `deploy_profile`
+  входит в контракт).
+- ➖ **A1-профиль публикуемости — реализован**, строка выше устарела: класс и разложение
+  неизвестности считаются (`core/domain/scoring.py:1077`), классы
+  `PUBLISHABLE`/`PUBLISHABLE_WITH_CAVEAT`/`ANALYTICAL_ONLY`/`NOT_COMPARABLE` объявлены
+  (`core/domain/enums.py:887-890`), причины `UnknownCause` — `core/domain/enums.py:893-939`,
+  артефакт `outputs/publishability.yaml` пишется (`core/pipeline/report.py:2302`), в Ш8 —
+  `core/pipeline/compute.py:337`.
+- ❔ **числа CI из абзаца выше не пере-проверялись** 2026-10-28: полный `pytest` не запускался
+  (на машине идёт живой прогон, RAM общая). Сверено по коду только то, что от них зависит:
+  контракт — ровно 28 полей (`core/pipeline/digests.py:80-181`), `selfcheck` — 111 проверок
+  (файл не менялся этой волной).
+
 ---
 
 ## 11. Разрешение на архитектурные правки (владелец, 2026-10-28)
@@ -556,10 +775,10 @@ P5-ловушки (удаление `fusion.py`, C4/C6/C9/C10/C11).
 | `--profile` в идентичность | «где запущен процесс» — провенанс, «какими механизмами получен корпус» — условие измерения | контракт | **уже было** (`deploy_profile`, с самого появления поля) |
 | `--from-scratch` в идентичность | — | — | **отвергнуто, см. ниже** |
 | `check_absence_coverage` (I2c) вызывать в pipeline | сейчас защита работает **случайно**: `_denial_basis` → `unobserved` при `coverage.complete is False`. Инвариант объявлен, но не исполняется — ровно то, что AGENTS.md называет «инварианты — это код, а не комментарии» | код | **сделано**: `evaluate._enforce_absence_coverage` — единственная точка вызова; нарушение → `❓` с токеном `absence_coverage_unsatisfied`, absence-протокол не публикуется |
-| Паритет `split`: члены архивов через шов, `document_level`/`pdf_pipeline` в edge, двойной фетч, дыра покрытия (архив скачан, члены не извлечены ⇒ `complete=True` на пустом корпусе) | профиль `split` — опция MVP (M1), а не паритетен; дыра покрытия даёт ложную уверенность в полноте | архитектура шва | 4 |
+| Паритет `split`: члены архивов через шов, `document_level`/`pdf_pipeline` в edge, двойной фетч, дыра покрытия (архив скачан, члены не извлечены ⇒ `complete=True` на пустом корпусе) | профиль `split` — опция MVP (M1), а не паритетен; дыра покрытия даёт ложную уверенность в полноте | архитектура шва | 4 → ⬜ **не сделано** (волна 4 не начата; ограничение записано как причина `deploy_profile` в контракте — `core/pipeline/digests.py:109-118`) |
 | Лексический индекс: одно поле вместо четырёх (C8), персист либо явная запись «время жизни процесса» | 4× работы анализаторов и объёма индекса ради 3 профилей, которые прогон не запрашивает; пересборка каждый прогон в temp | архитектура | 3 → **сделано** (`1e7fad9`: одно поле + `lexical_spec` в контракте) |
 | Таксономия `CrawlError` из адаптера в порт/домен (R5) | десяток модулей ядра импортировали таксономию из реализации; место было зафиксировано компромиссом в `ports/crawler.py:20` | архитектура | 3 → **сделано** (`dfa428d`) |
-| `document_timeout_s` как настоящая ось `CrawlLimits` + проводка в docling (F7) | ось объявлена, до docling не доходит; `FULL: None` означает «слот занят до конца прогона» | код + контракт | 2 (со мной) |
+| `document_timeout_s` как настоящая ось `CrawlLimits` + проводка в docling (F7) | ось объявлена, до docling не доходит; `FULL: None` означает «слот занят до конца прогона» | код + контракт | 2 → ✅ **сделано**: ось в аргументах (`core/cli/execution_axes.py:184`), до docling (`core/cli/wiring.py:2071,2418,2785`) |
 | `extract_cache`: частичность при 304-reuse | переиспользование полного результата для частично извлечённого документа скрывает деградацию | схема state.db | 3 → **сделано** (`8d55b6a`, схема состояния 5) |
 | `PARTIAL_SUCCESS`/`SKIP_READ_FAILED` (без `corpus_members`) | отказ, который сейчас теряется, — это невидимая потеря, а не типизация | код | 3 → **сделано** (`8d55b6a`: `MemberOutcome.partial` с инвариантом, `PARTIAL_EXTRACTION` в блокирующих классах) |
 

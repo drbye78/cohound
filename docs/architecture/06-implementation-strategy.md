@@ -1,5 +1,15 @@
 # coHound — стратегия реализации production-grade и статус
 
+> **Статус реализации на 2026-10-28** (HEAD `f6100c7`): PARTIAL — из 27 верхнеуровневых пунктов
+> закрыто 21, открыто 6 (M0, M1, M2, M3, W12, W14). Сверх того открыто 6 подпунктов: паритет
+> `split`, durable-аттестация профиля, замер W8, `evaluator-benchmark`, живой SERP-раунд вместе с
+> append-only раунд-циклом, приёмка отчёта M0.5. Снято 4 решения (T9.6, строка `llama-cpp-python`,
+> `extract_workers` как ось контракта, «прогонов до `report` ноль»), не проверено 1. Ниже у каждого
+> пункта стоит маркер ✅/⬜/➖/❔ с доказательством (`путь:строка`).
+>
+> **Главная поправка против текста ниже: прогон до `report` состоялся** — `runs/ru-pg-dbms-3edf2b06097c`
+> (2026-10-26). Утверждения §0 и §4 о «нуле прогонов до `report`» оставлены как история и помечены.
+
 **Документ:** `docs/architecture/06-implementation-strategy.md`
 **Статус:** актуализировано as-built (план реализации итерации 6, сверен с кодом)
 **Опирается на:** `00`–`05`; источник истины — `cohound-spec-v2.md` (регламент v2.1).
@@ -54,6 +64,11 @@
 > по существу «0.1.0». Всё, что ниже помечено ✅, означает «код приземлён и покрыт тестами»,
 > а не «проверено на реальных данных».
 > DoD первого полного прогона — §4 (M0.5).
+
+➖ снято на 2026-10-28 — главный факт этого блока больше не верен: прогон `ru-pg-dbms-3edf2b06097c`
+дошёл до `report` (2026-10-26), `outputs/` у него полный (5 артефактов, включая `battle_card.xlsx` и
+`nda_questions.csv`), живой оценщик участвовал (§5.W9). Оговорка «✅ = код покрыт тестами, а не
+проверено на данных» сохраняется только для замера ретривала (§5.W8) и `evaluator-benchmark` (§5.W9).
 
 *Категорийная нейтральность `core/` проверяется грепп-тестом и матрицей слоёв в selfcheck на каждом коммите.*
 
@@ -125,8 +140,10 @@
 → [G4] → report` реализован с возобновляемым состоянием и артефактами. «Продакшн» для первого
 пользователя (один аналитик) достигается на M1–M2; масштаб на 5 кейсов — на M3.
 
-⚠️ «Реализован» здесь означает: фазы существуют, соединяются и проходят на тестах с фейками;
-**ни один прогон не прошёл эту цепочку целиком на реальных данных** (§0, DoD M0.5).
+✅ «Реализован» здесь означает: фазы существуют, соединяются и проходят на тестах с фейками.
+Цепочка **прошла целиком на реальных данных** 2026-10-26 (`runs/ru-pg-dbms-3edf2b06097c`, §4 M0.5):
+`outputs/` + `run_manifest.yaml`, `report` в `metrics.json:duration_by_phase`. Ограничением на
+2026-10-28 остаётся не проходимость, а качество отчёта (Coverage 0.208) и приёмка (M2).
 
 ### 2.3. Порядок работ (историческая карта зависимостей)
 
@@ -165,6 +182,12 @@ staging крупных артефактов отсутствует; (3) ось `
 (конвертеры строит edge). Поэтому `split` — **функционально уже `local`** по артефактам и
 контейнерам; это известное ограничение MVP, а не достигнутый паритет.
 
+⬜ не сделано — паритет `split` не изменился на `f6100c7`: (1) члены контейнеров не
+извлекаются — `core/adapters/remote_extractor.py:42` (`supports_source_path = False`);
+(2) страница `collect` ограничена 8 MiB — `core/edge/scheduler.py:163` (`_COLLECT_MAX_BYTES`),
+файлового staging крупных артефактов через шов нет; (3) ось `crawl.document_level` под `split`
+принимается и игнорируется — `core/cli/wiring.py:2215`.
+
 ---
 
 ## 3. Рабочие потоки (workstreams): статус
@@ -185,6 +208,8 @@ staging крупных артефактов отсутствует; (3) ось `
 | **W12** | Прод-хардненинг | `core/pipeline/{observability,metrics,adversarial,golden}.py`, `core/store/backup.py`, `tests/e2e/` | 🟡 partial: код done; ⏳ golden-full, §11.5-baseline, кейсы 2–5 не выполнены |
 | **W13** | DMZ / шов | `core/ports/gateway.py`, `core/adapters/remote_*.py`, `core/edge/*`, `core/config/deploy.py`, `contracts/seam/*` | ✅ done (+ планировщик краула, Phase 3) |
 | **W14** | Стадийная архитектура извлечения | проект: `10-extraction-pipeline-architecture.md`; порядок — `11-production-architecture-strategy.md` | ⛔ не начат (проект на ревью; группа A — память/запись, группа B — шов `extract` и lease). Ставить **после** M0.5: `11` §4 (F1 → F2 ‖ F3) |
+
+> Пунктовый маркер с доказательством — в §5 (по одному на поток); эта таблица — карта, не аудит.
 
 **Cross-cutting (сквозные, ведутся постоянно):** нейтральность `core/` (§1.3), контур данных (§10),
 воспроизводимость/R7, документация-в-коммите.
@@ -211,19 +236,32 @@ staging крупных артефактов отсутствует; (3) ось `
 `trafilatura-html-2` и `text-plain-1`. Поэтому M0 не закрыт целиком: каркас и детерминированные
 волны готовы, воспроизводимой приёмки экстракции нет.
 
-### M0.5 — Первый полный прогон до `report` — ⛔ не достигнут (прогонов: 0)
+⬜ не сделано — приёмка экстракции: PDF/Office-фикстур в дереве нет (`find tests -name '*.pdf'` →
+0 файлов на `f6100c7`), docling-путь в CI не проверяется. Блокер именно фикстуры, а не контур.
+
+### M0.5 — Первый полный прогон до `report` — ✅ достигнут (2026-10-26, `ru-pg-dbms-3edf2b06097c`)
 
 **DoD.** Один прогон кейса 1 на реальных данных проходит все 15 фаз
 (`normalize … report`), пишет `outputs/` (и выгружает `run_manifest.yaml`), и его отчёт
 разбирается без необъяснённых аномалий. Гейты G1/G2 проходятся человеком (per-run), G3/G4 —
 решением извне или явным `waived`.
 
-**Факт.** Такого прогона не было **ни одного**: самая дальняя durable-фаза — `evaluate`
+**Факт (состояние до 2026-10-26).** Такого прогона не было **ни одного**: самая дальняя durable-фаза — `evaluate`
 (единственный прогон, `live-inc-f`), и он же имеет **ноль** строк в `llm_scenarios`, то есть
 `evaluate` прошёл без живого оценщика. Ни один прогон не дошёл до `review`/`compute`/`report`.
 До закрытия M0.5 все числа методологии (Coverage, Capability, κ, пороги golden) — гипотезы (§0).
 Это гейт **перед** любым разговором о M2/M3: приёмку нельзя провести на системе, которая ни
 разу не дошла до отчёта.
+
+✅ сделано (поправка на 2026-10-28) — прогон `ru-pg-dbms-3edf2b06097c` дошёл до `report`:
+`runs/ru-pg-dbms-3edf2b06097c/outputs/{battle_card.xlsx,preliminary_findings.xlsx,nda_questions.csv,diff.md,artifacts_gap.yaml}`,
+`run_manifest.yaml`, `gates/{G1,G3,G4}-request.json`; `metrics.json` пишет
+`duration_by_phase.report = 0.279 s`, `cells_by_state = {evaluated: 153, failed: 319, pending: 4}`.
+Живой оценщик в прогоне участвовал (`docs/reports/measurements/2026-10-26-verdict-reproducibility.md`:
+`deepseek-v4.1-flash:purple`). Механическая часть DoD выполнена.
+⬜ остаётся качественная часть DoD — «отчёт разбирается без необъяснённых аномалий»:
+аномалии (Coverage 0.208 при Capability 0.922, 119 `failed` у pangolin, 63 `❓`) разобраны в
+`docs/reports/measurements/2026-10-2*.md`, но их принятие — решение человека, не код.
 
 ### M1 — Конвейер (strict-карта кейса 1 + preliminary + профиль `split`) — 🟡 код готов, прогон не завершён
 
@@ -238,6 +276,9 @@ staging крупных артефактов отсутствует; (3) ось `
   харнесс `hound experiment retrieval` есть, артефактов замера (KS-sweep + `index_build_id`) в
   дереве нет — см. §5.W8 и §12.
 
+⬜ не сделано — M1 не закрыт: паритет `split` (§2.3) и фиксация ретривала (§5.W8). Прогон до
+`report` состоялся (M0.5), поэтому оговорка «прогон не завершён» к конвейеру больше не относится.
+
 ### M2 — Приёмка кейса 1 — 🟡 частично (код-инструменты готовы, приёмка не проведена)
 
 - ✅ W11 (SERP-петля) — код; golden-харнесс и adversarial-набор — код.
@@ -246,10 +287,17 @@ staging крупных артефактов отсутствует; (3) ось `
   baseline-эксперимент (2 аннотатора, §11.5); полная метрика приёмки (R6/R7/R11/R12, critical=0,
   preliminary-yield) на реальных данных; калибровка порогов. Приёмка кейса 1 **не заявлена**.
 
+⬜ не сделано — и формулировка «полный golden не проведён» неточна: он **проведён и провален**.
+`hound golden --tier full` на `3edf2b06097c` даёт `agreement: 6.8 %` (16 из 236), `false_ok: 3`
+(`docs/reports/measurements/2026-10-27-golden-reference-set-unusable.md`). Причина — состав
+эталона (`missing: 217`, разметка не на тех продуктах), а не оценщик: нужна пере-разметка.
+
 ### M3 — Кейсы 2–5 (portability) — ⛔ не начат
 
 Авторство пакетов категорий 2–5 не выполнялось; в репозитории есть один доменный пакет кейса 1
 (`packages/ru-pg-dbms/`) и нейтральный `packages/_template/`. Portability gate ×5 не проводился.
+
+⬜ не сделано — проверено на `f6100c7`: `ls packages/` → `ru-pg-dbms`, `_template`; кейсов 2–5 нет.
 
 > **Реалистичность.** Самое дорогое — **калибровка методологии (§11.5) и авторство категорий**,
 > а не код. W1–W13 (код) практически завершены; незакрытое — измерительные прогоны и домен.
@@ -264,6 +312,10 @@ staging крупных артефактов отсутствует; (3) ось `
 
 ### W1 — Фундамент и рефактор — ✅ done
 
+✅ сделано (проверено на `f6100c7`) — монолиты отсутствуют (`ls core/schemas.py core/db.py` → No such
+file); порты без наследников (`core/ports/llm.py:4` — «без `tools`/`web_search`»); грепп-гейт трёх
+слоёв — `tests/selfcheck.py::_neutrality`, тот же набор в `scripts/ci.sh`.
+
 - `core/ports/*.py` — `typing.Protocol`-контракты без наследования (llm, vector_index,
   lexical_index, search, crawler, extractor, chunker, embedder, index_builder, registry, store,
   gate_store, gateway, crawl_executor, poller, discovery_llm, types).
@@ -275,12 +327,20 @@ staging крупных артефактов отсутствует; (3) ось `
 
 ### W2 — Домен — ✅ done
 
+✅ сделано (проверено) — `core/domain/models.py:70` (`ConfigDict(extra="forbid", …)` — база всех моделей),
+`core/domain/scoring.py:407` (знаменатель `scope_universe`), property-тесты — `tests/domain/`.
+
 - Модели Pydantic с `extra="forbid"`, `StrEnum`-перечисления, чистые `check_*`-инварианты,
   `scoring` (capability/coverage/failure_rate/comparability/sensitivity/modules), `r2`, `anchors`
   (`SourceResolver`), `dictionary`.
 - Property-тесты домена — `tests/domain/`.
 
 ### W3 — Store — ✅ done
+
+✅ сделано (проверено) — `core/store/sqlite.py:15` (`SCHEMA_VERSION = "3.13.0"`; на `f6100c7` в схеме
+21 таблица, из них 20 предметных + `sqlite_sequence` — текст ниже говорит «19», это устарело),
+`core/store/state_sqlite.py:41` (`STATE_SCHEMA_VERSION = "5"`, в тексте ниже `"4"`),
+`core/store/state_store.py:875` (`save_profile_attestation` — писателя в прогоне нет, см. §5.W4).
 
 - `core/store/sqlite.py` — DDL §4.4 + триггеры I4/I6/I7/I13/I18, `SCHEMA_VERSION = "3.13.0"`
   (19 таблиц, включая `schema_meta`; гейт версии схемы — файл другой версии отвергается,
@@ -295,6 +355,12 @@ staging крупных артефактов отсутствует; (3) ось `
 - `run_inputs` — снимок плановых входов (самодостаточность `runs/{run_id}`, P1).
 
 ### W4 — Конвейер и гейты — ✅ done
+
+✅ сделано (проверено) — `core/pipeline/runner.py:167` (`PhaseResult` c
+`ok|skipped|blocked|failed`), `core/pipeline/gates.py`, `core/pipeline/gate_subject.py`,
+`core/cli/context.py:1197` (`make_profile_gate` подключён в CLI).
+⬜ не сделано — durable-аттестация профиля: `save_profile_attestation` не вызывается ни из
+одного прод-пути (`grep -rn save_profile_attestation core` → только определение), строку пишут тесты.
 
 - `core/pipeline/runner.py` — фазы, `PhaseResult`, resume; `core/pipeline/phases.py` — сборка фаз
   Ш1–Ш9; `gates.py` G1–G4 (только через `gate_decisions`); `observability.py`/`metrics.py`;
@@ -323,6 +389,10 @@ staging крупных артефактов отсутствует; (3) ось `
 
 ### W5 — Конфиг и CLI — ✅ done
 
+✅ сделано (проверено) — `core/pipeline/lint.py:105` (`LintReport.ready`); сборка парсера даёт
+21 верхнеуровневую команду (`core/cli/parser.py`, проба на `f6100c7`) и 25 подкоманд
+`hound package` (`core/cli/package/parser.py`).
+
 - `core/config/run_config.py` + загрузчики пакета (`core/pipeline/normalize.py`), `lint.py`,
   `plan.py`; `core/config/paths.py` (раскладка операционных каталогов).
 - `core/cli/` — composition root Z0: `main.py`, `parser.py`, `context.py`, `errors.py`, `output.py`,
@@ -335,6 +405,10 @@ staging крупных артефактов отсутствует; (3) ось `
 
 ### W6 — Детерминированные волны — ✅ done
 
+✅ сделано (проверено) — `core/adapters/registry_generic.py:106` (`headers_env`), `core/pipeline/registry.py`,
+`core/pipeline/inheritance.py`; корневого `registries/` нет (`ls packages/*/registries` → no such file),
+шаблоны — `docs/templates/registries/`.
+
 - `core/adapters/registry_generic.py` (config-driven json/html + маппинг), `core/pipeline/registry.py`
   (R-ячейки), `core/pipeline/inheritance.py` (direct/conditional/blocked + derived-evidence).
 - **Реестры (P3):** спецификации **package-scoped** — `packages/{case_id}/registries/{registry_id}.yaml`,
@@ -343,6 +417,12 @@ staging крупных артефактов отсутствует; (3) ось `
   (значение из env, не из файла). Операционный knob `paths.registries`/`COHOUND_REGISTRIES_DIR` удалён.
 
 ### W7 — Корпус — ✅ done по коду; ⚠️ под `split` — с расхождениями
+
+✅ сделано (код, проверено) — `core/pipeline/crawl_frontier.py:830` (`host_in_scope`), `:821`/`:826`
+(`out_of_scope_subdomains`/`accepted_foreign_hosts`), `core/pipeline/archive_descent.py:110-112`
+(`archive_cycle`/`archive_budget_exhausted` — исчерпание видимо), цепочка 5000 архивов —
+`tests/pipeline/test_corpus_descent.py`.
+⬜ остаётся паритет `split` (§2.3).
 
 - Порты: `core/ports/{crawler,extractor,chunker,container}.py`. Адаптеры: `crawl_scrapy.py`
   (robots=obey — **Scrapy-путь**), `crawl_http.py`, `crawl_browser.py` (прямой Playwright/CDP,
@@ -393,7 +473,14 @@ staging крупных артефактов отсутствует; (3) ось `
   «ещё в очереди» от «потерян»), опрашивая сеанс до терминального статуса. «Не начат» ≠
   «потерян» различимо по `product_skipped`.
 
-### W8 — Ретривал и индекс — ✅ код done; ⏳ замер не воспроизведён (артефактов нет)
+### W8 — Ретривал и индекс — ✅ код done; ⬜ замер не воспроизведён (артефактов нет)
+
+✅ сделано (код, проверено) — `core/pipeline/retrieve.py:98` (`rrf_fuse_chunks`),
+`core/cli/commands/experiment.py:101-170` (персист `retrieval_profile`/`K`/`rrf_k` + `settings_provenance`,
+и только при полном сравнении).
+⬜ не сделано — замер R0/R1/R2 + K-свип: KS-sweep в дереве отсутствует (`grep -rln "KS-sweep"
+docs/reports/measurements/` → пусто). В дереве есть только пере-оценка 63 `❓` на копии БД
+(`docs/reports/measurements/2026-10-26-retrieval-profile-r0-vs-r2.md`), а не фиксация профиля.
 
 - Порты: `embedder`/`index_builder`/`vector_index`/`lexical_index`. Адаптеры: `embed_local.py`
   (bge-m3, extra `embed`), **`embed_model2vec.py`** (лёгкий офлайн-путь, extra `embed-lite` без torch;
@@ -420,12 +507,22 @@ staging крупных артефактов отсутствует; (3) ось `
   retrieval-golden кейса; живой прогон оценщика; вендорного снапшота модели в репозитории нет
   (снапшот лежит вне репо).
 
-### W9 — Оценщик — ✅ код done; ⏳ живой прогон не выполнялся
+### W9 — Оценщик — ✅ код done; ✅ живой прогон состоялся (2026-10-26)
+
+✅ сделано (проверено) — живой оценщик участвовал в прогоне `ru-pg-dbms-3edf2b06097c`:
+`docs/reports/measurements/2026-10-26-verdict-reproducibility.md` называет модель
+`deepseek-v4.1-flash:purple`, `temperature=0`, `seed=0`, тот же `prompt_hash`; `metrics.json`
+пишет `cells_by_state.evaluated = 153`.  ⚠️ `metrics.json.llm_calls: 0` — счётчик фиксирует
+только последнюю инвокацию, поэтому факт живого прогона доказывается замером, а не им.
+⬜ не сделано — `evaluator-benchmark` не прогонялся: харнесс есть
+(`core/pipeline/evaluator_benchmark.py`), артефакта измерения в `docs/reports/measurements/` нет.
 
 - `core/ports/llm.py` (без `tools`, I18 структурно), `core/adapters/llm_local.py` — клиент
   [OI]-совместимого endpoint корп. облака (constrained decoding, seed/greedy);
   `core/pipeline/{prompt,evaluate,validate}.py`; `CellEvidence`/детерминированный `evidence_id`.
-- **T9.6 — снят (retracted).** Офлайн-fallback `llama-cpp-python` (CPU/GGUF) для тестов порта
+- **T9.6 — снят (retracted).** ➖ снято — superseded: контур оценщика замкнут на [OI]-совместимый API (см. ниже).
+  ✅ проверено на `f6100c7`: `grep -rn "llama_cpp" core` → пусто; рабочая зависимость отсутствует в
+  конвейере, строка реестра `05:135` помечена «снято». Офлайн-fallback `llama-cpp-python` (CPU/GGUF) для тестов порта
   **не реализован и снят с плана как superseded**: контур оценщика замкнут на [OI]-совместимый API
   **внутри корпоративного периметра** (`core/adapters/llm_local.py`), и отдельный локальный
   GGUF-инференс дублировал бы адаптер вне принятой архитектуры. Реестр стека (`05`) всё ещё несёт
@@ -438,13 +535,26 @@ staging крупных артефактов отсутствует; (3) ось `
 
 ### W10 — Расчёт и отчёты — ✅ done
 
+✅ сделано (проверено) — `core/pipeline/report.py:123-126` (`render_battle_card`,
+`render_nda_questions`, `render_preliminary_findings`); живой вывод —
+`runs/ru-pg-dbms-3edf2b06097c/outputs/` (5 артефактов, включая `battle_card.xlsx` и `diff.md`).
+
 - `core/pipeline/compute.py` → `core/domain/scoring.py`; `requested` vs `computed` ranking (K6).
 - `core/pipeline/report.py` — `battle_card.xlsx`/`preliminary_findings.xlsx`/`nda_questions.csv`/`diff.md`
   (в `runs/{run_id}/outputs/`), `run_manifest.yaml` (все версии/модели/build/профиль+K/бюджет, R7;
   манифест хранится строкой БД, `report` выгружает YAML отдельно).
 - CLI `run/review/report/golden/sensitivity/diff/promote` + `gate` (S9) реализованы.
 
-### W11 — Search-адаптер и SERP-петля — ✅ код done; ⏳ живой раунд не выполнялся
+### W11 — Search-адаптер и SERP-петля — ✅ код done; ⬜ живой раунд не выполнялся
+
+✅ сделано (код) — контур исполняется: `core/pipeline/corpus.py:3925` вызывает `_run_serp_contour`
+(поиск → допуск → расширение seed-набора **до** дренажа, одна сборка), `core/pipeline/search_log.py`
+(бюджет, I23).
+⬜ не сделано — (а) append-only раунд-цикл `run_serp_loop` (`core/pipeline/serp_loop.py:1549`)
+**не вызывается ни из одного прод-пути**: ссылки только в `core/pipeline/__init__.py` и
+`tests/pipeline/test_serp_loop.py` ⇒ механизм объявлен и покрыт тестом, но в прогоне не работает;
+(б) живой SERP-раунд: `runs/ru-pg-dbms-3edf2b06097c/metrics.json` даёт `search_calls_by_phase = {}`,
+а `nda_questions.csv` всех `❓` пишет `i3_anomaly: не пройдены контуры: serp, registry`.
 
 - `core/ports/search.py`; адаптеры `core/adapters/search_yandex.py` (дефолт) и `search_glm.py`
   (список поддержанных — `SUPPORTED_SEARCH_ADAPTERS` в `core/cli/wiring.py`).
@@ -456,6 +566,11 @@ staging крупных артефактов отсутствует; (3) ось `
 
 ### W12 — Прод-хардненинг и кейсы — 🟡 partial
 
+⬜ не сделано — код есть (`core/store/backup.py:139/211/300` — `backup_run`/`restore_run`/
+`gc_index_builds`; `core/pipeline/adversarial.py:497` исполняется в `tests/selfcheck.py:2932`),
+но приёмочный контур не пройден: golden-full дал 6.8 % (`2026-10-27-golden-reference-set-unusable.md`),
+§11.5-baseline и кейсы 2–5 не делались.
+
 - Наблюдаемость (`observability.py`/`metrics.py`), backup/restore + GC (`store/backup.py`),
   adversarial-набор (`adversarial.py`, R8), golden-харнесс (`golden.py`), e2e-регрессии
   (`tests/e2e/{test_walking_skeleton,test_reproducibility}.py`) — ✅ код.
@@ -464,6 +579,11 @@ staging крупных артефактов отсутствует; (3) ось `
   авторство и прогон кейсов 2–5.
 
 ### W13 — DMZ / application-layer шов — ✅ done
+
+✅ сделано (проверено) — `core/edge/{server,auth,audit,scheduler}.py`, публикуемые схемы
+`contracts/seam/*` (`openapi.json`, `crawl.schema.json`, `search.schema.json`, …),
+`hound deploy-check` — `core/cli/commands/deploy.py:1`.
+⬜ паритет с `local` — §2.3.
 
 - `core/ports/gateway.py` (`ContentGateway`), `core/adapters/remote_{gateway,crawler,search,registry,extractor}.py`
   (httpx, TLS без пиннинга, retry ≤2, лимит ответа, клиентская валидация).
@@ -480,6 +600,9 @@ staging крупных артефактов отсутствует; (3) ось `
   + `crawl/poll` — аддитивны (`schema_version` остаётся `"1"`, scope `crawl`).
 
 ### W14 — Стадийная архитектура извлечения и пост-извлечения — ⛔ не начат (проект)
+
+⬜ не сделано — кода нет: `grep -rn "F3\b" core` → пусто на `f6100c7`. Гейт F3 — «после F1»;
+F1 (первый прогон до `report`) уже выполнен 2026-10-26 (§4 M0.5), значит F3 разблокирован.
 
 - **Проект:** `10-extraction-pipeline-architecture.md`. §1–§4 — as-built и дефекты (Д-1…Д-8);
   §5 — целевая форма, **не реализовано**; §8 — принятые решения с обоснованием; §9 —
@@ -518,6 +641,9 @@ staging крупных артефактов отсутствует; (3) ось `
 описывает **отклонённый** путь и не является зависимостью конвейера. Оценщик работает через
 [OI]-совместимый API внутри периметра (§W9). Реестр `05` не переписывается в этой фазе (вне задачи
 P5), но строка помечена здесь как неактуальная — **residual doc debt**, см. §12.
+
+➖ снято — долг уже закрыт: строка `docs/architecture/05-dependency-stack.md:135` несёт
+«**снято (2026-10, см. `06` §5.W9/§5.13)**» и «конвейер путь не использует».
 
 ---
 
@@ -585,6 +711,11 @@ P5), но строка помечена здесь как неактуальна
   `03` §D.5 — **плановая оценка**, а не замер: она осталась в проектном документе как
   консервативный расчёт, фактические числа — из замеров выше (`extract_workers: 2` в
   `packages/ru-pg-dbms/run.yaml`).
+
+  ➖ снято — утверждение выше, что `extract_workers` входит в `crawl_config_digest` и класс
+  `execution_change`, **неверно на `f6100c7`** (F0): параллелизм извлечения в `as_dict()` не входит,
+  иначе `run_id` стал бы функцией хоста — `core/pipeline/crawl_frontier.py:141-160`.
+
 - **Уровни извлечения документов (P5, as-built).** Ось `crawl.document_level`
   (`off`|`text`|`layout`|`layout_tables`|`full`; app < run < site, per seed-root,
   `CrawlLimits.document_level`, манифест-поле `crawl_document_level`, `crawl_config_digest`)
@@ -660,6 +791,10 @@ walking skeleton + reproducibility) — **заполнены и зелёные**
 golden-full, adversarial как приёмочный прогон) — **харнессы реализованы, реальные прогоны M2 не
 проведены**.
 
+⬜ уточнение — golden-full **прогонялся** и провалился (6.8 % согласия), а не «не проводился»;
+`packages/ru-pg-dbms/golden.csv` содержит 236 строк (144 ✅ / 66 ⚠️ / 26 ❌), но размечен не на тех
+продуктах (`2026-10-27-golden-reference-set-unusable.md`).
+
 ---
 
 ## 7. Окружения и воспроизводимость
@@ -723,7 +858,7 @@ uv sync --frozen --extra dev
 
 | Риск | Вероятн. | Влияние | Мера | Триггер пересмотра |
 |---|---|---|---|---|
-| **Первый полный прогон не выполнен** (прогонов до `report`: 0) | выс. | критич. | DoD M0.5 (§4): довести один прогон кейса 1 до `report` до любой работы по M2/M3; до этого все методологические числа — гипотезы | прогон дошёл до `report` |
+| **Первый полный прогон не выполнен** (прогонов до `report`: 0) — ➖ снято 2026-10-26: прогон `ru-pg-dbms-3edf2b06097c` дошёл до `report` (`outputs/`, `run_manifest.yaml`) | выс. | критич. | DoD M0.5 (§4): довести один прогон кейса 1 до `report` до любой работы по M2/M3; до этого все методологические числа — гипотезы | прогон дошёл до `report` |
 | Качество экстракции PDF-таблиц (фич-матрицы) | ср. | высокое | тест на реальных мануалах (блокер M0 — нет фикстур/приёмки); extraction-golden; fallback markitdown/pdfplumber | расхождение таблиц > допустимого |
 | Оценщик не достигает golden-порогов | ср. | высокое | **харнесс измерения есть**: `hound experiment evaluator-benchmark` (валидность, κ, `fabricated_support`, CI, детерминизм); ждёт прогона. По его результату — смена слота `cheap → flagship` (граница `execution_change`, §13) | R6/R12 ниже порога |
 | Стоимость `evaluate` — длинный полюс (≈149k LLM-вызовов по замеру) | выс. | высокое | батчинг вызовов, кэш вердиктов (`eval_cache.py`), бюджет прогона; измерять до масштабирования на 5 кейсов | прогон `evaluate` не укладывается в окно |
@@ -755,8 +890,9 @@ uv sync --frozen --extra dev
 - **Docs:** правка контракта/инварианта — правка `00`–`06` в том же коммите.
 - **Первый полный прогон (M0.5, сквозной DoD):** один прогон кейса 1 на реальных данных проходит
   все 15 фаз до `report`, пишет `outputs/` и манифест, и отчёт разбирается без необъяснённых
-  аномалий. **Не выполнено: прогонов до `report` — 0.** Пока это не так, «готово» ниже означает
-  «код есть и покрыт тестами».
+  аномалий. ✅ **Выполнено 2026-10-26** (`ru-pg-dbms-3edf2b06097c`: 15 фаз, `outputs/` из 5
+  артефактов, `run_manifest.yaml`, `report` в `duration_by_phase`). Ограничением осталось качество
+  отчёта (Coverage 0.208 ⇒ `battle_card` публикуется с оговоркой) и приёмка M2.
 
 ---
 
@@ -789,6 +925,9 @@ uv sync --frozen --extra dev
    (тот же класс, что `reviewed_by`), иначе смена подписанта рвала бы межцикловый diff.
    Продукт без подписи ведёт себя ровно как раньше: `❌` при неполном корпусе не публикуется.
    *Содержательное* владение (кто и на каком основании) — доменный процесс, вне кода.
+   ✅ проверено на `f6100c7`: правило — `core/pipeline/lint.py:318` (`absence-attestation`),
+   канал в Ш6 — `core/pipeline/phases.py:1180`. Имя параметра сменилось: `scope_acceptance`
+   (принятие риска), `scope_attested_by` остался deprecated-алиасом — `core/pipeline/evaluate.py:1863-1895`.
 
 **Вне рамок работы:** аттестация шва против конкретных корпоративных IDP/DLP/IDS (какой IDP, какой
 DLP, набор IDS-правил) — design-требования зафиксированы в `07` §8, но проверка соответствия
@@ -817,17 +956,25 @@ DLP, набор IDS-правил) — design-требования зафикси
 - **`05-dependency-stack.md`:** строка о `llama-cpp-python` (опц. CPU/GGUF-инференс) описывает
   отклонённый путь (см. §5.W9/§5.13); конвейер её не использует. Рядом со строкой стоит пометка
   «снято» — правка реестра стека остаётся отдельной задачей (не входила в объём P5).
+  ➖ снято — правка состоялась: `05-dependency-stack.md:135` уже помечен «снято».
 - **Риски Phase 5 (source routing/feed/channel):** прежний список остаточных рисков (каталожный GET
   не занимает слот планировщика, лимиты `defusedxml`, отсутствие capability-negotiation, потеря при
   усечении `max_feed_bytes`, элемент feed/channel без `raw_path`) при переписывании опущен; он не был
   перенесён в `02`/`03`. Считать зафиксированным здесь как известное остаточное, а не закрытое.
+  ❔ не проверено — «не перенесён в `02`/`03`» я не сверял (проверка кода, не документации);
+  статус остаётся «известное остаточное».
 - **M2/M3:** приёмочные прогоны (golden-full, adversarial, §11.5-baseline) и авторство кейсов 2–5
   не выполнены; §4 помечает M2 как 🟡, M3 как ⛔ — это факт, а не план.
+  ⬜ подтверждено на `f6100c7`: `ls packages/` → только `ru-pg-dbms` и `_template`.
 - **Измерения:** ⏳ фиксация R0/R1/R2+K **не воспроизведена, артефакты отсутствуют** — харнесс
   `hound experiment retrieval` есть, но ни KS-sweep, ни `index_build_id` замера в дереве нет
   (`runs/`/`index_store/` в `.gitignore`). Правило проекта: доказательство замера кладётся в
   `docs/reports/measurements/` с командой и параметрами; до этого профиль/K — `source: default`.
   Полноценный retrieval-golden кейса и живой прогон оценщика/SERP остаются открытыми.
+  ⬜ уточнение на `f6100c7`: живой прогон оценщика **состоялся** (§5.W9), открыт SERP-раунд;
+  и формулировка «ни `index_build_id` замера в дереве нет» устарела — он есть в
+  `docs/reports/measurements/2026-10-26-retrieval-profile-r0-vs-r2.md`
+  (`cb_ecf3850d1bf7b0b2fdb08235` → `pb_72868f6b2a683d21bee7beb6`). Отсутствует KS-sweep.
 
 ---
 
@@ -836,9 +983,10 @@ DLP, набор IDS-правил) — design-требования зафикси
 Порядок не косметический: каждый следующий пункт дешевле предыдущего только после того, как
 предыдущий дал измерение (A3).
 
-1. **Первый сквозной прогон до `report` (M0.5).** Ни одного такого прогона не было (§0, §4).
-   Пока его нет, методология не проверена ни на одном реальном отчёте, и любая калибровка —
-   предвидение. Это гейт перед всем остальным.
+1. **Первый сквозной прогон до `report` (M0.5) — ✅ выполнен 2026-10-26** (`ru-pg-dbms-3edf2b06097c`:
+   `outputs/` + `run_manifest.yaml`, `report` исполнялся — §4). Пункт перестал быть «дойти» и стал
+   «прочитать отчёт»: Coverage 0.208 при Capability 0.922, 319 `failed`, 63 `❓` — разбор в
+   `docs/reports/measurements/`. Следующий гейт — пере-разметка golden (M2).
 2. **Стоимость `evaluate` — длинный полюс.** По замеру — ~149k LLM-вызовов на прогон кейса.
    Прежде чем масштабировать на 5 кейсов: батчинг вызовов, кэш вердиктов (`eval_cache.py`),
    бюджет, и только затем — вопрос о слоте модели (`evaluator-benchmark`).

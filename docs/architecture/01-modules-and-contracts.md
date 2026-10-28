@@ -1,5 +1,8 @@
 # coHound — архитектура: Итерация 1 — модули и контракты
 
+> **Статус открытых вопросов на 2026-10-28** (HEAD `f6100c7`): 7 закрыто, 1 открыто.
+> У каждого пункта в §9–§10 маркер ✅/⬜/➖/❔ с доказательством.
+
 **Документ:** `docs/architecture/01-modules-and-contracts.md`
 **Статус:** принято (ревью-гейт @oracle пройден 2026-10-08)
 **Опирается на:** `00-overview.md` (слои, драйверы **AD1–AD11**)
@@ -694,9 +697,9 @@ JSONPath-маппинг полей) и реализует `RegistryFetcherPort`.
 
 | Было | Стало | Статус |
 |---|---|---|
-| `core/schemas.py` (монолит) | `domain/enums.py` + `domain/models.py` + `domain/invariants.py` + `domain/r2.py` | ✅ выполнено (T1.2); монолит **удалён** |
-| `core/db.py` DDL/триггеры | `store/sqlite.py` (DDL) + `ports/store.py` (контракт) | ✅ выполнено (T1.3); монолит **удалён** |
-| `tests/selfcheck.py` | `tests/domain/*`, `tests/store/*` | частично (обёртка selfcheck остаётся) |
+| `core/schemas.py` (монолит) | `domain/enums.py` + `domain/models.py` + `domain/invariants.py` + `domain/r2.py` | ✅ сделано (T1.2; `core/domain/enums.py:1`, `core/domain/anchors.py:1`); монолит **удалён** — гейт `tests/selfcheck.py:1123` (`_shims_removed`) |
+| `core/db.py` DDL/триггеры | `store/sqlite.py` (DDL) + `ports/store.py` (контракт) | ✅ сделано (T1.3; `core/store/sqlite.py:21`); монолит **удалён** — тот же гейт `tests/selfcheck.py:1123` |
+| `tests/selfcheck.py` | `tests/domain/*`, `tests/store/*` | ⬜ не сделано — `tests/domain/` (11 файлов) и `tests/store/` (15 файлов) заведены, но `tests/selfcheck.py` (229 КБ) остаётся **автономным входом CI** (`scripts/ci.sh:39`), обёртка — `tests/test_selfcheck.py` |
 
 Ранее использовавшиеся transitional re-export-шимы `core/schemas.py` и `core/db.py` **удалены**:
 импорты идут напрямую из `core.domain` и `core.store.sqlite`. Последовательность миграции и её
@@ -724,6 +727,11 @@ JSONPath-маппинг полей) и реализует `RegistryFetcherPort`.
 | I1–I23 | §6 матрица |
 | `09` онбординг/инкремент | §3.10 (`ProductStatePort`), §3.9 (контейнеры), §4 (`run_isolated`, resume/N4) |
 
-**Открытые вопросы к итерации 2:** точные сигнатуры фьюжна RRF; формат `AlignmentReport`;
-структура `ProtocolExhaustion`; политика ретраев в `evaluate.py`; как передавать чанки в
-`validate` (по `source_id` из store или из RetrievalResult).
+**Открытые вопросы к итерации 2:** точные сигнатуры фьюжна RRF — ✅ сделано
+(`core/pipeline/retrieve.py:98`, `rrf_fuse_chunks(…, rrf_k=60, top_k)`); формат `AlignmentReport` —
+✅ сделано (`core/domain/models.py:1367`); структура `ProtocolExhaustion` — ✅ сделано
+(`core/domain/models.py:1204`); политика ретраев в `evaluate.py` — ✅ сделано
+(`core/pipeline/evaluate.py:1829`, цикл `:2003`); как передавать чанки в `validate` — ✅ сделано
+**объектами из RetrievalResult**, а не выборкой из store: `validate_output(*, chunks:
+Mapping[str, ChunkLike], …)` (`core/pipeline/validate.py:267`), словарь строит вызывающий
+(`core/pipeline/evaluate.py:1899`).

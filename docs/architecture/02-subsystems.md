@@ -1,5 +1,8 @@
 # coHound — архитектура: Итерация 2 — подсистемы
 
+> **Статус открытых вопросов на 2026-10-28** (HEAD `f6100c7`): 5 закрыто, 0 открыто.
+> У каждого пункта в §H маркер ✅/⬜/➖/❔ с доказательством.
+
 **Документ:** `docs/architecture/02-subsystems.md`
 **Статус:** принято (ревью-гейт @oracle пройден 2026-10-08)
 **Опирается на:** `00-overview.md`, `01-modules-and-contracts.md`
@@ -787,6 +790,14 @@ flowchart LR
 | §11 golden/эксперименты | B.3 |
 | I16–I23 | A–E |
 
-**Открытые вопросы к итерации 3:** формат `runs/{run_id}/` (раскладка файлов); версионирование
-`prompt`-шаблонов; глобальный content-addressed кэш для R7 (ADR 0016); политика ретраев и backoff;
-гранулярность транзакций SQLite при массовой записи.
+**Открытые вопросы к итерации 3:** формат `runs/{run_id}/` (раскладка файлов) — ✅ сделано
+(раскладка и её код: `docs/architecture/03-data-config-cli.md` §A.2, `core/pipeline/report.py:2572`,
+`core/pipeline/gate_subject.py:427`); версионирование `prompt`-шаблонов — ✅ сделано
+(`core/pipeline/prompt.py:117`, `TEMPLATE_VERSION = "evaluator_v5"`, файлы
+`core/pipeline/templates/evaluator_v{1..5}.txt`; версия входит в `prompt_hash` —
+`core/util/hashing.py:45`); глобальный content-addressed кэш для R7 (ADR 0016) — ✅ сделано
+(`core/util/cache.py:133`, проводка `core/cli/context.py:1355`); политика ретраев и backoff —
+✅ сделано (общая политика `core/util/retry.py:1`, потребитель — `core/adapters/search_glm.py:66`);
+гранулярность транзакций SQLite при массовой записи — ✅ сделано (`core/store/sqlite.py:21` WAL +
+`core/store/sqlite_store.py:67` `DEFAULT_BATCH_SIZE = 200`, `save_cells_batch` `:626` — одна
+транзакция на пачку).

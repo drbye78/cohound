@@ -1,5 +1,9 @@
 # coHound — архитектура: реестр зависимостей
 
+> **Статус открытых вопросов на 2026-10-28** (HEAD `f6100c7`): 3 закрыто, 2 открыто.
+> У каждого пункта в §6 маркер ✅/⬜/➖/❔ с доказательством (V3 — выбор без подтверждения
+> измерением, V4 — офлайн-веса и лицензии).
+
 **Документ:** `docs/architecture/05-dependency-stack.md`
 **Статус:** реестр решений (снимок 2026-10-08)
 **Опирается на:** `00-overview.md` (AD1, AD10), `01-modules-and-contracts.md` (порты/адаптеры)
@@ -575,8 +579,8 @@ bash scripts/ci.sh                               # всё вместе: ruff →
 |---|---|---|
 | V1 | RU/EN-стемминг `tantivy` из Python-биндингов | ✅ **закрыт (2026-10-08):** русский стеммер и стоп-слова доступны нативно — `Filter.stemmer("russian")`, `Filter.stopword("russian")` (tantivy 0.26.2); end-to-end индекс+поиск на смешанном RU/EN корпусе прошёл («экспорт» находит «Экспорт»/«экспорта»). Внешний `snowballstemmer` не нужен |
 | V2 | Колёса `torch`/`sentence-transformers` под Python 3.14 | ✅ **закрыт (2026-10-08):** `torch 2.14.1` и `sentence-transformers 6.1.0` имеют колёса `cp314`; резолв `uv` на 3.14 прошёл. См. `pyproject.toml` |
-| V3 | Выбор RU/EN-эмбеддинга | 🟡 **решение:** RU — абсолютный приоритет, EN — очень хорошо; **основной — `BAAI/bge-m3`** (MIT, 8192 контекста). Подтверждение и сравнение с RU-файнтюнами (`deepvk/USER-bge-m3`, `ai-forever/ru-en-RoSBERTa`) — R9/R10 |
-| V4 | docling offline-веса в контуре + лицензии весов | ⚠️ **механика уточнена:** штатный офлайн-механизм — `DOCLING_ARTIFACTS_PATH` / pipeline `artifacts_path`, заполняемый `docling-tools models download` (см. §7); `HF_HUB_OFFLINE=1` — вспомогательный guard; Office-форматы весов не требуют. Открыт аудит лицензий весов |
+| V3 | Выбор RU/EN-эмбеддинга | 🟡 **решение:** RU — абсолютный приоритет, EN — очень хорошо; **основной — `BAAI/bge-m3`** (MIT, 8192 контекста). Подтверждение и сравнение с RU-файнтюнами (`deepvk/USER-bge-m3`, `ai-forever/ru-en-RoSBERTa`) — R9/R10. ⬜ не сделано — `bge-m3` зафиксирован кодом как дефолт (`core/adapters/embed_local.py:63`), но **сравнения с RU-файнтюнами не было**: ни одного замера по `USER-bge-m3`/`RoSBERTa` в `docs/reports/measurements/` нет |
+| V4 | docling offline-веса в контуре + лицензии весов | ⚠️ **механика уточнена:** штатный офлайн-механизм — `DOCLING_ARTIFACTS_PATH` / pipeline `artifacts_path`, заполняемый `docling-tools models download` (см. §7); `HF_HUB_OFFLINE=1` — вспомогательный guard; Office-форматы весов не требуют. Открыт аудит лицензий весов. ⬜ не сделано — аудита лицензий весов нет, и офлайн-бандл **ничем не включён**: в docling 2.135.0 `DOCLING_ARTIFACTS_PATH` не читается (`.venv/…/docling/datamodel/settings.py:71` — только поле `artifacts_path`), а coHound передаёт `artifacts_path` лишь в OCR-пробу (`core/adapters/extract_document.py:362`), в `PdfPipelineOptions` экстракции его нет |
 | V5 | `scrapy-playwright` 0.0.x на сложных антибот-доменах | ✅ **закрыт smoke-тестом (2026-10-08):** зрелый де-факто стандарт (org `scrapy-plugins`, BSD-3, py3.14). Smoke `tests/smoke_scrapy_playwright.py` пройден на Scrapy 2.19.0 + scrapy-playwright 0.0.48 + playwright **1.63.0** (chromium + firefox) → **оставляем с жёстким пином**; связка 1.63/2.19 подтверждена, фолбэк 1.57 не нужен. Изолируется за портом `crawler`. Альтернативы не берём (см. §2.5) |
 
 ---
@@ -602,7 +606,11 @@ air-gap) сетевого доступа к HF нет — либо загруз�
 
 **Статус:** ✅ план **подтверждён владельцем (2026-10-08), механика уточнена 2026-10-12**
 (предзакачка бандла → `DOCLING_ARTIFACTS_PATH` + `HF_HUB_OFFLINE=1` как guard → revision-пины →
-аудит лицензий весов).
+аудит лицензий весов). ⬜ не сделано — исполнение ниже не подтверждается репозиторием: шаг 1
+(бандл весов) — операция окружения и в репозитории не виден; ш. 3–4 отсутствуют — манифест несёт
+`extractor_stack` (константы + версия docling, `core/pipeline/run_identity.py:83`), но **не**
+repo_id/revision/лицензию весов; env-переключателя `DOCLING_ARTIFACTS_PATH` в docling 2.135.0 нет
+(§6/V4), поэтому `artifacts_path` придётся объявлять опцией пайплайна.
 
 **Что делать (план, закрывает V4):**
 1. **Предзакачать** нужные веса (`docling-tools models download`) на машине с доступом к сети →
