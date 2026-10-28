@@ -25,7 +25,7 @@ from core.adapters.extract_document import (
     _page_count,
     _probe_ocr_engine,
 )
-from core.domain.enums import DocumentLevel
+from core.domain.enums import DocumentLevel, PdfDevice
 from core.util.hashing import content_hash
 
 
@@ -194,6 +194,59 @@ def test_options_provenance_is_level_aware() -> None:
 
 
 # --------------------------------------------------------------------------- #
+# P9: устройство моделей объявлено в accelerator_options, а не выведено
+# --------------------------------------------------------------------------- #
+
+
+def test_accelerator_options_carry_declared_device() -> None:
+    """``cpu``/``cuda`` доезжают до docling явно: дефолт ``auto`` не используется.
+
+    Проверяется **фактическое** поле ``PdfPipelineOptions.accelerator_options``, которое
+    увидит пайплайн: ``device`` — значение оси, ``num_threads`` — :data:`ACCELERATOR_NUM_THREADS`
+    (дефолт библиотеки, переданный явно, чтобы значение не приходило из env).
+    """
+    for level in (
+        DocumentLevel.LAYOUT,
+        DocumentLevel.LAYOUT_TABLES,
+        DocumentLevel.FULL,
+    ):
+        for device in (PdfDevice.CPU, PdfDevice.CUDA):
+            options = DoclingDocumentExtractor(level, pdf_device=device)._pdf_options()
+            accelerator = options.accelerator_options
+            assert accelerator is not None, (level, device)
+            assert accelerator.device == device.value, (level, device)
+            assert accelerator.num_threads == extract_document.ACCELERATOR_NUM_THREADS
+
+
+def test_accelerator_num_threads_is_not_increased_over_default() -> None:
+    """Потоки не поднимаются выше дефолта docling: замер запрещает рост на этом стеке.
+
+    Замер ``layout_tables``: 4 потока — 1.145 s/стр., 11 потоков — 1.800 s/стр. Тест
+    держит константу на месте: иначе «ускорение GPU» незаметно тянуло бы за собой
+    замедление CPU-пути через второй, неизмеренный параметр.
+    """
+    assert extract_document.ACCELERATOR_NUM_THREADS == 4
+
+
+def test_text_level_does_not_force_a_device() -> None:
+    """Нативный пайплайн моделей не грузит: устройство ему не навязывается.
+
+    Поле ``accelerator_options`` у ``NativePdfPipelineOptions`` существует (общий базовый
+    класс), но остаётся **дефолтом docling** (``auto``): моделей, которым нужно
+    устройство, у уровня нет, поэтому объявлять там нечего. Если библиотека сменит
+    дефолт, тест сломается явно — это сигнал, а не тихая регрессия.
+    """
+    options = DoclingDocumentExtractor(
+        DocumentLevel.TEXT, pdf_device=PdfDevice.CUDA
+    )._pdf_options()
+    assert options.accelerator_options.device == "auto"
+    # Устройство при этом всё равно в ключе кэша: уровень ``text`` тоже объявлен на оси.
+    assert "/cuda/" in DoclingDocumentExtractor(
+        DocumentLevel.TEXT, pdf_device=PdfDevice.CUDA
+    ).version
+
+
+# --------------------------------------------------------------------------- #
 # page_count — счётчик документа, а не конвертированных страниц
 # --------------------------------------------------------------------------- #
 
@@ -316,7 +369,7 @@ def test_extract_path_matches_extract_bytes_byte_for_byte(
     assert by_path.page_count == by_bytes.page_count == 7
     assert by_path.extractor_version == by_bytes.extractor_version
     assert by_path.extractor_version == (
-        "docling-doc-3:layout_tables/"
+        "docling-doc-3:layout_tables/cpu/"
         f"docling-{extract_document.docling_library_version()}"
     )
     # Оба пути отдали конвертеру одни и те же байты.
@@ -371,7 +424,7 @@ def test_extract_path_missing_file_is_graceful(tmp_path: Path) -> None:
     assert doc.error == f"retained-файл не найден: {missing}"
     assert doc.text == ""
     assert doc.extractor_version == (
-        "docling-doc-3:layout_tables/"
+        "docling-doc-3:layout_tables/cpu/"
         f"docling-{extract_document.docling_library_version()}"
     )
 
@@ -518,11 +571,13 @@ def test_resolve_docling_uses_injected_symbols_without_importing(
 
 
 def test_extractor_version_names_level_and_engine_build() -> None:
-    """``docling-doc-3:<level>/docling-<build>``: уровень и версия библиотеки видны.
+    """``docling-doc-3:<level>/<device>/docling-<build>``: все три слагаемых видны.
 
-    Обе половины обязательны: уровень различает сборки на оси ``document_level``,
-    сборка — версию установленного парсера. Без второй прогон мог бы объявить
-    ``docling-2.140`` и переиспользовать текст ``docling-2.135`` (Д-8).
+    Все три обязательны: уровень различает сборки на оси ``document_level``, устройство
+    — на оси ``pdf_device`` (P9), сборка — версию установленного парсера. Без последней
+    прогон мог бы объявить ``docling-2.140`` и переиспользовать текст ``docling-2.135``
+    (Д-8); без устройства CUDA-прогон нашёл бы в ``extract_cache`` CPU-текст (Д-8 в
+    новом виде).
     """
     build = f"docling-{extract_document.docling_library_version()}"
     for level in (
@@ -533,9 +588,25 @@ def test_extractor_version_names_level_and_engine_build() -> None:
         DocumentLevel.FULL,
     ):
         version = DoclingDocumentExtractor(level).version
-        assert version == f"docling-doc-3:{level.value}/{build}"
-        assert version.startswith(f"docling-doc-3:{level.value}/")
+        assert version == f"docling-doc-3:{level.value}/cpu/{build}"
+        assert version.startswith(f"docling-doc-3:{level.value}/cpu/")
         assert version.endswith(f"/{build}")
+
+
+def test_extractor_version_differs_by_device() -> None:
+    """``cpu`` и ``cuda`` дают **разные** ключи ``extract_cache`` (P9/Д-8).
+
+    Текст документа зависит от устройства (численные различия моделей меняют разметку
+    на границах), поэтому один ключ на два устройства вернул бы из кэша текст, которого
+    объявленное устройство не производило.
+    """
+    for level in (DocumentLevel.LAYOUT, DocumentLevel.LAYOUT_TABLES, DocumentLevel.FULL):
+        cpu = DoclingDocumentExtractor(level, pdf_device=PdfDevice.CPU).version
+        cuda = DoclingDocumentExtractor(level, pdf_device=PdfDevice.CUDA).version
+        assert cpu != cuda, level
+        assert "/cpu/" in cpu and "/cuda/" in cuda, level
+        # Сборка движка у обоих одна: устройство не подменяет версию библиотеки.
+        assert cpu.rsplit("/", 1)[-1] == cuda.rsplit("/", 1)[-1]
 
 
 def test_engine_build_reflects_installed_library_version(
@@ -547,7 +618,7 @@ def test_engine_build_reflects_installed_library_version(
     assert extract_document.docling_engine_build() == "docling-2.140.1"
     assert (
         DoclingDocumentExtractor(DocumentLevel.FULL).version
-        == "docling-doc-3:full/docling-2.140.1"
+        == "docling-doc-3:full/cpu/docling-2.140.1"
     )
 
 
@@ -560,7 +631,7 @@ def test_missing_library_does_not_invent_a_build(
     assert extract_document.docling_library_version() == "unknown"
     assert (
         DoclingDocumentExtractor(DocumentLevel.FULL).version
-        == "docling-doc-3:full/docling-unknown"
+        == "docling-doc-3:full/cpu/docling-unknown"
     )
 
 

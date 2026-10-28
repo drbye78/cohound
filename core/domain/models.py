@@ -45,6 +45,7 @@ from core.domain.enums import (
     OnboardingState,
     Origin,
     ParamType,
+    PdfDevice,
     PdfPipeline,
     ProductMode,
     ProductScope,
@@ -539,6 +540,13 @@ class CrawlRunConfig(BaseModel):
     # перекрывал бы app/site-слои в цепочке ``_pick`` (site > run > app) и объявленный
     # ``deploy.yaml:crawl.pdf_pipeline`` молча не действовал бы.
     pdf_pipeline: PdfPipeline | None = None
+    # P9: run-слой **устройства** моделей извлечения PDF (``run.yaml:crawl.pdf_device``).
+    # ``None`` = не задано на этом слое: резолв берёт app-дефолт ``cpu``. Не ``cpu`` по
+    # умолчанию — по той же причине, что у ``pdf_pipeline``: дефолт run-слоя перекрыл бы
+    # app-слой в цепочке ``_pick``, и объявленный ``deploy.yaml:crawl.pdf_device`` молча
+    # не действовал бы (R5). Устройство — ось **хоста исполнения**, а не сайта: per-site
+    # переопределения у неё нет (в ``domain_profiles.yaml`` поля нет намеренно).
+    pdf_device: PdfDevice | None = None
     #: Ось «потолок времени на извлечение **одного** документа» (``crawl.document_timeout_s``,
     #: секунды). ``None`` = не задано на этом слое: резолв берёт app-слой, затем
     #: ``DEFAULT_DOCUMENT_TIMEOUT_S`` (1800 с — ровно прежнее зашитое значение, поэтому

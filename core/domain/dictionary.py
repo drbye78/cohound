@@ -34,6 +34,7 @@ from core.domain.enums import (
     GateVerdict,
     IncrementalKind,
     OnboardingState,
+    PdfDevice,
     PdfPipeline,
     ProductMode,
     ProductScope,
@@ -104,6 +105,8 @@ def assert_dictionary_integrity(path: str | Path) -> None:
         "document_level",
         # P7: механизм извлечения PDF (crawl.pdf_pipeline).
         "pdf_pipeline",
+        # P9: устройство моделей извлечения PDF (crawl.pdf_device).
+        "pdf_device",
         # §7.1/§7.4: механизм constrained decoding оценщика (V4).
         "decoder",
         # P6: глубина спуска в контейнеры (crawl.archive_descent).
@@ -165,6 +168,7 @@ def assert_dictionary_integrity(path: str | Path) -> None:
         "crawl_strategy": {v.value for v in CrawlStrategy},
         "document_level": {v.value for v in DocumentLevel},
         "pdf_pipeline": {v.value for v in PdfPipeline},
+        "pdf_device": {v.value for v in PdfDevice},
         "decoder": {v.value for v in Decoder},
         "archive_descent": {v.value for v in ArchiveDescent},
         "archive_descent_status": {v.value for v in ArchiveDescentStatus},

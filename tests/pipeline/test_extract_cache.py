@@ -479,7 +479,7 @@ def test_same_engine_build_hits(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
         extractor_version=extractor.version,
         page_count=3,
     )
-    assert doc.extractor_version == "docling-doc-3:full/docling-2.135.0"
+    assert doc.extractor_version == "docling-doc-3:full/cpu/docling-2.135.0"
 
     cache.put(doc, level=DocumentLevel.FULL, content_hash=RAW_A)
     assert cache.get(RAW_A, extractor.version, DocumentLevel.FULL) == doc
@@ -536,7 +536,7 @@ def test_pre_build_key_envelope_is_not_served(
     )
 
     upgraded = DoclingDocumentExtractor(DocumentLevel.FULL)
-    assert upgraded.version == "docling-doc-3:full/docling-2.135.0"
+    assert upgraded.version == "docling-doc-3:full/cpu/docling-2.135.0"
     assert cache.get(RAW_A, upgraded.version, "full") is None
     assert cache.stats()["misses"] == 1
 

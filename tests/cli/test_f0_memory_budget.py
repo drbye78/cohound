@@ -30,7 +30,8 @@ from core.cli.wiring import (
     preflight_extraction_budget,
     resolve_extraction_budget,
 )
-from core.domain.enums import DocumentLevel
+from core.config.deploy import CrawlConfig, DeployConfig
+from core.domain.enums import DocumentLevel, PdfDevice
 from core.domain.models import CrawlRunConfig
 from core.pipeline.resources import (
     DOCLING_PEAK_MB,
@@ -43,8 +44,8 @@ from core.pipeline.resources import (
 E2E_FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "e2e"
 ROOT = "https://p1.test/docs"
 
-#: Полный уровень: 3107 MB на документ. Бюджет 1000 MB не помещает ни одного воркера
-#: (1000 − 500 пола < 3107), то есть конфигурация заведомо невозможна.
+#: Полный уровень: 4833 MB на документ. Бюджет 1000 MB не помещает ни одного воркера
+#: (1000 − 500 пола < 4833), то есть конфигурация заведомо невозможна.
 UNFITTABLE_BUDGET = 1000
 
 
@@ -266,3 +267,68 @@ def test_run_proceeds_when_extract_workers_is_declared(
     payload = capsys.readouterr().out
     assert "crawl.extract_workers: 2" in payload
     assert f"{UNFITTABLE_BUDGET} MB" in payload
+
+
+# --------------------------------------------------------------------------- #
+# P9: cuda без устройства — отказ на входе, а не тихий CPU
+# --------------------------------------------------------------------------- #
+
+
+def test_cuda_device_without_gpu_is_a_usage_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``crawl.pdf_device=cuda`` при недоступном CUDA — ``WiringError`` с числами (R5).
+
+    Тихий CPU-фолбэк запрещён: ``extractor_version``/``extractor_stack`` назвали бы GPU,
+    на котором прогон не исполнялся. Сообщение обязано нести факты (версия torch, факт
+    ``cuda_available``, объём карты), иначе оператор не может ни понять отказ, ни
+    исправить вход.
+    """
+    from core.cli import wiring
+
+    monkeypatch.setattr(wiring, "cuda_available", lambda: False)
+    monkeypatch.setattr(wiring, "cuda_total_vram_mb", lambda: None)
+
+    with pytest.raises(wiring.WiringError) as excinfo:
+        wiring.preflight_pdf_device(
+            deploy=DeployConfig(crawl=CrawlConfig(pdf_device=PdfDevice.CUDA))
+        )
+    text = str(excinfo.value)
+    assert "crawl.pdf_device=cuda" in text
+    assert "cuda_available=False" in text
+    assert "device_vram_mb=нет устройства" in text
+    assert "torch=" in text
+
+
+def test_cpu_device_never_requires_cuda(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``cpu`` — штатный режим: доступность CUDA не проверяется вовсе.
+
+    torch при этом **не импортируется** (ось не должна стоить памяти сама по себе):
+    проверка «а вдруг GPU есть» на каждый прогон была бы той же ошибкой, что чтение
+    устройства из окружения.
+    """
+    from core.cli import wiring
+
+    def _must_not_probe() -> bool:
+        raise AssertionError("под cpu доступность CUDA не спрашивается")
+
+    monkeypatch.setattr(wiring, "cuda_available", _must_not_probe)
+    device = wiring.preflight_pdf_device(
+        deploy=DeployConfig(crawl=CrawlConfig(pdf_device=PdfDevice.CPU))
+    )
+    assert device is PdfDevice.CPU
+
+
+def test_cuda_device_is_accepted_when_gpu_is_present(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ось исполни́ма — прогон получает объявленное устройство, а не «что найдётся»."""
+    from core.cli import wiring
+
+    monkeypatch.setattr(wiring, "cuda_available", lambda: True)
+    assert (
+        wiring.preflight_pdf_device(
+            deploy=DeployConfig(crawl=CrawlConfig(pdf_device=PdfDevice.CUDA))
+        )
+        is PdfDevice.CUDA
+    )

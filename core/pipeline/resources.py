@@ -41,7 +41,7 @@ try:  # pragma: no cover - на Windows модуля нет; обещание «
 except ImportError:  # pragma: no cover
     _resource = None
 
-from core.domain.enums import DocumentLevel, PdfPipeline
+from core.domain.enums import DocumentLevel, PdfDevice, PdfPipeline
 from core.util.document_formats import (
     document_suffix,
     is_epub,
@@ -50,6 +50,7 @@ from core.util.document_formats import (
 
 __all__ = [
     "DOCLING_PEAK_MB",
+    "DOCLING_VRAM_PEAK_MB",
     "FAMILY_EPUB",
     "FAMILY_HTML",
     "FAMILY_OFFICE",
@@ -60,18 +61,23 @@ __all__ = [
     "MEM_RESERVE_MB",
     "PARENT_FLOOR_MB",
     "PDFIUM_TEXT_PEAK_MB",
+    "VRAM_RESERVE_MB",
     "MemoryBudgetError",
     "ResourcesObservation",
     "build_resources_block",
     "cpu_parallelism_cap",
+    "cuda_available",
+    "cuda_total_vram_mb",
     "docling_peak_mb",
     "document_family",
     "mem_budget_provenance",
     "pdf_peak_mb",
     "read_available_mb",
     "read_peak_rss_mb",
+    "read_usable_vram_mb",
     "resolve_mem_budget_mb",
     "summarize_chunks_per_doc",
+    "vram_peak_mb",
     "workers_from_budget",
 ]
 
@@ -86,9 +92,22 @@ __all__ = [
 #:   реального корпуса: 36 стр. → 1888 MB, 191 → 1582, 665 → 2131, 2763 → **3679**.
 #:
 #: ``layout_tables`` пересмотрен по второму замеру: 1953 MB было пиком 30-страничного
-#: документа, а на 2763-страничном тот же уровень берёт 3679 MB — больше, чем константа
-#: ``full``. Отсюда правило: пик определяется **документом**, уровень лишь задаёт множитель,
-#: поэтому в таблице стоит максимум наблюдённого, а не «типичное» и не «пик на синтетике».
+#: документа, а на 2763-страничном тот же уровень берёт 3679 MB — больше, чем прежняя
+#: константа ``full`` (3107 MB, синтетика). Отсюда правило: пик определяется
+#: **документом**, уровень лишь задаёт множитель, поэтому в таблице стоит максимум
+#: наблюдённого, а не «типичное» и не «пик на синтетике».
+#:
+#: ``full`` пересчитан **по направлению, а не наоборот**: ``full`` — надмножество работы
+#: ``layout_tables`` (те же layout-модели плюс ACCURATE-таблицы и авто-OCR), поэтому
+#: значение **ниже** ``layout_tables`` (3107 < 3679) означало, что на реальном корпусе
+#: формула вывела бы больше воркеров, чем помещается, — ошибка перестала быть
+#: консервативной. Прямого замера ``full`` на реальном корпусе нет (2763 стр. на CPU —
+#: часы), поэтому взята **синтетическая дельта** того же уровня (3107 − 1953 = 1154 MB:
+#: цена OCR + ACCURATE против FAST без OCR) и приложена к измеренному реальному пику
+#: ``layout_tables``: 3679 + 1154 = **4833 MB**. Это экстраполяция, и она названа
+#: экстраполяцией; замена прямым замером — отдельная задача, а не повод оставить число,
+#: которое занижает цену уровня.
+#:
 #: Направление ошибки выбрано сознательно: занижение даёт лишнего воркера и OOM-kill,
 #: завышение — на одного воркера меньше, то есть медленнее, но живой прогон.
 #:
@@ -98,8 +117,40 @@ DOCLING_PEAK_MB: dict[DocumentLevel, int] = {
     DocumentLevel.TEXT: 855,
     DocumentLevel.LAYOUT: 1563,
     DocumentLevel.LAYOUT_TABLES: 3679,
-    DocumentLevel.FULL: 3107,
+    DocumentLevel.FULL: 4833,
 }
+
+#: Пик VRAM docling на **один** документ, по уровням — только **измеренные** значения
+#: (MB, пик процесса на карте: ``torch.cuda.max_memory_allocated`` на документ).
+#:
+#: Источник — замер на реальном документе корпуса (665 стр., ``layout_tables``,
+#: RTX 3050 Laptop 4096 MiB): **817 MB**; ``text`` — **0** (нативный pdfium в VRAM не
+#: ходит вовсе). ``layout`` в таблице стоит на 817 с обоснованием: это уровень **меньше**
+#: ``layout_tables`` по объёму работы (нет TableFormer), поэтому измеренный пик более
+#: тяжёлого уровня доказуемо является верхней границей и здесь. Направление ошибки —
+#: «на одного воркера меньше»: завышенный пик стоит скорости, заниженный — CUDA OOM.
+#:
+#: ``full`` в таблице **нет** намеренно: OCR + ACCURATE-таблицы на реальном корпусе на
+#: GPU не измерялись, а выдуманное число выдавало бы себя за замер (A3). Отсутствие
+#: ключа означает «VRAM окно не ограничивает» и видно в preflight предупреждением
+#: (``crawl.pdf_device=cuda`` + неизмеренный уровень), а не тишиной.
+DOCLING_VRAM_PEAK_MB: dict[DocumentLevel, int] = {
+    DocumentLevel.TEXT: 0,
+    DocumentLevel.LAYOUT: 817,
+    DocumentLevel.LAYOUT_TABLES: 817,
+}
+
+#: Резерв видеопамяти, который окно **не** отдаёт воркерам, MB.
+#:
+#: Карта не бывает целиком доступна процессу: на измеренном хосте из 4096 MB свободно
+#: 3965 (дисплей и композитор держат ~131 MB), плюс сам CUDA-контекст (ядра, workspace
+#: cuBLAS/cuDNN) растёт с первым же модели-тензором и не отдаётся обратно. 512 MB —
+#: ~12 % карты: это цена того, чтобы прогон не оказался CUDA-OOM для собственного
+#: рабочего стола; для окна она меньше одного пика ``layout_tables`` (817 MB) и потому
+#: не «съедает» воркера на разумных уровнях. Направление ошибки — как у
+#: :data:`MEM_RESERVE_MB`: занижение резерва даёт OOM, завышение — воркера меньше.
+VRAM_RESERVE_MB = 512
+
 
 #: Пик конвейера ``text_layer`` (текстовый слой pdfium, без моделей), MB — **замер**, а не
 #: доля от docling'а.
@@ -285,6 +336,77 @@ def pdf_peak_mb(
     return DOCLING_PEAK_MB.get(level)
 
 
+def vram_peak_mb(
+    level: DocumentLevel,
+    pdf_pipeline: PdfPipeline = PdfPipeline.STRUCTURED,
+) -> int | None:
+    """Пик VRAM на один документ для уровня, MB; ``None`` — уровень **не измерен**.
+
+    ``text_layer`` (pdfium) в VRAM не ходит вовсе — 0, а не «неизвестно»: это
+    измеренный факт (нативный парсер не грузит моделей), и он не должен ограничивать окно.
+    Для ``structured`` без замера (``full``) — ``None``: это не ноль и не «бесплатно»,
+    а «не измеряли», и подставлять чужой пик значило бы выдать оценку за измерение (A3).
+    Окно в этом случае ограничивают память хоста и CPU, а факт отсутствия VRAM-границы
+    виден в preflight (:func:`core.cli.wiring.preflight_extraction_budget`).
+    """
+    if pdf_pipeline is PdfPipeline.TEXT_LAYER:
+        return 0
+    return DOCLING_VRAM_PEAK_MB.get(level)
+
+
+def cuda_available() -> bool:
+    """Доступно ли CUDA-устройство — **ленивый** импорт torch (не на старте процесса).
+
+    Импорт torch стоит сотни MB RSS и тянет весь стек моделей, поэтому он выполняется
+    только когда оператор объявил ``crawl.pdf_device=cuda``: тогда процесс всё равно
+    загрузит его для извлечения. Отсутствие torch/драйвера — честный ``False``, а не
+    исключение: решение «отказ или работа» принимает вызывающий (R5: ``cuda`` при
+    недоступном устройстве — ``EXIT_USAGE``, не тихий CPU-фолбэк).
+    """
+    try:  # тяжёлая необязательная зависимость
+        import torch
+    except Exception:  # noqa: BLE001 — нет пакета/битые библиотеки: устройство недоступно
+        return False
+    try:
+        return bool(torch.cuda.is_available())
+    except Exception:  # noqa: BLE001 — драйвер отвечает ошибкой: устройство недоступно
+        return False
+
+
+def cuda_total_vram_mb() -> int | None:
+    """Полный объём видеопамяти устройства 0, MB; ``None`` — устройства нет.
+
+    Источник — ``torch.cuda.get_device_properties(0).total_memory`` (факт устройства), а
+    не свободная память: свободная меняется от чужих процессов, и окно воркеров не может
+    зависеть от того, открыт ли у соседа браузер. Резерв вычитается отдельно
+    (:func:`read_usable_vram_mb`), поэтому формула называет обе величины.
+    """
+    try:  # тяжёлая необязательная зависимость
+        import torch
+    except Exception:  # noqa: BLE001 — нет пакета
+        return None
+    try:
+        if not bool(torch.cuda.is_available()):
+            return None
+        total = int(torch.cuda.get_device_properties(0).total_memory)
+    except Exception:  # noqa: BLE001 — драйвер/инициализация отвечают ошибкой
+        return None
+    return total // (1024 * 1024)
+
+
+def read_usable_vram_mb() -> int | None:
+    """Видеопамять, которую окно воркеров может занять, MB (``total − reserve``).
+
+    ``None`` — устройства/драйвера нет. Отрицательный остаток не выдумывается: карта
+    меньше резерва даёт 0, то есть «воркеров по VRAM не помещается» — видимый отказ
+    вместо правдоподобного числа.
+    """
+    total = cuda_total_vram_mb()
+    if total is None:
+        return None
+    return max(0, total - VRAM_RESERVE_MB)
+
+
 def _accepted_env_budget(env: Mapping[str, str]) -> int | None:
     """Явный бюджет из ``COHOUND_MEM_BUDGET_MB``, если он **принят** (иначе ``None``).
 
@@ -340,6 +462,7 @@ def mem_budget_provenance(
     *,
     env: Mapping[str, str] | None = None,
     available_mb: int | None = None,
+    pdf_device: PdfDevice | None = None,
 ) -> dict[str, Any]:
     """Провенанс бюджета для ``metrics.json.resources.budget`` (числа, не догадки).
 
@@ -358,6 +481,24 @@ def mem_budget_provenance(
     if budget is None:
         source = "unknown"
     available = read_available_mb() if available_mb is None else available_mb
+    device = PdfDevice.CPU if pdf_device is None else PdfDevice(pdf_device)
+    # P9: VRAM публикуется **только** при объявленном ``cuda`` — на ``cpu`` окно о
+    # видеопамяти ничего не говорит, и чтение torch стоило бы сотни MB RSS ради факта,
+    # который не используется (ось не должна стоить памяти сама по себе). ``None`` —
+    # «не спрашивали/устройства нет», а не ноль.
+    vram: dict[str, Any] = {
+        "pdf_device": device.value,
+        "usable_vram_mb": read_usable_vram_mb()
+        if device is PdfDevice.CUDA
+        else None,
+        "reserve_mb": VRAM_RESERVE_MB,
+        "docling_peak_mb": {
+            level.value: peak
+            for level, peak in sorted(
+                DOCLING_VRAM_PEAK_MB.items(), key=lambda item: item[0].value
+            )
+        },
+    }
     return {
         "mem_budget_mb": budget,
         "source": source,
@@ -371,6 +512,7 @@ def mem_budget_provenance(
                 DOCLING_PEAK_MB.items(), key=lambda item: item[0].value
             )
         },
+        "vram": vram,
     }
 
 
@@ -403,18 +545,43 @@ def workers_from_budget(
     *,
     cpu_cap: int | None = None,
     pdf_pipeline: PdfPipeline = PdfPipeline.STRUCTURED,
+    pdf_device: PdfDevice = PdfDevice.CPU,
+    usable_vram_mb: int | None = None,
 ) -> int:
     """Сколько воркеров экстракции имеет смысл запускать в бюджете (``>= 0``).
 
-    Формула — ``min(floor((budget − PARENT_FLOOR_MB) / peak(level)), cpu_cap)``: пол
-    родителя занимается до воркеров, каждый воркер стоит пик уровня, а CPU ограничивает
-    то, что память разрешила бы с избытком (:func:`cpu_parallelism_cap`). **0 — валидный
-    ответ**: он означает «конфигурация не помещается», а не «возьми один» (взять один —
-    это ровно то предвидение, которое F0 заменяет замером). Для ``off`` возвращается 0:
-    документной экстракции нет, воркеры не нужны — вызывающий обязан проверить уровень
-    сам, чтобы не спутать эти два нуля.
+    Формула — минимум по **двум** ограничениям:
+
+    * память хоста — ``floor((budget − PARENT_FLOOR_MB) / peak(level))``: пол родителя
+      занимается до воркеров, каждый воркер стоит пик уровня;
+    * видеопамять (только ``pdf_device=cuda``) — ``floor(usable_vram / vram_peak(level))``:
+      каждый GPU-воркер держит на карте свои тензоры, и host-память об этом не знает;
+    * сверху — ``cpu_cap``: память говорит, что влезает, CPU — что имеет смысл
+      (:func:`cpu_parallelism_cap`).
+
+    **0 — валидный ответ**: он означает «конфигурация не помещается», а не «возьми
+    один» (взять один — это ровно то предвидение, которое F0 заменяет замером). Для
+    ``off`` возвращается 0: документной экстракции нет, воркеры не нужны — вызывающий
+    обязан проверить уровень сам, чтобы не спутать эти два нуля.
 
     ``None`` (бюджет неизвестен) → 0: без объявленного бюджета выводить нечего.
+
+    **VRAM-слагаемое: почему оно нужно и почему не всегда действует.** Замер на
+    RTX 3050 Laptop (4096 MiB): ``layout_tables`` держит 817 MB на воркер, 2 воркера —
+    1344 MB, то есть на этой карте связывает **host**, а не карта. Слагаемое существует
+    для обратной конфигурации (большая RAM, маленькая карта): без него формула вывела бы
+    ноутбучному хосту 20 воркеров по host-памяти и упала бы в CUDA OOM. Где VRAM-пик
+    уровня не измерен (:func:`vram_peak_mb` → ``None``, уровень ``full``), слагаемое не
+    применяется: число не выдумывается, а отсутствие границы видно в preflight.
+
+    **Окно — это вместимость, а не оптимум, и цену оптимума надо называть.** Замер на
+    одной карте: два воркера дают **1.10×** по времени при ΣRSS 4 787 MB против 2 488 MB
+    у одного, то есть второй воркер покупает 10 % времени за ~2.3 GB host-памяти (карта
+    насыщена, util 73–100 %, P0). Поэтому здесь **нет** потолка ``1`` на карту: на хосте,
+    где память не связывает, второй воркер — плохая, но настоящая покупка, и решать её
+    оператору (явный ``extract_workers``), а не формуле. На измеренном хосте минимум по
+    host-памяти и так даёт 1 — то есть правильная конфигурация получается из ресурса, а не
+    из запрета.
 
     :param cpu_cap: явный потолок по CPU; ``None`` — взять факт хоста
         (:func:`cpu_parallelism_cap`). Явное значение нужно тестам арифметики: иначе
@@ -422,6 +589,11 @@ def workers_from_budget(
     :param pdf_pipeline: фактический механизм извлечения PDF (P7). ``text_layer`` даёт
         пик :data:`PDFIUM_TEXT_PEAK_MB` вместо пика docling'а: окно обязано считаться по
         тому стеку, который реально будет запущен (:func:`pdf_peak_mb`).
+    :param pdf_device: объявленное устройство моделей (P9). ``cpu`` — VRAM-слагаемого нет
+        вовсе (и torch **не** импортируется: ось не должна стоить памяти сама по себе).
+    :param usable_vram_mb: явный объём доступной видеопамяти; ``None`` — прочитать у
+        устройства 0 (:func:`read_usable_vram_mb`). Явное значение нужно тестам
+        арифметики: иначе ожидаемое число зависело бы от карты тестовой машины.
     """
     if budget_mb is None:
         return 0
@@ -432,7 +604,14 @@ def workers_from_budget(
     if room <= 0:
         return 0
     cap = cpu_parallelism_cap() if cpu_cap is None else max(1, int(cpu_cap))
-    return max(0, min(room // peak, cap))
+    workers = min(room // peak, cap)
+    if PdfDevice(pdf_device) is PdfDevice.CUDA:
+        vram_peak = vram_peak_mb(level, pdf_pipeline)
+        if vram_peak and vram_peak > 0:
+            vram = usable_vram_mb if usable_vram_mb is not None else read_usable_vram_mb()
+            if vram is not None:
+                workers = min(workers, max(0, int(vram) // vram_peak))
+    return max(0, workers)
 
 
 # --------------------------------------------------------------------------- #

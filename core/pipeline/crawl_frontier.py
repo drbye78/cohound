@@ -66,7 +66,7 @@ from urllib.parse import unquote, urlsplit
 
 from core.config.deploy import CrawlConfig
 from core.config.domain_profiles import DomainProfile
-from core.domain.enums import ArchiveDescent, DocumentLevel, PdfPipeline
+from core.domain.enums import ArchiveDescent, DocumentLevel, PdfDevice, PdfPipeline
 from core.domain.models import (
     DEFAULT_ARCHIVE_MAX_MEMBER_BYTES,
     DEFAULT_ARCHIVE_MAX_TOTAL_UNCOMPRESSED_BYTES,
@@ -96,6 +96,7 @@ __all__ = [
     "is_blacklisted",
     "normalize_scope_host",
     "resolve_crawl_limits",
+    "resolve_pdf_device",
     "root_path_prefix",
 ]
 
@@ -215,6 +216,19 @@ class CrawlLimits:
     #: входит в ``as_dict()`` **всегда**: механизм определяет текст документа, то есть
     #: состав корпуса (``execution_change``, §13), а не расписание.
     pdf_pipeline: PdfPipeline = PdfPipeline.STRUCTURED
+    #: P9: **устройство** моделей извлечения PDF (ось ``crawl.pdf_device``). Дефолт
+    #: ``cpu`` — поведение прогонов, ось не объявивших, остаётся прежним (модели на CPU).
+    #: ``auto`` не существует намеренно (R5): объявленная ось обязана действовать, а
+    #: «устройство выбрал движок» — ложный провенанс (тот же класс, что env-модель
+    #: оценщика, §7.4). Резолвится цепочкой app < run: устройство — свойство **хоста
+    #: исполнения**, а не сайта, поэтому per-site слоя у оси нет.
+    #:
+    #: В :meth:`as_dict` **не** входит: устройство уже названо ``extractor_stack``
+    #: (``docling-doc-3/<device>/docling-<build>``) и ``extractor_version`` документа, то
+    #: есть входит в ``run_id`` и в ключ ``extract_cache``. Второй раз в
+    #: ``crawl_config_digest`` это был бы второй носитель одного материала: расхождение
+    #: прогонов нельзя было бы разобрать по полям.
+    pdf_device: PdfDevice = PdfDevice.CPU
     #: P8: таймаут **документа** (``crawl.document_timeout_s``) — потолок ожидания
     #: извлечения одного документа/члена контейнера, секунды. Дефолт равен прежнему
     #: зашитому значению (:data:`DEFAULT_DOCUMENT_TIMEOUT_S` = 1800.0), поэтому объявление
@@ -304,6 +318,28 @@ class CrawlLimits:
         if self.archive_descent_explicit:
             payload["archive_descent"] = self.archive_descent.value
         return payload
+
+
+def resolve_pdf_device(app: object, run: object | None = None) -> PdfDevice:
+    """Устройство моделей извлечения PDF по объявленным слоям: app < run (P9).
+
+    Цепочка та же, что у остальных осей краула, но **без** per-site слоя: устройство —
+    свойство хоста исполнения, а не сайта. Поэтому формула здесь одна, а не три
+    (``_pick`` с двумя слагаемыми): подставлять ``None`` третьим слагаемым значило бы
+    обещать per-site слой, которого нет.
+
+    Дефолт ``cpu`` — **объявленное** значение, а не «что выберет движок»: ``auto``
+    запрещён (R5), иначе прогон на машине с CUDA молча исполнялся бы на GPU, а
+    ``extractor_version`` называл бы устройство, которого вход не объявлял.
+
+    Функция чистая (никаких импортов torch): доступность CUDA — отдельная проверка
+    (:func:`core.pipeline.resources.cuda_vram_mb`), а не часть резолва.
+    """
+    run_value = getattr(run, "pdf_device", None) if run is not None else None
+    value = _pick(getattr(app, "pdf_device", None), run_value, None)
+    # ``_pick`` возвращает ``object``; на слоях конфига значение уже ``PdfDevice``
+    # (Pydantic-поле), поэтому сужение — к типу объявления, а не новая проверка.
+    return PdfDevice(PdfDevice.CPU if value is None else value)  # type: ignore[arg-type]
 
 
 def _pick(app: object, run: object, site: object) -> object:
@@ -442,6 +478,14 @@ def resolve_crawl_limits(
         if document_level is not None
         else DocumentLevel.FULL
     )
+    # P9: устройство моделей извлечения PDF — та же цепочка app < run, но **без**
+    # per-site слоя: устройство принадлежит хосту исполнения, а не сайту (два корня на
+    # одной машине не могут исполняться на разных устройствах). Резолвится **до** окна
+    # извлечения: под ``cuda`` вторым ограничением окна становится видеопамять
+    # (:func:`core.pipeline.resources.workers_from_budget`). Формула одна —
+    # :func:`resolve_pdf_device`, её же зовёт composition root для ``extractor_stack``:
+    # вторая копия разошлась бы с манифестом молча.
+    resolved_pdf_device = resolve_pdf_device(app, run)
     extract_workers = _pick(
         getattr(app, "extract_workers", None),
         run_extract_workers,
@@ -457,7 +501,9 @@ def resolve_crawl_limits(
         and resolved_level is not DocumentLevel.OFF
         and mem_budget_mb is not None
     ):
-        extract_workers = workers_from_budget(resolved_level, mem_budget_mb)
+        extract_workers = workers_from_budget(
+            resolved_level, mem_budget_mb, pdf_device=resolved_pdf_device
+        )
         extract_workers_derived = True
     extract_max_tasks = _pick(
         getattr(app, "extract_max_tasks_per_child", None),
@@ -683,6 +729,7 @@ def resolve_crawl_limits(
         pdf_pipeline=PdfPipeline(
             PdfPipeline.STRUCTURED if pdf_pipeline is None else pdf_pipeline
         ),
+        pdf_device=resolved_pdf_device,
         document_timeout_s=(
             DEFAULT_DOCUMENT_TIMEOUT_S
             if document_timeout is None

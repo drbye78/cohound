@@ -30,6 +30,7 @@ import json
 import os
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -120,7 +121,7 @@ from core.config.deploy import (
     resolve_serp_rounds,
 )
 from core.config.domain_profiles import DomainProfile
-from core.domain.enums import DocumentLevel, PdfPipeline
+from core.domain.enums import DocumentLevel, PdfDevice, PdfPipeline
 from core.domain.models import CrawlRunConfig
 from core.domain.scoring import endpoint_host_notices
 from core.pipeline import Ports, Runner
@@ -130,13 +131,16 @@ from core.pipeline.composition import (
     read_composition,
 )
 from core.pipeline.corpus import ExtractionPool
-from core.pipeline.crawl_frontier import resolve_crawl_limits
+from core.pipeline.crawl_frontier import resolve_crawl_limits, resolve_pdf_device
 from core.pipeline.resources import (
     MEM_BUDGET_ENV,
     PARENT_FLOOR_MB,
     MemoryBudgetError,
+    cuda_available,
+    cuda_total_vram_mb,
     pdf_peak_mb,
     resolve_mem_budget_mb,
+    vram_peak_mb,
     workers_from_budget,
 )
 from core.pipeline.runner import PHASES, Clock, PhaseFn
@@ -208,10 +212,13 @@ __all__ = [
     "build_search_adapter",
     "build_store",
     "build_vector_index",
+    "build_worker_extractor",
     "llm_env_notices",
     "llm_host_notices",
     "manifest_deploy_fields",
     "preflight_extraction_budget",
+    "preflight_pdf_device",
+    "require_pdf_device",
     "resolve_and_build_search_adapter",
     "resolve_evaluator_model_identity",
     "resolve_experiment_target",
@@ -2032,6 +2039,7 @@ def build_worker_extractor(
     level: DocumentLevel = DocumentLevel.FULL,
     pdf_pipeline: PdfPipeline = PdfPipeline.STRUCTURED,
     document_timeout: float | None = None,
+    pdf_device: PdfDevice = PdfDevice.CPU,
 ) -> ExtractorPort:
     """Строит экстрактор **внутри** воркер-процесса (P4/P5/P7; picklable by reference, §7).
 
@@ -2061,14 +2069,25 @@ def build_worker_extractor(
     Подстановка дефолта оси вместо ``None`` запрещена: 1800 с — потолок **задачи** фазы,
     а не per-level таймаут конвертера, и подмена изменила бы поведение прогонов, которые
     ось не объявляли.
+
+    **P9: ``pdf_device``.** Объявленное устройство моделей едет и в воркеры, и в
+    inline-путь (эта же фабрика — ``extractor_factory`` портов). Оно входит в
+    ``version`` экстрактора, то есть в ключ ``extract_cache`` и в провенанс документа.
+    ``cuda`` при недоступном устройстве — :class:`WiringError` (EXIT_USAGE), а не тихий
+    CPU: тихий фолбэк описал бы прогон устройством, на котором он не исполнялся (R5).
+    Штатная проверка — до запуска (:func:`preflight_pdf_device`); здесь она повторяется
+    потому, что фабрика исполняется и в воркер-процессе, который мог быть запущен другой
+    конфигурацией.
     """
     html = HtmlExtractor()
     pipeline = PdfPipeline(pdf_pipeline)
+    device = PdfDevice(pdf_device)
+    require_pdf_device(device)
     pdf: ExtractorPort | None = None
     documents: DoclingDocumentExtractor | None = None
     if level is not DocumentLevel.OFF:
         candidate = DoclingDocumentExtractor(
-            level=level, document_timeout=document_timeout
+            level=level, document_timeout=document_timeout, pdf_device=device
         )
         documents = candidate if candidate.available else None
         if pipeline is PdfPipeline.TEXT_LAYER:
@@ -2120,6 +2139,7 @@ def _local_extract_pool_factory(
     pdf_pipeline: PdfPipeline = PdfPipeline.STRUCTURED,
     *,
     max_tasks_per_child: int | None = None,
+    pdf_device: PdfDevice | str = PdfDevice.CPU,
     extractor_factory: Callable[
         [DocumentLevel, PdfPipeline], ExtractorPort
     ] = build_worker_extractor,
@@ -2138,15 +2158,32 @@ def _local_extract_pool_factory(
 
     ``extractor_factory`` — точка подмены для тестов рециклинга (по умолчанию — реальная
     фабрика composition root; никакого docling в тестах рециклинга не требуется).
+
+    **P9: ``pdf_device``.** Устройство — свойство хоста, поэтому оно захватывается в
+    ``partial`` фабрики (picklable: модульная функция + StrEnum-значение) и уезжает в
+    инициализатор воркера. Оговорка: под ``cuda`` фабрика — уже ``partial``, поэтому
+    подмена ``extractor_factory`` обязана принимать ``pdf_device``; тестовая подмена
+    работает на дефолтном ``cpu`` и ``partial`` не строится.
     """
     import multiprocessing
     from concurrent.futures import ProcessPoolExecutor
+
+    device = PdfDevice(pdf_device)
+    if device is PdfDevice.CPU:
+        init_factory: Callable[..., ExtractorPort] = extractor_factory
+    else:
+        # ``partial``, а не замыкание: инициализатор уезжает в другой процесс, и
+        # замыкание там не разрешилось бы (pickle by reference). ``base`` — та же
+        # фабрика, но с широкой подписью: ``partial`` добавляет kwarg ``pdf_device``,
+        # которого в тесной ``Callable[[level, pipeline], …]`` нет.
+        base: Callable[..., ExtractorPort] = extractor_factory
+        init_factory = partial(base, pdf_device=device)
 
     return ProcessPoolExecutor(
         max_workers=max_workers,
         mp_context=multiprocessing.get_context("forkserver"),
         initializer=_extract_worker_init,
-        initargs=(extractor_factory, level, pdf_pipeline),
+        initargs=(init_factory, level, pdf_pipeline),
         max_tasks_per_child=max_tasks_per_child,
     )
 
@@ -2157,6 +2194,7 @@ def build_extraction_pool(
     extractor: ExtractorPort | None = None,
     max_tasks_per_child: int | None = None,
     worker_rss_dir: str | Path | None = None,
+    pdf_device: PdfDevice | str = PdfDevice.CPU,
 ) -> ExtractionPool | None:
     """Собирает исполнитель экстракции по профилю развёртывания (P4/§7).
 
@@ -2186,6 +2224,11 @@ def build_extraction_pool(
 
     if profile == LOCAL_PROFILE:
         default_recycle = max_tasks_per_child
+        # P9: устройство моделей захватывается замыканием — это свойство хоста, а не
+        # корня, поэтому per-root значения у него нет (единственная точка объявления —
+        # ``deploy.yaml``/``run.yaml:crawl.pdf_device``). ``split`` его игнорирует: там
+        # извлечение исполняет edge своим конфигом (R-S), как и ``document_level``.
+        device = PdfDevice(pdf_device)
 
         def _local_factory(
             n: int,
@@ -2199,7 +2242,11 @@ def build_extraction_pool(
                 default_recycle if max_tasks_per_child is None else max_tasks_per_child
             )
             return _local_extract_pool_factory(
-                n, level, pdf_pipeline, max_tasks_per_child=recycle
+                n,
+                level,
+                pdf_pipeline,
+                max_tasks_per_child=recycle,
+                pdf_device=device,
             )
 
         return ExtractionPool(
@@ -2270,6 +2317,66 @@ def resolve_extraction_budget(
     return resolve_mem_budget_mb(env=env, available_mb=available_mb), derive
 
 
+def require_pdf_device(pdf_device: PdfDevice | str = PdfDevice.CPU) -> None:
+    """``cuda`` без CUDA-устройства — отказ с числами, а не тихий CPU-фолбэк (P9/R5).
+
+    Ось ``crawl.pdf_device`` — **объявленный** вход: прогон, объявивший ``cuda``,
+    обязан исполниться на GPU либо не начаться. Тихая подстановка ``cpu`` была бы
+    ложным провенансом (``extractor_version``/``extractor_stack`` назвали бы устройство,
+    которого не было) — тот же класс, что чтение модели оценщика из env (§7.4).
+
+    Сообщение несёт факты, по которым оператор может починить вход, а не «недоступно»:
+    версию установленного ``torch`` (из метаданных дистрибутива — без импорта: импорт
+    torch стоит сотни MB и был бы нужен только для отказа), факт ``cuda_available`` и
+    объём карты (``None`` — устройства/драйвера нет).
+
+    ``cpu`` проходит всегда: ось не требует устройства, а её отсутствие — штатный режим.
+    """
+    device = PdfDevice(pdf_device)
+    if device is not PdfDevice.CUDA:
+        return
+    if cuda_available():
+        return
+    from importlib.metadata import PackageNotFoundError
+    from importlib.metadata import version as _dist_version
+
+    try:
+        torch_version = _dist_version("torch")
+    except PackageNotFoundError:  # pragma: no cover — окружение без torch
+        torch_version = "не установлен"
+    total = cuda_total_vram_mb()
+    raise WiringError(
+        "crawl.pdf_device=cuda, но CUDA-устройство недоступно: "
+        f"torch={torch_version}, cuda_available=False, "
+        f"device_vram_mb={total if total is not None else 'нет устройства'}. "
+        "Объявите crawl.pdf_device=cpu либо установите CUDA-колёса и драйвер "
+        "(индекс cu130: `uv sync --frozen --extra extract-pdf`). Тихая подмена "
+        "устройства запрещена: extractor_version/extractor_stack назвали бы GPU, "
+        "на котором прогон не исполнялся"
+    )
+
+
+def preflight_pdf_device(
+    *,
+    deploy: DeployConfig | None = None,
+    run_crawl: CrawlRunConfig | None = None,
+) -> PdfDevice:
+    """Резолвит объявленное устройство и **проверяет его исполнимость** до прогона.
+
+    Одна точка входа для composition root: резолв — тот же
+    :func:`core.pipeline.crawl_frontier.resolve_pdf_device`, что увидит фаза корпуса
+    (``app < run``), поэтому отказ срабатывает ровно на том значении, которое
+    исполнилось бы, а не на копии формулы.
+
+    :raises WiringError: ``cuda`` при недоступном устройстве (``EXIT_USAGE`` до старта).
+    """
+    device = resolve_pdf_device(
+        deploy.crawl if deploy is not None else CrawlConfig(), run_crawl
+    )
+    require_pdf_device(device)
+    return device
+
+
 def preflight_extraction_budget(
     *,
     roots: Iterable[str],
@@ -2300,6 +2407,7 @@ def preflight_extraction_budget(
     error: MemoryBudgetError | None = None
     warnings: list[str] = []
     seen: set[tuple[int, str]] = set()
+    seen_vram: set[tuple[str, str]] = set()
     for root in roots:
         try:
             limits = resolve_crawl_limits(
@@ -2325,9 +2433,27 @@ def preflight_extraction_budget(
         if level is DocumentLevel.OFF and pdf_pipeline is not PdfPipeline.TEXT_LAYER:
             # Документной экстракции нет — воркеры не нужны; ноль здесь не «не помещается».
             continue
+        # P9: окно под ``cuda`` ограничено ещё и видеопамятью — вместимость считается
+        # тем же вызовом, что и в фазе корпуса (одна формула, не вторая копия).
         capacity = workers_from_budget(
-            level, mem_budget_mb, pdf_pipeline=pdf_pipeline
+            level,
+            mem_budget_mb,
+            pdf_pipeline=pdf_pipeline,
+            pdf_device=limits.pdf_device,
         )
+        # Неизмеренный VRAM-пик уровня — не «ноль» и не повод выдумать число: говорим
+        # прямо, чем ограничено окно, чтобы отсутствие границы не выглядело гарантией.
+        if (
+            limits.pdf_device is PdfDevice.CUDA
+            and vram_peak_mb(level, pdf_pipeline) is None
+            and (level.value, pdf_pipeline.value) not in seen_vram
+        ):
+            seen_vram.add((level.value, pdf_pipeline.value))
+            warnings.append(
+                f"crawl.pdf_device=cuda: пик VRAM уровня {level.value} "
+                f"({pdf_pipeline.value}) не измерен — окно ограничено памятью хоста и "
+                f"CPU; VRAM-слагаемое не применяется (замер, а не предвидение: A3)"
+            )
         if limits.extract_workers_derived:
             if limits.extract_workers == 0 and error is None:
                 error = MemoryBudgetError(
@@ -2377,6 +2503,7 @@ def _build_local_ports(
     lexical_index: LexicalIndexPort | None = None,
     pdf_pipeline: PdfPipeline = PdfPipeline.STRUCTURED,
     document_timeout: float | None = None,
+    pdf_device: PdfDevice = PdfDevice.CPU,
 ) -> Ports:
     """Собирает in-process порты профиля ``local`` (без сети/тяжёлых зависимостей).
 
@@ -2413,9 +2540,18 @@ def _build_local_ports(
     значение своей таблицы). Раньше ось не доезжала до конвертера вовсе: адаптер имел
     параметр, а конструктор его не передавал, поэтому объявленный потолок документа не
     действовал.
+
+    **Устройство (P9).** ``pdf_device`` — объявленная ось ``crawl.pdf_device``: она
+    доезжает до документарного адаптера (и в его ``version``), поэтому пробный
+    экстрактор портов и Ш5 исполняются на том же устройстве, что объявлено. ``cuda``
+    проверяется здесь же (:func:`require_pdf_device`): недоступное устройство — отказ
+    до прогона, а не тихий CPU.
     """
     html = HtmlExtractor()
-    documents = DoclingDocumentExtractor(document_timeout=document_timeout)
+    require_pdf_device(pdf_device)
+    documents = DoclingDocumentExtractor(
+        document_timeout=document_timeout, pdf_device=pdf_device
+    )
     # P7: PDF-механизм — часть композита, а не «настройка внутри docling». ``structured``
     # (дефолт) — тот же docling: поведение и ``version`` байт-в-байт прежние.
     pdf_adapter: ExtractorPort | None = None
@@ -2805,6 +2941,10 @@ def build_adapters(
             embedder=embedder,
             pdf_pipeline=pdf_pipeline,
             document_timeout=document_timeout,
+            # P9: устройство — из той же разрешённой оси (app < run), что и механизм:
+            # пробный экстрактор обязан исполняться там же, где объявлено, иначе
+            # ``extractor_version`` портов и Ш5 описывали бы разные устройства.
+            pdf_device=crawl_limits.pdf_device,
         )
     if profile == SPLIT_PROFILE:
         config = deploy if deploy is not None else load_deploy_config(None)

@@ -122,8 +122,9 @@ from core.config.deploy import (
 )
 from core.config.passports import passport_content_digests
 from core.domain.dictionary import load_dictionary
-from core.domain.enums import RefreshPolicy, SearchMode
+from core.domain.enums import PdfDevice, RefreshPolicy, SearchMode
 from core.domain.models import CrawlRunConfig, canonical_rate_limit
+from core.pipeline.crawl_frontier import resolve_pdf_device
 from core.pipeline.digests import passports_digest, render_modes_digest
 from core.pipeline.evaluation_policy import evaluation_policy_spec
 from core.pipeline.manual_artifacts import load_manual_artifacts
@@ -619,16 +620,29 @@ class DeclaredExecutionAxes:
     lexical_spec: dict[str, Any] | None = None
 
 
-def extractor_stack_version() -> str:
-    """Декларированный стек извлечения: ``<html>+<docling-family>/<build>``.
+def extractor_stack_version(
+    pdf_device: PdfDevice | str = PdfDevice.CPU,
+) -> str:
+    """Декларированный стек извлечения: ``<html>+<docling-family>/<device>/<build>``.
 
-    Пример: ``trafilatura-html-2+docling-doc-3/docling-2.135.0`` (при отсутствии
+    Пример: ``trafilatura-html-2+docling-doc-3/cuda/docling-2.135.0`` (при отсутствии
     библиотеки — ``.../docling-unknown``). ``<build>`` — **тот же** вызов
     (:func:`core.adapters.extract_document.docling_engine_build`), что даёт сборку в
     ``extractor_version`` документа, поэтому стек и ключ ``extract_cache`` называют одну
     и ту же версию библиотеки (Д-8).
+
+    ``<device>`` — объявленная ось ``crawl.pdf_device`` (P9). Она здесь потому, что
+    ``extractor_version`` **наблюдаем** и в контракт не входит (методология 2.4.0: он
+    остаётся провенансом), а устройство — условие измерения: текст документа от него
+    зависит, и без сегмента ``cpu``/``cuda`` два прогона с разным устройством имели бы
+    один ``run_id``. Поле контракта при этом не новое: ``extractor_stack`` и есть
+    объявленный аналог ``extractor_version``.
     """
-    return f"{HtmlExtractor.version}+{DOCLING_ADAPTER_FAMILY}/{docling_engine_build()}"
+    device = PdfDevice(pdf_device)
+    return (
+        f"{HtmlExtractor.version}+{DOCLING_ADAPTER_FAMILY}/{device.value}/"
+        f"{docling_engine_build()}"
+    )
 
 
 def declared_status_dict_version() -> str | None:
@@ -922,7 +936,16 @@ def resolve_declared_axes(
         ),
         lexical_spec=lexical_schema_spec(),
         llm_scenarios=_resolve_llm_scenarios(args=args, inputs=inputs, deploy=config),
-        extractor_stack=extractor_stack_version(),
+        # P9: устройство — объявленная ось (``app < run`` той же формулой, что у
+        # исполнения); входит в стек, значит и в ``run_id``. Значение резолвится, а не
+        # читается у устройства: доступность CUDA — отдельный отказ (preflight), не
+        # условие идентичности (иначе ``run_id`` стал бы функцией хоста).
+        extractor_stack=extractor_stack_version(
+            resolve_pdf_device(
+                config.crawl,
+                getattr(getattr(inputs, "run", None), "crawl", None),
+            )
+        ),
         # 13-manual-artifacts §3.2: ручные артефакты объявлены файлом пакета, поэтому
         # отпечаток — функция входа (как seeds_digest), а не наблюдение прогона.
         manual_artifacts_digest=_manual_artifacts_digest(args),

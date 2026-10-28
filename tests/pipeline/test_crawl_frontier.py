@@ -12,6 +12,7 @@ from pydantic import ValidationError
 
 from core.config.deploy import CrawlConfig
 from core.config.domain_profiles import DomainProfile
+from core.domain.enums import PdfDevice
 from core.domain.models import CrawlRunConfig
 from core.pipeline.crawl_frontier import (
     CrawlLimits,
@@ -19,6 +20,7 @@ from core.pipeline.crawl_frontier import (
     blacklist_match,
     is_blacklisted,
     resolve_crawl_limits,
+    resolve_pdf_device,
     root_path_prefix,
 )
 
@@ -761,3 +763,54 @@ def test_off_level_does_not_derive_extract_workers() -> None:
     )
     assert limits.document_level.value == "off"
     assert (limits.extract_workers, limits.extract_workers_derived) == (None, False)
+
+
+# --------------------------------------------------------------------------- #
+# P9: устройство моделей извлечения PDF (crawl.pdf_device)
+# --------------------------------------------------------------------------- #
+
+
+def test_pdf_device_defaults_to_cpu() -> None:
+    """Ось не объявлена — ``cpu``: поведение прогонов без оси не меняется.
+
+    ``auto`` не существует намеренно (R5): объявленная ось обязана действовать, а
+    «устройство выбрал движок» — ложный провенанс (тот же класс, что env-модель
+    оценщика, §7.4).
+    """
+    assert resolve_crawl_limits(URL, app=APP).pdf_device is PdfDevice.CPU
+    assert resolve_pdf_device(APP, None) is PdfDevice.CPU
+
+
+def test_pdf_device_run_layer_overrides_app() -> None:
+    """Цепочка app < run: объявленное в ``run.yaml`` побеждает app-дефолт."""
+    assert (
+        resolve_crawl_limits(
+            URL, app=APP, run=CrawlRunConfig(pdf_device="cuda")
+        ).pdf_device
+        is PdfDevice.CUDA
+    )
+    assert (
+        resolve_pdf_device(APP, CrawlRunConfig(pdf_device="cuda")) is PdfDevice.CUDA
+    )
+
+
+def test_pdf_device_has_no_site_layer() -> None:
+    """Per-site переопределения нет: устройство — свойство **хоста**, не сайта.
+
+    Профиль домена не объявляет поля ``pdf_device`` вовсе (``extra="forbid"``), поэтому
+    два корня на одной машине не могут исполняться на разных устройствах — и не могут
+    молча разойтись с ``extractor_stack``.
+    """
+    profile = DomainProfile()
+    assert not hasattr(profile, "pdf_device")
+    with pytest.raises(ValidationError):
+        DomainProfile(pdf_device="cuda")  # type: ignore[call-arg]
+    # Даже с профилем домена устройство остаётся app/run-значением.
+    limits = resolve_crawl_limits(URL, app=APP, profiles={"example.com": profile})
+    assert limits.pdf_device is PdfDevice.CPU
+
+
+def test_pdf_device_rejects_auto() -> None:
+    """``auto`` — не значение оси: лишнее значение обязано падать на входе, не в прогоне."""
+    with pytest.raises(ValidationError):
+        CrawlRunConfig(pdf_device="auto")  # type: ignore[arg-type]

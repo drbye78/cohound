@@ -76,7 +76,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-from core.domain.enums import DocumentLevel
+from core.domain.enums import DocumentLevel, PdfDevice
 from core.ports.types import ExtractedDoc
 from core.util.document_formats import DOCUMENT_SUFFIXES
 
@@ -101,6 +101,11 @@ NativePdfPipelineOptions: Any = None
 TableStructureOptions: Any = None
 TableFormerMode: Any = None
 OcrAutoOptions: Any = None
+#: P9: ``AcceleratorOptions`` — не входит в :data:`_DOCLING_SYMBOLS` (это не часть
+#: контракта инъекции: тесты подменяют конвертер/опции, а устройство проверяют отдельно),
+#: но заполняется тем же импортом. ``None`` — docling не импортирован (или подменён):
+#: тогда устройство объявить нечем, и это видно предупреждением, а не тишиной.
+AcceleratorOptions: Any = None
 
 #: Имена, которые :func:`_resolve_docling` заполняет из docling. Порядок не важен.
 _DOCLING_SYMBOLS: tuple[str, ...] = (
@@ -194,16 +199,32 @@ def docling_engine_build() -> str:
     return f"{_DOCLING_BUILD_PREFIX}{docling_library_version()}"
 
 
-def docling_extractor_version(level: DocumentLevel | str) -> str:
-    """``extractor_version`` документа: ``docling-doc-3:<level>/docling-<build>``.
+def docling_extractor_version(
+    level: DocumentLevel | str, pdf_device: PdfDevice | str = PdfDevice.CPU
+) -> str:
+    """``extractor_version`` документа: ``docling-doc-3:<level>/<device>/docling-<build>``.
 
-    Пример: ``docling-doc-3:full/docling-2.135.0``. Уровень кодирует ось
-    ``crawl.document_level`` (P5), сборка — фактически установленную библиотеку. Оба
-    слагаемых входят в ключ ``extract_cache``: после апгрейда docling старый текст
-    получается только под **старым** ключом и потому не находится.
+    Пример: ``docling-doc-3:full/cuda/docling-2.135.0``. Уровень кодирует ось
+    ``crawl.document_level`` (P5), устройство — ``crawl.pdf_device`` (P9), сборка —
+    фактически установленную библиотеку. Все три слагаемых входят в ключ
+    ``extract_cache`` (``(content_hash, extractor_version, level)``): после апгрейда
+    docling **или** смены устройства старый текст получается только под **старым**
+    ключом и потому не находится.
+
+    Почему устройство обязательно в ключе (Д-8 в новом виде). Текст документа не
+    бит-в-бит независим от устройства: layout/таблицы считаются тензорными ядрами, и
+    численные различия меняют разметку на границах. Без сегмента устройства CUDA-прогон
+    нашёл бы в кэше CPU-текст под тем же ключом — то есть ``stage=extract`` вернул бы
+    текст, которого объявленное устройство не производило. Это ровно тот класс, ради
+    которого в ключе лежит сборка движка.
+
+    ``pdf_device`` принимает и ``str`` (значение оси из конфига) — нормализуется через
+    :class:`PdfDevice`, поэтому два пути не могут дать разные строки для одного входа.
     """
+    device = PdfDevice(pdf_device)
     return (
-        f"{DOCLING_ADAPTER_FAMILY}:{DocumentLevel(level).value}/{docling_engine_build()}"
+        f"{DOCLING_ADAPTER_FAMILY}:{DocumentLevel(level).value}/"
+        f"{device.value}/{docling_engine_build()}"
     )
 
 
@@ -237,6 +258,9 @@ def _resolve_docling() -> bool:
         import docling  # noqa: F401  # type: ignore[import-not-found]
         from docling.datamodel.base_models import (  # type: ignore[import-not-found]
             InputFormat as _InputFormat,
+        )
+        from docling.datamodel.pipeline_options import (  # type: ignore[import-not-found]
+            AcceleratorOptions as _AcceleratorOptions,
         )
         from docling.datamodel.pipeline_options import (  # type: ignore[import-not-found]
             NativePdfPipelineOptions as _NativePdfPipelineOptions,
@@ -277,6 +301,7 @@ def _resolve_docling() -> bool:
             "TableStructureOptions": _TableStructureOptions,
             "TableFormerMode": _TableFormerMode,
             "OcrAutoOptions": _OcrAutoOptions,
+            "AcceleratorOptions": _AcceleratorOptions,
         }
     )
     _DOCLING_AVAILABLE = True
@@ -398,6 +423,26 @@ _LEVEL_DOCUMENT_TIMEOUT_S: dict[DocumentLevel, float | None] = {
 #: остаётся валидным).
 PDF_QUEUE_MAX_SIZE = 1
 
+#: Число CPU-потоков инференса (``AcceleratorOptions.num_threads``), объявленное **явно**.
+#:
+#: Значение равно дефолту docling 2.135 — проверено вызовом, а не по памяти:
+#: ``AcceleratorOptions()`` → ``num_threads=4``. Пинится не ради «настройки», а чтобы
+#: убрать **env-зависимость**: ``AcceleratorOptions`` — ``BaseSettings`` с префиксом
+#: ``DOCLING_``, поэтому без явного аргумента число потоков приходит из окружения
+#: (``DOCLING_NUM_THREADS``/``OMP_NUM_THREADS``). Проверено вызовом:
+#: ``DOCLING_NUM_THREADS=11 OMP_NUM_THREADS=11`` даёт **11** у ``AcceleratorOptions()`` и
+#: **4** у ``AcceleratorOptions(num_threads=4)`` — явный аргумент приоритетнее env.
+#:
+#: Это тот же класс дефекта, что P9 (R5): параметр исполнения не должен выбираться
+#: окружением. Иначе два хоста с одним ``run.yaml`` извлекают по-разному, а
+#: ``extractor_version`` этого не различает — в ключ ``extract_cache`` входит устройство
+#: (:func:`docling_extractor_version`), но не потоки.
+#:
+#: **Влияние на скорость не измерено.** Утверждения «больше потоков быстрее/медленнее» на
+#: этом стеке здесь нет ни в одну сторону: подбор значения по времени — отдельный замер,
+#: а не предвидение (A3).
+ACCELERATOR_NUM_THREADS = 4
+
 #: Эффективное значение замеренной ручки по уровням PDF-пайплайна: ``None`` — ручки у
 #: пайплайна уровня нет (``text`` — ``NativePdfPipelineOptions``, другой механизм).
 _PDF_QUEUE_MAX_SIZE_BY_LEVEL: dict[str, int | None] = {
@@ -489,11 +534,12 @@ def _converted_page_count(result: object) -> int | None:
 class DoclingDocumentExtractor:
     """Документ (PDF/DOCX/PPTX/XLSX) → markdown через docling. Реализация ``ExtractorPort``.
 
-    ``level`` задаёт уровень извлечения PDF (P5). ``version`` — инстансный и кодирует
-    уровень и сборку движка (``docling-doc-3:<level>/docling-<build>``,
-    :func:`docling_extractor_version`), чтобы смена уровня или апгрейд docling была видна
-    и в ``index_build_id``, и в ключе ``extract_cache``. Классовый ``version`` — дефолт
-    ``full`` (обратная совместимость по атрибуту).
+    ``level`` задаёт уровень извлечения PDF (P5), ``pdf_device`` — устройство моделей (P9).
+    ``version`` — инстансный и кодирует уровень, устройство и сборку движка
+    (``docling-doc-3:<level>/<device>/docling-<build>``,
+    :func:`docling_extractor_version`), чтобы смена уровня, устройства или апгрейд docling
+    была видна и в ``index_build_id``, и в ключе ``extract_cache``. Классовый ``version`` —
+    дефолт ``full``/``cpu`` (обратная совместимость по атрибуту).
     """
 
     #: Классовый дефолт = уровень ``full``, вычисленный при импорте
@@ -510,9 +556,13 @@ class DoclingDocumentExtractor:
         level: DocumentLevel = DocumentLevel.FULL,
         *,
         document_timeout: float | None = None,
+        pdf_device: PdfDevice | str = PdfDevice.CPU,
     ) -> None:
         self._level = DocumentLevel(level)
-        self.version = docling_extractor_version(self._level)
+        # P9: объявленное устройство моделей. Подставляется в ``accelerator_options``
+        # конвертера (``auto`` в docling не используется: ось объявлена, а не выведена).
+        self._pdf_device = PdfDevice(pdf_device)
+        self.version = docling_extractor_version(self._level, self._pdf_device)
         # §6: явный таймаут оператора приоритетен; иначе — щедрый per-level дефолт.
         self._document_timeout = document_timeout
         self._converter = None
@@ -568,13 +618,23 @@ class DoclingDocumentExtractor:
         документах; статус docling — ``SUCCESS``, страниц 665/665 (частичных нет).
 
         Класс изменения — ``execution_change`` (§13), **не** ``methodology_change``:
-        ``extractor_version`` (``docling-doc-3:<level>/docling-<build>``) не включает эту
-        ручку и от замера не меняется, поэтому записи ``extract_cache/`` остаются
-        валидными (замер не инвалидирует извлечённый корпус). ``golden-full`` не требуется.
+        ``extractor_version`` (``docling-doc-3:<level>/<device>/docling-<build>``) не
+        включает эту ручку и от замера не меняется, поэтому записи ``extract_cache/``
+        остаются валидными (замер не инвалидирует извлечённый корпус). ``golden-full``
+        не требуется.
+
+        **P9: устройство и потоки.** ``accelerator_options`` выставляются **всегда** для
+        структурированных уровней: ``device`` — объявленная ось ``crawl.pdf_device``,
+        ``num_threads`` — :data:`ACCELERATOR_NUM_THREADS` (равен дефолту библиотеки, но
+        передан явно — иначе значение приходит из env ``DOCLING_NUM_THREADS``/
+        ``OMP_NUM_THREADS``). Дефолт docling ``device="auto"`` не используется: он выбирает
+        устройство по окружению, а не по объявленному входу (R5), и GPU-хост молча
+        исполнял бы прогон не там, где заявлено. Устройство, в отличие от этой ручки,
+        **входит** в ``extractor_version`` — текст документа от него зависит.
 
         Ветка ``text`` (``NativePdfPipelineOptions``) намеренно **без** этой ручки: у
         нативного пайплайна другой механизм и своя память (899 MB), поля ``queue_max_size``
-        у него нет вовсе.
+        у него нет вовсе; моделей, которым нужно устройство, он не грузит.
         """
         # Символы docling разрешаются здесь же: до этого вызова они могли быть ``None``
         # (ленивый импорт). Повторный вызов — no-op (см. :func:`_resolve_docling`).
@@ -585,13 +645,28 @@ class DoclingDocumentExtractor:
             else _LEVEL_DOCUMENT_TIMEOUT_S.get(self._level)
         )
         if self._level is DocumentLevel.TEXT:
+            # Нативный пайплайн моделей не грузит: устройство и потоки ему не адресованы
+            # (pdfium/нативный парсер исполняется в вызывающем процессе на CPU).
             return NativePdfPipelineOptions(document_timeout=timeout)
+        # P9: устройство объявлено, а не выведено. Без этого docling берёт
+        # ``AcceleratorOptions()`` с ``device="auto"``, то есть решает сам — ровно то,
+        # что R5 запрещает: провенанс назвал бы устройство, которого вход не объявлял.
+        #
+        # ``accelerator_options`` добавляется в kwargs **только** когда объект есть:
+        # у docling это поле не принимает ``None`` (Pydantic отвергнет), а подменённые
+        # символы без docling дают именно ``None``.
+        common: dict[str, Any] = {
+            "document_timeout": timeout,
+            "queue_max_size": PDF_QUEUE_MAX_SIZE,
+        }
+        accelerator = self._accelerator_options()
+        if accelerator is not None:
+            common["accelerator_options"] = accelerator
         if self._level is DocumentLevel.LAYOUT:
             return PdfPipelineOptions(
                 do_table_structure=False,
                 do_ocr=False,
-                document_timeout=timeout,
-                queue_max_size=PDF_QUEUE_MAX_SIZE,
+                **common,
             )
         if self._level is DocumentLevel.LAYOUT_TABLES:
             return PdfPipelineOptions(
@@ -600,13 +675,42 @@ class DoclingDocumentExtractor:
                     do_cell_matching=True, mode=TableFormerMode.FAST
                 ),
                 do_ocr=False,
-                document_timeout=timeout,
-                queue_max_size=PDF_QUEUE_MAX_SIZE,
+                **common,
             )
         # ``full`` — байт-в-байт дефолты docling (OCR включён, таблицы ACCURATE), кроме
         # ``queue_max_size`` (см. docstring: замер −44% RSS, markdown идентичен).
-        return PdfPipelineOptions(
-            document_timeout=timeout, queue_max_size=PDF_QUEUE_MAX_SIZE
+        return PdfPipelineOptions(**common)
+
+    def _accelerator_options(self) -> object:
+        """``AcceleratorOptions`` с **объявленным** устройством (P9).
+
+        ``device`` — значение оси ``crawl.pdf_device`` (``cpu``/``cuda``), ``num_threads``
+        — :data:`ACCELERATOR_NUM_THREADS` (дефолт библиотеки, переданный явно). Оба
+        значения объявлены здесь, а не взяты из дефолтов библиотеки: ``device="auto"`` —
+        это выбор окружения, а не входа, а число потоков как дефолт ``BaseSettings``
+        читается из env (``DOCLING_NUM_THREADS``/``OMP_NUM_THREADS``).
+
+        ``AcceleratorOptions`` не входит в контракт инъекции docling-символов
+        (:data:`_DOCLING_SYMBOLS`), поэтому в окружении с подменёнными символами он может
+        быть ``None``. Тогда объявить устройство нечем: это **отказ** для ``cuda`` (нельзя
+        исполнить объявленную ось) и видимое предупреждение для ``cpu`` — тихая подмена
+        устройства запрещена тем же правилом, что тихий CPU-фолбэк.
+        """
+        if AcceleratorOptions is None:  # pragma: no cover — только подменённые символы
+            if self._pdf_device is PdfDevice.CUDA:
+                raise RuntimeError(
+                    "crawl.pdf_device=cuda: AcceleratorOptions недоступен "
+                    "(docling не импортирован или символы подменены) — объявленное "
+                    "устройство невозможно исполнить"
+                )
+            _log.warning(
+                "document extract: AcceleratorOptions недоступен — устройство "
+                "моделей не объявлено (ожидалось %s)",
+                self._pdf_device.value,
+            )
+            return None
+        return AcceleratorOptions(
+            device=self._pdf_device.value, num_threads=ACCELERATOR_NUM_THREADS
         )
 
     def _build_converter(self, *, pdf: bool = True):  # noqa: ANN202 - тип docling необязателен

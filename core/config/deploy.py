@@ -30,7 +30,13 @@ from typing import Any
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from core.domain.enums import ArchiveDescent, Decoder, DocumentLevel, PdfPipeline
+from core.domain.enums import (
+    ArchiveDescent,
+    Decoder,
+    DocumentLevel,
+    PdfDevice,
+    PdfPipeline,
+)
 from core.domain.models import (
     DEFAULT_ARCHIVE_MAX_MEMBER_BYTES,
     DEFAULT_ARCHIVE_MAX_TOTAL_UNCOMPRESSED_BYTES,
@@ -447,6 +453,14 @@ class CrawlConfig(BaseModel):
     # ``crawl_config_digest`` и меняет ``run_id`` (``execution_change``, §13).
     # ``crawl.document_level`` действует только при ``structured``.
     pdf_pipeline: PdfPipeline = PdfPipeline.STRUCTURED
+    # P9: устройство моделей извлечения PDF (``crawl.pdf_device``). ``auto`` не существует
+    # намеренно (R5): объявленная ось обязана действовать, а «движок выбрал окружение» —
+    # тот же класс, что чтение модели оценщика из env. Дефолт ``cpu`` = модели на CPU;
+    # ``cuda`` требует доступного устройства (иначе EXIT_USAGE с числами, не фолбэк).
+    # Устройство входит в ``extractor_version``/``extractor_stack`` (ключ ``extract_cache``
+    # и ``run_id``), а в ``crawl_config_digest`` — нет: материал уже назван стеком, и
+    # второе поле на тот же материал не дало бы различить расхождение прогонов.
+    pdf_device: PdfDevice = PdfDevice.CPU
     # D1/§10 (N1): явное включение/выключение принуждения ``robots.txt`` в адаптерах
     # (egress-слой). ``None`` = auto: robots включается ровно тогда, когда включён обход
     # (любой эффективный ``max_depth > 0`` или сконфигурированный per-site ``sitemap``),

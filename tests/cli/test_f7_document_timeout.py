@@ -19,7 +19,7 @@ from typing import Any
 import pytest
 
 from core.cli import wiring
-from core.domain.enums import DocumentLevel, PdfPipeline
+from core.domain.enums import DocumentLevel, PdfDevice, PdfPipeline
 from core.domain.models import CrawlRunConfig
 
 
@@ -37,8 +37,16 @@ class _RecordingDocling:
         level: DocumentLevel = DocumentLevel.FULL,
         *,
         document_timeout: float | None = None,
+        pdf_device: PdfDevice = PdfDevice.CPU,
     ) -> None:
-        type(self).captured = {"level": level, "document_timeout": document_timeout}
+        # ``pdf_device`` принимается и записывается: подпись конструктора — часть
+        # контракта проводки (P9), и двойник обязан её повторять, иначе проводка
+        # «проходит» на старом наборе аргументов и молча не передаёт новую ось.
+        type(self).captured = {
+            "level": level,
+            "document_timeout": document_timeout,
+            "pdf_device": pdf_device,
+        }
 
 
 @pytest.fixture
@@ -55,7 +63,11 @@ def test_worker_extractor_receives_declared_document_timeout(
     """Фабрика воркер-экстрактора передаёт объявленный таймаут в адаптер."""
     wiring.build_worker_extractor(DocumentLevel.TEXT, document_timeout=1234.0)
 
-    assert recording.captured == {"level": DocumentLevel.TEXT, "document_timeout": 1234.0}
+    assert recording.captured == {
+        "level": DocumentLevel.TEXT,
+        "document_timeout": 1234.0,
+        "pdf_device": PdfDevice.CPU,
+    }
 
 
 def test_worker_extractor_without_axis_keeps_level_table(
@@ -67,6 +79,7 @@ def test_worker_extractor_without_axis_keeps_level_table(
     assert recording.captured == {
         "level": DocumentLevel.LAYOUT_TABLES,
         "document_timeout": None,
+        "pdf_device": PdfDevice.CPU,
     }
 
 

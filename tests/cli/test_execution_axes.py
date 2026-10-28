@@ -52,7 +52,7 @@ from core.config.deploy import (
     LLMDeployConfig,
     LLMSlotConfig,
 )
-from core.domain.enums import CrawlStrategy, DocumentLevel
+from core.domain.enums import CrawlStrategy, DocumentLevel, PdfDevice
 from core.domain.models import CrawlRunConfig, RateLimitSpec
 from core.pipeline.digests import (
     EXECUTION_CONTRACT_FIELDS,
@@ -125,7 +125,7 @@ def test_declared_axes_are_deterministic(tmp_path: Path) -> None:
     second = _resolve(package)
     assert first == second
     assert first.extractor_stack.startswith(
-        "trafilatura-html-2+docling-doc-3/docling-"
+        "trafilatura-html-2+docling-doc-3/cpu/docling-"
     )
     # Объявленные оси — ровно по списку §13 (+ ``serp_rounds``: раунд внешнего поиска
     # меняет состав корпуса, то есть условие измерения; + ``manual_artifacts_digest``:
@@ -516,6 +516,29 @@ def test_contract_ignores_observed_manifest_values(tmp_path: Path) -> None:
     assert _contract(package, declared) == first
 
 
+def test_extractor_stack_names_the_declared_device(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """P9: устройство входит в ``extractor_stack`` — иначе ``run_id`` не различает его.
+
+    ``extractor_version`` (где устройство тоже есть) наблюдаем и в контракт не входит
+    (методология 2.4.0). Однако текст документа от устройства зависит, поэтому два
+    прогона с разными устройствами обязаны иметь **разный** ``run_id`` — иначе один
+    ``run_id`` описывал бы два разных корпуса. Поле контракта при этом не новое:
+    устройство едет внутрь уже объявленного ``extractor_stack``.
+    """
+    monkeypatch.setattr(extract_document, "docling_library_version", lambda: "9.9.9")
+
+    cpu = execution_axes.extractor_stack_version(PdfDevice.CPU)
+    cuda = execution_axes.extractor_stack_version(PdfDevice.CUDA)
+
+    assert cpu.endswith("+docling-doc-3/cpu/docling-9.9.9")
+    assert cuda.endswith("+docling-doc-3/cuda/docling-9.9.9")
+    assert cpu != cuda
+    # Устройство и сборка не смешиваются: последний сегмент у обоих один.
+    assert cpu.rsplit("/", 1)[1] == cuda.rsplit("/", 1)[1]
+
+
 def test_extractor_stack_and_extractor_version_share_the_engine_build(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -533,7 +556,7 @@ def test_extractor_stack_and_extractor_version_share_the_engine_build(
     version = DoclingDocumentExtractor(DocumentLevel.FULL).version
 
     assert stack.endswith("/docling-9.9.9")
-    assert version == "docling-doc-3:full/docling-9.9.9"
+    assert version == "docling-doc-3:full/cpu/docling-9.9.9"
     # Одна и та же строка сборки в обоих идентификаторах.
     assert stack.rsplit("/", 1)[1] == version.rsplit("/", 1)[1]
 

@@ -78,7 +78,12 @@ from core.cli.wiring import (
     seed_lexical_index,
     serp_env_notices,
 )
-from core.config.deploy import is_split, load_deploy_config, profile_notices
+from core.config.deploy import (
+    CrawlConfig,
+    is_split,
+    load_deploy_config,
+    profile_notices,
+)
 from core.domain import (
     CrawlItemStatus,
     CrawlRunConfig,
@@ -88,6 +93,7 @@ from core.domain import (
 )
 from core.pipeline import GATE_PHASES, PHASES, Ports
 from core.pipeline.compute import bundle_for_run
+from core.pipeline.crawl_frontier import resolve_pdf_device
 from core.pipeline.crawl_session import (
     default_session_id,
     read_provenance,
@@ -840,7 +846,15 @@ def run(args: argparse.Namespace) -> int:
         # другое число, чем то, из которого выведено окно (часы краула меняют его на
         # гигабайты). Публиковать «бюджет» и «окно из бюджета» из разных мгновений значило
         # бы соврать провенансом — ту же ошибку, что метка ``env`` у отвергнутого значения.
-        budget_provenance = mem_budget_provenance()
+        #
+        # P9: устройство — та же разрешённая ось, что увидит экстракция (``app < run``),
+        # поэтому VRAM-часть провенанса описывает именно тот режим, который исполняется.
+        budget_provenance = mem_budget_provenance(
+            pdf_device=resolve_pdf_device(
+                deploy_config.crawl if deploy_config is not None else CrawlConfig(),
+                getattr(getattr(inputs, "run", None), "crawl", None),
+            )
+        )
         # Одно соединение на прогон (R7): фильтрация URL, сборка портов (``store``/
         # ``chunk_lookup`` для лексического/dense плеча), Runner и пост-корпусная
         # перепривязка ретривала работают на этом объекте. Открываем **до**

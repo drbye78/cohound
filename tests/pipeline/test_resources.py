@@ -26,7 +26,7 @@ from typing import Any
 
 import pytest
 
-from core.domain.enums import DocumentLevel, PdfPipeline
+from core.domain.enums import DocumentLevel, PdfDevice, PdfPipeline
 from core.pipeline import resources
 from core.pipeline.resources import (
     MEM_BUDGET_ENV,
@@ -47,10 +47,13 @@ from core.pipeline.resources import (
 #: Замеренные пики docling на один документ (MB): пер-уровневые —
 #: ``2026-10-23-docling-level-peaks.md``, ``layout_tables`` —
 #: ``2026-10-24-docling-peaks-real-corpus.md`` (максимум по реальному корпусу, 2763 стр.).
+#: ``full`` = 4833 — 3679 (измеренный реальный ``layout_tables``) + 1154 (синтетическая
+#: дельта OCR+ACCURATE против FAST без OCR): прежнее 3107 было **ниже** ``layout_tables``,
+#: то есть ошибка перестала быть консервативной.
 PEAK_TEXT = 855
 PEAK_LAYOUT = 1563
 PEAK_LAYOUT_TABLES = 3679
-PEAK_FULL = 3107
+PEAK_FULL = 4833
 
 #: Бюджет хоста 6.9 GiB, округлённый вниз до MB (тот же замер).
 HOST_BUDGET_MB = 6500
@@ -215,6 +218,135 @@ def test_workers_from_budget_matches_measured_host() -> None:
     # Один воркер помещается ровно с полом родителя: 500 + 3679 = 4179 MB.
     assert workers_from_budget(DocumentLevel.LAYOUT_TABLES, 4179, cpu_cap=8) == 1
     assert workers_from_budget(DocumentLevel.LAYOUT_TABLES, 4178, cpu_cap=8) == 0
+
+
+# --------------------------------------------------------------------------- #
+# P9: окно — минимум по двум ограничениям (host-память и VRAM)
+# --------------------------------------------------------------------------- #
+
+
+def test_workers_from_budget_cpu_device_ignores_vram() -> None:
+    """Под ``cpu`` VRAM-слагаемого нет вовсе: параметр даже не читается.
+
+    ``usable_vram_mb=0`` при ``cpu`` не должен обнулить окно — иначе объявление
+    устройством CPU стоило бы воркеров на машине, где видеопамяти просто нет.
+    """
+    assert (
+        workers_from_budget(
+            DocumentLevel.LAYOUT_TABLES,
+            HOST_BUDGET_MB,
+            cpu_cap=8,
+            pdf_device=PdfDevice.CPU,
+            usable_vram_mb=0,
+        )
+        == 1
+    )
+
+
+def test_workers_from_budget_cuda_is_capped_by_vram() -> None:
+    """``cuda``: окно ограничено и видеопамятью — по замеренному пику 817 MB.
+
+    Конфигурация, ради которой слагаемое существует: host-памяти много, карта маленькая.
+    Без него формула вывела бы 8 воркеров (потолок CPU) и упала бы в CUDA OOM.
+    ``usable_vram`` здесь явный: тест не должен зависеть от карты хоста.
+    """
+    budget = PARENT_FLOOR_MB + 100 * PEAK_LAYOUT_TABLES  # host разрешает много
+    peak = resources.DOCLING_VRAM_PEAK_MB[DocumentLevel.LAYOUT_TABLES]
+    assert peak == 817  # замер: 665-стр. документ на RTX 3050, layout_tables
+    assert (
+        workers_from_budget(
+            DocumentLevel.LAYOUT_TABLES,
+            budget,
+            cpu_cap=8,
+            pdf_device=PdfDevice.CUDA,
+            usable_vram_mb=2 * peak,
+        )
+        == 2
+    )
+    # Меньше одного пика — ноль: «не помещается», а не «возьми один».
+    assert (
+        workers_from_budget(
+            DocumentLevel.LAYOUT_TABLES,
+            budget,
+            cpu_cap=8,
+            pdf_device=PdfDevice.CUDA,
+            usable_vram_mb=peak - 1,
+        )
+        == 0
+    )
+
+
+def test_workers_from_budget_cuda_result_is_min_of_both_limits() -> None:
+    """Минимум, а не произведение: связывает **то** ограничение, которое меньше."""
+    # Host даёт 1 воркер, VRAM — 4: побеждает host.
+    assert (
+        workers_from_budget(
+            DocumentLevel.LAYOUT_TABLES,
+            PARENT_FLOOR_MB + PEAK_LAYOUT_TABLES,
+            cpu_cap=8,
+            pdf_device=PdfDevice.CUDA,
+            usable_vram_mb=4 * 817,
+        )
+        == 1
+    )
+    # Host даёт 4, VRAM — 1: побеждает VRAM.
+    assert (
+        workers_from_budget(
+            DocumentLevel.LAYOUT_TABLES,
+            PARENT_FLOOR_MB + 4 * PEAK_LAYOUT_TABLES,
+            cpu_cap=8,
+            pdf_device=PdfDevice.CUDA,
+            usable_vram_mb=817,
+        )
+        == 1
+    )
+
+
+def test_workers_from_budget_cuda_unmeasured_level_does_not_invent_a_peak() -> None:
+    """Уровень без VRAM-замера (``full``) не ограничивается выдуманным числом.
+
+    ``None`` в :func:`vram_peak_mb` — «не измеряли», а не «бесплатно»: окно считает
+    host-память и CPU, а факт отсутствия VRAM-границы виден в preflight (A3).
+    """
+    assert resources.vram_peak_mb(DocumentLevel.FULL) is None
+    big = PARENT_FLOOR_MB + 2 * PEAK_FULL
+    assert (
+        workers_from_budget(
+            DocumentLevel.FULL,
+            big,
+            cpu_cap=8,
+            pdf_device=PdfDevice.CUDA,
+            usable_vram_mb=817,  # намеренно мало: пик уровня не измерен — не применяется
+        )
+        == 2
+    )
+
+
+def test_vram_peak_text_layer_is_zero_not_unknown() -> None:
+    """``text_layer`` (pdfium) в VRAM не ходит — измеренный 0, а не «неизвестно».
+
+    Разница существенна: ``0`` не ограничивает окно, ``None`` означал бы «не смотрели».
+    """
+    assert (
+        resources.vram_peak_mb(DocumentLevel.LAYOUT_TABLES, PdfPipeline.TEXT_LAYER) == 0
+    )
+    assert resources.vram_peak_mb(DocumentLevel.TEXT) == 0
+
+
+def test_read_usable_vram_mb_reserves_headroom(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``usable = total − reserve``: карта целиком прогону не отдаётся.
+
+    Резерв — не потолок, а цена того, чтобы прогон не оказался CUDA-OOM для рабочего
+    стола: дисплей и первый CUDA-контекст занимают память до воркеров.
+    """
+    monkeypatch.setattr(resources, "cuda_total_vram_mb", lambda: 4095)
+    assert resources.read_usable_vram_mb() == 4095 - resources.VRAM_RESERVE_MB
+    # Карта меньше резерва — 0 («по VRAM не помещается»), а не отрицательное число.
+    monkeypatch.setattr(resources, "cuda_total_vram_mb", lambda: 100)
+    assert resources.read_usable_vram_mb() == 0
+    # Устройства нет — «неизвестно», а не ноль.
+    monkeypatch.setattr(resources, "cuda_total_vram_mb", lambda: None)
+    assert resources.read_usable_vram_mb() is None
 
 
 # --------------------------------------------------------------------------- #

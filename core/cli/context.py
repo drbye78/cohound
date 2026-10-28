@@ -52,6 +52,7 @@ from core.cli.wiring import (
     build_worker_extractor,
     llm_env_notices,
     manifest_deploy_fields,
+    preflight_pdf_device,
     resolve_extraction_budget,
     run_db_path,
 )
@@ -71,6 +72,7 @@ from core.domain.enums import (
     EndpointKind,
     Gate,
     LLMScenario,
+    PdfDevice,
     PdfPipeline,
     Status,
 )
@@ -1828,6 +1830,29 @@ def _load_render_modes(path: str | Path | None) -> dict[str, FetchMode]:
     return modes
 
 
+def _worker_extractor_factory(
+    pdf_device: PdfDevice, document_timeout: float | None
+) -> Any:
+    """Фабрика per-level экстрактора для inline-пути с объявленными осями (P8/P9).
+
+    Возвращает **саму** модульную функцию, когда привязывать нечего (``cpu`` без
+    таймаута): сохранение прежнего объекта важно, потому что фабрика передаётся в
+    ``core.pipeline.corpus`` как «ссылка на движок по умолчанию», и подмена её на
+    ``partial`` без нужды меняла бы наблюдаемое поведение (и identity в тестах).
+
+    ``partial`` (а не замыкание) — требование picklability: фабрика уезжает в
+    воркер-процесс, где замыкание не разрешилось бы. Оба значения — скаляры/StrEnum.
+    """
+    kwargs: dict[str, Any] = {}
+    if document_timeout is not None:
+        kwargs["document_timeout"] = document_timeout
+    if PdfDevice(pdf_device) is not PdfDevice.CPU:
+        kwargs["pdf_device"] = PdfDevice(pdf_device)
+    if not kwargs:
+        return build_worker_extractor
+    return partial(build_worker_extractor, **kwargs)
+
+
 def _resolve_phases(
     args: argparse.Namespace, *, inputs: RunInputs, plan: RunPlan, ports: Ports,
     deploy_config: DeployConfig | None = None,
@@ -1957,6 +1982,16 @@ def _resolve_phases(
         "extract_max_tasks_per_child",
         None,
     )
+    # P9: устройство моделей — объявленная ось (``run.yaml``/``deploy.yaml:crawl.pdf_device``).
+    # Резолв и проверка исполнимости в одной точке (:func:`preflight_pdf_device`): ``cuda``
+    # без устройства — EXIT_USAGE до прогона, а не тихий CPU. Значение едет и в пул
+    # (инициализатор воркера), и в ``extractor_factory`` портов (inline-путь/проба);
+    # CLI-флага у оси нет намеренно: устройство принадлежит **хосту исполнения**, а не
+    # операторской правке пакета.
+    resolved_pdf_device = preflight_pdf_device(
+        deploy=deploy_config,
+        run_crawl=getattr(getattr(inputs, "run", None), "crawl", None),
+    )
     kwargs: dict[str, Any] = {
         "inputs": inputs,
         "plan": plan,
@@ -2030,6 +2065,9 @@ def _resolve_phases(
             # F0: внутри профильной фабрики — ``None`` для ``split`` (пик воркеров edge
             # ядру не виден), путь стока для локального процессного пула.
             worker_rss_dir=worker_rss_dir,
+            # P9: устройство — свойство хоста, поэтому захватывается фабрикой пула, а не
+            # приходит в payload задания; под ``split`` игнорируется (edge своим конфигом).
+            pdf_device=resolved_pdf_device,
         ),
         # F0: бюджет памяти и решение «окно из бюджета» — явные входы Ш5 (не env).
         "mem_budget_mb": mem_budget_mb,
@@ -2074,13 +2112,8 @@ def _resolve_phases(
         # скалярный kwarg), а не замыканием. Не объявлена — ``None``, и действует
         # per-level таблица docling: подставлять дефолт оси нельзя, он про задачу фазы.
         "extractor_factory": (
-            (
-                build_worker_extractor
-                if getattr(args, "document_timeout_s", None) is None
-                else partial(
-                    build_worker_extractor,
-                    document_timeout=getattr(args, "document_timeout_s", None),
-                )
+            _worker_extractor_factory(
+                resolved_pdf_device, getattr(args, "document_timeout_s", None)
             )
             if (deploy_config.profile if deploy_config is not None else LOCAL_PROFILE)
             == LOCAL_PROFILE
