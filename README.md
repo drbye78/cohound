@@ -222,6 +222,10 @@ tests/               # selfcheck, property-тесты домена, smoke scrapy
 
 ## Архитектура и документация
 
+**Статус каждого документа** (что сделано, что открыто, что снято — с доказательством
+`путь:строка`) — [`docs/architecture/README.md`](docs/architecture/README.md). Начинать
+чтение каталога стоит с него: там сводка и разбор по удалению.
+
 - [`docs/architecture/00-overview.md`](docs/architecture/00-overview.md) — обзор слоёв и потоков.
 - [`01-modules-and-contracts.md`](docs/architecture/01-modules-and-contracts.md) — модули, контракты, матрица зависимостей.
 - [`02-subsystems.md`](docs/architecture/02-subsystems.md) — детальный дизайн подсистем.
@@ -231,6 +235,13 @@ tests/               # selfcheck, property-тесты домена, smoke scrapy
 - [`06-implementation-strategy.md`](docs/architecture/06-implementation-strategy.md) — стратегия и статус реализации.
 - [`07-deployment-topology.md`](docs/architecture/07-deployment-topology.md) — доверенные зоны и DMZ.
 - [`09-product-onboarding-incremental-runs.md`](docs/architecture/09-product-onboarding-incremental-runs.md) — онбординг продукта, `state/`, инкрементальные прогоны (`--update`/`--since-run`).
+- [`10-extraction-pipeline-architecture.md`](docs/architecture/10-extraction-pipeline-architecture.md) — плоскость извлечения: as-built, дефекты, целевая форма.
+- [`11-production-architecture-strategy.md`](docs/architecture/11-production-architecture-strategy.md) — порядок фаз доведения до production-grade (F0–F6).
+- [`12-cli-architecture-review.md`](docs/architecture/12-cli-architecture-review.md) — разбор CLI: дефекты и предложения.
+- [`13-manual-artifacts.md`](docs/architecture/13-manual-artifacts.md) — вручную предоставленные артефакты (закрывают пробел от `robots.txt`, а не подписывают риск).
+- [`14-vector-store-and-embedder-scaling.md`](docs/architecture/14-vector-store-and-embedder-scaling.md) — нужна ли векторная СУБД и внешний эмбеддер (решение с числами).
+- [`15-external-review-findings-plan.md`](docs/architecture/15-external-review-findings-plan.md) — разбор внешних аудитов и план работ по находкам.
+- `08-crawl-platform-evolution-plan.md` — план развития краула (намеренно **untracked**, решение владельца).
 
 ## Доверенные зоны и DMZ (дисклеймер)
 
