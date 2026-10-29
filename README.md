@@ -1,267 +1,379 @@
 # coHound
 
-**coHound** — методология и инструмент построения **сравнительной технической карты
-программных продуктов** по публично доказуемой функциональности. Это не «истина о
-продукте», а воспроизводимая карта **подтверждаемости** по фиксированному протоколу:
-каждая ячейка статуса привязана к evidence, а отсутствие функциональности доказывается
-absence-evidence по формальным правилам.
+**coHound** — методология и программная система для построения воспроизводимой
+**сравнительной технической карты предметных сущностей** по публично доказуемым
+свойствам.
 
-**Источник истины по семантике, инвариантам и архитектуре** — регламент
-[`cohound-spec-v2.md`](cohound-spec-v2.md) (v2.1). Архитектурный проект — в
-[`docs/architecture/`](docs/architecture/).
+coHound отвечает не на вопрос «какая сущность лучше вообще», а на более узкий и
+проверяемый вопрос:
 
-## Аксиомы (§0 регламента)
+> **что именно можно подтвердить по фиксированному протоколу, публичным источникам и
+> сохранённому evidence?**
 
-- **A1.** Сначала доказательство ценности минимальными средствами, потом оптимизация.
-- **A2.** Moat — методология измерения, а не AI-пайплайн. Если реализация требует изменить
-  методологию — это ошибка реализации.
-- **A3.** Эпистемология единообразна: дефолты — это assumption/candidate; замена дефолта
-  происходит по измерению, не по предвидению.
+Результат — карта свойств по параметрам, сравниваемым сущностям и, если это нужно
+домену, ролям или сценариям использования. Каждая ячейка имеет статус, evidence и
+provenance. Если свойство не найдено, это не автоматически означает доказанное
+отсутствие: для отрицательного вывода действуют отдельные правила absence-evidence,
+полноты охвата и аттестации.
 
-Следствия: категорийная нейтральность ядра (`core/` не содержит названий продуктов и
-вендоров — вся специфика в данных `packages/`); `failed` — состояние ячейки, а не статус;
-гейт не проходится автоматически никогда — G1/G2 это внутренняя аттестация человеком,
-G3/G4 точки интеграции, где решение приходит извне и только записывается; оценщик не
-вызывает внешний поиск.
+## Предметная нейтральность
 
-## Установка
+Текущие примеры и терминология coHound в основном говорят о программных продуктах,
+но это **сценарий применения, а не ограничение методологии**. Ядро `core/`
+категорийно нейтрально: оно не знает, что сравнивается — программные продукты,
+оборудование, товары, услуги, нормативные объекты или сложные технические системы.
 
-Требуется Python **3.14** (базлайн; все зависимости стека имеют cp314/abi3-колёса —
-`docs/architecture/05-dependency-stack.md`), а также `uv`.
+Смысл сравнения задаётся авторским пакетом категории:
 
-```bash
-# Минимальный набор, чтобы реально прогнать кейс: ядро + ретривал + краул + экстракция.
-uv pip install -e '.[dev,retrieval,crawl,extract]'
+- набором сравниваемых сущностей и их стабильными идентификаторами;
+- каталогом параметров, определениями и правилами интерпретации;
+- ролями, сценариями или контекстами, если они имеют смысл для домена;
+- когортой, паспортами, источниками и правилами допустимого evidence.
 
-# Только тесты/CI (без краула и экстракции):
-uv pip install -e '.[dev]'
+Поэтому при наличии корпуса параметров coHound может сопоставлять, например,
+характеристики товаров, промышленного оборудования, компонентов, услуг или других
+сложных объектов. Для этого не требуется менять методологическое ядро или встраивать
+предметную логику в `core/`: доменная семантика должна жить в данных пакета.
+
+Граница применимости проходит не по типу сущности, а по измеримости. Сравнение
+воспроизводимо, если можно:
+
+1. однозначно определить сущности и границы когорты;
+2. формально выразить свойства как параметры и правила;
+3. получить публичные или вручную предоставленные допустимые источники;
+4. связать утверждения с evidence и provenance;
+5. отличить подтверждённое отсутствие от «не найдено», неполного охвата и сбоя
+   инструмента.
+
+То есть coHound — это **domain-neutral evidence-based measurement system**, а не
+только средство сравнения программных продуктов. Текущая реализация и имеющиеся
+пакеты просто лучше всего демонстрируют его на программных продуктах.
+
+## Коротко о текущем состоянии
+
+На **2026-10-29** coHound — это:
+
+- рабочий вертикальный срез методологии: пакет → план → корпус → retrieval → оценка →
+  review → расчёт → отчёт;
+- CLI-поставка с профилями `local` и `split`;
+- single-node система, а не кластерная платформа;
+- кодовые контракты для будущего распределённого исполнения, но без общего fleet-
+  планировщика, shared durable queue и общего object storage;
+- система, в которой основной незакрытый вопрос — не наличие фаз, а качество карты,
+  приёмка реальных прогонов и стоимость недельного обновления большого портфеля.
+
+Один реальный прогон уже дошёл до `report` и создал отчётные артефакты. Это доказывает
+сквозную исполнимость текущего контура, но **не означает**, что coHound уже
+production-ready для целевого масштаба 100–200 профилей в неделю.
+
+Текущий статус реализации с доказательствами ведётся в
+[`docs/architecture/06-implementation-strategy.md`](docs/architecture/06-implementation-strategy.md)
+и сводится в [`docs/architecture/README.md`](docs/architecture/README.md).
+
+## Что coHound делает
+
+1. Принимает авторский пакет категории: каталог параметров, роли, когорту сущностей,
+   паспорта, источники и правила прогона.
+2. Строит детерминированный план измерения и фиксирует объявленные входы прогона.
+3. Получает корпус из публичных источников с контролем SSRF, host scope, robots,
+   лимитов и происхождения контента.
+4. Нормализует HTML, text/markdown, EPUB, PDF, Office и заявленные контейнеры.
+5. Строит scoped retrieval для сравниваемой сущности и сохраняет immutable index builds.
+6. Передаёт оценщику только извлечённые и проиндексированные evidence-чанки.
+7. Сохраняет provenance: источник → content hash → индексная сборка → evidence → ячейка.
+8. Выпускает карту, preliminary-артефакты, вопросы на проверку и отчётные материалы.
+9. Экспериментально сравнивает retrieval и evaluator, не подменяя измерение выбором
+   модели «по умолчанию».
+
+## Чем coHound не является
+
+- не юридическим заключением и не универсальным рейтингом сущностей;
+- не каталогом маркетинговых утверждений вендоров;
+- не LLM с веб-поиском, которому разрешено самостоятельно искать evidence;
+- не generic RAG-платформой;
+- не заменой человеческой аттестации профиля, review и решения о публикации;
+- не готовой распределённой платформой для еженедельной актуализации 100–200 профилей.
+
+Методологический moat coHound — **протокол измерения, инварианты и audit trail**, а не
+конкретная LLM, поисковый движок или extractor.
+
+## Принципы
+
+- **A1 — сначала ценность.** Сначала доказать работающий вертикальный срез минимальными
+  средствами, затем масштабировать измеренные bottleneck'и.
+- **A2 — moat в методологии.** Инфраструктурные компоненты заменяемы за портами и не
+  должны менять смысл измерения.
+- **A3 — измерение вместо предвидения.** Модель, retrieval-профиль, лимиты и прочие
+  влияющие входы объявляются и проверяются экспериментом, а не выбираются удобством.
+
+Отсюда следуют категорийная нейтральность `core/`, неизменяемость индексных сборок,
+явная классификация отказов, сохранение неизвестности и запрет на автоматическое
+выведение `N/A` или доказанного отсутствия.
+
+## Как устроено измерение
+
+Сквозной run состоит из 15 фаз:
+
+```text
+normalize → lint → plan → G1 → discovery → G2 → registry → inheritance → corpus
+  → evaluate → review → G3 → compute → G4 → report
 ```
 
-Набор extras и то, чего не хватает, показывает `./hound.py doctor`: он печатает группы
-`core`/`retrieval`/`crawl`/`extract`/`safety`/`ops`/`embed`/`embed-lite`/`dev` и статус
-каждой. Без `retrieval`/`crawl`/`extract` фазы `corpus`/`evaluate` не работают. Контейнеры:
-обычный `zip` читается stdlib-ом (`zipfile`), `7z`/`rar` требуют extra `extract-archives`
-(`py7zr`/`rarfile`; для `rar` со сжатыми членами нужен внешний `bsdtar`/`unrar`/`7z`).
-Без бэкенда контейнер **не разворачивается видимо**: `available()=False`,
-`backend_unavailable: … (extra extract-archives)`, `container_reader_unavailable` — а не
-тихий успех.
+Гейты — это процессные границы, а не скрытый автоматический классификатор:
 
-Воспроизводимо из лока (рекомендуется для CI и для повторного развёртывания):
+- **G1/G2** — внутренняя аттестация содержимого профиля и матрицы роль × сущность;
+- **G3/G4** — точки интеграции с review и публикацией; решение приходит извне и
+  записывается в audit trail;
+- **G1/G2/G3 не блокируют run при отсутствии действующего решения**: система пишет
+  видимую policy-waiver запись и продолжает фазу;
+- **G4 блокирует публикацию**, а явный `rejected` по любому гейту блокирует прогон;
+- решение действует только для конкретного `run_id` и `subject_digest`.
 
-```bash
-uv sync --frozen --extra dev --extra retrieval --extra crawl --extra extract
-# плюс спуск в 7z/rar, если он нужен кейсу:
-uv sync --frozen --extra dev --extra retrieval --extra crawl --extra extract --extra extract-archives
+Оценщик не имеет веб-доступа. Внешний контент становится evidence только после
+цепочки:
+
+```text
+public source → corpus_raw → hash → extraction → index → retrieval → evaluator
 ```
 
-`uv lock --check` проходит: лок синхронизирован с `pyproject.toml`, включая
-`extract-archives`. Если правите зависимости — обновите лок тем же коммитом, иначе
-`--frozen` откажет.
+Это одновременно требование воспроизводимости, безопасности и I18/I19 регламента.
 
 ## Быстрый старт
 
+### Установка
+
+Требуется Python **3.14** и `uv`.
+
 ```bash
-./hound.py --help          # список команд
-./hound.py doctor          # самодиагностика инсталляции (read-only, без сети)
-python3 tests/selfcheck.py # автономная проверка фундамента
-bash scripts/ci.sh         # CI-гейты: selfcheck + pytest + порог покрытия ядра
+# Полный локальный контур для реального прогона
+uv pip install -e '.[dev,retrieval,crawl,extract]'
+
+# Для 7z/rar добавьте extra extract-archives
+uv pip install -e '.[dev,retrieval,crawl,extract,extract-archives]'
+
+# Воспроизводимая установка из lock-файла
+uv sync --frozen --extra dev --extra retrieval --extra crawl --extra extract
 ```
 
-## Первый прогон: plan → run → gate → report
+Проверить состав окружения можно без сети:
 
 ```bash
-# 1. plan — нормализовать входы, пролинтить пакет и напечатать план (stdout/--json).
-#    План чисто вычислим и ничего не пишет: черновик run.yaml/cohort.yaml не создаётся.
-./hound.py plan --run-yaml packages/{case_id}/run.yaml --package packages/{case_id}
+./hound.py doctor
+```
 
-# 2. run — конвейер Ш1–Ш9. --urls — операторский корпусный вход: без него корпус URL пуст
-#    (doc_domains паспортов молча не фетчатся). --follow печатает прогресс сеанса краула.
-./hound.py run --run-yaml packages/{case_id}/run.yaml --package packages/{case_id} \
-  --urls packages/{case_id}/sources/corpus_urls.yaml --follow
+### Первый run
 
-# 3. gate — единственный способ записать решение гейта (гейт не проходится сам).
-#    Свежий прогон встаёт на g1 (4-я фаза из 15) и возвращает код 3 (EXIT_BLOCKED);
-#    на блоке он пишет runs/{run_id}/gates/G1-request.json, откуда берётся subject_digest.
-./hound.py gate --runs-dir runs --run-id {run_id} \
-  --gate G1 --actor {кто} --target cohort --notes "{почему}"
-# если request-файла нет (решение принимается вне прогона) — отпечаток задаётся явно:
-#   --subject-digest {digest}
+```bash
+# План только печатается и ничего не пишет
+./hound.py plan \
+  --run-yaml packages/{case_id}/run.yaml \
+  --package packages/{case_id}
 
-# 4. report — пересобрать артефакты прогона из БД (пишет {out}/{run_id}/outputs/).
+# --urls — явный операторский вход корпуса
+./hound.py run \
+  --run-yaml packages/{case_id}/run.yaml \
+  --package packages/{case_id} \
+  --urls packages/{case_id}/sources/corpus_urls.yaml \
+  --follow
+
+# Если run дошёл до G4, внесите внешнее решение по request-файлу
+./hound.py gate \
+  --runs-dir runs \
+  --run-id {run_id} \
+  --gate G4 \
+  --actor {кто} \
+  --target publication \
+  --notes "{почему}"
+
+# Экспортировать отчётные артефакты из БД прогона
 ./hound.py report --runs-dir runs --run-id {run_id}
 ```
 
-`run` останавливается на **первом** непройденном гейте, а не «на всех G1–G4 сразу».
-Гейты **per-run**: новый `run_id` требует новых решений, старые не переносятся. Дальше
-по фазам: `g2` — матрица роль×продукт, `g3`/`g4` — точки интеграции (решение приходит
-извне, см. ниже). Продолжить с места остановки: `run … --until {фаза}`; посмотреть
-очередь ревью — `./hound.py review --runs-dir runs --run-id {run_id}`, повысить
-preliminary — `./hound.py promote --runs-dir runs --run-id {run_id} --actor {кто}`.
+Свежий run не должен останавливаться на G1 только из-за отсутствия решения: G1–G3
+неблокирующие по текущей политике. Продолжение уже начатого прогона выполняется
+командой `run … --until {фаза}`. Решения гейтов не переносятся между прогонами.
 
-### Краул и прогресс
+### Краул и восстановление
 
 ```bash
-# Отдельный сеанс краула (фаза corpus) — тем же пакетом и тем же run_id:
-./hound.py crawl run --run-yaml packages/{case_id}/run.yaml --package packages/{case_id} \
-  --urls packages/{case_id}/sources/corpus_urls.yaml --follow
+# Отдельный сеанс краула
+./hound.py crawl run \
+  --run-yaml packages/{case_id}/run.yaml \
+  --package packages/{case_id} \
+  --urls packages/{case_id}/sources/corpus_urls.yaml \
+  --follow
 
-# Прогресс/счётчики сеанса (read-only); --per-url — построчно по элементам:
+# Сводный или построчный статус
+./hound.py crawl status --run-id {run_id}
 ./hound.py crawl status --run-id {run_id} --per-url
-./hound.py crawl list --runs-dir runs --run-id {run_id}
-```
 
-- `crawl resume` продолжает прерванный сеанс: та же `session_id`, уже `FETCHED`-элементы не
-  пере-фетчатся (идемпотентно). `crawl restart` очищает сеанс и запускает заново.
-- `crawl cancel` переводит сеанс в терминальный `cancelled`. В foreground-профиле `local`
-  живого worker'а нет, поэтому это намерение оператора, а не прерывание процесса.
-- Обычный `run` уже пройденные фазы не переделывает: он останавливается на первом `blocked`.
-- «Почему у продукта ноль источников» читается в `results[].notes` (`--json` прогона), там же
-  `product_start`/`product_end`/`product_skipped`. При `--follow` в `--json` печатаются
-  NDJSON-события `crawl_progress` (агрегат сеанса) и `crawl_product` (границы продукта:
-  агрегат не отличает «ещё в очереди» от «потерян»).
-
-### `resolve` — пост-хок lookup, не входной шаг
-
-```bash
-# source_id → URL по БД прогона (без сети). Нужен после прогона, чтобы раскрутить evidence.
+# Post-hoc lookup source_id → URL без сети
 ./hound.py resolve --db runs/{run_id}/cohound.db {source_id}
 ```
 
-Промах — не исключение, а код возврата 4 (`EXIT_NOT_FOUND`, код `I10/I15`).
+`crawl resume` продолжает тот же durable-сеанс и не пере-фетчит уже успешно полученные
+элементы. `crawl restart` запускает его заново. Причины нулевого корпуса продукта
+сохраняются в результатах прогона и не маскируются как «просто пустой результат».
 
-Остальная CLI-поверхность (`crawl`, `diff`, `sensitivity`, `golden`, `report`, `discover`,
-`passport-scout`, `review`, `promote`, `gate`, `deploy-check`,
-`experiment {retrieval, evaluator-benchmark}`,
-`baseline-agreement`, `doctor`,
-`package …`) описана в `docs/architecture/03-data-config-cli.md` §E.1. **Источник истины по CLI —
-код (`core/cli/`); документ — его зеркало.** Актуальный список — `./hound.py --help`.
+## Форматы и extraction
 
-Выбор модели оценщика — измерительная задача, а не предрешение (A3):
+- HTML — основной веб-источник.
+- Plain text, markdown и EPUB — first-class форматы со своими reader/chunker.
+- PDF и Office (`docx`, `pptx`, `xlsx`) — через docling.
+- `zip` читается стандартной библиотекой; `7z` и `rar` требуют
+  `extract-archives` и соответствующих внешних backend'ов.
+- Глубина вложенных архивов не ограничивается искусственным числом уровней; конечность
+  обеспечивается циклом по content hash и объявленным бюджетом байтов.
+- Исчерпание бюджета и отсутствие backend'а видимы в результате, а не превращаются в
+  тихое отсутствие документов.
+
+Текущий extraction исполняется в trusted core. Поле `extractor_zone` и целевая Z2
+PARSE-зона пока являются проектом, а не рабочим переключателем. В `split` уже вынесены
+веб-адаптеры, но полного паритета local/split для крупных артефактов и членов архивов
+пока нет.
+
+## Развёртывание и границы доверия
+
+### `local`
+
+Один процесс, локальные адаптеры и SQLite-файлы. Это дефолт для разработки, небольших
+прогонов и доказательства ценности по A1.
+
+### `split`
+
+Core находится в доверенной зоне без веб-эгрессии, а crawler, search и registry
+адаптеры — за L7 HTTP/JSON seam в edge/DMZ. Оценщик не получает интернет-маршрут.
+
+`split` — уже существующий deployment profile, но не кластер: текущая edge queue и
+blob paths локальны узлу. Load balancer перед несколькими такими узлами сам по себе
+не создаёт общую очередь, leases или согласованное object storage.
+
+Подробная схема зон и опубликованные seam-схемы:
+[`docs/architecture/07-deployment-topology.md`](docs/architecture/07-deployment-topology.md)
+и [`contracts/seam/`](contracts/seam/).
+
+## Целевой образ: недельное обновление портфеля
+
+Целевой режим coHound — регулярное обновление порядка **100–200 профилей**, в каждом
+примерно **10–15 продуктов** и **100–200 фактов**. Это означает не только сотни тысяч
+ячеек, но и большой поток crawl, extraction, архивов, embeddings, index builds и
+LLM-вызовов.
+
+Такой режим требует горизонтально масштабируемого execution plane. Масштабировать
+следует не каждую из 15 фаз как отдельный микросервис, а независимые единицы работы и
+ресурсные классы:
+
+```text
+control plane
+  └─ profile/run orchestration
+      ├─ crawl tasks
+      ├─ extraction tasks
+      ├─ product index builds
+      └─ evaluation tasks
+
+durable metadata + queue     immutable object storage
+        │                              │
+        ├─ edge/http/browser workers   ├─ raw artifacts
+        ├─ text/PDF/archive workers    ├─ extracted artifacts
+        ├─ index builders              ├─ immutable index partitions
+        └─ evaluator pool              └─ prompts/results
+```
+
+Главные независимые оси:
+
+- crawl — сеть, origin pacing и browser contexts;
+- PDF/Office — CPU/RAM/VRAM и отдельные окна concurrency;
+- архивы — bytes·sec и длительность одной задачи;
+- index build — product partition и immutable build;
+- evaluator — calls/sec, tokens, latency и quota LLM endpoint;
+- retrieval — пока локальный read-only компонент рядом с индексом/evaluator, пока
+  измерения не потребуют отдельного сервиса.
+
+Целевой переход состоит из этапов:
+
+1. измерить недельную стоимость и resource classes на одном узле;
+2. добавить batch runner и product-level fan-out с независимыми run-каталогами;
+3. сделать raw/extracted/index artifacts durable и доступными между worker-ами;
+4. ввести shared queue, leases, retry/reclaim и PostgreSQL-compatible metadata store;
+5. после этого развести deployments для edge, extraction, index и evaluator.
+
+Это roadmap, а не заявление о текущей готовности. SQLite может оставаться локальной
+per-run БД и audit store, но не должна быть авторитетной общей очередью или
+координационным хранилищем fleet-инсталляции.
+
+## Основные ограничения текущей реализации
+
+На текущем этапе не следует выдавать за сделанное:
+
+- горизонтальное выполнение product-stage на нескольких узлах;
+- cluster-wide leases, reclaim и shared durable queue;
+- общее object storage как часть correctness-модели;
+- отдельную долговечную PDF/extraction queue;
+- полный local/split parity для артефактов и контейнеров;
+- production-grade качество карты без полноценного `golden-full`, evaluator benchmark
+  и измерения недельного workload;
+- доказанную пропускную способность SQLite или готовность fleet-режима.
+
+Это не отменяет уже работающий вертикальный срез. Это разделение **as-built** и
+**целевого образа**, необходимое для честного позиционирования.
+
+## Пакеты, данные и документация
+
+Пакет категории живёт в `packages/{case_id}/`. Его назначение и жизненный цикл описаны
+в [`docs/user-guide/package-profile.md`](docs/user-guide/package-profile.md), а
+подробный состав файлов и полей — в
+[`docs/user-guide/package-files.md`](docs/user-guide/package-files.md).
+
+Ключевые каталоги:
+
+```text
+cohound-spec-v2.md                 # регламент v2.1, источник истины по семантике
+core/domain/                       # модели, enums, инварианты, scoring, без I/O
+core/ports/                        # порты LLM, store, search, crawl, index, gateway…
+core/pipeline/                     # сценарии Ш1–Ш9, corpus, evaluate, gates, report
+core/adapters/                     # extraction, crawl, search, index, LLM и прочие adapters
+core/store/                        # SQLite DDL/store и backup
+core/edge/                         # edge/DMZ composition root и seam server
+packages/{case_id}/                # данные и входы категории
+passports/{product_id}/            # паспорта продуктов и сателлитов
+runs/{run_id}/                     # durable состояние одного прогона и outputs
+state/{package_id}/state.db        # долговременное состояние инкрементальности
+index_store/ corpus_raw/ cache/    # runtime artifacts, обычно в .gitignore
+contracts/seam/                    # публикуемые JSON-схемы core ↔ edge
+docs/architecture/                 # архитектура, решения и планы доведения
+tests/                             # selfcheck, unit/property/contract/e2e tests
+```
+
+Начинать изучение архитектуры стоит с:
+
+- [`cohound-spec-v2.md`](cohound-spec-v2.md) — семантика и инварианты;
+- [`docs/architecture/00-overview.md`](docs/architecture/00-overview.md) — карта
+  компонентов и доверенных зон;
+- [`docs/architecture/06-implementation-strategy.md`](docs/architecture/06-implementation-strategy.md)
+  — as-built и открытые работы;
+- [`docs/architecture/08-crawl-platform-evolution-plan.md`](docs/architecture/08-crawl-platform-evolution-plan.md)
+  — целевая платформа краулинга и fleet-масштабирование;
+- [`docs/architecture/11-production-architecture-strategy.md`](docs/architecture/11-production-architecture-strategy.md)
+  — порядок доведения до production-grade;
+- [`docs/architecture/14-vector-store-and-embedder-scaling.md`](docs/architecture/14-vector-store-and-embedder-scaling.md)
+  — измеренные границы retrieval и решение по Qdrant.
+
+## Разработка и проверки
 
 ```bash
-./hound.py experiment evaluator-benchmark --runs-dir runs --run-id {run_id} \
-  --golden packages/{case_id}/golden.csv --model {model_id}
+./hound.py doctor
+python3 tests/selfcheck.py
+python3 -m pytest -q -n 3 --dist worksteal
+PYTHON=.venv/bin/python bash scripts/ci.sh
 ```
 
-Считает валидность JSON, согласие (Cohen's κ), confusion, abstention, `fabricated_support`,
-bootstrap CI и пробу детерминизма (`--repeats`) при фиксированных прочих условиях;
-`model_id` берётся **только** из флага, не из env. Смена модели под сценарий при этом
-остаётся версионной границей `execution_versions` (§13).
-
-## Форматы и контейнеры
-
-HTML — основной источник. Plain text и markdown (со всеми расширенными вариантами) и EPUB —
-**первый класс** наравне с HTML: у них собственный читатель (`extract_text`/`extract_epub`)
-и собственный чанкер, а не docling. PDF и Office (docx/pptx/xlsx) идут через docling.
-Заявленные контейнеры (`zip`/`7z`/`rar`) раскрываются спуском: **потолка глубины нет** —
-конечность дают цикл по хешу содержимого (`archive_cycle`) и кумулятивный бюджет корня
-(`archive_max_total_uncompressed_bytes`); исчерпание видно как `archive_budget_exhausted`,
-а не как тихое завершение. Оси `archive_max_*` при этом ограничивают **один** контейнер,
-поэтому бюджет корня — отдельная ось.
-
-Память извлечения — операционный рычаг: после каждого документа воркер отдаёт ОС свободные
-арены glibc (`malloc_trim` через `core/util/memory.py`), иначе RSS растёт храповиком до OOM.
-
-## Гейты: что решается внутри, а что приходит извне
-
-- **G1/G2 — внутренняя аттестация.** Человек утверждает **содержимое профиля** пакета-якоря
-  (когорта, роли, объём, паспорта) и матрицу роль×продукт. Второй путь — durable-аттестация
-  профиля (`state/{package_id}/state.db`, таблица `profile_attestation`) — **объявлен и
-  проверяется** гейтом, но **производителя в прогоне пока нет** (design-only: строку пишут
-  только тесты). Сегодня рабочий путь один — per-run решение `hound gate`, оно и остаётся
-  приоритетным (аудит-след и override).
-- **G3/G4 — точки интеграции.** coHound не решает ревью и публикацию: на блоке пишется
-  `runs/{run_id}/gates/{gate}-request.json` — детерминированный предмет решения плюс
-  `subject_digest`; решение приходит извне и только записывается.
-- Решение привязано к предмету: `gate_decisions` несёт `subject_digest`, `source`
-  (`internal|external`), `external_ref`, `verdict` (`approved|rejected`). Устаревшее
-  одобрение (предмет изменился) гейт не проходит, и сообщение называет изменившийся
-  компонент. Явный отказ блокирует отдельным сообщением: молчание внешней системы не
-  выдаётся ни за отказ, ни за одобрение.
-- `run.yaml: gates.{g3,g4}: external|waived` (дефолт `external`). `waived` → фаза
-  `skipped` с `skip_reason=gate_delegated_external`, waiver-строка в `gate_decisions` и
-  `gate_waivers` в манифесте прогона (манифест живёт строкой в `cohound.db`; `report`
-  выгружает его как `run_manifest.yaml`). Невидимый waiver запрещён.
-  Политика гейтов — **процесс**, а не условие измерения: в `EXECUTION_CONTRACT_FIELDS` её
-  нет, `run_id` она не меняет.
-
-## Структура репозитория (сжато)
-
-```
-cohound-spec-v2.md   # регламент v2.1 — источник истины
-AGENTS.md            # инструкции для агентов/разработчиков
-core/                # ядро, категорийно-нейтральный код (§1.3)
-  domain/            # Pydantic-модели, enums, инварианты, r2, scoring, anchors (без I/O)
-  ports/             # Protocol-контракты (LLM, discovery_llm, индексы, store, search, crawler,
-                     #   crawl_executor, container, poller, state, gateway, …)
-  pipeline/          # сценарии Ш1–Ш9 (runner/phases), гейты (gates, gate_subject,
-                     #   profile_attestation), краул (crawl_frontier, archive_descent,
-                     #   artifact_probe), корпус/оценка, эксперименты, инкрементальность
-  adapters/          # реализации портов (индексы, LLM, поиск, краул, экстракция, container_*)
-  store/             # SQLite DDL + триггеры, StorePort/GateStore-реализация, backup
-  config/            # загрузка run.yaml/пакетов, deploy.yaml, раскладка путей
-  cli/               # composition root Z0 (ядро) — сборка зависимостей
-  edge/              # composition root Z1/DMZ — веб-адаптеры за швом (07)
-  util/              # текст (RU/EN), security (SSRF/slug), fusion (RRF), форматы,
-                     #   container_policy (бюджеты спуска), memory (malloc_trim)
-docs/                # архитектурный проект, регламент, absence-правила
-docs/status-dictionary.yaml  # источник истины по перечислениям/статусам (§4.1)
-contracts/seam/      # публикуемые JSON-схемы шва DMZ (/v1/*; 07 §5/§8)
-config/              # deploy.yaml (профиль зон) + paths.example.yaml (раскладка каталогов)
-scripts/             # scripts/ci.sh — единая точка входа CI
-packages/{case_id}/  # пакеты категорий (package.yaml/catalog/baselines/cohort/golden/
-                     #   domain_profiles/derived_fields/run.yaml/scope_attestation);
-                     #   sources/ — авторские входы
-passports/{product_id}/  # паспорта продуктов и сателлитов
-runs/{run_id}/       # прогон: cohound.db (входы плана, решения гейтов), logs/, metrics.json
-state/{package_id}/state.db  # durable per-product состояние (09 §4.1; источник --since-run)
-index_store/ · corpus_raw/ · cache/ · eval_cache/ · extract_cache/
-                     # операционные каталоги (runtime; в .gitignore)
-tests/               # selfcheck, property-тесты домена, smoke scrapy-playwright
-```
-
-## Архитектура и документация
-
-**Статус каждого документа** (что сделано, что открыто, что снято — с доказательством
-`путь:строка`) — [`docs/architecture/README.md`](docs/architecture/README.md). Начинать
-чтение каталога стоит с него: там сводка и разбор по удалению.
-
-- [`docs/architecture/00-overview.md`](docs/architecture/00-overview.md) — обзор слоёв и потоков.
-- [`01-modules-and-contracts.md`](docs/architecture/01-modules-and-contracts.md) — модули, контракты, матрица зависимостей.
-- [`02-subsystems.md`](docs/architecture/02-subsystems.md) — детальный дизайн подсистем.
-- [`03-data-config-cli.md`](docs/architecture/03-data-config-cli.md) — данные/хранилища, конфиг, CLI.
-- [`04-reliability-adr.md`](docs/architecture/04-reliability-adr.md) — надёжность и ADR-реестр.
-- [`05-dependency-stack.md`](docs/architecture/05-dependency-stack.md) — стек, лицензии, пины.
-- [`06-implementation-strategy.md`](docs/architecture/06-implementation-strategy.md) — стратегия и статус реализации.
-- [`07-deployment-topology.md`](docs/architecture/07-deployment-topology.md) — доверенные зоны и DMZ.
-- [`09-product-onboarding-incremental-runs.md`](docs/architecture/09-product-onboarding-incremental-runs.md) — онбординг продукта, `state/`, инкрементальные прогоны (`--update`/`--since-run`).
-- [`10-extraction-pipeline-architecture.md`](docs/architecture/10-extraction-pipeline-architecture.md) — плоскость извлечения: as-built, дефекты, целевая форма.
-- [`11-production-architecture-strategy.md`](docs/architecture/11-production-architecture-strategy.md) — порядок фаз доведения до production-grade (F0–F6).
-- [`12-cli-architecture-review.md`](docs/architecture/12-cli-architecture-review.md) — разбор CLI: дефекты и предложения.
-- [`13-manual-artifacts.md`](docs/architecture/13-manual-artifacts.md) — вручную предоставленные артефакты (закрывают пробел от `robots.txt`, а не подписывают риск).
-- [`14-vector-store-and-embedder-scaling.md`](docs/architecture/14-vector-store-and-embedder-scaling.md) — нужна ли векторная СУБД и внешний эмбеддер (решение с числами).
-- [`15-external-review-findings-plan.md`](docs/architecture/15-external-review-findings-plan.md) — разбор внешних аудитов и план работ по находкам.
-- `08-crawl-platform-evolution-plan.md` — план развития краула (намеренно **untracked**, решение владельца).
-
-## Доверенные зоны и DMZ (дисклеймер)
-
-Веб-функции (краул, внешний поиск, реестры, экстракция недоверенного контента) выносятся в
-**DMZ** (`core/edge/`), не-веб код остаётся в ядре без веб-эгрессии. Связь — только через
-application-layer firewall по протоколу `/v1/*`. Профиль `local` (один процесс) — дефолт;
-профиль `split` (DMZ) — опция уже в MVP. Значение `split-hardened` принимается ради
-совместимости конфига, но **громко предупреждает**, что ничего не добавляет сверх `split`
-(ни Z2 PARSE, ни egress-прокси, ни TLS-инспекции): это алиас `split`, а не другой профиль.
-Оценщик (evaluator) **никогда** не вызывает внешний
-поиск: внешний контент становится evidence только после `corpus_raw → hash → index`
-(I18/I19). Подробности — `docs/architecture/07-deployment-topology.md`.
-
-> Инструмент даёт воспроизводимую карту **подтверждаемости** по публично доступным
-> источникам, а не юридически значимую оценку продукта. Аттестация против конкретных
-> корпоративных средств IDP/DLP/IDS — вне рамок проекта.
+`scripts/ci.sh` — единая точка CI: ruff, mypy-gate, selfcheck, pytest и порог покрытия.
+На машине с ограниченной памятью не используйте `-n auto`; число worker-ов ограничено
+RAM, а не количеством CPU-ядер.
 
 ## Лицензия
 
 Проект распространяется под лицензией **MIT** — см. [`LICENSE`](LICENSE).
 
-Сторонние компоненты, включённые в репозиторий, сохраняют свои лицензии (указаны в шапках
-соответствующих файлов).
+Сторонние компоненты, включённые в репозиторий, сохраняют свои лицензии; ссылки и
+уведомления находятся в соответствующих файлах и реестре зависимостей.
